@@ -4,7 +4,7 @@
 .vs/
 
 # no bin folder
-src/bin/
+bin/
 
 # no obj folder
 obj/
