@@ -1,4 +1,5 @@
 # DX12 & DXR test framework
+This project is for dx12 & dxr learning. Quite not orgnized for now. I am focussing about the actual working implementation of each tech issues(resource binding, dynamic descriotpr allocation, MT, etc....)
 
 ## DX12
 * Modified from ms dynamicindexing tutorial sln.(Almost nothing left now, will change sln name soon)
