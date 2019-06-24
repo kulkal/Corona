@@ -3,6 +3,12 @@
 # no .vs folder
 .vs/
 
+# no bin folder
+bin/
+
+# no obj folder
+obj/
+
 # no .a files
 *.a
 
