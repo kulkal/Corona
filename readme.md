@@ -5,6 +5,7 @@
 * Simple resource binding interface.
 * Dynamic descriptor allocation strategy.
 * Multi threaded mesh rendering.
+* Most implementations are in DummyRHI_DX12.h/cpp, will be renamed someday.
 
 ## DXR
 * Will implement most of advanced lighting effects(shadow, reflection, ao) using raytracing for learning purpose.
