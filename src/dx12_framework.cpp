@@ -1078,7 +1078,7 @@ void dx12_framework::OnRender()
 
 	LightingPass();
 
-	//RaytracePass();
+	RaytracePass();
 
 	CopyPass();
 

@@ -2730,7 +2730,7 @@ void RTPipelineStateObject::InitRS(string ShaderFile)
 		if (EntrySize > ShaderTableEntrySize)
 			ShaderTableEntrySize = EntrySize;
 	}
-	ShaderTableEntrySize = align_to(D3D12_RAYTRACING_SHADER_RECORD_BYTE_ALIGNMENT, ShaderTableEntrySize);
+	ShaderTableEntrySize = align_to(D3D12_RAYTRACING_SHADER_TABLE_BYTE_ALIGNMENT, ShaderTableEntrySize);
 
 
 	UINT NumShaderTableEntry = 0;
