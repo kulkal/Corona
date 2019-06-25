@@ -126,7 +126,7 @@ public:
 	void SetTexture(string name, Texture* texture, ID3D12GraphicsCommandList* CommandList, ThreadDescriptorHeapPool* DHPool);
 	void SetUAV(string name, Texture* texture);
 
-	void SetSampler(string name, Sampler* sampler, ID3D12GraphicsCommandList* CommandList);
+	void SetSampler(string name, Sampler* sampler, ID3D12GraphicsCommandList* CommandList, ThreadDescriptorHeapPool* DHPool = nullptr);
 	
 	void SetGlobalConstantBuffer(string name, GlobalConstantBuffer* cb, ID3D12GraphicsCommandList* CommandList, ThreadDescriptorHeapPool* DHPool);
 	void SetConstantValue(string name, void* pData, UINT drawCallIndex, ID3D12GraphicsCommandList* CommandList, ThreadDescriptorHeapPool* DHPool);

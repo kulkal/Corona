@@ -1302,7 +1302,7 @@ void dx12_framework::RecordDraw (UINT StartIndex, UINT NumDraw, UINT CLIndex, Th
 	CL->SetDescriptorHeaps(_countof(ppHeaps), ppHeaps);
 	
 	RS_Mesh->ApplyGraphicsRSPSO(CL);
-	RS_Mesh->ps->SetSampler("samplerWrap", samplerWrap.get(), CL);
+	RS_Mesh->ps->SetSampler("samplerWrap", samplerWrap.get(), CL, DHPool);
 	RS_Mesh->vs->SetGlobalConstantBuffer("ViewParameter", ViewParameter.get(), CL, DHPool);;
 
 	for (int i = StartIndex; i < StartIndex + NumDraw; i++)

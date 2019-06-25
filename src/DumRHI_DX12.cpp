@@ -36,6 +36,7 @@ void ThreadDescriptorHeapPool::AllocDescriptor(D3D12_CPU_DESCRIPTOR_HANDLE& cpuH
 
 }
 
+
 void DescriptorHeap::Init(D3D12_DESCRIPTOR_HEAP_DESC& InHeapDesc)
 {
 	HeapDesc = InHeapDesc;
@@ -44,6 +45,7 @@ void DescriptorHeap::Init(D3D12_DESCRIPTOR_HEAP_DESC& InHeapDesc)
 
 	ThrowIfFailed(g_dx12_rhi->Device->CreateDescriptorHeap(&HeapDesc, IID_PPV_ARGS(&DH)));
 	NAME_D3D12_OBJECT(DH);
+
 
 	CPUHeapStart = DH->GetCPUDescriptorHandleForHeapStart().ptr;
 	GPUHeapStart = DH->GetGPUDescriptorHandleForHeapStart().ptr;
@@ -319,7 +321,7 @@ shared_ptr<Sampler> DumRHI_DX12::CreateSampler(D3D12_SAMPLER_DESC& InSamplerDesc
 
 	sampler->SamplerDesc = InSamplerDesc;
 
-	SamplerDescriptorHeapShaderVisible->AllocDescriptor(sampler->CpuHandle, sampler->GpuHandle);
+	SamplerDescriptorHeapStorage->AllocDescriptor(sampler->CpuHandle, sampler->GpuHandle);
 
 
 	Device->CreateSampler(&sampler->SamplerDesc, sampler->CpuHandle);
@@ -620,6 +622,9 @@ DumRHI_DX12::DumRHI_DX12(ID3D12Device5 * InDevice)
 		HeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
 		HeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
 		RTVDescriptorHeap->Init(HeapDesc);
+
+		NAME_D3D12_OBJECT(RTVDescriptorHeap->DH);
+
 	}
 	
 
@@ -631,6 +636,9 @@ DumRHI_DX12::DumRHI_DX12(ID3D12Device5 * InDevice)
 		HeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
 		HeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
 		DSVDescriptorHeap->Init(HeapDesc);
+
+		NAME_D3D12_OBJECT(DSVDescriptorHeap->DH);
+
 	}
 	
 	// shader visible CBV_SRV_UAV
@@ -643,6 +651,7 @@ DumRHI_DX12::DumRHI_DX12(ID3D12Device5 * InDevice)
 		HeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
 		SRVCBVDescriptorHeapShaderVisible->Init(HeapDesc);
 
+		NAME_D3D12_OBJECT(SRVCBVDescriptorHeapShaderVisible->DH);
 	}
 
 	// non shader visible(storage) CBV_SRV_UAV
@@ -655,6 +664,8 @@ DumRHI_DX12::DumRHI_DX12(ID3D12Device5 * InDevice)
 		HeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
 		SRVCBVDescriptorHeapStorage->Init(HeapDesc);
 
+		NAME_D3D12_OBJECT(SRVCBVDescriptorHeapStorage->DH);
+
 	}
 
 	// shader visible sampler
@@ -662,10 +673,12 @@ DumRHI_DX12::DumRHI_DX12(ID3D12Device5 * InDevice)
 		SamplerDescriptorHeapShaderVisible = std::make_unique<DescriptorHeap>();
 
 		D3D12_DESCRIPTOR_HEAP_DESC HeapDesc = {};
-		HeapDesc.NumDescriptors = 1024;
+		HeapDesc.NumDescriptors = 1024*2;
 		HeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER;
 		HeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
 		SamplerDescriptorHeapShaderVisible->Init(HeapDesc);
+
+		NAME_D3D12_OBJECT(SamplerDescriptorHeapShaderVisible->DH);
 	}
 	
 	{
@@ -676,6 +689,9 @@ DumRHI_DX12::DumRHI_DX12(ID3D12Device5 * InDevice)
 		HeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER;
 		HeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
 		SamplerDescriptorHeapStorage->Init(HeapDesc);
+
+		NAME_D3D12_OBJECT(SamplerDescriptorHeapStorage->DH);
+
 	}
 	
 	
@@ -819,7 +835,6 @@ void Shader::SetTexture(string name, Texture* texture, ID3D12GraphicsCommandList
 		DHPool->AllocDescriptor(ShaderVisibleCPUHandle, ShaderVisibleGpuHandle);
 	else
 		g_dx12_rhi->SRVCBVDescriptorHeapShaderVisible->AllocDescriptor(ShaderVisibleCPUHandle, ShaderVisibleGpuHandle);
-	//g_dx12_rhi->SRVCBVDescriptorHeapShaderVisible->AllocDescriptor(ShaderVisibleCPUHandle, texture->GpuHandleSRV);
 
 	g_dx12_rhi->Device->CopyDescriptorsSimple(1, ShaderVisibleCPUHandle, texture->CpuHandleSRV, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
 
@@ -833,10 +848,23 @@ void Shader::SetUAV(string name, Texture* texture)
 	uavBinding[name].texture = texture;
 }
 
-void Shader::SetSampler(string name, Sampler* sampler, ID3D12GraphicsCommandList* CommandList)
+void Shader::SetSampler(string name, Sampler* sampler, ID3D12GraphicsCommandList* CommandList, ThreadDescriptorHeapPool* DHPool)
 {
 	samplerBinding[name].sampler = sampler;
-	CommandList->SetGraphicsRootDescriptorTable(samplerBinding[name].rootParamIndex, sampler->GpuHandle);
+
+	D3D12_CPU_DESCRIPTOR_HANDLE ShaderVisibleCPUHandle;
+	D3D12_GPU_DESCRIPTOR_HANDLE ShaderVisibleGpuHandle;
+
+	// FIXME :: sampler also should be dh pool.
+	/*if (DHPool)
+		DHPool->AllocDescriptor(ShaderVisibleCPUHandle, ShaderVisibleGpuHandle);
+	else*/
+		g_dx12_rhi->SamplerDescriptorHeapShaderVisible->AllocDescriptor(ShaderVisibleCPUHandle, ShaderVisibleGpuHandle);
+
+	g_dx12_rhi->Device->CopyDescriptorsSimple(1, ShaderVisibleCPUHandle, sampler->CpuHandle, D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
+
+
+	CommandList->SetGraphicsRootDescriptorTable(samplerBinding[name].rootParamIndex, ShaderVisibleGpuHandle);
 
 }
 
@@ -1210,7 +1238,14 @@ void PipelineStateObject::ApplyGlobal(ID3D12GraphicsCommandList* CommandList)
 
 	for (auto&bd : ps->samplerBinding)
 	{
-		CommandList->SetGraphicsRootDescriptorTable(bd.second.rootParamIndex, bd.second.sampler->GpuHandle);
+		D3D12_CPU_DESCRIPTOR_HANDLE ShaderVisibleCPUHandle;
+		D3D12_GPU_DESCRIPTOR_HANDLE ShaderVisibleGpuHandle;
+
+		
+		g_dx12_rhi->SamplerDescriptorHeapShaderVisible->AllocDescriptor(ShaderVisibleCPUHandle, ShaderVisibleGpuHandle);
+
+		g_dx12_rhi->Device->CopyDescriptorsSimple(1, ShaderVisibleCPUHandle, bd.second.sampler->CpuHandle, D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
+		CommandList->SetGraphicsRootDescriptorTable(bd.second.rootParamIndex, ShaderVisibleGpuHandle);
 	}
 
 	for (auto& bd : ps->rootBinding)
@@ -2144,18 +2179,32 @@ void RTPipelineStateObject::EndShaderTable()
 			{
 				if (bd.Type == D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER)
 				{
-					//g_dx12_rhi->Device->CopyDescriptorsSimple(1, ShaderVisibleCPU, CPUHandle, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+					D3D12_CPU_DESCRIPTOR_HANDLE CPUHandle = bd.CPUHandle;
+
+					D3D12_CPU_DESCRIPTOR_HANDLE ShaderVisibleCPU;
+					D3D12_GPU_DESCRIPTOR_HANDLE ShaderVisibleGPU;
+
+					g_dx12_rhi->SamplerDescriptorHeapShaderVisible->AllocDescriptor(ShaderVisibleCPU, ShaderVisibleGPU);
+
+					g_dx12_rhi->Device->CopyDescriptorsSimple(1, ShaderVisibleCPU, CPUHandle, D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
+
+					*(UINT64*)(pDataThis) = ShaderVisibleGPU.ptr;
 
 				}
-				D3D12_CPU_DESCRIPTOR_HANDLE CPUHandle = bd.CPUHandle;
-				D3D12_GPU_DESCRIPTOR_HANDLE ShaderVisibleGPU;
-				D3D12_CPU_DESCRIPTOR_HANDLE ShaderVisibleCPU;
+				else
+				{
+					D3D12_CPU_DESCRIPTOR_HANDLE CPUHandle = bd.CPUHandle;
+					D3D12_GPU_DESCRIPTOR_HANDLE ShaderVisibleGPU;
+					D3D12_CPU_DESCRIPTOR_HANDLE ShaderVisibleCPU;
 
-				g_dx12_rhi->SRVCBVDescriptorHeapShaderVisible->AllocDescriptor(ShaderVisibleCPU, ShaderVisibleGPU);
-				g_dx12_rhi->Device->CopyDescriptorsSimple(1, ShaderVisibleCPU, CPUHandle, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+					g_dx12_rhi->SRVCBVDescriptorHeapShaderVisible->AllocDescriptor(ShaderVisibleCPU, ShaderVisibleGPU);
+					g_dx12_rhi->Device->CopyDescriptorsSimple(1, ShaderVisibleCPU, CPUHandle, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+					*(UINT64*)(pDataThis) = ShaderVisibleGPU.ptr;
+
+				}
+				
 
 
-				*(UINT64*)(pDataThis) = ShaderVisibleGPU.ptr;
 				pDataThis += sizeof(UINT64);
 			}
 
