@@ -10,13 +10,13 @@
 //*********************************************************
 
 #include "stdafx.h"
-#include "D3D12DynamicIndexing.h"
+#include "dx12_framework.h"
 #include <dxgidebug.h>
 
 _Use_decl_annotations_
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow)
 {
-	D3D12DynamicIndexing* sample = new D3D12DynamicIndexing(1280, 720, L"D3D12 Dynamic Indexing Sample");
+	dx12_framework* sample = new dx12_framework(1280, 720, L"D3D12 Dynamic Indexing Sample");
 	Win32Application::Run(sample, hInstance, nCmdShow);
 
 	delete sample;
