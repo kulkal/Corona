@@ -152,14 +152,15 @@
       <DeploymentContent Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">true</DeploymentContent>
       <FileType>Document</FileType>
     </CustomBuild>
-    <CustomBuild Include="07-Shaders.hlsl">
-      <FileType>Document</FileType>
-    </CustomBuild>
     <CustomBuild Include="CopyPS.hlsl">
       <FileType>Document</FileType>
     </CustomBuild>
     <CustomBuild Include="LightingPS.hlsl">
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">false</ExcludedFromBuild>
+      <FileType>Document</FileType>
+    </CustomBuild>
+    <CustomBuild Include="RT_Shadow.hlsl">
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">true</ExcludedFromBuild>
       <FileType>Document</FileType>
     </CustomBuild>
     <FxCompile Include="shader_mesh_dynamic_indexing_pixel.hlsl">

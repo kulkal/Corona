@@ -113,23 +113,13 @@ private:
 
 	std::shared_ptr<Sampler> samplerWrap;
 
-	// App resources.
-	/*UINT m_numIndices;
-	
-	std::shared_ptr<IndexBuffer> Ib;
-	std::shared_ptr<VertexBuffer> Vb;
-
-
-	std::shared_ptr<Texture> CityDiffuseTexture;
-	std::vector<std::shared_ptr<Texture>> CityMaterialTextures;
-*/
 
 	unique_ptr<Mesh> SquintRoom;
 
 	StepTimer m_timer;
 
 	SimpleCamera m_camera;
-	std::vector<std::shared_ptr<Texture>> renderTargets;
+	std::vector<std::shared_ptr<Texture>> framebuffers;
 
 	// Frame resources.
 
@@ -137,7 +127,7 @@ private:
 
 	XMFLOAT4X4 m_modelMatrices;
 
-	
+	glm::vec3 LightDir = glm::vec3(1, 1, -1);
 
 
 	std::unique_ptr<DumRHI_DX12> dx12_rhi;									

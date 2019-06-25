@@ -114,9 +114,11 @@
     <CustomBuild Include="cs.hlsl">
       <Filter>Assets\Shaders</Filter>
     </CustomBuild>
-    <CustomBuild Include="07-Shaders.hlsl" />
     <CustomBuild Include="CopyPS.hlsl" />
     <CustomBuild Include="LightingPS.hlsl">
+      <Filter>Assets\Shaders</Filter>
+    </CustomBuild>
+    <CustomBuild Include="RT_Shadow.hlsl">
       <Filter>Assets\Shaders</Filter>
     </CustomBuild>
   </ItemGroup>

@@ -9,6 +9,8 @@ bin/
 # no obj folder
 obj/
 
+# vs filters
+*.filters
 # no .a files
 *.a
 

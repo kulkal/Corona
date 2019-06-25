@@ -461,7 +461,7 @@ void D3D12DynamicIndexing::LoadAssets()
 		// create each rtv for one actual resource(swapchain)
 		shared_ptr<Texture> rt = dx12_rhi->CreateTexture2DFromResource(rendertarget);
 		rt->MakeRTV();
-		renderTargets.push_back(rt);
+		framebuffers.push_back(rt);
 	}
 
 	// lighting result
@@ -906,7 +906,7 @@ void D3D12DynamicIndexing::CopyPass()
 
 	
 
-	Texture* backbuffer = renderTargets[dx12_rhi->CurrentFrameIndex].get();
+	Texture* backbuffer = framebuffers[dx12_rhi->CurrentFrameIndex].get();
 
 	D3D12_RESOURCE_BARRIER BarrierDesc = {};
 	BarrierDesc.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
@@ -986,7 +986,9 @@ void D3D12DynamicIndexing::LightingPass()
 	RS_Lighting->ps->SetTexture("NormalTex", NormalBuffer.get(), dx12_rhi->CommandList.Get(), nullptr);
 
 	LightingParam Param;
-	Param.LightDir = glm::vec4(1.0f, 1.0f, -1.0f, 0.0f);
+	//Param.LightDir = glm::vec4(1.0f, 1.0f, -1.0f, 0.0f);
+	Param.LightDir = glm::vec4(LightDir, 0);
+
 	glm::normalize(Param.LightDir);
 	RS_Lighting->ps->SetConstantValue("LightingParam", &Param, 0, dx12_rhi->CommandList.Get(), nullptr);
 
@@ -1067,7 +1069,7 @@ void D3D12DynamicIndexing::OnRender()
 	dx12_rhi->BeginFrame();
 	
 	// Record all the commands we need to render the scene into the command list.
-	Texture* backbuffer = renderTargets[dx12_rhi->CurrentFrameIndex].get();
+	Texture* backbuffer = framebuffers[dx12_rhi->CurrentFrameIndex].get();
 
 	DrawMeshPass();
 
@@ -1402,7 +1404,7 @@ void D3D12DynamicIndexing::InitRaytracing()
 	// PSO_RT->BindSRV("chs", "diffuse");
 
 	//PSO_RT->Init("07-Shaders.hlsl");
-	PSO_RT->InitRS("07-Shaders.hlsl");
+	PSO_RT->InitRS("RT_Shadow.hlsl");
 
 
 
