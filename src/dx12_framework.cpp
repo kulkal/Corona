@@ -327,7 +327,7 @@ void dx12_framework::LoadPipeline()
 
 	UINT dxgiFactoryFlags = 0;
 
-#if 1//defined(_DEBUG)
+#if defined(_DEBUG)
 	// Enable the debug layer (requires the Graphics Tools "optional feature").
 	// NOTE: Enabling the debug layer after device creation will invalidate the active device.
 	{
@@ -398,8 +398,20 @@ void dx12_framework::LoadPipeline()
 		ComPtr<ID3D12InfoQueue> d3dInfoQueue;
 		if (SUCCEEDED(m_device->QueryInterface(__uuidof(ID3D12InfoQueue), (void**)&d3dInfoQueue)))
 		{
-			//d3dInfoQueue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_CORRUPTION, true);
-			//d3dInfoQueue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_ERROR, true);
+			d3dInfoQueue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_CORRUPTION, true);
+			d3dInfoQueue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_ERROR, true);
+
+			D3D12_MESSAGE_ID blockedIds[] = { 
+			/*	D3D12_MESSAGE_ID_CLEARRENDERTARGETVIEW_MISMATCHINGCLEARVALUE, 
+				D3D12_MESSAGE_ID_CLEARDEPTHSTENCILVIEW_MISMATCHINGCLEARVALUE, */
+				D3D12_MESSAGE_ID_COPY_DESCRIPTORS_INVALID_RANGES };
+			D3D12_INFO_QUEUE_FILTER filter = {};
+			filter.DenyList.pIDList = blockedIds;
+			filter.DenyList.NumIDs = 3;
+			d3dInfoQueue->AddRetrievalFilterEntries(&filter);
+			d3dInfoQueue->AddStorageFilterEntries(&filter);
+		
+
 		}
 	}
 

@@ -685,7 +685,7 @@ DumRHI_DX12::DumRHI_DX12(ID3D12Device5 * InDevice)
 		SamplerDescriptorHeapStorage = std::make_unique<DescriptorHeap>();
 
 		D3D12_DESCRIPTOR_HEAP_DESC HeapDesc = {};
-		HeapDesc.NumDescriptors = 1024;
+		HeapDesc.NumDescriptors = 1024*8;
 		HeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER;
 		HeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
 		SamplerDescriptorHeapStorage->Init(HeapDesc);
