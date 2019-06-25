@@ -97,7 +97,7 @@ void DumRHI_DX12::BeginFrame()
 		cb->isPopulatedThisFrame = false;
 	}
 
-	ID3D12DescriptorHeap* ppHeaps[] = { SRVCBVDescriptorHeapShaderVisible->DH.Get(), SamplerDescriptorHeap->DH.Get() };
+	ID3D12DescriptorHeap* ppHeaps[] = { SRVCBVDescriptorHeapShaderVisible->DH.Get(), SamplerDescriptorHeapShaderVisible->DH.Get() };
 	CommandList->SetDescriptorHeaps(_countof(ppHeaps), ppHeaps);
 	
 }
@@ -319,7 +319,7 @@ shared_ptr<Sampler> DumRHI_DX12::CreateSampler(D3D12_SAMPLER_DESC& InSamplerDesc
 
 	sampler->SamplerDesc = InSamplerDesc;
 
-	SamplerDescriptorHeap->AllocDescriptor(sampler->CpuHandle, sampler->GpuHandle);
+	SamplerDescriptorHeapShaderVisible->AllocDescriptor(sampler->CpuHandle, sampler->GpuHandle);
 
 
 	Device->CreateSampler(&sampler->SamplerDesc, sampler->CpuHandle);
@@ -633,7 +633,7 @@ DumRHI_DX12::DumRHI_DX12(ID3D12Device5 * InDevice)
 		DSVDescriptorHeap->Init(HeapDesc);
 	}
 	
-	// shader visible
+	// shader visible CBV_SRV_UAV
 	{
 		SRVCBVDescriptorHeapShaderVisible = std::make_unique<DescriptorHeap>();
 
@@ -644,17 +644,8 @@ DumRHI_DX12::DumRHI_DX12(ID3D12Device5 * InDevice)
 		SRVCBVDescriptorHeapShaderVisible->Init(HeapDesc);
 
 	}
-	// sampler
-	{
-		SamplerDescriptorHeap = std::make_unique<DescriptorHeap>();
 
-		D3D12_DESCRIPTOR_HEAP_DESC HeapDesc = {};
-		HeapDesc.NumDescriptors = 1024;
-		HeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER;
-		HeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
-		SamplerDescriptorHeap->Init(HeapDesc);
-	}
-	// non shader visible(storage)
+	// non shader visible(storage) CBV_SRV_UAV
 	{
 		SRVCBVDescriptorHeapStorage = std::make_unique<DescriptorHeap>();
 
@@ -666,7 +657,27 @@ DumRHI_DX12::DumRHI_DX12(ID3D12Device5 * InDevice)
 
 	}
 
+	// shader visible sampler
+	{
+		SamplerDescriptorHeapShaderVisible = std::make_unique<DescriptorHeap>();
 
+		D3D12_DESCRIPTOR_HEAP_DESC HeapDesc = {};
+		HeapDesc.NumDescriptors = 1024;
+		HeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER;
+		HeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+		SamplerDescriptorHeapShaderVisible->Init(HeapDesc);
+	}
+	
+	{
+		SamplerDescriptorHeapStorage = std::make_unique<DescriptorHeap>();
+
+		D3D12_DESCRIPTOR_HEAP_DESC HeapDesc = {};
+		HeapDesc.NumDescriptors = 1024;
+		HeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER;
+		HeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
+		SamplerDescriptorHeapStorage->Init(HeapDesc);
+	}
+	
 	
 	
 
@@ -1783,6 +1794,8 @@ ComPtr<ID3DBlob> compileShaderLibrary(const WCHAR* filename, const WCHAR* target
 		pResult->GetErrorBuffer(&pError);
 		std::string log = convertBlobToString(pError.Get());
 		//msgBox("Compiler error:\n" + log);
+		OutputDebugStringA(log.c_str());
+
 		return nullptr;
 	}
 
@@ -2129,6 +2142,11 @@ void RTPipelineStateObject::EndShaderTable()
 			pDataThis += D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES;
 			for (auto& bd : bindingInfo.Binding)
 			{
+				if (bd.Type == D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER)
+				{
+					//g_dx12_rhi->Device->CopyDescriptorsSimple(1, ShaderVisibleCPU, CPUHandle, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+
+				}
 				D3D12_CPU_DESCRIPTOR_HANDLE CPUHandle = bd.CPUHandle;
 				D3D12_GPU_DESCRIPTOR_HANDLE ShaderVisibleGPU;
 				D3D12_CPU_DESCRIPTOR_HANDLE ShaderVisibleCPU;
@@ -2518,11 +2536,13 @@ void RTPipelineStateObject::InitRS(string ShaderFile)
 		vector<D3D12_ROOT_PARAMETER> rootParamVec;
 		vector<D3D12_DESCRIPTOR_RANGE> Ranges;
 
+		vector<D3D12_ROOT_PARAMETER> rootParamVecSampler;
+		vector<D3D12_DESCRIPTOR_RANGE> RangesSampler;
+
 		if (bindingInfo.Binding.size() > 0)
 		{
 			// create root signature
 			
-			D3D12_ROOT_PARAMETER RootParam = {};
 			for (auto& bindingData : bindingInfo.Binding)
 			{
 				D3D12_DESCRIPTOR_RANGE Range = {};
@@ -2532,14 +2552,34 @@ void RTPipelineStateObject::InitRS(string ShaderFile)
 				Range.RegisterSpace = 0;
 				Range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
 
-				Ranges.push_back(Range);
+				if (bindingData.Type == D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER)
+				{
+					RangesSampler.push_back(Range);
+				}
+				else
+				{
+					Ranges.push_back(Range);
+				}
+				
 			}
+
+			D3D12_ROOT_PARAMETER RootParam = {};
 			RootParam.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
 			RootParam.DescriptorTable.NumDescriptorRanges = Ranges.size();
 			RootParam.DescriptorTable.pDescriptorRanges = Ranges.data();
 			RootParam.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 
 			rootParamVec.push_back(RootParam);
+
+
+			D3D12_ROOT_PARAMETER RootParamSampler = {};
+			RootParamSampler.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+			RootParamSampler.DescriptorTable.NumDescriptorRanges = RangesSampler.size();
+			RootParamSampler.DescriptorTable.pDescriptorRanges = RangesSampler.data();
+			RootParamSampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+
+			rootParamVec.push_back(RootParamSampler);
+
 
 			Desc.NumParameters = rootParamVec.size();
 			Desc.pParameters = rootParamVec.data();

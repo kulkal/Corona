@@ -501,7 +501,7 @@ public:
 
 	std::unique_ptr<DescriptorHeap> RTVDescriptorHeap;
 	std::unique_ptr<DescriptorHeap> DSVDescriptorHeap;
-	std::unique_ptr<DescriptorHeap> SamplerDescriptorHeap;
+	std::unique_ptr<DescriptorHeap> SamplerDescriptorHeapShaderVisible;
 
 	std::unique_ptr<DescriptorHeap> SRVCBVDescriptorHeapShaderVisible;
 
@@ -509,6 +509,7 @@ public:
 
 
 	std::unique_ptr<DescriptorHeap> SRVCBVDescriptorHeapStorage;
+	std::unique_ptr<DescriptorHeap> SamplerDescriptorHeapStorage;
 
 
 

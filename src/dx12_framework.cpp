@@ -1078,7 +1078,7 @@ void dx12_framework::OnRender()
 
 	LightingPass();
 
-	RaytracePass();
+	//RaytracePass();
 
 	CopyPass();
 
@@ -1179,7 +1179,7 @@ void dx12_framework::DrawMeshPass()
 	dx12_rhi->CommandQueue->ExecuteCommandLists(1, ppCommandLists);
 	dx12_rhi->CommandList->Reset(dx12_rhi->GetCurrentCA(), nullptr);
 
-	ID3D12DescriptorHeap* ppHeaps[] = { dx12_rhi->SRVCBVDescriptorHeapShaderVisible->DH.Get(), dx12_rhi->SamplerDescriptorHeap->DH.Get() };
+	ID3D12DescriptorHeap* ppHeaps[] = { dx12_rhi->SRVCBVDescriptorHeapShaderVisible->DH.Get(), dx12_rhi->SamplerDescriptorHeapShaderVisible->DH.Get() };
 	dx12_rhi->CommandList->SetDescriptorHeaps(_countof(ppHeaps), ppHeaps);
 
 	dx12_rhi->UploadeFrameTexture2ShaderVisibleHeap();
@@ -1298,7 +1298,7 @@ void dx12_framework::RecordDraw (UINT StartIndex, UINT NumDraw, UINT CLIndex, Th
 	CL->IASetIndexBuffer(&SquintRoom->Ib->view);
 	CL->IASetVertexBuffers(0, 1, &SquintRoom->Vb->view);
 
-	ID3D12DescriptorHeap* ppHeaps[] = { dx12_rhi->SRVCBVDescriptorHeapShaderVisible->DH.Get(), dx12_rhi->SamplerDescriptorHeap->DH.Get() };
+	ID3D12DescriptorHeap* ppHeaps[] = { dx12_rhi->SRVCBVDescriptorHeapShaderVisible->DH.Get(), dx12_rhi->SamplerDescriptorHeapShaderVisible->DH.Get() };
 	CL->SetDescriptorHeaps(_countof(ppHeaps), ppHeaps);
 	
 	RS_Mesh->ApplyGraphicsRSPSO(CL);
@@ -1393,8 +1393,9 @@ void dx12_framework::InitRaytracing()
 	PSO_RT->AddShader("rayGen", RTPipelineStateObject::RAYGEN);
 	PSO_RT->BindUAV("rayGen", "gOutput", 0);
 	PSO_RT->BindSRV("rayGen", "gRtScene", 0);
-	PSO_RT->BindSRV("rayGen", "Depth", 1);
+	PSO_RT->BindSRV("rayGen", "DepthTex", 1);
 	PSO_RT->BindCBV("rayGen", "ViewParameter", 0, sizeof(RTViewParamCB), 1);
+	PSO_RT->BindSampler("rayGen", "samplerWrap", 0);
 
 	PSO_RT->AddShader("miss", RTPipelineStateObject::MISS);
 	PSO_RT->AddShader("chs", RTPipelineStateObject::HIT);
@@ -1429,8 +1430,9 @@ void dx12_framework::RaytracePass()
 
 		PSO_RT->SetUAV("rayGen", "gOutput", ShadowBuffer->CpuHandleUAV);
 		PSO_RT->SetSRV("rayGen", "gRtScene", RTASCPUHandle);
-		PSO_RT->SetSRV("rayGen", "Depth", dx12_rhi->depthTexture->CpuHandleSRV);
+		PSO_RT->SetSRV("rayGen", "DepthTex", dx12_rhi->depthTexture->CpuHandleSRV);
 		PSO_RT->SetCBVValue("rayGen", "ViewParameter", &RTViewParam, sizeof(RTViewParamCB));
+		PSO_RT->SetSampler("rayGen", "samplerWrap", samplerWrap.get());
 		PSO_RT->SetHitProgram("chs", 0); // this pass use only 1 hit program
 		PSO_RT->EndShaderTable();
 

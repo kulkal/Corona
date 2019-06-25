@@ -26,7 +26,7 @@
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ***************************************************************************/
 RaytracingAccelerationStructure gRtScene : register(t0);
-Texture2D<float> Depth : register(t1);
+Texture2D DepthTex : register(t1);
 RWTexture2D<float4> gOutput : register(u0);
 cbuffer ViewParameter : register(b0)
 {
@@ -34,6 +34,8 @@ cbuffer ViewParameter : register(b0)
     float4x4 InvViewMatrix;
     float4 LightDir;
 };
+SamplerState sampleWrap : register(s0);
+
 
 float3 linearToSrgb(float3 c)
 {
@@ -78,7 +80,12 @@ void rayGen()
     float3 col = linearToSrgb(payload.color);
     //gOutput[launchIndex.xy] = float4(col, 1);
     float dd = payload.distance / 1000.0f;
-    gOutput[launchIndex.xy] = float4(dd, dd, dd, 1);
+    //gOutput[launchIndex.xy] = float4(dd, dd, dd, 1);
+
+    float2 UV = crd / dims;
+    float Depth = DepthTex.SampleLevel(sampleWrap, UV, 0).x;
+    gOutput[launchIndex.xy] = float4(Depth, Depth, Depth, 1);
+
 
 }
 
