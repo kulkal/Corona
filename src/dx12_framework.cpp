@@ -506,6 +506,7 @@ void dx12_framework::LoadAssets()
 	
 	dx12_rhi->depthTexture = dx12_rhi->CreateTexture2D(DXGI_FORMAT_D32_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL, D3D12_RESOURCE_STATE_DEPTH_WRITE, m_width, m_height, 1);
 	dx12_rhi->depthTexture->MakeDSV();
+	dx12_rhi->depthTexture->MakeSRV(true);
 
 
 
@@ -1061,6 +1062,8 @@ void dx12_framework::OnUpdate()
 	XMVECTOR Det;
 	XMStoreFloat4x4(&RTViewParam.InvViewMatrix, XMMatrixInverse(&Det, XMMatrixTranspose(m_camera.GetViewMatrix())));
 
+	RTViewParam.LightDir = glm::vec4(LightDir, 0);
+
 }
 
 // Render the scene.
@@ -1388,9 +1391,10 @@ void dx12_framework::InitRaytracing()
 	// new interface
 	PSO_RT->AddHitGroup("HitGroup", "chs", "");
 	PSO_RT->AddShader("rayGen", RTPipelineStateObject::RAYGEN);
-	PSO_RT->BindUAV("rayGen", "gOutput");
-	PSO_RT->BindSRV("rayGen", "gRtScene");
-	PSO_RT->BindCBV("rayGen", "ViewParameter", sizeof(RTViewParamCB), 1);
+	PSO_RT->BindUAV("rayGen", "gOutput", 0);
+	PSO_RT->BindSRV("rayGen", "gRtScene", 0);
+	PSO_RT->BindSRV("rayGen", "Depth", 1);
+	PSO_RT->BindCBV("rayGen", "ViewParameter", 0, sizeof(RTViewParamCB), 1);
 
 	PSO_RT->AddShader("miss", RTPipelineStateObject::MISS);
 	PSO_RT->AddShader("chs", RTPipelineStateObject::HIT);
@@ -1425,6 +1429,7 @@ void dx12_framework::RaytracePass()
 
 		PSO_RT->SetUAV("rayGen", "gOutput", ShadowBuffer->CpuHandleUAV);
 		PSO_RT->SetSRV("rayGen", "gRtScene", RTASCPUHandle);
+		PSO_RT->SetSRV("rayGen", "Depth", dx12_rhi->depthTexture->CpuHandleSRV);
 		PSO_RT->SetCBVValue("rayGen", "ViewParameter", &RTViewParam, sizeof(RTViewParamCB));
 		PSO_RT->SetHitProgram("chs", 0); // this pass use only 1 hit program
 		PSO_RT->EndShaderTable();

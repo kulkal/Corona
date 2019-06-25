@@ -186,6 +186,7 @@ class RTPipelineStateObject
 		Texture* texture;
 		Sampler* sampler;
 
+		UINT BaseRegister;
 		D3D12_CPU_DESCRIPTOR_HANDLE CPUHandle; // for multiple instances
 
 		vector<shared_ptr<ConstantBuffer>> cbs; // multiple constant buffers are need for multiple buffering.
@@ -273,10 +274,10 @@ public:
 
 	// new binding interface
 	void AddShader(string shader, RTPipelineStateObject::ShaderType shaderType);
-	void BindUAV(string shader, string name);
-	void BindSRV(string shader, string name);
-	void BindSampler(string shader, string name);
-	void BindCBV(string shader, string name, UINT size, UINT numInstance);
+	void BindUAV(string shader, string name, UINT baseRegister);
+	void BindSRV(string shader, string name, UINT baseRegister);
+	void BindSampler(string shader, string name, UINT baseRegister);
+	void BindCBV(string shader, string name, UINT baseRegister, UINT size, UINT numInstance);
 
 	void BeginShaderTable();
 	void EndShaderTable();
@@ -368,7 +369,7 @@ public:
 
 	void VisibleThisFrame();
 	void MakeUAV();
-	void MakeSRV();
+	void MakeSRV(bool isDepth = false);
 	void MakeRTV();
 	void MakeDSV();
 
@@ -518,7 +519,6 @@ public:
 
 
 
-	std::set<Texture*> textures;
 
 	vector<shared_ptr<ConstantBuffer>> cbVec;
 

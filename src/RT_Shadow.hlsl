@@ -26,11 +26,13 @@
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ***************************************************************************/
 RaytracingAccelerationStructure gRtScene : register(t0);
+Texture2D<float> Depth : register(t1);
 RWTexture2D<float4> gOutput : register(u0);
 cbuffer ViewParameter : register(b0)
 {
     float4x4 ViewMatrix;
     float4x4 InvViewMatrix;
+    float4 LightDir;
 };
 
 float3 linearToSrgb(float3 c)

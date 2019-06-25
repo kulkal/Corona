@@ -160,7 +160,7 @@
       <FileType>Document</FileType>
     </CustomBuild>
     <CustomBuild Include="RT_Shadow.hlsl">
-      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">false</ExcludedFromBuild>
       <FileType>Document</FileType>
     </CustomBuild>
     <FxCompile Include="shader_mesh_dynamic_indexing_pixel.hlsl">

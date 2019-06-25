@@ -1330,13 +1330,17 @@ void Texture::MakeUAV()
 	g_dx12_rhi->Device->CreateUnorderedAccessView(resource.Get(), nullptr, &uavDesc, CpuHandleUAV);
 }
 
-void Texture::MakeSRV()
+void Texture::MakeSRV(bool isDepth)
 {
 	g_dx12_rhi->SRVCBVDescriptorHeapStorage->AllocDescriptor(CpuHandleSRV, GpuHandleSRV);
 
 	D3D12_SHADER_RESOURCE_VIEW_DESC SrvDesc = {};
 	SrvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-	SrvDesc.Format = Format;
+	if (isDepth)
+		SrvDesc.Format = DXGI_FORMAT_R32_FLOAT;
+	else
+		SrvDesc.Format = Format;
+
 	SrvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
 	SrvDesc.Texture2D.MipLevels = textureDesc.MipLevels;
 	g_dx12_rhi->Device->CreateShaderResourceView(resource.Get(), &SrvDesc, CpuHandleSRV);
@@ -1842,11 +1846,13 @@ ComPtr<ID3D12RootSignature> CreateRootSignature(ComPtr<ID3D12Device5> pDevice, c
 	if (FAILED(hr))
 	{
 		std::string msg = convertBlobToString(pErrorBlob.Get());
-		//msgBox(msg);
+		OutputDebugStringA(msg.c_str());
+
 		return nullptr;
 	}
 	ComPtr<ID3D12RootSignature> pRootSig;
-	pDevice->CreateRootSignature(0, pSigBlob->GetBufferPointer(), pSigBlob->GetBufferSize(), IID_PPV_ARGS(&pRootSig));
+	hr = pDevice->CreateRootSignature(0, pSigBlob->GetBufferPointer(), pSigBlob->GetBufferSize(), IID_PPV_ARGS(&pRootSig));
+
 	return pRootSig;
 }
 
@@ -2016,7 +2022,7 @@ void RTPipelineStateObject::AddShader(string shader, RTPipelineStateObject::Shad
 	ShaderBinding[shader].Type = shaderType;
 }
 
-void RTPipelineStateObject::BindUAV(string shader, string name)
+void RTPipelineStateObject::BindUAV(string shader, string name, UINT baseRegister)
 {
 	auto& bindingInfo = ShaderBinding[shader];
 
@@ -2024,10 +2030,12 @@ void RTPipelineStateObject::BindUAV(string shader, string name)
 	binding.name = name;
 	binding.Type = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
 
+	binding.BaseRegister = baseRegister;
+
 	bindingInfo.Binding.push_back(binding);
 }
 
-void RTPipelineStateObject::BindSRV(string shader, string name)
+void RTPipelineStateObject::BindSRV(string shader, string name, UINT baseRegister)
 {
 	auto& bindingInfo = ShaderBinding[shader];
 
@@ -2035,10 +2043,13 @@ void RTPipelineStateObject::BindSRV(string shader, string name)
 	binding.name = name;
 	binding.Type = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
 
+	binding.BaseRegister = baseRegister;
+
+
 	bindingInfo.Binding.push_back(binding);
 }
 
-void RTPipelineStateObject::BindSampler(string shader, string name)
+void RTPipelineStateObject::BindSampler(string shader, string name, UINT baseRegister)
 {
 	auto& bindingInfo = ShaderBinding[shader];
 
@@ -2046,16 +2057,22 @@ void RTPipelineStateObject::BindSampler(string shader, string name)
 	binding.name = name;
 	binding.Type = D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER;
 
+	binding.BaseRegister = baseRegister;
+
+
 	bindingInfo.Binding.push_back(binding);
 }
 
-void RTPipelineStateObject::BindCBV(string shader, string name, UINT size, UINT numInstance)
+void RTPipelineStateObject::BindCBV(string shader, string name, UINT baseRegister, UINT size, UINT numInstance)
 {
 	auto& bindingInfo = ShaderBinding[shader];
 
 	BindingData binding;
 	binding.name = name;
 	binding.Type = D3D12_DESCRIPTOR_RANGE_TYPE_CBV;
+
+	binding.BaseRegister = baseRegister;
+
 
 	int div = size / 256;
 	binding.cbSize = (div + 1) * 256;
@@ -2510,7 +2527,7 @@ void RTPipelineStateObject::InitRS(string ShaderFile)
 			{
 				D3D12_DESCRIPTOR_RANGE Range = {};
 				Range.RangeType = bindingData.Type;
-				Range.BaseShaderRegister = 0;
+				Range.BaseShaderRegister = bindingData.BaseRegister;
 				Range.NumDescriptors = 1;
 				Range.RegisterSpace = 0;
 				Range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
