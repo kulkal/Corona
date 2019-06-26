@@ -1082,6 +1082,8 @@ void dx12_framework::OnUpdate()
 
 	ViewParameter->SetValue(&ViewProjMat);
 
+
+
 	XMStoreFloat4x4(&RTViewParam.ViewMatrix, XMMatrixTranspose(m_camera.GetViewMatrix()));
 	
 
