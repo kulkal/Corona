@@ -14,6 +14,8 @@
 
 #include <comdef.h>
 
+
+
 #define align_to(_alignment, _val) (((_val + _alignment - 1) / _alignment) * _alignment)
 
 DumRHI_DX12* g_dx12_rhi;
@@ -564,6 +566,10 @@ void DumRHI_DX12::SubmitCommandList(ID3D12GraphicsCommandList* CmdList)
 DumRHI_DX12::DumRHI_DX12(ID3D12Device5 * InDevice)
 	:Device(InDevice)
 {
+
+	ID3D12Device* Device = InDevice;
+	GFSDK_Aftermath_Result result = GFSDK_Aftermath_DX12_Initialize(GFSDK_Aftermath_Version::GFSDK_Aftermath_Version_API, GFSDK_Aftermath_FeatureFlags::GFSDK_Aftermath_FeatureFlags_Maximum, Device);
+
 	g_dx12_rhi = this;
 
 	// Describe and create the command queue.
@@ -596,6 +602,9 @@ DumRHI_DX12::DumRHI_DX12(ID3D12Device5 * InDevice)
 	}
 
 	ThrowIfFailed(Device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, FrameResourceVec[0].CommandAllocator.Get(), nullptr, IID_PPV_ARGS(&CommandList)));
+
+	GFSDK_Aftermath_Result ar = GFSDK_Aftermath_DX12_CreateContextHandle(CommandList.Get(), &AM_CL_Handle);
+
 	NAME_D3D12_OBJECT(CommandList);
 
 	for (int i = 0; i < NumDrawMeshCommandList; i++)
@@ -2147,6 +2156,7 @@ void RTPipelineStateObject::EndShaderTable()
 	// hit : raygen + miss(N) + instanceIndex
 	uint8_t* pData;
 	HRESULT hr = ShaderTable->Map(0, nullptr, (void**)&pData);
+	D3D12_GPU_VIRTUAL_ADDRESS va = ShaderTable->GetGPUVirtualAddress();
 
 	ComPtr<ID3D12StateObjectProperties> RtsoProps;
 	RTPipelineState->QueryInterface(IID_PPV_ARGS(&RtsoProps));
@@ -2236,7 +2246,7 @@ void RTPipelineStateObject::EndShaderTable()
 		auto& HitProgramInfo = HitProgramBinding[InstanceIndex];
 		
 		memcpy(pDataThis, RtsoProps->GetShaderIdentifier(HitProgramInfo.HitGroupName.c_str()), D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES);
-		pDataThis += sizeof(UINT64);
+		pDataThis += D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES;
 
 		for (auto& bd : HitProgramInfo.VecData)
 		{
@@ -2368,155 +2378,6 @@ void RTPipelineStateObject::SetHitProgram(string shader, UINT instanceIndex)
 	HitProgramBinding[instanceIndex].HitGroupName = MapHitGroup[shader].name;
 }
 
-void RTPipelineStateObject::Init(string ShaderFile)
-{
-	vector<D3D12_STATE_SUBOBJECT> subobjects;
-
-	subobjects.resize(10);
-
-	uint32_t index = 0;
-
-	// dxil lib
-	wstring wShaderFile = StringToWString(ShaderFile);
-	ComPtr<ID3DBlob> pDxilLib = compileShaderLibrary(wShaderFile.c_str(), L"lib_6_3");
-	const WCHAR* entryPoints[] = { kRayGenShader.c_str(), kMissShader.c_str(), kClosestHitShader.c_str() };
-	DxilLibrary dxilLib = DxilLibrary(pDxilLib, entryPoints, arraysize(entryPoints));
-
-	//subobjects.push_back(dxilLib.stateSubobject);
-	subobjects[index++] = dxilLib.stateSubobject; // 0 Library
-
-	// hit group
-	HitProgram hitProgram(nullptr, kClosestHitShader.c_str(), kHitGroup.c_str());
-	//subobjects.push_back(hitProgram.subObject);
-	subobjects[index++] = hitProgram.subObject; // 1 Hit Group
-
-	// raygen root signature binding
-
-	vector<D3D12_ROOT_PARAMETER> rootParamVec;
-
-	vector<D3D12_DESCRIPTOR_RANGE> RaygenRanges;
-
-	D3D12_ROOT_PARAMETER CBParam = {};
-
-	if (RaygenBinding.size() != 0)
-	{
-		for (auto& bindingData : RaygenBinding)
-		{
-			//BindingData& bindingData = bindingPair.second;
-			D3D12_DESCRIPTOR_RANGE Range = {};
-			Range.RangeType = bindingData.Type;
-			Range.BaseShaderRegister = 0;
-			Range.NumDescriptors = 1;
-			Range.RegisterSpace = 0;
-			Range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
-
-			RaygenRanges.push_back(Range);
-		}
-	}
-
-	CBParam.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-	CBParam.DescriptorTable.NumDescriptorRanges = RaygenRanges.size();
-	CBParam.DescriptorTable.pDescriptorRanges = RaygenRanges.data();
-	CBParam.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
-
-	rootParamVec.push_back(CBParam);
-
-
-	// raygen root signature
-	D3D12_STATE_SUBOBJECT subobjectRaygenRS;
-	ID3D12RootSignature* pInterface = nullptr;
-	D3D12_ROOT_SIGNATURE_DESC RaygenRSDesc = {};
-	RaygenRSDesc.NumParameters = rootParamVec.size();
-	RaygenRSDesc.pParameters = rootParamVec.data();
-	RaygenRSDesc.Flags = D3D12_ROOT_SIGNATURE_FLAG_LOCAL_ROOT_SIGNATURE;
-	
-	RaygenRS = CreateRootSignature(g_dx12_rhi->Device, RaygenRSDesc);
-	NAME_D3D12_OBJECT(RaygenRS);
-
-	pInterface = RaygenRS.Get();
-	subobjectRaygenRS.pDesc = &pInterface;
-	subobjectRaygenRS.Type = D3D12_STATE_SUBOBJECT_TYPE_LOCAL_ROOT_SIGNATURE;
-
-	//subobjects.push_back(subobjectRaygenRS);
-	subobjects[index] = subobjectRaygenRS; // 2 RayGen Root Sig
-	uint32_t rgsRootIndex = index++; // 2
-
-	// raygen export association
-	const WCHAR* raygenExportName[] = { kRayGenShader.c_str()};
-	ExportAssociation rgsRootAssociation(raygenExportName, 1, &subobjects[rgsRootIndex]);
-	//subobjects.push_back(rgsRootAssociation.subobject);
-	subobjects[index++] = rgsRootAssociation.subobject; // 3 Associate Root Sig to RGS
-
-	
-	// empty root signature for hit-miss
-	D3D12_STATE_SUBOBJECT subobjectHitMiss;
-	ID3D12RootSignature* pInterfaceHitMissRS;
-	D3D12_ROOT_SIGNATURE_DESC HitMissRSDesc = {};
-	HitMissRSDesc.Flags = D3D12_ROOT_SIGNATURE_FLAG_LOCAL_ROOT_SIGNATURE;
-
-	HitMissRS = CreateRootSignature(g_dx12_rhi->Device, HitMissRSDesc);
-	NAME_D3D12_OBJECT(HitMissRS);
-
-	pInterfaceHitMissRS = HitMissRS.Get();
-	subobjectHitMiss.pDesc = &pInterfaceHitMissRS;
-	subobjectHitMiss.Type = D3D12_STATE_SUBOBJECT_TYPE_LOCAL_ROOT_SIGNATURE;
-	//subobjects.push_back(subobjectHitMiss);
-	subobjects[index] = subobjectHitMiss;
-	uint32_t hitMissRootIndex = index++; // 4
-
-	// hit-miss export association
-	const WCHAR* missHitExportName[] = { kMissShader.c_str(), kClosestHitShader.c_str() };
-	ExportAssociation missHitRootAssociation(missHitExportName, arraysize(missHitExportName), &subobjects[hitMissRootIndex]);
-	//subobjects.push_back(missHitRootAssociation.subobject);
-	subobjects[index++] = missHitRootAssociation.subobject;
-
-	// shader config
-	ShaderConfig shaderConfig(sizeof(float) * 2, sizeof(float) * 4);
-	//subobjects.push_back(shaderConfig.subobject);
-	subobjects[index++] = shaderConfig.subobject;
-
-	// shaderconfig export association
-	const WCHAR* shaderExports[] = { kMissShader.c_str(), kClosestHitShader.c_str(), kRayGenShader.c_str() };
-	ExportAssociation configAssociation(shaderExports, arraysize(shaderExports), &shaderConfig.subobject);
-	//subobjects.push_back(configAssociation.subobject);
-	subobjects[index++] = configAssociation.subobject;
-
-
-	// pipeline config
-	PipelineConfig config(1);
-	//subobjects.push_back(config.subobject);
-	subobjects[index++] = config.subobject;
-
-	// global root signature
-	D3D12_STATE_SUBOBJECT subobjectGlobalRS = {};
-	ID3D12RootSignature* pInterfaceGlobalRS = nullptr;
-	D3D12_ROOT_SIGNATURE_DESC GlobalRSDesc = {};
-
-	GlobalRS = CreateRootSignature(g_dx12_rhi->Device, GlobalRSDesc);
-	NAME_D3D12_OBJECT(GlobalRS);
-
-	pInterfaceGlobalRS = GlobalRS.Get();
-	subobjectGlobalRS.pDesc = &pInterfaceGlobalRS;
-	subobjectGlobalRS.Type = D3D12_STATE_SUBOBJECT_TYPE_GLOBAL_ROOT_SIGNATURE;
-
-	//subobjects.push_back(subobjectGlobalRS);
-	subobjects[index++] = subobjectGlobalRS;
-
-	// Create the RTPSO
-	D3D12_STATE_OBJECT_DESC descRTSO;
-	descRTSO.NumSubobjects = subobjects.size(); // 10
-	descRTSO.pSubobjects = subobjects.data();
-	descRTSO.Type = D3D12_STATE_OBJECT_TYPE_RAYTRACING_PIPELINE;
-
-	HRESULT hr = g_dx12_rhi->Device->CreateStateObject(&descRTSO, IID_PPV_ARGS(&RTPipelineState));
-	if (FAILED(hr))
-	{
-
-	}
-	
-
-}
-
 void RTPipelineStateObject::InitRS(string ShaderFile)
 {
 	vector<D3D12_STATE_SUBOBJECT> subobjects;
@@ -2620,15 +2481,16 @@ void RTPipelineStateObject::InitRS(string ShaderFile)
 
 			rootParamVec.push_back(RootParam);
 
+			if (RangesSampler.size() > 0)
+			{
+				D3D12_ROOT_PARAMETER RootParamSampler = {};
+				RootParamSampler.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+				RootParamSampler.DescriptorTable.NumDescriptorRanges = RangesSampler.size();
+				RootParamSampler.DescriptorTable.pDescriptorRanges = RangesSampler.data();
+				RootParamSampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 
-			D3D12_ROOT_PARAMETER RootParamSampler = {};
-			RootParamSampler.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-			RootParamSampler.DescriptorTable.NumDescriptorRanges = RangesSampler.size();
-			RootParamSampler.DescriptorTable.pDescriptorRanges = RangesSampler.data();
-			RootParamSampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
-
-			rootParamVec.push_back(RootParamSampler);
-
+				rootParamVec.push_back(RootParamSampler);
+			}
 
 			Desc.NumParameters = rootParamVec.size();
 			Desc.pParameters = rootParamVec.data();
@@ -2805,6 +2667,7 @@ void RTPipelineStateObject::Apply(UINT width, UINT height)
 	g_dx12_rhi->CommandList->SetPipelineState1(RTPipelineState.Get());
 
 
+	GFSDK_Aftermath_SetEventMarker(g_dx12_rhi->AM_CL_Handle, nullptr, 0);
 
 	g_dx12_rhi->CommandList->DispatchRays(&raytraceDesc);
 }

@@ -80,11 +80,11 @@ void rayGen()
     float3 col = linearToSrgb(payload.color);
     //gOutput[launchIndex.xy] = float4(col, 1);
     float dd = payload.distance / 1000.0f;
-    //gOutput[launchIndex.xy] = float4(dd, dd, dd, 1);
+    gOutput[launchIndex.xy] = float4(dd, dd, dd, 1);
 
-    float2 UV = crd / dims;
+    float2 UV = crd / dims *2;
     float Depth = DepthTex.SampleLevel(sampleWrap, UV, 0).x;
-    gOutput[launchIndex.xy] = float4(Depth, Depth, Depth, 1);
+    gOutput[launchIndex.xy] = float4(Depth, 0, 0, 1);
 
 
 }

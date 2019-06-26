@@ -288,7 +288,6 @@ public:
 	void SetHitProgram(string shader, UINT instanceIndex);
 
 
-	void Init(string ShaderFile);
 	void InitRS(string ShaderFile);
 
 	void Apply(UINT width, UINT height);
@@ -531,6 +530,9 @@ public:
 	// Synchronization objects.
 
 	ComPtr<IDXGISwapChain3> m_swapChain;
+
+
+	GFSDK_Aftermath_ContextHandle AM_CL_Handle;
 
 public:
 	void BeginFrame();

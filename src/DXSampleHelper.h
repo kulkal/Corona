@@ -10,11 +10,24 @@
 //*********************************************************
 
 #pragma once
+#include "GFSDK_Aftermath/include/GFSDK_Aftermath.h"
+
 
 inline void ThrowIfFailed(HRESULT hr)
 {
 	if (FAILED(hr))
 	{
+
+		GFSDK_Aftermath_Device_Status st;
+		GFSDK_Aftermath_GetDeviceStatus(&st);
+
+		GFSDK_Aftermath_PageFaultInformation pf;
+		GFSDK_Aftermath_GetPageFaultInformation(&pf);
+
+		GFSDK_Aftermath_ContextHandle ch;
+		GFSDK_Aftermath_ContextData cd;
+		GFSDK_Aftermath_GetData(0, &ch, &cd);
+
 		throw std::exception();
 	}
 }

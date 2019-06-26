@@ -18,6 +18,7 @@
 #include "enkiTS/TaskScheduler.h""
 #include "DXCAPI/dxcapi.use.h"
 
+#include "GFSDK_Aftermath/include/GFSDK_Aftermath.h"
 
 #include <sstream>
 #include <fstream>
@@ -327,7 +328,7 @@ void dx12_framework::LoadPipeline()
 
 	UINT dxgiFactoryFlags = 0;
 
-#if defined(_DEBUG)
+#if 0//defined(_DEBUG)
 	// Enable the debug layer (requires the Graphics Tools "optional feature").
 	// NOTE: Enabling the debug layer after device creation will invalidate the active device.
 	{
@@ -398,8 +399,8 @@ void dx12_framework::LoadPipeline()
 		ComPtr<ID3D12InfoQueue> d3dInfoQueue;
 		if (SUCCEEDED(m_device->QueryInterface(__uuidof(ID3D12InfoQueue), (void**)&d3dInfoQueue)))
 		{
-			d3dInfoQueue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_CORRUPTION, true);
-			d3dInfoQueue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_ERROR, true);
+			/*d3dInfoQueue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_CORRUPTION, true);
+			d3dInfoQueue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_ERROR, true);*/
 
 			D3D12_MESSAGE_ID blockedIds[] = { 
 			/*	D3D12_MESSAGE_ID_CLEARRENDERTARGETVIEW_MISMATCHINGCLEARVALUE, 
@@ -416,10 +417,11 @@ void dx12_framework::LoadPipeline()
 	}
 
 
-
 	
 
 	dx12_rhi = std::make_unique<DumRHI_DX12>(m_device.Get());
+
+	
 
 
 
@@ -1405,8 +1407,8 @@ void dx12_framework::InitRaytracing()
 	PSO_RT->AddShader("rayGen", RTPipelineStateObject::RAYGEN);
 	PSO_RT->BindUAV("rayGen", "gOutput", 0);
 	PSO_RT->BindSRV("rayGen", "gRtScene", 0);
-	PSO_RT->BindSRV("rayGen", "DepthTex", 1);
 	PSO_RT->BindCBV("rayGen", "ViewParameter", 0, sizeof(RTViewParamCB), 1);
+	PSO_RT->BindSRV("rayGen", "DepthTex", 1);
 	PSO_RT->BindSampler("rayGen", "samplerWrap", 0);
 
 	PSO_RT->AddShader("miss", RTPipelineStateObject::MISS);
@@ -1436,19 +1438,24 @@ void dx12_framework::InitRaytracing()
 
 void dx12_framework::RaytracePass()
 {
-	
-	{
-		PSO_RT->BeginShaderTable();
+	GFSDK_Aftermath_SetEventMarker(dx12_rhi->AM_CL_Handle, nullptr, 0);
+	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(dx12_rhi->depthTexture->resource.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
 
-		PSO_RT->SetUAV("rayGen", "gOutput", ShadowBuffer->CpuHandleUAV);
-		PSO_RT->SetSRV("rayGen", "gRtScene", RTASCPUHandle);
-		PSO_RT->SetSRV("rayGen", "DepthTex", dx12_rhi->depthTexture->CpuHandleSRV);
-		PSO_RT->SetCBVValue("rayGen", "ViewParameter", &RTViewParam, sizeof(RTViewParamCB));
-		PSO_RT->SetSampler("rayGen", "samplerWrap", samplerWrap.get());
-		PSO_RT->SetHitProgram("chs", 0); // this pass use only 1 hit program
-		PSO_RT->EndShaderTable();
 
-		PSO_RT->Apply(m_width, m_height);
-	}
+	PSO_RT->BeginShaderTable();
+
+	PSO_RT->SetUAV("rayGen", "gOutput", ShadowBuffer->CpuHandleUAV);
+	PSO_RT->SetSRV("rayGen", "gRtScene", RTASCPUHandle);
+	PSO_RT->SetCBVValue("rayGen", "ViewParameter", &RTViewParam, sizeof(RTViewParamCB));
+	PSO_RT->SetSRV("rayGen", "DepthTex", dx12_rhi->depthTexture->CpuHandleSRV);
+
+	PSO_RT->SetSampler("rayGen", "samplerWrap", samplerWrap.get());
+	PSO_RT->SetHitProgram("chs", 0); // this pass use only 1 hit program
+	PSO_RT->EndShaderTable();
+
+	PSO_RT->Apply(m_width, m_height);
+
+	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(dx12_rhi->depthTexture->resource.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_DEPTH_WRITE));
+
 }
 
