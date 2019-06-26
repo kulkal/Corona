@@ -107,22 +107,22 @@ void rayGen()
     float2 UV = crd / dims;
     float DeviceDepth = DepthTex.SampleLevel(sampleWrap, UV, 0).x;
 
-    //_SC.ProjectionParams.x = Far / (Far - Near);
-    //_SC.ProjectionParams.y = Near / (Near - Far);
-    //_SC.ProjectionParams.z = Far;
+  
 
-    //float LinearDepth = GetLinearDepth(DeviceDepth, ProjectionParams.x, ProjectionParams.y) * ProjectionParams.z;
+    float LinearDepth = GetLinearDepth(DeviceDepth, ProjectionParams.x, ProjectionParams.y) * ProjectionParams.z;
 
-    //float2 ScreenPosition = crd.xy;
-    //ScreenPosition.x /= dims.x;
-    //ScreenPosition.y /= dims.y;
-    //ScreenPosition.xy = ScreenPosition.xy * 2 - 1;
-    //ScreenPosition.y = -ScreenPosition.y;
+    float2 ScreenPosition = crd.xy;
+    ScreenPosition.x /= dims.x;
+    ScreenPosition.y /= dims.y;
+    ScreenPosition.xy = ScreenPosition.xy * 2 - 1;
+    ScreenPosition.y = -ScreenPosition.y;
 
-    //float3 ViewPosition = GetViewPosition(LinearDepth, ScreenPosition, Projection._11, Projection._22);
-	// float3 WorldPos = mul(float4(ViewPosition, 1), InvViewMatrix).xyz;
+    float3 ViewPosition = GetViewPosition(LinearDepth, ScreenPosition, ProjMatrix._11, ProjMatrix._22);
+    float3 WorldPos = mul(float4(ViewPosition, 1), InvViewMatrix).xyz;
 
-    gOutput[launchIndex.xy] = float4(DeviceDepth, 0, 0, 1);
+    //gOutput[launchIndex.xy] = float4(DeviceDepth, 0, 0, 1);
+    gOutput[launchIndex.xy] = float4(WorldPos, 1);
+
 
 
 }
