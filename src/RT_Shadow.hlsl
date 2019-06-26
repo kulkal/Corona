@@ -32,6 +32,9 @@ cbuffer ViewParameter : register(b0)
 {
     float4x4 ViewMatrix;
     float4x4 InvViewMatrix;
+    float4x4 ProjMatrix;
+    float4 ProjectionParams;
+
     float4 LightDir;
 };
 SamplerState sampleWrap : register(s0);
@@ -52,6 +55,25 @@ struct RayPayload
     float3 color;
     float distance;
 };
+
+float GetLinearDepth(float DeviceDepth, float ParamX, float ParamY)
+{
+    return ParamY / (DeviceDepth - ParamX);
+}
+
+float3 GetViewPosition(float LinearDepth, float2 ScreenPosition, float Proj11, float Proj22)
+{
+    float2 screenSpaceRay = float2(ScreenPosition.x / Proj11,
+                                   ScreenPosition.y / Proj22);
+    
+    float3 ViewPosition;
+    ViewPosition.z = LinearDepth;
+    // Solve the two projection equations
+    ViewPosition.xy = screenSpaceRay.xy * ViewPosition.z;
+    ViewPosition.z *= -1;
+    return ViewPosition;
+}
+
 
 [shader("raygeneration")]
 void rayGen()
@@ -82,9 +104,25 @@ void rayGen()
     float dd = payload.distance / 1000.0f;
     gOutput[launchIndex.xy] = float4(dd, dd, dd, 1);
 
-    float2 UV = crd / dims *2;
-    float Depth = DepthTex.SampleLevel(sampleWrap, UV, 0).x;
-    gOutput[launchIndex.xy] = float4(Depth, 0, 0, 1);
+    float2 UV = crd / dims;
+    float DeviceDepth = DepthTex.SampleLevel(sampleWrap, UV, 0).x;
+
+    //_SC.ProjectionParams.x = Far / (Far - Near);
+    //_SC.ProjectionParams.y = Near / (Near - Far);
+    //_SC.ProjectionParams.z = Far;
+
+    //float LinearDepth = GetLinearDepth(DeviceDepth, ProjectionParams.x, ProjectionParams.y) * ProjectionParams.z;
+
+    //float2 ScreenPosition = crd.xy;
+    //ScreenPosition.x /= dims.x;
+    //ScreenPosition.y /= dims.y;
+    //ScreenPosition.xy = ScreenPosition.xy * 2 - 1;
+    //ScreenPosition.y = -ScreenPosition.y;
+
+    //float3 ViewPosition = GetViewPosition(LinearDepth, ScreenPosition, Projection._11, Projection._22);
+	// float3 WorldPos = mul(float4(ViewPosition, 1), InvViewMatrix).xyz;
+
+    gOutput[launchIndex.xy] = float4(DeviceDepth, 0, 0, 1);
 
 
 }

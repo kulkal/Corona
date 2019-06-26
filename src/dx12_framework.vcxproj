@@ -197,6 +197,7 @@
   <ItemGroup>
     <None Include="dxcompiler.dll" />
     <None Include="dxil.dll" />
+    <None Include="GFSDK_Aftermath_Lib.x64.dll" />
     <None Include="packages.config" />
     <CustomBuild Include="SquidRoom.bin">
       <DeploymentContent Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">true</DeploymentContent>

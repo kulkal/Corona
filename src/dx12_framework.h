@@ -52,6 +52,8 @@ class dx12_framework : public DXSample
 	{
 		XMFLOAT4X4 ViewMatrix;		// Model-view-projection (MVP) matrix.
 		XMFLOAT4X4 InvViewMatrix;		// Model-view-projection (MVP) matrix.
+		XMFLOAT4X4 ProjMatrix;
+		glm::vec4 ProjectionParams;
 		glm::vec4	LightDir;
 		//float padding[];
 	};

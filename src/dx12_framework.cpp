@@ -1067,7 +1067,10 @@ void dx12_framework::OnUpdate()
 
 
 	// Compute the model-view-projection matrix.
-	XMStoreFloat4x4(&mvp, XMMatrixTranspose(m_camera.GetViewMatrix() * m_camera.GetProjectionMatrix(0.8f, m_aspectRatio)));
+	float Near = 1.0f;
+	float Far = 10000.0f;
+	XMMATRIX ProjMatrix = m_camera.GetProjectionMatrix(0.8f, m_aspectRatio, Near, Far);
+	XMStoreFloat4x4(&mvp, XMMatrixTranspose(m_camera.GetViewMatrix() * ProjMatrix));
 
 
 	ViewParameter->SetValue(&mvp);
@@ -1075,6 +1078,12 @@ void dx12_framework::OnUpdate()
 	XMStoreFloat4x4(&RTViewParam.ViewMatrix, XMMatrixTranspose(m_camera.GetViewMatrix()));
 	XMVECTOR Det;
 	XMStoreFloat4x4(&RTViewParam.InvViewMatrix, XMMatrixInverse(&Det, XMMatrixTranspose(m_camera.GetViewMatrix())));
+
+	XMStoreFloat4x4(&RTViewParam.ProjMatrix, XMMatrixTranspose(ProjMatrix));
+
+	RTViewParam.ProjectionParams.x = Far / (Far - Near);
+	RTViewParam.ProjectionParams.y = Near / (Near - Far);
+	RTViewParam.ProjectionParams.z = Far;
 
 	RTViewParam.LightDir = glm::vec4(LightDir, 0);
 
@@ -1389,16 +1398,7 @@ void dx12_framework::InitRaytracing()
 
 	// create rtpso
 	PSO_RT = unique_ptr<RTPipelineStateObject>(new RTPipelineStateObject);
-	//PSO_RT->BindUAVRaygen("gOutput");
-	//PSO_RT->BindSRVRaygen("gRtScene");
-	//PSO_RT->BindCBVRaygen("ViewParameter", sizeof(RTViewParamCB));
-
-
-
-	//PSO_RT->kRayGenShader = L"rayGen";
-	//PSO_RT->kMissShader = L"miss";
-	//PSO_RT->kClosestHitShader = L"chs";
-	//PSO_RT->kHitGroup = L"HitGroup";
+	
 
 	PSO_RT->NumInstance = 1; // important for cbv allocation & shadertable size.
 
@@ -1420,19 +1420,7 @@ void dx12_framework::InitRaytracing()
 	PSO_RT->MaxAttributeSizeInBytes = sizeof(float) * 2;
 	PSO_RT->MaxPayloadSizeInBytes = sizeof(float) * 4;
 
-	// PSO_RT->BindSRV("chs", "diffuse");
-
-	//PSO_RT->Init("07-Shaders.hlsl");
 	PSO_RT->InitRS("RT_Shadow.hlsl");
-
-
-
-
-	
-
-	
-
-
 }
 
 
@@ -1448,8 +1436,8 @@ void dx12_framework::RaytracePass()
 	PSO_RT->SetSRV("rayGen", "gRtScene", RTASCPUHandle);
 	PSO_RT->SetCBVValue("rayGen", "ViewParameter", &RTViewParam, sizeof(RTViewParamCB));
 	PSO_RT->SetSRV("rayGen", "DepthTex", dx12_rhi->depthTexture->CpuHandleSRV);
-
 	PSO_RT->SetSampler("rayGen", "samplerWrap", samplerWrap.get());
+
 	PSO_RT->SetHitProgram("chs", 0); // this pass use only 1 hit program
 	PSO_RT->EndShaderTable();
 

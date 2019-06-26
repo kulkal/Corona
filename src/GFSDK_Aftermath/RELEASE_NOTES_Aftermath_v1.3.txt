@@ -1,0 +1,26 @@
+  ******************************
+  * NVIDIA Aftermath(Debugger) *
+  ******************************
+
+--- RELEASE NOTES (version 1.3) ---
+
+Features:
+o) Added ability to get more information back from GPU in event of page fault - GFSDK_Aftermath_GetPageFaultInformation.
+o) Renamed GFSDK_Aftermath_Status to GFSDK_Aftermath_Device_Status - to avoid confusion with GFSDK_Aftermath_Context_Status.
+o) Removing VC Runtime dependency (static linked) from non-UWP DLL (still required for UWP).
+o) Increased minimum supported driver version to 387.xx
+o) Separated GetData from GetDeviceState - so GetDeviceState can be polled without worrying about performance.
+o) Updated how to instructions in header.
+o) Added APIs to associate a commandlists/deviceContexts with Aftermath (GFSDK_Aftermath_DXxx_CreateContextHandle). 
+	-> Provides a nice CPU perf boost, as no longer need to lookup the internal Aftermath context.
+	-> Simplifies following entrypoints, removing the per DX version ones.
+
+Bugs:
+o) API - Unable to export demangled, GFSDK_Aftermath_ContextData::getErrorCode() - now implemented in header.
+o) Crash - Crash occured if calling SetEventMarker on a command list after resetting the allocator.
+o) API - SetEventMarker now accepts a const void* - previously just a void*.
+o) Functionality - D3D12 bundles previously didn't work if the bundle was "baked" (contained 4 or more draws).
+
+Performance:
+o) Siginificantly reduced memory footprint of D3D12 "baked" bundles.
+o) Increased the CPU performance of Aftermath for D3D11 and D3D12.

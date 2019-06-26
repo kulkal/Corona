@@ -264,14 +264,6 @@ public:
 	void AddHitGroup(string name, string chs, string ahs);
 
 
-	void BindUAVRaygen(string name);
-
-	void BindSRVRaygen(string name);
-
-	void BindSamplerRaygen(string name);
-
-	void BindCBVRaygen(string name, UINT Size);
-
 	// new binding interface
 	void AddShader(string shader, RTPipelineStateObject::ShaderType shaderType);
 	void BindUAV(string shader, string name, UINT baseRegister);

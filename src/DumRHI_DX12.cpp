@@ -2004,64 +2004,6 @@ struct PipelineConfig
 	D3D12_STATE_SUBOBJECT subobject = {};
 };
 
-
-void RTPipelineStateObject::BindUAVRaygen(string name)
-{
-	BindingData binding;
-	binding.name = name;
-	binding.Type = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
-
-	RaygenBinding.push_back(binding);
-	//RaygenBinding.insert(pair<string, BindingData>(name, binding));
-}
-
-
-
-void RTPipelineStateObject::BindSRVRaygen(string name)
-{
-	BindingData binding;
-	binding.name = name;
-	binding.Type = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-
-	RaygenBinding.push_back(binding);
-
-	//RaygenBinding.insert(pair<string, BindingData>(name, binding));
-}
-
-void RTPipelineStateObject::BindSamplerRaygen(string name)
-{
-	BindingData binding;
-	binding.name = name;
-	binding.Type = D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER;
-
-	RaygenBinding.push_back(binding);
-
-	//RaygenBinding.insert(pair<string, BindingData>(name, binding));
-}
-
-
-
-void RTPipelineStateObject::BindCBVRaygen(string name, UINT Size)
-{
-	BindingData binding;
-	binding.name = name;
-	binding.Type = D3D12_DESCRIPTOR_RANGE_TYPE_CBV;
-	
-	int div = Size / 256;
-	binding.cbSize = (div + 1) * 256;
-
-
-	for (int iFrame = 0; iFrame < g_dx12_rhi->NumFrame; iFrame++)
-	{
-		binding.cbs.push_back(g_dx12_rhi->CreateConstantBuffer(binding.cbSize, 1));
-	}
-
-	RaygenBinding.push_back(binding);
-
-	//RaygenBinding.insert(pair<string, BindingData>(name, binding));
-}
-
-
 void RTPipelineStateObject::AddHitGroup(string name, string chs, string ahs)
 {
 	HitGroupInfo info;
