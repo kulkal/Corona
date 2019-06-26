@@ -51,6 +51,7 @@ class dx12_framework : public DXSample
 	struct RTViewParamCB
 	{
 		XMFLOAT4X4 ViewMatrix;		// Model-view-projection (MVP) matrix.
+		//glm::mat4x4 ViewMatrix;
 		XMFLOAT4X4 InvViewMatrix;		// Model-view-projection (MVP) matrix.
 		XMFLOAT4X4 ProjMatrix;
 		glm::vec4 ProjectionParams;

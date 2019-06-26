@@ -1063,19 +1063,28 @@ void dx12_framework::OnUpdate()
 	m_camera.Update(static_cast<float>(m_timer.GetElapsedSeconds()));
 
 
-
-
-
-	// Compute the model-view-projection matrix.
 	float Near = 1.0f;
 	float Far = 10000.0f;
+
+	glm::mat4x4 ViewMat;
+	glm::mat4x4 ProjMat;
+
+	memcpy(&ViewMat, &m_camera.GetViewMatrix(), sizeof(glm::mat4x4));
+	memcpy(&ProjMat, &m_camera.GetProjectionMatrix(0.8f, m_aspectRatio, Near, Far), sizeof(glm::mat4x4));
+
+	glm::mat4x4 ViewProjMat = glm::transpose(ProjMat * ViewMat);
+
+	// Compute the model-view-projection matrix.
+	
 	XMMATRIX ProjMatrix = m_camera.GetProjectionMatrix(0.8f, m_aspectRatio, Near, Far);
-	XMStoreFloat4x4(&mvp, XMMatrixTranspose(m_camera.GetViewMatrix() * ProjMatrix));
+	//XMStoreFloat4x4(&mvp, XMMatrixTranspose(m_camera.GetViewMatrix() * ProjMatrix));
 
 
-	ViewParameter->SetValue(&mvp);
+	ViewParameter->SetValue(&ViewProjMat);
 
 	XMStoreFloat4x4(&RTViewParam.ViewMatrix, XMMatrixTranspose(m_camera.GetViewMatrix()));
+	
+
 	XMVECTOR Det;
 	XMStoreFloat4x4(&RTViewParam.InvViewMatrix, XMMatrixInverse(&Det, XMMatrixTranspose(m_camera.GetViewMatrix())));
 
