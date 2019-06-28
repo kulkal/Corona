@@ -789,6 +789,8 @@ void Shader::BindTexture(string name, int baseRegister, int num)
 
 void Shader::BindConstantBuffer(string name, int baseRegister, int size, UINT numMaxDrawCall)
 {
+	NumMaxDrawCall = numMaxDrawCall;
+
 	BindingData binding;
 	binding.name = name;
 	binding.baseRegister = baseRegister;
@@ -798,13 +800,7 @@ void Shader::BindConstantBuffer(string name, int baseRegister, int size, UINT nu
 	int div = size / 256;
 	binding.cbSize = (div + 1) * 256;
 
-
-	binding.frameCBs.resize(g_dx12_rhi->NumFrame);
-
-	for (int iFrame = 0; iFrame < g_dx12_rhi->NumFrame; iFrame++)
-	{
-		binding.cbs.push_back(g_dx12_rhi->CreateConstantBuffer(binding.cbSize, numMaxDrawCall));
-	}
+	binding.cb = g_dx12_rhi->CreateConstantBuffer(binding.cbSize, g_dx12_rhi->NumFrame * numMaxDrawCall);
 
 	constantBufferBinding.insert(pair<string, BindingData>(name, binding));
 }
@@ -887,15 +883,15 @@ void Shader::SetGlobalConstantBuffer(string name, GlobalConstantBuffer* gcb, ID3
 {
 	BindingData& binding = constantBufferBinding[name];
 
-	binding.cbs = gcb->cbs;
+	//binding.cbs = gcb->cbs;
 
 	ConstantBuffer* cb = nullptr;
 
 	D3D12_CPU_DESCRIPTOR_HANDLE ShaderVisibleCPUHandle;
 	D3D12_GPU_DESCRIPTOR_HANDLE ShaderVisibleGpuHandle;
 
-	if (binding.cbs.size() != 0)
-		cb = binding.cbs[g_dx12_rhi->CurrentFrameIndex].get();
+	if (gcb->cbs.size() != 0)
+		cb = gcb->cbs[g_dx12_rhi->CurrentFrameIndex].get();
 
 	{
 		UINT DrawCallIndex;
@@ -929,22 +925,10 @@ void Shader::SetConstantValue(string name, void* pData, ID3D12GraphicsCommandLis
 {
 	BindingData& binding = constantBufferBinding[name];
 
-	binding.frameCBs[g_dx12_rhi->CurrentFrameIndex].versions;
-	CBVersions& versions = binding.frameCBs[g_dx12_rhi->CurrentFrameIndex];
-	int numVersions = versions.versions.size();
-
-	shared_ptr<ConstantBuffer> cb;
-	if (numVersions <= currentDrawCallIndex)
-	{
-		cb = g_dx12_rhi->CreateConstantBuffer(binding.cbSize, 1);
-		versions.versions.push_back(cb);
-	}
-	else
-	{
-		cb = versions.versions[currentDrawCallIndex];
-	}
 	
-	UINT8* pMapped = (UINT8*)cb->MemMapped;
+	UINT CBViewIndex = g_dx12_rhi->CurrentFrameIndex * NumMaxDrawCall + currentDrawCallIndex;
+
+	UINT8* pMapped = (UINT8*)binding.cb->MemMapped + binding.cbSize*CBViewIndex;
 	memcpy((void*)pMapped, pData, binding.cbSize);
 
 
@@ -952,7 +936,7 @@ void Shader::SetConstantValue(string name, void* pData, ID3D12GraphicsCommandLis
 	D3D12_GPU_DESCRIPTOR_HANDLE ShaderVisibleGpuHandle;
 
 
-	D3D12_CPU_DESCRIPTOR_HANDLE NonShadervisibleCPUHandle = cb->CpuHandleVec[0];
+	D3D12_CPU_DESCRIPTOR_HANDLE NonShadervisibleCPUHandle = binding.cb->CpuHandleVec[CBViewIndex];
 
 	if (DHPool)
 		DHPool->AllocDescriptor(ShaderVisibleCPUHandle, ShaderVisibleGpuHandle);
@@ -1163,88 +1147,6 @@ void PipelineStateObject::Init(bool isCompute)
 	}
 }
 
-void PipelineStateObject::ApplyMeshDraw(ID3D12GraphicsCommandList* CommandList, UINT DrawIndex, ThreadDescriptorHeapPool* DHPool)
-{
-	CommandList->SetGraphicsRootSignature(RS.Get());
-	CommandList->SetPipelineState(PSO.Get());
-
-	
-
-	for (auto&bd : ps->samplerBinding)
-	{
-		CommandList->SetGraphicsRootDescriptorTable(bd.second.rootParamIndex, bd.second.sampler->GpuHandle);
-	}
-
-	for (auto& bd : ps->rootBinding)
-	{
-		CommandList->SetGraphicsRoot32BitConstant(bd.second.rootParamIndex, bd.second.rootConst, 0);
-	}
-
-	// populate shader-visible desctiptor heap.
-	
-
-	for (auto& bd : ps->textureBinding)
-	{
-		// texture->GpuHandle is shader visible, it is pre processed in UploadeFrameTexture2ShaderVisibleHeap.
-		//CommandList->SetGraphicsRootDescriptorTable(bd.second.rootParamIndex, bd.second.texture->GpuHandleSRV);
-	}
-
-
-	// shader visible descriptor heap for global constant buffer should be cached.
-	for (auto& bd : vs->constantBufferBinding)
-	{
-		Shader::BindingData& binding = bd.second;
-		ConstantBuffer* cb = nullptr;
-
-		if (binding.cbs.size() != 0)
-			cb = binding.cbs[g_dx12_rhi->CurrentFrameIndex].get();
-
-		{
-			UINT DrawCallIndex;
-			if (cb->CpuHandleVec.size() > 1)
-				DrawCallIndex = DrawIndex;// vs->currentDrawCallIndex;
-			else
-				DrawCallIndex = 0;
-
-			if (cb->CpuHandleVec.size() == 1) // this is global constant buffer(can be same for all draw)
-			{
-				if (!cb->isPopulatedThisFrame)
-				{
-					D3D12_CPU_DESCRIPTOR_HANDLE NonShadervisibleCPUHandle = cb->CpuHandleVec[DrawCallIndex];
-
-					D3D12_CPU_DESCRIPTOR_HANDLE ShaderVisibleCPUHandle;
-					//g_dx12_rhi->SRVCBVDescriptorHeapShaderVisible->AllocDescriptor(ShaderVisibleCPUHandle, cb->GpuHandle);
-					if(DHPool)
-						DHPool->AllocDescriptor(ShaderVisibleCPUHandle, cb->GpuHandle);
-					else
-						g_dx12_rhi->SRVCBVDescriptorHeapShaderVisible->AllocDescriptor(ShaderVisibleCPUHandle, cb->GpuHandle);
-
-
-					g_dx12_rhi->Device->CopyDescriptorsSimple(1, ShaderVisibleCPUHandle, NonShadervisibleCPUHandle, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-					cb->isPopulatedThisFrame = true;
-				}
-			}
-			else
-			{
-				D3D12_CPU_DESCRIPTOR_HANDLE NonShadervisibleCPUHandle = cb->CpuHandleVec[DrawCallIndex];
-
-				D3D12_CPU_DESCRIPTOR_HANDLE ShaderVisibleCPUHandle;
-				//g_dx12_rhi->SRVCBVDescriptorHeapShaderVisible->AllocDescriptor(ShaderVisibleCPUHandle, cb->GpuHandle);
-				if(DHPool)
-					DHPool->AllocDescriptor(ShaderVisibleCPUHandle, cb->GpuHandle);
-				else
-					g_dx12_rhi->SRVCBVDescriptorHeapShaderVisible->AllocDescriptor(ShaderVisibleCPUHandle, cb->GpuHandle);
-
-
-				g_dx12_rhi->Device->CopyDescriptorsSimple(1, ShaderVisibleCPUHandle, NonShadervisibleCPUHandle, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-			}
-		}
-
-		CommandList->SetGraphicsRootDescriptorTable(binding.rootParamIndex, cb->GpuHandle);
-	}
-
-}
-
 void PipelineStateObject::ApplyGlobal(ID3D12GraphicsCommandList* CommandList)
 {
 	CommandList->SetGraphicsRootSignature(RS.Get());
@@ -1339,21 +1241,21 @@ UINT PipelineStateObject::GetGraphicsBindingDHSize()
 	return	vs->constantBufferBinding.size() + ps->constantBufferBinding.size() + vs->textureBinding.size() + ps->textureBinding.size();
 }
 
-UINT PipelineStateObject::GetGraphicsCBDHBindingSize()
-{
-	UINT Size = 0;
-	for (auto& cbbinding : vs->constantBufferBinding)
-	{
-		Size += cbbinding.second.cbs[g_dx12_rhi->CurrentFrameIndex]->CpuHandleVec.size();
-	}
-
-	for (auto& cbbinding : ps->constantBufferBinding)
-	{
-		Size += cbbinding.second.cbs[g_dx12_rhi->CurrentFrameIndex]->CpuHandleVec.size();
-	}
-	
-	return Size;
-}
+//UINT PipelineStateObject::GetGraphicsCBDHBindingSize()
+//{
+//	UINT Size = 0;
+//	for (auto& cbbinding : vs->constantBufferBinding)
+//	{
+//		Size += cbbinding.second.cbs[g_dx12_rhi->CurrentFrameIndex]->CpuHandleVec.size();
+//	}
+//
+//	for (auto& cbbinding : ps->constantBufferBinding)
+//	{
+//		Size += cbbinding.second.cbs[g_dx12_rhi->CurrentFrameIndex]->CpuHandleVec.size();
+//	}
+//	
+//	return Size;
+//}
 
 void GlobalConstantBuffer::SetValue(void* pData)
 {

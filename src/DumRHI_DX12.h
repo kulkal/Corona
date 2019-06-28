@@ -107,14 +107,17 @@ public:
 		Texture* texture;
 		Sampler* sampler;
 		
-		vector<CBVersions> frameCBs;
+		//vector<CBVersions> frameCBs;
 
-		vector<shared_ptr<ConstantBuffer>> cbs; // multiple constant buffers are need for multiple buffering.
+		//vector<shared_ptr<ConstantBuffer>> cbs; // multiple constant buffers are need for multiple buffering.
+
+		shared_ptr<ConstantBuffer> cb;
 
 		UINT rootConst;
 	};
 
 	UINT currentDrawCallIndex = 0;
+	UINT NumMaxDrawCall = 0;
 
 	map<string, BindingData> uavBinding;
 	map<string, BindingData> textureBinding;
@@ -164,7 +167,7 @@ public:
 	D3D12_COMPUTE_PIPELINE_STATE_DESC computePSODesc;
 
 	void Init(bool isCompute);
-	void ApplyMeshDraw(ID3D12GraphicsCommandList* CommandList, UINT DrawIndex, ThreadDescriptorHeapPool* DHPool);
+	//void ApplyMeshDraw(ID3D12GraphicsCommandList* CommandList, UINT DrawIndex, ThreadDescriptorHeapPool* DHPool);
 
 	void ApplyGlobal(ID3D12GraphicsCommandList* CommandList);
 
@@ -174,8 +177,6 @@ public:
 	void ApplyComputeRSPSO(ID3D12GraphicsCommandList* CommandList);
 
 	UINT GetGraphicsBindingDHSize();
-	UINT GetGraphicsCBDHBindingSize();
-
 };
 
 class RTShaderLib
