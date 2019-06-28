@@ -463,7 +463,6 @@ void dx12_framework::LoadAssets()
 	InitComputeRS();
 	InitDrawMeshRS();
 	InitCopyPass();
-	InitDebugPass();
 	InitLightingPass();
 	
 
@@ -800,7 +799,7 @@ void dx12_framework::InitCopyPass()
 	ps->BindSampler("samplerWrap", 0);
 
 	Shader* vs = new Shader((UINT8*)vertexShader->GetBufferPointer(), vertexShader->GetBufferSize());
-	vs->BindConstantBuffer("ScaleOffsetParams", 0, sizeof(CopyScaleOffsetCB));
+	vs->BindConstantBuffer("ScaleOffsetParams", 0, sizeof(CopyScaleOffsetCB), 2);
 
 
 	CD3DX12_RASTERIZER_DESC rasterizerStateDesc(D3D12_DEFAULT);
@@ -838,110 +837,6 @@ void dx12_framework::InitCopyPass()
 	RS_Copy->Init(false);
 }
 
-
-
-void dx12_framework::InitDebugPass()
-{
-	struct PostVertex
-	{
-		XMFLOAT4 position;
-		XMFLOAT2 uv;
-	};
-
-	PostVertex quadVertices[] =
-	{
-		{ { -1.0f, -1.0f, 0.0f, 1.0f }, { 0.0f, 0.0f } },    // Bottom left.
-		{ { -1.0f, 1.0f, 0.0f, 1.0f }, { 0.0f, 1.0f } },    // Top left.
-		{ { 1.0f, -1.0f, 0.0f, 1.0f }, { 1.0f, 0.0f } },    // Bottom right.
-		{ { 1.0f, 1.0f, 0.0f, 1.0f }, { 1.0f, 1.0f } }        // Top right.
-	};
-
-	const UINT vertexBufferSize = sizeof(quadVertices);
-	const UINT vertexBufferStride = sizeof(PostVertex);
-
-	D3D12_SUBRESOURCE_DATA vertexData = {};
-	vertexData.pData = &quadVertices;
-	vertexData.RowPitch = vertexBufferSize;
-	vertexData.SlicePitch = vertexData.RowPitch;
-
-	FullScreenVB = dx12_rhi->CreateVertexBuffer(vertexBufferSize, vertexBufferStride, &quadVertices);
-
-	///
-	ComPtr<ID3DBlob> vertexShader;
-	ComPtr<ID3DBlob> pixelShader;
-
-
-#if defined(_DEBUG)
-	// Enable better shader debugging with the graphics debugging tools.
-	UINT compileFlags = D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
-#else
-	UINT compileFlags = D3DCOMPILE_OPTIMIZATION_LEVEL3;
-#endif
-
-	ID3DBlob*compilationMsgs = nullptr;
-
-	try
-	{
-		ThrowIfFailed(D3DCompileFromFile(GetAssetFullPath(L"CopyPS.hlsl").c_str(), nullptr, nullptr, "VSMain", "vs_5_0", compileFlags, 0, &vertexShader, &compilationMsgs));
-	}
-	catch (const std::exception& e)
-	{
-		OutputDebugStringA(reinterpret_cast<const char*>(compilationMsgs->GetBufferPointer()));
-		compilationMsgs->Release();
-	}
-
-	try
-	{
-		ThrowIfFailed(D3DCompileFromFile(GetAssetFullPath(L"CopyPS.hlsl").c_str(), nullptr, nullptr, "PSMain", "ps_5_0", compileFlags, 0, &pixelShader, &compilationMsgs));
-	}
-	catch (const std::exception& e)
-	{
-		OutputDebugStringA(reinterpret_cast<const char*>(compilationMsgs->GetBufferPointer()));
-		compilationMsgs->Release();
-	}
-
-	Shader* ps = new Shader((UINT8*)pixelShader->GetBufferPointer(), pixelShader->GetBufferSize());
-	ps->BindTexture("SrcTex", 0, 1);
-	ps->BindSampler("samplerWrap", 0);
-
-	Shader* vs = new Shader((UINT8*)vertexShader->GetBufferPointer(), vertexShader->GetBufferSize());
-	vs->BindConstantBuffer("ScaleOffsetParams", 0, sizeof(CopyScaleOffsetCB));
-
-
-	CD3DX12_RASTERIZER_DESC rasterizerStateDesc(D3D12_DEFAULT);
-	rasterizerStateDesc.CullMode = D3D12_CULL_MODE_NONE;
-
-	D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDesc = {};
-
-	const D3D12_INPUT_ELEMENT_DESC StandardVertexDescription[] =
-	{
-		{ "POSITION", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 0,  D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
-		{ "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT,    0, 16, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
-	};
-	UINT StandardVertexDescriptionNumElements = _countof(StandardVertexDescription);
-
-	psoDesc.InputLayout = { StandardVertexDescription, StandardVertexDescriptionNumElements };
-	//psoDesc.pRootSignature = m_rootSignature.Get();
-	/*psoDesc.VS = CD3DX12_SHADER_BYTECODE(pVertexShaderData, vertexShaderDataLength);
-	psoDesc.PS = CD3DX12_SHADER_BYTECODE(pPixelShaderData, pixelShaderDataLength);*/
-	psoDesc.RasterizerState = rasterizerStateDesc;
-	psoDesc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
-	psoDesc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
-	psoDesc.DepthStencilState.DepthEnable = FALSE;
-	psoDesc.DepthStencilState.StencilEnable = FALSE;
-	psoDesc.SampleMask = UINT_MAX;
-	psoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-	psoDesc.NumRenderTargets = 1;
-	psoDesc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
-	//psoDescMesh.DSVFormat = DXGI_FORMAT_D32_FLOAT;
-	psoDesc.SampleDesc.Count = 1;
-
-	RS_Debug = unique_ptr<PipelineStateObject>(new PipelineStateObject);
-	RS_Debug->ps = shared_ptr<Shader>(ps);
-	RS_Debug->vs = shared_ptr<Shader>(vs);
-	RS_Debug->graphicsPSODesc = psoDesc;
-	RS_Debug->Init(false);
-}
 
 void dx12_framework::InitLightingPass()
 {
@@ -1039,6 +934,8 @@ void dx12_framework::CopyPass()
 	const float clearColor[] = { 0.0f, 0.2f, 0.4f, 1.0f };
 	dx12_rhi->CommandList->ClearRenderTargetView(backbuffer->CpuHandleRTV, clearColor, 0, nullptr);
 	
+	RS_Copy->ps->currentDrawCallIndex = 0;
+	RS_Copy->vs->currentDrawCallIndex = 0;
 	RS_Copy->ApplyGraphicsRSPSO(dx12_rhi->CommandList.Get());
 
 
@@ -1072,6 +969,7 @@ void dx12_framework::CopyPass()
 
 	dx12_rhi->CommandList->DrawInstanced(4, 1, 0, 0);
 
+
 	PIXEndEvent(dx12_rhi->CommandList.Get());
 }
 
@@ -1081,20 +979,21 @@ void dx12_framework::DebugPass()
 
 	//Texture* backbuffer = framebuffers[dx12_rhi->CurrentFrameIndex].get();
 
+	RS_Copy->ps->currentDrawCallIndex++;
+	RS_Copy->vs->currentDrawCallIndex++;
+	RS_Copy->ApplyGraphicsRSPSO(dx12_rhi->CommandList.Get());
 
-	RS_Debug->ApplyGraphicsRSPSO(dx12_rhi->CommandList.Get());
 
-
-	RS_Debug->ps->SetSampler("samplerWrap", samplerWrap.get(), dx12_rhi->CommandList.Get());
-	RS_Debug->ps->SetTexture("SrcTex", ShadowBuffer.get(), dx12_rhi->CommandList.Get(), nullptr);
+	RS_Copy->ps->SetSampler("samplerWrap", samplerWrap.get(), dx12_rhi->CommandList.Get());
+	RS_Copy->ps->SetTexture("SrcTex", ShadowBuffer.get(), dx12_rhi->CommandList.Get(), nullptr);
 
 	CopyScaleOffsetCB cb;
 	cb.Offset = glm::vec4(-0.75, -0.75, 0, 0);
 	cb.Scale = glm::vec4(0.25, 0.25, 0, 0);
-	RS_Debug->vs->SetConstantValue("ScaleOffsetParams", &cb, dx12_rhi->CommandList.Get(), nullptr);
+	RS_Copy->vs->SetConstantValue("ScaleOffsetParams", &cb, dx12_rhi->CommandList.Get(), nullptr);
 
 
-	RS_Debug->ApplyGlobal(dx12_rhi->CommandList.Get());
+	RS_Copy->ApplyGlobal(dx12_rhi->CommandList.Get());
 
 	//dx12_rhi->CommandList->OMSetRenderTargets(1, &backbuffer->CpuHandleRTV, FALSE, nullptr);
 

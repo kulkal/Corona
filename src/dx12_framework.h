@@ -173,7 +173,6 @@ private:
 	// full screen copy pass
 	unique_ptr<PipelineStateObject> RS_Copy;
 
-	unique_ptr<PipelineStateObject> RS_Debug;
 
 
 	shared_ptr<VertexBuffer> FullScreenVB;
@@ -212,8 +211,6 @@ public:
 	void ComputePass();
 
 	void InitCopyPass();
-
-	void InitDebugPass();
 
 	void InitLightingPass();
 
