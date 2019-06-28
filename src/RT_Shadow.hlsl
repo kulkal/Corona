@@ -90,19 +90,19 @@ void rayGen()
     float aspectRatio = dims.x / dims.y;
 
 
-    RayDesc ray;
-    ray.Origin = mul(float4(0, 0, 0, 1), InvViewMatrix).xyz;
-    ray.Direction = mul(normalize(float3(d.x * aspectRatio, -d.y, -1)), InvViewMatrix);
+    //RayDesc ray;
+    //ray.Origin = mul(float4(0, 0, 0, 1), InvViewMatrix).xyz;
+    //ray.Direction = mul(normalize(float3(d.x * aspectRatio, -d.y, -1)), InvViewMatrix);
 
-    ray.TMin = 0;
-    ray.TMax = 100000;
+    //ray.TMin = 0;
+    //ray.TMax = 100000;
 
-    RayPayload payload;
-    TraceRay( gRtScene, 0 /*rayFlags*/, 0xFF, 0 /* ray index*/, 0, 0, ray, payload );
-    float3 col = linearToSrgb(payload.color);
+    //RayPayload payload;
+    //TraceRay( gRtScene, 0 /*rayFlags*/, 0xFF, 0 /* ray index*/, 0, 0, ray, payload );
+    //float3 col = linearToSrgb(payload.color);
     //gOutput[launchIndex.xy] = float4(col, 1);
-    float dd = payload.distance / 1000.0f;
-    gOutput[launchIndex.xy] = float4(dd, dd, dd, 1);
+    //float dd = payload.distance / 1000.0f;
+    //gOutput[launchIndex.xy] = float4(dd, dd, dd, 1);
 
     float2 UV = crd / dims;
     float DeviceDepth = DepthTex.SampleLevel(sampleWrap, UV, 0).x;
@@ -120,12 +120,32 @@ void rayGen()
     float3 ViewPosition = GetViewPosition(LinearDepth, ScreenPosition, ProjMatrix._11, ProjMatrix._22);
     float3 WorldPos = mul(float4(ViewPosition, 1), InvViewMatrix).xyz;
 
+    RayDesc ray;
+    ray.Origin = WorldPos;//    mul(float4(0, 0, 0, 1), InvViewMatrix).xyz;
+    ray.Direction = LightDir;
+
+    ray.TMin = 0;
+    ray.TMax = 100000;
+
+    RayPayload payload;
+    TraceRay(gRtScene, 0 /*rayFlags*/, 0xFF, 0 /* ray index*/, 0, 0, ray, payload);
+    //float3 col = linearToSrgb(payload.color);
+    if (payload.distance < 0.0000001f)
+    {
+        gOutput[launchIndex.xy] = float4(1, 1, 1, 1);
+    }
+	else
+    {
+        gOutput[launchIndex.xy] = float4(0, 0, 0, 1);
+    }
+
+
     //gOutput[launchIndex.xy] = float4(DeviceDepth, 0, 0, 1);
-    gOutput[launchIndex.xy] = float4(WorldPos, 1);
+        gOutput[launchIndex.xy] = float4(WorldPos, 1);
 
 
 
-}
+    }
 
 [shader("miss")]
 void miss(inout RayPayload payload)

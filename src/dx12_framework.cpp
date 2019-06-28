@@ -328,7 +328,7 @@ void dx12_framework::LoadPipeline()
 
 	UINT dxgiFactoryFlags = 0;
 
-#if 0//defined(_DEBUG)
+#if defined(_DEBUG)
 	// Enable the debug layer (requires the Graphics Tools "optional feature").
 	// NOTE: Enabling the debug layer after device creation will invalidate the active device.
 	{
@@ -399,8 +399,8 @@ void dx12_framework::LoadPipeline()
 		ComPtr<ID3D12InfoQueue> d3dInfoQueue;
 		if (SUCCEEDED(m_device->QueryInterface(__uuidof(ID3D12InfoQueue), (void**)&d3dInfoQueue)))
 		{
-			/*d3dInfoQueue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_CORRUPTION, true);
-			d3dInfoQueue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_ERROR, true);*/
+			d3dInfoQueue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_CORRUPTION, true);
+			d3dInfoQueue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_ERROR, true);
 
 			D3D12_MESSAGE_ID blockedIds[] = { 
 			/*	D3D12_MESSAGE_ID_CLEARRENDERTARGETVIEW_MISMATCHINGCLEARVALUE, 
@@ -463,6 +463,7 @@ void dx12_framework::LoadAssets()
 	InitComputeRS();
 	InitDrawMeshRS();
 	InitCopyPass();
+	InitDebugPass();
 	InitLightingPass();
 	
 
@@ -508,7 +509,7 @@ void dx12_framework::LoadAssets()
 	// shadow result
 	ShadowBuffer = dx12_rhi->CreateTexture2D(DXGI_FORMAT_R8G8B8A8_UNORM,
 		D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
-		D3D12_RESOURCE_STATE_UNORDERED_ACCESS, m_width, m_height, 1);
+		D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, m_width, m_height, 1);
 	ShadowBuffer->MakeSRV();
 	
 	ShadowBuffer->MakeUAV();
@@ -799,11 +800,13 @@ void dx12_framework::InitCopyPass()
 	ps->BindSampler("samplerWrap", 0);
 
 	Shader* vs = new Shader((UINT8*)vertexShader->GetBufferPointer(), vertexShader->GetBufferSize());
-	
+	vs->BindConstantBuffer("ScaleOffsetParams", 0, sizeof(CopyScaleOffsetCB));
+
+
 	CD3DX12_RASTERIZER_DESC rasterizerStateDesc(D3D12_DEFAULT);
 	rasterizerStateDesc.CullMode = D3D12_CULL_MODE_NONE;
 
-	D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDescMesh = {};
+	D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDesc = {};
 
 	const D3D12_INPUT_ELEMENT_DESC StandardVertexDescription[] =
 	{
@@ -812,30 +815,133 @@ void dx12_framework::InitCopyPass()
 	};
 	UINT StandardVertexDescriptionNumElements = _countof(StandardVertexDescription);
 
-	psoDescMesh.InputLayout = { StandardVertexDescription, StandardVertexDescriptionNumElements };
+	psoDesc.InputLayout = { StandardVertexDescription, StandardVertexDescriptionNumElements };
 	//psoDesc.pRootSignature = m_rootSignature.Get();
 	/*psoDesc.VS = CD3DX12_SHADER_BYTECODE(pVertexShaderData, vertexShaderDataLength);
 	psoDesc.PS = CD3DX12_SHADER_BYTECODE(pPixelShaderData, pixelShaderDataLength);*/
-	psoDescMesh.RasterizerState = rasterizerStateDesc;
-	psoDescMesh.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
-	psoDescMesh.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
-	psoDescMesh.DepthStencilState.DepthEnable = FALSE;
-	psoDescMesh.DepthStencilState.StencilEnable = FALSE;
-	psoDescMesh.SampleMask = UINT_MAX;
-	psoDescMesh.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-	psoDescMesh.NumRenderTargets = 1;
-	psoDescMesh.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
+	psoDesc.RasterizerState = rasterizerStateDesc;
+	psoDesc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
+	psoDesc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
+	psoDesc.DepthStencilState.DepthEnable = FALSE;
+	psoDesc.DepthStencilState.StencilEnable = FALSE;
+	psoDesc.SampleMask = UINT_MAX;
+	psoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+	psoDesc.NumRenderTargets = 1;
+	psoDesc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
 	//psoDescMesh.DSVFormat = DXGI_FORMAT_D32_FLOAT;
-	psoDescMesh.SampleDesc.Count = 1;
+	psoDesc.SampleDesc.Count = 1;
 
 	RS_Copy = unique_ptr<PipelineStateObject>(new PipelineStateObject);
 	RS_Copy->ps = shared_ptr<Shader>(ps);
 	RS_Copy->vs = shared_ptr<Shader>(vs);
-	RS_Copy->graphicsPSODesc = psoDescMesh;
+	RS_Copy->graphicsPSODesc = psoDesc;
 	RS_Copy->Init(false);
 }
 
 
+
+void dx12_framework::InitDebugPass()
+{
+	struct PostVertex
+	{
+		XMFLOAT4 position;
+		XMFLOAT2 uv;
+	};
+
+	PostVertex quadVertices[] =
+	{
+		{ { -1.0f, -1.0f, 0.0f, 1.0f }, { 0.0f, 0.0f } },    // Bottom left.
+		{ { -1.0f, 1.0f, 0.0f, 1.0f }, { 0.0f, 1.0f } },    // Top left.
+		{ { 1.0f, -1.0f, 0.0f, 1.0f }, { 1.0f, 0.0f } },    // Bottom right.
+		{ { 1.0f, 1.0f, 0.0f, 1.0f }, { 1.0f, 1.0f } }        // Top right.
+	};
+
+	const UINT vertexBufferSize = sizeof(quadVertices);
+	const UINT vertexBufferStride = sizeof(PostVertex);
+
+	D3D12_SUBRESOURCE_DATA vertexData = {};
+	vertexData.pData = &quadVertices;
+	vertexData.RowPitch = vertexBufferSize;
+	vertexData.SlicePitch = vertexData.RowPitch;
+
+	FullScreenVB = dx12_rhi->CreateVertexBuffer(vertexBufferSize, vertexBufferStride, &quadVertices);
+
+	///
+	ComPtr<ID3DBlob> vertexShader;
+	ComPtr<ID3DBlob> pixelShader;
+
+
+#if defined(_DEBUG)
+	// Enable better shader debugging with the graphics debugging tools.
+	UINT compileFlags = D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
+#else
+	UINT compileFlags = D3DCOMPILE_OPTIMIZATION_LEVEL3;
+#endif
+
+	ID3DBlob*compilationMsgs = nullptr;
+
+	try
+	{
+		ThrowIfFailed(D3DCompileFromFile(GetAssetFullPath(L"CopyPS.hlsl").c_str(), nullptr, nullptr, "VSMain", "vs_5_0", compileFlags, 0, &vertexShader, &compilationMsgs));
+	}
+	catch (const std::exception& e)
+	{
+		OutputDebugStringA(reinterpret_cast<const char*>(compilationMsgs->GetBufferPointer()));
+		compilationMsgs->Release();
+	}
+
+	try
+	{
+		ThrowIfFailed(D3DCompileFromFile(GetAssetFullPath(L"CopyPS.hlsl").c_str(), nullptr, nullptr, "PSMain", "ps_5_0", compileFlags, 0, &pixelShader, &compilationMsgs));
+	}
+	catch (const std::exception& e)
+	{
+		OutputDebugStringA(reinterpret_cast<const char*>(compilationMsgs->GetBufferPointer()));
+		compilationMsgs->Release();
+	}
+
+	Shader* ps = new Shader((UINT8*)pixelShader->GetBufferPointer(), pixelShader->GetBufferSize());
+	ps->BindTexture("SrcTex", 0, 1);
+	ps->BindSampler("samplerWrap", 0);
+
+	Shader* vs = new Shader((UINT8*)vertexShader->GetBufferPointer(), vertexShader->GetBufferSize());
+	vs->BindConstantBuffer("ScaleOffsetParams", 0, sizeof(CopyScaleOffsetCB));
+
+
+	CD3DX12_RASTERIZER_DESC rasterizerStateDesc(D3D12_DEFAULT);
+	rasterizerStateDesc.CullMode = D3D12_CULL_MODE_NONE;
+
+	D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDesc = {};
+
+	const D3D12_INPUT_ELEMENT_DESC StandardVertexDescription[] =
+	{
+		{ "POSITION", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 0,  D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+		{ "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT,    0, 16, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+	};
+	UINT StandardVertexDescriptionNumElements = _countof(StandardVertexDescription);
+
+	psoDesc.InputLayout = { StandardVertexDescription, StandardVertexDescriptionNumElements };
+	//psoDesc.pRootSignature = m_rootSignature.Get();
+	/*psoDesc.VS = CD3DX12_SHADER_BYTECODE(pVertexShaderData, vertexShaderDataLength);
+	psoDesc.PS = CD3DX12_SHADER_BYTECODE(pPixelShaderData, pixelShaderDataLength);*/
+	psoDesc.RasterizerState = rasterizerStateDesc;
+	psoDesc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
+	psoDesc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
+	psoDesc.DepthStencilState.DepthEnable = FALSE;
+	psoDesc.DepthStencilState.StencilEnable = FALSE;
+	psoDesc.SampleMask = UINT_MAX;
+	psoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+	psoDesc.NumRenderTargets = 1;
+	psoDesc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
+	//psoDescMesh.DSVFormat = DXGI_FORMAT_D32_FLOAT;
+	psoDesc.SampleDesc.Count = 1;
+
+	RS_Debug = unique_ptr<PipelineStateObject>(new PipelineStateObject);
+	RS_Debug->ps = shared_ptr<Shader>(ps);
+	RS_Debug->vs = shared_ptr<Shader>(vs);
+	RS_Debug->graphicsPSODesc = psoDesc;
+	RS_Debug->Init(false);
+}
 
 void dx12_framework::InitLightingPass()
 {
@@ -919,8 +1025,6 @@ void dx12_framework::CopyPass()
 {
 	PIXBeginEvent(dx12_rhi->CommandList.Get(), 0, L"CopyPass");
 
-	
-
 	Texture* backbuffer = framebuffers[dx12_rhi->CurrentFrameIndex].get();
 
 	D3D12_RESOURCE_BARRIER BarrierDesc = {};
@@ -932,7 +1036,8 @@ void dx12_framework::CopyPass()
 	BarrierDesc.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
 	dx12_rhi->CommandList->ResourceBarrier(1, &BarrierDesc);
 
-
+	const float clearColor[] = { 0.0f, 0.2f, 0.4f, 1.0f };
+	dx12_rhi->CommandList->ClearRenderTargetView(backbuffer->CpuHandleRTV, clearColor, 0, nullptr);
 	
 	RS_Copy->ApplyGraphicsRSPSO(dx12_rhi->CommandList.Get());
 
@@ -940,40 +1045,78 @@ void dx12_framework::CopyPass()
 	RS_Copy->ps->SetSampler("samplerWrap", samplerWrap.get(), dx12_rhi->CommandList.Get());
 	RS_Copy->ps->SetTexture("SrcTex", ColorBuffer.get(), dx12_rhi->CommandList.Get(), nullptr);
 
+	CopyScaleOffsetCB cb;
+	cb.Offset = glm::vec4(0, 0, 0, 0);
+	cb.Scale = glm::vec4(1, 1, 0, 0);
+	RS_Copy->vs->SetConstantValue("ScaleOffsetParams", &cb, 0, dx12_rhi->CommandList.Get(), nullptr);
+
+
 	RS_Copy->ApplyGlobal(dx12_rhi->CommandList.Get());
 
 	dx12_rhi->CommandList->OMSetRenderTargets(1, &backbuffer->CpuHandleRTV, FALSE, nullptr);
 
+	UINT Width = m_width / 1;
+	UINT Height = m_height / 1;
+	CD3DX12_VIEWPORT viewport(0.0f, 0.0f, static_cast<float>(Width), static_cast<float>(Height));
+	CD3DX12_RECT scissorRect(0, 0, static_cast<LONG>(Width), static_cast<LONG>(Height));
 
-	dx12_rhi->CommandList->RSSetViewports(1, &m_viewport);
-	dx12_rhi->CommandList->RSSetScissorRects(1, &m_scissorRect);
+
+	dx12_rhi->CommandList->RSSetViewports(1, &viewport);
+
+
+	dx12_rhi->CommandList->RSSetScissorRects(1, &scissorRect);
 
 	dx12_rhi->CommandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
-	//dx12_rhi->CommandList->IASetIndexBuffer(&SquintRoom->Ib->view);
 	dx12_rhi->CommandList->IASetVertexBuffers(0, 1, &FullScreenVB->view);
-
-	
 	
 
 	dx12_rhi->CommandList->DrawInstanced(4, 1, 0, 0);
 
+	PIXEndEvent(dx12_rhi->CommandList.Get());
+}
 
-	D3D12_RESOURCE_BARRIER BarrierDescPresent = {};
-	BarrierDescPresent.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-	BarrierDescPresent.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
-	BarrierDescPresent.Transition.pResource = backbuffer->resource.Get();
-	BarrierDescPresent.Transition.Subresource = 0;
-	BarrierDescPresent.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
-	BarrierDescPresent.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
-	dx12_rhi->CommandList->ResourceBarrier(1, &BarrierDescPresent);
+void dx12_framework::DebugPass()
+{
+	PIXBeginEvent(dx12_rhi->CommandList.Get(), 0, L"DebugPass");
+
+	//Texture* backbuffer = framebuffers[dx12_rhi->CurrentFrameIndex].get();
+
+
+	RS_Debug->ApplyGraphicsRSPSO(dx12_rhi->CommandList.Get());
+
+
+	RS_Debug->ps->SetSampler("samplerWrap", samplerWrap.get(), dx12_rhi->CommandList.Get());
+	RS_Debug->ps->SetTexture("SrcTex", ShadowBuffer.get(), dx12_rhi->CommandList.Get(), nullptr);
+
+	CopyScaleOffsetCB cb;
+	cb.Offset = glm::vec4(-0.75, -0.75, 0, 0);
+	cb.Scale = glm::vec4(0.25, 0.25, 0, 0);
+	RS_Debug->vs->SetConstantValue("ScaleOffsetParams", &cb, 0, dx12_rhi->CommandList.Get(), nullptr);
+
+
+	RS_Debug->ApplyGlobal(dx12_rhi->CommandList.Get());
+
+	//dx12_rhi->CommandList->OMSetRenderTargets(1, &backbuffer->CpuHandleRTV, FALSE, nullptr);
+
+	/*UINT Width = m_width / 1;
+	UINT Height = m_height / 1;
+	CD3DX12_VIEWPORT viewport(0.0f, 0.0f, static_cast<float>(Width), static_cast<float>(Height));
+	CD3DX12_RECT scissorRect(0, 0, static_cast<LONG>(Width), static_cast<LONG>(Height));
+
+
+	dx12_rhi->CommandList->RSSetViewports(1, &viewport);
+
+
+	dx12_rhi->CommandList->RSSetScissorRects(1, &scissorRect);*/
+
+	dx12_rhi->CommandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+	dx12_rhi->CommandList->IASetVertexBuffers(0, 1, &FullScreenVB->view);
+
+
+	dx12_rhi->CommandList->DrawInstanced(4, 1, 0, 0);
+
 
 	PIXEndEvent(dx12_rhi->CommandList.Get());
-
-
-	dx12_rhi->CommandList->Close();
-	ID3D12CommandList* ppCommandListsEnd[] = { dx12_rhi->CommandList.Get()
-	};
-	dx12_rhi->CommandQueue->ExecuteCommandLists(_countof(ppCommandListsEnd), ppCommandListsEnd);
 }
 
 void dx12_framework::LightingPass()
@@ -1084,13 +1227,19 @@ void dx12_framework::OnUpdate()
 
 
 
-	XMStoreFloat4x4(&RTViewParam.ViewMatrix, XMMatrixTranspose(m_camera.GetViewMatrix()));
-	
+	//XMStoreFloat4x4(&RTViewParam.ViewMatrix, XMMatrixTranspose(m_camera.GetViewMatrix()));
+	RTViewParam.ViewMatrix = glm::transpose(ViewMat);
 
-	XMVECTOR Det;
-	XMStoreFloat4x4(&RTViewParam.InvViewMatrix, XMMatrixInverse(&Det, XMMatrixTranspose(m_camera.GetViewMatrix())));
+	//XMVECTOR Det;
+	//XMStoreFloat4x4(&RTViewParam.InvViewMatrix, XMMatrixInverse(&Det, XMMatrixTranspose(m_camera.GetViewMatrix())));
 
-	XMStoreFloat4x4(&RTViewParam.ProjMatrix, XMMatrixTranspose(ProjMatrix));
+	glm::mat4x4 InvViewMat = glm::inverse(glm::transpose(ViewMat));
+	RTViewParam.InvViewMatrix = InvViewMat;
+
+
+	//XMStoreFloat4x4(&RTViewParam.ProjMatrix, XMMatrixTranspose(ProjMatrix));
+
+	RTViewParam.ProjMatrix = glm::transpose(ProjMat);
 
 	RTViewParam.ProjectionParams.x = Far / (Far - Near);
 	RTViewParam.ProjectionParams.y = Near / (Near - Far);
@@ -1116,6 +1265,24 @@ void dx12_framework::OnRender()
 
 	CopyPass();
 
+	if(bDebugDraw)
+		DebugPass();
+
+	D3D12_RESOURCE_BARRIER BarrierDescPresent = {};
+	BarrierDescPresent.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+	BarrierDescPresent.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+	BarrierDescPresent.Transition.pResource = backbuffer->resource.Get();
+	BarrierDescPresent.Transition.Subresource = 0;
+	BarrierDescPresent.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
+	BarrierDescPresent.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
+	dx12_rhi->CommandList->ResourceBarrier(1, &BarrierDescPresent);
+
+
+	dx12_rhi->CommandList->Close();
+	ID3D12CommandList* ppCommandListsEnd[] = { dx12_rhi->CommandList.Get()
+	};
+	dx12_rhi->CommandQueue->ExecuteCommandLists(_countof(ppCommandListsEnd), ppCommandListsEnd);
+
 	dx12_rhi->EndFrame();
 }
 
@@ -1134,6 +1301,9 @@ void dx12_framework::OnKeyDown(UINT8 key)
 	{
 	case 'M':
 		bMultiThreadRendering = !bMultiThreadRendering;
+		break;
+	case 'B':
+		bDebugDraw = !bDebugDraw;
 		break;
 	default:
 		break;
@@ -1439,6 +1609,7 @@ void dx12_framework::RaytracePass()
 {
 	GFSDK_Aftermath_SetEventMarker(dx12_rhi->AM_CL_Handle, nullptr, 0);
 	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(dx12_rhi->depthTexture->resource.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
+	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(ShadowBuffer->resource.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS));
 
 
 	PSO_RT->BeginShaderTable();
@@ -1455,6 +1626,7 @@ void dx12_framework::RaytracePass()
 	PSO_RT->Apply(m_width, m_height);
 
 	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(dx12_rhi->depthTexture->resource.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_DEPTH_WRITE));
+	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(ShadowBuffer->resource.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
 
 }
 

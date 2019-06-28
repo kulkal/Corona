@@ -793,11 +793,16 @@ void Shader::BindConstantBuffer(string name, int baseRegister, int size, UINT nu
 	binding.name = name;
 	binding.baseRegister = baseRegister;
 	binding.numDescriptors = 1;
-	binding.cbSize = size;
+	//binding.cbSize = size;
+
+	int div = size / 256;
+	binding.cbSize = (div + 1) * 256;
+
+
 
 	for (int iFrame = 0; iFrame < g_dx12_rhi->NumFrame; iFrame++)
 	{
-		binding.cbs.push_back(g_dx12_rhi->CreateConstantBuffer(size, numMaxDrawCall));
+		binding.cbs.push_back(g_dx12_rhi->CreateConstantBuffer(binding.cbSize, numMaxDrawCall));
 	}
 
 	constantBufferBinding.insert(pair<string, BindingData>(name, binding));

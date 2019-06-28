@@ -50,14 +50,23 @@ class dx12_framework : public DXSample
 
 	struct RTViewParamCB
 	{
-		XMFLOAT4X4 ViewMatrix;		// Model-view-projection (MVP) matrix.
-		//glm::mat4x4 ViewMatrix;
-		XMFLOAT4X4 InvViewMatrix;		// Model-view-projection (MVP) matrix.
-		XMFLOAT4X4 ProjMatrix;
+		//XMFLOAT4X4 ViewMatrix;		// Model-view-projection (MVP) matrix.
+		glm::mat4x4 ViewMatrix;
+		//XMFLOAT4X4 InvViewMatrix;		// Model-view-projection (MVP) matrix.
+		glm::mat4x4 InvViewMatrix;
+		//XMFLOAT4X4 ProjMatrix;
+		glm::mat4x4 ProjMatrix;
 		glm::vec4 ProjectionParams;
 		glm::vec4	LightDir;
 		//float padding[];
 	};
+
+	struct CopyScaleOffsetCB
+	{
+		glm::vec4 Scale;
+		glm::vec4 Offset;
+	};
+
 public:
 	dx12_framework(UINT width, UINT height, std::wstring name);
 	virtual ~dx12_framework();
@@ -71,6 +80,8 @@ public:
 
 private:
 	bool bMultiThreadRendering = false;
+
+	bool bDebugDraw = false;
 	//static const UINT FrameCount = 3
 	
 	UINT m_frameCounter;
@@ -161,6 +172,10 @@ private:
 
 	// full screen copy pass
 	unique_ptr<PipelineStateObject> RS_Copy;
+
+	unique_ptr<PipelineStateObject> RS_Debug;
+
+
 	shared_ptr<VertexBuffer> FullScreenVB;
 
 	// lighting pass
@@ -197,9 +212,14 @@ public:
 	void ComputePass();
 
 	void InitCopyPass();
+
+	void InitDebugPass();
+
 	void InitLightingPass();
 
 	void CopyPass();
+
+	void DebugPass();
 
 	void LightingPass();
 

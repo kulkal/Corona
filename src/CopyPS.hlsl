@@ -11,7 +11,11 @@
 
 Texture2D SrcTex: register(t0);
 SamplerState sampleWrap : register(s0);
-
+cbuffer ScaleOffsetParams : register(b0)
+{
+    float4 Scale;
+    float4 Offset;
+};
 
 struct VSInput
 {
@@ -30,7 +34,11 @@ PSInput VSMain(
 {
     PSInput result;
 
-    result.position = input.position;
+    float4 pos = input.position;
+
+    pos.xy = pos.xy * Scale + Offset.xy;
+    result.position = pos;
+
     result.uv = input.uv;
 
     return result;
