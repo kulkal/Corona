@@ -294,6 +294,7 @@ shared_ptr<ConstantBuffer> DumRHI_DX12::CreateConstantBuffer(int Size, UINT NumV
 	ThrowIfFailed(cbuffer->resource->Map(0, &readRange, reinterpret_cast<void**>(&cbuffer->MemMapped)));
 
 	// Describe and create a constant buffer view (CBV).
+	cbuffer->CpuHandleVec.reserve(NumView);
 	for (int i = 0; i < NumView; i++)
 	{
 		D3D12_CPU_DESCRIPTOR_HANDLE CpuHandle;
