@@ -121,7 +121,7 @@ void rayGen()
     float3 WorldPos = mul(float4(ViewPosition, 1), InvViewMatrix).xyz;
 
     RayDesc ray;
-    ray.Origin = WorldPos;//    mul(float4(0, 0, 0, 1), InvViewMatrix).xyz;
+    ray.Origin = WorldPos + LightDir *0.0001f;//    mul(float4(0, 0, 0, 1), InvViewMatrix).xyz;
     ray.Direction = LightDir;
 
     ray.TMin = 0;
@@ -130,7 +130,7 @@ void rayGen()
     RayPayload payload;
     TraceRay(gRtScene, 0 /*rayFlags*/, 0xFF, 0 /* ray index*/, 0, 0, ray, payload);
     //float3 col = linearToSrgb(payload.color);
-    if (payload.distance < 0.0000001f)
+    if (payload.distance == 0)
     {
         gOutput[launchIndex.xy] = float4(1, 1, 1, 1);
     }
@@ -141,7 +141,7 @@ void rayGen()
 
 
     //gOutput[launchIndex.xy] = float4(DeviceDepth, 0, 0, 1);
-        gOutput[launchIndex.xy] = float4(WorldPos, 1);
+        //gOutput[launchIndex.xy] = float4(WorldPos, 1);
 
 
 

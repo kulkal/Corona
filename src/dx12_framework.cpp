@@ -709,7 +709,7 @@ void dx12_framework::InitDrawMeshRS()
 	vs->BindConstantBuffer("ObjParameter", 1, sizeof(ObjConstantBuffer), _countof(SampleAssetsIndoor::Draws));
 
 	CD3DX12_RASTERIZER_DESC rasterizerStateDesc(D3D12_DEFAULT);
-	rasterizerStateDesc.CullMode = D3D12_CULL_MODE_BACK;
+	rasterizerStateDesc.CullMode = D3D12_CULL_MODE_NONE;
 
 	D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDescMesh = {};
 	psoDescMesh.InputLayout = { SampleAssetsIndoor::StandardVertexDescription, SampleAssetsIndoor::StandardVertexDescriptionNumElements };
@@ -799,7 +799,7 @@ void dx12_framework::InitCopyPass()
 	ps->BindSampler("samplerWrap", 0);
 
 	Shader* vs = new Shader((UINT8*)vertexShader->GetBufferPointer(), vertexShader->GetBufferSize());
-	vs->BindConstantBuffer("ScaleOffsetParams", 0, sizeof(CopyScaleOffsetCB), 2);
+	vs->BindConstantBuffer("ScaleOffsetParams", 0, sizeof(CopyScaleOffsetCB), 4);
 
 
 	CD3DX12_RASTERIZER_DESC rasterizerStateDesc(D3D12_DEFAULT);
@@ -1015,6 +1015,17 @@ void dx12_framework::DebugPass()
 	dx12_rhi->CommandList->DrawInstanced(4, 1, 0, 0);
 
 
+	// world normal
+	RS_Copy->ps->currentDrawCallIndex++;
+	RS_Copy->vs->currentDrawCallIndex++;
+
+	cb.Offset = glm::vec4(-0.25, -0.75, 0, 0);
+	cb.Scale = glm::vec4(0.25, 0.25, 0, 0);
+	RS_Copy->vs->SetConstantValue("ScaleOffsetParams", &cb, dx12_rhi->CommandList.Get(), nullptr);
+	RS_Copy->ps->SetTexture("SrcTex", NormalBuffer.get(), dx12_rhi->CommandList.Get(), nullptr);
+	dx12_rhi->CommandList->DrawInstanced(4, 1, 0, 0);
+
+
 	PIXEndEvent(dx12_rhi->CommandList.Get());
 }
 
@@ -1126,17 +1137,13 @@ void dx12_framework::OnUpdate()
 
 
 
-	//XMStoreFloat4x4(&RTViewParam.ViewMatrix, XMMatrixTranspose(m_camera.GetViewMatrix()));
 	RTViewParam.ViewMatrix = glm::transpose(ViewMat);
 
-	//XMVECTOR Det;
-	//XMStoreFloat4x4(&RTViewParam.InvViewMatrix, XMMatrixInverse(&Det, XMMatrixTranspose(m_camera.GetViewMatrix())));
 
 	glm::mat4x4 InvViewMat = glm::inverse(glm::transpose(ViewMat));
 	RTViewParam.InvViewMatrix = InvViewMat;
 
 
-	//XMStoreFloat4x4(&RTViewParam.ProjMatrix, XMMatrixTranspose(ProjMatrix));
 
 	RTViewParam.ProjMatrix = glm::transpose(ProjMat);
 
@@ -1160,7 +1167,7 @@ void dx12_framework::OnRender()
 
 	LightingPass();
 
-	RaytracePass();
+	//RaytracePass();
 
 	CopyPass();
 

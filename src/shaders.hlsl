@@ -86,13 +86,16 @@ float3 CalcPerPixelNormal(float2 vTexcoord, float3 vVertNormal, float3 vVertTang
     vVertTangent = normalize(vVertTangent);
 
     float3 vVertBinormal = normalize(cross(vVertTangent, vVertNormal));
-    float3x3 mTangentSpaceToWorldSpace = float3x3(vVertTangent, vVertBinormal, vVertNormal);
+    float3x3 mTangentSpaceToWorldSpace = (float3x3(vVertTangent, vVertBinormal, vVertNormal));
 
 	// Compute per-pixel normal.
     float3 vBumpNormal = (float3) normalMap.Sample(sampleWrap, vTexcoord);
+    //return vBumpNormal;
+
     vBumpNormal = 2.0f * vBumpNormal - 1.0f;
 
     return mul(vBumpNormal, mTangentSpaceToWorldSpace);
+    //return vVertNormal;
 }
 
 

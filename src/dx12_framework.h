@@ -142,7 +142,7 @@ private:
 
 	XMFLOAT4X4 m_modelMatrices;
 
-	glm::vec3 LightDir = glm::vec3(1, 1, -1);
+	glm::vec3 LightDir = glm::vec3(0, 0, 1);
 
 
 	std::unique_ptr<DumRHI_DX12> dx12_rhi;									
