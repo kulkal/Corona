@@ -22,3 +22,8 @@ This project is for dx12 & dxr learning. Quite not orgnized for now. I am focuss
 	* Similar issue with mesh cbv.
 		* draw index is used for mesh draw to allocate seperated cbv.
 		* draw index is not intuitive for PSO reuse usage.
+
+## Usefule link
+* [Dynamic cb implementation](https://github.com/Microsoft/DirectX-Graphics-Samples/blob/07008938a0dc5a187a23abcb55b61f8c2809c874/Samples/Desktop/D3D12PipelineStateCache/src/DynamicConstantBuffer.cpp#L64)
+	* We might not have to create multiple constant buffer view for each draw.
+	* All we need are just gpu addresses.
