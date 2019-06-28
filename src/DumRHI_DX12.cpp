@@ -1241,22 +1241,6 @@ UINT PipelineStateObject::GetGraphicsBindingDHSize()
 	return	vs->constantBufferBinding.size() + ps->constantBufferBinding.size() + vs->textureBinding.size() + ps->textureBinding.size();
 }
 
-//UINT PipelineStateObject::GetGraphicsCBDHBindingSize()
-//{
-//	UINT Size = 0;
-//	for (auto& cbbinding : vs->constantBufferBinding)
-//	{
-//		Size += cbbinding.second.cbs[g_dx12_rhi->CurrentFrameIndex]->CpuHandleVec.size();
-//	}
-//
-//	for (auto& cbbinding : ps->constantBufferBinding)
-//	{
-//		Size += cbbinding.second.cbs[g_dx12_rhi->CurrentFrameIndex]->CpuHandleVec.size();
-//	}
-//	
-//	return Size;
-//}
-
 void GlobalConstantBuffer::SetValue(void* pData)
 {
 	void* pMapped = cbs[g_dx12_rhi->CurrentFrameIndex]->MemMapped;
