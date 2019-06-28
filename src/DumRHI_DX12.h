@@ -91,6 +91,11 @@ public:
 class Shader
 {
 public:
+	struct CBVersions
+	{
+		vector<shared_ptr<ConstantBuffer>> versions;
+	};
+
 	struct BindingData
 	{
 		string name;
@@ -101,12 +106,15 @@ public:
 
 		Texture* texture;
 		Sampler* sampler;
+		
+		vector<CBVersions> frameCBs;
+
 		vector<shared_ptr<ConstantBuffer>> cbs; // multiple constant buffers are need for multiple buffering.
 
 		UINT rootConst;
 	};
 
-	//UINT currentDrawCallIndex = 0;
+	UINT currentDrawCallIndex = 0;
 
 	map<string, BindingData> uavBinding;
 	map<string, BindingData> textureBinding;
@@ -129,7 +137,7 @@ public:
 	void SetSampler(string name, Sampler* sampler, ID3D12GraphicsCommandList* CommandList, ThreadDescriptorHeapPool* DHPool = nullptr);
 	
 	void SetGlobalConstantBuffer(string name, GlobalConstantBuffer* cb, ID3D12GraphicsCommandList* CommandList, ThreadDescriptorHeapPool* DHPool);
-	void SetConstantValue(string name, void* pData, UINT drawCallIndex, ID3D12GraphicsCommandList* CommandList, ThreadDescriptorHeapPool* DHPool);
+	void SetConstantValue(string name, void* pData, ID3D12GraphicsCommandList* CommandList, ThreadDescriptorHeapPool* DHPool);
 	void SetRootConstant(string, UINT value, ID3D12GraphicsCommandList* CommandList);
 
 	Shader(UINT8* ByteCode, UINT Size);

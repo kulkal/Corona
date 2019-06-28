@@ -1048,7 +1048,7 @@ void dx12_framework::CopyPass()
 	CopyScaleOffsetCB cb;
 	cb.Offset = glm::vec4(0, 0, 0, 0);
 	cb.Scale = glm::vec4(1, 1, 0, 0);
-	RS_Copy->vs->SetConstantValue("ScaleOffsetParams", &cb, 0, dx12_rhi->CommandList.Get(), nullptr);
+	RS_Copy->vs->SetConstantValue("ScaleOffsetParams", &cb, dx12_rhi->CommandList.Get(), nullptr);
 
 
 	RS_Copy->ApplyGlobal(dx12_rhi->CommandList.Get());
@@ -1091,7 +1091,7 @@ void dx12_framework::DebugPass()
 	CopyScaleOffsetCB cb;
 	cb.Offset = glm::vec4(-0.75, -0.75, 0, 0);
 	cb.Scale = glm::vec4(0.25, 0.25, 0, 0);
-	RS_Debug->vs->SetConstantValue("ScaleOffsetParams", &cb, 0, dx12_rhi->CommandList.Get(), nullptr);
+	RS_Debug->vs->SetConstantValue("ScaleOffsetParams", &cb, dx12_rhi->CommandList.Get(), nullptr);
 
 
 	RS_Debug->ApplyGlobal(dx12_rhi->CommandList.Get());
@@ -1148,7 +1148,7 @@ void dx12_framework::LightingPass()
 	Param.LightDir = glm::vec4(LightDir, 0);
 
 	glm::normalize(Param.LightDir);
-	RS_Lighting->ps->SetConstantValue("LightingParam", &Param, 0, dx12_rhi->CommandList.Get(), nullptr);
+	RS_Lighting->ps->SetConstantValue("LightingParam", &Param, dx12_rhi->CommandList.Get(), nullptr);
 
 
 	RS_Lighting->ApplyGlobal(dx12_rhi->CommandList.Get());
@@ -1406,11 +1406,13 @@ void dx12_framework::DrawMeshPass()
 
 		for (int i = 0; i < SquintRoom->Draws.size(); i++)
 		{
+			RS_Mesh->vs->currentDrawCallIndex = i;
+			RS_Mesh->ps->currentDrawCallIndex = i;
 
 			Mesh::DrawCall& drawcall = SquintRoom->Draws[i];
 			ObjConstantBuffer objCB;
 			XMStoreFloat4x4(&objCB.WorldMatrix, XMMatrixRotationY(i * 0));
-			RS_Mesh->vs->SetConstantValue("ObjParameter", (void*)&objCB.WorldMatrix, i, dx12_rhi->CommandList.Get(), nullptr);
+			RS_Mesh->vs->SetConstantValue("ObjParameter", (void*)&objCB.WorldMatrix, dx12_rhi->CommandList.Get(), nullptr);
 
 			Texture* diffuseTex = SquintRoom->Textures[drawcall.DiffuseTextureIndex].get();
 			RS_Mesh->ps->SetTexture("diffuseMap", diffuseTex, dx12_rhi->CommandList.Get(), nullptr);
@@ -1514,7 +1516,7 @@ void dx12_framework::RecordDraw (UINT StartIndex, UINT NumDraw, UINT CLIndex, Th
 		Mesh::DrawCall& drawcall = SquintRoom->Draws[i];
 		ObjConstantBuffer objCB;
 		XMStoreFloat4x4(&objCB.WorldMatrix, XMMatrixRotationY(i * 0));
-		RS_Mesh->vs->SetConstantValue("ObjParameter", (void*)&objCB.WorldMatrix, i, CL, DHPool);
+		RS_Mesh->vs->SetConstantValue("ObjParameter", (void*)&objCB.WorldMatrix, CL, DHPool);
 
 
 		Texture* diffuseTex = SquintRoom->Textures[drawcall.DiffuseTextureIndex].get();

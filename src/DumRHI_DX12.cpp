@@ -799,6 +799,7 @@ void Shader::BindConstantBuffer(string name, int baseRegister, int size, UINT nu
 	binding.cbSize = (div + 1) * 256;
 
 
+	binding.frameCBs.resize(g_dx12_rhi->NumFrame);
 
 	for (int iFrame = 0; iFrame < g_dx12_rhi->NumFrame; iFrame++)
 	{
@@ -924,43 +925,42 @@ void Shader::SetGlobalConstantBuffer(string name, GlobalConstantBuffer* gcb, ID3
 	CommandList->SetGraphicsRootDescriptorTable(binding.rootParamIndex, ShaderVisibleGpuHandle);
 }
 
-void Shader::SetConstantValue(string name, void* pData, UINT drawCallIndex, ID3D12GraphicsCommandList* CommandList, ThreadDescriptorHeapPool* DHPool)
+void Shader::SetConstantValue(string name, void* pData, ID3D12GraphicsCommandList* CommandList, ThreadDescriptorHeapPool* DHPool)
 {
-	//currentDrawCallIndex = drawCallIndex;
 	BindingData& binding = constantBufferBinding[name];
+
+	binding.frameCBs[g_dx12_rhi->CurrentFrameIndex].versions;
+	CBVersions& versions = binding.frameCBs[g_dx12_rhi->CurrentFrameIndex];
+	int numVersions = versions.versions.size();
+
+	shared_ptr<ConstantBuffer> cb;
+	if (numVersions <= currentDrawCallIndex)
+	{
+		cb = g_dx12_rhi->CreateConstantBuffer(binding.cbSize, 1);
+		versions.versions.push_back(cb);
+	}
+	else
+	{
+		cb = versions.versions[currentDrawCallIndex];
+	}
 	
-	UINT8* pMapped = (UINT8*)constantBufferBinding[name].cbs[g_dx12_rhi->CurrentFrameIndex]->MemMapped + binding.cbSize * drawCallIndex;
+	UINT8* pMapped = (UINT8*)cb->MemMapped;
 	memcpy((void*)pMapped, pData, binding.cbSize);
 
-	ConstantBuffer* cb = nullptr;
 
 	D3D12_CPU_DESCRIPTOR_HANDLE ShaderVisibleCPUHandle;
 	D3D12_GPU_DESCRIPTOR_HANDLE ShaderVisibleGpuHandle;
 
-	if (binding.cbs.size() != 0)
-		cb = binding.cbs[g_dx12_rhi->CurrentFrameIndex].get();
 
-	{
-		UINT DrawCallIndex;
-		if (cb->CpuHandleVec.size() > 1)
-			DrawCallIndex = drawCallIndex;// vs->currentDrawCallIndex;
-		else
-			DrawCallIndex = 0;
+	D3D12_CPU_DESCRIPTOR_HANDLE NonShadervisibleCPUHandle = cb->CpuHandleVec[0];
 
-		{
-			D3D12_CPU_DESCRIPTOR_HANDLE NonShadervisibleCPUHandle = cb->CpuHandleVec[DrawCallIndex];
+	if (DHPool)
+		DHPool->AllocDescriptor(ShaderVisibleCPUHandle, ShaderVisibleGpuHandle);
+	else
+		g_dx12_rhi->SRVCBVDescriptorHeapShaderVisible->AllocDescriptor(ShaderVisibleCPUHandle, ShaderVisibleGpuHandle);
 
 
-			//g_dx12_rhi->SRVCBVDescriptorHeapShaderVisible->AllocDescriptor(ShaderVisibleCPUHandle, cb->GpuHandle);
-			if (DHPool)
-				DHPool->AllocDescriptor(ShaderVisibleCPUHandle, ShaderVisibleGpuHandle);
-			else
-				g_dx12_rhi->SRVCBVDescriptorHeapShaderVisible->AllocDescriptor(ShaderVisibleCPUHandle, ShaderVisibleGpuHandle);
-
-
-			g_dx12_rhi->Device->CopyDescriptorsSimple(1, ShaderVisibleCPUHandle, NonShadervisibleCPUHandle, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-		}
-	}
+	g_dx12_rhi->Device->CopyDescriptorsSimple(1, ShaderVisibleCPUHandle, NonShadervisibleCPUHandle, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
 
 	CommandList->SetGraphicsRootDescriptorTable(binding.rootParamIndex, ShaderVisibleGpuHandle);
 }
