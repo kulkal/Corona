@@ -15,3 +15,10 @@ This project is for dx12 & dxr learning. Quite not orgnized for now. I am focuss
 ## Third-party libs
 * enkiTS
 * glm
+
+## Known issues
+* Cannot reuse RTPipelineStateObject
+	* Constant buffer is being overwritten.
+	* Similar issue with mesh cbv.
+		* draw index is used for mesh draw.
+		* draw index is not intuitive for PSO reuse usage.
