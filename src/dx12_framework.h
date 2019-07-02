@@ -98,6 +98,7 @@ private:
 	shared_ptr<Texture> ColorBuffer;
 	shared_ptr<Texture> AlbedoBuffer;
 	shared_ptr<Texture> NormalBuffer;
+	shared_ptr<Texture> GeomNormalBuffer;
 
 	shared_ptr<Texture> ShadowBuffer;
 
@@ -142,7 +143,7 @@ private:
 
 	XMFLOAT4X4 m_modelMatrices;
 
-	glm::vec3 LightDir = glm::vec3(0, 0, 1);
+	glm::vec3 LightDir = glm::normalize(glm::vec3(1, 1, 0));
 
 
 	std::unique_ptr<DumRHI_DX12> dx12_rhi;									

@@ -124,7 +124,7 @@ void rayGen()
     ray.Origin = WorldPos + LightDir *0.0001f;//    mul(float4(0, 0, 0, 1), InvViewMatrix).xyz;
     ray.Direction = LightDir;
 
-    ray.TMin = 0;
+    ray.TMin = 0.5;
     ray.TMax = 100000;
 
     RayPayload payload;

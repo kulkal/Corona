@@ -496,6 +496,17 @@ void dx12_framework::LoadAssets()
 
 	NAME_D3D12_OBJECT(NormalBuffer->resource);
 
+	// geometry world normal
+	GeomNormalBuffer = dx12_rhi->CreateTexture2D(DXGI_FORMAT_R8G8B8A8_UNORM,
+		D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
+		D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, m_width, m_height, 1);
+	GeomNormalBuffer->MakeRTV();
+	GeomNormalBuffer->MakeSRV();
+
+	NAME_D3D12_OBJECT(GeomNormalBuffer->resource);
+
+
+
 	// albedo
 	AlbedoBuffer = dx12_rhi->CreateTexture2D(DXGI_FORMAT_R8G8B8A8_UNORM,
 		D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
@@ -721,9 +732,11 @@ void dx12_framework::InitDrawMeshRS()
 	psoDescMesh.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
 	psoDescMesh.SampleMask = UINT_MAX;
 	psoDescMesh.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-	psoDescMesh.NumRenderTargets = 2;
+	psoDescMesh.NumRenderTargets = 3;
 	psoDescMesh.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
 	psoDescMesh.RTVFormats[1] = DXGI_FORMAT_R8G8B8A8_UNORM;
+	psoDescMesh.RTVFormats[2] = DXGI_FORMAT_R8G8B8A8_UNORM;
+
 	psoDescMesh.DSVFormat = DXGI_FORMAT_D32_FLOAT;
 	psoDescMesh.SampleDesc.Count = 1;
 
@@ -799,7 +812,7 @@ void dx12_framework::InitCopyPass()
 	ps->BindSampler("samplerWrap", 0);
 
 	Shader* vs = new Shader((UINT8*)vertexShader->GetBufferPointer(), vertexShader->GetBufferSize());
-	vs->BindConstantBuffer("ScaleOffsetParams", 0, sizeof(CopyScaleOffsetCB), 4);
+	vs->BindConstantBuffer("ScaleOffsetParams", 0, sizeof(CopyScaleOffsetCB), 10);
 
 
 	CD3DX12_RASTERIZER_DESC rasterizerStateDesc(D3D12_DEFAULT);
@@ -977,56 +990,70 @@ void dx12_framework::DebugPass()
 {
 	PIXBeginEvent(dx12_rhi->CommandList.Get(), 0, L"DebugPass");
 
-	//Texture* backbuffer = framebuffers[dx12_rhi->CurrentFrameIndex].get();
 
-	RS_Copy->ps->currentDrawCallIndex++;
-	RS_Copy->vs->currentDrawCallIndex++;
+
 	RS_Copy->ApplyGraphicsRSPSO(dx12_rhi->CommandList.Get());
-
-
-	RS_Copy->ps->SetSampler("samplerWrap", samplerWrap.get(), dx12_rhi->CommandList.Get());
-	RS_Copy->ps->SetTexture("SrcTex", ShadowBuffer.get(), dx12_rhi->CommandList.Get(), nullptr);
-
-	CopyScaleOffsetCB cb;
-	cb.Offset = glm::vec4(-0.75, -0.75, 0, 0);
-	cb.Scale = glm::vec4(0.25, 0.25, 0, 0);
-	RS_Copy->vs->SetConstantValue("ScaleOffsetParams", &cb, dx12_rhi->CommandList.Get(), nullptr);
-
-
-	RS_Copy->ApplyGlobal(dx12_rhi->CommandList.Get());
-
-	//dx12_rhi->CommandList->OMSetRenderTargets(1, &backbuffer->CpuHandleRTV, FALSE, nullptr);
-
-	/*UINT Width = m_width / 1;
-	UINT Height = m_height / 1;
-	CD3DX12_VIEWPORT viewport(0.0f, 0.0f, static_cast<float>(Width), static_cast<float>(Height));
-	CD3DX12_RECT scissorRect(0, 0, static_cast<LONG>(Width), static_cast<LONG>(Height));
-
-
-	dx12_rhi->CommandList->RSSetViewports(1, &viewport);
-
-
-	dx12_rhi->CommandList->RSSetScissorRects(1, &scissorRect);*/
-
 	dx12_rhi->CommandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
 	dx12_rhi->CommandList->IASetVertexBuffers(0, 1, &FullScreenVB->view);
 
+	RS_Copy->ps->SetSampler("samplerWrap", samplerWrap.get(), dx12_rhi->CommandList.Get());
+	CopyScaleOffsetCB cb;
 
+	// raytraced shadow
+	RS_Copy->ps->currentDrawCallIndex++;
+	RS_Copy->vs->currentDrawCallIndex++;
+	RS_Copy->ps->SetTexture("SrcTex", ShadowBuffer.get(), dx12_rhi->CommandList.Get(), nullptr);
+	cb.Offset = glm::vec4(-0.75, -0.75, 0, 0);
+	cb.Scale = glm::vec4(0.25, 0.25, 0, 0);
+	RS_Copy->vs->SetConstantValue("ScaleOffsetParams", &cb, dx12_rhi->CommandList.Get(), nullptr);
 	dx12_rhi->CommandList->DrawInstanced(4, 1, 0, 0);
 
 
 	// world normal
 	RS_Copy->ps->currentDrawCallIndex++;
 	RS_Copy->vs->currentDrawCallIndex++;
-
+	RS_Copy->ps->SetTexture("SrcTex", NormalBuffer.get(), dx12_rhi->CommandList.Get(), nullptr);
 	cb.Offset = glm::vec4(-0.25, -0.75, 0, 0);
 	cb.Scale = glm::vec4(0.25, 0.25, 0, 0);
 	RS_Copy->vs->SetConstantValue("ScaleOffsetParams", &cb, dx12_rhi->CommandList.Get(), nullptr);
-	RS_Copy->ps->SetTexture("SrcTex", NormalBuffer.get(), dx12_rhi->CommandList.Get(), nullptr);
+	dx12_rhi->CommandList->DrawInstanced(4, 1, 0, 0);
+
+	// geom world normal
+	RS_Copy->ps->currentDrawCallIndex++;
+	RS_Copy->vs->currentDrawCallIndex++;
+
+	cb.Offset = glm::vec4(-0.25, -0.25, 0, 0);
+	cb.Scale = glm::vec4(0.25, 0.25, 0, 0);
+	RS_Copy->vs->SetConstantValue("ScaleOffsetParams", &cb, dx12_rhi->CommandList.Get(), nullptr);
+	RS_Copy->ps->SetTexture("SrcTex", GeomNormalBuffer.get(), dx12_rhi->CommandList.Get(), nullptr);
+	dx12_rhi->CommandList->DrawInstanced(4, 1, 0, 0);
+
+	// depth
+	RS_Copy->ps->currentDrawCallIndex++;
+	RS_Copy->vs->currentDrawCallIndex++;
+
+	cb.Offset = glm::vec4(0.25, -0.75, 0, 0);
+	cb.Scale = glm::vec4(0.25, 0.25, 0, 0);
+	RS_Copy->vs->SetConstantValue("ScaleOffsetParams", &cb, dx12_rhi->CommandList.Get(), nullptr);
+	RS_Copy->ps->SetTexture("SrcTex", dx12_rhi->depthTexture.get(), dx12_rhi->CommandList.Get(), nullptr);
 	dx12_rhi->CommandList->DrawInstanced(4, 1, 0, 0);
 
 
+	// albedo
+	RS_Copy->ps->currentDrawCallIndex++;
+	RS_Copy->vs->currentDrawCallIndex++;
+
+	cb.Offset = glm::vec4(0.750, -0.75, 0, 0);
+	cb.Scale = glm::vec4(0.25, 0.25, 0, 0);
+	RS_Copy->vs->SetConstantValue("ScaleOffsetParams", &cb, dx12_rhi->CommandList.Get(), nullptr);
+	RS_Copy->ps->SetTexture("SrcTex", AlbedoBuffer.get(), dx12_rhi->CommandList.Get(), nullptr);
+	dx12_rhi->CommandList->DrawInstanced(4, 1, 0, 0);
+
+
+	RS_Copy->ApplyGlobal(dx12_rhi->CommandList.Get());
+
 	PIXEndEvent(dx12_rhi->CommandList.Get());
+
 }
 
 void dx12_framework::LightingPass()
@@ -1167,7 +1194,7 @@ void dx12_framework::OnRender()
 
 	LightingPass();
 
-	//RaytracePass();
+	RaytracePass();
 
 	CopyPass();
 
@@ -1270,10 +1297,11 @@ void dx12_framework::DrawMeshPass()
 
 	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(AlbedoBuffer->resource.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET));
 	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(NormalBuffer->resource.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET));
+	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(GeomNormalBuffer->resource.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET));
 
 
-	const D3D12_CPU_DESCRIPTOR_HANDLE Rendertargets[] = { AlbedoBuffer->CpuHandleRTV, NormalBuffer->CpuHandleRTV };
-	dx12_rhi->CommandList->OMSetRenderTargets(2, Rendertargets, FALSE, &dx12_rhi->depthTexture->CpuHandleDSV);
+	const D3D12_CPU_DESCRIPTOR_HANDLE Rendertargets[] = { AlbedoBuffer->CpuHandleRTV, NormalBuffer->CpuHandleRTV, GeomNormalBuffer->CpuHandleRTV };
+	dx12_rhi->CommandList->OMSetRenderTargets(3, Rendertargets, FALSE, &dx12_rhi->depthTexture->CpuHandleDSV);
 
 
 	//dx12_rhi->CommandList->OMSetRenderTargets(1, &backbuffer->CpuHandleRTV, FALSE, &dx12_rhi->depthTexture->CpuHandleDSV);
@@ -1297,8 +1325,9 @@ void dx12_framework::DrawMeshPass()
 	PIXBeginEvent(dx12_rhi->CommandList.Get(), 0, L"Draw Mesh");
 	if (!bMultiThreadRendering)
 	{
-		const D3D12_CPU_DESCRIPTOR_HANDLE Rendertargets[] = { AlbedoBuffer->CpuHandleRTV, NormalBuffer->CpuHandleRTV };
-		dx12_rhi->CommandList->OMSetRenderTargets(2, Rendertargets, FALSE, &dx12_rhi->depthTexture->CpuHandleDSV);
+		const D3D12_CPU_DESCRIPTOR_HANDLE Rendertargets[] = { AlbedoBuffer->CpuHandleRTV, NormalBuffer->CpuHandleRTV, GeomNormalBuffer->CpuHandleRTV };
+
+		dx12_rhi->CommandList->OMSetRenderTargets(3, Rendertargets, FALSE, &dx12_rhi->depthTexture->CpuHandleDSV);
 
 		RS_Mesh->ApplyGraphicsRSPSO(dx12_rhi->CommandList.Get());
 		RS_Mesh->ps->SetSampler("samplerWrap", samplerWrap.get(), dx12_rhi->CommandList.Get());
@@ -1378,17 +1407,11 @@ void dx12_framework::DrawMeshPass()
 		dx12_rhi->CommandQueue->ExecuteCommandLists(vecCL.size(), &vecCL[0]);
 	}
 
-	//D3D12_RESOURCE_BARRIER BarrierDescPresent = {};
-	//BarrierDescPresent.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-	//BarrierDescPresent.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
-	//BarrierDescPresent.Transition.pResource = backbuffer->resource.Get();
-	//BarrierDescPresent.Transition.Subresource = 0;
-	//BarrierDescPresent.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
-	//BarrierDescPresent.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
-	//dx12_rhi->CommandList->ResourceBarrier(1, &BarrierDescPresent);
+	
 	
 	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(AlbedoBuffer->resource.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
 	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(NormalBuffer->resource.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
+	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(GeomNormalBuffer->resource.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
 
 
 	PIXEndEvent(dx12_rhi->CommandList.Get());
