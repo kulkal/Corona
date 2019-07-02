@@ -28,7 +28,7 @@ public:
 	void OnKeyDown(WPARAM key);
 	void OnKeyUp(WPARAM key);
 
-private:
+public:
 	void Reset();
 
 	struct KeysPressed

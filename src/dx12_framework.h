@@ -45,7 +45,8 @@ class dx12_framework : public DXSample
 	struct ObjConstantBuffer
 	{
 		XMFLOAT4X4 WorldMatrix;		// Model-view-projection (MVP) matrix.
-		FLOAT padding[48];
+		glm::vec4 ViewDir;
+		//FLOAT padding[48];
 	};
 
 	struct RTViewParamCB

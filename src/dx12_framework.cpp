@@ -488,7 +488,7 @@ void dx12_framework::LoadAssets()
 	NAME_D3D12_OBJECT(ColorBuffer->resource);
 
 	// world normal
-	NormalBuffer = dx12_rhi->CreateTexture2D(DXGI_FORMAT_R8G8B8A8_UNORM,
+	NormalBuffer = dx12_rhi->CreateTexture2D(DXGI_FORMAT_R16G16B16A16_FLOAT,
 		D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
 		D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, m_width, m_height, 1);
 	NormalBuffer->MakeRTV();
@@ -497,7 +497,7 @@ void dx12_framework::LoadAssets()
 	NAME_D3D12_OBJECT(NormalBuffer->resource);
 
 	// geometry world normal
-	GeomNormalBuffer = dx12_rhi->CreateTexture2D(DXGI_FORMAT_R8G8B8A8_UNORM,
+	GeomNormalBuffer = dx12_rhi->CreateTexture2D(DXGI_FORMAT_R16G16B16A16_FLOAT,
 		D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
 		D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, m_width, m_height, 1);
 	GeomNormalBuffer->MakeRTV();
@@ -734,8 +734,8 @@ void dx12_framework::InitDrawMeshRS()
 	psoDescMesh.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
 	psoDescMesh.NumRenderTargets = 3;
 	psoDescMesh.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
-	psoDescMesh.RTVFormats[1] = DXGI_FORMAT_R8G8B8A8_UNORM;
-	psoDescMesh.RTVFormats[2] = DXGI_FORMAT_R8G8B8A8_UNORM;
+	psoDescMesh.RTVFormats[1] = DXGI_FORMAT_R16G16B16A16_FLOAT;
+	psoDescMesh.RTVFormats[2] = DXGI_FORMAT_R16G16B16A16_FLOAT;
 
 	psoDescMesh.DSVFormat = DXGI_FORMAT_D32_FLOAT;
 	psoDescMesh.SampleDesc.Count = 1;
@@ -1194,7 +1194,7 @@ void dx12_framework::OnRender()
 
 	LightingPass();
 
-	RaytracePass();
+	//RaytracePass();
 
 	CopyPass();
 
@@ -1347,6 +1347,10 @@ void dx12_framework::DrawMeshPass()
 			Mesh::DrawCall& drawcall = SquintRoom->Draws[i];
 			ObjConstantBuffer objCB;
 			XMStoreFloat4x4(&objCB.WorldMatrix, XMMatrixRotationY(i * 0));
+			objCB.ViewDir.x = m_camera.m_lookDirection.x;
+			objCB.ViewDir.y = m_camera.m_lookDirection.y;
+			objCB.ViewDir.z = m_camera.m_lookDirection.z;
+
 			RS_Mesh->vs->SetConstantValue("ObjParameter", (void*)&objCB.WorldMatrix, dx12_rhi->CommandList.Get(), nullptr);
 
 			Texture* diffuseTex = SquintRoom->Textures[drawcall.DiffuseTextureIndex].get();
@@ -1521,6 +1525,8 @@ void dx12_framework::InitRaytracing()
 	PSO_RT->BindSRV("rayGen", "gRtScene", 0);
 	PSO_RT->BindCBV("rayGen", "ViewParameter", 0, sizeof(RTViewParamCB), 1);
 	PSO_RT->BindSRV("rayGen", "DepthTex", 1);
+	PSO_RT->BindSRV("rayGen", "WorldNormalTex", 2);
+
 	PSO_RT->BindSampler("rayGen", "samplerWrap", 0);
 
 	PSO_RT->AddShader("miss", RTPipelineStateObject::MISS);
@@ -1539,7 +1545,7 @@ void dx12_framework::InitRaytracing()
 void dx12_framework::RaytracePass()
 {
 	GFSDK_Aftermath_SetEventMarker(dx12_rhi->AM_CL_Handle, nullptr, 0);
-	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(dx12_rhi->depthTexture->resource.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
+	//dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(dx12_rhi->depthTexture->resource.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
 	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(ShadowBuffer->resource.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS));
 
 
@@ -1549,6 +1555,7 @@ void dx12_framework::RaytracePass()
 	PSO_RT->SetSRV("rayGen", "gRtScene", RTASCPUHandle);
 	PSO_RT->SetCBVValue("rayGen", "ViewParameter", &RTViewParam, sizeof(RTViewParamCB));
 	PSO_RT->SetSRV("rayGen", "DepthTex", dx12_rhi->depthTexture->CpuHandleSRV);
+	PSO_RT->SetSRV("rayGen", "WorldNormalTex", GeomNormalBuffer->CpuHandleSRV);
 	PSO_RT->SetSampler("rayGen", "samplerWrap", samplerWrap.get());
 
 	PSO_RT->SetHitProgram("chs", 0); // this pass use only 1 hit program
@@ -1556,7 +1563,7 @@ void dx12_framework::RaytracePass()
 
 	PSO_RT->Apply(m_width, m_height);
 
-	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(dx12_rhi->depthTexture->resource.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_DEPTH_WRITE));
+	//dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(dx12_rhi->depthTexture->resource.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_DEPTH_WRITE));
 	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(ShadowBuffer->resource.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
 
 }

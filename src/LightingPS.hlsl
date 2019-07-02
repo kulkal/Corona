@@ -51,7 +51,7 @@ float4 PSMain(PSInput input) : SV_TARGET
     float3 Albedo = AlbedoTex.Sample(sampleWrap, input.uv);
     float3 WorldNormal = NormalTex.Sample(sampleWrap, input.uv);
 	
-    float3 DiffuseLighting = dot(LightDir.xyz, WorldNormal)*Albedo;
+    float3 DiffuseLighting = dot(LightDir.xyz, WorldNormal)* Albedo;
 
 
 

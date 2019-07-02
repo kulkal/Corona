@@ -27,6 +27,8 @@
 ***************************************************************************/
 RaytracingAccelerationStructure gRtScene : register(t0);
 Texture2D DepthTex : register(t1);
+Texture2D WorldNormalTex : register(t2);
+
 RWTexture2D<float4> gOutput : register(u0);
 cbuffer ViewParameter : register(b0)
 {
@@ -52,7 +54,7 @@ float3 linearToSrgb(float3 c)
 
 struct RayPayload
 {
-    float3 color;
+    //float3 color;
     float distance;
 };
 
@@ -74,20 +76,31 @@ float3 GetViewPosition(float LinearDepth, float2 ScreenPosition, float Proj11, f
     return ViewPosition;
 }
 
+float3 offset_ray(float3 p, float3 n)
+{
+    float origin = 1.0f / 32.0f;
+    float float_scale = 1.0f / 65536.0f;
+    float int_scale = 256.0f;
+	
+    int3 of_i = int3(int_scale * n.x, int_scale * n.y, int_scale * n.z);
+
+}
 
 [shader("raygeneration")]
-void rayGen()
+
+    void rayGen
+    ()
 {
-    uint3 launchIndex = DispatchRaysIndex();
-    uint3 launchDim = DispatchRaysDimensions();
+        uint3 launchIndex = DispatchRaysIndex();
+        uint3 launchDim = DispatchRaysDimensions();
 
-    float2 crd = float2(launchIndex.xy);
+        float2 crd = float2(launchIndex.xy);
     //crd.y *= -1;
-    float2 dims = float2(launchDim.xy);
+        float2 dims = float2(launchDim.xy);
 
-    float2 d = ((crd/dims) * 2.f - 1.f);
-    d *= tan(0.8 / 2);
-    float aspectRatio = dims.x / dims.y;
+        float2 d = ((crd / dims) * 2.f - 1.f);
+        d *= tan(0.8 / 2);
+        float aspectRatio = dims.x / dims.y;
 
 
     //RayDesc ray;
@@ -104,65 +117,88 @@ void rayGen()
     //float dd = payload.distance / 1000.0f;
     //gOutput[launchIndex.xy] = float4(dd, dd, dd, 1);
 
-    float2 UV = crd / dims;
-    float DeviceDepth = DepthTex.SampleLevel(sampleWrap, UV, 0).x;
+        float2 UV = crd / dims;
+        float DeviceDepth = DepthTex.SampleLevel(sampleWrap, UV, 0).x;
+
+        float3 WorldNormal = normalize(WorldNormalTex.SampleLevel(sampleWrap, UV, 0).xyz);
+  
+
+        float LinearDepth = GetLinearDepth(DeviceDepth, ProjectionParams.x, ProjectionParams.y) * ProjectionParams.z;
+
+        float2 ScreenPosition = crd.xy;
+        ScreenPosition.x /= dims.x;
+        ScreenPosition.y /= dims.y;
+        ScreenPosition.xy = ScreenPosition.xy * 2 - 1;
+        ScreenPosition.y = -ScreenPosition.y;
+
+        float3 ViewPosition = GetViewPosition(LinearDepth, ScreenPosition, ProjMatrix._11, ProjMatrix._22);
+        float3 WorldPos = mul(float4(ViewPosition, 1), InvViewMatrix).xyz;
 
   
 
-    float LinearDepth = GetLinearDepth(DeviceDepth, ProjectionParams.x, ProjectionParams.y) * ProjectionParams.z;
 
-    float2 ScreenPosition = crd.xy;
-    ScreenPosition.x /= dims.x;
-    ScreenPosition.y /= dims.y;
-    ScreenPosition.xy = ScreenPosition.xy * 2 - 1;
-    ScreenPosition.y = -ScreenPosition.y;
 
-    float3 ViewPosition = GetViewPosition(LinearDepth, ScreenPosition, ProjMatrix._11, ProjMatrix._22);
-    float3 WorldPos = mul(float4(ViewPosition, 1), InvViewMatrix).xyz;
+        RayDesc ray;
+        ray.Origin = WorldPos + WorldNormal * 0.5; //    mul(float4(0, 0, 0, 1), InvViewMatrix).xyz;
+        ray.Direction = LightDir;
 
-    RayDesc ray;
-    ray.Origin = WorldPos;//    mul(float4(0, 0, 0, 1), InvViewMatrix).xyz;
-    ray.Direction = LightDir;
+        ray.TMin = 0;
+        ray.TMax = 100000;
 
-    ray.TMin = 0.5;
-    ray.TMax = 100000;
-
-    RayPayload payload;
-    TraceRay(gRtScene, 0 /*rayFlags*/, 0xFF, 0 /* ray index*/, 0, 0, ray, payload);
+        RayPayload payload;
+        TraceRay(gRtScene, 0 /*rayFlags*/, 0xFF, 0 /* ray index*/, 0, 0, ray, payload);
     //float3 col = linearToSrgb(payload.color);
-    if (payload.distance == 0)
-    {
-        gOutput[launchIndex.xy] = float4(1, 1, 1, 1);
-    }
-	else
-    {
-        gOutput[launchIndex.xy] = float4(0, 0, 0, 1);
-    }
+
+        if (payload.distance == 0)
+        {
+            gOutput[launchIndex.xy] = float4(1, 1, 1, 1);
+        }
+    //else if (payload.distance < 5)
+    //{
+    //    gOutput[launchIndex.xy] = float4(1, 0.1, 0.1, 1);
+    //}
+    //else if (payload.distance > 500)
+    //{
+    //    gOutput[launchIndex.xy] = float4(0.1, 0.1, 1, 1);
+    //}
+        else
+        {
+            gOutput[launchIndex.xy] = float4(0.1, 0.1, 0.1, 1);
+        }
+    //float dd = payload.distance / 1000;
+    //gOutput[launchIndex.xy] = float4(dd, dd, dd, 1);
 
 
     //gOutput[launchIndex.xy] = float4(DeviceDepth, 0, 0, 1);
-        //gOutput[launchIndex.xy] = float4(WorldPos, 1);
+    //gOutput[launchIndex.xy] = float4(WorldPos/1000.0, 1);
 
 
 
     }
 
 [shader("miss")]
-void miss(inout RayPayload payload)
+
+    void miss
+    (inout
+    RayPayload payload)
 {
-    payload.color = float3(0.4, 0.6, 0.2);
-    payload.distance = 0;
-}
+    //payload.color = float3(0.4, 0.6, 0.2);
+        payload.distance = 0;
+    }
 
 [shader("closesthit")]
-void chs(inout RayPayload payload, in BuiltInTriangleIntersectionAttributes attribs)
+
+    void chs
+    (inout
+    RayPayload payload, in BuiltInTriangleIntersectionAttributes
+    attribs)
 {
-    float3 barycentrics = float3(1.0 - attribs.barycentrics.x - attribs.barycentrics.y, attribs.barycentrics.x, attribs.barycentrics.y);
+    //float3 barycentrics = float3(1.0 - attribs.barycentrics.x - attribs.barycentrics.y, attribs.barycentrics.x, attribs.barycentrics.y);
 
-    const float3 A = float3(1, 0, 0);
-    const float3 B = float3(0, 1, 0);
-    const float3 C = float3(0, 0, 1);
+    //const float3 A = float3(1, 0, 0);
+    //const float3 B = float3(0, 1, 0);
+    //const float3 C = float3(0, 0, 1);
 
-    payload.color = A * barycentrics.x + B * barycentrics.y + C * barycentrics.z;
-    payload.distance = RayTCurrent();
-}
+    //payload.color = A * barycentrics.x + B * barycentrics.y + C * barycentrics.z;
+        payload.distance = RayTCurrent();
+    }

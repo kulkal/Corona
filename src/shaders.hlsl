@@ -24,6 +24,7 @@ cbuffer ViewParameter : register(b0)
 cbuffer ObjParameter : register(b1)
 {
     float4x4 WorldMatrix;
+    float4 ViewDir;
 };
 
 struct VSInput
@@ -52,7 +53,13 @@ PSInput VSMain(
     result.position = mul(worldPos, ViewProjectionMatrix);
 	result.worldpos = worldPos;
 
-    result.normal = input.normal;
+    float3 CorrectNormal;
+ //   if (dot(input.normal, ViewDir.xyz) > 0)
+ //       CorrectNormal = input.normal;
+	//else
+        CorrectNormal = input.normal;
+
+	result.normal = CorrectNormal;
     result.tangent = input.tangent;
     result.uv = input.uv;
 	
