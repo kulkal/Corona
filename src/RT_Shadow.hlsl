@@ -87,94 +87,78 @@ float3 offset_ray(float3 p, float3 n)
 }
 
 [shader("raygeneration")]
-
-    void rayGen
-    ()
+void rayGen
+()
 {
-        uint3 launchIndex = DispatchRaysIndex();
-        uint3 launchDim = DispatchRaysDimensions();
+	uint3 launchIndex = DispatchRaysIndex();
+	uint3 launchDim = DispatchRaysDimensions();
 
-        float2 crd = float2(launchIndex.xy);
-    //crd.y *= -1;
-        float2 dims = float2(launchDim.xy);
+	float2 crd = float2(launchIndex.xy);
+	//crd.y *= -1;
+	float2 dims = float2(launchDim.xy);
 
-        float2 d = ((crd / dims) * 2.f - 1.f);
-        d *= tan(0.8 / 2);
-        float aspectRatio = dims.x / dims.y;
+	float2 d = ((crd / dims) * 2.f - 1.f);
+	d *= tan(0.8 / 2);
+	float aspectRatio = dims.x / dims.y;
 
+#define DEPTH 1
 
-    //RayDesc ray;
-    //ray.Origin = mul(float4(0, 0, 0, 1), InvViewMatrix).xyz;
-    //ray.Direction = mul(normalize(float3(d.x * aspectRatio, -d.y, -1)), InvViewMatrix);
+#if DEPTH
+	RayDesc ray;
+	ray.Origin = mul(float4(0, 0, 0, 1), InvViewMatrix).xyz;
+	ray.Direction = mul(normalize(float3(d.x * aspectRatio, -d.y, -1)), InvViewMatrix);
 
-    //ray.TMin = 0;
-    //ray.TMax = 100000;
+	ray.TMin = 0;
+	ray.TMax = 100000;
 
-    //RayPayload payload;
-    //TraceRay( gRtScene, 0 /*rayFlags*/, 0xFF, 0 /* ray index*/, 0, 0, ray, payload );
-    //float3 col = linearToSrgb(payload.color);
-    //gOutput[launchIndex.xy] = float4(col, 1);
-    //float dd = payload.distance / 1000.0f;
-    //gOutput[launchIndex.xy] = float4(dd, dd, dd, 1);
+	RayPayload payload;
+    TraceRay(gRtScene, 0 /*rayFlags*/, 0xFF, 0 /* ray index*/, 0, 0, ray, payload);
+	float dd = payload.distance / 10.0f;
+	gOutput[launchIndex.xy] = float4(dd, dd, dd, 1);
+    gOutput[launchIndex.xy] = float4(1, 0, 0, 1);
 
-        float2 UV = crd / dims;
-        float DeviceDepth = DepthTex.SampleLevel(sampleWrap, UV, 0).x;
+#else
+	float2 UV = crd / dims;
+	float DeviceDepth = DepthTex.SampleLevel(sampleWrap, UV, 0).x;
 
-        float3 WorldNormal = normalize(WorldNormalTex.SampleLevel(sampleWrap, UV, 0).xyz);
+	float3 WorldNormal = normalize(WorldNormalTex.SampleLevel(sampleWrap, UV, 0).xyz);
   
 
-        float LinearDepth = GetLinearDepth(DeviceDepth, ProjectionParams.x, ProjectionParams.y) * ProjectionParams.z;
+	float LinearDepth = GetLinearDepth(DeviceDepth, ProjectionParams.x, ProjectionParams.y) * ProjectionParams.z;
 
-        float2 ScreenPosition = crd.xy;
-        ScreenPosition.x /= dims.x;
-        ScreenPosition.y /= dims.y;
-        ScreenPosition.xy = ScreenPosition.xy * 2 - 1;
-        ScreenPosition.y = -ScreenPosition.y;
+	float2 ScreenPosition = crd.xy;
+	ScreenPosition.x /= dims.x;
+	ScreenPosition.y /= dims.y;
+	ScreenPosition.xy = ScreenPosition.xy * 2 - 1;
+	ScreenPosition.y = -ScreenPosition.y;
 
-        float3 ViewPosition = GetViewPosition(LinearDepth, ScreenPosition, ProjMatrix._11, ProjMatrix._22);
-        float3 WorldPos = mul(float4(ViewPosition, 1), InvViewMatrix).xyz;
+	float3 ViewPosition = GetViewPosition(LinearDepth, ScreenPosition, ProjMatrix._11, ProjMatrix._22);
+	float3 WorldPos = mul(float4(ViewPosition, 1), InvViewMatrix).xyz;
 
   
 
 
 
-        RayDesc ray;
-        ray.Origin = WorldPos + WorldNormal * 0.5; //    mul(float4(0, 0, 0, 1), InvViewMatrix).xyz;
-        ray.Direction = LightDir;
+	RayDesc ray;
+	ray.Origin = WorldPos + WorldNormal * 0.5; //    mul(float4(0, 0, 0, 1), InvViewMatrix).xyz;
+	ray.Direction = LightDir;
 
-        ray.TMin = 0;
-        ray.TMax = 100000;
+	ray.TMin = 0;
+	ray.TMax = 100000;
 
-        RayPayload payload;
-        TraceRay(gRtScene, 0 /*rayFlags*/, 0xFF, 0 /* ray index*/, 0, 0, ray, payload);
-    //float3 col = linearToSrgb(payload.color);
+	RayPayload payload;
+	TraceRay(gRtScene, 0 /*rayFlags*/, 0xFF, 0 /* ray index*/, 0, 0, ray, payload);
 
-        if (payload.distance == 0)
-        {
-            gOutput[launchIndex.xy] = float4(1, 1, 1, 1);
-        }
-    //else if (payload.distance < 5)
-    //{
-    //    gOutput[launchIndex.xy] = float4(1, 0.1, 0.1, 1);
-    //}
-    //else if (payload.distance > 500)
-    //{
-    //    gOutput[launchIndex.xy] = float4(0.1, 0.1, 1, 1);
-    //}
-        else
-        {
-            gOutput[launchIndex.xy] = float4(0.1, 0.1, 0.1, 1);
-        }
-    //float dd = payload.distance / 1000;
-    //gOutput[launchIndex.xy] = float4(dd, dd, dd, 1);
-
-
-    //gOutput[launchIndex.xy] = float4(DeviceDepth, 0, 0, 1);
-    //gOutput[launchIndex.xy] = float4(WorldPos/1000.0, 1);
-
-
-
-    }
+	if (payload.distance == 0)
+	{
+		gOutput[launchIndex.xy] = float4(1, 1, 1, 1);
+	}
+	else
+	{
+		gOutput[launchIndex.xy] = float4(0.1, 0.1, 0.1, 1);
+	}
+	#endif
+}
 
 [shader("miss")]
 

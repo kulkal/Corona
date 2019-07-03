@@ -57,3 +57,9 @@ std::wstring GetFileExtension(const WCHAR* filePath_)
 	else
 		return std::wstring(L"");
 }
+
+void NVAftermathMarker(GFSDK_Aftermath_ContextHandle ah, std::string markerName)
+{
+	GFSDK_Aftermath_Result ar = GFSDK_Aftermath_SetEventMarker(ah, markerName.c_str(), markerName.length());
+
+}

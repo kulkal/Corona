@@ -36,15 +36,12 @@ using namespace std;
 
 class dx12_framework : public DXSample
 {
-	struct SceneConstantBuffer
-	{
-		XMFLOAT4X4 mvp;		// Model-view-projection (MVP) matrix.
-		FLOAT padding[48];
-	};
-
 	struct ObjConstantBuffer
 	{
-		XMFLOAT4X4 WorldMatrix;		// Model-view-projection (MVP) matrix.
+		//XMFLOAT4X4 mvp;		// Model-view-projection (MVP) matrix.
+		glm::mat4x4 ViewProjectionMatrix;
+		//XMFLOAT4X4 WorldMatrix;		// Model-view-projection (MVP) matrix.
+		glm::mat4x4 WorldMatrix;
 		glm::vec4 ViewDir;
 		//FLOAT padding[48];
 	};
@@ -143,13 +140,13 @@ private:
 
 	// Frame resources.
 
-	unique_ptr<GlobalConstantBuffer> ViewParameter;
 
 	XMFLOAT4X4 m_modelMatrices;
 
 	glm::vec3 LightDir = glm::normalize(glm::vec3(1, 1, 0));
 
-
+	float Near = 1.0f;
+	float Far = 10000.0f;
 	std::unique_ptr<DumRHI_DX12> dx12_rhi;									
 
 

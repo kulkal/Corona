@@ -24,6 +24,8 @@
 
 #define align_to(_alignment, _val) (((_val + _alignment - 1) / _alignment) * _alignment)
 
+using namespace std;
+
 DumRHI_DX12* g_dx12_rhi;
 
 ThreadDescriptorHeapPool::ThreadDescriptorHeapPool()
@@ -115,7 +117,7 @@ void DumRHI_DX12::BeginFrame()
 void DumRHI_DX12::EndFrame()
 {
 	// Present and update the frame index for the next frame.
-	ThrowIfFailed(m_swapChain->Present(0, 0));
+	ThrowIfFailed(m_swapChain->Present(0, 0), &g_dx12_rhi->AM_CL_Handle);
 
 	// Signal and increment the fence value.
 	FrameResourceVec[CurrentFrameIndex].FenceValue = FrameFenceValue;
@@ -199,6 +201,10 @@ shared_ptr<ConstantBuffer> DumRHI_DX12::CreateConstantBuffer(int Size, UINT NumV
 	resDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
 	resDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
 
+	stringstream ss;
+	ss << "CreateConstantBuffer : " << resDesc.Width << "\n";
+	OutputDebugStringA(ss.str().c_str());
+
 	ThrowIfFailed(Device->CreateCommittedResource(
 		&heapProp,
 		D3D12_HEAP_FLAG_NONE,
@@ -257,6 +263,9 @@ shared_ptr<IndexBuffer> DumRHI_DX12::CreateIndexBuffer(DXGI_FORMAT Format, UINT 
 {
 	IndexBuffer* ib = new IndexBuffer;
 
+	stringstream ss;
+	ss << "CreateIndexBuffer : " << Size << "\n";
+	OutputDebugStringA(ss.str().c_str());
 
 	ThrowIfFailed(Device->CreateCommittedResource(
 		&CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT),
@@ -300,7 +309,7 @@ shared_ptr<IndexBuffer> DumRHI_DX12::CreateIndexBuffer(DXGI_FORMAT Format, UINT 
 			IID_PPV_ARGS(&UploadHeap)));
 
 		UpdateSubresources<1>(CommandList.Get(), ib->resource.Get(), UploadHeap.Get(), 0, 0, 1, &indexData);
-		CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(ib->resource.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_INDEX_BUFFER));
+		CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(ib->resource.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_INDEX_BUFFER | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE));
 
 
 		ThrowIfFailed(CommandList->Close());
@@ -348,7 +357,11 @@ shared_ptr<IndexBuffer> DumRHI_DX12::CreateIndexBuffer(DXGI_FORMAT Format, UINT 
 shared_ptr<VertexBuffer> DumRHI_DX12::CreateVertexBuffer(UINT Size, UINT Stride, void* SrcData)
 {
 	VertexBuffer* vb = new VertexBuffer;
-
+	
+	stringstream ss;
+	ss << "CreateVertexBuffer : " << Size << "\n";
+	OutputDebugStringA(ss.str().c_str());
+	
 	ThrowIfFailed(Device->CreateCommittedResource(
 		&CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT),
 		D3D12_HEAP_FLAG_NONE,
@@ -377,7 +390,7 @@ shared_ptr<VertexBuffer> DumRHI_DX12::CreateVertexBuffer(UINT Size, UINT Stride,
 			IID_PPV_ARGS(&UploadHeap)));
 
 		UpdateSubresources<1>(CommandList.Get(), vb->resource.Get(), UploadHeap.Get(), 0, 0, 1, &vertexData);
-		CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(vb->resource.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER));
+		CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(vb->resource.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE));
 
 		// Initialize the vertex buffer view.
 		vb->view.BufferLocation = vb->resource->GetGPUVirtualAddress();
@@ -1362,6 +1375,10 @@ void Texture::UploadSRCData(D3D12_SUBRESOURCE_DATA* SrcData)
 		resDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
 		resDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
 
+		stringstream ss;
+		ss << "UploadSRCData : " << uploadBufferSize << "\n";
+		OutputDebugStringA(ss.str().c_str());
+
 
 		ThrowIfFailed(g_dx12_rhi->Device->CreateCommittedResource(
 			&heapProp,
@@ -1485,6 +1502,10 @@ std::shared_ptr<Texture> DumRHI_DX12::CreateTextureFromFile(wstring fileName)
 	resDesc.SampleDesc.Quality = 0;
 	resDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
 	resDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
+
+	stringstream ss;
+	ss << "CreateTextureFromFile : " << uploadBufferSize << "\n";
+	OutputDebugStringA(ss.str().c_str());
 
 	g_dx12_rhi->Device->CreateCommittedResource(&heapPropUpload, D3D12_HEAP_FLAG_NONE, &resDesc,
 		D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&uploadHeap));
@@ -1628,6 +1649,10 @@ shared_ptr<RTAS> Mesh::CreateBLAS()
 		bufDesc.SampleDesc.Quality = 0;
 		bufDesc.Width = info.ScratchDataSizeInBytes;
 
+		stringstream ss;
+		ss << "blas->scratch : " << bufDesc.Width << "\n";
+		OutputDebugStringA(ss.str().c_str());
+
 		g_dx12_rhi->Device->CreateCommittedResource(&kDefaultHeapProps, D3D12_HEAP_FLAG_NONE, &bufDesc, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, IID_PPV_ARGS(&as->Scratch));
 
 	}
@@ -1645,6 +1670,16 @@ shared_ptr<RTAS> Mesh::CreateBLAS()
 		bufDesc.SampleDesc.Count = 1;
 		bufDesc.SampleDesc.Quality = 0;
 		bufDesc.Width = info.ResultDataMaxSizeInBytes;
+
+		if (bufDesc.Width == 4960 || bufDesc.Width == 6272 || bufDesc.Width == 3712 || bufDesc.Width == 156160)
+		{
+			int a = 0;
+			return nullptr;
+		}
+		stringstream ss;
+		ss << "blas->result : " << bufDesc.Width << "\n";
+		OutputDebugStringA(ss.str().c_str());
+
 
 		g_dx12_rhi->Device->CreateCommittedResource(&kDefaultHeapProps, D3D12_HEAP_FLAG_NONE, &bufDesc, D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE, nullptr, IID_PPV_ARGS(&as->Result));
 	}
@@ -1727,6 +1762,11 @@ std::shared_ptr<RTAS> Mesh::CreateBLASArray()
 		bufDesc.SampleDesc.Quality = 0;
 		bufDesc.Width = info.ScratchDataSizeInBytes;
 
+
+		stringstream ss;
+		ss << "blasarray->result : " << bufDesc.Width;
+		OutputDebugStringA(ss.str().c_str());
+
 		g_dx12_rhi->Device->CreateCommittedResource(&kDefaultHeapProps, D3D12_HEAP_FLAG_NONE, &bufDesc, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, IID_PPV_ARGS(&as->Scratch));
 
 	}
@@ -1744,6 +1784,11 @@ std::shared_ptr<RTAS> Mesh::CreateBLASArray()
 		bufDesc.SampleDesc.Count = 1;
 		bufDesc.SampleDesc.Quality = 0;
 		bufDesc.Width = info.ResultDataMaxSizeInBytes;
+
+
+		stringstream ss;
+		ss << "blasarray->result : " << bufDesc.Width << "\n" << "\n";
+		OutputDebugStringA(ss.str().c_str());
 
 		g_dx12_rhi->Device->CreateCommittedResource(&kDefaultHeapProps, D3D12_HEAP_FLAG_NONE, &bufDesc, D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE, nullptr, IID_PPV_ARGS(&as->Result));
 	}
@@ -1792,6 +1837,12 @@ shared_ptr<RTAS> DumRHI_DX12::CreateTLAS(vector<shared_ptr<RTAS>>& VecBottomLeve
 		bufDesc.SampleDesc.Quality = 0;
 		bufDesc.Width = info.ScratchDataSizeInBytes;
 
+
+		stringstream ss;
+		ss << "tlas->result : " << bufDesc.Width << "\n";
+		OutputDebugStringA(ss.str().c_str());
+
+
 		g_dx12_rhi->Device->CreateCommittedResource(&kDefaultHeapProps, D3D12_HEAP_FLAG_NONE, &bufDesc, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, IID_PPV_ARGS(&as->Scratch));
 
 	}
@@ -1810,6 +1861,12 @@ shared_ptr<RTAS> DumRHI_DX12::CreateTLAS(vector<shared_ptr<RTAS>>& VecBottomLeve
 		bufDesc.SampleDesc.Quality = 0;
 		bufDesc.Width = info.ResultDataMaxSizeInBytes;
 
+
+		stringstream ss;
+		ss << "tlas->result : " << bufDesc.Width << "\n";
+		OutputDebugStringA(ss.str().c_str());
+
+
 		g_dx12_rhi->Device->CreateCommittedResource(&kDefaultHeapProps, D3D12_HEAP_FLAG_NONE, &bufDesc, D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE, nullptr, IID_PPV_ARGS(&as->Result));
 	}
 
@@ -1825,7 +1882,13 @@ shared_ptr<RTAS> DumRHI_DX12::CreateTLAS(vector<shared_ptr<RTAS>>& VecBottomLeve
 		bufDesc.MipLevels = 1;
 		bufDesc.SampleDesc.Count = 1;
 		bufDesc.SampleDesc.Quality = 0;
-		bufDesc.Width = sizeof(D3D12_RAYTRACING_INSTANCE_DESC);
+		bufDesc.Width = sizeof(D3D12_RAYTRACING_INSTANCE_DESC) * VecBottomLevelAS.size();
+
+
+		stringstream ss;
+		ss << "as->instance : " << bufDesc.Width << "\n";
+		OutputDebugStringA(ss.str().c_str());
+
 
 		g_dx12_rhi->Device->CreateCommittedResource(&kUploadHeapProps, D3D12_HEAP_FLAG_NONE, &bufDesc, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&as->Instance));
 	}
@@ -1836,7 +1899,7 @@ shared_ptr<RTAS> DumRHI_DX12::CreateTLAS(vector<shared_ptr<RTAS>>& VecBottomLeve
 
 	for (int i = 0; i < VecBottomLevelAS.size(); i++)
 	{
-		pInstanceDesc[i].InstanceID = 0;                            // This value will be exposed to the shader via InstanceID()
+		pInstanceDesc[i].InstanceID = i;                            // This value will be exposed to the shader via InstanceID()
 		pInstanceDesc[i].InstanceContributionToHitGroupIndex = 0;   // This is the offset inside the shader-table. We only have a single geometry, so the offset 0
 		pInstanceDesc[i].Flags = D3D12_RAYTRACING_INSTANCE_FLAG_NONE;
 		glm::mat4 m; // Identity matrix
@@ -2166,6 +2229,7 @@ void RTPipelineStateObject::BeginShaderTable()
 	HitProgramBinding.clear();
 }
 
+
 void RTPipelineStateObject::EndShaderTable()
 {
 	// raygen : simple, it is just the begin of table
@@ -2202,6 +2266,10 @@ void RTPipelineStateObject::EndShaderTable()
 		{
 			memcpy(pDataThis, RtsoProps->GetShaderIdentifier(bindingInfo.ShaderName.c_str()), D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES);
 			pDataThis += D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES;
+
+			
+			
+
 			for (auto& bd : bindingInfo.Binding)
 			{
 				if (bd.Type == D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER)
@@ -2227,6 +2295,8 @@ void RTPipelineStateObject::EndShaderTable()
 					g_dx12_rhi->SRVCBVDescriptorHeapShaderVisible->AllocDescriptor(ShaderVisibleCPU, ShaderVisibleGPU);
 					g_dx12_rhi->Device->CopyDescriptorsSimple(1, ShaderVisibleCPU, CPUHandle, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
 					*(UINT64*)(pDataThis) = ShaderVisibleGPU.ptr;
+					memcpy(pDataThis, &ShaderVisibleGPU.ptr, sizeof(UINT64));
+					UINT64 v = *(UINT64*)(pDataThis);
 
 				}
 				
@@ -2238,6 +2308,9 @@ void RTPipelineStateObject::EndShaderTable()
 		}
 	}
 	LastIndex++;
+
+	
+
 
 	// miss
 	for (auto& sb : ShaderBinding)
@@ -2253,6 +2326,7 @@ void RTPipelineStateObject::EndShaderTable()
 
 		}
 	}
+	
 
 	// hit program 
 	//for (auto& sb : ShaderBinding)
@@ -2281,6 +2355,7 @@ void RTPipelineStateObject::EndShaderTable()
 
 		LastIndex++;
 	}
+
 
 	ShaderTable->Unmap(0, nullptr);
 }
@@ -2649,6 +2724,12 @@ void RTPipelineStateObject::InitRS(string ShaderFile)
 			0,
 		};
 
+
+		stringstream ss;
+		ss << "shadertable : " << bufDesc.Width << "\n";
+		OutputDebugStringA(ss.str().c_str());
+
+
 		g_dx12_rhi->Device->CreateCommittedResource(&kUploadHeapProps, D3D12_HEAP_FLAG_NONE, &bufDesc, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&ShaderTable));
 
 	}
@@ -2683,9 +2764,7 @@ void RTPipelineStateObject::Apply(UINT width, UINT height)
 	g_dx12_rhi->CommandList->SetComputeRootSignature(GlobalRS.Get());
 	g_dx12_rhi->CommandList->SetPipelineState1(RTPipelineState.Get());
 
-
-	GFSDK_Aftermath_SetEventMarker(g_dx12_rhi->AM_CL_Handle, nullptr, 0);
-
+	
 	g_dx12_rhi->CommandList->DispatchRays(&raytraceDesc);
 }
 

@@ -340,7 +340,7 @@ void dx12_framework::LoadPipeline()
 
 	UINT dxgiFactoryFlags = 0;
 
-#if defined(_DEBUG)
+#if 0//defined(_DEBUG)
 	// Enable the debug layer (requires the Graphics Tools "optional feature").
 	// NOTE: Enabling the debug layer after device creation will invalidate the active device.
 	{
@@ -437,7 +437,6 @@ void dx12_framework::LoadPipeline()
 
 
 
-	ViewParameter = make_unique<GlobalConstantBuffer>(sizeof(SceneConstantBuffer));
 
 	// Describe and create the swap chain.
 	DXGI_SWAP_CHAIN_DESC1 swapChainDesc = {};
@@ -548,7 +547,7 @@ void dx12_framework::LoadAssets()
 
 
 	// load indoor scene assets
-	LoadMesh();
+	//LoadMesh();
 
 	LoadFbx();
 
@@ -881,7 +880,7 @@ void dx12_framework::InitDrawMeshRS()
 
 	try
 	{
-		ThrowIfFailed(D3DCompileFromFile(GetAssetFullPath(L"shaders.hlsl").c_str(), nullptr, nullptr, "VSMain", "vs_5_0", compileFlags, 0, &vertexShader, &compilationMsgs));
+		ThrowIfFailed(D3DCompileFromFile(GetAssetFullPath(L"MeshDraw.hlsl").c_str(), nullptr, nullptr, "VSMain", "vs_5_0", compileFlags, 0, &vertexShader, &compilationMsgs));
 	}
 	catch (const std::exception& e)
 	{
@@ -891,7 +890,7 @@ void dx12_framework::InitDrawMeshRS()
 
 	try
 	{
-		ThrowIfFailed(D3DCompileFromFile(GetAssetFullPath(L"shaders.hlsl").c_str(), nullptr, nullptr, "PSMain", "ps_5_0", compileFlags, 0, &pixelShader, &compilationMsgs));
+		ThrowIfFailed(D3DCompileFromFile(GetAssetFullPath(L"MeshDraw.hlsl").c_str(), nullptr, nullptr, "PSMain", "ps_5_0", compileFlags, 0, &pixelShader, &compilationMsgs));
 	}
 	catch (const std::exception& e)
 	{
@@ -906,8 +905,8 @@ void dx12_framework::InitDrawMeshRS()
 	ps->BindSampler("samplerWrap", 0);
 
 	Shader* vs = new Shader((UINT8*)vertexShader->GetBufferPointer(), vertexShader->GetBufferSize());
-	vs->BindGlobalConstantBuffer("ViewParameter", 0);
-	vs->BindConstantBuffer("ObjParameter", 1, sizeof(ObjConstantBuffer), _countof(SampleAssetsIndoor::Draws) + 400);
+	//vs->BindGlobalConstantBuffer("ViewParameter", 0);
+	vs->BindConstantBuffer("ObjParameter", 0, sizeof(ObjConstantBuffer), _countof(SampleAssetsIndoor::Draws) + 400);
 
 	CD3DX12_RASTERIZER_DESC rasterizerStateDesc(D3D12_DEFAULT);
 	rasterizerStateDesc.CullMode = D3D12_CULL_MODE_NONE;
@@ -1333,8 +1332,7 @@ void dx12_framework::OnUpdate()
 	m_camera.Update(static_cast<float>(m_timer.GetElapsedSeconds()));
 
 
-	float Near = 1.0f;
-	float Far = 10000.0f;
+
 
 	glm::mat4x4 ViewMat;
 	glm::mat4x4 ProjMat;
@@ -1350,7 +1348,6 @@ void dx12_framework::OnUpdate()
 	//XMStoreFloat4x4(&mvp, XMMatrixTranspose(m_camera.GetViewMatrix() * ProjMatrix));
 
 
-	ViewParameter->SetValue(&ViewProjMat);
 
 
 
@@ -1375,16 +1372,24 @@ void dx12_framework::OnUpdate()
 // Render the scene.
 void dx12_framework::OnRender()
 {
+
 	dx12_rhi->BeginFrame();
 	
 	// Record all the commands we need to render the scene into the command list.
 	Texture* backbuffer = framebuffers[dx12_rhi->CurrentFrameIndex].get();
+	NVAftermathMarker(dx12_rhi->AM_CL_Handle, "DrawMeshPass");
 
 	DrawMeshPass();
 
+	NVAftermathMarker(dx12_rhi->AM_CL_Handle, "LightingPass");
+
 	LightingPass();
 
-	//RaytracePass();
+	NVAftermathMarker(dx12_rhi->AM_CL_Handle, "RaytracePass");
+
+	RaytracePass();
+
+	NVAftermathMarker(dx12_rhi->AM_CL_Handle, "CopyPass");
 
 	CopyPass();
 
@@ -1465,15 +1470,20 @@ void dx12_framework::DrawMeshPass()
 
 
 	// upload frame texture descriptor to shader visible heap.
-	for (int i = 0; i < mesh->Draws.size(); i++)
-	{
-		Mesh::DrawCall& drawcall = mesh->Draws[i];
-		Texture* diffuseTex = mesh->Textures[drawcall.DiffuseTextureIndex].get();
-		diffuseTex->VisibleThisFrame();
-		Texture* normalTex = mesh->Textures[drawcall.NormalTextureIndex].get();
-		normalTex->VisibleThisFrame();
-	}
+	//for (int i = 0; i < mesh->Draws.size(); i++)
+	//{
+	//	Mesh::DrawCall& drawcall = mesh->Draws[i];
+	//	Texture* diffuseTex = mesh->Textures[drawcall.DiffuseTextureIndex].get();
+	//	diffuseTex->VisibleThisFrame();
+	//	Texture* normalTex = mesh->Textures[drawcall.NormalTextureIndex].get();
+	//	normalTex->VisibleThisFrame();
+	//}
 
+	//for (auto& mat : Materials)
+	//{
+	//	mat->Diffuse->VisibleThisFrame();
+	//	mat->Normal->VisibleThisFrame();
+	//}
 
 	/*D3D12_RESOURCE_BARRIER BarrierDesc = {};
 	BarrierDesc.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
@@ -1521,13 +1531,13 @@ void dx12_framework::DrawMeshPass()
 
 		RS_Mesh->ApplyGraphicsRSPSO(dx12_rhi->CommandList.Get());
 		RS_Mesh->ps->SetSampler("samplerWrap", samplerWrap.get(), dx12_rhi->CommandList.Get());
-		RS_Mesh->vs->SetGlobalConstantBuffer("ViewParameter", ViewParameter.get(), dx12_rhi->CommandList.Get(), nullptr);;
+		//RS_Mesh->vs->SetGlobalConstantBuffer("ViewParameter", ViewParameter.get(), dx12_rhi->CommandList.Get(), nullptr);;
 
 		dx12_rhi->CommandList->RSSetViewports(1, &m_viewport);
 		dx12_rhi->CommandList->RSSetScissorRects(1, &m_scissorRect);
-		dx12_rhi->CommandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-		dx12_rhi->CommandList->IASetIndexBuffer(&mesh->Ib->view);
-		dx12_rhi->CommandList->IASetVertexBuffers(0, 1, &mesh->Vb->view);
+		//dx12_rhi->CommandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+		//dx12_rhi->CommandList->IASetIndexBuffer(&mesh->Ib->view);
+		//dx12_rhi->CommandList->IASetVertexBuffers(0, 1, &mesh->Vb->view);
 
 		RS_Mesh->vs->currentDrawCallIndex = 0;
 		RS_Mesh->ps->currentDrawCallIndex = 0;
@@ -1555,6 +1565,14 @@ void dx12_framework::DrawMeshPass()
 			dx12_rhi->CommandList->DrawIndexedInstanced(drawcall.IndexCount, 1, drawcall.IndexStart, drawcall.VertexBase, 0);
 		}*/
 
+		glm::mat4x4 ViewMat;
+		glm::mat4x4 ProjMat;
+
+		memcpy(&ViewMat, &m_camera.GetViewMatrix(), sizeof(glm::mat4x4));
+		memcpy(&ProjMat, &m_camera.GetProjectionMatrix(0.8f, m_aspectRatio, Near, Far), sizeof(glm::mat4x4));
+
+		glm::mat4x4 ViewProjMat = glm::transpose(ProjMat * ViewMat);
+
 		for (auto& mesh : meshes)
 		{
 			dx12_rhi->CommandList->IASetIndexBuffer(&mesh->Ib->view);
@@ -1567,12 +1585,14 @@ void dx12_framework::DrawMeshPass()
 
 				Mesh::DrawCall& drawcall = mesh->Draws[i];
 				ObjConstantBuffer objCB;
-				XMStoreFloat4x4(&objCB.WorldMatrix, XMMatrixRotationY(i * 0));
+				objCB.ViewProjectionMatrix = ViewProjMat;
+				glm::mat4 m; // Identity matrix
+				objCB.WorldMatrix = m;
 				objCB.ViewDir.x = m_camera.m_lookDirection.x;
 				objCB.ViewDir.y = m_camera.m_lookDirection.y;
 				objCB.ViewDir.z = m_camera.m_lookDirection.z;
 
-				RS_Mesh->vs->SetConstantValue("ObjParameter", (void*)&objCB.WorldMatrix, dx12_rhi->CommandList.Get(), nullptr);
+				RS_Mesh->vs->SetConstantValue("ObjParameter", (void*)&objCB, dx12_rhi->CommandList.Get(), nullptr);
 
 				Texture* diffuseTex = drawcall.mat->Diffuse.get();
 				if(diffuseTex)
@@ -1666,14 +1686,27 @@ void dx12_framework::RecordDraw (UINT StartIndex, UINT NumDraw, UINT CLIndex, Th
 	
 	RS_Mesh->ApplyGraphicsRSPSO(CL);
 	RS_Mesh->ps->SetSampler("samplerWrap", samplerWrap.get(), CL, DHPool);
-	RS_Mesh->vs->SetGlobalConstantBuffer("ViewParameter", ViewParameter.get(), CL, DHPool);;
+	//RS_Mesh->vs->SetGlobalConstantBuffer("ViewParameter", ViewParameter.get(), CL, DHPool);;
+
+	glm::mat4x4 ViewMat;
+	glm::mat4x4 ProjMat;
+
+	memcpy(&ViewMat, &m_camera.GetViewMatrix(), sizeof(glm::mat4x4));
+	memcpy(&ProjMat, &m_camera.GetProjectionMatrix(0.8f, m_aspectRatio, Near, Far), sizeof(glm::mat4x4));
+
+	glm::mat4x4 ViewProjMat = glm::transpose(ProjMat * ViewMat);
 
 	for (int i = StartIndex; i < StartIndex + NumDraw; i++)
 	{
 		Mesh::DrawCall& drawcall = mesh->Draws[i];
 		ObjConstantBuffer objCB;
-		XMStoreFloat4x4(&objCB.WorldMatrix, XMMatrixRotationY(i * 0));
-		RS_Mesh->vs->SetConstantValue("ObjParameter", (void*)&objCB.WorldMatrix, CL, DHPool);
+		objCB.ViewProjectionMatrix = ViewProjMat;
+		glm::mat4 m; // Identity matrix
+		objCB.WorldMatrix = m;
+		objCB.ViewDir.x = m_camera.m_lookDirection.x;
+		objCB.ViewDir.y = m_camera.m_lookDirection.y;
+		objCB.ViewDir.z = m_camera.m_lookDirection.z;
+		RS_Mesh->vs->SetConstantValue("ObjParameter", (void*)&objCB, CL, DHPool);
 
 
 		Texture* diffuseTex = mesh->Textures[drawcall.DiffuseTextureIndex].get();
@@ -1708,8 +1741,24 @@ void dx12_framework::ComputePass()
 void dx12_framework::InitRaytracing()
 {
 	// init raytracing
-	BLAS = mesh->CreateBLASArray();
+	/*BLAS = mesh->CreateBLASArray();
 	vector<shared_ptr<RTAS>> vecBLAS = { BLAS };
+	uint64_t tlasSize;
+	TLAS = dx12_rhi->CreateTLAS(vecBLAS, tlasSize);*/
+
+	vector<shared_ptr<RTAS>> vecBLAS;
+	vecBLAS.reserve(meshes.size());
+	int i = 0;
+	for (auto& mesh : meshes)
+	{
+		//if (i == 389) continue;
+		shared_ptr<RTAS> blas = mesh->CreateBLAS();
+		if(blas == nullptr) continue;
+		vecBLAS.push_back(blas);
+		i++;
+
+	}
+
 	uint64_t tlasSize;
 	TLAS = dx12_rhi->CreateTLAS(vecBLAS, tlasSize);
 
@@ -1763,12 +1812,39 @@ void dx12_framework::InitRaytracing()
 	PSO_RT->MaxPayloadSizeInBytes = sizeof(float) * 4;
 
 	PSO_RT->InitRS("RT_Shadow.hlsl");
+
+	//PSO_RT->BeginShaderTable();
+
+	//PSO_RT->SetUAV("rayGen", "gOutput", ShadowBuffer->CpuHandleUAV);
+	//PSO_RT->SetSRV("rayGen", "gRtScene", RTASCPUHandle);
+	//PSO_RT->SetCBVValue("rayGen", "ViewParameter", &RTViewParam, sizeof(RTViewParamCB));
+	//PSO_RT->SetSRV("rayGen", "DepthTex", dx12_rhi->depthTexture->CpuHandleSRV);
+	//PSO_RT->SetSRV("rayGen", "WorldNormalTex", GeomNormalBuffer->CpuHandleSRV);
+	//PSO_RT->SetSampler("rayGen", "samplerWrap", samplerWrap.get());
+
+	//PSO_RT->SetHitProgram("chs", 0); // this pass use only 1 hit program
+	//PSO_RT->EndShaderTable();
+
 }
 
 
+vector<UINT64> ResourceInt64array(ComPtr<ID3D12Resource> resource, int size)
+{
+	uint8_t* pData;
+	HRESULT hr = resource->Map(0, nullptr, (void**)&pData);
+
+	int size64 = size / sizeof(UINT64);
+	vector<UINT64> mem;
+	for (int i = 0; i < size64; i++)
+	{
+		UINT64 v = *(UINT64*)(pData + i * sizeof(UINT64));
+		mem.push_back(v);
+	}
+
+	return mem;
+}
 void dx12_framework::RaytracePass()
 {
-	GFSDK_Aftermath_SetEventMarker(dx12_rhi->AM_CL_Handle, nullptr, 0);
 	//dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(dx12_rhi->depthTexture->resource.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
 	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(ShadowBuffer->resource.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS));
 
@@ -1784,6 +1860,8 @@ void dx12_framework::RaytracePass()
 
 	PSO_RT->SetHitProgram("chs", 0); // this pass use only 1 hit program
 	PSO_RT->EndShaderTable();
+
+	vector<UINT64> mem = ResourceInt64array(PSO_RT->ShaderTable, PSO_RT->ShaderTableSize);
 
 	PSO_RT->Apply(m_width, m_height);
 

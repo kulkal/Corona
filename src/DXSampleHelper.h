@@ -13,7 +13,7 @@
 #include "GFSDK_Aftermath/include/GFSDK_Aftermath.h"
 
 
-inline void ThrowIfFailed(HRESULT hr)
+inline void ThrowIfFailed(HRESULT hr, GFSDK_Aftermath_ContextHandle* AMH = nullptr)
 {
 	if (FAILED(hr))
 	{
@@ -26,7 +26,10 @@ inline void ThrowIfFailed(HRESULT hr)
 
 		GFSDK_Aftermath_ContextHandle ch;
 		GFSDK_Aftermath_ContextData cd;
-		GFSDK_Aftermath_GetData(0, &ch, &cd);
+		GFSDK_Aftermath_GetData(1, AMH, &cd);
+
+		char str[256];
+		memcpy(str, cd.markerData, cd.markerSize);
 
 		throw std::exception();
 	}
