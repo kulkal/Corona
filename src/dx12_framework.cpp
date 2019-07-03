@@ -1535,7 +1535,7 @@ void dx12_framework::DrawMeshPass()
 
 		dx12_rhi->CommandList->RSSetViewports(1, &m_viewport);
 		dx12_rhi->CommandList->RSSetScissorRects(1, &m_scissorRect);
-		//dx12_rhi->CommandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+		dx12_rhi->CommandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 		//dx12_rhi->CommandList->IASetIndexBuffer(&mesh->Ib->view);
 		//dx12_rhi->CommandList->IASetVertexBuffers(0, 1, &mesh->Vb->view);
 

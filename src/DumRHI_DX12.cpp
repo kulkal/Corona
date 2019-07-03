@@ -1671,11 +1671,11 @@ shared_ptr<RTAS> Mesh::CreateBLAS()
 		bufDesc.SampleDesc.Quality = 0;
 		bufDesc.Width = info.ResultDataMaxSizeInBytes;
 
-		if (bufDesc.Width == 4960 || bufDesc.Width == 6272 || bufDesc.Width == 3712 || bufDesc.Width == 156160)
+		/*if (bufDesc.Width == 4960 || bufDesc.Width == 6272 || bufDesc.Width == 3712 || bufDesc.Width == 156160)
 		{
 			int a = 0;
 			return nullptr;
-		}
+		}*/
 		stringstream ss;
 		ss << "blas->result : " << bufDesc.Width << "\n";
 		OutputDebugStringA(ss.str().c_str());

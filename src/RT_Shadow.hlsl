@@ -112,7 +112,7 @@ void rayGen
 	ray.TMax = 100000;
 
 	RayPayload payload;
-    TraceRay(gRtScene, 0 /*rayFlags*/, 0xFF, 0 /* ray index*/, 0, 0, ray, payload);
+    //TraceRay(gRtScene, 0 /*rayFlags*/, 0xFF, 0 /* ray index*/, 0, 0, ray, payload);
 	float dd = payload.distance / 10.0f;
 	gOutput[launchIndex.xy] = float4(dd, dd, dd, 1);
     gOutput[launchIndex.xy] = float4(1, 0, 0, 1);
