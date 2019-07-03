@@ -17,6 +17,13 @@
 #include <array>
 #include "enkiTS/TaskScheduler.h""
 #include "DXCAPI/dxcapi.use.h"
+#include "ofbx/ofbx.h"
+#include "Utils.h"
+
+#include "assimp/include/Importer.hpp"
+#include "assimp/include/scene.h"
+#include "assimp/include/postprocess.h"
+#pragma comment(lib, "assimp\\lib\\assimp.lib")
 
 #include "GFSDK_Aftermath/include/GFSDK_Aftermath.h"
 
@@ -30,6 +37,9 @@
 static dxc::DxcDllSupport gDxcDllHelper;
 
 enki::TaskScheduler g_TS;
+
+ofbx::IScene* g_scene = nullptr;
+
 
 
 template<class BlotType>
@@ -312,6 +322,8 @@ dx12_framework::~dx12_framework()
 
 void dx12_framework::OnInit()
 {
+	CoInitialize(NULL);
+
 	g_TS.Initialize(8);
 
 	m_camera.Init({100, 15, 50 });
@@ -408,7 +420,7 @@ void dx12_framework::LoadPipeline()
 				D3D12_MESSAGE_ID_COPY_DESCRIPTORS_INVALID_RANGES };
 			D3D12_INFO_QUEUE_FILTER filter = {};
 			filter.DenyList.pIDList = blockedIds;
-			filter.DenyList.NumIDs = 3;
+			filter.DenyList.NumIDs = 1;
 			d3dInfoQueue->AddRetrievalFilterEntries(&filter);
 			d3dInfoQueue->AddStorageFilterEntries(&filter);
 		
@@ -538,6 +550,8 @@ void dx12_framework::LoadAssets()
 	// load indoor scene assets
 	LoadMesh();
 
+	LoadFbx();
+
 
 
 	// Describe and create a sampler.
@@ -568,7 +582,7 @@ void dx12_framework::LoadMesh()
 	UINT8* pAssetData;
 	ThrowIfFailed(ReadDataFromFile(GetAssetFullPath(SampleAssetsIndoor::DataFileName).c_str(), &pAssetData, &fileSize));
 
-	SquintRoom = make_unique<Mesh>();
+	mesh = make_unique<Mesh>();
 
 	// vertex buffer
 	/*D3D12_SUBRESOURCE_DATA vertexData = {};
@@ -576,9 +590,9 @@ void dx12_framework::LoadMesh()
 	vertexData.RowPitch = SampleAssetsIndoor::VertexDataSize;
 	vertexData.SlicePitch = vertexData.RowPitch;*/
 
-	SquintRoom->Vb = dx12_rhi->CreateVertexBuffer(SampleAssetsIndoor::VertexDataSize, SampleAssetsIndoor::StandardVertexStride, pAssetData + SampleAssetsIndoor::VertexDataOffset);
-	SquintRoom->VertexStride = SampleAssetsIndoor::StandardVertexStride;
-	SquintRoom->IndexFormat = SampleAssetsIndoor::StandardIndexFormat;
+	mesh->Vb = dx12_rhi->CreateVertexBuffer(SampleAssetsIndoor::VertexDataSize, SampleAssetsIndoor::StandardVertexStride, pAssetData + SampleAssetsIndoor::VertexDataOffset);
+	mesh->VertexStride = SampleAssetsIndoor::StandardVertexStride;
+	mesh->IndexFormat = SampleAssetsIndoor::StandardIndexFormat;
 
 
 	// index buffer
@@ -586,7 +600,7 @@ void dx12_framework::LoadMesh()
 	indexData.pData = pAssetData + SampleAssetsIndoor::IndexDataOffset;
 	indexData.RowPitch = SampleAssetsIndoor::IndexDataSize;
 	indexData.SlicePitch = indexData.RowPitch;*/
-	SquintRoom->Ib = dx12_rhi->CreateIndexBuffer(SampleAssetsIndoor::StandardIndexFormat, SampleAssetsIndoor::IndexDataSize, pAssetData + SampleAssetsIndoor::IndexDataOffset);
+	mesh->Ib = dx12_rhi->CreateIndexBuffer(SampleAssetsIndoor::StandardIndexFormat, SampleAssetsIndoor::IndexDataSize, pAssetData + SampleAssetsIndoor::IndexDataOffset);
 
 
 
@@ -606,7 +620,7 @@ void dx12_framework::LoadMesh()
 		shared_ptr<Texture> tex = dx12_rhi->CreateTexture2D(SampleAssetsIndoor::Textures[i].Format, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_COPY_DEST, SampleAssetsIndoor::Textures[i].Width, SampleAssetsIndoor::Textures[i].Height, SampleAssetsIndoor::Textures[i].MipLevels);
 		tex->MakeSRV();
 		tex->UploadSRCData(&textureData);
-		SquintRoom->Textures.push_back(tex);
+		mesh->Textures.push_back(tex);
 	}
 
 	const UINT drawCount = _countof(SampleAssetsIndoor::Draws);
@@ -624,12 +638,188 @@ void dx12_framework::LoadMesh()
 
 		if (i > 0)
 		{
-			auto& prevDraw = SquintRoom->Draws[i - 1];
+			auto& prevDraw = mesh->Draws[i - 1];
 			prevDraw.VertexCount = drawcall.VertexBase - prevDraw.VertexBase;
 		}
-		SquintRoom->Draws.push_back(drawcall);
+		mesh->Draws.push_back(drawcall);
 	}
-	SquintRoom->Draws[SquintRoom->Draws.size() - 1].VertexCount = SquintRoom->Vb->numVertices - SquintRoom->Draws[SquintRoom->Draws.size() - 1].VertexBase;
+	mesh->Draws[mesh->Draws.size() - 1].VertexCount = mesh->Vb->numVertices - mesh->Draws[mesh->Draws.size() - 1].VertexBase;
+}
+
+void dx12_framework::LoadFbx()
+{
+	Assimp::Importer importer;
+	const aiScene* scene = importer.ReadFile("Sponza/Sponza.fbx", 0);
+	wstring dir = L"Sponza/";
+
+	/*const aiScene* scene = importer.ReadFile("a.fbx", 0);
+	wstring dir = L"";
+*/
+	if (scene == nullptr)
+	{
+
+	}
+		
+	if (scene->mNumMeshes == 0)
+	{
+	}
+
+	if (scene->mNumMaterials == 0)
+	{
+
+	}
+
+	UINT flags = aiProcess_CalcTangentSpace |
+		aiProcess_Triangulate |
+		aiProcess_JoinIdenticalVertices |
+		aiProcess_MakeLeftHanded |
+		aiProcess_RemoveRedundantMaterials |
+		aiProcess_FlipUVs |
+		aiProcess_FlipWindingOrder;
+
+	/*if (settings.MergeMeshes)
+		flags |= aiProcess_PreTransformVertices | aiProcess_OptimizeMeshes;*/
+
+	scene = importer.ApplyPostProcessing(flags);
+
+	const int numMaterials = scene->mNumMaterials;
+	Materials.reserve(numMaterials);
+	for (int i = 0; i < numMaterials; ++i)
+	{
+		const aiMaterial& aiMat = *scene->mMaterials[i];
+		Material* mat = new Material;
+
+		wstring wDiffuseTex;
+		wstring wNormalTex;
+
+		aiString diffuseTexPath;
+		aiString normalMapPath;
+		if (aiMat.GetTexture(aiTextureType_DIFFUSE, 0, &diffuseTexPath) == aiReturn_SUCCESS)
+			wDiffuseTex = GetFileName(AnsiToWString(diffuseTexPath.C_Str()).c_str());
+		if (wDiffuseTex.length() != 0)
+		{
+			shared_ptr<Texture> diffuseTex = dx12_rhi->CreateTextureFromFile(dir + wDiffuseTex);
+			mat->Diffuse = diffuseTex;
+		}
+
+
+		if (aiMat.GetTexture(aiTextureType_NORMALS, 0, &normalMapPath) == aiReturn_SUCCESS
+			|| aiMat.GetTexture(aiTextureType_HEIGHT, 0, &normalMapPath) == aiReturn_SUCCESS)
+			wNormalTex = GetFileName(AnsiToWString(normalMapPath.C_Str()).c_str());
+
+		if (wNormalTex.length() != 0)
+		{
+			shared_ptr<Texture> normalTex = dx12_rhi->CreateTextureFromFile(dir + wNormalTex);
+			mat->Normal = normalTex;
+		}
+		
+		Materials.push_back(shared_ptr<Material>(mat));
+
+
+	}
+
+	struct Vertex
+	{
+		glm::vec3 Position;
+		glm::vec3 Normal;
+		glm::vec2 UV;
+		glm::vec3 Tangent;
+	};
+	const UINT numMeshes = scene->mNumMeshes;
+
+	UINT totalNumVert = 0;
+	for (UINT i = 0; i < numMeshes; ++i)
+	{
+		aiMesh* asMesh = scene->mMeshes[i];
+
+		totalNumVert += asMesh->mNumVertices;
+	}
+
+	for (UINT i = 0; i < numMeshes; ++i)
+	{
+		aiMesh* asMesh = scene->mMeshes[i];
+
+		Mesh* mesh = new Mesh;
+
+		mesh->NumVertices = asMesh->mNumVertices;
+		mesh->NumIndices = asMesh->mNumFaces * 3;
+
+		vector<Vertex> vertices;
+		vertices.resize(mesh->NumVertices);
+
+		vector<UINT16> indices;
+		indices.resize(mesh->NumIndices);
+		//if (i > 0) break;
+
+		if (asMesh->HasPositions())
+		{
+			for (int i = 0; i < mesh->NumVertices; ++i)
+			{
+				vertices[i].Position.x = asMesh->mVertices[i].x;
+				vertices[i].Position.y = asMesh->mVertices[i].y;
+				vertices[i].Position.z = asMesh->mVertices[i].z;
+
+			}
+
+		}
+
+		if (asMesh->HasNormals())
+		{
+			for (int i = 0; i < mesh->NumVertices; ++i)
+			{
+				vertices[i].Normal.x = asMesh->mNormals[i].x;
+				vertices[i].Normal.y = asMesh->mNormals[i].y;
+				vertices[i].Normal.z = asMesh->mNormals[i].z;
+
+			}
+		}
+
+		if (asMesh->HasTextureCoords(0))
+		{
+			for (int i = 0; i < mesh->NumVertices; ++i)
+			{
+				vertices[i].UV.x = asMesh->mTextureCoords[0][i].x;
+				vertices[i].UV.y = asMesh->mTextureCoords[0][i].y;
+			}
+		}
+
+		if (asMesh->HasTangentsAndBitangents())
+		{
+			for (int i = 0; i < mesh->NumVertices; ++i)
+			{
+				vertices[i].Tangent.x = asMesh->mTangents[i].x;
+				vertices[i].Tangent.y = asMesh->mTangents[i].y;
+				vertices[i].Tangent.z = asMesh->mTangents[i].z;
+			}
+		}
+
+		const UINT numTriangles = asMesh->mNumFaces;
+		for (int triIdx = 0; triIdx < numTriangles; ++triIdx)
+		{
+			indices[triIdx * 3 + 0] = UINT16(asMesh->mFaces[triIdx].mIndices[0]);
+			indices[triIdx * 3 + 1] = UINT16(asMesh->mFaces[triIdx].mIndices[1]);
+			indices[triIdx * 3 + 2] = UINT16(asMesh->mFaces[triIdx].mIndices[2]);
+		}
+
+		mesh->Vb = dx12_rhi->CreateVertexBuffer(sizeof(Vertex) * mesh->NumVertices, sizeof(Vertex), vertices.data());
+		mesh->VertexStride = sizeof(Vertex);
+		mesh->IndexFormat = DXGI_FORMAT_R16_UINT;
+
+		mesh->Ib = dx12_rhi->CreateIndexBuffer(mesh->IndexFormat, sizeof(UINT16)*3*numTriangles, indices.data());
+
+
+		Mesh::DrawCall dc;
+		dc.IndexCount = numTriangles * 3;
+		dc.IndexStart = 0;
+		dc.VertexBase = 0;
+		dc.VertexCount = vertices.size();
+		dc.mat = Materials[asMesh->mMaterialIndex];
+		
+		mesh->Draws.push_back(dc);
+
+		meshes.push_back(shared_ptr<Mesh>(mesh));
+	}
+
 }
 
 void dx12_framework::InitComputeRS()
@@ -717,7 +907,7 @@ void dx12_framework::InitDrawMeshRS()
 
 	Shader* vs = new Shader((UINT8*)vertexShader->GetBufferPointer(), vertexShader->GetBufferSize());
 	vs->BindGlobalConstantBuffer("ViewParameter", 0);
-	vs->BindConstantBuffer("ObjParameter", 1, sizeof(ObjConstantBuffer), _countof(SampleAssetsIndoor::Draws));
+	vs->BindConstantBuffer("ObjParameter", 1, sizeof(ObjConstantBuffer), _countof(SampleAssetsIndoor::Draws) + 400);
 
 	CD3DX12_RASTERIZER_DESC rasterizerStateDesc(D3D12_DEFAULT);
 	rasterizerStateDesc.CullMode = D3D12_CULL_MODE_NONE;
@@ -1275,12 +1465,12 @@ void dx12_framework::DrawMeshPass()
 
 
 	// upload frame texture descriptor to shader visible heap.
-	for (int i = 0; i < SquintRoom->Draws.size(); i++)
+	for (int i = 0; i < mesh->Draws.size(); i++)
 	{
-		Mesh::DrawCall& drawcall = SquintRoom->Draws[i];
-		Texture* diffuseTex = SquintRoom->Textures[drawcall.DiffuseTextureIndex].get();
+		Mesh::DrawCall& drawcall = mesh->Draws[i];
+		Texture* diffuseTex = mesh->Textures[drawcall.DiffuseTextureIndex].get();
 		diffuseTex->VisibleThisFrame();
-		Texture* normalTex = SquintRoom->Textures[drawcall.NormalTextureIndex].get();
+		Texture* normalTex = mesh->Textures[drawcall.NormalTextureIndex].get();
 		normalTex->VisibleThisFrame();
 	}
 
@@ -1336,15 +1526,18 @@ void dx12_framework::DrawMeshPass()
 		dx12_rhi->CommandList->RSSetViewports(1, &m_viewport);
 		dx12_rhi->CommandList->RSSetScissorRects(1, &m_scissorRect);
 		dx12_rhi->CommandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-		dx12_rhi->CommandList->IASetIndexBuffer(&SquintRoom->Ib->view);
-		dx12_rhi->CommandList->IASetVertexBuffers(0, 1, &SquintRoom->Vb->view);
+		dx12_rhi->CommandList->IASetIndexBuffer(&mesh->Ib->view);
+		dx12_rhi->CommandList->IASetVertexBuffers(0, 1, &mesh->Vb->view);
 
-		for (int i = 0; i < SquintRoom->Draws.size(); i++)
+		RS_Mesh->vs->currentDrawCallIndex = 0;
+		RS_Mesh->ps->currentDrawCallIndex = 0;
+
+		/*for (int i = 0; i < mesh->Draws.size(); i++)
 		{
 			RS_Mesh->vs->currentDrawCallIndex = i;
 			RS_Mesh->ps->currentDrawCallIndex = i;
 
-			Mesh::DrawCall& drawcall = SquintRoom->Draws[i];
+			Mesh::DrawCall& drawcall = mesh->Draws[i];
 			ObjConstantBuffer objCB;
 			XMStoreFloat4x4(&objCB.WorldMatrix, XMMatrixRotationY(i * 0));
 			objCB.ViewDir.x = m_camera.m_lookDirection.x;
@@ -1353,20 +1546,51 @@ void dx12_framework::DrawMeshPass()
 
 			RS_Mesh->vs->SetConstantValue("ObjParameter", (void*)&objCB.WorldMatrix, dx12_rhi->CommandList.Get(), nullptr);
 
-			Texture* diffuseTex = SquintRoom->Textures[drawcall.DiffuseTextureIndex].get();
+			Texture* diffuseTex = mesh->Textures[drawcall.DiffuseTextureIndex].get();
 			RS_Mesh->ps->SetTexture("diffuseMap", diffuseTex, dx12_rhi->CommandList.Get(), nullptr);
 
-			Texture* normalTex = SquintRoom->Textures[drawcall.NormalTextureIndex].get();
+			Texture* normalTex = mesh->Textures[drawcall.NormalTextureIndex].get();
 			RS_Mesh->ps->SetTexture("normalMap", normalTex, dx12_rhi->CommandList.Get(), nullptr);
 
 			dx12_rhi->CommandList->DrawIndexedInstanced(drawcall.IndexCount, 1, drawcall.IndexStart, drawcall.VertexBase, 0);
+		}*/
+
+		for (auto& mesh : meshes)
+		{
+			dx12_rhi->CommandList->IASetIndexBuffer(&mesh->Ib->view);
+			dx12_rhi->CommandList->IASetVertexBuffers(0, 1, &mesh->Vb->view);
+
+			for (int i = 0; i < mesh->Draws.size(); i++)
+			{
+				RS_Mesh->vs->currentDrawCallIndex++;
+				RS_Mesh->ps->currentDrawCallIndex++;
+
+				Mesh::DrawCall& drawcall = mesh->Draws[i];
+				ObjConstantBuffer objCB;
+				XMStoreFloat4x4(&objCB.WorldMatrix, XMMatrixRotationY(i * 0));
+				objCB.ViewDir.x = m_camera.m_lookDirection.x;
+				objCB.ViewDir.y = m_camera.m_lookDirection.y;
+				objCB.ViewDir.z = m_camera.m_lookDirection.z;
+
+				RS_Mesh->vs->SetConstantValue("ObjParameter", (void*)&objCB.WorldMatrix, dx12_rhi->CommandList.Get(), nullptr);
+
+				Texture* diffuseTex = drawcall.mat->Diffuse.get();
+				if(diffuseTex)
+					RS_Mesh->ps->SetTexture("diffuseMap", diffuseTex, dx12_rhi->CommandList.Get(), nullptr);
+
+				Texture* normalTex = drawcall.mat->Normal.get();
+				if(normalTex)
+					RS_Mesh->ps->SetTexture("normalMap", normalTex, dx12_rhi->CommandList.Get(), nullptr);
+
+				dx12_rhi->CommandList->DrawIndexedInstanced(drawcall.IndexCount, 1, drawcall.IndexStart, drawcall.VertexBase, 0);
+			}
 		}
 	}
 	else
 	{
 		UINT NumThread = dx12_rhi->NumDrawMeshCommandList;
-		UINT RemainDraw = SquintRoom->Draws.size();
-		UINT NumDrawThread = SquintRoom->Draws.size() / (NumThread);
+		UINT RemainDraw = mesh->Draws.size();
+		UINT NumDrawThread = mesh->Draws.size() / (NumThread);
 		UINT StartIndex = 0;
 
 		vector<ThreadDescriptorHeapPool> vecDHPool;
@@ -1434,8 +1658,8 @@ void dx12_framework::RecordDraw (UINT StartIndex, UINT NumDraw, UINT CLIndex, Th
 	CL->RSSetViewports(1, &m_viewport);
 	CL->RSSetScissorRects(1, &m_scissorRect);
 	CL->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-	CL->IASetIndexBuffer(&SquintRoom->Ib->view);
-	CL->IASetVertexBuffers(0, 1, &SquintRoom->Vb->view);
+	CL->IASetIndexBuffer(&mesh->Ib->view);
+	CL->IASetVertexBuffers(0, 1, &mesh->Vb->view);
 
 	ID3D12DescriptorHeap* ppHeaps[] = { dx12_rhi->SRVCBVDescriptorHeapShaderVisible->DH.Get(), dx12_rhi->SamplerDescriptorHeapShaderVisible->DH.Get() };
 	CL->SetDescriptorHeaps(_countof(ppHeaps), ppHeaps);
@@ -1446,16 +1670,16 @@ void dx12_framework::RecordDraw (UINT StartIndex, UINT NumDraw, UINT CLIndex, Th
 
 	for (int i = StartIndex; i < StartIndex + NumDraw; i++)
 	{
-		Mesh::DrawCall& drawcall = SquintRoom->Draws[i];
+		Mesh::DrawCall& drawcall = mesh->Draws[i];
 		ObjConstantBuffer objCB;
 		XMStoreFloat4x4(&objCB.WorldMatrix, XMMatrixRotationY(i * 0));
 		RS_Mesh->vs->SetConstantValue("ObjParameter", (void*)&objCB.WorldMatrix, CL, DHPool);
 
 
-		Texture* diffuseTex = SquintRoom->Textures[drawcall.DiffuseTextureIndex].get();
+		Texture* diffuseTex = mesh->Textures[drawcall.DiffuseTextureIndex].get();
 		RS_Mesh->ps->SetTexture("diffuseMap", diffuseTex, CL, DHPool);
 
-		Texture* normalTex = SquintRoom->Textures[drawcall.NormalTextureIndex].get();
+		Texture* normalTex = mesh->Textures[drawcall.NormalTextureIndex].get();
 		RS_Mesh->ps->SetTexture("normalMap", normalTex, CL, DHPool);
 
 
@@ -1484,7 +1708,7 @@ void dx12_framework::ComputePass()
 void dx12_framework::InitRaytracing()
 {
 	// init raytracing
-	BLAS = SquintRoom->CreateBLASArray();
+	BLAS = mesh->CreateBLASArray();
 	vector<shared_ptr<RTAS>> vecBLAS = { BLAS };
 	uint64_t tlasSize;
 	TLAS = dx12_rhi->CreateTLAS(vecBLAS, tlasSize);

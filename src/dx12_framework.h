@@ -131,7 +131,10 @@ private:
 	std::shared_ptr<Sampler> samplerWrap;
 
 
-	unique_ptr<Mesh> SquintRoom;
+	unique_ptr<Mesh> mesh;
+
+	vector<shared_ptr<Mesh>> meshes;
+	vector<shared_ptr<Material>> Materials;
 
 	StepTimer m_timer;
 
@@ -197,6 +200,8 @@ public:
 	void LoadAssets();
 
 	void LoadMesh();
+
+	void LoadFbx();
 
 	void InitComputeRS();
 

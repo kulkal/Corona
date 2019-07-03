@@ -118,6 +118,7 @@
     <ClInclude Include="enkiTS\TaskScheduler.h" />
     <ClInclude Include="enkiTS\Threads.h" />
     <ClInclude Include="resource.h" />
+    <ClInclude Include="Utils.h" />
     <ClInclude Include="Win32Application.h" />
     <ClInclude Include="dx12_framework.h" />
     <ClInclude Include="d3dx12.h" />
@@ -131,6 +132,7 @@
   <ItemGroup>
     <ClCompile Include="DumRHI_DX12.cpp" />
     <ClCompile Include="enkiTS\TaskScheduler.cpp" />
+    <ClCompile Include="Utils.cpp" />
     <ClCompile Include="Win32Application.cpp" />
     <ClCompile Include="dx12_framework.cpp" />
     <ClCompile Include="DXSample.cpp" />
@@ -195,6 +197,12 @@
     </CustomBuild>
   </ItemGroup>
   <ItemGroup>
+    <None Include="a.FBX" />
+    <None Include="b.fbx" />
+    <None Include="c.FBX">
+      <DeploymentContent Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">true</DeploymentContent>
+    </None>
+    <None Include="d.fbx" />
     <None Include="dxcompiler.dll" />
     <None Include="dxil.dll" />
     <None Include="GFSDK_Aftermath_Lib.x64.dll" />

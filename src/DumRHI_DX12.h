@@ -348,7 +348,7 @@ public:
 class Texture
 {
 public:
-	DXGI_FORMAT Format;
+	//DXGI_FORMAT Format;
 
 	D3D12_RESOURCE_DESC textureDesc;
 
@@ -436,13 +436,19 @@ public:
 	ComPtr<ID3D12Resource> Instance;
 };
 
-
+class Material
+{
+public:
+	shared_ptr<Texture> Diffuse;
+	shared_ptr<Texture> Normal;
+};
 
 class Mesh
 {
 public:
 	struct DrawCall
 	{
+		shared_ptr<Material> mat;
 		INT DiffuseTextureIndex;
 		INT NormalTextureIndex;
 		INT SpecularTextureIndex;
@@ -452,6 +458,9 @@ public:
 		UINT VertexCount;
 	};
 public:
+	UINT NumIndices;
+	UINT NumVertices;
+
 	UINT VertexStride;
 
 	DXGI_FORMAT IndexFormat = DXGI_FORMAT_R32_UINT;
@@ -460,6 +469,8 @@ public:
 	shared_ptr<IndexBuffer> Ib;
 	shared_ptr<VertexBuffer> Vb;
 	vector<shared_ptr<Texture>> Textures;
+
+	shared_ptr<Material> Mat;
 
 	vector<DrawCall> Draws;
 
@@ -548,6 +559,8 @@ public:
 	shared_ptr<Texture> CreateTexture2DFromResource(ComPtr<ID3D12Resource> InResource);
 
 	shared_ptr<Texture> CreateTexture2D(DXGI_FORMAT format, D3D12_RESOURCE_FLAGS resFlags, D3D12_RESOURCE_STATES initResState, int width, int height, int mipLevels);
+
+	shared_ptr<Texture> CreateTextureFromFile(wstring fileName);
 
 	shared_ptr<ConstantBuffer> CreateConstantBuffer(int Size, UINT NumView = 1);
 	shared_ptr<Sampler> CreateSampler(D3D12_SAMPLER_DESC& InSamplerDesc);

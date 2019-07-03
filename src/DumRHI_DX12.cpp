@@ -8,13 +8,19 @@
 #include "glm/mat4x4.hpp"
 #include "glm/fwd.hpp"
 #include "DXCAPI/dxcapi.use.h"
-
+#include "Utils.h"
 #include <sstream>
 #include <fstream>
 
 #include <comdef.h>
 
-
+// DirectX Tex
+#include "DirectXTex July 2017/Include/DirectXTex.h"
+#ifdef _DEBUG
+#pragma comment(lib, "DirectXTex July 2017/Lib 2017/Debug/DirectXTex.lib")
+#else
+#pragma comment(lib, "DirectXTex July 2017/Lib 2017/Release/DirectXTex.lib")
+#endif
 
 #define align_to(_alignment, _val) (((_val + _alignment - 1) / _alignment) * _alignment)
 
@@ -163,95 +169,9 @@ void DumRHI_DX12::UploadeFrameTexture2ShaderVisibleHeap()
 	}
 }
 
-std::shared_ptr<Texture> DumRHI_DX12::CreateTexture2DFromResource(ComPtr<ID3D12Resource> InResource)
-{
-	Texture* tex =  new Texture;
-
-	if (InResource)
-	{
-		tex->resource = InResource;
-	}
-
-	return shared_ptr<Texture>(tex);
-}
 
 
 
-std::shared_ptr<Texture> DumRHI_DX12::CreateTexture2D(DXGI_FORMAT format, D3D12_RESOURCE_FLAGS resFlags, D3D12_RESOURCE_STATES initResState, int width, int height, int mipLevels)
-{
-	Texture* tex = new Texture;
-	
-
-
-	D3D12_RESOURCE_DESC textureDesc = {};
-	textureDesc.MipLevels = mipLevels;
-	textureDesc.Format = format;
-	textureDesc.Width = width;
-	textureDesc.Height = height;
-	textureDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
-	textureDesc.DepthOrArraySize = 1;
-	textureDesc.SampleDesc.Count = 1;
-	textureDesc.SampleDesc.Quality = 0;
-	textureDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-	
-	textureDesc.Flags = resFlags;
-
-	tex->textureDesc = textureDesc;
-
-	D3D12_HEAP_PROPERTIES heapProp;
-	heapProp.Type = D3D12_HEAP_TYPE_DEFAULT;
-	heapProp.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
-	heapProp.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
-	heapProp.CreationNodeMask = 1;
-	heapProp.VisibleNodeMask = 1;
-
-
-	D3D12_RESOURCE_STATES ResStats = initResState;
-
-	
-	if (resFlags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL)
-	{
-		D3D12_CLEAR_VALUE optimizedClearValue = {};
-		optimizedClearValue.Format = DXGI_FORMAT_D32_FLOAT;
-		optimizedClearValue.DepthStencil = { 1.0f, 0 };
-	
-		ThrowIfFailed(Device->CreateCommittedResource(
-			&heapProp,
-			D3D12_HEAP_FLAG_NONE,
-			&textureDesc,
-			ResStats,
-			&optimizedClearValue,
-			IID_PPV_ARGS(&tex->resource)));
-	}
-	else
-	{
-		D3D12_CLEAR_VALUE optimizedClearValue = {};
-		optimizedClearValue.Format = format;
-		optimizedClearValue.Color[0] = 0.0f;
-		optimizedClearValue.Color[1] = 0.2f;
-		optimizedClearValue.Color[2] = 0.4f;
-		optimizedClearValue.Color[3] = 1.0f;
-
-		//D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET
-
-		D3D12_CLEAR_VALUE* pClearValue = nullptr;
-		if (resFlags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET)
-			pClearValue = &optimizedClearValue;
-		ThrowIfFailed(Device->CreateCommittedResource(
-			&heapProp,
-			D3D12_HEAP_FLAG_NONE,
-			&textureDesc,
-			ResStats,
-			pClearValue,
-			IID_PPV_ARGS(&tex->resource)));
-
-	
-	}
-	
-
-	return shared_ptr<Texture>(tex);
-
-}
 
 shared_ptr<ConstantBuffer> DumRHI_DX12::CreateConstantBuffer(int Size, UINT NumView)
 
@@ -1273,7 +1193,9 @@ void Texture::MakeUAV()
 
 	D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc = {};
 	uavDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
-	uavDesc.Format = Format;
+	//uavDesc.Format = Format;
+	uavDesc.Format = textureDesc.Format;
+
 	g_dx12_rhi->Device->CreateUnorderedAccessView(resource.Get(), nullptr, &uavDesc, CpuHandleUAV);
 }
 
@@ -1286,7 +1208,9 @@ void Texture::MakeSRV(bool isDepth)
 	if (isDepth)
 		SrvDesc.Format = DXGI_FORMAT_R32_FLOAT;
 	else
-		SrvDesc.Format = Format;
+		//SrvDesc.Format = Format;
+		SrvDesc.Format = textureDesc.Format;
+
 
 	SrvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
 	SrvDesc.Texture2D.MipLevels = textureDesc.MipLevels;
@@ -1298,7 +1222,9 @@ void Texture::MakeRTV()
 	g_dx12_rhi->RTVDescriptorHeap->AllocDescriptor(CpuHandleRTV, GpuHandleRTV);
 	
 	D3D12_RENDER_TARGET_VIEW_DESC desc = {};
-	desc.Format = Format;
+	//desc.Format = Format;
+	desc.Format = textureDesc.Format;
+
 	desc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
 
 	g_dx12_rhi->Device->CreateRenderTargetView(resource.Get(), &desc, CpuHandleRTV);
@@ -1315,7 +1241,95 @@ void Texture::MakeDSV()
 	g_dx12_rhi->Device->CreateDepthStencilView(resource.Get(), &depthStencilDesc, CpuHandleDSV);
 }
 
+std::shared_ptr<Texture> DumRHI_DX12::CreateTexture2DFromResource(ComPtr<ID3D12Resource> InResource)
+{
+	Texture* tex = new Texture;
 
+	if (InResource)
+	{
+		tex->resource = InResource;
+	}
+
+	return shared_ptr<Texture>(tex);
+}
+
+//DirectX::ScratchImage 
+
+std::shared_ptr<Texture> DumRHI_DX12::CreateTexture2D(DXGI_FORMAT format, D3D12_RESOURCE_FLAGS resFlags, D3D12_RESOURCE_STATES initResState, int width, int height, int mipLevels)
+{
+	Texture* tex = new Texture;
+
+
+
+	D3D12_RESOURCE_DESC textureDesc = {};
+	textureDesc.MipLevels = mipLevels;
+	textureDesc.Format = format;
+	textureDesc.Width = width;
+	textureDesc.Height = height;
+	textureDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
+	textureDesc.DepthOrArraySize = 1;
+	textureDesc.SampleDesc.Count = 1;
+	textureDesc.SampleDesc.Quality = 0;
+	textureDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+
+	textureDesc.Flags = resFlags;
+
+	tex->textureDesc = textureDesc;
+
+	D3D12_HEAP_PROPERTIES heapProp;
+	heapProp.Type = D3D12_HEAP_TYPE_DEFAULT;
+	heapProp.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
+	heapProp.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
+	heapProp.CreationNodeMask = 1;
+	heapProp.VisibleNodeMask = 1;
+
+
+	D3D12_RESOURCE_STATES ResStats = initResState;
+
+
+	if (resFlags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL)
+	{
+		D3D12_CLEAR_VALUE optimizedClearValue = {};
+		optimizedClearValue.Format = DXGI_FORMAT_D32_FLOAT;
+		optimizedClearValue.DepthStencil = { 1.0f, 0 };
+
+		ThrowIfFailed(Device->CreateCommittedResource(
+			&heapProp,
+			D3D12_HEAP_FLAG_NONE,
+			&textureDesc,
+			ResStats,
+			&optimizedClearValue,
+			IID_PPV_ARGS(&tex->resource)));
+	}
+	else
+	{
+		D3D12_CLEAR_VALUE optimizedClearValue = {};
+		optimizedClearValue.Format = format;
+		optimizedClearValue.Color[0] = 0.0f;
+		optimizedClearValue.Color[1] = 0.2f;
+		optimizedClearValue.Color[2] = 0.4f;
+		optimizedClearValue.Color[3] = 1.0f;
+
+		//D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET
+
+		D3D12_CLEAR_VALUE* pClearValue = nullptr;
+		if (resFlags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET)
+			pClearValue = &optimizedClearValue;
+		ThrowIfFailed(Device->CreateCommittedResource(
+			&heapProp,
+			D3D12_HEAP_FLAG_NONE,
+			&textureDesc,
+			ResStats,
+			pClearValue,
+			IID_PPV_ARGS(&tex->resource)));
+
+
+	}
+
+
+	return shared_ptr<Texture>(tex);
+
+}
 
 void Texture::UploadSRCData(D3D12_SUBRESOURCE_DATA* SrcData)
 {
@@ -1384,6 +1398,175 @@ void Texture::UploadSRCData(D3D12_SUBRESOURCE_DATA* SrcData)
 }
 
 
+
+std::shared_ptr<Texture> DumRHI_DX12::CreateTextureFromFile(wstring fileName)
+{
+	if (FileExists(fileName.c_str()) == false)
+		return nullptr;
+
+	Texture* tex = new Texture;
+
+
+	DirectX::ScratchImage image;
+
+	const std::wstring extension = GetFileExtension(fileName.c_str());
+
+	if (extension == L"DDS" || extension == L"dds")
+	{
+		DirectX::LoadFromDDSFile(fileName.c_str(), DirectX::DDS_FLAGS_NONE, nullptr, image);
+	}
+	else if (extension == L"TGA" || extension == L"tga")
+	{
+		DirectX::ScratchImage tempImage;
+		DirectX::LoadFromTGAFile(fileName.c_str(), nullptr, tempImage);
+		DirectX::GenerateMipMaps(*tempImage.GetImage(0, 0, 0), DirectX::TEX_FILTER_DEFAULT, 0, image, false);
+	}
+	else
+	{
+		DirectX::ScratchImage tempImage;
+		DirectX::LoadFromWICFile(fileName.c_str(), DirectX::WIC_FLAGS_NONE, nullptr, tempImage);
+		DirectX::GenerateMipMaps(*tempImage.GetImage(0, 0, 0), DirectX::TEX_FILTER_DEFAULT, 0, image, false);
+	}
+
+	const DirectX::TexMetadata& metaData = image.GetMetadata();
+	DXGI_FORMAT format = metaData.format;
+
+	//format = DirectX::MakeSRGB(format);
+
+	const bool is3D = metaData.dimension == DirectX::TEX_DIMENSION_TEXTURE3D;
+
+	D3D12_RESOURCE_DESC textureDesc = { };
+	textureDesc.MipLevels = UINT16(metaData.mipLevels);
+	textureDesc.Format = format;
+	textureDesc.Width = UINT64(metaData.width);
+	textureDesc.Height = UINT64(metaData.height);
+	textureDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
+	textureDesc.DepthOrArraySize = is3D ? UINT16(metaData.depth) : UINT16(metaData.arraySize);
+	textureDesc.SampleDesc.Count = 1;
+	textureDesc.SampleDesc.Quality = 0;
+	textureDesc.Dimension = is3D ? D3D12_RESOURCE_DIMENSION_TEXTURE3D : D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+	textureDesc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+	textureDesc.Alignment = 0;
+
+	D3D12_HEAP_PROPERTIES heapProp;
+	heapProp.Type = D3D12_HEAP_TYPE_DEFAULT;
+	heapProp.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
+	heapProp.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
+	heapProp.CreationNodeMask = 1;
+	heapProp.VisibleNodeMask = 1;
+
+	tex->textureDesc = textureDesc;
+
+
+	g_dx12_rhi->Device->CreateCommittedResource(&heapProp, D3D12_HEAP_FLAG_NONE, &textureDesc,
+		D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&tex->resource));
+	tex->resource->SetName(fileName.c_str());
+
+	D3D12_HEAP_PROPERTIES heapPropUpload;
+	heapPropUpload.Type = D3D12_HEAP_TYPE_UPLOAD;
+	heapPropUpload.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
+	heapPropUpload.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
+	heapPropUpload.CreationNodeMask = 1;
+	heapPropUpload.VisibleNodeMask = 1;
+
+	ComPtr<ID3D12Resource> uploadHeap;
+	
+	const UINT subresourceCount = textureDesc.DepthOrArraySize * textureDesc.MipLevels;
+	const UINT64 uploadBufferSize = GetRequiredIntermediateSize(tex->resource.Get(), 0, subresourceCount);
+	D3D12_RESOURCE_DESC resDesc;
+	resDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+	resDesc.Alignment = 0;
+	resDesc.Width = uploadBufferSize;
+	resDesc.Height = 1;
+	resDesc.DepthOrArraySize = 1;
+	resDesc.MipLevels = 1;// textureDesc.MipLevels;
+	resDesc.Format = DXGI_FORMAT_UNKNOWN;
+	resDesc.SampleDesc.Count = 1;
+	resDesc.SampleDesc.Quality = 0;
+	resDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+	resDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
+
+	g_dx12_rhi->Device->CreateCommittedResource(&heapPropUpload, D3D12_HEAP_FLAG_NONE, &resDesc,
+		D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&uploadHeap));
+	uploadHeap->SetName(L"TexUploadingHeap");
+
+	const UINT64 numSubResources = metaData.mipLevels * metaData.arraySize;
+	D3D12_PLACED_SUBRESOURCE_FOOTPRINT* layouts = (D3D12_PLACED_SUBRESOURCE_FOOTPRINT*)_alloca(sizeof(D3D12_PLACED_SUBRESOURCE_FOOTPRINT) * numSubResources);
+	UINT32* numRows = (UINT32*)_alloca(sizeof(UINT32) * numSubResources);
+	UINT64* rowSizes = (UINT64*)_alloca(sizeof(UINT64) * numSubResources);
+
+	UINT64 textureMemSize = 0;
+	g_dx12_rhi->Device->GetCopyableFootprints(&textureDesc, 0, UINT32(numSubResources), 0, layouts, numRows, rowSizes, &textureMemSize);
+
+	UINT8* uploadMem = nullptr;
+
+	D3D12_RANGE readRange = { };
+	uploadHeap->Map(0, &readRange, reinterpret_cast<void**>(&uploadMem));
+	for (UINT64 arrayIdx = 0; arrayIdx < metaData.arraySize; ++arrayIdx)
+	{
+
+		for (UINT64 mipIdx = 0; mipIdx < metaData.mipLevels; ++mipIdx)
+		{
+			const UINT64 subResourceIdx = mipIdx + (arrayIdx * metaData.mipLevels);
+
+			const D3D12_PLACED_SUBRESOURCE_FOOTPRINT& subResourceLayout = layouts[subResourceIdx];
+			const UINT64 subResourceHeight = numRows[subResourceIdx];
+			const UINT64 subResourcePitch = subResourceLayout.Footprint.RowPitch;
+			const UINT64 subResourceDepth = subResourceLayout.Footprint.Depth;
+			UINT8* dstSubResourceMem = reinterpret_cast<UINT8*>(uploadMem) + subResourceLayout.Offset;
+
+			for (UINT64 z = 0; z < subResourceDepth; ++z)
+			{
+				const DirectX::Image* subImage = image.GetImage(mipIdx, arrayIdx, z);
+				const UINT8* srcSubResourceMem = subImage->pixels;
+
+				for (UINT64 y = 0; y < subResourceHeight; ++y)
+				{
+					memcpy(dstSubResourceMem, srcSubResourceMem, glm::min<float>(subResourcePitch, subImage->rowPitch));
+					dstSubResourceMem += subResourcePitch;
+					srcSubResourceMem += subImage->rowPitch;
+				}
+			}
+		}
+	}
+	uploadHeap->Unmap(0, nullptr);
+
+	for (UINT64 subResourceIdx = 0; subResourceIdx < numSubResources; ++subResourceIdx)
+	{
+		D3D12_TEXTURE_COPY_LOCATION dst = { };
+		dst.pResource = tex->resource.Get();
+		dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+		dst.SubresourceIndex = UINT32(subResourceIdx);
+		D3D12_TEXTURE_COPY_LOCATION src = { };
+		src.pResource = uploadHeap.Get();
+		src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+		src.PlacedFootprint = layouts[subResourceIdx];
+		//src.PlacedFootprint.Offset += 0;// uploadContext.ResourceOffset;
+		//src.SubresourceIndex = UINT32(subResourceIdx);
+
+		g_dx12_rhi->CommandList->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+	}
+
+	D3D12_RESOURCE_BARRIER BarrierDesc = {};
+	BarrierDesc.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+	BarrierDesc.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+	BarrierDesc.Transition.pResource = tex->resource.Get();
+	BarrierDesc.Transition.Subresource = 0;
+	BarrierDesc.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+	BarrierDesc.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+	g_dx12_rhi->CommandList->ResourceBarrier(1, &BarrierDesc);
+
+	ThrowIfFailed(g_dx12_rhi->CommandList->Close());
+	ID3D12CommandList* ppCommandLists[] = { g_dx12_rhi->CommandList.Get() };
+	g_dx12_rhi->CommandQueue->ExecuteCommandLists(_countof(ppCommandLists), ppCommandLists);
+	ThrowIfFailed(g_dx12_rhi->CommandList->Reset(g_dx12_rhi->GetCurrentCA(), nullptr));
+
+	g_dx12_rhi->WaitGPU();
+
+	tex->MakeSRV();
+
+	return shared_ptr<Texture>(tex);
+}
 static const D3D12_HEAP_PROPERTIES kDefaultHeapProps =
 {
 	D3D12_HEAP_TYPE_DEFAULT,
