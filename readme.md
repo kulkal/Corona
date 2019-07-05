@@ -22,7 +22,6 @@ This project is for dx12 & dxr learning. Quite  unorgnized for now. I am trying 
 * [NV Aftermath](https://developer.nvidia.com/nvidia-aftermath)
 
 ## Usefule link
-DynamicConstantBuffer.cpp#L64)
 * [NVIDIA dxr tutorials](https://github.com/NVIDIAGameWorks/DxrTutorials)
 	* Most clean & easy to understand.
 * [Microsoft dxr tutorial](https://github.com/microsoft/DirectX-Graphics-Samples/tree/master/Samples/Desktop/D3D12Raytracing)
