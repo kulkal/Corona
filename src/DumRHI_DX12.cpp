@@ -59,6 +59,7 @@ void DescriptorHeap::Init(D3D12_DESCRIPTOR_HEAP_DESC& InHeapDesc)
 
 	CPUHeapStart = DH->GetCPUDescriptorHandleForHeapStart().ptr;
 	GPUHeapStart = DH->GetGPUDescriptorHandleForHeapStart().ptr;
+
 }
 
 void DescriptorHeap::AllocDescriptor(D3D12_CPU_DESCRIPTOR_HANDLE& cpuHandle, D3D12_GPU_DESCRIPTOR_HANDLE& gpuHandle)
@@ -77,13 +78,14 @@ void DescriptorHeap::AllocDescriptor(D3D12_CPU_DESCRIPTOR_HANDLE& cpuHandle, D3D
 
 void DumRHI_DX12::BeginFrame()
 {
+	SRVCBVDescriptorHeapShaderVisible->DescriptorIndex = 0;
 	const UINT64 lastCompletedFence = m_fence->GetCompletedValue();
 
 	CurrentFrameIndex = m_swapChain->GetCurrentBackBufferIndex();
 
 
 	// wait until gpu processing for this frame resource is completed
-	if (FrameFenceValue > 2)
+	//if (m_fenceValue > 2)
 	{
 		UINT64 ThisFrameFenceValue = FrameResourceVec[CurrentFrameIndex].FenceValue;
 		ThrowIfFailed(m_fence->SetEventOnCompletion(ThisFrameFenceValue, m_fenceEvent));
@@ -120,46 +122,26 @@ void DumRHI_DX12::EndFrame()
 	ThrowIfFailed(m_swapChain->Present(0, 0), &g_dx12_rhi->AM_CL_Handle);
 
 	// Signal and increment the fence value.
-	FrameResourceVec[CurrentFrameIndex].FenceValue = FrameFenceValue;
-	ThrowIfFailed(CommandQueue->Signal(m_fence.Get(), FrameFenceValue));
-	FrameFenceValue++;
+	m_fenceValue++;
+
+	FrameResourceVec[CurrentFrameIndex].FenceValue = m_fenceValue;
+	ThrowIfFailed(CommandQueue->Signal(m_fence.Get(), m_fenceValue));
 }
 
 void DumRHI_DX12::WaitGPU()
 {
-	// Create synchronization objects and wait until assets have been uploaded to the GPU.
-
-	HANDLE m_fenceEvent;
-	ComPtr<ID3D12Fence> m_fence;
-	UINT64 mfenceValue = 0;
-
-	ThrowIfFailed(g_dx12_rhi->Device->CreateFence(m_fenceValue, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&m_fence)));
 	m_fenceValue++;
 
-	// Create an event handle to use for frame synchronization.
-	m_fenceEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
-	if (m_fenceEvent == nullptr)
-	{
-		ThrowIfFailed(HRESULT_FROM_WIN32(GetLastError()));
-	}
+	CommandQueue->Signal(m_fence.Get(), m_fenceValue);
 
-	// Wait for the command list to execute; we are reusing the same command 
-	// list in our main loop but for now, we just want to wait for setup to 
-	// complete before continuing.
-
-	// Signal and increment the fence value.
-	const UINT64 fenceToWaitFor = m_fenceValue;
-	ThrowIfFailed(CommandQueue->Signal(m_fence.Get(), fenceToWaitFor));
-	m_fenceValue++;
-
-	// Wait until the fence is completed.
-	ThrowIfFailed(m_fence->SetEventOnCompletion(fenceToWaitFor, m_fenceEvent));
+	m_fence->SetEventOnCompletion(m_fenceValue, m_fenceEvent);
 	WaitForSingleObject(m_fenceEvent, INFINITE);
+
 }
 
 void DumRHI_DX12::UploadeFrameTexture2ShaderVisibleHeap()
 {
-	std::set<Texture*>::iterator it;
+	/*std::set<Texture*>::iterator it;
 	for (it = FrameTextureSet.begin(); it != FrameTextureSet.end(); ++it)
 	{
 		Texture* texture = *it;
@@ -168,7 +150,7 @@ void DumRHI_DX12::UploadeFrameTexture2ShaderVisibleHeap()
 		g_dx12_rhi->SRVCBVDescriptorHeapShaderVisible->AllocDescriptor(cpuHandleShaderVisible, texture->GpuHandleSRV);
 
 		g_dx12_rhi->Device->CopyDescriptorsSimple(1, cpuHandleShaderVisible, texture->CpuHandleSRV, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-	}
+	}*/
 }
 
 
@@ -221,13 +203,15 @@ shared_ptr<ConstantBuffer> DumRHI_DX12::CreateConstantBuffer(int Size, UINT NumV
 
 	// Describe and create a constant buffer view (CBV).
 	cbuffer->CpuHandleVec.reserve(NumView);
+	cbuffer->GpuHandleVec.reserve(NumView);
+
 	for (int i = 0; i < NumView; i++)
 	{
 		D3D12_CPU_DESCRIPTOR_HANDLE CpuHandle;
 		D3D12_GPU_DESCRIPTOR_HANDLE GpuHandle;
 
-		SRVCBVDescriptorHeapStorage->AllocDescriptor(CpuHandle, GpuHandle);
-
+		//SRVCBVDescriptorHeapStorage->AllocDescriptor(CpuHandle, GpuHandle);
+		SRVCBVDescriptorHeapShaderVisible->AllocDescriptor(CpuHandle, GpuHandle);
 
 		D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc = {};
 		cbvDesc.BufferLocation = cbuffer->resource->GetGPUVirtualAddress() + i*Size;
@@ -235,6 +219,8 @@ shared_ptr<ConstantBuffer> DumRHI_DX12::CreateConstantBuffer(int Size, UINT NumV
 		Device->CreateConstantBufferView(&cbvDesc, CpuHandle);
 		
 		cbuffer->CpuHandleVec.push_back(CpuHandle);
+		cbuffer->GpuHandleVec.push_back(GpuHandle);
+
 	}
 	
 	shared_ptr<ConstantBuffer> retPtr = shared_ptr<ConstantBuffer>(cbuffer);
@@ -250,7 +236,8 @@ shared_ptr<Sampler> DumRHI_DX12::CreateSampler(D3D12_SAMPLER_DESC& InSamplerDesc
 
 	sampler->SamplerDesc = InSamplerDesc;
 
-	SamplerDescriptorHeapStorage->AllocDescriptor(sampler->CpuHandle, sampler->GpuHandle);
+	//SamplerDescriptorHeapStorage->AllocDescriptor(sampler->CpuHandle, sampler->GpuHandle);
+	SamplerDescriptorHeapShaderVisible->AllocDescriptor(sampler->CpuHandle, sampler->GpuHandle);
 
 
 	Device->CreateSampler(&sampler->SamplerDesc, sampler->CpuHandle);
@@ -318,36 +305,9 @@ shared_ptr<IndexBuffer> DumRHI_DX12::CreateIndexBuffer(DXGI_FORMAT Format, UINT 
 		//ThrowIfFailed(CommandList->Reset(CommandAllocator.Get(), nullptr));
 		ThrowIfFailed(CommandList->Reset(GetCurrentCA(), nullptr));
 
+		g_dx12_rhi->WaitGPU();
 		// Create synchronization objects and wait until assets have been uploaded to the GPU.
-		{
 
-			HANDLE m_fenceEvent;
-			ComPtr<ID3D12Fence> m_fence;
-			UINT64 m_fenceValue = 0;
-
-			ThrowIfFailed(Device->CreateFence(m_fenceValue, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&m_fence)));
-			m_fenceValue++;
-
-			// Create an event handle to use for frame synchronization.
-			m_fenceEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
-			if (m_fenceEvent == nullptr)
-			{
-				ThrowIfFailed(HRESULT_FROM_WIN32(GetLastError()));
-			}
-
-			// Wait for the command list to execute; we are reusing the same command 
-			// list in our main loop but for now, we just want to wait for setup to 
-			// complete before continuing.
-
-			// Signal and increment the fence value.
-			const UINT64 fenceToWaitFor = m_fenceValue;
-			ThrowIfFailed(CommandQueue->Signal(m_fence.Get(), fenceToWaitFor));
-			m_fenceValue++;
-
-			// Wait until the fence is completed.
-			ThrowIfFailed(m_fence->SetEventOnCompletion(fenceToWaitFor, m_fenceEvent));
-			WaitForSingleObject(m_fenceEvent, INFINITE);
-		}
 
 	}
 
@@ -404,36 +364,9 @@ shared_ptr<VertexBuffer> DumRHI_DX12::CreateVertexBuffer(UINT Size, UINT Stride,
 		//ThrowIfFailed(CommandList->Reset(CommandAllocator.Get(), nullptr));
 		ThrowIfFailed(CommandList->Reset(GetCurrentCA(), nullptr));
 
-		// Create synchronization objects and wait until assets have been uploaded to the GPU.
-		{
+		g_dx12_rhi->WaitGPU();
 
-			HANDLE m_fenceEvent;
-			ComPtr<ID3D12Fence> m_fence;
-			UINT64 m_fenceValue = 0;
-
-			ThrowIfFailed(Device->CreateFence(m_fenceValue, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&m_fence)));
-			m_fenceValue++;
-
-			// Create an event handle to use for frame synchronization.
-			m_fenceEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
-			if (m_fenceEvent == nullptr)
-			{
-				ThrowIfFailed(HRESULT_FROM_WIN32(GetLastError()));
-			}
-
-			// Wait for the command list to execute; we are reusing the same command 
-			// list in our main loop but for now, we just want to wait for setup to 
-			// complete before continuing.
-
-			// Signal and increment the fence value.
-			const UINT64 fenceToWaitFor = m_fenceValue;
-			ThrowIfFailed(CommandQueue->Signal(m_fence.Get(), fenceToWaitFor));
-			m_fenceValue++;
-
-			// Wait until the fence is completed.
-			ThrowIfFailed(m_fence->SetEventOnCompletion(fenceToWaitFor, m_fenceEvent));
-			WaitForSingleObject(m_fenceEvent, INFINITE);
-		}
+	
 
 	}
 
@@ -487,14 +420,6 @@ void DumRHI_DX12::CreateRendertargets(IDXGISwapChain3* InSwapChain, int width, i
 	}
 	
 	depthTexture = CreateTexture2DFromResource(nullptr);
-}
-
-void DumRHI_DX12::SubmitCommandList(ID3D12GraphicsCommandList* CmdList)
-{
-	CmdList->Close();
-	CommandQueue->ExecuteCommandLists(1, (ID3D12CommandList**)&CmdList);
-	m_fenceValue++;
-	CommandQueue->Signal(m_fence.Get(), m_fenceValue);
 }
 
 DumRHI_DX12::DumRHI_DX12(ID3D12Device5 * InDevice)
@@ -637,8 +562,10 @@ DumRHI_DX12::DumRHI_DX12(ID3D12Device5 * InDevice)
 
 	}
 	
-	
-	
+	m_fenceValue = 0;
+	ThrowIfFailed(g_dx12_rhi->Device->CreateFence(m_fenceValue, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&m_fence)));
+	// Create an event handle to use for frame synchronization.
+	m_fenceEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
 
 
 	
@@ -650,55 +577,36 @@ DumRHI_DX12::DumRHI_DX12(ID3D12Device5 * InDevice)
 	//ThrowIfFailed(CommandList->Reset(CommandAllocator.Get(), nullptr));
 	ThrowIfFailed(CommandList->Reset(GetCurrentCA(), nullptr));
 
-	// Create synchronization objects and wait until assets have been uploaded to the GPU.
-	{
-		ThrowIfFailed(Device->CreateFence(m_fenceValue, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&m_fence)));
-		m_fenceValue++;
-
-		// Create an event handle to use for frame synchronization.
-		m_fenceEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
-		if (m_fenceEvent == nullptr)
-		{
-			ThrowIfFailed(HRESULT_FROM_WIN32(GetLastError()));
-		}
-
-		// Wait for the command list to execute; we are reusing the same command 
-		// list in our main loop but for now, we just want to wait for setup to 
-		// complete before continuing.
-
-		// Signal and increment the fence value.
-		const UINT64 fenceToWaitFor = m_fenceValue;
-		ThrowIfFailed(CommandQueue->Signal(m_fence.Get(), fenceToWaitFor));
-		m_fenceValue++;
-
-		// Wait until the fence is completed.
-		ThrowIfFailed(m_fence->SetEventOnCompletion(fenceToWaitFor, m_fenceEvent));
-		WaitForSingleObject(m_fenceEvent, INFINITE);
-	}
-
-
-
-
+	g_dx12_rhi->WaitGPU();
 }
 
 
 DumRHI_DX12::~DumRHI_DX12()
 {
-	{
-		const UINT64 fence = m_fenceValue;
-		const UINT64 lastCompletedFence = m_fence->GetCompletedValue();
+	m_fenceValue++;
 
-		// Signal and increment the fence value.
-		ThrowIfFailed(CommandQueue->Signal(m_fence.Get(), m_fenceValue));
-		m_fenceValue++;
+	CommandQueue->Signal(m_fence.Get(), m_fenceValue);
 
-		// Wait until the previous frame is finished.
-		if (lastCompletedFence < fence)
-		{
-			ThrowIfFailed(m_fence->SetEventOnCompletion(fence, m_fenceEvent));
-			WaitForSingleObject(m_fenceEvent, INFINITE);
-		}
-	}
+
+	m_fence->SetEventOnCompletion(m_fenceValue, m_fenceEvent);
+	WaitForSingleObject(m_fenceEvent, INFINITE);
+
+
+	//{
+	//	const UINT64 fence = m_fenceValue;
+	//	const UINT64 lastCompletedFence = m_fence->GetCompletedValue();
+
+	//	// Signal and increment the fence value.
+	//	ThrowIfFailed(CommandQueue->Signal(m_fence.Get(), m_fenceValue));
+	//	m_fenceValue++;
+
+	//	// Wait until the previous frame is finished.
+	//	if (lastCompletedFence < fence)
+	//	{
+	//		ThrowIfFailed(m_fence->SetEventOnCompletion(fence, m_fenceEvent));
+	//		WaitForSingleObject(m_fenceEvent, INFINITE);
+	//	}
+	//}
 }
 
 void Shader::BindUAV(string name, int baseRegister)
@@ -776,21 +684,36 @@ void Shader::SetTexture(string name, Texture* texture, ID3D12GraphicsCommandList
 	D3D12_CPU_DESCRIPTOR_HANDLE ShaderVisibleCPUHandle;
 	D3D12_GPU_DESCRIPTOR_HANDLE ShaderVisibleGpuHandle;
 
-	if (DHPool)
+	/*if (DHPool)
 		DHPool->AllocDescriptor(ShaderVisibleCPUHandle, ShaderVisibleGpuHandle);
 	else
 		g_dx12_rhi->SRVCBVDescriptorHeapShaderVisible->AllocDescriptor(ShaderVisibleCPUHandle, ShaderVisibleGpuHandle);
 
-	g_dx12_rhi->Device->CopyDescriptorsSimple(1, ShaderVisibleCPUHandle, texture->CpuHandleSRV, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+	g_dx12_rhi->Device->CopyDescriptorsSimple(1, ShaderVisibleCPUHandle, texture->CpuHandleSRV, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);*/
 
 	UINT RPI = textureBinding[name].rootParamIndex;
-	CommandList->SetGraphicsRootDescriptorTable(RPI, ShaderVisibleGpuHandle);
+	CommandList->SetGraphicsRootDescriptorTable(RPI, texture->GpuHandleSRV);
 
 }
 
-void Shader::SetUAV(string name, Texture* texture)
+void Shader::SetUAV(string name, Texture* texture, ID3D12GraphicsCommandList* CommandList, bool isCompute)
 {
 	uavBinding[name].texture = texture;
+	D3D12_CPU_DESCRIPTOR_HANDLE ShaderVisibleCPUHandle;
+	D3D12_GPU_DESCRIPTOR_HANDLE ShaderVisibleGpuHandle;
+
+	/*if (DHPool)
+		DHPool->AllocDescriptor(ShaderVisibleCPUHandle, ShaderVisibleGpuHandle);
+	else*/
+	/*	g_dx12_rhi->SRVCBVDescriptorHeapShaderVisible->AllocDescriptor(ShaderVisibleCPUHandle, ShaderVisibleGpuHandle);
+
+	g_dx12_rhi->Device->CopyDescriptorsSimple(1, ShaderVisibleCPUHandle, texture->CpuHandleSRV, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);*/
+
+	UINT RPI = textureBinding[name].rootParamIndex;
+	if (isCompute)
+		CommandList->SetComputeRootDescriptorTable(RPI, texture->GpuHandleUAV);
+	else
+		CommandList->SetGraphicsRootDescriptorTable(RPI, texture->GpuHandleUAV);
 }
 
 void Shader::SetSampler(string name, Sampler* sampler, ID3D12GraphicsCommandList* CommandList, ThreadDescriptorHeapPool* DHPool)
@@ -804,55 +727,55 @@ void Shader::SetSampler(string name, Sampler* sampler, ID3D12GraphicsCommandList
 	/*if (DHPool)
 		DHPool->AllocDescriptor(ShaderVisibleCPUHandle, ShaderVisibleGpuHandle);
 	else*/
-		g_dx12_rhi->SamplerDescriptorHeapShaderVisible->AllocDescriptor(ShaderVisibleCPUHandle, ShaderVisibleGpuHandle);
+	/*	g_dx12_rhi->SamplerDescriptorHeapShaderVisible->AllocDescriptor(ShaderVisibleCPUHandle, ShaderVisibleGpuHandle);
 
-	g_dx12_rhi->Device->CopyDescriptorsSimple(1, ShaderVisibleCPUHandle, sampler->CpuHandle, D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
+	g_dx12_rhi->Device->CopyDescriptorsSimple(1, ShaderVisibleCPUHandle, sampler->CpuHandle, D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);*/
 
 
-	CommandList->SetGraphicsRootDescriptorTable(samplerBinding[name].rootParamIndex, ShaderVisibleGpuHandle);
+	CommandList->SetGraphicsRootDescriptorTable(samplerBinding[name].rootParamIndex, sampler->GpuHandle);
 
 }
 
 void Shader::SetGlobalConstantBuffer(string name, GlobalConstantBuffer* gcb, ID3D12GraphicsCommandList* CommandList, ThreadDescriptorHeapPool* DHPool)
 {
-	BindingData& binding = constantBufferBinding[name];
+	//BindingData& binding = constantBufferBinding[name];
 
-	//binding.cbs = gcb->cbs;
+	////binding.cbs = gcb->cbs;
 
-	ConstantBuffer* cb = nullptr;
+	//ConstantBuffer* cb = nullptr;
 
-	D3D12_CPU_DESCRIPTOR_HANDLE ShaderVisibleCPUHandle;
-	D3D12_GPU_DESCRIPTOR_HANDLE ShaderVisibleGpuHandle;
+	//D3D12_CPU_DESCRIPTOR_HANDLE ShaderVisibleCPUHandle;
+	//D3D12_GPU_DESCRIPTOR_HANDLE ShaderVisibleGpuHandle;
 
-	if (gcb->cbs.size() != 0)
-		cb = gcb->cbs[g_dx12_rhi->CurrentFrameIndex].get();
+	//if (gcb->cbs.size() != 0)
+	//	cb = gcb->cbs[g_dx12_rhi->CurrentFrameIndex].get();
 
-	{
-		UINT DrawCallIndex;
-		
-		DrawCallIndex = 0;
+	//{
+	//	UINT DrawCallIndex;
+	//	
+	//	DrawCallIndex = 0;
 
-		if (cb->CpuHandleVec.size() == 1) // this is global constant buffer(can be same for all draw)
-		{
-			//if (!cb->isPopulatedThisFrame)
-			{
-				D3D12_CPU_DESCRIPTOR_HANDLE NonShadervisibleCPUHandle = cb->CpuHandleVec[DrawCallIndex];
+	//	if (cb->CpuHandleVec.size() == 1) // this is global constant buffer(can be same for all draw)
+	//	{
+	//		//if (!cb->isPopulatedThisFrame)
+	//		{
+	//			D3D12_CPU_DESCRIPTOR_HANDLE NonShadervisibleCPUHandle = cb->CpuHandleVec[DrawCallIndex];
 
-				//g_dx12_rhi->SRVCBVDescriptorHeapShaderVisible->AllocDescriptor(ShaderVisibleCPUHandle, cb->GpuHandle);
-				if (DHPool)
-					DHPool->AllocDescriptor(ShaderVisibleCPUHandle, ShaderVisibleGpuHandle);
-				else
-					g_dx12_rhi->SRVCBVDescriptorHeapShaderVisible->AllocDescriptor(ShaderVisibleCPUHandle, ShaderVisibleGpuHandle);
+	//			//g_dx12_rhi->SRVCBVDescriptorHeapShaderVisible->AllocDescriptor(ShaderVisibleCPUHandle, cb->GpuHandle);
+	//			if (DHPool)
+	//				DHPool->AllocDescriptor(ShaderVisibleCPUHandle, ShaderVisibleGpuHandle);
+	//			else
+	//				g_dx12_rhi->SRVCBVDescriptorHeapShaderVisible->AllocDescriptor(ShaderVisibleCPUHandle, ShaderVisibleGpuHandle);
 
 
-				g_dx12_rhi->Device->CopyDescriptorsSimple(1, ShaderVisibleCPUHandle, NonShadervisibleCPUHandle, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-				//cb->isPopulatedThisFrame = true;
-			}
-		}
-	
-	}
+	//			g_dx12_rhi->Device->CopyDescriptorsSimple(1, ShaderVisibleCPUHandle, NonShadervisibleCPUHandle, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+	//			//cb->isPopulatedThisFrame = true;
+	//		}
+	//	}
+	//
+	//}
 
-	CommandList->SetGraphicsRootDescriptorTable(binding.rootParamIndex, ShaderVisibleGpuHandle);
+	//CommandList->SetGraphicsRootDescriptorTable(binding.rootParamIndex, ShaderVisibleGpuHandle);
 }
 
 void Shader::SetConstantValue(string name, void* pData, ID3D12GraphicsCommandList* CommandList, ThreadDescriptorHeapPool* DHPool)
@@ -872,14 +795,15 @@ void Shader::SetConstantValue(string name, void* pData, ID3D12GraphicsCommandLis
 
 	D3D12_CPU_DESCRIPTOR_HANDLE NonShadervisibleCPUHandle = binding.cb->CpuHandleVec[CBViewIndex];
 
-	if (DHPool)
-		DHPool->AllocDescriptor(ShaderVisibleCPUHandle, ShaderVisibleGpuHandle);
-	else
-		g_dx12_rhi->SRVCBVDescriptorHeapShaderVisible->AllocDescriptor(ShaderVisibleCPUHandle, ShaderVisibleGpuHandle);
+	//if (DHPool)
+	//	DHPool->AllocDescriptor(ShaderVisibleCPUHandle, ShaderVisibleGpuHandle);
+	//else
+	//	g_dx12_rhi->SRVCBVDescriptorHeapShaderVisible->AllocDescriptor(ShaderVisibleCPUHandle, ShaderVisibleGpuHandle);
 
 
-	g_dx12_rhi->Device->CopyDescriptorsSimple(1, ShaderVisibleCPUHandle, NonShadervisibleCPUHandle, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+	//g_dx12_rhi->Device->CopyDescriptorsSimple(1, ShaderVisibleCPUHandle, NonShadervisibleCPUHandle, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
 
+	ShaderVisibleGpuHandle = binding.cb->GpuHandleVec[CBViewIndex];
 	CommandList->SetGraphicsRootDescriptorTable(binding.rootParamIndex, ShaderVisibleGpuHandle);
 }
 
@@ -1086,41 +1010,41 @@ void PipelineStateObject::ApplyGlobal(ID3D12GraphicsCommandList* CommandList)
 	CommandList->SetGraphicsRootSignature(RS.Get());
 	CommandList->SetPipelineState(PSO.Get());
 
-	for (auto&bd : ps->samplerBinding)
-	{
-		D3D12_CPU_DESCRIPTOR_HANDLE ShaderVisibleCPUHandle;
-		D3D12_GPU_DESCRIPTOR_HANDLE ShaderVisibleGpuHandle;
+	//for (auto&bd : ps->samplerBinding)
+	//{
+	//	D3D12_CPU_DESCRIPTOR_HANDLE ShaderVisibleCPUHandle;
+	//	D3D12_GPU_DESCRIPTOR_HANDLE ShaderVisibleGpuHandle;
 
-		
-		g_dx12_rhi->SamplerDescriptorHeapShaderVisible->AllocDescriptor(ShaderVisibleCPUHandle, ShaderVisibleGpuHandle);
+	//	
+	//	g_dx12_rhi->SamplerDescriptorHeapShaderVisible->AllocDescriptor(ShaderVisibleCPUHandle, ShaderVisibleGpuHandle);
 
-		g_dx12_rhi->Device->CopyDescriptorsSimple(1, ShaderVisibleCPUHandle, bd.second.sampler->CpuHandle, D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
-		CommandList->SetGraphicsRootDescriptorTable(bd.second.rootParamIndex, ShaderVisibleGpuHandle);
-	}
+	//	g_dx12_rhi->Device->CopyDescriptorsSimple(1, ShaderVisibleCPUHandle, bd.second.sampler->CpuHandle, D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
+	//	CommandList->SetGraphicsRootDescriptorTable(bd.second.rootParamIndex, ShaderVisibleGpuHandle);
+	//}
 
-	for (auto& bd : ps->rootBinding)
-	{
-		CommandList->SetGraphicsRoot32BitConstant(bd.second.rootParamIndex, bd.second.rootConst, 0);
-	}
+	//for (auto& bd : ps->rootBinding)
+	//{
+	//	CommandList->SetGraphicsRoot32BitConstant(bd.second.rootParamIndex, bd.second.rootConst, 0);
+	//}
 
 
-	for (auto& bd : ps->textureBinding)
-	{
-		Texture* tex = bd.second.texture;
-		D3D12_CPU_DESCRIPTOR_HANDLE ShaderVisibleCPUHandle;
-		g_dx12_rhi->SRVCBVDescriptorHeapShaderVisible->AllocDescriptor(ShaderVisibleCPUHandle, tex->GpuHandleSRV);
-		g_dx12_rhi->Device->CopyDescriptorsSimple(1, ShaderVisibleCPUHandle, tex->CpuHandleSRV, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-		CommandList->SetGraphicsRootDescriptorTable(bd.second.rootParamIndex, bd.second.texture->GpuHandleSRV);
-	}
+	//for (auto& bd : ps->textureBinding)
+	//{
+	//	Texture* tex = bd.second.texture;
+	//	D3D12_CPU_DESCRIPTOR_HANDLE ShaderVisibleCPUHandle;
+	//	g_dx12_rhi->SRVCBVDescriptorHeapShaderVisible->AllocDescriptor(ShaderVisibleCPUHandle, tex->GpuHandleSRV);
+	//	g_dx12_rhi->Device->CopyDescriptorsSimple(1, ShaderVisibleCPUHandle, tex->CpuHandleSRV, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+	//	CommandList->SetGraphicsRootDescriptorTable(bd.second.rootParamIndex, bd.second.texture->GpuHandleSRV);
+	//}
 
-	for (auto& bd : ps->uavBinding)
-	{
-		Texture* tex = bd.second.texture;
-		D3D12_CPU_DESCRIPTOR_HANDLE ShaderVisibleCPUHandle;
-		g_dx12_rhi->SRVCBVDescriptorHeapShaderVisible->AllocDescriptor(ShaderVisibleCPUHandle, tex->GpuHandleUAV);
-		g_dx12_rhi->Device->CopyDescriptorsSimple(1, ShaderVisibleCPUHandle, tex->CpuHandleUAV, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-		CommandList->SetGraphicsRootDescriptorTable(bd.second.rootParamIndex, tex->GpuHandleUAV);
-	}
+	//for (auto& bd : ps->uavBinding)
+	//{
+	//	Texture* tex = bd.second.texture;
+	//	D3D12_CPU_DESCRIPTOR_HANDLE ShaderVisibleCPUHandle;
+	//	g_dx12_rhi->SRVCBVDescriptorHeapShaderVisible->AllocDescriptor(ShaderVisibleCPUHandle, tex->GpuHandleUAV);
+	//	g_dx12_rhi->Device->CopyDescriptorsSimple(1, ShaderVisibleCPUHandle, tex->CpuHandleUAV, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+	//	CommandList->SetGraphicsRootDescriptorTable(bd.second.rootParamIndex, tex->GpuHandleUAV);
+	//}
 }
 
 void PipelineStateObject::ApplyCS(ID3D12GraphicsCommandList* CommandList)
@@ -1128,7 +1052,7 @@ void PipelineStateObject::ApplyCS(ID3D12GraphicsCommandList* CommandList)
 	CommandList->SetComputeRootSignature(RS.Get());
 	CommandList->SetPipelineState(PSO.Get());
 
-	for (auto&bd : cs->samplerBinding)
+	/*for (auto&bd : cs->samplerBinding)
 	{
 		CommandList->SetComputeRootDescriptorTable(bd.second.rootParamIndex, bd.second.sampler->GpuHandle);
 	}
@@ -1155,7 +1079,7 @@ void PipelineStateObject::ApplyCS(ID3D12GraphicsCommandList* CommandList)
 		g_dx12_rhi->SRVCBVDescriptorHeapShaderVisible->AllocDescriptor(ShaderVisibleCPUHandle, tex->GpuHandleUAV);
 		g_dx12_rhi->Device->CopyDescriptorsSimple(1, ShaderVisibleCPUHandle, tex->CpuHandleUAV, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
 		CommandList->SetComputeRootDescriptorTable(bd.second.rootParamIndex, tex->GpuHandleUAV);
-	}
+	}*/
 }
 
 void PipelineStateObject::ApplyGraphicsRSPSO(ID3D12GraphicsCommandList* CommandList)
@@ -1202,7 +1126,9 @@ void Texture::VisibleThisFrame()
 
 void Texture::MakeUAV()
 {
-	g_dx12_rhi->SRVCBVDescriptorHeapStorage->AllocDescriptor(CpuHandleUAV, GpuHandleUAV);
+	//g_dx12_rhi->SRVCBVDescriptorHeapStorage->AllocDescriptor(CpuHandleUAV, GpuHandleUAV);
+	g_dx12_rhi->SRVCBVDescriptorHeapShaderVisible->AllocDescriptor(CpuHandleUAV, GpuHandleUAV);
+
 
 	D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc = {};
 	uavDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
@@ -1214,7 +1140,9 @@ void Texture::MakeUAV()
 
 void Texture::MakeSRV(bool isDepth)
 {
-	g_dx12_rhi->SRVCBVDescriptorHeapStorage->AllocDescriptor(CpuHandleSRV, GpuHandleSRV);
+	//g_dx12_rhi->SRVCBVDescriptorHeapStorage->AllocDescriptor(CpuHandleSRV, GpuHandleSRV);
+	g_dx12_rhi->SRVCBVDescriptorHeapShaderVisible->AllocDescriptor(CpuHandleSRV, GpuHandleSRV);
+
 
 	D3D12_SHADER_RESOURCE_VIEW_DESC SrvDesc = {};
 	SrvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
@@ -1416,7 +1344,7 @@ void Texture::UploadSRCData(D3D12_SUBRESOURCE_DATA* SrcData)
 
 
 
-std::shared_ptr<Texture> DumRHI_DX12::CreateTextureFromFile(wstring fileName)
+std::shared_ptr<Texture> DumRHI_DX12::CreateTextureFromFile(wstring fileName, bool isNormal)
 {
 	if (FileExists(fileName.c_str()) == false)
 		return nullptr;
@@ -1448,7 +1376,8 @@ std::shared_ptr<Texture> DumRHI_DX12::CreateTextureFromFile(wstring fileName)
 	const DirectX::TexMetadata& metaData = image.GetMetadata();
 	DXGI_FORMAT format = metaData.format;
 
-	//format = DirectX::MakeSRGB(format);
+	if(!isNormal)
+		format = DirectX::MakeSRGB(format);
 
 	const bool is3D = metaData.dimension == DirectX::TEX_DIMENSION_TEXTURE3D;
 
@@ -1689,12 +1618,16 @@ shared_ptr<RTAS> Mesh::CreateBLAS()
 	asDesc.DestAccelerationStructureData = as->Result->GetGPUVirtualAddress();
 	asDesc.ScratchAccelerationStructureData = as->Scratch->GetGPUVirtualAddress();
 
-	g_dx12_rhi->CommandList->BuildRaytracingAccelerationStructure(&asDesc, 0, nullptr);
+	D3D12_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO_DESC postInfo;
+	g_dx12_rhi->CommandList->BuildRaytracingAccelerationStructure(&asDesc, 0, &postInfo);
 
 	D3D12_RESOURCE_BARRIER uavBarrier = {};
 	uavBarrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
 	uavBarrier.UAV.pResource = as->Result.Get();
 	g_dx12_rhi->CommandList->ResourceBarrier(1, &uavBarrier);
+
+	g_dx12_rhi->WaitGPU();
+
 
 	return shared_ptr<RTAS>(as);
 }
@@ -1805,11 +1738,14 @@ std::shared_ptr<RTAS> Mesh::CreateBLASArray()
 	uavBarrier.UAV.pResource = as->Result.Get();
 	g_dx12_rhi->CommandList->ResourceBarrier(1, &uavBarrier);
 
+
+	g_dx12_rhi->WaitGPU();
+	
 	return shared_ptr<RTAS>(as);
 
 }
 
-shared_ptr<RTAS> DumRHI_DX12::CreateTLAS(vector<shared_ptr<RTAS>>& VecBottomLevelAS, uint64_t& tlasSize)
+std::shared_ptr<RTAS> DumRHI_DX12::CreateTLAS(vector<shared_ptr<RTAS>>& VecBottomLevelAS)
 {
 	RTAS* as = new  RTAS;
 
@@ -1893,37 +1829,49 @@ shared_ptr<RTAS> DumRHI_DX12::CreateTLAS(vector<shared_ptr<RTAS>>& VecBottomLeve
 		g_dx12_rhi->Device->CreateCommittedResource(&kUploadHeapProps, D3D12_HEAP_FLAG_NONE, &bufDesc, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&as->Instance));
 	}
 
-	D3D12_RAYTRACING_INSTANCE_DESC* pInstanceDesc;
-	as->Instance->Map(0, nullptr, (void**)&pInstanceDesc);
-	ZeroMemory(pInstanceDesc, sizeof(D3D12_RAYTRACING_INSTANCE_DESC) * VecBottomLevelAS.size());
-
-	for (int i = 0; i < VecBottomLevelAS.size(); i++)
+	if (VecBottomLevelAS.size() > 0)
 	{
-		pInstanceDesc[i].InstanceID = i;                            // This value will be exposed to the shader via InstanceID()
-		pInstanceDesc[i].InstanceContributionToHitGroupIndex = 0;   // This is the offset inside the shader-table. We only have a single geometry, so the offset 0
-		pInstanceDesc[i].Flags = D3D12_RAYTRACING_INSTANCE_FLAG_NONE;
-		glm::mat4 m; // Identity matrix
-		memcpy(pInstanceDesc[i].Transform, &m, sizeof(pInstanceDesc[i].Transform));
-		pInstanceDesc[i].AccelerationStructure = VecBottomLevelAS[i]->Result->GetGPUVirtualAddress();
-		pInstanceDesc[i].InstanceMask = 0xFF;
-	}
+		D3D12_RAYTRACING_INSTANCE_DESC* pInstanceDesc;
+		as->Instance->Map(0, nullptr, (void**)&pInstanceDesc);
+		ZeroMemory(pInstanceDesc, sizeof(D3D12_RAYTRACING_INSTANCE_DESC) * VecBottomLevelAS.size());
 
-	as->Instance->Unmap(0, nullptr);
+		for (int i = 0; i < VecBottomLevelAS.size(); i++)
+		{
+			pInstanceDesc[i].InstanceID = i;                            // This value will be exposed to the shader via InstanceID()
+			pInstanceDesc[i].InstanceContributionToHitGroupIndex = 0;   // This is the offset inside the shader-table. We only have a single geometry, so the offset 0
+			pInstanceDesc[i].Flags = D3D12_RAYTRACING_INSTANCE_FLAG_NONE;
+			glm::mat4 m; // Identity matrix
+			memcpy(pInstanceDesc[i].Transform, &m, sizeof(pInstanceDesc[i].Transform));
+			pInstanceDesc[i].AccelerationStructure = VecBottomLevelAS[i]->Result->GetGPUVirtualAddress();
+			pInstanceDesc[i].InstanceMask = 0xFF;
+		}
+		as->Instance->Unmap(0, nullptr);
+	}
+	
+
 
 	// Create the TLAS
 	D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC asDesc = {};
 	asDesc.Inputs = inputs;
-	asDesc.Inputs.InstanceDescs = as->Instance->GetGPUVirtualAddress();
+
+	if (VecBottomLevelAS.size() > 0)
+		asDesc.Inputs.InstanceDescs = as->Instance->GetGPUVirtualAddress();
 	asDesc.DestAccelerationStructureData = as->Result->GetGPUVirtualAddress();
 	asDesc.ScratchAccelerationStructureData = as->Scratch->GetGPUVirtualAddress();
 
-	CommandList->BuildRaytracingAccelerationStructure(&asDesc, 0, nullptr);
+	D3D12_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO_DESC postInfo;
+
+	CommandList->BuildRaytracingAccelerationStructure(&asDesc, 0, &postInfo);
 
 	// We need to insert a UAV barrier before using the acceleration structures in a raytracing operation
 	D3D12_RESOURCE_BARRIER uavBarrier = {};
 	uavBarrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
 	uavBarrier.UAV.pResource = as->Result.Get();
 	CommandList->ResourceBarrier(1, &uavBarrier);
+
+	g_dx12_rhi->WaitGPU();
+
+
 	return shared_ptr<RTAS>(as);
 }
 
@@ -2274,28 +2222,30 @@ void RTPipelineStateObject::EndShaderTable()
 			{
 				if (bd.Type == D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER)
 				{
-					D3D12_CPU_DESCRIPTOR_HANDLE CPUHandle = bd.CPUHandle;
+					/*D3D12_CPU_DESCRIPTOR_HANDLE CPUHandle = bd.GPUHandle;
 
 					D3D12_CPU_DESCRIPTOR_HANDLE ShaderVisibleCPU;
-					D3D12_GPU_DESCRIPTOR_HANDLE ShaderVisibleGPU;
+					D3D12_GPU_DESCRIPTOR_HANDLE ShaderVisibleGPU;*/
 
-					g_dx12_rhi->SamplerDescriptorHeapShaderVisible->AllocDescriptor(ShaderVisibleCPU, ShaderVisibleGPU);
+					/*g_dx12_rhi->SamplerDescriptorHeapShaderVisible->AllocDescriptor(ShaderVisibleCPU, ShaderVisibleGPU);
 
-					g_dx12_rhi->Device->CopyDescriptorsSimple(1, ShaderVisibleCPU, CPUHandle, D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
+					g_dx12_rhi->Device->CopyDescriptorsSimple(1, ShaderVisibleCPU, CPUHandle, D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);*/
 
-					*(UINT64*)(pDataThis) = ShaderVisibleGPU.ptr;
+					*(UINT64*)(pDataThis) = bd.GPUHandle.ptr;
 
 				}
 				else
 				{
-					D3D12_CPU_DESCRIPTOR_HANDLE CPUHandle = bd.CPUHandle;
+			/*		D3D12_CPU_DESCRIPTOR_HANDLE CPUHandle = bd.GPUHandle;
 					D3D12_GPU_DESCRIPTOR_HANDLE ShaderVisibleGPU;
-					D3D12_CPU_DESCRIPTOR_HANDLE ShaderVisibleCPU;
+					D3D12_CPU_DESCRIPTOR_HANDLE ShaderVisibleCPU;*/
 
-					g_dx12_rhi->SRVCBVDescriptorHeapShaderVisible->AllocDescriptor(ShaderVisibleCPU, ShaderVisibleGPU);
-					g_dx12_rhi->Device->CopyDescriptorsSimple(1, ShaderVisibleCPU, CPUHandle, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-					*(UINT64*)(pDataThis) = ShaderVisibleGPU.ptr;
-					memcpy(pDataThis, &ShaderVisibleGPU.ptr, sizeof(UINT64));
+					//g_dx12_rhi->SRVCBVDescriptorHeapShaderVisible->AllocDescriptor(ShaderVisibleCPU, ShaderVisibleGPU);
+					//g_dx12_rhi->Device->CopyDescriptorsSimple(1, ShaderVisibleCPU, CPUHandle, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+
+
+
+					*(UINT64*)(pDataThis) = bd.GPUHandle.ptr;
 					UINT64 v = *(UINT64*)(pDataThis);
 
 				}
@@ -2341,14 +2291,14 @@ void RTPipelineStateObject::EndShaderTable()
 
 		for (auto& bd : HitProgramInfo.VecData)
 		{
-			D3D12_CPU_DESCRIPTOR_HANDLE CPUHandle = bd;
+			/*D3D12_CPU_DESCRIPTOR_HANDLE CPUHandle = bd;
 			D3D12_GPU_DESCRIPTOR_HANDLE ShaderVisibleGPU;
 			D3D12_CPU_DESCRIPTOR_HANDLE ShaderVisibleCPU;
 
 			g_dx12_rhi->SRVCBVDescriptorHeapShaderVisible->AllocDescriptor(ShaderVisibleCPU, ShaderVisibleGPU);
 			g_dx12_rhi->Device->CopyDescriptorsSimple(1, ShaderVisibleCPU, CPUHandle, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-
-			*(UINT64*)(pDataThis) = ShaderVisibleGPU.ptr;
+*/
+			*(UINT64*)(pDataThis) = bd.ptr;// ShaderVisibleGPU.ptr;
 			
 			pDataThis += sizeof(UINT64);
 		}
@@ -2360,7 +2310,7 @@ void RTPipelineStateObject::EndShaderTable()
 	ShaderTable->Unmap(0, nullptr);
 }
 
-void RTPipelineStateObject::SetUAV(string shader, string bindingName, D3D12_CPU_DESCRIPTOR_HANDLE uavHandle, INT instanceIndex /*= -1*/)
+void RTPipelineStateObject::SetUAV(string shader, string bindingName, D3D12_GPU_DESCRIPTOR_HANDLE uavHandle, INT instanceIndex /*= -1*/)
 {
 	// each bindings of raygen/miss shader is unique to shader name.
 	if (instanceIndex == -1) // raygen, miss
@@ -2370,7 +2320,7 @@ void RTPipelineStateObject::SetUAV(string shader, string bindingName, D3D12_CPU_
 		{
 			if (bd.name == bindingName)
 			{
-				bd.CPUHandle = uavHandle;
+				bd.GPUHandle = uavHandle;
 
 			}
 		}
@@ -2384,7 +2334,7 @@ void RTPipelineStateObject::SetUAV(string shader, string bindingName, D3D12_CPU_
 	
 }
 
-void RTPipelineStateObject::SetSRV(string shader, string bindingName, D3D12_CPU_DESCRIPTOR_HANDLE srvHandle, INT instanceIndex /*= -1*/)
+void RTPipelineStateObject::SetSRV(string shader, string bindingName, D3D12_GPU_DESCRIPTOR_HANDLE srvHandle, INT instanceIndex /*= -1*/)
 {
 	// each bindings of raygen/miss shader is unique to shader name.
 	if (instanceIndex == -1) // raygen, miss
@@ -2394,7 +2344,7 @@ void RTPipelineStateObject::SetSRV(string shader, string bindingName, D3D12_CPU_
 		{
 			if (bd.name == bindingName)
 			{
-				bd.CPUHandle = srvHandle;
+				bd.GPUHandle = srvHandle;
 			}
 		}
 	}
@@ -2416,7 +2366,7 @@ void RTPipelineStateObject::SetSampler(string shader, string bindingName, Sample
 		{
 			if (bd.name == bindingName)
 			{
-				bd.CPUHandle = sampler->CpuHandle;
+				bd.GPUHandle = sampler->GpuHandle;
 			}
 		}
 	}
@@ -2424,7 +2374,7 @@ void RTPipelineStateObject::SetSampler(string shader, string bindingName, Sample
 	{
 		// SetXXX should be called according to the binding order, because it is push_backed to vector.
 		HitProgramBinding[instanceIndex].HitGroupName = MapHitGroup[shader].name;
-		HitProgramBinding[instanceIndex].VecData.push_back(sampler->CpuHandle);
+		HitProgramBinding[instanceIndex].VecData.push_back(sampler->GpuHandle);
 	}
 }
 
@@ -2442,7 +2392,7 @@ void RTPipelineStateObject::SetCBVValue(string shader, string bindingName, void*
 				UINT8* pMapped = (UINT8*)cb->MemMapped + size * 0;
 				memcpy((void*)pMapped, pData, size);
 
-				bd.CPUHandle = cb->CpuHandleVec[0];
+				bd.GPUHandle = cb->GpuHandleVec[0];
 			}
 		}
 	}
@@ -2459,7 +2409,7 @@ void RTPipelineStateObject::SetCBVValue(string shader, string bindingName, void*
 				memcpy((void*)pMapped, pData, size);
 
 				HitProgramBinding[instanceIndex].HitGroupName = MapHitGroup[shader].name;
-				HitProgramBinding[instanceIndex].VecData.push_back(cb->CpuHandleVec[instanceIndex]);
+				HitProgramBinding[instanceIndex].VecData.push_back(cb->GpuHandleVec[instanceIndex]);
 			}
 		}
 	}

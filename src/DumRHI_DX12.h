@@ -135,7 +135,7 @@ public:
 	void BindSampler(string name, int baseRegister);
 
 	void SetTexture(string name, Texture* texture, ID3D12GraphicsCommandList* CommandList, ThreadDescriptorHeapPool* DHPool);
-	void SetUAV(string name, Texture* texture);
+	void SetUAV(string name, Texture* texture, ID3D12GraphicsCommandList* CommandList, bool isCompute = false);
 
 	void SetSampler(string name, Sampler* sampler, ID3D12GraphicsCommandList* CommandList, ThreadDescriptorHeapPool* DHPool = nullptr);
 	
@@ -197,6 +197,7 @@ class RTPipelineStateObject
 
 		UINT BaseRegister;
 		D3D12_CPU_DESCRIPTOR_HANDLE CPUHandle; // for multiple instances
+		D3D12_GPU_DESCRIPTOR_HANDLE GPUHandle; // for multiple instances
 
 		vector<shared_ptr<ConstantBuffer>> cbs; // multiple constant buffers are need for multiple buffering.
 	};
@@ -247,7 +248,7 @@ public:
 	struct HitProgramData
 	{
 		wstring HitGroupName;
-		vector< D3D12_CPU_DESCRIPTOR_HANDLE> VecData;
+		vector< D3D12_GPU_DESCRIPTOR_HANDLE> VecData;
 	};
 
 	map<UINT, HitProgramData> HitProgramBinding;
@@ -282,8 +283,8 @@ public:
 
 	void BeginShaderTable();
 	void EndShaderTable();
-	void SetUAV(string shader, string bindingName, D3D12_CPU_DESCRIPTOR_HANDLE uavHandle, INT instanceIndex = -1);
-	void SetSRV(string shader, string bindingName, D3D12_CPU_DESCRIPTOR_HANDLE srvHandle, INT instanceIndex = -1);
+	void SetUAV(string shader, string bindingName, D3D12_GPU_DESCRIPTOR_HANDLE uavHandle, INT instanceIndex = -1);
+	void SetSRV(string shader, string bindingName, D3D12_GPU_DESCRIPTOR_HANDLE srvHandle, INT instanceIndex = -1);
 	void SetSampler(string shader, string bindingName, Sampler* sampler, INT instanceIndex = -1);
 	void SetCBVValue(string shader, string bindingName, void* pData, INT size, INT instanceIndex = -1);
 	void SetHitProgram(string shader, UINT instanceIndex);
@@ -332,6 +333,8 @@ public:
 
 	// multiple descriptor is needed for multiple draw(ex : transform matrix)
 	vector<D3D12_CPU_DESCRIPTOR_HANDLE> CpuHandleVec;
+	vector<D3D12_GPU_DESCRIPTOR_HANDLE> GpuHandleVec;
+
 
 	void* MemMapped = nullptr;
 
@@ -491,7 +494,6 @@ public:
 	uint32_t NumFrame = 3;
 	uint32_t CurrentFrameIndex = 0;
 
-	UINT64 FrameFenceValue;
 
 	ComPtr<ID3D12Device5> Device;
 	ComPtr<ID3D12CommandQueue> CommandQueue;
@@ -540,6 +542,7 @@ public:
 	ComPtr<ID3D12Fence> m_fence;
 	UINT64 m_fenceValue;
 	// Synchronization objects.
+	//UINT64 FrameFenceValue;
 
 	ComPtr<IDXGISwapChain3> m_swapChain;
 
@@ -560,14 +563,14 @@ public:
 
 	shared_ptr<Texture> CreateTexture2D(DXGI_FORMAT format, D3D12_RESOURCE_FLAGS resFlags, D3D12_RESOURCE_STATES initResState, int width, int height, int mipLevels);
 
-	shared_ptr<Texture> CreateTextureFromFile(wstring fileName);
+	shared_ptr<Texture> CreateTextureFromFile(wstring fileName, bool isNormal);
 
 	shared_ptr<ConstantBuffer> CreateConstantBuffer(int Size, UINT NumView = 1);
 	shared_ptr<Sampler> CreateSampler(D3D12_SAMPLER_DESC& InSamplerDesc);
 	shared_ptr<IndexBuffer> CreateIndexBuffer(DXGI_FORMAT Format, UINT Size, void* SrcData);
 	shared_ptr<VertexBuffer> CreateVertexBuffer(UINT Size, UINT Stride, void* SrcData);
 	
-	shared_ptr<RTAS> CreateTLAS(vector<shared_ptr<RTAS>>& VecBottomLevelAS, uint64_t& tlasSize);
+	shared_ptr<RTAS> CreateTLAS(vector<shared_ptr<RTAS>>& VecBottomLevelAS);
 
 
 	void SetRendertarget(Texture* rt);
@@ -576,7 +579,6 @@ public:
 	
 	void CreateRendertargets(IDXGISwapChain3* InSwapChain, int width, int height);
 
-	void SubmitCommandList(ID3D12GraphicsCommandList* CmdList);
 
 	DumRHI_DX12(ID3D12Device5 * pDevice);
 	virtual ~DumRHI_DX12();

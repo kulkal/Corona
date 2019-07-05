@@ -25,21 +25,20 @@
 # (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ***************************************************************************/
-RaytracingAccelerationStructure gRtScene : register(t0);
-Texture2D DepthTex : register(t1);
-Texture2D WorldNormalTex : register(t2);
 
 RWTexture2D<float4> gOutput : register(u0);
-cbuffer ViewParameter : register(b0)
-{
-    float4x4 ViewMatrix;
-    float4x4 InvViewMatrix;
-    float4x4 ProjMatrix;
-    float4 ProjectionParams;
-
-    float4 LightDir;
-};
-SamplerState sampleWrap : register(s0);
+RaytracingAccelerationStructure gRtScene : register(t0);
+////Texture2D DepthTex : register(t1);
+////Texture2D WorldNormalTex : register(t2);
+//cbuffer ViewParameter : register(b0)
+//{
+//    float4x4 ViewMatrix;
+//    float4x4 InvViewMatrix;
+//    float4x4 ProjMatrix;
+//    float4 ProjectionParams;
+//    float4 LightDir;
+//};
+//SamplerState sampleWrap : register(s0);
 
 
 float3 linearToSrgb(float3 c)
@@ -90,20 +89,39 @@ float3 offset_ray(float3 p, float3 n)
 void rayGen
 ()
 {
-	uint3 launchIndex = DispatchRaysIndex();
-	uint3 launchDim = DispatchRaysDimensions();
+    uint3 launchIndex = DispatchRaysIndex();
+    uint3 launchDim = DispatchRaysDimensions();
 
-	float2 crd = float2(launchIndex.xy);
+    float2 crd = float2(launchIndex.xy);
 	//crd.y *= -1;
-	float2 dims = float2(launchDim.xy);
+    float2 dims = float2(launchDim.xy);
 
-	float2 d = ((crd / dims) * 2.f - 1.f);
-	d *= tan(0.8 / 2);
-	float aspectRatio = dims.x / dims.y;
+    float2 d = ((crd / dims) * 2.f - 1.f);
+    d *= tan(0.8 / 2);
+    float aspectRatio = dims.x / dims.y;
 
-#define DEPTH 1
+#define DEPTH 0
+#define SIMPLE 1
 
-#if DEPTH
+#if SIMPLE 
+    RayDesc ray;
+    ray.Origin = float3(0, 0, -2);
+    ray.Direction = normalize(float3(d.x * aspectRatio, -d.y, 1));
+
+    ray.TMin = 0;
+    ray.TMax = 100000;
+
+    RayPayload payload;
+    //TraceRay(gRtScene, 0 /*rayFlags*/, 0xFF, 0 /* ray index*/, 0, 0, ray, payload);
+    float dd = payload.distance / 1000.0f;
+    gOutput[launchIndex.xy] = float4(dd, dd, dd, 1);
+    //float sx = sin(crd.x);
+    //float sy = sin(crd.y);
+
+    //gOutput[launchIndex.xy] = float4(sx, sy, 0, 1);
+
+
+#elif DEPTH
 	RayDesc ray;
 	ray.Origin = mul(float4(0, 0, 0, 1), InvViewMatrix).xyz;
 	ray.Direction = mul(normalize(float3(d.x * aspectRatio, -d.y, -1)), InvViewMatrix);
@@ -112,10 +130,10 @@ void rayGen
 	ray.TMax = 100000;
 
 	RayPayload payload;
-    //TraceRay(gRtScene, 0 /*rayFlags*/, 0xFF, 0 /* ray index*/, 0, 0, ray, payload);
-	float dd = payload.distance / 10.0f;
-	gOutput[launchIndex.xy] = float4(dd, dd, dd, 1);
-    gOutput[launchIndex.xy] = float4(1, 0, 0, 1);
+    TraceRay(gRtScene, 0 /*rayFlags*/, 0xFF, 0 /* ray index*/, 0, 0, ray, payload);
+	float dd = payload.distance / 1000.0f;
+    gOutput[launchIndex.xy] = float4(dd, dd, dd, 1);
+    //gOutput[launchIndex.xy] = float4(1, 0, 0, 1);
 
 #else
 	float2 UV = crd / dims;
@@ -157,7 +175,7 @@ void rayGen
 	{
 		gOutput[launchIndex.xy] = float4(0.1, 0.1, 0.1, 1);
 	}
-	#endif
+#endif
 }
 
 [shader("miss")]
@@ -167,8 +185,8 @@ void rayGen
     RayPayload payload)
 {
     //payload.color = float3(0.4, 0.6, 0.2);
-        payload.distance = 0;
-    }
+    payload.distance = 0;
+}
 
 [shader("closesthit")]
 
@@ -184,5 +202,5 @@ void rayGen
     //const float3 C = float3(0, 0, 1);
 
     //payload.color = A * barycentrics.x + B * barycentrics.y + C * barycentrics.z;
-        payload.distance = RayTCurrent();
-    }
+    payload.distance = RayTCurrent();
+}

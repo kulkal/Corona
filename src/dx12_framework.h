@@ -128,7 +128,7 @@ private:
 	std::shared_ptr<Sampler> samplerWrap;
 
 
-	unique_ptr<Mesh> mesh;
+	shared_ptr<Mesh> mesh;
 
 	vector<shared_ptr<Mesh>> meshes;
 	vector<shared_ptr<Material>> Materials;

@@ -40,7 +40,7 @@ enki::TaskScheduler g_TS;
 
 ofbx::IScene* g_scene = nullptr;
 
-
+using namespace glm;
 
 template<class BlotType>
 std::string convertBlobToString(BlotType* pBlob)
@@ -340,7 +340,7 @@ void dx12_framework::LoadPipeline()
 
 	UINT dxgiFactoryFlags = 0;
 
-#if 0//defined(_DEBUG)
+#if 0// defined(_DEBUG)
 	// Enable the debug layer (requires the Graphics Tools "optional feature").
 	// NOTE: Enabling the debug layer after device creation will invalidate the active device.
 	{
@@ -518,14 +518,6 @@ void dx12_framework::LoadAssets()
 
 
 
-	// albedo
-	AlbedoBuffer = dx12_rhi->CreateTexture2D(DXGI_FORMAT_R8G8B8A8_UNORM,
-		D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
-		D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, m_width, m_height, 1);
-	AlbedoBuffer->MakeRTV();
-	AlbedoBuffer->MakeSRV();
-
-	NAME_D3D12_OBJECT(AlbedoBuffer->resource);
 	
 	// shadow result
 	ShadowBuffer = dx12_rhi->CreateTexture2D(DXGI_FORMAT_R8G8B8A8_UNORM,
@@ -538,6 +530,16 @@ void dx12_framework::LoadAssets()
 
 
 	NAME_D3D12_OBJECT(ShadowBuffer->resource);
+
+	// albedo
+	AlbedoBuffer = dx12_rhi->CreateTexture2D(DXGI_FORMAT_R8G8B8A8_UNORM,
+		D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
+		D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, m_width, m_height, 1);
+	AlbedoBuffer->MakeRTV();
+	AlbedoBuffer->MakeSRV();
+
+	NAME_D3D12_OBJECT(AlbedoBuffer->resource);
+
 
 	
 	dx12_rhi->depthTexture = dx12_rhi->CreateTexture2D(DXGI_FORMAT_D32_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL, D3D12_RESOURCE_STATE_DEPTH_WRITE, m_width, m_height, 1);
@@ -555,13 +557,13 @@ void dx12_framework::LoadAssets()
 
 	// Describe and create a sampler.
 	D3D12_SAMPLER_DESC samplerDesc = {};
-	samplerDesc.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+	samplerDesc.Filter = D3D12_FILTER_ANISOTROPIC;
 	samplerDesc.AddressU = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
 	samplerDesc.AddressV = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
 	samplerDesc.AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
 	samplerDesc.MinLOD = 0;
 	samplerDesc.MaxLOD = D3D12_FLOAT32_MAX;
-	samplerDesc.MipLODBias = 0.0f;
+	samplerDesc.MipLODBias = -1.0f;
 	samplerDesc.MaxAnisotropy = 1;
 	samplerDesc.ComparisonFunc = D3D12_COMPARISON_FUNC_ALWAYS;
 
@@ -647,6 +649,8 @@ void dx12_framework::LoadMesh()
 
 void dx12_framework::LoadFbx()
 {
+	
+
 	Assimp::Importer importer;
 	const aiScene* scene = importer.ReadFile("Sponza/Sponza.fbx", 0);
 	wstring dir = L"Sponza/";
@@ -697,7 +701,7 @@ void dx12_framework::LoadFbx()
 			wDiffuseTex = GetFileName(AnsiToWString(diffuseTexPath.C_Str()).c_str());
 		if (wDiffuseTex.length() != 0)
 		{
-			shared_ptr<Texture> diffuseTex = dx12_rhi->CreateTextureFromFile(dir + wDiffuseTex);
+			shared_ptr<Texture> diffuseTex = dx12_rhi->CreateTextureFromFile(dir + wDiffuseTex, false);
 			mat->Diffuse = diffuseTex;
 		}
 
@@ -708,7 +712,7 @@ void dx12_framework::LoadFbx()
 
 		if (wNormalTex.length() != 0)
 		{
-			shared_ptr<Texture> normalTex = dx12_rhi->CreateTextureFromFile(dir + wNormalTex);
+			shared_ptr<Texture> normalTex = dx12_rhi->CreateTextureFromFile(dir + wNormalTex, true);
 			mat->Normal = normalTex;
 		}
 		
@@ -819,6 +823,27 @@ void dx12_framework::LoadFbx()
 		meshes.push_back(shared_ptr<Mesh>(mesh));
 	}
 
+
+	mesh = shared_ptr<Mesh>(new Mesh);
+	const vec3 vertices[] =
+	{
+		vec3(0,          1,  0) * 100.f,
+		vec3(0.866f,  -0.5f, 0) * 100.f,
+		vec3(-0.866f, -0.5f, 0) * 100.f,
+	};
+
+	mesh->Vb = dx12_rhi->CreateVertexBuffer(sizeof(vec3) * 3, sizeof(vec3), (void*)vertices);
+	mesh->VertexStride = sizeof(vec3);
+	mesh->IndexFormat = DXGI_FORMAT_R16_UINT;
+
+	const UINT16 indices[] =
+	{
+		0, 1, 2
+	};
+
+	mesh->Ib = dx12_rhi->CreateIndexBuffer(mesh->IndexFormat, sizeof(UINT16) * 3 * 1, (void*)indices);
+
+
 }
 
 void dx12_framework::InitComputeRS()
@@ -845,7 +870,7 @@ void dx12_framework::InitComputeRS()
 
 	Shader* cs = new Shader((UINT8*)computeShader->GetBufferPointer(), computeShader->GetBufferSize());
 	cs->BindUAV("output", 0);
-	cs->BindTexture("input", 0, 1);
+	//cs->BindTexture("input", 0, 1);
 	//cs->BindTexture("input", 0, 1);
 
 	D3D12_COMPUTE_PIPELINE_STATE_DESC computePsoDesc = {};
@@ -1124,18 +1149,11 @@ void dx12_framework::CopyPass()
 
 	Texture* backbuffer = framebuffers[dx12_rhi->CurrentFrameIndex].get();
 
-	D3D12_RESOURCE_BARRIER BarrierDesc = {};
-	BarrierDesc.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-	BarrierDesc.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
-	BarrierDesc.Transition.pResource = backbuffer->resource.Get();
-	BarrierDesc.Transition.Subresource = 0;
-	BarrierDesc.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
-	BarrierDesc.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
-	dx12_rhi->CommandList->ResourceBarrier(1, &BarrierDesc);
-
-	const float clearColor[] = { 0.0f, 0.2f, 0.4f, 1.0f };
-	dx12_rhi->CommandList->ClearRenderTargetView(backbuffer->CpuHandleRTV, clearColor, 0, nullptr);
 	
+
+	/*const float clearColor[] = { 0.0f, 0.2f, 0.4f, 1.0f };
+	dx12_rhi->CommandList->ClearRenderTargetView(backbuffer->CpuHandleRTV, clearColor, 0, nullptr);
+	*/
 	RS_Copy->ps->currentDrawCallIndex = 0;
 	RS_Copy->vs->currentDrawCallIndex = 0;
 	RS_Copy->ApplyGraphicsRSPSO(dx12_rhi->CommandList.Get());
@@ -1152,7 +1170,6 @@ void dx12_framework::CopyPass()
 
 	RS_Copy->ApplyGlobal(dx12_rhi->CommandList.Get());
 
-	dx12_rhi->CommandList->OMSetRenderTargets(1, &backbuffer->CpuHandleRTV, FALSE, nullptr);
 
 	UINT Width = m_width / 1;
 	UINT Height = m_height / 1;
@@ -1179,6 +1196,8 @@ void dx12_framework::DebugPass()
 {
 	PIXBeginEvent(dx12_rhi->CommandList.Get(), 0, L"DebugPass");
 
+	Texture* backbuffer = framebuffers[dx12_rhi->CurrentFrameIndex].get();
+	//dx12_rhi->CommandList->OMSetRenderTargets(1, &backbuffer->CpuHandleRTV, FALSE, nullptr);
 
 
 	RS_Copy->ApplyGraphicsRSPSO(dx12_rhi->CommandList.Get());
@@ -1188,7 +1207,7 @@ void dx12_framework::DebugPass()
 	RS_Copy->ps->SetSampler("samplerWrap", samplerWrap.get(), dx12_rhi->CommandList.Get());
 	CopyScaleOffsetCB cb;
 
-	// raytraced shadow
+	 //raytraced shadow
 	RS_Copy->ps->currentDrawCallIndex++;
 	RS_Copy->vs->currentDrawCallIndex++;
 	RS_Copy->ps->SetTexture("SrcTex", ShadowBuffer.get(), dx12_rhi->CommandList.Get(), nullptr);
@@ -1389,7 +1408,21 @@ void dx12_framework::OnRender()
 
 	RaytracePass();
 
+	//ComputePass();
+
 	NVAftermathMarker(dx12_rhi->AM_CL_Handle, "CopyPass");
+
+	D3D12_RESOURCE_BARRIER BarrierDesc = {};
+	BarrierDesc.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+	BarrierDesc.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+	BarrierDesc.Transition.pResource = backbuffer->resource.Get();
+	BarrierDesc.Transition.Subresource = 0;
+	BarrierDesc.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
+	BarrierDesc.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
+	dx12_rhi->CommandList->ResourceBarrier(1, &BarrierDesc);
+
+	dx12_rhi->CommandList->OMSetRenderTargets(1, &backbuffer->CpuHandleRTV, FALSE, nullptr);
+
 
 	CopyPass();
 
@@ -1509,6 +1542,8 @@ void dx12_framework::DrawMeshPass()
 	const float clearColor[] = { 0.0f, 0.2f, 0.4f, 1.0f };
 	dx12_rhi->CommandList->ClearRenderTargetView(AlbedoBuffer->CpuHandleRTV, clearColor, 0, nullptr);
 	dx12_rhi->CommandList->ClearRenderTargetView(NormalBuffer->CpuHandleRTV, clearColor, 0, nullptr);
+	dx12_rhi->CommandList->ClearRenderTargetView(GeomNormalBuffer->CpuHandleRTV, clearColor, 0, nullptr);
+
 	dx12_rhi->CommandList->ClearDepthStencilView(dx12_rhi->depthTexture->CpuHandleDSV, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
 
 	
@@ -1595,10 +1630,14 @@ void dx12_framework::DrawMeshPass()
 				RS_Mesh->vs->SetConstantValue("ObjParameter", (void*)&objCB, dx12_rhi->CommandList.Get(), nullptr);
 
 				Texture* diffuseTex = drawcall.mat->Diffuse.get();
+				if (diffuseTex == nullptr)
+					diffuseTex = Materials[0]->Diffuse.get();
 				if(diffuseTex)
 					RS_Mesh->ps->SetTexture("diffuseMap", diffuseTex, dx12_rhi->CommandList.Get(), nullptr);
 
 				Texture* normalTex = drawcall.mat->Normal.get();
+				if (normalTex == nullptr)
+					normalTex = Materials[0]->Normal.get();
 				if(normalTex)
 					RS_Mesh->ps->SetTexture("normalMap", normalTex, dx12_rhi->CommandList.Get(), nullptr);
 
@@ -1726,15 +1765,21 @@ void dx12_framework::RecordDraw (UINT StartIndex, UINT NumDraw, UINT CLIndex, Th
 
 void dx12_framework::ComputePass()
 {
-	PIXBeginEvent(dx12_rhi->CommandList.Get(), 0, L"Compute");
+	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(ShadowBuffer->resource.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS));
 
-	RS_Compute->cs->SetUAV("output", ComputeOuputTexture.get());
-	//RS_Compute->cs->SetTexture("input", ColorBuffer.get());
+	PIXBeginEvent(dx12_rhi->CommandList.Get(), 0, L"Compute");
 
 	RS_Compute->ApplyCS(dx12_rhi->CommandList.Get());
 
+	RS_Compute->cs->SetUAV("output", ShadowBuffer.get(), dx12_rhi->CommandList.Get(), true);
+	//RS_Compute->cs->SetTexture("input", ColorBuffer.get());
+
+
 	dx12_rhi->CommandList->Dispatch(m_width / 32, m_height / 32, 1);
 	PIXEndEvent(dx12_rhi->CommandList.Get());
+
+	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(ShadowBuffer->resource.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
+
 }
 
 
@@ -1751,23 +1796,37 @@ void dx12_framework::InitRaytracing()
 	int i = 0;
 	for (auto& mesh : meshes)
 	{
-		//if (i == 389) continue;
+		/*if(i > 0) break;
+
+		if (i != 150)
+		{
+			i++;
+			continue;
+		}*/
+//*/
 		shared_ptr<RTAS> blas = mesh->CreateBLAS();
-		if(blas == nullptr) continue;
+		if (blas == nullptr)
+		{
+			continue;
+		}
 		vecBLAS.push_back(blas);
 		i++;
 
 	}
+	TLAS = dx12_rhi->CreateTLAS(vecBLAS);
+	
+	/*vector<shared_ptr<RTAS>> vecBLAS;
+	shared_ptr<RTAS> blas = mesh->CreateBLAS();
+	vecBLAS.push_back(blas);
 
 	uint64_t tlasSize;
-	TLAS = dx12_rhi->CreateTLAS(vecBLAS, tlasSize);
+	TLAS = dx12_rhi->CreateTLAS(vecBLAS, tlasSize);*/
 
 	dx12_rhi->CommandList->Close();
 	ID3D12CommandList* ppCommandLists[] = { dx12_rhi->CommandList.Get() };
 	dx12_rhi->CommandQueue->ExecuteCommandLists(1, ppCommandLists);
 	//dx12_rhi->CommandList->Reset(dx12_rhi->CommandAllocator.Get(), nullptr);
 	//dx12_rhi->CommandList->Reset(dx12_rhi->GetCurrentCA(), nullptr);
-
 
 	dx12_rhi->WaitGPU();
 
@@ -1780,7 +1839,9 @@ void dx12_framework::InitRaytracing()
 	srvDesc.RaytracingAccelerationStructure.Location = TLAS->Result->GetGPUVirtualAddress();
 
 	// copydescriptor needed when being used.
-	dx12_rhi->SRVCBVDescriptorHeapStorage->AllocDescriptor(RTASCPUHandle, RTASGPUHandle);
+	//dx12_rhi->SRVCBVDescriptorHeapStorage->AllocDescriptor(RTASCPUHandle, RTASGPUHandle);
+	dx12_rhi->SRVCBVDescriptorHeapShaderVisible->AllocDescriptor(RTASCPUHandle, RTASGPUHandle);
+
 	dx12_rhi->Device->CreateShaderResourceView(nullptr, &srvDesc, RTASCPUHandle);
 
 	
@@ -1796,11 +1857,10 @@ void dx12_framework::InitRaytracing()
 	PSO_RT->AddShader("rayGen", RTPipelineStateObject::RAYGEN);
 	PSO_RT->BindUAV("rayGen", "gOutput", 0);
 	PSO_RT->BindSRV("rayGen", "gRtScene", 0);
-	PSO_RT->BindCBV("rayGen", "ViewParameter", 0, sizeof(RTViewParamCB), 1);
-	PSO_RT->BindSRV("rayGen", "DepthTex", 1);
-	PSO_RT->BindSRV("rayGen", "WorldNormalTex", 2);
-
-	PSO_RT->BindSampler("rayGen", "samplerWrap", 0);
+	//PSO_RT->BindSRV("rayGen", "DepthTex", 1);
+	//PSO_RT->BindSRV("rayGen", "WorldNormalTex", 2);
+	//PSO_RT->BindCBV("rayGen", "ViewParameter", 0, sizeof(RTViewParamCB), 1);
+	//PSO_RT->BindSampler("rayGen", "samplerWrap", 0);
 
 	PSO_RT->AddShader("miss", RTPipelineStateObject::MISS);
 	PSO_RT->AddShader("chs", RTPipelineStateObject::HIT);
@@ -1809,21 +1869,11 @@ void dx12_framework::InitRaytracing()
 
 	PSO_RT->MaxRecursion = 1;
 	PSO_RT->MaxAttributeSizeInBytes = sizeof(float) * 2;
-	PSO_RT->MaxPayloadSizeInBytes = sizeof(float) * 4;
+	PSO_RT->MaxPayloadSizeInBytes = sizeof(float) * 1;
 
 	PSO_RT->InitRS("RT_Shadow.hlsl");
 
-	//PSO_RT->BeginShaderTable();
 
-	//PSO_RT->SetUAV("rayGen", "gOutput", ShadowBuffer->CpuHandleUAV);
-	//PSO_RT->SetSRV("rayGen", "gRtScene", RTASCPUHandle);
-	//PSO_RT->SetCBVValue("rayGen", "ViewParameter", &RTViewParam, sizeof(RTViewParamCB));
-	//PSO_RT->SetSRV("rayGen", "DepthTex", dx12_rhi->depthTexture->CpuHandleSRV);
-	//PSO_RT->SetSRV("rayGen", "WorldNormalTex", GeomNormalBuffer->CpuHandleSRV);
-	//PSO_RT->SetSampler("rayGen", "samplerWrap", samplerWrap.get());
-
-	//PSO_RT->SetHitProgram("chs", 0); // this pass use only 1 hit program
-	//PSO_RT->EndShaderTable();
 
 }
 
@@ -1851,12 +1901,12 @@ void dx12_framework::RaytracePass()
 
 	PSO_RT->BeginShaderTable();
 
-	PSO_RT->SetUAV("rayGen", "gOutput", ShadowBuffer->CpuHandleUAV);
-	PSO_RT->SetSRV("rayGen", "gRtScene", RTASCPUHandle);
-	PSO_RT->SetCBVValue("rayGen", "ViewParameter", &RTViewParam, sizeof(RTViewParamCB));
-	PSO_RT->SetSRV("rayGen", "DepthTex", dx12_rhi->depthTexture->CpuHandleSRV);
-	PSO_RT->SetSRV("rayGen", "WorldNormalTex", GeomNormalBuffer->CpuHandleSRV);
-	PSO_RT->SetSampler("rayGen", "samplerWrap", samplerWrap.get());
+	PSO_RT->SetUAV("rayGen", "gOutput", ShadowBuffer->GpuHandleUAV);
+	PSO_RT->SetSRV("rayGen", "gRtScene", RTASGPUHandle);
+	//PSO_RT->SetSRV("rayGen", "DepthTex", dx12_rhi->depthTexture->CpuHandleSRV);
+	//PSO_RT->SetSRV("rayGen", "WorldNormalTex", GeomNormalBuffer->CpuHandleSRV);
+	//PSO_RT->SetCBVValue("rayGen", "ViewParameter", &RTViewParam, sizeof(RTViewParamCB));
+	//PSO_RT->SetSampler("rayGen", "samplerWrap", samplerWrap.get());
 
 	PSO_RT->SetHitProgram("chs", 0); // this pass use only 1 hit program
 	PSO_RT->EndShaderTable();
