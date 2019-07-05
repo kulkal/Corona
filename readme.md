@@ -1,5 +1,6 @@
 # DX12 & DXR test framework
 This project is for dx12 & dxr learning. Quite  unorgnized for now. I am trying to test best practice implementation(resource binding, dynamic descriotpr allocation, multi-thread command submission, etc....)
+![raytraced shadow(very naive implementation)](rt_shadow.png)
 
 ## DX12
 * Helper classes for resource management.
