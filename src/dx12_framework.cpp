@@ -340,7 +340,7 @@ void dx12_framework::LoadPipeline()
 
 	UINT dxgiFactoryFlags = 0;
 
-#if 0// defined(_DEBUG)
+#if  defined(_DEBUG)
 	// Enable the debug layer (requires the Graphics Tools "optional feature").
 	// NOTE: Enabling the debug layer after device creation will invalidate the active device.
 	{
@@ -1103,6 +1103,8 @@ void dx12_framework::InitLightingPass()
 	Shader* ps = new Shader((UINT8*)pixelShader->GetBufferPointer(), pixelShader->GetBufferSize());
 	ps->BindTexture("AlbedoTex", 0, 1);
 	ps->BindTexture("NormalTex", 1, 1);
+	ps->BindTexture("ShadowTex", 2, 1);
+
 	ps->BindSampler("samplerWrap", 0);
 	ps->BindConstantBuffer("LightingParam", 0, sizeof(LightingParam));
 
@@ -1287,6 +1289,8 @@ void dx12_framework::LightingPass()
 	RS_Lighting->ps->SetSampler("samplerWrap", samplerWrap.get(), dx12_rhi->CommandList.Get());
 	RS_Lighting->ps->SetTexture("AlbedoTex", AlbedoBuffer.get(), dx12_rhi->CommandList.Get(), nullptr);
 	RS_Lighting->ps->SetTexture("NormalTex", NormalBuffer.get(), dx12_rhi->CommandList.Get(), nullptr);
+	RS_Lighting->ps->SetTexture("ShadowTex", ShadowBuffer.get(), dx12_rhi->CommandList.Get(), nullptr);
+
 
 	LightingParam Param;
 	//Param.LightDir = glm::vec4(1.0f, 1.0f, -1.0f, 0.0f);
@@ -1400,15 +1404,17 @@ void dx12_framework::OnRender()
 
 	DrawMeshPass();
 
-	NVAftermathMarker(dx12_rhi->AM_CL_Handle, "LightingPass");
-
-	LightingPass();
 
 	NVAftermathMarker(dx12_rhi->AM_CL_Handle, "RaytracePass");
 
 	RaytracePass();
 
 	//ComputePass();
+
+	NVAftermathMarker(dx12_rhi->AM_CL_Handle, "LightingPass");
+
+	LightingPass();
+
 
 	NVAftermathMarker(dx12_rhi->AM_CL_Handle, "CopyPass");
 
@@ -1786,24 +1792,12 @@ void dx12_framework::ComputePass()
 void dx12_framework::InitRaytracing()
 {
 	// init raytracing
-	/*BLAS = mesh->CreateBLASArray();
-	vector<shared_ptr<RTAS>> vecBLAS = { BLAS };
-	uint64_t tlasSize;
-	TLAS = dx12_rhi->CreateTLAS(vecBLAS, tlasSize);*/
+	
 
-	vector<shared_ptr<RTAS>> vecBLAS;
 	vecBLAS.reserve(meshes.size());
 	int i = 0;
 	for (auto& mesh : meshes)
 	{
-		/*if(i > 0) break;
-
-		if (i != 150)
-		{
-			i++;
-			continue;
-		}*/
-//*/
 		shared_ptr<RTAS> blas = mesh->CreateBLAS();
 		if (blas == nullptr)
 		{
@@ -1815,12 +1809,7 @@ void dx12_framework::InitRaytracing()
 	}
 	TLAS = dx12_rhi->CreateTLAS(vecBLAS);
 	
-	/*vector<shared_ptr<RTAS>> vecBLAS;
-	shared_ptr<RTAS> blas = mesh->CreateBLAS();
-	vecBLAS.push_back(blas);
-
-	uint64_t tlasSize;
-	TLAS = dx12_rhi->CreateTLAS(vecBLAS, tlasSize);*/
+	
 
 	dx12_rhi->CommandList->Close();
 	ID3D12CommandList* ppCommandLists[] = { dx12_rhi->CommandList.Get() };
@@ -1857,10 +1846,10 @@ void dx12_framework::InitRaytracing()
 	PSO_RT->AddShader("rayGen", RTPipelineStateObject::RAYGEN);
 	PSO_RT->BindUAV("rayGen", "gOutput", 0);
 	PSO_RT->BindSRV("rayGen", "gRtScene", 0);
-	//PSO_RT->BindSRV("rayGen", "DepthTex", 1);
-	//PSO_RT->BindSRV("rayGen", "WorldNormalTex", 2);
-	//PSO_RT->BindCBV("rayGen", "ViewParameter", 0, sizeof(RTViewParamCB), 1);
-	//PSO_RT->BindSampler("rayGen", "samplerWrap", 0);
+	PSO_RT->BindSRV("rayGen", "DepthTex", 1);
+	PSO_RT->BindSRV("rayGen", "WorldNormalTex", 2);
+	PSO_RT->BindCBV("rayGen", "ViewParameter", 0, sizeof(RTViewParamCB), 1);
+	PSO_RT->BindSampler("rayGen", "samplerWrap", 0);
 
 	PSO_RT->AddShader("miss", RTPipelineStateObject::MISS);
 	PSO_RT->AddShader("chs", RTPipelineStateObject::HIT);
@@ -1903,10 +1892,10 @@ void dx12_framework::RaytracePass()
 
 	PSO_RT->SetUAV("rayGen", "gOutput", ShadowBuffer->GpuHandleUAV);
 	PSO_RT->SetSRV("rayGen", "gRtScene", RTASGPUHandle);
-	//PSO_RT->SetSRV("rayGen", "DepthTex", dx12_rhi->depthTexture->CpuHandleSRV);
-	//PSO_RT->SetSRV("rayGen", "WorldNormalTex", GeomNormalBuffer->CpuHandleSRV);
-	//PSO_RT->SetCBVValue("rayGen", "ViewParameter", &RTViewParam, sizeof(RTViewParamCB));
-	//PSO_RT->SetSampler("rayGen", "samplerWrap", samplerWrap.get());
+	PSO_RT->SetSRV("rayGen", "DepthTex", dx12_rhi->depthTexture->GpuHandleSRV);
+	PSO_RT->SetSRV("rayGen", "WorldNormalTex", GeomNormalBuffer->GpuHandleSRV);
+	PSO_RT->SetCBVValue("rayGen", "ViewParameter", &RTViewParam, sizeof(RTViewParamCB));
+	PSO_RT->SetSampler("rayGen", "samplerWrap", samplerWrap.get());
 
 	PSO_RT->SetHitProgram("chs", 0); // this pass use only 1 hit program
 	PSO_RT->EndShaderTable();

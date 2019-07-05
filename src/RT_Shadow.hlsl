@@ -28,17 +28,17 @@
 
 RWTexture2D<float4> gOutput : register(u0);
 RaytracingAccelerationStructure gRtScene : register(t0);
-////Texture2D DepthTex : register(t1);
-////Texture2D WorldNormalTex : register(t2);
-//cbuffer ViewParameter : register(b0)
-//{
-//    float4x4 ViewMatrix;
-//    float4x4 InvViewMatrix;
-//    float4x4 ProjMatrix;
-//    float4 ProjectionParams;
-//    float4 LightDir;
-//};
-//SamplerState sampleWrap : register(s0);
+Texture2D DepthTex : register(t1);
+Texture2D WorldNormalTex : register(t2);
+cbuffer ViewParameter : register(b0)
+{
+    float4x4 ViewMatrix;
+    float4x4 InvViewMatrix;
+    float4x4 ProjMatrix;
+    float4 ProjectionParams;
+    float4 LightDir;
+};
+SamplerState sampleWrap : register(s0);
 
 
 float3 linearToSrgb(float3 c)
@@ -101,7 +101,8 @@ void rayGen
     float aspectRatio = dims.x / dims.y;
 
 #define DEPTH 0
-#define SIMPLE 1
+#define SIMPLE 0
+#define SHADOW 1
 
 #if SIMPLE 
     RayDesc ray;
@@ -115,10 +116,14 @@ void rayGen
     //TraceRay(gRtScene, 0 /*rayFlags*/, 0xFF, 0 /* ray index*/, 0, 0, ray, payload);
     float dd = payload.distance / 1000.0f;
     gOutput[launchIndex.xy] = float4(dd, dd, dd, 1);
-    //float sx = sin(crd.x);
-    //float sy = sin(crd.y);
+    float sx = sin(crd.x);
+    float sy = sin(crd.y);
+    float DeviceDepth = DepthTex.Load(int3(launchIndex.xy, 0), int2(0, 0)).x;
+    float3 WorldNormal = WorldNormalTex.Load(int3(launchIndex.xy, 0), int2(0, 0)).xyz;
+    gOutput[launchIndex.xy] = float4(WorldNormal, 1);
+    float LinearDepth = GetLinearDepth(DeviceDepth, ProjectionParams.x, ProjectionParams.y) * ProjectionParams.z /1000.0f;
 
-    //gOutput[launchIndex.xy] = float4(sx, sy, 0, 1);
+    gOutput[launchIndex.xy] = float4(LinearDepth, LinearDepth, LinearDepth, 1);
 
 
 #elif DEPTH
@@ -135,7 +140,7 @@ void rayGen
     gOutput[launchIndex.xy] = float4(dd, dd, dd, 1);
     //gOutput[launchIndex.xy] = float4(1, 0, 0, 1);
 
-#else
+#elif SHADOW
 	float2 UV = crd / dims;
 	float DeviceDepth = DepthTex.SampleLevel(sampleWrap, UV, 0).x;
 

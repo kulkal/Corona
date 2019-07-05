@@ -1600,11 +1600,7 @@ shared_ptr<RTAS> Mesh::CreateBLAS()
 		bufDesc.SampleDesc.Quality = 0;
 		bufDesc.Width = info.ResultDataMaxSizeInBytes;
 
-		/*if (bufDesc.Width == 4960 || bufDesc.Width == 6272 || bufDesc.Width == 3712 || bufDesc.Width == 156160)
-		{
-			int a = 0;
-			return nullptr;
-		}*/
+		
 		stringstream ss;
 		ss << "blas->result : " << bufDesc.Width << "\n";
 		OutputDebugStringA(ss.str().c_str());
@@ -2487,9 +2483,9 @@ void RTPipelineStateObject::InitRS(string ShaderFile)
 
 		vector<D3D12_ROOT_PARAMETER> rootParamVec;
 		vector<D3D12_DESCRIPTOR_RANGE> Ranges;
+		Ranges.resize(bindingInfo.Binding.size());
 
-		vector<D3D12_ROOT_PARAMETER> rootParamVecSampler;
-		vector<D3D12_DESCRIPTOR_RANGE> RangesSampler;
+		int i = 0;
 
 		if (bindingInfo.Binding.size() > 0)
 		{
@@ -2497,42 +2493,25 @@ void RTPipelineStateObject::InitRS(string ShaderFile)
 			
 			for (auto& bindingData : bindingInfo.Binding)
 			{
-				D3D12_DESCRIPTOR_RANGE Range = {};
+				D3D12_DESCRIPTOR_RANGE& Range = Ranges[i++];;
 				Range.RangeType = bindingData.Type;
 				Range.BaseShaderRegister = bindingData.BaseRegister;
 				Range.NumDescriptors = 1;
 				Range.RegisterSpace = 0;
 				Range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+				//Ranges.push_back(Range);
 
-				if (bindingData.Type == D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER)
-				{
-					RangesSampler.push_back(Range);
-				}
-				else
-				{
-					Ranges.push_back(Range);
-				}
+
+				D3D12_ROOT_PARAMETER RootParam = {};
+				RootParam.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+				RootParam.DescriptorTable.NumDescriptorRanges = 1;// Ranges.size();
+				RootParam.DescriptorTable.pDescriptorRanges = &Range;// Ranges.data();
+				RootParam.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+
+				rootParamVec.push_back(RootParam);
 				
 			}
 
-			D3D12_ROOT_PARAMETER RootParam = {};
-			RootParam.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-			RootParam.DescriptorTable.NumDescriptorRanges = Ranges.size();
-			RootParam.DescriptorTable.pDescriptorRanges = Ranges.data();
-			RootParam.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
-
-			rootParamVec.push_back(RootParam);
-
-			if (RangesSampler.size() > 0)
-			{
-				D3D12_ROOT_PARAMETER RootParamSampler = {};
-				RootParamSampler.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-				RootParamSampler.DescriptorTable.NumDescriptorRanges = RangesSampler.size();
-				RootParamSampler.DescriptorTable.pDescriptorRanges = RangesSampler.data();
-				RootParamSampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
-
-				rootParamVec.push_back(RootParamSampler);
-			}
 
 			Desc.NumParameters = rootParamVec.size();
 			Desc.pParameters = rootParamVec.data();

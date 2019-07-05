@@ -11,7 +11,7 @@
 
 Texture2D AlbedoTex : register(t0);
 Texture2D NormalTex : register(t1);
-//Texture2D DepthTex : register(t0);
+Texture2D ShadowTex : register(t2);
 
 SamplerState sampleWrap : register(s0);
 
@@ -50,8 +50,10 @@ float4 PSMain(PSInput input) : SV_TARGET
     input.uv.y *= -1;
     float3 Albedo = AlbedoTex.Sample(sampleWrap, input.uv);
     float3 WorldNormal = NormalTex.Sample(sampleWrap, input.uv);
+    float3 Shadow = ShadowTex.Sample(sampleWrap, input.uv);
+
 	
-    float3 DiffuseLighting = dot(LightDir.xyz, WorldNormal)* Albedo;
+    float3 DiffuseLighting = dot(LightDir.xyz, WorldNormal)* Albedo * Shadow;
 
 
 

@@ -143,7 +143,7 @@ private:
 
 	XMFLOAT4X4 m_modelMatrices;
 
-	glm::vec3 LightDir = glm::normalize(glm::vec3(1, 1, 0));
+	glm::vec3 LightDir = glm::normalize(glm::vec3(0.5, 1, 0.2));
 
 	float Near = 1.0f;
 	float Far = 10000.0f;
@@ -154,10 +154,10 @@ private:
 
 
 	// raytracing as
-	shared_ptr<RTAS> BLAS;
 
 	shared_ptr<RTAS> TLAS;
 	
+	vector<shared_ptr<RTAS>> vecBLAS;
 
 
 	ComPtr<ID3D12Resource> mpShaderTable;
