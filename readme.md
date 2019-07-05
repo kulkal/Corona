@@ -30,3 +30,5 @@ This project is for dx12 & dxr learning. Quite  unorgnized for now. I am trying 
 	* More complicated binding.(global root signature or descriptor table in shadertable).
 * [MJP github](https://github.com/TheRealMJP)
 	* Excellent dx12 reference implementation.
+* [Raytracing gems](http://www.realtimerendering.com/raytracinggems/unofficial_RayTracingGems_v1.4.pdf)
+	* Reading chapter 3 may help you to understand resource binding of raytracing shader.
