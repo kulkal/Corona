@@ -5,12 +5,12 @@ This project is for dx12 & dxr learning. Quite  unorgnized for now. I am trying 
 ## DX12
 * Helper classes for resource management.
 * Easy resource binding interface.
-* Dynamic descriptor allocation strategy.
+* ~~Dynamic descriptor allocation strategy.~~
 * Multi threaded mesh rendering.
 
 ## DXR
 * Shadow
-* Reflection
+* ~~Reflection~~
 
 ## Build
 * I used to use CMake before, considering to migrate to other build system.
@@ -22,6 +22,11 @@ This project is for dx12 & dxr learning. Quite  unorgnized for now. I am trying 
 * [NV Aftermath](https://developer.nvidia.com/nvidia-aftermath)
 
 ## Usefule link
-* [Dynamic cb implementation](https://github.com/Microsoft/DirectX-Graphics-Samples/blob/07008938a0dc5a187a23abcb55b61f8c2809c874/Samples/Desktop/D3D12PipelineStateCache/src/DynamicConstantBuffer.cpp#L64)
+DynamicConstantBuffer.cpp#L64)
+* [NVIDIA dxr tutorials](https://github.com/NVIDIAGameWorks/DxrTutorials)
+	* Most clean & easy to understand.
+* [Microsoft dxr tutorial](https://github.com/microsoft/DirectX-Graphics-Samples/tree/master/Samples/Desktop/D3D12Raytracing)
+	* More complicated effects like shadow & reflection.
+	* More complicated binding.(global root signature or descriptor table in shadertable).
 * [MJP github](https://github.com/TheRealMJP)
 	* Excellent dx12 reference implementation.
