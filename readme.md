@@ -20,6 +20,7 @@ This project is for dx12 & dxr learning. Quite  unorgnized for now. I am trying 
 * [enkiTS](https://github.com/dougbinks/enkiTS)
 * [glm](https://glm.g-truc.net/0.9.9/index.html)
 * [NV Aftermath](https://developer.nvidia.com/nvidia-aftermath)
+* [Assimp](https://github.com/assimp/assimp)
 
 ## Usefule link
 * [NVIDIA dxr tutorials](https://github.com/NVIDIAGameWorks/DxrTutorials)
