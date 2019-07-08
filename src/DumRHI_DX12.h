@@ -529,8 +529,6 @@ public:
 
 
 
-	shared_ptr<Texture> depthTexture;
-	shared_ptr<Texture> ShadowBuffer;
 
 	std::vector<std::shared_ptr<Texture>> renderTargetTextures;
 
@@ -576,11 +574,9 @@ public:
 	shared_ptr<RTAS> CreateTLAS(vector<shared_ptr<RTAS>>& VecBottomLevelAS);
 
 
-	void SetRendertarget(Texture* rt);
 	void PresentBarrier(Texture* rt);
 	void ResourceBarrier(ID3D12Resource* Resource, D3D12_RESOURCE_STATES StateBefore, D3D12_RESOURCE_STATES StateAfter);
 	
-	void CreateRendertargets(IDXGISwapChain3* InSwapChain, int width, int height);
 
 
 	DumRHI_DX12(ID3D12Device5 * pDevice);

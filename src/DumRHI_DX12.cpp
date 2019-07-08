@@ -374,26 +374,6 @@ shared_ptr<VertexBuffer> DumRHI_DX12::CreateVertexBuffer(UINT Size, UINT Stride,
 	return shared_ptr<VertexBuffer>(vb);
 }
 
-void DumRHI_DX12::SetRendertarget(Texture* rt)
-{
-	/*D3D12_RESOURCE_BARRIER BarrierDesc = {};
-	BarrierDesc.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-	BarrierDesc.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
-	BarrierDesc.Transition.pResource = rt->resource.Get();
-	BarrierDesc.Transition.Subresource = 0;
-	BarrierDesc.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
-	BarrierDesc.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
-	CommandList->ResourceBarrier(1, &BarrierDesc);*/
-
-	D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = rt->CpuHandleRTV;
-
-	CommandList->OMSetRenderTargets(1, &rtvHandle, FALSE, &depthTexture->CpuHandleDSV);
-
-	const float clearColor[] = { 0.0f, 0.2f, 0.4f, 1.0f };
-	CommandList->ClearRenderTargetView(rtvHandle, clearColor, 0, nullptr);
-	CommandList->ClearDepthStencilView(depthTexture->CpuHandleDSV, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
-}
-
 void DumRHI_DX12::PresentBarrier(Texture* rt)
 {
 	D3D12_RESOURCE_BARRIER BarrierDesc = {};
@@ -404,22 +384,6 @@ void DumRHI_DX12::PresentBarrier(Texture* rt)
 	BarrierDesc.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
 	BarrierDesc.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
 	CommandList->ResourceBarrier(1, &BarrierDesc);
-}
-
-void DumRHI_DX12::CreateRendertargets(IDXGISwapChain3* InSwapChain, int width, int height)
-{
-	// use swapchain not texture.
-	{
-		for (UINT i = 0; i < NumFrame; i++)
-		{
-			ComPtr<ID3D12Resource> rendertarget;
-			ThrowIfFailed(InSwapChain->GetBuffer(i, IID_PPV_ARGS(&rendertarget)));
-
-			renderTargetTextures.push_back(CreateTexture2DFromResource(rendertarget));
-		}
-	}
-	
-	depthTexture = CreateTexture2DFromResource(nullptr);
 }
 
 DumRHI_DX12::DumRHI_DX12(ID3D12Device5 * InDevice)

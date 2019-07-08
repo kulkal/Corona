@@ -542,9 +542,9 @@ void dx12_framework::LoadAssets()
 
 
 	
-	dx12_rhi->depthTexture = dx12_rhi->CreateTexture2D(DXGI_FORMAT_D32_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL, D3D12_RESOURCE_STATE_DEPTH_WRITE, m_width, m_height, 1);
-	dx12_rhi->depthTexture->MakeDSV();
-	dx12_rhi->depthTexture->MakeSRV(true);
+	DepthBuffer = dx12_rhi->CreateTexture2D(DXGI_FORMAT_D32_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL, D3D12_RESOURCE_STATE_DEPTH_WRITE, m_width, m_height, 1);
+	DepthBuffer->MakeDSV();
+	DepthBuffer->MakeSRV(true);
 
 
 
@@ -1245,7 +1245,7 @@ void dx12_framework::DebugPass()
 	cb.Offset = glm::vec4(0.25, -0.75, 0, 0);
 	cb.Scale = glm::vec4(0.25, 0.25, 0, 0);
 	RS_Copy->vs->SetConstantValue("ScaleOffsetParams", &cb, dx12_rhi->CommandList.Get(), nullptr);
-	RS_Copy->ps->SetTexture("SrcTex", dx12_rhi->depthTexture.get(), dx12_rhi->CommandList.Get(), nullptr);
+	RS_Copy->ps->SetTexture("SrcTex", DepthBuffer.get(), dx12_rhi->CommandList.Get(), nullptr);
 	dx12_rhi->CommandList->DrawInstanced(4, 1, 0, 0);
 
 
@@ -1540,7 +1540,7 @@ void dx12_framework::DrawMeshPass()
 
 
 	const D3D12_CPU_DESCRIPTOR_HANDLE Rendertargets[] = { AlbedoBuffer->CpuHandleRTV, NormalBuffer->CpuHandleRTV, GeomNormalBuffer->CpuHandleRTV };
-	dx12_rhi->CommandList->OMSetRenderTargets(3, Rendertargets, FALSE, &dx12_rhi->depthTexture->CpuHandleDSV);
+	dx12_rhi->CommandList->OMSetRenderTargets(3, Rendertargets, FALSE, &DepthBuffer->CpuHandleDSV);
 
 
 	//dx12_rhi->CommandList->OMSetRenderTargets(1, &backbuffer->CpuHandleRTV, FALSE, &dx12_rhi->depthTexture->CpuHandleDSV);
@@ -1550,7 +1550,7 @@ void dx12_framework::DrawMeshPass()
 	dx12_rhi->CommandList->ClearRenderTargetView(NormalBuffer->CpuHandleRTV, clearColor, 0, nullptr);
 	dx12_rhi->CommandList->ClearRenderTargetView(GeomNormalBuffer->CpuHandleRTV, clearColor, 0, nullptr);
 
-	dx12_rhi->CommandList->ClearDepthStencilView(dx12_rhi->depthTexture->CpuHandleDSV, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
+	dx12_rhi->CommandList->ClearDepthStencilView(DepthBuffer->CpuHandleDSV, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
 
 	
 	dx12_rhi->CommandList->Close();
@@ -1568,7 +1568,7 @@ void dx12_framework::DrawMeshPass()
 	{
 		const D3D12_CPU_DESCRIPTOR_HANDLE Rendertargets[] = { AlbedoBuffer->CpuHandleRTV, NormalBuffer->CpuHandleRTV, GeomNormalBuffer->CpuHandleRTV };
 
-		dx12_rhi->CommandList->OMSetRenderTargets(3, Rendertargets, FALSE, &dx12_rhi->depthTexture->CpuHandleDSV);
+		dx12_rhi->CommandList->OMSetRenderTargets(3, Rendertargets, FALSE, &DepthBuffer->CpuHandleDSV);
 
 		RS_Mesh->ApplyGraphicsRSPSO(dx12_rhi->CommandList.Get());
 		RS_Mesh->ps->SetSampler("samplerWrap", samplerWrap.get(), dx12_rhi->CommandList.Get());
@@ -1719,7 +1719,7 @@ void dx12_framework::RecordDraw (UINT StartIndex, UINT NumDraw, UINT CLIndex, Th
 	ID3D12CommandAllocator* CA = dx12_rhi->FrameResourceVec[dx12_rhi->CurrentFrameIndex].VecCommandAllocatorMeshDraw[CLIndex].Get();
 	CL->Reset(CA, nullptr);
 
-	CL->OMSetRenderTargets(1, &backbuffer->CpuHandleRTV, FALSE, &dx12_rhi->depthTexture->CpuHandleDSV);
+	CL->OMSetRenderTargets(1, &backbuffer->CpuHandleRTV, FALSE, &DepthBuffer->CpuHandleDSV);
 	CL->RSSetViewports(1, &m_viewport);
 	CL->RSSetScissorRects(1, &m_scissorRect);
 	CL->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -1821,17 +1821,6 @@ void dx12_framework::InitRaytracing()
 
 
 
-	//// create acceleration structure srv (not shader-visible yet)
-	//D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
-	//srvDesc.ViewDimension = D3D12_SRV_DIMENSION_RAYTRACING_ACCELERATION_STRUCTURE;
-	//srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-	//srvDesc.RaytracingAccelerationStructure.Location = TLAS->Result->GetGPUVirtualAddress();
-
-	//// copydescriptor needed when being used.
-	////dx12_rhi->SRVCBVDescriptorHeapStorage->AllocDescriptor(RTASCPUHandle, RTASGPUHandle);
-	//dx12_rhi->SRVCBVDescriptorHeapShaderVisible->AllocDescriptor(RTASCPUHandle, RTASGPUHandle);
-
-	//dx12_rhi->Device->CreateShaderResourceView(nullptr, &srvDesc, RTASCPUHandle);
 
 	
 
@@ -1892,7 +1881,7 @@ void dx12_framework::RaytracePass()
 
 	PSO_RT->SetUAV("rayGen", "gOutput", ShadowBuffer->GpuHandleUAV);
 	PSO_RT->SetSRV("rayGen", "gRtScene", TLAS->GPUHandle);
-	PSO_RT->SetSRV("rayGen", "DepthTex", dx12_rhi->depthTexture->GpuHandleSRV);
+	PSO_RT->SetSRV("rayGen", "DepthTex", DepthBuffer->GpuHandleSRV);
 	PSO_RT->SetSRV("rayGen", "WorldNormalTex", GeomNormalBuffer->GpuHandleSRV);
 	PSO_RT->SetCBVValue("rayGen", "ViewParameter", &RTViewParam, sizeof(RTViewParamCB));
 	PSO_RT->SetSampler("rayGen", "samplerWrap", samplerWrap.get());
