@@ -1821,17 +1821,17 @@ void dx12_framework::InitRaytracing()
 
 
 
-	// create acceleration structure srv (not shader-visible yet)
-	D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
-	srvDesc.ViewDimension = D3D12_SRV_DIMENSION_RAYTRACING_ACCELERATION_STRUCTURE;
-	srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-	srvDesc.RaytracingAccelerationStructure.Location = TLAS->Result->GetGPUVirtualAddress();
+	//// create acceleration structure srv (not shader-visible yet)
+	//D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+	//srvDesc.ViewDimension = D3D12_SRV_DIMENSION_RAYTRACING_ACCELERATION_STRUCTURE;
+	//srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+	//srvDesc.RaytracingAccelerationStructure.Location = TLAS->Result->GetGPUVirtualAddress();
 
-	// copydescriptor needed when being used.
-	//dx12_rhi->SRVCBVDescriptorHeapStorage->AllocDescriptor(RTASCPUHandle, RTASGPUHandle);
-	dx12_rhi->SRVCBVDescriptorHeapShaderVisible->AllocDescriptor(RTASCPUHandle, RTASGPUHandle);
+	//// copydescriptor needed when being used.
+	////dx12_rhi->SRVCBVDescriptorHeapStorage->AllocDescriptor(RTASCPUHandle, RTASGPUHandle);
+	//dx12_rhi->SRVCBVDescriptorHeapShaderVisible->AllocDescriptor(RTASCPUHandle, RTASGPUHandle);
 
-	dx12_rhi->Device->CreateShaderResourceView(nullptr, &srvDesc, RTASCPUHandle);
+	//dx12_rhi->Device->CreateShaderResourceView(nullptr, &srvDesc, RTASCPUHandle);
 
 	
 
@@ -1891,7 +1891,7 @@ void dx12_framework::RaytracePass()
 	PSO_RT->BeginShaderTable();
 
 	PSO_RT->SetUAV("rayGen", "gOutput", ShadowBuffer->GpuHandleUAV);
-	PSO_RT->SetSRV("rayGen", "gRtScene", RTASGPUHandle);
+	PSO_RT->SetSRV("rayGen", "gRtScene", TLAS->GPUHandle);
 	PSO_RT->SetSRV("rayGen", "DepthTex", dx12_rhi->depthTexture->GpuHandleSRV);
 	PSO_RT->SetSRV("rayGen", "WorldNormalTex", GeomNormalBuffer->GpuHandleSRV);
 	PSO_RT->SetCBVValue("rayGen", "ViewParameter", &RTViewParam, sizeof(RTViewParamCB));

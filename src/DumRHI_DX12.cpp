@@ -1865,6 +1865,18 @@ std::shared_ptr<RTAS> DumRHI_DX12::CreateTLAS(vector<shared_ptr<RTAS>>& VecBotto
 	uavBarrier.UAV.pResource = as->Result.Get();
 	CommandList->ResourceBarrier(1, &uavBarrier);
 
+	// create acceleration structure srv (not shader-visible yet)
+	D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+	srvDesc.ViewDimension = D3D12_SRV_DIMENSION_RAYTRACING_ACCELERATION_STRUCTURE;
+	srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+	srvDesc.RaytracingAccelerationStructure.Location = as->Result->GetGPUVirtualAddress();
+
+	// copydescriptor needed when being used.
+	//dx12_rhi->SRVCBVDescriptorHeapStorage->AllocDescriptor(RTASCPUHandle, RTASGPUHandle);
+	g_dx12_rhi->SRVCBVDescriptorHeapShaderVisible->AllocDescriptor(as->CPUHandle, as->GPUHandle);
+
+	g_dx12_rhi->Device->CreateShaderResourceView(nullptr, &srvDesc, as->CPUHandle);
+
 	g_dx12_rhi->WaitGPU();
 
 

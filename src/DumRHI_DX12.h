@@ -434,6 +434,9 @@ public:
 class RTAS
 {
 public:
+	D3D12_GPU_DESCRIPTOR_HANDLE GPUHandle;
+	D3D12_CPU_DESCRIPTOR_HANDLE CPUHandle;
+
 	ComPtr<ID3D12Resource> Scratch;
 	ComPtr<ID3D12Resource> Result;
 	ComPtr<ID3D12Resource> Instance;

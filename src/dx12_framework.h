@@ -150,9 +150,6 @@ private:
 	std::unique_ptr<DumRHI_DX12> dx12_rhi;									
 
 
-	XMFLOAT4X4 mvp;
-
-
 	// raytracing as
 
 	shared_ptr<RTAS> TLAS;
@@ -162,9 +159,6 @@ private:
 
 	ComPtr<ID3D12Resource> mpShaderTable;
 	uint32_t mShaderTableEntrySize = 0;
-
-	D3D12_GPU_DESCRIPTOR_HANDLE RTASGPUHandle;
-	D3D12_CPU_DESCRIPTOR_HANDLE RTASCPUHandle;
 
 	unique_ptr<GlobalConstantBuffer> ViewMatrixCB;
 
