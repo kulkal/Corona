@@ -22,7 +22,7 @@
     <ConfigurationType>Application</ConfigurationType>
     <UseDebugLibraries>true</UseDebugLibraries>
     <PlatformToolset>v141</PlatformToolset>
-    <CharacterSet>Unicode</CharacterSet>
+    <CharacterSet>NotSet</CharacterSet>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
     <ConfigurationType>Application</ConfigurationType>
@@ -64,6 +64,7 @@
       </AdditionalUsingDirectories>
       <AdditionalIncludeDirectories>%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <LanguageStandard>stdcpp17</LanguageStandard>
+      <RuntimeLibrary>MultiThreadedDebugDLL</RuntimeLibrary>
     </ClCompile>
     <Link>
       <GenerateDebugInformation>true</GenerateDebugInformation>
@@ -114,9 +115,6 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClInclude Include="DumRHI_DX12.h" />
-    <ClInclude Include="enkiTS\Atomics.h" />
-    <ClInclude Include="enkiTS\TaskScheduler.h" />
-    <ClInclude Include="enkiTS\Threads.h" />
     <ClInclude Include="resource.h" />
     <ClInclude Include="Utils.h" />
     <ClInclude Include="Win32Application.h" />
@@ -124,7 +122,6 @@
     <ClInclude Include="d3dx12.h" />
     <ClInclude Include="DXSample.h" />
     <ClInclude Include="DXSampleHelper.h" />
-    <ClInclude Include="occcity.h" />
     <ClInclude Include="SimpleCamera.h" />
     <ClInclude Include="StepTimer.h" />
     <ClInclude Include="stdafx.h" />
@@ -144,52 +141,7 @@
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
-    <CustomBuild Include="cs.hlsl">
-      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Compute</ShaderType>
-      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">4.0</ShaderModel>
-      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Compute</ShaderType>
-      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Release|x64'">4.0</ShaderModel>
-      <DeploymentContent Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">true</DeploymentContent>
-      <FileType>Document</FileType>
-    </CustomBuild>
-    <CustomBuild Include="CopyPS.hlsl">
-      <FileType>Document</FileType>
-    </CustomBuild>
-    <CustomBuild Include="LightingPS.hlsl">
-      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">false</ExcludedFromBuild>
-      <FileType>Document</FileType>
-    </CustomBuild>
-    <CustomBuild Include="RT_Shadow.hlsl">
-      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">false</ExcludedFromBuild>
-      <FileType>Document</FileType>
-    </CustomBuild>
-    <CustomBuild Include="MeshDraw.hlsl">
-      <DeploymentContent Condition="'$(Configuration)|$(Platform)'=='Release|x64'">true</DeploymentContent>
-      <FileType>Document</FileType>
-    </CustomBuild>
-  </ItemGroup>
-  <ItemGroup>
-    <CustomBuild Include="occcity.bin">
-      <FileType>Document</FileType>
-      <DeploymentContent>true</DeploymentContent>
-    </CustomBuild>
-  </ItemGroup>
-  <ItemGroup>
-    <None Include="a.FBX" />
-    <None Include="assimp.dll" />
-    <None Include="b.fbx" />
-    <None Include="c.FBX">
-      <DeploymentContent Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">true</DeploymentContent>
-    </None>
-    <None Include="d.fbx" />
-    <None Include="dxcompiler.dll" />
-    <None Include="dxil.dll" />
-    <None Include="GFSDK_Aftermath_Lib.x64.dll" />
     <None Include="packages.config" />
-    <CustomBuild Include="SquidRoom.bin">
-      <DeploymentContent Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">true</DeploymentContent>
-      <FileType>Document</FileType>
-    </CustomBuild>
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

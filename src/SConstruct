@@ -1,0 +1,23 @@
+# Program('test', Glob('*.cpp'))
+# Library('enkiTS', Glob('enkiTS/*.cpp'))
+# Library('DumRHI_DX12', ['DumRHI_DX12.cpp'])
+platform = ARGUMENTS.get('OS', Platform())
+
+print("platform :", platform)
+
+env = Environment(PLATFORM=platform)
+# env.Append(CPPDEFINES=['UNICODE'])
+env.Append(CCFLAGS=['/MD'])
+
+
+env.Program(target='dx12_framework', 
+	source=[
+	# 'DumRHI_DX12',
+	# 'dx12_framework.cpp',
+	# 'enkiTS/TaskScheduler.cpp',
+	# 'enkiTS/TaskScheduler_c.cpp'
+	# 'DXSample.cpp',
+	'Win32Application.cpp'
+	]
+	)
+

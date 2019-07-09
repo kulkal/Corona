@@ -41,7 +41,7 @@ bool FileExists(const WCHAR* filePath)
 	if (filePath == NULL)
 		return false;
 
-	DWORD fileAttr = GetFileAttributes(filePath);
+	DWORD fileAttr = GetFileAttributesW(filePath);
 	if (fileAttr == INVALID_FILE_ATTRIBUTES)
 		return false;
 
