@@ -13,7 +13,7 @@ This project is for dx12 & dxr learning. Quite  unorgnized for now. I am trying 
 * ~~Reflection~~
 
 ## Build
-* I used to use CMake before, considering to migrate to other build system.
+* I used to use CMake before, now considering to migrate to other build system.
 * Currently, it is just a vs solution.
 
 ## Third-party libs
