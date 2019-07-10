@@ -1,4 +1,7 @@
 #include "DumRHI_DX12.h"
+
+#include <DirectXMath.h>
+#include "DirectXTex.h"
 #include "d3dx12.h"
 #define GLM_FORCE_CTOR_INIT
 
@@ -17,9 +20,9 @@
 // DirectX Tex
 #include "DirectXTex July 2017/Include/DirectXTex.h"
 #ifdef _DEBUG
-#pragma comment(lib, "DirectXTex July 2017/Lib 2017/Debug/DirectXTex.lib")
+#pragma comment(lib, "Debug/DirectXTex.lib")
 #else
-#pragma comment(lib, "DirectXTex July 2017/Lib 2017/Release/DirectXTex.lib")
+#pragma comment(lib, "Release/DirectXTex.lib")
 #endif
 
 #define align_to(_alignment, _val) (((_val + _alignment - 1) / _alignment) * _alignment)
@@ -374,26 +377,6 @@ shared_ptr<VertexBuffer> DumRHI_DX12::CreateVertexBuffer(UINT Size, UINT Stride,
 	return shared_ptr<VertexBuffer>(vb);
 }
 
-void DumRHI_DX12::SetRendertarget(Texture* rt)
-{
-	/*D3D12_RESOURCE_BARRIER BarrierDesc = {};
-	BarrierDesc.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-	BarrierDesc.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
-	BarrierDesc.Transition.pResource = rt->resource.Get();
-	BarrierDesc.Transition.Subresource = 0;
-	BarrierDesc.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
-	BarrierDesc.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
-	CommandList->ResourceBarrier(1, &BarrierDesc);*/
-
-	D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = rt->CpuHandleRTV;
-
-	CommandList->OMSetRenderTargets(1, &rtvHandle, FALSE, &depthTexture->CpuHandleDSV);
-
-	const float clearColor[] = { 0.0f, 0.2f, 0.4f, 1.0f };
-	CommandList->ClearRenderTargetView(rtvHandle, clearColor, 0, nullptr);
-	CommandList->ClearDepthStencilView(depthTexture->CpuHandleDSV, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
-}
-
 void DumRHI_DX12::PresentBarrier(Texture* rt)
 {
 	D3D12_RESOURCE_BARRIER BarrierDesc = {};
@@ -404,22 +387,6 @@ void DumRHI_DX12::PresentBarrier(Texture* rt)
 	BarrierDesc.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
 	BarrierDesc.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
 	CommandList->ResourceBarrier(1, &BarrierDesc);
-}
-
-void DumRHI_DX12::CreateRendertargets(IDXGISwapChain3* InSwapChain, int width, int height)
-{
-	// use swapchain not texture.
-	{
-		for (UINT i = 0; i < NumFrame; i++)
-		{
-			ComPtr<ID3D12Resource> rendertarget;
-			ThrowIfFailed(InSwapChain->GetBuffer(i, IID_PPV_ARGS(&rendertarget)));
-
-			renderTargetTextures.push_back(CreateTexture2DFromResource(rendertarget));
-		}
-	}
-	
-	depthTexture = CreateTexture2DFromResource(nullptr);
 }
 
 DumRHI_DX12::DumRHI_DX12(ID3D12Device5 * InDevice)
@@ -1168,7 +1135,7 @@ void Texture::MakeRTV()
 
 	desc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
 
-	g_dx12_rhi->Device->CreateRenderTargetView(resource.Get(), &desc, CpuHandleRTV);
+	g_dx12_rhi->Device->CreateRenderTargetView(resource.Get(), nullptr, CpuHandleRTV);
 }
 
 void Texture::MakeDSV()
@@ -1864,6 +1831,18 @@ std::shared_ptr<RTAS> DumRHI_DX12::CreateTLAS(vector<shared_ptr<RTAS>>& VecBotto
 	uavBarrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
 	uavBarrier.UAV.pResource = as->Result.Get();
 	CommandList->ResourceBarrier(1, &uavBarrier);
+
+	// create acceleration structure srv (not shader-visible yet)
+	D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+	srvDesc.ViewDimension = D3D12_SRV_DIMENSION_RAYTRACING_ACCELERATION_STRUCTURE;
+	srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+	srvDesc.RaytracingAccelerationStructure.Location = as->Result->GetGPUVirtualAddress();
+
+	// copydescriptor needed when being used.
+	//dx12_rhi->SRVCBVDescriptorHeapStorage->AllocDescriptor(RTASCPUHandle, RTASGPUHandle);
+	g_dx12_rhi->SRVCBVDescriptorHeapShaderVisible->AllocDescriptor(as->CPUHandle, as->GPUHandle);
+
+	g_dx12_rhi->Device->CreateShaderResourceView(nullptr, &srvDesc, as->CPUHandle);
 
 	g_dx12_rhi->WaitGPU();
 

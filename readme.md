@@ -1,34 +1,26 @@
 # DX12 & DXR test framework
 This project is for dx12 & dxr learning. Quite  unorgnized for now. I am trying to test best practice implementation(resource binding, dynamic descriotpr allocation, multi-thread command submission, etc....)
-![raytraced shadow(very naive implementation)](rt_shadow.png)
 
 ## DX12
 * Helper classes for resource management.
 * Easy resource binding interface.
-* ~~Dynamic descriptor allocation strategy.~~
+* Dynamic descriptor allocation strategy.
 * Multi threaded mesh rendering.
 
 ## DXR
 * Shadow
-* ~~Reflection~~
+* Reflection
 
 ## Build
 * I used to use CMake before, now considering to migrate to other build system.
-* Currently, it is just a vs solution.
+* Go to vs directory.
+* premake5.exe vs2017
 
 ## Third-party libs
 * [enkiTS](https://github.com/dougbinks/enkiTS)
 * [glm](https://glm.g-truc.net/0.9.9/index.html)
 * [NV Aftermath](https://developer.nvidia.com/nvidia-aftermath)
-* [Assimp](https://github.com/assimp/assimp)
-
 ## Usefule link
-* [NVIDIA dxr tutorials](https://github.com/NVIDIAGameWorks/DxrTutorials)
-	* Most clean & easy to understand.
-* [Microsoft dxr tutorial](https://github.com/microsoft/DirectX-Graphics-Samples/tree/master/Samples/Desktop/D3D12Raytracing)
-	* More complicated effects like shadow & reflection.
-	* More complicated binding.(global root signature or descriptor table in shadertable).
+* [Dynamic cb implementation](https://github.com/Microsoft/DirectX-Graphics-Samples/blob/07008938a0dc5a187a23abcb55b61f8c2809c874/Samples/Desktop/D3D12PipelineStateCache/src/DynamicConstantBuffer.cpp#L64)
 * [MJP github](https://github.com/TheRealMJP)
 	* Excellent dx12 reference implementation.
-* [Raytracing gems](http://www.realtimerendering.com/raytracinggems/unofficial_RayTracingGems_v1.4.pdf)
-	* Reading chapter 3 may help you to understand resource binding of raytracing shader.

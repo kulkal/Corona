@@ -23,20 +23,20 @@ int Win32Application::Run(DXSample* pSample, HINSTANCE hInstance, int nCmdShow)
 	LocalFree(argv);
 
 	// Initialize the window class.
-	WNDCLASSEX windowClass = { 0 };
+	WNDCLASSEXW windowClass = { 0 };
 	windowClass.cbSize = sizeof(WNDCLASSEX);
 	windowClass.style = CS_HREDRAW | CS_VREDRAW;
 	windowClass.lpfnWndProc = WindowProc;
 	windowClass.hInstance = hInstance;
 	windowClass.hCursor = LoadCursor(NULL, IDC_ARROW);
 	windowClass.lpszClassName = L"DXSampleClass";
-	RegisterClassEx(&windowClass);
+	RegisterClassExW(&windowClass);
 
 	RECT windowRect = { 0, 0, static_cast<LONG>(pSample->GetWidth()), static_cast<LONG>(pSample->GetHeight()) };
 	AdjustWindowRect(&windowRect, WS_OVERLAPPEDWINDOW, FALSE);
 
 	// Create the window and store a handle to it.
-	m_hwnd = CreateWindow(
+	m_hwnd = CreateWindowW(
 		windowClass.lpszClassName,
 		pSample->GetTitle(),
 		WS_OVERLAPPEDWINDOW,

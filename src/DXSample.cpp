@@ -23,6 +23,7 @@ DXSample::DXSample(UINT width, UINT height, std::wstring name) :
 	WCHAR assetsPath[512];
 	GetAssetsPath(assetsPath, _countof(assetsPath));
 	m_assetsPath = assetsPath;
+	m_assetsPath += L"\\";
 
 	m_aspectRatio = static_cast<float>(width) / static_cast<float>(height);
 }
@@ -72,7 +73,7 @@ void DXSample::GetHardwareAdapter(IDXGIFactory2* pFactory, IDXGIAdapter1** ppAda
 void DXSample::SetCustomWindowText(LPCWSTR text)
 {
 	std::wstring windowText = m_title + L": " + text;
-	SetWindowText(Win32Application::GetHwnd(), windowText.c_str());
+	SetWindowTextW(Win32Application::GetHwnd(), windowText.c_str());
 }
 
 // Helper function for parsing any supplied command line args.

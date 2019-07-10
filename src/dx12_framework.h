@@ -38,25 +38,18 @@ class dx12_framework : public DXSample
 {
 	struct ObjConstantBuffer
 	{
-		//XMFLOAT4X4 mvp;		// Model-view-projection (MVP) matrix.
 		glm::mat4x4 ViewProjectionMatrix;
-		//XMFLOAT4X4 WorldMatrix;		// Model-view-projection (MVP) matrix.
 		glm::mat4x4 WorldMatrix;
 		glm::vec4 ViewDir;
-		//FLOAT padding[48];
 	};
 
 	struct RTViewParamCB
 	{
-		//XMFLOAT4X4 ViewMatrix;		// Model-view-projection (MVP) matrix.
 		glm::mat4x4 ViewMatrix;
-		//XMFLOAT4X4 InvViewMatrix;		// Model-view-projection (MVP) matrix.
 		glm::mat4x4 InvViewMatrix;
-		//XMFLOAT4X4 ProjMatrix;
 		glm::mat4x4 ProjMatrix;
 		glm::vec4 ProjectionParams;
 		glm::vec4	LightDir;
-		//float padding[];
 	};
 
 	struct CopyScaleOffsetCB
@@ -77,16 +70,13 @@ public:
 	virtual void OnKeyUp(UINT8 key);
 
 private:
+	std::unique_ptr<DumRHI_DX12> dx12_rhi;
+
 	bool bMultiThreadRendering = false;
-
 	bool bDebugDraw = false;
-	//static const UINT FrameCount = 3
 	
-	UINT m_frameCounter;
-	;
+	UINT m_frameCounter = 0;
 	
-	static const bool UseBundles = false;
-
 	// Pipeline objects.
 	CD3DX12_VIEWPORT m_viewport;
 	CD3DX12_RECT m_scissorRect;
@@ -97,86 +87,47 @@ private:
 	shared_ptr<Texture> AlbedoBuffer;
 	shared_ptr<Texture> NormalBuffer;
 	shared_ptr<Texture> GeomNormalBuffer;
-
 	shared_ptr<Texture> ShadowBuffer;
+	shared_ptr<Texture> DepthBuffer;
 
+	std::vector<std::shared_ptr<Texture>> framebuffers;
 
-
-
-
-
-	unique_ptr<PipelineStateObject> RS;
 
 	unique_ptr<PipelineStateObject> RS_Mesh;
 
-	D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDescMesh;
-	shared_ptr<Shader> vsMesh;
-	shared_ptr<Shader> psMesh;
 
-
-
+	// test compute pass
 	unique_ptr<PipelineStateObject> RS_Compute;
-
 	shared_ptr<Texture> ComputeOuputTexture;
 
-
-
-	//unique_ptr<Texture> SceneColorBuffer;
-
-
-
+	// global wrap sampler
 	std::shared_ptr<Sampler> samplerWrap;
 
-
+	// dx sample mesh
 	shared_ptr<Mesh> mesh;
 
+	// fbx mesh
 	vector<shared_ptr<Mesh>> meshes;
 	vector<shared_ptr<Material>> Materials;
 
 	StepTimer m_timer;
-
 	SimpleCamera m_camera;
-	std::vector<std::shared_ptr<Texture>> framebuffers;
 
-	// Frame resources.
-
-
-	XMFLOAT4X4 m_modelMatrices;
 
 	glm::vec3 LightDir = glm::normalize(glm::vec3(0.5, 1, 0.2));
-
 	float Near = 1.0f;
 	float Far = 10000.0f;
-	std::unique_ptr<DumRHI_DX12> dx12_rhi;									
 
 
-	XMFLOAT4X4 mvp;
-
-
-	// raytracing as
-
+	// raytracing
 	shared_ptr<RTAS> TLAS;
-	
 	vector<shared_ptr<RTAS>> vecBLAS;
-
-
-	ComPtr<ID3D12Resource> mpShaderTable;
-	uint32_t mShaderTableEntrySize = 0;
-
-	D3D12_GPU_DESCRIPTOR_HANDLE RTASGPUHandle;
-	D3D12_CPU_DESCRIPTOR_HANDLE RTASCPUHandle;
-
-	unique_ptr<GlobalConstantBuffer> ViewMatrixCB;
-
 	unique_ptr<RTPipelineStateObject> PSO_RT;
 	RTViewParamCB RTViewParam;
 
 
 	// full screen copy pass
 	unique_ptr<PipelineStateObject> RS_Copy;
-
-
-
 	shared_ptr<VertexBuffer> FullScreenVB;
 
 	// lighting pass
@@ -184,8 +135,6 @@ private:
 	struct LightingParam
 	{
 		glm::vec4 LightDir;
-		FLOAT padding[60];
-
 	};
 
 

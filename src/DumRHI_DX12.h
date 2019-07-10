@@ -28,7 +28,7 @@ public:
 	ComPtr<ID3D12CommandAllocator> CommandAllocator;
 	vector<ComPtr<ID3D12CommandAllocator>> VecCommandAllocatorMeshDraw;
 
-	UINT64 FenceValue;
+	UINT64 FenceValue = 0;
 	
 };
 
@@ -434,6 +434,9 @@ public:
 class RTAS
 {
 public:
+	D3D12_GPU_DESCRIPTOR_HANDLE GPUHandle;
+	D3D12_CPU_DESCRIPTOR_HANDLE CPUHandle;
+
 	ComPtr<ID3D12Resource> Scratch;
 	ComPtr<ID3D12Resource> Result;
 	ComPtr<ID3D12Resource> Instance;
@@ -526,8 +529,6 @@ public:
 
 
 
-	shared_ptr<Texture> depthTexture;
-	shared_ptr<Texture> ShadowBuffer;
 
 	std::vector<std::shared_ptr<Texture>> renderTargetTextures;
 
@@ -573,11 +574,9 @@ public:
 	shared_ptr<RTAS> CreateTLAS(vector<shared_ptr<RTAS>>& VecBottomLevelAS);
 
 
-	void SetRendertarget(Texture* rt);
 	void PresentBarrier(Texture* rt);
 	void ResourceBarrier(ID3D12Resource* Resource, D3D12_RESOURCE_STATES StateBefore, D3D12_RESOURCE_STATES StateAfter);
 	
-	void CreateRendertargets(IDXGISwapChain3* InSwapChain, int width, int height);
 
 
 	DumRHI_DX12(ID3D12Device5 * pDevice);

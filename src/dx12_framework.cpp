@@ -11,19 +11,17 @@
 
 #include "stdafx.h"
 #include "dx12_framework.h"
-#include "occcity.h"
 #include <iostream>
 #include <algorithm>
 #include <array>
 #include "enkiTS/TaskScheduler.h""
 #include "DXCAPI/dxcapi.use.h"
-#include "ofbx/ofbx.h"
 #include "Utils.h"
 
 #include "assimp/include/Importer.hpp"
 #include "assimp/include/scene.h"
 #include "assimp/include/postprocess.h"
-#pragma comment(lib, "assimp\\lib\\assimp.lib")
+//#pragma comment(lib, "assimp\\lib\\assimp.lib")
 
 #include "GFSDK_Aftermath/include/GFSDK_Aftermath.h"
 
@@ -38,7 +36,6 @@ static dxc::DxcDllSupport gDxcDllHelper;
 
 enki::TaskScheduler g_TS;
 
-ofbx::IScene* g_scene = nullptr;
 
 using namespace glm;
 
@@ -201,13 +198,6 @@ static const WCHAR* kMissShader = L"miss";
 static const WCHAR* kClosestHitShader = L"chs";
 static const WCHAR* kHitGroup = L"HitGroup";
 
-DxilLibrary createDxilLibrary()
-{
-	// Compile the shader
-	ComPtr<ID3DBlob> pDxilLib = compileLibrary(L"07-Shaders.hlsl", L"lib_6_3");
-	const WCHAR* entryPoints[] = { kRayGenShader, kMissShader, kClosestHitShader };
-	return DxilLibrary(pDxilLib, entryPoints, arraysize(entryPoints));
-}
 
 
 struct HitProgram
@@ -542,9 +532,9 @@ void dx12_framework::LoadAssets()
 
 
 	
-	dx12_rhi->depthTexture = dx12_rhi->CreateTexture2D(DXGI_FORMAT_D32_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL, D3D12_RESOURCE_STATE_DEPTH_WRITE, m_width, m_height, 1);
-	dx12_rhi->depthTexture->MakeDSV();
-	dx12_rhi->depthTexture->MakeSRV(true);
+	DepthBuffer = dx12_rhi->CreateTexture2D(DXGI_FORMAT_D32_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL, D3D12_RESOURCE_STATE_DEPTH_WRITE, m_width, m_height, 1);
+	DepthBuffer->MakeDSV();
+	DepthBuffer->MakeSRV(true);
 
 
 
@@ -578,73 +568,73 @@ void dx12_framework::LoadAssets()
 
 void dx12_framework::LoadMesh()
 {
-	// Load scene assets.
-	UINT fileSize = 0;
-	UINT8* pAssetData;
-	ThrowIfFailed(ReadDataFromFile(GetAssetFullPath(SampleAssetsIndoor::DataFileName).c_str(), &pAssetData, &fileSize));
+	//// Load scene assets.
+	//UINT fileSize = 0;
+	//UINT8* pAssetData;
+	//ThrowIfFailed(ReadDataFromFile(GetAssetFullPath(SampleAssetsIndoor::DataFileName).c_str(), &pAssetData, &fileSize));
 
-	mesh = make_unique<Mesh>();
+	//mesh = make_unique<Mesh>();
 
-	// vertex buffer
-	/*D3D12_SUBRESOURCE_DATA vertexData = {};
-	vertexData.pData = pAssetData + SampleAssetsIndoor::VertexDataOffset;
-	vertexData.RowPitch = SampleAssetsIndoor::VertexDataSize;
-	vertexData.SlicePitch = vertexData.RowPitch;*/
+	//// vertex buffer
+	///*D3D12_SUBRESOURCE_DATA vertexData = {};
+	//vertexData.pData = pAssetData + SampleAssetsIndoor::VertexDataOffset;
+	//vertexData.RowPitch = SampleAssetsIndoor::VertexDataSize;
+	//vertexData.SlicePitch = vertexData.RowPitch;*/
 
-	mesh->Vb = dx12_rhi->CreateVertexBuffer(SampleAssetsIndoor::VertexDataSize, SampleAssetsIndoor::StandardVertexStride, pAssetData + SampleAssetsIndoor::VertexDataOffset);
-	mesh->VertexStride = SampleAssetsIndoor::StandardVertexStride;
-	mesh->IndexFormat = SampleAssetsIndoor::StandardIndexFormat;
-
-
-	// index buffer
-	/*D3D12_SUBRESOURCE_DATA indexData = {};
-	indexData.pData = pAssetData + SampleAssetsIndoor::IndexDataOffset;
-	indexData.RowPitch = SampleAssetsIndoor::IndexDataSize;
-	indexData.SlicePitch = indexData.RowPitch;*/
-	mesh->Ib = dx12_rhi->CreateIndexBuffer(SampleAssetsIndoor::StandardIndexFormat, SampleAssetsIndoor::IndexDataSize, pAssetData + SampleAssetsIndoor::IndexDataOffset);
+	//mesh->Vb = dx12_rhi->CreateVertexBuffer(SampleAssetsIndoor::VertexDataSize, SampleAssetsIndoor::StandardVertexStride, pAssetData + SampleAssetsIndoor::VertexDataOffset);
+	//mesh->VertexStride = SampleAssetsIndoor::StandardVertexStride;
+	//mesh->IndexFormat = SampleAssetsIndoor::StandardIndexFormat;
 
 
+	//// index buffer
+	///*D3D12_SUBRESOURCE_DATA indexData = {};
+	//indexData.pData = pAssetData + SampleAssetsIndoor::IndexDataOffset;
+	//indexData.RowPitch = SampleAssetsIndoor::IndexDataSize;
+	//indexData.SlicePitch = indexData.RowPitch;*/
+	//mesh->Ib = dx12_rhi->CreateIndexBuffer(SampleAssetsIndoor::StandardIndexFormat, SampleAssetsIndoor::IndexDataSize, pAssetData + SampleAssetsIndoor::IndexDataOffset);
 
 
-	// read textures
-	const UINT srvCount = _countof(SampleAssetsIndoor::Textures);
 
-	for (UINT i = 0; i < srvCount; i++)
-	{
-		D3D12_SUBRESOURCE_DATA textureData = {};
-		textureData.pData = pAssetData + SampleAssetsIndoor::Textures[i].Data[0].Offset;
-		textureData.RowPitch = SampleAssetsIndoor::Textures[i].Data[0].Pitch;
-		textureData.SlicePitch = SampleAssetsIndoor::Textures[i].Data[0].Size;
 
-		//SquintRoom->Textures.push_back(dx12_rhi->CreateTexture2D(SampleAssetsIndoor::Textures[i].Format, SampleAssetsIndoor::Textures[i].Width, SampleAssetsIndoor::Textures[i].Height, SampleAssetsIndoor::Textures[i].MipLevels, &textureData));
+	//// read textures
+	//const UINT srvCount = _countof(SampleAssetsIndoor::Textures);
 
-		shared_ptr<Texture> tex = dx12_rhi->CreateTexture2D(SampleAssetsIndoor::Textures[i].Format, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_COPY_DEST, SampleAssetsIndoor::Textures[i].Width, SampleAssetsIndoor::Textures[i].Height, SampleAssetsIndoor::Textures[i].MipLevels);
-		tex->MakeSRV();
-		tex->UploadSRCData(&textureData);
-		mesh->Textures.push_back(tex);
-	}
+	//for (UINT i = 0; i < srvCount; i++)
+	//{
+	//	D3D12_SUBRESOURCE_DATA textureData = {};
+	//	textureData.pData = pAssetData + SampleAssetsIndoor::Textures[i].Data[0].Offset;
+	//	textureData.RowPitch = SampleAssetsIndoor::Textures[i].Data[0].Pitch;
+	//	textureData.SlicePitch = SampleAssetsIndoor::Textures[i].Data[0].Size;
 
-	const UINT drawCount = _countof(SampleAssetsIndoor::Draws);
+	//	//SquintRoom->Textures.push_back(dx12_rhi->CreateTexture2D(SampleAssetsIndoor::Textures[i].Format, SampleAssetsIndoor::Textures[i].Width, SampleAssetsIndoor::Textures[i].Height, SampleAssetsIndoor::Textures[i].MipLevels, &textureData));
 
-	for (int i = 0; i < _countof(SampleAssetsIndoor::Draws); i++)
-	{
-		SampleAssetsIndoor::DrawParameters drawArgs = SampleAssetsIndoor::Draws[i];
-		Mesh::DrawCall drawcall;
-		drawcall.DiffuseTextureIndex = drawArgs.DiffuseTextureIndex;
-		drawcall.IndexCount = drawArgs.IndexCount;
-		drawcall.IndexStart = drawArgs.IndexStart;
-		drawcall.NormalTextureIndex = drawArgs.NormalTextureIndex;
-		drawcall.SpecularTextureIndex = drawArgs.SpecularTextureIndex;
-		drawcall.VertexBase = drawArgs.VertexBase;
+	//	shared_ptr<Texture> tex = dx12_rhi->CreateTexture2D(SampleAssetsIndoor::Textures[i].Format, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_COPY_DEST, SampleAssetsIndoor::Textures[i].Width, SampleAssetsIndoor::Textures[i].Height, SampleAssetsIndoor::Textures[i].MipLevels);
+	//	tex->MakeSRV();
+	//	tex->UploadSRCData(&textureData);
+	//	mesh->Textures.push_back(tex);
+	//}
 
-		if (i > 0)
-		{
-			auto& prevDraw = mesh->Draws[i - 1];
-			prevDraw.VertexCount = drawcall.VertexBase - prevDraw.VertexBase;
-		}
-		mesh->Draws.push_back(drawcall);
-	}
-	mesh->Draws[mesh->Draws.size() - 1].VertexCount = mesh->Vb->numVertices - mesh->Draws[mesh->Draws.size() - 1].VertexBase;
+	//const UINT drawCount = _countof(SampleAssetsIndoor::Draws);
+
+	//for (int i = 0; i < _countof(SampleAssetsIndoor::Draws); i++)
+	//{
+	//	SampleAssetsIndoor::DrawParameters drawArgs = SampleAssetsIndoor::Draws[i];
+	//	Mesh::DrawCall drawcall;
+	//	drawcall.DiffuseTextureIndex = drawArgs.DiffuseTextureIndex;
+	//	drawcall.IndexCount = drawArgs.IndexCount;
+	//	drawcall.IndexStart = drawArgs.IndexStart;
+	//	drawcall.NormalTextureIndex = drawArgs.NormalTextureIndex;
+	//	drawcall.SpecularTextureIndex = drawArgs.SpecularTextureIndex;
+	//	drawcall.VertexBase = drawArgs.VertexBase;
+
+	//	if (i > 0)
+	//	{
+	//		auto& prevDraw = mesh->Draws[i - 1];
+	//		prevDraw.VertexCount = drawcall.VertexBase - prevDraw.VertexBase;
+	//	}
+	//	mesh->Draws.push_back(drawcall);
+	//}
+	//mesh->Draws[mesh->Draws.size() - 1].VertexCount = mesh->Vb->numVertices - mesh->Draws[mesh->Draws.size() - 1].VertexBase;
 }
 
 void dx12_framework::LoadFbx()
@@ -860,7 +850,7 @@ void dx12_framework::InitComputeRS()
 
 	try
 	{
-		ThrowIfFailed(D3DCompileFromFile(GetAssetFullPath(L"cs.hlsl").c_str(), nullptr, nullptr, "main", "cs_5_0", compileFlags, 0, &computeShader, &compilationMsgs));
+		ThrowIfFailed(D3DCompileFromFile(GetAssetFullPath(L"Shaders\\SimpleCS.hlsl").c_str(), nullptr, nullptr, "main", "cs_5_0", compileFlags, 0, &computeShader, &compilationMsgs));
 	}
 	catch (const std::exception& e)
 	{
@@ -905,7 +895,7 @@ void dx12_framework::InitDrawMeshRS()
 
 	try
 	{
-		ThrowIfFailed(D3DCompileFromFile(GetAssetFullPath(L"MeshDraw.hlsl").c_str(), nullptr, nullptr, "VSMain", "vs_5_0", compileFlags, 0, &vertexShader, &compilationMsgs));
+		ThrowIfFailed(D3DCompileFromFile(GetAssetFullPath(L"Shaders\\MeshDraw.hlsl").c_str(), nullptr, nullptr, "VSMain", "vs_5_0", compileFlags, 0, &vertexShader, &compilationMsgs));
 	}
 	catch (const std::exception& e)
 	{
@@ -915,7 +905,7 @@ void dx12_framework::InitDrawMeshRS()
 
 	try
 	{
-		ThrowIfFailed(D3DCompileFromFile(GetAssetFullPath(L"MeshDraw.hlsl").c_str(), nullptr, nullptr, "PSMain", "ps_5_0", compileFlags, 0, &pixelShader, &compilationMsgs));
+		ThrowIfFailed(D3DCompileFromFile(GetAssetFullPath(L"Shaders\\MeshDraw.hlsl").c_str(), nullptr, nullptr, "PSMain", "ps_5_0", compileFlags, 0, &pixelShader, &compilationMsgs));
 	}
 	catch (const std::exception& e)
 	{
@@ -931,13 +921,23 @@ void dx12_framework::InitDrawMeshRS()
 
 	Shader* vs = new Shader((UINT8*)vertexShader->GetBufferPointer(), vertexShader->GetBufferSize());
 	//vs->BindGlobalConstantBuffer("ViewParameter", 0);
-	vs->BindConstantBuffer("ObjParameter", 0, sizeof(ObjConstantBuffer), _countof(SampleAssetsIndoor::Draws) + 400);
+	vs->BindConstantBuffer("ObjParameter", 0, sizeof(ObjConstantBuffer), 400);
 
 	CD3DX12_RASTERIZER_DESC rasterizerStateDesc(D3D12_DEFAULT);
 	rasterizerStateDesc.CullMode = D3D12_CULL_MODE_NONE;
 
+	const D3D12_INPUT_ELEMENT_DESC StandardVertexDescription[] =
+	{
+		{ "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0,  D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+	{ "NORMAL",   0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+	{ "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT,    0, 24, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+	{ "TANGENT",  0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 32, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+	};
+
+	UINT StandardVertexDescriptionNumElements = _countof(StandardVertexDescription);
+
 	D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDescMesh = {};
-	psoDescMesh.InputLayout = { SampleAssetsIndoor::StandardVertexDescription, SampleAssetsIndoor::StandardVertexDescriptionNumElements };
+	psoDescMesh.InputLayout = { StandardVertexDescription, StandardVertexDescriptionNumElements };
 	//psoDesc.pRootSignature = m_rootSignature.Get();
 	/*psoDesc.VS = CD3DX12_SHADER_BYTECODE(pVertexShaderData, vertexShaderDataLength);
 	psoDesc.PS = CD3DX12_SHADER_BYTECODE(pPixelShaderData, pixelShaderDataLength);*/
@@ -1003,7 +1003,7 @@ void dx12_framework::InitCopyPass()
 
 	try
 	{
-		ThrowIfFailed(D3DCompileFromFile(GetAssetFullPath(L"CopyPS.hlsl").c_str(), nullptr, nullptr, "VSMain", "vs_5_0", compileFlags, 0, &vertexShader, &compilationMsgs));
+		ThrowIfFailed(D3DCompileFromFile(GetAssetFullPath(L"Shaders\\CopyPS.hlsl").c_str(), nullptr, nullptr, "VSMain", "vs_5_0", compileFlags, 0, &vertexShader, &compilationMsgs));
 	}
 	catch (const std::exception& e)
 	{
@@ -1013,7 +1013,7 @@ void dx12_framework::InitCopyPass()
 
 	try
 	{
-		ThrowIfFailed(D3DCompileFromFile(GetAssetFullPath(L"CopyPS.hlsl").c_str(), nullptr, nullptr, "PSMain", "ps_5_0", compileFlags, 0, &pixelShader, &compilationMsgs));
+		ThrowIfFailed(D3DCompileFromFile(GetAssetFullPath(L"Shaders\\CopyPS.hlsl").c_str(), nullptr, nullptr, "PSMain", "ps_5_0", compileFlags, 0, &pixelShader, &compilationMsgs));
 	}
 	catch (const std::exception& e)
 	{
@@ -1082,7 +1082,7 @@ void dx12_framework::InitLightingPass()
 
 	try
 	{
-		ThrowIfFailed(D3DCompileFromFile(GetAssetFullPath(L"LightingPS.hlsl").c_str(), nullptr, nullptr, "VSMain", "vs_5_0", compileFlags, 0, &vertexShader, &compilationMsgs));
+		ThrowIfFailed(D3DCompileFromFile(GetAssetFullPath(L"Shaders\\LightingPS.hlsl").c_str(), nullptr, nullptr, "VSMain", "vs_5_0", compileFlags, 0, &vertexShader, &compilationMsgs));
 	}
 	catch (const std::exception& e)
 	{
@@ -1092,7 +1092,7 @@ void dx12_framework::InitLightingPass()
 
 	try
 	{
-		ThrowIfFailed(D3DCompileFromFile(GetAssetFullPath(L"LightingPS.hlsl").c_str(), nullptr, nullptr, "PSMain", "ps_5_0", compileFlags, 0, &pixelShader, &compilationMsgs));
+		ThrowIfFailed(D3DCompileFromFile(GetAssetFullPath(L"Shaders\\LightingPS.hlsl").c_str(), nullptr, nullptr, "PSMain", "ps_5_0", compileFlags, 0, &pixelShader, &compilationMsgs));
 	}
 	catch (const std::exception& e)
 	{
@@ -1147,7 +1147,7 @@ void dx12_framework::InitLightingPass()
 
 void dx12_framework::CopyPass()
 {
-	PIXBeginEvent(dx12_rhi->CommandList.Get(), 0, L"CopyPass");
+	/*PIXBeginEvent*/(dx12_rhi->CommandList.Get(), 0, L"CopyPass");
 
 	Texture* backbuffer = framebuffers[dx12_rhi->CurrentFrameIndex].get();
 
@@ -1191,12 +1191,12 @@ void dx12_framework::CopyPass()
 	dx12_rhi->CommandList->DrawInstanced(4, 1, 0, 0);
 
 
-	PIXEndEvent(dx12_rhi->CommandList.Get());
+	//PIXEndEvent(dx12_rhi->CommandList.Get());
 }
 
 void dx12_framework::DebugPass()
 {
-	PIXBeginEvent(dx12_rhi->CommandList.Get(), 0, L"DebugPass");
+	//PIXBeginEvent(dx12_rhi->CommandList.Get(), 0, L"DebugPass");
 
 	Texture* backbuffer = framebuffers[dx12_rhi->CurrentFrameIndex].get();
 	//dx12_rhi->CommandList->OMSetRenderTargets(1, &backbuffer->CpuHandleRTV, FALSE, nullptr);
@@ -1245,7 +1245,7 @@ void dx12_framework::DebugPass()
 	cb.Offset = glm::vec4(0.25, -0.75, 0, 0);
 	cb.Scale = glm::vec4(0.25, 0.25, 0, 0);
 	RS_Copy->vs->SetConstantValue("ScaleOffsetParams", &cb, dx12_rhi->CommandList.Get(), nullptr);
-	RS_Copy->ps->SetTexture("SrcTex", dx12_rhi->depthTexture.get(), dx12_rhi->CommandList.Get(), nullptr);
+	RS_Copy->ps->SetTexture("SrcTex", DepthBuffer.get(), dx12_rhi->CommandList.Get(), nullptr);
 	dx12_rhi->CommandList->DrawInstanced(4, 1, 0, 0);
 
 
@@ -1262,13 +1262,13 @@ void dx12_framework::DebugPass()
 
 	RS_Copy->ApplyGlobal(dx12_rhi->CommandList.Get());
 
-	PIXEndEvent(dx12_rhi->CommandList.Get());
+	//PIXEndEvent(dx12_rhi->CommandList.Get());
 
 }
 
 void dx12_framework::LightingPass()
 {
-	PIXBeginEvent(dx12_rhi->CommandList.Get(), 0, L"LightingPass");
+	//PIXBeginEvent(dx12_rhi->CommandList.Get(), 0, L"LightingPass");
 
 
 
@@ -1327,7 +1327,7 @@ void dx12_framework::LightingPass()
 	BarrierDescPresent.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
 	dx12_rhi->CommandList->ResourceBarrier(1, &BarrierDescPresent);
 
-	PIXEndEvent(dx12_rhi->CommandList.Get());
+	//PIXEndEvent(dx12_rhi->CommandList.Get());
 
 
 	/*dx12_rhi->CommandList->Close();
@@ -1540,7 +1540,7 @@ void dx12_framework::DrawMeshPass()
 
 
 	const D3D12_CPU_DESCRIPTOR_HANDLE Rendertargets[] = { AlbedoBuffer->CpuHandleRTV, NormalBuffer->CpuHandleRTV, GeomNormalBuffer->CpuHandleRTV };
-	dx12_rhi->CommandList->OMSetRenderTargets(3, Rendertargets, FALSE, &dx12_rhi->depthTexture->CpuHandleDSV);
+	dx12_rhi->CommandList->OMSetRenderTargets(3, Rendertargets, FALSE, &DepthBuffer->CpuHandleDSV);
 
 
 	//dx12_rhi->CommandList->OMSetRenderTargets(1, &backbuffer->CpuHandleRTV, FALSE, &dx12_rhi->depthTexture->CpuHandleDSV);
@@ -1550,7 +1550,7 @@ void dx12_framework::DrawMeshPass()
 	dx12_rhi->CommandList->ClearRenderTargetView(NormalBuffer->CpuHandleRTV, clearColor, 0, nullptr);
 	dx12_rhi->CommandList->ClearRenderTargetView(GeomNormalBuffer->CpuHandleRTV, clearColor, 0, nullptr);
 
-	dx12_rhi->CommandList->ClearDepthStencilView(dx12_rhi->depthTexture->CpuHandleDSV, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
+	dx12_rhi->CommandList->ClearDepthStencilView(DepthBuffer->CpuHandleDSV, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
 
 	
 	dx12_rhi->CommandList->Close();
@@ -1563,12 +1563,12 @@ void dx12_framework::DrawMeshPass()
 
 	dx12_rhi->UploadeFrameTexture2ShaderVisibleHeap();
 
-	PIXBeginEvent(dx12_rhi->CommandList.Get(), 0, L"Draw Mesh");
+	//PIXBeginEvent(dx12_rhi->CommandList.Get(), 0, L"Draw Mesh");
 	if (!bMultiThreadRendering)
 	{
 		const D3D12_CPU_DESCRIPTOR_HANDLE Rendertargets[] = { AlbedoBuffer->CpuHandleRTV, NormalBuffer->CpuHandleRTV, GeomNormalBuffer->CpuHandleRTV };
 
-		dx12_rhi->CommandList->OMSetRenderTargets(3, Rendertargets, FALSE, &dx12_rhi->depthTexture->CpuHandleDSV);
+		dx12_rhi->CommandList->OMSetRenderTargets(3, Rendertargets, FALSE, &DepthBuffer->CpuHandleDSV);
 
 		RS_Mesh->ApplyGraphicsRSPSO(dx12_rhi->CommandList.Get());
 		RS_Mesh->ps->SetSampler("samplerWrap", samplerWrap.get(), dx12_rhi->CommandList.Get());
@@ -1707,7 +1707,7 @@ void dx12_framework::DrawMeshPass()
 	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(GeomNormalBuffer->resource.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
 
 
-	PIXEndEvent(dx12_rhi->CommandList.Get());
+	//PIXEndEvent(dx12_rhi->CommandList.Get());
 }
 
 void dx12_framework::RecordDraw (UINT StartIndex, UINT NumDraw, UINT CLIndex, ThreadDescriptorHeapPool* DHPool)
@@ -1719,7 +1719,7 @@ void dx12_framework::RecordDraw (UINT StartIndex, UINT NumDraw, UINT CLIndex, Th
 	ID3D12CommandAllocator* CA = dx12_rhi->FrameResourceVec[dx12_rhi->CurrentFrameIndex].VecCommandAllocatorMeshDraw[CLIndex].Get();
 	CL->Reset(CA, nullptr);
 
-	CL->OMSetRenderTargets(1, &backbuffer->CpuHandleRTV, FALSE, &dx12_rhi->depthTexture->CpuHandleDSV);
+	CL->OMSetRenderTargets(1, &backbuffer->CpuHandleRTV, FALSE, &DepthBuffer->CpuHandleDSV);
 	CL->RSSetViewports(1, &m_viewport);
 	CL->RSSetScissorRects(1, &m_scissorRect);
 	CL->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -1773,7 +1773,7 @@ void dx12_framework::ComputePass()
 {
 	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(ShadowBuffer->resource.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS));
 
-	PIXBeginEvent(dx12_rhi->CommandList.Get(), 0, L"Compute");
+	//PIXBeginEvent(dx12_rhi->CommandList.Get(), 0, L"Compute");
 
 	RS_Compute->ApplyCS(dx12_rhi->CommandList.Get());
 
@@ -1782,7 +1782,7 @@ void dx12_framework::ComputePass()
 
 
 	dx12_rhi->CommandList->Dispatch(m_width / 32, m_height / 32, 1);
-	PIXEndEvent(dx12_rhi->CommandList.Get());
+	//PIXEndEvent(dx12_rhi->CommandList.Get());
 
 	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(ShadowBuffer->resource.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
 
@@ -1821,17 +1821,6 @@ void dx12_framework::InitRaytracing()
 
 
 
-	// create acceleration structure srv (not shader-visible yet)
-	D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
-	srvDesc.ViewDimension = D3D12_SRV_DIMENSION_RAYTRACING_ACCELERATION_STRUCTURE;
-	srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-	srvDesc.RaytracingAccelerationStructure.Location = TLAS->Result->GetGPUVirtualAddress();
-
-	// copydescriptor needed when being used.
-	//dx12_rhi->SRVCBVDescriptorHeapStorage->AllocDescriptor(RTASCPUHandle, RTASGPUHandle);
-	dx12_rhi->SRVCBVDescriptorHeapShaderVisible->AllocDescriptor(RTASCPUHandle, RTASGPUHandle);
-
-	dx12_rhi->Device->CreateShaderResourceView(nullptr, &srvDesc, RTASCPUHandle);
 
 	
 
@@ -1860,7 +1849,7 @@ void dx12_framework::InitRaytracing()
 	PSO_RT->MaxAttributeSizeInBytes = sizeof(float) * 2;
 	PSO_RT->MaxPayloadSizeInBytes = sizeof(float) * 1;
 
-	PSO_RT->InitRS("RT_Shadow.hlsl");
+	PSO_RT->InitRS("Shaders\\RaytracedShadow.hlsl");
 
 
 
@@ -1891,8 +1880,8 @@ void dx12_framework::RaytracePass()
 	PSO_RT->BeginShaderTable();
 
 	PSO_RT->SetUAV("rayGen", "gOutput", ShadowBuffer->GpuHandleUAV);
-	PSO_RT->SetSRV("rayGen", "gRtScene", RTASGPUHandle);
-	PSO_RT->SetSRV("rayGen", "DepthTex", dx12_rhi->depthTexture->GpuHandleSRV);
+	PSO_RT->SetSRV("rayGen", "gRtScene", TLAS->GPUHandle);
+	PSO_RT->SetSRV("rayGen", "DepthTex", DepthBuffer->GpuHandleSRV);
 	PSO_RT->SetSRV("rayGen", "WorldNormalTex", GeomNormalBuffer->GpuHandleSRV);
 	PSO_RT->SetCBVValue("rayGen", "ViewParameter", &RTViewParam, sizeof(RTViewParamCB));
 	PSO_RT->SetSampler("rayGen", "samplerWrap", samplerWrap.get());
