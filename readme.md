@@ -12,7 +12,7 @@ This project is for dx12 & dxr learning. Quite  unorgnized for now. I am trying 
 * Reflection
 
 ## Build
-* Go to vs directory.
+* Go to build directory.
 * premake5.exe vs2017
 
 ## Third-party libs
