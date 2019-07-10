@@ -19,7 +19,7 @@ This project is for dx12 & dxr learning. Quite  unorgnized for now. I am trying 
 * [enkiTS](https://github.com/dougbinks/enkiTS)
 * [glm](https://glm.g-truc.net/0.9.9/index.html)
 * [NV Aftermath](https://developer.nvidia.com/nvidia-aftermath)
-## Usefule link
-* [Dynamic cb implementation](https://github.com/Microsoft/DirectX-Graphics-Samples/blob/07008938a0dc5a187a23abcb55b61f8c2809c874/Samples/Desktop/D3D12PipelineStateCache/src/DynamicConstantBuffer.cpp#L64)
+* [premake](https://premake.github.io/)
+## Useful link
 * [MJP github](https://github.com/TheRealMJP)
 	* Excellent dx12 reference implementation.
