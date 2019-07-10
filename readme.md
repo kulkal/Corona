@@ -12,8 +12,9 @@ This project is for dx12 & dxr learning. Quite  unorgnized for now. I am trying 
 * Reflection
 
 ## Build
-* I used to use CMake before, considering to migrate to other build system.
-* Currently, it is just a vs solution.
+I used to cmake before, now using premake. it is much simpler to use and have most of features I needed. I tried scons too but it is a little bit difficult than premake but feels more professional. I felt that premake is better for personal rendering test frameworkk.
+* Go to vs directory.
+* premake5.exe vs2017
 
 ## Third-party libs
 * [enkiTS](https://github.com/dougbinks/enkiTS)

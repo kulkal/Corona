@@ -1,4 +1,7 @@
 #include "DumRHI_DX12.h"
+
+#include <DirectXMath.h>
+#include "DirectXTex.h"
 #include "d3dx12.h"
 #define GLM_FORCE_CTOR_INIT
 
@@ -17,9 +20,9 @@
 // DirectX Tex
 #include "DirectXTex July 2017/Include/DirectXTex.h"
 #ifdef _DEBUG
-#pragma comment(lib, "DirectXTex July 2017/Lib 2017/Debug/DirectXTex.lib")
+#pragma comment(lib, "Debug/DirectXTex.lib")
 #else
-#pragma comment(lib, "DirectXTex July 2017/Lib 2017/Release/DirectXTex.lib")
+#pragma comment(lib, "Release/DirectXTex.lib")
 #endif
 
 #define align_to(_alignment, _val) (((_val + _alignment - 1) / _alignment) * _alignment)
@@ -1132,7 +1135,7 @@ void Texture::MakeRTV()
 
 	desc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
 
-	g_dx12_rhi->Device->CreateRenderTargetView(resource.Get(), &desc, CpuHandleRTV);
+	g_dx12_rhi->Device->CreateRenderTargetView(resource.Get(), nullptr, CpuHandleRTV);
 }
 
 void Texture::MakeDSV()

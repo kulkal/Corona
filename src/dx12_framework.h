@@ -75,7 +75,7 @@ private:
 	bool bMultiThreadRendering = false;
 	bool bDebugDraw = false;
 	
-	UINT m_frameCounter;
+	UINT m_frameCounter = 0;
 	
 	// Pipeline objects.
 	CD3DX12_VIEWPORT m_viewport;

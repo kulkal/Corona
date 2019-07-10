@@ -21,7 +21,7 @@
 #include "assimp/include/Importer.hpp"
 #include "assimp/include/scene.h"
 #include "assimp/include/postprocess.h"
-#pragma comment(lib, "assimp\\lib\\assimp.lib")
+//#pragma comment(lib, "assimp\\lib\\assimp.lib")
 
 #include "GFSDK_Aftermath/include/GFSDK_Aftermath.h"
 

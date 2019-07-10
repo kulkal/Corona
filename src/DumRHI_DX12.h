@@ -28,7 +28,7 @@ public:
 	ComPtr<ID3D12CommandAllocator> CommandAllocator;
 	vector<ComPtr<ID3D12CommandAllocator>> VecCommandAllocatorMeshDraw;
 
-	UINT64 FenceValue;
+	UINT64 FenceValue = 0;
 	
 };
 
