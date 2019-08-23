@@ -57,9 +57,15 @@ struct RayPayload
     float distance;
 };
 
-float GetLinearDepth(float DeviceDepth, float ParamX, float ParamY)
+/*
+    Params.x = Far / (Far - Near);
+    Params.y = Near / (Near - Far);
+    Params.z = Far;
+*/
+float GetLinearDepth(float DeviceDepth, float ParamX, float ParamY, float ParamZ)
 {
-    return ParamY / (DeviceDepth - ParamX);
+    // return Near/(Near-Far)/(DeviceDepth -Far/(Far-Near))*Far
+    return ParamY / (DeviceDepth - ParamX) * ParamZ;
 }
 
 float3 GetViewPosition(float LinearDepth, float2 ScreenPosition, float Proj11, float Proj22)
@@ -147,7 +153,7 @@ void rayGen
 	float3 WorldNormal = normalize(WorldNormalTex.SampleLevel(sampleWrap, UV, 0).xyz);
   
 
-	float LinearDepth = GetLinearDepth(DeviceDepth, ProjectionParams.x, ProjectionParams.y) * ProjectionParams.z;
+	float LinearDepth = GetLinearDepth(DeviceDepth, ProjectionParams.x, ProjectionParams.y, ProjectionParams.z) ;
 
 	float2 ScreenPosition = crd.xy;
 	ScreenPosition.x /= dims.x;

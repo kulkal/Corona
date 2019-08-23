@@ -27,6 +27,7 @@
 
 #include <sstream>
 #include <fstream>
+#include <variant>
 
 #define arraysize(a) (sizeof(a)/sizeof(a[0]))
 #define align_to(_alignment, _val) (((_val + _alignment - 1) / _alignment) * _alignment)
@@ -321,6 +322,9 @@ void dx12_framework::OnInit()
 
 	LoadPipeline();
 	LoadAssets();
+
+	
+
 }
 
 // Load the rendering pipeline dependencies.
