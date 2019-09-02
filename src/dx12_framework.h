@@ -43,7 +43,7 @@ class dx12_framework : public DXSample
 		glm::vec4 ViewDir;
 	};
 
-	struct RTViewParamCB
+	struct RTShadowViewParamCB
 	{
 		glm::mat4x4 ViewMatrix;
 		glm::mat4x4 InvViewMatrix;
@@ -51,6 +51,16 @@ class dx12_framework : public DXSample
 		glm::vec4 ProjectionParams;
 		glm::vec4	LightDir;
 	};
+
+	struct RTReflectionViewParamCB
+	{
+		glm::mat4x4 ViewMatrix;
+		glm::mat4x4 InvViewMatrix;
+		glm::mat4x4 ProjMatrix;
+		glm::vec4 ProjectionParams;
+		glm::vec4	LightDir;
+	};
+
 
 	struct CopyScaleOffsetCB
 	{
@@ -88,6 +98,9 @@ private:
 	shared_ptr<Texture> NormalBuffer;
 	shared_ptr<Texture> GeomNormalBuffer;
 	shared_ptr<Texture> ShadowBuffer;
+	shared_ptr<Texture> ReflectionBuffer;
+
+
 	shared_ptr<Texture> DepthBuffer;
 
 	std::vector<std::shared_ptr<Texture>> framebuffers;
@@ -122,8 +135,12 @@ private:
 	// raytracing
 	shared_ptr<RTAS> TLAS;
 	vector<shared_ptr<RTAS>> vecBLAS;
-	unique_ptr<RTPipelineStateObject> PSO_RT;
-	RTViewParamCB RTViewParam;
+	unique_ptr<RTPipelineStateObject> PSO_RT_SHADOW;
+	RTShadowViewParamCB RTShadowViewParam;
+
+	unique_ptr<RTPipelineStateObject> PSO_RT_REFLECTION;
+	RTReflectionViewParamCB RTReflectionViewParam;
+
 
 
 	// full screen copy pass
@@ -156,7 +173,9 @@ public:
 	void InitDrawMeshPass();
 	void DrawMeshPass();
 
-	void RaytracePass();
+	void RaytraceShadowPass();
+
+	void RaytraceReflectionPass();
 
 	void RecordDraw(UINT StartIndex, UINT NumDraw, UINT CLIndex, ThreadDescriptorHeapPool* DHPool);
 

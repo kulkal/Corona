@@ -2197,35 +2197,15 @@ void RTPipelineStateObject::EndShaderTable()
 			{
 				if (bd.Type == D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER)
 				{
-					/*D3D12_CPU_DESCRIPTOR_HANDLE CPUHandle = bd.GPUHandle;
-
-					D3D12_CPU_DESCRIPTOR_HANDLE ShaderVisibleCPU;
-					D3D12_GPU_DESCRIPTOR_HANDLE ShaderVisibleGPU;*/
-
-					/*g_dx12_rhi->SamplerDescriptorHeapShaderVisible->AllocDescriptor(ShaderVisibleCPU, ShaderVisibleGPU);
-
-					g_dx12_rhi->Device->CopyDescriptorsSimple(1, ShaderVisibleCPU, CPUHandle, D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);*/
-
 					*(UINT64*)(pDataThis) = bd.GPUHandle.ptr;
 
 				}
 				else
 				{
-			/*		D3D12_CPU_DESCRIPTOR_HANDLE CPUHandle = bd.GPUHandle;
-					D3D12_GPU_DESCRIPTOR_HANDLE ShaderVisibleGPU;
-					D3D12_CPU_DESCRIPTOR_HANDLE ShaderVisibleCPU;*/
-
-					//g_dx12_rhi->SRVCBVDescriptorHeapShaderVisible->AllocDescriptor(ShaderVisibleCPU, ShaderVisibleGPU);
-					//g_dx12_rhi->Device->CopyDescriptorsSimple(1, ShaderVisibleCPU, CPUHandle, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-
-
-
 					*(UINT64*)(pDataThis) = bd.GPUHandle.ptr;
 					UINT64 v = *(UINT64*)(pDataThis);
 
 				}
-				
-
 
 				pDataThis += sizeof(UINT64);
 			}
@@ -2233,9 +2213,6 @@ void RTPipelineStateObject::EndShaderTable()
 		}
 	}
 	LastIndex++;
-
-	
-
 
 	// miss
 	for (auto& sb : ShaderBinding)
@@ -2266,14 +2243,7 @@ void RTPipelineStateObject::EndShaderTable()
 
 		for (auto& bd : HitProgramInfo.VecData)
 		{
-			/*D3D12_CPU_DESCRIPTOR_HANDLE CPUHandle = bd;
-			D3D12_GPU_DESCRIPTOR_HANDLE ShaderVisibleGPU;
-			D3D12_CPU_DESCRIPTOR_HANDLE ShaderVisibleCPU;
-
-			g_dx12_rhi->SRVCBVDescriptorHeapShaderVisible->AllocDescriptor(ShaderVisibleCPU, ShaderVisibleGPU);
-			g_dx12_rhi->Device->CopyDescriptorsSimple(1, ShaderVisibleCPU, CPUHandle, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-*/
-			*(UINT64*)(pDataThis) = bd.ptr;// ShaderVisibleGPU.ptr;
+			*(UINT64*)(pDataThis) = bd.ptr;
 			
 			pDataThis += sizeof(UINT64);
 		}
