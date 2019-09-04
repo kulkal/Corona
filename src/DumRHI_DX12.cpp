@@ -301,6 +301,19 @@ shared_ptr<IndexBuffer> DumRHI_DX12::CreateIndexBuffer(DXGI_FORMAT Format, UINT 
 		UpdateSubresources<1>(CommandList.Get(), ib->resource.Get(), UploadHeap.Get(), 0, 0, 1, &indexData);
 		CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(ib->resource.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_INDEX_BUFFER | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE));
 
+		// create shader resource view
+		D3D12_SHADER_RESOURCE_VIEW_DESC vertexSRVDesc;
+		vertexSRVDesc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+		vertexSRVDesc.Format = DXGI_FORMAT_R32_TYPELESS;
+		vertexSRVDesc.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
+		vertexSRVDesc.Buffer.StructureByteStride = 0;
+		vertexSRVDesc.Buffer.FirstElement = 0;
+		vertexSRVDesc.Buffer.NumElements = static_cast<UINT>(Size) / sizeof(float); // byte address buffer
+		vertexSRVDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+
+		g_dx12_rhi->SRVCBVDescriptorHeapShaderVisible->AllocDescriptor(ib->CpuHandleSRV, ib->GpuHandleSRV);
+		Device->CreateShaderResourceView(ib->resource.Get(), &vertexSRVDesc, ib->CpuHandleSRV);
+
 
 		ThrowIfFailed(CommandList->Close());
 		ID3D12CommandList* ppCommandLists[] = { CommandList.Get() };
@@ -361,6 +374,20 @@ shared_ptr<VertexBuffer> DumRHI_DX12::CreateVertexBuffer(UINT Size, UINT Stride,
 		vb->view.SizeInBytes = Size;
 		vb->numVertices = Size / Stride;
 
+		// create shader resource view
+		D3D12_SHADER_RESOURCE_VIEW_DESC vertexSRVDesc;
+		vertexSRVDesc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+		vertexSRVDesc.Format = DXGI_FORMAT_R32_TYPELESS;
+		vertexSRVDesc.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
+		vertexSRVDesc.Buffer.StructureByteStride = 0;
+		vertexSRVDesc.Buffer.FirstElement = 0;
+		vertexSRVDesc.Buffer.NumElements = static_cast<UINT>(Size) / sizeof(float); // byte address buffer
+		vertexSRVDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+
+		g_dx12_rhi->SRVCBVDescriptorHeapShaderVisible->AllocDescriptor(vb->CpuHandleSRV, vb->GpuHandleSRV);
+
+		Device->CreateShaderResourceView(vb->resource.Get(), &vertexSRVDesc, vb->CpuHandleSRV);
+
 		ThrowIfFailed(CommandList->Close());
 		ID3D12CommandList* ppCommandLists[] = { CommandList.Get() };
 		CommandQueue->ExecuteCommandLists(_countof(ppCommandLists), ppCommandLists);
@@ -389,12 +416,11 @@ void DumRHI_DX12::PresentBarrier(Texture* rt)
 	CommandList->ResourceBarrier(1, &BarrierDesc);
 }
 
-DumRHI_DX12::DumRHI_DX12(ID3D12Device5 * InDevice)
+DumRHI_DX12::DumRHI_DX12(ComPtr<ID3D12Device5> InDevice)
 	:Device(InDevice)
 {
 
-	ID3D12Device* Device = InDevice;
-	GFSDK_Aftermath_Result result = GFSDK_Aftermath_DX12_Initialize(GFSDK_Aftermath_Version::GFSDK_Aftermath_Version_API, GFSDK_Aftermath_FeatureFlags::GFSDK_Aftermath_FeatureFlags_Maximum, Device);
+	//GFSDK_Aftermath_Result result = GFSDK_Aftermath_DX12_Initialize(GFSDK_Aftermath_Version::GFSDK_Aftermath_Version_API, GFSDK_Aftermath_FeatureFlags::GFSDK_Aftermath_FeatureFlags_Maximum, Device.Get());
 
 	g_dx12_rhi = this;
 
@@ -429,7 +455,7 @@ DumRHI_DX12::DumRHI_DX12(ID3D12Device5 * InDevice)
 
 	ThrowIfFailed(Device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, FrameResourceVec[0].CommandAllocator.Get(), nullptr, IID_PPV_ARGS(&CommandList)));
 
-	GFSDK_Aftermath_Result ar = GFSDK_Aftermath_DX12_CreateContextHandle(CommandList.Get(), &AM_CL_Handle);
+	//GFSDK_Aftermath_Result ar = GFSDK_Aftermath_DX12_CreateContextHandle(CommandList.Get(), &AM_CL_Handle);
 
 	NAME_D3D12_OBJECT(CommandList);
 
@@ -1801,7 +1827,7 @@ std::shared_ptr<RTAS> DumRHI_DX12::CreateTLAS(vector<shared_ptr<RTAS>>& VecBotto
 		for (int i = 0; i < VecBottomLevelAS.size(); i++)
 		{
 			pInstanceDesc[i].InstanceID = i;                            // This value will be exposed to the shader via InstanceID()
-			pInstanceDesc[i].InstanceContributionToHitGroupIndex = 0;   // This is the offset inside the shader-table. We only have a single geometry, so the offset 0
+			pInstanceDesc[i].InstanceContributionToHitGroupIndex = i;   // This is the offset inside the shader-table. We only have a single geometry, so the offset 0
 			pInstanceDesc[i].Flags = D3D12_RAYTRACING_INSTANCE_FLAG_NONE;
 			glm::mat4 m; // Identity matrix
 			memcpy(pInstanceDesc[i].Transform, &m, sizeof(pInstanceDesc[i].Transform));
@@ -2149,7 +2175,7 @@ void RTPipelineStateObject::BindCBV(string shader, string name, UINT baseRegiste
 
 void RTPipelineStateObject::BeginShaderTable()
 {
-	HitProgramBinding.clear();
+	//HitProgramBinding.clear();
 }
 
 
@@ -2299,6 +2325,18 @@ void RTPipelineStateObject::SetSRV(string shader, string bindingName, D3D12_GPU_
 		HitProgramBinding[instanceIndex].HitGroupName = MapHitGroup[shader].name;
 		HitProgramBinding[instanceIndex].VecData.push_back(srvHandle);
 	}
+}
+
+void RTPipelineStateObject::AddHitProgramDescriptor(string shader, D3D12_GPU_DESCRIPTOR_HANDLE srvHandle, UINT instanceIndex)
+{
+	HitProgramBinding[instanceIndex].VecData.push_back(srvHandle);
+}
+
+void RTPipelineStateObject::ResetHitProgramBinding(string shader, UINT instanceIndex, UINT size)
+{
+	HitProgramBinding[instanceIndex].HitGroupName = MapHitGroup[shader].name;
+	HitProgramBinding[instanceIndex].VecData.clear();
+	HitProgramBinding[instanceIndex].VecData.reserve(size);
 }
 
 void RTPipelineStateObject::SetSampler(string shader, string bindingName, Sampler* sampler, INT instanceIndex /*= -1*/)
@@ -2537,6 +2575,8 @@ void RTPipelineStateObject::InitRS(string ShaderFile)
 	descRTSO.Type = D3D12_STATE_OBJECT_TYPE_RAYTRACING_PIPELINE;
 
 	HRESULT hr = g_dx12_rhi->Device->CreateStateObject(&descRTSO, IID_PPV_ARGS(&RTPipelineState));
+	NAME_D3D12_OBJECT(RTPipelineState);
+
 	if (FAILED(hr))
 	{
 
@@ -2609,6 +2649,7 @@ void RTPipelineStateObject::InitRS(string ShaderFile)
 
 
 		g_dx12_rhi->Device->CreateCommittedResource(&kUploadHeapProps, D3D12_HEAP_FLAG_NONE, &bufDesc, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&ShaderTable));
+		NAME_D3D12_OBJECT(ShaderTable);
 
 	}
 

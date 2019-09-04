@@ -18,6 +18,9 @@
 #include "DXCAPI/dxcapi.use.h"
 #include "Utils.h"
 
+#include <dxgidebug.h>
+
+
 #include "assimp/include/Importer.hpp"
 #include "assimp/include/scene.h"
 #include "assimp/include/postprocess.h"
@@ -302,13 +305,7 @@ dx12_framework::dx12_framework(UINT width, UINT height, std::wstring name) :
 
 dx12_framework::~dx12_framework()
 {
-	/*IDXGIDebug *pDebugInterface;
-	DXGIGetDebugInterface(__uuidof(IDXGIDebug), (void**)&pDebugInterface);
-
-
-	pDebugInterface->ReportLiveObjects(DXGI_DEBUG_D3D11, DXGI_DEBUG_RLO_ALL);*/
-
-
+	
 }
 
 void dx12_framework::OnInit()
@@ -360,27 +357,21 @@ void dx12_framework::LoadPipeline()
 	ComPtr<IDXGIFactory4> factory;
 	ThrowIfFailed(CreateDXGIFactory2(dxgiFactoryFlags, IID_PPV_ARGS(&factory)));
 
-	if (m_useWarpDevice)
+	ComPtr<IDXGIAdapter1> hardwareAdapter;
+	//GetHardwareAdapter(factory.Get(), &hardwareAdapter);
+	for (uint32_t i = 0; DXGI_ERROR_NOT_FOUND != factory->EnumAdapters1(i, &hardwareAdapter); i++)
 	{
-		ComPtr<IDXGIAdapter> warpAdapter;
-		ThrowIfFailed(factory->EnumWarpAdapter(IID_PPV_ARGS(&warpAdapter)));
+		DXGI_ADAPTER_DESC1 desc;
+		hardwareAdapter->GetDesc1(&desc);
 
-		ThrowIfFailed(D3D12CreateDevice(
-			warpAdapter.Get(),
-			D3D_FEATURE_LEVEL_11_0,
-			IID_PPV_ARGS(&m_device)
-			));
-	}
-	else
-	{
-		ComPtr<IDXGIAdapter1> hardwareAdapter;
-		GetHardwareAdapter(factory.Get(), &hardwareAdapter);
+		// Skip SW adapters
+		if (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) continue;
 
 		ThrowIfFailed(D3D12CreateDevice(
 			hardwareAdapter.Get(),
 			D3D_FEATURE_LEVEL_12_1,
 			IID_PPV_ARGS(&m_device)
-			));
+		));
 
 		D3D12_FEATURE_DATA_D3D12_OPTIONS5 features5;
 		HRESULT hr = m_device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS5, &features5, sizeof(D3D12_FEATURE_DATA_D3D12_OPTIONS5));
@@ -391,14 +382,14 @@ void dx12_framework::LoadPipeline()
 		}
 
 
-		ComPtr<IDXGIAdapter3> pDXGIAdapter3;
+		/*ComPtr<IDXGIAdapter3> pDXGIAdapter3;
 		hardwareAdapter->QueryInterface(IID_PPV_ARGS(&pDXGIAdapter3));
-		
+
 		ThrowIfFailed(pDXGIAdapter3->SetVideoMemoryReservation(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, 2213100441));
 
 
 		DXGI_QUERY_VIDEO_MEMORY_INFO LocalVideoMemoryInfo;
-		ThrowIfFailed(pDXGIAdapter3->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &LocalVideoMemoryInfo));
+		ThrowIfFailed(pDXGIAdapter3->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &LocalVideoMemoryInfo));*/
 
 		// break on error
 
@@ -408,24 +399,25 @@ void dx12_framework::LoadPipeline()
 			d3dInfoQueue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_CORRUPTION, true);
 			d3dInfoQueue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_ERROR, true);
 
-			D3D12_MESSAGE_ID blockedIds[] = { 
-			/*	D3D12_MESSAGE_ID_CLEARRENDERTARGETVIEW_MISMATCHINGCLEARVALUE, 
-				D3D12_MESSAGE_ID_CLEARDEPTHSTENCILVIEW_MISMATCHINGCLEARVALUE, */
-				D3D12_MESSAGE_ID_COPY_DESCRIPTORS_INVALID_RANGES };
+			D3D12_MESSAGE_ID blockedIds[] = {
+				/*	D3D12_MESSAGE_ID_CLEARRENDERTARGETVIEW_MISMATCHINGCLEARVALUE,
+					D3D12_MESSAGE_ID_CLEARDEPTHSTENCILVIEW_MISMATCHINGCLEARVALUE, */
+					D3D12_MESSAGE_ID_COPY_DESCRIPTORS_INVALID_RANGES };
 			D3D12_INFO_QUEUE_FILTER filter = {};
 			filter.DenyList.pIDList = blockedIds;
 			filter.DenyList.NumIDs = 1;
 			d3dInfoQueue->AddRetrievalFilterEntries(&filter);
 			d3dInfoQueue->AddStorageFilterEntries(&filter);
-		
+
 
 		}
+		break;
 	}
 
 
 	
 
-	dx12_rhi = std::make_unique<DumRHI_DX12>(m_device.Get());
+	dx12_rhi = std::make_unique<DumRHI_DX12>(m_device);
 
 	
 
@@ -459,6 +451,7 @@ void dx12_framework::LoadPipeline()
 	//dx12_rhi->m_frameIndex = m_swapChain->GetCurrentBackBufferIndex();
 
 	dx12_rhi->m_swapChain = m_swapChain;
+
 
 }
 
@@ -1437,24 +1430,24 @@ void dx12_framework::OnRender()
 	
 	// Record all the commands we need to render the scene into the command list.
 	Texture* backbuffer = framebuffers[dx12_rhi->CurrentFrameIndex].get();
-	NVAftermathMarker(dx12_rhi->AM_CL_Handle, "DrawMeshPass");
+	//NVAftermathMarker(dx12_rhi->AM_CL_Handle, "DrawMeshPass");
 
 	DrawMeshPass();
 
 
-	NVAftermathMarker(dx12_rhi->AM_CL_Handle, "RaytracePass");
+	//NVAftermathMarker(dx12_rhi->AM_CL_Handle, "RaytracePass");
 
 	RaytraceShadowPass();
 
 	RaytraceReflectionPass();
 	//ComputePass();
 
-	NVAftermathMarker(dx12_rhi->AM_CL_Handle, "LightingPass");
+	//NVAftermathMarker(dx12_rhi->AM_CL_Handle, "LightingPass");
 
 	LightingPass();
 
 
-	NVAftermathMarker(dx12_rhi->AM_CL_Handle, "CopyPass");
+	//NVAftermathMarker(dx12_rhi->AM_CL_Handle, "CopyPass");
 
 	D3D12_RESOURCE_BARRIER BarrierDesc = {};
 	BarrierDesc.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
@@ -1489,6 +1482,8 @@ void dx12_framework::OnRender()
 	dx12_rhi->CommandQueue->ExecuteCommandLists(_countof(ppCommandListsEnd), ppCommandListsEnd);
 
 	dx12_rhi->EndFrame();
+
+	
 }
 
 void dx12_framework::OnDestroy()
@@ -1496,8 +1491,13 @@ void dx12_framework::OnDestroy()
 	// Ensure that the GPU is no longer referencing resources that are about to be
 	// cleaned up by the destructor.
 	
+	dx12_rhi->WaitGPU();
 
-	
+	/*ComPtr<IDXGIDebug1> dxgiDebug;
+	if (SUCCEEDED(DXGIGetDebugInterface1(0, IID_PPV_ARGS(&dxgiDebug))))
+	{
+		dxgiDebug->ReportLiveObjects(DXGI_DEBUG_ALL, DXGI_DEBUG_RLO_ALL);
+	}*/
 }
 
 void dx12_framework::OnKeyDown(UINT8 key)
@@ -1866,7 +1866,7 @@ void dx12_framework::InitRaytracing()
 	PSO_RT_SHADOW = unique_ptr<RTPipelineStateObject>(new RTPipelineStateObject);
 	
 
-	PSO_RT_SHADOW->NumInstance = 1; // important for cbv allocation & shadertable size.
+	PSO_RT_SHADOW->NumInstance = meshes.size(); // important for cbv allocation & shadertable size.
 
 	// new interface
 	PSO_RT_SHADOW->AddHitGroup("HitGroup", "chs", "");
@@ -1881,7 +1881,7 @@ void dx12_framework::InitRaytracing()
 	PSO_RT_SHADOW->AddShader("miss", RTPipelineStateObject::MISS);
 	PSO_RT_SHADOW->AddShader("chs", RTPipelineStateObject::HIT);
 
-
+	
 
 	PSO_RT_SHADOW->MaxRecursion = 1;
 	PSO_RT_SHADOW->MaxAttributeSizeInBytes = sizeof(float) * 2;
@@ -1893,9 +1893,10 @@ void dx12_framework::InitRaytracing()
 	// create reflection rtpso
 
 	PSO_RT_REFLECTION = unique_ptr<RTPipelineStateObject>(new RTPipelineStateObject);
-	PSO_RT_REFLECTION->NumInstance = 1;
+	PSO_RT_REFLECTION->NumInstance = meshes.size();
 
 	PSO_RT_REFLECTION->AddHitGroup("HitGroup", "chs", "");
+
 	PSO_RT_REFLECTION->AddShader("rayGen", RTPipelineStateObject::RAYGEN);
 	PSO_RT_REFLECTION->BindUAV("rayGen", "gOutput", 0);
 	PSO_RT_REFLECTION->BindSRV("rayGen", "gRtScene", 0);
@@ -1905,7 +1906,12 @@ void dx12_framework::InitRaytracing()
 	PSO_RT_REFLECTION->BindSampler("rayGen", "samplerWrap", 0);
 
 	PSO_RT_REFLECTION->AddShader("miss", RTPipelineStateObject::MISS);
+
 	PSO_RT_REFLECTION->AddShader("chs", RTPipelineStateObject::HIT);
+	PSO_RT_REFLECTION->BindSRV("chs", "vertices", 3);
+	PSO_RT_REFLECTION->BindSRV("chs", "indices", 4);
+	PSO_RT_REFLECTION->BindSRV("chs", "AlbedoTex", 5);
+	PSO_RT_REFLECTION->BindSampler("chs", "samplerWrap", 0);
 
 
 	PSO_RT_REFLECTION->MaxRecursion = 1;
@@ -1939,6 +1945,11 @@ void dx12_framework::RaytraceShadowPass()
 
 	PSO_RT_SHADOW->BeginShaderTable();
 
+	for (int i = 0; i < meshes.size(); i++)
+	{
+		PSO_RT_SHADOW->SetHitProgram("chs", i);
+	}
+
 	PSO_RT_SHADOW->SetUAV("rayGen", "gOutput", ShadowBuffer->GpuHandleUAV);
 	PSO_RT_SHADOW->SetSRV("rayGen", "gRtScene", TLAS->GPUHandle);
 	PSO_RT_SHADOW->SetSRV("rayGen", "DepthTex", DepthBuffer->GpuHandleSRV);
@@ -1946,11 +1957,9 @@ void dx12_framework::RaytraceShadowPass()
 	PSO_RT_SHADOW->SetCBVValue("rayGen", "ViewParameter", &RTShadowViewParam, sizeof(RTShadowViewParamCB));
 	PSO_RT_SHADOW->SetSampler("rayGen", "samplerWrap", samplerWrap.get());
 
-	PSO_RT_SHADOW->SetHitProgram("chs", 0); // this pass use only 1 hit program
+	//PSO_RT_SHADOW->SetHitProgram("HitGroup", 0); // this pass use only 1 hit program
 
 	PSO_RT_SHADOW->EndShaderTable();
-
-	vector<UINT64> mem = ResourceInt64array(PSO_RT_SHADOW->ShaderTable, PSO_RT_SHADOW->ShaderTableSize);
 
 	PSO_RT_SHADOW->Apply(m_width, m_height);
 
@@ -1972,10 +1981,25 @@ void dx12_framework::RaytraceReflectionPass()
 	PSO_RT_REFLECTION->SetCBVValue("rayGen", "ViewParameter", &RTReflectionViewParam, sizeof(RTReflectionViewParamCB));
 	PSO_RT_REFLECTION->SetSampler("rayGen", "samplerWrap", samplerWrap.get());
 
-	PSO_RT_REFLECTION->SetHitProgram("chs", 0); // this pass use only 1 hit program
 
-//	for(int i=0;i<numMeshes;i++)
-//	PSO_RT->SetSRV("chs", "albedoTex", mesh->albedoTex, i);
+	for (int i = 0; i < meshes.size(); i++)
+	{
+		auto& mesh = meshes[i];
+
+		PSO_RT_REFLECTION->SetHitProgram("chs", i);
+
+		PSO_RT_REFLECTION->ResetHitProgramBinding("chs", i, 2);
+		Texture* diffuseTex = mesh->Draws[0].mat->Diffuse.get();
+		if (diffuseTex == nullptr)
+			diffuseTex = Materials[0]->Diffuse.get();
+		
+		PSO_RT_REFLECTION->AddHitProgramDescriptor("chs", mesh->Vb->GpuHandleSRV, i);
+		PSO_RT_REFLECTION->AddHitProgramDescriptor("chs", mesh->Ib->GpuHandleSRV, i);
+		PSO_RT_REFLECTION->AddHitProgramDescriptor("chs", diffuseTex->GpuHandleSRV, i);
+		PSO_RT_REFLECTION->AddHitProgramDescriptor("chs", samplerWrap->GpuHandle, i);
+
+	}
+
 
 
 	PSO_RT_REFLECTION->EndShaderTable();

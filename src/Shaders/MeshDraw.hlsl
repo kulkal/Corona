@@ -114,6 +114,7 @@ struct PS_OUTPUT
     float4 GeomNormal : SV_Target2;
 };
 
+
 PS_OUTPUT PSMain(PSInput input) : SV_TARGET
 {
 

@@ -285,6 +285,10 @@ public:
 	void EndShaderTable();
 	void SetUAV(string shader, string bindingName, D3D12_GPU_DESCRIPTOR_HANDLE uavHandle, INT instanceIndex = -1);
 	void SetSRV(string shader, string bindingName, D3D12_GPU_DESCRIPTOR_HANDLE srvHandle, INT instanceIndex = -1);
+
+	void AddHitProgramDescriptor(string shader, D3D12_GPU_DESCRIPTOR_HANDLE srvHandle, UINT instanceIndex);
+	void ResetHitProgramBinding(string shader, UINT instanceIndex, UINT size);
+
 	void SetSampler(string shader, string bindingName, Sampler* sampler, INT instanceIndex = -1);
 	void SetCBVValue(string shader, string bindingName, void* pData, INT size, INT instanceIndex = -1);
 	void SetHitProgram(string shader, UINT instanceIndex);
@@ -303,6 +307,9 @@ public:
 	int numIndices;
 	ComPtr<ID3D12Resource> resource;
 	D3D12_INDEX_BUFFER_VIEW view;
+
+	D3D12_CPU_DESCRIPTOR_HANDLE CpuHandleSRV;
+	D3D12_GPU_DESCRIPTOR_HANDLE GpuHandleSRV;
 };
 
 class VertexBuffer
@@ -311,6 +318,9 @@ public:
 	int numVertices;
 	ComPtr<ID3D12Resource> resource;
 	D3D12_VERTEX_BUFFER_VIEW view;
+
+	D3D12_CPU_DESCRIPTOR_HANDLE CpuHandleSRV;
+	D3D12_GPU_DESCRIPTOR_HANDLE GpuHandleSRV;
 };
 
 class Sampler
@@ -579,7 +589,7 @@ public:
 	
 
 
-	DumRHI_DX12(ID3D12Device5 * pDevice);
+	DumRHI_DX12(ComPtr<ID3D12Device5> pDevice);
 	virtual ~DumRHI_DX12();
 };
 

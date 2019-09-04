@@ -27,9 +27,14 @@
 ***************************************************************************/
 
 RWTexture2D<float4> gOutput : register(u0);
+
 RaytracingAccelerationStructure gRtScene : register(t0);
 Texture2D DepthTex : register(t1);
 Texture2D WorldNormalTex : register(t2);
+ByteAddressBuffer vertices : register(t3);
+ByteAddressBuffer indices : register(t4);
+Texture2D AlbedoTex : register(t5);
+
 cbuffer ViewParameter : register(b0)
 {
     float4x4 ViewMatrix;
@@ -38,6 +43,7 @@ cbuffer ViewParameter : register(b0)
     float4 ProjectionParams;
     float4 LightDir;
 };
+
 SamplerState sampleWrap : register(s0);
 
 
@@ -106,47 +112,7 @@ void rayGen
     d *= tan(0.8 / 2);
     float aspectRatio = dims.x / dims.y;
 
-#define DEPTH 0
-#define SIMPLE 0
-#define SHADOW 1
 
-#if SIMPLE 
-    RayDesc ray;
-    ray.Origin = float3(0, 0, -2);
-    ray.Direction = normalize(float3(d.x * aspectRatio, -d.y, 1));
-
-    ray.TMin = 0;
-    ray.TMax = 100000;
-
-    RayPayload payload;
-    //TraceRay(gRtScene, 0 /*rayFlags*/, 0xFF, 0 /* ray index*/, 0, 0, ray, payload);
-    float dd = payload.distance / 1000.0f;
-    gOutput[launchIndex.xy] = float4(dd, dd, dd, 1);
-    float sx = sin(crd.x);
-    float sy = sin(crd.y);
-    float DeviceDepth = DepthTex.Load(int3(launchIndex.xy, 0), int2(0, 0)).x;
-    float3 WorldNormal = WorldNormalTex.Load(int3(launchIndex.xy, 0), int2(0, 0)).xyz;
-    gOutput[launchIndex.xy] = float4(WorldNormal, 1);
-    float LinearDepth = GetLinearDepth(DeviceDepth, ProjectionParams.x, ProjectionParams.y) * ProjectionParams.z /1000.0f;
-
-    gOutput[launchIndex.xy] = float4(LinearDepth, LinearDepth, LinearDepth, 1);
-
-
-#elif DEPTH
-	RayDesc ray;
-	ray.Origin = mul(float4(0, 0, 0, 1), InvViewMatrix).xyz;
-	ray.Direction = mul(normalize(float3(d.x * aspectRatio, -d.y, -1)), InvViewMatrix);
-
-	ray.TMin = 0;
-	ray.TMax = 100000;
-
-	RayPayload payload;
-    TraceRay(gRtScene, 0 /*rayFlags*/, 0xFF, 0 /* ray index*/, 0, 0, ray, payload);
-	float dd = payload.distance / 1000.0f;
-    gOutput[launchIndex.xy] = float4(dd, dd, dd, 1);
-    //gOutput[launchIndex.xy] = float4(1, 0, 0, 1);
-
-#elif SHADOW
 	float2 UV = crd / dims;
 	float DeviceDepth = DepthTex.SampleLevel(sampleWrap, UV, 0).x;
 
@@ -166,11 +132,11 @@ void rayGen
 
   
 
-
+    float3 ViewDir = mul(normalize(float3(d.x * aspectRatio, -d.y, -1)), InvViewMatrix);
 
 	RayDesc ray;
 	ray.Origin = WorldPos + WorldNormal * 0.5; //    mul(float4(0, 0, 0, 1), InvViewMatrix).xyz;
-	ray.Direction = LightDir;
+	ray.Direction = reflect(ViewDir, WorldNormal);
 
 	ray.TMin = 0;
 	ray.TMax = 100000;
@@ -178,40 +144,118 @@ void rayGen
 	RayPayload payload;
 	TraceRay(gRtScene, 0 /*rayFlags*/, 0xFF, 0 /* ray index*/, 0, 0, ray, payload);
 
-	if (payload.distance == 0)
-	{
-		gOutput[launchIndex.xy] = float4(1, 1, 1, 1);
-	}
-	else
-	{
-		gOutput[launchIndex.xy] = float4(0.1, 0.1, 0.1, 1);
-	}
-#endif
+	gOutput[launchIndex.xy] = float4(payload.color, 1);
 }
 
-[shader("miss")]
 
-    void miss
-    (inout
-    RayPayload payload)
+
+[shader("miss")]
+void miss(inout RayPayload payload)
 {
     //payload.color = float3(0.4, 0.6, 0.2);
     payload.distance = 0;
 }
 
-[shader("closesthit")]
 
-    void chs
-    (inout
-    RayPayload payload, in BuiltInTriangleIntersectionAttributes
-    attribs)
+
+struct Vertex
 {
-    //float3 barycentrics = float3(1.0 - attribs.barycentrics.x - attribs.barycentrics.y, attribs.barycentrics.x, attribs.barycentrics.y);
+    float3 position;
+    float3 normal;
+    float2 uv;
+    float3 tangent;
+};
 
-    //const float3 A = float3(1, 0, 0);
-    //const float3 B = float3(0, 1, 0);
-    //const float3 C = float3(0, 0, 1);
+uint3 Load3x16BitIndices(uint offsetBytes)
+{
+    uint3 index;
 
-    //payload.color = A * barycentrics.x + B * barycentrics.y + C * barycentrics.z;
+    // ByteAdressBuffer loads must be aligned at a 4 byte boundary.
+    // Since we need to read three 16 bit indices: { 0, 1, 2 } 
+    // aligned at a 4 byte boundary as: { 0 1 } { 2 0 } { 1 2 } { 0 1 } ...
+    // we will load 8 bytes (~ 4 indices { a b | c d }) to handle two possible index triplet layouts,
+    // based on first index's offsetBytes being aligned at the 4 byte boundary or not:
+    //  Aligned:     { 0 1 | 2 - }
+    //  Not aligned: { - 0 | 1 2 }
+    const uint dwordAlignedOffset = offsetBytes & ~3;    
+    const uint2 four16BitIndices = indices.Load2(dwordAlignedOffset);
+ 
+    // Aligned: { 0 1 | 2 - } => retrieve first three 16bit indices
+    if (dwordAlignedOffset == offsetBytes)
+    {
+        index.x = four16BitIndices.x & 0xffff;
+        index.y = (four16BitIndices.x >> 16) & 0xffff;
+        index.z = four16BitIndices.y & 0xffff;
+    }
+    else // Not aligned: { - 0 | 1 2 } => retrieve last three 16bit indices
+    {
+        index.x = (four16BitIndices.x >> 16) & 0xffff;
+        index.y = four16BitIndices.y & 0xffff;
+        index.z = (four16BitIndices.y >> 16) & 0xffff;
+    }
+
+    return index;
+}
+
+uint3 GetIndices(uint triangleIndex)
+{
+    uint baseIndex = (triangleIndex * 3 * 2) ;
+    uint3 index;
+
+    // ByteAdressBuffer loads must be aligned at a 4 byte boundary.
+    // Since we need to read three 16 bit indices: { 0, 1, 2 } 
+    // aligned at a 4 byte boundary as: { 0 1 } { 2 0 } { 1 2 } { 0 1 } ...
+    // we will load 8 bytes (~ 4 indices { a b | c d }) to handle two possible index triplet layouts,
+    // based on first index's offsetBytes being aligned at the 4 byte boundary or not:
+    //  Aligned:     { 0 1 | 2 - }
+    //  Not aligned: { - 0 | 1 2 }
+    const uint dwordAlignedOffset = baseIndex & ~3;    
+    const uint2 four16BitIndices = indices.Load2(dwordAlignedOffset);
+ 
+    // Aligned: { 0 1 | 2 - } => retrieve first three 16bit indices
+    if (dwordAlignedOffset == baseIndex)
+    {
+        index.x = four16BitIndices.x & 0xffff;
+        index.y = (four16BitIndices.x >> 16) & 0xffff;
+        index.z = four16BitIndices.y & 0xffff;
+    }
+    else // Not aligned: { - 0 | 1 2 } => retrieve last three 16bit indices
+    {
+        index.x = (four16BitIndices.x >> 16) & 0xffff;
+        index.y = four16BitIndices.y & 0xffff;
+        index.z = (four16BitIndices.y >> 16) & 0xffff;
+    }
+
+    return index;
+}
+
+Vertex GetVertexAttributes(uint triangleIndex, float3 barycentrics)
+{
+    uint3 index = GetIndices(triangleIndex);
+    Vertex v;
+    v.position = float3(0, 0, 0);
+    v.uv = float2(0, 0);
+
+    for (uint i = 0; i < 3; i++)
+    {
+        int address = (index[i] * 11) * 4;
+        v.position += asfloat(vertices.Load3(address)) * barycentrics[i];
+        address += (3 * 8);
+        v.uv += asfloat(vertices.Load2(address)) * barycentrics[i];
+    }
+
+    return v;
+}
+
+
+
+[shader("closesthit")]
+void chs(inout RayPayload payload, in BuiltInTriangleIntersectionAttributes attribs)
+{
+    float3 barycentrics = float3(1.0 - attribs.barycentrics.x - attribs.barycentrics.y, attribs.barycentrics.x, attribs.barycentrics.y);
+    uint triangleIndex = PrimitiveIndex();
+    Vertex vertex = GetVertexAttributes(triangleIndex, barycentrics);
+
+    payload.color = AlbedoTex.SampleLevel(sampleWrap, vertex.uv, 0).xyz;
     payload.distance = RayTCurrent();
 }
