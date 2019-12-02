@@ -139,7 +139,6 @@ public:
 
 	void SetSampler(string name, Sampler* sampler, ID3D12GraphicsCommandList* CommandList, ThreadDescriptorHeapPool* DHPool = nullptr);
 	
-	void SetGlobalConstantBuffer(string name, GlobalConstantBuffer* cb, ID3D12GraphicsCommandList* CommandList, ThreadDescriptorHeapPool* DHPool);
 	void SetConstantValue(string name, void* pData, ID3D12GraphicsCommandList* CommandList, ThreadDescriptorHeapPool* DHPool);
 	void SetRootConstant(string, UINT value, ID3D12GraphicsCommandList* CommandList);
 
@@ -390,6 +389,7 @@ public:
 	void UploadSRCData(D3D12_SUBRESOURCE_DATA* SrcData);
 };
 
+
 class DescriptorHeap
 {
 public:
@@ -411,8 +411,33 @@ public:
 
 	void AllocDescriptor(D3D12_CPU_DESCRIPTOR_HANDLE& cpuHandle, D3D12_GPU_DESCRIPTOR_HANDLE& gpuHandle);
 
-
+	void AllocDescriptors(D3D12_CPU_DESCRIPTOR_HANDLE& cpuHandle, D3D12_GPU_DESCRIPTOR_HANDLE& gpuHandle, UINT num);
 };
+
+// allocate region of descriptors from descriptor heap. (numDescriptors * numFrame)
+// and 
+class DescriptorHeapRing
+{
+public:
+	DescriptorHeap* DHeap = nullptr;
+
+	D3D12_CPU_DESCRIPTOR_HANDLE CPUHeapStart;
+	D3D12_GPU_DESCRIPTOR_HANDLE GPUHeapStart;
+	UINT NumFrame = 0;
+	UINT CurrentFrame = 0;
+	UINT NumDescriptors = 0;
+	UINT NumAllocated = 0;
+	UINT DescriptorSize;
+
+public:
+	void Init(DescriptorHeap* InDHHeap, UINT InNumDescriptors, UINT InNumFrame);
+	void AllocDescriptor(D3D12_CPU_DESCRIPTOR_HANDLE& cpuHandle, D3D12_GPU_DESCRIPTOR_HANDLE& gpuHandle);
+	void Advance();
+
+	DescriptorHeapRing(){}
+	~DescriptorHeapRing() {}
+};
+
 
 class ThreadDescriptorHeapPool
 {
@@ -528,15 +553,14 @@ public:
 	std::unique_ptr<DescriptorHeap> RTVDescriptorHeap;
 	std::unique_ptr<DescriptorHeap> DSVDescriptorHeap;
 	std::unique_ptr<DescriptorHeap> SamplerDescriptorHeapShaderVisible;
-
 	std::unique_ptr<DescriptorHeap> SRVCBVDescriptorHeapShaderVisible;
+	std::unique_ptr<DescriptorHeap> SRVCBVDescriptorHeapStorage;
+
+	std::unique_ptr<DescriptorHeapRing> GlobalDHRing; // resources that changes every frame.
+	std::unique_ptr<DescriptorHeapRing> TextureDHRing;
+	std::unique_ptr<DescriptorHeapRing> GeomtryDHRing;
 
 	set<Texture*> FrameTextureSet;
-
-
-	std::unique_ptr<DescriptorHeap> SRVCBVDescriptorHeapStorage;
-	std::unique_ptr<DescriptorHeap> SamplerDescriptorHeapStorage;
-
 
 
 
@@ -567,7 +591,6 @@ public:
 	void WaitGPU();
 
 	// pupulate unique set of srv descriptors to shader visible heap.
-	void UploadeFrameTexture2ShaderVisibleHeap();
 
 	
 	shared_ptr<Texture> CreateTexture2DFromResource(ComPtr<ID3D12Resource> InResource);

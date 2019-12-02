@@ -103,6 +103,9 @@ private:
 
 	shared_ptr<Texture> DepthBuffer;
 
+	shared_ptr<Texture> FakeDepthBuffer;
+
+
 	std::vector<std::shared_ptr<Texture>> framebuffers;
 
 

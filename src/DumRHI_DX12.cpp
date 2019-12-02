@@ -70,18 +70,27 @@ void DescriptorHeap::AllocDescriptor(D3D12_CPU_DESCRIPTOR_HANDLE& cpuHandle, D3D
 	if (DescriptorIndex >= MaxNumDescriptors)
 		DescriptorIndex = 0;
 
-	cpuHandle.ptr = CPUHeapStart /*DH->GetCPUDescriptorHandleForHeapStart().ptr */+ DescriptorIndex * DescriptorSize;// g_dx12_rhi->Device->GetDescriptorHandleIncrementSize(HeapDesc.Type);
+	cpuHandle.ptr = CPUHeapStart + DescriptorIndex * DescriptorSize ;
 
-	gpuHandle.ptr = GPUHeapStart /*DH->GetGPUDescriptorHandleForHeapStart().ptr */+ DescriptorIndex * DescriptorSize;// g_dx12_rhi->Device->GetDescriptorHandleIncrementSize(HeapDesc.Type);
+	gpuHandle.ptr = GPUHeapStart + DescriptorIndex * DescriptorSize;
 
 	DescriptorIndex++;
 }
 
 
 
+void DescriptorHeap::AllocDescriptors(D3D12_CPU_DESCRIPTOR_HANDLE& cpuHandle, D3D12_GPU_DESCRIPTOR_HANDLE& gpuHandle, UINT num)
+{
+	cpuHandle.ptr = CPUHeapStart + DescriptorIndex * DescriptorSize * num;
+
+	gpuHandle.ptr = GPUHeapStart + DescriptorIndex * DescriptorSize * num;
+
+	DescriptorIndex += num;
+}
+
 void DumRHI_DX12::BeginFrame()
 {
-	SRVCBVDescriptorHeapShaderVisible->DescriptorIndex = 0;
+	//SRVCBVDescriptorHeapShaderVisible->DescriptorIndex = 0;
 	const UINT64 lastCompletedFence = m_fence->GetCompletedValue();
 
 	CurrentFrameIndex = m_swapChain->GetCurrentBackBufferIndex();
@@ -141,24 +150,6 @@ void DumRHI_DX12::WaitGPU()
 	WaitForSingleObject(m_fenceEvent, INFINITE);
 
 }
-
-void DumRHI_DX12::UploadeFrameTexture2ShaderVisibleHeap()
-{
-	/*std::set<Texture*>::iterator it;
-	for (it = FrameTextureSet.begin(); it != FrameTextureSet.end(); ++it)
-	{
-		Texture* texture = *it;
-
-		D3D12_CPU_DESCRIPTOR_HANDLE cpuHandleShaderVisible;
-		g_dx12_rhi->SRVCBVDescriptorHeapShaderVisible->AllocDescriptor(cpuHandleShaderVisible, texture->GpuHandleSRV);
-
-		g_dx12_rhi->Device->CopyDescriptorsSimple(1, cpuHandleShaderVisible, texture->CpuHandleSRV, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-	}*/
-}
-
-
-
-
 
 shared_ptr<ConstantBuffer> DumRHI_DX12::CreateConstantBuffer(int Size, UINT NumView)
 
@@ -542,18 +533,14 @@ DumRHI_DX12::DumRHI_DX12(ComPtr<ID3D12Device5> InDevice)
 		NAME_D3D12_OBJECT(SamplerDescriptorHeapShaderVisible->DH);
 	}
 	
-	{
-		SamplerDescriptorHeapStorage = std::make_unique<DescriptorHeap>();
+	GlobalDHRing = std::make_unique<DescriptorHeapRing>();
+	GlobalDHRing->Init(SRVCBVDescriptorHeapShaderVisible.get(), 1000, NumFrame);
 
-		D3D12_DESCRIPTOR_HEAP_DESC HeapDesc = {};
-		HeapDesc.NumDescriptors = 1024*8;
-		HeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER;
-		HeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
-		SamplerDescriptorHeapStorage->Init(HeapDesc);
+	TextureDHRing = std::make_unique<DescriptorHeapRing>();
+	TextureDHRing->Init(SRVCBVDescriptorHeapShaderVisible.get(), 1000, NumFrame);
 
-		NAME_D3D12_OBJECT(SamplerDescriptorHeapStorage->DH);
-
-	}
+	GeomtryDHRing = std::make_unique<DescriptorHeapRing>();
+	GeomtryDHRing->Init(SRVCBVDescriptorHeapShaderVisible.get(), 1000, NumFrame);
 	
 	m_fenceValue = 0;
 	ThrowIfFailed(g_dx12_rhi->Device->CreateFence(m_fenceValue, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&m_fence)));
@@ -727,48 +714,6 @@ void Shader::SetSampler(string name, Sampler* sampler, ID3D12GraphicsCommandList
 
 	CommandList->SetGraphicsRootDescriptorTable(samplerBinding[name].rootParamIndex, sampler->GpuHandle);
 
-}
-
-void Shader::SetGlobalConstantBuffer(string name, GlobalConstantBuffer* gcb, ID3D12GraphicsCommandList* CommandList, ThreadDescriptorHeapPool* DHPool)
-{
-	//BindingData& binding = constantBufferBinding[name];
-
-	////binding.cbs = gcb->cbs;
-
-	//ConstantBuffer* cb = nullptr;
-
-	//D3D12_CPU_DESCRIPTOR_HANDLE ShaderVisibleCPUHandle;
-	//D3D12_GPU_DESCRIPTOR_HANDLE ShaderVisibleGpuHandle;
-
-	//if (gcb->cbs.size() != 0)
-	//	cb = gcb->cbs[g_dx12_rhi->CurrentFrameIndex].get();
-
-	//{
-	//	UINT DrawCallIndex;
-	//	
-	//	DrawCallIndex = 0;
-
-	//	if (cb->CpuHandleVec.size() == 1) // this is global constant buffer(can be same for all draw)
-	//	{
-	//		//if (!cb->isPopulatedThisFrame)
-	//		{
-	//			D3D12_CPU_DESCRIPTOR_HANDLE NonShadervisibleCPUHandle = cb->CpuHandleVec[DrawCallIndex];
-
-	//			//g_dx12_rhi->SRVCBVDescriptorHeapShaderVisible->AllocDescriptor(ShaderVisibleCPUHandle, cb->GpuHandle);
-	//			if (DHPool)
-	//				DHPool->AllocDescriptor(ShaderVisibleCPUHandle, ShaderVisibleGpuHandle);
-	//			else
-	//				g_dx12_rhi->SRVCBVDescriptorHeapShaderVisible->AllocDescriptor(ShaderVisibleCPUHandle, ShaderVisibleGpuHandle);
-
-
-	//			g_dx12_rhi->Device->CopyDescriptorsSimple(1, ShaderVisibleCPUHandle, NonShadervisibleCPUHandle, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-	//			//cb->isPopulatedThisFrame = true;
-	//		}
-	//	}
-	//
-	//}
-
-	//CommandList->SetGraphicsRootDescriptorTable(binding.rootParamIndex, ShaderVisibleGpuHandle);
 }
 
 void Shader::SetConstantValue(string name, void* pData, ID3D12GraphicsCommandList* CommandList, ThreadDescriptorHeapPool* DHPool)
@@ -1003,41 +948,7 @@ void PipelineStateObject::ApplyGlobal(ID3D12GraphicsCommandList* CommandList)
 	CommandList->SetGraphicsRootSignature(RS.Get());
 	CommandList->SetPipelineState(PSO.Get());
 
-	//for (auto&bd : ps->samplerBinding)
-	//{
-	//	D3D12_CPU_DESCRIPTOR_HANDLE ShaderVisibleCPUHandle;
-	//	D3D12_GPU_DESCRIPTOR_HANDLE ShaderVisibleGpuHandle;
-
-	//	
-	//	g_dx12_rhi->SamplerDescriptorHeapShaderVisible->AllocDescriptor(ShaderVisibleCPUHandle, ShaderVisibleGpuHandle);
-
-	//	g_dx12_rhi->Device->CopyDescriptorsSimple(1, ShaderVisibleCPUHandle, bd.second.sampler->CpuHandle, D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
-	//	CommandList->SetGraphicsRootDescriptorTable(bd.second.rootParamIndex, ShaderVisibleGpuHandle);
-	//}
-
-	//for (auto& bd : ps->rootBinding)
-	//{
-	//	CommandList->SetGraphicsRoot32BitConstant(bd.second.rootParamIndex, bd.second.rootConst, 0);
-	//}
-
-
-	//for (auto& bd : ps->textureBinding)
-	//{
-	//	Texture* tex = bd.second.texture;
-	//	D3D12_CPU_DESCRIPTOR_HANDLE ShaderVisibleCPUHandle;
-	//	g_dx12_rhi->SRVCBVDescriptorHeapShaderVisible->AllocDescriptor(ShaderVisibleCPUHandle, tex->GpuHandleSRV);
-	//	g_dx12_rhi->Device->CopyDescriptorsSimple(1, ShaderVisibleCPUHandle, tex->CpuHandleSRV, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-	//	CommandList->SetGraphicsRootDescriptorTable(bd.second.rootParamIndex, bd.second.texture->GpuHandleSRV);
-	//}
-
-	//for (auto& bd : ps->uavBinding)
-	//{
-	//	Texture* tex = bd.second.texture;
-	//	D3D12_CPU_DESCRIPTOR_HANDLE ShaderVisibleCPUHandle;
-	//	g_dx12_rhi->SRVCBVDescriptorHeapShaderVisible->AllocDescriptor(ShaderVisibleCPUHandle, tex->GpuHandleUAV);
-	//	g_dx12_rhi->Device->CopyDescriptorsSimple(1, ShaderVisibleCPUHandle, tex->CpuHandleUAV, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-	//	CommandList->SetGraphicsRootDescriptorTable(bd.second.rootParamIndex, tex->GpuHandleUAV);
-	//}
+	
 }
 
 void PipelineStateObject::ApplyCS(ID3D12GraphicsCommandList* CommandList)
@@ -1045,34 +956,7 @@ void PipelineStateObject::ApplyCS(ID3D12GraphicsCommandList* CommandList)
 	CommandList->SetComputeRootSignature(RS.Get());
 	CommandList->SetPipelineState(PSO.Get());
 
-	/*for (auto&bd : cs->samplerBinding)
-	{
-		CommandList->SetComputeRootDescriptorTable(bd.second.rootParamIndex, bd.second.sampler->GpuHandle);
-	}
-
-	for (auto& bd : cs->rootBinding)
-	{
-		CommandList->SetComputeRoot32BitConstant(bd.second.rootParamIndex, bd.second.rootConst, 0);
-	}
-
-
-	for (auto& bd : cs->textureBinding)
-	{
-		Texture* tex = bd.second.texture;
-		D3D12_CPU_DESCRIPTOR_HANDLE ShaderVisibleCPUHandle;
-		g_dx12_rhi->SRVCBVDescriptorHeapShaderVisible->AllocDescriptor(ShaderVisibleCPUHandle, tex->GpuHandleSRV);
-		g_dx12_rhi->Device->CopyDescriptorsSimple(1, ShaderVisibleCPUHandle, tex->CpuHandleSRV, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-		CommandList->SetComputeRootDescriptorTable(bd.second.rootParamIndex, bd.second.texture->GpuHandleSRV);
-	}
-
-	for (auto& bd : cs->uavBinding)
-	{
-		Texture* tex = bd.second.texture;
-		D3D12_CPU_DESCRIPTOR_HANDLE ShaderVisibleCPUHandle;
-		g_dx12_rhi->SRVCBVDescriptorHeapShaderVisible->AllocDescriptor(ShaderVisibleCPUHandle, tex->GpuHandleUAV);
-		g_dx12_rhi->Device->CopyDescriptorsSimple(1, ShaderVisibleCPUHandle, tex->CpuHandleUAV, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-		CommandList->SetComputeRootDescriptorTable(bd.second.rootParamIndex, tex->GpuHandleUAV);
-	}*/
+	
 }
 
 void PipelineStateObject::ApplyGraphicsRSPSO(ID3D12GraphicsCommandList* CommandList)
@@ -2687,3 +2571,20 @@ void RTPipelineStateObject::Apply(UINT width, UINT height)
 	g_dx12_rhi->CommandList->DispatchRays(&raytraceDesc);
 }
 
+void DescriptorHeapRing::Init(DescriptorHeap* InDHHeap, UINT InNumDescriptors, UINT InNumFrame)
+{
+	DHeap = InDHHeap;
+	NumDescriptors = InNumDescriptors;
+	NumFrame = InNumFrame;
+	DescriptorSize = DHeap->DescriptorSize;
+
+	DHeap->AllocDescriptors(CPUHeapStart, GPUHeapStart, NumDescriptors * NumFrame);
+}
+
+void DescriptorHeapRing::AllocDescriptor(D3D12_CPU_DESCRIPTOR_HANDLE& cpuHandle, D3D12_GPU_DESCRIPTOR_HANDLE& gpuHandle)
+{
+	cpuHandle.ptr = CPUHeapStart.ptr + NumAllocated * DescriptorSize * CurrentFrame ;
+	gpuHandle.ptr = GPUHeapStart.ptr + NumAllocated * DescriptorSize * CurrentFrame;
+
+	NumAllocated++;
+}

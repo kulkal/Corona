@@ -541,6 +541,10 @@ void dx12_framework::LoadAssets()
 	DepthBuffer->MakeSRV(true);
 
 
+	//FakeDepthBuffer = dx12_rhi->CreateTexture2D(DXGI_FORMAT_R32_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS | D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, m_width, m_height, 1);
+	//FakeDepthBuffer->MakeUAV();
+	////FakeDepthBuffer->MakeSRV();
+	//FakeDepthBuffer->MakeDSV();
 
 	// load indoor scene assets
 	//LoadMesh();
@@ -1577,8 +1581,8 @@ void dx12_framework::DrawMeshPass()
 	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(GeomNormalBuffer->resource.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET));
 
 
-	const D3D12_CPU_DESCRIPTOR_HANDLE Rendertargets[] = { AlbedoBuffer->CpuHandleRTV, NormalBuffer->CpuHandleRTV, GeomNormalBuffer->CpuHandleRTV };
-	dx12_rhi->CommandList->OMSetRenderTargets(3, Rendertargets, FALSE, &DepthBuffer->CpuHandleDSV);
+	/*const D3D12_CPU_DESCRIPTOR_HANDLE Rendertargets[] = { AlbedoBuffer->CpuHandleRTV, NormalBuffer->CpuHandleRTV, GeomNormalBuffer->CpuHandleRTV };
+	dx12_rhi->CommandList->OMSetRenderTargets(3, Rendertargets, FALSE, &DepthBuffer->CpuHandleDSV);*/
 
 
 	//dx12_rhi->CommandList->OMSetRenderTargets(1, &backbuffer->CpuHandleRTV, FALSE, &dx12_rhi->depthTexture->CpuHandleDSV);
@@ -1599,12 +1603,13 @@ void dx12_framework::DrawMeshPass()
 	ID3D12DescriptorHeap* ppHeaps[] = { dx12_rhi->SRVCBVDescriptorHeapShaderVisible->DH.Get(), dx12_rhi->SamplerDescriptorHeapShaderVisible->DH.Get() };
 	dx12_rhi->CommandList->SetDescriptorHeaps(_countof(ppHeaps), ppHeaps);
 
-	dx12_rhi->UploadeFrameTexture2ShaderVisibleHeap();
 
 	//PIXBeginEvent(dx12_rhi->CommandList.Get(), 0, L"Draw Mesh");
 	if (!bMultiThreadRendering)
 	{
+		//const D3D12_CPU_DESCRIPTOR_HANDLE Rendertargets[] = { AlbedoBuffer->CpuHandleRTV, NormalBuffer->CpuHandleRTV, GeomNormalBuffer->CpuHandleRTV };
 		const D3D12_CPU_DESCRIPTOR_HANDLE Rendertargets[] = { AlbedoBuffer->CpuHandleRTV, NormalBuffer->CpuHandleRTV, GeomNormalBuffer->CpuHandleRTV };
+
 
 		dx12_rhi->CommandList->OMSetRenderTargets(3, Rendertargets, FALSE, &DepthBuffer->CpuHandleDSV);
 

@@ -12,6 +12,8 @@
 Texture2D AlbedoTex : register(t0);
 Texture2D NormalTex : register(t1);
 Texture2D ShadowTex : register(t2);
+Texture2D SpecularTex : register(t3);
+
 
 SamplerState sampleWrap : register(s0);
 
