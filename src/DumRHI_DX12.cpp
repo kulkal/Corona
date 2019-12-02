@@ -1021,26 +1021,45 @@ void Texture::MakeUAV()
 	g_dx12_rhi->Device->CreateUnorderedAccessView(resource.Get(), nullptr, &uavDesc, CpuHandleUAV);
 }
 
-void Texture::MakeSRV(bool isDepth)
+void Texture::MakeDepthSRV()
 {
-	//g_dx12_rhi->SRVCBVDescriptorHeapStorage->AllocDescriptor(CpuHandleSRV, GpuHandleSRV);
-	//g_dx12_rhi->SRVCBVDescriptorHeapShaderVisible->AllocDescriptor(CpuHandleSRV, GpuHandleSRV);
 	g_dx12_rhi->GlobalDHRing->AllocDescriptor(CpuHandleSRV, GpuHandleSRV);
-
 
 	D3D12_SHADER_RESOURCE_VIEW_DESC SrvDesc = {};
 	SrvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-	if (isDepth)
-		SrvDesc.Format = DXGI_FORMAT_R32_FLOAT;
-	else
-		//SrvDesc.Format = Format;
-		SrvDesc.Format = textureDesc.Format;
-
+	SrvDesc.Format = DXGI_FORMAT_R32_FLOAT;
 
 	SrvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
 	SrvDesc.Texture2D.MipLevels = textureDesc.MipLevels;
 	g_dx12_rhi->Device->CreateShaderResourceView(resource.Get(), &SrvDesc, CpuHandleSRV);
 }
+
+void Texture::MakeDynamicSRV()
+{
+	g_dx12_rhi->GlobalDHRing->AllocDescriptor(CpuHandleSRV, GpuHandleSRV);
+
+	D3D12_SHADER_RESOURCE_VIEW_DESC SrvDesc = {};
+	SrvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+	SrvDesc.Format = textureDesc.Format;
+
+	SrvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+	SrvDesc.Texture2D.MipLevels = textureDesc.MipLevels;
+	g_dx12_rhi->Device->CreateShaderResourceView(resource.Get(), &SrvDesc, CpuHandleSRV);
+}
+
+void Texture::MakeStaticSRV()
+{
+	g_dx12_rhi->TextureDHRing->AllocDescriptor(CpuHandleSRV, GpuHandleSRV);
+
+	D3D12_SHADER_RESOURCE_VIEW_DESC SrvDesc = {};
+	SrvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+	SrvDesc.Format = textureDesc.Format;
+
+	SrvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+	SrvDesc.Texture2D.MipLevels = textureDesc.MipLevels;
+	g_dx12_rhi->Device->CreateShaderResourceView(resource.Get(), &SrvDesc, CpuHandleSRV);
+}
+
 
 void Texture::MakeRTV()
 {
@@ -1397,7 +1416,7 @@ std::shared_ptr<Texture> DumRHI_DX12::CreateTextureFromFile(wstring fileName, bo
 
 	g_dx12_rhi->WaitGPU();
 
-	tex->MakeSRV();
+	tex->MakeStaticSRV();
 
 	return shared_ptr<Texture>(tex);
 }

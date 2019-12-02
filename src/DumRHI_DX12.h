@@ -73,8 +73,7 @@ public:
 
 	void BindUAV(string name, int baseRegister);
 	void BindTexture(string name, int baseRegister, int num);
-	void BindConstantBuffer(string name, int baseRegister, int size, UINT numMaxDrawCall = 1);
-	void BindGlobalConstantBuffer(string name, int baseRegister);
+	//void BindConstantBuffer(string name, int baseRegister, int size, UINT numMaxDrawCall = 1);
 	void BindRootConstant(string name, int baseRegister);
 	void BindSampler(string name, int baseRegister);
 
@@ -381,7 +380,10 @@ public:
 
 	void VisibleThisFrame();
 	void MakeUAV();
-	void MakeSRV(bool isDepth = false);
+	void MakeDepthSRV();
+	void MakeDynamicSRV();
+	void MakeStaticSRV();
+
 	void MakeRTV();
 	void MakeDSV();
 

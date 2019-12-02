@@ -481,7 +481,7 @@ void dx12_framework::LoadAssets()
 		D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
 		D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, m_width, m_height, 1);
 	ColorBuffer->MakeRTV();
-	ColorBuffer->MakeSRV();
+	ColorBuffer->MakeDynamicSRV();
 
 	NAME_D3D12_OBJECT(ColorBuffer->resource);
 
@@ -490,7 +490,7 @@ void dx12_framework::LoadAssets()
 		D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
 		D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, m_width, m_height, 1);
 	NormalBuffer->MakeRTV();
-	NormalBuffer->MakeSRV();
+	NormalBuffer->MakeDynamicSRV();
 
 	NAME_D3D12_OBJECT(NormalBuffer->resource);
 
@@ -499,7 +499,7 @@ void dx12_framework::LoadAssets()
 		D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
 		D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, m_width, m_height, 1);
 	GeomNormalBuffer->MakeRTV();
-	GeomNormalBuffer->MakeSRV();
+	GeomNormalBuffer->MakeDynamicSRV();
 
 	NAME_D3D12_OBJECT(GeomNormalBuffer->resource);
 
@@ -510,7 +510,7 @@ void dx12_framework::LoadAssets()
 	ShadowBuffer = dx12_rhi->CreateTexture2D(DXGI_FORMAT_R8G8B8A8_UNORM,
 		D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
 		D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, m_width, m_height, 1);
-	ShadowBuffer->MakeSRV();
+	ShadowBuffer->MakeDynamicSRV();
 	
 	ShadowBuffer->MakeUAV();
 
@@ -518,7 +518,7 @@ void dx12_framework::LoadAssets()
 	ReflectionBuffer = dx12_rhi->CreateTexture2D(DXGI_FORMAT_R8G8B8A8_UNORM,
 		D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
 		D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, m_width, m_height, 1);
-	ReflectionBuffer->MakeSRV();
+	ReflectionBuffer->MakeDynamicSRV();
 
 	ReflectionBuffer->MakeUAV();
 
@@ -530,7 +530,7 @@ void dx12_framework::LoadAssets()
 		D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
 		D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, m_width, m_height, 1);
 	AlbedoBuffer->MakeRTV();
-	AlbedoBuffer->MakeSRV();
+	AlbedoBuffer->MakeDynamicSRV();
 
 	NAME_D3D12_OBJECT(AlbedoBuffer->resource);
 
@@ -538,7 +538,7 @@ void dx12_framework::LoadAssets()
 	
 	DepthBuffer = dx12_rhi->CreateTexture2D(DXGI_FORMAT_D32_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL, D3D12_RESOURCE_STATE_DEPTH_WRITE, m_width, m_height, 1);
 	DepthBuffer->MakeDSV();
-	DepthBuffer->MakeSRV(true);
+	DepthBuffer->MakeDepthSRV();
 
 
 	//FakeDepthBuffer = dx12_rhi->CreateTexture2D(DXGI_FORMAT_R32_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS | D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, m_width, m_height, 1);
@@ -883,7 +883,7 @@ void dx12_framework::InitComputeRS()
 		D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
 		D3D12_RESOURCE_STATE_UNORDERED_ACCESS, m_width, m_height, 1);
 	ComputeOuputTexture->MakeUAV();
-	ComputeOuputTexture->MakeSRV();
+	ComputeOuputTexture->MakeDynamicSRV();
 }
 
 void dx12_framework::InitDrawMeshRS()
