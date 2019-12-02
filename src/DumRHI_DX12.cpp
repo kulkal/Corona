@@ -1001,11 +1001,6 @@ GlobalConstantBuffer::GlobalConstantBuffer(UINT size)
 	}
 }
 
-void Texture::VisibleThisFrame()
-{
-	g_dx12_rhi->FrameTextureSet.insert(this);
-}
-
 void Texture::MakeUAV()
 {
 	//g_dx12_rhi->SRVCBVDescriptorHeapStorage->AllocDescriptor(CpuHandleUAV, GpuHandleUAV);
