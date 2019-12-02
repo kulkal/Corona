@@ -395,13 +395,13 @@ class DescriptorHeap
 public:
 	D3D12_DESCRIPTOR_HEAP_DESC HeapDesc;
 	ComPtr<ID3D12DescriptorHeap> DH;
-	UINT DescriptorSize;
+	UINT DescriptorSize = 0;
 
 	UINT64 CPUHeapStart;
 	UINT64 GPUHeapStart;
 
-	int DescriptorIndex;
-	UINT MaxNumDescriptors;
+	UINT NumAllocated = 0;
+	UINT MaxNumDescriptors = 0;
 public:
 	DescriptorHeap()
 	{
@@ -452,11 +452,11 @@ public:
 	{
 		PoolSize = InPoolSize;
 		
-		if (DHeap->DescriptorIndex + PoolSize >= DHeap->MaxNumDescriptors)
-			DHeap->DescriptorIndex = 0;
+		if (DHeap->NumAllocated + PoolSize >= DHeap->MaxNumDescriptors)
+			DHeap->NumAllocated = 0;
 
-		PoolIndex = StartIndex = DHeap->DescriptorIndex;
-		DHeap->DescriptorIndex += PoolSize;
+		PoolIndex = StartIndex = DHeap->NumAllocated;
+		DHeap->NumAllocated += PoolSize;
 	}
 
 	void AllocDescriptor(D3D12_CPU_DESCRIPTOR_HANDLE& cpuHandle, D3D12_GPU_DESCRIPTOR_HANDLE& gpuHandle);

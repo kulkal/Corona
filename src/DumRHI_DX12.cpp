@@ -67,25 +67,25 @@ void DescriptorHeap::Init(D3D12_DESCRIPTOR_HEAP_DESC& InHeapDesc)
 
 void DescriptorHeap::AllocDescriptor(D3D12_CPU_DESCRIPTOR_HANDLE& cpuHandle, D3D12_GPU_DESCRIPTOR_HANDLE& gpuHandle)
 {
-	if (DescriptorIndex >= MaxNumDescriptors)
-		DescriptorIndex = 0;
+	if (NumAllocated >= MaxNumDescriptors)
+		NumAllocated = 0;
 
-	cpuHandle.ptr = CPUHeapStart + DescriptorIndex * DescriptorSize ;
+	cpuHandle.ptr = CPUHeapStart + NumAllocated * DescriptorSize ;
 
-	gpuHandle.ptr = GPUHeapStart + DescriptorIndex * DescriptorSize;
+	gpuHandle.ptr = GPUHeapStart + NumAllocated * DescriptorSize;
 
-	DescriptorIndex++;
+	NumAllocated++;
 }
 
 
 
 void DescriptorHeap::AllocDescriptors(D3D12_CPU_DESCRIPTOR_HANDLE& cpuHandle, D3D12_GPU_DESCRIPTOR_HANDLE& gpuHandle, UINT num)
 {
-	cpuHandle.ptr = CPUHeapStart + DescriptorIndex * DescriptorSize * num;
+	cpuHandle.ptr = CPUHeapStart + NumAllocated * DescriptorSize;
 
-	gpuHandle.ptr = GPUHeapStart + DescriptorIndex * DescriptorSize * num;
+	gpuHandle.ptr = GPUHeapStart + NumAllocated * DescriptorSize;
 
-	DescriptorIndex += num;
+	NumAllocated += num;
 }
 
 void DumRHI_DX12::BeginFrame()
@@ -205,7 +205,9 @@ shared_ptr<ConstantBuffer> DumRHI_DX12::CreateConstantBuffer(int Size, UINT NumV
 		D3D12_GPU_DESCRIPTOR_HANDLE GpuHandle;
 
 		//SRVCBVDescriptorHeapStorage->AllocDescriptor(CpuHandle, GpuHandle);
-		SRVCBVDescriptorHeapShaderVisible->AllocDescriptor(CpuHandle, GpuHandle);
+		//SRVCBVDescriptorHeapShaderVisible->AllocDescriptor(CpuHandle, GpuHandle);
+		g_dx12_rhi->GlobalDHRing->AllocDescriptor(CpuHandle, GpuHandle);
+
 
 		D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc = {};
 		cbvDesc.BufferLocation = cbuffer->resource->GetGPUVirtualAddress() + i*Size;
@@ -302,7 +304,9 @@ shared_ptr<IndexBuffer> DumRHI_DX12::CreateIndexBuffer(DXGI_FORMAT Format, UINT 
 		vertexSRVDesc.Buffer.NumElements = static_cast<UINT>(Size) / sizeof(float); // byte address buffer
 		vertexSRVDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
 
-		g_dx12_rhi->SRVCBVDescriptorHeapShaderVisible->AllocDescriptor(ib->CpuHandleSRV, ib->GpuHandleSRV);
+		//g_dx12_rhi->SRVCBVDescriptorHeapShaderVisible->AllocDescriptor(ib->CpuHandleSRV, ib->GpuHandleSRV);
+		GeomtryDHRing->AllocDescriptor(ib->CpuHandleSRV, ib->GpuHandleSRV);
+
 		Device->CreateShaderResourceView(ib->resource.Get(), &vertexSRVDesc, ib->CpuHandleSRV);
 
 
@@ -375,7 +379,8 @@ shared_ptr<VertexBuffer> DumRHI_DX12::CreateVertexBuffer(UINT Size, UINT Stride,
 		vertexSRVDesc.Buffer.NumElements = static_cast<UINT>(Size) / sizeof(float); // byte address buffer
 		vertexSRVDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
 
-		g_dx12_rhi->SRVCBVDescriptorHeapShaderVisible->AllocDescriptor(vb->CpuHandleSRV, vb->GpuHandleSRV);
+		//g_dx12_rhi->SRVCBVDescriptorHeapShaderVisible->AllocDescriptor(vb->CpuHandleSRV, vb->GpuHandleSRV);
+		GeomtryDHRing->AllocDescriptor(vb->CpuHandleSRV, vb->GpuHandleSRV);
 
 		Device->CreateShaderResourceView(vb->resource.Get(), &vertexSRVDesc, vb->CpuHandleSRV);
 
@@ -534,13 +539,13 @@ DumRHI_DX12::DumRHI_DX12(ComPtr<ID3D12Device5> InDevice)
 	}
 	
 	GlobalDHRing = std::make_unique<DescriptorHeapRing>();
-	GlobalDHRing->Init(SRVCBVDescriptorHeapShaderVisible.get(), 1000, NumFrame);
+	GlobalDHRing->Init(SRVCBVDescriptorHeapShaderVisible.get(), 10000, NumFrame);
 
 	TextureDHRing = std::make_unique<DescriptorHeapRing>();
-	TextureDHRing->Init(SRVCBVDescriptorHeapShaderVisible.get(), 1000, NumFrame);
+	TextureDHRing->Init(SRVCBVDescriptorHeapShaderVisible.get(), 10000, NumFrame);
 
 	GeomtryDHRing = std::make_unique<DescriptorHeapRing>();
-	GeomtryDHRing->Init(SRVCBVDescriptorHeapShaderVisible.get(), 1000, NumFrame);
+	GeomtryDHRing->Init(SRVCBVDescriptorHeapShaderVisible.get(), 10000, NumFrame);
 	
 	m_fenceValue = 0;
 	ThrowIfFailed(g_dx12_rhi->Device->CreateFence(m_fenceValue, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&m_fence)));
@@ -1004,7 +1009,8 @@ void Texture::VisibleThisFrame()
 void Texture::MakeUAV()
 {
 	//g_dx12_rhi->SRVCBVDescriptorHeapStorage->AllocDescriptor(CpuHandleUAV, GpuHandleUAV);
-	g_dx12_rhi->SRVCBVDescriptorHeapShaderVisible->AllocDescriptor(CpuHandleUAV, GpuHandleUAV);
+	//g_dx12_rhi->SRVCBVDescriptorHeapShaderVisible->AllocDescriptor(CpuHandleUAV, GpuHandleUAV);
+	g_dx12_rhi->GlobalDHRing->AllocDescriptor(CpuHandleUAV, GpuHandleUAV);
 
 
 	D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc = {};
@@ -1018,7 +1024,8 @@ void Texture::MakeUAV()
 void Texture::MakeSRV(bool isDepth)
 {
 	//g_dx12_rhi->SRVCBVDescriptorHeapStorage->AllocDescriptor(CpuHandleSRV, GpuHandleSRV);
-	g_dx12_rhi->SRVCBVDescriptorHeapShaderVisible->AllocDescriptor(CpuHandleSRV, GpuHandleSRV);
+	//g_dx12_rhi->SRVCBVDescriptorHeapShaderVisible->AllocDescriptor(CpuHandleSRV, GpuHandleSRV);
+	g_dx12_rhi->GlobalDHRing->AllocDescriptor(CpuHandleSRV, GpuHandleSRV);
 
 
 	D3D12_SHADER_RESOURCE_VIEW_DESC SrvDesc = {};
@@ -1750,7 +1757,8 @@ std::shared_ptr<RTAS> DumRHI_DX12::CreateTLAS(vector<shared_ptr<RTAS>>& VecBotto
 
 	// copydescriptor needed when being used.
 	//dx12_rhi->SRVCBVDescriptorHeapStorage->AllocDescriptor(RTASCPUHandle, RTASGPUHandle);
-	g_dx12_rhi->SRVCBVDescriptorHeapShaderVisible->AllocDescriptor(as->CPUHandle, as->GPUHandle);
+	//g_dx12_rhi->SRVCBVDescriptorHeapShaderVisible->AllocDescriptor(as->CPUHandle, as->GPUHandle);
+	GeomtryDHRing->AllocDescriptor(as->CPUHandle, as->GPUHandle);
 
 	g_dx12_rhi->Device->CreateShaderResourceView(nullptr, &srvDesc, as->CPUHandle);
 
@@ -2583,8 +2591,8 @@ void DescriptorHeapRing::Init(DescriptorHeap* InDHHeap, UINT InNumDescriptors, U
 
 void DescriptorHeapRing::AllocDescriptor(D3D12_CPU_DESCRIPTOR_HANDLE& cpuHandle, D3D12_GPU_DESCRIPTOR_HANDLE& gpuHandle)
 {
-	cpuHandle.ptr = CPUHeapStart.ptr + NumAllocated * DescriptorSize * CurrentFrame ;
-	gpuHandle.ptr = GPUHeapStart.ptr + NumAllocated * DescriptorSize * CurrentFrame;
+	cpuHandle.ptr = CPUHeapStart.ptr + NumAllocated * DescriptorSize + NumDescriptors * DescriptorSize * CurrentFrame;
+	gpuHandle.ptr = GPUHeapStart.ptr + NumAllocated * DescriptorSize + NumDescriptors * DescriptorSize * CurrentFrame;
 
 	NumAllocated++;
 }
