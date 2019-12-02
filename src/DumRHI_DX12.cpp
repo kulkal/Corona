@@ -1019,6 +1019,8 @@ void Texture::MakeUAV()
 	uavDesc.Format = textureDesc.Format;
 
 	g_dx12_rhi->Device->CreateUnorderedAccessView(resource.Get(), nullptr, &uavDesc, CpuHandleUAV);
+
+	isDynamic = true;
 }
 
 void Texture::MakeDepthSRV()
@@ -1032,6 +1034,8 @@ void Texture::MakeDepthSRV()
 	SrvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
 	SrvDesc.Texture2D.MipLevels = textureDesc.MipLevels;
 	g_dx12_rhi->Device->CreateShaderResourceView(resource.Get(), &SrvDesc, CpuHandleSRV);
+
+	isDynamic = true;
 }
 
 void Texture::MakeDynamicSRV()
@@ -1045,6 +1049,8 @@ void Texture::MakeDynamicSRV()
 	SrvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
 	SrvDesc.Texture2D.MipLevels = textureDesc.MipLevels;
 	g_dx12_rhi->Device->CreateShaderResourceView(resource.Get(), &SrvDesc, CpuHandleSRV);
+
+	isDynamic = true;
 }
 
 void Texture::MakeStaticSRV()
@@ -1058,6 +1064,8 @@ void Texture::MakeStaticSRV()
 	SrvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
 	SrvDesc.Texture2D.MipLevels = textureDesc.MipLevels;
 	g_dx12_rhi->Device->CreateShaderResourceView(resource.Get(), &SrvDesc, CpuHandleSRV);
+
+	isDynamic = false;
 }
 
 

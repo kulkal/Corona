@@ -359,6 +359,7 @@ public:
 class Texture
 {
 public:
+	bool isDynamic = false;
 	//DXGI_FORMAT Format;
 
 	D3D12_RESOURCE_DESC textureDesc;
@@ -378,12 +379,14 @@ public:
 	D3D12_CPU_DESCRIPTOR_HANDLE CpuHandleSRV;
 	D3D12_GPU_DESCRIPTOR_HANDLE GpuHandleSRV;
 
-	void VisibleThisFrame();
+	// these below 3 functions should be called every frame because it will be changed every frame and should allocate descriptor and create view
 	void MakeUAV();
 	void MakeDepthSRV();
 	void MakeDynamicSRV();
-	void MakeStaticSRV();
 
+	// these below 3 functions does not have to be created every time.(texture & rtv & dsv)
+	// texture changes sparsly, so they should be in non-shadow visible heap and updated when changed.(new texture, delete ..etc..)
+	void MakeStaticSRV();
 	void MakeRTV();
 	void MakeDSV();
 
@@ -562,7 +565,6 @@ public:
 	std::unique_ptr<DescriptorHeapRing> TextureDHRing;
 	std::unique_ptr<DescriptorHeapRing> GeomtryDHRing;
 
-	set<Texture*> FrameTextureSet;
 
 
 
