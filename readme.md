@@ -20,6 +20,10 @@ This project is for dx12 & dxr learning. Quite  unorgnized for now. I am trying 
 * [glm](https://glm.g-truc.net/0.9.9/index.html)
 * [NV Aftermath](https://developer.nvidia.com/nvidia-aftermath)
 * [premake](https://premake.github.io/)
+
 ## Useful link
 * [MJP github](https://github.com/TheRealMJP)
 	* Excellent dx12 reference implementation.
+	
+## Copyright
+TODO
