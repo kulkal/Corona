@@ -4,6 +4,7 @@
 #include <dxgi1_4.h>
 #include <set>
 #include <vector>
+#include <list>
 #include <map>
 #include <memory>
 #include "DXSampleHelper.h"
@@ -30,61 +31,6 @@ public:
 
 	UINT64 FenceValue = 0;
 	
-};
-
-class GlobalConstantBuffer
-{
-	UINT cbSize;
-public:
-	vector<shared_ptr<ConstantBuffer>> cbs;
-
-	void SetValue(void* pData);
-	ConstantBuffer* GetCurrentFrameCB();
-
-	GlobalConstantBuffer(UINT size);
-	~GlobalConstantBuffer()
-	{}
-};
-
-class Binder
-{
-public:
-	struct BindingData
-	{
-		string name;
-		UINT rootParamIndex;
-		UINT baseRegister;
-		UINT numDescriptors;
-		UINT cbSize;
-
-		Texture* texture;
-		Sampler* sampler;
-		vector<shared_ptr<ConstantBuffer>> cbs; // multiple constant buffers are need for multiple buffering.
-
-		UINT rootConst;
-	};
-
-
-	map<string, BindingData> uavBinding;
-	map<string, BindingData> textureBinding;
-	map<string, BindingData> constantBufferBinding;
-	map<string, BindingData> samplerBinding;
-	map<string, BindingData> rootBinding;
-
-	void BindUAV(string name, int baseRegister);
-	void BindTexture(string name, int baseRegister, int num);
-	//void BindConstantBuffer(string name, int baseRegister, int size, UINT numMaxDrawCall = 1);
-	void BindRootConstant(string name, int baseRegister);
-	void BindSampler(string name, int baseRegister);
-
-	void SetTexture(string name, Texture* texture);
-	void SetUAV(string name, Texture* texture);
-
-	void SetSampler(string name, Sampler* sampler);
-
-	void SetGlobalConstantBuffer(string name, GlobalConstantBuffer* cb);
-	void SetConstantValue(string name, void* pData, UINT drawCallIndex = 0);
-	void SetRootConstant(string, UINT value);
 };
 
 class Shader
@@ -129,16 +75,15 @@ public:
 	void BindUAV(string name, int baseRegister);
 	void BindTexture(string name, int baseRegister, int num);
 	void BindConstantBuffer(string name, int baseRegister, int size, UINT numMaxDrawCall = 1);
-	void BindGlobalConstantBuffer(string name, int baseRegister);
 	void BindRootConstant(string name, int baseRegister);
 	void BindSampler(string name, int baseRegister);
 
-	void SetTexture(string name, Texture* texture, ID3D12GraphicsCommandList* CommandList, ThreadDescriptorHeapPool* DHPool);
+	void SetTexture(string name, Texture* texture, ID3D12GraphicsCommandList* CommandList);
 	void SetUAV(string name, Texture* texture, ID3D12GraphicsCommandList* CommandList, bool isCompute = false);
 
-	void SetSampler(string name, Sampler* sampler, ID3D12GraphicsCommandList* CommandList, ThreadDescriptorHeapPool* DHPool = nullptr);
+	void SetSampler(string name, Sampler* sampler, ID3D12GraphicsCommandList* CommandList);
 	
-	void SetConstantValue(string name, void* pData, ID3D12GraphicsCommandList* CommandList, ThreadDescriptorHeapPool* DHPool);
+	void SetConstantValue(string name, void* pData, ID3D12GraphicsCommandList* CommandList);
 	void SetRootConstant(string, UINT value, ID3D12GraphicsCommandList* CommandList);
 
 	Shader(UINT8* ByteCode, UINT Size);
@@ -334,7 +279,7 @@ public:
 class ConstantBuffer
 {
 public:
-	bool isPopulatedThisFrame = false;
+	UINT Size;
 	ComPtr<ID3D12Resource> resource = nullptr;
 	//D3D12_CPU_DESCRIPTOR_HANDLE CpuHandle;
 	D3D12_GPU_DESCRIPTOR_HANDLE GpuHandle;
@@ -355,11 +300,9 @@ public:
 		MemMapped = nullptr;
 	}
 };
-
-class Texture
+class Texture : public std::enable_shared_from_this<Texture>
 {
 public:
-	bool isDynamic = false;
 	//DXGI_FORMAT Format;
 
 	D3D12_RESOURCE_DESC textureDesc;
@@ -379,13 +322,10 @@ public:
 	D3D12_CPU_DESCRIPTOR_HANDLE CpuHandleSRV;
 	D3D12_GPU_DESCRIPTOR_HANDLE GpuHandleSRV;
 
-	// these below 3 functions should be called every frame because it will be changed every frame and should allocate descriptor and create view
 	void MakeUAV();
 	void MakeDepthSRV();
 	void MakeDynamicSRV();
 
-	// these below 3 functions does not have to be created every time.(texture & rtv & dsv)
-	// texture changes sparsly, so they should be in non-shadow visible heap and updated when changed.(new texture, delete ..etc..)
 	void MakeStaticSRV();
 	void MakeRTV();
 	void MakeDSV();
@@ -570,7 +510,7 @@ public:
 
 	std::vector<std::shared_ptr<Texture>> renderTargetTextures;
 
-
+	std::list<std::shared_ptr<Texture>> DynamicTextures;
 
 
 	vector<shared_ptr<ConstantBuffer>> cbVec;

@@ -928,7 +928,6 @@ void dx12_framework::InitDrawMeshRS()
 	ps->BindSampler("samplerWrap", 0);
 
 	Shader* vs = new Shader((UINT8*)vertexShader->GetBufferPointer(), vertexShader->GetBufferSize());
-	//vs->BindGlobalConstantBuffer("ViewParameter", 0);
 	vs->BindConstantBuffer("ObjParameter", 0, sizeof(ObjConstantBuffer), 400);
 
 	CD3DX12_RASTERIZER_DESC rasterizerStateDesc(D3D12_DEFAULT);
@@ -1170,12 +1169,12 @@ void dx12_framework::CopyPass()
 
 
 	RS_Copy->ps->SetSampler("samplerWrap", samplerWrap.get(), dx12_rhi->CommandList.Get());
-	RS_Copy->ps->SetTexture("SrcTex", ColorBuffer.get(), dx12_rhi->CommandList.Get(), nullptr);
+	RS_Copy->ps->SetTexture("SrcTex", ColorBuffer.get(), dx12_rhi->CommandList.Get());
 
 	CopyScaleOffsetCB cb;
 	cb.Offset = glm::vec4(0, 0, 0, 0);
 	cb.Scale = glm::vec4(1, 1, 0, 0);
-	RS_Copy->vs->SetConstantValue("ScaleOffsetParams", &cb, dx12_rhi->CommandList.Get(), nullptr);
+	RS_Copy->vs->SetConstantValue("ScaleOffsetParams", &cb, dx12_rhi->CommandList.Get());
 
 
 	RS_Copy->ApplyGlobal(dx12_rhi->CommandList.Get());
@@ -1220,29 +1219,29 @@ void dx12_framework::DebugPass()
 	 //raytraced shadow
 	RS_Copy->ps->currentDrawCallIndex++;
 	RS_Copy->vs->currentDrawCallIndex++;
-	RS_Copy->ps->SetTexture("SrcTex", ShadowBuffer.get(), dx12_rhi->CommandList.Get(), nullptr);
+	RS_Copy->ps->SetTexture("SrcTex", ShadowBuffer.get(), dx12_rhi->CommandList.Get());
 	cb.Offset = glm::vec4(-0.75, -0.75, 0, 0);
 	cb.Scale = glm::vec4(0.25, 0.25, 0, 0);
-	RS_Copy->vs->SetConstantValue("ScaleOffsetParams", &cb, dx12_rhi->CommandList.Get(), nullptr);
+	RS_Copy->vs->SetConstantValue("ScaleOffsetParams", &cb, dx12_rhi->CommandList.Get());
 	dx12_rhi->CommandList->DrawInstanced(4, 1, 0, 0);
 
 	// raytrace reflection
 	RS_Copy->ps->currentDrawCallIndex++;
 	RS_Copy->vs->currentDrawCallIndex++;
-	RS_Copy->ps->SetTexture("SrcTex", ReflectionBuffer.get(), dx12_rhi->CommandList.Get(), nullptr);
+	RS_Copy->ps->SetTexture("SrcTex", ReflectionBuffer.get(), dx12_rhi->CommandList.Get());
 	cb.Offset = glm::vec4(-0.75, -0.25, 0, 0);
 	cb.Scale = glm::vec4(0.25, 0.25, 0, 0);
-	RS_Copy->vs->SetConstantValue("ScaleOffsetParams", &cb, dx12_rhi->CommandList.Get(), nullptr);
+	RS_Copy->vs->SetConstantValue("ScaleOffsetParams", &cb, dx12_rhi->CommandList.Get());
 	dx12_rhi->CommandList->DrawInstanced(4, 1, 0, 0);
 
 
 	// world normal
 	RS_Copy->ps->currentDrawCallIndex++;
 	RS_Copy->vs->currentDrawCallIndex++;
-	RS_Copy->ps->SetTexture("SrcTex", NormalBuffer.get(), dx12_rhi->CommandList.Get(), nullptr);
+	RS_Copy->ps->SetTexture("SrcTex", NormalBuffer.get(), dx12_rhi->CommandList.Get());
 	cb.Offset = glm::vec4(-0.25, -0.75, 0, 0);
 	cb.Scale = glm::vec4(0.25, 0.25, 0, 0);
-	RS_Copy->vs->SetConstantValue("ScaleOffsetParams", &cb, dx12_rhi->CommandList.Get(), nullptr);
+	RS_Copy->vs->SetConstantValue("ScaleOffsetParams", &cb, dx12_rhi->CommandList.Get());
 	dx12_rhi->CommandList->DrawInstanced(4, 1, 0, 0);
 
 	// geom world normal
@@ -1251,8 +1250,8 @@ void dx12_framework::DebugPass()
 
 	cb.Offset = glm::vec4(-0.25, -0.25, 0, 0);
 	cb.Scale = glm::vec4(0.25, 0.25, 0, 0);
-	RS_Copy->vs->SetConstantValue("ScaleOffsetParams", &cb, dx12_rhi->CommandList.Get(), nullptr);
-	RS_Copy->ps->SetTexture("SrcTex", GeomNormalBuffer.get(), dx12_rhi->CommandList.Get(), nullptr);
+	RS_Copy->vs->SetConstantValue("ScaleOffsetParams", &cb, dx12_rhi->CommandList.Get());
+	RS_Copy->ps->SetTexture("SrcTex", GeomNormalBuffer.get(), dx12_rhi->CommandList.Get());
 	dx12_rhi->CommandList->DrawInstanced(4, 1, 0, 0);
 
 	// depth
@@ -1261,8 +1260,8 @@ void dx12_framework::DebugPass()
 
 	cb.Offset = glm::vec4(0.25, -0.75, 0, 0);
 	cb.Scale = glm::vec4(0.25, 0.25, 0, 0);
-	RS_Copy->vs->SetConstantValue("ScaleOffsetParams", &cb, dx12_rhi->CommandList.Get(), nullptr);
-	RS_Copy->ps->SetTexture("SrcTex", DepthBuffer.get(), dx12_rhi->CommandList.Get(), nullptr);
+	RS_Copy->vs->SetConstantValue("ScaleOffsetParams", &cb, dx12_rhi->CommandList.Get());
+	RS_Copy->ps->SetTexture("SrcTex", DepthBuffer.get(), dx12_rhi->CommandList.Get());
 	dx12_rhi->CommandList->DrawInstanced(4, 1, 0, 0);
 
 
@@ -1272,8 +1271,8 @@ void dx12_framework::DebugPass()
 
 	cb.Offset = glm::vec4(0.750, -0.75, 0, 0);
 	cb.Scale = glm::vec4(0.25, 0.25, 0, 0);
-	RS_Copy->vs->SetConstantValue("ScaleOffsetParams", &cb, dx12_rhi->CommandList.Get(), nullptr);
-	RS_Copy->ps->SetTexture("SrcTex", AlbedoBuffer.get(), dx12_rhi->CommandList.Get(), nullptr);
+	RS_Copy->vs->SetConstantValue("ScaleOffsetParams", &cb, dx12_rhi->CommandList.Get());
+	RS_Copy->ps->SetTexture("SrcTex", AlbedoBuffer.get(), dx12_rhi->CommandList.Get());
 	dx12_rhi->CommandList->DrawInstanced(4, 1, 0, 0);
 
 
@@ -1304,9 +1303,9 @@ void dx12_framework::LightingPass()
 
 
 	RS_Lighting->ps->SetSampler("samplerWrap", samplerWrap.get(), dx12_rhi->CommandList.Get());
-	RS_Lighting->ps->SetTexture("AlbedoTex", AlbedoBuffer.get(), dx12_rhi->CommandList.Get(), nullptr);
-	RS_Lighting->ps->SetTexture("NormalTex", NormalBuffer.get(), dx12_rhi->CommandList.Get(), nullptr);
-	RS_Lighting->ps->SetTexture("ShadowTex", ShadowBuffer.get(), dx12_rhi->CommandList.Get(), nullptr);
+	RS_Lighting->ps->SetTexture("AlbedoTex", AlbedoBuffer.get(), dx12_rhi->CommandList.Get());
+	RS_Lighting->ps->SetTexture("NormalTex", NormalBuffer.get(), dx12_rhi->CommandList.Get());
+	RS_Lighting->ps->SetTexture("ShadowTex", ShadowBuffer.get(), dx12_rhi->CommandList.Get());
 
 
 	LightingParam Param;
@@ -1314,7 +1313,7 @@ void dx12_framework::LightingPass()
 	Param.LightDir = glm::vec4(LightDir, 0);
 
 	glm::normalize(Param.LightDir);
-	RS_Lighting->ps->SetConstantValue("LightingParam", &Param, dx12_rhi->CommandList.Get(), nullptr);
+	RS_Lighting->ps->SetConstantValue("LightingParam", &Param, dx12_rhi->CommandList.Get());
 
 
 	RS_Lighting->ApplyGlobal(dx12_rhi->CommandList.Get());
@@ -1615,7 +1614,6 @@ void dx12_framework::DrawMeshPass()
 
 		RS_Mesh->ApplyGraphicsRSPSO(dx12_rhi->CommandList.Get());
 		RS_Mesh->ps->SetSampler("samplerWrap", samplerWrap.get(), dx12_rhi->CommandList.Get());
-		//RS_Mesh->vs->SetGlobalConstantBuffer("ViewParameter", ViewParameter.get(), dx12_rhi->CommandList.Get(), nullptr);;
 
 		dx12_rhi->CommandList->RSSetViewports(1, &m_viewport);
 		dx12_rhi->CommandList->RSSetScissorRects(1, &m_scissorRect);
@@ -1676,19 +1674,19 @@ void dx12_framework::DrawMeshPass()
 				objCB.ViewDir.y = m_camera.m_lookDirection.y;
 				objCB.ViewDir.z = m_camera.m_lookDirection.z;
 
-				RS_Mesh->vs->SetConstantValue("ObjParameter", (void*)&objCB, dx12_rhi->CommandList.Get(), nullptr);
+				RS_Mesh->vs->SetConstantValue("ObjParameter", (void*)&objCB, dx12_rhi->CommandList.Get());
 
 				Texture* diffuseTex = drawcall.mat->Diffuse.get();
 				if (diffuseTex == nullptr)
 					diffuseTex = Materials[0]->Diffuse.get();
 				if(diffuseTex)
-					RS_Mesh->ps->SetTexture("diffuseMap", diffuseTex, dx12_rhi->CommandList.Get(), nullptr);
+					RS_Mesh->ps->SetTexture("diffuseMap", diffuseTex, dx12_rhi->CommandList.Get());
 
 				Texture* normalTex = drawcall.mat->Normal.get();
 				if (normalTex == nullptr)
 					normalTex = Materials[0]->Normal.get();
 				if(normalTex)
-					RS_Mesh->ps->SetTexture("normalMap", normalTex, dx12_rhi->CommandList.Get(), nullptr);
+					RS_Mesh->ps->SetTexture("normalMap", normalTex, dx12_rhi->CommandList.Get());
 
 				dx12_rhi->CommandList->DrawIndexedInstanced(drawcall.IndexCount, 1, drawcall.IndexStart, drawcall.VertexBase, 0);
 			}
@@ -1755,59 +1753,58 @@ void dx12_framework::DrawMeshPass()
 
 void dx12_framework::RecordDraw (UINT StartIndex, UINT NumDraw, UINT CLIndex, ThreadDescriptorHeapPool* DHPool)
 {
-	Texture* backbuffer = ColorBuffer.get();
+	//Texture* backbuffer = ColorBuffer.get();
 
-	ID3D12GraphicsCommandList* CL = dx12_rhi->DrawMeshCommandList[CLIndex].Get();
+	//ID3D12GraphicsCommandList* CL = dx12_rhi->DrawMeshCommandList[CLIndex].Get();
 
-	ID3D12CommandAllocator* CA = dx12_rhi->FrameResourceVec[dx12_rhi->CurrentFrameIndex].VecCommandAllocatorMeshDraw[CLIndex].Get();
-	CL->Reset(CA, nullptr);
+	//ID3D12CommandAllocator* CA = dx12_rhi->FrameResourceVec[dx12_rhi->CurrentFrameIndex].VecCommandAllocatorMeshDraw[CLIndex].Get();
+	//CL->Reset(CA, nullptr);
 
-	CL->OMSetRenderTargets(1, &backbuffer->CpuHandleRTV, FALSE, &DepthBuffer->CpuHandleDSV);
-	CL->RSSetViewports(1, &m_viewport);
-	CL->RSSetScissorRects(1, &m_scissorRect);
-	CL->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-	CL->IASetIndexBuffer(&mesh->Ib->view);
-	CL->IASetVertexBuffers(0, 1, &mesh->Vb->view);
+	//CL->OMSetRenderTargets(1, &backbuffer->CpuHandleRTV, FALSE, &DepthBuffer->CpuHandleDSV);
+	//CL->RSSetViewports(1, &m_viewport);
+	//CL->RSSetScissorRects(1, &m_scissorRect);
+	//CL->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+	//CL->IASetIndexBuffer(&mesh->Ib->view);
+	//CL->IASetVertexBuffers(0, 1, &mesh->Vb->view);
 
-	ID3D12DescriptorHeap* ppHeaps[] = { dx12_rhi->SRVCBVDescriptorHeapShaderVisible->DH.Get(), dx12_rhi->SamplerDescriptorHeapShaderVisible->DH.Get() };
-	CL->SetDescriptorHeaps(_countof(ppHeaps), ppHeaps);
-	
-	RS_Mesh->ApplyGraphicsRSPSO(CL);
-	RS_Mesh->ps->SetSampler("samplerWrap", samplerWrap.get(), CL, DHPool);
-	//RS_Mesh->vs->SetGlobalConstantBuffer("ViewParameter", ViewParameter.get(), CL, DHPool);;
+	//ID3D12DescriptorHeap* ppHeaps[] = { dx12_rhi->SRVCBVDescriptorHeapShaderVisible->DH.Get(), dx12_rhi->SamplerDescriptorHeapShaderVisible->DH.Get() };
+	//CL->SetDescriptorHeaps(_countof(ppHeaps), ppHeaps);
+	//
+	//RS_Mesh->ApplyGraphicsRSPSO(CL);
+	//RS_Mesh->ps->SetSampler("samplerWrap", samplerWrap.get(), CL, DHPool);
 
-	glm::mat4x4 ViewMat;
-	glm::mat4x4 ProjMat;
+	//glm::mat4x4 ViewMat;
+	//glm::mat4x4 ProjMat;
 
-	memcpy(&ViewMat, &m_camera.GetViewMatrix(), sizeof(glm::mat4x4));
-	memcpy(&ProjMat, &m_camera.GetProjectionMatrix(0.8f, m_aspectRatio, Near, Far), sizeof(glm::mat4x4));
+	//memcpy(&ViewMat, &m_camera.GetViewMatrix(), sizeof(glm::mat4x4));
+	//memcpy(&ProjMat, &m_camera.GetProjectionMatrix(0.8f, m_aspectRatio, Near, Far), sizeof(glm::mat4x4));
 
-	glm::mat4x4 ViewProjMat = glm::transpose(ProjMat * ViewMat);
+	//glm::mat4x4 ViewProjMat = glm::transpose(ProjMat * ViewMat);
 
-	for (int i = StartIndex; i < StartIndex + NumDraw; i++)
-	{
-		Mesh::DrawCall& drawcall = mesh->Draws[i];
-		ObjConstantBuffer objCB;
-		objCB.ViewProjectionMatrix = ViewProjMat;
-		glm::mat4 m; // Identity matrix
-		objCB.WorldMatrix = m;
-		objCB.ViewDir.x = m_camera.m_lookDirection.x;
-		objCB.ViewDir.y = m_camera.m_lookDirection.y;
-		objCB.ViewDir.z = m_camera.m_lookDirection.z;
-		RS_Mesh->vs->SetConstantValue("ObjParameter", (void*)&objCB, CL, DHPool);
-
-
-		Texture* diffuseTex = mesh->Textures[drawcall.DiffuseTextureIndex].get();
-		RS_Mesh->ps->SetTexture("diffuseMap", diffuseTex, CL, DHPool);
-
-		Texture* normalTex = mesh->Textures[drawcall.NormalTextureIndex].get();
-		RS_Mesh->ps->SetTexture("normalMap", normalTex, CL, DHPool);
+	//for (int i = StartIndex; i < StartIndex + NumDraw; i++)
+	//{
+	//	Mesh::DrawCall& drawcall = mesh->Draws[i];
+	//	ObjConstantBuffer objCB;
+	//	objCB.ViewProjectionMatrix = ViewProjMat;
+	//	glm::mat4 m; // Identity matrix
+	//	objCB.WorldMatrix = m;
+	//	objCB.ViewDir.x = m_camera.m_lookDirection.x;
+	//	objCB.ViewDir.y = m_camera.m_lookDirection.y;
+	//	objCB.ViewDir.z = m_camera.m_lookDirection.z;
+	//	RS_Mesh->vs->SetConstantValue("ObjParameter", (void*)&objCB, CL, DHPool);
 
 
-		CL->DrawIndexedInstanced(drawcall.IndexCount, 1, drawcall.IndexStart, drawcall.VertexBase, 0);
-	}
-	
-	CL->Close();
+	//	Texture* diffuseTex = mesh->Textures[drawcall.DiffuseTextureIndex].get();
+	//	RS_Mesh->ps->SetTexture("diffuseMap", diffuseTex, CL, DHPool);
+
+	//	Texture* normalTex = mesh->Textures[drawcall.NormalTextureIndex].get();
+	//	RS_Mesh->ps->SetTexture("normalMap", normalTex, CL, DHPool);
+
+
+	//	CL->DrawIndexedInstanced(drawcall.IndexCount, 1, drawcall.IndexStart, drawcall.VertexBase, 0);
+	//}
+	//
+	//CL->Close();
 }
 
 

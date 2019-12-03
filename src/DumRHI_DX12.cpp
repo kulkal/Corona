@@ -116,16 +116,42 @@ void DumRHI_DX12::BeginFrame()
 		CA->Reset();
 	}
 	
-	FrameTextureSet.clear();
 
-	for (auto &cb : cbVec)
-	{
-		cb->isPopulatedThisFrame = false;
-	}
 
 	ID3D12DescriptorHeap* ppHeaps[] = { SRVCBVDescriptorHeapShaderVisible->DH.Get(), SamplerDescriptorHeapShaderVisible->DH.Get() };
 	CommandList->SetDescriptorHeaps(_countof(ppHeaps), ppHeaps);
 	
+
+	g_dx12_rhi->GlobalDHRing->Advance();
+
+	for (auto& tex : DynamicTextures)
+	{
+		if (tex->textureDesc.Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS)
+		{
+			g_dx12_rhi->GlobalDHRing->AllocDescriptor(tex->CpuHandleUAV, tex->GpuHandleUAV);
+
+
+			D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc = {};
+			uavDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+			uavDesc.Format = tex->textureDesc.Format;
+
+			g_dx12_rhi->Device->CreateUnorderedAccessView(tex->resource.Get(), nullptr, &uavDesc, tex->CpuHandleUAV);
+		}
+
+		// alloc dh and create srv
+		g_dx12_rhi->GlobalDHRing->AllocDescriptor(tex->CpuHandleSRV, tex->GpuHandleSRV);
+
+		D3D12_SHADER_RESOURCE_VIEW_DESC SrvDesc = {};
+		SrvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+		if (tex->textureDesc.Flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL)
+			SrvDesc.Format = DXGI_FORMAT_R32_FLOAT;
+		else
+			SrvDesc.Format = tex->textureDesc.Format;
+
+		SrvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+		SrvDesc.Texture2D.MipLevels = tex->textureDesc.MipLevels;
+		g_dx12_rhi->Device->CreateShaderResourceView(tex->resource.Get(), &SrvDesc, tex->CpuHandleSRV);
+	}
 }
 
 void DumRHI_DX12::EndFrame()
@@ -155,6 +181,8 @@ shared_ptr<ConstantBuffer> DumRHI_DX12::CreateConstantBuffer(int Size, UINT NumV
 
 {
 	ConstantBuffer* cbuffer = new ConstantBuffer;
+
+	cbuffer->Size = Size;
 
 	D3D12_HEAP_PROPERTIES heapProp;
 	heapProp.Type = D3D12_HEAP_TYPE_UPLOAD;
@@ -196,28 +224,28 @@ shared_ptr<ConstantBuffer> DumRHI_DX12::CreateConstantBuffer(int Size, UINT NumV
 	ThrowIfFailed(cbuffer->resource->Map(0, &readRange, reinterpret_cast<void**>(&cbuffer->MemMapped)));
 
 	// Describe and create a constant buffer view (CBV).
-	cbuffer->CpuHandleVec.reserve(NumView);
-	cbuffer->GpuHandleVec.reserve(NumView);
+	//cbuffer->CpuHandleVec.reserve(NumView);
+	//cbuffer->GpuHandleVec.reserve(NumView);
 
-	for (int i = 0; i < NumView; i++)
-	{
-		D3D12_CPU_DESCRIPTOR_HANDLE CpuHandle;
-		D3D12_GPU_DESCRIPTOR_HANDLE GpuHandle;
+	//for (int i = 0; i < NumView; i++)
+	//{
+	//	D3D12_CPU_DESCRIPTOR_HANDLE CpuHandle;
+	//	D3D12_GPU_DESCRIPTOR_HANDLE GpuHandle;
 
-		//SRVCBVDescriptorHeapStorage->AllocDescriptor(CpuHandle, GpuHandle);
-		//SRVCBVDescriptorHeapShaderVisible->AllocDescriptor(CpuHandle, GpuHandle);
-		g_dx12_rhi->GlobalDHRing->AllocDescriptor(CpuHandle, GpuHandle);
+	//	//SRVCBVDescriptorHeapStorage->AllocDescriptor(CpuHandle, GpuHandle);
+	//	//SRVCBVDescriptorHeapShaderVisible->AllocDescriptor(CpuHandle, GpuHandle);
+	//	g_dx12_rhi->GlobalDHRing->AllocDescriptor(CpuHandle, GpuHandle);
 
 
-		D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc = {};
-		cbvDesc.BufferLocation = cbuffer->resource->GetGPUVirtualAddress() + i*Size;
-		cbvDesc.SizeInBytes = Size;
-		Device->CreateConstantBufferView(&cbvDesc, CpuHandle);
-		
-		cbuffer->CpuHandleVec.push_back(CpuHandle);
-		cbuffer->GpuHandleVec.push_back(GpuHandle);
+	//	D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc = {};
+	//	cbvDesc.BufferLocation = cbuffer->resource->GetGPUVirtualAddress() + i*Size;
+	//	cbvDesc.SizeInBytes = Size;
+	//	Device->CreateConstantBufferView(&cbvDesc, CpuHandle);
+	//	
+	//	cbuffer->CpuHandleVec.push_back(CpuHandle);
+	//	cbuffer->GpuHandleVec.push_back(GpuHandle);
 
-	}
+	//}
 	
 	shared_ptr<ConstantBuffer> retPtr = shared_ptr<ConstantBuffer>(cbuffer);
 	cbVec.push_back(retPtr);
@@ -632,15 +660,6 @@ void Shader::BindConstantBuffer(string name, int baseRegister, int size, UINT nu
 	constantBufferBinding.insert(pair<string, BindingData>(name, binding));
 }
 
-void Shader::BindGlobalConstantBuffer(string name, int baseRegister)
-{
-	BindingData binding;
-	binding.name = name;
-	binding.baseRegister = baseRegister;
-	binding.numDescriptors = 1;
-
-	constantBufferBinding.insert(pair<string, BindingData>(name, binding));
-}
 
 void Shader::BindRootConstant(string name, int baseRegister)
 {
@@ -662,19 +681,12 @@ void Shader::BindSampler(string name, int baseRegister)
 	samplerBinding.insert(pair<string, BindingData>(name, binding));
 }
 
-void Shader::SetTexture(string name, Texture* texture, ID3D12GraphicsCommandList* CommandList, ThreadDescriptorHeapPool* DHPool)
+void Shader::SetTexture(string name, Texture* texture, ID3D12GraphicsCommandList* CommandList)
 {
 	textureBinding[name].texture = texture;
 
 	D3D12_CPU_DESCRIPTOR_HANDLE ShaderVisibleCPUHandle;
 	D3D12_GPU_DESCRIPTOR_HANDLE ShaderVisibleGpuHandle;
-
-	/*if (DHPool)
-		DHPool->AllocDescriptor(ShaderVisibleCPUHandle, ShaderVisibleGpuHandle);
-	else
-		g_dx12_rhi->SRVCBVDescriptorHeapShaderVisible->AllocDescriptor(ShaderVisibleCPUHandle, ShaderVisibleGpuHandle);
-
-	g_dx12_rhi->Device->CopyDescriptorsSimple(1, ShaderVisibleCPUHandle, texture->CpuHandleSRV, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);*/
 
 	UINT RPI = textureBinding[name].rootParamIndex;
 	CommandList->SetGraphicsRootDescriptorTable(RPI, texture->GpuHandleSRV);
@@ -687,13 +699,6 @@ void Shader::SetUAV(string name, Texture* texture, ID3D12GraphicsCommandList* Co
 	D3D12_CPU_DESCRIPTOR_HANDLE ShaderVisibleCPUHandle;
 	D3D12_GPU_DESCRIPTOR_HANDLE ShaderVisibleGpuHandle;
 
-	/*if (DHPool)
-		DHPool->AllocDescriptor(ShaderVisibleCPUHandle, ShaderVisibleGpuHandle);
-	else*/
-	/*	g_dx12_rhi->SRVCBVDescriptorHeapShaderVisible->AllocDescriptor(ShaderVisibleCPUHandle, ShaderVisibleGpuHandle);
-
-	g_dx12_rhi->Device->CopyDescriptorsSimple(1, ShaderVisibleCPUHandle, texture->CpuHandleSRV, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);*/
-
 	UINT RPI = textureBinding[name].rootParamIndex;
 	if (isCompute)
 		CommandList->SetComputeRootDescriptorTable(RPI, texture->GpuHandleUAV);
@@ -701,27 +706,17 @@ void Shader::SetUAV(string name, Texture* texture, ID3D12GraphicsCommandList* Co
 		CommandList->SetGraphicsRootDescriptorTable(RPI, texture->GpuHandleUAV);
 }
 
-void Shader::SetSampler(string name, Sampler* sampler, ID3D12GraphicsCommandList* CommandList, ThreadDescriptorHeapPool* DHPool)
+void Shader::SetSampler(string name, Sampler* sampler, ID3D12GraphicsCommandList* CommandList)
 {
 	samplerBinding[name].sampler = sampler;
 
 	D3D12_CPU_DESCRIPTOR_HANDLE ShaderVisibleCPUHandle;
 	D3D12_GPU_DESCRIPTOR_HANDLE ShaderVisibleGpuHandle;
 
-	// FIXME :: sampler also should be dh pool.
-	/*if (DHPool)
-		DHPool->AllocDescriptor(ShaderVisibleCPUHandle, ShaderVisibleGpuHandle);
-	else*/
-	/*	g_dx12_rhi->SamplerDescriptorHeapShaderVisible->AllocDescriptor(ShaderVisibleCPUHandle, ShaderVisibleGpuHandle);
-
-	g_dx12_rhi->Device->CopyDescriptorsSimple(1, ShaderVisibleCPUHandle, sampler->CpuHandle, D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);*/
-
-
 	CommandList->SetGraphicsRootDescriptorTable(samplerBinding[name].rootParamIndex, sampler->GpuHandle);
-
 }
 
-void Shader::SetConstantValue(string name, void* pData, ID3D12GraphicsCommandList* CommandList, ThreadDescriptorHeapPool* DHPool)
+void Shader::SetConstantValue(string name, void* pData, ID3D12GraphicsCommandList* CommandList)
 {
 	BindingData& binding = constantBufferBinding[name];
 
@@ -732,22 +727,20 @@ void Shader::SetConstantValue(string name, void* pData, ID3D12GraphicsCommandLis
 	memcpy((void*)pMapped, pData, binding.cbSize);
 
 
-	D3D12_CPU_DESCRIPTOR_HANDLE ShaderVisibleCPUHandle;
-	D3D12_GPU_DESCRIPTOR_HANDLE ShaderVisibleGpuHandle;
+	D3D12_CPU_DESCRIPTOR_HANDLE CpuHandle;
+	D3D12_GPU_DESCRIPTOR_HANDLE GpuHandle;
+
+	// ring is advanced at the begining of frame. so descriptors from multiple frame is not overlapped.
+	g_dx12_rhi->GlobalDHRing->AllocDescriptor(CpuHandle, GpuHandle);
+
+	D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc = {};
+	cbvDesc.BufferLocation = binding.cb->resource->GetGPUVirtualAddress() + CBViewIndex * binding.cb->Size;
+	cbvDesc.SizeInBytes = binding.cb->Size;
+	g_dx12_rhi->Device->CreateConstantBufferView(&cbvDesc, CpuHandle);
 
 
-	D3D12_CPU_DESCRIPTOR_HANDLE NonShadervisibleCPUHandle = binding.cb->CpuHandleVec[CBViewIndex];
 
-	//if (DHPool)
-	//	DHPool->AllocDescriptor(ShaderVisibleCPUHandle, ShaderVisibleGpuHandle);
-	//else
-	//	g_dx12_rhi->SRVCBVDescriptorHeapShaderVisible->AllocDescriptor(ShaderVisibleCPUHandle, ShaderVisibleGpuHandle);
-
-
-	//g_dx12_rhi->Device->CopyDescriptorsSimple(1, ShaderVisibleCPUHandle, NonShadervisibleCPUHandle, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-
-	ShaderVisibleGpuHandle = binding.cb->GpuHandleVec[CBViewIndex];
-	CommandList->SetGraphicsRootDescriptorTable(binding.rootParamIndex, ShaderVisibleGpuHandle);
+	CommandList->SetGraphicsRootDescriptorTable(binding.rootParamIndex, GpuHandle);
 }
 
 void Shader::SetRootConstant(string name, UINT value, ID3D12GraphicsCommandList* CommandList)
@@ -981,26 +974,6 @@ UINT PipelineStateObject::GetGraphicsBindingDHSize()
 	return	vs->constantBufferBinding.size() + ps->constantBufferBinding.size() + vs->textureBinding.size() + ps->textureBinding.size();
 }
 
-void GlobalConstantBuffer::SetValue(void* pData)
-{
-	void* pMapped = cbs[g_dx12_rhi->CurrentFrameIndex]->MemMapped;
-	memcpy(pMapped, pData, cbSize);
-}
-
-ConstantBuffer* GlobalConstantBuffer::GetCurrentFrameCB()
-{
-	return cbs[g_dx12_rhi->CurrentFrameIndex].get();
-}
-
-GlobalConstantBuffer::GlobalConstantBuffer(UINT size)
-{
-	cbSize = size;
-	for (int i = 0; i < g_dx12_rhi->NumFrame; i++)
-	{
-		cbs.push_back(g_dx12_rhi->CreateConstantBuffer(size));
-	}
-}
-
 void Texture::MakeUAV()
 {
 	//g_dx12_rhi->SRVCBVDescriptorHeapStorage->AllocDescriptor(CpuHandleUAV, GpuHandleUAV);
@@ -1014,8 +987,6 @@ void Texture::MakeUAV()
 	uavDesc.Format = textureDesc.Format;
 
 	g_dx12_rhi->Device->CreateUnorderedAccessView(resource.Get(), nullptr, &uavDesc, CpuHandleUAV);
-
-	isDynamic = true;
 }
 
 void Texture::MakeDepthSRV()
@@ -1030,7 +1001,6 @@ void Texture::MakeDepthSRV()
 	SrvDesc.Texture2D.MipLevels = textureDesc.MipLevels;
 	g_dx12_rhi->Device->CreateShaderResourceView(resource.Get(), &SrvDesc, CpuHandleSRV);
 
-	isDynamic = true;
 }
 
 void Texture::MakeDynamicSRV()
@@ -1045,7 +1015,7 @@ void Texture::MakeDynamicSRV()
 	SrvDesc.Texture2D.MipLevels = textureDesc.MipLevels;
 	g_dx12_rhi->Device->CreateShaderResourceView(resource.Get(), &SrvDesc, CpuHandleSRV);
 
-	isDynamic = true;
+	
 }
 
 void Texture::MakeStaticSRV()
@@ -1060,7 +1030,6 @@ void Texture::MakeStaticSRV()
 	SrvDesc.Texture2D.MipLevels = textureDesc.MipLevels;
 	g_dx12_rhi->Device->CreateShaderResourceView(resource.Get(), &SrvDesc, CpuHandleSRV);
 
-	isDynamic = false;
 }
 
 
@@ -1172,10 +1141,11 @@ std::shared_ptr<Texture> DumRHI_DX12::CreateTexture2D(DXGI_FORMAT format, D3D12_
 
 
 	}
+	shared_ptr<Texture> texPtr = shared_ptr<Texture>(tex);
+	if (resFlags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET || resFlags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL || resFlags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS)
+		g_dx12_rhi->DynamicTextures.push_back(texPtr);
 
-
-	return shared_ptr<Texture>(tex);
-
+	return texPtr;
 }
 
 void Texture::UploadSRCData(D3D12_SUBRESOURCE_DATA* SrcData)
@@ -2289,7 +2259,18 @@ void RTPipelineStateObject::SetCBVValue(string shader, string bindingName, void*
 				UINT8* pMapped = (UINT8*)cb->MemMapped + size * 0;
 				memcpy((void*)pMapped, pData, size);
 
-				bd.GPUHandle = cb->GpuHandleVec[0];
+				D3D12_CPU_DESCRIPTOR_HANDLE CpuHandle;
+				D3D12_GPU_DESCRIPTOR_HANDLE GpuHandle;
+
+				// ring is advanced at the begining of frame. so descriptors from multiple frame is not overlapped.
+				g_dx12_rhi->GlobalDHRing->AllocDescriptor(CpuHandle, GpuHandle);
+
+				D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc = {};
+				cbvDesc.BufferLocation = cb->resource->GetGPUVirtualAddress();
+				cbvDesc.SizeInBytes = cb->Size;
+				g_dx12_rhi->Device->CreateConstantBufferView(&cbvDesc, CpuHandle);
+
+				bd.GPUHandle = GpuHandle;
 			}
 		}
 	}
@@ -2306,7 +2287,19 @@ void RTPipelineStateObject::SetCBVValue(string shader, string bindingName, void*
 				memcpy((void*)pMapped, pData, size);
 
 				HitProgramBinding[instanceIndex].HitGroupName = MapHitGroup[shader].name;
-				HitProgramBinding[instanceIndex].VecData.push_back(cb->GpuHandleVec[instanceIndex]);
+
+				D3D12_CPU_DESCRIPTOR_HANDLE CpuHandle;
+				D3D12_GPU_DESCRIPTOR_HANDLE GpuHandle;
+
+				// ring is advanced at the begining of frame. so descriptors from multiple frame is not overlapped.
+				g_dx12_rhi->GlobalDHRing->AllocDescriptor(CpuHandle, GpuHandle);
+
+				D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc = {};
+				cbvDesc.BufferLocation = cb->resource->GetGPUVirtualAddress();
+				cbvDesc.SizeInBytes = cb->Size;
+				g_dx12_rhi->Device->CreateConstantBufferView(&cbvDesc, CpuHandle);
+
+				HitProgramBinding[instanceIndex].VecData.push_back(GpuHandle);
 			}
 		}
 	}
@@ -2617,4 +2610,10 @@ void DescriptorHeapRing::AllocDescriptor(D3D12_CPU_DESCRIPTOR_HANDLE& cpuHandle,
 	gpuHandle.ptr = GPUHeapStart.ptr + NumAllocated * DescriptorSize + NumDescriptors * DescriptorSize * CurrentFrame;
 
 	NumAllocated++;
+}
+
+void DescriptorHeapRing::Advance()
+{
+	CurrentFrame = (CurrentFrame + 1) % NumFrame;
+	NumAllocated = 0;
 }
