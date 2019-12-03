@@ -26,6 +26,7 @@ cbuffer ObjParameter : register(b0)
     float4x4 ViewProjectionMatrix;
     float4x4 WorldMatrix;
     float4 ViewDir;
+    float4 pad[7];
 };
 
 struct VSInput

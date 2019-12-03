@@ -653,7 +653,11 @@ void Shader::BindConstantBuffer(string name, int baseRegister, int size, UINT nu
 	//binding.cbSize = size;
 
 	int div = size / 256;
-	binding.cbSize = (div + 1) * 256;
+	binding.cbSize = (div) * 256;
+
+	if (size % 256 > 0)
+		binding.cbSize += 256;
+
 
 	binding.cb = g_dx12_rhi->CreateConstantBuffer(binding.cbSize, g_dx12_rhi->NumFrame * numMaxDrawCall);
 
@@ -723,6 +727,7 @@ void Shader::SetConstantValue(string name, void* pData, ID3D12GraphicsCommandLis
 	
 	UINT CBViewIndex = g_dx12_rhi->CurrentFrameIndex * NumMaxDrawCall + currentDrawCallIndex;
 
+
 	UINT8* pMapped = (UINT8*)binding.cb->MemMapped + binding.cbSize*CBViewIndex;
 	memcpy((void*)pMapped, pData, binding.cbSize);
 
@@ -737,8 +742,6 @@ void Shader::SetConstantValue(string name, void* pData, ID3D12GraphicsCommandLis
 	cbvDesc.BufferLocation = binding.cb->resource->GetGPUVirtualAddress() + CBViewIndex * binding.cb->Size;
 	cbvDesc.SizeInBytes = binding.cb->Size;
 	g_dx12_rhi->Device->CreateConstantBufferView(&cbvDesc, CpuHandle);
-
-
 
 	CommandList->SetGraphicsRootDescriptorTable(binding.rootParamIndex, GpuHandle);
 }
@@ -1203,7 +1206,7 @@ void Texture::UploadSRCData(D3D12_SUBRESOURCE_DATA* SrcData)
 		BarrierDesc.Transition.pResource = resource.Get();
 		BarrierDesc.Transition.Subresource = 0;
 		BarrierDesc.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
-		BarrierDesc.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+		BarrierDesc.Transition.StateAfter = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
 		g_dx12_rhi->CommandList->ResourceBarrier(1, &BarrierDesc);
 
 		ThrowIfFailed(g_dx12_rhi->CommandList->Close());
@@ -1379,7 +1382,7 @@ std::shared_ptr<Texture> DumRHI_DX12::CreateTextureFromFile(wstring fileName, bo
 	BarrierDesc.Transition.pResource = tex->resource.Get();
 	BarrierDesc.Transition.Subresource = 0;
 	BarrierDesc.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
-	BarrierDesc.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+	BarrierDesc.Transition.StateAfter = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
 	g_dx12_rhi->CommandList->ResourceBarrier(1, &BarrierDesc);
 
 	ThrowIfFailed(g_dx12_rhi->CommandList->Close());
@@ -2045,7 +2048,10 @@ void RTPipelineStateObject::BindCBV(string shader, string name, UINT baseRegiste
 
 
 	int div = size / 256;
-	binding.cbSize = (div + 1) * 256;
+	binding.cbSize = (div) * 256;
+
+	if (size % 256 > 0)
+		binding.cbSize += 256;
 
 
 	for (int iFrame = 0; iFrame < g_dx12_rhi->NumFrame; iFrame++)

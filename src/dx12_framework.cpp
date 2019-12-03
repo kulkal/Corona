@@ -479,7 +479,7 @@ void dx12_framework::LoadAssets()
 	// lighting result
 	ColorBuffer = dx12_rhi->CreateTexture2D(DXGI_FORMAT_R8G8B8A8_UNORM,
 		D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
-		D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, m_width, m_height, 1);
+		D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, m_width, m_height, 1);
 	ColorBuffer->MakeRTV();
 	ColorBuffer->MakeDynamicSRV();
 
@@ -488,7 +488,7 @@ void dx12_framework::LoadAssets()
 	// world normal
 	NormalBuffer = dx12_rhi->CreateTexture2D(DXGI_FORMAT_R16G16B16A16_FLOAT,
 		D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
-		D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, m_width, m_height, 1);
+		D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, m_width, m_height, 1);
 	NormalBuffer->MakeRTV();
 	NormalBuffer->MakeDynamicSRV();
 
@@ -497,7 +497,7 @@ void dx12_framework::LoadAssets()
 	// geometry world normal
 	GeomNormalBuffer = dx12_rhi->CreateTexture2D(DXGI_FORMAT_R16G16B16A16_FLOAT,
 		D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
-		D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, m_width, m_height, 1);
+		D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, m_width, m_height, 1);
 	GeomNormalBuffer->MakeRTV();
 	GeomNormalBuffer->MakeDynamicSRV();
 
@@ -509,7 +509,7 @@ void dx12_framework::LoadAssets()
 	// shadow result
 	ShadowBuffer = dx12_rhi->CreateTexture2D(DXGI_FORMAT_R8G8B8A8_UNORM,
 		D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
-		D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, m_width, m_height, 1);
+		D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, m_width, m_height, 1);
 	ShadowBuffer->MakeDynamicSRV();
 	
 	ShadowBuffer->MakeUAV();
@@ -517,7 +517,7 @@ void dx12_framework::LoadAssets()
 	// refleciton result
 	ReflectionBuffer = dx12_rhi->CreateTexture2D(DXGI_FORMAT_R8G8B8A8_UNORM,
 		D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
-		D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, m_width, m_height, 1);
+		D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, m_width, m_height, 1);
 	ReflectionBuffer->MakeDynamicSRV();
 
 	ReflectionBuffer->MakeUAV();
@@ -528,7 +528,7 @@ void dx12_framework::LoadAssets()
 	// albedo
 	AlbedoBuffer = dx12_rhi->CreateTexture2D(DXGI_FORMAT_R8G8B8A8_UNORM,
 		D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
-		D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, m_width, m_height, 1);
+		D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, m_width, m_height, 1);
 	AlbedoBuffer->MakeRTV();
 	AlbedoBuffer->MakeDynamicSRV();
 
@@ -1293,7 +1293,7 @@ void dx12_framework::LightingPass()
 	BarrierDesc.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
 	BarrierDesc.Transition.pResource = ColorBuffer->resource.Get();
 	BarrierDesc.Transition.Subresource = 0;
-	BarrierDesc.Transition.StateBefore = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+	BarrierDesc.Transition.StateBefore = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
 	BarrierDesc.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
 	dx12_rhi->CommandList->ResourceBarrier(1, &BarrierDesc);
 
@@ -1340,7 +1340,7 @@ void dx12_framework::LightingPass()
 	BarrierDescPresent.Transition.pResource = ColorBuffer->resource.Get();
 	BarrierDescPresent.Transition.Subresource = 0;
 	BarrierDescPresent.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
-	BarrierDescPresent.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+	BarrierDescPresent.Transition.StateAfter = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
 	dx12_rhi->CommandList->ResourceBarrier(1, &BarrierDescPresent);
 
 	//PIXEndEvent(dx12_rhi->CommandList.Get());
@@ -1373,50 +1373,29 @@ void dx12_framework::OnUpdate()
 
 
 
-	glm::mat4x4 ViewMat;
-	glm::mat4x4 ProjMat;
+
 
 	memcpy(&ViewMat, &m_camera.GetViewMatrix(), sizeof(glm::mat4x4));
 	memcpy(&ProjMat, &m_camera.GetProjectionMatrix(0.8f, m_aspectRatio, Near, Far), sizeof(glm::mat4x4));
 
-	glm::mat4x4 ViewProjMat = glm::transpose(ProjMat * ViewMat);
-
-	// Compute the model-view-projection matrix.
-	
-	XMMATRIX ProjMatrix = m_camera.GetProjectionMatrix(0.8f, m_aspectRatio, Near, Far);
-	//XMStoreFloat4x4(&mvp, XMMatrixTranspose(m_camera.GetViewMatrix() * ProjMatrix));
-
-
-
-
+	ViewProjMat = glm::transpose(ProjMat * ViewMat);
 
 	RTShadowViewParam.ViewMatrix = glm::transpose(ViewMat);
 
 
 	glm::mat4x4 InvViewMat = glm::inverse(glm::transpose(ViewMat));
 	RTShadowViewParam.InvViewMatrix = InvViewMat;
-
-
-
 	RTShadowViewParam.ProjMatrix = glm::transpose(ProjMat);
-
 	RTShadowViewParam.ProjectionParams.x = Far / (Far - Near);
 	RTShadowViewParam.ProjectionParams.y = Near / (Near - Far);
 	RTShadowViewParam.ProjectionParams.z = Far;
-
 	RTShadowViewParam.LightDir = glm::vec4(LightDir, 0);
 
 
 	// reflection view param
 	RTReflectionViewParam.ViewMatrix = glm::transpose(ViewMat);
-
-
 	RTReflectionViewParam.InvViewMatrix = InvViewMat;
-
-
-
 	RTReflectionViewParam.ProjMatrix = glm::transpose(ProjMat);
-
 	RTReflectionViewParam.ProjectionParams.x = Far / (Far - Near);
 	RTReflectionViewParam.ProjectionParams.y = Near / (Near - Far);
 	RTReflectionViewParam.ProjectionParams.z = Far;
@@ -1440,9 +1419,9 @@ void dx12_framework::OnRender()
 
 	//NVAftermathMarker(dx12_rhi->AM_CL_Handle, "RaytracePass");
 
-	RaytraceShadowPass();
+	//RaytraceShadowPass();
 
-	RaytraceReflectionPass();
+	//RaytraceReflectionPass();
 	//ComputePass();
 
 	//NVAftermathMarker(dx12_rhi->AM_CL_Handle, "LightingPass");
@@ -1486,7 +1465,8 @@ void dx12_framework::OnRender()
 
 	dx12_rhi->EndFrame();
 
-	
+	PrevViewProjMat = ViewProjMat;
+	PrevViewMat = ViewMat;
 }
 
 void dx12_framework::OnDestroy()
@@ -1545,39 +1525,13 @@ struct ParallelDrawTaskSet : enki::ITaskSet
 
 void dx12_framework::DrawMeshPass()
 {
-	//Texture* backbuffer = ColorBuffer.get();
+	
 
 
-
-	// upload frame texture descriptor to shader visible heap.
-	//for (int i = 0; i < mesh->Draws.size(); i++)
-	//{
-	//	Mesh::DrawCall& drawcall = mesh->Draws[i];
-	//	Texture* diffuseTex = mesh->Textures[drawcall.DiffuseTextureIndex].get();
-	//	diffuseTex->VisibleThisFrame();
-	//	Texture* normalTex = mesh->Textures[drawcall.NormalTextureIndex].get();
-	//	normalTex->VisibleThisFrame();
-	//}
-
-	//for (auto& mat : Materials)
-	//{
-	//	mat->Diffuse->VisibleThisFrame();
-	//	mat->Normal->VisibleThisFrame();
-	//}
-
-	/*D3D12_RESOURCE_BARRIER BarrierDesc = {};
-	BarrierDesc.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-	BarrierDesc.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
-	BarrierDesc.Transition.pResource = backbuffer->resource.Get();
-	BarrierDesc.Transition.Subresource = 0;
-	BarrierDesc.Transition.StateBefore = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
-	BarrierDesc.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
-	dx12_rhi->CommandList->ResourceBarrier(1, &BarrierDesc);*/
-
-
-	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(AlbedoBuffer->resource.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET));
-	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(NormalBuffer->resource.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET));
-	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(GeomNormalBuffer->resource.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET));
+	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(AlbedoBuffer->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET));
+	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(NormalBuffer->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET));
+	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(GeomNormalBuffer->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET));
+	//dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(DepthBuffer->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_DEPTH_WRITE));
 
 
 	/*const D3D12_CPU_DESCRIPTOR_HANDLE Rendertargets[] = { AlbedoBuffer->CpuHandleRTV, NormalBuffer->CpuHandleRTV, GeomNormalBuffer->CpuHandleRTV };
@@ -1647,13 +1601,7 @@ void dx12_framework::DrawMeshPass()
 			dx12_rhi->CommandList->DrawIndexedInstanced(drawcall.IndexCount, 1, drawcall.IndexStart, drawcall.VertexBase, 0);
 		}*/
 
-		glm::mat4x4 ViewMat;
-		glm::mat4x4 ProjMat;
-
-		memcpy(&ViewMat, &m_camera.GetViewMatrix(), sizeof(glm::mat4x4));
-		memcpy(&ProjMat, &m_camera.GetProjectionMatrix(0.8f, m_aspectRatio, Near, Far), sizeof(glm::mat4x4));
-
-		glm::mat4x4 ViewProjMat = glm::transpose(ProjMat * ViewMat);
+		
 
 		for (auto& mesh : meshes)
 		{
@@ -1662,11 +1610,10 @@ void dx12_framework::DrawMeshPass()
 
 			for (int i = 0; i < mesh->Draws.size(); i++)
 			{
-				RS_Mesh->vs->currentDrawCallIndex++;
-				RS_Mesh->ps->currentDrawCallIndex++;
-
 				Mesh::DrawCall& drawcall = mesh->Draws[i];
 				ObjConstantBuffer objCB;
+				int sizea = sizeof(ObjConstantBuffer);
+
 				objCB.ViewProjectionMatrix = ViewProjMat;
 				glm::mat4 m; // Identity matrix
 				objCB.WorldMatrix = m;
@@ -1689,6 +1636,10 @@ void dx12_framework::DrawMeshPass()
 					RS_Mesh->ps->SetTexture("normalMap", normalTex, dx12_rhi->CommandList.Get());
 
 				dx12_rhi->CommandList->DrawIndexedInstanced(drawcall.IndexCount, 1, drawcall.IndexStart, drawcall.VertexBase, 0);
+
+
+				RS_Mesh->vs->currentDrawCallIndex++;
+				RS_Mesh->ps->currentDrawCallIndex++;
 			}
 		}
 	}
@@ -1743,9 +1694,10 @@ void dx12_framework::DrawMeshPass()
 
 	
 	
-	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(AlbedoBuffer->resource.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
-	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(NormalBuffer->resource.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
-	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(GeomNormalBuffer->resource.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
+	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(AlbedoBuffer->resource.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE));
+	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(NormalBuffer->resource.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE));
+	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(GeomNormalBuffer->resource.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE));
+	//dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(DepthBuffer->resource.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE));
 
 
 	//PIXEndEvent(dx12_rhi->CommandList.Get());
@@ -1811,7 +1763,7 @@ void dx12_framework::RecordDraw (UINT StartIndex, UINT NumDraw, UINT CLIndex, Th
 
 void dx12_framework::ComputePass()
 {
-	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(ShadowBuffer->resource.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS));
+	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(ShadowBuffer->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS));
 
 	//PIXBeginEvent(dx12_rhi->CommandList.Get(), 0, L"Compute");
 
@@ -1824,7 +1776,7 @@ void dx12_framework::ComputePass()
 	dx12_rhi->CommandList->Dispatch(m_width / 32, m_height / 32, 1);
 	//PIXEndEvent(dx12_rhi->CommandList.Get());
 
-	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(ShadowBuffer->resource.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
+	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(ShadowBuffer->resource.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE));
 
 }
 
@@ -1942,7 +1894,7 @@ vector<UINT64> ResourceInt64array(ComPtr<ID3D12Resource> resource, int size)
 }
 void dx12_framework::RaytraceShadowPass()
 {
-	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(ShadowBuffer->resource.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS));
+	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(ShadowBuffer->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS));
 
 
 	PSO_RT_SHADOW->BeginShaderTable();
@@ -1965,13 +1917,13 @@ void dx12_framework::RaytraceShadowPass()
 
 	PSO_RT_SHADOW->Apply(m_width, m_height);
 
-	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(ShadowBuffer->resource.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
+	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(ShadowBuffer->resource.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE));
 
 }
 
 void dx12_framework::RaytraceReflectionPass()
 {
-	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(ReflectionBuffer->resource.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS));
+	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(ReflectionBuffer->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS));
 
 
 	PSO_RT_REFLECTION->BeginShaderTable();
@@ -2009,6 +1961,6 @@ void dx12_framework::RaytraceReflectionPass()
 
 	PSO_RT_REFLECTION->Apply(m_width, m_height);
 
-	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(ReflectionBuffer->resource.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
+	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(ReflectionBuffer->resource.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE));
 
 }

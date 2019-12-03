@@ -41,6 +41,7 @@ class dx12_framework : public DXSample
 		glm::mat4x4 ViewProjectionMatrix;
 		glm::mat4x4 WorldMatrix;
 		glm::vec4 ViewDir;
+		glm::vec4 pad[7];
 	};
 
 	struct RTShadowViewParamCB
@@ -133,6 +134,13 @@ private:
 	glm::vec3 LightDir = glm::normalize(glm::vec3(0.5, 1, 0.2));
 	float Near = 1.0f;
 	float Far = 10000.0f;
+
+	glm::mat4x4 ViewMat;
+	glm::mat4x4 ProjMat;
+	glm::mat4x4 ViewProjMat;
+
+	glm::mat4x4 PrevViewMat;
+	glm::mat4x4 PrevViewProjMat;
 
 
 	// raytracing

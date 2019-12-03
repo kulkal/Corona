@@ -78,7 +78,7 @@ void SimpleCamera::Update(float elapsedSeconds)
 	float moveInterval = m_moveSpeed * elapsedSeconds;
 	float rotateInterval = m_turnSpeed * elapsedSeconds;
 
-	if (m_keysPressed.left)
+	//if (m_keysPressed.left)
 		m_yaw += rotateInterval;
 	if (m_keysPressed.right)
 		m_yaw -= rotateInterval;
