@@ -30,6 +30,9 @@ RWTexture2D<float4> gOutput : register(u0);
 RaytracingAccelerationStructure gRtScene : register(t0);
 Texture2D DepthTex : register(t1);
 Texture2D WorldNormalTex : register(t2);
+// Texture2D dummy : register(t3);
+// Texture2D dummy2 : register(t3);
+
 cbuffer ViewParameter : register(b0)
 {
     float4x4 ViewMatrix;
@@ -37,6 +40,7 @@ cbuffer ViewParameter : register(b0)
     float4x4 ProjMatrix;
     float4 ProjectionParams;
     float4 LightDir;
+    float4 pad[2];
 };
 SamplerState sampleWrap : register(s0);
 
@@ -170,6 +174,8 @@ void rayGen
 
 	RayDesc ray;
 	ray.Origin = WorldPos + WorldNormal * 0.5; //    mul(float4(0, 0, 0, 1), InvViewMatrix).xyz;
+    // ray.Origin = WorldPos ; //    mul(float4(0, 0, 0, 1), InvViewMatrix).xyz;
+
 	ray.Direction = LightDir;
 
 	ray.TMin = 0;

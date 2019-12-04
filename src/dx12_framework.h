@@ -39,9 +39,10 @@ class dx12_framework : public DXSample
 	struct ObjConstantBuffer
 	{
 		glm::mat4x4 ViewProjectionMatrix;
+		glm::mat4x4 ViewMatrix;
 		glm::mat4x4 WorldMatrix;
 		glm::vec4 ViewDir;
-		glm::vec4 pad[7];
+		glm::vec4 pad[3];
 	};
 
 	struct RTShadowViewParamCB
@@ -51,6 +52,7 @@ class dx12_framework : public DXSample
 		glm::mat4x4 ProjMatrix;
 		glm::vec4 ProjectionParams;
 		glm::vec4	LightDir;
+		glm::vec4	pad[2];
 	};
 
 	struct RTReflectionViewParamCB

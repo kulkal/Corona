@@ -513,7 +513,7 @@ public:
 	std::list<std::shared_ptr<Texture>> DynamicTextures;
 
 
-	vector<shared_ptr<ConstantBuffer>> cbVec;
+	//vector<shared_ptr<ConstantBuffer>> cbVec;
 
 
 

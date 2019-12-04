@@ -248,7 +248,7 @@ shared_ptr<ConstantBuffer> DumRHI_DX12::CreateConstantBuffer(int Size, UINT NumV
 	//}
 	
 	shared_ptr<ConstantBuffer> retPtr = shared_ptr<ConstantBuffer>(cbuffer);
-	cbVec.push_back(retPtr);
+	//cbVec.push_back(retPtr);
 
 	return retPtr;
 }
@@ -1380,9 +1380,9 @@ std::shared_ptr<Texture> DumRHI_DX12::CreateTextureFromFile(wstring fileName, bo
 	BarrierDesc.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
 	BarrierDesc.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
 	BarrierDesc.Transition.pResource = tex->resource.Get();
-	BarrierDesc.Transition.Subresource = 0;
+	BarrierDesc.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
 	BarrierDesc.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
-	BarrierDesc.Transition.StateAfter = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+	BarrierDesc.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
 	g_dx12_rhi->CommandList->ResourceBarrier(1, &BarrierDesc);
 
 	ThrowIfFailed(g_dx12_rhi->CommandList->Close());

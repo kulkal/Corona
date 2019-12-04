@@ -55,7 +55,7 @@ float4 PSMain(PSInput input) : SV_TARGET
     float3 Shadow = ShadowTex.Sample(sampleWrap, input.uv);
 
 	
-    float3 DiffuseLighting = dot(LightDir.xyz, WorldNormal)* Albedo * 1;
+    float3 DiffuseLighting = dot(LightDir.xyz, WorldNormal)* Albedo * Shadow;
 
 
 

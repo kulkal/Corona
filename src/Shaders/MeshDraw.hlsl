@@ -24,9 +24,10 @@ SamplerState sampleWrap : register(s0);
 cbuffer ObjParameter : register(b0)
 {
     float4x4 ViewProjectionMatrix;
+    float4x4 ViewMatrix;
     float4x4 WorldMatrix;
     float4 ViewDir;
-    float4 pad[7];
+    float4 pad[3];
 };
 
 struct VSInput
