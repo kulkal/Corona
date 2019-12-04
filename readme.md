@@ -1,15 +1,18 @@
 # DX12 & DXR test framework
-This project is for dx12 & dxr learning. Quite  unorgnized for now. I am trying to test best practice implementation(resource binding, dynamic descriotpr allocation, multi-thread command submission, etc....)
+This project is for dx12 & dxr learning. I am trying to test best practice implementation(resource binding, descriotpr allocation, multi-thread command submission, etc....)
 
-## DX12
-* Helper classes for resource management.
+## DX12 Topic
 * Easy resource binding interface.
-* Dynamic descriptor allocation strategy.
-* Multi threaded mesh rendering.
+* Descriptor allocation.
+	* Ring buffer.
+* Multi threaded mesh rendering. (this is broken temporarily)
+* Descriptor table usage.
+* Memory residency.
 
-## DXR
-* Shadow
-* Reflection
+## DXR Topic
+* How to make resource binding easier.
+	* Root signature.
+	* Shader table.
 
 ## Build
 * Go to build directory.
@@ -24,6 +27,9 @@ This project is for dx12 & dxr learning. Quite  unorgnized for now. I am trying 
 ## Useful link
 * [MJP github](https://github.com/TheRealMJP)
 	* Excellent dx12 reference implementation.
+
+## Fun bug story
+* Shader table should be ring buffer if it changes!.
 	
 ## Copyright
 TODO
