@@ -2076,6 +2076,9 @@ void RTPipelineStateObject::EndShaderTable()
 	// hit : raygen + miss(N) + instanceIndex
 	uint8_t* pData;
 	HRESULT hr = ShaderTable->Map(0, nullptr, (void**)&pData);
+
+	pData += ShaderTableSize * g_dx12_rhi->CurrentFrameIndex;;
+
 	D3D12_GPU_VIRTUAL_ADDRESS va = ShaderTable->GetGPUVirtualAddress();
 
 	ComPtr<ID3D12StateObjectProperties> RtsoProps;
@@ -2544,7 +2547,7 @@ void RTPipelineStateObject::InitRS(string ShaderFile)
 		bufDesc.MipLevels = 1;
 		bufDesc.SampleDesc.Count = 1;
 		bufDesc.SampleDesc.Quality = 0;
-		bufDesc.Width = ShaderTableSize;
+		bufDesc.Width = ShaderTableSize * g_dx12_rhi->NumFrame;
 
 		const D3D12_HEAP_PROPERTIES kUploadHeapProps =
 		{
@@ -2575,19 +2578,21 @@ void RTPipelineStateObject::Apply(UINT width, UINT height)
 	raytraceDesc.Height = height;
 	raytraceDesc.Depth = 1;
 
-	raytraceDesc.RayGenerationShaderRecord.StartAddress = ShaderTable->GetGPUVirtualAddress() + 0 * ShaderTableEntrySize;
+	D3D12_GPU_VIRTUAL_ADDRESS StartAddress = ShaderTable->GetGPUVirtualAddress() + ShaderTableSize * g_dx12_rhi->CurrentFrameIndex;
+
+	raytraceDesc.RayGenerationShaderRecord.StartAddress = StartAddress ;
 	raytraceDesc.RayGenerationShaderRecord.SizeInBytes = ShaderTableEntrySize;
 
 	// Miss is the second entry in the shader-table
 	size_t missOffset = 1 * ShaderTableEntrySize;
-	raytraceDesc.MissShaderTable.StartAddress = ShaderTable->GetGPUVirtualAddress() + missOffset;
+	raytraceDesc.MissShaderTable.StartAddress = StartAddress + missOffset;
 	raytraceDesc.MissShaderTable.StrideInBytes = ShaderTableEntrySize;
 	raytraceDesc.MissShaderTable.SizeInBytes = ShaderTableEntrySize;   // Only a s single miss-entry
 
 
 	 // Hit is the third entry in the shader-table
 	size_t hitOffset = 2 * ShaderTableEntrySize;
-	raytraceDesc.HitGroupTable.StartAddress = ShaderTable->GetGPUVirtualAddress() + hitOffset;
+	raytraceDesc.HitGroupTable.StartAddress = StartAddress + hitOffset;
 	raytraceDesc.HitGroupTable.StrideInBytes = ShaderTableEntrySize;
 	raytraceDesc.HitGroupTable.SizeInBytes = ShaderTableEntrySize;
 

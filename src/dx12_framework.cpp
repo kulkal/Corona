@@ -1831,7 +1831,7 @@ void dx12_framework::InitRaytracing()
 	PSO_RT_SHADOW->BindSRV("rayGen", "gRtScene", 0);
 	PSO_RT_SHADOW->BindSRV("rayGen", "DepthTex", 1);
 	PSO_RT_SHADOW->BindSRV("rayGen", "WorldNormalTex", 2);
-	PSO_RT_SHADOW->BindSRV("rayGen", "dummy", 3);
+	//PSO_RT_SHADOW->BindSRV("rayGen", "dummy", 3);
 
 
 	PSO_RT_SHADOW->BindCBV("rayGen", "ViewParameter", 0, sizeof(RTShadowViewParamCB), 1);
@@ -1912,10 +1912,10 @@ void dx12_framework::RaytraceShadowPass()
 	PSO_RT_SHADOW->SetUAV("rayGen", "gOutput", ShadowBuffer->GpuHandleUAV);
 	PSO_RT_SHADOW->SetSRV("rayGen", "gRtScene", TLAS->GPUHandle);
 	PSO_RT_SHADOW->SetSRV("rayGen", "DepthTex", DepthBuffer->GpuHandleSRV);
-	PSO_RT_SHADOW->SetSRV("rayGen", "WorldNormalTex", NormalBuffer->GpuHandleSRV);
+	PSO_RT_SHADOW->SetSRV("rayGen", "WorldNormalTex", GeomNormalBuffer->GpuHandleSRV);
 
-	D3D12_GPU_DESCRIPTOR_HANDLE dummy;
-	PSO_RT_SHADOW->SetSRV("rayGen", "dummy", dummy);
+	/*D3D12_GPU_DESCRIPTOR_HANDLE dummy;
+	PSO_RT_SHADOW->SetSRV("rayGen", "dummy", dummy);*/
 
 
 
