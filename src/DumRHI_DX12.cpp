@@ -41,14 +41,12 @@ void ThreadDescriptorHeapPool::AllocDescriptor(D3D12_CPU_DESCRIPTOR_HANDLE& cpuH
 	if ((PoolIndex-StartIndex) >= PoolSize)
 		PoolIndex = 0;
 
-	cpuHandle.ptr = DHeap->CPUHeapStart /*DHeap->DH->GetCPUDescriptorHandleForHeapStart().ptr */+ PoolIndex * DHeap->DescriptorSize;// g_dx12_rhi->Device->GetDescriptorHandleIncrementSize(DHeap->HeapDesc.Type);
-
-	gpuHandle.ptr = DHeap->GPUHeapStart/* DHeap->DH->GetGPUDescriptorHandleForHeapStart().ptr */+ PoolIndex * DHeap->DescriptorSize;// g_dx12_rhi->Device->GetDescriptorHandleIncrementSize(DHeap->HeapDesc.Type);
+	cpuHandle.ptr = DHeap->CPUHeapStart + PoolIndex * DHeap->DescriptorSize;
+	gpuHandle.ptr = DHeap->GPUHeapStart + PoolIndex * DHeap->DescriptorSize;
 
 	PoolIndex++;
 
 }
-
 
 void DescriptorHeap::Init(D3D12_DESCRIPTOR_HEAP_DESC& InHeapDesc)
 {
@@ -62,7 +60,6 @@ void DescriptorHeap::Init(D3D12_DESCRIPTOR_HEAP_DESC& InHeapDesc)
 
 	CPUHeapStart = DH->GetCPUDescriptorHandleForHeapStart().ptr;
 	GPUHeapStart = DH->GetGPUDescriptorHandleForHeapStart().ptr;
-
 }
 
 void DescriptorHeap::AllocDescriptor(D3D12_CPU_DESCRIPTOR_HANDLE& cpuHandle, D3D12_GPU_DESCRIPTOR_HANDLE& gpuHandle)
@@ -71,18 +68,14 @@ void DescriptorHeap::AllocDescriptor(D3D12_CPU_DESCRIPTOR_HANDLE& cpuHandle, D3D
 		NumAllocated = 0;
 
 	cpuHandle.ptr = CPUHeapStart + NumAllocated * DescriptorSize ;
-
 	gpuHandle.ptr = GPUHeapStart + NumAllocated * DescriptorSize;
 
 	NumAllocated++;
 }
 
-
-
 void DescriptorHeap::AllocDescriptors(D3D12_CPU_DESCRIPTOR_HANDLE& cpuHandle, D3D12_GPU_DESCRIPTOR_HANDLE& gpuHandle, UINT num)
 {
 	cpuHandle.ptr = CPUHeapStart + NumAllocated * DescriptorSize;
-
 	gpuHandle.ptr = GPUHeapStart + NumAllocated * DescriptorSize;
 
 	NumAllocated += num;
@@ -90,14 +83,11 @@ void DescriptorHeap::AllocDescriptors(D3D12_CPU_DESCRIPTOR_HANDLE& cpuHandle, D3
 
 void DumRHI_DX12::BeginFrame()
 {
-	//SRVCBVDescriptorHeapShaderVisible->DescriptorIndex = 0;
 	const UINT64 lastCompletedFence = m_fence->GetCompletedValue();
 
 	CurrentFrameIndex = m_swapChain->GetCurrentBackBufferIndex();
 
-
 	// wait until gpu processing for this frame resource is completed
-	//if (m_fenceValue > 2)
 	{
 		UINT64 ThisFrameFenceValue = FrameResourceVec[CurrentFrameIndex].FenceValue;
 		ThrowIfFailed(m_fence->SetEventOnCompletion(ThisFrameFenceValue, m_fenceEvent));
@@ -107,9 +97,6 @@ void DumRHI_DX12::BeginFrame()
 
 	GetCurrentCA()->Reset();
 	ThrowIfFailed(CommandList->Reset(GetCurrentCA(), nullptr));
-
-	/*	ID3D12CommandAllocator* CA = dx12_rhi->FrameResourceVec[dx12_rhi->CurrentFrameIndex].VecCommandAllocatorMeshDraw[i].Get();
-			CL->Reset(CA, nullptr);*/
 
 	for (auto& CA : FrameResourceVec[CurrentFrameIndex].VecCommandAllocatorMeshDraw)
 	{
@@ -174,11 +161,9 @@ void DumRHI_DX12::WaitGPU()
 
 	m_fence->SetEventOnCompletion(m_fenceValue, m_fenceEvent);
 	WaitForSingleObject(m_fenceEvent, INFINITE);
-
 }
 
 shared_ptr<ConstantBuffer> DumRHI_DX12::CreateConstantBuffer(int Size, UINT NumView)
-
 {
 	ConstantBuffer* cbuffer = new ConstantBuffer;
 
@@ -223,49 +208,18 @@ shared_ptr<ConstantBuffer> DumRHI_DX12::CreateConstantBuffer(int Size, UINT NumV
 	CD3DX12_RANGE readRange(0, 0);		// We do not intend to read from this resource on the CPU.
 	ThrowIfFailed(cbuffer->resource->Map(0, &readRange, reinterpret_cast<void**>(&cbuffer->MemMapped)));
 
-	// Describe and create a constant buffer view (CBV).
-	//cbuffer->CpuHandleVec.reserve(NumView);
-	//cbuffer->GpuHandleVec.reserve(NumView);
-
-	//for (int i = 0; i < NumView; i++)
-	//{
-	//	D3D12_CPU_DESCRIPTOR_HANDLE CpuHandle;
-	//	D3D12_GPU_DESCRIPTOR_HANDLE GpuHandle;
-
-	//	//SRVCBVDescriptorHeapStorage->AllocDescriptor(CpuHandle, GpuHandle);
-	//	//SRVCBVDescriptorHeapShaderVisible->AllocDescriptor(CpuHandle, GpuHandle);
-	//	g_dx12_rhi->GlobalDHRing->AllocDescriptor(CpuHandle, GpuHandle);
-
-
-	//	D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc = {};
-	//	cbvDesc.BufferLocation = cbuffer->resource->GetGPUVirtualAddress() + i*Size;
-	//	cbvDesc.SizeInBytes = Size;
-	//	Device->CreateConstantBufferView(&cbvDesc, CpuHandle);
-	//	
-	//	cbuffer->CpuHandleVec.push_back(CpuHandle);
-	//	cbuffer->GpuHandleVec.push_back(GpuHandle);
-
-	//}
-	
 	shared_ptr<ConstantBuffer> retPtr = shared_ptr<ConstantBuffer>(cbuffer);
 	//cbVec.push_back(retPtr);
 
 	return retPtr;
 }
 
-
 shared_ptr<Sampler> DumRHI_DX12::CreateSampler(D3D12_SAMPLER_DESC& InSamplerDesc)
 {
 	Sampler* sampler = new Sampler;
-
 	sampler->SamplerDesc = InSamplerDesc;
-
-	//SamplerDescriptorHeapStorage->AllocDescriptor(sampler->CpuHandle, sampler->GpuHandle);
 	SamplerDescriptorHeapShaderVisible->AllocDescriptor(sampler->CpuHandle, sampler->GpuHandle);
-
-
 	Device->CreateSampler(&sampler->SamplerDesc, sampler->CpuHandle);
-
 
 	return shared_ptr<Sampler>(sampler);
 }
@@ -346,8 +300,6 @@ shared_ptr<IndexBuffer> DumRHI_DX12::CreateIndexBuffer(DXGI_FORMAT Format, UINT 
 
 		g_dx12_rhi->WaitGPU();
 		// Create synchronization objects and wait until assets have been uploaded to the GPU.
-
-
 	}
 
 	return shared_ptr<IndexBuffer>(ib);
@@ -419,11 +371,7 @@ shared_ptr<VertexBuffer> DumRHI_DX12::CreateVertexBuffer(UINT Size, UINT Stride,
 		ThrowIfFailed(CommandList->Reset(GetCurrentCA(), nullptr));
 
 		g_dx12_rhi->WaitGPU();
-
-	
-
 	}
-
 
 	return shared_ptr<VertexBuffer>(vb);
 }
@@ -443,7 +391,6 @@ void DumRHI_DX12::PresentBarrier(Texture* rt)
 DumRHI_DX12::DumRHI_DX12(ComPtr<ID3D12Device5> InDevice)
 	:Device(InDevice)
 {
-
 	//GFSDK_Aftermath_Result result = GFSDK_Aftermath_DX12_Initialize(GFSDK_Aftermath_Version::GFSDK_Aftermath_Version_API, GFSDK_Aftermath_FeatureFlags::GFSDK_Aftermath_FeatureFlags_Maximum, Device.Get());
 
 	g_dx12_rhi = this;
@@ -455,7 +402,6 @@ DumRHI_DX12::DumRHI_DX12(ComPtr<ID3D12Device5> InDevice)
 
 	ThrowIfFailed(Device->CreateCommandQueue(&queueDesc, IID_PPV_ARGS(&CommandQueue)));
 	NAME_D3D12_OBJECT(CommandQueue);
-
 
 	for (int i = 0; i < NumFrame; i++)
 	{
@@ -509,7 +455,6 @@ DumRHI_DX12::DumRHI_DX12(ComPtr<ID3D12Device5> InDevice)
 		RTVDescriptorHeap->Init(HeapDesc);
 
 		NAME_D3D12_OBJECT(RTVDescriptorHeap->DH);
-
 	}
 	
 
@@ -523,7 +468,6 @@ DumRHI_DX12::DumRHI_DX12(ComPtr<ID3D12Device5> InDevice)
 		DSVDescriptorHeap->Init(HeapDesc);
 
 		NAME_D3D12_OBJECT(DSVDescriptorHeap->DH);
-
 	}
 	
 	// shader visible CBV_SRV_UAV
@@ -550,7 +494,6 @@ DumRHI_DX12::DumRHI_DX12(ComPtr<ID3D12Device5> InDevice)
 		SRVCBVDescriptorHeapStorage->Init(HeapDesc);
 
 		NAME_D3D12_OBJECT(SRVCBVDescriptorHeapStorage->DH);
-
 	}
 
 	// shader visible sampler
@@ -580,9 +523,6 @@ DumRHI_DX12::DumRHI_DX12(ComPtr<ID3D12Device5> InDevice)
 	// Create an event handle to use for frame synchronization.
 	m_fenceEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
 
-
-	
-
 	// Close the command list and execute it to begin the initial GPU setup.
 	ThrowIfFailed(CommandList->Close());
 	ID3D12CommandList* ppCommandLists[] = { CommandList.Get() };
@@ -597,29 +537,9 @@ DumRHI_DX12::DumRHI_DX12(ComPtr<ID3D12Device5> InDevice)
 DumRHI_DX12::~DumRHI_DX12()
 {
 	m_fenceValue++;
-
 	CommandQueue->Signal(m_fence.Get(), m_fenceValue);
-
-
 	m_fence->SetEventOnCompletion(m_fenceValue, m_fenceEvent);
 	WaitForSingleObject(m_fenceEvent, INFINITE);
-
-
-	//{
-	//	const UINT64 fence = m_fenceValue;
-	//	const UINT64 lastCompletedFence = m_fence->GetCompletedValue();
-
-	//	// Signal and increment the fence value.
-	//	ThrowIfFailed(CommandQueue->Signal(m_fence.Get(), m_fenceValue));
-	//	m_fenceValue++;
-
-	//	// Wait until the previous frame is finished.
-	//	if (lastCompletedFence < fence)
-	//	{
-	//		ThrowIfFailed(m_fence->SetEventOnCompletion(fence, m_fenceEvent));
-	//		WaitForSingleObject(m_fenceEvent, INFINITE);
-	//	}
-	//}
 }
 
 void Shader::BindUAV(string name, int baseRegister)
@@ -628,7 +548,6 @@ void Shader::BindUAV(string name, int baseRegister)
 	binding.name = name;
 	binding.baseRegister = baseRegister;
 	binding.numDescriptors = 1;
-
 	uavBinding.insert(pair<string, BindingData>(name, binding));
 }
 
@@ -638,7 +557,6 @@ void Shader::BindTexture(string name, int baseRegister, int num)
 	binding.name = name;
 	binding.baseRegister = baseRegister;
 	binding.numDescriptors = num;
-
 	textureBinding.insert(pair<string, BindingData>(name, binding));
 }
 
@@ -663,7 +581,6 @@ void Shader::BindConstantBuffer(string name, int baseRegister, int size, UINT nu
 
 	constantBufferBinding.insert(pair<string, BindingData>(name, binding));
 }
-
 
 void Shader::BindRootConstant(string name, int baseRegister)
 {
@@ -694,7 +611,6 @@ void Shader::SetTexture(string name, Texture* texture, ID3D12GraphicsCommandList
 
 	UINT RPI = textureBinding[name].rootParamIndex;
 	CommandList->SetGraphicsRootDescriptorTable(RPI, texture->GpuHandleSRV);
-
 }
 
 void Shader::SetUAV(string name, Texture* texture, ID3D12GraphicsCommandList* CommandList, bool isCompute)
@@ -723,14 +639,10 @@ void Shader::SetSampler(string name, Sampler* sampler, ID3D12GraphicsCommandList
 void Shader::SetConstantValue(string name, void* pData, ID3D12GraphicsCommandList* CommandList)
 {
 	BindingData& binding = constantBufferBinding[name];
-
 	
 	UINT CBViewIndex = g_dx12_rhi->CurrentFrameIndex * NumMaxDrawCall + currentDrawCallIndex;
-
-
 	UINT8* pMapped = (UINT8*)binding.cb->MemMapped + binding.cbSize*CBViewIndex;
 	memcpy((void*)pMapped, pData, binding.cbSize);
-
 
 	D3D12_CPU_DESCRIPTOR_HANDLE CpuHandle;
 	D3D12_GPU_DESCRIPTOR_HANDLE GpuHandle;
@@ -889,8 +801,6 @@ void PipelineStateObject::Init(bool isCompute)
 		}
 	}
 
-	
-
 	CD3DX12_VERSIONED_ROOT_SIGNATURE_DESC rootSignatureDesc;
 	rootSignatureDesc.Init_1_1(rootParamVec.size(), &rootParamVec[0], 0, nullptr, D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
 
@@ -948,16 +858,12 @@ void PipelineStateObject::ApplyGlobal(ID3D12GraphicsCommandList* CommandList)
 {
 	CommandList->SetGraphicsRootSignature(RS.Get());
 	CommandList->SetPipelineState(PSO.Get());
-
-	
 }
 
 void PipelineStateObject::ApplyCS(ID3D12GraphicsCommandList* CommandList)
 {
 	CommandList->SetComputeRootSignature(RS.Get());
 	CommandList->SetPipelineState(PSO.Get());
-
-	
 }
 
 void PipelineStateObject::ApplyGraphicsRSPSO(ID3D12GraphicsCommandList* CommandList)
@@ -977,50 +883,6 @@ UINT PipelineStateObject::GetGraphicsBindingDHSize()
 	return	vs->constantBufferBinding.size() + ps->constantBufferBinding.size() + vs->textureBinding.size() + ps->textureBinding.size();
 }
 
-void Texture::MakeUAV()
-{
-	//g_dx12_rhi->SRVCBVDescriptorHeapStorage->AllocDescriptor(CpuHandleUAV, GpuHandleUAV);
-	//g_dx12_rhi->SRVCBVDescriptorHeapShaderVisible->AllocDescriptor(CpuHandleUAV, GpuHandleUAV);
-	g_dx12_rhi->GlobalDHRing->AllocDescriptor(CpuHandleUAV, GpuHandleUAV);
-
-
-	D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc = {};
-	uavDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
-	//uavDesc.Format = Format;
-	uavDesc.Format = textureDesc.Format;
-
-	g_dx12_rhi->Device->CreateUnorderedAccessView(resource.Get(), nullptr, &uavDesc, CpuHandleUAV);
-}
-
-void Texture::MakeDepthSRV()
-{
-	g_dx12_rhi->GlobalDHRing->AllocDescriptor(CpuHandleSRV, GpuHandleSRV);
-
-	D3D12_SHADER_RESOURCE_VIEW_DESC SrvDesc = {};
-	SrvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-	SrvDesc.Format = DXGI_FORMAT_R32_FLOAT;
-
-	SrvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-	SrvDesc.Texture2D.MipLevels = textureDesc.MipLevels;
-	g_dx12_rhi->Device->CreateShaderResourceView(resource.Get(), &SrvDesc, CpuHandleSRV);
-
-}
-
-void Texture::MakeDynamicSRV()
-{
-	g_dx12_rhi->GlobalDHRing->AllocDescriptor(CpuHandleSRV, GpuHandleSRV);
-
-	D3D12_SHADER_RESOURCE_VIEW_DESC SrvDesc = {};
-	SrvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-	SrvDesc.Format = textureDesc.Format;
-
-	SrvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-	SrvDesc.Texture2D.MipLevels = textureDesc.MipLevels;
-	g_dx12_rhi->Device->CreateShaderResourceView(resource.Get(), &SrvDesc, CpuHandleSRV);
-
-	
-}
-
 void Texture::MakeStaticSRV()
 {
 	g_dx12_rhi->TextureDHRing->AllocDescriptor(CpuHandleSRV, GpuHandleSRV);
@@ -1032,9 +894,7 @@ void Texture::MakeStaticSRV()
 	SrvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
 	SrvDesc.Texture2D.MipLevels = textureDesc.MipLevels;
 	g_dx12_rhi->Device->CreateShaderResourceView(resource.Get(), &SrvDesc, CpuHandleSRV);
-
 }
-
 
 void Texture::MakeRTV()
 {
@@ -1071,8 +931,6 @@ std::shared_ptr<Texture> DumRHI_DX12::CreateTexture2DFromResource(ComPtr<ID3D12R
 
 	return shared_ptr<Texture>(tex);
 }
-
-//DirectX::ScratchImage 
 
 std::shared_ptr<Texture> DumRHI_DX12::CreateTexture2D(DXGI_FORMAT format, D3D12_RESOURCE_FLAGS resFlags, D3D12_RESOURCE_STATES initResState, int width, int height, int mipLevels)
 {
@@ -1215,13 +1073,8 @@ void Texture::UploadSRCData(D3D12_SUBRESOURCE_DATA* SrcData)
 		ThrowIfFailed(g_dx12_rhi->CommandList->Reset(g_dx12_rhi->GetCurrentCA(), nullptr));
 
 		g_dx12_rhi->WaitGPU();
-
-		//ThrowIfFailed(g_dx12_rhi->CommandList->Reset(g_dx12_rhi->CommandAllocator.Get(), nullptr));
-
 	}
 }
-
-
 
 std::shared_ptr<Texture> DumRHI_DX12::CreateTextureFromFile(wstring fileName, bool isNormal)
 {
@@ -1617,7 +1470,6 @@ std::shared_ptr<RTAS> Mesh::CreateBLASArray()
 	g_dx12_rhi->WaitGPU();
 	
 	return shared_ptr<RTAS>(as);
-
 }
 
 std::shared_ptr<RTAS> DumRHI_DX12::CreateTLAS(vector<shared_ptr<RTAS>>& VecBottomLevelAS)
@@ -1723,8 +1575,6 @@ std::shared_ptr<RTAS> DumRHI_DX12::CreateTLAS(vector<shared_ptr<RTAS>>& VecBotto
 		as->Instance->Unmap(0, nullptr);
 	}
 	
-
-
 	// Create the TLAS
 	D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC asDesc = {};
 	asDesc.Inputs = inputs;
@@ -1759,7 +1609,6 @@ std::shared_ptr<RTAS> DumRHI_DX12::CreateTLAS(vector<shared_ptr<RTAS>>& VecBotto
 
 	g_dx12_rhi->WaitGPU();
 
-
 	return shared_ptr<RTAS>(as);
 }
 
@@ -1773,7 +1622,6 @@ std::string convertBlobToString(BlotType* pBlob)
 }
 
 static dxc::DxcDllSupport gDxcDllHelper;
-
 
 ComPtr<ID3DBlob> compileShaderLibrary(const WCHAR* filename, const WCHAR* targetString)
 {
@@ -1867,7 +1715,6 @@ wstring StringToWString(const std::string &s)
 
 	return ws;
 }
-
 
 ComPtr<ID3D12RootSignature> CreateRootSignature(ComPtr<ID3D12Device5> pDevice, const D3D12_ROOT_SIGNATURE_DESC& desc)
 {
@@ -2018,7 +1865,6 @@ void RTPipelineStateObject::BindSRV(string shader, string name, UINT baseRegiste
 
 	binding.BaseRegister = baseRegister;
 
-
 	bindingInfo.Binding.push_back(binding);
 }
 
@@ -2031,7 +1877,6 @@ void RTPipelineStateObject::BindSampler(string shader, string name, UINT baseReg
 	binding.Type = D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER;
 
 	binding.BaseRegister = baseRegister;
-
 
 	bindingInfo.Binding.push_back(binding);
 }
@@ -2065,9 +1910,7 @@ void RTPipelineStateObject::BindCBV(string shader, string name, UINT baseRegiste
 
 void RTPipelineStateObject::BeginShaderTable()
 {
-	//HitProgramBinding.clear();
 }
-
 
 void RTPipelineStateObject::EndShaderTable()
 {
@@ -2195,7 +2038,6 @@ void RTPipelineStateObject::SetUAV(string shader, string bindingName, D3D12_GPU_
 		HitProgramBinding[instanceIndex].HitGroupName = MapHitGroup[shader].name;
 		HitProgramBinding[instanceIndex].VecData.push_back(uavHandle);
 	}
-	
 }
 
 void RTPipelineStateObject::SetSRV(string shader, string bindingName, D3D12_GPU_DESCRIPTOR_HANDLE srvHandle, INT instanceIndex /*= -1*/)
@@ -2568,7 +2410,6 @@ void RTPipelineStateObject::InitRS(string ShaderFile)
 		NAME_D3D12_OBJECT(ShaderTable);
 
 	}
-
 }
 
 void RTPipelineStateObject::Apply(UINT width, UINT height)

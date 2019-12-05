@@ -183,7 +183,6 @@ public:
 
 	void InitDrawMeshRS();
 
-	void InitDrawMeshPass();
 	void DrawMeshPass();
 
 	void RaytraceShadowPass();

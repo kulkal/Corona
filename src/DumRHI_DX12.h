@@ -12,8 +12,6 @@
 using namespace Microsoft::WRL;
 using namespace std;
 
-// when RTV is created, free descriptor 
-
 class DumRHI_DX12;
 class Texture;
 class ConstantBuffer;
@@ -22,15 +20,12 @@ class ThreadDescriptorHeapPool;
 
 class FrameResource
 {
-private:
-
 public:
 
 	ComPtr<ID3D12CommandAllocator> CommandAllocator;
 	vector<ComPtr<ID3D12CommandAllocator>> VecCommandAllocatorMeshDraw;
 
 	UINT64 FenceValue = 0;
-	
 };
 
 class Shader
@@ -51,10 +46,6 @@ public:
 
 		Texture* texture;
 		Sampler* sampler;
-		
-		//vector<CBVersions> frameCBs;
-
-		//vector<shared_ptr<ConstantBuffer>> cbs; // multiple constant buffers are need for multiple buffering.
 
 		shared_ptr<ConstantBuffer> cb;
 
@@ -96,12 +87,9 @@ class PipelineStateObject
 {
 public:
 	UINT RootParamIndex = 0;
-	//DumRHI_DX12 * rhi;
 	shared_ptr<Shader> vs;
 	shared_ptr<Shader> ps;
 	shared_ptr<Shader> cs;
-
-	
 
 	ComPtr<ID3D12RootSignature> RS;
 	ComPtr<ID3D12PipelineState> PSO;
@@ -110,21 +98,13 @@ public:
 	D3D12_COMPUTE_PIPELINE_STATE_DESC computePSODesc;
 
 	void Init(bool isCompute);
-	//void ApplyMeshDraw(ID3D12GraphicsCommandList* CommandList, UINT DrawIndex, ThreadDescriptorHeapPool* DHPool);
 
 	void ApplyGlobal(ID3D12GraphicsCommandList* CommandList);
-
 	void ApplyCS(ID3D12GraphicsCommandList* CommandList);
-
 	void ApplyGraphicsRSPSO(ID3D12GraphicsCommandList* CommandList);
 	void ApplyComputeRSPSO(ID3D12GraphicsCommandList* CommandList);
 
 	UINT GetGraphicsBindingDHSize();
-};
-
-class RTShaderLib
-{
-	
 };
 
 class RTPipelineStateObject
@@ -162,10 +142,6 @@ public:
 	struct BindingInfo
 	{
 		ShaderType Type;
-	
-		
-
-
 		wstring ShaderName;
 		vector<BindingData> Binding;
 
@@ -211,11 +187,9 @@ public:
 	UINT ShaderTableSize;
 	ComPtr<ID3D12Resource> ShaderTable;
 
-
 	UINT NumInstance;
 
 	void AddHitGroup(string name, string chs, string ahs);
-
 
 	// new binding interface
 	void AddShader(string shader, RTPipelineStateObject::ShaderType shaderType);
@@ -236,13 +210,9 @@ public:
 	void SetCBVValue(string shader, string bindingName, void* pData, INT size, INT instanceIndex = -1);
 	void SetHitProgram(string shader, UINT instanceIndex);
 
-
 	void InitRS(string ShaderFile);
-
 	void Apply(UINT width, UINT height);
-
 };
-
 
 class IndexBuffer
 {
@@ -275,24 +245,20 @@ public:
 	D3D12_GPU_DESCRIPTOR_HANDLE GpuHandle;
 };
 
-//template<class T>
 class ConstantBuffer
 {
 public:
 	UINT Size;
 	ComPtr<ID3D12Resource> resource = nullptr;
-	//D3D12_CPU_DESCRIPTOR_HANDLE CpuHandle;
 	D3D12_GPU_DESCRIPTOR_HANDLE GpuHandle;
 
 	// multiple descriptor is needed for multiple draw(ex : transform matrix)
 	vector<D3D12_CPU_DESCRIPTOR_HANDLE> CpuHandleVec;
 	vector<D3D12_GPU_DESCRIPTOR_HANDLE> GpuHandleVec;
 
-
 	void* MemMapped = nullptr;
 
 	ConstantBuffer(){}
-		
 	
 	virtual ~ConstantBuffer()
 	{
@@ -303,8 +269,6 @@ public:
 class Texture : public std::enable_shared_from_this<Texture>
 {
 public:
-	//DXGI_FORMAT Format;
-
 	D3D12_RESOURCE_DESC textureDesc;
 
 	ComPtr<ID3D12Resource> resource;
@@ -322,18 +286,12 @@ public:
 	D3D12_CPU_DESCRIPTOR_HANDLE CpuHandleSRV;
 	D3D12_GPU_DESCRIPTOR_HANDLE GpuHandleSRV;
 
-	void MakeUAV();
-	void MakeDepthSRV();
-	void MakeDynamicSRV();
-
 	void MakeStaticSRV();
 	void MakeRTV();
 	void MakeDSV();
 
-
 	void UploadSRCData(D3D12_SUBRESOURCE_DATA* SrcData);
 };
-
 
 class DescriptorHeap
 {
@@ -360,7 +318,6 @@ public:
 };
 
 // allocate region of descriptors from descriptor heap. (numDescriptors * numFrame)
-// and 
 class DescriptorHeapRing
 {
 public:
@@ -382,7 +339,6 @@ public:
 	DescriptorHeapRing(){}
 	~DescriptorHeapRing() {}
 };
-
 
 class ThreadDescriptorHeapPool
 {
@@ -408,7 +364,6 @@ public:
 
 	ThreadDescriptorHeapPool();
 	~ThreadDescriptorHeapPool() {}
-	
 };
 
 class RTAS
@@ -464,27 +419,20 @@ public:
 	shared_ptr<RTAS> CreateBLASArray();
 };
 
-
-
 class DumRHI_DX12
 {
-
-
 public:
-
 	friend class DescriptorHeap;
 
-	uint32_t NumFrame = 3;
+	const uint32_t NumFrame = 3;
 	uint32_t CurrentFrameIndex = 0;
-
 
 	ComPtr<ID3D12Device5> Device;
 	ComPtr<ID3D12CommandQueue> CommandQueue;
-
 	ComPtr<ID3D12GraphicsCommandList4> CommandList;
 
-	ID3D12CommandAllocator* GetCurrentCA() { 
-		
+	ID3D12CommandAllocator* GetCurrentCA() 
+	{ 
 		return FrameResourceVec[CurrentFrameIndex].CommandAllocator.Get();
 	}
 
@@ -492,8 +440,6 @@ public:
 
 	static const UINT NumDrawMeshCommandList = 8;
 	ComPtr<ID3D12GraphicsCommandList> DrawMeshCommandList[NumDrawMeshCommandList];
-
-
 
 	std::unique_ptr<DescriptorHeap> RTVDescriptorHeap;
 	std::unique_ptr<DescriptorHeap> DSVDescriptorHeap;
@@ -505,56 +451,33 @@ public:
 	std::unique_ptr<DescriptorHeapRing> TextureDHRing;
 	std::unique_ptr<DescriptorHeapRing> GeomtryDHRing;
 
-
-
-
 	std::vector<std::shared_ptr<Texture>> renderTargetTextures;
-
 	std::list<std::shared_ptr<Texture>> DynamicTextures;
-
-
-	//vector<shared_ptr<ConstantBuffer>> cbVec;
-
-
 
 	HANDLE m_fenceEvent;
 	ComPtr<ID3D12Fence> m_fence;
 	UINT64 m_fenceValue;
-	// Synchronization objects.
-	//UINT64 FrameFenceValue;
 
 	ComPtr<IDXGISwapChain3> m_swapChain;
-
 
 	GFSDK_Aftermath_ContextHandle AM_CL_Handle;
 
 public:
 	void BeginFrame();
 	void EndFrame();
-
 	void WaitGPU();
 
-	// pupulate unique set of srv descriptors to shader visible heap.
-
-	
 	shared_ptr<Texture> CreateTexture2DFromResource(ComPtr<ID3D12Resource> InResource);
-
 	shared_ptr<Texture> CreateTexture2D(DXGI_FORMAT format, D3D12_RESOURCE_FLAGS resFlags, D3D12_RESOURCE_STATES initResState, int width, int height, int mipLevels);
-
 	shared_ptr<Texture> CreateTextureFromFile(wstring fileName, bool isNormal);
-
 	shared_ptr<ConstantBuffer> CreateConstantBuffer(int Size, UINT NumView = 1);
 	shared_ptr<Sampler> CreateSampler(D3D12_SAMPLER_DESC& InSamplerDesc);
 	shared_ptr<IndexBuffer> CreateIndexBuffer(DXGI_FORMAT Format, UINT Size, void* SrcData);
 	shared_ptr<VertexBuffer> CreateVertexBuffer(UINT Size, UINT Stride, void* SrcData);
-	
 	shared_ptr<RTAS> CreateTLAS(vector<shared_ptr<RTAS>>& VecBottomLevelAS);
-
 
 	void PresentBarrier(Texture* rt);
 	void ResourceBarrier(ID3D12Resource* Resource, D3D12_RESOURCE_STATES StateBefore, D3D12_RESOURCE_STATES StateAfter);
-	
-
 
 	DumRHI_DX12(ComPtr<ID3D12Device5> pDevice);
 	virtual ~DumRHI_DX12();
