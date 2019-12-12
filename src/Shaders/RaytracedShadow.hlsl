@@ -30,6 +30,8 @@ RWTexture2D<float4> gOutput : register(u0);
 RaytracingAccelerationStructure gRtScene : register(t0);
 Texture2D DepthTex : register(t1);
 Texture2D WorldNormalTex : register(t2);
+Texture2D AlbedoTex : register(t3);
+
 // Texture2D dummy : register(t3);
 // Texture2D dummy2 : register(t3);
 

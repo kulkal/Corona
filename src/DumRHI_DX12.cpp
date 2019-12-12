@@ -606,9 +606,6 @@ void Shader::SetTexture(string name, Texture* texture, ID3D12GraphicsCommandList
 {
 	textureBinding[name].texture = texture;
 
-	D3D12_CPU_DESCRIPTOR_HANDLE ShaderVisibleCPUHandle;
-	D3D12_GPU_DESCRIPTOR_HANDLE ShaderVisibleGpuHandle;
-
 	UINT RPI = textureBinding[name].rootParamIndex;
 	CommandList->SetGraphicsRootDescriptorTable(RPI, texture->GpuHandleSRV);
 }

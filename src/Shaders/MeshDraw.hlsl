@@ -24,10 +24,12 @@ SamplerState sampleWrap : register(s0);
 cbuffer ObjParameter : register(b0)
 {
     float4x4 ViewProjectionMatrix;
-    float4x4 ViewMatrix;
+    float4x4 UnjitteredViewProjectionMatrix;
+    float4x4 InvViewProjectionMatrix;
+    float4x4 PrevViewProjectionMatrix;  
     float4x4 WorldMatrix;
     float4 ViewDir;
-    float4 pad[3];
+    float2 RTSize;
 };
 
 struct VSInput
@@ -41,7 +43,7 @@ struct VSInput
 struct PSInput
 {
     float4 position : SV_POSITION;
-    float4 worldpos : POSITION;
+    float4 velocity : POSITION;
     float2 uv : TEXCOORD0;
     float3 normal : NORMAL;
     float3 tangent : TANGENT;
@@ -53,14 +55,29 @@ PSInput VSMain(
     PSInput result;
 	float4 worldPos = mul(float4(input.position, 1.0f), WorldMatrix);
 
+
     result.position = mul(worldPos, ViewProjectionMatrix);
-	result.worldpos = worldPos;
+	float4 positionSS = result.position / result.position.w;
+    positionSS.xy = (positionSS.xy*float2(0.5, -0.5) + 0.5) * RTSize;
+
+    float4 prevPosition = mul(worldPos, PrevViewProjectionMatrix);
+    prevPosition /= prevPosition.w;
+    float2 prevPositionSS = (prevPosition.xy*float2(0.5, -0.5) + 0.5) * RTSize;
+
+    
+
+    result.velocity.xy = positionSS.xy - prevPositionSS.xy;
+
+    float4 unjitteredPosition = mul(worldPos, UnjitteredViewProjectionMatrix);
+    unjitteredPosition /= unjitteredPosition.w;
+    result.velocity.zw = float2(unjitteredPosition.z, 0);
+
 
     float3 CorrectNormal;
  //   if (dot(input.normal, ViewDir.xyz) > 0)
  //       CorrectNormal = input.normal;
 	//else
-        CorrectNormal = input.normal;
+    CorrectNormal = mul(input.normal, WorldMatrix);
 
 	result.normal = CorrectNormal;
     result.tangent = input.tangent;
@@ -70,24 +87,6 @@ PSInput VSMain(
 }
 
 
-//float4 PSMain(PSInput input) : SV_TARGET
-//{
-//	float4 diffuseColor = diffuseMap.Sample(sampleWrap, input.uv);
-//	float3 pixelNormal = CalcPerPixelNormal(input.uv, input.normal, input.tangent);
-//	float4 totalLight = ambientColor;
-
-//	for (int i = 0; i < NUM_LIGHTS; i++)
-//	{
-//		float4 lightPass = CalcLightingColor(lights[i].position, lights[i].direction, lights[i].color, lights[i].falloff, input.worldpos.xyz, pixelNormal);
-//		if (sampleShadowMap && i == 0)
-//		{
-//			lightPass *= CalcUnshadowedAmountPCF2x2(i, input.worldpos);
-//		}
-//		totalLight += lightPass;
-//	}
-
-//	return diffuseColor * saturate(totalLight);
-//}
 
 float3 CalcPerPixelNormal(float2 vTexcoord, float3 vVertNormal, float3 vVertTangent)
 {
@@ -114,26 +113,23 @@ struct PS_OUTPUT
     float4 Albedo : SV_Target0;
     float4 Normal : SV_Target1;
     float4 GeomNormal : SV_Target2;
+    float2 Velocity : SV_Target3;
 };
 
 
 PS_OUTPUT PSMain(PSInput input) : SV_TARGET
 {
 
-    //float3 Albedo = diffuseMap.SampleLevel(sampleWrap, input.uv, 0).rgb;
     float3 Albedo = diffuseMap.Sample(sampleWrap, input.uv).rgb;
 
     float3 WorldNormal = CalcPerPixelNormal(input.uv, input.normal, input.tangent);
-    float3 lightDir = normalize(float3(2, 1, -1)) * 1.2;
-    float3 DiffuseLighting = dot(lightDir, WorldNormal);
-    //float3 mat = g_txMats[materialConstants.matIndex].Sample(g_sampler, input.uv).rgb;
-    //float3 mat = g_txMats[20].Sample(g_sampler, input.uv).rgb;
-    //float3 mat = g_txMats[8].Sample(g_sampler, input.uv).rgb;
 	
     PS_OUTPUT output;
     output.Albedo.xyz = Albedo;
+	output.Albedo.w = input.velocity.z;// unjittered depth
     output.Normal.xyz = WorldNormal;
     output.GeomNormal.xyz = input.normal;
+    output.Velocity = input.velocity.xy;
 
     return output;
 }

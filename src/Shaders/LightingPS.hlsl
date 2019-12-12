@@ -12,7 +12,10 @@
 Texture2D AlbedoTex : register(t0);
 Texture2D NormalTex : register(t1);
 Texture2D ShadowTex : register(t2);
-Texture2D SpecularTex : register(t3);
+Texture2D PrevColorTex : register(t3);
+Texture2D VelocityTex : register(t4);
+
+
 
 
 SamplerState sampleWrap : register(s0);
@@ -21,6 +24,7 @@ SamplerState sampleWrap : register(s0);
 cbuffer LightingParam : register(b0)
 {
     float4 LightDir;
+    float2 RTSize;
 };
 
 struct VSInput
@@ -49,16 +53,23 @@ PSInput VSMain(
 
 float4 PSMain(PSInput input) : SV_TARGET
 {
-    input.uv.y *= -1;
-    float3 Albedo = AlbedoTex.Sample(sampleWrap, input.uv);
-    float3 WorldNormal = NormalTex.Sample(sampleWrap, input.uv);
-    float3 Shadow = ShadowTex.Sample(sampleWrap, input.uv);
+    input.uv.y = 1 - input.uv.y;
+    float2 PixelPos = input.uv * RTSize;
+    float3 Albedo = AlbedoTex[PixelPos];//.Sample(sampleWrap, input.uv);
+    float3 WorldNormal = NormalTex[PixelPos];//.Sample(sampleWrap, input.uv);
+    float3 Shadow = ShadowTex[PixelPos];//.Sample(sampleWrap, input.uv);
+
+    float2 Velocity = VelocityTex[PixelPos];//.Sample(sampleWrap, input.uv).xy;
 
 	
     float3 DiffuseLighting = dot(LightDir.xyz, WorldNormal)* Albedo * Shadow;
 
 
+    float4 CurrentColor = float4(DiffuseLighting, 1);
+    float2 PrevColorPos = PixelPos - Velocity;
+    float4 PrevColor = PrevColorTex[PrevColorPos];
 
+    float4 Color = PrevColor *0.9 + CurrentColor * 0.1;
 
-    return float4(DiffuseLighting, 1);
+    return CurrentColor;
 }

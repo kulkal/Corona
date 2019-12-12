@@ -23,6 +23,7 @@
 #include "StepTimer.h"
 #include "SimpleCamera.h"
 #include "DumRHI_DX12.h"
+#include <array>
 using namespace DirectX;
 
 // Note that while ComPtr is used to manage the lifetime of resources on the CPU,
@@ -39,10 +40,12 @@ class dx12_framework : public DXSample
 	struct ObjConstantBuffer
 	{
 		glm::mat4x4 ViewProjectionMatrix;
-		glm::mat4x4 ViewMatrix;
+		glm::mat4x4 UnjitteredViewProjectionMatrix;
+		glm::mat4x4 InvViewProjectionMatrix;
+		glm::mat4x4 PrevViewProjectionMatrix;
 		glm::mat4x4 WorldMatrix;
 		glm::vec4 ViewDir;
-		glm::vec4 pad[3];
+		glm::vec2 RTSize;
 	};
 
 	struct RTShadowViewParamCB
@@ -89,6 +92,8 @@ private:
 	bool bDebugDraw = false;
 	
 	UINT m_frameCounter = 0;
+
+	UINT FrmaeCounter = 0;
 	
 	// Pipeline objects.
 	CD3DX12_VIEWPORT m_viewport;
@@ -96,10 +101,18 @@ private:
 	ComPtr<IDXGISwapChain3> m_swapChain;
 	ComPtr<ID3D12Device5> m_device;
 	
-	shared_ptr<Texture> ColorBuffer;
+	UINT ColorBufferWriteIndex = 0;
+	shared_ptr<Texture> ColorBuffer0;
+	shared_ptr<Texture> ColorBuffer1;
+	
+	std::array<Texture*, 2> ColorBuffers;
+
 	shared_ptr<Texture> AlbedoBuffer;
 	shared_ptr<Texture> NormalBuffer;
 	shared_ptr<Texture> GeomNormalBuffer;
+	shared_ptr<Texture> VelocityBuffer;
+
+
 	shared_ptr<Texture> ShadowBuffer;
 	shared_ptr<Texture> ReflectionBuffer;
 
@@ -140,6 +153,10 @@ private:
 	glm::mat4x4 ViewMat;
 	glm::mat4x4 ProjMat;
 	glm::mat4x4 ViewProjMat;
+	glm::mat4x4 UnjitteredViewProjMat;
+
+	glm::mat4x4 InvViewProjMat;
+
 
 	glm::mat4x4 PrevViewMat;
 	glm::mat4x4 PrevViewProjMat;
@@ -165,6 +182,7 @@ private:
 	struct LightingParam
 	{
 		glm::vec4 LightDir;
+		glm::vec2 RTSize;
 	};
 
 
