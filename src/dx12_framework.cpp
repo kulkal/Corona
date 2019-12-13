@@ -1368,7 +1368,7 @@ void dx12_framework::OnUpdate()
 	
 	UnjitteredViewProjMat = ViewMat * ProjMat;
 
-	ProjMat = ProjMat * JitterMat;
+	ProjMat = ProjMat ;
 
 
 	ViewProjMat = ViewMat * ProjMat;
@@ -1392,7 +1392,7 @@ void dx12_framework::OnUpdate()
 
 	FrmaeCounter++;
 
-	ColorBufferWriteIndex = 0;// FrmaeCounter % 2;
+	ColorBufferWriteIndex = FrmaeCounter % 2;
 }
 
 // Render the scene.
@@ -1585,12 +1585,13 @@ void dx12_framework::DrawMeshPass()
 		
 
 		int nMesh = 0;
+
 		for (auto& mesh : meshes)
 		{
 			dx12_rhi->CommandList->IASetIndexBuffer(&mesh->Ib->view);
 			dx12_rhi->CommandList->IASetVertexBuffers(0, 1, &mesh->Vb->view);
-			if (nMesh > 1) break;;
-			nMesh++;
+			/*if (nMesh > 1) break;;
+			nMesh++;*/
 			for (int i = 0; i < mesh->Draws.size(); i++)
 			{
 				Mesh::DrawCall& drawcall = mesh->Draws[i];
@@ -1614,17 +1615,13 @@ void dx12_framework::DrawMeshPass()
 
 				objCB.JitterOffset = JitterOffset;
 
-				//RS_Mesh->vs->SetConstantValue("ObjParameter", (void*)&objCB, dx12_rhi->CommandList.Get());
 				RS_Mesh->SetConstantValue("ObjParameter", (void*)&objCB, dx12_rhi->CommandList.Get());
-
-				//RS_Mesh->ps->SetConstantValue("ObjParameter", (void*)&objCB, dx12_rhi->CommandList.Get());
 
 
 				Texture* diffuseTex = drawcall.mat->Diffuse.get();
 				if (diffuseTex == nullptr)
 					diffuseTex = Materials[0]->Diffuse.get();
 				if(diffuseTex)
-					//RS_Mesh->ps->SetTexture("diffuseMap", diffuseTex, dx12_rhi->CommandList.Get());
 					RS_Mesh->SetTexture("diffuseMap", diffuseTex, dx12_rhi->CommandList.Get());
 
 
@@ -1632,7 +1629,6 @@ void dx12_framework::DrawMeshPass()
 				if (normalTex == nullptr)
 					normalTex = Materials[0]->Normal.get();
 				if(normalTex)
-					//RS_Mesh->ps->SetTexture("normalMap", normalTex, dx12_rhi->CommandList.Get());
 					RS_Mesh->SetTexture("normalMap", normalTex, dx12_rhi->CommandList.Get());
 
 
