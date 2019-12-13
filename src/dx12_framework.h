@@ -40,12 +40,14 @@ class dx12_framework : public DXSample
 	struct ObjConstantBuffer
 	{
 		glm::mat4x4 ViewProjectionMatrix;
-		glm::mat4x4 UnjitteredViewProjectionMatrix;
-		glm::mat4x4 InvViewProjectionMatrix;
+		//glm::mat4x4 UnjitteredViewProjectionMatrix;
+		//glm::mat4x4 InvViewProjectionMatrix;
 		glm::mat4x4 PrevViewProjectionMatrix;
 		glm::mat4x4 WorldMatrix;
 		glm::vec4 ViewDir;
 		glm::vec2 RTSize;
+		glm::vec2 JitterOffset;
+		glm::vec4 pad[2];
 	};
 
 	struct RTShadowViewParamCB
@@ -160,6 +162,9 @@ private:
 
 	glm::mat4x4 PrevViewMat;
 	glm::mat4x4 PrevViewProjMat;
+	glm::vec2 JitterOffset;
+	glm::vec2 PrevJitter;
+
 
 
 	// raytracing
@@ -183,7 +188,11 @@ private:
 	{
 		glm::vec4 LightDir;
 		glm::vec2 RTSize;
+		float TAABlendFactor;
+		float pad0;
 	};
+
+	bool bEnableTAA = true;
 
 
 public:

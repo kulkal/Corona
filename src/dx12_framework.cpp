@@ -393,15 +393,16 @@ void dx12_framework::LoadPipeline()
 			d3dInfoQueue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_CORRUPTION, true);
 			d3dInfoQueue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_ERROR, true);
 
-			D3D12_MESSAGE_ID blockedIds[] = {
-				/*	D3D12_MESSAGE_ID_CLEARRENDERTARGETVIEW_MISMATCHINGCLEARVALUE,
-					D3D12_MESSAGE_ID_CLEARDEPTHSTENCILVIEW_MISMATCHINGCLEARVALUE, */
-					D3D12_MESSAGE_ID_COPY_DESCRIPTORS_INVALID_RANGES };
-			D3D12_INFO_QUEUE_FILTER filter = {};
-			filter.DenyList.pIDList = blockedIds;
-			filter.DenyList.NumIDs = 1;
-			d3dInfoQueue->AddRetrievalFilterEntries(&filter);
-			d3dInfoQueue->AddStorageFilterEntries(&filter);
+			//D3D12_MESSAGE_ID blockedIds[] = {
+			//	/*	D3D12_MESSAGE_ID_CLEARRENDERTARGETVIEW_MISMATCHINGCLEARVALUE,
+			//		D3D12_MESSAGE_ID_CLEARDEPTHSTENCILVIEW_MISMATCHINGCLEARVALUE, */
+			//		D3D12_MESSAGE_ID_COPY_DESCRIPTORS_INVALID_RANGES
+			//};
+			//D3D12_INFO_QUEUE_FILTER filter = {};
+			//filter.DenyList.pIDList = blockedIds;
+			//filter.DenyList.NumIDs = 1;
+			//d3dInfoQueue->AddRetrievalFilterEntries(&filter);
+			//d3dInfoQueue->AddStorageFilterEntries(&filter);
 
 
 		}
@@ -816,7 +817,6 @@ void dx12_framework::InitComputeRS()
 	}
 
 	Shader* cs = new Shader((UINT8*)computeShader->GetBufferPointer(), computeShader->GetBufferSize());
-	cs->BindUAV("output", 0);
 
 	D3D12_COMPUTE_PIPELINE_STATE_DESC computePsoDesc = {};
 	//computePsoDesc.pRootSignature = m_computeRootSignature.Get();
@@ -824,7 +824,8 @@ void dx12_framework::InitComputeRS()
 	RS_Compute = unique_ptr<PipelineStateObject>(new PipelineStateObject);
 	RS_Compute->cs = unique_ptr<Shader>(cs);
 	RS_Compute->computePSODesc = computePsoDesc;
-	RS_Compute->Init(true);
+	RS_Compute->BindUAV("output", 0);
+	RS_Compute->Init2(true);
 
 	ComputeOuputTexture = dx12_rhi->CreateTexture2D(DXGI_FORMAT_R8G8B8A8_UNORM,
 		D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
@@ -868,14 +869,14 @@ void dx12_framework::InitDrawMeshRS()
 	}
 
 	Shader* ps = new Shader((UINT8*)pixelShader->GetBufferPointer(), pixelShader->GetBufferSize());
-	ps->BindTexture("diffuseMap", 0, 1);
-	ps->BindTexture("normalMap", 1, 1);
+	//ps->BindTexture("diffuseMap", 0, 1);
+	//ps->BindTexture("normalMap", 1, 1);
 
-	ps->BindSampler("samplerWrap", 0);
+	//ps->BindSampler("samplerWrap", 0);
 
 	Shader* vs = new Shader((UINT8*)vertexShader->GetBufferPointer(), vertexShader->GetBufferSize());
-	vs->BindConstantBuffer("ObjParameter", 0, sizeof(ObjConstantBuffer), 400);
-	ps->BindConstantBuffer("ObjParameter", 0, sizeof(ObjConstantBuffer), 400);
+	//vs->BindConstantBuffer("ObjParameter", 0, sizeof(ObjConstantBuffer), 400);
+	//ps->BindConstantBuffer("ObjParameter", 0, sizeof(ObjConstantBuffer), 400);
 
 
 	CD3DX12_RASTERIZER_DESC rasterizerStateDesc(D3D12_DEFAULT);
@@ -915,7 +916,12 @@ void dx12_framework::InitDrawMeshRS()
 	RS_Mesh->ps = shared_ptr<Shader>(ps);
 	RS_Mesh->vs = shared_ptr<Shader>(vs);
 	RS_Mesh->graphicsPSODesc = psoDescMesh;
-	RS_Mesh->Init(false);
+	RS_Mesh->BindTexture("diffuseMap", 0, 1);
+	RS_Mesh->BindTexture("normalMap", 1, 1);
+	RS_Mesh->BindSampler("samplerWrap", 0);
+	RS_Mesh->BindConstantBuffer("ObjParameter", 0, sizeof(ObjConstantBuffer), 400);
+
+	RS_Mesh->Init2(false);
 }
 
 void dx12_framework::InitCopyPass()
@@ -979,11 +985,11 @@ void dx12_framework::InitCopyPass()
 	}
 
 	Shader* ps = new Shader((UINT8*)pixelShader->GetBufferPointer(), pixelShader->GetBufferSize());
-	ps->BindTexture("SrcTex", 0, 1);
-	ps->BindSampler("samplerWrap", 0);
+	/*ps->BindTexture("SrcTex", 0, 1);
+	ps->BindSampler("samplerWrap", 0);*/
 
 	Shader* vs = new Shader((UINT8*)vertexShader->GetBufferPointer(), vertexShader->GetBufferSize());
-	vs->BindConstantBuffer("ScaleOffsetParams", 0, sizeof(CopyScaleOffsetCB), 12);
+	//vs->BindConstantBuffer("ScaleOffsetParams", 0, sizeof(CopyScaleOffsetCB), 12);
 
 
 	CD3DX12_RASTERIZER_DESC rasterizerStateDesc(D3D12_DEFAULT);
@@ -1018,7 +1024,12 @@ void dx12_framework::InitCopyPass()
 	RS_Copy->ps = shared_ptr<Shader>(ps);
 	RS_Copy->vs = shared_ptr<Shader>(vs);
 	RS_Copy->graphicsPSODesc = psoDesc;
-	RS_Copy->Init(false);
+
+	RS_Copy->BindTexture("SrcTex", 0, 1);
+	RS_Copy->BindSampler("samplerWrap", 0);
+	RS_Copy->BindConstantBuffer("ScaleOffsetParams", 0, sizeof(CopyScaleOffsetCB), 12);
+
+	RS_Copy->Init2(false);
 }
 
 void dx12_framework::InitLightingPass()
@@ -1057,15 +1068,15 @@ void dx12_framework::InitLightingPass()
 	}
 
 	Shader* ps = new Shader((UINT8*)pixelShader->GetBufferPointer(), pixelShader->GetBufferSize());
-	ps->BindTexture("AlbedoTex", 0, 1);
-	ps->BindTexture("NormalTex", 1, 1);
-	ps->BindTexture("ShadowTex", 2, 1);
-	ps->BindTexture("PrevColorTex", 3, 1);
-	ps->BindTexture("VelocityTex", 4, 1);
+	//ps->BindTexture("AlbedoTex", 0, 1);
+	//ps->BindTexture("NormalTex", 1, 1);
+	//ps->BindTexture("ShadowTex", 2, 1);
+	//ps->BindTexture("PrevColorTex", 3, 1);
+	//ps->BindTexture("VelocityTex", 4, 1);
 
 
-	ps->BindSampler("samplerWrap", 0);
-	ps->BindConstantBuffer("LightingParam", 0, sizeof(LightingParam));
+	//ps->BindSampler("samplerWrap", 0);
+	//ps->BindConstantBuffer("LightingParam", 0, sizeof(LightingParam));
 
 	Shader* vs = new Shader((UINT8*)vertexShader->GetBufferPointer(), vertexShader->GetBufferSize());
 
@@ -1101,7 +1112,17 @@ void dx12_framework::InitLightingPass()
 	RS_Lighting->ps = shared_ptr<Shader>(ps);
 	RS_Lighting->vs = shared_ptr<Shader>(vs);
 	RS_Lighting->graphicsPSODesc = psoDesc;
-	RS_Lighting->Init(false);
+
+	RS_Lighting->BindTexture("AlbedoTex", 0, 1);
+	RS_Lighting->BindTexture("NormalTex", 1, 1);
+	RS_Lighting->BindTexture("ShadowTex", 2, 1);
+	RS_Lighting->BindTexture("PrevColorTex", 3, 1);
+	RS_Lighting->BindTexture("VelocityTex", 4, 1);
+
+
+	RS_Lighting->BindSampler("samplerWrap", 0);
+	RS_Lighting->BindConstantBuffer("LightingParam", 0, sizeof(LightingParam));
+	RS_Lighting->Init2(false);
 }
 
 void dx12_framework::CopyPass()
@@ -1115,18 +1136,17 @@ void dx12_framework::CopyPass()
 	/*const float clearColor[] = { 0.0f, 0.2f, 0.4f, 1.0f };
 	dx12_rhi->CommandList->ClearRenderTargetView(backbuffer->CpuHandleRTV, clearColor, 0, nullptr);
 	*/
-	RS_Copy->ps->currentDrawCallIndex = 0;
-	RS_Copy->vs->currentDrawCallIndex = 0;
+	RS_Copy->currentDrawCallIndex = 0;
 	RS_Copy->ApplyGraphicsRSPSO(dx12_rhi->CommandList.Get());
 
 
-	RS_Copy->ps->SetSampler("samplerWrap", samplerWrap.get(), dx12_rhi->CommandList.Get());
-	RS_Copy->ps->SetTexture("SrcTex", ColorBuffer0.get(), dx12_rhi->CommandList.Get());
+	RS_Copy->SetSampler("samplerWrap", samplerWrap.get(), dx12_rhi->CommandList.Get());
+	RS_Copy->SetTexture("SrcTex", ColorBuffer0.get(), dx12_rhi->CommandList.Get());
 
 	CopyScaleOffsetCB cb;
 	cb.Offset = glm::vec4(0, 0, 0, 0);
 	cb.Scale = glm::vec4(1, 1, 0, 0);
-	RS_Copy->vs->SetConstantValue("ScaleOffsetParams", &cb, dx12_rhi->CommandList.Get());
+	RS_Copy->SetConstantValue("ScaleOffsetParams", &cb, dx12_rhi->CommandList.Get());
 
 
 	RS_Copy->ApplyGlobal(dx12_rhi->CommandList.Get());
@@ -1148,6 +1168,9 @@ void dx12_framework::CopyPass()
 	
 
 	dx12_rhi->CommandList->DrawInstanced(4, 1, 0, 0);
+
+	RS_Copy->currentDrawCallIndex++;
+
 }
 
 void dx12_framework::DebugPass()
@@ -1158,78 +1181,69 @@ void dx12_framework::DebugPass()
 	dx12_rhi->CommandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
 	dx12_rhi->CommandList->IASetVertexBuffers(0, 1, &FullScreenVB->view);
 
-	RS_Copy->ps->SetSampler("samplerWrap", samplerWrap.get(), dx12_rhi->CommandList.Get());
+	RS_Copy->SetSampler("samplerWrap", samplerWrap.get(), dx12_rhi->CommandList.Get());
 	CopyScaleOffsetCB cb;
 
 	 //raytraced shadow
-	RS_Copy->ps->currentDrawCallIndex++;
-	RS_Copy->vs->currentDrawCallIndex++;
-	RS_Copy->ps->SetTexture("SrcTex", ShadowBuffer.get(), dx12_rhi->CommandList.Get());
+	RS_Copy->SetTexture("SrcTex", ShadowBuffer.get(), dx12_rhi->CommandList.Get());
 	cb.Offset = glm::vec4(-0.75, -0.75, 0, 0);
 	cb.Scale = glm::vec4(0.25, 0.25, 0, 0);
-	RS_Copy->vs->SetConstantValue("ScaleOffsetParams", &cb, dx12_rhi->CommandList.Get());
+	RS_Copy->SetConstantValue("ScaleOffsetParams", &cb, dx12_rhi->CommandList.Get());
 	dx12_rhi->CommandList->DrawInstanced(4, 1, 0, 0);
+	RS_Copy->currentDrawCallIndex++;
+
 
 	// raytrace reflection
-	RS_Copy->ps->currentDrawCallIndex++;
-	RS_Copy->vs->currentDrawCallIndex++;
-	RS_Copy->ps->SetTexture("SrcTex", ReflectionBuffer.get(), dx12_rhi->CommandList.Get());
+	RS_Copy->SetTexture("SrcTex", ReflectionBuffer.get(), dx12_rhi->CommandList.Get());
 	cb.Offset = glm::vec4(-0.75, -0.25, 0, 0);
 	cb.Scale = glm::vec4(0.25, 0.25, 0, 0);
-	RS_Copy->vs->SetConstantValue("ScaleOffsetParams", &cb, dx12_rhi->CommandList.Get());
+	RS_Copy->SetConstantValue("ScaleOffsetParams", &cb, dx12_rhi->CommandList.Get());
 	dx12_rhi->CommandList->DrawInstanced(4, 1, 0, 0);
+	RS_Copy->currentDrawCallIndex++;
 
 
 	// world normal
-	RS_Copy->ps->currentDrawCallIndex++;
-	RS_Copy->vs->currentDrawCallIndex++;
-	RS_Copy->ps->SetTexture("SrcTex", NormalBuffer.get(), dx12_rhi->CommandList.Get());
+	RS_Copy->SetTexture("SrcTex", NormalBuffer.get(), dx12_rhi->CommandList.Get());
 	cb.Offset = glm::vec4(-0.25, -0.75, 0, 0);
 	cb.Scale = glm::vec4(0.25, 0.25, 0, 0);
-	RS_Copy->vs->SetConstantValue("ScaleOffsetParams", &cb, dx12_rhi->CommandList.Get());
+	RS_Copy->SetConstantValue("ScaleOffsetParams", &cb, dx12_rhi->CommandList.Get());
 	dx12_rhi->CommandList->DrawInstanced(4, 1, 0, 0);
+	RS_Copy->currentDrawCallIndex++;
+
 
 	// geom world normal
-	RS_Copy->ps->currentDrawCallIndex++;
-	RS_Copy->vs->currentDrawCallIndex++;
-
 	cb.Offset = glm::vec4(-0.25, -0.25, 0, 0);
 	cb.Scale = glm::vec4(0.25, 0.25, 0, 0);
-	RS_Copy->vs->SetConstantValue("ScaleOffsetParams", &cb, dx12_rhi->CommandList.Get());
-	RS_Copy->ps->SetTexture("SrcTex", GeomNormalBuffer.get(), dx12_rhi->CommandList.Get());
+	RS_Copy->SetConstantValue("ScaleOffsetParams", &cb, dx12_rhi->CommandList.Get());
+	RS_Copy->SetTexture("SrcTex", GeomNormalBuffer.get(), dx12_rhi->CommandList.Get());
 	dx12_rhi->CommandList->DrawInstanced(4, 1, 0, 0);
+	RS_Copy->currentDrawCallIndex++;
 
 	// depth
-	RS_Copy->ps->currentDrawCallIndex++;
-	RS_Copy->vs->currentDrawCallIndex++;
-
 	cb.Offset = glm::vec4(0.25, -0.75, 0, 0);
 	cb.Scale = glm::vec4(0.25, 0.25, 0, 0);
-	RS_Copy->vs->SetConstantValue("ScaleOffsetParams", &cb, dx12_rhi->CommandList.Get());
-	RS_Copy->ps->SetTexture("SrcTex", DepthBuffer.get(), dx12_rhi->CommandList.Get());
+	RS_Copy->SetConstantValue("ScaleOffsetParams", &cb, dx12_rhi->CommandList.Get());
+	RS_Copy->SetTexture("SrcTex", DepthBuffer.get(), dx12_rhi->CommandList.Get());
 	dx12_rhi->CommandList->DrawInstanced(4, 1, 0, 0);
+	RS_Copy->currentDrawCallIndex++;
 
 
 	// albedo
-	RS_Copy->ps->currentDrawCallIndex++;
-	RS_Copy->vs->currentDrawCallIndex++;
 
 	cb.Offset = glm::vec4(0.750, -0.75, 0, 0);
 	cb.Scale = glm::vec4(0.25, 0.25, 0, 0);
-	RS_Copy->vs->SetConstantValue("ScaleOffsetParams", &cb, dx12_rhi->CommandList.Get());
-	RS_Copy->ps->SetTexture("SrcTex", AlbedoBuffer.get(), dx12_rhi->CommandList.Get());
+	RS_Copy->SetConstantValue("ScaleOffsetParams", &cb, dx12_rhi->CommandList.Get());
+	RS_Copy->SetTexture("SrcTex", AlbedoBuffer.get(), dx12_rhi->CommandList.Get());
 	dx12_rhi->CommandList->DrawInstanced(4, 1, 0, 0);
+	RS_Copy->currentDrawCallIndex++;
 
 	// velocity
-	RS_Copy->ps->currentDrawCallIndex++;
-	RS_Copy->vs->currentDrawCallIndex++;
-
 	cb.Offset = glm::vec4(0.75, -0.25, 0, 0);
 	cb.Scale = glm::vec4(0.25, 0.25, 0, 0);
-	RS_Copy->vs->SetConstantValue("ScaleOffsetParams", &cb, dx12_rhi->CommandList.Get());
-	RS_Copy->ps->SetTexture("SrcTex", VelocityBuffer.get(), dx12_rhi->CommandList.Get());
+	RS_Copy->SetConstantValue("ScaleOffsetParams", &cb, dx12_rhi->CommandList.Get());
+	RS_Copy->SetTexture("SrcTex", VelocityBuffer.get(), dx12_rhi->CommandList.Get());
 	dx12_rhi->CommandList->DrawInstanced(4, 1, 0, 0);
-
+	RS_Copy->currentDrawCallIndex++;
 
 	RS_Copy->ApplyGlobal(dx12_rhi->CommandList.Get());
 }
@@ -1244,14 +1258,14 @@ void dx12_framework::LightingPass()
 	RS_Lighting->ApplyGraphicsRSPSO(dx12_rhi->CommandList.Get());
 
 
-	RS_Lighting->ps->SetSampler("samplerWrap", samplerWrap.get(), dx12_rhi->CommandList.Get());
-	RS_Lighting->ps->SetTexture("AlbedoTex", AlbedoBuffer.get(), dx12_rhi->CommandList.Get());
-	RS_Lighting->ps->SetTexture("NormalTex", NormalBuffer.get(), dx12_rhi->CommandList.Get());
-	RS_Lighting->ps->SetTexture("ShadowTex", ShadowBuffer.get(), dx12_rhi->CommandList.Get());
+	RS_Lighting->SetSampler("samplerWrap", samplerWrap.get(), dx12_rhi->CommandList.Get());
+	RS_Lighting->SetTexture("AlbedoTex", AlbedoBuffer.get(), dx12_rhi->CommandList.Get());
+	RS_Lighting->SetTexture("NormalTex", NormalBuffer.get(), dx12_rhi->CommandList.Get());
+	RS_Lighting->SetTexture("ShadowTex", ShadowBuffer.get(), dx12_rhi->CommandList.Get());
 
 	Texture* PrevColorBuffer = ColorBuffers[PrevColorBufferIndex];
-	RS_Lighting->ps->SetTexture("PrevColorTex", PrevColorBuffer, dx12_rhi->CommandList.Get());
-	RS_Lighting->ps->SetTexture("VelocityTex", VelocityBuffer.get(), dx12_rhi->CommandList.Get());
+	RS_Lighting->SetTexture("PrevColorTex", PrevColorBuffer, dx12_rhi->CommandList.Get());
+	RS_Lighting->SetTexture("VelocityTex", VelocityBuffer.get(), dx12_rhi->CommandList.Get());
 
 
 
@@ -1263,8 +1277,14 @@ void dx12_framework::LightingPass()
 	Param.RTSize.x = m_width;
 	Param.RTSize.y = m_height;
 
+	if(bEnableTAA)
+		Param.TAABlendFactor = 0.1;
+	else
+		Param.TAABlendFactor = 1.0;
+
+
 	glm::normalize(Param.LightDir);
-	RS_Lighting->ps->SetConstantValue("LightingParam", &Param, dx12_rhi->CommandList.Get());
+	RS_Lighting->SetConstantValue("LightingParam", &Param, dx12_rhi->CommandList.Get());
 
 
 	RS_Lighting->ApplyGlobal(dx12_rhi->CommandList.Get());
@@ -1340,11 +1360,15 @@ void dx12_framework::OnUpdate()
 	Jitter = Hammersley2D(idx, 16) * 2.0f - glm::vec2(1.0f);
 	const float offsetX = Jitter.x * (1.0f / m_width);
 	const float offsetY = Jitter.y * (1.0f / m_height);
+
+	JitterOffset = (Jitter - PrevJitter) * 0.5f;
+	PrevJitter = Jitter;
+	//JitterOffset = -glm::vec2(Jitter.x, -Jitter.y);
 	glm::mat4x4 JitterMat = glm::translate(glm::vec3(offsetX, -offsetY, 0));
 	
 	UnjitteredViewProjMat = ViewMat * ProjMat;
 
-	//ProjMat = ProjMat * JitterMat;
+	ProjMat = ProjMat * JitterMat;
 
 
 	ViewProjMat = ViewMat * ProjMat;
@@ -1368,7 +1392,7 @@ void dx12_framework::OnUpdate()
 
 	FrmaeCounter++;
 
-	ColorBufferWriteIndex = FrmaeCounter % 2;
+	ColorBufferWriteIndex = 0;// FrmaeCounter % 2;
 }
 
 // Render the scene.
@@ -1386,7 +1410,7 @@ void dx12_framework::OnRender()
 
 	//NVAftermathMarker(dx12_rhi->AM_CL_Handle, "RaytracePass");
 
-	RaytraceShadowPass();
+	//RaytraceShadowPass();
 
 	//RaytraceReflectionPass();
 	//ComputePass();
@@ -1454,6 +1478,9 @@ void dx12_framework::OnKeyDown(UINT8 key)
 	case 'B':
 		bDebugDraw = !bDebugDraw;
 		break;
+	case 'T':
+		bEnableTAA = !bEnableTAA;
+		break;
 	default:
 		break;
 	}
@@ -1514,14 +1541,16 @@ void dx12_framework::DrawMeshPass()
 
 	if (!bMultiThreadRendering)
 	{
-		//const D3D12_CPU_DESCRIPTOR_HANDLE Rendertargets[] = { AlbedoBuffer->CpuHandleRTV, NormalBuffer->CpuHandleRTV, GeomNormalBuffer->CpuHandleRTV };
 		const D3D12_CPU_DESCRIPTOR_HANDLE Rendertargets[] = { AlbedoBuffer->CpuHandleRTV, NormalBuffer->CpuHandleRTV, GeomNormalBuffer->CpuHandleRTV, VelocityBuffer->CpuHandleRTV };
 
 
-		dx12_rhi->CommandList->OMSetRenderTargets(4, Rendertargets, FALSE, &DepthBuffer->CpuHandleDSV);
+
+		dx12_rhi->CommandList->OMSetRenderTargets(RS_Mesh->graphicsPSODesc.NumRenderTargets, Rendertargets, FALSE, &DepthBuffer->CpuHandleDSV);
 
 		RS_Mesh->ApplyGraphicsRSPSO(dx12_rhi->CommandList.Get());
-		RS_Mesh->ps->SetSampler("samplerWrap", samplerWrap.get(), dx12_rhi->CommandList.Get());
+		//RS_Mesh->ps->SetSampler("samplerWrap", samplerWrap.get(), dx12_rhi->CommandList.Get());
+		RS_Mesh->SetSampler("samplerWrap", samplerWrap.get(), dx12_rhi->CommandList.Get());
+
 
 		dx12_rhi->CommandList->RSSetViewports(1, &m_viewport);
 		dx12_rhi->CommandList->RSSetScissorRects(1, &m_scissorRect);
@@ -1529,9 +1558,7 @@ void dx12_framework::DrawMeshPass()
 		//dx12_rhi->CommandList->IASetIndexBuffer(&mesh->Ib->view);
 		//dx12_rhi->CommandList->IASetVertexBuffers(0, 1, &mesh->Vb->view);
 
-		RS_Mesh->vs->currentDrawCallIndex = 0;
-		RS_Mesh->ps->currentDrawCallIndex = 0;
-
+		RS_Mesh->currentDrawCallIndex = 0;
 		/*for (int i = 0; i < mesh->Draws.size(); i++)
 		{
 			RS_Mesh->vs->currentDrawCallIndex = i;
@@ -1557,11 +1584,13 @@ void dx12_framework::DrawMeshPass()
 
 		
 
+		int nMesh = 0;
 		for (auto& mesh : meshes)
 		{
 			dx12_rhi->CommandList->IASetIndexBuffer(&mesh->Ib->view);
 			dx12_rhi->CommandList->IASetVertexBuffers(0, 1, &mesh->Vb->view);
-
+			if (nMesh > 1) break;;
+			nMesh++;
 			for (int i = 0; i < mesh->Draws.size(); i++)
 			{
 				Mesh::DrawCall& drawcall = mesh->Draws[i];
@@ -1569,7 +1598,8 @@ void dx12_framework::DrawMeshPass()
 				int sizea = sizeof(ObjConstantBuffer);
 
 				objCB.ViewProjectionMatrix = ViewProjMat;
-				objCB.UnjitteredViewProjectionMatrix = UnjitteredViewProjMat;
+				//objCB.InvViewProjectionMatrix = InvViewProjMat;
+				//objCB.UnjitteredViewProjectionMatrix = UnjitteredViewProjMat;
 				objCB.PrevViewProjectionMatrix = PrevViewProjMat;
 
 
@@ -1582,27 +1612,34 @@ void dx12_framework::DrawMeshPass()
 				objCB.RTSize.x = m_width;
 				objCB.RTSize.y = m_height;
 
-				RS_Mesh->vs->SetConstantValue("ObjParameter", (void*)&objCB, dx12_rhi->CommandList.Get());
-				RS_Mesh->ps->SetConstantValue("ObjParameter", (void*)&objCB, dx12_rhi->CommandList.Get());
+				objCB.JitterOffset = JitterOffset;
+
+				//RS_Mesh->vs->SetConstantValue("ObjParameter", (void*)&objCB, dx12_rhi->CommandList.Get());
+				RS_Mesh->SetConstantValue("ObjParameter", (void*)&objCB, dx12_rhi->CommandList.Get());
+
+				//RS_Mesh->ps->SetConstantValue("ObjParameter", (void*)&objCB, dx12_rhi->CommandList.Get());
 
 
 				Texture* diffuseTex = drawcall.mat->Diffuse.get();
 				if (diffuseTex == nullptr)
 					diffuseTex = Materials[0]->Diffuse.get();
 				if(diffuseTex)
-					RS_Mesh->ps->SetTexture("diffuseMap", diffuseTex, dx12_rhi->CommandList.Get());
+					//RS_Mesh->ps->SetTexture("diffuseMap", diffuseTex, dx12_rhi->CommandList.Get());
+					RS_Mesh->SetTexture("diffuseMap", diffuseTex, dx12_rhi->CommandList.Get());
+
 
 				Texture* normalTex = drawcall.mat->Normal.get();
 				if (normalTex == nullptr)
 					normalTex = Materials[0]->Normal.get();
 				if(normalTex)
-					RS_Mesh->ps->SetTexture("normalMap", normalTex, dx12_rhi->CommandList.Get());
+					//RS_Mesh->ps->SetTexture("normalMap", normalTex, dx12_rhi->CommandList.Get());
+					RS_Mesh->SetTexture("normalMap", normalTex, dx12_rhi->CommandList.Get());
+
 
 				dx12_rhi->CommandList->DrawIndexedInstanced(drawcall.IndexCount, 1, drawcall.IndexStart, drawcall.VertexBase, 0);
 
 
-				RS_Mesh->vs->currentDrawCallIndex++;
-				RS_Mesh->ps->currentDrawCallIndex++;
+				RS_Mesh->currentDrawCallIndex++;
 			}
 		}
 	}
@@ -1732,7 +1769,7 @@ void dx12_framework::ComputePass()
 
 	RS_Compute->ApplyCS(dx12_rhi->CommandList.Get());
 
-	RS_Compute->cs->SetUAV("output", ShadowBuffer.get(), dx12_rhi->CommandList.Get(), true);
+	RS_Compute->SetUAV("output", ShadowBuffer.get(), dx12_rhi->CommandList.Get(), true);
 	//RS_Compute->cs->SetTexture("input", ColorBuffer.get());
 
 

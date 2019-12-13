@@ -80,6 +80,7 @@ void DescriptorHeap::AllocDescriptors(D3D12_CPU_DESCRIPTOR_HANDLE& cpuHandle, D3
 
 	NumAllocated += num;
 }
+#include <windows.h>
 
 void DumRHI_DX12::BeginFrame()
 {
@@ -140,6 +141,7 @@ void DumRHI_DX12::BeginFrame()
 		g_dx12_rhi->Device->CreateShaderResourceView(tex->resource.Get(), &SrvDesc, tex->CpuHandleSRV);
 	}
 }
+
 
 void DumRHI_DX12::EndFrame()
 {
@@ -542,7 +544,13 @@ DumRHI_DX12::~DumRHI_DX12()
 	WaitForSingleObject(m_fenceEvent, INFINITE);
 }
 
-void Shader::BindUAV(string name, int baseRegister)
+Shader::Shader(UINT8* ByteCode, UINT Size)
+{
+	ShaderByteCode = CD3DX12_SHADER_BYTECODE(ByteCode, Size);
+}
+
+
+void PipelineStateObject::BindUAV(string name, int baseRegister)
 {
 	BindingData binding;
 	binding.name = name;
@@ -551,7 +559,7 @@ void Shader::BindUAV(string name, int baseRegister)
 	uavBinding.insert(pair<string, BindingData>(name, binding));
 }
 
-void Shader::BindTexture(string name, int baseRegister, int num)
+void PipelineStateObject::BindTexture(string name, int baseRegister, int num)
 {
 	BindingData binding;
 	binding.name = name;
@@ -560,7 +568,7 @@ void Shader::BindTexture(string name, int baseRegister, int num)
 	textureBinding.insert(pair<string, BindingData>(name, binding));
 }
 
-void Shader::BindConstantBuffer(string name, int baseRegister, int size, UINT numMaxDrawCall)
+void PipelineStateObject::BindConstantBuffer(string name, int baseRegister, int size, UINT numMaxDrawCall)
 {
 	NumMaxDrawCall = numMaxDrawCall;
 
@@ -579,10 +587,11 @@ void Shader::BindConstantBuffer(string name, int baseRegister, int size, UINT nu
 
 	binding.cb = g_dx12_rhi->CreateConstantBuffer(binding.cbSize, g_dx12_rhi->NumFrame * numMaxDrawCall);
 
+	D3D12_GPU_VIRTUAL_ADDRESS va = binding.cb->resource->GetGPUVirtualAddress();
 	constantBufferBinding.insert(pair<string, BindingData>(name, binding));
 }
 
-void Shader::BindRootConstant(string name, int baseRegister)
+void PipelineStateObject::BindRootConstant(string name, int baseRegister)
 {
 	BindingData binding;
 	binding.name = name;
@@ -592,7 +601,7 @@ void Shader::BindRootConstant(string name, int baseRegister)
 	rootBinding.insert(pair<string, BindingData>(name, binding));
 }
 
-void Shader::BindSampler(string name, int baseRegister)
+void PipelineStateObject::BindSampler(string name, int baseRegister)
 {
 	BindingData binding;
 	binding.name = name;
@@ -602,7 +611,7 @@ void Shader::BindSampler(string name, int baseRegister)
 	samplerBinding.insert(pair<string, BindingData>(name, binding));
 }
 
-void Shader::SetTexture(string name, Texture* texture, ID3D12GraphicsCommandList* CommandList)
+void PipelineStateObject::SetTexture(string name, Texture* texture, ID3D12GraphicsCommandList* CommandList)
 {
 	textureBinding[name].texture = texture;
 
@@ -610,7 +619,7 @@ void Shader::SetTexture(string name, Texture* texture, ID3D12GraphicsCommandList
 	CommandList->SetGraphicsRootDescriptorTable(RPI, texture->GpuHandleSRV);
 }
 
-void Shader::SetUAV(string name, Texture* texture, ID3D12GraphicsCommandList* CommandList, bool isCompute)
+void PipelineStateObject::SetUAV(string name, Texture* texture, ID3D12GraphicsCommandList* CommandList, bool isCompute)
 {
 	uavBinding[name].texture = texture;
 	D3D12_CPU_DESCRIPTOR_HANDLE ShaderVisibleCPUHandle;
@@ -623,7 +632,7 @@ void Shader::SetUAV(string name, Texture* texture, ID3D12GraphicsCommandList* Co
 		CommandList->SetGraphicsRootDescriptorTable(RPI, texture->GpuHandleUAV);
 }
 
-void Shader::SetSampler(string name, Sampler* sampler, ID3D12GraphicsCommandList* CommandList)
+void PipelineStateObject::SetSampler(string name, Sampler* sampler, ID3D12GraphicsCommandList* CommandList)
 {
 	samplerBinding[name].sampler = sampler;
 
@@ -633,10 +642,10 @@ void Shader::SetSampler(string name, Sampler* sampler, ID3D12GraphicsCommandList
 	CommandList->SetGraphicsRootDescriptorTable(samplerBinding[name].rootParamIndex, sampler->GpuHandle);
 }
 
-void Shader::SetConstantValue(string name, void* pData, ID3D12GraphicsCommandList* CommandList)
+void PipelineStateObject::SetConstantValue(string name, void* pData, ID3D12GraphicsCommandList* CommandList)
 {
 	BindingData& binding = constantBufferBinding[name];
-	
+
 	UINT CBViewIndex = g_dx12_rhi->CurrentFrameIndex * NumMaxDrawCall + currentDrawCallIndex;
 	UINT8* pMapped = (UINT8*)binding.cb->MemMapped + binding.cbSize*CBViewIndex;
 	memcpy((void*)pMapped, pData, binding.cbSize);
@@ -655,140 +664,281 @@ void Shader::SetConstantValue(string name, void* pData, ID3D12GraphicsCommandLis
 	CommandList->SetGraphicsRootDescriptorTable(binding.rootParamIndex, GpuHandle);
 }
 
-void Shader::SetRootConstant(string name, UINT value, ID3D12GraphicsCommandList* CommandList)
+void PipelineStateObject::SetRootConstant(string name, UINT value, ID3D12GraphicsCommandList* CommandList)
 {
 	rootBinding[name].rootConst = value;
 	CommandList->SetGraphicsRoot32BitConstant(rootBinding[name].rootParamIndex, rootBinding[name].rootConst, 0);
 }
+//void PipelineStateObject::Init(bool isCompute)
+//{
+//
+//	vector<CD3DX12_ROOT_PARAMETER1> rootParamVec;
+//
+//	vector<CD3DX12_DESCRIPTOR_RANGE1> TextureRanges;
+//	if (ps && ps->textureBinding.size() != 0)
+//	{
+//		TextureRanges.resize(ps->textureBinding.size());
+//		int i = 0;
+//		for (auto& bindingPair : ps->textureBinding)
+//		{
+//			Shader::BindingData& bindingData = bindingPair.second;
+//
+//			CD3DX12_ROOT_PARAMETER1 TextureParam;
+//			TextureRanges[i].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, bindingData.numDescriptors, bindingData.baseRegister, 0, D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE);
+//			TextureParam.InitAsDescriptorTable(1, &TextureRanges[i], D3D12_SHADER_VISIBILITY_PIXEL);
+//			rootParamVec.push_back(TextureParam);
+//			i++;
+//			bindingData.rootParamIndex = RootParamIndex++;
+//		}
+//	}
+//	
+//	vector<CD3DX12_DESCRIPTOR_RANGE1> SamplerRanges;
+//	if (ps && ps->samplerBinding.size() != 0)
+//	{
+//		SamplerRanges.resize(ps->samplerBinding.size());
+//		int i = 0;
+//		for (auto& bindingPair : ps->samplerBinding)
+//		{
+//			Shader::BindingData& bindingData = bindingPair.second;
+//
+//			CD3DX12_ROOT_PARAMETER1 SamplerParam;
+//			SamplerRanges[i].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER, bindingData.numDescriptors, bindingData.baseRegister);
+//			SamplerParam.InitAsDescriptorTable(1, &SamplerRanges[i], D3D12_SHADER_VISIBILITY_PIXEL);
+//			rootParamVec.push_back(SamplerParam);
+//			i++;
+//			bindingData.rootParamIndex = RootParamIndex++;
+//		}
+//	}
+//	
+//
+//	if (ps && ps->rootBinding.size() != 0)
+//	{
+//		int i = 0;
+//		for (auto& bindingPair : ps->rootBinding)
+//		{
+//			Shader::BindingData& bindingData = bindingPair.second;
+//
+//			CD3DX12_ROOT_PARAMETER1 ConstantParam;
+//			ConstantParam.InitAsConstants(bindingData.numDescriptors, bindingData.baseRegister, 0, D3D12_SHADER_VISIBILITY_PIXEL);
+//			rootParamVec.push_back(ConstantParam);
+//			i++;
+//			bindingData.rootParamIndex = RootParamIndex++;
+//		}
+//	}
+//
+//	vector<CD3DX12_DESCRIPTOR_RANGE1> CBRangesPS;
+//	if (ps && ps->constantBufferBinding.size() != 0)
+//	{
+//
+//		CBRangesPS.resize(ps->constantBufferBinding.size());
+//		int i = 0;
+//		for (auto& bindingPair : ps->constantBufferBinding)
+//		{
+//			Shader::BindingData& bindingData = bindingPair.second;
+//
+//			CD3DX12_ROOT_PARAMETER1 CBParam;
+//			CBRangesPS[i].Init(D3D12_DESCRIPTOR_RANGE_TYPE_CBV, bindingData.numDescriptors, bindingData.baseRegister, 0, D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE);
+//			CBParam.InitAsDescriptorTable(1, &CBRangesPS[i], D3D12_SHADER_VISIBILITY_PIXEL);
+//
+//			rootParamVec.push_back(CBParam);
+//			i++;
+//			bindingData.rootParamIndex = RootParamIndex++;
+//		}
+//	}
+//	
+//	
+//	vector<CD3DX12_DESCRIPTOR_RANGE1> CBRanges;
+//	if (vs && vs->constantBufferBinding.size() != 0)
+//	{
+//		CBRanges.resize(vs->constantBufferBinding.size());
+//		int i = 0;
+//		for (auto& bindingPair : vs->constantBufferBinding)
+//		{
+//			Shader::BindingData& bindingData = bindingPair.second;
+//
+//			CD3DX12_ROOT_PARAMETER1 CBParam;
+//			CBRanges[i].Init(D3D12_DESCRIPTOR_RANGE_TYPE_CBV, bindingData.numDescriptors, bindingData.baseRegister, 0, D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE);
+//			CBParam.InitAsDescriptorTable(1, &CBRanges[i], D3D12_SHADER_VISIBILITY_VERTEX);
+//
+//			rootParamVec.push_back(CBParam);
+//			i++;
+//			bindingData.rootParamIndex = RootParamIndex++;
+//		}
+//	}
+//	
+//	vector<CD3DX12_DESCRIPTOR_RANGE1> TextureRangesCS;
+//	if (cs && cs->textureBinding.size() != 0)
+//	{
+//		TextureRangesCS.resize(cs->textureBinding.size());
+//		int i = 0;
+//		for (auto& bindingPair : cs->textureBinding)
+//		{
+//			Shader::BindingData& bindingData = bindingPair.second;
+//
+//			CD3DX12_ROOT_PARAMETER1 TextureParam;
+//			TextureRangesCS[i].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, bindingData.numDescriptors, bindingData.baseRegister, 0, D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE);
+//			TextureParam.InitAsDescriptorTable(1, &TextureRangesCS[i], D3D12_SHADER_VISIBILITY_ALL);
+//			rootParamVec.push_back(TextureParam);
+//			i++;
+//			bindingData.rootParamIndex = RootParamIndex++;
+//		}
+//	}
+//
+//	vector<CD3DX12_DESCRIPTOR_RANGE1> UAVRanges;
+//	if (cs && cs->uavBinding.size() != 0)
+//	{
+//		UAVRanges.resize(cs->uavBinding.size());
+//		int i = 0;
+//		for (auto& bindingPair : cs->uavBinding)
+//		{
+//			Shader::BindingData& bindingData = bindingPair.second;
+//			CD3DX12_ROOT_PARAMETER1 TextureParam;
+//			UAVRanges[i].Init(D3D12_DESCRIPTOR_RANGE_TYPE_UAV, bindingData.numDescriptors, bindingData.baseRegister, 0, D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE);
+//			TextureParam.InitAsDescriptorTable(1, &UAVRanges[i], D3D12_SHADER_VISIBILITY_ALL);
+//			rootParamVec.push_back(TextureParam);
+//			i++;
+//			bindingData.rootParamIndex = RootParamIndex++;
+//		}
+//	}
+//
+//	CD3DX12_VERSIONED_ROOT_SIGNATURE_DESC rootSignatureDesc;
+//	rootSignatureDesc.Init_1_1(rootParamVec.size(), &rootParamVec[0], 0, nullptr, D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
+//
+//	D3D12_FEATURE_DATA_ROOT_SIGNATURE featureData = {};
+//	featureData.HighestVersion = D3D_ROOT_SIGNATURE_VERSION_1_1;
+//
+//	if (FAILED(g_dx12_rhi->Device->CheckFeatureSupport(D3D12_FEATURE_ROOT_SIGNATURE, &featureData, sizeof(featureData))))
+//	{
+//		featureData.HighestVersion = D3D_ROOT_SIGNATURE_VERSION_1_0;
+//	}
+//
+//	ComPtr<ID3DBlob> signature;
+//	ComPtr<ID3DBlob> error;
+//	
+//	try
+//	{
+//		ThrowIfFailed(D3DX12SerializeVersionedRootSignature(&rootSignatureDesc, featureData.HighestVersion, &signature, &error));
+//	}
+//	catch (const std::exception& e)
+//	{
+//		OutputDebugStringA(reinterpret_cast<const char*>(error->GetBufferPointer()));
+//	}
+//	
+//	try
+//	{
+//		ThrowIfFailed(g_dx12_rhi->Device->CreateRootSignature(0, signature->GetBufferPointer(), signature->GetBufferSize(), IID_PPV_ARGS(&RS)));
+//	}
+//	catch (const std::exception& e)
+//	{
+//		OutputDebugStringA(reinterpret_cast<const char*>(error->GetBufferPointer()));
+//	}
+//
+//	NAME_D3D12_OBJECT(RS);
+//	if (isCompute)
+//	{
+//		computePSODesc.CS = cs->ShaderByteCode;
+//		computePSODesc.pRootSignature = RS.Get();
+//
+//		ThrowIfFailed(g_dx12_rhi->Device->CreateComputePipelineState(&computePSODesc, IID_PPV_ARGS(&PSO)));
+//		NAME_D3D12_OBJECT(PSO);
+//	}
+//	else
+//	{
+//		graphicsPSODesc.VS = vs->ShaderByteCode;
+//		graphicsPSODesc.PS = ps->ShaderByteCode;
+//
+//		graphicsPSODesc.pRootSignature = RS.Get();
+//
+//		ThrowIfFailed(g_dx12_rhi->Device->CreateGraphicsPipelineState(&graphicsPSODesc, IID_PPV_ARGS(&PSO)));
+//		NAME_D3D12_OBJECT(PSO);
+//	}
+//}
 
-Shader::Shader(UINT8* ByteCode, UINT Size)
-{
-	ShaderByteCode = CD3DX12_SHADER_BYTECODE(ByteCode, Size);
-}
-
-void PipelineStateObject::Init(bool isCompute)
+void PipelineStateObject::Init2(bool isCompute)
 {
 
 	vector<CD3DX12_ROOT_PARAMETER1> rootParamVec;
 
 	vector<CD3DX12_DESCRIPTOR_RANGE1> TextureRanges;
-	if (ps && ps->textureBinding.size() != 0)
+	if (textureBinding.size() != 0)
 	{
-		TextureRanges.resize(ps->textureBinding.size());
+		TextureRanges.resize(textureBinding.size());
 		int i = 0;
-		for (auto& bindingPair : ps->textureBinding)
+		for (auto& bindingPair : textureBinding)
 		{
-			Shader::BindingData& bindingData = bindingPair.second;
+			PipelineStateObject::BindingData& bindingData = bindingPair.second;
 
 			CD3DX12_ROOT_PARAMETER1 TextureParam;
 			TextureRanges[i].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, bindingData.numDescriptors, bindingData.baseRegister, 0, D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE);
-			TextureParam.InitAsDescriptorTable(1, &TextureRanges[i], D3D12_SHADER_VISIBILITY_PIXEL);
+			TextureParam.InitAsDescriptorTable(1, &TextureRanges[i], D3D12_SHADER_VISIBILITY_ALL);
 			rootParamVec.push_back(TextureParam);
 			i++;
 			bindingData.rootParamIndex = RootParamIndex++;
 		}
 	}
-	
+
 	vector<CD3DX12_DESCRIPTOR_RANGE1> SamplerRanges;
-	if (ps && ps->samplerBinding.size() != 0)
+	if (samplerBinding.size() != 0)
 	{
-		SamplerRanges.resize(ps->samplerBinding.size());
+		SamplerRanges.resize(samplerBinding.size());
 		int i = 0;
-		for (auto& bindingPair : ps->samplerBinding)
+		for (auto& bindingPair : samplerBinding)
 		{
-			Shader::BindingData& bindingData = bindingPair.second;
+			PipelineStateObject::BindingData& bindingData = bindingPair.second;
 
 			CD3DX12_ROOT_PARAMETER1 SamplerParam;
 			SamplerRanges[i].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER, bindingData.numDescriptors, bindingData.baseRegister);
-			SamplerParam.InitAsDescriptorTable(1, &SamplerRanges[i], D3D12_SHADER_VISIBILITY_PIXEL);
+			SamplerParam.InitAsDescriptorTable(1, &SamplerRanges[i], D3D12_SHADER_VISIBILITY_ALL);
 			rootParamVec.push_back(SamplerParam);
 			i++;
 			bindingData.rootParamIndex = RootParamIndex++;
 		}
 	}
-	
 
-	if (ps && ps->rootBinding.size() != 0)
+
+	if (rootBinding.size() != 0)
 	{
 		int i = 0;
-		for (auto& bindingPair : ps->rootBinding)
+		for (auto& bindingPair : rootBinding)
 		{
-			Shader::BindingData& bindingData = bindingPair.second;
+			PipelineStateObject::BindingData& bindingData = bindingPair.second;
 
 			CD3DX12_ROOT_PARAMETER1 ConstantParam;
-			ConstantParam.InitAsConstants(bindingData.numDescriptors, bindingData.baseRegister, 0, D3D12_SHADER_VISIBILITY_PIXEL);
+			ConstantParam.InitAsConstants(bindingData.numDescriptors, bindingData.baseRegister, 0, D3D12_SHADER_VISIBILITY_ALL);
 			rootParamVec.push_back(ConstantParam);
 			i++;
 			bindingData.rootParamIndex = RootParamIndex++;
 		}
 	}
 
-	vector<CD3DX12_DESCRIPTOR_RANGE1> CBRangesPS;
-	if (ps && ps->constantBufferBinding.size() != 0)
-	{
-
-		CBRangesPS.resize(ps->constantBufferBinding.size());
-		int i = 0;
-		for (auto& bindingPair : ps->constantBufferBinding)
-		{
-			Shader::BindingData& bindingData = bindingPair.second;
-
-			CD3DX12_ROOT_PARAMETER1 CBParam;
-			CBRangesPS[i].Init(D3D12_DESCRIPTOR_RANGE_TYPE_CBV, bindingData.numDescriptors, bindingData.baseRegister, 0, D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE);
-			CBParam.InitAsDescriptorTable(1, &CBRangesPS[i], D3D12_SHADER_VISIBILITY_PIXEL);
-
-			rootParamVec.push_back(CBParam);
-			i++;
-			bindingData.rootParamIndex = RootParamIndex++;
-		}
-	}
-	
-	
 	vector<CD3DX12_DESCRIPTOR_RANGE1> CBRanges;
-	if (vs && vs->constantBufferBinding.size() != 0)
+	if (constantBufferBinding.size() != 0)
 	{
-		CBRanges.resize(vs->constantBufferBinding.size());
+
+		CBRanges.resize(constantBufferBinding.size());
 		int i = 0;
-		for (auto& bindingPair : vs->constantBufferBinding)
+		for (auto& bindingPair : constantBufferBinding)
 		{
-			Shader::BindingData& bindingData = bindingPair.second;
+			PipelineStateObject::BindingData& bindingData = bindingPair.second;
 
 			CD3DX12_ROOT_PARAMETER1 CBParam;
 			CBRanges[i].Init(D3D12_DESCRIPTOR_RANGE_TYPE_CBV, bindingData.numDescriptors, bindingData.baseRegister, 0, D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE);
-			CBParam.InitAsDescriptorTable(1, &CBRanges[i], D3D12_SHADER_VISIBILITY_VERTEX);
+			CBParam.InitAsDescriptorTable(1, &CBRanges[i], D3D12_SHADER_VISIBILITY_ALL);
 
 			rootParamVec.push_back(CBParam);
-			i++;
-			bindingData.rootParamIndex = RootParamIndex++;
-		}
-	}
-	
-	vector<CD3DX12_DESCRIPTOR_RANGE1> TextureRangesCS;
-	if (cs && cs->textureBinding.size() != 0)
-	{
-		TextureRangesCS.resize(cs->textureBinding.size());
-		int i = 0;
-		for (auto& bindingPair : cs->textureBinding)
-		{
-			Shader::BindingData& bindingData = bindingPair.second;
-
-			CD3DX12_ROOT_PARAMETER1 TextureParam;
-			TextureRangesCS[i].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, bindingData.numDescriptors, bindingData.baseRegister, 0, D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE);
-			TextureParam.InitAsDescriptorTable(1, &TextureRangesCS[i], D3D12_SHADER_VISIBILITY_ALL);
-			rootParamVec.push_back(TextureParam);
 			i++;
 			bindingData.rootParamIndex = RootParamIndex++;
 		}
 	}
 
 	vector<CD3DX12_DESCRIPTOR_RANGE1> UAVRanges;
-	if (cs && cs->uavBinding.size() != 0)
+	if (uavBinding.size() != 0)
 	{
-		UAVRanges.resize(cs->uavBinding.size());
+		UAVRanges.resize(uavBinding.size());
 		int i = 0;
-		for (auto& bindingPair : cs->uavBinding)
+		for (auto& bindingPair : uavBinding)
 		{
-			Shader::BindingData& bindingData = bindingPair.second;
+			PipelineStateObject::BindingData& bindingData = bindingPair.second;
 			CD3DX12_ROOT_PARAMETER1 TextureParam;
 			UAVRanges[i].Init(D3D12_DESCRIPTOR_RANGE_TYPE_UAV, bindingData.numDescriptors, bindingData.baseRegister, 0, D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE);
 			TextureParam.InitAsDescriptorTable(1, &UAVRanges[i], D3D12_SHADER_VISIBILITY_ALL);
@@ -811,7 +961,7 @@ void PipelineStateObject::Init(bool isCompute)
 
 	ComPtr<ID3DBlob> signature;
 	ComPtr<ID3DBlob> error;
-	
+
 	try
 	{
 		ThrowIfFailed(D3DX12SerializeVersionedRootSignature(&rootSignatureDesc, featureData.HighestVersion, &signature, &error));
@@ -820,7 +970,7 @@ void PipelineStateObject::Init(bool isCompute)
 	{
 		OutputDebugStringA(reinterpret_cast<const char*>(error->GetBufferPointer()));
 	}
-	
+
 	try
 	{
 		ThrowIfFailed(g_dx12_rhi->Device->CreateRootSignature(0, signature->GetBufferPointer(), signature->GetBufferSize(), IID_PPV_ARGS(&RS)));
@@ -877,7 +1027,7 @@ void PipelineStateObject::ApplyComputeRSPSO(ID3D12GraphicsCommandList* CommandLi
 
 UINT PipelineStateObject::GetGraphicsBindingDHSize()
 {
-	return	vs->constantBufferBinding.size() + ps->constantBufferBinding.size() + vs->textureBinding.size() + ps->textureBinding.size();
+	return 0;//return	vs->constantBufferBinding.size() + ps->constantBufferBinding.size() + vs->textureBinding.size() + ps->textureBinding.size();
 }
 
 void Texture::MakeStaticSRV()

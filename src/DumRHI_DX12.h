@@ -31,11 +31,41 @@ public:
 class Shader
 {
 public:
-	struct CBVersions
+
+
+	struct BindingData
 	{
-		vector<shared_ptr<ConstantBuffer>> versions;
+		string name;
+		UINT rootParamIndex;
+		UINT baseRegister;
+		UINT numDescriptors;
+		UINT cbSize;
+
+		Texture* texture;
+		Sampler* sampler;
+
+		shared_ptr<ConstantBuffer> cb;
+
+		UINT rootConst;
 	};
 
+	
+
+	D3D12_SHADER_BYTECODE ShaderByteCode;
+	
+private:
+	
+	
+public:
+	Shader(UINT8* ByteCode, UINT Size);
+	~Shader()
+	{
+	}
+};
+
+class PipelineStateObject
+{
+public:
 	struct BindingData
 	{
 		string name;
@@ -61,31 +91,6 @@ public:
 	map<string, BindingData> samplerBinding;
 	map<string, BindingData> rootBinding;
 
-	D3D12_SHADER_BYTECODE ShaderByteCode;
-	
-	void BindUAV(string name, int baseRegister);
-	void BindTexture(string name, int baseRegister, int num);
-	void BindConstantBuffer(string name, int baseRegister, int size, UINT numMaxDrawCall = 1);
-	void BindRootConstant(string name, int baseRegister);
-	void BindSampler(string name, int baseRegister);
-
-	void SetTexture(string name, Texture* texture, ID3D12GraphicsCommandList* CommandList);
-	void SetUAV(string name, Texture* texture, ID3D12GraphicsCommandList* CommandList, bool isCompute = false);
-
-	void SetSampler(string name, Sampler* sampler, ID3D12GraphicsCommandList* CommandList);
-	
-	void SetConstantValue(string name, void* pData, ID3D12GraphicsCommandList* CommandList);
-	void SetRootConstant(string, UINT value, ID3D12GraphicsCommandList* CommandList);
-
-	Shader(UINT8* ByteCode, UINT Size);
-	~Shader()
-	{
-	}
-};
-
-class PipelineStateObject
-{
-public:
 	UINT RootParamIndex = 0;
 	shared_ptr<Shader> vs;
 	shared_ptr<Shader> ps;
@@ -99,11 +104,28 @@ public:
 
 	void Init(bool isCompute);
 
+	void Init2(bool isCompute);
+
+
 	void ApplyGlobal(ID3D12GraphicsCommandList* CommandList);
 	void ApplyCS(ID3D12GraphicsCommandList* CommandList);
 	void ApplyGraphicsRSPSO(ID3D12GraphicsCommandList* CommandList);
 	void ApplyComputeRSPSO(ID3D12GraphicsCommandList* CommandList);
 
+
+	void BindUAV(string name, int baseRegister);
+	void BindTexture(string name, int baseRegister, int num);
+	void BindConstantBuffer(string name, int baseRegister, int size, UINT numMaxDrawCall = 1);
+	void BindRootConstant(string name, int baseRegister);
+	void BindSampler(string name, int baseRegister);
+
+	void SetTexture(string name, Texture* texture, ID3D12GraphicsCommandList* CommandList);
+	void SetUAV(string name, Texture* texture, ID3D12GraphicsCommandList* CommandList, bool isCompute = false);
+
+	void SetSampler(string name, Sampler* sampler, ID3D12GraphicsCommandList* CommandList);
+
+	void SetConstantValue(string name, void* pData, ID3D12GraphicsCommandList* CommandList);
+	void SetRootConstant(string, UINT value, ID3D12GraphicsCommandList* CommandList);
 	UINT GetGraphicsBindingDHSize();
 };
 

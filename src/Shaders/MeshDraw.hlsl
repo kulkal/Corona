@@ -24,12 +24,14 @@ SamplerState sampleWrap : register(s0);
 cbuffer ObjParameter : register(b0)
 {
     float4x4 ViewProjectionMatrix;
-    float4x4 UnjitteredViewProjectionMatrix;
-    float4x4 InvViewProjectionMatrix;
+    // float4x4 UnjitteredViewProjectionMatrix;
+    // float4x4 InvViewProjectionMatrix;
     float4x4 PrevViewProjectionMatrix;  
     float4x4 WorldMatrix;
     float4 ViewDir;
     float2 RTSize;
+    float2 JitterOffset;
+    float4 pad[2];
 };
 
 struct VSInput
@@ -43,7 +45,7 @@ struct VSInput
 struct PSInput
 {
     float4 position : SV_POSITION;
-    float4 velocity : POSITION;
+    // float4 prevPosition : PREVPOSITION;
     float2 uv : TEXCOORD0;
     float3 normal : NORMAL;
     float3 tangent : TANGENT;
@@ -54,33 +56,29 @@ PSInput VSMain(
 {
     PSInput result;
 	float4 worldPos = mul(float4(input.position, 1.0f), WorldMatrix);
-
-
     result.position = mul(worldPos, ViewProjectionMatrix);
-	float4 positionSS = result.position / result.position.w;
-    positionSS.xy = (positionSS.xy*float2(0.5, -0.5) + 0.5) * RTSize;
 
-    float4 prevPosition = mul(worldPos, PrevViewProjectionMatrix);
-    prevPosition /= prevPosition.w;
-    float2 prevPositionSS = (prevPosition.xy*float2(0.5, -0.5) + 0.5) * RTSize;
+	// float4 positionSS = result.position / result.position.w;
+ //    positionSS.xy = (positionSS.xy*float2(0.5, -0.5) + 0.5) * RTSize;
 
+    //result.prevPosition = mul(worldPos, PrevViewProjectionMatrix);
+    // result.prevPosition /= result.prevPosition.w;
+ //    float2 prevPositionSS = (prevPosition.xy*float2(0.5, -0.5) + 0.5) * RTSize;
+
+    // result.currentPosition = mul(worldPos, ViewProjectionMatrix);
+    // result.currentPosition /= result.prevPosition.w;
     
 
-    result.velocity.xy = positionSS.xy - prevPositionSS.xy;
+ //    result.velocity.xy = positionSS.xy - prevPositionSS.xy;
 
-    float4 unjitteredPosition = mul(worldPos, UnjitteredViewProjectionMatrix);
-    unjitteredPosition /= unjitteredPosition.w;
-    result.velocity.zw = float2(unjitteredPosition.z, 0);
+    // float4 unjitteredPosition = mul(worldPos, UnjitteredViewProjectionMatrix);
+    // unjitteredPosition /= unjitteredPosition.w;
+    // result.velocity.zw = float2(unjitteredPosition.z, 0);
 
 
-    float3 CorrectNormal;
- //   if (dot(input.normal, ViewDir.xyz) > 0)
- //       CorrectNormal = input.normal;
-	//else
-    CorrectNormal = mul(input.normal, WorldMatrix);
 
-	result.normal = CorrectNormal;
-    result.tangent = input.tangent;
+	result.normal = mul(input.normal, WorldMatrix);
+    result.tangent = mul(input.tangent, WorldMatrix);
     result.uv = input.uv;
 	
     return result;
@@ -107,18 +105,33 @@ float3 CalcPerPixelNormal(float2 vTexcoord, float3 vVertNormal, float3 vVertTang
     //return vVertNormal;
 }
 
-
 struct PS_OUTPUT
 {
     float4 Albedo : SV_Target0;
     float4 Normal : SV_Target1;
     float4 GeomNormal : SV_Target2;
-    float2 Velocity : SV_Target3;
+    // float2 Velocity : SV_Target3;
 };
 
 
 PS_OUTPUT PSMain(PSInput input) : SV_TARGET
 {
+ //    float4 positionNCD = float4((input.position.xy / RTSize) * 2.0f - 1.0f, 1.0f, 1.0f);
+	// positionNCD.y *= -1.0f;
+    
+	// float4 positionWS = mul(positionNCD, InvViewProjectionMatrix);
+ //    positionWS /= positionWS.w;
+
+ //    float4 prevPositionNCD = mul(float4(positionWS.xyz, 1.0f), PrevViewProjectionMatrix);
+ //    prevPositionNCD /= prevPositionNCD.w;
+
+ //    float2 prevPositionSS = (prevPositionNCD.xy * float2(0.5f, -0.5f) + 0.5f) * RTSize;
+    // float2 prevPositionSS = (input.prevPosition.xy/input.prevPosition.w) * float2(0.5, -0.5) + 0.5;
+    // prevPositionSS *= RTSize.xy;
+    // float2 velocity = input.position.xy - prevPositionSS;
+    // velocity -= JitterOffset;
+    // velocity /= RTSize.xy;
+
 
     float3 Albedo = diffuseMap.Sample(sampleWrap, input.uv).rgb;
 
@@ -126,10 +139,10 @@ PS_OUTPUT PSMain(PSInput input) : SV_TARGET
 	
     PS_OUTPUT output;
     output.Albedo.xyz = Albedo;
-	output.Albedo.w = input.velocity.z;// unjittered depth
+	//output.Albedo.w = input.velocity.z;// unjittered depth
     output.Normal.xyz = WorldNormal;
     output.GeomNormal.xyz = input.normal;
-    output.Velocity = input.velocity.xy;
+    //output.Velocity = velocity.xy;
 
     return output;
 }
