@@ -1345,11 +1345,15 @@ void dx12_framework::OnUpdate()
 	ProjMat = m_camera.GetProjectionMatrix(0.8f, m_aspectRatio, Near, Far);
 
 	glm::mat4x4 InvViewMat = glm::inverse(ViewMat);
-	RTShadowViewParam.InvViewMatrix = InvViewMat;
-	RTShadowViewParam.ProjMatrix = ProjMat;
+	RTShadowViewParam.ViewMatrix = glm::transpose(ViewMat);
+	RTShadowViewParam.InvViewMatrix = glm::transpose(InvViewMat);
+	RTShadowViewParam.ProjMatrix = glm::transpose(ProjMat);
 	RTShadowViewParam.ProjectionParams.x = Far / (Far - Near);
 	RTShadowViewParam.ProjectionParams.y = Near / (Near - Far);
-	RTShadowViewParam.ProjectionParams.z = Far;
+	RTShadowViewParam.ProjectionParams.z = Near;
+	RTShadowViewParam.ProjectionParams.w = Far;
+
+
 	RTShadowViewParam.LightDir = glm::vec4(LightDir, 0);
 
 	glm::vec2 Jitter;
@@ -1378,19 +1382,15 @@ void dx12_framework::OnUpdate()
 
 	InvViewProjMat = glm::inverse(ViewProjMat);
 
-	RTShadowViewParam.ViewMatrix = ViewMat;
-
-
 
 
 	// reflection view param
-	RTReflectionViewParam.ViewMatrix = ViewMat;
-	RTReflectionViewParam.InvViewMatrix = InvViewMat;
-	RTReflectionViewParam.ProjMatrix = ProjMat;
+	RTReflectionViewParam.ViewMatrix = glm::transpose(ViewMat);
+	RTReflectionViewParam.InvViewMatrix = glm::transpose(InvViewMat);
+	RTReflectionViewParam.ProjMatrix = glm::transpose(ProjMat);
 	RTReflectionViewParam.ProjectionParams.x = Far / (Far - Near);
 	RTReflectionViewParam.ProjectionParams.y = Near / (Near - Far);
 	RTReflectionViewParam.ProjectionParams.z = Far;
-
 	RTReflectionViewParam.LightDir = glm::vec4(LightDir, 0);
 
 	FrmaeCounter++;

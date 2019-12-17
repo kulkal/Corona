@@ -64,7 +64,7 @@ float4 PSMain(PSInput input) : SV_TARGET
     float2 Velocity = VelocityTex[PixelPos];//.Sample(sampleWrap, input.uv).xy;
 
 	
-    float3 DiffuseLighting = dot(LightDir.xyz, WorldNormal)* Albedo;//* Shadow;
+    float3 DiffuseLighting = dot(LightDir.xyz, WorldNormal)* Albedo * Shadow;
 
 
     float4 CurrentColor = float4(DiffuseLighting, 1);

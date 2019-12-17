@@ -74,6 +74,13 @@ float GetLinearDepth(float DeviceDepth, float ParamX, float ParamY, float ParamZ
     return ParamY / (DeviceDepth - ParamX) * ParamZ;
 }
 
+float GetLinearDepthOpenGL(float DeviceDepth, float Near, float Far)
+{
+    float z_n = DeviceDepth * 2 - 1;
+
+    return 2.0 * Near * Far /(Far + Near -z_n * (Far - Near));
+}
+
 float3 GetViewPosition(float LinearDepth, float2 ScreenPosition, float Proj11, float Proj22)
 {
     float2 screenSpaceRay = float2(ScreenPosition.x / Proj11,
@@ -159,7 +166,10 @@ void rayGen
 	float3 WorldNormal = normalize(WorldNormalTex.SampleLevel(sampleWrap, UV, 0).xyz);
   
 
-	float LinearDepth = GetLinearDepth(DeviceDepth, ProjectionParams.x, ProjectionParams.y, ProjectionParams.z) ;
+	// float LinearDepth = GetLinearDepth(DeviceDepth, ProjectionParams.x, ProjectionParams.y, ProjectionParams.z) ;
+    float LinearDepth = GetLinearDepthOpenGL(DeviceDepth, ProjectionParams.z, ProjectionParams.w) ;
+
+
 
 	float2 ScreenPosition = crd.xy;
 	ScreenPosition.x /= dims.x;
@@ -167,6 +177,7 @@ void rayGen
 	ScreenPosition.xy = ScreenPosition.xy * 2 - 1;
 	ScreenPosition.y = -ScreenPosition.y;
 
+    // float3 ViewPosition = normalize(float3(d.x * aspectRatio, -d.y, -1)) * LinearDepth;
 	float3 ViewPosition = GetViewPosition(LinearDepth, ScreenPosition, ProjMatrix._11, ProjMatrix._22);
 	float3 WorldPos = mul(float4(ViewPosition, 1), InvViewMatrix).xyz;
 
@@ -194,6 +205,9 @@ void rayGen
 	{
 		gOutput[launchIndex.xy] = float4(0.1, 0.1, 0.1, 1);
 	}
+
+        // gOutput[launchIndex.xy] = float4(LinearDepth/1000.0, 0.1, 0.1, 1);
+
 #endif
 }
 
