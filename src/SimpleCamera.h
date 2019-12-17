@@ -11,17 +11,24 @@
 
 #pragma once
 
-using namespace DirectX;
+
+#include "glm/glm.hpp"
+#define GLM_ENABLE_EXPERIMENTAL
+#include "glm/gtx/transform.hpp"
+#include "glm/mat4x4.hpp"
+#include "glm/fwd.hpp"
+#include "glm/gtc/constants.hpp"
+
 
 class SimpleCamera
 {
 public:
 	SimpleCamera();
 
-	void Init(XMFLOAT3 position);
+	void Init(glm::vec3 position);
 	void Update(float elapsedSeconds);
-	XMMATRIX GetViewMatrix();
-	XMMATRIX GetProjectionMatrix(float fov, float aspectRatio, float nearPlane = 1.0f, float farPlane = 10000.0f);
+	glm::mat4x4 GetViewMatrix();
+	glm::mat4x4 GetProjectionMatrix(float fov, float aspectRatio, float nearPlane = 1.0f, float farPlane = 10000.0f);
 	void SetMoveSpeed(float unitsPerSecond);
 	void SetTurnSpeed(float radiansPerSecond);
 
@@ -47,12 +54,12 @@ public:
 		bool down;
 	};
 
-	XMFLOAT3 m_initialPosition;
-	XMFLOAT3 m_position;
+	glm::vec3 m_initialPosition;
+	glm::vec3 m_position;
 	float m_yaw;				// Relative to the +z axis.
 	float m_pitch;				// Relative to the xz plane.
-	XMFLOAT3 m_lookDirection;
-	XMFLOAT3 m_upDirection;
+	glm::vec3 m_lookDirection;
+	glm::vec3 m_upDirection;
 	float m_moveSpeed;			// Speed at which the camera moves, in units per second.
 	float m_turnSpeed;			// Speed at which the camera turns, in radians per second.
 

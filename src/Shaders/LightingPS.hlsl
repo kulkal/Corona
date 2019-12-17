@@ -68,7 +68,7 @@ float4 PSMain(PSInput input) : SV_TARGET
 
 
     float4 CurrentColor = float4(DiffuseLighting, 1);
-    float2 PrevColorPos = PixelPos;// - Velocity * RTSize;
+    float2 PrevColorPos = PixelPos - Velocity * RTSize;
     float4 PrevColor = PrevColorTex[PrevColorPos];
 
     float4 Color = PrevColor *(1-TAABlendFactor) + CurrentColor * TAABlendFactor;

@@ -1341,11 +1341,8 @@ void dx12_framework::OnUpdate()
 
 	m_camera.Update(static_cast<float>(m_timer.GetElapsedSeconds()));
 
-	memcpy(&ViewMat, &m_camera.GetViewMatrix(), sizeof(glm::mat4x4));
-	ViewMat = glm::transpose(ViewMat);
-	memcpy(&ProjMat, &m_camera.GetProjectionMatrix(0.8f, m_aspectRatio, Near, Far), sizeof(glm::mat4x4));
-	ProjMat = glm::transpose(ProjMat);
-
+	ViewMat = m_camera.GetViewMatrix();
+	ProjMat = m_camera.GetProjectionMatrix(0.8f, m_aspectRatio, Near, Far);
 
 	glm::mat4x4 InvViewMat = glm::inverse(ViewMat);
 	RTShadowViewParam.InvViewMatrix = InvViewMat;
@@ -1356,22 +1353,28 @@ void dx12_framework::OnUpdate()
 	RTShadowViewParam.LightDir = glm::vec4(LightDir, 0);
 
 	glm::vec2 Jitter;
-	uint64 idx = FrmaeCounter % 16;
-	Jitter = Hammersley2D(idx, 16) * 2.0f - glm::vec2(1.0f);
+	uint64 idx = FrmaeCounter % 4;
+	Jitter = Hammersley2D(idx, 4) * 2.0f - glm::vec2(1.0f);
+
+
 	const float offsetX = Jitter.x * (1.0f / m_width);
 	const float offsetY = Jitter.y * (1.0f / m_height);
 
-	JitterOffset = (Jitter - PrevJitter) * 0.5f;
+	if (bEnableTAA)
+		JitterOffset = (Jitter - PrevJitter) * 0.5f;
+	else
+		JitterOffset = glm::vec2(0, 0);
+	
 	PrevJitter = Jitter;
-	//JitterOffset = -glm::vec2(Jitter.x, -Jitter.y);
 	glm::mat4x4 JitterMat = glm::translate(glm::vec3(offsetX, -offsetY, 0));
 	
-	UnjitteredViewProjMat = ViewMat * ProjMat;
+	UnjitteredViewProjMat = ProjMat * ViewMat;
 
-	ProjMat = ProjMat ;
+	if(bEnableTAA)
+		ProjMat = JitterMat * ProjMat;
 
 
-	ViewProjMat = ViewMat * ProjMat;
+	ViewProjMat = ProjMat * ViewMat;
 
 	InvViewProjMat = glm::inverse(ViewProjMat);
 
@@ -1410,7 +1413,7 @@ void dx12_framework::OnRender()
 
 	//NVAftermathMarker(dx12_rhi->AM_CL_Handle, "RaytracePass");
 
-	//RaytraceShadowPass();
+	RaytraceShadowPass();
 
 	//RaytraceReflectionPass();
 	//ComputePass();
@@ -1598,10 +1601,10 @@ void dx12_framework::DrawMeshPass()
 				ObjConstantBuffer objCB;
 				int sizea = sizeof(ObjConstantBuffer);
 
-				objCB.ViewProjectionMatrix = ViewProjMat;
+				objCB.ViewProjectionMatrix = glm::transpose(ViewProjMat);
 				//objCB.InvViewProjectionMatrix = InvViewProjMat;
 				//objCB.UnjitteredViewProjectionMatrix = UnjitteredViewProjMat;
-				objCB.PrevViewProjectionMatrix = PrevViewProjMat;
+				objCB.PrevViewProjectionMatrix = glm::transpose(PrevViewProjMat);
 
 
 				glm::mat4 m; // Identity matrix
