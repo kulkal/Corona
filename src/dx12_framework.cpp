@@ -1118,6 +1118,8 @@ void dx12_framework::InitLightingPass()
 	RS_Lighting->BindTexture("ShadowTex", 2, 1);
 	RS_Lighting->BindTexture("PrevColorTex", 3, 1);
 	RS_Lighting->BindTexture("VelocityTex", 4, 1);
+	RS_Lighting->BindTexture("DepthTex", 5, 1);
+
 
 
 	RS_Lighting->BindSampler("samplerWrap", 0);
@@ -1266,6 +1268,8 @@ void dx12_framework::LightingPass()
 	Texture* PrevColorBuffer = ColorBuffers[PrevColorBufferIndex];
 	RS_Lighting->SetTexture("PrevColorTex", PrevColorBuffer, dx12_rhi->CommandList.Get());
 	RS_Lighting->SetTexture("VelocityTex", VelocityBuffer.get(), dx12_rhi->CommandList.Get());
+	RS_Lighting->SetTexture("DepthTex", DepthBuffer.get(), dx12_rhi->CommandList.Get());
+
 
 
 

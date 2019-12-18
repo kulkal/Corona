@@ -14,6 +14,7 @@ Texture2D NormalTex : register(t1);
 Texture2D ShadowTex : register(t2);
 Texture2D PrevColorTex : register(t3);
 Texture2D VelocityTex : register(t4);
+Texture2D DepthTex : register(t5);
 
 
 
@@ -68,10 +69,26 @@ float4 PSMain(PSInput input) : SV_TARGET
 
 
     float4 CurrentColor = float4(DiffuseLighting, 1);
-    float2 PrevColorPos = PixelPos - Velocity * RTSize;
-    float4 PrevColor = PrevColorTex[PrevColorPos];
+    float2 PrevPixelPos = PixelPos - Velocity * RTSize;
+    float4 PrevColor = PrevColorTex[PrevPixelPos];
 
-    float4 Color = PrevColor *(1-TAABlendFactor) + CurrentColor * TAABlendFactor;
+    float Depth = DepthTex[PixelPos];
+    float PrevDepth = DepthTex[PrevPixelPos];
+
+    float BlendFactor = TAABlendFactor;
+
+    if(PrevDepth < Depth || PrevPixelPos.x > RTSize.x || PrevPixelPos.y > RTSize.y || PrevPixelPos.x < 0 || PrevPixelPos.y < 0)
+        BlendFactor = 1.0;
+
+    float4 Color = PrevColor *(1-BlendFactor) + CurrentColor * BlendFactor;
+
+    // float depth = DepthTex[PixelPos];
+    // if(depth > 0.5)
+    //     Color = float4(1, 0, 0, 0);
+    // else if(depth > 0)
+    //     Color = float4(0, 1, 0, 0);
+    // else if(depth > -0.5)
+    //     Color = float4(0, 0, 1, 0);
 
     return Color;
 }
