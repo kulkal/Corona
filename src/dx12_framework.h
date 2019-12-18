@@ -148,7 +148,7 @@ private:
 	SimpleCamera m_camera;
 
 
-	glm::vec3 LightDir = glm::normalize(glm::vec3(0.5, 1, 0.2));
+	glm::vec3 LightDir = glm::normalize(glm::vec3(0.7, 1, 0.2));
 	float Near = 1.0f;
 	float Far = 20000.0f;
 

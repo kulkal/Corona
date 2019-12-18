@@ -314,7 +314,7 @@ void dx12_framework::OnInit()
 
 	g_TS.Initialize(8);
 
-	m_camera.Init({100, 15, 50 });
+	m_camera.Init({0, 0, 0 });
 	m_camera.SetMoveSpeed(200);
 
 	LoadPipeline();

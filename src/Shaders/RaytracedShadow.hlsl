@@ -76,7 +76,7 @@ float GetLinearDepth(float DeviceDepth, float ParamX, float ParamY, float ParamZ
 
 float GetLinearDepthOpenGL(float DeviceDepth, float Near, float Far)
 {
-    float z_n = DeviceDepth * 2 - 1;
+    float z_n = DeviceDepth;// * 2 - 1;
 
     return 2.0 * Near * Far /(Far + Near -z_n * (Far - Near));
 }
@@ -181,7 +181,6 @@ void rayGen
 	float3 ViewPosition = GetViewPosition(LinearDepth, ScreenPosition, ProjMatrix._11, ProjMatrix._22);
 	float3 WorldPos = mul(float4(ViewPosition, 1), InvViewMatrix).xyz;
 
-  
 
 
 
