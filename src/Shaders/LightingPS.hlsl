@@ -56,8 +56,16 @@ PSInput VSMain(
 
 float4 PSMain(PSInput input) : SV_TARGET
 {
+    float LowFreqWeight = 0.25f;
+    float HiFreqWeight = 0.85f;
+    float3 clrMin = 99999999.0f;
+    float3 clrMax = -99999999.0f;
+    float totalWeight = 0.0f;
+
     input.uv.y = 1 - input.uv.y;
     float2 PixelPos = input.uv * RTSize;
+
+
     float3 Albedo = AlbedoTex[PixelPos];//.Sample(sampleWrap, input.uv);
     float3 WorldNormal = NormalTex[PixelPos];//.Sample(sampleWrap, input.uv);
     float3 Shadow = ShadowTex[PixelPos];//.Sample(sampleWrap, input.uv);
@@ -68,27 +76,40 @@ float4 PSMain(PSInput input) : SV_TARGET
     float3 DiffuseLighting = dot(LightDir.xyz, WorldNormal)* Albedo * Shadow;
 
 
-    float4 CurrentColor = float4(DiffuseLighting, 1);
-    float2 PrevPixelPos = PixelPos - Velocity * RTSize;
-    float4 PrevColor = PrevColorTex[PrevPixelPos];
+    // float3 CurrentColor = DiffuseLighting;
+    // float2 PrevPixelPos = PixelPos - Velocity * RTSize;
+    // float3 PrevColor = PrevColorTex[PrevPixelPos].xyz;
+    // // PrevColor = clamp(PrevColor, clrMin, clrMax);
 
-    float Depth = DepthTex[PixelPos];
-    float PrevDepth = DepthTex[PrevPixelPos];
+    // float Depth = DepthTex[PixelPos];
+    // float PrevDepth = DepthTex[PrevPixelPos];
 
-    float BlendFactor = TAABlendFactor;
+    // float BlendFactor = TAABlendFactor;
 
-    if(PrevDepth < Depth || PrevPixelPos.x > RTSize.x || PrevPixelPos.y > RTSize.y || PrevPixelPos.x < 0 || PrevPixelPos.y < 0)
-        BlendFactor = 1.0;
 
-    float4 Color = PrevColor *(1-BlendFactor) + CurrentColor * BlendFactor;
+  
 
-    // float depth = DepthTex[PixelPos];
-    // if(depth > 0.5)
-    //     Color = float4(1, 0, 0, 0);
-    // else if(depth > 0)
-    //     Color = float4(0, 1, 0, 0);
-    // else if(depth > -0.5)
-    //     Color = float4(0, 0, 1, 0);
 
-    return Color;
+    //     // return float4(CurrentColor, 1);
+    
+    // float3 weightA = saturate(1.0f - BlendFactor);
+    // float3 weightB = saturate(BlendFactor);
+
+    // float3 temporalWeight = saturate(abs(clrMax - clrMin) / CurrentColor);
+    // weightB = saturate(lerp(LowFreqWeight, HiFreqWeight, temporalWeight));
+    // weightA = 1.0f - weightB;
+
+
+    //  // if( PrevDepth < Depth || PrevPixelPos.x > RTSize.x || PrevPixelPos.y > RTSize.y || PrevPixelPos.x < 0 || PrevPixelPos.y < 0)
+    //  if(  PrevPixelPos.x > RTSize.x || PrevPixelPos.y > RTSize.y || PrevPixelPos.x < 0 || PrevPixelPos.y < 0 || TAABlendFactor > 0.999f)
+    //  {
+    //     weightA = 1.0f;
+    //     weightB = 0.0f;
+    //     // return float4(1, 0, 0, 0);
+    //  }
+
+    // float4 Color = float4((CurrentColor * weightA + PrevColor * weightB) / (weightA + weightB), 1);
+    
+
+    return float4(DiffuseLighting, 1);
 }

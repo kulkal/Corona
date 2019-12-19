@@ -109,6 +109,8 @@ private:
 	
 	std::array<Texture*, 2> ColorBuffers;
 
+	shared_ptr<Texture> LightingBuffer;
+
 	shared_ptr<Texture> AlbedoBuffer;
 	shared_ptr<Texture> NormalBuffer;
 	shared_ptr<Texture> GeomNormalBuffer;
@@ -184,6 +186,11 @@ private:
 
 	// lighting pass
 	unique_ptr<PipelineStateObject> RS_Lighting;
+
+	// temporalAA
+	unique_ptr<PipelineStateObject> RS_TemporalAA;
+
+
 	struct LightingParam
 	{
 		glm::vec4 LightDir;
@@ -225,10 +232,15 @@ public:
 
 	void InitLightingPass();
 
+	void InitTemporalAAPass();
+
+
 	void CopyPass();
 
 	void DebugPass();
 
 	void LightingPass();
+
+	void TemporalAAPass();
 
 };

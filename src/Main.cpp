@@ -16,7 +16,7 @@
 _Use_decl_annotations_
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow)
 {
-	dx12_framework* sample = new dx12_framework(1280, 720, L"D3D12 Dynamic Indexing Sample");
+	dx12_framework* sample = new dx12_framework(1920, 1080, L"We should learn dx12");
 	Win32Application::Run(sample, hInstance, nCmdShow);
 
 	delete sample;
