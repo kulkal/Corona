@@ -14,6 +14,9 @@ This project is for dx12 & dxr learning. I am trying to test best practice imple
 	* Root signature.
 	* Shader table.
 
+## Non-DX Topic
+* Temporal AA
+
 ## Build
 * Go to build directory.
 * premake5.exe vs2017
