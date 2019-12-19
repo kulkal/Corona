@@ -199,9 +199,16 @@ private:
 		float pad0;
 	};
 
+	struct TemporalAAParam
+	{
+		glm::vec2 RTSize;
+		float TAABlendFactor;
+		UINT32 ClampMode;
+	};
 	bool bEnableTAA = true;
 
-
+	UINT32 ClampMode = 2;
+	float JitterScale = 0.85;
 public:
 
 	void InitRaytracing();

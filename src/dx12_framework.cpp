@@ -1426,8 +1426,7 @@ void dx12_framework::TemporalAAPass()
 
 
 
-	LightingParam Param;
-	Param.LightDir = glm::vec4(LightDir, 0);
+	TemporalAAParam Param;
 
 	Param.RTSize.x = m_width;
 	Param.RTSize.y = m_height;
@@ -1437,8 +1436,8 @@ void dx12_framework::TemporalAAPass()
 	else
 		Param.TAABlendFactor = 1.0;
 
+	Param.ClampMode = ClampMode;
 
-	glm::normalize(Param.LightDir);
 	RS_TemporalAA->SetConstantValue("LightingParam", &Param, dx12_rhi->CommandList.Get());
 
 
@@ -1514,7 +1513,7 @@ void dx12_framework::OnUpdate()
 	glm::vec2 Jitter;
 	uint64 idx = FrmaeCounter % 4;
 	Jitter = Hammersley2D(idx, 4) * 2.0f - glm::vec2(1.0f);
-
+	Jitter *= JitterScale;
 
 	const float offsetX = Jitter.x * (1.0f / m_width);
 	const float offsetY = Jitter.y * (1.0f / m_height);
@@ -1642,6 +1641,10 @@ void dx12_framework::OnKeyDown(UINT8 key)
 		break;
 	case 'T':
 		bEnableTAA = !bEnableTAA;
+		break;
+	case 'C':
+		ClampMode++;
+		ClampMode = ClampMode % 3;
 		break;
 	default:
 		break;
