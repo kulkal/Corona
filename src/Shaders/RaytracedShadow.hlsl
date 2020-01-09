@@ -1,30 +1,5 @@
-/***************************************************************************
-# Copyright (c) 2018, NVIDIA CORPORATION. All rights reserved.
-#
-# Redistribution and use in source and binary forms, with or without
-# modification, are permitted provided that the following conditions
-# are met:
-#  * Redistributions of source code must retain the above copyright
-#    notice, this list of conditions and the following disclaimer.
-#  * Redistributions in binary form must reproduce the above copyright
-#    notice, this list of conditions and the following disclaimer in the
-#    documentation and/or other materials provided with the distribution.
-#  * Neither the name of NVIDIA CORPORATION nor the names of its
-#    contributors may be used to endorse or promote products derived
-#    from this software without specific prior written permission.
-#
-# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS ``AS IS'' AND ANY
-# EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
-# IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
-# PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT OWNER OR
-# CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
-# EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
-# PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
-# PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY
-# OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
-# (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-# OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-***************************************************************************/
+#include "Common.hlsl"
+
 
 RWTexture2D<float4> gOutput : register(u0);
 RaytracingAccelerationStructure gRtScene : register(t0);
@@ -68,31 +43,8 @@ struct RayPayload
     Params.y = Near / (Near - Far);
     Params.z = Far;
 */
-float GetLinearDepth(float DeviceDepth, float ParamX, float ParamY, float ParamZ)
-{
-    // return Near/(Near-Far)/(DeviceDepth -Far/(Far-Near))*Far
-    return ParamY / (DeviceDepth - ParamX) * ParamZ;
-}
 
-float GetLinearDepthOpenGL(float DeviceDepth, float Near, float Far)
-{
-    float z_n = DeviceDepth;// * 2 - 1;
 
-    return 2.0 * Near * Far /(Far + Near -z_n * (Far - Near));
-}
-
-float3 GetViewPosition(float LinearDepth, float2 ScreenPosition, float Proj11, float Proj22)
-{
-    float2 screenSpaceRay = float2(ScreenPosition.x / Proj11,
-                                   ScreenPosition.y / Proj22);
-    
-    float3 ViewPosition;
-    ViewPosition.z = LinearDepth;
-    // Solve the two projection equations
-    ViewPosition.xy = screenSpaceRay.xy * ViewPosition.z;
-    ViewPosition.z *= -1;
-    return ViewPosition;
-}
 
 float3 offset_ray(float3 p, float3 n)
 {

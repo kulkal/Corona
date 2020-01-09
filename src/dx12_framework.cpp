@@ -508,13 +508,23 @@ void dx12_framework::LoadAssets()
 		D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
 		D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, m_width, m_height, 1);
 
+	NAME_D3D12_OBJECT(ShadowBuffer->resource);
+
+
 	// refleciton result
 	ReflectionBuffer = dx12_rhi->CreateTexture2D(DXGI_FORMAT_R8G8B8A8_UNORM,
 		D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
 		D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, m_width, m_height, 1);
 
+	NAME_D3D12_OBJECT(ReflectionBuffer->resource);
 
-	NAME_D3D12_OBJECT(ShadowBuffer->resource);
+	// gi result
+	GIBuffer = dx12_rhi->CreateTexture2D(DXGI_FORMAT_R8G8B8A8_UNORM,
+		D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+		D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, m_width, m_height, 1);
+
+	NAME_D3D12_OBJECT(GIBuffer->resource);
+
 
 	// albedo
 	AlbedoBuffer = dx12_rhi->CreateTexture2D(DXGI_FORMAT_R8G8B8A8_UNORM,
@@ -1324,6 +1334,13 @@ void dx12_framework::DebugPass()
 	dx12_rhi->CommandList->DrawInstanced(4, 1, 0, 0);
 	RS_Copy->currentDrawCallIndex++;
 
+	// gi
+	cb.Offset = glm::vec4(0.25, -0.25, 0, 0);
+	cb.Scale = glm::vec4(0.25, 0.25, 0, 0);
+	RS_Copy->SetConstantValue("ScaleOffsetParams", &cb, dx12_rhi->CommandList.Get());
+	RS_Copy->SetTexture("SrcTex", GIBuffer.get(), dx12_rhi->CommandList.Get());
+	dx12_rhi->CommandList->DrawInstanced(4, 1, 0, 0);
+	RS_Copy->currentDrawCallIndex++;
 
 	// albedo
 
@@ -1544,9 +1561,23 @@ void dx12_framework::OnUpdate()
 	RTReflectionViewParam.ProjMatrix = glm::transpose(ProjMat);
 	RTReflectionViewParam.ProjectionParams.x = Far / (Far - Near);
 	RTReflectionViewParam.ProjectionParams.y = Near / (Near - Far);
-	RTReflectionViewParam.ProjectionParams.z = Far;
+	RTReflectionViewParam.ProjectionParams.z = Near;
+	RTReflectionViewParam.ProjectionParams.w = Far;
+
 	RTReflectionViewParam.LightDir = glm::vec4(LightDir, 0);
 
+	// GI view param
+	RTGIViewParam.ViewMatrix = glm::transpose(ViewMat);
+	RTGIViewParam.InvViewMatrix = glm::transpose(InvViewMat);
+	RTGIViewParam.ProjMatrix = glm::transpose(ProjMat);
+	RTGIViewParam.ProjectionParams.x = Far / (Far - Near);
+	RTGIViewParam.ProjectionParams.y = Near / (Near - Far);
+	RTGIViewParam.ProjectionParams.z = Near;
+	RTGIViewParam.ProjectionParams.w = Far;
+	RTGIViewParam.LightDir = glm::vec4(LightDir, 0);
+	float timeElapsed = m_timer.GetTotalSeconds();
+	timeElapsed *= 0.01f;
+	RTGIViewParam.RandomOffset = glm::vec2(timeElapsed, timeElapsed);
 	FrmaeCounter++;
 
 	ColorBufferWriteIndex = FrmaeCounter % 2;
@@ -1569,7 +1600,10 @@ void dx12_framework::OnRender()
 
 	RaytraceShadowPass();
 
-	//RaytraceReflectionPass();
+	RaytraceReflectionPass();
+
+	RaytraceGIPass();
+
 	//ComputePass();
 
 	//NVAftermathMarker(dx12_rhi->AM_CL_Handle, "LightingPass");
@@ -1958,6 +1992,7 @@ void dx12_framework::InitRaytracing()
 		i++;
 
 	}
+	// TODO : per model world matrix
 	TLAS = dx12_rhi->CreateTLAS(vecBLAS);
 	
 	dx12_rhi->CommandList->Close();
@@ -2028,6 +2063,57 @@ void dx12_framework::InitRaytracing()
 	PSO_RT_REFLECTION->MaxPayloadSizeInBytes = sizeof(float) * 4;
 
 	PSO_RT_REFLECTION->InitRS("Shaders\\RaytracedReflection.hlsl");
+
+	// gi rtpso
+
+	PSO_RT_GI = unique_ptr<RTPipelineStateObject>(new RTPipelineStateObject);
+	PSO_RT_GI->NumInstance = meshes.size();
+
+	PSO_RT_GI->AddHitGroup("HitGroup", "chs", "");
+
+	PSO_RT_GI->AddShader("rayGen", RTPipelineStateObject::RAYGEN);
+	PSO_RT_GI->BindUAV("rayGen", "gOutput", 0);
+	PSO_RT_GI->BindSRV("rayGen", "gRtScene", 0);
+	PSO_RT_GI->BindSRV("rayGen", "DepthTex", 1);
+	PSO_RT_GI->BindSRV("rayGen", "WorldNormalTex", 2);
+	PSO_RT_GI->BindCBV("rayGen", "ViewParameter", 0, sizeof(RTGIViewParam), 1);
+	PSO_RT_GI->BindSampler("rayGen", "samplerWrap", 0);
+
+	PSO_RT_GI->AddShader("miss", RTPipelineStateObject::MISS);
+
+	PSO_RT_GI->AddShader("chs", RTPipelineStateObject::HIT);
+	PSO_RT_GI->BindSRV("chs", "vertices", 3);
+	PSO_RT_GI->BindSRV("chs", "indices", 4);
+	PSO_RT_GI->BindSRV("chs", "AlbedoTex", 5);
+	PSO_RT_GI->BindSRV("chs", "InstanceProperty", 6);
+	PSO_RT_GI->BindSampler("chs", "samplerWrap", 0);
+
+
+	PSO_RT_GI->MaxRecursion = 1;
+	PSO_RT_GI->MaxAttributeSizeInBytes = sizeof(float) * 2;
+	/*
+		float3 positin;
+		float3 color;
+		float3 normal;
+		float distance;
+	*/
+	PSO_RT_GI->MaxPayloadSizeInBytes = sizeof(float) * 10;
+
+	PSO_RT_GI->InitRS("Shaders\\RaytracedGI.hlsl");
+
+	InstancePropertyBuffer = dx12_rhi->CreateBuffer(sizeof(InstanceProperty) * 500);
+
+	uint8_t* pData;
+	InstancePropertyBuffer->resource->Map(0, nullptr, (void**)&pData);
+
+	for (auto& m : meshes)
+	{
+		glm::mat4x4 identityMat;
+		memcpy(pData, &identityMat, sizeof(glm::mat4x4));
+		pData += sizeof(InstanceProperty);
+	}
+
+	InstancePropertyBuffer->resource->Unmap(0, nullptr);
 }
 
 vector<UINT64> ResourceInt64array(ComPtr<ID3D12Resource> resource, int size)
@@ -2078,7 +2164,7 @@ void dx12_framework::RaytraceShadowPass()
 
 void dx12_framework::RaytraceReflectionPass()
 {
-	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(ReflectionBuffer->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS));
+	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(ReflectionBuffer->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS));
 
 
 	PSO_RT_REFLECTION->BeginShaderTable();
@@ -2116,5 +2202,50 @@ void dx12_framework::RaytraceReflectionPass()
 
 	PSO_RT_REFLECTION->Apply(m_width, m_height);
 
-	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(ReflectionBuffer->resource.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE));
+	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(ReflectionBuffer->resource.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
+}
+
+void dx12_framework::RaytraceGIPass()
+{
+	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(GIBuffer->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS));
+
+
+	PSO_RT_GI->BeginShaderTable();
+
+	PSO_RT_GI->SetUAV("rayGen", "gOutput", GIBuffer->GpuHandleUAV);
+	PSO_RT_GI->SetSRV("rayGen", "gRtScene", TLAS->GPUHandle);
+	PSO_RT_GI->SetSRV("rayGen", "DepthTex", DepthBuffer->GpuHandleSRV);
+	PSO_RT_GI->SetSRV("rayGen", "WorldNormalTex", GeomNormalBuffer->GpuHandleSRV);
+	PSO_RT_GI->SetCBVValue("rayGen", "ViewParameter", &RTGIViewParam, sizeof(RTGIViewParamCB));
+	PSO_RT_GI->SetSampler("rayGen", "samplerWrap", samplerWrap.get());
+
+
+	for (int i = 0; i < meshes.size(); i++)
+	{
+		auto& mesh = meshes[i];
+
+		PSO_RT_GI->SetHitProgram("chs", i);
+
+		PSO_RT_GI->ResetHitProgramBinding("chs", i, 2);
+		Texture* diffuseTex = mesh->Draws[0].mat->Diffuse.get();
+		if (diffuseTex == nullptr)
+			diffuseTex = Materials[0]->Diffuse.get();
+
+		PSO_RT_GI->AddHitProgramDescriptor("chs", mesh->Vb->GpuHandleSRV, i);
+		PSO_RT_GI->AddHitProgramDescriptor("chs", mesh->Ib->GpuHandleSRV, i);
+		PSO_RT_GI->AddHitProgramDescriptor("chs", diffuseTex->GpuHandleSRV, i);
+		PSO_RT_GI->AddHitProgramDescriptor("chs", InstancePropertyBuffer->GpuHandleSRV, i);
+		PSO_RT_GI->AddHitProgramDescriptor("chs", samplerWrap->GpuHandle, i);
+
+
+	}
+
+
+
+	PSO_RT_GI->EndShaderTable();
+
+
+	PSO_RT_GI->Apply(m_width, m_height);
+
+	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(GIBuffer->resource.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
 }

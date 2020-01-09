@@ -236,6 +236,15 @@ public:
 	void Apply(UINT width, UINT height);
 };
 
+class Buffer
+{
+public:
+	ComPtr<ID3D12Resource> resource;
+	D3D12_CPU_DESCRIPTOR_HANDLE CpuHandleSRV;
+	D3D12_GPU_DESCRIPTOR_HANDLE GpuHandleSRV;
+};
+
+
 class IndexBuffer
 {
 public:
@@ -494,6 +503,7 @@ public:
 	shared_ptr<Texture> CreateTextureFromFile(wstring fileName, bool isNormal);
 	shared_ptr<ConstantBuffer> CreateConstantBuffer(int Size, UINT NumView = 1);
 	shared_ptr<Sampler> CreateSampler(D3D12_SAMPLER_DESC& InSamplerDesc);
+	shared_ptr<Buffer> CreateBuffer(UINT Size);
 	shared_ptr<IndexBuffer> CreateIndexBuffer(DXGI_FORMAT Format, UINT Size, void* SrcData);
 	shared_ptr<VertexBuffer> CreateVertexBuffer(UINT Size, UINT Stride, void* SrcData);
 	shared_ptr<RTAS> CreateTLAS(vector<shared_ptr<RTAS>>& VecBottomLevelAS);

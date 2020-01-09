@@ -8,6 +8,8 @@ Texture2D WorldNormalTex : register(t2);
 ByteAddressBuffer vertices : register(t3);
 ByteAddressBuffer indices : register(t4);
 Texture2D AlbedoTex : register(t5);
+ByteAddressBuffer InstanceProperty : register(t6);
+
 
 cbuffer ViewParameter : register(b0)
 {
@@ -16,6 +18,7 @@ cbuffer ViewParameter : register(b0)
     float4x4 ProjMatrix;
     float4 ProjectionParams;
     float4 LightDir;
+    float2 RandomOffset;
 };
 
 SamplerState sampleWrap : register(s0);
@@ -33,7 +36,9 @@ float3 linearToSrgb(float3 c)
 
 struct RayPayload
 {
+    float3 position;
     float3 color;
+    float3 normal;
     float distance;
 };
 
@@ -43,6 +48,7 @@ struct RayPayload
     Params.z = Far;
 */
 
+
 float3 offset_ray(float3 p, float3 n)
 {
     float origin = 1.0f / 32.0f;
@@ -51,6 +57,40 @@ float3 offset_ray(float3 p, float3 n)
 	
     int3 of_i = int3(int_scale * n.x, int_scale * n.y, int_scale * n.z);
 
+}
+
+float random(float2 co){
+    return frac(sin(dot(co.xy ,float2(12.9898,78.233))) * 43758.5453);
+}
+
+float madFrac(float a, float b) {
+    return (a*b) - floor(a*b);
+}
+
+
+
+
+float3x3 buildTBN(float3 normal) {
+
+    // TODO: Maybe try approach from here (Building an Orthonormal Basis, Revisited): 
+    // https://graphics.pixar.com/library/OrthonormalB/paper.pdf
+
+    // Pick random vector for generating orthonormal basis
+    static const float3 rvec1 = float3(0.847100675f, 0.207911700f, 0.489073813f);
+    static const float3 rvec2 = float3(-0.639436305f, -0.390731126f, 0.662155867f);
+    float3 rvec;
+
+    if (dot(rvec1, normal) > 0.95f)
+        rvec = rvec2;
+    else
+        rvec = rvec1;
+
+    // Construct TBN matrix to orient sampling hemisphere along the surface normal
+    float3 b1 = normalize(rvec - normal * dot(rvec, normal));
+    float3 b2 = cross(normal, b1);
+    float3x3 tbn = float3x3(b1, b2, normal);
+
+    return tbn;
 }
 
 [shader("raygeneration")]
@@ -76,8 +116,8 @@ void rayGen
   
 
     float LinearDepth = GetLinearDepthOpenGL(DeviceDepth, ProjectionParams.z, ProjectionParams.w) ;
-
-	float2 ScreenPosition = crd.xy;
+	
+    float2 ScreenPosition = crd.xy;
 	ScreenPosition.x /= dims.x;
 	ScreenPosition.y /= dims.y;
 	ScreenPosition.xy = ScreenPosition.xy * 2 - 1;
@@ -87,20 +127,68 @@ void rayGen
 	float3 WorldPos = mul(float4(ViewPosition, 1), InvViewMatrix).xyz;
 
   
+    float rand_u = random(crd + RandomOffset);
+    float rand_v = random(crd + RandomOffset + float2(100, 100));
+
+    // float3 sampleDirLocal = SampleUniformHemisphere(rand_u, rand_v);
+    float3 sampleDirLocal = SampleHemisphereCosine(rand_u, rand_v);
+
+
+    float3x3 tbn = buildTBN(WorldNormal);
+    float3 sampleDirWorld = mul(sampleDirLocal, tbn);
+
+    // https://computergraphics.stackexchange.com/questions/4664/does-cosine-weighted-hemisphere-sampling-still-require-ndotl-when-calculating-co
+    // https://computergraphics.stackexchange.com/questions/8578/how-to-set-equivalent-pdfs-for-cosine-weighted-and-uniform-sampled-hemispheres
+    float cosTerm = 1;//dot(float3(0, 0, 1), sampleDirLocal)*2;
 
     float3 ViewDir = mul(normalize(float3(d.x * aspectRatio, -d.y, -1)), InvViewMatrix);
 
 	RayDesc ray;
 	ray.Origin = WorldPos + WorldNormal * 0.5; //    mul(float4(0, 0, 0, 1), InvViewMatrix).xyz;
-	ray.Direction = reflect(ViewDir, WorldNormal);
+	ray.Direction = normalize(sampleDirWorld);//reflect(ViewDir, WorldNormal);
 
 	ray.TMin = 0;
 	ray.TMax = 100000;
 
 	RayPayload payload;
 	TraceRay(gRtScene, 0 /*rayFlags*/, 0xFF, 0 /* ray index*/, 0, 0, ray, payload);
+    if(payload.distance == 0)
+    {
+        // hit sky
+        float3 Radiance = float4(0, 0, 0.1, 1);
+        float3 DiffuseLighting = Radiance * cosTerm;
+        gOutput[launchIndex.xy] = float4(DiffuseLighting.xyz, 1);   
+    }
+    else
+    {
 
-	gOutput[launchIndex.xy] = float4(payload.color, 1);
+        RayDesc shadowRay;
+        shadowRay.Origin = payload.position + payload.normal *0.5;
+        shadowRay.Direction = LightDir;
+
+        shadowRay.TMin = 0;
+        shadowRay.TMax = 100000;
+
+        RayPayload shadowPayload;
+        TraceRay(gRtScene, 0 /*rayFlags*/, 0xFF, 0 /* ray index*/, 0, 0, shadowRay, shadowPayload);
+
+        float3 Albedo = payload.color;
+        float3 DiffuseLighting;
+        if(shadowPayload.distance == 0)
+        {
+            // miss
+            float3 Radiance = dot(LightDir.xyz, payload.normal) * Albedo;
+            DiffuseLighting = Radiance * cosTerm;
+        }
+        else
+        {
+            // shadowed
+            DiffuseLighting = float3(0, 0, 0);
+        }
+
+        // DiffuseLighting = Albedo;
+        gOutput[launchIndex.xy] = float4(DiffuseLighting.xyz, 1);   
+    }
 }
 
 
@@ -108,7 +196,9 @@ void rayGen
 [shader("miss")]
 void miss(inout RayPayload payload)
 {
-    payload.color = float3(0.0, 0.0, 0.1);
+    payload.position = float3(0, 0, 0);
+    payload.color = float3(0.0, 0.0, 1.0);
+    payload.normal = float3(0, 0, -1);
     payload.distance = 0;
 }
 
@@ -192,14 +282,47 @@ Vertex GetVertexAttributes(uint triangleIndex, float3 barycentrics)
     v.position = float3(0, 0, 0);
     v.uv = float2(0, 0);
 
-    for (uint i = 0; i < 3; i++)
-    {
-        int address = (index[i] * 11) * 4;
-        v.position += asfloat(vertices.Load3(address)) * barycentrics[i];
-        address += (3 * 8);
-        v.uv += asfloat(vertices.Load2(address)) * barycentrics[i];
-    }
+    // for (uint i = 0; i < 3; i++)
+    // {
+    //     int address = (index[i] * 11) * 4;
+    //     v.position += asfloat(vertices.Load3(address)) * barycentrics[i];
+    //     address += (3 * 8);
+    //     v.uv += asfloat(vertices.Load2(address)) * barycentrics[i];
+    // }
 
+    float3 p0 = asfloat(vertices.Load3((index[0] * 11) * 4));
+    float3 p1 = asfloat(vertices.Load3((index[1] * 11) * 4));
+    float3 p2 = asfloat(vertices.Load3((index[2] * 11) * 4));
+
+    float4x4 WorldMatrix = {
+        asfloat(InstanceProperty.Load4(InstanceID()*4*16)), 
+        asfloat(InstanceProperty.Load4(InstanceID()*4*16 + 16)), 
+        asfloat(InstanceProperty.Load4(InstanceID()*4*16 + 16*2)),
+        asfloat(InstanceProperty.Load4(InstanceID()*4*16 + 16*3)),
+    };
+
+
+    v.position += p0 * barycentrics[0];
+    v.position += p1 * barycentrics[1];
+    v.position += p2 * barycentrics[2];
+
+    v.position = mul(float4(v.position, 1), WorldMatrix).xyz;
+
+    float2 uv0 = asfloat(vertices.Load2((index[0] * 11) * 4) + 3*8);
+    float2 uv1 = asfloat(vertices.Load2((index[1] * 11) * 4) + 3*8);
+    float2 uv2 = asfloat(vertices.Load2((index[2] * 11) * 4) + 3*8);
+
+    v.uv += uv0 * barycentrics[0];
+    v.uv += uv1 * barycentrics[1];
+    v.uv += uv2 * barycentrics[2];
+
+
+
+    float3 e1 = p1 - p0;
+    float3 e2 = p2 - p0;
+    v.normal = normalize(cross(e1, e2));
+
+    v.normal = mul(float4(v.normal, 0), WorldMatrix).xyz;
     return v;
 }
 
@@ -212,6 +335,11 @@ void chs(inout RayPayload payload, in BuiltInTriangleIntersectionAttributes attr
     uint triangleIndex = PrimitiveIndex();
     Vertex vertex = GetVertexAttributes(triangleIndex, barycentrics);
 
+    payload.position = vertex.position;
+    payload.normal = vertex.normal;
     payload.color = AlbedoTex.SampleLevel(sampleWrap, vertex.uv, 0).xyz;
+
+
+
     payload.distance = RayTCurrent();
 }

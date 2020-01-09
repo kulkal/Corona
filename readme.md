@@ -28,11 +28,18 @@ This project is for dx12 & dxr learning. I am trying to test best practice imple
 * [premake](https://premake.github.io/)
 
 ## Useful link
-* [MJP github](https://github.com/TheRealMJP)
-	* Excellent dx12 reference implementation.
+* DX12
+	* [MJP github](https://github.com/TheRealMJP)
+* DXR
+	* [Instance property](https://developer.nvidia.com/rtx/raytracing/dxr/DX12-Raytracing-tutorial/Extra/dxr_tutorial_extra2_simple_lighting)
+	* [Adam Mars intro dxr](https://github.com/acmarrs/IntroToDXR)
+
+* Denoising
+	* [Q2RT Indirect diffuse denoiser](https://github.com/NVIDIA/Q2RTX/blob/master/src/refresh/vkpt/shader/asvgf_lf.comp)
+	* [Q2 RT GTC presentation from Alexey Pantellev](https://developer.nvidia.com/gtc/2019/video/S91046/video)
+	* [Q2 RT GDC presentation from Alexey Pantellev](https://www.youtube.com/watch?v=FewqoJjHR0A)
+	* [MS RTAO SFGV denoiser](https://github.com/microsoft/DirectX-Graphics-Samples/tree/master/Samples/Desktop/D3D12Raytracing/src/D3D12RaytracingRealTimeDenoisedAmbientOcclusion)
 
 ## Fun bug story
 * Shader table should be ring buffer if it changes!.
 	
-## Copyright
-TODO

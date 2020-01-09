@@ -37,6 +37,10 @@ using namespace std;
 
 class dx12_framework : public DXSample
 {
+	struct InstanceProperty
+	{
+		glm::mat4x4 WorldMatrix;
+	};
 	struct ObjConstantBuffer
 	{
 		glm::mat4x4 ViewProjectionMatrix;
@@ -69,6 +73,15 @@ class dx12_framework : public DXSample
 		glm::vec4	LightDir;
 	};
 
+	struct RTGIViewParamCB
+	{
+		glm::mat4x4 ViewMatrix;
+		glm::mat4x4 InvViewMatrix;
+		glm::mat4x4 ProjMatrix;
+		glm::vec4 ProjectionParams;
+		glm::vec4 LightDir;
+		glm::vec2 RandomOffset;
+	};
 
 	struct CopyScaleOffsetCB
 	{
@@ -119,6 +132,8 @@ private:
 
 	shared_ptr<Texture> ShadowBuffer;
 	shared_ptr<Texture> ReflectionBuffer;
+	shared_ptr<Texture> GIBuffer;
+
 
 
 	shared_ptr<Texture> DepthBuffer;
@@ -150,7 +165,7 @@ private:
 	SimpleCamera m_camera;
 
 
-	glm::vec3 LightDir = glm::normalize(glm::vec3(0.7, 1, 0.2));
+	glm::vec3 LightDir = glm::normalize(glm::vec3(0.7, 1, 0.2)) * 3.0f;
 	float Near = 1.0f;
 	float Far = 20000.0f;
 
@@ -170,6 +185,7 @@ private:
 
 
 	// raytracing
+	std::shared_ptr<Buffer> InstancePropertyBuffer;
 	shared_ptr<RTAS> TLAS;
 	vector<shared_ptr<RTAS>> vecBLAS;
 	unique_ptr<RTPipelineStateObject> PSO_RT_SHADOW;
@@ -177,6 +193,10 @@ private:
 
 	unique_ptr<RTPipelineStateObject> PSO_RT_REFLECTION;
 	RTReflectionViewParamCB RTReflectionViewParam;
+
+
+	unique_ptr<RTPipelineStateObject> PSO_RT_GI;
+	RTGIViewParamCB RTGIViewParam;
 
 
 
@@ -212,6 +232,8 @@ private:
 public:
 
 	void InitRaytracing();
+
+	void InitRaytraceShadow();
 	
 	void LoadPipeline();
 	void LoadAssets();
@@ -229,6 +251,8 @@ public:
 	void RaytraceShadowPass();
 
 	void RaytraceReflectionPass();
+
+	void RaytraceGIPass();
 
 	void RecordDraw(UINT StartIndex, UINT NumDraw, UINT CLIndex, ThreadDescriptorHeapPool* DHPool);
 

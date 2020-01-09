@@ -226,6 +226,45 @@ shared_ptr<Sampler> DumRHI_DX12::CreateSampler(D3D12_SAMPLER_DESC& InSamplerDesc
 	return shared_ptr<Sampler>(sampler);
 }
 
+std::shared_ptr<Buffer> DumRHI_DX12::CreateBuffer(UINT Size)
+{
+	Buffer * buffer = new Buffer;
+	D3D12_RESOURCE_DESC bufDesc = {};
+	bufDesc.Alignment = 0;
+	bufDesc.DepthOrArraySize = 1;
+	bufDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+	bufDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
+	bufDesc.Format = DXGI_FORMAT_UNKNOWN;
+	bufDesc.Height = 1;
+	bufDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+	bufDesc.MipLevels = 1;
+	bufDesc.SampleDesc.Count = 1;
+	bufDesc.SampleDesc.Quality = 0;
+	bufDesc.Width = Size;
+
+	ThrowIfFailed(Device->CreateCommittedResource(&CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD), D3D12_HEAP_FLAG_NONE, &bufDesc,
+		D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&buffer->resource)));
+
+	NAME_D3D12_OBJECT(buffer->resource);
+
+	// create shader resource view
+	D3D12_SHADER_RESOURCE_VIEW_DESC bufferSRVDesc;
+	bufferSRVDesc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+	bufferSRVDesc.Format = DXGI_FORMAT_R32_TYPELESS;
+	bufferSRVDesc.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
+	bufferSRVDesc.Buffer.StructureByteStride = 0;
+	bufferSRVDesc.Buffer.FirstElement = 0;
+	bufferSRVDesc.Buffer.NumElements = static_cast<UINT>(Size) / sizeof(float); // byte address buffer
+	bufferSRVDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+
+	// TODO : should be GlobalDHRing? if object instance are to move.
+	TextureDHRing->AllocDescriptor(buffer->CpuHandleSRV, buffer->GpuHandleSRV);
+
+	Device->CreateShaderResourceView(buffer->resource.Get(), &bufferSRVDesc, buffer->CpuHandleSRV);
+
+	return shared_ptr<Buffer>(buffer);;
+}
+
 shared_ptr<IndexBuffer> DumRHI_DX12::CreateIndexBuffer(DXGI_FORMAT Format, UINT Size, void* SrcData)
 {
 	IndexBuffer* ib = new IndexBuffer;
@@ -1776,8 +1815,10 @@ ComPtr<ID3DBlob> compileShaderLibrary(const WCHAR* filename, const WCHAR* target
 	gDxcDllHelper.Initialize();
 	ComPtr<IDxcCompiler> pCompiler;
 	ComPtr<IDxcLibrary> pLibrary;
+	ComPtr<IDxcIncludeHandler> dxcIncludeHandler;
 	gDxcDllHelper.CreateInstance(CLSID_DxcCompiler, __uuidof(IDxcCompiler), &pCompiler);
 	gDxcDllHelper.CreateInstance(CLSID_DxcLibrary, __uuidof(IDxcLibrary), &pLibrary);
+	pLibrary->CreateIncludeHandler(&dxcIncludeHandler);
 
 	// Open and read the file
 	std::ifstream shaderFile(filename);
@@ -1796,7 +1837,7 @@ ComPtr<ID3DBlob> compileShaderLibrary(const WCHAR* filename, const WCHAR* target
 
 	// Compile
 	ComPtr<IDxcOperationResult> pResult;
-	pCompiler->Compile(pTextBlob.Get(), filename, L"", targetString, nullptr, 0, nullptr, 0, nullptr, &pResult);
+	pCompiler->Compile(pTextBlob.Get(), filename, L"", targetString, nullptr, 0, nullptr, 0, dxcIncludeHandler.Get(), &pResult);
 
 	// Verify the result
 	HRESULT resultCode;
