@@ -154,7 +154,7 @@ void rayGen
 	}
 	else
 	{
-		gOutput[launchIndex.xy] = float4(0.1, 0.1, 0.1, 1);
+		gOutput[launchIndex.xy] = float4(0.0, 0.0, 0.0, 1);
 	}
 
         // gOutput[launchIndex.xy] = float4(LinearDepth/1000.0, 0.1, 0.1, 1);

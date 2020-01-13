@@ -448,6 +448,7 @@ void dx12_framework::LoadAssets()
 	InitCopyPass();
 	InitLightingPass();
 	InitTemporalAAPass();
+	InitDenoiserPass();
 	
 	for (UINT i = 0; i < dx12_rhi->NumFrame; i++)
 	{
@@ -519,7 +520,7 @@ void dx12_framework::LoadAssets()
 	NAME_D3D12_OBJECT(ReflectionBuffer->resource);
 
 	// gi result
-	GIBuffer = dx12_rhi->CreateTexture2D(DXGI_FORMAT_R8G8B8A8_UNORM,
+	GIBuffer = dx12_rhi->CreateTexture2D(DXGI_FORMAT_R16G16B16A16_FLOAT,
 		D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
 		D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, m_width, m_height, 1);
 
@@ -845,12 +846,66 @@ void dx12_framework::InitComputeRS()
 	RS_Compute->cs = unique_ptr<Shader>(cs);
 	RS_Compute->computePSODesc = computePsoDesc;
 	RS_Compute->BindUAV("output", 0);
-	RS_Compute->Init2(true);
+	RS_Compute->IsCompute = true;
+	RS_Compute->Init2();
 
 	ComputeOuputTexture = dx12_rhi->CreateTexture2D(DXGI_FORMAT_R8G8B8A8_UNORM,
 		D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
 		D3D12_RESOURCE_STATE_UNORDERED_ACCESS, m_width, m_height, 1);
 
+}
+
+void dx12_framework::InitDenoiserPass()
+{
+	ComPtr<ID3DBlob> computeShader;
+#if defined(_DEBUG)
+	// Enable better shader debugging with the graphics debugging tools.
+	UINT compileFlags = D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
+#else
+	UINT compileFlags = D3DCOMPILE_OPTIMIZATION_LEVEL3;
+#endif
+
+	ID3DBlob*compilationMsgs = nullptr;
+
+	try
+	{
+		ThrowIfFailed(D3DCompileFromFile(GetAssetFullPath(L"Shaders\\FilterIndirectDiffuseCS.hlsl").c_str(), nullptr, nullptr, "FilterIndirectDiffuse", "cs_5_0", compileFlags, 0, &computeShader, &compilationMsgs));
+	}
+	catch (const std::exception& e)
+	{
+		OutputDebugStringA(reinterpret_cast<const char*>(compilationMsgs->GetBufferPointer()));
+		compilationMsgs->Release();
+	}
+
+	Shader* cs = new Shader((UINT8*)computeShader->GetBufferPointer(), computeShader->GetBufferSize());
+
+	D3D12_COMPUTE_PIPELINE_STATE_DESC computePsoDesc = {};
+	//computePsoDesc.pRootSignature = m_computeRootSignature.Get();
+
+	RS_FilterIndirectDiffuse = unique_ptr<PipelineStateObject>(new PipelineStateObject);
+	RS_FilterIndirectDiffuse->cs = unique_ptr<Shader>(cs);
+	RS_FilterIndirectDiffuse->computePSODesc = computePsoDesc;
+	RS_FilterIndirectDiffuse->BindTexture("InputTex", 0, 1);
+	RS_FilterIndirectDiffuse->BindTexture("DepthTex", 1, 1);
+	RS_FilterIndirectDiffuse->BindTexture("GeoNormalTex", 2, 1);
+
+	RS_FilterIndirectDiffuse->BindUAV("OutputTex", 0);
+	RS_FilterIndirectDiffuse->BindConstantBuffer("FilterIndirectDiffuseConstant", 0, sizeof(FilterIndirectDiffuseConstant), 1);
+	RS_FilterIndirectDiffuse->IsCompute = true;
+	RS_FilterIndirectDiffuse->Init2();
+
+	FilterIndirectDiffusePingPong[0] = dx12_rhi->CreateTexture2D(DXGI_FORMAT_R16G16B16A16_FLOAT,
+		D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+		D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, m_width, m_height, 1);
+
+	NAME_D3D12_OBJECT(FilterIndirectDiffusePingPong[0]->resource);
+
+	FilterIndirectDiffusePingPong[1] = dx12_rhi->CreateTexture2D(DXGI_FORMAT_R16G16B16A16_FLOAT,
+		D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+		D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, m_width, m_height, 1);
+
+	NAME_D3D12_OBJECT(FilterIndirectDiffusePingPong[1]->resource);
+	
 }
 
 void dx12_framework::InitDrawMeshRS()
@@ -941,7 +996,7 @@ void dx12_framework::InitDrawMeshRS()
 	RS_Mesh->BindSampler("samplerWrap", 0);
 	RS_Mesh->BindConstantBuffer("ObjParameter", 0, sizeof(ObjConstantBuffer), 400);
 
-	RS_Mesh->Init2(false);
+	RS_Mesh->Init2();
 }
 
 void dx12_framework::InitCopyPass()
@@ -1049,7 +1104,7 @@ void dx12_framework::InitCopyPass()
 	RS_Copy->BindSampler("samplerWrap", 0);
 	RS_Copy->BindConstantBuffer("ScaleOffsetParams", 0, sizeof(CopyScaleOffsetCB), 15);
 
-	RS_Copy->Init2(false);
+	RS_Copy->Init2();
 }
 
 void dx12_framework::InitLightingPass()
@@ -1138,12 +1193,14 @@ void dx12_framework::InitLightingPass()
 	RS_Lighting->BindTexture("ShadowTex", 2, 1);
 	RS_Lighting->BindTexture("VelocityTex", 3, 1);
 	RS_Lighting->BindTexture("DepthTex", 4, 1);
+	RS_Lighting->BindTexture("IndirectDiffuseTex", 5, 1);
+
 
 
 
 	RS_Lighting->BindSampler("samplerWrap", 0);
 	RS_Lighting->BindConstantBuffer("LightingParam", 0, sizeof(LightingParam));
-	RS_Lighting->Init2(false);
+	RS_Lighting->Init2();
 }
 
 void dx12_framework::InitTemporalAAPass()
@@ -1226,7 +1283,7 @@ void dx12_framework::InitTemporalAAPass()
 
 	RS_TemporalAA->BindSampler("samplerWrap", 0);
 	RS_TemporalAA->BindConstantBuffer("LightingParam", 0, sizeof(LightingParam));
-	RS_TemporalAA->Init2(false);
+	RS_TemporalAA->Init2();
 }
 
 void dx12_framework::CopyPass()
@@ -1242,7 +1299,7 @@ void dx12_framework::CopyPass()
 	dx12_rhi->CommandList->ClearRenderTargetView(backbuffer->CpuHandleRTV, clearColor, 0, nullptr);
 	*/
 	RS_Copy->currentDrawCallIndex = 0;
-	RS_Copy->ApplyGraphicsRSPSO(dx12_rhi->CommandList.Get());
+	RS_Copy->Apply(dx12_rhi->CommandList.Get());
 
 
 	RS_Copy->SetSampler("samplerWrap", samplerWrap.get(), dx12_rhi->CommandList.Get());
@@ -1254,7 +1311,7 @@ void dx12_framework::CopyPass()
 	RS_Copy->SetConstantValue("ScaleOffsetParams", &cb, dx12_rhi->CommandList.Get());
 
 
-	RS_Copy->ApplyGlobal(dx12_rhi->CommandList.Get());
+	RS_Copy->Apply(dx12_rhi->CommandList.Get());
 
 
 	UINT Width = m_width / 1;
@@ -1284,7 +1341,7 @@ void dx12_framework::DebugPass()
 
 	Texture* backbuffer = framebuffers[dx12_rhi->CurrentFrameIndex].get();
 
-	RS_Copy->ApplyGraphicsRSPSO(dx12_rhi->CommandList.Get());
+	RS_Copy->Apply(dx12_rhi->CommandList.Get());
 	dx12_rhi->CommandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
 	dx12_rhi->CommandList->IASetVertexBuffers(0, 1, &FullScreenVB->view);
 
@@ -1338,7 +1395,19 @@ void dx12_framework::DebugPass()
 	cb.Offset = glm::vec4(0.25, -0.25, 0, 0);
 	cb.Scale = glm::vec4(0.25, 0.25, 0, 0);
 	RS_Copy->SetConstantValue("ScaleOffsetParams", &cb, dx12_rhi->CommandList.Get());
+	//RS_Copy->SetTexture("SrcTex", GIBuffer.get(), dx12_rhi->CommandList.Get());
 	RS_Copy->SetTexture("SrcTex", GIBuffer.get(), dx12_rhi->CommandList.Get());
+
+	dx12_rhi->CommandList->DrawInstanced(4, 1, 0, 0);
+	RS_Copy->currentDrawCallIndex++;
+
+	// filtered gi
+	cb.Offset = glm::vec4(0.25, 0.25, 0, 0);
+	cb.Scale = glm::vec4(0.25, 0.25, 0, 0);
+	RS_Copy->SetConstantValue("ScaleOffsetParams", &cb, dx12_rhi->CommandList.Get());
+	//RS_Copy->SetTexture("SrcTex", GIBuffer.get(), dx12_rhi->CommandList.Get());
+	RS_Copy->SetTexture("SrcTex", FilterIndirectDiffusePingPong[1].get(), dx12_rhi->CommandList.Get());
+
 	dx12_rhi->CommandList->DrawInstanced(4, 1, 0, 0);
 	RS_Copy->currentDrawCallIndex++;
 
@@ -1359,7 +1428,7 @@ void dx12_framework::DebugPass()
 	dx12_rhi->CommandList->DrawInstanced(4, 1, 0, 0);
 	RS_Copy->currentDrawCallIndex++;
 
-	RS_Copy->ApplyGlobal(dx12_rhi->CommandList.Get());
+	RS_Copy->Apply(dx12_rhi->CommandList.Get());
 }
 
 void dx12_framework::LightingPass()
@@ -1368,7 +1437,7 @@ void dx12_framework::LightingPass()
 	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(LightingBuffer->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET));
 
 
-	RS_Lighting->ApplyGraphicsRSPSO(dx12_rhi->CommandList.Get());
+	RS_Lighting->Apply(dx12_rhi->CommandList.Get());
 
 
 	RS_Lighting->SetSampler("samplerWrap", samplerWrap.get(), dx12_rhi->CommandList.Get());
@@ -1378,6 +1447,8 @@ void dx12_framework::LightingPass()
 
 	RS_Lighting->SetTexture("VelocityTex", VelocityBuffer.get(), dx12_rhi->CommandList.Get());
 	RS_Lighting->SetTexture("DepthTex", DepthBuffer.get(), dx12_rhi->CommandList.Get());
+	RS_Lighting->SetTexture("IndirectDiffuseTex", FilterIndirectDiffusePingPong[1].get(), dx12_rhi->CommandList.Get());
+
 
 
 
@@ -1400,7 +1471,7 @@ void dx12_framework::LightingPass()
 	RS_Lighting->SetConstantValue("LightingParam", &Param, dx12_rhi->CommandList.Get());
 
 
-	RS_Lighting->ApplyGlobal(dx12_rhi->CommandList.Get());
+	RS_Lighting->Apply(dx12_rhi->CommandList.Get());
 
 	dx12_rhi->CommandList->OMSetRenderTargets(1, &LightingBuffer->CpuHandleRTV, FALSE, nullptr);
 
@@ -1427,7 +1498,7 @@ void dx12_framework::TemporalAAPass()
 	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(ResolveTarget->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET));
 
 
-	RS_TemporalAA->ApplyGraphicsRSPSO(dx12_rhi->CommandList.Get());
+	RS_TemporalAA->Apply(dx12_rhi->CommandList.Get());
 
 
 	RS_TemporalAA->SetSampler("samplerWrap", samplerWrap.get(), dx12_rhi->CommandList.Get());
@@ -1458,7 +1529,7 @@ void dx12_framework::TemporalAAPass()
 	RS_TemporalAA->SetConstantValue("LightingParam", &Param, dx12_rhi->CommandList.Get());
 
 
-	RS_TemporalAA->ApplyGlobal(dx12_rhi->CommandList.Get());
+	RS_TemporalAA->Apply(dx12_rhi->CommandList.Get());
 
 
 	dx12_rhi->CommandList->OMSetRenderTargets(1, &ResolveTarget->CpuHandleRTV, FALSE, nullptr);
@@ -1604,6 +1675,7 @@ void dx12_framework::OnRender()
 
 	RaytraceGIPass();
 
+	FilterIndirectDiffusePass();
 	//ComputePass();
 
 	//NVAftermathMarker(dx12_rhi->AM_CL_Handle, "LightingPass");
@@ -1746,7 +1818,7 @@ void dx12_framework::DrawMeshPass()
 
 		dx12_rhi->CommandList->OMSetRenderTargets(RS_Mesh->graphicsPSODesc.NumRenderTargets, Rendertargets, FALSE, &DepthBuffer->CpuHandleDSV);
 
-		RS_Mesh->ApplyGraphicsRSPSO(dx12_rhi->CommandList.Get());
+		RS_Mesh->Apply(dx12_rhi->CommandList.Get());
 		//RS_Mesh->ps->SetSampler("samplerWrap", samplerWrap.get(), dx12_rhi->CommandList.Get());
 		RS_Mesh->SetSampler("samplerWrap", samplerWrap.get(), dx12_rhi->CommandList.Get());
 
@@ -1956,23 +2028,56 @@ void dx12_framework::RecordDraw (UINT StartIndex, UINT NumDraw, UINT CLIndex, Th
 
 
 
-void dx12_framework::ComputePass()
+void dx12_framework::FilterIndirectDiffusePass()
 {
-	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(ShadowBuffer->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS));
+	UINT WriteIndex = 0;
+	UINT ReadIndex;
 
-	//PIXBeginEvent(dx12_rhi->CommandList.Get(), 0, L"Compute");
+	// first pass
+	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(FilterIndirectDiffusePingPong[WriteIndex]->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS));
 
-	RS_Compute->ApplyCS(dx12_rhi->CommandList.Get());
 
-	RS_Compute->SetUAV("output", ShadowBuffer.get(), dx12_rhi->CommandList.Get(), true);
-	//RS_Compute->cs->SetTexture("input", ColorBuffer.get());
+	RS_FilterIndirectDiffuse->Apply(dx12_rhi->CommandList.Get());
 
+	RS_FilterIndirectDiffuse->SetTexture("InputTex", GIBuffer.get(), dx12_rhi->CommandList.Get());
+	RS_FilterIndirectDiffuse->SetTexture("DepthTex", DepthBuffer.get(), dx12_rhi->CommandList.Get());
+	RS_FilterIndirectDiffuse->SetTexture("GeoNormalTex", GeomNormalBuffer.get(), dx12_rhi->CommandList.Get());
+
+	RS_FilterIndirectDiffuse->SetUAV("OutputTex", FilterIndirectDiffusePingPong[0].get(), dx12_rhi->CommandList.Get());
+
+	FilterIndirectDiffuseConstant CB;
+	CB.Iteration = 0;
+	RS_FilterIndirectDiffuse->SetConstantValue("FilterIndirectDiffuseConstant", &CB, dx12_rhi->CommandList.Get());
 
 	dx12_rhi->CommandList->Dispatch(m_width / 32, m_height / 32, 1);
-	//PIXEndEvent(dx12_rhi->CommandList.Get());
 
-	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(ShadowBuffer->resource.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
+	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(FilterIndirectDiffusePingPong[WriteIndex]->resource.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
 
+
+	for (int i = 1; i < 4; i++)
+	{
+		WriteIndex = 1 - WriteIndex; // 1
+		ReadIndex = 1 - WriteIndex; // 0
+
+		dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(FilterIndirectDiffusePingPong[WriteIndex]->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS));
+
+
+		RS_FilterIndirectDiffuse->Apply(dx12_rhi->CommandList.Get());
+
+		RS_FilterIndirectDiffuse->SetTexture("InputTex", FilterIndirectDiffusePingPong[ReadIndex].get(), dx12_rhi->CommandList.Get());
+		RS_FilterIndirectDiffuse->SetTexture("DepthTex", DepthBuffer.get(), dx12_rhi->CommandList.Get());
+		RS_FilterIndirectDiffuse->SetTexture("GeoNormalTex", GeomNormalBuffer.get(), dx12_rhi->CommandList.Get());
+
+		RS_FilterIndirectDiffuse->SetUAV("OutputTex", FilterIndirectDiffusePingPong[WriteIndex].get(), dx12_rhi->CommandList.Get());
+
+		FilterIndirectDiffuseConstant CB;
+		CB.Iteration = i;
+		RS_FilterIndirectDiffuse->SetConstantValue("FilterIndirectDiffuseConstant", &CB, dx12_rhi->CommandList.Get());
+
+		dx12_rhi->CommandList->Dispatch(m_width / 32, m_height / 32, 1);
+
+		dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(FilterIndirectDiffusePingPong[WriteIndex]->resource.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
+	}
 }
 
 

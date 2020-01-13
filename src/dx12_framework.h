@@ -146,6 +146,14 @@ private:
 
 	unique_ptr<PipelineStateObject> RS_Mesh;
 
+	// denoising
+	struct FilterIndirectDiffuseConstant
+	{
+		UINT32 Iteration;
+	};
+	unique_ptr<PipelineStateObject> RS_FilterIndirectDiffuse;
+	shared_ptr<Texture> FilterIndirectDiffusePingPong[2];
+
 
 	// test compute pass
 	unique_ptr<PipelineStateObject> RS_Compute;
@@ -244,6 +252,8 @@ public:
 
 	void InitComputeRS();
 
+	void InitDenoiserPass();
+
 	void InitDrawMeshRS();
 
 	void DrawMeshPass();
@@ -254,10 +264,11 @@ public:
 
 	void RaytraceGIPass();
 
+
 	void RecordDraw(UINT StartIndex, UINT NumDraw, UINT CLIndex, ThreadDescriptorHeapPool* DHPool);
 
 
-	void ComputePass();
+	void FilterIndirectDiffusePass();
 
 	void InitCopyPass();
 

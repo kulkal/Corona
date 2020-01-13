@@ -66,6 +66,7 @@ public:
 class PipelineStateObject
 {
 public:
+	bool IsCompute = false;
 	struct BindingData
 	{
 		string name;
@@ -102,16 +103,11 @@ public:
 	D3D12_GRAPHICS_PIPELINE_STATE_DESC graphicsPSODesc;
 	D3D12_COMPUTE_PIPELINE_STATE_DESC computePSODesc;
 
-	void Init(bool isCompute);
 
-	void Init2(bool isCompute);
+	void Init2();
 
 
-	void ApplyGlobal(ID3D12GraphicsCommandList* CommandList);
-	void ApplyCS(ID3D12GraphicsCommandList* CommandList);
-	void ApplyGraphicsRSPSO(ID3D12GraphicsCommandList* CommandList);
-	void ApplyComputeRSPSO(ID3D12GraphicsCommandList* CommandList);
-
+	void Apply(ID3D12GraphicsCommandList* CommandList);
 
 	void BindUAV(string name, int baseRegister);
 	void BindTexture(string name, int baseRegister, int num);
@@ -120,7 +116,7 @@ public:
 	void BindSampler(string name, int baseRegister);
 
 	void SetTexture(string name, Texture* texture, ID3D12GraphicsCommandList* CommandList);
-	void SetUAV(string name, Texture* texture, ID3D12GraphicsCommandList* CommandList, bool isCompute = false);
+	void SetUAV(string name, Texture* texture, ID3D12GraphicsCommandList* CommandList);
 
 	void SetSampler(string name, Sampler* sampler, ID3D12GraphicsCommandList* CommandList);
 

@@ -655,17 +655,20 @@ void PipelineStateObject::SetTexture(string name, Texture* texture, ID3D12Graphi
 	textureBinding[name].texture = texture;
 
 	UINT RPI = textureBinding[name].rootParamIndex;
-	CommandList->SetGraphicsRootDescriptorTable(RPI, texture->GpuHandleSRV);
+	if (IsCompute)
+		CommandList->SetComputeRootDescriptorTable(RPI, texture->GpuHandleSRV);
+	else
+		CommandList->SetGraphicsRootDescriptorTable(RPI, texture->GpuHandleSRV);
 }
 
-void PipelineStateObject::SetUAV(string name, Texture* texture, ID3D12GraphicsCommandList* CommandList, bool isCompute)
+void PipelineStateObject::SetUAV(string name, Texture* texture, ID3D12GraphicsCommandList* CommandList)
 {
 	uavBinding[name].texture = texture;
 	D3D12_CPU_DESCRIPTOR_HANDLE ShaderVisibleCPUHandle;
 	D3D12_GPU_DESCRIPTOR_HANDLE ShaderVisibleGpuHandle;
 
-	UINT RPI = textureBinding[name].rootParamIndex;
-	if (isCompute)
+	UINT RPI = uavBinding[name].rootParamIndex;
+	if (IsCompute)
 		CommandList->SetComputeRootDescriptorTable(RPI, texture->GpuHandleUAV);
 	else
 		CommandList->SetGraphicsRootDescriptorTable(RPI, texture->GpuHandleUAV);
@@ -678,7 +681,10 @@ void PipelineStateObject::SetSampler(string name, Sampler* sampler, ID3D12Graphi
 	D3D12_CPU_DESCRIPTOR_HANDLE ShaderVisibleCPUHandle;
 	D3D12_GPU_DESCRIPTOR_HANDLE ShaderVisibleGpuHandle;
 
-	CommandList->SetGraphicsRootDescriptorTable(samplerBinding[name].rootParamIndex, sampler->GpuHandle);
+	if (IsCompute)
+		CommandList->SetComputeRootDescriptorTable(samplerBinding[name].rootParamIndex, sampler->GpuHandle);
+	else
+		CommandList->SetGraphicsRootDescriptorTable(samplerBinding[name].rootParamIndex, sampler->GpuHandle);
 }
 
 void PipelineStateObject::SetConstantValue(string name, void* pData, ID3D12GraphicsCommandList* CommandList)
@@ -700,13 +706,19 @@ void PipelineStateObject::SetConstantValue(string name, void* pData, ID3D12Graph
 	cbvDesc.SizeInBytes = binding.cb->Size;
 	g_dx12_rhi->Device->CreateConstantBufferView(&cbvDesc, CpuHandle);
 
-	CommandList->SetGraphicsRootDescriptorTable(binding.rootParamIndex, GpuHandle);
+	if (IsCompute)
+		CommandList->SetComputeRootDescriptorTable(binding.rootParamIndex, GpuHandle);
+	else
+		CommandList->SetGraphicsRootDescriptorTable(binding.rootParamIndex, GpuHandle);
 }
 
 void PipelineStateObject::SetRootConstant(string name, UINT value, ID3D12GraphicsCommandList* CommandList)
 {
 	rootBinding[name].rootConst = value;
-	CommandList->SetGraphicsRoot32BitConstant(rootBinding[name].rootParamIndex, rootBinding[name].rootConst, 0);
+	if(IsCompute)
+		CommandList->SetComputeRoot32BitConstant(rootBinding[name].rootParamIndex, rootBinding[name].rootConst, 0);
+	else
+		CommandList->SetGraphicsRoot32BitConstant(rootBinding[name].rootParamIndex, rootBinding[name].rootConst, 0);
 }
 //void PipelineStateObject::Init(bool isCompute)
 //{
@@ -893,7 +905,7 @@ void PipelineStateObject::SetRootConstant(string name, UINT value, ID3D12Graphic
 //	}
 //}
 
-void PipelineStateObject::Init2(bool isCompute)
+void PipelineStateObject::Init2()
 {
 
 	vector<CD3DX12_ROOT_PARAMETER1> rootParamVec;
@@ -1020,7 +1032,7 @@ void PipelineStateObject::Init2(bool isCompute)
 	}
 
 	NAME_D3D12_OBJECT(RS);
-	if (isCompute)
+	if (IsCompute)
 	{
 		computePSODesc.CS = cs->ShaderByteCode;
 		computePSODesc.pRootSignature = RS.Get();
@@ -1040,28 +1052,18 @@ void PipelineStateObject::Init2(bool isCompute)
 	}
 }
 
-void PipelineStateObject::ApplyGlobal(ID3D12GraphicsCommandList* CommandList)
+void PipelineStateObject::Apply(ID3D12GraphicsCommandList* CommandList)
 {
-	CommandList->SetGraphicsRootSignature(RS.Get());
-	CommandList->SetPipelineState(PSO.Get());
-}
-
-void PipelineStateObject::ApplyCS(ID3D12GraphicsCommandList* CommandList)
-{
-	CommandList->SetComputeRootSignature(RS.Get());
-	CommandList->SetPipelineState(PSO.Get());
-}
-
-void PipelineStateObject::ApplyGraphicsRSPSO(ID3D12GraphicsCommandList* CommandList)
-{
-	CommandList->SetGraphicsRootSignature(RS.Get());
-	CommandList->SetPipelineState(PSO.Get());
-}
-
-void PipelineStateObject::ApplyComputeRSPSO(ID3D12GraphicsCommandList* CommandList)
-{
-	CommandList->SetComputeRootSignature(RS.Get());
-	CommandList->SetPipelineState(PSO.Get());
+	if (IsCompute)
+	{
+		CommandList->SetComputeRootSignature(RS.Get());
+		CommandList->SetPipelineState(PSO.Get());
+	}
+	else
+	{
+		CommandList->SetGraphicsRootSignature(RS.Get());
+		CommandList->SetPipelineState(PSO.Get());
+	}
 }
 
 UINT PipelineStateObject::GetGraphicsBindingDHSize()

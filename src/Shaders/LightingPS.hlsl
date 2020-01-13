@@ -12,9 +12,9 @@
 Texture2D AlbedoTex : register(t0);
 Texture2D NormalTex : register(t1);
 Texture2D ShadowTex : register(t2);
-Texture2D PrevColorTex : register(t3);
-Texture2D VelocityTex : register(t4);
-Texture2D DepthTex : register(t5);
+Texture2D VelocityTex : register(t3);
+Texture2D DepthTex : register(t4);
+Texture2D IndirectDiffuseTex : register(t5);
 
 
 
@@ -75,41 +75,8 @@ float4 PSMain(PSInput input) : SV_TARGET
 	
     float3 DiffuseLighting = dot(LightDir.xyz, WorldNormal)* Albedo * Shadow;
 
-
-    // float3 CurrentColor = DiffuseLighting;
-    // float2 PrevPixelPos = PixelPos - Velocity * RTSize;
-    // float3 PrevColor = PrevColorTex[PrevPixelPos].xyz;
-    // // PrevColor = clamp(PrevColor, clrMin, clrMax);
-
-    // float Depth = DepthTex[PixelPos];
-    // float PrevDepth = DepthTex[PrevPixelPos];
-
-    // float BlendFactor = TAABlendFactor;
+    float3 IndirectDiffuse = IndirectDiffuseTex[PixelPos];
 
 
-  
-
-
-    //     // return float4(CurrentColor, 1);
-    
-    // float3 weightA = saturate(1.0f - BlendFactor);
-    // float3 weightB = saturate(BlendFactor);
-
-    // float3 temporalWeight = saturate(abs(clrMax - clrMin) / CurrentColor);
-    // weightB = saturate(lerp(LowFreqWeight, HiFreqWeight, temporalWeight));
-    // weightA = 1.0f - weightB;
-
-
-    //  // if( PrevDepth < Depth || PrevPixelPos.x > RTSize.x || PrevPixelPos.y > RTSize.y || PrevPixelPos.x < 0 || PrevPixelPos.y < 0)
-    //  if(  PrevPixelPos.x > RTSize.x || PrevPixelPos.y > RTSize.y || PrevPixelPos.x < 0 || PrevPixelPos.y < 0 || TAABlendFactor > 0.999f)
-    //  {
-    //     weightA = 1.0f;
-    //     weightB = 0.0f;
-    //     // return float4(1, 0, 0, 0);
-    //  }
-
-    // float4 Color = float4((CurrentColor * weightA + PrevColor * weightB) / (weightA + weightB), 1);
-    
-
-    return float4(DiffuseLighting, 1);
+    return float4(DiffuseLighting + IndirectDiffuse, 1);
 }
