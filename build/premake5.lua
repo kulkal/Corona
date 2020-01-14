@@ -19,7 +19,9 @@ project "dx12_framework"
                ".", 
                "C:/Program Files (x86)/Windows Kits/10/Include/10.0.17763.0/um",  
                "../src/DirectXTex July 2017/Include", 
-               "../src/assimp/include"
+               "../src/assimp/include",
+               "../src/imgui/",
+               "../src/imgui/examples"
                }
    libdirs {
             "C:/dev/dx12_wrapper/src/GFSDK_Aftermath/lib/x64", 
@@ -46,14 +48,28 @@ project "dx12_framework"
       systemversion( WIN_SDK_VERSION)
       staticruntime("off")
       flags { "NoPCH" } 
-      files { "../src/*.h", "../src/*.cpp", "../src/enkiTS/*.cpp" }
+      files { 
+      "../src/*.h",
+      "../src/*.cpp",
+      "../src/enkiTS/*.cpp",
+      "../src/imgui/*.cpp",
+      "../src/imgui/examples/imgui_impl_dx12.cpp",
+      "../src/imgui/examples/imgui_impl_win32.cpp"
+      }
 
    configuration "Release"
       debugdir("../src/")
       systemversion( WIN_SDK_VERSION)
       staticruntime("off")
       flags { "NoPCH" } 
-      files { "../src/*.h", "../src/*.cpp", "../src/enkiTS/*.cpp" }
+      files {
+         "../src/*.h",
+      "../src/*.cpp",
+      "../src/enkiTS/*.cpp",
+      "../src/imgui/*.cpp",
+      "../src/imgui/examples/imgui_impl_dx12.cpp",
+      "../src/imgui/examples/imgui_impl_win32.cpp"
+      }
 
 
    filter "configurations:Debug"

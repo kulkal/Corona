@@ -7,6 +7,7 @@
 #include <list>
 #include <map>
 #include <memory>
+#include <string>
 #include "DXSampleHelper.h"
 
 using namespace Microsoft::WRL;

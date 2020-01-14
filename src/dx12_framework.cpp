@@ -32,6 +32,10 @@
 #include <fstream>
 #include <variant>
 
+#include "imgui.h"
+#include "imgui_impl_win32.h"
+#include "imgui_impl_dx12.h"
+
 #define arraysize(a) (sizeof(a)/sizeof(a[0]))
 #define align_to(_alignment, _val) (((_val + _alignment - 1) / _alignment) * _alignment)
 
@@ -443,6 +447,7 @@ void dx12_framework::LoadPipeline()
 // Load the sample assets.
 void dx12_framework::LoadAssets()
 {
+	InitImgui();
 	InitComputeRS();
 	InitDrawMeshRS();
 	InitCopyPass();
@@ -829,7 +834,7 @@ void dx12_framework::InitComputeRS()
 
 	try
 	{
-		ThrowIfFailed(D3DCompileFromFile(GetAssetFullPath(L"Shaders\\SimpleCS.hlsl").c_str(), nullptr, nullptr, "main", "cs_5_0", compileFlags, 0, &computeShader, &compilationMsgs));
+		ThrowIfFailed(D3DCompileFromFile(GetAssetFullPath(L"Shaders\\SimpleCS.hlsl").c_str(), nullptr, D3D_COMPILE_STANDARD_FILE_INCLUDE, "main", "cs_5_0", compileFlags, 0, &computeShader, &compilationMsgs));
 	}
 	catch (const std::exception& e)
 	{
@@ -869,7 +874,7 @@ void dx12_framework::InitDenoiserPass()
 
 	try
 	{
-		ThrowIfFailed(D3DCompileFromFile(GetAssetFullPath(L"Shaders\\FilterIndirectDiffuseCS.hlsl").c_str(), nullptr, nullptr, "FilterIndirectDiffuse", "cs_5_0", compileFlags, 0, &computeShader, &compilationMsgs));
+		ThrowIfFailed(D3DCompileFromFile(GetAssetFullPath(L"Shaders\\FilterIndirectDiffuseCS.hlsl").c_str(), nullptr, D3D_COMPILE_STANDARD_FILE_INCLUDE, "FilterIndirectDiffuse", "cs_5_0", compileFlags, 0, &computeShader, &compilationMsgs));
 	}
 	catch (const std::exception& e)
 	{
@@ -997,6 +1002,21 @@ void dx12_framework::InitDrawMeshRS()
 	RS_Mesh->BindConstantBuffer("ObjParameter", 0, sizeof(ObjConstantBuffer), 400);
 
 	RS_Mesh->Init2();
+}
+
+void dx12_framework::InitImgui()
+{
+	IMGUI_CHECKVERSION();
+	ImGui::CreateContext();
+	ImGuiIO& io = ImGui::GetIO(); (void)io;
+
+	dx12_rhi->TextureDHRing->AllocDescriptor(CpuHandleImguiFontTex, GpuHandleImguiFontTex);
+
+	ImGui_ImplWin32_Init(Win32Application::GetHwnd());
+	ImGui_ImplDX12_Init(dx12_rhi->Device.Get(), dx12_rhi->NumFrame,
+		DXGI_FORMAT_R8G8B8A8_UNORM, dx12_rhi->SRVCBVDescriptorHeapShaderVisible->DH.Get(),
+		CpuHandleImguiFontTex,
+		GpuHandleImguiFontTex);
 }
 
 void dx12_framework::InitCopyPass()
@@ -1456,7 +1476,7 @@ void dx12_framework::LightingPass()
 
 
 	LightingParam Param;
-	Param.LightDir = glm::vec4(LightDir, 0);
+	Param.LightDir = glm::vec4(LightDir*LightIntensity, 0);
 	
 	Param.RTSize.x = m_width;
 	Param.RTSize.y = m_height;
@@ -1649,7 +1669,15 @@ void dx12_framework::OnUpdate()
 	float timeElapsed = m_timer.GetTotalSeconds();
 	timeElapsed *= 0.01f;
 	RTGIViewParam.RandomOffset = glm::vec2(timeElapsed, timeElapsed);
+	
+	FilterIndirectDiffuseConstantCB.ProjectionParams.x = Near;
+	FilterIndirectDiffuseConstantCB.ProjectionParams.y = Far;
+
+
+	
 	FrmaeCounter++;
+
+
 
 	ColorBufferWriteIndex = FrmaeCounter % 2;
 }
@@ -1706,6 +1734,30 @@ void dx12_framework::OnRender()
 	if(bDebugDraw)
 		DebugPass();
 
+
+
+	ImGui_ImplDX12_NewFrame();
+	ImGui_ImplWin32_NewFrame();
+	ImGui::NewFrame();
+
+	bool show_demo_window = true;
+
+	//ImGui::ShowDemoWindow(&show_demo_window);
+
+	ImGui::Begin("Hello, world!");                          // Create a window called "Hello, world!" and append into it.
+	ImGui::Text("This is some useful text.");               // Display some text (you can use a format strings too)
+	ImGui::Checkbox("Enable TemporalAA", &bEnableTAA);      // Edit bools storing our window open/close state
+
+	ImGui::SliderFloat3("Light direction", &LightDir.x, -1.0f, 1.0f);
+	ImGui::SliderFloat("IndirectDiffuse Depth Weight Factor", &FilterIndirectDiffuseConstantCB.IndirectDiffuseWeightFactorDepth, 0.0f, 2.0f);            // Edit 1 float using a slider from 0.0f to 1.0f
+	ImGui::SliderFloat("IndirectDiffuse Normal Weight Factor", &FilterIndirectDiffuseConstantCB.IndirectDiffuseWeightFactorNormal, 0.0f, 20.0f);            // Edit 1 float using a slider from 0.0f to 1.0f
+
+
+
+	ImGui::Render();
+	ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), dx12_rhi->CommandList.Get());
+
+
 	D3D12_RESOURCE_BARRIER BarrierDescPresent = {};
 	BarrierDescPresent.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
 	BarrierDescPresent.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
@@ -1721,6 +1773,8 @@ void dx12_framework::OnRender()
 	};
 	dx12_rhi->CommandQueue->ExecuteCommandLists(_countof(ppCommandListsEnd), ppCommandListsEnd);
 
+
+
 	dx12_rhi->EndFrame();
 
 	PrevViewProjMat = ViewProjMat;
@@ -1733,6 +1787,10 @@ void dx12_framework::OnDestroy()
 	// cleaned up by the destructor.
 	
 	dx12_rhi->WaitGPU();
+
+	ImGui_ImplDX12_Shutdown();
+	ImGui_ImplWin32_Shutdown();
+	ImGui::DestroyContext();
 }
 
 void dx12_framework::OnKeyDown(UINT8 key)
@@ -2045,9 +2103,8 @@ void dx12_framework::FilterIndirectDiffusePass()
 
 	RS_FilterIndirectDiffuse->SetUAV("OutputTex", FilterIndirectDiffusePingPong[0].get(), dx12_rhi->CommandList.Get());
 
-	FilterIndirectDiffuseConstant CB;
-	CB.Iteration = 0;
-	RS_FilterIndirectDiffuse->SetConstantValue("FilterIndirectDiffuseConstant", &CB, dx12_rhi->CommandList.Get());
+	FilterIndirectDiffuseConstantCB.Iteration = 0;
+	RS_FilterIndirectDiffuse->SetConstantValue("FilterIndirectDiffuseConstant", &FilterIndirectDiffuseConstantCB, dx12_rhi->CommandList.Get());
 
 	dx12_rhi->CommandList->Dispatch(m_width / 32, m_height / 32, 1);
 
@@ -2070,9 +2127,8 @@ void dx12_framework::FilterIndirectDiffusePass()
 
 		RS_FilterIndirectDiffuse->SetUAV("OutputTex", FilterIndirectDiffusePingPong[WriteIndex].get(), dx12_rhi->CommandList.Get());
 
-		FilterIndirectDiffuseConstant CB;
-		CB.Iteration = i;
-		RS_FilterIndirectDiffuse->SetConstantValue("FilterIndirectDiffuseConstant", &CB, dx12_rhi->CommandList.Get());
+		FilterIndirectDiffuseConstantCB.Iteration = i;
+		RS_FilterIndirectDiffuse->SetConstantValue("FilterIndirectDiffuseConstant", &FilterIndirectDiffuseConstantCB, dx12_rhi->CommandList.Get());
 
 		dx12_rhi->CommandList->Dispatch(m_width / 32, m_height / 32, 1);
 

@@ -149,8 +149,15 @@ private:
 	// denoising
 	struct FilterIndirectDiffuseConstant
 	{
+		glm::vec4 ProjectionParams;
 		UINT32 Iteration;
+		float IndirectDiffuseWeightFactorDepth = 0.20f;
+		float IndirectDiffuseWeightFactorNormal = 9.0f;
 	};
+
+	//FLOAT IndirectDiffuseWeightFactor0;
+	FilterIndirectDiffuseConstant FilterIndirectDiffuseConstantCB;
+
 	unique_ptr<PipelineStateObject> RS_FilterIndirectDiffuse;
 	shared_ptr<Texture> FilterIndirectDiffusePingPong[2];
 
@@ -173,7 +180,8 @@ private:
 	SimpleCamera m_camera;
 
 
-	glm::vec3 LightDir = glm::normalize(glm::vec3(0.7, 1, 0.2)) * 3.0f;
+	glm::vec3 LightDir = glm::normalize(glm::vec3(0.901, 0.88, 0.176));
+	float LightIntensity = 3.0f;
 	float Near = 1.0f;
 	float Far = 20000.0f;
 
@@ -237,6 +245,10 @@ private:
 
 	UINT32 ClampMode = 2;
 	float JitterScale = 0.85;
+
+	// imgui font texture
+	D3D12_CPU_DESCRIPTOR_HANDLE CpuHandleImguiFontTex;
+	D3D12_GPU_DESCRIPTOR_HANDLE GpuHandleImguiFontTex;
 public:
 
 	void InitRaytracing();
@@ -255,6 +267,8 @@ public:
 	void InitDenoiserPass();
 
 	void InitDrawMeshRS();
+
+	void InitImgui();
 
 	void DrawMeshPass();
 
