@@ -1,6 +1,8 @@
 #include "Common.hlsl"
 
-RWTexture2D<float4> gOutput : register(u0);
+RWTexture2D<float4> GIResultSH : register(u0);
+RWTexture2D<float4> GIResultColor : register(u1);
+
 
 RaytracingAccelerationStructure gRtScene : register(t0);
 Texture2D DepthTex : register(t1);
@@ -8,7 +10,9 @@ Texture2D WorldNormalTex : register(t2);
 ByteAddressBuffer vertices : register(t3);
 ByteAddressBuffer indices : register(t4);
 Texture2D AlbedoTex : register(t5);
+
 ByteAddressBuffer InstanceProperty : register(t6);
+Texture3D BlueNoiseTex : register(t7);
 
 
 cbuffer ViewParameter : register(b0)
@@ -19,10 +23,23 @@ cbuffer ViewParameter : register(b0)
     float4 ProjectionParams;
     float4 LightDir;
     float2 RandomOffset;
+    uint FrameCounter;
+    uint BlueNoiseOffsetStride;
 };
 
 SamplerState sampleWrap : register(s0);
 
+float2 LoadBlueNoise2(Texture3D blueNoiseTex, uint2 launchIndex, uint frameCounter, uint stride)
+{
+    uint offset = frameCounter;
+    uint3 addr = uint3(launchIndex.x % 64, launchIndex.y % 64, (offset/2) % 64);
+    float4 Noise = BlueNoiseTex[addr];
+
+    if(offset % 2 == 0)
+        return Noise.xy;
+    else
+        return Noise.zw;
+}
 
 float3 linearToSrgb(float3 c)
 {
@@ -130,8 +147,11 @@ void rayGen
     float rand_u = random(crd + RandomOffset);
     float rand_v = random(crd + RandomOffset + float2(100, 100));
 
+    float2 RandomUV = LoadBlueNoise2(BlueNoiseTex, launchIndex, FrameCounter, BlueNoiseOffsetStride);
+
+    // RandomUV = float2(rand_u, rand_v);
     // float3 sampleDirLocal = SampleUniformHemisphere(rand_u, rand_v);
-    float3 sampleDirLocal = SampleHemisphereCosine(rand_u, rand_v);
+    float3 sampleDirLocal = SampleHemisphereCosine(RandomUV.x, RandomUV.y);
 
 
     float3x3 tbn = buildTBN(WorldNormal);
@@ -157,7 +177,7 @@ void rayGen
         // hit sky
         float3 Radiance = float4(0, 0, 0.1, 1);
         float3 DiffuseLighting = Radiance * cosTerm;
-        gOutput[launchIndex.xy] = float4(DiffuseLighting.xyz, 1);   
+        // gOutput[launchIndex.xy] = float4(DiffuseLighting.xyz, 1);   
     }
     else
     {
@@ -174,11 +194,13 @@ void rayGen
 
         float3 Albedo = payload.color;
         float3 DiffuseLighting;
+        SH sh_indirect = init_SH();
         if(shadowPayload.distance == 0)
         {
             // miss
-            float3 Radiance = dot(LightDir.xyz, payload.normal) * Albedo;
-            DiffuseLighting = Radiance * cosTerm;
+            float3 Irradiance = dot(LightDir.xyz, payload.normal) * Albedo;
+            DiffuseLighting = Irradiance * cosTerm;
+            sh_indirect = irradiance_to_SH(Irradiance, sampleDirWorld);
         }
         else
         {
@@ -187,8 +209,13 @@ void rayGen
         }
 
         // DiffuseLighting = Albedo;
-        gOutput[launchIndex.xy] = float4(DiffuseLighting.xyz, 1);   
+        // gOutput[launchIndex.xy] = float4(DiffuseLighting.xyz, 1);   
+
+        GIResultSH[launchIndex.xy] = sh_indirect.shY;
+        GIResultColor[launchIndex.xy] = float4(sh_indirect.CoCg, 0, 0);
     }
+
+
 }
 
 

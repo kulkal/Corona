@@ -1,10 +1,14 @@
 #include "Common.hlsl"
 
-Texture2D InputTex : register(t0);
-Texture2D DepthTex : register(t1);
-Texture2D GeoNormalTex : register(t2);
+Texture2D DepthTex : register(t0);
+Texture2D GeoNormalTex : register(t1);
+Texture2D InGIResultSHTex : register(t2);
+Texture2D InGIResultColorTex : register(t3);
 
-RWTexture2D<float4> OutputTex : register(u0);
+
+RWTexture2D<float4> OutGIResultSH : register(u0);
+RWTexture2D<float4> OutGIResultColor: register(u1);
+
 
 
 cbuffer FilterIndirectDiffuseConstant : register(b0)
@@ -37,12 +41,18 @@ void FilterIndirectDiffuse( uint3 DTid : SV_DispatchThreadID )
 	const int r = 1;
 	float3 SumColor = float3(0, 0, 0);
 	float SumW = 0;
+
+	SH SumSH = init_SH();
+
 	for(int yy = -r; yy <= r; yy++) 
 	{
 		for(int xx = -r; xx <= r; xx++) 
 		{
 			float2 SamplePos = CenterPos + float2(xx, yy) * StepSize;
-			float3 Sample = InputTex[SamplePos];
+
+			SH SampleSH;
+			SampleSH.shY = InGIResultSHTex[SamplePos];
+			SampleSH.CoCg = InGIResultColorTex[SamplePos].xy;
 
 			float W = 1;
 
@@ -50,7 +60,6 @@ void FilterIndirectDiffuse( uint3 DTid : SV_DispatchThreadID )
 			float SampleZ = GetLinearDepthOpenGL(SampleDepth, ProjectionParams.x, ProjectionParams.y) ;
 
 			float DistZ = abs(CenterZ - SampleZ) * IndirectDiffuseWeightFactorDepth;
-			//exp(-dist_z / float(step_size * GRAD_DWN));
 			W *= exp(-DistZ/StepSize) ;
 			float3 Normal = GeoNormalTex[SamplePos.xy];
 			W *= wavelet_kernel[abs(xx)][abs(yy)];
@@ -59,8 +68,13 @@ void FilterIndirectDiffuse( uint3 DTid : SV_DispatchThreadID )
 			W *= pow(GNdotGN, IndirectDiffuseWeightFactorNormal);
 
 			SumW += W;
-			SumColor += Sample*W;
+			accumulate_SH(SumSH, SampleSH, W);
 		}
 	}
-    OutputTex[DTid.xy] = float4(SumColor/SumW, 1);
+
+    scale_SH(SumSH, 1.0/SumW);
+
+    OutGIResultSH[DTid.xy] = SumSH.shY;
+    OutGIResultColor[DTid.xy] = float4(SumSH.CoCg, 0, 0);
+
 }

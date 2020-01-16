@@ -1079,7 +1079,10 @@ void Texture::MakeStaticSRV()
 	SrvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
 	SrvDesc.Format = textureDesc.Format;
 
-	SrvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+	if(textureDesc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D)
+		SrvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE3D;
+	else 
+		SrvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
 	SrvDesc.Texture2D.MipLevels = textureDesc.MipLevels;
 	g_dx12_rhi->Device->CreateShaderResourceView(resource.Get(), &SrvDesc, CpuHandleSRV);
 }
@@ -1197,15 +1200,72 @@ std::shared_ptr<Texture> DumRHI_DX12::CreateTexture2D(DXGI_FORMAT format, D3D12_
 	return texPtr;
 }
 
-void Texture::UploadSRCData(D3D12_SUBRESOURCE_DATA* SrcData)
+std::shared_ptr<Texture> DumRHI_DX12::CreateTexture3D(DXGI_FORMAT format, D3D12_RESOURCE_FLAGS resFlags, D3D12_RESOURCE_STATES initResState, int width, int height, int depth, int mipLevels)
+{
+	Texture* tex = new Texture;
+
+
+
+	D3D12_RESOURCE_DESC textureDesc = {};
+	textureDesc.MipLevels = mipLevels;
+	textureDesc.Format = format;
+	textureDesc.Width = width;
+	textureDesc.Height = height;
+	textureDesc.DepthOrArraySize = depth;
+	textureDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
+	textureDesc.SampleDesc.Count = 1;
+	textureDesc.SampleDesc.Quality = 0;
+	textureDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE3D;
+
+	textureDesc.Flags = resFlags;
+
+	tex->textureDesc = textureDesc;
+
+	D3D12_HEAP_PROPERTIES heapProp;
+	heapProp.Type = D3D12_HEAP_TYPE_DEFAULT;
+	heapProp.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
+	heapProp.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
+	heapProp.CreationNodeMask = 1;
+	heapProp.VisibleNodeMask = 1;
+
+
+	D3D12_RESOURCE_STATES ResStats = initResState;
+
+
+	D3D12_CLEAR_VALUE* pClearValue = nullptr;
+
+	ThrowIfFailed(Device->CreateCommittedResource(
+		&heapProp,
+		D3D12_HEAP_FLAG_NONE,
+		&textureDesc,
+		ResStats,
+		pClearValue,
+		IID_PPV_ARGS(&tex->resource)));
+
+
+	shared_ptr<Texture> texPtr = shared_ptr<Texture>(tex);
+
+
+	if (resFlags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET || resFlags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL || resFlags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS)
+		g_dx12_rhi->DynamicTextures.push_back(texPtr);
+	else
+		tex->MakeStaticSRV();
+
+	return texPtr;
+}
+
+void Texture::UploadSRCData3D(D3D12_SUBRESOURCE_DATA* SrcData)
 {
 	// upload src data
 	if (SrcData)
 	{
-		ComPtr<ID3D12Resource> textureUploadHeap;
 
-		const UINT subresourceCount = textureDesc.DepthOrArraySize * textureDesc.MipLevels;
-		const UINT64 uploadBufferSize = GetRequiredIntermediateSize(resource.Get(), 0, subresourceCount);
+		D3D12_PLACED_SUBRESOURCE_FOOTPRINT descFootPrint;
+		UINT Rows = 0;
+		UINT64 RowSize = 0;
+		UINT64 TotalBytes = 0;
+		g_dx12_rhi->Device->GetCopyableFootprints(&textureDesc, 0, 1, 0, &descFootPrint, &Rows, &RowSize, &TotalBytes);
+
 
 		D3D12_HEAP_PROPERTIES heapProp;
 		heapProp.Type = D3D12_HEAP_TYPE_UPLOAD;
@@ -1218,7 +1278,7 @@ void Texture::UploadSRCData(D3D12_SUBRESOURCE_DATA* SrcData)
 
 		resDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
 		resDesc.Alignment = 0;
-		resDesc.Width = uploadBufferSize;
+		resDesc.Width = TotalBytes;
 		resDesc.Height = 1;
 		resDesc.DepthOrArraySize = 1;
 		resDesc.MipLevels = textureDesc.MipLevels;
@@ -1229,9 +1289,10 @@ void Texture::UploadSRCData(D3D12_SUBRESOURCE_DATA* SrcData)
 		resDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
 
 		stringstream ss;
-		ss << "UploadSRCData : " << uploadBufferSize << "\n";
+		ss << "UploadSRCData : " << TotalBytes << "\n";
 		OutputDebugStringA(ss.str().c_str());
 
+		ComPtr<ID3D12Resource> textureUploadHeap;
 
 		ThrowIfFailed(g_dx12_rhi->Device->CreateCommittedResource(
 			&heapProp,
@@ -1243,8 +1304,29 @@ void Texture::UploadSRCData(D3D12_SUBRESOURCE_DATA* SrcData)
 
 		NAME_D3D12_OBJECT(textureUploadHeap);
 
+		UINT8* pData = nullptr;
+		textureUploadHeap->Map(0, nullptr, reinterpret_cast<void**>(&pData));
+		memcpy(reinterpret_cast<void*>(pData), SrcData->pData, TotalBytes);
+		textureUploadHeap->Unmap(0, nullptr);
 
-		UpdateSubresources(g_dx12_rhi->CommandList.Get(), resource.Get(), textureUploadHeap.Get(), 0, 0, subresourceCount, SrcData);
+		D3D12_TEXTURE_COPY_LOCATION dst = { };
+		dst.pResource = resource.Get();
+		dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+		dst.SubresourceIndex = UINT32(0);
+		D3D12_TEXTURE_COPY_LOCATION src = { };
+		src.pResource = textureUploadHeap.Get();
+		src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+		src.PlacedFootprint = descFootPrint;
+
+		D3D12_BOX sourceRegion;
+		sourceRegion.left = 0;
+		sourceRegion.top = 64;
+		sourceRegion.right = 64;
+		sourceRegion.bottom = 0;
+		sourceRegion.front = 64;
+		sourceRegion.back = 0;
+		g_dx12_rhi->CommandList->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+
 
 		D3D12_RESOURCE_BARRIER BarrierDesc = {};
 		BarrierDesc.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
@@ -1252,7 +1334,7 @@ void Texture::UploadSRCData(D3D12_SUBRESOURCE_DATA* SrcData)
 		BarrierDesc.Transition.pResource = resource.Get();
 		BarrierDesc.Transition.Subresource = 0;
 		BarrierDesc.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
-		BarrierDesc.Transition.StateAfter = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+		BarrierDesc.Transition.StateAfter = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
 		g_dx12_rhi->CommandList->ResourceBarrier(1, &BarrierDesc);
 
 		ThrowIfFailed(g_dx12_rhi->CommandList->Close());

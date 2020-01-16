@@ -9,12 +9,17 @@
 //
 //*********************************************************
 
+#include "Common.hlsl"
+
 Texture2D AlbedoTex : register(t0);
 Texture2D NormalTex : register(t1);
 Texture2D ShadowTex : register(t2);
 Texture2D VelocityTex : register(t3);
 Texture2D DepthTex : register(t4);
-Texture2D IndirectDiffuseTex : register(t5);
+// Texture2D IndirectDiffuseTex : register(t5);
+Texture2D GIResultSHTex : register(t5);
+Texture2D GIResultColorTex : register(t6);
+
 
 
 
@@ -75,7 +80,13 @@ float4 PSMain(PSInput input) : SV_TARGET
 	
     float3 DiffuseLighting = dot(LightDir.xyz, WorldNormal)* Albedo * Shadow;
 
-    float3 IndirectDiffuse = IndirectDiffuseTex[PixelPos];
+    SH sh_indirect;
+    sh_indirect.shY = GIResultSHTex[PixelPos];
+    sh_indirect.CoCg = GIResultColorTex[PixelPos].xy;
+
+    float3 IndirectDiffuse = project_SH_irradiance(sh_indirect, WorldNormal) * Albedo;
+
+    // float3 IndirectDiffuse = IndirectDiffuseTex[PixelPos] * Albedo;
 
 
     return float4(DiffuseLighting + IndirectDiffuse, 1);

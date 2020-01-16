@@ -447,6 +447,7 @@ void dx12_framework::LoadPipeline()
 // Load the sample assets.
 void dx12_framework::LoadAssets()
 {
+	InitBlueNoiseTexture();
 	InitImgui();
 	InitComputeRS();
 	InitDrawMeshRS();
@@ -530,6 +531,21 @@ void dx12_framework::LoadAssets()
 		D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, m_width, m_height, 1);
 
 	NAME_D3D12_OBJECT(GIBuffer->resource);
+
+
+	// gi result sh
+	GIBufferSH = dx12_rhi->CreateTexture2D(DXGI_FORMAT_R16G16B16A16_FLOAT,
+		D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+		D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, m_width, m_height, 1);
+
+	NAME_D3D12_OBJECT(GIBufferSH->resource);
+
+	// gi result color
+	GIBufferColor = dx12_rhi->CreateTexture2D(DXGI_FORMAT_R16G16B16A16_FLOAT,
+		D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+		D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, m_width, m_height, 1);
+
+	NAME_D3D12_OBJECT(GIBufferColor->resource);
 
 
 	// albedo
@@ -890,11 +906,15 @@ void dx12_framework::InitDenoiserPass()
 	RS_FilterIndirectDiffuse = unique_ptr<PipelineStateObject>(new PipelineStateObject);
 	RS_FilterIndirectDiffuse->cs = unique_ptr<Shader>(cs);
 	RS_FilterIndirectDiffuse->computePSODesc = computePsoDesc;
-	RS_FilterIndirectDiffuse->BindTexture("InputTex", 0, 1);
-	RS_FilterIndirectDiffuse->BindTexture("DepthTex", 1, 1);
-	RS_FilterIndirectDiffuse->BindTexture("GeoNormalTex", 2, 1);
+	RS_FilterIndirectDiffuse->BindTexture("DepthTex", 0, 1);
+	RS_FilterIndirectDiffuse->BindTexture("GeoNormalTex", 1, 1);
+	RS_FilterIndirectDiffuse->BindTexture("InGIResultSHTex", 2, 1);
+	RS_FilterIndirectDiffuse->BindTexture("InGIResultColorTex", 3, 1);
 
-	RS_FilterIndirectDiffuse->BindUAV("OutputTex", 0);
+
+	RS_FilterIndirectDiffuse->BindUAV("OutGIResultSH", 0);
+	RS_FilterIndirectDiffuse->BindUAV("OutGIResultColor", 1);
+
 	RS_FilterIndirectDiffuse->BindConstantBuffer("FilterIndirectDiffuseConstant", 0, sizeof(FilterIndirectDiffuseConstant), 1);
 	RS_FilterIndirectDiffuse->IsCompute = true;
 	RS_FilterIndirectDiffuse->Init2();
@@ -910,6 +930,32 @@ void dx12_framework::InitDenoiserPass()
 		D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, m_width, m_height, 1);
 
 	NAME_D3D12_OBJECT(FilterIndirectDiffusePingPong[1]->resource);
+
+
+	FilterIndirectDiffusePingPongSH[0] = dx12_rhi->CreateTexture2D(DXGI_FORMAT_R16G16B16A16_FLOAT,
+		D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+		D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, m_width, m_height, 1);
+
+	NAME_D3D12_OBJECT(FilterIndirectDiffusePingPongSH[0]->resource);
+
+	FilterIndirectDiffusePingPongSH[1] = dx12_rhi->CreateTexture2D(DXGI_FORMAT_R16G16B16A16_FLOAT,
+		D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+		D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, m_width, m_height, 1);
+
+	NAME_D3D12_OBJECT(FilterIndirectDiffusePingPongSH[1]->resource);
+
+	FilterIndirectDiffusePingPongColor[0] = dx12_rhi->CreateTexture2D(DXGI_FORMAT_R16G16B16A16_FLOAT,
+		D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+		D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, m_width, m_height, 1);
+
+	NAME_D3D12_OBJECT(FilterIndirectDiffusePingPongColor[0]->resource);
+
+	FilterIndirectDiffusePingPongColor[1] = dx12_rhi->CreateTexture2D(DXGI_FORMAT_R16G16B16A16_FLOAT,
+		D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+		D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, m_width, m_height, 1);
+
+	NAME_D3D12_OBJECT(FilterIndirectDiffusePingPongColor[1]->resource);
+
 	
 }
 
@@ -930,7 +976,7 @@ void dx12_framework::InitDrawMeshRS()
 
 	try
 	{
-		ThrowIfFailed(D3DCompileFromFile(GetAssetFullPath(L"Shaders\\MeshDraw.hlsl").c_str(), nullptr, nullptr, "VSMain", "vs_5_0", compileFlags, 0, &vertexShader, &compilationMsgs));
+		ThrowIfFailed(D3DCompileFromFile(GetAssetFullPath(L"Shaders\\MeshDraw.hlsl").c_str(), nullptr, D3D_COMPILE_STANDARD_FILE_INCLUDE, "VSMain", "vs_5_0", compileFlags, 0, &vertexShader, &compilationMsgs));
 	}
 	catch (const std::exception& e)
 	{
@@ -940,7 +986,7 @@ void dx12_framework::InitDrawMeshRS()
 
 	try
 	{
-		ThrowIfFailed(D3DCompileFromFile(GetAssetFullPath(L"Shaders\\MeshDraw.hlsl").c_str(), nullptr, nullptr, "PSMain", "ps_5_0", compileFlags, 0, &pixelShader, &compilationMsgs));
+		ThrowIfFailed(D3DCompileFromFile(GetAssetFullPath(L"Shaders\\MeshDraw.hlsl").c_str(), nullptr, D3D_COMPILE_STANDARD_FILE_INCLUDE, "PSMain", "ps_5_0", compileFlags, 0, &pixelShader, &compilationMsgs));
 	}
 	catch (const std::exception& e)
 	{
@@ -1019,6 +1065,73 @@ void dx12_framework::InitImgui()
 		GpuHandleImguiFontTex);
 }
 
+void dx12_framework::InitBlueNoiseTexture()
+{
+	string path = "bluenoise/64_64_64/HDR_RGBA.raw";
+	ifstream file(path.data(), ios::in | ios::binary);
+	if (file.is_open())
+	{
+		file.seekg(0, file.end);
+		int length = file.tellg();
+		file.seekg(0, file.beg);
+
+		UINT32 Version;
+		file.read(reinterpret_cast<char*>(&Version), sizeof(UINT32));
+
+		UINT32 nChannel;
+		file.read(reinterpret_cast<char*>(&nChannel), sizeof(UINT32));
+
+		UINT32 nDimension;
+		file.read(reinterpret_cast<char*>(&nDimension), sizeof(UINT32));
+
+		UINT32 Shape[3];
+		for(int i=0;i< nDimension;i++)
+			file.read(reinterpret_cast<char*>(&Shape[i]), sizeof(UINT32));
+
+		UINT DataSize = sizeof(UINT32) * nChannel * Shape[0] * Shape[1] * Shape[2];
+		UINT32* NoiseDataRaw = new UINT32[DataSize];
+
+		file.read(reinterpret_cast<char*>(NoiseDataRaw), DataSize);
+		size_t extracted = file.gcount();
+		/*UINT32 NoiseData[128];
+		file.read(reinterpret_cast<char*>(NoiseData), 128*sizeof(UINT32));*/
+		int NumFloat = nChannel * Shape[0] * Shape[1] * Shape[2];
+
+		float* NoiseDataFloat = new float[NumFloat];
+		stringstream ss;
+
+		float MaxValue = Shape[0] * Shape[1] * Shape[2];
+		for (int i = 0; i < NumFloat; i++)
+		{
+			if (NoiseDataRaw[i] == 3452816845)
+			{
+				int a = 0;
+			}
+			NoiseDataFloat[i] = static_cast<float>(NoiseDataRaw[i]) / MaxValue;
+
+			ss << NoiseDataFloat[i] << " ";
+			if(i %(64*4) == 0)
+				ss << "\n";
+		}
+		OutputDebugStringA(ss.str().c_str());
+
+		D3D12_SUBRESOURCE_DATA textureData = {};
+		textureData.pData = NoiseDataFloat;
+		textureData.RowPitch = Shape[0] * nChannel * sizeof(UINT32);
+		textureData.SlicePitch = textureData.RowPitch * Shape[1];
+
+		BlueNoiseTex = dx12_rhi->CreateTexture3D(DXGI_FORMAT_R32G32B32A32_FLOAT, D3D12_RESOURCE_FLAG_NONE,
+			D3D12_RESOURCE_STATE_COPY_DEST, Shape[0], Shape[1], Shape[2], 1);
+		BlueNoiseTex->UploadSRCData3D(&textureData);
+
+		delete[] NoiseDataRaw;
+		delete[] NoiseDataFloat;
+
+	}
+	
+	file.close();
+}
+
 void dx12_framework::InitCopyPass()
 {
 	struct PostVertex
@@ -1061,7 +1174,7 @@ void dx12_framework::InitCopyPass()
 
 	try
 	{
-		ThrowIfFailed(D3DCompileFromFile(GetAssetFullPath(L"Shaders\\CopyPS.hlsl").c_str(), nullptr, nullptr, "VSMain", "vs_5_0", compileFlags, 0, &vertexShader, &compilationMsgs));
+		ThrowIfFailed(D3DCompileFromFile(GetAssetFullPath(L"Shaders\\CopyPS.hlsl").c_str(), nullptr, D3D_COMPILE_STANDARD_FILE_INCLUDE, "VSMain", "vs_5_0", compileFlags, 0, &vertexShader, &compilationMsgs));
 	}
 	catch (const std::exception& e)
 	{
@@ -1071,7 +1184,7 @@ void dx12_framework::InitCopyPass()
 
 	try
 	{
-		ThrowIfFailed(D3DCompileFromFile(GetAssetFullPath(L"Shaders\\CopyPS.hlsl").c_str(), nullptr, nullptr, "PSMain", "ps_5_0", compileFlags, 0, &pixelShader, &compilationMsgs));
+		ThrowIfFailed(D3DCompileFromFile(GetAssetFullPath(L"Shaders\\CopyPS.hlsl").c_str(), nullptr, D3D_COMPILE_STANDARD_FILE_INCLUDE, "PSMain", "ps_5_0", compileFlags, 0, &pixelShader, &compilationMsgs));
 	}
 	catch (const std::exception& e)
 	{
@@ -1144,7 +1257,7 @@ void dx12_framework::InitLightingPass()
 
 	try
 	{
-		ThrowIfFailed(D3DCompileFromFile(GetAssetFullPath(L"Shaders\\LightingPS.hlsl").c_str(), nullptr, nullptr, "VSMain", "vs_5_0", compileFlags, 0, &vertexShader, &compilationMsgs));
+		ThrowIfFailed(D3DCompileFromFile(GetAssetFullPath(L"Shaders\\LightingPS.hlsl").c_str(), nullptr, D3D_COMPILE_STANDARD_FILE_INCLUDE, "VSMain", "vs_5_0", compileFlags, 0, &vertexShader, &compilationMsgs));
 	}
 	catch (const std::exception& e)
 	{
@@ -1154,7 +1267,7 @@ void dx12_framework::InitLightingPass()
 
 	try
 	{
-		ThrowIfFailed(D3DCompileFromFile(GetAssetFullPath(L"Shaders\\LightingPS.hlsl").c_str(), nullptr, nullptr, "PSMain", "ps_5_0", compileFlags, 0, &pixelShader, &compilationMsgs));
+		ThrowIfFailed(D3DCompileFromFile(GetAssetFullPath(L"Shaders\\LightingPS.hlsl").c_str(), nullptr, D3D_COMPILE_STANDARD_FILE_INCLUDE, "PSMain", "ps_5_0", compileFlags, 0, &pixelShader, &compilationMsgs));
 	}
 	catch (const std::exception& e)
 	{
@@ -1213,7 +1326,9 @@ void dx12_framework::InitLightingPass()
 	RS_Lighting->BindTexture("ShadowTex", 2, 1);
 	RS_Lighting->BindTexture("VelocityTex", 3, 1);
 	RS_Lighting->BindTexture("DepthTex", 4, 1);
-	RS_Lighting->BindTexture("IndirectDiffuseTex", 5, 1);
+	//RS_Lighting->BindTexture("IndirectDiffuseTex", 5, 1);
+	RS_Lighting->BindTexture("GIResultSHTex", 5, 1);
+	RS_Lighting->BindTexture("GIResultColorTex", 6, 1);
 
 
 
@@ -1240,7 +1355,7 @@ void dx12_framework::InitTemporalAAPass()
 
 	try
 	{
-		ThrowIfFailed(D3DCompileFromFile(GetAssetFullPath(L"Shaders\\TemporalAA.hlsl").c_str(), nullptr, nullptr, "VSMain", "vs_5_0", compileFlags, 0, &vertexShader, &compilationMsgs));
+		ThrowIfFailed(D3DCompileFromFile(GetAssetFullPath(L"Shaders\\TemporalAA.hlsl").c_str(), nullptr, D3D_COMPILE_STANDARD_FILE_INCLUDE, "VSMain", "vs_5_0", compileFlags, 0, &vertexShader, &compilationMsgs));
 	}
 	catch (const std::exception& e)
 	{
@@ -1250,7 +1365,7 @@ void dx12_framework::InitTemporalAAPass()
 
 	try
 	{
-		ThrowIfFailed(D3DCompileFromFile(GetAssetFullPath(L"Shaders\\TemporalAA.hlsl").c_str(), nullptr, nullptr, "PSMain", "ps_5_0", compileFlags, 0, &pixelShader, &compilationMsgs));
+		ThrowIfFailed(D3DCompileFromFile(GetAssetFullPath(L"Shaders\\TemporalAA.hlsl").c_str(), nullptr, D3D_COMPILE_STANDARD_FILE_INCLUDE, "PSMain", "ps_5_0", compileFlags, 0, &pixelShader, &compilationMsgs));
 	}
 	catch (const std::exception& e)
 	{
@@ -1416,7 +1531,7 @@ void dx12_framework::DebugPass()
 	cb.Scale = glm::vec4(0.25, 0.25, 0, 0);
 	RS_Copy->SetConstantValue("ScaleOffsetParams", &cb, dx12_rhi->CommandList.Get());
 	//RS_Copy->SetTexture("SrcTex", GIBuffer.get(), dx12_rhi->CommandList.Get());
-	RS_Copy->SetTexture("SrcTex", GIBuffer.get(), dx12_rhi->CommandList.Get());
+	RS_Copy->SetTexture("SrcTex", GIBufferSH.get(), dx12_rhi->CommandList.Get());
 
 	dx12_rhi->CommandList->DrawInstanced(4, 1, 0, 0);
 	RS_Copy->currentDrawCallIndex++;
@@ -1426,7 +1541,7 @@ void dx12_framework::DebugPass()
 	cb.Scale = glm::vec4(0.25, 0.25, 0, 0);
 	RS_Copy->SetConstantValue("ScaleOffsetParams", &cb, dx12_rhi->CommandList.Get());
 	//RS_Copy->SetTexture("SrcTex", GIBuffer.get(), dx12_rhi->CommandList.Get());
-	RS_Copy->SetTexture("SrcTex", FilterIndirectDiffusePingPong[1].get(), dx12_rhi->CommandList.Get());
+	RS_Copy->SetTexture("SrcTex", FilterIndirectDiffusePingPongSH[1].get(), dx12_rhi->CommandList.Get());
 
 	dx12_rhi->CommandList->DrawInstanced(4, 1, 0, 0);
 	RS_Copy->currentDrawCallIndex++;
@@ -1467,12 +1582,9 @@ void dx12_framework::LightingPass()
 
 	RS_Lighting->SetTexture("VelocityTex", VelocityBuffer.get(), dx12_rhi->CommandList.Get());
 	RS_Lighting->SetTexture("DepthTex", DepthBuffer.get(), dx12_rhi->CommandList.Get());
-	RS_Lighting->SetTexture("IndirectDiffuseTex", FilterIndirectDiffusePingPong[1].get(), dx12_rhi->CommandList.Get());
-
-
-
-
-
+	//RS_Lighting->SetTexture("IndirectDiffuseTex", FilterIndirectDiffusePingPong[1].get(), dx12_rhi->CommandList.Get());
+	RS_Lighting->SetTexture("GIResultSHTex", FilterIndirectDiffusePingPongSH[1].get(), dx12_rhi->CommandList.Get());
+	RS_Lighting->SetTexture("GIResultColorTex", FilterIndirectDiffusePingPongColor[1].get(), dx12_rhi->CommandList.Get());
 
 
 	LightingParam Param;
@@ -1619,7 +1731,7 @@ void dx12_framework::OnUpdate()
 	RTShadowViewParam.LightDir = glm::vec4(LightDir, 0);
 
 	glm::vec2 Jitter;
-	uint64 idx = FrmaeCounter % 4;
+	uint64 idx = FrameCounter % 4;
 	Jitter = Hammersley2D(idx, 4) * 2.0f - glm::vec2(1.0f);
 	Jitter *= JitterScale;
 
@@ -1669,17 +1781,18 @@ void dx12_framework::OnUpdate()
 	float timeElapsed = m_timer.GetTotalSeconds();
 	timeElapsed *= 0.01f;
 	RTGIViewParam.RandomOffset = glm::vec2(timeElapsed, timeElapsed);
+	RTGIViewParam.FrameCounter = FrameCounter;
 	
 	FilterIndirectDiffuseConstantCB.ProjectionParams.x = Near;
 	FilterIndirectDiffuseConstantCB.ProjectionParams.y = Far;
 
 
 	
-	FrmaeCounter++;
+	FrameCounter++;
 
 
 
-	ColorBufferWriteIndex = FrmaeCounter % 2;
+	ColorBufferWriteIndex = FrameCounter % 2;
 }
 
 // Render the scene.
@@ -1752,7 +1865,7 @@ void dx12_framework::OnRender()
 	ImGui::SliderFloat("IndirectDiffuse Depth Weight Factor", &FilterIndirectDiffuseConstantCB.IndirectDiffuseWeightFactorDepth, 0.0f, 2.0f);            // Edit 1 float using a slider from 0.0f to 1.0f
 	ImGui::SliderFloat("IndirectDiffuse Normal Weight Factor", &FilterIndirectDiffuseConstantCB.IndirectDiffuseWeightFactorNormal, 0.0f, 20.0f);            // Edit 1 float using a slider from 0.0f to 1.0f
 
-
+	ImGui::End();
 
 	ImGui::Render();
 	ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), dx12_rhi->CommandList.Get());
@@ -2093,6 +2206,9 @@ void dx12_framework::FilterIndirectDiffusePass()
 
 	// first pass
 	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(FilterIndirectDiffusePingPong[WriteIndex]->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS));
+	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(FilterIndirectDiffusePingPongSH[WriteIndex]->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS));
+	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(FilterIndirectDiffusePingPongColor[WriteIndex]->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS));
+
 
 
 	RS_FilterIndirectDiffuse->Apply(dx12_rhi->CommandList.Get());
@@ -2100,8 +2216,16 @@ void dx12_framework::FilterIndirectDiffusePass()
 	RS_FilterIndirectDiffuse->SetTexture("InputTex", GIBuffer.get(), dx12_rhi->CommandList.Get());
 	RS_FilterIndirectDiffuse->SetTexture("DepthTex", DepthBuffer.get(), dx12_rhi->CommandList.Get());
 	RS_FilterIndirectDiffuse->SetTexture("GeoNormalTex", GeomNormalBuffer.get(), dx12_rhi->CommandList.Get());
+	RS_FilterIndirectDiffuse->SetTexture("InGIResultSHTex", GIBufferSH.get(), dx12_rhi->CommandList.Get());
+	RS_FilterIndirectDiffuse->SetTexture("InGIResultColorTex", GIBufferColor.get(), dx12_rhi->CommandList.Get());
+
+
 
 	RS_FilterIndirectDiffuse->SetUAV("OutputTex", FilterIndirectDiffusePingPong[0].get(), dx12_rhi->CommandList.Get());
+	RS_FilterIndirectDiffuse->SetUAV("OutGIResultSH", FilterIndirectDiffusePingPongSH[0].get(), dx12_rhi->CommandList.Get());
+	RS_FilterIndirectDiffuse->SetUAV("OutGIResultColor", FilterIndirectDiffusePingPongColor[0].get(), dx12_rhi->CommandList.Get());
+
+
 
 	FilterIndirectDiffuseConstantCB.Iteration = 0;
 	RS_FilterIndirectDiffuse->SetConstantValue("FilterIndirectDiffuseConstant", &FilterIndirectDiffuseConstantCB, dx12_rhi->CommandList.Get());
@@ -2109,6 +2233,8 @@ void dx12_framework::FilterIndirectDiffusePass()
 	dx12_rhi->CommandList->Dispatch(m_width / 32, m_height / 32, 1);
 
 	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(FilterIndirectDiffusePingPong[WriteIndex]->resource.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
+	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(FilterIndirectDiffusePingPongSH[WriteIndex]->resource.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
+	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(FilterIndirectDiffusePingPongColor[WriteIndex]->resource.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
 
 
 	for (int i = 1; i < 4; i++)
@@ -2117,6 +2243,8 @@ void dx12_framework::FilterIndirectDiffusePass()
 		ReadIndex = 1 - WriteIndex; // 0
 
 		dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(FilterIndirectDiffusePingPong[WriteIndex]->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS));
+		dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(FilterIndirectDiffusePingPongSH[WriteIndex]->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS));
+		dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(FilterIndirectDiffusePingPongColor[WriteIndex]->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS));
 
 
 		RS_FilterIndirectDiffuse->Apply(dx12_rhi->CommandList.Get());
@@ -2124,8 +2252,15 @@ void dx12_framework::FilterIndirectDiffusePass()
 		RS_FilterIndirectDiffuse->SetTexture("InputTex", FilterIndirectDiffusePingPong[ReadIndex].get(), dx12_rhi->CommandList.Get());
 		RS_FilterIndirectDiffuse->SetTexture("DepthTex", DepthBuffer.get(), dx12_rhi->CommandList.Get());
 		RS_FilterIndirectDiffuse->SetTexture("GeoNormalTex", GeomNormalBuffer.get(), dx12_rhi->CommandList.Get());
+		RS_FilterIndirectDiffuse->SetTexture("InGIResultSHTex", FilterIndirectDiffusePingPongSH[ReadIndex].get(), dx12_rhi->CommandList.Get());
+		RS_FilterIndirectDiffuse->SetTexture("InGIResultColorTex", FilterIndirectDiffusePingPongColor[ReadIndex].get(), dx12_rhi->CommandList.Get());
+
 
 		RS_FilterIndirectDiffuse->SetUAV("OutputTex", FilterIndirectDiffusePingPong[WriteIndex].get(), dx12_rhi->CommandList.Get());
+		RS_FilterIndirectDiffuse->SetUAV("OutGIResultSH", FilterIndirectDiffusePingPongSH[WriteIndex].get(), dx12_rhi->CommandList.Get());
+		RS_FilterIndirectDiffuse->SetUAV("OutGIResultColor", FilterIndirectDiffusePingPongColor[WriteIndex].get(), dx12_rhi->CommandList.Get());
+
+
 
 		FilterIndirectDiffuseConstantCB.Iteration = i;
 		RS_FilterIndirectDiffuse->SetConstantValue("FilterIndirectDiffuseConstant", &FilterIndirectDiffuseConstantCB, dx12_rhi->CommandList.Get());
@@ -2133,6 +2268,9 @@ void dx12_framework::FilterIndirectDiffusePass()
 		dx12_rhi->CommandList->Dispatch(m_width / 32, m_height / 32, 1);
 
 		dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(FilterIndirectDiffusePingPong[WriteIndex]->resource.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
+		dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(FilterIndirectDiffusePingPongSH[WriteIndex]->resource.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
+		dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(FilterIndirectDiffusePingPongColor[WriteIndex]->resource.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
+
 	}
 }
 
@@ -2233,12 +2371,17 @@ void dx12_framework::InitRaytracing()
 	PSO_RT_GI->AddHitGroup("HitGroup", "chs", "");
 
 	PSO_RT_GI->AddShader("rayGen", RTPipelineStateObject::RAYGEN);
-	PSO_RT_GI->BindUAV("rayGen", "gOutput", 0);
+	PSO_RT_GI->BindUAV("rayGen", "GIResultSH", 0);
+	PSO_RT_GI->BindUAV("rayGen", "GIResultColor", 1);
+
+
 	PSO_RT_GI->BindSRV("rayGen", "gRtScene", 0);
 	PSO_RT_GI->BindSRV("rayGen", "DepthTex", 1);
 	PSO_RT_GI->BindSRV("rayGen", "WorldNormalTex", 2);
 	PSO_RT_GI->BindCBV("rayGen", "ViewParameter", 0, sizeof(RTGIViewParam), 1);
 	PSO_RT_GI->BindSampler("rayGen", "samplerWrap", 0);
+	PSO_RT_GI->BindSRV("rayGen", "BlueNoiseTex", 7);
+
 
 	PSO_RT_GI->AddShader("miss", RTPipelineStateObject::MISS);
 
@@ -2369,14 +2512,21 @@ void dx12_framework::RaytraceReflectionPass()
 void dx12_framework::RaytraceGIPass()
 {
 	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(GIBuffer->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS));
+	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(GIBufferSH->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS));
+	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(GIBufferColor->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS));
 
 
 	PSO_RT_GI->BeginShaderTable();
 
 	PSO_RT_GI->SetUAV("rayGen", "gOutput", GIBuffer->GpuHandleUAV);
+	PSO_RT_GI->SetUAV("rayGen", "GIResultSH", GIBufferSH->GpuHandleUAV);
+	PSO_RT_GI->SetUAV("rayGen", "GIResultColor", GIBufferColor->GpuHandleUAV);
+
 	PSO_RT_GI->SetSRV("rayGen", "gRtScene", TLAS->GPUHandle);
 	PSO_RT_GI->SetSRV("rayGen", "DepthTex", DepthBuffer->GpuHandleSRV);
 	PSO_RT_GI->SetSRV("rayGen", "WorldNormalTex", GeomNormalBuffer->GpuHandleSRV);
+	PSO_RT_GI->SetSRV("rayGen", "BlueNoiseTex", BlueNoiseTex->GpuHandleSRV);
+
 	PSO_RT_GI->SetCBVValue("rayGen", "ViewParameter", &RTGIViewParam, sizeof(RTGIViewParamCB));
 	PSO_RT_GI->SetSampler("rayGen", "samplerWrap", samplerWrap.get());
 
@@ -2409,4 +2559,6 @@ void dx12_framework::RaytraceGIPass()
 	PSO_RT_GI->Apply(m_width, m_height);
 
 	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(GIBuffer->resource.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
+	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(GIBufferSH->resource.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
+	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(GIBufferColor->resource.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
 }

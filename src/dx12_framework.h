@@ -81,6 +81,8 @@ class dx12_framework : public DXSample
 		glm::vec4 ProjectionParams;
 		glm::vec4 LightDir;
 		glm::vec2 RandomOffset;
+		UINT32 FrameCounter;
+		UINT32 BlueNoiseOffsetStride = 1.0f;
 	};
 
 	struct CopyScaleOffsetCB
@@ -108,7 +110,7 @@ private:
 	
 	UINT m_frameCounter = 0;
 
-	UINT FrmaeCounter = 0;
+	UINT FrameCounter = 0;
 	
 	// Pipeline objects.
 	CD3DX12_VIEWPORT m_viewport;
@@ -133,6 +135,9 @@ private:
 	shared_ptr<Texture> ShadowBuffer;
 	shared_ptr<Texture> ReflectionBuffer;
 	shared_ptr<Texture> GIBuffer;
+
+	shared_ptr<Texture> GIBufferSH;
+	shared_ptr<Texture> GIBufferColor;
 
 
 
@@ -160,6 +165,10 @@ private:
 
 	unique_ptr<PipelineStateObject> RS_FilterIndirectDiffuse;
 	shared_ptr<Texture> FilterIndirectDiffusePingPong[2];
+
+	shared_ptr<Texture> FilterIndirectDiffusePingPongSH[2];
+	shared_ptr<Texture> FilterIndirectDiffusePingPongColor[2];
+
 
 
 	// test compute pass
@@ -249,6 +258,9 @@ private:
 	// imgui font texture
 	D3D12_CPU_DESCRIPTOR_HANDLE CpuHandleImguiFontTex;
 	D3D12_GPU_DESCRIPTOR_HANDLE GpuHandleImguiFontTex;
+
+	// blue noise texture
+	shared_ptr<Texture> BlueNoiseTex;
 public:
 
 	void InitRaytracing();
@@ -269,6 +281,8 @@ public:
 	void InitDrawMeshRS();
 
 	void InitImgui();
+
+	void InitBlueNoiseTexture();
 
 	void DrawMeshPass();
 

@@ -318,7 +318,7 @@ public:
 	void MakeRTV();
 	void MakeDSV();
 
-	void UploadSRCData(D3D12_SUBRESOURCE_DATA* SrcData);
+	void UploadSRCData3D(D3D12_SUBRESOURCE_DATA* SrcData);
 };
 
 class DescriptorHeap
@@ -497,6 +497,8 @@ public:
 
 	shared_ptr<Texture> CreateTexture2DFromResource(ComPtr<ID3D12Resource> InResource);
 	shared_ptr<Texture> CreateTexture2D(DXGI_FORMAT format, D3D12_RESOURCE_FLAGS resFlags, D3D12_RESOURCE_STATES initResState, int width, int height, int mipLevels);
+	shared_ptr<Texture> CreateTexture3D(DXGI_FORMAT format, D3D12_RESOURCE_FLAGS resFlags, D3D12_RESOURCE_STATES initResState, int width, int height, int depth, int mipLevels);
+
 	shared_ptr<Texture> CreateTextureFromFile(wstring fileName, bool isNormal);
 	shared_ptr<ConstantBuffer> CreateConstantBuffer(int Size, UINT NumView = 1);
 	shared_ptr<Sampler> CreateSampler(D3D12_SAMPLER_DESC& InSamplerDesc);
