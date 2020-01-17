@@ -21,7 +21,7 @@ cbuffer ViewParameter : register(b0)
     float4x4 InvViewMatrix;
     float4x4 ProjMatrix;
     float4 ProjectionParams;
-    float4 LightDir;
+    float4 LightDirAndIntensity;
     float2 RandomOffset;
     uint FrameCounter;
     uint BlueNoiseOffsetStride;
@@ -181,7 +181,8 @@ void rayGen
     }
     else
     {
-
+        float3 LightDir = LightDirAndIntensity.xyz;
+        float3 LightIntensity = LightDirAndIntensity.w;
         RayDesc shadowRay;
         shadowRay.Origin = payload.position + payload.normal *0.5;
         shadowRay.Direction = LightDir;
@@ -198,7 +199,7 @@ void rayGen
         if(shadowPayload.distance == 0)
         {
             // miss
-            float3 Irradiance = dot(LightDir.xyz, payload.normal) * Albedo;
+            float3 Irradiance = dot(LightDir.xyz, payload.normal) * LightIntensity  * Albedo;
             DiffuseLighting = Irradiance * cosTerm;
             sh_indirect = irradiance_to_SH(Irradiance, sampleDirWorld);
         }
@@ -208,7 +209,6 @@ void rayGen
             DiffuseLighting = float3(0, 0, 0);
         }
 
-        // DiffuseLighting = Albedo;
         // gOutput[launchIndex.xy] = float4(DiffuseLighting.xyz, 1);   
 
         GIResultSH[launchIndex.xy] = sh_indirect.shY;

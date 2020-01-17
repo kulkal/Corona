@@ -469,14 +469,14 @@ void dx12_framework::LoadAssets()
 	}
 
 	// TAA pingping buffer
-	ColorBuffer0 = dx12_rhi->CreateTexture2D(DXGI_FORMAT_R8G8B8A8_UNORM,
+	ColorBuffer0 = dx12_rhi->CreateTexture2D(DXGI_FORMAT_R16G16B16A16_FLOAT,
 		D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
 		D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, m_width, m_height, 1);
 	ColorBuffer0->MakeRTV();
 
 	NAME_D3D12_OBJECT(ColorBuffer0->resource);
 
-	ColorBuffer1 = dx12_rhi->CreateTexture2D(DXGI_FORMAT_R8G8B8A8_UNORM,
+	ColorBuffer1 = dx12_rhi->CreateTexture2D(DXGI_FORMAT_R16G16B16A16_FLOAT,
 		D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
 		D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, m_width, m_height, 1);
 	ColorBuffer1->MakeRTV();
@@ -519,7 +519,7 @@ void dx12_framework::LoadAssets()
 
 
 	// refleciton result
-	ReflectionBuffer = dx12_rhi->CreateTexture2D(DXGI_FORMAT_R8G8B8A8_UNORM,
+	ReflectionBuffer = dx12_rhi->CreateTexture2D(DXGI_FORMAT_R16G16B16A16_FLOAT,
 		D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
 		D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, m_width, m_height, 1);
 
@@ -1588,7 +1588,7 @@ void dx12_framework::LightingPass()
 
 
 	LightingParam Param;
-	Param.LightDir = glm::vec4(LightDir*LightIntensity, 0);
+	Param.LightDir = glm::vec4(glm::normalize(LightDir), LightIntensity);
 	
 	Param.RTSize.x = m_width;
 	Param.RTSize.y = m_height;
@@ -1777,7 +1777,7 @@ void dx12_framework::OnUpdate()
 	RTGIViewParam.ProjectionParams.y = Near / (Near - Far);
 	RTGIViewParam.ProjectionParams.z = Near;
 	RTGIViewParam.ProjectionParams.w = Far;
-	RTGIViewParam.LightDir = glm::vec4(LightDir, 0);
+	RTGIViewParam.LightDir = glm::vec4(glm::normalize(LightDir), LightIntensity);
 	float timeElapsed = m_timer.GetTotalSeconds();
 	timeElapsed *= 0.01f;
 	RTGIViewParam.RandomOffset = glm::vec2(timeElapsed, timeElapsed);
@@ -1862,6 +1862,8 @@ void dx12_framework::OnRender()
 	ImGui::Checkbox("Enable TemporalAA", &bEnableTAA);      // Edit bools storing our window open/close state
 
 	ImGui::SliderFloat3("Light direction", &LightDir.x, -1.0f, 1.0f);
+	ImGui::SliderFloat("Light Brightness", &LightIntensity, 0.0f, 20.0f);
+
 	ImGui::SliderFloat("IndirectDiffuse Depth Weight Factor", &FilterIndirectDiffuseConstantCB.IndirectDiffuseWeightFactorDepth, 0.0f, 2.0f);            // Edit 1 float using a slider from 0.0f to 1.0f
 	ImGui::SliderFloat("IndirectDiffuse Normal Weight Factor", &FilterIndirectDiffuseConstantCB.IndirectDiffuseWeightFactorNormal, 0.0f, 20.0f);            // Edit 1 float using a slider from 0.0f to 1.0f
 

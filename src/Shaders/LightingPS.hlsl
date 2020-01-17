@@ -29,7 +29,7 @@ SamplerState sampleWrap : register(s0);
 
 cbuffer LightingParam : register(b0)
 {
-    float4 LightDir;
+    float4 LightDirAndIntensity;
     float2 RTSize;
     float TAABlendFactor;
     float pad;
@@ -71,14 +71,16 @@ float4 PSMain(PSInput input) : SV_TARGET
     float2 PixelPos = input.uv * RTSize;
 
 
-    float3 Albedo = AlbedoTex[PixelPos];//.Sample(sampleWrap, input.uv);
-    float3 WorldNormal = NormalTex[PixelPos];//.Sample(sampleWrap, input.uv);
-    float3 Shadow = ShadowTex[PixelPos];//.Sample(sampleWrap, input.uv);
+    float3 Albedo = AlbedoTex[PixelPos];
+    float3 WorldNormal = NormalTex[PixelPos];
+    float3 Shadow = ShadowTex[PixelPos];
 
-    float2 Velocity = VelocityTex[PixelPos];//.Sample(sampleWrap, input.uv).xy;
+    float2 Velocity = VelocityTex[PixelPos];
 
+    float3 LightDir = LightDirAndIntensity.xyz;
+    float LightIntensity = LightDirAndIntensity.w;
 	
-    float3 DiffuseLighting = dot(LightDir.xyz, WorldNormal)* Albedo * Shadow;
+    float3 DiffuseLighting = dot(LightDir.xyz, WorldNormal) * LightIntensity * Albedo * Shadow;
 
     SH sh_indirect;
     sh_indirect.shY = GIResultSHTex[PixelPos];
