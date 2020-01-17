@@ -181,9 +181,13 @@ private:
 	// dx sample mesh
 	shared_ptr<Mesh> mesh;
 
+	
+
+	shared_ptr<Scene> Sponza;
+
 	// fbx mesh
-	vector<shared_ptr<Mesh>> meshes;
-	vector<shared_ptr<Material>> Materials;
+	//vector<shared_ptr<Mesh>> meshes;
+	//vector<shared_ptr<Material>> Materials;
 
 	StepTimer m_timer;
 	SimpleCamera m_camera;
@@ -272,7 +276,7 @@ public:
 
 	void LoadMesh();
 
-	void LoadFbx();
+	shared_ptr<Scene> LoadFbx(string fileName);
 
 	void InitComputeRS();
 

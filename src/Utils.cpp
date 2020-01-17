@@ -11,8 +11,8 @@ std::wstring AnsiToWString(const char* ansiString)
 std::wstring GetDirectoryFromFilePath(const WCHAR* filePath_)
 {
 	std::wstring filePath(filePath_);
-	size_t idx = filePath.rfind(L'\\');
-	if (idx != std::wstring::npos)
+	size_t idx = filePath.rfind(L'/');
+	if (idx != std::wstring::npos )
 		return filePath.substr(0, idx + 1);
 	else
 		return std::wstring(L"");

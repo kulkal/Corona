@@ -568,7 +568,7 @@ void dx12_framework::LoadAssets()
 	DepthBuffer->MakeDSV();
 	NAME_D3D12_OBJECT(DepthBuffer->resource);
 
-	LoadFbx();
+	Sponza = LoadFbx("Sponza/Sponza.fbx");
 
 	// Describe and create a sampler.
 	D3D12_SAMPLER_DESC samplerDesc = {};
@@ -657,12 +657,19 @@ void dx12_framework::LoadMesh()
 	//}
 	//mesh->Draws[mesh->Draws.size() - 1].VertexCount = mesh->Vb->numVertices - mesh->Draws[mesh->Draws.size() - 1].VertexBase;
 }
-
-void dx12_framework::LoadFbx()
+#include <codecvt>
+shared_ptr<Scene> dx12_framework::LoadFbx(string fileName)
 {
+	Scene* scene = new Scene;
+
 	Assimp::Importer importer;
-	const aiScene* scene = importer.ReadFile("Sponza/Sponza.fbx", 0);
-	wstring dir = L"Sponza/";
+	const aiScene* assimpScene = importer.ReadFile(fileName, 0);
+	
+	std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> converter;
+	wstring wide = converter.from_bytes(fileName);
+
+	wstring dir = GetDirectoryFromFilePath(wide.c_str());
+	//wstring dir = L"Sponza/";
 
 	UINT flags = aiProcess_CalcTangentSpace |
 		aiProcess_Triangulate |
@@ -675,13 +682,13 @@ void dx12_framework::LoadFbx()
 	/*if (settings.MergeMeshes)
 		flags |= aiProcess_PreTransformVertices | aiProcess_OptimizeMeshes;*/
 
-	scene = importer.ApplyPostProcessing(flags);
+	assimpScene = importer.ApplyPostProcessing(flags);
 
-	const int numMaterials = scene->mNumMaterials;
-	Materials.reserve(numMaterials);
+	const int numMaterials = assimpScene->mNumMaterials;
+	scene->Materials.reserve(numMaterials);
 	for (int i = 0; i < numMaterials; ++i)
 	{
-		const aiMaterial& aiMat = *scene->mMaterials[i];
+		const aiMaterial& aiMat = *assimpScene->mMaterials[i];
 		Material* mat = new Material;
 
 		wstring wDiffuseTex;
@@ -708,7 +715,7 @@ void dx12_framework::LoadFbx()
 			mat->Normal = normalTex;
 		}
 		
-		Materials.push_back(shared_ptr<Material>(mat));
+		scene->Materials.push_back(shared_ptr<Material>(mat));
 
 
 	}
@@ -720,19 +727,19 @@ void dx12_framework::LoadFbx()
 		glm::vec2 UV;
 		glm::vec3 Tangent;
 	};
-	const UINT numMeshes = scene->mNumMeshes;
+	const UINT numMeshes = assimpScene->mNumMeshes;
 
 	UINT totalNumVert = 0;
 	for (UINT i = 0; i < numMeshes; ++i)
 	{
-		aiMesh* asMesh = scene->mMeshes[i];
+		aiMesh* asMesh = assimpScene->mMeshes[i];
 
 		totalNumVert += asMesh->mNumVertices;
 	}
 
 	for (UINT i = 0; i < numMeshes; ++i)
 	{
-		aiMesh* asMesh = scene->mMeshes[i];
+		aiMesh* asMesh = assimpScene->mMeshes[i];
 
 		Mesh* mesh = new Mesh;
 
@@ -808,32 +815,35 @@ void dx12_framework::LoadFbx()
 		dc.IndexStart = 0;
 		dc.VertexBase = 0;
 		dc.VertexCount = vertices.size();
-		dc.mat = Materials[asMesh->mMaterialIndex];
+		dc.mat = scene->Materials[asMesh->mMaterialIndex];
 		
 		mesh->Draws.push_back(dc);
 
-		meshes.push_back(shared_ptr<Mesh>(mesh));
+		scene->meshes.push_back(shared_ptr<Mesh>(mesh));
 	}
 
+	shared_ptr<Scene> scenePtr = shared_ptr<Scene>(scene);
 
-	mesh = shared_ptr<Mesh>(new Mesh);
-	const vec3 vertices[] =
-	{
-		vec3(0,          1,  0) * 100.f,
-		vec3(0.866f,  -0.5f, 0) * 100.f,
-		vec3(-0.866f, -0.5f, 0) * 100.f,
-	};
+	return scenePtr;
 
-	mesh->Vb = dx12_rhi->CreateVertexBuffer(sizeof(vec3) * 3, sizeof(vec3), (void*)vertices);
-	mesh->VertexStride = sizeof(vec3);
-	mesh->IndexFormat = DXGI_FORMAT_R16_UINT;
+	//mesh = shared_ptr<Mesh>(new Mesh);
+	//const vec3 vertices[] =
+	//{
+	//	vec3(0,          1,  0) * 100.f,
+	//	vec3(0.866f,  -0.5f, 0) * 100.f,
+	//	vec3(-0.866f, -0.5f, 0) * 100.f,
+	//};
 
-	const UINT16 indices[] =
-	{
-		0, 1, 2
-	};
+	//mesh->Vb = dx12_rhi->CreateVertexBuffer(sizeof(vec3) * 3, sizeof(vec3), (void*)vertices);
+	//mesh->VertexStride = sizeof(vec3);
+	//mesh->IndexFormat = DXGI_FORMAT_R16_UINT;
 
-	mesh->Ib = dx12_rhi->CreateIndexBuffer(mesh->IndexFormat, sizeof(UINT16) * 3 * 1, (void*)indices);
+	//const UINT16 indices[] =
+	//{
+	//	0, 1, 2
+	//};
+
+	//mesh->Ib = dx12_rhi->CreateIndexBuffer(mesh->IndexFormat, sizeof(UINT16) * 3 * 1, (void*)indices);
 }
 
 void dx12_framework::InitComputeRS()
@@ -1326,7 +1336,6 @@ void dx12_framework::InitLightingPass()
 	RS_Lighting->BindTexture("ShadowTex", 2, 1);
 	RS_Lighting->BindTexture("VelocityTex", 3, 1);
 	RS_Lighting->BindTexture("DepthTex", 4, 1);
-	//RS_Lighting->BindTexture("IndirectDiffuseTex", 5, 1);
 	RS_Lighting->BindTexture("GIResultSHTex", 5, 1);
 	RS_Lighting->BindTexture("GIResultColorTex", 6, 1);
 
@@ -1402,7 +1411,7 @@ void dx12_framework::InitTemporalAAPass()
 	psoDesc.SampleMask = UINT_MAX;
 	psoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
 	psoDesc.NumRenderTargets = 1;
-	psoDesc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
+	psoDesc.RTVFormats[0] = DXGI_FORMAT_R16G16B16A16_FLOAT;
 	//psoDescMesh.DSVFormat = DXGI_FORMAT_D32_FLOAT;
 	psoDesc.SampleDesc.Count = 1;
 
@@ -1992,50 +2001,23 @@ void dx12_framework::DrawMeshPass()
 		dx12_rhi->CommandList->OMSetRenderTargets(RS_Mesh->graphicsPSODesc.NumRenderTargets, Rendertargets, FALSE, &DepthBuffer->CpuHandleDSV);
 
 		RS_Mesh->Apply(dx12_rhi->CommandList.Get());
-		//RS_Mesh->ps->SetSampler("samplerWrap", samplerWrap.get(), dx12_rhi->CommandList.Get());
 		RS_Mesh->SetSampler("samplerWrap", samplerWrap.get(), dx12_rhi->CommandList.Get());
 
 
 		dx12_rhi->CommandList->RSSetViewports(1, &m_viewport);
 		dx12_rhi->CommandList->RSSetScissorRects(1, &m_scissorRect);
 		dx12_rhi->CommandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-		//dx12_rhi->CommandList->IASetIndexBuffer(&mesh->Ib->view);
-		//dx12_rhi->CommandList->IASetVertexBuffers(0, 1, &mesh->Vb->view);
 
 		RS_Mesh->currentDrawCallIndex = 0;
-		/*for (int i = 0; i < mesh->Draws.size(); i++)
-		{
-			RS_Mesh->vs->currentDrawCallIndex = i;
-			RS_Mesh->ps->currentDrawCallIndex = i;
-
-			Mesh::DrawCall& drawcall = mesh->Draws[i];
-			ObjConstantBuffer objCB;
-			XMStoreFloat4x4(&objCB.WorldMatrix, XMMatrixRotationY(i * 0));
-			objCB.ViewDir.x = m_camera.m_lookDirection.x;
-			objCB.ViewDir.y = m_camera.m_lookDirection.y;
-			objCB.ViewDir.z = m_camera.m_lookDirection.z;
-
-			RS_Mesh->vs->SetConstantValue("ObjParameter", (void*)&objCB.WorldMatrix, dx12_rhi->CommandList.Get(), nullptr);
-
-			Texture* diffuseTex = mesh->Textures[drawcall.DiffuseTextureIndex].get();
-			RS_Mesh->ps->SetTexture("diffuseMap", diffuseTex, dx12_rhi->CommandList.Get(), nullptr);
-
-			Texture* normalTex = mesh->Textures[drawcall.NormalTextureIndex].get();
-			RS_Mesh->ps->SetTexture("normalMap", normalTex, dx12_rhi->CommandList.Get(), nullptr);
-
-			dx12_rhi->CommandList->DrawIndexedInstanced(drawcall.IndexCount, 1, drawcall.IndexStart, drawcall.VertexBase, 0);
-		}*/
-
 		
-
 		int nMesh = 0;
 
-		for (auto& mesh : meshes)
+		shared_ptr<Scene> scene = Sponza;
+		for (auto& mesh : scene->meshes)
 		{
 			dx12_rhi->CommandList->IASetIndexBuffer(&mesh->Ib->view);
 			dx12_rhi->CommandList->IASetVertexBuffers(0, 1, &mesh->Vb->view);
-			/*if (nMesh > 1) break;;
-			nMesh++;*/
+			
 			for (int i = 0; i < mesh->Draws.size(); i++)
 			{
 				Mesh::DrawCall& drawcall = mesh->Draws[i];
@@ -2043,10 +2025,7 @@ void dx12_framework::DrawMeshPass()
 				int sizea = sizeof(ObjConstantBuffer);
 
 				objCB.ViewProjectionMatrix = glm::transpose(ViewProjMat);
-				//objCB.InvViewProjectionMatrix = InvViewProjMat;
-				//objCB.UnjitteredViewProjectionMatrix = UnjitteredViewProjMat;
 				objCB.PrevViewProjectionMatrix = glm::transpose(PrevViewProjMat);
-
 
 				glm::mat4 m; // Identity matrix
 				objCB.WorldMatrix = m;
@@ -2064,14 +2043,14 @@ void dx12_framework::DrawMeshPass()
 
 				Texture* diffuseTex = drawcall.mat->Diffuse.get();
 				if (diffuseTex == nullptr)
-					diffuseTex = Materials[0]->Diffuse.get();
+					diffuseTex = scene->Materials[0]->Diffuse.get();
 				if(diffuseTex)
 					RS_Mesh->SetTexture("diffuseMap", diffuseTex, dx12_rhi->CommandList.Get());
 
 
 				Texture* normalTex = drawcall.mat->Normal.get();
 				if (normalTex == nullptr)
-					normalTex = Materials[0]->Normal.get();
+					normalTex = scene->Materials[0]->Normal.get();
 				if(normalTex)
 					RS_Mesh->SetTexture("normalMap", normalTex, dx12_rhi->CommandList.Get());
 
@@ -2215,7 +2194,7 @@ void dx12_framework::FilterIndirectDiffusePass()
 
 	RS_FilterIndirectDiffuse->Apply(dx12_rhi->CommandList.Get());
 
-	RS_FilterIndirectDiffuse->SetTexture("InputTex", GIBuffer.get(), dx12_rhi->CommandList.Get());
+	//RS_FilterIndirectDiffuse->SetTexture("InputTex", GIBuffer.get(), dx12_rhi->CommandList.Get());
 	RS_FilterIndirectDiffuse->SetTexture("DepthTex", DepthBuffer.get(), dx12_rhi->CommandList.Get());
 	RS_FilterIndirectDiffuse->SetTexture("GeoNormalTex", GeomNormalBuffer.get(), dx12_rhi->CommandList.Get());
 	RS_FilterIndirectDiffuse->SetTexture("InGIResultSHTex", GIBufferSH.get(), dx12_rhi->CommandList.Get());
@@ -2223,7 +2202,7 @@ void dx12_framework::FilterIndirectDiffusePass()
 
 
 
-	RS_FilterIndirectDiffuse->SetUAV("OutputTex", FilterIndirectDiffusePingPong[0].get(), dx12_rhi->CommandList.Get());
+	//RS_FilterIndirectDiffuse->SetUAV("OutputTex", FilterIndirectDiffusePingPong[0].get(), dx12_rhi->CommandList.Get());
 	RS_FilterIndirectDiffuse->SetUAV("OutGIResultSH", FilterIndirectDiffusePingPongSH[0].get(), dx12_rhi->CommandList.Get());
 	RS_FilterIndirectDiffuse->SetUAV("OutGIResultColor", FilterIndirectDiffusePingPongColor[0].get(), dx12_rhi->CommandList.Get());
 
@@ -2251,14 +2230,14 @@ void dx12_framework::FilterIndirectDiffusePass()
 
 		RS_FilterIndirectDiffuse->Apply(dx12_rhi->CommandList.Get());
 
-		RS_FilterIndirectDiffuse->SetTexture("InputTex", FilterIndirectDiffusePingPong[ReadIndex].get(), dx12_rhi->CommandList.Get());
+		//RS_FilterIndirectDiffuse->SetTexture("InputTex", FilterIndirectDiffusePingPong[ReadIndex].get(), dx12_rhi->CommandList.Get());
 		RS_FilterIndirectDiffuse->SetTexture("DepthTex", DepthBuffer.get(), dx12_rhi->CommandList.Get());
 		RS_FilterIndirectDiffuse->SetTexture("GeoNormalTex", GeomNormalBuffer.get(), dx12_rhi->CommandList.Get());
 		RS_FilterIndirectDiffuse->SetTexture("InGIResultSHTex", FilterIndirectDiffusePingPongSH[ReadIndex].get(), dx12_rhi->CommandList.Get());
 		RS_FilterIndirectDiffuse->SetTexture("InGIResultColorTex", FilterIndirectDiffusePingPongColor[ReadIndex].get(), dx12_rhi->CommandList.Get());
 
 
-		RS_FilterIndirectDiffuse->SetUAV("OutputTex", FilterIndirectDiffusePingPong[WriteIndex].get(), dx12_rhi->CommandList.Get());
+		//RS_FilterIndirectDiffuse->SetUAV("OutputTex", FilterIndirectDiffusePingPong[WriteIndex].get(), dx12_rhi->CommandList.Get());
 		RS_FilterIndirectDiffuse->SetUAV("OutGIResultSH", FilterIndirectDiffusePingPongSH[WriteIndex].get(), dx12_rhi->CommandList.Get());
 		RS_FilterIndirectDiffuse->SetUAV("OutGIResultColor", FilterIndirectDiffusePingPongColor[WriteIndex].get(), dx12_rhi->CommandList.Get());
 
@@ -2279,10 +2258,11 @@ void dx12_framework::FilterIndirectDiffusePass()
 
 void dx12_framework::InitRaytracing()
 {
+	shared_ptr<Scene> scene = Sponza;
 	// init raytracing
-	vecBLAS.reserve(meshes.size());
+	vecBLAS.reserve(scene->meshes.size());
 	int i = 0;
-	for (auto& mesh : meshes)
+	for (auto& mesh : scene->meshes)
 	{
 		shared_ptr<RTAS> blas = mesh->CreateBLAS();
 		if (blas == nullptr)
@@ -2306,7 +2286,7 @@ void dx12_framework::InitRaytracing()
 	PSO_RT_SHADOW = unique_ptr<RTPipelineStateObject>(new RTPipelineStateObject);
 	
 
-	PSO_RT_SHADOW->NumInstance = meshes.size(); // important for cbv allocation & shadertable size.
+	PSO_RT_SHADOW->NumInstance = scene->meshes.size(); // important for cbv allocation & shadertable size.
 
 	// new interface
 	PSO_RT_SHADOW->AddHitGroup("HitGroup", "chs", "");
@@ -2338,7 +2318,7 @@ void dx12_framework::InitRaytracing()
 	// create reflection rtpso
 
 	PSO_RT_REFLECTION = unique_ptr<RTPipelineStateObject>(new RTPipelineStateObject);
-	PSO_RT_REFLECTION->NumInstance = meshes.size();
+	PSO_RT_REFLECTION->NumInstance = scene->meshes.size();
 
 	PSO_RT_REFLECTION->AddHitGroup("HitGroup", "chs", "");
 
@@ -2368,7 +2348,7 @@ void dx12_framework::InitRaytracing()
 	// gi rtpso
 
 	PSO_RT_GI = unique_ptr<RTPipelineStateObject>(new RTPipelineStateObject);
-	PSO_RT_GI->NumInstance = meshes.size();
+	PSO_RT_GI->NumInstance = scene->meshes.size();
 
 	PSO_RT_GI->AddHitGroup("HitGroup", "chs", "");
 
@@ -2412,7 +2392,7 @@ void dx12_framework::InitRaytracing()
 	uint8_t* pData;
 	InstancePropertyBuffer->resource->Map(0, nullptr, (void**)&pData);
 
-	for (auto& m : meshes)
+	for (auto& m : scene->meshes)
 	{
 		glm::mat4x4 identityMat;
 		memcpy(pData, &identityMat, sizeof(glm::mat4x4));
@@ -2441,10 +2421,11 @@ void dx12_framework::RaytraceShadowPass()
 {
 	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(ShadowBuffer->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS));
 
-
 	PSO_RT_SHADOW->BeginShaderTable();
 
-	for (int i = 0; i < meshes.size(); i++)
+	shared_ptr<Scene> scene = Sponza;
+
+	for (int i = 0; i < scene->meshes.size(); i++)
 	{
 		PSO_RT_SHADOW->SetHitProgram("chs", i);
 	}
@@ -2482,17 +2463,18 @@ void dx12_framework::RaytraceReflectionPass()
 	PSO_RT_REFLECTION->SetCBVValue("rayGen", "ViewParameter", &RTReflectionViewParam, sizeof(RTReflectionViewParamCB));
 	PSO_RT_REFLECTION->SetSampler("rayGen", "samplerWrap", samplerWrap.get());
 
+	shared_ptr<Scene> scene = Sponza;
 
-	for (int i = 0; i < meshes.size(); i++)
+	for (int i = 0; i < scene->meshes.size(); i++)
 	{
-		auto& mesh = meshes[i];
+		auto& mesh = scene->meshes[i];
 
 		PSO_RT_REFLECTION->SetHitProgram("chs", i);
 
 		PSO_RT_REFLECTION->ResetHitProgramBinding("chs", i, 2);
 		Texture* diffuseTex = mesh->Draws[0].mat->Diffuse.get();
 		if (diffuseTex == nullptr)
-			diffuseTex = Materials[0]->Diffuse.get();
+			diffuseTex = scene->Materials[0]->Diffuse.get();
 		
 		PSO_RT_REFLECTION->AddHitProgramDescriptor("chs", mesh->Vb->GpuHandleSRV, i);
 		PSO_RT_REFLECTION->AddHitProgramDescriptor("chs", mesh->Ib->GpuHandleSRV, i);
@@ -2532,17 +2514,18 @@ void dx12_framework::RaytraceGIPass()
 	PSO_RT_GI->SetCBVValue("rayGen", "ViewParameter", &RTGIViewParam, sizeof(RTGIViewParamCB));
 	PSO_RT_GI->SetSampler("rayGen", "samplerWrap", samplerWrap.get());
 
+	shared_ptr<Scene> scene = Sponza;
 
-	for (int i = 0; i < meshes.size(); i++)
+	for (int i = 0; i < scene->meshes.size(); i++)
 	{
-		auto& mesh = meshes[i];
+		auto& mesh = scene->meshes[i];
 
 		PSO_RT_GI->SetHitProgram("chs", i);
 
 		PSO_RT_GI->ResetHitProgramBinding("chs", i, 2);
 		Texture* diffuseTex = mesh->Draws[0].mat->Diffuse.get();
 		if (diffuseTex == nullptr)
-			diffuseTex = Materials[0]->Diffuse.get();
+			diffuseTex = scene->Materials[0]->Diffuse.get();
 
 		PSO_RT_GI->AddHitProgramDescriptor("chs", mesh->Vb->GpuHandleSRV, i);
 		PSO_RT_GI->AddHitProgramDescriptor("chs", mesh->Ib->GpuHandleSRV, i);

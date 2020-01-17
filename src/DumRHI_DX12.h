@@ -447,6 +447,14 @@ public:
 	shared_ptr<RTAS> CreateBLASArray();
 };
 
+class Scene
+{
+public:
+	vector<shared_ptr<Mesh>> meshes;
+	vector<shared_ptr<Material>> Materials;
+public:
+};
+
 class DumRHI_DX12
 {
 public:
