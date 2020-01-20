@@ -39,6 +39,8 @@ This project is for dx12 & dxr learning. I am trying to test best practice imple
 	* [Q2 RT GTC presentation from Alexey Pantellev](https://developer.nvidia.com/gtc/2019/video/S91046/video)
 	* [Q2 RT GDC presentation from Alexey Pantellev](https://www.youtube.com/watch?v=FewqoJjHR0A)
 	* [MS RTAO SFGV denoiser](https://github.com/microsoft/DirectX-Graphics-Samples/tree/master/Samples/Desktop/D3D12Raytracing/src/D3D12RaytracingRealTimeDenoisedAmbientOcclusion)
+* fbx file
+	* [https://github.com/derkreature/IBLBaker](https://github.com/derkreature/IBLBaker)
 
 ## Fun bug story
 * Shader table should be ring buffer if it changes!.

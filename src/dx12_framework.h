@@ -185,6 +185,11 @@ private:
 
 	shared_ptr<Scene> Sponza;
 
+	shared_ptr<Scene> Buddha;
+
+	shared_ptr<Scene> ShaderBall;
+
+
 	// fbx mesh
 	//vector<shared_ptr<Mesh>> meshes;
 	//vector<shared_ptr<Material>> Materials;
@@ -265,6 +270,9 @@ private:
 
 	// blue noise texture
 	shared_ptr<Texture> BlueNoiseTex;
+	shared_ptr<Texture> DefaultWhiteTex;
+	shared_ptr<Texture> DefaultNormalTex;
+
 public:
 
 	void InitRaytracing();
@@ -276,7 +284,7 @@ public:
 
 	void LoadMesh();
 
-	shared_ptr<Scene> LoadFbx(string fileName);
+	shared_ptr<Scene> LoadModel(string fileName);
 
 	void InitComputeRS();
 
@@ -287,6 +295,8 @@ public:
 	void InitImgui();
 
 	void InitBlueNoiseTexture();
+
+	void DrawScene(shared_ptr<Scene> scene);
 
 	void DrawMeshPass();
 

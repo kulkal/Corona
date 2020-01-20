@@ -568,7 +568,23 @@ void dx12_framework::LoadAssets()
 	DepthBuffer->MakeDSV();
 	NAME_D3D12_OBJECT(DepthBuffer->resource);
 
-	Sponza = LoadFbx("Sponza/Sponza.fbx");
+	DefaultWhiteTex = dx12_rhi->CreateTextureFromFile(L"default/default_white.png", false);
+	DefaultNormalTex = dx12_rhi->CreateTextureFromFile(L"default/default_normal.png", true);
+
+
+	Sponza = LoadModel("Sponza/Sponza.fbx");
+
+	ShaderBall = LoadModel("shaderball/shaderBall.fbx");
+
+	glm::mat4x4 scaleMat = glm::scale(vec3(2.5, 2.5, 2.5));
+	glm::mat4x4 translatemat = glm::translate(glm::vec3(-150, 20, 0));
+	ShaderBall->SetTransform(scaleMat* translatemat );
+
+	
+	//Buddha = LoadModel("buddha/buddha.obj");
+
+	/*glm::mat4x4 buddhaTM = glm::scale(vec3(100, 100, 100));
+	Buddha->SetTransform(buddhaTM);*/
 
 	// Describe and create a sampler.
 	D3D12_SAMPLER_DESC samplerDesc = {};
@@ -658,7 +674,7 @@ void dx12_framework::LoadMesh()
 	//mesh->Draws[mesh->Draws.size() - 1].VertexCount = mesh->Vb->numVertices - mesh->Draws[mesh->Draws.size() - 1].VertexBase;
 }
 #include <codecvt>
-shared_ptr<Scene> dx12_framework::LoadFbx(string fileName)
+shared_ptr<Scene> dx12_framework::LoadModel(string fileName)
 {
 	Scene* scene = new Scene;
 
@@ -679,8 +695,7 @@ shared_ptr<Scene> dx12_framework::LoadFbx(string fileName)
 		aiProcess_FlipUVs |
 		aiProcess_FlipWindingOrder;
 
-	/*if (settings.MergeMeshes)
-		flags |= aiProcess_PreTransformVertices | aiProcess_OptimizeMeshes;*/
+		flags |= aiProcess_PreTransformVertices /*| aiProcess_OptimizeMeshes*/;
 
 	assimpScene = importer.ApplyPostProcessing(flags);
 
@@ -701,7 +716,10 @@ shared_ptr<Scene> dx12_framework::LoadFbx(string fileName)
 		if (wDiffuseTex.length() != 0)
 		{
 			shared_ptr<Texture> diffuseTex = dx12_rhi->CreateTextureFromFile(dir + wDiffuseTex, false);
-			mat->Diffuse = diffuseTex;
+			if (diffuseTex)
+				mat->Diffuse = diffuseTex;
+			else
+				mat->Diffuse = DefaultWhiteTex;
 		}
 
 
@@ -712,7 +730,10 @@ shared_ptr<Scene> dx12_framework::LoadFbx(string fileName)
 		if (wNormalTex.length() != 0)
 		{
 			shared_ptr<Texture> normalTex = dx12_rhi->CreateTextureFromFile(dir + wNormalTex, true);
-			mat->Normal = normalTex;
+			if (normalTex)
+				mat->Normal = normalTex;
+			else
+				mat->Normal = DefaultNormalTex;
 		}
 		
 		scene->Materials.push_back(shared_ptr<Material>(mat));
@@ -1964,6 +1985,58 @@ struct ParallelDrawTaskSet : enki::ITaskSet
 	}
 };
 
+void dx12_framework::DrawScene(shared_ptr<Scene> scene)
+{
+	for (auto& mesh : scene->meshes)
+	{
+		dx12_rhi->CommandList->IASetIndexBuffer(&mesh->Ib->view);
+		dx12_rhi->CommandList->IASetVertexBuffers(0, 1, &mesh->Vb->view);
+
+		for (int i = 0; i < mesh->Draws.size(); i++)
+		{
+			Mesh::DrawCall& drawcall = mesh->Draws[i];
+			ObjConstantBuffer objCB;
+			int sizea = sizeof(ObjConstantBuffer);
+
+			objCB.ViewProjectionMatrix = glm::transpose(ViewProjMat);
+			objCB.PrevViewProjectionMatrix = glm::transpose(PrevViewProjMat);
+
+			//glm::mat4 m; // Identity matrix
+			objCB.WorldMatrix = glm::transpose(mesh->transform);
+			objCB.ViewDir.x = m_camera.m_lookDirection.x;
+			objCB.ViewDir.y = m_camera.m_lookDirection.y;
+			objCB.ViewDir.z = m_camera.m_lookDirection.z;
+
+			objCB.RTSize.x = m_width;
+			objCB.RTSize.y = m_height;
+
+			objCB.JitterOffset = JitterOffset;
+
+			RS_Mesh->SetConstantValue("ObjParameter", (void*)&objCB, dx12_rhi->CommandList.Get());
+
+
+			Texture* diffuseTex = drawcall.mat->Diffuse.get();
+			/*if (diffuseTex == nullptr)
+				diffuseTex = scene->Materials[0]->Diffuse.get();*/
+			if (diffuseTex)
+				RS_Mesh->SetTexture("diffuseMap", diffuseTex, dx12_rhi->CommandList.Get());
+
+
+			Texture* normalTex = drawcall.mat->Normal.get();
+			/*if (normalTex == nullptr)
+				normalTex = scene->Materials[0]->Normal.get();*/
+			if (normalTex)
+				RS_Mesh->SetTexture("normalMap", normalTex, dx12_rhi->CommandList.Get());
+
+
+			dx12_rhi->CommandList->DrawIndexedInstanced(drawcall.IndexCount, 1, drawcall.IndexStart, drawcall.VertexBase, 0);
+
+
+			RS_Mesh->currentDrawCallIndex++;
+		}
+	}
+}
+
 void dx12_framework::DrawMeshPass()
 {
 	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(AlbedoBuffer->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET));
@@ -2012,55 +2085,58 @@ void dx12_framework::DrawMeshPass()
 		
 		int nMesh = 0;
 
-		shared_ptr<Scene> scene = Sponza;
-		for (auto& mesh : scene->meshes)
-		{
-			dx12_rhi->CommandList->IASetIndexBuffer(&mesh->Ib->view);
-			dx12_rhi->CommandList->IASetVertexBuffers(0, 1, &mesh->Vb->view);
-			
-			for (int i = 0; i < mesh->Draws.size(); i++)
-			{
-				Mesh::DrawCall& drawcall = mesh->Draws[i];
-				ObjConstantBuffer objCB;
-				int sizea = sizeof(ObjConstantBuffer);
+		//shared_ptr<Scene> scene = Sponza;
+		//for (auto& mesh : scene->meshes)
+		//{
+		//	dx12_rhi->CommandList->IASetIndexBuffer(&mesh->Ib->view);
+		//	dx12_rhi->CommandList->IASetVertexBuffers(0, 1, &mesh->Vb->view);
+		//	
+		//	for (int i = 0; i < mesh->Draws.size(); i++)
+		//	{
+		//		Mesh::DrawCall& drawcall = mesh->Draws[i];
+		//		ObjConstantBuffer objCB;
+		//		int sizea = sizeof(ObjConstantBuffer);
 
-				objCB.ViewProjectionMatrix = glm::transpose(ViewProjMat);
-				objCB.PrevViewProjectionMatrix = glm::transpose(PrevViewProjMat);
+		//		objCB.ViewProjectionMatrix = glm::transpose(ViewProjMat);
+		//		objCB.PrevViewProjectionMatrix = glm::transpose(PrevViewProjMat);
 
-				glm::mat4 m; // Identity matrix
-				objCB.WorldMatrix = m;
-				objCB.ViewDir.x = m_camera.m_lookDirection.x;
-				objCB.ViewDir.y = m_camera.m_lookDirection.y;
-				objCB.ViewDir.z = m_camera.m_lookDirection.z;
+		//		glm::mat4 m; // Identity matrix
+		//		objCB.WorldMatrix = m;
+		//		objCB.ViewDir.x = m_camera.m_lookDirection.x;
+		//		objCB.ViewDir.y = m_camera.m_lookDirection.y;
+		//		objCB.ViewDir.z = m_camera.m_lookDirection.z;
 
-				objCB.RTSize.x = m_width;
-				objCB.RTSize.y = m_height;
+		//		objCB.RTSize.x = m_width;
+		//		objCB.RTSize.y = m_height;
 
-				objCB.JitterOffset = JitterOffset;
+		//		objCB.JitterOffset = JitterOffset;
 
-				RS_Mesh->SetConstantValue("ObjParameter", (void*)&objCB, dx12_rhi->CommandList.Get());
-
-
-				Texture* diffuseTex = drawcall.mat->Diffuse.get();
-				if (diffuseTex == nullptr)
-					diffuseTex = scene->Materials[0]->Diffuse.get();
-				if(diffuseTex)
-					RS_Mesh->SetTexture("diffuseMap", diffuseTex, dx12_rhi->CommandList.Get());
+		//		RS_Mesh->SetConstantValue("ObjParameter", (void*)&objCB, dx12_rhi->CommandList.Get());
 
 
-				Texture* normalTex = drawcall.mat->Normal.get();
-				if (normalTex == nullptr)
-					normalTex = scene->Materials[0]->Normal.get();
-				if(normalTex)
-					RS_Mesh->SetTexture("normalMap", normalTex, dx12_rhi->CommandList.Get());
+		//		Texture* diffuseTex = drawcall.mat->Diffuse.get();
+		//		/*if (diffuseTex == nullptr)
+		//			diffuseTex = scene->Materials[0]->Diffuse.get();*/
+		//		if(diffuseTex)
+		//			RS_Mesh->SetTexture("diffuseMap", diffuseTex, dx12_rhi->CommandList.Get());
 
 
-				dx12_rhi->CommandList->DrawIndexedInstanced(drawcall.IndexCount, 1, drawcall.IndexStart, drawcall.VertexBase, 0);
+		//		Texture* normalTex = drawcall.mat->Normal.get();
+		//		/*if (normalTex == nullptr)
+		//			normalTex = scene->Materials[0]->Normal.get();*/
+		//		if(normalTex)
+		//			RS_Mesh->SetTexture("normalMap", normalTex, dx12_rhi->CommandList.Get());
 
 
-				RS_Mesh->currentDrawCallIndex++;
-			}
-		}
+		//		dx12_rhi->CommandList->DrawIndexedInstanced(drawcall.IndexCount, 1, drawcall.IndexStart, drawcall.VertexBase, 0);
+
+
+		//		RS_Mesh->currentDrawCallIndex++;
+		//	}
+		//}
+		DrawScene(Sponza);
+
+		DrawScene(ShaderBall);
 	}
 	else
 	{

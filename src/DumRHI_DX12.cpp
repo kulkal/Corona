@@ -2741,3 +2741,11 @@ void DescriptorHeapRing::Advance()
 	CurrentFrame = (CurrentFrame + 1) % NumFrame;
 	NumAllocated = 0;
 }
+
+void Scene::SetTransform(glm::mat4x4 inTransform)
+{
+	for (auto& mesh : meshes)
+	{
+		mesh->transform = inTransform;
+	}
+}

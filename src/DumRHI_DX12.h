@@ -1,4 +1,5 @@
 #pragma once
+
 #include <d3d12.h>
 #include <wrl.h>
 #include <dxgi1_4.h>
@@ -8,6 +9,16 @@
 #include <map>
 #include <memory>
 #include <string>
+
+#define GLM_FORCE_CTOR_INIT
+
+#include "glm/glm.hpp"
+#define GLM_ENABLE_EXPERIMENTAL
+#include "glm/gtx/transform.hpp"
+#include "glm/mat4x4.hpp"
+#include "glm/fwd.hpp"
+
+
 #include "DXSampleHelper.h"
 
 using namespace Microsoft::WRL;
@@ -427,6 +438,7 @@ public:
 		UINT VertexCount;
 	};
 public:
+	glm::mat4x4 transform;
 	UINT NumIndices;
 	UINT NumVertices;
 
@@ -450,6 +462,9 @@ public:
 class Scene
 {
 public:
+
+	void SetTransform(glm::mat4x4 inTransform);
+
 	vector<shared_ptr<Mesh>> meshes;
 	vector<shared_ptr<Material>> Materials;
 public:
