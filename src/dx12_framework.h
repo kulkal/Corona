@@ -134,7 +134,7 @@ private:
 
 	shared_ptr<Texture> ShadowBuffer;
 	shared_ptr<Texture> ReflectionBuffer;
-	shared_ptr<Texture> GIBuffer;
+	//shared_ptr<Texture> GIBuffer;
 
 	shared_ptr<Texture> GIBufferSH;
 	shared_ptr<Texture> GIBufferColor;

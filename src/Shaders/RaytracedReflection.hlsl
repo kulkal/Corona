@@ -1,6 +1,6 @@
 #include "Common.hlsl"
 
-RWTexture2D<float4> gOutput : register(u0);
+RWTexture2D<float4> ReflectionResult : register(u0);
 
 RaytracingAccelerationStructure gRtScene : register(t0);
 Texture2D DepthTex : register(t1);
@@ -100,7 +100,7 @@ void rayGen
 	RayPayload payload;
 	TraceRay(gRtScene, 0 /*rayFlags*/, 0xFF, 0 /* ray index*/, 0, 0, ray, payload);
 
-	gOutput[launchIndex.xy] = float4(payload.color, 1);
+	ReflectionResult[launchIndex.xy] = float4(payload.color, 1);
 }
 
 

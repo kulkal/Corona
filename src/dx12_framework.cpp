@@ -525,12 +525,7 @@ void dx12_framework::LoadAssets()
 
 	NAME_D3D12_OBJECT(ReflectionBuffer->resource);
 
-	// gi result
-	GIBuffer = dx12_rhi->CreateTexture2D(DXGI_FORMAT_R16G16B16A16_FLOAT,
-		D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
-		D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, m_width, m_height, 1);
-
-	NAME_D3D12_OBJECT(GIBuffer->resource);
+	
 
 
 	// gi result sh
@@ -2085,55 +2080,7 @@ void dx12_framework::DrawMeshPass()
 		
 		int nMesh = 0;
 
-		//shared_ptr<Scene> scene = Sponza;
-		//for (auto& mesh : scene->meshes)
-		//{
-		//	dx12_rhi->CommandList->IASetIndexBuffer(&mesh->Ib->view);
-		//	dx12_rhi->CommandList->IASetVertexBuffers(0, 1, &mesh->Vb->view);
-		//	
-		//	for (int i = 0; i < mesh->Draws.size(); i++)
-		//	{
-		//		Mesh::DrawCall& drawcall = mesh->Draws[i];
-		//		ObjConstantBuffer objCB;
-		//		int sizea = sizeof(ObjConstantBuffer);
-
-		//		objCB.ViewProjectionMatrix = glm::transpose(ViewProjMat);
-		//		objCB.PrevViewProjectionMatrix = glm::transpose(PrevViewProjMat);
-
-		//		glm::mat4 m; // Identity matrix
-		//		objCB.WorldMatrix = m;
-		//		objCB.ViewDir.x = m_camera.m_lookDirection.x;
-		//		objCB.ViewDir.y = m_camera.m_lookDirection.y;
-		//		objCB.ViewDir.z = m_camera.m_lookDirection.z;
-
-		//		objCB.RTSize.x = m_width;
-		//		objCB.RTSize.y = m_height;
-
-		//		objCB.JitterOffset = JitterOffset;
-
-		//		RS_Mesh->SetConstantValue("ObjParameter", (void*)&objCB, dx12_rhi->CommandList.Get());
-
-
-		//		Texture* diffuseTex = drawcall.mat->Diffuse.get();
-		//		/*if (diffuseTex == nullptr)
-		//			diffuseTex = scene->Materials[0]->Diffuse.get();*/
-		//		if(diffuseTex)
-		//			RS_Mesh->SetTexture("diffuseMap", diffuseTex, dx12_rhi->CommandList.Get());
-
-
-		//		Texture* normalTex = drawcall.mat->Normal.get();
-		//		/*if (normalTex == nullptr)
-		//			normalTex = scene->Materials[0]->Normal.get();*/
-		//		if(normalTex)
-		//			RS_Mesh->SetTexture("normalMap", normalTex, dx12_rhi->CommandList.Get());
-
-
-		//		dx12_rhi->CommandList->DrawIndexedInstanced(drawcall.IndexCount, 1, drawcall.IndexStart, drawcall.VertexBase, 0);
-
-
-		//		RS_Mesh->currentDrawCallIndex++;
-		//	}
-		//}
+		
 		DrawScene(Sponza);
 
 		DrawScene(ShaderBall);
@@ -2331,24 +2278,31 @@ void dx12_framework::FilterIndirectDiffusePass()
 	}
 }
 
-
-void dx12_framework::InitRaytracing()
+void AddMeshToVec(vector<shared_ptr<RTAS>>& vecBLAS, shared_ptr<Scene> scene)
 {
-	shared_ptr<Scene> scene = Sponza;
-	// init raytracing
-	vecBLAS.reserve(scene->meshes.size());
-	int i = 0;
 	for (auto& mesh : scene->meshes)
 	{
 		shared_ptr<RTAS> blas = mesh->CreateBLAS();
+		blas->mesh = mesh;
 		if (blas == nullptr)
 		{
 			continue;
 		}
 		vecBLAS.push_back(blas);
-		i++;
-
 	}
+}
+
+void dx12_framework::InitRaytracing()
+{
+	// init raytracing
+
+	UINT NumTotalMesh = Sponza->meshes.size() + ShaderBall->meshes.size();
+	vecBLAS.reserve(NumTotalMesh);
+
+	AddMeshToVec(vecBLAS, Sponza);
+	AddMeshToVec(vecBLAS, ShaderBall);
+
+
 	// TODO : per model world matrix
 	TLAS = dx12_rhi->CreateTLAS(vecBLAS);
 	
@@ -2362,12 +2316,12 @@ void dx12_framework::InitRaytracing()
 	PSO_RT_SHADOW = unique_ptr<RTPipelineStateObject>(new RTPipelineStateObject);
 	
 
-	PSO_RT_SHADOW->NumInstance = scene->meshes.size(); // important for cbv allocation & shadertable size.
+	PSO_RT_SHADOW->NumInstance = vecBLAS.size();// scene->meshes.size(); // important for cbv allocation & shadertable size.
 
 	// new interface
 	PSO_RT_SHADOW->AddHitGroup("HitGroup", "chs", "");
 	PSO_RT_SHADOW->AddShader("rayGen", RTPipelineStateObject::RAYGEN);
-	PSO_RT_SHADOW->BindUAV("rayGen", "gOutput", 0);
+	PSO_RT_SHADOW->BindUAV("rayGen", "ShadowResult", 0);
 	PSO_RT_SHADOW->BindSRV("rayGen", "gRtScene", 0);
 	PSO_RT_SHADOW->BindSRV("rayGen", "DepthTex", 1);
 	PSO_RT_SHADOW->BindSRV("rayGen", "WorldNormalTex", 2);
@@ -2394,12 +2348,12 @@ void dx12_framework::InitRaytracing()
 	// create reflection rtpso
 
 	PSO_RT_REFLECTION = unique_ptr<RTPipelineStateObject>(new RTPipelineStateObject);
-	PSO_RT_REFLECTION->NumInstance = scene->meshes.size();
+	PSO_RT_REFLECTION->NumInstance = vecBLAS.size();// scene->meshes.size();
 
 	PSO_RT_REFLECTION->AddHitGroup("HitGroup", "chs", "");
+	PSO_RT_REFLECTION->BindUAV("rayGen", "ReflectionResult", 0);
 
 	PSO_RT_REFLECTION->AddShader("rayGen", RTPipelineStateObject::RAYGEN);
-	PSO_RT_REFLECTION->BindUAV("rayGen", "gOutput", 0);
 	PSO_RT_REFLECTION->BindSRV("rayGen", "gRtScene", 0);
 	PSO_RT_REFLECTION->BindSRV("rayGen", "DepthTex", 1);
 	PSO_RT_REFLECTION->BindSRV("rayGen", "WorldNormalTex", 2);
@@ -2424,7 +2378,7 @@ void dx12_framework::InitRaytracing()
 	// gi rtpso
 
 	PSO_RT_GI = unique_ptr<RTPipelineStateObject>(new RTPipelineStateObject);
-	PSO_RT_GI->NumInstance = scene->meshes.size();
+	PSO_RT_GI->NumInstance = vecBLAS.size();// scene->meshes.size();
 
 	PSO_RT_GI->AddHitGroup("HitGroup", "chs", "");
 
@@ -2468,10 +2422,10 @@ void dx12_framework::InitRaytracing()
 	uint8_t* pData;
 	InstancePropertyBuffer->resource->Map(0, nullptr, (void**)&pData);
 
-	for (auto& m : scene->meshes)
+	for (auto& m : vecBLAS)
 	{
-		glm::mat4x4 identityMat;
-		memcpy(pData, &identityMat, sizeof(glm::mat4x4));
+		glm::mat4x4 mat = glm::transpose(m->mesh->transform);
+		memcpy(pData, &mat, sizeof(glm::mat4x4));
 		pData += sizeof(InstanceProperty);
 	}
 
@@ -2499,14 +2453,14 @@ void dx12_framework::RaytraceShadowPass()
 
 	PSO_RT_SHADOW->BeginShaderTable();
 
-	shared_ptr<Scene> scene = Sponza;
-
-	for (int i = 0; i < scene->meshes.size(); i++)
+	int i = 0;
+	for (auto&as : vecBLAS)
 	{
-		PSO_RT_SHADOW->SetHitProgram("chs", i);
+		PSO_RT_SHADOW->SetHitProgram(i, "chs");
+		i++;
 	}
 
-	PSO_RT_SHADOW->SetUAV("rayGen", "gOutput", ShadowBuffer->GpuHandleUAV);
+	PSO_RT_SHADOW->SetUAV("rayGen", "ShadowResult", ShadowBuffer->GpuHandleUAV);
 	PSO_RT_SHADOW->SetSRV("rayGen", "gRtScene", TLAS->GPUHandle);
 	PSO_RT_SHADOW->SetSRV("rayGen", "DepthTex", DepthBuffer->GpuHandleSRV);
 	PSO_RT_SHADOW->SetSRV("rayGen", "WorldNormalTex", GeomNormalBuffer->GpuHandleSRV);
@@ -2532,31 +2486,33 @@ void dx12_framework::RaytraceReflectionPass()
 
 	PSO_RT_REFLECTION->BeginShaderTable();
 
-	PSO_RT_REFLECTION->SetUAV("rayGen", "gOutput", ReflectionBuffer->GpuHandleUAV);
+	PSO_RT_REFLECTION->SetUAV("rayGen", "ReflectionResult", ReflectionBuffer->GpuHandleUAV);
 	PSO_RT_REFLECTION->SetSRV("rayGen", "gRtScene", TLAS->GPUHandle);
 	PSO_RT_REFLECTION->SetSRV("rayGen", "DepthTex", DepthBuffer->GpuHandleSRV);
 	PSO_RT_REFLECTION->SetSRV("rayGen", "WorldNormalTex", GeomNormalBuffer->GpuHandleSRV);
 	PSO_RT_REFLECTION->SetCBVValue("rayGen", "ViewParameter", &RTReflectionViewParam, sizeof(RTReflectionViewParamCB));
 	PSO_RT_REFLECTION->SetSampler("rayGen", "samplerWrap", samplerWrap.get());
 
-	shared_ptr<Scene> scene = Sponza;
 
-	for (int i = 0; i < scene->meshes.size(); i++)
+	//for (int i = 0; i < scene->meshes.size(); i++)
+	int i = 0;
+	for(auto&as : vecBLAS)
 	{
-		auto& mesh = scene->meshes[i];
+		auto& mesh = as->mesh;
 
-		PSO_RT_REFLECTION->SetHitProgram("chs", i);
+		PSO_RT_REFLECTION->SetHitProgram(i, "chs");
 
-		PSO_RT_REFLECTION->ResetHitProgramBinding("chs", i, 2);
+		PSO_RT_REFLECTION->ResetHitProgramBinding("chs", i, 4);
 		Texture* diffuseTex = mesh->Draws[0].mat->Diffuse.get();
-		if (diffuseTex == nullptr)
-			diffuseTex = scene->Materials[0]->Diffuse.get();
+		
+		if (!diffuseTex)
+			diffuseTex = DefaultWhiteTex.get();
 		
 		PSO_RT_REFLECTION->AddHitProgramDescriptor("chs", mesh->Vb->GpuHandleSRV, i);
 		PSO_RT_REFLECTION->AddHitProgramDescriptor("chs", mesh->Ib->GpuHandleSRV, i);
 		PSO_RT_REFLECTION->AddHitProgramDescriptor("chs", diffuseTex->GpuHandleSRV, i);
 		PSO_RT_REFLECTION->AddHitProgramDescriptor("chs", samplerWrap->GpuHandle, i);
-
+		i++;
 	}
 
 
@@ -2571,14 +2527,12 @@ void dx12_framework::RaytraceReflectionPass()
 
 void dx12_framework::RaytraceGIPass()
 {
-	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(GIBuffer->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS));
 	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(GIBufferSH->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS));
 	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(GIBufferColor->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS));
 
 
 	PSO_RT_GI->BeginShaderTable();
 
-	PSO_RT_GI->SetUAV("rayGen", "gOutput", GIBuffer->GpuHandleUAV);
 	PSO_RT_GI->SetUAV("rayGen", "GIResultSH", GIBufferSH->GpuHandleUAV);
 	PSO_RT_GI->SetUAV("rayGen", "GIResultColor", GIBufferColor->GpuHandleUAV);
 
@@ -2590,26 +2544,24 @@ void dx12_framework::RaytraceGIPass()
 	PSO_RT_GI->SetCBVValue("rayGen", "ViewParameter", &RTGIViewParam, sizeof(RTGIViewParamCB));
 	PSO_RT_GI->SetSampler("rayGen", "samplerWrap", samplerWrap.get());
 
-	shared_ptr<Scene> scene = Sponza;
-
-	for (int i = 0; i < scene->meshes.size(); i++)
+	int i = 0;
+	for(auto&as : vecBLAS)
 	{
-		auto& mesh = scene->meshes[i];
+		auto& mesh = as->mesh;
 
-		PSO_RT_GI->SetHitProgram("chs", i);
+		PSO_RT_GI->SetHitProgram(i, "chs");
 
-		PSO_RT_GI->ResetHitProgramBinding("chs", i, 2);
+		PSO_RT_GI->ResetHitProgramBinding("chs", i, 5);
 		Texture* diffuseTex = mesh->Draws[0].mat->Diffuse.get();
-		if (diffuseTex == nullptr)
-			diffuseTex = scene->Materials[0]->Diffuse.get();
-
+		if (!diffuseTex)
+			diffuseTex = DefaultWhiteTex.get();
 		PSO_RT_GI->AddHitProgramDescriptor("chs", mesh->Vb->GpuHandleSRV, i);
 		PSO_RT_GI->AddHitProgramDescriptor("chs", mesh->Ib->GpuHandleSRV, i);
 		PSO_RT_GI->AddHitProgramDescriptor("chs", diffuseTex->GpuHandleSRV, i);
 		PSO_RT_GI->AddHitProgramDescriptor("chs", InstancePropertyBuffer->GpuHandleSRV, i);
 		PSO_RT_GI->AddHitProgramDescriptor("chs", samplerWrap->GpuHandle, i);
 
-
+		i++;
 	}
 
 
@@ -2619,7 +2571,6 @@ void dx12_framework::RaytraceGIPass()
 
 	PSO_RT_GI->Apply(m_width, m_height);
 
-	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(GIBuffer->resource.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
 	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(GIBufferSH->resource.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
 	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(GIBufferColor->resource.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
 }

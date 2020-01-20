@@ -1541,6 +1541,7 @@ shared_ptr<RTAS> Mesh::CreateBLAS()
 {
 	RTAS* as = new  RTAS;
 
+
 	D3D12_RAYTRACING_GEOMETRY_DESC geomDesc = {};
 	geomDesc.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
 	geomDesc.Triangles.VertexBuffer.StartAddress = Vb->resource->GetGPUVirtualAddress();
@@ -1627,118 +1628,6 @@ shared_ptr<RTAS> Mesh::CreateBLAS()
 	g_dx12_rhi->WaitGPU();
 
 
-	return shared_ptr<RTAS>(as);
-}
-
-std::shared_ptr<RTAS> Mesh::CreateBLASArray()
-{
-	RTAS* as = new  RTAS;
-
-	int indexSize;
-	if (IndexFormat == DXGI_FORMAT_R32_UINT)
-	{
-		indexSize = 4;
-	}
-	else if (IndexFormat == DXGI_FORMAT_R16_UINT)
-	{
-		indexSize = 2;
-	}
-	
-	int i = 0;
-	vector< D3D12_RAYTRACING_GEOMETRY_DESC> geomVec;
-	for (auto& drawcall : Draws)
-	{
-		if (i == 1024)
-			int a = 0;
-		D3D12_RAYTRACING_GEOMETRY_DESC geomDesc = {};
-		geomDesc.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
-		uint64_t vbstart = Vb->resource->GetGPUVirtualAddress();
-		geomDesc.Triangles.VertexBuffer.StartAddress = Vb->resource->GetGPUVirtualAddress() + drawcall.VertexBase *VertexStride;
-		geomDesc.Triangles.VertexBuffer.StrideInBytes = VertexStride;;
-		geomDesc.Triangles.VertexFormat = DXGI_FORMAT_R32G32B32_FLOAT;
-		geomDesc.Triangles.VertexCount = drawcall.VertexCount;
-		geomDesc.Triangles.IndexBuffer = Ib->resource->GetGPUVirtualAddress() + drawcall.IndexStart * indexSize;
-		geomDesc.Triangles.IndexFormat = IndexFormat;
-		geomDesc.Triangles.IndexCount = drawcall.IndexCount;// Ib->numIndices;
-		geomDesc.Triangles.Transform3x4 = 0;
-
-		geomDesc.Flags = D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE;
-		geomVec.push_back(geomDesc);
-
-		i++;
-	}
-
-	D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS inputs = {};
-	inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
-	inputs.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_NONE;
-	inputs.NumDescs = geomVec.size();
-	inputs.pGeometryDescs = geomVec.data();
-	inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
-
-	D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO info = {};
-	g_dx12_rhi->Device->GetRaytracingAccelerationStructurePrebuildInfo(&inputs, &info);
-
-
-	{
-		D3D12_RESOURCE_DESC bufDesc = {};
-		bufDesc.Alignment = 0;
-		bufDesc.DepthOrArraySize = 1;
-		bufDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-		bufDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
-		bufDesc.Format = DXGI_FORMAT_UNKNOWN;
-		bufDesc.Height = 1;
-		bufDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-		bufDesc.MipLevels = 1;
-		bufDesc.SampleDesc.Count = 1;
-		bufDesc.SampleDesc.Quality = 0;
-		bufDesc.Width = info.ScratchDataSizeInBytes;
-
-
-		stringstream ss;
-		ss << "blasarray->result : " << bufDesc.Width;
-		OutputDebugStringA(ss.str().c_str());
-
-		g_dx12_rhi->Device->CreateCommittedResource(&kDefaultHeapProps, D3D12_HEAP_FLAG_NONE, &bufDesc, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, IID_PPV_ARGS(&as->Scratch));
-
-	}
-
-	{
-		D3D12_RESOURCE_DESC bufDesc = {};
-		bufDesc.Alignment = 0;
-		bufDesc.DepthOrArraySize = 1;
-		bufDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-		bufDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
-		bufDesc.Format = DXGI_FORMAT_UNKNOWN;
-		bufDesc.Height = 1;
-		bufDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-		bufDesc.MipLevels = 1;
-		bufDesc.SampleDesc.Count = 1;
-		bufDesc.SampleDesc.Quality = 0;
-		bufDesc.Width = info.ResultDataMaxSizeInBytes;
-
-
-		stringstream ss;
-		ss << "blasarray->result : " << bufDesc.Width << "\n" << "\n";
-		OutputDebugStringA(ss.str().c_str());
-
-		g_dx12_rhi->Device->CreateCommittedResource(&kDefaultHeapProps, D3D12_HEAP_FLAG_NONE, &bufDesc, D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE, nullptr, IID_PPV_ARGS(&as->Result));
-	}
-
-	D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC asDesc = {};
-	asDesc.Inputs = inputs;
-	asDesc.DestAccelerationStructureData = as->Result->GetGPUVirtualAddress();
-	asDesc.ScratchAccelerationStructureData = as->Scratch->GetGPUVirtualAddress();
-
-	g_dx12_rhi->CommandList->BuildRaytracingAccelerationStructure(&asDesc, 0, nullptr);
-
-	D3D12_RESOURCE_BARRIER uavBarrier = {};
-	uavBarrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
-	uavBarrier.UAV.pResource = as->Result.Get();
-	g_dx12_rhi->CommandList->ResourceBarrier(1, &uavBarrier);
-
-
-	g_dx12_rhi->WaitGPU();
-	
 	return shared_ptr<RTAS>(as);
 }
 
@@ -1837,8 +1726,8 @@ std::shared_ptr<RTAS> DumRHI_DX12::CreateTLAS(vector<shared_ptr<RTAS>>& VecBotto
 			pInstanceDesc[i].InstanceID = i;                            // This value will be exposed to the shader via InstanceID()
 			pInstanceDesc[i].InstanceContributionToHitGroupIndex = i;   // This is the offset inside the shader-table. We only have a single geometry, so the offset 0
 			pInstanceDesc[i].Flags = D3D12_RAYTRACING_INSTANCE_FLAG_NONE;
-			glm::mat4 m; // Identity matrix
-			memcpy(pInstanceDesc[i].Transform, &m, sizeof(pInstanceDesc[i].Transform));
+			glm::mat4x4 mat = glm::transpose(VecBottomLevelAS[i]->mesh->transform);
+			memcpy(pInstanceDesc[i].Transform, &mat, sizeof(pInstanceDesc[i].Transform));
 			pInstanceDesc[i].AccelerationStructure = VecBottomLevelAS[i]->Result->GetGPUVirtualAddress();
 			pInstanceDesc[i].InstanceMask = 0xFF;
 		}
@@ -2428,7 +2317,7 @@ void RTPipelineStateObject::SetCBVValue(string shader, string bindingName, void*
 	}
 }
 
-void RTPipelineStateObject::SetHitProgram(string shader, UINT instanceIndex)
+void RTPipelineStateObject::SetHitProgram(UINT instanceIndex, string shader)
 {
 	HitProgramBinding[instanceIndex].HitGroupName = MapHitGroup[shader].name;
 }

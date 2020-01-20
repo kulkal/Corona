@@ -238,7 +238,7 @@ public:
 
 	void SetSampler(string shader, string bindingName, Sampler* sampler, INT instanceIndex = -1);
 	void SetCBVValue(string shader, string bindingName, void* pData, INT size, INT instanceIndex = -1);
-	void SetHitProgram(string shader, UINT instanceIndex);
+	void SetHitProgram(UINT instanceIndex, string shader);
 
 	void InitRS(string ShaderFile);
 	void Apply(UINT width, UINT height);
@@ -405,9 +405,11 @@ public:
 	~ThreadDescriptorHeapPool() {}
 };
 
+class Mesh;
 class RTAS
 {
 public:
+	shared_ptr<Mesh> mesh;
 	D3D12_GPU_DESCRIPTOR_HANDLE GPUHandle;
 	D3D12_CPU_DESCRIPTOR_HANDLE CPUHandle;
 
@@ -456,7 +458,7 @@ public:
 	vector<DrawCall> Draws;
 
 	shared_ptr<RTAS> CreateBLAS();
-	shared_ptr<RTAS> CreateBLASArray();
+	//shared_ptr<RTAS> CreateBLASArray();
 };
 
 class Scene
@@ -469,6 +471,9 @@ public:
 	vector<shared_ptr<Material>> Materials;
 public:
 };
+
+
+
 
 class DumRHI_DX12
 {

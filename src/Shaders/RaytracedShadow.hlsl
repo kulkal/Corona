@@ -1,7 +1,7 @@
 #include "Common.hlsl"
 
 
-RWTexture2D<float4> gOutput : register(u0);
+RWTexture2D<float4> ShadowResult : register(u0);
 RaytracingAccelerationStructure gRtScene : register(t0);
 Texture2D DepthTex : register(t1);
 Texture2D WorldNormalTex : register(t2);
@@ -86,15 +86,15 @@ void rayGen
     RayPayload payload;
     //TraceRay(gRtScene, 0 /*rayFlags*/, 0xFF, 0 /* ray index*/, 0, 0, ray, payload);
     float dd = payload.distance / 1000.0f;
-    gOutput[launchIndex.xy] = float4(dd, dd, dd, 1);
+    ShadowResult[launchIndex.xy] = float4(dd, dd, dd, 1);
     float sx = sin(crd.x);
     float sy = sin(crd.y);
     float DeviceDepth = DepthTex.Load(int3(launchIndex.xy, 0), int2(0, 0)).x;
     float3 WorldNormal = WorldNormalTex.Load(int3(launchIndex.xy, 0), int2(0, 0)).xyz;
-    gOutput[launchIndex.xy] = float4(WorldNormal, 1);
+    ShadowResult[launchIndex.xy] = float4(WorldNormal, 1);
     float LinearDepth = GetLinearDepth(DeviceDepth, ProjectionParams.x, ProjectionParams.y) * ProjectionParams.z /1000.0f;
 
-    gOutput[launchIndex.xy] = float4(LinearDepth, LinearDepth, LinearDepth, 1);
+    ShadowResult[launchIndex.xy] = float4(LinearDepth, LinearDepth, LinearDepth, 1);
 
 
 #elif DEPTH
@@ -108,7 +108,7 @@ void rayGen
 	RayPayload payload;
     TraceRay(gRtScene, 0 /*rayFlags*/, 0xFF, 0 /* ray index*/, 0, 0, ray, payload);
 	float dd = payload.distance / 1000.0f;
-    gOutput[launchIndex.xy] = float4(dd, dd, dd, 1);
+    ShadowResult[launchIndex.xy] = float4(dd, dd, dd, 1);
     //gOutput[launchIndex.xy] = float4(1, 0, 0, 1);
 
 #elif SHADOW
@@ -150,11 +150,11 @@ void rayGen
 
 	if (payload.distance == 0)
 	{
-		gOutput[launchIndex.xy] = float4(1, 1, 1, 1);
+		ShadowResult[launchIndex.xy] = float4(1, 1, 1, 1);
 	}
 	else
 	{
-		gOutput[launchIndex.xy] = float4(0.0, 0.0, 0.0, 1);
+		ShadowResult[launchIndex.xy] = float4(0.0, 0.0, 0.0, 1);
 	}
 
         // gOutput[launchIndex.xy] = float4(LinearDepth/1000.0, 0.1, 0.1, 1);
