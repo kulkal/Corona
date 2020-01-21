@@ -32,7 +32,7 @@ cbuffer LightingParam : register(b0)
     float4 LightDirAndIntensity;
     float2 RTSize;
     float TAABlendFactor;
-    float pad;
+    float GIBufferScale;
 };
 
 struct VSInput
@@ -82,9 +82,13 @@ float4 PSMain(PSInput input) : SV_TARGET
 	
     float3 DiffuseLighting = dot(LightDir.xyz, WorldNormal) * LightIntensity * Albedo * Shadow;
 
+    float2 ScreenUV = input.uv;
     SH sh_indirect;
-    sh_indirect.shY = GIResultSHTex[PixelPos];
-    sh_indirect.CoCg = GIResultColorTex[PixelPos].xy;
+    // sh_indirect.shY = GIResultSHTex[GIPos];
+    // sh_indirect.CoCg = GIResultColorTex[GIPos].xy;
+
+    sh_indirect.shY = GIResultSHTex.Sample(sampleWrap, ScreenUV);
+    sh_indirect.CoCg = GIResultColorTex.Sample(sampleWrap, ScreenUV);
 
     float3 IndirectDiffuse = project_SH_irradiance(sh_indirect, WorldNormal) * Albedo;
 

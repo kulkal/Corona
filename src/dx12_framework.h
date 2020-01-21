@@ -136,6 +136,7 @@ private:
 	shared_ptr<Texture> ReflectionBuffer;
 	//shared_ptr<Texture> GIBuffer;
 
+	UINT GIBufferScale = 1;
 	shared_ptr<Texture> GIBufferSH;
 	shared_ptr<Texture> GIBufferColor;
 
@@ -156,6 +157,7 @@ private:
 	{
 		glm::vec4 ProjectionParams;
 		UINT32 Iteration;
+		UINT32 GIBufferScale;
 		float IndirectDiffuseWeightFactorDepth = 0.20f;
 		float IndirectDiffuseWeightFactorNormal = 9.0f;
 	};
@@ -250,7 +252,7 @@ private:
 		glm::vec4 LightDir;
 		glm::vec2 RTSize;
 		float TAABlendFactor;
-		float pad0;
+		UINT32 GIBufferScale;
 	};
 
 	struct TemporalAAParam
