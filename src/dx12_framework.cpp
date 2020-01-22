@@ -2264,42 +2264,6 @@ void dx12_framework::RecordDraw (UINT StartIndex, UINT NumDraw, UINT CLIndex, Th
 
 void dx12_framework::SpatialDenoisingPass()
 {
-	//GIBufferWriteIndex = 1 - GIBufferWriteIndex;
-	
-
-	//// first pass
-	//dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(FilterIndirectDiffusePingPongSH[WriteIndex]->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS));
-	//dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(FilterIndirectDiffusePingPongColor[WriteIndex]->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS));
-
-
-
-	//RS_SpatialDenoisingFilter->Apply(dx12_rhi->CommandList.Get());
-
-	////RS_FilterIndirectDiffuse->SetTexture("InputTex", GIBuffer.get(), dx12_rhi->CommandList.Get());
-	//RS_SpatialDenoisingFilter->SetTexture("DepthTex", DepthBuffer.get(), dx12_rhi->CommandList.Get());
-	//RS_SpatialDenoisingFilter->SetTexture("GeoNormalTex", GeomNormalBuffer.get(), dx12_rhi->CommandList.Get());
-	//RS_SpatialDenoisingFilter->SetTexture("InGIResultSHTex", GIBufferSH[GIBufferWriteIndex].get(), dx12_rhi->CommandList.Get());
-	//RS_SpatialDenoisingFilter->SetTexture("InGIResultColorTex", GIBufferColor[GIBufferWriteIndex].get(), dx12_rhi->CommandList.Get());
-
-
-
-	////RS_FilterIndirectDiffuse->SetUAV("OutputTex", FilterIndirectDiffusePingPong[0].get(), dx12_rhi->CommandList.Get());
-	//RS_SpatialDenoisingFilter->SetUAV("OutGIResultSH", FilterIndirectDiffusePingPongSH[0].get(), dx12_rhi->CommandList.Get());
-	//RS_SpatialDenoisingFilter->SetUAV("OutGIResultColor", FilterIndirectDiffusePingPongColor[0].get(), dx12_rhi->CommandList.Get());
-
-
-
-	//DenoisingCB.Iteration = 0;
-	//DenoisingCB.GIBufferScale = GIBufferScale;
-	//RS_SpatialDenoisingFilter->SetConstantValue("FilterIndirectDiffuseConstant", &DenoisingCB, dx12_rhi->CommandList.Get());
-
-	//UINT WidthGI = m_width / GIBufferScale;
-	//UINT HeightGI = m_height / GIBufferScale;
-	//dx12_rhi->CommandList->Dispatch(WidthGI / 32, HeightGI / 32, 1);
-
-	//dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(FilterIndirectDiffusePingPongSH[WriteIndex]->resource.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
-	//dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(FilterIndirectDiffusePingPongColor[WriteIndex]->resource.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
-
 	UINT WriteIndex = 0;
 	UINT ReadIndex = 1;
 	for (int i = 0; i < 4; i++)
@@ -2330,7 +2294,7 @@ void dx12_framework::SpatialDenoisingPass()
 		DenoisingCB.Iteration = i;
 		RS_SpatialDenoisingFilter->SetConstantValue("FilterIndirectDiffuseConstant", &DenoisingCB, dx12_rhi->CommandList.Get());
 
-		dx12_rhi->CommandList->Dispatch(m_width / 32, m_height / 32, 1);
+		dx12_rhi->CommandList->Dispatch(m_width / 32, m_height / 32 + 1 , 1);
 
 		dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(FilterIndirectDiffusePingPongSH[WriteIndex]->resource.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
 		dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(FilterIndirectDiffusePingPongColor[WriteIndex]->resource.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
@@ -2372,7 +2336,7 @@ void dx12_framework::TemporalDenoisingPass()
 	DenoisingCB.GIBufferScale = GIBufferScale;
 	RS_SpatialDenoisingFilter->SetConstantValue("FilterIndirectDiffuseConstant", &DenoisingCB, dx12_rhi->CommandList.Get());
 
-	dx12_rhi->CommandList->Dispatch(m_width / 16 , m_height / 16, 1);
+	dx12_rhi->CommandList->Dispatch(m_width / 32 , m_height / 32 + 1, 1);
 
 	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(FilterIndirectDiffusePingPongSH[0]->resource.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
 	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(FilterIndirectDiffusePingPongColor[0]->resource.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));

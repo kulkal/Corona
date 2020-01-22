@@ -142,11 +142,14 @@ void SpatialFilter( uint3 DTid : SV_DispatchThreadID )
     OutGIResultSH[DTid.xy] = ResultSH.shY;
     OutGIResultColor[DTid.xy] = float4(ResultSH.CoCg, 0, 0);
 
+    // OutGIResultSH[DTid.xy] = float4(1, 1, 1, 1);
+   	// OutGIResultColor[DTid.xy] = float4(1, 1, 0, 0);
 }
 
-[numthreads(16, 16, 1)]
+[numthreads(32, 32, 1)]
 void TemporalFilter( uint3 DTid : SV_DispatchThreadID )
 {
 	OutGIResultSH[DTid.xy] = InGIResultSHTex[DTid.xy];
     OutGIResultColor[DTid.xy] = InGIResultColorTex[DTid.xy];
+
 }
