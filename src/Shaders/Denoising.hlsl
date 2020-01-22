@@ -4,6 +4,10 @@ Texture2D DepthTex : register(t0);
 Texture2D GeoNormalTex : register(t1);
 Texture2D InGIResultSHTex : register(t2);
 Texture2D InGIResultColorTex : register(t3);
+// Texture2D InGIResultSHTexPrev : register(t4);
+// Texture2D InGIResultColorTexPrev : register(t5);
+Texture2D VelocityTex : register(t4);
+
 
 
 RWTexture2D<float4> OutGIResultSH : register(u0);
@@ -126,7 +130,7 @@ void Filter(Texture2D GIResultSHTex,Texture2D GIResultColorTex, uint2 Pos, inout
 }
 
 [numthreads(32, 32, 1)]
-void FilterIndirectDiffuse( uint3 DTid : SV_DispatchThreadID )
+void SpatialFilter( uint3 DTid : SV_DispatchThreadID )
 {
     SH ResultSH;
     if(Iteration == 0)
@@ -138,4 +142,11 @@ void FilterIndirectDiffuse( uint3 DTid : SV_DispatchThreadID )
     OutGIResultSH[DTid.xy] = ResultSH.shY;
     OutGIResultColor[DTid.xy] = float4(ResultSH.CoCg, 0, 0);
 
+}
+
+[numthreads(16, 16, 1)]
+void TemporalFilter( uint3 DTid : SV_DispatchThreadID )
+{
+	OutGIResultSH[DTid.xy] = InGIResultSHTex[DTid.xy];
+    OutGIResultColor[DTid.xy] = InGIResultColorTex[DTid.xy];
 }

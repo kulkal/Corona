@@ -134,11 +134,11 @@ private:
 
 	shared_ptr<Texture> ShadowBuffer;
 	shared_ptr<Texture> ReflectionBuffer;
-	//shared_ptr<Texture> GIBuffer;
 
 	UINT GIBufferScale = 1;
-	shared_ptr<Texture> GIBufferSH;
-	shared_ptr<Texture> GIBufferColor;
+	UINT GIBufferWriteIndex = 0;
+	shared_ptr<Texture> GIBufferSH[2];
+	shared_ptr<Texture> GIBufferColor[2];
 
 
 
@@ -153,7 +153,7 @@ private:
 	unique_ptr<PipelineStateObject> RS_Mesh;
 
 	// denoising
-	struct FilterIndirectDiffuseConstant
+	struct DenoisingConstant
 	{
 		glm::vec4 ProjectionParams;
 		UINT32 Iteration;
@@ -163,13 +163,17 @@ private:
 	};
 
 	//FLOAT IndirectDiffuseWeightFactor0;
-	FilterIndirectDiffuseConstant FilterIndirectDiffuseConstantCB;
+	DenoisingConstant DenoisingCB;
 
-	unique_ptr<PipelineStateObject> RS_FilterIndirectDiffuse;
+	unique_ptr<PipelineStateObject> RS_SpatialDenoisingFilter;
 	shared_ptr<Texture> FilterIndirectDiffusePingPong[2];
 
 	shared_ptr<Texture> FilterIndirectDiffusePingPongSH[2];
 	shared_ptr<Texture> FilterIndirectDiffusePingPongColor[2];
+
+
+
+	unique_ptr<PipelineStateObject> RS_TemporalDenoisingFilter;
 
 
 
@@ -290,7 +294,10 @@ public:
 
 	void InitComputeRS();
 
-	void InitDenoiserPass();
+	void InitSpatialDenoisingPass();
+
+	void InitTemporalDenoisingPass();
+
 
 	void InitDrawMeshRS();
 
@@ -312,7 +319,9 @@ public:
 	void RecordDraw(UINT StartIndex, UINT NumDraw, UINT CLIndex, ThreadDescriptorHeapPool* DHPool);
 
 
-	void FilterIndirectDiffusePass();
+	void SpatialDenoisingPass();
+
+	void TemporalDenoisingPass();
 
 	void InitCopyPass();
 
