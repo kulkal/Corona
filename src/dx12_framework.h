@@ -137,8 +137,11 @@ private:
 
 	UINT GIBufferScale = 1;
 	UINT GIBufferWriteIndex = 0;
-	shared_ptr<Texture> GIBufferSH[2];
-	shared_ptr<Texture> GIBufferColor[2];
+	shared_ptr<Texture> GIBufferSHTemporal[2];
+	shared_ptr<Texture> GIBufferColorTemporal[2];
+
+	shared_ptr<Texture> GIBufferSH;
+	shared_ptr<Texture> GIBufferColor;
 
 
 
@@ -153,7 +156,7 @@ private:
 	unique_ptr<PipelineStateObject> RS_Mesh;
 
 	// denoising
-	struct DenoisingConstant
+	struct SpatialFilterConstant
 	{
 		glm::vec4 ProjectionParams;
 		UINT32 Iteration;
@@ -163,16 +166,22 @@ private:
 	};
 
 	//FLOAT IndirectDiffuseWeightFactor0;
-	DenoisingConstant DenoisingCB;
+	SpatialFilterConstant SpatialFilterCB;
 
 	unique_ptr<PipelineStateObject> RS_SpatialDenoisingFilter;
-	shared_ptr<Texture> FilterIndirectDiffusePingPong[2];
 
 	shared_ptr<Texture> FilterIndirectDiffusePingPongSH[2];
 	shared_ptr<Texture> FilterIndirectDiffusePingPongColor[2];
 
 
+	struct TemporalFilterConstant
+	{
+		glm::vec4 ProjectionParams;
+		glm::vec2 RTSize;
+	};
 
+	//FLOAT IndirectDiffuseWeightFactor0;
+	TemporalFilterConstant TemporalFilterCB;
 	unique_ptr<PipelineStateObject> RS_TemporalDenoisingFilter;
 
 

@@ -9,6 +9,10 @@ This project is for dx12 & dxr learning. I am trying to test best practice imple
 * Descriptor table usage.
 * Memory residency.
 
+## Screenshots
+![](diffuse_gi.png)
+![](diffuse_gi2.png)
+
 ## DXR Topic
 * How to make resource binding easier.
 	* Root signature.

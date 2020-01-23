@@ -117,6 +117,7 @@ void rayGen
     uint3 launchIndex = DispatchRaysIndex();
     uint3 launchDim = DispatchRaysDimensions();
 
+
     float2 crd = float2(launchIndex.xy);
 	//crd.y *= -1;
     float2 dims = float2(launchDim.xy);
@@ -161,6 +162,8 @@ void rayGen
     // https://computergraphics.stackexchange.com/questions/8578/how-to-set-equivalent-pdfs-for-cosine-weighted-and-uniform-sampled-hemispheres
     float cosTerm = 1;//dot(float3(0, 0, 1), sampleDirLocal)*2;
 
+    float3 LightIntensity = LightDirAndIntensity.w;
+
     float3 ViewDir = mul(normalize(float3(d.x * aspectRatio, -d.y, -1)), InvViewMatrix);
 
 	RayDesc ray;
@@ -175,14 +178,19 @@ void rayGen
     if(payload.distance == 0)
     {
         // hit sky
-        float3 Radiance = float4(0, 0, 0.1, 1);
-        float3 DiffuseLighting = Radiance * cosTerm;
+        float3 Radiance = float4(0, 0, 1, 1) * LightIntensity;
+        float3 Irradiance = Radiance * cosTerm;
+
+        SH sh_indirect = init_SH();
+        sh_indirect = irradiance_to_SH(Irradiance, sampleDirWorld);
+
+        GIResultSH[launchIndex.xy] = sh_indirect.shY;
+        GIResultColor[launchIndex.xy] = float4(sh_indirect.CoCg, 0, 0);
         // gOutput[launchIndex.xy] = float4(DiffuseLighting.xyz, 1);   
     }
     else
     {
         float3 LightDir = LightDirAndIntensity.xyz;
-        float3 LightIntensity = LightDirAndIntensity.w;
         RayDesc shadowRay;
         shadowRay.Origin = payload.position + payload.normal *0.5;
         shadowRay.Direction = LightDir;
@@ -194,19 +202,16 @@ void rayGen
         TraceRay(gRtScene, 0 /*rayFlags*/, 0xFF, 0 /* ray index*/, 0, 0, shadowRay, shadowPayload);
 
         float3 Albedo = payload.color;
-        float3 DiffuseLighting;
         SH sh_indirect = init_SH();
         if(shadowPayload.distance == 0)
         {
             // miss
             float3 Irradiance = dot(LightDir.xyz, payload.normal) * LightIntensity  * Albedo;
-            DiffuseLighting = Irradiance * cosTerm;
             sh_indirect = irradiance_to_SH(Irradiance, sampleDirWorld);
         }
         else
         {
             // shadowed
-            DiffuseLighting = float3(0, 0, 0);
         }
 
         // gOutput[launchIndex.xy] = float4(DiffuseLighting.xyz, 1);   
