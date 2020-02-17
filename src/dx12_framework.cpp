@@ -528,8 +528,6 @@ void dx12_framework::LoadAssets()
 
 	
 
-	UINT WidthGI = m_width / GIBufferScale;
-	UINT HeightGI = m_height / GIBufferScale;
 
 	GIBufferSH = dx12_rhi->CreateTexture2D(DXGI_FORMAT_R16G16B16A16_FLOAT,
 		D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
@@ -2318,7 +2316,10 @@ void dx12_framework::SpatialDenoisingPass()
 		SpatialFilterCB.Iteration = i;
 		RS_SpatialDenoisingFilter->SetConstantValue("SpatialFilterConstant", &SpatialFilterCB, dx12_rhi->CommandList.Get());
 
-		dx12_rhi->CommandList->Dispatch(m_width / 32, m_height / 32 + 1 , 1);
+		UINT WidthGI = m_width / GIBufferScale;
+		UINT HeightGI = m_height / GIBufferScale;
+
+		dx12_rhi->CommandList->Dispatch(WidthGI / 32, HeightGI / 32 + 1 , 1);
 
 		dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(FilterIndirectDiffusePingPongSH[WriteIndex]->resource.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
 		dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(FilterIndirectDiffusePingPongColor[WriteIndex]->resource.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
@@ -2361,7 +2362,7 @@ void dx12_framework::TemporalDenoisingPass()
 
 	RS_TemporalDenoisingFilter->SetConstantValue("TemporalFilterConstant", &TemporalFilterCB, dx12_rhi->CommandList.Get());
 
-	dx12_rhi->CommandList->Dispatch(m_width / 32 , m_height / 32 + 1, 1);
+	dx12_rhi->CommandList->Dispatch(m_width / 15 , m_height / 15, 1);
 
 	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(FilterIndirectDiffusePingPongSH[0]->resource.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
 	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(FilterIndirectDiffusePingPongColor[0]->resource.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));

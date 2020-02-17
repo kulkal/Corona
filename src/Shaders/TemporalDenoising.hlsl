@@ -23,11 +23,19 @@ cbuffer TemporalFilterConstant : register(b0)
 	float2 RTSize;
 };
 
+#define GROUPSIZE 15
+groupshared float4 g_SH[GROUPSIZE][GROUPSIZE]; 
+groupshared float2 g_CoCg[GROUPSIZE][GROUPSIZE];
+groupshared float3 g_Normal[GROUPSIZE][GROUPSIZE]; 
+groupshared float g_Depth[GROUPSIZE][GROUPSIZE]; 
 
-[numthreads(32, 32, 1)]
-void TemporalFilter( uint3 DTid : SV_DispatchThreadID )
+
+
+[numthreads(15, 15, 1)]
+void TemporalFilter( uint3 DTid : SV_DispatchThreadID, uint3 GTid : SV_GroupThreadID, uint GTIndex : SV_GroupIndex, uint3 GId : SV_GroupID)
 {
 	float2 PixelPos = DTid.xy;
+	float2 GroupPos = GTid.xy;
 	SH CurrentSH = init_SH();
 	CurrentSH.shY = InGIResultSHTex[PixelPos];
 	CurrentSH.CoCg = InGIResultColorTex[PixelPos].xy;
@@ -50,10 +58,74 @@ void TemporalFilter( uint3 DTid : SV_DispatchThreadID )
 	OutGIResultSH[PixelPos] = BlendedSH.shY;
     OutGIResultColor[PixelPos] = float4(BlendedSH.CoCg, 0, 0);
 
-    OutGIResultSHDS[PixelPos] = BlendedSH.shY;
-    OutGIResultColorDS[PixelPos] = float4(BlendedSH.CoCg, 0, 0);
+
+    g_SH[GroupPos.y][GroupPos.x] = BlendedSH.shY;
+    g_CoCg[GroupPos.y][GroupPos.x] = BlendedSH.CoCg;
+    g_Normal[GroupPos.y][GroupPos.x] = GeoNormalTex[PixelPos].xyz;
+    g_Depth[GroupPos.y][GroupPos.x] = DepthTex[PixelPos];
 
 
-	// OutGIResultSHDS[PixelPos] = CurrentSH.shY;
- //    OutGIResultColorDS[PixelPos] = float4(CurrentSH.CoCg, 0, 0);
+    GroupMemoryBarrierWithGroupSync();
+
+
+    uint2 LowResGroupPos;
+	LowResGroupPos.x = GTIndex % (GROUPSIZE / DOWNSAMPLE_SIZE);
+	LowResGroupPos.y = GTIndex / (GROUPSIZE / DOWNSAMPLE_SIZE);
+
+	// gl_LocalInvocationIndex 0 ~225
+	// GROUP_SIZE / GRAD_DWN = 15/3 = 5
+	// 5 * 15
+	// 5x5 == 25 
+	// lowres_local_id.x = 0~5
+	// lowres_local_id.y 0 ~ 5
+	if(LowResGroupPos.y >= (GROUPSIZE / DOWNSAMPLE_SIZE))
+		return;
+
+	uint2 CenterHiResPos = LowResGroupPos * DOWNSAMPLE_SIZE + uint2(1, 1);
+	float3 CenterNormal = g_Normal[CenterHiResPos.y][CenterHiResPos.x];
+	float CenterDepth = g_Depth[CenterHiResPos.y][CenterHiResPos.x];
+	float CenterZ = GetLinearDepthOpenGL(CenterDepth, ProjectionParams.x, ProjectionParams.y) ;
+	
+	// float depth_width = s_depth_width[lowres_local_id.y][lowres_local_id.x];
+
+	SH CenterSH;
+	CenterSH.shY = g_SH[CenterHiResPos.y][CenterHiResPos.x];
+	CenterSH.CoCg = g_CoCg[CenterHiResPos.y][CenterHiResPos.x];
+
+	float sum_w = 1;
+	SH SumSH = CenterSH;
+
+	for(int yy = -1; yy <= 1; yy++)
+	{
+		for(int xx = -1; xx <= 1; xx++)
+		{
+			if(yy == 0 && xx == 0)
+				continue;
+
+			float3 SampleNormal = g_Normal[CenterHiResPos.y + yy][CenterHiResPos.x + xx].xyz;
+			float SampleDepth = g_Depth[CenterHiResPos.y + yy][CenterHiResPos.x + xx];
+			float SampleZ = GetLinearDepthOpenGL(SampleDepth, ProjectionParams.x, ProjectionParams.y) ;
+
+			float w = 1.0f;
+			float DistZ = abs(SampleZ - CenterZ) * 0.2;
+			w *= exp(-DistZ/1) ;
+
+			w *= pow(max(dot(SampleNormal, CenterNormal), 0), 8);
+
+			SH SampleSH;
+			SampleSH.shY = g_SH[CenterHiResPos.y + yy][CenterHiResPos.x + xx];
+			SampleSH.CoCg = g_CoCg[CenterHiResPos.y + yy][CenterHiResPos.x + xx];
+
+			accumulate_SH(SumSH, SampleSH, w);
+			sum_w += w;
+		}
+	}
+
+	float inv_w = 1.0 / sum_w;
+	SumSH.shY  *= inv_w;
+	SumSH.CoCg *= inv_w;
+
+     uint2 LowResPos = GId * (GROUPSIZE / DOWNSAMPLE_SIZE) + LowResGroupPos;
+	OutGIResultSHDS[LowResPos] = SumSH.shY;
+    OutGIResultColorDS[LowResPos] = float4(SumSH.CoCg, 0, 0);
 }

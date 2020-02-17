@@ -135,7 +135,7 @@ private:
 	shared_ptr<Texture> ShadowBuffer;
 	shared_ptr<Texture> ReflectionBuffer;
 
-	UINT GIBufferScale = 1;
+	UINT GIBufferScale = 3;
 	UINT GIBufferWriteIndex = 0;
 	shared_ptr<Texture> GIBufferSHTemporal[2];
 	shared_ptr<Texture> GIBufferColorTemporal[2];
@@ -265,7 +265,7 @@ private:
 		glm::vec4 LightDir;
 		glm::vec2 RTSize;
 		float TAABlendFactor;
-		UINT32 GIBufferScale;
+		float GIBufferScale;
 	};
 
 	struct TemporalAAParam

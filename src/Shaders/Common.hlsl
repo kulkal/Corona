@@ -1,5 +1,8 @@
 #define PI 3.14159265
 
+#define DOWNSAMPLE_SIZE 3
+
+
 float GetLinearDepth(float DeviceDepth, float ParamX, float ParamY, float ParamZ)
 {
     // return Near/(Near-Far)/(DeviceDepth -Far/(Far-Near))*Far

@@ -31,7 +31,7 @@ void DeFlicker(Texture2D GIResultSHTex, Texture2D GIResultColorTex, uint2 Pos, i
 {
 	int StepSize =  int(1u << (Iteration - 1));
 
-	float2 CenterPos = Pos;
+	uint2 CenterPos = Pos;
 
 	SH CenterSH = init_SH();
 	CenterSH.shY = GIResultSHTex[CenterPos];
@@ -52,7 +52,7 @@ void DeFlicker(Texture2D GIResultSHTex, Texture2D GIResultColorTex, uint2 Pos, i
 			if(xx == 0 && yy == 0)
 				continue;
 
-			float2 SamplePos = CenterPos + float2(xx, yy) * StepSize;
+			uint2 SamplePos = CenterPos + float2(xx, yy);
 
 			SumSH.shY += GIResultSHTex[SamplePos];
 			SumSH.CoCg += GIResultColorTex[SamplePos].xy;
@@ -77,26 +77,30 @@ void Filter(Texture2D GIResultSHTex,Texture2D GIResultColorTex, uint2 Pos, inout
 {
 	int StepSize =  int(1u << (Iteration - 1));
 
-	float2 CenterPos = Pos;
+	uint2 CenterPos = Pos;
+	uint2 CenterPosHiRes = CenterPos * DOWNSAMPLE_SIZE + uint2(1, 1);
 
-	float CenterDepth = DepthTex[CenterPos.xy];
+	float CenterDepth = DepthTex[CenterPosHiRes.xy];
 	float CenterZ = GetLinearDepthOpenGL(CenterDepth, ProjectionParams.x, ProjectionParams.y) ;
 
-	float3 CenterNormal = GeoNormalTex[CenterPos.xy];
+	float3 CenterNormal = GeoNormalTex[CenterPosHiRes.xy];
 
 	const int r = 1;
 	float3 SumColor = float3(0, 0, 0);
-	float SumW = 0;
+	float SumW = 1.0f;
 
 	SH SumSH = init_SH();
 
+	SumSH.shY = GIResultSHTex[CenterPos];
+	SumSH.CoCg = GIResultColorTex[CenterPos].xy;
 	for(int yy = -r; yy <= r; yy++) 
 	{
 		for(int xx = -r; xx <= r; xx++) 
 		{
 			if(xx == 0 && yy == 0)
 				continue;
-			float2 SamplePos = CenterPos + float2(xx, yy) * StepSize;
+			uint2 SamplePos = CenterPos + float2(xx, yy) * StepSize;
+			uint2 SamplePosHiRes = SamplePos * DOWNSAMPLE_SIZE + uint2(1,1);
 
 			SH SampleSH;
 			SampleSH.shY = GIResultSHTex[SamplePos];
@@ -104,12 +108,12 @@ void Filter(Texture2D GIResultSHTex,Texture2D GIResultColorTex, uint2 Pos, inout
 
 			float W = 1;
 
-			float3 SampleDepth = DepthTex[SamplePos.xy];
+			float3 SampleDepth = DepthTex[SamplePosHiRes.xy];
 			float SampleZ = GetLinearDepthOpenGL(SampleDepth, ProjectionParams.x, ProjectionParams.y) ;
 
 			float DistZ = abs(CenterZ - SampleZ) * IndirectDiffuseWeightFactorDepth;
-			W *= exp(-DistZ/StepSize) ;
-			float3 Normal = GeoNormalTex[SamplePos.xy];
+			W *= exp(-DistZ/float(StepSize*DOWNSAMPLE_SIZE)) ;
+			float3 Normal = GeoNormalTex[SamplePosHiRes.xy];
 			W *= wavelet_kernel[abs(xx)][abs(yy)];
 
 			float GNdotGN = max(0.0, dot(CenterNormal, Normal));
@@ -138,6 +142,4 @@ void SpatialFilter( uint3 DTid : SV_DispatchThreadID )
     OutGIResultSH[DTid.xy] = ResultSH.shY;
     OutGIResultColor[DTid.xy] = float4(ResultSH.CoCg, 0, 0);
 
-    // OutGIResultSH[DTid.xy] = InGIResultSHTex[DTid.xy];
-    // OutGIResultColor[DTid.xy] = InGIResultColorTex[DTid.xy];
 }
