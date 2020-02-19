@@ -105,6 +105,7 @@ public:
 private:
 	std::unique_ptr<DumRHI_DX12> dx12_rhi;
 
+	float m_turnSpeed = glm::half_pi<float>();
 	bool bMultiThreadRendering = false;
 	bool bDebugDraw = false;
 	
@@ -161,8 +162,8 @@ private:
 		glm::vec4 ProjectionParams;
 		UINT32 Iteration;
 		UINT32 GIBufferScale;
-		float IndirectDiffuseWeightFactorDepth = 0.20f;
-		float IndirectDiffuseWeightFactorNormal = 9.0f;
+		float IndirectDiffuseWeightFactorDepth = 0.5f;
+		float IndirectDiffuseWeightFactorNormal = 1.0f;
 	};
 
 	//FLOAT IndirectDiffuseWeightFactor0;

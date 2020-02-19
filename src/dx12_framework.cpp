@@ -1816,6 +1816,7 @@ void dx12_framework::OnUpdate()
 
 	m_frameCounter++;
 
+	m_camera.SetTurnSpeed(m_turnSpeed);
 	m_camera.Update(static_cast<float>(m_timer.GetElapsedSeconds()));
 
 	ViewMat = m_camera.GetViewMatrix();
@@ -1966,15 +1967,22 @@ void dx12_framework::OnRender()
 
 	//ImGui::ShowDemoWindow(&show_demo_window);
 
-	ImGui::Begin("Hello, world!");                          // Create a window called "Hello, world!" and append into it.
-	ImGui::Text("This is some useful text.");               // Display some text (you can use a format strings too)
-	ImGui::Checkbox("Enable TemporalAA", &bEnableTAA);      // Edit bools storing our window open/close state
+	char fps[64];
+	sprintf(fps, "FPS : %u fps", m_timer.GetFramesPerSecond());
+
+	ImGui::Begin("Hi, Let's traceray!");
+	ImGui::Text(fps);
+
+	ImGui::Text("Tuning knobs.");
+	ImGui::SliderFloat("Camera turn speed", &m_turnSpeed, 0.0f, glm::half_pi<float>()*2);
+
+	ImGui::Checkbox("Enable TemporalAA", &bEnableTAA);
 
 	ImGui::SliderFloat3("Light direction", &LightDir.x, -1.0f, 1.0f);
 	ImGui::SliderFloat("Light Brightness", &LightIntensity, 0.0f, 20.0f);
 
-	ImGui::SliderFloat("IndirectDiffuse Depth Weight Factor", &SpatialFilterCB.IndirectDiffuseWeightFactorDepth, 0.0f, 20.0f);            // Edit 1 float using a slider from 0.0f to 1.0f
-	ImGui::SliderFloat("IndirectDiffuse Normal Weight Factor", &SpatialFilterCB.IndirectDiffuseWeightFactorNormal, 0.0f, 20.0f);            // Edit 1 float using a slider from 0.0f to 1.0f
+	ImGui::SliderFloat("IndirectDiffuse Depth Weight Factor", &SpatialFilterCB.IndirectDiffuseWeightFactorDepth, 0.0f, 20.0f);
+	ImGui::SliderFloat("IndirectDiffuse Normal Weight Factor", &SpatialFilterCB.IndirectDiffuseWeightFactorNormal, 0.0f, 20.0f);
 
 	ImGui::End();
 

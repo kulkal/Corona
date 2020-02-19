@@ -29,6 +29,7 @@ groupshared float2 g_CoCg[GROUPSIZE][GROUPSIZE];
 groupshared float3 g_Normal[GROUPSIZE][GROUPSIZE]; 
 groupshared float g_Depth[GROUPSIZE][GROUPSIZE]; 
 
+static const float2 off[4] = { { 0, 0 }, { 1, 0 }, { 0, 1 }, { 1, 1 } };
 
 
 [numthreads(15, 15, 1)]
@@ -36,24 +37,101 @@ void TemporalFilter( uint3 DTid : SV_DispatchThreadID, uint3 GTid : SV_GroupThre
 {
 	float2 PixelPos = DTid.xy;
 	float2 GroupPos = GTid.xy;
+
+  	uint2 LowResGroupPos;
+	LowResGroupPos.x = GTIndex % (GROUPSIZE / DOWNSAMPLE_SIZE);
+	LowResGroupPos.y = GTIndex / (GROUPSIZE / DOWNSAMPLE_SIZE);
+	uint2 CenterHiResPos = LowResGroupPos * DOWNSAMPLE_SIZE + uint2(1, 1);
+
+	float3 CurNormal = g_Normal[GroupPos.y][GroupPos.x] = GeoNormalTex[PixelPos].xyz;
+    float CurDepth = g_Depth[GroupPos.y][GroupPos.x] = DepthTex[PixelPos];
+
+    // GroupMemoryBarrierWithGroupSync();
+	
+
 	SH CurrentSH = init_SH();
 	CurrentSH.shY = InGIResultSHTex[PixelPos];
 	CurrentSH.CoCg = InGIResultColorTex[PixelPos].xy;
 
 	SH PrevSH = init_SH();
-	uint2 PrevPos;
+	float2 PrevPos;
 
     float2 Velocity = VelocityTex[PixelPos];
     PrevPos = PixelPos - Velocity  * RTSize;
 
+	bool isValidHistory = false;
+	float temporal_sum_w_spec = 0.0f;
+	float2 pos_ld = floor(PrevPos - float2(0.5, 0.5));
+	float2 subpix = frac(PrevPos - float2(0.5, 0.5) - pos_ld);
+	
 	PrevSH.shY = InGIResultSHTexPrev[PrevPos];
 	PrevSH.CoCg = InGIResultColorTexPrev[PrevPos].xy;
 
+ 	
+	//Bilinear/bilateral filter
+	float w[4] = {
+		(1.0 - subpix.x) * (1.0 - subpix.y),
+		(subpix.x      ) * (1.0 - subpix.y),
+		(1.0 - subpix.x) * (subpix.y      ),
+		(subpix.x      ) * (subpix.y      )
+	};
+
+	// bool bt = false;
+	// [unroll]
+	for(int i = 0; i < 4; i++) 
+	{
+		float2 p = float2(pos_ld) + off[i];
+
+		if(p.x < 0 || p.x >= RTSize.x || p.y < 0 || p.y >= RTSize.y)
+			continue;
+
+		float PrevDepth = DepthTex[p];
+		float3 PrevNormal = GeoNormalTex[p];
+
+		float dist_depth = abs(CurDepth - PrevDepth);
+		float dot_normals = dot(CurNormal, PrevNormal);
+
+		if(CurDepth < 0)
+		{
+			// Reduce the filter sensitivity to depth for secondary surfaces,
+			// because reflection/refraction motion vectors are often inaccurate.
+			dist_depth *= 0.25;
+		}
+
+		if(dist_depth < 2.0 && dot_normals > 0.5) 
+		{
+			float w_diff = w[i];
+			float w_spec = w_diff * pow(max(dot_normals, 0), 128);
+			temporal_sum_w_spec += w_spec;
+			// bt = true;
+		}
+	}
+
+	if(temporal_sum_w_spec > 0.000001)
+	{
+		isValidHistory = true;
+	}
+
+	// if(bt == true)
+		// isValidHistory = true;
+
+		// isValidHistory = true;
 
 	SH BlendedSH = init_SH();
 	float W = 0.1;
-	BlendedSH.shY = max(CurrentSH.shY * W + PrevSH.shY * (1-W), float4(0, 0, 0, 0));
-    BlendedSH.CoCg = max(CurrentSH.CoCg * W + PrevSH.CoCg * (1-W), float2(0, 0));
+	if(isValidHistory)
+	{
+		BlendedSH.shY = max(CurrentSH.shY * W + PrevSH.shY * (1-W), float4(0, 0, 0, 0));
+    	BlendedSH.CoCg = max(CurrentSH.CoCg * W + PrevSH.CoCg * (1-W), float2(0, 0));	
+	}
+	else
+	{
+		BlendedSH.shY = CurrentSH.shY;
+		BlendedSH.CoCg = CurrentSH.CoCg;
+	}
+	
+	// BlendedSH.shY = CurrentSH.shY;
+	// BlendedSH.CoCg = CurrentSH.CoCg;
 
 	OutGIResultSH[PixelPos] = BlendedSH.shY;
     OutGIResultColor[PixelPos] = float4(BlendedSH.CoCg, 0, 0);
@@ -61,16 +139,13 @@ void TemporalFilter( uint3 DTid : SV_DispatchThreadID, uint3 GTid : SV_GroupThre
 
     g_SH[GroupPos.y][GroupPos.x] = BlendedSH.shY;
     g_CoCg[GroupPos.y][GroupPos.x] = BlendedSH.CoCg;
-    g_Normal[GroupPos.y][GroupPos.x] = GeoNormalTex[PixelPos].xyz;
-    g_Depth[GroupPos.y][GroupPos.x] = DepthTex[PixelPos];
+   
 
 
     GroupMemoryBarrierWithGroupSync();
 
 
-    uint2 LowResGroupPos;
-	LowResGroupPos.x = GTIndex % (GROUPSIZE / DOWNSAMPLE_SIZE);
-	LowResGroupPos.y = GTIndex / (GROUPSIZE / DOWNSAMPLE_SIZE);
+  
 
 	// gl_LocalInvocationIndex 0 ~225
 	// GROUP_SIZE / GRAD_DWN = 15/3 = 5
@@ -81,7 +156,6 @@ void TemporalFilter( uint3 DTid : SV_DispatchThreadID, uint3 GTid : SV_GroupThre
 	if(LowResGroupPos.y >= (GROUPSIZE / DOWNSAMPLE_SIZE))
 		return;
 
-	uint2 CenterHiResPos = LowResGroupPos * DOWNSAMPLE_SIZE + uint2(1, 1);
 	float3 CenterNormal = g_Normal[CenterHiResPos.y][CenterHiResPos.x];
 	float CenterDepth = g_Depth[CenterHiResPos.y][CenterHiResPos.x];
 	float CenterZ = GetLinearDepthOpenGL(CenterDepth, ProjectionParams.x, ProjectionParams.y) ;
