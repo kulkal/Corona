@@ -107,6 +107,7 @@ void TemporalFilter( uint3 DTid : SV_DispatchThreadID, uint3 GTid : SV_GroupThre
 		}
 	}
 
+	// this code have application hang infinitely with gpu validation enabled.
 	if(temporal_sum_w_spec > 0.000001)
 	{
 		isValidHistory = true;
