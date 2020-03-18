@@ -348,7 +348,7 @@ void dx12_framework::LoadPipeline()
 
 		ComPtr<ID3D12Debug1> spDebugController1;
 		debugController->QueryInterface(IID_PPV_ARGS(&spDebugController1));
-		spDebugController1->SetEnableGPUBasedValidation(true);
+		//spDebugController1->SetEnableGPUBasedValidation(true);
 	}
 #endif
 
@@ -427,7 +427,7 @@ void dx12_framework::LoadPipeline()
 
 	ComPtr<IDXGISwapChain1> swapChain;
 	ThrowIfFailed(factory->CreateSwapChainForHwnd(
-		dx12_rhi->CommandQueue.Get(),		// Swap chain needs the queue so that it can force a flush on it.
+		dx12_rhi->CmdQ->CmdQueue.Get(),		// Swap chain needs the queue so that it can force a flush on it.
 		Win32Application::GetHwnd(),
 		&swapChainDesc,
 		nullptr,
@@ -1514,7 +1514,7 @@ void dx12_framework::InitTemporalAAPass()
 
 void dx12_framework::CopyPass()
 {
-	/*PIXBeginEvent*/(dx12_rhi->CommandList.Get(), 0, L"CopyPass");
+	/*PIXBeginEvent*/(dx12_rhi->GlobalCmdList->CmdList.Get(), 0, L"CopyPass");
 
 	Texture* backbuffer = framebuffers[dx12_rhi->CurrentFrameIndex].get();
 	Texture* ResolveTarget = ColorBuffers[ColorBufferWriteIndex];//framebuffers[dx12_rhi->CurrentFrameIndex].get();
@@ -1525,19 +1525,19 @@ void dx12_framework::CopyPass()
 	dx12_rhi->CommandList->ClearRenderTargetView(backbuffer->CpuHandleRTV, clearColor, 0, nullptr);
 	*/
 	RS_Copy->currentDrawCallIndex = 0;
-	RS_Copy->Apply(dx12_rhi->CommandList.Get());
+	RS_Copy->Apply(dx12_rhi->GlobalCmdList->CmdList.Get());
 
 
-	RS_Copy->SetSampler("samplerWrap", samplerWrap.get(), dx12_rhi->CommandList.Get());
-	RS_Copy->SetTexture("SrcTex", ResolveTarget, dx12_rhi->CommandList.Get());
+	RS_Copy->SetSampler("samplerWrap", samplerWrap.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
+	RS_Copy->SetTexture("SrcTex", ResolveTarget, dx12_rhi->GlobalCmdList->CmdList.Get());
 
 	CopyScaleOffsetCB cb;
 	cb.Offset = glm::vec4(0, 0, 0, 0);
 	cb.Scale = glm::vec4(1, 1, 0, 0);
-	RS_Copy->SetConstantValue("ScaleOffsetParams", &cb, dx12_rhi->CommandList.Get());
+	RS_Copy->SetConstantValue("ScaleOffsetParams", &cb, dx12_rhi->GlobalCmdList->CmdList.Get());
 
 
-	RS_Copy->Apply(dx12_rhi->CommandList.Get());
+	RS_Copy->Apply(dx12_rhi->GlobalCmdList->CmdList.Get());
 
 
 	UINT Width = m_width / 1;
@@ -1546,16 +1546,16 @@ void dx12_framework::CopyPass()
 	CD3DX12_RECT scissorRect(0, 0, static_cast<LONG>(Width), static_cast<LONG>(Height));
 
 
-	dx12_rhi->CommandList->RSSetViewports(1, &viewport);
+	dx12_rhi->GlobalCmdList->CmdList->RSSetViewports(1, &viewport);
 
 
-	dx12_rhi->CommandList->RSSetScissorRects(1, &scissorRect);
+	dx12_rhi->GlobalCmdList->CmdList->RSSetScissorRects(1, &scissorRect);
 
-	dx12_rhi->CommandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
-	dx12_rhi->CommandList->IASetVertexBuffers(0, 1, &FullScreenVB->view);
+	dx12_rhi->GlobalCmdList->CmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+	dx12_rhi->GlobalCmdList->CmdList->IASetVertexBuffers(0, 1, &FullScreenVB->view);
 	
 
-	dx12_rhi->CommandList->DrawInstanced(4, 1, 0, 0);
+	dx12_rhi->GlobalCmdList->CmdList->DrawInstanced(4, 1, 0, 0);
 
 	RS_Copy->currentDrawCallIndex++;
 
@@ -1567,125 +1567,125 @@ void dx12_framework::DebugPass()
 
 	Texture* backbuffer = framebuffers[dx12_rhi->CurrentFrameIndex].get();
 
-	RS_Copy->Apply(dx12_rhi->CommandList.Get());
-	dx12_rhi->CommandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
-	dx12_rhi->CommandList->IASetVertexBuffers(0, 1, &FullScreenVB->view);
+	RS_Copy->Apply(dx12_rhi->GlobalCmdList->CmdList.Get());
+	dx12_rhi->GlobalCmdList->CmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+	dx12_rhi->GlobalCmdList->CmdList->IASetVertexBuffers(0, 1, &FullScreenVB->view);
 
-	RS_Copy->SetSampler("samplerWrap", samplerWrap.get(), dx12_rhi->CommandList.Get());
+	RS_Copy->SetSampler("samplerWrap", samplerWrap.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
 	CopyScaleOffsetCB cb;
 
 	 //raytraced shadow
-	RS_Copy->SetTexture("SrcTex", ShadowBuffer.get(), dx12_rhi->CommandList.Get());
+	RS_Copy->SetTexture("SrcTex", ShadowBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
 	cb.Offset = glm::vec4(-0.75, -0.75, 0, 0);
 	cb.Scale = glm::vec4(0.25, 0.25, 0, 0);
-	RS_Copy->SetConstantValue("ScaleOffsetParams", &cb, dx12_rhi->CommandList.Get());
-	dx12_rhi->CommandList->DrawInstanced(4, 1, 0, 0);
+	RS_Copy->SetConstantValue("ScaleOffsetParams", &cb, dx12_rhi->GlobalCmdList->CmdList.Get());
+	dx12_rhi->GlobalCmdList->CmdList->DrawInstanced(4, 1, 0, 0);
 	RS_Copy->currentDrawCallIndex++;
 
 
 	// raytrace reflection
-	RS_Copy->SetTexture("SrcTex", ReflectionBuffer.get(), dx12_rhi->CommandList.Get());
+	RS_Copy->SetTexture("SrcTex", ReflectionBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
 	cb.Offset = glm::vec4(-0.75, -0.25, 0, 0);
 	cb.Scale = glm::vec4(0.25, 0.25, 0, 0);
-	RS_Copy->SetConstantValue("ScaleOffsetParams", &cb, dx12_rhi->CommandList.Get());
-	dx12_rhi->CommandList->DrawInstanced(4, 1, 0, 0);
+	RS_Copy->SetConstantValue("ScaleOffsetParams", &cb, dx12_rhi->GlobalCmdList->CmdList.Get());
+	dx12_rhi->GlobalCmdList->CmdList->DrawInstanced(4, 1, 0, 0);
 	RS_Copy->currentDrawCallIndex++;
 
 
 	// world normal
-	RS_Copy->SetTexture("SrcTex", NormalBuffer.get(), dx12_rhi->CommandList.Get());
+	RS_Copy->SetTexture("SrcTex", NormalBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
 	cb.Offset = glm::vec4(-0.25, -0.75, 0, 0);
 	cb.Scale = glm::vec4(0.25, 0.25, 0, 0);
-	RS_Copy->SetConstantValue("ScaleOffsetParams", &cb, dx12_rhi->CommandList.Get());
-	dx12_rhi->CommandList->DrawInstanced(4, 1, 0, 0);
+	RS_Copy->SetConstantValue("ScaleOffsetParams", &cb, dx12_rhi->GlobalCmdList->CmdList.Get());
+	dx12_rhi->GlobalCmdList->CmdList->DrawInstanced(4, 1, 0, 0);
 	RS_Copy->currentDrawCallIndex++;
 
 
 	// geom world normal
 	cb.Offset = glm::vec4(-0.25, -0.25, 0, 0);
 	cb.Scale = glm::vec4(0.25, 0.25, 0, 0);
-	RS_Copy->SetConstantValue("ScaleOffsetParams", &cb, dx12_rhi->CommandList.Get());
-	RS_Copy->SetTexture("SrcTex", GeomNormalBuffer.get(), dx12_rhi->CommandList.Get());
-	dx12_rhi->CommandList->DrawInstanced(4, 1, 0, 0);
+	RS_Copy->SetConstantValue("ScaleOffsetParams", &cb, dx12_rhi->GlobalCmdList->CmdList.Get());
+	RS_Copy->SetTexture("SrcTex", GeomNormalBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
+	dx12_rhi->GlobalCmdList->CmdList->DrawInstanced(4, 1, 0, 0);
 	RS_Copy->currentDrawCallIndex++;
 
 	// depth
 	cb.Offset = glm::vec4(0.25, -0.75, 0, 0);
 	cb.Scale = glm::vec4(0.25, 0.25, 0, 0);
-	RS_Copy->SetConstantValue("ScaleOffsetParams", &cb, dx12_rhi->CommandList.Get());
-	RS_Copy->SetTexture("SrcTex", DepthBuffer.get(), dx12_rhi->CommandList.Get());
-	dx12_rhi->CommandList->DrawInstanced(4, 1, 0, 0);
+	RS_Copy->SetConstantValue("ScaleOffsetParams", &cb, dx12_rhi->GlobalCmdList->CmdList.Get());
+	RS_Copy->SetTexture("SrcTex", DepthBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
+	dx12_rhi->GlobalCmdList->CmdList->DrawInstanced(4, 1, 0, 0);
 	RS_Copy->currentDrawCallIndex++;
 
 	// raw sh
 	cb.Offset = glm::vec4(0.25, -0.25, 0, 0);
 	cb.Scale = glm::vec4(0.25, 0.25, 0, 0);
-	RS_Copy->SetConstantValue("ScaleOffsetParams", &cb, dx12_rhi->CommandList.Get());
+	RS_Copy->SetConstantValue("ScaleOffsetParams", &cb, dx12_rhi->GlobalCmdList->CmdList.Get());
 	//RS_Copy->SetTexture("SrcTex", GIBuffer.get(), dx12_rhi->CommandList.Get());
-	RS_Copy->SetTexture("SrcTex", GIBufferSH.get(), dx12_rhi->CommandList.Get());
+	RS_Copy->SetTexture("SrcTex", GIBufferSH.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
 
-	dx12_rhi->CommandList->DrawInstanced(4, 1, 0, 0);
+	dx12_rhi->GlobalCmdList->CmdList->DrawInstanced(4, 1, 0, 0);
 	RS_Copy->currentDrawCallIndex++;
 
 	// temporal filtered sh
 	cb.Offset = glm::vec4(0.25, 0.25, 0, 0);
 	cb.Scale = glm::vec4(0.25, 0.25, 0, 0);
-	RS_Copy->SetConstantValue("ScaleOffsetParams", &cb, dx12_rhi->CommandList.Get());
+	RS_Copy->SetConstantValue("ScaleOffsetParams", &cb, dx12_rhi->GlobalCmdList->CmdList.Get());
 	//RS_Copy->SetTexture("SrcTex", GIBuffer.get(), dx12_rhi->CommandList.Get());
-	RS_Copy->SetTexture("SrcTex", GIBufferSHTemporal[GIBufferWriteIndex].get(), dx12_rhi->CommandList.Get());
+	RS_Copy->SetTexture("SrcTex", GIBufferSHTemporal[GIBufferWriteIndex].get(), dx12_rhi->GlobalCmdList->CmdList.Get());
 
-	dx12_rhi->CommandList->DrawInstanced(4, 1, 0, 0);
+	dx12_rhi->GlobalCmdList->CmdList->DrawInstanced(4, 1, 0, 0);
 	RS_Copy->currentDrawCallIndex++;
 
 	// spatial filtered sh
 	cb.Offset = glm::vec4(0.25, 0.75, 0, 0);
 	cb.Scale = glm::vec4(0.25, 0.25, 0, 0);
-	RS_Copy->SetConstantValue("ScaleOffsetParams", &cb, dx12_rhi->CommandList.Get());
+	RS_Copy->SetConstantValue("ScaleOffsetParams", &cb, dx12_rhi->GlobalCmdList->CmdList.Get());
 	//RS_Copy->SetTexture("SrcTex", GIBuffer.get(), dx12_rhi->CommandList.Get());
-	RS_Copy->SetTexture("SrcTex", FilterIndirectDiffusePingPongSH[0].get(), dx12_rhi->CommandList.Get());
+	RS_Copy->SetTexture("SrcTex", FilterIndirectDiffusePingPongSH[0].get(), dx12_rhi->GlobalCmdList->CmdList.Get());
 
-	dx12_rhi->CommandList->DrawInstanced(4, 1, 0, 0);
+	dx12_rhi->GlobalCmdList->CmdList->DrawInstanced(4, 1, 0, 0);
 	RS_Copy->currentDrawCallIndex++;
 
 	// albedo
 
 	cb.Offset = glm::vec4(0.750, -0.75, 0, 0);
 	cb.Scale = glm::vec4(0.25, 0.25, 0, 0);
-	RS_Copy->SetConstantValue("ScaleOffsetParams", &cb, dx12_rhi->CommandList.Get());
-	RS_Copy->SetTexture("SrcTex", AlbedoBuffer.get(), dx12_rhi->CommandList.Get());
-	dx12_rhi->CommandList->DrawInstanced(4, 1, 0, 0);
+	RS_Copy->SetConstantValue("ScaleOffsetParams", &cb, dx12_rhi->GlobalCmdList->CmdList.Get());
+	RS_Copy->SetTexture("SrcTex", AlbedoBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
+	dx12_rhi->GlobalCmdList->CmdList->DrawInstanced(4, 1, 0, 0);
 	RS_Copy->currentDrawCallIndex++;
 
 	// velocity
 	cb.Offset = glm::vec4(0.75, -0.25, 0, 0);
 	cb.Scale = glm::vec4(0.25, 0.25, 0, 0);
-	RS_Copy->SetConstantValue("ScaleOffsetParams", &cb, dx12_rhi->CommandList.Get());
-	RS_Copy->SetTexture("SrcTex", VelocityBuffer.get(), dx12_rhi->CommandList.Get());
-	dx12_rhi->CommandList->DrawInstanced(4, 1, 0, 0);
+	RS_Copy->SetConstantValue("ScaleOffsetParams", &cb, dx12_rhi->GlobalCmdList->CmdList.Get());
+	RS_Copy->SetTexture("SrcTex", VelocityBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
+	dx12_rhi->GlobalCmdList->CmdList->DrawInstanced(4, 1, 0, 0);
 	RS_Copy->currentDrawCallIndex++;
 
-	RS_Copy->Apply(dx12_rhi->CommandList.Get());
+	RS_Copy->Apply(dx12_rhi->GlobalCmdList->CmdList.Get());
 }
 
 void dx12_framework::LightingPass()
 {
 
-	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(LightingBuffer->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET));
+	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(LightingBuffer->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET));
 
 
-	RS_Lighting->Apply(dx12_rhi->CommandList.Get());
+	RS_Lighting->Apply(dx12_rhi->GlobalCmdList->CmdList.Get());
 
 
-	RS_Lighting->SetSampler("samplerWrap", samplerWrap.get(), dx12_rhi->CommandList.Get());
-	RS_Lighting->SetTexture("AlbedoTex", AlbedoBuffer.get(), dx12_rhi->CommandList.Get());
-	RS_Lighting->SetTexture("NormalTex", NormalBuffer.get(), dx12_rhi->CommandList.Get());
-	RS_Lighting->SetTexture("ShadowTex", ShadowBuffer.get(), dx12_rhi->CommandList.Get());
+	RS_Lighting->SetSampler("samplerWrap", samplerWrap.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
+	RS_Lighting->SetTexture("AlbedoTex", AlbedoBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
+	RS_Lighting->SetTexture("NormalTex", NormalBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
+	RS_Lighting->SetTexture("ShadowTex", ShadowBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
 
-	RS_Lighting->SetTexture("VelocityTex", VelocityBuffer.get(), dx12_rhi->CommandList.Get());
-	RS_Lighting->SetTexture("DepthTex", DepthBuffer.get(), dx12_rhi->CommandList.Get());
+	RS_Lighting->SetTexture("VelocityTex", VelocityBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
+	RS_Lighting->SetTexture("DepthTex", DepthBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
 	//RS_Lighting->SetTexture("IndirectDiffuseTex", FilterIndirectDiffusePingPong[1].get(), dx12_rhi->CommandList.Get());
-	RS_Lighting->SetTexture("GIResultSHTex", FilterIndirectDiffusePingPongSH[0].get(), dx12_rhi->CommandList.Get());
-	RS_Lighting->SetTexture("GIResultColorTex", FilterIndirectDiffusePingPongColor[0].get(), dx12_rhi->CommandList.Get());
+	RS_Lighting->SetTexture("GIResultSHTex", FilterIndirectDiffusePingPongSH[0].get(), dx12_rhi->GlobalCmdList->CmdList.Get());
+	RS_Lighting->SetTexture("GIResultColorTex", FilterIndirectDiffusePingPongColor[0].get(), dx12_rhi->GlobalCmdList->CmdList.Get());
 
 
 	LightingParam Param;
@@ -1703,25 +1703,25 @@ void dx12_framework::LightingPass()
 
 
 	glm::normalize(Param.LightDir);
-	RS_Lighting->SetConstantValue("LightingParam", &Param, dx12_rhi->CommandList.Get());
+	RS_Lighting->SetConstantValue("LightingParam", &Param, dx12_rhi->GlobalCmdList->CmdList.Get());
 
 
-	RS_Lighting->Apply(dx12_rhi->CommandList.Get());
+	RS_Lighting->Apply(dx12_rhi->GlobalCmdList->CmdList.Get());
 
-	dx12_rhi->CommandList->OMSetRenderTargets(1, &LightingBuffer->CpuHandleRTV, FALSE, nullptr);
-
-
-	dx12_rhi->CommandList->RSSetViewports(1, &m_viewport);
-	dx12_rhi->CommandList->RSSetScissorRects(1, &m_scissorRect);
-
-	dx12_rhi->CommandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
-	dx12_rhi->CommandList->IASetVertexBuffers(0, 1, &FullScreenVB->view);
+	dx12_rhi->GlobalCmdList->CmdList->OMSetRenderTargets(1, &LightingBuffer->CpuHandleRTV, FALSE, nullptr);
 
 
-	dx12_rhi->CommandList->DrawInstanced(4, 1, 0, 0);
+	dx12_rhi->GlobalCmdList->CmdList->RSSetViewports(1, &m_viewport);
+	dx12_rhi->GlobalCmdList->CmdList->RSSetScissorRects(1, &m_scissorRect);
+
+	dx12_rhi->GlobalCmdList->CmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+	dx12_rhi->GlobalCmdList->CmdList->IASetVertexBuffers(0, 1, &FullScreenVB->view);
 
 
-	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(LightingBuffer->resource.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
+	dx12_rhi->GlobalCmdList->CmdList->DrawInstanced(4, 1, 0, 0);
+
+
+	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(LightingBuffer->resource.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
 
 }
 
@@ -1730,22 +1730,22 @@ void dx12_framework::TemporalAAPass()
 	UINT PrevColorBufferIndex = 1 - ColorBufferWriteIndex;
 	Texture* ResolveTarget = ColorBuffers[ColorBufferWriteIndex];//framebuffers[dx12_rhi->CurrentFrameIndex].get();
 
-	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(ResolveTarget->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET));
+	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(ResolveTarget->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET));
 
 
-	RS_TemporalAA->Apply(dx12_rhi->CommandList.Get());
+	RS_TemporalAA->Apply(dx12_rhi->GlobalCmdList->CmdList.Get());
 
 
-	RS_TemporalAA->SetSampler("samplerWrap", samplerWrap.get(), dx12_rhi->CommandList.Get());
+	RS_TemporalAA->SetSampler("samplerWrap", samplerWrap.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
 	
-	RS_TemporalAA->SetTexture("CurrentColorTex", LightingBuffer.get(), dx12_rhi->CommandList.Get());
+	RS_TemporalAA->SetTexture("CurrentColorTex", LightingBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
 	
 	Texture* PrevColorBuffer = ColorBuffers[PrevColorBufferIndex];
-	RS_TemporalAA->SetTexture("PrevColorTex", PrevColorBuffer, dx12_rhi->CommandList.Get());
+	RS_TemporalAA->SetTexture("PrevColorTex", PrevColorBuffer, dx12_rhi->GlobalCmdList->CmdList.Get());
 	
-	RS_TemporalAA->SetTexture("VelocityTex", VelocityBuffer.get(), dx12_rhi->CommandList.Get());
+	RS_TemporalAA->SetTexture("VelocityTex", VelocityBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
 	
-	RS_TemporalAA->SetTexture("DepthTex", DepthBuffer.get(), dx12_rhi->CommandList.Get());
+	RS_TemporalAA->SetTexture("DepthTex", DepthBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
 
 
 
@@ -1761,26 +1761,26 @@ void dx12_framework::TemporalAAPass()
 
 	Param.ClampMode = ClampMode;
 
-	RS_TemporalAA->SetConstantValue("LightingParam", &Param, dx12_rhi->CommandList.Get());
+	RS_TemporalAA->SetConstantValue("LightingParam", &Param, dx12_rhi->GlobalCmdList->CmdList.Get());
 
 
-	RS_TemporalAA->Apply(dx12_rhi->CommandList.Get());
+	RS_TemporalAA->Apply(dx12_rhi->GlobalCmdList->CmdList.Get());
 
 
-	dx12_rhi->CommandList->OMSetRenderTargets(1, &ResolveTarget->CpuHandleRTV, FALSE, nullptr);
+	dx12_rhi->GlobalCmdList->CmdList->OMSetRenderTargets(1, &ResolveTarget->CpuHandleRTV, FALSE, nullptr);
 
 
-	dx12_rhi->CommandList->RSSetViewports(1, &m_viewport);
-	dx12_rhi->CommandList->RSSetScissorRects(1, &m_scissorRect);
+	dx12_rhi->GlobalCmdList->CmdList->RSSetViewports(1, &m_viewport);
+	dx12_rhi->GlobalCmdList->CmdList->RSSetScissorRects(1, &m_scissorRect);
 
-	dx12_rhi->CommandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
-	dx12_rhi->CommandList->IASetVertexBuffers(0, 1, &FullScreenVB->view);
-
-
-	dx12_rhi->CommandList->DrawInstanced(4, 1, 0, 0);
+	dx12_rhi->GlobalCmdList->CmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+	dx12_rhi->GlobalCmdList->CmdList->IASetVertexBuffers(0, 1, &FullScreenVB->view);
 
 
-	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(ResolveTarget->resource.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
+	dx12_rhi->GlobalCmdList->CmdList->DrawInstanced(4, 1, 0, 0);
+
+
+	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(ResolveTarget->resource.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
 }
 
 static const float OneMinusEpsilon = 0.9999999403953552f;
@@ -1949,9 +1949,9 @@ void dx12_framework::OnRender()
 	BarrierDesc.Transition.Subresource = 0;
 	BarrierDesc.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
 	BarrierDesc.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
-	dx12_rhi->CommandList->ResourceBarrier(1, &BarrierDesc);
+	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &BarrierDesc);
 
-	dx12_rhi->CommandList->OMSetRenderTargets(1, &backbuffer->CpuHandleRTV, FALSE, nullptr);
+	dx12_rhi->GlobalCmdList->CmdList->OMSetRenderTargets(1, &backbuffer->CpuHandleRTV, FALSE, nullptr);
 	CopyPass();
 
 	if(bDebugDraw)
@@ -1987,7 +1987,7 @@ void dx12_framework::OnRender()
 	ImGui::End();
 
 	ImGui::Render();
-	ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), dx12_rhi->CommandList.Get());
+	ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), dx12_rhi->GlobalCmdList->CmdList.Get());
 
 
 	D3D12_RESOURCE_BARRIER BarrierDescPresent = {};
@@ -1997,15 +1997,9 @@ void dx12_framework::OnRender()
 	BarrierDescPresent.Transition.Subresource = 0;
 	BarrierDescPresent.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
 	BarrierDescPresent.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
-	dx12_rhi->CommandList->ResourceBarrier(1, &BarrierDescPresent);
+	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &BarrierDescPresent);
 
-
-	dx12_rhi->CommandList->Close();
-	ID3D12CommandList* ppCommandListsEnd[] = { dx12_rhi->CommandList.Get()
-	};
-	dx12_rhi->CommandQueue->ExecuteCommandLists(_countof(ppCommandListsEnd), ppCommandListsEnd);
-
-
+	dx12_rhi->CmdQ->ExecuteCommandList(dx12_rhi->GlobalCmdList);
 
 	dx12_rhi->EndFrame();
 
@@ -2018,7 +2012,7 @@ void dx12_framework::OnDestroy()
 	// Ensure that the GPU is no longer referencing resources that are about to be
 	// cleaned up by the destructor.
 	
-	dx12_rhi->WaitGPU();
+	dx12_rhi->CmdQ->WaitGPU();
 
 	ImGui_ImplDX12_Shutdown();
 	ImGui_ImplWin32_Shutdown();
@@ -2076,8 +2070,8 @@ void dx12_framework::DrawScene(shared_ptr<Scene> scene)
 {
 	for (auto& mesh : scene->meshes)
 	{
-		dx12_rhi->CommandList->IASetIndexBuffer(&mesh->Ib->view);
-		dx12_rhi->CommandList->IASetVertexBuffers(0, 1, &mesh->Vb->view);
+		dx12_rhi->GlobalCmdList->CmdList->IASetIndexBuffer(&mesh->Ib->view);
+		dx12_rhi->GlobalCmdList->CmdList->IASetVertexBuffers(0, 1, &mesh->Vb->view);
 
 		for (int i = 0; i < mesh->Draws.size(); i++)
 		{
@@ -2099,24 +2093,24 @@ void dx12_framework::DrawScene(shared_ptr<Scene> scene)
 
 			objCB.JitterOffset = JitterOffset;
 
-			RS_Mesh->SetConstantValue("ObjParameter", (void*)&objCB, dx12_rhi->CommandList.Get());
+			RS_Mesh->SetConstantValue("ObjParameter", (void*)&objCB, dx12_rhi->GlobalCmdList->CmdList.Get());
 
 
 			Texture* diffuseTex = drawcall.mat->Diffuse.get();
 			/*if (diffuseTex == nullptr)
 				diffuseTex = scene->Materials[0]->Diffuse.get();*/
 			if (diffuseTex)
-				RS_Mesh->SetTexture("diffuseMap", diffuseTex, dx12_rhi->CommandList.Get());
+				RS_Mesh->SetTexture("diffuseMap", diffuseTex, dx12_rhi->GlobalCmdList->CmdList.Get());
 
 
 			Texture* normalTex = drawcall.mat->Normal.get();
 			/*if (normalTex == nullptr)
 				normalTex = scene->Materials[0]->Normal.get();*/
 			if (normalTex)
-				RS_Mesh->SetTexture("normalMap", normalTex, dx12_rhi->CommandList.Get());
+				RS_Mesh->SetTexture("normalMap", normalTex, dx12_rhi->GlobalCmdList->CmdList.Get());
 
 
-			dx12_rhi->CommandList->DrawIndexedInstanced(drawcall.IndexCount, 1, drawcall.IndexStart, drawcall.VertexBase, 0);
+			dx12_rhi->GlobalCmdList->CmdList->DrawIndexedInstanced(drawcall.IndexCount, 1, drawcall.IndexStart, drawcall.VertexBase, 0);
 
 
 			RS_Mesh->currentDrawCallIndex++;
@@ -2126,30 +2120,26 @@ void dx12_framework::DrawScene(shared_ptr<Scene> scene)
 
 void dx12_framework::DrawMeshPass()
 {
-	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(AlbedoBuffer->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET));
-	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(NormalBuffer->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET));
-	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(GeomNormalBuffer->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET));
-	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(VelocityBuffer->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET));
+	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(AlbedoBuffer->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET));
+	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(NormalBuffer->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET));
+	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(GeomNormalBuffer->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET));
+	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(VelocityBuffer->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET));
 
-	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(DepthBuffer->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_DEPTH_WRITE));
+	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(DepthBuffer->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_DEPTH_WRITE));
 
 	const float clearColor[] = { 0.0f, 0.2f, 0.4f, 1.0f };
-	dx12_rhi->CommandList->ClearRenderTargetView(AlbedoBuffer->CpuHandleRTV, clearColor, 0, nullptr);
-	dx12_rhi->CommandList->ClearRenderTargetView(NormalBuffer->CpuHandleRTV, clearColor, 0, nullptr);
-	dx12_rhi->CommandList->ClearRenderTargetView(GeomNormalBuffer->CpuHandleRTV, clearColor, 0, nullptr);
-	dx12_rhi->CommandList->ClearRenderTargetView(VelocityBuffer->CpuHandleRTV, clearColor, 0, nullptr);
+	dx12_rhi->GlobalCmdList->CmdList->ClearRenderTargetView(AlbedoBuffer->CpuHandleRTV, clearColor, 0, nullptr);
+	dx12_rhi->GlobalCmdList->CmdList->ClearRenderTargetView(NormalBuffer->CpuHandleRTV, clearColor, 0, nullptr);
+	dx12_rhi->GlobalCmdList->CmdList->ClearRenderTargetView(GeomNormalBuffer->CpuHandleRTV, clearColor, 0, nullptr);
+	dx12_rhi->GlobalCmdList->CmdList->ClearRenderTargetView(VelocityBuffer->CpuHandleRTV, clearColor, 0, nullptr);
 
 
-	dx12_rhi->CommandList->ClearDepthStencilView(DepthBuffer->CpuHandleDSV, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
+	dx12_rhi->GlobalCmdList->CmdList->ClearDepthStencilView(DepthBuffer->CpuHandleDSV, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
 
 	
-	dx12_rhi->CommandList->Close();
-	ID3D12CommandList* ppCommandLists[] = { dx12_rhi->CommandList.Get() };
-	dx12_rhi->CommandQueue->ExecuteCommandLists(1, ppCommandLists);
-	dx12_rhi->CommandList->Reset(dx12_rhi->GetCurrentCA(), nullptr);
-
+	
 	ID3D12DescriptorHeap* ppHeaps[] = { dx12_rhi->SRVCBVDescriptorHeapShaderVisible->DH.Get(), dx12_rhi->SamplerDescriptorHeapShaderVisible->DH.Get() };
-	dx12_rhi->CommandList->SetDescriptorHeaps(_countof(ppHeaps), ppHeaps);
+	dx12_rhi->GlobalCmdList->CmdList->SetDescriptorHeaps(_countof(ppHeaps), ppHeaps);
 
 
 	if (!bMultiThreadRendering)
@@ -2158,15 +2148,15 @@ void dx12_framework::DrawMeshPass()
 
 
 
-		dx12_rhi->CommandList->OMSetRenderTargets(RS_Mesh->graphicsPSODesc.NumRenderTargets, Rendertargets, FALSE, &DepthBuffer->CpuHandleDSV);
+		dx12_rhi->GlobalCmdList->CmdList->OMSetRenderTargets(RS_Mesh->graphicsPSODesc.NumRenderTargets, Rendertargets, FALSE, &DepthBuffer->CpuHandleDSV);
 
-		RS_Mesh->Apply(dx12_rhi->CommandList.Get());
-		RS_Mesh->SetSampler("samplerWrap", samplerWrap.get(), dx12_rhi->CommandList.Get());
+		RS_Mesh->Apply(dx12_rhi->GlobalCmdList->CmdList.Get());
+		RS_Mesh->SetSampler("samplerWrap", samplerWrap.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
 
 
-		dx12_rhi->CommandList->RSSetViewports(1, &m_viewport);
-		dx12_rhi->CommandList->RSSetScissorRects(1, &m_scissorRect);
-		dx12_rhi->CommandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+		dx12_rhi->GlobalCmdList->CmdList->RSSetViewports(1, &m_viewport);
+		dx12_rhi->GlobalCmdList->CmdList->RSSetScissorRects(1, &m_scissorRect);
+		dx12_rhi->GlobalCmdList->CmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
 		RS_Mesh->currentDrawCallIndex = 0;
 		
@@ -2179,62 +2169,61 @@ void dx12_framework::DrawMeshPass()
 	}
 	else
 	{
-		UINT NumThread = dx12_rhi->NumDrawMeshCommandList;
-		UINT RemainDraw = mesh->Draws.size();
-		UINT NumDrawThread = mesh->Draws.size() / (NumThread);
-		UINT StartIndex = 0;
+		//UINT NumThread = dx12_rhi->NumDrawMeshCommandList;
+		//UINT RemainDraw = mesh->Draws.size();
+		//UINT NumDrawThread = mesh->Draws.size() / (NumThread);
+		//UINT StartIndex = 0;
 
-		vector<ThreadDescriptorHeapPool> vecDHPool;
-		vecDHPool.resize(NumThread);
+		//vector<ThreadDescriptorHeapPool> vecDHPool;
+		//vecDHPool.resize(NumThread);
 
-		vector<ParallelDrawTaskSet> vecTask;
-		vecTask.resize(NumThread);
+		//vector<ParallelDrawTaskSet> vecTask;
+		//vecTask.resize(NumThread);
 
-		for (int i = 0; i < NumThread; i++)
-		{
-			UINT ThisDraw = NumDrawThread;
-			
-			if (i == NumThread - 1)
-				ThisDraw = RemainDraw;
+		//for (int i = 0; i < NumThread; i++)
+		//{
+		//	UINT ThisDraw = NumDrawThread;
+		//	
+		//	if (i == NumThread - 1)
+		//		ThisDraw = RemainDraw;
 
-			ThreadDescriptorHeapPool& DHPool = vecDHPool[i];
-			DHPool.AllocPool(RS_Mesh->GetGraphicsBindingDHSize()*ThisDraw);
+		//	ThreadDescriptorHeapPool& DHPool = vecDHPool[i];
+		//	DHPool.AllocPool(RS_Mesh->GetGraphicsBindingDHSize()*ThisDraw);
 
-			// draw
-			ParallelDrawTaskSet& task = vecTask[i];
-			task.app = this;
-			task.StartIndex = StartIndex;
-			task.ThisDraw = ThisDraw;
-			task.ThreadIndex = i;
-			task.DHPool = &DHPool;
+		//	// draw
+		//	ParallelDrawTaskSet& task = vecTask[i];
+		//	task.app = this;
+		//	task.StartIndex = StartIndex;
+		//	task.ThisDraw = ThisDraw;
+		//	task.ThreadIndex = i;
+		//	task.DHPool = &DHPool;
 
-			g_TS.AddTaskSetToPipe(&task);
+		//	g_TS.AddTaskSetToPipe(&task);
 
-			RemainDraw -= ThisDraw;
-			StartIndex += ThisDraw;
-		}
+		//	RemainDraw -= ThisDraw;
+		//	StartIndex += ThisDraw;
+		//}
 
-		g_TS.WaitforAll();
+		//g_TS.WaitforAll();
 
 
-		UINT NumCL = dx12_rhi->NumDrawMeshCommandList;
-		vector< ID3D12CommandList*> vecCL;
+		//UINT NumCL = dx12_rhi->NumDrawMeshCommandList;
+		//vector< ID3D12CommandList*> vecCL;
 
-		for (int i = 0; i < NumCL; i++)
-			vecCL.push_back(dx12_rhi->DrawMeshCommandList[i].Get());
+		//for (int i = 0; i < NumCL; i++)
+		//	vecCL.push_back(dx12_rhi->DrawMeshCommandList[i].Get());
 
-		dx12_rhi->CommandQueue->ExecuteCommandLists(vecCL.size(), &vecCL[0]);
 	}
 
 	
 	
-	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(AlbedoBuffer->resource.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
-	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(NormalBuffer->resource.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
-	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(GeomNormalBuffer->resource.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
-	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(VelocityBuffer->resource.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
+	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(AlbedoBuffer->resource.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
+	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(NormalBuffer->resource.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
+	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(GeomNormalBuffer->resource.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
+	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(VelocityBuffer->resource.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
 
 
-	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(DepthBuffer->resource.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
+	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(DepthBuffer->resource.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
 }
 
 void dx12_framework::RecordDraw (UINT StartIndex, UINT NumDraw, UINT CLIndex, ThreadDescriptorHeapPool* DHPool)
@@ -2304,33 +2293,33 @@ void dx12_framework::SpatialDenoisingPass()
 		WriteIndex = 1 - WriteIndex; // 1
 		ReadIndex = 1 - WriteIndex; // 0
 
-		dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(FilterIndirectDiffusePingPongSH[WriteIndex]->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS));
-		dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(FilterIndirectDiffusePingPongColor[WriteIndex]->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS));
+		dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(FilterIndirectDiffusePingPongSH[WriteIndex]->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS));
+		dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(FilterIndirectDiffusePingPongColor[WriteIndex]->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS));
 
 
-		RS_SpatialDenoisingFilter->Apply(dx12_rhi->CommandList.Get());
+		RS_SpatialDenoisingFilter->Apply(dx12_rhi->GlobalCmdList->CmdList.Get());
 
-		RS_SpatialDenoisingFilter->SetTexture("DepthTex", DepthBuffer.get(), dx12_rhi->CommandList.Get());
-		RS_SpatialDenoisingFilter->SetTexture("GeoNormalTex", GeomNormalBuffer.get(), dx12_rhi->CommandList.Get());
-		RS_SpatialDenoisingFilter->SetTexture("InGIResultSHTex", FilterIndirectDiffusePingPongSH[ReadIndex].get(), dx12_rhi->CommandList.Get());
-		RS_SpatialDenoisingFilter->SetTexture("InGIResultColorTex", FilterIndirectDiffusePingPongColor[ReadIndex].get(), dx12_rhi->CommandList.Get());
+		RS_SpatialDenoisingFilter->SetTexture("DepthTex", DepthBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
+		RS_SpatialDenoisingFilter->SetTexture("GeoNormalTex", GeomNormalBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
+		RS_SpatialDenoisingFilter->SetTexture("InGIResultSHTex", FilterIndirectDiffusePingPongSH[ReadIndex].get(), dx12_rhi->GlobalCmdList->CmdList.Get());
+		RS_SpatialDenoisingFilter->SetTexture("InGIResultColorTex", FilterIndirectDiffusePingPongColor[ReadIndex].get(), dx12_rhi->GlobalCmdList->CmdList.Get());
 
 
-		RS_SpatialDenoisingFilter->SetUAV("OutGIResultSH", FilterIndirectDiffusePingPongSH[WriteIndex].get(), dx12_rhi->CommandList.Get());
-		RS_SpatialDenoisingFilter->SetUAV("OutGIResultColor", FilterIndirectDiffusePingPongColor[WriteIndex].get(), dx12_rhi->CommandList.Get());
+		RS_SpatialDenoisingFilter->SetUAV("OutGIResultSH", FilterIndirectDiffusePingPongSH[WriteIndex].get(), dx12_rhi->GlobalCmdList->CmdList.Get());
+		RS_SpatialDenoisingFilter->SetUAV("OutGIResultColor", FilterIndirectDiffusePingPongColor[WriteIndex].get(), dx12_rhi->GlobalCmdList->CmdList.Get());
 
 
 
 		SpatialFilterCB.Iteration = i;
-		RS_SpatialDenoisingFilter->SetConstantValue("SpatialFilterConstant", &SpatialFilterCB, dx12_rhi->CommandList.Get());
+		RS_SpatialDenoisingFilter->SetConstantValue("SpatialFilterConstant", &SpatialFilterCB, dx12_rhi->GlobalCmdList->CmdList.Get());
 
 		UINT WidthGI = m_width / GIBufferScale;
 		UINT HeightGI = m_height / GIBufferScale;
 
-		dx12_rhi->CommandList->Dispatch(WidthGI / 32, HeightGI / 32 + 1 , 1);
+		dx12_rhi->GlobalCmdList->CmdList->Dispatch(WidthGI / 32, HeightGI / 32 + 1 , 1);
 
-		dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(FilterIndirectDiffusePingPongSH[WriteIndex]->resource.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
-		dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(FilterIndirectDiffusePingPongColor[WriteIndex]->resource.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
+		dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(FilterIndirectDiffusePingPongSH[WriteIndex]->resource.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
+		dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(FilterIndirectDiffusePingPongColor[WriteIndex]->resource.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
 
 	}
 }
@@ -2344,39 +2333,39 @@ void dx12_framework::TemporalDenoisingPass()
 	UINT ReadIndex = 1 - WriteIndex;
 
 	// first pass
-	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(FilterIndirectDiffusePingPongSH[0]->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS));
-	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(FilterIndirectDiffusePingPongColor[0]->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS));
-	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(GIBufferSHTemporal[WriteIndex]->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS));
-	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(GIBufferColorTemporal[WriteIndex]->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS));
+	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(FilterIndirectDiffusePingPongSH[0]->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS));
+	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(FilterIndirectDiffusePingPongColor[0]->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS));
+	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(GIBufferSHTemporal[WriteIndex]->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS));
+	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(GIBufferColorTemporal[WriteIndex]->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS));
 
 
-	RS_TemporalDenoisingFilter->Apply(dx12_rhi->CommandList.Get());
+	RS_TemporalDenoisingFilter->Apply(dx12_rhi->GlobalCmdList->CmdList.Get());
 
-	RS_TemporalDenoisingFilter->SetTexture("DepthTex", DepthBuffer.get(), dx12_rhi->CommandList.Get());
-	RS_TemporalDenoisingFilter->SetTexture("GeoNormalTex", GeomNormalBuffer.get(), dx12_rhi->CommandList.Get());
-	RS_TemporalDenoisingFilter->SetTexture("InGIResultSHTex", GIBufferSH.get(), dx12_rhi->CommandList.Get());
-	RS_TemporalDenoisingFilter->SetTexture("InGIResultColorTex", GIBufferColor.get(), dx12_rhi->CommandList.Get());
-	RS_TemporalDenoisingFilter->SetTexture("InGIResultSHTexPrev", GIBufferSHTemporal[ReadIndex].get(), dx12_rhi->CommandList.Get());
-	RS_TemporalDenoisingFilter->SetTexture("InGIResultColorTexPrev", GIBufferColorTemporal[ReadIndex].get(), dx12_rhi->CommandList.Get());
-	RS_TemporalDenoisingFilter->SetTexture("VelocityTex", VelocityBuffer.get(), dx12_rhi->CommandList.Get());
+	RS_TemporalDenoisingFilter->SetTexture("DepthTex", DepthBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
+	RS_TemporalDenoisingFilter->SetTexture("GeoNormalTex", GeomNormalBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
+	RS_TemporalDenoisingFilter->SetTexture("InGIResultSHTex", GIBufferSH.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
+	RS_TemporalDenoisingFilter->SetTexture("InGIResultColorTex", GIBufferColor.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
+	RS_TemporalDenoisingFilter->SetTexture("InGIResultSHTexPrev", GIBufferSHTemporal[ReadIndex].get(), dx12_rhi->GlobalCmdList->CmdList.Get());
+	RS_TemporalDenoisingFilter->SetTexture("InGIResultColorTexPrev", GIBufferColorTemporal[ReadIndex].get(), dx12_rhi->GlobalCmdList->CmdList.Get());
+	RS_TemporalDenoisingFilter->SetTexture("VelocityTex", VelocityBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
 
 
 	
-	RS_TemporalDenoisingFilter->SetUAV("OutGIResultSH", GIBufferSHTemporal[WriteIndex].get(), dx12_rhi->CommandList.Get());
-	RS_TemporalDenoisingFilter->SetUAV("OutGIResultColor", GIBufferColorTemporal[WriteIndex].get(), dx12_rhi->CommandList.Get());
-	RS_TemporalDenoisingFilter->SetUAV("OutGIResultSHDS", FilterIndirectDiffusePingPongSH[0].get(), dx12_rhi->CommandList.Get());
-	RS_TemporalDenoisingFilter->SetUAV("OutGIResultColorDS", FilterIndirectDiffusePingPongColor[0].get(), dx12_rhi->CommandList.Get());
+	RS_TemporalDenoisingFilter->SetUAV("OutGIResultSH", GIBufferSHTemporal[WriteIndex].get(), dx12_rhi->GlobalCmdList->CmdList.Get());
+	RS_TemporalDenoisingFilter->SetUAV("OutGIResultColor", GIBufferColorTemporal[WriteIndex].get(), dx12_rhi->GlobalCmdList->CmdList.Get());
+	RS_TemporalDenoisingFilter->SetUAV("OutGIResultSHDS", FilterIndirectDiffusePingPongSH[0].get(), dx12_rhi->GlobalCmdList->CmdList.Get());
+	RS_TemporalDenoisingFilter->SetUAV("OutGIResultColorDS", FilterIndirectDiffusePingPongColor[0].get(), dx12_rhi->GlobalCmdList->CmdList.Get());
 
 
-	RS_TemporalDenoisingFilter->SetConstantValue("TemporalFilterConstant", &TemporalFilterCB, dx12_rhi->CommandList.Get());
+	RS_TemporalDenoisingFilter->SetConstantValue("TemporalFilterConstant", &TemporalFilterCB, dx12_rhi->GlobalCmdList->CmdList.Get());
 
-	dx12_rhi->CommandList->Dispatch(m_width / 15 , m_height / 15, 1);
+	dx12_rhi->GlobalCmdList->CmdList->Dispatch(m_width / 15 , m_height / 15, 1);
 
-	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(FilterIndirectDiffusePingPongSH[0]->resource.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
-	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(FilterIndirectDiffusePingPongColor[0]->resource.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
+	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(FilterIndirectDiffusePingPongSH[0]->resource.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
+	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(FilterIndirectDiffusePingPongColor[0]->resource.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
 
-	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(GIBufferSHTemporal[WriteIndex]->resource.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
-	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(GIBufferColorTemporal[WriteIndex]->resource.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
+	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(GIBufferSHTemporal[WriteIndex]->resource.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
+	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(GIBufferColorTemporal[WriteIndex]->resource.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
 }
 
 void AddMeshToVec(vector<shared_ptr<RTAS>>& vecBLAS, shared_ptr<Scene> scene)
@@ -2407,12 +2396,6 @@ void dx12_framework::InitRaytracing()
 	// TODO : per model world matrix
 	TLAS = dx12_rhi->CreateTLAS(vecBLAS);
 	
-	dx12_rhi->CommandList->Close();
-	ID3D12CommandList* ppCommandLists[] = { dx12_rhi->CommandList.Get() };
-	dx12_rhi->CommandQueue->ExecuteCommandLists(1, ppCommandLists);
-
-	dx12_rhi->WaitGPU();
-
 	// create shadow rtpso
 	PSO_RT_SHADOW = unique_ptr<RTPipelineStateObject>(new RTPipelineStateObject);
 	
@@ -2550,7 +2533,7 @@ vector<UINT64> ResourceInt64array(ComPtr<ID3D12Resource> resource, int size)
 }
 void dx12_framework::RaytraceShadowPass()
 {
-	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(ShadowBuffer->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS));
+	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(ShadowBuffer->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS));
 
 	PSO_RT_SHADOW->BeginShaderTable();
 
@@ -2577,12 +2560,12 @@ void dx12_framework::RaytraceShadowPass()
 
 	PSO_RT_SHADOW->Apply(m_width, m_height);
 
-	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(ShadowBuffer->resource.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
+	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(ShadowBuffer->resource.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
 }
 
 void dx12_framework::RaytraceReflectionPass()
 {
-	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(ReflectionBuffer->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS));
+	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(ReflectionBuffer->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS));
 
 
 	PSO_RT_REFLECTION->BeginShaderTable();
@@ -2623,14 +2606,14 @@ void dx12_framework::RaytraceReflectionPass()
 
 	PSO_RT_REFLECTION->Apply(m_width, m_height);
 
-	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(ReflectionBuffer->resource.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
+	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(ReflectionBuffer->resource.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
 }
 
 void dx12_framework::RaytraceGIPass()
 {
 
-	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(GIBufferSH->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS));
-	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(GIBufferColor->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS));
+	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(GIBufferSH->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS));
+	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(GIBufferColor->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS));
 
 
 	PSO_RT_GI->BeginShaderTable();
@@ -2673,6 +2656,6 @@ void dx12_framework::RaytraceGIPass()
 
 	PSO_RT_GI->Apply(m_width, m_height);
 
-	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(GIBufferSH->resource.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
-	dx12_rhi->CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(GIBufferColor->resource.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
+	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(GIBufferSH->resource.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
+	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(GIBufferColor->resource.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
 }

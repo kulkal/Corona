@@ -84,30 +84,19 @@ void DescriptorHeap::AllocDescriptors(D3D12_CPU_DESCRIPTOR_HANDLE& cpuHandle, D3
 
 void DumRHI_DX12::BeginFrame()
 {
-	const UINT64 lastCompletedFence = m_fence->GetCompletedValue();
-
 	CurrentFrameIndex = m_swapChain->GetCurrentBackBufferIndex();
 
 	// wait until gpu processing for this frame resource is completed
-	{
-		UINT64 ThisFrameFenceValue = FrameResourceVec[CurrentFrameIndex].FenceValue;
-		ThrowIfFailed(m_fence->SetEventOnCompletion(ThisFrameFenceValue, m_fenceEvent));
-		WaitForSingleObject(m_fenceEvent, INFINITE);
-	}
-
-
-	GetCurrentCA()->Reset();
-	ThrowIfFailed(CommandList->Reset(GetCurrentCA(), nullptr));
-
-	for (auto& CA : FrameResourceVec[CurrentFrameIndex].VecCommandAllocatorMeshDraw)
-	{
-		CA->Reset();
-	}
+	UINT64 ThisFrameFenceValue = FrameFenceValueVec[CurrentFrameIndex];
 	
+	CmdQ->WaitFenceValue(ThisFrameFenceValue);
 
+	
+	GlobalCmdList = CmdQ->AllocCmdList();
+	GlobalCmdList->Fence = CmdQ->CurrentFenceValue;
 
 	ID3D12DescriptorHeap* ppHeaps[] = { SRVCBVDescriptorHeapShaderVisible->DH.Get(), SamplerDescriptorHeapShaderVisible->DH.Get() };
-	CommandList->SetDescriptorHeaps(_countof(ppHeaps), ppHeaps);
+	GlobalCmdList->CmdList->SetDescriptorHeaps(_countof(ppHeaps), ppHeaps);
 	
 
 	g_dx12_rhi->GlobalDHRing->Advance();
@@ -149,20 +138,10 @@ void DumRHI_DX12::EndFrame()
 	ThrowIfFailed(m_swapChain->Present(0, 0), &g_dx12_rhi->AM_CL_Handle);
 
 	// Signal and increment the fence value.
-	m_fenceValue++;
 
-	FrameResourceVec[CurrentFrameIndex].FenceValue = m_fenceValue;
-	ThrowIfFailed(CommandQueue->Signal(m_fence.Get(), m_fenceValue));
-}
+	FrameFenceValueVec[CurrentFrameIndex] = CmdQ->CurrentFenceValue;;
 
-void DumRHI_DX12::WaitGPU()
-{
-	m_fenceValue++;
-
-	CommandQueue->Signal(m_fence.Get(), m_fenceValue);
-
-	m_fence->SetEventOnCompletion(m_fenceValue, m_fenceEvent);
-	WaitForSingleObject(m_fenceEvent, INFINITE);
+	CmdQ->SignalCurrentFence();
 }
 
 shared_ptr<ConstantBuffer> DumRHI_DX12::CreateConstantBuffer(int Size, UINT NumView)
@@ -267,6 +246,8 @@ std::shared_ptr<Buffer> DumRHI_DX12::CreateBuffer(UINT Size)
 
 shared_ptr<IndexBuffer> DumRHI_DX12::CreateIndexBuffer(DXGI_FORMAT Format, UINT Size, void* SrcData)
 {
+	CommandList* cmd = CmdQ->AllocCmdList();
+
 	IndexBuffer* ib = new IndexBuffer;
 
 	stringstream ss;
@@ -314,8 +295,8 @@ shared_ptr<IndexBuffer> DumRHI_DX12::CreateIndexBuffer(DXGI_FORMAT Format, UINT 
 			nullptr,
 			IID_PPV_ARGS(&UploadHeap)));
 
-		UpdateSubresources<1>(CommandList.Get(), ib->resource.Get(), UploadHeap.Get(), 0, 0, 1, &indexData);
-		CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(ib->resource.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_INDEX_BUFFER | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE));
+		UpdateSubresources<1>(cmd->CmdList.Get(), ib->resource.Get(), UploadHeap.Get(), 0, 0, 1, &indexData);
+		cmd->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(ib->resource.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_INDEX_BUFFER | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE));
 
 		// create shader resource view
 		D3D12_SHADER_RESOURCE_VIEW_DESC vertexSRVDesc;
@@ -332,15 +313,8 @@ shared_ptr<IndexBuffer> DumRHI_DX12::CreateIndexBuffer(DXGI_FORMAT Format, UINT 
 
 		Device->CreateShaderResourceView(ib->resource.Get(), &vertexSRVDesc, ib->CpuHandleSRV);
 
-
-		ThrowIfFailed(CommandList->Close());
-		ID3D12CommandList* ppCommandLists[] = { CommandList.Get() };
-		CommandQueue->ExecuteCommandLists(_countof(ppCommandLists), ppCommandLists);
-		//ThrowIfFailed(CommandList->Reset(CommandAllocator.Get(), nullptr));
-		ThrowIfFailed(CommandList->Reset(GetCurrentCA(), nullptr));
-
-		g_dx12_rhi->WaitGPU();
-		// Create synchronization objects and wait until assets have been uploaded to the GPU.
+		CmdQ->ExecuteCommandList(cmd);
+		CmdQ->WaitGPU();
 	}
 
 	return shared_ptr<IndexBuffer>(ib);
@@ -348,6 +322,8 @@ shared_ptr<IndexBuffer> DumRHI_DX12::CreateIndexBuffer(DXGI_FORMAT Format, UINT 
 
 shared_ptr<VertexBuffer> DumRHI_DX12::CreateVertexBuffer(UINT Size, UINT Stride, void* SrcData)
 {
+	CommandList* cmd = CmdQ->AllocCmdList();
+
 	VertexBuffer* vb = new VertexBuffer;
 	
 	stringstream ss;
@@ -381,8 +357,8 @@ shared_ptr<VertexBuffer> DumRHI_DX12::CreateVertexBuffer(UINT Size, UINT Stride,
 			nullptr,
 			IID_PPV_ARGS(&UploadHeap)));
 
-		UpdateSubresources<1>(CommandList.Get(), vb->resource.Get(), UploadHeap.Get(), 0, 0, 1, &vertexData);
-		CommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(vb->resource.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE));
+		UpdateSubresources<1>(cmd->CmdList.Get(), vb->resource.Get(), UploadHeap.Get(), 0, 0, 1, &vertexData);
+		cmd->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(vb->resource.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE));
 
 		// Initialize the vertex buffer view.
 		vb->view.BufferLocation = vb->resource->GetGPUVirtualAddress();
@@ -405,13 +381,8 @@ shared_ptr<VertexBuffer> DumRHI_DX12::CreateVertexBuffer(UINT Size, UINT Stride,
 
 		Device->CreateShaderResourceView(vb->resource.Get(), &vertexSRVDesc, vb->CpuHandleSRV);
 
-		ThrowIfFailed(CommandList->Close());
-		ID3D12CommandList* ppCommandLists[] = { CommandList.Get() };
-		CommandQueue->ExecuteCommandLists(_countof(ppCommandLists), ppCommandLists);
-		//ThrowIfFailed(CommandList->Reset(CommandAllocator.Get(), nullptr));
-		ThrowIfFailed(CommandList->Reset(GetCurrentCA(), nullptr));
-
-		g_dx12_rhi->WaitGPU();
+		CmdQ->ExecuteCommandList(cmd);
+		CmdQ->WaitGPU();
 	}
 
 	return shared_ptr<VertexBuffer>(vb);
@@ -426,7 +397,7 @@ void DumRHI_DX12::PresentBarrier(Texture* rt)
 	BarrierDesc.Transition.Subresource = 0;
 	BarrierDesc.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
 	BarrierDesc.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
-	CommandList->ResourceBarrier(1, &BarrierDesc);
+	GlobalCmdList->CmdList->ResourceBarrier(1, &BarrierDesc);
 }
 
 DumRHI_DX12::DumRHI_DX12(ComPtr<ID3D12Device5> InDevice)
@@ -436,57 +407,12 @@ DumRHI_DX12::DumRHI_DX12(ComPtr<ID3D12Device5> InDevice)
 
 	g_dx12_rhi = this;
 
-	// Describe and create the command queue.
-	D3D12_COMMAND_QUEUE_DESC queueDesc = {};
-	queueDesc.Flags = D3D12_COMMAND_QUEUE_FLAG_NONE;
-	queueDesc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
 
-	ThrowIfFailed(Device->CreateCommandQueue(&queueDesc, IID_PPV_ARGS(&CommandQueue)));
-	NAME_D3D12_OBJECT(CommandQueue);
+	FrameFenceValueVec.resize(NumFrame);
 
-	for (int i = 0; i < NumFrame; i++)
-	{
-		FrameResource frameRes;
-		frameRes.CommandAllocator;
-		ThrowIfFailed(Device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&frameRes.CommandAllocator)));
-		NAME_D3D12_OBJECT(frameRes.CommandAllocator);
+	CmdQ = unique_ptr<CommandQueue>(new CommandQueue);
 
-		const int NumMeshDraw = NumDrawMeshCommandList;
-		frameRes.VecCommandAllocatorMeshDraw.resize(NumMeshDraw);
-		for (int m = 0; m < NumMeshDraw; m++)
-		{
-
-			ThrowIfFailed(Device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&frameRes.VecCommandAllocatorMeshDraw[m])));
-			NAME_D3D12_OBJECT(frameRes.VecCommandAllocatorMeshDraw[m]);
-		}
-		
-		FrameResourceVec.push_back(frameRes);
-
-	}
-
-	ThrowIfFailed(Device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, FrameResourceVec[0].CommandAllocator.Get(), nullptr, IID_PPV_ARGS(&CommandList)));
-
-	//GFSDK_Aftermath_Result ar = GFSDK_Aftermath_DX12_CreateContextHandle(CommandList.Get(), &AM_CL_Handle);
-
-	NAME_D3D12_OBJECT(CommandList);
-
-	for (int i = 0; i < NumDrawMeshCommandList; i++)
-	{
-		/*ThrowIfFailed(Device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&DrawMeshCommandAllocator[i])));
-		NAME_D3D12_OBJECT(DrawMeshCommandAllocator[i]);*/
-		FrameResource& frameRes = FrameResourceVec[0];
-
-		ThrowIfFailed(Device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, frameRes.VecCommandAllocatorMeshDraw[i].Get(), nullptr, IID_PPV_ARGS(&DrawMeshCommandList[i])));
-		NAME_D3D12_OBJECT(DrawMeshCommandList[i]);
-
-		DrawMeshCommandList[i]->Close();
-	}
-
-	vector< ID3D12CommandList*> vecCL;
-	for (int i = 0; i < NumDrawMeshCommandList; i++)
-		vecCL.push_back(DrawMeshCommandList[i].Get());
-	CommandQueue->ExecuteCommandLists(vecCL.size(), &vecCL[0]);
-
+	
 	{
 		RTVDescriptorHeap = std::make_unique<DescriptorHeap>();
 		D3D12_DESCRIPTOR_HEAP_DESC HeapDesc = {};
@@ -559,28 +485,13 @@ DumRHI_DX12::DumRHI_DX12(ComPtr<ID3D12Device5> InDevice)
 	GeomtryDHRing = std::make_unique<DescriptorHeapRing>();
 	GeomtryDHRing->Init(SRVCBVDescriptorHeapShaderVisible.get(), 10000, NumFrame);
 	
-	m_fenceValue = 0;
-	ThrowIfFailed(g_dx12_rhi->Device->CreateFence(m_fenceValue, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&m_fence)));
-	// Create an event handle to use for frame synchronization.
-	m_fenceEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
-
-	// Close the command list and execute it to begin the initial GPU setup.
-	ThrowIfFailed(CommandList->Close());
-	ID3D12CommandList* ppCommandLists[] = { CommandList.Get() };
-	CommandQueue->ExecuteCommandLists(_countof(ppCommandLists), ppCommandLists);
-	//ThrowIfFailed(CommandList->Reset(CommandAllocator.Get(), nullptr));
-	ThrowIfFailed(CommandList->Reset(GetCurrentCA(), nullptr));
-
-	g_dx12_rhi->WaitGPU();
+	CmdQ->WaitGPU();
 }
 
 
 DumRHI_DX12::~DumRHI_DX12()
 {
-	m_fenceValue++;
-	CommandQueue->Signal(m_fence.Get(), m_fenceValue);
-	m_fence->SetEventOnCompletion(m_fenceValue, m_fenceEvent);
-	WaitForSingleObject(m_fenceEvent, INFINITE);
+	CmdQ->WaitGPU();
 }
 
 Shader::Shader(UINT8* ByteCode, UINT Size)
@@ -1256,6 +1167,9 @@ std::shared_ptr<Texture> DumRHI_DX12::CreateTexture3D(DXGI_FORMAT format, D3D12_
 
 void Texture::UploadSRCData3D(D3D12_SUBRESOURCE_DATA* SrcData)
 {
+	CommandList* cmd = g_dx12_rhi->CmdQ->AllocCmdList();
+	ComPtr<ID3D12Resource> textureUploadHeap;
+
 	// upload src data
 	if (SrcData)
 	{
@@ -1292,7 +1206,6 @@ void Texture::UploadSRCData3D(D3D12_SUBRESOURCE_DATA* SrcData)
 		ss << "UploadSRCData : " << TotalBytes << "\n";
 		OutputDebugStringA(ss.str().c_str());
 
-		ComPtr<ID3D12Resource> textureUploadHeap;
 
 		ThrowIfFailed(g_dx12_rhi->Device->CreateCommittedResource(
 			&heapProp,
@@ -1325,7 +1238,7 @@ void Texture::UploadSRCData3D(D3D12_SUBRESOURCE_DATA* SrcData)
 		sourceRegion.bottom = 0;
 		sourceRegion.front = 64;
 		sourceRegion.back = 0;
-		g_dx12_rhi->CommandList->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+		cmd->CmdList->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
 
 
 		D3D12_RESOURCE_BARRIER BarrierDesc = {};
@@ -1335,19 +1248,17 @@ void Texture::UploadSRCData3D(D3D12_SUBRESOURCE_DATA* SrcData)
 		BarrierDesc.Transition.Subresource = 0;
 		BarrierDesc.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
 		BarrierDesc.Transition.StateAfter = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
-		g_dx12_rhi->CommandList->ResourceBarrier(1, &BarrierDesc);
+		cmd->CmdList->ResourceBarrier(1, &BarrierDesc);
 
-		ThrowIfFailed(g_dx12_rhi->CommandList->Close());
-		ID3D12CommandList* ppCommandLists[] = { g_dx12_rhi->CommandList.Get() };
-		g_dx12_rhi->CommandQueue->ExecuteCommandLists(_countof(ppCommandLists), ppCommandLists);
-		ThrowIfFailed(g_dx12_rhi->CommandList->Reset(g_dx12_rhi->GetCurrentCA(), nullptr));
-
-		g_dx12_rhi->WaitGPU();
+		g_dx12_rhi->CmdQ->ExecuteCommandList(cmd);
+		g_dx12_rhi->CmdQ->WaitGPU();
 	}
 }
 
 std::shared_ptr<Texture> DumRHI_DX12::CreateTextureFromFile(wstring fileName, bool isNormal)
 {
+	CommandList* cmd = g_dx12_rhi->CmdQ->AllocCmdList();
+
 	if (FileExists(fileName.c_str()) == false)
 		return nullptr;
 
@@ -1496,7 +1407,7 @@ std::shared_ptr<Texture> DumRHI_DX12::CreateTextureFromFile(wstring fileName, bo
 		//src.PlacedFootprint.Offset += 0;// uploadContext.ResourceOffset;
 		//src.SubresourceIndex = UINT32(subResourceIdx);
 
-		g_dx12_rhi->CommandList->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+		cmd->CmdList->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
 	}
 
 	D3D12_RESOURCE_BARRIER BarrierDesc = {};
@@ -1506,14 +1417,10 @@ std::shared_ptr<Texture> DumRHI_DX12::CreateTextureFromFile(wstring fileName, bo
 	BarrierDesc.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
 	BarrierDesc.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
 	BarrierDesc.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
-	g_dx12_rhi->CommandList->ResourceBarrier(1, &BarrierDesc);
+	cmd->CmdList->ResourceBarrier(1, &BarrierDesc);
 
-	ThrowIfFailed(g_dx12_rhi->CommandList->Close());
-	ID3D12CommandList* ppCommandLists[] = { g_dx12_rhi->CommandList.Get() };
-	g_dx12_rhi->CommandQueue->ExecuteCommandLists(_countof(ppCommandLists), ppCommandLists);
-	ThrowIfFailed(g_dx12_rhi->CommandList->Reset(g_dx12_rhi->GetCurrentCA(), nullptr));
-
-	g_dx12_rhi->WaitGPU();
+	g_dx12_rhi->CmdQ->ExecuteCommandList(cmd);
+	g_dx12_rhi->CmdQ->WaitGPU();
 
 	tex->MakeStaticSRV();
 
@@ -1612,21 +1519,23 @@ shared_ptr<RTAS> Mesh::CreateBLAS()
 		g_dx12_rhi->Device->CreateCommittedResource(&kDefaultHeapProps, D3D12_HEAP_FLAG_NONE, &bufDesc, D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE, nullptr, IID_PPV_ARGS(&as->Result));
 	}
 
+	CommandList* cmd = g_dx12_rhi->CmdQ->AllocCmdList();
+
 	D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC asDesc = {};
 	asDesc.Inputs = inputs;
 	asDesc.DestAccelerationStructureData = as->Result->GetGPUVirtualAddress();
 	asDesc.ScratchAccelerationStructureData = as->Scratch->GetGPUVirtualAddress();
 
 	D3D12_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO_DESC postInfo;
-	g_dx12_rhi->CommandList->BuildRaytracingAccelerationStructure(&asDesc, 0, &postInfo);
+	cmd->CmdList->BuildRaytracingAccelerationStructure(&asDesc, 0, &postInfo);
 
 	D3D12_RESOURCE_BARRIER uavBarrier = {};
 	uavBarrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
 	uavBarrier.UAV.pResource = as->Result.Get();
-	g_dx12_rhi->CommandList->ResourceBarrier(1, &uavBarrier);
+	cmd->CmdList->ResourceBarrier(1, &uavBarrier);
 
-	g_dx12_rhi->WaitGPU();
-
+	g_dx12_rhi->CmdQ->ExecuteCommandList(cmd);
+	g_dx12_rhi->CmdQ->WaitGPU();
 
 	return shared_ptr<RTAS>(as);
 }
@@ -1735,6 +1644,9 @@ std::shared_ptr<RTAS> DumRHI_DX12::CreateTLAS(vector<shared_ptr<RTAS>>& VecBotto
 	}
 	
 	// Create the TLAS
+
+	CommandList* cmd = g_dx12_rhi->CmdQ->AllocCmdList();
+
 	D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC asDesc = {};
 	asDesc.Inputs = inputs;
 
@@ -1745,13 +1657,13 @@ std::shared_ptr<RTAS> DumRHI_DX12::CreateTLAS(vector<shared_ptr<RTAS>>& VecBotto
 
 	D3D12_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO_DESC postInfo;
 
-	CommandList->BuildRaytracingAccelerationStructure(&asDesc, 0, &postInfo);
+	cmd->CmdList->BuildRaytracingAccelerationStructure(&asDesc, 0, &postInfo);
 
 	// We need to insert a UAV barrier before using the acceleration structures in a raytracing operation
 	D3D12_RESOURCE_BARRIER uavBarrier = {};
 	uavBarrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
 	uavBarrier.UAV.pResource = as->Result.Get();
-	CommandList->ResourceBarrier(1, &uavBarrier);
+	cmd->CmdList->ResourceBarrier(1, &uavBarrier);
 
 	// create acceleration structure srv (not shader-visible yet)
 	D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
@@ -1766,7 +1678,9 @@ std::shared_ptr<RTAS> DumRHI_DX12::CreateTLAS(vector<shared_ptr<RTAS>>& VecBotto
 
 	g_dx12_rhi->Device->CreateShaderResourceView(nullptr, &srvDesc, as->CPUHandle);
 
-	g_dx12_rhi->WaitGPU();
+	//g_dx12_rhi->WaitGPU();
+	g_dx12_rhi->CmdQ->ExecuteCommandList(cmd);
+	g_dx12_rhi->CmdQ->WaitGPU();
 
 	return shared_ptr<RTAS>(as);
 }
@@ -2600,11 +2514,11 @@ void RTPipelineStateObject::Apply(UINT width, UINT height)
 
 	// Bind the empty root signature
 
-	g_dx12_rhi->CommandList->SetComputeRootSignature(GlobalRS.Get());
-	g_dx12_rhi->CommandList->SetPipelineState1(RTPipelineState.Get());
+	g_dx12_rhi->GlobalCmdList->CmdList->SetComputeRootSignature(GlobalRS.Get());
+	g_dx12_rhi->GlobalCmdList->CmdList->SetPipelineState1(RTPipelineState.Get());
 
 	
-	g_dx12_rhi->CommandList->DispatchRays(&raytraceDesc);
+	g_dx12_rhi->GlobalCmdList->CmdList->DispatchRays(&raytraceDesc);
 }
 
 void DescriptorHeapRing::Init(DescriptorHeap* InDHHeap, UINT InNumDescriptors, UINT InNumFrame)
@@ -2637,4 +2551,89 @@ void Scene::SetTransform(glm::mat4x4 inTransform)
 	{
 		mesh->transform = inTransform;
 	}
+}
+
+
+
+CommandQueue::CommandQueue()
+{
+	ThrowIfFailed(g_dx12_rhi->Device->CreateFence(CurrentFenceValue, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&m_fence)));
+	// Create an event handle to use for frame synchronization.
+	m_fenceEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+
+	D3D12_COMMAND_QUEUE_DESC queueDesc = {};
+	queueDesc.Flags = D3D12_COMMAND_QUEUE_FLAG_NONE;
+	queueDesc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+
+	ThrowIfFailed(g_dx12_rhi->Device->CreateCommandQueue(&queueDesc, IID_PPV_ARGS(&CmdQueue)));
+	NAME_D3D12_OBJECT(CmdQueue);
+
+	CommandListPool.reserve(CommandListPoolSize);
+	for (int i = 0; i < CommandListPoolSize; i++)
+	{
+		CommandList * cmdList = new CommandList;
+		ThrowIfFailed(g_dx12_rhi->Device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&cmdList->CmdAllocator)));
+		NAME_D3D12_OBJECT(cmdList->CmdAllocator);
+
+		ThrowIfFailed(g_dx12_rhi->Device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, cmdList->CmdAllocator.Get(), nullptr, IID_PPV_ARGS(&cmdList->CmdList)));
+		cmdList->CmdList->Close();
+		NAME_D3D12_OBJECT(cmdList->CmdList);
+
+		CommandListPool.emplace_back(shared_ptr<CommandList>(cmdList));
+	}
+}
+
+CommandQueue::~CommandQueue()
+{
+}
+
+CommandList * CommandQueue::AllocCmdList()
+{
+	std::lock_guard<std::mutex> lock(CmdAllocMtx);
+
+	CommandList* cmdList = CommandListPool[CurrentIndex].get();
+	if(cmdList->Fence.has_value())
+		WaitFenceValue(cmdList->Fence.value());
+
+	CurrentIndex++;
+
+	CurrentIndex = CurrentIndex % CommandListPoolSize;
+
+	cmdList->Fence = std::nullopt;
+	cmdList->Reset();
+	return cmdList;
+}
+
+void CommandQueue::ExecuteCommandList(CommandList * cmd)
+{
+	cmd->CmdList->Close();
+	ID3D12CommandList* ppCommandListsEnd[] = { cmd->CmdList.Get() };
+	CmdQueue->ExecuteCommandLists(_countof(ppCommandListsEnd), ppCommandListsEnd);
+}
+
+void CommandQueue::WaitGPU()
+{
+	CmdQueue->Signal(m_fence.Get(), CurrentFenceValue);
+	m_fence->SetEventOnCompletion(CurrentFenceValue, m_fenceEvent);
+	WaitForSingleObject(m_fenceEvent, INFINITE);
+	
+	CurrentFenceValue++;
+}
+
+void CommandQueue::WaitFenceValue(UINT64 fenceValue)
+{
+	m_fence->SetEventOnCompletion(fenceValue, m_fenceEvent);
+	WaitForSingleObject(m_fenceEvent, INFINITE);
+}
+
+void CommandQueue::SignalCurrentFence()
+{
+	CmdQueue->Signal(m_fence.Get(), CurrentFenceValue);
+	CurrentFenceValue++;
+}
+
+void CommandList::Reset()
+{
+	CmdAllocator->Reset();
+	CmdList->Reset(CmdAllocator.Get(), nullptr);
 }

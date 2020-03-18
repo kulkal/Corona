@@ -118,6 +118,7 @@ private:
 	CD3DX12_RECT m_scissorRect;
 	ComPtr<IDXGISwapChain3> m_swapChain;
 	ComPtr<ID3D12Device5> m_device;
+
 	
 	UINT ColorBufferWriteIndex = 0;
 	shared_ptr<Texture> ColorBuffer0;

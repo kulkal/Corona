@@ -9,7 +9,9 @@
 #include <map>
 #include <memory>
 #include <string>
-
+#include <optional>
+#include <mutex>
+#include <array>
 #define GLM_FORCE_CTOR_INIT
 
 #include "glm/glm.hpp"
@@ -30,13 +32,55 @@ class ConstantBuffer;
 class Sampler;
 class ThreadDescriptorHeapPool;
 
-class FrameResource
+
+class CommandList
 {
 public:
 
-	ComPtr<ID3D12CommandAllocator> CommandAllocator;
-	vector<ComPtr<ID3D12CommandAllocator>> VecCommandAllocatorMeshDraw;
+	ComPtr<ID3D12GraphicsCommandList4> CmdList;
+	ComPtr<ID3D12CommandAllocator> CmdAllocator;
+	std::optional<UINT64> Fence;
 
+public:
+
+	void Reset();
+
+};
+
+class CommandQueue
+{
+public:
+	const UINT32 CommandListPoolSize = 4096;
+
+	ComPtr<ID3D12CommandQueue> CmdQueue;
+
+	std::vector<shared_ptr<CommandList>> CommandListPool;
+	UINT32 CurrentIndex = 0;
+
+	std::mutex CmdAllocMtx;
+
+	HANDLE m_fenceEvent;
+	ComPtr<ID3D12Fence> m_fence;
+	UINT64 CurrentFenceValue = 2;
+public:
+	CommandQueue();
+	virtual ~CommandQueue();
+
+	CommandList* AllocCmdList();
+
+	void ExecuteCommandList(CommandList* cmd);
+
+	void WaitGPU();
+	
+	void WaitFenceValue(UINT64 fenceValue);
+
+	void SignalCurrentFence();
+};
+
+
+class FrameResource
+{
+public:
 	UINT64 FenceValue = 0;
 };
 
@@ -481,21 +525,17 @@ public:
 	friend class DescriptorHeap;
 
 	const uint32_t NumFrame = 3;
+	//#define NumFrame  3
+
 	uint32_t CurrentFrameIndex = 0;
 
 	ComPtr<ID3D12Device5> Device;
-	ComPtr<ID3D12CommandQueue> CommandQueue;
-	ComPtr<ID3D12GraphicsCommandList4> CommandList;
 
-	ID3D12CommandAllocator* GetCurrentCA() 
-	{ 
-		return FrameResourceVec[CurrentFrameIndex].CommandAllocator.Get();
-	}
+	unique_ptr<CommandQueue> CmdQ;
+	CommandList* GlobalCmdList = nullptr;
 
-	vector<FrameResource> FrameResourceVec;
 
-	static const UINT NumDrawMeshCommandList = 8;
-	ComPtr<ID3D12GraphicsCommandList> DrawMeshCommandList[NumDrawMeshCommandList];
+	vector<UINT32> FrameFenceValueVec;
 
 	std::unique_ptr<DescriptorHeap> RTVDescriptorHeap;
 	std::unique_ptr<DescriptorHeap> DSVDescriptorHeap;
@@ -510,9 +550,7 @@ public:
 	std::vector<std::shared_ptr<Texture>> renderTargetTextures;
 	std::list<std::shared_ptr<Texture>> DynamicTextures;
 
-	HANDLE m_fenceEvent;
-	ComPtr<ID3D12Fence> m_fence;
-	UINT64 m_fenceValue;
+	
 
 	ComPtr<IDXGISwapChain3> m_swapChain;
 
@@ -521,7 +559,6 @@ public:
 public:
 	void BeginFrame();
 	void EndFrame();
-	void WaitGPU();
 
 	shared_ptr<Texture> CreateTexture2DFromResource(ComPtr<ID3D12Resource> InResource);
 	shared_ptr<Texture> CreateTexture2D(DXGI_FORMAT format, D3D12_RESOURCE_FLAGS resFlags, D3D12_RESOURCE_STATES initResState, int width, int height, int mipLevels);

@@ -15,6 +15,8 @@ project "dx12_framework"
    kind "ConsoleApp"
    language "C"
    targetdir "bin/%{cfg.buildcfg}"
+   cppdialect "C++17"
+  
    includedirs { 
                ".", 
                "C:/Program Files (x86)/Windows Kits/10/Include/10.0.17763.0/um",  
