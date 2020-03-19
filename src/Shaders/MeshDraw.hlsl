@@ -21,7 +21,7 @@ SamplerState sampleWrap : register(s0);
 
 //};
 
-cbuffer ObjParameter : register(b0)
+cbuffer MeshDrawConstantBuffer : register(b0)
 {
     float4x4 ViewProjectionMatrix;
     // float4x4 UnjitteredViewProjectionMatrix;
@@ -31,7 +31,8 @@ cbuffer ObjParameter : register(b0)
     float4 ViewDir;
     float2 RTSize;
     float2 JitterOffset;
-    float4 pad[2];
+    float4 RougnessMetalic;
+    float4 pad[1];
 };
 
 struct VSInput
@@ -91,7 +92,8 @@ struct PS_OUTPUT
     float4 Albedo : SV_Target0;
     float4 Normal : SV_Target1;
     float4 GeomNormal : SV_Target2;
-     float2 Velocity : SV_Target3;
+    float2 Velocity : SV_Target3;
+    float4 Material : SV_Target4;
 };
 
 
@@ -114,6 +116,9 @@ PS_OUTPUT PSMain(PSInput input) : SV_TARGET
     output.Normal.xyz = WorldNormal;
     output.GeomNormal.xyz = input.normal;
     output.Velocity = velocity.xy;
+    output.Material.x = RougnessMetalic.x;
+    output.Material.y = RougnessMetalic.y;
+
 
     return output;
 }
