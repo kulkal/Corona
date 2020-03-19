@@ -442,6 +442,7 @@ void dx12_framework::LoadAssets()
 	InitComputeRS();
 	InitDrawMeshRS();
 	InitCopyPass();
+	InitDebugPass();
 	InitLightingPass();
 	InitTemporalAAPass();
 	InitSpatialDenoisingPass();
@@ -566,6 +567,15 @@ void dx12_framework::LoadAssets()
 	VelocityBuffer->MakeRTV();
 	NAME_D3D12_OBJECT(VelocityBuffer->resource);
 
+	// pbr material
+	MaterialBuffer = dx12_rhi->CreateTexture2D(DXGI_FORMAT_R8G8B8A8_UNORM,
+		D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
+		D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, m_width, m_height, 1);
+	MaterialBuffer->MakeRTV();
+
+	NAME_D3D12_OBJECT(MaterialBuffer->resource);
+
+	// depth 
 	DepthBuffer = dx12_rhi->CreateTexture2D(DXGI_FORMAT_D32_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, m_width, m_height, 1);
 	DepthBuffer->MakeDSV();
 	NAME_D3D12_OBJECT(DepthBuffer->resource);
@@ -1057,11 +1067,12 @@ void dx12_framework::InitDrawMeshRS()
 	psoDescMesh.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
 	psoDescMesh.SampleMask = UINT_MAX;
 	psoDescMesh.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-	psoDescMesh.NumRenderTargets = 4;
+	psoDescMesh.NumRenderTargets = 5;
 	psoDescMesh.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
 	psoDescMesh.RTVFormats[1] = DXGI_FORMAT_R16G16B16A16_FLOAT;
 	psoDescMesh.RTVFormats[2] = DXGI_FORMAT_R16G16B16A16_FLOAT;
 	psoDescMesh.RTVFormats[3] = DXGI_FORMAT_R16G16_FLOAT;
+	psoDescMesh.RTVFormats[4] = DXGI_FORMAT_R8G8B8A8_UNORM;
 
 	psoDescMesh.DSVFormat = DXGI_FORMAT_D32_FLOAT;
 	psoDescMesh.SampleDesc.Count = 1;
@@ -1073,7 +1084,7 @@ void dx12_framework::InitDrawMeshRS()
 	RS_Mesh->BindTexture("diffuseMap", 0, 1);
 	RS_Mesh->BindTexture("normalMap", 1, 1);
 	RS_Mesh->BindSampler("samplerWrap", 0);
-	RS_Mesh->BindConstantBuffer("ObjParameter", 0, sizeof(ObjConstantBuffer), 400);
+	RS_Mesh->BindConstantBuffer("ObjParameter", 0, sizeof(MeshDrawConstantBuffer), 400);
 
 	RS_Mesh->Init2();
 }
@@ -1255,6 +1266,104 @@ void dx12_framework::InitCopyPass()
 	RS_Copy->BindConstantBuffer("ScaleOffsetParams", 0, sizeof(CopyScaleOffsetCB), 15);
 
 	RS_Copy->Init2();
+}
+
+void dx12_framework::InitDebugPass()
+{
+	struct PostVertex
+	{
+		XMFLOAT4 position;
+		XMFLOAT2 uv;
+	};
+
+	PostVertex quadVertices[] =
+	{
+		{ { -1.0f, -1.0f, 0.0f, 1.0f }, { 0.0f, 0.0f } },    // Bottom left.
+		{ { -1.0f, 1.0f, 0.0f, 1.0f }, { 0.0f, 1.0f } },    // Top left.
+		{ { 1.0f, -1.0f, 0.0f, 1.0f }, { 1.0f, 0.0f } },    // Bottom right.
+		{ { 1.0f, 1.0f, 0.0f, 1.0f }, { 1.0f, 1.0f } }        // Top right.
+	};
+
+	const UINT vertexBufferSize = sizeof(quadVertices);
+	const UINT vertexBufferStride = sizeof(PostVertex);
+
+	D3D12_SUBRESOURCE_DATA vertexData = {};
+	vertexData.pData = &quadVertices;
+	vertexData.RowPitch = vertexBufferSize;
+	vertexData.SlicePitch = vertexData.RowPitch;
+
+	FullScreenVB = dx12_rhi->CreateVertexBuffer(vertexBufferSize, vertexBufferStride, &quadVertices);
+
+	ComPtr<ID3DBlob> vertexShader;
+	ComPtr<ID3DBlob> pixelShader;
+
+#if defined(_DEBUG)
+	// Enable better shader debugging with the graphics debugging tools.
+	UINT compileFlags = D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
+#else
+	UINT compileFlags = D3DCOMPILE_OPTIMIZATION_LEVEL3;
+#endif
+
+	ID3DBlob*compilationMsgs = nullptr;
+
+	try
+	{
+		ThrowIfFailed(D3DCompileFromFile(GetAssetFullPath(L"Shaders\\DebugPS.hlsl").c_str(), nullptr, D3D_COMPILE_STANDARD_FILE_INCLUDE, "VSMain", "vs_5_0", compileFlags, 0, &vertexShader, &compilationMsgs));
+	}
+	catch (const std::exception& e)
+	{
+		OutputDebugStringA(reinterpret_cast<const char*>(compilationMsgs->GetBufferPointer()));
+		compilationMsgs->Release();
+	}
+
+	try
+	{
+		ThrowIfFailed(D3DCompileFromFile(GetAssetFullPath(L"Shaders\\DebugPS.hlsl").c_str(), nullptr, D3D_COMPILE_STANDARD_FILE_INCLUDE, "PSMain", "ps_5_0", compileFlags, 0, &pixelShader, &compilationMsgs));
+	}
+	catch (const std::exception& e)
+	{
+		OutputDebugStringA(reinterpret_cast<const char*>(compilationMsgs->GetBufferPointer()));
+		compilationMsgs->Release();
+	}
+
+	Shader* ps = new Shader((UINT8*)pixelShader->GetBufferPointer(), pixelShader->GetBufferSize());
+	Shader* vs = new Shader((UINT8*)vertexShader->GetBufferPointer(), vertexShader->GetBufferSize());
+
+	CD3DX12_RASTERIZER_DESC rasterizerStateDesc(D3D12_DEFAULT);
+	rasterizerStateDesc.CullMode = D3D12_CULL_MODE_NONE;
+
+	D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDesc = {};
+
+	const D3D12_INPUT_ELEMENT_DESC StandardVertexDescription[] =
+	{
+		{ "POSITION", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 0,  D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+		{ "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT,    0, 16, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+	};
+	UINT StandardVertexDescriptionNumElements = _countof(StandardVertexDescription);
+
+	psoDesc.InputLayout = { StandardVertexDescription, StandardVertexDescriptionNumElements };
+	psoDesc.RasterizerState = rasterizerStateDesc;
+	psoDesc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
+	psoDesc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
+	psoDesc.DepthStencilState.DepthEnable = FALSE;
+	psoDesc.DepthStencilState.StencilEnable = FALSE;
+	psoDesc.SampleMask = UINT_MAX;
+	psoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+	psoDesc.NumRenderTargets = 1;
+	psoDesc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
+	//psoDescMesh.DSVFormat = DXGI_FORMAT_D32_FLOAT;
+	psoDesc.SampleDesc.Count = 1;
+
+	RS_Debug = unique_ptr<PipelineStateObject>(new PipelineStateObject);
+	RS_Debug->ps = shared_ptr<Shader>(ps);
+	RS_Debug->vs = shared_ptr<Shader>(vs);
+	RS_Debug->graphicsPSODesc = psoDesc;
+
+	RS_Debug->BindTexture("SrcTex", 0, 1);
+	RS_Debug->BindSampler("samplerWrap", 0);
+	RS_Debug->BindConstantBuffer("DebugPassCB", 0, sizeof(DebugPassCB), 15);
+
+	RS_Debug->Init2();
 }
 
 void dx12_framework::InitLightingPass()
@@ -1554,7 +1663,32 @@ void dx12_framework::DebugPass()
 	dx12_rhi->GlobalCmdList->CmdList->DrawInstanced(4, 1, 0, 0);
 	RS_Copy->currentDrawCallIndex++;
 
-	RS_Copy->Apply(dx12_rhi->GlobalCmdList->CmdList.Get());
+	/*cb.Offset = glm::vec4(0.75, 0.25, 0, 0);
+	cb.Scale = glm::vec4(0.25, 0.25, 0, 0);
+	RS_Copy->SetConstantValue("ScaleOffsetParams", &cb, dx12_rhi->GlobalCmdList->CmdList.Get());
+	RS_Copy->SetTexture("SrcTex", VelocityBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
+	dx12_rhi->GlobalCmdList->CmdList->DrawInstanced(4, 1, 0, 0);
+	RS_Copy->currentDrawCallIndex++;*/
+
+	//RS_Copy->Apply(dx12_rhi->GlobalCmdList->CmdList.Get());
+
+	{
+		RS_Debug->currentDrawCallIndex = 0;
+
+		RS_Debug->SetSampler("samplerWrap", samplerWrap.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
+		DebugPassCB cb;
+
+		cb.Offset = glm::vec4(0.75, 0.25, 0, 0);
+		cb.Scale = glm::vec4(0.25, 0.25, 0, 0);
+		cb.DebugMode = RAW_COPY;
+		RS_Debug->SetConstantValue("DebugPassCB", &cb, dx12_rhi->GlobalCmdList->CmdList.Get());
+		RS_Debug->SetTexture("SrcTex", MaterialBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
+		dx12_rhi->GlobalCmdList->CmdList->DrawInstanced(4, 1, 0, 0);
+		RS_Debug->currentDrawCallIndex++;
+
+		RS_Debug->Apply(dx12_rhi->GlobalCmdList->CmdList.Get());
+
+	}
 }
 
 void dx12_framework::LightingPass()
@@ -1902,7 +2036,7 @@ struct ParallelDrawTaskSet : enki::ITaskSet
 	}
 };
 
-void dx12_framework::DrawScene(shared_ptr<Scene> scene)
+void dx12_framework::DrawScene(shared_ptr<Scene> scene, float Roughness, float Metalic)
 {
 	for (auto& mesh : scene->meshes)
 	{
@@ -1912,8 +2046,8 @@ void dx12_framework::DrawScene(shared_ptr<Scene> scene)
 		for (int i = 0; i < mesh->Draws.size(); i++)
 		{
 			Mesh::DrawCall& drawcall = mesh->Draws[i];
-			ObjConstantBuffer objCB;
-			int sizea = sizeof(ObjConstantBuffer);
+			MeshDrawConstantBuffer objCB;
+			int sizea = sizeof(MeshDrawConstantBuffer);
 
 			objCB.ViewProjectionMatrix = glm::transpose(ViewProjMat);
 			objCB.PrevViewProjectionMatrix = glm::transpose(PrevViewProjMat);
@@ -1928,6 +2062,8 @@ void dx12_framework::DrawScene(shared_ptr<Scene> scene)
 			objCB.RTSize.y = m_height;
 
 			objCB.JitterOffset = JitterOffset;
+			objCB.RougnessMetalic.x = Roughness;
+			objCB.RougnessMetalic.y = Metalic;
 
 			RS_Mesh->SetConstantValue("ObjParameter", (void*)&objCB, dx12_rhi->GlobalCmdList->CmdList.Get());
 
@@ -1958,6 +2094,7 @@ void dx12_framework::DrawMeshPass()
 	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(NormalBuffer->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET));
 	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(GeomNormalBuffer->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET));
 	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(VelocityBuffer->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET));
+	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(MaterialBuffer->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET));
 
 	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(DepthBuffer->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_DEPTH_WRITE));
 
@@ -1973,7 +2110,7 @@ void dx12_framework::DrawMeshPass()
 
 	if (!bMultiThreadRendering)
 	{
-		const D3D12_CPU_DESCRIPTOR_HANDLE Rendertargets[] = { AlbedoBuffer->CpuHandleRTV, NormalBuffer->CpuHandleRTV, GeomNormalBuffer->CpuHandleRTV, VelocityBuffer->CpuHandleRTV };
+		const D3D12_CPU_DESCRIPTOR_HANDLE Rendertargets[] = { AlbedoBuffer->CpuHandleRTV, NormalBuffer->CpuHandleRTV, GeomNormalBuffer->CpuHandleRTV, VelocityBuffer->CpuHandleRTV, MaterialBuffer->CpuHandleRTV };
 
 		dx12_rhi->GlobalCmdList->CmdList->OMSetRenderTargets(RS_Mesh->graphicsPSODesc.NumRenderTargets, Rendertargets, FALSE, &DepthBuffer->CpuHandleDSV);
 
@@ -1986,8 +2123,8 @@ void dx12_framework::DrawMeshPass()
 
 		RS_Mesh->currentDrawCallIndex = 0;
 		
-		DrawScene(Sponza);
-		DrawScene(ShaderBall);
+		DrawScene(Sponza, 1, 0);
+		DrawScene(ShaderBall, 0, 1);
 	}
 	else
 	{
@@ -2041,6 +2178,7 @@ void dx12_framework::DrawMeshPass()
 	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(NormalBuffer->resource.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
 	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(GeomNormalBuffer->resource.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
 	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(VelocityBuffer->resource.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
+	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(MaterialBuffer->resource.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
 
 
 	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(DepthBuffer->resource.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));

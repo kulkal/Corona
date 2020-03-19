@@ -41,7 +41,7 @@ class dx12_framework : public DXSample
 	{
 		glm::mat4x4 WorldMatrix;
 	};
-	struct ObjConstantBuffer
+	struct MeshDrawConstantBuffer
 	{
 		glm::mat4x4 ViewProjectionMatrix;
 		//glm::mat4x4 UnjitteredViewProjectionMatrix;
@@ -51,7 +51,8 @@ class dx12_framework : public DXSample
 		glm::vec4 ViewDir;
 		glm::vec2 RTSize;
 		glm::vec2 JitterOffset;
-		glm::vec4 pad[2];
+		glm::vec4 RougnessMetalic;
+		glm::vec4 pad4[1];
 	};
 
 	struct RTShadowViewParamCB
@@ -89,6 +90,22 @@ class dx12_framework : public DXSample
 	{
 		glm::vec4 Scale;
 		glm::vec4 Offset;
+	};
+
+	enum EDebugMode
+	{
+		RAW_COPY,
+		CHANNEL_X,
+		CHANNEL_Y,
+		CHANNEL_Z,
+		CHANNEL_W,
+		SH_LIGHTING,
+	};
+	struct DebugPassCB
+	{
+		glm::vec4 Scale;
+		glm::vec4 Offset;
+		UINT32 DebugMode;
 	};
 
 public:
@@ -129,6 +146,7 @@ private:
 	shared_ptr<Texture> NormalBuffer;
 	shared_ptr<Texture> GeomNormalBuffer;
 	shared_ptr<Texture> VelocityBuffer;
+	shared_ptr<Texture> MaterialBuffer;
 	shared_ptr<Texture> ShadowBuffer;
 	shared_ptr<Texture> ReflectionBuffer;
 
@@ -223,6 +241,9 @@ private:
 	unique_ptr<PipelineStateObject> RS_Copy;
 	shared_ptr<VertexBuffer> FullScreenVB;
 
+	// debug pass
+	unique_ptr<PipelineStateObject> RS_Debug;
+
 	// lighting pass
 	unique_ptr<PipelineStateObject> RS_Lighting;
 
@@ -281,7 +302,7 @@ public:
 
 	void InitBlueNoiseTexture();
 
-	void DrawScene(shared_ptr<Scene> scene);
+	void DrawScene(shared_ptr<Scene> scene, float Roughness, float Metalic);
 
 	void DrawMeshPass();
 
@@ -298,6 +319,8 @@ public:
 	void TemporalDenoisingPass();
 
 	void InitCopyPass();
+
+	void InitDebugPass();
 
 	void InitLightingPass();
 
