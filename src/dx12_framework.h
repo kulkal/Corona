@@ -123,17 +123,12 @@ private:
 	UINT ColorBufferWriteIndex = 0;
 	shared_ptr<Texture> ColorBuffer0;
 	shared_ptr<Texture> ColorBuffer1;
-	
 	std::array<Texture*, 2> ColorBuffers;
-
 	shared_ptr<Texture> LightingBuffer;
-
 	shared_ptr<Texture> AlbedoBuffer;
 	shared_ptr<Texture> NormalBuffer;
 	shared_ptr<Texture> GeomNormalBuffer;
 	shared_ptr<Texture> VelocityBuffer;
-
-
 	shared_ptr<Texture> ShadowBuffer;
 	shared_ptr<Texture> ReflectionBuffer;
 
@@ -141,20 +136,13 @@ private:
 	UINT GIBufferWriteIndex = 0;
 	shared_ptr<Texture> GIBufferSHTemporal[2];
 	shared_ptr<Texture> GIBufferColorTemporal[2];
-
 	shared_ptr<Texture> GIBufferSH;
 	shared_ptr<Texture> GIBufferColor;
-
-
-
 	shared_ptr<Texture> DepthBuffer;
-
 	shared_ptr<Texture> FakeDepthBuffer;
 
-
 	std::vector<std::shared_ptr<Texture>> framebuffers;
-
-
+	
 	unique_ptr<PipelineStateObject> RS_Mesh;
 
 	// denoising
@@ -175,7 +163,6 @@ private:
 	shared_ptr<Texture> FilterIndirectDiffusePingPongSH[2];
 	shared_ptr<Texture> FilterIndirectDiffusePingPongColor[2];
 
-
 	struct TemporalFilterConstant
 	{
 		glm::vec4 ProjectionParams;
@@ -186,8 +173,6 @@ private:
 	TemporalFilterConstant TemporalFilterCB;
 	unique_ptr<PipelineStateObject> RS_TemporalDenoisingFilter;
 
-
-
 	// test compute pass
 	unique_ptr<PipelineStateObject> RS_Compute;
 	shared_ptr<Texture> ComputeOuputTexture;
@@ -195,10 +180,7 @@ private:
 	// global wrap sampler
 	std::shared_ptr<Sampler> samplerWrap;
 
-	// dx sample mesh
 	shared_ptr<Mesh> mesh;
-
-	
 
 	shared_ptr<Scene> Sponza;
 
@@ -206,14 +188,8 @@ private:
 
 	shared_ptr<Scene> ShaderBall;
 
-
-	// fbx mesh
-	//vector<shared_ptr<Mesh>> meshes;
-	//vector<shared_ptr<Material>> Materials;
-
 	StepTimer m_timer;
 	SimpleCamera m_camera;
-
 
 	glm::vec3 LightDir = glm::normalize(glm::vec3(0.901, 0.88, 0.176));
 	float LightIntensity = 3.0f;
@@ -224,16 +200,11 @@ private:
 	glm::mat4x4 ProjMat;
 	glm::mat4x4 ViewProjMat;
 	glm::mat4x4 UnjitteredViewProjMat;
-
 	glm::mat4x4 InvViewProjMat;
-
-
 	glm::mat4x4 PrevViewMat;
 	glm::mat4x4 PrevViewProjMat;
 	glm::vec2 JitterOffset;
 	glm::vec2 PrevJitter;
-
-
 
 	// raytracing
 	std::shared_ptr<Buffer> InstancePropertyBuffer;
@@ -245,11 +216,8 @@ private:
 	unique_ptr<RTPipelineStateObject> PSO_RT_REFLECTION;
 	RTReflectionViewParamCB RTReflectionViewParam;
 
-
 	unique_ptr<RTPipelineStateObject> PSO_RT_GI;
 	RTGIViewParamCB RTGIViewParam;
-
-
 
 	// full screen copy pass
 	unique_ptr<PipelineStateObject> RS_Copy;
@@ -260,7 +228,6 @@ private:
 
 	// temporalAA
 	unique_ptr<PipelineStateObject> RS_TemporalAA;
-
 
 	struct LightingParam
 	{
@@ -293,10 +260,9 @@ private:
 public:
 
 	void InitRaytracing();
-
-	void InitRaytraceShadow();
 	
 	void LoadPipeline();
+
 	void LoadAssets();
 
 	void LoadMesh();
@@ -308,7 +274,6 @@ public:
 	void InitSpatialDenoisingPass();
 
 	void InitTemporalDenoisingPass();
-
 
 	void InitDrawMeshRS();
 
@@ -326,9 +291,7 @@ public:
 
 	void RaytraceGIPass();
 
-
 	void RecordDraw(UINT StartIndex, UINT NumDraw, UINT CLIndex, ThreadDescriptorHeapPool* DHPool);
-
 
 	void SpatialDenoisingPass();
 
@@ -340,7 +303,6 @@ public:
 
 	void InitTemporalAAPass();
 
-
 	void CopyPass();
 
 	void DebugPass();
@@ -348,5 +310,4 @@ public:
 	void LightingPass();
 
 	void TemporalAAPass();
-
 };

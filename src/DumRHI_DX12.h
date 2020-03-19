@@ -32,19 +32,15 @@ class ConstantBuffer;
 class Sampler;
 class ThreadDescriptorHeapPool;
 
-
 class CommandList
 {
 public:
-
 	ComPtr<ID3D12GraphicsCommandList4> CmdList;
 	ComPtr<ID3D12CommandAllocator> CmdAllocator;
 	std::optional<UINT64> Fence;
 
 public:
-
 	void Reset();
-
 };
 
 class CommandQueue
@@ -77,7 +73,6 @@ public:
 	void SignalCurrentFence();
 };
 
-
 class FrameResource
 {
 public:
@@ -87,8 +82,6 @@ public:
 class Shader
 {
 public:
-
-
 	struct BindingData
 	{
 		string name;
@@ -105,13 +98,7 @@ public:
 		UINT rootConst;
 	};
 
-	
-
 	D3D12_SHADER_BYTECODE ShaderByteCode;
-	
-private:
-	
-	
 public:
 	Shader(UINT8* ByteCode, UINT Size);
 	~Shader()
@@ -178,7 +165,6 @@ public:
 
 	void SetConstantValue(string name, void* pData, ID3D12GraphicsCommandList* CommandList);
 	void SetRootConstant(string, UINT value, ID3D12GraphicsCommandList* CommandList);
-	UINT GetGraphicsBindingDHSize();
 };
 
 class RTPipelineStateObject
@@ -224,7 +210,6 @@ public:
 		D3D12_STATE_SUBOBJECT subobject;
 		ID3D12RootSignature* pInterface;
 		vector<const WCHAR*> ExportName;
-
 	};
 	map<string, BindingInfo> ShaderBinding;
 
@@ -245,7 +230,6 @@ public:
 	};
 
 	map<UINT, HitProgramData> HitProgramBinding;
-
 public:
 
 	wstring kRayGenShader;
@@ -295,7 +279,6 @@ public:
 	D3D12_CPU_DESCRIPTOR_HANDLE CpuHandleSRV;
 	D3D12_GPU_DESCRIPTOR_HANDLE GpuHandleSRV;
 };
-
 
 class IndexBuffer
 {
@@ -349,6 +332,7 @@ public:
 		MemMapped = nullptr;
 	}
 };
+
 class Texture : public std::enable_shared_from_this<Texture>
 {
 public:
@@ -391,7 +375,6 @@ public:
 public:
 	DescriptorHeap()
 	{
-
 	}
 	void Init(D3D12_DESCRIPTOR_HEAP_DESC& InHeapDesc);
 
@@ -492,7 +475,6 @@ public:
 
 	DXGI_FORMAT IndexFormat = DXGI_FORMAT_R32_UINT;
 
-
 	shared_ptr<IndexBuffer> Ib;
 	shared_ptr<VertexBuffer> Vb;
 	vector<shared_ptr<Texture>> Textures;
@@ -502,22 +484,19 @@ public:
 	vector<DrawCall> Draws;
 
 	shared_ptr<RTAS> CreateBLAS();
-	//shared_ptr<RTAS> CreateBLASArray();
 };
 
 class Scene
 {
 public:
-
+	
 	void SetTransform(glm::mat4x4 inTransform);
 
+public:
 	vector<shared_ptr<Mesh>> meshes;
 	vector<shared_ptr<Material>> Materials;
 public:
 };
-
-
-
 
 class DumRHI_DX12
 {
@@ -525,7 +504,6 @@ public:
 	friend class DescriptorHeap;
 
 	const uint32_t NumFrame = 3;
-	//#define NumFrame  3
 
 	uint32_t CurrentFrameIndex = 0;
 
@@ -533,7 +511,6 @@ public:
 
 	unique_ptr<CommandQueue> CmdQ;
 	CommandList* GlobalCmdList = nullptr;
-
 
 	vector<UINT32> FrameFenceValueVec;
 
@@ -549,8 +526,6 @@ public:
 
 	std::vector<std::shared_ptr<Texture>> renderTargetTextures;
 	std::list<std::shared_ptr<Texture>> DynamicTextures;
-
-	
 
 	ComPtr<IDXGISwapChain3> m_swapChain;
 
