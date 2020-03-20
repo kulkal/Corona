@@ -8,13 +8,19 @@
 // PURPOSE, MERCHANTABILITY, OR NON-INFRINGEMENT.
 //
 //*********************************************************
+#include "Common.hlsl"
 
 Texture2D SrcTex: register(t0);
+Texture2D SrcTexSH: register(t1);
+Texture2D SrcTexNormal: register(t2);
+
 SamplerState sampleWrap : register(s0);
 cbuffer DebugPassCB : register(b0)
 {
     float4 Scale;
     float4 Offset;
+    float2 RTSize;
+    float GIBufferScale;
     uint DebugMode;
 };
 
@@ -48,7 +54,10 @@ PSInput VSMain(
 
 float4 PSMain(PSInput input) : SV_TARGET
 {
-    input.uv.y *= -1;
+    // input.uv.y *= -1;
+
+    input.uv.y = 1 - input.uv.y;
+    float2 PixelPos = input.uv * RTSize;
 	float4 SrcColor;
 	
     if(DebugMode == 0)
@@ -72,6 +81,17 @@ float4 PSMain(PSInput input) : SV_TARGET
     {
         float v = SrcTex.Sample(sampleWrap, input.uv).w;
         SrcColor = float4(v, v, v, v);
+    }
+    else if(DebugMode == 5)
+    {
+        SH sh_indirect;
+        sh_indirect.shY = SrcTexSH[PixelPos/GIBufferScale];
+        sh_indirect.CoCg = SrcTex[PixelPos/GIBufferScale].xy;
+
+        float3 WorldNormal = SrcTexNormal[PixelPos];
+
+        float3 IndirectDiffuse = project_SH_irradiance(sh_indirect, WorldNormal);
+        SrcColor = float4(IndirectDiffuse, 0);
     }
 
 

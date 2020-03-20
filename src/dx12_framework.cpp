@@ -1360,6 +1360,9 @@ void dx12_framework::InitDebugPass()
 	RS_Debug->graphicsPSODesc = psoDesc;
 
 	RS_Debug->BindTexture("SrcTex", 0, 1);
+	RS_Debug->BindTexture("SrcTexSH", 1, 1);
+	RS_Debug->BindTexture("SrcTexNormal", 2, 1);
+
 	RS_Debug->BindSampler("samplerWrap", 0);
 	RS_Debug->BindConstantBuffer("DebugPassCB", 0, sizeof(DebugPassCB), 15);
 
@@ -1563,15 +1566,13 @@ void dx12_framework::CopyPass()
 void dx12_framework::DebugPass()
 {
 	RS_Debug->currentDrawCallIndex = 0;
-	RS_Debug->SetSampler("samplerWrap", samplerWrap.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
 	RS_Debug->Apply(dx12_rhi->GlobalCmdList->CmdList.Get());
+	RS_Debug->SetSampler("samplerWrap", samplerWrap.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
 
 	Texture* backbuffer = framebuffers[dx12_rhi->CurrentFrameIndex].get();
 
 	dx12_rhi->GlobalCmdList->CmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
 	dx12_rhi->GlobalCmdList->CmdList->IASetVertexBuffers(0, 1, &FullScreenVB->view);
-
-	CopyScaleOffsetCB cb;
 
 	 //raytraced shadow
 	{
@@ -1671,6 +1672,24 @@ void dx12_framework::DebugPass()
 		cb.DebugMode = RAW_COPY;
 		RS_Debug->SetConstantValue("DebugPassCB", &cb, dx12_rhi->GlobalCmdList->CmdList.Get());
 		RS_Debug->SetTexture("SrcTex", FilterIndirectDiffusePingPongSH[0].get(), dx12_rhi->GlobalCmdList->CmdList.Get());
+		dx12_rhi->GlobalCmdList->CmdList->DrawInstanced(4, 1, 0, 0);
+		RS_Debug->currentDrawCallIndex++;
+	}
+
+	// sh lighting result
+	{
+		DebugPassCB cb;
+
+		cb.RTSize = glm::vec2(m_width, m_height);
+		cb.GIBufferScale = GIBufferScale;
+		cb.Offset = glm::vec4(0.75, 0.75, 0, 0);
+		cb.Scale = glm::vec4(0.25, 0.25, 0, 0);
+		cb.DebugMode = SH_LIGHTING;
+		RS_Debug->SetConstantValue("DebugPassCB", &cb, dx12_rhi->GlobalCmdList->CmdList.Get());
+		RS_Debug->SetTexture("SrcTex", FilterIndirectDiffusePingPongColor[0].get(), dx12_rhi->GlobalCmdList->CmdList.Get());
+		RS_Debug->SetTexture("SrcTexSH", FilterIndirectDiffusePingPongSH[0].get(), dx12_rhi->GlobalCmdList->CmdList.Get());
+		RS_Debug->SetTexture("SrcTexNormal", NormalBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
+
 		dx12_rhi->GlobalCmdList->CmdList->DrawInstanced(4, 1, 0, 0);
 		RS_Debug->currentDrawCallIndex++;
 	}

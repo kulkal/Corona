@@ -94,17 +94,19 @@ class dx12_framework : public DXSample
 
 	enum EDebugMode
 	{
-		RAW_COPY,
-		CHANNEL_X,
-		CHANNEL_Y,
-		CHANNEL_Z,
-		CHANNEL_W,
-		SH_LIGHTING,
+		RAW_COPY = 0,
+		CHANNEL_X = 1,
+		CHANNEL_Y = 2,
+		CHANNEL_Z = 3,
+		CHANNEL_W = 4,
+		SH_LIGHTING =5,
 	};
 	struct DebugPassCB
 	{
 		glm::vec4 Scale;
 		glm::vec4 Offset;
+		glm::vec2 RTSize;
+		float GIBufferScale;
 		UINT32 DebugMode;
 	};
 
