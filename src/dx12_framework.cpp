@@ -1562,120 +1562,147 @@ void dx12_framework::CopyPass()
 
 void dx12_framework::DebugPass()
 {
-	//RS_Copy->currentDrawCallIndex = 0;
+	RS_Debug->currentDrawCallIndex = 0;
+	RS_Debug->SetSampler("samplerWrap", samplerWrap.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
+	RS_Debug->Apply(dx12_rhi->GlobalCmdList->CmdList.Get());
 
 	Texture* backbuffer = framebuffers[dx12_rhi->CurrentFrameIndex].get();
 
-	RS_Copy->Apply(dx12_rhi->GlobalCmdList->CmdList.Get());
 	dx12_rhi->GlobalCmdList->CmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
 	dx12_rhi->GlobalCmdList->CmdList->IASetVertexBuffers(0, 1, &FullScreenVB->view);
 
-	RS_Copy->SetSampler("samplerWrap", samplerWrap.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
 	CopyScaleOffsetCB cb;
 
 	 //raytraced shadow
-	RS_Copy->SetTexture("SrcTex", ShadowBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
-	cb.Offset = glm::vec4(-0.75, -0.75, 0, 0);
-	cb.Scale = glm::vec4(0.25, 0.25, 0, 0);
-	RS_Copy->SetConstantValue("ScaleOffsetParams", &cb, dx12_rhi->GlobalCmdList->CmdList.Get());
-	dx12_rhi->GlobalCmdList->CmdList->DrawInstanced(4, 1, 0, 0);
-	RS_Copy->currentDrawCallIndex++;
+	{
+		DebugPassCB cb;
 
+		cb.Offset = glm::vec4(-0.75, -0.75, 0, 0);
+		cb.Scale = glm::vec4(0.25, 0.25, 0, 0);
+		cb.DebugMode = RAW_COPY;
+		RS_Debug->SetConstantValue("DebugPassCB", &cb, dx12_rhi->GlobalCmdList->CmdList.Get());
+		RS_Debug->SetTexture("SrcTex", ShadowBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
+		dx12_rhi->GlobalCmdList->CmdList->DrawInstanced(4, 1, 0, 0);
+		RS_Debug->currentDrawCallIndex++;
+	}
+	
+	// reflection
+	{
+		DebugPassCB cb;
 
-	// raytrace reflection
-	RS_Copy->SetTexture("SrcTex", ReflectionBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
-	cb.Offset = glm::vec4(-0.75, -0.25, 0, 0);
-	cb.Scale = glm::vec4(0.25, 0.25, 0, 0);
-	RS_Copy->SetConstantValue("ScaleOffsetParams", &cb, dx12_rhi->GlobalCmdList->CmdList.Get());
-	dx12_rhi->GlobalCmdList->CmdList->DrawInstanced(4, 1, 0, 0);
-	RS_Copy->currentDrawCallIndex++;
-
+		cb.Offset = glm::vec4(-0.75, -0.25, 0, 0);
+		cb.Scale = glm::vec4(0.25, 0.25, 0, 0);
+		cb.DebugMode = RAW_COPY;
+		RS_Debug->SetConstantValue("DebugPassCB", &cb, dx12_rhi->GlobalCmdList->CmdList.Get());
+		RS_Debug->SetTexture("SrcTex", ReflectionBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
+		dx12_rhi->GlobalCmdList->CmdList->DrawInstanced(4, 1, 0, 0);
+		RS_Debug->currentDrawCallIndex++;
+	}
 
 	// world normal
-	RS_Copy->SetTexture("SrcTex", NormalBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
-	cb.Offset = glm::vec4(-0.25, -0.75, 0, 0);
-	cb.Scale = glm::vec4(0.25, 0.25, 0, 0);
-	RS_Copy->SetConstantValue("ScaleOffsetParams", &cb, dx12_rhi->GlobalCmdList->CmdList.Get());
-	dx12_rhi->GlobalCmdList->CmdList->DrawInstanced(4, 1, 0, 0);
-	RS_Copy->currentDrawCallIndex++;
+	{
+		DebugPassCB cb;
 
+		cb.Offset = glm::vec4(-0.25, -0.75, 0, 0);
+		cb.Scale = glm::vec4(0.25, 0.25, 0, 0);
+		cb.DebugMode = RAW_COPY;
+		RS_Debug->SetConstantValue("DebugPassCB", &cb, dx12_rhi->GlobalCmdList->CmdList.Get());
+		RS_Debug->SetTexture("SrcTex", NormalBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
+		dx12_rhi->GlobalCmdList->CmdList->DrawInstanced(4, 1, 0, 0);
+		RS_Debug->currentDrawCallIndex++;
+	}
 
 	// geom world normal
-	cb.Offset = glm::vec4(-0.25, -0.25, 0, 0);
-	cb.Scale = glm::vec4(0.25, 0.25, 0, 0);
-	RS_Copy->SetConstantValue("ScaleOffsetParams", &cb, dx12_rhi->GlobalCmdList->CmdList.Get());
-	RS_Copy->SetTexture("SrcTex", GeomNormalBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
-	dx12_rhi->GlobalCmdList->CmdList->DrawInstanced(4, 1, 0, 0);
-	RS_Copy->currentDrawCallIndex++;
+	{
+		DebugPassCB cb;
 
+		cb.Offset = glm::vec4(-0.25, -0.25, 0, 0);
+		cb.Scale = glm::vec4(0.25, 0.25, 0, 0);
+		cb.DebugMode = RAW_COPY;
+		RS_Debug->SetConstantValue("DebugPassCB", &cb, dx12_rhi->GlobalCmdList->CmdList.Get());
+		RS_Debug->SetTexture("SrcTex", GeomNormalBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
+		dx12_rhi->GlobalCmdList->CmdList->DrawInstanced(4, 1, 0, 0);
+		RS_Debug->currentDrawCallIndex++;
+	}
 	// depth
-	cb.Offset = glm::vec4(0.25, -0.75, 0, 0);
-	cb.Scale = glm::vec4(0.25, 0.25, 0, 0);
-	RS_Copy->SetConstantValue("ScaleOffsetParams", &cb, dx12_rhi->GlobalCmdList->CmdList.Get());
-	RS_Copy->SetTexture("SrcTex", DepthBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
-	dx12_rhi->GlobalCmdList->CmdList->DrawInstanced(4, 1, 0, 0);
-	RS_Copy->currentDrawCallIndex++;
+	{
+		DebugPassCB cb;
+
+		cb.Offset = glm::vec4(0.25, -0.75, 0, 0);
+		cb.Scale = glm::vec4(0.25, 0.25, 0, 0);
+		cb.DebugMode = RAW_COPY;
+		RS_Debug->SetConstantValue("DebugPassCB", &cb, dx12_rhi->GlobalCmdList->CmdList.Get());
+		RS_Debug->SetTexture("SrcTex", DepthBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
+		dx12_rhi->GlobalCmdList->CmdList->DrawInstanced(4, 1, 0, 0);
+		RS_Debug->currentDrawCallIndex++;
+	}
 
 	// raw sh
-	cb.Offset = glm::vec4(0.25, -0.25, 0, 0);
-	cb.Scale = glm::vec4(0.25, 0.25, 0, 0);
-	RS_Copy->SetConstantValue("ScaleOffsetParams", &cb, dx12_rhi->GlobalCmdList->CmdList.Get());
-	//RS_Copy->SetTexture("SrcTex", GIBuffer.get(), dx12_rhi->CommandList.Get());
-	RS_Copy->SetTexture("SrcTex", GIBufferSH.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
+	{
+		DebugPassCB cb;
 
-	dx12_rhi->GlobalCmdList->CmdList->DrawInstanced(4, 1, 0, 0);
-	RS_Copy->currentDrawCallIndex++;
-
+		cb.Offset = glm::vec4(0.25, -0.25, 0, 0);
+		cb.Scale = glm::vec4(0.25, 0.25, 0, 0);
+		cb.DebugMode = RAW_COPY;
+		RS_Debug->SetConstantValue("DebugPassCB", &cb, dx12_rhi->GlobalCmdList->CmdList.Get());
+		RS_Debug->SetTexture("SrcTex", GIBufferSH.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
+		dx12_rhi->GlobalCmdList->CmdList->DrawInstanced(4, 1, 0, 0);
+		RS_Debug->currentDrawCallIndex++;
+	}
 	// temporal filtered sh
-	cb.Offset = glm::vec4(0.25, 0.25, 0, 0);
-	cb.Scale = glm::vec4(0.25, 0.25, 0, 0);
-	RS_Copy->SetConstantValue("ScaleOffsetParams", &cb, dx12_rhi->GlobalCmdList->CmdList.Get());
-	//RS_Copy->SetTexture("SrcTex", GIBuffer.get(), dx12_rhi->CommandList.Get());
-	RS_Copy->SetTexture("SrcTex", GIBufferSHTemporal[GIBufferWriteIndex].get(), dx12_rhi->GlobalCmdList->CmdList.Get());
+	{
+		DebugPassCB cb;
 
-	dx12_rhi->GlobalCmdList->CmdList->DrawInstanced(4, 1, 0, 0);
-	RS_Copy->currentDrawCallIndex++;
+		cb.Offset = glm::vec4(0.25, 0.25, 0, 0);
+		cb.Scale = glm::vec4(0.25, 0.25, 0, 0);
+		cb.DebugMode = RAW_COPY;
+		RS_Debug->SetConstantValue("DebugPassCB", &cb, dx12_rhi->GlobalCmdList->CmdList.Get());
+		RS_Debug->SetTexture("SrcTex", GIBufferSHTemporal[GIBufferWriteIndex].get(), dx12_rhi->GlobalCmdList->CmdList.Get());
+		dx12_rhi->GlobalCmdList->CmdList->DrawInstanced(4, 1, 0, 0);
+		RS_Debug->currentDrawCallIndex++;
+	}
 
 	// spatial filtered sh
-	cb.Offset = glm::vec4(0.25, 0.75, 0, 0);
-	cb.Scale = glm::vec4(0.25, 0.25, 0, 0);
-	RS_Copy->SetConstantValue("ScaleOffsetParams", &cb, dx12_rhi->GlobalCmdList->CmdList.Get());
-	//RS_Copy->SetTexture("SrcTex", GIBuffer.get(), dx12_rhi->CommandList.Get());
-	RS_Copy->SetTexture("SrcTex", FilterIndirectDiffusePingPongSH[0].get(), dx12_rhi->GlobalCmdList->CmdList.Get());
+	{
+		DebugPassCB cb;
 
-	dx12_rhi->GlobalCmdList->CmdList->DrawInstanced(4, 1, 0, 0);
-	RS_Copy->currentDrawCallIndex++;
+		cb.Offset = glm::vec4(0.25, 0.75, 0, 0);
+		cb.Scale = glm::vec4(0.25, 0.25, 0, 0);
+		cb.DebugMode = RAW_COPY;
+		RS_Debug->SetConstantValue("DebugPassCB", &cb, dx12_rhi->GlobalCmdList->CmdList.Get());
+		RS_Debug->SetTexture("SrcTex", FilterIndirectDiffusePingPongSH[0].get(), dx12_rhi->GlobalCmdList->CmdList.Get());
+		dx12_rhi->GlobalCmdList->CmdList->DrawInstanced(4, 1, 0, 0);
+		RS_Debug->currentDrawCallIndex++;
+	}
 
 	// albedo
+	{
+		DebugPassCB cb;
 
-	cb.Offset = glm::vec4(0.750, -0.75, 0, 0);
-	cb.Scale = glm::vec4(0.25, 0.25, 0, 0);
-	RS_Copy->SetConstantValue("ScaleOffsetParams", &cb, dx12_rhi->GlobalCmdList->CmdList.Get());
-	RS_Copy->SetTexture("SrcTex", AlbedoBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
-	dx12_rhi->GlobalCmdList->CmdList->DrawInstanced(4, 1, 0, 0);
-	RS_Copy->currentDrawCallIndex++;
+		cb.Offset = glm::vec4(0.75, -0.75, 0, 0);
+		cb.Scale = glm::vec4(0.25, 0.25, 0, 0);
+		cb.DebugMode = RAW_COPY;
+		RS_Debug->SetConstantValue("DebugPassCB", &cb, dx12_rhi->GlobalCmdList->CmdList.Get());
+		RS_Debug->SetTexture("SrcTex", AlbedoBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
+		dx12_rhi->GlobalCmdList->CmdList->DrawInstanced(4, 1, 0, 0);
+		RS_Debug->currentDrawCallIndex++;
+	}
 
 	// velocity
-	cb.Offset = glm::vec4(0.75, -0.25, 0, 0);
-	cb.Scale = glm::vec4(0.25, 0.25, 0, 0);
-	RS_Copy->SetConstantValue("ScaleOffsetParams", &cb, dx12_rhi->GlobalCmdList->CmdList.Get());
-	RS_Copy->SetTexture("SrcTex", VelocityBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
-	dx12_rhi->GlobalCmdList->CmdList->DrawInstanced(4, 1, 0, 0);
-	RS_Copy->currentDrawCallIndex++;
-
-	/*cb.Offset = glm::vec4(0.75, 0.25, 0, 0);
-	cb.Scale = glm::vec4(0.25, 0.25, 0, 0);
-	RS_Copy->SetConstantValue("ScaleOffsetParams", &cb, dx12_rhi->GlobalCmdList->CmdList.Get());
-	RS_Copy->SetTexture("SrcTex", VelocityBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
-	dx12_rhi->GlobalCmdList->CmdList->DrawInstanced(4, 1, 0, 0);
-	RS_Copy->currentDrawCallIndex++;*/
-
-	//RS_Copy->Apply(dx12_rhi->GlobalCmdList->CmdList.Get());
-
 	{
-		RS_Debug->currentDrawCallIndex = 0;
+		DebugPassCB cb;
 
-		RS_Debug->SetSampler("samplerWrap", samplerWrap.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
+		cb.Offset = glm::vec4(0.75, -0.25, 0, 0);
+		cb.Scale = glm::vec4(0.25, 0.25, 0, 0);
+		cb.DebugMode = RAW_COPY;
+		RS_Debug->SetConstantValue("DebugPassCB", &cb, dx12_rhi->GlobalCmdList->CmdList.Get());
+		RS_Debug->SetTexture("SrcTex", VelocityBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
+		dx12_rhi->GlobalCmdList->CmdList->DrawInstanced(4, 1, 0, 0);
+		RS_Debug->currentDrawCallIndex++;
+	}
+
+	// material
+	{
 		DebugPassCB cb;
 
 		cb.Offset = glm::vec4(0.75, 0.25, 0, 0);
@@ -1685,9 +1712,6 @@ void dx12_framework::DebugPass()
 		RS_Debug->SetTexture("SrcTex", MaterialBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
 		dx12_rhi->GlobalCmdList->CmdList->DrawInstanced(4, 1, 0, 0);
 		RS_Debug->currentDrawCallIndex++;
-
-		RS_Debug->Apply(dx12_rhi->GlobalCmdList->CmdList.Get());
-
 	}
 }
 
