@@ -37,108 +37,9 @@ using namespace std;
 
 class MyToyDX12Renderer : public DXSample
 {
-	struct InstanceProperty
-	{
-		glm::mat4x4 WorldMatrix;
-	};
-	struct MeshDrawConstantBuffer
-	{
-		glm::mat4x4 ViewProjectionMatrix;
-		//glm::mat4x4 UnjitteredViewProjectionMatrix;
-		//glm::mat4x4 InvViewProjectionMatrix;
-		glm::mat4x4 PrevViewProjectionMatrix;
-		glm::mat4x4 WorldMatrix;
-		glm::vec4 ViewDir;
-		glm::vec2 RTSize;
-		glm::vec2 JitterOffset;
-		glm::vec4 RougnessMetalic;
-		glm::vec4 pad4[1];
-	};
-
-	struct RTShadowViewParamCB
-	{
-		glm::mat4x4 ViewMatrix;
-		glm::mat4x4 InvViewMatrix;
-		glm::mat4x4 ProjMatrix;
-		glm::vec4 ProjectionParams;
-		glm::vec4	LightDir;
-		glm::vec4	pad[2];
-	};
-
-	struct RTReflectionViewParamCB
-	{
-		glm::mat4x4 ViewMatrix;
-		glm::mat4x4 InvViewMatrix;
-		glm::mat4x4 ProjMatrix;
-		glm::vec4 ProjectionParams;
-		glm::vec4	LightDir;
-	};
-
-	struct RTGIViewParamCB
-	{
-		glm::mat4x4 ViewMatrix;
-		glm::mat4x4 InvViewMatrix;
-		glm::mat4x4 ProjMatrix;
-		glm::vec4 ProjectionParams;
-		glm::vec4 LightDir;
-		glm::vec2 RandomOffset;
-		UINT32 FrameCounter;
-		UINT32 BlueNoiseOffsetStride = 1.0f;
-	};
-
-	struct CopyScaleOffsetCB
-	{
-		glm::vec4 Scale;
-		glm::vec4 Offset;
-	};
-
-	enum EDebugMode
-	{
-		RAW_COPY = 0,
-		CHANNEL_X = 1,
-		CHANNEL_Y = 2,
-		CHANNEL_Z = 3,
-		CHANNEL_W = 4,
-		SH_LIGHTING =5,
-	};
-	struct DebugPassCB
-	{
-		glm::vec4 Scale;
-		glm::vec4 Offset;
-		glm::vec2 RTSize;
-		float GIBufferScale;
-		UINT32 DebugMode;
-	};
-
-public:
-	MyToyDX12Renderer(UINT width, UINT height, std::wstring name);
-	virtual ~MyToyDX12Renderer();
-
-	virtual void OnInit();
-	virtual void OnUpdate();
-	virtual void OnRender();
-	virtual void OnDestroy();
-	virtual void OnKeyDown(UINT8 key);
-	virtual void OnKeyUp(UINT8 key);
-
 private:
-	std::unique_ptr<SimpleDX12> dx12_rhi;
+	shared_ptr<Texture> DepthBuffer;
 
-	float m_turnSpeed = glm::half_pi<float>();
-	bool bMultiThreadRendering = false;
-	bool bDebugDraw = false;
-	
-	UINT m_frameCounter = 0;
-
-	UINT FrameCounter = 0;
-	
-	// Pipeline objects.
-	CD3DX12_VIEWPORT m_viewport;
-	CD3DX12_RECT m_scissorRect;
-	ComPtr<IDXGISwapChain3> m_swapChain;
-	ComPtr<ID3D12Device5> m_device;
-
-	
 	UINT ColorBufferWriteIndex = 0;
 	shared_ptr<Texture> ColorBuffer0;
 	shared_ptr<Texture> ColorBuffer1;
@@ -158,14 +59,30 @@ private:
 	shared_ptr<Texture> GIBufferColorTemporal[2];
 	shared_ptr<Texture> GIBufferSH;
 	shared_ptr<Texture> GIBufferColor;
-	shared_ptr<Texture> DepthBuffer;
-	shared_ptr<Texture> FakeDepthBuffer;
+
+	shared_ptr<Texture> FilterIndirectDiffusePingPongSH[2];
+	shared_ptr<Texture> FilterIndirectDiffusePingPongColor[2];
 
 	std::vector<std::shared_ptr<Texture>> framebuffers;
 	
+	// mesh draw pass
+	struct MeshDrawConstantBuffer
+	{
+		glm::mat4x4 ViewProjectionMatrix;
+		//glm::mat4x4 UnjitteredViewProjectionMatrix;
+		//glm::mat4x4 InvViewProjectionMatrix;
+		glm::mat4x4 PrevViewProjectionMatrix;
+		glm::mat4x4 WorldMatrix;
+		glm::vec4 ViewDir;
+		glm::vec2 RTSize;
+		glm::vec2 JitterOffset;
+		glm::vec4 RougnessMetalic;
+		glm::vec4 pad4[1];
+	};
+
 	unique_ptr<PipelineStateObject> RS_Mesh;
 
-	// denoising
+	// spatial denoising
 	struct SpatialFilterConstant
 	{
 		glm::vec4 ProjectionParams;
@@ -175,28 +92,141 @@ private:
 		float IndirectDiffuseWeightFactorNormal = 1.0f;
 	};
 
-	//FLOAT IndirectDiffuseWeightFactor0;
 	SpatialFilterConstant SpatialFilterCB;
 
 	unique_ptr<PipelineStateObject> RS_SpatialDenoisingFilter;
 
-	shared_ptr<Texture> FilterIndirectDiffusePingPongSH[2];
-	shared_ptr<Texture> FilterIndirectDiffusePingPongColor[2];
-
+	// temporal denoising
 	struct TemporalFilterConstant
 	{
 		glm::vec4 ProjectionParams;
 		glm::vec2 RTSize;
 	};
 
-	//FLOAT IndirectDiffuseWeightFactor0;
 	TemporalFilterConstant TemporalFilterCB;
-	unique_ptr<PipelineStateObject> RS_TemporalDenoisingFilter;
 
+	unique_ptr<PipelineStateObject> RS_TemporalDenoisingFilter;
+	
+	// RT shadow
+	struct RTShadowViewParamCB
+	{
+		glm::mat4x4 ViewMatrix;
+		glm::mat4x4 InvViewMatrix;
+		glm::mat4x4 ProjMatrix;
+		glm::vec4 ProjectionParams;
+		glm::vec4	LightDir;
+		glm::vec4	pad[2];
+	};
+
+	RTShadowViewParamCB RTShadowViewParam;
+	
+	unique_ptr<RTPipelineStateObject> PSO_RT_SHADOW;
+
+
+	// RT reflection
+	struct RTReflectionViewParamCB
+	{
+		glm::mat4x4 ViewMatrix;
+		glm::mat4x4 InvViewMatrix;
+		glm::mat4x4 ProjMatrix;
+		glm::vec4 ProjectionParams;
+		glm::vec4	LightDir;
+	};
+
+	RTReflectionViewParamCB RTReflectionViewParam;
+	
+	unique_ptr<RTPipelineStateObject> PSO_RT_REFLECTION;
+
+	// RT GI
+	struct RTGIViewParamCB
+	{
+		glm::mat4x4 ViewMatrix;
+		glm::mat4x4 InvViewMatrix;
+		glm::mat4x4 ProjMatrix;
+		glm::vec4 ProjectionParams;
+		glm::vec4 LightDir;
+		glm::vec2 RandomOffset;
+		UINT32 FrameCounter;
+		UINT32 BlueNoiseOffsetStride = 1.0f;
+	};
+
+	RTGIViewParamCB RTGIViewParam;
+	unique_ptr<RTPipelineStateObject> PSO_RT_GI;
+	
+
+	// full screen copy pass
+	struct CopyScaleOffsetCB
+	{
+		glm::vec4 Scale;
+		glm::vec4 Offset;
+	};
+
+	unique_ptr<PipelineStateObject> RS_Copy;
+
+	// debug pass
+	enum EDebugMode
+	{
+		RAW_COPY = 0,
+		CHANNEL_X = 1,
+		CHANNEL_Y = 2,
+		CHANNEL_Z = 3,
+		CHANNEL_W = 4,
+		SH_LIGHTING = 5,
+	};
+	struct DebugPassCB
+	{
+		glm::vec4 Scale;
+		glm::vec4 Offset;
+		glm::vec2 RTSize;
+		float GIBufferScale;
+		UINT32 DebugMode;
+	};
+
+	unique_ptr<PipelineStateObject> RS_Debug;
+
+	// lighting pass
+	
+	struct LightingParam
+	{
+		glm::vec4 LightDir;
+		glm::vec2 RTSize;
+		float TAABlendFactor;
+		float GIBufferScale;
+	};
+	
+	unique_ptr<PipelineStateObject> RS_Lighting;
+
+	// temporalAA
+	struct TemporalAAParam
+	{
+		glm::vec2 RTSize;
+		float TAABlendFactor;
+		UINT32 ClampMode;
+	};
+	
+	bool bEnableTAA = true;
+
+	UINT32 ClampMode = 2;
+
+	float JitterScale = 0.85;
+
+	unique_ptr<PipelineStateObject> RS_TemporalAA;
+
+	// imgui font texture
+	D3D12_CPU_DESCRIPTOR_HANDLE CpuHandleImguiFontTex;
+	D3D12_GPU_DESCRIPTOR_HANDLE GpuHandleImguiFontTex;
+
+	shared_ptr<VertexBuffer> FullScreenVB;
+
+	// blue noise texture
+	shared_ptr<Texture> BlueNoiseTex;
+	shared_ptr<Texture> DefaultWhiteTex;
+	shared_ptr<Texture> DefaultNormalTex;
 
 	// global wrap sampler
 	std::shared_ptr<Sampler> samplerWrap;
 
+	// mesh
 	shared_ptr<Mesh> mesh;
 
 	shared_ptr<Scene> Sponza;
@@ -205,9 +235,14 @@ private:
 
 	shared_ptr<Scene> ShaderBall;
 
+	// time & camera
 	StepTimer m_timer;
+
+	float m_turnSpeed = glm::half_pi<float>();
+
 	SimpleCamera m_camera;
 
+	// misc
 	glm::vec3 LightDir = glm::normalize(glm::vec3(0.901, 0.88, 0.176));
 	float LightIntensity = 3.0f;
 	float Near = 1.0f;
@@ -223,59 +258,32 @@ private:
 	glm::vec2 JitterOffset;
 	glm::vec2 PrevJitter;
 
-	// raytracing
+	// raytracing resources
+
+	struct InstanceProperty
+	{
+		glm::mat4x4 WorldMatrix;
+	};
+
 	std::shared_ptr<Buffer> InstancePropertyBuffer;
 	shared_ptr<RTAS> TLAS;
 	vector<shared_ptr<RTAS>> vecBLAS;
-	unique_ptr<RTPipelineStateObject> PSO_RT_SHADOW;
-	RTShadowViewParamCB RTShadowViewParam;
+	
+	// ...
+	bool bMultiThreadRendering = false;
 
-	unique_ptr<RTPipelineStateObject> PSO_RT_REFLECTION;
-	RTReflectionViewParamCB RTReflectionViewParam;
+	bool bDebugDraw = false;
 
-	unique_ptr<RTPipelineStateObject> PSO_RT_GI;
-	RTGIViewParamCB RTGIViewParam;
+	UINT m_frameCounter = 0;
 
-	// full screen copy pass
-	unique_ptr<PipelineStateObject> RS_Copy;
-	shared_ptr<VertexBuffer> FullScreenVB;
+	UINT FrameCounter = 0;
 
-	// debug pass
-	unique_ptr<PipelineStateObject> RS_Debug;
-
-	// lighting pass
-	unique_ptr<PipelineStateObject> RS_Lighting;
-
-	// temporalAA
-	unique_ptr<PipelineStateObject> RS_TemporalAA;
-
-	struct LightingParam
-	{
-		glm::vec4 LightDir;
-		glm::vec2 RTSize;
-		float TAABlendFactor;
-		float GIBufferScale;
-	};
-
-	struct TemporalAAParam
-	{
-		glm::vec2 RTSize;
-		float TAABlendFactor;
-		UINT32 ClampMode;
-	};
-	bool bEnableTAA = true;
-
-	UINT32 ClampMode = 2;
-	float JitterScale = 0.85;
-
-	// imgui font texture
-	D3D12_CPU_DESCRIPTOR_HANDLE CpuHandleImguiFontTex;
-	D3D12_GPU_DESCRIPTOR_HANDLE GpuHandleImguiFontTex;
-
-	// blue noise texture
-	shared_ptr<Texture> BlueNoiseTex;
-	shared_ptr<Texture> DefaultWhiteTex;
-	shared_ptr<Texture> DefaultNormalTex;
+	// Pipeline objects.
+	CD3DX12_VIEWPORT m_viewport;
+	CD3DX12_RECT m_scissorRect;
+	ComPtr<IDXGISwapChain3> m_swapChain;
+	ComPtr<ID3D12Device5> m_device;
+	std::unique_ptr<SimpleDX12> dx12_rhi;
 
 public:
 
@@ -284,8 +292,6 @@ public:
 	void LoadPipeline();
 
 	void LoadAssets();
-
-	void LoadMesh();
 
 	shared_ptr<Scene> LoadModel(string fileName);
 
@@ -330,4 +336,23 @@ public:
 	void LightingPass();
 
 	void TemporalAAPass();
+
+	// DXSample functions
+	virtual void OnInit();
+
+	virtual void OnUpdate();
+
+	virtual void OnRender();
+
+	virtual void OnDestroy();
+
+	virtual void OnKeyDown(UINT8 key);
+
+	virtual void OnKeyUp(UINT8 key);
+
+	MyToyDX12Renderer(UINT width, UINT height, std::wstring name);
+
+	virtual ~MyToyDX12Renderer();
+
+	
 };
