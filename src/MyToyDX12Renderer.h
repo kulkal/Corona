@@ -12,6 +12,7 @@
 #pragma once
 
 #define GLM_FORCE_CTOR_INIT
+#include <array>
 
 #include "glm/glm.hpp"
 #define GLM_ENABLE_EXPERIMENTAL
@@ -23,7 +24,7 @@
 #include "StepTimer.h"
 #include "SimpleCamera.h"
 #include "DumRHI_DX12.h"
-#include <array>
+#include "enkiTS/TaskScheduler.h""
 using namespace DirectX;
 
 // Note that while ComPtr is used to manage the lifetime of resources on the CPU,
@@ -284,6 +285,8 @@ private:
 	ComPtr<IDXGISwapChain3> m_swapChain;
 	ComPtr<ID3D12Device5> m_device;
 	std::unique_ptr<SimpleDX12> dx12_rhi;
+
+	enki::TaskScheduler g_TS;
 
 public:
 

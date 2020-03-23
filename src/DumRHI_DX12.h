@@ -20,6 +20,13 @@
 #include "glm/mat4x4.hpp"
 #include "glm/fwd.hpp"
 
+#include <crtdbg.h>
+
+#if _DEBUG
+#define DEBUG_CLIENTBLOCK   new( _CLIENT_BLOCK, __FILE__, __LINE__)
+#else
+#define DEBUG_CLIENTBLOCK
+#endif // _DEBUG
 
 #include "DXSampleHelper.h"
 

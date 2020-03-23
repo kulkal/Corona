@@ -11,38 +11,35 @@
 
 #include "stdafx.h"
 #include "MyToyDX12Renderer.h"
+#include "DXCAPI/dxcapi.use.h"
+#include "Utils.h"
 #include <iostream>
 #include <algorithm>
 #include <array>
-#include "enkiTS/TaskScheduler.h""
-#include "DXCAPI/dxcapi.use.h"
-#include "Utils.h"
-
+#include <sstream>
+#include <fstream>
+#include <variant>
+#include <codecvt>
 #include <dxgidebug.h>
-
-
 #include "assimp/include/Importer.hpp"
 #include "assimp/include/scene.h"
 #include "assimp/include/postprocess.h"
 //#pragma comment(lib, "assimp\\lib\\assimp.lib")
-
 #include "GFSDK_Aftermath/include/GFSDK_Aftermath.h"
-
-#include <sstream>
-#include <fstream>
-#include <variant>
-
 #include "imgui.h"
 #include "imgui_impl_win32.h"
 #include "imgui_impl_dx12.h"
 
+
+
+#ifdef _DEBUG
+#define new DEBUG_CLIENTBLOCK
+#endif
+
 #define arraysize(a) (sizeof(a)/sizeof(a[0]))
 #define align_to(_alignment, _val) (((_val + _alignment - 1) / _alignment) * _alignment)
 
-
 static dxc::DxcDllSupport gDxcDllHelper;
-
-enki::TaskScheduler g_TS;
 
 
 using namespace glm;
@@ -296,11 +293,26 @@ struct PipelineConfig
 };
 
 
+
+
 MyToyDX12Renderer::MyToyDX12Renderer(UINT width, UINT height, std::wstring name) :
 	DXSample(width, height, name),
 	m_viewport(0.0f, 0.0f, static_cast<float>(width), static_cast<float>(height)),
 	m_scissorRect(0, 0, static_cast<LONG>(width), static_cast<LONG>(height))
 {
+	int tmpFlag = _CrtSetDbgFlag(_CRTDBG_REPORT_FLAG);
+
+	// Turn on leak-checking bit.
+	tmpFlag |= _CRTDBG_LEAK_CHECK_DF;
+	tmpFlag |= _CRTDBG_ALLOC_MEM_DF;
+	//tmpFlag |= _CRTDBG_CHECK_ALWAYS_DF;
+
+
+	// Turn off CRT block checking bit.
+	//tmpFlag &= ~_CRTDBG_CHECK_CRT_DF;
+
+	// Set flag to the new value.
+	_CrtSetDbgFlag(tmpFlag);
 }
 
 MyToyDX12Renderer::~MyToyDX12Renderer()
@@ -308,8 +320,11 @@ MyToyDX12Renderer::~MyToyDX12Renderer()
 	
 }
 
+
 void MyToyDX12Renderer::OnInit()
 {
+	//_CrtSetBreakAlloc(196);
+
 	CoInitialize(NULL);
 
 	g_TS.Initialize(8);
@@ -612,7 +627,6 @@ void MyToyDX12Renderer::LoadAssets()
 	InitRaytracing();
 }
 
-#include <codecvt>
 shared_ptr<Scene> MyToyDX12Renderer::LoadModel(string fileName)
 {
 	Scene* scene = new Scene;
@@ -1042,7 +1056,6 @@ void MyToyDX12Renderer::InitBlueNoiseTexture()
 			if(i %(64*4) == 0)
 				ss << "\n";
 		}
-		OutputDebugStringA(ss.str().c_str());
 
 		D3D12_SUBRESOURCE_DATA textureData = {};
 		textureData.pData = NoiseDataFloat;
