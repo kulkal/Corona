@@ -26,7 +26,7 @@
 using namespace Microsoft::WRL;
 using namespace std;
 
-class DumRHI_DX12;
+class SimpleDX12;
 class Texture;
 class ConstantBuffer;
 class Sampler;
@@ -498,7 +498,7 @@ public:
 public:
 };
 
-class DumRHI_DX12
+class SimpleDX12
 {
 public:
 	friend class DescriptorHeap;
@@ -550,8 +550,8 @@ public:
 	void PresentBarrier(Texture* rt);
 	void ResourceBarrier(ID3D12Resource* Resource, D3D12_RESOURCE_STATES StateBefore, D3D12_RESOURCE_STATES StateAfter);
 
-	DumRHI_DX12(ComPtr<ID3D12Device5> pDevice);
-	virtual ~DumRHI_DX12();
+	SimpleDX12(ComPtr<ID3D12Device5> pDevice);
+	virtual ~SimpleDX12();
 };
 
 

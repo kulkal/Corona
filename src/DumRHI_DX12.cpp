@@ -30,7 +30,7 @@
 
 using namespace std;
 
-DumRHI_DX12* g_dx12_rhi;
+SimpleDX12* g_dx12_rhi;
 
 ThreadDescriptorHeapPool::ThreadDescriptorHeapPool()
 {
@@ -80,7 +80,7 @@ void DescriptorHeap::AllocDescriptors(D3D12_CPU_DESCRIPTOR_HANDLE& cpuHandle, D3
 	NumAllocated += num;
 }
 
-void DumRHI_DX12::BeginFrame()
+void SimpleDX12::BeginFrame()
 {
 	CurrentFrameIndex = m_swapChain->GetCurrentBackBufferIndex();
 
@@ -129,14 +129,14 @@ void DumRHI_DX12::BeginFrame()
 	}
 }
 
-void DumRHI_DX12::EndFrame()
+void SimpleDX12::EndFrame()
 {
 	ThrowIfFailed(m_swapChain->Present(0, 0), &g_dx12_rhi->AM_CL_Handle);
 	FrameFenceValueVec[CurrentFrameIndex] = CmdQ->CurrentFenceValue;;
 	CmdQ->SignalCurrentFence();
 }
 
-shared_ptr<ConstantBuffer> DumRHI_DX12::CreateConstantBuffer(int Size, UINT NumView)
+shared_ptr<ConstantBuffer> SimpleDX12::CreateConstantBuffer(int Size, UINT NumView)
 {
 	ConstantBuffer* cbuffer = new ConstantBuffer;
 
@@ -186,7 +186,7 @@ shared_ptr<ConstantBuffer> DumRHI_DX12::CreateConstantBuffer(int Size, UINT NumV
 	return retPtr;
 }
 
-shared_ptr<Sampler> DumRHI_DX12::CreateSampler(D3D12_SAMPLER_DESC& InSamplerDesc)
+shared_ptr<Sampler> SimpleDX12::CreateSampler(D3D12_SAMPLER_DESC& InSamplerDesc)
 {
 	Sampler* sampler = new Sampler;
 	sampler->SamplerDesc = InSamplerDesc;
@@ -196,7 +196,7 @@ shared_ptr<Sampler> DumRHI_DX12::CreateSampler(D3D12_SAMPLER_DESC& InSamplerDesc
 	return shared_ptr<Sampler>(sampler);
 }
 
-std::shared_ptr<Buffer> DumRHI_DX12::CreateBuffer(UINT Size)
+std::shared_ptr<Buffer> SimpleDX12::CreateBuffer(UINT Size)
 {
 	Buffer * buffer = new Buffer;
 	D3D12_RESOURCE_DESC bufDesc = {};
@@ -235,7 +235,7 @@ std::shared_ptr<Buffer> DumRHI_DX12::CreateBuffer(UINT Size)
 	return shared_ptr<Buffer>(buffer);;
 }
 
-shared_ptr<IndexBuffer> DumRHI_DX12::CreateIndexBuffer(DXGI_FORMAT Format, UINT Size, void* SrcData)
+shared_ptr<IndexBuffer> SimpleDX12::CreateIndexBuffer(DXGI_FORMAT Format, UINT Size, void* SrcData)
 {
 	CommandList* cmd = CmdQ->AllocCmdList();
 
@@ -311,7 +311,7 @@ shared_ptr<IndexBuffer> DumRHI_DX12::CreateIndexBuffer(DXGI_FORMAT Format, UINT 
 	return shared_ptr<IndexBuffer>(ib);
 }
 
-shared_ptr<VertexBuffer> DumRHI_DX12::CreateVertexBuffer(UINT Size, UINT Stride, void* SrcData)
+shared_ptr<VertexBuffer> SimpleDX12::CreateVertexBuffer(UINT Size, UINT Stride, void* SrcData)
 {
 	CommandList* cmd = CmdQ->AllocCmdList();
 
@@ -379,7 +379,7 @@ shared_ptr<VertexBuffer> DumRHI_DX12::CreateVertexBuffer(UINT Size, UINT Stride,
 	return shared_ptr<VertexBuffer>(vb);
 }
 
-void DumRHI_DX12::PresentBarrier(Texture* rt)
+void SimpleDX12::PresentBarrier(Texture* rt)
 {
 	D3D12_RESOURCE_BARRIER BarrierDesc = {};
 	BarrierDesc.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
@@ -391,7 +391,7 @@ void DumRHI_DX12::PresentBarrier(Texture* rt)
 	GlobalCmdList->CmdList->ResourceBarrier(1, &BarrierDesc);
 }
 
-DumRHI_DX12::DumRHI_DX12(ComPtr<ID3D12Device5> InDevice)
+SimpleDX12::SimpleDX12(ComPtr<ID3D12Device5> InDevice)
 	:Device(InDevice)
 {
 	//GFSDK_Aftermath_Result result = GFSDK_Aftermath_DX12_Initialize(GFSDK_Aftermath_Version::GFSDK_Aftermath_Version_API, GFSDK_Aftermath_FeatureFlags::GFSDK_Aftermath_FeatureFlags_Maximum, Device.Get());
@@ -477,7 +477,7 @@ DumRHI_DX12::DumRHI_DX12(ComPtr<ID3D12Device5> InDevice)
 	CmdQ->WaitGPU();
 }
 
-DumRHI_DX12::~DumRHI_DX12()
+SimpleDX12::~SimpleDX12()
 {
 	CmdQ->WaitGPU();
 }
@@ -819,7 +819,7 @@ void Texture::MakeDSV()
 	g_dx12_rhi->Device->CreateDepthStencilView(resource.Get(), &depthStencilDesc, CpuHandleDSV);
 }
 
-std::shared_ptr<Texture> DumRHI_DX12::CreateTexture2DFromResource(ComPtr<ID3D12Resource> InResource)
+std::shared_ptr<Texture> SimpleDX12::CreateTexture2DFromResource(ComPtr<ID3D12Resource> InResource)
 {
 	Texture* tex = new Texture;
 
@@ -831,7 +831,7 @@ std::shared_ptr<Texture> DumRHI_DX12::CreateTexture2DFromResource(ComPtr<ID3D12R
 	return shared_ptr<Texture>(tex);
 }
 
-std::shared_ptr<Texture> DumRHI_DX12::CreateTexture2D(DXGI_FORMAT format, D3D12_RESOURCE_FLAGS resFlags, D3D12_RESOURCE_STATES initResState, int width, int height, int mipLevels)
+std::shared_ptr<Texture> SimpleDX12::CreateTexture2D(DXGI_FORMAT format, D3D12_RESOURCE_FLAGS resFlags, D3D12_RESOURCE_STATES initResState, int width, int height, int mipLevels)
 {
 	Texture* tex = new Texture;
 
@@ -901,7 +901,7 @@ std::shared_ptr<Texture> DumRHI_DX12::CreateTexture2D(DXGI_FORMAT format, D3D12_
 	return texPtr;
 }
 
-std::shared_ptr<Texture> DumRHI_DX12::CreateTexture3D(DXGI_FORMAT format, D3D12_RESOURCE_FLAGS resFlags, D3D12_RESOURCE_STATES initResState, int width, int height, int depth, int mipLevels)
+std::shared_ptr<Texture> SimpleDX12::CreateTexture3D(DXGI_FORMAT format, D3D12_RESOURCE_FLAGS resFlags, D3D12_RESOURCE_STATES initResState, int width, int height, int depth, int mipLevels)
 {
 	Texture* tex = new Texture;
 
@@ -1038,7 +1038,7 @@ void Texture::UploadSRCData3D(D3D12_SUBRESOURCE_DATA* SrcData)
 	}
 }
 
-std::shared_ptr<Texture> DumRHI_DX12::CreateTextureFromFile(wstring fileName, bool isNormal)
+std::shared_ptr<Texture> SimpleDX12::CreateTextureFromFile(wstring fileName, bool isNormal)
 {
 	CommandList* cmd = g_dx12_rhi->CmdQ->AllocCmdList();
 
@@ -1318,7 +1318,7 @@ shared_ptr<RTAS> Mesh::CreateBLAS()
 	return shared_ptr<RTAS>(as);
 }
 
-std::shared_ptr<RTAS> DumRHI_DX12::CreateTLAS(vector<shared_ptr<RTAS>>& VecBottomLevelAS)
+std::shared_ptr<RTAS> SimpleDX12::CreateTLAS(vector<shared_ptr<RTAS>>& VecBottomLevelAS)
 {
 	RTAS* as = new  RTAS;
 

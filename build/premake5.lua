@@ -1,7 +1,7 @@
 -- premake5.lua
 
 WIN_SDK_VERSION = "10.0.17763.0" 
-workspace "dx12_framework_premake"
+workspace "MyToyDX12Renderer"
    configurations { "Debug", "Release" }
    platforms { "Win64"}
 
@@ -11,7 +11,7 @@ workspace "dx12_framework_premake"
 
 
 
-project "dx12_framework"
+project "MyToyDX12Renderer"
    kind "ConsoleApp"
    language "C"
    targetdir "bin/%{cfg.buildcfg}"

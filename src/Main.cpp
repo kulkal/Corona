@@ -10,13 +10,13 @@
 //*********************************************************
 
 #include "stdafx.h"
-#include "dx12_framework.h"
+#include "MyToyDX12Renderer.h"
 #include <dxgidebug.h>
 
 _Use_decl_annotations_
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow)
 {
-	dx12_framework* sample = new dx12_framework(1920, 1080, L"We should learn dx12");
+	MyToyDX12Renderer* sample = new MyToyDX12Renderer(1920, 1080, L"We should learn dx12");
 	Win32Application::Run(sample, hInstance, nCmdShow);
 
 	delete sample;
