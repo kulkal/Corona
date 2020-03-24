@@ -4,10 +4,13 @@ RWTexture2D<float4> ReflectionResult : register(u0);
 
 RaytracingAccelerationStructure gRtScene : register(t0);
 Texture2D DepthTex : register(t1);
-Texture2D WorldNormalTex : register(t2);
+Texture2D GeoNormalTex : register(t2);
 ByteAddressBuffer vertices : register(t3);
 ByteAddressBuffer indices : register(t4);
 Texture2D AlbedoTex : register(t5);
+Texture2D MetallicRougnessTex : register(t6);
+Texture3D BlueNoiseTex : register(t7);
+Texture2D WorldNormalTex : register(t8);
 
 cbuffer ViewParameter : register(b0)
 {
@@ -16,6 +19,9 @@ cbuffer ViewParameter : register(b0)
     float4x4 ProjMatrix;
     float4 ProjectionParams;
     float4 LightDir;
+    float2 RandomOffset;
+    uint FrameCounter;
+    uint BlueNoiseOffsetStride;
 };
 
 SamplerState sampleWrap : register(s0);
@@ -53,6 +59,37 @@ float3 offset_ray(float3 p, float3 n)
 
 }
 
+float3 ImportanceSampleGGX_VNDF(float2 u, float roughness, float3 V, float3x3 TBN)
+{
+    float alpha = square(roughness);
+
+    // float3 Ve = -float3(dot(V, TBN[0]), dot(V, TBN[1]), dot(V, TBN[2]));
+    float3 Ve = normalize(mul(V, transpose(TBN)));
+
+    float3 Vh = normalize(float3(alpha * Ve.x, alpha * Ve.y, Ve.z));
+    
+    float lensq = square(Vh.x) + square(Vh.y);
+    float3 T1 = lensq > 0.0 ? float3(-Vh.y, Vh.x, 0.0) * rsqrt(lensq) : float3(1.0, 0.0, 0.0);
+    float3 T2 = cross(Vh, T1);
+
+    float r = sqrt(u.x);
+    float phi = 2.0 * PI * u.y;
+    float t1 = r * cos(phi);
+    float t2 = r * sin(phi);
+    float s = 0.5 * (1.0 + Vh.z);
+    t2 = (1.0 - s) * sqrt(1.0 - square(t1)) + s * t2;
+
+    float3 Nh = t1 * T1 + t2 * T2 + sqrt(max(0.0, 1.0 - square(t1) - square(t2))) * Vh;
+
+    // Tangent space H
+    float3 Ne = float3(alpha * Nh.x, max(0.0, Nh.z), alpha * Nh.y);
+
+    // World space H
+    // float WNe = float3(dot(Ne, T), dot(Ne, B), dot(Ne, N));
+    return normalize(mul(Ne, TBN));
+}
+
+
 [shader("raygeneration")]
 void rayGen
 ()
@@ -74,6 +111,7 @@ void rayGen
 
 	float3 WorldNormal = normalize(WorldNormalTex.SampleLevel(sampleWrap, UV, 0).xyz);
   
+    float3 GeoNormal = normalize(GeoNormalTex.SampleLevel(sampleWrap, UV, 0).xyz);
 
     float LinearDepth = GetLinearDepthOpenGL(DeviceDepth, ProjectionParams.z, ProjectionParams.w) ;
 
@@ -86,21 +124,61 @@ void rayGen
 	float3 ViewPosition = GetViewPosition(LinearDepth, ScreenPosition, ProjMatrix._11, ProjMatrix._22);
 	float3 WorldPos = mul(float4(ViewPosition, 1), InvViewMatrix).xyz;
 
-  
+    float2 RandomUV = LoadBlueNoise2(BlueNoiseTex, launchIndex, FrameCounter, BlueNoiseOffsetStride);
+    float3x3 TBN = construct_ONB_frisvad(WorldNormal);
 
-    float3 ViewDir = mul(normalize(float3(d.x * aspectRatio, -d.y, -1)), InvViewMatrix);
+    float Rougness = 0;//MetallicRougnessTex.SampleLevel(sampleWrap, UV, 0).y;
+    float3 N = WorldNormal;
+    float3 V = mul(normalize(float3(d.x * aspectRatio, -d.y, -1)), InvViewMatrix);
+    float3 H = ImportanceSampleGGX_VNDF(RandomUV, 0, V, TBN);
+    float3 L = reflect(V, H);
 
-	RayDesc ray;
-	ray.Origin = WorldPos + WorldNormal * 0.5; //    mul(float4(0, 0, 0, 1), InvViewMatrix).xyz;
-	ray.Direction = reflect(ViewDir, WorldNormal);
+    float NoV = max(0, -dot(N, V));
+    float NoL = max(0, dot(N, L));
+    float NoH = max(0, dot(N, H));
+    float VoH = max(0, -dot(V, H));
 
-	ray.TMin = 0;
-	ray.TMax = 100000;
+    if (NoL > 0)
+    {
+    	RayDesc ray;
+    	ray.Origin = WorldPos + GeoNormal * 0.5; //    mul(float4(0, 0, 0, 1), InvViewMatrix).xyz;
+    	ray.Direction = L;//reflect(V, N);
 
-	RayPayload payload;
-	TraceRay(gRtScene, 0 /*rayFlags*/, 0xFF, 0 /* ray index*/, 0, 0, ray, payload);
+    	ray.TMin = 0;
+    	ray.TMax = 100000;
 
-	ReflectionResult[launchIndex.xy] = float4(payload.color, 1);
+    	RayPayload payload;
+    	TraceRay(gRtScene, 0 /*rayFlags*/, 0xFF, 0 /* ray index*/, 0, 0, ray, payload);
+
+    	ReflectionResult[launchIndex.xy] = float4(payload.color, 1);
+        ReflectionResult[launchIndex.xy] = float4(0, 0, 1, 1);
+
+    }
+    else
+    {
+        N = -WorldNormal;
+
+        TBN = construct_ONB_frisvad(N);
+        float3 H = ImportanceSampleGGX_VNDF(RandomUV, Rougness, V, TBN);
+        L = reflect(V, H);     
+     
+        RayDesc ray;
+        ray.Origin = WorldPos + GeoNormal * 0.5; //    mul(float4(0, 0, 0, 1), InvViewMatrix).xyz;
+        ray.Direction = L;//reflect(V, N);
+
+        ray.TMin = 0;
+        ray.TMax = 100000;
+
+        RayPayload payload;
+        TraceRay(gRtScene, 0 /*rayFlags*/, 0xFF, 0 /* ray index*/, 0, 0, ray, payload);
+
+        ReflectionResult[launchIndex.xy] = float4(payload.color, 1);
+        ReflectionResult[launchIndex.xy] = float4(1, 0, 0, 1);
+
+    }
+
+        ReflectionResult[launchIndex.xy] = float4(abs(H), 1);
+
 }
 
 

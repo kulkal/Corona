@@ -140,3 +140,35 @@ void scale_SH(inout SH sh, float scale)
 	sh.shY *= scale;
 	sh.CoCg *= scale;
 }
+
+float2 LoadBlueNoise2(Texture3D blueNoiseTex, uint2 launchIndex, uint frameCounter, uint stride)
+{
+    uint offset = frameCounter;
+    uint3 addr = uint3(launchIndex.x % 64, launchIndex.y % 64, (offset/2) % 64);
+    float4 Noise = blueNoiseTex[addr];
+
+    if(offset % 2 == 0)
+        return Noise.xy;
+    else
+        return Noise.zw;
+}
+
+float square(float x) { return x * x; }
+
+float3x3 construct_ONB_frisvad(float3 normal)
+{
+    float3x3 ret;
+    ret[1] = normal;
+    if(normal.z < -0.999805696f) {
+        ret[0] = float3(0.0f, -1.0f, 0.0f);
+        ret[2] = float3(-1.0f, 0.0f, 0.0f);
+    }
+    else 
+    {
+        float a = 1.0f / (1.0f + normal.z);
+        float b = -normal.x * normal.y * a;
+        ret[0] = float3(1.0f - normal.x * normal.x * a, b, -normal.x);
+        ret[2] = float3(b, 1.0f - normal.y * normal.y * a, -normal.y);
+    }
+    return ret;
+}

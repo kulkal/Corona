@@ -461,6 +461,7 @@ void MyToyDX12Renderer::LoadAssets()
 	InitTemporalAAPass();
 	InitSpatialDenoisingPass();
 	InitTemporalDenoisingPass();
+
 	
 	for (UINT i = 0; i < dx12_rhi->NumFrame; i++)
 	{
@@ -522,11 +523,11 @@ void MyToyDX12Renderer::LoadAssets()
 	NAME_D3D12_OBJECT(ShadowBuffer->resource);
 
 	// refleciton result
-	ReflectionBuffer = dx12_rhi->CreateTexture2D(DXGI_FORMAT_R16G16B16A16_FLOAT,
+	SpeculaGIBuffer = dx12_rhi->CreateTexture2D(DXGI_FORMAT_R16G16B16A16_FLOAT,
 		D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
 		D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, m_width, m_height, 1);
 
-	NAME_D3D12_OBJECT(ReflectionBuffer->resource);
+	NAME_D3D12_OBJECT(SpeculaGIBuffer->resource);
 
 	GIBufferSH = dx12_rhi->CreateTexture2D(DXGI_FORMAT_R16G16B16A16_FLOAT,
 		D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
@@ -625,6 +626,7 @@ void MyToyDX12Renderer::LoadAssets()
 	samplerWrap = dx12_rhi->CreateSampler(samplerDesc);
 
 	InitRaytracing();
+
 }
 
 shared_ptr<Scene> MyToyDX12Renderer::LoadModel(string fileName)
@@ -1490,19 +1492,6 @@ void MyToyDX12Renderer::DebugPass()
 		RS_Debug->currentDrawCallIndex++;
 	}
 	
-	// reflection
-	{
-		DebugPassCB cb;
-
-		cb.Offset = glm::vec4(-0.75, -0.25, 0, 0);
-		cb.Scale = glm::vec4(0.25, 0.25, 0, 0);
-		cb.DebugMode = RAW_COPY;
-		RS_Debug->SetConstantValue("DebugPassCB", &cb, dx12_rhi->GlobalCmdList->CmdList.Get());
-		RS_Debug->SetTexture("SrcTex", ReflectionBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
-		dx12_rhi->GlobalCmdList->CmdList->DrawInstanced(4, 1, 0, 0);
-		RS_Debug->currentDrawCallIndex++;
-	}
-
 	// world normal
 	{
 		DebugPassCB cb;
@@ -1632,6 +1621,29 @@ void MyToyDX12Renderer::DebugPass()
 		cb.DebugMode = RAW_COPY;
 		RS_Debug->SetConstantValue("DebugPassCB", &cb, dx12_rhi->GlobalCmdList->CmdList.Get());
 		RS_Debug->SetTexture("SrcTex", MaterialBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
+		dx12_rhi->GlobalCmdList->CmdList->DrawInstanced(4, 1, 0, 0);
+		RS_Debug->currentDrawCallIndex++;
+	}
+
+	// reflection
+	{
+		DebugPassCB cb;
+
+		
+		if (bReflectionFullScreenDebug)
+		{
+			cb.Offset = glm::vec4(0, 0, 0, 0);
+			cb.Scale = glm::vec4(1, 1, 0, 0);
+		}
+		else
+		{
+			cb.Offset = glm::vec4(-0.75, -0.25, 0, 0);
+			cb.Scale = glm::vec4(0.25, 0.25, 0, 0);
+		}
+
+		cb.DebugMode = RAW_COPY;
+		RS_Debug->SetConstantValue("DebugPassCB", &cb, dx12_rhi->GlobalCmdList->CmdList.Get());
+		RS_Debug->SetTexture("SrcTex", SpeculaGIBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
 		dx12_rhi->GlobalCmdList->CmdList->DrawInstanced(4, 1, 0, 0);
 		RS_Debug->currentDrawCallIndex++;
 	}
@@ -1795,7 +1807,9 @@ void MyToyDX12Renderer::OnUpdate()
 	ViewProjMat = ProjMat * ViewMat;
 
 	InvViewProjMat = glm::inverse(ViewProjMat);
-
+	
+	float timeElapsed = m_timer.GetTotalSeconds();
+	timeElapsed *= 0.01f;
 	// reflection view param
 	RTReflectionViewParam.ViewMatrix = glm::transpose(ViewMat);
 	RTReflectionViewParam.InvViewMatrix = glm::transpose(InvViewMat);
@@ -1804,7 +1818,9 @@ void MyToyDX12Renderer::OnUpdate()
 	RTReflectionViewParam.ProjectionParams.y = Near / (Near - Far);
 	RTReflectionViewParam.ProjectionParams.z = Near;
 	RTReflectionViewParam.ProjectionParams.w = Far;
-	RTReflectionViewParam.LightDir = glm::vec4(LightDir, 0);
+	RTReflectionViewParam.LightDir = glm::vec4(glm::normalize(LightDir), LightIntensity);
+	RTGIViewParam.RandomOffset = glm::vec2(timeElapsed, timeElapsed);
+	RTGIViewParam.FrameCounter = FrameCounter;
 
 	// GI view param
 	RTGIViewParam.ViewMatrix = glm::transpose(ViewMat);
@@ -1815,8 +1831,6 @@ void MyToyDX12Renderer::OnUpdate()
 	RTGIViewParam.ProjectionParams.z = Near;
 	RTGIViewParam.ProjectionParams.w = Far;
 	RTGIViewParam.LightDir = glm::vec4(glm::normalize(LightDir), LightIntensity);
-	float timeElapsed = m_timer.GetTotalSeconds();
-	timeElapsed *= 0.01f;
 	RTGIViewParam.RandomOffset = glm::vec2(timeElapsed, timeElapsed);
 	RTGIViewParam.FrameCounter = FrameCounter;
 	
@@ -1896,6 +1910,8 @@ void MyToyDX12Renderer::OnRender()
 	ImGui::SliderFloat("Camera turn speed", &m_turnSpeed, 0.0f, glm::half_pi<float>()*2);
 
 	ImGui::Checkbox("Enable TemporalAA", &bEnableTAA);
+	ImGui::Checkbox("Fullscreen reflection debug", &bReflectionFullScreenDebug);
+
 
 	ImGui::SliderFloat3("Light direction", &LightDir.x, -1.0f, 1.0f);
 	ImGui::SliderFloat("Light Brightness", &LightIntensity, 0.0f, 20.0f);
@@ -1951,6 +1967,18 @@ void MyToyDX12Renderer::OnKeyDown(UINT8 key)
 	case 'C':
 		ClampMode++;
 		ClampMode = ClampMode % 3;
+		break;
+	case 'R':
+		dx12_rhi->CmdQ->WaitGPU();
+
+		PSO_RT_REFLECTION = nullptr;
+		PSO_RT_GI = nullptr;
+		PSO_RT_SHADOW = nullptr;
+
+		InitRTPSO();
+
+		RS_Mesh = nullptr;
+		InitDrawMeshRS();
 		break;
 	default:
 		break;
@@ -2287,9 +2315,28 @@ void MyToyDX12Renderer::InitRaytracing()
 	// TODO : per model world matrix
 	TLAS = dx12_rhi->CreateTLAS(vecBLAS);
 	
+	InitRTPSO();
+
+	InstancePropertyBuffer = dx12_rhi->CreateBuffer(sizeof(InstanceProperty) * 500);
+
+	uint8_t* pData;
+	InstancePropertyBuffer->resource->Map(0, nullptr, (void**)&pData);
+
+	for (auto& m : vecBLAS)
+	{
+		glm::mat4x4 mat = glm::transpose(m->mesh->transform);
+		memcpy(pData, &mat, sizeof(glm::mat4x4));
+		pData += sizeof(InstanceProperty);
+	}
+
+	InstancePropertyBuffer->resource->Unmap(0, nullptr);
+}
+
+void MyToyDX12Renderer::InitRTPSO()
+{
 	// create shadow rtpso
 	PSO_RT_SHADOW = unique_ptr<RTPipelineStateObject>(new RTPipelineStateObject);
-	
+
 	PSO_RT_SHADOW->NumInstance = vecBLAS.size();// scene->meshes.size(); // important for cbv allocation & shadertable size.
 
 	// new interface
@@ -2324,7 +2371,12 @@ void MyToyDX12Renderer::InitRaytracing()
 	PSO_RT_REFLECTION->AddShader("rayGen", RTPipelineStateObject::RAYGEN);
 	PSO_RT_REFLECTION->BindSRV("rayGen", "gRtScene", 0);
 	PSO_RT_REFLECTION->BindSRV("rayGen", "DepthTex", 1);
-	PSO_RT_REFLECTION->BindSRV("rayGen", "WorldNormalTex", 2);
+	PSO_RT_REFLECTION->BindSRV("rayGen", "GeoNormalTex", 2);
+	PSO_RT_REFLECTION->BindSRV("rayGen", "MetallicRougnessTex", 6);
+	PSO_RT_REFLECTION->BindSRV("rayGen", "BlueNoiseTex", 7);
+	PSO_RT_REFLECTION->BindSRV("rayGen", "WorldNormalTex", 8);
+
+
 	PSO_RT_REFLECTION->BindCBV("rayGen", "ViewParameter", 0, sizeof(RTReflectionViewParam), 1);
 	PSO_RT_REFLECTION->BindSampler("rayGen", "samplerWrap", 0);
 
@@ -2334,6 +2386,7 @@ void MyToyDX12Renderer::InitRaytracing()
 	PSO_RT_REFLECTION->BindSRV("chs", "vertices", 3);
 	PSO_RT_REFLECTION->BindSRV("chs", "indices", 4);
 	PSO_RT_REFLECTION->BindSRV("chs", "AlbedoTex", 5);
+
 	PSO_RT_REFLECTION->BindSampler("chs", "samplerWrap", 0);
 
 
@@ -2374,24 +2427,10 @@ void MyToyDX12Renderer::InitRaytracing()
 
 	PSO_RT_GI->MaxRecursion = 1;
 	PSO_RT_GI->MaxAttributeSizeInBytes = sizeof(float) * 2;
-	
+
 	PSO_RT_GI->MaxPayloadSizeInBytes = sizeof(float) * 10;
 
 	PSO_RT_GI->InitRS("Shaders\\RaytracedGI.hlsl");
-
-	InstancePropertyBuffer = dx12_rhi->CreateBuffer(sizeof(InstanceProperty) * 500);
-
-	uint8_t* pData;
-	InstancePropertyBuffer->resource->Map(0, nullptr, (void**)&pData);
-
-	for (auto& m : vecBLAS)
-	{
-		glm::mat4x4 mat = glm::transpose(m->mesh->transform);
-		memcpy(pData, &mat, sizeof(glm::mat4x4));
-		pData += sizeof(InstanceProperty);
-	}
-
-	InstancePropertyBuffer->resource->Unmap(0, nullptr);
 }
 
 vector<UINT64> ResourceInt64array(ComPtr<ID3D12Resource> resource, int size)
@@ -2443,14 +2482,18 @@ void MyToyDX12Renderer::RaytraceShadowPass()
 
 void MyToyDX12Renderer::RaytraceReflectionPass()
 {
-	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(ReflectionBuffer->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS));
+	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(SpeculaGIBuffer->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS));
 
 	PSO_RT_REFLECTION->BeginShaderTable();
 
-	PSO_RT_REFLECTION->SetUAV("rayGen", "ReflectionResult", ReflectionBuffer->GpuHandleUAV);
+	PSO_RT_REFLECTION->SetUAV("rayGen", "ReflectionResult", SpeculaGIBuffer->GpuHandleUAV);
 	PSO_RT_REFLECTION->SetSRV("rayGen", "gRtScene", TLAS->GPUHandle);
 	PSO_RT_REFLECTION->SetSRV("rayGen", "DepthTex", DepthBuffer->GpuHandleSRV);
-	PSO_RT_REFLECTION->SetSRV("rayGen", "WorldNormalTex", GeomNormalBuffer->GpuHandleSRV);
+	PSO_RT_REFLECTION->SetSRV("rayGen", "GeoNormalTex", GeomNormalBuffer->GpuHandleSRV);
+	PSO_RT_REFLECTION->SetSRV("rayGen", "MetallicRougnessTex", MaterialBuffer->GpuHandleSRV);
+	PSO_RT_REFLECTION->SetSRV("rayGen", "BlueNoiseTex", BlueNoiseTex->GpuHandleSRV);
+	PSO_RT_REFLECTION->SetSRV("rayGen", "WorldNormalTex", NormalBuffer->GpuHandleSRV);
+
 	PSO_RT_REFLECTION->SetCBVValue("rayGen", "ViewParameter", &RTReflectionViewParam, sizeof(RTReflectionViewParamCB));
 	PSO_RT_REFLECTION->SetSampler("rayGen", "samplerWrap", samplerWrap.get());
 
@@ -2480,7 +2523,7 @@ void MyToyDX12Renderer::RaytraceReflectionPass()
 
 	PSO_RT_REFLECTION->Apply(m_width, m_height);
 
-	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(ReflectionBuffer->resource.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
+	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(SpeculaGIBuffer->resource.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
 }
 
 void MyToyDX12Renderer::RaytraceGIPass()

@@ -61,8 +61,8 @@ PSInput VSMain(
 
     result.prevPosition = mul(worldPos, PrevViewProjectionMatrix);
 
-	result.normal = mul(input.normal, WorldMatrix);
-    result.tangent = mul(input.tangent, WorldMatrix);
+	result.normal = normalize(mul(float4(input.normal, 0), WorldMatrix));
+    result.tangent = normalize(mul(float4(input.tangent, 0), WorldMatrix));
     result.uv = input.uv;
 	
     return result;
@@ -76,14 +76,14 @@ float3 CalcPerPixelNormal(float2 vTexcoord, float3 vVertNormal, float3 vVertTang
     vVertTangent = normalize(vVertTangent);
 
     float3 vVertBinormal = normalize(cross(vVertTangent, vVertNormal));
-    float3x3 mTangentSpaceToWorldSpace = (float3x3(vVertTangent, vVertBinormal, vVertNormal));
+    float3x3 TBN = (float3x3(vVertTangent, vVertBinormal, vVertNormal));
 
 	// Compute per-pixel normal.
     float3 vBumpNormal = (float3) normalMap.Sample(sampleWrap, vTexcoord);
 
     vBumpNormal = 2.0f * vBumpNormal - 1.0f;
 
-    return mul(vBumpNormal, mTangentSpaceToWorldSpace);
+    return mul(vBumpNormal, TBN);
     //return vVertNormal;
 }
 

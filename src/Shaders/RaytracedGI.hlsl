@@ -29,17 +29,6 @@ cbuffer ViewParameter : register(b0)
 
 SamplerState sampleWrap : register(s0);
 
-float2 LoadBlueNoise2(Texture3D blueNoiseTex, uint2 launchIndex, uint frameCounter, uint stride)
-{
-    uint offset = frameCounter;
-    uint3 addr = uint3(launchIndex.x % 64, launchIndex.y % 64, (offset/2) % 64);
-    float4 Noise = BlueNoiseTex[addr];
-
-    if(offset % 2 == 0)
-        return Noise.xy;
-    else
-        return Noise.zw;
-}
 
 float3 linearToSrgb(float3 c)
 {

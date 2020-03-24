@@ -52,7 +52,7 @@ private:
 	shared_ptr<Texture> VelocityBuffer;
 	shared_ptr<Texture> MaterialBuffer;
 	shared_ptr<Texture> ShadowBuffer;
-	shared_ptr<Texture> ReflectionBuffer;
+	shared_ptr<Texture> SpeculaGIBuffer;
 
 	UINT GIBufferScale = 3;
 	UINT GIBufferWriteIndex = 0;
@@ -132,6 +132,9 @@ private:
 		glm::mat4x4 ProjMatrix;
 		glm::vec4 ProjectionParams;
 		glm::vec4	LightDir;
+		glm::vec2 RandomOffset;
+		UINT32 FrameCounter;
+		UINT32 BlueNoiseOffsetStride = 1.0f;
 	};
 
 	RTReflectionViewParamCB RTReflectionViewParam;
@@ -274,6 +277,7 @@ private:
 	bool bMultiThreadRendering = false;
 
 	bool bDebugDraw = false;
+	bool bReflectionFullScreenDebug = false;
 
 	UINT m_frameCounter = 0;
 
@@ -292,6 +296,8 @@ public:
 
 	void InitRaytracing();
 	
+	void InitRTPSO();
+
 	void LoadPipeline();
 
 	void LoadAssets();
