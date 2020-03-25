@@ -251,10 +251,12 @@ private:
 	// mesh
 	shared_ptr<Mesh> mesh;
 
+	float SponzaRoughness = 0.1;
 	shared_ptr<Scene> Sponza;
 
 	shared_ptr<Scene> Buddha;
 
+	float ShaderBallRoughness = 0.3;
 	shared_ptr<Scene> ShaderBall;
 
 	// time & camera
@@ -295,6 +297,7 @@ private:
 	bool bMultiThreadRendering = false;
 
 	bool bDebugDraw = false;
+
 
 	UINT m_frameCounter = 0;
 

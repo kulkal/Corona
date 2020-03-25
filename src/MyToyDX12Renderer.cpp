@@ -2117,6 +2117,10 @@ void MyToyDX12Renderer::OnRender()
 	ImGui::SliderFloat3("Light direction", &LightDir.x, -1.0f, 1.0f);
 	ImGui::SliderFloat("Light Brightness", &LightIntensity, 0.0f, 20.0f);
 
+	ImGui::SliderFloat("SponzaRoughness", &SponzaRoughness, 0.0f, 1.0f);
+	ImGui::SliderFloat("ShaderBallRoughness", &ShaderBallRoughness, 0.0f, 1.0f);
+
+
 	ImGui::SliderFloat("IndirectDiffuse Depth Weight Factor", &SpatialFilterCB.IndirectDiffuseWeightFactorDepth, 0.0f, 20.0f);
 	ImGui::SliderFloat("IndirectDiffuse Normal Weight Factor", &SpatialFilterCB.IndirectDiffuseWeightFactorNormal, 0.0f, 20.0f);
 
@@ -2298,8 +2302,8 @@ void MyToyDX12Renderer::DrawMeshPass()
 
 		RS_Mesh->currentDrawCallIndex = 0;
 		
-		DrawScene(Sponza, 0.1, 0);
-		DrawScene(ShaderBall, 0.3, 1);
+		DrawScene(Sponza, SponzaRoughness, 0);
+		DrawScene(ShaderBall, ShaderBallRoughness, 1);
 	}
 	else
 	{
