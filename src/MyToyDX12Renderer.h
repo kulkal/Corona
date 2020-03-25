@@ -139,7 +139,7 @@ private:
 
 	RTShadowViewParamCB RTShadowViewParam;
 	
-	unique_ptr<RTPipelineStateObject> PSO_RT_SHADOW;
+	shared_ptr<RTPipelineStateObject> PSO_RT_SHADOW;
 
 
 	// RT reflection
@@ -157,7 +157,7 @@ private:
 
 	RTReflectionViewParamCB RTReflectionViewParam;
 	
-	unique_ptr<RTPipelineStateObject> PSO_RT_REFLECTION;
+	shared_ptr<RTPipelineStateObject> PSO_RT_REFLECTION;
 
 	// RT GI
 	struct RTGIViewParamCB
@@ -173,7 +173,7 @@ private:
 	};
 
 	RTGIViewParamCB RTGIViewParam;
-	unique_ptr<RTPipelineStateObject> PSO_RT_GI;
+	shared_ptr<RTPipelineStateObject> PSO_RT_GI;
 	
 
 	// full screen copy pass
@@ -251,12 +251,12 @@ private:
 	// mesh
 	shared_ptr<Mesh> mesh;
 
-	float SponzaRoughness = 0.1;
+	float SponzaRoughness = 0.05;
 	shared_ptr<Scene> Sponza;
 
 	shared_ptr<Scene> Buddha;
 
-	float ShaderBallRoughness = 0.3;
+	float ShaderBallRoughness = 0.15;
 	shared_ptr<Scene> ShaderBall;
 
 	// time & camera

@@ -1984,7 +1984,7 @@ void RTPipelineStateObject::SetHitProgram(UINT instanceIndex, string shader)
 	HitProgramBinding[instanceIndex].HitGroupName = MapHitGroup[shader].name;
 }
 
-void RTPipelineStateObject::InitRS(string ShaderFile)
+bool RTPipelineStateObject::InitRS(string ShaderFile)
 {
 	vector<D3D12_STATE_SUBOBJECT> subobjects;
 
@@ -2150,6 +2150,11 @@ void RTPipelineStateObject::InitRS(string ShaderFile)
 	descRTSO.Type = D3D12_STATE_OBJECT_TYPE_RAYTRACING_PIPELINE;
 
 	HRESULT hr = g_dx12_rhi->Device->CreateStateObject(&descRTSO, IID_PPV_ARGS(&RTPipelineState));
+	if (FAILED(hr))
+	{
+		return false;
+	}
+
 	NAME_D3D12_OBJECT(RTPipelineState);
 
 	// find biggiest binding size
@@ -2211,6 +2216,8 @@ void RTPipelineStateObject::InitRS(string ShaderFile)
 		g_dx12_rhi->Device->CreateCommittedResource(&kUploadHeapProps, D3D12_HEAP_FLAG_NONE, &bufDesc, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&ShaderTable));
 		NAME_D3D12_OBJECT(ShaderTable);
 	}
+
+	return true;
 }
 
 void RTPipelineStateObject::Apply(UINT width, UINT height)

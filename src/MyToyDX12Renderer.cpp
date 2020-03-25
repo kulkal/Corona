@@ -2176,12 +2176,9 @@ void MyToyDX12Renderer::OnKeyDown(UINT8 key)
 	case 'R':
 		dx12_rhi->CmdQ->WaitGPU();
 
-		PSO_RT_REFLECTION = nullptr;
-		PSO_RT_GI = nullptr;
-		PSO_RT_SHADOW = nullptr;
-
 		InitRTPSO();
 
+		// TODO : handle compile failure for non-rt shaders.
 		RS_Mesh = nullptr;
 		InitDrawMeshRS();
 		break;
@@ -2540,102 +2537,119 @@ void MyToyDX12Renderer::InitRaytracing()
 void MyToyDX12Renderer::InitRTPSO()
 {
 	// create shadow rtpso
-	PSO_RT_SHADOW = unique_ptr<RTPipelineStateObject>(new RTPipelineStateObject);
+	{
+		shared_ptr<RTPipelineStateObject> TEMP_PSO_RT_SHADOW = shared_ptr<RTPipelineStateObject>(new RTPipelineStateObject);
 
-	PSO_RT_SHADOW->NumInstance = vecBLAS.size();// scene->meshes.size(); // important for cbv allocation & shadertable size.
+		TEMP_PSO_RT_SHADOW->NumInstance = vecBLAS.size();// scene->meshes.size(); // important for cbv allocation & shadertable size.
 
-	// new interface
-	PSO_RT_SHADOW->AddHitGroup("HitGroup", "chs", "");
-	PSO_RT_SHADOW->AddShader("rayGen", RTPipelineStateObject::RAYGEN);
-	PSO_RT_SHADOW->BindUAV("rayGen", "ShadowResult", 0);
-	PSO_RT_SHADOW->BindSRV("rayGen", "gRtScene", 0);
-	PSO_RT_SHADOW->BindSRV("rayGen", "DepthTex", 1);
-	PSO_RT_SHADOW->BindSRV("rayGen", "WorldNormalTex", 2);
-	PSO_RT_SHADOW->BindSRV("rayGen", "AlbedoTex", 3);
+		// new interface
+		TEMP_PSO_RT_SHADOW->AddHitGroup("HitGroup", "chs", "");
+		TEMP_PSO_RT_SHADOW->AddShader("rayGen", RTPipelineStateObject::RAYGEN);
+		TEMP_PSO_RT_SHADOW->BindUAV("rayGen", "ShadowResult", 0);
+		TEMP_PSO_RT_SHADOW->BindSRV("rayGen", "gRtScene", 0);
+		TEMP_PSO_RT_SHADOW->BindSRV("rayGen", "DepthTex", 1);
+		TEMP_PSO_RT_SHADOW->BindSRV("rayGen", "WorldNormalTex", 2);
+		TEMP_PSO_RT_SHADOW->BindSRV("rayGen", "AlbedoTex", 3);
 
-	PSO_RT_SHADOW->BindCBV("rayGen", "ViewParameter", 0, sizeof(RTShadowViewParamCB), 1);
-	PSO_RT_SHADOW->BindSampler("rayGen", "samplerWrap", 0);
+		TEMP_PSO_RT_SHADOW->BindCBV("rayGen", "ViewParameter", 0, sizeof(RTShadowViewParamCB), 1);
+		TEMP_PSO_RT_SHADOW->BindSampler("rayGen", "samplerWrap", 0);
 
-	PSO_RT_SHADOW->AddShader("miss", RTPipelineStateObject::MISS);
-	PSO_RT_SHADOW->AddShader("chs", RTPipelineStateObject::HIT);
+		TEMP_PSO_RT_SHADOW->AddShader("miss", RTPipelineStateObject::MISS);
+		TEMP_PSO_RT_SHADOW->AddShader("chs", RTPipelineStateObject::HIT);
 
-	PSO_RT_SHADOW->MaxRecursion = 1;
-	PSO_RT_SHADOW->MaxAttributeSizeInBytes = sizeof(float) * 2;
-	PSO_RT_SHADOW->MaxPayloadSizeInBytes = sizeof(float) * 1;
+		TEMP_PSO_RT_SHADOW->MaxRecursion = 1;
+		TEMP_PSO_RT_SHADOW->MaxAttributeSizeInBytes = sizeof(float) * 2;
+		TEMP_PSO_RT_SHADOW->MaxPayloadSizeInBytes = sizeof(float) * 1;
 
-	PSO_RT_SHADOW->InitRS("Shaders\\RaytracedShadow.hlsl");
+		bool bSuccess = TEMP_PSO_RT_SHADOW->InitRS("Shaders\\RaytracedShadow.hlsl");
+		if (bSuccess)
+		{
+			PSO_RT_SHADOW = TEMP_PSO_RT_SHADOW;
+		}
+	}
 
 	// create reflection rtpso
+	{
+		shared_ptr<RTPipelineStateObject> TEMP_PSO_RT_REFLECTION = shared_ptr<RTPipelineStateObject>(new RTPipelineStateObject);
+		TEMP_PSO_RT_REFLECTION->NumInstance = vecBLAS.size();// scene->meshes.size();
 
-	PSO_RT_REFLECTION = unique_ptr<RTPipelineStateObject>(new RTPipelineStateObject);
-	PSO_RT_REFLECTION->NumInstance = vecBLAS.size();// scene->meshes.size();
+		TEMP_PSO_RT_REFLECTION->AddHitGroup("HitGroup", "chs", "");
+		TEMP_PSO_RT_REFLECTION->BindUAV("rayGen", "ReflectionResult", 0);
 
-	PSO_RT_REFLECTION->AddHitGroup("HitGroup", "chs", "");
-	PSO_RT_REFLECTION->BindUAV("rayGen", "ReflectionResult", 0);
-
-	PSO_RT_REFLECTION->AddShader("rayGen", RTPipelineStateObject::RAYGEN);
-	PSO_RT_REFLECTION->BindSRV("rayGen", "gRtScene", 0);
-	PSO_RT_REFLECTION->BindSRV("rayGen", "DepthTex", 1);
-	PSO_RT_REFLECTION->BindSRV("rayGen", "GeoNormalTex", 2);
-	PSO_RT_REFLECTION->BindSRV("rayGen", "RougnessMetallicTex", 6);
-	PSO_RT_REFLECTION->BindSRV("rayGen", "BlueNoiseTex", 7);
-	PSO_RT_REFLECTION->BindSRV("rayGen", "WorldNormalTex", 8);
-
-
-	PSO_RT_REFLECTION->BindCBV("rayGen", "ViewParameter", 0, sizeof(RTReflectionViewParam), 1);
-	PSO_RT_REFLECTION->BindSampler("rayGen", "samplerWrap", 0);
-
-	PSO_RT_REFLECTION->AddShader("miss", RTPipelineStateObject::MISS);
-
-	PSO_RT_REFLECTION->AddShader("chs", RTPipelineStateObject::HIT);
-	PSO_RT_REFLECTION->BindSRV("chs", "vertices", 3);
-	PSO_RT_REFLECTION->BindSRV("chs", "indices", 4);
-	PSO_RT_REFLECTION->BindSRV("chs", "AlbedoTex", 5);
-
-	PSO_RT_REFLECTION->BindSampler("chs", "samplerWrap", 0);
+		TEMP_PSO_RT_REFLECTION->AddShader("rayGen", RTPipelineStateObject::RAYGEN);
+		TEMP_PSO_RT_REFLECTION->BindSRV("rayGen", "gRtScene", 0);
+		TEMP_PSO_RT_REFLECTION->BindSRV("rayGen", "DepthTex", 1);
+		TEMP_PSO_RT_REFLECTION->BindSRV("rayGen", "GeoNormalTex", 2);
+		TEMP_PSO_RT_REFLECTION->BindSRV("rayGen", "RougnessMetallicTex", 6);
+		TEMP_PSO_RT_REFLECTION->BindSRV("rayGen", "BlueNoiseTex", 7);
+		TEMP_PSO_RT_REFLECTION->BindSRV("rayGen", "WorldNormalTex", 8);
 
 
-	PSO_RT_REFLECTION->MaxRecursion = 1;
-	PSO_RT_REFLECTION->MaxAttributeSizeInBytes = sizeof(float) * 2;
-	PSO_RT_REFLECTION->MaxPayloadSizeInBytes = sizeof(float) * 4;
+		TEMP_PSO_RT_REFLECTION->BindCBV("rayGen", "ViewParameter", 0, sizeof(RTReflectionViewParam), 1);
+		TEMP_PSO_RT_REFLECTION->BindSampler("rayGen", "samplerWrap", 0);
 
-	PSO_RT_REFLECTION->InitRS("Shaders\\RaytracedReflection.hlsl");
+		TEMP_PSO_RT_REFLECTION->AddShader("miss", RTPipelineStateObject::MISS);
 
+		TEMP_PSO_RT_REFLECTION->AddShader("chs", RTPipelineStateObject::HIT);
+		TEMP_PSO_RT_REFLECTION->BindSRV("chs", "vertices", 3);
+		TEMP_PSO_RT_REFLECTION->BindSRV("chs", "indices", 4);
+		TEMP_PSO_RT_REFLECTION->BindSRV("chs", "AlbedoTex", 5);
+
+		TEMP_PSO_RT_REFLECTION->BindSampler("chs", "samplerWrap", 0);
+
+
+		TEMP_PSO_RT_REFLECTION->MaxRecursion = 1;
+		TEMP_PSO_RT_REFLECTION->MaxAttributeSizeInBytes = sizeof(float) * 2;
+		TEMP_PSO_RT_REFLECTION->MaxPayloadSizeInBytes = sizeof(float) * 4;
+
+		bool bSuccess = TEMP_PSO_RT_REFLECTION->InitRS("Shaders\\RaytracedReflection.hlsl");
+
+		if (bSuccess)
+		{
+			PSO_RT_REFLECTION = TEMP_PSO_RT_REFLECTION;
+		}
+	}
 	// gi rtpso
+	{
+		shared_ptr<RTPipelineStateObject> TEMP_PSO_RT_GI = shared_ptr<RTPipelineStateObject>(new RTPipelineStateObject);
+		TEMP_PSO_RT_GI->NumInstance = vecBLAS.size();// scene->meshes.size();
 
-	PSO_RT_GI = unique_ptr<RTPipelineStateObject>(new RTPipelineStateObject);
-	PSO_RT_GI->NumInstance = vecBLAS.size();// scene->meshes.size();
+		TEMP_PSO_RT_GI->AddHitGroup("HitGroup", "chs", "");
 
-	PSO_RT_GI->AddHitGroup("HitGroup", "chs", "");
-
-	PSO_RT_GI->AddShader("rayGen", RTPipelineStateObject::RAYGEN);
-	PSO_RT_GI->BindUAV("rayGen", "GIResultSH", 0);
-	PSO_RT_GI->BindUAV("rayGen", "GIResultColor", 1);
-
-
-	PSO_RT_GI->BindSRV("rayGen", "gRtScene", 0);
-	PSO_RT_GI->BindSRV("rayGen", "DepthTex", 1);
-	PSO_RT_GI->BindSRV("rayGen", "WorldNormalTex", 2);
-	PSO_RT_GI->BindCBV("rayGen", "ViewParameter", 0, sizeof(RTGIViewParam), 1);
-	PSO_RT_GI->BindSampler("rayGen", "samplerWrap", 0);
-	PSO_RT_GI->BindSRV("rayGen", "BlueNoiseTex", 7);
-
-	PSO_RT_GI->AddShader("miss", RTPipelineStateObject::MISS);
-
-	PSO_RT_GI->AddShader("chs", RTPipelineStateObject::HIT);
-	PSO_RT_GI->BindSRV("chs", "vertices", 3);
-	PSO_RT_GI->BindSRV("chs", "indices", 4);
-	PSO_RT_GI->BindSRV("chs", "AlbedoTex", 5);
-	PSO_RT_GI->BindSRV("chs", "InstanceProperty", 6);
-	PSO_RT_GI->BindSampler("chs", "samplerWrap", 0);
+		TEMP_PSO_RT_GI->AddShader("rayGen", RTPipelineStateObject::RAYGEN);
+		TEMP_PSO_RT_GI->BindUAV("rayGen", "GIResultSH", 0);
+		TEMP_PSO_RT_GI->BindUAV("rayGen", "GIResultColor", 1);
 
 
-	PSO_RT_GI->MaxRecursion = 1;
-	PSO_RT_GI->MaxAttributeSizeInBytes = sizeof(float) * 2;
+		TEMP_PSO_RT_GI->BindSRV("rayGen", "gRtScene", 0);
+		TEMP_PSO_RT_GI->BindSRV("rayGen", "DepthTex", 1);
+		TEMP_PSO_RT_GI->BindSRV("rayGen", "WorldNormalTex", 2);
+		TEMP_PSO_RT_GI->BindCBV("rayGen", "ViewParameter", 0, sizeof(RTGIViewParam), 1);
+		TEMP_PSO_RT_GI->BindSampler("rayGen", "samplerWrap", 0);
+		TEMP_PSO_RT_GI->BindSRV("rayGen", "BlueNoiseTex", 7);
 
-	PSO_RT_GI->MaxPayloadSizeInBytes = sizeof(float) * 10;
+		TEMP_PSO_RT_GI->AddShader("miss", RTPipelineStateObject::MISS);
 
-	PSO_RT_GI->InitRS("Shaders\\RaytracedGI.hlsl");
+		TEMP_PSO_RT_GI->AddShader("chs", RTPipelineStateObject::HIT);
+		TEMP_PSO_RT_GI->BindSRV("chs", "vertices", 3);
+		TEMP_PSO_RT_GI->BindSRV("chs", "indices", 4);
+		TEMP_PSO_RT_GI->BindSRV("chs", "AlbedoTex", 5);
+		TEMP_PSO_RT_GI->BindSRV("chs", "InstanceProperty", 6);
+		TEMP_PSO_RT_GI->BindSampler("chs", "samplerWrap", 0);
+
+
+		TEMP_PSO_RT_GI->MaxRecursion = 1;
+		TEMP_PSO_RT_GI->MaxAttributeSizeInBytes = sizeof(float) * 2;
+
+		TEMP_PSO_RT_GI->MaxPayloadSizeInBytes = sizeof(float) * 10;
+
+		bool bSuccess = TEMP_PSO_RT_GI->InitRS("Shaders\\RaytracedGI.hlsl");
+
+		if (bSuccess)
+		{
+			PSO_RT_GI = TEMP_PSO_RT_GI;
+		}
+	}
 }
 
 vector<UINT64> ResourceInt64array(ComPtr<ID3D12Resource> resource, int size)

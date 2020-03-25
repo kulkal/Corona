@@ -275,7 +275,7 @@ public:
 	void SetCBVValue(string shader, string bindingName, void* pData, INT size, INT instanceIndex = -1);
 	void SetHitProgram(UINT instanceIndex, string shader);
 
-	void InitRS(string ShaderFile);
+	bool InitRS(string ShaderFile);
 	void Apply(UINT width, UINT height);
 };
 
