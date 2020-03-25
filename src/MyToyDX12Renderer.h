@@ -38,6 +38,24 @@ using namespace std;
 
 class MyToyDX12Renderer : public DXSample
 {
+	enum class EDebugVisualization
+	{
+		SHADOW,
+		WORLD_NORMAL,
+		GEO_NORMAL,
+		DEPTH,
+		RAW_SH,
+		TEMPORAL_FILTERED_SH,
+		SPATIAL_FILTERED_SH,
+		SH_LIGHTING,
+		ALBEDO,
+		VELOCITY,
+		ROUGNESS_METALLIC,
+		REFLECTION,
+		NO_FULLSCREEN,
+	};
+
+	EDebugVisualization FullscreenDebugBuffer = EDebugVisualization::NO_FULLSCREEN;
 private:
 	shared_ptr<Texture> DepthBuffer;
 
@@ -277,7 +295,6 @@ private:
 	bool bMultiThreadRendering = false;
 
 	bool bDebugDraw = false;
-	bool bReflectionFullScreenDebug = false;
 
 	UINT m_frameCounter = 0;
 

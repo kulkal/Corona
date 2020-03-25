@@ -8,7 +8,7 @@ Texture2D GeoNormalTex : register(t2);
 ByteAddressBuffer vertices : register(t3);
 ByteAddressBuffer indices : register(t4);
 Texture2D AlbedoTex : register(t5);
-Texture2D MetallicRougnessTex : register(t6);
+Texture2D RougnessMetallicTex : register(t6);
 Texture3D BlueNoiseTex : register(t7);
 Texture2D WorldNormalTex : register(t8);
 
@@ -59,7 +59,44 @@ float3 offset_ray(float3 p, float3 n)
 
 }
 
-float3 ImportanceSampleGGX_VNDF(float2 u, float roughness, float3 V, float3x3 TBN)
+// Returns quaternion of rotation from stc to dst
+float4 getOrientation(float3 src, float3 dst)
+{
+    // If the rotation is larger than pi/2 then do it from the other side.
+    // 1. rotate by pi around (1,0,0)
+    // 2. find shortest rotation from there
+    // 3. return the quaternion which does the full rotation
+    float tmp = dot(src, dst);
+    bool flip = tmp < 0;
+    [flatten] if (flip)
+    {
+        src = float3(src.x, -src.y, -src.z);
+    }
+    float3 v = cross(src, dst);
+    float4 q;
+    // TODO: This can be made somewhat faster with rsqrt and rcp, but then also need to normalize
+    q.w = sqrt((1 + abs(tmp)) / 2);
+    q.xyz = v / (2 * q.w);
+    [flatten] if (flip)
+    {
+        q = float4(q.w, q.z, -q.y, -q.x);
+    }
+    return q;
+}
+
+// Transform a vector v with a quaternion q
+// v doesn't need to be normalized
+float3 orientVector(float4 q, float3 v)
+{
+    return v + 2 * cross(q.xyz, cross(q.xyz, v) + q.w * v);
+}
+
+float4 inverseOrientation(float4 q)
+{
+    return float4(-q.xyz, q.w);
+}
+
+float3 ImportanceSampleGGX_VNDF(float2 u, float roughness, float3 V, float3x3 TBN, float3 N)
 {
     float alpha = square(roughness);
 
@@ -69,7 +106,7 @@ float3 ImportanceSampleGGX_VNDF(float2 u, float roughness, float3 V, float3x3 TB
     float3 Vh = normalize(float3(alpha * Ve.x, alpha * Ve.y, Ve.z));
     
     float lensq = square(Vh.x) + square(Vh.y);
-    float3 T1 = lensq > 0.0 ? float3(-Vh.y, Vh.x, 0.0) * rsqrt(lensq) : float3(1.0, 0.0, 0.0);
+    float3 T1 = lensq > 0.0 ? float3(-Vh.y, Vh.x, 0.0) / sqrt(lensq) : float3(1.0, 0.0, 0.0);
     float3 T2 = cross(Vh, T1);
 
     float r = sqrt(u.x);
@@ -82,13 +119,65 @@ float3 ImportanceSampleGGX_VNDF(float2 u, float roughness, float3 V, float3x3 TB
     float3 Nh = t1 * T1 + t2 * T2 + sqrt(max(0.0, 1.0 - square(t1) - square(t2))) * Vh;
 
     // Tangent space H
-    float3 Ne = float3(alpha * Nh.x, max(0.0, Nh.z), alpha * Nh.y);
+    float3 Ne = float3(alpha * Nh.x, alpha * Nh.y, max(0.0, Nh.z));
 
-    // World space H
-    // float WNe = float3(dot(Ne, T), dot(Ne, B), dot(Ne, N));
     return normalize(mul(Ne, TBN));
+
+
+    // float3 alpha = square(roughness);
+
+    // // Transform incoming direction to local space, with geometry normal pointing to [0, 0, 1]
+    // float4 q = getOrientation(float3(0, 0, 1), N);
+    // float3 Ve = orientVector(inverseOrientation(q), V);
+
+    // // Section 3.2: transforming the view direction to the hemisphere configuration
+    // float3 Vh = normalize(float3(alpha.x * Ve.x, alpha.y * Ve.y, Ve.z));
+
+    // // Section 4.1: orthonormal basis (with special case if cross product is zero)
+    // float3 T1 = (Vh.z < 0.9999) ? normalize(cross(float3(0, 0, 1), Vh)) : float3(1, 0, 0);
+    // float3 T2 = cross(Vh, T1);
+
+    // // Section 4.2: parameterization of the projected area
+    // float r = sqrt(u.x);
+    // float phi = 2*PI * u.y;
+    // float t1 = r * cos(phi);
+    // float t2 = r * sin(phi);
+    // float s = 0.5 * (1.0 + Vh.z);
+    // t2 = lerp(sqrt(max(mad(-t1, t1, 1), 0)), t2, s);
+
+    // // Section 4.3: reprojection onto hemisphere
+    // float3 Nh = t1 * T1 + t2 * T2 + sqrt(max(0.0, mad(-t1, t1, mad(-t2, t2, 1))))*Vh;
+
+    // // Section 3.4: transforming the normal back to the ellipsoid configuration
+    // float3 Ne = normalize(float3(alpha.x * Nh.x, alpha.y * Nh.y, max(0.0, Nh.z)));
+
+    // float3 H = orientVector(q, Ne);
+
+    // return H;
 }
 
+float3x3 buildTBN(float3 normal) {
+
+    // TODO: Maybe try approach from here (Building an Orthonormal Basis, Revisited): 
+    // https://graphics.pixar.com/library/OrthonormalB/paper.pdf
+
+    // Pick random vector for generating orthonormal basis
+    static const float3 rvec1 = float3(0.847100675f, 0.207911700f, 0.489073813f);
+    static const float3 rvec2 = float3(-0.639436305f, -0.390731126f, 0.662155867f);
+    float3 rvec;
+
+    if (dot(rvec1, normal) > 0.95f)
+        rvec = rvec2;
+    else
+        rvec = rvec1;
+
+    // Construct TBN matrix to orient sampling hemisphere along the surface normal
+    float3 b1 = normalize(rvec - normal * dot(rvec, normal));
+    float3 b2 = cross(normal, b1);
+    float3x3 tbn = float3x3(b1, b2, normal);
+
+    return tbn;
+}
 
 [shader("raygeneration")]
 void rayGen
@@ -125,60 +214,35 @@ void rayGen
 	float3 WorldPos = mul(float4(ViewPosition, 1), InvViewMatrix).xyz;
 
     float2 RandomUV = LoadBlueNoise2(BlueNoiseTex, launchIndex, FrameCounter, BlueNoiseOffsetStride);
-    float3x3 TBN = construct_ONB_frisvad(WorldNormal);
+    float3x3 TBN = buildTBN(WorldNormal);
 
-    float Rougness = 0;//MetallicRougnessTex.SampleLevel(sampleWrap, UV, 0).y;
+    float Rougness = RougnessMetallicTex.SampleLevel(sampleWrap, UV, 0).x;
     float3 N = WorldNormal;
     float3 V = mul(normalize(float3(d.x * aspectRatio, -d.y, -1)), InvViewMatrix);
-    float3 H = ImportanceSampleGGX_VNDF(RandomUV, 0, V, TBN);
+    float3 H = ImportanceSampleGGX_VNDF(RandomUV, Rougness, -V, TBN, WorldNormal);
     float3 L = reflect(V, H);
 
     float NoV = max(0, -dot(N, V));
     float NoL = max(0, dot(N, L));
     float NoH = max(0, dot(N, H));
     float VoH = max(0, -dot(V, H));
+    float LoH = max(0, -dot(L, H));
 
-    if (NoL > 0)
-    {
-    	RayDesc ray;
-    	ray.Origin = WorldPos + GeoNormal * 0.5; //    mul(float4(0, 0, 0, 1), InvViewMatrix).xyz;
-    	ray.Direction = L;//reflect(V, N);
 
-    	ray.TMin = 0;
-    	ray.TMax = 100000;
+	RayDesc ray;
+	ray.Origin = WorldPos + GeoNormal * 0.5; //    mul(float4(0, 0, 0, 1), InvViewMatrix).xyz;
+	ray.Direction = L;// reflect(V, N);
 
-    	RayPayload payload;
-    	TraceRay(gRtScene, 0 /*rayFlags*/, 0xFF, 0 /* ray index*/, 0, 0, ray, payload);
+	ray.TMin = 0;
+	ray.TMax = 100000;
 
-    	ReflectionResult[launchIndex.xy] = float4(payload.color, 1);
-        ReflectionResult[launchIndex.xy] = float4(0, 0, 1, 1);
+	RayPayload payload;
+	TraceRay(gRtScene, 0 /*rayFlags*/, 0xFF, 0 /* ray index*/, 0, 0, ray, payload);
 
-    }
-    else
-    {
-        N = -WorldNormal;
+	ReflectionResult[launchIndex.xy] = float4(payload.color, 1);
+    // ReflectionResult[launchIndex.xy] = float4(0, 0, 1, 1);
 
-        TBN = construct_ONB_frisvad(N);
-        float3 H = ImportanceSampleGGX_VNDF(RandomUV, Rougness, V, TBN);
-        L = reflect(V, H);     
-     
-        RayDesc ray;
-        ray.Origin = WorldPos + GeoNormal * 0.5; //    mul(float4(0, 0, 0, 1), InvViewMatrix).xyz;
-        ray.Direction = L;//reflect(V, N);
-
-        ray.TMin = 0;
-        ray.TMax = 100000;
-
-        RayPayload payload;
-        TraceRay(gRtScene, 0 /*rayFlags*/, 0xFF, 0 /* ray index*/, 0, 0, ray, payload);
-
-        ReflectionResult[launchIndex.xy] = float4(payload.color, 1);
-        ReflectionResult[launchIndex.xy] = float4(1, 0, 0, 1);
-
-    }
-
-        ReflectionResult[launchIndex.xy] = float4(abs(H), 1);
-
+ 
 }
 
 

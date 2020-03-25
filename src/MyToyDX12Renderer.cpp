@@ -1479,103 +1479,204 @@ void MyToyDX12Renderer::DebugPass()
 	dx12_rhi->GlobalCmdList->CmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
 	dx12_rhi->GlobalCmdList->CmdList->IASetVertexBuffers(0, 1, &FullScreenVB->view);
 
-	 //raytraced shadow
-	{
+	
+
+	std::vector<std::function<void(EDebugVisualization eFS)>> functions;
+	functions.push_back([&](EDebugVisualization eFS){
+		//raytraced shadow
 		DebugPassCB cb;
 
-		cb.Offset = glm::vec4(-0.75, -0.75, 0, 0);
-		cb.Scale = glm::vec4(0.25, 0.25, 0, 0);
+		if (eFS == EDebugVisualization::SHADOW)
+		{
+			cb.Offset = glm::vec4(0, 0, 0, 0);
+			cb.Scale = glm::vec4(1, 1, 0, 0);
+		}
+		else if(eFS == EDebugVisualization::NO_FULLSCREEN)
+		{
+			cb.Offset = glm::vec4(-0.75, -0.75, 0, 0);
+			cb.Scale = glm::vec4(0.25, 0.25, 0, 0);
+		}
+		else
+		{
+			return;
+		}
 		cb.DebugMode = RAW_COPY;
 		RS_Debug->SetConstantValue("DebugPassCB", &cb, dx12_rhi->GlobalCmdList->CmdList.Get());
 		RS_Debug->SetTexture("SrcTex", ShadowBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
 		dx12_rhi->GlobalCmdList->CmdList->DrawInstanced(4, 1, 0, 0);
 		RS_Debug->currentDrawCallIndex++;
-	}
-	
-	// world normal
-	{
+	});
+
+	functions.push_back([&](EDebugVisualization eFS) {
+		// world normal
 		DebugPassCB cb;
 
-		cb.Offset = glm::vec4(-0.25, -0.75, 0, 0);
-		cb.Scale = glm::vec4(0.25, 0.25, 0, 0);
+		if (eFS ==  EDebugVisualization::WORLD_NORMAL)
+		{
+			cb.Offset = glm::vec4(0, 0, 0, 0);
+			cb.Scale = glm::vec4(1, 1, 0, 0);
+		}
+		else if (eFS == EDebugVisualization::NO_FULLSCREEN)
+		{
+			cb.Offset = glm::vec4(-0.25, -0.75, 0, 0);
+			cb.Scale = glm::vec4(0.25, 0.25, 0, 0);
+		}
+		else
+		{
+			return;
+		}
 		cb.DebugMode = RAW_COPY;
 		RS_Debug->SetConstantValue("DebugPassCB", &cb, dx12_rhi->GlobalCmdList->CmdList.Get());
 		RS_Debug->SetTexture("SrcTex", NormalBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
 		dx12_rhi->GlobalCmdList->CmdList->DrawInstanced(4, 1, 0, 0);
 		RS_Debug->currentDrawCallIndex++;
-	}
+	});
 
-	// geom world normal
-	{
+	functions.push_back([&](EDebugVisualization eFS) {
+		// geom world normal
 		DebugPassCB cb;
-
-		cb.Offset = glm::vec4(-0.25, -0.25, 0, 0);
-		cb.Scale = glm::vec4(0.25, 0.25, 0, 0);
+		if (eFS == EDebugVisualization::GEO_NORMAL)
+		{
+			cb.Offset = glm::vec4(0, 0, 0, 0);
+			cb.Scale = glm::vec4(1, 1, 0, 0);
+		}
+		else if(eFS == EDebugVisualization::NO_FULLSCREEN)
+		{
+			cb.Offset = glm::vec4(-0.25, -0.25, 0, 0);
+			cb.Scale = glm::vec4(0.25, 0.25, 0, 0);
+		}
+		else
+		{
+			return;
+		}
 		cb.DebugMode = RAW_COPY;
 		RS_Debug->SetConstantValue("DebugPassCB", &cb, dx12_rhi->GlobalCmdList->CmdList.Get());
 		RS_Debug->SetTexture("SrcTex", GeomNormalBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
 		dx12_rhi->GlobalCmdList->CmdList->DrawInstanced(4, 1, 0, 0);
 		RS_Debug->currentDrawCallIndex++;
-	}
-	// depth
-	{
+	});
+
+	functions.push_back([&](EDebugVisualization eFS) {
+		// depth
 		DebugPassCB cb;
 
-		cb.Offset = glm::vec4(0.25, -0.75, 0, 0);
-		cb.Scale = glm::vec4(0.25, 0.25, 0, 0);
+		if (eFS == EDebugVisualization::DEPTH)
+		{
+			cb.Offset = glm::vec4(0, 0, 0, 0);
+			cb.Scale = glm::vec4(1, 1, 0, 0);
+		}
+		else if(eFS == EDebugVisualization::NO_FULLSCREEN)
+		{
+			cb.Offset = glm::vec4(0.25, -0.75, 0, 0);
+			cb.Scale = glm::vec4(0.25, 0.25, 0, 0);
+		}
+		else
+		{
+			return;
+		}
+
 		cb.DebugMode = RAW_COPY;
 		RS_Debug->SetConstantValue("DebugPassCB", &cb, dx12_rhi->GlobalCmdList->CmdList.Get());
 		RS_Debug->SetTexture("SrcTex", DepthBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
 		dx12_rhi->GlobalCmdList->CmdList->DrawInstanced(4, 1, 0, 0);
 		RS_Debug->currentDrawCallIndex++;
-	}
-
-	// raw sh
-	{
+	});
+	functions.push_back([&](EDebugVisualization eFS) {
+		// raw sh
 		DebugPassCB cb;
 
-		cb.Offset = glm::vec4(0.25, -0.25, 0, 0);
-		cb.Scale = glm::vec4(0.25, 0.25, 0, 0);
+		if (eFS == EDebugVisualization::RAW_SH)
+		{
+			cb.Offset = glm::vec4(0, 0, 0, 0);
+			cb.Scale = glm::vec4(1, 1, 0, 0);
+		}
+		else if(eFS == EDebugVisualization::NO_FULLSCREEN)
+		{
+			cb.Offset = glm::vec4(0.25, -0.25, 0, 0);
+			cb.Scale = glm::vec4(0.25, 0.25, 0, 0);
+		}
+		else
+		{
+			return;
+		}
+
 		cb.DebugMode = RAW_COPY;
 		RS_Debug->SetConstantValue("DebugPassCB", &cb, dx12_rhi->GlobalCmdList->CmdList.Get());
 		RS_Debug->SetTexture("SrcTex", GIBufferSH.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
 		dx12_rhi->GlobalCmdList->CmdList->DrawInstanced(4, 1, 0, 0);
 		RS_Debug->currentDrawCallIndex++;
-	}
-	// temporal filtered sh
-	{
+	});
+	functions.push_back([&](EDebugVisualization eFS) {
+		// temporal filtered sh
 		DebugPassCB cb;
 
-		cb.Offset = glm::vec4(0.25, 0.25, 0, 0);
-		cb.Scale = glm::vec4(0.25, 0.25, 0, 0);
+		if (eFS == EDebugVisualization::TEMPORAL_FILTERED_SH)
+		{
+			cb.Offset = glm::vec4(0, 0, 0, 0);
+			cb.Scale = glm::vec4(1, 1, 0, 0);
+		}
+		else if (eFS == EDebugVisualization::NO_FULLSCREEN)
+		{
+			cb.Offset = glm::vec4(0.25, 0.25, 0, 0);
+			cb.Scale = glm::vec4(0.25, 0.25, 0, 0);
+		}
+		else
+		{
+			return;
+		}
+
 		cb.DebugMode = RAW_COPY;
 		RS_Debug->SetConstantValue("DebugPassCB", &cb, dx12_rhi->GlobalCmdList->CmdList.Get());
 		RS_Debug->SetTexture("SrcTex", GIBufferSHTemporal[GIBufferWriteIndex].get(), dx12_rhi->GlobalCmdList->CmdList.Get());
 		dx12_rhi->GlobalCmdList->CmdList->DrawInstanced(4, 1, 0, 0);
 		RS_Debug->currentDrawCallIndex++;
-	}
-
-	// spatial filtered sh
-	{
+	});
+	functions.push_back([&](EDebugVisualization eFS) {
+		// spatial filtered sh
 		DebugPassCB cb;
 
-		cb.Offset = glm::vec4(0.25, 0.75, 0, 0);
-		cb.Scale = glm::vec4(0.25, 0.25, 0, 0);
+		if (eFS == EDebugVisualization::SPATIAL_FILTERED_SH)
+		{
+			cb.Offset = glm::vec4(0, 0, 0, 0);
+			cb.Scale = glm::vec4(1, 1, 0, 0);
+		}
+		else  if (eFS == EDebugVisualization::NO_FULLSCREEN)
+		{
+			cb.Offset = glm::vec4(0.25, 0.75, 0, 0);
+			cb.Scale = glm::vec4(0.25, 0.25, 0, 0);
+		}
+		else
+		{
+			return;
+		}
+
 		cb.DebugMode = RAW_COPY;
 		RS_Debug->SetConstantValue("DebugPassCB", &cb, dx12_rhi->GlobalCmdList->CmdList.Get());
 		RS_Debug->SetTexture("SrcTex", FilterIndirectDiffusePingPongSH[0].get(), dx12_rhi->GlobalCmdList->CmdList.Get());
 		dx12_rhi->GlobalCmdList->CmdList->DrawInstanced(4, 1, 0, 0);
 		RS_Debug->currentDrawCallIndex++;
-	}
-
-	// sh lighting result
-	{
+	});
+	functions.push_back([&](EDebugVisualization eFS) {
+		// sh lighting result
 		DebugPassCB cb;
 
 		cb.RTSize = glm::vec2(m_width, m_height);
 		cb.GIBufferScale = GIBufferScale;
-		cb.Offset = glm::vec4(0.75, 0.75, 0, 0);
-		cb.Scale = glm::vec4(0.25, 0.25, 0, 0);
+		if (eFS == EDebugVisualization::SH_LIGHTING)
+		{
+			cb.Offset = glm::vec4(0, 0, 0, 0);
+			cb.Scale = glm::vec4(1, 1, 0, 0);
+		}
+		else if (eFS == EDebugVisualization::NO_FULLSCREEN)
+		{
+			cb.Offset = glm::vec4(0.75, 0.75, 0, 0);
+			cb.Scale = glm::vec4(0.25, 0.25, 0, 0);
+		}
+		else
+		{
+			return;
+		}
+
 		cb.DebugMode = SH_LIGHTING;
 		RS_Debug->SetConstantValue("DebugPassCB", &cb, dx12_rhi->GlobalCmdList->CmdList.Get());
 		RS_Debug->SetTexture("SrcTex", FilterIndirectDiffusePingPongColor[0].get(), dx12_rhi->GlobalCmdList->CmdList.Get());
@@ -1584,61 +1685,101 @@ void MyToyDX12Renderer::DebugPass()
 
 		dx12_rhi->GlobalCmdList->CmdList->DrawInstanced(4, 1, 0, 0);
 		RS_Debug->currentDrawCallIndex++;
-	}
-
-	// albedo
-	{
+	});
+	functions.push_back([&](EDebugVisualization eFS) {
+		// albedo
 		DebugPassCB cb;
 
-		cb.Offset = glm::vec4(0.75, -0.75, 0, 0);
-		cb.Scale = glm::vec4(0.25, 0.25, 0, 0);
+		if (eFS == EDebugVisualization::ALBEDO)
+		{
+			cb.Offset = glm::vec4(0, 0, 0, 0);
+			cb.Scale = glm::vec4(1, 1, 0, 0);
+		}
+		else  if (eFS == EDebugVisualization::NO_FULLSCREEN)
+		{
+			cb.Offset = glm::vec4(0.75, -0.75, 0, 0);
+			cb.Scale = glm::vec4(0.25, 0.25, 0, 0);
+		}
+		else
+		{
+			return;
+		}
+
 		cb.DebugMode = RAW_COPY;
 		RS_Debug->SetConstantValue("DebugPassCB", &cb, dx12_rhi->GlobalCmdList->CmdList.Get());
 		RS_Debug->SetTexture("SrcTex", AlbedoBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
 		dx12_rhi->GlobalCmdList->CmdList->DrawInstanced(4, 1, 0, 0);
 		RS_Debug->currentDrawCallIndex++;
-	}
-
-	// velocity
-	{
+	});
+	
+	functions.push_back([&](EDebugVisualization eFS) {
+		// velocity
 		DebugPassCB cb;
 
-		cb.Offset = glm::vec4(0.75, -0.25, 0, 0);
-		cb.Scale = glm::vec4(0.25, 0.25, 0, 0);
+		if (eFS == EDebugVisualization::VELOCITY)
+		{
+			cb.Offset = glm::vec4(0, 0, 0, 0);
+			cb.Scale = glm::vec4(1, 1, 0, 0);
+		}
+		else if(eFS == EDebugVisualization::NO_FULLSCREEN)
+		{
+			cb.Offset = glm::vec4(0.75, -0.25, 0, 0);
+			cb.Scale = glm::vec4(0.25, 0.25, 0, 0);
+		}
+		else
+		{
+			return;
+		}
+
 		cb.DebugMode = RAW_COPY;
 		RS_Debug->SetConstantValue("DebugPassCB", &cb, dx12_rhi->GlobalCmdList->CmdList.Get());
 		RS_Debug->SetTexture("SrcTex", VelocityBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
 		dx12_rhi->GlobalCmdList->CmdList->DrawInstanced(4, 1, 0, 0);
 		RS_Debug->currentDrawCallIndex++;
-	}
-
-	// material
-	{
+	});
+	
+	functions.push_back([&](EDebugVisualization eFS) {
+		// material
 		DebugPassCB cb;
+		if (eFS == EDebugVisualization::ROUGNESS_METALLIC)
+		{
+			cb.Offset = glm::vec4(0, 0, 0, 0);
+			cb.Scale = glm::vec4(1, 1, 0, 0);
+		}
+		else if (eFS == EDebugVisualization::NO_FULLSCREEN)
+		{
+			cb.Offset = glm::vec4(0.75, 0.25, 0, 0);
+			cb.Scale = glm::vec4(0.25, 0.25, 0, 0);
+		}
+		else
+		{
+			return;
+		}
 
-		cb.Offset = glm::vec4(0.75, 0.25, 0, 0);
-		cb.Scale = glm::vec4(0.25, 0.25, 0, 0);
 		cb.DebugMode = RAW_COPY;
 		RS_Debug->SetConstantValue("DebugPassCB", &cb, dx12_rhi->GlobalCmdList->CmdList.Get());
 		RS_Debug->SetTexture("SrcTex", MaterialBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
 		dx12_rhi->GlobalCmdList->CmdList->DrawInstanced(4, 1, 0, 0);
 		RS_Debug->currentDrawCallIndex++;
-	}
-
-	// reflection
-	{
+	});
+	functions.push_back([&](EDebugVisualization eFS) {
+		// reflection
 		DebugPassCB cb;
 
-		
-		if (bReflectionFullScreenDebug)
+
+		if (eFS == EDebugVisualization::REFLECTION)
 		{
 			cb.Offset = glm::vec4(0, 0, 0, 0);
 			cb.Scale = glm::vec4(1, 1, 0, 0);
 		}
-		else
+		else if (eFS == EDebugVisualization::NO_FULLSCREEN)
 		{
 			cb.Offset = glm::vec4(-0.75, -0.25, 0, 0);
 			cb.Scale = glm::vec4(0.25, 0.25, 0, 0);
+		}
+		else
+		{
+			return;
 		}
 
 		cb.DebugMode = RAW_COPY;
@@ -1646,6 +1787,14 @@ void MyToyDX12Renderer::DebugPass()
 		RS_Debug->SetTexture("SrcTex", SpeculaGIBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
 		dx12_rhi->GlobalCmdList->CmdList->DrawInstanced(4, 1, 0, 0);
 		RS_Debug->currentDrawCallIndex++;
+	});
+
+
+	EDebugVisualization FullScreenVisualize = EDebugVisualization::REFLECTION;
+
+	for (auto& f : functions)
+	{
+		f(FullscreenDebugBuffer);
 	}
 }
 
@@ -1910,8 +2059,60 @@ void MyToyDX12Renderer::OnRender()
 	ImGui::SliderFloat("Camera turn speed", &m_turnSpeed, 0.0f, glm::half_pi<float>()*2);
 
 	ImGui::Checkbox("Enable TemporalAA", &bEnableTAA);
-	ImGui::Checkbox("Fullscreen reflection debug", &bReflectionFullScreenDebug);
 
+	/*
+	enum class EDebugVisualization
+	{
+		SHADOW,
+		WORLD_NORMAL,
+		GEO_NORMAL,
+		DEPTH,
+		RAW_SH,
+		TEMPORAL_FILTERED_SH,
+		SPATIAL_FILTERED_SH,
+		SH_LIGHTING,
+		ALBEDO,
+		VELOCITY,
+		ROUGNESS_METALLIC,
+		REFLECTION,
+		NO_FULLSCREEN,
+	};
+	*/
+	static ImGuiComboFlags flags = 0;
+	const char* items[] = { 
+		"SHADOW",
+		"WORLD_NORMAL",
+		"GEO_NORMAL",
+		"DEPTH",
+		"RAW_SH",
+		"TEMPORAL_FILTERED_SH",
+		"SPATIAL_FILTERED_SH",
+		"SH_LIGHTING",
+		"ALBEDO",
+		"VELOCITY",
+		"ROUGNESS_METALLIC",
+		"REFLECTION",
+		"NO_FULLSCREEN",
+	};
+	static const char* item_current = items[0];            // Here our selection is a single pointer stored outside the object.
+	if (ImGui::BeginCombo("combo 1", item_current, flags)) // The second parameter is the label previewed before opening the combo.
+	{
+		for (int n = 0; n < IM_ARRAYSIZE(items); n++)
+		{
+			bool is_selected = (item_current == items[n]);
+			if (ImGui::Selectable(items[n], is_selected))\
+			{
+				item_current = items[n];
+				FullscreenDebugBuffer = (EDebugVisualization)n;
+			}
+			if (is_selected)
+			{
+				ImGui::SetItemDefaultFocus();   // Set the initial focus when opening the combo (scrolling + for keyboard navigation support in the upcoming navigation branch)
+			}
+
+		}
+		ImGui::EndCombo();
+	}
 
 	ImGui::SliderFloat3("Light direction", &LightDir.x, -1.0f, 1.0f);
 	ImGui::SliderFloat("Light Brightness", &LightIntensity, 0.0f, 20.0f);
@@ -2097,8 +2298,8 @@ void MyToyDX12Renderer::DrawMeshPass()
 
 		RS_Mesh->currentDrawCallIndex = 0;
 		
-		DrawScene(Sponza, 1, 0);
-		DrawScene(ShaderBall, 0, 1);
+		DrawScene(Sponza, 0.1, 0);
+		DrawScene(ShaderBall, 0.3, 1);
 	}
 	else
 	{
@@ -2372,7 +2573,7 @@ void MyToyDX12Renderer::InitRTPSO()
 	PSO_RT_REFLECTION->BindSRV("rayGen", "gRtScene", 0);
 	PSO_RT_REFLECTION->BindSRV("rayGen", "DepthTex", 1);
 	PSO_RT_REFLECTION->BindSRV("rayGen", "GeoNormalTex", 2);
-	PSO_RT_REFLECTION->BindSRV("rayGen", "MetallicRougnessTex", 6);
+	PSO_RT_REFLECTION->BindSRV("rayGen", "RougnessMetallicTex", 6);
 	PSO_RT_REFLECTION->BindSRV("rayGen", "BlueNoiseTex", 7);
 	PSO_RT_REFLECTION->BindSRV("rayGen", "WorldNormalTex", 8);
 
@@ -2490,7 +2691,7 @@ void MyToyDX12Renderer::RaytraceReflectionPass()
 	PSO_RT_REFLECTION->SetSRV("rayGen", "gRtScene", TLAS->GPUHandle);
 	PSO_RT_REFLECTION->SetSRV("rayGen", "DepthTex", DepthBuffer->GpuHandleSRV);
 	PSO_RT_REFLECTION->SetSRV("rayGen", "GeoNormalTex", GeomNormalBuffer->GpuHandleSRV);
-	PSO_RT_REFLECTION->SetSRV("rayGen", "MetallicRougnessTex", MaterialBuffer->GpuHandleSRV);
+	PSO_RT_REFLECTION->SetSRV("rayGen", "RougnessMetallicTex", MaterialBuffer->GpuHandleSRV);
 	PSO_RT_REFLECTION->SetSRV("rayGen", "BlueNoiseTex", BlueNoiseTex->GpuHandleSRV);
 	PSO_RT_REFLECTION->SetSRV("rayGen", "WorldNormalTex", NormalBuffer->GpuHandleSRV);
 
