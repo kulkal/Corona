@@ -817,13 +817,14 @@ void MyToyDX12Renderer::InitSpatialDenoisingPass()
 	{
 		OutputDebugStringA(reinterpret_cast<const char*>(compilationMsgs->GetBufferPointer()));
 		compilationMsgs->Release();
+		return;
 	}
 
 	Shader* cs = new Shader((UINT8*)computeShader->GetBufferPointer(), computeShader->GetBufferSize());
 
 	D3D12_COMPUTE_PIPELINE_STATE_DESC computePsoDesc = {};
 
-	RS_SpatialDenoisingFilter = unique_ptr<PipelineStateObject>(new PipelineStateObject);
+	RS_SpatialDenoisingFilter = shared_ptr<PipelineStateObject>(new PipelineStateObject);
 	RS_SpatialDenoisingFilter->cs = unique_ptr<Shader>(cs);
 	RS_SpatialDenoisingFilter->computePSODesc = computePsoDesc;
 	RS_SpatialDenoisingFilter->BindTexture("DepthTex", 0, 1);
@@ -836,7 +837,7 @@ void MyToyDX12Renderer::InitSpatialDenoisingPass()
 
 	RS_SpatialDenoisingFilter->BindConstantBuffer("SpatialFilterConstant", 0, sizeof(SpatialFilterConstant), 1);
 	RS_SpatialDenoisingFilter->IsCompute = true;
-	RS_SpatialDenoisingFilter->Init2();
+	RS_SpatialDenoisingFilter->Init();
 
 	UINT WidthGI = m_width / GIBufferScale;
 	UINT HeightGI = m_height / GIBufferScale;
@@ -886,13 +887,14 @@ void MyToyDX12Renderer::InitTemporalDenoisingPass()
 	{
 		OutputDebugStringA(reinterpret_cast<const char*>(compilationMsgs->GetBufferPointer()));
 		compilationMsgs->Release();
+		return;
 	}
 
 	Shader* cs = new Shader((UINT8*)computeShader->GetBufferPointer(), computeShader->GetBufferSize());
 
 	D3D12_COMPUTE_PIPELINE_STATE_DESC computePsoDesc = {};
 
-	RS_TemporalDenoisingFilter = unique_ptr<PipelineStateObject>(new PipelineStateObject);
+	RS_TemporalDenoisingFilter = shared_ptr<PipelineStateObject>(new PipelineStateObject);
 	RS_TemporalDenoisingFilter->cs = unique_ptr<Shader>(cs);
 	RS_TemporalDenoisingFilter->computePSODesc = computePsoDesc;
 	RS_TemporalDenoisingFilter->BindTexture("DepthTex", 0, 1);
@@ -910,7 +912,7 @@ void MyToyDX12Renderer::InitTemporalDenoisingPass()
 
 	RS_TemporalDenoisingFilter->BindConstantBuffer("TemporalFilterConstant", 0, sizeof(TemporalFilterConstant), 1);
 	RS_TemporalDenoisingFilter->IsCompute = true;
-	RS_TemporalDenoisingFilter->Init2();
+	RS_TemporalDenoisingFilter->Init();
 }
 
 void MyToyDX12Renderer::InitDrawMeshRS()
@@ -935,6 +937,7 @@ void MyToyDX12Renderer::InitDrawMeshRS()
 	{
 		OutputDebugStringA(reinterpret_cast<const char*>(compilationMsgs->GetBufferPointer()));
 		compilationMsgs->Release();
+		return;
 	}
 
 	try
@@ -945,6 +948,7 @@ void MyToyDX12Renderer::InitDrawMeshRS()
 	{
 		OutputDebugStringA(reinterpret_cast<const char*>(compilationMsgs->GetBufferPointer()));
 		compilationMsgs->Release();
+		return;
 	}
 
 	Shader* ps = new Shader((UINT8*)pixelShader->GetBufferPointer(), pixelShader->GetBufferSize());
@@ -983,7 +987,8 @@ void MyToyDX12Renderer::InitDrawMeshRS()
 	psoDescMesh.DSVFormat = DXGI_FORMAT_D32_FLOAT;
 	psoDescMesh.SampleDesc.Count = 1;
 
-	RS_Mesh = unique_ptr<PipelineStateObject>(new PipelineStateObject);
+	
+	RS_Mesh = shared_ptr<PipelineStateObject>(new PipelineStateObject);
 	RS_Mesh->ps = shared_ptr<Shader>(ps);
 	RS_Mesh->vs = shared_ptr<Shader>(vs);
 	RS_Mesh->graphicsPSODesc = psoDescMesh;
@@ -992,7 +997,7 @@ void MyToyDX12Renderer::InitDrawMeshRS()
 	RS_Mesh->BindSampler("samplerWrap", 0);
 	RS_Mesh->BindConstantBuffer("ObjParameter", 0, sizeof(MeshDrawConstantBuffer), 400);
 
-	RS_Mesh->Init2();
+	bool bSucess = RS_Mesh->Init();
 }
 
 void MyToyDX12Renderer::InitImgui()
@@ -1121,6 +1126,7 @@ void MyToyDX12Renderer::InitCopyPass()
 	{
 		OutputDebugStringA(reinterpret_cast<const char*>(compilationMsgs->GetBufferPointer()));
 		compilationMsgs->Release();
+		return;
 	}
 
 	try
@@ -1131,6 +1137,7 @@ void MyToyDX12Renderer::InitCopyPass()
 	{
 		OutputDebugStringA(reinterpret_cast<const char*>(compilationMsgs->GetBufferPointer()));
 		compilationMsgs->Release();
+		return;
 	}
 
 	Shader* ps = new Shader((UINT8*)pixelShader->GetBufferPointer(), pixelShader->GetBufferSize());
@@ -1161,7 +1168,7 @@ void MyToyDX12Renderer::InitCopyPass()
 	//psoDescMesh.DSVFormat = DXGI_FORMAT_D32_FLOAT;
 	psoDesc.SampleDesc.Count = 1;
 
-	RS_Copy = unique_ptr<PipelineStateObject>(new PipelineStateObject);
+	RS_Copy = shared_ptr<PipelineStateObject>(new PipelineStateObject);
 	RS_Copy->ps = shared_ptr<Shader>(ps);
 	RS_Copy->vs = shared_ptr<Shader>(vs);
 	RS_Copy->graphicsPSODesc = psoDesc;
@@ -1170,7 +1177,7 @@ void MyToyDX12Renderer::InitCopyPass()
 	RS_Copy->BindSampler("samplerWrap", 0);
 	RS_Copy->BindConstantBuffer("ScaleOffsetParams", 0, sizeof(CopyScaleOffsetCB), 15);
 
-	RS_Copy->Init2();
+	RS_Copy->Init();
 }
 
 void MyToyDX12Renderer::InitDebugPass()
@@ -1219,6 +1226,7 @@ void MyToyDX12Renderer::InitDebugPass()
 	{
 		OutputDebugStringA(reinterpret_cast<const char*>(compilationMsgs->GetBufferPointer()));
 		compilationMsgs->Release();
+		return;
 	}
 
 	try
@@ -1229,6 +1237,7 @@ void MyToyDX12Renderer::InitDebugPass()
 	{
 		OutputDebugStringA(reinterpret_cast<const char*>(compilationMsgs->GetBufferPointer()));
 		compilationMsgs->Release();
+		return;
 	}
 
 	Shader* ps = new Shader((UINT8*)pixelShader->GetBufferPointer(), pixelShader->GetBufferSize());
@@ -1259,7 +1268,7 @@ void MyToyDX12Renderer::InitDebugPass()
 	//psoDescMesh.DSVFormat = DXGI_FORMAT_D32_FLOAT;
 	psoDesc.SampleDesc.Count = 1;
 
-	RS_Debug = unique_ptr<PipelineStateObject>(new PipelineStateObject);
+	RS_Debug = shared_ptr<PipelineStateObject>(new PipelineStateObject);
 	RS_Debug->ps = shared_ptr<Shader>(ps);
 	RS_Debug->vs = shared_ptr<Shader>(vs);
 	RS_Debug->graphicsPSODesc = psoDesc;
@@ -1271,7 +1280,7 @@ void MyToyDX12Renderer::InitDebugPass()
 	RS_Debug->BindSampler("samplerWrap", 0);
 	RS_Debug->BindConstantBuffer("DebugPassCB", 0, sizeof(DebugPassCB), 15);
 
-	RS_Debug->Init2();
+	RS_Debug->Init();
 }
 
 void MyToyDX12Renderer::InitLightingPass()
@@ -1296,6 +1305,7 @@ void MyToyDX12Renderer::InitLightingPass()
 	{
 		OutputDebugStringA(reinterpret_cast<const char*>(compilationMsgs->GetBufferPointer()));
 		compilationMsgs->Release();
+		return;
 	}
 
 	try
@@ -1306,6 +1316,7 @@ void MyToyDX12Renderer::InitLightingPass()
 	{
 		OutputDebugStringA(reinterpret_cast<const char*>(compilationMsgs->GetBufferPointer()));
 		compilationMsgs->Release();
+		return;
 	}
 
 	Shader* ps = new Shader((UINT8*)pixelShader->GetBufferPointer(), pixelShader->GetBufferSize());
@@ -1336,7 +1347,7 @@ void MyToyDX12Renderer::InitLightingPass()
 	//psoDescMesh.DSVFormat = DXGI_FORMAT_D32_FLOAT;
 	psoDesc.SampleDesc.Count = 1;
 
-	RS_Lighting = unique_ptr<PipelineStateObject>(new PipelineStateObject);
+	RS_Lighting = shared_ptr<PipelineStateObject>(new PipelineStateObject);
 	RS_Lighting->ps = shared_ptr<Shader>(ps);
 	RS_Lighting->vs = shared_ptr<Shader>(vs);
 	RS_Lighting->graphicsPSODesc = psoDesc;
@@ -1351,7 +1362,7 @@ void MyToyDX12Renderer::InitLightingPass()
 
 	RS_Lighting->BindSampler("samplerWrap", 0);
 	RS_Lighting->BindConstantBuffer("LightingParam", 0, sizeof(LightingParam));
-	RS_Lighting->Init2();
+	RS_Lighting->Init();
 }
 
 void MyToyDX12Renderer::InitTemporalAAPass()
@@ -1376,6 +1387,7 @@ void MyToyDX12Renderer::InitTemporalAAPass()
 	{
 		OutputDebugStringA(reinterpret_cast<const char*>(compilationMsgs->GetBufferPointer()));
 		compilationMsgs->Release();
+		return;
 	}
 
 	try
@@ -1386,6 +1398,7 @@ void MyToyDX12Renderer::InitTemporalAAPass()
 	{
 		OutputDebugStringA(reinterpret_cast<const char*>(compilationMsgs->GetBufferPointer()));
 		compilationMsgs->Release();
+		return;
 	}
 
 	Shader* ps = new Shader((UINT8*)pixelShader->GetBufferPointer(), pixelShader->GetBufferSize());
@@ -1416,7 +1429,7 @@ void MyToyDX12Renderer::InitTemporalAAPass()
 	//psoDescMesh.DSVFormat = DXGI_FORMAT_D32_FLOAT;
 	psoDesc.SampleDesc.Count = 1;
 
-	RS_TemporalAA = unique_ptr<PipelineStateObject>(new PipelineStateObject);
+	RS_TemporalAA = shared_ptr<PipelineStateObject>(new PipelineStateObject);
 	RS_TemporalAA->ps = shared_ptr<Shader>(ps);
 	RS_TemporalAA->vs = shared_ptr<Shader>(vs);
 	RS_TemporalAA->graphicsPSODesc = psoDesc;
@@ -1428,7 +1441,7 @@ void MyToyDX12Renderer::InitTemporalAAPass()
 
 	RS_TemporalAA->BindSampler("samplerWrap", 0);
 	RS_TemporalAA->BindConstantBuffer("LightingParam", 0, sizeof(LightingParam));
-	RS_TemporalAA->Init2();
+	RS_TemporalAA->Init();
 }
 
 void MyToyDX12Renderer::CopyPass()
@@ -1994,6 +2007,12 @@ void MyToyDX12Renderer::OnUpdate()
 	FrameCounter++;
 
 	ColorBufferWriteIndex = FrameCounter % 2;
+
+	if (bRecompileShaders)
+	{
+		RecompileShaders();
+		bRecompileShaders = false;
+	}
 }
 
 // Render the scene.
@@ -2055,11 +2074,16 @@ void MyToyDX12Renderer::OnRender()
 	ImGui::Begin("Hi, Let's traceray!");
 	ImGui::Text(fps);
 
+	if (ImGui::Button("Recompile all shaders"))
+		bRecompileShaders = true;
+
 	ImGui::Text("Tuning knobs.");
 	ImGui::SliderFloat("Camera turn speed", &m_turnSpeed, 0.0f, glm::half_pi<float>()*2);
 
 	ImGui::Checkbox("Enable TemporalAA", &bEnableTAA);
+	ImGui::Checkbox("Visualize Buffers", &bDebugDraw);
 
+	
 	/*
 	enum class EDebugVisualization
 	{
@@ -2094,8 +2118,8 @@ void MyToyDX12Renderer::OnRender()
 		"REFLECTION",
 		"NO_FULLSCREEN",
 	};
-	static const char* item_current = items[0];            // Here our selection is a single pointer stored outside the object.
-	if (ImGui::BeginCombo("combo 1", item_current, flags)) // The second parameter is the label previewed before opening the combo.
+	static const char* item_current = items[UINT(EDebugVisualization::NO_FULLSCREEN)];
+	if (ImGui::BeginCombo("Visualize Full Screen", item_current, flags))
 	{
 		for (int n = 0; n < IM_ARRAYSIZE(items); n++)
 		{
@@ -2107,7 +2131,7 @@ void MyToyDX12Renderer::OnRender()
 			}
 			if (is_selected)
 			{
-				ImGui::SetItemDefaultFocus();   // Set the initial focus when opening the combo (scrolling + for keyboard navigation support in the upcoming navigation branch)
+				ImGui::SetItemDefaultFocus(); 
 			}
 
 		}
@@ -2174,13 +2198,7 @@ void MyToyDX12Renderer::OnKeyDown(UINT8 key)
 		ClampMode = ClampMode % 3;
 		break;
 	case 'R':
-		dx12_rhi->CmdQ->WaitGPU();
-
-		InitRTPSO();
-
-		// TODO : handle compile failure for non-rt shaders.
-		RS_Mesh = nullptr;
-		InitDrawMeshRS();
+		RecompileShaders();
 		break;
 	default:
 		break;
@@ -2503,6 +2521,20 @@ void AddMeshToVec(vector<shared_ptr<RTAS>>& vecBLAS, shared_ptr<Scene> scene)
 		}
 		vecBLAS.push_back(blas);
 	}
+}
+
+void MyToyDX12Renderer::RecompileShaders()
+{
+	dx12_rhi->CmdQ->WaitGPU();
+
+	InitRTPSO();
+	InitSpatialDenoisingPass();
+	InitTemporalDenoisingPass();
+	InitDrawMeshRS();
+	InitCopyPass();
+	InitDebugPass();
+	InitLightingPass();
+	InitTemporalAAPass();
 }
 
 void MyToyDX12Renderer::InitRaytracing()

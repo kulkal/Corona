@@ -99,7 +99,7 @@ private:
 		glm::vec4 pad4[1];
 	};
 
-	unique_ptr<PipelineStateObject> RS_Mesh;
+	shared_ptr<PipelineStateObject> RS_Mesh;
 
 	// spatial denoising
 	struct SpatialFilterConstant
@@ -113,7 +113,7 @@ private:
 
 	SpatialFilterConstant SpatialFilterCB;
 
-	unique_ptr<PipelineStateObject> RS_SpatialDenoisingFilter;
+	shared_ptr<PipelineStateObject> RS_SpatialDenoisingFilter;
 
 	// temporal denoising
 	struct TemporalFilterConstant
@@ -124,7 +124,7 @@ private:
 
 	TemporalFilterConstant TemporalFilterCB;
 
-	unique_ptr<PipelineStateObject> RS_TemporalDenoisingFilter;
+	shared_ptr<PipelineStateObject> RS_TemporalDenoisingFilter;
 	
 	// RT shadow
 	struct RTShadowViewParamCB
@@ -183,7 +183,7 @@ private:
 		glm::vec4 Offset;
 	};
 
-	unique_ptr<PipelineStateObject> RS_Copy;
+	shared_ptr<PipelineStateObject> RS_Copy;
 
 	// debug pass
 	enum EDebugMode
@@ -204,7 +204,7 @@ private:
 		UINT32 DebugMode;
 	};
 
-	unique_ptr<PipelineStateObject> RS_Debug;
+	shared_ptr<PipelineStateObject> RS_Debug;
 
 	// lighting pass
 	
@@ -216,7 +216,7 @@ private:
 		float GIBufferScale;
 	};
 	
-	unique_ptr<PipelineStateObject> RS_Lighting;
+	shared_ptr<PipelineStateObject> RS_Lighting;
 
 	// temporalAA
 	struct TemporalAAParam
@@ -232,7 +232,7 @@ private:
 
 	float JitterScale = 0.85;
 
-	unique_ptr<PipelineStateObject> RS_TemporalAA;
+	shared_ptr<PipelineStateObject> RS_TemporalAA;
 
 	// imgui font texture
 	D3D12_CPU_DESCRIPTOR_HANDLE CpuHandleImguiFontTex;
@@ -312,11 +312,12 @@ private:
 
 	enki::TaskScheduler g_TS;
 
+	bool bRecompileShaders = false;
+	void RecompileShaders();
 public:
 
 	void InitRaytracing();
 	
-	void InitRTPSO();
 
 	void LoadPipeline();
 
@@ -324,11 +325,21 @@ public:
 
 	shared_ptr<Scene> LoadModel(string fileName);
 
+	void InitRTPSO();
+
 	void InitSpatialDenoisingPass();
 
 	void InitTemporalDenoisingPass();
 
 	void InitDrawMeshRS();
+
+	void InitCopyPass();
+
+	void InitDebugPass();
+
+	void InitLightingPass();
+
+	void InitTemporalAAPass();
 
 	void InitImgui();
 
@@ -350,13 +361,6 @@ public:
 
 	void TemporalDenoisingPass();
 
-	void InitCopyPass();
-
-	void InitDebugPass();
-
-	void InitLightingPass();
-
-	void InitTemporalAAPass();
 
 	void CopyPass();
 

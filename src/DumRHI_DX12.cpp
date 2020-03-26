@@ -619,7 +619,7 @@ void PipelineStateObject::SetRootConstant(string name, UINT value, ID3D12Graphic
 		CommandList->SetGraphicsRoot32BitConstant(rootBinding[name].rootParamIndex, rootBinding[name].rootConst, 0);
 }
 
-void PipelineStateObject::Init2()
+bool PipelineStateObject::Init()
 {
 	vector<CD3DX12_ROOT_PARAMETER1> rootParamVec;
 
@@ -749,9 +749,11 @@ void PipelineStateObject::Init2()
 	{
 		computePSODesc.CS = cs->ShaderByteCode;
 		computePSODesc.pRootSignature = RS.Get();
-
-		ThrowIfFailed(g_dx12_rhi->Device->CreateComputePipelineState(&computePSODesc, IID_PPV_ARGS(&PSO)));
+		HRESULT hr;
+		ThrowIfFailed(hr = g_dx12_rhi->Device->CreateComputePipelineState(&computePSODesc, IID_PPV_ARGS(&PSO)));
 		NAME_D3D12_OBJECT(PSO);
+		return SUCCEEDED(hr);
+
 	}
 	else
 	{
@@ -759,9 +761,10 @@ void PipelineStateObject::Init2()
 		graphicsPSODesc.PS = ps->ShaderByteCode;
 
 		graphicsPSODesc.pRootSignature = RS.Get();
-
-		ThrowIfFailed(g_dx12_rhi->Device->CreateGraphicsPipelineState(&graphicsPSODesc, IID_PPV_ARGS(&PSO)));
+		HRESULT hr;
+		ThrowIfFailed(hr = g_dx12_rhi->Device->CreateGraphicsPipelineState(&graphicsPSODesc, IID_PPV_ARGS(&PSO)));
 		NAME_D3D12_OBJECT(PSO);
+		return SUCCEEDED(hr);
 	}
 }
 

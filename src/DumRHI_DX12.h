@@ -154,7 +154,7 @@ public:
 	D3D12_COMPUTE_PIPELINE_STATE_DESC computePSODesc;
 
 
-	void Init2();
+	bool Init();
 
 
 	void Apply(ID3D12GraphicsCommandList* CommandList);
