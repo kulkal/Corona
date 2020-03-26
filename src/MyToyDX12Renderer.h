@@ -25,6 +25,8 @@
 #include "SimpleCamera.h"
 #include "DumRHI_DX12.h"
 #include "enkiTS/TaskScheduler.h""
+#define PROFILE_BUILD 1
+#include "pix3.h"
 using namespace DirectX;
 
 // Note that while ComPtr is used to manage the lifetime of resources on the CPU,

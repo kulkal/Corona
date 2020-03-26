@@ -1446,7 +1446,7 @@ void MyToyDX12Renderer::InitTemporalAAPass()
 
 void MyToyDX12Renderer::CopyPass()
 {
-	/*PIXBeginEvent*/(dx12_rhi->GlobalCmdList->CmdList.Get(), 0, L"CopyPass");
+	PIXScopedEvent(dx12_rhi->GlobalCmdList->CmdList.Get(), PIX_COLOR(rand() % 255, rand() % 255, rand() % 255), "CopyPass");
 
 	Texture* backbuffer = framebuffers[dx12_rhi->CurrentFrameIndex].get();
 	Texture* ResolveTarget = ColorBuffers[ColorBufferWriteIndex];//framebuffers[dx12_rhi->CurrentFrameIndex].get();
@@ -1479,10 +1479,14 @@ void MyToyDX12Renderer::CopyPass()
 	dx12_rhi->GlobalCmdList->CmdList->DrawInstanced(4, 1, 0, 0);
 
 	RS_Copy->currentDrawCallIndex++;
+	
+	PIXEndEvent(dx12_rhi->GlobalCmdList->CmdList.Get());
 }
 
 void MyToyDX12Renderer::DebugPass()
 {
+	PIXScopedEvent(dx12_rhi->GlobalCmdList->CmdList.Get(), PIX_COLOR(rand() % 255, rand() % 255, rand() % 255), "DebugPass");
+
 	RS_Debug->currentDrawCallIndex = 0;
 	RS_Debug->Apply(dx12_rhi->GlobalCmdList->CmdList.Get());
 	RS_Debug->SetSampler("samplerWrap", samplerWrap.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
@@ -1813,6 +1817,8 @@ void MyToyDX12Renderer::DebugPass()
 
 void MyToyDX12Renderer::LightingPass()
 {
+	PIXScopedEvent(dx12_rhi->GlobalCmdList->CmdList.Get(), PIX_COLOR(rand() % 255, rand() % 255, rand() % 255), "LightingPass");
+
 	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(LightingBuffer->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET));
 
 	RS_Lighting->Apply(dx12_rhi->GlobalCmdList->CmdList.Get());
@@ -1858,6 +1864,8 @@ void MyToyDX12Renderer::LightingPass()
 
 void MyToyDX12Renderer::TemporalAAPass()
 {
+	PIXScopedEvent(dx12_rhi->GlobalCmdList->CmdList.Get(), PIX_COLOR(rand() % 255, rand() % 255, rand() % 255), "TemporalAAPass");
+
 	UINT PrevColorBufferIndex = 1 - ColorBufferWriteIndex;
 	Texture* ResolveTarget = ColorBuffers[ColorBufferWriteIndex];//framebuffers[dx12_rhi->CurrentFrameIndex].get();
 
@@ -2284,6 +2292,8 @@ void MyToyDX12Renderer::DrawScene(shared_ptr<Scene> scene, float Roughness, floa
 
 void MyToyDX12Renderer::DrawMeshPass()
 {
+	PIXScopedEvent(dx12_rhi->GlobalCmdList->CmdList.Get(), PIX_COLOR(rand() % 255, rand() % 255, rand() % 255), "DrawMeshPass");
+
 	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(AlbedoBuffer->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET));
 	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(NormalBuffer->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET));
 	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(GeomNormalBuffer->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET));
@@ -2436,6 +2446,8 @@ void MyToyDX12Renderer::RecordDraw (UINT StartIndex, UINT NumDraw, UINT CLIndex,
 
 void MyToyDX12Renderer::SpatialDenoisingPass()
 {
+	PIXScopedEvent(dx12_rhi->GlobalCmdList->CmdList.Get(), PIX_COLOR(rand() % 255, rand() % 255, rand() % 255), "SpatialDenoisingPass");
+
 	UINT WriteIndex = 0;
 	UINT ReadIndex = 1;
 	for (int i = 0; i < 4; i++)
@@ -2471,6 +2483,8 @@ void MyToyDX12Renderer::SpatialDenoisingPass()
 
 void MyToyDX12Renderer::TemporalDenoisingPass()
 {
+	PIXScopedEvent(dx12_rhi->GlobalCmdList->CmdList.Get(), PIX_COLOR(rand() % 255, rand() % 255, rand() % 255), "TemporalDenoisingPass");
+
 	// GIBufferSH : full scale
 	// FilterIndirectDiffusePingPongSH : 3x3 downsample
 	GIBufferWriteIndex = 1 - GIBufferWriteIndex;
@@ -2701,6 +2715,8 @@ vector<UINT64> ResourceInt64array(ComPtr<ID3D12Resource> resource, int size)
 }
 void MyToyDX12Renderer::RaytraceShadowPass()
 {
+	PIXScopedEvent(dx12_rhi->GlobalCmdList->CmdList.Get(), PIX_COLOR(rand()%255, rand() % 255, rand() % 255), "RaytraceShadowPass");
+
 	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(ShadowBuffer->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS));
 
 	PSO_RT_SHADOW->BeginShaderTable();
@@ -2733,6 +2749,8 @@ void MyToyDX12Renderer::RaytraceShadowPass()
 
 void MyToyDX12Renderer::RaytraceReflectionPass()
 {
+	PIXScopedEvent(dx12_rhi->GlobalCmdList->CmdList.Get(), PIX_COLOR(rand() % 255, rand() % 255, rand() % 255), "RaytraceReflectionPass");
+
 	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(SpeculaGIBuffer->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS));
 
 	PSO_RT_REFLECTION->BeginShaderTable();
@@ -2775,10 +2793,13 @@ void MyToyDX12Renderer::RaytraceReflectionPass()
 	PSO_RT_REFLECTION->Apply(m_width, m_height);
 
 	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(SpeculaGIBuffer->resource.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
+	PIXEndEvent();
 }
 
 void MyToyDX12Renderer::RaytraceGIPass()
 {
+	PIXScopedEvent(dx12_rhi->GlobalCmdList->CmdList.Get(), PIX_COLOR(rand() % 255, rand() % 255, rand() % 255), "RaytraceGIPass");
+
 	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(GIBufferSH->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS));
 	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(GIBufferColor->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS));
 

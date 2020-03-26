@@ -14,7 +14,6 @@ workspace "MyToyDX12Renderer"
 project "MyToyDX12Renderer"
    kind "ConsoleApp"
    language "C"
-   targetdir "bin/%{cfg.buildcfg}"
    cppdialect "C++17"
   
    includedirs { 
@@ -47,6 +46,8 @@ project "MyToyDX12Renderer"
 
    configuration "Debug"
       debugdir("../src/")
+      targetdir "../src/"
+
       systemversion( WIN_SDK_VERSION)
       staticruntime("off")
       flags { "NoPCH" } 
@@ -61,6 +62,7 @@ project "MyToyDX12Renderer"
 
    configuration "Release"
       debugdir("../src/")
+      targetdir "../src/"
       systemversion( WIN_SDK_VERSION)
       staticruntime("off")
       flags { "NoPCH" } 
