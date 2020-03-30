@@ -4,7 +4,7 @@
 #include <Windows.h>
 #include <d3d12.h>
 
-#include "GFSDK_Aftermath/include/GFSDK_Aftermath.h"
+#include "external/GFSDK_Aftermath/include/GFSDK_Aftermath.h"
 
 
 std::wstring AnsiToWString(const char* ansiString);

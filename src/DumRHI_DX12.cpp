@@ -163,9 +163,9 @@ shared_ptr<ConstantBuffer> SimpleDX12::CreateConstantBuffer(int Size, UINT NumVi
 	resDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
 	resDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
 
-	stringstream ss;
+	/*stringstream ss;
 	ss << "CreateConstantBuffer : " << resDesc.Width << "\n";
-	OutputDebugStringA(ss.str().c_str());
+	OutputDebugStringA(ss.str().c_str());*/
 
 	ThrowIfFailed(Device->CreateCommittedResource(
 		&heapProp,
@@ -241,9 +241,9 @@ shared_ptr<IndexBuffer> SimpleDX12::CreateIndexBuffer(DXGI_FORMAT Format, UINT S
 
 	IndexBuffer* ib = new IndexBuffer;
 
-	stringstream ss;
+	/*stringstream ss;
 	ss << "CreateIndexBuffer : " << Size << "\n";
-	OutputDebugStringA(ss.str().c_str());
+	OutputDebugStringA(ss.str().c_str());*/
 
 	ThrowIfFailed(Device->CreateCommittedResource(
 		&CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT),
@@ -317,9 +317,9 @@ shared_ptr<VertexBuffer> SimpleDX12::CreateVertexBuffer(UINT Size, UINT Stride, 
 
 	VertexBuffer* vb = new VertexBuffer;
 	
-	stringstream ss;
+	/*stringstream ss;
 	ss << "CreateVertexBuffer : " << Size << "\n";
-	OutputDebugStringA(ss.str().c_str());
+	OutputDebugStringA(ss.str().c_str());*/
 	
 	ThrowIfFailed(Device->CreateCommittedResource(
 		&CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT),
@@ -988,9 +988,9 @@ void Texture::UploadSRCData3D(D3D12_SUBRESOURCE_DATA* SrcData)
 		resDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
 		resDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
 
-		stringstream ss;
+		/*stringstream ss;
 		ss << "UploadSRCData : " << TotalBytes << "\n";
-		OutputDebugStringA(ss.str().c_str());
+		OutputDebugStringA(ss.str().c_str());*/
 
 
 		ThrowIfFailed(g_dx12_rhi->Device->CreateCommittedResource(
@@ -1129,9 +1129,9 @@ std::shared_ptr<Texture> SimpleDX12::CreateTextureFromFile(wstring fileName, boo
 	resDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
 	resDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
 
-	stringstream ss;
+	/*stringstream ss;
 	ss << "CreateTextureFromFile : " << uploadBufferSize << "\n";
-	OutputDebugStringA(ss.str().c_str());
+	OutputDebugStringA(ss.str().c_str());*/
 
 	g_dx12_rhi->Device->CreateCommittedResource(&heapPropUpload, D3D12_HEAP_FLAG_NONE, &resDesc,
 		D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&uploadHeap));
@@ -1271,9 +1271,9 @@ shared_ptr<RTAS> Mesh::CreateBLAS()
 		bufDesc.SampleDesc.Quality = 0;
 		bufDesc.Width = info.ScratchDataSizeInBytes;
 
-		stringstream ss;
+		/*stringstream ss;
 		ss << "blas->scratch : " << bufDesc.Width << "\n";
-		OutputDebugStringA(ss.str().c_str());
+		OutputDebugStringA(ss.str().c_str());*/
 
 		g_dx12_rhi->Device->CreateCommittedResource(&kDefaultHeapProps, D3D12_HEAP_FLAG_NONE, &bufDesc, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, IID_PPV_ARGS(&as->Scratch));
 	}
@@ -1292,9 +1292,9 @@ shared_ptr<RTAS> Mesh::CreateBLAS()
 		bufDesc.SampleDesc.Quality = 0;
 		bufDesc.Width = info.ResultDataMaxSizeInBytes;
 		
-		stringstream ss;
+		/*stringstream ss;
 		ss << "blas->result : " << bufDesc.Width << "\n";
-		OutputDebugStringA(ss.str().c_str());
+		OutputDebugStringA(ss.str().c_str());*/
 
 
 		g_dx12_rhi->Device->CreateCommittedResource(&kDefaultHeapProps, D3D12_HEAP_FLAG_NONE, &bufDesc, D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE, nullptr, IID_PPV_ARGS(&as->Result));
@@ -1821,24 +1821,29 @@ void RTPipelineStateObject::EndShaderTable()
 
 	// hit program 
 	//for (auto& sb : ShaderBinding)
-	for(int InstanceIndex=0;InstanceIndex<NumInstance;InstanceIndex++)
+	if (HitProgramBinding.size() > 0)
 	{
-		pDataThis = pData + LastIndex * ShaderTableEntrySize;
 
-		auto& HitProgramInfo = HitProgramBinding[InstanceIndex];
-		
-		memcpy(pDataThis, RtsoProps->GetShaderIdentifier(HitProgramInfo.HitGroupName.c_str()), D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES);
-		pDataThis += D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES;
-
-		for (auto& bd : HitProgramInfo.VecData)
+		for(int InstanceIndex=0;InstanceIndex<NumInstance;InstanceIndex++)
 		{
-			*(UINT64*)(pDataThis) = bd.ptr;
-			
-			pDataThis += sizeof(UINT64);
-		}
+			pDataThis = pData + LastIndex * ShaderTableEntrySize;
 
-		LastIndex++;
+			auto& HitProgramInfo = HitProgramBinding[InstanceIndex];
+		
+			memcpy(pDataThis, RtsoProps->GetShaderIdentifier(HitProgramInfo.HitGroupName.c_str()), D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES);
+			pDataThis += D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES;
+
+			for (auto& bd : HitProgramInfo.VecData)
+			{
+				*(UINT64*)(pDataThis) = bd.ptr;
+			
+				pDataThis += sizeof(UINT64);
+			}
+
+			LastIndex++;
+		}
 	}
+
 
 	ShaderTable->Unmap(0, nullptr);
 }

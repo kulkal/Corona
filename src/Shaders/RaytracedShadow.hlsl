@@ -163,21 +163,14 @@ void rayGen
 }
 
 [shader("miss")]
-
-    void miss
-    (inout
-    RayPayload payload)
+void miss(inout RayPayload payload)
 {
     //payload.color = float3(0.4, 0.6, 0.2);
     payload.distance = 0;
 }
 
 [shader("closesthit")]
-
-    void chs
-    (inout
-    RayPayload payload, in BuiltInTriangleIntersectionAttributes
-    attribs)
+void chs(inout RayPayload payload, in BuiltInTriangleIntersectionAttributes attribs)
 {
     //float3 barycentrics = float3(1.0 - attribs.barycentrics.x - attribs.barycentrics.y, attribs.barycentrics.x, attribs.barycentrics.y);
 
@@ -187,4 +180,12 @@ void rayGen
 
     //payload.color = A * barycentrics.x + B * barycentrics.y + C * barycentrics.z;
     payload.distance = RayTCurrent();
+}
+
+[shader("anyhit")]
+void anyhit(inout RayPayload payload, in BuiltInTriangleIntersectionAttributes attribs)
+{
+    // payload.distance = 1;
+
+    AcceptHitAndEndSearch();
 }

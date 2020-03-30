@@ -204,7 +204,8 @@ public:
 	{
 		RAYGEN,
 		MISS,
-		HIT
+		HIT,
+		ANYHIT
 	};
 	struct BindingInfo
 	{

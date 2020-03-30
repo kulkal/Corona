@@ -1,0 +1,18 @@
+Nsight Aftermath is primarily a development tool and is intended to be used
+with minimal side effects to the user application. Despite this, there may be
+overhead when it is enabled resulting in performance degradation. The
+application should only fully enable Nsight Aftermath when in an application
+controlled 'diagnostics mode', e.g. enabled after the user has experienced a
+GPU crash and exhaustive data collection is required.
+
+Your users should also be able to easily disable Nsight Aftermath in situations
+where performance is critical, such as when benchmarking or during competitive
+play.
+
+To override the behavior of applications that do not follow the above guidelines
+a user may always set a Windows registry key that forces off all Aftermath
+functionality in the application:
+HKEY_CURRENT_USER\Software\NVIDIA Corporation\Nsight Aftermath\ForceOff=1.
+
+For questions regarding these guidelines or Nsight Aftermath in general, please
+email Nsight-Aftermath@nvidia.com

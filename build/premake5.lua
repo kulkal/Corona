@@ -25,7 +25,7 @@ project "MyToyDX12Renderer"
                "../src/imgui/examples"
                }
    libdirs {
-            "C:/dev/dx12_wrapper/src/GFSDK_Aftermath/lib/x64", 
+            "C:/dev/dx12_wrapper/src/external/GFSDK_Aftermath/lib/x64", 
             -- "../src/DirectXTex July 2017/Lib 2017/Release",
             "../src/DirectXTex July 2017/Lib 2017/",
             "../src/assimp/lib",

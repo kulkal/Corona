@@ -25,7 +25,7 @@
 #include "assimp/include/scene.h"
 #include "assimp/include/postprocess.h"
 //#pragma comment(lib, "assimp\\lib\\assimp.lib")
-#include "GFSDK_Aftermath/include/GFSDK_Aftermath.h"
+#include "external/GFSDK_Aftermath/include/GFSDK_Aftermath.h"
 #include "imgui.h"
 #include "imgui_impl_win32.h"
 #include "imgui_impl_dx12.h"
@@ -2602,6 +2602,8 @@ void MyToyDX12Renderer::InitRTPSO()
 
 		TEMP_PSO_RT_SHADOW->AddShader("miss", RTPipelineStateObject::MISS);
 		TEMP_PSO_RT_SHADOW->AddShader("chs", RTPipelineStateObject::HIT);
+		TEMP_PSO_RT_SHADOW->AddShader("anyhit", RTPipelineStateObject::ANYHIT);
+
 
 		TEMP_PSO_RT_SHADOW->MaxRecursion = 1;
 		TEMP_PSO_RT_SHADOW->MaxAttributeSizeInBytes = sizeof(float) * 2;
