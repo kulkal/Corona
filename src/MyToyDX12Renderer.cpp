@@ -2589,7 +2589,7 @@ void MyToyDX12Renderer::InitRTPSO()
 		TEMP_PSO_RT_SHADOW->NumInstance = vecBLAS.size();// scene->meshes.size(); // important for cbv allocation & shadertable size.
 
 		// new interface
-		TEMP_PSO_RT_SHADOW->AddHitGroup("HitGroup", "chs", "");
+		TEMP_PSO_RT_SHADOW->AddHitGroup("HitGroup", "chs", "anyhit");
 		TEMP_PSO_RT_SHADOW->AddShader("rayGen", RTPipelineStateObject::RAYGEN);
 		TEMP_PSO_RT_SHADOW->BindUAV("rayGen", "ShadowResult", 0);
 		TEMP_PSO_RT_SHADOW->BindSRV("rayGen", "gRtScene", 0);

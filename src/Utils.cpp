@@ -1,5 +1,5 @@
 #include "Utils.h"
-
+#include "SimpleDX12.h"
 
 std::wstring AnsiToWString(const char* ansiString)
 {
@@ -60,6 +60,7 @@ std::wstring GetFileExtension(const WCHAR* filePath_)
 
 void NVAftermathMarker(GFSDK_Aftermath_ContextHandle ah, std::string markerName)
 {
+#if USE_AFTERMATH
 	GFSDK_Aftermath_Result ar = GFSDK_Aftermath_SetEventMarker(ah, markerName.c_str(), markerName.length());
-
+#endif
 }

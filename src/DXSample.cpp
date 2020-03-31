@@ -10,6 +10,7 @@
 //*********************************************************
 
 #include "stdafx.h"
+#include "DXSampleHelper.h"
 #include "DXSample.h"
 
 using namespace Microsoft::WRL;

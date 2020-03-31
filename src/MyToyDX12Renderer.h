@@ -23,7 +23,7 @@
 #include "DXSample.h"
 #include "StepTimer.h"
 #include "SimpleCamera.h"
-#include "DumRHI_DX12.h"
+#include "SimpleDX12.h"
 #include "enkiTS/TaskScheduler.h""
 #define PROFILE_BUILD 1
 #include "pix3.h"

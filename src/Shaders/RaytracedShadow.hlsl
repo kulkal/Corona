@@ -146,7 +146,10 @@ void rayGen
 	ray.TMax = 100000;
 
 	RayPayload payload;
-	TraceRay(gRtScene, 0 /*rayFlags*/, 0xFF, 0 /* ray index*/, 0, 0, ray, payload);
+	TraceRay(gRtScene, 
+        RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH 
+        // | RAY_FLAG_SKIP_CLOSEST_HIT_SHADER
+        , 0xFF, 0 /* ray index*/, 0, 0, ray, payload);
 
 	if (payload.distance == 0)
 	{
@@ -185,7 +188,7 @@ void chs(inout RayPayload payload, in BuiltInTriangleIntersectionAttributes attr
 [shader("anyhit")]
 void anyhit(inout RayPayload payload, in BuiltInTriangleIntersectionAttributes attribs)
 {
-    // payload.distance = 1;
+    // payload.distance = RayTCurrent();;
 
     AcceptHitAndEndSearch();
 }
