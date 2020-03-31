@@ -17,20 +17,21 @@ project "MyToyDX12Renderer"
    cppdialect "C++17"
   
    includedirs { 
-               ".", 
-               "C:/Program Files (x86)/Windows Kits/10/Include/10.0.17763.0/um",  
-               "../src/DirectXTex July 2017/Include", 
-               "../src/assimp/include",
-               "../src/imgui/",
-               "../src/imgui/examples"
+				"../src/external",
+				".", 
+				"C:/Program Files (x86)/Windows Kits/10/Include/10.0.17763.0/um",  
+				"../src/external/DirectXTex July 2017/Include", 
+				"../src/external/assimp/include",
+				"../src/imgui/",
+				"../src/imgui/examples"
                }
-   libdirs {
-            "C:/dev/dx12_wrapper/src/external/GFSDK_Aftermath/lib/x64", 
+   libdirs 	{
+            "../src/external/GFSDK_Aftermath/lib/x64", 
             -- "../src/DirectXTex July 2017/Lib 2017/Release",
-            "../src/DirectXTex July 2017/Lib 2017/",
-            "../src/assimp/lib",
+            "../src/external/DirectXTex July 2017/Lib 2017/",
+            "../src/external/assimp/lib",
             "."
-         }
+			}
    libdirs { os.findlib("dx12") }
    links{
       "d3d12",
@@ -67,13 +68,13 @@ project "MyToyDX12Renderer"
       staticruntime("off")
       flags { "NoPCH" } 
       files {
-         "../src/*.h",
-      "../src/*.cpp",
-      "../src/enkiTS/*.cpp",
-      "../src/imgui/*.cpp",
-      "../src/imgui/examples/imgui_impl_dx12.cpp",
-      "../src/imgui/examples/imgui_impl_win32.cpp"
-      }
+			"../src/*.h",
+			"../src/*.cpp",
+			"../src/enkiTS/*.cpp",
+			"../src/imgui/*.cpp",
+			"../src/imgui/examples/imgui_impl_dx12.cpp",
+			"../src/imgui/examples/imgui_impl_win32.cpp"
+			}
 
 
    filter "configurations:Debug"

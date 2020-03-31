@@ -25,7 +25,7 @@
 #include "assimp/include/scene.h"
 #include "assimp/include/postprocess.h"
 //#pragma comment(lib, "assimp\\lib\\assimp.lib")
-#include "external/GFSDK_Aftermath/include/GFSDK_Aftermath.h"
+#include "GFSDK_Aftermath/include/GFSDK_Aftermath.h"
 #include "imgui.h"
 #include "imgui_impl_win32.h"
 #include "imgui_impl_dx12.h"
