@@ -595,12 +595,12 @@ void MyToyDX12Renderer::LoadAssets()
 	DepthBuffer->MakeDSV();
 	NAME_D3D12_OBJECT(DepthBuffer->resource);
 
-	DefaultWhiteTex = dx12_rhi->CreateTextureFromFile(L"default/default_white.png", false);
-	DefaultNormalTex = dx12_rhi->CreateTextureFromFile(L"default/default_normal.png", true);
+	DefaultWhiteTex = dx12_rhi->CreateTextureFromFile(L"assets/default/default_white.png", false);
+	DefaultNormalTex = dx12_rhi->CreateTextureFromFile(L"assets/default/default_normal.png", true);
 
-	Sponza = LoadModel("Sponza/Sponza.fbx");
+	Sponza = LoadModel("assets/Sponza/Sponza.fbx");
 
-	ShaderBall = LoadModel("shaderball/shaderBall.fbx");
+	ShaderBall = LoadModel("assets/shaderball/shaderBall.fbx");
 
 	glm::mat4x4 scaleMat = glm::scale(vec3(2.5, 2.5, 2.5));
 	glm::mat4x4 translatemat = glm::translate(glm::vec3(-150, 20, 0));
@@ -1017,7 +1017,7 @@ void MyToyDX12Renderer::InitImgui()
 
 void MyToyDX12Renderer::InitBlueNoiseTexture()
 {
-	string path = "bluenoise/64_64_64/HDR_RGBA.raw";
+	string path = "assets/bluenoise/64_64_64/HDR_RGBA.raw";
 	ifstream file(path.data(), ios::in | ios::binary);
 	if (file.is_open())
 	{

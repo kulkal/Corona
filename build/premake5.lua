@@ -22,8 +22,8 @@ project "MyToyDX12Renderer"
 				"C:/Program Files (x86)/Windows Kits/10/Include/10.0.17763.0/um",  
 				"../src/external/DirectXTex July 2017/Include", 
 				"../src/external/assimp/include",
-				"../src/imgui/",
-				"../src/imgui/examples"
+				"../src/external/imgui/",
+				"../src/external/imgui/examples"
                }
    libdirs 	{
             "../src/external/GFSDK_Aftermath/lib/x64", 
@@ -55,10 +55,10 @@ project "MyToyDX12Renderer"
       files { 
       "../src/*.h",
       "../src/*.cpp",
-      "../src/enkiTS/*.cpp",
-      "../src/imgui/*.cpp",
-      "../src/imgui/examples/imgui_impl_dx12.cpp",
-      "../src/imgui/examples/imgui_impl_win32.cpp"
+      "../src/external/enkiTS/*.cpp",
+      "../src/external/imgui/*.cpp",
+      "../src/external/imgui/examples/imgui_impl_dx12.cpp",
+      "../src/external/imgui/examples/imgui_impl_win32.cpp"
       }
 
    configuration "Release"
@@ -70,10 +70,10 @@ project "MyToyDX12Renderer"
       files {
 			"../src/*.h",
 			"../src/*.cpp",
-			"../src/enkiTS/*.cpp",
-			"../src/imgui/*.cpp",
-			"../src/imgui/examples/imgui_impl_dx12.cpp",
-			"../src/imgui/examples/imgui_impl_win32.cpp"
+			"../src/external/enkiTS/*.cpp",
+			"../src/external/imgui/*.cpp",
+			"../src/external/imgui/examples/imgui_impl_dx12.cpp",
+			"../src/external/imgui/examples/imgui_impl_win32.cpp"
 			}
 
 
