@@ -11,6 +11,7 @@ Texture2D AlbedoTex : register(t5);
 Texture2D RougnessMetallicTex : register(t6);
 Texture3D BlueNoiseTex : register(t7);
 Texture2D WorldNormalTex : register(t8);
+ByteAddressBuffer InstanceProperty : register(t9);
 
 cbuffer ViewParameter : register(b0)
 {
@@ -18,7 +19,7 @@ cbuffer ViewParameter : register(b0)
     float4x4 InvViewMatrix;
     float4x4 ProjMatrix;
     float4 ProjectionParams;
-    float4 LightDir;
+    float4 LightDirAndIntensity;
     float2 RandomOffset;
     uint FrameCounter;
     uint BlueNoiseOffsetStride;
@@ -39,7 +40,9 @@ float3 linearToSrgb(float3 c)
 
 struct RayPayload
 {
+    float3 position;
     float3 color;
+    float3 normal;
     float distance;
 };
 
@@ -228,6 +231,8 @@ void rayGen
     float VoH = max(0, -dot(V, H));
     float LoH = max(0, -dot(L, H));
 
+    float3 LightIntensity = LightDirAndIntensity.w;
+
 
 	RayDesc ray;
 	ray.Origin = WorldPos + GeoNormal * 0.5; //    mul(float4(0, 0, 0, 1), InvViewMatrix).xyz;
@@ -239,10 +244,46 @@ void rayGen
 	RayPayload payload;
 	TraceRay(gRtScene, 0 /*rayFlags*/, 0xFF, 0 /* ray index*/, 0, 0, ray, payload);
 
-	ReflectionResult[launchIndex.xy] = float4(payload.color, 1);
-    // ReflectionResult[launchIndex.xy] = float4(0, 0, 1, 1);
+    if(payload.distance == 0)
+    {
+        // hit sky
+        float3 Radiance = payload.color * LightIntensity;
+        ReflectionResult[launchIndex.xy] = float4(Radiance, 1);
+    }
+    else
+    {
+        float3 LightDir = LightDirAndIntensity.xyz;
+        RayDesc shadowRay;
+        shadowRay.Origin = payload.position + payload.normal *0.5;
+        shadowRay.Direction = LightDir;
 
- 
+        shadowRay.TMin = 0;
+        shadowRay.TMax = 100000;
+
+        RayPayload shadowPayload;
+        TraceRay(gRtScene, 0 /*rayFlags*/, 0xFF, 0 /* ray index*/, 0, 0, shadowRay, shadowPayload);
+
+        float3 Irradiance = 0..xxx;
+        float3 Albedo = payload.color;
+        if(shadowPayload.distance == 0)
+        {
+            // miss
+            Irradiance = dot(LightDir.xyz, payload.normal) * LightIntensity  * Albedo;
+        }
+        else
+        {
+            // shadowed
+        }
+            // LightDir = float(0, 0, -1);
+            // Irradiance = dot(LightDir.xyz, payload.normal) * 1  * 1;
+
+        ReflectionResult[launchIndex.xy] = float4(Irradiance, 1);
+        // ReflectionResult[launchIndex.xy] = float4(payload.color, 1);
+
+    }
+
+        // ReflectionResult[launchIndex.xy] = float4(payload.color, 1);
+
 }
 
 
@@ -250,10 +291,11 @@ void rayGen
 [shader("miss")]
 void miss(inout RayPayload payload)
 {
-    payload.color = float3(0.0, 0.0, 0.1);
+    payload.position = float3(0, 0, 0);
+    payload.color = float3(0.0, 0.2, 0.4);
+    payload.normal = float3(0, 0, -1);
     payload.distance = 0;
 }
-
 
 
 struct Vertex
@@ -334,14 +376,47 @@ Vertex GetVertexAttributes(uint triangleIndex, float3 barycentrics)
     v.position = float3(0, 0, 0);
     v.uv = float2(0, 0);
 
-    for (uint i = 0; i < 3; i++)
-    {
-        int address = (index[i] * 11) * 4;
-        v.position += asfloat(vertices.Load3(address)) * barycentrics[i];
-        address += (3 * 8);
-        v.uv += asfloat(vertices.Load2(address)) * barycentrics[i];
-    }
+    // for (uint i = 0; i < 3; i++)
+    // {
+    //     int address = (index[i] * 11) * 4;
+    //     v.position += asfloat(vertices.Load3(address)) * barycentrics[i];
+    //     address += (3 * 8);
+    //     v.uv += asfloat(vertices.Load2(address)) * barycentrics[i];
+    // }
 
+    float3 p0 = asfloat(vertices.Load3((index[0] * 11) * 4));
+    float3 p1 = asfloat(vertices.Load3((index[1] * 11) * 4));
+    float3 p2 = asfloat(vertices.Load3((index[2] * 11) * 4));
+
+    float4x4 WorldMatrix = {
+        asfloat(InstanceProperty.Load4(InstanceID()*4*16)), 
+        asfloat(InstanceProperty.Load4(InstanceID()*4*16 + 16)), 
+        asfloat(InstanceProperty.Load4(InstanceID()*4*16 + 16*2)),
+        asfloat(InstanceProperty.Load4(InstanceID()*4*16 + 16*3)),
+    };
+
+
+    v.position += p0 * barycentrics[0];
+    v.position += p1 * barycentrics[1];
+    v.position += p2 * barycentrics[2];
+
+    v.position = mul(float4(v.position, 1), WorldMatrix).xyz;
+
+    float2 uv0 = asfloat(vertices.Load2((index[0] * 11) * 4) + 3*8);
+    float2 uv1 = asfloat(vertices.Load2((index[1] * 11) * 4) + 3*8);
+    float2 uv2 = asfloat(vertices.Load2((index[2] * 11) * 4) + 3*8);
+
+    v.uv += uv0 * barycentrics[0];
+    v.uv += uv1 * barycentrics[1];
+    v.uv += uv2 * barycentrics[2];
+
+
+
+    float3 e1 = p1 - p0;
+    float3 e2 = p2 - p0;
+    v.normal = normalize(cross(e1, e2));
+
+    v.normal = mul(float4(v.normal, 0), WorldMatrix).xyz;
     return v;
 }
 
@@ -354,6 +429,9 @@ void chs(inout RayPayload payload, in BuiltInTriangleIntersectionAttributes attr
     uint triangleIndex = PrimitiveIndex();
     Vertex vertex = GetVertexAttributes(triangleIndex, barycentrics);
 
-    payload.color = AlbedoTex.SampleLevel(sampleWrap, vertex.uv, 0).xyz;
+    payload.position = vertex.position;
+    payload.normal = vertex.normal;
+    payload.color =  AlbedoTex.SampleLevel(sampleWrap, vertex.uv, 0).xyz;
+
     payload.distance = RayTCurrent();
 }

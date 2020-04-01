@@ -10,7 +10,6 @@ Texture2D WorldNormalTex : register(t2);
 ByteAddressBuffer vertices : register(t3);
 ByteAddressBuffer indices : register(t4);
 Texture2D AlbedoTex : register(t5);
-
 ByteAddressBuffer InstanceProperty : register(t6);
 Texture3D BlueNoiseTex : register(t7);
 
@@ -359,8 +358,6 @@ void chs(inout RayPayload payload, in BuiltInTriangleIntersectionAttributes attr
     payload.position = vertex.position;
     payload.normal = vertex.normal;
     payload.color = AlbedoTex.SampleLevel(sampleWrap, vertex.uv, 0).xyz;
-
-
 
     payload.distance = RayTCurrent();
 }

@@ -595,12 +595,12 @@ void MyToyDX12Renderer::LoadAssets()
 	NAME_D3D12_OBJECT(VelocityBuffer->resource);
 
 	// pbr material
-	MaterialBuffer = dx12_rhi->CreateTexture2D(DXGI_FORMAT_R8G8B8A8_UNORM,
+	RoughnessMetalicBuffer = dx12_rhi->CreateTexture2D(DXGI_FORMAT_R8G8B8A8_UNORM,
 		D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
 		D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, m_width, m_height, 1);
-	MaterialBuffer->MakeRTV();
+	RoughnessMetalicBuffer->MakeRTV();
 
-	NAME_D3D12_OBJECT(MaterialBuffer->resource);
+	NAME_D3D12_OBJECT(RoughnessMetalicBuffer->resource);
 
 	// depth 
 	DepthBuffer = dx12_rhi->CreateTexture2D(DXGI_FORMAT_D32_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, m_width, m_height, 1);
@@ -1377,6 +1377,8 @@ void MyToyDX12Renderer::InitLightingPass()
 	RS_Lighting->BindTexture("DepthTex", 4, 1);
 	RS_Lighting->BindTexture("GIResultSHTex", 5, 1);
 	RS_Lighting->BindTexture("GIResultColorTex", 6, 1);
+	RS_Lighting->BindTexture("SpecularGITex", 7, 1);
+	RS_Lighting->BindTexture("RoughnessMetalicTex", 8, 1);
 
 	RS_Lighting->BindSampler("samplerWrap", 0);
 	RS_Lighting->BindConstantBuffer("LightingParam", 0, sizeof(LightingParam));
@@ -1795,7 +1797,7 @@ void MyToyDX12Renderer::DebugPass()
 
 		cb.DebugMode = RAW_COPY;
 		RS_Debug->SetConstantValue("DebugPassCB", &cb, dx12_rhi->GlobalCmdList->CmdList.Get());
-		RS_Debug->SetTexture("SrcTex", MaterialBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
+		RS_Debug->SetTexture("SrcTex", RoughnessMetalicBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
 		dx12_rhi->GlobalCmdList->CmdList->DrawInstanced(4, 1, 0, 0);
 		RS_Debug->currentDrawCallIndex++;
 	});
@@ -1848,7 +1850,7 @@ void MyToyDX12Renderer::DebugPass()
 
 		cb.DebugMode = RAW_COPY;
 		RS_Debug->SetConstantValue("DebugPassCB", &cb, dx12_rhi->GlobalCmdList->CmdList.Get());
-		RS_Debug->SetTexture("SrcTex", SpeculaGIBufferTemporal[0].get(), dx12_rhi->GlobalCmdList->CmdList.Get());
+		RS_Debug->SetTexture("SrcTex", SpeculaGIBufferTemporal[GIBufferWriteIndex].get(), dx12_rhi->GlobalCmdList->CmdList.Get());
 		dx12_rhi->GlobalCmdList->CmdList->DrawInstanced(4, 1, 0, 0);
 		RS_Debug->currentDrawCallIndex++;
 	});
@@ -1877,9 +1879,11 @@ void MyToyDX12Renderer::LightingPass()
 
 	RS_Lighting->SetTexture("VelocityTex", VelocityBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
 	RS_Lighting->SetTexture("DepthTex", DepthBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
-	//RS_Lighting->SetTexture("IndirectDiffuseTex", FilterIndirectDiffusePingPong[1].get(), dx12_rhi->CommandList.Get());
 	RS_Lighting->SetTexture("GIResultSHTex", FilterIndirectDiffusePingPongSH[0].get(), dx12_rhi->GlobalCmdList->CmdList.Get());
 	RS_Lighting->SetTexture("GIResultColorTex", FilterIndirectDiffusePingPongColor[0].get(), dx12_rhi->GlobalCmdList->CmdList.Get());
+	RS_Lighting->SetTexture("SpecularGITex", SpeculaGIBufferTemporal[GIBufferWriteIndex].get(), dx12_rhi->GlobalCmdList->CmdList.Get());
+	RS_Lighting->SetTexture("RoughnessMetalicTex", RoughnessMetalicBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
+
 
 	LightingParam Param;
 	Param.LightDir = glm::vec4(glm::normalize(LightDir), LightIntensity);
@@ -2347,7 +2351,7 @@ void MyToyDX12Renderer::DrawMeshPass()
 	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(NormalBuffer->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET));
 	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(GeomNormalBuffer->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET));
 	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(VelocityBuffer->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET));
-	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(MaterialBuffer->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET));
+	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(RoughnessMetalicBuffer->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET));
 
 	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(DepthBuffer->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_DEPTH_WRITE));
 
@@ -2363,7 +2367,7 @@ void MyToyDX12Renderer::DrawMeshPass()
 
 	if (!bMultiThreadRendering)
 	{
-		const D3D12_CPU_DESCRIPTOR_HANDLE Rendertargets[] = { AlbedoBuffer->CpuHandleRTV, NormalBuffer->CpuHandleRTV, GeomNormalBuffer->CpuHandleRTV, VelocityBuffer->CpuHandleRTV, MaterialBuffer->CpuHandleRTV };
+		const D3D12_CPU_DESCRIPTOR_HANDLE Rendertargets[] = { AlbedoBuffer->CpuHandleRTV, NormalBuffer->CpuHandleRTV, GeomNormalBuffer->CpuHandleRTV, VelocityBuffer->CpuHandleRTV, RoughnessMetalicBuffer->CpuHandleRTV };
 
 		dx12_rhi->GlobalCmdList->CmdList->OMSetRenderTargets(RS_Mesh->graphicsPSODesc.NumRenderTargets, Rendertargets, FALSE, &DepthBuffer->CpuHandleDSV);
 
@@ -2431,7 +2435,7 @@ void MyToyDX12Renderer::DrawMeshPass()
 	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(NormalBuffer->resource.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
 	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(GeomNormalBuffer->resource.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
 	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(VelocityBuffer->resource.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
-	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(MaterialBuffer->resource.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
+	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(RoughnessMetalicBuffer->resource.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
 
 
 	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(DepthBuffer->resource.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
@@ -2699,13 +2703,14 @@ void MyToyDX12Renderer::InitRTPSO()
 		TEMP_PSO_RT_REFLECTION->BindSRV("chs", "vertices", 3);
 		TEMP_PSO_RT_REFLECTION->BindSRV("chs", "indices", 4);
 		TEMP_PSO_RT_REFLECTION->BindSRV("chs", "AlbedoTex", 5);
-
+		TEMP_PSO_RT_REFLECTION->BindSRV("chs", "InstanceProperty", 9);
 		TEMP_PSO_RT_REFLECTION->BindSampler("chs", "samplerWrap", 0);
 
 
 		TEMP_PSO_RT_REFLECTION->MaxRecursion = 1;
 		TEMP_PSO_RT_REFLECTION->MaxAttributeSizeInBytes = sizeof(float) * 2;
-		TEMP_PSO_RT_REFLECTION->MaxPayloadSizeInBytes = sizeof(float) * 4;
+		TEMP_PSO_RT_REFLECTION->MaxPayloadSizeInBytes = sizeof(float) * 10;
+
 
 		bool bSuccess = TEMP_PSO_RT_REFLECTION->InitRS("Shaders\\RaytracedReflection.hlsl");
 
@@ -2818,7 +2823,7 @@ void MyToyDX12Renderer::RaytraceReflectionPass()
 	PSO_RT_REFLECTION->SetSRV("rayGen", "gRtScene", TLAS->GPUHandle);
 	PSO_RT_REFLECTION->SetSRV("rayGen", "DepthTex", DepthBuffer->GpuHandleSRV);
 	PSO_RT_REFLECTION->SetSRV("rayGen", "GeoNormalTex", GeomNormalBuffer->GpuHandleSRV);
-	PSO_RT_REFLECTION->SetSRV("rayGen", "RougnessMetallicTex", MaterialBuffer->GpuHandleSRV);
+	PSO_RT_REFLECTION->SetSRV("rayGen", "RougnessMetallicTex", RoughnessMetalicBuffer->GpuHandleSRV);
 	PSO_RT_REFLECTION->SetSRV("rayGen", "BlueNoiseTex", BlueNoiseTex->GpuHandleSRV);
 	PSO_RT_REFLECTION->SetSRV("rayGen", "WorldNormalTex", NormalBuffer->GpuHandleSRV);
 
@@ -2843,7 +2848,9 @@ void MyToyDX12Renderer::RaytraceReflectionPass()
 		PSO_RT_REFLECTION->AddHitProgramDescriptor("chs", mesh->Vb->GpuHandleSRV, i);
 		PSO_RT_REFLECTION->AddHitProgramDescriptor("chs", mesh->Ib->GpuHandleSRV, i);
 		PSO_RT_REFLECTION->AddHitProgramDescriptor("chs", diffuseTex->GpuHandleSRV, i);
+		PSO_RT_REFLECTION->AddHitProgramDescriptor("chs", InstancePropertyBuffer->GpuHandleSRV, i);
 		PSO_RT_REFLECTION->AddHitProgramDescriptor("chs", samplerWrap->GpuHandle, i);
+
 		i++;
 	}
 

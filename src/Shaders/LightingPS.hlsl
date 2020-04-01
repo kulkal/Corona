@@ -16,9 +16,11 @@ Texture2D NormalTex : register(t1);
 Texture2D ShadowTex : register(t2);
 Texture2D VelocityTex : register(t3);
 Texture2D DepthTex : register(t4);
-// Texture2D IndirectDiffuseTex : register(t5);
 Texture2D GIResultSHTex : register(t5);
 Texture2D GIResultColorTex : register(t6);
+Texture2D SpecularGITex : register(t7);
+Texture2D RoughnessMetalicTex : register(t8);
+
 
 
 
@@ -92,8 +94,15 @@ float4 PSMain(PSInput input) : SV_TARGET
 
     float3 IndirectDiffuse = project_SH_irradiance(sh_indirect, WorldNormal) * Albedo;
 
-    // float3 IndirectDiffuse = IndirectDiffuseTex[PixelPos] * Albedo;
 
-
-    return float4(DiffuseLighting + IndirectDiffuse, 1);
+    // use 0.05 if is non-metal
+    // specular = mix(0.05, 1.0, metallic); 
+    float Metalic = RoughnessMetalicTex[PixelPos].y;
+    float Specular = lerp(0.05, 1.0, Metalic); 
+    // non-metal doesnt have specular color
+    // vec3 spec_color = mix(vec3(1), surf_albedo.rgb, surf_metallic) * surf_specular;
+    float3 SpecularColor = lerp(1..xxxx, Albedo.xyz, Metalic) * Specular;
+    // final_color = (projected_lf.rgb + high_freq.rgb) * diff_color + specular.rgb * spec_color;
+    float3 IndirectSpecular = SpecularGITex[PixelPos].xyz * SpecularColor;
+    return float4(DiffuseLighting + IndirectDiffuse*(1-Specular) + IndirectSpecular, 1);
 }

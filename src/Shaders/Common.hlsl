@@ -172,3 +172,4 @@ float3x3 construct_ONB_frisvad(float3 normal)
     }
     return ret;
 }
+

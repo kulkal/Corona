@@ -71,7 +71,7 @@ private:
 	shared_ptr<Texture> NormalBuffer;
 	shared_ptr<Texture> GeomNormalBuffer;
 	shared_ptr<Texture> VelocityBuffer;
-	shared_ptr<Texture> MaterialBuffer;
+	shared_ptr<Texture> RoughnessMetalicBuffer;
 	shared_ptr<Texture> ShadowBuffer;
 
 	shared_ptr<Texture> SpeculaGIBuffer;
