@@ -329,7 +329,7 @@ void MyToyDX12Renderer::OnInit()
 
 	g_TS.Initialize(8);
 
-	m_camera.Init({0, 0, 0 });
+	m_camera.Init({ 458, 781, 185 });
 	m_camera.SetMoveSpeed(200);
 
 	LoadPipeline();
@@ -528,6 +528,18 @@ void MyToyDX12Renderer::LoadAssets()
 		D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, m_width, m_height, 1);
 
 	NAME_D3D12_OBJECT(SpeculaGIBuffer->resource);
+
+	SpeculaGIBufferTemporal[0] = dx12_rhi->CreateTexture2D(DXGI_FORMAT_R16G16B16A16_FLOAT,
+		D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+		D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, m_width, m_height, 1);
+
+	NAME_D3D12_OBJECT(SpeculaGIBufferTemporal[0]->resource);
+
+	SpeculaGIBufferTemporal[1] = dx12_rhi->CreateTexture2D(DXGI_FORMAT_R16G16B16A16_FLOAT,
+		D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+		D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, m_width, m_height, 1);
+
+	NAME_D3D12_OBJECT(SpeculaGIBufferTemporal[1]->resource);
 
 	GIBufferSH = dx12_rhi->CreateTexture2D(DXGI_FORMAT_R16G16B16A16_FLOAT,
 		D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
@@ -904,11 +916,17 @@ void MyToyDX12Renderer::InitTemporalDenoisingPass()
 	RS_TemporalDenoisingFilter->BindTexture("InGIResultSHTexPrev", 4, 1);
 	RS_TemporalDenoisingFilter->BindTexture("InGIResultColorTexPrev", 5, 1);
 	RS_TemporalDenoisingFilter->BindTexture("VelocityTex", 6, 1);
+	RS_TemporalDenoisingFilter->BindTexture("InSpecularGITex", 7, 1);
+	RS_TemporalDenoisingFilter->BindTexture("InSpecularGITexPrev", 8, 1);
+
+
 
 	RS_TemporalDenoisingFilter->BindUAV("OutGIResultSH", 0);
 	RS_TemporalDenoisingFilter->BindUAV("OutGIResultColor", 1);
 	RS_TemporalDenoisingFilter->BindUAV("OutGIResultSHDS", 2);
 	RS_TemporalDenoisingFilter->BindUAV("OutGIResultColorDS", 3);
+	RS_TemporalDenoisingFilter->BindUAV("OutSpecularGI", 4);
+
 
 	RS_TemporalDenoisingFilter->BindConstantBuffer("TemporalFilterConstant", 0, sizeof(TemporalFilterConstant), 1);
 	RS_TemporalDenoisingFilter->IsCompute = true;
@@ -1278,7 +1296,7 @@ void MyToyDX12Renderer::InitDebugPass()
 	RS_Debug->BindTexture("SrcTexNormal", 2, 1);
 
 	RS_Debug->BindSampler("samplerWrap", 0);
-	RS_Debug->BindConstantBuffer("DebugPassCB", 0, sizeof(DebugPassCB), 15);
+	RS_Debug->BindConstantBuffer("DebugPassCB", 0, sizeof(DebugPassCB), 19);
 
 	RS_Debug->Init();
 }
@@ -1592,7 +1610,9 @@ void MyToyDX12Renderer::DebugPass()
 			return;
 		}
 
-		cb.DebugMode = RAW_COPY;
+		cb.ProjectionParams.z = Near;
+		cb.ProjectionParams.w = Far;
+		cb.DebugMode = DEPTH;
 		RS_Debug->SetConstantValue("DebugPassCB", &cb, dx12_rhi->GlobalCmdList->CmdList.Get());
 		RS_Debug->SetTexture("SrcTex", DepthBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
 		dx12_rhi->GlobalCmdList->CmdList->DrawInstanced(4, 1, 0, 0);
@@ -1780,11 +1800,11 @@ void MyToyDX12Renderer::DebugPass()
 		RS_Debug->currentDrawCallIndex++;
 	});
 	functions.push_back([&](EDebugVisualization eFS) {
-		// reflection
+		// specular raw
 		DebugPassCB cb;
 
 
-		if (eFS == EDebugVisualization::REFLECTION)
+		if (eFS == EDebugVisualization::SPECULAR_RAW)
 		{
 			cb.Offset = glm::vec4(0, 0, 0, 0);
 			cb.Scale = glm::vec4(1, 1, 0, 0);
@@ -1806,8 +1826,35 @@ void MyToyDX12Renderer::DebugPass()
 		RS_Debug->currentDrawCallIndex++;
 	});
 
+	functions.push_back([&](EDebugVisualization eFS) {
+		// temporal filtered specular
+		DebugPassCB cb;
 
-	EDebugVisualization FullScreenVisualize = EDebugVisualization::REFLECTION;
+
+		if (eFS == EDebugVisualization::TEMPORAL_FILTERED_SPECULAR)
+		{
+			cb.Offset = glm::vec4(0, 0, 0, 0);
+			cb.Scale = glm::vec4(1, 1, 0, 0);
+		}
+		else if (eFS == EDebugVisualization::NO_FULLSCREEN)
+		{
+			cb.Offset = glm::vec4(-0.75, 0.25, 0, 0);
+			cb.Scale = glm::vec4(0.25, 0.25, 0, 0);
+		}
+		else
+		{
+			return;
+		}
+
+		cb.DebugMode = RAW_COPY;
+		RS_Debug->SetConstantValue("DebugPassCB", &cb, dx12_rhi->GlobalCmdList->CmdList.Get());
+		RS_Debug->SetTexture("SrcTex", SpeculaGIBufferTemporal[0].get(), dx12_rhi->GlobalCmdList->CmdList.Get());
+		dx12_rhi->GlobalCmdList->CmdList->DrawInstanced(4, 1, 0, 0);
+		RS_Debug->currentDrawCallIndex++;
+	});
+
+
+	EDebugVisualization FullScreenVisualize = EDebugVisualization::SPECULAR_RAW;
 
 	for (auto& f : functions)
 	{
@@ -1989,8 +2036,8 @@ void MyToyDX12Renderer::OnUpdate()
 	RTReflectionViewParam.ProjectionParams.z = Near;
 	RTReflectionViewParam.ProjectionParams.w = Far;
 	RTReflectionViewParam.LightDir = glm::vec4(glm::normalize(LightDir), LightIntensity);
-	RTGIViewParam.RandomOffset = glm::vec2(timeElapsed, timeElapsed);
-	RTGIViewParam.FrameCounter = FrameCounter;
+	RTReflectionViewParam.RandomOffset = glm::vec2(timeElapsed, timeElapsed);
+	RTReflectionViewParam.FrameCounter = FrameCounter;
 
 	// GI view param
 	RTGIViewParam.ViewMatrix = glm::transpose(ViewMat);
@@ -2106,7 +2153,8 @@ void MyToyDX12Renderer::OnRender()
 		ALBEDO,
 		VELOCITY,
 		ROUGNESS_METALLIC,
-		REFLECTION,
+		SPECULAR_RAW,
+		TEMPORAL_FILTERED_SPECULAR,
 		NO_FULLSCREEN,
 	};
 	*/
@@ -2123,7 +2171,8 @@ void MyToyDX12Renderer::OnRender()
 		"ALBEDO",
 		"VELOCITY",
 		"ROUGNESS_METALLIC",
-		"REFLECTION",
+		"SPECULAR_RAW",
+		"TEMPORAL_FILTERED_SPECULAR",
 		"NO_FULLSCREEN",
 	};
 	static const char* item_current = items[UINT(EDebugVisualization::NO_FULLSCREEN)];
@@ -2496,21 +2545,28 @@ void MyToyDX12Renderer::TemporalDenoisingPass()
 	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(FilterIndirectDiffusePingPongColor[0]->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS));
 	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(GIBufferSHTemporal[WriteIndex]->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS));
 	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(GIBufferColorTemporal[WriteIndex]->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS));
+	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(SpeculaGIBufferTemporal[WriteIndex]->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS));
+
 
 	RS_TemporalDenoisingFilter->Apply(dx12_rhi->GlobalCmdList->CmdList.Get());
 
 	RS_TemporalDenoisingFilter->SetTexture("DepthTex", DepthBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
-	RS_TemporalDenoisingFilter->SetTexture("GeoNormalTex", GeomNormalBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
+	RS_TemporalDenoisingFilter->SetTexture("GeoNormalTex", NormalBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
 	RS_TemporalDenoisingFilter->SetTexture("InGIResultSHTex", GIBufferSH.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
 	RS_TemporalDenoisingFilter->SetTexture("InGIResultColorTex", GIBufferColor.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
 	RS_TemporalDenoisingFilter->SetTexture("InGIResultSHTexPrev", GIBufferSHTemporal[ReadIndex].get(), dx12_rhi->GlobalCmdList->CmdList.Get());
 	RS_TemporalDenoisingFilter->SetTexture("InGIResultColorTexPrev", GIBufferColorTemporal[ReadIndex].get(), dx12_rhi->GlobalCmdList->CmdList.Get());
 	RS_TemporalDenoisingFilter->SetTexture("VelocityTex", VelocityBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
+	RS_TemporalDenoisingFilter->SetTexture("InSpecularGITex", SpeculaGIBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
+	RS_TemporalDenoisingFilter->SetTexture("InSpecularGITexPrev", SpeculaGIBufferTemporal[ReadIndex].get(), dx12_rhi->GlobalCmdList->CmdList.Get());
+
 
 	RS_TemporalDenoisingFilter->SetUAV("OutGIResultSH", GIBufferSHTemporal[WriteIndex].get(), dx12_rhi->GlobalCmdList->CmdList.Get());
 	RS_TemporalDenoisingFilter->SetUAV("OutGIResultColor", GIBufferColorTemporal[WriteIndex].get(), dx12_rhi->GlobalCmdList->CmdList.Get());
 	RS_TemporalDenoisingFilter->SetUAV("OutGIResultSHDS", FilterIndirectDiffusePingPongSH[0].get(), dx12_rhi->GlobalCmdList->CmdList.Get());
 	RS_TemporalDenoisingFilter->SetUAV("OutGIResultColorDS", FilterIndirectDiffusePingPongColor[0].get(), dx12_rhi->GlobalCmdList->CmdList.Get());
+	RS_TemporalDenoisingFilter->SetUAV("OutSpecularGI", SpeculaGIBufferTemporal[WriteIndex].get(), dx12_rhi->GlobalCmdList->CmdList.Get());
+
 
 	RS_TemporalDenoisingFilter->SetConstantValue("TemporalFilterConstant", &TemporalFilterCB, dx12_rhi->GlobalCmdList->CmdList.Get());
 
@@ -2521,6 +2577,7 @@ void MyToyDX12Renderer::TemporalDenoisingPass()
 
 	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(GIBufferSHTemporal[WriteIndex]->resource.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
 	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(GIBufferColorTemporal[WriteIndex]->resource.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
+	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(SpeculaGIBufferTemporal[WriteIndex]->resource.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
 }
 
 void AddMeshToVec(vector<shared_ptr<RTAS>>& vecBLAS, shared_ptr<Scene> scene)
@@ -2813,7 +2870,7 @@ void MyToyDX12Renderer::RaytraceGIPass()
 
 	PSO_RT_GI->SetSRV("rayGen", "gRtScene", TLAS->GPUHandle);
 	PSO_RT_GI->SetSRV("rayGen", "DepthTex", DepthBuffer->GpuHandleSRV);
-	PSO_RT_GI->SetSRV("rayGen", "WorldNormalTex", GeomNormalBuffer->GpuHandleSRV);
+	PSO_RT_GI->SetSRV("rayGen", "WorldNormalTex", NormalBuffer->GpuHandleSRV);
 	PSO_RT_GI->SetSRV("rayGen", "BlueNoiseTex", BlueNoiseTex->GpuHandleSRV);
 
 	PSO_RT_GI->SetCBVValue("rayGen", "ViewParameter", &RTGIViewParam, sizeof(RTGIViewParamCB));

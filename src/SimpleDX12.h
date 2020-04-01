@@ -30,7 +30,7 @@
 
 #include "DXSampleHelper.h"
 
-#define USE_AFTERMATH 1
+#define USE_AFTERMATH 0
 
 using namespace Microsoft::WRL;
 using namespace std;

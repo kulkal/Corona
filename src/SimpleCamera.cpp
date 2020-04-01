@@ -15,8 +15,8 @@
 SimpleCamera::SimpleCamera():
 	m_initialPosition(0, 0, 0),
 	m_position(m_initialPosition),
-	m_yaw(glm::pi<float>()),
-	m_pitch(0.0f),
+	m_yaw(0),
+	m_pitch(0),
 	m_lookDirection(0, 0, -1),
 	m_upDirection(0, 1, 0),
 	m_moveSpeed(200.0f),
@@ -44,8 +44,8 @@ void SimpleCamera::SetTurnSpeed(float radiansPerSecond)
 void SimpleCamera::Reset()
 {
 	m_position = m_initialPosition;
-	m_yaw = glm::pi<float>();
-	m_pitch = 0.0f;
+	m_yaw = 4.4;// glm::pi<float>();
+	m_pitch = -0.40f;
 	m_lookDirection = { 0, 0, -1 };
 }
 

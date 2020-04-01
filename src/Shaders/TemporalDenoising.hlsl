@@ -1,12 +1,15 @@
 #include "Common.hlsl"
 
 Texture2D DepthTex : register(t0);
-Texture2D GeoNormalTex : register(t1);
+Texture2D NormalTex : register(t1);
 Texture2D InGIResultSHTex : register(t2);
 Texture2D InGIResultColorTex : register(t3);
 Texture2D InGIResultSHTexPrev : register(t4);
 Texture2D InGIResultColorTexPrev : register(t5);
 Texture2D VelocityTex : register(t6);
+Texture2D InSpecularGITex : register(t7);
+Texture2D InSpecularGITexPrev : register(t8);
+
 
 
 
@@ -14,6 +17,7 @@ RWTexture2D<float4> OutGIResultSH : register(u0);
 RWTexture2D<float4> OutGIResultColor: register(u1);
 RWTexture2D<float4> OutGIResultSHDS : register(u2);
 RWTexture2D<float4> OutGIResultColorDS: register(u3);
+RWTexture2D<float4> OutSpecularGI: register(u4);
 
 
 
@@ -43,21 +47,23 @@ void TemporalFilter( uint3 DTid : SV_DispatchThreadID, uint3 GTid : SV_GroupThre
 	LowResGroupPos.y = GTIndex / (GROUPSIZE / DOWNSAMPLE_SIZE);
 	uint2 CenterHiResPos = LowResGroupPos * DOWNSAMPLE_SIZE + uint2(1, 1);
 
-	float3 CurNormal = g_Normal[GroupPos.y][GroupPos.x] = GeoNormalTex[PixelPos].xyz;
+	float3 CurNormal = g_Normal[GroupPos.y][GroupPos.x] = NormalTex[PixelPos].xyz;
     float CurDepth = g_Depth[GroupPos.y][GroupPos.x] = DepthTex[PixelPos];
 
     // GroupMemoryBarrierWithGroupSync();
-	
-
-	SH CurrentSH = init_SH();
-	CurrentSH.shY = InGIResultSHTex[PixelPos];
-	CurrentSH.CoCg = InGIResultColorTex[PixelPos].xy;
-
 	SH PrevSH = init_SH();
 	float2 PrevPos;
 
     float2 Velocity = VelocityTex[PixelPos];
     PrevPos = PixelPos - Velocity  * RTSize;
+
+	float4 CurrentSpecular = InSpecularGITex[PixelPos];
+	float4 PrevSpecular = InSpecularGITexPrev[PrevPos];
+
+
+	SH CurrentSH = init_SH();
+	CurrentSH.shY = InGIResultSHTex[PixelPos];
+	CurrentSH.CoCg = InGIResultColorTex[PixelPos].xy;
 
 	bool isValidHistory = false;
 	float temporal_sum_w_spec = 0.0f;
@@ -86,7 +92,7 @@ void TemporalFilter( uint3 DTid : SV_DispatchThreadID, uint3 GTid : SV_GroupThre
 			continue;
 
 		float PrevDepth = DepthTex[p];
-		float3 PrevNormal = GeoNormalTex[p];
+		float3 PrevNormal = NormalTex[p];
 
 		float dist_depth = abs(CurDepth - PrevDepth);
 		float dot_normals = dot(CurNormal, PrevNormal);
@@ -118,17 +124,22 @@ void TemporalFilter( uint3 DTid : SV_DispatchThreadID, uint3 GTid : SV_GroupThre
 
 		// isValidHistory = true;
 
+	float4 BlendedSpecular = 0..xxxx;
 	SH BlendedSH = init_SH();
 	float W = 0.1;
 	if(isValidHistory)
 	{
 		BlendedSH.shY = max(CurrentSH.shY * W + PrevSH.shY * (1-W), float4(0, 0, 0, 0));
     	BlendedSH.CoCg = max(CurrentSH.CoCg * W + PrevSH.CoCg * (1-W), float2(0, 0));	
+
+    	BlendedSpecular = max(CurrentSpecular * W + PrevSpecular * (1-W), float4(0, 0, 0, 0));
 	}
 	else
 	{
 		BlendedSH.shY = CurrentSH.shY;
 		BlendedSH.CoCg = CurrentSH.CoCg;
+
+		BlendedSpecular = CurrentSpecular;
 	}
 	
 	// BlendedSH.shY = CurrentSH.shY;
@@ -137,6 +148,7 @@ void TemporalFilter( uint3 DTid : SV_DispatchThreadID, uint3 GTid : SV_GroupThre
 	OutGIResultSH[PixelPos] = BlendedSH.shY;
     OutGIResultColor[PixelPos] = float4(BlendedSH.CoCg, 0, 0);
 
+    OutSpecularGI[PixelPos] = BlendedSpecular;
 
     g_SH[GroupPos.y][GroupPos.x] = BlendedSH.shY;
     g_CoCg[GroupPos.y][GroupPos.x] = BlendedSH.CoCg;
@@ -200,7 +212,7 @@ void TemporalFilter( uint3 DTid : SV_DispatchThreadID, uint3 GTid : SV_GroupThre
 	SumSH.shY  *= inv_w;
 	SumSH.CoCg *= inv_w;
 
-     uint2 LowResPos = GId * (GROUPSIZE / DOWNSAMPLE_SIZE) + LowResGroupPos;
+    uint2 LowResPos = GId * (GROUPSIZE / DOWNSAMPLE_SIZE) + LowResGroupPos;
 	OutGIResultSHDS[LowResPos] = SumSH.shY;
     OutGIResultColorDS[LowResPos] = float4(SumSH.CoCg, 0, 0);
 }

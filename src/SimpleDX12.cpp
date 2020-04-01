@@ -131,7 +131,12 @@ void SimpleDX12::BeginFrame()
 
 void SimpleDX12::EndFrame()
 {
+#if USE_AFTERMATH
 	ThrowIfFailed(m_swapChain->Present(0, 0), &g_dx12_rhi->AM_CL_Handle);
+#else
+	ThrowIfFailed(m_swapChain->Present(0, 0), nullptr);
+
+#endif
 	FrameFenceValueVec[CurrentFrameIndex] = CmdQ->CurrentFenceValue;;
 	CmdQ->SignalCurrentFence();
 }

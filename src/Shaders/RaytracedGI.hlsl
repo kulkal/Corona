@@ -167,7 +167,7 @@ void rayGen
     if(payload.distance == 0)
     {
         // hit sky
-        float3 Radiance = payload.color;// * LightIntensity;
+        float3 Radiance = payload.color * LightIntensity;
         float3 Irradiance = Radiance * cosTerm;
 
         SH sh_indirect = init_SH();

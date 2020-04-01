@@ -35,6 +35,7 @@ public:
 	void OnKeyDown(WPARAM key);
 	void OnKeyUp(WPARAM key);
 
+
 public:
 	void Reset();
 

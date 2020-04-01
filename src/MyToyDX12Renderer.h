@@ -53,7 +53,8 @@ class MyToyDX12Renderer : public DXSample
 		ALBEDO,
 		VELOCITY,
 		ROUGNESS_METALLIC,
-		REFLECTION,
+		SPECULAR_RAW,
+		TEMPORAL_FILTERED_SPECULAR,
 		NO_FULLSCREEN,
 	};
 
@@ -72,7 +73,11 @@ private:
 	shared_ptr<Texture> VelocityBuffer;
 	shared_ptr<Texture> MaterialBuffer;
 	shared_ptr<Texture> ShadowBuffer;
+
 	shared_ptr<Texture> SpeculaGIBuffer;
+
+	shared_ptr<Texture> SpeculaGIBufferTemporal[2];
+
 
 	UINT GIBufferScale = 3;
 	UINT GIBufferWriteIndex = 0;
@@ -196,11 +201,14 @@ private:
 		CHANNEL_Z = 3,
 		CHANNEL_W = 4,
 		SH_LIGHTING = 5,
+		DEPTH = 6,
+		COUNT = 7,
 	};
 	struct DebugPassCB
 	{
 		glm::vec4 Scale;
 		glm::vec4 Offset;
+		glm::vec4 ProjectionParams;
 		glm::vec2 RTSize;
 		float GIBufferScale;
 		UINT32 DebugMode;
@@ -270,7 +278,7 @@ private:
 
 	// misc
 	glm::vec3 LightDir = glm::normalize(glm::vec3(0.901, 0.88, 0.176));
-	float LightIntensity = 3.0f;
+	float LightIntensity = 7.0f;
 	float Near = 1.0f;
 	float Far = 20000.0f;
 

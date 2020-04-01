@@ -19,6 +19,7 @@ cbuffer DebugPassCB : register(b0)
 {
     float4 Scale;
     float4 Offset;
+    float4 ProjectionParams;   
     float2 RTSize;
     float GIBufferScale;
     uint DebugMode;
@@ -93,7 +94,12 @@ float4 PSMain(PSInput input) : SV_TARGET
         float3 IndirectDiffuse = project_SH_irradiance(sh_indirect, WorldNormal);
         SrcColor = float4(IndirectDiffuse, 0);
     }
-
+    else if(DebugMode == 6) // DEPTH
+    {
+        float DeviceDepth = SrcTex.Sample(sampleWrap, input.uv).x;
+        float LinearDepth = GetLinearDepthOpenGL(DeviceDepth, ProjectionParams.z, ProjectionParams.w) ;
+        SrcColor = float4(LinearDepth, 0, 0, 0)/ProjectionParams.w;
+    }
 
     return SrcColor;
 }
