@@ -220,6 +220,8 @@ private:
 	
 	struct LightingParam
 	{
+		glm::mat4x4 ViewMatrix;
+		glm::mat4x4 InvViewMatrix;
 		glm::vec4 LightDir;
 		glm::vec2 RTSize;
 		float TAABlendFactor;
@@ -261,7 +263,7 @@ private:
 	// mesh
 	shared_ptr<Mesh> mesh;
 
-	float SponzaRoughness = 0.05;
+	float SponzaRoughness = 0.4;
 	shared_ptr<Scene> Sponza;
 
 	shared_ptr<Scene> Buddha;
@@ -278,7 +280,7 @@ private:
 
 	// misc
 	glm::vec3 LightDir = glm::normalize(glm::vec3(0.901, 0.88, 0.176));
-	float LightIntensity = 7.0f;
+	float LightIntensity = 3.0f;
 	float Near = 1.0f;
 	float Far = 20000.0f;
 

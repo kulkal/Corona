@@ -31,6 +31,8 @@ SamplerState sampleWrap : register(s0);
 
 cbuffer LightingParam : register(b0)
 {
+    float4x4 ViewMatrix;
+    float4x4 InvViewMatrix;
     float4 LightDirAndIntensity;
     float2 RTSize;
     float TAABlendFactor;
@@ -96,13 +98,20 @@ float4 PSMain(PSInput input) : SV_TARGET
 
 
     // use 0.05 if is non-metal
-    // specular = mix(0.05, 1.0, metallic); 
+    float3 V = mul(InvViewMatrix, float3(0, 0, 1));
+    float NdotV = clamp(dot(WorldNormal, -V), 0, 1);
+
+    float Rougness = RoughnessMetalicTex[PixelPos].x; 
     float Metalic = RoughnessMetalicTex[PixelPos].y;
     float Specular = lerp(0.05, 1.0, Metalic); 
+    Specular = schlick_ross_fresnel(Specular, Rougness, NdotV);
+    // Specular *= (1 - Rougness * (1 - Metalic) * 0.9);
+
     // non-metal doesnt have specular color
-    // vec3 spec_color = mix(vec3(1), surf_albedo.rgb, surf_metallic) * surf_specular;
     float3 SpecularColor = lerp(1..xxxx, Albedo.xyz, Metalic) * Specular;
-    // final_color = (projected_lf.rgb + high_freq.rgb) * diff_color + specular.rgb * spec_color;
     float3 IndirectSpecular = SpecularGITex[PixelPos].xyz * SpecularColor;
-    return float4(DiffuseLighting + IndirectDiffuse*(1-Specular) + IndirectSpecular, 1);
+
+    float3 DirectSpecular = SpecularColor * GGX(V, normalize(LightDir), WorldNormal, Rougness, 0.0) * LightIntensity * Shadow;
+    // return float4(DirectSpecular, 0);
+    return float4(DiffuseLighting * (1-Specular) + DirectSpecular + IndirectDiffuse*(1-Metalic) + IndirectSpecular, 1);
 }

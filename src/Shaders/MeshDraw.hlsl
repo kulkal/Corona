@@ -106,12 +106,14 @@ PS_OUTPUT PSMain(PSInput input) : SV_TARGET
     velocity /= RTSize.xy;
 
 
-    float3 Albedo = diffuseMap.Sample(sampleWrap, input.uv).rgb;
+    float4 Albedo = diffuseMap.Sample(sampleWrap, input.uv);
+    if(Albedo.w < 0.1)
+        discard;
 
     float3 WorldNormal = CalcPerPixelNormal(input.uv, input.normal, input.tangent);
 	
     PS_OUTPUT output;
-    output.Albedo.xyz = Albedo;
+    output.Albedo.xyz = Albedo.xyz;
 	//output.Albedo.w = input.velocity.z;// unjittered depth
     output.Normal.xyz = WorldNormal;
     output.GeomNormal.xyz = input.normal;

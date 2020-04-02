@@ -173,3 +173,44 @@ float3x3 construct_ONB_frisvad(float3 normal)
     return ret;
 }
 
+float schlick_ross_fresnel(float F0, float roughness, float NdotV)
+{
+    if(F0 < 0)
+        return 0;
+
+    // Shlick's approximation for Ross BRDF -- makes Fresnel converge to less than 1.0 when N.V is low
+    return F0 + (1 - F0) * pow(1 - NdotV, 5 * exp(-2.69 * roughness)) / (1.0 + 22.7 * pow(roughness, 1.5));
+}
+
+float G_Smith_over_NdotV(float roughness, float NdotV, float NdotL)
+{
+    float alpha = square(roughness);
+    float g1 = NdotV * sqrt(square(alpha) + (1.0 - square(alpha)) * square(NdotL));
+    float g2 = NdotL * sqrt(square(alpha) + (1.0 - square(alpha)) * square(NdotV));
+    return 2.0 *  NdotL / (g1 + g2);
+}
+
+float GGX(float3 V, float3 L, float3 N, float roughness, float NoH_offset)
+{
+    float3 H = normalize(L - V);
+    
+    float NoL = max(0, dot(N, L));
+    float VoH = max(0, -dot(V, H));
+    float NoV = max(0, -dot(N, V));
+    float NoH = clamp(dot(N, H) + NoH_offset, 0, 1);
+
+    if (NoL > 0)
+    {
+        float G = G_Smith_over_NdotV(roughness, NoV, NoL);
+        float alpha = square(max(roughness, 0.02));
+        float D = square(alpha) / (PI * square(square(NoH) * square(alpha) + (1 - square(NoH))));
+
+        // Incident light = SampleColor * NoL
+        // Microfacet specular = D*G*F / (4*NoL*NoV)
+        // F = 1, accounted for elsewhere
+        // NoL = 1, accounted for in the diffuse term
+        return D * G / 4;
+    }
+
+    return 0;
+}

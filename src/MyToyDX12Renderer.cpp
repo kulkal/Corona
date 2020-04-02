@@ -1884,8 +1884,10 @@ void MyToyDX12Renderer::LightingPass()
 	RS_Lighting->SetTexture("SpecularGITex", SpeculaGIBufferTemporal[GIBufferWriteIndex].get(), dx12_rhi->GlobalCmdList->CmdList.Get());
 	RS_Lighting->SetTexture("RoughnessMetalicTex", RoughnessMetalicBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
 
-
+	glm::mat4x4 InvViewMat = glm::inverse(ViewMat);
 	LightingParam Param;
+	Param.ViewMatrix = glm::transpose(ViewMat);
+	Param.InvViewMatrix = glm::transpose(InvViewMat);
 	Param.LightDir = glm::vec4(glm::normalize(LightDir), LightIntensity);
 	
 	Param.RTSize.x = m_width;
