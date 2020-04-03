@@ -1685,70 +1685,145 @@ void RTPipelineStateObject::AddShader(string shader, RTPipelineStateObject::Shad
 
 void RTPipelineStateObject::BindUAV(string shader, string name, UINT baseRegister)
 {
-	auto& bindingInfo = ShaderBinding[shader];
+	if (shader == "global")
+	{
+		BindingData binding;
+		binding.name = name;
+		binding.Type = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
 
-	BindingData binding;
-	binding.name = name;
-	binding.Type = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+		binding.BaseRegister = baseRegister;
 
-	binding.BaseRegister = baseRegister;
+		GlobalBinding.push_back(binding);
+	}
+	else
+	{
+		auto& bindingInfo = ShaderBinding[shader];
 
-	bindingInfo.Binding.push_back(binding);
+		BindingData binding;
+		binding.name = name;
+		binding.Type = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+
+		binding.BaseRegister = baseRegister;
+
+		bindingInfo.Binding.push_back(binding);
+	}
 }
 
 void RTPipelineStateObject::BindSRV(string shader, string name, UINT baseRegister)
 {
-	auto& bindingInfo = ShaderBinding[shader];
+	if (shader == "global")
+	{
+		BindingData binding;
+		binding.name = name;
+		binding.Type = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
 
-	BindingData binding;
-	binding.name = name;
-	binding.Type = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+		binding.BaseRegister = baseRegister;
 
-	binding.BaseRegister = baseRegister;
+		GlobalBinding.push_back(binding);
+	}
+	else
+	{
+		auto& bindingInfo = ShaderBinding[shader];
 
-	bindingInfo.Binding.push_back(binding);
+		BindingData binding;
+		binding.name = name;
+		binding.Type = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+
+		binding.BaseRegister = baseRegister;
+
+		bindingInfo.Binding.push_back(binding);
+	}
 }
+
+
 
 void RTPipelineStateObject::BindSampler(string shader, string name, UINT baseRegister)
 {
-	auto& bindingInfo = ShaderBinding[shader];
+	if (shader == "global")
+	{
+		BindingData binding;
+		binding.name = name;
+		binding.Type = D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER;
 
-	BindingData binding;
-	binding.name = name;
-	binding.Type = D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER;
+		binding.BaseRegister = baseRegister;
 
-	binding.BaseRegister = baseRegister;
+		GlobalBinding.push_back(binding);
+	}
+	else
+	{
+		auto& bindingInfo = ShaderBinding[shader];
 
-	bindingInfo.Binding.push_back(binding);
+		BindingData binding;
+		binding.name = name;
+		binding.Type = D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER;
+
+		binding.BaseRegister = baseRegister;
+
+		bindingInfo.Binding.push_back(binding);
+	}
 }
 
 void RTPipelineStateObject::BindCBV(string shader, string name, UINT baseRegister, UINT size, UINT numInstance)
 {
-	auto& bindingInfo = ShaderBinding[shader];
-
-	BindingData binding;
-	binding.name = name;
-	binding.Type = D3D12_DESCRIPTOR_RANGE_TYPE_CBV;
-
-	binding.BaseRegister = baseRegister;
-
-	int div = size / 256;
-	binding.cbSize = (div) * 256;
-
-	if (size % 256 > 0)
-		binding.cbSize += 256;
-
-
-	for (int iFrame = 0; iFrame < g_dx12_rhi->NumFrame; iFrame++)
+	if (shader == "global")
 	{
-		binding.cbs.push_back(g_dx12_rhi->CreateConstantBuffer(binding.cbSize, numInstance));
-	}
+		BindingData binding;
+		binding.name = name;
+		binding.Type = D3D12_DESCRIPTOR_RANGE_TYPE_CBV;
 
-	bindingInfo.Binding.push_back(binding);
+		binding.BaseRegister = baseRegister;
+
+		int div = size / 256;
+		binding.cbSize = (div) * 256;
+
+		if (size % 256 > 0)
+			binding.cbSize += 256;
+
+
+		for (int iFrame = 0; iFrame < g_dx12_rhi->NumFrame; iFrame++)
+		{
+			binding.cbs.push_back(g_dx12_rhi->CreateConstantBuffer(binding.cbSize, numInstance));
+		}
+
+		GlobalBinding.push_back(binding);
+	}
+	else
+	{
+		auto& bindingInfo = ShaderBinding[shader];
+
+		BindingData binding;
+		binding.name = name;
+		binding.Type = D3D12_DESCRIPTOR_RANGE_TYPE_CBV;
+
+		binding.BaseRegister = baseRegister;
+
+		int div = size / 256;
+		binding.cbSize = (div) * 256;
+
+		if (size % 256 > 0)
+			binding.cbSize += 256;
+
+
+		for (int iFrame = 0; iFrame < g_dx12_rhi->NumFrame; iFrame++)
+		{
+			binding.cbs.push_back(g_dx12_rhi->CreateConstantBuffer(binding.cbSize, numInstance));
+		}
+
+		bindingInfo.Binding.push_back(binding);
+	}
 }
 
 void RTPipelineStateObject::BeginShaderTable()
 {
+}
+
+void RTPipelineStateObject::SetGlobalBinding(CommandList* CommandList)
+{
+	UINT RPI = 0;
+	for (auto& bi : GlobalBinding)
+	{
+		CommandList->CmdList.Get()->SetComputeRootDescriptorTable(RPI++, bi.GPUHandle);
+	}
 }
 
 void RTPipelineStateObject::EndShaderTable()
@@ -1793,17 +1868,7 @@ void RTPipelineStateObject::EndShaderTable()
 
 			for (auto& bd : bindingInfo.Binding)
 			{
-				if (bd.Type == D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER)
-				{
-					*(UINT64*)(pDataThis) = bd.GPUHandle.ptr;
-
-				}
-				else
-				{
-					*(UINT64*)(pDataThis) = bd.GPUHandle.ptr;
-					UINT64 v = *(UINT64*)(pDataThis);
-
-				}
+				*(UINT64*)(pDataThis) = bd.GPUHandle.ptr;
 
 				pDataThis += sizeof(UINT64);
 			}
@@ -1860,13 +1925,26 @@ void RTPipelineStateObject::SetUAV(string shader, string bindingName, D3D12_GPU_
 	// each bindings of raygen/miss shader is unique to shader name.
 	if (instanceIndex == -1) // raygen, miss
 	{
-		BindingInfo& bi = ShaderBinding[shader];
-		for (auto&bd : bi.Binding)
+		if (shader == "global")
 		{
-			if (bd.name == bindingName)
+			for (auto& bd : GlobalBinding)
 			{
-				bd.GPUHandle = uavHandle;
+				if (bd.name == bindingName)
+				{
+					bd.GPUHandle = uavHandle;
+				}
+			}
+		}
+		else
+		{
+			BindingInfo& bi = ShaderBinding[shader];
+			for (auto& bd : bi.Binding)
+			{
+				if (bd.name == bindingName)
+				{
+					bd.GPUHandle = uavHandle;
 
+				}
 			}
 		}
 	}
@@ -1883,12 +1961,25 @@ void RTPipelineStateObject::SetSRV(string shader, string bindingName, D3D12_GPU_
 	// each bindings of raygen/miss shader is unique to shader name.
 	if (instanceIndex == -1) // raygen, miss
 	{
-		BindingInfo& bi = ShaderBinding[shader];
-		for (auto&bd : bi.Binding)
+		if (shader == "global")
 		{
-			if (bd.name == bindingName)
+			for (auto& bd : GlobalBinding)
 			{
-				bd.GPUHandle = srvHandle;
+				if (bd.name == bindingName)
+				{
+					bd.GPUHandle = srvHandle;
+				}
+			}
+		}
+		else
+		{
+			BindingInfo& bi = ShaderBinding[shader];
+			for (auto& bd : bi.Binding)
+			{
+				if (bd.name == bindingName)
+				{
+					bd.GPUHandle = srvHandle;
+				}
 			}
 		}
 	}
@@ -1917,12 +2008,25 @@ void RTPipelineStateObject::SetSampler(string shader, string bindingName, Sample
 	// each bindings of raygen/miss shader is unique to shader name.
 	if (instanceIndex == -1) // raygen, miss
 	{
-		BindingInfo& bi = ShaderBinding[shader];
-		for (auto&bd : bi.Binding)
+		if (shader == "global")
 		{
-			if (bd.name == bindingName)
+			for (auto& bd : GlobalBinding)
 			{
-				bd.GPUHandle = sampler->GpuHandle;
+				if (bd.name == bindingName)
+				{
+					bd.GPUHandle = sampler->GpuHandle;
+				}
+			}
+		}
+		else
+		{
+			BindingInfo& bi = ShaderBinding[shader];
+			for (auto& bd : bi.Binding)
+			{
+				if (bd.name == bindingName)
+				{
+					bd.GPUHandle = sampler->GpuHandle;
+				}
 			}
 		}
 	}
@@ -1939,27 +2043,55 @@ void RTPipelineStateObject::SetCBVValue(string shader, string bindingName, void*
 	// each bindings of raygen/miss shader is unique to shader name.
 	if (instanceIndex == -1) // raygen, miss
 	{
-		BindingInfo& bi = ShaderBinding[shader];
-		for (auto&bd : bi.Binding)
+		if (shader == "global")
 		{
-			if (bd.name == bindingName)
+			for (auto& bd : GlobalBinding)
 			{
-				auto& cb = bd.cbs[g_dx12_rhi->CurrentFrameIndex];
-				UINT8* pMapped = (UINT8*)cb->MemMapped + size * 0;
-				memcpy((void*)pMapped, pData, size);
+				if (bd.name == bindingName)
+				{
+					auto& cb = bd.cbs[g_dx12_rhi->CurrentFrameIndex];
+					UINT8* pMapped = (UINT8*)cb->MemMapped + size * 0;
+					memcpy((void*)pMapped, pData, size);
 
-				D3D12_CPU_DESCRIPTOR_HANDLE CpuHandle;
-				D3D12_GPU_DESCRIPTOR_HANDLE GpuHandle;
+					D3D12_CPU_DESCRIPTOR_HANDLE CpuHandle;
+					D3D12_GPU_DESCRIPTOR_HANDLE GpuHandle;
 
-				// ring is advanced at the begining of frame. so descriptors from multiple frame is not overlapped.
-				g_dx12_rhi->GlobalDHRing->AllocDescriptor(CpuHandle, GpuHandle);
+					// ring is advanced at the begining of frame. so descriptors from multiple frame is not overlapped.
+					g_dx12_rhi->GlobalDHRing->AllocDescriptor(CpuHandle, GpuHandle);
 
-				D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc = {};
-				cbvDesc.BufferLocation = cb->resource->GetGPUVirtualAddress();
-				cbvDesc.SizeInBytes = cb->Size;
-				g_dx12_rhi->Device->CreateConstantBufferView(&cbvDesc, CpuHandle);
+					D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc = {};
+					cbvDesc.BufferLocation = cb->resource->GetGPUVirtualAddress();
+					cbvDesc.SizeInBytes = cb->Size;
+					g_dx12_rhi->Device->CreateConstantBufferView(&cbvDesc, CpuHandle);
 
-				bd.GPUHandle = GpuHandle;
+					bd.GPUHandle = GpuHandle;
+				}
+			}
+		}
+		else
+		{
+			BindingInfo& bi = ShaderBinding[shader];
+			for (auto& bd : bi.Binding)
+			{
+				if (bd.name == bindingName)
+				{
+					auto& cb = bd.cbs[g_dx12_rhi->CurrentFrameIndex];
+					UINT8* pMapped = (UINT8*)cb->MemMapped + size * 0;
+					memcpy((void*)pMapped, pData, size);
+
+					D3D12_CPU_DESCRIPTOR_HANDLE CpuHandle;
+					D3D12_GPU_DESCRIPTOR_HANDLE GpuHandle;
+
+					// ring is advanced at the begining of frame. so descriptors from multiple frame is not overlapped.
+					g_dx12_rhi->GlobalDHRing->AllocDescriptor(CpuHandle, GpuHandle);
+
+					D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc = {};
+					cbvDesc.BufferLocation = cb->resource->GetGPUVirtualAddress();
+					cbvDesc.SizeInBytes = cb->Size;
+					g_dx12_rhi->Device->CreateConstantBufferView(&cbvDesc, CpuHandle);
+
+					bd.GPUHandle = GpuHandle;
+				}
 			}
 		}
 	}
@@ -2060,7 +2192,7 @@ bool RTPipelineStateObject::InitRS(string ShaderFile)
 	{
 		BindingInfo& bindingInfo = sb.second;
 		pBI = &bindingInfo;
-
+		
 		D3D12_ROOT_SIGNATURE_DESC Desc = {};
 		Desc.Flags = D3D12_ROOT_SIGNATURE_FLAG_LOCAL_ROOT_SIGNATURE;
 
@@ -2148,8 +2280,42 @@ bool RTPipelineStateObject::InitRS(string ShaderFile)
 	D3D12_STATE_SUBOBJECT subobjectGlobalRS = {};
 	ID3D12RootSignature* pInterfaceGlobalRS = nullptr;
 	D3D12_ROOT_SIGNATURE_DESC GlobalRSDesc = {};
+		
+	D3D12_ROOT_SIGNATURE_DESC Desc = {};
+	Desc.Flags = D3D12_ROOT_SIGNATURE_FLAG_NONE;
 
-	GlobalRS = CreateRootSignature(g_dx12_rhi->Device, GlobalRSDesc);
+	vector<D3D12_ROOT_PARAMETER> rootParamVec;
+	vector<D3D12_DESCRIPTOR_RANGE> Ranges;
+	Ranges.resize(GlobalBinding.size());
+
+	int i = 0;
+
+	// create root signature
+
+	for (auto& bindingData : GlobalBinding)
+	{
+		D3D12_DESCRIPTOR_RANGE& Range = Ranges[i++];;
+		Range.RangeType = bindingData.Type;
+		Range.BaseShaderRegister = bindingData.BaseRegister;
+		Range.NumDescriptors = 1;
+		Range.RegisterSpace = 0;
+		Range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+		//Ranges.push_back(Range);
+
+
+		D3D12_ROOT_PARAMETER RootParam = {};
+		RootParam.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+		RootParam.DescriptorTable.NumDescriptorRanges = 1;// Ranges.size();
+		RootParam.DescriptorTable.pDescriptorRanges = &Range;// Ranges.data();
+		RootParam.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+
+		rootParamVec.push_back(RootParam);
+	}
+
+	Desc.NumParameters = rootParamVec.size();
+	Desc.pParameters = rootParamVec.data();
+
+	GlobalRS = CreateRootSignature(g_dx12_rhi->Device, Desc);
 	NAME_D3D12_OBJECT(GlobalRS);
 
 	pInterfaceGlobalRS = GlobalRS.Get();
@@ -2157,6 +2323,15 @@ bool RTPipelineStateObject::InitRS(string ShaderFile)
 	subobjectGlobalRS.Type = D3D12_STATE_SUBOBJECT_TYPE_GLOBAL_ROOT_SIGNATURE;
 
 	subobjects[index++] = subobjectGlobalRS;
+
+	/*GlobalRS = CreateRootSignature(g_dx12_rhi->Device, GlobalRSDesc);
+	NAME_D3D12_OBJECT(GlobalRS);
+
+	pInterfaceGlobalRS = GlobalRS.Get();
+	subobjectGlobalRS.pDesc = &pInterfaceGlobalRS;
+	subobjectGlobalRS.Type = D3D12_STATE_SUBOBJECT_TYPE_GLOBAL_ROOT_SIGNATURE;
+
+	subobjects[index++] = subobjectGlobalRS;*/
 
 	// Create the RTPSO
 	D3D12_STATE_OBJECT_DESC descRTSO;
@@ -2235,7 +2410,7 @@ bool RTPipelineStateObject::InitRS(string ShaderFile)
 	return true;
 }
 
-void RTPipelineStateObject::Apply(UINT width, UINT height)
+void RTPipelineStateObject::Apply(UINT width, UINT height, CommandList* CommandList)
 {
 	D3D12_DISPATCH_RAYS_DESC raytraceDesc = {};
 	raytraceDesc.Width = width;
@@ -2261,6 +2436,13 @@ void RTPipelineStateObject::Apply(UINT width, UINT height)
 
 	// Bind the empty root signature
 	g_dx12_rhi->GlobalCmdList->CmdList->SetComputeRootSignature(GlobalRS.Get());
+
+	UINT RPI = 0;
+	for (auto& bi : GlobalBinding)
+	{
+		CommandList->CmdList.Get()->SetComputeRootDescriptorTable(RPI++, bi.GPUHandle);
+	}
+
 	g_dx12_rhi->GlobalCmdList->CmdList->SetPipelineState1(RTPipelineState.Get());
 	
 	g_dx12_rhi->GlobalCmdList->CmdList->DispatchRays(&raytraceDesc);

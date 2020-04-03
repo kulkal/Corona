@@ -30,7 +30,7 @@
 
 #include "DXSampleHelper.h"
 
-#define USE_AFTERMATH 0
+#define USE_AFTERMATH 1
 
 using namespace Microsoft::WRL;
 using namespace std;
@@ -204,6 +204,7 @@ public:
 
 	enum ShaderType
 	{
+		GLOBAL,
 		RAYGEN,
 		MISS,
 		HIT,
@@ -211,7 +212,7 @@ public:
 	};
 	struct BindingInfo
 	{
-		ShaderType Type;
+		ShaderType Type = GLOBAL;
 		wstring ShaderName;
 		vector<BindingData> Binding;
 
@@ -222,6 +223,8 @@ public:
 		vector<const WCHAR*> ExportName;
 	};
 	map<string, BindingInfo> ShaderBinding;
+
+	vector<BindingData> GlobalBinding;
 
 	struct HitGroupInfo
 	{
@@ -268,18 +271,21 @@ public:
 
 	void BeginShaderTable();
 	void EndShaderTable();
+	void SetGlobalBinding(CommandList* CommandList);
+	
 	void SetUAV(string shader, string bindingName, D3D12_GPU_DESCRIPTOR_HANDLE uavHandle, INT instanceIndex = -1);
 	void SetSRV(string shader, string bindingName, D3D12_GPU_DESCRIPTOR_HANDLE srvHandle, INT instanceIndex = -1);
+	void SetSampler(string shader, string bindingName, Sampler* sampler, INT instanceIndex = -1);
+	void SetCBVValue(string shader, string bindingName, void* pData, INT size, INT instanceIndex = -1);
 
 	void AddHitProgramDescriptor(string shader, D3D12_GPU_DESCRIPTOR_HANDLE srvHandle, UINT instanceIndex);
 	void ResetHitProgramBinding(string shader, UINT instanceIndex, UINT size);
 
-	void SetSampler(string shader, string bindingName, Sampler* sampler, INT instanceIndex = -1);
-	void SetCBVValue(string shader, string bindingName, void* pData, INT size, INT instanceIndex = -1);
+	
 	void SetHitProgram(UINT instanceIndex, string shader);
 
 	bool InitRS(string ShaderFile);
-	void Apply(UINT width, UINT height);
+	void Apply(UINT width, UINT height, CommandList* CommandList);
 };
 
 class Buffer

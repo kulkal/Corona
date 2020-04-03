@@ -297,6 +297,15 @@ void miss(inout RayPayload payload)
     payload.distance = 0;
 }
 
+[shader("miss")]
+void missShadow(inout RayPayload payload)
+{
+    payload.position = float3(0, 0, 0);
+    payload.color = float3(0.0, 0.2, 0.4);
+    payload.normal = float3(0, 0, -1);
+    payload.distance = 0;
+}
+
 
 struct Vertex
 {
@@ -434,4 +443,29 @@ void chs(inout RayPayload payload, in BuiltInTriangleIntersectionAttributes attr
     payload.color =  AlbedoTex.SampleLevel(sampleWrap, vertex.uv, 0).xyz;
 
     payload.distance = RayTCurrent();
+}
+
+
+
+[shader("closesthit")]
+void chsShadow(inout RayPayload payload, in BuiltInTriangleIntersectionAttributes attribs)
+{
+    float3 barycentrics = float3(1.0 - attribs.barycentrics.x - attribs.barycentrics.y, attribs.barycentrics.x, attribs.barycentrics.y);
+    uint triangleIndex = PrimitiveIndex();
+    Vertex vertex = GetVertexAttributes(triangleIndex, barycentrics);
+
+    payload.position = vertex.position;
+    payload.normal = vertex.normal;
+    payload.color =  AlbedoTex.SampleLevel(sampleWrap, vertex.uv, 0).xyz;
+
+    payload.distance = RayTCurrent();
+}
+
+
+[shader("anyhit")]
+void anyhitShadow(inout RayPayload payload, in BuiltInTriangleIntersectionAttributes attribs)
+{
+    // payload.distance = RayTCurrent();;
+
+    AcceptHitAndEndSearch();
 }

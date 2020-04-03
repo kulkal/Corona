@@ -340,7 +340,7 @@ void MyToyDX12Renderer::LoadPipeline()
 {
 	UINT dxgiFactoryFlags = 0;
 
-#if  defined(_DEBUG)
+#if defined(_DEBUG)
 	// Enable the debug layer (requires the Graphics Tools "optional feature").
 	// NOTE: Enabling the debug layer after device creation will invalidate the active device.
 	{
@@ -2083,15 +2083,19 @@ void MyToyDX12Renderer::OnRender()
 	
 	// Record all the commands we need to render the scene into the command list.
 	Texture* backbuffer = framebuffers[dx12_rhi->CurrentFrameIndex].get();
-	//NVAftermathMarker(dx12_rhi->AM_CL_Handle, "DrawMeshPass");
+	NVAftermathMarker(dx12_rhi->AM_CL_Handle, "DrawMeshPass");
 
 	DrawMeshPass();
 
-	//NVAftermathMarker(dx12_rhi->AM_CL_Handle, "RaytracePass");
+	NVAftermathMarker(dx12_rhi->AM_CL_Handle, "RaytraceShadowPass");
 
 	RaytraceShadowPass();
 
+	NVAftermathMarker(dx12_rhi->AM_CL_Handle, "RaytraceReflectionPass");
+
 	RaytraceReflectionPass();
+	
+	NVAftermathMarker(dx12_rhi->AM_CL_Handle, "RaytraceGIPass");
 
 	RaytraceGIPass();
 
@@ -2654,14 +2658,25 @@ void MyToyDX12Renderer::InitRTPSO()
 		// new interface
 		TEMP_PSO_RT_SHADOW->AddHitGroup("HitGroup", "chs", "anyhit");
 		TEMP_PSO_RT_SHADOW->AddShader("rayGen", RTPipelineStateObject::RAYGEN);
-		TEMP_PSO_RT_SHADOW->BindUAV("rayGen", "ShadowResult", 0);
+		/*TEMP_PSO_RT_SHADOW->BindUAV("rayGen", "ShadowResult", 0);
 		TEMP_PSO_RT_SHADOW->BindSRV("rayGen", "gRtScene", 0);
 		TEMP_PSO_RT_SHADOW->BindSRV("rayGen", "DepthTex", 1);
 		TEMP_PSO_RT_SHADOW->BindSRV("rayGen", "WorldNormalTex", 2);
-		TEMP_PSO_RT_SHADOW->BindSRV("rayGen", "AlbedoTex", 3);
+		TEMP_PSO_RT_SHADOW->BindSRV("rayGen", "AlbedoTex", 3);*/
 
-		TEMP_PSO_RT_SHADOW->BindCBV("rayGen", "ViewParameter", 0, sizeof(RTShadowViewParamCB), 1);
-		TEMP_PSO_RT_SHADOW->BindSampler("rayGen", "samplerWrap", 0);
+		//TEMP_PSO_RT_SHADOW->BindCBV("rayGen", "ViewParameter", 0, sizeof(RTShadowViewParamCB), 1);
+		//TEMP_PSO_RT_SHADOW->BindSampler("rayGen", "samplerWrap", 0);
+
+		TEMP_PSO_RT_SHADOW->BindUAV("global", "ShadowResult", 0);
+		TEMP_PSO_RT_SHADOW->BindSRV("global", "gRtScene", 0);
+		TEMP_PSO_RT_SHADOW->BindSRV("global", "DepthTex", 1);
+		TEMP_PSO_RT_SHADOW->BindSRV("global", "WorldNormalTex", 2);
+		TEMP_PSO_RT_SHADOW->BindSRV("global", "AlbedoTex", 3);
+
+		TEMP_PSO_RT_SHADOW->BindCBV("global", "ViewParameter", 0, sizeof(RTShadowViewParamCB), 1);
+		TEMP_PSO_RT_SHADOW->BindSampler("global", "samplerWrap", 0);
+
+
 
 		TEMP_PSO_RT_SHADOW->AddShader("miss", RTPipelineStateObject::MISS);
 		TEMP_PSO_RT_SHADOW->AddShader("chs", RTPipelineStateObject::HIT);
@@ -2685,28 +2700,34 @@ void MyToyDX12Renderer::InitRTPSO()
 		TEMP_PSO_RT_REFLECTION->NumInstance = vecBLAS.size();// scene->meshes.size();
 
 		TEMP_PSO_RT_REFLECTION->AddHitGroup("HitGroup", "chs", "");
-		TEMP_PSO_RT_REFLECTION->BindUAV("rayGen", "ReflectionResult", 0);
+		//TEMP_PSO_RT_REFLECTION->AddHitGroup("ShadowHitGroup", "chsShadow", "anyhitShadow");
+
 
 		TEMP_PSO_RT_REFLECTION->AddShader("rayGen", RTPipelineStateObject::RAYGEN);
-		TEMP_PSO_RT_REFLECTION->BindSRV("rayGen", "gRtScene", 0);
-		TEMP_PSO_RT_REFLECTION->BindSRV("rayGen", "DepthTex", 1);
-		TEMP_PSO_RT_REFLECTION->BindSRV("rayGen", "GeoNormalTex", 2);
-		TEMP_PSO_RT_REFLECTION->BindSRV("rayGen", "RougnessMetallicTex", 6);
-		TEMP_PSO_RT_REFLECTION->BindSRV("rayGen", "BlueNoiseTex", 7);
-		TEMP_PSO_RT_REFLECTION->BindSRV("rayGen", "WorldNormalTex", 8);
+		
+		TEMP_PSO_RT_REFLECTION->BindUAV("global", "ReflectionResult", 0);
+		TEMP_PSO_RT_REFLECTION->BindSRV("global", "gRtScene", 0);
+		TEMP_PSO_RT_REFLECTION->BindSRV("global", "DepthTex", 1);
+		TEMP_PSO_RT_REFLECTION->BindSRV("global", "GeoNormalTex", 2);
+		TEMP_PSO_RT_REFLECTION->BindSRV("global", "RougnessMetallicTex", 6);
+		TEMP_PSO_RT_REFLECTION->BindSRV("global", "BlueNoiseTex", 7);
+		TEMP_PSO_RT_REFLECTION->BindSRV("global", "WorldNormalTex", 8);
 
 
-		TEMP_PSO_RT_REFLECTION->BindCBV("rayGen", "ViewParameter", 0, sizeof(RTReflectionViewParam), 1);
-		TEMP_PSO_RT_REFLECTION->BindSampler("rayGen", "samplerWrap", 0);
+		TEMP_PSO_RT_REFLECTION->BindCBV("global", "ViewParameter", 0, sizeof(RTReflectionViewParam), 1);
+		TEMP_PSO_RT_REFLECTION->BindSampler("global", "samplerWrap", 0);
 
 		TEMP_PSO_RT_REFLECTION->AddShader("miss", RTPipelineStateObject::MISS);
+		//TEMP_PSO_RT_REFLECTION->AddShader("missShadow", RTPipelineStateObject::MISS);
+
 
 		TEMP_PSO_RT_REFLECTION->AddShader("chs", RTPipelineStateObject::HIT);
 		TEMP_PSO_RT_REFLECTION->BindSRV("chs", "vertices", 3);
 		TEMP_PSO_RT_REFLECTION->BindSRV("chs", "indices", 4);
 		TEMP_PSO_RT_REFLECTION->BindSRV("chs", "AlbedoTex", 5);
 		TEMP_PSO_RT_REFLECTION->BindSRV("chs", "InstanceProperty", 9);
-		TEMP_PSO_RT_REFLECTION->BindSampler("chs", "samplerWrap", 0);
+
+		//TEMP_PSO_RT_REFLECTION->AddShader("anyhitShadow", RTPipelineStateObject::ANYHIT);
 
 
 		TEMP_PSO_RT_REFLECTION->MaxRecursion = 1;
@@ -2729,16 +2750,15 @@ void MyToyDX12Renderer::InitRTPSO()
 		TEMP_PSO_RT_GI->AddHitGroup("HitGroup", "chs", "");
 
 		TEMP_PSO_RT_GI->AddShader("rayGen", RTPipelineStateObject::RAYGEN);
-		TEMP_PSO_RT_GI->BindUAV("rayGen", "GIResultSH", 0);
-		TEMP_PSO_RT_GI->BindUAV("rayGen", "GIResultColor", 1);
-
-
-		TEMP_PSO_RT_GI->BindSRV("rayGen", "gRtScene", 0);
-		TEMP_PSO_RT_GI->BindSRV("rayGen", "DepthTex", 1);
-		TEMP_PSO_RT_GI->BindSRV("rayGen", "WorldNormalTex", 2);
-		TEMP_PSO_RT_GI->BindCBV("rayGen", "ViewParameter", 0, sizeof(RTGIViewParam), 1);
-		TEMP_PSO_RT_GI->BindSampler("rayGen", "samplerWrap", 0);
-		TEMP_PSO_RT_GI->BindSRV("rayGen", "BlueNoiseTex", 7);
+		
+		TEMP_PSO_RT_GI->BindUAV("global", "GIResultSH", 0);
+		TEMP_PSO_RT_GI->BindUAV("global", "GIResultColor", 1);
+		TEMP_PSO_RT_GI->BindSRV("global", "gRtScene", 0);
+		TEMP_PSO_RT_GI->BindSRV("global", "DepthTex", 1);
+		TEMP_PSO_RT_GI->BindSRV("global", "WorldNormalTex", 2);
+		TEMP_PSO_RT_GI->BindCBV("global", "ViewParameter", 0, sizeof(RTGIViewParam), 1);
+		TEMP_PSO_RT_GI->BindSampler("global", "samplerWrap", 0);
+		TEMP_PSO_RT_GI->BindSRV("global", "BlueNoiseTex", 7);
 
 		TEMP_PSO_RT_GI->AddShader("miss", RTPipelineStateObject::MISS);
 
@@ -2747,7 +2767,6 @@ void MyToyDX12Renderer::InitRTPSO()
 		TEMP_PSO_RT_GI->BindSRV("chs", "indices", 4);
 		TEMP_PSO_RT_GI->BindSRV("chs", "AlbedoTex", 5);
 		TEMP_PSO_RT_GI->BindSRV("chs", "InstanceProperty", 6);
-		TEMP_PSO_RT_GI->BindSampler("chs", "samplerWrap", 0);
 
 
 		TEMP_PSO_RT_GI->MaxRecursion = 1;
@@ -2794,21 +2813,20 @@ void MyToyDX12Renderer::RaytraceShadowPass()
 		i++;
 	}
 
-	PSO_RT_SHADOW->SetUAV("rayGen", "ShadowResult", ShadowBuffer->GpuHandleUAV);
-	PSO_RT_SHADOW->SetSRV("rayGen", "gRtScene", TLAS->GPUHandle);
-	PSO_RT_SHADOW->SetSRV("rayGen", "DepthTex", DepthBuffer->GpuHandleSRV);
-	PSO_RT_SHADOW->SetSRV("rayGen", "WorldNormalTex", GeomNormalBuffer->GpuHandleSRV);
-	PSO_RT_SHADOW->SetSRV("rayGen", "AlbedoTex", AlbedoBuffer->GpuHandleSRV);
+	PSO_RT_SHADOW->SetUAV("global", "ShadowResult", ShadowBuffer->GpuHandleUAV);
+	PSO_RT_SHADOW->SetSRV("global", "gRtScene", TLAS->GPUHandle);
+	PSO_RT_SHADOW->SetSRV("global", "DepthTex", DepthBuffer->GpuHandleSRV);
+	PSO_RT_SHADOW->SetSRV("global", "WorldNormalTex", GeomNormalBuffer->GpuHandleSRV);
+	PSO_RT_SHADOW->SetSRV("global", "AlbedoTex", AlbedoBuffer->GpuHandleSRV);
+	PSO_RT_SHADOW->SetCBVValue("global", "ViewParameter", &RTShadowViewParam, sizeof(RTShadowViewParamCB));
+	PSO_RT_SHADOW->SetSampler("global", "samplerWrap", samplerWrap.get());
 
-
-	PSO_RT_SHADOW->SetCBVValue("rayGen", "ViewParameter", &RTShadowViewParam, sizeof(RTShadowViewParamCB));
-	PSO_RT_SHADOW->SetSampler("rayGen", "samplerWrap", samplerWrap.get());
 
 	//PSO_RT_SHADOW->SetHitProgram("HitGroup", 0); // this pass use only 1 hit program
 
 	PSO_RT_SHADOW->EndShaderTable();
 
-	PSO_RT_SHADOW->Apply(m_width, m_height);
+	PSO_RT_SHADOW->Apply(m_width, m_height, dx12_rhi->GlobalCmdList);
 
 	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(ShadowBuffer->resource.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
 }
@@ -2821,16 +2839,16 @@ void MyToyDX12Renderer::RaytraceReflectionPass()
 
 	PSO_RT_REFLECTION->BeginShaderTable();
 
-	PSO_RT_REFLECTION->SetUAV("rayGen", "ReflectionResult", SpeculaGIBuffer->GpuHandleUAV);
-	PSO_RT_REFLECTION->SetSRV("rayGen", "gRtScene", TLAS->GPUHandle);
-	PSO_RT_REFLECTION->SetSRV("rayGen", "DepthTex", DepthBuffer->GpuHandleSRV);
-	PSO_RT_REFLECTION->SetSRV("rayGen", "GeoNormalTex", GeomNormalBuffer->GpuHandleSRV);
-	PSO_RT_REFLECTION->SetSRV("rayGen", "RougnessMetallicTex", RoughnessMetalicBuffer->GpuHandleSRV);
-	PSO_RT_REFLECTION->SetSRV("rayGen", "BlueNoiseTex", BlueNoiseTex->GpuHandleSRV);
-	PSO_RT_REFLECTION->SetSRV("rayGen", "WorldNormalTex", NormalBuffer->GpuHandleSRV);
+	PSO_RT_REFLECTION->SetUAV("global", "ReflectionResult", SpeculaGIBuffer->GpuHandleUAV);
+	PSO_RT_REFLECTION->SetSRV("global", "gRtScene", TLAS->GPUHandle);
+	PSO_RT_REFLECTION->SetSRV("global", "DepthTex", DepthBuffer->GpuHandleSRV);
+	PSO_RT_REFLECTION->SetSRV("global", "GeoNormalTex", GeomNormalBuffer->GpuHandleSRV);
+	PSO_RT_REFLECTION->SetSRV("global", "RougnessMetallicTex", RoughnessMetalicBuffer->GpuHandleSRV);
+	PSO_RT_REFLECTION->SetSRV("global", "BlueNoiseTex", BlueNoiseTex->GpuHandleSRV);
+	PSO_RT_REFLECTION->SetSRV("global", "WorldNormalTex", NormalBuffer->GpuHandleSRV);
 
-	PSO_RT_REFLECTION->SetCBVValue("rayGen", "ViewParameter", &RTReflectionViewParam, sizeof(RTReflectionViewParamCB));
-	PSO_RT_REFLECTION->SetSampler("rayGen", "samplerWrap", samplerWrap.get());
+	PSO_RT_REFLECTION->SetCBVValue("global", "ViewParameter", &RTReflectionViewParam, sizeof(RTReflectionViewParamCB));
+	PSO_RT_REFLECTION->SetSampler("global", "samplerWrap", samplerWrap.get());
 
 
 	//for (int i = 0; i < scene->meshes.size(); i++)
@@ -2851,14 +2869,13 @@ void MyToyDX12Renderer::RaytraceReflectionPass()
 		PSO_RT_REFLECTION->AddHitProgramDescriptor("chs", mesh->Ib->GpuHandleSRV, i);
 		PSO_RT_REFLECTION->AddHitProgramDescriptor("chs", diffuseTex->GpuHandleSRV, i);
 		PSO_RT_REFLECTION->AddHitProgramDescriptor("chs", InstancePropertyBuffer->GpuHandleSRV, i);
-		PSO_RT_REFLECTION->AddHitProgramDescriptor("chs", samplerWrap->GpuHandle, i);
 
 		i++;
 	}
 
 	PSO_RT_REFLECTION->EndShaderTable();
 
-	PSO_RT_REFLECTION->Apply(m_width, m_height);
+	PSO_RT_REFLECTION->Apply(m_width, m_height, dx12_rhi->GlobalCmdList);
 
 	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(SpeculaGIBuffer->resource.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
 	PIXEndEvent();
@@ -2874,16 +2891,16 @@ void MyToyDX12Renderer::RaytraceGIPass()
 
 	PSO_RT_GI->BeginShaderTable();
 
-	PSO_RT_GI->SetUAV("rayGen", "GIResultSH", GIBufferSH->GpuHandleUAV);
-	PSO_RT_GI->SetUAV("rayGen", "GIResultColor", GIBufferColor->GpuHandleUAV);
+	PSO_RT_GI->SetUAV("global", "GIResultSH", GIBufferSH->GpuHandleUAV);
+	PSO_RT_GI->SetUAV("global", "GIResultColor", GIBufferColor->GpuHandleUAV);
 
-	PSO_RT_GI->SetSRV("rayGen", "gRtScene", TLAS->GPUHandle);
-	PSO_RT_GI->SetSRV("rayGen", "DepthTex", DepthBuffer->GpuHandleSRV);
-	PSO_RT_GI->SetSRV("rayGen", "WorldNormalTex", NormalBuffer->GpuHandleSRV);
-	PSO_RT_GI->SetSRV("rayGen", "BlueNoiseTex", BlueNoiseTex->GpuHandleSRV);
+	PSO_RT_GI->SetSRV("global", "gRtScene", TLAS->GPUHandle);
+	PSO_RT_GI->SetSRV("global", "DepthTex", DepthBuffer->GpuHandleSRV);
+	PSO_RT_GI->SetSRV("global", "WorldNormalTex", NormalBuffer->GpuHandleSRV);
+	PSO_RT_GI->SetSRV("global", "BlueNoiseTex", BlueNoiseTex->GpuHandleSRV);
 
-	PSO_RT_GI->SetCBVValue("rayGen", "ViewParameter", &RTGIViewParam, sizeof(RTGIViewParamCB));
-	PSO_RT_GI->SetSampler("rayGen", "samplerWrap", samplerWrap.get());
+	PSO_RT_GI->SetCBVValue("global", "ViewParameter", &RTGIViewParam, sizeof(RTGIViewParamCB));
+	PSO_RT_GI->SetSampler("global", "samplerWrap", samplerWrap.get());
 
 	int i = 0;
 	for(auto&as : vecBLAS)
@@ -2900,15 +2917,12 @@ void MyToyDX12Renderer::RaytraceGIPass()
 		PSO_RT_GI->AddHitProgramDescriptor("chs", mesh->Ib->GpuHandleSRV, i);
 		PSO_RT_GI->AddHitProgramDescriptor("chs", diffuseTex->GpuHandleSRV, i);
 		PSO_RT_GI->AddHitProgramDescriptor("chs", InstancePropertyBuffer->GpuHandleSRV, i);
-		PSO_RT_GI->AddHitProgramDescriptor("chs", samplerWrap->GpuHandle, i);
-
-		i++;
 	}
 
 	PSO_RT_GI->EndShaderTable();
 
 
-	PSO_RT_GI->Apply(m_width, m_height);
+	PSO_RT_GI->Apply(m_width, m_height, dx12_rhi->GlobalCmdList);
 
 	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(GIBufferSH->resource.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
 	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(GIBufferColor->resource.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));

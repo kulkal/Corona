@@ -57,8 +57,7 @@ float3 offset_ray(float3 p, float3 n)
 }
 
 [shader("raygeneration")]
-void rayGen
-()
+void rayGen()
 {
     uint3 launchIndex = DispatchRaysIndex();
     uint3 launchDim = DispatchRaysDimensions();
