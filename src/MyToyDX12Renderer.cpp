@@ -2909,7 +2909,7 @@ void MyToyDX12Renderer::RaytraceGIPass()
 
 		PSO_RT_GI->SetHitProgram(i, "chs");
 
-		PSO_RT_GI->ResetHitProgramBinding("chs", i, 5);
+		PSO_RT_GI->ResetHitProgramBinding("chs", i, 4);
 		Texture* diffuseTex = mesh->Draws[0].mat->Diffuse.get();
 		if (!diffuseTex)
 			diffuseTex = DefaultWhiteTex.get();
@@ -2917,6 +2917,7 @@ void MyToyDX12Renderer::RaytraceGIPass()
 		PSO_RT_GI->AddHitProgramDescriptor("chs", mesh->Ib->GpuHandleSRV, i);
 		PSO_RT_GI->AddHitProgramDescriptor("chs", diffuseTex->GpuHandleSRV, i);
 		PSO_RT_GI->AddHitProgramDescriptor("chs", InstancePropertyBuffer->GpuHandleSRV, i);
+		i++;
 	}
 
 	PSO_RT_GI->EndShaderTable();
