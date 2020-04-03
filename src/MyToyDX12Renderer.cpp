@@ -2727,8 +2727,17 @@ void MyToyDX12Renderer::InitRTPSO()
 		TEMP_PSO_RT_REFLECTION->BindSRV("chs", "AlbedoTex", 5);
 		TEMP_PSO_RT_REFLECTION->BindSRV("chs", "InstanceProperty", 9);
 
-		//TEMP_PSO_RT_REFLECTION->AddShader("anyhitShadow", RTPipelineStateObject::ANYHIT);
+		//TEMP_PSO_RT_REFLECTION->AddShader("chsShadow", RTPipelineStateObject::HIT);
+		//TEMP_PSO_RT_REFLECTION->BindSRV("chsShadow", "vertices", 3);
+		//TEMP_PSO_RT_REFLECTION->BindSRV("chsShadow", "indices", 4);
+		//TEMP_PSO_RT_REFLECTION->BindSRV("chsShadow", "AlbedoTex", 5);
+		//TEMP_PSO_RT_REFLECTION->BindSRV("chsShadow", "InstanceProperty", 9);
 
+		//TEMP_PSO_RT_REFLECTION->AddShader("anyhitShadow", RTPipelineStateObject::ANYHIT);
+		//TEMP_PSO_RT_REFLECTION->BindSRV("anyhitShadow", "vertices", 3);
+		//TEMP_PSO_RT_REFLECTION->BindSRV("anyhitShadow", "indices", 4);
+		//TEMP_PSO_RT_REFLECTION->BindSRV("anyhitShadow", "AlbedoTex", 5);
+		//TEMP_PSO_RT_REFLECTION->BindSRV("anyhitShadow", "InstanceProperty", 9);
 
 		TEMP_PSO_RT_REFLECTION->MaxRecursion = 1;
 		TEMP_PSO_RT_REFLECTION->MaxAttributeSizeInBytes = sizeof(float) * 2;
@@ -2809,7 +2818,9 @@ void MyToyDX12Renderer::RaytraceShadowPass()
 	int i = 0;
 	for (auto&as : vecBLAS)
 	{
-		PSO_RT_SHADOW->SetHitProgram(i, "chs");
+		PSO_RT_SHADOW->ResetHitProgram(i);
+		PSO_RT_SHADOW->StartHitProgram("HitGroup", i);
+
 		i++;
 	}
 
@@ -2821,8 +2832,6 @@ void MyToyDX12Renderer::RaytraceShadowPass()
 	PSO_RT_SHADOW->SetCBVValue("global", "ViewParameter", &RTShadowViewParam, sizeof(RTShadowViewParamCB));
 	PSO_RT_SHADOW->SetSampler("global", "samplerWrap", samplerWrap.get());
 
-
-	//PSO_RT_SHADOW->SetHitProgram("HitGroup", 0); // this pass use only 1 hit program
 
 	PSO_RT_SHADOW->EndShaderTable();
 
@@ -2851,24 +2860,24 @@ void MyToyDX12Renderer::RaytraceReflectionPass()
 	PSO_RT_REFLECTION->SetSampler("global", "samplerWrap", samplerWrap.get());
 
 
-	//for (int i = 0; i < scene->meshes.size(); i++)
 	int i = 0;
 	for(auto&as : vecBLAS)
 	{
 		auto& mesh = as->mesh;
 
-		PSO_RT_REFLECTION->SetHitProgram(i, "chs");
+		PSO_RT_REFLECTION->ResetHitProgram(i);
+		PSO_RT_REFLECTION->StartHitProgram("HitGroup", i);
 
-		PSO_RT_REFLECTION->ResetHitProgramBinding("chs", i, 4);
 		Texture* diffuseTex = mesh->Draws[0].mat->Diffuse.get();
 		
 		if (!diffuseTex)
 			diffuseTex = DefaultWhiteTex.get();
 		
-		PSO_RT_REFLECTION->AddHitProgramDescriptor("chs", mesh->Vb->GpuHandleSRV, i);
-		PSO_RT_REFLECTION->AddHitProgramDescriptor("chs", mesh->Ib->GpuHandleSRV, i);
-		PSO_RT_REFLECTION->AddHitProgramDescriptor("chs", diffuseTex->GpuHandleSRV, i);
-		PSO_RT_REFLECTION->AddHitProgramDescriptor("chs", InstancePropertyBuffer->GpuHandleSRV, i);
+		PSO_RT_REFLECTION->AddDescriptor2HitProgram("HitGroup", mesh->Vb->GpuHandleSRV, i);
+		PSO_RT_REFLECTION->AddDescriptor2HitProgram("HitGroup", mesh->Ib->GpuHandleSRV, i);
+		PSO_RT_REFLECTION->AddDescriptor2HitProgram("HitGroup", diffuseTex->GpuHandleSRV, i);
+		PSO_RT_REFLECTION->AddDescriptor2HitProgram("HitGroup", InstancePropertyBuffer->GpuHandleSRV, i);
+
 
 		i++;
 	}
@@ -2907,16 +2916,18 @@ void MyToyDX12Renderer::RaytraceGIPass()
 	{
 		auto& mesh = as->mesh;
 
-		PSO_RT_GI->SetHitProgram(i, "chs");
+		PSO_RT_GI->ResetHitProgram(i);
+		PSO_RT_GI->StartHitProgram("HitGroup", i);
 
-		PSO_RT_GI->ResetHitProgramBinding("chs", i, 4);
 		Texture* diffuseTex = mesh->Draws[0].mat->Diffuse.get();
 		if (!diffuseTex)
 			diffuseTex = DefaultWhiteTex.get();
-		PSO_RT_GI->AddHitProgramDescriptor("chs", mesh->Vb->GpuHandleSRV, i);
-		PSO_RT_GI->AddHitProgramDescriptor("chs", mesh->Ib->GpuHandleSRV, i);
-		PSO_RT_GI->AddHitProgramDescriptor("chs", diffuseTex->GpuHandleSRV, i);
-		PSO_RT_GI->AddHitProgramDescriptor("chs", InstancePropertyBuffer->GpuHandleSRV, i);
+		
+		PSO_RT_GI->AddDescriptor2HitProgram("HitGroup", mesh->Vb->GpuHandleSRV, i);
+		PSO_RT_GI->AddDescriptor2HitProgram("HitGroup", mesh->Ib->GpuHandleSRV, i);
+		PSO_RT_GI->AddDescriptor2HitProgram("HitGroup", diffuseTex->GpuHandleSRV, i);
+		PSO_RT_GI->AddDescriptor2HitProgram("HitGroup", InstancePropertyBuffer->GpuHandleSRV, i);
+
 		i++;
 	}
 

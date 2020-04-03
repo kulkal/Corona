@@ -1674,7 +1674,6 @@ void RTPipelineStateObject::AddHitGroup(string name, string chs, string ahs)
 	info.ahs = StringToWString(ahs);
 
 	VecHitGroup.push_back(info);
-	MapHitGroup[chs] = info;
 }
 
 void RTPipelineStateObject::AddShader(string shader, RTPipelineStateObject::ShaderType shaderType)
@@ -1892,28 +1891,29 @@ void RTPipelineStateObject::EndShaderTable()
 	}
 
 	// hit program 
-	//for (auto& sb : ShaderBinding)
-	if (HitProgramBinding.size() > 0)
+	for(int InstanceIndex=0;InstanceIndex<NumInstance;InstanceIndex++)
 	{
+		pDataThis = pData + LastIndex * ShaderTableEntrySize;
 
-		for(int InstanceIndex=0;InstanceIndex<NumInstance;InstanceIndex++)
-		{
-			pDataThis = pData + LastIndex * ShaderTableEntrySize;
+		//auto& HitProgramInfo = HitProgramBinding[InstanceIndex];
 
-			auto& HitProgramInfo = HitProgramBinding[InstanceIndex];
+		map<UINT, HitProgramData>& HitProgram = VecHitGroup[0].HitProgramBinding;
+		auto& HitProgramInfo = HitProgram[InstanceIndex];
+
 		
-			memcpy(pDataThis, RtsoProps->GetShaderIdentifier(HitProgramInfo.HitGroupName.c_str()), D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES);
-			pDataThis += D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES;
+		//memcpy(pDataThis, RtsoProps->GetShaderIdentifier(HitProgramInfo.HitGroupName.c_str()), D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES);
+		memcpy(pDataThis, RtsoProps->GetShaderIdentifier(VecHitGroup[0].name.c_str()), D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES);
 
-			for (auto& bd : HitProgramInfo.VecData)
-			{
-				*(UINT64*)(pDataThis) = bd.ptr;
+		pDataThis += D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES;
+
+		for (auto& bd : HitProgramInfo.VecData)
+		{
+			*(UINT64*)(pDataThis) = bd.ptr;
 			
-				pDataThis += sizeof(UINT64);
-			}
-
-			LastIndex++;
+			pDataThis += sizeof(UINT64);
 		}
+
+		LastIndex++;
 	}
 
 
@@ -1948,12 +1948,12 @@ void RTPipelineStateObject::SetUAV(string shader, string bindingName, D3D12_GPU_
 			}
 		}
 	}
-	else // hitprogram : There can be multiple hitprogram entry with same shader name, so we need another data structure. (HitProgramBinding)
-	{
-		// SetXXX should be called according to the binding order, because it is push_backed to vector.
-		HitProgramBinding[instanceIndex].HitGroupName = MapHitGroup[shader].name;
-		HitProgramBinding[instanceIndex].VecData.push_back(uavHandle);
-	}
+	//else // hitprogram : There can be multiple hitprogram entry with same shader name, so we need another data structure. (HitProgramBinding)
+	//{
+	//	// SetXXX should be called according to the binding order, because it is push_backed to vector.
+	//	HitProgramBindingCHS[instanceIndex].HitGroupName = MapHitGroup[shader].name;
+	//	HitProgramBindingCHS[instanceIndex].VecData.push_back(uavHandle);
+	//}
 }
 
 void RTPipelineStateObject::SetSRV(string shader, string bindingName, D3D12_GPU_DESCRIPTOR_HANDLE srvHandle, INT instanceIndex /*= -1*/)
@@ -1983,24 +1983,44 @@ void RTPipelineStateObject::SetSRV(string shader, string bindingName, D3D12_GPU_
 			}
 		}
 	}
-	else // hitprogram : There can be multiple hitprogram entry with same shader name, so we need another data structure. (HitProgramBinding)
+	//else // hitprogram : There can be multiple hitprogram entry with same shader name, so we need another data structure. (HitProgramBinding)
+	//{
+	//	// SetXXX should be called according to the binding order, because it is push_backed to vector.
+	//	HitProgramBindingCHS[instanceIndex].HitGroupName = MapHitGroup[shader].name;
+	//	HitProgramBindingCHS[instanceIndex].VecData.push_back(srvHandle);
+	//}
+}
+
+void RTPipelineStateObject::ResetHitProgram(UINT instanceIndex)
+{
+	for (auto& HG : VecHitGroup)
 	{
-		// SetXXX should be called according to the binding order, because it is push_backed to vector.
-		HitProgramBinding[instanceIndex].HitGroupName = MapHitGroup[shader].name;
-		HitProgramBinding[instanceIndex].VecData.push_back(srvHandle);
+		HG.HitProgramBinding[instanceIndex].VecData.clear();
 	}
 }
 
-void RTPipelineStateObject::AddHitProgramDescriptor(string shader, D3D12_GPU_DESCRIPTOR_HANDLE srvHandle, UINT instanceIndex)
+void RTPipelineStateObject::StartHitProgram(string HitGroup, UINT instanceIndex)
 {
-	HitProgramBinding[instanceIndex].VecData.push_back(srvHandle);
+	map<UINT, HitProgramData>* HitProgram =nullptr;
+	for (auto& HG : VecHitGroup)
+	{
+		if (HG.name == StringToWString(HitGroup))
+			HitProgram = &HG.HitProgramBinding;
+	}
+	//(*HitProgram)[instanceIndex].HitGroupName = StringToWString(HitGroup);
+	(*HitProgram)[instanceIndex].VecData.clear();
 }
 
-void RTPipelineStateObject::ResetHitProgramBinding(string shader, UINT instanceIndex, UINT size)
+void RTPipelineStateObject::AddDescriptor2HitProgram(string HitGroup, D3D12_GPU_DESCRIPTOR_HANDLE srvHandle, UINT instanceIndex)
 {
-	HitProgramBinding[instanceIndex].HitGroupName = MapHitGroup[shader].name;
-	HitProgramBinding[instanceIndex].VecData.clear();
-	HitProgramBinding[instanceIndex].VecData.reserve(size);
+	map<UINT, HitProgramData>* HitProgram = nullptr;
+	for (auto& HG : VecHitGroup)
+	{
+		if (HG.name == StringToWString(HitGroup))
+			HitProgram = &HG.HitProgramBinding;
+	}
+
+	(*HitProgram)[instanceIndex].VecData.push_back(srvHandle);
 }
 
 void RTPipelineStateObject::SetSampler(string shader, string bindingName, Sampler* sampler, INT instanceIndex /*= -1*/)
@@ -2030,12 +2050,12 @@ void RTPipelineStateObject::SetSampler(string shader, string bindingName, Sample
 			}
 		}
 	}
-	else // hitprogram : There can be multiple hitprogram entry with same shader name, so we need another data structure. (HitProgramBinding)
-	{
-		// SetXXX should be called according to the binding order, because it is push_backed to vector.
-		HitProgramBinding[instanceIndex].HitGroupName = MapHitGroup[shader].name;
-		HitProgramBinding[instanceIndex].VecData.push_back(sampler->GpuHandle);
-	}
+	//else // hitprogram : There can be multiple hitprogram entry with same shader name, so we need another data structure. (HitProgramBinding)
+	//{
+	//	// SetXXX should be called according to the binding order, because it is push_backed to vector.
+	//	HitProgramBindingCHS[instanceIndex].HitGroupName = MapHitGroup[shader].name;
+	//	HitProgramBindingCHS[instanceIndex].VecData.push_back(sampler->GpuHandle);
+	//}
 }
 
 void RTPipelineStateObject::SetCBVValue(string shader, string bindingName, void* pData, INT size, INT instanceIndex /*= -1*/)
@@ -2095,41 +2115,37 @@ void RTPipelineStateObject::SetCBVValue(string shader, string bindingName, void*
 			}
 		}
 	}
-	else // hitprogram : There can be multiple hitprogram entry with same shader name, so we need another data structure. (HitProgramBinding)
-	{
-		// SetXXX should be called by the binding order, because it is "push_back"ed to vector.
-		BindingInfo& bi = ShaderBinding[shader];
-		for (auto&bd : bi.Binding)
-		{
-			if (bd.name == bindingName)
-			{
-				auto& cb = bd.cbs[g_dx12_rhi->CurrentFrameIndex];
-				UINT8* pMapped = (UINT8*)cb->MemMapped + size * instanceIndex;
-				memcpy((void*)pMapped, pData, size);
+	//else // hitprogram : There can be multiple hitprogram entry with same shader name, so we need another data structure. (HitProgramBinding)
+	//{
+	//	// SetXXX should be called by the binding order, because it is "push_back"ed to vector.
+	//	BindingInfo& bi = ShaderBinding[shader];
+	//	for (auto&bd : bi.Binding)
+	//	{
+	//		if (bd.name == bindingName)
+	//		{
+	//			auto& cb = bd.cbs[g_dx12_rhi->CurrentFrameIndex];
+	//			UINT8* pMapped = (UINT8*)cb->MemMapped + size * instanceIndex;
+	//			memcpy((void*)pMapped, pData, size);
 
-				HitProgramBinding[instanceIndex].HitGroupName = MapHitGroup[shader].name;
+	//			HitProgramBindingCHS[instanceIndex].HitGroupName = MapHitGroup[shader].name;
 
-				D3D12_CPU_DESCRIPTOR_HANDLE CpuHandle;
-				D3D12_GPU_DESCRIPTOR_HANDLE GpuHandle;
+	//			D3D12_CPU_DESCRIPTOR_HANDLE CpuHandle;
+	//			D3D12_GPU_DESCRIPTOR_HANDLE GpuHandle;
 
-				// ring is advanced at the begining of frame. so descriptors from multiple frame is not overlapped.
-				g_dx12_rhi->GlobalDHRing->AllocDescriptor(CpuHandle, GpuHandle);
+	//			// ring is advanced at the begining of frame. so descriptors from multiple frame is not overlapped.
+	//			g_dx12_rhi->GlobalDHRing->AllocDescriptor(CpuHandle, GpuHandle);
 
-				D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc = {};
-				cbvDesc.BufferLocation = cb->resource->GetGPUVirtualAddress();
-				cbvDesc.SizeInBytes = cb->Size;
-				g_dx12_rhi->Device->CreateConstantBufferView(&cbvDesc, CpuHandle);
+	//			D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc = {};
+	//			cbvDesc.BufferLocation = cb->resource->GetGPUVirtualAddress();
+	//			cbvDesc.SizeInBytes = cb->Size;
+	//			g_dx12_rhi->Device->CreateConstantBufferView(&cbvDesc, CpuHandle);
 
-				HitProgramBinding[instanceIndex].VecData.push_back(GpuHandle);
-			}
-		}
-	}
+	//			HitProgramBindingCHS[instanceIndex].VecData.push_back(GpuHandle);
+	//		}
+	//	}
+	//}
 }
 
-void RTPipelineStateObject::SetHitProgram(UINT instanceIndex, string shader)
-{
-	HitProgramBinding[instanceIndex].HitGroupName = MapHitGroup[shader].name;
-}
 
 bool RTPipelineStateObject::InitRS(string ShaderFile)
 {

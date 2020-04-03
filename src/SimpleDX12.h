@@ -226,23 +226,24 @@ public:
 
 	vector<BindingData> GlobalBinding;
 
+	
+
+	struct HitProgramData
+	{
+		//wstring HitGroupName;
+		vector< D3D12_GPU_DESCRIPTOR_HANDLE> VecData;
+	};
+
 	struct HitGroupInfo
 	{
 		wstring name;
 		wstring chs;
 		wstring ahs;
+
+		map<UINT, HitProgramData> HitProgramBinding;
 	};
 
 	vector<HitGroupInfo> VecHitGroup;
-	map<string, HitGroupInfo> MapHitGroup;
-
-	struct HitProgramData
-	{
-		wstring HitGroupName;
-		vector< D3D12_GPU_DESCRIPTOR_HANDLE> VecData;
-	};
-
-	map<UINT, HitProgramData> HitProgramBinding;
 public:
 
 	wstring kRayGenShader;
@@ -278,11 +279,9 @@ public:
 	void SetSampler(string shader, string bindingName, Sampler* sampler, INT instanceIndex = -1);
 	void SetCBVValue(string shader, string bindingName, void* pData, INT size, INT instanceIndex = -1);
 
-	void AddHitProgramDescriptor(string shader, D3D12_GPU_DESCRIPTOR_HANDLE srvHandle, UINT instanceIndex);
-	void ResetHitProgramBinding(string shader, UINT instanceIndex, UINT size);
-
-	
-	void SetHitProgram(UINT instanceIndex, string shader);
+	void ResetHitProgram(UINT instanceIndex);
+	void StartHitProgram(string HitGroup, UINT instanceIndex);
+	void AddDescriptor2HitProgram(string HitGroup, D3D12_GPU_DESCRIPTOR_HANDLE srvHandle, UINT instanceIndex);
 
 	bool InitRS(string ShaderFile);
 	void Apply(UINT width, UINT height, CommandList* CommandList);
