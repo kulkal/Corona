@@ -1,5 +1,5 @@
 # DX12 & DXR test framework
-This project is for dx12 & dxr learning. I am trying to test best practice implementation(resource binding, descriotpr allocation, multi-thread command submission, etc....)
+This project is for dx12 & dxr learning. I am trying to bring best practice implementation to this project(resource binding, descriotpr allocation, multi-thread command submission, etc....)
 
 ## DX12 Topic
 * Easy resource binding interface.
@@ -10,9 +10,13 @@ This project is for dx12 & dxr learning. I am trying to test best practice imple
 * Memory residency.
 
 ## Screenshots
-![](diffuse_gi3.png)
-![](diffuse_gi.png)
-![](diffuse_gi2.png)
+![](rt_1.png)
+![](rt_2.png)
+![](rt_3.png)
+![](rt_4.png)
+![](rt_5.png)
+![](rt_6.png)
+
 
 
 ## DXR Topic
@@ -22,10 +26,14 @@ This project is for dx12 & dxr learning. I am trying to test best practice imple
 
 ## Non-DX Topic
 * Temporal AA
+* Aftermath.
+* Rutime shader compile.
 
 ## Build
 * Go to build directory.
 * premake5.exe vs2017
+* Install WinPixEventRuntime. (It should be re-installed after re-generate vs sln after.)
+* Build!
 
 ## Third-party libs
 * [enkiTS](https://github.com/dougbinks/enkiTS)
