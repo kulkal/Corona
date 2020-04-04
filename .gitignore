@@ -33,3 +33,5 @@ doc/**/*.pdf
 src/MyToyDX12Renderer.exe
 src/MyToyDX12Renderer.pdb
 src/MyToyDX12Renderer.ilk
+src/MyToyDX12Renderer.exe
+src/MyToyDX12Renderer.pdb

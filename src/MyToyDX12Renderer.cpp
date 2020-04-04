@@ -2122,7 +2122,7 @@ void MyToyDX12Renderer::OnUpdate()
 
 	if (bRecompileShaders)
 	{
-		dx12_rhi->errorString += string("recompile all shaders\n");
+		//dx12_rhi->errorString += string("recompile all shaders\n");
 
 		RecompileShaders();
 		bRecompileShaders = false;
@@ -2178,108 +2178,135 @@ void MyToyDX12Renderer::OnRender()
 	if(bDebugDraw)
 		DebugPass();
 
-	ImGui_ImplDX12_NewFrame();
-	ImGui_ImplWin32_NewFrame();
-	ImGui::NewFrame();
+	if (bShowImgui)
+	{
 
-	bool show_demo_window = true;
+		ImGui_ImplDX12_NewFrame();
+		ImGui_ImplWin32_NewFrame();
+		ImGui::NewFrame();
 
-	//ImGui::ShowDemoWindow(&show_demo_window);
+		bool show_demo_window = true;
 
-	char fps[64];
-	sprintf(fps, "FPS : %u fps", m_timer.GetFramesPerSecond());
+		//ImGui::ShowDemoWindow(&show_demo_window);
 
-	ImGui::Begin("Hi, Let's traceray!");
-	ImGui::Text(fps);
+		char fps[64];
+		sprintf(fps, "FPS : %u fps", m_timer.GetFramesPerSecond());
 
-	if (ImGui::Button("Recompile all shaders"))
-		bRecompileShaders = true;
+		ImGui::Begin("Hi, Let's traceray!");
+		ImGui::Text(fps);
 
-	ImGui::Text("Tuning knobs.");
-	ImGui::SliderFloat("Camera turn speed", &m_turnSpeed, 0.0f, glm::half_pi<float>()*2);
+		if (ImGui::Button("Recompile all shaders"))
+			bRecompileShaders = true;
 
-	ImGui::Checkbox("Enable TemporalAA", &bEnableTAA);
-	ImGui::Checkbox("Visualize Buffers", &bDebugDraw);
+		ImGui::Text("Tuning knobs.");
+		ImGui::SliderFloat("Camera turn speed", &m_turnSpeed, 0.0f, glm::half_pi<float>()*2);
+
+		ImGui::Checkbox("Enable TemporalAA", &bEnableTAA);
+		ImGui::Checkbox("Visualize Buffers", &bDebugDraw);
 	
-	/*
-	enum class EDebugVisualization
-	{
-		SHADOW,
-		WORLD_NORMAL,
-		GEO_NORMAL,
-		DEPTH,
-		RAW_SH,
-		RAW_CoCg,
-		TEMPORAL_FILTERED_SH,
-		SPATIAL_FILTERED_SH,
-		SH_LIGHTING,
-		ALBEDO,
-		VELOCITY,
-		ROUGNESS_METALLIC,
-		SPECULAR_RAW,
-		TEMPORAL_FILTERED_SPECULAR,
-		NO_FULLSCREEN,
-	};
-	*/
-	static ImGuiComboFlags flags = 0;
-	const char* items[] = { 
-		"SHADOW",
-		"WORLD_NORMAL",
-		"GEO_NORMAL",
-		"DEPTH",
-		"RAW_SH",
-		"RAW_CoCg",
-		"TEMPORAL_FILTERED_SH",
-		"SPATIAL_FILTERED_SH",
-		"SH_LIGHTING",
-		"ALBEDO",
-		"VELOCITY",
-		"ROUGNESS_METALLIC",
-		"SPECULAR_RAW",
-		"TEMPORAL_FILTERED_SPECULAR",
-		"NO_FULLSCREEN",
-	};
-	static const char* item_current = items[UINT(EDebugVisualization::NO_FULLSCREEN)];
-	if (ImGui::BeginCombo("Visualize Full Screen", item_current, flags))
-	{
-		for (int n = 0; n < IM_ARRAYSIZE(items); n++)
+		/*
+		enum class EDebugVisualization
 		{
-			bool is_selected = (item_current == items[n]);
-			if (ImGui::Selectable(items[n], is_selected))\
+			SHADOW,
+			WORLD_NORMAL,
+			GEO_NORMAL,
+			DEPTH,
+			RAW_SH,
+			RAW_CoCg,
+			TEMPORAL_FILTERED_SH,
+			SPATIAL_FILTERED_SH,
+			SH_LIGHTING,
+			ALBEDO,
+			VELOCITY,
+			ROUGNESS_METALLIC,
+			SPECULAR_RAW,
+			TEMPORAL_FILTERED_SPECULAR,
+			NO_FULLSCREEN,
+		};
+		*/
+		static ImGuiComboFlags flags = 0;
+		const char* items[] = { 
+			"SHADOW",
+			"WORLD_NORMAL",
+			"GEO_NORMAL",
+			"DEPTH",
+			"RAW_SH",
+			"RAW_CoCg",
+			"TEMPORAL_FILTERED_SH",
+			"SPATIAL_FILTERED_SH",
+			"SH_LIGHTING",
+			"ALBEDO",
+			"VELOCITY",
+			"ROUGNESS_METALLIC",
+			"SPECULAR_RAW",
+			"TEMPORAL_FILTERED_SPECULAR",
+			"NO_FULLSCREEN",
+		};
+		static const char* item_current = items[UINT(EDebugVisualization::NO_FULLSCREEN)];
+		if (ImGui::BeginCombo("Visualize Full Screen", item_current, flags))
+		{
+			for (int n = 0; n < IM_ARRAYSIZE(items); n++)
 			{
-				item_current = items[n];
-				FullscreenDebugBuffer = (EDebugVisualization)n;
-			}
-			if (is_selected)
-			{
-				ImGui::SetItemDefaultFocus(); 
-			}
+				bool is_selected = (item_current == items[n]);
+				if (ImGui::Selectable(items[n], is_selected))\
+				{
+					item_current = items[n];
+					FullscreenDebugBuffer = (EDebugVisualization)n;
+				}
+				if (is_selected)
+				{
+					ImGui::SetItemDefaultFocus(); 
+				}
 
+			}
+			ImGui::EndCombo();
 		}
-		ImGui::EndCombo();
-	}
 
-	ImGui::SliderFloat3("Light direction", &LightDir.x, -1.0f, 1.0f);
-	ImGui::SliderFloat("Light Brightness", &LightIntensity, 0.0f, 20.0f);
+		ImGui::SliderFloat3("Light direction", &LightDir.x, -1.0f, 1.0f);
+		ImGui::SliderFloat("Light Brightness", &LightIntensity, 0.0f, 20.0f);
 
-	ImGui::SliderFloat("SponzaRoughness", &SponzaRoughness, 0.0f, 1.0f);
-	ImGui::SliderFloat("ShaderBallRoughness", &ShaderBallRoughness, 0.0f, 1.0f);
+		ImGui::SliderFloat("SponzaRoughness", &SponzaRoughness, 0.0f, 1.0f);
+		ImGui::SliderFloat("ShaderBallRoughness", &ShaderBallRoughness, 0.0f, 1.0f);
 
 
-	ImGui::SliderFloat("IndirectDiffuse Depth Weight Factor", &SpatialFilterCB.IndirectDiffuseWeightFactorDepth, 0.0f, 20.0f);
-	ImGui::SliderFloat("IndirectDiffuse Normal Weight Factor", &SpatialFilterCB.IndirectDiffuseWeightFactorNormal, 0.0f, 20.0f);
+		ImGui::SliderFloat("IndirectDiffuse Depth Weight Factor", &SpatialFilterCB.IndirectDiffuseWeightFactorDepth, 0.0f, 20.0f);
+		ImGui::SliderFloat("IndirectDiffuse Normal Weight Factor", &SpatialFilterCB.IndirectDiffuseWeightFactorNormal, 0.0f, 20.0f);
 		
-	if (dx12_rhi->errorString.size() > 0)
-	{
-		ImGui::Begin("error");
-		ImGui::TextWrapped(dx12_rhi->errorString.c_str());
-		ImGui::End();
-	}
-	
-	ImGui::End();
+		if (dx12_rhi->errorString.size() > 0)
+		{
+			if (!ImGui::IsPopupOpen("Msg"))
+			{
+				ImGui::SetNextWindowSize(ImVec2(1200, 800));
+				ImGui::OpenPopup("Msg");
+			}
 
-	ImGui::Render();
-	ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), dx12_rhi->GlobalCmdList->CmdList.Get());
+			if (ImGui::BeginPopupModal("Msg"))
+			{
+				ImGui::TextWrapped(dx12_rhi->errorString.c_str());
+			
+				if (ImGui::Button("Compile again", ImVec2(120, 0)))
+				{
+					bRecompileShaders = true;
+					dx12_rhi->errorString = "";
+					ImGui::CloseCurrentPopup();
+				}
+				ImGui::SameLine();
+				if (ImGui::Button("Close", ImVec2(80, 0)))
+				{
+					dx12_rhi->errorString = "";
+					ImGui::CloseCurrentPopup();
+				}
+				ImGui::EndPopup();
+			}
+		
+		}
+	
+		ImGui::End();
+
+		ImGui::Render();
+		ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), dx12_rhi->GlobalCmdList->CmdList.Get());
+
+	}
 
 
 	D3D12_RESOURCE_BARRIER BarrierDescPresent = {};
@@ -2327,6 +2354,9 @@ void MyToyDX12Renderer::OnKeyDown(UINT8 key)
 		break;
 	case 'R':
 		RecompileShaders();
+		break;
+	case 'I':
+		bShowImgui = !bShowImgui;
 		break;
 	default:
 		break;

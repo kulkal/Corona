@@ -326,6 +326,7 @@ private:
 	enki::TaskScheduler g_TS;
 
 	bool bRecompileShaders = false;
+	bool bShowImgui = true;
 	void RecompileShaders();
 public:
 

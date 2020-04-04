@@ -198,10 +198,11 @@ void anyhit(inout RayPayload payload, in BuiltInTriangleIntersectionAttributes a
 
     float opacity = AlbedoTex.SampleLevel(sampleWrap, vertex.uv, 0).w;
 
-    if(opacity > 0.1)
-        payload.bHit = true;
+    if(opacity < 0.1)
+        IgnoreHit();
+        // payload.bHit = true;
     // else
     //     payload.bHit = true;
     // IgnoreHit();
-    AcceptHitAndEndSearch();
+    // AcceptHitAndEndSearch();
 }
