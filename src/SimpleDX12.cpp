@@ -1858,7 +1858,7 @@ void RTPipelineStateObject::EndShaderTable()
 				NumShaderTableEntry++;
 
 		}
-		NumShaderTableEntry += NumInstance;
+		NumShaderTableEntry += NumInstance * VecHitGroup.size();
 
 		ShaderTableSize = ShaderTableEntrySize * NumShaderTableEntry;
 
@@ -1958,11 +1958,12 @@ void RTPipelineStateObject::EndShaderTable()
 	// hit program 
 	for(int InstanceIndex=0;InstanceIndex<NumInstance;InstanceIndex++)
 	{
-		pDataThis = pData + LastIndex * ShaderTableEntrySize;
 
 		//auto& HitProgramInfo = HitProgramBinding[InstanceIndex];
 		for (int iHitGroup = 0; iHitGroup < VecHitGroup.size(); iHitGroup++)
 		{
+			pDataThis = pData + LastIndex * ShaderTableEntrySize;
+
 			map<UINT, HitProgramData>& HitProgram = VecHitGroup[iHitGroup].HitProgramBinding;
 			auto& HitProgramInfo = HitProgram[InstanceIndex];
 
@@ -1976,10 +1977,10 @@ void RTPipelineStateObject::EndShaderTable()
 
 				pDataThis += sizeof(UINT64);
 			}
-		}
-		
+			LastIndex++;
 
-		LastIndex++;
+		}
+
 	}
 
 
@@ -2451,16 +2452,23 @@ void RTPipelineStateObject::Apply(UINT width, UINT height, CommandList* CommandL
 	raytraceDesc.RayGenerationShaderRecord.SizeInBytes = ShaderTableEntrySize;
 
 	// Miss is the second entry in the shader-table
-	size_t missOffset = 1 * ShaderTableEntrySize;
+	UINT NumMissShader = 0;
+	for (auto& sb : ShaderBinding)
+	{
+		if (sb.second.Type == MISS)
+			NumMissShader++;
+	}
+	size_t missOffset = ShaderTableEntrySize * 1;
 	raytraceDesc.MissShaderTable.StartAddress = StartAddress + missOffset;
 	raytraceDesc.MissShaderTable.StrideInBytes = ShaderTableEntrySize;
-	raytraceDesc.MissShaderTable.SizeInBytes = ShaderTableEntrySize;   // Only a s single miss-entry
+	raytraceDesc.MissShaderTable.SizeInBytes = ShaderTableEntrySize * NumMissShader;
 
+	
 	 // Hit is the third entry in the shader-table
-	size_t hitOffset = 2 * ShaderTableEntrySize;
+	size_t hitOffset = missOffset + NumMissShader * ShaderTableEntrySize;
 	raytraceDesc.HitGroupTable.StartAddress = StartAddress + hitOffset;
 	raytraceDesc.HitGroupTable.StrideInBytes = ShaderTableEntrySize;
-	raytraceDesc.HitGroupTable.SizeInBytes = ShaderTableEntrySize;
+	raytraceDesc.HitGroupTable.SizeInBytes = ShaderTableEntrySize * VecHitGroup.size() *NumInstance;
 
 	// Bind the empty root signature
 	g_dx12_rhi->GlobalCmdList->CmdList->SetComputeRootSignature(GlobalRS.Get());

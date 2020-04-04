@@ -2786,7 +2786,7 @@ void MyToyDX12Renderer::InitRTPSO()
 		TEMP_PSO_RT_REFLECTION->BindSampler("global", "samplerWrap", 0);
 
 		TEMP_PSO_RT_REFLECTION->AddShader("miss", RTPipelineStateObject::MISS);
-		//TEMP_PSO_RT_REFLECTION->AddShader("missShadow", RTPipelineStateObject::MISS);
+		TEMP_PSO_RT_REFLECTION->AddShader("missShadow", RTPipelineStateObject::MISS);
 
 
 		TEMP_PSO_RT_REFLECTION->AddShader("chs", RTPipelineStateObject::HIT);
@@ -2842,7 +2842,7 @@ void MyToyDX12Renderer::InitRTPSO()
 		TEMP_PSO_RT_GI->BindSRV("global", "BlueNoiseTex", 7);
 
 		TEMP_PSO_RT_GI->AddShader("miss", RTPipelineStateObject::MISS);
-		//TEMP_PSO_RT_GI->AddShader("missShadow", RTPipelineStateObject::MISS);
+		TEMP_PSO_RT_GI->AddShader("missShadow", RTPipelineStateObject::MISS);
 
 
 		TEMP_PSO_RT_GI->AddShader("chs", RTPipelineStateObject::HIT);

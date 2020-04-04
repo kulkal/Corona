@@ -218,8 +218,8 @@ void rayGen
 	RayPayload payload;
 	TraceRay(gRtScene, 0 /*rayFlags*/, 0xFF, 0 /* ray index*/, 0, 0, ray, payload);
 
-    // if(payload.bHit == false)
-    if(false)
+    if(payload.bHit == false)
+    // if(true)
     {
         // hit sky
         float3 Radiance = payload.color * LightIntensity;
@@ -237,7 +237,8 @@ void rayGen
 
         ShadowRayPayload shadowPayload;
         shadowPayload.bHit = true;
-        TraceRay(gRtScene, 0 /*rayFlags*/, 0xFF, 0 /* ray index*/, 0, 0, shadowRay, shadowPayload);
+        uint RayIndex = 0;
+        TraceRay(gRtScene, 0 /*rayFlags*/, 0xFF, RayIndex /* ray index*/, 0, 1, shadowRay, shadowPayload);
 
         float3 Irradiance = 0..xxx;
         float3 Albedo = payload.color;
@@ -251,8 +252,7 @@ void rayGen
         {
             // shadowed
         }
-            // LightDir = float(0, 0, -1);
-            // Irradiance = dot(LightDir.xyz, payload.normal) * 1  * 1;
+            
 
         ReflectionResult[launchIndex.xy] = float4(Irradiance, 1);
     }

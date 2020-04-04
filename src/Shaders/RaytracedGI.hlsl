@@ -44,15 +44,15 @@ struct RayPayload
     float3 position;
     float3 color;
     float3 normal;
-    float distance;
+    // float distance;
+    bool bHit;
 };
 
-/*
-    Params.x = Far / (Far - Near);
-    Params.y = Near / (Near - Far);
-    Params.z = Far;
-*/
 
+struct ShadowRayPayload
+{
+    bool bHit;
+};
 
 float3 offset_ray(float3 p, float3 n)
 {
@@ -163,7 +163,7 @@ void rayGen
 
 	RayPayload payload;
 	TraceRay(gRtScene, 0 /*rayFlags*/, 0xFF, 0 /* ray index*/, 0, 0, ray, payload);
-    if(payload.distance == 0)
+    if(payload.bHit = false)
     {
         // hit sky
         float3 Radiance = payload.color * LightIntensity;
@@ -186,12 +186,13 @@ void rayGen
         shadowRay.TMin = 0;
         shadowRay.TMax = 100000;
 
-        RayPayload shadowPayload;
-        TraceRay(gRtScene, 0 /*rayFlags*/, 0xFF, 0 /* ray index*/, 0, 0, shadowRay, shadowPayload);
+        ShadowRayPayload shadowPayload;
+        shadowPayload.bHit = true;
+        TraceRay(gRtScene, 0 /*rayFlags*/, 0xFF, 0 /* ray index*/, 0, 1, shadowRay, shadowPayload);
 
         float3 Albedo = payload.color;
         SH sh_indirect = init_SH();
-        if(shadowPayload.distance == 0)
+        if(shadowPayload.bHit == false)
         {
             // miss
             float3 Irradiance = dot(LightDir.xyz, payload.normal) * LightIntensity  * Albedo;
@@ -219,7 +220,8 @@ void miss(inout RayPayload payload)
     payload.position = float3(0, 0, 0);
     payload.color = float3(0.0, 0.2, 0.4);
     payload.normal = float3(0, 0, -1);
-    payload.distance = 0;
+    // payload.distance = 0;
+    payload.bHit = false;
 }
 
 [shader("closesthit")]
@@ -234,39 +236,14 @@ void chs(inout RayPayload payload, in BuiltInTriangleIntersectionAttributes attr
     payload.normal = vertex.normal;
     payload.color = AlbedoTex.SampleLevel(sampleWrap, vertex.uv, 0).xyz;
 
-    payload.distance = RayTCurrent();
-}
-
-
-[shader("closesthit")]
-void chsShadow(inout RayPayload payload, in BuiltInTriangleIntersectionAttributes attribs)
-{
-    // float3 barycentrics = float3(1.0 - attribs.barycentrics.x - attribs.barycentrics.y, attribs.barycentrics.x, attribs.barycentrics.y);
-    // uint triangleIndex = PrimitiveIndex();
-    // Vertex vertex = GetVertexAttributes(triangleIndex, barycentrics);
-
-    // payload.position = vertex.position;
-    // payload.normal = vertex.normal;
-    // payload.color =  AlbedoTex.SampleLevel(sampleWrap, vertex.uv, 0).xyz;
+    payload.bHit = true;
 
     // payload.distance = RayTCurrent();
-}
-
-
-[shader("anyhit")]
-void anyhitShadow(inout RayPayload payload, in BuiltInTriangleIntersectionAttributes attribs)
-{
-    payload.distance = RayTCurrent();;
-
-    AcceptHitAndEndSearch();
 }
 
 [shader("miss")]
 void missShadow(inout RayPayload payload)
 {
-    payload.position = float3(0, 0, 0);
-    payload.color = float3(0.0, 0.2, 0.4);
-    payload.normal = float3(0, 0, -1);
-    payload.distance = 0;
+    payload.bHit = false;
 }
 
