@@ -1501,6 +1501,7 @@ ComPtr<ID3DBlob> compileShaderLibrary(const WCHAR* filename, const WCHAR* target
 		pResult->GetErrorBuffer(&pError);
 		std::string log = convertBlobToString(pError.Get());
 		//msgBox("Compiler error:\n" + log);
+		g_dx12_rhi->errorString += log;
 		OutputDebugStringA(log.c_str());
 
 		return nullptr;
@@ -1827,6 +1828,70 @@ void RTPipelineStateObject::SetGlobalBinding(CommandList* CommandList)
 
 void RTPipelineStateObject::EndShaderTable()
 {
+	if (ShaderTable == nullptr)
+	{
+		// find biggiest binding size
+		ShaderTableEntrySize = D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES;
+		for (auto& sb : ShaderBinding)
+		{
+			UINT EntrySize = D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES;
+
+			BindingInfo& bindingInfo = sb.second;
+
+			D3D12_ROOT_PARAMETER RootParam = {};
+			for (auto& bindingData : bindingInfo.Binding)
+			{
+				EntrySize += 8;
+			}
+
+			if (EntrySize > ShaderTableEntrySize)
+				ShaderTableEntrySize = EntrySize;
+		}
+		ShaderTableEntrySize = align_to(D3D12_RAYTRACING_SHADER_TABLE_BYTE_ALIGNMENT, ShaderTableEntrySize);
+
+
+		UINT NumShaderTableEntry = 0;
+		for (auto& it : ShaderBinding)
+		{
+			BindingInfo& bi = it.second;
+			if (bi.Type == RAYGEN || bi.Type == MISS || bi.Type == ANYHIT)
+				NumShaderTableEntry++;
+
+		}
+		NumShaderTableEntry += NumInstance;
+
+		ShaderTableSize = ShaderTableEntrySize * NumShaderTableEntry;
+
+		// allocate shader table
+		{
+			D3D12_RESOURCE_DESC bufDesc = {};
+			bufDesc.Alignment = 0;
+			bufDesc.DepthOrArraySize = 1;
+			bufDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+			bufDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
+			bufDesc.Format = DXGI_FORMAT_UNKNOWN;
+			bufDesc.Height = 1;
+			bufDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+			bufDesc.MipLevels = 1;
+			bufDesc.SampleDesc.Count = 1;
+			bufDesc.SampleDesc.Quality = 0;
+			bufDesc.Width = ShaderTableSize * g_dx12_rhi->NumFrame;
+
+			const D3D12_HEAP_PROPERTIES kUploadHeapProps =
+			{
+				D3D12_HEAP_TYPE_UPLOAD,
+				D3D12_CPU_PAGE_PROPERTY_UNKNOWN,
+				D3D12_MEMORY_POOL_UNKNOWN,
+				0,
+				0,
+			};
+
+			g_dx12_rhi->Device->CreateCommittedResource(&kUploadHeapProps, D3D12_HEAP_FLAG_NONE, &bufDesc, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&ShaderTable));
+			NAME_D3D12_OBJECT(ShaderTable);
+		}
+	}
+	
+
 	// raygen : simple, it is just the begin of table
 	// miss : raygen + miss index * EntrySize
 	// hit : raygen + miss(N) + instanceIndex
@@ -1896,22 +1961,23 @@ void RTPipelineStateObject::EndShaderTable()
 		pDataThis = pData + LastIndex * ShaderTableEntrySize;
 
 		//auto& HitProgramInfo = HitProgramBinding[InstanceIndex];
-
-		map<UINT, HitProgramData>& HitProgram = VecHitGroup[0].HitProgramBinding;
-		auto& HitProgramInfo = HitProgram[InstanceIndex];
-
-		
-		//memcpy(pDataThis, RtsoProps->GetShaderIdentifier(HitProgramInfo.HitGroupName.c_str()), D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES);
-		memcpy(pDataThis, RtsoProps->GetShaderIdentifier(VecHitGroup[0].name.c_str()), D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES);
-
-		pDataThis += D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES;
-
-		for (auto& bd : HitProgramInfo.VecData)
+		for (int iHitGroup = 0; iHitGroup < VecHitGroup.size(); iHitGroup++)
 		{
-			*(UINT64*)(pDataThis) = bd.ptr;
-			
-			pDataThis += sizeof(UINT64);
+			map<UINT, HitProgramData>& HitProgram = VecHitGroup[iHitGroup].HitProgramBinding;
+			auto& HitProgramInfo = HitProgram[InstanceIndex];
+
+			memcpy(pDataThis, RtsoProps->GetShaderIdentifier(VecHitGroup[iHitGroup].name.c_str()), D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES);
+
+			pDataThis += D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES;
+
+			for (auto& bd : HitProgramInfo.VecData)
+			{
+				*(UINT64*)(pDataThis) = bd.ptr;
+
+				pDataThis += sizeof(UINT64);
+			}
 		}
+		
 
 		LastIndex++;
 	}
@@ -2358,70 +2424,16 @@ bool RTPipelineStateObject::InitRS(string ShaderFile)
 	HRESULT hr = g_dx12_rhi->Device->CreateStateObject(&descRTSO, IID_PPV_ARGS(&RTPipelineState));
 	if (FAILED(hr))
 	{
+		stringstream ss;
+		ss << "Failed to compile shader : " << ShaderFile << "\n";
+		g_dx12_rhi->errorString += ss.str();
+		OutputDebugStringA(ss.str().c_str());
 		return false;
 	}
 
 	NAME_D3D12_OBJECT(RTPipelineState);
 
-	// find biggiest binding size
-	ShaderTableEntrySize = D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES;
-	for (auto& sb : ShaderBinding)
-	{
-		UINT EntrySize = D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES;
-
-		BindingInfo& bindingInfo = sb.second;
-
-		D3D12_ROOT_PARAMETER RootParam = {};
-		for (auto& bindingData : bindingInfo.Binding)
-		{
-			EntrySize += 8;
-		}
-
-		if (EntrySize > ShaderTableEntrySize)
-			ShaderTableEntrySize = EntrySize;
-	}
-	ShaderTableEntrySize = align_to(D3D12_RAYTRACING_SHADER_TABLE_BYTE_ALIGNMENT, ShaderTableEntrySize);
-
-
-	UINT NumShaderTableEntry = 0;
-	for (auto& it : ShaderBinding)
-	{
-		BindingInfo& bi = it.second;
-		if (bi.Type == RAYGEN || bi.Type == MISS)
-			NumShaderTableEntry++;
-
-	}
-	NumShaderTableEntry += NumInstance;
-
-	ShaderTableSize = ShaderTableEntrySize * NumShaderTableEntry;
-
-	// allocate shader table
-	{
-		D3D12_RESOURCE_DESC bufDesc = {};
-		bufDesc.Alignment = 0;
-		bufDesc.DepthOrArraySize = 1;
-		bufDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-		bufDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
-		bufDesc.Format = DXGI_FORMAT_UNKNOWN;
-		bufDesc.Height = 1;
-		bufDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-		bufDesc.MipLevels = 1;
-		bufDesc.SampleDesc.Count = 1;
-		bufDesc.SampleDesc.Quality = 0;
-		bufDesc.Width = ShaderTableSize * g_dx12_rhi->NumFrame;
-
-		const D3D12_HEAP_PROPERTIES kUploadHeapProps =
-		{
-			D3D12_HEAP_TYPE_UPLOAD,
-			D3D12_CPU_PAGE_PROPERTY_UNKNOWN,
-			D3D12_MEMORY_POOL_UNKNOWN,
-			0,
-			0,
-		};
-
-		g_dx12_rhi->Device->CreateCommittedResource(&kUploadHeapProps, D3D12_HEAP_FLAG_NONE, &bufDesc, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&ShaderTable));
-		NAME_D3D12_OBJECT(ShaderTable);
-	}
+	
 
 	return true;
 }

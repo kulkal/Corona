@@ -131,8 +131,7 @@ void TemporalFilter( uint3 DTid : SV_DispatchThreadID, uint3 GTid : SV_GroupThre
 	{
 		BlendedSH.shY = max(CurrentSH.shY * W + PrevSH.shY * (1-W), float4(0, 0, 0, 0));
     	BlendedSH.CoCg = max(CurrentSH.CoCg * W + PrevSH.CoCg * (1-W), float2(0, 0));	
-
-    	BlendedSpecular = max(CurrentSpecular * W + PrevSpecular * (1-W), float4(0, 0, 0, 0));
+	    BlendedSpecular = max(CurrentSpecular * W + PrevSpecular * (1-W), float4(0, 0, 0, 0));
 	}
 	else
 	{
@@ -141,6 +140,13 @@ void TemporalFilter( uint3 DTid : SV_DispatchThreadID, uint3 GTid : SV_GroupThre
 
 		BlendedSpecular = CurrentSpecular;
 	}
+	
+	// if(pos_ld.x < 0 || pos_ld.x >= RTSize.x || pos_ld.y < 0 || pos_ld.y >= RTSize.y)
+	// 	BlendedSpecular = CurrentSpecular;
+	// else
+	//     BlendedSpecular = max(CurrentSpecular * W + PrevSpecular * (1-W), float4(0, 0, 0, 0));
+
+
 	
 	// BlendedSH.shY = CurrentSH.shY;
 	// BlendedSH.CoCg = CurrentSH.CoCg;

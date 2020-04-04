@@ -47,6 +47,7 @@ class MyToyDX12Renderer : public DXSample
 		GEO_NORMAL,
 		DEPTH,
 		RAW_SH,
+		RAW_CoCg,
 		TEMPORAL_FILTERED_SH,
 		SPATIAL_FILTERED_SH,
 		SH_LIGHTING,
@@ -328,7 +329,7 @@ private:
 	void RecompileShaders();
 public:
 
-	void InitRaytracing();
+	void InitRaytracingData();
 	
 
 	void LoadPipeline();

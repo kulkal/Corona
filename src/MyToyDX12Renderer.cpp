@@ -461,6 +461,7 @@ void MyToyDX12Renderer::LoadAssets()
 	InitTemporalAAPass();
 	InitSpatialDenoisingPass();
 	InitTemporalDenoisingPass();
+	InitRTPSO();
 
 	
 	for (UINT i = 0; i < dx12_rhi->NumFrame; i++)
@@ -637,7 +638,7 @@ void MyToyDX12Renderer::LoadAssets()
 
 	samplerWrap = dx12_rhi->CreateSampler(samplerDesc);
 
-	InitRaytracing();
+	InitRaytracingData();
 
 }
 
@@ -827,7 +828,9 @@ void MyToyDX12Renderer::InitSpatialDenoisingPass()
 	}
 	catch (const std::exception& e)
 	{
-		OutputDebugStringA(reinterpret_cast<const char*>(compilationMsgs->GetBufferPointer()));
+		string errorStr = reinterpret_cast<const char*>(compilationMsgs->GetBufferPointer());
+		OutputDebugStringA(errorStr.c_str());
+		dx12_rhi->errorString += errorStr;
 		compilationMsgs->Release();
 		return;
 	}
@@ -897,7 +900,9 @@ void MyToyDX12Renderer::InitTemporalDenoisingPass()
 	}
 	catch (const std::exception& e)
 	{
-		OutputDebugStringA(reinterpret_cast<const char*>(compilationMsgs->GetBufferPointer()));
+		string errorStr = reinterpret_cast<const char*>(compilationMsgs->GetBufferPointer());
+		OutputDebugStringA(errorStr.c_str());
+		dx12_rhi->errorString += errorStr;
 		compilationMsgs->Release();
 		return;
 	}
@@ -953,7 +958,9 @@ void MyToyDX12Renderer::InitDrawMeshRS()
 	}
 	catch (const std::exception& e)
 	{
-		OutputDebugStringA(reinterpret_cast<const char*>(compilationMsgs->GetBufferPointer()));
+		string errorStr = reinterpret_cast<const char*>(compilationMsgs->GetBufferPointer());
+		OutputDebugStringA(errorStr.c_str());
+		dx12_rhi->errorString += errorStr;
 		compilationMsgs->Release();
 		return;
 	}
@@ -964,7 +971,9 @@ void MyToyDX12Renderer::InitDrawMeshRS()
 	}
 	catch (const std::exception& e)
 	{
-		OutputDebugStringA(reinterpret_cast<const char*>(compilationMsgs->GetBufferPointer()));
+		string errorStr = reinterpret_cast<const char*>(compilationMsgs->GetBufferPointer());
+		OutputDebugStringA(errorStr.c_str());
+		dx12_rhi->errorString += errorStr;
 		compilationMsgs->Release();
 		return;
 	}
@@ -1142,7 +1151,9 @@ void MyToyDX12Renderer::InitCopyPass()
 	}
 	catch (const std::exception& e)
 	{
-		OutputDebugStringA(reinterpret_cast<const char*>(compilationMsgs->GetBufferPointer()));
+		string errorStr = reinterpret_cast<const char*>(compilationMsgs->GetBufferPointer());
+		OutputDebugStringA(errorStr.c_str());
+		dx12_rhi->errorString += errorStr;
 		compilationMsgs->Release();
 		return;
 	}
@@ -1153,7 +1164,10 @@ void MyToyDX12Renderer::InitCopyPass()
 	}
 	catch (const std::exception& e)
 	{
-		OutputDebugStringA(reinterpret_cast<const char*>(compilationMsgs->GetBufferPointer()));
+		string errorStr = reinterpret_cast<const char*>(compilationMsgs->GetBufferPointer());
+		OutputDebugStringA(errorStr.c_str());
+		dx12_rhi->errorString += errorStr;
+
 		compilationMsgs->Release();
 		return;
 	}
@@ -1242,7 +1256,9 @@ void MyToyDX12Renderer::InitDebugPass()
 	}
 	catch (const std::exception& e)
 	{
-		OutputDebugStringA(reinterpret_cast<const char*>(compilationMsgs->GetBufferPointer()));
+		string errorStr = reinterpret_cast<const char*>(compilationMsgs->GetBufferPointer());
+		OutputDebugStringA(errorStr.c_str());
+		dx12_rhi->errorString += errorStr;
 		compilationMsgs->Release();
 		return;
 	}
@@ -1253,7 +1269,9 @@ void MyToyDX12Renderer::InitDebugPass()
 	}
 	catch (const std::exception& e)
 	{
-		OutputDebugStringA(reinterpret_cast<const char*>(compilationMsgs->GetBufferPointer()));
+		string errorStr = reinterpret_cast<const char*>(compilationMsgs->GetBufferPointer());
+		OutputDebugStringA(errorStr.c_str());
+		dx12_rhi->errorString += errorStr;
 		compilationMsgs->Release();
 		return;
 	}
@@ -1321,7 +1339,9 @@ void MyToyDX12Renderer::InitLightingPass()
 	}
 	catch (const std::exception& e)
 	{
-		OutputDebugStringA(reinterpret_cast<const char*>(compilationMsgs->GetBufferPointer()));
+		string errorStr = reinterpret_cast<const char*>(compilationMsgs->GetBufferPointer());
+		OutputDebugStringA(errorStr.c_str());
+		dx12_rhi->errorString += errorStr;
 		compilationMsgs->Release();
 		return;
 	}
@@ -1332,7 +1352,9 @@ void MyToyDX12Renderer::InitLightingPass()
 	}
 	catch (const std::exception& e)
 	{
-		OutputDebugStringA(reinterpret_cast<const char*>(compilationMsgs->GetBufferPointer()));
+		string errorStr = reinterpret_cast<const char*>(compilationMsgs->GetBufferPointer());
+		OutputDebugStringA(errorStr.c_str());
+		dx12_rhi->errorString += errorStr;
 		compilationMsgs->Release();
 		return;
 	}
@@ -1405,7 +1427,9 @@ void MyToyDX12Renderer::InitTemporalAAPass()
 	}
 	catch (const std::exception& e)
 	{
-		OutputDebugStringA(reinterpret_cast<const char*>(compilationMsgs->GetBufferPointer()));
+		string errorStr = reinterpret_cast<const char*>(compilationMsgs->GetBufferPointer());
+		OutputDebugStringA(errorStr.c_str());
+		dx12_rhi->errorString += errorStr;
 		compilationMsgs->Release();
 		return;
 	}
@@ -1416,7 +1440,9 @@ void MyToyDX12Renderer::InitTemporalAAPass()
 	}
 	catch (const std::exception& e)
 	{
-		OutputDebugStringA(reinterpret_cast<const char*>(compilationMsgs->GetBufferPointer()));
+		string errorStr = reinterpret_cast<const char*>(compilationMsgs->GetBufferPointer());
+		OutputDebugStringA(errorStr.c_str());
+		dx12_rhi->errorString += errorStr;
 		compilationMsgs->Release();
 		return;
 	}
@@ -1642,6 +1668,31 @@ void MyToyDX12Renderer::DebugPass()
 		cb.DebugMode = RAW_COPY;
 		RS_Debug->SetConstantValue("DebugPassCB", &cb, dx12_rhi->GlobalCmdList->CmdList.Get());
 		RS_Debug->SetTexture("SrcTex", GIBufferSH.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
+		dx12_rhi->GlobalCmdList->CmdList->DrawInstanced(4, 1, 0, 0);
+		RS_Debug->currentDrawCallIndex++;
+	});
+	functions.push_back([&](EDebugVisualization eFS) {
+		// raw CoCg
+		DebugPassCB cb;
+
+		if (eFS == EDebugVisualization::RAW_CoCg)
+		{
+			cb.Offset = glm::vec4(0, 0, 0, 0);
+			cb.Scale = glm::vec4(1, 1, 0, 0);
+		}
+		else if (eFS == EDebugVisualization::NO_FULLSCREEN)
+		{
+			cb.Offset = glm::vec4(0.25, -0.25, 0, 0);
+			cb.Scale = glm::vec4(0.25, 0.25, 0, 0);
+		}
+		else
+		{
+			return;
+		}
+
+		cb.DebugMode = RAW_COPY;
+		RS_Debug->SetConstantValue("DebugPassCB", &cb, dx12_rhi->GlobalCmdList->CmdList.Get());
+		RS_Debug->SetTexture("SrcTex", GIBufferColor.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
 		dx12_rhi->GlobalCmdList->CmdList->DrawInstanced(4, 1, 0, 0);
 		RS_Debug->currentDrawCallIndex++;
 	});
@@ -2071,6 +2122,8 @@ void MyToyDX12Renderer::OnUpdate()
 
 	if (bRecompileShaders)
 	{
+		dx12_rhi->errorString += string("recompile all shaders\n");
+
 		RecompileShaders();
 		bRecompileShaders = false;
 	}
@@ -2147,7 +2200,6 @@ void MyToyDX12Renderer::OnRender()
 
 	ImGui::Checkbox("Enable TemporalAA", &bEnableTAA);
 	ImGui::Checkbox("Visualize Buffers", &bDebugDraw);
-
 	
 	/*
 	enum class EDebugVisualization
@@ -2157,6 +2209,7 @@ void MyToyDX12Renderer::OnRender()
 		GEO_NORMAL,
 		DEPTH,
 		RAW_SH,
+		RAW_CoCg,
 		TEMPORAL_FILTERED_SH,
 		SPATIAL_FILTERED_SH,
 		SH_LIGHTING,
@@ -2175,6 +2228,7 @@ void MyToyDX12Renderer::OnRender()
 		"GEO_NORMAL",
 		"DEPTH",
 		"RAW_SH",
+		"RAW_CoCg",
 		"TEMPORAL_FILTERED_SH",
 		"SPATIAL_FILTERED_SH",
 		"SH_LIGHTING",
@@ -2214,7 +2268,14 @@ void MyToyDX12Renderer::OnRender()
 
 	ImGui::SliderFloat("IndirectDiffuse Depth Weight Factor", &SpatialFilterCB.IndirectDiffuseWeightFactorDepth, 0.0f, 20.0f);
 	ImGui::SliderFloat("IndirectDiffuse Normal Weight Factor", &SpatialFilterCB.IndirectDiffuseWeightFactorNormal, 0.0f, 20.0f);
-
+		
+	if (dx12_rhi->errorString.size() > 0)
+	{
+		ImGui::Begin("error");
+		ImGui::TextWrapped(dx12_rhi->errorString.c_str());
+		ImGui::End();
+	}
+	
 	ImGui::End();
 
 	ImGui::Render();
@@ -2618,7 +2679,7 @@ void MyToyDX12Renderer::RecompileShaders()
 	InitTemporalAAPass();
 }
 
-void MyToyDX12Renderer::InitRaytracing()
+void MyToyDX12Renderer::InitRaytracingData()
 {
 	UINT NumTotalMesh = Sponza->meshes.size() + ShaderBall->meshes.size();
 	vecBLAS.reserve(NumTotalMesh);
@@ -2630,7 +2691,6 @@ void MyToyDX12Renderer::InitRaytracing()
 	// TODO : per model world matrix
 	TLAS = dx12_rhi->CreateTLAS(vecBLAS);
 	
-	InitRTPSO();
 
 	InstancePropertyBuffer = dx12_rhi->CreateBuffer(sizeof(InstanceProperty) * 500);
 
@@ -2671,7 +2731,6 @@ void MyToyDX12Renderer::InitRTPSO()
 		TEMP_PSO_RT_SHADOW->BindSRV("global", "gRtScene", 0);
 		TEMP_PSO_RT_SHADOW->BindSRV("global", "DepthTex", 1);
 		TEMP_PSO_RT_SHADOW->BindSRV("global", "WorldNormalTex", 2);
-		TEMP_PSO_RT_SHADOW->BindSRV("global", "AlbedoTex", 3);
 
 		TEMP_PSO_RT_SHADOW->BindCBV("global", "ViewParameter", 0, sizeof(RTShadowViewParamCB), 1);
 		TEMP_PSO_RT_SHADOW->BindSampler("global", "samplerWrap", 0);
@@ -2680,8 +2739,17 @@ void MyToyDX12Renderer::InitRTPSO()
 
 		TEMP_PSO_RT_SHADOW->AddShader("miss", RTPipelineStateObject::MISS);
 		TEMP_PSO_RT_SHADOW->AddShader("chs", RTPipelineStateObject::HIT);
-		TEMP_PSO_RT_SHADOW->AddShader("anyhit", RTPipelineStateObject::ANYHIT);
+		TEMP_PSO_RT_SHADOW->BindSRV("chs", "vertices", 3);
+		TEMP_PSO_RT_SHADOW->BindSRV("chs", "indices", 4);
+		TEMP_PSO_RT_SHADOW->BindSRV("chs", "AlbedoTex", 5);
+		TEMP_PSO_RT_SHADOW->BindSRV("chs", "InstanceProperty", 6);
 
+
+		TEMP_PSO_RT_SHADOW->AddShader("anyhit", RTPipelineStateObject::ANYHIT);
+		TEMP_PSO_RT_SHADOW->BindSRV("anyhit", "vertices", 3);
+		TEMP_PSO_RT_SHADOW->BindSRV("anyhit", "indices", 4);
+		TEMP_PSO_RT_SHADOW->BindSRV("anyhit", "AlbedoTex", 5);
+		TEMP_PSO_RT_SHADOW->BindSRV("anyhit", "InstanceProperty", 6);
 
 		TEMP_PSO_RT_SHADOW->MaxRecursion = 1;
 		TEMP_PSO_RT_SHADOW->MaxAttributeSizeInBytes = sizeof(float) * 2;
@@ -2700,7 +2768,7 @@ void MyToyDX12Renderer::InitRTPSO()
 		TEMP_PSO_RT_REFLECTION->NumInstance = vecBLAS.size();// scene->meshes.size();
 
 		TEMP_PSO_RT_REFLECTION->AddHitGroup("HitGroup", "chs", "");
-		//TEMP_PSO_RT_REFLECTION->AddHitGroup("ShadowHitGroup", "chsShadow", "anyhitShadow");
+		//TEMP_PSO_RT_REFLECTION->AddHitGroup("ShadowHitGroup", "chsShadow", "");
 
 
 		TEMP_PSO_RT_REFLECTION->AddShader("rayGen", RTPipelineStateObject::RAYGEN);
@@ -2727,17 +2795,19 @@ void MyToyDX12Renderer::InitRTPSO()
 		TEMP_PSO_RT_REFLECTION->BindSRV("chs", "AlbedoTex", 5);
 		TEMP_PSO_RT_REFLECTION->BindSRV("chs", "InstanceProperty", 9);
 
+
+
 		//TEMP_PSO_RT_REFLECTION->AddShader("chsShadow", RTPipelineStateObject::HIT);
-		//TEMP_PSO_RT_REFLECTION->BindSRV("chsShadow", "vertices", 3);
-		//TEMP_PSO_RT_REFLECTION->BindSRV("chsShadow", "indices", 4);
-		//TEMP_PSO_RT_REFLECTION->BindSRV("chsShadow", "AlbedoTex", 5);
-		//TEMP_PSO_RT_REFLECTION->BindSRV("chsShadow", "InstanceProperty", 9);
+		/*TEMP_PSO_RT_REFLECTION->BindSRV("chsShadow", "vertices", 3);
+		TEMP_PSO_RT_REFLECTION->BindSRV("chsShadow", "indices", 4);
+		TEMP_PSO_RT_REFLECTION->BindSRV("chsShadow", "AlbedoTex", 5);
+		TEMP_PSO_RT_REFLECTION->BindSRV("chsShadow", "InstanceProperty", 9);*/
 
 		//TEMP_PSO_RT_REFLECTION->AddShader("anyhitShadow", RTPipelineStateObject::ANYHIT);
-		//TEMP_PSO_RT_REFLECTION->BindSRV("anyhitShadow", "vertices", 3);
-		//TEMP_PSO_RT_REFLECTION->BindSRV("anyhitShadow", "indices", 4);
-		//TEMP_PSO_RT_REFLECTION->BindSRV("anyhitShadow", "AlbedoTex", 5);
-		//TEMP_PSO_RT_REFLECTION->BindSRV("anyhitShadow", "InstanceProperty", 9);
+		/*TEMP_PSO_RT_REFLECTION->BindSRV("anyhitShadow", "vertices", 3);
+		TEMP_PSO_RT_REFLECTION->BindSRV("anyhitShadow", "indices", 4);
+		TEMP_PSO_RT_REFLECTION->BindSRV("anyhitShadow", "AlbedoTex", 5);
+		TEMP_PSO_RT_REFLECTION->BindSRV("anyhitShadow", "InstanceProperty", 9);*/
 
 		TEMP_PSO_RT_REFLECTION->MaxRecursion = 1;
 		TEMP_PSO_RT_REFLECTION->MaxAttributeSizeInBytes = sizeof(float) * 2;
@@ -2757,6 +2827,8 @@ void MyToyDX12Renderer::InitRTPSO()
 		TEMP_PSO_RT_GI->NumInstance = vecBLAS.size();// scene->meshes.size();
 
 		TEMP_PSO_RT_GI->AddHitGroup("HitGroup", "chs", "");
+		//TEMP_PSO_RT_GI->AddHitGroup("ShadowHitGroup", "chsShadow", "anyhitShadow");
+
 
 		TEMP_PSO_RT_GI->AddShader("rayGen", RTPipelineStateObject::RAYGEN);
 		
@@ -2770,6 +2842,8 @@ void MyToyDX12Renderer::InitRTPSO()
 		TEMP_PSO_RT_GI->BindSRV("global", "BlueNoiseTex", 7);
 
 		TEMP_PSO_RT_GI->AddShader("miss", RTPipelineStateObject::MISS);
+		//TEMP_PSO_RT_GI->AddShader("missShadow", RTPipelineStateObject::MISS);
+
 
 		TEMP_PSO_RT_GI->AddShader("chs", RTPipelineStateObject::HIT);
 		TEMP_PSO_RT_GI->BindSRV("chs", "vertices", 3);
@@ -2777,6 +2851,17 @@ void MyToyDX12Renderer::InitRTPSO()
 		TEMP_PSO_RT_GI->BindSRV("chs", "AlbedoTex", 5);
 		TEMP_PSO_RT_GI->BindSRV("chs", "InstanceProperty", 6);
 
+		/*TEMP_PSO_RT_GI->AddShader("chsShadow", RTPipelineStateObject::HIT);
+		TEMP_PSO_RT_GI->BindSRV("chsShadow", "vertices", 3);
+		TEMP_PSO_RT_GI->BindSRV("chsShadow", "indices", 4);
+		TEMP_PSO_RT_GI->BindSRV("chsShadow", "AlbedoTex", 5);
+		TEMP_PSO_RT_GI->BindSRV("chsShadow", "InstanceProperty", 9);
+
+		TEMP_PSO_RT_GI->AddShader("anyhitShadow", RTPipelineStateObject::ANYHIT);
+		TEMP_PSO_RT_GI->BindSRV("anyhitShadow", "vertices", 3);
+		TEMP_PSO_RT_GI->BindSRV("anyhitShadow", "indices", 4);
+		TEMP_PSO_RT_GI->BindSRV("anyhitShadow", "AlbedoTex", 5);
+		TEMP_PSO_RT_GI->BindSRV("anyhitShadow", "InstanceProperty", 9);*/
 
 		TEMP_PSO_RT_GI->MaxRecursion = 1;
 		TEMP_PSO_RT_GI->MaxAttributeSizeInBytes = sizeof(float) * 2;
@@ -2813,13 +2898,26 @@ void MyToyDX12Renderer::RaytraceShadowPass()
 
 	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(ShadowBuffer->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS));
 
+	PSO_RT_SHADOW->NumInstance = vecBLAS.size();
+
 	PSO_RT_SHADOW->BeginShaderTable();
 
 	int i = 0;
 	for (auto&as : vecBLAS)
 	{
+		auto& mesh = as->mesh;
+		Texture* diffuseTex = mesh->Draws[0].mat->Diffuse.get();
+
+		if (!diffuseTex)
+			diffuseTex = DefaultWhiteTex.get();
+
 		PSO_RT_SHADOW->ResetHitProgram(i);
 		PSO_RT_SHADOW->StartHitProgram("HitGroup", i);
+
+		PSO_RT_SHADOW->AddDescriptor2HitProgram("HitGroup", mesh->Vb->GpuHandleSRV, i);
+		PSO_RT_SHADOW->AddDescriptor2HitProgram("HitGroup", mesh->Ib->GpuHandleSRV, i);
+		PSO_RT_SHADOW->AddDescriptor2HitProgram("HitGroup", diffuseTex->GpuHandleSRV, i);
+		PSO_RT_SHADOW->AddDescriptor2HitProgram("HitGroup", InstancePropertyBuffer->GpuHandleSRV, i);
 
 		i++;
 	}
@@ -2828,7 +2926,6 @@ void MyToyDX12Renderer::RaytraceShadowPass()
 	PSO_RT_SHADOW->SetSRV("global", "gRtScene", TLAS->GPUHandle);
 	PSO_RT_SHADOW->SetSRV("global", "DepthTex", DepthBuffer->GpuHandleSRV);
 	PSO_RT_SHADOW->SetSRV("global", "WorldNormalTex", GeomNormalBuffer->GpuHandleSRV);
-	PSO_RT_SHADOW->SetSRV("global", "AlbedoTex", AlbedoBuffer->GpuHandleSRV);
 	PSO_RT_SHADOW->SetCBVValue("global", "ViewParameter", &RTShadowViewParam, sizeof(RTShadowViewParamCB));
 	PSO_RT_SHADOW->SetSampler("global", "samplerWrap", samplerWrap.get());
 
@@ -2846,6 +2943,7 @@ void MyToyDX12Renderer::RaytraceReflectionPass()
 
 	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(SpeculaGIBuffer->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS));
 
+	PSO_RT_REFLECTION->NumInstance = vecBLAS.size();
 	PSO_RT_REFLECTION->BeginShaderTable();
 
 	PSO_RT_REFLECTION->SetUAV("global", "ReflectionResult", SpeculaGIBuffer->GpuHandleUAV);
@@ -2864,21 +2962,24 @@ void MyToyDX12Renderer::RaytraceReflectionPass()
 	for(auto&as : vecBLAS)
 	{
 		auto& mesh = as->mesh;
-
-		PSO_RT_REFLECTION->ResetHitProgram(i);
-		PSO_RT_REFLECTION->StartHitProgram("HitGroup", i);
-
 		Texture* diffuseTex = mesh->Draws[0].mat->Diffuse.get();
-		
+
 		if (!diffuseTex)
 			diffuseTex = DefaultWhiteTex.get();
-		
+		PSO_RT_REFLECTION->ResetHitProgram(i);
+
+		PSO_RT_REFLECTION->StartHitProgram("HitGroup", i);
 		PSO_RT_REFLECTION->AddDescriptor2HitProgram("HitGroup", mesh->Vb->GpuHandleSRV, i);
 		PSO_RT_REFLECTION->AddDescriptor2HitProgram("HitGroup", mesh->Ib->GpuHandleSRV, i);
 		PSO_RT_REFLECTION->AddDescriptor2HitProgram("HitGroup", diffuseTex->GpuHandleSRV, i);
 		PSO_RT_REFLECTION->AddDescriptor2HitProgram("HitGroup", InstancePropertyBuffer->GpuHandleSRV, i);
 
-
+		//PSO_RT_REFLECTION->StartHitProgram("ShadowHitGroup", i);
+		/*
+		PSO_RT_REFLECTION->AddDescriptor2HitProgram("ShadowHitGroup", mesh->Vb->GpuHandleSRV, i);
+		PSO_RT_REFLECTION->AddDescriptor2HitProgram("ShadowHitGroup", mesh->Ib->GpuHandleSRV, i);
+		PSO_RT_REFLECTION->AddDescriptor2HitProgram("ShadowHitGroup", diffuseTex->GpuHandleSRV, i);
+		PSO_RT_REFLECTION->AddDescriptor2HitProgram("ShadowHitGroup", InstancePropertyBuffer->GpuHandleSRV, i);*/
 		i++;
 	}
 
@@ -2897,7 +2998,7 @@ void MyToyDX12Renderer::RaytraceGIPass()
 	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(GIBufferSH->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS));
 	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(GIBufferColor->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS));
 
-
+	PSO_RT_GI->NumInstance = vecBLAS.size();
 	PSO_RT_GI->BeginShaderTable();
 
 	PSO_RT_GI->SetUAV("global", "GIResultSH", GIBufferSH->GpuHandleUAV);
@@ -2915,18 +3016,24 @@ void MyToyDX12Renderer::RaytraceGIPass()
 	for(auto&as : vecBLAS)
 	{
 		auto& mesh = as->mesh;
-
-		PSO_RT_GI->ResetHitProgram(i);
-		PSO_RT_GI->StartHitProgram("HitGroup", i);
-
+		
 		Texture* diffuseTex = mesh->Draws[0].mat->Diffuse.get();
 		if (!diffuseTex)
 			diffuseTex = DefaultWhiteTex.get();
-		
+
+		PSO_RT_GI->ResetHitProgram(i);
+
+		PSO_RT_GI->StartHitProgram("HitGroup", i);
 		PSO_RT_GI->AddDescriptor2HitProgram("HitGroup", mesh->Vb->GpuHandleSRV, i);
 		PSO_RT_GI->AddDescriptor2HitProgram("HitGroup", mesh->Ib->GpuHandleSRV, i);
 		PSO_RT_GI->AddDescriptor2HitProgram("HitGroup", diffuseTex->GpuHandleSRV, i);
 		PSO_RT_GI->AddDescriptor2HitProgram("HitGroup", InstancePropertyBuffer->GpuHandleSRV, i);
+
+		/*PSO_RT_GI->StartHitProgram("ShadowHitGroup", i);
+		PSO_RT_GI->AddDescriptor2HitProgram("ShadowHitGroup", mesh->Vb->GpuHandleSRV, i);
+		PSO_RT_GI->AddDescriptor2HitProgram("ShadowHitGroup", mesh->Ib->GpuHandleSRV, i);
+		PSO_RT_GI->AddDescriptor2HitProgram("ShadowHitGroup", diffuseTex->GpuHandleSRV, i);
+		PSO_RT_GI->AddDescriptor2HitProgram("ShadowHitGroup", InstancePropertyBuffer->GpuHandleSRV, i);*/
 
 		i++;
 	}

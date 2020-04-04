@@ -222,138 +222,13 @@ void miss(inout RayPayload payload)
     payload.distance = 0;
 }
 
-
-
-struct Vertex
-{
-    float3 position;
-    float3 normal;
-    float2 uv;
-    float3 tangent;
-};
-
-uint3 Load3x16BitIndices(uint offsetBytes)
-{
-    uint3 index;
-
-    // ByteAdressBuffer loads must be aligned at a 4 byte boundary.
-    // Since we need to read three 16 bit indices: { 0, 1, 2 } 
-    // aligned at a 4 byte boundary as: { 0 1 } { 2 0 } { 1 2 } { 0 1 } ...
-    // we will load 8 bytes (~ 4 indices { a b | c d }) to handle two possible index triplet layouts,
-    // based on first index's offsetBytes being aligned at the 4 byte boundary or not:
-    //  Aligned:     { 0 1 | 2 - }
-    //  Not aligned: { - 0 | 1 2 }
-    const uint dwordAlignedOffset = offsetBytes & ~3;    
-    const uint2 four16BitIndices = indices.Load2(dwordAlignedOffset);
- 
-    // Aligned: { 0 1 | 2 - } => retrieve first three 16bit indices
-    if (dwordAlignedOffset == offsetBytes)
-    {
-        index.x = four16BitIndices.x & 0xffff;
-        index.y = (four16BitIndices.x >> 16) & 0xffff;
-        index.z = four16BitIndices.y & 0xffff;
-    }
-    else // Not aligned: { - 0 | 1 2 } => retrieve last three 16bit indices
-    {
-        index.x = (four16BitIndices.x >> 16) & 0xffff;
-        index.y = four16BitIndices.y & 0xffff;
-        index.z = (four16BitIndices.y >> 16) & 0xffff;
-    }
-
-    return index;
-}
-
-uint3 GetIndices(uint triangleIndex)
-{
-    uint baseIndex = (triangleIndex * 3 * 2) ;
-    uint3 index;
-
-    // ByteAdressBuffer loads must be aligned at a 4 byte boundary.
-    // Since we need to read three 16 bit indices: { 0, 1, 2 } 
-    // aligned at a 4 byte boundary as: { 0 1 } { 2 0 } { 1 2 } { 0 1 } ...
-    // we will load 8 bytes (~ 4 indices { a b | c d }) to handle two possible index triplet layouts,
-    // based on first index's offsetBytes being aligned at the 4 byte boundary or not:
-    //  Aligned:     { 0 1 | 2 - }
-    //  Not aligned: { - 0 | 1 2 }
-    const uint dwordAlignedOffset = baseIndex & ~3;    
-    const uint2 four16BitIndices = indices.Load2(dwordAlignedOffset);
- 
-    // Aligned: { 0 1 | 2 - } => retrieve first three 16bit indices
-    if (dwordAlignedOffset == baseIndex)
-    {
-        index.x = four16BitIndices.x & 0xffff;
-        index.y = (four16BitIndices.x >> 16) & 0xffff;
-        index.z = four16BitIndices.y & 0xffff;
-    }
-    else // Not aligned: { - 0 | 1 2 } => retrieve last three 16bit indices
-    {
-        index.x = (four16BitIndices.x >> 16) & 0xffff;
-        index.y = four16BitIndices.y & 0xffff;
-        index.z = (four16BitIndices.y >> 16) & 0xffff;
-    }
-
-    return index;
-}
-
-Vertex GetVertexAttributes(uint triangleIndex, float3 barycentrics)
-{
-    uint3 index = GetIndices(triangleIndex);
-    Vertex v;
-    v.position = float3(0, 0, 0);
-    v.uv = float2(0, 0);
-
-    // for (uint i = 0; i < 3; i++)
-    // {
-    //     int address = (index[i] * 11) * 4;
-    //     v.position += asfloat(vertices.Load3(address)) * barycentrics[i];
-    //     address += (3 * 8);
-    //     v.uv += asfloat(vertices.Load2(address)) * barycentrics[i];
-    // }
-
-    float3 p0 = asfloat(vertices.Load3((index[0] * 11) * 4));
-    float3 p1 = asfloat(vertices.Load3((index[1] * 11) * 4));
-    float3 p2 = asfloat(vertices.Load3((index[2] * 11) * 4));
-
-    float4x4 WorldMatrix = {
-        asfloat(InstanceProperty.Load4(InstanceID()*4*16)), 
-        asfloat(InstanceProperty.Load4(InstanceID()*4*16 + 16)), 
-        asfloat(InstanceProperty.Load4(InstanceID()*4*16 + 16*2)),
-        asfloat(InstanceProperty.Load4(InstanceID()*4*16 + 16*3)),
-    };
-
-
-    v.position += p0 * barycentrics[0];
-    v.position += p1 * barycentrics[1];
-    v.position += p2 * barycentrics[2];
-
-    v.position = mul(float4(v.position, 1), WorldMatrix).xyz;
-
-    float2 uv0 = asfloat(vertices.Load2((index[0] * 11) * 4) + 3*8);
-    float2 uv1 = asfloat(vertices.Load2((index[1] * 11) * 4) + 3*8);
-    float2 uv2 = asfloat(vertices.Load2((index[2] * 11) * 4) + 3*8);
-
-    v.uv += uv0 * barycentrics[0];
-    v.uv += uv1 * barycentrics[1];
-    v.uv += uv2 * barycentrics[2];
-
-
-
-    float3 e1 = p1 - p0;
-    float3 e2 = p2 - p0;
-    v.normal = normalize(cross(e1, e2));
-
-    v.normal = mul(float4(v.normal, 0), WorldMatrix).xyz;
-    return v;
-}
-
-
-
 [shader("closesthit")]
 void chs(inout RayPayload payload, in BuiltInTriangleIntersectionAttributes attribs)
 {
     float3 barycentrics = float3(1.0 - attribs.barycentrics.x - attribs.barycentrics.y, attribs.barycentrics.x, attribs.barycentrics.y);
     uint triangleIndex = PrimitiveIndex();
-    Vertex vertex = GetVertexAttributes(triangleIndex, barycentrics);
+    // Vertex vertex = GetVertexAttributes(triangleIndex, barycentrics);
+    Vertex vertex = GetVertexAttributes(InstanceID(), vertices, indices, InstanceProperty, triangleIndex, barycentrics);
 
     payload.position = vertex.position;
     payload.normal = vertex.normal;
@@ -361,3 +236,37 @@ void chs(inout RayPayload payload, in BuiltInTriangleIntersectionAttributes attr
 
     payload.distance = RayTCurrent();
 }
+
+
+[shader("closesthit")]
+void chsShadow(inout RayPayload payload, in BuiltInTriangleIntersectionAttributes attribs)
+{
+    // float3 barycentrics = float3(1.0 - attribs.barycentrics.x - attribs.barycentrics.y, attribs.barycentrics.x, attribs.barycentrics.y);
+    // uint triangleIndex = PrimitiveIndex();
+    // Vertex vertex = GetVertexAttributes(triangleIndex, barycentrics);
+
+    // payload.position = vertex.position;
+    // payload.normal = vertex.normal;
+    // payload.color =  AlbedoTex.SampleLevel(sampleWrap, vertex.uv, 0).xyz;
+
+    // payload.distance = RayTCurrent();
+}
+
+
+[shader("anyhit")]
+void anyhitShadow(inout RayPayload payload, in BuiltInTriangleIntersectionAttributes attribs)
+{
+    payload.distance = RayTCurrent();;
+
+    AcceptHitAndEndSearch();
+}
+
+[shader("miss")]
+void missShadow(inout RayPayload payload)
+{
+    payload.position = float3(0, 0, 0);
+    payload.color = float3(0.0, 0.2, 0.4);
+    payload.normal = float3(0, 0, -1);
+    payload.distance = 0;
+}
+

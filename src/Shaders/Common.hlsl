@@ -214,3 +214,120 @@ float GGX(float3 V, float3 L, float3 N, float roughness, float NoH_offset)
 
     return 0;
 }
+
+
+struct Vertex
+{
+    float3 position;
+    float3 normal;
+    float2 uv;
+    float3 tangent;
+};
+
+// uint3 Load3x16BitIndices(uint offsetBytes)
+// {
+//     uint3 index;
+
+//     // ByteAdressBuffer loads must be aligned at a 4 byte boundary.
+//     // Since we need to read three 16 bit indices: { 0, 1, 2 } 
+//     // aligned at a 4 byte boundary as: { 0 1 } { 2 0 } { 1 2 } { 0 1 } ...
+//     // we will load 8 bytes (~ 4 indices { a b | c d }) to handle two possible index triplet layouts,
+//     // based on first index's offsetBytes being aligned at the 4 byte boundary or not:
+//     //  Aligned:     { 0 1 | 2 - }
+//     //  Not aligned: { - 0 | 1 2 }
+//     const uint dwordAlignedOffset = offsetBytes & ~3;    
+//     const uint2 four16BitIndices = indices.Load2(dwordAlignedOffset);
+ 
+//     // Aligned: { 0 1 | 2 - } => retrieve first three 16bit indices
+//     if (dwordAlignedOffset == offsetBytes)
+//     {
+//         index.x = four16BitIndices.x & 0xffff;
+//         index.y = (four16BitIndices.x >> 16) & 0xffff;
+//         index.z = four16BitIndices.y & 0xffff;
+//     }
+//     else // Not aligned: { - 0 | 1 2 } => retrieve last three 16bit indices
+//     {
+//         index.x = (four16BitIndices.x >> 16) & 0xffff;
+//         index.y = four16BitIndices.y & 0xffff;
+//         index.z = (four16BitIndices.y >> 16) & 0xffff;
+//     }
+
+//     return index;
+// }
+
+uint3 GetIndices(ByteAddressBuffer ib, uint triangleIndex)
+{
+    uint baseIndex = (triangleIndex * 3 * 2) ;
+    uint3 index;
+
+    // ByteAdressBuffer loads must be aligned at a 4 byte boundary.
+    // Since we need to read three 16 bit indices: { 0, 1, 2 } 
+    // aligned at a 4 byte boundary as: { 0 1 } { 2 0 } { 1 2 } { 0 1 } ...
+    // we will load 8 bytes (~ 4 indices { a b | c d }) to handle two possible index triplet layouts,
+    // based on first index's offsetBytes being aligned at the 4 byte boundary or not:
+    //  Aligned:     { 0 1 | 2 - }
+    //  Not aligned: { - 0 | 1 2 }
+    const uint dwordAlignedOffset = baseIndex & ~3;    
+    const uint2 four16BitIndices = ib.Load2(dwordAlignedOffset);
+ 
+    // Aligned: { 0 1 | 2 - } => retrieve first three 16bit indices
+    if (dwordAlignedOffset == baseIndex)
+    {
+        index.x = four16BitIndices.x & 0xffff;
+        index.y = (four16BitIndices.x >> 16) & 0xffff;
+        index.z = four16BitIndices.y & 0xffff;
+    }
+    else // Not aligned: { - 0 | 1 2 } => retrieve last three 16bit indices
+    {
+        index.x = (four16BitIndices.x >> 16) & 0xffff;
+        index.y = four16BitIndices.y & 0xffff;
+        index.z = (four16BitIndices.y >> 16) & 0xffff;
+    }
+
+    return index;
+}
+
+Vertex GetVertexAttributes(uint instanceID, ByteAddressBuffer vb, ByteAddressBuffer ib, ByteAddressBuffer ip, uint triangleIndex, float3 barycentrics)
+{
+   uint3 index = GetIndices(ib, triangleIndex);
+    Vertex v;
+    v.position = float3(0, 0, 0);
+    v.uv = float2(0, 0);
+
+
+    float3 p0 = asfloat(vb.Load3(index[0] * 44));
+    float3 p1 = asfloat(vb.Load3(index[1] * 44));
+    float3 p2 = asfloat(vb.Load3(index[2] * 44));
+
+    float4x4 WorldMatrix = {
+        asfloat(ip.Load4(instanceID*4*16)), 
+        asfloat(ip.Load4(instanceID*4*16 + 16)), 
+        asfloat(ip.Load4(instanceID*4*16 + 16*2)),
+        asfloat(ip.Load4(instanceID*4*16 + 16*3)),
+    };
+
+
+    v.position += p0 * barycentrics[0];
+    v.position += p1 * barycentrics[1];
+    v.position += p2 * barycentrics[2];
+
+    v.position = mul(float4(v.position, 1), WorldMatrix).xyz;
+
+    float2 uv0 = asfloat(vb.Load2(index[0] * 44 + 24));
+    float2 uv1 = asfloat(vb.Load2(index[1] * 44 + 24));
+    float2 uv2 = asfloat(vb.Load2(index[2] * 44 + 24));
+
+    v.uv += uv0 * barycentrics[0];
+    v.uv += uv1 * barycentrics[1];
+    v.uv += uv2 * barycentrics[2];
+
+    // v.uv = v.position.xy;
+
+
+    float3 e1 = p1 - p0;
+    float3 e2 = p2 - p0;
+    v.normal = normalize(cross(e1, e2));
+
+    v.normal = mul(float4(v.normal, 0), WorldMatrix).xyz;
+    return v;
+}

@@ -93,6 +93,7 @@ float4 PSMain(PSInput input) : SV_TARGET
 
         float3 IndirectDiffuse = project_SH_irradiance(sh_indirect, WorldNormal);
         SrcColor = float4(IndirectDiffuse, 0);
+        // SrcColor = float4(sh_indirect.shY);
     }
     else if(DebugMode == 6) // DEPTH
     {

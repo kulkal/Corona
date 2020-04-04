@@ -43,7 +43,13 @@ struct RayPayload
     float3 position;
     float3 color;
     float3 normal;
-    float distance;
+    // float distance;
+    bool bHit;
+};
+
+struct ShadowRayPayload
+{
+    bool bHit;
 };
 
 /*
@@ -125,38 +131,6 @@ float3 ImportanceSampleGGX_VNDF(float2 u, float roughness, float3 V, float3x3 TB
     float3 Ne = float3(alpha * Nh.x, alpha * Nh.y, max(0.0, Nh.z));
 
     return normalize(mul(Ne, TBN));
-
-
-    // float3 alpha = square(roughness);
-
-    // // Transform incoming direction to local space, with geometry normal pointing to [0, 0, 1]
-    // float4 q = getOrientation(float3(0, 0, 1), N);
-    // float3 Ve = orientVector(inverseOrientation(q), V);
-
-    // // Section 3.2: transforming the view direction to the hemisphere configuration
-    // float3 Vh = normalize(float3(alpha.x * Ve.x, alpha.y * Ve.y, Ve.z));
-
-    // // Section 4.1: orthonormal basis (with special case if cross product is zero)
-    // float3 T1 = (Vh.z < 0.9999) ? normalize(cross(float3(0, 0, 1), Vh)) : float3(1, 0, 0);
-    // float3 T2 = cross(Vh, T1);
-
-    // // Section 4.2: parameterization of the projected area
-    // float r = sqrt(u.x);
-    // float phi = 2*PI * u.y;
-    // float t1 = r * cos(phi);
-    // float t2 = r * sin(phi);
-    // float s = 0.5 * (1.0 + Vh.z);
-    // t2 = lerp(sqrt(max(mad(-t1, t1, 1), 0)), t2, s);
-
-    // // Section 4.3: reprojection onto hemisphere
-    // float3 Nh = t1 * T1 + t2 * T2 + sqrt(max(0.0, mad(-t1, t1, mad(-t2, t2, 1))))*Vh;
-
-    // // Section 3.4: transforming the normal back to the ellipsoid configuration
-    // float3 Ne = normalize(float3(alpha.x * Nh.x, alpha.y * Nh.y, max(0.0, Nh.z)));
-
-    // float3 H = orientVector(q, Ne);
-
-    // return H;
 }
 
 float3x3 buildTBN(float3 normal) {
@@ -244,7 +218,8 @@ void rayGen
 	RayPayload payload;
 	TraceRay(gRtScene, 0 /*rayFlags*/, 0xFF, 0 /* ray index*/, 0, 0, ray, payload);
 
-    if(payload.distance == 0)
+    // if(payload.bHit == false)
+    if(false)
     {
         // hit sky
         float3 Radiance = payload.color * LightIntensity;
@@ -260,12 +235,14 @@ void rayGen
         shadowRay.TMin = 0;
         shadowRay.TMax = 100000;
 
-        RayPayload shadowPayload;
+        ShadowRayPayload shadowPayload;
+        shadowPayload.bHit = true;
         TraceRay(gRtScene, 0 /*rayFlags*/, 0xFF, 0 /* ray index*/, 0, 0, shadowRay, shadowPayload);
 
         float3 Irradiance = 0..xxx;
         float3 Albedo = payload.color;
-        if(shadowPayload.distance == 0)
+        if(shadowPayload.bHit == false)
+        // if(true)
         {
             // miss
             Irradiance = dot(LightDir.xyz, payload.normal) * LightIntensity  * Albedo;
@@ -278,12 +255,7 @@ void rayGen
             // Irradiance = dot(LightDir.xyz, payload.normal) * 1  * 1;
 
         ReflectionResult[launchIndex.xy] = float4(Irradiance, 1);
-        // ReflectionResult[launchIndex.xy] = float4(payload.color, 1);
-
     }
-
-        // ReflectionResult[launchIndex.xy] = float4(payload.color, 1);
-
 }
 
 
@@ -294,178 +266,49 @@ void miss(inout RayPayload payload)
     payload.position = float3(0, 0, 0);
     payload.color = float3(0.0, 0.2, 0.4);
     payload.normal = float3(0, 0, -1);
-    payload.distance = 0;
+    payload.bHit = false;
 }
-
-[shader("miss")]
-void missShadow(inout RayPayload payload)
-{
-    payload.position = float3(0, 0, 0);
-    payload.color = float3(0.0, 0.2, 0.4);
-    payload.normal = float3(0, 0, -1);
-    payload.distance = 0;
-}
-
-
-struct Vertex
-{
-    float3 position;
-    float3 normal;
-    float2 uv;
-    float3 tangent;
-};
-
-uint3 Load3x16BitIndices(uint offsetBytes)
-{
-    uint3 index;
-
-    // ByteAdressBuffer loads must be aligned at a 4 byte boundary.
-    // Since we need to read three 16 bit indices: { 0, 1, 2 } 
-    // aligned at a 4 byte boundary as: { 0 1 } { 2 0 } { 1 2 } { 0 1 } ...
-    // we will load 8 bytes (~ 4 indices { a b | c d }) to handle two possible index triplet layouts,
-    // based on first index's offsetBytes being aligned at the 4 byte boundary or not:
-    //  Aligned:     { 0 1 | 2 - }
-    //  Not aligned: { - 0 | 1 2 }
-    const uint dwordAlignedOffset = offsetBytes & ~3;    
-    const uint2 four16BitIndices = indices.Load2(dwordAlignedOffset);
- 
-    // Aligned: { 0 1 | 2 - } => retrieve first three 16bit indices
-    if (dwordAlignedOffset == offsetBytes)
-    {
-        index.x = four16BitIndices.x & 0xffff;
-        index.y = (four16BitIndices.x >> 16) & 0xffff;
-        index.z = four16BitIndices.y & 0xffff;
-    }
-    else // Not aligned: { - 0 | 1 2 } => retrieve last three 16bit indices
-    {
-        index.x = (four16BitIndices.x >> 16) & 0xffff;
-        index.y = four16BitIndices.y & 0xffff;
-        index.z = (four16BitIndices.y >> 16) & 0xffff;
-    }
-
-    return index;
-}
-
-uint3 GetIndices(uint triangleIndex)
-{
-    uint baseIndex = (triangleIndex * 3 * 2) ;
-    uint3 index;
-
-    // ByteAdressBuffer loads must be aligned at a 4 byte boundary.
-    // Since we need to read three 16 bit indices: { 0, 1, 2 } 
-    // aligned at a 4 byte boundary as: { 0 1 } { 2 0 } { 1 2 } { 0 1 } ...
-    // we will load 8 bytes (~ 4 indices { a b | c d }) to handle two possible index triplet layouts,
-    // based on first index's offsetBytes being aligned at the 4 byte boundary or not:
-    //  Aligned:     { 0 1 | 2 - }
-    //  Not aligned: { - 0 | 1 2 }
-    const uint dwordAlignedOffset = baseIndex & ~3;    
-    const uint2 four16BitIndices = indices.Load2(dwordAlignedOffset);
- 
-    // Aligned: { 0 1 | 2 - } => retrieve first three 16bit indices
-    if (dwordAlignedOffset == baseIndex)
-    {
-        index.x = four16BitIndices.x & 0xffff;
-        index.y = (four16BitIndices.x >> 16) & 0xffff;
-        index.z = four16BitIndices.y & 0xffff;
-    }
-    else // Not aligned: { - 0 | 1 2 } => retrieve last three 16bit indices
-    {
-        index.x = (four16BitIndices.x >> 16) & 0xffff;
-        index.y = four16BitIndices.y & 0xffff;
-        index.z = (four16BitIndices.y >> 16) & 0xffff;
-    }
-
-    return index;
-}
-
-Vertex GetVertexAttributes(uint triangleIndex, float3 barycentrics)
-{
-    uint3 index = GetIndices(triangleIndex);
-    Vertex v;
-    v.position = float3(0, 0, 0);
-    v.uv = float2(0, 0);
-
-    // for (uint i = 0; i < 3; i++)
-    // {
-    //     int address = (index[i] * 11) * 4;
-    //     v.position += asfloat(vertices.Load3(address)) * barycentrics[i];
-    //     address += (3 * 8);
-    //     v.uv += asfloat(vertices.Load2(address)) * barycentrics[i];
-    // }
-
-    float3 p0 = asfloat(vertices.Load3((index[0] * 11) * 4));
-    float3 p1 = asfloat(vertices.Load3((index[1] * 11) * 4));
-    float3 p2 = asfloat(vertices.Load3((index[2] * 11) * 4));
-
-    float4x4 WorldMatrix = {
-        asfloat(InstanceProperty.Load4(InstanceID()*4*16)), 
-        asfloat(InstanceProperty.Load4(InstanceID()*4*16 + 16)), 
-        asfloat(InstanceProperty.Load4(InstanceID()*4*16 + 16*2)),
-        asfloat(InstanceProperty.Load4(InstanceID()*4*16 + 16*3)),
-    };
-
-
-    v.position += p0 * barycentrics[0];
-    v.position += p1 * barycentrics[1];
-    v.position += p2 * barycentrics[2];
-
-    v.position = mul(float4(v.position, 1), WorldMatrix).xyz;
-
-    float2 uv0 = asfloat(vertices.Load2((index[0] * 11) * 4) + 3*8);
-    float2 uv1 = asfloat(vertices.Load2((index[1] * 11) * 4) + 3*8);
-    float2 uv2 = asfloat(vertices.Load2((index[2] * 11) * 4) + 3*8);
-
-    v.uv += uv0 * barycentrics[0];
-    v.uv += uv1 * barycentrics[1];
-    v.uv += uv2 * barycentrics[2];
-
-
-
-    float3 e1 = p1 - p0;
-    float3 e2 = p2 - p0;
-    v.normal = normalize(cross(e1, e2));
-
-    v.normal = mul(float4(v.normal, 0), WorldMatrix).xyz;
-    return v;
-}
-
-
 
 [shader("closesthit")]
 void chs(inout RayPayload payload, in BuiltInTriangleIntersectionAttributes attribs)
 {
     float3 barycentrics = float3(1.0 - attribs.barycentrics.x - attribs.barycentrics.y, attribs.barycentrics.x, attribs.barycentrics.y);
     uint triangleIndex = PrimitiveIndex();
-    Vertex vertex = GetVertexAttributes(triangleIndex, barycentrics);
+    Vertex vertex = GetVertexAttributes(InstanceID(), vertices, indices, InstanceProperty, triangleIndex, barycentrics);
 
     payload.position = vertex.position;
     payload.normal = vertex.normal;
     payload.color =  AlbedoTex.SampleLevel(sampleWrap, vertex.uv, 0).xyz;
-
-    payload.distance = RayTCurrent();
+    payload.bHit = true;
 }
 
 
 
 [shader("closesthit")]
-void chsShadow(inout RayPayload payload, in BuiltInTriangleIntersectionAttributes attribs)
+void chsShadow(inout ShadowRayPayload payload, in BuiltInTriangleIntersectionAttributes attribs)
 {
-    float3 barycentrics = float3(1.0 - attribs.barycentrics.x - attribs.barycentrics.y, attribs.barycentrics.x, attribs.barycentrics.y);
-    uint triangleIndex = PrimitiveIndex();
-    Vertex vertex = GetVertexAttributes(triangleIndex, barycentrics);
+    // float3 barycentrics = float3(1.0 - attribs.barycentrics.x - attribs.barycentrics.y, attribs.barycentrics.x, attribs.barycentrics.y);
+    // uint triangleIndex = PrimitiveIndex();
+    // Vertex vertex = GetVertexAttributes(triangleIndex, barycentrics);
 
-    payload.position = vertex.position;
-    payload.normal = vertex.normal;
-    payload.color =  AlbedoTex.SampleLevel(sampleWrap, vertex.uv, 0).xyz;
+    // payload.position = vertex.position;
+    // payload.normal = vertex.normal;
+    // payload.color =  AlbedoTex.SampleLevel(sampleWrap, vertex.uv, 0).xyz;
 
-    payload.distance = RayTCurrent();
+    payload.bHit = true;
 }
 
 
-[shader("anyhit")]
-void anyhitShadow(inout RayPayload payload, in BuiltInTriangleIntersectionAttributes attribs)
-{
-    // payload.distance = RayTCurrent();;
+// [shader("anyhit")]
+// void anyhitShadow(inout ShadowRayPayload payload, in BuiltInTriangleIntersectionAttributes attribs)
+// {
+//     payload.bHit = true;
 
-    AcceptHitAndEndSearch();
+//     AcceptHitAndEndSearch();
+// }
+
+[shader("miss")]
+void missShadow(inout ShadowRayPayload payload)
+{
+    payload.bHit = false;
 }

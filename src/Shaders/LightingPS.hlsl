@@ -112,6 +112,5 @@ float4 PSMain(PSInput input) : SV_TARGET
     float3 IndirectSpecular = SpecularGITex[PixelPos].xyz * SpecularColor;
 
     float3 DirectSpecular = SpecularColor * GGX(V, normalize(LightDir), WorldNormal, Rougness, 0.0) * LightIntensity * Shadow;
-    // return float4(DirectSpecular, 0);
     return float4(DiffuseLighting * (1-Specular) + DirectSpecular + IndirectDiffuse*(1-Metalic) + IndirectSpecular, 1);
 }

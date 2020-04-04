@@ -544,6 +544,8 @@ public:
 
 	ComPtr<IDXGISwapChain3> m_swapChain;
 
+	string errorString;
+
 #if USE_AFTERMATH
 	GFSDK_Aftermath_ContextHandle AM_CL_Handle;
 #endif
