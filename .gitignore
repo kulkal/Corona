@@ -30,3 +30,6 @@ doc/*.txt
 
 # ignore all .pdf files in the doc/ directory
 doc/**/*.pdf
+src/MyToyDX12Renderer.exe
+src/MyToyDX12Renderer.pdb
+src/MyToyDX12Renderer.ilk
