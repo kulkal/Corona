@@ -31,22 +31,22 @@
 using namespace std;
 
 SimpleDX12* g_dx12_rhi;
-
-ThreadDescriptorHeapPool::ThreadDescriptorHeapPool()
-{
-	DHeap = g_dx12_rhi->SRVCBVDescriptorHeapShaderVisible.get();
-}
-
-void ThreadDescriptorHeapPool::AllocDescriptor(D3D12_CPU_DESCRIPTOR_HANDLE& cpuHandle, D3D12_GPU_DESCRIPTOR_HANDLE& gpuHandle)
-{
-	if ((PoolIndex-StartIndex) >= PoolSize)
-		PoolIndex = 0;
-
-	cpuHandle.ptr = DHeap->CPUHeapStart + PoolIndex * DHeap->DescriptorSize;
-	gpuHandle.ptr = DHeap->GPUHeapStart + PoolIndex * DHeap->DescriptorSize;
-
-	PoolIndex++;
-}
+//
+//ThreadDescriptorHeapPool::ThreadDescriptorHeapPool()
+//{
+//	DHeap = g_dx12_rhi->SRVCBVDescriptorHeapShaderVisible.get();
+//}
+//
+//void ThreadDescriptorHeapPool::AllocDescriptor(D3D12_CPU_DESCRIPTOR_HANDLE& cpuHandle, D3D12_GPU_DESCRIPTOR_HANDLE& gpuHandle)
+//{
+//	if ((PoolIndex-StartIndex) >= PoolSize)
+//		PoolIndex = 0;
+//
+//	cpuHandle.ptr = DHeap->CPUHeapStart + PoolIndex * DHeap->DescriptorSize;
+//	gpuHandle.ptr = DHeap->GPUHeapStart + PoolIndex * DHeap->DescriptorSize;
+//
+//	PoolIndex++;
+//}
 
 void DescriptorHeap::Init(D3D12_DESCRIPTOR_HEAP_DESC& InHeapDesc)
 {
@@ -99,6 +99,8 @@ void SimpleDX12::BeginFrame()
 
 	g_dx12_rhi->GlobalDHRing->Advance();
 
+	g_dx12_rhi->GlobalCBRing->Advance();
+
 	for (auto& tex : DynamicTextures)
 	{
 		if (tex->textureDesc.Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS)
@@ -139,56 +141,6 @@ void SimpleDX12::EndFrame()
 #endif
 	FrameFenceValueVec[CurrentFrameIndex] = CmdQ->CurrentFenceValue;;
 	CmdQ->SignalCurrentFence();
-}
-
-shared_ptr<ConstantBuffer> SimpleDX12::CreateConstantBuffer(int Size, UINT NumView)
-{
-	ConstantBuffer* cbuffer = new ConstantBuffer;
-
-	cbuffer->Size = Size;
-
-	D3D12_HEAP_PROPERTIES heapProp;
-	heapProp.Type = D3D12_HEAP_TYPE_UPLOAD;
-	heapProp.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
-	heapProp.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
-	heapProp.CreationNodeMask = 1;
-	heapProp.VisibleNodeMask = 1;
-
-	D3D12_RESOURCE_DESC resDesc;
-
-	resDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-	resDesc.Alignment = 0;
-	resDesc.Width = Size * NumView;
-	resDesc.Height = 1;
-	resDesc.DepthOrArraySize = 1;
-	resDesc.MipLevels = 1;
-	resDesc.Format = DXGI_FORMAT_UNKNOWN;
-	resDesc.SampleDesc.Count = 1;
-	resDesc.SampleDesc.Quality = 0;
-	resDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-	resDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
-
-	/*stringstream ss;
-	ss << "CreateConstantBuffer : " << resDesc.Width << "\n";
-	OutputDebugStringA(ss.str().c_str());*/
-
-	ThrowIfFailed(Device->CreateCommittedResource(
-		&heapProp,
-		D3D12_HEAP_FLAG_NONE,
-		&resDesc,
-		D3D12_RESOURCE_STATE_GENERIC_READ,
-		nullptr,
-		IID_PPV_ARGS(&cbuffer->resource)));
-
-	NAME_D3D12_OBJECT(cbuffer->resource);
-
-
-	CD3DX12_RANGE readRange(0, 0);		// We do not intend to read from this resource on the CPU.
-	ThrowIfFailed(cbuffer->resource->Map(0, &readRange, reinterpret_cast<void**>(&cbuffer->MemMapped)));
-
-	shared_ptr<ConstantBuffer> retPtr = shared_ptr<ConstantBuffer>(cbuffer);
-
-	return retPtr;
 }
 
 shared_ptr<Sampler> SimpleDX12::CreateSampler(D3D12_SAMPLER_DESC& InSamplerDesc)
@@ -480,6 +432,8 @@ SimpleDX12::SimpleDX12(ComPtr<ID3D12Device5> InDevice)
 
 	GeomtryDHRing = std::make_unique<DescriptorHeapRing>();
 	GeomtryDHRing->Init(SRVCBVDescriptorHeapShaderVisible.get(), 10000, NumFrame);
+
+	GlobalCBRing = std::make_unique<ConstantBufferRingBuffer>(1024 * 1024 * 10, NumFrame);
 	
 	CmdQ->WaitGPU();
 }
@@ -503,7 +457,7 @@ void PipelineStateObject::BindUAV(string name, int baseRegister)
 	uavBinding.insert(pair<string, BindingData>(name, binding));
 }
 
-void PipelineStateObject::BindTexture(string name, int baseRegister, int num)
+void PipelineStateObject::BindSRV(string name, int baseRegister, int num)
 {
 	BindingData binding;
 	binding.name = name;
@@ -512,10 +466,8 @@ void PipelineStateObject::BindTexture(string name, int baseRegister, int num)
 	textureBinding.insert(pair<string, BindingData>(name, binding));
 }
 
-void PipelineStateObject::BindConstantBuffer(string name, int baseRegister, int size, UINT numMaxDrawCall)
+void PipelineStateObject::BindCBV(string name, int baseRegister, int size)
 {
-	NumMaxDrawCall = numMaxDrawCall;
-
 	BindingData binding;
 	binding.name = name;
 	binding.baseRegister = baseRegister;
@@ -528,10 +480,6 @@ void PipelineStateObject::BindConstantBuffer(string name, int baseRegister, int 
 	if (size % 256 > 0)
 		binding.cbSize += 256;
 
-
-	binding.cb = g_dx12_rhi->CreateConstantBuffer(binding.cbSize, g_dx12_rhi->NumFrame * numMaxDrawCall);
-
-	D3D12_GPU_VIRTUAL_ADDRESS va = binding.cb->resource->GetGPUVirtualAddress();
 	constantBufferBinding.insert(pair<string, BindingData>(name, binding));
 }
 
@@ -555,7 +503,7 @@ void PipelineStateObject::BindSampler(string name, int baseRegister)
 	samplerBinding.insert(pair<string, BindingData>(name, binding));
 }
 
-void PipelineStateObject::SetTexture(string name, Texture* texture, ID3D12GraphicsCommandList* CommandList)
+void PipelineStateObject::SetSRV(string name, Texture* texture, ID3D12GraphicsCommandList* CommandList)
 {
 	textureBinding[name].texture = texture;
 
@@ -592,12 +540,13 @@ void PipelineStateObject::SetSampler(string name, Sampler* sampler, ID3D12Graphi
 		CommandList->SetGraphicsRootDescriptorTable(samplerBinding[name].rootParamIndex, sampler->GpuHandle);
 }
 
-void PipelineStateObject::SetConstantValue(string name, void* pData, ID3D12GraphicsCommandList* CommandList)
+void PipelineStateObject::SetCBVValue(string name, void* pData, ID3D12GraphicsCommandList* CommandList)
 {
 	BindingData& binding = constantBufferBinding[name];
+	auto Alloc = g_dx12_rhi->GlobalCBRing->AllocGPUMemory(binding.cbSize);
+	UINT64 GPUAddr = std::get<0>(Alloc);
+	UINT8* pMapped = std::get<1>(Alloc);
 
-	UINT CBViewIndex = g_dx12_rhi->CurrentFrameIndex * NumMaxDrawCall + currentDrawCallIndex;
-	UINT8* pMapped = (UINT8*)binding.cb->MemMapped + binding.cbSize*CBViewIndex;
 	memcpy((void*)pMapped, pData, binding.cbSize);
 
 	D3D12_CPU_DESCRIPTOR_HANDLE CpuHandle;
@@ -607,8 +556,9 @@ void PipelineStateObject::SetConstantValue(string name, void* pData, ID3D12Graph
 	g_dx12_rhi->GlobalDHRing->AllocDescriptor(CpuHandle, GpuHandle);
 
 	D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc = {};
-	cbvDesc.BufferLocation = binding.cb->resource->GetGPUVirtualAddress() + CBViewIndex * binding.cb->Size;
-	cbvDesc.SizeInBytes = binding.cb->Size;
+	cbvDesc.BufferLocation = GPUAddr;
+	cbvDesc.SizeInBytes = binding.cbSize;
+
 	g_dx12_rhi->Device->CreateConstantBufferView(&cbvDesc, CpuHandle);
 
 	if (IsCompute)
@@ -1779,12 +1729,6 @@ void RTPipelineStateObject::BindCBV(string shader, string name, UINT baseRegiste
 		if (size % 256 > 0)
 			binding.cbSize += 256;
 
-
-		for (int iFrame = 0; iFrame < g_dx12_rhi->NumFrame; iFrame++)
-		{
-			binding.cbs.push_back(g_dx12_rhi->CreateConstantBuffer(binding.cbSize, numInstance));
-		}
-
 		GlobalBinding.push_back(binding);
 	}
 	else
@@ -1802,12 +1746,6 @@ void RTPipelineStateObject::BindCBV(string shader, string name, UINT baseRegiste
 
 		if (size % 256 > 0)
 			binding.cbSize += 256;
-
-
-		for (int iFrame = 0; iFrame < g_dx12_rhi->NumFrame; iFrame++)
-		{
-			binding.cbs.push_back(g_dx12_rhi->CreateConstantBuffer(binding.cbSize, numInstance));
-		}
 
 		bindingInfo.Binding.push_back(binding);
 	}
@@ -2125,7 +2063,7 @@ void RTPipelineStateObject::SetSampler(string shader, string bindingName, Sample
 	//}
 }
 
-void RTPipelineStateObject::SetCBVValue(string shader, string bindingName, void* pData, INT size, INT instanceIndex /*= -1*/)
+void RTPipelineStateObject::SetCBVValue(string shader, string bindingName, void* pData, INT instanceIndex /*= -1*/)
 {
 	// each bindings of raygen/miss shader is unique to shader name.
 	if (instanceIndex == -1) // raygen, miss
@@ -2136,9 +2074,11 @@ void RTPipelineStateObject::SetCBVValue(string shader, string bindingName, void*
 			{
 				if (bd.name == bindingName)
 				{
-					auto& cb = bd.cbs[g_dx12_rhi->CurrentFrameIndex];
-					UINT8* pMapped = (UINT8*)cb->MemMapped + size * 0;
-					memcpy((void*)pMapped, pData, size);
+					auto Alloc = g_dx12_rhi->GlobalCBRing->AllocGPUMemory(bd.cbSize);
+					UINT64 GPUAddr = std::get<0>(Alloc);
+					UINT8* pMapped = std::get<1>(Alloc);
+
+					memcpy((void*)pMapped, pData, bd.cbSize);
 
 					D3D12_CPU_DESCRIPTOR_HANDLE CpuHandle;
 					D3D12_GPU_DESCRIPTOR_HANDLE GpuHandle;
@@ -2147,8 +2087,8 @@ void RTPipelineStateObject::SetCBVValue(string shader, string bindingName, void*
 					g_dx12_rhi->GlobalDHRing->AllocDescriptor(CpuHandle, GpuHandle);
 
 					D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc = {};
-					cbvDesc.BufferLocation = cb->resource->GetGPUVirtualAddress();
-					cbvDesc.SizeInBytes = cb->Size;
+					cbvDesc.BufferLocation = GPUAddr;
+					cbvDesc.SizeInBytes = bd.cbSize;
 					g_dx12_rhi->Device->CreateConstantBufferView(&cbvDesc, CpuHandle);
 
 					bd.GPUHandle = GpuHandle;
@@ -2162,9 +2102,11 @@ void RTPipelineStateObject::SetCBVValue(string shader, string bindingName, void*
 			{
 				if (bd.name == bindingName)
 				{
-					auto& cb = bd.cbs[g_dx12_rhi->CurrentFrameIndex];
-					UINT8* pMapped = (UINT8*)cb->MemMapped + size * 0;
-					memcpy((void*)pMapped, pData, size);
+					auto Alloc = g_dx12_rhi->GlobalCBRing->AllocGPUMemory(bd.cbSize);
+					UINT64 GPUAddr = std::get<0>(Alloc);
+					UINT8* pMapped = std::get<1>(Alloc);
+
+					memcpy((void*)pMapped, pData, bd.cbSize);
 
 					D3D12_CPU_DESCRIPTOR_HANDLE CpuHandle;
 					D3D12_GPU_DESCRIPTOR_HANDLE GpuHandle;
@@ -2173,8 +2115,8 @@ void RTPipelineStateObject::SetCBVValue(string shader, string bindingName, void*
 					g_dx12_rhi->GlobalDHRing->AllocDescriptor(CpuHandle, GpuHandle);
 
 					D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc = {};
-					cbvDesc.BufferLocation = cb->resource->GetGPUVirtualAddress();
-					cbvDesc.SizeInBytes = cb->Size;
+					cbvDesc.BufferLocation = GPUAddr;
+					cbvDesc.SizeInBytes = bd.cbSize;
 					g_dx12_rhi->Device->CreateConstantBufferView(&cbvDesc, CpuHandle);
 
 					bd.GPUHandle = GpuHandle;
@@ -2597,4 +2539,66 @@ void CommandList::Reset()
 {
 	CmdAllocator->Reset();
 	CmdList->Reset(CmdAllocator.Get(), nullptr);
+}
+
+std::tuple<UINT64, UINT8*> ConstantBufferRingBuffer::AllocGPUMemory(UINT InSize)
+{
+
+	UINT64 AllocGPUAddr = CBMem->GetGPUVirtualAddress() + CurrentFrame * TotalSize + AllocPos;
+
+	UINT8* pMapped = (UINT8*)MemMapped + CurrentFrame * TotalSize + AllocPos;
+	AllocPos += InSize;
+	
+	return std::make_tuple(AllocGPUAddr, pMapped);
+}
+
+void ConstantBufferRingBuffer::Advance()
+{
+	CurrentFrame = (CurrentFrame + 1) % NumFrame;
+	AllocPos = 0;
+}
+
+ConstantBufferRingBuffer::ConstantBufferRingBuffer(UINT InSize, UINT InNumFrame)
+{
+	NumFrame = InNumFrame;
+	TotalSize = InSize;
+
+	D3D12_HEAP_PROPERTIES heapProp;
+	heapProp.Type = D3D12_HEAP_TYPE_UPLOAD;
+	heapProp.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
+	heapProp.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
+	heapProp.CreationNodeMask = 1;
+	heapProp.VisibleNodeMask = 1;
+
+	D3D12_RESOURCE_DESC resDesc;
+
+	resDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+	resDesc.Alignment = 0;
+	resDesc.Width = InSize * g_dx12_rhi->NumFrame;;
+	resDesc.Height = 1;
+	resDesc.DepthOrArraySize = 1;
+	resDesc.MipLevels = 1;
+	resDesc.Format = DXGI_FORMAT_UNKNOWN;
+	resDesc.SampleDesc.Count = 1;
+	resDesc.SampleDesc.Quality = 0;
+	resDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+	resDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
+
+	ThrowIfFailed(g_dx12_rhi->Device->CreateCommittedResource(
+		&heapProp,
+		D3D12_HEAP_FLAG_NONE,
+		&resDesc,
+		D3D12_RESOURCE_STATE_GENERIC_READ,
+		nullptr,
+		IID_PPV_ARGS(&CBMem)));
+
+	NAME_D3D12_OBJECT(CBMem);
+
+	CD3DX12_RANGE readRange(0, 0);		// We do not intend to read from this resource on the CPU.
+	ThrowIfFailed(CBMem->Map(0, &readRange, reinterpret_cast<void**>(&MemMapped)));
+}
+
+ConstantBufferRingBuffer::~ConstantBufferRingBuffer()
+{
+	CBMem->Unmap(0, nullptr);
 }

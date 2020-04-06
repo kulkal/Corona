@@ -37,9 +37,8 @@ using namespace std;
 
 class SimpleDX12;
 class Texture;
-class ConstantBuffer;
 class Sampler;
-class ThreadDescriptorHeapPool;
+//class ThreadDescriptorHeapPool;
 
 class CommandList
 {
@@ -102,8 +101,6 @@ public:
 		Texture* texture;
 		Sampler* sampler;
 
-		shared_ptr<ConstantBuffer> cb;
-
 		UINT rootConst;
 	};
 
@@ -130,13 +127,9 @@ public:
 		Texture* texture;
 		Sampler* sampler;
 
-		shared_ptr<ConstantBuffer> cb;
-
 		UINT rootConst;
 	};
 
-	UINT currentDrawCallIndex = 0;
-	UINT NumMaxDrawCall = 0;
 
 	map<string, BindingData> uavBinding;
 	map<string, BindingData> textureBinding;
@@ -162,17 +155,17 @@ public:
 	void Apply(ID3D12GraphicsCommandList* CommandList);
 
 	void BindUAV(string name, int baseRegister);
-	void BindTexture(string name, int baseRegister, int num);
-	void BindConstantBuffer(string name, int baseRegister, int size, UINT numMaxDrawCall = 1);
+	void BindSRV(string name, int baseRegister, int num);
+	void BindCBV(string name, int baseRegister, int size);
 	void BindRootConstant(string name, int baseRegister);
 	void BindSampler(string name, int baseRegister);
 
-	void SetTexture(string name, Texture* texture, ID3D12GraphicsCommandList* CommandList);
+	void SetSRV(string name, Texture* texture, ID3D12GraphicsCommandList* CommandList);
 	void SetUAV(string name, Texture* texture, ID3D12GraphicsCommandList* CommandList);
 
 	void SetSampler(string name, Sampler* sampler, ID3D12GraphicsCommandList* CommandList);
 
-	void SetConstantValue(string name, void* pData, ID3D12GraphicsCommandList* CommandList);
+	void SetCBVValue(string name, void* pData, ID3D12GraphicsCommandList* CommandList);
 	void SetRootConstant(string, UINT value, ID3D12GraphicsCommandList* CommandList);
 };
 
@@ -190,8 +183,6 @@ class RTPipelineStateObject
 		UINT BaseRegister;
 		D3D12_CPU_DESCRIPTOR_HANDLE CPUHandle; // for multiple instances
 		D3D12_GPU_DESCRIPTOR_HANDLE GPUHandle; // for multiple instances
-
-		vector<shared_ptr<ConstantBuffer>> cbs; // multiple constant buffers are need for multiple buffering.
 	};
 	vector<BindingData> RaygenBinding;
 
@@ -277,7 +268,7 @@ public:
 	void SetUAV(string shader, string bindingName, D3D12_GPU_DESCRIPTOR_HANDLE uavHandle, INT instanceIndex = -1);
 	void SetSRV(string shader, string bindingName, D3D12_GPU_DESCRIPTOR_HANDLE srvHandle, INT instanceIndex = -1);
 	void SetSampler(string shader, string bindingName, Sampler* sampler, INT instanceIndex = -1);
-	void SetCBVValue(string shader, string bindingName, void* pData, INT size, INT instanceIndex = -1);
+	void SetCBVValue(string shader, string bindingName, void* pData, INT instanceIndex = -1);
 
 	void ResetHitProgram(UINT instanceIndex);
 	void StartHitProgram(string HitGroup, UINT instanceIndex);
@@ -324,28 +315,6 @@ public:
 	ComPtr<ID3D12Resource> resource;
 	D3D12_CPU_DESCRIPTOR_HANDLE CpuHandle;
 	D3D12_GPU_DESCRIPTOR_HANDLE GpuHandle;
-};
-
-class ConstantBuffer
-{
-public:
-	UINT Size;
-	ComPtr<ID3D12Resource> resource = nullptr;
-	D3D12_GPU_DESCRIPTOR_HANDLE GpuHandle;
-
-	// multiple descriptor is needed for multiple draw(ex : transform matrix)
-	vector<D3D12_CPU_DESCRIPTOR_HANDLE> CpuHandleVec;
-	vector<D3D12_GPU_DESCRIPTOR_HANDLE> GpuHandleVec;
-
-	void* MemMapped = nullptr;
-
-	ConstantBuffer(){}
-	
-	virtual ~ConstantBuffer()
-	{
-		resource->Unmap(0, nullptr);
-		MemMapped = nullptr;
-	}
 };
 
 class Texture : public std::enable_shared_from_this<Texture>
@@ -418,34 +387,56 @@ public:
 	void Advance();
 
 	DescriptorHeapRing(){}
-	~DescriptorHeapRing() {}
+	virtual ~DescriptorHeapRing() {}
 };
 
-class ThreadDescriptorHeapPool
+
+class ConstantBufferRingBuffer
 {
+	UINT NumFrame = 0;
+	UINT CurrentFrame = 0;
+	UINT TotalSize;
+
+	UINT AllocPos = 0;
+	
+	void* MemMapped = nullptr;
+
+	ComPtr<ID3D12Resource> CBMem = nullptr;
+
 public:
-	DescriptorHeap* DHeap = nullptr;
-	UINT PoolSize = 0;
-	UINT StartIndex = 0;
-	UINT PoolIndex = 0;
 
-	// Descriptor in pool is for one thread only, so that it is not overwritten.
-	void AllocPool(UINT InPoolSize)
-	{
-		PoolSize = InPoolSize;
-		
-		if (DHeap->NumAllocated + PoolSize >= DHeap->MaxNumDescriptors)
-			DHeap->NumAllocated = 0;
+	std::tuple<UINT64, UINT8*> AllocGPUMemory(UINT InSize);
+	void Advance();
 
-		PoolIndex = StartIndex = DHeap->NumAllocated;
-		DHeap->NumAllocated += PoolSize;
-	}
-
-	void AllocDescriptor(D3D12_CPU_DESCRIPTOR_HANDLE& cpuHandle, D3D12_GPU_DESCRIPTOR_HANDLE& gpuHandle);
-
-	ThreadDescriptorHeapPool();
-	~ThreadDescriptorHeapPool() {}
+	ConstantBufferRingBuffer(UINT InSize, UINT InNumFrame);
+	virtual ~ConstantBufferRingBuffer();
 };
+
+//class ThreadDescriptorHeapPool
+//{
+//public:
+//	DescriptorHeap* DHeap = nullptr;
+//	UINT PoolSize = 0;
+//	UINT StartIndex = 0;
+//	UINT PoolIndex = 0;
+//
+//	// Descriptor in pool is for one thread only, so that it is not overwritten.
+//	void AllocPool(UINT InPoolSize)
+//	{
+//		PoolSize = InPoolSize;
+//		
+//		if (DHeap->NumAllocated + PoolSize >= DHeap->MaxNumDescriptors)
+//			DHeap->NumAllocated = 0;
+//
+//		PoolIndex = StartIndex = DHeap->NumAllocated;
+//		DHeap->NumAllocated += PoolSize;
+//	}
+//
+//	void AllocDescriptor(D3D12_CPU_DESCRIPTOR_HANDLE& cpuHandle, D3D12_GPU_DESCRIPTOR_HANDLE& gpuHandle);
+//
+//	ThreadDescriptorHeapPool();
+//	~ThreadDescriptorHeapPool() {}
+//};
 
 class Mesh;
 class RTAS
@@ -539,6 +530,8 @@ public:
 	std::unique_ptr<DescriptorHeapRing> TextureDHRing;
 	std::unique_ptr<DescriptorHeapRing> GeomtryDHRing;
 
+	std::unique_ptr<ConstantBufferRingBuffer> GlobalCBRing;
+
 	std::vector<std::shared_ptr<Texture>> renderTargetTextures;
 	std::list<std::shared_ptr<Texture>> DynamicTextures;
 
@@ -558,7 +551,6 @@ public:
 	shared_ptr<Texture> CreateTexture3D(DXGI_FORMAT format, D3D12_RESOURCE_FLAGS resFlags, D3D12_RESOURCE_STATES initResState, int width, int height, int depth, int mipLevels);
 
 	shared_ptr<Texture> CreateTextureFromFile(wstring fileName, bool isNormal);
-	shared_ptr<ConstantBuffer> CreateConstantBuffer(int Size, UINT NumView = 1);
 	shared_ptr<Sampler> CreateSampler(D3D12_SAMPLER_DESC& InSamplerDesc);
 	shared_ptr<Buffer> CreateBuffer(UINT Size);
 	shared_ptr<IndexBuffer> CreateIndexBuffer(DXGI_FORMAT Format, UINT Size, void* SrcData);

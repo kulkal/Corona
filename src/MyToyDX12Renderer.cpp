@@ -842,15 +842,15 @@ void MyToyDX12Renderer::InitSpatialDenoisingPass()
 	RS_SpatialDenoisingFilter = shared_ptr<PipelineStateObject>(new PipelineStateObject);
 	RS_SpatialDenoisingFilter->cs = unique_ptr<Shader>(cs);
 	RS_SpatialDenoisingFilter->computePSODesc = computePsoDesc;
-	RS_SpatialDenoisingFilter->BindTexture("DepthTex", 0, 1);
-	RS_SpatialDenoisingFilter->BindTexture("GeoNormalTex", 1, 1);
-	RS_SpatialDenoisingFilter->BindTexture("InGIResultSHTex", 2, 1);
-	RS_SpatialDenoisingFilter->BindTexture("InGIResultColorTex", 3, 1);
+	RS_SpatialDenoisingFilter->BindSRV("DepthTex", 0, 1);
+	RS_SpatialDenoisingFilter->BindSRV("GeoNormalTex", 1, 1);
+	RS_SpatialDenoisingFilter->BindSRV("InGIResultSHTex", 2, 1);
+	RS_SpatialDenoisingFilter->BindSRV("InGIResultColorTex", 3, 1);
 
 	RS_SpatialDenoisingFilter->BindUAV("OutGIResultSH", 0);
 	RS_SpatialDenoisingFilter->BindUAV("OutGIResultColor", 1);
 
-	RS_SpatialDenoisingFilter->BindConstantBuffer("SpatialFilterConstant", 0, sizeof(SpatialFilterConstant), 1);
+	RS_SpatialDenoisingFilter->BindCBV("SpatialFilterConstant", 0, sizeof(SpatialFilterConstant));
 	RS_SpatialDenoisingFilter->IsCompute = true;
 	RS_SpatialDenoisingFilter->Init();
 
@@ -914,15 +914,15 @@ void MyToyDX12Renderer::InitTemporalDenoisingPass()
 	RS_TemporalDenoisingFilter = shared_ptr<PipelineStateObject>(new PipelineStateObject);
 	RS_TemporalDenoisingFilter->cs = unique_ptr<Shader>(cs);
 	RS_TemporalDenoisingFilter->computePSODesc = computePsoDesc;
-	RS_TemporalDenoisingFilter->BindTexture("DepthTex", 0, 1);
-	RS_TemporalDenoisingFilter->BindTexture("GeoNormalTex", 1, 1);
-	RS_TemporalDenoisingFilter->BindTexture("InGIResultSHTex", 2, 1);
-	RS_TemporalDenoisingFilter->BindTexture("InGIResultColorTex", 3, 1);
-	RS_TemporalDenoisingFilter->BindTexture("InGIResultSHTexPrev", 4, 1);
-	RS_TemporalDenoisingFilter->BindTexture("InGIResultColorTexPrev", 5, 1);
-	RS_TemporalDenoisingFilter->BindTexture("VelocityTex", 6, 1);
-	RS_TemporalDenoisingFilter->BindTexture("InSpecularGITex", 7, 1);
-	RS_TemporalDenoisingFilter->BindTexture("InSpecularGITexPrev", 8, 1);
+	RS_TemporalDenoisingFilter->BindSRV("DepthTex", 0, 1);
+	RS_TemporalDenoisingFilter->BindSRV("GeoNormalTex", 1, 1);
+	RS_TemporalDenoisingFilter->BindSRV("InGIResultSHTex", 2, 1);
+	RS_TemporalDenoisingFilter->BindSRV("InGIResultColorTex", 3, 1);
+	RS_TemporalDenoisingFilter->BindSRV("InGIResultSHTexPrev", 4, 1);
+	RS_TemporalDenoisingFilter->BindSRV("InGIResultColorTexPrev", 5, 1);
+	RS_TemporalDenoisingFilter->BindSRV("VelocityTex", 6, 1);
+	RS_TemporalDenoisingFilter->BindSRV("InSpecularGITex", 7, 1);
+	RS_TemporalDenoisingFilter->BindSRV("InSpecularGITexPrev", 8, 1);
 
 
 
@@ -933,7 +933,7 @@ void MyToyDX12Renderer::InitTemporalDenoisingPass()
 	RS_TemporalDenoisingFilter->BindUAV("OutSpecularGI", 4);
 
 
-	RS_TemporalDenoisingFilter->BindConstantBuffer("TemporalFilterConstant", 0, sizeof(TemporalFilterConstant), 1);
+	RS_TemporalDenoisingFilter->BindCBV("TemporalFilterConstant", 0, sizeof(TemporalFilterConstant));
 	RS_TemporalDenoisingFilter->IsCompute = true;
 	RS_TemporalDenoisingFilter->Init();
 }
@@ -1019,10 +1019,10 @@ void MyToyDX12Renderer::InitDrawMeshRS()
 	RS_Mesh->ps = shared_ptr<Shader>(ps);
 	RS_Mesh->vs = shared_ptr<Shader>(vs);
 	RS_Mesh->graphicsPSODesc = psoDescMesh;
-	RS_Mesh->BindTexture("diffuseMap", 0, 1);
-	RS_Mesh->BindTexture("normalMap", 1, 1);
+	RS_Mesh->BindSRV("diffuseMap", 0, 1);
+	RS_Mesh->BindSRV("normalMap", 1, 1);
 	RS_Mesh->BindSampler("samplerWrap", 0);
-	RS_Mesh->BindConstantBuffer("ObjParameter", 0, sizeof(MeshDrawConstantBuffer), 400);
+	RS_Mesh->BindCBV("ObjParameter", 0, sizeof(MeshDrawConstantBuffer));
 
 	bool bSucess = RS_Mesh->Init();
 }
@@ -1205,9 +1205,9 @@ void MyToyDX12Renderer::InitCopyPass()
 	RS_Copy->vs = shared_ptr<Shader>(vs);
 	RS_Copy->graphicsPSODesc = psoDesc;
 
-	RS_Copy->BindTexture("SrcTex", 0, 1);
+	RS_Copy->BindSRV("SrcTex", 0, 1);
 	RS_Copy->BindSampler("samplerWrap", 0);
-	RS_Copy->BindConstantBuffer("ScaleOffsetParams", 0, sizeof(CopyScaleOffsetCB), 15);
+	RS_Copy->BindCBV("ScaleOffsetParams", 0, sizeof(CopyScaleOffsetCB));
 
 	RS_Copy->Init();
 }
@@ -1309,12 +1309,12 @@ void MyToyDX12Renderer::InitDebugPass()
 	RS_Debug->vs = shared_ptr<Shader>(vs);
 	RS_Debug->graphicsPSODesc = psoDesc;
 
-	RS_Debug->BindTexture("SrcTex", 0, 1);
-	RS_Debug->BindTexture("SrcTexSH", 1, 1);
-	RS_Debug->BindTexture("SrcTexNormal", 2, 1);
+	RS_Debug->BindSRV("SrcTex", 0, 1);
+	RS_Debug->BindSRV("SrcTexSH", 1, 1);
+	RS_Debug->BindSRV("SrcTexNormal", 2, 1);
 
 	RS_Debug->BindSampler("samplerWrap", 0);
-	RS_Debug->BindConstantBuffer("DebugPassCB", 0, sizeof(DebugPassCB), 19);
+	RS_Debug->BindCBV("DebugPassCB", 0, sizeof(DebugPassCB));
 
 	RS_Debug->Init();
 }
@@ -1392,18 +1392,18 @@ void MyToyDX12Renderer::InitLightingPass()
 	RS_Lighting->vs = shared_ptr<Shader>(vs);
 	RS_Lighting->graphicsPSODesc = psoDesc;
 
-	RS_Lighting->BindTexture("AlbedoTex", 0, 1);
-	RS_Lighting->BindTexture("NormalTex", 1, 1);
-	RS_Lighting->BindTexture("ShadowTex", 2, 1);
-	RS_Lighting->BindTexture("VelocityTex", 3, 1);
-	RS_Lighting->BindTexture("DepthTex", 4, 1);
-	RS_Lighting->BindTexture("GIResultSHTex", 5, 1);
-	RS_Lighting->BindTexture("GIResultColorTex", 6, 1);
-	RS_Lighting->BindTexture("SpecularGITex", 7, 1);
-	RS_Lighting->BindTexture("RoughnessMetalicTex", 8, 1);
+	RS_Lighting->BindSRV("AlbedoTex", 0, 1);
+	RS_Lighting->BindSRV("NormalTex", 1, 1);
+	RS_Lighting->BindSRV("ShadowTex", 2, 1);
+	RS_Lighting->BindSRV("VelocityTex", 3, 1);
+	RS_Lighting->BindSRV("DepthTex", 4, 1);
+	RS_Lighting->BindSRV("GIResultSHTex", 5, 1);
+	RS_Lighting->BindSRV("GIResultColorTex", 6, 1);
+	RS_Lighting->BindSRV("SpecularGITex", 7, 1);
+	RS_Lighting->BindSRV("RoughnessMetalicTex", 8, 1);
 
 	RS_Lighting->BindSampler("samplerWrap", 0);
-	RS_Lighting->BindConstantBuffer("LightingParam", 0, sizeof(LightingParam));
+	RS_Lighting->BindCBV("LightingParam", 0, sizeof(LightingParam));
 	RS_Lighting->Init();
 }
 
@@ -1480,13 +1480,13 @@ void MyToyDX12Renderer::InitTemporalAAPass()
 	RS_TemporalAA->vs = shared_ptr<Shader>(vs);
 	RS_TemporalAA->graphicsPSODesc = psoDesc;
 
-	RS_TemporalAA->BindTexture("CurrentColorTex", 0, 1);
-	RS_TemporalAA->BindTexture("PrevColorTex", 1, 1);
-	RS_TemporalAA->BindTexture("VelocityTex", 2, 1);
-	RS_TemporalAA->BindTexture("DepthTex", 3, 1);
+	RS_TemporalAA->BindSRV("CurrentColorTex", 0, 1);
+	RS_TemporalAA->BindSRV("PrevColorTex", 1, 1);
+	RS_TemporalAA->BindSRV("VelocityTex", 2, 1);
+	RS_TemporalAA->BindSRV("DepthTex", 3, 1);
 
 	RS_TemporalAA->BindSampler("samplerWrap", 0);
-	RS_TemporalAA->BindConstantBuffer("LightingParam", 0, sizeof(LightingParam));
+	RS_TemporalAA->BindCBV("LightingParam", 0, sizeof(LightingParam));
 	RS_TemporalAA->Init();
 }
 
@@ -1497,17 +1497,16 @@ void MyToyDX12Renderer::CopyPass()
 	Texture* backbuffer = framebuffers[dx12_rhi->CurrentFrameIndex].get();
 	Texture* ResolveTarget = ColorBuffers[ColorBufferWriteIndex];//framebuffers[dx12_rhi->CurrentFrameIndex].get();
 
-	RS_Copy->currentDrawCallIndex = 0;
 	RS_Copy->Apply(dx12_rhi->GlobalCmdList->CmdList.Get());
 
 
 	RS_Copy->SetSampler("samplerWrap", samplerWrap.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
-	RS_Copy->SetTexture("SrcTex", ResolveTarget, dx12_rhi->GlobalCmdList->CmdList.Get());
+	RS_Copy->SetSRV("SrcTex", ResolveTarget, dx12_rhi->GlobalCmdList->CmdList.Get());
 
 	CopyScaleOffsetCB cb;
 	cb.Offset = glm::vec4(0, 0, 0, 0);
 	cb.Scale = glm::vec4(1, 1, 0, 0);
-	RS_Copy->SetConstantValue("ScaleOffsetParams", &cb, dx12_rhi->GlobalCmdList->CmdList.Get());
+	RS_Copy->SetCBVValue("ScaleOffsetParams", &cb, dx12_rhi->GlobalCmdList->CmdList.Get());
 
 	RS_Copy->Apply(dx12_rhi->GlobalCmdList->CmdList.Get());
 
@@ -1524,7 +1523,6 @@ void MyToyDX12Renderer::CopyPass()
 	
 	dx12_rhi->GlobalCmdList->CmdList->DrawInstanced(4, 1, 0, 0);
 
-	RS_Copy->currentDrawCallIndex++;
 	
 	PIXEndEvent(dx12_rhi->GlobalCmdList->CmdList.Get());
 }
@@ -1533,7 +1531,6 @@ void MyToyDX12Renderer::DebugPass()
 {
 	PIXScopedEvent(dx12_rhi->GlobalCmdList->CmdList.Get(), PIX_COLOR(rand() % 255, rand() % 255, rand() % 255), "DebugPass");
 
-	RS_Debug->currentDrawCallIndex = 0;
 	RS_Debug->Apply(dx12_rhi->GlobalCmdList->CmdList.Get());
 	RS_Debug->SetSampler("samplerWrap", samplerWrap.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
 
@@ -1564,10 +1561,9 @@ void MyToyDX12Renderer::DebugPass()
 			return;
 		}
 		cb.DebugMode = RAW_COPY;
-		RS_Debug->SetConstantValue("DebugPassCB", &cb, dx12_rhi->GlobalCmdList->CmdList.Get());
-		RS_Debug->SetTexture("SrcTex", ShadowBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
+		RS_Debug->SetCBVValue("DebugPassCB", &cb, dx12_rhi->GlobalCmdList->CmdList.Get());
+		RS_Debug->SetSRV("SrcTex", ShadowBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
 		dx12_rhi->GlobalCmdList->CmdList->DrawInstanced(4, 1, 0, 0);
-		RS_Debug->currentDrawCallIndex++;
 	});
 
 	functions.push_back([&](EDebugVisualization eFS) {
@@ -1589,10 +1585,9 @@ void MyToyDX12Renderer::DebugPass()
 			return;
 		}
 		cb.DebugMode = RAW_COPY;
-		RS_Debug->SetConstantValue("DebugPassCB", &cb, dx12_rhi->GlobalCmdList->CmdList.Get());
-		RS_Debug->SetTexture("SrcTex", NormalBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
+		RS_Debug->SetCBVValue("DebugPassCB", &cb, dx12_rhi->GlobalCmdList->CmdList.Get());
+		RS_Debug->SetSRV("SrcTex", NormalBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
 		dx12_rhi->GlobalCmdList->CmdList->DrawInstanced(4, 1, 0, 0);
-		RS_Debug->currentDrawCallIndex++;
 	});
 
 	functions.push_back([&](EDebugVisualization eFS) {
@@ -1613,10 +1608,9 @@ void MyToyDX12Renderer::DebugPass()
 			return;
 		}
 		cb.DebugMode = RAW_COPY;
-		RS_Debug->SetConstantValue("DebugPassCB", &cb, dx12_rhi->GlobalCmdList->CmdList.Get());
-		RS_Debug->SetTexture("SrcTex", GeomNormalBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
+		RS_Debug->SetCBVValue("DebugPassCB", &cb, dx12_rhi->GlobalCmdList->CmdList.Get());
+		RS_Debug->SetSRV("SrcTex", GeomNormalBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
 		dx12_rhi->GlobalCmdList->CmdList->DrawInstanced(4, 1, 0, 0);
-		RS_Debug->currentDrawCallIndex++;
 	});
 
 	functions.push_back([&](EDebugVisualization eFS) {
@@ -1641,10 +1635,9 @@ void MyToyDX12Renderer::DebugPass()
 		cb.ProjectionParams.z = Near;
 		cb.ProjectionParams.w = Far;
 		cb.DebugMode = DEPTH;
-		RS_Debug->SetConstantValue("DebugPassCB", &cb, dx12_rhi->GlobalCmdList->CmdList.Get());
-		RS_Debug->SetTexture("SrcTex", DepthBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
+		RS_Debug->SetCBVValue("DebugPassCB", &cb, dx12_rhi->GlobalCmdList->CmdList.Get());
+		RS_Debug->SetSRV("SrcTex", DepthBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
 		dx12_rhi->GlobalCmdList->CmdList->DrawInstanced(4, 1, 0, 0);
-		RS_Debug->currentDrawCallIndex++;
 	});
 	functions.push_back([&](EDebugVisualization eFS) {
 		// raw sh
@@ -1666,10 +1659,9 @@ void MyToyDX12Renderer::DebugPass()
 		}
 
 		cb.DebugMode = RAW_COPY;
-		RS_Debug->SetConstantValue("DebugPassCB", &cb, dx12_rhi->GlobalCmdList->CmdList.Get());
-		RS_Debug->SetTexture("SrcTex", GIBufferSH.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
+		RS_Debug->SetCBVValue("DebugPassCB", &cb, dx12_rhi->GlobalCmdList->CmdList.Get());
+		RS_Debug->SetSRV("SrcTex", GIBufferSH.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
 		dx12_rhi->GlobalCmdList->CmdList->DrawInstanced(4, 1, 0, 0);
-		RS_Debug->currentDrawCallIndex++;
 	});
 	functions.push_back([&](EDebugVisualization eFS) {
 		// raw CoCg
@@ -1691,10 +1683,9 @@ void MyToyDX12Renderer::DebugPass()
 		}
 
 		cb.DebugMode = RAW_COPY;
-		RS_Debug->SetConstantValue("DebugPassCB", &cb, dx12_rhi->GlobalCmdList->CmdList.Get());
-		RS_Debug->SetTexture("SrcTex", GIBufferColor.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
+		RS_Debug->SetCBVValue("DebugPassCB", &cb, dx12_rhi->GlobalCmdList->CmdList.Get());
+		RS_Debug->SetSRV("SrcTex", GIBufferColor.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
 		dx12_rhi->GlobalCmdList->CmdList->DrawInstanced(4, 1, 0, 0);
-		RS_Debug->currentDrawCallIndex++;
 	});
 	functions.push_back([&](EDebugVisualization eFS) {
 		// temporal filtered sh
@@ -1716,10 +1707,9 @@ void MyToyDX12Renderer::DebugPass()
 		}
 
 		cb.DebugMode = RAW_COPY;
-		RS_Debug->SetConstantValue("DebugPassCB", &cb, dx12_rhi->GlobalCmdList->CmdList.Get());
-		RS_Debug->SetTexture("SrcTex", GIBufferSHTemporal[GIBufferWriteIndex].get(), dx12_rhi->GlobalCmdList->CmdList.Get());
+		RS_Debug->SetCBVValue("DebugPassCB", &cb, dx12_rhi->GlobalCmdList->CmdList.Get());
+		RS_Debug->SetSRV("SrcTex", GIBufferSHTemporal[GIBufferWriteIndex].get(), dx12_rhi->GlobalCmdList->CmdList.Get());
 		dx12_rhi->GlobalCmdList->CmdList->DrawInstanced(4, 1, 0, 0);
-		RS_Debug->currentDrawCallIndex++;
 	});
 	functions.push_back([&](EDebugVisualization eFS) {
 		// spatial filtered sh
@@ -1741,10 +1731,9 @@ void MyToyDX12Renderer::DebugPass()
 		}
 
 		cb.DebugMode = RAW_COPY;
-		RS_Debug->SetConstantValue("DebugPassCB", &cb, dx12_rhi->GlobalCmdList->CmdList.Get());
-		RS_Debug->SetTexture("SrcTex", FilterIndirectDiffusePingPongSH[0].get(), dx12_rhi->GlobalCmdList->CmdList.Get());
+		RS_Debug->SetCBVValue("DebugPassCB", &cb, dx12_rhi->GlobalCmdList->CmdList.Get());
+		RS_Debug->SetSRV("SrcTex", FilterIndirectDiffusePingPongSH[0].get(), dx12_rhi->GlobalCmdList->CmdList.Get());
 		dx12_rhi->GlobalCmdList->CmdList->DrawInstanced(4, 1, 0, 0);
-		RS_Debug->currentDrawCallIndex++;
 	});
 	functions.push_back([&](EDebugVisualization eFS) {
 		// sh lighting result
@@ -1768,13 +1757,12 @@ void MyToyDX12Renderer::DebugPass()
 		}
 
 		cb.DebugMode = SH_LIGHTING;
-		RS_Debug->SetConstantValue("DebugPassCB", &cb, dx12_rhi->GlobalCmdList->CmdList.Get());
-		RS_Debug->SetTexture("SrcTex", FilterIndirectDiffusePingPongColor[0].get(), dx12_rhi->GlobalCmdList->CmdList.Get());
-		RS_Debug->SetTexture("SrcTexSH", FilterIndirectDiffusePingPongSH[0].get(), dx12_rhi->GlobalCmdList->CmdList.Get());
-		RS_Debug->SetTexture("SrcTexNormal", NormalBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
+		RS_Debug->SetCBVValue("DebugPassCB", &cb, dx12_rhi->GlobalCmdList->CmdList.Get());
+		RS_Debug->SetSRV("SrcTex", FilterIndirectDiffusePingPongColor[0].get(), dx12_rhi->GlobalCmdList->CmdList.Get());
+		RS_Debug->SetSRV("SrcTexSH", FilterIndirectDiffusePingPongSH[0].get(), dx12_rhi->GlobalCmdList->CmdList.Get());
+		RS_Debug->SetSRV("SrcTexNormal", NormalBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
 
 		dx12_rhi->GlobalCmdList->CmdList->DrawInstanced(4, 1, 0, 0);
-		RS_Debug->currentDrawCallIndex++;
 	});
 	functions.push_back([&](EDebugVisualization eFS) {
 		// albedo
@@ -1796,10 +1784,9 @@ void MyToyDX12Renderer::DebugPass()
 		}
 
 		cb.DebugMode = RAW_COPY;
-		RS_Debug->SetConstantValue("DebugPassCB", &cb, dx12_rhi->GlobalCmdList->CmdList.Get());
-		RS_Debug->SetTexture("SrcTex", AlbedoBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
+		RS_Debug->SetCBVValue("DebugPassCB", &cb, dx12_rhi->GlobalCmdList->CmdList.Get());
+		RS_Debug->SetSRV("SrcTex", AlbedoBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
 		dx12_rhi->GlobalCmdList->CmdList->DrawInstanced(4, 1, 0, 0);
-		RS_Debug->currentDrawCallIndex++;
 	});
 	
 	functions.push_back([&](EDebugVisualization eFS) {
@@ -1822,10 +1809,9 @@ void MyToyDX12Renderer::DebugPass()
 		}
 
 		cb.DebugMode = RAW_COPY;
-		RS_Debug->SetConstantValue("DebugPassCB", &cb, dx12_rhi->GlobalCmdList->CmdList.Get());
-		RS_Debug->SetTexture("SrcTex", VelocityBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
+		RS_Debug->SetCBVValue("DebugPassCB", &cb, dx12_rhi->GlobalCmdList->CmdList.Get());
+		RS_Debug->SetSRV("SrcTex", VelocityBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
 		dx12_rhi->GlobalCmdList->CmdList->DrawInstanced(4, 1, 0, 0);
-		RS_Debug->currentDrawCallIndex++;
 	});
 	
 	functions.push_back([&](EDebugVisualization eFS) {
@@ -1847,10 +1833,9 @@ void MyToyDX12Renderer::DebugPass()
 		}
 
 		cb.DebugMode = RAW_COPY;
-		RS_Debug->SetConstantValue("DebugPassCB", &cb, dx12_rhi->GlobalCmdList->CmdList.Get());
-		RS_Debug->SetTexture("SrcTex", RoughnessMetalicBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
+		RS_Debug->SetCBVValue("DebugPassCB", &cb, dx12_rhi->GlobalCmdList->CmdList.Get());
+		RS_Debug->SetSRV("SrcTex", RoughnessMetalicBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
 		dx12_rhi->GlobalCmdList->CmdList->DrawInstanced(4, 1, 0, 0);
-		RS_Debug->currentDrawCallIndex++;
 	});
 	functions.push_back([&](EDebugVisualization eFS) {
 		// specular raw
@@ -1873,10 +1858,9 @@ void MyToyDX12Renderer::DebugPass()
 		}
 
 		cb.DebugMode = RAW_COPY;
-		RS_Debug->SetConstantValue("DebugPassCB", &cb, dx12_rhi->GlobalCmdList->CmdList.Get());
-		RS_Debug->SetTexture("SrcTex", SpeculaGIBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
+		RS_Debug->SetCBVValue("DebugPassCB", &cb, dx12_rhi->GlobalCmdList->CmdList.Get());
+		RS_Debug->SetSRV("SrcTex", SpeculaGIBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
 		dx12_rhi->GlobalCmdList->CmdList->DrawInstanced(4, 1, 0, 0);
-		RS_Debug->currentDrawCallIndex++;
 	});
 
 	functions.push_back([&](EDebugVisualization eFS) {
@@ -1900,10 +1884,9 @@ void MyToyDX12Renderer::DebugPass()
 		}
 
 		cb.DebugMode = RAW_COPY;
-		RS_Debug->SetConstantValue("DebugPassCB", &cb, dx12_rhi->GlobalCmdList->CmdList.Get());
-		RS_Debug->SetTexture("SrcTex", SpeculaGIBufferTemporal[GIBufferWriteIndex].get(), dx12_rhi->GlobalCmdList->CmdList.Get());
+		RS_Debug->SetCBVValue("DebugPassCB", &cb, dx12_rhi->GlobalCmdList->CmdList.Get());
+		RS_Debug->SetSRV("SrcTex", SpeculaGIBufferTemporal[GIBufferWriteIndex].get(), dx12_rhi->GlobalCmdList->CmdList.Get());
 		dx12_rhi->GlobalCmdList->CmdList->DrawInstanced(4, 1, 0, 0);
-		RS_Debug->currentDrawCallIndex++;
 	});
 
 
@@ -1924,16 +1907,16 @@ void MyToyDX12Renderer::LightingPass()
 	RS_Lighting->Apply(dx12_rhi->GlobalCmdList->CmdList.Get());
 
 	RS_Lighting->SetSampler("samplerWrap", samplerWrap.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
-	RS_Lighting->SetTexture("AlbedoTex", AlbedoBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
-	RS_Lighting->SetTexture("NormalTex", NormalBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
-	RS_Lighting->SetTexture("ShadowTex", ShadowBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
+	RS_Lighting->SetSRV("AlbedoTex", AlbedoBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
+	RS_Lighting->SetSRV("NormalTex", NormalBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
+	RS_Lighting->SetSRV("ShadowTex", ShadowBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
 
-	RS_Lighting->SetTexture("VelocityTex", VelocityBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
-	RS_Lighting->SetTexture("DepthTex", DepthBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
-	RS_Lighting->SetTexture("GIResultSHTex", FilterIndirectDiffusePingPongSH[0].get(), dx12_rhi->GlobalCmdList->CmdList.Get());
-	RS_Lighting->SetTexture("GIResultColorTex", FilterIndirectDiffusePingPongColor[0].get(), dx12_rhi->GlobalCmdList->CmdList.Get());
-	RS_Lighting->SetTexture("SpecularGITex", SpeculaGIBufferTemporal[GIBufferWriteIndex].get(), dx12_rhi->GlobalCmdList->CmdList.Get());
-	RS_Lighting->SetTexture("RoughnessMetalicTex", RoughnessMetalicBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
+	RS_Lighting->SetSRV("VelocityTex", VelocityBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
+	RS_Lighting->SetSRV("DepthTex", DepthBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
+	RS_Lighting->SetSRV("GIResultSHTex", FilterIndirectDiffusePingPongSH[0].get(), dx12_rhi->GlobalCmdList->CmdList.Get());
+	RS_Lighting->SetSRV("GIResultColorTex", FilterIndirectDiffusePingPongColor[0].get(), dx12_rhi->GlobalCmdList->CmdList.Get());
+	RS_Lighting->SetSRV("SpecularGITex", SpeculaGIBufferTemporal[GIBufferWriteIndex].get(), dx12_rhi->GlobalCmdList->CmdList.Get());
+	RS_Lighting->SetSRV("RoughnessMetalicTex", RoughnessMetalicBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
 
 	glm::mat4x4 InvViewMat = glm::inverse(ViewMat);
 	LightingParam Param;
@@ -1952,7 +1935,7 @@ void MyToyDX12Renderer::LightingPass()
 	Param.GIBufferScale = GIBufferScale;
 
 	glm::normalize(Param.LightDir);
-	RS_Lighting->SetConstantValue("LightingParam", &Param, dx12_rhi->GlobalCmdList->CmdList.Get());
+	RS_Lighting->SetCBVValue("LightingParam", &Param, dx12_rhi->GlobalCmdList->CmdList.Get());
 
 
 	RS_Lighting->Apply(dx12_rhi->GlobalCmdList->CmdList.Get());
@@ -1978,11 +1961,11 @@ void MyToyDX12Renderer::TemporalAAPass()
 	RS_TemporalAA->Apply(dx12_rhi->GlobalCmdList->CmdList.Get());
 
 	RS_TemporalAA->SetSampler("samplerWrap", samplerWrap.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
-	RS_TemporalAA->SetTexture("CurrentColorTex", LightingBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
+	RS_TemporalAA->SetSRV("CurrentColorTex", LightingBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
 	Texture* PrevColorBuffer = ColorBuffers[PrevColorBufferIndex];
-	RS_TemporalAA->SetTexture("PrevColorTex", PrevColorBuffer, dx12_rhi->GlobalCmdList->CmdList.Get());
-	RS_TemporalAA->SetTexture("VelocityTex", VelocityBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
-	RS_TemporalAA->SetTexture("DepthTex", DepthBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
+	RS_TemporalAA->SetSRV("PrevColorTex", PrevColorBuffer, dx12_rhi->GlobalCmdList->CmdList.Get());
+	RS_TemporalAA->SetSRV("VelocityTex", VelocityBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
+	RS_TemporalAA->SetSRV("DepthTex", DepthBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
 
 	TemporalAAParam Param;
 
@@ -1996,7 +1979,7 @@ void MyToyDX12Renderer::TemporalAAPass()
 
 	Param.ClampMode = ClampMode;
 
-	RS_TemporalAA->SetConstantValue("LightingParam", &Param, dx12_rhi->GlobalCmdList->CmdList.Get());
+	RS_TemporalAA->SetCBVValue("LightingParam", &Param, dx12_rhi->GlobalCmdList->CmdList.Get());
 	RS_TemporalAA->Apply(dx12_rhi->GlobalCmdList->CmdList.Get());
 
 	dx12_rhi->GlobalCmdList->CmdList->OMSetRenderTargets(1, &ResolveTarget->CpuHandleRTV, FALSE, nullptr);
@@ -2376,7 +2359,7 @@ struct ParallelDrawTaskSet : enki::ITaskSet
 	UINT StartIndex;
 	UINT ThisDraw;
 	UINT ThreadIndex;
-	ThreadDescriptorHeapPool* DHPool;
+	//ThreadDescriptorHeapPool* DHPool;
 
 	ParallelDrawTaskSet(){}
 	ParallelDrawTaskSet(ParallelDrawTaskSet &&) {}
@@ -2384,7 +2367,7 @@ struct ParallelDrawTaskSet : enki::ITaskSet
 
 	virtual void ExecuteRange(enki::TaskSetPartition range, uint32_t threadnum)
 	{
-		app->RecordDraw(StartIndex, ThisDraw, ThreadIndex, const_cast<ThreadDescriptorHeapPool*>(DHPool));
+		//app->RecordDraw(StartIndex, ThisDraw, ThreadIndex, const_cast<ThreadDescriptorHeapPool*>(DHPool));
 	}
 };
 
@@ -2417,25 +2400,23 @@ void MyToyDX12Renderer::DrawScene(shared_ptr<Scene> scene, float Roughness, floa
 			objCB.RougnessMetalic.x = Roughness;
 			objCB.RougnessMetalic.y = Metalic;
 
-			RS_Mesh->SetConstantValue("ObjParameter", (void*)&objCB, dx12_rhi->GlobalCmdList->CmdList.Get());
+			RS_Mesh->SetCBVValue("ObjParameter", (void*)&objCB, dx12_rhi->GlobalCmdList->CmdList.Get());
 
 			Texture* diffuseTex = drawcall.mat->Diffuse.get();
 			/*if (diffuseTex == nullptr)
 				diffuseTex = scene->Materials[0]->Diffuse.get();*/
 			if (diffuseTex)
-				RS_Mesh->SetTexture("diffuseMap", diffuseTex, dx12_rhi->GlobalCmdList->CmdList.Get());
+				RS_Mesh->SetSRV("diffuseMap", diffuseTex, dx12_rhi->GlobalCmdList->CmdList.Get());
 
 
 			Texture* normalTex = drawcall.mat->Normal.get();
 			/*if (normalTex == nullptr)
 				normalTex = scene->Materials[0]->Normal.get();*/
 			if (normalTex)
-				RS_Mesh->SetTexture("normalMap", normalTex, dx12_rhi->GlobalCmdList->CmdList.Get());
+				RS_Mesh->SetSRV("normalMap", normalTex, dx12_rhi->GlobalCmdList->CmdList.Get());
 
 
 			dx12_rhi->GlobalCmdList->CmdList->DrawIndexedInstanced(drawcall.IndexCount, 1, drawcall.IndexStart, drawcall.VertexBase, 0);
-
-			RS_Mesh->currentDrawCallIndex++;
 		}
 	}
 }
@@ -2475,7 +2456,6 @@ void MyToyDX12Renderer::DrawMeshPass()
 		dx12_rhi->GlobalCmdList->CmdList->RSSetScissorRects(1, &m_scissorRect);
 		dx12_rhi->GlobalCmdList->CmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
-		RS_Mesh->currentDrawCallIndex = 0;
 		
 		DrawScene(Sponza, SponzaRoughness, 0);
 		DrawScene(ShaderBall, ShaderBallRoughness, 1);
@@ -2538,61 +2518,61 @@ void MyToyDX12Renderer::DrawMeshPass()
 	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(DepthBuffer->resource.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
 }
 
-void MyToyDX12Renderer::RecordDraw (UINT StartIndex, UINT NumDraw, UINT CLIndex, ThreadDescriptorHeapPool* DHPool)
-{
-	//Texture* backbuffer = ColorBuffer.get();
-
-	//ID3D12GraphicsCommandList* CL = dx12_rhi->DrawMeshCommandList[CLIndex].Get();
-
-	//ID3D12CommandAllocator* CA = dx12_rhi->FrameResourceVec[dx12_rhi->CurrentFrameIndex].VecCommandAllocatorMeshDraw[CLIndex].Get();
-	//CL->Reset(CA, nullptr);
-
-	//CL->OMSetRenderTargets(1, &backbuffer->CpuHandleRTV, FALSE, &DepthBuffer->CpuHandleDSV);
-	//CL->RSSetViewports(1, &m_viewport);
-	//CL->RSSetScissorRects(1, &m_scissorRect);
-	//CL->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-	//CL->IASetIndexBuffer(&mesh->Ib->view);
-	//CL->IASetVertexBuffers(0, 1, &mesh->Vb->view);
-
-	//ID3D12DescriptorHeap* ppHeaps[] = { dx12_rhi->SRVCBVDescriptorHeapShaderVisible->DH.Get(), dx12_rhi->SamplerDescriptorHeapShaderVisible->DH.Get() };
-	//CL->SetDescriptorHeaps(_countof(ppHeaps), ppHeaps);
-	//
-	//RS_Mesh->ApplyGraphicsRSPSO(CL);
-	//RS_Mesh->ps->SetSampler("samplerWrap", samplerWrap.get(), CL, DHPool);
-
-	//glm::mat4x4 ViewMat;
-	//glm::mat4x4 ProjMat;
-
-	//memcpy(&ViewMat, &m_camera.GetViewMatrix(), sizeof(glm::mat4x4));
-	//memcpy(&ProjMat, &m_camera.GetProjectionMatrix(0.8f, m_aspectRatio, Near, Far), sizeof(glm::mat4x4));
-
-	//glm::mat4x4 ViewProjMat = glm::transpose(ProjMat * ViewMat);
-
-	//for (int i = StartIndex; i < StartIndex + NumDraw; i++)
-	//{
-	//	Mesh::DrawCall& drawcall = mesh->Draws[i];
-	//	ObjConstantBuffer objCB;
-	//	objCB.ViewProjectionMatrix = ViewProjMat;
-	//	glm::mat4 m; // Identity matrix
-	//	objCB.WorldMatrix = m;
-	//	objCB.ViewDir.x = m_camera.m_lookDirection.x;
-	//	objCB.ViewDir.y = m_camera.m_lookDirection.y;
-	//	objCB.ViewDir.z = m_camera.m_lookDirection.z;
-	//	RS_Mesh->vs->SetConstantValue("ObjParameter", (void*)&objCB, CL, DHPool);
-
-
-	//	Texture* diffuseTex = mesh->Textures[drawcall.DiffuseTextureIndex].get();
-	//	RS_Mesh->ps->SetTexture("diffuseMap", diffuseTex, CL, DHPool);
-
-	//	Texture* normalTex = mesh->Textures[drawcall.NormalTextureIndex].get();
-	//	RS_Mesh->ps->SetTexture("normalMap", normalTex, CL, DHPool);
-
-
-	//	CL->DrawIndexedInstanced(drawcall.IndexCount, 1, drawcall.IndexStart, drawcall.VertexBase, 0);
-	//}
-	//
-	//CL->Close();
-}
+//void MyToyDX12Renderer::RecordDraw (UINT StartIndex, UINT NumDraw, UINT CLIndex, ThreadDescriptorHeapPool* DHPool)
+//{
+//	//Texture* backbuffer = ColorBuffer.get();
+//
+//	//ID3D12GraphicsCommandList* CL = dx12_rhi->DrawMeshCommandList[CLIndex].Get();
+//
+//	//ID3D12CommandAllocator* CA = dx12_rhi->FrameResourceVec[dx12_rhi->CurrentFrameIndex].VecCommandAllocatorMeshDraw[CLIndex].Get();
+//	//CL->Reset(CA, nullptr);
+//
+//	//CL->OMSetRenderTargets(1, &backbuffer->CpuHandleRTV, FALSE, &DepthBuffer->CpuHandleDSV);
+//	//CL->RSSetViewports(1, &m_viewport);
+//	//CL->RSSetScissorRects(1, &m_scissorRect);
+//	//CL->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+//	//CL->IASetIndexBuffer(&mesh->Ib->view);
+//	//CL->IASetVertexBuffers(0, 1, &mesh->Vb->view);
+//
+//	//ID3D12DescriptorHeap* ppHeaps[] = { dx12_rhi->SRVCBVDescriptorHeapShaderVisible->DH.Get(), dx12_rhi->SamplerDescriptorHeapShaderVisible->DH.Get() };
+//	//CL->SetDescriptorHeaps(_countof(ppHeaps), ppHeaps);
+//	//
+//	//RS_Mesh->ApplyGraphicsRSPSO(CL);
+//	//RS_Mesh->ps->SetSampler("samplerWrap", samplerWrap.get(), CL, DHPool);
+//
+//	//glm::mat4x4 ViewMat;
+//	//glm::mat4x4 ProjMat;
+//
+//	//memcpy(&ViewMat, &m_camera.GetViewMatrix(), sizeof(glm::mat4x4));
+//	//memcpy(&ProjMat, &m_camera.GetProjectionMatrix(0.8f, m_aspectRatio, Near, Far), sizeof(glm::mat4x4));
+//
+//	//glm::mat4x4 ViewProjMat = glm::transpose(ProjMat * ViewMat);
+//
+//	//for (int i = StartIndex; i < StartIndex + NumDraw; i++)
+//	//{
+//	//	Mesh::DrawCall& drawcall = mesh->Draws[i];
+//	//	ObjConstantBuffer objCB;
+//	//	objCB.ViewProjectionMatrix = ViewProjMat;
+//	//	glm::mat4 m; // Identity matrix
+//	//	objCB.WorldMatrix = m;
+//	//	objCB.ViewDir.x = m_camera.m_lookDirection.x;
+//	//	objCB.ViewDir.y = m_camera.m_lookDirection.y;
+//	//	objCB.ViewDir.z = m_camera.m_lookDirection.z;
+//	//	RS_Mesh->vs->SetConstantValue("ObjParameter", (void*)&objCB, CL, DHPool);
+//
+//
+//	//	Texture* diffuseTex = mesh->Textures[drawcall.DiffuseTextureIndex].get();
+//	//	RS_Mesh->ps->SetTexture("diffuseMap", diffuseTex, CL, DHPool);
+//
+//	//	Texture* normalTex = mesh->Textures[drawcall.NormalTextureIndex].get();
+//	//	RS_Mesh->ps->SetTexture("normalMap", normalTex, CL, DHPool);
+//
+//
+//	//	CL->DrawIndexedInstanced(drawcall.IndexCount, 1, drawcall.IndexStart, drawcall.VertexBase, 0);
+//	//}
+//	//
+//	//CL->Close();
+//}
 
 void MyToyDX12Renderer::SpatialDenoisingPass()
 {
@@ -2610,16 +2590,16 @@ void MyToyDX12Renderer::SpatialDenoisingPass()
 
 		RS_SpatialDenoisingFilter->Apply(dx12_rhi->GlobalCmdList->CmdList.Get());
 
-		RS_SpatialDenoisingFilter->SetTexture("DepthTex", DepthBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
-		RS_SpatialDenoisingFilter->SetTexture("GeoNormalTex", GeomNormalBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
-		RS_SpatialDenoisingFilter->SetTexture("InGIResultSHTex", FilterIndirectDiffusePingPongSH[ReadIndex].get(), dx12_rhi->GlobalCmdList->CmdList.Get());
-		RS_SpatialDenoisingFilter->SetTexture("InGIResultColorTex", FilterIndirectDiffusePingPongColor[ReadIndex].get(), dx12_rhi->GlobalCmdList->CmdList.Get());
+		RS_SpatialDenoisingFilter->SetSRV("DepthTex", DepthBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
+		RS_SpatialDenoisingFilter->SetSRV("GeoNormalTex", GeomNormalBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
+		RS_SpatialDenoisingFilter->SetSRV("InGIResultSHTex", FilterIndirectDiffusePingPongSH[ReadIndex].get(), dx12_rhi->GlobalCmdList->CmdList.Get());
+		RS_SpatialDenoisingFilter->SetSRV("InGIResultColorTex", FilterIndirectDiffusePingPongColor[ReadIndex].get(), dx12_rhi->GlobalCmdList->CmdList.Get());
 
 		RS_SpatialDenoisingFilter->SetUAV("OutGIResultSH", FilterIndirectDiffusePingPongSH[WriteIndex].get(), dx12_rhi->GlobalCmdList->CmdList.Get());
 		RS_SpatialDenoisingFilter->SetUAV("OutGIResultColor", FilterIndirectDiffusePingPongColor[WriteIndex].get(), dx12_rhi->GlobalCmdList->CmdList.Get());
 
 		SpatialFilterCB.Iteration = i;
-		RS_SpatialDenoisingFilter->SetConstantValue("SpatialFilterConstant", &SpatialFilterCB, dx12_rhi->GlobalCmdList->CmdList.Get());
+		RS_SpatialDenoisingFilter->SetCBVValue("SpatialFilterConstant", &SpatialFilterCB, dx12_rhi->GlobalCmdList->CmdList.Get());
 
 		UINT WidthGI = m_width / GIBufferScale;
 		UINT HeightGI = m_height / GIBufferScale;
@@ -2651,15 +2631,15 @@ void MyToyDX12Renderer::TemporalDenoisingPass()
 
 	RS_TemporalDenoisingFilter->Apply(dx12_rhi->GlobalCmdList->CmdList.Get());
 
-	RS_TemporalDenoisingFilter->SetTexture("DepthTex", DepthBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
-	RS_TemporalDenoisingFilter->SetTexture("GeoNormalTex", NormalBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
-	RS_TemporalDenoisingFilter->SetTexture("InGIResultSHTex", GIBufferSH.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
-	RS_TemporalDenoisingFilter->SetTexture("InGIResultColorTex", GIBufferColor.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
-	RS_TemporalDenoisingFilter->SetTexture("InGIResultSHTexPrev", GIBufferSHTemporal[ReadIndex].get(), dx12_rhi->GlobalCmdList->CmdList.Get());
-	RS_TemporalDenoisingFilter->SetTexture("InGIResultColorTexPrev", GIBufferColorTemporal[ReadIndex].get(), dx12_rhi->GlobalCmdList->CmdList.Get());
-	RS_TemporalDenoisingFilter->SetTexture("VelocityTex", VelocityBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
-	RS_TemporalDenoisingFilter->SetTexture("InSpecularGITex", SpeculaGIBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
-	RS_TemporalDenoisingFilter->SetTexture("InSpecularGITexPrev", SpeculaGIBufferTemporal[ReadIndex].get(), dx12_rhi->GlobalCmdList->CmdList.Get());
+	RS_TemporalDenoisingFilter->SetSRV("DepthTex", DepthBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
+	RS_TemporalDenoisingFilter->SetSRV("GeoNormalTex", NormalBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
+	RS_TemporalDenoisingFilter->SetSRV("InGIResultSHTex", GIBufferSH.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
+	RS_TemporalDenoisingFilter->SetSRV("InGIResultColorTex", GIBufferColor.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
+	RS_TemporalDenoisingFilter->SetSRV("InGIResultSHTexPrev", GIBufferSHTemporal[ReadIndex].get(), dx12_rhi->GlobalCmdList->CmdList.Get());
+	RS_TemporalDenoisingFilter->SetSRV("InGIResultColorTexPrev", GIBufferColorTemporal[ReadIndex].get(), dx12_rhi->GlobalCmdList->CmdList.Get());
+	RS_TemporalDenoisingFilter->SetSRV("VelocityTex", VelocityBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
+	RS_TemporalDenoisingFilter->SetSRV("InSpecularGITex", SpeculaGIBuffer.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
+	RS_TemporalDenoisingFilter->SetSRV("InSpecularGITexPrev", SpeculaGIBufferTemporal[ReadIndex].get(), dx12_rhi->GlobalCmdList->CmdList.Get());
 
 
 	RS_TemporalDenoisingFilter->SetUAV("OutGIResultSH", GIBufferSHTemporal[WriteIndex].get(), dx12_rhi->GlobalCmdList->CmdList.Get());
@@ -2669,7 +2649,7 @@ void MyToyDX12Renderer::TemporalDenoisingPass()
 	RS_TemporalDenoisingFilter->SetUAV("OutSpecularGI", SpeculaGIBufferTemporal[WriteIndex].get(), dx12_rhi->GlobalCmdList->CmdList.Get());
 
 
-	RS_TemporalDenoisingFilter->SetConstantValue("TemporalFilterConstant", &TemporalFilterCB, dx12_rhi->GlobalCmdList->CmdList.Get());
+	RS_TemporalDenoisingFilter->SetCBVValue("TemporalFilterConstant", &TemporalFilterCB, dx12_rhi->GlobalCmdList->CmdList.Get());
 
 	dx12_rhi->GlobalCmdList->CmdList->Dispatch(m_width / 15 , m_height / 15, 1);
 
@@ -2956,7 +2936,7 @@ void MyToyDX12Renderer::RaytraceShadowPass()
 	PSO_RT_SHADOW->SetSRV("global", "gRtScene", TLAS->GPUHandle);
 	PSO_RT_SHADOW->SetSRV("global", "DepthTex", DepthBuffer->GpuHandleSRV);
 	PSO_RT_SHADOW->SetSRV("global", "WorldNormalTex", GeomNormalBuffer->GpuHandleSRV);
-	PSO_RT_SHADOW->SetCBVValue("global", "ViewParameter", &RTShadowViewParam, sizeof(RTShadowViewParamCB));
+	PSO_RT_SHADOW->SetCBVValue("global", "ViewParameter", &RTShadowViewParam);
 	PSO_RT_SHADOW->SetSampler("global", "samplerWrap", samplerWrap.get());
 
 
@@ -2984,7 +2964,7 @@ void MyToyDX12Renderer::RaytraceReflectionPass()
 	PSO_RT_REFLECTION->SetSRV("global", "BlueNoiseTex", BlueNoiseTex->GpuHandleSRV);
 	PSO_RT_REFLECTION->SetSRV("global", "WorldNormalTex", NormalBuffer->GpuHandleSRV);
 
-	PSO_RT_REFLECTION->SetCBVValue("global", "ViewParameter", &RTReflectionViewParam, sizeof(RTReflectionViewParamCB));
+	PSO_RT_REFLECTION->SetCBVValue("global", "ViewParameter", &RTReflectionViewParam);
 	PSO_RT_REFLECTION->SetSampler("global", "samplerWrap", samplerWrap.get());
 
 
@@ -3039,7 +3019,7 @@ void MyToyDX12Renderer::RaytraceGIPass()
 	PSO_RT_GI->SetSRV("global", "WorldNormalTex", NormalBuffer->GpuHandleSRV);
 	PSO_RT_GI->SetSRV("global", "BlueNoiseTex", BlueNoiseTex->GpuHandleSRV);
 
-	PSO_RT_GI->SetCBVValue("global", "ViewParameter", &RTGIViewParam, sizeof(RTGIViewParamCB));
+	PSO_RT_GI->SetCBVValue("global", "ViewParameter", &RTGIViewParam);
 	PSO_RT_GI->SetSampler("global", "samplerWrap", samplerWrap.get());
 
 	int i = 0;

@@ -369,7 +369,7 @@ public:
 
 	void RaytraceGIPass();
 
-	void RecordDraw(UINT StartIndex, UINT NumDraw, UINT CLIndex, ThreadDescriptorHeapPool* DHPool);
+	//void RecordDraw(UINT StartIndex, UINT NumDraw, UINT CLIndex, ThreadDescriptorHeapPool* DHPool);
 
 	void SpatialDenoisingPass();
 
