@@ -1,13 +1,8 @@
-# DX12 & DXR test framework
+# DX12
 This project is for dx12 & dxr learning. I am trying to bring best practice implementation to this project(resource binding, descriotpr allocation, multi-thread command submission, etc....)
 
-## DX12 Topic
-* Easy resource binding interface.
-* Descriptor allocation.
-	* Ring buffer.
-* Multi threaded mesh rendering. (this is broken temporarily)
-* Descriptor table usage.
-* Memory residency.
+# DXR
+This is basically simplified version of Q2RTX in terms of raytracing.
 
 ## Screenshots
 ![](rt_1.png)
@@ -16,18 +11,6 @@ This project is for dx12 & dxr learning. I am trying to bring best practice impl
 ![](rt_4.png)
 ![](rt_5.png)
 ![](rt_6.png)
-
-
-
-## DXR Topic
-* How to make resource binding easier.
-	* Root signature.
-	* Shader table.
-
-## Non-DX Topic
-* Temporal AA
-* Aftermath.
-* Rutime shader compile.
 
 ## Build
 * Go to build directory.
@@ -40,6 +23,7 @@ This project is for dx12 & dxr learning. I am trying to bring best practice impl
 * [glm](https://glm.g-truc.net/0.9.9/index.html)
 * [NV Aftermath](https://developer.nvidia.com/nvidia-aftermath)
 * [premake](https://premake.github.io/)
+* [imgui gizmo(compatible with glm)](https://github.com/DarisaLLC/imGuIZMO-1)
 
 ## Useful link
 * DX12
@@ -56,6 +40,5 @@ This project is for dx12 & dxr learning. I am trying to bring best practice impl
 * fbx file
 	* [https://github.com/derkreature/IBLBaker](https://github.com/derkreature/IBLBaker)
 
-## Fun bug story
-* Shader table should be ring buffer if it changes!.
+
 	
