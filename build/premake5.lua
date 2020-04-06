@@ -23,7 +23,9 @@ project "MyToyDX12Renderer"
 				"../src/external/DirectXTex July 2017/Include", 
 				"../src/external/assimp/include",
 				"../src/external/imgui/",
-				"../src/external/imgui/examples"
+				"../src/external/imgui/examples",
+				"../src/"
+
                }
    libdirs 	{
             "../src/external/GFSDK_Aftermath/lib/x64", 

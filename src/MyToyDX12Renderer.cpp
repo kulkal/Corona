@@ -29,6 +29,7 @@
 #include "imgui.h"
 #include "imgui_impl_win32.h"
 #include "imgui_impl_dx12.h"
+#include "imGuIZMO.h"
 
 
 
@@ -615,7 +616,7 @@ void MyToyDX12Renderer::LoadAssets()
 
 	ShaderBall = LoadModel("assets/shaderball/shaderBall.fbx");
 
-	glm::mat4x4 scaleMat = glm::scale(vec3(2.5, 2.5, 2.5));
+	glm::mat4x4 scaleMat = glm::scale(glm::vec3(2.5, 2.5, 2.5));
 	glm::mat4x4 translatemat = glm::translate(glm::vec3(-150, 20, 0));
 	ShaderBall->SetTransform(scaleMat* translatemat );
 	
@@ -2245,7 +2246,15 @@ void MyToyDX12Renderer::OnRender()
 			ImGui::EndCombo();
 		}
 
-		ImGui::SliderFloat3("Light direction", &LightDir.x, -1.0f, 1.0f);
+
+
+		glm::vec3 LD = glm::vec3(LightDir.z, -LightDir.y, -LightDir.x);
+		ImGui::gizmo3D("##gizmo1", LD, 200 /* mode */);
+		LightDir = glm::vec3(-LD.z, -LD.y, LD.x);
+		ImGui::SameLine();
+		ImGui::Text("Light Direction");
+
+
 		ImGui::SliderFloat("Light Brightness", &LightIntensity, 0.0f, 20.0f);
 
 		ImGui::SliderFloat("SponzaRoughness", &SponzaRoughness, 0.0f, 1.0f);

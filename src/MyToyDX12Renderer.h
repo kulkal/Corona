@@ -19,6 +19,7 @@
 #include "glm/gtx/transform.hpp"
 #include "glm/mat4x4.hpp"
 #include "glm/fwd.hpp"
+#include "glm/gtc/quaternion.hpp"
 
 #include "DXSample.h"
 #include "StepTimer.h"
@@ -280,6 +281,7 @@ private:
 	SimpleCamera m_camera;
 
 	// misc
+	glm::quat SunRotation;
 	glm::vec3 LightDir = glm::normalize(glm::vec3(0.901, 0.88, 0.176));
 	float LightIntensity = 3.0f;
 	float Near = 1.0f;
