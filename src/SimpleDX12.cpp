@@ -2266,7 +2266,6 @@ bool RTPipelineStateObject::InitRS(string ShaderFile)
 
 		// export association
 		bindingInfo.ExportName = { bindingInfo.ShaderName.c_str() };
-		//ExportAssociation Association(bindingInfo.ExportName.data(), 1, &subobjects[RSIndex]);
 
 		D3D12_STATE_SUBOBJECT subobjectAssociation = {};
 		D3D12_SUBOBJECT_TO_EXPORTS_ASSOCIATION association = {};
@@ -2282,18 +2281,18 @@ bool RTPipelineStateObject::InitRS(string ShaderFile)
 
 	// shader config
 	ShaderConfig shaderConfig(MaxAttributeSizeInBytes, MaxPayloadSizeInBytes);
+	D3D12_STATE_SUBOBJECT* shaderConfigSubObject = &subobjects[index];
 	subobjects[index++] = shaderConfig.subobject;
 
 	// shaderconfig export association
-	// CHECK : all shader has same payload size?
-	vector<const WCHAR*> vecShaderExports;// = { kMissShader.c_str(), kClosestHitShader.c_str(), kRayGenShader.c_str() };
+	vector<const WCHAR*> vecShaderExports;
 	entryPoints.reserve(ShaderBinding.size());
 	for (auto& sb : ShaderBinding)
 	{
 		vecShaderExports.push_back(sb.second.ShaderName.c_str());
 	}
 
-	ExportAssociation configAssociation(vecShaderExports.data(), vecShaderExports.size(), &shaderConfig.subobject);
+	ExportAssociation configAssociation(vecShaderExports.data(), vecShaderExports.size(), shaderConfigSubObject);
 	subobjects[index++] = configAssociation.subobject;
 
 

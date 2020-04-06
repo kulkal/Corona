@@ -1493,6 +1493,8 @@ void MyToyDX12Renderer::InitTemporalAAPass()
 
 void MyToyDX12Renderer::CopyPass()
 {
+	NVAftermathMarker(dx12_rhi->AM_CL_Handle, "CopyPass");
+
 	PIXScopedEvent(dx12_rhi->GlobalCmdList->CmdList.Get(), PIX_COLOR(rand() % 255, rand() % 255, rand() % 255), "CopyPass");
 
 	Texture* backbuffer = framebuffers[dx12_rhi->CurrentFrameIndex].get();
@@ -1530,6 +1532,8 @@ void MyToyDX12Renderer::CopyPass()
 
 void MyToyDX12Renderer::DebugPass()
 {
+	NVAftermathMarker(dx12_rhi->AM_CL_Handle, "DebugPass");
+
 	PIXScopedEvent(dx12_rhi->GlobalCmdList->CmdList.Get(), PIX_COLOR(rand() % 255, rand() % 255, rand() % 255), "DebugPass");
 
 	RS_Debug->Apply(dx12_rhi->GlobalCmdList->CmdList.Get());
@@ -1901,6 +1905,8 @@ void MyToyDX12Renderer::DebugPass()
 
 void MyToyDX12Renderer::LightingPass()
 {
+	NVAftermathMarker(dx12_rhi->AM_CL_Handle, "LightingPass");
+
 	PIXScopedEvent(dx12_rhi->GlobalCmdList->CmdList.Get(), PIX_COLOR(rand() % 255, rand() % 255, rand() % 255), "LightingPass");
 
 	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(LightingBuffer->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET));
@@ -1952,6 +1958,8 @@ void MyToyDX12Renderer::LightingPass()
 
 void MyToyDX12Renderer::TemporalAAPass()
 {
+	NVAftermathMarker(dx12_rhi->AM_CL_Handle, "LightingPass");
+
 	PIXScopedEvent(dx12_rhi->GlobalCmdList->CmdList.Get(), PIX_COLOR(rand() % 255, rand() % 255, rand() % 255), "TemporalAAPass");
 
 	UINT PrevColorBufferIndex = 1 - ColorBufferWriteIndex;
@@ -2120,19 +2128,15 @@ void MyToyDX12Renderer::OnRender()
 	
 	// Record all the commands we need to render the scene into the command list.
 	Texture* backbuffer = framebuffers[dx12_rhi->CurrentFrameIndex].get();
-	NVAftermathMarker(dx12_rhi->AM_CL_Handle, "DrawMeshPass");
 
-	DrawMeshPass();
+	GBufferPass();
 
-	NVAftermathMarker(dx12_rhi->AM_CL_Handle, "RaytraceShadowPass");
 
 	RaytraceShadowPass();
 
-	NVAftermathMarker(dx12_rhi->AM_CL_Handle, "RaytraceReflectionPass");
 
 	RaytraceReflectionPass();
 	
-	NVAftermathMarker(dx12_rhi->AM_CL_Handle, "RaytraceGIPass");
 
 	RaytraceGIPass();
 
@@ -2430,9 +2434,11 @@ void MyToyDX12Renderer::DrawScene(shared_ptr<Scene> scene, float Roughness, floa
 	}
 }
 
-void MyToyDX12Renderer::DrawMeshPass()
+void MyToyDX12Renderer::GBufferPass()
 {
-	PIXScopedEvent(dx12_rhi->GlobalCmdList->CmdList.Get(), PIX_COLOR(rand() % 255, rand() % 255, rand() % 255), "DrawMeshPass");
+	NVAftermathMarker(dx12_rhi->AM_CL_Handle, "GBufferPass");
+
+	PIXScopedEvent(dx12_rhi->GlobalCmdList->CmdList.Get(), PIX_COLOR(rand() % 255, rand() % 255, rand() % 255), "GBufferPass");
 
 	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(AlbedoBuffer->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET));
 	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(NormalBuffer->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET));
@@ -2527,64 +2533,10 @@ void MyToyDX12Renderer::DrawMeshPass()
 	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(DepthBuffer->resource.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
 }
 
-//void MyToyDX12Renderer::RecordDraw (UINT StartIndex, UINT NumDraw, UINT CLIndex, ThreadDescriptorHeapPool* DHPool)
-//{
-//	//Texture* backbuffer = ColorBuffer.get();
-//
-//	//ID3D12GraphicsCommandList* CL = dx12_rhi->DrawMeshCommandList[CLIndex].Get();
-//
-//	//ID3D12CommandAllocator* CA = dx12_rhi->FrameResourceVec[dx12_rhi->CurrentFrameIndex].VecCommandAllocatorMeshDraw[CLIndex].Get();
-//	//CL->Reset(CA, nullptr);
-//
-//	//CL->OMSetRenderTargets(1, &backbuffer->CpuHandleRTV, FALSE, &DepthBuffer->CpuHandleDSV);
-//	//CL->RSSetViewports(1, &m_viewport);
-//	//CL->RSSetScissorRects(1, &m_scissorRect);
-//	//CL->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-//	//CL->IASetIndexBuffer(&mesh->Ib->view);
-//	//CL->IASetVertexBuffers(0, 1, &mesh->Vb->view);
-//
-//	//ID3D12DescriptorHeap* ppHeaps[] = { dx12_rhi->SRVCBVDescriptorHeapShaderVisible->DH.Get(), dx12_rhi->SamplerDescriptorHeapShaderVisible->DH.Get() };
-//	//CL->SetDescriptorHeaps(_countof(ppHeaps), ppHeaps);
-//	//
-//	//RS_Mesh->ApplyGraphicsRSPSO(CL);
-//	//RS_Mesh->ps->SetSampler("samplerWrap", samplerWrap.get(), CL, DHPool);
-//
-//	//glm::mat4x4 ViewMat;
-//	//glm::mat4x4 ProjMat;
-//
-//	//memcpy(&ViewMat, &m_camera.GetViewMatrix(), sizeof(glm::mat4x4));
-//	//memcpy(&ProjMat, &m_camera.GetProjectionMatrix(0.8f, m_aspectRatio, Near, Far), sizeof(glm::mat4x4));
-//
-//	//glm::mat4x4 ViewProjMat = glm::transpose(ProjMat * ViewMat);
-//
-//	//for (int i = StartIndex; i < StartIndex + NumDraw; i++)
-//	//{
-//	//	Mesh::DrawCall& drawcall = mesh->Draws[i];
-//	//	ObjConstantBuffer objCB;
-//	//	objCB.ViewProjectionMatrix = ViewProjMat;
-//	//	glm::mat4 m; // Identity matrix
-//	//	objCB.WorldMatrix = m;
-//	//	objCB.ViewDir.x = m_camera.m_lookDirection.x;
-//	//	objCB.ViewDir.y = m_camera.m_lookDirection.y;
-//	//	objCB.ViewDir.z = m_camera.m_lookDirection.z;
-//	//	RS_Mesh->vs->SetConstantValue("ObjParameter", (void*)&objCB, CL, DHPool);
-//
-//
-//	//	Texture* diffuseTex = mesh->Textures[drawcall.DiffuseTextureIndex].get();
-//	//	RS_Mesh->ps->SetTexture("diffuseMap", diffuseTex, CL, DHPool);
-//
-//	//	Texture* normalTex = mesh->Textures[drawcall.NormalTextureIndex].get();
-//	//	RS_Mesh->ps->SetTexture("normalMap", normalTex, CL, DHPool);
-//
-//
-//	//	CL->DrawIndexedInstanced(drawcall.IndexCount, 1, drawcall.IndexStart, drawcall.VertexBase, 0);
-//	//}
-//	//
-//	//CL->Close();
-//}
-
 void MyToyDX12Renderer::SpatialDenoisingPass()
 {
+	NVAftermathMarker(dx12_rhi->AM_CL_Handle, "SpatialDenoisingPass");
+
 	PIXScopedEvent(dx12_rhi->GlobalCmdList->CmdList.Get(), PIX_COLOR(rand() % 255, rand() % 255, rand() % 255), "SpatialDenoisingPass");
 
 	UINT WriteIndex = 0;
@@ -2622,6 +2574,8 @@ void MyToyDX12Renderer::SpatialDenoisingPass()
 
 void MyToyDX12Renderer::TemporalDenoisingPass()
 {
+	NVAftermathMarker(dx12_rhi->AM_CL_Handle, "TemporalDenoisingPass");
+
 	PIXScopedEvent(dx12_rhi->GlobalCmdList->CmdList.Get(), PIX_COLOR(rand() % 255, rand() % 255, rand() % 255), "TemporalDenoisingPass");
 
 	// GIBufferSH : full scale
@@ -2913,6 +2867,8 @@ vector<UINT64> ResourceInt64array(ComPtr<ID3D12Resource> resource, int size)
 }
 void MyToyDX12Renderer::RaytraceShadowPass()
 {
+	NVAftermathMarker(dx12_rhi->AM_CL_Handle, "RaytraceShadowPass");
+
 	PIXScopedEvent(dx12_rhi->GlobalCmdList->CmdList.Get(), PIX_COLOR(rand()%255, rand() % 255, rand() % 255), "RaytraceShadowPass");
 
 	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(ShadowBuffer->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS));
@@ -2958,6 +2914,8 @@ void MyToyDX12Renderer::RaytraceShadowPass()
 
 void MyToyDX12Renderer::RaytraceReflectionPass()
 {
+	NVAftermathMarker(dx12_rhi->AM_CL_Handle, "RaytraceReflectionPass");
+
 	PIXScopedEvent(dx12_rhi->GlobalCmdList->CmdList.Get(), PIX_COLOR(rand() % 255, rand() % 255, rand() % 255), "RaytraceReflectionPass");
 
 	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(SpeculaGIBuffer->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS));
@@ -3012,6 +2970,8 @@ void MyToyDX12Renderer::RaytraceReflectionPass()
 
 void MyToyDX12Renderer::RaytraceGIPass()
 {
+	NVAftermathMarker(dx12_rhi->AM_CL_Handle, "RaytraceGIPass");
+
 	PIXScopedEvent(dx12_rhi->GlobalCmdList->CmdList.Get(), PIX_COLOR(rand() % 255, rand() % 255, rand() % 255), "RaytraceGIPass");
 
 	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(GIBufferSH->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS));

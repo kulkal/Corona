@@ -281,7 +281,6 @@ private:
 	SimpleCamera m_camera;
 
 	// misc
-	glm::quat SunRotation;
 	glm::vec3 LightDir = glm::normalize(glm::vec3(0.901, 0.88, 0.176));
 	float LightIntensity = 3.0f;
 	float Near = 1.0f;
@@ -363,15 +362,13 @@ public:
 
 	void DrawScene(shared_ptr<Scene> scene, float Roughness, float Metalic);
 
-	void DrawMeshPass();
+	void GBufferPass();
 
 	void RaytraceShadowPass();
 
 	void RaytraceReflectionPass();
 
 	void RaytraceGIPass();
-
-	//void RecordDraw(UINT StartIndex, UINT NumDraw, UINT CLIndex, ThreadDescriptorHeapPool* DHPool);
 
 	void SpatialDenoisingPass();
 
