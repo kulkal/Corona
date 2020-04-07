@@ -454,8 +454,12 @@ public:
 class Material
 {
 public:
+	bool bHasAlpha = false;
+
 	shared_ptr<Texture> Diffuse;
 	shared_ptr<Texture> Normal;
+	shared_ptr<Texture> Roughness;
+	shared_ptr<Texture> Metallic;
 };
 
 class Mesh
@@ -473,6 +477,7 @@ public:
 		UINT VertexCount;
 	};
 public:
+	bool bTransparent = false;
 	glm::mat4x4 transform;
 	UINT NumIndices;
 	UINT NumVertices;

@@ -128,6 +128,7 @@ private:
 	struct TemporalFilterConstant
 	{
 		glm::vec4 ProjectionParams;
+		glm::vec4 TemporalValidParams = glm::vec4(15, 0, 0, 0);
 		glm::vec2 RTSize;
 	};
 

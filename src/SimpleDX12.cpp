@@ -1201,7 +1201,11 @@ shared_ptr<RTAS> Mesh::CreateBLAS()
 	geomDesc.Triangles.IndexCount = Ib->numIndices;
 	geomDesc.Triangles.Transform3x4 = 0;
 
-	geomDesc.Flags = D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE;
+	if(bTransparent)
+		geomDesc.Flags = D3D12_RAYTRACING_GEOMETRY_FLAG_NONE;
+	else
+		geomDesc.Flags = D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE;
+
 
 
 	D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS inputs = {};
@@ -2348,15 +2352,7 @@ bool RTPipelineStateObject::InitRS(string ShaderFile)
 
 	subobjects[index++] = subobjectGlobalRS;
 
-	/*GlobalRS = CreateRootSignature(g_dx12_rhi->Device, GlobalRSDesc);
-	NAME_D3D12_OBJECT(GlobalRS);
-
-	pInterfaceGlobalRS = GlobalRS.Get();
-	subobjectGlobalRS.pDesc = &pInterfaceGlobalRS;
-	subobjectGlobalRS.Type = D3D12_STATE_SUBOBJECT_TYPE_GLOBAL_ROOT_SIGNATURE;
-
-	subobjects[index++] = subobjectGlobalRS;*/
-
+	
 	// Create the RTPSO
 	D3D12_STATE_OBJECT_DESC descRTSO;
 	descRTSO.NumSubobjects = subobjects.size(); // 10

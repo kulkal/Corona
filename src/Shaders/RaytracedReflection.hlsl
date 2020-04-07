@@ -284,19 +284,19 @@ void chs(inout RayPayload payload, in BuiltInTriangleIntersectionAttributes attr
 
 
 
-[shader("closesthit")]
-void chsShadow(inout ShadowRayPayload payload, in BuiltInTriangleIntersectionAttributes attribs)
-{
-    // float3 barycentrics = float3(1.0 - attribs.barycentrics.x - attribs.barycentrics.y, attribs.barycentrics.x, attribs.barycentrics.y);
-    // uint triangleIndex = PrimitiveIndex();
-    // Vertex vertex = GetVertexAttributes(triangleIndex, barycentrics);
+// [shader("closesthit")]
+// void chsShadow(inout ShadowRayPayload payload, in BuiltInTriangleIntersectionAttributes attribs)
+// {
+//     // float3 barycentrics = float3(1.0 - attribs.barycentrics.x - attribs.barycentrics.y, attribs.barycentrics.x, attribs.barycentrics.y);
+//     // uint triangleIndex = PrimitiveIndex();
+//     // Vertex vertex = GetVertexAttributes(triangleIndex, barycentrics);
 
-    // payload.position = vertex.position;
-    // payload.normal = vertex.normal;
-    // payload.color =  AlbedoTex.SampleLevel(sampleWrap, vertex.uv, 0).xyz;
+//     // payload.position = vertex.position;
+//     // payload.normal = vertex.normal;
+//     // payload.color =  AlbedoTex.SampleLevel(sampleWrap, vertex.uv, 0).xyz;
 
-    payload.bHit = true;
-}
+//     payload.bHit = true;
+// }
 
 
 // [shader("anyhit")]

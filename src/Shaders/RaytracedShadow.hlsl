@@ -36,17 +36,7 @@ float3 linearToSrgb(float3 c)
 struct RayPayload
 {
     bool bHit;
-    //float3 color;
-    // float distance;
 };
-
-/*
-    Params.x = Far / (Far - Near);
-    Params.y = Near / (Near - Far);
-    Params.z = Far;
-*/
-
-
 
 float3 offset_ray(float3 p, float3 n)
 {
@@ -72,54 +62,12 @@ void rayGen()
     d *= tan(0.8 / 2);
     float aspectRatio = dims.x / dims.y;
 
-#define DEPTH 0
-#define SIMPLE 0
-#define SHADOW 1
-
-#if SIMPLE 
-    RayDesc ray;
-    ray.Origin = float3(0, 0, -2);
-    ray.Direction = normalize(float3(d.x * aspectRatio, -d.y, 1));
-
-    ray.TMin = 0;
-    ray.TMax = 100000;
-
-    RayPayload payload;
-    //TraceRay(gRtScene, 0 /*rayFlags*/, 0xFF, 0 /* ray index*/, 0, 0, ray, payload);
-    float dd = payload.distance / 1000.0f;
-    ShadowResult[launchIndex.xy] = float4(dd, dd, dd, 1);
-    float sx = sin(crd.x);
-    float sy = sin(crd.y);
-    float DeviceDepth = DepthTex.Load(int3(launchIndex.xy, 0), int2(0, 0)).x;
-    float3 WorldNormal = WorldNormalTex.Load(int3(launchIndex.xy, 0), int2(0, 0)).xyz;
-    ShadowResult[launchIndex.xy] = float4(WorldNormal, 1);
-    float LinearDepth = GetLinearDepth(DeviceDepth, ProjectionParams.x, ProjectionParams.y) * ProjectionParams.z /1000.0f;
-
-    ShadowResult[launchIndex.xy] = float4(LinearDepth, LinearDepth, LinearDepth, 1);
-
-
-#elif DEPTH
-	RayDesc ray;
-	ray.Origin = mul(float4(0, 0, 0, 1), InvViewMatrix).xyz;
-	ray.Direction = mul(normalize(float3(d.x * aspectRatio, -d.y, -1)), InvViewMatrix);
-
-	ray.TMin = 0;
-	ray.TMax = 100000;
-
-	RayPayload payload;
-    TraceRay(gRtScene, 0 /*rayFlags*/, 0xFF, 0 /* ray index*/, 0, 0, ray, payload);
-	float dd = payload.distance / 1000.0f;
-    ShadowResult[launchIndex.xy] = float4(dd, dd, dd, 1);
-    //gOutput[launchIndex.xy] = float4(1, 0, 0, 1);
-
-#elif SHADOW
 	float2 UV = crd / dims;
 	float DeviceDepth = DepthTex.SampleLevel(sampleWrap, UV, 0).x;
 
 	float3 WorldNormal = normalize(WorldNormalTex.SampleLevel(sampleWrap, UV, 0).xyz);
   
 
-	// float LinearDepth = GetLinearDepth(DeviceDepth, ProjectionParams.x, ProjectionParams.y, ProjectionParams.z) ;
     float LinearDepth = GetLinearDepthOpenGL(DeviceDepth, ProjectionParams.z, ProjectionParams.w) ;
 
 
@@ -130,7 +78,6 @@ void rayGen()
 	ScreenPosition.xy = ScreenPosition.xy * 2 - 1;
 	ScreenPosition.y = -ScreenPosition.y;
 
-    // float3 ViewPosition = normalize(float3(d.x * aspectRatio, -d.y, -1)) * LinearDepth;
 	float3 ViewPosition = GetViewPosition(LinearDepth, ScreenPosition, ProjMatrix._11, ProjMatrix._22);
 	float3 WorldPos = mul(float4(ViewPosition, 1), InvViewMatrix).xyz;
 
@@ -139,7 +86,6 @@ void rayGen()
 
 	RayDesc ray;
 	ray.Origin = WorldPos + WorldNormal * 0.5; //    mul(float4(0, 0, 0, 1), InvViewMatrix).xyz;
-    // ray.Origin = WorldPos ; //    mul(float4(0, 0, 0, 1), InvViewMatrix).xyz;
 
 	ray.Direction = LightDir;
 
@@ -149,8 +95,8 @@ void rayGen()
 	RayPayload payload;
     payload.bHit = true;
 	TraceRay(gRtScene, 
-        RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH 
-        // | RAY_FLAG_SKIP_CLOSEST_HIT_SHADER
+        0
+       // RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_CLOSEST_HIT_SHADER 
         , 0xFF, 0 /* ray index*/, 0, 0, ray, payload);
 
 	if (payload.bHit == false )
@@ -162,31 +108,13 @@ void rayGen()
 		ShadowResult[launchIndex.xy] = float4(0.0, 0.0, 0.0, 1);
 	}
 
-#endif
 }
 
 [shader("miss")]
 void miss(inout RayPayload payload)
 {
+    // payload.opacity = 0.0;
     payload.bHit = false;
-}
-
-[shader("closesthit")]
-void chs(inout RayPayload payload, in BuiltInTriangleIntersectionAttributes attribs)
-{
-    float3 barycentrics = float3(1.0 - attribs.barycentrics.x - attribs.barycentrics.y, attribs.barycentrics.x, attribs.barycentrics.y);
-    uint triangleIndex = PrimitiveIndex();
-    Vertex vertex = GetVertexAttributes(InstanceID(), vertices, indices, InstanceProperty, triangleIndex, barycentrics);
-    float3 pos = vertex.position;
-    float3 normal = vertex.normal;
-    float2 uv = vertex.uv;
-    float opacity = AlbedoTex.SampleLevel(sampleWrap, uv, 0).w;
-
-    if(opacity < 0.1)
-        payload.bHit = false;
-    else
-        payload.bHit = true;
-
 }
 
 [shader("anyhit")]
@@ -198,11 +126,13 @@ void anyhit(inout RayPayload payload, in BuiltInTriangleIntersectionAttributes a
 
     float opacity = AlbedoTex.SampleLevel(sampleWrap, vertex.uv, 0).w;
 
-    if(opacity < 0.1)
-        IgnoreHit();
-        // payload.bHit = true;
-    // else
-    //     payload.bHit = true;
-    // IgnoreHit();
-    // AcceptHitAndEndSearch();
+        // payload.bHit = false;
+
+    if(opacity > 0.1)
+    {
+        payload.bHit = true;
+        AcceptHitAndEndSearch();
+    }
+    
+    IgnoreHit();
 }

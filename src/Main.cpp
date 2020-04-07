@@ -16,7 +16,7 @@
 _Use_decl_annotations_
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow)
 {
-	MyToyDX12Renderer* sample = new MyToyDX12Renderer(1920, 1080, L"We should learn dx12");
+	MyToyDX12Renderer* sample = new MyToyDX12Renderer(2560, 1440, L"We should learn dx12");
 	Win32Application::Run(sample, hInstance, nCmdShow);
 
 	delete sample;

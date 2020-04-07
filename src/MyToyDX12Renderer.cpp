@@ -677,33 +677,81 @@ shared_ptr<Scene> MyToyDX12Renderer::LoadModel(string fileName)
 
 		wstring wDiffuseTex;
 		wstring wNormalTex;
+		wstring wRoughnessTex;
+		wstring wMetallicTex;
+
 
 		aiString diffuseTexPath;
 		aiString normalMapPath;
+		aiString rougnessMapPath;
+		aiString metallicMapPath;
+
+
 		if (aiMat.GetTexture(aiTextureType_DIFFUSE, 0, &diffuseTexPath) == aiReturn_SUCCESS)
 			wDiffuseTex = GetFileName(AnsiToWString(diffuseTexPath.C_Str()).c_str());
 		if (wDiffuseTex.length() != 0)
 		{
-			shared_ptr<Texture> diffuseTex = dx12_rhi->CreateTextureFromFile(dir + wDiffuseTex, false);
-			if (diffuseTex)
-				mat->Diffuse = diffuseTex;
-			else
+			mat->Diffuse = dx12_rhi->CreateTextureFromFile(dir + wDiffuseTex, false);
+			if (!mat->Diffuse)
 				mat->Diffuse = DefaultWhiteTex;
 		}
-
+		
 		if (aiMat.GetTexture(aiTextureType_NORMALS, 0, &normalMapPath) == aiReturn_SUCCESS
 			|| aiMat.GetTexture(aiTextureType_HEIGHT, 0, &normalMapPath) == aiReturn_SUCCESS)
 			wNormalTex = GetFileName(AnsiToWString(normalMapPath.C_Str()).c_str());
 
 		if (wNormalTex.length() != 0)
 		{
-			shared_ptr<Texture> normalTex = dx12_rhi->CreateTextureFromFile(dir + wNormalTex, true);
-			if (normalTex)
-				mat->Normal = normalTex;
-			else
+			mat->Normal = dx12_rhi->CreateTextureFromFile(dir + wNormalTex, true);
+			if (!mat->Normal)
 				mat->Normal = DefaultNormalTex;
 		}
+
+		if (aiMat.GetTexture(aiTextureType_SPECULAR, 0, &rougnessMapPath) == aiReturn_SUCCESS)
+			wRoughnessTex = GetFileName(AnsiToWString(rougnessMapPath.C_Str()).c_str());
+		if (wRoughnessTex.length() != 0)
+		{
+			mat->Roughness = dx12_rhi->CreateTextureFromFile(dir + wRoughnessTex, false);
+			if (!mat->Roughness)
+				mat->Diffuse = DefaultWhiteTex;
+		}
+		// aiTextureType_HEIGHT is normal in sponza
+		// aiTextureType_AMBIENT is metallic in sponza
+		if (aiMat.GetTexture(aiTextureType_AMBIENT, 0, &metallicMapPath) == aiReturn_SUCCESS)
+			wMetallicTex = GetFileName(AnsiToWString(metallicMapPath.C_Str()).c_str());
+		if (wMetallicTex.length() != 0)
+		{
+			mat->Metallic = dx12_rhi->CreateTextureFromFile(dir + wMetallicTex, false);
+			if (!mat->Metallic)
+				mat->Metallic = DefaultWhiteTex;
+		}
 		
+		// HACK!
+		if (wDiffuseTex == L"Sponza_Thorn_diffuse.png" || wDiffuseTex == L"VasePlant_diffuse.png")
+			mat->bHasAlpha = true;
+
+#if 1;//FIND_TEXTURE
+		UINT texType = 0;
+		for(texType = 0; texType < AI_TEXTURE_TYPE_MAX; texType++)
+		{
+			UINT TotalTexNum = aiMat.GetTextureCount((aiTextureType)texType);
+			{
+				for (UINT numTex = 0; numTex < AI_TEXTURE_TYPE_MAX; numTex++)
+				{
+					aiString wTex;
+					if (aiMat.GetTexture((aiTextureType)texType, numTex, &wTex) == aiReturn_SUCCESS)
+					{
+						stringstream ss;
+						ss << "Texture: " << wTex.C_Str() << "\n";
+						OutputDebugStringA(ss.str().c_str());
+					}
+				}
+				
+			}
+
+		}
+#endif
+
 		scene->Materials.push_back(shared_ptr<Material>(mat));
 	}
 
@@ -800,6 +848,7 @@ shared_ptr<Scene> MyToyDX12Renderer::LoadModel(string fileName)
 		dc.VertexBase = 0;
 		dc.VertexCount = vertices.size();
 		dc.mat = scene->Materials[asMesh->mMaterialIndex];
+		if (dc.mat->bHasAlpha) mesh->bTransparent = true;
 		
 		mesh->Draws.push_back(dc);
 
@@ -2267,6 +2316,9 @@ void MyToyDX12Renderer::OnRender()
 
 		ImGui::SliderFloat("IndirectDiffuse Depth Weight Factor", &SpatialFilterCB.IndirectDiffuseWeightFactorDepth, 0.0f, 20.0f);
 		ImGui::SliderFloat("IndirectDiffuse Normal Weight Factor", &SpatialFilterCB.IndirectDiffuseWeightFactorNormal, 0.0f, 20.0f);
+
+		ImGui::SliderFloat("TemporalValidParams.x", &TemporalFilterCB.TemporalValidParams.x, 0.0f, 128);
+
 		
 		if (dx12_rhi->errorString.size() > 0)
 		{
@@ -2660,10 +2712,7 @@ void MyToyDX12Renderer::InitRaytracingData()
 	AddMeshToVec(vecBLAS, Sponza);
 	AddMeshToVec(vecBLAS, ShaderBall);
 
-
-	// TODO : per model world matrix
 	TLAS = dx12_rhi->CreateTLAS(vecBLAS);
-	
 
 	InstancePropertyBuffer = dx12_rhi->CreateBuffer(sizeof(InstanceProperty) * 500);
 
@@ -2689,16 +2738,8 @@ void MyToyDX12Renderer::InitRTPSO()
 		TEMP_PSO_RT_SHADOW->NumInstance = vecBLAS.size();// scene->meshes.size(); // important for cbv allocation & shadertable size.
 
 		// new interface
-		TEMP_PSO_RT_SHADOW->AddHitGroup("HitGroup", "chs", "anyhit");
+		TEMP_PSO_RT_SHADOW->AddHitGroup("HitGroup", "", "anyhit");
 		TEMP_PSO_RT_SHADOW->AddShader("rayGen", RTPipelineStateObject::RAYGEN);
-		/*TEMP_PSO_RT_SHADOW->BindUAV("rayGen", "ShadowResult", 0);
-		TEMP_PSO_RT_SHADOW->BindSRV("rayGen", "gRtScene", 0);
-		TEMP_PSO_RT_SHADOW->BindSRV("rayGen", "DepthTex", 1);
-		TEMP_PSO_RT_SHADOW->BindSRV("rayGen", "WorldNormalTex", 2);
-		TEMP_PSO_RT_SHADOW->BindSRV("rayGen", "AlbedoTex", 3);*/
-
-		//TEMP_PSO_RT_SHADOW->BindCBV("rayGen", "ViewParameter", 0, sizeof(RTShadowViewParamCB), 1);
-		//TEMP_PSO_RT_SHADOW->BindSampler("rayGen", "samplerWrap", 0);
 
 		TEMP_PSO_RT_SHADOW->BindUAV("global", "ShadowResult", 0);
 		TEMP_PSO_RT_SHADOW->BindSRV("global", "gRtScene", 0);
@@ -2711,13 +2752,7 @@ void MyToyDX12Renderer::InitRTPSO()
 
 
 		TEMP_PSO_RT_SHADOW->AddShader("miss", RTPipelineStateObject::MISS);
-		TEMP_PSO_RT_SHADOW->AddShader("chs", RTPipelineStateObject::HIT);
-		TEMP_PSO_RT_SHADOW->BindSRV("chs", "vertices", 3);
-		TEMP_PSO_RT_SHADOW->BindSRV("chs", "indices", 4);
-		TEMP_PSO_RT_SHADOW->BindSRV("chs", "AlbedoTex", 5);
-		TEMP_PSO_RT_SHADOW->BindSRV("chs", "InstanceProperty", 6);
-
-
+		
 		TEMP_PSO_RT_SHADOW->AddShader("anyhit", RTPipelineStateObject::ANYHIT);
 		TEMP_PSO_RT_SHADOW->BindSRV("anyhit", "vertices", 3);
 		TEMP_PSO_RT_SHADOW->BindSRV("anyhit", "indices", 4);
@@ -2726,7 +2761,7 @@ void MyToyDX12Renderer::InitRTPSO()
 
 		TEMP_PSO_RT_SHADOW->MaxRecursion = 1;
 		TEMP_PSO_RT_SHADOW->MaxAttributeSizeInBytes = sizeof(float) * 2;
-		TEMP_PSO_RT_SHADOW->MaxPayloadSizeInBytes = sizeof(float) * 1;
+		TEMP_PSO_RT_SHADOW->MaxPayloadSizeInBytes = sizeof(float) * 2;
 
 		bool bSuccess = TEMP_PSO_RT_SHADOW->InitRS("Shaders\\RaytracedShadow.hlsl");
 		if (bSuccess)
@@ -2768,21 +2803,7 @@ void MyToyDX12Renderer::InitRTPSO()
 		TEMP_PSO_RT_REFLECTION->BindSRV("chs", "AlbedoTex", 5);
 		TEMP_PSO_RT_REFLECTION->BindSRV("chs", "InstanceProperty", 9);
 
-
-
-		//TEMP_PSO_RT_REFLECTION->AddShader("chsShadow", RTPipelineStateObject::HIT);
-		/*TEMP_PSO_RT_REFLECTION->BindSRV("chsShadow", "vertices", 3);
-		TEMP_PSO_RT_REFLECTION->BindSRV("chsShadow", "indices", 4);
-		TEMP_PSO_RT_REFLECTION->BindSRV("chsShadow", "AlbedoTex", 5);
-		TEMP_PSO_RT_REFLECTION->BindSRV("chsShadow", "InstanceProperty", 9);*/
-
-		//TEMP_PSO_RT_REFLECTION->AddShader("anyhitShadow", RTPipelineStateObject::ANYHIT);
-		/*TEMP_PSO_RT_REFLECTION->BindSRV("anyhitShadow", "vertices", 3);
-		TEMP_PSO_RT_REFLECTION->BindSRV("anyhitShadow", "indices", 4);
-		TEMP_PSO_RT_REFLECTION->BindSRV("anyhitShadow", "AlbedoTex", 5);
-		TEMP_PSO_RT_REFLECTION->BindSRV("anyhitShadow", "InstanceProperty", 9);*/
-
-		TEMP_PSO_RT_REFLECTION->MaxRecursion = 1;
+		TEMP_PSO_RT_REFLECTION->MaxRecursion = 2;
 		TEMP_PSO_RT_REFLECTION->MaxAttributeSizeInBytes = sizeof(float) * 2;
 		TEMP_PSO_RT_REFLECTION->MaxPayloadSizeInBytes = sizeof(float) * 10;
 
@@ -2800,7 +2821,6 @@ void MyToyDX12Renderer::InitRTPSO()
 		TEMP_PSO_RT_GI->NumInstance = vecBLAS.size();// scene->meshes.size();
 
 		TEMP_PSO_RT_GI->AddHitGroup("HitGroup", "chs", "");
-		//TEMP_PSO_RT_GI->AddHitGroup("ShadowHitGroup", "chsShadow", "anyhitShadow");
 
 
 		TEMP_PSO_RT_GI->AddShader("rayGen", RTPipelineStateObject::RAYGEN);
@@ -2824,19 +2844,7 @@ void MyToyDX12Renderer::InitRTPSO()
 		TEMP_PSO_RT_GI->BindSRV("chs", "AlbedoTex", 5);
 		TEMP_PSO_RT_GI->BindSRV("chs", "InstanceProperty", 6);
 
-		/*TEMP_PSO_RT_GI->AddShader("chsShadow", RTPipelineStateObject::HIT);
-		TEMP_PSO_RT_GI->BindSRV("chsShadow", "vertices", 3);
-		TEMP_PSO_RT_GI->BindSRV("chsShadow", "indices", 4);
-		TEMP_PSO_RT_GI->BindSRV("chsShadow", "AlbedoTex", 5);
-		TEMP_PSO_RT_GI->BindSRV("chsShadow", "InstanceProperty", 9);
-
-		TEMP_PSO_RT_GI->AddShader("anyhitShadow", RTPipelineStateObject::ANYHIT);
-		TEMP_PSO_RT_GI->BindSRV("anyhitShadow", "vertices", 3);
-		TEMP_PSO_RT_GI->BindSRV("anyhitShadow", "indices", 4);
-		TEMP_PSO_RT_GI->BindSRV("anyhitShadow", "AlbedoTex", 5);
-		TEMP_PSO_RT_GI->BindSRV("anyhitShadow", "InstanceProperty", 9);*/
-
-		TEMP_PSO_RT_GI->MaxRecursion = 1;
+		TEMP_PSO_RT_GI->MaxRecursion = 2;
 		TEMP_PSO_RT_GI->MaxAttributeSizeInBytes = sizeof(float) * 2;
 
 		TEMP_PSO_RT_GI->MaxPayloadSizeInBytes = sizeof(float) * 10;
@@ -2982,7 +2990,6 @@ void MyToyDX12Renderer::RaytraceGIPass()
 
 	PSO_RT_GI->SetUAV("global", "GIResultSH", GIBufferSH->GpuHandleUAV);
 	PSO_RT_GI->SetUAV("global", "GIResultColor", GIBufferColor->GpuHandleUAV);
-
 	PSO_RT_GI->SetSRV("global", "gRtScene", TLAS->GPUHandle);
 	PSO_RT_GI->SetSRV("global", "DepthTex", DepthBuffer->GpuHandleSRV);
 	PSO_RT_GI->SetSRV("global", "WorldNormalTex", NormalBuffer->GpuHandleSRV);

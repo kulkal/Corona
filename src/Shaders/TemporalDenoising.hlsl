@@ -24,6 +24,7 @@ RWTexture2D<float4> OutSpecularGI: register(u4);
 cbuffer TemporalFilterConstant : register(b0)
 {
 	float4 ProjectionParams;
+	float4 TemporalValidParams;
 	float2 RTSize;
 };
 
@@ -82,6 +83,8 @@ void TemporalFilter( uint3 DTid : SV_DispatchThreadID, uint3 GTid : SV_GroupThre
 		(subpix.x      ) * (subpix.y      )
 	};
 
+	float dotSum = 0;
+	float distSum = 0;
 	// bool bt = false;
 	// [unroll]
 	for(int i = 0; i < 4; i++) 
@@ -95,8 +98,9 @@ void TemporalFilter( uint3 DTid : SV_DispatchThreadID, uint3 GTid : SV_GroupThre
 		float3 PrevNormal = NormalTex[p];
 
 		float dist_depth = abs(CurDepth - PrevDepth);
-		float dot_normals = dot(CurNormal, PrevNormal);
-
+		float dot_normals = abs(dot(CurNormal, PrevNormal));
+		dotSum += dot_normals;
+		distSum = dist_depth;
 		if(CurDepth < 0)
 		{
 			// Reduce the filter sensitivity to depth for secondary surfaces,
@@ -107,7 +111,7 @@ void TemporalFilter( uint3 DTid : SV_DispatchThreadID, uint3 GTid : SV_GroupThre
 		if(dist_depth < 2.0 && dot_normals > 0.5) 
 		{
 			float w_diff = w[i];
-			float w_spec = w_diff * pow(max(dot_normals, 0), 128);
+			float w_spec = w_diff * pow(max(dot_normals, 0), TemporalValidParams.x);
 			temporal_sum_w_spec += w_spec;
 			// bt = true;
 		}
@@ -118,6 +122,7 @@ void TemporalFilter( uint3 DTid : SV_DispatchThreadID, uint3 GTid : SV_GroupThre
 	{
 		isValidHistory = true;
 	}
+
 
 	// if(bt == true)
 		// isValidHistory = true;
@@ -140,11 +145,11 @@ void TemporalFilter( uint3 DTid : SV_DispatchThreadID, uint3 GTid : SV_GroupThre
 
 		BlendedSpecular = CurrentSpecular;
 	}
-	
-	// if(pos_ld.x < 0 || pos_ld.x >= RTSize.x || pos_ld.y < 0 || pos_ld.y >= RTSize.y)
-	// 	BlendedSpecular = CurrentSpecular;
-	// else
-	//     BlendedSpecular = max(CurrentSpecular * W + PrevSpecular * (1-W), float4(0, 0, 0, 0));
+	// dotSum *= 0.25;
+	// BlendedSpecular = float4(dotSum, dotSum, dotSum, 0);
+	// distSum *= 100;
+	// BlendedSpecular = float4(distSum, distSum, distSum, 0);
+
 
 
 	

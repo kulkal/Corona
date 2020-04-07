@@ -164,6 +164,7 @@ void rayGen
 	RayPayload payload;
 	TraceRay(gRtScene, 0 /*rayFlags*/, 0xFF, 0 /* ray index*/, 0, 0, ray, payload);
     if(payload.bHit = false)
+    // if(true)
     {
         // hit sky
         float3 Radiance = payload.color * LightIntensity;
@@ -229,12 +230,16 @@ void chs(inout RayPayload payload, in BuiltInTriangleIntersectionAttributes attr
 {
     float3 barycentrics = float3(1.0 - attribs.barycentrics.x - attribs.barycentrics.y, attribs.barycentrics.x, attribs.barycentrics.y);
     uint triangleIndex = PrimitiveIndex();
-    // Vertex vertex = GetVertexAttributes(triangleIndex, barycentrics);
     Vertex vertex = GetVertexAttributes(InstanceID(), vertices, indices, InstanceProperty, triangleIndex, barycentrics);
 
     payload.position = vertex.position;
     payload.normal = vertex.normal;
     payload.color = AlbedoTex.SampleLevel(sampleWrap, vertex.uv, 0).xyz;
+
+
+ // payload.position = float3(0, 0, 0);
+    // payload.color = float3(0.0, 0.2, 0.4);
+    // payload.normal = float3(0, 0, -1);
 
     payload.bHit = true;
 
@@ -242,7 +247,7 @@ void chs(inout RayPayload payload, in BuiltInTriangleIntersectionAttributes attr
 }
 
 [shader("miss")]
-void missShadow(inout RayPayload payload)
+void missShadow(inout ShadowRayPayload payload)
 {
     payload.bHit = false;
 }
