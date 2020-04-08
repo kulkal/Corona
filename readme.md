@@ -9,8 +9,6 @@ This is basically simplified version of Q2RTX in terms of raytracing.
 ![](rt_2.png)
 ![](rt_3.png)
 ![](rt_4.png)
-![](rt_5.png)
-![](rt_6.png)
 
 ## Build
 * Go to build directory.
