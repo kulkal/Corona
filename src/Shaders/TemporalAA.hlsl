@@ -257,17 +257,11 @@ float4 PSMain(PSInput input) : SV_TARGET
     float3 weightA = saturate(1.0f - BlendFactor);
     float3 weightB = saturate(BlendFactor);
 
+
     float3 temporalWeight = saturate(abs(clrMax - clrMin) / CurrentColor);
     weightB = saturate(lerp(LowFreqWeight, HiFreqWeight, temporalWeight));
     weightA = 1.0f - weightB;
 
-
-     //if(  PrevPixelPos.x > RTSize.x || PrevPixelPos.y > RTSize.y || PrevPixelPos.x < 0 || PrevPixelPos.y < 0 || TAABlendFactor > 0.999f)
-     //{
-     //   weightA = 1.0f;
-     //   weightB = 0.0f;
-     //   // return float4(1, 0, 0, 0);
-     //}
 
     return  float4((CurrentColor * weightA + PrevColor * weightB) / (weightA + weightB), 1);
 }

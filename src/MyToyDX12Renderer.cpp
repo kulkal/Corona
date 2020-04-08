@@ -610,7 +610,9 @@ void MyToyDX12Renderer::LoadAssets()
 	NAME_D3D12_OBJECT(DepthBuffer->resource);
 
 	DefaultWhiteTex = dx12_rhi->CreateTextureFromFile(L"assets/default/default_white.png", false);
+	DefaultBlackTex = dx12_rhi->CreateTextureFromFile(L"assets/default/default_black.png", false);
 	DefaultNormalTex = dx12_rhi->CreateTextureFromFile(L"assets/default/default_normal.png", true);
+	DefaultRougnessTex = dx12_rhi->CreateTextureFromFile(L"assets/default/default_roughness.png", true);
 
 	Sponza = LoadModel("assets/Sponza/Sponza.fbx");
 
@@ -643,6 +645,33 @@ void MyToyDX12Renderer::LoadAssets()
 
 }
 
+map<wstring, wstring> SponzaRoughnessMap = {
+	{L"Background_Albedo", L"Background_Roughness"},
+	{L"ChainTexture_Albedo", L"ChainTexture_Roughness"},
+	{L"Lion_Albedo", L"Lion_Roughness"},
+	{L"Sponza_Arch_diffuse", L"Sponza_Arch_roughness"},
+	{L"Sponza_Bricks_a_Albedo", L"Sponza_Bricks_a_Roughness"},
+	{L"Sponza_Ceiling_diffuse", L"Sponza_Ceiling_roughness"},
+	{L"Sponza_Column_a_diffuse", L"Sponza_Column_a_roughness"},
+	{L"Sponza_Column_b_diffuse", L"Sponza_Column_b_roughness"},
+	{L"Sponza_Column_c_diffuse", L"Sponza_Column_c_roughness"},
+	{L"Sponza_Curtain_Blue_diffuse", L"Sponza_Curtain_roughness"},
+	{L"Sponza_Curtain_Green_diffuse", L"Sponza_Curtain_roughness"},
+	{L"Sponza_Curtain_Red_diffuse", L"Sponza_Curtain_roughness"},
+	{L"Sponza_Details_diffuse", L"Sponza_Details_roughness"},
+	{L"Sponza_Fabric_Blue_diffuse", L"Sponza_Fabric_roughness"},
+	{L"Sponza_Fabric_Green_diffuse", L"Sponza_Fabric_roughness"},
+	{L"Sponza_Fabric_Red_diffuse", L"Sponza_Fabric_roughness"},
+	{L"Sponza_FlagPole_diffuse", L"Sponza_FlagPole_roughness"},
+	{L"Sponza_Floor_diffuse", L"Sponza_Floor_roughness"},
+	{L"Sponza_Roof_diffuse", L"Sponza_Roof_roughness"},
+	{L"Sponza_Thorn_diffuse", L"Sponza_Thorn_roughness"},
+	{L"Vase_diffuse", L"Vase_roughness"},
+	{L"VaseHanging_diffuse", L"VaseHanging_roughness"},
+	{L"VasePlant_diffuse", L"VasePlant_roughness"},
+	{L"VaseRound_diffuse", L"VaseRound_roughness"}
+};
+
 shared_ptr<Scene> MyToyDX12Renderer::LoadModel(string fileName)
 {
 	Scene* scene = new Scene;
@@ -673,7 +702,7 @@ shared_ptr<Scene> MyToyDX12Renderer::LoadModel(string fileName)
 	for (int i = 0; i < numMaterials; ++i)
 	{
 		const aiMaterial& aiMat = *assimpScene->mMaterials[i];
-		Material* mat = new Material;
+		shared_ptr<Material> mat = shared_ptr<Material>(new Material);
 
 		wstring wDiffuseTex;
 		wstring wNormalTex;
@@ -692,9 +721,10 @@ shared_ptr<Scene> MyToyDX12Renderer::LoadModel(string fileName)
 		if (wDiffuseTex.length() != 0)
 		{
 			mat->Diffuse = dx12_rhi->CreateTextureFromFile(dir + wDiffuseTex, false);
-			if (!mat->Diffuse)
-				mat->Diffuse = DefaultWhiteTex;
 		}
+
+		if (!mat->Diffuse)
+			mat->Diffuse = DefaultWhiteTex;
 		
 		if (aiMat.GetTexture(aiTextureType_NORMALS, 0, &normalMapPath) == aiReturn_SUCCESS
 			|| aiMat.GetTexture(aiTextureType_HEIGHT, 0, &normalMapPath) == aiReturn_SUCCESS)
@@ -703,34 +733,40 @@ shared_ptr<Scene> MyToyDX12Renderer::LoadModel(string fileName)
 		if (wNormalTex.length() != 0)
 		{
 			mat->Normal = dx12_rhi->CreateTextureFromFile(dir + wNormalTex, true);
-			if (!mat->Normal)
-				mat->Normal = DefaultNormalTex;
 		}
 
-		if (aiMat.GetTexture(aiTextureType_SPECULAR, 0, &rougnessMapPath) == aiReturn_SUCCESS)
-			wRoughnessTex = GetFileName(AnsiToWString(rougnessMapPath.C_Str()).c_str());
-		if (wRoughnessTex.length() != 0)
-		{
-			mat->Roughness = dx12_rhi->CreateTextureFromFile(dir + wRoughnessTex, false);
-			if (!mat->Roughness)
-				mat->Diffuse = DefaultWhiteTex;
-		}
+		if (!mat->Normal)
+			mat->Normal = DefaultNormalTex;
+
+		
 		// aiTextureType_HEIGHT is normal in sponza
 		// aiTextureType_AMBIENT is metallic in sponza
+
 		if (aiMat.GetTexture(aiTextureType_AMBIENT, 0, &metallicMapPath) == aiReturn_SUCCESS)
 			wMetallicTex = GetFileName(AnsiToWString(metallicMapPath.C_Str()).c_str());
 		if (wMetallicTex.length() != 0)
 		{
 			mat->Metallic = dx12_rhi->CreateTextureFromFile(dir + wMetallicTex, false);
-			if (!mat->Metallic)
-				mat->Metallic = DefaultWhiteTex;
 		}
+
+		if (!mat->Metallic)
+			mat->Metallic = DefaultBlackTex;
 		
+		if (wDiffuseTex.length() != 0)
+		{
+			wRoughnessTex = SponzaRoughnessMap[wDiffuseTex.substr(0, wDiffuseTex.length() - 4)] + L".png";
+			mat->Roughness = dx12_rhi->CreateTextureFromFile(dir + wRoughnessTex, false);
+		}
+		if (!mat->Roughness)
+		{
+			mat->Roughness = DefaultRougnessTex;
+		}
+
 		// HACK!
-		if (wDiffuseTex == L"Sponza_Thorn_diffuse.png" || wDiffuseTex == L"VasePlant_diffuse.png")
+		if (wDiffuseTex == L"Sponza_Thorn_diffuse.png" || wDiffuseTex == L"VasePlant_diffuse.png" || wDiffuseTex == L"ChainTexture_Albedo.png")
 			mat->bHasAlpha = true;
 
-#if 1;//FIND_TEXTURE
+#if FIND_TEXTURE
 		UINT texType = 0;
 		for(texType = 0; texType < AI_TEXTURE_TYPE_MAX; texType++)
 		{
@@ -752,7 +788,7 @@ shared_ptr<Scene> MyToyDX12Renderer::LoadModel(string fileName)
 		}
 #endif
 
-		scene->Materials.push_back(shared_ptr<Material>(mat));
+		scene->Materials.push_back(mat);
 	}
 
 	struct Vertex
@@ -1004,7 +1040,7 @@ void MyToyDX12Renderer::InitDrawMeshRS()
 
 	try
 	{
-		ThrowIfFailed(D3DCompileFromFile(GetAssetFullPath(L"Shaders\\MeshDraw.hlsl").c_str(), nullptr, D3D_COMPILE_STANDARD_FILE_INCLUDE, "VSMain", "vs_5_0", compileFlags, 0, &vertexShader, &compilationMsgs));
+		ThrowIfFailed(D3DCompileFromFile(GetAssetFullPath(L"Shaders\\GBuffer.hlsl").c_str(), nullptr, D3D_COMPILE_STANDARD_FILE_INCLUDE, "VSMain", "vs_5_0", compileFlags, 0, &vertexShader, &compilationMsgs));
 	}
 	catch (const std::exception& e)
 	{
@@ -1017,7 +1053,7 @@ void MyToyDX12Renderer::InitDrawMeshRS()
 
 	try
 	{
-		ThrowIfFailed(D3DCompileFromFile(GetAssetFullPath(L"Shaders\\MeshDraw.hlsl").c_str(), nullptr, D3D_COMPILE_STANDARD_FILE_INCLUDE, "PSMain", "ps_5_0", compileFlags, 0, &pixelShader, &compilationMsgs));
+		ThrowIfFailed(D3DCompileFromFile(GetAssetFullPath(L"Shaders\\GBuffer.hlsl").c_str(), nullptr, D3D_COMPILE_STANDARD_FILE_INCLUDE, "PSMain", "ps_5_0", compileFlags, 0, &pixelShader, &compilationMsgs));
 	}
 	catch (const std::exception& e)
 	{
@@ -1065,16 +1101,19 @@ void MyToyDX12Renderer::InitDrawMeshRS()
 	psoDescMesh.SampleDesc.Count = 1;
 
 	
-	RS_Mesh = shared_ptr<PipelineStateObject>(new PipelineStateObject);
-	RS_Mesh->ps = shared_ptr<Shader>(ps);
-	RS_Mesh->vs = shared_ptr<Shader>(vs);
-	RS_Mesh->graphicsPSODesc = psoDescMesh;
-	RS_Mesh->BindSRV("diffuseMap", 0, 1);
-	RS_Mesh->BindSRV("normalMap", 1, 1);
-	RS_Mesh->BindSampler("samplerWrap", 0);
-	RS_Mesh->BindCBV("ObjParameter", 0, sizeof(MeshDrawConstantBuffer));
+	RS_GBufferPass = shared_ptr<PipelineStateObject>(new PipelineStateObject);
+	RS_GBufferPass->ps = shared_ptr<Shader>(ps);
+	RS_GBufferPass->vs = shared_ptr<Shader>(vs);
+	RS_GBufferPass->graphicsPSODesc = psoDescMesh;
+	RS_GBufferPass->BindSRV("AlbedoTex", 0, 1);
+	RS_GBufferPass->BindSRV("NormalTex", 1, 1);
+	RS_GBufferPass->BindSRV("RoughnessTex", 2, 1);
+	RS_GBufferPass->BindSRV("MetallicTex", 3, 1);
 
-	bool bSucess = RS_Mesh->Init();
+	RS_GBufferPass->BindSampler("samplerWrap", 0);
+	RS_GBufferPass->BindCBV("GBufferConstantBuffer", 0, sizeof(GBufferConstantBuffer));
+
+	bool bSucess = RS_GBufferPass->Init();
 }
 
 void MyToyDX12Renderer::InitImgui()
@@ -1545,6 +1584,7 @@ void MyToyDX12Renderer::CopyPass()
 	NVAftermathMarker(dx12_rhi->AM_CL_Handle, "CopyPass");
 
 	PIXScopedEvent(dx12_rhi->GlobalCmdList->CmdList.Get(), PIX_COLOR(rand() % 255, rand() % 255, rand() % 255), "CopyPass");
+
 
 	Texture* backbuffer = framebuffers[dx12_rhi->CurrentFrameIndex].get();
 	Texture* ResolveTarget = ColorBuffers[ColorBufferWriteIndex];//framebuffers[dx12_rhi->CurrentFrameIndex].get();
@@ -2086,6 +2126,7 @@ void MyToyDX12Renderer::OnUpdate()
 
 	ViewMat = m_camera.GetViewMatrix();
 	ProjMat = m_camera.GetProjectionMatrix(0.8f, m_aspectRatio, Near, Far);
+	UnjitteredViewProjMat = ProjMat * ViewMat;
 
 	glm::mat4x4 InvViewMat = glm::inverse(ViewMat);
 	RTShadowViewParam.ViewMatrix = glm::transpose(ViewMat);
@@ -2113,7 +2154,6 @@ void MyToyDX12Renderer::OnUpdate()
 	PrevJitter = Jitter;
 	glm::mat4x4 JitterMat = glm::translate(glm::vec3(offsetX, -offsetY, 0));
 	
-	UnjitteredViewProjMat = ProjMat * ViewMat;
 
 	if(bEnableTAA)
 		ProjMat = JitterMat * ProjMat;
@@ -2176,7 +2216,6 @@ void MyToyDX12Renderer::OnRender()
 	dx12_rhi->BeginFrame();
 	
 	// Record all the commands we need to render the scene into the command list.
-	Texture* backbuffer = framebuffers[dx12_rhi->CurrentFrameIndex].get();
 
 	GBufferPass();
 
@@ -2192,24 +2231,15 @@ void MyToyDX12Renderer::OnRender()
 	TemporalDenoisingPass();
 
 	SpatialDenoisingPass();
-	//ComputePass();
 
-	//NVAftermathMarker(dx12_rhi->AM_CL_Handle, "LightingPass");
 	LightingPass();
 
-	//NVAftermathMarker(dx12_rhi->AM_CL_Handle, "CopyPass");
 	TemporalAAPass();
 	
-	D3D12_RESOURCE_BARRIER BarrierDesc = {};
-	BarrierDesc.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-	BarrierDesc.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
-	BarrierDesc.Transition.pResource = backbuffer->resource.Get();
-	BarrierDesc.Transition.Subresource = 0;
-	BarrierDesc.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
-	BarrierDesc.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
-	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &BarrierDesc);
-
+	Texture* backbuffer = framebuffers[dx12_rhi->CurrentFrameIndex].get();
+	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(backbuffer->resource.Get(), D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET));
 	dx12_rhi->GlobalCmdList->CmdList->OMSetRenderTargets(1, &backbuffer->CpuHandleRTV, FALSE, nullptr);
+
 	CopyPass();
 
 	if(bDebugDraw)
@@ -2235,7 +2265,7 @@ void MyToyDX12Renderer::OnRender()
 		if (ImGui::Button("Recompile all shaders"))
 			bRecompileShaders = true;
 
-		ImGui::Text("Tuning knobs.");
+		ImGui::Text("Tuning knobs.\nI key : show/hide imGui");
 		ImGui::SliderFloat("Camera turn speed", &m_turnSpeed, 0.0f, glm::half_pi<float>()*2);
 
 		ImGui::Checkbox("Enable TemporalAA", &bEnableTAA);
@@ -2310,8 +2340,8 @@ void MyToyDX12Renderer::OnRender()
 
 		ImGui::SliderFloat("Light Brightness", &LightIntensity, 0.0f, 20.0f);
 
-		ImGui::SliderFloat("SponzaRoughness", &SponzaRoughness, 0.0f, 1.0f);
-		ImGui::SliderFloat("ShaderBallRoughness", &ShaderBallRoughness, 0.0f, 1.0f);
+		ImGui::SliderFloat("SponzaRoughness multiplier", &SponzaRoughnessMultiplier, 0.0f, 1.0f);
+		ImGui::SliderFloat("ShaderBallRoughness multiplier", &ShaderBallRoughnessMultiplier, 0.0f, 1.0f);
 
 
 		ImGui::SliderFloat("IndirectDiffuse Depth Weight Factor", &SpatialFilterCB.IndirectDiffuseWeightFactorDepth, 0.0f, 20.0f);
@@ -2356,15 +2386,8 @@ void MyToyDX12Renderer::OnRender()
 
 	}
 
+	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(backbuffer->resource.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT));
 
-	D3D12_RESOURCE_BARRIER BarrierDescPresent = {};
-	BarrierDescPresent.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-	BarrierDescPresent.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
-	BarrierDescPresent.Transition.pResource = backbuffer->resource.Get();
-	BarrierDescPresent.Transition.Subresource = 0;
-	BarrierDescPresent.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
-	BarrierDescPresent.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
-	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &BarrierDescPresent);
 
 	dx12_rhi->CmdQ->ExecuteCommandList(dx12_rhi->GlobalCmdList);
 
@@ -2372,6 +2395,8 @@ void MyToyDX12Renderer::OnRender()
 
 	PrevViewProjMat = ViewProjMat;
 	PrevViewMat = ViewMat;
+
+	PrevUnjitteredViewProjMat = UnjitteredViewProjMat;
 }
 
 void MyToyDX12Renderer::OnDestroy()
@@ -2436,7 +2461,7 @@ struct ParallelDrawTaskSet : enki::ITaskSet
 	}
 };
 
-void MyToyDX12Renderer::DrawScene(shared_ptr<Scene> scene, float Roughness, float Metalic)
+void MyToyDX12Renderer::DrawScene(shared_ptr<Scene> scene, float Roughness, float Metalic, bool bOverrideRoughnessMetallic)
 {
 	for (auto& mesh : scene->meshes)
 	{
@@ -2446,14 +2471,17 @@ void MyToyDX12Renderer::DrawScene(shared_ptr<Scene> scene, float Roughness, floa
 		for (int i = 0; i < mesh->Draws.size(); i++)
 		{
 			Mesh::DrawCall& drawcall = mesh->Draws[i];
-			MeshDrawConstantBuffer objCB;
-			int sizea = sizeof(MeshDrawConstantBuffer);
+			GBufferConstantBuffer objCB;
+			int sizea = sizeof(GBufferConstantBuffer);
 
 			objCB.ViewProjectionMatrix = glm::transpose(ViewProjMat);
 			objCB.PrevViewProjectionMatrix = glm::transpose(PrevViewProjMat);
 
 			//glm::mat4 m; // Identity matrix
 			objCB.WorldMatrix = glm::transpose(mesh->transform);
+
+			objCB.UnjitteredViewProjMat = glm::transpose(UnjitteredViewProjMat);
+			objCB.PrevUnjitteredViewProjMat = glm::transpose(PrevUnjitteredViewProjMat);
 			objCB.ViewDir.x = m_camera.m_lookDirection.x;
 			objCB.ViewDir.y = m_camera.m_lookDirection.y;
 			objCB.ViewDir.z = m_camera.m_lookDirection.z;
@@ -2465,20 +2493,25 @@ void MyToyDX12Renderer::DrawScene(shared_ptr<Scene> scene, float Roughness, floa
 			objCB.RougnessMetalic.x = Roughness;
 			objCB.RougnessMetalic.y = Metalic;
 
-			RS_Mesh->SetCBVValue("ObjParameter", (void*)&objCB, dx12_rhi->GlobalCmdList->CmdList.Get());
+			objCB.bOverrideRougnessMetallic = bOverrideRoughnessMetallic ? 1 : 0;
 
-			Texture* diffuseTex = drawcall.mat->Diffuse.get();
-			/*if (diffuseTex == nullptr)
-				diffuseTex = scene->Materials[0]->Diffuse.get();*/
-			if (diffuseTex)
-				RS_Mesh->SetSRV("diffuseMap", diffuseTex, dx12_rhi->GlobalCmdList->CmdList.Get());
+			RS_GBufferPass->SetCBVValue("GBufferConstantBuffer", (void*)&objCB, dx12_rhi->GlobalCmdList->CmdList.Get());
 
+			Texture* AlbedoTex = drawcall.mat->Diffuse.get();
+			if (AlbedoTex)
+				RS_GBufferPass->SetSRV("AlbedoTex", AlbedoTex, dx12_rhi->GlobalCmdList->CmdList.Get());
 
-			Texture* normalTex = drawcall.mat->Normal.get();
-			/*if (normalTex == nullptr)
-				normalTex = scene->Materials[0]->Normal.get();*/
-			if (normalTex)
-				RS_Mesh->SetSRV("normalMap", normalTex, dx12_rhi->GlobalCmdList->CmdList.Get());
+			Texture* NormalTex = drawcall.mat->Normal.get();
+			if (NormalTex)
+				RS_GBufferPass->SetSRV("NormalTex", NormalTex, dx12_rhi->GlobalCmdList->CmdList.Get());
+
+			Texture* RoughnessTex = drawcall.mat->Roughness.get();
+			if (RoughnessTex)
+				RS_GBufferPass->SetSRV("RoughnessTex", RoughnessTex, dx12_rhi->GlobalCmdList->CmdList.Get());
+
+			Texture* MetallicTex = drawcall.mat->Metallic.get();
+			if (MetallicTex)
+				RS_GBufferPass->SetSRV("MetallicTex", MetallicTex, dx12_rhi->GlobalCmdList->CmdList.Get());
 
 
 			dx12_rhi->GlobalCmdList->CmdList->DrawIndexedInstanced(drawcall.IndexCount, 1, drawcall.IndexStart, drawcall.VertexBase, 0);
@@ -2502,30 +2535,36 @@ void MyToyDX12Renderer::GBufferPass()
 
 	const float clearColor[] = { 0.0f, 0.2f, 0.4f, 1.0f };
 	dx12_rhi->GlobalCmdList->CmdList->ClearRenderTargetView(AlbedoBuffer->CpuHandleRTV, clearColor, 0, nullptr);
-	dx12_rhi->GlobalCmdList->CmdList->ClearRenderTargetView(NormalBuffer->CpuHandleRTV, clearColor, 0, nullptr);
-	dx12_rhi->GlobalCmdList->CmdList->ClearRenderTargetView(GeomNormalBuffer->CpuHandleRTV, clearColor, 0, nullptr);
-	dx12_rhi->GlobalCmdList->CmdList->ClearRenderTargetView(VelocityBuffer->CpuHandleRTV, clearColor, 0, nullptr);
+	const float normalClearColor[] = { 0.0f, -0.1f, 0.0f, 0.0f };
+	dx12_rhi->GlobalCmdList->CmdList->ClearRenderTargetView(NormalBuffer->CpuHandleRTV, normalClearColor, 0, nullptr);
+	dx12_rhi->GlobalCmdList->CmdList->ClearRenderTargetView(GeomNormalBuffer->CpuHandleRTV, normalClearColor, 0, nullptr);
+	const float velocityClearColor[] = { 0.0f, 0.0f, 0.0f, 0.0f };
+	dx12_rhi->GlobalCmdList->CmdList->ClearRenderTargetView(VelocityBuffer->CpuHandleRTV, velocityClearColor, 0, nullptr);
+	const float roughnessClearColor[] = { 0.001f, 0.0f, 0.0f, 0.0f };
+	dx12_rhi->GlobalCmdList->CmdList->ClearRenderTargetView(RoughnessMetalicBuffer->CpuHandleRTV, roughnessClearColor, 0, nullptr);
+
 	dx12_rhi->GlobalCmdList->CmdList->ClearDepthStencilView(DepthBuffer->CpuHandleDSV, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
 	
 	ID3D12DescriptorHeap* ppHeaps[] = { dx12_rhi->SRVCBVDescriptorHeapShaderVisible->DH.Get(), dx12_rhi->SamplerDescriptorHeapShaderVisible->DH.Get() };
 	dx12_rhi->GlobalCmdList->CmdList->SetDescriptorHeaps(_countof(ppHeaps), ppHeaps);
 
+	dx12_rhi->GlobalCmdList->CmdList->RSSetViewports(1, &m_viewport);
+	dx12_rhi->GlobalCmdList->CmdList->RSSetScissorRects(1, &m_scissorRect);
+	dx12_rhi->GlobalCmdList->CmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+	
+	const D3D12_CPU_DESCRIPTOR_HANDLE Rendertargets[] = { AlbedoBuffer->CpuHandleRTV, NormalBuffer->CpuHandleRTV, GeomNormalBuffer->CpuHandleRTV, VelocityBuffer->CpuHandleRTV, RoughnessMetalicBuffer->CpuHandleRTV };
+	dx12_rhi->GlobalCmdList->CmdList->OMSetRenderTargets(RS_GBufferPass->graphicsPSODesc.NumRenderTargets, Rendertargets, FALSE, &DepthBuffer->CpuHandleDSV);
+
+	RS_GBufferPass->Apply(dx12_rhi->GlobalCmdList->CmdList.Get());
+	
+	RS_GBufferPass->SetSampler("samplerWrap", samplerWrap.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
+
 	if (!bMultiThreadRendering)
 	{
-		const D3D12_CPU_DESCRIPTOR_HANDLE Rendertargets[] = { AlbedoBuffer->CpuHandleRTV, NormalBuffer->CpuHandleRTV, GeomNormalBuffer->CpuHandleRTV, VelocityBuffer->CpuHandleRTV, RoughnessMetalicBuffer->CpuHandleRTV };
-
-		dx12_rhi->GlobalCmdList->CmdList->OMSetRenderTargets(RS_Mesh->graphicsPSODesc.NumRenderTargets, Rendertargets, FALSE, &DepthBuffer->CpuHandleDSV);
-
-		RS_Mesh->Apply(dx12_rhi->GlobalCmdList->CmdList.Get());
-		RS_Mesh->SetSampler("samplerWrap", samplerWrap.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
-
-		dx12_rhi->GlobalCmdList->CmdList->RSSetViewports(1, &m_viewport);
-		dx12_rhi->GlobalCmdList->CmdList->RSSetScissorRects(1, &m_scissorRect);
-		dx12_rhi->GlobalCmdList->CmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
 		
-		DrawScene(Sponza, SponzaRoughness, 0);
-		DrawScene(ShaderBall, ShaderBallRoughness, 1);
+		DrawScene(Sponza, SponzaRoughnessMultiplier, 0, false);
+		DrawScene(ShaderBall, ShaderBallRoughnessMultiplier, 1, true);
 	}
 	else
 	{

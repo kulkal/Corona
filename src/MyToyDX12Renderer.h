@@ -94,21 +94,21 @@ private:
 	std::vector<std::shared_ptr<Texture>> framebuffers;
 	
 	// mesh draw pass
-	struct MeshDrawConstantBuffer
+	struct GBufferConstantBuffer
 	{
 		glm::mat4x4 ViewProjectionMatrix;
-		//glm::mat4x4 UnjitteredViewProjectionMatrix;
-		//glm::mat4x4 InvViewProjectionMatrix;
 		glm::mat4x4 PrevViewProjectionMatrix;
 		glm::mat4x4 WorldMatrix;
+		glm::mat4x4 UnjitteredViewProjMat;
+		glm::mat4x4 PrevUnjitteredViewProjMat;
 		glm::vec4 ViewDir;
 		glm::vec2 RTSize;
 		glm::vec2 JitterOffset;
-		glm::vec4 RougnessMetalic;
-		glm::vec4 pad4[1];
+		glm::vec2 RougnessMetalic;
+		UINT32 bOverrideRougnessMetallic;
 	};
 
-	shared_ptr<PipelineStateObject> RS_Mesh;
+	shared_ptr<PipelineStateObject> RS_GBufferPass;
 
 	// spatial denoising
 	struct SpatialFilterConstant
@@ -258,7 +258,9 @@ private:
 	// blue noise texture
 	shared_ptr<Texture> BlueNoiseTex;
 	shared_ptr<Texture> DefaultWhiteTex;
+	shared_ptr<Texture> DefaultBlackTex;
 	shared_ptr<Texture> DefaultNormalTex;
+	shared_ptr<Texture> DefaultRougnessTex;
 
 	// global wrap sampler
 	std::shared_ptr<Sampler> samplerWrap;
@@ -266,12 +268,12 @@ private:
 	// mesh
 	shared_ptr<Mesh> mesh;
 
-	float SponzaRoughness = 0.4;
+	float SponzaRoughnessMultiplier = 1;
 	shared_ptr<Scene> Sponza;
 
 	shared_ptr<Scene> Buddha;
 
-	float ShaderBallRoughness = 0.15;
+	float ShaderBallRoughnessMultiplier = 0.15;
 	shared_ptr<Scene> ShaderBall;
 
 	// time & camera
@@ -290,12 +292,15 @@ private:
 	glm::mat4x4 ViewMat;
 	glm::mat4x4 ProjMat;
 	glm::mat4x4 ViewProjMat;
-	glm::mat4x4 UnjitteredViewProjMat;
 	glm::mat4x4 InvViewProjMat;
 	glm::mat4x4 PrevViewMat;
 	glm::mat4x4 PrevViewProjMat;
 	glm::vec2 JitterOffset;
 	glm::vec2 PrevJitter;
+
+	glm::mat4x4 UnjitteredViewProjMat;
+	glm::mat4x4 PrevUnjitteredViewProjMat;
+
 
 	// raytracing resources
 
@@ -361,7 +366,7 @@ public:
 
 	void InitBlueNoiseTexture();
 
-	void DrawScene(shared_ptr<Scene> scene, float Roughness, float Metalic);
+	void DrawScene(shared_ptr<Scene> scene, float Roughness, float Metalic, bool bOverrideRoughnessMetallic);
 
 	void GBufferPass();
 

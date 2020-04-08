@@ -145,16 +145,6 @@ void TemporalFilter( uint3 DTid : SV_DispatchThreadID, uint3 GTid : SV_GroupThre
 
 		BlendedSpecular = CurrentSpecular;
 	}
-	// dotSum *= 0.25;
-	// BlendedSpecular = float4(dotSum, dotSum, dotSum, 0);
-	// distSum *= 100;
-	// BlendedSpecular = float4(distSum, distSum, distSum, 0);
-
-
-
-	
-	// BlendedSH.shY = CurrentSH.shY;
-	// BlendedSH.CoCg = CurrentSH.CoCg;
 
 	OutGIResultSH[PixelPos] = BlendedSH.shY;
     OutGIResultColor[PixelPos] = float4(BlendedSH.CoCg, 0, 0);
@@ -164,12 +154,7 @@ void TemporalFilter( uint3 DTid : SV_DispatchThreadID, uint3 GTid : SV_GroupThre
     g_SH[GroupPos.y][GroupPos.x] = BlendedSH.shY;
     g_CoCg[GroupPos.y][GroupPos.x] = BlendedSH.CoCg;
    
-
-
     GroupMemoryBarrierWithGroupSync();
-
-
-  
 
 	// gl_LocalInvocationIndex 0 ~225
 	// GROUP_SIZE / GRAD_DWN = 15/3 = 5

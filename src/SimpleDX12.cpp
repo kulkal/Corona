@@ -755,13 +755,13 @@ void Texture::MakeStaticSRV()
 	g_dx12_rhi->Device->CreateShaderResourceView(resource.Get(), &SrvDesc, CpuHandleSRV);
 }
 
-void Texture::MakeRTV()
+void Texture::MakeRTV(bool isBackBuffer)
 {
 	g_dx12_rhi->RTVDescriptorHeap->AllocDescriptor(CpuHandleRTV, GpuHandleRTV);
 	
 	D3D12_RENDER_TARGET_VIEW_DESC desc = {};
 	//desc.Format = Format;
-	desc.Format = textureDesc.Format;
+	desc.Format = isBackBuffer ? DXGI_FORMAT_R8G8B8A8_UNORM_SRGB : textureDesc.Format;
 
 	desc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
 
@@ -1000,10 +1000,12 @@ void Texture::UploadSRCData3D(D3D12_SUBRESOURCE_DATA* SrcData)
 
 std::shared_ptr<Texture> SimpleDX12::CreateTextureFromFile(wstring fileName, bool isNormal)
 {
-	CommandList* cmd = g_dx12_rhi->CmdQ->AllocCmdList();
 
 	if (FileExists(fileName.c_str()) == false)
 		return nullptr;
+
+	CommandList* cmd = g_dx12_rhi->CmdQ->AllocCmdList();
+
 
 	Texture* tex = new Texture;
 
@@ -1277,7 +1279,7 @@ shared_ptr<RTAS> Mesh::CreateBLAS()
 	cmd->CmdList->ResourceBarrier(1, &uavBarrier);
 
 	g_dx12_rhi->CmdQ->ExecuteCommandList(cmd);
-	g_dx12_rhi->CmdQ->WaitGPU();
+	//g_dx12_rhi->CmdQ->WaitGPU();
 
 	return shared_ptr<RTAS>(as);
 }

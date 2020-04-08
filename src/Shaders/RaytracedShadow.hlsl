@@ -128,7 +128,7 @@ void anyhit(inout RayPayload payload, in BuiltInTriangleIntersectionAttributes a
 
         // payload.bHit = false;
 
-    if(opacity > 0.1)
+    if(opacity > 0.10)
     {
         payload.bHit = true;
         AcceptHitAndEndSearch();

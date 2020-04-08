@@ -338,7 +338,7 @@ public:
 	D3D12_GPU_DESCRIPTOR_HANDLE GpuHandleSRV;
 
 	void MakeStaticSRV();
-	void MakeRTV();
+	void MakeRTV(bool isBackBuffer = false);
 	void MakeDSV();
 
 	void UploadSRCData3D(D3D12_SUBRESOURCE_DATA* SrcData);
