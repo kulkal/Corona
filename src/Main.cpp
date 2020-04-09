@@ -10,13 +10,13 @@
 //*********************************************************
 
 #include "stdafx.h"
-#include "MyToyDX12Renderer.h"
+#include "Corona.h"
 #include <dxgidebug.h>
 
 _Use_decl_annotations_
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow)
 {
-	MyToyDX12Renderer* sample = new MyToyDX12Renderer(2560, 1440, L"We should learn dx12");
+	Corona* sample = new Corona(2560, 1440, L"Corona");
 	Win32Application::Run(sample, hInstance, nCmdShow);
 
 	delete sample;

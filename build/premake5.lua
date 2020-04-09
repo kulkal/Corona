@@ -1,7 +1,7 @@
 -- premake5.lua
 
 WIN_SDK_VERSION = "10.0.18362.0" 
-workspace "MyToyDX12Renderer"
+workspace "Corona"
    configurations { "Debug", "Release" }
    platforms { "Win64"}
 
@@ -11,7 +11,7 @@ workspace "MyToyDX12Renderer"
 
 
 
-project "MyToyDX12Renderer"
+project "Corona"
    kind "ConsoleApp"
    language "C"
    cppdialect "C++17"
