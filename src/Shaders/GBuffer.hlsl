@@ -27,7 +27,6 @@ cbuffer GBufferConstantBuffer : register(b0)
     float4x4 PrevUnjitteredViewProjMat;
     float4 ViewDir;
     float2 RTSize;
-    float2 JitterOffset;
     float2 RougnessMetalic;
     uint bOverrideRougnessMetallic;
 };
@@ -101,14 +100,11 @@ PS_OUTPUT PSMain(PSInput input) : SV_TARGET
 {
     float2 prevPositionSS = (input.prevPosition.xy/input.prevPosition.w) * float2(0.5, -0.5) + 0.5;
     prevPositionSS *= RTSize.xy;
-    float2 velocity = (input.position.xy - prevPositionSS);
-    // velocity -= JitterOffset;
-    // velocity /= RTSize.xy;
 
     float2 positionSS = (input.unjitteredPosition.xy/input.unjitteredPosition.w) * float2(0.5, -0.5) + 0.5;
     positionSS *= RTSize.xy;
     
-    velocity = positionSS - prevPositionSS;
+    float2 velocity = positionSS - prevPositionSS;
     velocity /= RTSize.xy;
 
     float4 Albedo = AlbedoTex.Sample(sampleWrap, input.uv);

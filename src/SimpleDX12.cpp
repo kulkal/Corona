@@ -10,8 +10,8 @@
 #include "glm/gtx/transform.hpp"
 #include "glm/mat4x4.hpp"
 #include "glm/fwd.hpp"
-#include "DXCAPI/dxcapi.use.h"
 #include "Utils.h"
+#include <dxcapi.use.h>
 #include <sstream>
 #include <fstream>
 
@@ -1212,7 +1212,7 @@ shared_ptr<RTAS> Mesh::CreateBLAS()
 
 	D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS inputs = {};
 	inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
-	inputs.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_NONE;
+	inputs.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;
 	inputs.NumDescs = 1;
 	inputs.pGeometryDescs = &geomDesc;
 	inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
@@ -1273,13 +1273,12 @@ shared_ptr<RTAS> Mesh::CreateBLAS()
 	D3D12_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO_DESC postInfo;
 	cmd->CmdList->BuildRaytracingAccelerationStructure(&asDesc, 0, &postInfo);
 
-	D3D12_RESOURCE_BARRIER uavBarrier = {};
+	/*D3D12_RESOURCE_BARRIER uavBarrier = {};
 	uavBarrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
 	uavBarrier.UAV.pResource = as->Result.Get();
-	cmd->CmdList->ResourceBarrier(1, &uavBarrier);
+	cmd->CmdList->ResourceBarrier(1, &uavBarrier);*/
 
 	g_dx12_rhi->CmdQ->ExecuteCommandList(cmd);
-	//g_dx12_rhi->CmdQ->WaitGPU();
 
 	return shared_ptr<RTAS>(as);
 }
@@ -1402,7 +1401,6 @@ std::shared_ptr<RTAS> SimpleDX12::CreateTLAS(vector<shared_ptr<RTAS>>& VecBottom
 	g_dx12_rhi->Device->CreateShaderResourceView(nullptr, &srvDesc, as->CPUHandle);
 
 	g_dx12_rhi->CmdQ->ExecuteCommandList(cmd);
-	g_dx12_rhi->CmdQ->WaitGPU();
 
 	return shared_ptr<RTAS>(as);
 }

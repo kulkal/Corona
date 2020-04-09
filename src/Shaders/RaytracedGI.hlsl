@@ -138,8 +138,6 @@ void rayGen
 
     float2 RandomUV = LoadBlueNoise2(BlueNoiseTex, launchIndex, FrameCounter, BlueNoiseOffsetStride);
 
-    // RandomUV = float2(rand_u, rand_v);
-    // float3 sampleDirLocal = SampleUniformHemisphere(rand_u, rand_v);
     float3 sampleDirLocal = SampleHemisphereCosine(RandomUV.x, RandomUV.y);
 
 
@@ -162,9 +160,8 @@ void rayGen
 	ray.TMax = 100000;
 
 	RayPayload payload;
-	TraceRay(gRtScene, 0 /*rayFlags*/, 0xFF, 0 /* ray index*/, 0, 0, ray, payload);
+	TraceRay(gRtScene, RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES /*rayFlags*/, 0xFF, 0 /* ray index*/, 0, 0, ray, payload);
     if(payload.bHit = false)
-    // if(true)
     {
         // hit sky
         float3 Radiance = payload.color * LightIntensity;
@@ -175,7 +172,6 @@ void rayGen
 
         GIResultSH[launchIndex.xy] = sh_indirect.shY;
         GIResultColor[launchIndex.xy] = float4(sh_indirect.CoCg, 0, 0);
-        // gOutput[launchIndex.xy] = float4(DiffuseLighting.xyz, 1);   
     }
     else
     {
@@ -189,7 +185,7 @@ void rayGen
 
         ShadowRayPayload shadowPayload;
         shadowPayload.bHit = true;
-        TraceRay(gRtScene, 0 /*rayFlags*/, 0xFF, 0 /* ray index*/, 0, 1, shadowRay, shadowPayload);
+        TraceRay(gRtScene, RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES /*rayFlags*/, 0xFF, 0 /* ray index*/, 0, 1, shadowRay, shadowPayload);
 
         float3 Albedo = payload.color;
         SH sh_indirect = init_SH();
@@ -204,8 +200,6 @@ void rayGen
             // shadowed
         }
 
-        // gOutput[launchIndex.xy] = float4(DiffuseLighting.xyz, 1);   
-
         GIResultSH[launchIndex.xy] = sh_indirect.shY;
         GIResultColor[launchIndex.xy] = float4(sh_indirect.CoCg, 0, 0);
     }
@@ -213,15 +207,12 @@ void rayGen
 
 }
 
-
-
 [shader("miss")]
 void miss(inout RayPayload payload)
 {
     payload.position = float3(0, 0, 0);
     payload.color = float3(0.0, 0.2, 0.4);
     payload.normal = float3(0, 0, -1);
-    // payload.distance = 0;
     payload.bHit = false;
 }
 
@@ -234,16 +225,9 @@ void chs(inout RayPayload payload, in BuiltInTriangleIntersectionAttributes attr
 
     payload.position = vertex.position;
     payload.normal = vertex.normal;
-    payload.color = AlbedoTex.SampleLevel(sampleWrap, vertex.uv, 0).xyz;
-
-
- // payload.position = float3(0, 0, 0);
-    // payload.color = float3(0.0, 0.2, 0.4);
-    // payload.normal = float3(0, 0, -1);
+    payload.color = AlbedoTex.SampleLevel(sampleWrap, vertex.uv, 5).xyz;
 
     payload.bHit = true;
-
-    // payload.distance = RayTCurrent();
 }
 
 [shader("miss")]

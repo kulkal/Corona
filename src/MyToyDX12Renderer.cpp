@@ -11,7 +11,8 @@
 
 #include "stdafx.h"
 #include "MyToyDX12Renderer.h"
-#include "DXCAPI/dxcapi.use.h"
+#include <dxcapi.use.h>
+//#include <dxcapi.h>
 #include "Utils.h"
 #include <iostream>
 #include <algorithm>
@@ -2265,7 +2266,12 @@ void MyToyDX12Renderer::OnRender()
 		if (ImGui::Button("Recompile all shaders"))
 			bRecompileShaders = true;
 
-		ImGui::Text("Tuning knobs.\nI key : show/hide imGui");
+		ImGui::Text("\nArrow keys : rotate camera imGui\
+			\nWASD keys : move camera imGui\
+			\nI : show/hide imGui\
+			\nB : show/hide buffer visualization\
+			\nT : enable/disable temporal aa\n\n");
+
 		ImGui::SliderFloat("Camera turn speed", &m_turnSpeed, 0.0f, glm::half_pi<float>()*2);
 
 		ImGui::Checkbox("Enable TemporalAA", &bEnableTAA);
@@ -2489,7 +2495,6 @@ void MyToyDX12Renderer::DrawScene(shared_ptr<Scene> scene, float Roughness, floa
 			objCB.RTSize.x = m_width;
 			objCB.RTSize.y = m_height;
 
-			objCB.JitterOffset = JitterOffset;
 			objCB.RougnessMetalic.x = Roughness;
 			objCB.RougnessMetalic.y = Metalic;
 
@@ -2842,7 +2847,7 @@ void MyToyDX12Renderer::InitRTPSO()
 		TEMP_PSO_RT_REFLECTION->BindSRV("chs", "AlbedoTex", 5);
 		TEMP_PSO_RT_REFLECTION->BindSRV("chs", "InstanceProperty", 9);
 
-		TEMP_PSO_RT_REFLECTION->MaxRecursion = 2;
+		TEMP_PSO_RT_REFLECTION->MaxRecursion = 1;
 		TEMP_PSO_RT_REFLECTION->MaxAttributeSizeInBytes = sizeof(float) * 2;
 		TEMP_PSO_RT_REFLECTION->MaxPayloadSizeInBytes = sizeof(float) * 10;
 
@@ -2883,7 +2888,7 @@ void MyToyDX12Renderer::InitRTPSO()
 		TEMP_PSO_RT_GI->BindSRV("chs", "AlbedoTex", 5);
 		TEMP_PSO_RT_GI->BindSRV("chs", "InstanceProperty", 6);
 
-		TEMP_PSO_RT_GI->MaxRecursion = 2;
+		TEMP_PSO_RT_GI->MaxRecursion = 1;
 		TEMP_PSO_RT_GI->MaxAttributeSizeInBytes = sizeof(float) * 2;
 
 		TEMP_PSO_RT_GI->MaxPayloadSizeInBytes = sizeof(float) * 10;

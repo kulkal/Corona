@@ -103,7 +103,6 @@ private:
 		glm::mat4x4 PrevUnjitteredViewProjMat;
 		glm::vec4 ViewDir;
 		glm::vec2 RTSize;
-		glm::vec2 JitterOffset;
 		glm::vec2 RougnessMetalic;
 		UINT32 bOverrideRougnessMetallic;
 	};
@@ -285,9 +284,9 @@ private:
 
 	// misc
 	glm::vec3 LightDir = glm::normalize(glm::vec3(0.901, 0.88, 0.176));
-	float LightIntensity = 3.0f;
+	float LightIntensity = 1.2f;
 	float Near = 1.0f;
-	float Far = 20000.0f;
+	float Far = 40000.0f;
 
 	glm::mat4x4 ViewMat;
 	glm::mat4x4 ProjMat;

@@ -1,8 +1,13 @@
+# Corona
+Corona pandemic made me to spend some time for this hobby project. That is the reason why the name of the project is Corona.
+
 # DX12
-This project is for dx12 & dxr learning. I am trying to bring best practice implementation to this project(resource binding, descriotpr allocation, multi-thread command submission, etc....)
+I tried to best practice of dx12 api usage.
 
 # DXR
-This is basically simplified version of Q2RTX in terms of raytracing.
+There are several dxr tutorials and examples. But I couldn't find one that is simple and includes complete sets of raytracing usage.
+This is basically simplified version of Q2RTX in terms of raytracing. which means it has most of raytracing feature(shadow/gi/..).
+I hope it helps someone to understand how dxr renderer looks like.
 
 ## Screenshots
 ![](rt_1.png)
@@ -12,9 +17,8 @@ This is basically simplified version of Q2RTX in terms of raytracing.
 
 ## Build
 * Go to build directory.
-* premake5.exe vs2017
-* Install WinPixEventRuntime. (It should be re-installed after re-generate vs sln after.)
-* Build!
+* premake5.exe vs2017( or vs2019)
+* Build & run!
 
 ## Third-party libs
 * [enkiTS](https://github.com/dougbinks/enkiTS)
@@ -29,7 +33,6 @@ This is basically simplified version of Q2RTX in terms of raytracing.
 * DXR
 	* [Instance property](https://developer.nvidia.com/rtx/raytracing/dxr/DX12-Raytracing-tutorial/Extra/dxr_tutorial_extra2_simple_lighting)
 	* [Adam Mars intro dxr](https://github.com/acmarrs/IntroToDXR)
-
 * Denoising
 	* [Q2RT Indirect diffuse denoiser](https://github.com/NVIDIA/Q2RTX/blob/master/src/refresh/vkpt/shader/asvgf_lf.comp)
 	* [Q2 RT GTC presentation from Alexey Pantellev](https://developer.nvidia.com/gtc/2019/video/S91046/video)
@@ -38,5 +41,6 @@ This is basically simplified version of Q2RTX in terms of raytracing.
 * fbx file
 	* [https://github.com/derkreature/IBLBaker](https://github.com/derkreature/IBLBaker)
 
-
+* Pef
+	* [Nsight](https://news.developer.nvidia.com/nsight-graphics-2020-2/)
 	

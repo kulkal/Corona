@@ -95,7 +95,7 @@ void rayGen()
 	RayPayload payload;
     payload.bHit = true;
 	TraceRay(gRtScene, 
-        0
+        RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES 
        // RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_CLOSEST_HIT_SHADER 
         , 0xFF, 0 /* ray index*/, 0, 0, ray, payload);
 
@@ -124,7 +124,7 @@ void anyhit(inout RayPayload payload, in BuiltInTriangleIntersectionAttributes a
     uint triangleIndex = PrimitiveIndex();
     Vertex vertex = GetVertexAttributes(InstanceID(), vertices, indices, InstanceProperty, triangleIndex, barycentrics);
 
-    float opacity = AlbedoTex.SampleLevel(sampleWrap, vertex.uv, 0).w;
+    float opacity = AlbedoTex.SampleLevel(sampleWrap, vertex.uv, 5).w;
 
         // payload.bHit = false;
 

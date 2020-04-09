@@ -1,6 +1,6 @@
 -- premake5.lua
 
-WIN_SDK_VERSION = "10.0.17763.0" 
+WIN_SDK_VERSION = "10.0.18362.0" 
 workspace "MyToyDX12Renderer"
    configurations { "Debug", "Release" }
    platforms { "Win64"}
@@ -19,11 +19,13 @@ project "MyToyDX12Renderer"
    includedirs { 
 				"../src/external",
 				".", 
-				"C:/Program Files (x86)/Windows Kits/10/Include/10.0.17763.0/um",  
+				"C:/Program Files (x86)/Windows Kits/10/Include/10.0.18362.0/um",  
 				"../src/external/DirectXTex July 2017/Include", 
 				"../src/external/assimp/include",
 				"../src/external/imgui/",
 				"../src/external/imgui/examples",
+            "../src/external/WinPixEventRuntime/Include/WinPixEventRuntime",
+            "../src/external/dxc/inc",
 				"../src/"
 
                }
@@ -32,6 +34,8 @@ project "MyToyDX12Renderer"
             -- "../src/DirectXTex July 2017/Lib 2017/Release",
             "../src/external/DirectXTex July 2017/Lib 2017/",
             "../src/external/assimp/lib",
+            "../src/external/WinPixEventRuntime/bin//x64",
+            "../src/external/dxc/lib",
             "."
 			}
    libdirs { os.findlib("dx12") }
@@ -41,6 +45,7 @@ project "MyToyDX12Renderer"
       "d3dcompiler",
       "dxguid",
       "GFSDK_Aftermath_Lib.x64",
+      "WinPixEventRuntime",
       -- "DirectXTex.lib",
       "assimp.lib"
       }

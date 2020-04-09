@@ -210,16 +210,15 @@ void rayGen
 
 	RayDesc ray;
 	ray.Origin = WorldPos + GeoNormal * 0.5; //    mul(float4(0, 0, 0, 1), InvViewMatrix).xyz;
-	ray.Direction = L;// reflect(V, N);
+	ray.Direction = L;
 
 	ray.TMin = 0;
 	ray.TMax = 100000;
 
 	RayPayload payload;
-	TraceRay(gRtScene, 0 /*rayFlags*/, 0xFF, 0 /* ray index*/, 0, 0, ray, payload);
+	TraceRay(gRtScene, RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES /*rayFlags*/, 0xFF, 0 /* ray index*/, 0, 0, ray, payload);
 
     if(payload.bHit == false)
-    // if(true)
     {
         // hit sky
         float3 Radiance = payload.color * LightIntensity;
@@ -238,12 +237,11 @@ void rayGen
         ShadowRayPayload shadowPayload;
         shadowPayload.bHit = true;
         uint RayIndex = 0;
-        TraceRay(gRtScene, 0 /*rayFlags*/, 0xFF, RayIndex /* ray index*/, 0, 1, shadowRay, shadowPayload);
+        TraceRay(gRtScene, RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES  /*rayFlags*/, 0xFF, RayIndex /* ray index*/, 0, 1, shadowRay, shadowPayload);
 
         float3 Irradiance = 0..xxx;
         float3 Albedo = payload.color;
         if(shadowPayload.bHit == false)
-        // if(true)
         {
             // miss
             Irradiance = dot(LightDir.xyz, payload.normal) * LightIntensity  * Albedo;
@@ -278,7 +276,7 @@ void chs(inout RayPayload payload, in BuiltInTriangleIntersectionAttributes attr
 
     payload.position = vertex.position;
     payload.normal = vertex.normal;
-    payload.color =  AlbedoTex.SampleLevel(sampleWrap, vertex.uv, 0).xyz;
+    payload.color =  AlbedoTex.SampleLevel(sampleWrap, vertex.uv, 5).xyz;
     payload.bHit = true;
 }
 

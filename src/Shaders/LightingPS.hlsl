@@ -91,22 +91,17 @@ float4 PSMain(PSInput input) : SV_TARGET
     sh_indirect.shY = GIResultSHTex[PixelPos/GIBufferScale];
     sh_indirect.CoCg = GIResultColorTex[PixelPos/GIBufferScale].xy;
 
-    // sh_indirect.shY = GIResultSHTex.Sample(sampleWrap, ScreenUV);
-    // sh_indirect.CoCg = GIResultColorTex.Sample(sampleWrap, ScreenUV);
-
     float3 IndirectDiffuse = project_SH_irradiance(sh_indirect, WorldNormal) * Albedo;
 
-
-    // use 0.05 if is non-metal
     float3 V = mul(InvViewMatrix, float3(0, 0, 1));
     float NdotV = clamp(dot(WorldNormal, -V), 0, 1);
 
     float Rougness = RoughnessMetalicTex[PixelPos].x; 
 
     float Metalic = RoughnessMetalicTex[PixelPos].y;
+    // use 0.05 if is non-metal
     float Specular = lerp(0.05, 1.0, Metalic); 
     Specular = schlick_ross_fresnel(Specular, Rougness, NdotV);
-    // Specular *= (1 - Rougness * (1 - Metalic) * 0.9);
 
     // non-metal doesnt have specular color
     float3 SpecularColor = lerp(1..xxxx, Albedo.xyz, Metalic) * Specular;
@@ -117,11 +112,6 @@ float4 PSMain(PSInput input) : SV_TARGET
     DiffuseLighting = max(DiffuseLighting , 0);
 
     DirectSpecular = max(DirectSpecular + IndirectSpecular, 0);
-
-   // return float4(DirectSpecular, 0); 
-
-    //     return float4(IndirectDiffuse, 0); 
-
 
     return float4(DiffuseLighting * (1-Specular) + DirectSpecular + IndirectDiffuse*(1-Specular) + IndirectSpecular, 1);
 }
