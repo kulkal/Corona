@@ -317,7 +317,7 @@ public:
 	D3D12_GPU_DESCRIPTOR_HANDLE GpuHandle;
 };
 
-class Texture : public std::enable_shared_from_this<Texture>
+class Texture 
 {
 public:
 	D3D12_RESOURCE_DESC textureDesc;
@@ -342,6 +342,11 @@ public:
 	void MakeDSV();
 
 	void UploadSRCData3D(D3D12_SUBRESOURCE_DATA* SrcData);
+	Texture(){}
+	~Texture()
+	{
+		int a = 0;
+	}
 };
 
 class DescriptorHeap
@@ -460,6 +465,11 @@ public:
 	shared_ptr<Texture> Normal;
 	shared_ptr<Texture> Roughness;
 	shared_ptr<Texture> Metallic;
+	Material() {}
+	~Material()
+	{
+		int a = 0;
+	}
 };
 
 class Mesh
@@ -555,7 +565,7 @@ public:
 	shared_ptr<Texture> CreateTexture2D(DXGI_FORMAT format, D3D12_RESOURCE_FLAGS resFlags, D3D12_RESOURCE_STATES initResState, int width, int height, int mipLevels);
 	shared_ptr<Texture> CreateTexture3D(DXGI_FORMAT format, D3D12_RESOURCE_FLAGS resFlags, D3D12_RESOURCE_STATES initResState, int width, int height, int depth, int mipLevels);
 
-	shared_ptr<Texture> CreateTextureFromFile(wstring fileName, bool isNormal);
+	shared_ptr<Texture> CreateTextureFromFile(wstring fileName, bool nonSRGB);
 	shared_ptr<Sampler> CreateSampler(D3D12_SAMPLER_DESC& InSamplerDesc);
 	shared_ptr<Buffer> CreateBuffer(UINT Size);
 	shared_ptr<IndexBuffer> CreateIndexBuffer(DXGI_FORMAT Format, UINT Size, void* SrcData);

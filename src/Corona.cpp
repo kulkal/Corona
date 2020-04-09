@@ -319,13 +319,13 @@ Corona::Corona(UINT width, UINT height, std::wstring name) :
 
 Corona::~Corona()
 {
-	
+
 }
 
 
 void Corona::OnInit()
 {
-	//_CrtSetBreakAlloc(196);
+	//_CrtSetBreakAlloc(4207117);
 
 	CoInitialize(NULL);
 
@@ -646,7 +646,11 @@ void Corona::LoadAssets()
 
 }
 
-map<wstring, wstring> SponzaRoughnessMap = {
+
+
+shared_ptr<Scene> Corona::LoadModel(string fileName)
+{
+	map<wstring, wstring> SponzaRoughnessMap = {
 	{L"Background_Albedo", L"Background_Roughness"},
 	{L"ChainTexture_Albedo", L"ChainTexture_Roughness"},
 	{L"Lion_Albedo", L"Lion_Roughness"},
@@ -671,10 +675,8 @@ map<wstring, wstring> SponzaRoughnessMap = {
 	{L"VaseHanging_diffuse", L"VaseHanging_roughness"},
 	{L"VasePlant_diffuse", L"VasePlant_roughness"},
 	{L"VaseRound_diffuse", L"VaseRound_roughness"}
-};
+	};
 
-shared_ptr<Scene> Corona::LoadModel(string fileName)
-{
 	Scene* scene = new Scene;
 
 	Assimp::Importer importer;
@@ -703,8 +705,8 @@ shared_ptr<Scene> Corona::LoadModel(string fileName)
 	for (int i = 0; i < numMaterials; ++i)
 	{
 		const aiMaterial& aiMat = *assimpScene->mMaterials[i];
-		shared_ptr<Material> mat = shared_ptr<Material>(new Material);
-
+		//shared_ptr<Material> mat = shared_ptr<Material>(new Material);
+		Material* mat = new Material;
 		wstring wDiffuseTex;
 		wstring wNormalTex;
 		wstring wRoughnessTex;
@@ -747,7 +749,7 @@ shared_ptr<Scene> Corona::LoadModel(string fileName)
 			wMetallicTex = GetFileName(AnsiToWString(metallicMapPath.C_Str()).c_str());
 		if (wMetallicTex.length() != 0)
 		{
-			mat->Metallic = dx12_rhi->CreateTextureFromFile(dir + wMetallicTex, false);
+			mat->Metallic = dx12_rhi->CreateTextureFromFile(dir + wMetallicTex, true);
 		}
 
 		if (!mat->Metallic)
@@ -755,9 +757,15 @@ shared_ptr<Scene> Corona::LoadModel(string fileName)
 		
 		if (wDiffuseTex.length() != 0)
 		{
-			wRoughnessTex = SponzaRoughnessMap[wDiffuseTex.substr(0, wDiffuseTex.length() - 4)] + L".png";
-			mat->Roughness = dx12_rhi->CreateTextureFromFile(dir + wRoughnessTex, false);
+			wstring wNameStr = wstring(wDiffuseTex.substr(0, wDiffuseTex.length() - 4));
+			map<wstring, wstring> ::iterator it = SponzaRoughnessMap.find(wNameStr);
+			if (it != SponzaRoughnessMap.end())
+			{
+				wRoughnessTex = SponzaRoughnessMap[wNameStr] + L".png";
+				mat->Roughness = dx12_rhi->CreateTextureFromFile(dir + wRoughnessTex, true);
+			}
 		}
+
 		if (!mat->Roughness)
 		{
 			mat->Roughness = DefaultRougnessTex;
@@ -767,29 +775,7 @@ shared_ptr<Scene> Corona::LoadModel(string fileName)
 		if (wDiffuseTex == L"Sponza_Thorn_diffuse.png" || wDiffuseTex == L"VasePlant_diffuse.png" || wDiffuseTex == L"ChainTexture_Albedo.png")
 			mat->bHasAlpha = true;
 
-#if FIND_TEXTURE
-		UINT texType = 0;
-		for(texType = 0; texType < AI_TEXTURE_TYPE_MAX; texType++)
-		{
-			UINT TotalTexNum = aiMat.GetTextureCount((aiTextureType)texType);
-			{
-				for (UINT numTex = 0; numTex < AI_TEXTURE_TYPE_MAX; numTex++)
-				{
-					aiString wTex;
-					if (aiMat.GetTexture((aiTextureType)texType, numTex, &wTex) == aiReturn_SUCCESS)
-					{
-						stringstream ss;
-						ss << "Texture: " << wTex.C_Str() << "\n";
-						OutputDebugStringA(ss.str().c_str());
-					}
-				}
-				
-			}
-
-		}
-#endif
-
-		scene->Materials.push_back(mat);
+		scene->Materials.push_back(shared_ptr<Material>(mat));
 	}
 
 	struct Vertex
@@ -2337,6 +2323,7 @@ void Corona::OnRender()
 
 
 
+		// ImGui::gizmo3D has memory leak.
 		glm::vec3 LD = glm::vec3(LightDir.z, -LightDir.y, -LightDir.x);
 		ImGui::gizmo3D("##gizmo1", LD, 200 /* mode */);
 		LightDir = glm::vec3(-LD.z, -LD.y, LD.x);

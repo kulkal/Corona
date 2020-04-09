@@ -998,7 +998,7 @@ void Texture::UploadSRCData3D(D3D12_SUBRESOURCE_DATA* SrcData)
 	}
 }
 
-std::shared_ptr<Texture> SimpleDX12::CreateTextureFromFile(wstring fileName, bool isNormal)
+std::shared_ptr<Texture> SimpleDX12::CreateTextureFromFile(wstring fileName, bool nonSRGB)
 {
 
 	if (FileExists(fileName.c_str()) == false)
@@ -1033,7 +1033,7 @@ std::shared_ptr<Texture> SimpleDX12::CreateTextureFromFile(wstring fileName, boo
 	const DirectX::TexMetadata& metaData = image.GetMetadata();
 	DXGI_FORMAT format = metaData.format;
 
-	if(!isNormal)
+	if(!nonSRGB)
 		format = DirectX::MakeSRGB(format);
 
 	const bool is3D = metaData.dimension == DirectX::TEX_DIMENSION_TEXTURE3D;
