@@ -2,6 +2,7 @@
 
 #include <DirectXMath.h>
 #include "DirectXTex.h"
+#include "Utils.h"
 #include "d3dx12.h"
 #define GLM_FORCE_CTOR_INIT
 
@@ -14,6 +15,9 @@
 #include <dxcapi.use.h>
 #include <sstream>
 #include <fstream>
+#include <D3Dcompiler.h>
+
+#include <assert.h>
 
 #include <comdef.h>
 #include <windows.h>
@@ -129,6 +133,34 @@ void SimpleDX12::BeginFrame()
 		SrvDesc.Texture2D.MipLevels = tex->textureDesc.MipLevels;
 		g_dx12_rhi->Device->CreateShaderResourceView(tex->resource.Get(), &SrvDesc, tex->CpuHandleSRV);
 	}
+
+	for (auto& buffer : DynamicBuffers)
+	{
+		g_dx12_rhi->GlobalDHRing->AllocDescriptor(buffer->CpuHandleUAV, buffer->GpuHandleUAV);
+
+		if (buffer->Type == Buffer::BYTE_ADDRESS)
+		{
+			D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc = {};
+			uavDesc.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+			uavDesc.Format = DXGI_FORMAT_R32_TYPELESS;
+			uavDesc.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
+			uavDesc.Buffer.NumElements = buffer->NumElements;
+
+			g_dx12_rhi->Device->CreateUnorderedAccessView(buffer->resource.Get(), nullptr, &uavDesc, buffer->CpuHandleUAV);
+		}
+		else if (buffer->Type == Buffer::STRUCTURED)
+		{
+			D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc = {};
+			uavDesc.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+			uavDesc.Format = DXGI_FORMAT_UNKNOWN;
+			uavDesc.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_NONE;
+			uavDesc.Buffer.StructureByteStride = buffer->ElementSize;
+			uavDesc.Buffer.NumElements = buffer->NumElements;
+
+			g_dx12_rhi->Device->CreateUnorderedAccessView(buffer->resource.Get(), nullptr, &uavDesc, buffer->CpuHandleUAV);
+		}
+	}
+
 }
 
 void SimpleDX12::EndFrame()
@@ -153,7 +185,7 @@ shared_ptr<Sampler> SimpleDX12::CreateSampler(D3D12_SAMPLER_DESC& InSamplerDesc)
 	return shared_ptr<Sampler>(sampler);
 }
 
-std::shared_ptr<Buffer> SimpleDX12::CreateBuffer(UINT Size)
+std::shared_ptr<Buffer> SimpleDX12::CreateBuffer(UINT InNumElements, UINT InElementSize, D3D12_RESOURCE_STATES initResState, bool isUAV, void* SrcData)
 {
 	Buffer * buffer = new Buffer;
 	D3D12_RESOURCE_DESC bufDesc = {};
@@ -161,35 +193,84 @@ std::shared_ptr<Buffer> SimpleDX12::CreateBuffer(UINT Size)
 	bufDesc.DepthOrArraySize = 1;
 	bufDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
 	bufDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
+	if (isUAV)
+		bufDesc.Flags |= D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
 	bufDesc.Format = DXGI_FORMAT_UNKNOWN;
 	bufDesc.Height = 1;
 	bufDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
 	bufDesc.MipLevels = 1;
 	bufDesc.SampleDesc.Count = 1;
 	bufDesc.SampleDesc.Quality = 0;
-	bufDesc.Width = Size;
+	bufDesc.Width = InNumElements * InElementSize;
 
-	ThrowIfFailed(Device->CreateCommittedResource(&CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD), D3D12_HEAP_FLAG_NONE, &bufDesc,
-		D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&buffer->resource)));
+	buffer->NumElements = InNumElements;
+	buffer->ElementSize = InElementSize;
 
-	NAME_D3D12_OBJECT(buffer->resource);
+	D3D12_HEAP_PROPERTIES heapProp;
+	heapProp.Type = D3D12_HEAP_TYPE_DEFAULT;
+	heapProp.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
+	heapProp.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
+	heapProp.CreationNodeMask = 1;
+	heapProp.VisibleNodeMask = 1;
+	if (isUAV)
+		heapProp.Type = D3D12_HEAP_TYPE_DEFAULT;
+	else
+		heapProp.Type = D3D12_HEAP_TYPE_UPLOAD;
 
-	// create shader resource view
-	D3D12_SHADER_RESOURCE_VIEW_DESC bufferSRVDesc;
-	bufferSRVDesc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
-	bufferSRVDesc.Format = DXGI_FORMAT_R32_TYPELESS;
-	bufferSRVDesc.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
-	bufferSRVDesc.Buffer.StructureByteStride = 0;
-	bufferSRVDesc.Buffer.FirstElement = 0;
-	bufferSRVDesc.Buffer.NumElements = static_cast<UINT>(Size) / sizeof(float); // byte address buffer
-	bufferSRVDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+	ThrowIfFailed(Device->CreateCommittedResource(&heapProp, D3D12_HEAP_FLAG_NONE, &bufDesc,
+		initResState, nullptr, IID_PPV_ARGS(&buffer->resource)));
 
-	// TODO : should be GlobalDHRing? if object instance are to move.
-	TextureDHRing->AllocDescriptor(buffer->CpuHandleSRV, buffer->GpuHandleSRV);
+	if (SrcData)
+	{
+		CommandList* cmd = g_dx12_rhi->CmdQ->AllocCmdList();
 
-	Device->CreateShaderResourceView(buffer->resource.Get(), &bufferSRVDesc, buffer->CpuHandleSRV);
+		cmd->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(buffer->resource.Get(), initResState, D3D12_RESOURCE_STATE_COPY_DEST));
 
-	return shared_ptr<Buffer>(buffer);;
+		UINT Size = buffer->NumElements * buffer->ElementSize;
+
+		ComPtr<ID3D12Resource> UploadHeap;
+
+		ThrowIfFailed(g_dx12_rhi->Device->CreateCommittedResource(
+			&CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD),
+			D3D12_HEAP_FLAG_NONE,
+			&CD3DX12_RESOURCE_DESC::Buffer(Size),
+			D3D12_RESOURCE_STATE_GENERIC_READ,
+			nullptr,
+			IID_PPV_ARGS(&UploadHeap)));
+
+		UINT8* pData = nullptr;
+		UploadHeap->Map(0, nullptr, reinterpret_cast<void**>(&pData));
+		memcpy(reinterpret_cast<void*>(pData), SrcData, Size);
+		UploadHeap->Unmap(0, nullptr);
+
+		cmd->CmdList->CopyBufferRegion(buffer->resource.Get(), 0, UploadHeap.Get(), 0, Size);
+		cmd->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(buffer->resource.Get(), D3D12_RESOURCE_STATE_COPY_DEST, initResState));
+
+
+		CmdQ->ExecuteCommandList(cmd);
+		CmdQ->WaitGPU();
+	}
+
+	//// create shader resource view
+	//D3D12_SHADER_RESOURCE_VIEW_DESC bufferSRVDesc;
+	//bufferSRVDesc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+	//bufferSRVDesc.Format = DXGI_FORMAT_R32_TYPELESS;
+	//bufferSRVDesc.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
+	//bufferSRVDesc.Buffer.StructureByteStride = 0;
+	//bufferSRVDesc.Buffer.FirstElement = 0;
+	//bufferSRVDesc.Buffer.NumElements = InNumElements;// static_cast<UINT>(Size) / sizeof(float); // byte address buffer
+	//bufferSRVDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+
+	//// TODO : should be GlobalDHRing? if object instance are to move.
+	//TextureDHRing->AllocDescriptor(buffer->CpuHandleSRV, buffer->GpuHandleSRV);
+
+	//Device->CreateShaderResourceView(buffer->resource.Get(), &bufferSRVDesc, buffer->CpuHandleSRV);
+
+	shared_ptr<Buffer> ptr = shared_ptr<Buffer>(buffer);
+	if (isUAV)
+		g_dx12_rhi->DynamicBuffers.push_back(ptr);
+
+	return ptr;
 }
 
 shared_ptr<IndexBuffer> SimpleDX12::CreateIndexBuffer(DXGI_FORMAT Format, UINT Size, void* SrcData)
@@ -443,11 +524,6 @@ SimpleDX12::~SimpleDX12()
 	CmdQ->WaitGPU();
 }
 
-Shader::Shader(UINT8* ByteCode, UINT Size)
-{
-	ShaderByteCode = CD3DX12_SHADER_BYTECODE(ByteCode, Size);
-}
-
 void PipelineStateObject::BindUAV(string name, int baseRegister)
 {
 	BindingData binding;
@@ -503,30 +579,29 @@ void PipelineStateObject::BindSampler(string name, int baseRegister)
 	samplerBinding.insert(pair<string, BindingData>(name, binding));
 }
 
-void PipelineStateObject::SetSRV(string name, Texture* texture, ID3D12GraphicsCommandList* CommandList)
+void PipelineStateObject::SetSRV(string name, D3D12_GPU_DESCRIPTOR_HANDLE GpuHandleSRV, ID3D12GraphicsCommandList* CommandList)
 {
-	textureBinding[name].texture = texture;
+	//textureBinding[name].texture = texture;
 
 	UINT RPI = textureBinding[name].rootParamIndex;
 	if (IsCompute)
-		CommandList->SetComputeRootDescriptorTable(RPI, texture->GpuHandleSRV);
+		CommandList->SetComputeRootDescriptorTable(RPI, GpuHandleSRV);
 	else
-		CommandList->SetGraphicsRootDescriptorTable(RPI, texture->GpuHandleSRV);
+		CommandList->SetGraphicsRootDescriptorTable(RPI, GpuHandleSRV);
 }
 
-void PipelineStateObject::SetUAV(string name, Texture* texture, ID3D12GraphicsCommandList* CommandList)
+void PipelineStateObject::SetUAV(string name, D3D12_GPU_DESCRIPTOR_HANDLE GpuHandleUAV, ID3D12GraphicsCommandList* CommandList)
 {
-	uavBinding[name].texture = texture;
+	//uavBinding[name].texture = texture;
 	D3D12_CPU_DESCRIPTOR_HANDLE ShaderVisibleCPUHandle;
 	D3D12_GPU_DESCRIPTOR_HANDLE ShaderVisibleGpuHandle;
 
 	UINT RPI = uavBinding[name].rootParamIndex;
 	if (IsCompute)
-		CommandList->SetComputeRootDescriptorTable(RPI, texture->GpuHandleUAV);
+		CommandList->SetComputeRootDescriptorTable(RPI, GpuHandleUAV);
 	else
-		CommandList->SetGraphicsRootDescriptorTable(RPI, texture->GpuHandleUAV);
+		CommandList->SetGraphicsRootDescriptorTable(RPI, GpuHandleUAV);
 }
-
 void PipelineStateObject::SetSampler(string name, Sampler* sampler, ID3D12GraphicsCommandList* CommandList)
 {
 	samplerBinding[name].sampler = sampler;
@@ -542,7 +617,10 @@ void PipelineStateObject::SetSampler(string name, Sampler* sampler, ID3D12Graphi
 
 void PipelineStateObject::SetCBVValue(string name, void* pData, ID3D12GraphicsCommandList* CommandList)
 {
-	BindingData& binding = constantBufferBinding[name];
+	map<string, BindingData> ::iterator it = constantBufferBinding.find(name);
+	assert(it != constantBufferBinding.end());
+	
+	BindingData& binding = it->second;// constantBufferBinding[name];
 	auto Alloc = g_dx12_rhi->GlobalCBRing->AllocGPUMemory(binding.cbSize);
 	UINT64 GPUAddr = std::get<0>(Alloc);
 	UINT8* pMapped = std::get<1>(Alloc);
@@ -578,6 +656,10 @@ void PipelineStateObject::SetRootConstant(string name, UINT value, ID3D12Graphic
 
 bool PipelineStateObject::Init()
 {
+	if (!IsCompute &&(!vs || !ps)) return false;
+	if (IsCompute && !cs) return false;
+
+
 	vector<CD3DX12_ROOT_PARAMETER1> rootParamVec;
 
 	vector<CD3DX12_DESCRIPTOR_RANGE1> TextureRanges;
@@ -704,7 +786,7 @@ bool PipelineStateObject::Init()
 	NAME_D3D12_OBJECT(RS);
 	if (IsCompute)
 	{
-		computePSODesc.CS = cs->ShaderByteCode;
+		computePSODesc.CS = CD3DX12_SHADER_BYTECODE(cs->GetBufferPointer(), cs->GetBufferSize());
 		computePSODesc.pRootSignature = RS.Get();
 		HRESULT hr;
 		ThrowIfFailed(hr = g_dx12_rhi->Device->CreateComputePipelineState(&computePSODesc, IID_PPV_ARGS(&PSO)));
@@ -714,8 +796,8 @@ bool PipelineStateObject::Init()
 	}
 	else
 	{
-		graphicsPSODesc.VS = vs->ShaderByteCode;
-		graphicsPSODesc.PS = ps->ShaderByteCode;
+		graphicsPSODesc.VS = CD3DX12_SHADER_BYTECODE(vs->GetBufferPointer(), vs->GetBufferSize());
+		graphicsPSODesc.PS = CD3DX12_SHADER_BYTECODE(ps->GetBufferPointer(), ps->GetBufferSize());
 
 		graphicsPSODesc.pRootSignature = RS.Get();
 		HRESULT hr;
@@ -791,7 +873,7 @@ std::shared_ptr<Texture> SimpleDX12::CreateTexture2DFromResource(ComPtr<ID3D12Re
 	return shared_ptr<Texture>(tex);
 }
 
-std::shared_ptr<Texture> SimpleDX12::CreateTexture2D(DXGI_FORMAT format, D3D12_RESOURCE_FLAGS resFlags, D3D12_RESOURCE_STATES initResState, int width, int height, int mipLevels)
+std::shared_ptr<Texture> SimpleDX12::CreateTexture2D(DXGI_FORMAT format, D3D12_RESOURCE_FLAGS resFlags, D3D12_RESOURCE_STATES initResState, int width, int height, int mipLevels, std::optional<glm::vec4> clearColor)
 {
 	Texture* tex = new Texture;
 
@@ -800,7 +882,6 @@ std::shared_ptr<Texture> SimpleDX12::CreateTexture2D(DXGI_FORMAT format, D3D12_R
 	textureDesc.Format = format;
 	textureDesc.Width = width;
 	textureDesc.Height = height;
-	textureDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
 	textureDesc.DepthOrArraySize = 1;
 	textureDesc.SampleDesc.Count = 1;
 	textureDesc.SampleDesc.Quality = 0;
@@ -836,11 +917,21 @@ std::shared_ptr<Texture> SimpleDX12::CreateTexture2D(DXGI_FORMAT format, D3D12_R
 	{
 		D3D12_CLEAR_VALUE optimizedClearValue = {};
 		optimizedClearValue.Format = format;
-		optimizedClearValue.Color[0] = 0.0f;
-		optimizedClearValue.Color[1] = 0.2f;
-		optimizedClearValue.Color[2] = 0.4f;
-		optimizedClearValue.Color[3] = 1.0f;
 
+		if (clearColor.has_value())
+		{
+			optimizedClearValue.Color[0] = clearColor.value().x;
+			optimizedClearValue.Color[1] = clearColor.value().y;
+			optimizedClearValue.Color[2] = clearColor.value().z;
+			optimizedClearValue.Color[3] = clearColor.value().w;
+		}
+		else
+		{
+			optimizedClearValue.Color[0] = 0.0f;
+			optimizedClearValue.Color[1] = 0.2f;
+			optimizedClearValue.Color[2] = 0.4f;
+			optimizedClearValue.Color[3] = 1.0f;
+		}
 		//D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET
 
 		D3D12_CLEAR_VALUE* pClearValue = nullptr;
@@ -1403,6 +1494,35 @@ std::shared_ptr<RTAS> SimpleDX12::CreateTLAS(vector<shared_ptr<RTAS>>& VecBottom
 	g_dx12_rhi->CmdQ->ExecuteCommandList(cmd);
 
 	return shared_ptr<RTAS>(as);
+}
+
+ComPtr<ID3DBlob> SimpleDX12::CreateShader(wstring FilePath, string EntryPoint, string Target)
+{
+	ComPtr<ID3DBlob> shader;
+
+#if defined(_DEBUG)
+	// Enable better shader debugging with the graphics debugging tools.
+	UINT compileFlags = D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
+#else
+	UINT compileFlags = D3DCOMPILE_OPTIMIZATION_LEVEL3;
+#endif
+
+	ID3DBlob* compilationMsgs = nullptr;
+
+	try
+	{
+		ThrowIfFailed(D3DCompileFromFile(FilePath.c_str(), nullptr, D3D_COMPILE_STANDARD_FILE_INCLUDE, EntryPoint.c_str(), Target.c_str(), compileFlags, 0, &shader, &compilationMsgs));
+	}
+	catch (const std::exception& e)
+	{
+		string errorStr = reinterpret_cast<const char*>(compilationMsgs->GetBufferPointer());
+		OutputDebugStringA(errorStr.c_str());
+		g_dx12_rhi->errorString += errorStr;
+		compilationMsgs->Release();
+		return nullptr;
+	}
+
+	return shader;
 }
 
 template<class BlotType>
@@ -2074,6 +2194,7 @@ void RTPipelineStateObject::SetCBVValue(string shader, string bindingName, void*
 	{
 		if (shader == "global")
 		{
+			bool bFound = false;
 			for (auto& bd : GlobalBinding)
 			{
 				if (bd.name == bindingName)
@@ -2096,11 +2217,16 @@ void RTPipelineStateObject::SetCBVValue(string shader, string bindingName, void*
 					g_dx12_rhi->Device->CreateConstantBufferView(&cbvDesc, CpuHandle);
 
 					bd.GPUHandle = GpuHandle;
+
+					bFound = true;
 				}
 			}
+			assert(bFound == true);
 		}
 		else
 		{
+			bool bFound = false;
+
 			BindingInfo& bi = ShaderBinding[shader];
 			for (auto& bd : bi.Binding)
 			{
@@ -2124,8 +2250,11 @@ void RTPipelineStateObject::SetCBVValue(string shader, string bindingName, void*
 					g_dx12_rhi->Device->CreateConstantBufferView(&cbvDesc, CpuHandle);
 
 					bd.GPUHandle = GpuHandle;
+				
+					bFound = true;
 				}
 			}
+			assert(bFound == true);
 		}
 	}
 	//else // hitprogram : There can be multiple hitprogram entry with same shader name, so we need another data structure. (HitProgramBinding)
@@ -2597,3 +2726,46 @@ ConstantBufferRingBuffer::~ConstantBufferRingBuffer()
 {
 	CBMem->Unmap(0, nullptr);
 }
+
+void Buffer::MakeByteAddressBufferSRV()
+{
+	// create shader resource view
+	D3D12_SHADER_RESOURCE_VIEW_DESC bufferSRVDesc;
+	bufferSRVDesc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+	bufferSRVDesc.Format = DXGI_FORMAT_R32_TYPELESS;
+	bufferSRVDesc.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
+	bufferSRVDesc.Buffer.StructureByteStride = 0;
+	bufferSRVDesc.Buffer.FirstElement = 0;
+	bufferSRVDesc.Buffer.NumElements = NumElements;
+	bufferSRVDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+
+	// TODO : should be GlobalDHRing? if object instance are to move.
+	
+	g_dx12_rhi->TextureDHRing->AllocDescriptor(CpuHandleSRV, GpuHandleSRV);
+
+	g_dx12_rhi->Device->CreateShaderResourceView(resource.Get(), &bufferSRVDesc, CpuHandleSRV);
+
+	Type = BYTE_ADDRESS;
+}
+
+void Buffer::MakeStructuredBufferSRV()
+{
+	// create shader resource view
+	D3D12_SHADER_RESOURCE_VIEW_DESC bufferSRVDesc;
+	bufferSRVDesc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+	bufferSRVDesc.Format = DXGI_FORMAT_UNKNOWN;
+	bufferSRVDesc.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_NONE;
+	bufferSRVDesc.Buffer.StructureByteStride = ElementSize;
+	bufferSRVDesc.Buffer.FirstElement = 0;
+	bufferSRVDesc.Buffer.NumElements = NumElements;
+	bufferSRVDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+
+	// TODO : should be GlobalDHRing? if object instance are to move.
+
+	g_dx12_rhi->TextureDHRing->AllocDescriptor(CpuHandleSRV, GpuHandleSRV);
+
+	g_dx12_rhi->Device->CreateShaderResourceView(resource.Get(), &bufferSRVDesc, CpuHandleSRV);
+
+	Type = STRUCTURED;
+}
+

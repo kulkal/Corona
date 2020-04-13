@@ -30,7 +30,7 @@
 
 #include "DXSampleHelper.h"
 
-#define USE_AFTERMATH 1
+#define USE_AFTERMATH 0
 
 using namespace Microsoft::WRL;
 using namespace std;
@@ -87,31 +87,6 @@ public:
 	UINT64 FenceValue = 0;
 };
 
-class Shader
-{
-public:
-	struct BindingData
-	{
-		string name;
-		UINT rootParamIndex;
-		UINT baseRegister;
-		UINT numDescriptors;
-		UINT cbSize;
-
-		Texture* texture;
-		Sampler* sampler;
-
-		UINT rootConst;
-	};
-
-	D3D12_SHADER_BYTECODE ShaderByteCode;
-public:
-	Shader(UINT8* ByteCode, UINT Size);
-	~Shader()
-	{
-	}
-};
-
 class PipelineStateObject
 {
 public:
@@ -138,9 +113,16 @@ public:
 	map<string, BindingData> rootBinding;
 
 	UINT RootParamIndex = 0;
-	shared_ptr<Shader> vs;
-	shared_ptr<Shader> ps;
-	shared_ptr<Shader> cs;
+	//shared_ptr<Shader> vs;
+	//shared_ptr<Shader> ps;
+	//shared_ptr<Shader> cs;
+
+	ComPtr<ID3DBlob> vs;
+	ComPtr<ID3DBlob> ps;
+	ComPtr<ID3DBlob> cs;
+
+
+
 
 	ComPtr<ID3D12RootSignature> RS;
 	ComPtr<ID3D12PipelineState> PSO;
@@ -160,8 +142,8 @@ public:
 	void BindRootConstant(string name, int baseRegister);
 	void BindSampler(string name, int baseRegister);
 
-	void SetSRV(string name, Texture* texture, ID3D12GraphicsCommandList* CommandList);
-	void SetUAV(string name, Texture* texture, ID3D12GraphicsCommandList* CommandList);
+	void SetSRV(string name, D3D12_GPU_DESCRIPTOR_HANDLE GpuHandleSRV, ID3D12GraphicsCommandList* CommandList);
+	void SetUAV(string name, D3D12_GPU_DESCRIPTOR_HANDLE GpuHandleUAV, ID3D12GraphicsCommandList* CommandList);
 
 	void SetSampler(string name, Sampler* sampler, ID3D12GraphicsCommandList* CommandList);
 
@@ -281,9 +263,24 @@ public:
 class Buffer
 {
 public:
+	enum BufferType
+	{
+		BYTE_ADDRESS,
+		STRUCTURED,
+		UNKNOWN,
+	};
+	BufferType Type = UNKNOWN;
+	UINT NumElements;
+	UINT ElementSize;
 	ComPtr<ID3D12Resource> resource;
 	D3D12_CPU_DESCRIPTOR_HANDLE CpuHandleSRV;
 	D3D12_GPU_DESCRIPTOR_HANDLE GpuHandleSRV;
+
+	D3D12_CPU_DESCRIPTOR_HANDLE CpuHandleUAV;
+	D3D12_GPU_DESCRIPTOR_HANDLE GpuHandleUAV;
+
+	void MakeByteAddressBufferSRV();
+	void MakeStructuredBufferSRV();
 };
 
 class IndexBuffer
@@ -549,6 +546,8 @@ public:
 
 	std::vector<std::shared_ptr<Texture>> renderTargetTextures;
 	std::list<std::shared_ptr<Texture>> DynamicTextures;
+	std::list<std::shared_ptr<Buffer>> DynamicBuffers;
+
 
 	ComPtr<IDXGISwapChain3> m_swapChain;
 
@@ -562,15 +561,18 @@ public:
 	void EndFrame();
 
 	shared_ptr<Texture> CreateTexture2DFromResource(ComPtr<ID3D12Resource> InResource);
-	shared_ptr<Texture> CreateTexture2D(DXGI_FORMAT format, D3D12_RESOURCE_FLAGS resFlags, D3D12_RESOURCE_STATES initResState, int width, int height, int mipLevels);
+	shared_ptr<Texture> CreateTexture2D(DXGI_FORMAT format, D3D12_RESOURCE_FLAGS resFlags, D3D12_RESOURCE_STATES initResState, int width, int height, int mipLevels, std::optional<glm::vec4> clearColor = std::nullopt);
 	shared_ptr<Texture> CreateTexture3D(DXGI_FORMAT format, D3D12_RESOURCE_FLAGS resFlags, D3D12_RESOURCE_STATES initResState, int width, int height, int depth, int mipLevels);
 
 	shared_ptr<Texture> CreateTextureFromFile(wstring fileName, bool nonSRGB);
 	shared_ptr<Sampler> CreateSampler(D3D12_SAMPLER_DESC& InSamplerDesc);
-	shared_ptr<Buffer> CreateBuffer(UINT Size);
+	shared_ptr<Buffer> CreateBuffer(UINT InNumElements, UINT InElementSize, D3D12_RESOURCE_STATES initResState, bool isUAV, void* SrcData = nullptr);
 	shared_ptr<IndexBuffer> CreateIndexBuffer(DXGI_FORMAT Format, UINT Size, void* SrcData);
 	shared_ptr<VertexBuffer> CreateVertexBuffer(UINT Size, UINT Stride, void* SrcData);
 	shared_ptr<RTAS> CreateTLAS(vector<shared_ptr<RTAS>>& VecBottomLevelAS);
+
+	ComPtr<ID3DBlob> CreateShader(wstring FileName, string EntryPoint, string Target);
+
 
 	void PresentBarrier(Texture* rt);
 	void ResourceBarrier(ID3D12Resource* Resource, D3D12_RESOURCE_STATES StateBefore, D3D12_RESOURCE_STATES StateAfter);

@@ -57,6 +57,7 @@ class Corona : public DXSample
 		ROUGNESS_METALLIC,
 		SPECULAR_RAW,
 		TEMPORAL_FILTERED_SPECULAR,
+		BLOOM,
 		NO_FULLSCREEN,
 	};
 
@@ -91,6 +92,13 @@ private:
 	shared_ptr<Texture> FilterIndirectDiffusePingPongSH[2];
 	shared_ptr<Texture> FilterIndirectDiffusePingPongColor[2];
 
+	shared_ptr<Texture> BloomBlurPingPong[2];
+	shared_ptr<Texture> LumaBuffer;
+	std::shared_ptr<Buffer> Histogram;
+	std::shared_ptr<Buffer> ExposureData;
+
+
+
 	std::vector<std::shared_ptr<Texture>> framebuffers;
 	
 	// mesh draw pass
@@ -107,7 +115,7 @@ private:
 		UINT32 bOverrideRougnessMetallic;
 	};
 
-	shared_ptr<PipelineStateObject> RS_GBufferPass;
+	shared_ptr<PipelineStateObject> GBufferPassPSO;
 
 	// spatial denoising
 	struct SpatialFilterConstant
@@ -121,7 +129,7 @@ private:
 
 	SpatialFilterConstant SpatialFilterCB;
 
-	shared_ptr<PipelineStateObject> RS_SpatialDenoisingFilter;
+	shared_ptr<PipelineStateObject> SpatialDenoisingFilterPSO;
 
 	// temporal denoising
 	struct TemporalFilterConstant
@@ -133,7 +141,7 @@ private:
 
 	TemporalFilterConstant TemporalFilterCB;
 
-	shared_ptr<PipelineStateObject> RS_TemporalDenoisingFilter;
+	shared_ptr<PipelineStateObject> TemporalDenoisingFilterPSO;
 	
 	// RT shadow
 	struct RTShadowViewParamCB
@@ -192,7 +200,7 @@ private:
 		glm::vec4 Offset;
 	};
 
-	shared_ptr<PipelineStateObject> RS_Copy;
+	shared_ptr<PipelineStateObject> BlitPSO;
 
 	// debug pass
 	enum EDebugMode
@@ -216,7 +224,7 @@ private:
 		UINT32 DebugMode;
 	};
 
-	shared_ptr<PipelineStateObject> RS_Debug;
+	shared_ptr<PipelineStateObject> BufferVisualizePSO;
 
 	// lighting pass
 	
@@ -230,7 +238,7 @@ private:
 		float GIBufferScale;
 	};
 	
-	shared_ptr<PipelineStateObject> RS_Lighting;
+	shared_ptr<PipelineStateObject> LightingPSO;
 
 	// temporalAA
 	struct TemporalAAParam
@@ -238,6 +246,8 @@ private:
 		glm::vec2 RTSize;
 		float TAABlendFactor;
 		UINT32 ClampMode;
+		//float Exposure;
+		float BloomStrength;
 	};
 	
 	bool bEnableTAA = true;
@@ -246,7 +256,63 @@ private:
 
 	float JitterScale = 0.85;
 
-	shared_ptr<PipelineStateObject> RS_TemporalAA;
+	shared_ptr<PipelineStateObject> TemporalAAPSO;
+
+
+	// bloom blur
+	struct BloomCB
+	{
+		glm::vec2 BlurDirection;
+		glm::vec2 RTSize;
+		UINT32 NumSamples;
+		float WeightScale;
+		float NormalizationScale;
+		float BloomThreshHold = 1.0;
+		//float Exposure;
+		//float MinLog;
+		//float RcpLogRange;
+	};
+
+	const float kInitialMinLog = -12.0f;
+	const float kInitialMaxLog = 4.0f;
+
+	BloomCB BloomCB;
+	float BloomSigma = 0.037;
+	float Exposure = 1;
+	float BloomStrength = 1.0;
+
+	UINT BloomBufferWidth = 640;
+	UINT  BloomBufferHeight = 384;
+
+	shared_ptr<PipelineStateObject> BloomBlurPSO;
+
+	shared_ptr<PipelineStateObject> BloomExtractPSO;
+
+	shared_ptr<PipelineStateObject> HistogramPSO;
+
+	shared_ptr<PipelineStateObject> ClearHistogramPSO;
+
+	shared_ptr<PipelineStateObject> DrawHistogramPSO;
+
+	struct AdaptExposureCB
+	{
+		float TargetLuminance = 0.08;
+		float AdaptationRate = 0.05;
+		float MinExposure = 1.0f / 64.0f;
+		float MaxExposure = 64.0f;
+		UINT32 PixelCount;
+	};
+
+	/*AdaptExposureCB.TargetLuminance = 0.08;
+AdaptExposureCB.AdaptationRate = 0.05;
+AdaptExposureCB.MinExposure = 1.0f / 64.0f;
+AdaptExposureCB.MaxExposure = 64.0f;*/
+	AdaptExposureCB AdaptExposureCB;
+
+	shared_ptr<PipelineStateObject> AdapteExposurePSO;
+
+
+
 
 	// imgui font texture
 	D3D12_CPU_DESCRIPTOR_HANDLE CpuHandleImguiFontTex;
@@ -361,6 +427,8 @@ public:
 
 	void InitTemporalAAPass();
 
+	void InitBloomPass();
+
 	void InitImgui();
 
 	void InitBlueNoiseTexture();
@@ -378,6 +446,9 @@ public:
 	void SpatialDenoisingPass();
 
 	void TemporalDenoisingPass();
+
+	void BloomPass();
+
 
 
 	void CopyPass();

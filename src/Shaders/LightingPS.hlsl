@@ -101,7 +101,7 @@ float4 PSMain(PSInput input) : SV_TARGET
     float Metalic = RoughnessMetalicTex[PixelPos].y;
     // use 0.05 if is non-metal
     float Specular = lerp(0.05, 1.0, Metalic); 
-    Specular = schlick_ross_fresnel(Specular, Rougness, NdotV);
+    Specular = clamp(schlick_ross_fresnel(Specular, Rougness, NdotV), 0, 1);
 
     // non-metal doesnt have specular color
     float3 SpecularColor = lerp(1..xxxx, Albedo.xyz, Metalic) * Specular;
