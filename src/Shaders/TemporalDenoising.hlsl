@@ -18,6 +18,8 @@ RWTexture2D<float4> OutGIResultColor: register(u1);
 RWTexture2D<float4> OutGIResultSHDS : register(u2);
 RWTexture2D<float4> OutGIResultColorDS: register(u3);
 RWTexture2D<float4> OutSpecularGI: register(u4);
+RWTexture2D<float4> OutSpecularGIDS: register(u5);
+
 
 
 
@@ -33,6 +35,8 @@ groupshared float4 g_SH[GROUPSIZE][GROUPSIZE];
 groupshared float2 g_CoCg[GROUPSIZE][GROUPSIZE];
 groupshared float3 g_Normal[GROUPSIZE][GROUPSIZE]; 
 groupshared float g_Depth[GROUPSIZE][GROUPSIZE]; 
+groupshared float4 g_Specular[GROUPSIZE][GROUPSIZE]; 
+
 
 static const float2 off[4] = { { 0, 0 }, { 1, 0 }, { 0, 1 }, { 1, 1 } };
 
@@ -153,6 +157,8 @@ void TemporalFilter( uint3 DTid : SV_DispatchThreadID, uint3 GTid : SV_GroupThre
 
     g_SH[GroupPos.y][GroupPos.x] = BlendedSH.shY;
     g_CoCg[GroupPos.y][GroupPos.x] = BlendedSH.CoCg;
+
+    g_Specular[GroupPos.y][GroupPos.x] = BlendedSpecular;
    
     GroupMemoryBarrierWithGroupSync();
 
@@ -178,6 +184,8 @@ void TemporalFilter( uint3 DTid : SV_DispatchThreadID, uint3 GTid : SV_GroupThre
 	float sum_w = 1;
 	SH SumSH = CenterSH;
 
+	float3 SumSpecular = 0..xxx;
+
 	for(int yy = -1; yy <= 1; yy++)
 	{
 		for(int xx = -1; xx <= 1; xx++)
@@ -193,13 +201,16 @@ void TemporalFilter( uint3 DTid : SV_DispatchThreadID, uint3 GTid : SV_GroupThre
 			float DistZ = abs(SampleZ - CenterZ) * 0.2;
 			w *= exp(-DistZ/1) ;
 
-			w *= pow(max(dot(SampleNormal, CenterNormal), 0), 8);
+			w *= pow(max(dot(SampleNormal, CenterNormal), 0), 8	);
 
 			SH SampleSH;
 			SampleSH.shY = g_SH[CenterHiResPos.y + yy][CenterHiResPos.x + xx];
 			SampleSH.CoCg = g_CoCg[CenterHiResPos.y + yy][CenterHiResPos.x + xx];
 
 			accumulate_SH(SumSH, SampleSH, w);
+
+			float3 SampleSpecular = g_Specular[CenterHiResPos.y + yy][CenterHiResPos.x + xx];
+			SumSpecular += SampleSpecular;
 			sum_w += w;
 		}
 	}
@@ -208,7 +219,11 @@ void TemporalFilter( uint3 DTid : SV_DispatchThreadID, uint3 GTid : SV_GroupThre
 	SumSH.shY  *= inv_w;
 	SumSH.CoCg *= inv_w;
 
+	SumSpecular *= inv_w;
+
     uint2 LowResPos = GId * (GROUPSIZE / DOWNSAMPLE_SIZE) + LowResGroupPos;
 	OutGIResultSHDS[LowResPos] = SumSH.shY;
     OutGIResultColorDS[LowResPos] = float4(SumSH.CoCg, 0, 0);
+
+    OutSpecularGIDS[LowResPos] = float4(SumSpecular, 0);
 }

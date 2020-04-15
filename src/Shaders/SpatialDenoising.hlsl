@@ -4,11 +4,14 @@ Texture2D DepthTex : register(t0);
 Texture2D GeoNormalTex : register(t1);
 Texture2D InGIResultSHTex : register(t2);
 Texture2D InGIResultColorTex : register(t3);
+Texture2D InSpecualrGITex : register(t4);
+
 
 
 
 RWTexture2D<float4> OutGIResultSH : register(u0);
 RWTexture2D<float4> OutGIResultColor: register(u1);
+RWTexture2D<float4> OutSpecularGI: register(u2);
 
 
 
@@ -27,7 +30,13 @@ static const float wavelet_kernel[2][2] = {
 	{ wavelet_factor, wavelet_factor * wavelet_factor }
 };
 
-void DeFlicker(Texture2D GIResultSHTex, Texture2D GIResultColorTex, uint2 Pos, inout SH result )
+float RGBToLuminance( float3 x )
+{
+    return dot( x, float3(0.212671, 0.715160, 0.072169) );        // Defined by sRGB/Rec.709 gamut
+}
+
+
+void DeFlicker(Texture2D GIResultSHTex, Texture2D GIResultColorTex, Texture2D SpecularGITex, uint2 Pos, inout SH result, inout float3 SpecularResult )
 {
 	int StepSize =  int(1u << (Iteration - 1));
 
@@ -37,8 +46,14 @@ void DeFlicker(Texture2D GIResultSHTex, Texture2D GIResultColorTex, uint2 Pos, i
 	CenterSH.shY = GIResultSHTex[CenterPos];
 	CenterSH.CoCg = GIResultColorTex[CenterPos].xy;
 
+	float3 CenterSpecular = SpecularGITex[CenterPos].xyz;
+
 	float3 SumColor = float3(0, 0, 0);
+
+	float3 SumSpecular = 0..xxx;
+
 	float SumW = 0;
+
 
 	SH SumSH = init_SH();
 
@@ -56,6 +71,8 @@ void DeFlicker(Texture2D GIResultSHTex, Texture2D GIResultColorTex, uint2 Pos, i
 
 			SumSH.shY += GIResultSHTex[SamplePos];
 			SumSH.CoCg += GIResultColorTex[SamplePos].xy;
+
+			SumSpecular += SpecularGITex[SamplePos].xyz;
 		}
 	}
 
@@ -71,9 +88,18 @@ void DeFlicker(Texture2D GIResultSHTex, Texture2D GIResultColorTex, uint2 Pos, i
 
 	result = CenterSH;
 
+	float max_spec = RGBToLuminance(SumSpecular) * 1.0 / num_pixels;
+	float center_spec_luma = RGBToLuminance(CenterSpecular);
+	if(center_spec_luma > max_lum)
+	{
+		float ratio = max_lum / center_spec_luma;
+
+		CenterSpecular *= ratio; 	
+	}
+	SpecularResult = CenterSpecular;
 }
 
-void Filter(Texture2D GIResultSHTex,Texture2D GIResultColorTex, uint2 Pos, inout SH result )
+void Filter(Texture2D GIResultSHTex,Texture2D GIResultColorTex, Texture2D SpecularGITex, uint2 Pos, inout SH result, inout float3 SpecularResult)
 {
 	int StepSize =  int(1u << (Iteration - 1));
 
@@ -87,6 +113,8 @@ void Filter(Texture2D GIResultSHTex,Texture2D GIResultColorTex, uint2 Pos, inout
 
 	const int r = 1;
 	float3 SumColor = float3(0, 0, 0);
+	float3 SumSpecular = 0..xxx;
+
 	float SumW = 1.0f;
 
 	SH SumSH = init_SH();
@@ -106,6 +134,7 @@ void Filter(Texture2D GIResultSHTex,Texture2D GIResultColorTex, uint2 Pos, inout
 			SampleSH.shY = GIResultSHTex[SamplePos];
 			SampleSH.CoCg = GIResultColorTex[SamplePos].xy;
 
+			float3 SampleSpecular = SpecularGITex[SamplePos].xyz;
 			float W = 1;
 
 			float3 SampleDepth = DepthTex[SamplePosHiRes.xy];
@@ -121,25 +150,31 @@ void Filter(Texture2D GIResultSHTex,Texture2D GIResultColorTex, uint2 Pos, inout
 
 			SumW += W;
 			accumulate_SH(SumSH, SampleSH, W);
+			SumSpecular += SampleSpecular;
 		}
 	}
 
     scale_SH(SumSH, 1.0/SumW);
 
     result = SumSH;
+
+    SumSpecular /= SumW;
+    SpecularResult = SumSpecular;
 }
 
 [numthreads(32, 32, 1)]
 void SpatialFilter( uint3 DTid : SV_DispatchThreadID )
 {
     SH ResultSH;
+    float3 SpecularReuslt = 0..xxxx;
     if(Iteration == 0)
-		DeFlicker(InGIResultSHTex, InGIResultColorTex, DTid.xy, ResultSH);
+		DeFlicker(InGIResultSHTex, InGIResultColorTex, InSpecualrGITex, DTid.xy, ResultSH, SpecularReuslt);
 	else
-		Filter(InGIResultSHTex, InGIResultColorTex, DTid.xy, ResultSH);
+		Filter(InGIResultSHTex, InGIResultColorTex, InSpecualrGITex, DTid.xy, ResultSH, SpecularReuslt);
 
 
     OutGIResultSH[DTid.xy] = ResultSH.shY;
     OutGIResultColor[DTid.xy] = float4(ResultSH.CoCg, 0, 0);
 
+    OutSpecularGI[DTid.xy] = float4(SpecularReuslt, 0);
 }

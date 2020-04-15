@@ -215,6 +215,21 @@ float GGX(float3 V, float3 L, float3 N, float roughness, float NoH_offset)
     return 0;
 }
 
+float calcTriangleArea(float3 posA, float3 posB, float3 posC)
+{
+    // Fundamentals of Computer Graphics, Peter Shirley (pg. 46)
+    return 0.5 * length(cross((posB - posA), (posC - posA)));
+}
+
+float computeTextureLOD(in float NdotV, in float rayConeWidth, in float triangleLodConstant)
+{
+    // Eq. 34
+    float lambda = triangleLodConstant;
+    lambda += log2(abs(rayConeWidth));
+    //lambda += halfLog2NumTexPixels; //< Now built into triangleLodConstant
+    lambda -= log2(abs(NdotV));
+    return lambda;
+}
 
 struct Vertex
 {
@@ -222,6 +237,7 @@ struct Vertex
     float3 normal;
     float2 uv;
     float3 tangent;
+    float textureLODConstant;
 };
 
 // uint3 Load3x16BitIndices(uint offsetBytes)
@@ -329,5 +345,15 @@ Vertex GetVertexAttributes(uint instanceID, ByteAddressBuffer vb, ByteAddressBuf
     v.normal = normalize(cross(e1, e2));
 
     v.normal = mul(float4(v.normal, 0), WorldMatrix).xyz;
+
+    float triangleArea = calcTriangleArea(p0, p1, p2);
+    
+    float3 uvA = float3(uv0.x, uv0.y, 0.f);
+    float3 uvB = float3(uv1.x, uv1.y, 0.f);
+    float3 uvC = float3(uv2.x, uv2.y, 0.f);   
+    float triangleUvArea = calcTriangleArea(uvA, uvB, uvC);
+    
+    v.textureLODConstant = 0.5 * log2(triangleUvArea / triangleArea);
+
     return v;
 }

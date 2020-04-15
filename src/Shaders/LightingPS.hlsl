@@ -20,6 +20,13 @@ Texture2D GIResultSHTex : register(t5);
 Texture2D GIResultColorTex : register(t6);
 Texture2D SpecularGITex : register(t7);
 Texture2D RoughnessMetalicTex : register(t8);
+Texture2D SpecularGITex3x3 : register(t9);
+Texture2D SpecularGITexMip1 : register(t10);
+Texture2D SpecularGITexMip2 : register(t11);
+Texture2D SpecularGITexMip3 : register(t12);
+Texture2D SpecularGITexMip4 : register(t13);
+
+
 
 
 
@@ -105,7 +112,22 @@ float4 PSMain(PSInput input) : SV_TARGET
 
     // non-metal doesnt have specular color
     float3 SpecularColor = lerp(1..xxxx, Albedo.xyz, Metalic) * Specular;
-    float3 IndirectSpecular = SpecularGITex[PixelPos].xyz * SpecularColor;
+    float3 IndirectSpecular;
+
+
+    if(Rougness < 0.2)
+        IndirectSpecular = SpecularGITex[PixelPos].xyz * SpecularColor;
+    else if(Rougness < 0.3)
+        IndirectSpecular = SpecularGITexMip1.SampleLevel(sampleWrap, input.uv, 0).xyz * SpecularColor;
+    else if(Rougness < 0.4)
+        IndirectSpecular = SpecularGITexMip2.SampleLevel(sampleWrap, input.uv, 0).xyz * SpecularColor;
+    else if(Rougness < 0.5)
+        IndirectSpecular = SpecularGITexMip3.SampleLevel(sampleWrap, input.uv, 0).xyz * SpecularColor;
+    else
+        IndirectSpecular = SpecularGITexMip4.SampleLevel(sampleWrap, input.uv, 0).xyz * SpecularColor;
+
+    IndirectSpecular = SpecularGITex[PixelPos].xyz * SpecularColor;
+
 
     float3 DirectSpecular = SpecularColor * GGX(V, normalize(LightDir), WorldNormal, Rougness, 0.0) * LightIntensity * Shadow;
 

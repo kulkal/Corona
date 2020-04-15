@@ -57,6 +57,10 @@ class Corona : public DXSample
 		ROUGNESS_METALLIC,
 		SPECULAR_RAW,
 		TEMPORAL_FILTERED_SPECULAR,
+		TEMPORAL_FILTERED_SPECULAR_2X2,
+		TEMPORAL_FILTERED_SPECULAR_4X4,
+		TEMPORAL_FILTERED_SPECULAR_8X8,
+		TEMPORAL_FILTERED_SPECULAR_16X16,
 		BLOOM,
 		NO_FULLSCREEN,
 	};
@@ -77,20 +81,26 @@ private:
 	shared_ptr<Texture> RoughnessMetalicBuffer;
 	shared_ptr<Texture> ShadowBuffer;
 
-	shared_ptr<Texture> SpeculaGIBuffer;
+	shared_ptr<Texture> SpeculaGIBufferRaw;
 
 	shared_ptr<Texture> SpeculaGIBufferTemporal[2];
+	shared_ptr<Texture> SpeculaGIBufferSpatial[2];
+
+	shared_ptr<Texture> SpeculaGIBufferMip[4];
+
+
+
 
 
 	UINT GIBufferScale = 3;
 	UINT GIBufferWriteIndex = 0;
-	shared_ptr<Texture> GIBufferSHTemporal[2];
-	shared_ptr<Texture> GIBufferColorTemporal[2];
-	shared_ptr<Texture> GIBufferSH;
-	shared_ptr<Texture> GIBufferColor;
+	shared_ptr<Texture> DiffuseGISHTemporal[2];
+	shared_ptr<Texture> DiffuseGICoCgTemporal[2];
+	shared_ptr<Texture> DiffuseGISHRaw;
+	shared_ptr<Texture> DiffuseGICoCgRaw;
 
-	shared_ptr<Texture> FilterIndirectDiffusePingPongSH[2];
-	shared_ptr<Texture> FilterIndirectDiffusePingPongColor[2];
+	shared_ptr<Texture> DiffuseGISHSpatial[2];
+	shared_ptr<Texture> DiffuseGICoCgSpatial[2];
 
 	shared_ptr<Texture> BloomBlurPingPong[2];
 	shared_ptr<Texture> LumaBuffer;
@@ -131,6 +141,17 @@ private:
 
 	shared_ptr<PipelineStateObject> SpatialDenoisingFilterPSO;
 
+	// gen specular gi mip
+	struct GenMipCB
+	{
+		glm::vec2 TexelSize;
+		UINT32 NumMipLevels;
+	};
+
+	GenMipCB GenMipCB;
+	shared_ptr<PipelineStateObject> GenMipPSO;
+
+
 	// temporal denoising
 	struct TemporalFilterConstant
 	{
@@ -170,6 +191,7 @@ private:
 		glm::vec2 RandomOffset;
 		UINT32 FrameCounter;
 		UINT32 BlueNoiseOffsetStride = 1.0f;
+		float ViewSpreadAngle;
 	};
 
 	RTReflectionViewParamCB RTReflectionViewParam;
@@ -292,14 +314,15 @@ private:
 
 	shared_ptr<PipelineStateObject> ClearHistogramPSO;
 
+	bool bDrawHistogram = false;
 	shared_ptr<PipelineStateObject> DrawHistogramPSO;
 
 	struct AdaptExposureCB
 	{
-		float TargetLuminance = 0.08;
+		float TargetLuminance = 0.1;
 		float AdaptationRate = 0.05;
 		float MinExposure = 1.0f / 64.0f;
-		float MaxExposure = 64.0f;
+		float MaxExposure = 8;
 		UINT32 PixelCount;
 	};
 
@@ -329,6 +352,8 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 
 	// global wrap sampler
 	std::shared_ptr<Sampler> samplerWrap;
+	std::shared_ptr<Sampler> samplerBilinearWrap;
+
 
 	// mesh
 	shared_ptr<Mesh> mesh;
@@ -353,6 +378,7 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	float LightIntensity = 1.2f;
 	float Near = 1.0f;
 	float Far = 40000.0f;
+	float Fov = 0.8f;
 
 	glm::mat4x4 ViewMat;
 	glm::mat4x4 ProjMat;
@@ -429,6 +455,8 @@ public:
 
 	void InitBloomPass();
 
+	void InitGenMipSpecularGIPass();
+
 	void InitImgui();
 
 	void InitBlueNoiseTexture();
@@ -445,6 +473,7 @@ public:
 
 	void SpatialDenoisingPass();
 
+
 	void TemporalDenoisingPass();
 
 	void BloomPass();
@@ -458,6 +487,8 @@ public:
 	void LightingPass();
 
 	void TemporalAAPass();
+
+	void GenMipSpecularGIPass();
 
 	// DXSample functions
 	virtual void OnInit();

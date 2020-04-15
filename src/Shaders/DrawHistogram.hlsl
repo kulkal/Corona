@@ -1,4 +1,5 @@
 ByteAddressBuffer Histogram : register( t0 );
+StructuredBuffer<float> Exposure : register( t1 );
 RWTexture2D<float3> ColorBuffer : register( u0 );
 
 groupshared uint gs_hist[256];
@@ -39,7 +40,7 @@ void DrawHistogram( uint GI : SV_GroupIndex, uint3 DTid : SV_DispatchThreadID )
     uint height = 127 - DTid.y * 4;
     uint threshold = histValue * 128 / max(1, maxHistValue);
 
-    float3 OutColor = (GI == (uint)16) ? float3(1.0, 0.0, 0.0) : float3(0.5, 0.5, 0.5);
+    float3 OutColor = (GI == (uint)Exposure[3]) ? float3(1.0, 0.0, 0.0) : float3(0.5, 0.5, 0.5);
 
     for (uint i = 0; i < 4; ++i)
     {
