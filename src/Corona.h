@@ -209,6 +209,7 @@ private:
 		glm::vec2 RandomOffset;
 		UINT32 FrameCounter;
 		UINT32 BlueNoiseOffsetStride = 1.0f;
+		float ViewSpreadAngle;
 	};
 
 	RTGIViewParamCB RTGIViewParam;

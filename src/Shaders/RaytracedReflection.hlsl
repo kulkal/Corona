@@ -281,7 +281,7 @@ void chs(inout RayPayload payload, in BuiltInTriangleIntersectionAttributes attr
     payload.position = vertex.position;
     payload.normal = vertex.normal;
 
-     uint w, h;
+    uint w, h;
     AlbedoTex.GetDimensions(w, h);
     float halfLog2NumTexPixels = 0.5 * log2(w * h);
 

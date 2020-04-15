@@ -24,6 +24,7 @@ cbuffer ViewParameter : register(b0)
     float2 RandomOffset;
     uint FrameCounter;
     uint BlueNoiseOffsetStride;
+    float ViewSpreadAngle;
 };
 
 SamplerState sampleWrap : register(s0);
@@ -44,7 +45,8 @@ struct RayPayload
     float3 position;
     float3 color;
     float3 normal;
-    // float distance;
+    float spreadAngle;
+    float coneWidth;
     bool bHit;
 };
 
@@ -160,6 +162,8 @@ void rayGen
 	ray.TMax = 100000;
 
 	RayPayload payload;
+    payload.coneWidth = 0;
+    payload.spreadAngle = ViewSpreadAngle; 
 	TraceRay(gRtScene, RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES /*rayFlags*/, 0xFF, 0 /* ray index*/, 0, 0, ray, payload);
     if(payload.bHit = false)
     {
@@ -225,7 +229,19 @@ void chs(inout RayPayload payload, in BuiltInTriangleIntersectionAttributes attr
 
     payload.position = vertex.position;
     payload.normal = vertex.normal;
-    payload.color = AlbedoTex.SampleLevel(sampleWrap, vertex.uv, 5).xyz;
+
+    uint w, h;
+    AlbedoTex.GetDimensions(w, h);
+    float halfLog2NumTexPixels = 0.5 * log2(w * h);
+
+    vertex.textureLODConstant += halfLog2NumTexPixels;
+    float hitT = RayTCurrent();
+    float rayConeWidth = payload.spreadAngle * hitT + payload.coneWidth;
+
+    float NoV = 1;//dot(V, vertex.normal);
+    float mipLevel = computeTextureLOD(NoV, rayConeWidth, vertex.textureLODConstant);
+
+    payload.color = AlbedoTex.SampleLevel(sampleWrap, vertex.uv, mipLevel).xyz;
 
     payload.bHit = true;
 }

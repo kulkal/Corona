@@ -3225,7 +3225,7 @@ void Corona::InitRTPSO()
 		TEMP_PSO_RT_GI->MaxRecursion = 1;
 		TEMP_PSO_RT_GI->MaxAttributeSizeInBytes = sizeof(float) * 2;
 
-		TEMP_PSO_RT_GI->MaxPayloadSizeInBytes = sizeof(float) * 10;
+		TEMP_PSO_RT_GI->MaxPayloadSizeInBytes = sizeof(float) * 12;
 
 		bool bSuccess = TEMP_PSO_RT_GI->InitRS("Shaders\\RaytracedGI.hlsl");
 
@@ -3376,7 +3376,8 @@ void Corona::RaytraceGIPass()
 	PSO_RT_GI->SetSRV("global", "DepthTex", DepthBuffer->GpuHandleSRV);
 	PSO_RT_GI->SetSRV("global", "WorldNormalTex", NormalBuffer->GpuHandleSRV);
 	PSO_RT_GI->SetSRV("global", "BlueNoiseTex", BlueNoiseTex->GpuHandleSRV);
-
+	
+	RTGIViewParam.ViewSpreadAngle = glm::tan(Fov * 0.5) / (0.5f * m_height);
 	PSO_RT_GI->SetCBVValue("global", "ViewParameter", &RTGIViewParam);
 	PSO_RT_GI->SetSampler("global", "samplerWrap", samplerWrap.get());
 
