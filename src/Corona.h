@@ -217,13 +217,30 @@ private:
 	
 
 	// full screen copy pass
-	struct CopyScaleOffsetCB
+	enum EToneMapMode
+	{
+		LINEAR_TO_SRGB,
+		REINHARD,
+		FILMIC_ALU,
+		FILMIC_HABLE,
+	};
+	struct ToneMapCB
 	{
 		glm::vec4 Scale;
 		glm::vec4 Offset;
+		UINT32 ToneMapMode = 0;
+		float WhitePoint_Hejl = 1.0f;
+		float ShoulderStrength = 4.0f;
+		float LinearStrength = 5.0f;
+		float LinearAngle = 0.12f;
+		float ToeStrength = 13.0f;
+		float WhitePoint_Hable = 6.0f;
 	};
+	ToneMapCB ToneMapCB;
 
-	shared_ptr<PipelineStateObject> BlitPSO;
+
+	UINT32 ToneMapMode = FILMIC_ALU;
+	shared_ptr<PipelineStateObject> ToneMapPSO;
 
 	// debug pass
 	enum EDebugMode
@@ -320,7 +337,7 @@ private:
 
 	struct AdaptExposureCB
 	{
-		float TargetLuminance = 0.1;
+		float TargetLuminance = 0.008;
 		float AdaptationRate = 0.05;
 		float MinExposure = 1.0f / 64.0f;
 		float MaxExposure = 8;
@@ -376,7 +393,7 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 
 	// misc
 	glm::vec3 LightDir = glm::normalize(glm::vec3(0.901, 0.88, 0.176));
-	float LightIntensity = 1.2f;
+	float LightIntensity = 0.169;
 	float Near = 1.0f;
 	float Far = 40000.0f;
 	float Fov = 0.8f;

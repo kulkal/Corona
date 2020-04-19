@@ -30,12 +30,6 @@ static const float wavelet_kernel[2][2] = {
 	{ wavelet_factor, wavelet_factor * wavelet_factor }
 };
 
-float RGBToLuminance( float3 x )
-{
-    return dot( x, float3(0.212671, 0.715160, 0.072169) );        // Defined by sRGB/Rec.709 gamut
-}
-
-
 void DeFlicker(Texture2D GIResultSHTex, Texture2D GIResultColorTex, Texture2D SpecularGITex, uint2 Pos, inout SH result, inout float3 SpecularResult )
 {
 	int StepSize =  int(1u << (Iteration - 1));

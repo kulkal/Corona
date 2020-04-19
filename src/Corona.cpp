@@ -1351,8 +1351,8 @@ void Corona::InitCopyPass()
 
 	FullScreenVB = dx12_rhi->CreateVertexBuffer(vertexBufferSize, vertexBufferStride, &quadVertices);
 	
-	ComPtr<ID3DBlob> vs = dx12_rhi->CreateShader(GetAssetFullPath(L"Shaders\\CopyPS.hlsl"), "VSMain", "vs_5_0");
-	ComPtr<ID3DBlob> ps = dx12_rhi->CreateShader(GetAssetFullPath(L"Shaders\\CopyPS.hlsl"), "PSMain", "ps_5_0");
+	ComPtr<ID3DBlob> vs = dx12_rhi->CreateShader(GetAssetFullPath(L"Shaders\\ToneMapPS.hlsl"), "VSMain", "vs_5_0");
+	ComPtr<ID3DBlob> ps = dx12_rhi->CreateShader(GetAssetFullPath(L"Shaders\\ToneMapPS.hlsl"), "PSMain", "ps_5_0");
 
 
 	CD3DX12_RASTERIZER_DESC rasterizerStateDesc(D3D12_DEFAULT);
@@ -1380,16 +1380,16 @@ void Corona::InitCopyPass()
 	//psoDescMesh.DSVFormat = DXGI_FORMAT_D32_FLOAT;
 	psoDesc.SampleDesc.Count = 1;
 
-	BlitPSO = shared_ptr<PipelineStateObject>(new PipelineStateObject);
-	BlitPSO->ps = ps;
-	BlitPSO->vs = vs;
-	BlitPSO->graphicsPSODesc = psoDesc;
+	ToneMapPSO = shared_ptr<PipelineStateObject>(new PipelineStateObject);
+	ToneMapPSO->ps = ps;
+	ToneMapPSO->vs = vs;
+	ToneMapPSO->graphicsPSODesc = psoDesc;
 
-	BlitPSO->BindSRV("SrcTex", 0, 1);
-	BlitPSO->BindSampler("samplerWrap", 0);
-	BlitPSO->BindCBV("ScaleOffsetParams", 0, sizeof(CopyScaleOffsetCB));
+	ToneMapPSO->BindSRV("SrcTex", 0, 1);
+	ToneMapPSO->BindSampler("samplerWrap", 0);
+	ToneMapPSO->BindCBV("ScaleOffsetParams", 0, sizeof(ToneMapCB));
 
-	BlitPSO->Init();
+	ToneMapPSO->Init();
 }
 
 void Corona::InitDebugPass()
@@ -1578,18 +1578,18 @@ void Corona::CopyPass()
 	Texture* backbuffer = framebuffers[dx12_rhi->CurrentFrameIndex].get();
 	Texture* ResolveTarget = ColorBuffers[ColorBufferWriteIndex];//framebuffers[dx12_rhi->CurrentFrameIndex].get();
 
-	BlitPSO->Apply(dx12_rhi->GlobalCmdList->CmdList.Get());
+	ToneMapPSO->Apply(dx12_rhi->GlobalCmdList->CmdList.Get());
 
 
-	BlitPSO->SetSampler("samplerWrap", samplerWrap.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
-	BlitPSO->SetSRV("SrcTex", ResolveTarget->GpuHandleSRV, dx12_rhi->GlobalCmdList->CmdList.Get());
+	ToneMapPSO->SetSampler("samplerWrap", samplerWrap.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
+	ToneMapPSO->SetSRV("SrcTex", ResolveTarget->GpuHandleSRV, dx12_rhi->GlobalCmdList->CmdList.Get());
 
-	CopyScaleOffsetCB cb;
-	cb.Offset = glm::vec4(0, 0, 0, 0);
-	cb.Scale = glm::vec4(1, 1, 0, 0);
-	BlitPSO->SetCBVValue("ScaleOffsetParams", &cb, dx12_rhi->GlobalCmdList->CmdList.Get());
+	ToneMapCB.Offset = glm::vec4(0, 0, 0, 0);
+	ToneMapCB.Scale = glm::vec4(1, 1, 0, 0);
+	ToneMapCB.ToneMapMode = ToneMapMode;
+	ToneMapPSO->SetCBVValue("ScaleOffsetParams", &ToneMapCB, dx12_rhi->GlobalCmdList->CmdList.Get());
 
-	BlitPSO->Apply(dx12_rhi->GlobalCmdList->CmdList.Get());
+	ToneMapPSO->Apply(dx12_rhi->GlobalCmdList->CmdList.Get());
 
 	UINT Width = m_width / 1;
 	UINT Height = m_height / 1;
@@ -2634,7 +2634,51 @@ void Corona::OnRender()
 			ImGui::EndCombo();
 		}
 
+		{
+			static ImGuiComboFlags flags = 0;
+			const char* items[] = {
+				"LINEAR_TO_SRGB",
+				"REINHARD",
+				"FILMIC",
+				"FILMIC_HABLE",
+			};
+			static const char* item_current = items[UINT(EToneMapMode::FILMIC_ALU)];
+			if (ImGui::BeginCombo("Tone Map Operator", item_current, flags))
+			{
+				for (int n = 0; n < IM_ARRAYSIZE(items); n++)
+				{
+					bool is_selected = (item_current == items[n]);
+					if (ImGui::Selectable(items[n], is_selected))\
+					{
+						item_current = items[n];
+						ToneMapMode = (EToneMapMode)n;
+					}
+					if (is_selected)
+					{
+						ImGui::SetItemDefaultFocus();
+					}
 
+				}
+				ImGui::EndCombo();
+			}
+
+		}
+
+		if (ToneMapMode == FILMIC_HABLE)
+		{
+
+			ImGui::SliderFloat("WhitePoint_Hejl", &ToneMapCB.WhitePoint_Hejl, 0.1f, 5.0f);
+
+			ImGui::SliderFloat("ShoulderStrength", &ToneMapCB.ShoulderStrength, 0.1f, 10.0f);
+
+			ImGui::SliderFloat("LinearStrength", &ToneMapCB.LinearStrength, 0.1f, 10.0f);
+
+			ImGui::SliderFloat("LinearAngle", &ToneMapCB.LinearAngle, 0.1f, 20.0f);
+
+			ImGui::SliderFloat("ToeStrength", &ToneMapCB.ToeStrength, 0.1f, 20.0f);
+
+			ImGui::SliderFloat("WhitePoint_Hable", &ToneMapCB.WhitePoint_Hable, 0.1f, 20.0f);
+		}
 
 		// ImGui::gizmo3D has memory leak.
 		glm::vec3 LD = glm::vec3(LightDir.z, -LightDir.y, -LightDir.x);

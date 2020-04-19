@@ -357,3 +357,8 @@ Vertex GetVertexAttributes(uint instanceID, ByteAddressBuffer vb, ByteAddressBuf
 
     return v;
 }
+
+float RGBToLuminance( float3 x )
+{
+    return dot( x, float3(0.212671, 0.715160, 0.072169) );        // Defined by sRGB/Rec.709 gamut
+}

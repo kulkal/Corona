@@ -158,6 +158,16 @@ float3x3 buildTBN(float3 normal) {
     return tbn;
 }
 
+float3 Reinhard(in float3 color)
+{
+    return color;
+    float Luminance = RGBToLuminance(color);
+    const float max_white = 2.0;
+    color = color*(1.0f + color/(max_white*max_white));
+    return color/(1 + color);
+}
+
+
 [shader("raygeneration")]
 void rayGen
 ()
@@ -226,7 +236,7 @@ void rayGen
     {
         // hit sky
         float3 Radiance = payload.color * LightIntensity;
-        ReflectionResult[launchIndex.xy] = float4(Radiance, 1);
+        ReflectionResult[launchIndex.xy] = float4(Reinhard(Radiance), 1);
     }
     else
     {
@@ -256,7 +266,7 @@ void rayGen
         }
             
 
-        ReflectionResult[launchIndex.xy] = float4(Irradiance, 1);
+        ReflectionResult[launchIndex.xy] = float4(Reinhard(Irradiance), 1);
     }
 }
 
