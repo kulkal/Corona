@@ -30,6 +30,7 @@ I hope it helps someone to understand how dxr renderer looks like.
 ## Useful link
 * Tone map
 	* [Baking lab](https://github.com/TheRealMJP/BakingLab/blob/master/BakingLab/ToneMapping.hlsl)
+	* [MS MiniEngine Histogram based exposure control](https://github.com/microsoft/DirectX-Graphics-Samples/tree/master/MiniEngine/Core/Shaders)
 * DX12
 	* [MJP github](https://github.com/TheRealMJP)
 * DXR
