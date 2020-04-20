@@ -36,7 +36,8 @@ I hope it helps someone to understand how dxr renderer looks like.
 * DXR
 	* [Instance property](https://developer.nvidia.com/rtx/raytracing/dxr/DX12-Raytracing-tutorial/Extra/dxr_tutorial_extra2_simple_lighting)
 	* [Adam Mars intro dxr](https://github.com/acmarrs/IntroToDXR)
-* Denoising
+* Raytracing
+	* [VNDF](http://jcgt.org/published/0007/04/01/paper.pdf)
 	* [Raytracing best practice](https://www.gdcvault.com/play/1026721/RTX-Ray-Tracing-Best-Practices)
 	* [Raytracing reflection in youngblood](https://www.gdcvault.com/play/1026723/Ray-Traced-Reflections-in-Wolfenstein)
 	* [Q2RT Indirect diffuse denoiser](https://github.com/NVIDIA/Q2RTX/blob/master/src/refresh/vkpt/shader/asvgf_lf.comp)
@@ -45,7 +46,6 @@ I hope it helps someone to understand how dxr renderer looks like.
 	* [MS RTAO SFGV denoiser](https://github.com/microsoft/DirectX-Graphics-Samples/tree/master/Samples/Desktop/D3D12Raytracing/src/D3D12RaytracingRealTimeDenoisedAmbientOcclusion)
 * fbx file
 	* [https://github.com/derkreature/IBLBaker](https://github.com/derkreature/IBLBaker)
-
 * Pef
 	* [Nsight](https://news.developer.nvidia.com/nsight-graphics-2020-2/)
 	
