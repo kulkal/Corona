@@ -28,12 +28,16 @@ I hope it helps someone to understand how dxr renderer looks like.
 * [imgui gizmo(compatible with glm)](https://github.com/DarisaLLC/imGuIZMO-1)
 
 ## Useful link
+* Tone map
+	* [Baking lab](https://github.com/TheRealMJP/BakingLab/blob/master/BakingLab/ToneMapping.hlsl)
 * DX12
 	* [MJP github](https://github.com/TheRealMJP)
 * DXR
 	* [Instance property](https://developer.nvidia.com/rtx/raytracing/dxr/DX12-Raytracing-tutorial/Extra/dxr_tutorial_extra2_simple_lighting)
 	* [Adam Mars intro dxr](https://github.com/acmarrs/IntroToDXR)
 * Denoising
+	* [Raytracing best practice](https://www.gdcvault.com/play/1026721/RTX-Ray-Tracing-Best-Practices)
+	* [Raytracing reflection in youngblood](https://www.gdcvault.com/play/1026723/Ray-Traced-Reflections-in-Wolfenstein)
 	* [Q2RT Indirect diffuse denoiser](https://github.com/NVIDIA/Q2RTX/blob/master/src/refresh/vkpt/shader/asvgf_lf.comp)
 	* [Q2 RT GTC presentation from Alexey Pantellev](https://developer.nvidia.com/gtc/2019/video/S91046/video)
 	* [Q2 RT GDC presentation from Alexey Pantellev](https://www.youtube.com/watch?v=FewqoJjHR0A)
