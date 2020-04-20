@@ -46,6 +46,7 @@ struct RayPayload
     float3 normal;
     float spreadAngle;
     float coneWidth;
+    float hitDist;
     bool bHit;
 };
 
@@ -167,6 +168,7 @@ float3 Reinhard(in float3 color)
     return color/(1 + color);
 }
 
+static const float MAX_HIT_DIST = 10000;
 
 [shader("raygeneration")]
 void rayGen
@@ -179,8 +181,8 @@ void rayGen
 	//crd.y *= -1;
     float2 dims = float2(launchDim.xy);
 
-    float2 d = ((crd / dims) * 2.f - 1.f);
-    d *= tan(0.8 / 2);
+    float2 dim = ((crd / dims) * 2.f - 1.f);
+    dim *= tan(0.8 / 2);
     float aspectRatio = dims.x / dims.y;
 
 
@@ -207,7 +209,7 @@ void rayGen
 
     float Rougness = RougnessMetallicTex.SampleLevel(sampleWrap, UV, 0).x;
     float3 N = WorldNormal;
-    float3 V = mul(normalize(float3(d.x * aspectRatio, -d.y, -1)), InvViewMatrix);
+    float3 V = mul(normalize(float3(dim.x * aspectRatio, -dim.y, -1)), InvViewMatrix);
     float3 H = ImportanceSampleGGX_VNDF(RandomUV, Rougness, -V, TBN, WorldNormal);
     float3 L = reflect(V, H);
 
@@ -225,13 +227,12 @@ void rayGen
 	ray.Direction = L;
 
 	ray.TMin = 0;
-	ray.TMax = 100000;
+	ray.TMax = MAX_HIT_DIST;
 
 	RayPayload payload;
     payload.coneWidth = 0;
     payload.spreadAngle = ViewSpreadAngle; 
     TraceRay(gRtScene, RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES /*rayFlags*/, 0xFF, 0 /* ray index*/, 0, 0, ray, payload);
-
     if(payload.bHit == false)
     {
         // hit sky
@@ -246,7 +247,7 @@ void rayGen
         shadowRay.Direction = LightDir;
 
         shadowRay.TMin = 0;
-        shadowRay.TMax = 100000;
+        shadowRay.TMax = MAX_HIT_DIST;
 
         ShadowRayPayload shadowPayload;
         shadowPayload.bHit = true;
@@ -268,6 +269,10 @@ void rayGen
 
         ReflectionResult[launchIndex.xy] = float4(Reinhard(Irradiance), 1);
     }
+
+    float d = -dot(WorldNormal, WorldPos);
+    float distP2Plane = PointPlaneDist(float4(WorldNormal, d), payload.position);
+    ReflectionResult[launchIndex.xy].w = abs(distP2Plane);//payload.hitDist;
 }
 
 
@@ -279,6 +284,7 @@ void miss(inout RayPayload payload)
     payload.color = float3(0.0, 0.2, 0.4);
     payload.normal = float3(0, 0, -1);
     payload.bHit = false;
+    payload.hitDist = MAX_HIT_DIST;
 }
 
 [shader("closesthit")]
@@ -303,6 +309,7 @@ void chs(inout RayPayload payload, in BuiltInTriangleIntersectionAttributes attr
     float mipLevel = computeTextureLOD(NoV, rayConeWidth, vertex.textureLODConstant);
     payload.color =  AlbedoTex.SampleLevel(sampleWrap, vertex.uv, mipLevel).xyz;
     payload.bHit = true;
+    payload.hitDist = hitT;
 }
 
 [shader("miss")]

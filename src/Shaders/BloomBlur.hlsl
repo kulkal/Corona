@@ -1,3 +1,6 @@
+#include "Common.hlsl"
+
+
 RWTexture2D<float4> DstTex : register(u0);
 RWTexture2D<uint> LumaResult : register(u1);
 
@@ -19,10 +22,6 @@ cbuffer BloomCB : register(b0)
    	// float RcpLogRange;
 };
 
-float RGBToLuminance( float3 x )
-{
-    return dot( x, float3(0.212671, 0.715160, 0.072169) );        // Defined by sRGB/Rec.709 gamut
-}
 
 
 [numthreads(32, 32, 1)]

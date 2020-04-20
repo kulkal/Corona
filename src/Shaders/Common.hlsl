@@ -362,3 +362,10 @@ float RGBToLuminance( float3 x )
 {
     return dot( x, float3(0.212671, 0.715160, 0.072169) );        // Defined by sRGB/Rec.709 gamut
 }
+
+float PointPlaneDist(float4 plane, float3 p)
+{
+    float n = plane.xyz;
+    float d = plane.w;
+    return (dot(n, p) + d)/length(n);
+}

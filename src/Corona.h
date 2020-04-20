@@ -158,6 +158,10 @@ private:
 		glm::vec4 ProjectionParams;
 		glm::vec4 TemporalValidParams = glm::vec4(15, 0, 0, 0);
 		glm::vec2 RTSize;
+		UINT32 FrameIndex;
+		float BayerRotScale = 0.1;
+		float SpecularBlurRadius = 2;
+		float Point2PlaneDistScale = 10.0f;
 	};
 
 	TemporalFilterConstant TemporalFilterCB;
@@ -239,7 +243,7 @@ private:
 	ToneMapCB ToneMapCB;
 
 
-	UINT32 ToneMapMode = FILMIC_ALU;
+	UINT32 ToneMapMode = FILMIC_HABLE;
 	shared_ptr<PipelineStateObject> ToneMapPSO;
 
 	// debug pass
@@ -393,7 +397,7 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 
 	// misc
 	glm::vec3 LightDir = glm::normalize(glm::vec3(0.901, 0.88, 0.176));
-	float LightIntensity = 0.169;
+	float LightIntensity = 0.4;
 	float Near = 1.0f;
 	float Far = 40000.0f;
 	float Fov = 0.8f;
@@ -461,9 +465,9 @@ public:
 
 	void InitTemporalDenoisingPass();
 
-	void InitDrawMeshRS();
+	void InitGBufferPass();
 
-	void InitCopyPass();
+	void InitToneMapPass();
 
 	void InitDebugPass();
 
@@ -498,7 +502,7 @@ public:
 
 
 
-	void CopyPass();
+	void ToneMapPass();
 
 	void DebugPass();
 

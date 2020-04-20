@@ -456,15 +456,15 @@ void Corona::LoadAssets()
 {
 	InitBlueNoiseTexture();
 	InitImgui();
-	InitDrawMeshRS();
-	InitCopyPass();
+	InitGBufferPass();
+	InitToneMapPass();
 	InitDebugPass();
 	InitLightingPass();
 	InitTemporalAAPass();
 	InitSpatialDenoisingPass();
 	InitTemporalDenoisingPass();
 	InitBloomPass();
-	InitGenMipSpecularGIPass();
+	//InitGenMipSpecularGIPass();
 
 	InitRTPSO();
 
@@ -951,24 +951,26 @@ void Corona::InitSpatialDenoisingPass()
 
 	D3D12_COMPUTE_PIPELINE_STATE_DESC computePsoDesc = {};
 
-	SpatialDenoisingFilterPSO = shared_ptr<PipelineStateObject>(new PipelineStateObject);
-	SpatialDenoisingFilterPSO->cs = cs;
-	SpatialDenoisingFilterPSO->computePSODesc = computePsoDesc;
-	SpatialDenoisingFilterPSO->BindSRV("DepthTex", 0, 1);
-	SpatialDenoisingFilterPSO->BindSRV("GeoNormalTex", 1, 1);
-	SpatialDenoisingFilterPSO->BindSRV("InGIResultSHTex", 2, 1);
-	SpatialDenoisingFilterPSO->BindSRV("InGIResultColorTex", 3, 1);
-	SpatialDenoisingFilterPSO->BindSRV("InSpecualrGITex", 4, 1);
-
-
-	SpatialDenoisingFilterPSO->BindUAV("OutGIResultSH", 0);
-	SpatialDenoisingFilterPSO->BindUAV("OutGIResultColor", 1);
-	SpatialDenoisingFilterPSO->BindUAV("OutSpecularGI", 2);
-
-
-	SpatialDenoisingFilterPSO->BindCBV("SpatialFilterConstant", 0, sizeof(SpatialFilterConstant));
-	SpatialDenoisingFilterPSO->IsCompute = true;
-	SpatialDenoisingFilterPSO->Init();
+	shared_ptr<PipelineStateObject> TEMP_SpatialDenoisingFilterPSO = shared_ptr<PipelineStateObject>(new PipelineStateObject);
+	TEMP_SpatialDenoisingFilterPSO->cs = cs;
+	TEMP_SpatialDenoisingFilterPSO->computePSODesc = computePsoDesc;
+	TEMP_SpatialDenoisingFilterPSO->BindSRV("DepthTex", 0, 1);
+	TEMP_SpatialDenoisingFilterPSO->BindSRV("GeoNormalTex", 1, 1);
+	TEMP_SpatialDenoisingFilterPSO->BindSRV("InGIResultSHTex", 2, 1);
+	TEMP_SpatialDenoisingFilterPSO->BindSRV("InGIResultColorTex", 3, 1);
+	TEMP_SpatialDenoisingFilterPSO->BindSRV("InSpecualrGITex", 4, 1);
+	
+	
+	TEMP_SpatialDenoisingFilterPSO->BindUAV("OutGIResultSH", 0);
+	TEMP_SpatialDenoisingFilterPSO->BindUAV("OutGIResultColor", 1);
+	TEMP_SpatialDenoisingFilterPSO->BindUAV("OutSpecularGI", 2);
+	
+	
+	TEMP_SpatialDenoisingFilterPSO->BindCBV("SpatialFilterConstant", 0, sizeof(SpatialFilterConstant));
+	TEMP_SpatialDenoisingFilterPSO->IsCompute = true;
+	bool bSuccess = TEMP_SpatialDenoisingFilterPSO->Init();
+	if (bSuccess)
+		SpatialDenoisingFilterPSO = TEMP_SpatialDenoisingFilterPSO;
 
 	UINT WidthGI = m_width / GIBufferScale;
 	UINT HeightGI = m_height / GIBufferScale;
@@ -1003,34 +1005,39 @@ void Corona::InitTemporalDenoisingPass()
 	ComPtr<ID3DBlob> cs = dx12_rhi->CreateShader(GetAssetFullPath(L"Shaders\\TemporalDenoising.hlsl"), "TemporalFilter", "cs_5_0");
 	
 	D3D12_COMPUTE_PIPELINE_STATE_DESC computePsoDesc = {};
-
-	TemporalDenoisingFilterPSO = shared_ptr<PipelineStateObject>(new PipelineStateObject);
-	TemporalDenoisingFilterPSO->cs = cs;
-	TemporalDenoisingFilterPSO->computePSODesc = computePsoDesc;
-	TemporalDenoisingFilterPSO->BindSRV("DepthTex", 0, 1);
-	TemporalDenoisingFilterPSO->BindSRV("GeoNormalTex", 1, 1);
-	TemporalDenoisingFilterPSO->BindSRV("InGIResultSHTex", 2, 1);
-	TemporalDenoisingFilterPSO->BindSRV("InGIResultColorTex", 3, 1);
-	TemporalDenoisingFilterPSO->BindSRV("InGIResultSHTexPrev", 4, 1);
-	TemporalDenoisingFilterPSO->BindSRV("InGIResultColorTexPrev", 5, 1);
-	TemporalDenoisingFilterPSO->BindSRV("VelocityTex", 6, 1);
-	TemporalDenoisingFilterPSO->BindSRV("InSpecularGITex", 7, 1);
-	TemporalDenoisingFilterPSO->BindSRV("InSpecularGITexPrev", 8, 1);
-
-
-
-	TemporalDenoisingFilterPSO->BindUAV("OutGIResultSH", 0);
-	TemporalDenoisingFilterPSO->BindUAV("OutGIResultColor", 1);
-	TemporalDenoisingFilterPSO->BindUAV("OutGIResultSHDS", 2);
-	TemporalDenoisingFilterPSO->BindUAV("OutGIResultColorDS", 3);
-	TemporalDenoisingFilterPSO->BindUAV("OutSpecularGI", 4);
-	TemporalDenoisingFilterPSO->BindUAV("OutSpecularGIDS", 5);
+	
+	shared_ptr<PipelineStateObject> TEMP_TemporalDenoisingFilterPSO = shared_ptr<PipelineStateObject>(new PipelineStateObject);
+	//TemporalDenoisingFilterPSO = shared_ptr<PipelineStateObject>(new PipelineStateObject);
+	TEMP_TemporalDenoisingFilterPSO->cs = cs;
+	TEMP_TemporalDenoisingFilterPSO->computePSODesc = computePsoDesc;
+	TEMP_TemporalDenoisingFilterPSO->BindSRV("DepthTex", 0, 1);
+	TEMP_TemporalDenoisingFilterPSO->BindSRV("GeoNormalTex", 1, 1);
+	TEMP_TemporalDenoisingFilterPSO->BindSRV("InGIResultSHTex", 2, 1);
+	TEMP_TemporalDenoisingFilterPSO->BindSRV("InGIResultColorTex", 3, 1);
+	TEMP_TemporalDenoisingFilterPSO->BindSRV("InGIResultSHTexPrev", 4, 1);
+	TEMP_TemporalDenoisingFilterPSO->BindSRV("InGIResultColorTexPrev", 5, 1);
+	TEMP_TemporalDenoisingFilterPSO->BindSRV("VelocityTex", 6, 1);
+	TEMP_TemporalDenoisingFilterPSO->BindSRV("InSpecularGITex", 7, 1);
+	TEMP_TemporalDenoisingFilterPSO->BindSRV("InSpecularGITexPrev", 8, 1);
+	TEMP_TemporalDenoisingFilterPSO->BindSRV("RougnessMetalicTex", 9, 1);
 
 
 
-	TemporalDenoisingFilterPSO->BindCBV("TemporalFilterConstant", 0, sizeof(TemporalFilterConstant));
-	TemporalDenoisingFilterPSO->IsCompute = true;
-	TemporalDenoisingFilterPSO->Init();
+	TEMP_TemporalDenoisingFilterPSO->BindUAV("OutGIResultSH", 0);
+	TEMP_TemporalDenoisingFilterPSO->BindUAV("OutGIResultColor", 1);
+	TEMP_TemporalDenoisingFilterPSO->BindUAV("OutGIResultSHDS", 2);
+	TEMP_TemporalDenoisingFilterPSO->BindUAV("OutGIResultColorDS", 3);
+	TEMP_TemporalDenoisingFilterPSO->BindUAV("OutSpecularGI", 4);
+	//TemporalDenoisingFilterPSO->BindUAV("OutSpecularGIDS", 5);
+
+	TEMP_TemporalDenoisingFilterPSO->BindSampler("BilinearClamp", 0);
+
+
+	TEMP_TemporalDenoisingFilterPSO->BindCBV("TemporalFilterConstant", 0, sizeof(TemporalFilterConstant));
+	TEMP_TemporalDenoisingFilterPSO->IsCompute = true;
+	bool bSuccess = TEMP_TemporalDenoisingFilterPSO->Init();
+	if (bSuccess)
+		TemporalDenoisingFilterPSO = TEMP_TemporalDenoisingFilterPSO;
 }
 
 void Corona::InitBloomPass()
@@ -1039,44 +1046,50 @@ void Corona::InitBloomPass()
 		ComPtr<ID3DBlob> cs = dx12_rhi->CreateShader(GetAssetFullPath(L"Shaders\\BloomBlur.hlsl"), "BloomExtract", "cs_5_0");
 		D3D12_COMPUTE_PIPELINE_STATE_DESC computePsoDesc = {};
 
-		BloomExtractPSO = shared_ptr<PipelineStateObject>(new PipelineStateObject);
-		BloomExtractPSO->cs = cs;
-		BloomExtractPSO->computePSODesc = computePsoDesc;
-		BloomExtractPSO->BindSRV("SrcTex", 0, 1);
-		BloomExtractPSO->BindSRV("Exposure", 1, 1);
-		BloomExtractPSO->BindUAV("DstTex", 0);
-		BloomExtractPSO->BindUAV("LumaResult", 1);
-		BloomExtractPSO->BindSampler("samplerWrap", 0);
-		BloomExtractPSO->BindCBV("BloomCB", 0, sizeof(BloomCB));
-		BloomExtractPSO->IsCompute = true;
-		BloomExtractPSO->Init();
+		shared_ptr<PipelineStateObject> TEMP_BloomExtractPSO = shared_ptr<PipelineStateObject>(new PipelineStateObject);
+		TEMP_BloomExtractPSO->cs = cs;
+		TEMP_BloomExtractPSO->computePSODesc = computePsoDesc;
+		TEMP_BloomExtractPSO->BindSRV("SrcTex", 0, 1);
+		TEMP_BloomExtractPSO->BindSRV("Exposure", 1, 1);
+		TEMP_BloomExtractPSO->BindUAV("DstTex", 0);
+		TEMP_BloomExtractPSO->BindUAV("LumaResult", 1);
+		TEMP_BloomExtractPSO->BindSampler("samplerWrap", 0);
+		TEMP_BloomExtractPSO->BindCBV("BloomCB", 0, sizeof(BloomCB));
+		TEMP_BloomExtractPSO->IsCompute = true;
+		bool bSuccess = TEMP_BloomExtractPSO->Init();
+		if (bSuccess)
+			BloomExtractPSO = TEMP_BloomExtractPSO;
 	}
 	{
 		ComPtr<ID3DBlob> cs = dx12_rhi->CreateShader(GetAssetFullPath(L"Shaders\\BloomBlur.hlsl"), "BloomBlur", "cs_5_0");
 		D3D12_COMPUTE_PIPELINE_STATE_DESC computePsoDesc = {};
 
-		BloomBlurPSO = shared_ptr<PipelineStateObject>(new PipelineStateObject);
-		BloomBlurPSO->cs = cs;
-		BloomBlurPSO->computePSODesc = computePsoDesc;
-		BloomBlurPSO->BindSRV("SrcTex", 0, 1);
-		BloomBlurPSO->BindUAV("DstTex", 0);
-		BloomBlurPSO->BindSampler("samplerWrap", 0);
-		BloomBlurPSO->BindCBV("BloomCB", 0, sizeof(BloomCB));
-		BloomBlurPSO->IsCompute = true;
-		BloomBlurPSO->Init();
+		shared_ptr<PipelineStateObject> TEMP_BloomBlurPSO = shared_ptr<PipelineStateObject>(new PipelineStateObject);
+		TEMP_BloomBlurPSO->cs = cs;
+		TEMP_BloomBlurPSO->computePSODesc = computePsoDesc;
+		TEMP_BloomBlurPSO->BindSRV("SrcTex", 0, 1);
+		TEMP_BloomBlurPSO->BindUAV("DstTex", 0);
+		TEMP_BloomBlurPSO->BindSampler("samplerWrap", 0);
+		TEMP_BloomBlurPSO->BindCBV("BloomCB", 0, sizeof(BloomCB));
+		TEMP_BloomBlurPSO->IsCompute = true;
+		bool bSucess = TEMP_BloomBlurPSO->Init();
+		if (bSucess)
+			BloomBlurPSO = TEMP_BloomBlurPSO;
 	}
 
 	{
 		ComPtr<ID3DBlob> cs = dx12_rhi->CreateShader(GetAssetFullPath(L"Shaders\\Histogram.hlsl"), "GenerateHistogram", "cs_5_0");
 		D3D12_COMPUTE_PIPELINE_STATE_DESC computePsoDesc = {};
 
-		HistogramPSO = shared_ptr<PipelineStateObject>(new PipelineStateObject);
-		HistogramPSO->cs = cs;
-		HistogramPSO->computePSODesc = computePsoDesc;
-		HistogramPSO->BindSRV("LumaTex", 0, 1);
-		HistogramPSO->BindUAV("Histogram", 0);
-		HistogramPSO->IsCompute = true;
-		HistogramPSO->Init();
+		shared_ptr<PipelineStateObject> TEMP_HistogramPSO = shared_ptr<PipelineStateObject>(new PipelineStateObject);
+		TEMP_HistogramPSO->cs = cs;
+		TEMP_HistogramPSO->computePSODesc = computePsoDesc;
+		TEMP_HistogramPSO->BindSRV("LumaTex", 0, 1);
+		TEMP_HistogramPSO->BindUAV("Histogram", 0);
+		TEMP_HistogramPSO->IsCompute = true;
+		bool bSucess = TEMP_HistogramPSO->Init();
+		if (bSucess)
+			HistogramPSO = TEMP_HistogramPSO;
 
 	}
 
@@ -1084,14 +1097,16 @@ void Corona::InitBloomPass()
 		ComPtr<ID3DBlob> cs = dx12_rhi->CreateShader(GetAssetFullPath(L"Shaders\\DrawHistogram.hlsl"), "DrawHistogram", "cs_5_0");
 		D3D12_COMPUTE_PIPELINE_STATE_DESC computePsoDesc = {};
 
-		DrawHistogramPSO = shared_ptr<PipelineStateObject>(new PipelineStateObject);
-		DrawHistogramPSO->cs = cs;
-		DrawHistogramPSO->computePSODesc = computePsoDesc;
-		DrawHistogramPSO->BindSRV("Histogram", 0, 1);
-		DrawHistogramPSO->BindSRV("Exposure", 1, 1);
-		DrawHistogramPSO->BindUAV("ColorBuffer", 0);
-		DrawHistogramPSO->IsCompute = true;
-		DrawHistogramPSO->Init();
+		shared_ptr<PipelineStateObject> TEMP_DrawHistogramPSO = shared_ptr<PipelineStateObject>(new PipelineStateObject);
+		TEMP_DrawHistogramPSO->cs = cs;
+		TEMP_DrawHistogramPSO->computePSODesc = computePsoDesc;
+		TEMP_DrawHistogramPSO->BindSRV("Histogram", 0, 1);
+		TEMP_DrawHistogramPSO->BindSRV("Exposure", 1, 1);
+		TEMP_DrawHistogramPSO->BindUAV("ColorBuffer", 0);
+		TEMP_DrawHistogramPSO->IsCompute = true;
+		bool bSuccess = TEMP_DrawHistogramPSO->Init();
+		if (bSuccess)
+			DrawHistogramPSO = TEMP_DrawHistogramPSO;
 
 	}
 
@@ -1099,12 +1114,14 @@ void Corona::InitBloomPass()
 		ComPtr<ID3DBlob> cs = dx12_rhi->CreateShader(GetAssetFullPath(L"Shaders\\Histogram.hlsl"), "ClearHistogram", "cs_5_0");
 		D3D12_COMPUTE_PIPELINE_STATE_DESC computePsoDesc = {};
 
-		ClearHistogramPSO = shared_ptr<PipelineStateObject>(new PipelineStateObject);
-		ClearHistogramPSO->cs = cs;
-		ClearHistogramPSO->computePSODesc = computePsoDesc;
-		ClearHistogramPSO->BindUAV("Histogram", 0);
-		ClearHistogramPSO->IsCompute = true;
-		ClearHistogramPSO->Init();
+		shared_ptr<PipelineStateObject> TEMP_ClearHistogramPSO = shared_ptr<PipelineStateObject>(new PipelineStateObject);
+		TEMP_ClearHistogramPSO->cs = cs;
+		TEMP_ClearHistogramPSO->computePSODesc = computePsoDesc;
+		TEMP_ClearHistogramPSO->BindUAV("Histogram", 0);
+		TEMP_ClearHistogramPSO->IsCompute = true;
+		bool bSuccess = TEMP_ClearHistogramPSO->Init();
+		if (bSuccess)
+			ClearHistogramPSO = TEMP_ClearHistogramPSO;
 
 	}
 
@@ -1113,16 +1130,18 @@ void Corona::InitBloomPass()
 		ComPtr<ID3DBlob> cs = dx12_rhi->CreateShader(GetAssetFullPath(L"Shaders\\AdaptExposureCS.hlsl"), "AdaptExposure", "cs_5_0");
 		D3D12_COMPUTE_PIPELINE_STATE_DESC computePsoDesc = {};
 
-		AdapteExposurePSO= shared_ptr<PipelineStateObject>(new PipelineStateObject);
-		AdapteExposurePSO->cs = cs;
-		AdapteExposurePSO->computePSODesc = computePsoDesc;
-		AdapteExposurePSO->BindSRV("Histogram", 0, 1);
-		AdapteExposurePSO->BindUAV("Exposure", 0);
-		AdapteExposurePSO->BindUAV("Exposure", 0);
-		AdapteExposurePSO->BindCBV("AdaptExposureCB", 0, sizeof(AdaptExposureCB));
+		shared_ptr<PipelineStateObject> TEMP_AdapteExposurePSO = shared_ptr<PipelineStateObject>(new PipelineStateObject);
+		TEMP_AdapteExposurePSO->cs = cs;
+		TEMP_AdapteExposurePSO->computePSODesc = computePsoDesc;
+		TEMP_AdapteExposurePSO->BindSRV("Histogram", 0, 1);
+		TEMP_AdapteExposurePSO->BindUAV("Exposure", 0);
+		TEMP_AdapteExposurePSO->BindUAV("Exposure", 0);
+		TEMP_AdapteExposurePSO->BindCBV("AdaptExposureCB", 0, sizeof(AdaptExposureCB));
 
-		AdapteExposurePSO->IsCompute = true;
-		AdapteExposurePSO->Init();
+		TEMP_AdapteExposurePSO->IsCompute = true;
+		bool bSucess = TEMP_AdapteExposurePSO->Init();
+		if (bSucess)
+			AdapteExposurePSO = TEMP_AdapteExposurePSO;
 
 	}
 
@@ -1191,7 +1210,7 @@ void Corona::InitGenMipSpecularGIPass()
 	GenMipPSO->Init();
 }
 
-void Corona::InitDrawMeshRS()
+void Corona::InitGBufferPass()
 {
 	ComPtr<ID3DBlob> vs = dx12_rhi->CreateShader(GetAssetFullPath(L"Shaders\\GBuffer.hlsl"), "VSMain", "vs_5_0");
 	ComPtr<ID3DBlob> ps = dx12_rhi->CreateShader(GetAssetFullPath(L"Shaders\\GBuffer.hlsl"), "PSMain", "ps_5_0");
@@ -1230,19 +1249,21 @@ void Corona::InitDrawMeshRS()
 	psoDescMesh.SampleDesc.Count = 1;
 
 	
-	GBufferPassPSO = shared_ptr<PipelineStateObject>(new PipelineStateObject);
-	GBufferPassPSO->ps = ps;
-	GBufferPassPSO->vs = vs;
-	GBufferPassPSO->graphicsPSODesc = psoDescMesh;
-	GBufferPassPSO->BindSRV("AlbedoTex", 0, 1);
-	GBufferPassPSO->BindSRV("NormalTex", 1, 1);
-	GBufferPassPSO->BindSRV("RoughnessTex", 2, 1);
-	GBufferPassPSO->BindSRV("MetallicTex", 3, 1);
+	shared_ptr<PipelineStateObject> TEMP_GBufferPassPSO = shared_ptr<PipelineStateObject>(new PipelineStateObject);
+	TEMP_GBufferPassPSO->ps = ps;
+	TEMP_GBufferPassPSO->vs = vs;
+	TEMP_GBufferPassPSO->graphicsPSODesc = psoDescMesh;
+	TEMP_GBufferPassPSO->BindSRV("AlbedoTex", 0, 1);
+	TEMP_GBufferPassPSO->BindSRV("NormalTex", 1, 1);
+	TEMP_GBufferPassPSO->BindSRV("RoughnessTex", 2, 1);
+	TEMP_GBufferPassPSO->BindSRV("MetallicTex", 3, 1);
+	
+	TEMP_GBufferPassPSO->BindSampler("samplerWrap", 0);
+	TEMP_GBufferPassPSO->BindCBV("GBufferConstantBuffer", 0, sizeof(GBufferConstantBuffer));
 
-	GBufferPassPSO->BindSampler("samplerWrap", 0);
-	GBufferPassPSO->BindCBV("GBufferConstantBuffer", 0, sizeof(GBufferConstantBuffer));
-
-	bool bSucess = GBufferPassPSO->Init();
+	bool bSucess = TEMP_GBufferPassPSO->Init();
+	if (bSucess)
+		GBufferPassPSO = TEMP_GBufferPassPSO;
 }
 
 void Corona::InitImgui()
@@ -1325,7 +1346,7 @@ void Corona::InitBlueNoiseTexture()
 	file.close();
 }
 
-void Corona::InitCopyPass()
+void Corona::InitToneMapPass()
 {
 	struct PostVertex
 	{
@@ -1380,16 +1401,18 @@ void Corona::InitCopyPass()
 	//psoDescMesh.DSVFormat = DXGI_FORMAT_D32_FLOAT;
 	psoDesc.SampleDesc.Count = 1;
 
-	ToneMapPSO = shared_ptr<PipelineStateObject>(new PipelineStateObject);
-	ToneMapPSO->ps = ps;
-	ToneMapPSO->vs = vs;
-	ToneMapPSO->graphicsPSODesc = psoDesc;
+	shared_ptr<PipelineStateObject> TEMP_ToneMapPSO = shared_ptr<PipelineStateObject>(new PipelineStateObject);
+	TEMP_ToneMapPSO->ps = ps;
+	TEMP_ToneMapPSO->vs = vs;
+	TEMP_ToneMapPSO->graphicsPSODesc = psoDesc;
 
-	ToneMapPSO->BindSRV("SrcTex", 0, 1);
-	ToneMapPSO->BindSampler("samplerWrap", 0);
-	ToneMapPSO->BindCBV("ScaleOffsetParams", 0, sizeof(ToneMapCB));
+	TEMP_ToneMapPSO->BindSRV("SrcTex", 0, 1);
+	TEMP_ToneMapPSO->BindSampler("samplerWrap", 0);
+	TEMP_ToneMapPSO->BindCBV("ScaleOffsetParams", 0, sizeof(ToneMapCB));
 
-	ToneMapPSO->Init();
+	bool bSuccess = TEMP_ToneMapPSO->Init();
+	if (bSuccess)
+		ToneMapPSO = TEMP_ToneMapPSO;
 }
 
 void Corona::InitDebugPass()
@@ -1446,19 +1469,21 @@ void Corona::InitDebugPass()
 	//psoDescMesh.DSVFormat = DXGI_FORMAT_D32_FLOAT;
 	psoDesc.SampleDesc.Count = 1;
 
-	BufferVisualizePSO = shared_ptr<PipelineStateObject>(new PipelineStateObject);
-	BufferVisualizePSO->ps = ps;
-	BufferVisualizePSO->vs = vs;
-	BufferVisualizePSO->graphicsPSODesc = psoDesc;
+	shared_ptr<PipelineStateObject> TEMP_BufferVisualizePSO = shared_ptr<PipelineStateObject>(new PipelineStateObject);
+	TEMP_BufferVisualizePSO->ps = ps;
+	TEMP_BufferVisualizePSO->vs = vs;
+	TEMP_BufferVisualizePSO->graphicsPSODesc = psoDesc;
 
-	BufferVisualizePSO->BindSRV("SrcTex", 0, 1);
-	BufferVisualizePSO->BindSRV("SrcTexSH", 1, 1);
-	BufferVisualizePSO->BindSRV("SrcTexNormal", 2, 1);
+	TEMP_BufferVisualizePSO->BindSRV("SrcTex", 0, 1);
+	TEMP_BufferVisualizePSO->BindSRV("SrcTexSH", 1, 1);
+	TEMP_BufferVisualizePSO->BindSRV("SrcTexNormal", 2, 1);
 
-	BufferVisualizePSO->BindSampler("samplerWrap", 0);
-	BufferVisualizePSO->BindCBV("DebugPassCB", 0, sizeof(DebugPassCB));
+	TEMP_BufferVisualizePSO->BindSampler("samplerWrap", 0);
+	TEMP_BufferVisualizePSO->BindCBV("DebugPassCB", 0, sizeof(DebugPassCB));
 
-	BufferVisualizePSO->Init();
+	bool bSuccess = TEMP_BufferVisualizePSO->Init();
+	if (bSuccess)
+		BufferVisualizePSO = TEMP_BufferVisualizePSO;
 }
 
 void Corona::InitLightingPass()
@@ -1491,31 +1516,33 @@ void Corona::InitLightingPass()
 	//psoDescMesh.DSVFormat = DXGI_FORMAT_D32_FLOAT;
 	psoDesc.SampleDesc.Count = 1;
 
-	LightingPSO = shared_ptr<PipelineStateObject>(new PipelineStateObject);
-	LightingPSO->ps = ps;
-	LightingPSO->vs = vs;
-	LightingPSO->graphicsPSODesc = psoDesc;
-
-	LightingPSO->BindSRV("AlbedoTex", 0, 1);
-	LightingPSO->BindSRV("NormalTex", 1, 1);
-	LightingPSO->BindSRV("ShadowTex", 2, 1);
-	LightingPSO->BindSRV("VelocityTex", 3, 1);
-	LightingPSO->BindSRV("DepthTex", 4, 1);
-	LightingPSO->BindSRV("GIResultSHTex", 5, 1);
-	LightingPSO->BindSRV("GIResultColorTex", 6, 1);
-	LightingPSO->BindSRV("SpecularGITex", 7, 1);
-	LightingPSO->BindSRV("RoughnessMetalicTex", 8, 1);
-	LightingPSO->BindSRV("SpecularGITex3x3", 9, 1);
-	LightingPSO->BindSRV("SpecularGITexMip1", 10, 1);
-	LightingPSO->BindSRV("SpecularGITexMip2", 11, 1);
-	LightingPSO->BindSRV("SpecularGITexMip3", 12, 1);
-	LightingPSO->BindSRV("SpecularGITexMip4", 13, 1);
-
-
-
-	LightingPSO->BindSampler("samplerWrap", 0);
-	LightingPSO->BindCBV("LightingParam", 0, sizeof(LightingParam));
-	LightingPSO->Init();
+	shared_ptr<PipelineStateObject> TEMP_LightingPSO = shared_ptr<PipelineStateObject>(new PipelineStateObject);
+	TEMP_LightingPSO->ps = ps;
+	TEMP_LightingPSO->vs = vs;
+	TEMP_LightingPSO->graphicsPSODesc = psoDesc;
+	
+	TEMP_LightingPSO->BindSRV("AlbedoTex", 0, 1);
+	TEMP_LightingPSO->BindSRV("NormalTex", 1, 1);
+	TEMP_LightingPSO->BindSRV("ShadowTex", 2, 1);
+	TEMP_LightingPSO->BindSRV("VelocityTex", 3, 1);
+	TEMP_LightingPSO->BindSRV("DepthTex", 4, 1);
+	TEMP_LightingPSO->BindSRV("GIResultSHTex", 5, 1);
+	TEMP_LightingPSO->BindSRV("GIResultColorTex", 6, 1);
+	TEMP_LightingPSO->BindSRV("SpecularGITex", 7, 1);
+	TEMP_LightingPSO->BindSRV("RoughnessMetalicTex", 8, 1);
+	TEMP_LightingPSO->BindSRV("SpecularGITex3x3", 9, 1);
+	TEMP_LightingPSO->BindSRV("SpecularGITexMip1", 10, 1);
+	TEMP_LightingPSO->BindSRV("SpecularGITexMip2", 11, 1);
+	TEMP_LightingPSO->BindSRV("SpecularGITexMip3", 12, 1);
+	TEMP_LightingPSO->BindSRV("SpecularGITexMip4", 13, 1);
+	
+	
+	
+	TEMP_LightingPSO->BindSampler("samplerWrap", 0);
+	TEMP_LightingPSO->BindCBV("LightingParam", 0, sizeof(LightingParam));
+	bool bSuccess = TEMP_LightingPSO->Init();
+	if (bSuccess)
+		LightingPSO = TEMP_LightingPSO;
 }
 
 void Corona::InitTemporalAAPass()
@@ -1547,27 +1574,29 @@ void Corona::InitTemporalAAPass()
 	//psoDescMesh.DSVFormat = DXGI_FORMAT_D32_FLOAT;
 	psoDesc.SampleDesc.Count = 1;
 
-	TemporalAAPSO = shared_ptr<PipelineStateObject>(new PipelineStateObject);
-	TemporalAAPSO->ps = ps;
-	TemporalAAPSO->vs = vs;
-	TemporalAAPSO->graphicsPSODesc = psoDesc;
+	shared_ptr<PipelineStateObject> TEMP_TemporalAAPSO = shared_ptr<PipelineStateObject>(new PipelineStateObject);
+	TEMP_TemporalAAPSO->ps = ps;
+	TEMP_TemporalAAPSO->vs = vs;
+	TEMP_TemporalAAPSO->graphicsPSODesc = psoDesc;
 
-	TemporalAAPSO->BindSRV("CurrentColorTex", 0, 1);
-	TemporalAAPSO->BindSRV("PrevColorTex", 1, 1);
-	TemporalAAPSO->BindSRV("VelocityTex", 2, 1);
-	TemporalAAPSO->BindSRV("DepthTex", 3, 1);
-	TemporalAAPSO->BindSRV("BloomTex", 4, 1);
-	TemporalAAPSO->BindSRV("Exposure", 5, 1);
+	TEMP_TemporalAAPSO->BindSRV("CurrentColorTex", 0, 1);
+	TEMP_TemporalAAPSO->BindSRV("PrevColorTex", 1, 1);
+	TEMP_TemporalAAPSO->BindSRV("VelocityTex", 2, 1);
+	TEMP_TemporalAAPSO->BindSRV("DepthTex", 3, 1);
+	TEMP_TemporalAAPSO->BindSRV("BloomTex", 4, 1);
+	TEMP_TemporalAAPSO->BindSRV("Exposure", 5, 1);
 
 
-	TemporalAAPSO->BindSampler("samplerWrap", 0);
-	TemporalAAPSO->BindCBV("LightingParam", 0, sizeof(LightingParam));
-	TemporalAAPSO->Init();
+	TEMP_TemporalAAPSO->BindSampler("samplerWrap", 0);
+	TEMP_TemporalAAPSO->BindCBV("LightingParam", 0, sizeof(LightingParam));
+	bool bSuccess = TEMP_TemporalAAPSO->Init();
+	if (bSuccess)
+		TemporalAAPSO = TEMP_TemporalAAPSO;
 }
 
 
 
-void Corona::CopyPass()
+void Corona::ToneMapPass()
 {
 #if USE_AFTERMATH
 	NVAftermathMarker(dx12_rhi->AM_CL_Handle, "CopyPass");
@@ -2479,7 +2508,8 @@ void Corona::OnUpdate()
 	TemporalFilterCB.ProjectionParams.y = Far;
 	TemporalFilterCB.RTSize.x = m_width;
 	TemporalFilterCB.RTSize.y = m_height;
-	
+	TemporalFilterCB.FrameIndex = FrameCounter;
+
 	FrameCounter++;
 
 	ColorBufferWriteIndex = FrameCounter % 2;
@@ -2513,7 +2543,7 @@ void Corona::OnRender()
 
 	TemporalDenoisingPass();
 
-	GenMipSpecularGIPass();
+	//GenMipSpecularGIPass();
 
 	SpatialDenoisingPass();
 
@@ -2528,7 +2558,7 @@ void Corona::OnRender()
 	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(backbuffer->resource.Get(), D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET));
 	dx12_rhi->GlobalCmdList->CmdList->OMSetRenderTargets(1, &backbuffer->CpuHandleRTV, FALSE, nullptr);
 
-	CopyPass();
+	ToneMapPass();
 
 	if(bDebugDraw)
 		DebugPass();
@@ -2639,10 +2669,10 @@ void Corona::OnRender()
 			const char* items[] = {
 				"LINEAR_TO_SRGB",
 				"REINHARD",
-				"FILMIC",
+				"FILMIC_ALU",
 				"FILMIC_HABLE",
 			};
-			static const char* item_current = items[UINT(EToneMapMode::FILMIC_ALU)];
+			static const char* item_current = items[UINT(EToneMapMode::FILMIC_HABLE)];
 			if (ImGui::BeginCombo("Tone Map Operator", item_current, flags))
 			{
 				for (int n = 0; n < IM_ARRAYSIZE(items); n++)
@@ -2711,6 +2741,12 @@ void Corona::OnRender()
 
 		ImGui::SliderFloat("MinExposure", &AdaptExposureCB.MinExposure, -8.0f, 0.0f);
 		ImGui::SliderFloat("MaxExposure", &AdaptExposureCB.MaxExposure, 0.0f, 8.0f);
+
+		ImGui::SliderFloat("BayerRotScale", &TemporalFilterCB.BayerRotScale, 0.0f, 1.0f);
+
+		ImGui::SliderFloat("SpecularBlurRadius", &TemporalFilterCB.SpecularBlurRadius, 0.0f, 5.0f);
+
+		ImGui::SliderFloat("Point2PlaneDistScale", &TemporalFilterCB.Point2PlaneDistScale, 0.0f, 1000.0f);
 
 	/*	AdaptExposureCB.TargetLuminance = 0.08;
 		AdaptExposureCB.AdaptationRate = 0.05;
@@ -3067,6 +3103,7 @@ void Corona::TemporalDenoisingPass()
 	TemporalDenoisingFilterPSO->SetSRV("VelocityTex", VelocityBuffer->GpuHandleSRV, dx12_rhi->GlobalCmdList->CmdList.Get());
 	TemporalDenoisingFilterPSO->SetSRV("InSpecularGITex", SpeculaGIBufferRaw->GpuHandleSRV, dx12_rhi->GlobalCmdList->CmdList.Get());
 	TemporalDenoisingFilterPSO->SetSRV("InSpecularGITexPrev", SpeculaGIBufferTemporal[ReadIndex]->GpuHandleSRV, dx12_rhi->GlobalCmdList->CmdList.Get());
+	TemporalDenoisingFilterPSO->SetSRV("RougnessMetalicTex", RoughnessMetalicBuffer->GpuHandleSRV, dx12_rhi->GlobalCmdList->CmdList.Get());
 
 
 	TemporalDenoisingFilterPSO->SetUAV("OutGIResultSH", DiffuseGISHTemporal[WriteIndex]->GpuHandleUAV, dx12_rhi->GlobalCmdList->CmdList.Get());
@@ -3074,8 +3111,9 @@ void Corona::TemporalDenoisingPass()
 	TemporalDenoisingFilterPSO->SetUAV("OutGIResultSHDS", DiffuseGISHSpatial[0]->GpuHandleUAV, dx12_rhi->GlobalCmdList->CmdList.Get());
 	TemporalDenoisingFilterPSO->SetUAV("OutGIResultColorDS", DiffuseGICoCgSpatial[0]->GpuHandleUAV, dx12_rhi->GlobalCmdList->CmdList.Get());
 	TemporalDenoisingFilterPSO->SetUAV("OutSpecularGI", SpeculaGIBufferTemporal[WriteIndex]->GpuHandleUAV, dx12_rhi->GlobalCmdList->CmdList.Get());
-	TemporalDenoisingFilterPSO->SetUAV("OutSpecularGIDS", SpeculaGIBufferSpatial[0]->GpuHandleUAV, dx12_rhi->GlobalCmdList->CmdList.Get());
+	//TemporalDenoisingFilterPSO->SetUAV("OutSpecularGIDS", SpeculaGIBufferSpatial[0]->GpuHandleUAV, dx12_rhi->GlobalCmdList->CmdList.Get());
 
+	TemporalDenoisingFilterPSO->SetSampler("BilinearClamp", samplerBilinearWrap.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
 
 
 	TemporalDenoisingFilterPSO->SetCBVValue("TemporalFilterConstant", &TemporalFilterCB, dx12_rhi->GlobalCmdList->CmdList.Get());
@@ -3113,13 +3151,13 @@ void Corona::RecompileShaders()
 	InitRTPSO();
 	InitSpatialDenoisingPass();
 	InitTemporalDenoisingPass();
-	InitDrawMeshRS();
-	InitCopyPass();
+	InitGBufferPass();
+	InitToneMapPass();
 	InitDebugPass();
 	InitLightingPass();
 	InitTemporalAAPass();
 	InitBloomPass();
-	InitGenMipSpecularGIPass();
+	//InitGenMipSpecularGIPass();
 }
 
 void Corona::InitRaytracingData()
@@ -3227,7 +3265,7 @@ void Corona::InitRTPSO()
 
 		TEMP_PSO_RT_REFLECTION->MaxRecursion = 1;
 		TEMP_PSO_RT_REFLECTION->MaxAttributeSizeInBytes = sizeof(float) * 2;
-		TEMP_PSO_RT_REFLECTION->MaxPayloadSizeInBytes = sizeof(float) * 12;
+		TEMP_PSO_RT_REFLECTION->MaxPayloadSizeInBytes = sizeof(float) * 13;
 
 
 		bool bSuccess = TEMP_PSO_RT_REFLECTION->InitRS("Shaders\\RaytracedReflection.hlsl");

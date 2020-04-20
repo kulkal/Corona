@@ -9,6 +9,8 @@ Texture2D InGIResultColorTexPrev : register(t5);
 Texture2D VelocityTex : register(t6);
 Texture2D InSpecularGITex : register(t7);
 Texture2D InSpecularGITexPrev : register(t8);
+Texture2D RougnessMetalicTex : register(t9);
+
 
 
 
@@ -18,8 +20,9 @@ RWTexture2D<float4> OutGIResultColor: register(u1);
 RWTexture2D<float4> OutGIResultSHDS : register(u2);
 RWTexture2D<float4> OutGIResultColorDS: register(u3);
 RWTexture2D<float4> OutSpecularGI: register(u4);
-RWTexture2D<float4> OutSpecularGIDS: register(u5);
+// RWTexture2D<float4> OutSpecularGIDS: register(u5);
 
+SamplerState BilinearClamp : register(s0);
 
 
 
@@ -28,6 +31,10 @@ cbuffer TemporalFilterConstant : register(b0)
 	float4 ProjectionParams;
 	float4 TemporalValidParams;
 	float2 RTSize;
+	uint FrameIndex;
+	float BayerRotScale;
+	float SpecularBlurRadius;
+	float Point2PlaneDistScale;
 };
 
 #define GROUPSIZE 15
@@ -35,17 +42,48 @@ groupshared float4 g_SH[GROUPSIZE][GROUPSIZE];
 groupshared float2 g_CoCg[GROUPSIZE][GROUPSIZE];
 groupshared float3 g_Normal[GROUPSIZE][GROUPSIZE]; 
 groupshared float g_Depth[GROUPSIZE][GROUPSIZE]; 
-groupshared float4 g_Specular[GROUPSIZE][GROUPSIZE]; 
+// groupshared float4 g_Specular[GROUPSIZE][GROUPSIZE]; 
 
 
 static const float2 off[4] = { { 0, 0 }, { 1, 0 }, { 0, 1 }, { 1, 1 } };
 
+static const uint POISSON_SAMPLE_NUM = 16;
+static const float2 POISSON_SAMPLES[POISSON_SAMPLE_NUM] =
+{
+	float2( 0.25846023600949697f, -0.07369550760351032f ),
+	float2( -0.9838570552784007f, -0.05779516564478064f ),
+	float2( -0.027743258156343067f, 0.9811291888930508f ),
+	float2( -0.27749280859153147f, -0.9558763050496616f ),
+	float2( 0.7957500833563568f, 0.601381663828957f ),
+	float2( 0.610845296785476f, -0.7463029770721497f ),
+	float2( -0.6784295880309313f, 0.660255493042322f ),
+	float2( 0.964729322668074f, -0.061480119938628806f ),
+	float2( -0.44963058033639447f, -0.357675895070531f ),
+	float2( -0.313556193156912f, 0.2145219816729168f ),
+	float2( 0.2859315712886788f, 0.43424956054318387f ),
+	float2( -0.04534300033675266f, -0.5334074339145939f ),
+	float2( -0.6541908929580176f, -0.7536055504687329f ),
+	float2( 0.18809498350573928f, -0.9128177827906239f ),
+	float2( 0.60895935404913f, 0.15435512892534362f ),
+	float2( 0.43638971738806215f, 0.8146738166643487f ),
+};
+
+
+static const uint BAYER_SAMPLE_NUM = 16;
+static const float BAYER_SAMPLES[BAYER_SAMPLE_NUM] =
+{
+0, 8, 2, 10, 
+12, 4, 14, 6, 
+3, 11, 1, 9, 
+15, 7, 13, 5
+};
 
 [numthreads(15, 15, 1)]
 void TemporalFilter( uint3 DTid : SV_DispatchThreadID, uint3 GTid : SV_GroupThreadID, uint GTIndex : SV_GroupIndex, uint3 GId : SV_GroupID)
 {
 	float2 PixelPos = DTid.xy;
 	float2 GroupPos = GTid.xy;
+
 
   	uint2 LowResGroupPos;
 	LowResGroupPos.x = GTIndex % (GROUPSIZE / DOWNSAMPLE_SIZE);
@@ -63,6 +101,37 @@ void TemporalFilter( uint3 DTid : SV_DispatchThreadID, uint3 GTid : SV_GroupThre
     PrevPos = PixelPos - Velocity  * RTSize;
 
 	float4 CurrentSpecular = InSpecularGITex[PixelPos];
+
+	// float SpecularBlurRadius = 1;
+	float Point2PlaneDist = clamp(CurrentSpecular.w/Point2PlaneDistScale, 0, 100);
+	float Roughness = RougnessMetalicTex[PixelPos].x;
+	float BlurRadius = SpecularBlurRadius * Roughness;// * (saturate(hitDist/0.5) * 0.9 + 0.1);
+	float SumWSpec = 1;
+	float RotAngle = BAYER_SAMPLES[FrameIndex % BAYER_SAMPLE_NUM] * 0.1;
+	float CZ = GetLinearDepthOpenGL(CurDepth, ProjectionParams.x, ProjectionParams.y) ;
+	for(int i=0;i<POISSON_SAMPLE_NUM;i++)
+	{
+		float2 Offset = POISSON_SAMPLES[i];
+		float2 OffsetRotated;
+		OffsetRotated.x = Offset.x * cos(RotAngle) - Offset.y * sin(RotAngle);
+		OffsetRotated.y = Offset.x * sin(RotAngle) + Offset.y * cos(RotAngle);
+
+		// OffsetRotated = Offset;
+ 		float2 uv = (DTid.xy + 0.5 + OffsetRotated* BlurRadius) / RTSize;
+
+		float4 SampleSpecular = InSpecularGITex.SampleLevel(BilinearClamp, uv, 0);
+
+		float SampleDepth = DepthTex.SampleLevel(BilinearClamp, uv, 0);
+		float SampleZ = GetLinearDepthOpenGL(SampleDepth, ProjectionParams.x, ProjectionParams.y) ;
+		float SampleW = 1;///16.0; // point to plane weight
+		float DistZ = abs(SampleZ - CZ) * 0.2;
+		SampleW *= exp(-DistZ/1);
+
+		CurrentSpecular += SampleSpecular * SampleW;
+		SumWSpec += SampleW;
+	}
+	CurrentSpecular /= SumWSpec;
+
 	float4 PrevSpecular = InSpecularGITexPrev[PrevPos];
 
 
@@ -135,7 +204,7 @@ void TemporalFilter( uint3 DTid : SV_DispatchThreadID, uint3 GTid : SV_GroupThre
 
 	float4 BlendedSpecular = 0..xxxx;
 	SH BlendedSH = init_SH();
-	float W = 0.1;
+	float W = 0.05;
 	if(isValidHistory)
 	{
 		BlendedSH.shY = max(CurrentSH.shY * W + PrevSH.shY * (1-W), float4(0, 0, 0, 0));
@@ -158,7 +227,7 @@ void TemporalFilter( uint3 DTid : SV_DispatchThreadID, uint3 GTid : SV_GroupThre
     g_SH[GroupPos.y][GroupPos.x] = BlendedSH.shY;
     g_CoCg[GroupPos.y][GroupPos.x] = BlendedSH.CoCg;
 
-    g_Specular[GroupPos.y][GroupPos.x] = BlendedSpecular;
+    // g_Specular[GroupPos.y][GroupPos.x] = BlendedSpecular;
    
     GroupMemoryBarrierWithGroupSync();
 
@@ -184,7 +253,7 @@ void TemporalFilter( uint3 DTid : SV_DispatchThreadID, uint3 GTid : SV_GroupThre
 	float sum_w = 1;
 	SH SumSH = CenterSH;
 
-	float3 SumSpecular = 0..xxx;
+	// float3 SumSpecular = 0..xxx;
 
 	for(int yy = -1; yy <= 1; yy++)
 	{
@@ -209,8 +278,8 @@ void TemporalFilter( uint3 DTid : SV_DispatchThreadID, uint3 GTid : SV_GroupThre
 
 			accumulate_SH(SumSH, SampleSH, w);
 
-			float3 SampleSpecular = g_Specular[CenterHiResPos.y + yy][CenterHiResPos.x + xx];
-			SumSpecular += SampleSpecular;
+			// float3 SampleSpecular = g_Specular[CenterHiResPos.y + yy][CenterHiResPos.x + xx];
+			// SumSpecular += SampleSpecular;
 			sum_w += w;
 		}
 	}
@@ -219,11 +288,11 @@ void TemporalFilter( uint3 DTid : SV_DispatchThreadID, uint3 GTid : SV_GroupThre
 	SumSH.shY  *= inv_w;
 	SumSH.CoCg *= inv_w;
 
-	SumSpecular *= inv_w;
+	// SumSpecular *= inv_w;
 
     uint2 LowResPos = GId * (GROUPSIZE / DOWNSAMPLE_SIZE) + LowResGroupPos;
 	OutGIResultSHDS[LowResPos] = SumSH.shY;
     OutGIResultColorDS[LowResPos] = float4(SumSH.CoCg, 0, 0);
 
-    OutSpecularGIDS[LowResPos] = float4(SumSpecular, 0);
+    // OutSpecularGIDS[LowResPos] = float4(SumSpecular, 0);
 }
