@@ -2,7 +2,7 @@
 Corona pandemic made me to spend some time for this hobby project. That is the reason why the name of the project is Corona.
 
 # DX12
-I tried to best practice of dx12 api usage.
+I tried to implement best practice of dx12 api usage.
 
 # DXR
 There are several dxr tutorials and examples. But I couldn't find one that is simple and includes complete sets of raytracing usage.
