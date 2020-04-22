@@ -165,10 +165,12 @@ void rayGen
     payload.coneWidth = 0;
     payload.spreadAngle = ViewSpreadAngle; 
 	TraceRay(gRtScene, RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES /*rayFlags*/, 0xFF, 0 /* ray index*/, 0, 0, ray, payload);
-    if(payload.bHit = false)
+    if(payload.bHit == false)
     {
         // hit sky
         float3 Radiance = payload.color * LightIntensity;
+        // float3 Radiance = float3(1, 0, 0) * LightIntensity;
+
         float3 Irradiance = Radiance * cosTerm;
 
         SH sh_indirect = init_SH();

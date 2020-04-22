@@ -91,7 +91,7 @@ struct PS_OUTPUT
     float4 Albedo : SV_Target0;
     float4 Normal : SV_Target1;
     float4 GeomNormal : SV_Target2;
-    float2 Velocity : SV_Target3;
+    float4 Velocity : SV_Target3;
     float4 Material : SV_Target4;
 };
 
@@ -101,11 +101,18 @@ PS_OUTPUT PSMain(PSInput input) : SV_TARGET
     float2 prevPositionSS = (input.prevPosition.xy/input.prevPosition.w) * float2(0.5, -0.5) + 0.5;
     prevPositionSS *= RTSize.xy;
 
+    float prevDepth = input.prevPosition.z/input.prevPosition.w * 0.5 + 0.5;
+
     float2 positionSS = (input.unjitteredPosition.xy/input.unjitteredPosition.w) * float2(0.5, -0.5) + 0.5;
     positionSS *= RTSize.xy;
     
-    float2 velocity = positionSS - prevPositionSS;
-    velocity /= RTSize.xy;
+    float curDepth = input.unjitteredPosition.z/input.unjitteredPosition.w * 0.5 + 0.5;
+    float3 velocity;
+    velocity.xy = positionSS - prevPositionSS;
+    velocity.z = curDepth - prevDepth;
+
+
+    velocity.xy /= RTSize.xy;
 
     float4 Albedo = AlbedoTex.Sample(sampleWrap, input.uv);
     float Roughness = RoughnessTex.Sample(sampleWrap, input.uv).x;
@@ -120,7 +127,8 @@ PS_OUTPUT PSMain(PSInput input) : SV_TARGET
     output.Albedo.xyz = Albedo.xyz;
     output.Normal.xyz = WorldNormal;
     output.GeomNormal.xyz = input.normal;
-    output.Velocity = velocity.xy;
+    output.Velocity.xyz = velocity;
+
     if(bOverrideRougnessMetallic)
     {
         output.Material.x = RougnessMetalic.x;

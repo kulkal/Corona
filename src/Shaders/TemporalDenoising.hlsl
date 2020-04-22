@@ -94,21 +94,22 @@ void TemporalFilter( uint3 DTid : SV_DispatchThreadID, uint3 GTid : SV_GroupThre
     float CurDepth = g_Depth[GroupPos.y][GroupPos.x] = DepthTex[PixelPos];
 
     // GroupMemoryBarrierWithGroupSync();
-	SH PrevSH = init_SH();
 	float2 PrevPos;
 
-    float2 Velocity = VelocityTex[PixelPos];
-    PrevPos = PixelPos - Velocity  * RTSize;
+    float3 Velocity = VelocityTex[PixelPos].xyz;
+    PrevPos = PixelPos - Velocity.xy  * RTSize;
 
 	float4 CurrentSpecular = InSpecularGITex[PixelPos];
 
+	float3 SpecMin = 99999999.0f;
+	float3 SpecMax = -99999999.0f;
 	// float SpecularBlurRadius = 1;
 	float Point2PlaneDist = clamp(CurrentSpecular.w/Point2PlaneDistScale, 0, 100);
 	float Roughness = RougnessMetalicTex[PixelPos].x;
 	float BlurRadius = SpecularBlurRadius * Roughness;// * (saturate(hitDist/0.5) * 0.9 + 0.1);
 	float SumWSpec = 1;
 	float RotAngle = BAYER_SAMPLES[FrameIndex % BAYER_SAMPLE_NUM] * 0.1;
-	float CZ = GetLinearDepthOpenGL(CurDepth, ProjectionParams.x, ProjectionParams.y) ;
+	float CZ = GetLinearDepthOpenGL(CurDepth, ProjectionParams.z, ProjectionParams.w) ;
 	for(int i=0;i<POISSON_SAMPLE_NUM;i++)
 	{
 		float2 Offset = POISSON_SAMPLES[i];
@@ -121,8 +122,11 @@ void TemporalFilter( uint3 DTid : SV_DispatchThreadID, uint3 GTid : SV_GroupThre
 
 		float4 SampleSpecular = InSpecularGITex.SampleLevel(BilinearClamp, uv, 0);
 
+		SpecMin = min(SpecMin, SampleSpecular);
+        SpecMax = max(SpecMax, SampleSpecular);
+
 		float SampleDepth = DepthTex.SampleLevel(BilinearClamp, uv, 0);
-		float SampleZ = GetLinearDepthOpenGL(SampleDepth, ProjectionParams.x, ProjectionParams.y) ;
+		float SampleZ = GetLinearDepthOpenGL(SampleDepth, ProjectionParams.z, ProjectionParams.w) ;
 		float SampleW = 1;///16.0; // point to plane weight
 		float DistZ = abs(SampleZ - CZ) * 0.2;
 		SampleW *= exp(-DistZ/1);
@@ -144,6 +148,8 @@ void TemporalFilter( uint3 DTid : SV_DispatchThreadID, uint3 GTid : SV_GroupThre
 	float2 pos_ld = floor(PrevPos - float2(0.5, 0.5));
 	float2 subpix = frac(PrevPos - float2(0.5, 0.5) - pos_ld);
 	
+	SH PrevSH = init_SH();
+
 	PrevSH.shY = InGIResultSHTexPrev[PrevPos];
 	PrevSH.CoCg = InGIResultColorTexPrev[PrevPos].xy;
 
@@ -156,8 +162,8 @@ void TemporalFilter( uint3 DTid : SV_DispatchThreadID, uint3 GTid : SV_GroupThre
 		(subpix.x      ) * (subpix.y      )
 	};
 
-	float dotSum = 0;
-	float distSum = 0;
+	float fwidth_depth = 1.0 / max(0.1, (abs(DepthTex[PixelPos + float2(1, 0)] - DepthTex[PixelPos]) * 2 + abs(DepthTex[PixelPos + float2(0, 1)] - DepthTex[PixelPos])));
+
 	// bool bt = false;
 	// [unroll]
 	for(int i = 0; i < 4; i++) 
@@ -170,10 +176,14 @@ void TemporalFilter( uint3 DTid : SV_DispatchThreadID, uint3 GTid : SV_GroupThre
 		float PrevDepth = DepthTex[p];
 		float3 PrevNormal = NormalTex[p];
 
-		float dist_depth = abs(CurDepth - PrevDepth);
+		// SH SampleSH = init_SH();;
+		// SampleSH.shY = InGIResultSHTexPrev[p];
+		// SampleSH.CoCg = InGIResultColorTexPrev[p].xy;
+
+		// float4 SampleSpecular = InSpecularGITexPrev[p];
+		float dist_depth = abs(CurDepth - PrevDepth ) ;
+		// float dist_depth  = abs(GetLinearDepthOpenGL(CurDepth, ProjectionParams.z, ProjectionParams.w) - GetLinearDepthOpenGL(PrevDepth, ProjectionParams.z, ProjectionParams.w));
 		float dot_normals = abs(dot(CurNormal, PrevNormal));
-		dotSum += dot_normals;
-		distSum = dist_depth;
 		if(CurDepth < 0)
 		{
 			// Reduce the filter sensitivity to depth for secondary surfaces,
@@ -181,11 +191,15 @@ void TemporalFilter( uint3 DTid : SV_DispatchThreadID, uint3 GTid : SV_GroupThre
 			dist_depth *= 0.25;
 		}
 
+
 		if(dist_depth < 2.0 && dot_normals > 0.5) 
 		{
 			float w_diff = w[i];
 			float w_spec = w_diff * pow(max(dot_normals, 0), TemporalValidParams.x);
 			temporal_sum_w_spec += w_spec;
+			// PrevSH.shY += SampleSH.shY * w_spec;
+			// PrevSH.CoCg += SampleSH.CoCg * w_spec;
+			// PrevSpecular += SampleSpecular * w_spec;
 			// bt = true;
 		}
 	}
@@ -193,15 +207,19 @@ void TemporalFilter( uint3 DTid : SV_DispatchThreadID, uint3 GTid : SV_GroupThre
 	// this code have application hang infinitely with gpu validation enabled.
 	if(temporal_sum_w_spec > 0.000001)
 	{
+		float inv_w_spec = 1.0 / temporal_sum_w_spec;
+		// PrevSH.shY *= inv_w_spec;
+		// PrevSH.CoCg *= inv_w_spec;
+		// PrevSpecular *= inv_w_spec;
 		isValidHistory = true;
 	}
 
+	float PrevLuma = RGBToLuminance(PrevSpecular.xyz);
+	float CurLuma = RGBToLuminance(CurrentSpecular.xyz);
 
-	// if(bt == true)
-		// isValidHistory = true;
-
-		// isValidHistory = true;
-
+	if(length(Velocity.xy) > 0)
+		PrevSpecular.xyz = clamp(PrevSpecular.xyz, SpecMin, SpecMax);
+	
 	float4 BlendedSpecular = 0..xxxx;
 	SH BlendedSH = init_SH();
 	float W = 0.05;
@@ -242,7 +260,7 @@ void TemporalFilter( uint3 DTid : SV_DispatchThreadID, uint3 GTid : SV_GroupThre
 
 	float3 CenterNormal = g_Normal[CenterHiResPos.y][CenterHiResPos.x];
 	float CenterDepth = g_Depth[CenterHiResPos.y][CenterHiResPos.x];
-	float CenterZ = GetLinearDepthOpenGL(CenterDepth, ProjectionParams.x, ProjectionParams.y) ;
+	float CenterZ = GetLinearDepthOpenGL(CenterDepth, ProjectionParams.z, ProjectionParams.w) ;
 	
 	// float depth_width = s_depth_width[lowres_local_id.y][lowres_local_id.x];
 
@@ -264,7 +282,7 @@ void TemporalFilter( uint3 DTid : SV_DispatchThreadID, uint3 GTid : SV_GroupThre
 
 			float3 SampleNormal = g_Normal[CenterHiResPos.y + yy][CenterHiResPos.x + xx].xyz;
 			float SampleDepth = g_Depth[CenterHiResPos.y + yy][CenterHiResPos.x + xx];
-			float SampleZ = GetLinearDepthOpenGL(SampleDepth, ProjectionParams.x, ProjectionParams.y) ;
+			float SampleZ = GetLinearDepthOpenGL(SampleDepth, ProjectionParams.z, ProjectionParams.w) ;
 
 			float w = 1.0f;
 			float DistZ = abs(SampleZ - CenterZ) * 0.2;

@@ -101,7 +101,7 @@ void Filter(Texture2D GIResultSHTex,Texture2D GIResultColorTex, Texture2D Specul
 	uint2 CenterPosHiRes = CenterPos * DOWNSAMPLE_SIZE + uint2(1, 1);
 
 	float CenterDepth = DepthTex[CenterPosHiRes.xy];
-	float CenterZ = GetLinearDepthOpenGL(CenterDepth, ProjectionParams.x, ProjectionParams.y) ;
+	float CenterZ = GetLinearDepthOpenGL(CenterDepth, ProjectionParams.z, ProjectionParams.w) ;
 
 	float3 CenterNormal = GeoNormalTex[CenterPosHiRes.xy];
 
@@ -132,7 +132,7 @@ void Filter(Texture2D GIResultSHTex,Texture2D GIResultColorTex, Texture2D Specul
 			float W = 1;
 
 			float3 SampleDepth = DepthTex[SamplePosHiRes.xy];
-			float SampleZ = GetLinearDepthOpenGL(SampleDepth, ProjectionParams.x, ProjectionParams.y) ;
+			float SampleZ = GetLinearDepthOpenGL(SampleDepth, ProjectionParams.z, ProjectionParams.w) ;
 
 			float DistZ = abs(CenterZ - SampleZ) * IndirectDiffuseWeightFactorDepth;
 			W *= exp(-DistZ/float(StepSize*DOWNSAMPLE_SIZE)) ;

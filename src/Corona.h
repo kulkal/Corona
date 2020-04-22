@@ -10,7 +10,6 @@
 //*********************************************************
 
 #pragma once
-
 #define GLM_FORCE_CTOR_INIT
 #include <array>
 

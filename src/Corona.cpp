@@ -635,7 +635,7 @@ void Corona::LoadAssets()
 	NAME_D3D12_OBJECT(AlbedoBuffer->resource);
 
 	// velocity
-	VelocityBuffer = dx12_rhi->CreateTexture2D(DXGI_FORMAT_R16G16_FLOAT,
+	VelocityBuffer = dx12_rhi->CreateTexture2D(DXGI_FORMAT_R16G16B16A16_FLOAT,
 		D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
 		D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, m_width, m_height, 1, glm::vec4(0.0f, 0.0f, 0.0f, 0.0f));
 	VelocityBuffer->MakeRTV();
@@ -1242,7 +1242,7 @@ void Corona::InitGBufferPass()
 	psoDescMesh.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
 	psoDescMesh.RTVFormats[1] = DXGI_FORMAT_R16G16B16A16_FLOAT;
 	psoDescMesh.RTVFormats[2] = DXGI_FORMAT_R16G16B16A16_FLOAT;
-	psoDescMesh.RTVFormats[3] = DXGI_FORMAT_R16G16_FLOAT;
+	psoDescMesh.RTVFormats[3] = DXGI_FORMAT_R16G16B16A16_FLOAT;
 	psoDescMesh.RTVFormats[4] = DXGI_FORMAT_R8G8B8A8_UNORM;
 
 	psoDescMesh.DSVFormat = DXGI_FORMAT_D32_FLOAT;
@@ -2440,6 +2440,8 @@ void Corona::OnUpdate()
 	ProjMat = m_camera.GetProjectionMatrix(Fov, m_aspectRatio, Near, Far);
 	UnjitteredViewProjMat = ProjMat * ViewMat;
 
+	
+
 	glm::mat4x4 InvViewMat = glm::inverse(ViewMat);
 	RTShadowViewParam.ViewMatrix = glm::transpose(ViewMat);
 	RTShadowViewParam.InvViewMatrix = glm::transpose(InvViewMat);
@@ -2501,11 +2503,11 @@ void Corona::OnUpdate()
 	RTGIViewParam.RandomOffset = glm::vec2(timeElapsed, timeElapsed);
 	RTGIViewParam.FrameCounter = FrameCounter;
 	
-	SpatialFilterCB.ProjectionParams.x = Near;
-	SpatialFilterCB.ProjectionParams.y = Far;
+	SpatialFilterCB.ProjectionParams.z = Near;
+	SpatialFilterCB.ProjectionParams.w = Far;
 
-	TemporalFilterCB.ProjectionParams.x = Near;
-	TemporalFilterCB.ProjectionParams.y = Far;
+	TemporalFilterCB.ProjectionParams.z = Near;
+	TemporalFilterCB.ProjectionParams.w = Far;
 	TemporalFilterCB.RTSize.x = m_width;
 	TemporalFilterCB.RTSize.y = m_height;
 	TemporalFilterCB.FrameIndex = FrameCounter;
@@ -2578,6 +2580,13 @@ void Corona::OnRender()
 		sprintf(fps, "FPS : %u fps", m_timer.GetFramesPerSecond());
 
 		ImGui::Begin("Hi, Let's traceray!");
+		ImGui::Text(fps);
+
+		glm::vec4 test = glm::vec4(0, -0, 0, 1) * glm::transpose(UnjitteredViewProjMat);
+		test.x /= test.w;
+		test.y /= test.w;
+		//test.z /= test.w;
+		sprintf(fps, "test : %f %f %f", test.x, test.y, test.z);
 		ImGui::Text(fps);
 
 		if (ImGui::Button("Recompile all shaders"))
