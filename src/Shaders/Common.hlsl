@@ -13,7 +13,7 @@ float GetLinearDepthOpenGL(float DeviceDepth, float Near, float Far)
 {
     float z_n = DeviceDepth;// * 2 - 1;
 
-    return 2.0 * Near * Far /(Far + Near -z_n * (Far - Near));
+    return Near * Far /(Far + Near -z_n * (Far - Near));
 }
 
 float3 GetViewPosition(float LinearDepth, float2 ScreenPosition, float Proj11, float Proj22)
