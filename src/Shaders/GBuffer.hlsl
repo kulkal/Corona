@@ -93,6 +93,7 @@ struct PS_OUTPUT
     float4 GeomNormal : SV_Target2;
     float4 Velocity : SV_Target3;
     float4 Material : SV_Target4;
+    float UnjitteredDepth : SV_Target5;
 };
 
 
@@ -128,6 +129,7 @@ PS_OUTPUT PSMain(PSInput input) : SV_TARGET
     output.Normal.xyz = WorldNormal;
     output.GeomNormal.xyz = input.normal;
     output.Velocity.xyz = velocity;
+    output.UnjitteredDepth = input.unjitteredPosition.z/input.unjitteredPosition.w;
 
     if(bOverrideRougnessMetallic)
     {

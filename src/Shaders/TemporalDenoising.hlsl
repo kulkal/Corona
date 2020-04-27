@@ -10,6 +10,10 @@ Texture2D VelocityTex : register(t6);
 Texture2D InSpecularGITex : register(t7);
 Texture2D InSpecularGITexPrev : register(t8);
 Texture2D RougnessMetalicTex : register(t9);
+Texture2D PrevDepthTex : register(t10);
+Texture2D PrevNormalTex : register(t11);
+
+
 
 
 
@@ -28,6 +32,8 @@ SamplerState BilinearClamp : register(s0);
 
 cbuffer TemporalFilterConstant : register(b0)
 {
+    float4x4 InvViewMatrix;
+    float4x4 InvProjMatrix;
 	float4 ProjectionParams;
 	float4 TemporalValidParams;
 	float2 RTSize;
@@ -85,6 +91,7 @@ void TemporalFilter( uint3 DTid : SV_DispatchThreadID, uint3 GTid : SV_GroupThre
 	float2 GroupPos = GTid.xy;
 
 
+
   	uint2 LowResGroupPos;
 	LowResGroupPos.x = GTIndex % (GROUPSIZE / DOWNSAMPLE_SIZE);
 	LowResGroupPos.y = GTIndex / (GROUPSIZE / DOWNSAMPLE_SIZE);
@@ -93,12 +100,17 @@ void TemporalFilter( uint3 DTid : SV_DispatchThreadID, uint3 GTid : SV_GroupThre
 	float3 CurNormal = g_Normal[GroupPos.y][GroupPos.x] = NormalTex[PixelPos].xyz;
     float CurDepth = g_Depth[GroupPos.y][GroupPos.x] = DepthTex[PixelPos];
 
+	
+
     // GroupMemoryBarrierWithGroupSync();
 	float2 PrevPos;
 
     float3 Velocity = VelocityTex[PixelPos].xyz;
     PrevPos = PixelPos - Velocity.xy  * RTSize;
     float2 PrevUV = (PrevPos + 0.5) /RTSize;
+
+
+    // get current indirect specular.
 
 	float4 CurrentSpecular = InSpecularGITex[PixelPos];
 
@@ -137,7 +149,6 @@ void TemporalFilter( uint3 DTid : SV_DispatchThreadID, uint3 GTid : SV_GroupThre
 	}
 	CurrentSpecular /= SumWSpec;
 
-	// float4 PrevSpecular = InSpecularGITexPrev[PrevPos];
 	float4 PrevSpecular = InSpecularGITexPrev.SampleLevel(BilinearClamp, PrevUV, 0);
 
 
@@ -175,34 +186,26 @@ void TemporalFilter( uint3 DTid : SV_DispatchThreadID, uint3 GTid : SV_GroupThre
 		if(p.x < 0 || p.x >= RTSize.x || p.y < 0 || p.y >= RTSize.y)
 			continue;
 
-		float PrevDepth = DepthTex[p];
-		float3 PrevNormal = NormalTex[p];
+		float PrevDepth = PrevDepthTex[p];
+		float3 PrevNormal = PrevNormalTex[p];
 
-		// SH SampleSH = init_SH();;
-		// SampleSH.shY = InGIResultSHTexPrev[p];
-		// SampleSH.CoCg = InGIResultColorTexPrev[p].xy;
-
-		// float4 SampleSpecular = InSpecularGITexPrev[p];
 		float dist_depth = abs(CurDepth - PrevDepth ) ;
 		// float dist_depth  = abs(GetLinearDepthOpenGL(CurDepth, ProjectionParams.z, ProjectionParams.w) - GetLinearDepthOpenGL(PrevDepth, ProjectionParams.z, ProjectionParams.w));
 		float dot_normals = abs(dot(CurNormal, PrevNormal));
-		if(CurDepth < 0)
-		{
-			// Reduce the filter sensitivity to depth for secondary surfaces,
-			// because reflection/refraction motion vectors are often inaccurate.
-			dist_depth *= 0.25;
-		}
+		// if(CurDepth < 0)
+		// {
+		// 	// Reduce the filter sensitivity to depth for secondary surfaces,
+		// 	// because reflection/refraction motion vectors are often inaccurate.
+		// 	dist_depth *= 0.25;
+		// }
 
 
-		if(dist_depth < 2.0 && dot_normals > 0.5) 
+		if(dist_depth < 0.001 && dot_normals > 0.5) // dont use normal weight
+		// if(dist_depth < 0.001) 
 		{
 			float w_diff = w[i];
 			float w_spec = w_diff * pow(max(dot_normals, 0), TemporalValidParams.x);
 			temporal_sum_w_spec += w_spec;
-			// PrevSH.shY += SampleSH.shY * w_spec;
-			// PrevSH.CoCg += SampleSH.CoCg * w_spec;
-			// PrevSpecular += SampleSpecular * w_spec;
-			// bt = true;
 		}
 	}
 
@@ -216,11 +219,8 @@ void TemporalFilter( uint3 DTid : SV_DispatchThreadID, uint3 GTid : SV_GroupThre
 		isValidHistory = true;
 	}
 
-	float PrevLuma = RGBToLuminance(PrevSpecular.xyz);
-	float CurLuma = RGBToLuminance(CurrentSpecular.xyz);
-
-	// if(length(Velocity.xy) > 0)
-	// 	PrevSpecular.xyz = clamp(PrevSpecular.xyz, SpecMin, SpecMax);
+	if(abs(CurDepth - PrevDepthTex[PrevPos].x) > 0.001)
+		isValidHistory = false;
 	
 	float4 BlendedSpecular = 0..xxxx;
 	SH BlendedSH = init_SH();

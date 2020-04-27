@@ -458,7 +458,7 @@ SimpleDX12::SimpleDX12(ComPtr<ID3D12Device5> InDevice)
 		DSVDescriptorHeap = std::make_unique<DescriptorHeap>();
 
 		D3D12_DESCRIPTOR_HEAP_DESC HeapDesc = {};
-		HeapDesc.NumDescriptors = 1;
+		HeapDesc.NumDescriptors = 2;
 		HeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
 		HeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
 		DSVDescriptorHeap->Init(HeapDesc);

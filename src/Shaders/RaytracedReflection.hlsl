@@ -18,6 +18,7 @@ cbuffer ViewParameter : register(b0)
     float4x4 ViewMatrix;
     float4x4 InvViewMatrix;
     float4x4 ProjMatrix;
+    float4x4 InvProjMatrix;
     float4 ProjectionParams;
     float4 LightDirAndIntensity;
     float2 RandomOffset;
@@ -201,7 +202,9 @@ void rayGen
 	ScreenPosition.xy = ScreenPosition.xy * 2 - 1;
 	ScreenPosition.y = -ScreenPosition.y;
 
-	float3 ViewPosition = GetViewPosition(LinearDepth, ScreenPosition, ProjMatrix._11, ProjMatrix._22);
+	// float3 ViewPosition = GetViewPosition(LinearDepth, ScreenPosition, ProjMatrix._11, ProjMatrix._22);
+    float3 ViewPosition = GetViewPosition(DeviceDepth, ScreenPosition, InvProjMatrix);
+
 	float3 WorldPos = mul(float4(ViewPosition, 1), InvViewMatrix).xyz;
 
     float2 RandomUV = LoadBlueNoise2(BlueNoiseTex, launchIndex, FrameCounter, BlueNoiseOffsetStride);

@@ -56,10 +56,6 @@ class Corona : public DXSample
 		ROUGNESS_METALLIC,
 		SPECULAR_RAW,
 		TEMPORAL_FILTERED_SPECULAR,
-		TEMPORAL_FILTERED_SPECULAR_2X2,
-		TEMPORAL_FILTERED_SPECULAR_4X4,
-		TEMPORAL_FILTERED_SPECULAR_8X8,
-		TEMPORAL_FILTERED_SPECULAR_16X16,
 		BLOOM,
 		NO_FULLSCREEN,
 	};
@@ -68,12 +64,13 @@ class Corona : public DXSample
 private:
 
 	shared_ptr<Texture> DepthBuffer;
+	shared_ptr<Texture> UnjitteredDepthBuffers[2];
 
 	UINT ColorBufferWriteIndex = 0;
-	std::array<shared_ptr<Texture>, 2> ColorBuffers;
+	shared_ptr<Texture> ColorBuffers[2];
 	shared_ptr<Texture> LightingBuffer;
 	shared_ptr<Texture> AlbedoBuffer;
-	shared_ptr<Texture> NormalBuffer;
+	shared_ptr<Texture> NormalBuffers[2];
 	shared_ptr<Texture> GeomNormalBuffer;
 	shared_ptr<Texture> VelocityBuffer;
 	shared_ptr<Texture> RoughnessMetalicBuffer;
@@ -139,22 +136,15 @@ private:
 
 	shared_ptr<PipelineStateObject> SpatialDenoisingFilterPSO;
 
-	// gen specular gi mip
-	struct GenMipCB
-	{
-		glm::vec2 TexelSize;
-		UINT32 NumMipLevels;
-	};
-
-	GenMipCB GenMipCB;
-	shared_ptr<PipelineStateObject> GenMipPSO;
 
 
 	// temporal denoising
 	struct TemporalFilterConstant
 	{
+		glm::mat4x4 InvViewMatrix;
+		glm::mat4x4 InvProjMatrix;
 		glm::vec4 ProjectionParams;
-		glm::vec4 TemporalValidParams = glm::vec4(15, 0, 0, 0);
+		glm::vec4 TemporalValidParams = glm::vec4(28, 0, 0, 0);
 		glm::vec2 RTSize;
 		UINT32 FrameIndex;
 		float BayerRotScale = 0.1;
@@ -172,6 +162,7 @@ private:
 		glm::mat4x4 ViewMatrix;
 		glm::mat4x4 InvViewMatrix;
 		glm::mat4x4 ProjMatrix;
+		glm::mat4x4 InvProjMatrix;
 		glm::vec4 ProjectionParams;
 		glm::vec4	LightDir;
 		glm::vec4	pad[2];
@@ -188,6 +179,7 @@ private:
 		glm::mat4x4 ViewMatrix;
 		glm::mat4x4 InvViewMatrix;
 		glm::mat4x4 ProjMatrix;
+		glm::mat4x4 InvProjMatrix;
 		glm::vec4 ProjectionParams;
 		glm::vec4	LightDir;
 		glm::vec2 RandomOffset;
@@ -206,6 +198,7 @@ private:
 		glm::mat4x4 ViewMatrix;
 		glm::mat4x4 InvViewMatrix;
 		glm::mat4x4 ProjMatrix;
+		glm::mat4x4 InvProjMatrix;
 		glm::vec4 ProjectionParams;
 		glm::vec4 LightDir;
 		glm::vec2 RandomOffset;
@@ -396,12 +389,14 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	// misc
 	glm::vec3 LightDir = glm::normalize(glm::vec3(0.901, 0.88, 0.176));
 	float LightIntensity = 0.4;
-	float Near = 1.0f;
-	float Far = 40000.0f;
+	float Near = 10.0f;
+	float Far = 20000.0f;
 	float Fov = 0.8f;
 
 	glm::mat4x4 ViewMat;
 	glm::mat4x4 ProjMat;
+	glm::mat4x4 InvViewMat;
+	glm::mat4x4 InvProjMat;
 	glm::mat4x4 ViewProjMat;
 	glm::mat4x4 InvViewProjMat;
 	glm::mat4x4 PrevViewMat;
