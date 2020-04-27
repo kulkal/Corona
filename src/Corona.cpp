@@ -481,21 +481,20 @@ void Corona::LoadAssets()
 	}
 
 	// TAA pingping buffer
-	ColorBuffer0 = dx12_rhi->CreateTexture2D(DXGI_FORMAT_R16G16B16A16_FLOAT,
+	ColorBuffers[0] = dx12_rhi->CreateTexture2D(DXGI_FORMAT_R16G16B16A16_FLOAT,
 		D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
 		D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, m_width, m_height, 1);
-	ColorBuffer0->MakeRTV();
+	ColorBuffers[0]->MakeRTV();
 
-	NAME_D3D12_OBJECT(ColorBuffer0->resource);
+	NAME_D3D12_OBJECT(ColorBuffers[0]->resource);
 
-	ColorBuffer1 = dx12_rhi->CreateTexture2D(DXGI_FORMAT_R16G16B16A16_FLOAT,
+	ColorBuffers[1] = dx12_rhi->CreateTexture2D(DXGI_FORMAT_R16G16B16A16_FLOAT,
 		D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
 		D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, m_width, m_height, 1);
-	ColorBuffer1->MakeRTV();
+	ColorBuffers[1]->MakeRTV();
 
-	NAME_D3D12_OBJECT(ColorBuffer1->resource);
+	NAME_D3D12_OBJECT(ColorBuffers[1]->resource);
 
-	ColorBuffers = { ColorBuffer0.get(), ColorBuffer1.get() };
 
 	// lighting result
 	LightingBuffer = dx12_rhi->CreateTexture2D(DXGI_FORMAT_R16G16B16A16_FLOAT,
@@ -1605,7 +1604,7 @@ void Corona::ToneMapPass()
 
 
 	Texture* backbuffer = framebuffers[dx12_rhi->CurrentFrameIndex].get();
-	Texture* ResolveTarget = ColorBuffers[ColorBufferWriteIndex];//framebuffers[dx12_rhi->CurrentFrameIndex].get();
+	Texture* ResolveTarget = ColorBuffers[ColorBufferWriteIndex].get();//framebuffers[dx12_rhi->CurrentFrameIndex].get();
 
 	ToneMapPSO->Apply(dx12_rhi->GlobalCmdList->CmdList.Get());
 
@@ -2207,7 +2206,7 @@ void Corona::TemporalAAPass()
 	PIXScopedEvent(dx12_rhi->GlobalCmdList->CmdList.Get(), PIX_COLOR(rand() % 255, rand() % 255, rand() % 255), "TemporalAAPass");
 
 	UINT PrevColorBufferIndex = 1 - ColorBufferWriteIndex;
-	Texture* ResolveTarget = ColorBuffers[ColorBufferWriteIndex];//framebuffers[dx12_rhi->CurrentFrameIndex].get();
+	Texture* ResolveTarget = ColorBuffers[ColorBufferWriteIndex].get();//framebuffers[dx12_rhi->CurrentFrameIndex].get();
 
 	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(ResolveTarget->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET));
 
@@ -2215,7 +2214,7 @@ void Corona::TemporalAAPass()
 
 	TemporalAAPSO->SetSampler("samplerWrap", samplerWrap.get(), dx12_rhi->GlobalCmdList->CmdList.Get());
 	TemporalAAPSO->SetSRV("CurrentColorTex", LightingBuffer->GpuHandleSRV, dx12_rhi->GlobalCmdList->CmdList.Get());
-	Texture* PrevColorBuffer = ColorBuffers[PrevColorBufferIndex];
+	Texture* PrevColorBuffer = ColorBuffers[PrevColorBufferIndex].get();
 	TemporalAAPSO->SetSRV("PrevColorTex", PrevColorBuffer->GpuHandleSRV, dx12_rhi->GlobalCmdList->CmdList.Get());
 	TemporalAAPSO->SetSRV("VelocityTex", VelocityBuffer->GpuHandleSRV, dx12_rhi->GlobalCmdList->CmdList.Get());
 	TemporalAAPSO->SetSRV("DepthTex", DepthBuffer->GpuHandleSRV, dx12_rhi->GlobalCmdList->CmdList.Get());

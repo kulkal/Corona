@@ -66,12 +66,11 @@ class Corona : public DXSample
 
 	EDebugVisualization FullscreenDebugBuffer = EDebugVisualization::NO_FULLSCREEN;
 private:
+
 	shared_ptr<Texture> DepthBuffer;
 
 	UINT ColorBufferWriteIndex = 0;
-	shared_ptr<Texture> ColorBuffer0;
-	shared_ptr<Texture> ColorBuffer1;
-	std::array<Texture*, 2> ColorBuffers;
+	std::array<shared_ptr<Texture>, 2> ColorBuffers;
 	shared_ptr<Texture> LightingBuffer;
 	shared_ptr<Texture> AlbedoBuffer;
 	shared_ptr<Texture> NormalBuffer;
