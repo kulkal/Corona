@@ -98,6 +98,7 @@ void TemporalFilter( uint3 DTid : SV_DispatchThreadID, uint3 GTid : SV_GroupThre
 
     float3 Velocity = VelocityTex[PixelPos].xyz;
     PrevPos = PixelPos - Velocity.xy  * RTSize;
+    float2 PrevUV = (PrevPos + 0.5) /RTSize;
 
 	float4 CurrentSpecular = InSpecularGITex[PixelPos];
 
@@ -136,7 +137,8 @@ void TemporalFilter( uint3 DTid : SV_DispatchThreadID, uint3 GTid : SV_GroupThre
 	}
 	CurrentSpecular /= SumWSpec;
 
-	float4 PrevSpecular = InSpecularGITexPrev[PrevPos];
+	// float4 PrevSpecular = InSpecularGITexPrev[PrevPos];
+	float4 PrevSpecular = InSpecularGITexPrev.SampleLevel(BilinearClamp, PrevUV, 0);
 
 
 	SH CurrentSH = init_SH();
@@ -217,8 +219,8 @@ void TemporalFilter( uint3 DTid : SV_DispatchThreadID, uint3 GTid : SV_GroupThre
 	float PrevLuma = RGBToLuminance(PrevSpecular.xyz);
 	float CurLuma = RGBToLuminance(CurrentSpecular.xyz);
 
-	if(length(Velocity.xy) > 0)
-		PrevSpecular.xyz = clamp(PrevSpecular.xyz, SpecMin, SpecMax);
+	// if(length(Velocity.xy) > 0)
+	// 	PrevSpecular.xyz = clamp(PrevSpecular.xyz, SpecMin, SpecMax);
 	
 	float4 BlendedSpecular = 0..xxxx;
 	SH BlendedSH = init_SH();
