@@ -237,7 +237,10 @@ float4 PSMain(PSInput input) : SV_TARGET
     float3 Bloom = BloomTex.SampleLevel( sampleWrap, input.uv, 0);
     float3 CurrentColor =  CurrentColorTex[PixelPos] * Exposure[0] + Bloom * BloomStrength;
     float2 PrevPixelPos = PixelPos - Velocity * RTSize;
-    float3 PrevColor = PrevColorTex[PrevPixelPos].xyz;
+    // float3 PrevColor = PrevColorTex[PrevPixelPos].xyz;
+    float2 PrevUV = (PrevPixelPos + 0)/RTSize;
+    float3 PrevColor = PrevColorTex.SampleLevel( sampleWrap, PrevUV, 0);
+
 
     if(ClampMode == 0)
         PrevColor = clamp(PrevColor, clrMin, clrMax);
