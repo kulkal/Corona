@@ -553,45 +553,18 @@ void Corona::LoadAssets()
 
 	NAME_D3D12_OBJECT(SpeculaGIBufferTemporal[1]->resource);
 
-	SpeculaGIBufferSpatial[0] = dx12_rhi->CreateTexture2D(DXGI_FORMAT_R16G16B16A16_FLOAT,
+	// moments
+	SpeculaGIMoments[0] = dx12_rhi->CreateTexture2D(DXGI_FORMAT_R16G16_FLOAT,
 		D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
-		D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, m_width/3, m_height/3, 1);
+		D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, m_width, m_height, 1);
 
-	NAME_D3D12_OBJECT(SpeculaGIBufferSpatial[0]->resource);
+	NAME_D3D12_OBJECT(SpeculaGIMoments[0]->resource);
 
-	SpeculaGIBufferSpatial[1] = dx12_rhi->CreateTexture2D(DXGI_FORMAT_R16G16B16A16_FLOAT,
+	SpeculaGIMoments[1] = dx12_rhi->CreateTexture2D(DXGI_FORMAT_R16G16_FLOAT,
 		D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
-		D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, m_width / 3, m_height / 3, 1);
+		D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, m_width, m_height, 1);
 
-	NAME_D3D12_OBJECT(SpeculaGIBufferSpatial[1]->resource);
-
-	//// specular gi mips
-	//SpeculaGIBufferMip[0] = dx12_rhi->CreateTexture2D(DXGI_FORMAT_R16G16B16A16_FLOAT,
-	//	D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
-	//	D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, m_width / 2, m_height / 2, 1);
-
-	//NAME_D3D12_OBJECT(SpeculaGIBufferMip[0]->resource);
-
-	//SpeculaGIBufferMip[1] = dx12_rhi->CreateTexture2D(DXGI_FORMAT_R16G16B16A16_FLOAT,
-	//	D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
-	//	D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, m_width / 4, m_height / 4, 1);
-
-	//NAME_D3D12_OBJECT(SpeculaGIBufferMip[1]->resource);
-
-
-	//SpeculaGIBufferMip[2] = dx12_rhi->CreateTexture2D(DXGI_FORMAT_R16G16B16A16_FLOAT,
-	//	D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
-	//	D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, m_width / 8, m_height / 8, 1);
-
-	//NAME_D3D12_OBJECT(SpeculaGIBufferMip[2]->resource);
-
-
-	//SpeculaGIBufferMip[3] = dx12_rhi->CreateTexture2D(DXGI_FORMAT_R16G16B16A16_FLOAT,
-	//	D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
-	//	D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, m_width / 16, m_height / 16, 1);
-
-	//NAME_D3D12_OBJECT(SpeculaGIBufferMip[3]->resource);
-
+	NAME_D3D12_OBJECT(SpeculaGIMoments[1]->resource);
 	// diffuse gi
 
 	DiffuseGISHRaw = dx12_rhi->CreateTexture2D(DXGI_FORMAT_R16G16B16A16_FLOAT,
@@ -641,7 +614,7 @@ void Corona::LoadAssets()
 	NAME_D3D12_OBJECT(AlbedoBuffer->resource);
 
 	// velocity
-	VelocityBuffer = dx12_rhi->CreateTexture2D(DXGI_FORMAT_R16G16B16A16_FLOAT,
+	VelocityBuffer = dx12_rhi->CreateTexture2D(DXGI_FORMAT_R16G16_FLOAT,
 		D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
 		D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, m_width, m_height, 1, glm::vec4(0.0f, 0.0f, 0.0f, 0.0f));
 	VelocityBuffer->MakeRTV();
@@ -976,12 +949,10 @@ void Corona::InitSpatialDenoisingPass()
 	TEMP_SpatialDenoisingFilterPSO->BindSRV("GeoNormalTex", 1, 1);
 	TEMP_SpatialDenoisingFilterPSO->BindSRV("InGIResultSHTex", 2, 1);
 	TEMP_SpatialDenoisingFilterPSO->BindSRV("InGIResultColorTex", 3, 1);
-	TEMP_SpatialDenoisingFilterPSO->BindSRV("InSpecualrGITex", 4, 1);
 	
 	
 	TEMP_SpatialDenoisingFilterPSO->BindUAV("OutGIResultSH", 0);
 	TEMP_SpatialDenoisingFilterPSO->BindUAV("OutGIResultColor", 1);
-	TEMP_SpatialDenoisingFilterPSO->BindUAV("OutSpecularGI", 2);
 	
 	
 	TEMP_SpatialDenoisingFilterPSO->BindCBV("SpatialFilterConstant", 0, sizeof(SpatialFilterConstant));
@@ -1040,6 +1011,8 @@ void Corona::InitTemporalDenoisingPass()
 	TEMP_TemporalDenoisingFilterPSO->BindSRV("RougnessMetalicTex", 9, 1);
 	TEMP_TemporalDenoisingFilterPSO->BindSRV("PrevDepthTex", 10, 1);
 	TEMP_TemporalDenoisingFilterPSO->BindSRV("PrevNormalTex", 11, 1);
+	TEMP_TemporalDenoisingFilterPSO->BindSRV("PrevMomentsTex", 12, 1);
+
 
 
 
@@ -1049,6 +1022,8 @@ void Corona::InitTemporalDenoisingPass()
 	TEMP_TemporalDenoisingFilterPSO->BindUAV("OutGIResultSHDS", 2);
 	TEMP_TemporalDenoisingFilterPSO->BindUAV("OutGIResultColorDS", 3);
 	TEMP_TemporalDenoisingFilterPSO->BindUAV("OutSpecularGI", 4);
+	TEMP_TemporalDenoisingFilterPSO->BindUAV("OutMoments", 5);
+
 	//TemporalDenoisingFilterPSO->BindUAV("OutSpecularGIDS", 5);
 
 	TEMP_TemporalDenoisingFilterPSO->BindSampler("BilinearClamp", 0);
@@ -1240,7 +1215,7 @@ void Corona::InitGBufferPass()
 	psoDescMesh.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
 	psoDescMesh.RTVFormats[1] = DXGI_FORMAT_R16G16B16A16_FLOAT;
 	psoDescMesh.RTVFormats[2] = DXGI_FORMAT_R16G16B16A16_FLOAT;
-	psoDescMesh.RTVFormats[3] = DXGI_FORMAT_R16G16B16A16_FLOAT;
+	psoDescMesh.RTVFormats[3] = DXGI_FORMAT_R16G16_FLOAT;
 	psoDescMesh.RTVFormats[4] = DXGI_FORMAT_R8G8B8A8_UNORM;
 	psoDescMesh.RTVFormats[5] = DXGI_FORMAT_R32_FLOAT;
 
@@ -1877,7 +1852,7 @@ void Corona::DebugPass()
 
 		cb.RTSize = glm::vec2(m_width, m_height);
 		cb.GIBufferScale = GIBufferScale;
-		if (eFS == EDebugVisualization::SH_LIGHTING)
+		if (eFS == EDebugVisualization::FINAL_INDIRECT_DIFFUSE)
 		{
 			cb.Offset = glm::vec4(0, 0, 0, 0);
 			cb.Scale = glm::vec4(1, 1, 0, 0);
@@ -2025,6 +2000,31 @@ void Corona::DebugPass()
 		dx12_rhi->GlobalCmdList->CmdList->DrawInstanced(4, 1, 0, 0);
 	});
 
+	functions.push_back([&](EDebugVisualization eFS) {
+		// history length
+		DebugPassCB cb;
+
+
+		if (eFS == EDebugVisualization::SPEC_HISTORY_LENGTH)
+		{
+			cb.Offset = glm::vec4(0, 0, 0, 0);
+			cb.Scale = glm::vec4(1, 1, 0, 0);
+		}
+		else if (eFS == EDebugVisualization::NO_FULLSCREEN)
+		{
+			cb.Offset = glm::vec4(-0.75, 0.75, 0, 0);
+			cb.Scale = glm::vec4(0.25, 0.25, 0, 0);
+		}
+		else
+		{
+			return;
+		}
+
+		cb.DebugMode = CHANNEL_W;
+		BufferVisualizePSO->SetCBVValue("DebugPassCB", &cb, dx12_rhi->GlobalCmdList->CmdList.Get());
+		BufferVisualizePSO->SetSRV("SrcTex", SpeculaGIBufferTemporal[GIBufferWriteIndex]->GpuHandleSRV, dx12_rhi->GlobalCmdList->CmdList.Get());
+		dx12_rhi->GlobalCmdList->CmdList->DrawInstanced(4, 1, 0, 0);
+	});
 
 	EDebugVisualization FullScreenVisualize = EDebugVisualization::SPECULAR_RAW;
 
@@ -2479,7 +2479,7 @@ void Corona::OnRender()
 		/*
 		enum class EDebugVisualization
 		{
-		SHADOW,
+				SHADOW,
 		WORLD_NORMAL,
 		GEO_NORMAL,
 		DEPTH,
@@ -2487,13 +2487,14 @@ void Corona::OnRender()
 		RAW_CoCg,
 		TEMPORAL_FILTERED_SH,
 		SPATIAL_FILTERED_SH,
-		SH_LIGHTING,
+		FINAL_INDIRECT_DIFFUSE,
 		ALBEDO,
 		VELOCITY,
 		ROUGNESS_METALLIC,
 		SPECULAR_RAW,
 		TEMPORAL_FILTERED_SPECULAR,
 		BLOOM,
+		SPEC_HISTORY_LENGTH,
 		NO_FULLSCREEN,
 		};
 		*/
@@ -2507,13 +2508,14 @@ void Corona::OnRender()
 			"RAW_CoCg",
 			"TEMPORAL_FILTERED_SH",
 			"SPATIAL_FILTERED_SH",
-			"SH_LIGHTING",
+			"FINAL_INDIRECT_DIFFUSE",
 			"ALBEDO",
 			"VELOCITY",
 			"ROUGNESS_METALLIC",
 			"SPECULAR_RAW",
 			"TEMPORAL_FILTERED_SPECULAR",
 			"BLOOM",
+			"SPEC_HISTORY_LENGTH",
 			"NO_FULLSCREEN",
 		};
 		static const char* item_current = items[UINT(EDebugVisualization::NO_FULLSCREEN)];
@@ -2816,7 +2818,7 @@ void Corona::GBufferPass()
 	const float normalClearColor[] = { 0.0f, -0.1f, 0.0f, 0.0f };
 	dx12_rhi->GlobalCmdList->CmdList->ClearRenderTargetView(NormalBuffers[ColorBufferWriteIndex]->CpuHandleRTV, normalClearColor, 0, nullptr);
 	dx12_rhi->GlobalCmdList->CmdList->ClearRenderTargetView(GeomNormalBuffer->CpuHandleRTV, normalClearColor, 0, nullptr);
-	const float velocityClearColor[] = { 0.0f, 0.0f, 0.0f, 0.0f };
+	const float velocityClearColor[] = { 0.0f, 0.0f};
 	dx12_rhi->GlobalCmdList->CmdList->ClearRenderTargetView(VelocityBuffer->CpuHandleRTV, velocityClearColor, 0, nullptr);
 	const float roughnessClearColor[] = { 0.001f, 0.0f, 0.0f, 0.0f };
 	dx12_rhi->GlobalCmdList->CmdList->ClearRenderTargetView(RoughnessMetalicBuffer->CpuHandleRTV, roughnessClearColor, 0, nullptr);
@@ -2929,12 +2931,10 @@ void Corona::SpatialDenoisingPass()
 		SpatialDenoisingFilterPSO->SetSRV("GeoNormalTex", GeomNormalBuffer->GpuHandleSRV, dx12_rhi->GlobalCmdList->CmdList.Get());
 		SpatialDenoisingFilterPSO->SetSRV("InGIResultSHTex", DiffuseGISHSpatial[ReadIndex]->GpuHandleSRV, dx12_rhi->GlobalCmdList->CmdList.Get());
 		SpatialDenoisingFilterPSO->SetSRV("InGIResultColorTex", DiffuseGICoCgSpatial[ReadIndex]->GpuHandleSRV, dx12_rhi->GlobalCmdList->CmdList.Get());
-		SpatialDenoisingFilterPSO->SetSRV("InSpecualrGITex", SpeculaGIBufferSpatial[ReadIndex]->GpuHandleSRV, dx12_rhi->GlobalCmdList->CmdList.Get());
 
 
 		SpatialDenoisingFilterPSO->SetUAV("OutGIResultSH", DiffuseGISHSpatial[WriteIndex]->GpuHandleUAV, dx12_rhi->GlobalCmdList->CmdList.Get());
 		SpatialDenoisingFilterPSO->SetUAV("OutGIResultColor", DiffuseGICoCgSpatial[WriteIndex]->GpuHandleUAV, dx12_rhi->GlobalCmdList->CmdList.Get());
-		SpatialDenoisingFilterPSO->SetUAV("OutSpecularGI", SpeculaGIBufferSpatial[WriteIndex]->GpuHandleUAV, dx12_rhi->GlobalCmdList->CmdList.Get());
 
 		SpatialFilterCB.Iteration = i;
 		SpatialDenoisingFilterPSO->SetCBVValue("SpatialFilterConstant", &SpatialFilterCB, dx12_rhi->GlobalCmdList->CmdList.Get());
@@ -2968,7 +2968,6 @@ void Corona::TemporalDenoisingPass()
 	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(DiffuseGISHTemporal[WriteIndex]->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS));
 	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(DiffuseGICoCgTemporal[WriteIndex]->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS));
 	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(SpeculaGIBufferTemporal[WriteIndex]->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS));
-	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(SpeculaGIBufferSpatial[0]->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS));
 
 
 	TemporalDenoisingFilterPSO->Apply(dx12_rhi->GlobalCmdList->CmdList.Get());
@@ -3006,7 +3005,6 @@ void Corona::TemporalDenoisingPass()
 	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(DiffuseGISHTemporal[WriteIndex]->resource.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
 	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(DiffuseGICoCgTemporal[WriteIndex]->resource.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
 	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(SpeculaGIBufferTemporal[WriteIndex]->resource.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
-	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(SpeculaGIBufferSpatial[0]->resource.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
 }
 
 

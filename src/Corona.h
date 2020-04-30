@@ -50,13 +50,14 @@ class Corona : public DXSample
 		RAW_CoCg,
 		TEMPORAL_FILTERED_SH,
 		SPATIAL_FILTERED_SH,
-		SH_LIGHTING,
+		FINAL_INDIRECT_DIFFUSE,
 		ALBEDO,
 		VELOCITY,
 		ROUGNESS_METALLIC,
 		SPECULAR_RAW,
 		TEMPORAL_FILTERED_SPECULAR,
 		BLOOM,
+		SPEC_HISTORY_LENGTH,
 		NO_FULLSCREEN,
 	};
 
@@ -79,9 +80,8 @@ private:
 	shared_ptr<Texture> SpeculaGIBufferRaw;
 
 	shared_ptr<Texture> SpeculaGIBufferTemporal[2];
-	shared_ptr<Texture> SpeculaGIBufferSpatial[2];
 
-	shared_ptr<Texture> SpeculaGIBufferMip[4];
+	shared_ptr<Texture> SpeculaGIMoments[2];
 
 
 
@@ -148,7 +148,7 @@ private:
 		glm::vec2 RTSize;
 		UINT32 FrameIndex;
 		float BayerRotScale = 0.1;
-		float SpecularBlurRadius = 2;
+		float SpecularBlurRadius = 4;
 		float Point2PlaneDistScale = 10.0f;
 	};
 

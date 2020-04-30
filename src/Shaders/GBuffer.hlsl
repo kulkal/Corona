@@ -91,7 +91,7 @@ struct PS_OUTPUT
     float4 Albedo : SV_Target0;
     float4 Normal : SV_Target1;
     float4 GeomNormal : SV_Target2;
-    float4 Velocity : SV_Target3;
+    float2 Velocity : SV_Target3;
     float4 Material : SV_Target4;
     float UnjitteredDepth : SV_Target5;
 };
@@ -108,9 +108,9 @@ PS_OUTPUT PSMain(PSInput input) : SV_TARGET
     positionSS *= RTSize.xy;
     
     float curDepth = input.unjitteredPosition.z/input.unjitteredPosition.w * 0.5 + 0.5;
-    float3 velocity;
+    float2 velocity;
     velocity.xy = positionSS - prevPositionSS;
-    velocity.z = curDepth - prevDepth;
+    // velocity.z = curDepth - prevDepth;
 
 
     velocity.xy /= RTSize.xy;
@@ -128,7 +128,7 @@ PS_OUTPUT PSMain(PSInput input) : SV_TARGET
     output.Albedo.xyz = Albedo.xyz;
     output.Normal.xyz = WorldNormal;
     output.GeomNormal.xyz = input.normal;
-    output.Velocity.xyz = velocity;
+    output.Velocity.xy = velocity;
     output.UnjitteredDepth = input.unjitteredPosition.z/input.unjitteredPosition.w;
 
     if(bOverrideRougnessMetallic)
