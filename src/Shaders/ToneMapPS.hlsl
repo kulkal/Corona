@@ -2,6 +2,8 @@
 
 #include "Common.hlsl"
 Texture2D SrcTex: register(t0);
+StructuredBuffer<float> Exposure : register( t1 );
+
 SamplerState sampleWrap : register(s0);
 cbuffer ToneMapCB : register(b0)
 {
@@ -106,8 +108,8 @@ float3 ToneMap_Hable(in float3 color) {
 
 float4 PSMain(PSInput input) : SV_TARGET
 {
-    input.uv.y *= -1;
-    float4 SrcColor = SrcTex.Sample(sampleWrap, input.uv);
+    input.uv.y = 1 - input.uv.y;
+    float4 SrcColor = SrcTex.Sample(sampleWrap, input.uv) * Exposure[0];
     float3 ToneMapped;
     if(ToneMapMode == 0) 
         ToneMapped = LinearTosRGB(SrcColor);

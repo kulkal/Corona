@@ -12,9 +12,7 @@ Texture2D CurrentColorTex : register(t0);
 Texture2D PrevColorTex : register(t1);
 Texture2D VelocityTex : register(t2);
 Texture2D DepthTex : register(t3);
-Texture2D BloomTex : register(t4);
-StructuredBuffer<float> Exposure : register( t5 );
-
+// Texture2D BloomTex : register(t4);
 
 SamplerState sampleWrap : register(s0);
 
@@ -25,7 +23,7 @@ cbuffer TemporalAAParam : register(b0)
     float TAABlendFactor;
     uint ClampMode;
     // float Exposure;
-    float BloomStrength;
+    // float BloomStrength;
 };
 
 struct VSInput
@@ -222,7 +220,7 @@ float4 PSMain(PSInput input) : SV_TARGET
 
             float2 sampleDist = abs(sampleOffset) / (ResolveFilterDiameter / 2.0f);
 
-            float3 sample = CurrentColorTex[samplePos].xyz * Exposure[0];
+            float3 sample = CurrentColorTex[samplePos].xyz ;
           
             clrMin = min(clrMin, sample);
             clrMax = max(clrMax, sample);
@@ -234,8 +232,8 @@ float4 PSMain(PSInput input) : SV_TARGET
     }
 
     float2 Velocity = VelocityTex[PixelPos];
-    float3 Bloom = BloomTex.SampleLevel( sampleWrap, input.uv, 0);
-    float3 CurrentColor =  CurrentColorTex[PixelPos] * Exposure[0] + Bloom * BloomStrength;
+    // float3 Bloom = BloomTex.SampleLevel( sampleWrap, input.uv, 0);
+    float3 CurrentColor =  CurrentColorTex[PixelPos];//  + Bloom * BloomStrength;
     float2 PrevPixelPos = PixelPos - Velocity * RTSize;
     // float3 PrevColor = PrevColorTex[PrevPixelPos].xyz;
     float2 PrevUV = (PrevPixelPos + 0)/RTSize;

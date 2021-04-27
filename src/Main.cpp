@@ -17,7 +17,10 @@ _Use_decl_annotations_
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow)
 {
 	//Corona* sample = new Corona(2560, 1440, L"Corona");
-	Corona* sample = new Corona(1920, 1080, L"Corona");
+	Corona* sample = new Corona(2560, 1440, 1920, 1080,  L"Corona");
+
+	//Corona* sample = new Corona(1920, 1080, 1280, 720, L"Corona");
+
 
 	Win32Application::Run(sample, hInstance, nCmdShow);
 

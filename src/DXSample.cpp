@@ -91,3 +91,11 @@ void DXSample::ParseCommandLineArgs(WCHAR* argv[], int argc)
 		}
 	}
 }
+
+void DXSample::SetWindowBounds(int left, int top, int right, int bottom)
+{
+	m_windowBounds.left = static_cast<LONG>(left);
+	m_windowBounds.top = static_cast<LONG>(top);
+	m_windowBounds.right = static_cast<LONG>(right);
+	m_windowBounds.bottom = static_cast<LONG>(bottom);
+}

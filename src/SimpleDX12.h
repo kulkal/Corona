@@ -1,8 +1,11 @@
 #pragma once
 
+
 #include <d3d12.h>
 #include <wrl.h>
 #include <dxgi1_4.h>
+#include <dxgi1_6.h>
+
 #include <set>
 #include <vector>
 #include <list>
@@ -21,7 +24,8 @@
 #include "glm/fwd.hpp"
 
 #include <crtdbg.h>
-
+#include <dxcapi.use.h>
+#include <dxcapi.h>
 #if _DEBUG
 #define DEBUG_CLIENTBLOCK   new( _CLIENT_BLOCK, __FILE__, __LINE__)
 #else
@@ -30,17 +34,59 @@
 
 #include "DXSampleHelper.h"
 
+#include "AbstractGfxLayer.h"
+
 #define USE_AFTERMATH 0
 
 using namespace Microsoft::WRL;
 using namespace std;
+
+
+#if defined(_DEBUG)
+inline void SetName(ID3D12Object* pObject, LPCWSTR name)
+{
+	if (wstring(name) == L"ColorBuffers[0]")
+	{
+		int a = 0;
+	}
+	pObject->SetName(name);
+}
+inline void SetNameIndexed(ID3D12Object* pObject, LPCWSTR name, UINT index)
+{
+	WCHAR fullName[50];
+	if (swprintf_s(fullName, L"%s[%u]", name, index) > 0)
+	{
+		pObject->SetName(fullName);
+	}
+}
+#else
+inline void SetName(ID3D12Object*, LPCWSTR)
+{
+}
+inline void SetNameIndexed(ID3D12Object*, LPCWSTR, UINT)
+{
+}
+#endif
+
+// Naming helper for ComPtr<T>.
+// Assigns the name of the variable as the name of the object.
+// The indexed variant will include the index in the name of the object.
+#define NAME_D3D12_OBJECT(x) SetName(x.Get(), L#x)
+#define NAME_D3D12_OBJECT_INDEXED(x, n) SetNameIndexed(x[n].Get(), L#x, n)
+#define NAME_D3D12_TEXTURE(x) x->name = L#x;SetName(x->resource.Get(), L#x)
 
 class SimpleDX12;
 class Texture;
 class Sampler;
 //class ThreadDescriptorHeapPool;
 
-class CommandList
+struct Descriptor : public GfxDescriptor
+{
+	D3D12_CPU_DESCRIPTOR_HANDLE CpuHandle;
+	D3D12_GPU_DESCRIPTOR_HANDLE GpuHandle;
+};
+
+class CommandList : public GfxCommandList
 {
 public:
 	ComPtr<ID3D12GraphicsCommandList4> CmdList;
@@ -87,7 +133,7 @@ public:
 	UINT64 FenceValue = 0;
 };
 
-class PipelineStateObject
+class PipelineStateObject : public GfxPipelineStateObject
 {
 public:
 	bool IsCompute = false;
@@ -148,10 +194,16 @@ public:
 	void SetSampler(string name, Sampler* sampler, ID3D12GraphicsCommandList* CommandList);
 
 	void SetCBVValue(string name, void* pData, ID3D12GraphicsCommandList* CommandList);
+	void SetCBVValue(string name, UINT64 GPUAddr, ID3D12GraphicsCommandList* CommandList);
+
 	void SetRootConstant(string, UINT value, ID3D12GraphicsCommandList* CommandList);
+
+	PipelineStateObject() {}
+	virtual ~PipelineStateObject() {}
 };
 
-class RTPipelineStateObject
+
+class RTPipelineStateObject : public GfxRTPipelineStateObject
 {
 	struct BindingData
 	{
@@ -232,7 +284,7 @@ public:
 	UINT ShaderTableSize;
 	ComPtr<ID3D12Resource> ShaderTable;
 
-	UINT NumInstance;
+	//UINT NumInstance;
 
 	void AddHitGroup(string name, string chs, string ahs);
 
@@ -241,28 +293,34 @@ public:
 	void BindUAV(string shader, string name, UINT baseRegister);
 	void BindSRV(string shader, string name, UINT baseRegister);
 	void BindSampler(string shader, string name, UINT baseRegister);
-	void BindCBV(string shader, string name, UINT baseRegister, UINT size, UINT numInstance);
+	void BindCBV(string shader, string name, UINT baseRegister, UINT size);
 
 	void BeginShaderTable();
-	void EndShaderTable();
+	void EndShaderTable(UINT NumInstance);
 	void SetGlobalBinding(CommandList* CommandList);
 	
 	void SetUAV(string shader, string bindingName, D3D12_GPU_DESCRIPTOR_HANDLE uavHandle, INT instanceIndex = -1);
 	void SetSRV(string shader, string bindingName, D3D12_GPU_DESCRIPTOR_HANDLE srvHandle, INT instanceIndex = -1);
 	void SetSampler(string shader, string bindingName, Sampler* sampler, INT instanceIndex = -1);
 	void SetCBVValue(string shader, string bindingName, void* pData, INT instanceIndex = -1);
+	void SetCBVValue(string shader, string bindingName, UINT64 GPUAddr, INT instanceIndex = -1);
 
 	void ResetHitProgram(UINT instanceIndex);
 	void StartHitProgram(string HitGroup, UINT instanceIndex);
 	void AddDescriptor2HitProgram(string HitGroup, D3D12_GPU_DESCRIPTOR_HANDLE srvHandle, UINT instanceIndex);
 
-	bool InitRS(string ShaderFile);
-	void Apply(UINT width, UINT height, CommandList* CommandList);
+	bool InitRS(string ShaderFile, std::optional<vector< DxcDefine>>  Defines = nullopt);
+	void DispatchRay(UINT width, UINT height, CommandList* CommandList, UINT NumInstance);
+
+	RTPipelineStateObject() {}
+	virtual ~RTPipelineStateObject() {}
 };
 
-class Buffer
+class Buffer : public GfxBuffer
 {
 public:
+	wstring name;
+
 	enum BufferType
 	{
 		BYTE_ADDRESS,
@@ -273,76 +331,75 @@ public:
 	UINT NumElements;
 	UINT ElementSize;
 	ComPtr<ID3D12Resource> resource;
-	D3D12_CPU_DESCRIPTOR_HANDLE CpuHandleSRV;
-	D3D12_GPU_DESCRIPTOR_HANDLE GpuHandleSRV;
 
-	D3D12_CPU_DESCRIPTOR_HANDLE CpuHandleUAV;
-	D3D12_GPU_DESCRIPTOR_HANDLE GpuHandleUAV;
+	Descriptor SRV;
+	Descriptor UAV;
+
 
 	void MakeByteAddressBufferSRV();
 	void MakeStructuredBufferSRV();
+
+	Buffer() {}
+	virtual ~Buffer() {}
 };
 
-class IndexBuffer
+class IndexBuffer : public GfxIndexBuffer
 {
 public:
 	int numIndices;
 	ComPtr<ID3D12Resource> resource;
 	D3D12_INDEX_BUFFER_VIEW view;
 
-	D3D12_CPU_DESCRIPTOR_HANDLE CpuHandleSRV;
-	D3D12_GPU_DESCRIPTOR_HANDLE GpuHandleSRV;
+	Descriptor Descriptor;
+
+	IndexBuffer() {}
+	virtual ~IndexBuffer() {}
 };
 
-class VertexBuffer
+class VertexBuffer : public GfxVertexBuffer
 {
 public:
 	int numVertices;
 	ComPtr<ID3D12Resource> resource;
 	D3D12_VERTEX_BUFFER_VIEW view;
 
-	D3D12_CPU_DESCRIPTOR_HANDLE CpuHandleSRV;
-	D3D12_GPU_DESCRIPTOR_HANDLE GpuHandleSRV;
+	Descriptor Descriptor;
+
+	VertexBuffer() {}
+	virtual ~VertexBuffer() {}
+
 };
 
-class Sampler
+class Sampler : public GfxSampler
 {
 public:
 	D3D12_SAMPLER_DESC SamplerDesc;
 	ComPtr<ID3D12Resource> resource;
-	D3D12_CPU_DESCRIPTOR_HANDLE CpuHandle;
-	D3D12_GPU_DESCRIPTOR_HANDLE GpuHandle;
+	
+	Descriptor Descriptor;
 };
 
-class Texture 
+class Texture : public GfxTexture
 {
 public:
+	bool isRT = false;
+	wstring name;
 	D3D12_RESOURCE_DESC textureDesc;
 
 	ComPtr<ID3D12Resource> resource;
 
-	D3D12_CPU_DESCRIPTOR_HANDLE CpuHandleUAV;
-	D3D12_GPU_DESCRIPTOR_HANDLE GpuHandleUAV;
-
-
-	D3D12_CPU_DESCRIPTOR_HANDLE CpuHandleRTV;
-	D3D12_GPU_DESCRIPTOR_HANDLE GpuHandleRTV;
-
-	D3D12_CPU_DESCRIPTOR_HANDLE CpuHandleDSV;
-	D3D12_GPU_DESCRIPTOR_HANDLE GpuHandleDSV;
-
-	D3D12_CPU_DESCRIPTOR_HANDLE CpuHandleSRV;
-	D3D12_GPU_DESCRIPTOR_HANDLE GpuHandleSRV;
+	Descriptor UAV;
+	Descriptor RTV;
+	Descriptor DSV;
+	Descriptor SRV;
 
 	void MakeStaticSRV();
-	void MakeRTV(bool isBackBuffer = false);
 	void MakeDSV();
 
 	void UploadSRCData3D(D3D12_SUBRESOURCE_DATA* SrcData);
 	Texture(){}
-	~Texture()
+	virtual ~Texture()
 	{
-		int a = 0;
 	}
 };
 
@@ -385,7 +442,7 @@ public:
 
 public:
 	void Init(DescriptorHeap* InDHHeap, UINT InNumDescriptors, UINT InNumFrame);
-	void AllocDescriptor(D3D12_CPU_DESCRIPTOR_HANDLE& cpuHandle, D3D12_GPU_DESCRIPTOR_HANDLE& gpuHandle);
+	UINT AllocDescriptor(D3D12_CPU_DESCRIPTOR_HANDLE& cpuHandle, D3D12_GPU_DESCRIPTOR_HANDLE& gpuHandle, UINT32 Num = 1);
 	void Advance();
 
 	DescriptorHeapRing(){}
@@ -441,12 +498,12 @@ public:
 //};
 
 class Mesh;
-class RTAS
+class RTAS : public GfxRTAS
 {
 public:
 	shared_ptr<Mesh> mesh;
-	D3D12_GPU_DESCRIPTOR_HANDLE GPUHandle;
-	D3D12_CPU_DESCRIPTOR_HANDLE CPUHandle;
+
+	Descriptor Descriptor;
 
 	ComPtr<ID3D12Resource> Scratch;
 	ComPtr<ID3D12Resource> Result;
@@ -458,10 +515,10 @@ class Material
 public:
 	bool bHasAlpha = false;
 
-	shared_ptr<Texture> Diffuse;
-	shared_ptr<Texture> Normal;
-	shared_ptr<Texture> Roughness;
-	shared_ptr<Texture> Metallic;
+	shared_ptr<GfxTexture> Diffuse;
+	shared_ptr<GfxTexture> Normal;
+	shared_ptr<GfxTexture> Roughness;
+	shared_ptr<GfxTexture> Metallic;
 	Material() {}
 	~Material()
 	{
@@ -491,10 +548,10 @@ public:
 
 	UINT VertexStride;
 
-	DXGI_FORMAT IndexFormat = DXGI_FORMAT_R32_UINT;
+	FORMAT IndexFormat = FORMAT_R32_UINT;
 
-	shared_ptr<IndexBuffer> Ib;
-	shared_ptr<VertexBuffer> Vb;
+	shared_ptr<GfxIndexBuffer> Ib;
+	shared_ptr<GfxVertexBuffer> Vb;
 	vector<shared_ptr<Texture>> Textures;
 
 	shared_ptr<Material> Mat;
@@ -507,7 +564,10 @@ public:
 class Scene
 {
 public:
-	
+	glm::vec3 AABBMin = glm::vec3(0, 0, 0);
+	glm::vec3 AABBMax = glm::vec3(0, 0, 0);
+	float BoundingRadius = 0.f;
+
 	void SetTransform(glm::mat4x4 inTransform);
 
 public:
@@ -539,15 +599,19 @@ public:
 	std::unique_ptr<DescriptorHeap> SRVCBVDescriptorHeapStorage;
 
 	std::unique_ptr<DescriptorHeapRing> GlobalDHRing; // resources that changes every frame.
-	std::unique_ptr<DescriptorHeapRing> TextureDHRing;
+	std::unique_ptr<DescriptorHeapRing> TextureDHRing; // can be changed only when new texture is added or removed. it works like static at this moment.
 	std::unique_ptr<DescriptorHeapRing> GeomtryDHRing;
 
 	std::unique_ptr<ConstantBufferRingBuffer> GlobalCBRing;
 
-	std::vector<std::shared_ptr<Texture>> renderTargetTextures;
-	std::list<std::shared_ptr<Texture>> DynamicTextures;
-	std::list<std::shared_ptr<Buffer>> DynamicBuffers;
+	std::unique_ptr<DescriptorHeapRing> GlobalRTDHRing; // can be changed only when new texture is added or removed. it works like static at this moment.
 
+
+	std::vector<std::shared_ptr<Texture>> renderTargetTextures;
+	std::list<Buffer*> DynamicBuffers;
+
+
+	bool m_windowedMode;
 
 	ComPtr<IDXGISwapChain3> m_swapChain;
 
@@ -556,28 +620,38 @@ public:
 #if USE_AFTERMATH
 	GFSDK_Aftermath_ContextHandle AM_CL_Handle;
 #endif
+
+	bool m_tearingSupport = false;
+	ComPtr<IDXGIAdapter1> m_hardwareAdapter;
+
 public:
-	void BeginFrame();
+	void BeginFrame(std::list<Texture*>& DynamicTexture);
 	void EndFrame();
 
-	shared_ptr<Texture> CreateTexture2DFromResource(ComPtr<ID3D12Resource> InResource);
-	shared_ptr<Texture> CreateTexture2D(DXGI_FORMAT format, D3D12_RESOURCE_FLAGS resFlags, D3D12_RESOURCE_STATES initResState, int width, int height, int mipLevels, std::optional<glm::vec4> clearColor = std::nullopt);
-	shared_ptr<Texture> CreateTexture3D(DXGI_FORMAT format, D3D12_RESOURCE_FLAGS resFlags, D3D12_RESOURCE_STATES initResState, int width, int height, int depth, int mipLevels);
+	Texture* CreateTexture2D(DXGI_FORMAT format, D3D12_RESOURCE_FLAGS resFlags, D3D12_RESOURCE_STATES initResState, int width, int height, int mipLevels, std::optional<glm::vec4> clearColor = std::nullopt);
+	Texture* CreateTexture3D(DXGI_FORMAT format, D3D12_RESOURCE_FLAGS resFlags, D3D12_RESOURCE_STATES initResState, int width, int height, int depth, int mipLevels);
+	Texture* CreateTextureFromFile(wstring fileName, bool nonSRGB);
 
-	shared_ptr<Texture> CreateTextureFromFile(wstring fileName, bool nonSRGB);
-	shared_ptr<Sampler> CreateSampler(D3D12_SAMPLER_DESC& InSamplerDesc);
-	shared_ptr<Buffer> CreateBuffer(UINT InNumElements, UINT InElementSize, D3D12_RESOURCE_STATES initResState, bool isUAV, void* SrcData = nullptr);
-	shared_ptr<IndexBuffer> CreateIndexBuffer(DXGI_FORMAT Format, UINT Size, void* SrcData);
-	shared_ptr<VertexBuffer> CreateVertexBuffer(UINT Size, UINT Stride, void* SrcData);
+	shared_ptr<Texture> CreateTexture2DFromResource(ComPtr<ID3D12Resource> InResource); // used only by SimpleDX12
+
+
+	Sampler* CreateSampler(D3D12_SAMPLER_DESC& InSamplerDesc);
+	Buffer* CreateBuffer(UINT InNumElements, UINT InElementSize, D3D12_HEAP_TYPE InType, D3D12_RESOURCE_STATES initResState, D3D12_RESOURCE_FLAGS InFlags, void* SrcData = nullptr);
+	IndexBuffer* CreateIndexBuffer(DXGI_FORMAT Format, UINT Size, void* SrcData);
+	VertexBuffer* CreateVertexBuffer(UINT Size, UINT Stride, void* SrcData);
 	shared_ptr<RTAS> CreateTLAS(vector<shared_ptr<RTAS>>& VecBottomLevelAS);
 
 	ComPtr<ID3DBlob> CreateShader(wstring FileName, string EntryPoint, string Target);
+	ComPtr<ID3DBlob> CreateShaderDXC(wstring FileName, wstring EntryPoint, wstring Target, std::optional<vector< DxcDefine>>  Defines);
 
 
 	void PresentBarrier(Texture* rt);
 	void ResourceBarrier(ID3D12Resource* Resource, D3D12_RESOURCE_STATES StateBefore, D3D12_RESOURCE_STATES StateAfter);
 
-	SimpleDX12(ComPtr<ID3D12Device5> pDevice);
+	void OnSizeChanged(UINT width, UINT height);
+	void GetFrameBuffers(std::vector<std::shared_ptr<Texture>>& FrameFuffers);
+
+	SimpleDX12(HWND hWnd, UINT DisplayWidth, UINT DisplayHeight);
 	virtual ~SimpleDX12();
 };
 

@@ -1,4 +1,5 @@
 #include "Common.hlsl"
+#include "NRD.hlsl"
 
 RWTexture2D<float4> GIResultSH : register(u0);
 RWTexture2D<float4> GIResultColor : register(u1);
@@ -26,6 +27,7 @@ cbuffer ViewParameter : register(b0)
     uint FrameCounter;
     uint BlueNoiseOffsetStride;
     float ViewSpreadAngle;
+	uint bPackNRD;
 };
 
 SamplerState sampleWrap : register(s0);
@@ -49,6 +51,7 @@ struct RayPayload
     float spreadAngle;
     float coneWidth;
     bool bHit;
+	float hitT;
 };
 
 
@@ -105,17 +108,17 @@ float3x3 buildTBN(float3 normal) {
 void rayGen
 ()
 {
-    uint3 launchIndex = DispatchRaysIndex();
-    uint3 launchDim = DispatchRaysDimensions();
+	uint3 launchIndex = DispatchRaysIndex();
+	uint3 launchDim = DispatchRaysDimensions();
 
 
-    float2 crd = float2(launchIndex.xy);
+	float2 crd = float2(launchIndex.xy);
 	//crd.y *= -1;
-    float2 dims = float2(launchDim.xy);
+	float2 dims = float2(launchDim.xy);
 
-    float2 d = ((crd / dims) * 2.f - 1.f);
-    d *= tan(0.8 / 2);
-    float aspectRatio = dims.x / dims.y;
+	float2 d = ((crd / dims) * 2.f - 1.f);
+	d *= tan(0.8 / 2);
+	float aspectRatio = dims.x / dims.y;
 
 
 	float2 UV = crd / dims;
@@ -124,96 +127,106 @@ void rayGen
 	float3 WorldNormal = normalize(WorldNormalTex.SampleLevel(sampleWrap, UV, 0).xyz);
   
 
-    float LinearDepth = GetLinearDepthOpenGL(DeviceDepth, ProjectionParams.z, ProjectionParams.w) ;
+	float LinearDepth = GetLinearDepthOpenGL(DeviceDepth, ProjectionParams.z, ProjectionParams.w);
 	
-    float2 ScreenPosition = crd.xy;
+	float2 ScreenPosition = crd.xy;
 	ScreenPosition.x /= dims.x;
 	ScreenPosition.y /= dims.y;
 	ScreenPosition.xy = ScreenPosition.xy * 2 - 1;
 	ScreenPosition.y = -ScreenPosition.y;
 
 	// float3 ViewPosition = GetViewPosition(LinearDepth, ScreenPosition, ProjMatrix._11, ProjMatrix._22);
-    float3 ViewPosition = GetViewPosition(DeviceDepth, ScreenPosition, InvProjMatrix);
+	float3 ViewPosition = GetViewPosition(DeviceDepth, ScreenPosition, InvProjMatrix);
     // 
 	float3 WorldPos = mul(float4(ViewPosition, 1), InvViewMatrix).xyz;
 
   
-    float rand_u = random(crd + RandomOffset);
-    float rand_v = random(crd + RandomOffset + float2(100, 100));
+	float rand_u = random(crd + RandomOffset);
+	float rand_v = random(crd + RandomOffset + float2(100, 100));
 
-    float2 RandomUV = LoadBlueNoise2(BlueNoiseTex, launchIndex, FrameCounter, BlueNoiseOffsetStride);
+	float2 RandomUV = LoadBlueNoise2(BlueNoiseTex, launchIndex, FrameCounter, BlueNoiseOffsetStride);
 
-    float3 sampleDirLocal = SampleHemisphereCosine(RandomUV.x, RandomUV.y);
+	float3 sampleDirLocal = SampleHemisphereCosine(RandomUV.x, RandomUV.y);
 
 
-    float3x3 tbn = buildTBN(WorldNormal);
-    float3 sampleDirWorld = mul(sampleDirLocal, tbn);
+	float3x3 tbn = buildTBN(WorldNormal);
+	float3 sampleDirWorld = mul(sampleDirLocal, tbn);
 
     // https://computergraphics.stackexchange.com/questions/4664/does-cosine-weighted-hemisphere-sampling-still-require-ndotl-when-calculating-co
     // https://computergraphics.stackexchange.com/questions/8578/how-to-set-equivalent-pdfs-for-cosine-weighted-and-uniform-sampled-hemispheres
-    float cosTerm = 1;//dot(float3(0, 0, 1), sampleDirLocal)*2;
+	float cosTerm = 1; //dot(float3(0, 0, 1), sampleDirLocal)*2;
 
-    float3 LightIntensity = LightDirAndIntensity.w;
+	float3 LightIntensity = LightDirAndIntensity.w;
 
-    float3 ViewDir = mul(normalize(float3(d.x * aspectRatio, -d.y, -1)), InvViewMatrix);
+	float3 ViewDir = mul(normalize(float3(d.x * aspectRatio, -d.y, -1)), InvViewMatrix);
 
 	RayDesc ray;
 	ray.Origin = WorldPos + WorldNormal * 0.5; //    mul(float4(0, 0, 0, 1), InvViewMatrix).xyz;
-	ray.Direction = normalize(sampleDirWorld);//reflect(ViewDir, WorldNormal);
+	ray.Direction = normalize(sampleDirWorld); //reflect(ViewDir, WorldNormal);
 
 	ray.TMin = 0;
 	ray.TMax = 100000;
 
 	RayPayload payload;
-    payload.coneWidth = 0;
-    payload.spreadAngle = ViewSpreadAngle; 
+	payload.coneWidth = 0;
+	payload.spreadAngle = ViewSpreadAngle;
 	TraceRay(gRtScene, RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES /*rayFlags*/, 0xFF, 0 /* ray index*/, 0, 0, ray, payload);
-    if(payload.bHit == false)
-    {
+	if (payload.bHit == false)
+	{
         // hit sky
-        float3 Radiance = payload.color * LightIntensity;
+		float3 Radiance = payload.color * LightIntensity;
         // float3 Radiance = float3(1, 0, 0) * LightIntensity;
 
-        float3 Irradiance = Radiance * cosTerm;
+		float3 Irradiance = Radiance * cosTerm;
 
-        SH sh_indirect = init_SH();
-        sh_indirect = irradiance_to_SH(Irradiance, sampleDirWorld);
+		SH sh_indirect = init_SH();
+		sh_indirect = irradiance_to_SH(Irradiance, sampleDirWorld);
 
-        GIResultSH[launchIndex.xy] = sh_indirect.shY;
-        GIResultColor[launchIndex.xy] = float4(sh_indirect.CoCg, 0, 0);
-    }
-    else
-    {
-        float3 LightDir = LightDirAndIntensity.xyz;
-        RayDesc shadowRay;
-        shadowRay.Origin = payload.position + payload.normal *0.5;
-        shadowRay.Direction = LightDir;
+		GIResultSH[launchIndex.xy] = sh_indirect.shY;
+		GIResultColor[launchIndex.xy] = float4(sh_indirect.CoCg, 0, 0);
+	}
+	else
+	{
+		float3 LightDir = LightDirAndIntensity.xyz;
+		RayDesc shadowRay;
+		shadowRay.Origin = payload.position + payload.normal * 0.5;
+		shadowRay.Direction = LightDir;
 
-        shadowRay.TMin = 0;
-        shadowRay.TMax = 100000;
+		shadowRay.TMin = 0;
+		shadowRay.TMax = 100000;
 
-        ShadowRayPayload shadowPayload;
-        shadowPayload.bHit = true;
-        TraceRay(gRtScene, RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES /*rayFlags*/, 0xFF, 0 /* ray index*/, 0, 1, shadowRay, shadowPayload);
+		ShadowRayPayload shadowPayload;
+		shadowPayload.bHit = true;
+		TraceRay(gRtScene, RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES /*rayFlags*/, 0xFF, 0 /* ray index*/, 0, 1, shadowRay, shadowPayload);
 
-        float3 Albedo = payload.color;
-        SH sh_indirect = init_SH();
-        if(shadowPayload.bHit == false)
-        {
+		float3 Albedo = payload.color;
+		SH sh_indirect = init_SH();
+		float3 Irradiance = 0.xxx;
+		if (shadowPayload.bHit == false)
+		{
             // miss
-            float3 Irradiance = dot(LightDir.xyz, payload.normal) * LightIntensity  * Albedo;
-            sh_indirect = irradiance_to_SH(Irradiance, sampleDirWorld);
-        }
-        else
-        {
+			Irradiance = dot(LightDir.xyz, payload.normal) * LightIntensity * Albedo;
+			sh_indirect = irradiance_to_SH(Irradiance, sampleDirWorld);
+		}
+		else
+		{
             // shadowed
-        }
+		}
 
-        GIResultSH[launchIndex.xy] = sh_indirect.shY;
-        GIResultColor[launchIndex.xy] = float4(sh_indirect.CoCg, 0, 0);
-    }
-
-
+		if (bPackNRD)
+		{
+			float4 DiffuseA;
+			float4 DiffuseB;
+			NRD_FrontEnd_PackDiffuse(Irradiance, sampleDirWorld, ViewPosition.z / ProjectionParams.w, payload.hitT, DiffuseA, DiffuseB);
+			GIResultSH[launchIndex.xy] = DiffuseA;
+			GIResultColor[launchIndex.xy] = DiffuseB;
+		}
+		else
+		{
+			GIResultSH[launchIndex.xy] = sh_indirect.shY;
+			GIResultColor[launchIndex.xy] = float4(sh_indirect.CoCg, 0, 0);
+		}
+	}
 }
 
 [shader("miss")]
@@ -221,6 +234,8 @@ void miss(inout RayPayload payload)
 {
     payload.position = float3(0, 0, 0);
     payload.color = float3(0.0, 0.2, 0.4);
+    payload.color = float3(0.0, 0.0, 0.0);
+
     payload.normal = float3(0, 0, -1);
     payload.bHit = false;
 }
@@ -249,6 +264,8 @@ void chs(inout RayPayload payload, in BuiltInTriangleIntersectionAttributes attr
     payload.color = AlbedoTex.SampleLevel(sampleWrap, vertex.uv, mipLevel).xyz;
 
     payload.bHit = true;
+	
+	payload.hitT = hitT;
 }
 
 [shader("miss")]

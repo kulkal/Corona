@@ -285,6 +285,7 @@ void miss(inout RayPayload payload)
 {
     payload.position = float3(0, 0, 0);
     payload.color = float3(0.0, 0.2, 0.4);
+    payload.color = float3(0.0, 0.0, 0.0);
     payload.normal = float3(0, 0, -1);
     payload.bHit = false;
     payload.hitDist = MAX_HIT_DIST;

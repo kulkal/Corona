@@ -88,7 +88,7 @@ void rayGen()
 
 
 	RayDesc ray;
-	ray.Origin = WorldPos + WorldNormal * 0.5; //    mul(float4(0, 0, 0, 1), InvViewMatrix).xyz;
+	ray.Origin = WorldPos + WorldNormal * 1.0; //    mul(float4(0, 0, 0, 1), InvViewMatrix).xyz;
 
 	ray.Direction = LightDir;
 

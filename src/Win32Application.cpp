@@ -13,7 +13,8 @@
 #include "Win32Application.h"
 
 HWND Win32Application::m_hwnd = nullptr;
-
+bool Win32Application::m_fullscreenMode = false;
+RECT Win32Application::m_windowRect;
 int Win32Application::Run(DXSample* pSample, HINSTANCE hInstance, int nCmdShow)
 {
 	// Parse the command line parameters
@@ -114,6 +115,18 @@ LRESULT CALLBACK Win32Application::WindowProc(HWND hWnd, UINT message, WPARAM wP
 		}
 		return 0;
 
+	case WM_SIZE:
+		if (pSample)
+		{
+			RECT windowRect = {};
+			GetWindowRect(hWnd, &windowRect);
+			pSample->SetWindowBounds(windowRect.left, windowRect.top, windowRect.right, windowRect.bottom);
+
+			RECT clientRect = {};
+			GetClientRect(hWnd, &clientRect);
+			pSample->OnSizeChanged(clientRect.right - clientRect.left, clientRect.bottom - clientRect.top, wParam == SIZE_MINIMIZED);
+		}
+		return 0;
 	case WM_DESTROY:
 		PostQuitMessage(0);
 		return 0;
@@ -121,4 +134,96 @@ LRESULT CALLBACK Win32Application::WindowProc(HWND hWnd, UINT message, WPARAM wP
 
 	// Handle any messages the switch statement didn't.
 	return DefWindowProc(hWnd, message, wParam, lParam);
+}
+
+void Win32Application::ToggleFullscreenWindow(IDXGISwapChain* pSwapChain)
+{
+	if (m_fullscreenMode)
+	{
+		// Restore the window's attributes and size.
+		SetWindowLong(m_hwnd, GWL_STYLE, m_windowStyle);
+
+		SetWindowPos(
+			m_hwnd,
+			HWND_NOTOPMOST,
+			m_windowRect.left,
+			m_windowRect.top,
+			m_windowRect.right - m_windowRect.left,
+			m_windowRect.bottom - m_windowRect.top,
+			SWP_FRAMECHANGED | SWP_NOACTIVATE);
+
+		ShowWindow(m_hwnd, SW_NORMAL);
+	}
+	else
+	{
+		// Save the old window rect so we can restore it when exiting fullscreen mode.
+		GetWindowRect(m_hwnd, &m_windowRect);
+
+		// Make the window borderless so that the client area can fill the screen.
+		SetWindowLong(m_hwnd, GWL_STYLE, m_windowStyle & ~(WS_CAPTION | WS_MAXIMIZEBOX | WS_MINIMIZEBOX | WS_SYSMENU | WS_THICKFRAME));
+
+		RECT fullscreenWindowRect;
+		try
+		{
+			if (pSwapChain)
+			{
+				// Get the settings of the display on which the app's window is currently displayed
+				ComPtr<IDXGIOutput> pOutput;
+				ThrowIfFailed(pSwapChain->GetContainingOutput(&pOutput));
+				DXGI_OUTPUT_DESC Desc;
+				ThrowIfFailed(pOutput->GetDesc(&Desc));
+				fullscreenWindowRect = Desc.DesktopCoordinates;
+			}
+			else
+			{
+				// Fallback to EnumDisplaySettings implementation
+				throw HrException(S_FALSE);
+			}
+		}
+		catch (HrException& e)
+		{
+			UNREFERENCED_PARAMETER(e);
+
+			// Get the settings of the primary display
+			DEVMODE devMode = {};
+			devMode.dmSize = sizeof(DEVMODE);
+			EnumDisplaySettings(nullptr, ENUM_CURRENT_SETTINGS, &devMode);
+
+			fullscreenWindowRect = {
+				devMode.dmPosition.x,
+				devMode.dmPosition.y,
+				devMode.dmPosition.x + static_cast<LONG>(devMode.dmPelsWidth),
+				devMode.dmPosition.y + static_cast<LONG>(devMode.dmPelsHeight)
+			};
+		}
+
+		SetWindowPos(
+			m_hwnd,
+			HWND_TOPMOST,
+			fullscreenWindowRect.left,
+			fullscreenWindowRect.top,
+			fullscreenWindowRect.right,
+			fullscreenWindowRect.bottom,
+			SWP_FRAMECHANGED | SWP_NOACTIVATE);
+
+
+		ShowWindow(m_hwnd, SW_MAXIMIZE);
+	}
+
+	m_fullscreenMode = !m_fullscreenMode;
+}
+
+void Win32Application::SetWindowZorderToTopMost(bool setToTopMost)
+{
+	RECT windowRect;
+	GetWindowRect(m_hwnd, &windowRect);
+
+	SetWindowPos(
+		m_hwnd,
+		(setToTopMost) ? HWND_TOPMOST : HWND_NOTOPMOST,
+		windowRect.left,
+		windowRect.top,
+		windowRect.right - windowRect.left,
+		windowRect.bottom - windowRect.top,
+		SWP_FRAMECHANGED | SWP_NOACTIVATE);
 }

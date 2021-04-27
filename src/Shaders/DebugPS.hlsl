@@ -9,21 +9,37 @@
 //
 //*********************************************************
 #include "Common.hlsl"
+#include "rtxgi/ddgi/Irradiance.hlsl"
 
 Texture2D SrcTex: register(t0);
 Texture2D SrcTexSH: register(t1);
 Texture2D SrcTexNormal: register(t2);
+Texture2D DDGIProbeIrradianceSRV: register(t3);
+Texture2D DDGIProbeDistanceSRV: register(t4);
+Texture2D DepthTex: register(t5);
+
+RWTexture2D<uint> DDGIProbeStates : register(u0);
+RWTexture2D<float4> DDGIProbeOffsets : register(u1);
+
 
 SamplerState sampleWrap : register(s0);
+SamplerState TrilinearSampler : register(s1);
+
 cbuffer DebugPassCB : register(b0)
 {
+    float4x4 InvViewMatrix;
+    float4x4 InvProjMatrix;
     float4 Scale;
     float4 Offset;
     float4 ProjectionParams;   
+    float4 CameraPosition;
     float2 RTSize;
     float GIBufferScale;
     uint DebugMode;
 };
+
+ConstantBuffer<DDGIVolumeDescGPU> DDGIVolume    : register(b1);
+
 
 struct VSInput
 {
@@ -44,7 +60,7 @@ PSInput VSMain(
 
     float4 pos = input.position;
 
-    pos.xy = pos.xy * Scale + Offset.xy;
+    pos.xy = pos.xy * Scale.xy + Offset.xy;
     result.position = pos;
 
     result.uv = input.uv;
@@ -102,11 +118,48 @@ float4 PSMain(PSInput input) : SV_TARGET
         sh_indirect.shY = SrcTexSH[PixelPos/GIBufferScale];
         sh_indirect.CoCg = SrcTex[PixelPos/GIBufferScale].xy;
 
-        float3 WorldNormal = SrcTexNormal[PixelPos];
+        float3 WorldNormal = SrcTexNormal[PixelPos].xyz;
 
         float3 IndirectDiffuse = project_SH_irradiance(sh_indirect, WorldNormal);
         SrcColor = float4(IndirectDiffuse, 0);
         // SrcColor = float4(sh_indirect.shY);
+    }
+    else if(DebugMode == 7)
+    {
+        float2 ScreenPosition = input.uv * 2 -1;
+        ScreenPosition.y = -ScreenPosition.y;
+
+        float DeviceDepth = DepthTex[PixelPos].x;//.SampleLevel(sampleWrap, input.uv, 0).x;
+        float3 ViewPosition = GetViewPosition(DeviceDepth, ScreenPosition, InvProjMatrix);
+        float3 WorldPos = mul(float4(ViewPosition, 1), InvViewMatrix).xyz;
+        float3 WorldNormal = SrcTexNormal[PixelPos].xyz;
+        float3 cameraDirection = normalize(ViewPosition - CameraPosition.xyz);
+        float3 surfaceBias = DDGIGetSurfaceBias(WorldNormal, cameraDirection, DDGIVolume);
+
+        DDGIVolumeResources resources;
+        resources.probeIrradianceSRV = DDGIProbeIrradianceSRV;
+        resources.probeDistanceSRV = DDGIProbeDistanceSRV;
+        resources.trilinearSampler = TrilinearSampler;
+#if RTXGI_DDGI_PROBE_RELOCATION
+        resources.probeOffsets = DDGIProbeOffsets;
+#endif
+#if RTXGI_DDGI_PROBE_STATE_CLASSIFIER
+        resources.probeStates = DDGIProbeStates;
+#endif
+
+        float3 irradiance = 0.f;
+
+        irradiance = DDGIGetVolumeIrradiance(
+            WorldPos.xyz,
+            surfaceBias,
+            WorldNormal,
+            DDGIVolume,
+            resources);
+
+        if(DeviceDepth == 1)
+            SrcColor = float4(0, 0, 0, 0);
+        else
+            SrcColor = float4(clamp(irradiance, 0, 1), 0);
     }
     else if(DebugMode == 6) // DEPTH
     {

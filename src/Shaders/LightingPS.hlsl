@@ -10,6 +10,8 @@
 //*********************************************************
 
 #include "Common.hlsl"
+#include "rtxgi/ddgi/Irradiance.hlsl"
+
 
 Texture2D AlbedoTex : register(t0);
 Texture2D NormalTex : register(t1);
@@ -20,26 +22,40 @@ Texture2D GIResultSHTex : register(t5);
 Texture2D GIResultColorTex : register(t6);
 Texture2D SpecularGITex : register(t7);
 Texture2D RoughnessMetalicTex : register(t8);
+Texture2D DiffuseGITex: register(t9);
 
 
 
+
+Texture2D DDGIProbeIrradianceSRV: register(t10);
+Texture2D DDGIProbeDistanceSRV: register(t11);
+
+RWTexture2D<uint> DDGIProbeStates : register(u0);
+RWTexture2D<float4> DDGIProbeOffsets : register(u1);
 
 
 
 
 
 SamplerState sampleWrap : register(s0);
+SamplerState TrilinearSampler : register(s1);
 
 
 cbuffer LightingParam : register(b0)
 {
     float4x4 ViewMatrix;
     float4x4 InvViewMatrix;
+    float4x4 InvProjMatrix;
     float4 LightDirAndIntensity;
+    float4 CameraPosition;
     float2 RTSize;
-    float TAABlendFactor;
     float GIBufferScale;
+    uint DiffuseGIMode;
+	uint UseNRD;
 };
+
+ConstantBuffer<DDGIVolumeDescGPU> DDGIVolume    : register(b1);
+
 
 struct VSInput
 {
@@ -93,31 +109,77 @@ float4 PSMain(PSInput input) : SV_TARGET
     sh_indirect.shY = GIResultSHTex[PixelPos/GIBufferScale];
     sh_indirect.CoCg = GIResultColorTex[PixelPos/GIBufferScale].xy;
 
-    float3 IndirectDiffuse = project_SH_irradiance(sh_indirect, WorldNormal) * Albedo;
+    float3 IndirectDiffuse = 0..xxx;// = project_SH_irradiance(sh_indirect, WorldNormal) * Albedo;
 
-    float3 V = mul(InvViewMatrix, float3(0, 0, 1));
-    float NdotV = clamp(dot(WorldNormal, -V), 0, 1);
+    if(DiffuseGIMode == 0)
+	{
+		if (UseNRD)
+			IndirectDiffuse = DiffuseGITex[PixelPos] * Albedo;
+		else
+			IndirectDiffuse = project_SH_irradiance(sh_indirect, WorldNormal) * Albedo;
+	}
+    else
+    {
+			float2 ScreenPosition = input.uv * 2 - 1;
+			ScreenPosition.y = -ScreenPosition.y;
 
-    float Rougness = RoughnessMetalicTex[PixelPos].x; 
+			float DeviceDepth = DepthTex[PixelPos].x; 
+			float3 ViewPosition = GetViewPosition(DeviceDepth, ScreenPosition, InvProjMatrix);
+			float3 WorldPos = mul(float4(ViewPosition, 1), InvViewMatrix).xyz;
+			float3 cameraDirection = normalize(ViewPosition - CameraPosition.xyz);
+			float3 surfaceBias = DDGIGetSurfaceBias(WorldNormal, cameraDirection, DDGIVolume);
 
-    float Metalic = RoughnessMetalicTex[PixelPos].y;
+			DDGIVolumeResources resources;
+			resources.probeIrradianceSRV = DDGIProbeIrradianceSRV;
+			resources.probeDistanceSRV = DDGIProbeDistanceSRV;
+			resources.trilinearSampler = TrilinearSampler;
+#if RTXGI_DDGI_PROBE_RELOCATION
+			resources.probeOffsets = DDGIProbeOffsets;
+#endif
+#if RTXGI_DDGI_PROBE_STATE_CLASSIFIER
+			resources.probeStates = DDGIProbeStates;
+#endif
+
+			float3 irradiance = 0.f;
+
+			irradiance = DDGIGetVolumeIrradiance(
+            WorldPos.xyz,
+            surfaceBias,
+            WorldNormal,
+            DDGIVolume,
+            resources);
+
+			if (DeviceDepth == 1)
+				IndirectDiffuse = float4(0, 0, 0, 0);
+			else
+				IndirectDiffuse = float4(irradiance, 0) * Albedo;
+		}
+
+		float3 V = mul(InvViewMatrix, float3(0, 0, 1));
+		float NdotV = clamp(dot(WorldNormal, -V), 0, 1);
+
+		float Rougness = RoughnessMetalicTex[PixelPos].x;
+
+		float Metalic = RoughnessMetalicTex[PixelPos].y;
     // use 0.05 if is non-metal
-    float Specular = lerp(0.05, 1.0, Metalic); 
-    Specular = clamp(schlick_ross_fresnel(Specular, Rougness, NdotV), 0, 1);
+		float Specular = lerp(0.05, 1.0, Metalic);
+		Specular = clamp(schlick_ross_fresnel(Specular, Rougness, NdotV), 0, 1);
 
     // non-metal doesnt have specular color
-    float3 SpecularColor = lerp(1..xxxx, Albedo.xyz, Metalic) * Specular;
-    float3 IndirectSpecular;
+		float3 SpecularColor = lerp(1..xxxx, Albedo.xyz, Metalic) * Specular;
+		float3 IndirectSpecular;
+
+		if (UseNRD)
+			IndirectSpecular = SpecularGITex[PixelPos].xyz * SpecularColor;
+		else
+			IndirectSpecular = SpecularGITex[PixelPos].xyz * SpecularColor;
 
 
-    IndirectSpecular = SpecularGITex[PixelPos].xyz * SpecularColor;
+		float3 DirectSpecular = SpecularColor * GGX(V, normalize(LightDir), WorldNormal, Rougness, 0.0) * LightIntensity * Shadow;
 
+		DiffuseLighting = max(DiffuseLighting, 0);
 
-    float3 DirectSpecular = SpecularColor * GGX(V, normalize(LightDir), WorldNormal, Rougness, 0.0) * LightIntensity * Shadow;
+		DirectSpecular = max(DirectSpecular + IndirectSpecular, 0);
 
-    DiffuseLighting = max(DiffuseLighting , 0);
-
-    DirectSpecular = max(DirectSpecular + IndirectSpecular, 0);
-
-    return float4(DiffuseLighting * (1-Specular) + DirectSpecular + IndirectDiffuse*(1-Specular) + IndirectSpecular, 1);
-}
+		return float4(DiffuseLighting * (1 - Specular) + DirectSpecular + IndirectDiffuse * (1 - Specular) + IndirectSpecular, 1);
+	}

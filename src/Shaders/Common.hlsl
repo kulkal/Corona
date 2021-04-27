@@ -33,13 +33,13 @@ float3 GetViewPosition(float LinearDepth, float2 ScreenPosition, float4x4 InvPro
 {
     float4 ClipPos = float4(ScreenPosition, LinearDepth, 1);
 
-    float4 ViewPosition = mul(ClipPos, InvProjMat);
+	ClipPos = mul(ClipPos, InvProjMat);
     // ViewPosition.z = LinearDepth;
     // Solve the two projection equations
     // ViewPosition.xy = ScreenPosition.xy * ViewPosition.z;
     // ViewPosition.z *= -1;
-    ViewPosition.xyz /=ViewPosition.w;
-    return ViewPosition.xyz;
+	float3 NDC = ClipPos.xyz /= ClipPos.w;
+    return NDC;
 }
 
 float3 SampleHemisphereCosine(float u, float v /*out float pdf*/)
@@ -378,7 +378,7 @@ float RGBToLuminance( float3 x )
 
 float PointPlaneDist(float4 plane, float3 p)
 {
-    float n = plane.xyz;
+    float3 n = plane.xyz;
     float d = plane.w;
     return (dot(n, p) + d)/length(n);
 }

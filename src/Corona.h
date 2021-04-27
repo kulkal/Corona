@@ -24,10 +24,40 @@
 #include "StepTimer.h"
 #include "SimpleCamera.h"
 #include "SimpleDX12.h"
+#include "AbstractGfxLayer.h"
 #include "enkiTS/TaskScheduler.h""
 #define PROFILE_BUILD 1
 #include "pix3.h"
 using namespace DirectX;
+
+#define USE_DLSS 0
+#define USE_NRD 0
+#define RTXGI 1
+#define USE_IMGUI 0
+#define USE_GIZMO 0
+
+#if USE_DLSS
+#include "nvsdk_ngx.h"
+#include <nvsdk_ngx_helpers.h>
+
+#define DLSS_APP_ID 100689411
+#endif
+
+#include <rtxgi/Types.h>
+#include <rtxgi/ddgi/DDGIVolume.h>
+
+constexpr uint32_t BUFFERED_FRAME_MAX_NUM = 2;
+#include "NRD.h"
+#include "NRI.h"
+#include "NRDIntegration.h"
+
+#include "NRIDeviceCreation.h"
+#include "NRIWrapperD3D12.h"
+
+
+
+
+
 
 // Note that while ComPtr is used to manage the lifetime of resources on the CPU,
 // it has no understanding of the lifetime of resources on the GPU. Apps must account
@@ -36,6 +66,14 @@ using namespace DirectX;
 // An example of this can be found in the class method: OnDestroy().
 using Microsoft::WRL::ComPtr;
 using namespace std;
+
+struct NRIInterface
+	: public nri::CoreInterface
+	, public nri::WrapperD3D12Interface
+	//, public nri::SwapChainInterface
+	//, public nri::RayTracingInterface
+{};
+
 
 
 class Corona : public DXSample
@@ -51,60 +89,77 @@ class Corona : public DXSample
 		TEMPORAL_FILTERED_SH,
 		SPATIAL_FILTERED_SH,
 		FINAL_INDIRECT_DIFFUSE,
+		RTXGI_RESULT,
 		ALBEDO,
 		VELOCITY,
 		ROUGNESS_METALLIC,
 		SPECULAR_RAW,
 		TEMPORAL_FILTERED_SPECULAR,
 		BLOOM,
-		SPEC_HISTORY_LENGTH,
+		SPEC_HISTORY_LENGTH,		
 		NO_FULLSCREEN,
 	};
 
-	EDebugVisualization FullscreenDebugBuffer = EDebugVisualization::NO_FULLSCREEN;
+	EDebugVisualization FullscreenDebugBuffer = EDebugVisualization::FINAL_INDIRECT_DIFFUSE;// EDebugVisualization::NO_FULLSCREEN;
 private:
 
-	shared_ptr<Texture> DepthBuffer;
-	shared_ptr<Texture> UnjitteredDepthBuffers[2];
+	UINT32 RenderWidth;
+	UINT32 RenderHeight;
+	UINT32 DisplayWidth;
+	UINT32 DisplayHeight;
+
+
+
+	shared_ptr<GfxTexture> DepthBuffer;
+	shared_ptr<GfxTexture> UnjitteredDepthBuffers[2];
 
 	UINT ColorBufferWriteIndex = 0;
-	shared_ptr<Texture> ColorBuffers[2];
-	shared_ptr<Texture> LightingBuffer;
-	shared_ptr<Texture> AlbedoBuffer;
-	shared_ptr<Texture> NormalBuffers[2];
-	shared_ptr<Texture> GeomNormalBuffer;
-	shared_ptr<Texture> VelocityBuffer;
-	shared_ptr<Texture> RoughnessMetalicBuffer;
-	shared_ptr<Texture> ShadowBuffer;
+	shared_ptr<GfxTexture> ColorBuffers[2];
+	shared_ptr<GfxTexture> LightingBuffer;
+	shared_ptr<GfxTexture> LightingWithBloomBuffer;
 
-	shared_ptr<Texture> SpeculaGIBufferRaw;
+	shared_ptr<GfxTexture> AlbedoBuffer;
+	shared_ptr<GfxTexture> NormalBuffers[2];
+	shared_ptr<GfxTexture> GeomNormalBuffer;
+	shared_ptr<GfxTexture> VelocityBuffer;
+	shared_ptr<GfxTexture> PixelVelocityBuffer;
 
-	shared_ptr<Texture> SpeculaGIBufferTemporal[2];
+	shared_ptr<GfxTexture> RoughnessMetalicBuffer;
+	shared_ptr<GfxTexture> ShadowBuffer;
 
-	shared_ptr<Texture> SpeculaGIMoments[2];
+	shared_ptr<GfxTexture> SpeculaGIBufferRaw;
 
+	shared_ptr<GfxTexture> SpeculaGIBufferTemporal[2];
+
+	shared_ptr<GfxTexture> SpeculaGIMoments[2];
+
+	// made seperated output buffers for NRD, i will refactor after NRD works.
+	shared_ptr<GfxTexture> SpecularGI_NRD;
+	shared_ptr<GfxTexture> DiffuseGI_NRD;
+	shared_ptr<GfxTexture> NormalRoughness_NRD;
+	shared_ptr<GfxTexture> LinearDepth_NRD;
 
 
 
 
 	UINT GIBufferScale = 3;
 	UINT GIBufferWriteIndex = 0;
-	shared_ptr<Texture> DiffuseGISHTemporal[2];
-	shared_ptr<Texture> DiffuseGICoCgTemporal[2];
-	shared_ptr<Texture> DiffuseGISHRaw;
-	shared_ptr<Texture> DiffuseGICoCgRaw;
+	shared_ptr<GfxTexture> DiffuseGISHTemporal[2];
+	shared_ptr<GfxTexture> DiffuseGICoCgTemporal[2];
+	shared_ptr<GfxTexture> DiffuseGISHRaw;
+	shared_ptr<GfxTexture> DiffuseGICoCgRaw;
 
-	shared_ptr<Texture> DiffuseGISHSpatial[2];
-	shared_ptr<Texture> DiffuseGICoCgSpatial[2];
+	shared_ptr<GfxTexture> DiffuseGISHSpatial[2];
+	shared_ptr<GfxTexture> DiffuseGICoCgSpatial[2];
 
-	shared_ptr<Texture> BloomBlurPingPong[2];
-	shared_ptr<Texture> LumaBuffer;
-	std::shared_ptr<Buffer> Histogram;
-	std::shared_ptr<Buffer> ExposureData;
+	shared_ptr<GfxTexture> BloomBlurPingPong[2];
+	shared_ptr<GfxTexture> LumaBuffer;
+	std::shared_ptr<GfxBuffer> Histogram;
+	std::shared_ptr<GfxBuffer> ExposureData;
 
 
 
-	std::vector<std::shared_ptr<Texture>> framebuffers;
+	std::vector<std::shared_ptr<GfxTexture>> framebuffers;
 	
 	// mesh draw pass
 	struct GBufferConstantBuffer
@@ -120,7 +175,7 @@ private:
 		UINT32 bOverrideRougnessMetallic;
 	};
 
-	shared_ptr<PipelineStateObject> GBufferPassPSO;
+	shared_ptr<GfxPipelineStateObject> GBufferPassPSO;
 
 	// spatial denoising
 	struct SpatialFilterConstant
@@ -134,7 +189,7 @@ private:
 
 	SpatialFilterConstant SpatialFilterCB;
 
-	shared_ptr<PipelineStateObject> SpatialDenoisingFilterPSO;
+	shared_ptr<GfxPipelineStateObject> SpatialDenoisingFilterPSO;
 
 
 
@@ -154,7 +209,7 @@ private:
 
 	TemporalFilterConstant TemporalFilterCB;
 
-	shared_ptr<PipelineStateObject> TemporalDenoisingFilterPSO;
+	shared_ptr<GfxPipelineStateObject> TemporalDenoisingFilterPSO;
 	
 	// RT shadow
 	struct RTShadowViewParamCB
@@ -170,7 +225,7 @@ private:
 
 	RTShadowViewParamCB RTShadowViewParam;
 	
-	shared_ptr<RTPipelineStateObject> PSO_RT_SHADOW;
+	shared_ptr<GfxRTPipelineStateObject> PSO_RT_SHADOW;
 
 
 	// RT reflection
@@ -190,7 +245,7 @@ private:
 
 	RTReflectionViewParamCB RTReflectionViewParam;
 	
-	shared_ptr<RTPipelineStateObject> PSO_RT_REFLECTION;
+	shared_ptr<GfxRTPipelineStateObject> PSO_RT_REFLECTION;
 
 	// RT GI
 	struct RTGIViewParamCB
@@ -205,10 +260,11 @@ private:
 		UINT32 FrameCounter;
 		UINT32 BlueNoiseOffsetStride = 1.0f;
 		float ViewSpreadAngle;
+		UINT32 bPackNRD;
 	};
 
 	RTGIViewParamCB RTGIViewParam;
-	shared_ptr<RTPipelineStateObject> PSO_RT_GI;
+	shared_ptr<GfxRTPipelineStateObject> PSO_RT_GI;
 	
 
 	// full screen copy pass
@@ -235,7 +291,7 @@ private:
 
 
 	UINT32 ToneMapMode = FILMIC_HABLE;
-	shared_ptr<PipelineStateObject> ToneMapPSO;
+	shared_ptr<GfxPipelineStateObject> ToneMapPSO;
 
 	// debug pass
 	enum EDebugMode
@@ -247,33 +303,49 @@ private:
 		CHANNEL_W = 4,
 		SH_LIGHTING = 5,
 		DEPTH = 6,
-		COUNT = 7,
+		RTXGI_LIGHTING = 7,
+		COUNT = 8,
 	};
 	struct DebugPassCB
 	{
+		glm::mat4x4 InvViewMatrix;
+		glm::mat4x4 InvProjMatrix;
 		glm::vec4 Scale;
 		glm::vec4 Offset;
 		glm::vec4 ProjectionParams;
+		glm::vec4 CameraPosition;
 		glm::vec2 RTSize;
 		float GIBufferScale;
 		UINT32 DebugMode;
 	};
 
-	shared_ptr<PipelineStateObject> BufferVisualizePSO;
+	shared_ptr<GfxPipelineStateObject> BufferVisualizePSO;
 
 	// lighting pass
 	
+	enum EDiffuseGIMode
+	{
+		PATH_TRACING,
+#if USE_RTXGI
+		RTXGI
+#endif
+	};
+	EDiffuseGIMode DiffuseGIMethod = PATH_TRACING;
+
 	struct LightingParam
 	{
 		glm::mat4x4 ViewMatrix;
 		glm::mat4x4 InvViewMatrix;
+		glm::mat4x4 InvProjMatrix;
 		glm::vec4 LightDir;
+		glm::vec4 CameraPosition;
 		glm::vec2 RTSize;
-		float TAABlendFactor;
 		float GIBufferScale;
+		UINT32 DiffuseGIMode;
+		UINT32 UseNRD;
 	};
 	
-	shared_ptr<PipelineStateObject> LightingPSO;
+	shared_ptr<GfxPipelineStateObject> LightingPSO;
 
 	// temporalAA
 	struct TemporalAAParam
@@ -282,16 +354,28 @@ private:
 		float TAABlendFactor;
 		UINT32 ClampMode;
 		//float Exposure;
-		float BloomStrength;
 	};
 	
 	bool bEnableTAA = true;
 
+	enum EAntialiasingMethod
+	{
+		TEMPORAL_AA,
+		DLSS,
+		NO_AA,
+	};
+#if USE_DLSS
+	EAntialiasingMethod AAMethod = DLSS;
+#else
+	EAntialiasingMethod AAMethod = TEMPORAL_AA;
+#endif
+	EAntialiasingMethod PrevAAMethod = TEMPORAL_AA;
+
 	UINT32 ClampMode = 2;
 
-	float JitterScale = 0.85;
+	float JitterScale = 1;
 
-	shared_ptr<PipelineStateObject> TemporalAAPSO;
+	shared_ptr<GfxPipelineStateObject> TemporalAAPSO;
 
 
 	// bloom blur
@@ -319,20 +403,20 @@ private:
 	UINT BloomBufferWidth = 640;
 	UINT  BloomBufferHeight = 384;
 
-	shared_ptr<PipelineStateObject> BloomBlurPSO;
+	shared_ptr<GfxPipelineStateObject> BloomBlurPSO;
 
-	shared_ptr<PipelineStateObject> BloomExtractPSO;
+	shared_ptr<GfxPipelineStateObject> BloomExtractPSO;
 
-	shared_ptr<PipelineStateObject> HistogramPSO;
+	shared_ptr<GfxPipelineStateObject> HistogramPSO;
 
-	shared_ptr<PipelineStateObject> ClearHistogramPSO;
+	shared_ptr<GfxPipelineStateObject> ClearHistogramPSO;
 
 	bool bDrawHistogram = false;
-	shared_ptr<PipelineStateObject> DrawHistogramPSO;
+	shared_ptr<GfxPipelineStateObject> DrawHistogramPSO;
 
 	struct AdaptExposureCB
 	{
-		float TargetLuminance = 0.008;
+		float TargetLuminance = 0.03;
 		float AdaptationRate = 0.05;
 		float MinExposure = 1.0f / 64.0f;
 		float MaxExposure = 8;
@@ -345,27 +429,39 @@ AdaptExposureCB.MinExposure = 1.0f / 64.0f;
 AdaptExposureCB.MaxExposure = 64.0f;*/
 	AdaptExposureCB AdaptExposureCB;
 
-	shared_ptr<PipelineStateObject> AdapteExposurePSO;
+	shared_ptr<GfxPipelineStateObject> AdapteExposurePSO;
+
+	struct AddBloomCB
+	{
+		glm::vec4 Scale;
+		glm::vec4 Offset;
+		float BloomStrength;
+	};
+	AddBloomCB AddBloomCB;
+
+	shared_ptr<GfxPipelineStateObject> AddBloomPSO;
 
 
-
+	shared_ptr<GfxPipelineStateObject> ResolvePixelVelocityPSO;
 
 	// imgui font texture
 	D3D12_CPU_DESCRIPTOR_HANDLE CpuHandleImguiFontTex;
 	D3D12_GPU_DESCRIPTOR_HANDLE GpuHandleImguiFontTex;
 
-	shared_ptr<VertexBuffer> FullScreenVB;
+	shared_ptr<GfxVertexBuffer> FullScreenVB;
 
 	// blue noise texture
-	shared_ptr<Texture> BlueNoiseTex;
-	shared_ptr<Texture> DefaultWhiteTex;
-	shared_ptr<Texture> DefaultBlackTex;
-	shared_ptr<Texture> DefaultNormalTex;
-	shared_ptr<Texture> DefaultRougnessTex;
+	shared_ptr<GfxTexture> BlueNoiseTex;
+	shared_ptr<GfxTexture> DefaultWhiteTex;
+	shared_ptr<GfxTexture> DefaultBlackTex;
+	shared_ptr<GfxTexture> DefaultNormalTex;
+	shared_ptr<GfxTexture> DefaultRougnessTex;
 
 	// global wrap sampler
-	std::shared_ptr<Sampler> samplerWrap;
-	std::shared_ptr<Sampler> samplerBilinearWrap;
+	std::shared_ptr<GfxSampler> samplerAnisoWrap;
+	std::shared_ptr<GfxSampler> samplerBilinearWrap;
+	std::shared_ptr<GfxSampler> samplerTrilinearClamp;
+
 
 
 	// mesh
@@ -388,7 +484,7 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 
 	// misc
 	glm::vec3 LightDir = glm::normalize(glm::vec3(0.901, 0.88, 0.176));
-	float LightIntensity = 0.4;
+	float LightIntensity = 1;
 	float Near = 10.0f;
 	float Far = 20000.0f;
 	float Fov = 0.8f;
@@ -399,8 +495,16 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	glm::mat4x4 InvProjMat;
 	glm::mat4x4 ViewProjMat;
 	glm::mat4x4 InvViewProjMat;
+	
 	glm::mat4x4 PrevViewMat;
+	glm::mat4x4 PrevProjMat;
+
+	glm::mat4x4 PrevInvViewMat;
+
+
 	glm::mat4x4 PrevViewProjMat;
+
+
 	glm::vec2 JitterOffset;
 	glm::vec2 PrevJitter;
 
@@ -415,7 +519,7 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 		glm::mat4x4 WorldMatrix;
 	};
 
-	std::shared_ptr<Buffer> InstancePropertyBuffer;
+	std::shared_ptr<GfxBuffer> InstancePropertyBuffer;
 	shared_ptr<RTAS> TLAS;
 	vector<shared_ptr<RTAS>> vecBLAS;
 	
@@ -430,20 +534,97 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	UINT FrameCounter = 0;
 
 	// Pipeline objects.
-	CD3DX12_VIEWPORT m_viewport;
-	CD3DX12_RECT m_scissorRect;
-	ComPtr<IDXGISwapChain3> m_swapChain;
-	ComPtr<ID3D12Device5> m_device;
+	Rect m_scissorRect;
 	std::unique_ptr<SimpleDX12> dx12_rhi;
+	
 
 	enki::TaskScheduler g_TS;
 
 	bool bRecompileShaders = false;
 	bool bShowImgui = true;
 	void RecompileShaders();
+
+#if USE_DLSS
+	bool m_ngxInitialized = false;
+	bool m_bDlssAvailable = false;
+
+	NVSDK_NGX_Parameter* m_ngxParameters = nullptr;
+	NVSDK_NGX_Handle* m_dlssFeature = nullptr;
+
+	bool bResetDLSS = false;
+
+#endif
+
+#if USE_RTXGI
+	shared_ptr<rtxgi::DDGIVolume> volume;
+	rtxgi::DDGIVolumeDesc volumeDesc = {};
+	rtxgi::DDGIVolumeResources volumeResources = {};
+	rtxgi::float3 volumeTranslation = { 0, 800, 0 };
+
+	std::shared_ptr<Buffer> VolumeCB;
+
+	shared_ptr<Texture> probeRTRadiance;
+	shared_ptr<Texture> probeIrradiance;
+	shared_ptr<Texture> probeDistance;
+	shared_ptr<Texture> probeOffsets;
+	shared_ptr<Texture> probeStates;
+
+	D3D12_CPU_DESCRIPTOR_HANDLE volumeDescriptorTableCPUHandle;
+	D3D12_GPU_DESCRIPTOR_HANDLE volumeDescriptorTableGPUHandle;
+
+	struct LightInfoCB
+	{
+		glm::vec4 LightDirAndIntensity;
+
+	};
+	shared_ptr<RTPipelineStateObject> PSO_RT_PROBE;
+
+	bool bDrawIrradiance = false;
+	float IrradianceScale = 1;
+	bool bDrawDistance = false;
+	float DistanceScale = 1;
+
+	float probeHysteresis = 0.996f;
+	float normalBias= 0.1;
+	float viewBias = 0.1;
+#endif
+
+# if USE_NRD
+	// NRD
+	bool bNRDDenoising = false;
+	Nrd m_NRD;
+
+	NRIInterface m_NRI = {};
+	nri::Device* m_NRIDevice = nullptr;
+	//shared_ptr<nri::CommandQueue> m_NRICommandQueue = nullptr;
+	
+	//std::array<nri::CommandBuffer*, 3> m_NRIcommandBuffers;
+
+	bool m_NRDInit = false;
+	bool m_NRIInit = false;
+
+	struct ResolveNRDParam
+	{
+		glm::mat4x4 InvProjMatrix;
+		float Near;
+		float Far;
+	};
+	shared_ptr<PipelineStateObject> ResolveNormalRoughnessPSO;
+#endif
+
 public:
 
 	void InitRaytracingData();
+
+	void InitDLSS();
+
+	void InitNRD();
+
+#if USE_RTXGI
+	void InitRTXGI();
+#endif
+
+	void ShutDownDLSS();
 	
 
 	void LoadPipeline();
@@ -470,7 +651,7 @@ public:
 
 	void InitBloomPass();
 
-	void InitGenMipSpecularGIPass();
+	void InitResolvePixelVelocityPass();
 
 	void InitImgui();
 
@@ -491,6 +672,9 @@ public:
 
 	void TemporalDenoisingPass();
 
+	void NRDPass();
+
+
 	void BloomPass();
 
 
@@ -503,7 +687,13 @@ public:
 
 	void TemporalAAPass();
 
-	void GenMipSpecularGIPass();
+#if USE_DLSS
+	void DLSSPass();
+#endif
+
+	void ResolvePixelVelocityPass();
+
+	void RTXGIPass();
 
 	// DXSample functions
 	virtual void OnInit();
@@ -518,7 +708,10 @@ public:
 
 	virtual void OnKeyUp(UINT8 key);
 
-	Corona(UINT width, UINT height, std::wstring name);
+	virtual void OnSizeChanged(UINT width, UINT height, bool minimized);
+
+
+	Corona(UINT width, UINT height, UINT renderWidth, UINT renderHeight, std::wstring name);
 
 	virtual ~Corona();
 
