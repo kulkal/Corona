@@ -23,29 +23,31 @@
 #include "DXSample.h"
 #include "StepTimer.h"
 #include "SimpleCamera.h"
-#include "SimpleDX12.h"
 #include "AbstractGfxLayer.h"
 #include "enkiTS/TaskScheduler.h""
 #define PROFILE_BUILD 1
 #include "pix3.h"
-using namespace DirectX;
 
 #define USE_DLSS 0
 #define USE_NRD 0
 #define RTXGI 1
 #define USE_IMGUI 0
 #define USE_GIZMO 0
+#define USE_AFTERMATH 0
 
 #if USE_DLSS
 #include "nvsdk_ngx.h"
 #include <nvsdk_ngx_helpers.h>
 
 #define DLSS_APP_ID 100689411
-#endif
+#endif //USE_DLSS
 
+#if RTXGI
 #include <rtxgi/Types.h>
 #include <rtxgi/ddgi/DDGIVolume.h>
+#endif // RTXGI
 
+#if USE_NRD
 constexpr uint32_t BUFFERED_FRAME_MAX_NUM = 2;
 #include "NRD.h"
 #include "NRI.h"
@@ -53,7 +55,7 @@ constexpr uint32_t BUFFERED_FRAME_MAX_NUM = 2;
 
 #include "NRIDeviceCreation.h"
 #include "NRIWrapperD3D12.h"
-
+#endif // USE_NRD
 
 
 
@@ -64,15 +66,17 @@ constexpr uint32_t BUFFERED_FRAME_MAX_NUM = 2;
 // for the GPU lifetime of resources to avoid destroying objects that may still be
 // referenced by the GPU.
 // An example of this can be found in the class method: OnDestroy().
-using Microsoft::WRL::ComPtr;
+//using Microsoft::WRL::ComPtr;
 using namespace std;
 
+#if USE_NRD
 struct NRIInterface
 	: public nri::CoreInterface
 	, public nri::WrapperD3D12Interface
 	//, public nri::SwapChainInterface
 	//, public nri::RayTracingInterface
 {};
+#endif // USE_NRD
 
 
 
@@ -520,8 +524,8 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	};
 
 	std::shared_ptr<GfxBuffer> InstancePropertyBuffer;
-	shared_ptr<RTAS> TLAS;
-	vector<shared_ptr<RTAS>> vecBLAS;
+	shared_ptr<GfxRTAS> TLAS;
+	vector<shared_ptr<GfxRTAS>> vecBLAS;
 	
 	// ...
 	bool bMultiThreadRendering = false;
@@ -535,7 +539,7 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 
 	// Pipeline objects.
 	Rect m_scissorRect;
-	std::unique_ptr<SimpleDX12> dx12_rhi;
+	std::unique_ptr<GfxAPI> gfx_api;
 	
 
 	enki::TaskScheduler g_TS;

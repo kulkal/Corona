@@ -475,6 +475,8 @@ void SimpleDX12::GetFrameBuffers(std::vector<std::shared_ptr<Texture>>& FrameFuf
 
 SimpleDX12::SimpleDX12(HWND hWnd, UINT DisplayWidth, UINT DisplayHeight)
 {
+	CoInitialize(NULL);
+
 	UINT dxgiFactoryFlags = 0;
 
 #if defined(_DEBUG)
@@ -1482,104 +1484,105 @@ static const D3D12_HEAP_PROPERTIES kUploadHeapProps =
 	0,
 };
 
-shared_ptr<RTAS> Mesh::CreateBLAS()
-{
-	RTAS* as = new  RTAS;
+//RTAS* Mesh::CreateBLAS()
+//{
+//	RTAS* as = new  RTAS;
+//	as->mesh = this;
+//
+//	VertexBuffer* vb = static_cast<VertexBuffer*>(Vb.get());
+//	IndexBuffer* ib = static_cast<IndexBuffer*>(Ib.get());
+//	D3D12_RAYTRACING_GEOMETRY_DESC geomDesc = {};
+//	geomDesc.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
+//	geomDesc.Triangles.VertexBuffer.StartAddress = vb->resource->GetGPUVirtualAddress();
+//	geomDesc.Triangles.VertexBuffer.StrideInBytes = VertexStride;;
+//	geomDesc.Triangles.VertexFormat = DXGI_FORMAT_R32G32B32_FLOAT;
+//	geomDesc.Triangles.VertexCount = vb->numVertices;
+//	geomDesc.Triangles.IndexBuffer = ib->resource->GetGPUVirtualAddress();
+//	geomDesc.Triangles.IndexFormat = static_cast<DXGI_FORMAT>(IndexFormat);
+//	geomDesc.Triangles.IndexCount = ib->numIndices;
+//	geomDesc.Triangles.Transform3x4 = 0;
+//
+//	if(bTransparent)
+//		geomDesc.Flags = D3D12_RAYTRACING_GEOMETRY_FLAG_NONE;
+//	else
+//		geomDesc.Flags = D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE;
+//
+//
+//
+//	D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS inputs = {};
+//	inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
+//	inputs.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;
+//	inputs.NumDescs = 1;
+//	inputs.pGeometryDescs = &geomDesc;
+//	inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
+//
+//	D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO info = {};
+//	g_dx12_rhi->Device->GetRaytracingAccelerationStructurePrebuildInfo(&inputs, &info);
+//
+//	{
+//		D3D12_RESOURCE_DESC bufDesc = {};
+//		bufDesc.Alignment = 0;
+//		bufDesc.DepthOrArraySize = 1;
+//		bufDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+//		bufDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+//		bufDesc.Format = DXGI_FORMAT_UNKNOWN;
+//		bufDesc.Height = 1;
+//		bufDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+//		bufDesc.MipLevels = 1;
+//		bufDesc.SampleDesc.Count = 1;
+//		bufDesc.SampleDesc.Quality = 0;
+//		bufDesc.Width = info.ScratchDataSizeInBytes;
+//
+//		/*stringstream ss;
+//		ss << "blas->scratch : " << bufDesc.Width << "\n";
+//		OutputDebugStringA(ss.str().c_str());*/
+//
+//		g_dx12_rhi->Device->CreateCommittedResource(&kDefaultHeapProps, D3D12_HEAP_FLAG_NONE, &bufDesc, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, IID_PPV_ARGS(&as->Scratch));
+//	}
+//	
+//	{
+//		D3D12_RESOURCE_DESC bufDesc = {};
+//		bufDesc.Alignment = 0;
+//		bufDesc.DepthOrArraySize = 1;
+//		bufDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+//		bufDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+//		bufDesc.Format = DXGI_FORMAT_UNKNOWN;
+//		bufDesc.Height = 1;
+//		bufDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+//		bufDesc.MipLevels = 1;
+//		bufDesc.SampleDesc.Count = 1;
+//		bufDesc.SampleDesc.Quality = 0;
+//		bufDesc.Width = info.ResultDataMaxSizeInBytes;
+//		
+//		/*stringstream ss;
+//		ss << "blas->result : " << bufDesc.Width << "\n";
+//		OutputDebugStringA(ss.str().c_str());*/
+//
+//
+//		g_dx12_rhi->Device->CreateCommittedResource(&kDefaultHeapProps, D3D12_HEAP_FLAG_NONE, &bufDesc, D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE, nullptr, IID_PPV_ARGS(&as->Result));
+//	}
+//
+//	CommandList* cmd = g_dx12_rhi->CmdQ->AllocCmdList();
+//
+//	D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC asDesc = {};
+//	asDesc.Inputs = inputs;
+//	asDesc.DestAccelerationStructureData = as->Result->GetGPUVirtualAddress();
+//	asDesc.ScratchAccelerationStructureData = as->Scratch->GetGPUVirtualAddress();
+//
+//	D3D12_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO_DESC postInfo;
+//	cmd->CmdList->BuildRaytracingAccelerationStructure(&asDesc, 0, &postInfo);
+//
+//	/*D3D12_RESOURCE_BARRIER uavBarrier = {};
+//	uavBarrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+//	uavBarrier.UAV.pResource = as->Result.Get();
+//	cmd->CmdList->ResourceBarrier(1, &uavBarrier);*/
+//
+//	g_dx12_rhi->CmdQ->ExecuteCommandList(cmd);
+//
+//	return as;
+//}
 
-	VertexBuffer* vb = static_cast<VertexBuffer*>(Vb.get());
-	IndexBuffer* ib = static_cast<IndexBuffer*>(Ib.get());
-	D3D12_RAYTRACING_GEOMETRY_DESC geomDesc = {};
-	geomDesc.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
-	geomDesc.Triangles.VertexBuffer.StartAddress = vb->resource->GetGPUVirtualAddress();
-	geomDesc.Triangles.VertexBuffer.StrideInBytes = VertexStride;;
-	geomDesc.Triangles.VertexFormat = DXGI_FORMAT_R32G32B32_FLOAT;
-	geomDesc.Triangles.VertexCount = vb->numVertices;
-	geomDesc.Triangles.IndexBuffer = ib->resource->GetGPUVirtualAddress();
-	geomDesc.Triangles.IndexFormat = static_cast<DXGI_FORMAT>(IndexFormat);
-	geomDesc.Triangles.IndexCount = ib->numIndices;
-	geomDesc.Triangles.Transform3x4 = 0;
-
-	if(bTransparent)
-		geomDesc.Flags = D3D12_RAYTRACING_GEOMETRY_FLAG_NONE;
-	else
-		geomDesc.Flags = D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE;
-
-
-
-	D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS inputs = {};
-	inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
-	inputs.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;
-	inputs.NumDescs = 1;
-	inputs.pGeometryDescs = &geomDesc;
-	inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
-
-	D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO info = {};
-	g_dx12_rhi->Device->GetRaytracingAccelerationStructurePrebuildInfo(&inputs, &info);
-
-	{
-		D3D12_RESOURCE_DESC bufDesc = {};
-		bufDesc.Alignment = 0;
-		bufDesc.DepthOrArraySize = 1;
-		bufDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-		bufDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
-		bufDesc.Format = DXGI_FORMAT_UNKNOWN;
-		bufDesc.Height = 1;
-		bufDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-		bufDesc.MipLevels = 1;
-		bufDesc.SampleDesc.Count = 1;
-		bufDesc.SampleDesc.Quality = 0;
-		bufDesc.Width = info.ScratchDataSizeInBytes;
-
-		/*stringstream ss;
-		ss << "blas->scratch : " << bufDesc.Width << "\n";
-		OutputDebugStringA(ss.str().c_str());*/
-
-		g_dx12_rhi->Device->CreateCommittedResource(&kDefaultHeapProps, D3D12_HEAP_FLAG_NONE, &bufDesc, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, IID_PPV_ARGS(&as->Scratch));
-	}
-	
-	{
-		D3D12_RESOURCE_DESC bufDesc = {};
-		bufDesc.Alignment = 0;
-		bufDesc.DepthOrArraySize = 1;
-		bufDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-		bufDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
-		bufDesc.Format = DXGI_FORMAT_UNKNOWN;
-		bufDesc.Height = 1;
-		bufDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-		bufDesc.MipLevels = 1;
-		bufDesc.SampleDesc.Count = 1;
-		bufDesc.SampleDesc.Quality = 0;
-		bufDesc.Width = info.ResultDataMaxSizeInBytes;
-		
-		/*stringstream ss;
-		ss << "blas->result : " << bufDesc.Width << "\n";
-		OutputDebugStringA(ss.str().c_str());*/
-
-
-		g_dx12_rhi->Device->CreateCommittedResource(&kDefaultHeapProps, D3D12_HEAP_FLAG_NONE, &bufDesc, D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE, nullptr, IID_PPV_ARGS(&as->Result));
-	}
-
-	CommandList* cmd = g_dx12_rhi->CmdQ->AllocCmdList();
-
-	D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC asDesc = {};
-	asDesc.Inputs = inputs;
-	asDesc.DestAccelerationStructureData = as->Result->GetGPUVirtualAddress();
-	asDesc.ScratchAccelerationStructureData = as->Scratch->GetGPUVirtualAddress();
-
-	D3D12_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO_DESC postInfo;
-	cmd->CmdList->BuildRaytracingAccelerationStructure(&asDesc, 0, &postInfo);
-
-	/*D3D12_RESOURCE_BARRIER uavBarrier = {};
-	uavBarrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
-	uavBarrier.UAV.pResource = as->Result.Get();
-	cmd->CmdList->ResourceBarrier(1, &uavBarrier);*/
-
-	g_dx12_rhi->CmdQ->ExecuteCommandList(cmd);
-
-	return shared_ptr<RTAS>(as);
-}
-
-std::shared_ptr<RTAS> SimpleDX12::CreateTLAS(vector<shared_ptr<RTAS>>& VecBottomLevelAS)
+RTAS* SimpleDX12::CreateTLAS(vector<RTAS*>& VecBottomLevelAS)
 {
 	RTAS* as = new  RTAS;
 
@@ -1698,8 +1701,107 @@ std::shared_ptr<RTAS> SimpleDX12::CreateTLAS(vector<shared_ptr<RTAS>>& VecBottom
 
 	g_dx12_rhi->CmdQ->ExecuteCommandList(cmd);
 
-	return shared_ptr<RTAS>(as);
+	return as;
 }
+
+RTAS* SimpleDX12::CreateBLAS(GfxMesh* mesh)
+{
+	RTAS* as = new  RTAS;
+	as->mesh = mesh;
+
+	VertexBuffer* vb = static_cast<VertexBuffer*>(mesh->Vb.get());
+	IndexBuffer* ib = static_cast<IndexBuffer*>(mesh->Ib.get());
+	D3D12_RAYTRACING_GEOMETRY_DESC geomDesc = {};
+	geomDesc.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
+	geomDesc.Triangles.VertexBuffer.StartAddress = vb->resource->GetGPUVirtualAddress();
+	geomDesc.Triangles.VertexBuffer.StrideInBytes = mesh->VertexStride;;
+	geomDesc.Triangles.VertexFormat = DXGI_FORMAT_R32G32B32_FLOAT;
+	geomDesc.Triangles.VertexCount = vb->numVertices;
+	geomDesc.Triangles.IndexBuffer = ib->resource->GetGPUVirtualAddress();
+	geomDesc.Triangles.IndexFormat = static_cast<DXGI_FORMAT>(mesh->IndexFormat);
+	geomDesc.Triangles.IndexCount = ib->numIndices;
+	geomDesc.Triangles.Transform3x4 = 0;
+
+	if (mesh->bTransparent)
+		geomDesc.Flags = D3D12_RAYTRACING_GEOMETRY_FLAG_NONE;
+	else
+		geomDesc.Flags = D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE;
+
+
+
+	D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS inputs = {};
+	inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
+	inputs.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;
+	inputs.NumDescs = 1;
+	inputs.pGeometryDescs = &geomDesc;
+	inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
+
+	D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO info = {};
+	g_dx12_rhi->Device->GetRaytracingAccelerationStructurePrebuildInfo(&inputs, &info);
+
+	{
+		D3D12_RESOURCE_DESC bufDesc = {};
+		bufDesc.Alignment = 0;
+		bufDesc.DepthOrArraySize = 1;
+		bufDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+		bufDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+		bufDesc.Format = DXGI_FORMAT_UNKNOWN;
+		bufDesc.Height = 1;
+		bufDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+		bufDesc.MipLevels = 1;
+		bufDesc.SampleDesc.Count = 1;
+		bufDesc.SampleDesc.Quality = 0;
+		bufDesc.Width = info.ScratchDataSizeInBytes;
+
+		/*stringstream ss;
+		ss << "blas->scratch : " << bufDesc.Width << "\n";
+		OutputDebugStringA(ss.str().c_str());*/
+
+		g_dx12_rhi->Device->CreateCommittedResource(&kDefaultHeapProps, D3D12_HEAP_FLAG_NONE, &bufDesc, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, IID_PPV_ARGS(&as->Scratch));
+	}
+
+	{
+		D3D12_RESOURCE_DESC bufDesc = {};
+		bufDesc.Alignment = 0;
+		bufDesc.DepthOrArraySize = 1;
+		bufDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+		bufDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+		bufDesc.Format = DXGI_FORMAT_UNKNOWN;
+		bufDesc.Height = 1;
+		bufDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+		bufDesc.MipLevels = 1;
+		bufDesc.SampleDesc.Count = 1;
+		bufDesc.SampleDesc.Quality = 0;
+		bufDesc.Width = info.ResultDataMaxSizeInBytes;
+
+		/*stringstream ss;
+		ss << "blas->result : " << bufDesc.Width << "\n";
+		OutputDebugStringA(ss.str().c_str());*/
+
+
+		g_dx12_rhi->Device->CreateCommittedResource(&kDefaultHeapProps, D3D12_HEAP_FLAG_NONE, &bufDesc, D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE, nullptr, IID_PPV_ARGS(&as->Result));
+	}
+
+	CommandList* cmd = g_dx12_rhi->CmdQ->AllocCmdList();
+
+	D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC asDesc = {};
+	asDesc.Inputs = inputs;
+	asDesc.DestAccelerationStructureData = as->Result->GetGPUVirtualAddress();
+	asDesc.ScratchAccelerationStructureData = as->Scratch->GetGPUVirtualAddress();
+
+	D3D12_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO_DESC postInfo;
+	cmd->CmdList->BuildRaytracingAccelerationStructure(&asDesc, 0, &postInfo);
+
+	/*D3D12_RESOURCE_BARRIER uavBarrier = {};
+	uavBarrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+	uavBarrier.UAV.pResource = as->Result.Get();
+	cmd->CmdList->ResourceBarrier(1, &uavBarrier);*/
+
+	g_dx12_rhi->CmdQ->ExecuteCommandList(cmd);
+
+	return as;
+}
+
 
 
 template<class BlotType>

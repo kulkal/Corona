@@ -12,7 +12,6 @@
 #include "stdafx.h"
 #include "Corona.h"
 #include <dxcapi.use.h>
-//#include <dxcapi.h>
 #include "Utils.h"
 #include <iostream>
 #include <algorithm>
@@ -25,19 +24,25 @@
 #include "assimp/include/Importer.hpp"
 #include "assimp/include/scene.h"
 #include "assimp/include/postprocess.h"
-//#pragma comment(lib, "assimp\\lib\\assimp.lib")
+
+#if USE_AFTERMATH
 #include "GFSDK_Aftermath/include/GFSDK_Aftermath.h"
+#endif // USE_AFTERMATH
+
+#if USE_IMGUI
 #include "imgui.h"
 #include "imgui_impl_win32.h"
 #include "imgui_impl_dx12.h"
 #include "imGuIZMO.h"
+#endif // USE_IMGUI
 
+#if USE_NRD
 #include "NRIDescs.hpp"
 #include "Helper.h"
 #define PROPS_D3D12
 #include "MathLib.h"
 #include "NRDIntegration.hpp"
-
+#endif //USE_NRD
 
 
 #ifdef _DEBUG
@@ -49,10 +54,7 @@
 
 static dxc::DxcDllSupport gDxcDllHelper;
 
-
 using namespace glm;
-
-
 
 Corona::Corona(UINT width, UINT height, UINT renderWidth, UINT renderHeight, std::wstring name) :
 	DXSample(width, height, name),
@@ -89,7 +91,6 @@ void Corona::OnInit()
 {
 	//_CrtSetBreakAlloc(4222159);
 
-	CoInitialize(NULL);
 
 	g_TS.Initialize(8);
 
@@ -108,8 +109,7 @@ void Corona::OnInit()
 
 void Corona::LoadPipeline()
 {
-	dx12_rhi = std::make_unique<SimpleDX12>(Win32Application::GetHwnd(), DisplayWidth, DisplayHeight);
-
+	gfx_api = std::unique_ptr<GfxAPI>(AbstractGfxLayer::CreateDX12API(Win32Application::GetHwnd(), DisplayWidth, DisplayHeight));
 	framebuffers.clear();
 	AbstractGfxLayer::GetFrameBuffers(framebuffers);
 }
@@ -131,7 +131,6 @@ void Corona::LoadAssets()
 	InitTemporalDenoisingPass();
 	InitBloomPass();
 	InitResolvePixelVelocityPass();
-	//InitGenMipSpecularGIPass();
 
 #if USE_RTXGI
 	InitRTXGI();
@@ -159,11 +158,6 @@ void Corona::LoadAssets()
 
 	const UINT vertexBufferSize = sizeof(quadVertices);
 	const UINT vertexBufferStride = sizeof(PostVertex);
-
-	D3D12_SUBRESOURCE_DATA vertexData = {};
-	vertexData.pData = &quadVertices;
-	vertexData.RowPitch = vertexBufferSize;
-	vertexData.SlicePitch = vertexData.RowPitch;
 
 	FullScreenVB = shared_ptr<GfxVertexBuffer>(AbstractGfxLayer::CreateVertexBuffer(vertexBufferSize, vertexBufferStride, &quadVertices));
 
@@ -437,10 +431,7 @@ void Corona::LoadAssets()
 	}
 
 	InitRaytracingData();
-
 }
-
-
 
 shared_ptr<Scene> Corona::LoadModel(string fileName)
 {
@@ -499,8 +490,7 @@ shared_ptr<Scene> Corona::LoadModel(string fileName)
 	for (int i = 0; i < numMaterials; ++i)
 	{
 		const aiMaterial& aiMat = *assimpScene->mMaterials[i];
-		//shared_ptr<Material> mat = shared_ptr<Material>(new Material);
-		Material* mat = new Material;
+		GfxMaterial* mat = new GfxMaterial;
 		wstring wDiffuseTex;
 		wstring wNormalTex;
 		wstring wRoughnessTex;
@@ -535,10 +525,6 @@ shared_ptr<Scene> Corona::LoadModel(string fileName)
 		if (!mat->Normal)
 			mat->Normal = DefaultNormalTex;
 
-		
-		// aiTextureType_HEIGHT is normal in sponza
-		// aiTextureType_AMBIENT is metallic in sponza
-
 		if (aiMat.GetTexture(aiTextureType_AMBIENT, 0, &metallicMapPath) == aiReturn_SUCCESS)
 			wMetallicTex = GetFileName(AnsiToWString(metallicMapPath.C_Str()).c_str());
 		if (wMetallicTex.length() != 0)
@@ -569,7 +555,7 @@ shared_ptr<Scene> Corona::LoadModel(string fileName)
 		if (wDiffuseTex == L"Sponza_Thorn_diffuse.png" || wDiffuseTex == L"VasePlant_diffuse.png" || wDiffuseTex == L"ChainTexture_Albedo.png")
 			mat->bHasAlpha = true;
 
-		scene->Materials.push_back(shared_ptr<Material>(mat));
+		scene->Materials.push_back(shared_ptr<GfxMaterial>(mat));
 	}
 
 	struct Vertex
@@ -593,7 +579,7 @@ shared_ptr<Scene> Corona::LoadModel(string fileName)
 	{
 		aiMesh* asMesh = assimpScene->mMeshes[i];
 
-		Mesh* mesh = new Mesh;
+		GfxMesh* mesh = new GfxMesh;
 
 		mesh->NumVertices = asMesh->mNumVertices;
 		mesh->NumIndices = asMesh->mNumFaces * 3;
@@ -603,7 +589,6 @@ shared_ptr<Scene> Corona::LoadModel(string fileName)
 
 		vector<UINT16> indices;
 		indices.resize(mesh->NumIndices);
-		//if (i > 0) break;
 
 		if (asMesh->HasPositions())
 		{
@@ -665,7 +650,7 @@ shared_ptr<Scene> Corona::LoadModel(string fileName)
 		mesh->Ib = shared_ptr<GfxIndexBuffer>(AbstractGfxLayer::CreateIndexBuffer(mesh->IndexFormat, sizeof(UINT16)*3*numTriangles, indices.data()));
 
 
-		Mesh::DrawCall dc;
+		GfxMesh::DrawCall dc;
 		dc.IndexCount = numTriangles * 3;
 		dc.IndexStart = 0;
 		dc.VertexBase = 0;
@@ -675,7 +660,7 @@ shared_ptr<Scene> Corona::LoadModel(string fileName)
 		
 		mesh->Draws.push_back(dc);
 
-		scene->meshes.push_back(shared_ptr<Mesh>(mesh));
+		scene->meshes.push_back(shared_ptr<GfxMesh>(mesh));
 	}
 
 	shared_ptr<Scene> scenePtr = shared_ptr<Scene>(scene);
@@ -842,8 +827,6 @@ void Corona::InitBloomPass()
 		AbstractGfxLayer::BindSRV(TEMP_HistogramPSO, "LumaTex", 0, 1);
 		AbstractGfxLayer::BindUAV(TEMP_HistogramPSO, "Histogram", 0);
 
-		
-
 		bool bSucess = AbstractGfxLayer::InitPSO(TEMP_HistogramPSO, &computePsoDesc);
 		if (bSucess)
 			HistogramPSO = shared_ptr<GfxPipelineStateObject>(TEMP_HistogramPSO);
@@ -871,7 +854,6 @@ void Corona::InitBloomPass()
 		if (bSucess)
 			DrawHistogramPSO = shared_ptr<GfxPipelineStateObject>(TEMP_DrawHistogramPSO);
 	}
-
 
 	{
 		SHADER_CREATE_DESC csDesc =
@@ -1334,11 +1316,6 @@ void Corona::InitBlueNoiseTexture()
 				ss << "\n";
 		}
 
-		/*D3D12_SUBRESOURCE_DATA textureData = {};
-		textureData.pData = NoiseDataFloat;
-		textureData.RowPitch = Shape[0] * nChannel * sizeof(UINT32);
-		textureData.SlicePitch = textureData.RowPitch * Shape[1];*/
-
 		BlueNoiseTex = shared_ptr<GfxTexture>(AbstractGfxLayer::CreateTexture3D(FORMAT_R32G32B32A32_FLOAT, RESOURCE_FLAG_NONE,
 			RESOURCE_STATE_COPY_DEST, Shape[0], Shape[1], Shape[2], 1));
 
@@ -1443,11 +1420,7 @@ void Corona::InitToneMapPass()
 	psoDescMesh.vsDesc = &vsDesc;
 	psoDescMesh.psDesc = &psDesc;
 
-
-
 	GfxPipelineStateObject* TEMP_ToneMapPSO = AbstractGfxLayer::CreatePSO();
-
-
 
 	AbstractGfxLayer::BindSRV(TEMP_ToneMapPSO, "SrcTex", 0, 1);
 	AbstractGfxLayer::BindSRV(TEMP_ToneMapPSO, "Exposure", 1, 1);
@@ -1523,7 +1496,6 @@ void Corona::InitDebugPass()
 
 	GRAPHICS_PIPELINE_STATE_DESC psoDescMesh = {};
 	psoDescMesh.InputLayout = { StandardVertexDescription, StandardVertexDescriptionNumElements };
-	//psoDescMesh.RasterizerState = rasterizerStateDesc;
 	psoDescMesh.CullMode = CULL_MODE_NONE; // rasterizer state is too big. and currently I use only CullMode.
 	psoDescMesh.BlendState = blendState;
 
@@ -1622,8 +1594,6 @@ void Corona::InitLightingPass()
 		/*StencilFunc = */COMPARISON_FUNC_ALWAYS
 	};
 
-	/*psoDesc.DepthStencilState.DepthEnable = FALSE;
-	psoDesc.DepthStencilState.StencilEnable = FALSE;*/
 	DEPTH_STENCIL_DESC depthStencilState = {
 		/*DepthEnable = */FALSE,
 		/*DepthWriteMask = */DEPTH_WRITE_MASK_ALL,
@@ -1638,7 +1608,6 @@ void Corona::InitLightingPass()
 
 	GRAPHICS_PIPELINE_STATE_DESC psoDescMesh = {};
 	psoDescMesh.InputLayout = { StandardVertexDescription, StandardVertexDescriptionNumElements };
-	//psoDescMesh.RasterizerState = rasterizerStateDesc;
 	psoDescMesh.CullMode = CULL_MODE_NONE; // rasterizer state is too big. and currently I use only CullMode.
 	psoDescMesh.BlendState = blendState;
 
@@ -1662,10 +1631,7 @@ void Corona::InitLightingPass()
 	psoDescMesh.vsDesc = &vsDesc;
 	psoDescMesh.psDesc = &psDesc;
 
-
-
 	GfxPipelineStateObject* TEMP_BufferVisualizePSO = AbstractGfxLayer::CreatePSO();
-
 
 	AbstractGfxLayer::BindSRV(TEMP_BufferVisualizePSO, "AlbedoTex", 0, 1);
 	AbstractGfxLayer::BindSRV(TEMP_BufferVisualizePSO, "NormalTex", 1, 1);
@@ -1678,14 +1644,11 @@ void Corona::InitLightingPass()
 	AbstractGfxLayer::BindSRV(TEMP_BufferVisualizePSO, "RoughnessMetalicTex", 8, 1);
 	AbstractGfxLayer::BindSRV(TEMP_BufferVisualizePSO, "DiffuseGITex", 9, 1);
 
-
 	AbstractGfxLayer::BindSRV(TEMP_BufferVisualizePSO, "DDGIProbeIrradianceSRV", 10, 1);
 	AbstractGfxLayer::BindSRV(TEMP_BufferVisualizePSO, "DDGIProbeDistanceSRV", 11, 1);
 
 	AbstractGfxLayer::BindUAV(TEMP_BufferVisualizePSO, "DDGIProbeStates", 0);
 	AbstractGfxLayer::BindUAV(TEMP_BufferVisualizePSO, "DDGIProbeOffsets", 1);
-
-
 
 	AbstractGfxLayer::BindSampler(TEMP_BufferVisualizePSO, "samplerWrap", 0);
 	AbstractGfxLayer::BindSampler(TEMP_BufferVisualizePSO, "TrilinearSampler", 1);
@@ -1745,8 +1708,6 @@ void Corona::InitTemporalAAPass()
 		/*StencilFunc = */COMPARISON_FUNC_ALWAYS
 	};
 
-	/*psoDesc.DepthStencilState.DepthEnable = FALSE;
-	psoDesc.DepthStencilState.StencilEnable = FALSE;*/
 	DEPTH_STENCIL_DESC depthStencilState = {
 		/*DepthEnable = */FALSE,
 		/*DepthWriteMask = */DEPTH_WRITE_MASK_ALL,
@@ -1784,8 +1745,6 @@ void Corona::InitTemporalAAPass()
 	psoDescMesh.vsDesc = &vsDesc;
 	psoDescMesh.psDesc = &psDesc;
 
-
-
 	GfxPipelineStateObject* TEMP_TemporalAAPSO = AbstractGfxLayer::CreatePSO();
 
 
@@ -1801,8 +1760,6 @@ void Corona::InitTemporalAAPass()
 	if (bSuccess)
 		TemporalAAPSO = shared_ptr<GfxPipelineStateObject>(TEMP_TemporalAAPSO);
 }
-
-
 
 void Corona::ToneMapPass()
 {
@@ -3048,8 +3005,6 @@ void Corona::OnUpdate()
 
 	FrameCounter++;
 
-	//ColorBufferWriteIndex = FrameCounter % 2;
-
 	if (bRecompileShaders)
 	{
 		RecompileShaders();
@@ -3663,7 +3618,7 @@ void Corona::DrawScene(shared_ptr<Scene> scene, float Roughness, float Metalic, 
 
 		for (int i = 0; i < mesh->Draws.size(); i++)
 		{
-			Mesh::DrawCall& drawcall = mesh->Draws[i];
+			GfxMesh::DrawCall& drawcall = mesh->Draws[i];
 			GBufferConstantBuffer objCB;
 			int sizea = sizeof(GBufferConstantBuffer);
 
@@ -4191,12 +4146,11 @@ void Corona::NRDPass()
 #endif USE_NRD
 
 
-void AddMeshToVec(vector<shared_ptr<RTAS>>& vecBLAS, shared_ptr<Scene> scene)
+void AddMeshToVec(vector<shared_ptr<GfxRTAS>>& vecBLAS, shared_ptr<Scene> scene)
 {
 	for (auto& mesh : scene->meshes)
 	{
-		shared_ptr<RTAS> blas = mesh->CreateBLAS();
-		blas->mesh = mesh;
+		shared_ptr<GfxRTAS> blas = shared_ptr<GfxRTAS>(AbstractGfxLayer::CreateBLAS(mesh.get()));
 		if (blas == nullptr)
 		{
 			continue;
@@ -4223,7 +4177,6 @@ void Corona::RecompileShaders()
 	InitLightingPass();
 	InitTemporalAAPass();
 	InitBloomPass();
-	//InitGenMipSpecularGIPass();
 }
 
 void Corona::InitRaytracingData()
@@ -4234,15 +4187,14 @@ void Corona::InitRaytracingData()
 	AddMeshToVec(vecBLAS, Sponza);
 	AddMeshToVec(vecBLAS, ShaderBall);
 
-	TLAS = dx12_rhi->CreateTLAS(vecBLAS);
+	TLAS = shared_ptr<GfxRTAS>(AbstractGfxLayer::CreateTLAS(vecBLAS));
 
 	InstancePropertyBuffer = shared_ptr<GfxBuffer>(AbstractGfxLayer::CreateByteAddressBuffer(500, sizeof(InstanceProperty), HEAP_TYPE_UPLOAD, RESOURCE_STATE_GENERIC_READ, RESOURCE_FLAG_NONE));
 	NAME_BUFFER(InstancePropertyBuffer);
 
 
-	Buffer* dx12Buffer = static_cast<Buffer*>(InstancePropertyBuffer.get());
 	uint8_t* pData;
-	dx12Buffer->resource->Map(0, nullptr, (void**)&pData);
+	AbstractGfxLayer::MapBuffer(InstancePropertyBuffer.get(), (void**)&pData);
 
 	for (auto& m : vecBLAS)
 	{
@@ -4251,7 +4203,8 @@ void Corona::InitRaytracingData()
 		pData += sizeof(InstanceProperty);
 	}
 
-	dx12Buffer->resource->Unmap(0, nullptr);
+	AbstractGfxLayer::UnmapBuffer(InstancePropertyBuffer.get());
+
 }
 
 #if USE_DLSS
@@ -4946,21 +4899,6 @@ void Corona::InitRTPSO()
 	}
 }
 
-vector<UINT64> ResourceInt64array(ComPtr<ID3D12Resource> resource, int size)
-{
-	uint8_t* pData;
-	HRESULT hr = resource->Map(0, nullptr, (void**)&pData);
-
-	int size64 = size / sizeof(UINT64);
-	vector<UINT64> mem;
-	for (int i = 0; i < size64; i++)
-	{
-		UINT64 v = *(UINT64*)(pData + i * sizeof(UINT64));
-		mem.push_back(v);
-	}
-
-	return mem;
-}
 void Corona::RaytraceShadowPass()
 {
 #if USE_AFTERMATH

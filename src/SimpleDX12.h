@@ -36,7 +36,6 @@
 
 #include "AbstractGfxLayer.h"
 
-#define USE_AFTERMATH 0
 
 using namespace Microsoft::WRL;
 using namespace std;
@@ -377,6 +376,9 @@ public:
 	ComPtr<ID3D12Resource> resource;
 	
 	Descriptor Descriptor;
+
+	Sampler(){}
+	virtual ~Sampler(){}
 };
 
 class Texture : public GfxTexture
@@ -501,82 +503,21 @@ class Mesh;
 class RTAS : public GfxRTAS
 {
 public:
-	shared_ptr<Mesh> mesh;
 
 	Descriptor Descriptor;
 
 	ComPtr<ID3D12Resource> Scratch;
 	ComPtr<ID3D12Resource> Result;
 	ComPtr<ID3D12Resource> Instance;
+
+	RTAS() {}
+	virtual ~RTAS() {}
 };
 
-class Material
-{
-public:
-	bool bHasAlpha = false;
 
-	shared_ptr<GfxTexture> Diffuse;
-	shared_ptr<GfxTexture> Normal;
-	shared_ptr<GfxTexture> Roughness;
-	shared_ptr<GfxTexture> Metallic;
-	Material() {}
-	~Material()
-	{
-		int a = 0;
-	}
-};
 
-class Mesh
-{
-public:
-	struct DrawCall
-	{
-		shared_ptr<Material> mat;
-		INT DiffuseTextureIndex;
-		INT NormalTextureIndex;
-		INT SpecularTextureIndex;
-		UINT IndexStart;
-		UINT IndexCount;
-		UINT VertexBase;
-		UINT VertexCount;
-	};
-public:
-	bool bTransparent = false;
-	glm::mat4x4 transform;
-	UINT NumIndices;
-	UINT NumVertices;
 
-	UINT VertexStride;
-
-	FORMAT IndexFormat = FORMAT_R32_UINT;
-
-	shared_ptr<GfxIndexBuffer> Ib;
-	shared_ptr<GfxVertexBuffer> Vb;
-	vector<shared_ptr<Texture>> Textures;
-
-	shared_ptr<Material> Mat;
-
-	vector<DrawCall> Draws;
-
-	shared_ptr<RTAS> CreateBLAS();
-};
-
-class Scene
-{
-public:
-	glm::vec3 AABBMin = glm::vec3(0, 0, 0);
-	glm::vec3 AABBMax = glm::vec3(0, 0, 0);
-	float BoundingRadius = 0.f;
-
-	void SetTransform(glm::mat4x4 inTransform);
-
-public:
-	vector<shared_ptr<Mesh>> meshes;
-	vector<shared_ptr<Material>> Materials;
-public:
-};
-
-class SimpleDX12
+class SimpleDX12 : public GfxAPI
 {
 public:
 	friend class DescriptorHeap;
@@ -639,7 +580,10 @@ public:
 	Buffer* CreateBuffer(UINT InNumElements, UINT InElementSize, D3D12_HEAP_TYPE InType, D3D12_RESOURCE_STATES initResState, D3D12_RESOURCE_FLAGS InFlags, void* SrcData = nullptr);
 	IndexBuffer* CreateIndexBuffer(DXGI_FORMAT Format, UINT Size, void* SrcData);
 	VertexBuffer* CreateVertexBuffer(UINT Size, UINT Stride, void* SrcData);
-	shared_ptr<RTAS> CreateTLAS(vector<shared_ptr<RTAS>>& VecBottomLevelAS);
+	RTAS* CreateTLAS(vector<RTAS*>& VecBottomLevelAS);
+
+	RTAS* CreateBLAS(GfxMesh* mesh);
+
 
 	ComPtr<ID3DBlob> CreateShader(wstring FileName, string EntryPoint, string Target);
 	ComPtr<ID3DBlob> CreateShaderDXC(wstring FileName, wstring EntryPoint, wstring Target, std::optional<vector< DxcDefine>>  Defines);
