@@ -1,14 +1,6 @@
-//*********************************************************
-//
-// Copyright (c) Microsoft. All rights reserved.
-// This code is licensed under the MIT License (MIT).
-// THIS CODE IS PROVIDED *AS IS* WITHOUT WARRANTY OF
-// ANY KIND, EITHER EXPRESS OR IMPLIED, INCLUDING ANY
-// IMPLIED WARRANTIES OF FITNESS FOR A PARTICULAR
-// PURPOSE, MERCHANTABILITY, OR NON-INFRINGEMENT.
-//
-//*********************************************************
-Texture2D CurrentColorTex : register(t0);
+#include "Common.hlsl"
+
+[[vk::binding(0, VULKAN_SRV_SPACE)]] Texture2D CurrentColorTex : register(t0);
 Texture2D PrevColorTex : register(t1);
 Texture2D VelocityTex : register(t2);
 Texture2D DepthTex : register(t3);

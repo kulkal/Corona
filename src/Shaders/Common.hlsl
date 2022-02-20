@@ -1,6 +1,16 @@
+#define VULKAN_UNIFORM_SPACE 0
+#define VULKAN_SAMPLER_SPACE 1
+#define VULKAN_SRV_SPACE 2
+#define VULKAN_UAV_SPACE 4
+
+
+
+
+
 #define PI 3.14159265
 
 #define DOWNSAMPLE_SIZE 3
+
 
 
 float GetLinearDepth(float DeviceDepth, float ParamX, float ParamY, float ParamZ)

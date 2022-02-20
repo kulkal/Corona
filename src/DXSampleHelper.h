@@ -10,7 +10,7 @@
 //*********************************************************
 #pragma once
 #include "external/GFSDK_Aftermath/include/GFSDK_Aftermath.h"
-#include "SimpleDX12.h"
+#include "DX12Impl.h"
 
 
 inline void ThrowIfFailed(HRESULT hr, GFSDK_Aftermath_ContextHandle* AMH = nullptr)

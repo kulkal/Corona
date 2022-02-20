@@ -35,6 +35,8 @@
 #define USE_GIZMO 0
 #define USE_AFTERMATH 0
 
+#define VULKAN_RENDERER 1
+
 #if USE_DLSS
 #include "nvsdk_ngx.h"
 #include <nvsdk_ngx_helpers.h>
@@ -466,11 +468,6 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	std::shared_ptr<GfxSampler> samplerBilinearWrap;
 	std::shared_ptr<GfxSampler> samplerTrilinearClamp;
 
-
-
-	// mesh
-	shared_ptr<Mesh> mesh;
-
 	float SponzaRoughnessMultiplier = 1;
 	shared_ptr<Scene> Sponza;
 
@@ -539,7 +536,6 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 
 	// Pipeline objects.
 	Rect m_scissorRect;
-	std::unique_ptr<GfxAPI> gfx_api;
 	
 
 	enki::TaskScheduler g_TS;
@@ -616,6 +612,28 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	shared_ptr<PipelineStateObject> ResolveNormalRoughnessPSO;
 #endif
 
+	struct SimpleDrawCB
+	{
+		glm::mat4x4 ViewProjectionMatrix;
+		glm::mat4x4 WorldMatrix;
+	};
+
+	shared_ptr<GfxPipelineStateObject> SimpleDrawPSO;
+
+
+	struct PostVertex
+	{
+		glm::vec4 position;
+		glm::vec2 uv;
+	};
+
+	struct MeshVertex
+	{
+		glm::vec3 Position;
+		glm::vec3 Normal;
+		glm::vec2 UV;
+		glm::vec3 Tangent;
+	};
 public:
 
 	void InitRaytracingData();
@@ -661,6 +679,8 @@ public:
 
 	void InitBlueNoiseTexture();
 
+	void InitSimpleDraw();
+
 	void DrawScene(shared_ptr<Scene> scene, float Roughness, float Metalic, bool bOverrideRoughnessMetallic);
 
 	void GBufferPass();
@@ -698,6 +718,8 @@ public:
 	void ResolvePixelVelocityPass();
 
 	void RTXGIPass();
+
+	void SimpleDrawPass();
 
 	// DXSample functions
 	virtual void OnInit();

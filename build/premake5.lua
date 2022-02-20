@@ -19,23 +19,23 @@ project "Corona"
    includedirs { 
 				"../src/external",
 				".", 
+				"../src/external/dxc/inc",
 				"C:/Program Files (x86)/Windows Kits/10/Include/10.0.18362.0/um",  
 				"../src/external/DirectXTex July 2017/Include", 
 				"../src/external/assimp/include",
 				"../src/external/imgui/",
 				"../src/external/imgui/examples",
-            "../src/external/WinPixEventRuntime/Include/WinPixEventRuntime",
-            "../src/external/dxc/inc",
-            "../src/external/dlss/Include",
-            "../src/external/rtxgi-sdk/include",
-            "../src/external/NRD/Include",
-            "../src/external/NRD/Integration",
-            "../src/external/NRD/Helper",
-            "../src/external/NRI/Include",
-            "../src/external/NRI/Include/Extensions",
-            "../src/external/MathLib",
-            "../src/"
-
+				"../src/external/WinPixEventRuntime/Include/WinPixEventRuntime",
+				"../src/external/dlss/Include",
+				"../src/external/rtxgi-sdk/include",
+				"../src/external/NRD/Include",
+				"../src/external/NRD/Integration",
+				"../src/external/NRD/Helper",
+				"../src/external/NRI/Include",
+				"../src/external/NRI/Include/Extensions",
+				"../src/external/MathLib",
+				"../src/",
+				"C:/VulkanSDK/1.2.170.0/Include"
                }
   
    files { 
@@ -80,11 +80,14 @@ project "Corona"
             "../src/external/dlss/Lib/x64",
             "../src/external/NRD/Lib/Debug",
             "../src/external/NRI/Lib/Debug",
+            "C:/VulkanSDK/1.2.170.0/Lib",
+            "../src/external/dxc/lib/x64",
             "."
          }
 
       links{
       "d3d12",
+      "vulkan-1.lib",
       "dxgi",
       "d3dcompiler",
       "dxguid",
@@ -100,6 +103,7 @@ project "Corona"
       "NRI_D3D12",
       "NRI_Validation",
       "NRI_VK",
+      "dxcompiler"
       }
 
 
@@ -130,11 +134,14 @@ project "Corona"
             "../src/external/dlss/Lib/x64",
             "../src/external/NRD/Lib/Release",
             "../src/external/NRI/Lib/Release",
+            "C:/VulkanSDK/1.2.170.0/Lib",
+            "../src/external/dxc/lib/x64",
             "."
          }
 
       links{
       "d3d12",
+      "vulkan-1.lib",
       "dxgi",
       "d3dcompiler",
       "dxguid",
@@ -150,6 +157,7 @@ project "Corona"
       "NRI_D3D12",
       "NRI_Validation",
       "NRI_VK",
+      "dxcompiler"
       }
 
 

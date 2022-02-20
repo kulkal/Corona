@@ -62,15 +62,15 @@ struct ShadowRayPayload
     Params.z = Far;
 */
 
-float3 offset_ray(float3 p, float3 n)
-{
-    float origin = 1.0f / 32.0f;
-    float float_scale = 1.0f / 65536.0f;
-    float int_scale = 256.0f;
+// float3 offset_ray(float3 p, float3 n)
+// {
+//     float origin = 1.0f / 32.0f;
+//     float float_scale = 1.0f / 65536.0f;
+//     float int_scale = 256.0f;
 	
-    int3 of_i = int3(int_scale * n.x, int_scale * n.y, int_scale * n.z);
+//     int3 of_i = int3(int_scale * n.x, int_scale * n.y, int_scale * n.z);
 
-}
+// }
 
 // Returns quaternion of rotation from stc to dst
 float4 getOrientation(float3 src, float3 dst)

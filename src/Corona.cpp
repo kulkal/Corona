@@ -11,7 +11,6 @@
 
 #include "stdafx.h"
 #include "Corona.h"
-#include <dxcapi.use.h>
 #include "Utils.h"
 #include <iostream>
 #include <algorithm>
@@ -52,7 +51,7 @@
 #define arraysize(a) (sizeof(a)/sizeof(a[0]))
 #define align_to(_alignment, _val) (((_val + _alignment - 1) / _alignment) * _alignment)
 
-static dxc::DxcDllSupport gDxcDllHelper;
+//static dxc::DxcDllSupport gDxcDllHelper;
 
 using namespace glm;
 
@@ -83,13 +82,53 @@ Corona::Corona(UINT width, UINT height, UINT renderWidth, UINT renderHeight, std
 
 Corona::~Corona()
 {
+	AbstractGfxLayer::Release();
+}
 
+void Corona::SimpleDrawPass()
+{
+	std::list<GfxTexture*> DynamicTexture = {};
+	AbstractGfxLayer::BeginFrame(DynamicTexture);
+
+	GfxTexture* backbuffer = framebuffers[AbstractGfxLayer::GetCurrentFrameIndex()].get();
+
+	{
+		std::array<ResourceTransition, 1> Transition = { {
+		{backbuffer, RESOURCE_STATE_PRESENT, RESOURCE_STATE_RENDER_TARGET},
+		} };
+		AbstractGfxLayer::TransitionResource(AbstractGfxLayer::GetGlobalCommandList(), Transition.size(), Transition.data());
+	}
+
+	std::vector<GfxTexture*> Rendertargets = { backbuffer };
+	AbstractGfxLayer::SetRenderTargets(AbstractGfxLayer::GetGlobalCommandList(), SimpleDrawPSO.get(), Rendertargets.size(), Rendertargets.data(), DepthBuffer.get());
+
+
+
+
+
+
+	{
+		std::array<ResourceTransition, 1> Transition = { {
+		{backbuffer, RESOURCE_STATE_RENDER_TARGET, RESOURCE_STATE_PRESENT},
+		} };
+		AbstractGfxLayer::TransitionResource(AbstractGfxLayer::GetGlobalCommandList(), Transition.size(), Transition.data());
+	}
+
+	AbstractGfxLayer::ExecuteCommandList(AbstractGfxLayer::GetGlobalCommandList());
+
+	AbstractGfxLayer::EndFrame();
+
+	PrevViewProjMat = ViewProjMat;
+	PrevViewMat = ViewMat;
+	PrevProjMat = ProjMat;
+	PrevInvViewMat = InvViewMat;
+	PrevUnjitteredViewProjMat = UnjitteredViewProjMat;
 }
 
 
 void Corona::OnInit()
 {
-	//_CrtSetBreakAlloc(4222159);
+	//_CrtSetBreakAlloc(219);
 
 
 	g_TS.Initialize(8);
@@ -109,13 +148,20 @@ void Corona::OnInit()
 
 void Corona::LoadPipeline()
 {
-	gfx_api = std::unique_ptr<GfxAPI>(AbstractGfxLayer::CreateDX12API(Win32Application::GetHwnd(), DisplayWidth, DisplayHeight));
+#if VULKAN_RENDERER
+	AbstractGfxLayer::CreateVulkanAPI(Win32Application::GetInstance(), Win32Application::GetHwnd(), DisplayWidth, DisplayHeight);
+#else
+	AbstractGfxLayer::CreateDX12API(Win32Application::GetHwnd(), DisplayWidth, DisplayHeight);
+#endif
+
+
 	framebuffers.clear();
 	AbstractGfxLayer::GetFrameBuffers(framebuffers);
 }
 
 void Corona::LoadAssets()
 {
+#if !VULKAN_RENDERER
 	InitBlueNoiseTexture();
 
 #if USE_IMGUI
@@ -141,12 +187,13 @@ void Corona::LoadAssets()
 #endif
 	InitRTPSO();
 
+#endif // VULKAN_RENDERER
+
+	InitSimpleDraw();
+
+
 	
-	struct PostVertex
-	{
-		glm::vec4 position;
-		glm::vec2 uv;
-	};
+	
 
 	PostVertex quadVertices[] =
 	{
@@ -431,6 +478,7 @@ void Corona::LoadAssets()
 	}
 
 	InitRaytracingData();
+
 }
 
 shared_ptr<Scene> Corona::LoadModel(string fileName)
@@ -558,13 +606,7 @@ shared_ptr<Scene> Corona::LoadModel(string fileName)
 		scene->Materials.push_back(shared_ptr<GfxMaterial>(mat));
 	}
 
-	struct Vertex
-	{
-		glm::vec3 Position;
-		glm::vec3 Normal;
-		glm::vec2 UV;
-		glm::vec3 Tangent;
-	};
+	
 	const UINT numMeshes = assimpScene->mNumMeshes;
 
 	UINT totalNumVert = 0;
@@ -584,7 +626,7 @@ shared_ptr<Scene> Corona::LoadModel(string fileName)
 		mesh->NumVertices = asMesh->mNumVertices;
 		mesh->NumIndices = asMesh->mNumFaces * 3;
 
-		vector<Vertex> vertices;
+		vector<MeshVertex> vertices;
 		vertices.resize(mesh->NumVertices);
 
 		vector<UINT16> indices;
@@ -642,9 +684,9 @@ shared_ptr<Scene> Corona::LoadModel(string fileName)
 			indices[triIdx * 3 + 2] = UINT16(asMesh->mFaces[triIdx].mIndices[2]);
 		}
 
-		mesh->Vb = shared_ptr<GfxVertexBuffer>(AbstractGfxLayer::CreateVertexBuffer(sizeof(Vertex) * mesh->NumVertices, sizeof(Vertex), vertices.data()));
+		mesh->Vb = shared_ptr<GfxVertexBuffer>(AbstractGfxLayer::CreateVertexBuffer(sizeof(MeshVertex) * mesh->NumVertices, sizeof(MeshVertex), vertices.data()));
 
-		mesh->VertexStride = sizeof(Vertex);
+		mesh->VertexStride = sizeof(MeshVertex);
 		mesh->IndexFormat = FORMAT_R16_UINT;
 
 		mesh->Ib = shared_ptr<GfxIndexBuffer>(AbstractGfxLayer::CreateIndexBuffer(mesh->IndexFormat, sizeof(UINT16)*3*numTriangles, indices.data()));
@@ -672,7 +714,7 @@ void Corona::InitSpatialDenoisingPass()
 {
 	SHADER_CREATE_DESC csDesc =
 	{
-		GetAssetFullPath(L"Shaders\\SpatialDenoising.hlsl"), L"SpatialFilter", L"cs_6_0", nullopt
+		GetAssetFullPath(L"Shaders\\"),		L"SpatialDenoising.hlsl",		L"SpatialFilter",		L"cs_6_0", 		nullopt
 	};
 
 	COMPUTE_PIPELINE_STATE_DESC computePsoDesc = {};
@@ -725,7 +767,7 @@ void Corona::InitTemporalDenoisingPass()
 {
 	SHADER_CREATE_DESC csDesc =
 	{
-		GetAssetFullPath(L"Shaders\\TemporalDenoising.hlsl"), L"TemporalFilter", L"cs_6_0", nullopt
+		GetAssetFullPath(L"Shaders\\"),		L"TemporalDenoising.hlsl",		L"TemporalFilter",		L"cs_6_0", 		nullopt
 	};
 
 	COMPUTE_PIPELINE_STATE_DESC computePsoDesc = {};
@@ -769,7 +811,7 @@ void Corona::InitBloomPass()
 	{
 		SHADER_CREATE_DESC csDesc =
 		{
-			GetAssetFullPath(L"Shaders\\BloomBlur.hlsl"), L"BloomExtract", L"cs_6_0", nullopt
+			GetAssetFullPath(L"Shaders\\"),		L"BloomBlur.hlsl", L"BloomExtract", L"cs_6_0", nullopt
 		};
 
 		COMPUTE_PIPELINE_STATE_DESC computePsoDesc = {};
@@ -793,7 +835,7 @@ void Corona::InitBloomPass()
 	{
 		SHADER_CREATE_DESC csDesc =
 		{
-			GetAssetFullPath(L"Shaders\\BloomBlur.hlsl"), L"BloomBlur", L"cs_6_0", nullopt
+			GetAssetFullPath(L"Shaders\\"),		L"BloomBlur.hlsl", L"BloomBlur", L"cs_6_0", nullopt
 		};
 
 		COMPUTE_PIPELINE_STATE_DESC computePsoDesc = {};
@@ -815,7 +857,7 @@ void Corona::InitBloomPass()
 	{
 		SHADER_CREATE_DESC csDesc =
 		{
-			GetAssetFullPath(L"Shaders\\Histogram.hlsl"), L"GenerateHistogram", L"cs_6_0", nullopt
+			GetAssetFullPath(L"Shaders\\"),		L"Histogram.hlsl", L"GenerateHistogram", L"cs_6_0", nullopt
 		};
 
 		COMPUTE_PIPELINE_STATE_DESC computePsoDesc = {};
@@ -836,7 +878,7 @@ void Corona::InitBloomPass()
 	{
 		SHADER_CREATE_DESC csDesc =
 		{
-			GetAssetFullPath(L"Shaders\\DrawHistogram.hlsl"), L"DrawHistogram", L"cs_6_0", nullopt
+			GetAssetFullPath(L"Shaders\\"),		L"DrawHistogram.hlsl", L"DrawHistogram", L"cs_6_0", nullopt
 		};
 
 		COMPUTE_PIPELINE_STATE_DESC computePsoDesc = {};
@@ -858,7 +900,7 @@ void Corona::InitBloomPass()
 	{
 		SHADER_CREATE_DESC csDesc =
 		{
-			GetAssetFullPath(L"Shaders\\Histogram.hlsl"), L"ClearHistogram", L"cs_6_0", nullopt
+			GetAssetFullPath(L"Shaders\\"),		L"Histogram.hlsl", L"ClearHistogram", L"cs_6_0", nullopt
 		};
 
 		COMPUTE_PIPELINE_STATE_DESC computePsoDesc = {};
@@ -877,7 +919,7 @@ void Corona::InitBloomPass()
 	{
 		SHADER_CREATE_DESC csDesc =
 		{
-			GetAssetFullPath(L"Shaders\\AdaptExposureCS.hlsl"), L"AdaptExposure", L"cs_6_0", nullopt
+			GetAssetFullPath(L"Shaders\\"),		L"AdaptExposureCS.hlsl", L"AdaptExposure", L"cs_6_0", nullopt
 		};
 
 		COMPUTE_PIPELINE_STATE_DESC computePsoDesc = {};
@@ -955,7 +997,7 @@ void Corona::InitBloomPass()
 		};
 
 		GRAPHICS_PIPELINE_STATE_DESC psoDescMesh = {};
-		psoDescMesh.InputLayout = { StandardVertexDescription, StandardVertexDescriptionNumElements };
+		psoDescMesh.InputLayout = { StandardVertexDescription, StandardVertexDescriptionNumElements, sizeof(PostVertex)};
 		//psoDescMesh.RasterizerState = rasterizerStateDesc;
 		psoDescMesh.CullMode = CULL_MODE_NONE; // rasterizer state is too big. and currently I use only CullMode.
 		psoDescMesh.BlendState = blendState;
@@ -963,6 +1005,7 @@ void Corona::InitBloomPass()
 		psoDescMesh.DepthStencilState = depthStencilState;
 		psoDescMesh.SampleMask = UINT_MAX;
 		psoDescMesh.PrimitiveTopologyType = PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+		psoDescMesh.PrimitiveTopology = PRIMITIVE_TOPOLOGY_TRIANGLESTRIP;
 		psoDescMesh.NumRenderTargets = 1;
 		psoDescMesh.RTVFormats[0] = FORMAT_R16G16B16A16_FLOAT;
 		psoDescMesh.MultiSampleCount = 1;
@@ -970,12 +1013,12 @@ void Corona::InitBloomPass()
 
 		SHADER_CREATE_DESC vsDesc =
 		{
-			GetAssetFullPath(L"Shaders\\AddBloomPS.hlsl"), L"VSMain", L"vs_6_0", nullopt
+			GetAssetFullPath(L"Shaders\\"),		L"AddBloomPS.hlsl", L"VSMain", L"vs_6_0", nullopt
 		};
 
 		SHADER_CREATE_DESC psDesc =
 		{
-			GetAssetFullPath(L"Shaders\\AddBloomPS.hlsl"), L"PSMain", L"ps_6_0", nullopt
+			GetAssetFullPath(L"Shaders\\"),		L"AddBloomPS.hlsl", L"PSMain", L"ps_6_0", nullopt
 		};
 		psoDescMesh.vsDesc = &vsDesc;
 		psoDescMesh.psDesc = &psDesc;
@@ -1096,7 +1139,7 @@ void Corona::InitResolvePixelVelocityPass()
 	};
 
 	GRAPHICS_PIPELINE_STATE_DESC psoDescMesh = {};
-	psoDescMesh.InputLayout = { StandardVertexDescription, StandardVertexDescriptionNumElements };
+	psoDescMesh.InputLayout = { StandardVertexDescription, StandardVertexDescriptionNumElements , sizeof(PostVertex) };
 	//psoDescMesh.RasterizerState = rasterizerStateDesc;
 	psoDescMesh.CullMode = CULL_MODE_NONE; // rasterizer state is too big. and currently I use only CullMode.
 	psoDescMesh.BlendState = blendState;
@@ -1104,6 +1147,7 @@ void Corona::InitResolvePixelVelocityPass()
 	psoDescMesh.DepthStencilState = depthStencilState;
 	psoDescMesh.SampleMask = UINT_MAX;
 	psoDescMesh.PrimitiveTopologyType = PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+	psoDescMesh.PrimitiveTopology = PRIMITIVE_TOPOLOGY_TRIANGLESTRIP;
 	psoDescMesh.NumRenderTargets = 1;
 	psoDescMesh.RTVFormats[0] = FORMAT_R16G16_FLOAT;
 	psoDescMesh.MultiSampleCount = 1;
@@ -1111,12 +1155,12 @@ void Corona::InitResolvePixelVelocityPass()
 
 	SHADER_CREATE_DESC vsDesc =
 	{
-		GetAssetFullPath(L"Shaders\\ResolveVelocityPS.hlsl"), L"VSMain", L"vs_6_0", nullopt
+		GetAssetFullPath(L"Shaders\\"),		L"ResolveVelocityPS.hlsl", L"VSMain", L"vs_6_0", nullopt
 	};
 
 	SHADER_CREATE_DESC psDesc =
 	{
-		GetAssetFullPath(L"Shaders\\ResolveVelocityPS.hlsl"), L"PSMain", L"ps_6_0", nullopt
+		GetAssetFullPath(L"Shaders\\"),		L"ResolveVelocityPS.hlsl", L"PSMain", L"ps_6_0", nullopt
 	};
 	psoDescMesh.vsDesc = &vsDesc;
 	psoDescMesh.psDesc = &psDesc;
@@ -1198,13 +1242,14 @@ void Corona::InitGBufferPass()
 	};
 
 	GRAPHICS_PIPELINE_STATE_DESC psoDescMesh = {};
-	psoDescMesh.InputLayout = { StandardVertexDescription, StandardVertexDescriptionNumElements };
+	psoDescMesh.InputLayout = { StandardVertexDescription, StandardVertexDescriptionNumElements, sizeof(MeshVertex) };
 	//psoDescMesh.RasterizerState = rasterizerStateDesc;
 	psoDescMesh.CullMode = CULL_MODE_NONE; // rasterizer state is too big. and currently I use only CullMode.
 	psoDescMesh.BlendState = blendState;
 	psoDescMesh.DepthStencilState = depthStencilState;
 	psoDescMesh.SampleMask = UINT_MAX;
 	psoDescMesh.PrimitiveTopologyType = PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+	psoDescMesh.PrimitiveTopology = PRIMITIVE_TOPOLOGY_TRIANGLELIST;
 	psoDescMesh.NumRenderTargets = 6;
 	psoDescMesh.RTVFormats[0] = FORMAT_R8G8B8A8_UNORM;
 	psoDescMesh.RTVFormats[1] = FORMAT_R16G16B16A16_FLOAT;
@@ -1220,12 +1265,12 @@ void Corona::InitGBufferPass()
 
 	SHADER_CREATE_DESC vsDesc =
 	{
-		GetAssetFullPath(L"Shaders\\GBuffer.hlsl"), L"VSMain", L"vs_6_0", nullopt
+		GetAssetFullPath(L"Shaders\\"),		L"GBuffer.hlsl", L"VSMain", L"vs_6_0", nullopt
 	};
 
 	SHADER_CREATE_DESC psDesc =
 	{
-		GetAssetFullPath(L"Shaders\\GBuffer.hlsl"), L"PSMain", L"ps_6_0", nullopt
+		GetAssetFullPath(L"Shaders\\"),		L"GBuffer.hlsl", L"PSMain", L"ps_6_0", nullopt
 	};
 	psoDescMesh.vsDesc = &vsDesc;
 	psoDescMesh.psDesc = &psDesc;
@@ -1395,7 +1440,7 @@ void Corona::InitToneMapPass()
 	};
 
 	GRAPHICS_PIPELINE_STATE_DESC psoDescMesh = {};
-	psoDescMesh.InputLayout = { StandardVertexDescription, StandardVertexDescriptionNumElements };
+	psoDescMesh.InputLayout = { StandardVertexDescription, StandardVertexDescriptionNumElements, sizeof(PostVertex) };
 	//psoDescMesh.RasterizerState = rasterizerStateDesc;
 	psoDescMesh.CullMode = CULL_MODE_NONE; // rasterizer state is too big. and currently I use only CullMode.
 	psoDescMesh.BlendState = blendState;
@@ -1403,6 +1448,7 @@ void Corona::InitToneMapPass()
 	psoDescMesh.DepthStencilState = depthStencilState;
 	psoDescMesh.SampleMask = UINT_MAX;
 	psoDescMesh.PrimitiveTopologyType = PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+	psoDescMesh.PrimitiveTopology = PRIMITIVE_TOPOLOGY_TRIANGLESTRIP;
 	psoDescMesh.NumRenderTargets = 1;
 	psoDescMesh.RTVFormats[0] = FORMAT_R8G8B8A8_UNORM;
 	psoDescMesh.MultiSampleCount = 1;
@@ -1410,12 +1456,12 @@ void Corona::InitToneMapPass()
 
 	SHADER_CREATE_DESC vsDesc =
 	{
-		GetAssetFullPath(L"Shaders\\ToneMapPS.hlsl"), L"VSMain", L"vs_6_0", nullopt
+		GetAssetFullPath(L"Shaders\\"),		L"ToneMapPS.hlsl", L"VSMain", L"vs_6_0", nullopt
 	};
 
 	SHADER_CREATE_DESC psDesc =
 	{
-		GetAssetFullPath(L"Shaders\\ToneMapPS.hlsl"), L"PSMain", L"ps_6_0", nullopt
+		GetAssetFullPath(L"Shaders\\"),		L"ToneMapPS.hlsl", L"PSMain", L"ps_6_0", nullopt
 	};
 	psoDescMesh.vsDesc = &vsDesc;
 	psoDescMesh.psDesc = &psDesc;
@@ -1495,13 +1541,14 @@ void Corona::InitDebugPass()
 	};
 
 	GRAPHICS_PIPELINE_STATE_DESC psoDescMesh = {};
-	psoDescMesh.InputLayout = { StandardVertexDescription, StandardVertexDescriptionNumElements };
+	psoDescMesh.InputLayout = { StandardVertexDescription, StandardVertexDescriptionNumElements , sizeof(PostVertex) };
 	psoDescMesh.CullMode = CULL_MODE_NONE; // rasterizer state is too big. and currently I use only CullMode.
 	psoDescMesh.BlendState = blendState;
 
 	psoDescMesh.DepthStencilState = depthStencilState;
 	psoDescMesh.SampleMask = UINT_MAX;
 	psoDescMesh.PrimitiveTopologyType = PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+	psoDescMesh.PrimitiveTopology = PRIMITIVE_TOPOLOGY_TRIANGLESTRIP;
 	psoDescMesh.NumRenderTargets = 1;
 	psoDescMesh.RTVFormats[0] = FORMAT_R8G8B8A8_UNORM;
 	psoDescMesh.MultiSampleCount = 1;
@@ -1509,12 +1556,12 @@ void Corona::InitDebugPass()
 
 	SHADER_CREATE_DESC vsDesc =
 	{
-		GetAssetFullPath(L"Shaders\\DebugPS.hlsl"), L"VSMain", L"vs_6_0", nullopt
+		GetAssetFullPath(L"Shaders\\"),		L"DebugPS.hlsl", L"VSMain", L"vs_6_0", nullopt
 	};
 
 	SHADER_CREATE_DESC psDesc =
 	{
-		GetAssetFullPath(L"Shaders\\DebugPS.hlsl"), L"PSMain", L"ps_6_0", nullopt
+		GetAssetFullPath(L"Shaders\\"),		L"DebugPS.hlsl", L"PSMain", L"ps_6_0", nullopt
 	};
 	psoDescMesh.vsDesc = &vsDesc;
 	psoDescMesh.psDesc = &psDesc;
@@ -1607,13 +1654,14 @@ void Corona::InitLightingPass()
 	};
 
 	GRAPHICS_PIPELINE_STATE_DESC psoDescMesh = {};
-	psoDescMesh.InputLayout = { StandardVertexDescription, StandardVertexDescriptionNumElements };
+	psoDescMesh.InputLayout = { StandardVertexDescription, StandardVertexDescriptionNumElements, sizeof(PostVertex) };
 	psoDescMesh.CullMode = CULL_MODE_NONE; // rasterizer state is too big. and currently I use only CullMode.
 	psoDescMesh.BlendState = blendState;
 
 	psoDescMesh.DepthStencilState = depthStencilState;
 	psoDescMesh.SampleMask = UINT_MAX;
 	psoDescMesh.PrimitiveTopologyType = PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+	psoDescMesh.PrimitiveTopology = PRIMITIVE_TOPOLOGY_TRIANGLESTRIP;
 	psoDescMesh.NumRenderTargets = 1;
 	psoDescMesh.RTVFormats[0] = FORMAT_R16G16B16A16_FLOAT;
 	psoDescMesh.MultiSampleCount = 1;
@@ -1621,12 +1669,12 @@ void Corona::InitLightingPass()
 
 	SHADER_CREATE_DESC vsDesc =
 	{
-		GetAssetFullPath(L"Shaders\\LightingPS.hlsl"), L"VSMain", L"vs_6_0", nullopt
+		GetAssetFullPath(L"Shaders\\"),		L"LightingPS.hlsl", L"VSMain", L"vs_6_0", nullopt
 	};
 
 	SHADER_CREATE_DESC psDesc =
 	{
-		GetAssetFullPath(L"Shaders\\LightingPS.hlsl"), L"PSMain", L"ps_6_0", nullopt
+		GetAssetFullPath(L"Shaders\\"),		L"LightingPS.hlsl", L"PSMain", L"ps_6_0", nullopt
 	};
 	psoDescMesh.vsDesc = &vsDesc;
 	psoDescMesh.psDesc = &psDesc;
@@ -1721,13 +1769,14 @@ void Corona::InitTemporalAAPass()
 	};
 
 	GRAPHICS_PIPELINE_STATE_DESC psoDescMesh = {};
-	psoDescMesh.InputLayout = { StandardVertexDescription, StandardVertexDescriptionNumElements };
+	psoDescMesh.InputLayout = { StandardVertexDescription, StandardVertexDescriptionNumElements , sizeof(PostVertex) };
 	psoDescMesh.CullMode = CULL_MODE_NONE; // rasterizer state is too big. and currently I use only CullMode.
 	psoDescMesh.BlendState = blendState;
 
 	psoDescMesh.DepthStencilState = depthStencilState;
 	psoDescMesh.SampleMask = UINT_MAX;
 	psoDescMesh.PrimitiveTopologyType = PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+	psoDescMesh.PrimitiveTopology = PRIMITIVE_TOPOLOGY_TRIANGLESTRIP;
 	psoDescMesh.NumRenderTargets = 1;
 	psoDescMesh.RTVFormats[0] = FORMAT_R16G16B16A16_FLOAT;
 	psoDescMesh.MultiSampleCount = 1;
@@ -1735,12 +1784,12 @@ void Corona::InitTemporalAAPass()
 
 	SHADER_CREATE_DESC vsDesc =
 	{
-		GetAssetFullPath(L"Shaders\\TemporalAA.hlsl"), L"VSMain", L"vs_6_0", nullopt
+		GetAssetFullPath(L"Shaders\\"),		L"TemporalAA.hlsl", L"VSMain", L"vs_6_0", nullopt
 	};
 
 	SHADER_CREATE_DESC psDesc =
 	{
-		GetAssetFullPath(L"Shaders\\TemporalAA.hlsl"), L"PSMain", L"ps_6_0", nullopt
+		GetAssetFullPath(L"Shaders\\"),		L"TemporalAA.hlsl", L"PSMain", L"ps_6_0", nullopt
 	};
 	psoDescMesh.vsDesc = &vsDesc;
 	psoDescMesh.psDesc = &psDesc;
@@ -1766,6 +1815,18 @@ void Corona::ToneMapPass()
 #if USE_AFTERMATH
 	NVAftermathMarker(dx12_rhi->AM_CL_Handle, "CopyPass");
 #endif
+
+	GfxTexture* backbuffer = framebuffers[AbstractGfxLayer::GetCurrentFrameIndex()].get();
+
+	{
+		std::array<ResourceTransition, 1> Transition = { {
+		{backbuffer, RESOURCE_STATE_PRESENT, RESOURCE_STATE_RENDER_TARGET},
+		} };
+		AbstractGfxLayer::TransitionResource(AbstractGfxLayer::GetGlobalCommandList(), Transition.size(), Transition.data());
+	}
+
+	std::vector<GfxTexture*> Rendertargets = { backbuffer };
+	AbstractGfxLayer::SetRenderTargets(AbstractGfxLayer::GetGlobalCommandList(), ToneMapPSO.get(), Rendertargets.size(), Rendertargets.data(), nullptr);
 
 	ProfileGPUScope(AbstractGfxLayer::GetGlobalCommandList(), PIX_COLOR(rand() % 255, rand() % 255, rand() % 255), "CopyPass");
 
@@ -2421,7 +2482,7 @@ void Corona::LightingPass()
 
 
 	std::vector<GfxTexture*> Rendertargets = { LightingBuffer.get()};
-	AbstractGfxLayer::SetRenderTargets(AbstractGfxLayer::GetGlobalCommandList(), Rendertargets.size(), Rendertargets.data(), nullptr);
+	AbstractGfxLayer::SetRenderTargets(AbstractGfxLayer::GetGlobalCommandList(), LightingPSO.get(), Rendertargets.size(), Rendertargets.data(), nullptr);
 
 	ViewPort viewPort = { 0.0f, 0.0f, static_cast<float>(RenderWidth), static_cast<float>(RenderHeight), 0, 1 };
 	AbstractGfxLayer::SetViewports(AbstractGfxLayer::GetGlobalCommandList(), 1, &viewPort);
@@ -2482,7 +2543,7 @@ void Corona::TemporalAAPass()
 
 
 	std::vector<GfxTexture*> Rendertargets = { ResolveTarget };
-	AbstractGfxLayer::SetRenderTargets(AbstractGfxLayer::GetGlobalCommandList(), Rendertargets.size(), Rendertargets.data(), nullptr);
+	AbstractGfxLayer::SetRenderTargets(AbstractGfxLayer::GetGlobalCommandList(), TemporalAAPSO.get(), Rendertargets.size(), Rendertargets.data(), nullptr);
 
 	ViewPort viewPort = { 0.0f, 0.0f, static_cast<float>(RenderWidth), static_cast<float>(RenderHeight), 0, 1 };
 	AbstractGfxLayer::SetViewports(AbstractGfxLayer::GetGlobalCommandList(), 1, &viewPort);
@@ -2608,7 +2669,7 @@ void Corona::ResolvePixelVelocityPass()
 
 
 	std::vector<GfxTexture*> Rendertargets = { PixelVelocityBuffer.get() };
-	AbstractGfxLayer::SetRenderTargets(AbstractGfxLayer::GetGlobalCommandList(), Rendertargets.size(), Rendertargets.data(), nullptr);
+	AbstractGfxLayer::SetRenderTargets(AbstractGfxLayer::GetGlobalCommandList(), ResolvePixelVelocityPSO.get(), Rendertargets.size(), Rendertargets.data(), nullptr);
 
 	AbstractGfxLayer::SetPrimitiveTopology(AbstractGfxLayer::GetGlobalCommandList(), PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
 	AbstractGfxLayer::SetVertexBuffer(AbstractGfxLayer::GetGlobalCommandList(), 0, 1, FullScreenVB.get());
@@ -2865,7 +2926,7 @@ void Corona::BloomPass()
 	AbstractGfxLayer::SetScissorRects(AbstractGfxLayer::GetGlobalCommandList(), 1, &scissorRect);
 
 	std::vector<GfxTexture*> Rendertargets = { LightingWithBloomBuffer.get() };
-	AbstractGfxLayer::SetRenderTargets(AbstractGfxLayer::GetGlobalCommandList(), Rendertargets.size(), Rendertargets.data(), nullptr);
+	AbstractGfxLayer::SetRenderTargets(AbstractGfxLayer::GetGlobalCommandList(), AddBloomPSO.get(), Rendertargets.size(), Rendertargets.data(), nullptr);
 
 	AbstractGfxLayer::SetPrimitiveTopology(AbstractGfxLayer::GetGlobalCommandList(), PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
 	AbstractGfxLayer::SetVertexBuffer(AbstractGfxLayer::GetGlobalCommandList(), 0, 1, FullScreenVB.get());
@@ -2879,6 +2940,111 @@ void Corona::BloomPass()
 
 		AbstractGfxLayer::TransitionResource(AbstractGfxLayer::GetGlobalCommandList(), Transition.size(), Transition.data());
 	}
+}
+
+void Corona::InitSimpleDraw()
+{
+	INPUT_ELEMENT_DESC StandardVertexDescription[] =
+	{
+		{ "POSITION", 0, FORMAT_R32G32B32_FLOAT, 0, 0,  INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+		{ "NORMAL",   0, FORMAT_R32G32B32_FLOAT, 0, 12, INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+		{ "TEXCOORD", 0, FORMAT_R32G32_FLOAT,    0, 24, INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+		{ "TANGENT",  0, FORMAT_R32G32B32_FLOAT, 0, 32, INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+	};
+
+	UINT StandardVertexDescriptionNumElements = _countof(StandardVertexDescription);
+
+	RENDER_TARGET_BLEND_DESC defaultRenderTargetBlendDesc =
+	{
+		/*BlendEnable=*/FALSE,
+		/*LogicOpEnable=*/FALSE,
+		/*SrcBlend=*/ BLEND_ONE,
+		/*DestBlend=*/BLEND_ZERO,
+		/*BlendOp=*/BLEND_OP_ADD,
+		/*SrcBlendAlpha=*/BLEND_ONE,
+		/*DestBlendAlpha=*/BLEND_ZERO,
+		/*BlendOpAlpha=*/BLEND_OP_ADD,
+		/*LogicOp=*/LOGIC_OP_NOOP,
+		/*RenderTargetWriteMask=*/COLOR_WRITE_ENABLE_ALL,
+	};
+
+	BLEND_DESC blendState = {
+		/*AlphaToCoverageEnable=*/FALSE,
+		/*IndependentBlendEnable*/FALSE,
+		/*RenderTarget[0]=*/defaultRenderTargetBlendDesc,
+		/*RenderTarget[1]=*/defaultRenderTargetBlendDesc,
+		/*RenderTarget[2]=*/defaultRenderTargetBlendDesc,
+		/*RenderTarget[3]=*/defaultRenderTargetBlendDesc,
+		/*RenderTarget[4]=*/defaultRenderTargetBlendDesc,
+		/*RenderTarget[5]=*/defaultRenderTargetBlendDesc,
+		/*RenderTarget[6]=*/defaultRenderTargetBlendDesc,
+		/*RenderTarget[7]=*/defaultRenderTargetBlendDesc
+	};
+
+
+	const DEPTH_STENCILOP_DESC defaultStencilOp =
+	{
+		/*StencilFailOp =*/ STENCIL_OP_KEEP,
+		/*StencilDepthFailOp =*/ STENCIL_OP_KEEP,
+		/*StencilPassOp = */STENCIL_OP_KEEP,
+		/*StencilFunc = */COMPARISON_FUNC_ALWAYS
+	};
+
+	DEPTH_STENCIL_DESC depthStencilState = {
+		/*DepthEnable = */TRUE,
+		/*DepthWriteMask = */DEPTH_WRITE_MASK_ALL,
+		/*DepthFunc = */COMPARISON_FUNC_LESS,
+		/*StencilEnable = */FALSE,
+		/*StencilReadMask = */DEFAULT_STENCIL_READ_MASK,
+		/*StencilWriteMask = */DEFAULT_STENCIL_WRITE_MASK,
+		/*FrontFace = */defaultStencilOp,
+		/*BackFace = */defaultStencilOp
+
+	};
+
+
+	GRAPHICS_PIPELINE_STATE_DESC psoDescMesh = {};
+	psoDescMesh.InputLayout = { StandardVertexDescription, StandardVertexDescriptionNumElements , sizeof(MeshVertex) };
+	//psoDescMesh.RasterizerState = rasterizerStateDesc;
+	psoDescMesh.CullMode = CULL_MODE_NONE; // rasterizer state is too big. and currently I use only CullMode.
+	psoDescMesh.BlendState = blendState;
+	psoDescMesh.DepthStencilState = depthStencilState;
+	psoDescMesh.SampleMask = UINT_MAX;
+	psoDescMesh.PrimitiveTopologyType = PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+	psoDescMesh.PrimitiveTopology = PRIMITIVE_TOPOLOGY_TRIANGLELIST;
+	psoDescMesh.NumRenderTargets = 1;
+	psoDescMesh.RTVFormats[0] = FORMAT_R8G8B8A8_UNORM;
+	
+
+	psoDescMesh.DSVFormat = FORMAT_D32_FLOAT;
+	psoDescMesh.MultiSampleCount = 1;
+
+
+
+	SHADER_CREATE_DESC vsDesc =
+	{
+		GetAssetFullPath(L"Shaders\\"),		L"SimpleDraw.hlsl", L"VSMain", L"vs_6_0", nullopt
+	};
+
+	SHADER_CREATE_DESC psDesc =
+	{
+		GetAssetFullPath(L"Shaders\\"),		L"SimpleDraw.hlsl", L"PSMain", L"ps_6_0", nullopt
+	};
+	psoDescMesh.vsDesc = &vsDesc;
+	psoDescMesh.psDesc = &psDesc;
+
+
+
+	GfxPipelineStateObject* TEMP_SimpleDrawPSO = AbstractGfxLayer::CreatePSO();
+
+	AbstractGfxLayer::BindSRV(TEMP_SimpleDrawPSO, "AlbedoTex", 0, 1);
+	AbstractGfxLayer::BindSampler(TEMP_SimpleDrawPSO, "samplerWrap", 0);
+	AbstractGfxLayer::BindCBV(TEMP_SimpleDrawPSO, "SimpleDrawCB", 0, sizeof(SimpleDrawCB));
+
+	bool bSuccess = AbstractGfxLayer::InitPSO(TEMP_SimpleDrawPSO, &psoDescMesh);
+
+	if (bSuccess)
+		SimpleDrawPSO = shared_ptr<GfxPipelineStateObject>(TEMP_SimpleDrawPSO);
 }
 
 static const float OneMinusEpsilon = 0.9999999403953552f;
@@ -3053,6 +3219,11 @@ void Corona::OnUpdate()
 // Render the scene.
 void Corona::OnRender()
 {
+#if VULKAN_RENDERER
+	SimpleDrawPass();
+#else
+
+
 	std::list<GfxTexture*> DynamicTexture = {
 	ColorBuffers[0].get(),
 	ColorBuffers[1].get(),
@@ -3092,7 +3263,10 @@ void Corona::OnRender()
 	BloomBlurPingPong[1].get(),
 	LumaBuffer.get(),
 
-};
+	};
+
+	for (auto& fb : framebuffers)
+		DynamicTexture.push_back(fb.get());
 
 #if USE_RTXGI
 	if (volume)
@@ -3104,9 +3278,6 @@ void Corona::OnRender()
 		DynamicTexture.push_back(probeStates);
 	}
 #endif
-
-	for (auto& fb : framebuffers)
-		DynamicTexture.push_back(fb.get());
 
 	AbstractGfxLayer::BeginFrame(DynamicTexture);
 	
@@ -3165,7 +3336,7 @@ void Corona::OnRender()
 #endif
 
 	
-	GfxTexture* backbuffer = framebuffers[AbstractGfxLayer::GetCurrentFrameIndex()].get();
+	/*GfxTexture* backbuffer = framebuffers[AbstractGfxLayer::GetCurrentFrameIndex()].get();
 
 	{
 		std::array<ResourceTransition, 1> Transition = { {
@@ -3175,7 +3346,7 @@ void Corona::OnRender()
 	}
 	
 	std::vector<GfxTexture*> Rendertargets = { backbuffer };
-	AbstractGfxLayer::SetRenderTargets(AbstractGfxLayer::GetGlobalCommandList(), Rendertargets.size(), Rendertargets.data(), nullptr);
+	AbstractGfxLayer::SetRenderTargets(AbstractGfxLayer::GetGlobalCommandList(), Rendertargets.size(), Rendertargets.data(), nullptr);*/
 	
 	ToneMapPass();
 
@@ -3497,6 +3668,7 @@ void Corona::OnRender()
 	}
 
 	{
+		GfxTexture* backbuffer = framebuffers[AbstractGfxLayer::GetCurrentFrameIndex()].get();
 		std::array<ResourceTransition, 1> Transition = { {
 		{backbuffer, RESOURCE_STATE_RENDER_TARGET, RESOURCE_STATE_PRESENT},
 		} };
@@ -3512,6 +3684,7 @@ void Corona::OnRender()
 	PrevProjMat = ProjMat;
 	PrevInvViewMat = InvViewMat;
 	PrevUnjitteredViewProjMat = UnjitteredViewProjMat;
+#endif // VULKAN_RENDERER
 }
 
 void Corona::OnDestroy()
@@ -3722,7 +3895,7 @@ void Corona::GBufferPass()
 	std::vector<GfxTexture*> Rendertarget = { AlbedoBuffer.get(), NormalBuffers[ColorBufferWriteIndex].get(),
 		GeomNormalBuffer.get(), VelocityBuffer.get(), RoughnessMetalicBuffer.get(),
 		UnjitteredDepthBuffers[ColorBufferWriteIndex].get()};
-	AbstractGfxLayer::SetRenderTargets(AbstractGfxLayer::GetGlobalCommandList(), Rendertarget.size(), Rendertarget.data(), DepthBuffer.get());
+	AbstractGfxLayer::SetRenderTargets(AbstractGfxLayer::GetGlobalCommandList(), GBufferPassPSO.get(), Rendertarget.size(), Rendertarget.data(), DepthBuffer.get());
 
 	AbstractGfxLayer::SetPSO(GBufferPassPSO.get(), AbstractGfxLayer::GetGlobalCommandList());
 
@@ -4163,6 +4336,8 @@ void Corona::RecompileShaders()
 {
 	AbstractGfxLayer::WaitGPUFlush();
 
+#if !VULKAN_RENDERER
+
 	InitRTPSO();
 
 #if USE_RTXGI
@@ -4177,6 +4352,9 @@ void Corona::RecompileShaders()
 	InitLightingPass();
 	InitTemporalAAPass();
 	InitBloomPass();
+#endif
+
+	InitSimpleDraw();
 }
 
 void Corona::InitRaytracingData()
@@ -4809,7 +4987,8 @@ void Corona::InitRTPSO()
 			1, //MaxRecursion
 			sizeof(float) * 2, // MaxAttributeSizeInBytes
 			sizeof(float) * 2, // MaxPayloadSizeInBytes
-			"Shaders\\RaytracedShadow.hlsl", // shader file
+			GetAssetFullPath(L"Shaders\\"),
+			L"RaytracedShadow.hlsl", // shader file
 			// Defines
 		};
 
@@ -4849,7 +5028,8 @@ void Corona::InitRTPSO()
 			1, //MaxRecursion
 			sizeof(float) * 2, // MaxAttributeSizeInBytes
 			sizeof(float) * 13, // MaxPayloadSizeInBytes
-			"Shaders\\RaytracedReflection.hlsl", // shader file
+			GetAssetFullPath(L"Shaders\\"),
+			L"RaytracedReflection.hlsl", // shader file
 			// Defines
 		};
 
@@ -4886,7 +5066,8 @@ void Corona::InitRTPSO()
 			1, //MaxRecursion
 			sizeof(float) * 2, // MaxAttributeSizeInBytes
 			sizeof(float) * 13, // MaxPayloadSizeInBytes
-			"Shaders\\RaytracedGI.hlsl", // shader file
+			GetAssetFullPath(L"Shaders\\"),
+			L"RaytracedGI.hlsl", // shader file
 			// Defines
 		};
 

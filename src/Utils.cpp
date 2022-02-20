@@ -1,5 +1,5 @@
 #include "Utils.h"
-#include "SimpleDX12.h"
+#include "DX12Impl.h"
 
 std::wstring AnsiToWString(const char* ansiString)
 {

@@ -12,11 +12,13 @@
 #include "stdafx.h"
 #include "Win32Application.h"
 
+HINSTANCE Win32Application::m_hInstance;
 HWND Win32Application::m_hwnd = nullptr;
 bool Win32Application::m_fullscreenMode = false;
 RECT Win32Application::m_windowRect;
 int Win32Application::Run(DXSample* pSample, HINSTANCE hInstance, int nCmdShow)
 {
+	m_hInstance = hInstance;
 	// Parse the command line parameters
 	int argc;
 	LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
