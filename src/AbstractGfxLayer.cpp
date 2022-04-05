@@ -1288,7 +1288,7 @@ void AbstractGfxLayer::WaitGPUFlush()
 
 bool AbstractGfxLayer::IsDX12()
 {
-	if (g_dx12_rhi)
+	if (GetDX12Impl() != nullptr)
 		return true;
 	else
 		return false;
@@ -1297,6 +1297,11 @@ bool AbstractGfxLayer::IsDX12()
 void AbstractGfxLayer::CreateDX12API(HWND hWnd, UINT DisplayWidth, UINT DisplayHeight)
 {
 	dx12_ptr = new DX12Impl(hWnd, DisplayWidth, DisplayHeight);
+}
+
+void* AbstractGfxLayer::GetDX12Impl()
+{
+	if (dx12_ptr) return dx12_ptr;
 }
 
 void AbstractGfxLayer::CreateVulkanAPI(HINSTANCE hInstance, HWND hWnd, UINT DisplayWidth, UINT DisplayHeight)

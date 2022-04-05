@@ -62,103 +62,85 @@ project "Corona"
    
    kind "WindowedApp"
 
-   configuration "Debug"
-      debugdir("../src/")
-      targetdir "../src/"
-
-      systemversion( WIN_SDK_VERSION)
-      staticruntime("off")
-      flags { "NoPCH" } 
+  
+   
+   systemversion( WIN_SDK_VERSION)
+   staticruntime("off")
+   flags { "NoPCH" } 
      
-      libdirs  {
-            "../src/external/GFSDK_Aftermath/lib/x64", 
-            -- "../src/DirectXTex July 2017/Lib 2017/Release",
-            "../src/external/DirectXTex July 2017/Lib 2017/",
-            "../src/external/assimp/lib",
-            "../src/external/WinPixEventRuntime/bin//x64",
-            "../src/external/dxc/lib",
-            "../src/external/dlss/Lib/x64",
-            "../src/external/NRD/Lib/Debug",
-            "../src/external/NRI/Lib/Debug",
-            "C:/VulkanSDK/1.2.170.0/Lib",
-            "../src/external/dxc/lib/x64",
-            "."
-         }
-
-      links{
-      "d3d12",
-      "vulkan-1.lib",
-      "dxgi",
-      "d3dcompiler",
-      "dxguid",
-      "GFSDK_Aftermath_Lib.x64",
-      "WinPixEventRuntime",
-      "nvsdk_ngx_d_dbg.lib",
-      -- "DirectXTex.lib",
-      "assimp.lib",
-      "NRD",
-      "NRI",
-      "NRI_Creation",
-      "NRI_D3D11",
-      "NRI_D3D12",
-      "NRI_Validation",
-      "NRI_VK",
-      "dxcompiler"
-      }
-
-
    configuration "Release"
-      debugdir("../src/")
-      targetdir "../src/"
-      systemversion( WIN_SDK_VERSION)
-      staticruntime("off")
-      flags { "NoPCH" } 
-   --    files {
-			-- "../src/*.h",
-			-- "../src/*.cpp",
-			-- "../src/external/enkiTS/*.cpp",
-			-- "../src/external/imgui/*.cpp",
-			-- "../src/external/imgui/examples/imgui_impl_dx12.cpp",
-			-- "../src/external/imgui/examples/imgui_impl_win32.cpp",
-   --       "../src/external/rtxgi-sdk/src/*.cpp",
-   --       "../src/external/rtxgi-sdk/src/ddgi/*.cpp",
-			-- }
-
-      libdirs    {
-            "../src/external/GFSDK_Aftermath/lib/x64", 
-            -- "../src/DirectXTex July 2017/Lib 2017/Release",
-            "../src/external/DirectXTex July 2017/Lib 2017/",
-            "../src/external/assimp/lib",
-            "../src/external/WinPixEventRuntime/bin//x64",
-            "../src/external/dxc/lib",
-            "../src/external/dlss/Lib/x64",
-            "../src/external/NRD/Lib/Release",
-            "../src/external/NRI/Lib/Release",
-            "C:/VulkanSDK/1.2.170.0/Lib",
-            "../src/external/dxc/lib/x64",
-            "."
-         }
-
-      links{
-      "d3d12",
-      "vulkan-1.lib",
-      "dxgi",
-      "d3dcompiler",
-      "dxguid",
-      "GFSDK_Aftermath_Lib.x64",
-      "WinPixEventRuntime",
-      "nvsdk_ngx_d.lib",
-      -- "DirectXTex.lib",
-      "assimp.lib",
-      "NRD",
-      "NRI",
-      "NRI_Creation",
-      "NRI_D3D11",
-      "NRI_D3D12",
-      "NRI_Validation",
-      "NRI_VK",
-      "dxcompiler"
+   debugdir("../src/")
+   targetdir "../src/"
+   libdirs  {
+         "../src/external/GFSDK_Aftermath/lib/x64", 
+         "../src/external/DirectXTex July 2017/Lib 2017/Release",
+         "../src/external/assimp/lib",
+         "../src/external/WinPixEventRuntime/bin//x64",
+         "../src/external/dxc/lib",
+         "../src/external/dlss/Lib/x64",
+         "../src/external/NRD/Lib/Release",
+         "../src/external/NRI/Lib/Release",
+         "C:/VulkanSDK/1.2.170.0/Lib",
+         "../src/external/dxc/lib/x64",
+         "."
       }
+
+   links{
+   "d3d12",
+   "vulkan-1.lib",
+   "dxgi",
+   "DirectXTex",
+   "dxguid",
+   "GFSDK_Aftermath_Lib.x64",
+   "WinPixEventRuntime",
+   "nvsdk_ngx_d_dbg.lib",
+   "assimp.lib",
+   "NRD",
+   "NRI",
+   "NRI_Creation",
+   "NRI_D3D11",
+   "NRI_D3D12",
+   "NRI_Validation",
+   "NRI_VK",
+   "dxcompiler"
+   }
+
+   configuration "Debug"
+   debugdir("../src/")
+   targetdir "../src/"
+   libdirs  {
+         "../src/external/GFSDK_Aftermath/lib/x64", 
+         "../src/external/DirectXTex July 2017/Lib 2017/Debug",
+         "../src/external/assimp/lib",
+         "../src/external/WinPixEventRuntime/bin//x64",
+         "../src/external/dxc/lib",
+         "../src/external/dlss/Lib/x64",
+         "../src/external/NRD/Lib/Debug",
+         "../src/external/NRI/Lib/Debug",
+         "C:/VulkanSDK/1.2.170.0/Lib",
+         "../src/external/dxc/lib/x64",
+         "."
+      }
+
+   links{
+   "d3d12",
+   "vulkan-1.lib",
+   "dxgi",
+   "DirectXTex",
+   "dxguid",
+   "GFSDK_Aftermath_Lib.x64",
+   "WinPixEventRuntime",
+   "nvsdk_ngx_d_dbg.lib",
+   "assimp.lib",
+   "NRD",
+   "NRI",
+   "NRI_Creation",
+   "NRI_D3D11",
+   "NRI_D3D12",
+   "NRI_Validation",
+   "NRI_VK",
+   "dxcompiler"
+   }
 
 
 

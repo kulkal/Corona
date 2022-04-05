@@ -25,17 +25,17 @@
 #include "SimpleCamera.h"
 #include "AbstractGfxLayer.h"
 #include "enkiTS/TaskScheduler.h""
-#define PROFILE_BUILD 1
-#include "pix3.h"
+
 
 #define USE_DLSS 0
 #define USE_NRD 0
 #define RTXGI 1
-#define USE_IMGUI 0
-#define USE_GIZMO 0
+#define USE_IMGUI 1
+#define USE_GIZMO 1
 #define USE_AFTERMATH 0
+#define VULKAN_RENDERER 0
 
-#define VULKAN_RENDERER 1
+
 
 #if USE_DLSS
 #include "nvsdk_ngx.h"

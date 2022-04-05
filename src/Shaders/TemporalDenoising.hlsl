@@ -455,6 +455,8 @@ void TemporalFilter( uint3 DTid : SV_DispatchThreadID, uint3 GTid : SV_GroupThre
 
     uint2 LowResPos = GId * (GROUPSIZE / DOWNSAMPLE_SIZE) + LowResGroupPos;
 	OutGIResultSHDS[LowResPos] = SumSH.shY;
-    OutGIResultColorDS[LowResPos] = float4(SumSH.CoCg, 0, 0);
+    //OutGIResultColorDS[LowResPos] = float4(SumSH.CoCg, 0, 0);
+	OutGIResultColorDS[LowResPos].xy = SumSH.CoCg;
+
 
 }

@@ -1302,6 +1302,7 @@ void Corona::InitImgui()
 	io.DisplaySize.x = DisplayWidth;
 	io.DisplaySize.y = DisplayHeight;
 
+	DX12Impl* dx12_rhi = (DX12Impl*)AbstractGfxLayer::GetDX12Impl();
 	dx12_rhi->TextureDHRing->AllocDescriptor(CpuHandleImguiFontTex, GpuHandleImguiFontTex);
 
 	ImGui_ImplWin32_Init(Win32Application::GetHwnd());
@@ -1829,6 +1830,7 @@ void Corona::ToneMapPass()
 	AbstractGfxLayer::SetRenderTargets(AbstractGfxLayer::GetGlobalCommandList(), ToneMapPSO.get(), Rendertargets.size(), Rendertargets.data(), nullptr);
 
 	ProfileGPUScope(AbstractGfxLayer::GetGlobalCommandList(), PIX_COLOR(rand() % 255, rand() % 255, rand() % 255), "CopyPass");
+	//ProfileGPUScope(AbstractGfxLayer::GetGlobalCommandList(), PIX_COLOR(rand() % 255, rand() % 255, rand() % 255), "CopyPass")
 
 	GfxTexture* ResolveTarget = ColorBuffers[ColorBufferWriteIndex].get();
 
@@ -2585,7 +2587,7 @@ void Corona::DLSSPass()
 	ProfileGPUScope(AbstractGfxLayer::GetGlobalCommandList(), PIX_COLOR(rand() % 255, rand() % 255, rand() % 255), "DLSSPass");
 
 	UINT PrevColorBufferIndex = 1 - ColorBufferWriteIndex;
-	Texture* ResolveTarget = ColorBuffers[ColorBufferWriteIndex].get();
+	Texture* ResolveTarget = (Texture*)ColorBuffers[ColorBufferWriteIndex].get();
 
 	std::array<ResourceTransition, 1> Transition0 = { {
 	{ResolveTarget, RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | RESOURCE_STATE_PIXEL_SHADER_RESOURCE, RESOURCE_STATE_UNORDERED_ACCESS},
@@ -2594,11 +2596,11 @@ void Corona::DLSSPass()
 
 	NVSDK_NGX_Result Result;
 
-	ID3D12GraphicsCommandList* d3dcommandList = AbstractGfxLayer::GetGlobalCommandList()->CmdList.Get();
-	ID3D12Resource* unresolvedColorBuffer = LightingWithBloomBuffer->resource.Get();
-	ID3D12Resource* motionVectorsBuffer = PixelVelocityBuffer->resource.Get();
+	ID3D12GraphicsCommandList* d3dcommandList = static_cast<CommandList*>(AbstractGfxLayer::GetGlobalCommandList())->CmdList.Get();
+	ID3D12Resource* unresolvedColorBuffer = static_cast<Texture*>(LightingWithBloomBuffer.get())->resource.Get();
+	ID3D12Resource* motionVectorsBuffer = static_cast<Texture*>(PixelVelocityBuffer.get())->resource.Get();
 	ID3D12Resource* resolvedColorBuffer = ResolveTarget->resource.Get();
-	ID3D12Resource* depthBuffer = DepthBuffer->resource.Get();
+	ID3D12Resource* depthBuffer = static_cast<Texture*>(DepthBuffer.get())->resource.Get();
 
 	D3D12_RESOURCE_DESC resDesc = depthBuffer->GetDesc();
 
@@ -2625,9 +2627,10 @@ void Corona::DLSSPass()
 	{ResolveTarget, RESOURCE_STATE_UNORDERED_ACCESS, RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | RESOURCE_STATE_PIXEL_SHADER_RESOURCE},
 	} };
 	AbstractGfxLayer::TransitionResource(AbstractGfxLayer::GetGlobalCommandList(), Transition1.size(), Transition1.data());
-
+	
+	DX12Impl* dx12_rhi = static_cast<DX12Impl*>(AbstractGfxLayer::GetDX12Impl());
 	ID3D12DescriptorHeap* ppHeaps[] = { dx12_rhi->SRVCBVDescriptorHeapShaderVisible->DH.Get(), dx12_rhi->SamplerDescriptorHeapShaderVisible->DH.Get() };
-	AbstractGfxLayer::GetGlobalCommandList()->CmdList->SetDescriptorHeaps(_countof(ppHeaps), ppHeaps);
+	static_cast<CommandList*>(AbstractGfxLayer::GetGlobalCommandList())->CmdList->SetDescriptorHeaps(_countof(ppHeaps), ppHeaps);
 }
 #endif
 
@@ -3589,11 +3592,11 @@ void Corona::OnRender()
 		}
 
 		// ImGui::gizmo3D has memory leak.
-		//glm::vec3 LD = glm::vec3(LightDir.z, -LightDir.y, -LightDir.x);
-		//ImGui::gizmo3D("##gizmo1", LD, 200 /* mode */);
-		//LightDir = glm::vec3(-LD.z, -LD.y, LD.x);
-		//ImGui::SameLine();
-		//ImGui::Text("Light Direction");
+		glm::vec3 LD = glm::vec3(LightDir.z, -LightDir.y, -LightDir.x);
+		ImGui::gizmo3D("##gizmo1", LD, 200 /* mode */);
+		LightDir = glm::vec3(-LD.z, -LD.y, LD.x);
+		ImGui::SameLine();
+		ImGui::Text("Light Direction");
 
 #if USE_RTXGI
 		ImGui::SliderFloat3("Volume Origin", (float*)&volumeTranslation, -3000, 3000);
@@ -3628,7 +3631,8 @@ void Corona::OnRender()
 		ImGui::SliderFloat("SpecularBlurRadius", &TemporalFilterCB.SpecularBlurRadius, 0.0f, 5.0f);
 
 		ImGui::SliderFloat("Point2PlaneDistScale", &TemporalFilterCB.Point2PlaneDistScale, 0.0f, 1000.0f);
-
+		
+		DX12Impl* dx12_rhi = (DX12Impl*)AbstractGfxLayer::GetDX12Impl();
 		if (dx12_rhi->errorString.size() > 0)
 		{
 			if (!ImGui::IsPopupOpen("Msg"))
@@ -3639,6 +3643,7 @@ void Corona::OnRender()
 
 			if (ImGui::BeginPopupModal("Msg"))
 			{
+
 				ImGui::TextWrapped(dx12_rhi->errorString.c_str());
 			
 				if (ImGui::Button("Compile again", ImVec2(120, 0)))
@@ -3849,8 +3854,8 @@ void Corona::GBufferPass()
 #if USE_AFTERMATH
 	NVAftermathMarker(dx12_rhi->AM_CL_Handle, "GBufferPass");
 #endif
+	//ProfileGPUScope(AbstractGfxLayer::GetGlobalCommandList(), PIX_COLOR(rand() % 255, rand() % 255, rand() % 255), "GBufferPass");
 	ProfileGPUScope(AbstractGfxLayer::GetGlobalCommandList(), PIX_COLOR(rand() % 255, rand() % 255, rand() % 255), "GBufferPass");
-
 	{
 		std::array<ResourceTransition, 7> Transition = { {
 		{AlbedoBuffer.get(), RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | RESOURCE_STATE_PIXEL_SHADER_RESOURCE, RESOURCE_STATE_RENDER_TARGET},
@@ -4390,6 +4395,8 @@ void Corona::InitDLSS()
 {
 	NVSDK_NGX_Result Result = NVSDK_NGX_Result_Fail;
 
+	DX12Impl* dx12_rhi = static_cast<DX12Impl*>(AbstractGfxLayer::GetDX12Impl());
+
 	Result = NVSDK_NGX_D3D12_Init(DLSS_APP_ID, L".", dx12_rhi->Device.Get());
 
 	m_ngxInitialized = !NVSDK_NGX_FAILED(Result);
@@ -4498,6 +4505,8 @@ void Corona::InitDLSS()
 		//DlssCreateFeatureFlags |= depthInverted ? NVSDK_NGX_DLSS_Feature_Flags_DepthInverted : 0;
 
 		NVSDK_NGX_DLSS_Create_Params DlssCreateParams;
+		
+		DX12Impl* dx12_rhi = static_cast<DX12Impl*>(AbstractGfxLayer::GetDX12Impl());
 
 		CommandList* cmd = dx12_rhi->CmdQ->AllocCmdList();
 

@@ -13,6 +13,7 @@
 
 #include <cmath>
 
+#undef RTXGI_PERF_MARKERS
 #if RTXGI_PERF_MARKERS
 #define USE_PIX
 #include "pix3.h"

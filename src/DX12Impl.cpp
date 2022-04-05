@@ -25,11 +25,11 @@
 
 // DirectX Tex
 #include "DirectXTex July 2017/Include/DirectXTex.h"
-#ifdef _DEBUG
-#pragma comment(lib, "Debug/DirectXTex.lib")
-#else
-#pragma comment(lib, "Release/DirectXTex.lib")
-#endif
+//#ifdef _DEBUG
+//#pragma comment(lib, "Debug/DirectXTex.lib")
+//#else
+//#pragma comment(lib, "Release/DirectXTex.lib")
+//#endif
 
 #define align_to(_alignment, _val) (((_val + _alignment - 1) / _alignment) * _alignment)
 

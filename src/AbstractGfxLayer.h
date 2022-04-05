@@ -7,6 +7,8 @@
 #include <optional>
 #include <glm/glm.hpp>
 #include <Windows.h>
+
+#define PROFILE
 #include "pix3.h"
 
 
@@ -916,6 +918,8 @@ public:
 
     static void CreateDX12API(HWND hWnd, UINT DisplayWidth, UINT DisplayHeight);
 
+    static void* GetDX12Impl();
+
     static void CreateVulkanAPI(HINSTANCE hInstance, HWND hWnd, UINT DisplayWidth, UINT DisplayHeight);
 
     static void Release();
@@ -933,7 +937,7 @@ public:
     template<typename... ARGS>
     AbstractGfxLayerScopeGPUProfile(GfxCommandList* cl, UINT64 color, PCSTR formatString, ARGS... args)
     {
-        if (AbstractGfxLayer::IsDX12())
+        //if (AbstractGfxLayer::IsDX12())
         {
             CommandList* dx12CL = static_cast<CommandList*>(cl);
             PIXBeginEvent(dx12CL->CmdList.Get(), color, formatString, args...);
@@ -942,9 +946,12 @@ public:
 
     ~AbstractGfxLayerScopeGPUProfile()
     {
-        if (AbstractGfxLayer::IsDX12())
+        //if (AbstractGfxLayer::IsDX12())
             PIXEndEvent();
+
     }
 };
 
-#define ProfileGPUScope(...) AbstractGfxLayerScopeGPUProfile p(__VA_ARGS__);
+//#define ProfileGPUScope(...) PIXScopedRetailEventObject p(__VA_ARGS__);
+#define ProfileGPUScope(cl, ...) CommandList* dx12CL = static_cast<CommandList*>(cl);\
+                                 PIXScopedEvent(dx12CL->CmdList.Get(), __VA_ARGS__);
