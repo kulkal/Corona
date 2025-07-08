@@ -52,7 +52,7 @@ project "Corona"
 
    kind "WindowedApp"
 
-   configuration "Debug"
+   filter "Debug"
       debugdir("../src/")
       targetdir "../src/"
 
@@ -68,7 +68,7 @@ project "Corona"
       "../src/external/imgui/examples/imgui_impl_win32.cpp"
       }
 
-   configuration "Release"
+   filter "Release"
       debugdir("../src/")
       targetdir "../src/"
       systemversion( WIN_SDK_VERSION)

@@ -358,6 +358,7 @@ public:
 
 	UINT NumAllocated = 0;
 	UINT MaxNumDescriptors = 0;
+	bool bShaderVisible = true;
 public:
 	DescriptorHeap()
 	{

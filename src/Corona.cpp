@@ -1608,7 +1608,7 @@ void Corona::ToneMapPass()
 	dx12_rhi->GlobalCmdList->CmdList->DrawInstanced(4, 1, 0, 0);
 
 	
-	PIXEndEvent(dx12_rhi->GlobalCmdList->CmdList.Get());
+	//PIXEndEvent(dx12_rhi->GlobalCmdList->CmdList.Get());
 }
 
 void Corona::DebugPass()
@@ -3315,7 +3315,7 @@ void Corona::RaytraceReflectionPass()
 	PSO_RT_REFLECTION->Apply(m_width, m_height, dx12_rhi->GlobalCmdList);
 
 	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(SpeculaGIBufferRaw->resource.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
-	PIXEndEvent();
+	//PIXEndEvent();
 }
 
 void Corona::RaytraceGIPass()

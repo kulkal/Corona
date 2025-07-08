@@ -62,7 +62,9 @@ void DescriptorHeap::Init(D3D12_DESCRIPTOR_HEAP_DESC& InHeapDesc)
 	NAME_D3D12_OBJECT(DH);
 
 	CPUHeapStart = DH->GetCPUDescriptorHandleForHeapStart().ptr;
-	GPUHeapStart = DH->GetGPUDescriptorHandleForHeapStart().ptr;
+	
+	if(bShaderVisible)
+		GPUHeapStart = DH->GetGPUDescriptorHandleForHeapStart().ptr;
 }
 
 void DescriptorHeap::AllocDescriptor(D3D12_CPU_DESCRIPTOR_HANDLE& cpuHandle, D3D12_GPU_DESCRIPTOR_HANDLE& gpuHandle)
@@ -444,6 +446,7 @@ SimpleDX12::SimpleDX12(ComPtr<ID3D12Device5> InDevice)
 
 	{
 		RTVDescriptorHeap = std::make_unique<DescriptorHeap>();
+		RTVDescriptorHeap->bShaderVisible = false;
 		D3D12_DESCRIPTOR_HEAP_DESC HeapDesc = {};
 		HeapDesc.NumDescriptors = 100;
 		HeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
@@ -456,7 +459,7 @@ SimpleDX12::SimpleDX12(ComPtr<ID3D12Device5> InDevice)
 
 	{
 		DSVDescriptorHeap = std::make_unique<DescriptorHeap>();
-
+		DSVDescriptorHeap->bShaderVisible = false;
 		D3D12_DESCRIPTOR_HEAP_DESC HeapDesc = {};
 		HeapDesc.NumDescriptors = 2;
 		HeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
@@ -482,7 +485,7 @@ SimpleDX12::SimpleDX12(ComPtr<ID3D12Device5> InDevice)
 	// non shader visible(storage) CBV_SRV_UAV
 	{
 		SRVCBVDescriptorHeapStorage = std::make_unique<DescriptorHeap>();
-
+		SRVCBVDescriptorHeapStorage->bShaderVisible = false;
 		D3D12_DESCRIPTOR_HEAP_DESC HeapDesc = {};
 		HeapDesc.NumDescriptors = 2000000;
 		HeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
