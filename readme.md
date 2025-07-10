@@ -18,6 +18,8 @@ I hope it helps someone to understand how dxr renderer looks like.
 ## Build
 * Go to build directory.
 * premake5.exe vs2017( or vs2019)
+* Right click solution manager and Manage Nuget packges.
+* Browse & install WinPixEventRuntime.
 * Build & run!
 
 ## Third-party libs
