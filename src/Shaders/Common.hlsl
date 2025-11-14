@@ -286,33 +286,14 @@ struct Vertex
 
 uint3 GetIndices(ByteAddressBuffer ib, uint triangleIndex)
 {
-    uint baseIndex = (triangleIndex * 3 * 2) ;
+    // For 32-bit indices: each triangle uses 12 bytes (3 indices * 4 bytes)
+    uint baseIndex = triangleIndex * 12;
+    
     uint3 index;
-
-    // ByteAdressBuffer loads must be aligned at a 4 byte boundary.
-    // Since we need to read three 16 bit indices: { 0, 1, 2 } 
-    // aligned at a 4 byte boundary as: { 0 1 } { 2 0 } { 1 2 } { 0 1 } ...
-    // we will load 8 bytes (~ 4 indices { a b | c d }) to handle two possible index triplet layouts,
-    // based on first index's offsetBytes being aligned at the 4 byte boundary or not:
-    //  Aligned:     { 0 1 | 2 - }
-    //  Not aligned: { - 0 | 1 2 }
-    const uint dwordAlignedOffset = baseIndex & ~3;    
-    const uint2 four16BitIndices = ib.Load2(dwordAlignedOffset);
- 
-    // Aligned: { 0 1 | 2 - } => retrieve first three 16bit indices
-    if (dwordAlignedOffset == baseIndex)
-    {
-        index.x = four16BitIndices.x & 0xffff;
-        index.y = (four16BitIndices.x >> 16) & 0xffff;
-        index.z = four16BitIndices.y & 0xffff;
-    }
-    else // Not aligned: { - 0 | 1 2 } => retrieve last three 16bit indices
-    {
-        index.x = (four16BitIndices.x >> 16) & 0xffff;
-        index.y = four16BitIndices.y & 0xffff;
-        index.z = (four16BitIndices.y >> 16) & 0xffff;
-    }
-
+    index.x = ib.Load(baseIndex);
+    index.y = ib.Load(baseIndex + 4);
+    index.z = ib.Load(baseIndex + 8);
+    
     return index;
 }
 
@@ -327,20 +308,27 @@ Vertex GetVertexAttributes(uint instanceID, ByteAddressBuffer vb, ByteAddressBuf
     float3 p0 = asfloat(vb.Load3(index[0] * 44));
     float3 p1 = asfloat(vb.Load3(index[1] * 44));
     float3 p2 = asfloat(vb.Load3(index[2] * 44));
+    
+    // Load vertex normals from buffer (offset 12)
+    float3 n0 = asfloat(vb.Load3(index[0] * 44 + 12));
+    float3 n1 = asfloat(vb.Load3(index[1] * 44 + 12));
+    float3 n2 = asfloat(vb.Load3(index[2] * 44 + 12));
 
-    float4x4 WorldMatrix = {
+    // Load world matrix (glm::mat4x4 is column-major in memory)
+    // But HLSL float4x4 initialization is row-major, so we need to transpose
+    float4x4 WorldMatrixTransposed = {
         asfloat(ip.Load4(instanceID*4*16)), 
         asfloat(ip.Load4(instanceID*4*16 + 16)), 
         asfloat(ip.Load4(instanceID*4*16 + 16*2)),
         asfloat(ip.Load4(instanceID*4*16 + 16*3)),
     };
-
+    float4x4 WorldMatrix = transpose(WorldMatrixTransposed);
 
     v.position += p0 * barycentrics[0];
     v.position += p1 * barycentrics[1];
     v.position += p2 * barycentrics[2];
 
-    v.position = mul(float4(v.position, 1), WorldMatrix).xyz;
+    v.position = mul(WorldMatrix, float4(v.position, 1)).xyz;
 
     float2 uv0 = asfloat(vb.Load2(index[0] * 44 + 24));
     float2 uv1 = asfloat(vb.Load2(index[1] * 44 + 24));
@@ -352,12 +340,22 @@ Vertex GetVertexAttributes(uint instanceID, ByteAddressBuffer vb, ByteAddressBuf
 
     // v.uv = v.position.xy;
 
-
-    float3 e1 = p1 - p0;
-    float3 e2 = p2 - p0;
-    v.normal = normalize(cross(e1, e2));
-
-    v.normal = mul(float4(v.normal, 0), WorldMatrix).xyz;
+    // Interpolate vertex normals for smooth shading
+    v.normal = n0 * barycentrics[0] + n1 * barycentrics[1] + n2 * barycentrics[2];
+    v.normal = normalize(v.normal);
+    v.normal = mul(WorldMatrix, float4(v.normal, 0)).xyz;
+    v.normal = normalize(v.normal);
+    
+    // Load vertex tangents from buffer (offset 32)
+    float3 t0 = asfloat(vb.Load3(index[0] * 44 + 32));
+    float3 t1 = asfloat(vb.Load3(index[1] * 44 + 32));
+    float3 t2 = asfloat(vb.Load3(index[2] * 44 + 32));
+    
+    // Interpolate vertex tangents
+    v.tangent = t0 * barycentrics[0] + t1 * barycentrics[1] + t2 * barycentrics[2];
+    v.tangent = normalize(v.tangent);
+    v.tangent = mul(WorldMatrix, float4(v.tangent, 0)).xyz;
+    v.tangent = normalize(v.tangent);
 
     float triangleArea = calcTriangleArea(p0, p1, p2);
     
@@ -378,7 +376,7 @@ float RGBToLuminance( float3 x )
 
 float PointPlaneDist(float4 plane, float3 p)
 {
-    float n = plane.xyz;
+    float3 n = plane.xyz;
     float d = plane.w;
     return (dot(n, p) + d)/length(n);
 }

@@ -21,7 +21,11 @@ SimpleCamera::SimpleCamera():
 	m_upDirection(0, 1, 0),
 	m_moveSpeed(200.0f),
 	m_turnSpeed(glm::half_pi<float>()),
-	m_keysPressed{}
+	m_keysPressed{},
+	m_mouseButtonDown(false),
+	m_lastMouseX(0),
+	m_lastMouseY(0),
+	m_mouseSensitivity(0.003f)
 {
 }
 
@@ -191,5 +195,37 @@ void SimpleCamera::OnKeyUp(WPARAM key)
 	case VK_DOWN:
 		m_keysPressed.down = false;
 		break;
+	}
+}
+
+void SimpleCamera::OnMouseDown(int x, int y)
+{
+	m_mouseButtonDown = true;
+	m_lastMouseX = x;
+	m_lastMouseY = y;
+}
+
+void SimpleCamera::OnMouseUp()
+{
+	m_mouseButtonDown = false;
+}
+
+void SimpleCamera::OnMouseMove(int x, int y)
+{
+	if (m_mouseButtonDown)
+	{
+		int deltaX = x - m_lastMouseX;
+		int deltaY = y - m_lastMouseY;
+		
+		// Update yaw and pitch based on mouse movement
+		m_yaw -= deltaX * m_mouseSensitivity;
+		m_pitch -= deltaY * m_mouseSensitivity;
+		
+		// Prevent looking too far up or down
+		m_pitch = glm::min(m_pitch, glm::quarter_pi<float>());
+		m_pitch = glm::max(-glm::quarter_pi<float>(), m_pitch);
+		
+		m_lastMouseX = x;
+		m_lastMouseY = y;
 	}
 }

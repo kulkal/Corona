@@ -24,7 +24,7 @@
 #include "StepTimer.h"
 #include "SimpleCamera.h"
 #include "SimpleDX12.h"
-#include "enkiTS/TaskScheduler.h""
+#include "enkiTS/TaskScheduler.h"
 #define PROFILE_BUILD 1
 #include "pix3.h"
 using namespace DirectX;
@@ -40,6 +40,12 @@ using namespace std;
 
 class Corona : public DXSample
 {
+	enum class ERenderingMode
+	{
+		HYBRID,		// Rasterization GBuffer + Raytracing
+		PATHTRACING	// Full path tracing
+	};
+
 	enum class EDebugVisualization
 	{
 		SHADOW,
@@ -61,6 +67,7 @@ class Corona : public DXSample
 		NO_FULLSCREEN,
 	};
 
+	ERenderingMode RenderingMode = ERenderingMode::HYBRID;
 	EDebugVisualization FullscreenDebugBuffer = EDebugVisualization::NO_FULLSCREEN;
 private:
 
@@ -184,8 +191,14 @@ private:
 		glm::vec4	LightDir;
 		glm::vec2 RandomOffset;
 		UINT32 FrameCounter;
-		UINT32 BlueNoiseOffsetStride = 1.0f;
+		UINT32 BlueNoiseOffsetStride = 1;
 		float ViewSpreadAngle;
+		glm::vec3 SkyColorTop;
+		float SkyIntensity;
+		glm::vec3 SkyColorBottom;
+		float _padding;
+		glm::vec3 LightColor;
+		float _padding2;
 	};
 
 	RTReflectionViewParamCB RTReflectionViewParam;
@@ -203,13 +216,64 @@ private:
 		glm::vec4 LightDir;
 		glm::vec2 RandomOffset;
 		UINT32 FrameCounter;
-		UINT32 BlueNoiseOffsetStride = 1.0f;
+		UINT32 BlueNoiseOffsetStride = 1;
 		float ViewSpreadAngle;
+		glm::vec3 SkyColorTop;
+		float SkyIntensity;
+		glm::vec3 SkyColorBottom;
+		float _padding;
+		glm::vec3 LightColor;
+		float _padding2;
 	};
 
 	RTGIViewParamCB RTGIViewParam;
 	shared_ptr<RTPipelineStateObject> PSO_RT_GI;
 	
+	// Path Tracing
+	enum class EPathTracingDebugMode
+	{
+		NONE = 0,
+		ALBEDO = 1,
+		NORMAL = 2,
+		ROUGHNESS = 3,
+		METALLIC = 4,
+		WORLD_POSITION = 5,
+		BARYCENTRIC = 6
+	};
+	
+	struct PathTracingViewParamCB
+	{
+		glm::mat4x4 ViewMatrix;
+		glm::mat4x4 InvViewMatrix;
+		glm::mat4x4 ProjMatrix;
+		glm::mat4x4 InvProjMatrix;
+		glm::vec4 ProjectionParams;
+		glm::vec4 LightDirAndIntensity;
+		glm::vec2 RandomOffset;
+		UINT32 FrameCounter;
+		UINT32 BlueNoiseOffsetStride = 1;
+		UINT32 MaxBounces = 4;
+		UINT32 SamplesPerPixel = 1;
+		float ViewSpreadAngle;
+		UINT32 DebugMode = 0; // EPathTracingDebugMode
+		glm::vec3 SkyColorTop;
+		float SkyIntensity;
+		glm::vec3 SkyColorBottom;
+		float _padding;
+		glm::vec3 LightColor;
+		float _padding2;
+	};
+
+	PathTracingViewParamCB PathTracingViewParam;
+	shared_ptr<RTPipelineStateObject> PSO_PATH_TRACING;
+	shared_ptr<Texture> PathTracingAccumBuffer[2];
+	UINT PathTracingWriteIndex = 0;
+	glm::mat4x4 PrevPathTracingViewMat;
+	glm::vec3 PrevPathTracingLightDir;
+	float PrevPathTracingLightIntensity = 0.0f;
+	glm::vec3 PrevSkyColorTop = glm::vec3(0.0f);
+	glm::vec3 PrevSkyColorBottom = glm::vec3(0.0f);
+	float PrevSkyIntensity = 0.0f;
 
 	// full screen copy pass
 	enum EToneMapMode
@@ -271,6 +335,8 @@ private:
 		glm::vec2 RTSize;
 		float TAABlendFactor;
 		float GIBufferScale;
+		glm::vec3 LightColor;
+		float _padding;
 	};
 	
 	shared_ptr<PipelineStateObject> LightingPSO;
@@ -389,6 +455,12 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	// misc
 	glm::vec3 LightDir = glm::normalize(glm::vec3(0.901, 0.88, 0.176));
 	float LightIntensity = 0.4;
+	
+	// Sky colors for path tracing
+	glm::vec3 SkyColorTop = glm::vec3(1.0f, 1.0f, 1.0f);
+	glm::vec3 SkyColorBottom = glm::vec3(0.8f, 0.8f, 0.8f);
+	float SkyIntensity = 3.0f;
+	
 	float Near = 10.0f;
 	float Far = 20000.0f;
 	float Fov = 0.8f;
@@ -493,7 +565,9 @@ public:
 
 	void BloomPass();
 
+	void InitPathTracingPass();
 
+	void PathTracingPass();
 
 	void ToneMapPass();
 
@@ -517,6 +591,10 @@ public:
 	virtual void OnKeyDown(UINT8 key);
 
 	virtual void OnKeyUp(UINT8 key);
+	
+	virtual void OnRButtonDown(int x, int y);
+	virtual void OnRButtonUp();
+	virtual void OnMouseMove(int x, int y);
 
 	Corona(UINT width, UINT height, std::wstring name);
 

@@ -1297,10 +1297,9 @@ shared_ptr<RTAS> Mesh::CreateBLAS()
 	geomDesc.Triangles.IndexCount = Ib->numIndices;
 	geomDesc.Triangles.Transform3x4 = 0;
 
-	if(bTransparent)
-		geomDesc.Flags = D3D12_RAYTRACING_GEOMETRY_FLAG_NONE;
-	else
-		geomDesc.Flags = D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE;
+	// For path tracing, treat all geometry as opaque
+	// Transparency should be handled in the hit shader
+	geomDesc.Flags = D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE;
 
 
 

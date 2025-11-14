@@ -26,6 +26,12 @@ cbuffer ViewParameter : register(b0)
     uint FrameCounter;
     uint BlueNoiseOffsetStride;
     float ViewSpreadAngle;
+    float3 SkyColorTop;
+    float SkyIntensity;
+    float3 SkyColorBottom;
+    float _padding;
+    float3 LightColor;
+    float _padding2;
 };
 
 SamplerState sampleWrap : register(s0);
@@ -170,8 +176,8 @@ void rayGen
 	TraceRay(gRtScene, RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES /*rayFlags*/, 0xFF, 0 /* ray index*/, 0, 0, ray, payload);
     if(payload.bHit == false)
     {
-        // hit sky
-        float3 Radiance = payload.color * LightIntensity;
+        // hit sky - payload.color already includes SkyIntensity from miss shader
+        float3 Radiance = payload.color;  // Don't multiply LightIntensity for sky
         // float3 Radiance = float3(1, 0, 0) * LightIntensity;
 
         float3 Irradiance = Radiance * cosTerm;
@@ -200,8 +206,8 @@ void rayGen
         SH sh_indirect = init_SH();
         if(shadowPayload.bHit == false)
         {
-            // miss
-            float3 Irradiance = dot(LightDir.xyz, payload.normal) * LightIntensity  * Albedo;
+            // miss - apply light color
+            float3 Irradiance = dot(LightDir.xyz, payload.normal) * LightIntensity * LightColor * Albedo;
             sh_indirect = irradiance_to_SH(Irradiance, sampleDirWorld);
         }
         else
@@ -219,8 +225,13 @@ void rayGen
 [shader("miss")]
 void miss(inout RayPayload payload)
 {
+    // Sky color - gradient based on ray direction (same as path tracing)
+    float3 rayDir = WorldRayDirection();
+    float t = 0.5 * (rayDir.y + 1.0);
+    float3 skyColor = lerp(SkyColorBottom, SkyColorTop, t);
+    
     payload.position = float3(0, 0, 0);
-    payload.color = float3(0.0, 0.2, 0.4);
+    payload.color = skyColor * SkyIntensity;
     payload.normal = float3(0, 0, -1);
     payload.bHit = false;
 }

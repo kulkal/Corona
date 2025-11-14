@@ -467,6 +467,7 @@ void Corona::LoadAssets()
 	//InitGenMipSpecularGIPass();
 
 	InitRTPSO();
+	InitPathTracingPass();
 
 	
 	for (UINT i = 0; i < dx12_rhi->NumFrame; i++)
@@ -495,6 +496,18 @@ void Corona::LoadAssets()
 
 	NAME_D3D12_OBJECT(ColorBuffers[1]->resource);
 
+	// Path tracing accumulation buffers
+	PathTracingAccumBuffer[0] = dx12_rhi->CreateTexture2D(DXGI_FORMAT_R32G32B32A32_FLOAT,
+		D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+		D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, m_width, m_height, 1, glm::vec4(0.0f, 0.0f, 0.0f, 0.0f));
+	
+	NAME_D3D12_OBJECT(PathTracingAccumBuffer[0]->resource);
+
+	PathTracingAccumBuffer[1] = dx12_rhi->CreateTexture2D(DXGI_FORMAT_R32G32B32A32_FLOAT,
+		D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+		D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, m_width, m_height, 1, glm::vec4(0.0f, 0.0f, 0.0f, 0.0f));
+	
+	NAME_D3D12_OBJECT(PathTracingAccumBuffer[1]->resource);
 
 	// lighting result
 	LightingBuffer = dx12_rhi->CreateTexture2D(DXGI_FORMAT_R16G16B16A16_FLOAT,
@@ -652,11 +665,11 @@ void Corona::LoadAssets()
 
 	Sponza = LoadModel("assets/Sponza/Sponza.fbx");
 
-	ShaderBall = LoadModel("assets/shaderball/shaderBall.fbx");
+	//  ShaderBall = LoadModel("assets/shaderball/shaderBall.fbx");
 
-	glm::mat4x4 scaleMat = glm::scale(glm::vec3(2.5, 2.5, 2.5));
-	glm::mat4x4 translatemat = glm::translate(glm::vec3(-150, 20, 0));
-	ShaderBall->SetTransform(scaleMat* translatemat );
+	// glm::mat4x4 scaleMat = glm::scale(glm::vec3(2.5, 2.5, 2.5));
+	// glm::mat4x4 translatemat = glm::translate(glm::vec3(-150, 20, 0));
+	// ShaderBall->SetTransform(scaleMat* translatemat );
 	
 	//Buddha = LoadModel("buddha/buddha.obj");
 
@@ -860,7 +873,7 @@ shared_ptr<Scene> Corona::LoadModel(string fileName)
 		vector<Vertex> vertices;
 		vertices.resize(mesh->NumVertices);
 
-		vector<UINT16> indices;
+		vector<UINT32> indices;
 		indices.resize(mesh->NumIndices);
 		//if (i > 0) break;
 
@@ -906,16 +919,16 @@ shared_ptr<Scene> Corona::LoadModel(string fileName)
 		const UINT numTriangles = asMesh->mNumFaces;
 		for (int triIdx = 0; triIdx < numTriangles; ++triIdx)
 		{
-			indices[triIdx * 3 + 0] = UINT16(asMesh->mFaces[triIdx].mIndices[0]);
-			indices[triIdx * 3 + 1] = UINT16(asMesh->mFaces[triIdx].mIndices[1]);
-			indices[triIdx * 3 + 2] = UINT16(asMesh->mFaces[triIdx].mIndices[2]);
+			indices[triIdx * 3 + 0] = asMesh->mFaces[triIdx].mIndices[0];
+			indices[triIdx * 3 + 1] = asMesh->mFaces[triIdx].mIndices[1];
+			indices[triIdx * 3 + 2] = asMesh->mFaces[triIdx].mIndices[2];
 		}
 
 		mesh->Vb = dx12_rhi->CreateVertexBuffer(sizeof(Vertex) * mesh->NumVertices, sizeof(Vertex), vertices.data());
 		mesh->VertexStride = sizeof(Vertex);
-		mesh->IndexFormat = DXGI_FORMAT_R16_UINT;
+		mesh->IndexFormat = DXGI_FORMAT_R32_UINT;
 
-		mesh->Ib = dx12_rhi->CreateIndexBuffer(mesh->IndexFormat, sizeof(UINT16)*3*numTriangles, indices.data());
+		mesh->Ib = dx12_rhi->CreateIndexBuffer(mesh->IndexFormat, sizeof(UINT32)*3*numTriangles, indices.data());
 
 
 		Mesh::DrawCall dc;
@@ -1579,7 +1592,17 @@ void Corona::ToneMapPass()
 
 
 	Texture* backbuffer = framebuffers[dx12_rhi->CurrentFrameIndex].get();
-	Texture* ResolveTarget = ColorBuffers[ColorBufferWriteIndex].get();//framebuffers[dx12_rhi->CurrentFrameIndex].get();
+	Texture* ResolveTarget = nullptr;
+	
+	// Select source texture based on rendering mode
+	if (RenderingMode == ERenderingMode::PATHTRACING)
+	{
+		ResolveTarget = PathTracingAccumBuffer[PathTracingWriteIndex].get();
+	}
+	else
+	{
+		ResolveTarget = ColorBuffers[ColorBufferWriteIndex].get();
+	}
 
 	ToneMapPSO->Apply(dx12_rhi->GlobalCmdList->CmdList.Get());
 
@@ -2061,10 +2084,16 @@ void Corona::LightingPass()
 
 
 	glm::mat4x4 InvViewMat = glm::inverse(ViewMat);
+	
+	// Calculate light color from sky gradient (same as raytracing modes)
+	glm::vec3 normalizedLightDir = glm::normalize(LightDir);
+	float lightDirT = 0.5f * (normalizedLightDir.y + 1.0f);
+	glm::vec3 lightColor = glm::mix(SkyColorBottom, SkyColorTop, lightDirT);
+	
 	LightingParam Param;
 	Param.ViewMatrix = glm::transpose(ViewMat);
 	Param.InvViewMatrix = glm::transpose(InvViewMat);
-	Param.LightDir = glm::vec4(glm::normalize(LightDir), LightIntensity);
+	Param.LightDir = glm::vec4(normalizedLightDir, LightIntensity);
 	
 	Param.RTSize.x = m_width;
 	Param.RTSize.y = m_height;
@@ -2075,6 +2104,7 @@ void Corona::LightingPass()
 		Param.TAABlendFactor = 1.0;
 
 	Param.GIBufferScale = GIBufferScale;
+	Param.LightColor = lightColor;
 
 	glm::normalize(Param.LightDir);
 	LightingPSO->SetCBVValue("LightingParam", &Param, dx12_rhi->GlobalCmdList->CmdList.Get());
@@ -2345,6 +2375,11 @@ void Corona::OnUpdate()
 	
 	float timeElapsed = m_timer.GetTotalSeconds();
 	timeElapsed *= 0.01f;
+	// Calculate light color from sky gradient based on light direction
+	glm::vec3 normalizedLightDir = glm::normalize(LightDir);
+	float lightDirT = 0.5f * (normalizedLightDir.y + 1.0f);
+	glm::vec3 lightColor = glm::mix(SkyColorBottom, SkyColorTop, lightDirT);
+	
 	// reflection view param
 	RTReflectionViewParam.ViewMatrix = glm::transpose(ViewMat);
 	RTReflectionViewParam.InvViewMatrix = glm::transpose(InvViewMat);
@@ -2354,9 +2389,13 @@ void Corona::OnUpdate()
 	RTReflectionViewParam.ProjectionParams.y = Near / (Near - Far);
 	RTReflectionViewParam.ProjectionParams.z = Near;
 	RTReflectionViewParam.ProjectionParams.w = Far;
-	RTReflectionViewParam.LightDir = glm::vec4(glm::normalize(LightDir), LightIntensity);
+	RTReflectionViewParam.LightDir = glm::vec4(normalizedLightDir, LightIntensity);
 	RTReflectionViewParam.RandomOffset = glm::vec2(timeElapsed, timeElapsed);
 	RTReflectionViewParam.FrameCounter = FrameCounter;
+	RTReflectionViewParam.SkyColorTop = SkyColorTop;
+	RTReflectionViewParam.SkyColorBottom = SkyColorBottom;
+	RTReflectionViewParam.SkyIntensity = SkyIntensity;
+	RTReflectionViewParam.LightColor = lightColor;
 
 	// GI view param
 	RTGIViewParam.ViewMatrix = glm::transpose(ViewMat);
@@ -2367,9 +2406,31 @@ void Corona::OnUpdate()
 	RTGIViewParam.ProjectionParams.y = Near / (Near - Far);
 	RTGIViewParam.ProjectionParams.z = Near;
 	RTGIViewParam.ProjectionParams.w = Far;
-	RTGIViewParam.LightDir = glm::vec4(glm::normalize(LightDir), LightIntensity);
+	RTGIViewParam.LightDir = glm::vec4(normalizedLightDir, LightIntensity);
 	RTGIViewParam.RandomOffset = glm::vec2(timeElapsed, timeElapsed);
 	RTGIViewParam.FrameCounter = FrameCounter;
+	RTGIViewParam.SkyColorTop = SkyColorTop;
+	RTGIViewParam.SkyColorBottom = SkyColorBottom;
+	RTGIViewParam.SkyIntensity = SkyIntensity;
+	RTGIViewParam.LightColor = lightColor;
+	
+	// Path Tracing view param
+	PathTracingViewParam.ViewMatrix = glm::transpose(ViewMat);
+	PathTracingViewParam.InvViewMatrix = glm::transpose(InvViewMat);
+	PathTracingViewParam.ProjMatrix = glm::transpose(ProjMat);
+	PathTracingViewParam.InvProjMatrix = glm::transpose(InvProjMat);
+	PathTracingViewParam.ProjectionParams.x = Far / (Far - Near);
+	PathTracingViewParam.ProjectionParams.y = Near / (Near - Far);
+	PathTracingViewParam.ProjectionParams.z = Near;
+	PathTracingViewParam.ProjectionParams.w = Far;
+	PathTracingViewParam.LightDirAndIntensity = glm::vec4(normalizedLightDir, LightIntensity);
+	PathTracingViewParam.RandomOffset = glm::vec2(timeElapsed, timeElapsed);
+	PathTracingViewParam.FrameCounter = FrameCounter;
+	PathTracingViewParam.ViewSpreadAngle = glm::tan(Fov * 0.5) / (0.5f * m_height);
+	PathTracingViewParam.SkyColorTop = SkyColorTop;
+	PathTracingViewParam.SkyColorBottom = SkyColorBottom;
+	PathTracingViewParam.SkyIntensity = SkyIntensity;
+	PathTracingViewParam.LightColor = lightColor;
 	
 	SpatialFilterCB.ProjectionParams.z = Near;
 	SpatialFilterCB.ProjectionParams.w = Far;
@@ -2383,7 +2444,11 @@ void Corona::OnUpdate()
 	TemporalFilterCB.RTSize.y = m_height;
 	TemporalFilterCB.FrameIndex = FrameCounter;
 
-	FrameCounter++;
+	// Don't increment frame counter in debug mode (to avoid accumulation noise)
+	if (PathTracingViewParam.DebugMode == 0)
+	{
+		FrameCounter++;
+	}
 
 	//ColorBufferWriteIndex = FrameCounter % 2;
 
@@ -2403,28 +2468,37 @@ void Corona::OnRender()
 	
 	// Record all the commands we need to render the scene into the command list.
 
-	GBufferPass();
+	if (RenderingMode == ERenderingMode::HYBRID)
+	{
+		// Hybrid rendering: Rasterization GBuffer + Raytracing
+		GBufferPass();
 
+		RaytraceShadowPass();
 
-	RaytraceShadowPass();
+		RaytraceReflectionPass();
 
+		RaytraceGIPass();
 
-	RaytraceReflectionPass();
-	
+		TemporalDenoisingPass();
 
-	RaytraceGIPass();
+		//GenMipSpecularGIPass();
 
-	TemporalDenoisingPass();
+		SpatialDenoisingPass();
 
-	//GenMipSpecularGIPass();
+		LightingPass();
 
-	SpatialDenoisingPass();
+		// BloomPass(); // Disabled for hybrid mode
 
-	LightingPass();
-
-	BloomPass();
-
-	TemporalAAPass();
+		TemporalAAPass();
+	}
+	else if (RenderingMode == ERenderingMode::PATHTRACING)
+	{
+		// Full path tracing
+		PathTracingPass();
+		
+		// Copy path tracing result to color buffer for tonemap
+		// (In a complete implementation, you would copy PathTracingAccumBuffer to ColorBuffers)
+	}
 
 	
 	Texture* backbuffer = framebuffers[dx12_rhi->CurrentFrameIndex].get();
@@ -2538,6 +2612,72 @@ void Corona::OnRender()
 			ImGui::EndCombo();
 		}
 
+		// Rendering Mode selector
+		{
+			static ImGuiComboFlags flags = 0;
+			const char* items[] = {
+				"HYBRID (Raster + RT)",
+				"PATH TRACING",
+			};
+			static const char* item_current = items[UINT(ERenderingMode::HYBRID)];
+			if (ImGui::BeginCombo("Rendering Mode", item_current, flags))
+			{
+				for (int n = 0; n < IM_ARRAYSIZE(items); n++)
+				{
+					bool is_selected = (item_current == items[n]);
+				if (ImGui::Selectable(items[n], is_selected))
+				{
+					item_current = items[n];
+					RenderingMode = (ERenderingMode)n;
+					
+					// Reset frame counter when switching modes for path tracing accumulation
+				if (RenderingMode == ERenderingMode::PATHTRACING)
+				{
+					FrameCounter = 0;
+					PrevPathTracingViewMat = glm::mat4x4(0.0f); // Force camera change detection on first frame
+					PrevPathTracingLightDir = glm::vec3(0.0f); // Force light change detection
+					PrevPathTracingLightIntensity = 0.0f;
+				}
+				}
+					if (is_selected)
+					{
+						ImGui::SetItemDefaultFocus();
+					}
+				}
+				ImGui::EndCombo();
+			}
+		}
+
+		// Path Tracing settings (only show when in path tracing mode)
+		if (RenderingMode == ERenderingMode::PATHTRACING)
+		{
+			ImGui::Separator();
+		ImGui::Text("Path Tracing Settings");
+		ImGui::SliderInt("Max Bounces", (int*)&PathTracingViewParam.MaxBounces, 1, 8);
+		ImGui::SliderInt("Samples Per Pixel", (int*)&PathTracingViewParam.SamplesPerPixel, 1, 16);
+	ImGui::Text("Accumulated Frames: %u", FrameCounter);
+if (ImGui::Button("Reset Accumulation"))
+{
+	FrameCounter = 0;
+	PrevPathTracingViewMat = glm::mat4x4(0.0f);
+	PrevPathTracingLightDir = glm::vec3(0.0f);
+	PrevPathTracingLightIntensity = 0.0f;
+}
+		
+		ImGui::Separator();
+		ImGui::Text("Debug Visualization");
+		const char* debugModes[] = { "None", "Albedo", "Normal", "Roughness", "Metallic", "World Position", "Barycentric" };
+		static int debugMode = 0;
+		if (ImGui::Combo("Debug Mode", &debugMode, debugModes, IM_ARRAYSIZE(debugModes)))
+		{
+			PathTracingViewParam.DebugMode = debugMode;
+			FrameCounter = 0; // Reset accumulation when changing debug mode
+			PrevPathTracingViewMat = glm::mat4x4(0.0f);
+		}
+		
+		ImGui::Separator();
+		}
+
 		{
 			static ImGuiComboFlags flags = 0;
 			const char* items[] = {
@@ -2593,6 +2733,13 @@ void Corona::OnRender()
 
 
 		ImGui::SliderFloat("Light Brightness", &LightIntensity, 0.0f, 20.0f);
+
+		ImGui::Separator();
+		ImGui::Text("Sky Settings (Path Tracing)");
+		ImGui::ColorEdit3("Sky Color Top", &SkyColorTop.x);
+		ImGui::ColorEdit3("Sky Color Bottom", &SkyColorBottom.x);
+		ImGui::SliderFloat("Sky Intensity", &SkyIntensity, 0.0f, 10.0f);
+		ImGui::Separator();
 
 		ImGui::SliderFloat("SponzaRoughness multiplier", &SponzaRoughnessMultiplier, 0.0f, 1.0f);
 		ImGui::SliderFloat("ShaderBallRoughness multiplier", &ShaderBallRoughnessMultiplier, 0.0f, 1.0f);
@@ -2718,6 +2865,21 @@ void Corona::OnKeyDown(UINT8 key)
 void Corona::OnKeyUp(UINT8 key)
 {
 	m_camera.OnKeyUp(key);
+}
+
+void Corona::OnRButtonDown(int x, int y)
+{
+	m_camera.OnMouseDown(x, y);
+}
+
+void Corona::OnRButtonUp()
+{
+	m_camera.OnMouseUp();
+}
+
+void Corona::OnMouseMove(int x, int y)
+{
+	m_camera.OnMouseMove(x, y);
 }
 
 struct ParallelDrawTaskSet : enki::ITaskSet
@@ -2847,7 +3009,7 @@ void Corona::GBufferPass()
 
 		
 		DrawScene(Sponza, SponzaRoughnessMultiplier, 0, false);
-		DrawScene(ShaderBall, ShaderBallRoughnessMultiplier, 1, true);
+		//DrawScene(ShaderBall, ShaderBallRoughnessMultiplier, 1, true);
 	}
 	else
 	{
@@ -3041,11 +3203,11 @@ void Corona::RecompileShaders()
 
 void Corona::InitRaytracingData()
 {
-	UINT NumTotalMesh = Sponza->meshes.size() + ShaderBall->meshes.size();
+	UINT NumTotalMesh = Sponza->meshes.size();
 	vecBLAS.reserve(NumTotalMesh);
 
 	AddMeshToVec(vecBLAS, Sponza);
-	AddMeshToVec(vecBLAS, ShaderBall);
+	//AddMeshToVec(vecBLAS, ShaderBall);
 
 	TLAS = dx12_rhi->CreateTLAS(vecBLAS);
 
@@ -3194,6 +3356,44 @@ void Corona::InitRTPSO()
 		{
 			PSO_RT_GI = TEMP_PSO_RT_GI;
 		}
+	}
+}
+
+void Corona::InitPathTracingPass()
+{
+	shared_ptr<RTPipelineStateObject> TEMP_PSO_PATH_TRACING = shared_ptr<RTPipelineStateObject>(new RTPipelineStateObject);
+	TEMP_PSO_PATH_TRACING->NumInstance = vecBLAS.size();
+
+	TEMP_PSO_PATH_TRACING->AddHitGroup("HitGroup", "PathTracingClosestHit", "");
+
+	TEMP_PSO_PATH_TRACING->AddShader("PathTracingRayGen", RTPipelineStateObject::RAYGEN);
+	
+	TEMP_PSO_PATH_TRACING->BindUAV("global", "OutputColor", 0);
+	TEMP_PSO_PATH_TRACING->BindSRV("global", "gRtScene", 0);
+	TEMP_PSO_PATH_TRACING->BindCBV("global", "ViewParameter", 0, sizeof(PathTracingViewParam), 1);
+	TEMP_PSO_PATH_TRACING->BindSampler("global", "samplerWrap", 0);
+	TEMP_PSO_PATH_TRACING->BindSRV("global", "BlueNoiseTex", 4);
+
+	TEMP_PSO_PATH_TRACING->AddShader("PathTracingMiss", RTPipelineStateObject::MISS);
+	TEMP_PSO_PATH_TRACING->AddShader("ShadowMiss", RTPipelineStateObject::MISS);
+
+	TEMP_PSO_PATH_TRACING->AddShader("PathTracingClosestHit", RTPipelineStateObject::HIT);
+	TEMP_PSO_PATH_TRACING->BindSRV("PathTracingClosestHit", "vertices", 1);
+	TEMP_PSO_PATH_TRACING->BindSRV("PathTracingClosestHit", "indices", 2);
+	TEMP_PSO_PATH_TRACING->BindSRV("PathTracingClosestHit", "InstanceProperty", 3);
+	TEMP_PSO_PATH_TRACING->BindSRV("PathTracingClosestHit", "AlbedoTex", 5);
+	TEMP_PSO_PATH_TRACING->BindSRV("PathTracingClosestHit", "NormalTex", 6);
+	TEMP_PSO_PATH_TRACING->BindSRV("PathTracingClosestHit", "RoughnessTex", 7);
+
+	TEMP_PSO_PATH_TRACING->MaxRecursion = 8;  // Support multiple bounces
+	TEMP_PSO_PATH_TRACING->MaxAttributeSizeInBytes = sizeof(float) * 2;
+	TEMP_PSO_PATH_TRACING->MaxPayloadSizeInBytes = 140; // PathTracingPayload: 3*float3 + 3*float3 + 1*float3 + 1*float3 + 1*float3 + 1*float2 + 3*uint + 2*float + 1*bool = 132+ bytes
+
+	bool bSuccess = TEMP_PSO_PATH_TRACING->InitRS("Shaders\\PathTracing.hlsl");
+
+	if (bSuccess)
+	{
+		PSO_PATH_TRACING = TEMP_PSO_PATH_TRACING;
 	}
 }
 
@@ -3375,4 +3575,110 @@ void Corona::RaytraceGIPass()
 
 	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(DiffuseGISHRaw->resource.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
 	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(DiffuseGICoCgRaw->resource.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
+}
+
+void Corona::PathTracingPass()
+{
+#if USE_AFTERMATH
+	NVAftermathMarker(dx12_rhi->AM_CL_Handle, "PathTracingPass");
+#endif
+	PIXScopedEvent(dx12_rhi->GlobalCmdList->CmdList.Get(), PIX_COLOR(rand() % 255, rand() % 255, rand() % 255), "PathTracingPass");
+
+	// Transition output buffer to UAV
+	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(
+		PathTracingAccumBuffer[PathTracingWriteIndex]->resource.Get(), 
+		D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, 
+		D3D12_RESOURCE_STATE_UNORDERED_ACCESS));
+
+	if (!PSO_PATH_TRACING)
+	{
+		InitPathTracingPass();
+	}
+
+	// Check if camera or light changed and reset accumulation
+	bool cameraChanged = false;
+	for (int i = 0; i < 4 && !cameraChanged; i++)
+	{
+		for (int j = 0; j < 4 && !cameraChanged; j++)
+		{
+			if (abs(PrevPathTracingViewMat[i][j] - ViewMat[i][j]) > 0.0001f)
+			{
+				cameraChanged = true;
+			}
+		}
+	}
+	
+	// Check if light direction or intensity changed
+	glm::vec3 currentLightDir = glm::normalize(LightDir);
+	bool lightDirChanged = glm::length(currentLightDir - PrevPathTracingLightDir) > 0.0001f;
+	bool lightIntensityChanged = abs(LightIntensity - PrevPathTracingLightIntensity) > 0.0001f;
+	
+	// Check if sky color changed
+	bool skyColorChanged = glm::length(SkyColorTop - PrevSkyColorTop) > 0.0001f ||
+	                       glm::length(SkyColorBottom - PrevSkyColorBottom) > 0.0001f ||
+	                       abs(SkyIntensity - PrevSkyIntensity) > 0.0001f;
+	
+	if (cameraChanged || lightDirChanged || lightIntensityChanged || skyColorChanged)
+	{
+		FrameCounter = 0;
+		PrevPathTracingViewMat = ViewMat;
+		PrevPathTracingLightDir = currentLightDir;
+		PrevPathTracingLightIntensity = LightIntensity;
+		PrevSkyColorTop = SkyColorTop;
+		PrevSkyColorBottom = SkyColorBottom;
+		PrevSkyIntensity = SkyIntensity;
+		
+		// Note: Buffer will be cleared in shader when FrameCounter == 0
+	}
+
+	PSO_PATH_TRACING->NumInstance = vecBLAS.size();
+	PSO_PATH_TRACING->BeginShaderTable();
+
+	PSO_PATH_TRACING->SetUAV("global", "OutputColor", PathTracingAccumBuffer[PathTracingWriteIndex]->GpuHandleUAV);
+	PSO_PATH_TRACING->SetSRV("global", "gRtScene", TLAS->GPUHandle);
+	PSO_PATH_TRACING->SetSRV("global", "BlueNoiseTex", BlueNoiseTex->GpuHandleSRV);
+	
+	// PathTracingViewParam is already updated in OnUpdate()
+	PSO_PATH_TRACING->SetCBVValue("global", "ViewParameter", &PathTracingViewParam);
+	PSO_PATH_TRACING->SetSampler("global", "samplerWrap", samplerWrap.get());
+
+	int i = 0;
+	for(auto& as : vecBLAS)
+	{
+		auto& mesh = as->mesh;
+		
+		Texture* diffuseTex = mesh->Draws[0].mat->Diffuse.get();
+		if (!diffuseTex)
+			diffuseTex = DefaultWhiteTex.get();
+		
+		Texture* normalTex = mesh->Draws[0].mat->Normal.get();
+		if (!normalTex)
+			normalTex = DefaultNormalTex.get();
+		
+		Texture* roughnessTex = mesh->Draws[0].mat->Roughness.get();
+		if (!roughnessTex)
+			roughnessTex = DefaultWhiteTex.get();
+
+		PSO_PATH_TRACING->ResetHitProgram(i);
+
+		PSO_PATH_TRACING->StartHitProgram("HitGroup", i);
+		PSO_PATH_TRACING->AddDescriptor2HitProgram("HitGroup", mesh->Vb->GpuHandleSRV, i);
+		PSO_PATH_TRACING->AddDescriptor2HitProgram("HitGroup", mesh->Ib->GpuHandleSRV, i);
+		PSO_PATH_TRACING->AddDescriptor2HitProgram("HitGroup", InstancePropertyBuffer->GpuHandleSRV, i);
+		PSO_PATH_TRACING->AddDescriptor2HitProgram("HitGroup", diffuseTex->GpuHandleSRV, i);
+		PSO_PATH_TRACING->AddDescriptor2HitProgram("HitGroup", normalTex->GpuHandleSRV, i);
+		PSO_PATH_TRACING->AddDescriptor2HitProgram("HitGroup", roughnessTex->GpuHandleSRV, i);
+
+		i++;
+	}
+
+	PSO_PATH_TRACING->EndShaderTable();
+
+	PSO_PATH_TRACING->Apply(m_width, m_height, dx12_rhi->GlobalCmdList);
+
+	// Transition output buffer back to SRV
+	dx12_rhi->GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(
+		PathTracingAccumBuffer[PathTracingWriteIndex]->resource.Get(), 
+		D3D12_RESOURCE_STATE_UNORDERED_ACCESS, 
+		D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
 }

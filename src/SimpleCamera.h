@@ -35,6 +35,10 @@ public:
 
 	void OnKeyDown(WPARAM key);
 	void OnKeyUp(WPARAM key);
+	
+	void OnMouseDown(int x, int y);
+	void OnMouseUp();
+	void OnMouseMove(int x, int y);
 
 
 public:
@@ -66,4 +70,10 @@ public:
 	float m_turnSpeed;			// Speed at which the camera turns, in radians per second.
 
 	KeysPressed m_keysPressed;
+	
+	// Mouse look
+	bool m_mouseButtonDown;
+	int m_lastMouseX;
+	int m_lastMouseY;
+	float m_mouseSensitivity;
 };

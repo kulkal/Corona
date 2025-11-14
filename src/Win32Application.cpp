@@ -11,6 +11,7 @@
 
 #include "stdafx.h"
 #include "Win32Application.h"
+#include <windowsx.h>
 
 HWND Win32Application::m_hwnd = nullptr;
 
@@ -103,6 +104,31 @@ LRESULT CALLBACK Win32Application::WindowProc(HWND hWnd, UINT message, WPARAM wP
 		if (pSample)
 		{
 			pSample->OnKeyUp(static_cast<UINT8>(wParam));
+		}
+		return 0;
+
+	case WM_RBUTTONDOWN:
+		if (pSample)
+		{
+			int xPos = GET_X_LPARAM(lParam);
+			int yPos = GET_Y_LPARAM(lParam);
+			pSample->OnRButtonDown(xPos, yPos);
+		}
+		return 0;
+
+	case WM_RBUTTONUP:
+		if (pSample)
+		{
+			pSample->OnRButtonUp();
+		}
+		return 0;
+
+	case WM_MOUSEMOVE:
+		if (pSample)
+		{
+			int xPos = GET_X_LPARAM(lParam);
+			int yPos = GET_Y_LPARAM(lParam);
+			pSample->OnMouseMove(xPos, yPos);
 		}
 		return 0;
 

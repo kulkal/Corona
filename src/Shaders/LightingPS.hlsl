@@ -39,6 +39,8 @@ cbuffer LightingParam : register(b0)
     float2 RTSize;
     float TAABlendFactor;
     float GIBufferScale;
+    float3 LightColor;
+    float _padding;
 };
 
 struct VSInput
@@ -86,7 +88,7 @@ float4 PSMain(PSInput input) : SV_TARGET
     float3 LightDir = LightDirAndIntensity.xyz;
     float LightIntensity = LightDirAndIntensity.w;
 	
-    float3 DiffuseLighting = dot(LightDir.xyz, WorldNormal) * LightIntensity * Albedo * Shadow;
+    float3 DiffuseLighting = dot(LightDir.xyz, WorldNormal) * LightIntensity * LightColor * Albedo * Shadow;
 
     float2 ScreenUV = input.uv;
     SH sh_indirect;
@@ -113,7 +115,7 @@ float4 PSMain(PSInput input) : SV_TARGET
     IndirectSpecular = SpecularGITex[PixelPos].xyz * SpecularColor;
 
 
-    float3 DirectSpecular = SpecularColor * GGX(V, normalize(LightDir), WorldNormal, Rougness, 0.0) * LightIntensity * Shadow;
+    float3 DirectSpecular = SpecularColor * GGX(V, normalize(LightDir), WorldNormal, Rougness, 0.0) * LightIntensity * LightColor * Shadow;
 
     DiffuseLighting = max(DiffuseLighting , 0);
 
