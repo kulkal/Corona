@@ -41,6 +41,10 @@ cbuffer LightingParam : register(b0)
     float GIBufferScale;
     float3 LightColor;
     float _padding;
+    uint bEnableDiffuseGI;
+    uint bEnableSpecularGI;
+    uint bEnableDirectDiffuse;
+    uint bEnableDirectSpecular;
 };
 
 struct VSInput
@@ -88,14 +92,14 @@ float4 PSMain(PSInput input) : SV_TARGET
     float3 LightDir = LightDirAndIntensity.xyz;
     float LightIntensity = LightDirAndIntensity.w;
 	
-    float3 DiffuseLighting = dot(LightDir.xyz, WorldNormal) * LightIntensity * LightColor * Albedo * Shadow;
+    float3 DiffuseLighting = bEnableDirectDiffuse ? (dot(LightDir.xyz, WorldNormal) * LightIntensity * LightColor * Albedo * Shadow) : float3(0, 0, 0);
 
     float2 ScreenUV = input.uv;
     SH sh_indirect;
     sh_indirect.shY = GIResultSHTex[PixelPos/GIBufferScale];
     sh_indirect.CoCg = GIResultColorTex[PixelPos/GIBufferScale].xy;
 
-    float3 IndirectDiffuse = project_SH_irradiance(sh_indirect, WorldNormal) * Albedo;
+    float3 IndirectDiffuse = bEnableDiffuseGI ? (project_SH_irradiance(sh_indirect, WorldNormal) * Albedo) : float3(0, 0, 0);
 
     float3 V = mul(InvViewMatrix, float3(0, 0, 1));
     float NdotV = clamp(dot(WorldNormal, -V), 0, 1);
@@ -112,10 +116,10 @@ float4 PSMain(PSInput input) : SV_TARGET
     float3 IndirectSpecular;
 
 
-    IndirectSpecular = SpecularGITex[PixelPos].xyz * SpecularColor;
+    IndirectSpecular = bEnableSpecularGI ? (SpecularGITex[PixelPos].xyz * SpecularColor) : float3(0, 0, 0);
 
 
-    float3 DirectSpecular = SpecularColor * GGX(V, normalize(LightDir), WorldNormal, Rougness, 0.0) * LightIntensity * LightColor * Shadow;
+    float3 DirectSpecular = bEnableDirectSpecular ? (SpecularColor * GGX(V, normalize(LightDir), WorldNormal, Rougness, 0.0) * LightIntensity * LightColor * Shadow) : float3(0, 0, 0);
 
     DiffuseLighting = max(DiffuseLighting , 0);
 

@@ -33,6 +33,10 @@ cbuffer ViewParameter : register(b0)
     float _padding;
     float3 LightColor;
     float _padding2;
+    uint bEnableDiffuseGI;
+    uint bEnableSpecularGI;
+    uint bEnableDirectDiffuse;
+    uint bEnableDirectSpecular;
 };
 
 SamplerState sampleWrap : register(s0);
@@ -404,13 +408,13 @@ void PathTracingClosestHit(inout PathTracingPayload payload, in BuiltInTriangleI
         if (NdotL > 0)
         {
             // Diffuse lighting (Lambertian)
-            float3 diffuse = albedo * (1.0 - metallic);
+            float3 diffuse = bEnableDirectDiffuse ? (albedo * (1.0 - metallic)) : float3(0, 0, 0);
             
             // Specular BRDF (simplified Blinn-Phong)
             float3 H = normalize(lightDir + V);
             float NdotH = max(0, dot(N, H));
             float spec = pow(NdotH, (1.0 - roughness) * 128.0);
-            float3 specular = lerp(float3(0.04, 0.04, 0.04), albedo, metallic) * spec;
+            float3 specular = bEnableDirectSpecular ? (lerp(float3(0.04, 0.04, 0.04), albedo, metallic) * spec) : float3(0, 0, 0);
             
             // Combine diffuse and specular with light color
             directLight = (diffuse + specular) * NdotL * lightIntensity * LightColor;
@@ -449,7 +453,10 @@ void PathTracingClosestHit(inout PathTracingPayload payload, in BuiltInTriangleI
             newDir = reflect(newDir, N);
         
         // For specular bounce, throughput is just Fresnel (already in weight)
-        payload.throughput *= F;
+        if (bEnableSpecularGI)
+            payload.throughput *= F;
+        else
+            payload.throughput = float3(0, 0, 0);
     }
     else
     {
@@ -459,7 +466,10 @@ void PathTracingClosestHit(inout PathTracingPayload payload, in BuiltInTriangleI
         newDir = normalize(mul(localDir, TBN));
         
         // Lambertian BRDF: albedo for diffuse materials, reduced for metals
-        payload.throughput *= albedo * (1.0 - metallic);
+        if (bEnableDiffuseGI)
+            payload.throughput *= albedo * (1.0 - metallic);
+        else
+            payload.throughput = float3(0, 0, 0);
     }
     
     payload.origin = hitPos;

@@ -262,6 +262,10 @@ private:
 		float _padding;
 		glm::vec3 LightColor;
 		float _padding2;
+		UINT32 bEnableDiffuseGI;
+		UINT32 bEnableSpecularGI;
+		UINT32 bEnableDirectDiffuse;
+		UINT32 bEnableDirectSpecular;
 	};
 
 	PathTracingViewParamCB PathTracingViewParam;
@@ -337,6 +341,10 @@ private:
 		float GIBufferScale;
 		glm::vec3 LightColor;
 		float _padding;
+		UINT32 bEnableDiffuseGI;
+		UINT32 bEnableSpecularGI;
+		UINT32 bEnableDirectDiffuse;
+		UINT32 bEnableDirectSpecular;
 	};
 	
 	shared_ptr<PipelineStateObject> LightingPSO;
@@ -352,6 +360,10 @@ private:
 	};
 	
 	bool bEnableTAA = true;
+	bool bEnableDiffuseGI = true;
+	bool bEnableSpecularGI = true;
+	bool bEnableDirectDiffuse = true;
+	bool bEnableDirectSpecular = true;
 
 	UINT32 ClampMode = 2;
 

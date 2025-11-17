@@ -2105,6 +2105,10 @@ void Corona::LightingPass()
 
 	Param.GIBufferScale = GIBufferScale;
 	Param.LightColor = lightColor;
+	Param.bEnableDiffuseGI = bEnableDiffuseGI ? 1 : 0;
+	Param.bEnableSpecularGI = bEnableSpecularGI ? 1 : 0;
+	Param.bEnableDirectDiffuse = bEnableDirectDiffuse ? 1 : 0;
+	Param.bEnableDirectSpecular = bEnableDirectSpecular ? 1 : 0;
 
 	glm::normalize(Param.LightDir);
 	LightingPSO->SetCBVValue("LightingParam", &Param, dx12_rhi->GlobalCmdList->CmdList.Get());
@@ -2431,6 +2435,10 @@ void Corona::OnUpdate()
 	PathTracingViewParam.SkyColorBottom = SkyColorBottom;
 	PathTracingViewParam.SkyIntensity = SkyIntensity;
 	PathTracingViewParam.LightColor = lightColor;
+	PathTracingViewParam.bEnableDiffuseGI = bEnableDiffuseGI ? 1 : 0;
+	PathTracingViewParam.bEnableSpecularGI = bEnableSpecularGI ? 1 : 0;
+	PathTracingViewParam.bEnableDirectDiffuse = bEnableDirectDiffuse ? 1 : 0;
+	PathTracingViewParam.bEnableDirectSpecular = bEnableDirectSpecular ? 1 : 0;
 	
 	SpatialFilterCB.ProjectionParams.z = Near;
 	SpatialFilterCB.ProjectionParams.w = Far;
@@ -2548,6 +2556,26 @@ void Corona::OnRender()
 		ImGui::Checkbox("Enable TemporalAA", &bEnableTAA);
 		ImGui::Checkbox("Visualize Buffers", &bDebugDraw);
 		ImGui::Checkbox("Draw Histogram", &bDrawHistogram);
+		
+		// Lighting control options (both Hybrid and Path Tracing)
+		if (RenderingMode == ERenderingMode::HYBRID || RenderingMode == ERenderingMode::PATHTRACING)
+		{
+			ImGui::Separator();
+			ImGui::Text("Lighting Control");
+			
+			bool bLightingChanged = false;
+			if (ImGui::Checkbox("Enable Direct Diffuse", &bEnableDirectDiffuse)) bLightingChanged = true;
+			if (ImGui::Checkbox("Enable Direct Specular", &bEnableDirectSpecular)) bLightingChanged = true;
+			if (ImGui::Checkbox("Enable Indirect Diffuse (GI)", &bEnableDiffuseGI)) bLightingChanged = true;
+			if (ImGui::Checkbox("Enable Indirect Specular (GI)", &bEnableSpecularGI)) bLightingChanged = true;
+			
+			// Reset accumulation when toggling options in path tracing mode
+			if (RenderingMode == ERenderingMode::PATHTRACING && bLightingChanged)
+			{
+				FrameCounter = 0;
+				PrevPathTracingViewMat = glm::mat4x4(0.0f);
+			}
+		}
 
 	
 		/*
