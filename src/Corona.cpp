@@ -3364,7 +3364,7 @@ void Corona::InitPathTracingPass()
 	shared_ptr<RTPipelineStateObject> TEMP_PSO_PATH_TRACING = shared_ptr<RTPipelineStateObject>(new RTPipelineStateObject);
 	TEMP_PSO_PATH_TRACING->NumInstance = vecBLAS.size();
 
-	TEMP_PSO_PATH_TRACING->AddHitGroup("HitGroup", "PathTracingClosestHit", "");
+	TEMP_PSO_PATH_TRACING->AddHitGroup("HitGroup", "PathTracingClosestHit", "PathTracingAnyHit");
 
 	TEMP_PSO_PATH_TRACING->AddShader("PathTracingRayGen", RTPipelineStateObject::RAYGEN);
 	
@@ -3384,6 +3384,17 @@ void Corona::InitPathTracingPass()
 	TEMP_PSO_PATH_TRACING->BindSRV("PathTracingClosestHit", "AlbedoTex", 5);
 	TEMP_PSO_PATH_TRACING->BindSRV("PathTracingClosestHit", "NormalTex", 6);
 	TEMP_PSO_PATH_TRACING->BindSRV("PathTracingClosestHit", "RoughnessTex", 7);
+	TEMP_PSO_PATH_TRACING->BindSRV("PathTracingClosestHit", "MetallicTex", 8);
+
+	TEMP_PSO_PATH_TRACING->AddShader("PathTracingAnyHit", RTPipelineStateObject::HIT);
+	TEMP_PSO_PATH_TRACING->BindSRV("PathTracingAnyHit", "vertices", 1);
+	TEMP_PSO_PATH_TRACING->BindSRV("PathTracingAnyHit", "indices", 2);
+	TEMP_PSO_PATH_TRACING->BindSRV("PathTracingAnyHit", "InstanceProperty", 3);
+	TEMP_PSO_PATH_TRACING->BindSRV("PathTracingAnyHit", "AlbedoTex", 5);
+	TEMP_PSO_PATH_TRACING->BindSRV("PathTracingAnyHit", "NormalTex", 6);
+	TEMP_PSO_PATH_TRACING->BindSRV("PathTracingAnyHit", "RoughnessTex", 7);
+	TEMP_PSO_PATH_TRACING->BindSRV("PathTracingAnyHit", "MetallicTex", 8);
+
 
 	TEMP_PSO_PATH_TRACING->MaxRecursion = 8;  // Support multiple bounces
 	TEMP_PSO_PATH_TRACING->MaxAttributeSizeInBytes = sizeof(float) * 2;
@@ -3657,7 +3668,11 @@ void Corona::PathTracingPass()
 		
 		Texture* roughnessTex = mesh->Draws[0].mat->Roughness.get();
 		if (!roughnessTex)
-			roughnessTex = DefaultWhiteTex.get();
+			roughnessTex = DefaultRougnessTex.get();
+		
+		Texture* metallicTex = mesh->Draws[0].mat->Metallic.get();
+		if (!metallicTex)
+			metallicTex = DefaultBlackTex.get();
 
 		PSO_PATH_TRACING->ResetHitProgram(i);
 
@@ -3668,6 +3683,7 @@ void Corona::PathTracingPass()
 		PSO_PATH_TRACING->AddDescriptor2HitProgram("HitGroup", diffuseTex->GpuHandleSRV, i);
 		PSO_PATH_TRACING->AddDescriptor2HitProgram("HitGroup", normalTex->GpuHandleSRV, i);
 		PSO_PATH_TRACING->AddDescriptor2HitProgram("HitGroup", roughnessTex->GpuHandleSRV, i);
+		PSO_PATH_TRACING->AddDescriptor2HitProgram("HitGroup", metallicTex->GpuHandleSRV, i);
 
 		i++;
 	}

@@ -10,6 +10,7 @@ Texture3D BlueNoiseTex : register(t4);
 Texture2D AlbedoTex : register(t5);
 Texture2D NormalTex : register(t6);
 Texture2D RoughnessTex : register(t7);
+Texture2D MetallicTex : register(t8);
 
 cbuffer ViewParameter : register(b0)
 {
@@ -335,9 +336,8 @@ void PathTracingClosestHit(inout PathTracingPayload payload, in BuiltInTriangleI
     
     // Get material properties
     float3 albedo = AlbedoTex.SampleLevel(sampleWrap, vertex.uv, 0).xyz;
-    float4 roughnessMetallic = RoughnessTex.SampleLevel(sampleWrap, vertex.uv, 0);
-    float roughness = roughnessMetallic.x;
-    float metallic = roughnessMetallic.y;
+    float roughness = RoughnessTex.SampleLevel(sampleWrap, vertex.uv, 0).x;
+    float metallic = MetallicTex.SampleLevel(sampleWrap, vertex.uv, 0).x;
     
     // Store debug information for primary hit (depth == 0)
     if (payload.depth == 0)
@@ -488,3 +488,23 @@ void ShadowMiss(inout ShadowRayPayload payload)
     payload.bHit = false;
 }
 
+[shader("anyhit")]
+void PathTracingAnyHit(inout PathTracingPayload payload, in BuiltInTriangleIntersectionAttributes attribs)
+{
+    float3 barycentrics = float3(1.0 - attribs.barycentrics.x - attribs.barycentrics.y, 
+                                  attribs.barycentrics.x, 
+                                  attribs.barycentrics.y);
+    
+    uint triangleIndex = PrimitiveIndex();
+    uint instanceID = InstanceID();
+    Vertex vertex = GetVertexAttributes(instanceID, vertices, indices, InstanceProperty, triangleIndex, barycentrics);
+    
+    // Sample albedo alpha channel
+    float alpha = AlbedoTex.SampleLevel(sampleWrap, vertex.uv, 0).w;
+    
+    // If alpha is too low, ignore this hit and continue ray traversal
+    if (alpha < 0.1)
+    {
+        IgnoreHit();
+    }
+}
