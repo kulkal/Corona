@@ -25,6 +25,7 @@
 #include "DXSample.h"
 #include "StepTimer.h"
 #include "SimpleCamera.h"
+#include "RenderBackend.h"
 #include "SimpleDX12.h"
 #include "enkiTS/TaskScheduler.h"
 #define PROFILE_BUILD 1
@@ -552,13 +553,6 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 
 	shared_ptr<PipelineStateObject> AdapteExposurePSO;
 
-
-
-
-	// imgui font texture
-	D3D12_CPU_DESCRIPTOR_HANDLE CpuHandleImguiFontTex;
-	D3D12_GPU_DESCRIPTOR_HANDLE GpuHandleImguiFontTex;
-
 	shared_ptr<VertexBuffer> FullScreenVB;
 
 	// blue noise texture
@@ -645,9 +639,9 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	// Pipeline objects.
 	CD3DX12_VIEWPORT m_viewport;
 	CD3DX12_RECT m_scissorRect;
-	ComPtr<IDXGISwapChain3> m_swapChain;
 	ComPtr<ID3D12Device5> m_device;
-	std::unique_ptr<SimpleDX12> dx12_rhi;
+	std::unique_ptr<IRenderBackend> renderBackend;
+	SimpleDX12* dx12_rhi = nullptr;
 
 	enki::TaskScheduler g_TS;
 
@@ -657,9 +651,6 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	bool bGpuTimingResourcesInitialized = false;
 	UINT32 GpuTimingAverageFrameCount = 30;
 	UINT64 GpuTimestampFrequency = 0;
-	ComPtr<ID3D12QueryHeap> GpuTimestampQueryHeap;
-	ComPtr<ID3D12Resource> GpuTimestampReadbackBuffer;
-	UINT64* GpuTimestampReadbackMapped = nullptr;
 	std::array<std::array<uint8_t, GpuPassCount>, 3> GpuPassActiveMaskPerFrame = {};
 	std::array<float, GpuPassCount> GpuPassLastTimeMs = {};
 	std::array<float, GpuPassCount> GpuPassAverageTimeMs = {};

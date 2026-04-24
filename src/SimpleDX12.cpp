@@ -3,6 +3,7 @@
 #include <DirectXMath.h>
 #include "DirectXTex.h"
 #include "Utils.h"
+#include "imgui_impl_dx12.h"
 #include "d3dx12.h"
 #define GLM_FORCE_CTOR_INIT
 
@@ -34,31 +35,98 @@
 
 using namespace std;
 
-SimpleDX12* g_dx12_rhi;
-//
-//ThreadDescriptorHeapPool::ThreadDescriptorHeapPool()
-//{
-//	DHeap = g_dx12_rhi->SRVCBVDescriptorHeapShaderVisible.get();
-//}
-//
-//void ThreadDescriptorHeapPool::AllocDescriptor(D3D12_CPU_DESCRIPTOR_HANDLE& cpuHandle, D3D12_GPU_DESCRIPTOR_HANDLE& gpuHandle)
-//{
-//	if ((PoolIndex-StartIndex) >= PoolSize)
-//		PoolIndex = 0;
-//
-//	cpuHandle.ptr = DHeap->CPUHeapStart + PoolIndex * DHeap->DescriptorSize;
-//	gpuHandle.ptr = DHeap->GPUHeapStart + PoolIndex * DHeap->DescriptorSize;
-//
-//	PoolIndex++;
-//}
-
-void DescriptorHeap::Init(D3D12_DESCRIPTOR_HEAP_DESC& InHeapDesc)
+namespace
 {
+	DXGI_FORMAT ToDXGIFormat(ETextureFormat format)
+	{
+		switch (format)
+		{
+		case ETextureFormat::RGBA16Float: return DXGI_FORMAT_R16G16B16A16_FLOAT;
+		case ETextureFormat::RGBA32Float: return DXGI_FORMAT_R32G32B32A32_FLOAT;
+		case ETextureFormat::RG16Float: return DXGI_FORMAT_R16G16_FLOAT;
+		case ETextureFormat::RGBA8Unorm: return DXGI_FORMAT_R8G8B8A8_UNORM;
+		case ETextureFormat::D32Float: return DXGI_FORMAT_D32_FLOAT;
+		case ETextureFormat::R32Float: return DXGI_FORMAT_R32_FLOAT;
+		case ETextureFormat::R8Uint: return DXGI_FORMAT_R8_UINT;
+		default: return DXGI_FORMAT_R16G16B16A16_FLOAT;
+		}
+	}
+
+	D3D12_RESOURCE_FLAGS ToD3D12ResourceFlags(ETextureUsageFlags usage)
+	{
+		D3D12_RESOURCE_FLAGS flags = D3D12_RESOURCE_FLAG_NONE;
+		if (HasTextureUsage(usage, TextureUsage_RenderTarget))
+			flags |= D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+		if (HasTextureUsage(usage, TextureUsage_UnorderedAccess))
+			flags |= D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+		if (HasTextureUsage(usage, TextureUsage_DepthStencil))
+			flags |= D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
+		return flags;
+	}
+
+	D3D12_RESOURCE_STATES ToD3D12ResourceState(EInitialResourceState state)
+	{
+		switch (state)
+		{
+		case EInitialResourceState::CopyDest:
+			return D3D12_RESOURCE_STATE_COPY_DEST;
+		case EInitialResourceState::GenericRead:
+			return D3D12_RESOURCE_STATE_GENERIC_READ;
+		case EInitialResourceState::ShaderRead:
+		default:
+			return D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+		}
+	}
+
+	D3D12_RESOURCE_STATES ToD3D12ResourceState(EResourceState state)
+	{
+		switch (state)
+		{
+		case EResourceState::RenderTarget:
+			return D3D12_RESOURCE_STATE_RENDER_TARGET;
+		case EResourceState::UnorderedAccess:
+			return D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+		case EResourceState::Present:
+			return D3D12_RESOURCE_STATE_PRESENT;
+		case EResourceState::DepthWrite:
+			return D3D12_RESOURCE_STATE_DEPTH_WRITE;
+		case EResourceState::CopyDest:
+			return D3D12_RESOURCE_STATE_COPY_DEST;
+		case EResourceState::ShaderRead:
+		default:
+			return D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+		}
+	}
+
+	D3D12_TEXTURE_ADDRESS_MODE ToD3D12AddressMode(ESamplerAddressMode mode)
+	{
+		switch (mode)
+		{
+		case ESamplerAddressMode::Clamp: return D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+		case ESamplerAddressMode::Wrap:
+		default: return D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+		}
+	}
+
+	D3D12_FILTER ToD3D12Filter(ESamplerFilter filter)
+	{
+		switch (filter)
+		{
+		case ESamplerFilter::Anisotropic: return D3D12_FILTER_ANISOTROPIC;
+		case ESamplerFilter::Linear:
+		default: return D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+		}
+	}
+}
+void DescriptorHeap::Init(ID3D12Device5* InDevice, D3D12_DESCRIPTOR_HEAP_DESC& InHeapDesc)
+{
+	Device = InDevice;
+	assert(Device);
 	HeapDesc = InHeapDesc;
 	MaxNumDescriptors = InHeapDesc.NumDescriptors;
-	DescriptorSize = g_dx12_rhi->Device->GetDescriptorHandleIncrementSize(HeapDesc.Type);
+	DescriptorSize = Device->GetDescriptorHandleIncrementSize(HeapDesc.Type);
 
-	ThrowIfFailed(g_dx12_rhi->Device->CreateDescriptorHeap(&HeapDesc, IID_PPV_ARGS(&DH)));
+	ThrowIfFailed(Device->CreateDescriptorHeap(&HeapDesc, IID_PPV_ARGS(&DH)));
 	NAME_D3D12_OBJECT(DH);
 
 	CPUHeapStart = DH->GetCPUDescriptorHandleForHeapStart().ptr;
@@ -103,26 +171,26 @@ void SimpleDX12::BeginFrame()
 	GlobalCmdList->CmdList->SetDescriptorHeaps(_countof(ppHeaps), ppHeaps);
 	
 
-	g_dx12_rhi->GlobalDHRing->Advance();
+	GlobalDHRing->Advance();
 
-	g_dx12_rhi->GlobalCBRing->Advance();
+	GlobalCBRing->Advance();
 
 	for (auto& tex : DynamicTextures)
 	{
 		if (tex->textureDesc.Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS)
 		{
-			g_dx12_rhi->GlobalDHRing->AllocDescriptor(tex->CpuHandleUAV, tex->GpuHandleUAV);
+			GlobalDHRing->AllocDescriptor(tex->CpuHandleUAV, tex->GpuHandleUAV);
 
 
 			D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc = {};
 			uavDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
 			uavDesc.Format = tex->textureDesc.Format;
 
-			g_dx12_rhi->Device->CreateUnorderedAccessView(tex->resource.Get(), nullptr, &uavDesc, tex->CpuHandleUAV);
+			Device->CreateUnorderedAccessView(tex->resource.Get(), nullptr, &uavDesc, tex->CpuHandleUAV);
 		}
 
 		// alloc dh and create srv
-		g_dx12_rhi->GlobalDHRing->AllocDescriptor(tex->CpuHandleSRV, tex->GpuHandleSRV);
+		GlobalDHRing->AllocDescriptor(tex->CpuHandleSRV, tex->GpuHandleSRV);
 
 		D3D12_SHADER_RESOURCE_VIEW_DESC SrvDesc = {};
 		SrvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
@@ -133,12 +201,12 @@ void SimpleDX12::BeginFrame()
 
 		SrvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
 		SrvDesc.Texture2D.MipLevels = tex->textureDesc.MipLevels;
-		g_dx12_rhi->Device->CreateShaderResourceView(tex->resource.Get(), &SrvDesc, tex->CpuHandleSRV);
+		Device->CreateShaderResourceView(tex->resource.Get(), &SrvDesc, tex->CpuHandleSRV);
 	}
 
 	for (auto& buffer : DynamicBuffers)
 	{
-		g_dx12_rhi->GlobalDHRing->AllocDescriptor(buffer->CpuHandleUAV, buffer->GpuHandleUAV);
+		GlobalDHRing->AllocDescriptor(buffer->CpuHandleUAV, buffer->GpuHandleUAV);
 
 		if (buffer->Type == Buffer::BYTE_ADDRESS)
 		{
@@ -148,7 +216,7 @@ void SimpleDX12::BeginFrame()
 			uavDesc.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
 			uavDesc.Buffer.NumElements = buffer->NumElements;
 
-			g_dx12_rhi->Device->CreateUnorderedAccessView(buffer->resource.Get(), nullptr, &uavDesc, buffer->CpuHandleUAV);
+			Device->CreateUnorderedAccessView(buffer->resource.Get(), nullptr, &uavDesc, buffer->CpuHandleUAV);
 		}
 		else if (buffer->Type == Buffer::STRUCTURED)
 		{
@@ -159,7 +227,7 @@ void SimpleDX12::BeginFrame()
 			uavDesc.Buffer.StructureByteStride = buffer->ElementSize;
 			uavDesc.Buffer.NumElements = buffer->NumElements;
 
-			g_dx12_rhi->Device->CreateUnorderedAccessView(buffer->resource.Get(), nullptr, &uavDesc, buffer->CpuHandleUAV);
+			Device->CreateUnorderedAccessView(buffer->resource.Get(), nullptr, &uavDesc, buffer->CpuHandleUAV);
 		}
 	}
 
@@ -168,13 +236,348 @@ void SimpleDX12::BeginFrame()
 void SimpleDX12::EndFrame()
 {
 #if USE_AFTERMATH
-	ThrowIfFailed(m_swapChain->Present(0, 0), &g_dx12_rhi->AM_CL_Handle);
+	ThrowIfFailed(m_swapChain->Present(0, 0), &AM_CL_Handle);
 #else
 	ThrowIfFailed(m_swapChain->Present(0, 0), nullptr);
 
 #endif
 	FrameFenceValueVec[CurrentFrameIndex] = CmdQ->CurrentFenceValue;;
 	CmdQ->SignalCurrentFence();
+}
+
+shared_ptr<Sampler> SimpleDX12::CreateSampler(const SamplerCreateDesc& desc)
+{
+	D3D12_SAMPLER_DESC samplerDesc = {};
+	samplerDesc.Filter = ToD3D12Filter(desc.Filter);
+	samplerDesc.AddressU = ToD3D12AddressMode(desc.AddressU);
+	samplerDesc.AddressV = ToD3D12AddressMode(desc.AddressV);
+	samplerDesc.AddressW = ToD3D12AddressMode(desc.AddressW);
+	samplerDesc.MinLOD = desc.MinLOD;
+	samplerDesc.MaxLOD = desc.MaxLOD;
+	samplerDesc.MipLODBias = desc.MipLODBias;
+	samplerDesc.MaxAnisotropy = desc.MaxAnisotropy;
+	samplerDesc.ComparisonFunc = D3D12_COMPARISON_FUNC_ALWAYS;
+	return CreateSampler(samplerDesc);
+}
+
+std::shared_ptr<Texture> SimpleDX12::WrapNativeTexture(const Microsoft::WRL::ComPtr<ID3D12Resource>& resource)
+{
+	return CreateTexture2DFromResource(resource);
+}
+
+void SimpleDX12::CreateSwapChainForWindow(IDXGIFactory4* factory, HWND hwnd, uint32_t width, uint32_t height, DXGI_FORMAT format)
+{
+	DXGI_SWAP_CHAIN_DESC1 swapChainDesc = {};
+	swapChainDesc.BufferCount = GetFrameCount();
+	swapChainDesc.Width = width;
+	swapChainDesc.Height = height;
+	swapChainDesc.Format = format;
+	swapChainDesc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+	swapChainDesc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+	swapChainDesc.SampleDesc.Count = 1;
+
+	ComPtr<IDXGISwapChain1> swapChain;
+	ThrowIfFailed(factory->CreateSwapChainForHwnd(
+		CmdQ->CmdQueue.Get(),
+		hwnd,
+		&swapChainDesc,
+		nullptr,
+		nullptr,
+		&swapChain));
+
+	ThrowIfFailed(factory->MakeWindowAssociation(hwnd, DXGI_MWA_NO_ALT_ENTER));
+	ThrowIfFailed(swapChain.As(&m_swapChain));
+}
+
+Microsoft::WRL::ComPtr<ID3D12Resource> SimpleDX12::GetSwapChainBuffer(uint32_t bufferIndex)
+{
+	ComPtr<ID3D12Resource> renderTarget;
+	ThrowIfFailed(m_swapChain->GetBuffer(bufferIndex, IID_PPV_ARGS(&renderTarget)));
+	return renderTarget;
+}
+
+HRESULT SimpleDX12::CaptureTexture(Texture* source, DirectX::ScratchImage& captured, D3D12_RESOURCE_STATES beforeState)
+{
+	if (!source || !CmdQ)
+		return E_INVALIDARG;
+
+	return DirectX::CaptureTexture(CmdQ->CmdQueue.Get(), source->resource.Get(), false, captured, beforeState, beforeState);
+}
+
+void SimpleDX12::InitializeImGuiBackend(HWND hwnd, DXGI_FORMAT rtvFormat)
+{
+	TextureDHRing->AllocDescriptor(CpuHandleImguiFontTex, GpuHandleImguiFontTex);
+
+	ImGui_ImplDX12_InitInfo initInfo = {};
+	initInfo.Device = Device.Get();
+	initInfo.CommandQueue = CmdQ->CmdQueue.Get();
+	initInfo.NumFramesInFlight = GetFrameCount();
+	initInfo.RTVFormat = rtvFormat;
+	initInfo.DSVFormat = DXGI_FORMAT_UNKNOWN;
+	initInfo.SrvDescriptorHeap = SRVCBVDescriptorHeapShaderVisible->DH.Get();
+	initInfo.LegacySingleSrvCpuDescriptor = CpuHandleImguiFontTex;
+	initInfo.LegacySingleSrvGpuDescriptor = GpuHandleImguiFontTex;
+	ImGui_ImplDX12_Init(&initInfo);
+}
+
+void SimpleDX12::NewImGuiFrame()
+{
+	ImGui_ImplDX12_NewFrame();
+}
+
+void SimpleDX12::RenderImGuiDrawData(ImDrawData* drawData)
+{
+	ImGui_ImplDX12_RenderDrawData(drawData, GlobalCmdList->CmdList.Get());
+}
+
+void SimpleDX12::ShutdownImGuiBackend()
+{
+	ImGui_ImplDX12_Shutdown();
+}
+
+void SimpleDX12::EmitGpuCrashMarker(const char* markerName)
+{
+#if USE_AFTERMATH
+	if (markerName)
+	{
+		NVAftermathMarker(AM_CL_Handle, markerName);
+	}
+#else
+	(void)markerName;
+#endif
+}
+
+void SimpleDX12::InitializeGpuTimestampQueries(uint32_t queryCount)
+{
+	if (GpuTimestampQueryHeap && GpuTimestampQueryCount == queryCount)
+		return;
+
+	ShutdownGpuTimestampQueries();
+
+	D3D12_QUERY_HEAP_DESC queryHeapDesc = {};
+	queryHeapDesc.Count = queryCount;
+	queryHeapDesc.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
+	ThrowIfFailed(Device->CreateQueryHeap(&queryHeapDesc, IID_PPV_ARGS(&GpuTimestampQueryHeap)));
+
+	const UINT64 readbackSize = sizeof(UINT64) * queryCount;
+	D3D12_HEAP_PROPERTIES heapProps = {};
+	heapProps.Type = D3D12_HEAP_TYPE_READBACK;
+	heapProps.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
+	heapProps.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
+	heapProps.CreationNodeMask = 1;
+	heapProps.VisibleNodeMask = 1;
+
+	D3D12_RESOURCE_DESC bufferDesc = {};
+	bufferDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+	bufferDesc.Width = readbackSize;
+	bufferDesc.Height = 1;
+	bufferDesc.DepthOrArraySize = 1;
+	bufferDesc.MipLevels = 1;
+	bufferDesc.Format = DXGI_FORMAT_UNKNOWN;
+	bufferDesc.SampleDesc.Count = 1;
+	bufferDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+
+	ThrowIfFailed(Device->CreateCommittedResource(
+		&heapProps,
+		D3D12_HEAP_FLAG_NONE,
+		&bufferDesc,
+		D3D12_RESOURCE_STATE_COPY_DEST,
+		nullptr,
+		IID_PPV_ARGS(&GpuTimestampReadbackBuffer)));
+
+	CD3DX12_RANGE readRange(0, static_cast<SIZE_T>(readbackSize));
+	ThrowIfFailed(GpuTimestampReadbackBuffer->Map(0, &readRange, reinterpret_cast<void**>(&GpuTimestampReadbackMapped)));
+	std::fill_n(GpuTimestampReadbackMapped, queryCount, 0ull);
+	GpuTimestampQueryCount = queryCount;
+}
+
+void SimpleDX12::ShutdownGpuTimestampQueries()
+{
+	if (GpuTimestampReadbackBuffer && GpuTimestampReadbackMapped)
+	{
+		GpuTimestampReadbackBuffer->Unmap(0, nullptr);
+		GpuTimestampReadbackMapped = nullptr;
+	}
+
+	GpuTimestampReadbackBuffer.Reset();
+	GpuTimestampQueryHeap.Reset();
+	GpuTimestampQueryCount = 0;
+}
+
+void SimpleDX12::WriteGpuTimestamp(uint32_t queryIndex)
+{
+	if (!GpuTimestampQueryHeap)
+		return;
+
+	GlobalCmdList->CmdList->EndQuery(GpuTimestampQueryHeap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, queryIndex);
+}
+
+void SimpleDX12::ResolveGpuTimestampRange(uint32_t startQueryIndex, uint32_t queryCount)
+{
+	if (!GpuTimestampQueryHeap || !GpuTimestampReadbackBuffer || queryCount == 0)
+		return;
+
+	const UINT64 bufferOffset = static_cast<UINT64>(startQueryIndex) * sizeof(UINT64);
+	GlobalCmdList->CmdList->ResolveQueryData(
+		GpuTimestampQueryHeap.Get(),
+		D3D12_QUERY_TYPE_TIMESTAMP,
+		startQueryIndex,
+		queryCount,
+		GpuTimestampReadbackBuffer.Get(),
+		bufferOffset);
+}
+
+uint64_t SimpleDX12::ReadGpuTimestampValue(uint32_t queryIndex) const
+{
+	if (!GpuTimestampReadbackMapped || queryIndex >= GpuTimestampQueryCount)
+		return 0;
+
+	return GpuTimestampReadbackMapped[queryIndex];
+}
+
+void SimpleDX12::SetRenderTarget(Texture* colorTarget, Texture* depthTarget)
+{
+	if (!colorTarget)
+		return;
+
+	GlobalCmdList->CmdList->OMSetRenderTargets(
+		1,
+		&colorTarget->CpuHandleRTV,
+		FALSE,
+		depthTarget ? &depthTarget->CpuHandleDSV : nullptr);
+}
+
+void SimpleDX12::SetRenderTargets(Texture* const* colorTargets, uint32_t colorTargetCount, Texture* depthTarget)
+{
+	if (!colorTargets || colorTargetCount == 0)
+		return;
+
+	std::vector<D3D12_CPU_DESCRIPTOR_HANDLE> renderTargetHandles;
+	renderTargetHandles.reserve(colorTargetCount);
+	for (uint32_t i = 0; i < colorTargetCount; ++i)
+	{
+		if (!colorTargets[i])
+			return;
+		renderTargetHandles.push_back(colorTargets[i]->CpuHandleRTV);
+	}
+
+	GlobalCmdList->CmdList->OMSetRenderTargets(
+		colorTargetCount,
+		renderTargetHandles.data(),
+		FALSE,
+		depthTarget ? &depthTarget->CpuHandleDSV : nullptr);
+}
+
+void SimpleDX12::ClearRenderTarget(Texture* colorTarget, const float clearColor[4])
+{
+	if (!colorTarget)
+		return;
+
+	GlobalCmdList->CmdList->ClearRenderTargetView(colorTarget->CpuHandleRTV, clearColor, 0, nullptr);
+}
+
+void SimpleDX12::ClearDepth(Texture* depthTarget, float depthValue)
+{
+	if (!depthTarget)
+		return;
+
+	GlobalCmdList->CmdList->ClearDepthStencilView(depthTarget->CpuHandleDSV, D3D12_CLEAR_FLAG_DEPTH, depthValue, 0, 0, nullptr);
+}
+
+void SimpleDX12::BindDefaultDescriptorHeaps()
+{
+	ID3D12DescriptorHeap* ppHeaps[] = { SRVCBVDescriptorHeapShaderVisible->DH.Get(), SamplerDescriptorHeapShaderVisible->DH.Get() };
+	GlobalCmdList->CmdList->SetDescriptorHeaps(_countof(ppHeaps), ppHeaps);
+}
+
+void SimpleDX12::SetViewportAndScissor(uint32_t width, uint32_t height)
+{
+	CD3DX12_VIEWPORT viewport(0.0f, 0.0f, static_cast<float>(width), static_cast<float>(height));
+	CD3DX12_RECT scissorRect(0, 0, static_cast<LONG>(width), static_cast<LONG>(height));
+	GlobalCmdList->CmdList->RSSetViewports(1, &viewport);
+	GlobalCmdList->CmdList->RSSetScissorRects(1, &scissorRect);
+}
+
+void SimpleDX12::DrawFullscreenQuad(VertexBuffer* vertexBuffer)
+{
+	if (!vertexBuffer)
+		return;
+
+	GlobalCmdList->CmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+	GlobalCmdList->CmdList->IASetVertexBuffers(0, 1, &vertexBuffer->view);
+	GlobalCmdList->CmdList->DrawInstanced(4, 1, 0, 0);
+}
+
+void SimpleDX12::BindMeshBuffers(VertexBuffer* vertexBuffer, IndexBuffer* indexBuffer)
+{
+	if (!vertexBuffer || !indexBuffer)
+		return;
+
+	GlobalCmdList->CmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+	GlobalCmdList->CmdList->IASetIndexBuffer(&indexBuffer->view);
+	GlobalCmdList->CmdList->IASetVertexBuffers(0, 1, &vertexBuffer->view);
+}
+
+void SimpleDX12::DrawIndexed(uint32_t indexCount, uint32_t startIndexLocation, int32_t baseVertexLocation)
+{
+	GlobalCmdList->CmdList->DrawIndexedInstanced(indexCount, 1, startIndexLocation, baseVertexLocation, 0);
+}
+
+void SimpleDX12::Dispatch(uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ)
+{
+	GlobalCmdList->CmdList->Dispatch(groupCountX, groupCountY, groupCountZ);
+}
+
+void SimpleDX12::ClearTextureUAVFloat(Texture* texture, const float clearColor[4])
+{
+	if (!texture)
+		return;
+
+	GlobalCmdList->CmdList->ClearUnorderedAccessViewFloat(
+		texture->GpuHandleUAV,
+		texture->CpuHandleUAV,
+		texture->resource.Get(),
+		clearColor,
+		0,
+		nullptr);
+}
+
+void SimpleDX12::ExecuteCurrentCommandList()
+{
+	if (!GlobalCmdList)
+		return;
+
+	CmdQ->ExecuteCommandList(GlobalCmdList);
+}
+
+void SimpleDX12::TransitionTexture(Texture* texture, EResourceState stateBefore, EResourceState stateAfter)
+{
+	if (!texture)
+		return;
+
+	D3D12_RESOURCE_BARRIER barrierDesc = {};
+	barrierDesc.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+	barrierDesc.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+	barrierDesc.Transition.pResource = texture->resource.Get();
+	barrierDesc.Transition.Subresource = 0;
+	barrierDesc.Transition.StateBefore = ToD3D12ResourceState(stateBefore);
+	barrierDesc.Transition.StateAfter = ToD3D12ResourceState(stateAfter);
+	GlobalCmdList->CmdList->ResourceBarrier(1, &barrierDesc);
+}
+
+void SimpleDX12::TransitionBuffer(Buffer* buffer, EResourceState stateBefore, EResourceState stateAfter)
+{
+	if (!buffer)
+		return;
+
+	D3D12_RESOURCE_BARRIER barrierDesc = {};
+	barrierDesc.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+	barrierDesc.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+	barrierDesc.Transition.pResource = buffer->resource.Get();
+	barrierDesc.Transition.Subresource = 0;
+	barrierDesc.Transition.StateBefore = ToD3D12ResourceState(stateBefore);
+	barrierDesc.Transition.StateAfter = ToD3D12ResourceState(stateAfter);
+	GlobalCmdList->CmdList->ResourceBarrier(1, &barrierDesc);
 }
 
 shared_ptr<Sampler> SimpleDX12::CreateSampler(D3D12_SAMPLER_DESC& InSamplerDesc)
@@ -187,9 +590,20 @@ shared_ptr<Sampler> SimpleDX12::CreateSampler(D3D12_SAMPLER_DESC& InSamplerDesc)
 	return shared_ptr<Sampler>(sampler);
 }
 
+std::shared_ptr<Buffer> SimpleDX12::CreateBuffer(const BufferCreateDesc& desc)
+{
+	return CreateBuffer(
+		desc.NumElements,
+		desc.ElementSize,
+		ToD3D12ResourceState(desc.InitialState),
+		desc.bAllowUnorderedAccess,
+		desc.InitialData);
+}
+
 std::shared_ptr<Buffer> SimpleDX12::CreateBuffer(UINT InNumElements, UINT InElementSize, D3D12_RESOURCE_STATES initResState, bool isUAV, void* SrcData)
 {
 	Buffer * buffer = new Buffer;
+	buffer->Owner = this;
 	D3D12_RESOURCE_DESC bufDesc = {};
 	bufDesc.Alignment = 0;
 	bufDesc.DepthOrArraySize = 1;
@@ -224,7 +638,7 @@ std::shared_ptr<Buffer> SimpleDX12::CreateBuffer(UINT InNumElements, UINT InElem
 
 	if (SrcData)
 	{
-		CommandList* cmd = g_dx12_rhi->CmdQ->AllocCmdList();
+		CommandList* cmd = CmdQ->AllocCmdList();
 
 		cmd->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(buffer->resource.Get(), initResState, D3D12_RESOURCE_STATE_COPY_DEST));
 
@@ -232,7 +646,7 @@ std::shared_ptr<Buffer> SimpleDX12::CreateBuffer(UINT InNumElements, UINT InElem
 
 		ComPtr<ID3D12Resource> UploadHeap;
 
-		ThrowIfFailed(g_dx12_rhi->Device->CreateCommittedResource(
+		ThrowIfFailed(Device->CreateCommittedResource(
 			&CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD),
 			D3D12_HEAP_FLAG_NONE,
 			&CD3DX12_RESOURCE_DESC::Buffer(Size),
@@ -270,7 +684,7 @@ std::shared_ptr<Buffer> SimpleDX12::CreateBuffer(UINT InNumElements, UINT InElem
 
 	shared_ptr<Buffer> ptr = shared_ptr<Buffer>(buffer);
 	if (isUAV)
-		g_dx12_rhi->DynamicBuffers.push_back(ptr);
+		DynamicBuffers.push_back(ptr);
 
 	return ptr;
 }
@@ -339,7 +753,6 @@ shared_ptr<IndexBuffer> SimpleDX12::CreateIndexBuffer(DXGI_FORMAT Format, UINT S
 		vertexSRVDesc.Buffer.NumElements = static_cast<UINT>(Size) / sizeof(float); // byte address buffer
 		vertexSRVDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
 
-		//g_dx12_rhi->SRVCBVDescriptorHeapShaderVisible->AllocDescriptor(ib->CpuHandleSRV, ib->GpuHandleSRV);
 		GeomtryDHRing->AllocDescriptor(ib->CpuHandleSRV, ib->GpuHandleSRV);
 
 		Device->CreateShaderResourceView(ib->resource.Get(), &vertexSRVDesc, ib->CpuHandleSRV);
@@ -407,7 +820,6 @@ shared_ptr<VertexBuffer> SimpleDX12::CreateVertexBuffer(UINT Size, UINT Stride, 
 		vertexSRVDesc.Buffer.NumElements = static_cast<UINT>(Size) / sizeof(float); // byte address buffer
 		vertexSRVDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
 
-		//g_dx12_rhi->SRVCBVDescriptorHeapShaderVisible->AllocDescriptor(vb->CpuHandleSRV, vb->GpuHandleSRV);
 		GeomtryDHRing->AllocDescriptor(vb->CpuHandleSRV, vb->GpuHandleSRV);
 
 		Device->CreateShaderResourceView(vb->resource.Get(), &vertexSRVDesc, vb->CpuHandleSRV);
@@ -438,11 +850,9 @@ SimpleDX12::SimpleDX12(ComPtr<ID3D12Device5> InDevice)
 	GFSDK_Aftermath_Result result = GFSDK_Aftermath_DX12_Initialize(GFSDK_Aftermath_Version::GFSDK_Aftermath_Version_API, GFSDK_Aftermath_FeatureFlags::GFSDK_Aftermath_FeatureFlags_Maximum, Device.Get());
 #endif
 
-	g_dx12_rhi = this;
-
 	FrameFenceValueVec.resize(NumFrame);
 
-	CmdQ = unique_ptr<CommandQueue>(new CommandQueue);
+	CmdQ = unique_ptr<CommandQueue>(new CommandQueue(Device.Get()));
 
 	{
 		RTVDescriptorHeap = std::make_unique<DescriptorHeap>();
@@ -451,7 +861,7 @@ SimpleDX12::SimpleDX12(ComPtr<ID3D12Device5> InDevice)
 		HeapDesc.NumDescriptors = 100;
 		HeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
 		HeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
-		RTVDescriptorHeap->Init(HeapDesc);
+		RTVDescriptorHeap->Init(Device.Get(), HeapDesc);
 
 		NAME_D3D12_OBJECT(RTVDescriptorHeap->DH);
 	}
@@ -464,7 +874,7 @@ SimpleDX12::SimpleDX12(ComPtr<ID3D12Device5> InDevice)
 		HeapDesc.NumDescriptors = 2;
 		HeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
 		HeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
-		DSVDescriptorHeap->Init(HeapDesc);
+		DSVDescriptorHeap->Init(Device.Get(), HeapDesc);
 
 		NAME_D3D12_OBJECT(DSVDescriptorHeap->DH);
 	}
@@ -477,7 +887,7 @@ SimpleDX12::SimpleDX12(ComPtr<ID3D12Device5> InDevice)
 		HeapDesc.NumDescriptors = 1000000;
 		HeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
 		HeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
-		SRVCBVDescriptorHeapShaderVisible->Init(HeapDesc);
+		SRVCBVDescriptorHeapShaderVisible->Init(Device.Get(), HeapDesc);
 
 		NAME_D3D12_OBJECT(SRVCBVDescriptorHeapShaderVisible->DH);
 	}
@@ -490,7 +900,7 @@ SimpleDX12::SimpleDX12(ComPtr<ID3D12Device5> InDevice)
 		HeapDesc.NumDescriptors = 2000000;
 		HeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
 		HeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
-		SRVCBVDescriptorHeapStorage->Init(HeapDesc);
+		SRVCBVDescriptorHeapStorage->Init(Device.Get(), HeapDesc);
 
 		NAME_D3D12_OBJECT(SRVCBVDescriptorHeapStorage->DH);
 	}
@@ -503,7 +913,7 @@ SimpleDX12::SimpleDX12(ComPtr<ID3D12Device5> InDevice)
 		HeapDesc.NumDescriptors = 1024*2;
 		HeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER;
 		HeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
-		SamplerDescriptorHeapShaderVisible->Init(HeapDesc);
+		SamplerDescriptorHeapShaderVisible->Init(Device.Get(), HeapDesc);
 
 		NAME_D3D12_OBJECT(SamplerDescriptorHeapShaderVisible->DH);
 	}
@@ -517,7 +927,7 @@ SimpleDX12::SimpleDX12(ComPtr<ID3D12Device5> InDevice)
 	GeomtryDHRing = std::make_unique<DescriptorHeapRing>();
 	GeomtryDHRing->Init(SRVCBVDescriptorHeapShaderVisible.get(), 10000, NumFrame);
 
-	GlobalCBRing = std::make_unique<ConstantBufferRingBuffer>(1024 * 1024 * 10, NumFrame);
+	GlobalCBRing = std::make_unique<ConstantBufferRingBuffer>(Device.Get(), 1024 * 1024 * 10, NumFrame);
 	
 	CmdQ->WaitGPU();
 }
@@ -582,9 +992,30 @@ void PipelineStateObject::BindSampler(string name, int baseRegister)
 	samplerBinding.insert(pair<string, BindingData>(name, binding));
 }
 
+namespace
+{
+	ID3D12GraphicsCommandList* ResolveGraphicsCommandList(SimpleDX12* owner, ID3D12GraphicsCommandList* CommandList)
+	{
+		if (CommandList)
+			return CommandList;
+		assert(owner && owner->GlobalCmdList);
+		return owner->GlobalCmdList->CmdList.Get();
+	}
+
+	CommandList* ResolveCommandList(SimpleDX12* owner, CommandList* commandList)
+	{
+		if (commandList)
+			return commandList;
+		assert(owner && owner->GlobalCmdList);
+		return owner->GlobalCmdList;
+	}
+}
+
 void PipelineStateObject::SetSRV(string name, D3D12_GPU_DESCRIPTOR_HANDLE GpuHandleSRV, ID3D12GraphicsCommandList* CommandList)
 {
 	//textureBinding[name].texture = texture;
+	CommandList = ResolveGraphicsCommandList(Owner, CommandList);
+	assert(CommandList);
 
 	UINT RPI = textureBinding[name].rootParamIndex;
 	if (IsCompute)
@@ -596,6 +1027,8 @@ void PipelineStateObject::SetSRV(string name, D3D12_GPU_DESCRIPTOR_HANDLE GpuHan
 void PipelineStateObject::SetUAV(string name, D3D12_GPU_DESCRIPTOR_HANDLE GpuHandleUAV, ID3D12GraphicsCommandList* CommandList)
 {
 	//uavBinding[name].texture = texture;
+	CommandList = ResolveGraphicsCommandList(Owner, CommandList);
+	assert(CommandList);
 	D3D12_CPU_DESCRIPTOR_HANDLE ShaderVisibleCPUHandle;
 	D3D12_GPU_DESCRIPTOR_HANDLE ShaderVisibleGpuHandle;
 
@@ -607,6 +1040,8 @@ void PipelineStateObject::SetUAV(string name, D3D12_GPU_DESCRIPTOR_HANDLE GpuHan
 }
 void PipelineStateObject::SetSampler(string name, Sampler* sampler, ID3D12GraphicsCommandList* CommandList)
 {
+	CommandList = ResolveGraphicsCommandList(Owner, CommandList);
+	assert(CommandList);
 	samplerBinding[name].sampler = sampler;
 
 	D3D12_CPU_DESCRIPTOR_HANDLE ShaderVisibleCPUHandle;
@@ -620,11 +1055,15 @@ void PipelineStateObject::SetSampler(string name, Sampler* sampler, ID3D12Graphi
 
 void PipelineStateObject::SetCBVValue(string name, void* pData, ID3D12GraphicsCommandList* CommandList)
 {
+	CommandList = ResolveGraphicsCommandList(Owner, CommandList);
+	assert(CommandList);
 	map<string, BindingData> ::iterator it = constantBufferBinding.find(name);
 	assert(it != constantBufferBinding.end());
 	
 	BindingData& binding = it->second;// constantBufferBinding[name];
-	auto Alloc = g_dx12_rhi->GlobalCBRing->AllocGPUMemory(binding.cbSize);
+	SimpleDX12* owner = Owner;
+	assert(owner);
+	auto Alloc = owner->GlobalCBRing->AllocGPUMemory(binding.cbSize);
 	UINT64 GPUAddr = std::get<0>(Alloc);
 	UINT8* pMapped = std::get<1>(Alloc);
 
@@ -634,13 +1073,13 @@ void PipelineStateObject::SetCBVValue(string name, void* pData, ID3D12GraphicsCo
 	D3D12_GPU_DESCRIPTOR_HANDLE GpuHandle;
 
 	// ring is advanced at the begining of frame. so descriptors from multiple frame is not overlapped.
-	g_dx12_rhi->GlobalDHRing->AllocDescriptor(CpuHandle, GpuHandle);
+	owner->GlobalDHRing->AllocDescriptor(CpuHandle, GpuHandle);
 
 	D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc = {};
 	cbvDesc.BufferLocation = GPUAddr;
 	cbvDesc.SizeInBytes = binding.cbSize;
 
-	g_dx12_rhi->Device->CreateConstantBufferView(&cbvDesc, CpuHandle);
+	owner->Device->CreateConstantBufferView(&cbvDesc, CpuHandle);
 
 	if (IsCompute)
 		CommandList->SetComputeRootDescriptorTable(binding.rootParamIndex, GpuHandle);
@@ -650,6 +1089,8 @@ void PipelineStateObject::SetCBVValue(string name, void* pData, ID3D12GraphicsCo
 
 void PipelineStateObject::SetRootConstant(string name, UINT value, ID3D12GraphicsCommandList* CommandList)
 {
+	CommandList = ResolveGraphicsCommandList(Owner, CommandList);
+	assert(CommandList);
 	rootBinding[name].rootConst = value;
 	if(IsCompute)
 		CommandList->SetComputeRoot32BitConstant(rootBinding[name].rootParamIndex, rootBinding[name].rootConst, 0);
@@ -760,7 +1201,9 @@ bool PipelineStateObject::Init()
 	D3D12_FEATURE_DATA_ROOT_SIGNATURE featureData = {};
 	featureData.HighestVersion = D3D_ROOT_SIGNATURE_VERSION_1_1;
 
-	if (FAILED(g_dx12_rhi->Device->CheckFeatureSupport(D3D12_FEATURE_ROOT_SIGNATURE, &featureData, sizeof(featureData))))
+	SimpleDX12* owner = Owner;
+	assert(owner);
+	if (FAILED(owner->Device->CheckFeatureSupport(D3D12_FEATURE_ROOT_SIGNATURE, &featureData, sizeof(featureData))))
 	{
 		featureData.HighestVersion = D3D_ROOT_SIGNATURE_VERSION_1_0;
 	}
@@ -779,7 +1222,7 @@ bool PipelineStateObject::Init()
 
 	try
 	{
-		ThrowIfFailed(g_dx12_rhi->Device->CreateRootSignature(0, signature->GetBufferPointer(), signature->GetBufferSize(), IID_PPV_ARGS(&RS)));
+		ThrowIfFailed(owner->Device->CreateRootSignature(0, signature->GetBufferPointer(), signature->GetBufferSize(), IID_PPV_ARGS(&RS)));
 	}
 	catch (const std::exception& e)
 	{
@@ -792,7 +1235,7 @@ bool PipelineStateObject::Init()
 		computePSODesc.CS = CD3DX12_SHADER_BYTECODE(cs->GetBufferPointer(), cs->GetBufferSize());
 		computePSODesc.pRootSignature = RS.Get();
 		HRESULT hr;
-		ThrowIfFailed(hr = g_dx12_rhi->Device->CreateComputePipelineState(&computePSODesc, IID_PPV_ARGS(&PSO)));
+		ThrowIfFailed(hr = owner->Device->CreateComputePipelineState(&computePSODesc, IID_PPV_ARGS(&PSO)));
 		NAME_D3D12_OBJECT(PSO);
 		return SUCCEEDED(hr);
 
@@ -804,7 +1247,7 @@ bool PipelineStateObject::Init()
 
 		graphicsPSODesc.pRootSignature = RS.Get();
 		HRESULT hr;
-		ThrowIfFailed(hr = g_dx12_rhi->Device->CreateGraphicsPipelineState(&graphicsPSODesc, IID_PPV_ARGS(&PSO)));
+		ThrowIfFailed(hr = owner->Device->CreateGraphicsPipelineState(&graphicsPSODesc, IID_PPV_ARGS(&PSO)));
 		NAME_D3D12_OBJECT(PSO);
 		return SUCCEEDED(hr);
 	}
@@ -812,6 +1255,8 @@ bool PipelineStateObject::Init()
 
 void PipelineStateObject::Apply(ID3D12GraphicsCommandList* CommandList)
 {
+	CommandList = ResolveGraphicsCommandList(Owner, CommandList);
+	assert(CommandList);
 	if (IsCompute)
 	{
 		CommandList->SetComputeRootSignature(RS.Get());
@@ -826,7 +1271,9 @@ void PipelineStateObject::Apply(ID3D12GraphicsCommandList* CommandList)
 
 void Texture::MakeStaticSRV()
 {
-	g_dx12_rhi->TextureDHRing->AllocDescriptor(CpuHandleSRV, GpuHandleSRV);
+	SimpleDX12* owner = Owner;
+	assert(owner);
+	owner->TextureDHRing->AllocDescriptor(CpuHandleSRV, GpuHandleSRV);
 
 	D3D12_SHADER_RESOURCE_VIEW_DESC SrvDesc = {};
 	SrvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
@@ -837,12 +1284,14 @@ void Texture::MakeStaticSRV()
 	else 
 		SrvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
 	SrvDesc.Texture2D.MipLevels = textureDesc.MipLevels;
-	g_dx12_rhi->Device->CreateShaderResourceView(resource.Get(), &SrvDesc, CpuHandleSRV);
+	owner->Device->CreateShaderResourceView(resource.Get(), &SrvDesc, CpuHandleSRV);
 }
 
 void Texture::MakeRTV(bool isBackBuffer)
 {
-	g_dx12_rhi->RTVDescriptorHeap->AllocDescriptor(CpuHandleRTV, GpuHandleRTV);
+	SimpleDX12* owner = Owner;
+	assert(owner);
+	owner->RTVDescriptorHeap->AllocDescriptor(CpuHandleRTV, GpuHandleRTV);
 	
 	D3D12_RENDER_TARGET_VIEW_DESC desc = {};
 	//desc.Format = Format;
@@ -850,23 +1299,26 @@ void Texture::MakeRTV(bool isBackBuffer)
 
 	desc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
 
-	g_dx12_rhi->Device->CreateRenderTargetView(resource.Get(), nullptr, CpuHandleRTV);
+	owner->Device->CreateRenderTargetView(resource.Get(), nullptr, CpuHandleRTV);
 }
 
 void Texture::MakeDSV()
 {
-	g_dx12_rhi->DSVDescriptorHeap->AllocDescriptor(CpuHandleDSV, GpuHandleDSV);
+	SimpleDX12* owner = Owner;
+	assert(owner);
+	owner->DSVDescriptorHeap->AllocDescriptor(CpuHandleDSV, GpuHandleDSV);
 
 	D3D12_DEPTH_STENCIL_VIEW_DESC depthStencilDesc = {};
 	depthStencilDesc.Format = DXGI_FORMAT_D32_FLOAT;
 	depthStencilDesc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
 	depthStencilDesc.Flags = D3D12_DSV_FLAG_NONE;
-	g_dx12_rhi->Device->CreateDepthStencilView(resource.Get(), &depthStencilDesc, CpuHandleDSV);
+	owner->Device->CreateDepthStencilView(resource.Get(), &depthStencilDesc, CpuHandleDSV);
 }
 
 std::shared_ptr<Texture> SimpleDX12::CreateTexture2DFromResource(ComPtr<ID3D12Resource> InResource)
 {
 	Texture* tex = new Texture;
+	tex->Owner = this;
 
 	if (InResource)
 	{
@@ -876,9 +1328,34 @@ std::shared_ptr<Texture> SimpleDX12::CreateTexture2DFromResource(ComPtr<ID3D12Re
 	return shared_ptr<Texture>(tex);
 }
 
+std::shared_ptr<Texture> SimpleDX12::CreateTexture2D(const TextureCreateDesc& desc)
+{
+	return CreateTexture2D(
+		ToDXGIFormat(desc.Format),
+		ToD3D12ResourceFlags(desc.Usage),
+		ToD3D12ResourceState(desc.InitialState),
+		desc.Width,
+		desc.Height,
+		desc.MipLevels,
+		desc.ClearColor);
+}
+
+std::shared_ptr<Texture> SimpleDX12::CreateTexture3D(ETextureFormat format, ETextureUsageFlags usage, EInitialResourceState initialState, int width, int height, int depth, int mipLevels)
+{
+	return CreateTexture3D(
+		ToDXGIFormat(format),
+		ToD3D12ResourceFlags(usage),
+		ToD3D12ResourceState(initialState),
+		width,
+		height,
+		depth,
+		mipLevels);
+}
+
 std::shared_ptr<Texture> SimpleDX12::CreateTexture2D(DXGI_FORMAT format, D3D12_RESOURCE_FLAGS resFlags, D3D12_RESOURCE_STATES initResState, int width, int height, int mipLevels, std::optional<glm::vec4> clearColor)
 {
 	Texture* tex = new Texture;
+	tex->Owner = this;
 
 	D3D12_RESOURCE_DESC textureDesc = {};
 	textureDesc.MipLevels = mipLevels;
@@ -950,7 +1427,7 @@ std::shared_ptr<Texture> SimpleDX12::CreateTexture2D(DXGI_FORMAT format, D3D12_R
 	}
 	shared_ptr<Texture> texPtr = shared_ptr<Texture>(tex);
 	if (resFlags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET || resFlags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL || resFlags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS)
-		g_dx12_rhi->DynamicTextures.push_back(texPtr);
+		DynamicTextures.push_back(texPtr);
 
 	return texPtr;
 }
@@ -958,6 +1435,7 @@ std::shared_ptr<Texture> SimpleDX12::CreateTexture2D(DXGI_FORMAT format, D3D12_R
 std::shared_ptr<Texture> SimpleDX12::CreateTexture3D(DXGI_FORMAT format, D3D12_RESOURCE_FLAGS resFlags, D3D12_RESOURCE_STATES initResState, int width, int height, int depth, int mipLevels)
 {
 	Texture* tex = new Texture;
+	tex->Owner = this;
 
 	D3D12_RESOURCE_DESC textureDesc = {};
 	textureDesc.MipLevels = mipLevels;
@@ -995,7 +1473,7 @@ std::shared_ptr<Texture> SimpleDX12::CreateTexture3D(DXGI_FORMAT format, D3D12_R
 	shared_ptr<Texture> texPtr = shared_ptr<Texture>(tex);
 
 	if (resFlags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET || resFlags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL || resFlags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS)
-		g_dx12_rhi->DynamicTextures.push_back(texPtr);
+		DynamicTextures.push_back(texPtr);
 	else
 		tex->MakeStaticSRV();
 
@@ -1004,7 +1482,9 @@ std::shared_ptr<Texture> SimpleDX12::CreateTexture3D(DXGI_FORMAT format, D3D12_R
 
 void Texture::UploadSRCData3D(D3D12_SUBRESOURCE_DATA* SrcData)
 {
-	CommandList* cmd = g_dx12_rhi->CmdQ->AllocCmdList();
+	SimpleDX12* owner = Owner;
+	assert(owner);
+	CommandList* cmd = owner->CmdQ->AllocCmdList();
 
 	// upload src data
 	if (SrcData)
@@ -1015,7 +1495,7 @@ void Texture::UploadSRCData3D(D3D12_SUBRESOURCE_DATA* SrcData)
 		UINT Rows = 0;
 		UINT64 RowSize = 0;
 		UINT64 TotalBytes = 0;
-		g_dx12_rhi->Device->GetCopyableFootprints(&textureDesc, 0, 1, 0, &descFootPrint, &Rows, &RowSize, &TotalBytes);
+		owner->Device->GetCopyableFootprints(&textureDesc, 0, 1, 0, &descFootPrint, &Rows, &RowSize, &TotalBytes);
 
 
 		D3D12_HEAP_PROPERTIES heapProp;
@@ -1044,7 +1524,7 @@ void Texture::UploadSRCData3D(D3D12_SUBRESOURCE_DATA* SrcData)
 		OutputDebugStringA(ss.str().c_str());*/
 
 
-		ThrowIfFailed(g_dx12_rhi->Device->CreateCommittedResource(
+		ThrowIfFailed(owner->Device->CreateCommittedResource(
 			&heapProp,
 			D3D12_HEAP_FLAG_NONE,
 			&resDesc,
@@ -1087,21 +1567,22 @@ void Texture::UploadSRCData3D(D3D12_SUBRESOURCE_DATA* SrcData)
 		BarrierDesc.Transition.StateAfter = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
 		cmd->CmdList->ResourceBarrier(1, &BarrierDesc);
 
-		g_dx12_rhi->CmdQ->ExecuteCommandList(cmd);
-		g_dx12_rhi->CmdQ->WaitGPU();
+		owner->CmdQ->ExecuteCommandList(cmd);
+		owner->CmdQ->WaitGPU();
 	}
 }
 
-std::shared_ptr<Texture> SimpleDX12::CreateTextureFromFile(wstring fileName, bool nonSRGB)
+std::shared_ptr<Texture> SimpleDX12::CreateTextureFromFile(const std::wstring& fileName, bool nonSRGB)
 {
 
 	if (FileExists(fileName.c_str()) == false)
 		return nullptr;
 
-	CommandList* cmd = g_dx12_rhi->CmdQ->AllocCmdList();
+	CommandList* cmd = CmdQ->AllocCmdList();
 
 
 	Texture* tex = new Texture;
+	tex->Owner = this;
 
 	DirectX::ScratchImage image;
 
@@ -1154,7 +1635,7 @@ std::shared_ptr<Texture> SimpleDX12::CreateTextureFromFile(wstring fileName, boo
 
 	tex->textureDesc = textureDesc;
 
-	g_dx12_rhi->Device->CreateCommittedResource(&heapProp, D3D12_HEAP_FLAG_NONE, &textureDesc,
+	Device->CreateCommittedResource(&heapProp, D3D12_HEAP_FLAG_NONE, &textureDesc,
 		D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&tex->resource));
 	tex->resource->SetName(fileName.c_str());
 
@@ -1186,7 +1667,7 @@ std::shared_ptr<Texture> SimpleDX12::CreateTextureFromFile(wstring fileName, boo
 	ss << "CreateTextureFromFile : " << uploadBufferSize << "\n";
 	OutputDebugStringA(ss.str().c_str());*/
 
-	g_dx12_rhi->Device->CreateCommittedResource(&heapPropUpload, D3D12_HEAP_FLAG_NONE, &resDesc,
+	Device->CreateCommittedResource(&heapPropUpload, D3D12_HEAP_FLAG_NONE, &resDesc,
 		D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&uploadHeap));
 	uploadHeap->SetName(L"TexUploadingHeap");
 
@@ -1196,7 +1677,7 @@ std::shared_ptr<Texture> SimpleDX12::CreateTextureFromFile(wstring fileName, boo
 	UINT64* rowSizes = (UINT64*)_alloca(sizeof(UINT64) * numSubResources);
 
 	UINT64 textureMemSize = 0;
-	g_dx12_rhi->Device->GetCopyableFootprints(&textureDesc, 0, UINT32(numSubResources), 0, layouts, numRows, rowSizes, &textureMemSize);
+	Device->GetCopyableFootprints(&textureDesc, 0, UINT32(numSubResources), 0, layouts, numRows, rowSizes, &textureMemSize);
 
 	UINT8* uploadMem = nullptr;
 
@@ -1256,8 +1737,8 @@ std::shared_ptr<Texture> SimpleDX12::CreateTextureFromFile(wstring fileName, boo
 	BarrierDesc.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
 	cmd->CmdList->ResourceBarrier(1, &BarrierDesc);
 
-	g_dx12_rhi->CmdQ->ExecuteCommandList(cmd);
-	g_dx12_rhi->CmdQ->WaitGPU();
+	CmdQ->ExecuteCommandList(cmd);
+	CmdQ->WaitGPU();
 
 	tex->MakeStaticSRV();
 
@@ -1283,6 +1764,8 @@ static const D3D12_HEAP_PROPERTIES kUploadHeapProps =
 
 shared_ptr<RTAS> Mesh::CreateBLAS()
 {
+	SimpleDX12* owner = Owner;
+	assert(owner);
 	RTAS* as = new  RTAS;
 
 
@@ -1310,7 +1793,7 @@ shared_ptr<RTAS> Mesh::CreateBLAS()
 	inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
 
 	D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO info = {};
-	g_dx12_rhi->Device->GetRaytracingAccelerationStructurePrebuildInfo(&inputs, &info);
+	owner->Device->GetRaytracingAccelerationStructurePrebuildInfo(&inputs, &info);
 
 	{
 		D3D12_RESOURCE_DESC bufDesc = {};
@@ -1330,7 +1813,7 @@ shared_ptr<RTAS> Mesh::CreateBLAS()
 		ss << "blas->scratch : " << bufDesc.Width << "\n";
 		OutputDebugStringA(ss.str().c_str());*/
 
-		g_dx12_rhi->Device->CreateCommittedResource(&kDefaultHeapProps, D3D12_HEAP_FLAG_NONE, &bufDesc, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, IID_PPV_ARGS(&as->Scratch));
+		owner->Device->CreateCommittedResource(&kDefaultHeapProps, D3D12_HEAP_FLAG_NONE, &bufDesc, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, IID_PPV_ARGS(&as->Scratch));
 	}
 	
 	{
@@ -1352,10 +1835,10 @@ shared_ptr<RTAS> Mesh::CreateBLAS()
 		OutputDebugStringA(ss.str().c_str());*/
 
 
-		g_dx12_rhi->Device->CreateCommittedResource(&kDefaultHeapProps, D3D12_HEAP_FLAG_NONE, &bufDesc, D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE, nullptr, IID_PPV_ARGS(&as->Result));
+		owner->Device->CreateCommittedResource(&kDefaultHeapProps, D3D12_HEAP_FLAG_NONE, &bufDesc, D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE, nullptr, IID_PPV_ARGS(&as->Result));
 	}
 
-	CommandList* cmd = g_dx12_rhi->CmdQ->AllocCmdList();
+	CommandList* cmd = owner->CmdQ->AllocCmdList();
 
 	D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC asDesc = {};
 	asDesc.Inputs = inputs;
@@ -1370,7 +1853,7 @@ shared_ptr<RTAS> Mesh::CreateBLAS()
 	uavBarrier.UAV.pResource = as->Result.Get();
 	cmd->CmdList->ResourceBarrier(1, &uavBarrier);*/
 
-	g_dx12_rhi->CmdQ->ExecuteCommandList(cmd);
+	owner->CmdQ->ExecuteCommandList(cmd);
 
 	return shared_ptr<RTAS>(as);
 }
@@ -1387,7 +1870,7 @@ std::shared_ptr<RTAS> SimpleDX12::CreateTLAS(vector<shared_ptr<RTAS>>& VecBottom
 	inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL;
 
 	D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO info;
-	g_dx12_rhi->Device->GetRaytracingAccelerationStructurePrebuildInfo(&inputs, &info);
+	Device->GetRaytracingAccelerationStructurePrebuildInfo(&inputs, &info);
 
 	{
 		D3D12_RESOURCE_DESC bufDesc = {};
@@ -1403,7 +1886,7 @@ std::shared_ptr<RTAS> SimpleDX12::CreateTLAS(vector<shared_ptr<RTAS>>& VecBottom
 		bufDesc.SampleDesc.Quality = 0;
 		bufDesc.Width = info.ScratchDataSizeInBytes;
 
-		g_dx12_rhi->Device->CreateCommittedResource(&kDefaultHeapProps, D3D12_HEAP_FLAG_NONE, &bufDesc, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, IID_PPV_ARGS(&as->Scratch));
+		Device->CreateCommittedResource(&kDefaultHeapProps, D3D12_HEAP_FLAG_NONE, &bufDesc, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, IID_PPV_ARGS(&as->Scratch));
 	}
 
 	{
@@ -1420,7 +1903,7 @@ std::shared_ptr<RTAS> SimpleDX12::CreateTLAS(vector<shared_ptr<RTAS>>& VecBottom
 		bufDesc.SampleDesc.Quality = 0;
 		bufDesc.Width = info.ResultDataMaxSizeInBytes;
 
-		g_dx12_rhi->Device->CreateCommittedResource(&kDefaultHeapProps, D3D12_HEAP_FLAG_NONE, &bufDesc, D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE, nullptr, IID_PPV_ARGS(&as->Result));
+		Device->CreateCommittedResource(&kDefaultHeapProps, D3D12_HEAP_FLAG_NONE, &bufDesc, D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE, nullptr, IID_PPV_ARGS(&as->Result));
 	}
 
 	{
@@ -1437,7 +1920,7 @@ std::shared_ptr<RTAS> SimpleDX12::CreateTLAS(vector<shared_ptr<RTAS>>& VecBottom
 		bufDesc.SampleDesc.Quality = 0;
 		bufDesc.Width = sizeof(D3D12_RAYTRACING_INSTANCE_DESC) * VecBottomLevelAS.size();
 
-		g_dx12_rhi->Device->CreateCommittedResource(&kUploadHeapProps, D3D12_HEAP_FLAG_NONE, &bufDesc, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&as->Instance));
+		Device->CreateCommittedResource(&kUploadHeapProps, D3D12_HEAP_FLAG_NONE, &bufDesc, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&as->Instance));
 	}
 
 	if (VecBottomLevelAS.size() > 0)
@@ -1461,7 +1944,7 @@ std::shared_ptr<RTAS> SimpleDX12::CreateTLAS(vector<shared_ptr<RTAS>>& VecBottom
 	
 	// Create the TLAS
 
-	CommandList* cmd = g_dx12_rhi->CmdQ->AllocCmdList();
+	CommandList* cmd = CmdQ->AllocCmdList();
 
 	D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC asDesc = {};
 	asDesc.Inputs = inputs;
@@ -1490,14 +1973,14 @@ std::shared_ptr<RTAS> SimpleDX12::CreateTLAS(vector<shared_ptr<RTAS>>& VecBottom
 	// copydescriptor needed when being used.
 	GeomtryDHRing->AllocDescriptor(as->CPUHandle, as->GPUHandle);
 
-	g_dx12_rhi->Device->CreateShaderResourceView(nullptr, &srvDesc, as->CPUHandle);
+	Device->CreateShaderResourceView(nullptr, &srvDesc, as->CPUHandle);
 
-	g_dx12_rhi->CmdQ->ExecuteCommandList(cmd);
+	CmdQ->ExecuteCommandList(cmd);
 
 	return shared_ptr<RTAS>(as);
 }
 
-ComPtr<ID3DBlob> SimpleDX12::CreateShader(wstring FilePath, string EntryPoint, string Target)
+ComPtr<ID3DBlob> SimpleDX12::CreateShader(const std::wstring& FilePath, const std::string& EntryPoint, const std::string& Target)
 {
 	ComPtr<ID3DBlob> shader;
 
@@ -1518,7 +2001,7 @@ ComPtr<ID3DBlob> SimpleDX12::CreateShader(wstring FilePath, string EntryPoint, s
 	{
 		string errorStr = reinterpret_cast<const char*>(compilationMsgs->GetBufferPointer());
 		OutputDebugStringA(errorStr.c_str());
-		g_dx12_rhi->errorString += errorStr;
+		errorString += errorStr;
 		compilationMsgs->Release();
 		return nullptr;
 	}
@@ -1537,7 +2020,7 @@ std::string convertBlobToString(BlotType* pBlob)
 
 static dxc::DxcDllSupport gDxcDllHelper;
 
-ComPtr<ID3DBlob> compileShaderLibrary(const WCHAR* filename, const WCHAR* targetString)
+ComPtr<ID3DBlob> compileShaderLibrary(SimpleDX12* owner, const WCHAR* filename, const WCHAR* targetString)
 {
 	// Initialize the helper
 	gDxcDllHelper.Initialize();
@@ -1576,7 +2059,10 @@ ComPtr<ID3DBlob> compileShaderLibrary(const WCHAR* filename, const WCHAR* target
 		pResult->GetErrorBuffer(&pError);
 		std::string log = convertBlobToString(pError.Get());
 		//msgBox("Compiler error:\n" + log);
-		g_dx12_rhi->errorString += log;
+		if (owner)
+		{
+			owner->errorString += log;
+		}
 		OutputDebugStringA(log.c_str());
 
 		return nullptr;
@@ -1882,6 +2368,10 @@ void RTPipelineStateObject::BeginShaderTable()
 
 void RTPipelineStateObject::SetGlobalBinding(CommandList* CommandList)
 {
+	SimpleDX12* owner = Owner;
+	assert(owner);
+	CommandList = ResolveCommandList(owner, CommandList);
+	assert(CommandList);
 	UINT RPI = 0;
 	for (auto& bi : GlobalBinding)
 	{
@@ -1891,6 +2381,8 @@ void RTPipelineStateObject::SetGlobalBinding(CommandList* CommandList)
 
 void RTPipelineStateObject::EndShaderTable()
 {
+	SimpleDX12* owner = Owner;
+	assert(owner);
 	if (ShaderTable == nullptr)
 	{
 		// find biggiest binding size
@@ -1938,7 +2430,7 @@ void RTPipelineStateObject::EndShaderTable()
 			bufDesc.MipLevels = 1;
 			bufDesc.SampleDesc.Count = 1;
 			bufDesc.SampleDesc.Quality = 0;
-			bufDesc.Width = ShaderTableSize * g_dx12_rhi->NumFrame;
+			bufDesc.Width = ShaderTableSize * owner->NumFrame;
 
 			const D3D12_HEAP_PROPERTIES kUploadHeapProps =
 			{
@@ -1949,7 +2441,7 @@ void RTPipelineStateObject::EndShaderTable()
 				0,
 			};
 
-			g_dx12_rhi->Device->CreateCommittedResource(&kUploadHeapProps, D3D12_HEAP_FLAG_NONE, &bufDesc, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&ShaderTable));
+			owner->Device->CreateCommittedResource(&kUploadHeapProps, D3D12_HEAP_FLAG_NONE, &bufDesc, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&ShaderTable));
 			NAME_D3D12_OBJECT(ShaderTable);
 		}
 	}
@@ -1961,7 +2453,7 @@ void RTPipelineStateObject::EndShaderTable()
 	uint8_t* pData;
 	HRESULT hr = ShaderTable->Map(0, nullptr, (void**)&pData);
 
-	pData += ShaderTableSize * g_dx12_rhi->CurrentFrameIndex;;
+	pData += ShaderTableSize * owner->CurrentFrameIndex;;
 
 	D3D12_GPU_VIRTUAL_ADDRESS va = ShaderTable->GetGPUVirtualAddress();
 
@@ -1970,7 +2462,7 @@ void RTPipelineStateObject::EndShaderTable()
 
 	if (FAILED(hr))
 	{
-		HRESULT hrRemoved = g_dx12_rhi->Device->GetDeviceRemovedReason();
+		HRESULT hrRemoved = owner->Device->GetDeviceRemovedReason();
 		if (FAILED(hrRemoved))
 		{
 			for (auto& sb : ShaderBinding)
@@ -2190,6 +2682,8 @@ void RTPipelineStateObject::SetSampler(string shader, string bindingName, Sample
 
 void RTPipelineStateObject::SetCBVValue(string shader, string bindingName, void* pData, INT instanceIndex /*= -1*/)
 {
+	SimpleDX12* owner = Owner;
+	assert(owner);
 	// each bindings of raygen/miss shader is unique to shader name.
 	if (instanceIndex == -1) // raygen, miss
 	{
@@ -2200,7 +2694,7 @@ void RTPipelineStateObject::SetCBVValue(string shader, string bindingName, void*
 			{
 				if (bd.name == bindingName)
 				{
-					auto Alloc = g_dx12_rhi->GlobalCBRing->AllocGPUMemory(bd.cbSize);
+					auto Alloc = owner->GlobalCBRing->AllocGPUMemory(bd.cbSize);
 					UINT64 GPUAddr = std::get<0>(Alloc);
 					UINT8* pMapped = std::get<1>(Alloc);
 
@@ -2210,12 +2704,12 @@ void RTPipelineStateObject::SetCBVValue(string shader, string bindingName, void*
 					D3D12_GPU_DESCRIPTOR_HANDLE GpuHandle;
 
 					// ring is advanced at the begining of frame. so descriptors from multiple frame is not overlapped.
-					g_dx12_rhi->GlobalDHRing->AllocDescriptor(CpuHandle, GpuHandle);
+					owner->GlobalDHRing->AllocDescriptor(CpuHandle, GpuHandle);
 
 					D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc = {};
 					cbvDesc.BufferLocation = GPUAddr;
 					cbvDesc.SizeInBytes = bd.cbSize;
-					g_dx12_rhi->Device->CreateConstantBufferView(&cbvDesc, CpuHandle);
+					owner->Device->CreateConstantBufferView(&cbvDesc, CpuHandle);
 
 					bd.GPUHandle = GpuHandle;
 
@@ -2233,7 +2727,7 @@ void RTPipelineStateObject::SetCBVValue(string shader, string bindingName, void*
 			{
 				if (bd.name == bindingName)
 				{
-					auto Alloc = g_dx12_rhi->GlobalCBRing->AllocGPUMemory(bd.cbSize);
+					auto Alloc = owner->GlobalCBRing->AllocGPUMemory(bd.cbSize);
 					UINT64 GPUAddr = std::get<0>(Alloc);
 					UINT8* pMapped = std::get<1>(Alloc);
 
@@ -2243,12 +2737,12 @@ void RTPipelineStateObject::SetCBVValue(string shader, string bindingName, void*
 					D3D12_GPU_DESCRIPTOR_HANDLE GpuHandle;
 
 					// ring is advanced at the begining of frame. so descriptors from multiple frame is not overlapped.
-					g_dx12_rhi->GlobalDHRing->AllocDescriptor(CpuHandle, GpuHandle);
+					owner->GlobalDHRing->AllocDescriptor(CpuHandle, GpuHandle);
 
 					D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc = {};
 					cbvDesc.BufferLocation = GPUAddr;
 					cbvDesc.SizeInBytes = bd.cbSize;
-					g_dx12_rhi->Device->CreateConstantBufferView(&cbvDesc, CpuHandle);
+					owner->Device->CreateConstantBufferView(&cbvDesc, CpuHandle);
 
 					bd.GPUHandle = GpuHandle;
 				
@@ -2258,40 +2752,13 @@ void RTPipelineStateObject::SetCBVValue(string shader, string bindingName, void*
 			assert(bFound == true);
 		}
 	}
-	//else // hitprogram : There can be multiple hitprogram entry with same shader name, so we need another data structure. (HitProgramBinding)
-	//{
-	//	// SetXXX should be called by the binding order, because it is "push_back"ed to vector.
-	//	BindingInfo& bi = ShaderBinding[shader];
-	//	for (auto&bd : bi.Binding)
-	//	{
-	//		if (bd.name == bindingName)
-	//		{
-	//			auto& cb = bd.cbs[g_dx12_rhi->CurrentFrameIndex];
-	//			UINT8* pMapped = (UINT8*)cb->MemMapped + size * instanceIndex;
-	//			memcpy((void*)pMapped, pData, size);
-
-	//			HitProgramBindingCHS[instanceIndex].HitGroupName = MapHitGroup[shader].name;
-
-	//			D3D12_CPU_DESCRIPTOR_HANDLE CpuHandle;
-	//			D3D12_GPU_DESCRIPTOR_HANDLE GpuHandle;
-
-	//			// ring is advanced at the begining of frame. so descriptors from multiple frame is not overlapped.
-	//			g_dx12_rhi->GlobalDHRing->AllocDescriptor(CpuHandle, GpuHandle);
-
-	//			D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc = {};
-	//			cbvDesc.BufferLocation = cb->resource->GetGPUVirtualAddress();
-	//			cbvDesc.SizeInBytes = cb->Size;
-	//			g_dx12_rhi->Device->CreateConstantBufferView(&cbvDesc, CpuHandle);
-
-	//			HitProgramBindingCHS[instanceIndex].VecData.push_back(GpuHandle);
-	//		}
-	//	}
-	//}
 }
 
 
 bool RTPipelineStateObject::InitRS(string ShaderFile)
 {
+	SimpleDX12* owner = Owner;
+	assert(owner);
 	vector<D3D12_STATE_SUBOBJECT> subobjects;
 
 	// dxil + Hitgroup count + RS + Export + shaderconfig + export + pipelineconfig + global RS
@@ -2302,7 +2769,7 @@ bool RTPipelineStateObject::InitRS(string ShaderFile)
 
 	// dxil lib
 	wstring wShaderFile = StringToWString(ShaderFile);
-	ComPtr<ID3DBlob> pDxilLib = compileShaderLibrary(wShaderFile.c_str(), L"lib_6_3");
+	ComPtr<ID3DBlob> pDxilLib = compileShaderLibrary(owner, wShaderFile.c_str(), L"lib_6_3");
 
 	vector<const WCHAR*> entryPoints;
 	entryPoints.reserve(ShaderBinding.size());
@@ -2389,7 +2856,7 @@ bool RTPipelineStateObject::InitRS(string ShaderFile)
 			Desc.pParameters = rootParamVec.data();
 		}
 
-		bindingInfo.RS = CreateRootSignature(g_dx12_rhi->Device, Desc);
+		bindingInfo.RS = CreateRootSignature(owner->Device, Desc);
 		NAME_D3D12_OBJECT(bindingInfo.RS);
 
 		bindingInfo.pInterface = bindingInfo.RS.Get();
@@ -2473,7 +2940,7 @@ bool RTPipelineStateObject::InitRS(string ShaderFile)
 	Desc.NumParameters = rootParamVec.size();
 	Desc.pParameters = rootParamVec.data();
 
-	GlobalRS = CreateRootSignature(g_dx12_rhi->Device, Desc);
+	GlobalRS = CreateRootSignature(owner->Device, Desc);
 	NAME_D3D12_OBJECT(GlobalRS);
 
 	pInterfaceGlobalRS = GlobalRS.Get();
@@ -2489,12 +2956,12 @@ bool RTPipelineStateObject::InitRS(string ShaderFile)
 	descRTSO.pSubobjects = subobjects.data();
 	descRTSO.Type = D3D12_STATE_OBJECT_TYPE_RAYTRACING_PIPELINE;
 
-	HRESULT hr = g_dx12_rhi->Device->CreateStateObject(&descRTSO, IID_PPV_ARGS(&RTPipelineState));
+	HRESULT hr = owner->Device->CreateStateObject(&descRTSO, IID_PPV_ARGS(&RTPipelineState));
 	if (FAILED(hr))
 	{
 		stringstream ss;
 		ss << "Failed to compile shader : " << ShaderFile << "\n";
-		g_dx12_rhi->errorString += ss.str();
+		owner->errorString += ss.str();
 		OutputDebugStringA(ss.str().c_str());
 		return false;
 	}
@@ -2508,12 +2975,16 @@ bool RTPipelineStateObject::InitRS(string ShaderFile)
 
 void RTPipelineStateObject::Apply(UINT width, UINT height, CommandList* CommandList)
 {
+	SimpleDX12* owner = Owner;
+	assert(owner);
+	CommandList = ResolveCommandList(owner, CommandList);
+	assert(CommandList);
 	D3D12_DISPATCH_RAYS_DESC raytraceDesc = {};
 	raytraceDesc.Width = width;
 	raytraceDesc.Height = height;
 	raytraceDesc.Depth = 1;
 
-	D3D12_GPU_VIRTUAL_ADDRESS StartAddress = ShaderTable->GetGPUVirtualAddress() + ShaderTableSize * g_dx12_rhi->CurrentFrameIndex;
+	D3D12_GPU_VIRTUAL_ADDRESS StartAddress = ShaderTable->GetGPUVirtualAddress() + ShaderTableSize * owner->CurrentFrameIndex;
 
 	raytraceDesc.RayGenerationShaderRecord.StartAddress = StartAddress ;
 	raytraceDesc.RayGenerationShaderRecord.SizeInBytes = ShaderTableEntrySize;
@@ -2538,7 +3009,7 @@ void RTPipelineStateObject::Apply(UINT width, UINT height, CommandList* CommandL
 	raytraceDesc.HitGroupTable.SizeInBytes = ShaderTableEntrySize * VecHitGroup.size() *NumInstance;
 
 	// Bind the empty root signature
-	g_dx12_rhi->GlobalCmdList->CmdList->SetComputeRootSignature(GlobalRS.Get());
+	CommandList->CmdList->SetComputeRootSignature(GlobalRS.Get());
 
 	UINT RPI = 0;
 	for (auto& bi : GlobalBinding)
@@ -2546,9 +3017,9 @@ void RTPipelineStateObject::Apply(UINT width, UINT height, CommandList* CommandL
 		CommandList->CmdList.Get()->SetComputeRootDescriptorTable(RPI++, bi.GPUHandle);
 	}
 
-	g_dx12_rhi->GlobalCmdList->CmdList->SetPipelineState1(RTPipelineState.Get());
+	CommandList->CmdList->SetPipelineState1(RTPipelineState.Get());
 	
-	g_dx12_rhi->GlobalCmdList->CmdList->DispatchRays(&raytraceDesc);
+	CommandList->CmdList->DispatchRays(&raytraceDesc);
 }
 
 void DescriptorHeapRing::Init(DescriptorHeap* InDHHeap, UINT InNumDescriptors, UINT InNumFrame)
@@ -2583,9 +3054,10 @@ void Scene::SetTransform(glm::mat4x4 inTransform)
 	}
 }
 
-CommandQueue::CommandQueue()
+CommandQueue::CommandQueue(ID3D12Device5* device)
 {
-	ThrowIfFailed(g_dx12_rhi->Device->CreateFence(CurrentFenceValue, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&m_fence)));
+	assert(device);
+	ThrowIfFailed(device->CreateFence(CurrentFenceValue, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&m_fence)));
 	// Create an event handle to use for frame synchronization.
 	m_fenceEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
 
@@ -2593,17 +3065,17 @@ CommandQueue::CommandQueue()
 	queueDesc.Flags = D3D12_COMMAND_QUEUE_FLAG_NONE;
 	queueDesc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
 
-	ThrowIfFailed(g_dx12_rhi->Device->CreateCommandQueue(&queueDesc, IID_PPV_ARGS(&CmdQueue)));
+	ThrowIfFailed(device->CreateCommandQueue(&queueDesc, IID_PPV_ARGS(&CmdQueue)));
 	NAME_D3D12_OBJECT(CmdQueue);
 
 	CommandListPool.reserve(CommandListPoolSize);
 	for (int i = 0; i < CommandListPoolSize; i++)
 	{
 		CommandList * cmdList = new CommandList;
-		ThrowIfFailed(g_dx12_rhi->Device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&cmdList->CmdAllocator)));
+		ThrowIfFailed(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&cmdList->CmdAllocator)));
 		NAME_D3D12_OBJECT(cmdList->CmdAllocator);
 
-		ThrowIfFailed(g_dx12_rhi->Device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, cmdList->CmdAllocator.Get(), nullptr, IID_PPV_ARGS(&cmdList->CmdList)));
+		ThrowIfFailed(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, cmdList->CmdAllocator.Get(), nullptr, IID_PPV_ARGS(&cmdList->CmdList)));
 		cmdList->CmdList->Close();
 		NAME_D3D12_OBJECT(cmdList->CmdList);
 
@@ -2683,8 +3155,10 @@ void ConstantBufferRingBuffer::Advance()
 	AllocPos = 0;
 }
 
-ConstantBufferRingBuffer::ConstantBufferRingBuffer(UINT InSize, UINT InNumFrame)
+ConstantBufferRingBuffer::ConstantBufferRingBuffer(ID3D12Device5* InDevice, UINT InSize, UINT InNumFrame)
 {
+	Device = InDevice;
+	assert(Device);
 	NumFrame = InNumFrame;
 	TotalSize = InSize;
 
@@ -2699,7 +3173,7 @@ ConstantBufferRingBuffer::ConstantBufferRingBuffer(UINT InSize, UINT InNumFrame)
 
 	resDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
 	resDesc.Alignment = 0;
-	resDesc.Width = InSize * g_dx12_rhi->NumFrame;;
+	resDesc.Width = InSize * NumFrame;
 	resDesc.Height = 1;
 	resDesc.DepthOrArraySize = 1;
 	resDesc.MipLevels = 1;
@@ -2709,7 +3183,7 @@ ConstantBufferRingBuffer::ConstantBufferRingBuffer(UINT InSize, UINT InNumFrame)
 	resDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
 	resDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
 
-	ThrowIfFailed(g_dx12_rhi->Device->CreateCommittedResource(
+	ThrowIfFailed(Device->CreateCommittedResource(
 		&heapProp,
 		D3D12_HEAP_FLAG_NONE,
 		&resDesc,
@@ -2730,6 +3204,8 @@ ConstantBufferRingBuffer::~ConstantBufferRingBuffer()
 
 void Buffer::MakeByteAddressBufferSRV()
 {
+	SimpleDX12* owner = Owner;
+	assert(owner);
 	// create shader resource view
 	D3D12_SHADER_RESOURCE_VIEW_DESC bufferSRVDesc;
 	bufferSRVDesc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
@@ -2740,17 +3216,17 @@ void Buffer::MakeByteAddressBufferSRV()
 	bufferSRVDesc.Buffer.NumElements = NumElements;
 	bufferSRVDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
 
-	// TODO : should be GlobalDHRing? if object instance are to move.
-	
-	g_dx12_rhi->TextureDHRing->AllocDescriptor(CpuHandleSRV, GpuHandleSRV);
+	owner->TextureDHRing->AllocDescriptor(CpuHandleSRV, GpuHandleSRV);
 
-	g_dx12_rhi->Device->CreateShaderResourceView(resource.Get(), &bufferSRVDesc, CpuHandleSRV);
+	owner->Device->CreateShaderResourceView(resource.Get(), &bufferSRVDesc, CpuHandleSRV);
 
 	Type = BYTE_ADDRESS;
 }
 
 void Buffer::MakeStructuredBufferSRV()
 {
+	SimpleDX12* owner = Owner;
+	assert(owner);
 	// create shader resource view
 	D3D12_SHADER_RESOURCE_VIEW_DESC bufferSRVDesc;
 	bufferSRVDesc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
@@ -2761,12 +3237,9 @@ void Buffer::MakeStructuredBufferSRV()
 	bufferSRVDesc.Buffer.NumElements = NumElements;
 	bufferSRVDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
 
-	// TODO : should be GlobalDHRing? if object instance are to move.
+	owner->TextureDHRing->AllocDescriptor(CpuHandleSRV, GpuHandleSRV);
 
-	g_dx12_rhi->TextureDHRing->AllocDescriptor(CpuHandleSRV, GpuHandleSRV);
-
-	g_dx12_rhi->Device->CreateShaderResourceView(resource.Get(), &bufferSRVDesc, CpuHandleSRV);
+	owner->Device->CreateShaderResourceView(resource.Get(), &bufferSRVDesc, CpuHandleSRV);
 
 	Type = STRUCTURED;
 }
-
