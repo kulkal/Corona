@@ -19,7 +19,10 @@ cbuffer ViewParameter : register(b0)
     float4x4 InvProjMatrix;
     float4 ProjectionParams;
     float4 LightDir;
-    float4 pad[2];
+    float ShadowLightRadius;
+    uint ShadowSampleCount;
+    float2 _padding;
+    float4 pad;
 };
 SamplerState sampleWrap : register(s0);
 
@@ -38,6 +41,26 @@ struct RayPayload
 {
     bool bHit;
 };
+
+float random(float2 p)
+{
+    return frac(sin(dot(p, float2(12.9898, 78.233))) * 43758.5453);
+}
+
+float2 SampleDisk(float2 u)
+{
+    float r = sqrt(u.x);
+    float phi = 2.0 * PI * u.y;
+    return float2(cos(phi), sin(phi)) * r;
+}
+
+float3x3 BuildBasis(float3 dir)
+{
+    float3 up = abs(dir.y) < 0.999f ? float3(0, 1, 0) : float3(1, 0, 0);
+    float3 tangent = normalize(cross(up, dir));
+    float3 bitangent = cross(dir, tangent);
+    return float3x3(tangent, bitangent, dir);
+}
 
 float3 offset_ray(float3 p, float3 n)
 {
@@ -87,29 +110,41 @@ void rayGen()
 
 
 
-	RayDesc ray;
-	ray.Origin = WorldPos + WorldNormal * 0.5; //    mul(float4(0, 0, 0, 1), InvViewMatrix).xyz;
+    float3 baseLightDir = normalize(LightDir.xyz);
+    float3x3 lightBasis = BuildBasis(baseLightDir);
+    float visibility = 0.0f;
+    const uint kMaxShadowSamples = 16;
+    uint sampleCount = min(max(ShadowSampleCount, 1), kMaxShadowSamples);
 
-	ray.Direction = LightDir;
+    [loop]
+    for (uint sampleIndex = 0; sampleIndex < kMaxShadowSamples; ++sampleIndex)
+    {
+        if (sampleIndex >= sampleCount)
+            break;
 
-	ray.TMin = 0;
-	ray.TMax = 100000;
+        float2 randUV = float2(
+            random(crd + float2(sampleIndex * 13.17, 17.31)),
+            random(crd + float2(sampleIndex * 29.73, 47.77)));
+        float2 disk = SampleDisk(randUV) * ShadowLightRadius;
+        float3 rayDir = normalize(baseLightDir + lightBasis[0] * disk.x + lightBasis[1] * disk.y);
 
-	RayPayload payload;
-    payload.bHit = true;
-	TraceRay(gRtScene, 
-        RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES 
-       // RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_CLOSEST_HIT_SHADER 
-        , 0xFF, 0 /* ray index*/, 0, 0, ray, payload);
+        RayDesc ray;
+        ray.Origin = WorldPos + WorldNormal * 0.5;
+        ray.Direction = rayDir;
+        ray.TMin = 0.01;
+        ray.TMax = 100000;
 
-	if (payload.bHit == false )
-	{
-		ShadowResult[launchIndex.xy] = float4(1, 1, 1, 1);
-	}
-	else
-	{
-		ShadowResult[launchIndex.xy] = float4(0.0, 0.0, 0.0, 1);
-	}
+        RayPayload payload;
+        payload.bHit = true;
+        TraceRay(gRtScene,
+            RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES,
+            0xFF, 0, 0, 0, ray, payload);
+
+        visibility += payload.bHit == false ? 1.0 : 0.0;
+    }
+
+    visibility /= sampleCount;
+    ShadowResult[launchIndex.xy] = float4(visibility.xxx, 1.0);
 
 }
 

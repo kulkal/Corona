@@ -98,15 +98,7 @@ float4 PSMain(PSInput input) : SV_TARGET
     }
     else if(DebugMode == 5)
     {
-        SH sh_indirect;
-        sh_indirect.shY = SrcTexSH[PixelPos/GIBufferScale];
-        sh_indirect.CoCg = SrcTex[PixelPos/GIBufferScale].xy;
-
-        float3 WorldNormal = SrcTexNormal[PixelPos];
-
-        float3 IndirectDiffuse = project_SH_irradiance(sh_indirect, WorldNormal);
-        SrcColor = float4(IndirectDiffuse, 0);
-        // SrcColor = float4(sh_indirect.shY);
+        SrcColor = float4(SrcTex[PixelPos].xyz, 0);
     }
     else if(DebugMode == 6) // DEPTH
     {

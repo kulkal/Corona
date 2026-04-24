@@ -16,17 +16,17 @@ I hope it helps someone to understand how dxr renderer looks like.
 ![](rt_4.png)
 
 ## Build
-* Go to build directory.
-* premake5.exe vs2017( or vs2019)
-* Right click solution manager and Manage Nuget packges.
-* Browse & install WinPixEventRuntime.
-* Build & run!
+* Generate the Visual Studio solution with CMake: `cmake --preset vs2022-x64`
+* Build a configuration: `cmake --build --preset release`
+* Open `out/build/vs2022-x64/Corona.sln`, or build and run from the command line.
+* The executable is still emitted to `src/`, and the Visual Studio debugger working directory is `src/`.
+* CMake expects `WinPixEventRuntime` to already exist under `build/packages/`.
 
 ## Third-party libs
 * [enkiTS](https://github.com/dougbinks/enkiTS)
 * [glm](https://glm.g-truc.net/0.9.9/index.html)
 * [NV Aftermath](https://developer.nvidia.com/nvidia-aftermath)
-* [premake](https://premake.github.io/)
+* [CMake](https://cmake.org/)
 * [imgui gizmo(compatible with glm)](https://github.com/DarisaLLC/imGuIZMO-1)
 
 ## Useful link

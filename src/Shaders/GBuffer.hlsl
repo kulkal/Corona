@@ -89,11 +89,12 @@ float3 CalcPerPixelNormal(float2 vTexcoord, float3 vVertNormal, float3 vVertTang
 struct PS_OUTPUT
 {
     float4 Albedo : SV_Target0;
-    float4 Normal : SV_Target1;
-    float4 GeomNormal : SV_Target2;
-    float2 Velocity : SV_Target3;
-    float4 Material : SV_Target4;
-    float UnjitteredDepth : SV_Target5;
+    float4 SpecularAlbedo : SV_Target1;
+    float4 Normal : SV_Target2;
+    float4 GeomNormal : SV_Target3;
+    float2 Velocity : SV_Target4;
+    float4 Material : SV_Target5;
+    float UnjitteredDepth : SV_Target6;
 };
 
 
@@ -141,6 +142,9 @@ PS_OUTPUT PSMain(PSInput input) : SV_TARGET
         output.Material.x = max(Roughness, 0.01) * RougnessMetalic.x;
         output.Material.y = max(Metallic, 0.01) * RougnessMetalic.y;
     }
+
+    output.SpecularAlbedo.xyz = lerp(0.04f.xxx, Albedo.xyz, output.Material.y);
+    output.SpecularAlbedo.w = 1.0f;
 
     return output;
 }

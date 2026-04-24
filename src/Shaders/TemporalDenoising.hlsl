@@ -20,7 +20,7 @@ RWTexture2D<float4> OutGIResultColor: register(u1);
 RWTexture2D<float4> OutGIResultSHDS : register(u2);
 RWTexture2D<float4> OutGIResultColorDS: register(u3);
 RWTexture2D<float4> OutSpecularGI: register(u4);
-RWTexture2D<float2> OutMoments: register(u4);
+RWTexture2D<float2> OutMoments: register(u5);
 
 SamplerState BilinearClamp : register(s0);
 
@@ -35,16 +35,12 @@ cbuffer TemporalFilterConstant : register(b0)
 	float BayerRotScale;
 	float SpecularBlurRadius;
 	float Point2PlaneDistScale;
+	float AccumulationAlpha;
+	uint HistoryValid;
+	float2 Padding;
 };
 
 #define GROUPSIZE 15
-groupshared float4 g_SH[GROUPSIZE][GROUPSIZE]; 
-groupshared float2 g_CoCg[GROUPSIZE][GROUPSIZE];
-groupshared float3 g_Normal[GROUPSIZE][GROUPSIZE]; 
-groupshared float g_Depth[GROUPSIZE][GROUPSIZE]; 
-// groupshared float4 g_Specular[GROUPSIZE][GROUPSIZE]; 
-
-
 static const float2 off[4] = { { 0, 0 }, { 1, 0 }, { 0, 1 }, { 1, 1 } };
 
 static const uint POISSON_SAMPLE_NUM = 16;
@@ -186,275 +182,81 @@ static const float BAYER_SAMPLES[BAYER_SAMPLE_NUM] =
 15, 7, 13, 5
 };
 
+float4 SanitizeFloat4(float4 value)
+{
+	if (any(isnan(value)) || any(isinf(value)))
+		return 0.0f.xxxx;
+
+	return value;
+}
+
 [numthreads(15, 15, 1)]
 void TemporalFilter( uint3 DTid : SV_DispatchThreadID, uint3 GTid : SV_GroupThreadID, uint GTIndex : SV_GroupIndex, uint3 GId : SV_GroupID)
 {
-	float2 PixelPos = DTid.xy;
-	float2 GroupPos = GTid.xy;
+    uint2 TextureSize = uint2(RTSize);
+    uint2 PixelPos = DTid.xy;
+	bool IsInBounds = PixelPos.x < TextureSize.x && PixelPos.y < TextureSize.y;
+	uint2 SafePixelPos = min(PixelPos, TextureSize - 1);
+	float accumulationAlpha = saturate(AccumulationAlpha);
 
+    float4 CurrentSpecular = SanitizeFloat4(InSpecularGITex[SafePixelPos]);
+    float4 CurrentDiffuse = SanitizeFloat4(InGIResultColorTex[SafePixelPos]);
+    CurrentDiffuse.w = 1.0f;
 
+    float4 BlendedSpecular = CurrentSpecular;
+    float4 BlendedDiffuse = CurrentDiffuse;
 
-  	uint2 LowResGroupPos;
-	LowResGroupPos.x = GTIndex % (GROUPSIZE / DOWNSAMPLE_SIZE);
-	LowResGroupPos.y = GTIndex / (GROUPSIZE / DOWNSAMPLE_SIZE);
-	uint2 CenterHiResPos = LowResGroupPos * DOWNSAMPLE_SIZE + uint2(1, 1);
+    if (HistoryValid != 0)
+    {
+        float2 velocity = VelocityTex[SafePixelPos].xy;
+        float2 prevUV = (float2(SafePixelPos) + 0.5f - velocity * RTSize) / RTSize;
 
-	float3 CurNormal = g_Normal[GroupPos.y][GroupPos.x] = NormalTex[PixelPos].xyz;
-    float CurDepth = g_Depth[GroupPos.y][GroupPos.x] = DepthTex[PixelPos];
+        bool validHistory = all(prevUV >= 0.0.xx) && all(prevUV <= 1.0.xx);
+        if (validHistory)
+        {
+            float currentDepth = DepthTex[SafePixelPos].x;
+            float prevDepth = PrevDepthTex.SampleLevel(BilinearClamp, prevUV, 0).x;
 
-	
+            float currentLinearDepth = GetLinearDepthOpenGL(currentDepth, ProjectionParams.z, ProjectionParams.w);
+            float prevLinearDepth = GetLinearDepthOpenGL(prevDepth, ProjectionParams.z, ProjectionParams.w);
 
-    // GroupMemoryBarrierWithGroupSync();
-	float2 PrevPos;
+            float3 currentNormal = normalize(NormalTex[SafePixelPos].xyz);
+            float3 prevNormal = normalize(PrevNormalTex.SampleLevel(BilinearClamp, prevUV, 0).xyz);
 
-    float3 Velocity = VelocityTex[PixelPos].xyz;
-    PrevPos = PixelPos - Velocity.xy  * RTSize;
-    float2 PrevUV = (PrevPos + 0.5) /RTSize;
-	float4 PrevSpecular = 0..xxxx;
+            float depthDelta = abs(currentLinearDepth - prevLinearDepth) / max(currentLinearDepth, 1e-3f);
+            float depthWeight = exp(-depthDelta * 32.0f);
+            float normalWeight = pow(saturate(dot(currentNormal, prevNormal)), 32.0f);
+            float historyWeight = saturate(depthWeight * normalWeight);
 
-	PrevSpecular = InSpecularGITexPrev.SampleLevel(BilinearClamp, PrevUV, 0);
+            float4 PrevSpecular = SanitizeFloat4(InSpecularGITexPrev.SampleLevel(BilinearClamp, prevUV, 0));
+            float4 PrevDiffuse = SanitizeFloat4(InGIResultColorTexPrev.SampleLevel(BilinearClamp, prevUV, 0));
+            PrevDiffuse.w = 1.0f;
 
-    // get current indirect specular.
+            float diffuseAlpha = lerp(1.0f, accumulationAlpha, historyWeight);
+            float specularAlpha = lerp(1.0f, saturate(accumulationAlpha * 1.5f), historyWeight);
 
-	float4 CurrentSpecular = InSpecularGITex[PixelPos];
+            BlendedDiffuse = lerp(PrevDiffuse, CurrentDiffuse, diffuseAlpha);
+            BlendedDiffuse.w = 1.0f;
+            BlendedSpecular = lerp(PrevSpecular, CurrentSpecular, specularAlpha);
+            BlendedSpecular.w = lerp(PrevSpecular.w + 1.0f, 1.0f, 1.0f - historyWeight);
+        }
+        else
+        {
+            BlendedSpecular.w = 1.0f;
+        }
+    }
+    else
+    {
+        BlendedSpecular.w = 1.0f;
+    }
 
-	float HistoryLength = PrevSpecular.w * 10.0f;
-
-	float3 SpecMin = 99999999.0f;
-	float3 SpecMax = -99999999.0f;
-	// float SpecularBlurRadius = 1;
-	float Point2PlaneDist = clamp(CurrentSpecular.w/Point2PlaneDistScale, 0, 100);
-	float Roughness = RougnessMetalicTex[PixelPos].x;
-	float SumWSpec = 1;
-	float RotAngle = BAYER_SAMPLES[FrameIndex % BAYER_SAMPLE_NUM] * 0.1;
-	float CZ = GetLinearDepthOpenGL(CurDepth, ProjectionParams.z, ProjectionParams.w) ;
-	
-	// to reduce ghosting
-	if(PrevSpecular.w < 0.5)
-		PrevSpecular.xyz = float3(0, 0, 0);
-
-	// if(PrevSpecular.w < 0.5)
-	// {
-	// 	float BlurRadius = SpecularBlurRadius * Roughness*4;// * (saturate(hitDist/0.5) * 0.9 + 0.1);
-
-	// 	for(int i=0;i<POISSON_SAMPLE_NUM_32;i++)
-	// 	{
-	// 		float2 Offset = POISSON_SAMPLES_32[i];
-	// 		float2 OffsetRotated;
-	// 		OffsetRotated.x = Offset.x * cos(RotAngle) - Offset.y * sin(RotAngle);
-	// 		OffsetRotated.y = Offset.x * sin(RotAngle) + Offset.y * cos(RotAngle);
-
-	// 		// OffsetRotated = Offset;
-	//  		float2 uv = (DTid.xy + 0.5 + OffsetRotated* BlurRadius) / RTSize;
-
-	// 		float4 SampleSpecular = InSpecularGITex.SampleLevel(BilinearClamp, uv, 0);
-
-	// 		SpecMin = min(SpecMin, SampleSpecular);
-	//         SpecMax = max(SpecMax, SampleSpecular);
-
-	// 		float SampleDepth = DepthTex.SampleLevel(BilinearClamp, uv, 0);
-	// 		float SampleZ = GetLinearDepthOpenGL(SampleDepth, ProjectionParams.z, ProjectionParams.w) ;
-	// 		float SampleW = 1;///16.0; // point to plane weight
-	// 		float DistZ = abs(SampleZ - CZ) * 0.2;
-	// 		SampleW *= exp(-DistZ/1);
-
-	// 		CurrentSpecular += SampleSpecular * SampleW;
-	// 		SumWSpec += SampleW;
-	// 	}
-	// }
-	// else 
+	if(IsInBounds)
 	{
-		float BlurRadius = SpecularBlurRadius * Roughness *1 ;// * (saturate(hitDist/0.5) * 0.9 + 0.1);
-
-		for(int i=0;i<POISSON_SAMPLE_NUM;i++)
-		{
-			float2 Offset = POISSON_SAMPLES[i];
-			float2 OffsetRotated;
-			OffsetRotated.x = Offset.x * cos(RotAngle) - Offset.y * sin(RotAngle);
-			OffsetRotated.y = Offset.x * sin(RotAngle) + Offset.y * cos(RotAngle);
-
-			// OffsetRotated = Offset;
-	 		float2 uv = (DTid.xy + 0.5 + OffsetRotated* BlurRadius) / RTSize;
-
-			float4 SampleSpecular = InSpecularGITex.SampleLevel(BilinearClamp, uv, 0);
-
-			SpecMin = min(SpecMin, SampleSpecular);
-	        SpecMax = max(SpecMax, SampleSpecular);
-
-			float SampleDepth = DepthTex.SampleLevel(BilinearClamp, uv, 0);
-			float SampleZ = GetLinearDepthOpenGL(SampleDepth, ProjectionParams.z, ProjectionParams.w) ;
-			float SampleW = 1;///16.0; // point to plane weight
-			float DistZ = abs(SampleZ - CZ) * 0.2;
-			SampleW *= exp(-DistZ/1);
-
-			CurrentSpecular += SampleSpecular * SampleW;
-			SumWSpec += SampleW;
-		}
+		OutGIResultSH[PixelPos] = 0.0f.xxxx;
+		OutGIResultColor[PixelPos] = BlendedDiffuse;
+		OutGIResultSHDS[PixelPos] = 0.0f.xxxx;
+		OutGIResultColorDS[PixelPos] = BlendedDiffuse;
+		OutSpecularGI[PixelPos] = BlendedSpecular;
 	}
-
-	CurrentSpecular /= SumWSpec;
-
-	SH CurrentSH = init_SH();
-	CurrentSH.shY = InGIResultSHTex[PixelPos];
-	CurrentSH.CoCg = InGIResultColorTex[PixelPos].xy;
-
-	bool isValidHistory = false;
-	float temporal_sum_w_spec = 0.0f;
-	float2 pos_ld = floor(PrevPos - float2(0.5, 0.5));
-	float2 subpix = frac(PrevPos - float2(0.5, 0.5) - pos_ld);
-	
-	SH PrevSH = init_SH();
-
-	PrevSH.shY = InGIResultSHTexPrev[PrevPos];
-	PrevSH.CoCg = InGIResultColorTexPrev[PrevPos].xy;
-
- 	
-	//Bilinear/bilateral filter
-	float w[4] = {
-		(1.0 - subpix.x) * (1.0 - subpix.y),
-		(subpix.x      ) * (1.0 - subpix.y),
-		(1.0 - subpix.x) * (subpix.y      ),
-		(subpix.x      ) * (subpix.y      )
-	};
-
-	float fwidth_depth = 1.0 / max(0.1, (abs(DepthTex[PixelPos + float2(1, 0)] - DepthTex[PixelPos]) * 2 + abs(DepthTex[PixelPos + float2(0, 1)] - DepthTex[PixelPos])));
-
-	// bool bt = false;
-	// [unroll]
-	for(int i = 0; i < 4; i++) 
-	{
-		float2 p = float2(pos_ld) + off[i];
-
-		if(p.x < 0 || p.x >= RTSize.x || p.y < 0 || p.y >= RTSize.y)
-			continue;
-
-		float PrevDepth = PrevDepthTex[p];
-		float3 PrevNormal = PrevNormalTex[p];
-
-		float dist_depth = abs(CurDepth - PrevDepth ) ;
-		// float dist_depth  = abs(GetLinearDepthOpenGL(CurDepth, ProjectionParams.z, ProjectionParams.w) - GetLinearDepthOpenGL(PrevDepth, ProjectionParams.z, ProjectionParams.w));
-		float dot_normals = abs(dot(CurNormal, PrevNormal));
-		// if(CurDepth < 0)
-		// {
-		// 	// Reduce the filter sensitivity to depth for secondary surfaces,
-		// 	// because reflection/refraction motion vectors are often inaccurate.
-		// 	dist_depth *= 0.25;
-		// }
-		if(dist_depth < 0.001 && dot_normals > 0.5) 
-		// if(dist_depth < 0.001) 
-		{
-			float w_diff = w[i];
-			float w_spec = w_diff * pow(max(dot_normals, 0), TemporalValidParams.x);
-			
-
-			temporal_sum_w_spec += w_spec;
-		}
-	}
-
-	// this code have application hang infinitely with gpu validation enabled.
-	if(temporal_sum_w_spec > 0.000001)
-	{
-		float inv_w_spec = 1.0 / temporal_sum_w_spec;
-		
-		isValidHistory = true;
-	}
-
-	
-	
-	float4 BlendedSpecular = 0..xxxx;
-	SH BlendedSH = init_SH();
-	float W = 0.05;
-	if(isValidHistory)
-	{
-		BlendedSH.shY = max(CurrentSH.shY * W + PrevSH.shY * (1-W), float4(0, 0, 0, 0));
-    	BlendedSH.CoCg = max(CurrentSH.CoCg * W + PrevSH.CoCg * (1-W), float2(0, 0));	
-	    BlendedSpecular = max(CurrentSpecular * W + PrevSpecular * (1-W), float4(0, 0, 0, 0));
-    	BlendedSpecular.w = PrevSpecular.w + 0.1;
-	}
-	else
-	{
-		BlendedSH.shY = CurrentSH.shY;
-		BlendedSH.CoCg = CurrentSH.CoCg;
-
-		BlendedSpecular = CurrentSpecular;
-
-    	BlendedSpecular.w = 0;
-
-	}
-
-	OutGIResultSH[PixelPos] = BlendedSH.shY;
-    OutGIResultColor[PixelPos] = float4(BlendedSH.CoCg, 0, 0);
-
-    OutSpecularGI[PixelPos] = BlendedSpecular;
-
-    g_SH[GroupPos.y][GroupPos.x] = BlendedSH.shY;
-    g_CoCg[GroupPos.y][GroupPos.x] = BlendedSH.CoCg;
-
-    // g_Specular[GroupPos.y][GroupPos.x] = BlendedSpecular;
-   
-    GroupMemoryBarrierWithGroupSync();
-
-	// gl_LocalInvocationIndex 0 ~225
-	// GROUP_SIZE / GRAD_DWN = 15/3 = 5
-	// 5 * 15
-	// 5x5 == 25 
-	// lowres_local_id.x = 0~5
-	// lowres_local_id.y 0 ~ 5
-	if(LowResGroupPos.y >= (GROUPSIZE / DOWNSAMPLE_SIZE))
-		return;
-
-	float3 CenterNormal = g_Normal[CenterHiResPos.y][CenterHiResPos.x];
-	float CenterDepth = g_Depth[CenterHiResPos.y][CenterHiResPos.x];
-	float CenterZ = GetLinearDepthOpenGL(CenterDepth, ProjectionParams.z, ProjectionParams.w) ;
-	
-	// float depth_width = s_depth_width[lowres_local_id.y][lowres_local_id.x];
-
-	SH CenterSH;
-	CenterSH.shY = g_SH[CenterHiResPos.y][CenterHiResPos.x];
-	CenterSH.CoCg = g_CoCg[CenterHiResPos.y][CenterHiResPos.x];
-
-	float sum_w = 1;
-	SH SumSH = CenterSH;
-
-	// float3 SumSpecular = 0..xxx;
-
-	for(int yy = -1; yy <= 1; yy++)
-	{
-		for(int xx = -1; xx <= 1; xx++)
-		{
-			if(yy == 0 && xx == 0)
-				continue;
-
-			float3 SampleNormal = g_Normal[CenterHiResPos.y + yy][CenterHiResPos.x + xx].xyz;
-			float SampleDepth = g_Depth[CenterHiResPos.y + yy][CenterHiResPos.x + xx];
-			float SampleZ = GetLinearDepthOpenGL(SampleDepth, ProjectionParams.z, ProjectionParams.w) ;
-
-			float w = 1.0f;
-			float DistZ = abs(SampleZ - CenterZ) * 0.2;
-			w *= exp(-DistZ/1) ;
-
-			w *= pow(max(dot(SampleNormal, CenterNormal), 0), 8	);
-
-			SH SampleSH;
-			SampleSH.shY = g_SH[CenterHiResPos.y + yy][CenterHiResPos.x + xx];
-			SampleSH.CoCg = g_CoCg[CenterHiResPos.y + yy][CenterHiResPos.x + xx];
-
-			accumulate_SH(SumSH, SampleSH, w);
-
-			// float3 SampleSpecular = g_Specular[CenterHiResPos.y + yy][CenterHiResPos.x + xx];
-			// SumSpecular += SampleSpecular;
-			sum_w += w;
-		}
-	}
-
-	float inv_w = 1.0 / sum_w;
-	SumSH.shY  *= inv_w;
-	SumSH.CoCg *= inv_w;
-
-	// SumSpecular *= inv_w;
-
-    uint2 LowResPos = GId * (GROUPSIZE / DOWNSAMPLE_SIZE) + LowResGroupPos;
-	OutGIResultSHDS[LowResPos] = SumSH.shY;
-    OutGIResultColorDS[LowResPos] = float4(SumSH.CoCg, 0, 0);
 
 }

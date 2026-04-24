@@ -106,7 +106,7 @@ float3 ToneMap_Hable(in float3 color) {
 
 float4 PSMain(PSInput input) : SV_TARGET
 {
-    input.uv.y *= -1;
+    input.uv.y = 1.0f - input.uv.y;
     float4 SrcColor = SrcTex.Sample(sampleWrap, input.uv);
     float3 ToneMapped;
     if(ToneMapMode == 0) 

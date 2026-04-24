@@ -30,7 +30,6 @@ Texture2D RoughnessMetalicTex : register(t8);
 
 SamplerState sampleWrap : register(s0);
 
-
 cbuffer LightingParam : register(b0)
 {
     float4x4 ViewMatrix;
@@ -70,6 +69,21 @@ PSInput VSMain(
     return result;
 }
 
+float3 SanitizeFloat3(float3 value)
+{
+    if (any(isnan(value)) || any(isinf(value)))
+        return 0.0f.xxx;
+
+    return value;
+}
+
+float4 SanitizeFloat4(float4 value)
+{
+    if (any(isnan(value)) || any(isinf(value)))
+        return 0.0f.xxxx;
+
+    return value;
+}
 
 float4 PSMain(PSInput input) : SV_TARGET
 {
@@ -83,23 +97,18 @@ float4 PSMain(PSInput input) : SV_TARGET
     float2 PixelPos = input.uv * RTSize;
 
 
-    float3 Albedo = AlbedoTex[PixelPos];
-    float3 WorldNormal = NormalTex[PixelPos];
-    float3 Shadow = ShadowTex[PixelPos];
+    float3 Albedo = SanitizeFloat3(AlbedoTex[PixelPos].xyz);
+    float3 WorldNormal = normalize(SanitizeFloat3(NormalTex[PixelPos].xyz));
+    float3 Shadow = saturate(SanitizeFloat3(ShadowTex[PixelPos].xyz));
 
     float2 Velocity = VelocityTex[PixelPos];
 
-    float3 LightDir = LightDirAndIntensity.xyz;
+    float3 LightDir = normalize(LightDirAndIntensity.xyz);
     float LightIntensity = LightDirAndIntensity.w;
 	
-    float3 DiffuseLighting = bEnableDirectDiffuse ? (dot(LightDir.xyz, WorldNormal) * LightIntensity * LightColor * Albedo * Shadow) : float3(0, 0, 0);
+    float3 DiffuseLighting = bEnableDirectDiffuse ? (saturate(dot(LightDir, WorldNormal)) * LightIntensity * LightColor * Albedo * Shadow) : float3(0, 0, 0);
 
-    float2 ScreenUV = input.uv;
-    SH sh_indirect;
-    sh_indirect.shY = GIResultSHTex[PixelPos/GIBufferScale];
-    sh_indirect.CoCg = GIResultColorTex[PixelPos/GIBufferScale].xy;
-
-    float3 IndirectDiffuse = bEnableDiffuseGI ? (project_SH_irradiance(sh_indirect, WorldNormal) * Albedo) : float3(0, 0, 0);
+    float3 IndirectDiffuse = bEnableDiffuseGI ? SanitizeFloat3(GIResultColorTex[PixelPos / GIBufferScale].xyz * Albedo) : float3(0, 0, 0);
 
     float3 V = mul(InvViewMatrix, float3(0, 0, 1));
     float NdotV = clamp(dot(WorldNormal, -V), 0, 1);
@@ -116,14 +125,15 @@ float4 PSMain(PSInput input) : SV_TARGET
     float3 IndirectSpecular;
 
 
-    IndirectSpecular = bEnableSpecularGI ? (SpecularGITex[PixelPos].xyz * SpecularColor) : float3(0, 0, 0);
+    IndirectSpecular = bEnableSpecularGI ? SanitizeFloat3(SpecularGITex[PixelPos].xyz * SpecularColor) : float3(0, 0, 0);
 
 
-    float3 DirectSpecular = bEnableDirectSpecular ? (SpecularColor * GGX(V, normalize(LightDir), WorldNormal, Rougness, 0.0) * LightIntensity * LightColor * Shadow) : float3(0, 0, 0);
+    float3 DirectSpecular = bEnableDirectSpecular ? (SpecularColor * GGX(V, LightDir, WorldNormal, Rougness, 0.0) * LightIntensity * LightColor * Shadow) : float3(0, 0, 0);
 
     DiffuseLighting = max(DiffuseLighting , 0);
 
-    DirectSpecular = max(DirectSpecular + IndirectSpecular, 0);
+    float3 TotalSpecular = max(DirectSpecular + IndirectSpecular, 0);
 
-    return float4(DiffuseLighting * (1-Specular) + DirectSpecular + IndirectDiffuse*(1-Specular) + IndirectSpecular, 1);
+    float3 FinalColor = DiffuseLighting * (1-Specular) + TotalSpecular + IndirectDiffuse * (1-Specular);
+    return float4(SanitizeFloat3(FinalColor), 1);
 }

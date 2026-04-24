@@ -12,6 +12,8 @@
 #pragma once
 #define GLM_FORCE_CTOR_INIT
 #include <array>
+#include <deque>
+#include <vector>
 
 #include "glm/glm.hpp"
 #define GLM_ENABLE_EXPERIMENTAL
@@ -27,6 +29,15 @@
 #include "enkiTS/TaskScheduler.h"
 #define PROFILE_BUILD 1
 #include "pix3.h"
+#ifndef WITH_STREAMLINE
+#define WITH_STREAMLINE 0
+#endif
+#if WITH_STREAMLINE
+#include "sl.h"
+#include "sl_consts.h"
+#include "sl_dlss.h"
+#include "sl_dlss_d.h"
+#endif
 using namespace DirectX;
 
 // Note that while ComPtr is used to manage the lifetime of resources on the CPU,
@@ -40,6 +51,7 @@ using namespace std;
 
 class Corona : public DXSample
 {
+public:
 	enum class ERenderingMode
 	{
 		HYBRID,		// Rasterization GBuffer + Raytracing
@@ -52,11 +64,11 @@ class Corona : public DXSample
 		WORLD_NORMAL,
 		GEO_NORMAL,
 		DEPTH,
-		RAW_SH,
-		RAW_CoCg,
-		TEMPORAL_FILTERED_SH,
-		SPATIAL_FILTERED_SH,
-		FINAL_INDIRECT_DIFFUSE,
+		RAW_DIFFUSE_GI,
+		RAW_DIFFUSE_GI_AUX,
+		TEMPORAL_FILTERED_DIFFUSE_GI,
+		SPATIAL_FILTERED_DIFFUSE_GI,
+		FINAL_DIFFUSE_GI,
 		ALBEDO,
 		VELOCITY,
 		ROUGNESS_METALLIC,
@@ -70,39 +82,66 @@ class Corona : public DXSample
 	ERenderingMode RenderingMode = ERenderingMode::HYBRID;
 	EDebugVisualization FullscreenDebugBuffer = EDebugVisualization::NO_FULLSCREEN;
 private:
+	enum class EGpuPass : UINT32
+	{
+		Frame = 0,
+		GBuffer,
+		RaytraceShadow,
+		ShadowDenoise,
+		RaytraceReflection,
+		RaytraceGI,
+		TemporalDenoise,
+		SpatialDenoise,
+		Lighting,
+		DLSSRR,
+		DLSSSR,
+		TemporalAA,
+		PathTracing,
+		ToneMap,
+		Debug,
+		ImGui,
+		Count
+	};
+
+	static constexpr UINT32 GpuPassCount = static_cast<UINT32>(EGpuPass::Count);
+	static constexpr UINT32 GpuQueriesPerPass = 2;
 
 	shared_ptr<Texture> DepthBuffer;
 	shared_ptr<Texture> UnjitteredDepthBuffers[2];
 
 	UINT ColorBufferWriteIndex = 0;
+	UINT ResolvedColorBufferIndex = 0;
 	shared_ptr<Texture> ColorBuffers[2];
 	shared_ptr<Texture> LightingBuffer;
 	shared_ptr<Texture> AlbedoBuffer;
+	shared_ptr<Texture> SpecularAlbedoBuffer;
 	shared_ptr<Texture> NormalBuffers[2];
 	shared_ptr<Texture> GeomNormalBuffer;
 	shared_ptr<Texture> VelocityBuffer;
 	shared_ptr<Texture> RoughnessMetalicBuffer;
 	shared_ptr<Texture> ShadowBuffer;
+	shared_ptr<Texture> ShadowDenoisedBuffer;
 
-	shared_ptr<Texture> SpeculaGIBufferRaw;
+	shared_ptr<Texture> SpecularGIRaw;
 
-	shared_ptr<Texture> SpeculaGIBufferTemporal[2];
+	shared_ptr<Texture> SpecularGITemporal[2];
+	shared_ptr<Texture> SpecularGISpatial[2];
 
-	shared_ptr<Texture> SpeculaGIMoments[2];
-
-
-
+	shared_ptr<Texture> SpecularGIMoments[2];
 
 
-	UINT GIBufferScale = 3;
+
+
+
+	UINT GIBufferScale = 1;
 	UINT GIBufferWriteIndex = 0;
-	shared_ptr<Texture> DiffuseGISHTemporal[2];
-	shared_ptr<Texture> DiffuseGICoCgTemporal[2];
-	shared_ptr<Texture> DiffuseGISHRaw;
-	shared_ptr<Texture> DiffuseGICoCgRaw;
+	shared_ptr<Texture> DiffuseGITemporalAux[2];
+	shared_ptr<Texture> DiffuseGITemporal[2];
+	shared_ptr<Texture> DiffuseGIRawAux;
+	shared_ptr<Texture> DiffuseGIRaw;
 
-	shared_ptr<Texture> DiffuseGISHSpatial[2];
-	shared_ptr<Texture> DiffuseGICoCgSpatial[2];
+	shared_ptr<Texture> DiffuseGISpatialAux[2];
+	shared_ptr<Texture> DiffuseGISpatial[2];
 
 	shared_ptr<Texture> BloomBlurPingPong[2];
 	shared_ptr<Texture> LumaBuffer;
@@ -135,6 +174,8 @@ private:
 		glm::vec4 ProjectionParams;
 		UINT32 Iteration;
 		UINT32 GIBufferScale;
+		UINT32 AccumulatedFrames = 0;
+		UINT32 Padding = 0;
 		float IndirectDiffuseWeightFactorDepth = 0.5f;
 		float IndirectDiffuseWeightFactorNormal = 1.0f;
 	};
@@ -157,6 +198,9 @@ private:
 		float BayerRotScale = 0.1;
 		float SpecularBlurRadius = 4;
 		float Point2PlaneDistScale = 10.0f;
+		float AccumulationAlpha = 1.0f;
+		UINT32 HistoryValid = 0;
+		glm::vec2 Padding = glm::vec2(0.0f);
 	};
 
 	TemporalFilterConstant TemporalFilterCB;
@@ -171,13 +215,25 @@ private:
 		glm::mat4x4 ProjMatrix;
 		glm::mat4x4 InvProjMatrix;
 		glm::vec4 ProjectionParams;
-		glm::vec4	LightDir;
-		glm::vec4	pad[2];
+		glm::vec4 LightDir;
+		float ShadowLightRadius = 0.03f;
+		UINT32 ShadowSampleCount = 8;
+		glm::vec2 _padding;
+		glm::vec4 pad;
 	};
 
 	RTShadowViewParamCB RTShadowViewParam;
 	
 	shared_ptr<RTPipelineStateObject> PSO_RT_SHADOW;
+	struct ShadowDenoiseCB
+	{
+		glm::vec4 ProjectionParams;
+		glm::vec2 RTSize;
+		float DepthSigma = 32.0f;
+		float NormalSigma = 64.0f;
+	};
+	ShadowDenoiseCB ShadowDenoiseParam;
+	shared_ptr<PipelineStateObject> ShadowDenoisePSO;
 
 
 	// RT reflection
@@ -272,12 +328,19 @@ private:
 	shared_ptr<RTPipelineStateObject> PSO_PATH_TRACING;
 	shared_ptr<Texture> PathTracingAccumBuffer[2];
 	UINT PathTracingWriteIndex = 0;
-	glm::mat4x4 PrevPathTracingViewMat;
+	glm::mat4x4 PrevPathTracingViewMat = glm::mat4x4(0.0f);
 	glm::vec3 PrevPathTracingLightDir;
 	float PrevPathTracingLightIntensity = 0.0f;
 	glm::vec3 PrevSkyColorTop = glm::vec3(0.0f);
 	glm::vec3 PrevSkyColorBottom = glm::vec3(0.0f);
 	float PrevSkyIntensity = 0.0f;
+	UINT32 IndirectAccumulatedFrames = 0;
+	glm::mat4x4 PrevIndirectAccumViewMat = glm::mat4x4(0.0f);
+	glm::vec3 PrevIndirectAccumLightDir = glm::vec3(0.0f);
+	float PrevIndirectAccumLightIntensity = 0.0f;
+	glm::vec3 PrevIndirectSkyColorTop = glm::vec3(0.0f);
+	glm::vec3 PrevIndirectSkyColorBottom = glm::vec3(0.0f);
+	float PrevIndirectSkyIntensity = 0.0f;
 
 	// full screen copy pass
 	enum EToneMapMode
@@ -355,11 +418,34 @@ private:
 		glm::vec2 RTSize;
 		float TAABlendFactor;
 		UINT32 ClampMode;
-		//float Exposure;
 		float BloomStrength;
+		UINT32 HistoryValid;
+		glm::vec3 _padding;
 	};
-	
-	bool bEnableTAA = true;
+
+public:
+	enum class EAntiAliasingMode
+	{
+		OFF = 0,
+		TAA,
+		DLSS_SR,
+		DLSS_RR,
+		COUNT
+	};
+
+	enum class EDLSSQualityMode
+	{
+		QUALITY = 0,
+		BALANCED,
+		PERFORMANCE,
+		ULTRA_PERFORMANCE,
+		COUNT
+	};
+
+private:
+
+	EAntiAliasingMode AntiAliasingMode = EAntiAliasingMode::DLSS_RR;
+	EDLSSQualityMode DLSSQualityMode = EDLSSQualityMode::QUALITY;
 	bool bEnableDiffuseGI = true;
 	bool bEnableSpecularGI = true;
 	bool bEnableDirectDiffuse = true;
@@ -367,9 +453,50 @@ private:
 
 	UINT32 ClampMode = 2;
 
-	float JitterScale = 0.85;
+	float JitterScale = 0.6;
+	UINT32 TAASampleCount = 32;
+	UINT32 DLSSJitterPhaseCount = 32;
+	UINT RenderWidth = 0;
+	UINT RenderHeight = 0;
+	bool bPendingUpscaleRefresh = false;
+	bool bForceUpscaleReload = false;
+	bool bResetTemporalStateNextUpdate = false;
+	UINT32 DLSSTransitionFramesRemaining = 0;
+	bool bUseLightingBufferFallbackForToneMap = false;
+	bool bAutoAADumpEnabled = true;
+	bool bAutoAADumpInitialized = false;
+	bool bAutoAADumpCompleted = false;
+	bool bStartupModeConfigured = false;
+	UINT32 AutoAADumpPhase = 0;
+	UINT32 AutoAADumpFramesInPhase = 0;
+	std::wstring AutoAADumpDir;
+	EAntiAliasingMode StartupSelectedAAMode = EAntiAliasingMode::DLSS_RR;
+	ERenderingMode StartupRenderingMode = ERenderingMode::HYBRID;
+	bool bCommandLineAutoDumpOverrideSet = false;
+	bool bCommandLineAutoDumpEnabled = false;
+	bool bCommandLineAAOverrideSet = false;
+	EAntiAliasingMode CommandLineSelectedAAMode = EAntiAliasingMode::DLSS_RR;
+	bool bCommandLineRenderModeOverrideSet = false;
+	ERenderingMode CommandLineRenderingMode = ERenderingMode::HYBRID;
 
 	shared_ptr<PipelineStateObject> TemporalAAPSO;
+	bool bTemporalAAHistoryValid = false;
+	bool bTemporalDenoiserHistoryValid = false;
+	bool bPendingTemporalHistoryClear = false;
+	bool bImguiInitialized = false;
+	bool bBlueNoiseInitialized = false;
+#if WITH_STREAMLINE
+	bool bStreamlineInitialized = false;
+	bool bDLSSAvailable = false;
+	bool bDLSSRRAvailable = false;
+	bool bDLSSResetNeeded = false;
+	sl::FrameToken* StreamlineFrameToken = nullptr;
+	uint32_t StreamlineFrameIndex = 0;
+	bool bStreamlineConstantsSetThisFrame = false;
+#else
+	bool bDLSSAvailable = false;
+	bool bDLSSRRAvailable = false;
+#endif
 
 
 	// bloom blur
@@ -479,6 +606,7 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 
 	glm::mat4x4 ViewMat;
 	glm::mat4x4 ProjMat;
+	glm::mat4x4 UnjitteredProjMat;
 	glm::mat4x4 InvViewMat;
 	glm::mat4x4 InvProjMat;
 	glm::mat4x4 ViewProjMat;
@@ -487,6 +615,7 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	glm::mat4x4 PrevViewProjMat;
 	glm::vec2 JitterOffset;
 	glm::vec2 PrevJitter;
+	glm::vec2 CurrentJitter;
 
 	glm::mat4x4 UnjitteredViewProjMat;
 	glm::mat4x4 PrevUnjitteredViewProjMat;
@@ -524,10 +653,34 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 
 	bool bRecompileShaders = false;
 	bool bShowImgui = true;
+	bool bShowGpuTimingWindow = false;
+	bool bGpuTimingResourcesInitialized = false;
+	UINT32 GpuTimingAverageFrameCount = 30;
+	UINT64 GpuTimestampFrequency = 0;
+	ComPtr<ID3D12QueryHeap> GpuTimestampQueryHeap;
+	ComPtr<ID3D12Resource> GpuTimestampReadbackBuffer;
+	UINT64* GpuTimestampReadbackMapped = nullptr;
+	std::array<std::array<uint8_t, GpuPassCount>, 3> GpuPassActiveMaskPerFrame = {};
+	std::array<float, GpuPassCount> GpuPassLastTimeMs = {};
+	std::array<float, GpuPassCount> GpuPassAverageTimeMs = {};
+	std::array<std::deque<float>, GpuPassCount> GpuPassHistoryMs = {};
 	void RecompileShaders();
+	void InitGpuTimingResources();
+	void BeginGpuTimingFrame();
+	void ResolveGpuTimingFrame();
+	void UpdateGpuTimingReadback();
+	void BeginGpuPassTiming(EGpuPass pass);
+	void EndGpuPassTiming(EGpuPass pass);
+	const char* GetGpuPassName(EGpuPass pass) const;
+	
+	// Raytracing helper functions
+	void UpdateInstancePropertyBuffer();
+	void RebuildAccelerationStructures();
+	
 public:
 
 	void InitRaytracingData();
+	void AddScene(shared_ptr<Scene> scene);
 	
 
 	void LoadPipeline();
@@ -550,6 +703,8 @@ public:
 
 	void InitLightingPass();
 
+	void InitShadowDenoisePass();
+
 	void InitTemporalAAPass();
 
 	void InitBloomPass();
@@ -557,6 +712,9 @@ public:
 	void InitGenMipSpecularGIPass();
 
 	void InitImgui();
+	bool LoadCameraState();
+	void SaveCameraState();
+	std::wstring GetCameraStatePath();
 
 	void InitBlueNoiseTexture();
 
@@ -565,6 +723,8 @@ public:
 	void GBufferPass();
 
 	void RaytraceShadowPass();
+
+	void ShadowDenoisePass();
 
 	void RaytraceReflectionPass();
 
@@ -589,7 +749,34 @@ public:
 
 	void TemporalAAPass();
 
+	bool IsTemporalAAEnabled() const { return AntiAliasingMode == EAntiAliasingMode::TAA; }
+	bool IsDLSSSREnabled() const { return AntiAliasingMode == EAntiAliasingMode::DLSS_SR && bDLSSAvailable; }
+	bool IsDLSSRREnabled() const { return AntiAliasingMode == EAntiAliasingMode::DLSS_RR && bDLSSRRAvailable; }
+	bool IsDLSSUpscaleEnabled() const { return IsDLSSSREnabled() || IsDLSSRREnabled(); }
+	bool IsJitterEnabled() const { return IsTemporalAAEnabled() || IsDLSSUpscaleEnabled(); }
+	UINT GetRenderWidth() const { return IsDLSSUpscaleEnabled() && RenderingMode == ERenderingMode::HYBRID ? RenderWidth : m_width; }
+	UINT GetRenderHeight() const { return IsDLSSUpscaleEnabled() && RenderingMode == ERenderingMode::HYBRID ? RenderHeight : m_height; }
+
 	void GenMipSpecularGIPass();
+	void ResetAllAccumulationState(bool forceUpscaleReload);
+	void ResetTemporalHistoryBuffers();
+	void ReloadRenderResolutionAssets();
+	void RefreshUpscaleSettings(bool reloadAssets);
+	Texture* GetCurrentResolveSource() const;
+	void PromptStartupModeSelection();
+	void InitializeAutoAADump();
+	void AdvanceAutoAADump(Texture* backbuffer);
+	void AppendAutoAADumpLog(const std::wstring& line);
+	bool DumpTextureHDR(Texture* source, const std::wstring& filePath, D3D12_RESOURCE_STATES beforeState);
+	bool DumpTexturePNG(Texture* source, const std::wstring& filePath, D3D12_RESOURCE_STATES beforeState);
+#if WITH_STREAMLINE
+	void InitStreamline();
+	void ShutdownStreamline();
+	bool BeginStreamlineFrame();
+	bool EnsureStreamlineConstants();
+	bool DLSSPass();
+	bool DLSSRRPass();
+#endif
 
 	// DXSample functions
 	virtual void OnInit();
@@ -599,6 +786,8 @@ public:
 	virtual void OnRender();
 
 	virtual void OnDestroy();
+
+	virtual void ParseCommandLineArgs(_In_reads_(argc) WCHAR* argv[], int argc) override;
 
 	virtual void OnKeyDown(UINT8 key);
 

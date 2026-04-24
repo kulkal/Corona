@@ -36,6 +36,20 @@ cbuffer ViewParameter : register(b0)
 
 SamplerState sampleWrap : register(s0);
 
+static const float INV_PI = 1.0 / PI;
+
+float3 EvaluateSkyColor(float3 direction)
+{
+    float t = 0.5 * (direction.y + 1.0);
+    return lerp(SkyColorBottom, SkyColorTop, t) * SkyIntensity;
+}
+
+float3 EvaluateSkyDiffuseBounce(float3 normal)
+{
+    float3 averageSky = 0.5f * (SkyColorTop + SkyColorBottom);
+    float3 skyGradient = 0.5f * (SkyColorTop - SkyColorBottom);
+    return (averageSky + (2.0f / 3.0f) * skyGradient * normal.y) * SkyIntensity;
+}
 
 float3 linearToSrgb(float3 c)
 {
@@ -159,7 +173,7 @@ void rayGen
     // https://computergraphics.stackexchange.com/questions/8578/how-to-set-equivalent-pdfs-for-cosine-weighted-and-uniform-sampled-hemispheres
     float cosTerm = 1;//dot(float3(0, 0, 1), sampleDirLocal)*2;
 
-    float3 LightIntensity = LightDirAndIntensity.w;
+    float LightIntensity = LightDirAndIntensity.w;
 
     float3 ViewDir = mul(normalize(float3(d.x * aspectRatio, -d.y, -1)), InvViewMatrix);
 
@@ -177,20 +191,18 @@ void rayGen
     if(payload.bHit == false)
     {
         // hit sky - payload.color already includes SkyIntensity from miss shader
-        float3 Radiance = payload.color;  // Don't multiply LightIntensity for sky
-        // float3 Radiance = float3(1, 0, 0) * LightIntensity;
-
-        float3 Irradiance = Radiance * cosTerm;
+        float3 Radiance = payload.color;
+        float3 Irradiance = Radiance;
 
         SH sh_indirect = init_SH();
         sh_indirect = irradiance_to_SH(Irradiance, sampleDirWorld);
 
         GIResultSH[launchIndex.xy] = sh_indirect.shY;
-        GIResultColor[launchIndex.xy] = float4(sh_indirect.CoCg, 0, 0);
+        GIResultColor[launchIndex.xy] = float4(Irradiance, 1.0f);
     }
     else
     {
-        float3 LightDir = LightDirAndIntensity.xyz;
+        float3 LightDir = normalize(LightDirAndIntensity.xyz);
         RayDesc shadowRay;
         shadowRay.Origin = payload.position + payload.normal *0.5;
         shadowRay.Direction = LightDir;
@@ -204,19 +216,22 @@ void rayGen
 
         float3 Albedo = payload.color;
         SH sh_indirect = init_SH();
+        float3 Irradiance = 0.0f.xxx;
         if(shadowPayload.bHit == false)
         {
             // miss - apply light color
-            float3 Irradiance = dot(LightDir.xyz, payload.normal) * LightIntensity * LightColor * Albedo;
+            float NdotL = saturate(dot(LightDir, payload.normal));
+            Irradiance = NdotL * LightIntensity * LightColor * Albedo * INV_PI;
             sh_indirect = irradiance_to_SH(Irradiance, sampleDirWorld);
         }
         else
         {
-            // shadowed
+            Irradiance = 0.0f.xxx;
+            sh_indirect = irradiance_to_SH(Irradiance, sampleDirWorld);
         }
 
         GIResultSH[launchIndex.xy] = sh_indirect.shY;
-        GIResultColor[launchIndex.xy] = float4(sh_indirect.CoCg, 0, 0);
+        GIResultColor[launchIndex.xy] = float4(Irradiance, 1.0f);
     }
 
 
@@ -227,11 +242,8 @@ void miss(inout RayPayload payload)
 {
     // Sky color - gradient based on ray direction (same as path tracing)
     float3 rayDir = WorldRayDirection();
-    float t = 0.5 * (rayDir.y + 1.0);
-    float3 skyColor = lerp(SkyColorBottom, SkyColorTop, t);
-    
     payload.position = float3(0, 0, 0);
-    payload.color = skyColor * SkyIntensity;
+    payload.color = EvaluateSkyColor(rayDir);
     payload.normal = float3(0, 0, -1);
     payload.bHit = false;
 }

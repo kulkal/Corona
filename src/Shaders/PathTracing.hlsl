@@ -41,6 +41,8 @@ cbuffer ViewParameter : register(b0)
 
 SamplerState sampleWrap : register(s0);
 
+static const float INV_PI = 1.0 / PI;
+
 struct PathTracingPayload
 {
     float3 radiance;
@@ -384,7 +386,7 @@ void PathTracingClosestHit(inout PathTracingPayload payload, in BuiltInTriangleI
     float3 hitPos = vertex.position + N * 0.01;
     
     // Direct lighting - sample light
-    float3 lightDir = LightDirAndIntensity.xyz;
+    float3 lightDir = normalize(LightDirAndIntensity.xyz);
     float lightIntensity = LightDirAndIntensity.w;
     
     float3 directLight = float3(0, 0, 0);
@@ -408,12 +410,13 @@ void PathTracingClosestHit(inout PathTracingPayload payload, in BuiltInTriangleI
         if (NdotL > 0)
         {
             // Diffuse lighting (Lambertian)
-            float3 diffuse = bEnableDirectDiffuse ? (albedo * (1.0 - metallic)) : float3(0, 0, 0);
+            float3 diffuse = bEnableDirectDiffuse ? (albedo * (1.0 - metallic) * INV_PI) : float3(0, 0, 0);
             
-            // Specular BRDF (simplified Blinn-Phong)
+            // Energy-normalized Blinn-Phong approximation for direct specular.
             float3 H = normalize(lightDir + V);
             float NdotH = max(0, dot(N, H));
-            float spec = pow(NdotH, (1.0 - roughness) * 128.0);
+            float shininess = max((1.0 - roughness) * 128.0, 1.0);
+            float spec = pow(NdotH, shininess) * ((shininess + 2.0) * 0.5 * INV_PI);
             float3 specular = bEnableDirectSpecular ? (lerp(float3(0.04, 0.04, 0.04), albedo, metallic) * spec) : float3(0, 0, 0);
             
             // Combine diffuse and specular with light color
@@ -432,13 +435,15 @@ void PathTracingClosestHit(inout PathTracingPayload payload, in BuiltInTriangleI
     float NdotV = max(0, dot(N, V));
     float3 F = F0 + (1.0 - F0) * pow(1.0 - NdotV, 5.0);
     
-    // Choose between diffuse and specular based on Fresnel
+    // Choose between diffuse and specular based on Fresnel, then normalize the
+    // branch probabilities so the chosen lobe is properly weighted.
     float specularWeight = (F.x + F.y + F.z) / 3.0;
-    float diffuseWeight = 1.0 - specularWeight;
-    
-    // Adjust weights based on roughness (rougher = more diffuse)
     specularWeight *= (1.0 - roughness * 0.5);
-    diffuseWeight = 1.0 - specularWeight;
+    specularWeight = saturate(specularWeight);
+    float diffuseWeight = saturate(1.0 - specularWeight);
+    float totalWeight = max(specularWeight + diffuseWeight, 1e-4);
+    specularWeight /= totalWeight;
+    diffuseWeight /= totalWeight;
     
     float r = random_float(payload.seed);
     
@@ -452,9 +457,10 @@ void PathTracingClosestHit(inout PathTracingPayload payload, in BuiltInTriangleI
         if (dot(newDir, N) < 0)
             newDir = reflect(newDir, N);
         
-        // For specular bounce, throughput is just Fresnel (already in weight)
+        // Compensate for the stochastic lobe selection probability. This is not
+        // full MIS yet, but it removes a major dark bias from the path tracer.
         if (bEnableSpecularGI)
-            payload.throughput *= F;
+            payload.throughput *= F / max(specularWeight, 1e-4);
         else
             payload.throughput = float3(0, 0, 0);
     }
@@ -465,9 +471,10 @@ void PathTracingClosestHit(inout PathTracingPayload payload, in BuiltInTriangleI
         float3x3 TBN = construct_ONB_frisvad(N);
         newDir = normalize(mul(localDir, TBN));
         
-        // Lambertian BRDF: albedo for diffuse materials, reduced for metals
+        // Lambertian BRDF under cosine-weighted sampling reduces to albedo, but
+        // we still need to divide by the branch probability.
         if (bEnableDiffuseGI)
-            payload.throughput *= albedo * (1.0 - metallic);
+            payload.throughput *= (albedo * (1.0 - metallic)) / max(diffuseWeight, 1e-4);
         else
             payload.throughput = float3(0, 0, 0);
     }
@@ -484,11 +491,7 @@ void PathTracingMiss(inout PathTracingPayload payload)
     float t = 0.5 * (payload.direction.y + 1.0);
     float3 skyColor = lerp(SkyColorBottom, SkyColorTop, t);
     
-    // Boost indirect sky contribution for better visibility on dark surfaces
-    // Primary rays (depth 0) use normal intensity, indirect rays get boosted
-    float indirectBoost = (payload.depth == 0) ? 1.0 : 2.0;
-    
-    payload.radiance = skyColor * SkyIntensity * indirectBoost;
+    payload.radiance = skyColor * SkyIntensity;
     payload.done = true;
 }
 

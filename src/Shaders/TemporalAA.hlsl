@@ -24,8 +24,9 @@ cbuffer TemporalAAParam : register(b0)
     float2 RTSize;
     float TAABlendFactor;
     uint ClampMode;
-    // float Exposure;
     float BloomStrength;
+    uint HistoryValid;
+    float3 _Padding;
 };
 
 struct VSInput
@@ -193,16 +194,18 @@ float3 ClipAABB(float3 aabbMin, float3 aabbMax, float3 prevSample, float3 avg)
 
 float4 PSMain(PSInput input) : SV_TARGET
 {
-    float LowFreqWeight = 0.25f;
-    float HiFreqWeight = 0.85f;
+    const float MinHistoryWeight = 0.35f;
     float3 clrMin = 99999999.0f;
     float3 clrMax = -99999999.0f;
     float3 m1 = 0.0f;
     float3 m2 = 0.0f;
     float mWeight = 0.0f;
+    float3 currentFilteredColor = 0.0f;
+    float currentFilterWeight = 0.0f;
 
     input.uv.y = 1 - input.uv.y;
-    float2 PixelPos = input.uv * RTSize;
+    uint2 PixelPos = uint2(input.position.xy);
+    float2 PixelCenter = float2(PixelPos) + 0.5f;
 
 
     const int SampleRadius_ = 1;
@@ -223,6 +226,7 @@ float4 PSMain(PSInput input) : SV_TARGET
             float2 sampleDist = abs(sampleOffset) / (ResolveFilterDiameter / 2.0f);
 
             float3 sample = CurrentColorTex[samplePos].xyz * Exposure[0];
+            float sampleWeight = FilterBlackmanHarris(sampleDist.x) * FilterBlackmanHarris(sampleDist.y);
           
             clrMin = min(clrMin, sample);
             clrMax = max(clrMax, sample);
@@ -230,15 +234,22 @@ float4 PSMain(PSInput input) : SV_TARGET
             m1 += sample;
             m2 += sample * sample;
             mWeight += 1.0f;
+            currentFilteredColor += sample * sampleWeight;
+            currentFilterWeight += sampleWeight;
         }
     }
 
     float2 Velocity = VelocityTex[PixelPos];
-    float3 Bloom = BloomTex.SampleLevel( sampleWrap, input.uv, 0);
-    float3 CurrentColor =  CurrentColorTex[PixelPos] * Exposure[0] + Bloom * BloomStrength;
-    float2 PrevPixelPos = PixelPos - Velocity * RTSize;
-    // float3 PrevColor = PrevColorTex[PrevPixelPos].xyz;
-    float2 PrevUV = (PrevPixelPos + 0)/RTSize;
+    float3 Bloom = BloomTex.SampleLevel(sampleWrap, input.uv, 0);
+    float3 CurrentColor = currentFilteredColor / max(currentFilterWeight, 1e-5f);
+    CurrentColor += Bloom * BloomStrength;
+
+    float2 PrevPixelPos = PixelCenter - Velocity * RTSize;
+    float2 PrevUV = (PrevPixelPos + 0.0f) / RTSize;
+
+    if (HistoryValid == 0 || any(PrevUV < 0.0f) || any(PrevUV > 1.0f))
+        return float4(CurrentColor, 1);
+
     float3 PrevColor = PrevColorTex.SampleLevel( sampleWrap, PrevUV, 0);
 
 
@@ -257,19 +268,16 @@ float4 PSMain(PSInput input) : SV_TARGET
         PrevColor = ClipAABB(minc, maxc, PrevColor, mu);
     }   
 
-    // float Depth = DepthTex[PixelPos];
-    // float PrevDepth = DepthTex[PrevPixelPos];
+    float3 neighborhoodExtent = abs(clrMax - clrMin);
+    float3 normalizedExtent = neighborhoodExtent / max(abs(CurrentColor), 1e-3.xxx);
+    float instability = saturate(max(normalizedExtent.x, max(normalizedExtent.y, normalizedExtent.z)) * 0.35f);
 
-    float BlendFactor = TAABlendFactor;
+    float historyWeight = saturate(1.0f - TAABlendFactor);
+    historyWeight *= lerp(1.0f, 0.6f, instability);
+    historyWeight = max(historyWeight, MinHistoryWeight);
 
-    
-    float3 weightA = saturate(1.0f - BlendFactor);
-    float3 weightB = saturate(BlendFactor);
+    float currentWeight = 1.0f - historyWeight;
+    float3 resolvedColor = CurrentColor * currentWeight + PrevColor * historyWeight;
 
-
-    float3 temporalWeight = saturate(abs(clrMax - clrMin) / CurrentColor);
-    weightB = saturate(lerp(LowFreqWeight, HiFreqWeight, temporalWeight));
-    weightA = 1.0f - weightB;
-
-    return  float4((CurrentColor * weightA + PrevColor * weightB) / (weightA + weightB), 1);
+    return float4(resolvedColor, 1);
 }
