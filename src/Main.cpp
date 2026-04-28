@@ -12,23 +12,36 @@
 #include "stdafx.h"
 #include "Corona.h"
 #include <dxgidebug.h>
+#include <cwchar>
 
 _Use_decl_annotations_
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow)
 {
 	//Corona* sample = new Corona(2560, 1440, L"Corona");
 	Corona* sample = new Corona(1920, 1080, L"Corona");
+	const bool bAutomationRun = std::wcsstr(GetCommandLineW(), L"--auto-dump") != nullptr;
 
 	Win32Application::Run(sample, hInstance, nCmdShow);
 
 	delete sample;
 
-	ComPtr<IDXGIDebug1> dxgiDebug;
-	if (SUCCEEDED(DXGIGetDebugInterface1(0, IID_PPV_ARGS(&dxgiDebug))))
+	if (bAutomationRun)
 	{
-		dxgiDebug->ReportLiveObjects(DXGI_DEBUG_ALL, DXGI_DEBUG_RLO_ALL);
+		int crtFlags = _CrtSetDbgFlag(_CRTDBG_REPORT_FLAG);
+		crtFlags &= ~_CRTDBG_LEAK_CHECK_DF;
+		_CrtSetDbgFlag(crtFlags);
+	}
+	else
+	{
+		ComPtr<IDXGIDebug1> dxgiDebug;
+		if (SUCCEEDED(DXGIGetDebugInterface1(0, IID_PPV_ARGS(&dxgiDebug))))
+		{
+			dxgiDebug->ReportLiveObjects(DXGI_DEBUG_ALL, DXGI_DEBUG_RLO_ALL);
+		}
+
+		_CrtCheckMemory();
+		_CrtDumpMemoryLeaks();
 	}
 
-	_CrtCheckMemory();
-	_CrtDumpMemoryLeaks();
+	return 0;
 }

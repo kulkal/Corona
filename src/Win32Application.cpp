@@ -12,16 +12,42 @@
 #include "stdafx.h"
 #include "Win32Application.h"
 #include <windowsx.h>
+#include <cwchar>
+#include <filesystem>
+#include <fstream>
+
+namespace
+{
+	void AppendStartupTrace(const std::wstring& line)
+	{
+		const std::filesystem::path tracePath = std::filesystem::path(L"C:\\dev\\Corona\\dumps\\vulkan_runtime_trace.log");
+		std::filesystem::create_directories(tracePath.parent_path());
+		std::wofstream traceFile(tracePath, std::ios::app);
+		if (traceFile.is_open())
+			traceFile << line << L"\n";
+	}
+}
 
 HWND Win32Application::m_hwnd = nullptr;
 
 int Win32Application::Run(DXSample* pSample, HINSTANCE hInstance, int nCmdShow)
 {
+	AppendStartupTrace(L"[Run] enter");
 	// Parse the command line parameters
 	int argc;
 	LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+	bool bCommandLineAutoDump = false;
+	for (int argIndex = 1; argIndex < argc; ++argIndex)
+	{
+		if (std::wcscmp(argv[argIndex], L"--auto-dump") == 0)
+		{
+			bCommandLineAutoDump = true;
+			break;
+		}
+	}
 	pSample->ParseCommandLineArgs(argv, argc);
 	LocalFree(argv);
+	AppendStartupTrace(L"[Run] after ParseCommandLineArgs");
 
 	// Initialize the window class.
 	WNDCLASSEXW windowClass = { 0 };
@@ -49,11 +75,25 @@ int Win32Application::Run(DXSample* pSample, HINSTANCE hInstance, int nCmdShow)
 		nullptr,		// We aren't using menus.
 		hInstance,
 		pSample);
+	AppendStartupTrace(m_hwnd ? L"[Run] after CreateWindowW ok" : L"[Run] after CreateWindowW failed");
 
 	// Initialize the sample. OnInit is defined in each child-implementation of DXSample.
+	AppendStartupTrace(L"[Run] before OnInit");
 	pSample->OnInit();
+	AppendStartupTrace(L"[Run] after OnInit");
 
-	ShowWindow(m_hwnd, nCmdShow);
+	const int effectiveCmdShow = (!bCommandLineAutoDump && nCmdShow == SW_HIDE) ? SW_SHOWNORMAL : nCmdShow;
+	ShowWindow(m_hwnd, effectiveCmdShow);
+	if (!bCommandLineAutoDump && effectiveCmdShow != SW_HIDE)
+	{
+		SetWindowPos(m_hwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+		SetForegroundWindow(m_hwnd);
+	}
+	UpdateWindow(m_hwnd);
+	AppendStartupTrace(
+		L"[Run] after ShowWindow requested=" + std::to_wstring(nCmdShow) +
+		L", effective=" + std::to_wstring(effectiveCmdShow) +
+		L", visible=" + std::to_wstring(IsWindowVisible(m_hwnd) ? 1 : 0));
 
 	// Main sample loop.
 	MSG msg = {};
@@ -64,6 +104,11 @@ int Win32Application::Run(DXSample* pSample, HINSTANCE hInstance, int nCmdShow)
 		{
 			TranslateMessage(&msg);
 			DispatchMessage(&msg);
+		}
+		else if (pSample)
+		{
+			pSample->OnUpdate();
+			pSample->OnRender();
 		}
 	}
 

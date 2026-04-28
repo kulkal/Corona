@@ -9,16 +9,16 @@
 //
 //*********************************************************
 
-Texture2D AlbedoTex : register(t0);
-Texture2D NormalTex : register(t1);
-Texture2D RoughnessTex : register(t2);
-Texture2D MetallicTex : register(t3);
+#include "ShaderResourceBindings.hlsli"
 
+TEXTURE2D_BINDING(AlbedoTex, 0);
+TEXTURE2D_BINDING(NormalTex, 1);
+TEXTURE2D_BINDING(RoughnessTex, 2);
+TEXTURE2D_BINDING(MetallicTex, 3);
 
+SAMPLER_BINDING(sampleWrap, 0);
 
-SamplerState sampleWrap : register(s0);
-
-cbuffer GBufferConstantBuffer : register(b0)
+CBUFFER_BINDING_BEGIN(GBufferConstantBuffer, 0)
 {
     float4x4 ViewProjectionMatrix;
     float4x4 PrevViewProjectionMatrix;  
@@ -29,7 +29,7 @@ cbuffer GBufferConstantBuffer : register(b0)
     float2 RTSize;
     float2 RougnessMetalic;
     uint bOverrideRougnessMetallic;
-};
+} CBUFFER_BINDING_END;
 
 struct VSInput
 {
@@ -98,7 +98,7 @@ struct PS_OUTPUT
 };
 
 
-PS_OUTPUT PSMain(PSInput input) : SV_TARGET
+PS_OUTPUT PSMain(PSInput input)
 {
     float2 prevPositionSS = (input.prevPosition.xy/input.prevPosition.w) * float2(0.5, -0.5) + 0.5;
     prevPositionSS *= RTSize.xy;

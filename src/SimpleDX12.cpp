@@ -16,12 +16,14 @@
 #include <dxcapi.use.h>
 #include <sstream>
 #include <fstream>
+#include <filesystem>
 #include <D3Dcompiler.h>
 
 #include <assert.h>
 
 #include <comdef.h>
 #include <windows.h>
+#include <wincodec.h>
 
 // DirectX Tex
 #include "DirectXTex July 2017/Include/DirectXTex.h"
@@ -37,6 +39,57 @@ using namespace std;
 
 namespace
 {
+	struct DX12GraphicsPipelineHandle final : GraphicsPipelineHandle
+	{
+		std::shared_ptr<PipelineStateObject> PSO;
+		uint32_t ConstantBufferSize = 0;
+	};
+
+	bool SaveScratchImagePNG(const DirectX::ScratchImage& captured, const std::wstring& filePath, std::wstring* errorMessage)
+	{
+		const DirectX::Image* image = captured.GetImage(0, 0, 0);
+		if (!image)
+		{
+			if (errorMessage)
+				*errorMessage = L"DX12 window capture image is empty.";
+			return false;
+		}
+
+		HRESULT hr = S_OK;
+		DirectX::ScratchImage convertedImage;
+		const DirectX::Image* outputImage = image;
+		if (image->format == DXGI_FORMAT_B8G8R8A8_UNORM || image->format == DXGI_FORMAT_R8G8B8A8_UNORM)
+		{
+			hr = SaveToWICFile(*image, DirectX::WIC_FLAGS_NONE, GUID_ContainerFormatPng, filePath.c_str());
+		}
+		else
+		{
+			hr = DirectX::Convert(
+				*image,
+				DXGI_FORMAT_R8G8B8A8_UNORM,
+				DirectX::TEX_FILTER_DEFAULT,
+				DirectX::TEX_THRESHOLD_DEFAULT,
+				convertedImage);
+			if (SUCCEEDED(hr))
+			{
+				outputImage = convertedImage.GetImage(0, 0, 0);
+				if (!outputImage)
+					hr = E_FAIL;
+			}
+			if (SUCCEEDED(hr))
+				hr = SaveToWICFile(*outputImage, DirectX::WIC_FLAGS_NONE, GUID_ContainerFormatPng, filePath.c_str());
+		}
+
+		if (FAILED(hr))
+		{
+			if (errorMessage)
+				*errorMessage = L"Failed to save DX12 window capture PNG.";
+			return false;
+		}
+
+		return true;
+	}
+
 	DXGI_FORMAT ToDXGIFormat(ETextureFormat format)
 	{
 		switch (format)
@@ -117,6 +170,7 @@ namespace
 		default: return D3D12_FILTER_MIN_MAG_MIP_LINEAR;
 		}
 	}
+
 }
 void DescriptorHeap::Init(ID3D12Device5* InDevice, D3D12_DESCRIPTOR_HEAP_DESC& InHeapDesc)
 {
@@ -235,10 +289,11 @@ void SimpleDX12::BeginFrame()
 
 void SimpleDX12::EndFrame()
 {
+	const UINT presentFlags = bTearingSupported ? DXGI_PRESENT_ALLOW_TEARING : 0;
 #if USE_AFTERMATH
-	ThrowIfFailed(m_swapChain->Present(0, 0), &AM_CL_Handle);
+	ThrowIfFailed(m_swapChain->Present(0, presentFlags), &AM_CL_Handle);
 #else
-	ThrowIfFailed(m_swapChain->Present(0, 0), nullptr);
+	ThrowIfFailed(m_swapChain->Present(0, presentFlags), nullptr);
 
 #endif
 	FrameFenceValueVec[CurrentFrameIndex] = CmdQ->CurrentFenceValue;;
@@ -267,6 +322,15 @@ std::shared_ptr<Texture> SimpleDX12::WrapNativeTexture(const Microsoft::WRL::Com
 
 void SimpleDX12::CreateSwapChainForWindow(IDXGIFactory4* factory, HWND hwnd, uint32_t width, uint32_t height, DXGI_FORMAT format)
 {
+	bTearingSupported = false;
+	ComPtr<IDXGIFactory5> factory5;
+	if (factory && SUCCEEDED(factory->QueryInterface(IID_PPV_ARGS(&factory5))))
+	{
+		BOOL allowTearing = FALSE;
+		if (SUCCEEDED(factory5->CheckFeatureSupport(DXGI_FEATURE_PRESENT_ALLOW_TEARING, &allowTearing, sizeof(allowTearing))))
+			bTearingSupported = allowTearing == TRUE;
+	}
+
 	DXGI_SWAP_CHAIN_DESC1 swapChainDesc = {};
 	swapChainDesc.BufferCount = GetFrameCount();
 	swapChainDesc.Width = width;
@@ -275,6 +339,7 @@ void SimpleDX12::CreateSwapChainForWindow(IDXGIFactory4* factory, HWND hwnd, uin
 	swapChainDesc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
 	swapChainDesc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
 	swapChainDesc.SampleDesc.Count = 1;
+	swapChainDesc.Flags = bTearingSupported ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0;
 
 	ComPtr<IDXGISwapChain1> swapChain;
 	ThrowIfFailed(factory->CreateSwapChainForHwnd(
@@ -287,6 +352,7 @@ void SimpleDX12::CreateSwapChainForWindow(IDXGIFactory4* factory, HWND hwnd, uin
 
 	ThrowIfFailed(factory->MakeWindowAssociation(hwnd, DXGI_MWA_NO_ALT_ENTER));
 	ThrowIfFailed(swapChain.As(&m_swapChain));
+	SwapChainRenderTargets.clear();
 }
 
 Microsoft::WRL::ComPtr<ID3D12Resource> SimpleDX12::GetSwapChainBuffer(uint32_t bufferIndex)
@@ -1269,10 +1335,117 @@ void PipelineStateObject::Apply(ID3D12GraphicsCommandList* CommandList)
 	}
 }
 
+void D3D12ComputePipelineStateObject::BindSRV(const std::string& name, uint32_t baseRegister, uint32_t numDescriptors)
+{
+	if (!PSO)
+		PSO = std::make_shared<PipelineStateObject>();
+	PSO->BindSRV(name, static_cast<int>(baseRegister), static_cast<int>(numDescriptors));
+}
+
+void D3D12ComputePipelineStateObject::BindUAV(const std::string& name, uint32_t baseRegister)
+{
+	if (!PSO)
+		PSO = std::make_shared<PipelineStateObject>();
+	PSO->BindUAV(name, static_cast<int>(baseRegister));
+}
+
+void D3D12ComputePipelineStateObject::BindCBV(const std::string& name, uint32_t baseRegister, uint32_t size)
+{
+	if (!PSO)
+		PSO = std::make_shared<PipelineStateObject>();
+	PSO->BindCBV(name, static_cast<int>(baseRegister), static_cast<int>(size));
+}
+
+void D3D12ComputePipelineStateObject::BindSampler(const std::string& name, uint32_t baseRegister)
+{
+	if (!PSO)
+		PSO = std::make_shared<PipelineStateObject>();
+	PSO->BindSampler(name, static_cast<int>(baseRegister));
+}
+
+bool D3D12ComputePipelineStateObject::InitCS(const std::wstring& shaderFile, const std::string& entryPoint)
+{
+	if (!Owner)
+		return false;
+	if (!PSO)
+		PSO = std::make_shared<PipelineStateObject>();
+
+	PSO->Owner = Owner;
+	PSO->IsCompute = true;
+	PSO->computePSODesc = {};
+	PSO->cs = Owner->CreateShader(shaderFile, entryPoint, "cs_5_0");
+	if (!PSO->cs)
+		return false;
+
+	return PSO->Init();
+}
+
+void D3D12ComputePipelineStateObject::Apply()
+{
+	if (!PSO)
+		return;
+
+	PSO->Apply();
+
+	for (const auto& binding : PendingSRVs)
+		PSO->SetSRV(binding.first, binding.second);
+	for (const auto& binding : PendingSamplers)
+		PSO->SetSampler(binding.first, binding.second);
+	for (const auto& binding : PendingCBVs)
+		PSO->SetCBVValue(binding.first, const_cast<uint8_t*>(binding.second.data()));
+	for (const auto& binding : PendingUAVs)
+		PSO->SetUAV(binding.first, binding.second);
+}
+
+void D3D12ComputePipelineStateObject::SetTextureSRV(const std::string& name, Texture* texture)
+{
+	if (PSO && texture)
+		PendingSRVs[name] = texture->GpuHandleSRV;
+}
+
+void D3D12ComputePipelineStateObject::SetTextureUAV(const std::string& name, Texture* texture)
+{
+	if (PSO && texture)
+		PendingUAVs[name] = texture->GpuHandleUAV;
+}
+
+void D3D12ComputePipelineStateObject::SetBufferSRV(const std::string& name, Buffer* buffer)
+{
+	if (PSO && buffer)
+		PendingSRVs[name] = buffer->GpuHandleSRV;
+}
+
+void D3D12ComputePipelineStateObject::SetBufferUAV(const std::string& name, Buffer* buffer)
+{
+	if (PSO && buffer)
+		PendingUAVs[name] = buffer->GpuHandleUAV;
+}
+
+void D3D12ComputePipelineStateObject::SetSampler(const std::string& name, Sampler* sampler)
+{
+	if (PSO && sampler)
+		PendingSamplers[name] = sampler;
+}
+
+void D3D12ComputePipelineStateObject::SetCBVValue(const std::string& name, void* pData)
+{
+	if (!PSO || !pData)
+		return;
+
+	auto bindingIt = PSO->constantBufferBinding.find(name);
+	if (bindingIt == PSO->constantBufferBinding.end())
+		return;
+
+	std::vector<uint8_t>& data = PendingCBVs[name];
+	data.resize(bindingIt->second.cbSize);
+	std::memcpy(data.data(), pData, data.size());
+}
+
 void Texture::MakeStaticSRV()
 {
 	SimpleDX12* owner = Owner;
-	assert(owner);
+	if (!owner)
+		return;
 	owner->TextureDHRing->AllocDescriptor(CpuHandleSRV, GpuHandleSRV);
 
 	D3D12_SHADER_RESOURCE_VIEW_DESC SrvDesc = {};
@@ -1290,7 +1463,8 @@ void Texture::MakeStaticSRV()
 void Texture::MakeRTV(bool isBackBuffer)
 {
 	SimpleDX12* owner = Owner;
-	assert(owner);
+	if (!owner)
+		return;
 	owner->RTVDescriptorHeap->AllocDescriptor(CpuHandleRTV, GpuHandleRTV);
 	
 	D3D12_RENDER_TARGET_VIEW_DESC desc = {};
@@ -1305,7 +1479,8 @@ void Texture::MakeRTV(bool isBackBuffer)
 void Texture::MakeDSV()
 {
 	SimpleDX12* owner = Owner;
-	assert(owner);
+	if (!owner)
+		return;
 	owner->DSVDescriptorHeap->AllocDescriptor(CpuHandleDSV, GpuHandleDSV);
 
 	D3D12_DEPTH_STENCIL_VIEW_DESC depthStencilDesc = {};
@@ -1350,6 +1525,18 @@ std::shared_ptr<Texture> SimpleDX12::CreateTexture3D(ETextureFormat format, ETex
 		height,
 		depth,
 		mipLevels);
+}
+
+void SimpleDX12::UploadTexture3D(Texture* texture, const void* data, uint64_t rowPitch, uint64_t slicePitch)
+{
+	if (!texture || !data)
+		return;
+
+	D3D12_SUBRESOURCE_DATA textureData = {};
+	textureData.pData = data;
+	textureData.RowPitch = static_cast<LONG_PTR>(rowPitch);
+	textureData.SlicePitch = static_cast<LONG_PTR>(slicePitch);
+	texture->UploadSRCData3D(&textureData);
 }
 
 std::shared_ptr<Texture> SimpleDX12::CreateTexture2D(DXGI_FORMAT format, D3D12_RESOURCE_FLAGS resFlags, D3D12_RESOURCE_STATES initResState, int width, int height, int mipLevels, std::optional<glm::vec4> clearColor)
@@ -1483,7 +1670,8 @@ std::shared_ptr<Texture> SimpleDX12::CreateTexture3D(DXGI_FORMAT format, D3D12_R
 void Texture::UploadSRCData3D(D3D12_SUBRESOURCE_DATA* SrcData)
 {
 	SimpleDX12* owner = Owner;
-	assert(owner);
+	if (!owner)
+		return;
 	CommandList* cmd = owner->CmdQ->AllocCmdList();
 
 	// upload src data
@@ -1764,24 +1952,32 @@ static const D3D12_HEAP_PROPERTIES kUploadHeapProps =
 
 shared_ptr<RTAS> Mesh::CreateBLAS()
 {
-	SimpleDX12* owner = Owner;
-	assert(owner);
-	RTAS* as = new  RTAS;
+	assert(Owner);
+	return Owner->CreateBLASForMesh(this);
+}
+
+std::shared_ptr<RTAS> SimpleDX12::CreateBLASForMesh(Mesh* mesh)
+{
+	assert(mesh);
+	SimpleDX12* owner = this;
+	D3D12RTAS* as = new D3D12RTAS;
 
 
 	D3D12_RAYTRACING_GEOMETRY_DESC geomDesc = {};
 	geomDesc.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
-	geomDesc.Triangles.VertexBuffer.StartAddress = Vb->resource->GetGPUVirtualAddress();
-	geomDesc.Triangles.VertexBuffer.StrideInBytes = VertexStride;;
+	geomDesc.Triangles.VertexBuffer.StartAddress = mesh->Vb->resource->GetGPUVirtualAddress();
+	geomDesc.Triangles.VertexBuffer.StrideInBytes = mesh->VertexStride;
 	geomDesc.Triangles.VertexFormat = DXGI_FORMAT_R32G32B32_FLOAT;
-	geomDesc.Triangles.VertexCount = Vb->numVertices;
-	geomDesc.Triangles.IndexBuffer = Ib->resource->GetGPUVirtualAddress();
-	geomDesc.Triangles.IndexFormat = IndexFormat;
-	geomDesc.Triangles.IndexCount = Ib->numIndices;
+	geomDesc.Triangles.VertexCount = mesh->Vb->numVertices;
+	geomDesc.Triangles.IndexBuffer = mesh->Ib->resource->GetGPUVirtualAddress();
+	geomDesc.Triangles.IndexFormat = mesh->IndexFormat;
+	geomDesc.Triangles.IndexCount = mesh->Ib->numIndices;
 	geomDesc.Triangles.Transform3x4 = 0;
 
-	// Allow anyhit shader execution for alpha testing
-	geomDesc.Flags = D3D12_RAYTRACING_GEOMETRY_FLAG_NONE;
+	// Only alpha-tested geometry needs any-hit. Opaque geometry can use the faster traversal path.
+	geomDesc.Flags = mesh->bTransparent
+		? D3D12_RAYTRACING_GEOMETRY_FLAG_NONE
+		: D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE;
 
 
 
@@ -1855,12 +2051,13 @@ shared_ptr<RTAS> Mesh::CreateBLAS()
 
 	owner->CmdQ->ExecuteCommandList(cmd);
 
+	as->MeshPtr = mesh;
 	return shared_ptr<RTAS>(as);
 }
 
 std::shared_ptr<RTAS> SimpleDX12::CreateTLAS(vector<shared_ptr<RTAS>>& VecBottomLevelAS)
 {
-	RTAS* as = new  RTAS;
+	D3D12RTAS* as = new D3D12RTAS;
 
 	// First, get the size of the TLAS buffers and create them
 	D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS inputs = {};
@@ -1931,12 +2128,14 @@ std::shared_ptr<RTAS> SimpleDX12::CreateTLAS(vector<shared_ptr<RTAS>>& VecBottom
 
 		for (int i = 0; i < VecBottomLevelAS.size(); i++)
 		{
+			D3D12RTAS* blas = dynamic_cast<D3D12RTAS*>(VecBottomLevelAS[i].get());
+			assert(blas);
 			pInstanceDesc[i].InstanceID = i;                            // This value will be exposed to the shader via InstanceID()
 			pInstanceDesc[i].InstanceContributionToHitGroupIndex = i;   // This is the offset inside the shader-table. We only have a single geometry, so the offset 0
 			pInstanceDesc[i].Flags = D3D12_RAYTRACING_INSTANCE_FLAG_NONE;
-			glm::mat4x4 mat = glm::transpose(VecBottomLevelAS[i]->mesh->transform);
+			glm::mat4x4 mat = glm::transpose(VecBottomLevelAS[i]->MeshPtr->transform);
 			memcpy(pInstanceDesc[i].Transform, &mat, sizeof(pInstanceDesc[i].Transform));
-			pInstanceDesc[i].AccelerationStructure = VecBottomLevelAS[i]->Result->GetGPUVirtualAddress();
+			pInstanceDesc[i].AccelerationStructure = blas->Result->GetGPUVirtualAddress();
 			pInstanceDesc[i].InstanceMask = 0xFF;
 		}
 		as->Instance->Unmap(0, nullptr);
@@ -1978,6 +2177,20 @@ std::shared_ptr<RTAS> SimpleDX12::CreateTLAS(vector<shared_ptr<RTAS>>& VecBottom
 	CmdQ->ExecuteCommandList(cmd);
 
 	return shared_ptr<RTAS>(as);
+}
+
+std::shared_ptr<RTPipelineStateObject> SimpleDX12::CreateRTPipelineStateObject()
+{
+	auto pso = std::make_shared<D3D12RTPipelineStateObject>();
+	pso->Owner = this;
+	return pso;
+}
+
+std::shared_ptr<ComputePipelineStateObject> SimpleDX12::CreateComputePipelineStateObject()
+{
+	auto pso = std::make_shared<D3D12ComputePipelineStateObject>();
+	pso->Owner = this;
+	return pso;
 }
 
 ComPtr<ID3DBlob> SimpleDX12::CreateShader(const std::wstring& FilePath, const std::string& EntryPoint, const std::string& Target)
@@ -2048,7 +2261,22 @@ ComPtr<ID3DBlob> compileShaderLibrary(SimpleDX12* owner, const WCHAR* filename, 
 
 	// Compile
 	ComPtr<IDxcOperationResult> pResult;
-	pCompiler->Compile(pTextBlob.Get(), filename, L"", targetString, nullptr, 0, nullptr, 0, dxcIncludeHandler.Get(), &pResult);
+#if defined(_DEBUG)
+	LPCWSTR compileArgs[] = { DXC_ARG_DEBUG, DXC_ARG_SKIP_OPTIMIZATIONS };
+#else
+	LPCWSTR compileArgs[] = { DXC_ARG_OPTIMIZATION_LEVEL3 };
+#endif
+	pCompiler->Compile(
+		pTextBlob.Get(),
+		filename,
+		L"",
+		targetString,
+		compileArgs,
+		_countof(compileArgs),
+		nullptr,
+		0,
+		dxcIncludeHandler.Get(),
+		&pResult);
 
 	// Verify the result
 	HRESULT resultCode;
@@ -2228,7 +2456,19 @@ struct PipelineConfig
 	D3D12_STATE_SUBOBJECT subobject = {};
 };
 
-void RTPipelineStateObject::AddHitGroup(string name, string chs, string ahs)
+void D3D12RTPipelineStateObject::SetNumInstances(uint32_t numInstances)
+{
+	NumInstance = numInstances;
+}
+
+void D3D12RTPipelineStateObject::Configure(uint32_t maxRecursion, uint32_t maxPayloadSizeInBytes, uint32_t maxAttributeSizeInBytes)
+{
+	MaxRecursion = maxRecursion;
+	MaxPayloadSizeInBytes = maxPayloadSizeInBytes;
+	MaxAttributeSizeInBytes = maxAttributeSizeInBytes;
+}
+
+void D3D12RTPipelineStateObject::AddHitGroup(const string& name, const string& chs, const string& ahs)
 {
 	HitGroupInfo info;
 	info.name = StringToWString(name);
@@ -2238,13 +2478,13 @@ void RTPipelineStateObject::AddHitGroup(string name, string chs, string ahs)
 	VecHitGroup.push_back(info);
 }
 
-void RTPipelineStateObject::AddShader(string shader, RTPipelineStateObject::ShaderType shaderType)
+void D3D12RTPipelineStateObject::AddShader(const string& shader, RTPipelineStateObject::ShaderType shaderType)
 {
 	ShaderBinding[shader].ShaderName = StringToWString(shader);;
-	ShaderBinding[shader].Type = shaderType;
+	ShaderBinding[shader].Type = static_cast<D3D12RTPipelineStateObject::ShaderType>(shaderType);
 }
 
-void RTPipelineStateObject::BindUAV(string shader, string name, UINT baseRegister)
+void D3D12RTPipelineStateObject::BindUAV(const string& shader, const string& name, uint32_t baseRegister)
 {
 	if (shader == "global")
 	{
@@ -2270,7 +2510,7 @@ void RTPipelineStateObject::BindUAV(string shader, string name, UINT baseRegiste
 	}
 }
 
-void RTPipelineStateObject::BindSRV(string shader, string name, UINT baseRegister)
+void D3D12RTPipelineStateObject::BindSRV(const string& shader, const string& name, uint32_t baseRegister)
 {
 	if (shader == "global")
 	{
@@ -2298,7 +2538,7 @@ void RTPipelineStateObject::BindSRV(string shader, string name, UINT baseRegiste
 
 
 
-void RTPipelineStateObject::BindSampler(string shader, string name, UINT baseRegister)
+void D3D12RTPipelineStateObject::BindSampler(const string& shader, const string& name, uint32_t baseRegister)
 {
 	if (shader == "global")
 	{
@@ -2324,7 +2564,7 @@ void RTPipelineStateObject::BindSampler(string shader, string name, UINT baseReg
 	}
 }
 
-void RTPipelineStateObject::BindCBV(string shader, string name, UINT baseRegister, UINT size, UINT numInstance)
+void D3D12RTPipelineStateObject::BindCBV(const string& shader, const string& name, uint32_t baseRegister, uint32_t size, uint32_t numInstance)
 {
 	if (shader == "global")
 	{
@@ -2362,11 +2602,11 @@ void RTPipelineStateObject::BindCBV(string shader, string name, UINT baseRegiste
 	}
 }
 
-void RTPipelineStateObject::BeginShaderTable()
+void D3D12RTPipelineStateObject::BeginShaderTable()
 {
 }
 
-void RTPipelineStateObject::SetGlobalBinding(CommandList* CommandList)
+void D3D12RTPipelineStateObject::SetGlobalBinding(CommandList* CommandList)
 {
 	SimpleDX12* owner = Owner;
 	assert(owner);
@@ -2379,7 +2619,7 @@ void RTPipelineStateObject::SetGlobalBinding(CommandList* CommandList)
 	}
 }
 
-void RTPipelineStateObject::EndShaderTable()
+void D3D12RTPipelineStateObject::EndShaderTable()
 {
 	SimpleDX12* owner = Owner;
 	assert(owner);
@@ -2542,7 +2782,7 @@ void RTPipelineStateObject::EndShaderTable()
 	ShaderTable->Unmap(0, nullptr);
 }
 
-void RTPipelineStateObject::SetUAV(string shader, string bindingName, D3D12_GPU_DESCRIPTOR_HANDLE uavHandle, INT instanceIndex /*= -1*/)
+void D3D12RTPipelineStateObject::SetUAVHandle(const string& shader, const string& bindingName, D3D12_GPU_DESCRIPTOR_HANDLE uavHandle, INT instanceIndex /*= -1*/)
 {
 	// each bindings of raygen/miss shader is unique to shader name.
 	if (instanceIndex == -1) // raygen, miss
@@ -2578,7 +2818,7 @@ void RTPipelineStateObject::SetUAV(string shader, string bindingName, D3D12_GPU_
 	//}
 }
 
-void RTPipelineStateObject::SetSRV(string shader, string bindingName, D3D12_GPU_DESCRIPTOR_HANDLE srvHandle, INT instanceIndex /*= -1*/)
+void D3D12RTPipelineStateObject::SetSRVHandle(const string& shader, const string& bindingName, D3D12_GPU_DESCRIPTOR_HANDLE srvHandle, INT instanceIndex /*= -1*/)
 {
 	// each bindings of raygen/miss shader is unique to shader name.
 	if (instanceIndex == -1) // raygen, miss
@@ -2613,7 +2853,7 @@ void RTPipelineStateObject::SetSRV(string shader, string bindingName, D3D12_GPU_
 	//}
 }
 
-void RTPipelineStateObject::ResetHitProgram(UINT instanceIndex)
+void D3D12RTPipelineStateObject::ResetHitProgram(uint32_t instanceIndex)
 {
 	for (auto& HG : VecHitGroup)
 	{
@@ -2621,7 +2861,7 @@ void RTPipelineStateObject::ResetHitProgram(UINT instanceIndex)
 	}
 }
 
-void RTPipelineStateObject::StartHitProgram(string HitGroup, UINT instanceIndex)
+void D3D12RTPipelineStateObject::StartHitProgram(const string& HitGroup, uint32_t instanceIndex)
 {
 	map<UINT, HitProgramData>* HitProgram =nullptr;
 	for (auto& HG : VecHitGroup)
@@ -2633,7 +2873,7 @@ void RTPipelineStateObject::StartHitProgram(string HitGroup, UINT instanceIndex)
 	(*HitProgram)[instanceIndex].VecData.clear();
 }
 
-void RTPipelineStateObject::AddDescriptor2HitProgram(string HitGroup, D3D12_GPU_DESCRIPTOR_HANDLE srvHandle, UINT instanceIndex)
+void D3D12RTPipelineStateObject::AddDescriptor2HitProgram(const string& HitGroup, D3D12_GPU_DESCRIPTOR_HANDLE srvHandle, UINT instanceIndex)
 {
 	map<UINT, HitProgramData>* HitProgram = nullptr;
 	for (auto& HG : VecHitGroup)
@@ -2645,7 +2885,7 @@ void RTPipelineStateObject::AddDescriptor2HitProgram(string HitGroup, D3D12_GPU_
 	(*HitProgram)[instanceIndex].VecData.push_back(srvHandle);
 }
 
-void RTPipelineStateObject::SetSampler(string shader, string bindingName, Sampler* sampler, INT instanceIndex /*= -1*/)
+void D3D12RTPipelineStateObject::SetSampler(const string& shader, const string& bindingName, Sampler* sampler, INT instanceIndex /*= -1*/)
 {
 	// each bindings of raygen/miss shader is unique to shader name.
 	if (instanceIndex == -1) // raygen, miss
@@ -2680,7 +2920,7 @@ void RTPipelineStateObject::SetSampler(string shader, string bindingName, Sample
 	//}
 }
 
-void RTPipelineStateObject::SetCBVValue(string shader, string bindingName, void* pData, INT instanceIndex /*= -1*/)
+void D3D12RTPipelineStateObject::SetCBVValue(const string& shader, const string& bindingName, void* pData, INT instanceIndex /*= -1*/)
 {
 	SimpleDX12* owner = Owner;
 	assert(owner);
@@ -2755,7 +2995,7 @@ void RTPipelineStateObject::SetCBVValue(string shader, string bindingName, void*
 }
 
 
-bool RTPipelineStateObject::InitRS(string ShaderFile)
+bool D3D12RTPipelineStateObject::InitRS(const string& ShaderFile)
 {
 	SimpleDX12* owner = Owner;
 	assert(owner);
@@ -2973,10 +3213,11 @@ bool RTPipelineStateObject::InitRS(string ShaderFile)
 	return true;
 }
 
-void RTPipelineStateObject::Apply(UINT width, UINT height, CommandList* CommandList)
+void D3D12RTPipelineStateObject::Apply(uint32_t width, uint32_t height)
 {
 	SimpleDX12* owner = Owner;
 	assert(owner);
+	CommandList* CommandList = nullptr;
 	CommandList = ResolveCommandList(owner, CommandList);
 	assert(CommandList);
 	D3D12_DISPATCH_RAYS_DESC raytraceDesc = {};
@@ -3020,6 +3261,55 @@ void RTPipelineStateObject::Apply(UINT width, UINT height, CommandList* CommandL
 	CommandList->CmdList->SetPipelineState1(RTPipelineState.Get());
 	
 	CommandList->CmdList->DispatchRays(&raytraceDesc);
+}
+
+void D3D12RTPipelineStateObject::SetTextureUAV(const string& shader, const string& bindingName, Texture* texture, int instanceIndex)
+{
+	assert(texture);
+	SetUAVHandle(shader, bindingName, texture->GpuHandleUAV, instanceIndex);
+}
+
+void D3D12RTPipelineStateObject::SetTextureSRV(const string& shader, const string& bindingName, Texture* texture, int instanceIndex)
+{
+	assert(texture);
+	SetSRVHandle(shader, bindingName, texture->GpuHandleSRV, instanceIndex);
+}
+
+void D3D12RTPipelineStateObject::SetBufferSRV(const string& shader, const string& bindingName, Buffer* buffer, int instanceIndex)
+{
+	assert(buffer);
+	SetSRVHandle(shader, bindingName, buffer->GpuHandleSRV, instanceIndex);
+}
+
+void D3D12RTPipelineStateObject::SetAccelerationStructure(const string& shader, const string& bindingName, const std::shared_ptr<RTAS>& rtas, int instanceIndex)
+{
+	D3D12RTAS* dx12RTAS = dynamic_cast<D3D12RTAS*>(rtas.get());
+	assert(dx12RTAS);
+	SetSRVHandle(shader, bindingName, dx12RTAS->GPUHandle, instanceIndex);
+}
+
+void D3D12RTPipelineStateObject::AddTextureSRVToHitProgram(const string& hitGroup, Texture* texture, uint32_t instanceIndex)
+{
+	assert(texture);
+	AddDescriptor2HitProgram(hitGroup, texture->GpuHandleSRV, instanceIndex);
+}
+
+void D3D12RTPipelineStateObject::AddBufferSRVToHitProgram(const string& hitGroup, Buffer* buffer, uint32_t instanceIndex)
+{
+	assert(buffer);
+	AddDescriptor2HitProgram(hitGroup, buffer->GpuHandleSRV, instanceIndex);
+}
+
+void D3D12RTPipelineStateObject::AddVertexBufferSRVToHitProgram(const string& hitGroup, VertexBuffer* buffer, uint32_t instanceIndex)
+{
+	assert(buffer);
+	AddDescriptor2HitProgram(hitGroup, buffer->GpuHandleSRV, instanceIndex);
+}
+
+void D3D12RTPipelineStateObject::AddIndexBufferSRVToHitProgram(const string& hitGroup, IndexBuffer* buffer, uint32_t instanceIndex)
+{
+	assert(buffer);
+	AddDescriptor2HitProgram(hitGroup, buffer->GpuHandleSRV, instanceIndex);
 }
 
 void DescriptorHeapRing::Init(DescriptorHeap* InDHHeap, UINT InNumDescriptors, UINT InNumFrame)
@@ -3205,7 +3495,8 @@ ConstantBufferRingBuffer::~ConstantBufferRingBuffer()
 void Buffer::MakeByteAddressBufferSRV()
 {
 	SimpleDX12* owner = Owner;
-	assert(owner);
+	if (!owner)
+		return;
 	// create shader resource view
 	D3D12_SHADER_RESOURCE_VIEW_DESC bufferSRVDesc;
 	bufferSRVDesc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
@@ -3226,7 +3517,8 @@ void Buffer::MakeByteAddressBufferSRV()
 void Buffer::MakeStructuredBufferSRV()
 {
 	SimpleDX12* owner = Owner;
-	assert(owner);
+	if (!owner)
+		return;
 	// create shader resource view
 	D3D12_SHADER_RESOURCE_VIEW_DESC bufferSRVDesc;
 	bufferSRVDesc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
@@ -3242,4 +3534,202 @@ void Buffer::MakeStructuredBufferSRV()
 	owner->Device->CreateShaderResourceView(resource.Get(), &bufferSRVDesc, CpuHandleSRV);
 
 	Type = STRUCTURED;
+}
+
+Texture* SimpleDX12::GetCurrentWindowRenderTarget()
+{
+	if (CurrentFrameIndex >= GetFrameCount())
+		return nullptr;
+
+	if (SwapChainRenderTargets.size() != GetFrameCount())
+		SwapChainRenderTargets.resize(GetFrameCount());
+
+	if (!SwapChainRenderTargets[CurrentFrameIndex])
+	{
+		std::shared_ptr<Texture> renderTarget = WrapNativeTexture(GetSwapChainBuffer(CurrentFrameIndex));
+		renderTarget->MakeRTV();
+		SwapChainRenderTargets[CurrentFrameIndex] = renderTarget;
+	}
+
+	return SwapChainRenderTargets[CurrentFrameIndex].get();
+}
+
+void SimpleDX12::PrepareWindowRenderTarget(Texture* renderTarget)
+{
+	if (!renderTarget)
+		return;
+
+	TransitionTexture(renderTarget, EResourceState::Present, EResourceState::RenderTarget);
+}
+
+void SimpleDX12::FinalizeWindowRenderTarget(Texture* renderTarget)
+{
+	if (!renderTarget)
+		return;
+
+	TransitionTexture(renderTarget, EResourceState::RenderTarget, EResourceState::Present);
+}
+
+void SimpleDX12::RequestWindowCapture(const std::wstring& outputPath)
+{
+	PendingWindowCapturePath = outputPath;
+}
+
+bool SimpleDX12::ConsumeWindowCaptureResult(std::wstring* outputPath, bool* success, std::wstring* errorMessage)
+{
+	if (!bLastWindowCaptureResultValid && !PendingWindowCapturePath.empty())
+	{
+		Texture* renderTarget = GetCurrentWindowRenderTarget();
+		if (!renderTarget)
+			return false;
+
+		std::filesystem::create_directories(std::filesystem::path(PendingWindowCapturePath).parent_path());
+		DirectX::ScratchImage captured;
+		LastWindowCapturePath = PendingWindowCapturePath;
+		LastWindowCaptureError.clear();
+		bLastWindowCaptureSucceeded = false;
+
+		const HRESULT hr = CaptureTexture(renderTarget, captured, D3D12_RESOURCE_STATE_PRESENT);
+		if (SUCCEEDED(hr))
+		{
+			bLastWindowCaptureSucceeded = SaveScratchImagePNG(captured, PendingWindowCapturePath, &LastWindowCaptureError);
+		}
+		else
+		{
+			LastWindowCaptureError = L"Failed to capture DX12 window render target.";
+		}
+
+		bLastWindowCaptureResultValid = true;
+		PendingWindowCapturePath.clear();
+	}
+
+	if (!bLastWindowCaptureResultValid)
+		return false;
+
+	if (outputPath)
+		*outputPath = LastWindowCapturePath;
+	if (success)
+		*success = bLastWindowCaptureSucceeded;
+	if (errorMessage)
+		*errorMessage = LastWindowCaptureError;
+
+	bLastWindowCaptureResultValid = false;
+	LastWindowCapturePath.clear();
+	LastWindowCaptureError.clear();
+	bLastWindowCaptureSucceeded = false;
+	return true;
+}
+
+std::shared_ptr<GraphicsPipelineHandle> SimpleDX12::CreateGraphicsPipeline(const GraphicsPipelineDesc& desc)
+{
+	auto handle = std::make_shared<DX12GraphicsPipelineHandle>();
+
+	ComPtr<ID3DBlob> vs = CreateShader(desc.ShaderPath, desc.VertexEntryPoint, "vs_5_0");
+	ComPtr<ID3DBlob> ps = CreateShader(desc.ShaderPath, desc.PixelEntryPoint, "ps_5_0");
+	if (!vs || !ps)
+		return nullptr;
+
+	std::vector<std::string> semantics;
+	semantics.reserve(desc.VertexElements.size());
+	std::vector<D3D12_INPUT_ELEMENT_DESC> vertexElements;
+	vertexElements.reserve(desc.VertexElements.size());
+	for (const auto& element : desc.VertexElements)
+	{
+		semantics.push_back(element.SemanticName);
+		D3D12_INPUT_ELEMENT_DESC inputDesc{};
+		inputDesc.SemanticName = semantics.back().c_str();
+		inputDesc.SemanticIndex = element.SemanticIndex;
+		inputDesc.Format = element.Format;
+		inputDesc.InputSlot = 0;
+		inputDesc.AlignedByteOffset = element.Offset;
+		inputDesc.InputSlotClass = D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA;
+		inputDesc.InstanceDataStepRate = 0;
+		vertexElements.push_back(inputDesc);
+	}
+
+	CD3DX12_RASTERIZER_DESC rasterizerStateDesc(D3D12_DEFAULT);
+	rasterizerStateDesc.CullMode = desc.bCullBackFaces ? D3D12_CULL_MODE_BACK : D3D12_CULL_MODE_NONE;
+
+	D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDesc = {};
+	psoDesc.InputLayout = { vertexElements.data(), static_cast<UINT>(vertexElements.size()) };
+	psoDesc.RasterizerState = rasterizerStateDesc;
+	psoDesc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
+	psoDesc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
+	psoDesc.DepthStencilState.DepthEnable = desc.bDepthEnable ? TRUE : FALSE;
+	psoDesc.DepthStencilState.DepthWriteMask = desc.bDepthEnable ? D3D12_DEPTH_WRITE_MASK_ALL : D3D12_DEPTH_WRITE_MASK_ZERO;
+	psoDesc.DepthStencilState.StencilEnable = FALSE;
+	psoDesc.SampleMask = UINT_MAX;
+	psoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+	psoDesc.NumRenderTargets = static_cast<UINT>(desc.ColorFormats.empty() ? 1 : desc.ColorFormats.size());
+	for (UINT i = 0; i < psoDesc.NumRenderTargets; ++i)
+		psoDesc.RTVFormats[i] = desc.ColorFormats[i];
+	psoDesc.DSVFormat = desc.DepthFormat;
+	psoDesc.SampleDesc.Count = 1;
+
+	auto pso = std::make_shared<PipelineStateObject>();
+	pso->Owner = this;
+	pso->vs = vs;
+	pso->ps = ps;
+	pso->graphicsPSODesc = psoDesc;
+	if (desc.ConstantBufferSize > 0)
+		pso->BindCBV("__CB0", desc.ConstantBufferBinding, desc.ConstantBufferSize);
+	for (const auto& binding : desc.TextureBindings)
+		pso->BindSRV(binding.Name, binding.Slot, 1);
+	for (const auto& binding : desc.BufferBindings)
+		pso->BindSRV(binding.Name, binding.Slot, 1);
+	for (const auto& binding : desc.SamplerBindings)
+		pso->BindSampler(binding.Name, binding.Slot);
+	if (!pso->Init())
+		return nullptr;
+
+	handle->PSO = pso;
+	handle->ConstantBufferSize = desc.ConstantBufferSize;
+	return handle;
+}
+
+void SimpleDX12::BindGraphicsPipeline(GraphicsPipelineHandle* pipeline)
+{
+	auto* dxPipeline = dynamic_cast<DX12GraphicsPipelineHandle*>(pipeline);
+	if (dxPipeline && dxPipeline->PSO)
+		dxPipeline->PSO->Apply();
+}
+
+void SimpleDX12::SetGraphicsPipelineConstantData(GraphicsPipelineHandle* pipeline, uint32_t slot, const void* data, uint32_t size)
+{
+	(void)slot;
+	auto* dxPipeline = dynamic_cast<DX12GraphicsPipelineHandle*>(pipeline);
+	if (!dxPipeline || !dxPipeline->PSO || !data || size == 0 || dxPipeline->ConstantBufferSize == 0)
+		return;
+
+	std::vector<uint8_t> paddedData(dxPipeline->ConstantBufferSize, 0);
+	const uint32_t copySize = (std::min)(size, dxPipeline->ConstantBufferSize);
+	std::memcpy(paddedData.data(), data, copySize);
+	dxPipeline->PSO->SetCBVValue("__CB0", paddedData.data());
+}
+
+void SimpleDX12::BindGraphicsPipelineTexture(GraphicsPipelineHandle* pipeline, const std::string& bindingName, Texture* texture)
+{
+	auto* dxPipeline = dynamic_cast<DX12GraphicsPipelineHandle*>(pipeline);
+	if (!dxPipeline || !dxPipeline->PSO || !texture)
+		return;
+
+	dxPipeline->PSO->SetSRV(bindingName, texture->GpuHandleSRV);
+}
+
+void SimpleDX12::BindGraphicsPipelineBuffer(GraphicsPipelineHandle* pipeline, const std::string& bindingName, Buffer* buffer)
+{
+	auto* dxPipeline = dynamic_cast<DX12GraphicsPipelineHandle*>(pipeline);
+	if (!dxPipeline || !dxPipeline->PSO || !buffer)
+		return;
+
+	dxPipeline->PSO->SetSRV(bindingName, buffer->GpuHandleSRV);
+}
+
+void SimpleDX12::BindGraphicsPipelineSampler(GraphicsPipelineHandle* pipeline, const std::string& bindingName, Sampler* sampler)
+{
+	auto* dxPipeline = dynamic_cast<DX12GraphicsPipelineHandle*>(pipeline);
+	if (!dxPipeline || !dxPipeline->PSO || !sampler)
+		return;
+
+	dxPipeline->PSO->SetSampler(bindingName, sampler);
 }

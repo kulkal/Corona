@@ -3,10 +3,10 @@
 RWTexture2D<float4> OutputColor : register(u0);
 
 RaytracingAccelerationStructure gRtScene : register(t0);
+Texture3D BlueNoiseTex : register(t4);
 ByteAddressBuffer vertices : register(t1);
 ByteAddressBuffer indices : register(t2);
 ByteAddressBuffer InstanceProperty : register(t3);
-Texture3D BlueNoiseTex : register(t4);
 Texture2D AlbedoTex : register(t5);
 Texture2D NormalTex : register(t6);
 Texture2D RoughnessTex : register(t7);

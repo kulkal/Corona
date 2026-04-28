@@ -297,9 +297,29 @@ uint3 GetIndices(ByteAddressBuffer ib, uint triangleIndex)
     return index;
 }
 
+static const uint INSTANCE_PROPERTY_STRIDE = 80;
+static const uint INSTANCE_PROPERTY_WORLD_MATRIX_OFFSET = 0;
+static const uint INSTANCE_PROPERTY_VERTEX_OFFSET = 64;
+static const uint INSTANCE_PROPERTY_INDEX_OFFSET = 68;
+
+uint3 GetIndicesWithOffset(ByteAddressBuffer ib, uint triangleIndex, uint indexOffset)
+{
+    uint baseIndex = (indexOffset + triangleIndex * 3) * 4;
+
+    uint3 index;
+    index.x = ib.Load(baseIndex);
+    index.y = ib.Load(baseIndex + 4);
+    index.z = ib.Load(baseIndex + 8);
+
+    return index;
+}
+
 Vertex GetVertexAttributes(uint instanceID, ByteAddressBuffer vb, ByteAddressBuffer ib, ByteAddressBuffer ip, uint triangleIndex, float3 barycentrics)
 {
-   uint3 index = GetIndices(ib, triangleIndex);
+    uint instancePropertyBase = instanceID * INSTANCE_PROPERTY_STRIDE;
+    uint vertexOffset = ip.Load(instancePropertyBase + INSTANCE_PROPERTY_VERTEX_OFFSET);
+    uint indexOffset = ip.Load(instancePropertyBase + INSTANCE_PROPERTY_INDEX_OFFSET);
+    uint3 index = GetIndicesWithOffset(ib, triangleIndex, indexOffset) + vertexOffset;
     Vertex v;
     v.position = float3(0, 0, 0);
     v.uv = float2(0, 0);
@@ -317,10 +337,10 @@ Vertex GetVertexAttributes(uint instanceID, ByteAddressBuffer vb, ByteAddressBuf
     // Load world matrix (glm::mat4x4 is column-major in memory)
     // But HLSL float4x4 initialization is row-major, so we need to transpose
     float4x4 WorldMatrixTransposed = {
-        asfloat(ip.Load4(instanceID*4*16)), 
-        asfloat(ip.Load4(instanceID*4*16 + 16)), 
-        asfloat(ip.Load4(instanceID*4*16 + 16*2)),
-        asfloat(ip.Load4(instanceID*4*16 + 16*3)),
+        asfloat(ip.Load4(instancePropertyBase + INSTANCE_PROPERTY_WORLD_MATRIX_OFFSET)), 
+        asfloat(ip.Load4(instancePropertyBase + INSTANCE_PROPERTY_WORLD_MATRIX_OFFSET + 16)), 
+        asfloat(ip.Load4(instancePropertyBase + INSTANCE_PROPERTY_WORLD_MATRIX_OFFSET + 16*2)),
+        asfloat(ip.Load4(instancePropertyBase + INSTANCE_PROPERTY_WORLD_MATRIX_OFFSET + 16*3)),
     };
     float4x4 WorldMatrix = transpose(WorldMatrixTransposed);
 
@@ -356,6 +376,69 @@ Vertex GetVertexAttributes(uint instanceID, ByteAddressBuffer vb, ByteAddressBuf
     v.tangent = normalize(v.tangent);
     v.tangent = mul(WorldMatrix, float4(v.tangent, 0)).xyz;
     v.tangent = normalize(v.tangent);
+
+    float triangleArea = calcTriangleArea(p0, p1, p2);
+    
+    float3 uvA = float3(uv0.x, uv0.y, 0.f);
+    float3 uvB = float3(uv1.x, uv1.y, 0.f);
+    float3 uvC = float3(uv2.x, uv2.y, 0.f);   
+    float triangleUvArea = calcTriangleArea(uvA, uvB, uvC);
+    
+    v.textureLODConstant = 0.5 * log2(triangleUvArea / triangleArea);
+
+    return v;
+}
+
+Vertex GetSurfaceVertexAttributes(uint instanceID, ByteAddressBuffer vb, ByteAddressBuffer ib, ByteAddressBuffer ip, uint triangleIndex, float3 barycentrics)
+{
+    uint instancePropertyBase = instanceID * INSTANCE_PROPERTY_STRIDE;
+    uint vertexOffset = ip.Load(instancePropertyBase + INSTANCE_PROPERTY_VERTEX_OFFSET);
+    uint indexOffset = ip.Load(instancePropertyBase + INSTANCE_PROPERTY_INDEX_OFFSET);
+    uint3 index = GetIndicesWithOffset(ib, triangleIndex, indexOffset) + vertexOffset;
+    Vertex v;
+    v.position = float3(0, 0, 0);
+    v.uv = float2(0, 0);
+    v.tangent = float3(0, 0, 0);
+
+
+    float3 p0 = asfloat(vb.Load3(index[0] * 44));
+    float3 p1 = asfloat(vb.Load3(index[1] * 44));
+    float3 p2 = asfloat(vb.Load3(index[2] * 44));
+    
+    // Load vertex normals from buffer (offset 12)
+    float3 n0 = asfloat(vb.Load3(index[0] * 44 + 12));
+    float3 n1 = asfloat(vb.Load3(index[1] * 44 + 12));
+    float3 n2 = asfloat(vb.Load3(index[2] * 44 + 12));
+
+    // Load world matrix (glm::mat4x4 is column-major in memory)
+    // But HLSL float4x4 initialization is row-major, so we need to transpose
+    float4x4 WorldMatrixTransposed = {
+        asfloat(ip.Load4(instancePropertyBase + INSTANCE_PROPERTY_WORLD_MATRIX_OFFSET)), 
+        asfloat(ip.Load4(instancePropertyBase + INSTANCE_PROPERTY_WORLD_MATRIX_OFFSET + 16)), 
+        asfloat(ip.Load4(instancePropertyBase + INSTANCE_PROPERTY_WORLD_MATRIX_OFFSET + 16*2)),
+        asfloat(ip.Load4(instancePropertyBase + INSTANCE_PROPERTY_WORLD_MATRIX_OFFSET + 16*3)),
+    };
+    float4x4 WorldMatrix = transpose(WorldMatrixTransposed);
+
+    v.position += p0 * barycentrics[0];
+    v.position += p1 * barycentrics[1];
+    v.position += p2 * barycentrics[2];
+
+    v.position = mul(WorldMatrix, float4(v.position, 1)).xyz;
+
+    float2 uv0 = asfloat(vb.Load2(index[0] * 44 + 24));
+    float2 uv1 = asfloat(vb.Load2(index[1] * 44 + 24));
+    float2 uv2 = asfloat(vb.Load2(index[2] * 44 + 24));
+
+    v.uv += uv0 * barycentrics[0];
+    v.uv += uv1 * barycentrics[1];
+    v.uv += uv2 * barycentrics[2];
+
+    // Interpolate vertex normals for smooth shading
+    v.normal = n0 * barycentrics[0] + n1 * barycentrics[1] + n2 * barycentrics[2];
+    v.normal = normalize(v.normal);
+    v.normal = mul(WorldMatrix, float4(v.normal, 0)).xyz;
+    v.normal = normalize(v.normal);
 
     float triangleArea = calcTriangleArea(p0, p1, p2);
     

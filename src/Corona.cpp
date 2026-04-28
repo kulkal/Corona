@@ -11,6 +11,7 @@
 
 #include "stdafx.h"
 #include "Corona.h"
+#include "VulkanBackend.h"
 #include <dxcapi.use.h>
 //#include <dxcapi.h>
 #include "Utils.h"
@@ -57,6 +58,28 @@ static dxc::DxcDllSupport gDxcDllHelper;
 
 using namespace glm;
 using namespace DirectX;
+
+namespace
+{
+	void AppendVulkanRuntimeTrace(const std::wstring& line);
+
+	uint32_t GetHybridStageAutoDumpFrameCount(uint32_t phase, bool bVulkanHybridDump, bool bLimitedHybridStageDump)
+	{
+		if (!bVulkanHybridDump)
+			return bLimitedHybridStageDump ? 1u : 8u;
+		if (phase >= 7u)
+			return 16u;
+		if (phase >= 5u)
+			return 8u;
+		return 1u;
+	}
+
+	bool ShouldUseTAAForHybridStageAutoDump(uint32_t phase, bool bVulkanHybridDump)
+	{
+		return bVulkanHybridDump && phase >= 7u;
+	}
+
+}
 
 #if WITH_STREAMLINE
 namespace
@@ -176,6 +199,29 @@ namespace
 		"Debug",
 		"ImGui",
 	};
+
+	const std::filesystem::path kFramePerfLogPath =
+		std::filesystem::path(L"C:\\dev\\Corona\\dumps\\fps_perf.log");
+
+	double ElapsedMilliseconds(
+		const std::chrono::steady_clock::time_point& begin,
+		const std::chrono::steady_clock::time_point& end)
+	{
+		return std::chrono::duration<double, std::milli>(end - begin).count();
+	}
+
+	const char* GetRenderingModeName(Corona::ERenderingMode mode)
+	{
+		switch (mode)
+		{
+		case Corona::ERenderingMode::HYBRID:
+			return "HYBRID";
+		case Corona::ERenderingMode::PATHTRACING:
+			return "PATHTRACING";
+		default:
+			return "UNKNOWN";
+		}
+	}
 }
 
 template<class BlotType>
@@ -257,6 +303,114 @@ Corona::~Corona()
 
 }
 
+void Corona::BeginFramePerfLogging()
+{
+	const auto now = CpuClock::now();
+	if (!bFramePerfLogInitialized)
+	{
+		bFramePerfLogInitialized = true;
+		FramePerfLogLastFlush = now;
+		std::error_code createDirectoryError;
+		std::filesystem::create_directories(kFramePerfLogPath.parent_path(), createDirectoryError);
+
+		std::ofstream logFile(kFramePerfLogPath, std::ios::trunc);
+		if (logFile.is_open())
+		{
+			logFile << "# Corona frame performance log. One row is an approximately one-second sample.\n";
+			logFile << "sample,total_frames,backend,mode,timer_fps,avg_fps,avg_frame_ms,min_frame_ms,max_frame_ms,"
+				"avg_begin_frame_ms,avg_record_ms,avg_execute_ms,avg_end_frame_ms";
+			for (UINT passIndex = 0; passIndex < GpuPassCount; ++passIndex)
+			{
+				logFile << ",cpu_" << GetGpuPassName(static_cast<EGpuPass>(passIndex)) << "_ms";
+			}
+			for (UINT passIndex = 0; passIndex < GpuPassCount; ++passIndex)
+			{
+				logFile << ",gpu_" << GetGpuPassName(static_cast<EGpuPass>(passIndex)) << "_ms";
+			}
+			logFile << "\n";
+		}
+	}
+
+	FramePerfLogFrameStart = now;
+	CpuPassLastTimeMs.fill(0.0f);
+	CpuPassActiveMask.fill(0);
+}
+
+void Corona::FinishFramePerfLogging(double beginFrameMs, double executeMs, double endFrameMs)
+{
+	if (!bFramePerfLogInitialized)
+		return;
+
+	const auto now = CpuClock::now();
+	const double frameMs = ElapsedMilliseconds(FramePerfLogFrameStart, now);
+	const double recordMs = std::max(0.0, frameMs - beginFrameMs - executeMs - endFrameMs);
+
+	++FramePerfLogTotalFrameCount;
+	++FramePerfLogSampleFrameCount;
+	FramePerfLogAccumFrameMs += frameMs;
+	FramePerfLogMinFrameMs = std::min(FramePerfLogMinFrameMs, frameMs);
+	FramePerfLogMaxFrameMs = std::max(FramePerfLogMaxFrameMs, frameMs);
+	FramePerfLogAccumBeginFrameMs += beginFrameMs;
+	FramePerfLogAccumRecordMs += recordMs;
+	FramePerfLogAccumExecuteMs += executeMs;
+	FramePerfLogAccumEndFrameMs += endFrameMs;
+	for (UINT passIndex = 0; passIndex < GpuPassCount; ++passIndex)
+	{
+		// Divide by sample frame count when flushing so inactive passes naturally show as 0 cost.
+		CpuPassAccumTimeMs[passIndex] += CpuPassLastTimeMs[passIndex];
+	}
+
+	const double elapsedSinceFlushSeconds =
+		std::chrono::duration<double>(now - FramePerfLogLastFlush).count();
+	if (elapsedSinceFlushSeconds < 1.0 && FramePerfLogSampleFrameCount < 120)
+		return;
+
+	const double sampleFrameCount = static_cast<double>(FramePerfLogSampleFrameCount);
+	const double avgFrameMs = FramePerfLogAccumFrameMs / sampleFrameCount;
+	const double avgFps = FramePerfLogAccumFrameMs > 0.0
+		? (sampleFrameCount * 1000.0 / FramePerfLogAccumFrameMs)
+		: 0.0;
+
+	std::ofstream logFile(kFramePerfLogPath, std::ios::app);
+	if (logFile.is_open())
+	{
+		logFile << std::fixed << std::setprecision(3)
+			<< (FramePerfLogTotalFrameCount / std::max<UINT32>(1, FramePerfLogSampleFrameCount))
+			<< "," << FramePerfLogTotalFrameCount
+			<< "," << (renderBackend ? renderBackend->GetBackendName() : "None")
+			<< "," << GetRenderingModeName(RenderingMode)
+			<< "," << m_timer.GetFramesPerSecond()
+			<< "," << avgFps
+			<< "," << avgFrameMs
+			<< "," << FramePerfLogMinFrameMs
+			<< "," << FramePerfLogMaxFrameMs
+			<< "," << (FramePerfLogAccumBeginFrameMs / sampleFrameCount)
+			<< "," << (FramePerfLogAccumRecordMs / sampleFrameCount)
+			<< "," << (FramePerfLogAccumExecuteMs / sampleFrameCount)
+			<< "," << (FramePerfLogAccumEndFrameMs / sampleFrameCount);
+		for (UINT passIndex = 0; passIndex < GpuPassCount; ++passIndex)
+		{
+			logFile << "," << (CpuPassAccumTimeMs[passIndex] / sampleFrameCount);
+		}
+		for (UINT passIndex = 0; passIndex < GpuPassCount; ++passIndex)
+		{
+			logFile << "," << GpuPassAverageTimeMs[passIndex];
+		}
+		logFile << "\n";
+	}
+
+	FramePerfLogLastFlush = now;
+	FramePerfLogSampleFrameCount = 0;
+	FramePerfLogAccumFrameMs = 0.0;
+	FramePerfLogMinFrameMs = 1.0e30;
+	FramePerfLogMaxFrameMs = 0.0;
+	FramePerfLogAccumBeginFrameMs = 0.0;
+	FramePerfLogAccumRecordMs = 0.0;
+	FramePerfLogAccumExecuteMs = 0.0;
+	FramePerfLogAccumEndFrameMs = 0.0;
+	CpuPassAccumTimeMs.fill(0.0);
+}
+
 void Corona::InitGpuTimingResources()
 {
 	if (bGpuTimingResourcesInitialized)
@@ -333,11 +487,14 @@ void Corona::UpdateGpuTimingReadback()
 
 void Corona::BeginGpuPassTiming(EGpuPass pass)
 {
+	const UINT passIndex = static_cast<UINT>(pass);
+	CpuPassActiveMask[passIndex] = 1;
+	CpuPassStartTimes[passIndex] = CpuClock::now();
+
 	if (!bGpuTimingResourcesInitialized)
 		return;
 
 	const UINT frameIndex = renderBackend->GetCurrentFrameIndex();
-	const UINT passIndex = static_cast<UINT>(pass);
 	GpuPassActiveMaskPerFrame[frameIndex][passIndex] = 1;
 
 	const UINT queryIndex = frameIndex * GpuPassCount * GpuQueriesPerPass + passIndex * GpuQueriesPerPass;
@@ -346,11 +503,17 @@ void Corona::BeginGpuPassTiming(EGpuPass pass)
 
 void Corona::EndGpuPassTiming(EGpuPass pass)
 {
+	const UINT passIndex = static_cast<UINT>(pass);
+	if (CpuPassActiveMask[passIndex])
+	{
+		CpuPassLastTimeMs[passIndex] =
+			static_cast<float>(ElapsedMilliseconds(CpuPassStartTimes[passIndex], CpuClock::now()));
+	}
+
 	if (!bGpuTimingResourcesInitialized)
 		return;
 
 	const UINT frameIndex = renderBackend->GetCurrentFrameIndex();
-	const UINT passIndex = static_cast<UINT>(pass);
 	const UINT queryIndex = frameIndex * GpuPassCount * GpuQueriesPerPass + passIndex * GpuQueriesPerPass + 1;
 	renderBackend->WriteGpuTimestamp(queryIndex);
 }
@@ -581,7 +744,7 @@ bool Corona::DLSSRRPass()
 
 void Corona::ResetTemporalHistoryBuffers()
 {
-	if (!dx12_rhi)
+	if (!renderBackend)
 		return;
 
 	const FLOAT clear4[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
@@ -759,6 +922,15 @@ Texture* Corona::GetCurrentResolveSource() const
 void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 {
 	DXSample::ParseCommandLineArgs(argv, argc);
+	auto AppendStartupTrace = [](const std::wstring& line)
+	{
+		const std::filesystem::path tracePath = std::filesystem::path(L"C:\\dev\\Corona\\dumps\\vulkan_runtime_trace.log");
+		std::filesystem::create_directories(tracePath.parent_path());
+		std::wofstream traceFile(tracePath, std::ios::app);
+		if (traceFile.is_open())
+			traceFile << line << L"\n";
+	};
+	AppendStartupTrace(L"[ParseCommandLineArgs] begin");
 
 	auto ToLower = [](std::wstring value)
 	{
@@ -828,7 +1000,22 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 				CommandLineRenderingMode = ERenderingMode::HYBRID;
 			continue;
 		}
+
+		std::wstring backendValue = ParseValueArg(arg, L"--backend", L"-backend", i);
+		if (!backendValue.empty())
+		{
+			bCommandLineRenderBackendOverrideSet = true;
+			CommandLineRenderBackendAPI = (backendValue == L"vulkan" || backendValue == L"vk") ? ERenderBackendAPI::Vulkan : ERenderBackendAPI::D3D12;
+			continue;
+		}
 	}
+	AppendStartupTrace(
+		L"[ParseCommandLineArgs] end backendOverride=" + std::to_wstring(bCommandLineRenderBackendOverrideSet ? 1 : 0) +
+		L", backend=" + std::to_wstring(static_cast<int>(CommandLineRenderBackendAPI)) +
+		L", renderOverride=" + std::to_wstring(bCommandLineRenderModeOverrideSet ? 1 : 0) +
+		L", renderMode=" + std::to_wstring(static_cast<int>(CommandLineRenderingMode)) +
+		L", autoDumpOverride=" + std::to_wstring(bCommandLineAutoDumpOverrideSet ? 1 : 0) +
+		L", autoDump=" + std::to_wstring(bCommandLineAutoDumpEnabled ? 1 : 0));
 }
 
 void Corona::PromptStartupModeSelection()
@@ -857,6 +1044,7 @@ void Corona::PromptStartupModeSelection()
 
 	StartupSelectedAAMode = SelectDefaultAAMode();
 	StartupRenderingMode = ERenderingMode::HYBRID;
+	StartupRenderBackendAPI = ERenderBackendAPI::D3D12;
 	RenderingMode = StartupRenderingMode;
 	bAutoAADumpEnabled = false;
 
@@ -874,6 +1062,10 @@ void Corona::PromptStartupModeSelection()
 	if (bCommandLineRenderModeOverrideSet)
 	{
 		StartupRenderingMode = CommandLineRenderingMode;
+	}
+	if (bCommandLineRenderBackendOverrideSet)
+	{
+		StartupRenderBackendAPI = CommandLineRenderBackendAPI;
 	}
 	const DWORD renderEnvLength = GetEnvironmentVariableW(L"CORONA_START_RENDER_MODE", envValue, _countof(envValue));
 	if (!bCommandLineRenderModeOverrideSet && renderEnvLength > 0)
@@ -952,6 +1144,11 @@ void Corona::PromptStartupModeSelection()
 		StartupSelectedAAMode = EAntiAliasingMode::TAA;
 #endif
 
+	if (StartupRenderBackendAPI == ERenderBackendAPI::Vulkan && IsDLSSMode(StartupSelectedAAMode))
+	{
+		StartupSelectedAAMode = EAntiAliasingMode::TAA;
+	}
+
 	AntiAliasingMode = StartupSelectedAAMode;
 	RenderingMode = StartupRenderingMode;
 	bStartupModeConfigured = true;
@@ -1008,6 +1205,47 @@ void Corona::InitializeAutoAADump()
 	if (this->bAutoAADumpInitialized || !this->bAutoAADumpEnabled)
 		return;
 
+	if (StartupRenderingMode == ERenderingMode::HYBRID)
+	{
+		const uint32_t maxSupportedHybridStage = renderBackend ? renderBackend->GetMaxSupportedHybridStage() : 7u;
+		std::filesystem::path dumpDir = std::filesystem::path(L"C:\\dev\\Corona\\dumps\\hybrid_pass_stages");
+		std::filesystem::create_directories(dumpDir);
+		this->AutoAADumpDir = dumpDir.wstring();
+		this->bAutoAADumpInitialized = true;
+		this->bAutoAADumpCompleted = false;
+		this->bHybridStageAutoDumpMode = true;
+		this->AutoAADumpPhase = 0;
+		this->AutoAADumpFramesInPhase = 0;
+
+		std::filesystem::path logPath = std::filesystem::path(AutoAADumpDir) / L"dump_log.txt";
+		std::error_code ec;
+		std::filesystem::remove(logPath, ec);
+
+		StartupRenderingMode = ERenderingMode::HYBRID;
+		RenderingMode = StartupRenderingMode;
+		AntiAliasingMode = EAntiAliasingMode::OFF;
+		ResetAllAccumulationState(false);
+		const bool bVulkanHybridDump =
+			renderBackend &&
+			renderBackend->GetAPI() == ERenderBackendAPI::Vulkan;
+		const bool bLimitedHybridStageDump = maxSupportedHybridStage < 7u;
+		if (maxSupportedHybridStage < 7u)
+		{
+			const wchar_t* backendName =
+				!renderBackend ? L"unknown" :
+				(renderBackend->GetAPI() == ERenderBackendAPI::Vulkan ? L"Vulkan" : L"D3D12");
+			AppendAutoAADumpLog(
+				std::wstring(L"[hybrid] stage capture limited by backend ") +
+				std::wstring(backendName) +
+				std::wstring(L" to stage_") + (maxSupportedHybridStage < 10 ? std::wstring(1, wchar_t(L'0' + maxSupportedHybridStage)) : std::to_wstring(maxSupportedHybridStage)));
+		}
+		AppendAutoAADumpLog(
+			std::wstring(L"[") + GetHybridStageAutoDumpPhaseName(0) +
+			L"] begin frames=" + std::to_wstring(GetHybridStageAutoDumpFrameCount(0u, bVulkanHybridDump, bLimitedHybridStageDump)) +
+			L", aa=off");
+		return;
+	}
+
 	if (StartupSelectedAAMode != EAntiAliasingMode::DLSS_RR)
 	{
 		bAutoAADumpEnabled = false;
@@ -1019,6 +1257,7 @@ void Corona::InitializeAutoAADump()
 	this->AutoAADumpDir = dumpDir.wstring();
 	this->bAutoAADumpInitialized = true;
 	this->bAutoAADumpCompleted = false;
+	this->bHybridStageAutoDumpMode = false;
 	this->AutoAADumpPhase = 0;
 	this->AutoAADumpFramesInPhase = 0;
 
@@ -1032,6 +1271,27 @@ void Corona::InitializeAutoAADump()
 	PathTracingViewParam.SamplesPerPixel = 1;
 	PathTracingViewParam.MaxBounces = 4;
 	ResetAllAccumulationState(false);
+}
+
+bool Corona::IsHybridStageAutoDumpPhase() const
+{
+	return bHybridStageAutoDumpMode && bAutoAADumpEnabled && bAutoAADumpInitialized && !bAutoAADumpCompleted;
+}
+
+const wchar_t* Corona::GetHybridStageAutoDumpPhaseName(uint32_t phase) const
+{
+	switch (phase)
+	{
+	case 0: return L"stage_00_gbuffer_only";
+	case 1: return L"stage_01_shadow_raw";
+	case 2: return L"stage_02_shadow_denoise";
+	case 3: return L"stage_03_reflection";
+	case 4: return L"stage_04_gi_raw";
+	case 5: return L"stage_05_gi_temporal";
+	case 6: return L"stage_06_gi_spatial";
+	case 7: return L"stage_07_lighting_tonemap";
+	default: return L"stage_unknown";
+	}
 }
 
 void Corona::AppendAutoAADumpLog(const std::wstring& line)
@@ -1142,6 +1402,120 @@ void Corona::AdvanceAutoAADump(Texture* backbuffer)
 {
 	if (!bAutoAADumpEnabled || !bAutoAADumpInitialized || bAutoAADumpCompleted)
 		return;
+
+	if (IsHybridStageAutoDumpPhase())
+	{
+		const uint32_t maxSupportedHybridStage = renderBackend ? renderBackend->GetMaxSupportedHybridStage() : 7u;
+		const bool bVulkanHybridDump =
+			renderBackend &&
+			renderBackend->GetAPI() == ERenderBackendAPI::Vulkan;
+		const bool bLimitedHybridStageDump = maxSupportedHybridStage < 7u;
+		const UINT32 kHybridStageDumpFrames = GetHybridStageAutoDumpFrameCount(AutoAADumpPhase, bVulkanHybridDump, bLimitedHybridStageDump);
+		const UINT32 kNumHybridStages = std::min<uint32_t>(8u, maxSupportedHybridStage + 1u);
+		if (AutoAADumpPhase >= kNumHybridStages)
+			return;
+
+		const wchar_t* currentPhaseName = GetHybridStageAutoDumpPhaseName(AutoAADumpPhase);
+		const bool bLightingStage = AutoAADumpPhase >= 7;
+
+		if (AutoAADumpFramesInPhase == kHybridStageDumpFrames - 1)
+		{
+			const std::wstring base = AutoAADumpDir + L"\\" + currentPhaseName;
+			if (bVulkanHybridDump)
+			{
+				AppendAutoAADumpLog(std::wstring(L"[") + currentPhaseName + L"] screen png=requested");
+			}
+			else
+			{
+			auto dumpResource = [&](const wchar_t* suffix, Texture* texture, D3D12_RESOURCE_STATES state, bool dumpHdr)
+			{
+				if (!texture)
+					return;
+				const std::wstring fileBase = base + L"_" + suffix;
+				bool hdrOk = true;
+				if (dumpHdr)
+					hdrOk = DumpTextureHDR(texture, fileBase + L".hdr", state);
+				const bool pngOk = DumpTexturePNG(texture, fileBase + L"_preview.png", state);
+				AppendAutoAADumpLog(std::wstring(L"[") + currentPhaseName + L"] " + suffix +
+					L" hdr=" + (dumpHdr ? (hdrOk ? L"ok" : L"fail") : L"skip") +
+					L", png=" + (pngOk ? L"ok" : L"fail"));
+			};
+
+			if (!bLimitedHybridStageDump)
+			{
+				dumpResource(L"gbuffer_albedo", AlbedoBuffer.get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, false);
+				dumpResource(L"gbuffer_world_normal", NormalBuffers[ColorBufferWriteIndex].get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, false);
+				dumpResource(L"gbuffer_geo_normal", GeomNormalBuffer.get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, false);
+				dumpResource(L"gbuffer_velocity", VelocityBuffer.get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, false);
+				dumpResource(L"gbuffer_depth", UnjitteredDepthBuffers[ColorBufferWriteIndex].get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, false);
+				dumpResource(L"gbuffer_rm", RoughnessMetalicBuffer.get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, false);
+
+				if (AutoAADumpPhase >= 1)
+					dumpResource(L"shadow_raw", ShadowBuffer.get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, false);
+				if (AutoAADumpPhase >= 2)
+					dumpResource(L"shadow_denoised", ShadowDenoisedBuffer.get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, false);
+				if (AutoAADumpPhase >= 3)
+					dumpResource(L"specular_raw", SpecularGIRaw.get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, true);
+				if (AutoAADumpPhase >= 4)
+				{
+					dumpResource(L"gi_diffuse_raw", DiffuseGIRaw.get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, true);
+					dumpResource(L"gi_diffuse_raw_aux", DiffuseGIRawAux.get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, true);
+				}
+				if (AutoAADumpPhase >= 5)
+				{
+					dumpResource(L"gi_diffuse_temporal", DiffuseGITemporal[GIBufferWriteIndex].get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, true);
+					dumpResource(L"gi_diffuse_temporal_aux", DiffuseGITemporalAux[GIBufferWriteIndex].get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, true);
+					dumpResource(L"gi_specular_temporal", SpecularGITemporal[GIBufferWriteIndex].get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, true);
+				}
+				if (AutoAADumpPhase >= 6)
+				{
+					dumpResource(L"gi_diffuse_spatial", DiffuseGISpatial[0].get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, true);
+					dumpResource(L"gi_diffuse_spatial_aux", DiffuseGISpatialAux[0].get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, true);
+					dumpResource(L"gi_specular_spatial", SpecularGISpatial[0].get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, true);
+				}
+				if (bLightingStage)
+				{
+					dumpResource(L"lighting", LightingBuffer.get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, true);
+					Texture* resolveTarget = GetCurrentResolveSource();
+					dumpResource(L"resolve", resolveTarget, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, true);
+					if (backbuffer)
+					{
+						const bool screenPngOk = DumpTexturePNG(backbuffer, base + L"_screen_preview.png", D3D12_RESOURCE_STATE_RENDER_TARGET);
+						AppendAutoAADumpLog(std::wstring(L"[") + currentPhaseName + L"] screen png=" + (screenPngOk ? L"ok" : L"fail"));
+					}
+				}
+			}
+			else
+			{
+				AppendAutoAADumpLog(std::wstring(L"[") + currentPhaseName + L"] limited backend preview capture requested");
+			}
+			}
+		}
+
+		++AutoAADumpFramesInPhase;
+		if (AutoAADumpFramesInPhase < kHybridStageDumpFrames)
+			return;
+
+		AutoAADumpFramesInPhase = 0;
+		++AutoAADumpPhase;
+		if (AutoAADumpPhase < kNumHybridStages)
+		{
+			const bool bUseTAAForStage = ShouldUseTAAForHybridStageAutoDump(AutoAADumpPhase, bVulkanHybridDump);
+			AntiAliasingMode = bUseTAAForStage ? EAntiAliasingMode::TAA : EAntiAliasingMode::OFF;
+			ResetAllAccumulationState(false);
+			AppendAutoAADumpLog(
+				std::wstring(L"[") + GetHybridStageAutoDumpPhaseName(AutoAADumpPhase) +
+				L"] begin frames=" + std::to_wstring(GetHybridStageAutoDumpFrameCount(AutoAADumpPhase, bVulkanHybridDump, bLimitedHybridStageDump)) +
+				L", aa=" + (bUseTAAForStage ? L"taa" : L"off"));
+			return;
+		}
+
+		bAutoAADumpCompleted = true;
+		if (HWND hwnd = Win32Application::GetHwnd())
+			PostMessage(hwnd, WM_CLOSE, 0, 0);
+		PostQuitMessage(0);
+		return;
+	}
 
 	if (StartupSelectedAAMode != EAntiAliasingMode::DLSS_RR)
 	{
@@ -1260,6 +1634,10 @@ void Corona::AdvanceAutoAADump(Texture* backbuffer)
 	if (AutoAADumpPhase >= kNumDumpPhases)
 	{
 		bAutoAADumpCompleted = true;
+		if (HWND hwnd = Win32Application::GetHwnd())
+		{
+			PostMessage(hwnd, WM_CLOSE, 0, 0);
+		}
 		PostQuitMessage(0);
 		return;
 	}
@@ -1355,28 +1733,126 @@ void Corona::OnInit()
 	//_CrtSetBreakAlloc(4207117);
 
 	CoInitialize(NULL);
+	AppendVulkanRuntimeTrace(L"[OnInit] begin");
 
 	g_TS.Initialize(8);
+	AppendVulkanRuntimeTrace(L"[OnInit] after g_TS.Initialize");
 
 	m_camera.Init({ 458, 781, 185 });
 	m_camera.SetMoveSpeed(200);
 	LoadCameraState();
+	AppendVulkanRuntimeTrace(L"[OnInit] after camera init");
 
 	RenderWidth = m_width;
 	RenderHeight = m_height;
+	AppendVulkanRuntimeTrace(L"[OnInit] after render size init");
 #if WITH_STREAMLINE
-	InitStreamline();
+	const bool bStartupRequestsVulkan =
+		bCommandLineRenderBackendOverrideSet &&
+		CommandLineRenderBackendAPI == ERenderBackendAPI::Vulkan;
+	if (!bStartupRequestsVulkan)
+	{
+		InitStreamline();
+		AppendVulkanRuntimeTrace(L"[OnInit] after InitStreamline");
+	}
+	else
+	{
+		AppendVulkanRuntimeTrace(L"[OnInit] skip InitStreamline for Vulkan startup");
+	}
 #endif
 	LoadPipeline();
+	AppendVulkanRuntimeTrace(L"[OnInit] after LoadPipeline");
 	PromptStartupModeSelection();
+	AppendVulkanRuntimeTrace(
+		L"[OnInit] after PromptStartupModeSelection backend=" + std::to_wstring(static_cast<int>(StartupRenderBackendAPI)) +
+		L", renderMode=" + std::to_wstring(static_cast<int>(StartupRenderingMode)) +
+		L", autoDump=" + std::to_wstring(bAutoAADumpEnabled ? 1 : 0));
+	const bool bVulkanHybridStartup =
+		StartupRenderingMode == ERenderingMode::HYBRID &&
+		StartupRenderBackendAPI == ERenderBackendAPI::Vulkan;
+	if (bVulkanHybridStartup)
+	{
+		const bool bCameraLooksUninitialized =
+			glm::length(m_camera.m_position) < 0.01f &&
+			fabsf(m_camera.m_yaw) < 0.01f &&
+			fabsf(m_camera.m_pitch) < 0.01f;
+		if (bCameraLooksUninitialized)
+		{
+			AppendVulkanRuntimeTrace(L"[OnInit] applying default hybrid camera");
+			ApplyHybridDefaultCamera();
+		}
+	}
+	AppendVulkanRuntimeTrace(L"[OnInit] before RefreshUpscaleSettings");
 	RefreshUpscaleSettings(false);
+	AppendVulkanRuntimeTrace(L"[OnInit] after RefreshUpscaleSettings");
+	AppendVulkanRuntimeTrace(L"[OnInit] before LoadAssets");
 	LoadAssets();
+	AppendVulkanRuntimeTrace(L"[OnInit] after LoadAssets");
 	bPendingTemporalHistoryClear = true;
 	InitializeAutoAADump();
+	AppendVulkanRuntimeTrace(
+		L"[OnInit] after InitializeAutoAADump initialized=" + std::to_wstring(bAutoAADumpInitialized ? 1 : 0) +
+		L", completed=" + std::to_wstring(bAutoAADumpCompleted ? 1 : 0) +
+		L", dir=" + AutoAADumpDir);
+}
+
+namespace
+{
+	void AppendVulkanRuntimeTrace(const std::wstring& line)
+	{
+		constexpr bool kVerboseVulkanRuntimeTrace = false;
+		if (!kVerboseVulkanRuntimeTrace)
+		{
+			constexpr const wchar_t* kHighFrequencyPrefixes[] =
+			{
+				L"[OnRender]",
+				L"[GBufferPass]",
+				L"[RaytraceReflectionPass]",
+				L"[TemporalDenoisingPass]",
+				L"[SpatialDenoisingPass]"
+			};
+			for (const wchar_t* prefix : kHighFrequencyPrefixes)
+			{
+				if (line.rfind(prefix, 0) == 0)
+					return;
+			}
+		}
+
+		const std::filesystem::path tracePath = std::filesystem::path(L"C:\\dev\\Corona\\dumps\\vulkan_runtime_trace.log");
+		std::filesystem::create_directories(tracePath.parent_path());
+		std::wofstream traceFile(tracePath, std::ios::app);
+		if (traceFile.is_open())
+		{
+			traceFile << line << L"\n";
+		}
+	}
 }
 
 void Corona::LoadPipeline()
 {
+	if (bCommandLineRenderBackendOverrideSet && CommandLineRenderBackendAPI == ERenderBackendAPI::Vulkan)
+	{
+		AppendVulkanRuntimeTrace(L"[LoadPipeline] begin Vulkan path");
+		renderBackend = CreateRenderBackend(ERenderBackendAPI::Vulkan, nullptr);
+		dx12_rhi = nullptr;
+		if (!renderBackend)
+		{
+			throw std::runtime_error("Failed to create Vulkan render backend.");
+		}
+		AppendVulkanRuntimeTrace(
+			L"[LoadPipeline] after CreateRenderBackend Vulkan api=" + std::to_wstring(static_cast<int>(renderBackend->GetAPI())) +
+			L", name=" + std::wstring(renderBackend->GetBackendName(), renderBackend->GetBackendName() + std::strlen(renderBackend->GetBackendName())));
+
+		renderBackend->CreateSwapChainForWindow(
+			nullptr,
+			Win32Application::GetHwnd(),
+			m_width,
+			m_height,
+			DXGI_FORMAT_R8G8B8A8_UNORM);
+		AppendVulkanRuntimeTrace(L"[LoadPipeline] after CreateSwapChainForWindow Vulkan");
+		return;
+	}
+
 	UINT dxgiFactoryFlags = 0;
 
 #if defined(_DEBUG)
@@ -1493,37 +1969,101 @@ void Corona::LoadPipeline()
 
 void Corona::LoadAssets()
 {
-	if (!bBlueNoiseInitialized)
+	const bool bVulkanBackend =
+		renderBackend &&
+		renderBackend->GetAPI() == ERenderBackendAPI::Vulkan;
+	const bool bVulkanHybridStartup =
+		bVulkanBackend &&
+		StartupRenderingMode == ERenderingMode::HYBRID;
+	const bool bVulkanPathTracingStartup =
+		bVulkanBackend &&
+		StartupRenderingMode == ERenderingMode::PATHTRACING;
+	const uint32_t maxSupportedHybridStage =
+		(renderBackend && StartupRenderingMode == ERenderingMode::HYBRID) ?
+		renderBackend->GetMaxSupportedHybridStage() : 7u;
+	const bool bVulkanHybridBootstrap = bVulkanHybridStartup && maxSupportedHybridStage == 0u;
+	const bool bSupportsHybridRaytracing = !bVulkanHybridStartup || maxSupportedHybridStage >= 1u;
+	const bool bSupportsShadowDenoise = !bVulkanHybridStartup || maxSupportedHybridStage >= 2u;
+	const bool bSupportsTemporalDenoise = !bVulkanHybridStartup || maxSupportedHybridStage >= 5u;
+	const bool bSupportsSpatialDenoise = !bVulkanHybridStartup || maxSupportedHybridStage >= 6u;
+	const bool bSupportsFullHybridPresentation = !bVulkanHybridStartup || maxSupportedHybridStage >= 7u;
+	const bool bAllowBlueNoiseInit = !bVulkanHybridStartup || maxSupportedHybridStage >= 3u;
+	const bool bAllowImguiInit =
+		!bVulkanHybridStartup ||
+		(bSupportsFullHybridPresentation && !bAutoAADumpEnabled);
+	if (bVulkanHybridBootstrap)
+		AppendVulkanRuntimeTrace(L"[LoadAssets] begin Vulkan hybrid bootstrap");
+	else if (bVulkanHybridStartup)
+		AppendVulkanRuntimeTrace(L"[LoadAssets] begin Vulkan hybrid stage-aware init stage=" + std::to_wstring(maxSupportedHybridStage));
+
+	if (bAllowBlueNoiseInit && !bBlueNoiseInitialized)
 	{
 		InitBlueNoiseTexture();
 		bBlueNoiseInitialized = true;
 	}
-	if (!bImguiInitialized)
+	if (bAllowImguiInit && !bImguiInitialized)
 	{
 		InitImgui();
 		bImguiInitialized = true;
 	}
-	InitGBufferPass();
-	InitToneMapPass();
-	InitDebugPass();
-	InitLightingPass();
-	InitShadowDenoisePass();
-	InitTemporalAAPass();
-	InitSpatialDenoisingPass();
-	InitTemporalDenoisingPass();
-	InitBloomPass();
-	//InitGenMipSpecularGIPass();
+	if (!bAllowImguiInit)
+	{
+		bShowImgui = false;
+		bImguiInitialized = false;
+	}
 
-	InitRTPSO();
-	InitPathTracingPass();
+	AppendVulkanRuntimeTrace(L"[LoadAssets] before InitGBufferPass");
+	InitGBufferPass();
+	AppendVulkanRuntimeTrace(L"[LoadAssets] after InitGBufferPass");
+	if (bSupportsFullHybridPresentation)
+	{
+		AppendVulkanRuntimeTrace(L"[LoadAssets] before full hybrid presentation pass init");
+		InitLightingPass();
+		InitToneMapPass();
+		if (!bVulkanPathTracingStartup)
+			InitTemporalAAPass();
+		if (!bVulkanBackend)
+		{
+			InitDebugPass();
+			InitBloomPass();
+		}
+		AppendVulkanRuntimeTrace(L"[LoadAssets] after full hybrid presentation pass init");
+	}
+	if (bSupportsShadowDenoise)
+	{
+		AppendVulkanRuntimeTrace(L"[LoadAssets] before InitShadowDenoisePass");
+		InitShadowDenoisePass();
+		AppendVulkanRuntimeTrace(L"[LoadAssets] after InitShadowDenoisePass");
+	}
+	if (bSupportsTemporalDenoise)
+	{
+		AppendVulkanRuntimeTrace(L"[LoadAssets] before InitTemporalDenoisingPass");
+		InitTemporalDenoisingPass();
+		AppendVulkanRuntimeTrace(L"[LoadAssets] after InitTemporalDenoisingPass");
+	}
+	if (bSupportsTemporalDenoise || bSupportsSpatialDenoise)
+	{
+		AppendVulkanRuntimeTrace(L"[LoadAssets] before InitSpatialDenoisingPass");
+		InitSpatialDenoisingPass();
+		AppendVulkanRuntimeTrace(L"[LoadAssets] after InitSpatialDenoisingPass");
+	}
+	AppendVulkanRuntimeTrace(L"[LoadAssets] before InitGpuTimingResources");
 	InitGpuTimingResources();
+	AppendVulkanRuntimeTrace(L"[LoadAssets] after InitGpuTimingResources");
 
 	const UINT DisplayWidth = m_width;
 	const UINT DisplayHeight = m_height;
 	const UINT RenderWidthLocal = GetRenderWidth();
 	const UINT RenderHeightLocal = GetRenderHeight();
+	const ETextureFormat HybridFloat4UAVFormat =
+		(renderBackend && renderBackend->GetAPI() == ERenderBackendAPI::Vulkan)
+		? ETextureFormat::RGBA32Float
+		: ETextureFormat::RGBA16Float;
 
-	if (framebuffers.empty())
+	if (bSupportsFullHybridPresentation &&
+		renderBackend &&
+		renderBackend->GetAPI() == ERenderBackendAPI::D3D12 &&
+		framebuffers.empty())
 	{
 		for (UINT i = 0; i < renderBackend->GetFrameCount(); i++)
 		{
@@ -1575,6 +2115,23 @@ void Corona::LoadAssets()
 
 		NAME_D3D12_OBJECT(ColorBuffers[1]->resource);
 	}
+	AppendVulkanRuntimeTrace(L"[LoadAssets] after color buffers");
+
+	if (bSupportsFullHybridPresentation && bVulkanHybridStartup && !ExposureData)
+	{
+		float initExposure[] =
+		{
+			Exposure,
+			1.0f / Exposure,
+			0.01f,
+			Exposure,
+			0.0f,
+			kInitialMinLog,
+			kInitialMaxLog,
+			kInitialMaxLog - kInitialMinLog
+		};
+		ExposureData = createBuffer(8u, sizeof(float), true, initExposure);
+	}
 
 	// Path tracing accumulation buffers
 	PathTracingAccumBuffer[0] = createTexture2D(ETextureFormat::RGBA32Float, TextureUsage_UnorderedAccess, DisplayWidth, DisplayHeight, 1, glm::vec4(0.0f));
@@ -1584,12 +2141,14 @@ void Corona::LoadAssets()
 	PathTracingAccumBuffer[1] = createTexture2D(ETextureFormat::RGBA32Float, TextureUsage_UnorderedAccess, DisplayWidth, DisplayHeight, 1, glm::vec4(0.0f));
 	
 	NAME_D3D12_OBJECT(PathTracingAccumBuffer[1]->resource);
+	AppendVulkanRuntimeTrace(L"[LoadAssets] after path tracing buffers");
 
 	// lighting result
 	LightingBuffer = createTexture2D(ETextureFormat::RGBA16Float, TextureUsage_RenderTarget | TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
 	LightingBuffer->MakeRTV();
 
 	NAME_D3D12_OBJECT(LightingBuffer->resource);
+	AppendVulkanRuntimeTrace(L"[LoadAssets] after lighting buffer");
 
 	// world normal
 	NormalBuffers[0] = createTexture2D(ETextureFormat::RGBA16Float, TextureUsage_RenderTarget, RenderWidthLocal, RenderHeightLocal, 1, glm::vec4(0.0f, -0.1f, 0.0f, 0.0f));
@@ -1609,24 +2168,25 @@ void Corona::LoadAssets()
 	NAME_D3D12_OBJECT(GeomNormalBuffer->resource);
 
 	// shadow result
-	ShadowBuffer = createTexture2D(ETextureFormat::RGBA8Unorm, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
+	ShadowBuffer = createTexture2D(ETextureFormat::RGBA32Float, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
 
 	NAME_D3D12_OBJECT(ShadowBuffer->resource);
 
-	ShadowDenoisedBuffer = createTexture2D(ETextureFormat::RGBA8Unorm, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
+	ShadowDenoisedBuffer = createTexture2D(ETextureFormat::RGBA32Float, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
 
 	NAME_D3D12_OBJECT(ShadowDenoisedBuffer->resource);
+	AppendVulkanRuntimeTrace(L"[LoadAssets] after shadow buffers");
 
 	// refleciton result
-	SpecularGIRaw = createTexture2D(ETextureFormat::RGBA16Float, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
+	SpecularGIRaw = createTexture2D(HybridFloat4UAVFormat, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
 
 	NAME_D3D12_OBJECT(SpecularGIRaw->resource);
 
-	SpecularGITemporal[0] = createTexture2D(ETextureFormat::RGBA16Float, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
+	SpecularGITemporal[0] = createTexture2D(HybridFloat4UAVFormat, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
 
 	NAME_D3D12_OBJECT(SpecularGITemporal[0]->resource);
 
-	SpecularGITemporal[1] = createTexture2D(ETextureFormat::RGBA16Float, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
+	SpecularGITemporal[1] = createTexture2D(HybridFloat4UAVFormat, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
 
 	NAME_D3D12_OBJECT(SpecularGITemporal[1]->resource);
 
@@ -1640,31 +2200,32 @@ void Corona::LoadAssets()
 	NAME_D3D12_OBJECT(SpecularGIMoments[1]->resource);
 	// diffuse gi
 
-	DiffuseGIRawAux = createTexture2D(ETextureFormat::RGBA16Float, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
+	DiffuseGIRawAux = createTexture2D(HybridFloat4UAVFormat, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
 
 	NAME_D3D12_OBJECT(DiffuseGIRawAux->resource);
 
-	DiffuseGIRaw = createTexture2D(ETextureFormat::RGBA16Float, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
+	DiffuseGIRaw = createTexture2D(HybridFloat4UAVFormat, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
 
 	NAME_D3D12_OBJECT(DiffuseGIRaw->resource);
 
 	// gi result sh
-	DiffuseGITemporalAux[0] = createTexture2D(ETextureFormat::RGBA16Float, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
+	DiffuseGITemporalAux[0] = createTexture2D(HybridFloat4UAVFormat, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
 
 	NAME_D3D12_OBJECT(DiffuseGITemporalAux[0]->resource);
 
-	DiffuseGITemporalAux[1] = createTexture2D(ETextureFormat::RGBA16Float, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
+	DiffuseGITemporalAux[1] = createTexture2D(HybridFloat4UAVFormat, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
 
 	NAME_D3D12_OBJECT(DiffuseGITemporalAux[1]->resource);
 
 	// gi result color
-	DiffuseGITemporal[0] = createTexture2D(ETextureFormat::RGBA16Float, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
+	DiffuseGITemporal[0] = createTexture2D(HybridFloat4UAVFormat, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
 
 	NAME_D3D12_OBJECT(DiffuseGITemporal[0]->resource);
 
-	DiffuseGITemporal[1] = createTexture2D(ETextureFormat::RGBA16Float, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
+	DiffuseGITemporal[1] = createTexture2D(HybridFloat4UAVFormat, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
 
 	NAME_D3D12_OBJECT(DiffuseGITemporal[1]->resource);
+	AppendVulkanRuntimeTrace(L"[LoadAssets] after temporal GI buffers");
 
 	// albedo
 	AlbedoBuffer = createTexture2D(ETextureFormat::RGBA8Unorm, TextureUsage_RenderTarget, RenderWidthLocal, RenderHeightLocal, 1);
@@ -1700,13 +2261,18 @@ void Corona::LoadAssets()
 	UnjitteredDepthBuffers[1] = createTexture2D(ETextureFormat::R32Float, TextureUsage_RenderTarget, RenderWidthLocal, RenderHeightLocal, 1);
 	UnjitteredDepthBuffers[1]->MakeRTV();
 	NAME_D3D12_OBJECT(UnjitteredDepthBuffers[1]->resource);
+	AppendVulkanRuntimeTrace(L"[LoadAssets] after gbuffer textures");
 
 	if (!DefaultWhiteTex) DefaultWhiteTex = renderBackend->CreateTextureFromFile(L"assets/default/default_white.png", false);
 	if (!DefaultBlackTex) DefaultBlackTex = renderBackend->CreateTextureFromFile(L"assets/default/default_black.png", false);
 	if (!DefaultNormalTex) DefaultNormalTex = renderBackend->CreateTextureFromFile(L"assets/default/default_normal.png", true);
 	if (!DefaultRougnessTex) DefaultRougnessTex = renderBackend->CreateTextureFromFile(L"assets/default/default_roughness.png", true);
+	if (bVulkanHybridStartup)
+		AppendVulkanRuntimeTrace(L"[LoadAssets] after default textures");
 
 	if (!Sponza) Sponza = LoadModel("assets/Sponza/Sponza.fbx");
+	if (bVulkanHybridStartup)
+		AppendVulkanRuntimeTrace(L"[LoadAssets] after sponza load");
 
 	//  ShaderBall = LoadModel("assets/shaderball/shaderBall.fbx");
 
@@ -1751,7 +2317,28 @@ void Corona::LoadAssets()
 		samplerBilinearWrap = renderBackend->CreateSampler(samplerDesc);
 
 	}
-	InitRaytracingData();
+	if (bVulkanHybridStartup)
+		AppendVulkanRuntimeTrace(L"[LoadAssets] after samplers");
+	if (bVulkanHybridBootstrap)
+	{
+		AppendVulkanRuntimeTrace(L"[LoadAssets] Vulkan hybrid bootstrap assets ready");
+		return;
+	}
+	if (bSupportsHybridRaytracing)
+	{
+		AppendVulkanRuntimeTrace(L"[LoadAssets] before InitRaytracingData");
+		InitRaytracingData();
+		AppendVulkanRuntimeTrace(L"[LoadAssets] after InitRaytracingData");
+		AppendVulkanRuntimeTrace(L"[LoadAssets] before InitRTPSO");
+		InitRTPSO();
+		AppendVulkanRuntimeTrace(L"[LoadAssets] after InitRTPSO");
+		if (StartupRenderingMode == ERenderingMode::PATHTRACING)
+		{
+			AppendVulkanRuntimeTrace(L"[LoadAssets] before InitPathTracingPass");
+			InitPathTracingPass();
+			AppendVulkanRuntimeTrace(L"[LoadAssets] after InitPathTracingPass");
+		}
+	}
 
 }
 
@@ -1897,19 +2484,26 @@ shared_ptr<Scene> Corona::LoadModel(string fileName)
 	const UINT numMeshes = assimpScene->mNumMeshes;
 
 	UINT totalNumVert = 0;
+	UINT totalNumIndex = 0;
 	for (UINT i = 0; i < numMeshes; ++i)
 	{
 		aiMesh* asMesh = assimpScene->mMeshes[i];
 
 		totalNumVert += asMesh->mNumVertices;
+		totalNumIndex += asMesh->mNumFaces * 3;
 	}
+
+	vector<Vertex> rtSceneVertices;
+	vector<UINT32> rtSceneIndices;
+	rtSceneVertices.reserve(totalNumVert);
+	rtSceneIndices.reserve(totalNumIndex);
 
 	for (UINT i = 0; i < numMeshes; ++i)
 	{
 		aiMesh* asMesh = assimpScene->mMeshes[i];
 
 		Mesh* mesh = new Mesh;
-		mesh->Owner = dx12_rhi;
+		mesh->Owner = renderBackend.get();
 
 		mesh->NumVertices = asMesh->mNumVertices;
 		mesh->NumIndices = asMesh->mNumFaces * 3;
@@ -1968,6 +2562,11 @@ shared_ptr<Scene> Corona::LoadModel(string fileName)
 			indices[triIdx * 3 + 2] = asMesh->mFaces[triIdx].mIndices[2];
 		}
 
+		mesh->RtVertexOffset = static_cast<UINT>(rtSceneVertices.size());
+		mesh->RtIndexOffset = static_cast<UINT>(rtSceneIndices.size());
+		rtSceneVertices.insert(rtSceneVertices.end(), vertices.begin(), vertices.end());
+		rtSceneIndices.insert(rtSceneIndices.end(), indices.begin(), indices.end());
+
 		mesh->Vb = renderBackend->CreateVertexBuffer(sizeof(Vertex) * mesh->NumVertices, sizeof(Vertex), vertices.data());
 		mesh->VertexStride = sizeof(Vertex);
 		mesh->IndexFormat = DXGI_FORMAT_R32_UINT;
@@ -1988,6 +2587,18 @@ shared_ptr<Scene> Corona::LoadModel(string fileName)
 		scene->meshes.push_back(shared_ptr<Mesh>(mesh));
 	}
 
+	if (renderBackend && renderBackend->GetAPI() == ERenderBackendAPI::Vulkan && !rtSceneVertices.empty() && !rtSceneIndices.empty())
+	{
+		scene->RtSceneVertexBuffer = renderBackend->CreateVertexBuffer(
+			static_cast<UINT>(sizeof(Vertex) * rtSceneVertices.size()),
+			sizeof(Vertex),
+			rtSceneVertices.data());
+		scene->RtSceneIndexBuffer = renderBackend->CreateIndexBuffer(
+			DXGI_FORMAT_R32_UINT,
+			static_cast<UINT>(sizeof(UINT32) * rtSceneIndices.size()),
+			rtSceneIndices.data());
+	}
+
 	shared_ptr<Scene> scenePtr = shared_ptr<Scene>(scene);
 
 	return scenePtr;
@@ -1995,14 +2606,9 @@ shared_ptr<Scene> Corona::LoadModel(string fileName)
 
 void Corona::InitSpatialDenoisingPass()
 {
-	ComPtr<ID3DBlob> cs = renderBackend->CreateShader(GetAssetFullPath(L"Shaders\\SpatialDenoising.hlsl"), "SpatialFilter", "cs_5_0");
-
-	D3D12_COMPUTE_PIPELINE_STATE_DESC computePsoDesc = {};
-
-	shared_ptr<PipelineStateObject> TEMP_SpatialDenoisingFilterPSO = shared_ptr<PipelineStateObject>(new PipelineStateObject);
-	TEMP_SpatialDenoisingFilterPSO->Owner = dx12_rhi;
-	TEMP_SpatialDenoisingFilterPSO->cs = cs;
-	TEMP_SpatialDenoisingFilterPSO->computePSODesc = computePsoDesc;
+	shared_ptr<ComputePipelineStateObject> TEMP_SpatialDenoisingFilterPSO = renderBackend->CreateComputePipelineStateObject();
+	if (!TEMP_SpatialDenoisingFilterPSO)
+		return;
 	TEMP_SpatialDenoisingFilterPSO->BindSRV("DepthTex", 0, 1);
 	TEMP_SpatialDenoisingFilterPSO->BindSRV("GeoNormalTex", 1, 1);
 	TEMP_SpatialDenoisingFilterPSO->BindSRV("InGIResultSHTex", 2, 1);
@@ -2016,49 +2622,47 @@ void Corona::InitSpatialDenoisingPass()
 	
 	
 	TEMP_SpatialDenoisingFilterPSO->BindCBV("SpatialFilterConstant", 0, sizeof(SpatialFilterConstant));
-	TEMP_SpatialDenoisingFilterPSO->IsCompute = true;
-	bool bSuccess = TEMP_SpatialDenoisingFilterPSO->Init();
+	bool bSuccess = TEMP_SpatialDenoisingFilterPSO->InitCS(GetAssetFullPath(L"Shaders\\SpatialDenoising.hlsl"), "SpatialFilter");
 	if (bSuccess)
 		SpatialDenoisingFilterPSO = TEMP_SpatialDenoisingFilterPSO;
 
 	UINT WidthGI = GetRenderWidth();
 	UINT HeightGI = GetRenderHeight();
+	const ETextureFormat HybridFloat4UAVFormat =
+		(renderBackend && renderBackend->GetAPI() == ERenderBackendAPI::Vulkan)
+		? ETextureFormat::RGBA32Float
+		: ETextureFormat::RGBA16Float;
 
-	DiffuseGISpatialAux[0] = renderBackend->CreateTexture2D({ ETextureFormat::RGBA16Float, TextureUsage_UnorderedAccess, EInitialResourceState::ShaderRead, (int)WidthGI, (int)HeightGI, 1, std::nullopt });
+	DiffuseGISpatialAux[0] = renderBackend->CreateTexture2D({ HybridFloat4UAVFormat, TextureUsage_UnorderedAccess, EInitialResourceState::ShaderRead, (int)WidthGI, (int)HeightGI, 1, std::nullopt });
 
 	NAME_D3D12_OBJECT(DiffuseGISpatialAux[0]->resource);
 
-	DiffuseGISpatialAux[1] = renderBackend->CreateTexture2D({ ETextureFormat::RGBA16Float, TextureUsage_UnorderedAccess, EInitialResourceState::ShaderRead, (int)WidthGI, (int)HeightGI, 1, std::nullopt });
+	DiffuseGISpatialAux[1] = renderBackend->CreateTexture2D({ HybridFloat4UAVFormat, TextureUsage_UnorderedAccess, EInitialResourceState::ShaderRead, (int)WidthGI, (int)HeightGI, 1, std::nullopt });
 
 	NAME_D3D12_OBJECT(DiffuseGISpatialAux[1]->resource);
 
-	DiffuseGISpatial[0] = renderBackend->CreateTexture2D({ ETextureFormat::RGBA16Float, TextureUsage_UnorderedAccess, EInitialResourceState::ShaderRead, (int)WidthGI, (int)HeightGI, 1, std::nullopt });
+	DiffuseGISpatial[0] = renderBackend->CreateTexture2D({ HybridFloat4UAVFormat, TextureUsage_UnorderedAccess, EInitialResourceState::ShaderRead, (int)WidthGI, (int)HeightGI, 1, std::nullopt });
 
 	NAME_D3D12_OBJECT(DiffuseGISpatial[0]->resource);
 
-	DiffuseGISpatial[1] = renderBackend->CreateTexture2D({ ETextureFormat::RGBA16Float, TextureUsage_UnorderedAccess, EInitialResourceState::ShaderRead, (int)WidthGI, (int)HeightGI, 1, std::nullopt });
+	DiffuseGISpatial[1] = renderBackend->CreateTexture2D({ HybridFloat4UAVFormat, TextureUsage_UnorderedAccess, EInitialResourceState::ShaderRead, (int)WidthGI, (int)HeightGI, 1, std::nullopt });
 
 	NAME_D3D12_OBJECT(DiffuseGISpatial[1]->resource);
 
-	SpecularGISpatial[0] = renderBackend->CreateTexture2D({ ETextureFormat::RGBA16Float, TextureUsage_UnorderedAccess, EInitialResourceState::ShaderRead, (int)WidthGI, (int)HeightGI, 1, std::nullopt });
+	SpecularGISpatial[0] = renderBackend->CreateTexture2D({ HybridFloat4UAVFormat, TextureUsage_UnorderedAccess, EInitialResourceState::ShaderRead, (int)WidthGI, (int)HeightGI, 1, std::nullopt });
 
 	NAME_D3D12_OBJECT(SpecularGISpatial[0]->resource);
 
-	SpecularGISpatial[1] = renderBackend->CreateTexture2D({ ETextureFormat::RGBA16Float, TextureUsage_UnorderedAccess, EInitialResourceState::ShaderRead, (int)WidthGI, (int)HeightGI, 1, std::nullopt });
+	SpecularGISpatial[1] = renderBackend->CreateTexture2D({ HybridFloat4UAVFormat, TextureUsage_UnorderedAccess, EInitialResourceState::ShaderRead, (int)WidthGI, (int)HeightGI, 1, std::nullopt });
 
 	NAME_D3D12_OBJECT(SpecularGISpatial[1]->resource);
 }
 
 void Corona::InitTemporalDenoisingPass()
 {
-	ComPtr<ID3DBlob> cs = renderBackend->CreateShader(GetAssetFullPath(L"Shaders\\TemporalDenoising.hlsl"), "TemporalFilter", "cs_5_0");
-	
-	D3D12_COMPUTE_PIPELINE_STATE_DESC computePsoDesc = {};
-	
-	shared_ptr<PipelineStateObject> TEMP_TemporalDenoisingFilterPSO = shared_ptr<PipelineStateObject>(new PipelineStateObject);
-	TEMP_TemporalDenoisingFilterPSO->Owner = dx12_rhi;
-	TEMP_TemporalDenoisingFilterPSO->cs = cs;
-	TEMP_TemporalDenoisingFilterPSO->computePSODesc = computePsoDesc;
+	shared_ptr<ComputePipelineStateObject> TEMP_TemporalDenoisingFilterPSO = renderBackend->CreateComputePipelineStateObject();
+	if (!TEMP_TemporalDenoisingFilterPSO)
+		return;
 	TEMP_TemporalDenoisingFilterPSO->BindSRV("DepthTex", 0, 1);
 	TEMP_TemporalDenoisingFilterPSO->BindSRV("NormalTex", 1, 1);
 	TEMP_TemporalDenoisingFilterPSO->BindSRV("InGIResultSHTex", 2, 1);
@@ -2090,8 +2694,7 @@ void Corona::InitTemporalDenoisingPass()
 
 
 	TEMP_TemporalDenoisingFilterPSO->BindCBV("TemporalFilterConstant", 0, sizeof(TemporalFilterConstant));
-	TEMP_TemporalDenoisingFilterPSO->IsCompute = true;
-	bool bSuccess = TEMP_TemporalDenoisingFilterPSO->Init();
+	bool bSuccess = TEMP_TemporalDenoisingFilterPSO->InitCS(GetAssetFullPath(L"Shaders\\TemporalDenoising.hlsl"), "TemporalFilter");
 	if (bSuccess)
 		TemporalDenoisingFilterPSO = TEMP_TemporalDenoisingFilterPSO;
 }
@@ -2245,61 +2848,42 @@ void Corona::InitBloomPass()
 
 void Corona::InitGBufferPass()
 {
-	ComPtr<ID3DBlob> vs = renderBackend->CreateShader(GetAssetFullPath(L"Shaders\\GBuffer.hlsl"), "VSMain", "vs_5_0");
-	ComPtr<ID3DBlob> ps = renderBackend->CreateShader(GetAssetFullPath(L"Shaders\\GBuffer.hlsl"), "PSMain", "ps_5_0");
-
-	CD3DX12_RASTERIZER_DESC rasterizerStateDesc(D3D12_DEFAULT);
-	rasterizerStateDesc.CullMode = D3D12_CULL_MODE_NONE;
-
-	const D3D12_INPUT_ELEMENT_DESC StandardVertexDescription[] =
-	{
-		{ "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0,  D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
-		{ "NORMAL",   0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
-		{ "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT,    0, 24, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
-		{ "TANGENT",  0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 32, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+	GraphicsPipelineDesc desc{};
+	desc.ShaderPath = GetAssetFullPath(L"Shaders\\GBuffer.hlsl");
+	desc.VertexEntryPoint = "VSMain";
+	desc.PixelEntryPoint = "PSMain";
+	desc.VertexElements = {
+		{ "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0 },
+		{ "NORMAL", 0, DXGI_FORMAT_R32G32B32_FLOAT, 12 },
+		{ "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 24 },
+		{ "TANGENT", 0, DXGI_FORMAT_R32G32B32_FLOAT, 32 },
 	};
+	desc.TextureBindings = {
+		{ "AlbedoTex", 0 },
+		{ "NormalTex", 1 },
+		{ "RoughnessTex", 2 },
+		{ "MetallicTex", 3 },
+	};
+	desc.SamplerBindings = {
+		{ "samplerWrap", 0 },
+	};
+	desc.VertexStride = 44;
+	desc.ColorFormats = {
+		DXGI_FORMAT_R8G8B8A8_UNORM,
+		DXGI_FORMAT_R8G8B8A8_UNORM,
+		DXGI_FORMAT_R16G16B16A16_FLOAT,
+		DXGI_FORMAT_R16G16B16A16_FLOAT,
+		DXGI_FORMAT_R16G16_FLOAT,
+		DXGI_FORMAT_R8G8B8A8_UNORM,
+		DXGI_FORMAT_R32_FLOAT,
+	};
+	desc.DepthFormat = DXGI_FORMAT_D32_FLOAT;
+	desc.bDepthEnable = true;
+	desc.bCullBackFaces = false;
+	desc.ConstantBufferSize = sizeof(GBufferConstantBuffer);
+	desc.ConstantBufferBinding = 0;
 
-	UINT StandardVertexDescriptionNumElements = _countof(StandardVertexDescription);
-
-	D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDescMesh = {};
-	psoDescMesh.InputLayout = { StandardVertexDescription, StandardVertexDescriptionNumElements };
-	//psoDesc.pRootSignature = m_rootSignature.Get();
-	/*psoDesc.VS = CD3DX12_SHADER_BYTECODE(pVertexShaderData, vertexShaderDataLength);
-	psoDesc.PS = CD3DX12_SHADER_BYTECODE(pPixelShaderData, pixelShaderDataLength);*/
-	psoDescMesh.RasterizerState = rasterizerStateDesc;
-	psoDescMesh.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
-	psoDescMesh.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
-	psoDescMesh.SampleMask = UINT_MAX;
-	psoDescMesh.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-	psoDescMesh.NumRenderTargets = 7;
-	psoDescMesh.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
-	psoDescMesh.RTVFormats[1] = DXGI_FORMAT_R8G8B8A8_UNORM;
-	psoDescMesh.RTVFormats[2] = DXGI_FORMAT_R16G16B16A16_FLOAT;
-	psoDescMesh.RTVFormats[3] = DXGI_FORMAT_R16G16B16A16_FLOAT;
-	psoDescMesh.RTVFormats[4] = DXGI_FORMAT_R16G16_FLOAT;
-	psoDescMesh.RTVFormats[5] = DXGI_FORMAT_R8G8B8A8_UNORM;
-	psoDescMesh.RTVFormats[6] = DXGI_FORMAT_R32_FLOAT;
-
-	psoDescMesh.DSVFormat = DXGI_FORMAT_D32_FLOAT;
-	psoDescMesh.SampleDesc.Count = 1;
-
-	
-	shared_ptr<PipelineStateObject> TEMP_GBufferPassPSO = shared_ptr<PipelineStateObject>(new PipelineStateObject);
-	TEMP_GBufferPassPSO->Owner = dx12_rhi;
-	TEMP_GBufferPassPSO->ps = ps;
-	TEMP_GBufferPassPSO->vs = vs;
-	TEMP_GBufferPassPSO->graphicsPSODesc = psoDescMesh;
-	TEMP_GBufferPassPSO->BindSRV("AlbedoTex", 0, 1);
-	TEMP_GBufferPassPSO->BindSRV("NormalTex", 1, 1);
-	TEMP_GBufferPassPSO->BindSRV("RoughnessTex", 2, 1);
-	TEMP_GBufferPassPSO->BindSRV("MetallicTex", 3, 1);
-	
-	TEMP_GBufferPassPSO->BindSampler("samplerWrap", 0);
-	TEMP_GBufferPassPSO->BindCBV("GBufferConstantBuffer", 0, sizeof(GBufferConstantBuffer));
-
-	bool bSucess = TEMP_GBufferPassPSO->Init();
-	if (bSucess)
-		GBufferPassPSO = TEMP_GBufferPassPSO;
+	GBufferGraphicsPipeline = renderBackend->CreateGraphicsPipeline(desc);
 }
 
 void Corona::InitImgui()
@@ -2367,7 +2951,7 @@ void Corona::InitBlueNoiseTexture()
 		textureData.SlicePitch = textureData.RowPitch * Shape[1];
 
 		BlueNoiseTex = renderBackend->CreateTexture3D(ETextureFormat::RGBA32Float, TextureUsage_None, EInitialResourceState::CopyDest, Shape[0], Shape[1], Shape[2], 1);
-		BlueNoiseTex->UploadSRCData3D(&textureData);
+		renderBackend->UploadTexture3D(BlueNoiseTex.get(), textureData.pData, textureData.RowPitch, textureData.SlicePitch);
 
 		delete[] NoiseDataRaw;
 		delete[] NoiseDataFloat;
@@ -2401,6 +2985,34 @@ void Corona::InitToneMapPass()
 	vertexData.SlicePitch = vertexData.RowPitch;
 
 	FullScreenVB = renderBackend->CreateVertexBuffer(vertexBufferSize, vertexBufferStride, &quadVertices);
+
+	if (renderBackend && renderBackend->GetAPI() == ERenderBackendAPI::Vulkan)
+	{
+		GraphicsPipelineDesc desc{};
+		desc.ShaderPath = GetAssetFullPath(L"Shaders\\ToneMapPS.hlsl");
+		desc.VertexEntryPoint = "VSMain";
+		desc.PixelEntryPoint = "PSMain";
+		desc.VertexStride = vertexBufferStride;
+		desc.ColorFormats = { DXGI_FORMAT_R8G8B8A8_UNORM };
+		desc.bDepthEnable = false;
+		desc.bCullBackFaces = false;
+		desc.bTriangleStrip = true;
+		desc.ConstantBufferSize = sizeof(ToneMapCB);
+		desc.ConstantBufferBinding = 0;
+		desc.VertexElements = {
+			{ "POSITION", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0 },
+			{ "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 16 }
+		};
+		desc.TextureBindings = {
+			{ "SrcTex", 0 }
+		};
+		desc.SamplerBindings = {
+			{ "sampleWrap", 0 }
+		};
+
+		ToneMapGraphicsPipeline = renderBackend->CreateGraphicsPipeline(desc);
+		return;
+	}
 	
 	ComPtr<ID3DBlob> vs = renderBackend->CreateShader(GetAssetFullPath(L"Shaders\\ToneMapPS.hlsl"), "VSMain", "vs_5_0");
 	ComPtr<ID3DBlob> ps = renderBackend->CreateShader(GetAssetFullPath(L"Shaders\\ToneMapPS.hlsl"), "PSMain", "ps_5_0");
@@ -2520,6 +3132,58 @@ void Corona::InitDebugPass()
 
 void Corona::InitLightingPass()
 {
+	if (renderBackend && renderBackend->GetAPI() == ERenderBackendAPI::Vulkan)
+	{
+		struct PostVertex
+		{
+			XMFLOAT4 position;
+			XMFLOAT2 uv;
+		};
+
+		PostVertex quadVertices[] =
+		{
+			{ { -1.0f, -1.0f, 0.0f, 1.0f }, { 0.0f, 0.0f } },
+			{ { -1.0f, 1.0f, 0.0f, 1.0f }, { 0.0f, 1.0f } },
+			{ { 1.0f, -1.0f, 0.0f, 1.0f }, { 1.0f, 0.0f } },
+			{ { 1.0f, 1.0f, 0.0f, 1.0f }, { 1.0f, 1.0f } }
+		};
+
+		FullScreenVB = renderBackend->CreateVertexBuffer(sizeof(quadVertices), sizeof(PostVertex), &quadVertices);
+
+		GraphicsPipelineDesc desc{};
+		desc.ShaderPath = GetAssetFullPath(L"Shaders\\LightingPS.hlsl");
+		desc.VertexEntryPoint = "VSMain";
+		desc.PixelEntryPoint = "PSMain";
+		desc.VertexStride = sizeof(PostVertex);
+		desc.ColorFormats = { DXGI_FORMAT_R16G16B16A16_FLOAT };
+		desc.bDepthEnable = false;
+		desc.bCullBackFaces = false;
+		desc.bTriangleStrip = true;
+		desc.ConstantBufferSize = sizeof(LightingParam);
+		desc.ConstantBufferBinding = 0;
+		desc.VertexElements = {
+			{ "POSITION", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0 },
+			{ "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 16 }
+		};
+		desc.TextureBindings = {
+			{ "AlbedoTex", 0 },
+			{ "NormalTex", 1 },
+			{ "ShadowTex", 2 },
+			{ "VelocityTex", 3 },
+			{ "DepthTex", 4 },
+			{ "GIResultSHTex", 5 },
+			{ "GIResultColorTex", 6 },
+			{ "SpecularGITex", 7 },
+			{ "RoughnessMetalicTex", 8 }
+		};
+		desc.SamplerBindings = {
+			{ "sampleWrap", 0 }
+		};
+
+		LightingGraphicsPipeline = renderBackend->CreateGraphicsPipeline(desc);
+		return;
+	}
+
 	ComPtr<ID3DBlob> vs = renderBackend->CreateShader(GetAssetFullPath(L"Shaders\\LightingPS.hlsl"), "VSMain", "vs_5_0");
 	ComPtr<ID3DBlob> ps = renderBackend->CreateShader(GetAssetFullPath(L"Shaders\\LightingPS.hlsl"), "PSMain", "ps_5_0");
 
@@ -2580,23 +3244,71 @@ void Corona::InitLightingPass()
 
 void Corona::InitShadowDenoisePass()
 {
-	ComPtr<ID3DBlob> cs = renderBackend->CreateShader(GetAssetFullPath(L"Shaders\\ShadowDenoise.hlsl"), "ShadowDenoiseCS", "cs_5_0");
-
-	shared_ptr<PipelineStateObject> tempPSO = shared_ptr<PipelineStateObject>(new PipelineStateObject);
-	tempPSO->Owner = dx12_rhi;
-	tempPSO->cs = cs;
-	tempPSO->IsCompute = true;
+	shared_ptr<ComputePipelineStateObject> tempPSO = renderBackend->CreateComputePipelineStateObject();
+	if (!tempPSO)
+		return;
 	tempPSO->BindSRV("ShadowTex", 0, 1);
 	tempPSO->BindSRV("DepthTex", 1, 1);
 	tempPSO->BindSRV("GeoNormalTex", 2, 1);
 	tempPSO->BindUAV("OutShadow", 0);
 	tempPSO->BindCBV("ShadowDenoiseCB", 0, sizeof(ShadowDenoiseCB));
-	if (tempPSO->Init())
+	if (tempPSO->InitCS(GetAssetFullPath(L"Shaders\\ShadowDenoise.hlsl"), "ShadowDenoiseCS"))
 		ShadowDenoisePSO = tempPSO;
 }
 
 void Corona::InitTemporalAAPass()
 {
+	if (renderBackend && renderBackend->GetAPI() == ERenderBackendAPI::Vulkan)
+	{
+		struct PostVertex
+		{
+			XMFLOAT4 position;
+			XMFLOAT2 uv;
+		};
+
+		PostVertex quadVertices[] =
+		{
+			{ { -1.0f, -1.0f, 0.0f, 1.0f }, { 0.0f, 0.0f } },
+			{ { -1.0f, 1.0f, 0.0f, 1.0f }, { 0.0f, 1.0f } },
+			{ { 1.0f, -1.0f, 0.0f, 1.0f }, { 1.0f, 0.0f } },
+			{ { 1.0f, 1.0f, 0.0f, 1.0f }, { 1.0f, 1.0f } }
+		};
+
+		FullScreenVB = renderBackend->CreateVertexBuffer(sizeof(quadVertices), sizeof(PostVertex), &quadVertices);
+
+		GraphicsPipelineDesc desc{};
+		desc.ShaderPath = GetAssetFullPath(L"Shaders\\TemporalAA.hlsl");
+		desc.VertexEntryPoint = "VSMain";
+		desc.PixelEntryPoint = "PSMain";
+		desc.VertexStride = sizeof(PostVertex);
+		desc.ColorFormats = { DXGI_FORMAT_R16G16B16A16_FLOAT };
+		desc.bDepthEnable = false;
+		desc.bCullBackFaces = false;
+		desc.bTriangleStrip = true;
+		desc.ConstantBufferSize = sizeof(TemporalAAParam);
+		desc.ConstantBufferBinding = 0;
+		desc.VertexElements = {
+			{ "POSITION", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0 },
+			{ "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 16 }
+		};
+		desc.TextureBindings = {
+			{ "CurrentColorTex", 0 },
+			{ "PrevColorTex", 1 },
+			{ "VelocityTex", 2 },
+			{ "DepthTex", 3 },
+			{ "BloomTex", 4 }
+		};
+		desc.BufferBindings = {
+			{ "Exposure", 5 }
+		};
+		desc.SamplerBindings = {
+			{ "sampleWrap", 0 }
+		};
+
+		TemporalAAGraphicsPipeline = renderBackend->CreateGraphicsPipeline(desc);
+		return;
+	}
+
 	ComPtr<ID3DBlob> vs = renderBackend->CreateShader(GetAssetFullPath(L"Shaders\\TemporalAA.hlsl"), "VSMain", "vs_5_0");
 	ComPtr<ID3DBlob> ps = renderBackend->CreateShader(GetAssetFullPath(L"Shaders\\TemporalAA.hlsl"), "PSMain", "ps_5_0");
 	CD3DX12_RASTERIZER_DESC rasterizerStateDesc(D3D12_DEFAULT);
@@ -2647,12 +3359,80 @@ void Corona::InitTemporalAAPass()
 
 
 
+void Corona::EnsureWindowFramebuffers()
+{
+	if (!renderBackend || renderBackend->GetAPI() != ERenderBackendAPI::D3D12 || !framebuffers.empty())
+		return;
+
+	for (UINT i = 0; i < renderBackend->GetFrameCount(); i++)
+	{
+		ComPtr<ID3D12Resource> rendertarget = renderBackend->GetSwapChainBuffer(i);
+		shared_ptr<Texture> rt = renderBackend->WrapNativeTexture(rendertarget);
+		rt->MakeRTV();
+		framebuffers.push_back(rt);
+	}
+}
+
+void Corona::ApplyHybridDefaultCamera()
+{
+	const glm::vec3 position(0.0f, 0.2f, 3.2f);
+	const float yaw = glm::pi<float>();
+	const float pitch = -0.08f;
+
+	m_camera.m_initialPosition = position;
+	m_camera.m_position = position;
+	m_camera.m_yaw = yaw;
+	m_camera.m_pitch = pitch;
+	m_camera.m_keysPressed = {};
+	m_camera.m_mouseButtonDown = false;
+
+	const float r = cosf(m_camera.m_pitch);
+	m_camera.m_lookDirection.x = r * sinf(m_camera.m_yaw);
+	m_camera.m_lookDirection.y = sinf(m_camera.m_pitch);
+	m_camera.m_lookDirection.z = r * cosf(m_camera.m_yaw);
+
+	bTemporalAAHistoryValid = false;
+	bTemporalDenoiserHistoryValid = false;
+	bResetTemporalStateNextUpdate = true;
+}
+
 void Corona::ToneMapPass()
 {
 #if USE_AFTERMATH
 	renderBackend->EmitGpuCrashMarker("CopyPass");
 #endif
-	PIXScopedEvent(renderBackend->GetGraphicsCommandList(), PIX_COLOR(rand() % 255, rand() % 255, rand() % 255), "CopyPass");
+	if (renderBackend && renderBackend->GetAPI() == ERenderBackendAPI::D3D12)
+	{
+		PIXScopedEvent(renderBackend->GetGraphicsCommandList(), PIX_COLOR(rand() % 255, rand() % 255, rand() % 255), "CopyPass");
+	}
+
+	if (renderBackend && renderBackend->GetAPI() == ERenderBackendAPI::Vulkan)
+	{
+		if (!ToneMapGraphicsPipeline)
+			return;
+
+		Texture* ResolveTarget = nullptr;
+		if (RenderingMode == ERenderingMode::PATHTRACING)
+			ResolveTarget = PathTracingAccumBuffer[PathTracingWriteIndex].get();
+		else if (bUseLightingBufferFallbackForToneMap && LightingBuffer)
+			ResolveTarget = LightingBuffer.get();
+		else
+			ResolveTarget = ColorBuffers[ResolvedColorBufferIndex].get();
+		if (!ResolveTarget)
+			return;
+
+		ToneMapCB.Offset = glm::vec4(0, 0, 0, 0);
+		ToneMapCB.Scale = glm::vec4(1, 1, 0, 0);
+		ToneMapCB.ToneMapMode = ToneMapMode;
+
+		renderBackend->BindGraphicsPipelineTexture(ToneMapGraphicsPipeline.get(), "SrcTex", ResolveTarget);
+		renderBackend->BindGraphicsPipelineSampler(ToneMapGraphicsPipeline.get(), "sampleWrap", samplerWrap.get());
+		renderBackend->SetGraphicsPipelineConstantData(ToneMapGraphicsPipeline.get(), 0, &ToneMapCB, sizeof(ToneMapCB));
+		renderBackend->BindGraphicsPipeline(ToneMapGraphicsPipeline.get());
+		renderBackend->SetViewportAndScissor(m_width, m_height);
+		renderBackend->DrawFullscreenQuad(FullScreenVB.get());
+		return;
+	}
 
 
 	Texture* backbuffer = framebuffers[renderBackend->GetCurrentFrameIndex()].get();
@@ -2693,6 +3473,14 @@ void Corona::ToneMapPass()
 
 void Corona::DebugPass()
 {
+	if (!renderBackend ||
+		renderBackend->GetAPI() != ERenderBackendAPI::D3D12 ||
+		!BufferVisualizePSO)
+	{
+		bDebugDraw = false;
+		return;
+	}
+
 #if USE_AFTERMATH
 	renderBackend->EmitGpuCrashMarker("DebugPass");
 #endif
@@ -3118,26 +3906,12 @@ void Corona::LightingPass()
 #if USE_AFTERMATH
 	renderBackend->EmitGpuCrashMarker("LightingPass");
 #endif
-	PIXScopedEvent(renderBackend->GetGraphicsCommandList(), PIX_COLOR(rand() % 255, rand() % 255, rand() % 255), "LightingPass");
+	if (renderBackend && renderBackend->GetAPI() == ERenderBackendAPI::D3D12)
+	{
+		PIXScopedEvent(renderBackend->GetGraphicsCommandList(), PIX_COLOR(rand() % 255, rand() % 255, rand() % 255), "LightingPass");
+	}
 
 	renderBackend->TransitionTexture(LightingBuffer.get(), EResourceState::ShaderRead, EResourceState::RenderTarget);
-
-	LightingPSO->Apply();
-
-	LightingPSO->SetSampler("samplerWrap", samplerWrap.get());
-	LightingPSO->SetSRV("AlbedoTex", AlbedoBuffer->GpuHandleSRV);
-	LightingPSO->SetSRV("NormalTex", NormalBuffers[ColorBufferWriteIndex]->GpuHandleSRV);
-	LightingPSO->SetSRV("ShadowTex", ShadowDenoisedBuffer ? ShadowDenoisedBuffer->GpuHandleSRV : ShadowBuffer->GpuHandleSRV);
-
-	LightingPSO->SetSRV("VelocityTex", VelocityBuffer->GpuHandleSRV);
-	LightingPSO->SetSRV("DepthTex", DepthBuffer->GpuHandleSRV);
-	LightingPSO->SetSRV("GIResultSHTex", DiffuseGISpatialAux[0]->GpuHandleSRV);
-	LightingPSO->SetSRV("GIResultColorTex", DiffuseGISpatial[0]->GpuHandleSRV);
-	LightingPSO->SetSRV("SpecularGITex", SpecularGISpatial[0]->GpuHandleSRV);
-	LightingPSO->SetSRV("RoughnessMetalicTex", RoughnessMetalicBuffer->GpuHandleSRV);
-
-
-
 
 	glm::mat4x4 InvViewMat = glm::inverse(ViewMat);
 	
@@ -3167,6 +3941,46 @@ void Corona::LightingPass()
 	Param.bEnableDirectSpecular = bEnableDirectSpecular ? 1 : 0;
 
 	glm::normalize(Param.LightDir);
+
+	if (renderBackend && renderBackend->GetAPI() == ERenderBackendAPI::Vulkan)
+	{
+		if (!LightingGraphicsPipeline)
+			return;
+
+		renderBackend->BindGraphicsPipelineTexture(LightingGraphicsPipeline.get(), "AlbedoTex", AlbedoBuffer.get());
+		renderBackend->BindGraphicsPipelineTexture(LightingGraphicsPipeline.get(), "NormalTex", NormalBuffers[ColorBufferWriteIndex].get());
+		renderBackend->BindGraphicsPipelineTexture(LightingGraphicsPipeline.get(), "ShadowTex", ShadowDenoisedBuffer ? ShadowDenoisedBuffer.get() : ShadowBuffer.get());
+		renderBackend->BindGraphicsPipelineTexture(LightingGraphicsPipeline.get(), "VelocityTex", VelocityBuffer.get());
+		renderBackend->BindGraphicsPipelineTexture(LightingGraphicsPipeline.get(), "DepthTex", DepthBuffer.get());
+		renderBackend->BindGraphicsPipelineTexture(LightingGraphicsPipeline.get(), "GIResultSHTex", DiffuseGISpatialAux[0].get());
+		renderBackend->BindGraphicsPipelineTexture(LightingGraphicsPipeline.get(), "GIResultColorTex", DiffuseGISpatial[0].get());
+		renderBackend->BindGraphicsPipelineTexture(LightingGraphicsPipeline.get(), "SpecularGITex", SpecularGISpatial[0].get());
+		renderBackend->BindGraphicsPipelineTexture(LightingGraphicsPipeline.get(), "RoughnessMetalicTex", RoughnessMetalicBuffer.get());
+		renderBackend->BindGraphicsPipelineSampler(LightingGraphicsPipeline.get(), "sampleWrap", samplerWrap.get());
+		renderBackend->SetGraphicsPipelineConstantData(LightingGraphicsPipeline.get(), 0, &Param, sizeof(Param));
+
+		Texture* lightingTarget = LightingBuffer.get();
+		renderBackend->SetRenderTargets(&lightingTarget, 1, nullptr);
+		renderBackend->BindGraphicsPipeline(LightingGraphicsPipeline.get());
+		renderBackend->SetViewportAndScissor(GetRenderWidth(), GetRenderHeight());
+		renderBackend->DrawFullscreenQuad(FullScreenVB.get());
+		renderBackend->TransitionTexture(LightingBuffer.get(), EResourceState::RenderTarget, EResourceState::ShaderRead);
+		return;
+	}
+
+	LightingPSO->Apply();
+
+	LightingPSO->SetSampler("samplerWrap", samplerWrap.get());
+	LightingPSO->SetSRV("AlbedoTex", AlbedoBuffer->GpuHandleSRV);
+	LightingPSO->SetSRV("NormalTex", NormalBuffers[ColorBufferWriteIndex]->GpuHandleSRV);
+	LightingPSO->SetSRV("ShadowTex", ShadowDenoisedBuffer ? ShadowDenoisedBuffer->GpuHandleSRV : ShadowBuffer->GpuHandleSRV);
+
+	LightingPSO->SetSRV("VelocityTex", VelocityBuffer->GpuHandleSRV);
+	LightingPSO->SetSRV("DepthTex", DepthBuffer->GpuHandleSRV);
+	LightingPSO->SetSRV("GIResultSHTex", DiffuseGISpatialAux[0]->GpuHandleSRV);
+	LightingPSO->SetSRV("GIResultColorTex", DiffuseGISpatial[0]->GpuHandleSRV);
+	LightingPSO->SetSRV("SpecularGITex", SpecularGISpatial[0]->GpuHandleSRV);
+	LightingPSO->SetSRV("RoughnessMetalicTex", RoughnessMetalicBuffer->GpuHandleSRV);
 	LightingPSO->SetCBVValue("LightingParam", &Param);
 
 
@@ -3183,10 +3997,62 @@ void Corona::TemporalAAPass()
 #if USE_AFTERMATH
 	renderBackend->EmitGpuCrashMarker("TemporalAAPass");
 #endif
-	PIXScopedEvent(renderBackend->GetGraphicsCommandList(), PIX_COLOR(rand() % 255, rand() % 255, rand() % 255), "TemporalAAPass");
+	if (renderBackend && renderBackend->GetAPI() == ERenderBackendAPI::D3D12)
+	{
+		PIXScopedEvent(renderBackend->GetGraphicsCommandList(), PIX_COLOR(rand() % 255, rand() % 255, rand() % 255), "TemporalAAPass");
+	}
 
 	UINT PrevColorBufferIndex = 1 - ColorBufferWriteIndex;
 	Texture* ResolveTarget = ColorBuffers[ColorBufferWriteIndex].get();
+
+	if (renderBackend && renderBackend->GetAPI() == ERenderBackendAPI::Vulkan)
+	{
+		if (!TemporalAAGraphicsPipeline || !ResolveTarget || !LightingBuffer || !ExposureData)
+		{
+			bUseLightingBufferFallbackForToneMap = true;
+			bTemporalAAHistoryValid = false;
+			return;
+		}
+
+		Texture* PrevColorBuffer = ColorBuffers[PrevColorBufferIndex].get();
+		Texture* BloomTexture = BloomBlurPingPong[0] ? BloomBlurPingPong[0].get() : DefaultBlackTex.get();
+		if (!PrevColorBuffer || !BloomTexture)
+		{
+			bUseLightingBufferFallbackForToneMap = true;
+			bTemporalAAHistoryValid = false;
+			return;
+		}
+
+		TemporalAAParam Param;
+		Param.RTSize.x = GetRenderWidth();
+		Param.RTSize.y = GetRenderHeight();
+		Param.TAABlendFactor = IsTemporalAAEnabled() ? 0.1f : 1.0f;
+		Param.ClampMode = ClampMode;
+		Param.BloomStrength = BloomBlurPingPong[0] ? BloomStrength : 0.0f;
+		Param.HistoryValid = bTemporalAAHistoryValid ? 1u : 0u;
+
+		renderBackend->BindGraphicsPipelineTexture(TemporalAAGraphicsPipeline.get(), "CurrentColorTex", LightingBuffer.get());
+		renderBackend->BindGraphicsPipelineTexture(TemporalAAGraphicsPipeline.get(), "PrevColorTex", PrevColorBuffer);
+		renderBackend->BindGraphicsPipelineTexture(TemporalAAGraphicsPipeline.get(), "VelocityTex", VelocityBuffer.get());
+		renderBackend->BindGraphicsPipelineTexture(TemporalAAGraphicsPipeline.get(), "DepthTex", DepthBuffer.get());
+		renderBackend->BindGraphicsPipelineTexture(TemporalAAGraphicsPipeline.get(), "BloomTex", BloomTexture);
+		renderBackend->BindGraphicsPipelineBuffer(TemporalAAGraphicsPipeline.get(), "Exposure", ExposureData.get());
+		renderBackend->BindGraphicsPipelineSampler(TemporalAAGraphicsPipeline.get(), "sampleWrap", samplerBilinearWrap ? samplerBilinearWrap.get() : samplerWrap.get());
+		renderBackend->SetGraphicsPipelineConstantData(TemporalAAGraphicsPipeline.get(), 0, &Param, sizeof(Param));
+
+		renderBackend->TransitionTexture(ResolveTarget, EResourceState::ShaderRead, EResourceState::RenderTarget);
+		Texture* temporalTarget = ResolveTarget;
+		renderBackend->SetRenderTargets(&temporalTarget, 1, nullptr);
+		renderBackend->BindGraphicsPipeline(TemporalAAGraphicsPipeline.get());
+		renderBackend->SetViewportAndScissor(GetRenderWidth(), GetRenderHeight());
+		renderBackend->DrawFullscreenQuad(FullScreenVB.get());
+		renderBackend->TransitionTexture(ResolveTarget, EResourceState::RenderTarget, EResourceState::ShaderRead);
+
+		bTemporalAAHistoryValid = IsTemporalAAEnabled();
+		bUseLightingBufferFallbackForToneMap = false;
+		ResolvedColorBufferIndex = ColorBufferWriteIndex;
+		return;
+	}
 
 	renderBackend->TransitionTexture(ResolveTarget, EResourceState::ShaderRead, EResourceState::RenderTarget);
 
@@ -3393,8 +4259,11 @@ void Corona::OnUpdate()
 	m_camera.SetTurnSpeed(m_turnSpeed);
 	m_camera.Update(static_cast<float>(m_timer.GetElapsedSeconds()));
 
+	const float effectiveNear = Near;
+	const float effectiveFar = Far;
+
 	ViewMat = m_camera.GetViewMatrix();
-	ProjMat = m_camera.GetProjectionMatrix(Fov, m_aspectRatio, Near, Far);
+	ProjMat = m_camera.GetProjectionMatrix(Fov, m_aspectRatio, effectiveNear, effectiveFar);
 	UnjitteredProjMat = ProjMat;
 	UnjitteredViewProjMat = ProjMat * ViewMat;
 
@@ -3405,10 +4274,10 @@ void Corona::OnUpdate()
 	RTShadowViewParam.InvViewMatrix = glm::transpose(InvViewMat);
 	RTShadowViewParam.ProjMatrix = glm::transpose(ProjMat);
 	RTShadowViewParam.InvProjMatrix = glm::transpose(InvProjMat);
-	RTShadowViewParam.ProjectionParams.x = Far / (Far - Near);
-	RTShadowViewParam.ProjectionParams.y = Near / (Near - Far);
-	RTShadowViewParam.ProjectionParams.z = Near;
-	RTShadowViewParam.ProjectionParams.w = Far;
+	RTShadowViewParam.ProjectionParams.x = effectiveFar / (effectiveFar - effectiveNear);
+	RTShadowViewParam.ProjectionParams.y = effectiveNear / (effectiveNear - effectiveFar);
+	RTShadowViewParam.ProjectionParams.z = effectiveNear;
+	RTShadowViewParam.ProjectionParams.w = effectiveFar;
 	RTShadowViewParam.LightDir = glm::vec4(LightDir, 0);
 	RTShadowViewParam.ShadowLightRadius = 0.03f;
 	RTShadowViewParam.ShadowSampleCount = 8;
@@ -3493,10 +4362,10 @@ void Corona::OnUpdate()
 	RTReflectionViewParam.InvViewMatrix = glm::transpose(InvViewMat);
 	RTReflectionViewParam.ProjMatrix = glm::transpose(UnjitteredProjMat);
 	RTReflectionViewParam.InvProjMatrix = glm::transpose(UnjitteredInvProjMat);
-	RTReflectionViewParam.ProjectionParams.x = Far / (Far - Near);
-	RTReflectionViewParam.ProjectionParams.y = Near / (Near - Far);
-	RTReflectionViewParam.ProjectionParams.z = Near;
-	RTReflectionViewParam.ProjectionParams.w = Far;
+	RTReflectionViewParam.ProjectionParams.x = effectiveFar / (effectiveFar - effectiveNear);
+	RTReflectionViewParam.ProjectionParams.y = effectiveNear / (effectiveNear - effectiveFar);
+	RTReflectionViewParam.ProjectionParams.z = effectiveNear;
+	RTReflectionViewParam.ProjectionParams.w = effectiveFar;
 	RTReflectionViewParam.LightDir = glm::vec4(normalizedLightDir, LightIntensity);
 	RTReflectionViewParam.RandomOffset = glm::vec2(timeElapsed, timeElapsed);
 	RTReflectionViewParam.FrameCounter = FrameCounter;
@@ -3510,10 +4379,10 @@ void Corona::OnUpdate()
 	RTGIViewParam.InvViewMatrix = glm::transpose(InvViewMat);
 	RTGIViewParam.ProjMatrix = glm::transpose(UnjitteredProjMat);
 	RTGIViewParam.InvProjMatrix = glm::transpose(UnjitteredInvProjMat);
-	RTGIViewParam.ProjectionParams.x = Far / (Far - Near);
-	RTGIViewParam.ProjectionParams.y = Near / (Near - Far);
-	RTGIViewParam.ProjectionParams.z = Near;
-	RTGIViewParam.ProjectionParams.w = Far;
+	RTGIViewParam.ProjectionParams.x = effectiveFar / (effectiveFar - effectiveNear);
+	RTGIViewParam.ProjectionParams.y = effectiveNear / (effectiveNear - effectiveFar);
+	RTGIViewParam.ProjectionParams.z = effectiveNear;
+	RTGIViewParam.ProjectionParams.w = effectiveFar;
 	RTGIViewParam.LightDir = glm::vec4(normalizedLightDir, LightIntensity);
 	RTGIViewParam.RandomOffset = glm::vec2(timeElapsed, timeElapsed);
 	RTGIViewParam.FrameCounter = FrameCounter;
@@ -3527,10 +4396,10 @@ void Corona::OnUpdate()
 	PathTracingViewParam.InvViewMatrix = glm::transpose(InvViewMat);
 	PathTracingViewParam.ProjMatrix = glm::transpose(ProjMat);
 	PathTracingViewParam.InvProjMatrix = glm::transpose(InvProjMat);
-	PathTracingViewParam.ProjectionParams.x = Far / (Far - Near);
-	PathTracingViewParam.ProjectionParams.y = Near / (Near - Far);
-	PathTracingViewParam.ProjectionParams.z = Near;
-	PathTracingViewParam.ProjectionParams.w = Far;
+	PathTracingViewParam.ProjectionParams.x = effectiveFar / (effectiveFar - effectiveNear);
+	PathTracingViewParam.ProjectionParams.y = effectiveNear / (effectiveNear - effectiveFar);
+	PathTracingViewParam.ProjectionParams.z = effectiveNear;
+	PathTracingViewParam.ProjectionParams.w = effectiveFar;
 	PathTracingViewParam.LightDirAndIntensity = glm::vec4(normalizedLightDir, LightIntensity);
 	PathTracingViewParam.RandomOffset = glm::vec2(timeElapsed, timeElapsed);
 	PathTracingViewParam.FrameCounter = FrameCounter;
@@ -3544,15 +4413,15 @@ void Corona::OnUpdate()
 	PathTracingViewParam.bEnableDirectDiffuse = bEnableDirectDiffuse ? 1 : 0;
 	PathTracingViewParam.bEnableDirectSpecular = bEnableDirectSpecular ? 1 : 0;
 	
-	SpatialFilterCB.ProjectionParams.z = Near;
-	SpatialFilterCB.ProjectionParams.w = Far;
+	SpatialFilterCB.ProjectionParams.z = effectiveNear;
+	SpatialFilterCB.ProjectionParams.w = effectiveFar;
 	SpatialFilterCB.AccumulatedFrames = IndirectAccumulatedFrames;
 
 
 	TemporalFilterCB.InvViewMatrix = glm::transpose(InvViewMat);
 	TemporalFilterCB.InvProjMatrix = glm::transpose(InvProjMat);
-	TemporalFilterCB.ProjectionParams.z = Near;
-	TemporalFilterCB.ProjectionParams.w = Far;
+	TemporalFilterCB.ProjectionParams.z = effectiveNear;
+	TemporalFilterCB.ProjectionParams.w = effectiveFar;
 	TemporalFilterCB.RTSize.x = GetRenderWidth();
 	TemporalFilterCB.RTSize.y = GetRenderHeight();
 	TemporalFilterCB.FrameIndex = FrameCounter;
@@ -3576,7 +4445,15 @@ void Corona::OnUpdate()
 // Render the scene.
 void Corona::OnRender()
 {
+	BeginFramePerfLogging();
+	double beginFrameMs = 0.0;
+	double executeMs = 0.0;
+	double endFrameMs = 0.0;
+
+	const auto beginFrameStart = CpuClock::now();
 	renderBackend->BeginFrame();
+	beginFrameMs = ElapsedMilliseconds(beginFrameStart, CpuClock::now());
+	AppendVulkanRuntimeTrace(L"[OnRender] after BeginFrame");
 	UpdateGpuTimingReadback();
 	BeginGpuTimingFrame();
 #if WITH_STREAMLINE
@@ -3594,43 +4471,100 @@ void Corona::OnRender()
 
 	if (RenderingMode == ERenderingMode::HYBRID)
 	{
+		const bool bStageDump = IsHybridStageAutoDumpPhase();
+		const uint32_t maxSupportedHybridStage = renderBackend ? renderBackend->GetMaxSupportedHybridStage() : 7u;
+		const uint32_t requestedHybridStage = bStageDump ? AutoAADumpPhase : 7u;
+		const uint32_t hybridStage = std::min(requestedHybridStage, maxSupportedHybridStage);
+		if (!bLoggedHybridStageLimit && requestedHybridStage > hybridStage)
+		{
+			bLoggedHybridStageLimit = true;
+			AppendVulkanRuntimeTrace(
+				std::wstring(L"[OnRender] hybrid stage limited by backend to ") +
+				GetHybridStageAutoDumpPhaseName(hybridStage));
+		}
+		const bool bRunShadow = hybridStage >= 1;
+		const bool bRunShadowDenoise = hybridStage >= 2;
+		const bool bRunReflection = hybridStage >= 3;
+		const bool bRunGI = hybridStage >= 4;
+		const bool bRunTemporalDenoise = hybridStage >= 5;
+		const bool bRunSpatialDenoise = hybridStage >= 6;
+		const bool bRunLighting = hybridStage >= 7;
+		const bool bVulkanHybridBackend =
+			renderBackend &&
+			renderBackend->GetAPI() == ERenderBackendAPI::Vulkan;
+
 		// Hybrid rendering: Rasterization GBuffer + Raytracing
 		BeginGpuPassTiming(EGpuPass::GBuffer);
+		AppendVulkanRuntimeTrace(L"[OnRender] before GBufferPass");
 		GBufferPass();
+		AppendVulkanRuntimeTrace(L"[OnRender] after GBufferPass");
 		EndGpuPassTiming(EGpuPass::GBuffer);
 
-		BeginGpuPassTiming(EGpuPass::RaytraceShadow);
-		RaytraceShadowPass();
-		EndGpuPassTiming(EGpuPass::RaytraceShadow);
+		if (bRunShadow)
+		{
+			BeginGpuPassTiming(EGpuPass::RaytraceShadow);
+			AppendVulkanRuntimeTrace(L"[OnRender] before RaytraceShadowPass");
+			RaytraceShadowPass();
+			AppendVulkanRuntimeTrace(L"[OnRender] after RaytraceShadowPass");
+			EndGpuPassTiming(EGpuPass::RaytraceShadow);
+		}
 
-		BeginGpuPassTiming(EGpuPass::ShadowDenoise);
-		ShadowDenoisePass();
-		EndGpuPassTiming(EGpuPass::ShadowDenoise);
+		if (bRunShadowDenoise)
+		{
+			BeginGpuPassTiming(EGpuPass::ShadowDenoise);
+			AppendVulkanRuntimeTrace(L"[OnRender] before ShadowDenoisePass");
+			ShadowDenoisePass();
+			AppendVulkanRuntimeTrace(L"[OnRender] after ShadowDenoisePass");
+			EndGpuPassTiming(EGpuPass::ShadowDenoise);
+		}
 
-		BeginGpuPassTiming(EGpuPass::RaytraceReflection);
-		RaytraceReflectionPass();
-		EndGpuPassTiming(EGpuPass::RaytraceReflection);
+		if (bRunReflection)
+		{
+			BeginGpuPassTiming(EGpuPass::RaytraceReflection);
+			AppendVulkanRuntimeTrace(L"[OnRender] before RaytraceReflectionPass");
+			RaytraceReflectionPass();
+			AppendVulkanRuntimeTrace(L"[OnRender] after RaytraceReflectionPass");
+			EndGpuPassTiming(EGpuPass::RaytraceReflection);
+		}
 
-		BeginGpuPassTiming(EGpuPass::RaytraceGI);
-		RaytraceGIPass();
-		EndGpuPassTiming(EGpuPass::RaytraceGI);
+		if (bRunGI)
+		{
+			BeginGpuPassTiming(EGpuPass::RaytraceGI);
+			AppendVulkanRuntimeTrace(L"[OnRender] before RaytraceGIPass");
+			RaytraceGIPass();
+			AppendVulkanRuntimeTrace(L"[OnRender] after RaytraceGIPass");
+			EndGpuPassTiming(EGpuPass::RaytraceGI);
+		}
 
 		// Simple GI denoising: edge-aware temporal accumulation + spatial bilateral.
-		BeginGpuPassTiming(EGpuPass::TemporalDenoise);
-		TemporalDenoisingPass();
-		EndGpuPassTiming(EGpuPass::TemporalDenoise);
+		if (bRunTemporalDenoise)
+		{
+			BeginGpuPassTiming(EGpuPass::TemporalDenoise);
+			AppendVulkanRuntimeTrace(L"[OnRender] before TemporalDenoisingPass");
+			TemporalDenoisingPass();
+			AppendVulkanRuntimeTrace(L"[OnRender] after TemporalDenoisingPass");
+			EndGpuPassTiming(EGpuPass::TemporalDenoise);
+		}
 		// GenMipSpecularGIPass();
-		BeginGpuPassTiming(EGpuPass::SpatialDenoise);
-		SpatialDenoisingPass();
-		EndGpuPassTiming(EGpuPass::SpatialDenoise);
+		if (bRunSpatialDenoise)
+		{
+			BeginGpuPassTiming(EGpuPass::SpatialDenoise);
+			AppendVulkanRuntimeTrace(L"[OnRender] before SpatialDenoisingPass");
+			SpatialDenoisingPass();
+			AppendVulkanRuntimeTrace(L"[OnRender] after SpatialDenoisingPass");
+			EndGpuPassTiming(EGpuPass::SpatialDenoise);
+		}
 
-		BeginGpuPassTiming(EGpuPass::Lighting);
-		LightingPass();
-		EndGpuPassTiming(EGpuPass::Lighting);
+		if (bRunLighting)
+		{
+			BeginGpuPassTiming(EGpuPass::Lighting);
+			LightingPass();
+			EndGpuPassTiming(EGpuPass::Lighting);
+		}
 
 		// BloomPass(); // Disabled for hybrid mode
 
-		if (IsDLSSRREnabled())
+		if (bRunLighting && IsDLSSRREnabled())
 		{
 			bool bNeedTemporalAA = false;
 			BeginGpuPassTiming(EGpuPass::DLSSRR);
@@ -3655,7 +4589,7 @@ void Corona::OnRender()
 				EndGpuPassTiming(EGpuPass::TemporalAA);
 			}
 		}
-		else if (IsDLSSSREnabled())
+		else if (bRunLighting && IsDLSSSREnabled())
 		{
 			BeginGpuPassTiming(EGpuPass::DLSSSR);
 			const bool bDLSSPassed = DLSSPass();
@@ -3667,9 +4601,14 @@ void Corona::OnRender()
 				EndGpuPassTiming(EGpuPass::TemporalAA);
 			}
 		}
-		else
+		else if (bRunLighting)
 		{
-			if (DLSSTransitionFramesRemaining > 0)
+			if (bVulkanHybridBackend && !TemporalAAGraphicsPipeline)
+			{
+				bUseLightingBufferFallbackForToneMap = true;
+				bTemporalAAHistoryValid = false;
+			}
+			else if (!bVulkanHybridBackend && DLSSTransitionFramesRemaining > 0)
 			{
 				--DLSSTransitionFramesRemaining;
 			}
@@ -3693,13 +4632,77 @@ void Corona::OnRender()
 	}
 
 	
-	Texture* backbuffer = framebuffers[renderBackend->GetCurrentFrameIndex()].get();
-	renderBackend->TransitionTexture(backbuffer, EResourceState::Present, EResourceState::RenderTarget);
-	renderBackend->SetRenderTarget(backbuffer);
-
-	BeginGpuPassTiming(EGpuPass::ToneMap);
-	ToneMapPass();
-	EndGpuPassTiming(EGpuPass::ToneMap);
+	Texture* backbuffer = nullptr;
+	if (renderBackend->GetCurrentFrameIndex() < framebuffers.size())
+		backbuffer = framebuffers[renderBackend->GetCurrentFrameIndex()].get();
+	if (!backbuffer)
+		backbuffer = renderBackend->GetCurrentWindowRenderTarget();
+	const bool bVulkanHybridBackend =
+		RenderingMode == ERenderingMode::HYBRID &&
+		renderBackend &&
+		renderBackend->GetAPI() == ERenderBackendAPI::Vulkan;
+	const bool bVulkanHybridAutoDump = bVulkanHybridBackend && IsHybridStageAutoDumpPhase();
+	const uint32_t vulkanPreviewStage =
+		bVulkanHybridBackend
+			? (bVulkanHybridAutoDump
+				? std::min<uint32_t>(AutoAADumpPhase, renderBackend->GetMaxSupportedHybridStage())
+				: renderBackend->GetMaxSupportedHybridStage())
+			: 7u;
+	const bool bVulkanStagePreview = bVulkanHybridBackend && vulkanPreviewStage < 7u;
+	const UINT32 vulkanStageDumpCaptureFrame =
+		bVulkanHybridAutoDump
+			? GetHybridStageAutoDumpFrameCount(
+				AutoAADumpPhase,
+				true,
+				renderBackend->GetMaxSupportedHybridStage() < 7u) - 1u
+			: 7u;
+	const bool bRequestVulkanStageDumpCapture =
+		bVulkanHybridAutoDump &&
+		AutoAADumpFramesInPhase == vulkanStageDumpCaptureFrame;
+	if (bRequestVulkanStageDumpCapture)
+	{
+		AppendVulkanRuntimeTrace(L"[OnRender] request stage dump capture");
+		renderBackend->RequestWindowCapture(
+			AutoAADumpDir + L"\\" + GetHybridStageAutoDumpPhaseName(AutoAADumpPhase) + L"_screen_preview.png");
+	}
+	if (bVulkanStagePreview)
+	{
+		if (auto* vkBackend = dynamic_cast<VulkanBackend*>(renderBackend.get()))
+		{
+			Texture* previewTexture = nullptr;
+			switch (vulkanPreviewStage)
+			{
+			case 0: previewTexture = AlbedoBuffer.get(); break;
+			case 1: previewTexture = ShadowBuffer.get(); break;
+			case 2: previewTexture = ShadowDenoisedBuffer.get(); break;
+			case 3: previewTexture = SpecularGIRaw.get(); break;
+			case 4: previewTexture = DiffuseGIRaw.get(); break;
+			case 5: previewTexture = DiffuseGITemporal[GIBufferWriteIndex].get(); break;
+			case 6: previewTexture = DiffuseGISpatial[0].get(); break;
+			default: previewTexture = nullptr; break;
+			}
+			AppendVulkanRuntimeTrace(L"[OnRender] before PreviewTextureOnWindow");
+			vkBackend->PreviewTextureOnWindow(previewTexture ? previewTexture : AlbedoBuffer.get());
+			AppendVulkanRuntimeTrace(L"[OnRender] after PreviewTextureOnWindow");
+		}
+	}
+	else
+	{
+		renderBackend->TransitionTexture(backbuffer, EResourceState::Present, EResourceState::RenderTarget);
+		renderBackend->SetRenderTarget(backbuffer);
+	}
+	if (!bVulkanStagePreview && RenderingMode == ERenderingMode::HYBRID &&
+		IsHybridStageAutoDumpPhase() && AutoAADumpPhase < 7)
+	{
+		static const float kStageClearColor[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
+		renderBackend->ClearRenderTarget(backbuffer, kStageClearColor);
+	}
+	else if (!bVulkanStagePreview)
+	{
+		BeginGpuPassTiming(EGpuPass::ToneMap);
+		ToneMapPass();
+		EndGpuPassTiming(EGpuPass::ToneMap);
+	}
 	AdvanceAutoAADump(backbuffer);
 
 	if(bDebugDraw)
@@ -3709,7 +4712,7 @@ void Corona::OnRender()
 		EndGpuPassTiming(EGpuPass::Debug);
 	}
 
-	if (bShowImgui)
+	if (bShowImgui && bImguiInitialized)
 	{
 
 		renderBackend->NewImGuiFrame();
@@ -3860,7 +4863,23 @@ void Corona::OnRender()
 			}
 #endif
 		}
-		ImGui::Checkbox("Visualize Buffers", &bDebugDraw);
+		const bool bDebugVisualizationAvailable =
+			renderBackend &&
+			renderBackend->GetAPI() == ERenderBackendAPI::D3D12 &&
+			BufferVisualizePSO != nullptr;
+		if (bDebugVisualizationAvailable)
+		{
+			ImGui::Checkbox("Visualize Buffers", &bDebugDraw);
+		}
+		else
+		{
+			bDebugDraw = false;
+			bool disabledDebugDraw = false;
+			ImGui::BeginDisabled();
+			ImGui::Checkbox("Visualize Buffers", &disabledDebugDraw);
+			ImGui::EndDisabled();
+			ImGui::TextDisabled("Visualize Buffers is currently available on the DX12 backend.");
+		}
 		ImGui::Checkbox("Draw Histogram", &bDrawHistogram);
 		
 		// Lighting control options (both Hybrid and Path Tracing)
@@ -3952,6 +4971,7 @@ void Corona::OnRender()
 			const char* items[] = {
 				"HYBRID (Raster + RT)",
 				"PATH TRACING",
+				"MESH TEST",
 			};
 			static const char* item_current = items[UINT(ERenderingMode::HYBRID)];
 			if (ImGui::BeginCombo("Rendering Mode", item_current, flags))
@@ -4175,9 +5195,29 @@ if (ImGui::Button("Reset Accumulation"))
 	renderBackend->TransitionTexture(backbuffer, EResourceState::RenderTarget, EResourceState::Present);
 
 
+	const auto executeStart = CpuClock::now();
 	renderBackend->ExecuteCurrentCommandList();
+	executeMs = ElapsedMilliseconds(executeStart, CpuClock::now());
+	AppendVulkanRuntimeTrace(L"[OnRender] after ExecuteCurrentCommandList");
 
+	const auto endFrameStart = CpuClock::now();
 	renderBackend->EndFrame();
+	endFrameMs = ElapsedMilliseconds(endFrameStart, CpuClock::now());
+	AppendVulkanRuntimeTrace(L"[OnRender] after EndFrame");
+	FinishFramePerfLogging(beginFrameMs, executeMs, endFrameMs);
+
+	if ((bVulkanStagePreview || bVulkanHybridAutoDump) && bAutoAADumpEnabled && bAutoAADumpInitialized && !AutoAADumpDir.empty())
+	{
+		std::wstring outputPath;
+		std::wstring errorMessage;
+		bool bCaptureSuccess = false;
+		if (renderBackend->ConsumeWindowCaptureResult(&outputPath, &bCaptureSuccess, &errorMessage))
+		{
+			AppendAutoAADumpLog(std::wstring(L"[capture] ") + outputPath + L" = " + (bCaptureSuccess ? L"ok" : L"fail"));
+			if (!errorMessage.empty())
+				AppendAutoAADumpLog(L"[capture] " + errorMessage);
+		}
+	}
 
 	PrevViewProjMat = ViewProjMat;
 	PrevViewMat = ViewMat;
@@ -4188,11 +5228,19 @@ if (ImGui::Button("Reset Accumulation"))
 void Corona::OnDestroy()
 {
 	SaveCameraState();
+	if (!renderBackend)
+	{
+		CoUninitialize();
+		return;
+	}
 	renderBackend->WaitForGpu();
 	renderBackend->ShutdownGpuTimestampQueries();
 
 #if WITH_STREAMLINE
-	ShutdownStreamline();
+	// Streamline can spend a long time in plugin shutdown after automated captures.
+	// The process is exiting immediately, so let the OS tear it down in this path.
+	if (!bAutoAADumpEnabled)
+		ShutdownStreamline();
 #endif
 	if (bImguiInitialized)
 	{
@@ -4201,6 +5249,7 @@ void Corona::OnDestroy()
 		ImGui::DestroyContext();
 		bImguiInitialized = false;
 	}
+	CoUninitialize();
 }
 
 void Corona::OnKeyDown(UINT8 key)
@@ -4211,7 +5260,16 @@ void Corona::OnKeyDown(UINT8 key)
 		bMultiThreadRendering = !bMultiThreadRendering;
 		break;*/
 	case 'B':
-		bDebugDraw = !bDebugDraw;
+		if (renderBackend &&
+			renderBackend->GetAPI() == ERenderBackendAPI::D3D12 &&
+			BufferVisualizePSO)
+		{
+			bDebugDraw = !bDebugDraw;
+		}
+		else
+		{
+			bDebugDraw = false;
+		}
 		break;
 	case 'T':
 	{
@@ -4293,7 +5351,7 @@ void Corona::DrawScene(shared_ptr<Scene> scene, float Roughness, float Metalic, 
 		for (int i = 0; i < mesh->Draws.size(); i++)
 		{
 			Mesh::DrawCall& drawcall = mesh->Draws[i];
-			GBufferConstantBuffer objCB;
+			GBufferConstantBuffer objCB = {};
 			int sizea = sizeof(GBufferConstantBuffer);
 
 			objCB.ViewProjectionMatrix = glm::transpose(ViewProjMat);
@@ -4307,6 +5365,7 @@ void Corona::DrawScene(shared_ptr<Scene> scene, float Roughness, float Metalic, 
 			objCB.ViewDir.x = m_camera.m_lookDirection.x;
 			objCB.ViewDir.y = m_camera.m_lookDirection.y;
 			objCB.ViewDir.z = m_camera.m_lookDirection.z;
+			objCB.ViewDir.w = 0.0f;
 
 			objCB.RTSize.x = GetRenderWidth();
 			objCB.RTSize.y = GetRenderHeight();
@@ -4316,23 +5375,17 @@ void Corona::DrawScene(shared_ptr<Scene> scene, float Roughness, float Metalic, 
 
 			objCB.bOverrideRougnessMetallic = bOverrideRoughnessMetallic ? 1 : 0;
 
-			GBufferPassPSO->SetCBVValue("GBufferConstantBuffer", (void*)&objCB);
+			renderBackend->SetGraphicsPipelineConstantData(GBufferGraphicsPipeline.get(), 0, &objCB, sizeof(objCB));
 
-			Texture* AlbedoTex = drawcall.mat->Diffuse.get();
-			if (AlbedoTex)
-				GBufferPassPSO->SetSRV("AlbedoTex", AlbedoTex->GpuHandleSRV);
+			Texture* AlbedoTex = drawcall.mat->Diffuse ? drawcall.mat->Diffuse.get() : DefaultWhiteTex.get();
+			Texture* NormalTex = drawcall.mat->Normal ? drawcall.mat->Normal.get() : DefaultNormalTex.get();
+			Texture* RoughnessTex = drawcall.mat->Roughness ? drawcall.mat->Roughness.get() : DefaultRougnessTex.get();
+			Texture* MetallicTex = drawcall.mat->Metallic ? drawcall.mat->Metallic.get() : DefaultBlackTex.get();
 
-			Texture* NormalTex = drawcall.mat->Normal.get();
-			if (NormalTex)
-				GBufferPassPSO->SetSRV("NormalTex", NormalTex->GpuHandleSRV);
-
-			Texture* RoughnessTex = drawcall.mat->Roughness.get();
-			if (RoughnessTex)
-				GBufferPassPSO->SetSRV("RoughnessTex", RoughnessTex->GpuHandleSRV);
-
-			Texture* MetallicTex = drawcall.mat->Metallic.get();
-			if (MetallicTex)
-				GBufferPassPSO->SetSRV("MetallicTex", MetallicTex->GpuHandleSRV);
+			renderBackend->BindGraphicsPipelineTexture(GBufferGraphicsPipeline.get(), "AlbedoTex", AlbedoTex);
+			renderBackend->BindGraphicsPipelineTexture(GBufferGraphicsPipeline.get(), "NormalTex", NormalTex);
+			renderBackend->BindGraphicsPipelineTexture(GBufferGraphicsPipeline.get(), "RoughnessTex", RoughnessTex);
+			renderBackend->BindGraphicsPipelineTexture(GBufferGraphicsPipeline.get(), "MetallicTex", MetallicTex);
 
 
 			renderBackend->DrawIndexed(drawcall.IndexCount, drawcall.IndexStart, drawcall.VertexBase);
@@ -4347,7 +5400,11 @@ void Corona::GBufferPass()
 #if USE_AFTERMATH
 	renderBackend->EmitGpuCrashMarker("GBufferPass");
 #endif
-	PIXScopedEvent(renderBackend->GetGraphicsCommandList(), PIX_COLOR(rand() % 255, rand() % 255, rand() % 255), "GBufferPass");
+	AppendVulkanRuntimeTrace(L"[GBufferPass] begin");
+	if (renderBackend && renderBackend->GetAPI() == ERenderBackendAPI::D3D12)
+	{
+		PIXScopedEvent(renderBackend->GetGraphicsCommandList(), PIX_COLOR(rand() % 255, rand() % 255, rand() % 255), "GBufferPass");
+	}
 
 	renderBackend->TransitionTexture(AlbedoBuffer.get(), EResourceState::ShaderRead, EResourceState::RenderTarget);
 	renderBackend->TransitionTexture(SpecularAlbedoBuffer.get(), EResourceState::ShaderRead, EResourceState::RenderTarget);
@@ -4358,6 +5415,7 @@ void Corona::GBufferPass()
 
 	renderBackend->TransitionTexture(DepthBuffer.get(), EResourceState::ShaderRead, EResourceState::DepthWrite);
 	renderBackend->TransitionTexture(UnjitteredDepthBuffers[ColorBufferWriteIndex].get(), EResourceState::ShaderRead, EResourceState::RenderTarget);
+	AppendVulkanRuntimeTrace(L"[GBufferPass] after transitions");
 
 	const float clearColor[] = { 0.0f, 0.2f, 0.4f, 1.0f };
 	renderBackend->ClearRenderTarget(AlbedoBuffer.get(), clearColor);
@@ -4373,6 +5431,7 @@ void Corona::GBufferPass()
 	renderBackend->ClearDepth(DepthBuffer.get(), 1.0f);
 	const float ujitteredDepthClearColor[] = { 1.0f, 1.0f, 1.0f, 1.0f};
 	renderBackend->ClearRenderTarget(UnjitteredDepthBuffers[ColorBufferWriteIndex].get(), ujitteredDepthClearColor);
+	AppendVulkanRuntimeTrace(L"[GBufferPass] after clears");
 
 
 	renderBackend->BindDefaultDescriptorHeaps();
@@ -4387,17 +5446,18 @@ void Corona::GBufferPass()
 		RoughnessMetalicBuffer.get(),
 		UnjitteredDepthBuffers[ColorBufferWriteIndex].get()
 	};
-	renderBackend->SetRenderTargets(renderTargets, GBufferPassPSO->graphicsPSODesc.NumRenderTargets, DepthBuffer.get());
+	renderBackend->SetRenderTargets(renderTargets, static_cast<uint32_t>(std::size(renderTargets)), DepthBuffer.get());
+	AppendVulkanRuntimeTrace(L"[GBufferPass] after SetRenderTargets");
 
-	GBufferPassPSO->Apply();
-	
-	GBufferPassPSO->SetSampler("samplerWrap", samplerWrap.get());
+	renderBackend->BindGraphicsPipeline(GBufferGraphicsPipeline.get());
+	renderBackend->BindGraphicsPipelineSampler(GBufferGraphicsPipeline.get(), "samplerWrap", samplerWrap.get());
+	AppendVulkanRuntimeTrace(L"[GBufferPass] after BindGraphicsPipeline");
 
 	if (!bMultiThreadRendering)
 	{
-
-		
+		AppendVulkanRuntimeTrace(L"[GBufferPass] before DrawScene");
 		DrawScene(Sponza, SponzaRoughnessMultiplier, 0, false);
+		AppendVulkanRuntimeTrace(L"[GBufferPass] after DrawScene");
 		//DrawScene(ShaderBall, ShaderBallRoughnessMultiplier, 1, true);
 	}
 	else
@@ -4449,6 +5509,7 @@ void Corona::GBufferPass()
 
 	renderBackend->TransitionTexture(DepthBuffer.get(), EResourceState::DepthWrite, EResourceState::ShaderRead);
 	renderBackend->TransitionTexture(UnjitteredDepthBuffers[ColorBufferWriteIndex].get(), EResourceState::RenderTarget, EResourceState::ShaderRead);
+	AppendVulkanRuntimeTrace(L"[GBufferPass] end");
 }
 
 void Corona::SpatialDenoisingPass()
@@ -4456,7 +5517,13 @@ void Corona::SpatialDenoisingPass()
 #if USE_AFTERMATH
 	renderBackend->EmitGpuCrashMarker("SpatialDenoisingPass");
 #endif
-	PIXScopedEvent(renderBackend->GetGraphicsCommandList(), PIX_COLOR(rand() % 255, rand() % 255, rand() % 255), "SpatialDenoisingPass");
+	if (!SpatialDenoisingFilterPSO)
+		return;
+	AppendVulkanRuntimeTrace(L"[SpatialDenoisingPass] begin");
+	if (renderBackend && renderBackend->GetAPI() == ERenderBackendAPI::D3D12)
+	{
+		PIXScopedEvent(renderBackend->GetGraphicsCommandList(), PIX_COLOR(rand() % 255, rand() % 255, rand() % 255), "SpatialDenoisingPass");
+	}
 
 	UINT WriteIndex = 0;
 	UINT ReadIndex = 1;
@@ -4469,40 +5536,42 @@ void Corona::SpatialDenoisingPass()
 		renderBackend->TransitionTexture(DiffuseGISpatial[WriteIndex].get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
 		renderBackend->TransitionTexture(SpecularGISpatial[WriteIndex].get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
 
-		SpatialDenoisingFilterPSO->Apply();
-
-		SpatialDenoisingFilterPSO->SetSRV("DepthTex", DepthBuffer->GpuHandleSRV);
-		SpatialDenoisingFilterPSO->SetSRV("GeoNormalTex", GeomNormalBuffer->GpuHandleSRV);
+		SpatialDenoisingFilterPSO->SetTextureSRV("DepthTex", DepthBuffer.get());
+		SpatialDenoisingFilterPSO->SetTextureSRV("GeoNormalTex", GeomNormalBuffer.get());
 		if (i == 0)
 		{
-			SpatialDenoisingFilterPSO->SetSRV("InGIResultSHTex", DiffuseGITemporalAux[GIBufferWriteIndex]->GpuHandleSRV);
-			SpatialDenoisingFilterPSO->SetSRV("InGIResultColorTex", DiffuseGITemporal[GIBufferWriteIndex]->GpuHandleSRV);
-			SpatialDenoisingFilterPSO->SetSRV("InSpecularGITex", SpecularGITemporal[GIBufferWriteIndex]->GpuHandleSRV);
+			SpatialDenoisingFilterPSO->SetTextureSRV("InGIResultSHTex", DiffuseGITemporalAux[GIBufferWriteIndex].get());
+			SpatialDenoisingFilterPSO->SetTextureSRV("InGIResultColorTex", DiffuseGITemporal[GIBufferWriteIndex].get());
+			SpatialDenoisingFilterPSO->SetTextureSRV("InSpecularGITex", SpecularGITemporal[GIBufferWriteIndex].get());
 		}
 		else
 		{
-			SpatialDenoisingFilterPSO->SetSRV("InGIResultSHTex", DiffuseGISpatialAux[ReadIndex]->GpuHandleSRV);
-			SpatialDenoisingFilterPSO->SetSRV("InGIResultColorTex", DiffuseGISpatial[ReadIndex]->GpuHandleSRV);
-			SpatialDenoisingFilterPSO->SetSRV("InSpecularGITex", SpecularGISpatial[ReadIndex]->GpuHandleSRV);
+			SpatialDenoisingFilterPSO->SetTextureSRV("InGIResultSHTex", DiffuseGISpatialAux[ReadIndex].get());
+			SpatialDenoisingFilterPSO->SetTextureSRV("InGIResultColorTex", DiffuseGISpatial[ReadIndex].get());
+			SpatialDenoisingFilterPSO->SetTextureSRV("InSpecularGITex", SpecularGISpatial[ReadIndex].get());
 		}
 
 
-		SpatialDenoisingFilterPSO->SetUAV("OutGIResultSH", DiffuseGISpatialAux[WriteIndex]->GpuHandleUAV);
-		SpatialDenoisingFilterPSO->SetUAV("OutGIResultColor", DiffuseGISpatial[WriteIndex]->GpuHandleUAV);
-		SpatialDenoisingFilterPSO->SetUAV("OutSpecularGI", SpecularGISpatial[WriteIndex]->GpuHandleUAV);
+		SpatialDenoisingFilterPSO->SetTextureUAV("OutGIResultSH", DiffuseGISpatialAux[WriteIndex].get());
+		SpatialDenoisingFilterPSO->SetTextureUAV("OutGIResultColor", DiffuseGISpatial[WriteIndex].get());
+		SpatialDenoisingFilterPSO->SetTextureUAV("OutSpecularGI", SpecularGISpatial[WriteIndex].get());
 
 		SpatialFilterCB.Iteration = i;
 		SpatialDenoisingFilterPSO->SetCBVValue("SpatialFilterConstant", &SpatialFilterCB);
+		SpatialDenoisingFilterPSO->Apply();
+		AppendVulkanRuntimeTrace(L"[SpatialDenoisingPass] after Apply iteration=" + std::to_wstring(i));
 
 		UINT WidthGI = GetRenderWidth();
 		UINT HeightGI = GetRenderHeight();
 
 		renderBackend->Dispatch((WidthGI + 31) / 32, (HeightGI + 31) / 32, 1);
+		AppendVulkanRuntimeTrace(L"[SpatialDenoisingPass] after Dispatch iteration=" + std::to_wstring(i));
 
 		renderBackend->TransitionTexture(DiffuseGISpatialAux[WriteIndex].get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
 		renderBackend->TransitionTexture(DiffuseGISpatial[WriteIndex].get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
 		renderBackend->TransitionTexture(SpecularGISpatial[WriteIndex].get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
 	}
+	AppendVulkanRuntimeTrace(L"[SpatialDenoisingPass] end");
 }
 
 void Corona::TemporalDenoisingPass()
@@ -4510,7 +5579,13 @@ void Corona::TemporalDenoisingPass()
 #if USE_AFTERMATH
 	renderBackend->EmitGpuCrashMarker("TemporalDenoisingPass");
 #endif
-	PIXScopedEvent(renderBackend->GetGraphicsCommandList(), PIX_COLOR(rand() % 255, rand() % 255, rand() % 255), "TemporalDenoisingPass");
+	if (!TemporalDenoisingFilterPSO)
+		return;
+	AppendVulkanRuntimeTrace(L"[TemporalDenoisingPass] begin");
+	if (renderBackend && renderBackend->GetAPI() == ERenderBackendAPI::D3D12)
+	{
+		PIXScopedEvent(renderBackend->GetGraphicsCommandList(), PIX_COLOR(rand() % 255, rand() % 255, rand() % 255), "TemporalDenoisingPass");
+	}
 
 	// GIBufferSH : full scale
 	// FilterIndirectDiffusePingPongSH : 3x3 downsample
@@ -4524,45 +5599,50 @@ void Corona::TemporalDenoisingPass()
 	renderBackend->TransitionTexture(DiffuseGITemporalAux[WriteIndex].get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
 	renderBackend->TransitionTexture(DiffuseGITemporal[WriteIndex].get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
 	renderBackend->TransitionTexture(SpecularGITemporal[WriteIndex].get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
+	renderBackend->TransitionTexture(SpecularGIMoments[WriteIndex].get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
+
+	TemporalDenoisingFilterPSO->SetTextureSRV("DepthTex", UnjitteredDepthBuffers[ColorBufferWriteIndex].get());
+	TemporalDenoisingFilterPSO->SetTextureSRV("NormalTex", NormalBuffers[ColorBufferWriteIndex].get());
+	TemporalDenoisingFilterPSO->SetTextureSRV("InGIResultSHTex", DiffuseGIRawAux.get());
+	TemporalDenoisingFilterPSO->SetTextureSRV("InGIResultColorTex", DiffuseGIRaw.get());
+	TemporalDenoisingFilterPSO->SetTextureSRV("InGIResultSHTexPrev", DiffuseGITemporalAux[ReadIndex].get());
+	TemporalDenoisingFilterPSO->SetTextureSRV("InGIResultColorTexPrev", DiffuseGITemporal[ReadIndex].get());
+	TemporalDenoisingFilterPSO->SetTextureSRV("VelocityTex", VelocityBuffer.get());
+	TemporalDenoisingFilterPSO->SetTextureSRV("InSpecularGITex", SpecularGIRaw.get());
+	TemporalDenoisingFilterPSO->SetTextureSRV("InSpecularGITexPrev", SpecularGITemporal[ReadIndex].get());
+	TemporalDenoisingFilterPSO->SetTextureSRV("RougnessMetalicTex", RoughnessMetalicBuffer.get());
+	TemporalDenoisingFilterPSO->SetTextureSRV("PrevDepthTex", UnjitteredDepthBuffers[1 - ColorBufferWriteIndex].get());
+	TemporalDenoisingFilterPSO->SetTextureSRV("PrevNormalTex", NormalBuffers[1 - ColorBufferWriteIndex].get());
+	TemporalDenoisingFilterPSO->SetTextureSRV("PrevMomentsTex", SpecularGIMoments[ReadIndex].get());
 
 
-	TemporalDenoisingFilterPSO->Apply();
-
-	TemporalDenoisingFilterPSO->SetSRV("DepthTex", UnjitteredDepthBuffers[ColorBufferWriteIndex]->GpuHandleSRV);
-	TemporalDenoisingFilterPSO->SetSRV("NormalTex", NormalBuffers[ColorBufferWriteIndex]->GpuHandleSRV);
-	TemporalDenoisingFilterPSO->SetSRV("InGIResultSHTex", DiffuseGIRawAux->GpuHandleSRV);
-	TemporalDenoisingFilterPSO->SetSRV("InGIResultColorTex", DiffuseGIRaw->GpuHandleSRV);
-	TemporalDenoisingFilterPSO->SetSRV("InGIResultSHTexPrev", DiffuseGITemporalAux[ReadIndex]->GpuHandleSRV);
-	TemporalDenoisingFilterPSO->SetSRV("InGIResultColorTexPrev", DiffuseGITemporal[ReadIndex]->GpuHandleSRV);
-	TemporalDenoisingFilterPSO->SetSRV("VelocityTex", VelocityBuffer->GpuHandleSRV);
-	TemporalDenoisingFilterPSO->SetSRV("InSpecularGITex", SpecularGIRaw->GpuHandleSRV);
-	TemporalDenoisingFilterPSO->SetSRV("InSpecularGITexPrev", SpecularGITemporal[ReadIndex]->GpuHandleSRV);
-	TemporalDenoisingFilterPSO->SetSRV("RougnessMetalicTex", RoughnessMetalicBuffer->GpuHandleSRV);
-	TemporalDenoisingFilterPSO->SetSRV("PrevDepthTex", UnjitteredDepthBuffers[1- ColorBufferWriteIndex]->GpuHandleSRV);
-	TemporalDenoisingFilterPSO->SetSRV("PrevNormalTex", NormalBuffers[1 - ColorBufferWriteIndex]->GpuHandleSRV);
-
-
-	TemporalDenoisingFilterPSO->SetUAV("OutGIResultSH", DiffuseGITemporalAux[WriteIndex]->GpuHandleUAV);
-	TemporalDenoisingFilterPSO->SetUAV("OutGIResultColor", DiffuseGITemporal[WriteIndex]->GpuHandleUAV);
-	TemporalDenoisingFilterPSO->SetUAV("OutGIResultSHDS", DiffuseGISpatialAux[0]->GpuHandleUAV);
-	TemporalDenoisingFilterPSO->SetUAV("OutGIResultColorDS", DiffuseGISpatial[0]->GpuHandleUAV);
-	TemporalDenoisingFilterPSO->SetUAV("OutSpecularGI", SpecularGITemporal[WriteIndex]->GpuHandleUAV);
+	TemporalDenoisingFilterPSO->SetTextureUAV("OutGIResultSH", DiffuseGITemporalAux[WriteIndex].get());
+	TemporalDenoisingFilterPSO->SetTextureUAV("OutGIResultColor", DiffuseGITemporal[WriteIndex].get());
+	TemporalDenoisingFilterPSO->SetTextureUAV("OutGIResultSHDS", DiffuseGISpatialAux[0].get());
+	TemporalDenoisingFilterPSO->SetTextureUAV("OutGIResultColorDS", DiffuseGISpatial[0].get());
+	TemporalDenoisingFilterPSO->SetTextureUAV("OutSpecularGI", SpecularGITemporal[WriteIndex].get());
+	TemporalDenoisingFilterPSO->SetTextureUAV("OutMoments", SpecularGIMoments[WriteIndex].get());
 	//TemporalDenoisingFilterPSO->SetUAV("OutSpecularGIDS", SpecularGISpatial[0]->GpuHandleUAV, renderBackend->GetGraphicsCommandList());
 
 	TemporalDenoisingFilterPSO->SetSampler("BilinearClamp", samplerBilinearWrap.get());
 	TemporalFilterCB.HistoryValid = bTemporalDenoiserHistoryValid ? 1u : 0u;
 
 	TemporalDenoisingFilterPSO->SetCBVValue("TemporalFilterConstant", &TemporalFilterCB);
+	TemporalDenoisingFilterPSO->Apply();
+	AppendVulkanRuntimeTrace(L"[TemporalDenoisingPass] after Apply");
 
 	renderBackend->Dispatch((GetRenderWidth() + 14) / 15, (GetRenderHeight() + 14) / 15, 1);
+	AppendVulkanRuntimeTrace(L"[TemporalDenoisingPass] after Dispatch");
 
 	renderBackend->TransitionTexture(DiffuseGISpatialAux[0].get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
 	renderBackend->TransitionTexture(DiffuseGISpatial[0].get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
 	renderBackend->TransitionTexture(DiffuseGITemporalAux[WriteIndex].get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
 	renderBackend->TransitionTexture(DiffuseGITemporal[WriteIndex].get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
 	renderBackend->TransitionTexture(SpecularGITemporal[WriteIndex].get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
+	renderBackend->TransitionTexture(SpecularGIMoments[WriteIndex].get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
 	bTemporalDenoiserHistoryValid = true;
 	IndirectAccumulatedFrames = std::min(IndirectAccumulatedFrames + 1u, 1024u);
+	AppendVulkanRuntimeTrace(L"[TemporalDenoisingPass] end");
 }
 
 
@@ -4573,7 +5653,6 @@ void AddMeshesToBLAS(vector<shared_ptr<RTAS>>& vecBLAS, shared_ptr<Scene> scene)
 	for (auto& mesh : scene->meshes)
 	{
 		shared_ptr<RTAS> blas = mesh->CreateBLAS();
-		blas->mesh = mesh;
 		if (blas == nullptr)
 		{
 			continue;
@@ -4592,27 +5671,55 @@ void Corona::RecompileShaders()
 	bResetTemporalStateNextUpdate = true;
 
 	InitRTPSO();
+	InitPathTracingPass();
 	InitSpatialDenoisingPass();
 	InitTemporalDenoisingPass();
 	InitGBufferPass();
 	InitToneMapPass();
-	InitDebugPass();
 	InitLightingPass();
 	InitTemporalAAPass();
-	InitBloomPass();
+	if (!renderBackend || renderBackend->GetAPI() == ERenderBackendAPI::D3D12)
+	{
+		InitDebugPass();
+		InitBloomPass();
+	}
 	//InitGenMipSpecularGIPass();
 }
 
 void Corona::UpdateInstancePropertyBuffer()
 {
+	if (renderBackend && renderBackend->GetAPI() == ERenderBackendAPI::Vulkan)
+	{
+		std::vector<InstanceProperty> instanceProperties(500u);
+		const size_t instanceCount = (std::min)(instanceProperties.size(), vecBLAS.size());
+		for (size_t i = 0; i < instanceCount; ++i)
+		{
+			instanceProperties[i].WorldMatrix = glm::transpose(vecBLAS[i]->MeshPtr->transform);
+			instanceProperties[i].VertexOffset = vecBLAS[i]->MeshPtr->RtVertexOffset;
+			instanceProperties[i].IndexOffset = vecBLAS[i]->MeshPtr->RtIndexOffset;
+		}
+
+		InstancePropertyBuffer = renderBackend->CreateBuffer({
+			static_cast<uint32_t>(instanceProperties.size()),
+			sizeof(InstanceProperty),
+			EInitialResourceState::ShaderRead,
+			false,
+			instanceProperties.data()
+		});
+		InstancePropertyBuffer->MakeByteAddressBufferSRV();
+		NAME_D3D12_OBJECT(InstancePropertyBuffer->resource);
+		return;
+	}
+
 	// Map and update instance properties
 	uint8_t* pData;
 	InstancePropertyBuffer->resource->Map(0, nullptr, (void**)&pData);
 
 	for (auto& m : vecBLAS)
 	{
-		glm::mat4x4 mat = glm::transpose(m->mesh->transform);
-		memcpy(pData, &mat, sizeof(glm::mat4x4));
+		InstanceProperty instanceProperty = {};
+		instanceProperty.WorldMatrix = glm::transpose(m->MeshPtr->transform);
+		memcpy(pData, &instanceProperty, sizeof(InstanceProperty));
 		pData += sizeof(InstanceProperty);
 	}
 
@@ -4629,6 +5736,9 @@ void Corona::RebuildAccelerationStructures()
 	
 	// Update instance property buffer
 	UpdateInstancePropertyBuffer();
+
+	if (PSO_PATH_TRACING)
+		InitPathTracingPass();
 }
 
 void Corona::AddScene(shared_ptr<Scene> scene)
@@ -4657,12 +5767,16 @@ void Corona::InitRaytracingData()
 
 void Corona::InitRTPSO()
 {
+	const uint32_t maxSupportedHybridStage = renderBackend ? renderBackend->GetMaxSupportedHybridStage() : 7u;
+	const bool bInitReflectionRT = !renderBackend || renderBackend->GetAPI() != ERenderBackendAPI::Vulkan || maxSupportedHybridStage >= 3u;
+	const bool bInitGIRT = !renderBackend || renderBackend->GetAPI() != ERenderBackendAPI::Vulkan || maxSupportedHybridStage >= 4u;
+
 	// create shadow rtpso
 	{
-		shared_ptr<RTPipelineStateObject> TEMP_PSO_RT_SHADOW = shared_ptr<RTPipelineStateObject>(new RTPipelineStateObject);
-		TEMP_PSO_RT_SHADOW->Owner = dx12_rhi;
-
-		TEMP_PSO_RT_SHADOW->NumInstance = vecBLAS.size();// scene->meshes.size(); // important for cbv allocation & shadertable size.
+		shared_ptr<RTPipelineStateObject> TEMP_PSO_RT_SHADOW = renderBackend->CreateRTPipelineStateObject();
+		if (!TEMP_PSO_RT_SHADOW)
+			return;
+		TEMP_PSO_RT_SHADOW->SetNumInstances(static_cast<uint32_t>(vecBLAS.size()));// scene->meshes.size(); // important for cbv allocation & shadertable size.
 
 		// new interface
 		TEMP_PSO_RT_SHADOW->AddHitGroup("HitGroup", "", "anyhit");
@@ -4674,7 +5788,7 @@ void Corona::InitRTPSO()
 		TEMP_PSO_RT_SHADOW->BindSRV("global", "WorldNormalTex", 2);
 
 		TEMP_PSO_RT_SHADOW->BindCBV("global", "ViewParameter", 0, sizeof(RTShadowViewParamCB), 1);
-		TEMP_PSO_RT_SHADOW->BindSampler("global", "samplerWrap", 0);
+		TEMP_PSO_RT_SHADOW->BindSampler("global", "sampleWrap", 0);
 
 
 
@@ -4685,10 +5799,7 @@ void Corona::InitRTPSO()
 		TEMP_PSO_RT_SHADOW->BindSRV("anyhit", "indices", 4);
 		TEMP_PSO_RT_SHADOW->BindSRV("anyhit", "AlbedoTex", 5);
 		TEMP_PSO_RT_SHADOW->BindSRV("anyhit", "InstanceProperty", 6);
-
-		TEMP_PSO_RT_SHADOW->MaxRecursion = 1;
-		TEMP_PSO_RT_SHADOW->MaxAttributeSizeInBytes = sizeof(float) * 2;
-		TEMP_PSO_RT_SHADOW->MaxPayloadSizeInBytes = sizeof(float) * 2;
+		TEMP_PSO_RT_SHADOW->Configure(1, sizeof(float) * 2, sizeof(float) * 2);
 
 		bool bSuccess = TEMP_PSO_RT_SHADOW->InitRS("Shaders\\RaytracedShadow.hlsl");
 		if (bSuccess)
@@ -4698,10 +5809,12 @@ void Corona::InitRTPSO()
 	}
 
 	// create reflection rtpso
+	if (bInitReflectionRT)
 	{
-		shared_ptr<RTPipelineStateObject> TEMP_PSO_RT_REFLECTION = shared_ptr<RTPipelineStateObject>(new RTPipelineStateObject);
-		TEMP_PSO_RT_REFLECTION->Owner = dx12_rhi;
-		TEMP_PSO_RT_REFLECTION->NumInstance = vecBLAS.size();// scene->meshes.size();
+		shared_ptr<RTPipelineStateObject> TEMP_PSO_RT_REFLECTION = renderBackend->CreateRTPipelineStateObject();
+		if (!TEMP_PSO_RT_REFLECTION)
+			return;
+		TEMP_PSO_RT_REFLECTION->SetNumInstances(static_cast<uint32_t>(vecBLAS.size()));// scene->meshes.size();
 
 		TEMP_PSO_RT_REFLECTION->AddHitGroup("HitGroup", "chs", "");
 		//TEMP_PSO_RT_REFLECTION->AddHitGroup("ShadowHitGroup", "chsShadow", "");
@@ -4719,7 +5832,7 @@ void Corona::InitRTPSO()
 
 
 		TEMP_PSO_RT_REFLECTION->BindCBV("global", "ViewParameter", 0, sizeof(RTReflectionViewParam), 1);
-		TEMP_PSO_RT_REFLECTION->BindSampler("global", "samplerWrap", 0);
+		TEMP_PSO_RT_REFLECTION->BindSampler("global", "sampleWrap", 0);
 
 		TEMP_PSO_RT_REFLECTION->AddShader("miss", RTPipelineStateObject::MISS);
 		TEMP_PSO_RT_REFLECTION->AddShader("missShadow", RTPipelineStateObject::MISS);
@@ -4730,11 +5843,7 @@ void Corona::InitRTPSO()
 		TEMP_PSO_RT_REFLECTION->BindSRV("chs", "indices", 4);
 		TEMP_PSO_RT_REFLECTION->BindSRV("chs", "AlbedoTex", 5);
 		TEMP_PSO_RT_REFLECTION->BindSRV("chs", "InstanceProperty", 9);
-
-		TEMP_PSO_RT_REFLECTION->MaxRecursion = 1;
-		TEMP_PSO_RT_REFLECTION->MaxAttributeSizeInBytes = sizeof(float) * 2;
-		TEMP_PSO_RT_REFLECTION->MaxPayloadSizeInBytes = sizeof(float) * 13;
-
+		TEMP_PSO_RT_REFLECTION->Configure(1, sizeof(float) * 13, sizeof(float) * 2);
 
 		bool bSuccess = TEMP_PSO_RT_REFLECTION->InitRS("Shaders\\RaytracedReflection.hlsl");
 
@@ -4744,10 +5853,12 @@ void Corona::InitRTPSO()
 		}
 	}
 	// gi rtpso
+	if (bInitGIRT)
 	{
-		shared_ptr<RTPipelineStateObject> TEMP_PSO_RT_GI = shared_ptr<RTPipelineStateObject>(new RTPipelineStateObject);
-		TEMP_PSO_RT_GI->Owner = dx12_rhi;
-		TEMP_PSO_RT_GI->NumInstance = vecBLAS.size();// scene->meshes.size();
+		shared_ptr<RTPipelineStateObject> TEMP_PSO_RT_GI = renderBackend->CreateRTPipelineStateObject();
+		if (!TEMP_PSO_RT_GI)
+			return;
+		TEMP_PSO_RT_GI->SetNumInstances(static_cast<uint32_t>(vecBLAS.size()));// scene->meshes.size();
 
 		TEMP_PSO_RT_GI->AddHitGroup("HitGroup", "chs", "");
 
@@ -4760,7 +5871,7 @@ void Corona::InitRTPSO()
 		TEMP_PSO_RT_GI->BindSRV("global", "DepthTex", 1);
 		TEMP_PSO_RT_GI->BindSRV("global", "WorldNormalTex", 2);
 		TEMP_PSO_RT_GI->BindCBV("global", "ViewParameter", 0, sizeof(RTGIViewParam), 1);
-		TEMP_PSO_RT_GI->BindSampler("global", "samplerWrap", 0);
+		TEMP_PSO_RT_GI->BindSampler("global", "sampleWrap", 0);
 		TEMP_PSO_RT_GI->BindSRV("global", "BlueNoiseTex", 7);
 
 		TEMP_PSO_RT_GI->AddShader("miss", RTPipelineStateObject::MISS);
@@ -4772,11 +5883,7 @@ void Corona::InitRTPSO()
 		TEMP_PSO_RT_GI->BindSRV("chs", "indices", 4);
 		TEMP_PSO_RT_GI->BindSRV("chs", "AlbedoTex", 5);
 		TEMP_PSO_RT_GI->BindSRV("chs", "InstanceProperty", 6);
-
-		TEMP_PSO_RT_GI->MaxRecursion = 1;
-		TEMP_PSO_RT_GI->MaxAttributeSizeInBytes = sizeof(float) * 2;
-
-		TEMP_PSO_RT_GI->MaxPayloadSizeInBytes = sizeof(float) * 12;
+		TEMP_PSO_RT_GI->Configure(1, sizeof(float) * 12, sizeof(float) * 2);
 
 		bool bSuccess = TEMP_PSO_RT_GI->InitRS("Shaders\\RaytracedGI.hlsl");
 
@@ -4789,9 +5896,10 @@ void Corona::InitRTPSO()
 
 void Corona::InitPathTracingPass()
 {
-	shared_ptr<RTPipelineStateObject> TEMP_PSO_PATH_TRACING = shared_ptr<RTPipelineStateObject>(new RTPipelineStateObject);
-	TEMP_PSO_PATH_TRACING->Owner = dx12_rhi;
-	TEMP_PSO_PATH_TRACING->NumInstance = vecBLAS.size();
+	shared_ptr<RTPipelineStateObject> TEMP_PSO_PATH_TRACING = renderBackend->CreateRTPipelineStateObject();
+	if (!TEMP_PSO_PATH_TRACING)
+		return;
+	TEMP_PSO_PATH_TRACING->SetNumInstances(static_cast<uint32_t>(vecBLAS.size()));
 
 	TEMP_PSO_PATH_TRACING->AddHitGroup("HitGroup", "PathTracingClosestHit", "PathTracingAnyHit");
 
@@ -4800,7 +5908,7 @@ void Corona::InitPathTracingPass()
 	TEMP_PSO_PATH_TRACING->BindUAV("global", "OutputColor", 0);
 	TEMP_PSO_PATH_TRACING->BindSRV("global", "gRtScene", 0);
 	TEMP_PSO_PATH_TRACING->BindCBV("global", "ViewParameter", 0, sizeof(PathTracingViewParam), 1);
-	TEMP_PSO_PATH_TRACING->BindSampler("global", "samplerWrap", 0);
+	TEMP_PSO_PATH_TRACING->BindSampler("global", "sampleWrap", 0);
 	TEMP_PSO_PATH_TRACING->BindSRV("global", "BlueNoiseTex", 4);
 
 	TEMP_PSO_PATH_TRACING->AddShader("PathTracingMiss", RTPipelineStateObject::MISS);
@@ -4815,7 +5923,7 @@ void Corona::InitPathTracingPass()
 	TEMP_PSO_PATH_TRACING->BindSRV("PathTracingClosestHit", "RoughnessTex", 7);
 	TEMP_PSO_PATH_TRACING->BindSRV("PathTracingClosestHit", "MetallicTex", 8);
 
-	TEMP_PSO_PATH_TRACING->AddShader("PathTracingAnyHit", RTPipelineStateObject::HIT);
+	TEMP_PSO_PATH_TRACING->AddShader("PathTracingAnyHit", RTPipelineStateObject::ANYHIT);
 	TEMP_PSO_PATH_TRACING->BindSRV("PathTracingAnyHit", "vertices", 1);
 	TEMP_PSO_PATH_TRACING->BindSRV("PathTracingAnyHit", "indices", 2);
 	TEMP_PSO_PATH_TRACING->BindSRV("PathTracingAnyHit", "InstanceProperty", 3);
@@ -4823,11 +5931,7 @@ void Corona::InitPathTracingPass()
 	TEMP_PSO_PATH_TRACING->BindSRV("PathTracingAnyHit", "NormalTex", 6);
 	TEMP_PSO_PATH_TRACING->BindSRV("PathTracingAnyHit", "RoughnessTex", 7);
 	TEMP_PSO_PATH_TRACING->BindSRV("PathTracingAnyHit", "MetallicTex", 8);
-
-
-	TEMP_PSO_PATH_TRACING->MaxRecursion = 8;  // Support multiple bounces
-	TEMP_PSO_PATH_TRACING->MaxAttributeSizeInBytes = sizeof(float) * 2;
-	TEMP_PSO_PATH_TRACING->MaxPayloadSizeInBytes = 140; // PathTracingPayload: 3*float3 + 3*float3 + 1*float3 + 1*float3 + 1*float3 + 1*float2 + 3*uint + 2*float + 1*bool = 132+ bytes
+	TEMP_PSO_PATH_TRACING->Configure(8, 192, sizeof(float) * 2);
 
 	bool bSuccess = TEMP_PSO_PATH_TRACING->InitRS("Shaders\\PathTracing.hlsl");
 
@@ -4854,21 +5958,35 @@ vector<UINT64> ResourceInt64array(ComPtr<ID3D12Resource> resource, int size)
 }
 void Corona::RaytraceShadowPass()
 {
+	if (!TLAS || !PSO_RT_SHADOW)
+		return;
 #if USE_AFTERMATH
 	renderBackend->EmitGpuCrashMarker("RaytraceShadowPass");
 #endif
-	PIXScopedEvent(renderBackend->GetGraphicsCommandList(), PIX_COLOR(rand()%255, rand() % 255, rand() % 255), "RaytraceShadowPass");
+	if (renderBackend && renderBackend->GetAPI() == ERenderBackendAPI::D3D12)
+	{
+		PIXScopedEvent(renderBackend->GetGraphicsCommandList(), PIX_COLOR(rand()%255, rand() % 255, rand() % 255), "RaytraceShadowPass");
+	}
 
 	renderBackend->TransitionTexture(ShadowBuffer.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
 
-	PSO_RT_SHADOW->NumInstance = vecBLAS.size();
+	PSO_RT_SHADOW->SetNumInstances(static_cast<uint32_t>(vecBLAS.size()));
 
 	PSO_RT_SHADOW->BeginShaderTable();
+
+	const bool bUseVulkanRtSceneGeometry =
+		renderBackend &&
+		renderBackend->GetAPI() == ERenderBackendAPI::Vulkan &&
+		Sponza &&
+		Sponza->RtSceneVertexBuffer &&
+		Sponza->RtSceneIndexBuffer;
 
 	int i = 0;
 	for (auto&as : vecBLAS)
 	{
-		auto& mesh = as->mesh;
+		Mesh* mesh = as->MeshPtr;
+		VertexBuffer* rtVertexBuffer = bUseVulkanRtSceneGeometry ? Sponza->RtSceneVertexBuffer.get() : mesh->Vb.get();
+		IndexBuffer* rtIndexBuffer = bUseVulkanRtSceneGeometry ? Sponza->RtSceneIndexBuffer.get() : mesh->Ib.get();
 		Texture* diffuseTex = mesh->Draws[0].mat->Diffuse.get();
 
 		if (!diffuseTex)
@@ -4877,20 +5995,20 @@ void Corona::RaytraceShadowPass()
 		PSO_RT_SHADOW->ResetHitProgram(i);
 		PSO_RT_SHADOW->StartHitProgram("HitGroup", i);
 
-		PSO_RT_SHADOW->AddDescriptor2HitProgram("HitGroup", mesh->Vb->GpuHandleSRV, i);
-		PSO_RT_SHADOW->AddDescriptor2HitProgram("HitGroup", mesh->Ib->GpuHandleSRV, i);
-		PSO_RT_SHADOW->AddDescriptor2HitProgram("HitGroup", diffuseTex->GpuHandleSRV, i);
-		PSO_RT_SHADOW->AddDescriptor2HitProgram("HitGroup", InstancePropertyBuffer->GpuHandleSRV, i);
+		PSO_RT_SHADOW->AddVertexBufferSRVToHitProgram("HitGroup", rtVertexBuffer, i);
+		PSO_RT_SHADOW->AddIndexBufferSRVToHitProgram("HitGroup", rtIndexBuffer, i);
+		PSO_RT_SHADOW->AddTextureSRVToHitProgram("HitGroup", diffuseTex, i);
+		PSO_RT_SHADOW->AddBufferSRVToHitProgram("HitGroup", InstancePropertyBuffer.get(), i);
 
 		i++;
 	}
 
-	PSO_RT_SHADOW->SetUAV("global", "ShadowResult", ShadowBuffer->GpuHandleUAV);
-	PSO_RT_SHADOW->SetSRV("global", "gRtScene", TLAS->GPUHandle);
-	PSO_RT_SHADOW->SetSRV("global", "DepthTex", DepthBuffer->GpuHandleSRV);
-	PSO_RT_SHADOW->SetSRV("global", "WorldNormalTex", GeomNormalBuffer->GpuHandleSRV);
+	PSO_RT_SHADOW->SetTextureUAV("global", "ShadowResult", ShadowBuffer.get());
+	PSO_RT_SHADOW->SetAccelerationStructure("global", "gRtScene", TLAS);
+	PSO_RT_SHADOW->SetTextureSRV("global", "DepthTex", DepthBuffer.get());
+	PSO_RT_SHADOW->SetTextureSRV("global", "WorldNormalTex", GeomNormalBuffer.get());
 	PSO_RT_SHADOW->SetCBVValue("global", "ViewParameter", &RTShadowViewParam);
-	PSO_RT_SHADOW->SetSampler("global", "samplerWrap", samplerWrap.get());
+		PSO_RT_SHADOW->SetSampler("global", "sampleWrap", samplerWrap.get());
 
 
 	PSO_RT_SHADOW->EndShaderTable();
@@ -4907,14 +6025,14 @@ void Corona::ShadowDenoisePass()
 
 	renderBackend->TransitionTexture(ShadowDenoisedBuffer.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
 
-	ShadowDenoisePSO->Apply();
-	ShadowDenoisePSO->SetSRV("ShadowTex", ShadowBuffer->GpuHandleSRV);
-	ShadowDenoisePSO->SetSRV("DepthTex", DepthBuffer->GpuHandleSRV);
-	ShadowDenoisePSO->SetSRV("GeoNormalTex", GeomNormalBuffer->GpuHandleSRV);
+	ShadowDenoisePSO->SetTextureSRV("ShadowTex", ShadowBuffer.get());
+	ShadowDenoisePSO->SetTextureSRV("DepthTex", DepthBuffer.get());
+	ShadowDenoisePSO->SetTextureSRV("GeoNormalTex", GeomNormalBuffer.get());
 	ShadowDenoiseParam.ProjectionParams = RTShadowViewParam.ProjectionParams;
 	ShadowDenoiseParam.RTSize = glm::vec2(GetRenderWidth(), GetRenderHeight());
 	ShadowDenoisePSO->SetCBVValue("ShadowDenoiseCB", &ShadowDenoiseParam);
-	ShadowDenoisePSO->SetUAV("OutShadow", ShadowDenoisedBuffer->GpuHandleUAV);
+	ShadowDenoisePSO->SetTextureUAV("OutShadow", ShadowDenoisedBuffer.get());
+	ShadowDenoisePSO->Apply();
 	renderBackend->Dispatch((GetRenderWidth() + 7) / 8, (GetRenderHeight() + 7) / 8, 1);
 
 	renderBackend->TransitionTexture(ShadowDenoisedBuffer.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
@@ -4922,35 +6040,54 @@ void Corona::ShadowDenoisePass()
 
 void Corona::RaytraceReflectionPass()
 {
+	if (!TLAS || !PSO_RT_REFLECTION)
+		return;
+	AppendVulkanRuntimeTrace(L"[RaytraceReflectionPass] begin");
 #if USE_AFTERMATH
 	renderBackend->EmitGpuCrashMarker("RaytraceReflectionPass");
 #endif
-	PIXScopedEvent(renderBackend->GetGraphicsCommandList(), PIX_COLOR(rand() % 255, rand() % 255, rand() % 255), "RaytraceReflectionPass");
+	if (renderBackend && renderBackend->GetAPI() == ERenderBackendAPI::D3D12)
+	{
+		PIXScopedEvent(renderBackend->GetGraphicsCommandList(), PIX_COLOR(rand() % 255, rand() % 255, rand() % 255), "RaytraceReflectionPass");
+	}
 
 	renderBackend->TransitionTexture(SpecularGIRaw.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
+	AppendVulkanRuntimeTrace(L"[RaytraceReflectionPass] after transition to UAV");
 	const FLOAT clearReflection[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
 	renderBackend->ClearTextureUAVFloat(SpecularGIRaw.get(), clearReflection);
+	AppendVulkanRuntimeTrace(L"[RaytraceReflectionPass] after clear");
 
-	PSO_RT_REFLECTION->NumInstance = vecBLAS.size();
+	PSO_RT_REFLECTION->SetNumInstances(static_cast<uint32_t>(vecBLAS.size()));
 	PSO_RT_REFLECTION->BeginShaderTable();
+	AppendVulkanRuntimeTrace(L"[RaytraceReflectionPass] after BeginShaderTable");
 
-	PSO_RT_REFLECTION->SetUAV("global", "ReflectionResult", SpecularGIRaw->GpuHandleUAV);
-	PSO_RT_REFLECTION->SetSRV("global", "gRtScene", TLAS->GPUHandle);
-	PSO_RT_REFLECTION->SetSRV("global", "DepthTex", UnjitteredDepthBuffers[ColorBufferWriteIndex]->GpuHandleSRV);
-	PSO_RT_REFLECTION->SetSRV("global", "GeoNormalTex", GeomNormalBuffer->GpuHandleSRV);
-	PSO_RT_REFLECTION->SetSRV("global", "RougnessMetallicTex", RoughnessMetalicBuffer->GpuHandleSRV);
-	PSO_RT_REFLECTION->SetSRV("global", "BlueNoiseTex", BlueNoiseTex->GpuHandleSRV);
-	PSO_RT_REFLECTION->SetSRV("global", "WorldNormalTex", NormalBuffers[ColorBufferWriteIndex]->GpuHandleSRV);
+	PSO_RT_REFLECTION->SetTextureUAV("global", "ReflectionResult", SpecularGIRaw.get());
+	PSO_RT_REFLECTION->SetAccelerationStructure("global", "gRtScene", TLAS);
+	PSO_RT_REFLECTION->SetTextureSRV("global", "DepthTex", UnjitteredDepthBuffers[ColorBufferWriteIndex].get());
+	PSO_RT_REFLECTION->SetTextureSRV("global", "GeoNormalTex", GeomNormalBuffer.get());
+	PSO_RT_REFLECTION->SetTextureSRV("global", "RougnessMetallicTex", RoughnessMetalicBuffer.get());
+	PSO_RT_REFLECTION->SetTextureSRV("global", "BlueNoiseTex", BlueNoiseTex.get());
+	PSO_RT_REFLECTION->SetTextureSRV("global", "WorldNormalTex", NormalBuffers[ColorBufferWriteIndex].get());
 
 	RTReflectionViewParam.ViewSpreadAngle = glm::tan(Fov * 0.5) / (0.5f * GetRenderHeight());
 	PSO_RT_REFLECTION->SetCBVValue("global", "ViewParameter", &RTReflectionViewParam);
-	PSO_RT_REFLECTION->SetSampler("global", "samplerWrap", samplerWrap.get());
+	PSO_RT_REFLECTION->SetSampler("global", "sampleWrap", samplerWrap.get());
+	AppendVulkanRuntimeTrace(L"[RaytraceReflectionPass] after global bindings");
 
+
+	const bool bUseVulkanRtSceneGeometry =
+		renderBackend &&
+		renderBackend->GetAPI() == ERenderBackendAPI::Vulkan &&
+		Sponza &&
+		Sponza->RtSceneVertexBuffer &&
+		Sponza->RtSceneIndexBuffer;
 
 	int i = 0;
 	for(auto&as : vecBLAS)
 	{
-		auto& mesh = as->mesh;
+		Mesh* mesh = as->MeshPtr;
+		VertexBuffer* rtVertexBuffer = bUseVulkanRtSceneGeometry ? Sponza->RtSceneVertexBuffer.get() : mesh->Vb.get();
+		IndexBuffer* rtIndexBuffer = bUseVulkanRtSceneGeometry ? Sponza->RtSceneIndexBuffer.get() : mesh->Ib.get();
 		Texture* diffuseTex = mesh->Draws[0].mat->Diffuse.get();
 
 		if (!diffuseTex)
@@ -4958,10 +6095,10 @@ void Corona::RaytraceReflectionPass()
 		PSO_RT_REFLECTION->ResetHitProgram(i);
 
 		PSO_RT_REFLECTION->StartHitProgram("HitGroup", i);
-		PSO_RT_REFLECTION->AddDescriptor2HitProgram("HitGroup", mesh->Vb->GpuHandleSRV, i);
-		PSO_RT_REFLECTION->AddDescriptor2HitProgram("HitGroup", mesh->Ib->GpuHandleSRV, i);
-		PSO_RT_REFLECTION->AddDescriptor2HitProgram("HitGroup", diffuseTex->GpuHandleSRV, i);
-		PSO_RT_REFLECTION->AddDescriptor2HitProgram("HitGroup", InstancePropertyBuffer->GpuHandleSRV, i);
+		PSO_RT_REFLECTION->AddVertexBufferSRVToHitProgram("HitGroup", rtVertexBuffer, i);
+		PSO_RT_REFLECTION->AddIndexBufferSRVToHitProgram("HitGroup", rtIndexBuffer, i);
+		PSO_RT_REFLECTION->AddTextureSRVToHitProgram("HitGroup", diffuseTex, i);
+		PSO_RT_REFLECTION->AddBufferSRVToHitProgram("HitGroup", InstancePropertyBuffer.get(), i);
 
 		//PSO_RT_REFLECTION->StartHitProgram("ShadowHitGroup", i);
 		/*
@@ -4971,21 +6108,31 @@ void Corona::RaytraceReflectionPass()
 		PSO_RT_REFLECTION->AddDescriptor2HitProgram("ShadowHitGroup", InstancePropertyBuffer->GpuHandleSRV, i);*/
 		i++;
 	}
+	AppendVulkanRuntimeTrace(L"[RaytraceReflectionPass] after hit bindings count=" + std::to_wstring(i));
 
 	PSO_RT_REFLECTION->EndShaderTable();
+	AppendVulkanRuntimeTrace(L"[RaytraceReflectionPass] after EndShaderTable");
 
+	AppendVulkanRuntimeTrace(L"[RaytraceReflectionPass] before Apply");
 	PSO_RT_REFLECTION->Apply(GetRenderWidth(), GetRenderHeight());
+	AppendVulkanRuntimeTrace(L"[RaytraceReflectionPass] after Apply");
 
 	renderBackend->TransitionTexture(SpecularGIRaw.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
+	AppendVulkanRuntimeTrace(L"[RaytraceReflectionPass] after transition to SRV");
 	//PIXEndEvent();
 }
 
 void Corona::RaytraceGIPass()
 {
+	if (!TLAS || !PSO_RT_GI)
+		return;
 #if USE_AFTERMATH
 	renderBackend->EmitGpuCrashMarker("RaytraceGIPass");
 #endif
-	PIXScopedEvent(renderBackend->GetGraphicsCommandList(), PIX_COLOR(rand() % 255, rand() % 255, rand() % 255), "RaytraceGIPass");
+	if (renderBackend && renderBackend->GetAPI() == ERenderBackendAPI::D3D12)
+	{
+		PIXScopedEvent(renderBackend->GetGraphicsCommandList(), PIX_COLOR(rand() % 255, rand() % 255, rand() % 255), "RaytraceGIPass");
+	}
 
 	renderBackend->TransitionTexture(DiffuseGIRawAux.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
 	renderBackend->TransitionTexture(DiffuseGIRaw.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
@@ -4993,24 +6140,33 @@ void Corona::RaytraceGIPass()
 	renderBackend->ClearTextureUAVFloat(DiffuseGIRawAux.get(), clearGI);
 	renderBackend->ClearTextureUAVFloat(DiffuseGIRaw.get(), clearGI);
 
-	PSO_RT_GI->NumInstance = vecBLAS.size();
+	PSO_RT_GI->SetNumInstances(static_cast<uint32_t>(vecBLAS.size()));
 	PSO_RT_GI->BeginShaderTable();
 
-	PSO_RT_GI->SetUAV("global", "GIResultSH", DiffuseGIRawAux->GpuHandleUAV);
-	PSO_RT_GI->SetUAV("global", "GIResultColor", DiffuseGIRaw->GpuHandleUAV);
-	PSO_RT_GI->SetSRV("global", "gRtScene", TLAS->GPUHandle);
-	PSO_RT_GI->SetSRV("global", "DepthTex", UnjitteredDepthBuffers[ColorBufferWriteIndex]->GpuHandleSRV);
-	PSO_RT_GI->SetSRV("global", "WorldNormalTex", NormalBuffers[ColorBufferWriteIndex]->GpuHandleSRV);
-	PSO_RT_GI->SetSRV("global", "BlueNoiseTex", BlueNoiseTex->GpuHandleSRV);
+	PSO_RT_GI->SetTextureUAV("global", "GIResultSH", DiffuseGIRawAux.get());
+	PSO_RT_GI->SetTextureUAV("global", "GIResultColor", DiffuseGIRaw.get());
+	PSO_RT_GI->SetAccelerationStructure("global", "gRtScene", TLAS);
+	PSO_RT_GI->SetTextureSRV("global", "DepthTex", UnjitteredDepthBuffers[ColorBufferWriteIndex].get());
+	PSO_RT_GI->SetTextureSRV("global", "WorldNormalTex", NormalBuffers[ColorBufferWriteIndex].get());
+	PSO_RT_GI->SetTextureSRV("global", "BlueNoiseTex", BlueNoiseTex.get());
 	
 	RTGIViewParam.ViewSpreadAngle = glm::tan(Fov * 0.5) / (0.5f * GetRenderHeight());
 	PSO_RT_GI->SetCBVValue("global", "ViewParameter", &RTGIViewParam);
-	PSO_RT_GI->SetSampler("global", "samplerWrap", samplerWrap.get());
+	PSO_RT_GI->SetSampler("global", "sampleWrap", samplerWrap.get());
+
+	const bool bUseVulkanRtSceneGeometry =
+		renderBackend &&
+		renderBackend->GetAPI() == ERenderBackendAPI::Vulkan &&
+		Sponza &&
+		Sponza->RtSceneVertexBuffer &&
+		Sponza->RtSceneIndexBuffer;
 
 	int i = 0;
 	for(auto&as : vecBLAS)
 	{
-		auto& mesh = as->mesh;
+		Mesh* mesh = as->MeshPtr;
+		VertexBuffer* rtVertexBuffer = bUseVulkanRtSceneGeometry ? Sponza->RtSceneVertexBuffer.get() : mesh->Vb.get();
+		IndexBuffer* rtIndexBuffer = bUseVulkanRtSceneGeometry ? Sponza->RtSceneIndexBuffer.get() : mesh->Ib.get();
 		
 		Texture* diffuseTex = mesh->Draws[0].mat->Diffuse.get();
 		if (!diffuseTex)
@@ -5019,10 +6175,10 @@ void Corona::RaytraceGIPass()
 		PSO_RT_GI->ResetHitProgram(i);
 
 		PSO_RT_GI->StartHitProgram("HitGroup", i);
-		PSO_RT_GI->AddDescriptor2HitProgram("HitGroup", mesh->Vb->GpuHandleSRV, i);
-		PSO_RT_GI->AddDescriptor2HitProgram("HitGroup", mesh->Ib->GpuHandleSRV, i);
-		PSO_RT_GI->AddDescriptor2HitProgram("HitGroup", diffuseTex->GpuHandleSRV, i);
-		PSO_RT_GI->AddDescriptor2HitProgram("HitGroup", InstancePropertyBuffer->GpuHandleSRV, i);
+		PSO_RT_GI->AddVertexBufferSRVToHitProgram("HitGroup", rtVertexBuffer, i);
+		PSO_RT_GI->AddIndexBufferSRVToHitProgram("HitGroup", rtIndexBuffer, i);
+		PSO_RT_GI->AddTextureSRVToHitProgram("HitGroup", diffuseTex, i);
+		PSO_RT_GI->AddBufferSRVToHitProgram("HitGroup", InstancePropertyBuffer.get(), i);
 
 		/*PSO_RT_GI->StartHitProgram("ShadowHitGroup", i);
 		PSO_RT_GI->AddDescriptor2HitProgram("ShadowHitGroup", mesh->Vb->GpuHandleSRV, i);
@@ -5044,18 +6200,25 @@ void Corona::RaytraceGIPass()
 
 void Corona::PathTracingPass()
 {
+	if (!TLAS || !PathTracingAccumBuffer[PathTracingWriteIndex])
+		return;
 #if USE_AFTERMATH
 	renderBackend->EmitGpuCrashMarker("PathTracingPass");
 #endif
-	PIXScopedEvent(renderBackend->GetGraphicsCommandList(), PIX_COLOR(rand() % 255, rand() % 255, rand() % 255), "PathTracingPass");
-
-	// Transition output buffer to UAV
-	renderBackend->TransitionTexture(PathTracingAccumBuffer[PathTracingWriteIndex].get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
+	if (renderBackend && renderBackend->GetAPI() == ERenderBackendAPI::D3D12)
+	{
+		PIXScopedEvent(renderBackend->GetGraphicsCommandList(), PIX_COLOR(rand() % 255, rand() % 255, rand() % 255), "PathTracingPass");
+	}
 
 	if (!PSO_PATH_TRACING)
 	{
 		InitPathTracingPass();
+		if (!PSO_PATH_TRACING)
+			return;
 	}
+
+	// Transition output buffer to UAV
+	renderBackend->TransitionTexture(PathTracingAccumBuffer[PathTracingWriteIndex].get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
 
 	// Check if camera or light changed and reset accumulation
 	bool cameraChanged = false;
@@ -5093,21 +6256,30 @@ void Corona::PathTracingPass()
 		// Note: Buffer will be cleared in shader when FrameCounter == 0
 	}
 
-	PSO_PATH_TRACING->NumInstance = vecBLAS.size();
+	PSO_PATH_TRACING->SetNumInstances(static_cast<uint32_t>(vecBLAS.size()));
 	PSO_PATH_TRACING->BeginShaderTable();
 
-	PSO_PATH_TRACING->SetUAV("global", "OutputColor", PathTracingAccumBuffer[PathTracingWriteIndex]->GpuHandleUAV);
-	PSO_PATH_TRACING->SetSRV("global", "gRtScene", TLAS->GPUHandle);
-	PSO_PATH_TRACING->SetSRV("global", "BlueNoiseTex", BlueNoiseTex->GpuHandleSRV);
+	PSO_PATH_TRACING->SetTextureUAV("global", "OutputColor", PathTracingAccumBuffer[PathTracingWriteIndex].get());
+	PSO_PATH_TRACING->SetAccelerationStructure("global", "gRtScene", TLAS);
+	PSO_PATH_TRACING->SetTextureSRV("global", "BlueNoiseTex", BlueNoiseTex.get());
 	
 	// PathTracingViewParam is already updated in OnUpdate()
 	PSO_PATH_TRACING->SetCBVValue("global", "ViewParameter", &PathTracingViewParam);
-	PSO_PATH_TRACING->SetSampler("global", "samplerWrap", samplerWrap.get());
+	PSO_PATH_TRACING->SetSampler("global", "sampleWrap", samplerWrap.get());
+
+	const bool bUseVulkanRtSceneGeometry =
+		renderBackend &&
+		renderBackend->GetAPI() == ERenderBackendAPI::Vulkan &&
+		Sponza &&
+		Sponza->RtSceneVertexBuffer &&
+		Sponza->RtSceneIndexBuffer;
 
 	int i = 0;
 	for(auto& as : vecBLAS)
 	{
-		auto& mesh = as->mesh;
+		Mesh* mesh = as->MeshPtr;
+		VertexBuffer* rtVertexBuffer = bUseVulkanRtSceneGeometry ? Sponza->RtSceneVertexBuffer.get() : mesh->Vb.get();
+		IndexBuffer* rtIndexBuffer = bUseVulkanRtSceneGeometry ? Sponza->RtSceneIndexBuffer.get() : mesh->Ib.get();
 		
 		Texture* diffuseTex = mesh->Draws[0].mat->Diffuse.get();
 		if (!diffuseTex)
@@ -5128,13 +6300,13 @@ void Corona::PathTracingPass()
 		PSO_PATH_TRACING->ResetHitProgram(i);
 
 		PSO_PATH_TRACING->StartHitProgram("HitGroup", i);
-		PSO_PATH_TRACING->AddDescriptor2HitProgram("HitGroup", mesh->Vb->GpuHandleSRV, i);
-		PSO_PATH_TRACING->AddDescriptor2HitProgram("HitGroup", mesh->Ib->GpuHandleSRV, i);
-		PSO_PATH_TRACING->AddDescriptor2HitProgram("HitGroup", InstancePropertyBuffer->GpuHandleSRV, i);
-		PSO_PATH_TRACING->AddDescriptor2HitProgram("HitGroup", diffuseTex->GpuHandleSRV, i);
-		PSO_PATH_TRACING->AddDescriptor2HitProgram("HitGroup", normalTex->GpuHandleSRV, i);
-		PSO_PATH_TRACING->AddDescriptor2HitProgram("HitGroup", roughnessTex->GpuHandleSRV, i);
-		PSO_PATH_TRACING->AddDescriptor2HitProgram("HitGroup", metallicTex->GpuHandleSRV, i);
+		PSO_PATH_TRACING->AddVertexBufferSRVToHitProgram("HitGroup", rtVertexBuffer, i);
+		PSO_PATH_TRACING->AddIndexBufferSRVToHitProgram("HitGroup", rtIndexBuffer, i);
+		PSO_PATH_TRACING->AddBufferSRVToHitProgram("HitGroup", InstancePropertyBuffer.get(), i);
+		PSO_PATH_TRACING->AddTextureSRVToHitProgram("HitGroup", diffuseTex, i);
+		PSO_PATH_TRACING->AddTextureSRVToHitProgram("HitGroup", normalTex, i);
+		PSO_PATH_TRACING->AddTextureSRVToHitProgram("HitGroup", roughnessTex, i);
+		PSO_PATH_TRACING->AddTextureSRVToHitProgram("HitGroup", metallicTex, i);
 
 		i++;
 	}

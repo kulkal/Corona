@@ -42,6 +42,11 @@ struct RayPayload
     bool bHit;
 };
 
+static const uint RT_SHADOW_RAY_FLAGS =
+    RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH |
+    RAY_FLAG_SKIP_CLOSEST_HIT_SHADER |
+    RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES;
+
 float random(float2 p)
 {
     return frac(sin(dot(p, float2(12.9898, 78.233))) * 43758.5453);
@@ -64,12 +69,7 @@ float3x3 BuildBasis(float3 dir)
 
 float3 offset_ray(float3 p, float3 n)
 {
-    float origin = 1.0f / 32.0f;
-    float float_scale = 1.0f / 65536.0f;
-    float int_scale = 256.0f;
-	
-    int3 of_i = int3(int_scale * n.x, int_scale * n.y, int_scale * n.z);
-
+    return p + n * (1.0f / 256.0f);
 }
 
 [shader("raygeneration")]
@@ -137,7 +137,7 @@ void rayGen()
         RayPayload payload;
         payload.bHit = true;
         TraceRay(gRtScene,
-            RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES,
+            RT_SHADOW_RAY_FLAGS,
             0xFF, 0, 0, 0, ray, payload);
 
         visibility += payload.bHit == false ? 1.0 : 0.0;
@@ -160,8 +160,8 @@ void anyhit(inout RayPayload payload, in BuiltInTriangleIntersectionAttributes a
 {
     float3 barycentrics = float3(1.0 - attribs.barycentrics.x - attribs.barycentrics.y, attribs.barycentrics.x, attribs.barycentrics.y);
     uint triangleIndex = PrimitiveIndex();
-    Vertex vertex = GetVertexAttributes(InstanceID(), vertices, indices, InstanceProperty, triangleIndex, barycentrics);
-
+    uint instanceID = InstanceID();
+    Vertex vertex = GetVertexAttributes(instanceID, vertices, indices, InstanceProperty, triangleIndex, barycentrics);
     float opacity = AlbedoTex.SampleLevel(sampleWrap, vertex.uv, 5).w;
 
         // payload.bHit = false;

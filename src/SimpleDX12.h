@@ -2,7 +2,7 @@
 
 #include <d3d12.h>
 #include <wrl.h>
-#include <dxgi1_4.h>
+#include <dxgi1_5.h>
 #include <set>
 #include <vector>
 #include <list>
@@ -153,7 +153,31 @@ public:
 	void SetRootConstant(string, UINT value, ID3D12GraphicsCommandList* CommandList = nullptr);
 };
 
-class RTPipelineStateObject
+class D3D12ComputePipelineStateObject : public ComputePipelineStateObject
+{
+public:
+	SimpleDX12* Owner = nullptr;
+	std::shared_ptr<PipelineStateObject> PSO;
+	std::map<std::string, D3D12_GPU_DESCRIPTOR_HANDLE> PendingSRVs;
+	std::map<std::string, D3D12_GPU_DESCRIPTOR_HANDLE> PendingUAVs;
+	std::map<std::string, Sampler*> PendingSamplers;
+	std::map<std::string, std::vector<uint8_t>> PendingCBVs;
+
+	void BindSRV(const std::string& name, uint32_t baseRegister, uint32_t numDescriptors) override;
+	void BindUAV(const std::string& name, uint32_t baseRegister) override;
+	void BindCBV(const std::string& name, uint32_t baseRegister, uint32_t size) override;
+	void BindSampler(const std::string& name, uint32_t baseRegister) override;
+	bool InitCS(const std::wstring& shaderFile, const std::string& entryPoint) override;
+	void Apply() override;
+	void SetTextureSRV(const std::string& name, Texture* texture) override;
+	void SetTextureUAV(const std::string& name, Texture* texture) override;
+	void SetBufferSRV(const std::string& name, Buffer* buffer) override;
+	void SetBufferUAV(const std::string& name, Buffer* buffer) override;
+	void SetSampler(const std::string& name, Sampler* sampler) override;
+	void SetCBVValue(const std::string& name, void* pData) override;
+};
+
+class D3D12RTPipelineStateObject : public RTPipelineStateObject
 {
 public:
 	SimpleDX12* Owner = nullptr;
@@ -223,46 +247,50 @@ public:
 
 	vector<HitGroupInfo> VecHitGroup;
 public:
-
 	wstring kRayGenShader;
 	wstring kMissShader;
 	wstring kClosestHitShader;
 	wstring kHitGroup;
 
 	UINT MaxRecursion = 1;
-	UINT MaxPayloadSizeInBytes;
-	UINT MaxAttributeSizeInBytes;
+	UINT MaxPayloadSizeInBytes = 0;
+	UINT MaxAttributeSizeInBytes = 0;
 
-	uint32_t ShaderTableEntrySize;
-	UINT ShaderTableSize;
+	uint32_t ShaderTableEntrySize = 0;
+	UINT ShaderTableSize = 0;
 	ComPtr<ID3D12Resource> ShaderTable;
 
-	UINT NumInstance;
+	UINT NumInstance = 0;
 
-	void AddHitGroup(string name, string chs, string ahs);
+	void SetNumInstances(uint32_t numInstances) override;
+	void Configure(uint32_t maxRecursion, uint32_t maxPayloadSizeInBytes, uint32_t maxAttributeSizeInBytes) override;
+	void AddHitGroup(const std::string& name, const std::string& chs, const std::string& ahs) override;
+	void AddShader(const std::string& shader, RTPipelineStateObject::ShaderType shaderType) override;
+	void BindUAV(const std::string& shader, const std::string& name, uint32_t baseRegister) override;
+	void BindSRV(const std::string& shader, const std::string& name, uint32_t baseRegister) override;
+	void BindSampler(const std::string& shader, const std::string& name, uint32_t baseRegister) override;
+	void BindCBV(const std::string& shader, const std::string& name, uint32_t baseRegister, uint32_t size, uint32_t numInstance) override;
+	void BeginShaderTable() override;
+	void EndShaderTable() override;
+	void SetTextureUAV(const std::string& shader, const std::string& bindingName, Texture* texture, int instanceIndex = -1) override;
+	void SetTextureSRV(const std::string& shader, const std::string& bindingName, Texture* texture, int instanceIndex = -1) override;
+	void SetBufferSRV(const std::string& shader, const std::string& bindingName, Buffer* buffer, int instanceIndex = -1) override;
+	void SetAccelerationStructure(const std::string& shader, const std::string& bindingName, const std::shared_ptr<RTAS>& rtas, int instanceIndex = -1) override;
+	void SetSampler(const std::string& shader, const std::string& bindingName, Sampler* sampler, int instanceIndex = -1) override;
+	void SetCBVValue(const std::string& shader, const std::string& bindingName, void* pData, int instanceIndex = -1) override;
+	void ResetHitProgram(uint32_t instanceIndex) override;
+	void StartHitProgram(const std::string& hitGroup, uint32_t instanceIndex) override;
+	void AddTextureSRVToHitProgram(const std::string& hitGroup, Texture* texture, uint32_t instanceIndex) override;
+	void AddBufferSRVToHitProgram(const std::string& hitGroup, Buffer* buffer, uint32_t instanceIndex) override;
+	void AddVertexBufferSRVToHitProgram(const std::string& hitGroup, VertexBuffer* buffer, uint32_t instanceIndex) override;
+	void AddIndexBufferSRVToHitProgram(const std::string& hitGroup, IndexBuffer* buffer, uint32_t instanceIndex) override;
+	bool InitRS(const std::string& shaderFile) override;
+	void Apply(uint32_t width, uint32_t height) override;
 
-	// new binding interface
-	void AddShader(string shader, RTPipelineStateObject::ShaderType shaderType);
-	void BindUAV(string shader, string name, UINT baseRegister);
-	void BindSRV(string shader, string name, UINT baseRegister);
-	void BindSampler(string shader, string name, UINT baseRegister);
-	void BindCBV(string shader, string name, UINT baseRegister, UINT size, UINT numInstance);
-
-	void BeginShaderTable();
-	void EndShaderTable();
 	void SetGlobalBinding(CommandList* CommandList = nullptr);
-	
-	void SetUAV(string shader, string bindingName, D3D12_GPU_DESCRIPTOR_HANDLE uavHandle, INT instanceIndex = -1);
-	void SetSRV(string shader, string bindingName, D3D12_GPU_DESCRIPTOR_HANDLE srvHandle, INT instanceIndex = -1);
-	void SetSampler(string shader, string bindingName, Sampler* sampler, INT instanceIndex = -1);
-	void SetCBVValue(string shader, string bindingName, void* pData, INT instanceIndex = -1);
-
-	void ResetHitProgram(UINT instanceIndex);
-	void StartHitProgram(string HitGroup, UINT instanceIndex);
-	void AddDescriptor2HitProgram(string HitGroup, D3D12_GPU_DESCRIPTOR_HANDLE srvHandle, UINT instanceIndex);
-
-	bool InitRS(string ShaderFile);
-	void Apply(UINT width, UINT height, CommandList* CommandList = nullptr);
+	void SetUAVHandle(const std::string& shader, const std::string& bindingName, D3D12_GPU_DESCRIPTOR_HANDLE uavHandle, INT instanceIndex = -1);
+	void SetSRVHandle(const std::string& shader, const std::string& bindingName, D3D12_GPU_DESCRIPTOR_HANDLE srvHandle, INT instanceIndex = -1);
+	void AddDescriptor2HitProgram(const std::string& hitGroup, D3D12_GPU_DESCRIPTOR_HANDLE srvHandle, UINT instanceIndex);
 };
 
 class Buffer
@@ -450,13 +478,11 @@ public:
 //	~ThreadDescriptorHeapPool() {}
 //};
 
-class Mesh;
-class RTAS
+class D3D12RTAS : public RTAS
 {
 public:
-	shared_ptr<Mesh> mesh;
-	D3D12_GPU_DESCRIPTOR_HANDLE GPUHandle;
-	D3D12_CPU_DESCRIPTOR_HANDLE CPUHandle;
+	D3D12_GPU_DESCRIPTOR_HANDLE GPUHandle = {};
+	D3D12_CPU_DESCRIPTOR_HANDLE CPUHandle = {};
 
 	ComPtr<ID3D12Resource> Scratch;
 	ComPtr<ID3D12Resource> Result;
@@ -482,7 +508,7 @@ public:
 class Mesh
 {
 public:
-	SimpleDX12* Owner = nullptr;
+	IRenderBackend* Owner = nullptr;
 	struct DrawCall
 	{
 		shared_ptr<Material> mat;
@@ -501,6 +527,8 @@ public:
 	UINT NumVertices;
 
 	UINT VertexStride;
+	UINT RtVertexOffset = 0;
+	UINT RtIndexOffset = 0;
 
 	DXGI_FORMAT IndexFormat = DXGI_FORMAT_R32_UINT;
 
@@ -524,6 +552,8 @@ public:
 public:
 	vector<shared_ptr<Mesh>> meshes;
 	vector<shared_ptr<Material>> Materials;
+	shared_ptr<VertexBuffer> RtSceneVertexBuffer;
+	shared_ptr<IndexBuffer> RtSceneIndexBuffer;
 public:
 };
 
@@ -561,6 +591,7 @@ public:
 
 
 	ComPtr<IDXGISwapChain3> m_swapChain;
+	bool bTearingSupported = false;
 	D3D12_CPU_DESCRIPTOR_HANDLE CpuHandleImguiFontTex{};
 	D3D12_GPU_DESCRIPTOR_HANDLE GpuHandleImguiFontTex{};
 	ComPtr<ID3D12QueryHeap> GpuTimestampQueryHeap;
@@ -576,6 +607,7 @@ public:
 public:
 	ERenderBackendAPI GetAPI() const override { return ERenderBackendAPI::D3D12; }
 	const char* GetBackendName() const override { return "Direct3D 12"; }
+	uint32_t GetMaxSupportedHybridStage() const override { return 7; }
 	void BeginFrame() override;
 	void EndFrame() override;
 	void WaitForGpu() override { CmdQ->WaitGPU(); }
@@ -592,9 +624,13 @@ public:
 	std::shared_ptr<Texture> CreateTextureFromFile(const std::wstring& fileName, bool nonSRGB) override;
 	std::shared_ptr<Texture> WrapNativeTexture(const Microsoft::WRL::ComPtr<ID3D12Resource>& resource) override;
 	std::shared_ptr<Texture> CreateTexture3D(ETextureFormat format, ETextureUsageFlags usage, EInitialResourceState initialState, int width, int height, int depth, int mipLevels) override;
+	void UploadTexture3D(Texture* texture, const void* data, uint64_t rowPitch, uint64_t slicePitch) override;
 	std::shared_ptr<VertexBuffer> CreateVertexBuffer(uint32_t size, uint32_t stride, void* srcData) override;
 	std::shared_ptr<IndexBuffer> CreateIndexBuffer(DXGI_FORMAT format, uint32_t size, void* srcData) override;
+	std::shared_ptr<RTAS> CreateBLASForMesh(Mesh* mesh) override;
 	std::shared_ptr<RTAS> CreateTLAS(vector<shared_ptr<RTAS>>& VecBottomLevelAS) override;
+	std::shared_ptr<RTPipelineStateObject> CreateRTPipelineStateObject() override;
+	std::shared_ptr<ComputePipelineStateObject> CreateComputePipelineStateObject() override;
 	Microsoft::WRL::ComPtr<ID3DBlob> CreateShader(const std::wstring& fileName, const std::string& entryPoint, const std::string& target) override;
 	void ResetDynamicResources() override { DynamicTextures.clear(); DynamicBuffers.clear(); }
 	void CreateSwapChainForWindow(IDXGIFactory4* factory, HWND hwnd, uint32_t width, uint32_t height, DXGI_FORMAT format) override;
@@ -624,6 +660,19 @@ public:
 	ID3D12GraphicsCommandList* GetGraphicsCommandList() override { return GlobalCmdList ? GlobalCmdList->CmdList.Get() : nullptr; }
 	void TransitionTexture(Texture* texture, EResourceState stateBefore, EResourceState stateAfter) override;
 	void TransitionBuffer(Buffer* buffer, EResourceState stateBefore, EResourceState stateAfter) override;
+	Texture* GetCurrentWindowRenderTarget() override;
+	void PrepareWindowRenderTarget(Texture* renderTarget) override;
+	void FinalizeWindowRenderTarget(Texture* renderTarget) override;
+	void RequestWindowCapture(const std::wstring& outputPath) override;
+	bool ConsumeWindowCaptureResult(std::wstring* outputPath, bool* success, std::wstring* errorMessage) override;
+	std::shared_ptr<GraphicsPipelineHandle> CreateGraphicsPipeline(const GraphicsPipelineDesc& desc) override;
+	void BindGraphicsPipeline(GraphicsPipelineHandle* pipeline) override;
+	void SetGraphicsPipelineConstantData(GraphicsPipelineHandle* pipeline, uint32_t slot, const void* data, uint32_t size) override;
+	void BindGraphicsPipelineTexture(GraphicsPipelineHandle* pipeline, const std::string& bindingName, Texture* texture) override;
+	void BindGraphicsPipelineBuffer(GraphicsPipelineHandle* pipeline, const std::string& bindingName, Buffer* buffer) override;
+	void BindGraphicsPipelineSampler(GraphicsPipelineHandle* pipeline, const std::string& bindingName, Sampler* sampler) override;
+	void DrawTriangleList(VertexBuffer* vertexBuffer, uint32_t vertexCount);
+	void RenderWindowTriangleFrame(uint32_t width, uint32_t height, float timeSeconds);
 
 	shared_ptr<Texture> CreateTexture2DFromResource(ComPtr<ID3D12Resource> InResource);
 	shared_ptr<Texture> CreateTexture2D(DXGI_FORMAT format, D3D12_RESOURCE_FLAGS resFlags, D3D12_RESOURCE_STATES initResState, int width, int height, int mipLevels, std::optional<glm::vec4> clearColor = std::nullopt);
@@ -631,6 +680,13 @@ public:
 
 	shared_ptr<Sampler> CreateSampler(D3D12_SAMPLER_DESC& InSamplerDesc);
 	shared_ptr<Buffer> CreateBuffer(UINT InNumElements, UINT InElementSize, D3D12_RESOURCE_STATES initResState, bool isUAV, void* SrcData = nullptr);
+
+	std::vector<std::shared_ptr<Texture>> SwapChainRenderTargets;
+	std::wstring PendingWindowCapturePath;
+	std::wstring LastWindowCapturePath;
+	std::wstring LastWindowCaptureError;
+	bool bLastWindowCaptureResultValid = false;
+	bool bLastWindowCaptureSucceeded = false;
 
 
 	void PresentBarrier(Texture* rt);

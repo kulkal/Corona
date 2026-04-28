@@ -7,11 +7,11 @@ RWTexture2D<float4> GIResultColor : register(u1);
 RaytracingAccelerationStructure gRtScene : register(t0);
 Texture2D DepthTex : register(t1);
 Texture2D WorldNormalTex : register(t2);
+Texture3D BlueNoiseTex : register(t7);
 ByteAddressBuffer vertices : register(t3);
 ByteAddressBuffer indices : register(t4);
 Texture2D AlbedoTex : register(t5);
 ByteAddressBuffer InstanceProperty : register(t6);
-Texture3D BlueNoiseTex : register(t7);
 
 
 cbuffer ViewParameter : register(b0)
@@ -37,6 +37,9 @@ cbuffer ViewParameter : register(b0)
 SamplerState sampleWrap : register(s0);
 
 static const float INV_PI = 1.0 / PI;
+static const float MAX_HIT_DIST = 10000;
+
+#define RT_GI_SURFACE_RAY_FLAGS (RAY_FLAG_FORCE_OPAQUE | RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES)
 
 float3 EvaluateSkyColor(float3 direction)
 {
@@ -79,12 +82,7 @@ struct ShadowRayPayload
 
 float3 offset_ray(float3 p, float3 n)
 {
-    float origin = 1.0f / 32.0f;
-    float float_scale = 1.0f / 65536.0f;
-    float int_scale = 256.0f;
-	
-    int3 of_i = int3(int_scale * n.x, int_scale * n.y, int_scale * n.z);
-
+    return p + n * (1.0f / 256.0f);
 }
 
 float random(float2 co){
@@ -182,12 +180,20 @@ void rayGen
 	ray.Direction = normalize(sampleDirWorld);//reflect(ViewDir, WorldNormal);
 
 	ray.TMin = 0;
-	ray.TMax = 100000;
+    ray.TMax = MAX_HIT_DIST;
 
 	RayPayload payload;
     payload.coneWidth = 0;
     payload.spreadAngle = ViewSpreadAngle; 
-	TraceRay(gRtScene, RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES /*rayFlags*/, 0xFF, 0 /* ray index*/, 0, 0, ray, payload);
+	TraceRay(
+        gRtScene,
+        RT_GI_SURFACE_RAY_FLAGS,
+        0xFF,
+        0,
+        0,
+        0,
+        ray,
+        payload);
     if(payload.bHit == false)
     {
         // hit sky - payload.color already includes SkyIntensity from miss shader
@@ -208,11 +214,22 @@ void rayGen
         shadowRay.Direction = LightDir;
 
         shadowRay.TMin = 0;
-        shadowRay.TMax = 100000;
+        shadowRay.TMax = MAX_HIT_DIST;
 
         ShadowRayPayload shadowPayload;
         shadowPayload.bHit = true;
-        TraceRay(gRtScene, RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES /*rayFlags*/, 0xFF, 0 /* ray index*/, 0, 1, shadowRay, shadowPayload);
+        TraceRay(
+            gRtScene,
+            RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH |
+                RAY_FLAG_SKIP_CLOSEST_HIT_SHADER |
+                RAY_FLAG_FORCE_OPAQUE |
+                RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES,
+            0xFF,
+            0,
+            0,
+            1,
+            shadowRay,
+            shadowPayload);
 
         float3 Albedo = payload.color;
         SH sh_indirect = init_SH();
@@ -253,7 +270,8 @@ void chs(inout RayPayload payload, in BuiltInTriangleIntersectionAttributes attr
 {
     float3 barycentrics = float3(1.0 - attribs.barycentrics.x - attribs.barycentrics.y, attribs.barycentrics.x, attribs.barycentrics.y);
     uint triangleIndex = PrimitiveIndex();
-    Vertex vertex = GetVertexAttributes(InstanceID(), vertices, indices, InstanceProperty, triangleIndex, barycentrics);
+    uint instanceID = InstanceID();
+    Vertex vertex = GetSurfaceVertexAttributes(instanceID, vertices, indices, InstanceProperty, triangleIndex, barycentrics);
 
     payload.position = vertex.position;
     payload.normal = vertex.normal;

@@ -12,6 +12,7 @@
 #pragma once
 #define GLM_FORCE_CTOR_INIT
 #include <array>
+#include <chrono>
 #include <deque>
 #include <vector>
 
@@ -106,6 +107,7 @@ private:
 
 	static constexpr UINT32 GpuPassCount = static_cast<UINT32>(EGpuPass::Count);
 	static constexpr UINT32 GpuQueriesPerPass = 2;
+	using CpuClock = std::chrono::steady_clock;
 
 	shared_ptr<Texture> DepthBuffer;
 	shared_ptr<Texture> UnjitteredDepthBuffers[2];
@@ -165,9 +167,10 @@ private:
 		glm::vec2 RTSize;
 		glm::vec2 RougnessMetalic;
 		UINT32 bOverrideRougnessMetallic;
+		UINT32 Padding[3] = {};
 	};
 
-	shared_ptr<PipelineStateObject> GBufferPassPSO;
+	std::shared_ptr<GraphicsPipelineHandle> GBufferGraphicsPipeline;
 
 	// spatial denoising
 	struct SpatialFilterConstant
@@ -183,7 +186,7 @@ private:
 
 	SpatialFilterConstant SpatialFilterCB;
 
-	shared_ptr<PipelineStateObject> SpatialDenoisingFilterPSO;
+	shared_ptr<ComputePipelineStateObject> SpatialDenoisingFilterPSO;
 
 
 
@@ -206,7 +209,7 @@ private:
 
 	TemporalFilterConstant TemporalFilterCB;
 
-	shared_ptr<PipelineStateObject> TemporalDenoisingFilterPSO;
+	shared_ptr<ComputePipelineStateObject> TemporalDenoisingFilterPSO;
 	
 	// RT shadow
 	struct RTShadowViewParamCB
@@ -234,7 +237,7 @@ private:
 		float NormalSigma = 64.0f;
 	};
 	ShadowDenoiseCB ShadowDenoiseParam;
-	shared_ptr<PipelineStateObject> ShadowDenoisePSO;
+	shared_ptr<ComputePipelineStateObject> ShadowDenoisePSO;
 
 
 	// RT reflection
@@ -368,6 +371,7 @@ private:
 
 	UINT32 ToneMapMode = FILMIC_HABLE;
 	shared_ptr<PipelineStateObject> ToneMapPSO;
+	std::shared_ptr<GraphicsPipelineHandle> ToneMapGraphicsPipeline;
 
 	// debug pass
 	enum EDebugMode
@@ -412,6 +416,7 @@ private:
 	};
 	
 	shared_ptr<PipelineStateObject> LightingPSO;
+	std::shared_ptr<GraphicsPipelineHandle> LightingGraphicsPipeline;
 
 	// temporalAA
 	struct TemporalAAParam
@@ -467,20 +472,26 @@ private:
 	bool bAutoAADumpEnabled = true;
 	bool bAutoAADumpInitialized = false;
 	bool bAutoAADumpCompleted = false;
+	bool bHybridStageAutoDumpMode = false;
+	bool bLoggedHybridStageLimit = false;
 	bool bStartupModeConfigured = false;
 	UINT32 AutoAADumpPhase = 0;
 	UINT32 AutoAADumpFramesInPhase = 0;
 	std::wstring AutoAADumpDir;
 	EAntiAliasingMode StartupSelectedAAMode = EAntiAliasingMode::DLSS_RR;
 	ERenderingMode StartupRenderingMode = ERenderingMode::HYBRID;
+	ERenderBackendAPI StartupRenderBackendAPI = ERenderBackendAPI::D3D12;
 	bool bCommandLineAutoDumpOverrideSet = false;
 	bool bCommandLineAutoDumpEnabled = false;
 	bool bCommandLineAAOverrideSet = false;
 	EAntiAliasingMode CommandLineSelectedAAMode = EAntiAliasingMode::DLSS_RR;
 	bool bCommandLineRenderModeOverrideSet = false;
 	ERenderingMode CommandLineRenderingMode = ERenderingMode::HYBRID;
+	bool bCommandLineRenderBackendOverrideSet = false;
+	ERenderBackendAPI CommandLineRenderBackendAPI = ERenderBackendAPI::D3D12;
 
 	shared_ptr<PipelineStateObject> TemporalAAPSO;
+	std::shared_ptr<GraphicsPipelineHandle> TemporalAAGraphicsPipeline;
 	bool bTemporalAAHistoryValid = false;
 	bool bTemporalDenoiserHistoryValid = false;
 	bool bPendingTemporalHistoryClear = false;
@@ -620,6 +631,9 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	struct InstanceProperty
 	{
 		glm::mat4x4 WorldMatrix;
+		UINT32 VertexOffset = 0;
+		UINT32 IndexOffset = 0;
+		UINT32 Padding[2] = {};
 	};
 
 	std::shared_ptr<Buffer> InstancePropertyBuffer;
@@ -655,7 +669,25 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	std::array<float, GpuPassCount> GpuPassLastTimeMs = {};
 	std::array<float, GpuPassCount> GpuPassAverageTimeMs = {};
 	std::array<std::deque<float>, GpuPassCount> GpuPassHistoryMs = {};
+	bool bFramePerfLogInitialized = false;
+	UINT64 FramePerfLogTotalFrameCount = 0;
+	UINT32 FramePerfLogSampleFrameCount = 0;
+	double FramePerfLogAccumFrameMs = 0.0;
+	double FramePerfLogMinFrameMs = 1.0e30;
+	double FramePerfLogMaxFrameMs = 0.0;
+	double FramePerfLogAccumBeginFrameMs = 0.0;
+	double FramePerfLogAccumRecordMs = 0.0;
+	double FramePerfLogAccumExecuteMs = 0.0;
+	double FramePerfLogAccumEndFrameMs = 0.0;
+	std::array<float, GpuPassCount> CpuPassLastTimeMs = {};
+	std::array<double, GpuPassCount> CpuPassAccumTimeMs = {};
+	std::array<uint8_t, GpuPassCount> CpuPassActiveMask = {};
+	std::array<CpuClock::time_point, GpuPassCount> CpuPassStartTimes = {};
+	CpuClock::time_point FramePerfLogFrameStart = {};
+	CpuClock::time_point FramePerfLogLastFlush = {};
 	void RecompileShaders();
+	void BeginFramePerfLogging();
+	void FinishFramePerfLogging(double beginFrameMs, double executeMs, double endFrameMs);
 	void InitGpuTimingResources();
 	void BeginGpuTimingFrame();
 	void ResolveGpuTimingFrame();
@@ -731,6 +763,8 @@ public:
 	void InitPathTracingPass();
 
 	void PathTracingPass();
+	void ApplyHybridDefaultCamera();
+	void EnsureWindowFramebuffers();
 
 	void ToneMapPass();
 
@@ -758,6 +792,8 @@ public:
 	void InitializeAutoAADump();
 	void AdvanceAutoAADump(Texture* backbuffer);
 	void AppendAutoAADumpLog(const std::wstring& line);
+	bool IsHybridStageAutoDumpPhase() const;
+	const wchar_t* GetHybridStageAutoDumpPhaseName(uint32_t phase) const;
 	bool DumpTextureHDR(Texture* source, const std::wstring& filePath, D3D12_RESOURCE_STATES beforeState);
 	bool DumpTexturePNG(Texture* source, const std::wstring& filePath, D3D12_RESOURCE_STATES beforeState);
 #if WITH_STREAMLINE

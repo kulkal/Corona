@@ -4,10 +4,15 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <vector>
 #include <wrl/client.h>
 #include <d3d12.h>
 #include <dxgi1_4.h>
+#include "glm/mat4x4.hpp"
 #include "glm/vec4.hpp"
+#include "ComputePipelineStateObject.h"
+#include "RTAS.h"
+#include "RTPipelineStateObject.h"
 
 namespace DirectX
 {
@@ -22,11 +27,13 @@ class Buffer;
 class Sampler;
 class VertexBuffer;
 class IndexBuffer;
-class RTAS;
+class Mesh;
+class GraphicsPipelineHandle;
 
 enum class ERenderBackendAPI
 {
 	D3D12,
+	Vulkan,
 };
 
 enum class ETextureFormat
@@ -119,6 +126,57 @@ struct SamplerCreateDesc
 	uint32_t MaxAnisotropy = 1;
 };
 
+struct GraphicsVertexElementDesc
+{
+	std::string SemanticName;
+	uint32_t SemanticIndex = 0;
+	DXGI_FORMAT Format = DXGI_FORMAT_UNKNOWN;
+	uint32_t Offset = 0;
+};
+
+struct GraphicsTextureBindingDesc
+{
+	std::string Name;
+	uint32_t Slot = 0;
+};
+
+struct GraphicsBufferBindingDesc
+{
+	std::string Name;
+	uint32_t Slot = 0;
+};
+
+struct GraphicsSamplerBindingDesc
+{
+	std::string Name;
+	uint32_t Slot = 0;
+};
+
+struct GraphicsPipelineDesc
+{
+	std::wstring ShaderPath;
+	std::string VertexEntryPoint;
+	std::string PixelEntryPoint;
+	std::vector<GraphicsVertexElementDesc> VertexElements;
+	std::vector<GraphicsTextureBindingDesc> TextureBindings;
+	std::vector<GraphicsBufferBindingDesc> BufferBindings;
+	std::vector<GraphicsSamplerBindingDesc> SamplerBindings;
+	uint32_t VertexStride = 0;
+	std::vector<DXGI_FORMAT> ColorFormats = { DXGI_FORMAT_R8G8B8A8_UNORM };
+	DXGI_FORMAT DepthFormat = DXGI_FORMAT_UNKNOWN;
+	bool bDepthEnable = false;
+	bool bCullBackFaces = true;
+	bool bTriangleStrip = false;
+	uint32_t ConstantBufferSize = 0;
+	uint32_t ConstantBufferBinding = 0;
+};
+
+class GraphicsPipelineHandle
+{
+public:
+	virtual ~GraphicsPipelineHandle() = default;
+};
+
 class IRenderBackend
 {
 public:
@@ -126,6 +184,7 @@ public:
 
 	virtual ERenderBackendAPI GetAPI() const = 0;
 	virtual const char* GetBackendName() const = 0;
+	virtual uint32_t GetMaxSupportedHybridStage() const = 0;
 	virtual void BeginFrame() = 0;
 	virtual void EndFrame() = 0;
 	virtual void WaitForGpu() = 0;
@@ -149,9 +208,13 @@ public:
 		int height,
 		int depth,
 		int mipLevels) = 0;
+	virtual void UploadTexture3D(Texture* texture, const void* data, uint64_t rowPitch, uint64_t slicePitch) = 0;
 	virtual std::shared_ptr<VertexBuffer> CreateVertexBuffer(uint32_t size, uint32_t stride, void* srcData) = 0;
 	virtual std::shared_ptr<IndexBuffer> CreateIndexBuffer(DXGI_FORMAT format, uint32_t size, void* srcData) = 0;
+	virtual std::shared_ptr<RTAS> CreateBLASForMesh(Mesh* mesh) = 0;
 	virtual std::shared_ptr<RTAS> CreateTLAS(std::vector<std::shared_ptr<RTAS>>& bottomLevelAS) = 0;
+	virtual std::shared_ptr<RTPipelineStateObject> CreateRTPipelineStateObject() = 0;
+	virtual std::shared_ptr<ComputePipelineStateObject> CreateComputePipelineStateObject() = 0;
 	virtual Microsoft::WRL::ComPtr<ID3DBlob> CreateShader(const std::wstring& fileName, const std::string& entryPoint, const std::string& target) = 0;
 	virtual void ResetDynamicResources() = 0;
 	virtual void CreateSwapChainForWindow(
@@ -186,6 +249,17 @@ public:
 	virtual ID3D12GraphicsCommandList* GetGraphicsCommandList() = 0;
 	virtual void TransitionTexture(Texture* texture, EResourceState stateBefore, EResourceState stateAfter) = 0;
 	virtual void TransitionBuffer(Buffer* buffer, EResourceState stateBefore, EResourceState stateAfter) = 0;
+	virtual Texture* GetCurrentWindowRenderTarget() = 0;
+	virtual void PrepareWindowRenderTarget(Texture* renderTarget) = 0;
+	virtual void FinalizeWindowRenderTarget(Texture* renderTarget) = 0;
+	virtual void RequestWindowCapture(const std::wstring& outputPath) = 0;
+	virtual bool ConsumeWindowCaptureResult(std::wstring* outputPath, bool* success, std::wstring* errorMessage) = 0;
+	virtual std::shared_ptr<GraphicsPipelineHandle> CreateGraphicsPipeline(const GraphicsPipelineDesc& desc) = 0;
+	virtual void BindGraphicsPipeline(GraphicsPipelineHandle* pipeline) = 0;
+	virtual void SetGraphicsPipelineConstantData(GraphicsPipelineHandle* pipeline, uint32_t slot, const void* data, uint32_t size) = 0;
+	virtual void BindGraphicsPipelineTexture(GraphicsPipelineHandle* pipeline, const std::string& bindingName, Texture* texture) = 0;
+	virtual void BindGraphicsPipelineBuffer(GraphicsPipelineHandle* pipeline, const std::string& bindingName, Buffer* buffer) = 0;
+	virtual void BindGraphicsPipelineSampler(GraphicsPipelineHandle* pipeline, const std::string& bindingName, Sampler* sampler) = 0;
 };
 
 std::unique_ptr<IRenderBackend> CreateRenderBackend(ERenderBackendAPI api, const Microsoft::WRL::ComPtr<ID3D12Device5>& device);
