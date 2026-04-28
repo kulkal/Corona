@@ -111,13 +111,9 @@ Final output with DLSS RR/SR:
 
 Camera-path playback comparison:
 
-DLSS RR/SR:
+Inline preview, left = DLSS RR/SR and right = TAA:
 
-[![DLSS RR/SR camera-path video](./docs/images/readme_dlss_rr_sr_current.png)](./docs/media/dlss_rr_camera_path.mp4)
-
-TAA:
-
-[![TAA camera-path video](./docs/images/readme_hybrid_final.png)](./docs/media/taa_camera_path.mp4)
+![DLSS RR/SR vs TAA camera-path preview](./docs/media/dlss_rr_vs_taa_preview.gif)
 
 These two 30fps camera-path captures make the moving-camera difference much easier to see than a still frame. The renderer is feeding both modes a very small 1spp GI signal. With TAA, stochastic diffuse GI noise remains visible during motion and tends to shimmer as the camera moves. With DLSS RR/SR, the reconstructed result stays far more stable: GI noise is strongly suppressed while Sponza edges, shadow boundaries, and material transitions remain readable. This is the practical strength of the current hybrid path: simple RT GI plus rich GBuffer context gives RR enough information to produce a clean moving image, not just a clean still frame.
 
