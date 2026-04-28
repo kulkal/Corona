@@ -109,11 +109,17 @@ Final output with DLSS RR/SR:
 
 ![DLSS RR/SR output capture](./docs/images/readme_dlss_rr_sr_current.png)
 
-Camera-path playback with DLSS RR/SR:
+Camera-path playback comparison:
+
+DLSS RR/SR:
 
 [![DLSS RR/SR camera-path video](./docs/images/readme_dlss_rr_sr_current.png)](./docs/media/dlss_rr_camera_path.mp4)
 
-The linked 30fps camera-path capture shows the same idea under motion. The renderer is still feeding DLSS RR a very small 1spp GI signal, but the reconstructed result stays stable as the camera moves: stochastic diffuse GI noise is strongly suppressed without smearing the Sponza edges, shadow boundaries, or material transitions. This is the practical strength of the current hybrid path: simple RT GI plus rich GBuffer context gives RR enough information to produce a clean moving image, not just a clean still frame.
+TAA:
+
+[![TAA camera-path video](./docs/images/readme_hybrid_final.png)](./docs/media/taa_camera_path.mp4)
+
+These two 30fps camera-path captures make the moving-camera difference much easier to see than a still frame. The renderer is feeding both modes a very small 1spp GI signal. With TAA, stochastic diffuse GI noise remains visible during motion and tends to shimmer as the camera moves. With DLSS RR/SR, the reconstructed result stays far more stable: GI noise is strongly suppressed while Sponza edges, shadow boundaries, and material transitions remain readable. This is the practical strength of the current hybrid path: simple RT GI plus rich GBuffer context gives RR enough information to produce a clean moving image, not just a clean still frame.
 
 ## Command-line Guide
 Run from the `src/` directory, or set the working directory to `src/` when launching from Visual Studio:
