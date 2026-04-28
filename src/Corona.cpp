@@ -61,7 +61,52 @@ using namespace DirectX;
 
 namespace
 {
+	constexpr double kCameraPathDumpFps = 30.0;
+	constexpr double kCameraPathRecordMinIntervalSeconds = 1.0 / 120.0;
+
 	void AppendVulkanRuntimeTrace(const std::wstring& line);
+
+	std::string WideToUtf8(const std::wstring& value)
+	{
+		if (value.empty())
+			return {};
+
+		const int valueLength = static_cast<int>(value.size());
+		const int requiredSize = WideCharToMultiByte(CP_UTF8, 0, value.data(), valueLength, nullptr, 0, nullptr, nullptr);
+		if (requiredSize <= 0)
+			return {};
+
+		std::string result(static_cast<size_t>(requiredSize), '\0');
+		WideCharToMultiByte(CP_UTF8, 0, value.data(), valueLength, result.data(), requiredSize, nullptr, nullptr);
+		return result;
+	}
+
+	std::wstring Utf8ToWide(const std::string& value)
+	{
+		if (value.empty())
+			return {};
+
+		const int valueLength = static_cast<int>(value.size());
+		const int requiredSize = MultiByteToWideChar(CP_UTF8, 0, value.data(), valueLength, nullptr, 0);
+		if (requiredSize <= 0)
+			return std::wstring(value.begin(), value.end());
+
+		std::wstring result(static_cast<size_t>(requiredSize), L'\0');
+		MultiByteToWideChar(CP_UTF8, 0, value.data(), valueLength, result.data(), requiredSize);
+		return result;
+	}
+
+	std::wstring ReadTextFilePreview(const std::filesystem::path& filePath, size_t maxChars)
+	{
+		std::ifstream file(filePath, std::ios::binary);
+		if (!file.is_open())
+			return {};
+
+		std::string text((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+		if (text.size() > maxChars)
+			text = text.substr(0, maxChars) + "\n...";
+		return Utf8ToWide(text);
+	}
 
 	uint32_t GetHybridStageAutoDumpFrameCount(uint32_t phase, bool bVulkanHybridDump, bool bLimitedHybridStageDump)
 	{
@@ -974,6 +1019,12 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 			bCommandLineAutoDumpEnabled = false;
 			continue;
 		}
+		if (arg == L"--no-imgui" || arg == L"--disable-imgui")
+		{
+			bCommandLineDisableImgui = true;
+			bShowImgui = false;
+			continue;
+		}
 
 		std::wstring aaValue = ParseValueArg(arg, L"--aa", L"-aa", i);
 		if (!aaValue.empty())
@@ -1015,7 +1066,8 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 		L", renderOverride=" + std::to_wstring(bCommandLineRenderModeOverrideSet ? 1 : 0) +
 		L", renderMode=" + std::to_wstring(static_cast<int>(CommandLineRenderingMode)) +
 		L", autoDumpOverride=" + std::to_wstring(bCommandLineAutoDumpOverrideSet ? 1 : 0) +
-		L", autoDump=" + std::to_wstring(bCommandLineAutoDumpEnabled ? 1 : 0));
+		L", autoDump=" + std::to_wstring(bCommandLineAutoDumpEnabled ? 1 : 0) +
+		L", noImgui=" + std::to_wstring(bCommandLineDisableImgui ? 1 : 0));
 }
 
 void Corona::PromptStartupModeSelection()
@@ -1643,6 +1695,664 @@ void Corona::AdvanceAutoAADump(Texture* backbuffer)
 	}
 }
 
+std::wstring Corona::BuildFinalScreenshotPath()
+{
+	SYSTEMTIME localTime{};
+	GetLocalTime(&localTime);
+
+	std::filesystem::path screenshotDir = std::filesystem::path(L"C:\\dev\\Corona\\dumps\\screenshots");
+	std::error_code ec;
+	std::filesystem::create_directories(screenshotDir, ec);
+
+	const wchar_t* backendName = L"unknown";
+	if (renderBackend)
+		backendName = renderBackend->GetAPI() == ERenderBackendAPI::Vulkan ? L"vulkan" : L"dx12";
+
+	const wchar_t* modeName = RenderingMode == ERenderingMode::PATHTRACING ? L"pathtracing" : L"hybrid";
+
+	for (UINT32 attempt = 0; attempt < 10000; ++attempt)
+	{
+		const UINT32 uniqueIndex = FinalScreenshotCounter++;
+		std::wstringstream filename;
+		filename << L"final_"
+			<< std::setfill(L'0')
+			<< std::setw(4) << localTime.wYear
+			<< std::setw(2) << localTime.wMonth
+			<< std::setw(2) << localTime.wDay
+			<< L"_"
+			<< std::setw(2) << localTime.wHour
+			<< std::setw(2) << localTime.wMinute
+			<< std::setw(2) << localTime.wSecond
+			<< L"_" << backendName
+			<< L"_" << modeName
+			<< L"_frame" << std::setw(6) << FrameCounter
+			<< L"_" << std::setw(4) << uniqueIndex
+			<< L".png";
+
+		std::filesystem::path candidate = screenshotDir / filename.str();
+		if (!std::filesystem::exists(candidate))
+			return candidate.wstring();
+	}
+
+	return (screenshotDir / L"final_capture.png").wstring();
+}
+
+void Corona::RequestFinalBackbufferScreenshot()
+{
+	if (!renderBackend || bFinalScreenshotCaptureInFlight)
+		return;
+
+	PendingFinalScreenshotPath = BuildFinalScreenshotPath();
+	renderBackend->RequestWindowCapture(PendingFinalScreenshotPath);
+	bFinalScreenshotCaptureInFlight = true;
+	bFinalScreenshotRequested = false;
+	LastFinalScreenshotStatus = L"Capturing final backbuffer without ImGui...";
+}
+
+void Corona::ConsumeFinalBackbufferScreenshotResult()
+{
+	if (!bFinalScreenshotCaptureInFlight || !renderBackend)
+		return;
+
+	std::wstring outputPath;
+	std::wstring errorMessage;
+	bool bCaptureSuccess = false;
+	if (!renderBackend->ConsumeWindowCaptureResult(&outputPath, &bCaptureSuccess, &errorMessage))
+		return;
+
+	bFinalScreenshotCaptureInFlight = false;
+	if (bCaptureSuccess)
+	{
+		LastFinalScreenshotStatus = L"Saved: " + outputPath;
+	}
+	else
+	{
+		LastFinalScreenshotStatus = L"Screenshot failed";
+		if (!errorMessage.empty())
+			LastFinalScreenshotStatus += L": " + errorMessage;
+	}
+
+	PendingFinalScreenshotPath.clear();
+}
+
+std::wstring Corona::GetCameraPathDirectory() const
+{
+	return L"C:\\dev\\Corona\\dumps\\camera_paths";
+}
+
+std::wstring Corona::GetCameraPathDumpDirectory() const
+{
+	return L"C:\\dev\\Corona\\dumps\\camera_path_frames";
+}
+
+Corona::CameraPathKeyframe Corona::CaptureCurrentCameraPathKeyframe(double timeSeconds) const
+{
+	CameraPathKeyframe keyframe;
+	keyframe.TimeSeconds = timeSeconds;
+	keyframe.Position = m_camera.m_position;
+	keyframe.Yaw = m_camera.m_yaw;
+	keyframe.Pitch = m_camera.m_pitch;
+	keyframe.Fov = Fov;
+	const float lightDirLength = glm::length(LightDir);
+	keyframe.DirectionalLightDir = lightDirLength > 0.0f ? (LightDir / lightDirLength) : glm::vec3(0.0f, 1.0f, 0.0f);
+	keyframe.DirectionalLightIntensity = LightIntensity;
+	return keyframe;
+}
+
+double Corona::GetCameraPathDurationSeconds() const
+{
+	if (CameraPathKeyframes.size() < 2)
+		return 0.0;
+	return std::max(0.0, CameraPathKeyframes.back().TimeSeconds - CameraPathKeyframes.front().TimeSeconds);
+}
+
+Corona::CameraPathKeyframe Corona::SampleCameraPath(double timeSeconds) const
+{
+	if (CameraPathKeyframes.empty())
+		return CaptureCurrentCameraPathKeyframe(0.0);
+
+	if (CameraPathKeyframes.size() == 1 || timeSeconds <= CameraPathKeyframes.front().TimeSeconds)
+		return CameraPathKeyframes.front();
+
+	if (timeSeconds >= CameraPathKeyframes.back().TimeSeconds)
+		return CameraPathKeyframes.back();
+
+	auto upper = std::lower_bound(
+		CameraPathKeyframes.begin(),
+		CameraPathKeyframes.end(),
+		timeSeconds,
+		[](const CameraPathKeyframe& keyframe, double value)
+		{
+			return keyframe.TimeSeconds < value;
+		});
+
+	if (upper == CameraPathKeyframes.begin())
+		return *upper;
+
+	const CameraPathKeyframe& b = *upper;
+	const CameraPathKeyframe& a = *(upper - 1);
+	const double span = std::max(1.0e-6, b.TimeSeconds - a.TimeSeconds);
+	const float alpha = static_cast<float>((timeSeconds - a.TimeSeconds) / span);
+
+	CameraPathKeyframe result;
+	result.TimeSeconds = timeSeconds;
+	result.Position = glm::mix(a.Position, b.Position, alpha);
+	float yawDelta = b.Yaw - a.Yaw;
+	while (yawDelta > glm::pi<float>())
+		yawDelta -= glm::two_pi<float>();
+	while (yawDelta < -glm::pi<float>())
+		yawDelta += glm::two_pi<float>();
+	result.Yaw = a.Yaw + yawDelta * alpha;
+	result.Pitch = a.Pitch + (b.Pitch - a.Pitch) * alpha;
+	result.Fov = a.Fov + (b.Fov - a.Fov) * alpha;
+	const glm::vec3 blendedLightDir = glm::mix(a.DirectionalLightDir, b.DirectionalLightDir, alpha);
+	const float blendedLightDirLength = glm::length(blendedLightDir);
+	result.DirectionalLightDir = blendedLightDirLength > 0.0f ? (blendedLightDir / blendedLightDirLength) : b.DirectionalLightDir;
+	result.DirectionalLightIntensity =
+		a.DirectionalLightIntensity + (b.DirectionalLightIntensity - a.DirectionalLightIntensity) * alpha;
+	return result;
+}
+
+void Corona::ApplyCameraPathKeyframe(const CameraPathKeyframe& keyframe)
+{
+	m_camera.m_position = keyframe.Position;
+	m_camera.m_yaw = keyframe.Yaw;
+	m_camera.m_pitch = glm::clamp(keyframe.Pitch, -glm::quarter_pi<float>(), glm::quarter_pi<float>());
+	m_camera.m_keysPressed = {};
+	m_camera.m_mouseButtonDown = false;
+	Fov = keyframe.Fov;
+	const float lightDirLength = glm::length(keyframe.DirectionalLightDir);
+	LightDir = lightDirLength > 0.0f ? (keyframe.DirectionalLightDir / lightDirLength) : LightDir;
+	LightIntensity = keyframe.DirectionalLightIntensity;
+
+	const float r = cosf(m_camera.m_pitch);
+	m_camera.m_lookDirection.x = r * sinf(m_camera.m_yaw);
+	m_camera.m_lookDirection.y = sinf(m_camera.m_pitch);
+	m_camera.m_lookDirection.z = r * cosf(m_camera.m_yaw);
+}
+
+void Corona::StartCameraPathRecording()
+{
+	bCameraPathPlaying = false;
+	bCameraPathDumping = false;
+	bCameraPathDumpCaptureInFlight = false;
+	bCameraPathRecording = true;
+	CameraPathKeyframes.clear();
+	CameraPathRecordingStartSeconds = m_timer.GetTotalSeconds();
+	CameraPathKeyframes.push_back(CaptureCurrentCameraPathKeyframe(0.0));
+	LastCameraPathStatus = L"Camera path recording started.";
+}
+
+void Corona::EndCameraPathRecording()
+{
+	if (!bCameraPathRecording)
+		return;
+
+	const double currentTime = std::max(0.0, m_timer.GetTotalSeconds() - CameraPathRecordingStartSeconds);
+	if (CameraPathKeyframes.empty() || currentTime > CameraPathKeyframes.back().TimeSeconds + 1.0e-6)
+		CameraPathKeyframes.push_back(CaptureCurrentCameraPathKeyframe(currentTime));
+
+	if (CameraPathKeyframes.size() == 1)
+	{
+		CameraPathKeyframe duplicate = CameraPathKeyframes.back();
+		duplicate.TimeSeconds += 1.0 / kCameraPathDumpFps;
+		CameraPathKeyframes.push_back(duplicate);
+	}
+
+	bCameraPathRecording = false;
+
+	SYSTEMTIME localTime{};
+	GetLocalTime(&localTime);
+	std::filesystem::path pathDir(GetCameraPathDirectory());
+	std::error_code ec;
+	std::filesystem::create_directories(pathDir, ec);
+
+	for (UINT32 attempt = 0; attempt < 10000; ++attempt)
+	{
+		std::wstringstream filename;
+		filename << L"camera_path_"
+			<< std::setfill(L'0')
+			<< std::setw(4) << localTime.wYear
+			<< std::setw(2) << localTime.wMonth
+			<< std::setw(2) << localTime.wDay
+			<< L"_"
+			<< std::setw(2) << localTime.wHour
+			<< std::setw(2) << localTime.wMinute
+			<< std::setw(2) << localTime.wSecond
+			<< L"_" << std::setw(4) << attempt
+			<< L".coronapath";
+
+		const std::filesystem::path candidate = pathDir / filename.str();
+		if (!std::filesystem::exists(candidate))
+		{
+			SaveCameraPath(candidate.wstring());
+			return;
+		}
+	}
+
+	LastCameraPathStatus = L"Camera path recording ended, but failed to allocate a unique path file.";
+}
+
+bool Corona::SaveCameraPath(const std::wstring& filePath)
+{
+	if (CameraPathKeyframes.empty())
+	{
+		LastCameraPathStatus = L"No camera path keyframes to save.";
+		return false;
+	}
+
+	std::filesystem::create_directories(std::filesystem::path(filePath).parent_path());
+	std::ofstream file(std::filesystem::path(filePath), std::ios::trunc);
+	if (!file.is_open())
+	{
+		LastCameraPathStatus = L"Failed to save camera path.";
+		return false;
+	}
+
+	file << std::fixed << std::setprecision(9);
+	file << "corona_camera_path 2\n";
+	file << "fps " << kCameraPathDumpFps << "\n";
+	file << "keyframes " << CameraPathKeyframes.size() << "\n";
+	file << "columns time_seconds pos_x pos_y pos_z yaw pitch fov light_dir_x light_dir_y light_dir_z light_intensity\n";
+	for (const CameraPathKeyframe& keyframe : CameraPathKeyframes)
+	{
+		file << "k "
+			<< keyframe.TimeSeconds << ' '
+			<< keyframe.Position.x << ' '
+			<< keyframe.Position.y << ' '
+			<< keyframe.Position.z << ' '
+			<< keyframe.Yaw << ' '
+			<< keyframe.Pitch << ' '
+			<< keyframe.Fov << ' '
+			<< keyframe.DirectionalLightDir.x << ' '
+			<< keyframe.DirectionalLightDir.y << ' '
+			<< keyframe.DirectionalLightDir.z << ' '
+			<< keyframe.DirectionalLightIntensity << '\n';
+	}
+
+	ActiveCameraPathFile = filePath;
+	LastCameraPathStatus =
+		L"Saved camera path: " + filePath +
+		L" (" + std::to_wstring(static_cast<unsigned long long>(CameraPathKeyframes.size())) + L" keyframes)";
+	return true;
+}
+
+bool Corona::LoadCameraPath(const std::wstring& filePath)
+{
+	std::ifstream file{ std::filesystem::path(filePath) };
+	if (!file.is_open())
+	{
+		LastCameraPathStatus = L"Failed to open camera path: " + filePath;
+		return false;
+	}
+
+	std::vector<CameraPathKeyframe> loadedKeyframes;
+	std::string token;
+	while (file >> token)
+	{
+		if (token.empty())
+			continue;
+
+		if (token[0] == '#')
+		{
+			std::string ignoredLine;
+			std::getline(file, ignoredLine);
+			continue;
+		}
+
+		if (token == "corona_camera_path")
+		{
+			int version = 0;
+			file >> version;
+			continue;
+		}
+
+		if (token == "fps" || token == "keyframes" || token == "columns")
+		{
+			std::string ignoredLine;
+			std::getline(file, ignoredLine);
+			continue;
+		}
+
+		if (token == "k")
+		{
+			std::string keyframeLine;
+			std::getline(file, keyframeLine);
+			std::istringstream keyframeStream(keyframeLine);
+			CameraPathKeyframe keyframe;
+			keyframe.DirectionalLightDir = glm::length(LightDir) > 0.0f ? glm::normalize(LightDir) : glm::vec3(0.0f, 1.0f, 0.0f);
+			keyframe.DirectionalLightIntensity = LightIntensity;
+			keyframeStream >> keyframe.TimeSeconds
+				>> keyframe.Position.x
+				>> keyframe.Position.y
+				>> keyframe.Position.z
+				>> keyframe.Yaw
+				>> keyframe.Pitch
+				>> keyframe.Fov;
+			if (keyframeStream)
+			{
+				glm::vec3 loadedLightDir;
+				float loadedLightIntensity = keyframe.DirectionalLightIntensity;
+				if (keyframeStream >> loadedLightDir.x >> loadedLightDir.y >> loadedLightDir.z >> loadedLightIntensity)
+				{
+					const float loadedLightDirLength = glm::length(loadedLightDir);
+					if (loadedLightDirLength > 0.0f)
+						keyframe.DirectionalLightDir = loadedLightDir / loadedLightDirLength;
+					keyframe.DirectionalLightIntensity = loadedLightIntensity;
+				}
+				loadedKeyframes.push_back(keyframe);
+			}
+		}
+		else
+		{
+			std::string ignoredLine;
+			std::getline(file, ignoredLine);
+		}
+	}
+
+	if (loadedKeyframes.size() < 2)
+	{
+		LastCameraPathStatus = L"Camera path needs at least two keyframes: " + filePath;
+		return false;
+	}
+
+	const double firstTime = loadedKeyframes.front().TimeSeconds;
+	for (CameraPathKeyframe& keyframe : loadedKeyframes)
+		keyframe.TimeSeconds = std::max(0.0, keyframe.TimeSeconds - firstTime);
+
+	CameraPathKeyframes = std::move(loadedKeyframes);
+	ActiveCameraPathFile = filePath;
+	LastCameraPathStatus =
+		L"Loaded camera path: " + filePath +
+		L" (" + std::to_wstring(static_cast<unsigned long long>(CameraPathKeyframes.size())) + L" keyframes)";
+	return true;
+}
+
+bool Corona::LoadLatestCameraPath()
+{
+	std::filesystem::path pathDir(GetCameraPathDirectory());
+	std::error_code ec;
+	if (!std::filesystem::exists(pathDir, ec))
+	{
+		LastCameraPathStatus = L"No camera path directory exists yet.";
+		return false;
+	}
+
+	bool bFound = false;
+	std::filesystem::path latestPath;
+	std::filesystem::file_time_type latestTime{};
+	for (const std::filesystem::directory_entry& entry : std::filesystem::directory_iterator(pathDir, ec))
+	{
+		if (ec || !entry.is_regular_file())
+			continue;
+		if (entry.path().extension() != L".coronapath")
+			continue;
+
+		std::error_code timeEc;
+		const auto writeTime = entry.last_write_time(timeEc);
+		if (timeEc)
+			continue;
+
+		if (!bFound || writeTime > latestTime)
+		{
+			bFound = true;
+			latestTime = writeTime;
+			latestPath = entry.path();
+		}
+	}
+
+	if (!bFound)
+	{
+		LastCameraPathStatus = L"No .coronapath files found.";
+		return false;
+	}
+
+	return LoadCameraPath(latestPath.wstring());
+}
+
+void Corona::StartCameraPathPlayback()
+{
+	if (CameraPathKeyframes.size() < 2)
+	{
+		LastCameraPathStatus = L"Record or load a camera path before playback.";
+		return;
+	}
+
+	bCameraPathRecording = false;
+	bCameraPathDumping = false;
+	bCameraPathDumpCaptureInFlight = false;
+	bCameraPathPlaying = true;
+	CameraPathPlaybackStartSeconds = m_timer.GetTotalSeconds();
+	ApplyCameraPathKeyframe(CameraPathKeyframes.front());
+	FrameCounter = 0;
+	bResetTemporalStateNextUpdate = true;
+	LastCameraPathStatus = L"Camera path playback started.";
+}
+
+void Corona::StopCameraPathPlayback()
+{
+	if (bCameraPathDumping)
+	{
+		StopCameraPathDump();
+		return;
+	}
+
+	if (bCameraPathPlaying)
+		LastCameraPathStatus = L"Camera path playback stopped.";
+	bCameraPathPlaying = false;
+}
+
+void Corona::StartCameraPathDump()
+{
+	if (CameraPathKeyframes.size() < 2)
+	{
+		LastCameraPathStatus = L"Record or load a camera path before dumping frames.";
+		return;
+	}
+
+	SYSTEMTIME localTime{};
+	GetLocalTime(&localTime);
+	std::filesystem::path dumpRoot(GetCameraPathDumpDirectory());
+	std::error_code ec;
+	std::filesystem::create_directories(dumpRoot, ec);
+	LastCameraPathDumpDir.clear();
+
+	for (UINT32 attempt = 0; attempt < 10000; ++attempt)
+	{
+		std::wstringstream dirName;
+		dirName << L"camera_path_"
+			<< std::setfill(L'0')
+			<< std::setw(4) << localTime.wYear
+			<< std::setw(2) << localTime.wMonth
+			<< std::setw(2) << localTime.wDay
+			<< L"_"
+			<< std::setw(2) << localTime.wHour
+			<< std::setw(2) << localTime.wMinute
+			<< std::setw(2) << localTime.wSecond
+			<< L"_" << std::setw(4) << attempt;
+
+		std::filesystem::path candidate = dumpRoot / dirName.str();
+		if (!std::filesystem::exists(candidate))
+		{
+			std::filesystem::create_directories(candidate, ec);
+			LastCameraPathDumpDir = candidate.wstring();
+			break;
+		}
+	}
+
+	if (LastCameraPathDumpDir.empty())
+	{
+		LastCameraPathStatus = L"Failed to allocate a camera path frame dump directory.";
+		return;
+	}
+
+	const double duration = GetCameraPathDurationSeconds();
+	CameraPathDumpFrameCount = std::max<UINT32>(1u, static_cast<UINT32>(std::ceil(duration * kCameraPathDumpFps)) + 1u);
+	CameraPathDumpFrameIndex = 0;
+	bCameraPathRecording = false;
+	bCameraPathPlaying = true;
+	bCameraPathDumping = true;
+	bCameraPathDumpCaptureInFlight = false;
+	CameraPathPlaybackStartSeconds = m_timer.GetTotalSeconds();
+	FrameCounter = 0;
+	bResetTemporalStateNextUpdate = true;
+	ApplyCameraPathKeyframe(CameraPathKeyframes.front());
+
+	std::wofstream infoFile(std::filesystem::path(LastCameraPathDumpDir) / L"dump_info.txt", std::ios::trunc);
+	if (infoFile.is_open())
+	{
+		infoFile << L"fps " << static_cast<int>(kCameraPathDumpFps) << L"\n";
+		infoFile << L"frame_count " << CameraPathDumpFrameCount << L"\n";
+		infoFile << L"camera_path " << ActiveCameraPathFile << L"\n";
+	}
+
+	LastCameraPathStatus =
+		L"Playing camera path and dumping 30fps PNG frames to: " + LastCameraPathDumpDir +
+		L" (" + std::to_wstring(CameraPathDumpFrameCount) + L" frames)";
+}
+
+void Corona::StopCameraPathDump()
+{
+	if (bCameraPathDumping)
+		LastCameraPathStatus = L"Camera path playback and frame dump stopped.";
+	bCameraPathDumping = false;
+	bCameraPathDumpCaptureInFlight = false;
+	bCameraPathPlaying = false;
+}
+
+void Corona::UpdateCameraPathState()
+{
+	if (bCameraPathDumping)
+	{
+		bCameraPathPlaying = true;
+		const double duration = GetCameraPathDurationSeconds();
+		const double frameTime = std::min(duration, static_cast<double>(CameraPathDumpFrameIndex) / kCameraPathDumpFps);
+		ApplyCameraPathKeyframe(SampleCameraPath(frameTime));
+		return;
+	}
+
+	if (bCameraPathPlaying)
+	{
+		const double duration = GetCameraPathDurationSeconds();
+		const double playbackTime = m_timer.GetTotalSeconds() - CameraPathPlaybackStartSeconds;
+		if (playbackTime >= duration)
+		{
+			ApplyCameraPathKeyframe(CameraPathKeyframes.back());
+			bCameraPathPlaying = false;
+			LastCameraPathStatus = L"Camera path playback finished.";
+		}
+		else
+		{
+			ApplyCameraPathKeyframe(SampleCameraPath(playbackTime));
+		}
+		return;
+	}
+
+	if (bCameraPathRecording)
+	{
+		const double sampleTime = std::max(0.0, m_timer.GetTotalSeconds() - CameraPathRecordingStartSeconds);
+		if (CameraPathKeyframes.empty() ||
+			sampleTime >= CameraPathKeyframes.back().TimeSeconds + kCameraPathRecordMinIntervalSeconds)
+		{
+			CameraPathKeyframes.push_back(CaptureCurrentCameraPathKeyframe(sampleTime));
+		}
+	}
+}
+
+std::wstring Corona::BuildCameraPathFrameDumpPath() const
+{
+	std::wstringstream filename;
+	filename << L"frame_" << std::setfill(L'0') << std::setw(6) << CameraPathDumpFrameIndex << L".png";
+	return (std::filesystem::path(LastCameraPathDumpDir) / filename.str()).wstring();
+}
+
+void Corona::RequestCameraPathDumpFrameCapture()
+{
+	if (!renderBackend || !bCameraPathDumping || bCameraPathDumpCaptureInFlight)
+		return;
+
+	if (CameraPathDumpFrameIndex >= CameraPathDumpFrameCount)
+	{
+		StopCameraPathDump();
+		return;
+	}
+
+	renderBackend->RequestWindowCapture(BuildCameraPathFrameDumpPath());
+	bCameraPathDumpCaptureInFlight = true;
+}
+
+void Corona::ConsumeCameraPathDumpCaptureResult()
+{
+	if (!bCameraPathDumpCaptureInFlight || !renderBackend)
+		return;
+
+	std::wstring outputPath;
+	std::wstring errorMessage;
+	bool bCaptureSuccess = false;
+	if (!renderBackend->ConsumeWindowCaptureResult(&outputPath, &bCaptureSuccess, &errorMessage))
+		return;
+
+	bCameraPathDumpCaptureInFlight = false;
+	++CameraPathDumpFrameIndex;
+
+	if (!bCaptureSuccess)
+	{
+		LastCameraPathStatus = L"Camera path frame capture failed";
+		if (!errorMessage.empty())
+			LastCameraPathStatus += L": " + errorMessage;
+	}
+	else if (CameraPathDumpFrameIndex >= CameraPathDumpFrameCount)
+	{
+		bCameraPathDumping = false;
+		bCameraPathPlaying = false;
+		LastCameraPathStatus =
+			L"Camera path playback and frame dump complete: " + LastCameraPathDumpDir +
+			L" (" + std::to_wstring(CameraPathDumpFrameCount) + L" frames)";
+	}
+	else
+	{
+		LastCameraPathStatus =
+			L"Dumped frame " + std::to_wstring(CameraPathDumpFrameIndex) +
+			L" / " + std::to_wstring(CameraPathDumpFrameCount);
+	}
+}
+
+void Corona::LaunchCameraPathVideoEncode()
+{
+	if (LastCameraPathDumpDir.empty())
+	{
+		LastCameraPathStatus = L"No camera path frame dump is available yet.";
+		return;
+	}
+
+	const std::filesystem::path scriptPath =
+		std::filesystem::path(GetAssetFullPath(L"..\\tools\\convert_frame_sequence.py")).lexically_normal();
+	if (!std::filesystem::exists(scriptPath))
+	{
+		LastCameraPathStatus = L"Video conversion script was not found: " + scriptPath.wstring();
+		return;
+	}
+
+	const std::filesystem::path outputPath = std::filesystem::path(LastCameraPathDumpDir) / L"camera_path.mp4";
+	const std::filesystem::path logPath = std::filesystem::path(LastCameraPathDumpDir) / L"camera_path_encode.log";
+	std::wstring displayCommand =
+		L"py -3 \"" + scriptPath.wstring() +
+		L"\" --input \"" + LastCameraPathDumpDir +
+		L"\" --fps 30 --output \"" + outputPath.wstring() + L"\"";
+	std::wstring command = displayCommand + L" > \"" + logPath.wstring() + L"\" 2>&1";
+	LastCameraPathVideoCommand = displayCommand;
+	const int result = _wsystem(command.c_str());
+	if (result == 0)
+		LastCameraPathStatus = L"Video conversion complete: " + outputPath.wstring();
+	else
+	{
+		const std::wstring logPreview = ReadTextFilePreview(logPath, 700);
+		LastCameraPathStatus = L"Video conversion failed. Log: " + logPath.wstring();
+		if (!logPreview.empty())
+			LastCameraPathStatus += L"\n" + logPreview;
+	}
+}
+
 std::wstring Corona::GetCameraStatePath()
 {
 	return GetAssetFullPath(L"camera_state.cfg");
@@ -1989,8 +2699,9 @@ void Corona::LoadAssets()
 	const bool bSupportsFullHybridPresentation = !bVulkanHybridStartup || maxSupportedHybridStage >= 7u;
 	const bool bAllowBlueNoiseInit = !bVulkanHybridStartup || maxSupportedHybridStage >= 3u;
 	const bool bAllowImguiInit =
-		!bVulkanHybridStartup ||
-		(bSupportsFullHybridPresentation && !bAutoAADumpEnabled);
+		!bCommandLineDisableImgui &&
+		(!bVulkanHybridStartup ||
+			(bSupportsFullHybridPresentation && !bAutoAADumpEnabled));
 	if (bVulkanHybridBootstrap)
 		AppendVulkanRuntimeTrace(L"[LoadAssets] begin Vulkan hybrid bootstrap");
 	else if (bVulkanHybridStartup)
@@ -4258,6 +4969,7 @@ void Corona::OnUpdate()
 
 	m_camera.SetTurnSpeed(m_turnSpeed);
 	m_camera.Update(static_cast<float>(m_timer.GetElapsedSeconds()));
+	UpdateCameraPathState();
 
 	const float effectiveNear = Near;
 	const float effectiveFar = Far;
@@ -4712,7 +5424,36 @@ void Corona::OnRender()
 		EndGpuPassTiming(EGpuPass::Debug);
 	}
 
-	if (bShowImgui && bImguiInitialized)
+	bool bSuppressImguiForCapture = false;
+	if (bCameraPathDumping)
+	{
+		if (!bVulkanStagePreview)
+		{
+			RequestCameraPathDumpFrameCapture();
+			bSuppressImguiForCapture = true;
+		}
+		else
+		{
+			StopCameraPathDump();
+			LastCameraPathStatus = L"Camera path dumping is not available while a Vulkan stage preview is active.";
+		}
+	}
+
+	if (!bSuppressImguiForCapture && bFinalScreenshotRequested)
+	{
+		if (!bVulkanStagePreview)
+		{
+			RequestFinalBackbufferScreenshot();
+			bSuppressImguiForCapture = bFinalScreenshotCaptureInFlight;
+		}
+		else
+		{
+			bFinalScreenshotRequested = false;
+			LastFinalScreenshotStatus = L"Screenshot is not available while a Vulkan stage preview is active.";
+		}
+	}
+
+	if (!bSuppressImguiForCapture && bShowImgui && bImguiInitialized)
 	{
 
 		renderBackend->NewImGuiFrame();
@@ -4742,6 +5483,110 @@ void Corona::OnRender()
 		if (ImGui::Button("GPU Pass Timings"))
 		{
 			bShowGpuTimingWindow = true;
+		}
+
+		if (bFinalScreenshotRequested || bFinalScreenshotCaptureInFlight)
+			ImGui::BeginDisabled();
+		if (ImGui::Button("Capture Final Backbuffer"))
+		{
+			bFinalScreenshotRequested = true;
+			LastFinalScreenshotStatus = L"Screenshot will be captured on the next frame without ImGui.";
+		}
+		if (bFinalScreenshotRequested || bFinalScreenshotCaptureInFlight)
+			ImGui::EndDisabled();
+		if (!LastFinalScreenshotStatus.empty())
+		{
+			const std::string statusText = WideToUtf8(LastFinalScreenshotStatus);
+			ImGui::TextWrapped("Screenshot: %s", statusText.c_str());
+		}
+
+		ImGui::Separator();
+		ImGui::Text("Camera Path Capture");
+		const bool bCameraPathBusy = bCameraPathRecording || bCameraPathPlaying || bCameraPathDumping;
+		if (bCameraPathBusy)
+			ImGui::BeginDisabled();
+		if (ImGui::Button("Start Camera Path"))
+		{
+			StartCameraPathRecording();
+		}
+		if (bCameraPathBusy)
+			ImGui::EndDisabled();
+		ImGui::SameLine();
+		if (!bCameraPathRecording)
+			ImGui::BeginDisabled();
+		if (ImGui::Button("End Camera Path"))
+		{
+			EndCameraPathRecording();
+		}
+		if (!bCameraPathRecording)
+			ImGui::EndDisabled();
+
+		if (CameraPathKeyframes.size() < 2 || bCameraPathRecording || bCameraPathDumping)
+			ImGui::BeginDisabled();
+		if (ImGui::Button(bCameraPathPlaying ? "Stop Playback" : "Play Camera Path"))
+		{
+			if (bCameraPathPlaying)
+				StopCameraPathPlayback();
+			else
+				StartCameraPathPlayback();
+		}
+		if (CameraPathKeyframes.size() < 2 || bCameraPathRecording || bCameraPathDumping)
+			ImGui::EndDisabled();
+		ImGui::SameLine();
+		if (bCameraPathRecording || bCameraPathPlaying || bCameraPathDumping)
+			ImGui::BeginDisabled();
+		if (ImGui::Button("Load Latest Path"))
+		{
+			LoadLatestCameraPath();
+		}
+		if (bCameraPathRecording || bCameraPathPlaying || bCameraPathDumping)
+			ImGui::EndDisabled();
+
+		if (CameraPathKeyframes.size() < 2 || bCameraPathRecording || bCameraPathPlaying || bCameraPathDumping)
+			ImGui::BeginDisabled();
+		if (ImGui::Button("Play + Dump 30fps PNG Sequence"))
+		{
+			StartCameraPathDump();
+		}
+		if (CameraPathKeyframes.size() < 2 || bCameraPathRecording || bCameraPathPlaying || bCameraPathDumping)
+			ImGui::EndDisabled();
+		ImGui::SameLine();
+		if (!bCameraPathDumping)
+			ImGui::BeginDisabled();
+		if (ImGui::Button("Stop Playback + Dump"))
+		{
+			StopCameraPathPlayback();
+		}
+		if (!bCameraPathDumping)
+			ImGui::EndDisabled();
+
+		if (LastCameraPathDumpDir.empty() || bCameraPathRecording || bCameraPathPlaying || bCameraPathDumping)
+			ImGui::BeginDisabled();
+		if (ImGui::Button("Convert Last Dump To MP4"))
+		{
+			LaunchCameraPathVideoEncode();
+		}
+		if (LastCameraPathDumpDir.empty() || bCameraPathRecording || bCameraPathPlaying || bCameraPathDumping)
+			ImGui::EndDisabled();
+
+		ImGui::Text("Path keyframes: %u, duration: %.2fs",
+			static_cast<unsigned>(CameraPathKeyframes.size()),
+			GetCameraPathDurationSeconds());
+		if (bCameraPathDumping)
+		{
+			ImGui::Text("Dump progress: %u / %u",
+				static_cast<unsigned>(CameraPathDumpFrameIndex),
+				static_cast<unsigned>(CameraPathDumpFrameCount));
+		}
+		if (!LastCameraPathStatus.empty())
+		{
+			const std::string statusText = WideToUtf8(LastCameraPathStatus);
+			ImGui::TextWrapped("Camera path: %s", statusText.c_str());
+		}
+		if (!LastCameraPathVideoCommand.empty())
+		{
+			const std::string commandText = WideToUtf8(LastCameraPathVideoCommand);
+			ImGui::TextWrapped("Video command: %s", commandText.c_str());
 		}
 
 		if (bShowGpuTimingWindow)
@@ -5079,6 +5924,9 @@ if (ImGui::Button("Reset Accumulation"))
 		}
 
 		// ImGui::gizmo3D has memory leak.
+		const bool bCameraPathOwnsLightControls = bCameraPathPlaying || bCameraPathDumping;
+		if (bCameraPathOwnsLightControls)
+			ImGui::BeginDisabled();
 		glm::vec3 LD = glm::vec3(LightDir.z, -LightDir.y, -LightDir.x);
 		ImGui::gizmo3D("##gizmo1", LD, 200 /* mode */);
 		LightDir = glm::vec3(-LD.z, -LD.y, LD.x);
@@ -5087,6 +5935,11 @@ if (ImGui::Button("Reset Accumulation"))
 
 
 		ImGui::SliderFloat("Light Brightness", &LightIntensity, 0.0f, 20.0f);
+		if (bCameraPathOwnsLightControls)
+		{
+			ImGui::EndDisabled();
+			ImGui::TextDisabled("Camera path playback is controlling the directional light.");
+		}
 
 		ImGui::Separator();
 		ImGui::Text("Sky Settings (Path Tracing)");
@@ -5205,6 +6058,9 @@ if (ImGui::Button("Reset Accumulation"))
 	endFrameMs = ElapsedMilliseconds(endFrameStart, CpuClock::now());
 	AppendVulkanRuntimeTrace(L"[OnRender] after EndFrame");
 	FinishFramePerfLogging(beginFrameMs, executeMs, endFrameMs);
+
+	ConsumeCameraPathDumpCaptureResult();
+	ConsumeFinalBackbufferScreenshotResult();
 
 	if ((bVulkanStagePreview || bVulkanHybridAutoDump) && bAutoAADumpEnabled && bAutoAADumpInitialized && !AutoAADumpDir.empty())
 	{

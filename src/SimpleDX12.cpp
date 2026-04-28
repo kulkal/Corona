@@ -45,6 +45,22 @@ namespace
 		uint32_t ConstantBufferSize = 0;
 	};
 
+	void ForceOpaqueAlpha(const DirectX::Image* image)
+	{
+		if (!image || !image->pixels)
+			return;
+
+		if (image->format != DXGI_FORMAT_B8G8R8A8_UNORM && image->format != DXGI_FORMAT_R8G8B8A8_UNORM)
+			return;
+
+		for (size_t y = 0; y < image->height; ++y)
+		{
+			uint8_t* row = image->pixels + y * image->rowPitch;
+			for (size_t x = 0; x < image->width; ++x)
+				row[x * 4 + 3] = 0xff;
+		}
+	}
+
 	bool SaveScratchImagePNG(const DirectX::ScratchImage& captured, const std::wstring& filePath, std::wstring* errorMessage)
 	{
 		const DirectX::Image* image = captured.GetImage(0, 0, 0);
@@ -56,11 +72,10 @@ namespace
 		}
 
 		HRESULT hr = S_OK;
-		DirectX::ScratchImage convertedImage;
-		const DirectX::Image* outputImage = image;
+		DirectX::ScratchImage pngImage;
 		if (image->format == DXGI_FORMAT_B8G8R8A8_UNORM || image->format == DXGI_FORMAT_R8G8B8A8_UNORM)
 		{
-			hr = SaveToWICFile(*image, DirectX::WIC_FLAGS_NONE, GUID_ContainerFormatPng, filePath.c_str());
+			hr = pngImage.InitializeFromImage(*image);
 		}
 		else
 		{
@@ -69,15 +84,17 @@ namespace
 				DXGI_FORMAT_R8G8B8A8_UNORM,
 				DirectX::TEX_FILTER_DEFAULT,
 				DirectX::TEX_THRESHOLD_DEFAULT,
-				convertedImage);
-			if (SUCCEEDED(hr))
-			{
-				outputImage = convertedImage.GetImage(0, 0, 0);
-				if (!outputImage)
-					hr = E_FAIL;
-			}
-			if (SUCCEEDED(hr))
-				hr = SaveToWICFile(*outputImage, DirectX::WIC_FLAGS_NONE, GUID_ContainerFormatPng, filePath.c_str());
+				pngImage);
+		}
+
+		const DirectX::Image* outputImage = SUCCEEDED(hr) ? pngImage.GetImage(0, 0, 0) : nullptr;
+		if (!outputImage)
+			hr = E_FAIL;
+
+		if (SUCCEEDED(hr))
+		{
+			ForceOpaqueAlpha(outputImage);
+			hr = SaveToWICFile(*outputImage, DirectX::WIC_FLAGS_NONE, GUID_ContainerFormatPng, filePath.c_str());
 		}
 
 		if (FAILED(hr))

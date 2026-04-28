@@ -489,6 +489,7 @@ private:
 	ERenderingMode CommandLineRenderingMode = ERenderingMode::HYBRID;
 	bool bCommandLineRenderBackendOverrideSet = false;
 	ERenderBackendAPI CommandLineRenderBackendAPI = ERenderBackendAPI::D3D12;
+	bool bCommandLineDisableImgui = false;
 
 	shared_ptr<PipelineStateObject> TemporalAAPSO;
 	std::shared_ptr<GraphicsPipelineHandle> TemporalAAGraphicsPipeline;
@@ -595,6 +596,29 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	float m_turnSpeed = glm::half_pi<float>();
 
 	SimpleCamera m_camera;
+	struct CameraPathKeyframe
+	{
+		double TimeSeconds = 0.0;
+		glm::vec3 Position = glm::vec3(0.0f);
+		float Yaw = 0.0f;
+		float Pitch = 0.0f;
+		float Fov = 0.8f;
+		glm::vec3 DirectionalLightDir = glm::vec3(0.0f, 1.0f, 0.0f);
+		float DirectionalLightIntensity = 0.4f;
+	};
+	std::vector<CameraPathKeyframe> CameraPathKeyframes;
+	bool bCameraPathRecording = false;
+	bool bCameraPathPlaying = false;
+	bool bCameraPathDumping = false;
+	bool bCameraPathDumpCaptureInFlight = false;
+	double CameraPathRecordingStartSeconds = 0.0;
+	double CameraPathPlaybackStartSeconds = 0.0;
+	UINT32 CameraPathDumpFrameIndex = 0;
+	UINT32 CameraPathDumpFrameCount = 0;
+	std::wstring ActiveCameraPathFile;
+	std::wstring LastCameraPathDumpDir;
+	std::wstring LastCameraPathStatus;
+	std::wstring LastCameraPathVideoCommand;
 
 	// misc
 	glm::vec3 LightDir = glm::normalize(glm::vec3(0.901, 0.88, 0.176));
@@ -662,6 +686,11 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	bool bRecompileShaders = false;
 	bool bShowImgui = true;
 	bool bShowGpuTimingWindow = false;
+	bool bFinalScreenshotRequested = false;
+	bool bFinalScreenshotCaptureInFlight = false;
+	UINT32 FinalScreenshotCounter = 0;
+	std::wstring PendingFinalScreenshotPath;
+	std::wstring LastFinalScreenshotStatus;
 	bool bGpuTimingResourcesInitialized = false;
 	UINT32 GpuTimingAverageFrameCount = 30;
 	UINT64 GpuTimestampFrequency = 0;
@@ -695,6 +724,29 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	void BeginGpuPassTiming(EGpuPass pass);
 	void EndGpuPassTiming(EGpuPass pass);
 	const char* GetGpuPassName(EGpuPass pass) const;
+	std::wstring BuildFinalScreenshotPath();
+	void RequestFinalBackbufferScreenshot();
+	void ConsumeFinalBackbufferScreenshotResult();
+	std::wstring GetCameraPathDirectory() const;
+	std::wstring GetCameraPathDumpDirectory() const;
+	CameraPathKeyframe CaptureCurrentCameraPathKeyframe(double timeSeconds) const;
+	CameraPathKeyframe SampleCameraPath(double timeSeconds) const;
+	void ApplyCameraPathKeyframe(const CameraPathKeyframe& keyframe);
+	void StartCameraPathRecording();
+	void EndCameraPathRecording();
+	bool SaveCameraPath(const std::wstring& filePath);
+	bool LoadCameraPath(const std::wstring& filePath);
+	bool LoadLatestCameraPath();
+	void StartCameraPathPlayback();
+	void StopCameraPathPlayback();
+	void StartCameraPathDump();
+	void StopCameraPathDump();
+	void UpdateCameraPathState();
+	std::wstring BuildCameraPathFrameDumpPath() const;
+	void RequestCameraPathDumpFrameCapture();
+	void ConsumeCameraPathDumpCaptureResult();
+	void LaunchCameraPathVideoEncode();
+	double GetCameraPathDurationSeconds() const;
 	
 	// Raytracing helper functions
 	void UpdateInstancePropertyBuffer();
