@@ -1,14 +1,6 @@
 # Corona
 Corona pandemic made me to spend some time for this hobby project. That is the reason why the name of the project is Corona.
 
-# DX12
-I tried to implement best practice of dx12 api usage.
-
-# DXR
-There are several dxr tutorials and examples. But I couldn't find one that is simple and includes complete sets of raytracing usage.
-This is basically simplified version of Q2RTX in terms of raytracing. which means it has most of raytracing feature(shadow/gi/..).
-I hope it helps someone to understand how dxr renderer looks like.
-
 ## Build
 Requirements:
 
