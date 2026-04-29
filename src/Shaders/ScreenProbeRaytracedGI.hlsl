@@ -69,7 +69,8 @@ cbuffer ViewParameter : register(b0)
     float _padding2;
     uint LightingBootstrap;
     uint BootstrapRays;
-    float2 _padding3;
+    uint SHCoefficientCount;
+    uint _padding3;
 };
 
 static const float INV_PI = 1.0f / PI;
@@ -159,11 +160,14 @@ void AccumulateSH3RGB(inout SH3RGB accum, SH3RGB value, float scale)
     accum.c1 += value.c1 * scale;
     accum.c2 += value.c2 * scale;
     accum.c3 += value.c3 * scale;
-    accum.c4 += value.c4 * scale;
-    accum.c5 += value.c5 * scale;
-    accum.c6 += value.c6 * scale;
-    accum.c7 += value.c7 * scale;
-    accum.c8 += value.c8 * scale;
+    if (SHCoefficientCount > 4u)
+    {
+        accum.c4 += value.c4 * scale;
+        accum.c5 += value.c5 * scale;
+        accum.c6 += value.c6 * scale;
+        accum.c7 += value.c7 * scale;
+        accum.c8 += value.c8 * scale;
+    }
 }
 
 SH3RGB ScaleSH3RGB(SH3RGB sh, float scale)
@@ -172,11 +176,14 @@ SH3RGB ScaleSH3RGB(SH3RGB sh, float scale)
     sh.c1 *= scale;
     sh.c2 *= scale;
     sh.c3 *= scale;
-    sh.c4 *= scale;
-    sh.c5 *= scale;
-    sh.c6 *= scale;
-    sh.c7 *= scale;
-    sh.c8 *= scale;
+    if (SHCoefficientCount > 4u)
+    {
+        sh.c4 *= scale;
+        sh.c5 *= scale;
+        sh.c6 *= scale;
+        sh.c7 *= scale;
+        sh.c8 *= scale;
+    }
     return sh;
 }
 
@@ -187,11 +194,19 @@ SH3RGB LerpSH3RGB(SH3RGB a, SH3RGB b, float t)
     result.c1 = lerp(a.c1, b.c1, t);
     result.c2 = lerp(a.c2, b.c2, t);
     result.c3 = lerp(a.c3, b.c3, t);
-    result.c4 = lerp(a.c4, b.c4, t);
-    result.c5 = lerp(a.c5, b.c5, t);
-    result.c6 = lerp(a.c6, b.c6, t);
-    result.c7 = lerp(a.c7, b.c7, t);
-    result.c8 = lerp(a.c8, b.c8, t);
+    result.c4 = 0.0f.xxx;
+    result.c5 = 0.0f.xxx;
+    result.c6 = 0.0f.xxx;
+    result.c7 = 0.0f.xxx;
+    result.c8 = 0.0f.xxx;
+    if (SHCoefficientCount > 4u)
+    {
+        result.c4 = lerp(a.c4, b.c4, t);
+        result.c5 = lerp(a.c5, b.c5, t);
+        result.c6 = lerp(a.c6, b.c6, t);
+        result.c7 = lerp(a.c7, b.c7, t);
+        result.c8 = lerp(a.c8, b.c8, t);
+    }
     return result;
 }
 
@@ -211,11 +226,19 @@ SH3RGB ProjectRadianceToSH3RGB(float3 radiance, float3 direction, float sampleWe
     sh.c1 = radiance * (0.488603f * y);
     sh.c2 = radiance * (0.488603f * z);
     sh.c3 = radiance * (0.488603f * x);
-    sh.c4 = radiance * (1.092548f * x * y);
-    sh.c5 = radiance * (1.092548f * y * z);
-    sh.c6 = radiance * (0.315392f * (3.0f * z * z - 1.0f));
-    sh.c7 = radiance * (1.092548f * x * z);
-    sh.c8 = radiance * (0.546274f * (x * x - y * y));
+    sh.c4 = 0.0f.xxx;
+    sh.c5 = 0.0f.xxx;
+    sh.c6 = 0.0f.xxx;
+    sh.c7 = 0.0f.xxx;
+    sh.c8 = 0.0f.xxx;
+    if (SHCoefficientCount > 4u)
+    {
+        sh.c4 = radiance * (1.092548f * x * y);
+        sh.c5 = radiance * (1.092548f * y * z);
+        sh.c6 = radiance * (0.315392f * (3.0f * z * z - 1.0f));
+        sh.c7 = radiance * (1.092548f * x * z);
+        sh.c8 = radiance * (0.546274f * (x * x - y * y));
+    }
     return sh;
 }
 
@@ -226,11 +249,19 @@ SH3RGB LoadPrevProbeSH(uint2 probeCoord)
     sh.c1 = SanitizeFloat3(PrevProbeSH1Tex[probeCoord].xyz);
     sh.c2 = SanitizeFloat3(PrevProbeSH2Tex[probeCoord].xyz);
     sh.c3 = SanitizeFloat3(PrevProbeSH3Tex[probeCoord].xyz);
-    sh.c4 = SanitizeFloat3(PrevProbeSH4Tex[probeCoord].xyz);
-    sh.c5 = SanitizeFloat3(PrevProbeSH5Tex[probeCoord].xyz);
-    sh.c6 = SanitizeFloat3(PrevProbeSH6Tex[probeCoord].xyz);
-    sh.c7 = SanitizeFloat3(PrevProbeSH7Tex[probeCoord].xyz);
-    sh.c8 = SanitizeFloat3(PrevProbeSH8Tex[probeCoord].xyz);
+    sh.c4 = 0.0f.xxx;
+    sh.c5 = 0.0f.xxx;
+    sh.c6 = 0.0f.xxx;
+    sh.c7 = 0.0f.xxx;
+    sh.c8 = 0.0f.xxx;
+    if (SHCoefficientCount > 4u)
+    {
+        sh.c4 = SanitizeFloat3(PrevProbeSH4Tex[probeCoord].xyz);
+        sh.c5 = SanitizeFloat3(PrevProbeSH5Tex[probeCoord].xyz);
+        sh.c6 = SanitizeFloat3(PrevProbeSH6Tex[probeCoord].xyz);
+        sh.c7 = SanitizeFloat3(PrevProbeSH7Tex[probeCoord].xyz);
+        sh.c8 = SanitizeFloat3(PrevProbeSH8Tex[probeCoord].xyz);
+    }
     return sh;
 }
 
@@ -240,11 +271,14 @@ void StoreProbeSH(uint2 probeCoord, SH3RGB sh)
     ProbeSH1[probeCoord] = float4(sh.c1, 0.0f);
     ProbeSH2[probeCoord] = float4(sh.c2, 0.0f);
     ProbeSH3[probeCoord] = float4(sh.c3, 0.0f);
-    ProbeSH4[probeCoord] = float4(sh.c4, 0.0f);
-    ProbeSH5[probeCoord] = float4(sh.c5, 0.0f);
-    ProbeSH6[probeCoord] = float4(sh.c6, 0.0f);
-    ProbeSH7[probeCoord] = float4(sh.c7, 0.0f);
-    ProbeSH8[probeCoord] = float4(sh.c8, 0.0f);
+    if (SHCoefficientCount > 4u)
+    {
+        ProbeSH4[probeCoord] = float4(sh.c4, 0.0f);
+        ProbeSH5[probeCoord] = float4(sh.c5, 0.0f);
+        ProbeSH6[probeCoord] = float4(sh.c6, 0.0f);
+        ProbeSH7[probeCoord] = float4(sh.c7, 0.0f);
+        ProbeSH8[probeCoord] = float4(sh.c8, 0.0f);
+    }
 }
 
 float3 SafeNormalize(float3 value, float3 fallback)

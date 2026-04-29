@@ -65,13 +65,46 @@ Path tracing reference:
 ![Path tracing reference](./docs/images/readme_path_tracing_current.png)
 
 ## GI And Denoising
-The hybrid renderer uses a ray-traced one-bounce diffuse GI approximation:
+The hybrid renderer has several real-time diffuse GI paths:
+
+| Mode | Command value | Summary |
+|---|---|---|
+| Simple raytrace | `simple` | One cosine-hemisphere DXR ray per pixel, followed by temporal and spatial denoising. |
+| Spatial hash | `spatial-hash`, `hash`, `sharc` | A SHaRC-style sparse surface cache. Visible primary-hit cells are stored in a hash table, traced per cell, accumulated as RGB SH, and evaluated per pixel normal. |
+| Screen probe | `screen-probe`, `probe` | Screen-space probe atlas path used for comparison with cache-based GI. |
+
+The default simple path is a ray-traced one-bounce diffuse GI approximation:
 
 * The GBuffer depth and world normal reconstruct the shaded surface point.
 * One blue-noise, frame-indexed cosine-hemisphere ray is traced per pixel.
 * A sky miss evaluates the procedural sky color.
 * A surface hit evaluates direct-light visibility at the hit point and writes Lambert diffuse irradiance.
 * The diffuse result is stored as both irradiance color and SH data, then accumulated with temporal reprojection and edge-aware spatial filtering.
+
+### Spatial Hash Diffuse GI
+The spatial hash GI mode is inspired by NVIDIA SHaRC, but the current implementation is intentionally small and renderer-local. It does not store radiance in a dense voxel texture. Instead, it uses a sparse hash table of visible surface cells backed by `StructuredBuffer` resources:
+
+* Primary-hit pixels reconstruct world position and normal from the GBuffer, quantize the position by `CellSize`, and insert that integer cell key into a `1 << 20` entry hash table.
+* The update pass writes `SpatialHashGIUpdateKeys`, `SpatialHashGICellPosition`, `SpatialHashGICellNormal`, and `SpatialHashGICellScore`. If several pixels map to the same cell, the representative sample closest to the cell center wins through an atomic priority score.
+* The ray generation shader dispatches over hash slots, not pixels. Empty slots exit immediately; active cells trace `RaysPerCell` diffuse paths and support `MaxBounces`.
+* Each active cell stores RGB spherical harmonics using four coefficients, L0 plus L1: `SpatialHashGITraceSH[4]` for the current trace and double-buffered `SpatialHashGIResolvedSH[2][4]` for history. `ResolvedSH0.w` stores the accumulated sample confidence.
+* The resolve pass searches the previous hash table by key, so a cell can keep history even if its slot moves after collisions. Current cell samples are added with sample-count weighting instead of replacing the cache.
+* Light changes use adaptive history decay. Cells whose SH energy barely changes keep integrating, while cells with visible lighting changes adapt faster.
+* The query pass reconstructs each pixel's cell, blends neighboring cells, optionally smooths a 3x3x3 neighborhood, evaluates the cached SH with the pixel normal, and writes the diffuse GI cache image.
+
+This means the cache is surface-centered in practice: only cells touched by visible primary rays are allocated or refreshed, while the storage itself remains a sparse spatial hash. The main cost knob is therefore active cells times `RaysPerCell`, not screen pixels times rays.
+
+Enable it interactively:
+
+```powershell
+.\Corona.exe --backend dx12 --render-mode hybrid --gi-mode spatial-hash --spatial-hash-cell 48 --spatial-hash-rays 2 --spatial-hash-bounces 2
+```
+
+Generate the diffuse GI auto-dump set:
+
+```powershell
+.\Corona.exe --auto-dump --backend dx12 --render-mode hybrid --dump-mode diffuse-gi --diffuse-gi-dump-frames 4 --spatial-hash-cell 48 --spatial-hash-rays 2 --spatial-hash-bounces 2 --spatial-hash-interp 1.0 --spatial-hash-smoothing 0.65
+```
 
 Specular GI/reflection is produced by the separate ray-traced reflection path and denoised alongside the diffuse GI buffers. The `pathtracing` render mode is a separate accumulated reference path, not the same algorithm used by the real-time hybrid GI pass.
 
@@ -114,11 +147,15 @@ Run from the `src/` directory, or set the working directory to `src/` when launc
 
 ```powershell
 cd src
+.\Corona.exe
 .\Corona.exe --backend dx12 --render-mode hybrid --aa taa --user-mode
 .\Corona.exe --backend vulkan --render-mode hybrid --aa taa --user-mode
 .\Corona.exe --backend vulkan --render-mode pathtracing --aa off --user-mode
 .\Corona.exe --backend dx12 --render-mode hybrid --auto-dump --no-imgui
+.\Corona.exe --backend dx12 --render-mode hybrid --gi-mode spatial-hash --spatial-hash-rays 2 --spatial-hash-bounces 2 --user-mode
 ```
+
+Launching without arguments starts the interactive DX12 hybrid renderer with DLSS RR selected by default.
 
 Supported options:
 
@@ -127,6 +164,17 @@ Supported options:
 | `--backend`, `-backend` | `dx12`, `vulkan`, `vk` | Selects the render backend. Unknown values fall back to DX12. |
 | `--render-mode`, `-render` | `hybrid`, `pt`, `pathtracing`, `path-tracing`, `path_tracing` | Selects hybrid rendering or full-screen path tracing. |
 | `--aa`, `-aa` | `off`, `taa`, `dlss`, `dlss-sr`, `sr`, `dlss-rr`, `rr` | DLSS modes fall back to TAA when Streamline/DLSS is unavailable. |
+| `--ray-noise`, `--noise`, `-noise`, `-n` | `r2`, `blue`, `stable` | Selects the hybrid RT GI/reflection sampling noise. `r2` is the default for calmer DLSS RR convergence. |
+| `--gi-mode`, `-gi` | `simple`, `spatial-hash`, `hash`, `sharc`, `screen-probe`, `probe` | Selects the hybrid diffuse GI method. |
+| `--spatial-hash-cell` | `4.0`-`256.0` | World-space cell size for the spatial hash GI cache. Default is `48.0`. |
+| `--spatial-hash-rays` | `1`-`8` | Diffuse rays traced per active spatial hash cell. Default is `2`. |
+| `--spatial-hash-bounces`, `--spatial-hash-depth` | `1`-`8` | Maximum diffuse path depth for cell tracing. Default is `2`. |
+| `--spatial-hash-interp`, `--spatial-hash-interpolation` | `0.0`-`1.0` | Blends the base cell with neighboring cell interpolation during query. Default is `1.0`. |
+| `--spatial-hash-smoothing` | `0.0`-`1.0` | Controls 3x3x3 SH neighborhood smoothing after interpolation. Default is `0.65`. |
+| `--dump-mode`, `-dump-mode` | `diffuse-gi`, `diffuse_gi`, `gi` | Makes auto-dump capture the simple, spatial-hash, and screen-probe diffuse GI debug buffers. |
+| `--diffuse-gi-dump-frames`, `--gi-dump-frames` | `4`-`512` | Frames accumulated per diffuse GI auto-dump phase. |
+| `--dlss-jitter-scale` | `0.25`-`16.0` | Multiplies the DLSS/RR jitter phase count. Default is `4.0` for longer phase cycles. |
+| `--dlss-jitter-phases` | `0`-`512` | Overrides the DLSS/RR jitter phase count directly. `0` means automatic scaled mode. |
 | `--user-mode`, `--manual`, `-user` | none | Disables auto dump mode and runs interactively. |
 | `--auto-dump`, `-dump` | none | Enables automated capture/dump mode. |
 | `--no-imgui`, `--disable-imgui` | none | Disables ImGui initialization and rendering, useful for clean screenshots. |
@@ -139,7 +187,7 @@ Environment overrides are also available for startup automation:
 |---|---|---|
 | `CORONA_AUTO_DUMP` | `1`, `true`, `yes`, `dump` | Enables auto dump mode unless overridden by command-line flags. |
 | `CORONA_START_RENDER_MODE` | `hybrid`, `pathtracing`, `pt` | Sets the initial render mode. |
-| `CORONA_START_AA` | `off`, `taa`, `dlss`, `rr` | Sets the initial AA mode. |
+| `CORONA_START_AA` | `off`, `taa`, `dlss`, `dlss-rr`, `rr` | Sets the initial AA mode. |
 
 ## Third-party libs
 * [enkiTS](https://github.com/dougbinks/enkiTS)

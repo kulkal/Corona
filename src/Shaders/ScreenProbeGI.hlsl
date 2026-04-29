@@ -47,7 +47,7 @@ cbuffer ScreenProbeGIConstant : register(b0)
     float EdgeDepthWeight;
     float EdgeNormalWeight;
     uint EdgeSampleCount;
-    uint EdgePadding;
+    uint SHCoefficientCount;
 };
 
 float3 SanitizeFloat3(float3 value)
@@ -101,6 +101,11 @@ float3 LoadGeoNormal(uint2 pos)
     return SafeNormalize(GeoNormalTex[pos].xyz, SafeNormalize(WorldNormalTex[pos].xyz, float3(0.0f, 1.0f, 0.0f)));
 }
 
+float3 LoadPixelNormal(uint2 pos)
+{
+    return SafeNormalize(WorldNormalTex[pos].xyz, LoadGeoNormal(pos));
+}
+
 uint2 ClampPixelCoord(float2 pixelCenter)
 {
     float2 maxPixel = max(RTSize - 1.0f.xx, 0.0f.xx);
@@ -115,7 +120,7 @@ float GeometryCompatibility(float depthA, float3 normalA, float depthB, float3 n
     return depthCompatibility * normalCompatibility;
 }
 
-float ComputeEdgeStopWeight(uint2 pixelPos, float currentDepth, float3 currentNormal, float2 probePixel, float probeDepth, float3 probeNormal)
+float ComputeEdgeStopWeight(uint2 pixelPos, float currentDepth, float3 currentGeoNormal, float2 probePixel, float probeDepth, float3 probeNormal)
 {
     float2 pixelCenter = float2(pixelPos) + 0.5f.xx;
     float2 probeCenter = clamp(probePixel, 0.5f.xx, RTSize - 0.5f.xx);
@@ -142,20 +147,20 @@ float ComputeEdgeStopWeight(uint2 pixelPos, float currentDepth, float3 currentNo
             sampleDepth,
             sampleNormal,
             currentDepth,
-            currentNormal,
+            currentGeoNormal,
             EdgeDepthWeight,
             EdgeNormalWeight);
 
         edgeWeight = min(edgeWeight, segmentWeight);
         currentDepth = sampleDepth;
-        currentNormal = sampleNormal;
+        currentGeoNormal = sampleNormal;
     }
 
     edgeWeight = min(edgeWeight, GeometryCompatibility(
         probeDepth,
         probeNormal,
         currentDepth,
-        currentNormal,
+        currentGeoNormal,
         EdgeDepthWeight,
         EdgeNormalWeight));
 
@@ -176,11 +181,19 @@ SH3RGB LoadProbeSH(uint2 probeCoord)
     sh.c1 = SanitizeFloat3(ScreenProbeSH1Tex[probeCoord].xyz);
     sh.c2 = SanitizeFloat3(ScreenProbeSH2Tex[probeCoord].xyz);
     sh.c3 = SanitizeFloat3(ScreenProbeSH3Tex[probeCoord].xyz);
-    sh.c4 = SanitizeFloat3(ScreenProbeSH4Tex[probeCoord].xyz);
-    sh.c5 = SanitizeFloat3(ScreenProbeSH5Tex[probeCoord].xyz);
-    sh.c6 = SanitizeFloat3(ScreenProbeSH6Tex[probeCoord].xyz);
-    sh.c7 = SanitizeFloat3(ScreenProbeSH7Tex[probeCoord].xyz);
-    sh.c8 = SanitizeFloat3(ScreenProbeSH8Tex[probeCoord].xyz);
+    sh.c4 = 0.0f.xxx;
+    sh.c5 = 0.0f.xxx;
+    sh.c6 = 0.0f.xxx;
+    sh.c7 = 0.0f.xxx;
+    sh.c8 = 0.0f.xxx;
+    if (SHCoefficientCount > 4u)
+    {
+        sh.c4 = SanitizeFloat3(ScreenProbeSH4Tex[probeCoord].xyz);
+        sh.c5 = SanitizeFloat3(ScreenProbeSH5Tex[probeCoord].xyz);
+        sh.c6 = SanitizeFloat3(ScreenProbeSH6Tex[probeCoord].xyz);
+        sh.c7 = SanitizeFloat3(ScreenProbeSH7Tex[probeCoord].xyz);
+        sh.c8 = SanitizeFloat3(ScreenProbeSH8Tex[probeCoord].xyz);
+    }
     return sh;
 }
 
@@ -204,30 +217,36 @@ float3 EvaluateProbeSH(uint2 probeCoord, float3 shadingNormal)
     float b1 = 0.488603f * y;
     float b2 = 0.488603f * z;
     float b3 = 0.488603f * x;
-    float b4 = 1.092548f * x * y;
-    float b5 = 1.092548f * y * z;
-    float b6 = 0.315392f * (3.0f * z * z - 1.0f);
-    float b7 = 1.092548f * x * z;
-    float b8 = 0.546274f * (x * x - y * y);
-
     // UE's SH3 path keeps L0/L1/L2. Apply the Lambertian convolution
     // constants per band to evaluate diffuse irradiance from radiance SH.
     float3 shRadiance =
         PI * sh.c0 * b0 +
-        (2.0f * PI / 3.0f) * (sh.c1 * b1 + sh.c2 * b2 + sh.c3 * b3) +
-        (PI / 4.0f) * (sh.c4 * b4 + sh.c5 * b5 + sh.c6 * b6 + sh.c7 * b7 + sh.c8 * b8);
+        (2.0f * PI / 3.0f) * (sh.c1 * b1 + sh.c2 * b2 + sh.c3 * b3);
+    if (SHCoefficientCount > 4u)
+    {
+        float b4 = 1.092548f * x * y;
+        float b5 = 1.092548f * y * z;
+        float b6 = 0.315392f * (3.0f * z * z - 1.0f);
+        float b7 = 1.092548f * x * z;
+        float b8 = 0.546274f * (x * x - y * y);
+        shRadiance += (PI / 4.0f) * (sh.c4 * b4 + sh.c5 * b5 + sh.c6 * b6 + sh.c7 * b7 + sh.c8 * b8);
+    }
     shRadiance = max(shRadiance * SH3_DIFFUSE_SCALE, 0.0f.xxx);
 
     float shEnergy =
         dot(abs(sh.c0), 1.0f.xxx) +
         dot(abs(sh.c1), 1.0f.xxx) +
         dot(abs(sh.c2), 1.0f.xxx) +
-        dot(abs(sh.c3), 1.0f.xxx) +
-        dot(abs(sh.c4), 1.0f.xxx) +
-        dot(abs(sh.c5), 1.0f.xxx) +
-        dot(abs(sh.c6), 1.0f.xxx) +
-        dot(abs(sh.c7), 1.0f.xxx) +
-        dot(abs(sh.c8), 1.0f.xxx);
+        dot(abs(sh.c3), 1.0f.xxx);
+    if (SHCoefficientCount > 4u)
+    {
+        shEnergy +=
+            dot(abs(sh.c4), 1.0f.xxx) +
+            dot(abs(sh.c5), 1.0f.xxx) +
+            dot(abs(sh.c6), 1.0f.xxx) +
+            dot(abs(sh.c7), 1.0f.xxx) +
+            dot(abs(sh.c8), 1.0f.xxx);
+    }
     return shEnergy > 1e-6f ? shRadiance : probeRadiance;
 }
 
@@ -239,7 +258,8 @@ float3 ResolveFromScreenProbes(uint2 pixelPos, out float resolveWeight, out floa
     int2 baseProbe = int2(floor(probeSpace));
 
     float currentDepth = LoadLinearDepth(pixelPos);
-    float3 currentNormal = LoadGeoNormal(pixelPos);
+    float3 currentPixelNormal = LoadPixelNormal(pixelPos);
+    float3 currentGeoNormal = LoadGeoNormal(pixelPos);
     uint radius = clamp(GatherRadius, 1u, 3u);
 
     float3 sumRadiance = 0.0f.xxx;
@@ -268,16 +288,16 @@ float3 ResolveFromScreenProbes(uint2 pixelPos, out float resolveWeight, out floa
             float spatialWeight = exp(-dot(pixelDelta, pixelDelta) * 0.75f);
 
             float4 probeMeta = LoadProbeMeta(probeCoord);
-            float3 probeNormal = SafeNormalize(probeMeta.xyz, currentNormal);
+            float3 probeNormal = SafeNormalize(probeMeta.xyz, currentGeoNormal);
             float probeDepth = probeMeta.w;
             if (probeDepth <= 0.0f)
                 continue;
 
-            float3 probeRadiance = EvaluateProbeSH(probeCoord, currentNormal);
+            float3 probeRadiance = EvaluateProbeSH(probeCoord, currentPixelNormal);
 
             float depthDelta = abs(currentDepth - probeDepth) / max(currentDepth, 1e-3f);
             float endpointGeometryWeight = exp(-depthDelta * ResolveDepthWeight);
-            endpointGeometryWeight *= pow(saturate(dot(currentNormal, probeNormal)), ResolveNormalWeight);
+            endpointGeometryWeight *= pow(saturate(dot(currentGeoNormal, probeNormal)), ResolveNormalWeight);
 
             float endpointWeight = spatialWeight * endpointGeometryWeight;
             if (endpointWeight > fallbackWeight)
@@ -286,7 +306,7 @@ float3 ResolveFromScreenProbes(uint2 pixelPos, out float resolveWeight, out floa
                 fallbackProbeRadiance = probeRadiance;
             }
 
-            float edgeWeight = ComputeEdgeStopWeight(pixelPos, currentDepth, currentNormal, probePixel, probeDepth, probeNormal);
+            float edgeWeight = ComputeEdgeStopWeight(pixelPos, currentDepth, currentGeoNormal, probePixel, probeDepth, probeNormal);
             float weight = endpointWeight * edgeWeight;
             sumRadiance += probeRadiance * weight;
             sumWeight += weight;
@@ -322,7 +342,7 @@ float3 ApplyTemporalHistory(uint2 pixelPos, float3 currentRadiance, out float cu
     float currentLinearDepth = GetLinearDepthOpenGL(currentDepth, ProjectionParams.z, ProjectionParams.w);
     float prevLinearDepth = GetLinearDepthOpenGL(prevDepth, ProjectionParams.z, ProjectionParams.w);
 
-    float3 currentNormal = LoadGeoNormal(pixelPos);
+    float3 currentNormal = LoadPixelNormal(pixelPos);
     float3 prevNormal = SafeNormalize(PrevNormalTex.SampleLevel(BilinearClamp, prevUV, 0).xyz, currentNormal);
 
     float depthDelta = abs(currentLinearDepth - prevLinearDepth) / max(currentLinearDepth, 1e-3f);

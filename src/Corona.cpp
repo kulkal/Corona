@@ -322,6 +322,8 @@ namespace
 		{
 		case Corona::EDiffuseGIMode::SIMPLE_RAYTRACE:
 			return "Simple Raytrace";
+		case Corona::EDiffuseGIMode::SPATIAL_HASH:
+			return "Spatial Hash";
 		case Corona::EDiffuseGIMode::SCREEN_PROBE:
 			return "Screen Probe";
 		default:
@@ -335,6 +337,8 @@ namespace
 		{
 		case Corona::EDiffuseGIMode::SIMPLE_RAYTRACE:
 			return L"simple";
+		case Corona::EDiffuseGIMode::SPATIAL_HASH:
+			return L"spatial-hash";
 		case Corona::EDiffuseGIMode::SCREEN_PROBE:
 			return L"screen-probe";
 		default:
@@ -894,6 +898,8 @@ void Corona::ResetTemporalHistoryBuffers()
 	ClearTextureUAV(SpecularGIMoments[1].get(), clear2);
 	ClearTextureUAV(DiffuseGIRawAux.get(), clear4);
 	ClearTextureUAV(DiffuseGIRaw.get(), clear4);
+	ClearTextureUAV(DiffuseGIHashCachedAux.get(), clear4);
+	ClearTextureUAV(DiffuseGIHashCached.get(), clear4);
 	ClearTextureUAV(ScreenProbeGIResolved.get(), clear4);
 	ClearTextureUAV(ScreenProbeGIProbeDebug.get(), clear4);
 	ClearTextureUAV(ScreenProbeGIRadiance[0].get(), clear4);
@@ -932,8 +938,10 @@ void Corona::ResetAllAccumulationState(bool forceUpscaleReload)
 	bScreenProbeGIAtlasHistoryValid = false;
 	bScreenProbeGIHistoryValid = false;
 	bScreenProbeLightingBootstrapPending = false;
+	bSpatialHashGIHistoryValid = false;
 	ScreenProbeGIAtlasWriteIndex = 0;
 	ScreenProbeGIHistoryWriteIndex = 0;
+	SpatialHashGIWriteIndex = 0;
 	bPendingTemporalHistoryClear = true;
 	bResetTemporalStateNextUpdate = true;
 	bUseLightingBufferFallbackForToneMap = true;
@@ -977,8 +985,10 @@ void Corona::ReloadRenderResolutionAssets()
 	bScreenProbeGIAtlasHistoryValid = false;
 	bScreenProbeGIHistoryValid = false;
 	bScreenProbeLightingBootstrapPending = false;
+	bSpatialHashGIHistoryValid = false;
 	ScreenProbeGIAtlasWriteIndex = 0;
 	ScreenProbeGIHistoryWriteIndex = 0;
+	SpatialHashGIWriteIndex = 0;
 	bPendingTemporalHistoryClear = true;
 	bResetTemporalStateNextUpdate = true;
 	PrevViewProjMat = ViewProjMat;
@@ -1211,8 +1221,99 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 		{
 			if (giModeValue == L"screen-probe" || giModeValue == L"screen_probe" || giModeValue == L"screenprobe" || giModeValue == L"probe" || giModeValue == L"probes")
 				DiffuseGIMode = EDiffuseGIMode::SCREEN_PROBE;
+			else if (giModeValue == L"spatial-hash" || giModeValue == L"spatial_hash" || giModeValue == L"spatialhash" || giModeValue == L"hash" || giModeValue == L"sharc")
+				DiffuseGIMode = EDiffuseGIMode::SPATIAL_HASH;
 			else
 				DiffuseGIMode = EDiffuseGIMode::SIMPLE_RAYTRACE;
+			continue;
+		}
+
+		std::wstring spatialHashCellValue = ParseValueArg(arg, L"--spatial-hash-cell", L"-spatial-hash-cell", i);
+		if (!spatialHashCellValue.empty())
+		{
+			try
+			{
+				SpatialHashGICB.CellSize = std::clamp(std::stof(spatialHashCellValue), 4.0f, 256.0f);
+			}
+			catch (...)
+			{
+			}
+			continue;
+		}
+
+		std::wstring spatialHashBlendValue = ParseValueArg(arg, L"--spatial-hash-raw-blend", L"-spatial-hash-raw-blend", i);
+		if (spatialHashBlendValue.empty())
+			spatialHashBlendValue = ParseValueArg(arg, L"--spatial-hash-smoothing", L"-spatial-hash-smoothing", i);
+		if (!spatialHashBlendValue.empty())
+		{
+			try
+			{
+				SpatialHashGICB.SmoothingStrength = std::clamp(std::stof(spatialHashBlendValue), 0.0f, 1.0f);
+			}
+			catch (...)
+			{
+			}
+			continue;
+		}
+
+		std::wstring spatialHashInterpValue = ParseValueArg(arg, L"--spatial-hash-interp", L"-spatial-hash-interp", i);
+		if (spatialHashInterpValue.empty())
+			spatialHashInterpValue = ParseValueArg(arg, L"--spatial-hash-interpolation", L"-spatial-hash-interpolation", i);
+		if (!spatialHashInterpValue.empty())
+		{
+			try
+			{
+				SpatialHashGICB.InterpolationStrength = std::clamp(std::stof(spatialHashInterpValue), 0.0f, 1.0f);
+			}
+			catch (...)
+			{
+			}
+			continue;
+		}
+
+		std::wstring spatialHashRaysValue = ParseValueArg(arg, L"--spatial-hash-rays", L"-spatial-hash-rays", i);
+		if (!spatialHashRaysValue.empty())
+		{
+			try
+			{
+				const unsigned long value = std::stoul(spatialHashRaysValue);
+				RTSpatialHashGIViewParam.RaysPerCell = static_cast<UINT32>(std::clamp<unsigned long>(value, 1ul, 8ul));
+			}
+			catch (...)
+			{
+			}
+			continue;
+		}
+
+		std::wstring spatialHashBouncesValue = ParseValueArg(arg, L"--spatial-hash-bounces", L"-spatial-hash-bounces", i);
+		if (spatialHashBouncesValue.empty())
+			spatialHashBouncesValue = ParseValueArg(arg, L"--spatial-hash-depth", L"-spatial-hash-depth", i);
+		if (!spatialHashBouncesValue.empty())
+		{
+			try
+			{
+				const unsigned long value = std::stoul(spatialHashBouncesValue);
+				RTSpatialHashGIViewParam.MaxBounces = static_cast<UINT32>(std::clamp<unsigned long>(value, 1ul, 8ul));
+			}
+			catch (...)
+			{
+			}
+			continue;
+		}
+
+		std::wstring diffuseGIDumpFramesValue = ParseValueArg(arg, L"--diffuse-gi-dump-frames", L"-diffuse-gi-dump-frames", i);
+		if (diffuseGIDumpFramesValue.empty())
+			diffuseGIDumpFramesValue = ParseValueArg(arg, L"--gi-dump-frames", L"-gi-dump-frames", i);
+		if (!diffuseGIDumpFramesValue.empty())
+		{
+			try
+			{
+				const unsigned long value = std::stoul(diffuseGIDumpFramesValue);
+				DiffuseGIAutoDumpFrameCount = static_cast<UINT32>(std::clamp<unsigned long>(value, 4ul, 512ul));
+			}
+			catch (...)
+			{
+			}
 			continue;
 		}
 
@@ -1334,6 +1435,20 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 			{
 				const unsigned long value = std::stoul(screenProbeRaysValue);
 				RTScreenProbeGIViewParam.RaysPerProbe = static_cast<UINT32>(std::clamp<unsigned long>(value, 1ul, 4ul));
+			}
+			catch (...)
+			{
+			}
+			continue;
+		}
+
+		std::wstring screenProbeSHValue = ParseValueArg(arg, L"--screen-probe-sh", L"-screen-probe-sh", i);
+		if (!screenProbeSHValue.empty())
+		{
+			try
+			{
+				const unsigned long value = std::stoul(screenProbeSHValue);
+				ScreenProbeGICB.SHCoefficientCount = value <= 4ul ? 4u : 9u;
 			}
 			catch (...)
 			{
@@ -1629,6 +1744,9 @@ void Corona::InitializeAutoAADump()
 		std::filesystem::path logPath = std::filesystem::path(AutoAADumpDir) / L"dump_log.txt";
 		std::error_code ec;
 		std::filesystem::remove(logPath, ec);
+		{
+			std::wofstream clearLog(logPath, std::ios::trunc);
+		}
 
 		StartupRenderingMode = ERenderingMode::HYBRID;
 		RenderingMode = StartupRenderingMode;
@@ -1636,7 +1754,7 @@ void Corona::InitializeAutoAADump()
 		bEnableDiffuseGI = true;
 		DiffuseGIMode = EDiffuseGIMode::SIMPLE_RAYTRACE;
 		ResetAllAccumulationState(false);
-		AppendAutoAADumpLog(L"[diffuse_gi_simple] begin frames=96, aa=off");
+		AppendAutoAADumpLog(L"[diffuse_gi_simple] begin frames=" + std::to_wstring(DiffuseGIAutoDumpFrameCount) + L", aa=off");
 		return;
 	}
 
@@ -1655,6 +1773,9 @@ void Corona::InitializeAutoAADump()
 		std::filesystem::path logPath = std::filesystem::path(AutoAADumpDir) / L"dump_log.txt";
 		std::error_code ec;
 		std::filesystem::remove(logPath, ec);
+		{
+			std::wofstream clearLog(logPath, std::ios::trunc);
+		}
 
 		StartupRenderingMode = ERenderingMode::HYBRID;
 		RenderingMode = StartupRenderingMode;
@@ -1699,6 +1820,9 @@ void Corona::InitializeAutoAADump()
 	std::filesystem::path logPath = std::filesystem::path(AutoAADumpDir) / L"dump_log.txt";
 	std::error_code ec;
 	std::filesystem::remove(logPath, ec);
+	{
+		std::wofstream clearLog(logPath, std::ios::trunc);
+	}
 
 	StartupRenderingMode = ERenderingMode::HYBRID;
 	RenderingMode = StartupRenderingMode;
@@ -1840,14 +1964,19 @@ void Corona::AdvanceAutoAADump(Texture* backbuffer)
 
 	if (bDiffuseGIAutoDumpMode)
 	{
-		constexpr UINT32 kDiffuseGIDumpFrames = 96;
-		constexpr UINT32 kNumDiffuseGIPhases = 2;
+		const UINT32 kDiffuseGIDumpFrames = std::max(1u, DiffuseGIAutoDumpFrameCount);
+		constexpr UINT32 kNumDiffuseGIPhases = 3;
 		if (AutoAADumpPhase >= kNumDiffuseGIPhases)
 			return;
 
-		const bool bScreenProbePhase = AutoAADumpPhase == 1;
-		const EDiffuseGIMode targetMode = bScreenProbePhase ? EDiffuseGIMode::SCREEN_PROBE : EDiffuseGIMode::SIMPLE_RAYTRACE;
-		const wchar_t* currentPhaseName = bScreenProbePhase ? L"diffuse_gi_screen_probe" : L"diffuse_gi_simple";
+		const bool bSpatialHashPhase = AutoAADumpPhase == 1;
+		const bool bScreenProbePhase = AutoAADumpPhase == 2;
+		const EDiffuseGIMode targetMode =
+			bScreenProbePhase ? EDiffuseGIMode::SCREEN_PROBE :
+			(bSpatialHashPhase ? EDiffuseGIMode::SPATIAL_HASH : EDiffuseGIMode::SIMPLE_RAYTRACE);
+		const wchar_t* currentPhaseName =
+			bScreenProbePhase ? L"diffuse_gi_screen_probe" :
+			(bSpatialHashPhase ? L"diffuse_gi_spatial_hash" : L"diffuse_gi_simple");
 
 		if (RenderingMode != ERenderingMode::HYBRID || AntiAliasingMode != EAntiAliasingMode::OFF || DiffuseGIMode != targetMode || !bEnableDiffuseGI)
 		{
@@ -1887,6 +2016,7 @@ void Corona::AdvanceAutoAADump(Texture* backbuffer)
 				L", accumulated=" + std::to_wstring(IndirectAccumulatedFrames) +
 				L", mode=" + std::wstring(GetDiffuseGIModeNameW(DiffuseGIMode)));
 			dumpResource(L"gi_diffuse_raw", DiffuseGIRaw.get(), true);
+			dumpResource(L"gi_diffuse_hash_cache", DiffuseGIHashCached.get(), true);
 			dumpResource(L"screen_probe_atlas", ScreenProbeGIRadiance[ScreenProbeGIAtlasWriteIndex].get(), true);
 			dumpResource(L"screen_probe_sh", ScreenProbeGISH[ScreenProbeGIAtlasWriteIndex][0].get(), false);
 			dumpResource(L"screen_probe_meta", ScreenProbeGIMetadata[ScreenProbeGIAtlasWriteIndex].get(), false);
@@ -1906,9 +2036,12 @@ void Corona::AdvanceAutoAADump(Texture* backbuffer)
 		++AutoAADumpPhase;
 		if (AutoAADumpPhase < kNumDiffuseGIPhases)
 		{
-			DiffuseGIMode = EDiffuseGIMode::SCREEN_PROBE;
+			DiffuseGIMode = AutoAADumpPhase == 1 ? EDiffuseGIMode::SPATIAL_HASH : EDiffuseGIMode::SCREEN_PROBE;
 			ResetAllAccumulationState(false);
-			AppendAutoAADumpLog(L"[diffuse_gi_screen_probe] begin frames=96, aa=off");
+			AppendAutoAADumpLog(
+				std::wstring(AutoAADumpPhase == 1 ? L"[diffuse_gi_spatial_hash]" : L"[diffuse_gi_screen_probe]") +
+				L" begin frames=" + std::to_wstring(kDiffuseGIDumpFrames) +
+				L", aa=off");
 			return;
 		}
 
@@ -3268,6 +3401,12 @@ void Corona::LoadAssets()
 		InitScreenProbeGIPass();
 		AppendVulkanRuntimeTrace(L"[LoadAssets] after InitScreenProbeGIPass");
 	}
+	if (!bVulkanBackend && bSupportsTemporalDenoise)
+	{
+		AppendVulkanRuntimeTrace(L"[LoadAssets] before InitSpatialHashGIPass");
+		InitSpatialHashGIPass();
+		AppendVulkanRuntimeTrace(L"[LoadAssets] after InitSpatialHashGIPass");
+	}
 	if (bSupportsTemporalDenoise || bSupportsSpatialDenoise)
 	{
 		AppendVulkanRuntimeTrace(L"[LoadAssets] before InitSpatialDenoisingPass");
@@ -3436,6 +3575,45 @@ void Corona::LoadAssets()
 	DiffuseGIRaw = createTexture2D(HybridFloat4UAVFormat, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
 
 	NAME_D3D12_OBJECT(DiffuseGIRaw->resource);
+
+	DiffuseGIHashCachedAux = createTexture2D(HybridFloat4UAVFormat, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
+
+	NAME_D3D12_OBJECT(DiffuseGIHashCachedAux->resource);
+
+	DiffuseGIHashCached = createTexture2D(HybridFloat4UAVFormat, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
+
+	NAME_D3D12_OBJECT(DiffuseGIHashCached->resource);
+
+	SpatialHashGIUpdateKeys = createBuffer(SpatialHashGIEntryCount, sizeof(UINT32), true);
+	SpatialHashGICellPosition = createBuffer(SpatialHashGIEntryCount, sizeof(float) * 4u, true);
+	SpatialHashGICellNormal = createBuffer(SpatialHashGIEntryCount, sizeof(float) * 4u, true);
+	SpatialHashGICellScore = createBuffer(SpatialHashGIEntryCount, sizeof(UINT32), true);
+	for (UINT coefficientIndex = 0; coefficientIndex < SpatialHashGISHCoefficientCount; ++coefficientIndex)
+		SpatialHashGITraceSH[coefficientIndex] = createBuffer(SpatialHashGIEntryCount, sizeof(float) * 4u, true);
+	SpatialHashGIResolvedKeys[0] = createBuffer(SpatialHashGIEntryCount, sizeof(UINT32), true);
+	SpatialHashGIResolvedKeys[1] = createBuffer(SpatialHashGIEntryCount, sizeof(UINT32), true);
+	for (UINT historyIndex = 0; historyIndex < 2u; ++historyIndex)
+	{
+		for (UINT coefficientIndex = 0; coefficientIndex < SpatialHashGISHCoefficientCount; ++coefficientIndex)
+			SpatialHashGIResolvedSH[historyIndex][coefficientIndex] = createBuffer(SpatialHashGIEntryCount, sizeof(float) * 4u, true);
+	}
+	if (SpatialHashGIUpdateKeys) SpatialHashGIUpdateKeys->MakeStructuredBufferSRV();
+	if (SpatialHashGICellPosition) SpatialHashGICellPosition->MakeStructuredBufferSRV();
+	if (SpatialHashGICellNormal) SpatialHashGICellNormal->MakeStructuredBufferSRV();
+	if (SpatialHashGICellScore) SpatialHashGICellScore->MakeStructuredBufferSRV();
+	for (UINT coefficientIndex = 0; coefficientIndex < SpatialHashGISHCoefficientCount; ++coefficientIndex)
+	{
+		if (SpatialHashGITraceSH[coefficientIndex]) SpatialHashGITraceSH[coefficientIndex]->MakeStructuredBufferSRV();
+	}
+	if (SpatialHashGIResolvedKeys[0]) SpatialHashGIResolvedKeys[0]->MakeStructuredBufferSRV();
+	if (SpatialHashGIResolvedKeys[1]) SpatialHashGIResolvedKeys[1]->MakeStructuredBufferSRV();
+	for (UINT historyIndex = 0; historyIndex < 2u; ++historyIndex)
+	{
+		for (UINT coefficientIndex = 0; coefficientIndex < SpatialHashGISHCoefficientCount; ++coefficientIndex)
+		{
+			if (SpatialHashGIResolvedSH[historyIndex][coefficientIndex]) SpatialHashGIResolvedSH[historyIndex][coefficientIndex]->MakeStructuredBufferSRV();
+		}
+	}
 
 	ScreenProbeGIResolved = createTexture2D(HybridFloat4UAVFormat, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
 
@@ -4005,6 +4183,59 @@ void Corona::InitScreenProbeGIPass()
 
 	if (tempPSO->InitCS(GetAssetFullPath(L"Shaders\\ScreenProbeGI.hlsl"), "ScreenProbeGI"))
 		ScreenProbeGIPSO = tempPSO;
+}
+
+void Corona::InitSpatialHashGIPass()
+{
+	auto createSpatialHashPSO = [&](const std::string& entryPoint)
+	{
+		shared_ptr<ComputePipelineStateObject> pso = renderBackend->CreateComputePipelineStateObject();
+		if (!pso)
+			return shared_ptr<ComputePipelineStateObject>();
+
+		pso->BindSRV("DepthTex", 0, 1);
+		pso->BindSRV("WorldNormalTex", 1, 1);
+		pso->BindSRV("GeoNormalTex", 2, 1);
+		pso->BindSRV("UpdateKeysIn", 5, 1);
+		pso->BindSRV("CellPositionIn", 6, 1);
+		pso->BindSRV("CellNormalIn", 7, 1);
+		pso->BindSRV("TraceSH0In", 8, 1);
+		pso->BindSRV("TraceSH1In", 9, 1);
+		pso->BindSRV("TraceSH2In", 10, 1);
+		pso->BindSRV("TraceSH3In", 11, 1);
+		pso->BindSRV("PrevResolvedKeys", 12, 1);
+		pso->BindSRV("PrevResolvedSH0", 13, 1);
+		pso->BindSRV("PrevResolvedSH1", 14, 1);
+		pso->BindSRV("PrevResolvedSH2", 15, 1);
+		pso->BindSRV("PrevResolvedSH3", 16, 1);
+		pso->BindSRV("ResolvedKeysIn", 17, 1);
+		pso->BindSRV("ResolvedSH0In", 18, 1);
+		pso->BindSRV("ResolvedSH1In", 19, 1);
+		pso->BindSRV("ResolvedSH2In", 20, 1);
+		pso->BindSRV("ResolvedSH3In", 21, 1);
+		pso->BindUAV("UpdateKeysOut", 0);
+		pso->BindUAV("CellPositionOut", 1);
+		pso->BindUAV("CellNormalOut", 2);
+		pso->BindUAV("CellScoreOut", 3);
+		pso->BindUAV("ResolvedKeysOut", 4);
+		pso->BindUAV("ResolvedSH0Out", 5);
+		pso->BindUAV("ResolvedSH1Out", 6);
+		pso->BindUAV("ResolvedSH2Out", 7);
+		pso->BindUAV("ResolvedSH3Out", 8);
+		pso->BindUAV("OutGIHashColor", 9);
+		pso->BindUAV("OutGIHashSH", 10);
+		pso->BindCBV("SpatialHashGIConstant", 0, sizeof(SpatialHashGIConstant));
+
+		if (!pso->InitCS(GetAssetFullPath(L"Shaders\\SpatialHashDiffuseGI.hlsl"), entryPoint))
+			return shared_ptr<ComputePipelineStateObject>();
+
+		return pso;
+	};
+
+	SpatialHashGIClearPSO = createSpatialHashPSO("SpatialHashClear");
+	SpatialHashGIUpdatePSO = createSpatialHashPSO("SpatialHashUpdate");
+	SpatialHashGIResolvePSO = createSpatialHashPSO("SpatialHashResolve");
+	SpatialHashGIQueryPSO = createSpatialHashPSO("SpatialHashQuery");
 }
 
 void Corona::InitBloomPass()
@@ -5710,6 +5941,7 @@ void Corona::OnUpdate()
 		bTemporalDenoiserHistoryValid = false;
 		bScreenProbeGIAtlasHistoryValid = false;
 		bScreenProbeGIHistoryValid = false;
+		bSpatialHashGIHistoryValid = false;
 		bResetTemporalStateNextUpdate = false;
 	}
 
@@ -5731,18 +5963,33 @@ void Corona::OnUpdate()
 		glm::length(SkyColorTop - PrevIndirectSkyColorTop) > 0.0001f ||
 		glm::length(SkyColorBottom - PrevIndirectSkyColorBottom) > 0.0001f ||
 		abs(SkyIntensity - PrevIndirectSkyIntensity) > 0.0001f;
+	const bool indirectLightingChanged = indirectLightDirChanged || indirectLightIntensityChanged || indirectSkyChanged;
+	const bool bUseSpatialHashLightingHistory = DiffuseGIMode == EDiffuseGIMode::SPATIAL_HASH && bSpatialHashGIHistoryValid;
+	float spatialHashHistorySampleDecay = 1.0f;
 
-	if (indirectLightDirChanged || indirectLightIntensityChanged || indirectSkyChanged)
+	if (indirectLightingChanged)
 	{
-		IndirectAccumulatedFrames = 0;
-		bTemporalDenoiserHistoryValid = false;
-		if (DiffuseGIMode == EDiffuseGIMode::SCREEN_PROBE && (bScreenProbeGIAtlasHistoryValid || bScreenProbeGIHistoryValid))
-			bScreenProbeLightingBootstrapPending = true;
-		else
+		if (bUseSpatialHashLightingHistory)
 		{
+			spatialHashHistorySampleDecay = 0.15f;
+			IndirectAccumulatedFrames = std::min(IndirectAccumulatedFrames, 7u);
 			bScreenProbeGIAtlasHistoryValid = false;
 			bScreenProbeGIHistoryValid = false;
 			bScreenProbeLightingBootstrapPending = false;
+		}
+		else
+		{
+			IndirectAccumulatedFrames = 0;
+			bTemporalDenoiserHistoryValid = false;
+			bSpatialHashGIHistoryValid = false;
+			if (DiffuseGIMode == EDiffuseGIMode::SCREEN_PROBE && (bScreenProbeGIAtlasHistoryValid || bScreenProbeGIHistoryValid))
+				bScreenProbeLightingBootstrapPending = true;
+			else
+			{
+				bScreenProbeGIAtlasHistoryValid = false;
+				bScreenProbeGIHistoryValid = false;
+				bScreenProbeLightingBootstrapPending = false;
+			}
 		}
 		PrevIndirectAccumLightDir = normalizedLightDir;
 		PrevIndirectAccumLightIntensity = LightIntensity;
@@ -5818,6 +6065,20 @@ void Corona::OnUpdate()
 	RTScreenProbeGIViewParam.LightColor = lightColor;
 	RTScreenProbeGIViewParam.LightingBootstrap = bScreenProbeLightingBootstrapPending ? 1u : 0u;
 	RTScreenProbeGIViewParam.BootstrapRays = kScreenProbeLightingBootstrapRays;
+	RTScreenProbeGIViewParam.SHCoefficientCount = ScreenProbeGICB.SHCoefficientCount <= 4u ? 4u : 9u;
+
+	RTSpatialHashGIViewParam.LightDir = glm::vec4(normalizedLightDir, LightIntensity);
+	RTSpatialHashGIViewParam.HashEntryCount = SpatialHashGIEntryCount;
+	RTSpatialHashGIViewParam.FrameCounter = FrameCounter;
+	RTSpatialHashGIViewParam.BlueNoiseOffsetStride = RTGIViewParam.BlueNoiseOffsetStride;
+	RTSpatialHashGIViewParam.NoiseMode = rayNoiseMode;
+	RTSpatialHashGIViewParam.ViewSpreadAngle = glm::tan(Fov * 0.5f) / (0.5f * GetRenderHeight());
+	RTSpatialHashGIViewParam.CellSize = SpatialHashGICB.CellSize;
+	RTSpatialHashGIViewParam.RayBias = std::clamp(SpatialHashGICB.CellSize * 0.02f, 0.05f, 0.5f);
+	RTSpatialHashGIViewParam.SkyColorTop = SkyColorTop;
+	RTSpatialHashGIViewParam.SkyColorBottom = SkyColorBottom;
+	RTSpatialHashGIViewParam.SkyIntensity = SkyIntensity;
+	RTSpatialHashGIViewParam.LightColor = lightColor;
 	
 	// Path Tracing view param
 	PathTracingViewParam.ViewMatrix = glm::transpose(ViewMat);
@@ -5860,6 +6121,16 @@ void Corona::OnUpdate()
 	ScreenProbeGICB.RTSize.y = GetRenderHeight();
 	ScreenProbeGICB.ProbeGridSize = screenProbeGridSize;
 	ScreenProbeGICB.FrameIndex = FrameCounter;
+	ScreenProbeGICB.SHCoefficientCount = ScreenProbeGICB.SHCoefficientCount <= 4u ? 4u : 9u;
+
+	SpatialHashGICB.InvViewMatrix = glm::transpose(InvViewMat);
+	SpatialHashGICB.InvProjMatrix = glm::transpose(UnjitteredInvProjMat);
+	SpatialHashGICB.ProjectionParams = RTGIViewParam.ProjectionParams;
+	SpatialHashGICB.RTSize = glm::vec2(GetRenderWidth(), GetRenderHeight());
+	SpatialHashGICB.HashEntryCount = SpatialHashGIEntryCount;
+	SpatialHashGICB.HashEntryMask = SpatialHashGIEntryCount - 1u;
+	SpatialHashGICB.FrameIndex = FrameCounter;
+	SpatialHashGICB.HistorySampleDecay = spatialHashHistorySampleDecay;
 
 	// Don't increment frame counter in debug mode (to avoid accumulation noise)
 	if (PathTracingViewParam.DebugMode == 0)
@@ -5970,6 +6241,12 @@ void Corona::OnRender()
 				AppendVulkanRuntimeTrace(L"[OnRender] before ScreenProbeRaytraceGIPass");
 				ScreenProbeRaytraceGIPass();
 				AppendVulkanRuntimeTrace(L"[OnRender] after ScreenProbeRaytraceGIPass");
+			}
+			else if (DiffuseGIMode == EDiffuseGIMode::SPATIAL_HASH)
+			{
+				AppendVulkanRuntimeTrace(L"[OnRender] before SpatialHashGIPass");
+				SpatialHashGIPass();
+				AppendVulkanRuntimeTrace(L"[OnRender] after SpatialHashGIPass");
 			}
 			else
 			{
@@ -6492,7 +6769,7 @@ void Corona::OnRender()
 			ImGui::Text("Diffuse GI");
 			if (ImGui::Checkbox("Enable Diffuse GI", &bEnableDiffuseGI)) bLightingChanged = true;
 
-			static const char* DiffuseGIModes[] = { "Simple Raytrace", "Screen Probe" };
+			static const char* DiffuseGIModes[] = { "Simple Raytrace", "Spatial Hash", "Screen Probe" };
 			int DiffuseGIModeIndex = static_cast<int>(DiffuseGIMode);
 			const bool bDiffuseGIMethodAvailable = RenderingMode == ERenderingMode::HYBRID;
 			if (!bDiffuseGIMethodAvailable)
@@ -6530,6 +6807,13 @@ void Corona::OnRender()
 					RTScreenProbeGIViewParam.RaysPerProbe = static_cast<UINT32>(raysPerProbe);
 					bLightingChanged = true;
 				}
+				static const char* ScreenProbeSHModes[] = { "4 coeffs (L0 + L1)", "9 coeffs (L0 + L1 + L2)" };
+				int screenProbeSHMode = ScreenProbeGICB.SHCoefficientCount <= 4u ? 0 : 1;
+				if (ImGui::Combo("Screen Probe SH Coefficients", &screenProbeSHMode, ScreenProbeSHModes, IM_ARRAYSIZE(ScreenProbeSHModes)))
+				{
+					ScreenProbeGICB.SHCoefficientCount = screenProbeSHMode == 0 ? 4u : 9u;
+					bLightingChanged = true;
+				}
 				if (ImGui::SliderFloat("Screen Probe Raw Blend", &ScreenProbeGICB.RawBlend, 0.0f, 0.35f, "%.3f"))
 					bLightingChanged = true;
 				ImGui::TextDisabled("Screen Probe history converges with a running 1/N radiance average.");
@@ -6547,6 +6831,29 @@ void Corona::OnRender()
 					ScreenProbeGICB.EdgeSampleCount = static_cast<UINT32>(edgeSamples);
 					bLightingChanged = true;
 				}
+			}
+			else if (DiffuseGIMode == EDiffuseGIMode::SPATIAL_HASH)
+			{
+				if (ImGui::SliderFloat("Spatial Hash Cell Size", &SpatialHashGICB.CellSize, 4.0f, 256.0f))
+					bLightingChanged = true;
+				int raysPerCell = static_cast<int>(RTSpatialHashGIViewParam.RaysPerCell);
+				if (ImGui::SliderInt("Spatial Hash Rays / Cell", &raysPerCell, 1, 8))
+				{
+					RTSpatialHashGIViewParam.RaysPerCell = static_cast<UINT32>(raysPerCell);
+					bLightingChanged = true;
+				}
+				int maxBounces = static_cast<int>(RTSpatialHashGIViewParam.MaxBounces);
+				if (ImGui::SliderInt("Spatial Hash Max Bounces", &maxBounces, 1, 8))
+				{
+					RTSpatialHashGIViewParam.MaxBounces = static_cast<UINT32>(maxBounces);
+					bLightingChanged = true;
+				}
+				if (ImGui::SliderFloat("Spatial Hash Interpolation", &SpatialHashGICB.InterpolationStrength, 0.0f, 1.0f))
+					bLightingChanged = true;
+				if (ImGui::SliderFloat("Spatial Hash Smoothing", &SpatialHashGICB.SmoothingStrength, 0.0f, 1.0f))
+					bLightingChanged = true;
+				if (ImGui::SliderFloat("Spatial Hash Temporal Alpha", &SpatialHashGICB.TemporalAlpha, 0.02f, 1.0f))
+					bLightingChanged = true;
 			}
 			static const char* RayNoiseModes[] = { "Blue Noise", "R2 Low Discrepancy", "Stable Hash" };
 			int RayNoiseModeIndex = static_cast<int>(RayNoiseMode);
@@ -7289,8 +7596,21 @@ void Corona::TemporalDenoisingPass()
 
 	TemporalDenoisingFilterPSO->SetTextureSRV("DepthTex", UnjitteredDepthBuffers[ColorBufferWriteIndex].get());
 	TemporalDenoisingFilterPSO->SetTextureSRV("NormalTex", NormalBuffers[ColorBufferWriteIndex].get());
-	TemporalDenoisingFilterPSO->SetTextureSRV("InGIResultSHTex", DiffuseGIRawAux.get());
-	TemporalDenoisingFilterPSO->SetTextureSRV("InGIResultColorTex", DiffuseGIRaw.get());
+	const bool bUseSpatialHashDiffuseInput =
+		DiffuseGIMode == EDiffuseGIMode::SPATIAL_HASH &&
+		bSpatialHashGIHistoryValid &&
+		DiffuseGIHashCached &&
+		DiffuseGIHashCachedAux;
+	Texture* temporalDiffuseInputAux =
+		bUseSpatialHashDiffuseInput ?
+		DiffuseGIHashCachedAux.get() :
+		DiffuseGIRawAux.get();
+	Texture* temporalDiffuseInput =
+		bUseSpatialHashDiffuseInput ?
+		DiffuseGIHashCached.get() :
+		DiffuseGIRaw.get();
+	TemporalDenoisingFilterPSO->SetTextureSRV("InGIResultSHTex", temporalDiffuseInputAux);
+	TemporalDenoisingFilterPSO->SetTextureSRV("InGIResultColorTex", temporalDiffuseInput);
 	TemporalDenoisingFilterPSO->SetTextureSRV("InGIResultSHTexPrev", DiffuseGITemporalAux[ReadIndex].get());
 	TemporalDenoisingFilterPSO->SetTextureSRV("InGIResultColorTexPrev", DiffuseGITemporal[ReadIndex].get());
 	TemporalDenoisingFilterPSO->SetTextureSRV("VelocityTex", VelocityBuffer.get());
@@ -7360,6 +7680,7 @@ void Corona::RecompileShaders()
 	InitPathTracingPass();
 	InitSpatialDenoisingPass();
 	InitTemporalDenoisingPass();
+	InitSpatialHashGIPass();
 	InitGBufferPass();
 	InitToneMapPass();
 	InitLightingPass();
@@ -7636,6 +7957,43 @@ void Corona::InitRTPSO()
 
 		if (tempPSO->InitRS("Shaders\\ScreenProbeRaytracedGI.hlsl"))
 			PSO_RT_SCREEN_PROBE_GI = tempPSO;
+	}
+
+	// spatial hash cell ray GI rtpso
+	if (bInitGIRT)
+	{
+		shared_ptr<RTPipelineStateObject> tempPSO = renderBackend->CreateRTPipelineStateObject();
+		if (!tempPSO)
+			return;
+		tempPSO->SetNumInstances(static_cast<uint32_t>(vecBLAS.size()));
+
+		tempPSO->AddHitGroup("HitGroup", "chs", "");
+		tempPSO->AddShader("rayGen", RTPipelineStateObject::RAYGEN);
+
+		tempPSO->BindUAV("global", "TraceSH0", 0);
+		tempPSO->BindUAV("global", "TraceSH1", 1);
+		tempPSO->BindUAV("global", "TraceSH2", 2);
+		tempPSO->BindUAV("global", "TraceSH3", 3);
+		tempPSO->BindSRV("global", "gRtScene", 0);
+		tempPSO->BindSRV("global", "CellKeys", 1);
+		tempPSO->BindSRV("global", "CellPosition", 2);
+		tempPSO->BindSRV("global", "CellNormal", 3);
+		tempPSO->BindSRV("global", "BlueNoiseTex", 4);
+		tempPSO->BindCBV("global", "ViewParameter", 0, sizeof(RTSpatialHashGIViewParamCB), 1);
+		tempPSO->BindSampler("global", "sampleWrap", 0);
+
+		tempPSO->AddShader("miss", RTPipelineStateObject::MISS);
+		tempPSO->AddShader("missShadow", RTPipelineStateObject::MISS);
+
+		tempPSO->AddShader("chs", RTPipelineStateObject::HIT);
+		tempPSO->BindSRV("chs", "vertices", 5);
+		tempPSO->BindSRV("chs", "indices", 6);
+		tempPSO->BindSRV("chs", "AlbedoTex", 7);
+		tempPSO->BindSRV("chs", "InstanceProperty", 8);
+		tempPSO->Configure(1, sizeof(float) * 12, sizeof(float) * 2);
+
+		if (tempPSO->InitRS("Shaders\\SpatialHashCellGI.hlsl"))
+			PSO_RT_SPATIAL_HASH_GI = tempPSO;
 	}
 }
 
@@ -7943,6 +8301,186 @@ void Corona::RaytraceGIPass()
 	renderBackend->TransitionTexture(DiffuseGIRaw.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
 }
 
+void Corona::SpatialHashGIPass()
+{
+	auto hasSpatialHashSHBuffers = [&]()
+	{
+		for (UINT coefficientIndex = 0; coefficientIndex < SpatialHashGISHCoefficientCount; ++coefficientIndex)
+		{
+			if (!SpatialHashGITraceSH[coefficientIndex])
+				return false;
+			if (!SpatialHashGIResolvedSH[0][coefficientIndex] || !SpatialHashGIResolvedSH[1][coefficientIndex])
+				return false;
+		}
+		return true;
+	};
+
+	if (!TLAS || !PSO_RT_SPATIAL_HASH_GI ||
+		!SpatialHashGIClearPSO || !SpatialHashGIUpdatePSO || !SpatialHashGIResolvePSO || !SpatialHashGIQueryPSO ||
+		!SpatialHashGIUpdateKeys || !SpatialHashGICellPosition || !SpatialHashGICellNormal || !SpatialHashGICellScore ||
+		!SpatialHashGIResolvedKeys[0] || !SpatialHashGIResolvedKeys[1] ||
+		!hasSpatialHashSHBuffers() ||
+		!DiffuseGIHashCached || !DiffuseGIHashCachedAux)
+		return;
+
+	if (renderBackend && renderBackend->GetAPI() != ERenderBackendAPI::D3D12)
+		return;
+
+#if USE_AFTERMATH
+	renderBackend->EmitGpuCrashMarker("SpatialHashGIPass");
+#endif
+	if (renderBackend && renderBackend->GetAPI() == ERenderBackendAPI::D3D12)
+	{
+		PIXScopedEvent(renderBackend->GetGraphicsCommandList(), PIX_COLOR(rand() % 255, rand() % 255, rand() % 255), "SpatialHashGIPass");
+	}
+
+	SpatialHashGIWriteIndex = 1u - SpatialHashGIWriteIndex;
+	const UINT32 writeIndex = SpatialHashGIWriteIndex;
+	const UINT32 readIndex = 1u - writeIndex;
+
+	SpatialHashGICB.HashEntryCount = SpatialHashGIEntryCount;
+	SpatialHashGICB.HashEntryMask = SpatialHashGIEntryCount - 1u;
+	SpatialHashGICB.RTSize = glm::vec2(GetRenderWidth(), GetRenderHeight());
+	SpatialHashGICB.FrameIndex = FrameCounter;
+	SpatialHashGICB.HistoryValid = bSpatialHashGIHistoryValid ? 1u : 0u;
+	SpatialHashGICB.MaxProbeSteps = std::clamp(SpatialHashGICB.MaxProbeSteps, 1u, 16u);
+	SpatialHashGICB.CellSize = std::clamp(SpatialHashGICB.CellSize, 4.0f, 256.0f);
+	SpatialHashGICB.HistorySampleDecay = std::clamp(SpatialHashGICB.HistorySampleDecay, 0.0f, 1.0f);
+	SpatialHashGICB.SmoothingStrength = std::clamp(SpatialHashGICB.SmoothingStrength, 0.0f, 1.0f);
+	SpatialHashGICB.TemporalAlpha = std::clamp(SpatialHashGICB.TemporalAlpha, 0.02f, 1.0f);
+	SpatialHashGICB.InterpolationStrength = std::clamp(SpatialHashGICB.InterpolationStrength, 0.0f, 1.0f);
+	RTSpatialHashGIViewParam.HashEntryCount = SpatialHashGIEntryCount;
+	RTSpatialHashGIViewParam.FrameCounter = FrameCounter;
+	RTSpatialHashGIViewParam.RaysPerCell = std::clamp(RTSpatialHashGIViewParam.RaysPerCell, 1u, 8u);
+	RTSpatialHashGIViewParam.MaxBounces = std::clamp(RTSpatialHashGIViewParam.MaxBounces, 1u, 8u);
+	RTSpatialHashGIViewParam.CellSize = SpatialHashGICB.CellSize;
+	RTSpatialHashGIViewParam.RayBias = std::clamp(SpatialHashGICB.CellSize * 0.02f, 0.05f, 0.5f);
+	RTSpatialHashGIViewParam.ViewSpreadAngle = glm::tan(Fov * 0.5f) / (0.5f * GetRenderHeight());
+
+	renderBackend->TransitionBuffer(SpatialHashGIUpdateKeys.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
+	renderBackend->TransitionBuffer(SpatialHashGICellPosition.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
+	renderBackend->TransitionBuffer(SpatialHashGICellNormal.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
+	renderBackend->TransitionBuffer(SpatialHashGICellScore.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
+	renderBackend->TransitionBuffer(SpatialHashGIResolvedKeys[writeIndex].get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
+	for (UINT coefficientIndex = 0; coefficientIndex < SpatialHashGISHCoefficientCount; ++coefficientIndex)
+	{
+		renderBackend->TransitionBuffer(SpatialHashGITraceSH[coefficientIndex].get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
+		renderBackend->TransitionBuffer(SpatialHashGIResolvedSH[writeIndex][coefficientIndex].get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
+	}
+
+	SpatialHashGIClearPSO->SetBufferUAV("UpdateKeysOut", SpatialHashGIUpdateKeys.get());
+	SpatialHashGIClearPSO->SetBufferUAV("CellPositionOut", SpatialHashGICellPosition.get());
+	SpatialHashGIClearPSO->SetBufferUAV("CellNormalOut", SpatialHashGICellNormal.get());
+	SpatialHashGIClearPSO->SetBufferUAV("CellScoreOut", SpatialHashGICellScore.get());
+	SpatialHashGIClearPSO->SetBufferUAV("ResolvedKeysOut", SpatialHashGIResolvedKeys[writeIndex].get());
+	SpatialHashGIClearPSO->SetBufferUAV("ResolvedSH0Out", SpatialHashGIResolvedSH[writeIndex][0].get());
+	SpatialHashGIClearPSO->SetBufferUAV("ResolvedSH1Out", SpatialHashGIResolvedSH[writeIndex][1].get());
+	SpatialHashGIClearPSO->SetBufferUAV("ResolvedSH2Out", SpatialHashGIResolvedSH[writeIndex][2].get());
+	SpatialHashGIClearPSO->SetBufferUAV("ResolvedSH3Out", SpatialHashGIResolvedSH[writeIndex][3].get());
+	SpatialHashGIClearPSO->SetCBVValue("SpatialHashGIConstant", &SpatialHashGICB);
+	SpatialHashGIClearPSO->Apply();
+	renderBackend->Dispatch((SpatialHashGIEntryCount + 255u) / 256u, 1u, 1u);
+
+	SpatialHashGIUpdatePSO->SetTextureSRV("DepthTex", UnjitteredDepthBuffers[ColorBufferWriteIndex].get());
+	SpatialHashGIUpdatePSO->SetTextureSRV("WorldNormalTex", NormalBuffers[ColorBufferWriteIndex].get());
+	SpatialHashGIUpdatePSO->SetTextureSRV("GeoNormalTex", GeomNormalBuffer.get());
+	SpatialHashGIUpdatePSO->SetBufferUAV("UpdateKeysOut", SpatialHashGIUpdateKeys.get());
+	SpatialHashGIUpdatePSO->SetBufferUAV("CellPositionOut", SpatialHashGICellPosition.get());
+	SpatialHashGIUpdatePSO->SetBufferUAV("CellNormalOut", SpatialHashGICellNormal.get());
+	SpatialHashGIUpdatePSO->SetBufferUAV("CellScoreOut", SpatialHashGICellScore.get());
+	SpatialHashGIUpdatePSO->SetCBVValue("SpatialHashGIConstant", &SpatialHashGICB);
+	SpatialHashGIUpdatePSO->Apply();
+	renderBackend->Dispatch((GetRenderWidth() + 7u) / 8u, (GetRenderHeight() + 7u) / 8u, 1u);
+
+	renderBackend->TransitionBuffer(SpatialHashGIUpdateKeys.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
+	renderBackend->TransitionBuffer(SpatialHashGICellPosition.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
+	renderBackend->TransitionBuffer(SpatialHashGICellNormal.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
+	renderBackend->TransitionBuffer(SpatialHashGICellScore.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
+
+	PSO_RT_SPATIAL_HASH_GI->SetNumInstances(static_cast<uint32_t>(vecBLAS.size()));
+	PSO_RT_SPATIAL_HASH_GI->BeginShaderTable();
+	PSO_RT_SPATIAL_HASH_GI->SetBufferUAV("global", "TraceSH0", SpatialHashGITraceSH[0].get());
+	PSO_RT_SPATIAL_HASH_GI->SetBufferUAV("global", "TraceSH1", SpatialHashGITraceSH[1].get());
+	PSO_RT_SPATIAL_HASH_GI->SetBufferUAV("global", "TraceSH2", SpatialHashGITraceSH[2].get());
+	PSO_RT_SPATIAL_HASH_GI->SetBufferUAV("global", "TraceSH3", SpatialHashGITraceSH[3].get());
+	PSO_RT_SPATIAL_HASH_GI->SetAccelerationStructure("global", "gRtScene", TLAS);
+	PSO_RT_SPATIAL_HASH_GI->SetBufferSRV("global", "CellKeys", SpatialHashGIUpdateKeys.get());
+	PSO_RT_SPATIAL_HASH_GI->SetBufferSRV("global", "CellPosition", SpatialHashGICellPosition.get());
+	PSO_RT_SPATIAL_HASH_GI->SetBufferSRV("global", "CellNormal", SpatialHashGICellNormal.get());
+	PSO_RT_SPATIAL_HASH_GI->SetTextureSRV("global", "BlueNoiseTex", BlueNoiseTex.get());
+	PSO_RT_SPATIAL_HASH_GI->SetCBVValue("global", "ViewParameter", &RTSpatialHashGIViewParam);
+	PSO_RT_SPATIAL_HASH_GI->SetSampler("global", "sampleWrap", samplerWrap.get());
+
+	int i = 0;
+	for (auto& as : vecBLAS)
+	{
+		Mesh* mesh = as->MeshPtr;
+		VertexBuffer* rtVertexBuffer = mesh->Vb.get();
+		IndexBuffer* rtIndexBuffer = mesh->Ib.get();
+		Texture* diffuseTex = mesh->Draws[0].mat->Diffuse.get();
+		if (!diffuseTex)
+			diffuseTex = DefaultWhiteTex.get();
+
+		PSO_RT_SPATIAL_HASH_GI->ResetHitProgram(i);
+		PSO_RT_SPATIAL_HASH_GI->StartHitProgram("HitGroup", i);
+		PSO_RT_SPATIAL_HASH_GI->AddVertexBufferSRVToHitProgram("HitGroup", rtVertexBuffer, i);
+		PSO_RT_SPATIAL_HASH_GI->AddIndexBufferSRVToHitProgram("HitGroup", rtIndexBuffer, i);
+		PSO_RT_SPATIAL_HASH_GI->AddTextureSRVToHitProgram("HitGroup", diffuseTex, i);
+		PSO_RT_SPATIAL_HASH_GI->AddBufferSRVToHitProgram("HitGroup", InstancePropertyBuffer.get(), i);
+		i++;
+	}
+
+	PSO_RT_SPATIAL_HASH_GI->EndShaderTable();
+	PSO_RT_SPATIAL_HASH_GI->Apply(SpatialHashGIEntryCount, 1u);
+
+	for (UINT coefficientIndex = 0; coefficientIndex < SpatialHashGISHCoefficientCount; ++coefficientIndex)
+		renderBackend->TransitionBuffer(SpatialHashGITraceSH[coefficientIndex].get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
+
+	SpatialHashGIResolvePSO->SetBufferSRV("UpdateKeysIn", SpatialHashGIUpdateKeys.get());
+	SpatialHashGIResolvePSO->SetBufferSRV("TraceSH0In", SpatialHashGITraceSH[0].get());
+	SpatialHashGIResolvePSO->SetBufferSRV("TraceSH1In", SpatialHashGITraceSH[1].get());
+	SpatialHashGIResolvePSO->SetBufferSRV("TraceSH2In", SpatialHashGITraceSH[2].get());
+	SpatialHashGIResolvePSO->SetBufferSRV("TraceSH3In", SpatialHashGITraceSH[3].get());
+	SpatialHashGIResolvePSO->SetBufferSRV("PrevResolvedKeys", SpatialHashGIResolvedKeys[readIndex].get());
+	SpatialHashGIResolvePSO->SetBufferSRV("PrevResolvedSH0", SpatialHashGIResolvedSH[readIndex][0].get());
+	SpatialHashGIResolvePSO->SetBufferSRV("PrevResolvedSH1", SpatialHashGIResolvedSH[readIndex][1].get());
+	SpatialHashGIResolvePSO->SetBufferSRV("PrevResolvedSH2", SpatialHashGIResolvedSH[readIndex][2].get());
+	SpatialHashGIResolvePSO->SetBufferSRV("PrevResolvedSH3", SpatialHashGIResolvedSH[readIndex][3].get());
+	SpatialHashGIResolvePSO->SetBufferUAV("ResolvedKeysOut", SpatialHashGIResolvedKeys[writeIndex].get());
+	SpatialHashGIResolvePSO->SetBufferUAV("ResolvedSH0Out", SpatialHashGIResolvedSH[writeIndex][0].get());
+	SpatialHashGIResolvePSO->SetBufferUAV("ResolvedSH1Out", SpatialHashGIResolvedSH[writeIndex][1].get());
+	SpatialHashGIResolvePSO->SetBufferUAV("ResolvedSH2Out", SpatialHashGIResolvedSH[writeIndex][2].get());
+	SpatialHashGIResolvePSO->SetBufferUAV("ResolvedSH3Out", SpatialHashGIResolvedSH[writeIndex][3].get());
+	SpatialHashGIResolvePSO->SetCBVValue("SpatialHashGIConstant", &SpatialHashGICB);
+	SpatialHashGIResolvePSO->Apply();
+	renderBackend->Dispatch((SpatialHashGIEntryCount + 255u) / 256u, 1u, 1u);
+
+	renderBackend->TransitionBuffer(SpatialHashGIResolvedKeys[writeIndex].get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
+	for (UINT coefficientIndex = 0; coefficientIndex < SpatialHashGISHCoefficientCount; ++coefficientIndex)
+		renderBackend->TransitionBuffer(SpatialHashGIResolvedSH[writeIndex][coefficientIndex].get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
+
+	renderBackend->TransitionTexture(DiffuseGIHashCached.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
+	renderBackend->TransitionTexture(DiffuseGIHashCachedAux.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
+
+	SpatialHashGIQueryPSO->SetTextureSRV("DepthTex", UnjitteredDepthBuffers[ColorBufferWriteIndex].get());
+	SpatialHashGIQueryPSO->SetTextureSRV("WorldNormalTex", NormalBuffers[ColorBufferWriteIndex].get());
+	SpatialHashGIQueryPSO->SetTextureSRV("GeoNormalTex", GeomNormalBuffer.get());
+	SpatialHashGIQueryPSO->SetBufferSRV("ResolvedKeysIn", SpatialHashGIResolvedKeys[writeIndex].get());
+	SpatialHashGIQueryPSO->SetBufferSRV("ResolvedSH0In", SpatialHashGIResolvedSH[writeIndex][0].get());
+	SpatialHashGIQueryPSO->SetBufferSRV("ResolvedSH1In", SpatialHashGIResolvedSH[writeIndex][1].get());
+	SpatialHashGIQueryPSO->SetBufferSRV("ResolvedSH2In", SpatialHashGIResolvedSH[writeIndex][2].get());
+	SpatialHashGIQueryPSO->SetBufferSRV("ResolvedSH3In", SpatialHashGIResolvedSH[writeIndex][3].get());
+	SpatialHashGIQueryPSO->SetTextureUAV("OutGIHashColor", DiffuseGIHashCached.get());
+	SpatialHashGIQueryPSO->SetTextureUAV("OutGIHashSH", DiffuseGIHashCachedAux.get());
+	SpatialHashGIQueryPSO->SetCBVValue("SpatialHashGIConstant", &SpatialHashGICB);
+	SpatialHashGIQueryPSO->Apply();
+	renderBackend->Dispatch((GetRenderWidth() + 7u) / 8u, (GetRenderHeight() + 7u) / 8u, 1u);
+
+	renderBackend->TransitionTexture(DiffuseGIHashCached.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
+	renderBackend->TransitionTexture(DiffuseGIHashCachedAux.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
+	bSpatialHashGIHistoryValid = true;
+}
+
 void Corona::ScreenProbeRaytraceGIPass()
 {
 	auto hasScreenProbeSHSet = [&](UINT historyIndex)
@@ -8003,6 +8541,7 @@ void Corona::ScreenProbeRaytraceGIPass()
 	RTScreenProbeGIViewParam.RaysPerProbe = std::clamp(RTScreenProbeGIViewParam.RaysPerProbe, 1u, 4u);
 	RTScreenProbeGIViewParam.HistoryValid = (bScreenProbeGIAtlasHistoryValid && !bScreenProbeLightingBootstrapPending) ? 1u : 0u;
 	RTScreenProbeGIViewParam.LightingBootstrap = bScreenProbeLightingBootstrapPending ? 1u : 0u;
+	RTScreenProbeGIViewParam.SHCoefficientCount = ScreenProbeGICB.SHCoefficientCount <= 4u ? 4u : 9u;
 	RTScreenProbeGIViewParam.TemporalAlpha = std::clamp(ScreenProbeGICB.TemporalAlpha, 0.02f, 1.0f);
 	RTScreenProbeGIViewParam.HistoryDepthWeight = ScreenProbeGICB.HistoryDepthWeight;
 	RTScreenProbeGIViewParam.HistoryNormalWeight = ScreenProbeGICB.HistoryNormalWeight;
@@ -8135,6 +8674,7 @@ void Corona::ScreenProbeGIPass()
 	ScreenProbeGICB.EdgeDepthWeight = std::clamp(ScreenProbeGICB.EdgeDepthWeight, 8.0f, 192.0f);
 	ScreenProbeGICB.EdgeNormalWeight = std::clamp(ScreenProbeGICB.EdgeNormalWeight, 1.0f, 96.0f);
 	ScreenProbeGICB.EdgeSampleCount = std::clamp(ScreenProbeGICB.EdgeSampleCount, 1u, 4u);
+	ScreenProbeGICB.SHCoefficientCount = ScreenProbeGICB.SHCoefficientCount <= 4u ? 4u : 9u;
 	ScreenProbeGICB.ProbeGridSize = glm::vec2(
 		static_cast<float>((GetRenderWidth() + ScreenProbeGICB.ProbeSpacing - 1u) / ScreenProbeGICB.ProbeSpacing),
 		static_cast<float>((GetRenderHeight() + ScreenProbeGICB.ProbeSpacing - 1u) / ScreenProbeGICB.ProbeSpacing));

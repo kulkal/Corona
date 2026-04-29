@@ -148,6 +148,8 @@ private:
 	shared_ptr<Texture> DiffuseGITemporal[2];
 	shared_ptr<Texture> DiffuseGIRawAux;
 	shared_ptr<Texture> DiffuseGIRaw;
+	shared_ptr<Texture> DiffuseGIHashCached;
+	shared_ptr<Texture> DiffuseGIHashCachedAux;
 	shared_ptr<Texture> ScreenProbeGIResolved;
 	shared_ptr<Texture> ScreenProbeGIProbeDebug;
 	shared_ptr<Texture> ScreenProbeGIRadiance[2];
@@ -249,11 +251,46 @@ private:
 		float EdgeDepthWeight = 32.0f;
 		float EdgeNormalWeight = 16.0f;
 		UINT32 EdgeSampleCount = 3;
-		UINT32 EdgePadding = 0;
+		UINT32 SHCoefficientCount = 4;
 	};
 
 	ScreenProbeGIConstant ScreenProbeGICB;
 	shared_ptr<ComputePipelineStateObject> ScreenProbeGIPSO;
+
+	// SHaRC-style spatial hash diffuse GI cache
+	static constexpr UINT32 SpatialHashGIEntryCount = 1u << 20;
+	static constexpr UINT32 SpatialHashGISHCoefficientCount = 4u;
+	struct SpatialHashGIConstant
+	{
+		glm::mat4x4 InvViewMatrix;
+		glm::mat4x4 InvProjMatrix;
+		glm::vec4 ProjectionParams;
+		glm::vec2 RTSize;
+		float CellSize = 48.0f;
+		float HistorySampleDecay = 1.0f;
+		UINT32 HashEntryCount = SpatialHashGIEntryCount;
+		UINT32 HashEntryMask = SpatialHashGIEntryCount - 1u;
+		UINT32 FrameIndex = 0;
+		UINT32 HistoryValid = 0;
+		float TemporalAlpha = 0.08f;
+		float SmoothingStrength = 0.65f;
+		UINT32 MaxProbeSteps = 8;
+		float InterpolationStrength = 1.0f;
+	};
+
+	SpatialHashGIConstant SpatialHashGICB;
+	shared_ptr<ComputePipelineStateObject> SpatialHashGIClearPSO;
+	shared_ptr<ComputePipelineStateObject> SpatialHashGIUpdatePSO;
+	shared_ptr<ComputePipelineStateObject> SpatialHashGIResolvePSO;
+	shared_ptr<ComputePipelineStateObject> SpatialHashGIQueryPSO;
+	std::shared_ptr<Buffer> SpatialHashGIUpdateKeys;
+	std::shared_ptr<Buffer> SpatialHashGICellPosition;
+	std::shared_ptr<Buffer> SpatialHashGICellNormal;
+	std::shared_ptr<Buffer> SpatialHashGICellScore;
+	std::shared_ptr<Buffer> SpatialHashGITraceSH[SpatialHashGISHCoefficientCount];
+	std::shared_ptr<Buffer> SpatialHashGIResolvedKeys[2];
+	std::shared_ptr<Buffer> SpatialHashGIResolvedSH[2][SpatialHashGISHCoefficientCount];
+	UINT32 SpatialHashGIWriteIndex = 0;
 	
 	// RT shadow
 	struct RTShadowViewParamCB
@@ -367,11 +404,35 @@ private:
 		float _padding2 = 0.0f;
 		UINT32 LightingBootstrap = 0;
 		UINT32 BootstrapRays = 100;
-		glm::vec2 _padding3 = glm::vec2(0.0f);
+		UINT32 SHCoefficientCount = 4;
+		UINT32 _padding3 = 0;
 	};
 
 	RTScreenProbeGIViewParamCB RTScreenProbeGIViewParam;
 	shared_ptr<RTPipelineStateObject> PSO_RT_SCREEN_PROBE_GI;
+
+	struct RTSpatialHashGIViewParamCB
+	{
+		glm::vec4 LightDir;
+		UINT32 HashEntryCount = SpatialHashGIEntryCount;
+		UINT32 FrameCounter = 0;
+		UINT32 BlueNoiseOffsetStride = 1;
+		UINT32 NoiseMode = 1;
+		UINT32 RaysPerCell = 2;
+		UINT32 MaxBounces = 2;
+		float ViewSpreadAngle = 0.0f;
+		float RayBias = 0.5f;
+		float CellSize = 48.0f;
+		glm::vec3 SkyColorTop;
+		float SkyIntensity = 3.0f;
+		glm::vec3 SkyColorBottom;
+		float _padding = 0.0f;
+		glm::vec3 LightColor;
+		float _padding2 = 0.0f;
+	};
+
+	RTSpatialHashGIViewParamCB RTSpatialHashGIViewParam;
+	shared_ptr<RTPipelineStateObject> PSO_RT_SPATIAL_HASH_GI;
 	
 	// Path Tracing
 	enum class EPathTracingDebugMode
@@ -544,6 +605,7 @@ public:
 	enum class EDiffuseGIMode
 	{
 		SIMPLE_RAYTRACE = 0,
+		SPATIAL_HASH,
 		SCREEN_PROBE,
 		COUNT
 	};
@@ -584,6 +646,7 @@ private:
 	bool bStartupModeConfigured = false;
 	UINT32 AutoAADumpPhase = 0;
 	UINT32 AutoAADumpFramesInPhase = 0;
+	UINT32 DiffuseGIAutoDumpFrameCount = 96;
 	std::wstring AutoAADumpDir;
 	EAntiAliasingMode StartupSelectedAAMode = EAntiAliasingMode::DLSS_RR;
 	ERenderingMode StartupRenderingMode = ERenderingMode::HYBRID;
@@ -609,6 +672,7 @@ private:
 	bool bScreenProbeGIAtlasHistoryValid = false;
 	bool bScreenProbeGIHistoryValid = false;
 	bool bScreenProbeLightingBootstrapPending = false;
+	bool bSpatialHashGIHistoryValid = false;
 	bool bPendingTemporalHistoryClear = false;
 	bool bImguiInitialized = false;
 	bool bBlueNoiseInitialized = false;
@@ -885,6 +949,7 @@ public:
 
 	void InitTemporalDenoisingPass();
 	void InitScreenProbeGIPass();
+	void InitSpatialHashGIPass();
 
 	void InitGBufferPass();
 
@@ -920,6 +985,7 @@ public:
 	void RaytraceReflectionPass();
 
 	void RaytraceGIPass();
+	void SpatialHashGIPass();
 	void ScreenProbeRaytraceGIPass();
 	void ScreenProbeGIPass();
 

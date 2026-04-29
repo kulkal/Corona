@@ -3286,6 +3286,12 @@ void D3D12RTPipelineStateObject::SetTextureUAV(const string& shader, const strin
 	SetUAVHandle(shader, bindingName, texture->GpuHandleUAV, instanceIndex);
 }
 
+void D3D12RTPipelineStateObject::SetBufferUAV(const string& shader, const string& bindingName, Buffer* buffer, int instanceIndex)
+{
+	assert(buffer);
+	SetUAVHandle(shader, bindingName, buffer->GpuHandleUAV, instanceIndex);
+}
+
 void D3D12RTPipelineStateObject::SetTextureSRV(const string& shader, const string& bindingName, Texture* texture, int instanceIndex)
 {
 	assert(texture);

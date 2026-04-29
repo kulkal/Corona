@@ -997,6 +997,12 @@ void VulkanRTPipelineStateObject::SetTextureUAV(const std::string& shader, const
 	(void)instanceIndex;
 	GlobalBindingValues[bindingName].TextureValue = texture;
 }
+void VulkanRTPipelineStateObject::SetBufferUAV(const std::string& shader, const std::string& bindingName, Buffer* buffer, int instanceIndex)
+{
+	(void)shader;
+	(void)instanceIndex;
+	GlobalBindingValues[bindingName].BufferValue = buffer;
+}
 void VulkanRTPipelineStateObject::SetTextureSRV(const std::string& shader, const std::string& bindingName, Texture* texture, int instanceIndex)
 {
 	(void)shader;
@@ -1638,12 +1644,20 @@ void VulkanRTPipelineStateObject::Apply(uint32_t width, uint32_t height)
 		if (binding.Shader != "global")
 			continue;
 		auto valueIt = GlobalBindingValues.find(binding.Name);
-		if (valueIt == GlobalBindingValues.end() || !valueIt->second.TextureValue)
+		if (valueIt == GlobalBindingValues.end())
 			continue;
-		auto textureIt = Owner->TextureAllocations.find(valueIt->second.TextureValue);
-		if (textureIt == Owner->TextureAllocations.end())
-			continue;
-		appendImageWrite(binding.DescriptorBinding, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, textureIt->second.ImageView, VK_IMAGE_LAYOUT_GENERAL, VK_NULL_HANDLE);
+		if (valueIt->second.TextureValue)
+		{
+			auto textureIt = Owner->TextureAllocations.find(valueIt->second.TextureValue);
+			if (textureIt != Owner->TextureAllocations.end())
+				appendImageWrite(binding.DescriptorBinding, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, textureIt->second.ImageView, VK_IMAGE_LAYOUT_GENERAL, VK_NULL_HANDLE);
+		}
+		else if (valueIt->second.BufferValue)
+		{
+			auto bufferIt = Owner->BufferAllocations.find(valueIt->second.BufferValue);
+			if (bufferIt != Owner->BufferAllocations.end())
+				appendBufferWrite(binding.DescriptorBinding, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, bufferIt->second.Buffer, 0, bufferIt->second.SizeInBytes);
+		}
 	}
 
 	for (const BindingDesc& binding : SRVBindings)
