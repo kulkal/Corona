@@ -301,7 +301,7 @@ private:
 		glm::mat4x4 InvProjMatrix;
 		glm::vec4 ProjectionParams;
 		glm::vec4 LightDir;
-		float ShadowLightRadius = 0.03f;
+		float ShadowLightRadius = 0.001f;
 		UINT32 ShadowSampleCount = 8;
 		glm::vec2 _padding;
 		glm::vec4 pad;
@@ -454,6 +454,9 @@ private:
 		glm::mat4x4 InvProjMatrix;
 		glm::vec4 ProjectionParams;
 		glm::vec4 LightDirAndIntensity;
+		float DirectLightAngularRadius = 0.001f;
+		UINT32 DirectLightSampleCount = 1;
+		glm::vec2 _directLightPadding = glm::vec2(0.0f);
 		glm::vec2 RandomOffset;
 		UINT32 FrameCounter;
 		UINT32 BlueNoiseOffsetStride = 1;

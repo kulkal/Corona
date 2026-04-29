@@ -20,6 +20,9 @@ cbuffer ViewParameter : register(b0)
     float4x4 InvProjMatrix;
     float4 ProjectionParams;
     float4 LightDirAndIntensity;
+    float DirectLightAngularRadius;
+    uint DirectLightSampleCount;
+    float2 _directLightPadding;
     float2 RandomOffset;
     uint FrameCounter;
     uint BlueNoiseOffsetStride;
@@ -385,44 +388,59 @@ void PathTracingClosestHit(inout PathTracingPayload payload, in BuiltInTriangleI
     // Use larger offset for path tracing to prevent shadow acne
     float3 hitPos = vertex.position + N * 0.01;
     
-    // Direct lighting - sample light
-    float3 lightDir = normalize(LightDirAndIntensity.xyz);
+    // Direct lighting - sample the sun as a small spherical cap.
+    float3 baseLightDir = normalize(LightDirAndIntensity.xyz);
     float lightIntensity = LightDirAndIntensity.w;
     
     float3 directLight = float3(0, 0, 0);
-    
-    // Shadow ray
-    RayDesc shadowRay;
-    shadowRay.Origin = hitPos;
-    shadowRay.Direction = lightDir;
-    shadowRay.TMin = 0.01;  // Larger offset to prevent self-intersection
-    shadowRay.TMax = 100000;
-    
-    ShadowRayPayload shadowPayload;
-    shadowPayload.bHit = true;
-    TraceRay(gRtScene, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_CLOSEST_HIT_SHADER, 
-             0xFF, 0, 0, 1, shadowRay, shadowPayload);
-    
-    if (!shadowPayload.bHit)
+
+    const uint kMaxDirectLightSamples = 8;
+    uint directLightSampleCount = min(max(DirectLightSampleCount, 1u), kMaxDirectLightSamples);
+
+    [loop]
+    for (uint lightSampleIndex = 0u; lightSampleIndex < kMaxDirectLightSamples; ++lightSampleIndex)
     {
-        float NdotL = max(0, dot(N, lightDir));
-        
-        if (NdotL > 0)
+        if (lightSampleIndex >= directLightSampleCount)
+            break;
+
+        float2 lightUV = float2(random_float(payload.seed), random_float(payload.seed));
+        float3 lightDir = SampleDirectionalLightSphereCap(baseLightDir, DirectLightAngularRadius, lightUV);
+
+        // Shadow ray
+        RayDesc shadowRay;
+        shadowRay.Origin = hitPos;
+        shadowRay.Direction = lightDir;
+        shadowRay.TMin = 0.01;  // Larger offset to prevent self-intersection
+        shadowRay.TMax = 100000;
+
+        ShadowRayPayload shadowPayload;
+        shadowPayload.bHit = true;
+        TraceRay(gRtScene, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_CLOSEST_HIT_SHADER,
+                 0xFF, 0, 0, 1, shadowRay, shadowPayload);
+
+        if (!shadowPayload.bHit)
         {
-            // Diffuse lighting (Lambertian)
-            float3 diffuse = bEnableDirectDiffuse ? (albedo * (1.0 - metallic) * INV_PI) : float3(0, 0, 0);
-            
-            // Energy-normalized Blinn-Phong approximation for direct specular.
-            float3 H = normalize(lightDir + V);
-            float NdotH = max(0, dot(N, H));
-            float shininess = max((1.0 - roughness) * 128.0, 1.0);
-            float spec = pow(NdotH, shininess) * ((shininess + 2.0) * 0.5 * INV_PI);
-            float3 specular = bEnableDirectSpecular ? (lerp(float3(0.04, 0.04, 0.04), albedo, metallic) * spec) : float3(0, 0, 0);
-            
-            // Combine diffuse and specular with light color
-            directLight = (diffuse + specular) * NdotL * lightIntensity * LightColor;
+            float NdotL = max(0, dot(N, lightDir));
+
+            if (NdotL > 0)
+            {
+                // Diffuse lighting (Lambertian)
+                float3 diffuse = bEnableDirectDiffuse ? (albedo * (1.0 - metallic) * INV_PI) : float3(0, 0, 0);
+
+                // Energy-normalized Blinn-Phong approximation for direct specular.
+                float3 H = normalize(lightDir + V);
+                float NdotH = max(0, dot(N, H));
+                float shininess = max((1.0 - roughness) * 128.0, 1.0);
+                float spec = pow(NdotH, shininess) * ((shininess + 2.0) * 0.5 * INV_PI);
+                float3 specular = bEnableDirectSpecular ? (lerp(float3(0.04, 0.04, 0.04), albedo, metallic) * spec) : float3(0, 0, 0);
+
+                // Combine diffuse and specular with light color
+                directLight += (diffuse + specular) * NdotL * lightIntensity * LightColor;
+            }
         }
     }
+
+    directLight /= float(directLightSampleCount);
     
     // Set direct lighting contribution
     payload.radiance = directLight;

@@ -52,21 +52,6 @@ float random(float2 p)
     return frac(sin(dot(p, float2(12.9898, 78.233))) * 43758.5453);
 }
 
-float2 SampleDisk(float2 u)
-{
-    float r = sqrt(u.x);
-    float phi = 2.0 * PI * u.y;
-    return float2(cos(phi), sin(phi)) * r;
-}
-
-float3x3 BuildBasis(float3 dir)
-{
-    float3 up = abs(dir.y) < 0.999f ? float3(0, 1, 0) : float3(1, 0, 0);
-    float3 tangent = normalize(cross(up, dir));
-    float3 bitangent = cross(dir, tangent);
-    return float3x3(tangent, bitangent, dir);
-}
-
 float3 offset_ray(float3 p, float3 n)
 {
     return p + n * (1.0f / 256.0f);
@@ -111,7 +96,6 @@ void rayGen()
 
 
     float3 baseLightDir = normalize(LightDir.xyz);
-    float3x3 lightBasis = BuildBasis(baseLightDir);
     float visibility = 0.0f;
     const uint kMaxShadowSamples = 16;
     uint sampleCount = min(max(ShadowSampleCount, 1), kMaxShadowSamples);
@@ -125,8 +109,7 @@ void rayGen()
         float2 randUV = float2(
             random(crd + float2(sampleIndex * 13.17, 17.31)),
             random(crd + float2(sampleIndex * 29.73, 47.77)));
-        float2 disk = SampleDisk(randUV) * ShadowLightRadius;
-        float3 rayDir = normalize(baseLightDir + lightBasis[0] * disk.x + lightBasis[1] * disk.y);
+        float3 rayDir = SampleDirectionalLightSphereCap(baseLightDir, ShadowLightRadius, randUV);
 
         RayDesc ray;
         ray.Origin = WorldPos + WorldNormal * 0.5;

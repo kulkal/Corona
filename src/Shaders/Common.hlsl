@@ -67,6 +67,28 @@ float3 SampleUniformHemisphere(float u, float v)
     return p;
 }
 
+float3 SampleDirectionalLightSphereCap(float3 direction, float angularRadius, float2 u)
+{
+    float3 center = direction;
+    float lenSq = dot(center, center);
+    center = lenSq > 1e-8f ? center * rsqrt(lenSq) : float3(0.0f, 1.0f, 0.0f);
+
+    angularRadius = clamp(angularRadius, 0.0f, 0.25f);
+    float cosThetaMax = cos(angularRadius);
+    float cosTheta = lerp(1.0f, cosThetaMax, saturate(u.x));
+    float sinTheta = sqrt(saturate(1.0f - cosTheta * cosTheta));
+    float phi = 2.0f * PI * u.y;
+
+    float3 up = abs(center.y) < 0.999f ? float3(0.0f, 1.0f, 0.0f) : float3(1.0f, 0.0f, 0.0f);
+    float3 tangent = normalize(cross(up, center));
+    float3 bitangent = cross(center, tangent);
+
+    return normalize(
+        tangent * (cos(phi) * sinTheta) +
+        bitangent * (sin(phi) * sinTheta) +
+        center * cosTheta);
+}
+
 
 struct SH
 {

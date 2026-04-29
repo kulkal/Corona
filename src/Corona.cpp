@@ -5903,8 +5903,8 @@ void Corona::OnUpdate()
 	RTShadowViewParam.ProjectionParams.z = effectiveNear;
 	RTShadowViewParam.ProjectionParams.w = effectiveFar;
 	RTShadowViewParam.LightDir = glm::vec4(LightDir, 0);
-	RTShadowViewParam.ShadowLightRadius = 0.03f;
-	RTShadowViewParam.ShadowSampleCount = 8;
+	RTShadowViewParam.ShadowLightRadius = std::clamp(RTShadowViewParam.ShadowLightRadius, 0.0f, 0.03f);
+	RTShadowViewParam.ShadowSampleCount = std::clamp(RTShadowViewParam.ShadowSampleCount, 1u, 16u);
 
 	glm::vec2 Jitter;
 	const uint64 ActiveJitterSampleCount = IsDLSSUpscaleEnabled() ? std::max<uint64>(1, DLSSJitterPhaseCount) : std::max<uint64>(1, TAASampleCount);
@@ -6090,6 +6090,8 @@ void Corona::OnUpdate()
 	PathTracingViewParam.ProjectionParams.z = effectiveNear;
 	PathTracingViewParam.ProjectionParams.w = effectiveFar;
 	PathTracingViewParam.LightDirAndIntensity = glm::vec4(normalizedLightDir, LightIntensity);
+	PathTracingViewParam.DirectLightAngularRadius = RTShadowViewParam.ShadowLightRadius;
+	PathTracingViewParam.DirectLightSampleCount = std::clamp(PathTracingViewParam.DirectLightSampleCount, 1u, 8u);
 	PathTracingViewParam.RandomOffset = glm::vec2(timeElapsed, timeElapsed);
 	PathTracingViewParam.FrameCounter = FrameCounter;
 	PathTracingViewParam.ViewSpreadAngle = glm::tan(Fov * 0.5) / (0.5f * m_height);
@@ -6764,6 +6766,26 @@ void Corona::OnRender()
 			if (ImGui::Checkbox("Enable Direct Diffuse", &bEnableDirectDiffuse)) bLightingChanged = true;
 			if (ImGui::Checkbox("Enable Direct Specular", &bEnableDirectSpecular)) bLightingChanged = true;
 			if (ImGui::Checkbox("Enable Indirect Specular (GI)", &bEnableSpecularGI)) bLightingChanged = true;
+			if (ImGui::SliderFloat("Sun Angular Radius", &RTShadowViewParam.ShadowLightRadius, 0.0f, 0.03f, "%.4f rad"))
+				bLightingChanged = true;
+			if (RenderingMode == ERenderingMode::HYBRID)
+			{
+				int shadowSamples = static_cast<int>(RTShadowViewParam.ShadowSampleCount);
+				if (ImGui::SliderInt("Hybrid Shadow Samples", &shadowSamples, 1, 16))
+				{
+					RTShadowViewParam.ShadowSampleCount = static_cast<UINT32>(shadowSamples);
+					bLightingChanged = true;
+				}
+			}
+			else if (RenderingMode == ERenderingMode::PATHTRACING)
+			{
+				int directLightSamples = static_cast<int>(PathTracingViewParam.DirectLightSampleCount);
+				if (ImGui::SliderInt("Path Tracing Sun Samples", &directLightSamples, 1, 8))
+				{
+					PathTracingViewParam.DirectLightSampleCount = static_cast<UINT32>(directLightSamples);
+					bLightingChanged = true;
+				}
+			}
 
 			ImGui::Separator();
 			ImGui::Text("Diffuse GI");
