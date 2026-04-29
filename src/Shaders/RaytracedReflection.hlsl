@@ -25,6 +25,8 @@ cbuffer ViewParameter : register(b0)
     uint FrameCounter;
     uint BlueNoiseOffsetStride;
     float ViewSpreadAngle;
+    uint NoiseMode;
+    float2 NoisePadding;
     float3 SkyColorTop;
     float SkyIntensity;
     float3 SkyColorBottom;
@@ -210,7 +212,7 @@ void rayGen
 
 	float3 WorldPos = mul(float4(ViewPosition, 1), InvViewMatrix).xyz;
 
-    float2 RandomUV = LoadBlueNoise2(BlueNoiseTex, launchIndex, FrameCounter, BlueNoiseOffsetStride);
+    float2 RandomUV = LoadRayNoise2(BlueNoiseTex, launchIndex.xy, FrameCounter, BlueNoiseOffsetStride, NoiseMode);
     float3x3 TBN = buildTBN(WorldNormal);
 
     float Rougness = RougnessMetallicTex.SampleLevel(sampleWrap, UV, 0).x;

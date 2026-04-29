@@ -26,6 +26,8 @@ cbuffer ViewParameter : register(b0)
     uint FrameCounter;
     uint BlueNoiseOffsetStride;
     float ViewSpreadAngle;
+    uint NoiseMode;
+    float2 NoisePadding;
     float3 SkyColorTop;
     float SkyIntensity;
     float3 SkyColorBottom;
@@ -159,7 +161,7 @@ void rayGen
     float rand_u = random(crd + RandomOffset);
     float rand_v = random(crd + RandomOffset + float2(100, 100));
 
-    float2 RandomUV = LoadBlueNoise2(BlueNoiseTex, launchIndex, FrameCounter, BlueNoiseOffsetStride);
+    float2 RandomUV = LoadRayNoise2(BlueNoiseTex, launchIndex.xy, FrameCounter, BlueNoiseOffsetStride, NoiseMode);
 
     float3 sampleDirLocal = SampleHemisphereCosine(RandomUV.x, RandomUV.y);
 

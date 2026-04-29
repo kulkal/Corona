@@ -226,13 +226,14 @@ namespace
 		return mode == Corona::EAntiAliasingMode::DLSS_SR || mode == Corona::EAntiAliasingMode::DLSS_RR;
 	}
 
-	constexpr std::array<const char*, 16> kGpuPassNames = {
+	constexpr std::array<const char*, 17> kGpuPassNames = {
 		"Frame Total",
 		"GBuffer",
 		"RT Shadow",
 		"Shadow Denoise",
 		"RT Reflection",
 		"RT Diffuse GI",
+		"Screen Probe GI",
 		"Temporal Denoise",
 		"Spatial Denoise",
 		"Lighting",
@@ -265,6 +266,79 @@ namespace
 			return "PATHTRACING";
 		default:
 			return "UNKNOWN";
+		}
+	}
+
+	const wchar_t* GetAntiAliasingModeName(Corona::EAntiAliasingMode mode)
+	{
+		switch (mode)
+		{
+		case Corona::EAntiAliasingMode::OFF:
+			return L"off";
+		case Corona::EAntiAliasingMode::TAA:
+			return L"taa";
+		case Corona::EAntiAliasingMode::DLSS_SR:
+			return L"dlss-sr";
+		case Corona::EAntiAliasingMode::DLSS_RR:
+			return L"dlss-rr";
+		default:
+			return L"unknown";
+		}
+	}
+
+	const char* GetRayNoiseModeName(Corona::ERayNoiseMode mode)
+	{
+		switch (mode)
+		{
+		case Corona::ERayNoiseMode::BLUE_NOISE:
+			return "Blue Noise";
+		case Corona::ERayNoiseMode::R2_LOW_DISCREPANCY:
+			return "R2 Low Discrepancy";
+		case Corona::ERayNoiseMode::STABLE_HASH:
+			return "Stable Hash";
+		default:
+			return "Unknown";
+		}
+	}
+
+	const wchar_t* GetRayNoiseModeNameW(Corona::ERayNoiseMode mode)
+	{
+		switch (mode)
+		{
+		case Corona::ERayNoiseMode::BLUE_NOISE:
+			return L"blue";
+		case Corona::ERayNoiseMode::R2_LOW_DISCREPANCY:
+			return L"r2";
+		case Corona::ERayNoiseMode::STABLE_HASH:
+			return L"stable";
+		default:
+			return L"unknown";
+		}
+	}
+
+	const char* GetDiffuseGIModeName(Corona::EDiffuseGIMode mode)
+	{
+		switch (mode)
+		{
+		case Corona::EDiffuseGIMode::SIMPLE_RAYTRACE:
+			return "Simple Raytrace";
+		case Corona::EDiffuseGIMode::SCREEN_PROBE:
+			return "Screen Probe";
+		default:
+			return "Unknown";
+		}
+	}
+
+	const wchar_t* GetDiffuseGIModeNameW(Corona::EDiffuseGIMode mode)
+	{
+		switch (mode)
+		{
+		case Corona::EDiffuseGIMode::SIMPLE_RAYTRACE:
+			return L"simple";
+		case Corona::EDiffuseGIMode::SCREEN_PROBE:
+			return L"screen-probe";
+		default:
+			return L"unknown";
 		}
 	}
 }
@@ -666,13 +740,16 @@ bool Corona::DLSSPass()
 	opts.useAutoExposure = sl::Boolean::eFalse;
 	slDLSSSetOptions(sl::ViewportHandle(0), opts);
 
+	Texture* inputColor = (bDLSSRROutputValidThisFrame && DLSSRRBuffer) ? DLSSRRBuffer.get() : LightingBuffer.get();
 	Texture* outputTarget = ColorBuffers[ColorBufferWriteIndex].get();
+	if (!inputColor || !outputTarget)
+		return false;
 	renderBackend->TransitionTexture(outputTarget, EResourceState::ShaderRead, EResourceState::UnorderedAccess);
 
 	sl::ViewportHandle vp(0);
 	sl::Extent renderExtent{ 0, 0, GetRenderWidth(), GetRenderHeight() };
 	sl::Extent outputExtent{ 0, 0, m_width, m_height };
-	sl::Resource colorRes(sl::ResourceType::eTex2d, LightingBuffer->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+	sl::Resource colorRes(sl::ResourceType::eTex2d, inputColor->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
 	sl::Resource depthRes(sl::ResourceType::eTex2d, UnjitteredDepthBuffers[ColorBufferWriteIndex]->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
 	sl::Resource motionRes(sl::ResourceType::eTex2d, VelocityBuffer->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
 	sl::Resource outputRes(sl::ResourceType::eTex2d, outputTarget->resource.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
@@ -728,15 +805,16 @@ bool Corona::DLSSRRPass()
 	opts.cameraViewToWorld = ToSLMatrix(InvViewMat);
 	slDLSSDSetOptions(sl::ViewportHandle(0), opts);
 
-	Texture* outputTarget = LightingBuffer.get();
-	if (!outputTarget)
+	Texture* inputColor = LightingBuffer.get();
+	Texture* outputTarget = DLSSRRBuffer.get();
+	if (!inputColor || !outputTarget)
 		return false;
 	renderBackend->TransitionTexture(outputTarget, EResourceState::ShaderRead, EResourceState::UnorderedAccess);
 
 	sl::ViewportHandle vp(0);
 	sl::Extent renderExtent{ 0, 0, GetRenderWidth(), GetRenderHeight() };
 	sl::Extent outputExtent{ 0, 0, GetRenderWidth(), GetRenderHeight() };
-	sl::Resource colorRes(sl::ResourceType::eTex2d, LightingBuffer->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+	sl::Resource colorRes(sl::ResourceType::eTex2d, inputColor->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
 	sl::Resource depthRes(sl::ResourceType::eTex2d, UnjitteredDepthBuffers[ColorBufferWriteIndex]->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
 	sl::Resource motionRes(sl::ResourceType::eTex2d, VelocityBuffer->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
 	sl::Resource normalRes(sl::ResourceType::eTex2d, NormalBuffers[ColorBufferWriteIndex]->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
@@ -779,9 +857,11 @@ bool Corona::DLSSRRPass()
 	renderBackend->TransitionTexture(outputTarget, EResourceState::UnorderedAccess, EResourceState::ShaderRead);
 	if (evalResult == sl::Result::eOk)
 	{
+		bDLSSRROutputValidThisFrame = true;
 		return true;
 	}
 
+	bDLSSRROutputValidThisFrame = false;
 	bUseLightingBufferFallbackForToneMap = true;
 	return false;
 }
@@ -814,6 +894,19 @@ void Corona::ResetTemporalHistoryBuffers()
 	ClearTextureUAV(SpecularGIMoments[1].get(), clear2);
 	ClearTextureUAV(DiffuseGIRawAux.get(), clear4);
 	ClearTextureUAV(DiffuseGIRaw.get(), clear4);
+	ClearTextureUAV(ScreenProbeGIResolved.get(), clear4);
+	ClearTextureUAV(ScreenProbeGIProbeDebug.get(), clear4);
+	ClearTextureUAV(ScreenProbeGIRadiance[0].get(), clear4);
+	ClearTextureUAV(ScreenProbeGIRadiance[1].get(), clear4);
+	for (UINT historyIndex = 0; historyIndex < 2; ++historyIndex)
+	{
+		for (UINT coefficientIndex = 0; coefficientIndex < ScreenProbeSHCoefficientCount; ++coefficientIndex)
+			ClearTextureUAV(ScreenProbeGISH[historyIndex][coefficientIndex].get(), clear4);
+	}
+	ClearTextureUAV(ScreenProbeGIMetadata[0].get(), clear4);
+	ClearTextureUAV(ScreenProbeGIMetadata[1].get(), clear4);
+	ClearTextureUAV(ScreenProbeGIHistory[0].get(), clear4);
+	ClearTextureUAV(ScreenProbeGIHistory[1].get(), clear4);
 	ClearTextureUAV(DiffuseGITemporalAux[0].get(), clear4);
 	ClearTextureUAV(DiffuseGITemporalAux[1].get(), clear4);
 	ClearTextureUAV(DiffuseGITemporal[0].get(), clear4);
@@ -836,9 +929,15 @@ void Corona::ResetAllAccumulationState(bool forceUpscaleReload)
 	CurrentJitter = glm::vec2(0.0f);
 	bTemporalAAHistoryValid = false;
 	bTemporalDenoiserHistoryValid = false;
+	bScreenProbeGIAtlasHistoryValid = false;
+	bScreenProbeGIHistoryValid = false;
+	bScreenProbeLightingBootstrapPending = false;
+	ScreenProbeGIAtlasWriteIndex = 0;
+	ScreenProbeGIHistoryWriteIndex = 0;
 	bPendingTemporalHistoryClear = true;
 	bResetTemporalStateNextUpdate = true;
 	bUseLightingBufferFallbackForToneMap = true;
+	bDLSSRROutputValidThisFrame = false;
 	PrevPathTracingViewMat = glm::mat4x4(0.0f);
 	PrevPathTracingLightDir = glm::vec3(0.0f);
 	PrevPathTracingLightIntensity = 0.0f;
@@ -875,6 +974,11 @@ void Corona::ReloadRenderResolutionAssets()
 	CurrentJitter = glm::vec2(0.0f);
 	bTemporalAAHistoryValid = false;
 	bTemporalDenoiserHistoryValid = false;
+	bScreenProbeGIAtlasHistoryValid = false;
+	bScreenProbeGIHistoryValid = false;
+	bScreenProbeLightingBootstrapPending = false;
+	ScreenProbeGIAtlasWriteIndex = 0;
+	ScreenProbeGIHistoryWriteIndex = 0;
 	bPendingTemporalHistoryClear = true;
 	bResetTemporalStateNextUpdate = true;
 	PrevViewProjMat = ViewProjMat;
@@ -887,6 +991,7 @@ void Corona::ReloadRenderResolutionAssets()
 	PrevIndirectSkyColorBottom = SkyColorBottom;
 	PrevIndirectSkyIntensity = SkyIntensity;
 	bUseLightingBufferFallbackForToneMap = true;
+	bDLSSRROutputValidThisFrame = false;
 #if WITH_STREAMLINE
 	bDLSSResetNeeded = true;
 #endif
@@ -896,6 +1001,18 @@ void Corona::RefreshUpscaleSettings(bool reloadAssets)
 {
 	UINT desiredRenderWidth = m_width;
 	UINT desiredRenderHeight = m_height;
+	auto ApplyDLSSJitterPhaseSettings = [&](UINT32 basePhaseCount)
+	{
+		DLSSJitterPhaseCountAuto = std::clamp(basePhaseCount, 1u, 512u);
+		if (DLSSJitterPhaseCountOverride > 0)
+		{
+			DLSSJitterPhaseCount = std::clamp(DLSSJitterPhaseCountOverride, 1u, 512u);
+			return;
+		}
+
+		const float scaledPhaseCount = static_cast<float>(DLSSJitterPhaseCountAuto) * std::max(0.25f, DLSSJitterPhaseScale);
+		DLSSJitterPhaseCount = std::clamp(static_cast<UINT32>(std::max(1.0f, ceilf(scaledPhaseCount))), 1u, 512u);
+	};
 
 #if WITH_STREAMLINE
 	if (bDLSSAvailable && AntiAliasingMode == EAntiAliasingMode::DLSS_SR)
@@ -915,7 +1032,7 @@ void Corona::RefreshUpscaleSettings(bool reloadAssets)
 			desiredRenderHeight = settings.optimalRenderHeight;
 		}
 
-		DLSSJitterPhaseCount = static_cast<UINT32>(std::max(1.0f, ceilf(8.0f * static_cast<float>(m_width) / static_cast<float>(desiredRenderWidth))));
+		ApplyDLSSJitterPhaseSettings(static_cast<UINT32>(std::max(1.0f, ceilf(8.0f * static_cast<float>(m_width) / static_cast<float>(desiredRenderWidth)))));
 		bDLSSResetNeeded = true;
 	}
 	else if (bDLSSRRAvailable && AntiAliasingMode == EAntiAliasingMode::DLSS_RR)
@@ -940,7 +1057,7 @@ void Corona::RefreshUpscaleSettings(bool reloadAssets)
 			desiredRenderHeight = settings.optimalRenderHeight;
 		}
 
-		DLSSJitterPhaseCount = static_cast<UINT32>(std::max(1.0f, ceilf(8.0f * static_cast<float>(m_width) / static_cast<float>(desiredRenderWidth))));
+		ApplyDLSSJitterPhaseSettings(static_cast<UINT32>(std::max(1.0f, ceilf(8.0f * static_cast<float>(m_width) / static_cast<float>(desiredRenderWidth)))));
 		bDLSSResetNeeded = true;
 	}
 #endif
@@ -948,6 +1065,13 @@ void Corona::RefreshUpscaleSettings(bool reloadAssets)
 	const bool bResolutionChanged = desiredRenderWidth != RenderWidth || desiredRenderHeight != RenderHeight;
 	RenderWidth = desiredRenderWidth;
 	RenderHeight = desiredRenderHeight;
+	AppendVulkanRuntimeTrace(
+		L"[RefreshUpscaleSettings] render=" + std::to_wstring(RenderWidth) +
+		L"x" + std::to_wstring(RenderHeight) +
+		L", dlssJitter=" + std::to_wstring(DLSSJitterPhaseCount) +
+		L", dlssJitterAuto=" + std::to_wstring(DLSSJitterPhaseCountAuto) +
+		L", dlssJitterScale=" + std::to_wstring(DLSSJitterPhaseScale) +
+		L", dlssJitterOverride=" + std::to_wstring(DLSSJitterPhaseCountOverride));
 	if (reloadAssets && (bResolutionChanged || bForceUpscaleReload))
 		ReloadRenderResolutionAssets();
 	bForceUpscaleReload = false;
@@ -959,7 +1083,11 @@ Texture* Corona::GetCurrentResolveSource() const
 		return PathTracingAccumBuffer[PathTracingWriteIndex].get();
 
 	if (bUseLightingBufferFallbackForToneMap && LightingBuffer)
+	{
+		if (bDLSSRROutputValidThisFrame && DLSSRRBuffer)
+			return DLSSRRBuffer.get();
 		return LightingBuffer.get();
+	}
 
 	return ColorBuffers[ResolvedColorBufferIndex].get();
 }
@@ -1003,6 +1131,19 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 		return L"";
 	};
 
+	if (argc <= 1)
+	{
+		bCommandLineRenderBackendOverrideSet = true;
+		CommandLineRenderBackendAPI = ERenderBackendAPI::D3D12;
+		bCommandLineRenderModeOverrideSet = true;
+		CommandLineRenderingMode = ERenderingMode::HYBRID;
+		bCommandLineAAOverrideSet = true;
+		CommandLineSelectedAAMode = EAntiAliasingMode::DLSS_RR;
+		bCommandLineAutoDumpOverrideSet = true;
+		bCommandLineAutoDumpEnabled = false;
+		AppendStartupTrace(L"[ParseCommandLineArgs] no args: default dx12, hybrid, dlss-rr, user-mode");
+	}
+
 	for (int i = 1; i < argc; ++i)
 	{
 		const std::wstring arg = ToLower(argv[i]);
@@ -1025,6 +1166,55 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 			bShowImgui = false;
 			continue;
 		}
+		if (arg == L"--camera-path-dump" || arg == L"--dump-camera-path")
+		{
+			bCommandLineCameraPathDump = true;
+			bCommandLineAutoDumpOverrideSet = true;
+			bCommandLineAutoDumpEnabled = false;
+			continue;
+		}
+		if (arg == L"--camera-path" || arg == L"-camera-path")
+		{
+			bCommandLineLoadLatestCameraPath = true;
+			if (i + 1 < argc)
+			{
+				std::wstring rawCameraPath = argv[++i];
+				std::wstring loweredCameraPath = ToLower(rawCameraPath);
+				if (loweredCameraPath != L"latest")
+					CommandLineCameraPathFile = rawCameraPath;
+			}
+			continue;
+		}
+		std::wstring cameraPathValue = ParseValueArg(arg, L"--camera-path", L"-camera-path", i);
+		if (!cameraPathValue.empty())
+		{
+			bCommandLineLoadLatestCameraPath = true;
+			if (cameraPathValue != L"latest")
+				CommandLineCameraPathFile = cameraPathValue;
+			continue;
+		}
+
+		std::wstring dumpModeValue = ParseValueArg(arg, L"--dump-mode", L"-dump-mode", i);
+		if (!dumpModeValue.empty())
+		{
+			if (dumpModeValue == L"diffuse-gi" || dumpModeValue == L"diffuse_gi" || dumpModeValue == L"diffusegi" || dumpModeValue == L"gi")
+			{
+				bCommandLineAutoDumpOverrideSet = true;
+				bCommandLineAutoDumpEnabled = true;
+				bCommandLineDiffuseGIAutoDumpMode = true;
+			}
+			continue;
+		}
+
+		std::wstring giModeValue = ParseValueArg(arg, L"--gi-mode", L"-gi", i);
+		if (!giModeValue.empty())
+		{
+			if (giModeValue == L"screen-probe" || giModeValue == L"screen_probe" || giModeValue == L"screenprobe" || giModeValue == L"probe" || giModeValue == L"probes")
+				DiffuseGIMode = EDiffuseGIMode::SCREEN_PROBE;
+			else
+				DiffuseGIMode = EDiffuseGIMode::SIMPLE_RAYTRACE;
+			continue;
+		}
 
 		std::wstring aaValue = ParseValueArg(arg, L"--aa", L"-aa", i);
 		if (!aaValue.empty())
@@ -1038,6 +1228,156 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 				CommandLineSelectedAAMode = EAntiAliasingMode::DLSS_SR;
 			else if (aaValue == L"dlss-rr" || aaValue == L"dlss_rr" || aaValue == L"dlss rr" || aaValue == L"rr")
 				CommandLineSelectedAAMode = EAntiAliasingMode::DLSS_RR;
+			continue;
+		}
+
+		std::wstring noiseValue = ParseValueArg(arg, L"--ray-noise", L"-noise", i);
+		if (noiseValue.empty())
+			noiseValue = ParseValueArg(arg, L"--noise", L"-n", i);
+		if (!noiseValue.empty())
+		{
+			if (noiseValue == L"blue" || noiseValue == L"blue-noise" || noiseValue == L"blue_noise")
+				RayNoiseMode = ERayNoiseMode::BLUE_NOISE;
+			else if (noiseValue == L"stable" || noiseValue == L"stable-hash" || noiseValue == L"stable_hash" || noiseValue == L"hash")
+				RayNoiseMode = ERayNoiseMode::STABLE_HASH;
+			else
+				RayNoiseMode = ERayNoiseMode::R2_LOW_DISCREPANCY;
+			continue;
+		}
+
+		std::wstring jitterScaleValue = ParseValueArg(arg, L"--dlss-jitter-scale", L"-dlss-jitter-scale", i);
+		if (!jitterScaleValue.empty())
+		{
+			try
+			{
+				const float value = std::stof(jitterScaleValue);
+				DLSSJitterPhaseScale = std::clamp(value, 0.25f, 16.0f);
+			}
+			catch (...)
+			{
+			}
+			continue;
+		}
+
+		std::wstring jitterPhaseValue = ParseValueArg(arg, L"--dlss-jitter-phases", L"-dlss-jitter-phases", i);
+		if (!jitterPhaseValue.empty())
+		{
+			try
+			{
+				const unsigned long value = std::stoul(jitterPhaseValue);
+				DLSSJitterPhaseCountOverride = static_cast<UINT32>(std::clamp<unsigned long>(value, 0ul, 512ul));
+			}
+			catch (...)
+			{
+			}
+			continue;
+		}
+
+		std::wstring screenProbeSpacingValue = ParseValueArg(arg, L"--screen-probe-spacing", L"-screen-probe-spacing", i);
+		if (!screenProbeSpacingValue.empty())
+		{
+			try
+			{
+				const unsigned long value = std::stoul(screenProbeSpacingValue);
+				ScreenProbeGICB.ProbeSpacing = static_cast<UINT32>(std::clamp<unsigned long>(value, 4ul, 64ul));
+			}
+			catch (...)
+			{
+			}
+			continue;
+		}
+
+		std::wstring screenProbeRadiusValue = ParseValueArg(arg, L"--screen-probe-radius", L"-screen-probe-radius", i);
+		if (!screenProbeRadiusValue.empty())
+		{
+			try
+			{
+				const unsigned long value = std::stoul(screenProbeRadiusValue);
+				ScreenProbeGICB.GatherRadius = static_cast<UINT32>(std::clamp<unsigned long>(value, 1ul, 3ul));
+			}
+			catch (...)
+			{
+			}
+			continue;
+		}
+
+		std::wstring screenProbeRawBlendValue = ParseValueArg(arg, L"--screen-probe-raw-blend", L"-screen-probe-raw-blend", i);
+		if (!screenProbeRawBlendValue.empty())
+		{
+			try
+			{
+				ScreenProbeGICB.RawBlend = std::clamp(std::stof(screenProbeRawBlendValue), 0.0f, 1.0f);
+			}
+			catch (...)
+			{
+			}
+			continue;
+		}
+
+		std::wstring screenProbeTemporalAlphaValue = ParseValueArg(arg, L"--screen-probe-temporal-alpha", L"-screen-probe-temporal-alpha", i);
+		if (!screenProbeTemporalAlphaValue.empty())
+		{
+			try
+			{
+				ScreenProbeGICB.TemporalAlpha = std::clamp(std::stof(screenProbeTemporalAlphaValue), 0.02f, 1.0f);
+			}
+			catch (...)
+			{
+			}
+			continue;
+		}
+
+		std::wstring screenProbeRaysValue = ParseValueArg(arg, L"--screen-probe-rays", L"-screen-probe-rays", i);
+		if (!screenProbeRaysValue.empty())
+		{
+			try
+			{
+				const unsigned long value = std::stoul(screenProbeRaysValue);
+				RTScreenProbeGIViewParam.RaysPerProbe = static_cast<UINT32>(std::clamp<unsigned long>(value, 1ul, 4ul));
+			}
+			catch (...)
+			{
+			}
+			continue;
+		}
+
+		std::wstring screenProbeEdgeDepthValue = ParseValueArg(arg, L"--screen-probe-edge-depth", L"-screen-probe-edge-depth", i);
+		if (!screenProbeEdgeDepthValue.empty())
+		{
+			try
+			{
+				ScreenProbeGICB.EdgeDepthWeight = std::clamp(std::stof(screenProbeEdgeDepthValue), 8.0f, 192.0f);
+			}
+			catch (...)
+			{
+			}
+			continue;
+		}
+
+		std::wstring screenProbeEdgeNormalValue = ParseValueArg(arg, L"--screen-probe-edge-normal", L"-screen-probe-edge-normal", i);
+		if (!screenProbeEdgeNormalValue.empty())
+		{
+			try
+			{
+				ScreenProbeGICB.EdgeNormalWeight = std::clamp(std::stof(screenProbeEdgeNormalValue), 1.0f, 96.0f);
+			}
+			catch (...)
+			{
+			}
+			continue;
+		}
+
+		std::wstring screenProbeEdgeSamplesValue = ParseValueArg(arg, L"--screen-probe-edge-samples", L"-screen-probe-edge-samples", i);
+		if (!screenProbeEdgeSamplesValue.empty())
+		{
+			try
+			{
+				const unsigned long value = std::stoul(screenProbeEdgeSamplesValue);
+				ScreenProbeGICB.EdgeSampleCount = static_cast<UINT32>(std::clamp<unsigned long>(value, 1ul, 4ul));
+			}
+			catch (...)
+			{
+			}
 			continue;
 		}
 
@@ -1065,6 +1405,14 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 		L", backend=" + std::to_wstring(static_cast<int>(CommandLineRenderBackendAPI)) +
 		L", renderOverride=" + std::to_wstring(bCommandLineRenderModeOverrideSet ? 1 : 0) +
 		L", renderMode=" + std::to_wstring(static_cast<int>(CommandLineRenderingMode)) +
+		L", aaOverride=" + std::to_wstring(bCommandLineAAOverrideSet ? 1 : 0) +
+		L", aa=" + std::wstring(GetAntiAliasingModeName(CommandLineSelectedAAMode)) +
+		L", rayNoise=" + std::wstring(GetRayNoiseModeNameW(RayNoiseMode)) +
+		L", diffuseGI=" + std::wstring(GetDiffuseGIModeNameW(DiffuseGIMode)) +
+		L", diffuseGIDump=" + std::to_wstring(bCommandLineDiffuseGIAutoDumpMode ? 1 : 0) +
+		L", cameraPathDump=" + std::to_wstring(bCommandLineCameraPathDump ? 1 : 0) +
+		L", dlssJitterScale=" + std::to_wstring(DLSSJitterPhaseScale) +
+		L", dlssJitterOverride=" + std::to_wstring(DLSSJitterPhaseCountOverride) +
 		L", autoDumpOverride=" + std::to_wstring(bCommandLineAutoDumpOverrideSet ? 1 : 0) +
 		L", autoDump=" + std::to_wstring(bCommandLineAutoDumpEnabled ? 1 : 0) +
 		L", noImgui=" + std::to_wstring(bCommandLineDisableImgui ? 1 : 0));
@@ -1102,6 +1450,9 @@ void Corona::PromptStartupModeSelection()
 
 	if (bCommandLineAutoDumpOverrideSet)
 		bAutoAADumpEnabled = bCommandLineAutoDumpEnabled;
+	bDiffuseGIAutoDumpMode = bCommandLineDiffuseGIAutoDumpMode;
+	if (bDiffuseGIAutoDumpMode)
+		bAutoAADumpEnabled = true;
 
 	const DWORD dumpEnvLength = GetEnvironmentVariableW(L"CORONA_AUTO_DUMP", envValue, _countof(envValue));
 	if (!bCommandLineAutoDumpOverrideSet && dumpEnvLength > 0)
@@ -1159,7 +1510,7 @@ void Corona::PromptStartupModeSelection()
 			StartupSelectedAAMode = EAntiAliasingMode::TAA;
 #endif
 		}
-		else if (aaMode == L"rr" || aaMode == L"dlssrr" || aaMode == L"dlss_rr" || aaMode == L"dlss rr")
+		else if (aaMode == L"rr" || aaMode == L"dlssrr" || aaMode == L"dlss-rr" || aaMode == L"dlss_rr" || aaMode == L"dlss rr")
 		{
 #if WITH_STREAMLINE
 			if (bDLSSRRAvailable)
@@ -1204,6 +1555,13 @@ void Corona::PromptStartupModeSelection()
 	AntiAliasingMode = StartupSelectedAAMode;
 	RenderingMode = StartupRenderingMode;
 	bStartupModeConfigured = true;
+	AppendVulkanRuntimeTrace(
+		L"[PromptStartupModeSelection] final backend=" + std::to_wstring(static_cast<int>(StartupRenderBackendAPI)) +
+		L", renderMode=" + std::to_wstring(static_cast<int>(StartupRenderingMode)) +
+		L", aa=" + std::wstring(GetAntiAliasingModeName(StartupSelectedAAMode)) +
+		L", dlssAvailable=" + std::to_wstring(bDLSSAvailable ? 1 : 0) +
+		L", dlssRRAvailable=" + std::to_wstring(bDLSSRRAvailable ? 1 : 0) +
+		L", autoDump=" + std::to_wstring(bAutoAADumpEnabled ? 1 : 0));
 	return;
 
 	const int runModeResult = MessageBoxW(
@@ -1256,6 +1614,31 @@ void Corona::InitializeAutoAADump()
 {
 	if (this->bAutoAADumpInitialized || !this->bAutoAADumpEnabled)
 		return;
+
+	if (bDiffuseGIAutoDumpMode)
+	{
+		std::filesystem::path dumpDir = std::filesystem::path(L"C:\\dev\\Corona\\dumps\\diffuse_gi");
+		std::filesystem::create_directories(dumpDir);
+		this->AutoAADumpDir = dumpDir.wstring();
+		this->bAutoAADumpInitialized = true;
+		this->bAutoAADumpCompleted = false;
+		this->bHybridStageAutoDumpMode = false;
+		this->AutoAADumpPhase = 0;
+		this->AutoAADumpFramesInPhase = 0;
+
+		std::filesystem::path logPath = std::filesystem::path(AutoAADumpDir) / L"dump_log.txt";
+		std::error_code ec;
+		std::filesystem::remove(logPath, ec);
+
+		StartupRenderingMode = ERenderingMode::HYBRID;
+		RenderingMode = StartupRenderingMode;
+		AntiAliasingMode = EAntiAliasingMode::OFF;
+		bEnableDiffuseGI = true;
+		DiffuseGIMode = EDiffuseGIMode::SIMPLE_RAYTRACE;
+		ResetAllAccumulationState(false);
+		AppendAutoAADumpLog(L"[diffuse_gi_simple] begin frames=96, aa=off");
+		return;
+	}
 
 	if (StartupRenderingMode == ERenderingMode::HYBRID)
 	{
@@ -1455,6 +1838,87 @@ void Corona::AdvanceAutoAADump(Texture* backbuffer)
 	if (!bAutoAADumpEnabled || !bAutoAADumpInitialized || bAutoAADumpCompleted)
 		return;
 
+	if (bDiffuseGIAutoDumpMode)
+	{
+		constexpr UINT32 kDiffuseGIDumpFrames = 96;
+		constexpr UINT32 kNumDiffuseGIPhases = 2;
+		if (AutoAADumpPhase >= kNumDiffuseGIPhases)
+			return;
+
+		const bool bScreenProbePhase = AutoAADumpPhase == 1;
+		const EDiffuseGIMode targetMode = bScreenProbePhase ? EDiffuseGIMode::SCREEN_PROBE : EDiffuseGIMode::SIMPLE_RAYTRACE;
+		const wchar_t* currentPhaseName = bScreenProbePhase ? L"diffuse_gi_screen_probe" : L"diffuse_gi_simple";
+
+		if (RenderingMode != ERenderingMode::HYBRID || AntiAliasingMode != EAntiAliasingMode::OFF || DiffuseGIMode != targetMode || !bEnableDiffuseGI)
+		{
+			RenderingMode = ERenderingMode::HYBRID;
+			AntiAliasingMode = EAntiAliasingMode::OFF;
+			DiffuseGIMode = targetMode;
+			bEnableDiffuseGI = true;
+			ResetAllAccumulationState(false);
+			AppendAutoAADumpLog(std::wstring(L"[") + currentPhaseName + L"] begin frames=" + std::to_wstring(kDiffuseGIDumpFrames) + L", aa=off");
+			return;
+		}
+
+		if (AutoAADumpFramesInPhase == kDiffuseGIDumpFrames - 1)
+		{
+			const std::wstring base = AutoAADumpDir + L"\\" + currentPhaseName;
+			const bool bCanCaptureTexture =
+				renderBackend &&
+				renderBackend->GetAPI() == ERenderBackendAPI::D3D12;
+
+			auto dumpResource = [&](const wchar_t* suffix, Texture* texture, bool dumpHdr)
+			{
+				if (!texture || !bCanCaptureTexture)
+					return;
+
+				const std::wstring fileBase = base + L"_" + suffix;
+				bool hdrOk = true;
+				if (dumpHdr)
+					hdrOk = DumpTextureHDR(texture, fileBase + L".hdr", D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+				const bool pngOk = DumpTexturePNG(texture, fileBase + L"_preview.png", D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+				AppendAutoAADumpLog(std::wstring(L"[") + currentPhaseName + L"] " + suffix +
+					L" hdr=" + (dumpHdr ? (hdrOk ? L"ok" : L"fail") : L"skip") +
+					L", png=" + (pngOk ? L"ok" : L"fail"));
+			};
+
+			AppendAutoAADumpLog(std::wstring(L"[") + currentPhaseName +
+				L"] frameCounter=" + std::to_wstring(FrameCounter) +
+				L", accumulated=" + std::to_wstring(IndirectAccumulatedFrames) +
+				L", mode=" + std::wstring(GetDiffuseGIModeNameW(DiffuseGIMode)));
+			dumpResource(L"gi_diffuse_raw", DiffuseGIRaw.get(), true);
+			dumpResource(L"screen_probe_atlas", ScreenProbeGIRadiance[ScreenProbeGIAtlasWriteIndex].get(), true);
+			dumpResource(L"screen_probe_sh", ScreenProbeGISH[ScreenProbeGIAtlasWriteIndex][0].get(), false);
+			dumpResource(L"screen_probe_meta", ScreenProbeGIMetadata[ScreenProbeGIAtlasWriteIndex].get(), false);
+			dumpResource(L"screen_probe_gi", ScreenProbeGIResolved.get(), true);
+			dumpResource(L"screen_probe_probes", ScreenProbeGIProbeDebug.get(), true);
+			dumpResource(L"gi_diffuse_temporal", DiffuseGITemporal[GIBufferWriteIndex].get(), true);
+			dumpResource(L"gi_diffuse_spatial", DiffuseGISpatial[0].get(), true);
+			if (!bCanCaptureTexture)
+				AppendAutoAADumpLog(std::wstring(L"[") + currentPhaseName + L"] texture capture skipped for non-DX12 backend");
+		}
+
+		++AutoAADumpFramesInPhase;
+		if (AutoAADumpFramesInPhase < kDiffuseGIDumpFrames)
+			return;
+
+		AutoAADumpFramesInPhase = 0;
+		++AutoAADumpPhase;
+		if (AutoAADumpPhase < kNumDiffuseGIPhases)
+		{
+			DiffuseGIMode = EDiffuseGIMode::SCREEN_PROBE;
+			ResetAllAccumulationState(false);
+			AppendAutoAADumpLog(L"[diffuse_gi_screen_probe] begin frames=96, aa=off");
+			return;
+		}
+
+		bAutoAADumpCompleted = true;
+		if (HWND hwnd = Win32Application::GetHwnd())
+			PostMessage(hwnd, WM_CLOSE, 0, 0);
+		PostQuitMessage(0);
+		return;
+	}
+
 	if (IsHybridStageAutoDumpPhase())
 	{
 		const uint32_t maxSupportedHybridStage = renderBackend ? renderBackend->GetMaxSupportedHybridStage() : 7u;
@@ -1512,6 +1976,11 @@ void Corona::AdvanceAutoAADump(Texture* backbuffer)
 				{
 					dumpResource(L"gi_diffuse_raw", DiffuseGIRaw.get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, true);
 					dumpResource(L"gi_diffuse_raw_aux", DiffuseGIRawAux.get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, true);
+					dumpResource(L"screen_probe_atlas", ScreenProbeGIRadiance[ScreenProbeGIAtlasWriteIndex].get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, true);
+					dumpResource(L"screen_probe_sh", ScreenProbeGISH[ScreenProbeGIAtlasWriteIndex][0].get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, false);
+					dumpResource(L"screen_probe_meta", ScreenProbeGIMetadata[ScreenProbeGIAtlasWriteIndex].get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, false);
+					dumpResource(L"screen_probe_gi", ScreenProbeGIResolved.get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, true);
+					dumpResource(L"screen_probe_probes", ScreenProbeGIProbeDebug.get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, true);
 				}
 				if (AutoAADumpPhase >= 5)
 				{
@@ -1655,6 +2124,11 @@ void Corona::AdvanceAutoAADump(Texture* backbuffer)
 			dumpResource(L"gbuffer_velocity", VelocityBuffer.get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, false);
 			dumpResource(L"gbuffer_depth", UnjitteredDepthBuffers[ColorBufferWriteIndex].get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, false);
 			dumpResource(L"gi_diffuse_raw", DiffuseGIRaw.get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, true);
+			dumpResource(L"screen_probe_atlas", ScreenProbeGIRadiance[ScreenProbeGIAtlasWriteIndex].get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, true);
+			dumpResource(L"screen_probe_sh", ScreenProbeGISH[ScreenProbeGIAtlasWriteIndex][0].get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, false);
+			dumpResource(L"screen_probe_meta", ScreenProbeGIMetadata[ScreenProbeGIAtlasWriteIndex].get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, false);
+			dumpResource(L"screen_probe_gi", ScreenProbeGIResolved.get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, true);
+			dumpResource(L"screen_probe_probes", ScreenProbeGIProbeDebug.get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, true);
 			dumpResource(L"gi_diffuse_spatial", DiffuseGISpatial[0].get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, true);
 			dumpResource(L"gi_diffuse_temporal", DiffuseGITemporal[GIBufferWriteIndex].get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, true);
 			dumpResource(L"gi_specular_temporal", SpecularGITemporal[GIBufferWriteIndex].get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, true);
@@ -2121,6 +2595,7 @@ void Corona::StartCameraPathPlayback()
 	bCameraPathRecording = false;
 	bCameraPathDumping = false;
 	bCameraPathDumpCaptureInFlight = false;
+	bCameraPathDumpExitWhenComplete = false;
 	bCameraPathPlaying = true;
 	CameraPathPlaybackStartSeconds = m_timer.GetTotalSeconds();
 	ApplyCameraPathKeyframe(CameraPathKeyframes.front());
@@ -2217,6 +2692,7 @@ void Corona::StopCameraPathDump()
 		LastCameraPathStatus = L"Camera path playback and frame dump stopped.";
 	bCameraPathDumping = false;
 	bCameraPathDumpCaptureInFlight = false;
+	bCameraPathDumpExitWhenComplete = false;
 	bCameraPathPlaying = false;
 }
 
@@ -2300,6 +2776,8 @@ void Corona::ConsumeCameraPathDumpCaptureResult()
 		LastCameraPathStatus = L"Camera path frame capture failed";
 		if (!errorMessage.empty())
 			LastCameraPathStatus += L": " + errorMessage;
+		if (bCameraPathDumpExitWhenComplete)
+			PostQuitMessage(1);
 	}
 	else if (CameraPathDumpFrameIndex >= CameraPathDumpFrameCount)
 	{
@@ -2308,6 +2786,8 @@ void Corona::ConsumeCameraPathDumpCaptureResult()
 		LastCameraPathStatus =
 			L"Camera path playback and frame dump complete: " + LastCameraPathDumpDir +
 			L" (" + std::to_wstring(CameraPathDumpFrameCount) + L" frames)";
+		if (bCameraPathDumpExitWhenComplete)
+			PostQuitMessage(0);
 	}
 	else
 	{
@@ -2476,6 +2956,9 @@ void Corona::OnInit()
 	AppendVulkanRuntimeTrace(
 		L"[OnInit] after PromptStartupModeSelection backend=" + std::to_wstring(static_cast<int>(StartupRenderBackendAPI)) +
 		L", renderMode=" + std::to_wstring(static_cast<int>(StartupRenderingMode)) +
+		L", aa=" + std::wstring(GetAntiAliasingModeName(AntiAliasingMode)) +
+		L", dlssAvailable=" + std::to_wstring(bDLSSAvailable ? 1 : 0) +
+		L", dlssRRAvailable=" + std::to_wstring(bDLSSRRAvailable ? 1 : 0) +
 		L", autoDump=" + std::to_wstring(bAutoAADumpEnabled ? 1 : 0));
 	const bool bVulkanHybridStartup =
 		StartupRenderingMode == ERenderingMode::HYBRID &&
@@ -2504,6 +2987,32 @@ void Corona::OnInit()
 		L"[OnInit] after InitializeAutoAADump initialized=" + std::to_wstring(bAutoAADumpInitialized ? 1 : 0) +
 		L", completed=" + std::to_wstring(bAutoAADumpCompleted ? 1 : 0) +
 		L", dir=" + AutoAADumpDir);
+	if (!bAutoAADumpEnabled && (bCommandLineLoadLatestCameraPath || !CommandLineCameraPathFile.empty() || bCommandLineCameraPathDump))
+	{
+		bool bLoadedCameraPath = false;
+		if (!CommandLineCameraPathFile.empty())
+			bLoadedCameraPath = LoadCameraPath(CommandLineCameraPathFile);
+		else
+			bLoadedCameraPath = LoadLatestCameraPath();
+
+		AppendVulkanRuntimeTrace(
+			L"[OnInit] command line camera path loaded=" + std::to_wstring(bLoadedCameraPath ? 1 : 0) +
+			L", dump=" + std::to_wstring(bCommandLineCameraPathDump ? 1 : 0) +
+			L", status=" + LastCameraPathStatus);
+
+		if (bLoadedCameraPath && bCommandLineCameraPathDump)
+		{
+			StartCameraPathDump();
+			bCameraPathDumpExitWhenComplete = bCameraPathDumping;
+			AppendVulkanRuntimeTrace(
+				L"[OnInit] command line camera path dump started=" + std::to_wstring(bCameraPathDumping ? 1 : 0) +
+				L", dir=" + LastCameraPathDumpDir);
+		}
+		else if (!bLoadedCameraPath && bCommandLineCameraPathDump)
+		{
+			PostQuitMessage(1);
+		}
+	}
 }
 
 namespace
@@ -2694,6 +3203,7 @@ void Corona::LoadAssets()
 	const bool bVulkanHybridBootstrap = bVulkanHybridStartup && maxSupportedHybridStage == 0u;
 	const bool bSupportsHybridRaytracing = !bVulkanHybridStartup || maxSupportedHybridStage >= 1u;
 	const bool bSupportsShadowDenoise = !bVulkanHybridStartup || maxSupportedHybridStage >= 2u;
+	const bool bSupportsScreenProbeGI = !bVulkanHybridStartup || maxSupportedHybridStage >= 4u;
 	const bool bSupportsTemporalDenoise = !bVulkanHybridStartup || maxSupportedHybridStage >= 5u;
 	const bool bSupportsSpatialDenoise = !bVulkanHybridStartup || maxSupportedHybridStage >= 6u;
 	const bool bSupportsFullHybridPresentation = !bVulkanHybridStartup || maxSupportedHybridStage >= 7u;
@@ -2751,6 +3261,12 @@ void Corona::LoadAssets()
 		AppendVulkanRuntimeTrace(L"[LoadAssets] before InitTemporalDenoisingPass");
 		InitTemporalDenoisingPass();
 		AppendVulkanRuntimeTrace(L"[LoadAssets] after InitTemporalDenoisingPass");
+	}
+	if (bSupportsScreenProbeGI)
+	{
+		AppendVulkanRuntimeTrace(L"[LoadAssets] before InitScreenProbeGIPass");
+		InitScreenProbeGIPass();
+		AppendVulkanRuntimeTrace(L"[LoadAssets] after InitScreenProbeGIPass");
 	}
 	if (bSupportsTemporalDenoise || bSupportsSpatialDenoise)
 	{
@@ -2859,6 +3375,8 @@ void Corona::LoadAssets()
 	LightingBuffer->MakeRTV();
 
 	NAME_D3D12_OBJECT(LightingBuffer->resource);
+	DLSSRRBuffer = createTexture2D(ETextureFormat::RGBA16Float, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
+	NAME_D3D12_OBJECT(DLSSRRBuffer->resource);
 	AppendVulkanRuntimeTrace(L"[LoadAssets] after lighting buffer");
 
 	// world normal
@@ -2918,6 +3436,51 @@ void Corona::LoadAssets()
 	DiffuseGIRaw = createTexture2D(HybridFloat4UAVFormat, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
 
 	NAME_D3D12_OBJECT(DiffuseGIRaw->resource);
+
+	ScreenProbeGIResolved = createTexture2D(HybridFloat4UAVFormat, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
+
+	NAME_D3D12_OBJECT(ScreenProbeGIResolved->resource);
+
+	ScreenProbeGIProbeDebug = createTexture2D(HybridFloat4UAVFormat, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
+
+	NAME_D3D12_OBJECT(ScreenProbeGIProbeDebug->resource);
+
+	const int ScreenProbeAtlasWidth = std::max(1, (static_cast<int>(RenderWidthLocal) + 3) / 4);
+	const int ScreenProbeAtlasHeight = std::max(1, (static_cast<int>(RenderHeightLocal) + 3) / 4);
+
+	ScreenProbeGIRadiance[0] = createTexture2D(HybridFloat4UAVFormat, TextureUsage_UnorderedAccess, ScreenProbeAtlasWidth, ScreenProbeAtlasHeight, 1);
+
+	NAME_D3D12_OBJECT(ScreenProbeGIRadiance[0]->resource);
+
+	ScreenProbeGIRadiance[1] = createTexture2D(HybridFloat4UAVFormat, TextureUsage_UnorderedAccess, ScreenProbeAtlasWidth, ScreenProbeAtlasHeight, 1);
+
+	NAME_D3D12_OBJECT(ScreenProbeGIRadiance[1]->resource);
+
+	for (UINT historyIndex = 0; historyIndex < 2; ++historyIndex)
+	{
+		for (UINT coefficientIndex = 0; coefficientIndex < ScreenProbeSHCoefficientCount; ++coefficientIndex)
+		{
+			ScreenProbeGISH[historyIndex][coefficientIndex] = createTexture2D(ETextureFormat::RGBA32Float, TextureUsage_UnorderedAccess, ScreenProbeAtlasWidth, ScreenProbeAtlasHeight, 1);
+
+			NAME_D3D12_OBJECT(ScreenProbeGISH[historyIndex][coefficientIndex]->resource);
+		}
+	}
+
+	ScreenProbeGIMetadata[0] = createTexture2D(ETextureFormat::RGBA32Float, TextureUsage_UnorderedAccess, ScreenProbeAtlasWidth, ScreenProbeAtlasHeight, 1);
+
+	NAME_D3D12_OBJECT(ScreenProbeGIMetadata[0]->resource);
+
+	ScreenProbeGIMetadata[1] = createTexture2D(ETextureFormat::RGBA32Float, TextureUsage_UnorderedAccess, ScreenProbeAtlasWidth, ScreenProbeAtlasHeight, 1);
+
+	NAME_D3D12_OBJECT(ScreenProbeGIMetadata[1]->resource);
+
+	ScreenProbeGIHistory[0] = createTexture2D(HybridFloat4UAVFormat, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
+
+	NAME_D3D12_OBJECT(ScreenProbeGIHistory[0]->resource);
+
+	ScreenProbeGIHistory[1] = createTexture2D(HybridFloat4UAVFormat, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
+
+	NAME_D3D12_OBJECT(ScreenProbeGIHistory[1]->resource);
 
 	// gi result sh
 	DiffuseGITemporalAux[0] = createTexture2D(HybridFloat4UAVFormat, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
@@ -3408,6 +3971,40 @@ void Corona::InitTemporalDenoisingPass()
 	bool bSuccess = TEMP_TemporalDenoisingFilterPSO->InitCS(GetAssetFullPath(L"Shaders\\TemporalDenoising.hlsl"), "TemporalFilter");
 	if (bSuccess)
 		TemporalDenoisingFilterPSO = TEMP_TemporalDenoisingFilterPSO;
+}
+
+void Corona::InitScreenProbeGIPass()
+{
+	shared_ptr<ComputePipelineStateObject> tempPSO = renderBackend->CreateComputePipelineStateObject();
+	if (!tempPSO)
+		return;
+
+	tempPSO->BindSRV("DepthTex", 0, 1);
+	tempPSO->BindSRV("WorldNormalTex", 1, 1);
+	tempPSO->BindSRV("GeoNormalTex", 2, 1);
+	tempPSO->BindSRV("ScreenProbeRadianceTex", 3, 1);
+	tempPSO->BindSRV("ScreenProbeMetaTex", 4, 1);
+	tempPSO->BindSRV("PrevScreenProbeGITex", 5, 1);
+	tempPSO->BindSRV("VelocityTex", 6, 1);
+	tempPSO->BindSRV("PrevDepthTex", 7, 1);
+	tempPSO->BindSRV("PrevNormalTex", 8, 1);
+	tempPSO->BindSRV("ScreenProbeSH0Tex", 9, 1);
+	tempPSO->BindSRV("ScreenProbeSH1Tex", 10, 1);
+	tempPSO->BindSRV("ScreenProbeSH2Tex", 11, 1);
+	tempPSO->BindSRV("ScreenProbeSH3Tex", 12, 1);
+	tempPSO->BindSRV("ScreenProbeSH4Tex", 13, 1);
+	tempPSO->BindSRV("ScreenProbeSH5Tex", 14, 1);
+	tempPSO->BindSRV("ScreenProbeSH6Tex", 15, 1);
+	tempPSO->BindSRV("ScreenProbeSH7Tex", 16, 1);
+	tempPSO->BindSRV("ScreenProbeSH8Tex", 17, 1);
+	tempPSO->BindUAV("OutScreenProbeGI", 0);
+	tempPSO->BindUAV("OutScreenProbeDebug", 1);
+	tempPSO->BindUAV("OutScreenProbeHistory", 2);
+	tempPSO->BindSampler("BilinearClamp", 0);
+	tempPSO->BindCBV("ScreenProbeGIConstant", 0, sizeof(ScreenProbeGIConstant));
+
+	if (tempPSO->InitCS(GetAssetFullPath(L"Shaders\\ScreenProbeGI.hlsl"), "ScreenProbeGI"))
+		ScreenProbeGIPSO = tempPSO;
 }
 
 void Corona::InitBloomPass()
@@ -4377,6 +4974,90 @@ void Corona::DebugPass()
 		renderBackend->DrawFullscreenQuad(FullScreenVB.get());
 	});
 	functions.push_back([&](EDebugVisualization eFS) {
+		// screen probe diffuse gi resolve
+		DebugPassCB cb;
+
+		if (eFS == EDebugVisualization::SCREEN_PROBE_DIFFUSE_GI)
+		{
+			cb.Offset = glm::vec4(0, 0, 0, 0);
+			cb.Scale = glm::vec4(1, 1, 0, 0);
+		}
+		else
+		{
+			return;
+		}
+
+		if (!ScreenProbeGIResolved)
+			return;
+		cb.DebugMode = RAW_COPY;
+		BufferVisualizePSO->SetCBVValue("DebugPassCB", &cb);
+		BufferVisualizePSO->SetSRV("SrcTex", ScreenProbeGIResolved->GpuHandleSRV);
+		renderBackend->DrawFullscreenQuad(FullScreenVB.get());
+	});
+	functions.push_back([&](EDebugVisualization eFS) {
+		// nearest screen probe radiance debug
+		DebugPassCB cb;
+
+		if (eFS == EDebugVisualization::SCREEN_PROBE_PROBES)
+		{
+			cb.Offset = glm::vec4(0, 0, 0, 0);
+			cb.Scale = glm::vec4(1, 1, 0, 0);
+		}
+		else
+		{
+			return;
+		}
+
+		if (!ScreenProbeGIProbeDebug)
+			return;
+		cb.DebugMode = RAW_COPY;
+		BufferVisualizePSO->SetCBVValue("DebugPassCB", &cb);
+		BufferVisualizePSO->SetSRV("SrcTex", ScreenProbeGIProbeDebug->GpuHandleSRV);
+		renderBackend->DrawFullscreenQuad(FullScreenVB.get());
+	});
+	functions.push_back([&](EDebugVisualization eFS) {
+		// full-resolution screen-probe resolve history length
+		DebugPassCB cb;
+
+		if (eFS == EDebugVisualization::SCREEN_PROBE_HISTORY_LENGTH)
+		{
+			cb.Offset = glm::vec4(0, 0, 0, 0);
+			cb.Scale = glm::vec4(1, 1, 0, 0);
+		}
+		else
+		{
+			return;
+		}
+
+		if (!ScreenProbeGIHistory[ScreenProbeGIHistoryWriteIndex])
+			return;
+		cb.DebugMode = HISTORY_LENGTH;
+		BufferVisualizePSO->SetCBVValue("DebugPassCB", &cb);
+		BufferVisualizePSO->SetSRV("SrcTex", ScreenProbeGIHistory[ScreenProbeGIHistoryWriteIndex]->GpuHandleSRV);
+		renderBackend->DrawFullscreenQuad(FullScreenVB.get());
+	});
+	functions.push_back([&](EDebugVisualization eFS) {
+		// probe-atlas radiance history length
+		DebugPassCB cb;
+
+		if (eFS == EDebugVisualization::SCREEN_PROBE_ATLAS_HISTORY_LENGTH)
+		{
+			cb.Offset = glm::vec4(0, 0, 0, 0);
+			cb.Scale = glm::vec4(1, 1, 0, 0);
+		}
+		else
+		{
+			return;
+		}
+
+		if (!ScreenProbeGIRadiance[ScreenProbeGIAtlasWriteIndex])
+			return;
+		cb.DebugMode = HISTORY_LENGTH;
+		BufferVisualizePSO->SetCBVValue("DebugPassCB", &cb);
+		BufferVisualizePSO->SetSRV("SrcTex", ScreenProbeGIRadiance[ScreenProbeGIAtlasWriteIndex]->GpuHandleSRV);
+		renderBackend->DrawFullscreenQuad(FullScreenVB.get());
+	});
+	functions.push_back([&](EDebugVisualization eFS) {
 		// temporal filtered diffuse gi
 		DebugPassCB cb;
 
@@ -5027,6 +5708,8 @@ void Corona::OnUpdate()
 		JitterOffset = glm::vec2(0.0f);
 		bTemporalAAHistoryValid = false;
 		bTemporalDenoiserHistoryValid = false;
+		bScreenProbeGIAtlasHistoryValid = false;
+		bScreenProbeGIHistoryValid = false;
 		bResetTemporalStateNextUpdate = false;
 	}
 
@@ -5039,16 +5722,8 @@ void Corona::OnUpdate()
 	glm::vec3 normalizedLightDir = glm::normalize(LightDir);
 	float lightDirT = 0.5f * (normalizedLightDir.y + 1.0f);
 	glm::vec3 lightColor = glm::mix(SkyColorBottom, SkyColorTop, lightDirT);
-
-	bool indirectCameraChanged = false;
-	for (int i = 0; i < 4 && !indirectCameraChanged; i++)
-	{
-		for (int j = 0; j < 4 && !indirectCameraChanged; j++)
-		{
-			if (abs(PrevIndirectAccumViewMat[i][j] - ViewMat[i][j]) > 0.0001f)
-				indirectCameraChanged = true;
-		}
-	}
+	const UINT32 rayNoiseMode = static_cast<UINT32>(RayNoiseMode);
+	constexpr UINT32 kScreenProbeLightingBootstrapRays = 100u;
 
 	const bool indirectLightDirChanged = glm::length(normalizedLightDir - PrevIndirectAccumLightDir) > 0.0001f;
 	const bool indirectLightIntensityChanged = abs(LightIntensity - PrevIndirectAccumLightIntensity) > 0.0001f;
@@ -5057,17 +5732,25 @@ void Corona::OnUpdate()
 		glm::length(SkyColorBottom - PrevIndirectSkyColorBottom) > 0.0001f ||
 		abs(SkyIntensity - PrevIndirectSkyIntensity) > 0.0001f;
 
-	if (indirectCameraChanged || indirectLightDirChanged || indirectLightIntensityChanged || indirectSkyChanged)
+	if (indirectLightDirChanged || indirectLightIntensityChanged || indirectSkyChanged)
 	{
 		IndirectAccumulatedFrames = 0;
 		bTemporalDenoiserHistoryValid = false;
-		PrevIndirectAccumViewMat = ViewMat;
+		if (DiffuseGIMode == EDiffuseGIMode::SCREEN_PROBE && (bScreenProbeGIAtlasHistoryValid || bScreenProbeGIHistoryValid))
+			bScreenProbeLightingBootstrapPending = true;
+		else
+		{
+			bScreenProbeGIAtlasHistoryValid = false;
+			bScreenProbeGIHistoryValid = false;
+			bScreenProbeLightingBootstrapPending = false;
+		}
 		PrevIndirectAccumLightDir = normalizedLightDir;
 		PrevIndirectAccumLightIntensity = LightIntensity;
 		PrevIndirectSkyColorTop = SkyColorTop;
 		PrevIndirectSkyColorBottom = SkyColorBottom;
 		PrevIndirectSkyIntensity = SkyIntensity;
 	}
+	PrevIndirectAccumViewMat = ViewMat;
 	
 	// reflection view param
 	RTReflectionViewParam.ViewMatrix = glm::transpose(ViewMat);
@@ -5085,6 +5768,7 @@ void Corona::OnUpdate()
 	RTReflectionViewParam.SkyColorBottom = SkyColorBottom;
 	RTReflectionViewParam.SkyIntensity = SkyIntensity;
 	RTReflectionViewParam.LightColor = lightColor;
+	RTReflectionViewParam.NoiseMode = rayNoiseMode;
 
 	// GI view param
 	RTGIViewParam.ViewMatrix = glm::transpose(ViewMat);
@@ -5102,6 +5786,38 @@ void Corona::OnUpdate()
 	RTGIViewParam.SkyColorBottom = SkyColorBottom;
 	RTGIViewParam.SkyIntensity = SkyIntensity;
 	RTGIViewParam.LightColor = lightColor;
+	RTGIViewParam.NoiseMode = rayNoiseMode;
+
+	const UINT32 screenProbeSpacing = std::clamp(ScreenProbeGICB.ProbeSpacing, 4u, 64u);
+	const glm::vec2 screenProbeGridSize = glm::vec2(
+		static_cast<float>((GetRenderWidth() + screenProbeSpacing - 1u) / screenProbeSpacing),
+		static_cast<float>((GetRenderHeight() + screenProbeSpacing - 1u) / screenProbeSpacing));
+
+	RTScreenProbeGIViewParam.ViewMatrix = glm::transpose(ViewMat);
+	RTScreenProbeGIViewParam.InvViewMatrix = glm::transpose(InvViewMat);
+	RTScreenProbeGIViewParam.ProjMatrix = glm::transpose(UnjitteredProjMat);
+	RTScreenProbeGIViewParam.InvProjMatrix = glm::transpose(UnjitteredInvProjMat);
+	RTScreenProbeGIViewParam.ProjectionParams = RTGIViewParam.ProjectionParams;
+	RTScreenProbeGIViewParam.LightDir = glm::vec4(normalizedLightDir, LightIntensity);
+	RTScreenProbeGIViewParam.RandomOffset = glm::vec2(timeElapsed, timeElapsed);
+	RTScreenProbeGIViewParam.RTSize = glm::vec2(GetRenderWidth(), GetRenderHeight());
+	RTScreenProbeGIViewParam.ProbeGridSize = screenProbeGridSize;
+	RTScreenProbeGIViewParam.FrameCounter = FrameCounter;
+	RTScreenProbeGIViewParam.BlueNoiseOffsetStride = RTGIViewParam.BlueNoiseOffsetStride;
+	RTScreenProbeGIViewParam.NoiseMode = rayNoiseMode;
+	RTScreenProbeGIViewParam.ProbeSpacing = screenProbeSpacing;
+	RTScreenProbeGIViewParam.RaysPerProbe = std::clamp(RTScreenProbeGIViewParam.RaysPerProbe, 1u, 4u);
+	RTScreenProbeGIViewParam.HistoryValid = (bScreenProbeGIAtlasHistoryValid && !bScreenProbeLightingBootstrapPending) ? 1u : 0u;
+	RTScreenProbeGIViewParam.ViewSpreadAngle = glm::tan(Fov * 0.5f) / (0.5f * GetRenderHeight());
+	RTScreenProbeGIViewParam.TemporalAlpha = std::clamp(ScreenProbeGICB.TemporalAlpha, 0.02f, 1.0f);
+	RTScreenProbeGIViewParam.HistoryDepthWeight = ScreenProbeGICB.HistoryDepthWeight;
+	RTScreenProbeGIViewParam.HistoryNormalWeight = ScreenProbeGICB.HistoryNormalWeight;
+	RTScreenProbeGIViewParam.SkyColorTop = SkyColorTop;
+	RTScreenProbeGIViewParam.SkyColorBottom = SkyColorBottom;
+	RTScreenProbeGIViewParam.SkyIntensity = SkyIntensity;
+	RTScreenProbeGIViewParam.LightColor = lightColor;
+	RTScreenProbeGIViewParam.LightingBootstrap = bScreenProbeLightingBootstrapPending ? 1u : 0u;
+	RTScreenProbeGIViewParam.BootstrapRays = kScreenProbeLightingBootstrapRays;
 	
 	// Path Tracing view param
 	PathTracingViewParam.ViewMatrix = glm::transpose(ViewMat);
@@ -5138,6 +5854,12 @@ void Corona::OnUpdate()
 	TemporalFilterCB.RTSize.y = GetRenderHeight();
 	TemporalFilterCB.FrameIndex = FrameCounter;
 	TemporalFilterCB.AccumulationAlpha = bTemporalDenoiserHistoryValid ? (1.0f / float(std::min(IndirectAccumulatedFrames + 1u, 32u))) : 1.0f;
+	ScreenProbeGICB.ProjectionParams.z = effectiveNear;
+	ScreenProbeGICB.ProjectionParams.w = effectiveFar;
+	ScreenProbeGICB.RTSize.x = GetRenderWidth();
+	ScreenProbeGICB.RTSize.y = GetRenderHeight();
+	ScreenProbeGICB.ProbeGridSize = screenProbeGridSize;
+	ScreenProbeGICB.FrameIndex = FrameCounter;
 
 	// Don't increment frame counter in debug mode (to avoid accumulation noise)
 	if (PathTracingViewParam.DebugMode == 0)
@@ -5172,6 +5894,7 @@ void Corona::OnRender()
 	StreamlineFrameToken = nullptr;
 	bStreamlineConstantsSetThisFrame = false;
 #endif
+	bDLSSRROutputValidThisFrame = false;
 	if (bPendingTemporalHistoryClear)
 	{
 		ResetTemporalHistoryBuffers();
@@ -5242,9 +5965,18 @@ void Corona::OnRender()
 		if (bRunGI)
 		{
 			BeginGpuPassTiming(EGpuPass::RaytraceGI);
-			AppendVulkanRuntimeTrace(L"[OnRender] before RaytraceGIPass");
-			RaytraceGIPass();
-			AppendVulkanRuntimeTrace(L"[OnRender] after RaytraceGIPass");
+			if (DiffuseGIMode == EDiffuseGIMode::SCREEN_PROBE)
+			{
+				AppendVulkanRuntimeTrace(L"[OnRender] before ScreenProbeRaytraceGIPass");
+				ScreenProbeRaytraceGIPass();
+				AppendVulkanRuntimeTrace(L"[OnRender] after ScreenProbeRaytraceGIPass");
+			}
+			else
+			{
+				AppendVulkanRuntimeTrace(L"[OnRender] before RaytraceGIPass");
+				RaytraceGIPass();
+				AppendVulkanRuntimeTrace(L"[OnRender] after RaytraceGIPass");
+			}
 			EndGpuPassTiming(EGpuPass::RaytraceGI);
 		}
 
@@ -5256,6 +5988,14 @@ void Corona::OnRender()
 			TemporalDenoisingPass();
 			AppendVulkanRuntimeTrace(L"[OnRender] after TemporalDenoisingPass");
 			EndGpuPassTiming(EGpuPass::TemporalDenoise);
+		}
+		if (bRunGI && DiffuseGIMode == EDiffuseGIMode::SCREEN_PROBE)
+		{
+			BeginGpuPassTiming(EGpuPass::ScreenProbeGI);
+			AppendVulkanRuntimeTrace(L"[OnRender] before ScreenProbeGIPass");
+			ScreenProbeGIPass();
+			AppendVulkanRuntimeTrace(L"[OnRender] after ScreenProbeGIPass");
+			EndGpuPassTiming(EGpuPass::ScreenProbeGI);
 		}
 		// GenMipSpecularGIPass();
 		if (bRunSpatialDenoise)
@@ -5388,8 +6128,8 @@ void Corona::OnRender()
 			case 1: previewTexture = ShadowBuffer.get(); break;
 			case 2: previewTexture = ShadowDenoisedBuffer.get(); break;
 			case 3: previewTexture = SpecularGIRaw.get(); break;
-			case 4: previewTexture = DiffuseGIRaw.get(); break;
-			case 5: previewTexture = DiffuseGITemporal[GIBufferWriteIndex].get(); break;
+			case 4: previewTexture = (DiffuseGIMode == EDiffuseGIMode::SCREEN_PROBE && ScreenProbeGIResolved) ? ScreenProbeGIResolved.get() : DiffuseGIRaw.get(); break;
+			case 5: previewTexture = (DiffuseGIMode == EDiffuseGIMode::SCREEN_PROBE && ScreenProbeGIResolved) ? ScreenProbeGIResolved.get() : DiffuseGITemporal[GIBufferWriteIndex].get(); break;
 			case 6: previewTexture = DiffuseGISpatial[0].get(); break;
 			default: previewTexture = nullptr; break;
 			}
@@ -5695,11 +6435,21 @@ void Corona::OnRender()
 					DLSSQualityMode = static_cast<EDLSSQualityMode>(DLSSQualityIndex);
 					ResetAllAccumulationState(true);
 				}
+				if (ImGui::SliderFloat("DLSS Jitter Phase Scale", &DLSSJitterPhaseScale, 0.25f, 16.0f, "%.2f"))
+				{
+					ResetAllAccumulationState(false);
+				}
+				int DLSSJitterPhaseOverrideUI = static_cast<int>(DLSSJitterPhaseCountOverride);
+				if (ImGui::SliderInt("DLSS Jitter Phase Override", &DLSSJitterPhaseOverrideUI, 0, 512))
+				{
+					DLSSJitterPhaseCountOverride = static_cast<UINT32>(DLSSJitterPhaseOverrideUI);
+					ResetAllAccumulationState(false);
+				}
 				ImGui::Text("DLSS SR Available: %s", bDLSSAvailable ? "Yes" : "No");
 				ImGui::Text("DLSS RR Available: %s", bDLSSRRAvailable ? "Yes" : "No");
 				ImGui::Text("Render Resolution: %u x %u", RenderWidth, RenderHeight);
 				if (IsDLSSUpscaleEnabled())
-					ImGui::Text("DLSS Jitter Phases: %u", DLSSJitterPhaseCount);
+					ImGui::Text("DLSS Jitter Phases: %u (auto base %u)", DLSSJitterPhaseCount, DLSSJitterPhaseCountAuto);
 			}
 			else
 			{
@@ -5736,8 +6486,76 @@ void Corona::OnRender()
 			bool bLightingChanged = false;
 			if (ImGui::Checkbox("Enable Direct Diffuse", &bEnableDirectDiffuse)) bLightingChanged = true;
 			if (ImGui::Checkbox("Enable Direct Specular", &bEnableDirectSpecular)) bLightingChanged = true;
-			if (ImGui::Checkbox("Enable Indirect Diffuse (GI)", &bEnableDiffuseGI)) bLightingChanged = true;
 			if (ImGui::Checkbox("Enable Indirect Specular (GI)", &bEnableSpecularGI)) bLightingChanged = true;
+
+			ImGui::Separator();
+			ImGui::Text("Diffuse GI");
+			if (ImGui::Checkbox("Enable Diffuse GI", &bEnableDiffuseGI)) bLightingChanged = true;
+
+			static const char* DiffuseGIModes[] = { "Simple Raytrace", "Screen Probe" };
+			int DiffuseGIModeIndex = static_cast<int>(DiffuseGIMode);
+			const bool bDiffuseGIMethodAvailable = RenderingMode == ERenderingMode::HYBRID;
+			if (!bDiffuseGIMethodAvailable)
+			{
+				ImGui::BeginDisabled();
+			}
+			ImGui::SetNextItemWidth(220.0f);
+			if (ImGui::Combo("Method##DiffuseGI", &DiffuseGIModeIndex, DiffuseGIModes, IM_ARRAYSIZE(DiffuseGIModes)))
+			{
+				DiffuseGIMode = static_cast<EDiffuseGIMode>(DiffuseGIModeIndex);
+				bLightingChanged = true;
+			}
+			if (!bDiffuseGIMethodAvailable)
+			{
+				ImGui::EndDisabled();
+				ImGui::TextDisabled("Diffuse GI method selection is used by Hybrid rendering.");
+			}
+			else if (DiffuseGIMode == EDiffuseGIMode::SCREEN_PROBE)
+			{
+				int probeSpacing = static_cast<int>(ScreenProbeGICB.ProbeSpacing);
+				if (ImGui::SliderInt("Screen Probe Spacing", &probeSpacing, 4, 64))
+				{
+					ScreenProbeGICB.ProbeSpacing = static_cast<UINT32>(probeSpacing);
+					bLightingChanged = true;
+				}
+				int gatherRadius = static_cast<int>(ScreenProbeGICB.GatherRadius);
+				if (ImGui::SliderInt("Screen Probe Gather Radius", &gatherRadius, 1, 3))
+				{
+					ScreenProbeGICB.GatherRadius = static_cast<UINT32>(gatherRadius);
+					bLightingChanged = true;
+				}
+				int raysPerProbe = static_cast<int>(RTScreenProbeGIViewParam.RaysPerProbe);
+				if (ImGui::SliderInt("Screen Probe Rays / Probe", &raysPerProbe, 1, 4))
+				{
+					RTScreenProbeGIViewParam.RaysPerProbe = static_cast<UINT32>(raysPerProbe);
+					bLightingChanged = true;
+				}
+				if (ImGui::SliderFloat("Screen Probe Raw Blend", &ScreenProbeGICB.RawBlend, 0.0f, 0.35f, "%.3f"))
+					bLightingChanged = true;
+				ImGui::TextDisabled("Screen Probe history converges with a running 1/N radiance average.");
+				if (ImGui::SliderFloat("Screen Probe Resolve Depth", &ScreenProbeGICB.ResolveDepthWeight, 1.0f, 96.0f, "%.1f"))
+					bLightingChanged = true;
+				if (ImGui::SliderFloat("Screen Probe Resolve Normal", &ScreenProbeGICB.ResolveNormalWeight, 1.0f, 96.0f, "%.1f"))
+					bLightingChanged = true;
+				if (ImGui::SliderFloat("Screen Probe Edge Depth", &ScreenProbeGICB.EdgeDepthWeight, 8.0f, 192.0f, "%.1f"))
+					bLightingChanged = true;
+				if (ImGui::SliderFloat("Screen Probe Edge Normal", &ScreenProbeGICB.EdgeNormalWeight, 1.0f, 96.0f, "%.1f"))
+					bLightingChanged = true;
+				int edgeSamples = static_cast<int>(ScreenProbeGICB.EdgeSampleCount);
+				if (ImGui::SliderInt("Screen Probe Edge Samples", &edgeSamples, 1, 4))
+				{
+					ScreenProbeGICB.EdgeSampleCount = static_cast<UINT32>(edgeSamples);
+					bLightingChanged = true;
+				}
+			}
+			static const char* RayNoiseModes[] = { "Blue Noise", "R2 Low Discrepancy", "Stable Hash" };
+			int RayNoiseModeIndex = static_cast<int>(RayNoiseMode);
+			if (ImGui::Combo("RT Noise", &RayNoiseModeIndex, RayNoiseModes, IM_ARRAYSIZE(RayNoiseModes)))
+			{
+				RayNoiseMode = static_cast<ERayNoiseMode>(RayNoiseModeIndex);
+				bLightingChanged = true;
+			}
+			ImGui::TextDisabled("R2 usually converges more calmly with DLSS RR; Blue Noise is kept for comparison.");
 			
 			// Lighting toggles only invalidate shading history; they do not require
 			// DLSS/RR resource reallocation or render-resolution changes.
@@ -5757,6 +6575,10 @@ void Corona::OnRender()
 		DEPTH,
 		RAW_DIFFUSE_GI,
 		RAW_DIFFUSE_GI_AUX,
+		SCREEN_PROBE_DIFFUSE_GI,
+		SCREEN_PROBE_PROBES,
+		SCREEN_PROBE_HISTORY_LENGTH,
+		SCREEN_PROBE_ATLAS_HISTORY_LENGTH,
 		TEMPORAL_FILTERED_DIFFUSE_GI,
 		SPATIAL_FILTERED_DIFFUSE_GI,
 		FINAL_DIFFUSE_GI,
@@ -5778,6 +6600,10 @@ void Corona::OnRender()
 			"DEPTH",
 			"RAW_DIFFUSE_GI",
 			"RAW_DIFFUSE_GI_AUX",
+			"SCREEN_PROBE_DIFFUSE_GI",
+			"SCREEN_PROBE_PROBES",
+			"SCREEN_PROBE_HISTORY_LENGTH",
+			"SCREEN_PROBE_ATLAS_HISTORY_LENGTH",
 			"TEMPORAL_FILTERED_DIFFUSE_GI",
 			"SPATIAL_FILTERED_DIFFUSE_GI",
 			"FINAL_DIFFUSE_GI",
@@ -6396,8 +7222,12 @@ void Corona::SpatialDenoisingPass()
 		SpatialDenoisingFilterPSO->SetTextureSRV("GeoNormalTex", GeomNormalBuffer.get());
 		if (i == 0)
 		{
+			Texture* diffuseSpatialInput =
+				(DiffuseGIMode == EDiffuseGIMode::SCREEN_PROBE && ScreenProbeGIResolved) ?
+				ScreenProbeGIResolved.get() :
+				DiffuseGITemporal[GIBufferWriteIndex].get();
 			SpatialDenoisingFilterPSO->SetTextureSRV("InGIResultSHTex", DiffuseGITemporalAux[GIBufferWriteIndex].get());
-			SpatialDenoisingFilterPSO->SetTextureSRV("InGIResultColorTex", DiffuseGITemporal[GIBufferWriteIndex].get());
+			SpatialDenoisingFilterPSO->SetTextureSRV("InGIResultColorTex", diffuseSpatialInput);
 			SpatialDenoisingFilterPSO->SetTextureSRV("InSpecularGITex", SpecularGITemporal[GIBufferWriteIndex].get());
 		}
 		else
@@ -6748,6 +7578,65 @@ void Corona::InitRTPSO()
 			PSO_RT_GI = TEMP_PSO_RT_GI;
 		}
 	}
+
+	// screen-probe gi rtpso
+	if (bInitGIRT)
+	{
+		shared_ptr<RTPipelineStateObject> tempPSO = renderBackend->CreateRTPipelineStateObject();
+		if (!tempPSO)
+			return;
+		tempPSO->SetNumInstances(static_cast<uint32_t>(vecBLAS.size()));
+
+		tempPSO->AddHitGroup("HitGroup", "chs", "");
+		tempPSO->AddShader("rayGen", RTPipelineStateObject::RAYGEN);
+
+		tempPSO->BindUAV("global", "ProbeRadiance", 0);
+		tempPSO->BindUAV("global", "ProbeMeta", 1);
+		tempPSO->BindUAV("global", "ProbeSH0", 2);
+		tempPSO->BindUAV("global", "ProbeSH1", 3);
+		tempPSO->BindUAV("global", "ProbeSH2", 4);
+		tempPSO->BindUAV("global", "ProbeSH3", 5);
+		tempPSO->BindUAV("global", "ProbeSH4", 6);
+		tempPSO->BindUAV("global", "ProbeSH5", 7);
+		tempPSO->BindUAV("global", "ProbeSH6", 8);
+		tempPSO->BindUAV("global", "ProbeSH7", 9);
+		tempPSO->BindUAV("global", "ProbeSH8", 10);
+		tempPSO->BindSRV("global", "gRtScene", 0);
+		tempPSO->BindSRV("global", "DepthTex", 1);
+		tempPSO->BindSRV("global", "WorldNormalTex", 2);
+		tempPSO->BindSRV("global", "BlueNoiseTex", 7);
+		tempPSO->BindSRV("global", "PrevProbeRadianceTex", 8);
+		tempPSO->BindSRV("global", "PrevProbeMetaTex", 9);
+		tempPSO->BindSRV("global", "VelocityTex", 10);
+		tempPSO->BindSRV("global", "PrevDepthTex", 11);
+		tempPSO->BindSRV("global", "PrevNormalTex", 12);
+		tempPSO->BindSRV("global", "PrevProbeSH0Tex", 13);
+		tempPSO->BindSRV("global", "PrevProbeSH1Tex", 14);
+		tempPSO->BindSRV("global", "PrevProbeSH2Tex", 15);
+		tempPSO->BindSRV("global", "PrevProbeSH3Tex", 16);
+		tempPSO->BindSRV("global", "PrevProbeSH4Tex", 17);
+		tempPSO->BindSRV("global", "PrevProbeSH5Tex", 18);
+		tempPSO->BindSRV("global", "PrevProbeSH6Tex", 19);
+		tempPSO->BindSRV("global", "PrevProbeSH7Tex", 20);
+		tempPSO->BindSRV("global", "PrevProbeSH8Tex", 21);
+		tempPSO->BindSRV("global", "GeoNormalTex", 22);
+		tempPSO->BindCBV("global", "ViewParameter", 0, sizeof(RTScreenProbeGIViewParamCB), 1);
+		tempPSO->BindSampler("global", "sampleWrap", 0);
+		tempPSO->BindSampler("global", "historyClamp", 1);
+
+		tempPSO->AddShader("miss", RTPipelineStateObject::MISS);
+		tempPSO->AddShader("missShadow", RTPipelineStateObject::MISS);
+
+		tempPSO->AddShader("chs", RTPipelineStateObject::HIT);
+		tempPSO->BindSRV("chs", "vertices", 3);
+		tempPSO->BindSRV("chs", "indices", 4);
+		tempPSO->BindSRV("chs", "AlbedoTex", 5);
+		tempPSO->BindSRV("chs", "InstanceProperty", 6);
+		tempPSO->Configure(1, sizeof(float) * 12, sizeof(float) * 2);
+
+		if (tempPSO->InitRS("Shaders\\ScreenProbeRaytracedGI.hlsl"))
+			PSO_RT_SCREEN_PROBE_GI = tempPSO;
+	}
 }
 
 void Corona::InitPathTracingPass()
@@ -7052,6 +7941,215 @@ void Corona::RaytraceGIPass()
 
 	renderBackend->TransitionTexture(DiffuseGIRawAux.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
 	renderBackend->TransitionTexture(DiffuseGIRaw.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
+}
+
+void Corona::ScreenProbeRaytraceGIPass()
+{
+	auto hasScreenProbeSHSet = [&](UINT historyIndex)
+	{
+		for (UINT coefficientIndex = 0; coefficientIndex < ScreenProbeSHCoefficientCount; ++coefficientIndex)
+		{
+			if (!ScreenProbeGISH[historyIndex][coefficientIndex])
+				return false;
+		}
+		return true;
+	};
+
+	if (!TLAS || !PSO_RT_SCREEN_PROBE_GI || !ScreenProbeGIRadiance[0] || !ScreenProbeGIRadiance[1] || !hasScreenProbeSHSet(0) || !hasScreenProbeSHSet(1) || !ScreenProbeGIMetadata[0] || !ScreenProbeGIMetadata[1])
+		return;
+#if USE_AFTERMATH
+	renderBackend->EmitGpuCrashMarker("ScreenProbeRaytraceGIPass");
+#endif
+	if (renderBackend && renderBackend->GetAPI() == ERenderBackendAPI::D3D12)
+	{
+		PIXScopedEvent(renderBackend->GetGraphicsCommandList(), PIX_COLOR(rand() % 255, rand() % 255, rand() % 255), "ScreenProbeRaytraceGIPass");
+	}
+
+	ScreenProbeGIAtlasWriteIndex = 1 - ScreenProbeGIAtlasWriteIndex;
+	const UINT writeIndex = ScreenProbeGIAtlasWriteIndex;
+	const UINT readIndex = 1 - writeIndex;
+	const char* probeSHUAVNames[ScreenProbeSHCoefficientCount] =
+	{
+		"ProbeSH0",
+		"ProbeSH1",
+		"ProbeSH2",
+		"ProbeSH3",
+		"ProbeSH4",
+		"ProbeSH5",
+		"ProbeSH6",
+		"ProbeSH7",
+		"ProbeSH8"
+	};
+	const char* prevProbeSHSRVNames[ScreenProbeSHCoefficientCount] =
+	{
+		"PrevProbeSH0Tex",
+		"PrevProbeSH1Tex",
+		"PrevProbeSH2Tex",
+		"PrevProbeSH3Tex",
+		"PrevProbeSH4Tex",
+		"PrevProbeSH5Tex",
+		"PrevProbeSH6Tex",
+		"PrevProbeSH7Tex",
+		"PrevProbeSH8Tex"
+	};
+
+	const UINT32 probeSpacing = std::clamp(ScreenProbeGICB.ProbeSpacing, 4u, 64u);
+	const UINT32 probeGridWidth = std::max(1u, (GetRenderWidth() + probeSpacing - 1u) / probeSpacing);
+	const UINT32 probeGridHeight = std::max(1u, (GetRenderHeight() + probeSpacing - 1u) / probeSpacing);
+
+	RTScreenProbeGIViewParam.ProbeSpacing = probeSpacing;
+	RTScreenProbeGIViewParam.ProbeGridSize = glm::vec2(probeGridWidth, probeGridHeight);
+	RTScreenProbeGIViewParam.RTSize = glm::vec2(GetRenderWidth(), GetRenderHeight());
+	RTScreenProbeGIViewParam.RaysPerProbe = std::clamp(RTScreenProbeGIViewParam.RaysPerProbe, 1u, 4u);
+	RTScreenProbeGIViewParam.HistoryValid = (bScreenProbeGIAtlasHistoryValid && !bScreenProbeLightingBootstrapPending) ? 1u : 0u;
+	RTScreenProbeGIViewParam.LightingBootstrap = bScreenProbeLightingBootstrapPending ? 1u : 0u;
+	RTScreenProbeGIViewParam.TemporalAlpha = std::clamp(ScreenProbeGICB.TemporalAlpha, 0.02f, 1.0f);
+	RTScreenProbeGIViewParam.HistoryDepthWeight = ScreenProbeGICB.HistoryDepthWeight;
+	RTScreenProbeGIViewParam.HistoryNormalWeight = ScreenProbeGICB.HistoryNormalWeight;
+
+	renderBackend->TransitionTexture(ScreenProbeGIRadiance[writeIndex].get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
+	for (UINT coefficientIndex = 0; coefficientIndex < ScreenProbeSHCoefficientCount; ++coefficientIndex)
+		renderBackend->TransitionTexture(ScreenProbeGISH[writeIndex][coefficientIndex].get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
+	renderBackend->TransitionTexture(ScreenProbeGIMetadata[writeIndex].get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
+
+	PSO_RT_SCREEN_PROBE_GI->SetNumInstances(static_cast<uint32_t>(vecBLAS.size()));
+	PSO_RT_SCREEN_PROBE_GI->BeginShaderTable();
+
+	PSO_RT_SCREEN_PROBE_GI->SetTextureUAV("global", "ProbeRadiance", ScreenProbeGIRadiance[writeIndex].get());
+	PSO_RT_SCREEN_PROBE_GI->SetTextureUAV("global", "ProbeMeta", ScreenProbeGIMetadata[writeIndex].get());
+	for (UINT coefficientIndex = 0; coefficientIndex < ScreenProbeSHCoefficientCount; ++coefficientIndex)
+		PSO_RT_SCREEN_PROBE_GI->SetTextureUAV("global", probeSHUAVNames[coefficientIndex], ScreenProbeGISH[writeIndex][coefficientIndex].get());
+	PSO_RT_SCREEN_PROBE_GI->SetAccelerationStructure("global", "gRtScene", TLAS);
+	PSO_RT_SCREEN_PROBE_GI->SetTextureSRV("global", "DepthTex", UnjitteredDepthBuffers[ColorBufferWriteIndex].get());
+	PSO_RT_SCREEN_PROBE_GI->SetTextureSRV("global", "WorldNormalTex", NormalBuffers[ColorBufferWriteIndex].get());
+	PSO_RT_SCREEN_PROBE_GI->SetTextureSRV("global", "BlueNoiseTex", BlueNoiseTex.get());
+	PSO_RT_SCREEN_PROBE_GI->SetTextureSRV("global", "PrevProbeRadianceTex", ScreenProbeGIRadiance[readIndex].get());
+	PSO_RT_SCREEN_PROBE_GI->SetTextureSRV("global", "PrevProbeMetaTex", ScreenProbeGIMetadata[readIndex].get());
+	for (UINT coefficientIndex = 0; coefficientIndex < ScreenProbeSHCoefficientCount; ++coefficientIndex)
+		PSO_RT_SCREEN_PROBE_GI->SetTextureSRV("global", prevProbeSHSRVNames[coefficientIndex], ScreenProbeGISH[readIndex][coefficientIndex].get());
+	PSO_RT_SCREEN_PROBE_GI->SetTextureSRV("global", "VelocityTex", VelocityBuffer.get());
+	PSO_RT_SCREEN_PROBE_GI->SetTextureSRV("global", "PrevDepthTex", UnjitteredDepthBuffers[1 - ColorBufferWriteIndex].get());
+	PSO_RT_SCREEN_PROBE_GI->SetTextureSRV("global", "PrevNormalTex", NormalBuffers[1 - ColorBufferWriteIndex].get());
+	PSO_RT_SCREEN_PROBE_GI->SetTextureSRV("global", "GeoNormalTex", GeomNormalBuffer.get());
+	PSO_RT_SCREEN_PROBE_GI->SetCBVValue("global", "ViewParameter", &RTScreenProbeGIViewParam);
+	PSO_RT_SCREEN_PROBE_GI->SetSampler("global", "sampleWrap", samplerWrap.get());
+	PSO_RT_SCREEN_PROBE_GI->SetSampler("global", "historyClamp", samplerBilinearWrap.get());
+
+	const bool bUseVulkanRtSceneGeometry =
+		renderBackend &&
+		renderBackend->GetAPI() == ERenderBackendAPI::Vulkan &&
+		Sponza &&
+		Sponza->RtSceneVertexBuffer &&
+		Sponza->RtSceneIndexBuffer;
+
+	int i = 0;
+	for (auto& as : vecBLAS)
+	{
+		Mesh* mesh = as->MeshPtr;
+		VertexBuffer* rtVertexBuffer = bUseVulkanRtSceneGeometry ? Sponza->RtSceneVertexBuffer.get() : mesh->Vb.get();
+		IndexBuffer* rtIndexBuffer = bUseVulkanRtSceneGeometry ? Sponza->RtSceneIndexBuffer.get() : mesh->Ib.get();
+		Texture* diffuseTex = mesh->Draws[0].mat->Diffuse.get();
+		if (!diffuseTex)
+			diffuseTex = DefaultWhiteTex.get();
+
+		PSO_RT_SCREEN_PROBE_GI->ResetHitProgram(i);
+		PSO_RT_SCREEN_PROBE_GI->StartHitProgram("HitGroup", i);
+		PSO_RT_SCREEN_PROBE_GI->AddVertexBufferSRVToHitProgram("HitGroup", rtVertexBuffer, i);
+		PSO_RT_SCREEN_PROBE_GI->AddIndexBufferSRVToHitProgram("HitGroup", rtIndexBuffer, i);
+		PSO_RT_SCREEN_PROBE_GI->AddTextureSRVToHitProgram("HitGroup", diffuseTex, i);
+		PSO_RT_SCREEN_PROBE_GI->AddBufferSRVToHitProgram("HitGroup", InstancePropertyBuffer.get(), i);
+		i++;
+	}
+
+	PSO_RT_SCREEN_PROBE_GI->EndShaderTable();
+	PSO_RT_SCREEN_PROBE_GI->Apply(probeGridWidth, probeGridHeight);
+
+	renderBackend->TransitionTexture(ScreenProbeGIRadiance[writeIndex].get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
+	for (UINT coefficientIndex = 0; coefficientIndex < ScreenProbeSHCoefficientCount; ++coefficientIndex)
+		renderBackend->TransitionTexture(ScreenProbeGISH[writeIndex][coefficientIndex].get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
+	renderBackend->TransitionTexture(ScreenProbeGIMetadata[writeIndex].get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
+	bScreenProbeGIAtlasHistoryValid = true;
+}
+
+void Corona::ScreenProbeGIPass()
+{
+	auto hasScreenProbeSHSet = [&](UINT historyIndex)
+	{
+		for (UINT coefficientIndex = 0; coefficientIndex < ScreenProbeSHCoefficientCount; ++coefficientIndex)
+		{
+			if (!ScreenProbeGISH[historyIndex][coefficientIndex])
+				return false;
+		}
+		return true;
+	};
+
+	if (!ScreenProbeGIPSO || !ScreenProbeGIResolved || !ScreenProbeGIProbeDebug || !ScreenProbeGIHistory[0] || !ScreenProbeGIHistory[1] ||
+		!ScreenProbeGIRadiance[ScreenProbeGIAtlasWriteIndex] || !hasScreenProbeSHSet(ScreenProbeGIAtlasWriteIndex) || !ScreenProbeGIMetadata[ScreenProbeGIAtlasWriteIndex])
+		return;
+#if USE_AFTERMATH
+	renderBackend->EmitGpuCrashMarker("ScreenProbeGIPass");
+#endif
+	if (renderBackend && renderBackend->GetAPI() == ERenderBackendAPI::D3D12)
+	{
+		PIXScopedEvent(renderBackend->GetGraphicsCommandList(), PIX_COLOR(rand() % 255, rand() % 255, rand() % 255), "ScreenProbeGIPass");
+	}
+
+	ScreenProbeGIHistoryWriteIndex = 1 - ScreenProbeGIHistoryWriteIndex;
+	const UINT historyWriteIndex = ScreenProbeGIHistoryWriteIndex;
+	const UINT historyReadIndex = 1 - historyWriteIndex;
+	const char* screenProbeSHSRVNames[ScreenProbeSHCoefficientCount] =
+	{
+		"ScreenProbeSH0Tex",
+		"ScreenProbeSH1Tex",
+		"ScreenProbeSH2Tex",
+		"ScreenProbeSH3Tex",
+		"ScreenProbeSH4Tex",
+		"ScreenProbeSH5Tex",
+		"ScreenProbeSH6Tex",
+		"ScreenProbeSH7Tex",
+		"ScreenProbeSH8Tex"
+	};
+
+	renderBackend->TransitionTexture(ScreenProbeGIResolved.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
+	renderBackend->TransitionTexture(ScreenProbeGIProbeDebug.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
+	renderBackend->TransitionTexture(ScreenProbeGIHistory[historyWriteIndex].get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
+
+	ScreenProbeGIPSO->SetTextureSRV("DepthTex", UnjitteredDepthBuffers[ColorBufferWriteIndex].get());
+	ScreenProbeGIPSO->SetTextureSRV("WorldNormalTex", NormalBuffers[ColorBufferWriteIndex].get());
+	ScreenProbeGIPSO->SetTextureSRV("GeoNormalTex", GeomNormalBuffer.get());
+	ScreenProbeGIPSO->SetTextureSRV("ScreenProbeRadianceTex", ScreenProbeGIRadiance[ScreenProbeGIAtlasWriteIndex].get());
+	ScreenProbeGIPSO->SetTextureSRV("ScreenProbeMetaTex", ScreenProbeGIMetadata[ScreenProbeGIAtlasWriteIndex].get());
+	ScreenProbeGIPSO->SetTextureSRV("PrevScreenProbeGITex", ScreenProbeGIHistory[historyReadIndex].get());
+	ScreenProbeGIPSO->SetTextureSRV("VelocityTex", VelocityBuffer.get());
+	ScreenProbeGIPSO->SetTextureSRV("PrevDepthTex", UnjitteredDepthBuffers[1 - ColorBufferWriteIndex].get());
+	ScreenProbeGIPSO->SetTextureSRV("PrevNormalTex", NormalBuffers[1 - ColorBufferWriteIndex].get());
+	for (UINT coefficientIndex = 0; coefficientIndex < ScreenProbeSHCoefficientCount; ++coefficientIndex)
+		ScreenProbeGIPSO->SetTextureSRV(screenProbeSHSRVNames[coefficientIndex], ScreenProbeGISH[ScreenProbeGIAtlasWriteIndex][coefficientIndex].get());
+	ScreenProbeGIPSO->SetTextureUAV("OutScreenProbeGI", ScreenProbeGIResolved.get());
+	ScreenProbeGIPSO->SetTextureUAV("OutScreenProbeDebug", ScreenProbeGIProbeDebug.get());
+	ScreenProbeGIPSO->SetTextureUAV("OutScreenProbeHistory", ScreenProbeGIHistory[historyWriteIndex].get());
+	ScreenProbeGIPSO->SetSampler("BilinearClamp", samplerBilinearWrap.get());
+	ScreenProbeGICB.ProbeSpacing = std::clamp(ScreenProbeGICB.ProbeSpacing, 4u, 64u);
+	ScreenProbeGICB.GatherRadius = std::clamp(ScreenProbeGICB.GatherRadius, 1u, 3u);
+	ScreenProbeGICB.RawBlend = std::clamp(ScreenProbeGICB.RawBlend, 0.0f, 1.0f);
+	ScreenProbeGICB.EdgeDepthWeight = std::clamp(ScreenProbeGICB.EdgeDepthWeight, 8.0f, 192.0f);
+	ScreenProbeGICB.EdgeNormalWeight = std::clamp(ScreenProbeGICB.EdgeNormalWeight, 1.0f, 96.0f);
+	ScreenProbeGICB.EdgeSampleCount = std::clamp(ScreenProbeGICB.EdgeSampleCount, 1u, 4u);
+	ScreenProbeGICB.ProbeGridSize = glm::vec2(
+		static_cast<float>((GetRenderWidth() + ScreenProbeGICB.ProbeSpacing - 1u) / ScreenProbeGICB.ProbeSpacing),
+		static_cast<float>((GetRenderHeight() + ScreenProbeGICB.ProbeSpacing - 1u) / ScreenProbeGICB.ProbeSpacing));
+	ScreenProbeGICB.TemporalAlpha = std::clamp(ScreenProbeGICB.TemporalAlpha, 0.02f, 1.0f);
+	ScreenProbeGICB.HistoryValid = (bScreenProbeGIHistoryValid && !bScreenProbeLightingBootstrapPending) ? 1u : 0u;
+	ScreenProbeGIPSO->SetCBVValue("ScreenProbeGIConstant", &ScreenProbeGICB);
+	ScreenProbeGIPSO->Apply();
+
+	renderBackend->Dispatch((GetRenderWidth() + 7) / 8, (GetRenderHeight() + 7) / 8, 1);
+
+	renderBackend->TransitionTexture(ScreenProbeGIResolved.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
+	renderBackend->TransitionTexture(ScreenProbeGIProbeDebug.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
+	renderBackend->TransitionTexture(ScreenProbeGIHistory[historyWriteIndex].get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
+	bScreenProbeGIHistoryValid = true;
+	bScreenProbeLightingBootstrapPending = false;
 }
 
 void Corona::PathTracingPass()

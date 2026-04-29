@@ -68,6 +68,10 @@ public:
 		DEPTH,
 		RAW_DIFFUSE_GI,
 		RAW_DIFFUSE_GI_AUX,
+		SCREEN_PROBE_DIFFUSE_GI,
+		SCREEN_PROBE_PROBES,
+		SCREEN_PROBE_HISTORY_LENGTH,
+		SCREEN_PROBE_ATLAS_HISTORY_LENGTH,
 		TEMPORAL_FILTERED_DIFFUSE_GI,
 		SPATIAL_FILTERED_DIFFUSE_GI,
 		FINAL_DIFFUSE_GI,
@@ -92,6 +96,7 @@ private:
 		ShadowDenoise,
 		RaytraceReflection,
 		RaytraceGI,
+		ScreenProbeGI,
 		TemporalDenoise,
 		SpatialDenoise,
 		Lighting,
@@ -116,6 +121,7 @@ private:
 	UINT ResolvedColorBufferIndex = 0;
 	shared_ptr<Texture> ColorBuffers[2];
 	shared_ptr<Texture> LightingBuffer;
+	shared_ptr<Texture> DLSSRRBuffer;
 	shared_ptr<Texture> AlbedoBuffer;
 	shared_ptr<Texture> SpecularAlbedoBuffer;
 	shared_ptr<Texture> NormalBuffers[2];
@@ -142,6 +148,15 @@ private:
 	shared_ptr<Texture> DiffuseGITemporal[2];
 	shared_ptr<Texture> DiffuseGIRawAux;
 	shared_ptr<Texture> DiffuseGIRaw;
+	shared_ptr<Texture> ScreenProbeGIResolved;
+	shared_ptr<Texture> ScreenProbeGIProbeDebug;
+	shared_ptr<Texture> ScreenProbeGIRadiance[2];
+	static constexpr UINT ScreenProbeSHCoefficientCount = 9;
+	shared_ptr<Texture> ScreenProbeGISH[2][ScreenProbeSHCoefficientCount];
+	shared_ptr<Texture> ScreenProbeGIMetadata[2];
+	shared_ptr<Texture> ScreenProbeGIHistory[2];
+	UINT ScreenProbeGIAtlasWriteIndex = 0;
+	UINT ScreenProbeGIHistoryWriteIndex = 0;
 
 	shared_ptr<Texture> DiffuseGISpatialAux[2];
 	shared_ptr<Texture> DiffuseGISpatial[2];
@@ -210,6 +225,35 @@ private:
 	TemporalFilterConstant TemporalFilterCB;
 
 	shared_ptr<ComputePipelineStateObject> TemporalDenoisingFilterPSO;
+
+	// Screen-probe diffuse GI resolve
+	struct ScreenProbeGIConstant
+	{
+		glm::vec4 ProjectionParams;
+		glm::vec2 RTSize;
+		glm::vec2 ProbeGridSize;
+		UINT32 ProbeSpacing = 8;
+		UINT32 GatherRadius = 3;
+		float ProbeDepthWeight = 8.0f;
+		float ProbeNormalWeight = 8.0f;
+		float ResolveDepthWeight = 24.0f;
+		float ResolveNormalWeight = 16.0f;
+		float RawBlend = 0.02f;
+		float MinResolveWeight = 0.02f;
+		UINT32 FrameIndex = 0;
+		UINT32 Padding = 0;
+		float TemporalAlpha = 0.06f;
+		float HistoryDepthWeight = 32.0f;
+		float HistoryNormalWeight = 32.0f;
+		UINT32 HistoryValid = 0;
+		float EdgeDepthWeight = 32.0f;
+		float EdgeNormalWeight = 16.0f;
+		UINT32 EdgeSampleCount = 3;
+		UINT32 EdgePadding = 0;
+	};
+
+	ScreenProbeGIConstant ScreenProbeGICB;
+	shared_ptr<ComputePipelineStateObject> ScreenProbeGIPSO;
 	
 	// RT shadow
 	struct RTShadowViewParamCB
@@ -253,6 +297,8 @@ private:
 		UINT32 FrameCounter;
 		UINT32 BlueNoiseOffsetStride = 1;
 		float ViewSpreadAngle;
+		UINT32 NoiseMode = 1;
+		glm::vec2 _noisePadding;
 		glm::vec3 SkyColorTop;
 		float SkyIntensity;
 		glm::vec3 SkyColorBottom;
@@ -278,6 +324,8 @@ private:
 		UINT32 FrameCounter;
 		UINT32 BlueNoiseOffsetStride = 1;
 		float ViewSpreadAngle;
+		UINT32 NoiseMode = 1;
+		glm::vec2 _noisePadding;
 		glm::vec3 SkyColorTop;
 		float SkyIntensity;
 		glm::vec3 SkyColorBottom;
@@ -288,6 +336,42 @@ private:
 
 	RTGIViewParamCB RTGIViewParam;
 	shared_ptr<RTPipelineStateObject> PSO_RT_GI;
+
+	struct RTScreenProbeGIViewParamCB
+	{
+		glm::mat4x4 ViewMatrix;
+		glm::mat4x4 InvViewMatrix;
+		glm::mat4x4 ProjMatrix;
+		glm::mat4x4 InvProjMatrix;
+		glm::vec4 ProjectionParams;
+		glm::vec4 LightDir;
+		glm::vec2 RandomOffset;
+		glm::vec2 RTSize;
+		glm::vec2 ProbeGridSize;
+		UINT32 FrameCounter = 0;
+		UINT32 BlueNoiseOffsetStride = 1;
+		UINT32 NoiseMode = 1;
+		UINT32 ProbeSpacing = 8;
+		UINT32 RaysPerProbe = 4;
+		UINT32 HistoryValid = 0;
+		float ViewSpreadAngle = 0.0f;
+		float TemporalAlpha = 0.06f;
+		float HistoryDepthWeight = 32.0f;
+		float HistoryNormalWeight = 32.0f;
+		UINT32 Padding = 0;
+		glm::vec3 SkyColorTop;
+		float SkyIntensity = 3.0f;
+		glm::vec3 SkyColorBottom;
+		float _padding = 0.0f;
+		glm::vec3 LightColor;
+		float _padding2 = 0.0f;
+		UINT32 LightingBootstrap = 0;
+		UINT32 BootstrapRays = 100;
+		glm::vec2 _padding3 = glm::vec2(0.0f);
+	};
+
+	RTScreenProbeGIViewParamCB RTScreenProbeGIViewParam;
+	shared_ptr<RTPipelineStateObject> PSO_RT_SCREEN_PROBE_GI;
 	
 	// Path Tracing
 	enum class EPathTracingDebugMode
@@ -383,7 +467,8 @@ private:
 		CHANNEL_W = 4,
 		SH_LIGHTING = 5,
 		DEPTH = 6,
-		COUNT = 7,
+		HISTORY_LENGTH = 7,
+		COUNT = 8,
 	};
 	struct DebugPassCB
 	{
@@ -448,10 +533,27 @@ public:
 		COUNT
 	};
 
+	enum class ERayNoiseMode
+	{
+		BLUE_NOISE = 0,
+		R2_LOW_DISCREPANCY,
+		STABLE_HASH,
+		COUNT
+	};
+
+	enum class EDiffuseGIMode
+	{
+		SIMPLE_RAYTRACE = 0,
+		SCREEN_PROBE,
+		COUNT
+	};
+
 private:
 
 	EAntiAliasingMode AntiAliasingMode = EAntiAliasingMode::DLSS_RR;
 	EDLSSQualityMode DLSSQualityMode = EDLSSQualityMode::QUALITY;
+	ERayNoiseMode RayNoiseMode = ERayNoiseMode::R2_LOW_DISCREPANCY;
+	EDiffuseGIMode DiffuseGIMode = EDiffuseGIMode::SIMPLE_RAYTRACE;
 	bool bEnableDiffuseGI = true;
 	bool bEnableSpecularGI = true;
 	bool bEnableDirectDiffuse = true;
@@ -461,7 +563,10 @@ private:
 
 	float JitterScale = 0.6;
 	UINT32 TAASampleCount = 32;
+	float DLSSJitterPhaseScale = 4.0f;
+	UINT32 DLSSJitterPhaseCountAuto = 32;
 	UINT32 DLSSJitterPhaseCount = 32;
+	UINT32 DLSSJitterPhaseCountOverride = 0;
 	UINT RenderWidth = 0;
 	UINT RenderHeight = 0;
 	bool bPendingUpscaleRefresh = false;
@@ -469,10 +574,12 @@ private:
 	bool bResetTemporalStateNextUpdate = false;
 	UINT32 DLSSTransitionFramesRemaining = 0;
 	bool bUseLightingBufferFallbackForToneMap = false;
+	bool bDLSSRROutputValidThisFrame = false;
 	bool bAutoAADumpEnabled = true;
 	bool bAutoAADumpInitialized = false;
 	bool bAutoAADumpCompleted = false;
 	bool bHybridStageAutoDumpMode = false;
+	bool bDiffuseGIAutoDumpMode = false;
 	bool bLoggedHybridStageLimit = false;
 	bool bStartupModeConfigured = false;
 	UINT32 AutoAADumpPhase = 0;
@@ -490,11 +597,18 @@ private:
 	bool bCommandLineRenderBackendOverrideSet = false;
 	ERenderBackendAPI CommandLineRenderBackendAPI = ERenderBackendAPI::D3D12;
 	bool bCommandLineDisableImgui = false;
+	bool bCommandLineDiffuseGIAutoDumpMode = false;
+	bool bCommandLineCameraPathDump = false;
+	bool bCommandLineLoadLatestCameraPath = false;
+	std::wstring CommandLineCameraPathFile;
 
 	shared_ptr<PipelineStateObject> TemporalAAPSO;
 	std::shared_ptr<GraphicsPipelineHandle> TemporalAAGraphicsPipeline;
 	bool bTemporalAAHistoryValid = false;
 	bool bTemporalDenoiserHistoryValid = false;
+	bool bScreenProbeGIAtlasHistoryValid = false;
+	bool bScreenProbeGIHistoryValid = false;
+	bool bScreenProbeLightingBootstrapPending = false;
 	bool bPendingTemporalHistoryClear = false;
 	bool bImguiInitialized = false;
 	bool bBlueNoiseInitialized = false;
@@ -610,6 +724,7 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	bool bCameraPathRecording = false;
 	bool bCameraPathPlaying = false;
 	bool bCameraPathDumping = false;
+	bool bCameraPathDumpExitWhenComplete = false;
 	bool bCameraPathDumpCaptureInFlight = false;
 	double CameraPathRecordingStartSeconds = 0.0;
 	double CameraPathPlaybackStartSeconds = 0.0;
@@ -769,6 +884,7 @@ public:
 	void InitSpatialDenoisingPass();
 
 	void InitTemporalDenoisingPass();
+	void InitScreenProbeGIPass();
 
 	void InitGBufferPass();
 
@@ -804,6 +920,8 @@ public:
 	void RaytraceReflectionPass();
 
 	void RaytraceGIPass();
+	void ScreenProbeRaytraceGIPass();
+	void ScreenProbeGIPass();
 
 	void SpatialDenoisingPass();
 

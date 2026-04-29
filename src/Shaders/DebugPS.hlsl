@@ -106,6 +106,12 @@ float4 PSMain(PSInput input) : SV_TARGET
         float LinearDepth = GetLinearDepthOpenGL(DeviceDepth, ProjectionParams.z, ProjectionParams.w) ;
         SrcColor = float4(LinearDepth, 0, 0, 0)/ProjectionParams.w;
     }
+    else if(DebugMode == 7) // HISTORY_LENGTH
+    {
+        float historyFrames = max(SrcTex.Sample(sampleWrap, input.uv).w, 0.0f);
+        float v = saturate(log2(historyFrames + 1.0f) / 16.0f);
+        SrcColor = float4(v, v, v, 1.0f);
+    }
 
     // return SrcColor;
     return float4(LinearTosRGB(SrcColor.xyz), 0);

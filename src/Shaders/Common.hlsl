@@ -166,6 +166,44 @@ float2 LoadBlueNoise2(Texture3D blueNoiseTex, uint2 launchIndex, uint frameCount
         return Noise.zw;
 }
 
+uint HashUInt(uint x)
+{
+    x ^= x >> 16;
+    x *= 0x7feb352du;
+    x ^= x >> 15;
+    x *= 0x846ca68bu;
+    x ^= x >> 16;
+    return x;
+}
+
+float HashToUnitFloat(uint x)
+{
+    return (HashUInt(x) >> 8) * (1.0f / 16777216.0f);
+}
+
+float2 LoadStableHashNoise2(uint2 launchIndex)
+{
+    uint seed = launchIndex.x * 1973u + launchIndex.y * 9277u + 0x68bc21ebu;
+    return float2(HashToUnitFloat(seed), HashToUnitFloat(seed ^ 0xb5297a4du));
+}
+
+float2 LoadR2LowDiscrepancyNoise2(uint2 launchIndex, uint frameCounter)
+{
+    const float2 r2 = float2(0.7548776662466927f, 0.5698402909980532f);
+    return frac(LoadStableHashNoise2(launchIndex) + r2 * float(frameCounter));
+}
+
+float2 LoadRayNoise2(Texture3D blueNoiseTex, uint2 launchIndex, uint frameCounter, uint stride, uint noiseMode)
+{
+    if (noiseMode == 0u)
+        return LoadBlueNoise2(blueNoiseTex, launchIndex, frameCounter, stride);
+
+    if (noiseMode == 2u)
+        return LoadStableHashNoise2(launchIndex);
+
+    return LoadR2LowDiscrepancyNoise2(launchIndex, frameCounter);
+}
+
 float square(float x) { return x * x; }
 
 float3x3 construct_ONB_frisvad(float3 normal)
