@@ -46,8 +46,8 @@ public:
 	virtual void StartHitProgram(const std::string& hitGroup, uint32_t instanceIndex) = 0;
 	virtual void AddTextureSRVToHitProgram(const std::string& hitGroup, Texture* texture, uint32_t instanceIndex) = 0;
 	virtual void AddBufferSRVToHitProgram(const std::string& hitGroup, Buffer* buffer, uint32_t instanceIndex) = 0;
-	virtual void AddVertexBufferSRVToHitProgram(const std::string& hitGroup, VertexBuffer* buffer, uint32_t instanceIndex) = 0;
-	virtual void AddIndexBufferSRVToHitProgram(const std::string& hitGroup, IndexBuffer* buffer, uint32_t instanceIndex) = 0;
+	// Hit shaders use scene-global geometry; InstanceProperty carries the per-instance offsets.
+	virtual void AddSceneGeometrySRVsToHitProgram(const std::string& hitGroup, VertexBuffer* sceneVertexBuffer, IndexBuffer* sceneIndexBuffer, uint32_t instanceIndex) = 0;
 	virtual bool InitRS(const std::string& shaderFile) = 0;
 	virtual void Apply(uint32_t width, uint32_t height) = 0;
 };

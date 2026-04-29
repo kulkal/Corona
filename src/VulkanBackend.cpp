@@ -100,6 +100,8 @@ namespace
 	}
 
 #if CORONA_HAS_VULKAN
+	std::filesystem::path ResolveVulkanSpirvPath(const std::wstring& fileName);
+
 	std::string TrimAscii(std::string value)
 	{
 		auto isSpace = [](unsigned char c) { return std::isspace(c) != 0; };
@@ -123,6 +125,70 @@ namespace
 		if (line.find("SamplerState") != std::string::npos)
 			return VK_DESCRIPTOR_TYPE_SAMPLER;
 		return std::nullopt;
+	}
+
+	std::string ExtractHlslResourceNameFromDeclaration(const std::string& line)
+	{
+		size_t nameEnd = line.find(':');
+		if (nameEnd == std::string::npos)
+			nameEnd = line.find(';');
+		if (nameEnd == std::string::npos)
+			return std::string();
+
+		const std::string declarationPrefix = TrimAscii(line.substr(0, nameEnd));
+		const size_t nameStart = declarationPrefix.find_last_of(" \t");
+		if (nameStart == std::string::npos)
+			return std::string();
+
+		std::string resourceName = TrimAscii(declarationPrefix.substr(nameStart + 1));
+		if (resourceName.size() >= 2 && resourceName.substr(resourceName.size() - 2) == "[]")
+			resourceName.resize(resourceName.size() - 2);
+		return resourceName;
+	}
+
+	std::unordered_map<std::string, VkDescriptorType> ParseHlslDescriptorTypes(const std::filesystem::path& shaderPath)
+	{
+		std::unordered_map<std::string, VkDescriptorType> descriptorTypesByName;
+		std::ifstream shaderStream(shaderPath);
+		if (!shaderStream.is_open())
+			return descriptorTypesByName;
+
+		std::string line;
+		while (std::getline(shaderStream, line))
+		{
+			const std::string trimmed = TrimAscii(line);
+			if (trimmed.empty() || trimmed.rfind("//", 0) == 0)
+				continue;
+
+			if (trimmed.rfind("cbuffer ", 0) == 0)
+			{
+				const size_t begin = std::string("cbuffer ").size();
+				size_t end = trimmed.find(' ', begin);
+				if (end == std::string::npos)
+					end = trimmed.find(':', begin);
+				if (end != std::string::npos)
+					descriptorTypesByName[trimmed.substr(begin, end - begin)] = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+				continue;
+			}
+
+			const std::optional<VkDescriptorType> inferredType = InferRayTracingDescriptorTypeFromDeclaration(trimmed);
+			if (!inferredType.has_value())
+				continue;
+
+			const std::string resourceName = ExtractHlslResourceNameFromDeclaration(trimmed);
+			if (!resourceName.empty())
+				descriptorTypesByName[resourceName] = *inferredType;
+		}
+		return descriptorTypesByName;
+	}
+
+	std::filesystem::path ResolveVulkanComputeSpirvPath(const std::wstring& shaderStem, const std::string& entryPoint)
+	{
+		const std::wstring entryPointWide(entryPoint.begin(), entryPoint.end());
+		const std::filesystem::path entrySpecificPath = ResolveVulkanSpirvPath(shaderStem + L"_" + entryPointWide + L"Vulkan.comp.spv");
+		if (std::filesystem::exists(entrySpecificPath))
+			return entrySpecificPath;
+		return ResolveVulkanSpirvPath(shaderStem + L"Vulkan.comp.spv");
 	}
 #endif
 
@@ -703,6 +769,21 @@ namespace
 		}
 	}
 
+	VkAccessFlags ToVkBufferAccessMask(EResourceState state)
+	{
+		switch (state)
+		{
+		case EResourceState::ShaderRead:
+			return VK_ACCESS_SHADER_READ_BIT;
+		case EResourceState::UnorderedAccess:
+			return VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+		case EResourceState::CopyDest:
+			return VK_ACCESS_TRANSFER_WRITE_BIT;
+		default:
+			return VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+		}
+	}
+
 	void TransitionImageLayout(
 		VkCommandBuffer commandBuffer,
 		VkImage image,
@@ -1069,18 +1150,15 @@ void VulkanRTPipelineStateObject::AddBufferSRVToHitProgram(const std::string& hi
 	value.BufferValue = buffer;
 	HitProgramBindingValues[instanceIndex].push_back(value);
 }
-void VulkanRTPipelineStateObject::AddVertexBufferSRVToHitProgram(const std::string& hitGroup, VertexBuffer* buffer, uint32_t instanceIndex)
+void VulkanRTPipelineStateObject::AddSceneGeometrySRVsToHitProgram(const std::string& hitGroup, VertexBuffer* sceneVertexBuffer, IndexBuffer* sceneIndexBuffer, uint32_t instanceIndex)
 {
 	(void)hitGroup;
 	ResourceBindingValue value{};
-	value.VertexBufferValue = buffer;
+	value.VertexBufferValue = sceneVertexBuffer;
 	HitProgramBindingValues[instanceIndex].push_back(value);
-}
-void VulkanRTPipelineStateObject::AddIndexBufferSRVToHitProgram(const std::string& hitGroup, IndexBuffer* buffer, uint32_t instanceIndex)
-{
-	(void)hitGroup;
-	ResourceBindingValue value{};
-	value.IndexBufferValue = buffer;
+
+	value = {};
+	value.IndexBufferValue = sceneIndexBuffer;
 	HitProgramBindingValues[instanceIndex].push_back(value);
 }
 
@@ -1125,24 +1203,9 @@ bool VulkanRTPipelineStateObject::InitRS(const std::string& shaderFile)
 		if (!inferredType.has_value())
 			continue;
 
-		size_t nameEnd = trimmed.find(':');
-		if (nameEnd == std::string::npos)
-			nameEnd = trimmed.find(';');
-		if (nameEnd == std::string::npos)
-			continue;
-
-		size_t nameStart = trimmed.rfind(' ', nameEnd);
-		if (nameStart == std::string::npos)
-			continue;
-
-		const std::string resourceName = TrimAscii(trimmed.substr(nameStart + 1, nameEnd - nameStart - 1));
+		const std::string resourceName = ExtractHlslResourceNameFromDeclaration(trimmed);
 		if (!resourceName.empty())
-		{
-			std::string normalizedResourceName = resourceName;
-			if (normalizedResourceName.size() >= 2 && normalizedResourceName.substr(normalizedResourceName.size() - 2) == "[]")
-				normalizedResourceName.resize(normalizedResourceName.size() - 2);
-			descriptorTypesByName[normalizedResourceName] = *inferredType;
-		}
+			descriptorTypesByName[resourceName] = *inferredType;
 	}
 
 	std::vector<VkDescriptorSetLayoutBinding> layoutBindings;
@@ -1965,7 +2028,23 @@ bool VulkanComputePipelineStateObject::InitCS(const std::wstring& shaderFile, co
 		return false;
 
 	const std::wstring shaderStem = std::filesystem::path(shaderFile).stem().wstring();
-	const std::filesystem::path spirvPath = ResolveVulkanSpirvPath(shaderStem + L"Vulkan.comp.spv");
+	const std::filesystem::path shaderPath(shaderFile);
+	const std::unordered_map<std::string, VkDescriptorType> descriptorTypesByName = ParseHlslDescriptorTypes(shaderPath);
+	auto applyDescriptorInference = [&](std::vector<BindingDesc>& bindings)
+	{
+		for (BindingDesc& binding : bindings)
+		{
+			const auto descriptorTypeIt = descriptorTypesByName.find(binding.Name);
+			if (descriptorTypeIt != descriptorTypesByName.end())
+				binding.DescriptorType = descriptorTypeIt->second;
+		}
+	};
+	applyDescriptorInference(SRVBindings);
+	applyDescriptorInference(UAVBindings);
+	applyDescriptorInference(SamplerBindings);
+	applyDescriptorInference(CBVBindings);
+
+	const std::filesystem::path spirvPath = ResolveVulkanComputeSpirvPath(shaderStem, entryPoint);
 	if (!std::filesystem::exists(spirvPath))
 	{
 		Owner->ErrorString += "Missing Vulkan compute SPIR-V module: " + spirvPath.string() + "\n";
@@ -2077,7 +2156,7 @@ void VulkanComputePipelineStateObject::Apply()
 	std::vector<VkDescriptorBufferInfo> bufferInfos;
 	writes.reserve(SRVBindings.size() + UAVBindings.size() + SamplerBindings.size() + CBVBindings.size());
 	imageInfos.reserve(SRVBindings.size() + UAVBindings.size() + SamplerBindings.size());
-	bufferInfos.reserve(SRVBindings.size() + CBVBindings.size());
+	bufferInfos.reserve(SRVBindings.size() + UAVBindings.size() + CBVBindings.size());
 
 	auto appendImageWrite = [&](uint32_t binding, VkDescriptorType type, VkImageView imageView, VkImageLayout imageLayout, VkSampler samplerHandle)
 	{
@@ -2991,8 +3070,8 @@ std::shared_ptr<Buffer> VulkanBackend::CreateBuffer(const BufferCreateDesc& desc
 			VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
 			VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
 	}
-	const bool bUseDeviceLocalUpload = desc.InitialData != nullptr && allocation.SizeInBytes > 0;
-	const bool bCreatedBuffer = bUseDeviceLocalUpload
+	const bool bUseDeviceLocalMemory = (desc.bAllowUnorderedAccess || desc.InitialData != nullptr) && allocation.SizeInBytes > 0;
+	const bool bCreatedBuffer = bUseDeviceLocalMemory
 		? CreateDeviceLocalBufferWithUpload(
 			allocation.SizeInBytes,
 			bufferUsage,
@@ -4689,7 +4768,38 @@ void VulkanBackend::TransitionTexture(Texture* texture, EResourceState stateBefo
 	it->second.CurrentLayout = newLayout;
 #endif
 }
-void VulkanBackend::TransitionBuffer(Buffer* buffer, EResourceState stateBefore, EResourceState stateAfter) { (void)buffer; (void)stateBefore; (void)stateAfter; ThrowNotImplemented(__FUNCTION__); }
+void VulkanBackend::TransitionBuffer(Buffer* buffer, EResourceState stateBefore, EResourceState stateAfter)
+{
+#if !CORONA_HAS_VULKAN
+	(void)buffer; (void)stateBefore; (void)stateAfter; ThrowNotImplemented(__FUNCTION__);
+#else
+	if (!buffer || ActiveCommandBuffer == VK_NULL_HANDLE)
+		return;
+
+	auto it = BufferAllocations.find(buffer);
+	if (it == BufferAllocations.end() || it->second.Buffer == VK_NULL_HANDLE || it->second.SizeInBytes == 0)
+		return;
+
+	VkBufferMemoryBarrier barrier{};
+	barrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+	barrier.srcAccessMask = ToVkBufferAccessMask(stateBefore);
+	barrier.dstAccessMask = ToVkBufferAccessMask(stateAfter);
+	barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	barrier.buffer = it->second.Buffer;
+	barrier.offset = 0;
+	barrier.size = it->second.SizeInBytes;
+
+	vkCmdPipelineBarrier(
+		ActiveCommandBuffer,
+		VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+		VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+		0,
+		0, nullptr,
+		1, &barrier,
+		0, nullptr);
+#endif
+}
 Texture* VulkanBackend::GetCurrentWindowRenderTarget() { return nullptr; }
 void VulkanBackend::PrepareWindowRenderTarget(Texture* renderTarget) { (void)renderTarget; }
 void VulkanBackend::FinalizeWindowRenderTarget(Texture* renderTarget) { (void)renderTarget; }

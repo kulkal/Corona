@@ -258,7 +258,9 @@ private:
 	shared_ptr<ComputePipelineStateObject> ScreenProbeGIPSO;
 
 	// SHaRC-style spatial hash diffuse GI cache
-	static constexpr UINT32 SpatialHashGIEntryCount = 1u << 20;
+	static constexpr UINT32 SpatialHashGIEntryCount = 1u << 21;
+	static constexpr UINT32 SpatialHashGIActiveCellCapacity = 1u << 20;
+	static constexpr UINT32 SpatialHashGITraceCellBudget = SpatialHashGIActiveCellCapacity;
 	static constexpr UINT32 SpatialHashGISHCoefficientCount = 4u;
 	struct SpatialHashGIConstant
 	{
@@ -276,6 +278,10 @@ private:
 		float SmoothingStrength = 0.65f;
 		UINT32 MaxProbeSteps = 8;
 		float InterpolationStrength = 1.0f;
+		UINT32 ActiveCellCapacity = SpatialHashGIActiveCellCapacity;
+		UINT32 TraceCellBudget = SpatialHashGITraceCellBudget;
+		UINT32 Padding1 = 0;
+		UINT32 Padding2 = 0;
 	};
 
 	SpatialHashGIConstant SpatialHashGICB;
@@ -283,7 +289,9 @@ private:
 	shared_ptr<ComputePipelineStateObject> SpatialHashGIUpdatePSO;
 	shared_ptr<ComputePipelineStateObject> SpatialHashGIResolvePSO;
 	shared_ptr<ComputePipelineStateObject> SpatialHashGIQueryPSO;
-	std::shared_ptr<Buffer> SpatialHashGIUpdateKeys;
+	std::shared_ptr<Buffer> SpatialHashGIActiveFlags;
+	std::shared_ptr<Buffer> SpatialHashGIActiveCellSlots;
+	std::shared_ptr<Buffer> SpatialHashGIActiveCounter;
 	std::shared_ptr<Buffer> SpatialHashGICellPosition;
 	std::shared_ptr<Buffer> SpatialHashGICellNormal;
 	std::shared_ptr<Buffer> SpatialHashGICellScore;
@@ -414,7 +422,7 @@ private:
 	struct RTSpatialHashGIViewParamCB
 	{
 		glm::vec4 LightDir;
-		UINT32 HashEntryCount = SpatialHashGIEntryCount;
+		UINT32 HashEntryCount = SpatialHashGITraceCellBudget;
 		UINT32 FrameCounter = 0;
 		UINT32 BlueNoiseOffsetStride = 1;
 		UINT32 NoiseMode = 1;
@@ -429,6 +437,10 @@ private:
 		float _padding = 0.0f;
 		glm::vec3 LightColor;
 		float _padding2 = 0.0f;
+		UINT32 ActiveCellCapacity = SpatialHashGIActiveCellCapacity;
+		UINT32 _padding3 = 0;
+		UINT32 _padding4 = 0;
+		UINT32 _padding5 = 0;
 	};
 
 	RTSpatialHashGIViewParamCB RTSpatialHashGIViewParam;
@@ -932,6 +944,7 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	
 	// Raytracing helper functions
 	void UpdateInstancePropertyBuffer();
+	bool GetRayTracingSceneGeometry(VertexBuffer*& outVertexBuffer, IndexBuffer*& outIndexBuffer) const;
 	void RebuildAccelerationStructures();
 	
 public:

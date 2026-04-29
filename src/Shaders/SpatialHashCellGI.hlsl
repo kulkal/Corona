@@ -14,6 +14,8 @@ ByteAddressBuffer vertices : register(t5);
 ByteAddressBuffer indices : register(t6);
 Texture2D AlbedoTex : register(t7);
 ByteAddressBuffer InstanceProperty : register(t8);
+StructuredBuffer<uint> ActiveCellSlots : register(t9);
+StructuredBuffer<uint> ActiveCounter : register(t10);
 
 SamplerState sampleWrap : register(s0);
 
@@ -35,6 +37,10 @@ cbuffer ViewParameter : register(b0)
     float _padding;
     float3 LightColor;
     float _padding2;
+    uint ActiveCellCapacity;
+    uint _padding3;
+    uint _padding4;
+    uint _padding5;
 };
 
 static const float INV_PI = 1.0f / PI;
@@ -254,17 +260,27 @@ float3 TraceDiffusePath(float3 origin, float3 direction, uint2 noiseCoord, uint 
 [shader("raygeneration")]
 void rayGen()
 {
-    uint slot = DispatchRaysIndex().x;
-    if (slot >= HashEntryCount)
+    uint traceIndex = DispatchRaysIndex().x;
+    uint activeCount = min(ActiveCounter[0], ActiveCellCapacity);
+    uint traceCount = min(activeCount, HashEntryCount);
+    if (traceIndex >= traceCount)
         return;
 
+    uint activeIndex = traceIndex;
+    if (activeCount > traceCount)
+    {
+        uint offset = (FrameCounter * traceCount) % activeCount;
+        activeIndex = (traceIndex + offset) % activeCount;
+    }
+
+    uint slot = ActiveCellSlots[activeIndex];
     uint key = CellKeys[slot];
     if (key == 0u)
     {
-        TraceSH0[slot] = 0.0f.xxxx;
-        TraceSH1[slot] = 0.0f.xxxx;
-        TraceSH2[slot] = 0.0f.xxxx;
-        TraceSH3[slot] = 0.0f.xxxx;
+        TraceSH0[traceIndex] = 0.0f.xxxx;
+        TraceSH1[traceIndex] = 0.0f.xxxx;
+        TraceSH2[traceIndex] = 0.0f.xxxx;
+        TraceSH3[traceIndex] = 0.0f.xxxx;
         return;
     }
 
@@ -272,10 +288,10 @@ void rayGen()
     float4 cellNormal = CellNormal[slot];
     if (cellPosition.w <= 0.0f || cellNormal.w <= 0.0f)
     {
-        TraceSH0[slot] = 0.0f.xxxx;
-        TraceSH1[slot] = 0.0f.xxxx;
-        TraceSH2[slot] = 0.0f.xxxx;
-        TraceSH3[slot] = 0.0f.xxxx;
+        TraceSH0[traceIndex] = 0.0f.xxxx;
+        TraceSH1[traceIndex] = 0.0f.xxxx;
+        TraceSH2[traceIndex] = 0.0f.xxxx;
+        TraceSH3[traceIndex] = 0.0f.xxxx;
         return;
     }
 
@@ -283,7 +299,8 @@ void rayGen()
     float3 worldPos = cellPosition.xyz;
     float3 origin = worldPos + worldNormal * RayBias;
     uint rayCount = clamp(RaysPerCell, 1u, 8u);
-    uint2 baseNoiseCoord = uint2(slot & 1023u, slot >> 10u);
+    uint noiseSeed = slot ^ (traceIndex * 1664525u);
+    uint2 baseNoiseCoord = uint2(noiseSeed & 1023u, noiseSeed >> 10u);
 
     SH4RGB sh = InitSH4RGB();
     [loop]
@@ -309,10 +326,10 @@ void rayGen()
     }
 
     sh = ScaleSH4RGB(sh, rcp(float(rayCount)));
-    TraceSH0[slot] = float4(sh.c0, float(rayCount));
-    TraceSH1[slot] = float4(sh.c1, 0.0f);
-    TraceSH2[slot] = float4(sh.c2, 0.0f);
-    TraceSH3[slot] = float4(sh.c3, 0.0f);
+    TraceSH0[traceIndex] = float4(sh.c0, float(rayCount));
+    TraceSH1[traceIndex] = float4(sh.c1, 0.0f);
+    TraceSH2[traceIndex] = float4(sh.c2, 0.0f);
+    TraceSH3[traceIndex] = float4(sh.c3, 0.0f);
 }
 
 [shader("miss")]

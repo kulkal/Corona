@@ -4,7 +4,7 @@ Texture2D DepthTex : register(t0);
 Texture2D WorldNormalTex : register(t1);
 Texture2D GeoNormalTex : register(t2);
 
-StructuredBuffer<uint> UpdateKeysIn : register(t5);
+StructuredBuffer<uint> ActiveCellSlotsIn : register(t5);
 StructuredBuffer<float4> CellPositionIn : register(t6);
 StructuredBuffer<float4> CellNormalIn : register(t7);
 StructuredBuffer<float4> TraceSH0In : register(t8);
@@ -21,8 +21,9 @@ StructuredBuffer<float4> ResolvedSH0In : register(t18);
 StructuredBuffer<float4> ResolvedSH1In : register(t19);
 StructuredBuffer<float4> ResolvedSH2In : register(t20);
 StructuredBuffer<float4> ResolvedSH3In : register(t21);
+StructuredBuffer<uint> ActiveCounterIn : register(t22);
 
-RWStructuredBuffer<uint> UpdateKeysOut : register(u0);
+RWStructuredBuffer<uint> ActiveFlagsOut : register(u0);
 RWStructuredBuffer<float4> CellPositionOut : register(u1);
 RWStructuredBuffer<float4> CellNormalOut : register(u2);
 RWStructuredBuffer<uint> CellScoreOut : register(u3);
@@ -33,6 +34,8 @@ RWStructuredBuffer<float4> ResolvedSH2Out : register(u7);
 RWStructuredBuffer<float4> ResolvedSH3Out : register(u8);
 RWTexture2D<float4> OutGIHashColor : register(u9);
 RWTexture2D<float4> OutGIHashSH : register(u10);
+RWStructuredBuffer<uint> ActiveCellSlotsOut : register(u11);
+RWStructuredBuffer<uint> ActiveCounterOut : register(u12);
 
 cbuffer SpatialHashGIConstant : register(b0)
 {
@@ -50,6 +53,9 @@ cbuffer SpatialHashGIConstant : register(b0)
     float SmoothingStrength;
     uint MaxProbeSteps;
     float InterpolationStrength;
+    uint ActiveCellCapacity;
+    uint TraceCellBudget;
+    uint2 SpatialHashPadding;
 };
 
 struct SH4RGB
@@ -61,6 +67,8 @@ struct SH4RGB
 };
 
 static const float MAX_SPATIAL_HASH_HISTORY_SAMPLES = 4096.0f;
+static const float SPATIAL_HASH_DIFFUSE_SCALE = 1.0f / PI;
+static const uint SPATIAL_HASH_ACTIVE_INIT = 0xffffffffu;
 
 float3 SanitizeFloat3(float3 value)
 {
@@ -299,7 +307,7 @@ bool FindSlotForWrite(uint key, out uint slot, out bool inserted)
 
         uint candidate = (startSlot + probeIndex) & HashEntryMask;
         uint oldValue = 0u;
-        InterlockedCompareExchange(UpdateKeysOut[candidate], 0u, key, oldValue);
+        InterlockedCompareExchange(ResolvedKeysOut[candidate], 0u, key, oldValue);
         if (oldValue == 0u || oldValue == key)
         {
             slot = candidate;
@@ -311,6 +319,44 @@ bool FindSlotForWrite(uint key, out uint slot, out bool inserted)
     slot = 0u;
     inserted = false;
     return false;
+}
+
+uint GetActiveFrameStamp()
+{
+    uint frameStamp = (FrameIndex & 0x7fffffffu) + 1u;
+    return frameStamp == SPATIAL_HASH_ACTIVE_INIT ? 1u : frameStamp;
+}
+
+void MarkActiveSlot(uint slot)
+{
+    uint frameStamp = GetActiveFrameStamp();
+
+    [loop]
+    for (uint attempt = 0u; attempt < 8u; ++attempt)
+    {
+        uint observed = 0u;
+        InterlockedCompareExchange(ActiveFlagsOut[slot], frameStamp, frameStamp, observed);
+        if (observed == frameStamp)
+            return;
+
+        if (observed == SPATIAL_HASH_ACTIVE_INIT)
+            continue;
+
+        uint previous = 0u;
+        InterlockedCompareExchange(ActiveFlagsOut[slot], observed, SPATIAL_HASH_ACTIVE_INIT, previous);
+        if (previous != observed)
+            continue;
+
+        CellScoreOut[slot] = 0xffffffffu;
+        ActiveFlagsOut[slot] = frameStamp;
+
+        uint activeIndex = 0u;
+        InterlockedAdd(ActiveCounterOut[0], 1u, activeIndex);
+        if (activeIndex < ActiveCellCapacity)
+            ActiveCellSlotsOut[activeIndex] = slot;
+        return;
+    }
+
 }
 
 bool FindSlotForRead(uint key, out uint slot)
@@ -524,18 +570,24 @@ bool LoadSmoothedSH(float3 worldPos, float3 normal, out SH4RGB outSH, out float 
 void SpatialHashClear(uint3 DTid : SV_DispatchThreadID)
 {
     uint entryIndex = DTid.x;
+    if (entryIndex == 0u)
+        ActiveCounterOut[0] = 0u;
+
     if (entryIndex >= HashEntryCount)
         return;
 
-    UpdateKeysOut[entryIndex] = 0u;
-    CellPositionOut[entryIndex] = 0.0f.xxxx;
-    CellNormalOut[entryIndex] = 0.0f.xxxx;
-    CellScoreOut[entryIndex] = 0xffffffffu;
-    ResolvedKeysOut[entryIndex] = 0u;
-    ResolvedSH0Out[entryIndex] = 0.0f.xxxx;
-    ResolvedSH1Out[entryIndex] = 0.0f.xxxx;
-    ResolvedSH2Out[entryIndex] = 0.0f.xxxx;
-    ResolvedSH3Out[entryIndex] = 0.0f.xxxx;
+    if (HistoryValid == 0u)
+    {
+        ActiveFlagsOut[entryIndex] = 0u;
+        CellScoreOut[entryIndex] = 0xffffffffu;
+        CellPositionOut[entryIndex] = 0.0f.xxxx;
+        CellNormalOut[entryIndex] = 0.0f.xxxx;
+        ResolvedKeysOut[entryIndex] = 0u;
+        ResolvedSH0Out[entryIndex] = 0.0f.xxxx;
+        ResolvedSH1Out[entryIndex] = 0.0f.xxxx;
+        ResolvedSH2Out[entryIndex] = 0.0f.xxxx;
+        ResolvedSH3Out[entryIndex] = 0.0f.xxxx;
+    }
 }
 
 [numthreads(8, 8, 1)]
@@ -558,6 +610,7 @@ void SpatialHashUpdate(uint3 DTid : SV_DispatchThreadID)
     bool inserted = false;
     if (!FindSlotForWrite(key, slot, inserted))
         return;
+    MarkActiveSlot(slot);
 
     float3 cellCenter = (float3(GetSpatialHashCell(worldPos)) + 0.5f.xxx) * max(CellSize, 1e-3f);
     float normalizedDist = saturate(length((worldPos - cellCenter) / max(CellSize, 1e-3f)) * 1.1547005f);
@@ -576,48 +629,46 @@ void SpatialHashUpdate(uint3 DTid : SV_DispatchThreadID)
 [numthreads(256, 1, 1)]
 void SpatialHashResolve(uint3 DTid : SV_DispatchThreadID)
 {
-    uint entryIndex = DTid.x;
-    if (entryIndex >= HashEntryCount)
+    uint traceIndex = DTid.x;
+    uint activeCount = min(ActiveCounterIn[0], ActiveCellCapacity);
+    uint traceCount = min(activeCount, TraceCellBudget);
+    if (traceIndex >= traceCount)
         return;
 
-    uint updateKey = UpdateKeysIn[entryIndex];
-    if (updateKey != 0u)
+    uint activeIndex = traceIndex;
+    if (activeCount > traceCount)
     {
-        SH4RGB currentSH = LoadTraceSH(entryIndex);
-        float currentSamples = LoadTraceSampleCount(entryIndex);
-        SH4RGB resolvedSH = currentSH;
-        float resolvedFrames = currentSamples;
+        uint offset = (FrameIndex * traceCount) % activeCount;
+        activeIndex = (traceIndex + offset) % activeCount;
+    }
 
-        uint previousSlot = 0u;
-        if (HistoryValid != 0u && FindPrevSlotForRead(updateKey, previousSlot))
-        {
-            SH4RGB previousSH = LoadPrevResolvedSH(previousSlot);
-            float adaptiveDecay = ComputeAdaptiveHistorySampleDecay(previousSH, currentSH, HistorySampleDecay);
-            float previousFrames = clamp(SanitizeFloat4(PrevResolvedSH0[previousSlot]).w * adaptiveDecay, 0.0f, MAX_SPATIAL_HASH_HISTORY_SAMPLES);
-            if (previousFrames > 0.0f)
-            {
-                float acceptedFrames = min(previousFrames + currentSamples, MAX_SPATIAL_HASH_HISTORY_SAMPLES);
-                float alpha = saturate(currentSamples / max(acceptedFrames, 1.0f));
-                resolvedSH = LerpSH(previousSH, currentSH, alpha);
-                resolvedFrames = acceptedFrames;
-            }
-        }
-
-        ResolvedKeysOut[entryIndex] = updateKey;
-        StoreResolvedSH(entryIndex, resolvedSH, resolvedFrames);
+    uint cacheSlot = ActiveCellSlotsIn[activeIndex];
+    if (cacheSlot >= HashEntryCount || ResolvedKeysOut[cacheSlot] == 0u)
         return;
+
+    SH4RGB currentSH = LoadTraceSH(traceIndex);
+    float currentSamples = LoadTraceSampleCount(traceIndex);
+    SH4RGB resolvedSH = currentSH;
+    float resolvedFrames = currentSamples;
+
+    SH4RGB previousSH;
+    float4 previousSH0 = SanitizeFloat4(ResolvedSH0Out[cacheSlot]);
+    previousSH.c0 = previousSH0.xyz;
+    previousSH.c1 = SanitizeFloat3(ResolvedSH1Out[cacheSlot].xyz);
+    previousSH.c2 = SanitizeFloat3(ResolvedSH2Out[cacheSlot].xyz);
+    previousSH.c3 = SanitizeFloat3(ResolvedSH3Out[cacheSlot].xyz);
+
+    float adaptiveDecay = ComputeAdaptiveHistorySampleDecay(previousSH, currentSH, HistorySampleDecay);
+    float previousFrames = clamp(previousSH0.w * adaptiveDecay, 0.0f, MAX_SPATIAL_HASH_HISTORY_SAMPLES);
+    if (previousFrames > 0.0f)
+    {
+        float acceptedFrames = min(previousFrames + currentSamples, MAX_SPATIAL_HASH_HISTORY_SAMPLES);
+        float alpha = saturate(currentSamples / max(acceptedFrames, 1.0f));
+        resolvedSH = LerpSH(previousSH, currentSH, alpha);
+        resolvedFrames = acceptedFrames;
     }
 
-    if (HistoryValid != 0u)
-    {
-        uint prevKey = PrevResolvedKeys[entryIndex];
-        float previousFrames = SanitizeFloat4(PrevResolvedSH0[entryIndex]).w;
-        if (prevKey != 0u && previousFrames > 1.0f)
-        {
-            ResolvedKeysOut[entryIndex] = prevKey;
-            StoreResolvedSH(entryIndex, LoadPrevResolvedSH(entryIndex), max(previousFrames - 1.0f, 0.0f));
-        }
-    }
+    StoreResolvedSH(cacheSlot, resolvedSH, resolvedFrames);
 }
 
 [numthreads(8, 8, 1)]
@@ -642,7 +693,7 @@ void SpatialHashQuery(uint3 DTid : SV_DispatchThreadID)
     float historyFrames = 0.0f;
     if (LoadSmoothedSH(worldPos, normal, cachedSH, historyFrames))
     {
-        float3 radiance = EvaluateSHDiffuse(cachedSH, normal);
+        float3 radiance = EvaluateSHDiffuse(cachedSH, normal) * SPATIAL_HASH_DIFFUSE_SCALE;
         OutGIHashColor[pixelPos] = float4(radiance, historyFrames);
         OutGIHashSH[pixelPos] = float4(cachedSH.c0, historyFrames);
     }

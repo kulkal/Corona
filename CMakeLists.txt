@@ -145,12 +145,14 @@ if(Vulkan_FOUND)
     set(CORONA_VULKAN_RT_REFLECTION_HLSL "${CORONA_VULKAN_GENERATED_SHADER_DIR}/RaytracedReflectionVulkan.generated.hlsl")
     set(CORONA_VULKAN_RT_GI_HLSL "${CORONA_VULKAN_GENERATED_SHADER_DIR}/RaytracedGIVulkan.generated.hlsl")
     set(CORONA_VULKAN_RT_SCREEN_PROBE_GI_HLSL "${CORONA_VULKAN_GENERATED_SHADER_DIR}/ScreenProbeRaytracedGIVulkan.generated.hlsl")
+    set(CORONA_VULKAN_RT_SPATIAL_HASH_GI_HLSL "${CORONA_VULKAN_GENERATED_SHADER_DIR}/SpatialHashCellGIVulkan.generated.hlsl")
     set(CORONA_VULKAN_RT_PATH_TRACING_HLSL "${CORONA_VULKAN_GENERATED_SHADER_DIR}/PathTracingVulkan.generated.hlsl")
     set(CORONA_VULKAN_RT_GENERATED_SHADERS
         "${CORONA_VULKAN_RT_SHADOW_HLSL}"
         "${CORONA_VULKAN_RT_REFLECTION_HLSL}"
         "${CORONA_VULKAN_RT_GI_HLSL}"
         "${CORONA_VULKAN_RT_SCREEN_PROBE_GI_HLSL}"
+        "${CORONA_VULKAN_RT_SPATIAL_HASH_GI_HLSL}"
         "${CORONA_VULKAN_RT_PATH_TRACING_HLSL}"
     )
     set(CORONA_VULKAN_SHADER_OUTPUTS
@@ -165,11 +167,16 @@ if(Vulkan_FOUND)
         "${CORONA_VULKAN_SPIRV_DIR}/ShadowDenoiseVulkan.comp.spv"
         "${CORONA_VULKAN_SPIRV_DIR}/TemporalDenoisingVulkan.comp.spv"
         "${CORONA_VULKAN_SPIRV_DIR}/ScreenProbeGIVulkan.comp.spv"
+        "${CORONA_VULKAN_SPIRV_DIR}/SpatialHashDiffuseGI_SpatialHashClearVulkan.comp.spv"
+        "${CORONA_VULKAN_SPIRV_DIR}/SpatialHashDiffuseGI_SpatialHashUpdateVulkan.comp.spv"
+        "${CORONA_VULKAN_SPIRV_DIR}/SpatialHashDiffuseGI_SpatialHashResolveVulkan.comp.spv"
+        "${CORONA_VULKAN_SPIRV_DIR}/SpatialHashDiffuseGI_SpatialHashQueryVulkan.comp.spv"
         "${CORONA_VULKAN_SPIRV_DIR}/SpatialDenoisingVulkan.comp.spv"
         "${CORONA_VULKAN_SPIRV_DIR}/RaytracedShadowVulkan.rt.spv"
         "${CORONA_VULKAN_SPIRV_DIR}/RaytracedReflectionVulkan.rt.spv"
         "${CORONA_VULKAN_SPIRV_DIR}/RaytracedGIVulkan.rt.spv"
         "${CORONA_VULKAN_SPIRV_DIR}/ScreenProbeRaytracedGIVulkan.rt.spv"
+        "${CORONA_VULKAN_SPIRV_DIR}/SpatialHashCellGIVulkan.rt.spv"
         "${CORONA_VULKAN_SPIRV_DIR}/PathTracingVulkan.rt.spv"
     )
 
@@ -211,18 +218,24 @@ if(Vulkan_FOUND)
             COMMAND "${CORONA_VULKAN_DXC}" ${CORONA_VULKAN_DXC_COMMON_FLAGS} -fspv-target-env=vulkan1.1 -T cs_6_0 -E ShadowDenoiseCS "${CORONA_VULKAN_SHADER_DIR}/ShadowDenoise.hlsl" -Fo "${CORONA_VULKAN_SPIRV_DIR}/ShadowDenoiseVulkan.comp.spv"
             COMMAND "${CORONA_VULKAN_DXC}" ${CORONA_VULKAN_DXC_COMMON_FLAGS} -fspv-target-env=vulkan1.1 -T cs_6_0 -E TemporalFilter "${CORONA_VULKAN_SHADER_DIR}/TemporalDenoising.hlsl" -Fo "${CORONA_VULKAN_SPIRV_DIR}/TemporalDenoisingVulkan.comp.spv"
             COMMAND "${CORONA_VULKAN_DXC}" ${CORONA_VULKAN_DXC_COMMON_FLAGS} -fspv-target-env=vulkan1.1 -T cs_6_0 -E ScreenProbeGI "${CORONA_VULKAN_SHADER_DIR}/ScreenProbeGI.hlsl" -Fo "${CORONA_VULKAN_SPIRV_DIR}/ScreenProbeGIVulkan.comp.spv"
+            COMMAND "${CORONA_VULKAN_DXC}" ${CORONA_VULKAN_DXC_COMMON_FLAGS} -fspv-target-env=vulkan1.1 -T cs_6_0 -E SpatialHashClear "${CORONA_VULKAN_SHADER_DIR}/SpatialHashDiffuseGI.hlsl" -Fo "${CORONA_VULKAN_SPIRV_DIR}/SpatialHashDiffuseGI_SpatialHashClearVulkan.comp.spv"
+            COMMAND "${CORONA_VULKAN_DXC}" ${CORONA_VULKAN_DXC_COMMON_FLAGS} -fspv-target-env=vulkan1.1 -T cs_6_0 -E SpatialHashUpdate "${CORONA_VULKAN_SHADER_DIR}/SpatialHashDiffuseGI.hlsl" -Fo "${CORONA_VULKAN_SPIRV_DIR}/SpatialHashDiffuseGI_SpatialHashUpdateVulkan.comp.spv"
+            COMMAND "${CORONA_VULKAN_DXC}" ${CORONA_VULKAN_DXC_COMMON_FLAGS} -fspv-target-env=vulkan1.1 -T cs_6_0 -E SpatialHashResolve "${CORONA_VULKAN_SHADER_DIR}/SpatialHashDiffuseGI.hlsl" -Fo "${CORONA_VULKAN_SPIRV_DIR}/SpatialHashDiffuseGI_SpatialHashResolveVulkan.comp.spv"
+            COMMAND "${CORONA_VULKAN_DXC}" ${CORONA_VULKAN_DXC_COMMON_FLAGS} -fspv-target-env=vulkan1.1 -T cs_6_0 -E SpatialHashQuery "${CORONA_VULKAN_SHADER_DIR}/SpatialHashDiffuseGI.hlsl" -Fo "${CORONA_VULKAN_SPIRV_DIR}/SpatialHashDiffuseGI_SpatialHashQueryVulkan.comp.spv"
             COMMAND "${CORONA_VULKAN_DXC}" ${CORONA_VULKAN_DXC_COMMON_FLAGS} -fspv-target-env=vulkan1.1 -T cs_6_0 -E SpatialFilter "${CORONA_VULKAN_SHADER_DIR}/SpatialDenoising.hlsl" -Fo "${CORONA_VULKAN_SPIRV_DIR}/SpatialDenoisingVulkan.comp.spv"
             COMMAND powershell -NoProfile -ExecutionPolicy Bypass -File "${CORONA_VULKAN_RT_SHADER_PREPARE}" -InputPath "${CORONA_VULKAN_SHADER_DIR}/RaytracedShadow.hlsl" -OutputPath "${CORONA_VULKAN_RT_SHADOW_HLSL}"
             COMMAND powershell -NoProfile -ExecutionPolicy Bypass -File "${CORONA_VULKAN_RT_SHADER_PREPARE}" -InputPath "${CORONA_VULKAN_SHADER_DIR}/RaytracedReflection.hlsl" -OutputPath "${CORONA_VULKAN_RT_REFLECTION_HLSL}"
             COMMAND powershell -NoProfile -ExecutionPolicy Bypass -File "${CORONA_VULKAN_RT_SHADER_PREPARE}" -InputPath "${CORONA_VULKAN_SHADER_DIR}/RaytracedGI.hlsl" -OutputPath "${CORONA_VULKAN_RT_GI_HLSL}"
             COMMAND powershell -NoProfile -ExecutionPolicy Bypass -File "${CORONA_VULKAN_RT_SHADER_PREPARE}" -InputPath "${CORONA_VULKAN_SHADER_DIR}/ScreenProbeRaytracedGI.hlsl" -OutputPath "${CORONA_VULKAN_RT_SCREEN_PROBE_GI_HLSL}"
+            COMMAND powershell -NoProfile -ExecutionPolicy Bypass -File "${CORONA_VULKAN_RT_SHADER_PREPARE}" -InputPath "${CORONA_VULKAN_SHADER_DIR}/SpatialHashCellGI.hlsl" -OutputPath "${CORONA_VULKAN_RT_SPATIAL_HASH_GI_HLSL}"
             COMMAND powershell -NoProfile -ExecutionPolicy Bypass -File "${CORONA_VULKAN_RT_SHADER_PREPARE}" -InputPath "${CORONA_VULKAN_SHADER_DIR}/PathTracing.hlsl" -OutputPath "${CORONA_VULKAN_RT_PATH_TRACING_HLSL}"
             COMMAND "${CORONA_VULKAN_DXC}" ${CORONA_VULKAN_DXC_COMMON_FLAGS} -fspv-target-env=vulkan1.2 -T lib_6_3 "${CORONA_VULKAN_RT_SHADOW_HLSL}" -Fo "${CORONA_VULKAN_SPIRV_DIR}/RaytracedShadowVulkan.rt.spv"
             COMMAND "${CORONA_VULKAN_DXC}" ${CORONA_VULKAN_DXC_COMMON_FLAGS} -fspv-target-env=vulkan1.2 -T lib_6_3 "${CORONA_VULKAN_RT_REFLECTION_HLSL}" -Fo "${CORONA_VULKAN_SPIRV_DIR}/RaytracedReflectionVulkan.rt.spv"
             COMMAND "${CORONA_VULKAN_DXC}" ${CORONA_VULKAN_DXC_COMMON_FLAGS} -fspv-target-env=vulkan1.2 -T lib_6_3 "${CORONA_VULKAN_RT_GI_HLSL}" -Fo "${CORONA_VULKAN_SPIRV_DIR}/RaytracedGIVulkan.rt.spv"
             COMMAND "${CORONA_VULKAN_DXC}" ${CORONA_VULKAN_DXC_COMMON_FLAGS} -fspv-target-env=vulkan1.2 -T lib_6_3 "${CORONA_VULKAN_RT_SCREEN_PROBE_GI_HLSL}" -Fo "${CORONA_VULKAN_SPIRV_DIR}/ScreenProbeRaytracedGIVulkan.rt.spv"
+            COMMAND "${CORONA_VULKAN_DXC}" ${CORONA_VULKAN_DXC_COMMON_FLAGS} -fspv-target-env=vulkan1.2 -T lib_6_3 "${CORONA_VULKAN_RT_SPATIAL_HASH_GI_HLSL}" -Fo "${CORONA_VULKAN_SPIRV_DIR}/SpatialHashCellGIVulkan.rt.spv"
             COMMAND "${CORONA_VULKAN_DXC}" ${CORONA_VULKAN_DXC_COMMON_FLAGS} -fspv-target-env=vulkan1.2 -T lib_6_3 "${CORONA_VULKAN_RT_PATH_TRACING_HLSL}" -Fo "${CORONA_VULKAN_SPIRV_DIR}/PathTracingVulkan.rt.spv"
-            DEPENDS "${CORONA_VULKAN_SHADER_DIR}/GBuffer.hlsl" "${CORONA_VULKAN_SHADER_DIR}/LightingPS.hlsl" "${CORONA_VULKAN_SHADER_DIR}/ToneMapPS.hlsl" "${CORONA_VULKAN_SHADER_DIR}/TemporalAA.hlsl" "${CORONA_VULKAN_SHADER_DIR}/ShadowDenoise.hlsl" "${CORONA_VULKAN_SHADER_DIR}/TemporalDenoising.hlsl" "${CORONA_VULKAN_SHADER_DIR}/ScreenProbeGI.hlsl" "${CORONA_VULKAN_SHADER_DIR}/SpatialDenoising.hlsl" "${CORONA_VULKAN_SHADER_DIR}/RaytracedShadow.hlsl" "${CORONA_VULKAN_SHADER_DIR}/RaytracedReflection.hlsl" "${CORONA_VULKAN_SHADER_DIR}/RaytracedGI.hlsl" "${CORONA_VULKAN_SHADER_DIR}/ScreenProbeRaytracedGI.hlsl" "${CORONA_VULKAN_SHADER_DIR}/PathTracing.hlsl" "${CORONA_VULKAN_SHADER_DIR}/Common.hlsl" "${CORONA_VULKAN_SHADER_DIR}/ShaderResourceBindings.hlsli" "${CORONA_VULKAN_RT_SHADER_PREPARE}"
+            DEPENDS "${CORONA_VULKAN_SHADER_DIR}/GBuffer.hlsl" "${CORONA_VULKAN_SHADER_DIR}/LightingPS.hlsl" "${CORONA_VULKAN_SHADER_DIR}/ToneMapPS.hlsl" "${CORONA_VULKAN_SHADER_DIR}/TemporalAA.hlsl" "${CORONA_VULKAN_SHADER_DIR}/ShadowDenoise.hlsl" "${CORONA_VULKAN_SHADER_DIR}/TemporalDenoising.hlsl" "${CORONA_VULKAN_SHADER_DIR}/ScreenProbeGI.hlsl" "${CORONA_VULKAN_SHADER_DIR}/SpatialHashDiffuseGI.hlsl" "${CORONA_VULKAN_SHADER_DIR}/SpatialDenoising.hlsl" "${CORONA_VULKAN_SHADER_DIR}/RaytracedShadow.hlsl" "${CORONA_VULKAN_SHADER_DIR}/RaytracedReflection.hlsl" "${CORONA_VULKAN_SHADER_DIR}/RaytracedGI.hlsl" "${CORONA_VULKAN_SHADER_DIR}/ScreenProbeRaytracedGI.hlsl" "${CORONA_VULKAN_SHADER_DIR}/SpatialHashCellGI.hlsl" "${CORONA_VULKAN_SHADER_DIR}/PathTracing.hlsl" "${CORONA_VULKAN_SHADER_DIR}/Common.hlsl" "${CORONA_VULKAN_SHADER_DIR}/ShaderResourceBindings.hlsli" "${CORONA_VULKAN_RT_SHADER_PREPARE}"
             VERBATIM
         )
     endif()

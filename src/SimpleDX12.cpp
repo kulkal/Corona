@@ -3323,16 +3323,12 @@ void D3D12RTPipelineStateObject::AddBufferSRVToHitProgram(const string& hitGroup
 	AddDescriptor2HitProgram(hitGroup, buffer->GpuHandleSRV, instanceIndex);
 }
 
-void D3D12RTPipelineStateObject::AddVertexBufferSRVToHitProgram(const string& hitGroup, VertexBuffer* buffer, uint32_t instanceIndex)
+void D3D12RTPipelineStateObject::AddSceneGeometrySRVsToHitProgram(const string& hitGroup, VertexBuffer* sceneVertexBuffer, IndexBuffer* sceneIndexBuffer, uint32_t instanceIndex)
 {
-	assert(buffer);
-	AddDescriptor2HitProgram(hitGroup, buffer->GpuHandleSRV, instanceIndex);
-}
-
-void D3D12RTPipelineStateObject::AddIndexBufferSRVToHitProgram(const string& hitGroup, IndexBuffer* buffer, uint32_t instanceIndex)
-{
-	assert(buffer);
-	AddDescriptor2HitProgram(hitGroup, buffer->GpuHandleSRV, instanceIndex);
+	assert(sceneVertexBuffer);
+	assert(sceneIndexBuffer);
+	AddDescriptor2HitProgram(hitGroup, sceneVertexBuffer->GpuHandleSRV, instanceIndex);
+	AddDescriptor2HitProgram(hitGroup, sceneIndexBuffer->GpuHandleSRV, instanceIndex);
 }
 
 void DescriptorHeapRing::Init(DescriptorHeap* InDHHeap, UINT InNumDescriptors, UINT InNumFrame)
@@ -3527,7 +3523,7 @@ void Buffer::MakeByteAddressBufferSRV()
 	bufferSRVDesc.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
 	bufferSRVDesc.Buffer.StructureByteStride = 0;
 	bufferSRVDesc.Buffer.FirstElement = 0;
-	bufferSRVDesc.Buffer.NumElements = NumElements;
+	bufferSRVDesc.Buffer.NumElements = (NumElements * ElementSize) / sizeof(UINT32);
 	bufferSRVDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
 
 	owner->TextureDHRing->AllocDescriptor(CpuHandleSRV, GpuHandleSRV);
