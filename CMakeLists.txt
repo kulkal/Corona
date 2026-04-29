@@ -30,6 +30,14 @@ file(GLOB CORONA_SOURCES CONFIGURE_DEPENDS
     "${CORONA_SRC_DIR}/*.cpp"
 )
 
+file(GLOB CORONA_SHADER_FILES CONFIGURE_DEPENDS
+    "${CORONA_SRC_DIR}/Shaders/*.hlsl"
+    "${CORONA_SRC_DIR}/Shaders/*.hlsli"
+    "${CORONA_SRC_DIR}/Shaders/*.ps1"
+)
+set_source_files_properties(${CORONA_SHADER_FILES} PROPERTIES HEADER_FILE_ONLY TRUE)
+source_group(TREE "${CORONA_SRC_DIR}/Shaders" PREFIX "Shaders" FILES ${CORONA_SHADER_FILES})
+
 list(APPEND CORONA_SOURCES
     "${CORONA_SRC_DIR}/VulkanBackend.cpp"
 )
@@ -94,6 +102,7 @@ add_executable(Corona WIN32
     ${CORONA_ENKITS_SOURCES}
     ${CORONA_IMGUI_SOURCES}
     ${CORONA_BACKEND_SOURCES}
+    ${CORONA_SHADER_FILES}
 )
 
 target_include_directories(Corona PRIVATE
@@ -235,7 +244,7 @@ if(Vulkan_FOUND)
             COMMAND "${CORONA_VULKAN_DXC}" ${CORONA_VULKAN_DXC_COMMON_FLAGS} -fspv-target-env=vulkan1.2 -T lib_6_3 "${CORONA_VULKAN_RT_SCREEN_PROBE_GI_HLSL}" -Fo "${CORONA_VULKAN_SPIRV_DIR}/ScreenProbeRaytracedGIVulkan.rt.spv"
             COMMAND "${CORONA_VULKAN_DXC}" ${CORONA_VULKAN_DXC_COMMON_FLAGS} -fspv-target-env=vulkan1.2 -T lib_6_3 "${CORONA_VULKAN_RT_SPATIAL_HASH_GI_HLSL}" -Fo "${CORONA_VULKAN_SPIRV_DIR}/SpatialHashCellGIVulkan.rt.spv"
             COMMAND "${CORONA_VULKAN_DXC}" ${CORONA_VULKAN_DXC_COMMON_FLAGS} -fspv-target-env=vulkan1.2 -T lib_6_3 "${CORONA_VULKAN_RT_PATH_TRACING_HLSL}" -Fo "${CORONA_VULKAN_SPIRV_DIR}/PathTracingVulkan.rt.spv"
-            DEPENDS "${CORONA_VULKAN_SHADER_DIR}/GBuffer.hlsl" "${CORONA_VULKAN_SHADER_DIR}/LightingPS.hlsl" "${CORONA_VULKAN_SHADER_DIR}/ToneMapPS.hlsl" "${CORONA_VULKAN_SHADER_DIR}/TemporalAA.hlsl" "${CORONA_VULKAN_SHADER_DIR}/ShadowDenoise.hlsl" "${CORONA_VULKAN_SHADER_DIR}/TemporalDenoising.hlsl" "${CORONA_VULKAN_SHADER_DIR}/ScreenProbeGI.hlsl" "${CORONA_VULKAN_SHADER_DIR}/SpatialHashDiffuseGI.hlsl" "${CORONA_VULKAN_SHADER_DIR}/SpatialDenoising.hlsl" "${CORONA_VULKAN_SHADER_DIR}/RaytracedShadow.hlsl" "${CORONA_VULKAN_SHADER_DIR}/RaytracedReflection.hlsl" "${CORONA_VULKAN_SHADER_DIR}/RaytracedGI.hlsl" "${CORONA_VULKAN_SHADER_DIR}/ScreenProbeRaytracedGI.hlsl" "${CORONA_VULKAN_SHADER_DIR}/SpatialHashCellGI.hlsl" "${CORONA_VULKAN_SHADER_DIR}/PathTracing.hlsl" "${CORONA_VULKAN_SHADER_DIR}/Common.hlsl" "${CORONA_VULKAN_SHADER_DIR}/ShaderResourceBindings.hlsli" "${CORONA_VULKAN_RT_SHADER_PREPARE}"
+            DEPENDS ${CORONA_SHADER_FILES}
             VERBATIM
         )
     endif()
