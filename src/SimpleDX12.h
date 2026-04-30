@@ -493,6 +493,7 @@ public:
 	ComPtr<ID3D12Resource> Scratch;
 	ComPtr<ID3D12Resource> Result;
 	ComPtr<ID3D12Resource> Instance;
+	UINT NumInstances = 0;
 };
 
 class Material
@@ -556,6 +557,9 @@ public:
 public:
 	vector<shared_ptr<Mesh>> meshes;
 	vector<shared_ptr<Material>> Materials;
+	bool bHasBounds = false;
+	glm::vec3 BoundsMin = glm::vec3(0.0f);
+	glm::vec3 BoundsMax = glm::vec3(0.0f);
 public:
 };
 
@@ -630,7 +634,8 @@ public:
 	std::shared_ptr<VertexBuffer> CreateVertexBuffer(uint32_t size, uint32_t stride, void* srcData) override;
 	std::shared_ptr<IndexBuffer> CreateIndexBuffer(DXGI_FORMAT format, uint32_t size, void* srcData) override;
 	std::shared_ptr<RTAS> CreateBLASForMesh(Mesh* mesh) override;
-	std::shared_ptr<RTAS> CreateTLAS(vector<shared_ptr<RTAS>>& VecBottomLevelAS) override;
+	std::shared_ptr<RTAS> CreateTLAS(const std::vector<RTInstanceDesc>& instances) override;
+	bool UpdateTLAS(const std::shared_ptr<RTAS>& topLevelAS, const std::vector<RTInstanceDesc>& instances) override;
 	std::shared_ptr<RTPipelineStateObject> CreateRTPipelineStateObject() override;
 	std::shared_ptr<ComputePipelineStateObject> CreateComputePipelineStateObject() override;
 	Microsoft::WRL::ComPtr<ID3DBlob> CreateShader(const std::wstring& fileName, const std::string& entryPoint, const std::string& target) override;

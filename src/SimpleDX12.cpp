@@ -17,7 +17,6 @@
 #include <sstream>
 #include <fstream>
 #include <filesystem>
-#include <D3Dcompiler.h>
 
 #include <assert.h>
 
@@ -37,8 +36,15 @@
 
 using namespace std;
 
+ComPtr<ID3DBlob> compileShaderDXC(SimpleDX12* owner, const WCHAR* filename, const std::string& entryPoint, const WCHAR* targetString);
+
 namespace
 {
+	std::wstring ToWide(const std::string& value)
+	{
+		return std::wstring(value.begin(), value.end());
+	}
+
 	struct DX12GraphicsPipelineHandle final : GraphicsPipelineHandle
 	{
 		std::shared_ptr<PipelineStateObject> PSO;
@@ -1406,11 +1412,14 @@ bool D3D12ComputePipelineStateObject::InitCS(const std::wstring& shaderFile, con
 	PSO->Owner = Owner;
 	PSO->IsCompute = true;
 	PSO->computePSODesc = {};
-	PSO->cs = Owner->CreateShader(shaderFile, entryPoint, "cs_5_0");
+	PSO->cs = compileShaderDXC(Owner, shaderFile.c_str(), entryPoint, L"cs_6_0");
 	if (!PSO->cs)
+	{
 		return false;
+	}
 
-	return PSO->Init();
+	const bool bInit = PSO->Init();
+	return bInit;
 }
 
 void D3D12ComputePipelineStateObject::Apply()
@@ -2088,19 +2097,59 @@ std::shared_ptr<RTAS> SimpleDX12::CreateBLASForMesh(Mesh* mesh)
 	return shared_ptr<RTAS>(as);
 }
 
-std::shared_ptr<RTAS> SimpleDX12::CreateTLAS(vector<shared_ptr<RTAS>>& VecBottomLevelAS)
+static bool WriteD3D12TLASInstanceDescs(D3D12RTAS* as, const std::vector<RTInstanceDesc>& instances)
+{
+	if (!as || !as->Instance || instances.size() > static_cast<size_t>(UINT_MAX))
+		return false;
+
+	D3D12_RAYTRACING_INSTANCE_DESC* pInstanceDesc = nullptr;
+	if (FAILED(as->Instance->Map(0, nullptr, reinterpret_cast<void**>(&pInstanceDesc))) || !pInstanceDesc)
+		return false;
+
+	const UINT instanceCount = static_cast<UINT>(instances.size());
+	ZeroMemory(pInstanceDesc, sizeof(D3D12_RAYTRACING_INSTANCE_DESC) * instanceCount);
+
+	bool bValid = true;
+	for (UINT i = 0; i < instanceCount; ++i)
+	{
+		D3D12RTAS* blas = dynamic_cast<D3D12RTAS*>(instances[i].BottomLevelAS.get());
+		if (!blas || !blas->Result)
+		{
+			bValid = false;
+			break;
+		}
+
+		pInstanceDesc[i].InstanceID = i;
+		pInstanceDesc[i].InstanceContributionToHitGroupIndex = i;
+		pInstanceDesc[i].Flags = D3D12_RAYTRACING_INSTANCE_FLAG_NONE;
+		glm::mat4x4 mat = glm::transpose(instances[i].Transform);
+		memcpy(pInstanceDesc[i].Transform, &mat, sizeof(pInstanceDesc[i].Transform));
+		pInstanceDesc[i].AccelerationStructure = blas->Result->GetGPUVirtualAddress();
+		pInstanceDesc[i].InstanceMask = 0xFF;
+	}
+
+	as->Instance->Unmap(0, nullptr);
+	return bValid;
+}
+
+std::shared_ptr<RTAS> SimpleDX12::CreateTLAS(const std::vector<RTInstanceDesc>& instances)
 {
 	D3D12RTAS* as = new D3D12RTAS;
 
 	// First, get the size of the TLAS buffers and create them
 	D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS inputs = {};
 	inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
-	inputs.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_NONE;
-	inputs.NumDescs = VecBottomLevelAS.size();
+	inputs.Flags =
+		D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_ALLOW_UPDATE |
+		D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;
+	inputs.NumDescs = static_cast<UINT>(instances.size());
 	inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL;
 
 	D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO info;
 	Device->GetRaytracingAccelerationStructurePrebuildInfo(&inputs, &info);
+	UINT64 scratchDataSize = info.ScratchDataSizeInBytes;
+	if (info.UpdateScratchDataSizeInBytes > scratchDataSize)
+		scratchDataSize = info.UpdateScratchDataSizeInBytes;
 
 	{
 		D3D12_RESOURCE_DESC bufDesc = {};
@@ -2114,7 +2163,7 @@ std::shared_ptr<RTAS> SimpleDX12::CreateTLAS(vector<shared_ptr<RTAS>>& VecBottom
 		bufDesc.MipLevels = 1;
 		bufDesc.SampleDesc.Count = 1;
 		bufDesc.SampleDesc.Quality = 0;
-		bufDesc.Width = info.ScratchDataSizeInBytes;
+		bufDesc.Width = scratchDataSize;
 
 		Device->CreateCommittedResource(&kDefaultHeapProps, D3D12_HEAP_FLAG_NONE, &bufDesc, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, IID_PPV_ARGS(&as->Scratch));
 	}
@@ -2148,30 +2197,15 @@ std::shared_ptr<RTAS> SimpleDX12::CreateTLAS(vector<shared_ptr<RTAS>>& VecBottom
 		bufDesc.MipLevels = 1;
 		bufDesc.SampleDesc.Count = 1;
 		bufDesc.SampleDesc.Quality = 0;
-		bufDesc.Width = sizeof(D3D12_RAYTRACING_INSTANCE_DESC) * VecBottomLevelAS.size();
+		bufDesc.Width = sizeof(D3D12_RAYTRACING_INSTANCE_DESC) * instances.size();
 
 		Device->CreateCommittedResource(&kUploadHeapProps, D3D12_HEAP_FLAG_NONE, &bufDesc, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&as->Instance));
 	}
 
-	if (VecBottomLevelAS.size() > 0)
+	if (!WriteD3D12TLASInstanceDescs(as, instances))
 	{
-		D3D12_RAYTRACING_INSTANCE_DESC* pInstanceDesc;
-		as->Instance->Map(0, nullptr, (void**)&pInstanceDesc);
-		ZeroMemory(pInstanceDesc, sizeof(D3D12_RAYTRACING_INSTANCE_DESC) * VecBottomLevelAS.size());
-
-		for (int i = 0; i < VecBottomLevelAS.size(); i++)
-		{
-			D3D12RTAS* blas = dynamic_cast<D3D12RTAS*>(VecBottomLevelAS[i].get());
-			assert(blas);
-			pInstanceDesc[i].InstanceID = i;                            // This value will be exposed to the shader via InstanceID()
-			pInstanceDesc[i].InstanceContributionToHitGroupIndex = i;   // This is the offset inside the shader-table. We only have a single geometry, so the offset 0
-			pInstanceDesc[i].Flags = D3D12_RAYTRACING_INSTANCE_FLAG_NONE;
-			glm::mat4x4 mat = glm::transpose(VecBottomLevelAS[i]->MeshPtr->transform);
-			memcpy(pInstanceDesc[i].Transform, &mat, sizeof(pInstanceDesc[i].Transform));
-			pInstanceDesc[i].AccelerationStructure = blas->Result->GetGPUVirtualAddress();
-			pInstanceDesc[i].InstanceMask = 0xFF;
-		}
-		as->Instance->Unmap(0, nullptr);
+		delete as;
+		return nullptr;
 	}
 	
 	// Create the TLAS
@@ -2181,7 +2215,7 @@ std::shared_ptr<RTAS> SimpleDX12::CreateTLAS(vector<shared_ptr<RTAS>>& VecBottom
 	D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC asDesc = {};
 	asDesc.Inputs = inputs;
 
-	if (VecBottomLevelAS.size() > 0)
+	if (!instances.empty())
 		asDesc.Inputs.InstanceDescs = as->Instance->GetGPUVirtualAddress();
 	asDesc.DestAccelerationStructureData = as->Result->GetGPUVirtualAddress();
 	asDesc.ScratchAccelerationStructureData = as->Scratch->GetGPUVirtualAddress();
@@ -2209,7 +2243,47 @@ std::shared_ptr<RTAS> SimpleDX12::CreateTLAS(vector<shared_ptr<RTAS>>& VecBottom
 
 	CmdQ->ExecuteCommandList(cmd);
 
+	as->NumInstances = static_cast<UINT>(instances.size());
 	return shared_ptr<RTAS>(as);
+}
+
+bool SimpleDX12::UpdateTLAS(const std::shared_ptr<RTAS>& topLevelAS, const std::vector<RTInstanceDesc>& instances)
+{
+	D3D12RTAS* as = dynamic_cast<D3D12RTAS*>(topLevelAS.get());
+	if (!as || !as->Scratch || !as->Result || !as->Instance)
+		return false;
+	if (instances.empty() || instances.size() != as->NumInstances || instances.size() > static_cast<size_t>(UINT_MAX))
+		return false;
+	if (!WriteD3D12TLASInstanceDescs(as, instances))
+		return false;
+
+	D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS inputs = {};
+	inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
+	inputs.Flags =
+		D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_ALLOW_UPDATE |
+		D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE |
+		D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PERFORM_UPDATE;
+	inputs.NumDescs = static_cast<UINT>(instances.size());
+	inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL;
+	inputs.InstanceDescs = as->Instance->GetGPUVirtualAddress();
+
+	CommandList* cmd = CmdQ->AllocCmdList();
+
+	D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC asDesc = {};
+	asDesc.Inputs = inputs;
+	asDesc.SourceAccelerationStructureData = as->Result->GetGPUVirtualAddress();
+	asDesc.DestAccelerationStructureData = as->Result->GetGPUVirtualAddress();
+	asDesc.ScratchAccelerationStructureData = as->Scratch->GetGPUVirtualAddress();
+
+	cmd->CmdList->BuildRaytracingAccelerationStructure(&asDesc, 0, nullptr);
+
+	D3D12_RESOURCE_BARRIER uavBarrier = {};
+	uavBarrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+	uavBarrier.UAV.pResource = as->Result.Get();
+	cmd->CmdList->ResourceBarrier(1, &uavBarrier);
+
+	CmdQ->ExecuteCommandList(cmd);
+	return true;
 }
 
 std::shared_ptr<RTPipelineStateObject> SimpleDX12::CreateRTPipelineStateObject()
@@ -2228,31 +2302,8 @@ std::shared_ptr<ComputePipelineStateObject> SimpleDX12::CreateComputePipelineSta
 
 ComPtr<ID3DBlob> SimpleDX12::CreateShader(const std::wstring& FilePath, const std::string& EntryPoint, const std::string& Target)
 {
-	ComPtr<ID3DBlob> shader;
-
-#if defined(_DEBUG)
-	// Enable better shader debugging with the graphics debugging tools.
-	UINT compileFlags = D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
-#else
-	UINT compileFlags = D3DCOMPILE_OPTIMIZATION_LEVEL3;
-#endif
-
-	ID3DBlob* compilationMsgs = nullptr;
-
-	try
-	{
-		ThrowIfFailed(D3DCompileFromFile(FilePath.c_str(), nullptr, D3D_COMPILE_STANDARD_FILE_INCLUDE, EntryPoint.c_str(), Target.c_str(), compileFlags, 0, &shader, &compilationMsgs));
-	}
-	catch (const std::exception& e)
-	{
-		string errorStr = reinterpret_cast<const char*>(compilationMsgs->GetBufferPointer());
-		OutputDebugStringA(errorStr.c_str());
-		errorString += errorStr;
-		compilationMsgs->Release();
-		return nullptr;
-	}
-
-	return shader;
+	const std::wstring targetWide = ToWide(Target);
+	return compileShaderDXC(this, FilePath.c_str(), EntryPoint, targetWide.c_str());
 }
 
 template<class BlotType>
@@ -2265,6 +2316,68 @@ std::string convertBlobToString(BlotType* pBlob)
 }
 
 static dxc::DxcDllSupport gDxcDllHelper;
+
+ComPtr<ID3DBlob> compileShaderDXC(SimpleDX12* owner, const WCHAR* filename, const std::string& entryPoint, const WCHAR* targetString)
+{
+	gDxcDllHelper.Initialize();
+	ComPtr<IDxcCompiler> pCompiler;
+	ComPtr<IDxcLibrary> pLibrary;
+	ComPtr<IDxcIncludeHandler> dxcIncludeHandler;
+	gDxcDllHelper.CreateInstance(CLSID_DxcCompiler, __uuidof(IDxcCompiler), &pCompiler);
+	gDxcDllHelper.CreateInstance(CLSID_DxcLibrary, __uuidof(IDxcLibrary), &pLibrary);
+	pLibrary->CreateIncludeHandler(&dxcIncludeHandler);
+
+	std::ifstream shaderFile(filename);
+	if (shaderFile.good() == false)
+	{
+		if (owner)
+			owner->errorString += "Can't open shader file.\n";
+		return nullptr;
+	}
+
+	std::stringstream strStream;
+	strStream << shaderFile.rdbuf();
+	std::string shader = strStream.str();
+
+	ComPtr<IDxcBlobEncoding> pTextBlob;
+	pLibrary->CreateBlobWithEncodingFromPinned((LPBYTE)shader.c_str(), (uint32_t)shader.size(), 0, &pTextBlob);
+
+	ComPtr<IDxcOperationResult> pResult;
+#if defined(_DEBUG)
+	LPCWSTR compileArgs[] = { DXC_ARG_DEBUG, DXC_ARG_SKIP_OPTIMIZATIONS };
+#else
+	LPCWSTR compileArgs[] = { DXC_ARG_OPTIMIZATION_LEVEL3 };
+#endif
+	const std::wstring entryPointWide = ToWide(entryPoint);
+	pCompiler->Compile(
+		pTextBlob.Get(),
+		filename,
+		entryPointWide.c_str(),
+		targetString,
+		compileArgs,
+		_countof(compileArgs),
+		nullptr,
+		0,
+		dxcIncludeHandler.Get(),
+		&pResult);
+
+	HRESULT resultCode;
+	pResult->GetStatus(&resultCode);
+	if (FAILED(resultCode))
+	{
+		ComPtr<IDxcBlobEncoding> pError;
+		pResult->GetErrorBuffer(&pError);
+		std::string log = convertBlobToString(pError.Get());
+		if (owner)
+			owner->errorString += log;
+		OutputDebugStringA(log.c_str());
+		return nullptr;
+	}
+
+	ID3DBlob* pBlob = nullptr;
+	pResult->GetResult((IDxcBlob**)&pBlob);
+	return ComPtr<ID3DBlob>(pBlob);
+}
 
 ComPtr<ID3DBlob> compileShaderLibrary(SimpleDX12* owner, const WCHAR* filename, const WCHAR* targetString)
 {
@@ -2491,6 +2604,12 @@ struct PipelineConfig
 
 void D3D12RTPipelineStateObject::SetNumInstances(uint32_t numInstances)
 {
+	if (NumInstance != numInstances)
+	{
+		ShaderTable.Reset();
+		ShaderTableEntrySize = 0;
+		ShaderTableSize = 0;
+	}
 	NumInstance = numInstances;
 }
 
@@ -3046,6 +3165,10 @@ bool D3D12RTPipelineStateObject::InitRS(const string& ShaderFile)
 		shaderPath = RuntimePaths::SourceDirectory() / shaderPath;
 	wstring wShaderFile = shaderPath.wstring();
 	ComPtr<ID3DBlob> pDxilLib = compileShaderLibrary(owner, wShaderFile.c_str(), L"lib_6_3");
+	if (!pDxilLib)
+	{
+		return false;
+	}
 
 	vector<const WCHAR*> entryPoints;
 	entryPoints.reserve(ShaderBinding.size());
@@ -3691,8 +3814,8 @@ std::shared_ptr<GraphicsPipelineHandle> SimpleDX12::CreateGraphicsPipeline(const
 {
 	auto handle = std::make_shared<DX12GraphicsPipelineHandle>();
 
-	ComPtr<ID3DBlob> vs = CreateShader(desc.ShaderPath, desc.VertexEntryPoint, "vs_5_0");
-	ComPtr<ID3DBlob> ps = CreateShader(desc.ShaderPath, desc.PixelEntryPoint, "ps_5_0");
+	ComPtr<ID3DBlob> vs = CreateShader(desc.ShaderPath, desc.VertexEntryPoint, "vs_6_0");
+	ComPtr<ID3DBlob> ps = CreateShader(desc.ShaderPath, desc.PixelEntryPoint, "ps_6_0");
 	if (!vs || !ps)
 		return nullptr;
 

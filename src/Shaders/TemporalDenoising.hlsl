@@ -190,6 +190,22 @@ float4 SanitizeFloat4(float4 value)
 	return value;
 }
 
+float3 SanitizeFloat3(float3 value)
+{
+	if (any(isnan(value)) || any(isinf(value)))
+		return 0.0f.xxx;
+
+	return value;
+}
+
+float3 SafeNormalize(float3 value, float3 fallback)
+{
+	value = SanitizeFloat3(value);
+	fallback = SanitizeFloat3(fallback);
+	float lenSq = dot(value, value);
+	return lenSq > 1e-12f ? value * rsqrt(lenSq) : fallback;
+}
+
 [numthreads(15, 15, 1)]
 void TemporalFilter( uint3 DTid : SV_DispatchThreadID, uint3 GTid : SV_GroupThreadID, uint GTIndex : SV_GroupIndex, uint3 GId : SV_GroupID)
 {
@@ -220,8 +236,8 @@ void TemporalFilter( uint3 DTid : SV_DispatchThreadID, uint3 GTid : SV_GroupThre
             float currentLinearDepth = GetLinearDepthOpenGL(currentDepth, ProjectionParams.z, ProjectionParams.w);
             float prevLinearDepth = GetLinearDepthOpenGL(prevDepth, ProjectionParams.z, ProjectionParams.w);
 
-            float3 currentNormal = normalize(NormalTex[SafePixelPos].xyz);
-            float3 prevNormal = normalize(PrevNormalTex.SampleLevel(BilinearClamp, prevUV, 0).xyz);
+            float3 currentNormal = SafeNormalize(NormalTex[SafePixelPos].xyz, float3(0.0f, 1.0f, 0.0f));
+            float3 prevNormal = SafeNormalize(PrevNormalTex.SampleLevel(BilinearClamp, prevUV, 0).xyz, currentNormal);
 
             float depthDelta = abs(currentLinearDepth - prevLinearDepth) / max(currentLinearDepth, 1e-3f);
             float depthWeight = exp(-depthDelta * 32.0f);
@@ -252,6 +268,11 @@ void TemporalFilter( uint3 DTid : SV_DispatchThreadID, uint3 GTid : SV_GroupThre
 
 	if(IsInBounds)
 	{
+		BlendedDiffuse = SanitizeFloat4(BlendedDiffuse);
+		BlendedDiffuse.xyz = max(BlendedDiffuse.xyz, 0.0f.xxx);
+		BlendedDiffuse.w = 1.0f;
+		BlendedSpecular = SanitizeFloat4(BlendedSpecular);
+		BlendedSpecular.xyz = max(BlendedSpecular.xyz, 0.0f.xxx);
 		OutGIResultSH[PixelPos] = 0.0f.xxxx;
 		OutGIResultColor[PixelPos] = BlendedDiffuse;
 		OutGIResultSHDS[PixelPos] = 0.0f.xxxx;

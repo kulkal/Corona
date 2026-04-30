@@ -16,32 +16,174 @@
 #include <cmath>
 #include <cstdlib>
 #include <iterator>
+#include <map>
 
 namespace
 {
-	void AddMeshesToBLAS(vector<shared_ptr<RTAS>>& vecBLAS, shared_ptr<Scene> scene)
+	void AddMeshesToRayTracingInstances(
+		vector<RTInstanceDesc>& instances,
+		map<Mesh*, shared_ptr<RTAS>>& blasCache,
+		const shared_ptr<Scene>& scene,
+		const glm::mat4x4& instanceTransform)
 	{
+		if (!scene)
+			return;
+
 		for (auto& mesh : scene->meshes)
 		{
-			shared_ptr<RTAS> blas = mesh->CreateBLAS();
-			if (blas == nullptr)
-			{
+			if (!mesh)
 				continue;
+
+			shared_ptr<RTAS> blas;
+			const auto cacheIt = blasCache.find(mesh.get());
+			if (cacheIt != blasCache.end())
+			{
+				blas = cacheIt->second;
 			}
-			vecBLAS.push_back(blas);
+			else
+			{
+				blas = mesh->CreateBLAS();
+				if (blas)
+					blasCache[mesh.get()] = blas;
+			}
+
+			if (blas == nullptr)
+				continue;
+
+			RTInstanceDesc instance;
+			instance.BottomLevelAS = blas;
+			instance.Transform = instanceTransform * mesh->transform;
+			instances.push_back(instance);
 		}
 	}
+}
+
+Corona::SceneObjectHandle Corona::AddSceneObject(const SceneObjectDesc& desc)
+{
+	if (!desc.ScenePtr)
+		return InvalidSceneObjectHandle;
+
+	SceneObject object;
+	object.Handle = NextSceneObjectHandle++;
+	if (NextSceneObjectHandle == InvalidSceneObjectHandle)
+		NextSceneObjectHandle = 1;
+	object.ScenePtr = desc.ScenePtr;
+	object.Roughness = desc.Roughness;
+	object.Metallic = desc.Metallic;
+	object.bOverrideRoughnessMetallic = desc.bOverrideRoughnessMetallic;
+	object.bVisible = desc.bVisible;
+	object.bRayTracing = desc.bRayTracing;
+	object.Transform = desc.Transform;
+	SceneObjects.push_back(object);
+
+	MarkRayTracingSceneDirty();
+	return object.Handle;
+}
+
+Corona::SceneObjectHandle Corona::AddSceneInstance(const shared_ptr<Scene>& scene, const glm::mat4x4& transform)
+{
+	SceneObjectDesc desc;
+	desc.ScenePtr = scene;
+	desc.Transform = transform;
+	return AddSceneObject(desc);
+}
+
+bool Corona::RemoveSceneObject(SceneObjectHandle handle)
+{
+	if (handle == InvalidSceneObjectHandle)
+		return false;
+
+	const auto it = std::find_if(SceneObjects.begin(), SceneObjects.end(), [handle](const SceneObject& object)
+	{
+		return object.Handle == handle;
+	});
+	if (it == SceneObjects.end())
+		return false;
+
+	SceneObjects.erase(it);
+	if (SponzaObject == handle)
+		SponzaObject = InvalidSceneObjectHandle;
+	if (BuddhaObject == handle)
+		BuddhaObject = InvalidSceneObjectHandle;
+	if (ShaderBallObject == handle)
+		ShaderBallObject = InvalidSceneObjectHandle;
+	if (PistolObject == handle)
+		PistolObject = InvalidSceneObjectHandle;
+	MarkRayTracingSceneDirty();
+	return true;
+}
+
+bool Corona::SetSceneObjectTransform(SceneObjectHandle handle, const glm::mat4x4& transform)
+{
+	const auto it = std::find_if(SceneObjects.begin(), SceneObjects.end(), [handle](const SceneObject& object)
+	{
+		return object.Handle == handle;
+	});
+	if (it == SceneObjects.end())
+		return false;
+
+	it->Transform = transform;
+	MarkRayTracingSceneDirty();
+	return true;
+}
+
+bool Corona::SetSceneObjectVisibility(SceneObjectHandle handle, bool visible)
+{
+	const auto it = std::find_if(SceneObjects.begin(), SceneObjects.end(), [handle](const SceneObject& object)
+	{
+		return object.Handle == handle;
+	});
+	if (it == SceneObjects.end())
+		return false;
+
+	if (it->bVisible != visible)
+	{
+		it->bVisible = visible;
+		MarkRayTracingSceneDirty();
+	}
+	return true;
+}
+
+bool Corona::SetSceneObjectRayTracingEnabled(SceneObjectHandle handle, bool enabled)
+{
+	const auto it = std::find_if(SceneObjects.begin(), SceneObjects.end(), [handle](const SceneObject& object)
+	{
+		return object.Handle == handle;
+	});
+	if (it == SceneObjects.end())
+		return false;
+
+	if (it->bRayTracing != enabled)
+	{
+		it->bRayTracing = enabled;
+		MarkRayTracingSceneDirty();
+	}
+	return true;
+}
+
+void Corona::MarkRayTracingSceneDirty()
+{
+	bRayTracingSceneDirty = true;
+	PrevPathTracingViewMat = glm::mat4x4(0.0f);
+}
+
+void Corona::FlushSceneObjectChanges()
+{
+	if (!bRayTracingSceneDirty || !renderBackend)
+		return;
+
+	RebuildAccelerationStructures();
 }
 
 void Corona::UpdateInstancePropertyBuffer()
 {
 	constexpr UINT32 kMinInstancePropertyCapacity = 500u;
-	const UINT32 instanceCapacity = std::max(kMinInstancePropertyCapacity, static_cast<UINT32>(vecBLAS.size()));
+	const UINT32 instanceCapacity = std::max(kMinInstancePropertyCapacity, static_cast<UINT32>(RayTracingInstances.size()));
 	std::vector<InstanceProperty> instanceProperties(instanceCapacity);
-	const size_t instanceCount = (std::min)(instanceProperties.size(), vecBLAS.size());
+	const size_t instanceCount = (std::min)(instanceProperties.size(), RayTracingInstances.size());
 	for (size_t i = 0; i < instanceCount; ++i)
 	{
-		instanceProperties[i].WorldMatrix = glm::transpose(vecBLAS[i]->MeshPtr->transform);
+		instanceProperties[i].WorldMatrix = glm::transpose(RayTracingInstances[i].Transform);
 		instanceProperties[i].VertexOffset = 0;
 		instanceProperties[i].IndexOffset = 0;
 	}
@@ -78,46 +220,84 @@ void Corona::UpdateInstancePropertyBuffer()
 
 void Corona::RebuildAccelerationStructures()
 {
+	if (!renderBackend)
+		return;
+
+	const size_t previousInstanceCount = RayTracingInstances.size();
+
 	// Wait for GPU to finish using current structures
 	renderBackend->WaitForGpu();
-	
-	// Recreate TLAS with current BLAS list
-	TLAS = renderBackend->CreateTLAS(vecBLAS);
+
+	RayTracingInstances.clear();
+	size_t meshCount = 0;
+	vector<Mesh*> retainedMeshes;
+	for (const SceneObject& object : SceneObjects)
+	{
+		if (!object.ScenePtr)
+			continue;
+
+		for (const shared_ptr<Mesh>& mesh : object.ScenePtr->meshes)
+		{
+			if (mesh && std::find(retainedMeshes.begin(), retainedMeshes.end(), mesh.get()) == retainedMeshes.end())
+				retainedMeshes.push_back(mesh.get());
+		}
+
+		if (object.bVisible && object.bRayTracing)
+			meshCount += object.ScenePtr->meshes.size();
+	}
+	RayTracingInstances.reserve(meshCount);
+	for (const SceneObject& object : SceneObjects)
+	{
+		if (object.bVisible && object.bRayTracing)
+			AddMeshesToRayTracingInstances(RayTracingInstances, RayTracingBLASCache, object.ScenePtr, object.Transform);
+	}
+
+	for (auto it = RayTracingBLASCache.begin(); it != RayTracingBLASCache.end();)
+	{
+		if (std::find(retainedMeshes.begin(), retainedMeshes.end(), it->first) == retainedMeshes.end())
+			it = RayTracingBLASCache.erase(it);
+		else
+			++it;
+	}
+
+	const bool bInstanceCountChanged = previousInstanceCount != RayTracingInstances.size();
+	if (RayTracingInstances.empty())
+	{
+		TLAS = nullptr;
+	}
+	else if (!TLAS || bInstanceCountChanged || !renderBackend->UpdateTLAS(TLAS, RayTracingInstances))
+	{
+		TLAS = renderBackend->CreateTLAS(RayTracingInstances);
+	}
 	
 	// Update instance property buffer
 	UpdateInstancePropertyBuffer();
 
+	if (bInstanceCountChanged && (PSO_RT_SHADOW || PSO_RT_REFLECTION || PSO_RT_GI || PSO_RT_SCREEN_PROBE_GI || PSO_RT_SPATIAL_HASH_GI))
+		InitRTPSO();
 	if (PSO_PATH_TRACING)
 		InitPathTracingPass();
-}
 
-void Corona::AddScene(shared_ptr<Scene> scene)
-{
-	// Add all meshes from scene to BLAS vector
-	AddMeshesToBLAS(vecBLAS, scene);
-	
-	// Rebuild acceleration structures and update buffers
-	RebuildAccelerationStructures();
+	bRayTracingSceneDirty = false;
 }
 
 void Corona::InitRaytracingData()
 {
-	UINT NumTotalMesh = Sponza ? static_cast<UINT>(Sponza->meshes.size()) : 0u;
-	if (Buddha)
-		NumTotalMesh += static_cast<UINT>(Buddha->meshes.size());
-	vecBLAS.reserve(NumTotalMesh);
+	size_t NumTotalMesh = 0;
+	for (const SceneObject& object : SceneObjects)
+	{
+		if (object.bVisible && object.bRayTracing && object.ScenePtr)
+			NumTotalMesh += object.ScenePtr->meshes.size();
+	}
+	RayTracingInstances.reserve(NumTotalMesh);
 
 	// Create initial instance property buffer (large enough for many instances)
 	InstancePropertyBuffer = renderBackend->CreateBuffer({ 500u, sizeof(InstanceProperty), EInitialResourceState::GenericRead, false, nullptr });
 	InstancePropertyBuffer->MakeByteAddressBufferSRV();
 	NAME_D3D12_OBJECT(InstancePropertyBuffer->resource);
 
-	// Add initial scene(s)
-	if (Sponza)
-		AddScene(Sponza);
-	if (Buddha)
-		AddScene(Buddha);
-	//AddScene(ShaderBall);
+	bRayTracingSceneDirty = true;
+	RebuildAccelerationStructures();
 }
 
 void Corona::InitRTPSO()

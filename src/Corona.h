@@ -14,6 +14,9 @@
 #include <array>
 #include <chrono>
 #include <deque>
+#include <filesystem>
+#include <map>
+#include <string>
 #include <vector>
 
 #include "glm/glm.hpp"
@@ -624,6 +627,20 @@ public:
 		COUNT
 	};
 
+	using SceneObjectHandle = uint32_t;
+	static constexpr SceneObjectHandle InvalidSceneObjectHandle = 0;
+
+	struct SceneObjectDesc
+	{
+		shared_ptr<Scene> ScenePtr;
+		glm::mat4x4 Transform = glm::mat4x4(1.0f);
+		float Roughness = 1.0f;
+		float Metallic = 0.0f;
+		bool bOverrideRoughnessMetallic = false;
+		bool bVisible = true;
+		bool bRayTracing = true;
+	};
+
 private:
 
 	EAntiAliasingMode AntiAliasingMode = EAntiAliasingMode::DLSS_RR;
@@ -656,10 +673,13 @@ private:
 	bool bAutoAADumpCompleted = false;
 	bool bHybridStageAutoDumpMode = false;
 	bool bDiffuseGIAutoDumpMode = false;
+	bool bReadmeScreenshotDumpMode = false;
+	bool bPathTracingScreenshotDumpMode = false;
 	bool bLoggedHybridStageLimit = false;
 	bool bStartupModeConfigured = false;
 	UINT32 AutoAADumpPhase = 0;
 	UINT32 AutoAADumpFramesInPhase = 0;
+	UINT32 AutoAADumpFrameCountOverride = 0;
 	UINT32 DiffuseGIAutoDumpFrameCount = 96;
 	std::wstring AutoAADumpDir;
 	EAntiAliasingMode StartupSelectedAAMode = EAntiAliasingMode::DLSS_RR;
@@ -675,6 +695,8 @@ private:
 	ERenderBackendAPI CommandLineRenderBackendAPI = ERenderBackendAPI::D3D12;
 	bool bCommandLineDisableImgui = false;
 	bool bCommandLineDiffuseGIAutoDumpMode = false;
+	bool bCommandLineReadmeScreenshotDumpMode = false;
+	bool bCommandLinePathTracingScreenshotDumpMode = false;
 	bool bCommandLineCameraPathDump = false;
 	bool bCommandLineLoadLatestCameraPath = false;
 	std::wstring CommandLineCameraPathFile;
@@ -776,11 +798,38 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 
 	float SponzaRoughnessMultiplier = 1;
 	shared_ptr<Scene> Sponza;
+	SceneObjectHandle SponzaObject = InvalidSceneObjectHandle;
 
 	shared_ptr<Scene> Buddha;
+	SceneObjectHandle BuddhaObject = InvalidSceneObjectHandle;
+	glm::vec3 BuddhaCenterPosition = glm::vec3(273.0f, -12.0f, -6.0f);
+	glm::vec3 BuddhaCenterRotationDegrees = glm::vec3(0.0f, -12.0f, 0.0f);
 
 	float ShaderBallRoughnessMultiplier = 0.15;
 	shared_ptr<Scene> ShaderBall;
+	SceneObjectHandle ShaderBallObject = InvalidSceneObjectHandle;
+	glm::vec3 ShaderBallCenterPosition = glm::vec3(0.0f, -4.0f, -72.0f);
+	glm::vec3 ShaderBallCenterRotationDegrees = glm::vec3(0.0f, -120.0f, 0.0f);
+
+	shared_ptr<Scene> Pistol;
+	SceneObjectHandle PistolObject = InvalidSceneObjectHandle;
+	glm::vec3 PistolCenterPosition = glm::vec3(30.0f, 62.0f, 116.0f);
+	glm::vec3 PistolCenterRotationDegrees = glm::vec3(0.0f, 141.0f, 0.0f);
+
+	struct SceneObject
+	{
+		SceneObjectHandle Handle = InvalidSceneObjectHandle;
+		shared_ptr<Scene> ScenePtr;
+		glm::mat4x4 Transform = glm::mat4x4(1.0f);
+		float Roughness = 1.0f;
+		float Metallic = 0.0f;
+		bool bOverrideRoughnessMetallic = false;
+		bool bVisible = true;
+		bool bRayTracing = true;
+	};
+	vector<SceneObject> SceneObjects;
+	SceneObjectHandle NextSceneObjectHandle = 1;
+	bool bRayTracingSceneDirty = false;
 
 	// time & camera
 	StepTimer m_timer;
@@ -798,12 +847,20 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 		glm::vec3 DirectionalLightDir = glm::vec3(0.0f, 1.0f, 0.0f);
 		float DirectionalLightIntensity = 0.4f;
 	};
+	struct CameraPathListEntry
+	{
+		std::wstring DisplayName;
+		std::wstring FilePath;
+	};
 	std::vector<CameraPathKeyframe> CameraPathKeyframes;
+	std::vector<CameraPathListEntry> CameraPathEntries;
+	int SelectedCameraPathIndex = -1;
 	bool bCameraPathRecording = false;
 	bool bCameraPathPlaying = false;
 	bool bCameraPathDumping = false;
 	bool bCameraPathDumpExitWhenComplete = false;
 	bool bCameraPathDumpCaptureInFlight = false;
+	bool bCameraPathListDirty = true;
 	double CameraPathRecordingStartSeconds = 0.0;
 	double CameraPathPlaybackStartSeconds = 0.0;
 	UINT32 CameraPathDumpFrameIndex = 0;
@@ -855,7 +912,8 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 
 	std::shared_ptr<Buffer> InstancePropertyBuffer;
 	shared_ptr<RTAS> TLAS;
-	vector<shared_ptr<RTAS>> vecBLAS;
+	std::map<Mesh*, std::shared_ptr<RTAS>> RayTracingBLASCache;
+	std::vector<RTInstanceDesc> RayTracingInstances;
 	
 	// ...
 	bool bMultiThreadRendering = false;
@@ -927,8 +985,13 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	void ApplyCameraPathKeyframe(const CameraPathKeyframe& keyframe);
 	void StartCameraPathRecording();
 	void EndCameraPathRecording();
+	std::wstring AllocateUniqueCameraPathFilePath(const wchar_t* tag) const;
+	bool WriteCameraPathFile(const std::wstring& filePath, bool bUpdateActivePath);
 	bool SaveCameraPath(const std::wstring& filePath);
 	bool LoadCameraPath(const std::wstring& filePath);
+	void RefreshCameraPathList();
+	bool EnsureCameraPathSavedForDump(const std::filesystem::path& dumpDir);
+	bool LoadSelectedCameraPath();
 	bool LoadLatestCameraPath();
 	void StartCameraPathPlayback();
 	void StopCameraPathPlayback();
@@ -942,6 +1005,21 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	double GetCameraPathDurationSeconds() const;
 	
 	// Raytracing helper functions
+	glm::mat4x4 BuildCenteredSceneTransform(
+		const shared_ptr<Scene>& scene,
+		float targetExtent,
+		const glm::vec3& position = glm::vec3(0.0f),
+		const glm::vec3& rotationDegrees = glm::vec3(0.0f)) const;
+	SceneObjectHandle AddCenteredSceneObject(
+		const shared_ptr<Scene>& scene,
+		float targetExtent,
+		float roughness,
+		float metallic,
+		bool bOverrideRoughnessMetallic,
+		const glm::vec3& position = glm::vec3(0.0f),
+		const glm::vec3& rotationDegrees = glm::vec3(0.0f));
+	void MarkRayTracingSceneDirty();
+	void FlushSceneObjectChanges();
 	void UpdateInstancePropertyBuffer();
 	void RebuildAccelerationStructures();
 	void InitRaytracingShadowPass();
@@ -953,7 +1031,12 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 public:
 
 	void InitRaytracingData();
-	void AddScene(shared_ptr<Scene> scene);
+	SceneObjectHandle AddSceneObject(const SceneObjectDesc& desc);
+	SceneObjectHandle AddSceneInstance(const shared_ptr<Scene>& scene, const glm::mat4x4& transform);
+	bool RemoveSceneObject(SceneObjectHandle handle);
+	bool SetSceneObjectTransform(SceneObjectHandle handle, const glm::mat4x4& transform);
+	bool SetSceneObjectVisibility(SceneObjectHandle handle, bool visible);
+	bool SetSceneObjectRayTracingEnabled(SceneObjectHandle handle, bool enabled);
 	
 
 	void LoadPipeline();
@@ -993,7 +1076,7 @@ public:
 
 	void InitBlueNoiseTexture();
 
-	void DrawScene(shared_ptr<Scene> scene, float Roughness, float Metalic, bool bOverrideRoughnessMetallic);
+	void DrawScene(shared_ptr<Scene> scene, const glm::mat4x4& instanceTransform, float Roughness, float Metalic, bool bOverrideRoughnessMetallic);
 
 	void GBufferPass();
 

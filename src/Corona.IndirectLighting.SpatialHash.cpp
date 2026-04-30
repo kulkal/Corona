@@ -78,7 +78,7 @@ void Corona::InitRaytracingSpatialHashPass()
 		shared_ptr<RTPipelineStateObject> tempPSO = renderBackend->CreateRTPipelineStateObject();
 		if (!tempPSO)
 			return;
-		tempPSO->SetNumInstances(static_cast<uint32_t>(vecBLAS.size()));
+		tempPSO->SetNumInstances(static_cast<uint32_t>(RayTracingInstances.size()));
 
 		tempPSO->AddHitGroup("HitGroup", "chs", "");
 		tempPSO->AddShader("rayGen", RTPipelineStateObject::RAYGEN);
@@ -229,7 +229,7 @@ void Corona::SpatialHashGIPass()
 	renderBackend->TransitionBuffer(SpatialHashGICellScore.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
 	renderBackend->TransitionBuffer(SpatialHashGIResolvedKeys[cacheIndex].get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
 
-	PSO_RT_SPATIAL_HASH_GI->SetNumInstances(static_cast<uint32_t>(vecBLAS.size()));
+	PSO_RT_SPATIAL_HASH_GI->SetNumInstances(static_cast<uint32_t>(RayTracingInstances.size()));
 	PSO_RT_SPATIAL_HASH_GI->BeginShaderTable();
 	PSO_RT_SPATIAL_HASH_GI->SetBufferUAV("global", "TraceSH0", SpatialHashGITraceSH[0].get());
 	PSO_RT_SPATIAL_HASH_GI->SetBufferUAV("global", "TraceSH1", SpatialHashGITraceSH[1].get());
@@ -246,9 +246,9 @@ void Corona::SpatialHashGIPass()
 	PSO_RT_SPATIAL_HASH_GI->SetSampler("global", "sampleWrap", samplerWrap.get());
 
 	int i = 0;
-	for (auto& as : vecBLAS)
+	for (const RTInstanceDesc& instance : RayTracingInstances)
 	{
-		Mesh* mesh = as->MeshPtr;
+		Mesh* mesh = instance.BottomLevelAS->MeshPtr;
 		Texture* diffuseTex = mesh->Draws[0].mat->Diffuse.get();
 		if (!diffuseTex)
 			diffuseTex = DefaultWhiteTex.get();

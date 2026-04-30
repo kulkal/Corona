@@ -37,6 +37,26 @@ cbuffer ViewParameter : register(b0)
 
 SamplerState sampleWrap : register(s0);
 
+float SpecSanitizeFloat(float value, float fallback)
+{
+    return value;
+}
+
+float3 SpecSanitizeFloat3(float3 value, float3 fallback)
+{
+    return value;
+}
+
+float4 SpecSanitizeFloat4(float4 value, float4 fallback)
+{
+    return value;
+}
+
+float3 SpecSafeNormalize(float3 value, float3 fallback)
+{
+    float lenSq = dot(value, value);
+    return lenSq > 1e-12f ? value * rsqrt(lenSq) : fallback;
+}
 
 float3 linearToSrgb(float3 c)
 {
@@ -114,12 +134,13 @@ float4 inverseOrientation(float4 q)
 
 float3 ImportanceSampleGGX_VNDF(float2 u, float roughness, float3 V, float3x3 TBN, float3 N)
 {
+    roughness = clamp(SpecSanitizeFloat(roughness, 0.5f), 0.02f, 1.0f);
     float alpha = square(roughness);
 
     // float3 Ve = -float3(dot(V, TBN[0]), dot(V, TBN[1]), dot(V, TBN[2]));
-    float3 Ve = normalize(mul(V, transpose(TBN)));
+    float3 Ve = SpecSafeNormalize(mul(V, transpose(TBN)), float3(0.0f, 0.0f, 1.0f));
 
-    float3 Vh = normalize(float3(alpha * Ve.x, alpha * Ve.y, Ve.z));
+    float3 Vh = SpecSafeNormalize(float3(alpha * Ve.x, alpha * Ve.y, Ve.z), float3(0.0f, 0.0f, 1.0f));
     
     float lensq = square(Vh.x) + square(Vh.y);
     float3 T1 = lensq > 0.0 ? float3(-Vh.y, Vh.x, 0.0) / sqrt(lensq) : float3(1.0, 0.0, 0.0);
@@ -130,20 +151,22 @@ float3 ImportanceSampleGGX_VNDF(float2 u, float roughness, float3 V, float3x3 TB
     float t1 = r * cos(phi);
     float t2 = r * sin(phi);
     float s = 0.5 * (1.0 + Vh.z);
-    t2 = (1.0 - s) * sqrt(1.0 - square(t1)) + s * t2;
+    t2 = (1.0 - s) * sqrt(saturate(1.0 - square(t1))) + s * t2;
 
     float3 Nh = t1 * T1 + t2 * T2 + sqrt(max(0.0, 1.0 - square(t1) - square(t2))) * Vh;
 
     // Tangent space H
     float3 Ne = float3(alpha * Nh.x, alpha * Nh.y, max(0.0, Nh.z));
 
-    return normalize(mul(Ne, TBN));
+    return SpecSafeNormalize(mul(Ne, TBN), N);
 }
 
 float3x3 buildTBN(float3 normal) {
 
     // TODO: Maybe try approach from here (Building an Orthonormal Basis, Revisited): 
     // https://graphics.pixar.com/library/OrthonormalB/paper.pdf
+
+    normal = SpecSafeNormalize(normal, float3(0.0f, 1.0f, 0.0f));
 
     // Pick random vector for generating orthonormal basis
     static const float3 rvec1 = float3(0.847100675f, 0.207911700f, 0.489073813f);
@@ -156,8 +179,8 @@ float3x3 buildTBN(float3 normal) {
         rvec = rvec1;
 
     // Construct TBN matrix to orient sampling hemisphere along the surface normal
-    float3 b1 = normalize(rvec - normal * dot(rvec, normal));
-    float3 b2 = cross(normal, b1);
+    float3 b1 = SpecSafeNormalize(rvec - normal * dot(rvec, normal), float3(1.0f, 0.0f, 0.0f));
+    float3 b2 = SpecSafeNormalize(cross(normal, b1), float3(0.0f, 0.0f, 1.0f));
     float3x3 tbn = float3x3(b1, b2, normal);
 
     return tbn;
@@ -195,9 +218,9 @@ void rayGen
 	float2 UV = crd / dims;
 	float DeviceDepth = DepthTex.SampleLevel(sampleWrap, UV, 0).x;
 
-	float3 WorldNormal = normalize(WorldNormalTex.SampleLevel(sampleWrap, UV, 0).xyz);
+	float3 WorldNormal = SpecSafeNormalize(WorldNormalTex.SampleLevel(sampleWrap, UV, 0).xyz, float3(0.0f, 1.0f, 0.0f));
   
-    float3 GeoNormal = normalize(GeoNormalTex.SampleLevel(sampleWrap, UV, 0).xyz);
+    float3 GeoNormal = SpecSafeNormalize(GeoNormalTex.SampleLevel(sampleWrap, UV, 0).xyz, WorldNormal);
 
     float LinearDepth = GetLinearDepthOpenGL(DeviceDepth, ProjectionParams.z, ProjectionParams.w) ;
 
@@ -210,16 +233,17 @@ void rayGen
 	// float3 ViewPosition = GetViewPosition(LinearDepth, ScreenPosition, ProjMatrix._11, ProjMatrix._22);
     float3 ViewPosition = GetViewPosition(DeviceDepth, ScreenPosition, InvProjMatrix);
 
-	float3 WorldPos = mul(float4(ViewPosition, 1), InvViewMatrix).xyz;
+	float3 WorldPos = SpecSanitizeFloat3(mul(float4(ViewPosition, 1), InvViewMatrix).xyz, 0.0f.xxx);
 
     float2 RandomUV = LoadRayNoise2(BlueNoiseTex, launchIndex.xy, FrameCounter, BlueNoiseOffsetStride, NoiseMode);
     float3x3 TBN = buildTBN(WorldNormal);
 
-    float Rougness = RougnessMetallicTex.SampleLevel(sampleWrap, UV, 0).x;
+    float Rougness = clamp(SpecSanitizeFloat(RougnessMetallicTex.SampleLevel(sampleWrap, UV, 0).x, 0.65f), 0.02f, 1.0f);
     float3 N = WorldNormal;
-    float3 V = mul(normalize(float3(dim.x * aspectRatio, -dim.y, -1)), InvViewMatrix);
+    float3 viewRay = SpecSafeNormalize(float3(dim.x * aspectRatio, -dim.y, -1), float3(0.0f, 0.0f, -1.0f));
+    float3 V = SpecSafeNormalize(mul(float4(viewRay, 0.0f), InvViewMatrix).xyz, -WorldNormal);
     float3 H = ImportanceSampleGGX_VNDF(RandomUV, Rougness, -V, TBN, WorldNormal);
-    float3 L = reflect(V, H);
+    float3 L = SpecSafeNormalize(reflect(V, H), reflect(V, WorldNormal));
 
     float NoV = max(0, -dot(N, V));
     float NoL = max(0, dot(N, L));
@@ -227,19 +251,24 @@ void rayGen
     float VoH = max(0, -dot(V, H));
     float LoH = max(0, -dot(L, H));
 
-    float3 LightIntensity = LightDirAndIntensity.w;
+    float LightIntensity = max(SpecSanitizeFloat(LightDirAndIntensity.w, 0.0f), 0.0f);
 
 
 	RayDesc ray;
-	ray.Origin = WorldPos + GeoNormal * 0.5; //    mul(float4(0, 0, 0, 1), InvViewMatrix).xyz;
-	ray.Direction = L;
+	ray.Origin = SpecSanitizeFloat3(WorldPos + GeoNormal * 0.5f, WorldPos);
+	ray.Direction = SpecSafeNormalize(L, WorldNormal);
 
 	ray.TMin = 0;
 	ray.TMax = MAX_HIT_DIST;
 
 	RayPayload payload;
+    payload.position = ray.Origin + ray.Direction * MAX_HIT_DIST;
+    payload.color = 0.0f.xxx;
+    payload.normal = WorldNormal;
     payload.coneWidth = 0;
-    payload.spreadAngle = ViewSpreadAngle; 
+    payload.spreadAngle = max(SpecSanitizeFloat(ViewSpreadAngle, 0.0f), 0.0f);
+    payload.hitDist = MAX_HIT_DIST;
+    payload.bHit = false;
     TraceRay(
         gRtScene,
         RT_REFLECTION_SURFACE_RAY_FLAGS,
@@ -252,14 +281,15 @@ void rayGen
     if(payload.bHit == false)
     {
         // hit sky - payload.color already includes SkyIntensity from miss shader
-        float3 Radiance = payload.color;  // Don't multiply LightIntensity for sky
-        ReflectionResult[launchIndex.xy] = float4(Reinhard(Radiance), 1);
+        float3 Radiance = max(SpecSanitizeFloat3(payload.color, 0.0f.xxx), 0.0f.xxx);
+        ReflectionResult[launchIndex.xy] = SpecSanitizeFloat4(float4(Reinhard(Radiance), 1), float4(0.0f, 0.0f, 0.0f, 1.0f));
     }
     else
     {
-        float3 LightDir = LightDirAndIntensity.xyz;
+        float3 LightDir = SpecSafeNormalize(LightDirAndIntensity.xyz, float3(0.0f, 1.0f, 0.0f));
         RayDesc shadowRay;
-        shadowRay.Origin = payload.position + payload.normal *0.5;
+        payload.normal = SpecSafeNormalize(payload.normal, WorldNormal);
+        shadowRay.Origin = SpecSanitizeFloat3(payload.position + payload.normal * 0.5f, payload.position);
         shadowRay.Direction = LightDir;
 
         shadowRay.TMin = 0;
@@ -281,12 +311,12 @@ void rayGen
             shadowRay,
             shadowPayload);
 
-        float3 Irradiance = 0..xxx;
-        float3 Albedo = payload.color;
+        float3 Irradiance = 0.0f.xxx;
+        float3 Albedo = max(SpecSanitizeFloat3(payload.color, 1.0f.xxx), 0.0f.xxx);
         if(shadowPayload.bHit == false)
         {
             // miss - apply light color
-            Irradiance = dot(LightDir.xyz, payload.normal) * LightIntensity * LightColor * Albedo;
+            Irradiance = max(0.0f, dot(LightDir.xyz, payload.normal)) * LightIntensity * max(SpecSanitizeFloat3(LightColor, 1.0f.xxx), 0.0f.xxx) * Albedo;
         }
         else
         {
@@ -294,12 +324,12 @@ void rayGen
         }
             
 
-        ReflectionResult[launchIndex.xy] = float4(Reinhard(Irradiance), 1);
+        ReflectionResult[launchIndex.xy] = SpecSanitizeFloat4(float4(Reinhard(max(Irradiance, 0.0f.xxx)), 1), float4(0.0f, 0.0f, 0.0f, 1.0f));
     }
 
     float d = -dot(WorldNormal, WorldPos);
     float distP2Plane = PointPlaneDist(float4(WorldNormal, d), payload.position);
-    ReflectionResult[launchIndex.xy].w = abs(distP2Plane);//payload.hitDist;
+    ReflectionResult[launchIndex.xy].w = SpecSanitizeFloat(abs(distP2Plane), MAX_HIT_DIST);
 }
 
 
@@ -308,12 +338,12 @@ void rayGen
 void miss(inout RayPayload payload)
 {
     // Sky color - gradient based on ray direction (same as path tracing)
-    float3 rayDir = WorldRayDirection();
+    float3 rayDir = SpecSafeNormalize(WorldRayDirection(), float3(0.0f, 1.0f, 0.0f));
     float t = 0.5 * (rayDir.y + 1.0);
     float3 skyColor = lerp(SkyColorBottom, SkyColorTop, t);
     
     payload.position = float3(0, 0, 0);
-    payload.color = skyColor * SkyIntensity;
+    payload.color = max(SpecSanitizeFloat3(skyColor * max(SpecSanitizeFloat(SkyIntensity, 0.0f), 0.0f), 0.0f.xxx), 0.0f.xxx);
     payload.normal = float3(0, 0, -1);
     payload.bHit = false;
     payload.hitDist = MAX_HIT_DIST;
@@ -327,20 +357,20 @@ void chs(inout RayPayload payload, in BuiltInTriangleIntersectionAttributes attr
     uint instanceID = InstanceID();
     Vertex vertex = GetSurfaceVertexAttributes(instanceID, vertices, indices, InstanceProperty, triangleIndex, barycentrics);
 
-    payload.position = vertex.position;
-    payload.normal = vertex.normal;
+    float hitT = max(SpecSanitizeFloat(RayTCurrent(), MAX_HIT_DIST), 0.0f);
+    payload.position = SpecSanitizeFloat3(vertex.position, WorldRayOrigin() + WorldRayDirection() * hitT);
+    payload.normal = SpecSafeNormalize(vertex.normal, -WorldRayDirection());
 
     uint w, h;
     AlbedoTex.GetDimensions(w, h);
-    float halfLog2NumTexPixels = 0.5 * log2(w * h);
+    float halfLog2NumTexPixels = 0.5 * log2(max(float(w) * float(h), 1.0f));
 
     vertex.textureLODConstant += halfLog2NumTexPixels;
-    float hitT = RayTCurrent();
     float rayConeWidth = payload.spreadAngle * hitT + payload.coneWidth;
 
     float NoV = 1;//dot(V, vertex.normal);
     float mipLevel = computeTextureLOD(NoV, rayConeWidth, vertex.textureLODConstant);
-    payload.color = AlbedoTex.SampleLevel(sampleWrap, vertex.uv, mipLevel).xyz;
+    payload.color = max(SpecSanitizeFloat3(AlbedoTex.SampleLevel(sampleWrap, vertex.uv, mipLevel).xyz, 1.0f.xxx), 0.0f.xxx);
     payload.bHit = true;
     payload.hitDist = hitT;
 }

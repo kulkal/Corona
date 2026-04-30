@@ -57,7 +57,7 @@ void Corona::InitRaytracingScreenProbePass()
 		shared_ptr<RTPipelineStateObject> tempPSO = renderBackend->CreateRTPipelineStateObject();
 		if (!tempPSO)
 			return;
-		tempPSO->SetNumInstances(static_cast<uint32_t>(vecBLAS.size()));
+		tempPSO->SetNumInstances(static_cast<uint32_t>(RayTracingInstances.size()));
 
 		tempPSO->AddHitGroup("HitGroup", "chs", "");
 		tempPSO->AddShader("rayGen", RTPipelineStateObject::RAYGEN);
@@ -178,7 +178,7 @@ void Corona::ScreenProbeRaytraceGIPass()
 		renderBackend->TransitionTexture(ScreenProbeGISH[writeIndex][coefficientIndex].get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
 	renderBackend->TransitionTexture(ScreenProbeGIMetadata[writeIndex].get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
 
-	PSO_RT_SCREEN_PROBE_GI->SetNumInstances(static_cast<uint32_t>(vecBLAS.size()));
+	PSO_RT_SCREEN_PROBE_GI->SetNumInstances(static_cast<uint32_t>(RayTracingInstances.size()));
 	PSO_RT_SCREEN_PROBE_GI->BeginShaderTable();
 
 	PSO_RT_SCREEN_PROBE_GI->SetTextureUAV("global", "ProbeRadiance", ScreenProbeGIRadiance[writeIndex].get());
@@ -202,9 +202,9 @@ void Corona::ScreenProbeRaytraceGIPass()
 	PSO_RT_SCREEN_PROBE_GI->SetSampler("global", "historyClamp", samplerBilinearWrap.get());
 
 	int i = 0;
-	for (auto& as : vecBLAS)
+	for (const RTInstanceDesc& instance : RayTracingInstances)
 	{
-		Mesh* mesh = as->MeshPtr;
+		Mesh* mesh = instance.BottomLevelAS->MeshPtr;
 		Texture* diffuseTex = mesh->Draws[0].mat->Diffuse.get();
 		if (!diffuseTex)
 			diffuseTex = DefaultWhiteTex.get();

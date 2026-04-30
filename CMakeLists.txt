@@ -130,6 +130,8 @@ target_link_directories(Corona PRIVATE
 )
 
 target_link_libraries(Corona PRIVATE
+    # Dear ImGui's stock DX12 backend still compiles its embedded UI shaders with D3DCompile.
+    # Corona runtime shaders use DXC.
     d3dcompiler
     dxguid
     "${CORONA_ASSIMP_LIB}"

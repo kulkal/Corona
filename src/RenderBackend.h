@@ -177,6 +177,12 @@ public:
 	virtual ~GraphicsPipelineHandle() = default;
 };
 
+struct RTInstanceDesc
+{
+	std::shared_ptr<RTAS> BottomLevelAS;
+	glm::mat4x4 Transform = glm::mat4x4(1.0f);
+};
+
 class IRenderBackend
 {
 public:
@@ -212,7 +218,8 @@ public:
 	virtual std::shared_ptr<VertexBuffer> CreateVertexBuffer(uint32_t size, uint32_t stride, void* srcData) = 0;
 	virtual std::shared_ptr<IndexBuffer> CreateIndexBuffer(DXGI_FORMAT format, uint32_t size, void* srcData) = 0;
 	virtual std::shared_ptr<RTAS> CreateBLASForMesh(Mesh* mesh) = 0;
-	virtual std::shared_ptr<RTAS> CreateTLAS(std::vector<std::shared_ptr<RTAS>>& bottomLevelAS) = 0;
+	virtual std::shared_ptr<RTAS> CreateTLAS(const std::vector<RTInstanceDesc>& instances) = 0;
+	virtual bool UpdateTLAS(const std::shared_ptr<RTAS>& topLevelAS, const std::vector<RTInstanceDesc>& instances) = 0;
 	virtual std::shared_ptr<RTPipelineStateObject> CreateRTPipelineStateObject() = 0;
 	virtual std::shared_ptr<ComputePipelineStateObject> CreateComputePipelineStateObject() = 0;
 	virtual Microsoft::WRL::ComPtr<ID3DBlob> CreateShader(const std::wstring& fileName, const std::string& entryPoint, const std::string& target) = 0;

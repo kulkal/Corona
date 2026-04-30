@@ -10,6 +10,7 @@
 //*********************************************************
 
 #include "Common.hlsl"
+#include "GGX.hlsli"
 
 Texture2D AlbedoTex : register(t0);
 Texture2D NormalTex : register(t1);
@@ -85,6 +86,20 @@ float4 SanitizeFloat4(float4 value)
     return value;
 }
 
+float3 ComputeSurfaceToViewDirection(float2 screenUV)
+{
+    float2 d = screenUV * 2.0f - 1.0f;
+    d.y = -d.y;
+
+    float aspectRatio = RTSize.x / max(RTSize.y, 1.0f);
+    d *= tan(0.8f * 0.5f);
+    d.x *= aspectRatio;
+
+    float3 viewRay = normalize(float3(d.x, d.y, -1.0f));
+    float3 worldRay = normalize(mul(float4(viewRay, 0.0f), InvViewMatrix).xyz);
+    return -worldRay;
+}
+
 float4 PSMain(PSInput input) : SV_TARGET
 {
     float LowFreqWeight = 0.25f;
@@ -93,6 +108,7 @@ float4 PSMain(PSInput input) : SV_TARGET
     float3 clrMax = -99999999.0f;
     float totalWeight = 0.0f;
 
+    float2 screenUV = input.uv;
     input.uv.y = 1 - input.uv.y;
     float2 PixelPos = input.uv * RTSize;
 
@@ -105,35 +121,32 @@ float4 PSMain(PSInput input) : SV_TARGET
 
     float3 LightDir = normalize(LightDirAndIntensity.xyz);
     float LightIntensity = LightDirAndIntensity.w;
+    float NdotL = saturate(dot(LightDir, WorldNormal));
+    float4 RoughnessMetallic = SanitizeFloat4(RoughnessMetalicTex[PixelPos]);
+    float Roughness = clamp(RoughnessMetallic.x, 0.02f, 1.0f);
+    float Metallic = saturate(RoughnessMetallic.y);
+    float3 F0 = lerp(0.04f.xxx, Albedo.xyz, Metallic);
 	
-    float3 DiffuseLighting = bEnableDirectDiffuse ? (saturate(dot(LightDir, WorldNormal)) * LightIntensity * LightColor * Albedo * Shadow) : float3(0, 0, 0);
+    float3 DiffuseLighting = bEnableDirectDiffuse ? (NdotL * LightIntensity * LightColor * Albedo * (1.0f - Metallic) * Shadow) : float3(0, 0, 0);
 
-    float3 IndirectDiffuse = bEnableDiffuseGI ? SanitizeFloat3(GIResultColorTex[PixelPos / GIBufferScale].xyz * Albedo) : float3(0, 0, 0);
+    float3 IndirectDiffuse = bEnableDiffuseGI ? SanitizeFloat3(GIResultColorTex[PixelPos / GIBufferScale].xyz * Albedo * (1.0f - Metallic)) : float3(0, 0, 0);
 
-    float3 V = mul(InvViewMatrix, float3(0, 0, 1));
-    float NdotV = clamp(dot(WorldNormal, -V), 0, 1);
+    float3 V = ComputeSurfaceToViewDirection(screenUV);
+    float NdotV = saturate(dot(WorldNormal, V));
 
-    float Rougness = RoughnessMetalicTex[PixelPos].x; 
-
-    float Metalic = RoughnessMetalicTex[PixelPos].y;
-    // use 0.05 if is non-metal
-    float Specular = lerp(0.05, 1.0, Metalic); 
-    Specular = clamp(schlick_ross_fresnel(Specular, Rougness, NdotV), 0, 1);
-
-    // non-metal doesnt have specular color
-    float3 SpecularColor = lerp(1..xxxx, Albedo.xyz, Metalic) * Specular;
+    float3 SpecularColor = FresnelSchlick(NdotV, F0);
     float3 IndirectSpecular;
 
 
     IndirectSpecular = bEnableSpecularGI ? SanitizeFloat3(SpecularGITex[PixelPos].xyz * SpecularColor) : float3(0, 0, 0);
 
 
-    float3 DirectSpecular = bEnableDirectSpecular ? (SpecularColor * GGX(V, LightDir, WorldNormal, Rougness, 0.0) * LightIntensity * LightColor * Shadow) : float3(0, 0, 0);
+    float3 DirectSpecular = bEnableDirectSpecular ? (EvaluateGGXSpecularBRDF(WorldNormal, V, LightDir, Roughness, F0) * NdotL * LightIntensity * LightColor * Shadow) : float3(0, 0, 0);
 
     DiffuseLighting = max(DiffuseLighting , 0);
 
     float3 TotalSpecular = max(DirectSpecular + IndirectSpecular, 0);
 
-    float3 FinalColor = DiffuseLighting * (1-Specular) + TotalSpecular + IndirectDiffuse * (1-Specular);
+    float3 FinalColor = DiffuseLighting + TotalSpecular + IndirectDiffuse;
     return float4(SanitizeFloat3(FinalColor), 1);
 }

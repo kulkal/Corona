@@ -22,7 +22,7 @@ void Corona::InitPathTracingPass()
 	shared_ptr<RTPipelineStateObject> TEMP_PSO_PATH_TRACING = renderBackend->CreateRTPipelineStateObject();
 	if (!TEMP_PSO_PATH_TRACING)
 		return;
-	TEMP_PSO_PATH_TRACING->SetNumInstances(static_cast<uint32_t>(vecBLAS.size()));
+	TEMP_PSO_PATH_TRACING->SetNumInstances(static_cast<uint32_t>(RayTracingInstances.size()));
 
 	TEMP_PSO_PATH_TRACING->AddHitGroup("HitGroup", "PathTracingClosestHit", "PathTracingAnyHit");
 
@@ -120,7 +120,7 @@ void Corona::PathTracingPass()
 		// Note: Buffer will be cleared in shader when FrameCounter == 0
 	}
 
-	PSO_PATH_TRACING->SetNumInstances(static_cast<uint32_t>(vecBLAS.size()));
+	PSO_PATH_TRACING->SetNumInstances(static_cast<uint32_t>(RayTracingInstances.size()));
 	PSO_PATH_TRACING->BeginShaderTable();
 
 	PSO_PATH_TRACING->SetTextureUAV("global", "OutputColor", PathTracingAccumBuffer[PathTracingWriteIndex].get());
@@ -132,9 +132,9 @@ void Corona::PathTracingPass()
 	PSO_PATH_TRACING->SetSampler("global", "sampleWrap", samplerWrap.get());
 
 	int i = 0;
-	for(auto& as : vecBLAS)
+	for (const RTInstanceDesc& instance : RayTracingInstances)
 	{
-		Mesh* mesh = as->MeshPtr;
+		Mesh* mesh = instance.BottomLevelAS->MeshPtr;
 		
 		Texture* diffuseTex = mesh->Draws[0].mat->Diffuse.get();
 		if (!diffuseTex)

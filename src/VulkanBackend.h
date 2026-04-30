@@ -257,7 +257,8 @@ public:
 	std::shared_ptr<VertexBuffer> CreateVertexBuffer(uint32_t size, uint32_t stride, void* srcData) override;
 	std::shared_ptr<IndexBuffer> CreateIndexBuffer(DXGI_FORMAT format, uint32_t size, void* srcData) override;
 	std::shared_ptr<RTAS> CreateBLASForMesh(Mesh* mesh) override;
-	std::shared_ptr<RTAS> CreateTLAS(std::vector<std::shared_ptr<RTAS>>& bottomLevelAS) override;
+	std::shared_ptr<RTAS> CreateTLAS(const std::vector<RTInstanceDesc>& instances) override;
+	bool UpdateTLAS(const std::shared_ptr<RTAS>& topLevelAS, const std::vector<RTInstanceDesc>& instances) override;
 	std::shared_ptr<RTPipelineStateObject> CreateRTPipelineStateObject() override;
 	std::shared_ptr<ComputePipelineStateObject> CreateComputePipelineStateObject() override;
 	Microsoft::WRL::ComPtr<ID3DBlob> CreateShader(const std::wstring& fileName, const std::string& entryPoint, const std::string& target) override;

@@ -54,13 +54,17 @@ Two main render modes are available:
 
 `--render-mode pt`, `--render-mode pathtracing`, and `--render-mode path-tracing` select the path tracing mode. Frame timing logs are written to `logs/fps_perf.log` and include CPU frame timing plus per-pass GPU timings for backend comparisons.
 
-The captures below were generated with ImGui disabled.
+The captures below were generated from the last saved camera/light state with ImGui disabled by the README screenshot dump. Captions call out the AA mode used for each image.
 
-Hybrid final resolve:
+Hybrid final resolve, AA = DLSS RR/SR:
 
 ![Hybrid final resolve](./docs/images/readme_hybrid_final.png)
 
-Path tracing reference:
+Hybrid final resolve, AA = TAA at native resolution:
+
+![Hybrid final resolve, TAA native](./docs/images/readme_hybrid_taa_native.png)
+
+Path tracing reference, AA = off, 1000 spp:
 
 ![Path tracing reference](./docs/images/readme_path_tracing_current.png)
 
@@ -152,6 +156,9 @@ cd bin
 .\Corona.exe --backend vulkan --render-mode hybrid --aa taa --user-mode
 .\Corona.exe --backend vulkan --render-mode pathtracing --aa off --user-mode
 .\Corona.exe --backend dx12 --render-mode hybrid --auto-dump --no-imgui
+.\Corona.exe --backend dx12 --dump-mode readme --readme-dump-frames 1000 --gi-mode spatial-hash --no-imgui
+.\Corona.exe --backend dx12 --dump-mode pathtracing --dump-frames 1000 --no-imgui
+.\Corona.exe --backend dx12 --render-mode hybrid --aa dlss-rr --camera-path latest --camera-path-dump --no-imgui
 .\Corona.exe --backend dx12 --render-mode hybrid --gi-mode spatial-hash --spatial-hash-rays 2 --spatial-hash-bounces 2 --user-mode
 ```
 
@@ -171,13 +178,17 @@ Supported options:
 | `--spatial-hash-bounces`, `--spatial-hash-depth` | `1`-`8` | Maximum diffuse path depth for cell tracing. Default is `2`. |
 | `--spatial-hash-interp`, `--spatial-hash-interpolation` | `0.0`-`1.0` | Blends the base cell with neighboring cell interpolation during query. Default is `1.0`. |
 | `--spatial-hash-smoothing` | `0.0`-`1.0` | Controls 3x3x3 SH neighborhood smoothing after interpolation. Default is `0.65`. |
-| `--dump-mode`, `-dump-mode` | `diffuse-gi`, `diffuse_gi`, `gi` | Makes auto-dump capture the simple, spatial-hash, and screen-probe diffuse GI debug buffers. |
+| `--dump-mode`, `-dump-mode` | `diffuse-gi`, `diffuse_gi`, `gi`, `readme`, `pathtracing`, `pt` | Selects an automated dump set. `readme` captures the representative hybrid and path tracing screenshots; `pathtracing` captures only the accumulated path tracing reference. |
+| `--readme-dump`, `--readme-screenshots` | none | Shortcut for the README screenshot dump mode. |
+| `--auto-dump-frames`, `--readme-dump-frames`, `--dump-frames` | `1`-`100000` | Overrides the per-mode frame count for README/AA auto dumps. |
 | `--diffuse-gi-dump-frames`, `--gi-dump-frames` | `4`-`512` | Frames accumulated per diffuse GI auto-dump phase. |
 | `--dlss-jitter-scale` | `0.25`-`16.0` | Multiplies the DLSS/RR jitter phase count. Default is `4.0` for longer phase cycles. |
 | `--dlss-jitter-phases` | `0`-`512` | Overrides the DLSS/RR jitter phase count directly. `0` means automatic scaled mode. |
 | `--user-mode`, `--manual`, `-user` | none | Disables auto dump mode and runs interactively. |
 | `--auto-dump`, `-dump` | none | Enables automated capture/dump mode. |
 | `--no-imgui`, `--disable-imgui` | none | Disables ImGui initialization and rendering, useful for clean screenshots. |
+| `--camera-path`, `-camera-path` | `latest` or `.coronapath` path | Loads a recorded camera/light path. `latest` selects the newest file under `dumps/camera_paths`. |
+| `--camera-path-dump`, `--dump-camera-path` | none | Plays the loaded camera path, captures a 30fps PNG sequence under `dumps/camera_path_frames`, and exits when complete. |
 
 Options can be written either as `--backend vulkan` or `--backend=vulkan`.
 

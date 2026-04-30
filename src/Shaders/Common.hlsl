@@ -2,6 +2,22 @@
 
 #define DOWNSAMPLE_SIZE 3
 
+float3 CommonSafeNormalize(float3 value, float3 fallback)
+{
+    if (any(isnan(value)) || any(isinf(value)))
+        value = fallback;
+
+    float lenSq = dot(value, value);
+    if (lenSq > 1e-8f)
+        return value * rsqrt(lenSq);
+
+    if (any(isnan(fallback)) || any(isinf(fallback)))
+        fallback = float3(0.0f, 0.0f, 0.0f);
+
+    float fallbackLenSq = dot(fallback, fallback);
+    return fallbackLenSq > 1e-8f ? fallback * rsqrt(fallbackLenSq) : fallback;
+}
+
 
 float GetLinearDepth(float DeviceDepth, float ParamX, float ParamY, float ParamZ)
 {
@@ -394,15 +410,13 @@ Vertex GetVertexAttributes(uint instanceID, ByteAddressBuffer vb, ByteAddressBuf
     float3 n1 = asfloat(vb.Load3(index[1] * 44 + 12));
     float3 n2 = asfloat(vb.Load3(index[2] * 44 + 12));
 
-    // Load world matrix (glm::mat4x4 is column-major in memory)
-    // But HLSL float4x4 initialization is row-major, so we need to transpose
-    float4x4 WorldMatrixTransposed = {
+    // InstanceProperty stores row-major object-to-world rows, matching the TLAS instance transform.
+    float4x4 WorldMatrix = {
         asfloat(ip.Load4(instancePropertyBase + INSTANCE_PROPERTY_WORLD_MATRIX_OFFSET)), 
         asfloat(ip.Load4(instancePropertyBase + INSTANCE_PROPERTY_WORLD_MATRIX_OFFSET + 16)), 
         asfloat(ip.Load4(instancePropertyBase + INSTANCE_PROPERTY_WORLD_MATRIX_OFFSET + 16*2)),
         asfloat(ip.Load4(instancePropertyBase + INSTANCE_PROPERTY_WORLD_MATRIX_OFFSET + 16*3)),
     };
-    float4x4 WorldMatrix = transpose(WorldMatrixTransposed);
 
     v.position += p0 * barycentrics[0];
     v.position += p1 * barycentrics[1];
@@ -422,9 +436,9 @@ Vertex GetVertexAttributes(uint instanceID, ByteAddressBuffer vb, ByteAddressBuf
 
     // Interpolate vertex normals for smooth shading
     v.normal = n0 * barycentrics[0] + n1 * barycentrics[1] + n2 * barycentrics[2];
-    v.normal = normalize(v.normal);
+    v.normal = CommonSafeNormalize(v.normal, float3(0.0f, 1.0f, 0.0f));
     v.normal = mul(WorldMatrix, float4(v.normal, 0)).xyz;
-    v.normal = normalize(v.normal);
+    v.normal = CommonSafeNormalize(v.normal, float3(0.0f, 1.0f, 0.0f));
     
     // Load vertex tangents from buffer (offset 32)
     float3 t0 = asfloat(vb.Load3(index[0] * 44 + 32));
@@ -433,9 +447,9 @@ Vertex GetVertexAttributes(uint instanceID, ByteAddressBuffer vb, ByteAddressBuf
     
     // Interpolate vertex tangents
     v.tangent = t0 * barycentrics[0] + t1 * barycentrics[1] + t2 * barycentrics[2];
-    v.tangent = normalize(v.tangent);
+    v.tangent = CommonSafeNormalize(v.tangent, float3(0.0f, 0.0f, 0.0f));
     v.tangent = mul(WorldMatrix, float4(v.tangent, 0)).xyz;
-    v.tangent = normalize(v.tangent);
+    v.tangent = CommonSafeNormalize(v.tangent, float3(0.0f, 0.0f, 0.0f));
 
     float triangleArea = calcTriangleArea(p0, p1, p2);
     
@@ -470,15 +484,13 @@ Vertex GetSurfaceVertexAttributes(uint instanceID, ByteAddressBuffer vb, ByteAdd
     float3 n1 = asfloat(vb.Load3(index[1] * 44 + 12));
     float3 n2 = asfloat(vb.Load3(index[2] * 44 + 12));
 
-    // Load world matrix (glm::mat4x4 is column-major in memory)
-    // But HLSL float4x4 initialization is row-major, so we need to transpose
-    float4x4 WorldMatrixTransposed = {
+    // InstanceProperty stores row-major object-to-world rows, matching the TLAS instance transform.
+    float4x4 WorldMatrix = {
         asfloat(ip.Load4(instancePropertyBase + INSTANCE_PROPERTY_WORLD_MATRIX_OFFSET)), 
         asfloat(ip.Load4(instancePropertyBase + INSTANCE_PROPERTY_WORLD_MATRIX_OFFSET + 16)), 
         asfloat(ip.Load4(instancePropertyBase + INSTANCE_PROPERTY_WORLD_MATRIX_OFFSET + 16*2)),
         asfloat(ip.Load4(instancePropertyBase + INSTANCE_PROPERTY_WORLD_MATRIX_OFFSET + 16*3)),
     };
-    float4x4 WorldMatrix = transpose(WorldMatrixTransposed);
 
     v.position += p0 * barycentrics[0];
     v.position += p1 * barycentrics[1];
@@ -496,9 +508,9 @@ Vertex GetSurfaceVertexAttributes(uint instanceID, ByteAddressBuffer vb, ByteAdd
 
     // Interpolate vertex normals for smooth shading
     v.normal = n0 * barycentrics[0] + n1 * barycentrics[1] + n2 * barycentrics[2];
-    v.normal = normalize(v.normal);
+    v.normal = CommonSafeNormalize(v.normal, float3(0.0f, 1.0f, 0.0f));
     v.normal = mul(WorldMatrix, float4(v.normal, 0)).xyz;
-    v.normal = normalize(v.normal);
+    v.normal = CommonSafeNormalize(v.normal, float3(0.0f, 1.0f, 0.0f));
 
     float triangleArea = calcTriangleArea(p0, p1, p2);
     

@@ -297,7 +297,7 @@ namespace
 			bgraPixels[i + 0] = rgbaPixels[i + 2];
 			bgraPixels[i + 1] = rgbaPixels[i + 1];
 			bgraPixels[i + 2] = rgbaPixels[i + 0];
-			bgraPixels[i + 3] = rgbaPixels[i + 3];
+			bgraPixels[i + 3] = 0xff;
 		}
 
 		const UINT stride = width * 4;
@@ -3627,7 +3627,7 @@ std::shared_ptr<RTAS> VulkanBackend::CreateBLASForMesh(Mesh* mesh)
 	RayTracingAccelerationStructures.push_back(rtas);
 	return rtas;
 }
-std::shared_ptr<RTAS> VulkanBackend::CreateTLAS(std::vector<std::shared_ptr<RTAS>>& bottomLevelAS)
+std::shared_ptr<RTAS> VulkanBackend::CreateTLAS(const std::vector<RTInstanceDesc>& instancesDesc)
 {
 	if (!bRayTracingEnabled)
 		throw std::runtime_error("Vulkan ray tracing is not enabled on this device.");
@@ -3636,14 +3636,14 @@ std::shared_ptr<RTAS> VulkanBackend::CreateTLAS(std::vector<std::shared_ptr<RTAS
 	rtas->Owner = this;
 
 	std::vector<VkAccelerationStructureInstanceKHR> instances;
-	instances.reserve(bottomLevelAS.size());
-	for (size_t i = 0; i < bottomLevelAS.size(); ++i)
+	instances.reserve(instancesDesc.size());
+	for (size_t i = 0; i < instancesDesc.size(); ++i)
 	{
-		VulkanRTAS* blas = dynamic_cast<VulkanRTAS*>(bottomLevelAS[i].get());
+		VulkanRTAS* blas = dynamic_cast<VulkanRTAS*>(instancesDesc[i].BottomLevelAS.get());
 		if (!blas || !blas->MeshPtr || blas->DeviceAddress == 0)
 			throw std::runtime_error("Vulkan TLAS creation requires valid Vulkan BLAS instances.");
 
-		const glm::mat4x4 mat = glm::transpose(blas->MeshPtr->transform);
+		const glm::mat4x4 mat = glm::transpose(instancesDesc[i].Transform);
 		VkAccelerationStructureInstanceKHR instance{};
 		instance.instanceCustomIndex = static_cast<uint32_t>(i);
 		instance.mask = 0xFF;
@@ -3799,6 +3799,14 @@ std::shared_ptr<RTAS> VulkanBackend::CreateTLAS(std::vector<std::shared_ptr<RTAS
 	RayTracingAccelerationStructures.push_back(rtas);
 	return rtas;
 }
+
+bool VulkanBackend::UpdateTLAS(const std::shared_ptr<RTAS>& topLevelAS, const std::vector<RTInstanceDesc>& instances)
+{
+	(void)topLevelAS;
+	(void)instances;
+	return false;
+}
+
 std::shared_ptr<RTPipelineStateObject> VulkanBackend::CreateRTPipelineStateObject()
 {
 #if !CORONA_HAS_VULKAN

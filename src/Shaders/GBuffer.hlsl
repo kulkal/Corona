@@ -71,10 +71,24 @@ PSInput VSMain(
 
 float3 CalcPerPixelNormal(float2 vTexcoord, float3 vVertNormal, float3 vVertTangent)
 {
-    vVertNormal = normalize(vVertNormal);
-    vVertTangent = normalize(vVertTangent);
+    float normalLengthSq = dot(vVertNormal, vVertNormal);
+    if (normalLengthSq < 1e-8f)
+        return float3(0.0f, 1.0f, 0.0f);
 
-    float3 vVertBinormal = normalize(cross(vVertTangent, vVertNormal));
+    vVertNormal *= rsqrt(normalLengthSq);
+
+    float tangentLengthSq = dot(vVertTangent, vVertTangent);
+    if (tangentLengthSq < 1e-8f)
+        return vVertNormal;
+
+    vVertTangent *= rsqrt(tangentLengthSq);
+
+    float3 vVertBinormal = cross(vVertTangent, vVertNormal);
+    float binormalLengthSq = dot(vVertBinormal, vVertBinormal);
+    if (binormalLengthSq < 1e-8f)
+        return vVertNormal;
+    vVertBinormal *= rsqrt(binormalLengthSq);
+
     float3x3 TBN = (float3x3(vVertTangent, vVertBinormal, vVertNormal));
 
 	// Compute per-pixel normal.
@@ -82,7 +96,12 @@ float3 CalcPerPixelNormal(float2 vTexcoord, float3 vVertNormal, float3 vVertTang
 
     vBumpNormal = 2.0f * vBumpNormal - 1.0f;
 
-    return mul(vBumpNormal, TBN);
+    float3 worldNormal = mul(vBumpNormal, TBN);
+    float worldNormalLengthSq = dot(worldNormal, worldNormal);
+    if (worldNormalLengthSq < 1e-8f)
+        return vVertNormal;
+
+    return worldNormal * rsqrt(worldNormalLengthSq);
     //return vVertNormal;
 }
 

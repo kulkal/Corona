@@ -1,4 +1,5 @@
 #include "Common.hlsl"
+#include "GGX.hlsli"
 
 RWTexture2D<float4> OutputColor : register(u0);
 
@@ -121,6 +122,7 @@ float schlick_fresnel(float cosine, float ref_idx)
 // Sample GGX distribution
 float3 sample_ggx(float3 N, float roughness, inout uint seed)
 {
+    N = GGXSafeNormalize(N, float3(0.0f, 1.0f, 0.0f));
     float a = roughness * roughness;
     
     float r1 = random_float(seed);
@@ -136,7 +138,33 @@ float3 sample_ggx(float3 N, float roughness, inout uint seed)
     H.z = cosTheta;
     
     float3x3 TBN = construct_ONB_frisvad(N);
-    return normalize(mul(H, TBN));
+    return GGXSafeNormalize(mul(H, TBN), N);
+}
+
+float3 ApplyPathTracingNormalMap(float3 vertexNormal, float3 vertexTangent, float2 uv, uint instanceID)
+{
+    float3 N = GGXSafeNormalize(vertexNormal, float3(0.0f, 1.0f, 0.0f));
+    float tangentLenSq = dot(vertexTangent, vertexTangent);
+    if (any(isnan(vertexTangent)) || any(isinf(vertexTangent)) || tangentLenSq < 1e-8f)
+        return N;
+
+    float3 T = GGXSafeNormalize(vertexTangent, N);
+    T = T - dot(T, N) * N;
+    T = GGXSafeNormalize(T, float3(0.0f, 0.0f, 0.0f));
+    if (dot(T, T) < 1e-8f)
+        return N;
+
+    float3 B = cross(N, T);
+    B = GGXSafeNormalize(B, float3(0.0f, 0.0f, 0.0f));
+    if (dot(B, B) < 1e-8f)
+        return N;
+
+    float3 normalMap = NormalTex.SampleLevel(sampleWrap, uv, 0).xyz;
+    if (any(isnan(normalMap)) || any(isinf(normalMap)))
+        return N;
+    normalMap = normalMap * 2.0f - 1.0f;
+
+    return GGXSafeNormalize(mul(normalMap, float3x3(T, B, N)), N);
 }
 
 [shader("raygeneration")]
@@ -345,8 +373,8 @@ void PathTracingClosestHit(inout PathTracingPayload payload, in BuiltInTriangleI
     
     // Get material properties
     float3 albedo = AlbedoTex.SampleLevel(sampleWrap, vertex.uv, 0).xyz;
-    float roughness = RoughnessTex.SampleLevel(sampleWrap, vertex.uv, 0).x;
-    float metallic = MetallicTex.SampleLevel(sampleWrap, vertex.uv, 0).x;
+    float roughness = clamp(RoughnessTex.SampleLevel(sampleWrap, vertex.uv, 0).x, 0.02f, 1.0f);
+    float metallic = saturate(MetallicTex.SampleLevel(sampleWrap, vertex.uv, 0).x);
     
     // Store debug information for primary hit (depth == 0)
     if (payload.depth == 0)
@@ -362,19 +390,14 @@ void PathTracingClosestHit(inout PathTracingPayload payload, in BuiltInTriangleI
         payload.debugTriangleIndex = triangleIndex;
     }
     
-    // Sample normal map and transform to world space
-    float3 normalMap = NormalTex.SampleLevel(sampleWrap, vertex.uv, 0).xyz;
-    normalMap = normalMap * 2.0 - 1.0; // Unpack from [0,1] to [-1,1]
-    
-    // Build TBN matrix
-    float3 N = normalize(vertex.normal);
-    float3 T = normalize(vertex.tangent);
-    T = normalize(T - dot(T, N) * N); // Gram-Schmidt orthogonalization
-    float3 B = cross(N, T);
-    float3x3 TBN = float3x3(T, B, N);
-    
-    // Transform normal from tangent space to world space
-    N = normalize(mul(normalMap, TBN));
+    // Sample normal map when a valid tangent basis exists. Models without UVs
+    // such as buddha.obj have no tangents, so fall back to the geometric normal.
+    float3 N = ApplyPathTracingNormalMap(vertex.normal, vertex.tangent, vertex.uv, instanceID);
+    float3 V = GGXSafeNormalize(-payload.direction, N);
+    // Path tracing hits both sides of imported meshes. Keep the shading normal
+    // on the visible side so inverted/two-sided OBJ normals do not trap paths.
+    if (dot(N, V) < 0.0f)
+        N = -N;
     
     // Store final normal for debug visualization
     if (payload.depth == 0)
@@ -382,14 +405,13 @@ void PathTracingClosestHit(inout PathTracingPayload payload, in BuiltInTriangleI
         payload.debugNormal = N;
     }
     
-    float3 V = -payload.direction;
-    
     // Offset ray origin to avoid self-intersection
     // Use larger offset for path tracing to prevent shadow acne
-    float3 hitPos = vertex.position + N * 0.01;
+    const float kPathTracingRayBias = 0.5f;
+    float3 hitPos = vertex.position + N * kPathTracingRayBias;
     
     // Direct lighting - sample the sun as a small spherical cap.
-    float3 baseLightDir = normalize(LightDirAndIntensity.xyz);
+    float3 baseLightDir = GGXSafeNormalize(LightDirAndIntensity.xyz, float3(0.0f, 1.0f, 0.0f));
     float lightIntensity = LightDirAndIntensity.w;
     
     float3 directLight = float3(0, 0, 0);
@@ -410,12 +432,16 @@ void PathTracingClosestHit(inout PathTracingPayload payload, in BuiltInTriangleI
         RayDesc shadowRay;
         shadowRay.Origin = hitPos;
         shadowRay.Direction = lightDir;
-        shadowRay.TMin = 0.01;  // Larger offset to prevent self-intersection
+        shadowRay.TMin = 0.01;
         shadowRay.TMax = 100000;
 
         ShadowRayPayload shadowPayload;
         shadowPayload.bHit = true;
-        TraceRay(gRtScene, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_CLOSEST_HIT_SHADER,
+        TraceRay(gRtScene,
+                 RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH |
+                 RAY_FLAG_SKIP_CLOSEST_HIT_SHADER |
+                 RAY_FLAG_FORCE_OPAQUE |
+                 RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES,
                  0xFF, 0, 0, 1, shadowRay, shadowPayload);
 
         if (!shadowPayload.bHit)
@@ -424,15 +450,13 @@ void PathTracingClosestHit(inout PathTracingPayload payload, in BuiltInTriangleI
 
             if (NdotL > 0)
             {
-                // Diffuse lighting (Lambertian)
-                float3 diffuse = bEnableDirectDiffuse ? (albedo * (1.0 - metallic) * INV_PI) : float3(0, 0, 0);
+                // Match the hybrid lighting pass: direct diffuse is evaluated as
+                // irradiance * albedo, without the Lambertian 1/pi normalization.
+                float3 diffuse = bEnableDirectDiffuse ? (albedo * (1.0 - metallic)) : float3(0, 0, 0);
 
-                // Energy-normalized Blinn-Phong approximation for direct specular.
-                float3 H = normalize(lightDir + V);
-                float NdotH = max(0, dot(N, H));
-                float shininess = max((1.0 - roughness) * 128.0, 1.0);
-                float spec = pow(NdotH, shininess) * ((shininess + 2.0) * 0.5 * INV_PI);
-                float3 specular = bEnableDirectSpecular ? (lerp(float3(0.04, 0.04, 0.04), albedo, metallic) * spec) : float3(0, 0, 0);
+                // Match the raster lighting pass: direct specular uses the shared GGX BRDF.
+                float3 F0 = lerp(float3(0.04, 0.04, 0.04), albedo, metallic);
+                float3 specular = bEnableDirectSpecular ? EvaluateGGXSpecularBRDF(N, V, lightDir, roughness, F0) : float3(0, 0, 0);
 
                 // Combine diffuse and specular with light color
                 directLight += (diffuse + specular) * NdotL * lightIntensity * LightColor;
@@ -469,11 +493,11 @@ void PathTracingClosestHit(inout PathTracingPayload payload, in BuiltInTriangleI
     {
         // Specular bounce
         float3 H = sample_ggx(N, roughness, payload.seed);
-        newDir = reflect(-V, H);
+        newDir = GGXSafeNormalize(reflect(-V, H), N);
         
         // Make sure we're above the surface
         if (dot(newDir, N) < 0)
-            newDir = reflect(newDir, N);
+            newDir = GGXSafeNormalize(reflect(newDir, N), N);
         
         // Compensate for the stochastic lobe selection probability. This is not
         // full MIS yet, but it removes a major dark bias from the path tracer.
@@ -487,7 +511,7 @@ void PathTracingClosestHit(inout PathTracingPayload payload, in BuiltInTriangleI
         // Diffuse bounce - cosine weighted sampling
         float3 localDir = random_cosine_direction(payload.seed);
         float3x3 TBN = construct_ONB_frisvad(N);
-        newDir = normalize(mul(localDir, TBN));
+        newDir = GGXSafeNormalize(mul(localDir, TBN), N);
         
         // Lambertian BRDF under cosine-weighted sampling reduces to albedo, but
         // we still need to divide by the branch probability.

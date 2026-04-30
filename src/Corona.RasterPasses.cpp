@@ -20,7 +20,7 @@
 void Corona::InitBloomPass()
 {
 	{
-		ComPtr<ID3DBlob> cs = renderBackend->CreateShader(GetAssetFullPath(L"Shaders\\BloomBlur.hlsl"), "BloomExtract", "cs_5_0");
+		ComPtr<ID3DBlob> cs = renderBackend->CreateShader(GetAssetFullPath(L"Shaders\\BloomBlur.hlsl"), "BloomExtract", "cs_6_0");
 		D3D12_COMPUTE_PIPELINE_STATE_DESC computePsoDesc = {};
 
 		shared_ptr<PipelineStateObject> TEMP_BloomExtractPSO = shared_ptr<PipelineStateObject>(new PipelineStateObject);
@@ -39,7 +39,7 @@ void Corona::InitBloomPass()
 			BloomExtractPSO = TEMP_BloomExtractPSO;
 	}
 	{
-		ComPtr<ID3DBlob> cs = renderBackend->CreateShader(GetAssetFullPath(L"Shaders\\BloomBlur.hlsl"), "BloomBlur", "cs_5_0");
+		ComPtr<ID3DBlob> cs = renderBackend->CreateShader(GetAssetFullPath(L"Shaders\\BloomBlur.hlsl"), "BloomBlur", "cs_6_0");
 		D3D12_COMPUTE_PIPELINE_STATE_DESC computePsoDesc = {};
 
 		shared_ptr<PipelineStateObject> TEMP_BloomBlurPSO = shared_ptr<PipelineStateObject>(new PipelineStateObject);
@@ -57,7 +57,7 @@ void Corona::InitBloomPass()
 	}
 
 	{
-		ComPtr<ID3DBlob> cs = renderBackend->CreateShader(GetAssetFullPath(L"Shaders\\Histogram.hlsl"), "GenerateHistogram", "cs_5_0");
+		ComPtr<ID3DBlob> cs = renderBackend->CreateShader(GetAssetFullPath(L"Shaders\\Histogram.hlsl"), "GenerateHistogram", "cs_6_0");
 		D3D12_COMPUTE_PIPELINE_STATE_DESC computePsoDesc = {};
 
 		shared_ptr<PipelineStateObject> TEMP_HistogramPSO = shared_ptr<PipelineStateObject>(new PipelineStateObject);
@@ -74,7 +74,7 @@ void Corona::InitBloomPass()
 	}
 
 	{
-		ComPtr<ID3DBlob> cs = renderBackend->CreateShader(GetAssetFullPath(L"Shaders\\DrawHistogram.hlsl"), "DrawHistogram", "cs_5_0");
+		ComPtr<ID3DBlob> cs = renderBackend->CreateShader(GetAssetFullPath(L"Shaders\\DrawHistogram.hlsl"), "DrawHistogram", "cs_6_0");
 		D3D12_COMPUTE_PIPELINE_STATE_DESC computePsoDesc = {};
 
 		shared_ptr<PipelineStateObject> TEMP_DrawHistogramPSO = shared_ptr<PipelineStateObject>(new PipelineStateObject);
@@ -92,7 +92,7 @@ void Corona::InitBloomPass()
 	}
 
 	{
-		ComPtr<ID3DBlob> cs = renderBackend->CreateShader(GetAssetFullPath(L"Shaders\\Histogram.hlsl"), "ClearHistogram", "cs_5_0");
+		ComPtr<ID3DBlob> cs = renderBackend->CreateShader(GetAssetFullPath(L"Shaders\\Histogram.hlsl"), "ClearHistogram", "cs_6_0");
 		D3D12_COMPUTE_PIPELINE_STATE_DESC computePsoDesc = {};
 
 		shared_ptr<PipelineStateObject> TEMP_ClearHistogramPSO = shared_ptr<PipelineStateObject>(new PipelineStateObject);
@@ -109,7 +109,7 @@ void Corona::InitBloomPass()
 
 
 	{
-		ComPtr<ID3DBlob> cs = renderBackend->CreateShader(GetAssetFullPath(L"Shaders\\AdaptExposureCS.hlsl"), "AdaptExposure", "cs_5_0");
+		ComPtr<ID3DBlob> cs = renderBackend->CreateShader(GetAssetFullPath(L"Shaders\\AdaptExposureCS.hlsl"), "AdaptExposure", "cs_6_0");
 		D3D12_COMPUTE_PIPELINE_STATE_DESC computePsoDesc = {};
 
 		shared_ptr<PipelineStateObject> TEMP_AdapteExposurePSO = shared_ptr<PipelineStateObject>(new PipelineStateObject);
@@ -258,8 +258,8 @@ void Corona::InitToneMapPass()
 		return;
 	}
 	
-	ComPtr<ID3DBlob> vs = renderBackend->CreateShader(GetAssetFullPath(L"Shaders\\ToneMapPS.hlsl"), "VSMain", "vs_5_0");
-	ComPtr<ID3DBlob> ps = renderBackend->CreateShader(GetAssetFullPath(L"Shaders\\ToneMapPS.hlsl"), "PSMain", "ps_5_0");
+	ComPtr<ID3DBlob> vs = renderBackend->CreateShader(GetAssetFullPath(L"Shaders\\ToneMapPS.hlsl"), "VSMain", "vs_6_0");
+	ComPtr<ID3DBlob> ps = renderBackend->CreateShader(GetAssetFullPath(L"Shaders\\ToneMapPS.hlsl"), "PSMain", "ps_6_0");
 
 
 	CD3DX12_RASTERIZER_DESC rasterizerStateDesc(D3D12_DEFAULT);
@@ -328,8 +328,8 @@ void Corona::InitDebugPass()
 
 	FullScreenVB = renderBackend->CreateVertexBuffer(vertexBufferSize, vertexBufferStride, &quadVertices);
 
-	ComPtr<ID3DBlob> vs = renderBackend->CreateShader(GetAssetFullPath(L"Shaders\\DebugPS.hlsl"), "VSMain", "vs_5_0");
-	ComPtr<ID3DBlob> ps = renderBackend->CreateShader(GetAssetFullPath(L"Shaders\\DebugPS.hlsl"), "PSMain", "ps_5_0");
+	ComPtr<ID3DBlob> vs = renderBackend->CreateShader(GetAssetFullPath(L"Shaders\\DebugPS.hlsl"), "VSMain", "vs_6_0");
+	ComPtr<ID3DBlob> ps = renderBackend->CreateShader(GetAssetFullPath(L"Shaders\\DebugPS.hlsl"), "PSMain", "ps_6_0");
 
 	CD3DX12_RASTERIZER_DESC rasterizerStateDesc(D3D12_DEFAULT);
 	rasterizerStateDesc.CullMode = D3D12_CULL_MODE_NONE;
@@ -428,8 +428,8 @@ void Corona::InitLightingPass()
 		return;
 	}
 
-	ComPtr<ID3DBlob> vs = renderBackend->CreateShader(GetAssetFullPath(L"Shaders\\LightingPS.hlsl"), "VSMain", "vs_5_0");
-	ComPtr<ID3DBlob> ps = renderBackend->CreateShader(GetAssetFullPath(L"Shaders\\LightingPS.hlsl"), "PSMain", "ps_5_0");
+	ComPtr<ID3DBlob> vs = renderBackend->CreateShader(GetAssetFullPath(L"Shaders\\LightingPS.hlsl"), "VSMain", "vs_6_0");
+	ComPtr<ID3DBlob> ps = renderBackend->CreateShader(GetAssetFullPath(L"Shaders\\LightingPS.hlsl"), "PSMain", "ps_6_0");
 
 	CD3DX12_RASTERIZER_DESC rasterizerStateDesc(D3D12_DEFAULT);
 	rasterizerStateDesc.CullMode = D3D12_CULL_MODE_NONE;
@@ -539,8 +539,8 @@ void Corona::InitTemporalAAPass()
 		return;
 	}
 
-	ComPtr<ID3DBlob> vs = renderBackend->CreateShader(GetAssetFullPath(L"Shaders\\TemporalAA.hlsl"), "VSMain", "vs_5_0");
-	ComPtr<ID3DBlob> ps = renderBackend->CreateShader(GetAssetFullPath(L"Shaders\\TemporalAA.hlsl"), "PSMain", "ps_5_0");
+	ComPtr<ID3DBlob> vs = renderBackend->CreateShader(GetAssetFullPath(L"Shaders\\TemporalAA.hlsl"), "VSMain", "vs_6_0");
+	ComPtr<ID3DBlob> ps = renderBackend->CreateShader(GetAssetFullPath(L"Shaders\\TemporalAA.hlsl"), "PSMain", "ps_6_0");
 	CD3DX12_RASTERIZER_DESC rasterizerStateDesc(D3D12_DEFAULT);
 	rasterizerStateDesc.CullMode = D3D12_CULL_MODE_NONE;
 
@@ -1485,7 +1485,7 @@ void Corona::BloomPass()
 
 }
 
-void Corona::DrawScene(shared_ptr<Scene> scene, float Roughness, float Metalic, bool bOverrideRoughnessMetallic)
+void Corona::DrawScene(shared_ptr<Scene> scene, const glm::mat4x4& instanceTransform, float Roughness, float Metalic, bool bOverrideRoughnessMetallic)
 {
 	for (auto& mesh : scene->meshes)
 	{
@@ -1501,7 +1501,7 @@ void Corona::DrawScene(shared_ptr<Scene> scene, float Roughness, float Metalic, 
 			objCB.PrevViewProjectionMatrix = glm::transpose(PrevViewProjMat);
 
 			//glm::mat4 m; // Identity matrix
-			objCB.WorldMatrix = glm::transpose(mesh->transform);
+			objCB.WorldMatrix = glm::transpose(instanceTransform * mesh->transform);
 
 			objCB.UnjitteredViewProjMat = glm::transpose(UnjitteredViewProjMat);
 			objCB.PrevUnjitteredViewProjMat = glm::transpose(PrevUnjitteredViewProjMat);
@@ -1591,10 +1591,17 @@ void Corona::GBufferPass()
 
 	if (!bMultiThreadRendering)
 	{
-		DrawScene(Sponza, SponzaRoughnessMultiplier, 0, false);
-		if (Buddha)
-			DrawScene(Buddha, 0.0f, 0.0f, false);
-		//DrawScene(ShaderBall, ShaderBallRoughnessMultiplier, 1, true);
+		for (const SceneObject& object : SceneObjects)
+		{
+			if (!object.bVisible || !object.ScenePtr)
+				continue;
+			DrawScene(
+				object.ScenePtr,
+				object.Transform,
+				object.Handle == SponzaObject ? SponzaRoughnessMultiplier : (object.Handle == ShaderBallObject ? ShaderBallRoughnessMultiplier : object.Roughness),
+				object.Handle == ShaderBallObject ? 1.0f : object.Metallic,
+				object.bOverrideRoughnessMetallic);
+		}
 	}
 	else
 	{

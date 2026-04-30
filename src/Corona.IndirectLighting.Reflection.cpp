@@ -22,7 +22,7 @@ void Corona::InitRaytracingReflectionPass()
 		shared_ptr<RTPipelineStateObject> TEMP_PSO_RT_REFLECTION = renderBackend->CreateRTPipelineStateObject();
 		if (!TEMP_PSO_RT_REFLECTION)
 			return;
-		TEMP_PSO_RT_REFLECTION->SetNumInstances(static_cast<uint32_t>(vecBLAS.size()));// scene->meshes.size();
+		TEMP_PSO_RT_REFLECTION->SetNumInstances(static_cast<uint32_t>(RayTracingInstances.size()));
 
 		TEMP_PSO_RT_REFLECTION->AddHitGroup("HitGroup", "chs", "");
 		//TEMP_PSO_RT_REFLECTION->AddHitGroup("ShadowHitGroup", "chsShadow", "");
@@ -75,7 +75,7 @@ void Corona::RaytraceReflectionPass()
 	const FLOAT clearReflection[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
 	renderBackend->ClearTextureUAVFloat(SpecularGIRaw.get(), clearReflection);
 
-	PSO_RT_REFLECTION->SetNumInstances(static_cast<uint32_t>(vecBLAS.size()));
+	PSO_RT_REFLECTION->SetNumInstances(static_cast<uint32_t>(RayTracingInstances.size()));
 	PSO_RT_REFLECTION->BeginShaderTable();
 
 	PSO_RT_REFLECTION->SetTextureUAV("global", "ReflectionResult", SpecularGIRaw.get());
@@ -92,9 +92,9 @@ void Corona::RaytraceReflectionPass()
 
 
 	int i = 0;
-	for(auto&as : vecBLAS)
+	for (const RTInstanceDesc& instance : RayTracingInstances)
 	{
-		Mesh* mesh = as->MeshPtr;
+		Mesh* mesh = instance.BottomLevelAS->MeshPtr;
 		Texture* diffuseTex = mesh->Draws[0].mat->Diffuse.get();
 
 		if (!diffuseTex)

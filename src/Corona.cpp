@@ -82,6 +82,64 @@ namespace
 		return result;
 	}
 
+	std::wstring NormalizePathForCompare(const std::wstring& value)
+	{
+		if (value.empty())
+			return {};
+
+		std::error_code ec;
+		const std::filesystem::path weakPath = std::filesystem::weakly_canonical(std::filesystem::path(value), ec);
+		if (!ec)
+			return weakPath.wstring();
+
+		return std::filesystem::path(value).lexically_normal().wstring();
+	}
+
+	std::wstring NormalizePathKey(const std::wstring& value)
+	{
+		std::wstring normalized = NormalizePathForCompare(value);
+		for (wchar_t& ch : normalized)
+			ch = towlower(ch);
+		return normalized;
+	}
+
+	bool IsPathInsideDirectory(const std::wstring& path, const std::wstring& directory)
+	{
+		std::wstring pathKey = NormalizePathKey(path);
+		std::wstring directoryKey = NormalizePathKey(directory);
+		if (pathKey.empty() || directoryKey.empty())
+			return false;
+
+		if (directoryKey.back() != L'\\' && directoryKey.back() != L'/')
+			directoryKey.push_back(std::filesystem::path::preferred_separator);
+		return pathKey.rfind(directoryKey, 0) == 0;
+	}
+
+	std::wstring TrimLeadingWhitespace(std::wstring value)
+	{
+		while (!value.empty() && iswspace(value.front()))
+			value.erase(value.begin());
+		return value;
+	}
+
+	void ForceOpaqueAlpha(const Image* image)
+	{
+		if (!image || !image->pixels)
+			return;
+
+		if (image->format != DXGI_FORMAT_B8G8R8A8_UNORM &&
+			image->format != DXGI_FORMAT_R8G8B8A8_UNORM &&
+			image->format != DXGI_FORMAT_B8G8R8X8_UNORM)
+			return;
+
+		for (size_t y = 0; y < image->height; ++y)
+		{
+			uint8_t* row = image->pixels + y * image->rowPitch;
+			for (size_t x = 0; x < image->width; ++x)
+				row[x * 4 + 3] = 0xff;
+		}
+	}
+
 	std::wstring Utf8ToWide(const std::string& value)
 	{
 		if (value.empty())
@@ -1240,6 +1298,32 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 				bCommandLineAutoDumpEnabled = true;
 				bCommandLineDiffuseGIAutoDumpMode = true;
 			}
+			else if (dumpModeValue == L"readme" || dumpModeValue == L"readme-screenshots" || dumpModeValue == L"readme_screenshots")
+			{
+				bCommandLineAutoDumpOverrideSet = true;
+				bCommandLineAutoDumpEnabled = true;
+				bCommandLineReadmeScreenshotDumpMode = true;
+			}
+			else if (dumpModeValue == L"pathtracing" || dumpModeValue == L"path-tracing" || dumpModeValue == L"path_tracing" || dumpModeValue == L"pt")
+			{
+				bCommandLineAutoDumpOverrideSet = true;
+				bCommandLineAutoDumpEnabled = true;
+				bCommandLinePathTracingScreenshotDumpMode = true;
+			}
+			continue;
+		}
+		if (arg == L"--readme-dump" || arg == L"--readme-screenshots")
+		{
+			bCommandLineAutoDumpOverrideSet = true;
+			bCommandLineAutoDumpEnabled = true;
+			bCommandLineReadmeScreenshotDumpMode = true;
+			continue;
+		}
+		if (arg == L"--path-tracing-dump" || arg == L"--pathtracing-dump" || arg == L"--pt-dump")
+		{
+			bCommandLineAutoDumpOverrideSet = true;
+			bCommandLineAutoDumpEnabled = true;
+			bCommandLinePathTracingScreenshotDumpMode = true;
 			continue;
 		}
 
@@ -1337,6 +1421,24 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 			{
 				const unsigned long value = std::stoul(diffuseGIDumpFramesValue);
 				DiffuseGIAutoDumpFrameCount = static_cast<UINT32>(std::clamp<unsigned long>(value, 4ul, 512ul));
+			}
+			catch (...)
+			{
+			}
+			continue;
+		}
+
+		std::wstring autoDumpFramesValue = ParseValueArg(arg, L"--auto-dump-frames", L"-auto-dump-frames", i);
+		if (autoDumpFramesValue.empty())
+			autoDumpFramesValue = ParseValueArg(arg, L"--readme-dump-frames", L"-readme-dump-frames", i);
+		if (autoDumpFramesValue.empty())
+			autoDumpFramesValue = ParseValueArg(arg, L"--dump-frames", L"-dump-frames", i);
+		if (!autoDumpFramesValue.empty())
+		{
+			try
+			{
+				const unsigned long value = std::stoul(autoDumpFramesValue);
+				AutoAADumpFrameCountOverride = static_cast<UINT32>(std::clamp<unsigned long>(value, 1ul, 100000ul));
 			}
 			catch (...)
 			{
@@ -1552,6 +1654,9 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 		L", rayNoise=" + std::wstring(GetRayNoiseModeNameW(RayNoiseMode)) +
 		L", diffuseGI=" + std::wstring(GetDiffuseGIModeNameW(DiffuseGIMode)) +
 		L", diffuseGIDump=" + std::to_wstring(bCommandLineDiffuseGIAutoDumpMode ? 1 : 0) +
+		L", readmeDump=" + std::to_wstring(bCommandLineReadmeScreenshotDumpMode ? 1 : 0) +
+		L", pathTracingDump=" + std::to_wstring(bCommandLinePathTracingScreenshotDumpMode ? 1 : 0) +
+		L", autoDumpFrames=" + std::to_wstring(AutoAADumpFrameCountOverride) +
 		L", cameraPathDump=" + std::to_wstring(bCommandLineCameraPathDump ? 1 : 0) +
 		L", dlssJitterScale=" + std::to_wstring(DLSSJitterPhaseScale) +
 		L", dlssJitterOverride=" + std::to_wstring(DLSSJitterPhaseCountOverride) +
@@ -1594,6 +1699,12 @@ void Corona::PromptStartupModeSelection()
 		bAutoAADumpEnabled = bCommandLineAutoDumpEnabled;
 	bDiffuseGIAutoDumpMode = bCommandLineDiffuseGIAutoDumpMode;
 	if (bDiffuseGIAutoDumpMode)
+		bAutoAADumpEnabled = true;
+	bReadmeScreenshotDumpMode = bCommandLineReadmeScreenshotDumpMode;
+	if (bReadmeScreenshotDumpMode)
+		bAutoAADumpEnabled = true;
+	bPathTracingScreenshotDumpMode = bCommandLinePathTracingScreenshotDumpMode;
+	if (bPathTracingScreenshotDumpMode)
 		bAutoAADumpEnabled = true;
 
 	const DWORD dumpEnvLength = GetEnvironmentVariableW(L"CORONA_AUTO_DUMP", envValue, _countof(envValue));
@@ -1756,6 +1867,63 @@ void Corona::InitializeAutoAADump()
 {
 	if (this->bAutoAADumpInitialized || !this->bAutoAADumpEnabled)
 		return;
+
+	if (bPathTracingScreenshotDumpMode)
+	{
+		std::filesystem::path dumpDir = RuntimePaths::DumpDirectory() / L"path_tracing_screenshots";
+		std::filesystem::create_directories(dumpDir);
+		this->AutoAADumpDir = dumpDir.wstring();
+		this->bAutoAADumpInitialized = true;
+		this->bAutoAADumpCompleted = false;
+		this->bHybridStageAutoDumpMode = false;
+		this->AutoAADumpPhase = 0;
+		this->AutoAADumpFramesInPhase = 0;
+
+		std::filesystem::path logPath = std::filesystem::path(AutoAADumpDir) / L"dump_log.txt";
+		std::error_code ec;
+		std::filesystem::remove(logPath, ec);
+		{
+			std::wofstream clearLog(logPath, std::ios::trunc);
+		}
+
+		StartupRenderingMode = ERenderingMode::PATHTRACING;
+		RenderingMode = StartupRenderingMode;
+		AntiAliasingMode = EAntiAliasingMode::OFF;
+		PathTracingViewParam.SamplesPerPixel = 1;
+		PathTracingViewParam.MaxBounces = 4;
+		ResetAllAccumulationState(false);
+		const UINT32 frameCount = std::max(1000u, AutoAADumpFrameCountOverride);
+		AppendAutoAADumpLog(L"[path_tracing] begin frames=" + std::to_wstring(frameCount) + L", spp=" + std::to_wstring(frameCount) + L", aa=off");
+		return;
+	}
+
+	if (bReadmeScreenshotDumpMode)
+	{
+		std::filesystem::path dumpDir = RuntimePaths::DumpDirectory() / L"readme_screenshots";
+		std::filesystem::create_directories(dumpDir);
+		this->AutoAADumpDir = dumpDir.wstring();
+		this->bAutoAADumpInitialized = true;
+		this->bAutoAADumpCompleted = false;
+		this->bHybridStageAutoDumpMode = false;
+		this->AutoAADumpPhase = 0;
+		this->AutoAADumpFramesInPhase = 0;
+
+		std::filesystem::path logPath = std::filesystem::path(AutoAADumpDir) / L"dump_log.txt";
+		std::error_code ec;
+		std::filesystem::remove(logPath, ec);
+		{
+			std::wofstream clearLog(logPath, std::ios::trunc);
+		}
+
+		StartupRenderingMode = ERenderingMode::HYBRID;
+		RenderingMode = StartupRenderingMode;
+		AntiAliasingMode = StartupSelectedAAMode;
+		bEnableDiffuseGI = true;
+		ResetAllAccumulationState(false);
+		const UINT32 frameCount = AutoAADumpFrameCountOverride > 0u ? AutoAADumpFrameCountOverride : 1000u;
+		AppendAutoAADumpLog(L"[readme_hybrid] begin frames=" + std::to_wstring(frameCount) + L", aa=" + std::wstring(GetAntiAliasingModeName(AntiAliasingMode)));
+		return;
+	}
 
 	if (bDiffuseGIAutoDumpMode)
 	{
@@ -1948,11 +2116,19 @@ bool Corona::DumpTexturePNG(Texture* source, const std::wstring& filePath, D3D12
 
 	const bool bCanSaveWithoutConvert =
 		image->format == DXGI_FORMAT_R8G8B8A8_UNORM ||
-		image->format == DXGI_FORMAT_B8G8R8A8_UNORM ||
-		image->format == DXGI_FORMAT_B8G8R8X8_UNORM;
+		image->format == DXGI_FORMAT_B8G8R8A8_UNORM;
 	if (bCanSaveWithoutConvert)
 	{
-		hr = SaveToWICFile(*image, DirectX::WIC_FLAGS_NONE, GUID_ContainerFormatPng, filePath.c_str());
+		ScratchImage pngImage;
+		hr = pngImage.InitializeFromImage(*image);
+		const Image* pngOutputImage = SUCCEEDED(hr) ? pngImage.GetImage(0, 0, 0) : nullptr;
+		if (!pngOutputImage)
+			hr = E_FAIL;
+		if (SUCCEEDED(hr))
+		{
+			ForceOpaqueAlpha(pngOutputImage);
+			hr = SaveToWICFile(*pngOutputImage, DirectX::WIC_FLAGS_NONE, GUID_ContainerFormatPng, filePath.c_str());
+		}
 		if (FAILED(hr))
 		{
 			AppendAutoAADumpLog(L"[capture] png direct save failed hr=0x" + std::to_wstring(static_cast<unsigned long>(hr)));
@@ -1976,6 +2152,7 @@ bool Corona::DumpTexturePNG(Texture* source, const std::wstring& filePath, D3D12
 	if (!convertedImage)
 		return false;
 
+	ForceOpaqueAlpha(convertedImage);
 	hr = SaveToWICFile(*convertedImage, DirectX::WIC_FLAGS_NONE, GUID_ContainerFormatPng, filePath.c_str());
 	if (FAILED(hr))
 	{
@@ -1988,6 +2165,55 @@ void Corona::AdvanceAutoAADump(Texture* backbuffer)
 {
 	if (!bAutoAADumpEnabled || !bAutoAADumpInitialized || bAutoAADumpCompleted)
 		return;
+
+	if (bPathTracingScreenshotDumpMode)
+	{
+		const UINT32 targetFrameCount = std::max(1000u, AutoAADumpFrameCountOverride);
+		if (RenderingMode != ERenderingMode::PATHTRACING || AntiAliasingMode != EAntiAliasingMode::OFF)
+		{
+			RenderingMode = ERenderingMode::PATHTRACING;
+			AntiAliasingMode = EAntiAliasingMode::OFF;
+			PathTracingViewParam.SamplesPerPixel = 1;
+			PathTracingViewParam.MaxBounces = 4;
+			ResetAllAccumulationState(false);
+			AppendAutoAADumpLog(L"[path_tracing] begin frames=" + std::to_wstring(targetFrameCount) + L", spp=" + std::to_wstring(targetFrameCount) + L", aa=off");
+			return;
+		}
+
+		if (AutoAADumpFramesInPhase == targetFrameCount - 1)
+		{
+			Texture* resolveTarget = GetCurrentResolveSource();
+			const std::wstring base = AutoAADumpDir + L"\\path_tracing";
+			const bool hdrOk = DumpTextureHDR(resolveTarget, base + L".hdr", D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+			const bool resolvePngOk = DumpTexturePNG(resolveTarget, base + L"_resolve_preview.png", D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+			AppendAutoAADumpLog(
+				L"[path_tracing] frameCounter=" + std::to_wstring(FrameCounter) +
+				L", spp=" + std::to_wstring(targetFrameCount) +
+				L", maxBounces=" + std::to_wstring(PathTracingViewParam.MaxBounces));
+			AppendAutoAADumpLog(std::wstring(L"[path_tracing] resolve hdr=") + (hdrOk ? L"ok" : L"fail") + L", resolve png=" + (resolvePngOk ? L"ok" : L"fail"));
+			if (LightingBuffer)
+			{
+				const bool lightingHdrOk = DumpTextureHDR(LightingBuffer.get(), base + L"_lighting.hdr", D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+				const bool lightingPngOk = DumpTexturePNG(LightingBuffer.get(), base + L"_lighting_preview.png", D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+				AppendAutoAADumpLog(std::wstring(L"[path_tracing] lighting hdr=") + (lightingHdrOk ? L"ok" : L"fail") + L", lighting png=" + (lightingPngOk ? L"ok" : L"fail"));
+			}
+			if (backbuffer)
+			{
+				const bool screenPngOk = DumpTexturePNG(backbuffer, base + L"_screen_preview.png", D3D12_RESOURCE_STATE_RENDER_TARGET);
+				AppendAutoAADumpLog(std::wstring(L"[path_tracing] screen png=") + (screenPngOk ? L"ok" : L"fail"));
+			}
+		}
+
+		++AutoAADumpFramesInPhase;
+		if (AutoAADumpFramesInPhase < targetFrameCount)
+			return;
+
+		bAutoAADumpCompleted = true;
+		if (HWND hwnd = Win32Application::GetHwnd())
+			PostMessage(hwnd, WM_CLOSE, 0, 0);
+		PostQuitMessage(0);
+		return;
+	}
 
 	if (bDiffuseGIAutoDumpMode)
 	{
@@ -2198,30 +2424,36 @@ void Corona::AdvanceAutoAADump(Texture* backbuffer)
 		return;
 	}
 
-	if (StartupSelectedAAMode != EAntiAliasingMode::DLSS_RR)
+	if (!bReadmeScreenshotDumpMode && StartupSelectedAAMode != EAntiAliasingMode::DLSS_RR)
 	{
 		bAutoAADumpCompleted = true;
 		return;
 	}
 
-	constexpr UINT32 kHybridDumpFrames = 60;
-	constexpr UINT32 kPathTracingDumpFrames = 180;
-	constexpr UINT32 kNumDumpPhases = 3;
+	const UINT32 kHybridDumpFrames =
+		AutoAADumpFrameCountOverride > 0u ? AutoAADumpFrameCountOverride :
+		(bReadmeScreenshotDumpMode ? 1000u : 60u);
+	const UINT32 kPathTracingDumpFrames =
+		AutoAADumpFrameCountOverride > 0u ? AutoAADumpFrameCountOverride :
+		(bReadmeScreenshotDumpMode ? 1000u : 180u);
+	const UINT32 kNumDumpPhases = bReadmeScreenshotDumpMode ? 2u : 3u;
 
 	if (AutoAADumpPhase >= kNumDumpPhases)
 		return;
 
 	const bool bHybridOnPhase = AutoAADumpPhase == 0;
-	const bool bHybridOffPhase = AutoAADumpPhase == 1;
-	const bool bPathTracingPhase = AutoAADumpPhase == 2;
+	const bool bHybridOffPhase = !bReadmeScreenshotDumpMode && AutoAADumpPhase == 1;
+	const bool bPathTracingPhase = bReadmeScreenshotDumpMode ? AutoAADumpPhase == 1 : AutoAADumpPhase == 2;
 	const bool bHybridPhase = bHybridOnPhase || bHybridOffPhase;
 	const UINT32 targetFrameCount = bHybridPhase ? kHybridDumpFrames : kPathTracingDumpFrames;
 	const ERenderingMode targetRenderingMode = bHybridPhase ? ERenderingMode::HYBRID : ERenderingMode::PATHTRACING;
 	const EAntiAliasingMode targetAAMode = bHybridPhase ? StartupSelectedAAMode : EAntiAliasingMode::OFF;
 	const bool targetEnableDiffuseGI = !bHybridOffPhase;
 	const wchar_t* currentPhaseName =
-		bHybridOnPhase ? L"hybrid_diffuse_on" :
-		(bHybridOffPhase ? L"hybrid_diffuse_off" : L"path_tracing");
+		bReadmeScreenshotDumpMode ?
+			(bPathTracingPhase ? L"readme_path_tracing" : L"readme_hybrid") :
+			(bHybridOnPhase ? L"hybrid_diffuse_on" :
+			(bHybridOffPhase ? L"hybrid_diffuse_off" : L"path_tracing"));
 
 	if (RenderingMode != targetRenderingMode || AntiAliasingMode != targetAAMode || bEnableDiffuseGI != targetEnableDiffuseGI)
 	{
@@ -2231,7 +2463,7 @@ void Corona::AdvanceAutoAADump(Texture* backbuffer)
 		ResetAllAccumulationState(bHybridPhase);
 		PathTracingViewParam.SamplesPerPixel = 1;
 		PathTracingViewParam.MaxBounces = 4;
-		AppendAutoAADumpLog(std::wstring(L"[") + currentPhaseName + L"] begin");
+		AppendAutoAADumpLog(std::wstring(L"[") + currentPhaseName + L"] begin frames=" + std::to_wstring(targetFrameCount));
 		return;
 	}
 
@@ -2310,10 +2542,23 @@ void Corona::AdvanceAutoAADump(Texture* backbuffer)
 
 	if (AutoAADumpPhase < kNumDumpPhases)
 	{
-		RenderingMode = (AutoAADumpPhase < 2) ? ERenderingMode::HYBRID : ERenderingMode::PATHTRACING;
+		RenderingMode =
+			(bReadmeScreenshotDumpMode ? AutoAADumpPhase == 0 : AutoAADumpPhase < 2) ?
+			ERenderingMode::HYBRID :
+			ERenderingMode::PATHTRACING;
 		AntiAliasingMode = (RenderingMode == ERenderingMode::HYBRID) ? StartupSelectedAAMode : EAntiAliasingMode::OFF;
-		bEnableDiffuseGI = (AutoAADumpPhase != 1);
+		bEnableDiffuseGI = bReadmeScreenshotDumpMode ? true : (AutoAADumpPhase != 1);
 		ResetAllAccumulationState(RenderingMode == ERenderingMode::HYBRID);
+		const bool bNextHybridOnPhase = AutoAADumpPhase == 0;
+		const bool bNextHybridOffPhase = !bReadmeScreenshotDumpMode && AutoAADumpPhase == 1;
+		const bool bNextPathTracingPhase = bReadmeScreenshotDumpMode ? AutoAADumpPhase == 1 : AutoAADumpPhase == 2;
+		const UINT32 nextFrameCount = RenderingMode == ERenderingMode::HYBRID ? kHybridDumpFrames : kPathTracingDumpFrames;
+		const wchar_t* nextPhaseName =
+			bReadmeScreenshotDumpMode ?
+				(bNextPathTracingPhase ? L"readme_path_tracing" : L"readme_hybrid") :
+				(bNextHybridOnPhase ? L"hybrid_diffuse_on" :
+				(bNextHybridOffPhase ? L"hybrid_diffuse_off" : L"path_tracing"));
+		AppendAutoAADumpLog(std::wstring(L"[") + nextPhaseName + L"] begin frames=" + std::to_wstring(nextFrameCount));
 		return;
 	}
 
@@ -2535,6 +2780,15 @@ void Corona::EndCameraPathRecording()
 
 	bCameraPathRecording = false;
 
+	const std::wstring pathFile = AllocateUniqueCameraPathFilePath(nullptr);
+	if (!pathFile.empty() && SaveCameraPath(pathFile))
+		return;
+
+	LastCameraPathStatus = L"Camera path recording ended, but failed to allocate a unique path file.";
+}
+
+std::wstring Corona::AllocateUniqueCameraPathFilePath(const wchar_t* tag) const
+{
 	SYSTEMTIME localTime{};
 	GetLocalTime(&localTime);
 	std::filesystem::path pathDir(GetCameraPathDirectory());
@@ -2552,22 +2806,21 @@ void Corona::EndCameraPathRecording()
 			<< L"_"
 			<< std::setw(2) << localTime.wHour
 			<< std::setw(2) << localTime.wMinute
-			<< std::setw(2) << localTime.wSecond
-			<< L"_" << std::setw(4) << attempt
+			<< std::setw(2) << localTime.wSecond;
+		if (tag && tag[0] != L'\0')
+			filename << L"_" << tag;
+		filename << L"_" << std::setw(4) << attempt
 			<< L".coronapath";
 
 		const std::filesystem::path candidate = pathDir / filename.str();
 		if (!std::filesystem::exists(candidate))
-		{
-			SaveCameraPath(candidate.wstring());
-			return;
-		}
+			return candidate.wstring();
 	}
 
-	LastCameraPathStatus = L"Camera path recording ended, but failed to allocate a unique path file.";
+	return {};
 }
 
-bool Corona::SaveCameraPath(const std::wstring& filePath)
+bool Corona::WriteCameraPathFile(const std::wstring& filePath, bool bUpdateActivePath)
 {
 	if (CameraPathKeyframes.empty())
 	{
@@ -2604,7 +2857,19 @@ bool Corona::SaveCameraPath(const std::wstring& filePath)
 			<< keyframe.DirectionalLightIntensity << '\n';
 	}
 
-	ActiveCameraPathFile = filePath;
+	if (bUpdateActivePath)
+	{
+		ActiveCameraPathFile = filePath;
+		bCameraPathListDirty = true;
+	}
+	return true;
+}
+
+bool Corona::SaveCameraPath(const std::wstring& filePath)
+{
+	if (!WriteCameraPathFile(filePath, true))
+		return false;
+
 	LastCameraPathStatus =
 		L"Saved camera path: " + filePath +
 		L" (" + std::to_wstring(static_cast<unsigned long long>(CameraPathKeyframes.size())) + L" keyframes)";
@@ -2696,14 +2961,212 @@ bool Corona::LoadCameraPath(const std::wstring& filePath)
 
 	CameraPathKeyframes = std::move(loadedKeyframes);
 	ActiveCameraPathFile = filePath;
+	const std::wstring activePath = NormalizePathKey(ActiveCameraPathFile);
+	for (size_t entryIndex = 0; entryIndex < CameraPathEntries.size(); ++entryIndex)
+	{
+		if (NormalizePathKey(CameraPathEntries[entryIndex].FilePath) == activePath)
+		{
+			SelectedCameraPathIndex = static_cast<int>(entryIndex);
+			break;
+		}
+	}
 	LastCameraPathStatus =
 		L"Loaded camera path: " + filePath +
 		L" (" + std::to_wstring(static_cast<unsigned long long>(CameraPathKeyframes.size())) + L" keyframes)";
 	return true;
 }
 
+void Corona::RefreshCameraPathList()
+{
+	const std::wstring previousSelection =
+		SelectedCameraPathIndex >= 0 && SelectedCameraPathIndex < static_cast<int>(CameraPathEntries.size()) ?
+		CameraPathEntries[SelectedCameraPathIndex].FilePath :
+		ActiveCameraPathFile;
+
+	std::vector<std::pair<std::filesystem::file_time_type, CameraPathListEntry>> entries;
+	auto addCameraPathEntry = [&](const std::filesystem::path& filePath, const std::wstring& displayName, std::filesystem::file_time_type writeTime)
+	{
+		std::error_code fileEc;
+		if (!std::filesystem::is_regular_file(filePath, fileEc) || filePath.extension() != L".coronapath")
+			return;
+
+		const std::wstring normalizedPath = NormalizePathKey(filePath.wstring());
+		for (const auto& existing : entries)
+		{
+			if (NormalizePathKey(existing.second.FilePath) == normalizedPath)
+				return;
+		}
+
+		CameraPathListEntry listEntry;
+		listEntry.DisplayName = displayName.empty() ? filePath.filename().wstring() : displayName;
+		listEntry.FilePath = filePath.wstring();
+		entries.push_back({ writeTime, listEntry });
+	};
+
+	auto getWriteTime = [](const std::filesystem::path& filePath)
+	{
+		std::error_code timeEc;
+		const auto writeTime = std::filesystem::last_write_time(filePath, timeEc);
+		return timeEc ? std::filesystem::file_time_type{} : writeTime;
+	};
+
+	std::filesystem::path pathDir(GetCameraPathDirectory());
+	std::error_code ec;
+	std::filesystem::create_directories(pathDir, ec);
+	if (std::filesystem::exists(pathDir, ec))
+	{
+		for (const std::filesystem::directory_entry& entry : std::filesystem::directory_iterator(pathDir, ec))
+		{
+			if (ec || !entry.is_regular_file())
+				continue;
+			addCameraPathEntry(entry.path(), entry.path().filename().wstring(), getWriteTime(entry.path()));
+		}
+	}
+
+	std::filesystem::path dumpRoot(GetCameraPathDumpDirectory());
+	std::filesystem::path latestDumpDir;
+	std::filesystem::file_time_type latestDumpTime{};
+	if (std::filesystem::exists(dumpRoot, ec))
+	{
+		for (const std::filesystem::directory_entry& dumpEntry : std::filesystem::directory_iterator(dumpRoot, ec))
+		{
+			if (ec || !dumpEntry.is_directory())
+				continue;
+
+			const std::filesystem::path dumpDir = dumpEntry.path();
+			const std::filesystem::file_time_type dumpTime = getWriteTime(dumpDir);
+			if (latestDumpDir.empty() || dumpTime > latestDumpTime)
+			{
+				latestDumpDir = dumpDir;
+				latestDumpTime = dumpTime;
+			}
+
+			bool bAddedReferencedPath = false;
+			const std::filesystem::path infoPath = dumpDir / L"dump_info.txt";
+			std::wifstream infoFile(infoPath);
+			if (infoFile.is_open())
+			{
+				std::wstring token;
+				while (infoFile >> token)
+				{
+					if (token == L"camera_path")
+					{
+						std::wstring referencedPath;
+						std::getline(infoFile, referencedPath);
+						referencedPath = TrimLeadingWhitespace(referencedPath);
+						if (!referencedPath.empty())
+						{
+							std::filesystem::path cameraPath(referencedPath);
+							if (std::filesystem::exists(cameraPath))
+							{
+								addCameraPathEntry(
+									cameraPath,
+									cameraPath.filename().wstring(),
+									getWriteTime(cameraPath));
+								bAddedReferencedPath = true;
+							}
+						}
+						break;
+					}
+
+					std::wstring ignoredLine;
+					std::getline(infoFile, ignoredLine);
+				}
+			}
+
+			if (!bAddedReferencedPath)
+			{
+				const std::filesystem::path snapshotPath = dumpDir / L"camera_path.coronapath";
+				if (std::filesystem::exists(snapshotPath))
+				{
+					addCameraPathEntry(
+						snapshotPath,
+						dumpDir.filename().wstring() + L" / camera_path.coronapath",
+						getWriteTime(snapshotPath));
+				}
+			}
+		}
+	}
+
+	std::sort(entries.begin(), entries.end(), [](const auto& lhs, const auto& rhs)
+	{
+		return lhs.first > rhs.first;
+	});
+
+	CameraPathEntries.clear();
+	CameraPathEntries.reserve(entries.size());
+	for (const auto& entry : entries)
+		CameraPathEntries.push_back(entry.second);
+
+	SelectedCameraPathIndex = CameraPathEntries.empty() ? -1 : 0;
+	const std::wstring normalizedPreviousSelection = NormalizePathKey(previousSelection);
+	const std::wstring normalizedActivePath = NormalizePathKey(ActiveCameraPathFile);
+	for (size_t entryIndex = 0; entryIndex < CameraPathEntries.size(); ++entryIndex)
+	{
+		const std::wstring normalizedEntryPath = NormalizePathKey(CameraPathEntries[entryIndex].FilePath);
+		if ((!normalizedPreviousSelection.empty() && normalizedEntryPath == normalizedPreviousSelection) ||
+			(normalizedPreviousSelection.empty() && !normalizedActivePath.empty() && normalizedEntryPath == normalizedActivePath))
+		{
+			SelectedCameraPathIndex = static_cast<int>(entryIndex);
+			break;
+		}
+	}
+
+	if (LastCameraPathDumpDir.empty() && !latestDumpDir.empty())
+		LastCameraPathDumpDir = latestDumpDir.wstring();
+
+	bCameraPathListDirty = false;
+}
+
+bool Corona::EnsureCameraPathSavedForDump(const std::filesystem::path& dumpDir)
+{
+	const std::wstring pathDir = GetCameraPathDirectory();
+	const bool bActivePathVisibleInUi =
+		!ActiveCameraPathFile.empty() &&
+		std::filesystem::exists(std::filesystem::path(ActiveCameraPathFile)) &&
+		IsPathInsideDirectory(ActiveCameraPathFile, pathDir);
+
+	if (!bActivePathVisibleInUi)
+	{
+		const std::wstring dumpPathFile = AllocateUniqueCameraPathFilePath(L"dump");
+		if (dumpPathFile.empty() || !SaveCameraPath(dumpPathFile))
+		{
+			AppendCpuRuntimeTrace(L"[CameraPath] failed to persist camera path before dump.");
+			return false;
+		}
+	}
+
+	const std::filesystem::path snapshotPath = dumpDir / L"camera_path.coronapath";
+	if (!WriteCameraPathFile(snapshotPath.wstring(), false))
+		AppendCpuRuntimeTrace(L"[CameraPath] failed to write dump camera_path.coronapath snapshot: " + snapshotPath.wstring());
+
+	bCameraPathListDirty = true;
+	return true;
+}
+
+bool Corona::LoadSelectedCameraPath()
+{
+	if (bCameraPathListDirty)
+		RefreshCameraPathList();
+
+	if (SelectedCameraPathIndex < 0 || SelectedCameraPathIndex >= static_cast<int>(CameraPathEntries.size()))
+	{
+		LastCameraPathStatus = L"No saved camera path is selected.";
+		return false;
+	}
+
+	return LoadCameraPath(CameraPathEntries[SelectedCameraPathIndex].FilePath);
+}
+
 bool Corona::LoadLatestCameraPath()
 {
+	RefreshCameraPathList();
+	if (!CameraPathEntries.empty())
+	{
+		SelectedCameraPathIndex = 0;
+		return LoadSelectedCameraPath();
+	}
+
 	std::filesystem::path pathDir(GetCameraPathDirectory());
 	std::error_code ec;
 	if (!std::filesystem::exists(pathDir, ec))
@@ -2820,6 +3283,8 @@ void Corona::StartCameraPathDump()
 		LastCameraPathStatus = L"Failed to allocate a camera path frame dump directory.";
 		return;
 	}
+
+	EnsureCameraPathSavedForDump(std::filesystem::path(LastCameraPathDumpDir));
 
 	const double duration = GetCameraPathDurationSeconds();
 	CameraPathDumpFrameCount = std::max<UINT32>(1u, static_cast<UINT32>(std::ceil(duration * kCameraPathDumpFps)) + 1u);
@@ -3332,6 +3797,52 @@ void Corona::LoadPipeline()
 		DXGI_FORMAT_R8G8B8A8_UNORM);
 }
 
+glm::mat4x4 Corona::BuildCenteredSceneTransform(
+	const shared_ptr<Scene>& scene,
+	float targetExtent,
+	const glm::vec3& position,
+	const glm::vec3& rotationDegrees) const
+{
+	if (!scene || !scene->bHasBounds)
+		return glm::mat4x4(1.0f);
+
+	const glm::vec3 boundsSize = scene->BoundsMax - scene->BoundsMin;
+	const float maxExtent = std::max(std::max(boundsSize.x, boundsSize.y), boundsSize.z);
+	const float scale = maxExtent > 1.0e-4f ? targetExtent / maxExtent : 1.0f;
+	const glm::vec3 center = (scene->BoundsMin + scene->BoundsMax) * 0.5f;
+	const glm::mat4x4 rotation =
+		glm::rotate(glm::radians(rotationDegrees.z), glm::vec3(0.0f, 0.0f, 1.0f)) *
+		glm::rotate(glm::radians(rotationDegrees.y), glm::vec3(0.0f, 1.0f, 0.0f)) *
+		glm::rotate(glm::radians(rotationDegrees.x), glm::vec3(1.0f, 0.0f, 0.0f));
+
+	return
+		glm::translate(position) *
+		rotation *
+		glm::scale(glm::vec3(scale)) *
+		glm::translate(glm::vec3(-center.x, -scene->BoundsMin.y, -center.z));
+}
+
+Corona::SceneObjectHandle Corona::AddCenteredSceneObject(
+	const shared_ptr<Scene>& scene,
+	float targetExtent,
+	float roughness,
+	float metallic,
+	bool bOverrideRoughnessMetallic,
+	const glm::vec3& position,
+	const glm::vec3& rotationDegrees)
+{
+	if (!scene)
+		return InvalidSceneObjectHandle;
+
+	SceneObjectDesc desc;
+	desc.ScenePtr = scene;
+	desc.Transform = BuildCenteredSceneTransform(scene, targetExtent, position, rotationDegrees);
+	desc.Roughness = roughness;
+	desc.Metallic = metallic;
+	desc.bOverrideRoughnessMetallic = bOverrideRoughnessMetallic;
+	return AddSceneObject(desc);
+}
+
 void Corona::LoadAssets()
 {
 	const bool bVulkanBackend =
@@ -3732,26 +4243,65 @@ void Corona::LoadAssets()
 		AppendCpuRuntimeTrace(L"[LoadAssets] after default textures");
 
 	if (!Sponza) Sponza = LoadModel(WideToUtf8(GetAssetFullPath(L"assets\\Sponza\\Sponza.fbx")));
+	if (Sponza && SponzaObject == InvalidSceneObjectHandle)
+	{
+		SceneObjectDesc desc;
+		desc.ScenePtr = Sponza;
+		desc.Transform = glm::mat4x4(1.0f);
+		desc.Roughness = SponzaRoughnessMultiplier;
+		desc.Metallic = 0.0f;
+		desc.bOverrideRoughnessMetallic = false;
+		SponzaObject = AddSceneObject(desc);
+	}
 	if (bVulkanHybridStartup)
 		AppendCpuRuntimeTrace(L"[LoadAssets] after sponza load");
-
-	//  ShaderBall = LoadModel("assets/shaderball/shaderBall.fbx");
-
-	// glm::mat4x4 scaleMat = glm::scale(glm::vec3(2.5, 2.5, 2.5));
-	// glm::mat4x4 translatemat = glm::translate(glm::vec3(-150, 20, 0));
-	// ShaderBall->SetTransform(scaleMat* translatemat );
 
 	if (!Buddha)
 	{
 		Buddha = LoadModel(WideToUtf8(GetAssetFullPath(L"assets\\buddha\\buddha.obj")));
-		if (Buddha)
-		{
-			constexpr float buddhaScale = 260.0f;
-			glm::mat4x4 buddhaTM =
-				glm::translate(glm::vec3(0.0f, 0.445945f * buddhaScale, 0.0f)) *
-				glm::scale(glm::vec3(buddhaScale));
-			Buddha->SetTransform(buddhaTM);
-		}
+	}
+	if (Buddha && BuddhaObject == InvalidSceneObjectHandle)
+	{
+		BuddhaObject = AddCenteredSceneObject(
+			Buddha,
+			260.0f,
+			0.65f,
+			0.0f,
+			false,
+			BuddhaCenterPosition,
+			BuddhaCenterRotationDegrees);
+	}
+
+	if (!ShaderBall)
+	{
+		ShaderBall = LoadModel(WideToUtf8(GetAssetFullPath(L"assets\\shaderBall\\shaderBall.fbx")));
+	}
+	if (ShaderBall && ShaderBallObject == InvalidSceneObjectHandle)
+	{
+		ShaderBallObject = AddCenteredSceneObject(
+			ShaderBall,
+			220.0f,
+			ShaderBallRoughnessMultiplier,
+			1.0f,
+			false,
+			ShaderBallCenterPosition,
+			ShaderBallCenterRotationDegrees);
+	}
+
+	if (!Pistol)
+	{
+		Pistol = LoadModel(WideToUtf8(GetAssetFullPath(L"assets\\pistol\\pistol.obj")));
+	}
+	if (Pistol && PistolObject == InvalidSceneObjectHandle)
+	{
+		PistolObject = AddCenteredSceneObject(
+			Pistol,
+			280.0f,
+			0.55f,
+			0.0f,
+			false,
+			PistolCenterPosition,
+			PistolCenterRotationDegrees);
 	}
 
 	// Describe and create a sampler.
@@ -3864,6 +4414,28 @@ shared_ptr<Scene> Corona::LoadModel(string fileName)
 		flags |= aiProcess_PreTransformVertices /*| aiProcess_OptimizeMeshes*/;
 
 	assimpScene = importer.ApplyPostProcessing(flags);
+	if (!assimpScene)
+	{
+		AppendCpuRuntimeTrace(L"[LoadModel] failed: " + wide + L" error=" + AnsiToWString(importer.GetErrorString()));
+		return nullptr;
+	}
+
+	auto loadTextureOrDefault = [&](const wstring& texturePath, bool nonSRGB, const shared_ptr<Texture>& fallback) -> shared_ptr<Texture>
+	{
+		if (texturePath.empty())
+			return fallback;
+
+		try
+		{
+			shared_ptr<Texture> texture = renderBackend->CreateTextureFromFile(texturePath, nonSRGB);
+			return texture ? texture : fallback;
+		}
+		catch (const std::exception& e)
+		{
+			AppendCpuRuntimeTrace(L"[LoadModel] texture fallback: " + texturePath + L" error=" + AnsiToWString(e.what()));
+			return fallback;
+		}
+	};
 
 	const int numMaterials = assimpScene->mNumMaterials;
 	scene->Materials.reserve(numMaterials);
@@ -3888,7 +4460,7 @@ shared_ptr<Scene> Corona::LoadModel(string fileName)
 			wDiffuseTex = GetFileName(AnsiToWString(diffuseTexPath.C_Str()).c_str());
 		if (wDiffuseTex.length() != 0)
 		{
-			mat->Diffuse = renderBackend->CreateTextureFromFile(dir + wDiffuseTex, false);
+			mat->Diffuse = loadTextureOrDefault(dir + wDiffuseTex, false, DefaultWhiteTex);
 		}
 
 		if (!mat->Diffuse)
@@ -3900,7 +4472,7 @@ shared_ptr<Scene> Corona::LoadModel(string fileName)
 
 		if (wNormalTex.length() != 0)
 		{
-			mat->Normal = renderBackend->CreateTextureFromFile(dir + wNormalTex, true);
+			mat->Normal = loadTextureOrDefault(dir + wNormalTex, true, DefaultNormalTex);
 		}
 
 		if (!mat->Normal)
@@ -3914,7 +4486,7 @@ shared_ptr<Scene> Corona::LoadModel(string fileName)
 			wMetallicTex = GetFileName(AnsiToWString(metallicMapPath.C_Str()).c_str());
 		if (wMetallicTex.length() != 0)
 		{
-			mat->Metallic = renderBackend->CreateTextureFromFile(dir + wMetallicTex, true);
+			mat->Metallic = loadTextureOrDefault(dir + wMetallicTex, true, DefaultBlackTex);
 		}
 
 		if (!mat->Metallic)
@@ -3927,7 +4499,7 @@ shared_ptr<Scene> Corona::LoadModel(string fileName)
 			if (it != SponzaRoughnessMap.end())
 			{
 				wRoughnessTex = SponzaRoughnessMap[wNameStr] + L".png";
-				mat->Roughness = renderBackend->CreateTextureFromFile(dir + wRoughnessTex, true);
+				mat->Roughness = loadTextureOrDefault(dir + wRoughnessTex, true, DefaultRougnessTex);
 			}
 		}
 
@@ -3958,6 +4530,7 @@ shared_ptr<Scene> Corona::LoadModel(string fileName)
 
 		Mesh* mesh = new Mesh;
 		mesh->Owner = renderBackend.get();
+		mesh->transform = glm::mat4x4(1.0f);
 
 		mesh->NumVertices = asMesh->mNumVertices;
 		mesh->NumIndices = asMesh->mNumFaces * 3;
@@ -3973,9 +4546,23 @@ shared_ptr<Scene> Corona::LoadModel(string fileName)
 		{
 			for (int i = 0; i < mesh->NumVertices; ++i)
 			{
-				vertices[i].Position.x = asMesh->mVertices[i].x;
-				vertices[i].Position.y = asMesh->mVertices[i].y;
-				vertices[i].Position.z = asMesh->mVertices[i].z;
+				const glm::vec3 position(asMesh->mVertices[i].x, asMesh->mVertices[i].y, asMesh->mVertices[i].z);
+				vertices[i].Position = position;
+				if (!scene->bHasBounds)
+				{
+					scene->BoundsMin = position;
+					scene->BoundsMax = position;
+					scene->bHasBounds = true;
+				}
+				else
+				{
+					scene->BoundsMin.x = std::min(scene->BoundsMin.x, position.x);
+					scene->BoundsMin.y = std::min(scene->BoundsMin.y, position.y);
+					scene->BoundsMin.z = std::min(scene->BoundsMin.z, position.z);
+					scene->BoundsMax.x = std::max(scene->BoundsMax.x, position.x);
+					scene->BoundsMax.y = std::max(scene->BoundsMax.y, position.y);
+					scene->BoundsMax.z = std::max(scene->BoundsMax.z, position.z);
+				}
 			}
 		}
 
@@ -4280,18 +4867,13 @@ void Corona::OnUpdate()
 		glm::length(SkyColorBottom - PrevIndirectSkyColorBottom) > 0.0001f ||
 		abs(SkyIntensity - PrevIndirectSkyIntensity) > 0.0001f;
 	const bool indirectLightingChanged = indirectLightDirChanged || indirectLightIntensityChanged || indirectSkyChanged;
-	const bool bUseSpatialHashLightingHistory = DiffuseGIMode == EDiffuseGIMode::SPATIAL_HASH && bSpatialHashGIHistoryValid;
 	float spatialHashHistorySampleDecay = 1.0f;
 
 	if (indirectLightingChanged)
 	{
-		if (bUseSpatialHashLightingHistory)
+		if (DiffuseGIMode == EDiffuseGIMode::SPATIAL_HASH)
 		{
-			spatialHashHistorySampleDecay = 0.15f;
-			IndirectAccumulatedFrames = std::min(IndirectAccumulatedFrames, 7u);
-			bScreenProbeGIAtlasHistoryValid = false;
-			bScreenProbeGIHistoryValid = false;
-			bScreenProbeLightingBootstrapPending = false;
+			// Spatial hash GI keeps visible cells live and lets new rays converge the cache.
 		}
 		else
 		{
@@ -4476,6 +5058,8 @@ void Corona::OnRender()
 	double beginFrameMs = 0.0;
 	double executeMs = 0.0;
 	double endFrameMs = 0.0;
+
+	FlushSceneObjectChanges();
 
 	const auto beginFrameStart = CpuClock::now();
 	renderBackend->BeginFrame();
@@ -4841,6 +5425,40 @@ void Corona::OnRender()
 		if (!bCameraPathRecording)
 			ImGui::EndDisabled();
 
+		if (bCameraPathListDirty)
+			RefreshCameraPathList();
+
+		const bool bCameraPathSelectionBusy = bCameraPathRecording || bCameraPathPlaying || bCameraPathDumping;
+		if (bCameraPathSelectionBusy)
+			ImGui::BeginDisabled();
+		if (ImGui::Button("Refresh Paths"))
+		{
+			RefreshCameraPathList();
+			LastCameraPathStatus = L"Found " + std::to_wstring(static_cast<unsigned long long>(CameraPathEntries.size())) + L" saved camera path(s).";
+		}
+		ImGui::SameLine();
+		ImGui::SetNextItemWidth(360.0f);
+		const std::wstring selectedCameraPathName =
+			SelectedCameraPathIndex >= 0 && SelectedCameraPathIndex < static_cast<int>(CameraPathEntries.size()) ?
+			CameraPathEntries[SelectedCameraPathIndex].DisplayName :
+			L"No saved paths";
+		const std::string selectedCameraPathNameUtf8 = WideToUtf8(selectedCameraPathName);
+		if (ImGui::BeginCombo("Saved Paths", selectedCameraPathNameUtf8.c_str()))
+		{
+			for (int entryIndex = 0; entryIndex < static_cast<int>(CameraPathEntries.size()); ++entryIndex)
+			{
+				const bool bSelected = entryIndex == SelectedCameraPathIndex;
+				const std::string entryName = WideToUtf8(CameraPathEntries[entryIndex].DisplayName);
+				if (ImGui::Selectable(entryName.c_str(), bSelected))
+					SelectedCameraPathIndex = entryIndex;
+				if (bSelected)
+					ImGui::SetItemDefaultFocus();
+			}
+			ImGui::EndCombo();
+		}
+		if (bCameraPathSelectionBusy)
+			ImGui::EndDisabled();
+
 		if (CameraPathKeyframes.size() < 2 || bCameraPathRecording || bCameraPathDumping)
 			ImGui::BeginDisabled();
 		if (ImGui::Button(bCameraPathPlaying ? "Stop Playback" : "Play Camera Path"))
@@ -4853,6 +5471,15 @@ void Corona::OnRender()
 		if (CameraPathKeyframes.size() < 2 || bCameraPathRecording || bCameraPathDumping)
 			ImGui::EndDisabled();
 		ImGui::SameLine();
+		if (SelectedCameraPathIndex < 0 || bCameraPathRecording || bCameraPathPlaying || bCameraPathDumping)
+			ImGui::BeginDisabled();
+		if (ImGui::Button("Load Selected Path"))
+		{
+			LoadSelectedCameraPath();
+		}
+		if (SelectedCameraPathIndex < 0 || bCameraPathRecording || bCameraPathPlaying || bCameraPathDumping)
+			ImGui::EndDisabled();
+		ImGui::SameLine();
 		if (bCameraPathRecording || bCameraPathPlaying || bCameraPathDumping)
 			ImGui::BeginDisabled();
 		if (ImGui::Button("Load Latest Path"))
@@ -4860,6 +5487,26 @@ void Corona::OnRender()
 			LoadLatestCameraPath();
 		}
 		if (bCameraPathRecording || bCameraPathPlaying || bCameraPathDumping)
+			ImGui::EndDisabled();
+
+		if (SelectedCameraPathIndex < 0 || bCameraPathRecording || bCameraPathPlaying || bCameraPathDumping)
+			ImGui::BeginDisabled();
+		if (ImGui::Button("Play Selected Path"))
+		{
+			if (LoadSelectedCameraPath())
+				StartCameraPathPlayback();
+		}
+		if (SelectedCameraPathIndex < 0 || bCameraPathRecording || bCameraPathPlaying || bCameraPathDumping)
+			ImGui::EndDisabled();
+		ImGui::SameLine();
+		if (SelectedCameraPathIndex < 0 || bCameraPathRecording || bCameraPathPlaying || bCameraPathDumping)
+			ImGui::BeginDisabled();
+		if (ImGui::Button("Dump Selected Path"))
+		{
+			if (LoadSelectedCameraPath())
+				StartCameraPathDump();
+		}
+		if (SelectedCameraPathIndex < 0 || bCameraPathRecording || bCameraPathPlaying || bCameraPathDumping)
 			ImGui::EndDisabled();
 
 		if (CameraPathKeyframes.size() < 2 || bCameraPathRecording || bCameraPathPlaying || bCameraPathDumping)
@@ -4952,11 +5599,116 @@ void Corona::OnRender()
 		if (ImGui::Button("Recompile all shaders"))
 			bRecompileShaders = true;
 
-		// Example: Add ShaderBall scene at runtime
-		// if (ImGui::Button("Add ShaderBall Scene"))
-		// {
-		// 	AddScene(ShaderBall);
-		// }
+		ImGui::Separator();
+		ImGui::Text("Scene Center Objects");
+		auto drawCenterObjectToggle = [&](
+			const char* label,
+			const wchar_t* assetPath,
+			shared_ptr<Scene>& scene,
+			SceneObjectHandle& handle,
+			float targetExtent,
+			float roughness,
+			float metallic,
+			bool bOverrideRoughnessMetallic,
+			glm::vec3* position,
+			glm::vec3* rotationDegrees)
+		{
+			ImGui::PushID(label);
+
+			auto applyControlledTransform = [&]()
+			{
+				if (scene && handle != InvalidSceneObjectHandle && position && rotationDegrees)
+				{
+					SetSceneObjectTransform(
+						handle,
+						BuildCenteredSceneTransform(scene, targetExtent, *position, *rotationDegrees));
+				}
+			};
+
+			const bool bInScene = handle != InvalidSceneObjectHandle;
+			const std::string buttonLabel = std::string(bInScene ? "Remove " : "Add ") + label;
+			if (ImGui::Button(buttonLabel.c_str(), ImVec2(150.0f, 0.0f)))
+			{
+				if (bInScene)
+				{
+					RemoveSceneObject(handle);
+				}
+				else
+				{
+					if (!scene && assetPath)
+						scene = LoadModel(WideToUtf8(GetAssetFullPath(assetPath)));
+
+					const glm::vec3 objectPosition = position ? *position : glm::vec3(0.0f);
+					const glm::vec3 objectRotationDegrees = rotationDegrees ? *rotationDegrees : glm::vec3(0.0f);
+					handle = AddCenteredSceneObject(
+						scene,
+						targetExtent,
+						roughness,
+						metallic,
+						bOverrideRoughnessMetallic,
+						objectPosition,
+						objectRotationDegrees);
+				}
+			}
+
+			ImGui::SameLine();
+			if (!scene)
+			{
+				ImGui::TextDisabled("not loaded");
+			}
+			else
+			{
+				ImGui::Text("%s", handle != InvalidSceneObjectHandle ? "in scene" : "hidden");
+			}
+
+			if (position && rotationDegrees)
+			{
+				ImGui::SameLine();
+				ImGui::SetNextItemWidth(180.0f);
+				if (ImGui::DragFloat3("Position", &position->x, 1.0f, -1000.0f, 1000.0f, "%.1f"))
+					applyControlledTransform();
+
+				ImGui::SameLine();
+				ImGui::SetNextItemWidth(180.0f);
+				if (ImGui::DragFloat3("Rotation", &rotationDegrees->x, 1.0f, -180.0f, 180.0f, "%.1f deg"))
+					applyControlledTransform();
+			}
+
+			ImGui::PopID();
+		};
+		drawCenterObjectToggle(
+			"Buddha",
+			L"assets\\buddha\\buddha.obj",
+			Buddha,
+			BuddhaObject,
+			260.0f,
+			0.65f,
+			0.0f,
+			false,
+			&BuddhaCenterPosition,
+			&BuddhaCenterRotationDegrees);
+		drawCenterObjectToggle(
+			"ShaderBall",
+			L"assets\\shaderBall\\shaderBall.fbx",
+			ShaderBall,
+			ShaderBallObject,
+			220.0f,
+			ShaderBallRoughnessMultiplier,
+			1.0f,
+			false,
+			&ShaderBallCenterPosition,
+			&ShaderBallCenterRotationDegrees);
+		drawCenterObjectToggle(
+			"Pistol",
+			L"assets\\pistol\\pistol.obj",
+			Pistol,
+			PistolObject,
+			280.0f,
+			0.55f,
+			0.0f,
+			false,
+			&PistolCenterPosition,
+			&PistolCenterRotationDegrees);
 
 		ImGui::Text("\nArrow keys : rotate camera imGui\
 			\nWASD keys : move camera imGui\

@@ -22,7 +22,7 @@ void Corona::InitRaytracingSimpleGIPass()
 		shared_ptr<RTPipelineStateObject> TEMP_PSO_RT_GI = renderBackend->CreateRTPipelineStateObject();
 		if (!TEMP_PSO_RT_GI)
 			return;
-		TEMP_PSO_RT_GI->SetNumInstances(static_cast<uint32_t>(vecBLAS.size()));// scene->meshes.size();
+		TEMP_PSO_RT_GI->SetNumInstances(static_cast<uint32_t>(RayTracingInstances.size()));
 
 		TEMP_PSO_RT_GI->AddHitGroup("HitGroup", "chs", "");
 
@@ -73,7 +73,7 @@ void Corona::RaytraceGIPass()
 	renderBackend->ClearTextureUAVFloat(DiffuseGIRawAux.get(), clearGI);
 	renderBackend->ClearTextureUAVFloat(DiffuseGIRaw.get(), clearGI);
 
-	PSO_RT_GI->SetNumInstances(static_cast<uint32_t>(vecBLAS.size()));
+	PSO_RT_GI->SetNumInstances(static_cast<uint32_t>(RayTracingInstances.size()));
 	PSO_RT_GI->BeginShaderTable();
 
 	PSO_RT_GI->SetTextureUAV("global", "GIResultSH", DiffuseGIRawAux.get());
@@ -88,9 +88,9 @@ void Corona::RaytraceGIPass()
 	PSO_RT_GI->SetSampler("global", "sampleWrap", samplerWrap.get());
 
 	int i = 0;
-	for(auto&as : vecBLAS)
+	for (const RTInstanceDesc& instance : RayTracingInstances)
 	{
-		Mesh* mesh = as->MeshPtr;
+		Mesh* mesh = instance.BottomLevelAS->MeshPtr;
 		
 		Texture* diffuseTex = mesh->Draws[0].mat->Diffuse.get();
 		if (!diffuseTex)

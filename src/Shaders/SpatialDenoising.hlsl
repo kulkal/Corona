@@ -27,19 +27,44 @@ static const float wavelet_kernel[2][2] = {
 	{ wavelet_factor, wavelet_factor * wavelet_factor }
 };
 
+float SanitizeFloat(float value, float fallback)
+{
+    return (isnan(value) || isinf(value)) ? fallback : value;
+}
+
+float3 SanitizeFloat3(float3 value)
+{
+    return (any(isnan(value)) || any(isinf(value))) ? 0.0f.xxx : value;
+}
+
+float4 SanitizeFloat4(float4 value)
+{
+    return (any(isnan(value)) || any(isinf(value))) ? 0.0f.xxxx : value;
+}
+
+float3 SafeNormalize(float3 value, float3 fallback)
+{
+    value = SanitizeFloat3(value);
+    fallback = SanitizeFloat3(fallback);
+    float lenSq = dot(value, value);
+    return lenSq > 1e-12f ? value * rsqrt(lenSq) : fallback;
+}
+
 float3 LoadDiffuseRadiance(Texture2D GIResultColorTex, int2 pos)
 {
-    return GIResultColorTex[pos].xyz;
+    return max(SanitizeFloat3(GIResultColorTex[pos].xyz), 0.0f.xxx);
 }
 
 float4 LoadSpecularRadiance(Texture2D SpecularTex, int2 pos)
 {
-    return SpecularTex[pos];
+    float4 value = SanitizeFloat4(SpecularTex[pos]);
+    value.xyz = max(value.xyz, 0.0f.xxx);
+    return value;
 }
 
 float Luminance(float3 color)
 {
-    return dot(color, float3(0.2126, 0.7152, 0.0722));
+    return SanitizeFloat(dot(SanitizeFloat3(color), float3(0.2126, 0.7152, 0.0722)), 0.0f);
 }
 
 void Filter(Texture2D GIResultColorTex, uint2 Pos, inout float3 result)
@@ -54,7 +79,7 @@ void Filter(Texture2D GIResultColorTex, uint2 Pos, inout float3 result)
 
 	float CenterDepth = DepthTex[CenterPos];
 	float CenterZ = GetLinearDepthOpenGL(CenterDepth, ProjectionParams.z, ProjectionParams.w);
-	float3 CenterNormal = GeoNormalTex[CenterPos];
+	float3 CenterNormal = SafeNormalize(GeoNormalTex[CenterPos].xyz, float3(0.0f, 1.0f, 0.0f));
 
 	const int r = 1;
 	float3 SumColor = LoadDiffuseRadiance(GIResultColorTex, CenterPos);
@@ -78,7 +103,7 @@ void Filter(Texture2D GIResultColorTex, uint2 Pos, inout float3 result)
 			float DistZ = abs(CenterZ - SampleZ) * IndirectDiffuseWeightFactorDepth;
 			W *= exp(-DistZ / float(StepSize));
 
-			float3 Normal = GeoNormalTex[SamplePos];
+			float3 Normal = SafeNormalize(GeoNormalTex[SamplePos].xyz, CenterNormal);
 			W *= wavelet_kernel[abs(xx)][abs(yy)];
 
 			float GNdotGN = max(0.0, dot(CenterNormal, Normal));
@@ -103,7 +128,7 @@ void FilterSpecular(Texture2D SpecularTex, uint2 Pos, inout float4 result)
 	int2 CenterPos = int2(Pos);
 	float CenterDepth = DepthTex[CenterPos];
 	float CenterZ = GetLinearDepthOpenGL(CenterDepth, ProjectionParams.z, ProjectionParams.w);
-	float3 CenterNormal = GeoNormalTex[CenterPos];
+	float3 CenterNormal = SafeNormalize(GeoNormalTex[CenterPos].xyz, float3(0.0f, 1.0f, 0.0f));
 	float4 CenterSpecular = LoadSpecularRadiance(SpecularTex, CenterPos);
 
 	const int r = 1;
@@ -123,7 +148,7 @@ void FilterSpecular(Texture2D SpecularTex, uint2 Pos, inout float4 result)
 
 			float SampleDepth = DepthTex[SamplePos];
 			float SampleZ = GetLinearDepthOpenGL(SampleDepth, ProjectionParams.z, ProjectionParams.w);
-			float3 SampleNormal = GeoNormalTex[SamplePos];
+			float3 SampleNormal = SafeNormalize(GeoNormalTex[SamplePos].xyz, CenterNormal);
 			float4 SampleSpecular = LoadSpecularRadiance(SpecularTex, SamplePos);
 
 			float depthDelta = abs(CenterZ - SampleZ) * IndirectDiffuseWeightFactorDepth;
@@ -135,12 +160,14 @@ void FilterSpecular(Texture2D SpecularTex, uint2 Pos, inout float4 result)
 			W *= normalWeight;
 			W *= exp(-luminanceDelta * 4.0);
 
+			W = max(SanitizeFloat(W, 0.0f), 0.0f);
 			SumSpecular += SampleSpecular * W;
 			SumW += W;
 		}
 	}
 
-	result = SumSpecular / max(SumW, 1e-4f);
+	result = SanitizeFloat4(SumSpecular / max(SumW, 1e-4f));
+	result.xyz = max(result.xyz, 0.0f.xxx);
 }
 
 [numthreads(32, 32, 1)]
@@ -155,8 +182,8 @@ void SpatialFilter(uint3 DTid : SV_DispatchThreadID)
     if (AccumulatedFrames < 2)
     {
         OutGIResultSH[DTid.xy] = 0.0f.xxxx;
-        OutGIResultColor[DTid.xy] = float4(InGIResultColorTex[DTid.xy].xyz, 1.0f);
-        OutSpecularGI[DTid.xy] = InSpecularGITex[DTid.xy];
+        OutGIResultColor[DTid.xy] = float4(LoadDiffuseRadiance(InGIResultColorTex, DTid.xy), 1.0f);
+        OutSpecularGI[DTid.xy] = LoadSpecularRadiance(InSpecularGITex, DTid.xy);
         return;
     }
 
@@ -166,6 +193,6 @@ void SpatialFilter(uint3 DTid : SV_DispatchThreadID)
     FilterSpecular(InSpecularGITex, DTid.xy, ResultSpecular);
 
     OutGIResultSH[DTid.xy] = 0.0f.xxxx;
-    OutGIResultColor[DTid.xy] = float4(ResultDiffuse, 1.0f);
-    OutSpecularGI[DTid.xy] = ResultSpecular;
+    OutGIResultColor[DTid.xy] = float4(max(SanitizeFloat3(ResultDiffuse), 0.0f.xxx), 1.0f);
+    OutSpecularGI[DTid.xy] = SanitizeFloat4(ResultSpecular);
 }

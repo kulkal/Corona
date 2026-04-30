@@ -22,7 +22,7 @@ void Corona::InitRaytracingShadowPass()
 		shared_ptr<RTPipelineStateObject> TEMP_PSO_RT_SHADOW = renderBackend->CreateRTPipelineStateObject();
 		if (!TEMP_PSO_RT_SHADOW)
 			return;
-		TEMP_PSO_RT_SHADOW->SetNumInstances(static_cast<uint32_t>(vecBLAS.size()));// scene->meshes.size(); // important for cbv allocation & shadertable size.
+		TEMP_PSO_RT_SHADOW->SetNumInstances(static_cast<uint32_t>(RayTracingInstances.size())); // important for cbv allocation & shadertable size.
 
 		// new interface
 		TEMP_PSO_RT_SHADOW->AddHitGroup("HitGroup", "", "anyhit");
@@ -66,14 +66,14 @@ void Corona::RaytraceShadowPass()
 
 	renderBackend->TransitionTexture(ShadowBuffer.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
 
-	PSO_RT_SHADOW->SetNumInstances(static_cast<uint32_t>(vecBLAS.size()));
+	PSO_RT_SHADOW->SetNumInstances(static_cast<uint32_t>(RayTracingInstances.size()));
 
 	PSO_RT_SHADOW->BeginShaderTable();
 
 	int i = 0;
-	for (auto&as : vecBLAS)
+	for (const RTInstanceDesc& instance : RayTracingInstances)
 	{
-		Mesh* mesh = as->MeshPtr;
+		Mesh* mesh = instance.BottomLevelAS->MeshPtr;
 		Texture* diffuseTex = mesh->Draws[0].mat->Diffuse.get();
 
 		if (!diffuseTex)
