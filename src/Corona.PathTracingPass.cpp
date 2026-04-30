@@ -131,11 +131,6 @@ void Corona::PathTracingPass()
 	PSO_PATH_TRACING->SetCBVValue("global", "ViewParameter", &PathTracingViewParam);
 	PSO_PATH_TRACING->SetSampler("global", "sampleWrap", samplerWrap.get());
 
-	VertexBuffer* rtSceneVertexBuffer = nullptr;
-	IndexBuffer* rtSceneIndexBuffer = nullptr;
-	if (!GetRayTracingSceneGeometry(rtSceneVertexBuffer, rtSceneIndexBuffer))
-		return;
-
 	int i = 0;
 	for(auto& as : vecBLAS)
 	{
@@ -160,7 +155,7 @@ void Corona::PathTracingPass()
 		PSO_PATH_TRACING->ResetHitProgram(i);
 
 		PSO_PATH_TRACING->StartHitProgram("HitGroup", i);
-		PSO_PATH_TRACING->AddSceneGeometrySRVsToHitProgram("HitGroup", rtSceneVertexBuffer, rtSceneIndexBuffer, i);
+		PSO_PATH_TRACING->AddSceneGeometrySRVsToHitProgram("HitGroup", mesh->Vb.get(), mesh->Ib.get(), i);
 		PSO_PATH_TRACING->AddBufferSRVToHitProgram("HitGroup", InstancePropertyBuffer.get(), i);
 		PSO_PATH_TRACING->AddTextureSRVToHitProgram("HitGroup", diffuseTex, i);
 		PSO_PATH_TRACING->AddTextureSRVToHitProgram("HitGroup", normalTex, i);

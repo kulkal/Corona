@@ -533,8 +533,6 @@ public:
 	UINT NumVertices;
 
 	UINT VertexStride;
-	UINT RtVertexOffset = 0;
-	UINT RtIndexOffset = 0;
 
 	DXGI_FORMAT IndexFormat = DXGI_FORMAT_R32_UINT;
 
@@ -558,8 +556,6 @@ public:
 public:
 	vector<shared_ptr<Mesh>> meshes;
 	vector<shared_ptr<Material>> Materials;
-	shared_ptr<VertexBuffer> RtSceneVertexBuffer;
-	shared_ptr<IndexBuffer> RtSceneIndexBuffer;
 public:
 };
 

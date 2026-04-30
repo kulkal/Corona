@@ -1592,6 +1592,8 @@ void Corona::GBufferPass()
 	if (!bMultiThreadRendering)
 	{
 		DrawScene(Sponza, SponzaRoughnessMultiplier, 0, false);
+		if (Buddha)
+			DrawScene(Buddha, 0.0f, 0.0f, false);
 		//DrawScene(ShaderBall, ShaderBallRoughnessMultiplier, 1, true);
 	}
 	else

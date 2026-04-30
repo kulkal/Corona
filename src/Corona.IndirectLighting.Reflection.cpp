@@ -91,11 +91,6 @@ void Corona::RaytraceReflectionPass()
 	PSO_RT_REFLECTION->SetSampler("global", "sampleWrap", samplerWrap.get());
 
 
-	VertexBuffer* rtSceneVertexBuffer = nullptr;
-	IndexBuffer* rtSceneIndexBuffer = nullptr;
-	if (!GetRayTracingSceneGeometry(rtSceneVertexBuffer, rtSceneIndexBuffer))
-		return;
-
 	int i = 0;
 	for(auto&as : vecBLAS)
 	{
@@ -107,7 +102,7 @@ void Corona::RaytraceReflectionPass()
 		PSO_RT_REFLECTION->ResetHitProgram(i);
 
 		PSO_RT_REFLECTION->StartHitProgram("HitGroup", i);
-		PSO_RT_REFLECTION->AddSceneGeometrySRVsToHitProgram("HitGroup", rtSceneVertexBuffer, rtSceneIndexBuffer, i);
+		PSO_RT_REFLECTION->AddSceneGeometrySRVsToHitProgram("HitGroup", mesh->Vb.get(), mesh->Ib.get(), i);
 		PSO_RT_REFLECTION->AddTextureSRVToHitProgram("HitGroup", diffuseTex, i);
 		PSO_RT_REFLECTION->AddBufferSRVToHitProgram("HitGroup", InstancePropertyBuffer.get(), i);
 

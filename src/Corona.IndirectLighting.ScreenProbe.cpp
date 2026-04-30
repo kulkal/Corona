@@ -201,11 +201,6 @@ void Corona::ScreenProbeRaytraceGIPass()
 	PSO_RT_SCREEN_PROBE_GI->SetSampler("global", "sampleWrap", samplerWrap.get());
 	PSO_RT_SCREEN_PROBE_GI->SetSampler("global", "historyClamp", samplerBilinearWrap.get());
 
-	VertexBuffer* rtSceneVertexBuffer = nullptr;
-	IndexBuffer* rtSceneIndexBuffer = nullptr;
-	if (!GetRayTracingSceneGeometry(rtSceneVertexBuffer, rtSceneIndexBuffer))
-		return;
-
 	int i = 0;
 	for (auto& as : vecBLAS)
 	{
@@ -216,7 +211,7 @@ void Corona::ScreenProbeRaytraceGIPass()
 
 		PSO_RT_SCREEN_PROBE_GI->ResetHitProgram(i);
 		PSO_RT_SCREEN_PROBE_GI->StartHitProgram("HitGroup", i);
-		PSO_RT_SCREEN_PROBE_GI->AddSceneGeometrySRVsToHitProgram("HitGroup", rtSceneVertexBuffer, rtSceneIndexBuffer, i);
+		PSO_RT_SCREEN_PROBE_GI->AddSceneGeometrySRVsToHitProgram("HitGroup", mesh->Vb.get(), mesh->Ib.get(), i);
 		PSO_RT_SCREEN_PROBE_GI->AddTextureSRVToHitProgram("HitGroup", diffuseTex, i);
 		PSO_RT_SCREEN_PROBE_GI->AddBufferSRVToHitProgram("HitGroup", InstancePropertyBuffer.get(), i);
 		i++;

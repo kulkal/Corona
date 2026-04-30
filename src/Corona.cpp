@@ -3741,10 +3741,18 @@ void Corona::LoadAssets()
 	// glm::mat4x4 translatemat = glm::translate(glm::vec3(-150, 20, 0));
 	// ShaderBall->SetTransform(scaleMat* translatemat );
 
-	//Buddha = LoadModel("buddha/buddha.obj");
-
-	/*glm::mat4x4 buddhaTM = glm::scale(vec3(100, 100, 100));
-	Buddha->SetTransform(buddhaTM);*/
+	if (!Buddha)
+	{
+		Buddha = LoadModel(WideToUtf8(GetAssetFullPath(L"assets\\buddha\\buddha.obj")));
+		if (Buddha)
+		{
+			constexpr float buddhaScale = 260.0f;
+			glm::mat4x4 buddhaTM =
+				glm::translate(glm::vec3(0.0f, 0.445945f * buddhaScale, 0.0f)) *
+				glm::scale(glm::vec3(buddhaScale));
+			Buddha->SetTransform(buddhaTM);
+		}
+	}
 
 	// Describe and create a sampler.
 	if (!samplerWrap)
@@ -3944,21 +3952,6 @@ shared_ptr<Scene> Corona::LoadModel(string fileName)
 	};
 	const UINT numMeshes = assimpScene->mNumMeshes;
 
-	UINT totalNumVert = 0;
-	UINT totalNumIndex = 0;
-	for (UINT i = 0; i < numMeshes; ++i)
-	{
-		aiMesh* asMesh = assimpScene->mMeshes[i];
-
-		totalNumVert += asMesh->mNumVertices;
-		totalNumIndex += asMesh->mNumFaces * 3;
-	}
-
-	vector<Vertex> rtSceneVertices;
-	vector<UINT32> rtSceneIndices;
-	rtSceneVertices.reserve(totalNumVert);
-	rtSceneIndices.reserve(totalNumIndex);
-
 	for (UINT i = 0; i < numMeshes; ++i)
 	{
 		aiMesh* asMesh = assimpScene->mMeshes[i];
@@ -4023,11 +4016,6 @@ shared_ptr<Scene> Corona::LoadModel(string fileName)
 			indices[triIdx * 3 + 2] = asMesh->mFaces[triIdx].mIndices[2];
 		}
 
-		mesh->RtVertexOffset = static_cast<UINT>(rtSceneVertices.size());
-		mesh->RtIndexOffset = static_cast<UINT>(rtSceneIndices.size());
-		rtSceneVertices.insert(rtSceneVertices.end(), vertices.begin(), vertices.end());
-		rtSceneIndices.insert(rtSceneIndices.end(), indices.begin(), indices.end());
-
 		mesh->Vb = renderBackend->CreateVertexBuffer(sizeof(Vertex) * mesh->NumVertices, sizeof(Vertex), vertices.data());
 		mesh->VertexStride = sizeof(Vertex);
 		mesh->IndexFormat = DXGI_FORMAT_R32_UINT;
@@ -4046,18 +4034,6 @@ shared_ptr<Scene> Corona::LoadModel(string fileName)
 		mesh->Draws.push_back(dc);
 
 		scene->meshes.push_back(shared_ptr<Mesh>(mesh));
-	}
-
-	if (renderBackend && !rtSceneVertices.empty() && !rtSceneIndices.empty())
-	{
-		scene->RtSceneVertexBuffer = renderBackend->CreateVertexBuffer(
-			static_cast<UINT>(sizeof(Vertex) * rtSceneVertices.size()),
-			sizeof(Vertex),
-			rtSceneVertices.data());
-		scene->RtSceneIndexBuffer = renderBackend->CreateIndexBuffer(
-			DXGI_FORMAT_R32_UINT,
-			static_cast<UINT>(sizeof(UINT32) * rtSceneIndices.size()),
-			rtSceneIndices.data());
 	}
 
 	shared_ptr<Scene> scenePtr = shared_ptr<Scene>(scene);

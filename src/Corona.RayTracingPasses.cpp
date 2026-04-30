@@ -42,8 +42,8 @@ void Corona::UpdateInstancePropertyBuffer()
 	for (size_t i = 0; i < instanceCount; ++i)
 	{
 		instanceProperties[i].WorldMatrix = glm::transpose(vecBLAS[i]->MeshPtr->transform);
-		instanceProperties[i].VertexOffset = vecBLAS[i]->MeshPtr->RtVertexOffset;
-		instanceProperties[i].IndexOffset = vecBLAS[i]->MeshPtr->RtIndexOffset;
+		instanceProperties[i].VertexOffset = 0;
+		instanceProperties[i].IndexOffset = 0;
 	}
 
 	if (renderBackend && renderBackend->GetAPI() == ERenderBackendAPI::Vulkan)
@@ -76,19 +76,6 @@ void Corona::UpdateInstancePropertyBuffer()
 	InstancePropertyBuffer->resource->Unmap(0, nullptr);
 }
 
-bool Corona::GetRayTracingSceneGeometry(VertexBuffer*& outVertexBuffer, IndexBuffer*& outIndexBuffer) const
-{
-	outVertexBuffer = nullptr;
-	outIndexBuffer = nullptr;
-
-	if (!Sponza || !Sponza->RtSceneVertexBuffer || !Sponza->RtSceneIndexBuffer)
-		return false;
-
-	outVertexBuffer = Sponza->RtSceneVertexBuffer.get();
-	outIndexBuffer = Sponza->RtSceneIndexBuffer.get();
-	return true;
-}
-
 void Corona::RebuildAccelerationStructures()
 {
 	// Wait for GPU to finish using current structures
@@ -115,7 +102,9 @@ void Corona::AddScene(shared_ptr<Scene> scene)
 
 void Corona::InitRaytracingData()
 {
-	UINT NumTotalMesh = Sponza->meshes.size();
+	UINT NumTotalMesh = Sponza ? static_cast<UINT>(Sponza->meshes.size()) : 0u;
+	if (Buddha)
+		NumTotalMesh += static_cast<UINT>(Buddha->meshes.size());
 	vecBLAS.reserve(NumTotalMesh);
 
 	// Create initial instance property buffer (large enough for many instances)
@@ -124,7 +113,10 @@ void Corona::InitRaytracingData()
 	NAME_D3D12_OBJECT(InstancePropertyBuffer->resource);
 
 	// Add initial scene(s)
-	AddScene(Sponza);
+	if (Sponza)
+		AddScene(Sponza);
+	if (Buddha)
+		AddScene(Buddha);
 	//AddScene(ShaderBall);
 }
 

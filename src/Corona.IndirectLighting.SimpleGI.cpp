@@ -87,11 +87,6 @@ void Corona::RaytraceGIPass()
 	PSO_RT_GI->SetCBVValue("global", "ViewParameter", &RTGIViewParam);
 	PSO_RT_GI->SetSampler("global", "sampleWrap", samplerWrap.get());
 
-	VertexBuffer* rtSceneVertexBuffer = nullptr;
-	IndexBuffer* rtSceneIndexBuffer = nullptr;
-	if (!GetRayTracingSceneGeometry(rtSceneVertexBuffer, rtSceneIndexBuffer))
-		return;
-
 	int i = 0;
 	for(auto&as : vecBLAS)
 	{
@@ -104,7 +99,7 @@ void Corona::RaytraceGIPass()
 		PSO_RT_GI->ResetHitProgram(i);
 
 		PSO_RT_GI->StartHitProgram("HitGroup", i);
-		PSO_RT_GI->AddSceneGeometrySRVsToHitProgram("HitGroup", rtSceneVertexBuffer, rtSceneIndexBuffer, i);
+		PSO_RT_GI->AddSceneGeometrySRVsToHitProgram("HitGroup", mesh->Vb.get(), mesh->Ib.get(), i);
 		PSO_RT_GI->AddTextureSRVToHitProgram("HitGroup", diffuseTex, i);
 		PSO_RT_GI->AddBufferSRVToHitProgram("HitGroup", InstancePropertyBuffer.get(), i);
 

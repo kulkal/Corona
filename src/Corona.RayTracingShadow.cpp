@@ -70,11 +70,6 @@ void Corona::RaytraceShadowPass()
 
 	PSO_RT_SHADOW->BeginShaderTable();
 
-	VertexBuffer* rtSceneVertexBuffer = nullptr;
-	IndexBuffer* rtSceneIndexBuffer = nullptr;
-	if (!GetRayTracingSceneGeometry(rtSceneVertexBuffer, rtSceneIndexBuffer))
-		return;
-
 	int i = 0;
 	for (auto&as : vecBLAS)
 	{
@@ -87,7 +82,7 @@ void Corona::RaytraceShadowPass()
 		PSO_RT_SHADOW->ResetHitProgram(i);
 		PSO_RT_SHADOW->StartHitProgram("HitGroup", i);
 
-		PSO_RT_SHADOW->AddSceneGeometrySRVsToHitProgram("HitGroup", rtSceneVertexBuffer, rtSceneIndexBuffer, i);
+		PSO_RT_SHADOW->AddSceneGeometrySRVsToHitProgram("HitGroup", mesh->Vb.get(), mesh->Ib.get(), i);
 		PSO_RT_SHADOW->AddTextureSRVToHitProgram("HitGroup", diffuseTex, i);
 		PSO_RT_SHADOW->AddBufferSRVToHitProgram("HitGroup", InstancePropertyBuffer.get(), i);
 

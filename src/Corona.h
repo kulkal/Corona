@@ -943,7 +943,6 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	
 	// Raytracing helper functions
 	void UpdateInstancePropertyBuffer();
-	bool GetRayTracingSceneGeometry(VertexBuffer*& outVertexBuffer, IndexBuffer*& outIndexBuffer) const;
 	void RebuildAccelerationStructures();
 	void InitRaytracingShadowPass();
 	void InitRaytracingReflectionPass();
