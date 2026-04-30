@@ -103,6 +103,8 @@ float3x3 buildTBN(float3 normal) {
     // TODO: Maybe try approach from here (Building an Orthonormal Basis, Revisited): 
     // https://graphics.pixar.com/library/OrthonormalB/paper.pdf
 
+    normal = CommonSafeNormalize(normal, float3(0.0f, 1.0f, 0.0f));
+
     // Pick random vector for generating orthonormal basis
     static const float3 rvec1 = float3(0.847100675f, 0.207911700f, 0.489073813f);
     static const float3 rvec2 = float3(-0.639436305f, -0.390731126f, 0.662155867f);
@@ -114,8 +116,8 @@ float3x3 buildTBN(float3 normal) {
         rvec = rvec1;
 
     // Construct TBN matrix to orient sampling hemisphere along the surface normal
-    float3 b1 = normalize(rvec - normal * dot(rvec, normal));
-    float3 b2 = cross(normal, b1);
+    float3 b1 = CommonSafeNormalize(rvec - normal * dot(rvec, normal), float3(1.0f, 0.0f, 0.0f));
+    float3 b2 = CommonSafeNormalize(cross(normal, b1), float3(0.0f, 0.0f, 1.0f));
     float3x3 tbn = float3x3(b1, b2, normal);
 
     return tbn;
@@ -141,7 +143,7 @@ void rayGen
 	float2 UV = crd / dims;
 	float DeviceDepth = DepthTex.SampleLevel(sampleWrap, UV, 0).x;
 
-	float3 WorldNormal = normalize(WorldNormalTex.SampleLevel(sampleWrap, UV, 0).xyz);
+	float3 WorldNormal = CommonSafeNormalize(WorldNormalTex.SampleLevel(sampleWrap, UV, 0).xyz, float3(0.0f, 1.0f, 0.0f));
   
 
     float LinearDepth = GetLinearDepthOpenGL(DeviceDepth, ProjectionParams.z, ProjectionParams.w) ;
@@ -163,30 +165,35 @@ void rayGen
 
     float2 RandomUV = LoadRayNoise2(BlueNoiseTex, launchIndex.xy, FrameCounter, BlueNoiseOffsetStride, NoiseMode);
 
+    float LightIntensity = max(CommonSanitizeFloat(LightDirAndIntensity.w, 0.0f), 0.0f);
+
+    float3 viewRay = CommonSafeNormalize(float3(d.x * aspectRatio, -d.y, -1.0f), float3(0.0f, 0.0f, -1.0f));
+    float3 ViewDir = CommonSafeNormalize(mul(float4(viewRay, 0.0f), InvViewMatrix).xyz, -WorldNormal);
+    if (dot(WorldNormal, -ViewDir) < 0.0f)
+        WorldNormal = -WorldNormal;
+
     float3 sampleDirLocal = SampleHemisphereCosine(RandomUV.x, RandomUV.y);
-
-
     float3x3 tbn = buildTBN(WorldNormal);
-    float3 sampleDirWorld = mul(sampleDirLocal, tbn);
+    float3 sampleDirWorld = CommonSafeNormalize(mul(sampleDirLocal, tbn), WorldNormal);
 
     // https://computergraphics.stackexchange.com/questions/4664/does-cosine-weighted-hemisphere-sampling-still-require-ndotl-when-calculating-co
     // https://computergraphics.stackexchange.com/questions/8578/how-to-set-equivalent-pdfs-for-cosine-weighted-and-uniform-sampled-hemispheres
     float cosTerm = 1;//dot(float3(0, 0, 1), sampleDirLocal)*2;
 
-    float LightIntensity = LightDirAndIntensity.w;
-
-    float3 ViewDir = mul(normalize(float3(d.x * aspectRatio, -d.y, -1)), InvViewMatrix);
-
 	RayDesc ray;
 	ray.Origin = WorldPos + WorldNormal * 0.5; //    mul(float4(0, 0, 0, 1), InvViewMatrix).xyz;
-	ray.Direction = normalize(sampleDirWorld);//reflect(ViewDir, WorldNormal);
+	ray.Direction = sampleDirWorld;//reflect(ViewDir, WorldNormal);
 
-	ray.TMin = 0;
+	ray.TMin = 0.001f;
     ray.TMax = MAX_HIT_DIST;
 
 	RayPayload payload;
+    payload.position = 0.0f.xxx;
+    payload.color = 0.0f.xxx;
+    payload.normal = WorldNormal;
     payload.coneWidth = 0;
     payload.spreadAngle = ViewSpreadAngle; 
+    payload.bHit = false;
 	TraceRay(
         gRtScene,
         RT_GI_SURFACE_RAY_FLAGS,
@@ -210,12 +217,13 @@ void rayGen
     }
     else
     {
-        float3 LightDir = normalize(LightDirAndIntensity.xyz);
+        float3 LightDir = CommonSafeNormalize(LightDirAndIntensity.xyz, float3(0.0f, 1.0f, 0.0f));
+        payload.normal = CommonSafeNormalize(payload.normal, WorldNormal);
         RayDesc shadowRay;
-        shadowRay.Origin = payload.position + payload.normal *0.5;
+        shadowRay.Origin = payload.position + payload.normal * 0.5f;
         shadowRay.Direction = LightDir;
 
-        shadowRay.TMin = 0;
+        shadowRay.TMin = 0.001f;
         shadowRay.TMax = MAX_HIT_DIST;
 
         ShadowRayPayload shadowPayload;
@@ -233,21 +241,16 @@ void rayGen
             shadowRay,
             shadowPayload);
 
-        float3 Albedo = payload.color;
+        float3 Albedo = max(CommonSanitizeFloat3(payload.color, 1.0f.xxx), 0.0f.xxx);
         SH sh_indirect = init_SH();
-        float3 Irradiance = 0.0f.xxx;
+        float3 Irradiance = EvaluateSkyDiffuseBounce(payload.normal) * Albedo * INV_PI;
         if(shadowPayload.bHit == false)
         {
             // miss - apply light color
             float NdotL = saturate(dot(LightDir, payload.normal));
-            Irradiance = NdotL * LightIntensity * LightColor * Albedo * INV_PI;
-            sh_indirect = irradiance_to_SH(Irradiance, sampleDirWorld);
+            Irradiance += NdotL * LightIntensity * max(CommonSanitizeFloat3(LightColor, 1.0f.xxx), 0.0f.xxx) * Albedo * INV_PI;
         }
-        else
-        {
-            Irradiance = 0.0f.xxx;
-            sh_indirect = irradiance_to_SH(Irradiance, sampleDirWorld);
-        }
+        sh_indirect = irradiance_to_SH(Irradiance, sampleDirWorld);
 
         GIResultSH[launchIndex.xy] = sh_indirect.shY;
         GIResultColor[launchIndex.xy] = float4(Irradiance, 1.0f);
@@ -275,8 +278,11 @@ void chs(inout RayPayload payload, in BuiltInTriangleIntersectionAttributes attr
     uint instanceID = InstanceID();
     Vertex vertex = GetSurfaceVertexAttributes(instanceID, vertices, indices, InstanceProperty, triangleIndex, barycentrics);
 
-    payload.position = vertex.position;
-    payload.normal = vertex.normal;
+    payload.position = CommonSanitizeFloat3(vertex.position, WorldRayOrigin() + WorldRayDirection() * RayTCurrent());
+    float3 hitNormal = CommonSafeNormalize(vertex.normal, -WorldRayDirection());
+    if (dot(hitNormal, -WorldRayDirection()) < 0.0f)
+        hitNormal = -hitNormal;
+    payload.normal = hitNormal;
 
     uint w, h;
     AlbedoTex.GetDimensions(w, h);
@@ -289,7 +295,7 @@ void chs(inout RayPayload payload, in BuiltInTriangleIntersectionAttributes attr
     float NoV = 1;//dot(V, vertex.normal);
     float mipLevel = computeTextureLOD(NoV, rayConeWidth, vertex.textureLODConstant);
 
-    payload.color = AlbedoTex.SampleLevel(sampleWrap, vertex.uv, mipLevel).xyz;
+    payload.color = max(CommonSanitizeFloat3(AlbedoTex.SampleLevel(sampleWrap, vertex.uv, mipLevel).xyz, 1.0f.xxx), 0.0f.xxx);
 
     payload.bHit = true;
 }

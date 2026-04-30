@@ -18,6 +18,18 @@ float3 CommonSafeNormalize(float3 value, float3 fallback)
     return fallbackLenSq > 1e-8f ? fallback * rsqrt(fallbackLenSq) : fallback;
 }
 
+float CommonSanitizeFloat(float value, float fallback)
+{
+    return (isnan(value) || isinf(value)) ? fallback : value;
+}
+
+float3 CommonSanitizeFloat3(float3 value, float3 fallback)
+{
+    if (any(isnan(value)) || any(isinf(value)))
+        return fallback;
+    return value;
+}
+
 
 float GetLinearDepth(float DeviceDepth, float ParamX, float ParamY, float ParamZ)
 {
@@ -313,11 +325,21 @@ float calcTriangleArea(float3 posA, float3 posB, float3 posC)
 float computeTextureLOD(in float NdotV, in float rayConeWidth, in float triangleLodConstant)
 {
     // Eq. 34
-    float lambda = triangleLodConstant;
-    lambda += log2(abs(rayConeWidth));
+    float lambda = CommonSanitizeFloat(triangleLodConstant, 0.0f);
+    lambda += log2(max(abs(rayConeWidth), 1e-6f));
     //lambda += halfLog2NumTexPixels; //< Now built into triangleLodConstant
-    lambda -= log2(abs(NdotV));
-    return lambda;
+    lambda -= log2(max(abs(NdotV), 1e-4f));
+    return clamp(CommonSanitizeFloat(lambda, 0.0f), 0.0f, 16.0f);
+}
+
+float computeTriangleTextureLODConstant(float triangleArea, float triangleUvArea)
+{
+    triangleArea = CommonSanitizeFloat(triangleArea, 0.0f);
+    triangleUvArea = CommonSanitizeFloat(triangleUvArea, 0.0f);
+    if (triangleArea <= 1e-8f || triangleUvArea <= 1e-12f)
+        return 0.0f;
+
+    return CommonSanitizeFloat(0.5f * log2(triangleUvArea / triangleArea), 0.0f);
 }
 
 struct Vertex
@@ -458,7 +480,7 @@ Vertex GetVertexAttributes(uint instanceID, ByteAddressBuffer vb, ByteAddressBuf
     float3 uvC = float3(uv2.x, uv2.y, 0.f);   
     float triangleUvArea = calcTriangleArea(uvA, uvB, uvC);
     
-    v.textureLODConstant = 0.5 * log2(triangleUvArea / triangleArea);
+    v.textureLODConstant = computeTriangleTextureLODConstant(triangleArea, triangleUvArea);
 
     return v;
 }
@@ -519,7 +541,7 @@ Vertex GetSurfaceVertexAttributes(uint instanceID, ByteAddressBuffer vb, ByteAdd
     float3 uvC = float3(uv2.x, uv2.y, 0.f);   
     float triangleUvArea = calcTriangleArea(uvA, uvB, uvC);
     
-    v.textureLODConstant = 0.5 * log2(triangleUvArea / triangleArea);
+    v.textureLODConstant = computeTriangleTextureLODConstant(triangleArea, triangleUvArea);
 
     return v;
 }
