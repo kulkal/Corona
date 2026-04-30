@@ -9,6 +9,16 @@ bin/
 # no obj folder
 obj/
 
+# runtime-local state and generated diagnostics
+config/
+logs/
+dumps/
+camera_state.cfg
+sl.log
+src/camera_state.cfg
+src/imgui.ini
+src/sl.log
+
 # vs filters
 *.filters
 # no .a files

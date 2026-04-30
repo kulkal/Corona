@@ -308,7 +308,9 @@ void SimpleDX12::EndFrame()
 {
 	const UINT presentFlags = bTearingSupported ? DXGI_PRESENT_ALLOW_TEARING : 0;
 #if USE_AFTERMATH
-	ThrowIfFailed(m_swapChain->Present(0, presentFlags), &AM_CL_Handle);
+	GFSDK_Aftermath_ContextHandle activeAftermathContext =
+		(GlobalCmdList && GlobalCmdList->AftermathContext) ? GlobalCmdList->AftermathContext : nullptr;
+	ThrowIfFailed(m_swapChain->Present(0, presentFlags), activeAftermathContext ? &activeAftermathContext : nullptr);
 #else
 	ThrowIfFailed(m_swapChain->Present(0, presentFlags), nullptr);
 
@@ -421,9 +423,9 @@ void SimpleDX12::ShutdownImGuiBackend()
 void SimpleDX12::EmitGpuCrashMarker(const char* markerName)
 {
 #if USE_AFTERMATH
-	if (markerName)
+	if (bAftermathEnabled && markerName && GlobalCmdList && GlobalCmdList->AftermathContext)
 	{
-		NVAftermathMarker(AM_CL_Handle, markerName);
+		NVAftermathMarker(GlobalCmdList->AftermathContext, markerName);
 	}
 #else
 	(void)markerName;
@@ -930,12 +932,26 @@ SimpleDX12::SimpleDX12(ComPtr<ID3D12Device5> InDevice)
 	:Device(InDevice)
 {
 #if USE_AFTERMATH
-	GFSDK_Aftermath_Result result = GFSDK_Aftermath_DX12_Initialize(GFSDK_Aftermath_Version::GFSDK_Aftermath_Version_API, GFSDK_Aftermath_FeatureFlags::GFSDK_Aftermath_FeatureFlags_Maximum, Device.Get());
+	const GFSDK_Aftermath_Result result = GFSDK_Aftermath_DX12_Initialize(
+		GFSDK_Aftermath_Version::GFSDK_Aftermath_Version_API,
+		GFSDK_Aftermath_FeatureFlags::GFSDK_Aftermath_FeatureFlags_EnableMarkers |
+			GFSDK_Aftermath_FeatureFlags::GFSDK_Aftermath_FeatureFlags_EnableResourceTracking,
+		Device.Get());
+	bAftermathEnabled =
+		result == GFSDK_Aftermath_Result::GFSDK_Aftermath_Result_Success ||
+		result == GFSDK_Aftermath_Result::GFSDK_Aftermath_Result_FAIL_AlreadyInitialized;
+	if (!bAftermathEnabled)
+		OutputDebugStringA("NVIDIA Aftermath DX12 initialization failed; GPU crash markers disabled.\n");
 #endif
 
 	FrameFenceValueVec.resize(NumFrame);
 
-	CmdQ = unique_ptr<CommandQueue>(new CommandQueue(Device.Get()));
+	CmdQ = unique_ptr<CommandQueue>(new CommandQueue(
+		Device.Get()
+#if USE_AFTERMATH
+		, bAftermathEnabled
+#endif
+	));
 
 	{
 		RTVDescriptorHeap = std::make_unique<DescriptorHeap>();
@@ -3025,7 +3041,10 @@ bool D3D12RTPipelineStateObject::InitRS(const string& ShaderFile)
 	uint32_t index = 0;
 
 	// dxil lib
-	wstring wShaderFile = StringToWString(ShaderFile);
+	std::filesystem::path shaderPath(ShaderFile);
+	if (shaderPath.is_relative())
+		shaderPath = RuntimePaths::SourceDirectory() / shaderPath;
+	wstring wShaderFile = shaderPath.wstring();
 	ComPtr<ID3DBlob> pDxilLib = compileShaderLibrary(owner, wShaderFile.c_str(), L"lib_6_3");
 
 	vector<const WCHAR*> entryPoints;
@@ -3363,8 +3382,13 @@ void Scene::SetTransform(glm::mat4x4 inTransform)
 	}
 }
 
-CommandQueue::CommandQueue(ID3D12Device5* device)
+CommandQueue::CommandQueue(ID3D12Device5* device, bool bEnableAftermathMarkers)
 {
+#if USE_AFTERMATH
+	bAftermathMarkersEnabled = bEnableAftermathMarkers;
+#else
+	(void)bEnableAftermathMarkers;
+#endif
 	assert(device);
 	ThrowIfFailed(device->CreateFence(CurrentFenceValue, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&m_fence)));
 	// Create an event handle to use for frame synchronization.
@@ -3394,6 +3418,16 @@ CommandQueue::CommandQueue(ID3D12Device5* device)
 
 CommandQueue::~CommandQueue()
 {
+#if USE_AFTERMATH
+	for (const std::shared_ptr<CommandList>& cmdList : CommandListPool)
+	{
+		if (cmdList && cmdList->AftermathContext)
+		{
+			GFSDK_Aftermath_ReleaseContextHandle(cmdList->AftermathContext);
+			cmdList->AftermathContext = nullptr;
+		}
+	}
+#endif
 }
 
 CommandList * CommandQueue::AllocCmdList()
@@ -3410,6 +3444,20 @@ CommandList * CommandQueue::AllocCmdList()
 
 	cmdList->Fence = std::nullopt;
 	cmdList->Reset();
+#if USE_AFTERMATH
+	if (bAftermathMarkersEnabled && !cmdList->AftermathContext && !cmdList->bAftermathContextCreateAttempted)
+	{
+		cmdList->bAftermathContextCreateAttempted = true;
+		const GFSDK_Aftermath_Result contextResult = GFSDK_Aftermath_DX12_CreateContextHandle(
+			cmdList->CmdList.Get(),
+			&cmdList->AftermathContext);
+		if (contextResult != GFSDK_Aftermath_Result::GFSDK_Aftermath_Result_Success)
+		{
+			cmdList->AftermathContext = nullptr;
+			OutputDebugStringA("Failed to create NVIDIA Aftermath command list context.\n");
+		}
+	}
+#endif
 	return cmdList;
 }
 

@@ -22,16 +22,15 @@
 
 #include <crtdbg.h>
 
+#include "AftermathConfig.h"
 #if _DEBUG
 #define DEBUG_CLIENTBLOCK   new( _CLIENT_BLOCK, __FILE__, __LINE__)
 #else
 #define DEBUG_CLIENTBLOCK
 #endif // _DEBUG
 
-#include "DXSampleHelper.h"
+#include "D3D12Helpers.h"
 #include "RenderBackend.h"
-
-#define USE_AFTERMATH 0
 
 using namespace Microsoft::WRL;
 using namespace std;
@@ -47,6 +46,10 @@ public:
 	ComPtr<ID3D12GraphicsCommandList4> CmdList;
 	ComPtr<ID3D12CommandAllocator> CmdAllocator;
 	std::optional<UINT64> Fence;
+#if USE_AFTERMATH
+	GFSDK_Aftermath_ContextHandle AftermathContext = nullptr;
+	bool bAftermathContextCreateAttempted = false;
+#endif
 
 public:
 	void Reset();
@@ -67,8 +70,11 @@ public:
 	HANDLE m_fenceEvent;
 	ComPtr<ID3D12Fence> m_fence;
 	UINT64 CurrentFenceValue = 2;
+#if USE_AFTERMATH
+	bool bAftermathMarkersEnabled = false;
+#endif
 public:
-	CommandQueue(ID3D12Device5* device);
+	CommandQueue(ID3D12Device5* device, bool bEnableAftermathMarkers = false);
 	virtual ~CommandQueue();
 
 	CommandList* AllocCmdList();
@@ -602,7 +608,7 @@ public:
 	string errorString;
 
 #if USE_AFTERMATH
-	GFSDK_Aftermath_ContextHandle AM_CL_Handle;
+	bool bAftermathEnabled = false;
 #endif
 public:
 	ERenderBackendAPI GetAPI() const override { return ERenderBackendAPI::D3D12; }

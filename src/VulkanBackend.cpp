@@ -1,6 +1,7 @@
 #include "stdafx.h"
 #include "VulkanBackend.h"
 #include "SimpleDX12.h"
+#include "Utils.h"
 
 #include <algorithm>
 #include <array>
@@ -438,8 +439,8 @@ namespace
 	}
 
 #if CORONA_HAS_VULKAN
-	const std::filesystem::path kVulkanValidationLogPath = std::filesystem::path(L"C:\\dev\\Corona\\dumps\\vulkan_validation.log");
-	const std::filesystem::path kVulkanRuntimeTracePath = std::filesystem::path(L"C:\\dev\\Corona\\dumps\\vulkan_runtime_trace.log");
+	const std::filesystem::path kVulkanValidationLogPath = RuntimePaths::LogFile(L"vulkan_validation.log");
+	const std::filesystem::path kVulkanRuntimeTracePath = RuntimePaths::LogFile(L"vulkan_runtime_trace.log");
 
 	void AppendVulkanValidationLog(const std::string& line)
 	{
@@ -1172,7 +1173,9 @@ bool VulkanRTPipelineStateObject::InitRS(const std::string& shaderFile)
 	Release();
 	Owner = backendOwner;
 
-	const std::filesystem::path shaderPath = std::filesystem::path(std::filesystem::current_path()) / shaderFile;
+	std::filesystem::path shaderPath(shaderFile);
+	if (shaderPath.is_relative())
+		shaderPath = RuntimePaths::SourceDirectory() / shaderPath;
 	std::ifstream shaderStream(shaderPath);
 	if (!shaderStream.is_open())
 	{
@@ -2919,7 +2922,24 @@ void VulkanBackend::WaitForGpu()
 		vkDeviceWaitIdle(Device);
 #endif
 }
-void VulkanBackend::EmitGpuCrashMarker(const char* markerName) { (void)markerName; }
+void VulkanBackend::EmitGpuCrashMarker(const char* markerName)
+{
+#if CORONA_HAS_VULKAN
+	if (!markerName || !vkCmdInsertDebugUtilsLabelEXTFn || ActiveCommandBuffer == VK_NULL_HANDLE)
+		return;
+
+	VkDebugUtilsLabelEXT label{};
+	label.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_LABEL_EXT;
+	label.pLabelName = markerName;
+	label.color[0] = 0.20f;
+	label.color[1] = 0.60f;
+	label.color[2] = 1.00f;
+	label.color[3] = 1.00f;
+	vkCmdInsertDebugUtilsLabelEXTFn(ActiveCommandBuffer, &label);
+#else
+	(void)markerName;
+#endif
+}
 const std::string& VulkanBackend::GetErrorString() const { return ErrorString; }
 void VulkanBackend::ClearErrorString() { ErrorString.clear(); }
 uint64_t VulkanBackend::GetTimestampFrequency() const
@@ -3833,10 +3853,12 @@ void VulkanBackend::CreateSwapChainForWindow(IDXGIFactory4* factory, HWND hwnd, 
 
 	AppendVulkanRuntimeTraceBackend(L"[VulkanBackend::CreateSwapChainForWindow] before validation layer query");
 	const bool bEnableValidation = IsVulkanValidationEnabled();
-	if (bEnableValidation && HasInstanceLayer("VK_LAYER_KHRONOS_validation") && HasInstanceExtension(VK_EXT_DEBUG_UTILS_EXTENSION_NAME))
+	const bool bHasDebugUtils = HasInstanceExtension(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+	if (bHasDebugUtils)
+		instanceExtensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+	if (bEnableValidation && HasInstanceLayer("VK_LAYER_KHRONOS_validation") && bHasDebugUtils)
 	{
 		instanceLayers.push_back("VK_LAYER_KHRONOS_validation");
-		instanceExtensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
 		bValidationLayersEnabled = true;
 
 		debugMessengerInfo.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT;
@@ -4058,6 +4080,8 @@ void VulkanBackend::CreateSwapChainForWindow(IDXGIFactory4* factory, HWND hwnd, 
 	if (vkCreateDevice(PhysicalDevice, &deviceCreateInfo, nullptr, &Device) != VK_SUCCESS)
 		throw std::runtime_error("Failed to create Vulkan device for window rendering.");
 	AppendVulkanRuntimeTraceBackend(L"[VulkanBackend::CreateSwapChainForWindow] after vkCreateDevice");
+	vkCmdInsertDebugUtilsLabelEXTFn = reinterpret_cast<PFN_vkCmdInsertDebugUtilsLabelEXT>(
+		vkGetDeviceProcAddr(Device, "vkCmdInsertDebugUtilsLabelEXT"));
 
 	if (bCanEnableRayTracing)
 		LoadRayTracingFunctionPointers();
@@ -4971,6 +4995,7 @@ void VulkanBackend::DestroyWindowContext()
 	ActiveFrameContextIndex = 0;
 	NextFrameContextIndex = 0;
 	bValidationLayersEnabled = false;
+	vkCmdInsertDebugUtilsLabelEXTFn = nullptr;
 	TimestampValidBits = 0;
 	TimestampPeriodNs = 0.0f;
 	UniformBufferAlignment = 256;

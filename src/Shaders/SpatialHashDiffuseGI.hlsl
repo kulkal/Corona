@@ -249,10 +249,16 @@ void StoreResolvedSH(uint entryIndex, SH4RGB sh, float historyFrames)
     ResolvedSH3Out[entryIndex] = float4(sh.c3, 0.0f);
 }
 
-float3 LoadSurfaceNormal(uint2 pixelPos)
+float3 LoadPixelNormal(uint2 pixelPos)
 {
-    float3 worldNormal = SafeNormalize(WorldNormalTex[pixelPos].xyz, float3(0.0f, 1.0f, 0.0f));
-    return SafeNormalize(GeoNormalTex[pixelPos].xyz, worldNormal);
+    float3 geoNormal = SafeNormalize(GeoNormalTex[pixelPos].xyz, float3(0.0f, 1.0f, 0.0f));
+    return SafeNormalize(WorldNormalTex[pixelPos].xyz, geoNormal);
+}
+
+float3 LoadCacheNormal(uint2 pixelPos)
+{
+    float3 pixelNormal = LoadPixelNormal(pixelPos);
+    return SafeNormalize(GeoNormalTex[pixelPos].xyz, pixelNormal);
 }
 
 float3 ReconstructWorldPosition(uint2 pixelPos)
@@ -602,7 +608,7 @@ void SpatialHashUpdate(uint3 DTid : SV_DispatchThreadID)
     if (deviceDepth >= 0.99999f)
         return;
 
-    float3 normal = LoadSurfaceNormal(pixelPos);
+    float3 normal = LoadCacheNormal(pixelPos);
     float3 worldPos = ReconstructWorldPosition(pixelPos);
     uint key = HashCellKey(worldPos, normal);
 
@@ -687,13 +693,14 @@ void SpatialHashQuery(uint3 DTid : SV_DispatchThreadID)
         return;
     }
 
-    float3 normal = LoadSurfaceNormal(pixelPos);
+    float3 pixelNormal = LoadPixelNormal(pixelPos);
+    float3 cacheNormal = LoadCacheNormal(pixelPos);
     float3 worldPos = ReconstructWorldPosition(pixelPos);
     SH4RGB cachedSH = InitSH4RGB();
     float historyFrames = 0.0f;
-    if (LoadSmoothedSH(worldPos, normal, cachedSH, historyFrames))
+    if (LoadSmoothedSH(worldPos, cacheNormal, cachedSH, historyFrames))
     {
-        float3 radiance = EvaluateSHDiffuse(cachedSH, normal) * SPATIAL_HASH_DIFFUSE_SCALE;
+        float3 radiance = EvaluateSHDiffuse(cachedSH, pixelNormal) * SPATIAL_HASH_DIFFUSE_SCALE;
         OutGIHashColor[pixelPos] = float4(radiance, historyFrames);
         OutGIHashSH[pixelPos] = float4(cachedSH.c0, historyFrames);
     }

@@ -23,7 +23,7 @@ $env:VULKAN_SDK='C:\VulkanSDK\1.4.341.1'
 cmake --build --preset release
 ```
 
-The executable is emitted to `src/Corona.exe`, and the Visual Studio debugger working directory is `src/`. The solution is generated at `out/build/vs2022-x64/Corona.sln`.
+The executable is emitted to `bin/Corona.exe`, and the Visual Studio debugger working directory is `src/`. The solution is generated at `out/build/vs2022-x64/Corona.sln`.
 
 Shader build outputs:
 
@@ -52,7 +52,7 @@ Two main render modes are available:
 * `hybrid`: GBuffer rasterization plus ray-traced shadow, reflection, diffuse GI, denoising, lighting, tone mapping, and optional TAA.
 * `pathtracing`: full-screen path tracing mode with accumulation, useful as a simpler reference path and for backend validation.
 
-`--render-mode pt`, `--render-mode pathtracing`, and `--render-mode path-tracing` select the path tracing mode. Frame timing logs are written to `dumps/fps_perf.log` and include CPU frame timing plus per-pass GPU timings for backend comparisons.
+`--render-mode pt`, `--render-mode pathtracing`, and `--render-mode path-tracing` select the path tracing mode. Frame timing logs are written to `logs/fps_perf.log` and include CPU frame timing plus per-pass GPU timings for backend comparisons.
 
 The captures below were generated with ImGui disabled.
 
@@ -73,13 +73,13 @@ The hybrid renderer has several real-time diffuse GI paths:
 | Spatial hash | `spatial-hash`, `hash`, `sharc` | A SHaRC-style sparse surface cache. Visible primary-hit cells are stored in a hash table, traced per cell, accumulated as RGB SH, and evaluated per pixel normal. |
 | Screen probe | `screen-probe`, `probe` | Screen-space probe atlas path used for comparison with cache-based GI. |
 
-The default simple path is a ray-traced one-bounce diffuse GI approximation:
+The default spatial hash path stores diffuse GI in a sparse surface cache:
 
-* The GBuffer depth and world normal reconstruct the shaded surface point.
-* One blue-noise, frame-indexed cosine-hemisphere ray is traced per pixel.
+* The GBuffer depth and normals reconstruct visible surface cells.
+* Active cells trace a small set of cosine-weighted diffuse rays.
 * A sky miss evaluates the procedural sky color.
-* A surface hit evaluates direct-light visibility at the hit point and writes Lambert diffuse irradiance.
-* The diffuse result is stored as both irradiance color and SH data, then accumulated with temporal reprojection and edge-aware spatial filtering.
+* A surface hit evaluates direct-light visibility at the hit point and writes Lambert diffuse irradiance into RGB SH.
+* Pixels query the cached SH with the pixel normal, then continue through temporal and spatial filtering.
 
 ### Spatial Hash Diffuse GI
 The spatial hash GI mode is inspired by NVIDIA SHaRC, but the current implementation is intentionally small and renderer-local. It does not store radiance in a dense voxel texture. Instead, it uses a sparse hash table of visible surface cells backed by `StructuredBuffer` resources:
@@ -143,10 +143,10 @@ Inline preview, left = DLSS RR/SR and right = TAA:
 These two 30fps camera-path captures make the moving-camera difference much easier to see than a still frame. The renderer is feeding both modes a very small 1spp GI signal. With TAA, stochastic diffuse GI noise remains visible during motion and tends to shimmer as the camera moves. With DLSS RR/SR, the reconstructed result stays far more stable: GI noise is strongly suppressed while Sponza edges, shadow boundaries, and material transitions remain readable. This is the practical strength of the current hybrid path: simple RT GI plus rich GBuffer context gives RR enough information to produce a clean moving image, not just a clean still frame.
 
 ## Command-line Guide
-Run from the `src/` directory, or set the working directory to `src/` when launching from Visual Studio:
+Run from the `bin/` directory, or set the working directory to `bin/` when launching from Visual Studio:
 
 ```powershell
-cd src
+cd bin
 .\Corona.exe
 .\Corona.exe --backend dx12 --render-mode hybrid --aa taa --user-mode
 .\Corona.exe --backend vulkan --render-mode hybrid --aa taa --user-mode

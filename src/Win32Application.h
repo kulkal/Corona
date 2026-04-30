@@ -11,14 +11,14 @@
 
 #pragma once
 
-#include "DXSample.h"
+#include <windows.h>
 
-class DXSample;
+class Corona;
 
 class Win32Application
 {
 public:
-	static int Run(DXSample* pSample, HINSTANCE hInstance, int nCmdShow);
+	static int Run(Corona* app, HINSTANCE hInstance, int nCmdShow);
 	static HWND GetHwnd() { return m_hwnd; }
 
 protected:

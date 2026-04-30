@@ -11,6 +11,7 @@
 
 #include "stdafx.h"
 #include "Corona.h"
+#include "Win32Application.h"
 #include <dxgidebug.h>
 #include <cwchar>
 

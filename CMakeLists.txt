@@ -20,7 +20,7 @@ set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
 find_package(Vulkan QUIET)
 
 set(CORONA_SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src")
-set(CORONA_OUT_DIR "${CORONA_SRC_DIR}")
+set(CORONA_OUT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/bin")
 
 file(GLOB CORONA_HEADERS CONFIGURE_DEPENDS
     "${CORONA_SRC_DIR}/*.h"
@@ -81,6 +81,7 @@ set(CORONA_WINPIX_LIB "${CORONA_WINPIX_ROOT}/bin/x64/WinPixEventRuntime.lib")
 set(CORONA_WINPIX_DLL "${CORONA_WINPIX_ROOT}/bin/x64/WinPixEventRuntime.dll")
 set(CORONA_STREAMLINE_SDK_ROOT "H:/dev/streamline_test/streamline-sdk" CACHE PATH "Path to the local NVIDIA Streamline SDK")
 set(CORONA_STREAMLINE_LIB "")
+option(CORONA_USE_AFTERMATH "Enable NVIDIA Aftermath markers for D3D12 GPU crash diagnostics" ON)
 if(EXISTS "${CORONA_STREAMLINE_SDK_ROOT}/include/sl.h")
     set(CORONA_STREAMLINE_LIB "${CORONA_STREAMLINE_SDK_ROOT}/lib/x64/sl.interposer.lib")
 endif()
@@ -150,44 +151,6 @@ if(Vulkan_FOUND)
     set(CORONA_VULKAN_GENERATED_SHADER_DIR "${CMAKE_CURRENT_BINARY_DIR}/VulkanGeneratedShaders")
     set(CORONA_VULKAN_SPIRV_DIR "${CMAKE_CURRENT_BINARY_DIR}/VulkanShaders")
     set(CORONA_VULKAN_RT_SHADER_PREPARE "${CORONA_VULKAN_SHADER_DIR}/PrepareVulkanRTShader.ps1")
-    set(CORONA_VULKAN_RT_SHADOW_HLSL "${CORONA_VULKAN_GENERATED_SHADER_DIR}/RaytracedShadowVulkan.generated.hlsl")
-    set(CORONA_VULKAN_RT_REFLECTION_HLSL "${CORONA_VULKAN_GENERATED_SHADER_DIR}/RaytracedReflectionVulkan.generated.hlsl")
-    set(CORONA_VULKAN_RT_GI_HLSL "${CORONA_VULKAN_GENERATED_SHADER_DIR}/RaytracedGIVulkan.generated.hlsl")
-    set(CORONA_VULKAN_RT_SCREEN_PROBE_GI_HLSL "${CORONA_VULKAN_GENERATED_SHADER_DIR}/ScreenProbeRaytracedGIVulkan.generated.hlsl")
-    set(CORONA_VULKAN_RT_SPATIAL_HASH_GI_HLSL "${CORONA_VULKAN_GENERATED_SHADER_DIR}/SpatialHashCellGIVulkan.generated.hlsl")
-    set(CORONA_VULKAN_RT_PATH_TRACING_HLSL "${CORONA_VULKAN_GENERATED_SHADER_DIR}/PathTracingVulkan.generated.hlsl")
-    set(CORONA_VULKAN_RT_GENERATED_SHADERS
-        "${CORONA_VULKAN_RT_SHADOW_HLSL}"
-        "${CORONA_VULKAN_RT_REFLECTION_HLSL}"
-        "${CORONA_VULKAN_RT_GI_HLSL}"
-        "${CORONA_VULKAN_RT_SCREEN_PROBE_GI_HLSL}"
-        "${CORONA_VULKAN_RT_SPATIAL_HASH_GI_HLSL}"
-        "${CORONA_VULKAN_RT_PATH_TRACING_HLSL}"
-    )
-    set(CORONA_VULKAN_SHADER_OUTPUTS
-        "${CORONA_VULKAN_SPIRV_DIR}/GBufferVulkan.vert.spv"
-        "${CORONA_VULKAN_SPIRV_DIR}/GBufferVulkan.frag.spv"
-        "${CORONA_VULKAN_SPIRV_DIR}/LightingPSVulkan.vert.spv"
-        "${CORONA_VULKAN_SPIRV_DIR}/LightingPSVulkan.frag.spv"
-        "${CORONA_VULKAN_SPIRV_DIR}/ToneMapPSVulkan.vert.spv"
-        "${CORONA_VULKAN_SPIRV_DIR}/ToneMapPSVulkan.frag.spv"
-        "${CORONA_VULKAN_SPIRV_DIR}/TemporalAAVulkan.vert.spv"
-        "${CORONA_VULKAN_SPIRV_DIR}/TemporalAAVulkan.frag.spv"
-        "${CORONA_VULKAN_SPIRV_DIR}/ShadowDenoiseVulkan.comp.spv"
-        "${CORONA_VULKAN_SPIRV_DIR}/TemporalDenoisingVulkan.comp.spv"
-        "${CORONA_VULKAN_SPIRV_DIR}/ScreenProbeGIVulkan.comp.spv"
-        "${CORONA_VULKAN_SPIRV_DIR}/SpatialHashDiffuseGI_SpatialHashClearVulkan.comp.spv"
-        "${CORONA_VULKAN_SPIRV_DIR}/SpatialHashDiffuseGI_SpatialHashUpdateVulkan.comp.spv"
-        "${CORONA_VULKAN_SPIRV_DIR}/SpatialHashDiffuseGI_SpatialHashResolveVulkan.comp.spv"
-        "${CORONA_VULKAN_SPIRV_DIR}/SpatialHashDiffuseGI_SpatialHashQueryVulkan.comp.spv"
-        "${CORONA_VULKAN_SPIRV_DIR}/SpatialDenoisingVulkan.comp.spv"
-        "${CORONA_VULKAN_SPIRV_DIR}/RaytracedShadowVulkan.rt.spv"
-        "${CORONA_VULKAN_SPIRV_DIR}/RaytracedReflectionVulkan.rt.spv"
-        "${CORONA_VULKAN_SPIRV_DIR}/RaytracedGIVulkan.rt.spv"
-        "${CORONA_VULKAN_SPIRV_DIR}/ScreenProbeRaytracedGIVulkan.rt.spv"
-        "${CORONA_VULKAN_SPIRV_DIR}/SpatialHashCellGIVulkan.rt.spv"
-        "${CORONA_VULKAN_SPIRV_DIR}/PathTracingVulkan.rt.spv"
-    )
 
     find_program(
         CORONA_VULKAN_DXC
@@ -211,47 +174,83 @@ if(Vulkan_FOUND)
             -fvk-b-shift 128 all
             -I "${CORONA_VULKAN_SHADER_DIR}"
         )
-        add_custom_command(
-            OUTPUT ${CORONA_VULKAN_SHADER_OUTPUTS}
-            BYPRODUCTS ${CORONA_VULKAN_RT_GENERATED_SHADERS}
-            COMMAND "${CMAKE_COMMAND}" -E make_directory "${CORONA_VULKAN_GENERATED_SHADER_DIR}"
-            COMMAND "${CMAKE_COMMAND}" -E make_directory "${CORONA_VULKAN_SPIRV_DIR}"
-            COMMAND "${CORONA_VULKAN_DXC}" ${CORONA_VULKAN_DXC_COMMON_FLAGS} -fspv-target-env=vulkan1.1 -T vs_6_0 -E VSMain "${CORONA_VULKAN_SHADER_DIR}/GBuffer.hlsl" -Fo "${CORONA_VULKAN_SPIRV_DIR}/GBufferVulkan.vert.spv"
-            COMMAND "${CORONA_VULKAN_DXC}" ${CORONA_VULKAN_DXC_COMMON_FLAGS} -fspv-target-env=vulkan1.1 -T ps_6_0 -E PSMain "${CORONA_VULKAN_SHADER_DIR}/GBuffer.hlsl" -Fo "${CORONA_VULKAN_SPIRV_DIR}/GBufferVulkan.frag.spv"
-            COMMAND "${CORONA_VULKAN_DXC}" ${CORONA_VULKAN_DXC_COMMON_FLAGS} -fspv-target-env=vulkan1.1 -T vs_6_0 -E VSMain "${CORONA_VULKAN_SHADER_DIR}/LightingPS.hlsl" -Fo "${CORONA_VULKAN_SPIRV_DIR}/LightingPSVulkan.vert.spv"
-            COMMAND "${CORONA_VULKAN_DXC}" ${CORONA_VULKAN_DXC_COMMON_FLAGS} -fspv-target-env=vulkan1.1 -T ps_6_0 -E PSMain "${CORONA_VULKAN_SHADER_DIR}/LightingPS.hlsl" -Fo "${CORONA_VULKAN_SPIRV_DIR}/LightingPSVulkan.frag.spv"
-            COMMAND "${CORONA_VULKAN_DXC}" ${CORONA_VULKAN_DXC_COMMON_FLAGS} -fspv-target-env=vulkan1.1 -T vs_6_0 -E VSMain "${CORONA_VULKAN_SHADER_DIR}/ToneMapPS.hlsl" -Fo "${CORONA_VULKAN_SPIRV_DIR}/ToneMapPSVulkan.vert.spv"
-            COMMAND "${CORONA_VULKAN_DXC}" ${CORONA_VULKAN_DXC_COMMON_FLAGS} -fspv-target-env=vulkan1.1 -T ps_6_0 -E PSMain "${CORONA_VULKAN_SHADER_DIR}/ToneMapPS.hlsl" -Fo "${CORONA_VULKAN_SPIRV_DIR}/ToneMapPSVulkan.frag.spv"
-            COMMAND "${CORONA_VULKAN_DXC}" ${CORONA_VULKAN_DXC_COMMON_FLAGS} -fspv-target-env=vulkan1.1 -T vs_6_0 -E VSMain "${CORONA_VULKAN_SHADER_DIR}/TemporalAA.hlsl" -Fo "${CORONA_VULKAN_SPIRV_DIR}/TemporalAAVulkan.vert.spv"
-            COMMAND "${CORONA_VULKAN_DXC}" ${CORONA_VULKAN_DXC_COMMON_FLAGS} -fspv-target-env=vulkan1.1 -T ps_6_0 -E PSMain "${CORONA_VULKAN_SHADER_DIR}/TemporalAA.hlsl" -Fo "${CORONA_VULKAN_SPIRV_DIR}/TemporalAAVulkan.frag.spv"
-            COMMAND "${CORONA_VULKAN_DXC}" ${CORONA_VULKAN_DXC_COMMON_FLAGS} -fspv-target-env=vulkan1.1 -T cs_6_0 -E ShadowDenoiseCS "${CORONA_VULKAN_SHADER_DIR}/ShadowDenoise.hlsl" -Fo "${CORONA_VULKAN_SPIRV_DIR}/ShadowDenoiseVulkan.comp.spv"
-            COMMAND "${CORONA_VULKAN_DXC}" ${CORONA_VULKAN_DXC_COMMON_FLAGS} -fspv-target-env=vulkan1.1 -T cs_6_0 -E TemporalFilter "${CORONA_VULKAN_SHADER_DIR}/TemporalDenoising.hlsl" -Fo "${CORONA_VULKAN_SPIRV_DIR}/TemporalDenoisingVulkan.comp.spv"
-            COMMAND "${CORONA_VULKAN_DXC}" ${CORONA_VULKAN_DXC_COMMON_FLAGS} -fspv-target-env=vulkan1.1 -T cs_6_0 -E ScreenProbeGI "${CORONA_VULKAN_SHADER_DIR}/ScreenProbeGI.hlsl" -Fo "${CORONA_VULKAN_SPIRV_DIR}/ScreenProbeGIVulkan.comp.spv"
-            COMMAND "${CORONA_VULKAN_DXC}" ${CORONA_VULKAN_DXC_COMMON_FLAGS} -fspv-target-env=vulkan1.1 -T cs_6_0 -E SpatialHashClear "${CORONA_VULKAN_SHADER_DIR}/SpatialHashDiffuseGI.hlsl" -Fo "${CORONA_VULKAN_SPIRV_DIR}/SpatialHashDiffuseGI_SpatialHashClearVulkan.comp.spv"
-            COMMAND "${CORONA_VULKAN_DXC}" ${CORONA_VULKAN_DXC_COMMON_FLAGS} -fspv-target-env=vulkan1.1 -T cs_6_0 -E SpatialHashUpdate "${CORONA_VULKAN_SHADER_DIR}/SpatialHashDiffuseGI.hlsl" -Fo "${CORONA_VULKAN_SPIRV_DIR}/SpatialHashDiffuseGI_SpatialHashUpdateVulkan.comp.spv"
-            COMMAND "${CORONA_VULKAN_DXC}" ${CORONA_VULKAN_DXC_COMMON_FLAGS} -fspv-target-env=vulkan1.1 -T cs_6_0 -E SpatialHashResolve "${CORONA_VULKAN_SHADER_DIR}/SpatialHashDiffuseGI.hlsl" -Fo "${CORONA_VULKAN_SPIRV_DIR}/SpatialHashDiffuseGI_SpatialHashResolveVulkan.comp.spv"
-            COMMAND "${CORONA_VULKAN_DXC}" ${CORONA_VULKAN_DXC_COMMON_FLAGS} -fspv-target-env=vulkan1.1 -T cs_6_0 -E SpatialHashQuery "${CORONA_VULKAN_SHADER_DIR}/SpatialHashDiffuseGI.hlsl" -Fo "${CORONA_VULKAN_SPIRV_DIR}/SpatialHashDiffuseGI_SpatialHashQueryVulkan.comp.spv"
-            COMMAND "${CORONA_VULKAN_DXC}" ${CORONA_VULKAN_DXC_COMMON_FLAGS} -fspv-target-env=vulkan1.1 -T cs_6_0 -E SpatialFilter "${CORONA_VULKAN_SHADER_DIR}/SpatialDenoising.hlsl" -Fo "${CORONA_VULKAN_SPIRV_DIR}/SpatialDenoisingVulkan.comp.spv"
-            COMMAND powershell -NoProfile -ExecutionPolicy Bypass -File "${CORONA_VULKAN_RT_SHADER_PREPARE}" -InputPath "${CORONA_VULKAN_SHADER_DIR}/RaytracedShadow.hlsl" -OutputPath "${CORONA_VULKAN_RT_SHADOW_HLSL}"
-            COMMAND powershell -NoProfile -ExecutionPolicy Bypass -File "${CORONA_VULKAN_RT_SHADER_PREPARE}" -InputPath "${CORONA_VULKAN_SHADER_DIR}/RaytracedReflection.hlsl" -OutputPath "${CORONA_VULKAN_RT_REFLECTION_HLSL}"
-            COMMAND powershell -NoProfile -ExecutionPolicy Bypass -File "${CORONA_VULKAN_RT_SHADER_PREPARE}" -InputPath "${CORONA_VULKAN_SHADER_DIR}/RaytracedGI.hlsl" -OutputPath "${CORONA_VULKAN_RT_GI_HLSL}"
-            COMMAND powershell -NoProfile -ExecutionPolicy Bypass -File "${CORONA_VULKAN_RT_SHADER_PREPARE}" -InputPath "${CORONA_VULKAN_SHADER_DIR}/ScreenProbeRaytracedGI.hlsl" -OutputPath "${CORONA_VULKAN_RT_SCREEN_PROBE_GI_HLSL}"
-            COMMAND powershell -NoProfile -ExecutionPolicy Bypass -File "${CORONA_VULKAN_RT_SHADER_PREPARE}" -InputPath "${CORONA_VULKAN_SHADER_DIR}/SpatialHashCellGI.hlsl" -OutputPath "${CORONA_VULKAN_RT_SPATIAL_HASH_GI_HLSL}"
-            COMMAND powershell -NoProfile -ExecutionPolicy Bypass -File "${CORONA_VULKAN_RT_SHADER_PREPARE}" -InputPath "${CORONA_VULKAN_SHADER_DIR}/PathTracing.hlsl" -OutputPath "${CORONA_VULKAN_RT_PATH_TRACING_HLSL}"
-            COMMAND "${CORONA_VULKAN_DXC}" ${CORONA_VULKAN_DXC_COMMON_FLAGS} -fspv-target-env=vulkan1.2 -T lib_6_3 "${CORONA_VULKAN_RT_SHADOW_HLSL}" -Fo "${CORONA_VULKAN_SPIRV_DIR}/RaytracedShadowVulkan.rt.spv"
-            COMMAND "${CORONA_VULKAN_DXC}" ${CORONA_VULKAN_DXC_COMMON_FLAGS} -fspv-target-env=vulkan1.2 -T lib_6_3 "${CORONA_VULKAN_RT_REFLECTION_HLSL}" -Fo "${CORONA_VULKAN_SPIRV_DIR}/RaytracedReflectionVulkan.rt.spv"
-            COMMAND "${CORONA_VULKAN_DXC}" ${CORONA_VULKAN_DXC_COMMON_FLAGS} -fspv-target-env=vulkan1.2 -T lib_6_3 "${CORONA_VULKAN_RT_GI_HLSL}" -Fo "${CORONA_VULKAN_SPIRV_DIR}/RaytracedGIVulkan.rt.spv"
-            COMMAND "${CORONA_VULKAN_DXC}" ${CORONA_VULKAN_DXC_COMMON_FLAGS} -fspv-target-env=vulkan1.2 -T lib_6_3 "${CORONA_VULKAN_RT_SCREEN_PROBE_GI_HLSL}" -Fo "${CORONA_VULKAN_SPIRV_DIR}/ScreenProbeRaytracedGIVulkan.rt.spv"
-            COMMAND "${CORONA_VULKAN_DXC}" ${CORONA_VULKAN_DXC_COMMON_FLAGS} -fspv-target-env=vulkan1.2 -T lib_6_3 "${CORONA_VULKAN_RT_SPATIAL_HASH_GI_HLSL}" -Fo "${CORONA_VULKAN_SPIRV_DIR}/SpatialHashCellGIVulkan.rt.spv"
-            COMMAND "${CORONA_VULKAN_DXC}" ${CORONA_VULKAN_DXC_COMMON_FLAGS} -fspv-target-env=vulkan1.2 -T lib_6_3 "${CORONA_VULKAN_RT_PATH_TRACING_HLSL}" -Fo "${CORONA_VULKAN_SPIRV_DIR}/PathTracingVulkan.rt.spv"
-            DEPENDS ${CORONA_SHADER_FILES}
-            VERBATIM
-        )
-    endif()
 
-    if(CORONA_VULKAN_DXC)
-        add_custom_target(CoronaVulkanShaders DEPENDS ${CORONA_VULKAN_SHADER_OUTPUTS})
-        add_dependencies(Corona CoronaVulkanShaders)
+        set(CORONA_VULKAN_SHADER_OUTPUTS)
+        set(CORONA_VULKAN_RT_GENERATED_SHADERS)
+        file(GLOB CORONA_VULKAN_HLSL_FILES CONFIGURE_DEPENDS
+            "${CORONA_VULKAN_SHADER_DIR}/*.hlsl"
+        )
+
+        macro(CORONA_ADD_VULKAN_GRAPHICS_SHADER shader_path shader_stem)
+            set(vertex_output "${CORONA_VULKAN_SPIRV_DIR}/${shader_stem}Vulkan.vert.spv")
+            set(fragment_output "${CORONA_VULKAN_SPIRV_DIR}/${shader_stem}Vulkan.frag.spv")
+            list(APPEND CORONA_VULKAN_SHADER_OUTPUTS "${vertex_output}" "${fragment_output}")
+            add_custom_command(
+                OUTPUT "${vertex_output}" "${fragment_output}"
+                COMMAND "${CMAKE_COMMAND}" -E make_directory "${CORONA_VULKAN_SPIRV_DIR}"
+                COMMAND "${CORONA_VULKAN_DXC}" ${CORONA_VULKAN_DXC_COMMON_FLAGS} -fspv-target-env=vulkan1.1 -T vs_6_0 -E VSMain "${shader_path}" -Fo "${vertex_output}"
+                COMMAND "${CORONA_VULKAN_DXC}" ${CORONA_VULKAN_DXC_COMMON_FLAGS} -fspv-target-env=vulkan1.1 -T ps_6_0 -E PSMain "${shader_path}" -Fo "${fragment_output}"
+                DEPENDS "${shader_path}" ${CORONA_SHADER_FILES}
+                VERBATIM
+            )
+        endmacro()
+
+        macro(CORONA_ADD_VULKAN_COMPUTE_SHADER shader_path shader_stem entry_point)
+            set(compute_output "${CORONA_VULKAN_SPIRV_DIR}/${shader_stem}_${entry_point}Vulkan.comp.spv")
+            list(APPEND CORONA_VULKAN_SHADER_OUTPUTS "${compute_output}")
+            add_custom_command(
+                OUTPUT "${compute_output}"
+                COMMAND "${CMAKE_COMMAND}" -E make_directory "${CORONA_VULKAN_SPIRV_DIR}"
+                COMMAND "${CORONA_VULKAN_DXC}" ${CORONA_VULKAN_DXC_COMMON_FLAGS} -fspv-target-env=vulkan1.1 -T cs_6_0 -E "${entry_point}" "${shader_path}" -Fo "${compute_output}"
+                DEPENDS "${shader_path}" ${CORONA_SHADER_FILES}
+                VERBATIM
+            )
+        endmacro()
+
+        macro(CORONA_ADD_VULKAN_RT_SHADER shader_path shader_stem)
+            set(generated_shader "${CORONA_VULKAN_GENERATED_SHADER_DIR}/${shader_stem}Vulkan.generated.hlsl")
+            set(rt_output "${CORONA_VULKAN_SPIRV_DIR}/${shader_stem}Vulkan.rt.spv")
+            list(APPEND CORONA_VULKAN_RT_GENERATED_SHADERS "${generated_shader}")
+            list(APPEND CORONA_VULKAN_SHADER_OUTPUTS "${rt_output}")
+            add_custom_command(
+                OUTPUT "${rt_output}"
+                BYPRODUCTS "${generated_shader}"
+                COMMAND "${CMAKE_COMMAND}" -E make_directory "${CORONA_VULKAN_GENERATED_SHADER_DIR}"
+                COMMAND "${CMAKE_COMMAND}" -E make_directory "${CORONA_VULKAN_SPIRV_DIR}"
+                COMMAND powershell -NoProfile -ExecutionPolicy Bypass -File "${CORONA_VULKAN_RT_SHADER_PREPARE}" -InputPath "${shader_path}" -OutputPath "${generated_shader}"
+                COMMAND "${CORONA_VULKAN_DXC}" ${CORONA_VULKAN_DXC_COMMON_FLAGS} -fspv-target-env=vulkan1.2 -T lib_6_3 "${generated_shader}" -Fo "${rt_output}"
+                DEPENDS "${shader_path}" "${CORONA_VULKAN_RT_SHADER_PREPARE}" ${CORONA_SHADER_FILES}
+                VERBATIM
+            )
+        endmacro()
+
+        foreach(CORONA_VULKAN_SHADER IN LISTS CORONA_VULKAN_HLSL_FILES)
+            get_filename_component(CORONA_VULKAN_SHADER_STEM "${CORONA_VULKAN_SHADER}" NAME_WE)
+            file(READ "${CORONA_VULKAN_SHADER}" CORONA_VULKAN_SHADER_CONTENT)
+
+            if(CORONA_VULKAN_SHADER_CONTENT MATCHES [=[\[shader\("raygeneration"\)\]]=])
+                CORONA_ADD_VULKAN_RT_SHADER("${CORONA_VULKAN_SHADER}" "${CORONA_VULKAN_SHADER_STEM}")
+            endif()
+
+            if(CORONA_VULKAN_SHADER_CONTENT MATCHES "VSMain[ \t\r\n]*\\(" AND CORONA_VULKAN_SHADER_CONTENT MATCHES "PSMain[ \t\r\n]*\\(")
+                CORONA_ADD_VULKAN_GRAPHICS_SHADER("${CORONA_VULKAN_SHADER}" "${CORONA_VULKAN_SHADER_STEM}")
+            endif()
+
+            string(REGEX MATCHALL "\\[numthreads\\([^]]+\\)\\][ \t\r\n]*void[ \t\r\n]+[A-Za-z_][A-Za-z0-9_]*[ \t\r\n]*\\(" CORONA_VULKAN_COMPUTE_ENTRY_MATCHES "${CORONA_VULKAN_SHADER_CONTENT}")
+            foreach(CORONA_VULKAN_COMPUTE_ENTRY_MATCH IN LISTS CORONA_VULKAN_COMPUTE_ENTRY_MATCHES)
+                string(REGEX REPLACE "\\[numthreads\\([^]]+\\)\\][ \t\r\n]*void[ \t\r\n]+([A-Za-z_][A-Za-z0-9_]*)[ \t\r\n]*\\(" "\\1" CORONA_VULKAN_COMPUTE_ENTRY "${CORONA_VULKAN_COMPUTE_ENTRY_MATCH}")
+                CORONA_ADD_VULKAN_COMPUTE_SHADER("${CORONA_VULKAN_SHADER}" "${CORONA_VULKAN_SHADER_STEM}" "${CORONA_VULKAN_COMPUTE_ENTRY}")
+            endforeach()
+        endforeach()
+
+        list(REMOVE_DUPLICATES CORONA_VULKAN_SHADER_OUTPUTS)
+        list(LENGTH CORONA_VULKAN_SHADER_OUTPUTS CORONA_VULKAN_SHADER_OUTPUT_COUNT)
+        message(STATUS "Discovered ${CORONA_VULKAN_SHADER_OUTPUT_COUNT} Vulkan shader outputs from ${CORONA_VULKAN_SHADER_DIR}")
+
+        if(CORONA_VULKAN_SHADER_OUTPUTS)
+            add_custom_target(CoronaVulkanShaders DEPENDS ${CORONA_VULKAN_SHADER_OUTPUTS})
+            add_dependencies(Corona CoronaVulkanShaders)
+        endif()
     endif()
     target_compile_definitions(Corona PRIVATE CORONA_VULKAN_SHADER_BINARY_DIR=L"${CORONA_VULKAN_SPIRV_DIR}")
 endif()
@@ -261,12 +260,13 @@ target_compile_definitions(Corona PRIVATE
     $<$<BOOL:${Vulkan_FOUND}>:CORONA_HAS_VULKAN=1>
     $<$<NOT:$<BOOL:${Vulkan_FOUND}>>:CORONA_HAS_VULKAN=0>
     $<$<BOOL:${CORONA_STREAMLINE_LIB}>:WITH_STREAMLINE=1>
+    USE_AFTERMATH=$<BOOL:${CORONA_USE_AFTERMATH}>
     $<$<CONFIG:Debug>:DEBUG>
     $<$<CONFIG:Release>:NDEBUG>
 )
 
 set_target_properties(Corona PROPERTIES
-    VS_DEBUGGER_WORKING_DIRECTORY "${CORONA_SRC_DIR}"
+    VS_DEBUGGER_WORKING_DIRECTORY "${CORONA_OUT_DIR}"
     RUNTIME_OUTPUT_DIRECTORY "${CORONA_OUT_DIR}"
     RUNTIME_OUTPUT_DIRECTORY_DEBUG "${CORONA_OUT_DIR}"
     RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CORONA_OUT_DIR}"

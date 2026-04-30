@@ -10,7 +10,9 @@
 //*********************************************************
 
 #include "stdafx.h"
+#include "Corona.h"
 #include "Win32Application.h"
+#include "Utils.h"
 #include <windowsx.h>
 #include <cwchar>
 #include <filesystem>
@@ -20,7 +22,7 @@ namespace
 {
 	void AppendStartupTrace(const std::wstring& line)
 	{
-		const std::filesystem::path tracePath = std::filesystem::path(L"C:\\dev\\Corona\\dumps\\vulkan_runtime_trace.log");
+		const std::filesystem::path tracePath = RuntimePaths::LogFile(L"vulkan_runtime_trace.log");
 		std::filesystem::create_directories(tracePath.parent_path());
 		std::wofstream traceFile(tracePath, std::ios::app);
 		if (traceFile.is_open())
@@ -30,7 +32,7 @@ namespace
 
 HWND Win32Application::m_hwnd = nullptr;
 
-int Win32Application::Run(DXSample* pSample, HINSTANCE hInstance, int nCmdShow)
+int Win32Application::Run(Corona* app, HINSTANCE hInstance, int nCmdShow)
 {
 	AppendStartupTrace(L"[Run] enter");
 	// Parse the command line parameters
@@ -45,7 +47,7 @@ int Win32Application::Run(DXSample* pSample, HINSTANCE hInstance, int nCmdShow)
 			break;
 		}
 	}
-	pSample->ParseCommandLineArgs(argv, argc);
+	app->ParseCommandLineArgs(argv, argc);
 	LocalFree(argv);
 	AppendStartupTrace(L"[Run] after ParseCommandLineArgs");
 
@@ -56,16 +58,16 @@ int Win32Application::Run(DXSample* pSample, HINSTANCE hInstance, int nCmdShow)
 	windowClass.lpfnWndProc = WindowProc;
 	windowClass.hInstance = hInstance;
 	windowClass.hCursor = LoadCursor(NULL, IDC_ARROW);
-	windowClass.lpszClassName = L"DXSampleClass";
+	windowClass.lpszClassName = L"CoronaWindowClass";
 	RegisterClassExW(&windowClass);
 
-	RECT windowRect = { 0, 0, static_cast<LONG>(pSample->GetWidth()), static_cast<LONG>(pSample->GetHeight()) };
+	RECT windowRect = { 0, 0, static_cast<LONG>(app->GetWidth()), static_cast<LONG>(app->GetHeight()) };
 	AdjustWindowRect(&windowRect, WS_OVERLAPPEDWINDOW, FALSE);
 
 	// Create the window and store a handle to it.
 	m_hwnd = CreateWindowW(
 		windowClass.lpszClassName,
-		pSample->GetTitle(),
+		app->GetTitle(),
 		WS_OVERLAPPEDWINDOW,
 		CW_USEDEFAULT,
 		CW_USEDEFAULT,
@@ -74,12 +76,11 @@ int Win32Application::Run(DXSample* pSample, HINSTANCE hInstance, int nCmdShow)
 		nullptr,		// We have no parent window.
 		nullptr,		// We aren't using menus.
 		hInstance,
-		pSample);
+		app);
 	AppendStartupTrace(m_hwnd ? L"[Run] after CreateWindowW ok" : L"[Run] after CreateWindowW failed");
 
-	// Initialize the sample. OnInit is defined in each child-implementation of DXSample.
 	AppendStartupTrace(L"[Run] before OnInit");
-	pSample->OnInit();
+	app->OnInit();
 	AppendStartupTrace(L"[Run] after OnInit");
 
 	const int effectiveCmdShow = (!bCommandLineAutoDump && nCmdShow == SW_HIDE) ? SW_SHOWNORMAL : nCmdShow;
@@ -105,14 +106,14 @@ int Win32Application::Run(DXSample* pSample, HINSTANCE hInstance, int nCmdShow)
 			TranslateMessage(&msg);
 			DispatchMessage(&msg);
 		}
-		else if (pSample)
+		else if (app)
 		{
-			pSample->OnUpdate();
-			pSample->OnRender();
+			app->OnUpdate();
+			app->OnRender();
 		}
 	}
 
-	pSample->OnDestroy();
+	app->OnDestroy();
 
 	// Return this part of the WM_QUIT message to Windows.
 	return static_cast<char>(msg.wParam);
@@ -123,7 +124,7 @@ extern LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam
 // Main message handler for the sample.
 LRESULT CALLBACK Win32Application::WindowProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 {
-	DXSample* pSample = reinterpret_cast<DXSample*>(GetWindowLongPtr(hWnd, GWLP_USERDATA));
+	Corona* app = reinterpret_cast<Corona*>(GetWindowLongPtr(hWnd, GWLP_USERDATA));
 
 	if (ImGui_ImplWin32_WndProcHandler(hWnd, message, wParam, lParam))
 		return true;
@@ -132,56 +133,55 @@ LRESULT CALLBACK Win32Application::WindowProc(HWND hWnd, UINT message, WPARAM wP
 	{
 	case WM_CREATE:
 		{
-			// Save the DXSample* passed in to CreateWindow.
 			LPCREATESTRUCT pCreateStruct = reinterpret_cast<LPCREATESTRUCT>(lParam);
 			SetWindowLongPtr(hWnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(pCreateStruct->lpCreateParams));
 		}
 		return 0;
 
 	case WM_KEYDOWN:
-		if (pSample)
+		if (app)
 		{
-			pSample->OnKeyDown(static_cast<UINT8>(wParam));
+			app->OnKeyDown(static_cast<UINT8>(wParam));
 		}
 		return 0;
 
 	case WM_KEYUP:
-		if (pSample)
+		if (app)
 		{
-			pSample->OnKeyUp(static_cast<UINT8>(wParam));
+			app->OnKeyUp(static_cast<UINT8>(wParam));
 		}
 		return 0;
 
 	case WM_RBUTTONDOWN:
-		if (pSample)
+		if (app)
 		{
 			int xPos = GET_X_LPARAM(lParam);
 			int yPos = GET_Y_LPARAM(lParam);
-			pSample->OnRButtonDown(xPos, yPos);
+			app->OnRButtonDown(xPos, yPos);
 		}
 		return 0;
 
 	case WM_RBUTTONUP:
-		if (pSample)
+		if (app)
 		{
-			pSample->OnRButtonUp();
+			app->OnRButtonUp();
 		}
 		return 0;
 
 	case WM_MOUSEMOVE:
-		if (pSample)
+		if (app)
 		{
 			int xPos = GET_X_LPARAM(lParam);
 			int yPos = GET_Y_LPARAM(lParam);
-			pSample->OnMouseMove(xPos, yPos);
+			app->OnMouseMove(xPos, yPos);
 		}
 		return 0;
 
 	case WM_PAINT:
-		if (pSample)
+		if (app)
 		{
-			pSample->OnUpdate();
-			pSample->OnRender();
+			app->OnUpdate();
+			app->OnRender();
 		}
 		return 0;
 

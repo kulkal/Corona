@@ -471,5 +471,6 @@ private:
 	PFN_vkCmdSetRayTracingPipelineStackSizeKHR vkCmdSetRayTracingPipelineStackSizeKHRFn = nullptr;
 	PFN_vkCmdTraceRaysKHR vkCmdTraceRaysKHRFn = nullptr;
 	PFN_vkGetBufferDeviceAddressKHR vkGetBufferDeviceAddressKHRFn = nullptr;
+	PFN_vkCmdInsertDebugUtilsLabelEXT vkCmdInsertDebugUtilsLabelEXTFn = nullptr;
 #endif
 };
