@@ -23,7 +23,6 @@
 #include "glm/fwd.hpp"
 #include "glm/gtc/quaternion.hpp"
 
-#include "DXSample.h"
 #include "StepTimer.h"
 #include "SimpleCamera.h"
 #include "RenderBackend.h"
@@ -51,7 +50,7 @@ using Microsoft::WRL::ComPtr;
 using namespace std;
 
 
-class Corona : public DXSample
+class Corona
 {
 public:
 	enum class ERenderingMode
@@ -587,7 +586,7 @@ private:
 		UINT32 ClampMode;
 		float BloomStrength;
 		UINT32 HistoryValid;
-		glm::vec3 _padding;
+		glm::vec2 CurrentJitter;
 	};
 
 public:
@@ -630,7 +629,7 @@ private:
 	EAntiAliasingMode AntiAliasingMode = EAntiAliasingMode::DLSS_RR;
 	EDLSSQualityMode DLSSQualityMode = EDLSSQualityMode::QUALITY;
 	ERayNoiseMode RayNoiseMode = ERayNoiseMode::R2_LOW_DISCREPANCY;
-	EDiffuseGIMode DiffuseGIMode = EDiffuseGIMode::SIMPLE_RAYTRACE;
+	EDiffuseGIMode DiffuseGIMode = EDiffuseGIMode::SPATIAL_HASH;
 	bool bEnableDiffuseGI = true;
 	bool bEnableSpecularGI = true;
 	bool bEnableDirectDiffuse = true;
@@ -946,6 +945,11 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	void UpdateInstancePropertyBuffer();
 	bool GetRayTracingSceneGeometry(VertexBuffer*& outVertexBuffer, IndexBuffer*& outIndexBuffer) const;
 	void RebuildAccelerationStructures();
+	void InitRaytracingShadowPass();
+	void InitRaytracingReflectionPass();
+	void InitRaytracingSimpleGIPass();
+	void InitRaytracingScreenProbePass();
+	void InitRaytracingSpatialHashPass();
 	
 public:
 
@@ -1033,6 +1037,9 @@ public:
 	bool IsJitterEnabled() const { return IsTemporalAAEnabled() || IsDLSSUpscaleEnabled(); }
 	UINT GetRenderWidth() const { return IsDLSSUpscaleEnabled() && RenderingMode == ERenderingMode::HYBRID ? RenderWidth : m_width; }
 	UINT GetRenderHeight() const { return IsDLSSUpscaleEnabled() && RenderingMode == ERenderingMode::HYBRID ? RenderHeight : m_height; }
+	UINT GetWidth() const { return m_width; }
+	UINT GetHeight() const { return m_height; }
+	const WCHAR* GetTitle() const { return m_title.c_str(); }
 
 	void GenMipSpecularGIPass();
 	void ResetAllAccumulationState(bool forceUpscaleReload);
@@ -1057,28 +1064,38 @@ public:
 	bool DLSSRRPass();
 #endif
 
-	// DXSample functions
-	virtual void OnInit();
+	void OnInit();
 
-	virtual void OnUpdate();
+	void OnUpdate();
 
-	virtual void OnRender();
+	void OnRender();
 
-	virtual void OnDestroy();
+	void OnDestroy();
 
-	virtual void ParseCommandLineArgs(_In_reads_(argc) WCHAR* argv[], int argc) override;
+	void ParseCommandLineArgs(_In_reads_(argc) WCHAR* argv[], int argc);
 
-	virtual void OnKeyDown(UINT8 key);
+	void OnKeyDown(UINT8 key);
 
-	virtual void OnKeyUp(UINT8 key);
+	void OnKeyUp(UINT8 key);
 	
-	virtual void OnRButtonDown(int x, int y);
+	void OnRButtonDown(int x, int y);
 	virtual void OnRButtonUp();
 	virtual void OnMouseMove(int x, int y);
 
 	Corona(UINT width, UINT height, std::wstring name);
 
-	virtual ~Corona();
+	~Corona();
 
-	
+private:
+	std::wstring GetAssetFullPath(LPCWSTR assetName) const;
+	void SetCustomWindowText(LPCWSTR text);
+
+	UINT m_width = 0;
+	UINT m_height = 0;
+	float m_aspectRatio = 1.0f;
+	bool m_useWarpDevice = false;
+	std::wstring m_assetsPath;
+	std::wstring m_title;
+	std::string m_imguiIniPath;
+	std::string m_imguiLogPath;
 };

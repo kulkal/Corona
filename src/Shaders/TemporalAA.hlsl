@@ -26,7 +26,7 @@ cbuffer TemporalAAParam : register(b0)
     uint ClampMode;
     float BloomStrength;
     uint HistoryValid;
-    float3 _Padding;
+    float2 CurrentJitter;
 };
 
 struct VSInput
@@ -206,6 +206,7 @@ float4 PSMain(PSInput input) : SV_TARGET
     input.uv.y = 1 - input.uv.y;
     uint2 PixelPos = uint2(input.position.xy);
     float2 PixelCenter = float2(PixelPos) + 0.5f;
+    float2 CurrentSampleCenter = PixelCenter + CurrentJitter;
 
 
     const int SampleRadius_ = 1;
@@ -220,12 +221,13 @@ float4 PSMain(PSInput input) : SV_TARGET
         for(int x = -SampleRadius_; x <= SampleRadius_; ++x)
         {
             float2 sampleOffset = float2(x, y);
-            float2 samplePos = PixelPos + sampleOffset;
-            samplePos = clamp(samplePos, 0, RTSize - 1.0f);
+            float2 samplePos = CurrentSampleCenter + sampleOffset;
+            samplePos = clamp(samplePos, 0.5f.xx, RTSize - 0.5f.xx);
+            float2 sampleUV = samplePos / RTSize;
 
             float2 sampleDist = abs(sampleOffset) / (ResolveFilterDiameter / 2.0f);
 
-            float3 sample = CurrentColorTex[samplePos].xyz * Exposure[0];
+            float3 sample = CurrentColorTex.SampleLevel(sampleWrap, sampleUV, 0).xyz * Exposure[0];
             float sampleWeight = FilterBlackmanHarris(sampleDist.x) * FilterBlackmanHarris(sampleDist.y);
           
             clrMin = min(clrMin, sample);
