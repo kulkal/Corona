@@ -37,7 +37,9 @@ cbuffer TemporalFilterConstant : register(b0)
 	float Point2PlaneDistScale;
 	float AccumulationAlpha;
 	uint HistoryValid;
-	float2 Padding;
+	float2 JitterOffset;
+	float SpecularAccumulationAlpha;
+	float SpecularVarianceClipGamma;
 };
 
 #define GROUPSIZE 15
@@ -206,6 +208,100 @@ float3 SafeNormalize(float3 value, float3 fallback)
 	return lenSq > 1e-12f ? value * rsqrt(lenSq) : fallback;
 }
 
+float3 LoadSpecularColor(int2 pos)
+{
+    float4 value = SanitizeFloat4(InSpecularGITex[pos]);
+    return max(value.xyz, 0.0f.xxx);
+}
+
+float CurrentFrameGeometryWeight(int2 samplePos, float centerLinearDepth, float3 centerNormal)
+{
+    float sampleDepth = DepthTex[samplePos].x;
+    float sampleLinearDepth = GetLinearDepthOpenGL(sampleDepth, ProjectionParams.z, ProjectionParams.w);
+    float3 sampleNormal = SafeNormalize(NormalTex[samplePos].xyz, centerNormal);
+
+    float depthDelta = abs(centerLinearDepth - sampleLinearDepth) / max(centerLinearDepth, 1e-3f);
+    float depthWeight = exp(-depthDelta * 64.0f);
+    float normalWeight = pow(saturate(dot(centerNormal, sampleNormal)), 16.0f);
+    return saturate(depthWeight * normalWeight);
+}
+
+void ComputeSpecularNeighborhoodStats(uint2 centerPos, uint2 textureSize, float centerLinearDepth, float3 centerNormal, out float3 meanColor, out float3 sigmaColor, out float edgeFactor)
+{
+    float3 sumColor = 0.0f.xxx;
+    float3 sumColorSq = 0.0f.xxx;
+    float sampleWeightSum = 0.0f;
+    float neighborWeightSum = 0.0f;
+
+    [unroll]
+    for (int yy = -1; yy <= 1; ++yy)
+    {
+        [unroll]
+        for (int xx = -1; xx <= 1; ++xx)
+        {
+            int2 samplePos = int2(centerPos) + int2(xx, yy);
+            samplePos = clamp(samplePos, int2(0, 0), int2(textureSize) - 1);
+            float geometryWeight = (xx == 0 && yy == 0) ? 1.0f : CurrentFrameGeometryWeight(samplePos, centerLinearDepth, centerNormal);
+            float3 color = LoadSpecularColor(samplePos);
+            sumColor += color * geometryWeight;
+            sumColorSq += color * color * geometryWeight;
+            sampleWeightSum += geometryWeight;
+            if (xx != 0 || yy != 0)
+                neighborWeightSum += geometryWeight;
+        }
+    }
+
+    meanColor = sumColor / max(sampleWeightSum, 1.0e-4f);
+    float3 variance = max(sumColorSq / max(sampleWeightSum, 1.0e-4f) - meanColor * meanColor, 0.0f.xxx);
+    sigmaColor = sqrt(variance);
+    edgeFactor = saturate(1.0f - neighborWeightSum / 8.0f);
+}
+
+bool SelectPrevSurfacePixel(float2 prevUV, uint2 textureSize, float currentLinearDepth, float3 currentNormal, out int2 bestPos, out float bestWeight)
+{
+    float2 prevPixel = prevUV * float2(textureSize) - 0.5f;
+    int2 basePos = int2(floor(prevPixel));
+    int2 maxPos = int2(textureSize) - 1;
+    bestPos = clamp(int2(round(prevPixel)), int2(0, 0), maxPos);
+    bestWeight = 0.0f;
+
+    [unroll]
+    for (int yy = -1; yy <= 2; ++yy)
+    {
+        [unroll]
+        for (int xx = -1; xx <= 2; ++xx)
+        {
+            int2 samplePos = clamp(basePos + int2(xx, yy), int2(0, 0), maxPos);
+            float prevDepth = PrevDepthTex[samplePos].x;
+            float prevLinearDepth = GetLinearDepthOpenGL(prevDepth, ProjectionParams.z, ProjectionParams.w);
+            float3 prevNormal = SafeNormalize(PrevNormalTex[samplePos].xyz, currentNormal);
+
+            float2 sampleCenter = float2(samplePos) + 0.5f;
+            float2 pixelDelta = sampleCenter - prevUV * float2(textureSize);
+            float filterWeight = exp(-dot(pixelDelta, pixelDelta) * 1.0f);
+            float depthDelta = abs(currentLinearDepth - prevLinearDepth) / max(currentLinearDepth, 1e-3f);
+            float depthWeight = exp(-depthDelta * 32.0f);
+            float normalWeight = pow(saturate(dot(currentNormal, prevNormal)), 16.0f);
+            float weight = filterWeight * depthWeight * normalWeight;
+
+            if (weight > bestWeight)
+            {
+                bestWeight = weight;
+                bestPos = samplePos;
+            }
+        }
+    }
+
+    return bestWeight > 1.0e-5f;
+}
+
+float2 BlendSpecularMoments(float2 prevMoments, float3 currentSpecular, float alpha)
+{
+    float luminance = max(RGBToLuminance(currentSpecular), 0.0f);
+    float2 currentMoments = float2(luminance, luminance * luminance);
+    return lerp(prevMoments, currentMoments, alpha);
+}
+
 [numthreads(15, 15, 1)]
 void TemporalFilter( uint3 DTid : SV_DispatchThreadID, uint3 GTid : SV_GroupThreadID, uint GTIndex : SV_GroupIndex, uint3 GId : SV_GroupID)
 {
@@ -219,50 +315,98 @@ void TemporalFilter( uint3 DTid : SV_DispatchThreadID, uint3 GTid : SV_GroupThre
     float4 CurrentDiffuse = SanitizeFloat4(InGIResultColorTex[SafePixelPos]);
     CurrentDiffuse.w = 1.0f;
 
-    float4 BlendedSpecular = CurrentSpecular;
-    float4 BlendedDiffuse = CurrentDiffuse;
+    float currentDepth = DepthTex[SafePixelPos].x;
+    float currentLinearDepth = GetLinearDepthOpenGL(currentDepth, ProjectionParams.z, ProjectionParams.w);
+    float3 currentNormal = SafeNormalize(NormalTex[SafePixelPos].xyz, float3(0.0f, 1.0f, 0.0f));
+    float roughness = clamp(SanitizeFloat4(RougnessMetalicTex[SafePixelPos]).x, 0.02f, 1.0f);
+    float3 specularNeighborhoodMean = 0.0f.xxx;
+    float3 specularNeighborhoodSigma = 0.0f.xxx;
+    float geometryEdgeFactor = 0.0f;
+    ComputeSpecularNeighborhoodStats(SafePixelPos, TextureSize, currentLinearDepth, currentNormal, specularNeighborhoodMean, specularNeighborhoodSigma, geometryEdgeFactor);
+    CurrentSpecular.xyz = max(CurrentSpecular.xyz, 0.0f.xxx);
+
+	float4 BlendedSpecular = CurrentSpecular;
+	float4 BlendedDiffuse = CurrentDiffuse;
+    float2 BlendedMoments = float2(max(RGBToLuminance(CurrentSpecular.xyz), 0.0f), 0.0f);
+    BlendedMoments.y = BlendedMoments.x * BlendedMoments.x;
 
     if (HistoryValid != 0)
     {
         float2 velocity = VelocityTex[SafePixelPos].xy;
-        float2 prevUV = (float2(SafePixelPos) + 0.5f - velocity * RTSize) / RTSize;
+        float2 prevUV = (float2(SafePixelPos) + 0.5f - velocity * RTSize - JitterOffset) / RTSize;
 
         bool validHistory = all(prevUV >= 0.0.xx) && all(prevUV <= 1.0.xx);
+        int2 bestPrevSpecularPos = int2(0, 0);
+        float bestPrevSpecularWeight = 0.0f;
         if (validHistory)
         {
-            float currentDepth = DepthTex[SafePixelPos].x;
-            float prevDepth = PrevDepthTex.SampleLevel(BilinearClamp, prevUV, 0).x;
+            validHistory = SelectPrevSurfacePixel(prevUV, TextureSize, currentLinearDepth, currentNormal, bestPrevSpecularPos, bestPrevSpecularWeight);
+        }
 
-            float currentLinearDepth = GetLinearDepthOpenGL(currentDepth, ProjectionParams.z, ProjectionParams.w);
+        if (validHistory)
+        {
+            float prevDepth = PrevDepthTex[bestPrevSpecularPos].x;
             float prevLinearDepth = GetLinearDepthOpenGL(prevDepth, ProjectionParams.z, ProjectionParams.w);
 
-            float3 currentNormal = SafeNormalize(NormalTex[SafePixelPos].xyz, float3(0.0f, 1.0f, 0.0f));
-            float3 prevNormal = SafeNormalize(PrevNormalTex.SampleLevel(BilinearClamp, prevUV, 0).xyz, currentNormal);
+            float3 prevNormal = SafeNormalize(PrevNormalTex[bestPrevSpecularPos].xyz, currentNormal);
 
             float depthDelta = abs(currentLinearDepth - prevLinearDepth) / max(currentLinearDepth, 1e-3f);
-            float depthWeight = exp(-depthDelta * 32.0f);
-            float normalWeight = pow(saturate(dot(currentNormal, prevNormal)), 32.0f);
-            float historyWeight = saturate(depthWeight * normalWeight);
+            float depthWeight = exp(-depthDelta * 24.0f);
+            float normalDot = saturate(dot(currentNormal, prevNormal));
+            float diffuseNormalWeight = pow(normalDot, 32.0f);
+            float specularNormalPower = lerp(32.0f, 12.0f, roughness);
+            float specularNormalWeight = pow(normalDot, specularNormalPower);
+            float diffuseHistoryWeight = saturate(depthWeight * diffuseNormalWeight);
+            float specularSurfaceWeight = saturate(bestPrevSpecularWeight * 6.0f);
+            float specularHistoryWeight = saturate(depthWeight * specularNormalWeight * specularSurfaceWeight);
 
-            float4 PrevSpecular = SanitizeFloat4(InSpecularGITexPrev.SampleLevel(BilinearClamp, prevUV, 0));
+            float4 PrevSpecular = SanitizeFloat4(InSpecularGITexPrev[bestPrevSpecularPos]);
             float4 PrevDiffuse = SanitizeFloat4(InGIResultColorTexPrev.SampleLevel(BilinearClamp, prevUV, 0));
+            float2 PrevMoments = max(PrevMomentsTex[bestPrevSpecularPos].xy, 0.0f.xx);
             PrevDiffuse.w = 1.0f;
 
-            float diffuseAlpha = lerp(1.0f, accumulationAlpha, historyWeight);
-            float specularAlpha = lerp(1.0f, saturate(accumulationAlpha * 1.5f), historyWeight);
+            float3 clipRadius = max(specularNeighborhoodSigma * max(SpecularVarianceClipGamma, 0.0f), 1.0e-4f.xxx);
+            float3 clipMin = max(specularNeighborhoodMean - clipRadius, 0.0f.xxx);
+            float3 clipMax = specularNeighborhoodMean + clipRadius;
+            float3 ClippedPrevSpecular = clamp(PrevSpecular.xyz, clipMin, clipMax);
+            float currentSpecularSignal = max(RGBToLuminance(CurrentSpecular.xyz), RGBToLuminance(specularNeighborhoodMean));
+            float sparseSampleClipWeight = saturate(currentSpecularSignal * 16.0f);
+            float specularClipWeight = lerp(1.0f, sparseSampleClipWeight, roughness);
+            PrevSpecular.xyz = lerp(max(PrevSpecular.xyz, 0.0f.xxx), ClippedPrevSpecular, specularClipWeight);
+            float edgeCurrentClipWeight = geometryEdgeFactor * (1.0f - specularHistoryWeight) * saturate(roughness * 1.25f);
+            float3 ClippedCurrentSpecular = clamp(CurrentSpecular.xyz, clipMin, clipMax);
+            CurrentSpecular.xyz = lerp(CurrentSpecular.xyz, ClippedCurrentSpecular, edgeCurrentClipWeight);
+
+            float diffuseAlpha = lerp(1.0f, accumulationAlpha, diffuseHistoryWeight);
+            float specularAlphaBase = saturate(SpecularAccumulationAlpha * lerp(1.25f, 0.75f, roughness));
+            float specularAlpha = lerp(1.0f, specularAlphaBase, specularHistoryWeight);
+            specularAlpha *= lerp(1.0f, 0.60f, geometryEdgeFactor * specularHistoryWeight);
 
             BlendedDiffuse = lerp(PrevDiffuse, CurrentDiffuse, diffuseAlpha);
             BlendedDiffuse.w = 1.0f;
             BlendedSpecular = lerp(PrevSpecular, CurrentSpecular, specularAlpha);
-            BlendedSpecular.w = lerp(PrevSpecular.w + 1.0f, 1.0f, 1.0f - historyWeight);
+            BlendedSpecular.w = lerp(PrevSpecular.w + 1.0f, 1.0f, 1.0f - specularHistoryWeight);
+            BlendedMoments = BlendSpecularMoments(PrevMoments, BlendedSpecular.xyz, specularAlpha);
         }
         else
         {
+            float3 clipRadius = max(specularNeighborhoodSigma * max(SpecularVarianceClipGamma, 0.0f), 1.0e-4f.xxx);
+            float3 clipMin = max(specularNeighborhoodMean - clipRadius, 0.0f.xxx);
+            float3 clipMax = specularNeighborhoodMean + clipRadius;
+            float edgeCurrentClipWeight = geometryEdgeFactor * saturate(roughness * 1.25f);
+            CurrentSpecular.xyz = lerp(CurrentSpecular.xyz, clamp(CurrentSpecular.xyz, clipMin, clipMax), edgeCurrentClipWeight);
+            BlendedSpecular = CurrentSpecular;
             BlendedSpecular.w = 1.0f;
         }
     }
     else
     {
+        float3 clipRadius = max(specularNeighborhoodSigma * max(SpecularVarianceClipGamma, 0.0f), 1.0e-4f.xxx);
+        float3 clipMin = max(specularNeighborhoodMean - clipRadius, 0.0f.xxx);
+        float3 clipMax = specularNeighborhoodMean + clipRadius;
+        float edgeCurrentClipWeight = geometryEdgeFactor * saturate(roughness * 1.25f);
+        CurrentSpecular.xyz = lerp(CurrentSpecular.xyz, clamp(CurrentSpecular.xyz, clipMin, clipMax), edgeCurrentClipWeight);
+        BlendedSpecular = CurrentSpecular;
         BlendedSpecular.w = 1.0f;
     }
 
@@ -278,6 +422,7 @@ void TemporalFilter( uint3 DTid : SV_DispatchThreadID, uint3 GTid : SV_GroupThre
 		OutGIResultSHDS[PixelPos] = 0.0f.xxxx;
 		OutGIResultColorDS[PixelPos] = BlendedDiffuse;
 		OutSpecularGI[PixelPos] = BlendedSpecular;
+        OutMoments[PixelPos] = max(BlendedMoments, 0.0f.xx);
 	}
 
 }

@@ -640,6 +640,8 @@ public:
 	std::shared_ptr<ComputePipelineStateObject> CreateComputePipelineStateObject() override;
 	Microsoft::WRL::ComPtr<ID3DBlob> CreateShader(const std::wstring& fileName, const std::string& entryPoint, const std::string& target) override;
 	void ResetDynamicResources() override { DynamicTextures.clear(); DynamicBuffers.clear(); }
+	void ForgetDynamicTexture(Texture* texture) { if (texture) DynamicTextures.remove_if([texture](const std::shared_ptr<Texture>& entry) { return entry.get() == texture; }); }
+	void ForgetDynamicBuffer(Buffer* buffer) { if (buffer) DynamicBuffers.remove_if([buffer](const std::shared_ptr<Buffer>& entry) { return entry.get() == buffer; }); }
 	void CreateSwapChainForWindow(IDXGIFactory4* factory, HWND hwnd, uint32_t width, uint32_t height, DXGI_FORMAT format) override;
 	Microsoft::WRL::ComPtr<ID3D12Resource> GetSwapChainBuffer(uint32_t bufferIndex) override;
 	HRESULT CaptureTexture(Texture* source, DirectX::ScratchImage& captured, D3D12_RESOURCE_STATES beforeState) override;

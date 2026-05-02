@@ -73,49 +73,20 @@ void Corona::RaytraceGIPass()
 	renderBackend->ClearTextureUAVFloat(DiffuseGIRawAux.get(), clearGI);
 	renderBackend->ClearTextureUAVFloat(DiffuseGIRaw.get(), clearGI);
 
-	PSO_RT_GI->SetNumInstances(static_cast<uint32_t>(RayTracingInstances.size()));
-	PSO_RT_GI->BeginShaderTable();
-
-	PSO_RT_GI->SetTextureUAV("global", "GIResultSH", DiffuseGIRawAux.get());
-	PSO_RT_GI->SetTextureUAV("global", "GIResultColor", DiffuseGIRaw.get());
-	PSO_RT_GI->SetAccelerationStructure("global", "gRtScene", TLAS);
-	PSO_RT_GI->SetTextureSRV("global", "DepthTex", UnjitteredDepthBuffers[ColorBufferWriteIndex].get());
-	PSO_RT_GI->SetTextureSRV("global", "WorldNormalTex", NormalBuffers[ColorBufferWriteIndex].get());
-	PSO_RT_GI->SetTextureSRV("global", "BlueNoiseTex", BlueNoiseTex.get());
-	
 	RTGIViewParam.ViewSpreadAngle = glm::tan(Fov * 0.5) / (0.5f * GetRenderHeight());
-	PSO_RT_GI->SetCBVValue("global", "ViewParameter", &RTGIViewParam);
-	PSO_RT_GI->SetSampler("global", "sampleWrap", samplerWrap.get());
 
-	int i = 0;
-	for (const RTInstanceDesc& instance : RayTracingInstances)
-	{
-		Mesh* mesh = instance.BottomLevelAS->MeshPtr;
-		
-		Texture* diffuseTex = mesh->Draws[0].mat->Diffuse.get();
-		if (!diffuseTex)
-			diffuseTex = DefaultWhiteTex.get();
-
-		PSO_RT_GI->ResetHitProgram(i);
-
-		PSO_RT_GI->StartHitProgram("HitGroup", i);
-		PSO_RT_GI->AddSceneGeometrySRVsToHitProgram("HitGroup", mesh->Vb.get(), mesh->Ib.get(), i);
-		PSO_RT_GI->AddTextureSRVToHitProgram("HitGroup", diffuseTex, i);
-		PSO_RT_GI->AddBufferSRVToHitProgram("HitGroup", InstancePropertyBuffer.get(), i);
-
-		/*PSO_RT_GI->StartHitProgram("ShadowHitGroup", i);
-		PSO_RT_GI->AddDescriptor2HitProgram("ShadowHitGroup", mesh->Vb->GpuHandleSRV, i);
-		PSO_RT_GI->AddDescriptor2HitProgram("ShadowHitGroup", mesh->Ib->GpuHandleSRV, i);
-		PSO_RT_GI->AddDescriptor2HitProgram("ShadowHitGroup", diffuseTex->GpuHandleSRV, i);
-		PSO_RT_GI->AddDescriptor2HitProgram("ShadowHitGroup", InstancePropertyBuffer->GpuHandleSRV, i);*/
-
-		i++;
-	}
-
-	PSO_RT_GI->EndShaderTable();
-
-
-	PSO_RT_GI->Apply(GetRenderWidth(), GetRenderHeight());
+	RTPassBuilder pass(*this, PSO_RT_GI);
+	pass.BeginScene()
+		.SetTextureUAV("global", "GIResultSH", DiffuseGIRawAux.get())
+		.SetTextureUAV("global", "GIResultColor", DiffuseGIRaw.get())
+		.SetAccelerationStructure("global", "gRtScene", TLAS)
+		.SetTextureSRV("global", "DepthTex", UnjitteredDepthBuffers[ColorBufferWriteIndex].get())
+		.SetTextureSRV("global", "WorldNormalTex", NormalBuffers[ColorBufferWriteIndex].get())
+		.SetTextureSRV("global", "BlueNoiseTex", BlueNoiseTex.get())
+		.SetCBVValue("global", "ViewParameter", &RTGIViewParam)
+		.SetSampler("global", "sampleWrap", samplerWrap.get());
+	pass.BindSceneHitPrograms();
+	pass.Dispatch(GetRenderWidth(), GetRenderHeight());
 
 	renderBackend->TransitionTexture(DiffuseGIRawAux.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
 	renderBackend->TransitionTexture(DiffuseGIRaw.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);

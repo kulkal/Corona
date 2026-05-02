@@ -120,54 +120,25 @@ void Corona::PathTracingPass()
 		// Note: Buffer will be cleared in shader when FrameCounter == 0
 	}
 
-	PSO_PATH_TRACING->SetNumInstances(static_cast<uint32_t>(RayTracingInstances.size()));
-	PSO_PATH_TRACING->BeginShaderTable();
+	RTPassBuilder pass(*this, PSO_PATH_TRACING);
+	pass.BeginScene()
+		.SetTextureUAV("global", "OutputColor", PathTracingAccumBuffer[PathTracingWriteIndex].get())
+		.SetAccelerationStructure("global", "gRtScene", TLAS)
+		.SetTextureSRV("global", "BlueNoiseTex", BlueNoiseTex.get())
+		.SetCBVValue("global", "ViewParameter", &PathTracingViewParam)
+		.SetSampler("global", "sampleWrap", samplerWrap.get());
 
-	PSO_PATH_TRACING->SetTextureUAV("global", "OutputColor", PathTracingAccumBuffer[PathTracingWriteIndex].get());
-	PSO_PATH_TRACING->SetAccelerationStructure("global", "gRtScene", TLAS);
-	PSO_PATH_TRACING->SetTextureSRV("global", "BlueNoiseTex", BlueNoiseTex.get());
-	
-	// PathTracingViewParam is already updated in OnUpdate()
-	PSO_PATH_TRACING->SetCBVValue("global", "ViewParameter", &PathTracingViewParam);
-	PSO_PATH_TRACING->SetSampler("global", "sampleWrap", samplerWrap.get());
-
-	int i = 0;
-	for (const RTInstanceDesc& instance : RayTracingInstances)
+	RTSceneHitProgramDesc hitProgramDesc;
+	hitProgramDesc.bBindDiffuseTexture = false;
+	hitProgramDesc.bBindInstancePropertyBeforeDiffuse = true;
+	pass.BindSceneHitPrograms(hitProgramDesc, [&pass](RTPipelineStateObject& pso, const RTSceneHitProgramDesc& desc, Mesh& mesh, uint32_t instanceIndex)
 	{
-		Mesh* mesh = instance.BottomLevelAS->MeshPtr;
-		
-		Texture* diffuseTex = mesh->Draws[0].mat->Diffuse.get();
-		if (!diffuseTex)
-			diffuseTex = DefaultWhiteTex.get();
-		
-		Texture* normalTex = mesh->Draws[0].mat->Normal.get();
-		if (!normalTex)
-			normalTex = DefaultNormalTex.get();
-		
-		Texture* roughnessTex = mesh->Draws[0].mat->Roughness.get();
-		if (!roughnessTex)
-			roughnessTex = DefaultRougnessTex.get();
-		
-		Texture* metallicTex = mesh->Draws[0].mat->Metallic.get();
-		if (!metallicTex)
-			metallicTex = DefaultBlackTex.get();
-
-		PSO_PATH_TRACING->ResetHitProgram(i);
-
-		PSO_PATH_TRACING->StartHitProgram("HitGroup", i);
-		PSO_PATH_TRACING->AddSceneGeometrySRVsToHitProgram("HitGroup", mesh->Vb.get(), mesh->Ib.get(), i);
-		PSO_PATH_TRACING->AddBufferSRVToHitProgram("HitGroup", InstancePropertyBuffer.get(), i);
-		PSO_PATH_TRACING->AddTextureSRVToHitProgram("HitGroup", diffuseTex, i);
-		PSO_PATH_TRACING->AddTextureSRVToHitProgram("HitGroup", normalTex, i);
-		PSO_PATH_TRACING->AddTextureSRVToHitProgram("HitGroup", roughnessTex, i);
-		PSO_PATH_TRACING->AddTextureSRVToHitProgram("HitGroup", metallicTex, i);
-
-		i++;
-	}
-
-	PSO_PATH_TRACING->EndShaderTable();
-
-	PSO_PATH_TRACING->Apply(m_width, m_height);
+		pso.AddTextureSRVToHitProgram(desc.HitGroup, pass.GetDiffuseTexture(mesh), instanceIndex);
+		pso.AddTextureSRVToHitProgram(desc.HitGroup, pass.GetNormalTexture(mesh), instanceIndex);
+		pso.AddTextureSRVToHitProgram(desc.HitGroup, pass.GetRoughnessTexture(mesh), instanceIndex);
+		pso.AddTextureSRVToHitProgram(desc.HitGroup, pass.GetMetallicTexture(mesh), instanceIndex);
+	});
+	pass.Dispatch(m_width, m_height);
 
 	// Transition output buffer back to SRV
 	renderBackend->TransitionTexture(PathTracingAccumBuffer[PathTracingWriteIndex].get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);

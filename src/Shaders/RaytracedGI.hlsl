@@ -205,9 +205,10 @@ void rayGen
         payload);
     if(payload.bHit == false)
     {
-        // hit sky - payload.color already includes SkyIntensity from miss shader
-        float3 Radiance = payload.color;
-        float3 Irradiance = Radiance;
+        // Direct environment lighting for the primary surface is evaluated by
+        // RaytracedSkyLighting. Keep this GI buffer focused on surface bounce
+        // radiance so LightingPS does not double-count sky diffuse.
+        float3 Irradiance = 0.0f.xxx;
 
         SH sh_indirect = init_SH();
         sh_indirect = irradiance_to_SH(Irradiance, sampleDirWorld);
@@ -243,7 +244,9 @@ void rayGen
 
         float3 Albedo = max(CommonSanitizeFloat3(payload.color, 1.0f.xxx), 0.0f.xxx);
         SH sh_indirect = init_SH();
-        float3 Irradiance = EvaluateSkyDiffuseBounce(payload.normal) * Albedo * INV_PI;
+        // Direct sky diffuse is evaluated by RaytracedSkyLighting. Keep this
+        // GI pass focused on surface bounce energy to avoid double-counting it.
+        float3 Irradiance = 0.0f.xxx;
         if(shadowPayload.bHit == false)
         {
             // miss - apply light color
@@ -262,10 +265,8 @@ void rayGen
 [shader("miss")]
 void miss(inout RayPayload payload)
 {
-    // Sky color - gradient based on ray direction (same as path tracing)
-    float3 rayDir = WorldRayDirection();
     payload.position = float3(0, 0, 0);
-    payload.color = EvaluateSkyColor(rayDir);
+    payload.color = 0.0f.xxx;
     payload.normal = float3(0, 0, -1);
     payload.bHit = false;
 }

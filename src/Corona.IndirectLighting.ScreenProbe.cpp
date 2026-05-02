@@ -178,47 +178,31 @@ void Corona::ScreenProbeRaytraceGIPass()
 		renderBackend->TransitionTexture(ScreenProbeGISH[writeIndex][coefficientIndex].get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
 	renderBackend->TransitionTexture(ScreenProbeGIMetadata[writeIndex].get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
 
-	PSO_RT_SCREEN_PROBE_GI->SetNumInstances(static_cast<uint32_t>(RayTracingInstances.size()));
-	PSO_RT_SCREEN_PROBE_GI->BeginShaderTable();
+	RTPassBuilder pass(*this, PSO_RT_SCREEN_PROBE_GI);
+	pass.BeginScene();
 
-	PSO_RT_SCREEN_PROBE_GI->SetTextureUAV("global", "ProbeRadiance", ScreenProbeGIRadiance[writeIndex].get());
-	PSO_RT_SCREEN_PROBE_GI->SetTextureUAV("global", "ProbeMeta", ScreenProbeGIMetadata[writeIndex].get());
+	pass.SetTextureUAV("global", "ProbeRadiance", ScreenProbeGIRadiance[writeIndex].get());
+	pass.SetTextureUAV("global", "ProbeMeta", ScreenProbeGIMetadata[writeIndex].get());
 	for (UINT coefficientIndex = 0; coefficientIndex < ScreenProbeSHCoefficientCount; ++coefficientIndex)
-		PSO_RT_SCREEN_PROBE_GI->SetTextureUAV("global", probeSHUAVNames[coefficientIndex], ScreenProbeGISH[writeIndex][coefficientIndex].get());
-	PSO_RT_SCREEN_PROBE_GI->SetAccelerationStructure("global", "gRtScene", TLAS);
-	PSO_RT_SCREEN_PROBE_GI->SetTextureSRV("global", "DepthTex", UnjitteredDepthBuffers[ColorBufferWriteIndex].get());
-	PSO_RT_SCREEN_PROBE_GI->SetTextureSRV("global", "WorldNormalTex", NormalBuffers[ColorBufferWriteIndex].get());
-	PSO_RT_SCREEN_PROBE_GI->SetTextureSRV("global", "BlueNoiseTex", BlueNoiseTex.get());
-	PSO_RT_SCREEN_PROBE_GI->SetTextureSRV("global", "PrevProbeRadianceTex", ScreenProbeGIRadiance[readIndex].get());
-	PSO_RT_SCREEN_PROBE_GI->SetTextureSRV("global", "PrevProbeMetaTex", ScreenProbeGIMetadata[readIndex].get());
+		pass.SetTextureUAV("global", probeSHUAVNames[coefficientIndex], ScreenProbeGISH[writeIndex][coefficientIndex].get());
+	pass.SetAccelerationStructure("global", "gRtScene", TLAS);
+	pass.SetTextureSRV("global", "DepthTex", UnjitteredDepthBuffers[ColorBufferWriteIndex].get());
+	pass.SetTextureSRV("global", "WorldNormalTex", NormalBuffers[ColorBufferWriteIndex].get());
+	pass.SetTextureSRV("global", "BlueNoiseTex", BlueNoiseTex.get());
+	pass.SetTextureSRV("global", "PrevProbeRadianceTex", ScreenProbeGIRadiance[readIndex].get());
+	pass.SetTextureSRV("global", "PrevProbeMetaTex", ScreenProbeGIMetadata[readIndex].get());
 	for (UINT coefficientIndex = 0; coefficientIndex < ScreenProbeSHCoefficientCount; ++coefficientIndex)
-		PSO_RT_SCREEN_PROBE_GI->SetTextureSRV("global", prevProbeSHSRVNames[coefficientIndex], ScreenProbeGISH[readIndex][coefficientIndex].get());
-	PSO_RT_SCREEN_PROBE_GI->SetTextureSRV("global", "VelocityTex", VelocityBuffer.get());
-	PSO_RT_SCREEN_PROBE_GI->SetTextureSRV("global", "PrevDepthTex", UnjitteredDepthBuffers[1 - ColorBufferWriteIndex].get());
-	PSO_RT_SCREEN_PROBE_GI->SetTextureSRV("global", "PrevNormalTex", NormalBuffers[1 - ColorBufferWriteIndex].get());
-	PSO_RT_SCREEN_PROBE_GI->SetTextureSRV("global", "GeoNormalTex", GeomNormalBuffer.get());
-	PSO_RT_SCREEN_PROBE_GI->SetCBVValue("global", "ViewParameter", &RTScreenProbeGIViewParam);
-	PSO_RT_SCREEN_PROBE_GI->SetSampler("global", "sampleWrap", samplerWrap.get());
-	PSO_RT_SCREEN_PROBE_GI->SetSampler("global", "historyClamp", samplerBilinearWrap.get());
+		pass.SetTextureSRV("global", prevProbeSHSRVNames[coefficientIndex], ScreenProbeGISH[readIndex][coefficientIndex].get());
+	pass.SetTextureSRV("global", "VelocityTex", VelocityBuffer.get());
+	pass.SetTextureSRV("global", "PrevDepthTex", UnjitteredDepthBuffers[1 - ColorBufferWriteIndex].get());
+	pass.SetTextureSRV("global", "PrevNormalTex", NormalBuffers[1 - ColorBufferWriteIndex].get());
+	pass.SetTextureSRV("global", "GeoNormalTex", GeomNormalBuffers[ColorBufferWriteIndex].get());
+	pass.SetCBVValue("global", "ViewParameter", &RTScreenProbeGIViewParam);
+	pass.SetSampler("global", "sampleWrap", samplerWrap.get());
+	pass.SetSampler("global", "historyClamp", samplerBilinearWrap.get());
 
-	int i = 0;
-	for (const RTInstanceDesc& instance : RayTracingInstances)
-	{
-		Mesh* mesh = instance.BottomLevelAS->MeshPtr;
-		Texture* diffuseTex = mesh->Draws[0].mat->Diffuse.get();
-		if (!diffuseTex)
-			diffuseTex = DefaultWhiteTex.get();
-
-		PSO_RT_SCREEN_PROBE_GI->ResetHitProgram(i);
-		PSO_RT_SCREEN_PROBE_GI->StartHitProgram("HitGroup", i);
-		PSO_RT_SCREEN_PROBE_GI->AddSceneGeometrySRVsToHitProgram("HitGroup", mesh->Vb.get(), mesh->Ib.get(), i);
-		PSO_RT_SCREEN_PROBE_GI->AddTextureSRVToHitProgram("HitGroup", diffuseTex, i);
-		PSO_RT_SCREEN_PROBE_GI->AddBufferSRVToHitProgram("HitGroup", InstancePropertyBuffer.get(), i);
-		i++;
-	}
-
-	PSO_RT_SCREEN_PROBE_GI->EndShaderTable();
-	PSO_RT_SCREEN_PROBE_GI->Apply(probeGridWidth, probeGridHeight);
+	pass.BindSceneHitPrograms();
+	pass.Dispatch(probeGridWidth, probeGridHeight);
 
 	renderBackend->TransitionTexture(ScreenProbeGIRadiance[writeIndex].get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
 	for (UINT coefficientIndex = 0; coefficientIndex < ScreenProbeSHCoefficientCount; ++coefficientIndex)
@@ -270,7 +254,7 @@ void Corona::ScreenProbeGIPass()
 
 	ScreenProbeGIPSO->SetTextureSRV("DepthTex", UnjitteredDepthBuffers[ColorBufferWriteIndex].get());
 	ScreenProbeGIPSO->SetTextureSRV("WorldNormalTex", NormalBuffers[ColorBufferWriteIndex].get());
-	ScreenProbeGIPSO->SetTextureSRV("GeoNormalTex", GeomNormalBuffer.get());
+	ScreenProbeGIPSO->SetTextureSRV("GeoNormalTex", GeomNormalBuffers[ColorBufferWriteIndex].get());
 	ScreenProbeGIPSO->SetTextureSRV("ScreenProbeRadianceTex", ScreenProbeGIRadiance[ScreenProbeGIAtlasWriteIndex].get());
 	ScreenProbeGIPSO->SetTextureSRV("ScreenProbeMetaTex", ScreenProbeGIMetadata[ScreenProbeGIAtlasWriteIndex].get());
 	ScreenProbeGIPSO->SetTextureSRV("PrevScreenProbeGITex", ScreenProbeGIHistory[historyReadIndex].get());

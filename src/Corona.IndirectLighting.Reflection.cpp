@@ -75,49 +75,21 @@ void Corona::RaytraceReflectionPass()
 	const FLOAT clearReflection[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
 	renderBackend->ClearTextureUAVFloat(SpecularGIRaw.get(), clearReflection);
 
-	PSO_RT_REFLECTION->SetNumInstances(static_cast<uint32_t>(RayTracingInstances.size()));
-	PSO_RT_REFLECTION->BeginShaderTable();
-
-	PSO_RT_REFLECTION->SetTextureUAV("global", "ReflectionResult", SpecularGIRaw.get());
-	PSO_RT_REFLECTION->SetAccelerationStructure("global", "gRtScene", TLAS);
-	PSO_RT_REFLECTION->SetTextureSRV("global", "DepthTex", UnjitteredDepthBuffers[ColorBufferWriteIndex].get());
-	PSO_RT_REFLECTION->SetTextureSRV("global", "GeoNormalTex", GeomNormalBuffer.get());
-	PSO_RT_REFLECTION->SetTextureSRV("global", "RougnessMetallicTex", RoughnessMetalicBuffer.get());
-	PSO_RT_REFLECTION->SetTextureSRV("global", "BlueNoiseTex", BlueNoiseTex.get());
-	PSO_RT_REFLECTION->SetTextureSRV("global", "WorldNormalTex", NormalBuffers[ColorBufferWriteIndex].get());
-
 	RTReflectionViewParam.ViewSpreadAngle = glm::tan(Fov * 0.5) / (0.5f * GetRenderHeight());
-	PSO_RT_REFLECTION->SetCBVValue("global", "ViewParameter", &RTReflectionViewParam);
-	PSO_RT_REFLECTION->SetSampler("global", "sampleWrap", samplerWrap.get());
 
-
-	int i = 0;
-	for (const RTInstanceDesc& instance : RayTracingInstances)
-	{
-		Mesh* mesh = instance.BottomLevelAS->MeshPtr;
-		Texture* diffuseTex = mesh->Draws[0].mat->Diffuse.get();
-
-		if (!diffuseTex)
-			diffuseTex = DefaultWhiteTex.get();
-		PSO_RT_REFLECTION->ResetHitProgram(i);
-
-		PSO_RT_REFLECTION->StartHitProgram("HitGroup", i);
-		PSO_RT_REFLECTION->AddSceneGeometrySRVsToHitProgram("HitGroup", mesh->Vb.get(), mesh->Ib.get(), i);
-		PSO_RT_REFLECTION->AddTextureSRVToHitProgram("HitGroup", diffuseTex, i);
-		PSO_RT_REFLECTION->AddBufferSRVToHitProgram("HitGroup", InstancePropertyBuffer.get(), i);
-
-		//PSO_RT_REFLECTION->StartHitProgram("ShadowHitGroup", i);
-		/*
-		PSO_RT_REFLECTION->AddDescriptor2HitProgram("ShadowHitGroup", mesh->Vb->GpuHandleSRV, i);
-		PSO_RT_REFLECTION->AddDescriptor2HitProgram("ShadowHitGroup", mesh->Ib->GpuHandleSRV, i);
-		PSO_RT_REFLECTION->AddDescriptor2HitProgram("ShadowHitGroup", diffuseTex->GpuHandleSRV, i);
-		PSO_RT_REFLECTION->AddDescriptor2HitProgram("ShadowHitGroup", InstancePropertyBuffer->GpuHandleSRV, i);*/
-		i++;
-	}
-
-	PSO_RT_REFLECTION->EndShaderTable();
-
-	PSO_RT_REFLECTION->Apply(GetRenderWidth(), GetRenderHeight());
+	RTPassBuilder pass(*this, PSO_RT_REFLECTION);
+	pass.BeginScene()
+		.SetTextureUAV("global", "ReflectionResult", SpecularGIRaw.get())
+		.SetAccelerationStructure("global", "gRtScene", TLAS)
+		.SetTextureSRV("global", "DepthTex", UnjitteredDepthBuffers[ColorBufferWriteIndex].get())
+		.SetTextureSRV("global", "GeoNormalTex", GeomNormalBuffers[ColorBufferWriteIndex].get())
+		.SetTextureSRV("global", "RougnessMetallicTex", RoughnessMetalicBuffer.get())
+		.SetTextureSRV("global", "BlueNoiseTex", BlueNoiseTex.get())
+		.SetTextureSRV("global", "WorldNormalTex", NormalBuffers[ColorBufferWriteIndex].get())
+		.SetCBVValue("global", "ViewParameter", &RTReflectionViewParam)
+		.SetSampler("global", "sampleWrap", samplerWrap.get());
+	pass.BindSceneHitPrograms();
+	pass.Dispatch(GetRenderWidth(), GetRenderHeight());
 
 	renderBackend->TransitionTexture(SpecularGIRaw.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
 	//PIXEndEvent();

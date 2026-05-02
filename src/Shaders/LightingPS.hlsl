@@ -21,6 +21,8 @@ Texture2D GIResultSHTex : register(t5);
 Texture2D GIResultColorTex : register(t6);
 Texture2D SpecularGITex : register(t7);
 Texture2D RoughnessMetalicTex : register(t8);
+Texture2D AmbientOcclusionTex : register(t14);
+Texture2D SkyLightingTex : register(t15);
 
 
 
@@ -45,6 +47,14 @@ cbuffer LightingParam : register(b0)
     uint bEnableSpecularGI;
     uint bEnableDirectDiffuse;
     uint bEnableDirectSpecular;
+    uint bEnableRTAO;
+    uint bEnableSkyLighting;
+    float RTAOIndirectStrength;
+    float RTAOIndirectFloor;
+    float SurfaceBounceStrength;
+    float SurfaceBounceSaturation;
+    float SkyLightingStrength;
+    uint LightingOutputMode;
 };
 
 struct VSInput
@@ -116,6 +126,7 @@ float4 PSMain(PSInput input) : SV_TARGET
     float3 Albedo = SanitizeFloat3(AlbedoTex[PixelPos].xyz);
     float3 WorldNormal = normalize(SanitizeFloat3(NormalTex[PixelPos].xyz));
     float3 Shadow = saturate(SanitizeFloat3(ShadowTex[PixelPos].xyz));
+    float3 DirectVisibility = Shadow;
 
     float2 Velocity = VelocityTex[PixelPos];
 
@@ -127,9 +138,16 @@ float4 PSMain(PSInput input) : SV_TARGET
     float Metallic = saturate(RoughnessMetallic.y);
     float3 F0 = lerp(0.04f.xxx, Albedo.xyz, Metallic);
 	
-    float3 DiffuseLighting = bEnableDirectDiffuse ? (NdotL * LightIntensity * LightColor * Albedo * (1.0f - Metallic) * Shadow) : float3(0, 0, 0);
+    float3 DiffuseLighting = bEnableDirectDiffuse ? (NdotL * LightIntensity * LightColor * Albedo * (1.0f - Metallic) * DirectVisibility) : float3(0, 0, 0);
 
-    float3 IndirectDiffuse = bEnableDiffuseGI ? SanitizeFloat3(GIResultColorTex[PixelPos / GIBufferScale].xyz * Albedo * (1.0f - Metallic)) : float3(0, 0, 0);
+    float AmbientOcclusion = bEnableRTAO != 0 ? saturate(SanitizeFloat3(AmbientOcclusionTex[PixelPos].xyz).x) : 1.0f;
+    float ContactAO = lerp(1.0f, max(AmbientOcclusion, saturate(RTAOIndirectFloor)), saturate(RTAOIndirectStrength));
+    float3 SkyDiffuse = (bEnableSkyLighting != 0) ? SanitizeFloat3(SkyLightingTex[PixelPos].xyz) * Albedo * (1.0f - Metallic) * saturate(SkyLightingStrength) : float3(0, 0, 0);
+    float3 SurfaceBounceGI = max(SanitizeFloat3(GIResultColorTex[PixelPos / GIBufferScale].xyz), 0.0f.xxx);
+    float surfaceBounceLuma = dot(SurfaceBounceGI, float3(0.2126f, 0.7152f, 0.0722f));
+    SurfaceBounceGI = lerp(surfaceBounceLuma.xxx, SurfaceBounceGI, saturate(SurfaceBounceSaturation));
+    float3 SurfaceBounceDiffuse = SurfaceBounceGI * Albedo * (1.0f - Metallic) * ContactAO * saturate(SurfaceBounceStrength);
+    float3 IndirectDiffuse = (bEnableDiffuseGI ? SurfaceBounceDiffuse : float3(0, 0, 0)) + SkyDiffuse;
 
     float3 V = ComputeSurfaceToViewDirection(screenUV);
     float NdotV = saturate(dot(WorldNormal, V));
@@ -141,9 +159,13 @@ float4 PSMain(PSInput input) : SV_TARGET
     IndirectSpecular = bEnableSpecularGI ? SanitizeFloat3(SpecularGITex[PixelPos].xyz * SpecularColor) : float3(0, 0, 0);
 
 
-    float3 DirectSpecular = bEnableDirectSpecular ? (EvaluateGGXSpecularBRDF(WorldNormal, V, LightDir, Roughness, F0) * NdotL * LightIntensity * LightColor * Shadow) : float3(0, 0, 0);
+    float3 DirectSpecular = bEnableDirectSpecular ? (EvaluateGGXSpecularBRDF(WorldNormal, V, LightDir, Roughness, F0) * NdotL * LightIntensity * LightColor * DirectVisibility) : float3(0, 0, 0);
 
     DiffuseLighting = max(DiffuseLighting , 0);
+
+    float3 DirectLighting = max(DiffuseLighting + DirectSpecular, 0);
+    if (LightingOutputMode == 1)
+        return float4(SanitizeFloat3(DirectLighting), 1);
 
     float3 TotalSpecular = max(DirectSpecular + IndirectSpecular, 0);
 

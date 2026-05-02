@@ -209,7 +209,7 @@ void Corona::SpatialHashGIPass()
 
 	SpatialHashGIUpdatePSO->SetTextureSRV("DepthTex", UnjitteredDepthBuffers[ColorBufferWriteIndex].get());
 	SpatialHashGIUpdatePSO->SetTextureSRV("WorldNormalTex", NormalBuffers[ColorBufferWriteIndex].get());
-	SpatialHashGIUpdatePSO->SetTextureSRV("GeoNormalTex", GeomNormalBuffer.get());
+	SpatialHashGIUpdatePSO->SetTextureSRV("GeoNormalTex", GeomNormalBuffers[ColorBufferWriteIndex].get());
 	SpatialHashGIUpdatePSO->SetBufferUAV("ActiveFlagsOut", SpatialHashGIActiveFlags.get());
 	SpatialHashGIUpdatePSO->SetBufferUAV("CellPositionOut", SpatialHashGICellPosition.get());
 	SpatialHashGIUpdatePSO->SetBufferUAV("CellNormalOut", SpatialHashGICellNormal.get());
@@ -229,40 +229,23 @@ void Corona::SpatialHashGIPass()
 	renderBackend->TransitionBuffer(SpatialHashGICellScore.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
 	renderBackend->TransitionBuffer(SpatialHashGIResolvedKeys[cacheIndex].get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
 
-	PSO_RT_SPATIAL_HASH_GI->SetNumInstances(static_cast<uint32_t>(RayTracingInstances.size()));
-	PSO_RT_SPATIAL_HASH_GI->BeginShaderTable();
-	PSO_RT_SPATIAL_HASH_GI->SetBufferUAV("global", "TraceSH0", SpatialHashGITraceSH[0].get());
-	PSO_RT_SPATIAL_HASH_GI->SetBufferUAV("global", "TraceSH1", SpatialHashGITraceSH[1].get());
-	PSO_RT_SPATIAL_HASH_GI->SetBufferUAV("global", "TraceSH2", SpatialHashGITraceSH[2].get());
-	PSO_RT_SPATIAL_HASH_GI->SetBufferUAV("global", "TraceSH3", SpatialHashGITraceSH[3].get());
-	PSO_RT_SPATIAL_HASH_GI->SetAccelerationStructure("global", "gRtScene", TLAS);
-	PSO_RT_SPATIAL_HASH_GI->SetBufferSRV("global", "CellKeys", SpatialHashGIResolvedKeys[cacheIndex].get());
-	PSO_RT_SPATIAL_HASH_GI->SetBufferSRV("global", "CellPosition", SpatialHashGICellPosition.get());
-	PSO_RT_SPATIAL_HASH_GI->SetBufferSRV("global", "CellNormal", SpatialHashGICellNormal.get());
-	PSO_RT_SPATIAL_HASH_GI->SetTextureSRV("global", "BlueNoiseTex", BlueNoiseTex.get());
-	PSO_RT_SPATIAL_HASH_GI->SetBufferSRV("global", "ActiveCellSlots", SpatialHashGIActiveCellSlots.get());
-	PSO_RT_SPATIAL_HASH_GI->SetBufferSRV("global", "ActiveCounter", SpatialHashGIActiveCounter.get());
-	PSO_RT_SPATIAL_HASH_GI->SetCBVValue("global", "ViewParameter", &RTSpatialHashGIViewParam);
-	PSO_RT_SPATIAL_HASH_GI->SetSampler("global", "sampleWrap", samplerWrap.get());
-
-	int i = 0;
-	for (const RTInstanceDesc& instance : RayTracingInstances)
-	{
-		Mesh* mesh = instance.BottomLevelAS->MeshPtr;
-		Texture* diffuseTex = mesh->Draws[0].mat->Diffuse.get();
-		if (!diffuseTex)
-			diffuseTex = DefaultWhiteTex.get();
-
-		PSO_RT_SPATIAL_HASH_GI->ResetHitProgram(i);
-		PSO_RT_SPATIAL_HASH_GI->StartHitProgram("HitGroup", i);
-		PSO_RT_SPATIAL_HASH_GI->AddSceneGeometrySRVsToHitProgram("HitGroup", mesh->Vb.get(), mesh->Ib.get(), i);
-		PSO_RT_SPATIAL_HASH_GI->AddTextureSRVToHitProgram("HitGroup", diffuseTex, i);
-		PSO_RT_SPATIAL_HASH_GI->AddBufferSRVToHitProgram("HitGroup", InstancePropertyBuffer.get(), i);
-		i++;
-	}
-
-	PSO_RT_SPATIAL_HASH_GI->EndShaderTable();
-	PSO_RT_SPATIAL_HASH_GI->Apply(spatialHashTraceCellBudget, 1u);
+	RTPassBuilder pass(*this, PSO_RT_SPATIAL_HASH_GI);
+	pass.BeginScene()
+		.SetBufferUAV("global", "TraceSH0", SpatialHashGITraceSH[0].get())
+		.SetBufferUAV("global", "TraceSH1", SpatialHashGITraceSH[1].get())
+		.SetBufferUAV("global", "TraceSH2", SpatialHashGITraceSH[2].get())
+		.SetBufferUAV("global", "TraceSH3", SpatialHashGITraceSH[3].get())
+		.SetAccelerationStructure("global", "gRtScene", TLAS)
+		.SetBufferSRV("global", "CellKeys", SpatialHashGIResolvedKeys[cacheIndex].get())
+		.SetBufferSRV("global", "CellPosition", SpatialHashGICellPosition.get())
+		.SetBufferSRV("global", "CellNormal", SpatialHashGICellNormal.get())
+		.SetTextureSRV("global", "BlueNoiseTex", BlueNoiseTex.get())
+		.SetBufferSRV("global", "ActiveCellSlots", SpatialHashGIActiveCellSlots.get())
+		.SetBufferSRV("global", "ActiveCounter", SpatialHashGIActiveCounter.get())
+		.SetCBVValue("global", "ViewParameter", &RTSpatialHashGIViewParam)
+		.SetSampler("global", "sampleWrap", samplerWrap.get());
+	pass.BindSceneHitPrograms();
+	pass.Dispatch(spatialHashTraceCellBudget, 1u);
 
 	for (UINT coefficientIndex = 0; coefficientIndex < SpatialHashGISHCoefficientCount; ++coefficientIndex)
 		renderBackend->TransitionBuffer(SpatialHashGITraceSH[coefficientIndex].get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
@@ -293,7 +276,7 @@ void Corona::SpatialHashGIPass()
 
 	SpatialHashGIQueryPSO->SetTextureSRV("DepthTex", UnjitteredDepthBuffers[ColorBufferWriteIndex].get());
 	SpatialHashGIQueryPSO->SetTextureSRV("WorldNormalTex", NormalBuffers[ColorBufferWriteIndex].get());
-	SpatialHashGIQueryPSO->SetTextureSRV("GeoNormalTex", GeomNormalBuffer.get());
+	SpatialHashGIQueryPSO->SetTextureSRV("GeoNormalTex", GeomNormalBuffers[ColorBufferWriteIndex].get());
 	SpatialHashGIQueryPSO->SetBufferSRV("ResolvedKeysIn", SpatialHashGIResolvedKeys[cacheIndex].get());
 	SpatialHashGIQueryPSO->SetBufferSRV("ResolvedSH0In", SpatialHashGIResolvedSH[cacheIndex][0].get());
 	SpatialHashGIQueryPSO->SetBufferSRV("ResolvedSH1In", SpatialHashGIResolvedSH[cacheIndex][1].get());

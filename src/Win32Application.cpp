@@ -41,7 +41,12 @@ int Win32Application::Run(Corona* app, HINSTANCE hInstance, int nCmdShow)
 	bool bCommandLineAutoDump = false;
 	for (int argIndex = 1; argIndex < argc; ++argIndex)
 	{
-		if (std::wcscmp(argv[argIndex], L"--auto-dump") == 0)
+		if (std::wcscmp(argv[argIndex], L"--auto-dump") == 0 ||
+			std::wcscmp(argv[argIndex], L"--readme-dump") == 0 ||
+			std::wcscmp(argv[argIndex], L"--path-tracing-dump") == 0 ||
+			std::wcscmp(argv[argIndex], L"--lighting-compare-dump") == 0 ||
+			std::wcscmp(argv[argIndex], L"--gi-compare-dump") == 0 ||
+			std::wcscmp(argv[argIndex], L"--indirect-compare-dump") == 0)
 		{
 			bCommandLineAutoDump = true;
 			break;

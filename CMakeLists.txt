@@ -148,6 +148,26 @@ if(Vulkan_FOUND)
     target_link_libraries(Corona PRIVATE Vulkan::Vulkan)
 endif()
 
+add_executable(CoronaTextureImport
+    "${CMAKE_CURRENT_SOURCE_DIR}/tools/TextureImportTool.cpp"
+)
+target_include_directories(CoronaTextureImport PRIVATE
+    "${CORONA_SRC_DIR}/external/DirectXTex July 2017/Include"
+)
+target_link_libraries(CoronaTextureImport PRIVATE
+    "$<$<CONFIG:Debug>:${CORONA_DIRECTXTEX_LIB_DIR}/Debug/DirectXTex.lib>"
+    "$<$<NOT:$<CONFIG:Debug>>:${CORONA_DIRECTXTEX_LIB_DIR}/Release/DirectXTex.lib>"
+    dxguid
+    windowscodecs
+)
+set_target_properties(CoronaTextureImport PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CORONA_OUT_DIR}"
+    RUNTIME_OUTPUT_DIRECTORY_DEBUG "${CORONA_OUT_DIR}"
+    RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CORONA_OUT_DIR}"
+    RUNTIME_OUTPUT_DIRECTORY_RELWITHDEBINFO "${CORONA_OUT_DIR}"
+    RUNTIME_OUTPUT_DIRECTORY_MINSIZEREL "${CORONA_OUT_DIR}"
+)
+
 if(Vulkan_FOUND)
     set(CORONA_VULKAN_SHADER_DIR "${CORONA_SRC_DIR}/Shaders")
     set(CORONA_VULKAN_GENERATED_SHADER_DIR "${CMAKE_CURRENT_BINARY_DIR}/VulkanGeneratedShaders")

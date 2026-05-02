@@ -9,6 +9,7 @@ ByteAddressBuffer vertices : register(t3);
 ByteAddressBuffer indices : register(t4);
 Texture2D AlbedoTex : register(t5);
 ByteAddressBuffer InstanceProperty : register(t6);
+Texture2D GeoNormalTex : register(t7);
 
 
 cbuffer ViewParameter : register(b0)
@@ -39,7 +40,8 @@ float3 linearToSrgb(float3 c)
 
 struct RayPayload
 {
-    bool bHit;
+    uint bHit;
+    float3 _padding;
 };
 
 static const uint RT_SHADOW_RAY_FLAGS =
@@ -62,43 +64,37 @@ void rayGen()
 {
     uint3 launchIndex = DispatchRaysIndex();
     uint3 launchDim = DispatchRaysDimensions();
+    uint2 pixelPos = launchIndex.xy;
 
-    float2 crd = float2(launchIndex.xy);
-	//crd.y *= -1;
-    float2 dims = float2(launchDim.xy);
+    float2 launchSize = float2(max(launchDim.x, 1u), max(launchDim.y, 1u));
+    float2 uv = (float2(pixelPos) + float2(0.5f, 0.5f)) / launchSize;
+	float deviceDepth = DepthTex.SampleLevel(sampleWrap, uv, 0).x;
+    if (deviceDepth >= 0.999999f)
+    {
+        ShadowResult[pixelPos] = float4(1.0f.xxx, 1.0f);
+        return;
+    }
 
-    float2 d = ((crd / dims) * 2.f - 1.f);
-    d *= tan(0.8 / 2);
-    float aspectRatio = dims.x / dims.y;
+	float2 screenPosition = uv * 2.0f - 1.0f;
+	screenPosition.y = -screenPosition.y;
+    float3 viewPosition = GetViewPosition(deviceDepth, screenPosition, InvProjMatrix);
+	float3 worldPos = mul(float4(viewPosition, 1.0f), InvViewMatrix).xyz;
 
-	float2 UV = crd / dims;
-	float DeviceDepth = DepthTex.SampleLevel(sampleWrap, UV, 0).x;
+	float3 geoNormal = CommonSafeNormalize(GeoNormalTex.SampleLevel(sampleWrap, uv, 0).xyz, float3(0.0f, 1.0f, 0.0f));
+	float3 worldNormal = CommonSafeNormalize(WorldNormalTex.SampleLevel(sampleWrap, uv, 0).xyz, geoNormal);
+    float3 cameraWorld = mul(float4(0.0f, 0.0f, 0.0f, 1.0f), InvViewMatrix).xyz;
+    float3 surfaceToCamera = CommonSafeNormalize(cameraWorld - worldPos, -worldNormal);
+    if (dot(geoNormal, surfaceToCamera) < 0.0f)
+        geoNormal = -geoNormal;
+    if (dot(worldNormal, geoNormal) < 0.0f)
+        worldNormal = -worldNormal;
 
-	float3 WorldNormal = normalize(WorldNormalTex.SampleLevel(sampleWrap, UV, 0).xyz);
-  
-
-    float LinearDepth = GetLinearDepthOpenGL(DeviceDepth, ProjectionParams.z, ProjectionParams.w) ;
-
-
-
-	float2 ScreenPosition = crd.xy;
-	ScreenPosition.x /= dims.x;
-	ScreenPosition.y /= dims.y;
-	ScreenPosition.xy = ScreenPosition.xy * 2 - 1;
-	ScreenPosition.y = -ScreenPosition.y;
-
-	// float3 ViewPosition = GetViewPosition(LinearDepth, ScreenPosition, ProjMatrix._11, ProjMatrix._22);
-    float3 ViewPosition = GetViewPosition(DeviceDepth, ScreenPosition, InvProjMatrix);
-
-	float3 WorldPos = mul(float4(ViewPosition, 1), InvViewMatrix).xyz;
-
-
-
-
-    float3 baseLightDir = normalize(LightDir.xyz);
+    float3 traceNormal = CommonSafeNormalize(geoNormal + worldNormal * 0.25f, geoNormal);
+    float3 baseLightDir = CommonSafeNormalize(LightDir.xyz, float3(0.0f, 1.0f, 0.0f));
     float visibility = 0.0f;
     const uint kMaxShadowSamples = 16;
     uint sampleCount = min(max(ShadowSampleCount, 1), kMaxShadowSamples);
+    float normalBias = 0.5f;
 
     [loop]
     for (uint sampleIndex = 0; sampleIndex < kMaxShadowSamples; ++sampleIndex)
@@ -107,27 +103,29 @@ void rayGen()
             break;
 
         float2 randUV = float2(
-            random(crd + float2(sampleIndex * 13.17, 17.31)),
-            random(crd + float2(sampleIndex * 29.73, 47.77)));
+            random(float2(pixelPos) + float2(sampleIndex * 13.17f, 17.31f)),
+            random(float2(pixelPos) + float2(sampleIndex * 29.73f, 47.77f)));
         float3 rayDir = SampleDirectionalLightSphereCap(baseLightDir, ShadowLightRadius, randUV);
+        float3 rayBiasNormal = dot(traceNormal, rayDir) < 0.0f ? -traceNormal : traceNormal;
 
         RayDesc ray;
-        ray.Origin = WorldPos + WorldNormal * 0.5;
+        ray.Origin = worldPos + rayBiasNormal * normalBias;
         ray.Direction = rayDir;
-        ray.TMin = 0.01;
+        ray.TMin = max(0.05f, normalBias * 0.25f);
         ray.TMax = 100000;
 
         RayPayload payload;
-        payload.bHit = true;
+        payload.bHit = 1u;
+        payload._padding = 0.0f.xxx;
         TraceRay(gRtScene,
             RT_SHADOW_RAY_FLAGS,
             0xFF, 0, 0, 0, ray, payload);
 
-        visibility += payload.bHit == false ? 1.0 : 0.0;
+        visibility += payload.bHit == 0u ? 1.0f : 0.0f;
     }
 
     visibility /= sampleCount;
-    ShadowResult[launchIndex.xy] = float4(visibility.xxx, 1.0);
+    ShadowResult[pixelPos] = float4(visibility.xxx, 1.0);
 
 }
 
@@ -135,7 +133,8 @@ void rayGen()
 void miss(inout RayPayload payload)
 {
     // payload.opacity = 0.0;
-    payload.bHit = false;
+    payload.bHit = 0u;
+    payload._padding = 0.0f.xxx;
 }
 
 [shader("anyhit")]
@@ -144,6 +143,13 @@ void anyhit(inout RayPayload payload, in BuiltInTriangleIntersectionAttributes a
     float3 barycentrics = float3(1.0 - attribs.barycentrics.x - attribs.barycentrics.y, attribs.barycentrics.x, attribs.barycentrics.y);
     uint triangleIndex = PrimitiveIndex();
     uint instanceID = InstanceID();
+
+    if (!IsAlphaTestedInstance(instanceID, InstanceProperty))
+    {
+        AcceptHitAndEndSearch();
+        return;
+    }
+
     Vertex vertex = GetVertexAttributes(instanceID, vertices, indices, InstanceProperty, triangleIndex, barycentrics);
     float opacity = AlbedoTex.SampleLevel(sampleWrap, vertex.uv, 5).w;
 
@@ -151,8 +157,8 @@ void anyhit(inout RayPayload payload, in BuiltInTriangleIntersectionAttributes a
 
     if(opacity > 0.10)
     {
-        payload.bHit = true;
         AcceptHitAndEndSearch();
+        return;
     }
     
     IgnoreHit();

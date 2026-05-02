@@ -13,9 +13,14 @@
 #define GLM_FORCE_CTOR_INIT
 #include <array>
 #include <chrono>
+#include <condition_variable>
 #include <deque>
 #include <filesystem>
+#include <functional>
 #include <map>
+#include <memory>
+#include <mutex>
+#include <thread>
 #include <string>
 #include <vector>
 
@@ -84,6 +89,7 @@ public:
 		TEMPORAL_FILTERED_SPECULAR,
 		BLOOM,
 		SPEC_HISTORY_LENGTH,
+		RTAO,
 		NO_FULLSCREEN,
 	};
 
@@ -96,6 +102,8 @@ private:
 		GBuffer,
 		RaytraceShadow,
 		ShadowDenoise,
+		RaytraceAO,
+		RaytraceSkyLighting,
 		RaytraceReflection,
 		RaytraceGI,
 		ScreenProbeGI,
@@ -123,15 +131,19 @@ private:
 	UINT ResolvedColorBufferIndex = 0;
 	shared_ptr<Texture> ColorBuffers[2];
 	shared_ptr<Texture> LightingBuffer;
+	shared_ptr<Texture> DirectLightingBuffer;
 	shared_ptr<Texture> DLSSRRBuffer;
 	shared_ptr<Texture> AlbedoBuffer;
 	shared_ptr<Texture> SpecularAlbedoBuffer;
 	shared_ptr<Texture> NormalBuffers[2];
-	shared_ptr<Texture> GeomNormalBuffer;
+	shared_ptr<Texture> GeomNormalBuffers[2];
 	shared_ptr<Texture> VelocityBuffer;
 	shared_ptr<Texture> RoughnessMetalicBuffer;
 	shared_ptr<Texture> ShadowBuffer;
 	shared_ptr<Texture> ShadowDenoisedBuffer;
+	shared_ptr<Texture> AmbientOcclusionBuffer;
+	shared_ptr<Texture> SkyLightingRawBuffer;
+	shared_ptr<Texture> SkyLightingBuffer;
 
 	shared_ptr<Texture> SpecularGIRaw;
 
@@ -201,6 +213,10 @@ private:
 		UINT32 Padding = 0;
 		float IndirectDiffuseWeightFactorDepth = 0.5f;
 		float IndirectDiffuseWeightFactorNormal = 1.0f;
+		float IndirectSpecularWeightFactorDepth = 0.5f;
+		float IndirectSpecularWeightFactorNormal = 2.0f;
+		float IndirectSpecularLuminanceWeight = 1.5f;
+		float IndirectSpecularEnergyPreservation = 0.85f;
 	};
 
 	SpatialFilterConstant SpatialFilterCB;
@@ -223,7 +239,9 @@ private:
 		float Point2PlaneDistScale = 10.0f;
 		float AccumulationAlpha = 1.0f;
 		UINT32 HistoryValid = 0;
-		glm::vec2 Padding = glm::vec2(0.0f);
+		glm::vec2 JitterOffset = glm::vec2(0.0f);
+		float SpecularAccumulationAlpha = 1.0f;
+		float SpecularVarianceClipGamma = 1.75f;
 	};
 
 	TemporalFilterConstant TemporalFilterCB;
@@ -320,6 +338,72 @@ private:
 	RTShadowViewParamCB RTShadowViewParam;
 	
 	shared_ptr<RTPipelineStateObject> PSO_RT_SHADOW;
+
+	// RT ambient occlusion. This is intentionally short-range contact AO; diffuse
+	// GI remains responsible for broad, low-frequency lighting.
+	struct RTAOViewParamCB
+	{
+		glm::mat4x4 ViewMatrix;
+		glm::mat4x4 InvViewMatrix;
+		glm::mat4x4 ProjMatrix;
+		glm::mat4x4 InvProjMatrix;
+		glm::vec4 ProjectionParams;
+		glm::vec2 RTSize;
+		float Radius = 96.0f;
+		float Power = 1.10f;
+		UINT32 SampleCount = 16;
+		UINT32 FrameCounter = 0;
+		UINT32 NoiseMode = 1;
+		UINT32 BlueNoiseOffsetStride = 1;
+		float NormalBias = 0.35f;
+		glm::vec3 _padding = glm::vec3(0.0f);
+	};
+
+	RTAOViewParamCB RTAOViewParam;
+	shared_ptr<RTPipelineStateObject> PSO_RT_AO;
+	bool bRTAOOutputValidThisFrame = false;
+
+	struct RTSkyLightingViewParamCB
+	{
+		glm::mat4x4 ViewMatrix;
+		glm::mat4x4 InvViewMatrix;
+		glm::mat4x4 ProjMatrix;
+		glm::mat4x4 InvProjMatrix;
+		glm::vec4 ProjectionParams;
+		glm::vec2 RTSize;
+		float RayLength = 10000.0f;
+		float NormalBias = 0.5f;
+		glm::vec3 SkyColorTop = glm::vec3(1.0f);
+		float SkyIntensity = 3.0f;
+		glm::vec3 SkyColorBottom = glm::vec3(0.8f);
+		UINT32 SampleCount = 32;
+		UINT32 FrameCounter = 0;
+		UINT32 NoiseMode = 1;
+		UINT32 BlueNoiseOffsetStride = 1;
+		float SkyUpBias = 0.65f;
+		float SkyDirectionPower = 2.25f;
+		float SkyMinWorldY = 0.02f;
+		UINT32 SkyMaxSampleAttempts = 4;
+		UINT32 _padding = 0;
+	};
+
+	RTSkyLightingViewParamCB RTSkyLightingViewParam;
+	shared_ptr<RTPipelineStateObject> PSO_RT_SKY_LIGHTING;
+	bool bSkyLightingOutputValidThisFrame = false;
+
+	struct SkyLightingDenoiseCB
+	{
+		glm::vec4 ProjectionParams;
+		glm::vec2 RTSize;
+		float DepthSigma = 48.0f;
+		float NormalSigma = 48.0f;
+		float VisibilitySigma = 8.0f;
+		UINT32 Radius = 5;
+		glm::vec2 _padding = glm::vec2(0.0f);
+	};
+	SkyLightingDenoiseCB SkyLightingDenoiseParam;
+	shared_ptr<ComputePipelineStateObject> SkyLightingDenoisePSO;
+
 	struct ShadowDenoiseCB
 	{
 		glm::vec4 ProjectionParams;
@@ -351,7 +435,10 @@ private:
 		glm::vec3 SkyColorBottom;
 		float _padding;
 		glm::vec3 LightColor;
-		float _padding2;
+		float PrefilteredEnvRoughnessThreshold = 0.65f;
+		float PrefilteredEnvRoughnessFade = 0.10f;
+		UINT32 bEnablePrefilteredEnvSpecular = 0;
+		glm::vec2 _prefilteredEnvPadding = glm::vec2(0.0f);
 	};
 
 	RTReflectionViewParamCB RTReflectionViewParam;
@@ -488,6 +575,8 @@ private:
 		UINT32 bEnableSpecularGI;
 		UINT32 bEnableDirectDiffuse;
 		UINT32 bEnableDirectSpecular;
+		UINT32 bEnableRTAO;
+		UINT32 _rtaoPadding[3] = {};
 	};
 
 	PathTracingViewParamCB PathTracingViewParam;
@@ -507,6 +596,9 @@ private:
 	glm::vec3 PrevIndirectSkyColorTop = glm::vec3(0.0f);
 	glm::vec3 PrevIndirectSkyColorBottom = glm::vec3(0.0f);
 	float PrevIndirectSkyIntensity = 0.0f;
+	float PrevIndirectPrefilteredEnvRoughnessThreshold = 0.0f;
+	float PrevIndirectPrefilteredEnvRoughnessFade = 0.0f;
+	bool PrevIndirectPrefilteredEnvSpecularEnabled = false;
 
 	// full screen copy pass
 	enum EToneMapMode
@@ -576,6 +668,14 @@ private:
 		UINT32 bEnableSpecularGI;
 		UINT32 bEnableDirectDiffuse;
 		UINT32 bEnableDirectSpecular;
+		UINT32 bEnableRTAO;
+		UINT32 bEnableSkyLighting;
+		float RTAOIndirectStrength;
+		float RTAOIndirectFloor;
+		float SurfaceBounceStrength;
+		float SurfaceBounceSaturation;
+		float SkyLightingStrength;
+		UINT32 LightingOutputMode = 0;
 	};
 	
 	shared_ptr<PipelineStateObject> LightingPSO;
@@ -651,6 +751,13 @@ private:
 	bool bEnableSpecularGI = true;
 	bool bEnableDirectDiffuse = true;
 	bool bEnableDirectSpecular = true;
+	bool bEnableRTAO = true;
+	bool bEnableSkyLighting = true;
+	float RTAOIndirectStrength = 0.25f;
+	float RTAOIndirectFloor = 0.55f;
+	float SurfaceBounceStrength = 0.35f;
+	float SurfaceBounceSaturation = 0.45f;
+	float SkyLightingStrength = 0.35f;
 
 	UINT32 ClampMode = 2;
 
@@ -675,6 +782,9 @@ private:
 	bool bDiffuseGIAutoDumpMode = false;
 	bool bReadmeScreenshotDumpMode = false;
 	bool bPathTracingScreenshotDumpMode = false;
+	bool bLightingCompareDumpMode = false;
+	bool bAASwitchDumpMode = false;
+	bool bSpecularSequenceDumpMode = false;
 	bool bLoggedHybridStageLimit = false;
 	bool bStartupModeConfigured = false;
 	UINT32 AutoAADumpPhase = 0;
@@ -697,6 +807,9 @@ private:
 	bool bCommandLineDiffuseGIAutoDumpMode = false;
 	bool bCommandLineReadmeScreenshotDumpMode = false;
 	bool bCommandLinePathTracingScreenshotDumpMode = false;
+	bool bCommandLineLightingCompareDumpMode = false;
+	bool bCommandLineAASwitchDumpMode = false;
+	bool bCommandLineSpecularSequenceDumpMode = false;
 	bool bCommandLineCameraPathDump = false;
 	bool bCommandLineLoadLatestCameraPath = false;
 	std::wstring CommandLineCameraPathFile;
@@ -816,6 +929,11 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	glm::vec3 PistolCenterPosition = glm::vec3(30.0f, 62.0f, 116.0f);
 	glm::vec3 PistolCenterRotationDegrees = glm::vec3(0.0f, 141.0f, 0.0f);
 
+	shared_ptr<Scene> MirrorCube;
+	SceneObjectHandle MirrorCubeObject = InvalidSceneObjectHandle;
+	glm::vec3 MirrorCubeCenterPosition = glm::vec3(0.0f, 0.0f, 0.0f);
+	glm::vec3 MirrorCubeCenterRotationDegrees = glm::vec3(0.0f, 0.0f, 0.0f);
+
 	struct SceneObject
 	{
 		SceneObjectHandle Handle = InvalidSceneObjectHandle;
@@ -878,6 +996,9 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	glm::vec3 SkyColorTop = glm::vec3(1.0f, 1.0f, 1.0f);
 	glm::vec3 SkyColorBottom = glm::vec3(0.8f, 0.8f, 0.8f);
 	float SkyIntensity = 3.0f;
+	bool bEnablePrefilteredEnvSpecular = false;
+	float PrefilteredEnvRoughnessThreshold = 0.65f;
+	float PrefilteredEnvRoughnessFade = 0.10f;
 	
 	float Near = 10.0f;
 	float Far = 20000.0f;
@@ -907,7 +1028,8 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 		glm::mat4x4 WorldMatrix;
 		UINT32 VertexOffset = 0;
 		UINT32 IndexOffset = 0;
-		UINT32 Padding[2] = {};
+		UINT32 Flags = 0;
+		UINT32 Padding = 0;
 	};
 
 	std::shared_ptr<Buffer> InstancePropertyBuffer;
@@ -942,6 +1064,14 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	UINT32 FinalScreenshotCounter = 0;
 	std::wstring PendingFinalScreenshotPath;
 	std::wstring LastFinalScreenshotStatus;
+	struct AsyncImageDumpJob;
+	std::deque<std::unique_ptr<AsyncImageDumpJob>> AsyncImageDumpQueue;
+	std::vector<std::thread> AsyncImageDumpWorkers;
+	std::mutex AsyncImageDumpMutex;
+	std::condition_variable AsyncImageDumpCV;
+	UINT32 AsyncImageDumpActiveJobs = 0;
+	bool bAsyncImageDumpStop = false;
+	bool bAsyncImageDumpWorkersStarted = false;
 	bool bGpuTimingResourcesInitialized = false;
 	UINT32 GpuTimingAverageFrameCount = 30;
 	UINT64 GpuTimestampFrequency = 0;
@@ -1003,6 +1133,47 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	void ConsumeCameraPathDumpCaptureResult();
 	void LaunchCameraPathVideoEncode();
 	double GetCameraPathDurationSeconds() const;
+
+	struct RTSceneHitProgramDesc
+	{
+		const char* HitGroup = "HitGroup";
+		bool bBindSceneGeometry = true;
+		bool bBindDiffuseTexture = true;
+		bool bBindInstanceProperty = true;
+		bool bBindInstancePropertyBeforeDiffuse = false;
+	};
+
+	class RTPassBuilder
+	{
+	public:
+		using HitProgramBinder = std::function<void(RTPipelineStateObject& pso, const RTSceneHitProgramDesc& desc, Mesh& mesh, uint32_t instanceIndex)>;
+
+		RTPassBuilder(Corona& owner, const shared_ptr<RTPipelineStateObject>& pso);
+
+		bool IsValid() const;
+		RTPassBuilder& BeginScene();
+		RTPassBuilder& SetTextureUAV(const char* shader, const char* bindingName, Texture* texture);
+		RTPassBuilder& SetBufferUAV(const char* shader, const char* bindingName, Buffer* buffer);
+		RTPassBuilder& SetTextureSRV(const char* shader, const char* bindingName, Texture* texture);
+		RTPassBuilder& SetBufferSRV(const char* shader, const char* bindingName, Buffer* buffer);
+		RTPassBuilder& SetAccelerationStructure(const char* shader, const char* bindingName, const shared_ptr<RTAS>& rtas);
+		RTPassBuilder& SetSampler(const char* shader, const char* bindingName, Sampler* sampler);
+		RTPassBuilder& SetCBVValue(const char* shader, const char* bindingName, void* data);
+		uint32_t BindSceneHitPrograms(const RTSceneHitProgramDesc& desc = RTSceneHitProgramDesc(), const HitProgramBinder& customBinder = HitProgramBinder());
+		void Dispatch(uint32_t width, uint32_t height);
+
+		Texture* GetDiffuseTexture(const Mesh& mesh) const;
+		Texture* GetNormalTexture(const Mesh& mesh) const;
+		Texture* GetRoughnessTexture(const Mesh& mesh) const;
+		Texture* GetMetallicTexture(const Mesh& mesh) const;
+
+	private:
+		Material* GetPrimaryMaterial(const Mesh& mesh) const;
+
+		Corona& Owner;
+		shared_ptr<RTPipelineStateObject> PSO;
+		bool bBegan = false;
+	};
 	
 	// Raytracing helper functions
 	glm::mat4x4 BuildCenteredSceneTransform(
@@ -1018,6 +1189,7 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 		bool bOverrideRoughnessMetallic,
 		const glm::vec3& position = glm::vec3(0.0f),
 		const glm::vec3& rotationDegrees = glm::vec3(0.0f));
+	shared_ptr<Scene> CreateMirrorCubeScene();
 	void MarkRayTracingSceneDirty();
 	void FlushSceneObjectChanges();
 	void UpdateInstancePropertyBuffer();
@@ -1044,6 +1216,7 @@ public:
 	void LoadAssets();
 
 	shared_ptr<Scene> LoadModel(string fileName);
+	shared_ptr<Scene> LoadBinaryMeshModel(const std::wstring& binaryFileName, const std::wstring& sourceFileName);
 
 	void InitRTPSO();
 
@@ -1062,6 +1235,7 @@ public:
 	void InitLightingPass();
 
 	void InitShadowDenoisePass();
+	void InitSkyLightingDenoisePass();
 
 	void InitTemporalAAPass();
 
@@ -1083,6 +1257,11 @@ public:
 	void RaytraceShadowPass();
 
 	void ShadowDenoisePass();
+	void InitRaytracingAOPass();
+	void RaytraceAOPass();
+	void InitRaytracingSkyLightingPass();
+	void RaytraceSkyLightingPass();
+	void SkyLightingDenoisePass();
 
 	void RaytraceReflectionPass();
 
@@ -1126,6 +1305,7 @@ public:
 	void GenMipSpecularGIPass();
 	void ResetAllAccumulationState(bool forceUpscaleReload);
 	void ResetTemporalHistoryBuffers();
+	void RecreateRenderResolutionResources();
 	void ReloadRenderResolutionAssets();
 	void RefreshUpscaleSettings(bool reloadAssets);
 	Texture* GetCurrentResolveSource() const;
@@ -1137,6 +1317,11 @@ public:
 	const wchar_t* GetHybridStageAutoDumpPhaseName(uint32_t phase) const;
 	bool DumpTextureHDR(Texture* source, const std::wstring& filePath, D3D12_RESOURCE_STATES beforeState);
 	bool DumpTexturePNG(Texture* source, const std::wstring& filePath, D3D12_RESOURCE_STATES beforeState);
+	bool StartAsyncImageDumpWorkers();
+	void AsyncImageDumpWorkerMain();
+	void WaitForAsyncImageDumps();
+	void StopAsyncImageDumpWorkers();
+	bool EnqueueAsyncImageDump(DirectX::ScratchImage&& captured, const std::wstring& filePath, bool bHDR);
 #if WITH_STREAMLINE
 	void InitStreamline();
 	void ShutdownStreamline();

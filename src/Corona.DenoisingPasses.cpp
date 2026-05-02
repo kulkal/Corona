@@ -126,6 +126,21 @@ void Corona::InitShadowDenoisePass()
 		ShadowDenoisePSO = tempPSO;
 }
 
+void Corona::InitSkyLightingDenoisePass()
+{
+	shared_ptr<ComputePipelineStateObject> tempPSO = renderBackend->CreateComputePipelineStateObject();
+	if (!tempPSO)
+		return;
+
+	tempPSO->BindSRV("SkyLightingRawTex", 0, 1);
+	tempPSO->BindSRV("DepthTex", 1, 1);
+	tempPSO->BindSRV("GeoNormalTex", 2, 1);
+	tempPSO->BindUAV("OutSkyLighting", 0);
+	tempPSO->BindCBV("SkyLightingDenoiseCB", 0, sizeof(SkyLightingDenoiseCB));
+	if (tempPSO->InitCS(GetAssetFullPath(L"Shaders\\SkyLightingDenoise.hlsl"), "SkyLightingDenoiseCS"))
+		SkyLightingDenoisePSO = tempPSO;
+}
+
 void Corona::SpatialDenoisingPass()
 {
 	if (!SpatialDenoisingFilterPSO)
@@ -147,8 +162,8 @@ void Corona::SpatialDenoisingPass()
 		renderBackend->TransitionTexture(DiffuseGISpatial[WriteIndex].get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
 		renderBackend->TransitionTexture(SpecularGISpatial[WriteIndex].get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
 
-		SpatialDenoisingFilterPSO->SetTextureSRV("DepthTex", DepthBuffer.get());
-		SpatialDenoisingFilterPSO->SetTextureSRV("GeoNormalTex", GeomNormalBuffer.get());
+		SpatialDenoisingFilterPSO->SetTextureSRV("DepthTex", UnjitteredDepthBuffers[ColorBufferWriteIndex].get());
+		SpatialDenoisingFilterPSO->SetTextureSRV("GeoNormalTex", GeomNormalBuffers[ColorBufferWriteIndex].get());
 		if (i == 0)
 		{
 			Texture* diffuseSpatialInput =
@@ -211,7 +226,7 @@ void Corona::TemporalDenoisingPass()
 	renderBackend->TransitionTexture(SpecularGIMoments[WriteIndex].get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
 
 	TemporalDenoisingFilterPSO->SetTextureSRV("DepthTex", UnjitteredDepthBuffers[ColorBufferWriteIndex].get());
-	TemporalDenoisingFilterPSO->SetTextureSRV("NormalTex", NormalBuffers[ColorBufferWriteIndex].get());
+	TemporalDenoisingFilterPSO->SetTextureSRV("NormalTex", GeomNormalBuffers[ColorBufferWriteIndex].get());
 	const bool bUseSpatialHashDiffuseInput =
 		DiffuseGIMode == EDiffuseGIMode::SPATIAL_HASH &&
 		bSpatialHashGIHistoryValid &&
@@ -234,7 +249,7 @@ void Corona::TemporalDenoisingPass()
 	TemporalDenoisingFilterPSO->SetTextureSRV("InSpecularGITexPrev", SpecularGITemporal[ReadIndex].get());
 	TemporalDenoisingFilterPSO->SetTextureSRV("RougnessMetalicTex", RoughnessMetalicBuffer.get());
 	TemporalDenoisingFilterPSO->SetTextureSRV("PrevDepthTex", UnjitteredDepthBuffers[1 - ColorBufferWriteIndex].get());
-	TemporalDenoisingFilterPSO->SetTextureSRV("PrevNormalTex", NormalBuffers[1 - ColorBufferWriteIndex].get());
+	TemporalDenoisingFilterPSO->SetTextureSRV("PrevNormalTex", GeomNormalBuffers[1 - ColorBufferWriteIndex].get());
 	TemporalDenoisingFilterPSO->SetTextureSRV("PrevMomentsTex", SpecularGIMoments[ReadIndex].get());
 
 
@@ -275,7 +290,7 @@ void Corona::ShadowDenoisePass()
 
 	ShadowDenoisePSO->SetTextureSRV("ShadowTex", ShadowBuffer.get());
 	ShadowDenoisePSO->SetTextureSRV("DepthTex", DepthBuffer.get());
-	ShadowDenoisePSO->SetTextureSRV("GeoNormalTex", GeomNormalBuffer.get());
+	ShadowDenoisePSO->SetTextureSRV("GeoNormalTex", GeomNormalBuffers[ColorBufferWriteIndex].get());
 	ShadowDenoiseParam.ProjectionParams = RTShadowViewParam.ProjectionParams;
 	ShadowDenoiseParam.RTSize = glm::vec2(GetRenderWidth(), GetRenderHeight());
 	ShadowDenoisePSO->SetCBVValue("ShadowDenoiseCB", &ShadowDenoiseParam);
@@ -284,4 +299,30 @@ void Corona::ShadowDenoisePass()
 	renderBackend->Dispatch((GetRenderWidth() + 7) / 8, (GetRenderHeight() + 7) / 8, 1);
 
 	renderBackend->TransitionTexture(ShadowDenoisedBuffer.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
+}
+
+void Corona::SkyLightingDenoisePass()
+{
+	if (!SkyLightingDenoisePSO || !SkyLightingRawBuffer || !SkyLightingBuffer || !UnjitteredDepthBuffers[ColorBufferWriteIndex] || !GeomNormalBuffers[ColorBufferWriteIndex])
+		return;
+
+	renderBackend->EmitGpuCrashMarker("SkyLightingDenoisePass");
+
+	renderBackend->TransitionTexture(SkyLightingBuffer.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
+
+	SkyLightingDenoisePSO->SetTextureSRV("SkyLightingRawTex", SkyLightingRawBuffer.get());
+	SkyLightingDenoisePSO->SetTextureSRV("DepthTex", UnjitteredDepthBuffers[ColorBufferWriteIndex].get());
+	SkyLightingDenoisePSO->SetTextureSRV("GeoNormalTex", GeomNormalBuffers[ColorBufferWriteIndex].get());
+	SkyLightingDenoiseParam.ProjectionParams = RTSkyLightingViewParam.ProjectionParams;
+	SkyLightingDenoiseParam.RTSize = glm::vec2(GetRenderWidth(), GetRenderHeight());
+	SkyLightingDenoiseParam.DepthSigma = std::clamp(SkyLightingDenoiseParam.DepthSigma, 1.0f, 192.0f);
+	SkyLightingDenoiseParam.NormalSigma = std::clamp(SkyLightingDenoiseParam.NormalSigma, 1.0f, 192.0f);
+	SkyLightingDenoiseParam.VisibilitySigma = std::clamp(SkyLightingDenoiseParam.VisibilitySigma, 0.0f, 32.0f);
+	SkyLightingDenoiseParam.Radius = std::clamp(SkyLightingDenoiseParam.Radius, 1u, 6u);
+	SkyLightingDenoisePSO->SetCBVValue("SkyLightingDenoiseCB", &SkyLightingDenoiseParam);
+	SkyLightingDenoisePSO->SetTextureUAV("OutSkyLighting", SkyLightingBuffer.get());
+	SkyLightingDenoisePSO->Apply();
+	renderBackend->Dispatch((GetRenderWidth() + 7) / 8, (GetRenderHeight() + 7) / 8, 1);
+
+	renderBackend->TransitionTexture(SkyLightingBuffer.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
 }

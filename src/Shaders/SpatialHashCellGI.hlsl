@@ -225,7 +225,8 @@ float3 TraceDiffusePath(float3 origin, float3 direction, uint2 noiseCoord, uint 
 
         if (!payload.bHit)
         {
-            radiance += throughput * payload.color;
+            // Direct sky diffuse is supplied by the dedicated sky-lighting pass.
+            // Spatial hash GI should not add environment miss energy on top.
             break;
         }
 
@@ -336,7 +337,7 @@ void rayGen()
 void miss(inout RayPayload payload)
 {
     payload.position = 0.0f.xxx;
-    payload.color = EvaluateSkyColor(WorldRayDirection());
+    payload.color = 0.0f.xxx;
     payload.normal = float3(0.0f, 1.0f, 0.0f);
     payload.bHit = false;
 }

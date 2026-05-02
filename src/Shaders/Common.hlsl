@@ -399,6 +399,15 @@ static const uint INSTANCE_PROPERTY_STRIDE = 80;
 static const uint INSTANCE_PROPERTY_WORLD_MATRIX_OFFSET = 0;
 static const uint INSTANCE_PROPERTY_VERTEX_OFFSET = 64;
 static const uint INSTANCE_PROPERTY_INDEX_OFFSET = 68;
+static const uint INSTANCE_PROPERTY_FLAGS_OFFSET = 72;
+static const uint INSTANCE_FLAG_ALPHA_TESTED = 1u << 0;
+
+bool IsAlphaTestedInstance(uint instanceID, ByteAddressBuffer ip)
+{
+    uint instancePropertyBase = instanceID * INSTANCE_PROPERTY_STRIDE;
+    uint flags = ip.Load(instancePropertyBase + INSTANCE_PROPERTY_FLAGS_OFFSET);
+    return (flags & INSTANCE_FLAG_ALPHA_TESTED) != 0u;
+}
 
 uint3 GetIndicesWithOffset(ByteAddressBuffer ib, uint triangleIndex, uint indexOffset)
 {

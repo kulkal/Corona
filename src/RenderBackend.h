@@ -181,6 +181,7 @@ struct RTInstanceDesc
 {
 	std::shared_ptr<RTAS> BottomLevelAS;
 	glm::mat4x4 Transform = glm::mat4x4(1.0f);
+	uint32_t Flags = 0;
 };
 
 class IRenderBackend

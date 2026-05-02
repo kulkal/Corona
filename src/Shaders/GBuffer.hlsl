@@ -91,10 +91,10 @@ float3 CalcPerPixelNormal(float2 vTexcoord, float3 vVertNormal, float3 vVertTang
 
     float3x3 TBN = (float3x3(vVertTangent, vVertBinormal, vVertNormal));
 
-	// Compute per-pixel normal.
-    float3 vBumpNormal = (float3) NormalTex.Sample(sampleWrap, vTexcoord);
-
-    vBumpNormal = 2.0f * vBumpNormal - 1.0f;
+    // Compute per-pixel normal. Reconstruct Z from XY so BC5 normal maps work.
+    float3 normalSample = (float3) NormalTex.Sample(sampleWrap, vTexcoord);
+    float2 normalXY = 2.0f * normalSample.xy - 1.0f;
+    float3 vBumpNormal = float3(normalXY, sqrt(saturate(1.0f - dot(normalXY, normalXY))));
 
     float3 worldNormal = mul(vBumpNormal, TBN);
     float worldNormalLengthSq = dot(worldNormal, worldNormal);

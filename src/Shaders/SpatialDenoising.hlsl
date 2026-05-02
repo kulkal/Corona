@@ -19,6 +19,10 @@ cbuffer SpatialFilterConstant : register(b0)
     uint Padding;
     float IndirectDiffuseWeightFactorDepth;
     float IndirectDiffuseWeightFactorNormal;
+    float IndirectSpecularWeightFactorDepth;
+    float IndirectSpecularWeightFactorNormal;
+    float IndirectSpecularLuminanceWeight;
+    float IndirectSpecularEnergyPreservation;
 };
 
 static const float wavelet_factor = 0.5;
@@ -133,7 +137,12 @@ void FilterSpecular(Texture2D SpecularTex, uint2 Pos, inout float4 result)
 
 	const int r = 1;
 	float4 SumSpecular = CenterSpecular;
+	float4 SumEnergySpecular = CenterSpecular;
 	float SumW = 1.0f;
+	float SumEnergyW = 1.0f;
+	float specularDepthFactor = max(SanitizeFloat(IndirectSpecularWeightFactorDepth, IndirectDiffuseWeightFactorDepth), 0.0f);
+	float specularNormalFactor = max(SanitizeFloat(IndirectSpecularWeightFactorNormal, IndirectDiffuseWeightFactorNormal * 2.0f), 0.0f);
+	float specularLuminanceFactor = max(SanitizeFloat(IndirectSpecularLuminanceWeight, 1.5f), 0.0f);
 
 	for (int yy = -r; yy <= r; yy++)
 	{
@@ -151,23 +160,81 @@ void FilterSpecular(Texture2D SpecularTex, uint2 Pos, inout float4 result)
 			float3 SampleNormal = SafeNormalize(GeoNormalTex[SamplePos].xyz, CenterNormal);
 			float4 SampleSpecular = LoadSpecularRadiance(SpecularTex, SamplePos);
 
-			float depthDelta = abs(CenterZ - SampleZ) * IndirectDiffuseWeightFactorDepth;
-			float normalWeight = pow(max(0.0, dot(CenterNormal, SampleNormal)), IndirectDiffuseWeightFactorNormal * 2.0);
+			float depthDelta = abs(CenterZ - SampleZ) * specularDepthFactor;
+			float normalWeight = pow(max(0.0, dot(CenterNormal, SampleNormal)), specularNormalFactor);
 			float luminanceDelta = abs(Luminance(CenterSpecular.xyz) - Luminance(SampleSpecular.xyz));
 
-			float W = wavelet_kernel[abs(xx)][abs(yy)];
-			W *= exp(-depthDelta / float(StepSize));
-			W *= normalWeight;
-			W *= exp(-luminanceDelta * 4.0);
+			float GeometryW = wavelet_kernel[abs(xx)][abs(yy)];
+			GeometryW *= exp(-depthDelta / float(StepSize));
+			GeometryW *= normalWeight;
+			GeometryW = max(SanitizeFloat(GeometryW, 0.0f), 0.0f);
 
+			float W = GeometryW * exp(-luminanceDelta * specularLuminanceFactor);
 			W = max(SanitizeFloat(W, 0.0f), 0.0f);
 			SumSpecular += SampleSpecular * W;
 			SumW += W;
+
+			SumEnergySpecular += SampleSpecular * GeometryW;
+			SumEnergyW += GeometryW;
 		}
 	}
 
 	result = SanitizeFloat4(SumSpecular / max(SumW, 1e-4f));
 	result.xyz = max(result.xyz, 0.0f.xxx);
+
+	float3 energyTarget = max(SanitizeFloat4(SumEnergySpecular / max(SumEnergyW, 1e-4f)).xyz, 0.0f.xxx);
+	float targetLum = Luminance(energyTarget);
+	float resultLum = Luminance(result.xyz);
+	float minPreservedLum = targetLum * saturate(SanitizeFloat(IndirectSpecularEnergyPreservation, 0.85f));
+	if (targetLum > 1e-5f && resultLum < minPreservedLum)
+	{
+		float restore = saturate((minPreservedLum - resultLum) / max(minPreservedLum, 1e-5f));
+		result.xyz = lerp(result.xyz, energyTarget, restore);
+	}
+
+	if (Iteration <= 2)
+	{
+		float edgeSupportWeight = saturate((3.0f - SumEnergyW) / 2.0f);
+		if (edgeSupportWeight > 1e-4f)
+		{
+			float4 EdgeSupportSum = 0.0f.xxxx;
+			float EdgeSupportW = 0.0f;
+			int LocalStepSize = max(1, StepSize);
+
+			for (int ey = -2; ey <= 2; ey++)
+			{
+				for (int ex = -2; ex <= 2; ex++)
+				{
+					if (ex == 0 && ey == 0)
+						continue;
+
+					int2 SupportPos = CenterPos + int2(ex, ey) * LocalStepSize;
+					if (SupportPos.x < 0 || SupportPos.y < 0 || SupportPos.x >= Width || SupportPos.y >= Height)
+						continue;
+
+					float SupportDepth = DepthTex[SupportPos];
+					float SupportZ = GetLinearDepthOpenGL(SupportDepth, ProjectionParams.z, ProjectionParams.w);
+					float3 SupportNormal = SafeNormalize(GeoNormalTex[SupportPos].xyz, CenterNormal);
+					float4 SupportSpecular = LoadSpecularRadiance(SpecularTex, SupportPos);
+
+					float supportDepthDelta = abs(CenterZ - SupportZ) * specularDepthFactor;
+					float supportNormalWeight = pow(max(0.0, dot(CenterNormal, SupportNormal)), specularNormalFactor);
+					float distanceWeight = exp(-dot(float2(ex, ey), float2(ex, ey)) * 0.35f);
+					float supportW = distanceWeight * exp(-supportDepthDelta / float(LocalStepSize)) * supportNormalWeight;
+					supportW = max(SanitizeFloat(supportW, 0.0f), 0.0f);
+
+					EdgeSupportSum += SupportSpecular * supportW;
+					EdgeSupportW += supportW;
+				}
+			}
+
+			if (EdgeSupportW > 1e-4f)
+			{
+				float3 edgeSupportColor = max(SanitizeFloat4(EdgeSupportSum / EdgeSupportW).xyz, 0.0f.xxx);
+				result.xyz = lerp(result.xyz, edgeSupportColor, edgeSupportWeight);
+			}
+		}
+	}
 }
 
 [numthreads(32, 32, 1)]

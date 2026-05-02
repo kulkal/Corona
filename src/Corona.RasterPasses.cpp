@@ -418,7 +418,9 @@ void Corona::InitLightingPass()
 			{ "GIResultSHTex", 5 },
 			{ "GIResultColorTex", 6 },
 			{ "SpecularGITex", 7 },
-			{ "RoughnessMetalicTex", 8 }
+			{ "RoughnessMetalicTex", 8 },
+			{ "AmbientOcclusionTex", 14 },
+			{ "SkyLightingTex", 15 }
 		};
 		desc.SamplerBindings = {
 			{ "sampleWrap", 0 }
@@ -476,6 +478,8 @@ void Corona::InitLightingPass()
 	TEMP_LightingPSO->BindSRV("SpecularGITexMip2", 11, 1);
 	TEMP_LightingPSO->BindSRV("SpecularGITexMip3", 12, 1);
 	TEMP_LightingPSO->BindSRV("SpecularGITexMip4", 13, 1);
+	TEMP_LightingPSO->BindSRV("AmbientOcclusionTex", 14, 1);
+	TEMP_LightingPSO->BindSRV("SkyLightingTex", 15, 1);
 	
 	
 	
@@ -708,6 +712,32 @@ void Corona::DebugPass()
 	});
 
 	functions.push_back([&](EDebugVisualization eFS) {
+		// ray traced ambient occlusion
+		DebugPassCB cb;
+
+		if (eFS == EDebugVisualization::RTAO)
+		{
+			cb.Offset = glm::vec4(0, 0, 0, 0);
+			cb.Scale = glm::vec4(1, 1, 0, 0);
+		}
+		else if (eFS == EDebugVisualization::NO_FULLSCREEN)
+		{
+			cb.Offset = glm::vec4(-0.25, 0.75, 0, 0);
+			cb.Scale = glm::vec4(0.25, 0.25, 0, 0);
+		}
+		else
+		{
+			return;
+		}
+		if (!AmbientOcclusionBuffer)
+			return;
+		cb.DebugMode = CHANNEL_X;
+		BufferVisualizePSO->SetCBVValue("DebugPassCB", &cb);
+		BufferVisualizePSO->SetSRV("SrcTex", AmbientOcclusionBuffer->GpuHandleSRV);
+		renderBackend->DrawFullscreenQuad(FullScreenVB.get());
+	});
+
+	functions.push_back([&](EDebugVisualization eFS) {
 		// world normal
 		DebugPassCB cb;
 
@@ -750,7 +780,7 @@ void Corona::DebugPass()
 		}
 		cb.DebugMode = RAW_COPY;
 		BufferVisualizePSO->SetCBVValue("DebugPassCB", &cb);
-		BufferVisualizePSO->SetSRV("SrcTex", GeomNormalBuffer->GpuHandleSRV);
+		BufferVisualizePSO->SetSRV("SrcTex", GeomNormalBuffers[ColorBufferWriteIndex]->GpuHandleSRV);
 		renderBackend->DrawFullscreenQuad(FullScreenVB.get());
 	});
 
@@ -1208,6 +1238,14 @@ void Corona::LightingPass()
 	Param.bEnableSpecularGI = bEnableSpecularGI ? 1 : 0;
 	Param.bEnableDirectDiffuse = bEnableDirectDiffuse ? 1 : 0;
 	Param.bEnableDirectSpecular = bEnableDirectSpecular ? 1 : 0;
+	Param.bEnableRTAO = (bEnableRTAO && bRTAOOutputValidThisFrame && AmbientOcclusionBuffer) ? 1 : 0;
+	Param.bEnableSkyLighting = (bEnableSkyLighting && bSkyLightingOutputValidThisFrame && SkyLightingBuffer) ? 1 : 0;
+	Param.RTAOIndirectStrength = RTAOIndirectStrength;
+	Param.RTAOIndirectFloor = RTAOIndirectFloor;
+	Param.SurfaceBounceStrength = std::clamp(SurfaceBounceStrength, 0.0f, 1.0f);
+	Param.SurfaceBounceSaturation = std::clamp(SurfaceBounceSaturation, 0.0f, 1.0f);
+	Param.SkyLightingStrength = std::clamp(SkyLightingStrength, 0.0f, 1.0f);
+	Param.LightingOutputMode = 0;
 
 	glm::normalize(Param.LightDir);
 
@@ -1225,15 +1263,31 @@ void Corona::LightingPass()
 		renderBackend->BindGraphicsPipelineTexture(LightingGraphicsPipeline.get(), "GIResultColorTex", DiffuseGISpatial[0].get());
 		renderBackend->BindGraphicsPipelineTexture(LightingGraphicsPipeline.get(), "SpecularGITex", SpecularGISpatial[0].get());
 		renderBackend->BindGraphicsPipelineTexture(LightingGraphicsPipeline.get(), "RoughnessMetalicTex", RoughnessMetalicBuffer.get());
+		renderBackend->BindGraphicsPipelineTexture(LightingGraphicsPipeline.get(), "AmbientOcclusionTex", AmbientOcclusionBuffer ? AmbientOcclusionBuffer.get() : DefaultWhiteTex.get());
+		renderBackend->BindGraphicsPipelineTexture(LightingGraphicsPipeline.get(), "SkyLightingTex", SkyLightingBuffer ? SkyLightingBuffer.get() : DefaultBlackTex.get());
 		renderBackend->BindGraphicsPipelineSampler(LightingGraphicsPipeline.get(), "sampleWrap", samplerWrap.get());
-		renderBackend->SetGraphicsPipelineConstantData(LightingGraphicsPipeline.get(), 0, &Param, sizeof(Param));
 
+		Param.LightingOutputMode = 0;
+		renderBackend->SetGraphicsPipelineConstantData(LightingGraphicsPipeline.get(), 0, &Param, sizeof(Param));
 		Texture* lightingTarget = LightingBuffer.get();
 		renderBackend->SetRenderTargets(&lightingTarget, 1, nullptr);
 		renderBackend->BindGraphicsPipeline(LightingGraphicsPipeline.get());
 		renderBackend->SetViewportAndScissor(GetRenderWidth(), GetRenderHeight());
 		renderBackend->DrawFullscreenQuad(FullScreenVB.get());
 		renderBackend->TransitionTexture(LightingBuffer.get(), EResourceState::RenderTarget, EResourceState::ShaderRead);
+
+		if (bAutoAADumpEnabled && DirectLightingBuffer)
+		{
+			Param.LightingOutputMode = 1;
+			renderBackend->SetGraphicsPipelineConstantData(LightingGraphicsPipeline.get(), 0, &Param, sizeof(Param));
+			renderBackend->TransitionTexture(DirectLightingBuffer.get(), EResourceState::ShaderRead, EResourceState::RenderTarget);
+			Texture* directLightingTarget = DirectLightingBuffer.get();
+			renderBackend->SetRenderTargets(&directLightingTarget, 1, nullptr);
+			renderBackend->BindGraphicsPipeline(LightingGraphicsPipeline.get());
+			renderBackend->SetViewportAndScissor(GetRenderWidth(), GetRenderHeight());
+			renderBackend->DrawFullscreenQuad(FullScreenVB.get());
+			renderBackend->TransitionTexture(DirectLightingBuffer.get(), EResourceState::RenderTarget, EResourceState::ShaderRead);
+		}
 		return;
 	}
 
@@ -1250,6 +1304,8 @@ void Corona::LightingPass()
 	LightingPSO->SetSRV("GIResultColorTex", DiffuseGISpatial[0]->GpuHandleSRV);
 	LightingPSO->SetSRV("SpecularGITex", SpecularGISpatial[0]->GpuHandleSRV);
 	LightingPSO->SetSRV("RoughnessMetalicTex", RoughnessMetalicBuffer->GpuHandleSRV);
+	LightingPSO->SetSRV("AmbientOcclusionTex", AmbientOcclusionBuffer ? AmbientOcclusionBuffer->GpuHandleSRV : DefaultWhiteTex->GpuHandleSRV);
+	LightingPSO->SetSRV("SkyLightingTex", SkyLightingBuffer ? SkyLightingBuffer->GpuHandleSRV : DefaultBlackTex->GpuHandleSRV);
 	LightingPSO->SetCBVValue("LightingParam", &Param);
 
 
@@ -1259,6 +1315,19 @@ void Corona::LightingPass()
 	renderBackend->SetViewportAndScissor(GetRenderWidth(), GetRenderHeight());
 	renderBackend->DrawFullscreenQuad(FullScreenVB.get());
 	renderBackend->TransitionTexture(LightingBuffer.get(), EResourceState::RenderTarget, EResourceState::ShaderRead);
+
+	if (bAutoAADumpEnabled && DirectLightingBuffer)
+	{
+		Param.LightingOutputMode = 1;
+		LightingPSO->SetCBVValue("LightingParam", &Param);
+		LightingPSO->Apply();
+
+		renderBackend->TransitionTexture(DirectLightingBuffer.get(), EResourceState::ShaderRead, EResourceState::RenderTarget);
+		renderBackend->SetRenderTarget(DirectLightingBuffer.get());
+		renderBackend->SetViewportAndScissor(GetRenderWidth(), GetRenderHeight());
+		renderBackend->DrawFullscreenQuad(FullScreenVB.get());
+		renderBackend->TransitionTexture(DirectLightingBuffer.get(), EResourceState::RenderTarget, EResourceState::ShaderRead);
+	}
 }
 
 void Corona::TemporalAAPass()
@@ -1549,7 +1618,7 @@ void Corona::GBufferPass()
 	renderBackend->TransitionTexture(AlbedoBuffer.get(), EResourceState::ShaderRead, EResourceState::RenderTarget);
 	renderBackend->TransitionTexture(SpecularAlbedoBuffer.get(), EResourceState::ShaderRead, EResourceState::RenderTarget);
 	renderBackend->TransitionTexture(NormalBuffers[ColorBufferWriteIndex].get(), EResourceState::ShaderRead, EResourceState::RenderTarget);
-	renderBackend->TransitionTexture(GeomNormalBuffer.get(), EResourceState::ShaderRead, EResourceState::RenderTarget);
+	renderBackend->TransitionTexture(GeomNormalBuffers[ColorBufferWriteIndex].get(), EResourceState::ShaderRead, EResourceState::RenderTarget);
 	renderBackend->TransitionTexture(VelocityBuffer.get(), EResourceState::ShaderRead, EResourceState::RenderTarget);
 	renderBackend->TransitionTexture(RoughnessMetalicBuffer.get(), EResourceState::ShaderRead, EResourceState::RenderTarget);
 
@@ -1561,7 +1630,7 @@ void Corona::GBufferPass()
 	renderBackend->ClearRenderTarget(SpecularAlbedoBuffer.get(), clearColor);
 	const float normalClearColor[] = { 0.0f, -0.1f, 0.0f, 0.0f };
 	renderBackend->ClearRenderTarget(NormalBuffers[ColorBufferWriteIndex].get(), normalClearColor);
-	renderBackend->ClearRenderTarget(GeomNormalBuffer.get(), normalClearColor);
+	renderBackend->ClearRenderTarget(GeomNormalBuffers[ColorBufferWriteIndex].get(), normalClearColor);
 	const float velocityClearColor[] = { 0.0f, 0.0f};
 	renderBackend->ClearRenderTarget(VelocityBuffer.get(), velocityClearColor);
 	const float roughnessClearColor[] = { 0.001f, 0.0f, 0.0f, 0.0f };
@@ -1579,7 +1648,7 @@ void Corona::GBufferPass()
 		AlbedoBuffer.get(),
 		SpecularAlbedoBuffer.get(),
 		NormalBuffers[ColorBufferWriteIndex].get(),
-		GeomNormalBuffer.get(),
+		GeomNormalBuffers[ColorBufferWriteIndex].get(),
 		VelocityBuffer.get(),
 		RoughnessMetalicBuffer.get(),
 		UnjitteredDepthBuffers[ColorBufferWriteIndex].get()
@@ -1645,7 +1714,7 @@ void Corona::GBufferPass()
 	renderBackend->TransitionTexture(AlbedoBuffer.get(), EResourceState::RenderTarget, EResourceState::ShaderRead);
 	renderBackend->TransitionTexture(SpecularAlbedoBuffer.get(), EResourceState::RenderTarget, EResourceState::ShaderRead);
 	renderBackend->TransitionTexture(NormalBuffers[ColorBufferWriteIndex].get(), EResourceState::RenderTarget, EResourceState::ShaderRead);
-	renderBackend->TransitionTexture(GeomNormalBuffer.get(), EResourceState::RenderTarget, EResourceState::ShaderRead);
+	renderBackend->TransitionTexture(GeomNormalBuffers[ColorBufferWriteIndex].get(), EResourceState::RenderTarget, EResourceState::ShaderRead);
 	renderBackend->TransitionTexture(VelocityBuffer.get(), EResourceState::RenderTarget, EResourceState::ShaderRead);
 	renderBackend->TransitionTexture(RoughnessMetalicBuffer.get(), EResourceState::RenderTarget, EResourceState::ShaderRead);
 

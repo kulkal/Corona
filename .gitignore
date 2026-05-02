@@ -25,6 +25,9 @@ src/sl.log
 *.a
 
 *.user
+__pycache__/
+*.pyc
+*.pyc.*
 
 # but do track lib.a, even though you're ignoring .a files above
 !lib.a

@@ -32,7 +32,10 @@ cbuffer ViewParameter : register(b0)
     float3 SkyColorBottom;
     float _padding;
     float3 LightColor;
-    float _padding2;
+    float PrefilteredEnvRoughnessThreshold;
+    float PrefilteredEnvRoughnessFade;
+    uint bEnablePrefilteredEnvSpecular;
+    float2 PrefilteredEnvPadding;
 };
 
 SamplerState sampleWrap : register(s0);
@@ -195,6 +198,37 @@ float3 Reinhard(in float3 color)
     return color/(1 + color);
 }
 
+float3 SampleSkyEnvironment(float3 rayDir)
+{
+    rayDir = SpecSafeNormalize(rayDir, float3(0.0f, 1.0f, 0.0f));
+    float t = 0.5f * (rayDir.y + 1.0f);
+    float skyIntensity = max(SpecSanitizeFloat(SkyIntensity, 0.0f), 0.0f);
+    float3 skyColor = lerp(SkyColorBottom, SkyColorTop, saturate(t));
+    return max(SpecSanitizeFloat3(skyColor * skyIntensity, 0.0f.xxx), 0.0f.xxx);
+}
+
+float3 SamplePrefilteredSkyEnvironment(float3 reflectionDir, float roughness)
+{
+    reflectionDir = SpecSafeNormalize(reflectionDir, float3(0.0f, 1.0f, 0.0f));
+    roughness = saturate(roughness);
+
+    float3 helperUp = abs(reflectionDir.y) < 0.98f ? float3(0.0f, 1.0f, 0.0f) : float3(1.0f, 0.0f, 0.0f);
+    float3 tangent = SpecSafeNormalize(cross(helperUp, reflectionDir), float3(1.0f, 0.0f, 0.0f));
+    float3 bitangent = SpecSafeNormalize(cross(reflectionDir, tangent), float3(0.0f, 0.0f, 1.0f));
+    float coneWidth = lerp(0.05f, 1.35f, roughness * roughness);
+    float verticalWeight = saturate(roughness * roughness * 0.75f);
+
+    float3 radiance = SampleSkyEnvironment(reflectionDir) * 4.0f;
+    radiance += SampleSkyEnvironment(reflectionDir + tangent * coneWidth);
+    radiance += SampleSkyEnvironment(reflectionDir - tangent * coneWidth);
+    radiance += SampleSkyEnvironment(reflectionDir + bitangent * coneWidth);
+    radiance += SampleSkyEnvironment(reflectionDir - bitangent * coneWidth);
+    radiance += SampleSkyEnvironment(float3(0.0f, 1.0f, 0.0f)) * verticalWeight;
+    radiance += SampleSkyEnvironment(float3(0.0f, -1.0f, 0.0f)) * verticalWeight;
+
+    return radiance / (8.0f + 2.0f * verticalWeight);
+}
+
 static const float MAX_HIT_DIST = 10000;
 
 #define RT_REFLECTION_SURFACE_RAY_FLAGS (RAY_FLAG_FORCE_OPAQUE | RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES)
@@ -235,21 +269,30 @@ void rayGen
 
 	float3 WorldPos = SpecSanitizeFloat3(mul(float4(ViewPosition, 1), InvViewMatrix).xyz, 0.0f.xxx);
 
-    float2 RandomUV = LoadRayNoise2(BlueNoiseTex, launchIndex.xy, FrameCounter, BlueNoiseOffsetStride, NoiseMode);
-    float3x3 TBN = buildTBN(WorldNormal);
-
     float Rougness = clamp(SpecSanitizeFloat(RougnessMetallicTex.SampleLevel(sampleWrap, UV, 0).x, 0.65f), 0.02f, 1.0f);
-    float3 N = WorldNormal;
     float3 viewRay = SpecSafeNormalize(float3(dim.x * aspectRatio, -dim.y, -1), float3(0.0f, 0.0f, -1.0f));
     float3 V = SpecSafeNormalize(mul(float4(viewRay, 0.0f), InvViewMatrix).xyz, -WorldNormal);
-    float3 H = ImportanceSampleGGX_VNDF(RandomUV, Rougness, -V, TBN, WorldNormal);
-    float3 L = SpecSafeNormalize(reflect(V, H), reflect(V, WorldNormal));
+    float3 MirrorL = SpecSafeNormalize(reflect(V, WorldNormal), WorldNormal);
 
-    float NoV = max(0, -dot(N, V));
-    float NoL = max(0, dot(N, L));
-    float NoH = max(0, dot(N, H));
-    float VoH = max(0, -dot(V, H));
-    float LoH = max(0, -dot(L, H));
+    const bool enablePrefilteredEnvSpecular = bEnablePrefilteredEnvSpecular != 0;
+    float envThreshold = saturate(SpecSanitizeFloat(PrefilteredEnvRoughnessThreshold, 0.65f));
+    float envFade = enablePrefilteredEnvSpecular ? max(SpecSanitizeFloat(PrefilteredEnvRoughnessFade, 0.0f), 0.0f) : 0.0f;
+    float envBlendStart = max(envThreshold - envFade, 0.0f);
+    float prefilteredEnvBlend = enablePrefilteredEnvSpecular ? (envFade <= 1e-4f
+        ? (Rougness >= envThreshold ? 1.0f : 0.0f)
+        : saturate((Rougness - envBlendStart) / max(envThreshold - envBlendStart, 1e-4f))) : 0.0f;
+    prefilteredEnvBlend = prefilteredEnvBlend * prefilteredEnvBlend * (3.0f - 2.0f * prefilteredEnvBlend);
+    prefilteredEnvBlend = enablePrefilteredEnvSpecular && Rougness >= envThreshold ? 1.0f : prefilteredEnvBlend;
+    float3 prefilteredEnvRadiance = SamplePrefilteredSkyEnvironment(MirrorL, Rougness);
+    bool useDeterministicPrefilteredEnvRay = prefilteredEnvBlend >= 0.999f;
+    float3 L = MirrorL;
+    if (!useDeterministicPrefilteredEnvRay)
+    {
+        float2 RandomUV = LoadRayNoise2(BlueNoiseTex, launchIndex.xy, FrameCounter, BlueNoiseOffsetStride, NoiseMode);
+        float3x3 TBN = buildTBN(WorldNormal);
+        float3 H = ImportanceSampleGGX_VNDF(RandomUV, Rougness, -V, TBN, WorldNormal);
+        L = SpecSafeNormalize(reflect(V, H), reflect(V, WorldNormal));
+    }
 
     float LightIntensity = max(SpecSanitizeFloat(LightDirAndIntensity.w, 0.0f), 0.0f);
 
@@ -278,11 +321,12 @@ void rayGen
         0,
         ray,
         payload);
+
+    float3 tracedRadiance = 0.0f.xxx;
     if(payload.bHit == false)
     {
         // hit sky - payload.color already includes SkyIntensity from miss shader
-        float3 Radiance = max(SpecSanitizeFloat3(payload.color, 0.0f.xxx), 0.0f.xxx);
-        ReflectionResult[launchIndex.xy] = SpecSanitizeFloat4(float4(Reinhard(Radiance), 1), float4(0.0f, 0.0f, 0.0f, 1.0f));
+        tracedRadiance = max(SpecSanitizeFloat3(payload.color, 0.0f.xxx), 0.0f.xxx);
     }
     else
     {
@@ -323,13 +367,23 @@ void rayGen
             // shadowed
         }
             
-
-        ReflectionResult[launchIndex.xy] = SpecSanitizeFloat4(float4(Reinhard(max(Irradiance, 0.0f.xxx)), 1), float4(0.0f, 0.0f, 0.0f, 1.0f));
+        tracedRadiance = max(Irradiance, 0.0f.xxx);
     }
 
-    float d = -dot(WorldNormal, WorldPos);
-    float distP2Plane = PointPlaneDist(float4(WorldNormal, d), payload.position);
-    ReflectionResult[launchIndex.xy].w = SpecSanitizeFloat(abs(distP2Plane), MAX_HIT_DIST);
+    // Prefiltered environment should replace only visible sky misses. Geometry hits
+    // still provide local occlusion/direct lighting, otherwise rough indoor surfaces
+    // become flooded by unoccluded sky radiance.
+    float3 finalRadiance = payload.bHit ? tracedRadiance : lerp(tracedRadiance, prefilteredEnvRadiance, prefilteredEnvBlend);
+    ReflectionResult[launchIndex.xy] = SpecSanitizeFloat4(float4(Reinhard(max(finalRadiance, 0.0f.xxx)), 1), float4(0.0f, 0.0f, 0.0f, 1.0f));
+
+    float reflectionDistance = MAX_HIT_DIST;
+    if (payload.bHit)
+    {
+        float d = -dot(WorldNormal, WorldPos);
+        float distP2Plane = PointPlaneDist(float4(WorldNormal, d), payload.position);
+        reflectionDistance = abs(distP2Plane);
+    }
+    ReflectionResult[launchIndex.xy].w = SpecSanitizeFloat(reflectionDistance, MAX_HIT_DIST);
 }
 
 
@@ -339,11 +393,9 @@ void miss(inout RayPayload payload)
 {
     // Sky color - gradient based on ray direction (same as path tracing)
     float3 rayDir = SpecSafeNormalize(WorldRayDirection(), float3(0.0f, 1.0f, 0.0f));
-    float t = 0.5 * (rayDir.y + 1.0);
-    float3 skyColor = lerp(SkyColorBottom, SkyColorTop, t);
     
     payload.position = float3(0, 0, 0);
-    payload.color = max(SpecSanitizeFloat3(skyColor * max(SpecSanitizeFloat(SkyIntensity, 0.0f), 0.0f), 0.0f.xxx), 0.0f.xxx);
+    payload.color = SampleSkyEnvironment(rayDir);
     payload.normal = float3(0, 0, -1);
     payload.bHit = false;
     payload.hitDist = MAX_HIT_DIST;

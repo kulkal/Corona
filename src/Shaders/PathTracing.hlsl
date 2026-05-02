@@ -552,6 +552,10 @@ void PathTracingAnyHit(inout PathTracingPayload payload, in BuiltInTriangleInter
     
     uint triangleIndex = PrimitiveIndex();
     uint instanceID = InstanceID();
+
+    if (!IsAlphaTestedInstance(instanceID, InstanceProperty))
+        return;
+
     Vertex vertex = GetVertexAttributes(instanceID, vertices, indices, InstanceProperty, triangleIndex, barycentrics);
     
     // Sample albedo alpha channel

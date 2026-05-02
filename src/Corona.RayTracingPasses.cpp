@@ -20,6 +20,8 @@
 
 namespace
 {
+	constexpr uint32_t kRTInstanceFlagAlphaTested = 1u << 0;
+
 	void AddMeshesToRayTracingInstances(
 		vector<RTInstanceDesc>& instances,
 		map<Mesh*, shared_ptr<RTAS>>& blasCache,
@@ -53,6 +55,14 @@ namespace
 			RTInstanceDesc instance;
 			instance.BottomLevelAS = blas;
 			instance.Transform = instanceTransform * mesh->transform;
+			for (const Mesh::DrawCall& draw : mesh->Draws)
+			{
+				if (draw.mat && draw.mat->bHasAlpha)
+				{
+					instance.Flags |= kRTInstanceFlagAlphaTested;
+					break;
+				}
+			}
 			instances.push_back(instance);
 		}
 	}
@@ -109,6 +119,8 @@ bool Corona::RemoveSceneObject(SceneObjectHandle handle)
 		ShaderBallObject = InvalidSceneObjectHandle;
 	if (PistolObject == handle)
 		PistolObject = InvalidSceneObjectHandle;
+	if (MirrorCubeObject == handle)
+		MirrorCubeObject = InvalidSceneObjectHandle;
 	MarkRayTracingSceneDirty();
 	return true;
 }
@@ -186,6 +198,7 @@ void Corona::UpdateInstancePropertyBuffer()
 		instanceProperties[i].WorldMatrix = glm::transpose(RayTracingInstances[i].Transform);
 		instanceProperties[i].VertexOffset = 0;
 		instanceProperties[i].IndexOffset = 0;
+		instanceProperties[i].Flags = RayTracingInstances[i].Flags;
 	}
 
 	if (renderBackend && renderBackend->GetAPI() == ERenderBackendAPI::Vulkan)
@@ -273,7 +286,7 @@ void Corona::RebuildAccelerationStructures()
 	// Update instance property buffer
 	UpdateInstancePropertyBuffer();
 
-	if (bInstanceCountChanged && (PSO_RT_SHADOW || PSO_RT_REFLECTION || PSO_RT_GI || PSO_RT_SCREEN_PROBE_GI || PSO_RT_SPATIAL_HASH_GI))
+	if (bInstanceCountChanged && (PSO_RT_SHADOW || PSO_RT_AO || PSO_RT_SKY_LIGHTING || PSO_RT_REFLECTION || PSO_RT_GI || PSO_RT_SCREEN_PROBE_GI || PSO_RT_SPATIAL_HASH_GI))
 		InitRTPSO();
 	if (PSO_PATH_TRACING)
 		InitPathTracingPass();
@@ -307,6 +320,8 @@ void Corona::InitRTPSO()
 	const bool bInitGIRT = !renderBackend || renderBackend->GetAPI() != ERenderBackendAPI::Vulkan || maxSupportedHybridStage >= 4u;
 
 	InitRaytracingShadowPass();
+	InitRaytracingAOPass();
+	InitRaytracingSkyLightingPass();
 	if (bInitReflectionRT)
 		InitRaytracingReflectionPass();
 	if (bInitGIRT)

@@ -1,0 +1,181 @@
+//*********************************************************
+//
+// Copyright (c) Microsoft. All rights reserved.
+// This code is licensed under the MIT License (MIT).
+// THIS CODE IS PROVIDED *AS IS* WITHOUT WARRANTY OF
+// ANY KIND, EITHER EXPRESS OR IMPLIED, INCLUDING ANY
+// IMPLIED WARRANTIES OF FITNESS FOR A PARTICULAR
+// PURPOSE, MERCHANTABILITY, OR NON-INFRINGEMENT.
+//
+//*********************************************************
+
+#include "stdafx.h"
+#include "Corona.h"
+
+Corona::RTPassBuilder::RTPassBuilder(Corona& owner, const shared_ptr<RTPipelineStateObject>& pso)
+	: Owner(owner)
+	, PSO(pso)
+{
+}
+
+bool Corona::RTPassBuilder::IsValid() const
+{
+	return PSO != nullptr;
+}
+
+Corona::RTPassBuilder& Corona::RTPassBuilder::BeginScene()
+{
+	if (!PSO)
+		return *this;
+
+	PSO->SetNumInstances(static_cast<uint32_t>(Owner.RayTracingInstances.size()));
+	PSO->BeginShaderTable();
+	bBegan = true;
+	return *this;
+}
+
+Corona::RTPassBuilder& Corona::RTPassBuilder::SetTextureUAV(const char* shader, const char* bindingName, Texture* texture)
+{
+	if (PSO && texture)
+		PSO->SetTextureUAV(shader, bindingName, texture);
+	return *this;
+}
+
+Corona::RTPassBuilder& Corona::RTPassBuilder::SetBufferUAV(const char* shader, const char* bindingName, Buffer* buffer)
+{
+	if (PSO && buffer)
+		PSO->SetBufferUAV(shader, bindingName, buffer);
+	return *this;
+}
+
+Corona::RTPassBuilder& Corona::RTPassBuilder::SetTextureSRV(const char* shader, const char* bindingName, Texture* texture)
+{
+	if (PSO && texture)
+		PSO->SetTextureSRV(shader, bindingName, texture);
+	return *this;
+}
+
+Corona::RTPassBuilder& Corona::RTPassBuilder::SetBufferSRV(const char* shader, const char* bindingName, Buffer* buffer)
+{
+	if (PSO && buffer)
+		PSO->SetBufferSRV(shader, bindingName, buffer);
+	return *this;
+}
+
+Corona::RTPassBuilder& Corona::RTPassBuilder::SetAccelerationStructure(const char* shader, const char* bindingName, const shared_ptr<RTAS>& rtas)
+{
+	if (PSO && rtas)
+		PSO->SetAccelerationStructure(shader, bindingName, rtas);
+	return *this;
+}
+
+Corona::RTPassBuilder& Corona::RTPassBuilder::SetSampler(const char* shader, const char* bindingName, Sampler* sampler)
+{
+	if (PSO && sampler)
+		PSO->SetSampler(shader, bindingName, sampler);
+	return *this;
+}
+
+Corona::RTPassBuilder& Corona::RTPassBuilder::SetCBVValue(const char* shader, const char* bindingName, void* data)
+{
+	if (PSO && data)
+		PSO->SetCBVValue(shader, bindingName, data);
+	return *this;
+}
+
+uint32_t Corona::RTPassBuilder::BindSceneHitPrograms(const RTSceneHitProgramDesc& desc, const HitProgramBinder& customBinder)
+{
+	if (!PSO)
+		return 0;
+
+	if (!bBegan)
+		BeginScene();
+
+	uint32_t boundCount = 0;
+	uint32_t instanceIndex = 0;
+	for (const RTInstanceDesc& instance : Owner.RayTracingInstances)
+	{
+		PSO->ResetHitProgram(instanceIndex);
+
+		Mesh* mesh = (instance.BottomLevelAS) ? instance.BottomLevelAS->MeshPtr : nullptr;
+		if (!mesh)
+		{
+			++instanceIndex;
+			continue;
+		}
+
+		PSO->StartHitProgram(desc.HitGroup, instanceIndex);
+
+		if (desc.bBindSceneGeometry && mesh->Vb && mesh->Ib)
+			PSO->AddSceneGeometrySRVsToHitProgram(desc.HitGroup, mesh->Vb.get(), mesh->Ib.get(), instanceIndex);
+
+		if (desc.bBindInstancePropertyBeforeDiffuse && desc.bBindInstanceProperty && Owner.InstancePropertyBuffer)
+			PSO->AddBufferSRVToHitProgram(desc.HitGroup, Owner.InstancePropertyBuffer.get(), instanceIndex);
+
+		if (desc.bBindDiffuseTexture)
+			PSO->AddTextureSRVToHitProgram(desc.HitGroup, GetDiffuseTexture(*mesh), instanceIndex);
+
+		if (!desc.bBindInstancePropertyBeforeDiffuse && desc.bBindInstanceProperty && Owner.InstancePropertyBuffer)
+			PSO->AddBufferSRVToHitProgram(desc.HitGroup, Owner.InstancePropertyBuffer.get(), instanceIndex);
+
+		if (customBinder)
+			customBinder(*PSO, desc, *mesh, instanceIndex);
+
+		++boundCount;
+		++instanceIndex;
+	}
+
+	return boundCount;
+}
+
+void Corona::RTPassBuilder::Dispatch(uint32_t width, uint32_t height)
+{
+	if (!PSO)
+		return;
+
+	if (!bBegan)
+		BeginScene();
+
+	PSO->EndShaderTable();
+	PSO->Apply(width, height);
+	bBegan = false;
+}
+
+Texture* Corona::RTPassBuilder::GetDiffuseTexture(const Mesh& mesh) const
+{
+	const Material* material = GetPrimaryMaterial(mesh);
+	if (material && material->Diffuse)
+		return material->Diffuse.get();
+	return Owner.DefaultWhiteTex.get();
+}
+
+Texture* Corona::RTPassBuilder::GetNormalTexture(const Mesh& mesh) const
+{
+	const Material* material = GetPrimaryMaterial(mesh);
+	if (material && material->Normal)
+		return material->Normal.get();
+	return Owner.DefaultNormalTex.get();
+}
+
+Texture* Corona::RTPassBuilder::GetRoughnessTexture(const Mesh& mesh) const
+{
+	const Material* material = GetPrimaryMaterial(mesh);
+	if (material && material->Roughness)
+		return material->Roughness.get();
+	return Owner.DefaultRougnessTex.get();
+}
+
+Texture* Corona::RTPassBuilder::GetMetallicTexture(const Mesh& mesh) const
+{
+	const Material* material = GetPrimaryMaterial(mesh);
+	if (material && material->Metallic)
+		return material->Metallic.get();
+	return Owner.DefaultBlackTex.get();
+}
+
+Material* Corona::RTPassBuilder::GetPrimaryMaterial(const Mesh& mesh) const
+{
+	if (!mesh.Draws.empty() && mesh.Draws[0].mat)
+		return mesh.Draws[0].mat.get();
+	return mesh.Mat.get();
+}

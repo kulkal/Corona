@@ -402,6 +402,13 @@ float3 EvaluateSkyColor(float3 direction)
     return lerp(SkyColorBottom, SkyColorTop, t) * SkyIntensity;
 }
 
+float3 EvaluateSkyDiffuseBounce(float3 normal)
+{
+    float3 averageSky = 0.5f * (SkyColorTop + SkyColorBottom);
+    float3 skyGradient = 0.5f * (SkyColorTop - SkyColorBottom);
+    return max((averageSky + (2.0f / 3.0f) * skyGradient * normal.y) * SkyIntensity, 0.0f.xxx);
+}
+
 float3x3 BuildTBN(float3 normal)
 {
     static const float3 rvec1 = float3(0.847100675f, 0.207911700f, 0.489073813f);
@@ -458,7 +465,7 @@ float3 TraceDiffuseProbeRay(float3 worldPos, float3 worldNormal, uint2 probeCoor
         payload);
 
     if (!payload.bHit)
-        return payload.color;
+        return 0.0f.xxx;
 
     float3 lightDir = normalize(LightDirAndIntensity.xyz);
     RayDesc shadowRay;
@@ -482,11 +489,15 @@ float3 TraceDiffuseProbeRay(float3 worldPos, float3 worldNormal, uint2 probeCoor
         shadowRay,
         shadowPayload);
 
-    if (shadowPayload.bHit)
-        return 0.0f.xxx;
-
-    float nDotL = saturate(dot(lightDir, payload.normal));
-    return nDotL * LightDirAndIntensity.w * LightColor * payload.color * INV_PI;
+    // Direct sky diffuse is handled by RaytracedSkyLighting. Probe GI only
+    // keeps surface/direct-light bounce energy so sky is not counted twice.
+    float3 radiance = 0.0f.xxx;
+    if (!shadowPayload.bHit)
+    {
+        float nDotL = saturate(dot(lightDir, payload.normal));
+        radiance += nDotL * LightDirAndIntensity.w * LightColor * payload.color * INV_PI;
+    }
+    return radiance;
 }
 
 bool ApplyProbeTemporalHistory(uint2 probeCoord, float2 probePixelCenter, float currentLinearDepth, float3 currentNormal, inout float3 currentRadiance, inout SH3RGB currentSH, inout float currentHistoryFrames)
@@ -764,7 +775,7 @@ void rayGen()
 void miss(inout RayPayload payload)
 {
     payload.position = 0.0f.xxx;
-    payload.color = EvaluateSkyColor(WorldRayDirection());
+    payload.color = 0.0f.xxx;
     payload.normal = float3(0.0f, 1.0f, 0.0f);
     payload.bHit = false;
 }

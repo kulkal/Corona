@@ -64,6 +64,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow)
 	const bool bAutomationRun =
 		HasCommandLineSwitch(commandLine, L"--auto-dump") ||
 		HasCommandLineSwitch(commandLine, L"--readme-dump") ||
+		HasCommandLineSwitch(commandLine, L"--path-tracing-dump") ||
+		HasCommandLineSwitch(commandLine, L"--lighting-compare-dump") ||
+		HasCommandLineSwitch(commandLine, L"--gi-compare-dump") ||
+		HasCommandLineSwitch(commandLine, L"--indirect-compare-dump") ||
 		HasCommandLineSwitch(commandLine, L"--camera-path-dump");
 
 	Win32Application::Run(sample, hInstance, nCmdShow);

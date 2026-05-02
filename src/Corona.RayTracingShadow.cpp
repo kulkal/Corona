@@ -32,6 +32,7 @@ void Corona::InitRaytracingShadowPass()
 		TEMP_PSO_RT_SHADOW->BindSRV("global", "gRtScene", 0);
 		TEMP_PSO_RT_SHADOW->BindSRV("global", "DepthTex", 1);
 		TEMP_PSO_RT_SHADOW->BindSRV("global", "WorldNormalTex", 2);
+		TEMP_PSO_RT_SHADOW->BindSRV("global", "GeoNormalTex", 7);
 
 		TEMP_PSO_RT_SHADOW->BindCBV("global", "ViewParameter", 0, sizeof(RTShadowViewParamCB), 1);
 		TEMP_PSO_RT_SHADOW->BindSampler("global", "sampleWrap", 0);
@@ -45,7 +46,7 @@ void Corona::InitRaytracingShadowPass()
 		TEMP_PSO_RT_SHADOW->BindSRV("anyhit", "indices", 4);
 		TEMP_PSO_RT_SHADOW->BindSRV("anyhit", "AlbedoTex", 5);
 		TEMP_PSO_RT_SHADOW->BindSRV("anyhit", "InstanceProperty", 6);
-		TEMP_PSO_RT_SHADOW->Configure(1, sizeof(float) * 2, sizeof(float) * 2);
+		TEMP_PSO_RT_SHADOW->Configure(1, sizeof(float) * 4, sizeof(float) * 2);
 
 		bool bSuccess = TEMP_PSO_RT_SHADOW->InitRS("Shaders\\RaytracedShadow.hlsl");
 		if (bSuccess)
@@ -56,7 +57,7 @@ void Corona::InitRaytracingShadowPass()
 
 void Corona::RaytraceShadowPass()
 {
-	if (!TLAS || !PSO_RT_SHADOW)
+	if (!TLAS || !PSO_RT_SHADOW || !UnjitteredDepthBuffers[ColorBufferWriteIndex] || !NormalBuffers[ColorBufferWriteIndex] || !GeomNormalBuffers[ColorBufferWriteIndex])
 		return;
 	renderBackend->EmitGpuCrashMarker("RaytraceShadowPass");
 	if (renderBackend && renderBackend->GetAPI() == ERenderBackendAPI::D3D12)
@@ -66,40 +67,17 @@ void Corona::RaytraceShadowPass()
 
 	renderBackend->TransitionTexture(ShadowBuffer.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
 
-	PSO_RT_SHADOW->SetNumInstances(static_cast<uint32_t>(RayTracingInstances.size()));
-
-	PSO_RT_SHADOW->BeginShaderTable();
-
-	int i = 0;
-	for (const RTInstanceDesc& instance : RayTracingInstances)
-	{
-		Mesh* mesh = instance.BottomLevelAS->MeshPtr;
-		Texture* diffuseTex = mesh->Draws[0].mat->Diffuse.get();
-
-		if (!diffuseTex)
-			diffuseTex = DefaultWhiteTex.get();
-
-		PSO_RT_SHADOW->ResetHitProgram(i);
-		PSO_RT_SHADOW->StartHitProgram("HitGroup", i);
-
-		PSO_RT_SHADOW->AddSceneGeometrySRVsToHitProgram("HitGroup", mesh->Vb.get(), mesh->Ib.get(), i);
-		PSO_RT_SHADOW->AddTextureSRVToHitProgram("HitGroup", diffuseTex, i);
-		PSO_RT_SHADOW->AddBufferSRVToHitProgram("HitGroup", InstancePropertyBuffer.get(), i);
-
-		i++;
-	}
-
-	PSO_RT_SHADOW->SetTextureUAV("global", "ShadowResult", ShadowBuffer.get());
-	PSO_RT_SHADOW->SetAccelerationStructure("global", "gRtScene", TLAS);
-	PSO_RT_SHADOW->SetTextureSRV("global", "DepthTex", DepthBuffer.get());
-	PSO_RT_SHADOW->SetTextureSRV("global", "WorldNormalTex", GeomNormalBuffer.get());
-	PSO_RT_SHADOW->SetCBVValue("global", "ViewParameter", &RTShadowViewParam);
-		PSO_RT_SHADOW->SetSampler("global", "sampleWrap", samplerWrap.get());
-
-
-	PSO_RT_SHADOW->EndShaderTable();
-
-	PSO_RT_SHADOW->Apply(GetRenderWidth(), GetRenderHeight());
+	RTPassBuilder pass(*this, PSO_RT_SHADOW);
+	pass.BeginScene()
+		.SetTextureUAV("global", "ShadowResult", ShadowBuffer.get())
+		.SetAccelerationStructure("global", "gRtScene", TLAS)
+		.SetTextureSRV("global", "DepthTex", UnjitteredDepthBuffers[ColorBufferWriteIndex].get())
+		.SetTextureSRV("global", "WorldNormalTex", NormalBuffers[ColorBufferWriteIndex].get())
+		.SetTextureSRV("global", "GeoNormalTex", GeomNormalBuffers[ColorBufferWriteIndex].get())
+		.SetCBVValue("global", "ViewParameter", &RTShadowViewParam)
+		.SetSampler("global", "sampleWrap", samplerWrap.get());
+	pass.BindSceneHitPrograms();
+	pass.Dispatch(GetRenderWidth(), GetRenderHeight());
 
 	renderBackend->TransitionTexture(ShadowBuffer.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
 }
