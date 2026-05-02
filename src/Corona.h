@@ -57,6 +57,7 @@ using namespace DirectX;
 using Microsoft::WRL::ComPtr;
 using namespace std;
 
+struct lua_State;
 
 class Corona
 {
@@ -729,6 +730,8 @@ public:
 
 	using SceneObjectHandle = uint32_t;
 	static constexpr SceneObjectHandle InvalidSceneObjectHandle = 0;
+	using ScriptSceneHandle = uint32_t;
+	static constexpr ScriptSceneHandle InvalidScriptSceneHandle = 0;
 
 	struct SceneObjectDesc
 	{
@@ -739,6 +742,15 @@ public:
 		bool bOverrideRoughnessMetallic = false;
 		bool bVisible = true;
 		bool bRayTracing = true;
+		bool bPhysicsQuery = true;
+	};
+
+	struct CpuPhysicsRaycastHit
+	{
+		SceneObjectHandle ObjectHandle = InvalidSceneObjectHandle;
+		glm::vec3 Position = glm::vec3(0.0f);
+		glm::vec3 Normal = glm::vec3(0.0f, 1.0f, 0.0f);
+		float Distance = 0.0f;
 	};
 
 private:
@@ -944,10 +956,47 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 		bool bOverrideRoughnessMetallic = false;
 		bool bVisible = true;
 		bool bRayTracing = true;
+		bool bPhysicsQuery = true;
 	};
 	vector<SceneObject> SceneObjects;
 	SceneObjectHandle NextSceneObjectHandle = 1;
 	bool bRayTracingSceneDirty = false;
+	bool bRayTracingTransformDirty = false;
+
+	struct ScriptSceneEntry
+	{
+		shared_ptr<Scene> ScenePtr;
+		std::wstring Path;
+	};
+	struct ScriptObjectState
+	{
+		ScriptSceneHandle SceneHandle = InvalidScriptSceneHandle;
+		glm::vec3 Position = glm::vec3(0.0f);
+		glm::vec3 RotationDegrees = glm::vec3(0.0f);
+		float TargetExtent = 1.0f;
+	};
+	struct LuauScriptState
+	{
+		lua_State* L = nullptr;
+		int UpdateRef = 0;
+	};
+	std::unique_ptr<LuauScriptState> ScriptState;
+	std::map<ScriptSceneHandle, ScriptSceneEntry> ScriptScenes;
+	std::map<std::wstring, ScriptSceneHandle> ScriptSceneByPath;
+	std::map<SceneObjectHandle, ScriptObjectState> ScriptObjects;
+	ScriptSceneHandle NextScriptSceneHandle = 1;
+	bool bEnableStartupLuauScript = true;
+	bool bScriptCameraControlEnabled = false;
+	std::array<bool, 256> ScriptKeyDown = {};
+	std::array<bool, 256> ScriptKeyPressed = {};
+	std::array<bool, 256> ScriptKeyReleased = {};
+	struct CpuPhysicsState;
+	struct CpuPhysicsStateDeleter
+	{
+		void operator()(CpuPhysicsState* state) const;
+	};
+	std::unique_ptr<CpuPhysicsState, CpuPhysicsStateDeleter> CpuPhysics;
+	bool bCpuPhysicsSceneDirty = true;
 
 	// time & camera
 	StepTimer m_timer;
@@ -1191,9 +1240,29 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 		const glm::vec3& rotationDegrees = glm::vec3(0.0f));
 	shared_ptr<Scene> CreateMirrorCubeScene();
 	void MarkRayTracingSceneDirty();
+	void MarkRayTracingTransformsDirty();
 	void FlushSceneObjectChanges();
+	void UpdateRayTracingInstanceTransforms();
 	void UpdateInstancePropertyBuffer();
 	void RebuildAccelerationStructures();
+	void InitCpuPhysics();
+	void ShutdownCpuPhysics();
+	void MarkCpuPhysicsSceneDirty();
+	void RebuildCpuPhysicsScene();
+	bool CpuPhysicsRaycast(
+		const glm::vec3& origin,
+		const glm::vec3& direction,
+		float maxDistance,
+		CpuPhysicsRaycastHit& hit);
+	bool CpuPhysicsSphereSweep(
+		const glm::vec3& origin,
+		float radius,
+		const glm::vec3& direction,
+		float maxDistance,
+		CpuPhysicsRaycastHit& hit);
+	glm::vec3 ResolveCameraPhysicsMovement(
+		const glm::vec3& startPosition,
+		const glm::vec3& desiredPosition);
 	void InitRaytracingShadowPass();
 	void InitRaytracingReflectionPass();
 	void InitRaytracingSimpleGIPass();
@@ -1209,6 +1278,56 @@ public:
 	bool SetSceneObjectTransform(SceneObjectHandle handle, const glm::mat4x4& transform);
 	bool SetSceneObjectVisibility(SceneObjectHandle handle, bool visible);
 	bool SetSceneObjectRayTracingEnabled(SceneObjectHandle handle, bool enabled);
+	bool CpuPhysicsRaycastForScript(
+		const glm::vec3& origin,
+		const glm::vec3& direction,
+		float maxDistance,
+		CpuPhysicsRaycastHit& hit);
+	ScriptSceneHandle LoadSceneForScript(const std::wstring& assetPath);
+	SceneObjectHandle SpawnSceneObjectForScript(
+		ScriptSceneHandle sceneHandle,
+		const glm::vec3& position,
+		const glm::vec3& rotationDegrees,
+		float targetExtent,
+		float roughness,
+		float metallic,
+		bool bOverrideRoughnessMetallic,
+		bool bVisible,
+		bool bRayTracing,
+		bool bPhysicsQuery);
+	bool SetSceneObjectTransformForScript(
+		SceneObjectHandle handle,
+		const glm::vec3& position,
+		const glm::vec3& rotationDegrees,
+		float targetExtent);
+	bool GetSceneObjectTransformForScript(
+		SceneObjectHandle handle,
+		glm::vec3& position,
+		glm::vec3& rotationDegrees,
+		float& targetExtent) const;
+	bool SetScriptCameraControlForScript(bool enabled);
+	bool SetCameraForScript(
+		const glm::vec3& position,
+		const glm::vec3& lookAt,
+		const glm::vec3& upDirection);
+	void GetCameraForScript(
+		glm::vec3& position,
+		glm::vec3& forward,
+		glm::vec3& right,
+		glm::vec3& up,
+		float& yawDegrees,
+		float& pitchDegrees) const;
+	void RecordScriptKeyDown(UINT8 key);
+	void RecordScriptKeyUp(UINT8 key);
+	bool IsScriptKeyDownForScript(UINT8 key) const;
+	bool WasScriptKeyPressedForScript(UINT8 key) const;
+	bool WasScriptKeyReleasedForScript(UINT8 key) const;
+	void ClearScriptInputFrameState();
+	void InitLuauScripting();
+	void RunStartupLuauScript();
+	void ReloadLuauScripting();
+	void UpdateLuauScripting(float dt);
+	void ShutdownLuauScripting();
 	
 
 	void LoadPipeline();

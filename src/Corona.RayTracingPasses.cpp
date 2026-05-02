@@ -83,10 +83,12 @@ Corona::SceneObjectHandle Corona::AddSceneObject(const SceneObjectDesc& desc)
 	object.bOverrideRoughnessMetallic = desc.bOverrideRoughnessMetallic;
 	object.bVisible = desc.bVisible;
 	object.bRayTracing = desc.bRayTracing;
+	object.bPhysicsQuery = desc.bPhysicsQuery;
 	object.Transform = desc.Transform;
 	SceneObjects.push_back(object);
 
 	MarkRayTracingSceneDirty();
+	MarkCpuPhysicsSceneDirty();
 	return object.Handle;
 }
 
@@ -111,6 +113,7 @@ bool Corona::RemoveSceneObject(SceneObjectHandle handle)
 		return false;
 
 	SceneObjects.erase(it);
+	ScriptObjects.erase(handle);
 	if (SponzaObject == handle)
 		SponzaObject = InvalidSceneObjectHandle;
 	if (BuddhaObject == handle)
@@ -122,6 +125,7 @@ bool Corona::RemoveSceneObject(SceneObjectHandle handle)
 	if (MirrorCubeObject == handle)
 		MirrorCubeObject = InvalidSceneObjectHandle;
 	MarkRayTracingSceneDirty();
+	MarkCpuPhysicsSceneDirty();
 	return true;
 }
 
@@ -135,7 +139,10 @@ bool Corona::SetSceneObjectTransform(SceneObjectHandle handle, const glm::mat4x4
 		return false;
 
 	it->Transform = transform;
-	MarkRayTracingSceneDirty();
+	if (it->bVisible && it->bRayTracing)
+		MarkRayTracingTransformsDirty();
+	if (it->bVisible && it->bPhysicsQuery)
+		MarkCpuPhysicsSceneDirty();
 	return true;
 }
 
@@ -152,6 +159,8 @@ bool Corona::SetSceneObjectVisibility(SceneObjectHandle handle, bool visible)
 	{
 		it->bVisible = visible;
 		MarkRayTracingSceneDirty();
+		if (it->bPhysicsQuery)
+			MarkCpuPhysicsSceneDirty();
 	}
 	return true;
 }
@@ -176,15 +185,75 @@ bool Corona::SetSceneObjectRayTracingEnabled(SceneObjectHandle handle, bool enab
 void Corona::MarkRayTracingSceneDirty()
 {
 	bRayTracingSceneDirty = true;
+	bRayTracingTransformDirty = false;
+	PrevPathTracingViewMat = glm::mat4x4(0.0f);
+}
+
+void Corona::MarkRayTracingTransformsDirty()
+{
+	if (!bRayTracingSceneDirty)
+		bRayTracingTransformDirty = true;
 	PrevPathTracingViewMat = glm::mat4x4(0.0f);
 }
 
 void Corona::FlushSceneObjectChanges()
 {
 	if (!bRayTracingSceneDirty || !renderBackend)
+	{
+		if (bRayTracingTransformDirty && renderBackend)
+			UpdateRayTracingInstanceTransforms();
 		return;
+	}
 
 	RebuildAccelerationStructures();
+}
+
+void Corona::UpdateRayTracingInstanceTransforms()
+{
+	if (!renderBackend)
+		return;
+
+	if (!TLAS)
+	{
+		bRayTracingSceneDirty = true;
+		bRayTracingTransformDirty = false;
+		RebuildAccelerationStructures();
+		return;
+	}
+
+	vector<RTInstanceDesc> updatedInstances;
+	size_t meshCount = 0;
+	for (const SceneObject& object : SceneObjects)
+	{
+		if (object.bVisible && object.bRayTracing && object.ScenePtr)
+			meshCount += object.ScenePtr->meshes.size();
+	}
+	updatedInstances.reserve(meshCount);
+	for (const SceneObject& object : SceneObjects)
+	{
+		if (object.bVisible && object.bRayTracing)
+			AddMeshesToRayTracingInstances(updatedInstances, RayTracingBLASCache, object.ScenePtr, object.Transform);
+	}
+
+	if (updatedInstances.size() != RayTracingInstances.size())
+	{
+		bRayTracingSceneDirty = true;
+		bRayTracingTransformDirty = false;
+		RebuildAccelerationStructures();
+		return;
+	}
+
+	RayTracingInstances = std::move(updatedInstances);
+	if (!renderBackend->UpdateTLAS(TLAS, RayTracingInstances))
+	{
+		bRayTracingSceneDirty = true;
+		bRayTracingTransformDirty = false;
+		RebuildAccelerationStructures();
+		return;
+	}
+
+	UpdateInstancePropertyBuffer();
+	bRayTracingTransformDirty = false;
 }
 
 void Corona::UpdateInstancePropertyBuffer()

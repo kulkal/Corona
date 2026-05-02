@@ -539,6 +539,8 @@ public:
 
 	shared_ptr<IndexBuffer> Ib;
 	shared_ptr<VertexBuffer> Vb;
+	vector<glm::vec3> CpuPositions;
+	vector<UINT32> CpuIndices;
 	vector<shared_ptr<Texture>> Textures;
 
 	shared_ptr<Material> Mat;

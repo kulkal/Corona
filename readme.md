@@ -49,7 +49,7 @@ The Vulkan backend is designed to share the same HLSL shader sources as much as 
 ## Render Modes
 Two main render modes are available:
 
-* `hybrid`: GBuffer rasterization plus ray-traced shadow, reflection, diffuse GI, denoising, lighting, tone mapping, and optional TAA.
+* `hybrid`: GBuffer rasterization plus ray-traced shadow, contact AO, sky lighting, reflection, diffuse GI, denoising, lighting, tone mapping, and optional TAA.
 * `pathtracing`: full-screen path tracing mode with accumulation, useful as a simpler reference path and for backend validation.
 
 `--render-mode pt`, `--render-mode pathtracing`, and `--render-mode path-tracing` select the path tracing mode. Frame timing logs are written to `logs/fps_perf.log` and include CPU frame timing plus per-pass GPU timings for backend comparisons.
@@ -81,9 +81,14 @@ The default spatial hash path stores diffuse GI in a sparse surface cache:
 
 * The GBuffer depth and normals reconstruct visible surface cells.
 * Active cells trace a small set of cosine-weighted diffuse rays.
-* A sky miss evaluates the procedural sky color.
+* Direct sky diffuse is handled by a separate ray-traced sky lighting pass, so the GI cache stays focused on surface bounce energy.
 * A surface hit evaluates direct-light visibility at the hit point and writes Lambert diffuse irradiance into RGB SH.
 * Pixels query the cached SH with the pixel normal, then continue through temporal and spatial filtering.
+
+### Contact AO And Sky Lighting
+The hybrid lighting path also includes a full-resolution RTAO pass and a dedicated ray-traced sky lighting pass. RTAO fills high-frequency contact occlusion that the lower-frequency diffuse GI cache can miss, then applies it gently to surface-bounce diffuse GI instead of multiplying the whole final image. Sky lighting traces visibility toward an up-guided sky hemisphere, denoises the raw result, and adds the visible sky diffuse term separately in `LightingPS.hlsl`.
+
+Useful controls include `--rtao`, `--no-rtao`, `--rtao-radius`, `--rtao-samples`, `--sky-lighting`, `--no-sky-lighting`, and `--sky-lighting-strength`. A fuller implementation note is available in [`RTAO_SKY_LIGHTING_IMPLEMENTATION.md`](./RTAO_SKY_LIGHTING_IMPLEMENTATION.md).
 
 ### Spatial Hash Diffuse GI
 The spatial hash GI mode is inspired by NVIDIA SHaRC, but the current implementation is intentionally small and renderer-local. It does not store radiance in a dense voxel texture. Instead, it uses a sparse hash table of visible surface cells backed by `StructuredBuffer` resources:
@@ -130,7 +135,7 @@ DLSS is integrated through NVIDIA Streamline on the DX12 backend:
 
 DLSS SR/RR currently belongs to the DX12/Streamline path. Other backends or unavailable Streamline features fall back to the non-DLSS AA path selected by the runtime.
 
-The important practical result is that the GI shader can stay intentionally simple while the final image becomes much more stable. The real-time diffuse GI pass is only a 1spp estimator: one cosine-weighted ray per pixel, a sky miss path, and one direct-light visibility query at the secondary hit. By itself, that raw GI signal is visibly noisy and far from converged.
+The important practical result is that the GI shader can stay intentionally simple while the final image becomes much more stable. The real-time diffuse GI pass is only a low-sample estimator focused on surface bounce energy, with sky diffuse now handled by the separate sky lighting pass. By itself, that raw GI signal is visibly noisy and far from converged.
 
 DLSS RR changes the quality tradeoff. It does not increase the GI sample count, and it does not make the raw GI buffer physically converged. Instead, it reconstructs the final lighting buffer using the noisy RT result plus strong scene context: depth, motion vectors, normals, roughness, albedo, and specular albedo. In practice, this can hide almost all visible stochastic GI noise in the resolved image while preserving geometric and material edges much better than a simple blur. This is the main reason the hybrid path can use a very small GI algorithm and still look close to a high-sample result after RR/SR.
 
@@ -175,6 +180,10 @@ Supported options:
 | `--render-mode`, `-render` | `hybrid`, `pt`, `pathtracing`, `path-tracing`, `path_tracing` | Selects hybrid rendering or full-screen path tracing. |
 | `--aa`, `-aa` | `off`, `taa`, `dlss`, `dlss-sr`, `sr`, `dlss-rr`, `rr` | Sets the startup AA mode. DLSS modes fall back to TAA when Streamline/DLSS is unavailable. |
 | `--ray-noise`, `--noise`, `-noise`, `-n` | `r2`, `blue`, `stable` | Selects the hybrid RT GI/reflection sampling noise. `r2` is the default for calmer DLSS RR convergence. |
+| `--rtao`, `--no-rtao` | none | Enables or disables the hybrid ray-traced contact AO pass. |
+| `--rtao-radius`, `--rtao-samples`, `--rtao-power`, `--rtao-bias` | numeric | Tunes the RTAO ray distance, sample count, contrast, and normal bias. |
+| `--sky-lighting`, `--no-sky-lighting` | none | Enables or disables the dedicated ray-traced sky diffuse lighting pass. |
+| `--sky-lighting-strength` | `0.0`-`1.0` | Scales the separated sky diffuse term in the lighting pass. |
 | `--gi-mode`, `-gi` | `simple`, `spatial-hash`, `hash`, `sharc`, `screen-probe`, `probe` | Selects the hybrid diffuse GI method. |
 | `--spatial-hash-cell` | `4.0`-`256.0` | World-space cell size for the spatial hash GI cache. Default is `48.0`. |
 | `--spatial-hash-rays` | `1`-`8` | Diffuse rays traced per active spatial hash cell. Default is `2`. |

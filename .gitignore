@@ -18,6 +18,7 @@ sl.log
 src/camera_state.cfg
 src/imgui.ini
 src/sl.log
+src/external/_downloads/
 
 # vs filters
 *.filters

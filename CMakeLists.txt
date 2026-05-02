@@ -38,6 +38,12 @@ file(GLOB CORONA_SHADER_FILES CONFIGURE_DEPENDS
 set_source_files_properties(${CORONA_SHADER_FILES} PROPERTIES HEADER_FILE_ONLY TRUE)
 source_group(TREE "${CORONA_SRC_DIR}/Shaders" PREFIX "Shaders" FILES ${CORONA_SHADER_FILES})
 
+file(GLOB CORONA_SCRIPT_FILES CONFIGURE_DEPENDS
+    "${CORONA_SRC_DIR}/scripts/*.luau"
+)
+set_source_files_properties(${CORONA_SCRIPT_FILES} PROPERTIES HEADER_FILE_ONLY TRUE)
+source_group(TREE "${CORONA_SRC_DIR}/scripts" PREFIX "Scripts" FILES ${CORONA_SCRIPT_FILES})
+
 list(APPEND CORONA_SOURCES
     "${CORONA_SRC_DIR}/VulkanBackend.cpp"
 )
@@ -79,18 +85,45 @@ set(CORONA_AFTERMATH_LIB "${CORONA_SRC_DIR}/external/GFSDK_Aftermath/lib/x64/GFS
 set(CORONA_AFTERMATH_DLL "${CORONA_SRC_DIR}/external/GFSDK_Aftermath/lib/x64/GFSDK_Aftermath_Lib.x64.dll")
 set(CORONA_WINPIX_LIB "${CORONA_WINPIX_ROOT}/bin/x64/WinPixEventRuntime.lib")
 set(CORONA_WINPIX_DLL "${CORONA_WINPIX_ROOT}/bin/x64/WinPixEventRuntime.dll")
-set(CORONA_STREAMLINE_SDK_ROOT "H:/dev/streamline_test/streamline-sdk" CACHE PATH "Path to the local NVIDIA Streamline SDK")
+set(CORONA_PHYSX_ROOT "${CORONA_SRC_DIR}/external/physx/physx/install/vc17win64-cpu-only/PhysX" CACHE PATH "Path to the local PhysX SDK install")
+set(CORONA_PHYSX_LIB_DIR "${CORONA_PHYSX_ROOT}/bin/win.x86_64.vc143.mt/release")
+set(CORONA_PHYSX_LIBS
+    "${CORONA_PHYSX_LIB_DIR}/PhysX_64.lib"
+    "${CORONA_PHYSX_LIB_DIR}/PhysXFoundation_64.lib"
+    "${CORONA_PHYSX_LIB_DIR}/PhysXCommon_64.lib"
+    "${CORONA_PHYSX_LIB_DIR}/PhysXCooking_64.lib"
+)
+set(CORONA_PHYSX_DLLS
+    "${CORONA_PHYSX_LIB_DIR}/PhysX_64.dll"
+    "${CORONA_PHYSX_LIB_DIR}/PhysXFoundation_64.dll"
+    "${CORONA_PHYSX_LIB_DIR}/PhysXCommon_64.dll"
+    "${CORONA_PHYSX_LIB_DIR}/PhysXCooking_64.dll"
+    "${CORONA_PHYSX_LIB_DIR}/PVDRuntime_64.dll"
+)
+set(CORONA_REPO_STREAMLINE_SDK_ROOT "${CORONA_SRC_DIR}/external/streamline-sdk")
+set(CORONA_STREAMLINE_SDK_ROOT "${CORONA_REPO_STREAMLINE_SDK_ROOT}" CACHE PATH "Path to the NVIDIA Streamline SDK")
+if(CORONA_STREAMLINE_SDK_ROOT MATCHES "^[Hh]:[/\\\\]dev[/\\\\]streamline_test[/\\\\]streamline-sdk$")
+    set(CORONA_STREAMLINE_SDK_ROOT "${CORONA_REPO_STREAMLINE_SDK_ROOT}" CACHE PATH "Path to the NVIDIA Streamline SDK" FORCE)
+endif()
 set(CORONA_STREAMLINE_LIB "")
 option(CORONA_USE_AFTERMATH "Enable NVIDIA Aftermath markers for D3D12 GPU crash diagnostics" ON)
-if(EXISTS "${CORONA_STREAMLINE_SDK_ROOT}/include/sl.h")
+if(EXISTS "${CORONA_STREAMLINE_SDK_ROOT}/include/sl.h" AND EXISTS "${CORONA_STREAMLINE_SDK_ROOT}/lib/x64/sl.interposer.lib")
     set(CORONA_STREAMLINE_LIB "${CORONA_STREAMLINE_SDK_ROOT}/lib/x64/sl.interposer.lib")
 endif()
+
+set(LUAU_BUILD_CLI OFF CACHE BOOL "" FORCE)
+set(LUAU_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(LUAU_BUILD_WEB OFF CACHE BOOL "" FORCE)
+set(LUAU_EXTERN_C ON CACHE BOOL "" FORCE)
+add_subdirectory("${CORONA_SRC_DIR}/external/luau" "${CMAKE_CURRENT_BINARY_DIR}/luau" EXCLUDE_FROM_ALL)
 
 foreach(required_path IN ITEMS
     "${CORONA_ASSIMP_LIB}"
     "${CORONA_DXCOMPILER_LIB}"
     "${CORONA_AFTERMATH_LIB}"
     "${CORONA_WINPIX_LIB}"
+    ${CORONA_PHYSX_LIBS}
+    ${CORONA_PHYSX_DLLS}
 )
     if(NOT EXISTS "${required_path}")
         message(FATAL_ERROR "Required dependency was not found: ${required_path}")
@@ -104,6 +137,7 @@ add_executable(Corona WIN32
     ${CORONA_IMGUI_SOURCES}
     ${CORONA_BACKEND_SOURCES}
     ${CORONA_SHADER_FILES}
+    ${CORONA_SCRIPT_FILES}
 )
 
 target_include_directories(Corona PRIVATE
@@ -113,6 +147,7 @@ target_include_directories(Corona PRIVATE
     "${CORONA_SRC_DIR}/external/imgui"
     "${CORONA_SRC_DIR}/external/imgui/backends"
     "${CORONA_SRC_DIR}/external/dxc/inc"
+    "${CORONA_PHYSX_ROOT}/include"
     "${CORONA_WINPIX_ROOT}/Include/WinPixEventRuntime"
     "${CORONA_SRC_DIR}"
 )
@@ -138,6 +173,9 @@ target_link_libraries(Corona PRIVATE
     "${CORONA_DXCOMPILER_LIB}"
     "${CORONA_AFTERMATH_LIB}"
     "${CORONA_WINPIX_LIB}"
+    ${CORONA_PHYSX_LIBS}
+    Luau.Compiler
+    Luau.VM
 )
 if(CORONA_STREAMLINE_LIB)
     target_link_libraries(Corona PRIVATE "${CORONA_STREAMLINE_LIB}")
@@ -302,6 +340,14 @@ add_custom_command(TARGET Corona POST_BUILD
         "${CORONA_WINPIX_DLL}"
         "${CORONA_OUT_DIR}/WinPixEventRuntime.dll"
 )
+foreach(CORONA_PHYSX_DLL IN LISTS CORONA_PHYSX_DLLS)
+    get_filename_component(CORONA_PHYSX_DLL_NAME "${CORONA_PHYSX_DLL}" NAME)
+    add_custom_command(TARGET Corona POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${CORONA_PHYSX_DLL}"
+            "${CORONA_OUT_DIR}/${CORONA_PHYSX_DLL_NAME}"
+    )
+endforeach()
 if(CORONA_STREAMLINE_LIB)
     foreach(CORONA_STREAMLINE_DLL IN ITEMS sl.interposer.dll sl.common.dll sl.dlss.dll nvngx_dlss.dll sl.dlss_d.dll nvngx_dlssd.dll)
         if(EXISTS "${CORONA_STREAMLINE_SDK_ROOT}/bin/x64/${CORONA_STREAMLINE_DLL}")

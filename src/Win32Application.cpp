@@ -31,6 +31,7 @@ namespace
 }
 
 HWND Win32Application::m_hwnd = nullptr;
+bool Win32Application::m_appInitialized = false;
 
 int Win32Application::Run(Corona* app, HINSTANCE hInstance, int nCmdShow)
 {
@@ -55,6 +56,7 @@ int Win32Application::Run(Corona* app, HINSTANCE hInstance, int nCmdShow)
 	app->ParseCommandLineArgs(argv, argc);
 	LocalFree(argv);
 	AppendStartupTrace(L"[Run] after ParseCommandLineArgs");
+	m_appInitialized = false;
 
 	// Initialize the window class.
 	WNDCLASSEXW windowClass = { 0 };
@@ -84,11 +86,24 @@ int Win32Application::Run(Corona* app, HINSTANCE hInstance, int nCmdShow)
 		app);
 	AppendStartupTrace(m_hwnd ? L"[Run] after CreateWindowW ok" : L"[Run] after CreateWindowW failed");
 
+	const int effectiveCmdShow = (!bCommandLineAutoDump && nCmdShow == SW_HIDE) ? SW_SHOWNORMAL : nCmdShow;
+	if (!bCommandLineAutoDump && effectiveCmdShow != SW_HIDE && m_hwnd)
+	{
+		ShowWindow(m_hwnd, effectiveCmdShow);
+		SetWindowPos(m_hwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+		SetForegroundWindow(m_hwnd);
+		UpdateWindow(m_hwnd);
+		AppendStartupTrace(
+			L"[Run] pre-init ShowWindow requested=" + std::to_wstring(nCmdShow) +
+			L", effective=" + std::to_wstring(effectiveCmdShow) +
+			L", visible=" + std::to_wstring(IsWindowVisible(m_hwnd) ? 1 : 0));
+	}
+
 	AppendStartupTrace(L"[Run] before OnInit");
 	app->OnInit();
+	m_appInitialized = true;
 	AppendStartupTrace(L"[Run] after OnInit");
 
-	const int effectiveCmdShow = (!bCommandLineAutoDump && nCmdShow == SW_HIDE) ? SW_SHOWNORMAL : nCmdShow;
 	ShowWindow(m_hwnd, effectiveCmdShow);
 	if (!bCommandLineAutoDump && effectiveCmdShow != SW_HIDE)
 	{
@@ -183,10 +198,16 @@ LRESULT CALLBACK Win32Application::WindowProc(HWND hWnd, UINT message, WPARAM wP
 		return 0;
 
 	case WM_PAINT:
-		if (app)
+		if (app && m_appInitialized)
 		{
 			app->OnUpdate();
 			app->OnRender();
+		}
+		else
+		{
+			PAINTSTRUCT paint;
+			BeginPaint(hWnd, &paint);
+			EndPaint(hWnd, &paint);
 		}
 		return 0;
 

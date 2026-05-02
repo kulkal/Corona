@@ -691,7 +691,8 @@ Corona::Corona(UINT width, UINT height, std::wstring name) :
 
 Corona::~Corona()
 {
-
+	ShutdownLuauScripting();
+	ShutdownCpuPhysics();
 }
 
 std::wstring Corona::GetAssetFullPath(LPCWSTR assetName) const
@@ -4678,6 +4679,10 @@ void Corona::OnInit()
 	AppendCpuRuntimeTrace(L"[OnInit] before LoadAssets");
 	LoadAssets();
 	AppendCpuRuntimeTrace(L"[OnInit] after LoadAssets");
+	InitCpuPhysics();
+	InitLuauScripting();
+	RunStartupLuauScript();
+	AppendCpuRuntimeTrace(L"[OnInit] after RunStartupLuauScript");
 	bPendingTemporalHistoryClear = true;
 	InitializeAutoAADump();
 	AppendCpuRuntimeTrace(
@@ -4988,6 +4993,10 @@ shared_ptr<Scene> Corona::CreateMirrorCubeScene()
 	mesh->Mat = material;
 	mesh->Vb = renderBackend->CreateVertexBuffer(sizeof(Vertex) * vertices.size(), sizeof(Vertex), vertices.data());
 	mesh->Ib = renderBackend->CreateIndexBuffer(mesh->IndexFormat, sizeof(UINT32) * indices.size(), indices.data());
+	mesh->CpuPositions.reserve(vertices.size());
+	for (const Vertex& vertex : vertices)
+		mesh->CpuPositions.push_back(vertex.Position);
+	mesh->CpuIndices = indices;
 
 	Mesh::DrawCall drawCall = {};
 	drawCall.IndexStart = 0;
@@ -5478,11 +5487,11 @@ void Corona::LoadAssets()
 			ShaderBallCenterRotationDegrees);
 	}
 
-	if (!Pistol)
+	if (!bEnableStartupLuauScript && !Pistol)
 	{
 		Pistol = LoadModel(WideToUtf8(GetAssetFullPath(L"assets\\pistol\\pistol.obj")));
 	}
-	if (Pistol && PistolObject == InvalidSceneObjectHandle)
+	if (!bEnableStartupLuauScript && Pistol && PistolObject == InvalidSceneObjectHandle)
 	{
 		PistolObject = AddCenteredSceneObject(
 			Pistol,
@@ -5564,6 +5573,7 @@ void Corona::LoadAssets()
 			AppendCpuRuntimeTrace(L"[LoadAssets] after InitPathTracingPass");
 		}
 	}
+	AppendCpuRuntimeTrace(L"[LoadAssets] return");
 
 }
 
@@ -5703,6 +5713,10 @@ shared_ptr<Scene> Corona::LoadBinaryMeshModel(const std::wstring& binaryFileName
 		mesh->IndexFormat = DXGI_FORMAT_R32_UINT;
 		mesh->Vb = renderBackend->CreateVertexBuffer(static_cast<UINT>(vertices.size() * sizeof(CoronaMeshDiskVertex)), sizeof(CoronaMeshDiskVertex), vertices.data());
 		mesh->Ib = renderBackend->CreateIndexBuffer(mesh->IndexFormat, static_cast<UINT>(indices.size() * sizeof(UINT32)), indices.data());
+		mesh->CpuPositions.reserve(vertices.size());
+		for (const CoronaMeshDiskVertex& vertex : vertices)
+			mesh->CpuPositions.push_back(vertex.Position);
+		mesh->CpuIndices = indices;
 
 		const uint32_t safeMaterialIndex = materialIndex < scene->Materials.size() ? materialIndex : 0;
 		Mesh::DrawCall dc = {};
@@ -5991,6 +6005,10 @@ shared_ptr<Scene> Corona::LoadModel(string fileName)
 		mesh->IndexFormat = DXGI_FORMAT_R32_UINT;
 
 		mesh->Ib = renderBackend->CreateIndexBuffer(mesh->IndexFormat, sizeof(UINT32)*3*numTriangles, indices.data());
+		mesh->CpuPositions.reserve(vertices.size());
+		for (const Vertex& vertex : vertices)
+			mesh->CpuPositions.push_back(vertex.Position);
+		mesh->CpuIndices = indices;
 
 
 		Mesh::DrawCall dc;
@@ -6159,6 +6177,7 @@ void Corona::OnUpdate()
 	}
 
 	m_timer.Tick(NULL);
+	const float elapsedSeconds = static_cast<float>(m_timer.GetElapsedSeconds());
 
 	if (m_frameCounter == 100)
 	{
@@ -6171,9 +6190,19 @@ void Corona::OnUpdate()
 
 	m_frameCounter++;
 
-	m_camera.SetTurnSpeed(m_turnSpeed);
-	m_camera.Update(static_cast<float>(m_timer.GetElapsedSeconds()));
-	UpdateCameraPathState();
+	const glm::vec3 cameraPositionBeforeNativeUpdate = m_camera.m_position;
+	if (!bScriptCameraControlEnabled)
+	{
+		m_camera.SetTurnSpeed(m_turnSpeed);
+		m_camera.Update(elapsedSeconds);
+		UpdateCameraPathState();
+		m_camera.m_position = ResolveCameraPhysicsMovement(cameraPositionBeforeNativeUpdate, m_camera.m_position);
+	}
+	const glm::vec3 cameraPositionBeforeScriptUpdate = m_camera.m_position;
+	UpdateLuauScripting(elapsedSeconds);
+	if (bScriptCameraControlEnabled)
+		m_camera.m_position = ResolveCameraPhysicsMovement(cameraPositionBeforeScriptUpdate, m_camera.m_position);
+	ClearScriptInputFrameState();
 
 	const float effectiveNear = Near;
 	const float effectiveFar = Far;
@@ -7848,6 +7877,8 @@ void Corona::OnDestroy()
 
 void Corona::OnKeyDown(UINT8 key)
 {
+	RecordScriptKeyDown(key);
+
 	switch (key)
 	{
 	/*case 'M':
@@ -7891,31 +7922,41 @@ void Corona::OnKeyDown(UINT8 key)
 	case 'I':
 		bShowImgui = !bShowImgui;
 		break;
+	case VK_F5:
+		ReloadLuauScripting();
+		break;
 	default:
 		break;
 	}
 
-	m_camera.OnKeyDown(key);
+	if (!bScriptCameraControlEnabled)
+		m_camera.OnKeyDown(key);
 }
 
 void Corona::OnKeyUp(UINT8 key)
 {
-	m_camera.OnKeyUp(key);
+	RecordScriptKeyUp(key);
+
+	if (!bScriptCameraControlEnabled)
+		m_camera.OnKeyUp(key);
 }
 
 void Corona::OnRButtonDown(int x, int y)
 {
-	m_camera.OnMouseDown(x, y);
+	if (!bScriptCameraControlEnabled)
+		m_camera.OnMouseDown(x, y);
 }
 
 void Corona::OnRButtonUp()
 {
-	m_camera.OnMouseUp();
+	if (!bScriptCameraControlEnabled)
+		m_camera.OnMouseUp();
 }
 
 void Corona::OnMouseMove(int x, int y)
 {
-	m_camera.OnMouseMove(x, y);
+	if (!bScriptCameraControlEnabled)
+		m_camera.OnMouseMove(x, y);
 }
 
 struct ParallelDrawTaskSet : enki::ITaskSet
