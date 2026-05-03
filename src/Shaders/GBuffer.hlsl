@@ -26,6 +26,7 @@ CBUFFER_BINDING_BEGIN(GBufferConstantBuffer, 0)
     float4x4 UnjitteredViewProjMat;
     float4x4 PrevUnjitteredViewProjMat;
     float4 ViewDir;
+    float4 BaseColorFactor;
     float2 RTSize;
     float2 RougnessMetalic;
     uint bOverrideRougnessMetallic;
@@ -135,7 +136,7 @@ PS_OUTPUT PSMain(PSInput input)
 
     velocity.xy /= RTSize.xy;
 
-    float4 Albedo = AlbedoTex.Sample(sampleWrap, input.uv);
+    float4 Albedo = AlbedoTex.Sample(sampleWrap, input.uv) * BaseColorFactor;
     float Roughness = RoughnessTex.Sample(sampleWrap, input.uv).x;
     float Metallic = MetallicTex.Sample(sampleWrap, input.uv).x;
 

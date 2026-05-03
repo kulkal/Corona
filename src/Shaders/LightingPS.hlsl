@@ -33,10 +33,19 @@ Texture2D SkyLightingTex : register(t15);
 
 SamplerState sampleWrap : register(s0);
 
+#define MAX_POINT_LIGHTS 8
+
+struct PointLightParam
+{
+    float4 PositionAndRadius;
+    float4 ColorAndIntensity;
+};
+
 cbuffer LightingParam : register(b0)
 {
     float4x4 ViewMatrix;
     float4x4 InvViewMatrix;
+    float4x4 InvProjMatrix;
     float4 LightDirAndIntensity;
     float2 RTSize;
     float TAABlendFactor;
@@ -55,6 +64,9 @@ cbuffer LightingParam : register(b0)
     float SurfaceBounceSaturation;
     float SkyLightingStrength;
     uint LightingOutputMode;
+    PointLightParam PointLights[MAX_POINT_LIGHTS];
+    uint PointLightCount;
+    float3 PointLightPadding;
 };
 
 struct VSInput
@@ -110,6 +122,14 @@ float3 ComputeSurfaceToViewDirection(float2 screenUV)
     return -worldRay;
 }
 
+float3 ReconstructWorldPosition(float2 screenUV, float deviceDepth)
+{
+    float2 screenPosition = screenUV * 2.0f - 1.0f;
+    screenPosition.y = -screenPosition.y;
+    float3 viewPosition = GetViewPosition(deviceDepth, screenPosition, InvProjMatrix);
+    return mul(float4(viewPosition, 1.0f), InvViewMatrix).xyz;
+}
+
 float4 PSMain(PSInput input) : SV_TARGET
 {
     float LowFreqWeight = 0.25f;
@@ -118,8 +138,8 @@ float4 PSMain(PSInput input) : SV_TARGET
     float3 clrMax = -99999999.0f;
     float totalWeight = 0.0f;
 
-    float2 screenUV = input.uv;
     input.uv.y = 1 - input.uv.y;
+    float2 screenUV = input.uv;
     float2 PixelPos = input.uv * RTSize;
 
 
@@ -127,6 +147,7 @@ float4 PSMain(PSInput input) : SV_TARGET
     float3 WorldNormal = normalize(SanitizeFloat3(NormalTex[PixelPos].xyz));
     float3 Shadow = saturate(SanitizeFloat3(ShadowTex[PixelPos].xyz));
     float3 DirectVisibility = Shadow;
+    float DeviceDepth = DepthTex[PixelPos].x;
 
     float2 Velocity = VelocityTex[PixelPos];
 
@@ -138,7 +159,7 @@ float4 PSMain(PSInput input) : SV_TARGET
     float Metallic = saturate(RoughnessMetallic.y);
     float3 F0 = lerp(0.04f.xxx, Albedo.xyz, Metallic);
 	
-    float3 DiffuseLighting = bEnableDirectDiffuse ? (NdotL * LightIntensity * LightColor * Albedo * (1.0f - Metallic) * DirectVisibility) : float3(0, 0, 0);
+    float3 DirectionalDiffuse = bEnableDirectDiffuse ? (NdotL * LightIntensity * LightColor * Albedo * (1.0f - Metallic) * DirectVisibility) : float3(0, 0, 0);
 
     float AmbientOcclusion = bEnableRTAO != 0 ? saturate(SanitizeFloat3(AmbientOcclusionTex[PixelPos].xyz).x) : 1.0f;
     float ContactAO = lerp(1.0f, max(AmbientOcclusion, saturate(RTAOIndirectFloor)), saturate(RTAOIndirectStrength));
@@ -159,9 +180,42 @@ float4 PSMain(PSInput input) : SV_TARGET
     IndirectSpecular = bEnableSpecularGI ? SanitizeFloat3(SpecularGITex[PixelPos].xyz * SpecularColor) : float3(0, 0, 0);
 
 
-    float3 DirectSpecular = bEnableDirectSpecular ? (EvaluateGGXSpecularBRDF(WorldNormal, V, LightDir, Roughness, F0) * NdotL * LightIntensity * LightColor * DirectVisibility) : float3(0, 0, 0);
+    float3 DirectionalSpecular = bEnableDirectSpecular ? (EvaluateGGXSpecularBRDF(WorldNormal, V, LightDir, Roughness, F0) * NdotL * LightIntensity * LightColor * DirectVisibility) : float3(0, 0, 0);
 
-    DiffuseLighting = max(DiffuseLighting , 0);
+    float3 PointDiffuse = 0.0f.xxx;
+    float3 PointSpecular = 0.0f.xxx;
+    if (PointLightCount > 0 && DeviceDepth < 0.999999f)
+    {
+        float3 WorldPosition = ReconstructWorldPosition(screenUV, DeviceDepth);
+        uint activePointLightCount = min(PointLightCount, MAX_POINT_LIGHTS);
+        [loop]
+        for (uint lightIndex = 0; lightIndex < activePointLightCount; ++lightIndex)
+        {
+            float3 pointPosition = PointLights[lightIndex].PositionAndRadius.xyz;
+            float pointRadius = max(PointLights[lightIndex].PositionAndRadius.w, 0.01f);
+            float3 pointColor = max(PointLights[lightIndex].ColorAndIntensity.xyz, 0.0f.xxx);
+            float pointIntensity = max(PointLights[lightIndex].ColorAndIntensity.w, 0.0f);
+
+            float3 toLight = pointPosition - WorldPosition;
+            float distanceSq = max(dot(toLight, toLight), 1.0e-4f);
+            float distanceToLight = sqrt(distanceSq);
+            float3 pointLightDir = toLight / distanceToLight;
+            float rangeAttenuation = saturate(1.0f - distanceToLight / pointRadius);
+            rangeAttenuation *= rangeAttenuation;
+            float inverseSquareAttenuation = 1.0f / max(1.0f, distanceSq * 0.0001f);
+            float attenuation = rangeAttenuation * inverseSquareAttenuation;
+            float pointNdotL = saturate(dot(pointLightDir, WorldNormal));
+            float3 pointRadiance = pointColor * pointIntensity * attenuation;
+
+            if (bEnableDirectDiffuse)
+                PointDiffuse += pointNdotL * pointRadiance * Albedo * (1.0f - Metallic);
+            if (bEnableDirectSpecular)
+                PointSpecular += EvaluateGGXSpecularBRDF(WorldNormal, V, pointLightDir, Roughness, F0) * pointNdotL * pointRadiance;
+        }
+    }
+
+    float3 DiffuseLighting = max(DirectionalDiffuse + PointDiffuse, 0);
+    float3 DirectSpecular = max(DirectionalSpecular + PointSpecular, 0);
 
     float3 DirectLighting = max(DiffuseLighting + DirectSpecular, 0);
     if (LightingOutputMode == 1)

@@ -27,7 +27,8 @@ cbuffer ViewParameter : register(b0)
     uint BlueNoiseOffsetStride;
     float ViewSpreadAngle;
     uint NoiseMode;
-    float2 NoisePadding;
+    uint bIncludeSkyLighting;
+    float NoisePadding;
     float3 SkyColorTop;
     float SkyIntensity;
     float3 SkyColorBottom;
@@ -46,7 +47,7 @@ static const float MAX_HIT_DIST = 10000;
 float3 EvaluateSkyColor(float3 direction)
 {
     float t = 0.5 * (direction.y + 1.0);
-    return lerp(SkyColorBottom, SkyColorTop, t) * SkyIntensity;
+    return max(lerp(SkyColorBottom, SkyColorTop, t) * SkyIntensity, 0.0f.xxx);
 }
 
 float3 EvaluateSkyDiffuseBounce(float3 normal)
@@ -205,10 +206,7 @@ void rayGen
         payload);
     if(payload.bHit == false)
     {
-        // Direct environment lighting for the primary surface is evaluated by
-        // RaytracedSkyLighting. Keep this GI buffer focused on surface bounce
-        // radiance so LightingPS does not double-count sky diffuse.
-        float3 Irradiance = 0.0f.xxx;
+        float3 Irradiance = (bIncludeSkyLighting != 0u) ? max(EvaluateSkyColor(sampleDirWorld), 0.0f.xxx) : 0.0f.xxx;
 
         SH sh_indirect = init_SH();
         sh_indirect = irradiance_to_SH(Irradiance, sampleDirWorld);
@@ -244,9 +242,9 @@ void rayGen
 
         float3 Albedo = max(CommonSanitizeFloat3(payload.color, 1.0f.xxx), 0.0f.xxx);
         SH sh_indirect = init_SH();
-        // Direct sky diffuse is evaluated by RaytracedSkyLighting. Keep this
-        // GI pass focused on surface bounce energy to avoid double-counting it.
         float3 Irradiance = 0.0f.xxx;
+        if (bIncludeSkyLighting != 0u)
+            Irradiance += max(EvaluateSkyDiffuseBounce(payload.normal), 0.0f.xxx) * Albedo;
         if(shadowPayload.bHit == false)
         {
             // miss - apply light color

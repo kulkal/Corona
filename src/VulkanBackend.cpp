@@ -23,6 +23,7 @@
 #include "external/assimp/include/Importer.hpp"
 #include "external/assimp/include/scene.h"
 #include "external/assimp/include/postprocess.h"
+#include "DirectXTex.h"
 
 #if CORONA_HAS_VULKAN
 #include <vulkan/vulkan.h>
@@ -330,6 +331,76 @@ namespace
 
 	bool LoadRGBA8TextureFromFile(const std::wstring& filePath, std::vector<uint8_t>& outPixels, uint32_t& outWidth, uint32_t& outHeight, std::wstring* errorMessage)
 	{
+		auto copyRGBA8Image = [&](const DirectX::Image& image)
+		{
+			if (!image.pixels || image.width == 0 || image.height == 0)
+			{
+				if (errorMessage) *errorMessage = L"DDS texture has invalid image data.";
+				return false;
+			}
+
+			outWidth = static_cast<uint32_t>(image.width);
+			outHeight = static_cast<uint32_t>(image.height);
+			const size_t dstRowPitch = static_cast<size_t>(outWidth) * 4u;
+			outPixels.resize(dstRowPitch * static_cast<size_t>(outHeight));
+			for (uint32_t row = 0; row < outHeight; ++row)
+			{
+				const uint8_t* srcRow = image.pixels + static_cast<size_t>(row) * image.rowPitch;
+				uint8_t* dstRow = outPixels.data() + static_cast<size_t>(row) * dstRowPitch;
+				std::memcpy(dstRow, srcRow, dstRowPitch);
+			}
+			return true;
+		};
+
+		if (_wcsicmp(std::filesystem::path(filePath).extension().c_str(), L".dds") == 0)
+		{
+			DirectX::TexMetadata metadata{};
+			DirectX::ScratchImage sourceImage;
+			HRESULT hr = DirectX::LoadFromDDSFile(filePath.c_str(), DirectX::DDS_FLAGS_NONE, &metadata, sourceImage);
+			if (FAILED(hr))
+			{
+				if (errorMessage) *errorMessage = L"Failed to load DDS texture file.";
+				return false;
+			}
+
+			const DirectX::Image* baseImage = sourceImage.GetImage(0, 0, 0);
+			if (!baseImage)
+			{
+				if (errorMessage) *errorMessage = L"DDS texture has no base image.";
+				return false;
+			}
+
+			DirectX::ScratchImage convertedImage;
+			const DirectX::Image* rgbaImage = baseImage;
+			if (DirectX::IsCompressed(baseImage->format))
+			{
+				hr = DirectX::Decompress(*baseImage, DXGI_FORMAT_R8G8B8A8_UNORM, convertedImage);
+				if (FAILED(hr))
+				{
+					if (errorMessage) *errorMessage = L"Failed to decompress DDS texture.";
+					return false;
+				}
+				rgbaImage = convertedImage.GetImage(0, 0, 0);
+			}
+			else if (baseImage->format != DXGI_FORMAT_R8G8B8A8_UNORM)
+			{
+				hr = DirectX::Convert(
+					*baseImage,
+					DXGI_FORMAT_R8G8B8A8_UNORM,
+					DirectX::TEX_FILTER_DEFAULT,
+					DirectX::TEX_THRESHOLD_DEFAULT,
+					convertedImage);
+				if (FAILED(hr))
+				{
+					if (errorMessage) *errorMessage = L"Failed to convert DDS texture to RGBA8.";
+					return false;
+				}
+				rgbaImage = convertedImage.GetImage(0, 0, 0);
+			}
+
+			return rgbaImage && copyRGBA8Image(*rgbaImage);
+		}
+
 		Microsoft::WRL::ComPtr<IWICImagingFactory> imagingFactory;
 		HRESULT hr = CoCreateInstance(
 			CLSID_WICImagingFactory,

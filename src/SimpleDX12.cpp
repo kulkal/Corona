@@ -14,6 +14,10 @@
 #include "glm/fwd.hpp"
 #include "Utils.h"
 #include <dxcapi.use.h>
+#include <algorithm>
+#include <chrono>
+#include <cstring>
+#include <iomanip>
 #include <sstream>
 #include <fstream>
 #include <filesystem>
@@ -37,12 +41,52 @@
 using namespace std;
 
 ComPtr<ID3DBlob> compileShaderDXC(SimpleDX12* owner, const WCHAR* filename, const std::string& entryPoint, const WCHAR* targetString);
+void AppendCpuRuntimeTrace(const std::wstring& line);
 
 namespace
 {
 	std::wstring ToWide(const std::string& value)
 	{
 		return std::wstring(value.begin(), value.end());
+	}
+
+	std::wstring FormatDx12InitMilliseconds(double milliseconds)
+	{
+		std::wostringstream stream;
+		stream << std::fixed << std::setprecision(3) << milliseconds;
+		return stream.str();
+	}
+
+	std::wstring FormatDx12Hex(uint64_t value)
+	{
+		std::wostringstream stream;
+		stream << L"0x" << std::hex << std::uppercase << value;
+		return stream.str();
+	}
+
+	double ElapsedDx12InitMilliseconds(
+		const std::chrono::steady_clock::time_point& begin,
+		const std::chrono::steady_clock::time_point& end)
+	{
+		return std::chrono::duration<double, std::milli>(end - begin).count();
+	}
+
+	UINT AlignConstantBufferSize(UINT size)
+	{
+		return (size + 255u) & ~255u;
+	}
+
+	void CopyConstantBufferData(UINT8* destination, UINT destinationSize, const void* source, UINT sourceSize)
+	{
+		if (!destination || destinationSize == 0)
+			return;
+
+		std::memset(destination, 0, destinationSize);
+		if (!source || sourceSize == 0)
+			return;
+
+		const UINT copySize = sourceSize < destinationSize ? sourceSize : destinationSize;
+		std::memcpy(destination, source, copySize);
 	}
 
 	struct DX12GraphicsPipelineHandle final : GraphicsPipelineHandle
@@ -1066,13 +1110,8 @@ void PipelineStateObject::BindCBV(string name, int baseRegister, int size)
 	binding.name = name;
 	binding.baseRegister = baseRegister;
 	binding.numDescriptors = 1;
-	//binding.cbSize = size;
-
-	int div = size / 256;
-	binding.cbSize = (div) * 256;
-
-	if (size % 256 > 0)
-		binding.cbSize += 256;
+	binding.sourceSize = static_cast<UINT>(std::max(size, 0));
+	binding.cbSize = AlignConstantBufferSize(binding.sourceSize);
 
 	constantBufferBinding.insert(pair<string, BindingData>(name, binding));
 }
@@ -1172,7 +1211,7 @@ void PipelineStateObject::SetCBVValue(string name, void* pData, ID3D12GraphicsCo
 	UINT64 GPUAddr = std::get<0>(Alloc);
 	UINT8* pMapped = std::get<1>(Alloc);
 
-	memcpy((void*)pMapped, pData, binding.cbSize);
+	CopyConstantBufferData(pMapped, binding.cbSize, pData, binding.sourceSize);
 
 	D3D12_CPU_DESCRIPTOR_HANDLE CpuHandle;
 	D3D12_GPU_DESCRIPTOR_HANDLE GpuHandle;
@@ -1480,7 +1519,7 @@ void D3D12ComputePipelineStateObject::SetCBVValue(const std::string& name, void*
 
 	std::vector<uint8_t>& data = PendingCBVs[name];
 	data.resize(bindingIt->second.cbSize);
-	std::memcpy(data.data(), pData, data.size());
+	CopyConstantBufferData(data.data(), static_cast<UINT>(data.size()), pData, bindingIt->second.sourceSize);
 }
 
 void Texture::MakeStaticSRV()
@@ -2103,8 +2142,14 @@ static bool WriteD3D12TLASInstanceDescs(D3D12RTAS* as, const std::vector<RTInsta
 		return false;
 
 	D3D12_RAYTRACING_INSTANCE_DESC* pInstanceDesc = nullptr;
-	if (FAILED(as->Instance->Map(0, nullptr, reinterpret_cast<void**>(&pInstanceDesc))) || !pInstanceDesc)
+	const HRESULT mapResult = as->Instance->Map(0, nullptr, reinterpret_cast<void**>(&pInstanceDesc));
+	if (FAILED(mapResult) || !pInstanceDesc)
+	{
+		AppendCpuRuntimeTrace(
+			L"[DX12RTAS] TLAS instance Map failed hr=" + FormatDx12Hex(static_cast<uint32_t>(mapResult)) +
+			L", instances=" + std::to_wstring(instances.size()));
 		return false;
+	}
 
 	const UINT instanceCount = static_cast<UINT>(instances.size());
 	ZeroMemory(pInstanceDesc, sizeof(D3D12_RAYTRACING_INSTANCE_DESC) * instanceCount);
@@ -2725,12 +2770,8 @@ void D3D12RTPipelineStateObject::BindCBV(const string& shader, const string& nam
 		binding.Type = D3D12_DESCRIPTOR_RANGE_TYPE_CBV;
 
 		binding.BaseRegister = baseRegister;
-
-		int div = size / 256;
-		binding.cbSize = (div) * 256;
-
-		if (size % 256 > 0)
-			binding.cbSize += 256;
+		binding.sourceSize = size;
+		binding.cbSize = AlignConstantBufferSize(binding.sourceSize);
 
 		GlobalBinding.push_back(binding);
 	}
@@ -2743,12 +2784,8 @@ void D3D12RTPipelineStateObject::BindCBV(const string& shader, const string& nam
 		binding.Type = D3D12_DESCRIPTOR_RANGE_TYPE_CBV;
 
 		binding.BaseRegister = baseRegister;
-
-		int div = size / 256;
-		binding.cbSize = (div) * 256;
-
-		if (size % 256 > 0)
-			binding.cbSize += 256;
+		binding.sourceSize = size;
+		binding.cbSize = AlignConstantBufferSize(binding.sourceSize);
 
 		bindingInfo.Binding.push_back(binding);
 	}
@@ -3090,7 +3127,7 @@ void D3D12RTPipelineStateObject::SetCBVValue(const string& shader, const string&
 					UINT64 GPUAddr = std::get<0>(Alloc);
 					UINT8* pMapped = std::get<1>(Alloc);
 
-					memcpy((void*)pMapped, pData, bd.cbSize);
+					CopyConstantBufferData(pMapped, bd.cbSize, pData, bd.sourceSize);
 
 					D3D12_CPU_DESCRIPTOR_HANDLE CpuHandle;
 					D3D12_GPU_DESCRIPTOR_HANDLE GpuHandle;
@@ -3123,7 +3160,7 @@ void D3D12RTPipelineStateObject::SetCBVValue(const string& shader, const string&
 					UINT64 GPUAddr = std::get<0>(Alloc);
 					UINT8* pMapped = std::get<1>(Alloc);
 
-					memcpy((void*)pMapped, pData, bd.cbSize);
+					CopyConstantBufferData(pMapped, bd.cbSize, pData, bd.sourceSize);
 
 					D3D12_CPU_DESCRIPTOR_HANDLE CpuHandle;
 					D3D12_GPU_DESCRIPTOR_HANDLE GpuHandle;
@@ -3151,11 +3188,31 @@ bool D3D12RTPipelineStateObject::InitRS(const string& ShaderFile)
 {
 	SimpleDX12* owner = Owner;
 	assert(owner);
+	const auto totalStart = std::chrono::steady_clock::now();
+	auto stepStart = totalStart;
+	const std::wstring shaderFileWide = ToWide(ShaderFile);
+	auto traceStep = [&](const wchar_t* label)
+	{
+		const auto now = std::chrono::steady_clock::now();
+		AppendCpuRuntimeTrace(
+			L"[StartupTiming][DX12RTInitRS] shader=\"" + shaderFileWide +
+			L"\", step=\"" + std::wstring(label) +
+			L"\", stepMs=" + FormatDx12InitMilliseconds(ElapsedDx12InitMilliseconds(stepStart, now)) +
+			L", totalMs=" + FormatDx12InitMilliseconds(ElapsedDx12InitMilliseconds(totalStart, now)));
+		stepStart = now;
+	};
+	AppendCpuRuntimeTrace(
+		L"[StartupTiming][DX12RTInitRS] begin shader=\"" + shaderFileWide +
+		L"\", shaderBindings=" + std::to_wstring(static_cast<uint32_t>(ShaderBinding.size())) +
+		L", globalBindings=" + std::to_wstring(static_cast<uint32_t>(GlobalBinding.size())) +
+		L", hitGroups=" + std::to_wstring(static_cast<uint32_t>(VecHitGroup.size())) +
+		L", instances=" + std::to_wstring(NumInstance));
 	vector<D3D12_STATE_SUBOBJECT> subobjects;
 
 	// dxil + Hitgroup count + RS + Export + shaderconfig + export + pipelineconfig + global RS
 	int numSubobjects = 1 + VecHitGroup.size() + ShaderBinding.size() * 2 + 2 + 1 + 1;
 	subobjects.resize(numSubobjects);
+	traceStep(L"Allocate subobjects");
 
 	uint32_t index = 0;
 
@@ -3167,8 +3224,10 @@ bool D3D12RTPipelineStateObject::InitRS(const string& ShaderFile)
 	ComPtr<ID3DBlob> pDxilLib = compileShaderLibrary(owner, wShaderFile.c_str(), L"lib_6_3");
 	if (!pDxilLib)
 	{
+		traceStep(L"Compile DXIL library failed");
 		return false;
 	}
+	traceStep(L"Compile DXIL library lib_6_3");
 
 	vector<const WCHAR*> entryPoints;
 	entryPoints.reserve(ShaderBinding.size());
@@ -3180,6 +3239,7 @@ bool D3D12RTPipelineStateObject::InitRS(const string& ShaderFile)
 
 	DxilLibrary dxilLib = DxilLibrary(pDxilLib, entryPoints.data(), entryPoints.size());
 	subobjects[index++] = dxilLib.stateSubobject; // 0 Library
+	traceStep(L"Build DXIL library subobject");
 
 	// hit group
 	vector<D3D12_HIT_GROUP_DESC> vecHitDesc;
@@ -3208,6 +3268,7 @@ bool D3D12RTPipelineStateObject::InitRS(const string& ShaderFile)
 
 		subobjects[index++] = subObject; // 1 Hit Group
 	}
+	traceStep(L"Build hit group subobjects");
 
 	// root signature
 	BindingInfo* pBI = nullptr;
@@ -3278,6 +3339,7 @@ bool D3D12RTPipelineStateObject::InitRS(const string& ShaderFile)
 
 		subobjects[index++] = subobjectAssociation;
 	}
+	traceStep(L"Create local root signatures");
 
 	// shader config
 	ShaderConfig shaderConfig(MaxAttributeSizeInBytes, MaxPayloadSizeInBytes);
@@ -3347,6 +3409,7 @@ bool D3D12RTPipelineStateObject::InitRS(const string& ShaderFile)
 	subobjectGlobalRS.Type = D3D12_STATE_SUBOBJECT_TYPE_GLOBAL_ROOT_SIGNATURE;
 
 	subobjects[index++] = subobjectGlobalRS;
+	traceStep(L"Create config and global root signature");
 
 	
 	// Create the RTPSO
@@ -3358,16 +3421,20 @@ bool D3D12RTPipelineStateObject::InitRS(const string& ShaderFile)
 	HRESULT hr = owner->Device->CreateStateObject(&descRTSO, IID_PPV_ARGS(&RTPipelineState));
 	if (FAILED(hr))
 	{
+		traceStep(L"CreateStateObject failed");
 		stringstream ss;
 		ss << "Failed to compile shader : " << ShaderFile << "\n";
 		owner->errorString += ss.str();
 		OutputDebugStringA(ss.str().c_str());
 		return false;
 	}
+	traceStep(L"CreateStateObject");
 
 	NAME_D3D12_OBJECT(RTPipelineState);
 
-	
+	AppendCpuRuntimeTrace(
+		L"[StartupTiming][DX12RTInitRS] complete shader=\"" + shaderFileWide +
+		L"\", totalMs=" + FormatDx12InitMilliseconds(ElapsedDx12InitMilliseconds(totalStart, std::chrono::steady_clock::now())));
 
 	return true;
 }
@@ -3589,6 +3656,10 @@ void CommandQueue::ExecuteCommandList(CommandList * cmd)
 	cmd->CmdList->Close();
 	ID3D12CommandList* ppCommandListsEnd[] = { cmd->CmdList.Get() };
 	CmdQueue->ExecuteCommandLists(_countof(ppCommandListsEnd), ppCommandListsEnd);
+	const UINT64 submittedFenceValue = CurrentFenceValue;
+	CmdQueue->Signal(m_fence.Get(), submittedFenceValue);
+	cmd->Fence = submittedFenceValue;
+	CurrentFenceValue++;
 }
 
 void CommandQueue::WaitGPU()
@@ -3891,10 +3962,14 @@ void SimpleDX12::SetGraphicsPipelineConstantData(GraphicsPipelineHandle* pipelin
 	if (!dxPipeline || !dxPipeline->PSO || !data || size == 0 || dxPipeline->ConstantBufferSize == 0)
 		return;
 
-	std::vector<uint8_t> paddedData(dxPipeline->ConstantBufferSize, 0);
-	const uint32_t copySize = (std::min)(size, dxPipeline->ConstantBufferSize);
-	std::memcpy(paddedData.data(), data, copySize);
-	dxPipeline->PSO->SetCBVValue("__CB0", paddedData.data());
+	const auto bindingIt = dxPipeline->PSO->constantBufferBinding.find("__CB0");
+	if (bindingIt == dxPipeline->PSO->constantBufferBinding.end())
+		return;
+
+	std::vector<uint8_t> sourceData(bindingIt->second.sourceSize, 0);
+	const uint32_t copySize = (std::min)(size, bindingIt->second.sourceSize);
+	std::memcpy(sourceData.data(), data, copySize);
+	dxPipeline->PSO->SetCBVValue("__CB0", sourceData.data());
 }
 
 void SimpleDX12::BindGraphicsPipelineTexture(GraphicsPipelineHandle* pipeline, const std::string& bindingName, Texture* texture)

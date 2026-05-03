@@ -13,9 +13,31 @@
 #include "Corona.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
+#include <iomanip>
 #include <iterator>
+#include <sstream>
+
+void AppendCpuRuntimeTrace(const std::wstring& line);
+
+namespace
+{
+	std::wstring FormatScreenProbeInitMilliseconds(double milliseconds)
+	{
+		std::wostringstream stream;
+		stream << std::fixed << std::setprecision(3) << milliseconds;
+		return stream.str();
+	}
+
+	double ElapsedScreenProbeInitMilliseconds(
+		const std::chrono::steady_clock::time_point& begin,
+		const std::chrono::steady_clock::time_point& end)
+	{
+		return std::chrono::duration<double, std::milli>(end - begin).count();
+	}
+}
 
 void Corona::InitScreenProbeGIPass()
 {
@@ -54,9 +76,30 @@ void Corona::InitScreenProbeGIPass()
 
 void Corona::InitRaytracingScreenProbePass()
 {
+		const auto totalStart = std::chrono::steady_clock::now();
+		auto stepStart = totalStart;
+		auto traceStep = [&](const wchar_t* label)
+		{
+			const auto now = std::chrono::steady_clock::now();
+			AppendCpuRuntimeTrace(
+				L"[StartupTiming][ScreenProbeRT] step=\"" + std::wstring(label) +
+				L"\", stepMs=" + FormatScreenProbeInitMilliseconds(ElapsedScreenProbeInitMilliseconds(stepStart, now)) +
+				L", totalMs=" + FormatScreenProbeInitMilliseconds(ElapsedScreenProbeInitMilliseconds(totalStart, now)));
+			stepStart = now;
+		};
+
+		AppendCpuRuntimeTrace(
+			L"[StartupTiming][ScreenProbeRT] begin instances=" +
+			std::to_wstring(static_cast<uint32_t>(RayTracingInstances.size())));
+
 		shared_ptr<RTPipelineStateObject> tempPSO = renderBackend->CreateRTPipelineStateObject();
 		if (!tempPSO)
+		{
+			AppendCpuRuntimeTrace(L"[StartupTiming][ScreenProbeRT] create RTPipelineStateObject failed");
 			return;
+		}
+		traceStep(L"CreateRTPipelineStateObject");
+
 		tempPSO->SetNumInstances(static_cast<uint32_t>(RayTracingInstances.size()));
 
 		tempPSO->AddHitGroup("HitGroup", "chs", "");
@@ -95,6 +138,7 @@ void Corona::InitRaytracingScreenProbePass()
 		tempPSO->BindCBV("global", "ViewParameter", 0, sizeof(RTScreenProbeGIViewParamCB), 1);
 		tempPSO->BindSampler("global", "sampleWrap", 0);
 		tempPSO->BindSampler("global", "historyClamp", 1);
+		traceStep(L"Bind global resources");
 
 		tempPSO->AddShader("miss", RTPipelineStateObject::MISS);
 		tempPSO->AddShader("missShadow", RTPipelineStateObject::MISS);
@@ -105,9 +149,15 @@ void Corona::InitRaytracingScreenProbePass()
 		tempPSO->BindSRV("chs", "AlbedoTex", 5);
 		tempPSO->BindSRV("chs", "InstanceProperty", 6);
 		tempPSO->Configure(1, sizeof(float) * 12, sizeof(float) * 2);
+		traceStep(L"Bind hit program resources");
 
 		if (tempPSO->InitRS("Shaders\\ScreenProbeRaytracedGI.hlsl"))
 			PSO_RT_SCREEN_PROBE_GI = tempPSO;
+		traceStep(L"InitRS ScreenProbeRaytracedGI.hlsl");
+		AppendCpuRuntimeTrace(
+			L"[StartupTiming][ScreenProbeRT] complete totalMs=" +
+			FormatScreenProbeInitMilliseconds(ElapsedScreenProbeInitMilliseconds(totalStart, std::chrono::steady_clock::now())) +
+			L", success=" + std::to_wstring(PSO_RT_SCREEN_PROBE_GI ? 1 : 0));
 }
 
 void Corona::ScreenProbeRaytraceGIPass()
@@ -161,17 +211,35 @@ void Corona::ScreenProbeRaytraceGIPass()
 	const UINT32 probeSpacing = std::clamp(ScreenProbeGICB.ProbeSpacing, 4u, 64u);
 	const UINT32 probeGridWidth = std::max(1u, (GetRenderWidth() + probeSpacing - 1u) / probeSpacing);
 	const UINT32 probeGridHeight = std::max(1u, (GetRenderHeight() + probeSpacing - 1u) / probeSpacing);
+	const UINT32 screenProbeLightingBootstrapRays = 100u;
 
+	RTScreenProbeGIViewParam.ViewMatrix = glm::transpose(ViewMat);
+	RTScreenProbeGIViewParam.InvViewMatrix = glm::transpose(InvViewMat);
+	RTScreenProbeGIViewParam.ProjMatrix = glm::transpose(UnjitteredProjMat);
+	RTScreenProbeGIViewParam.InvProjMatrix = glm::transpose(UnjitteredInvProjMat);
+	RTScreenProbeGIViewParam.ProjectionParams = FrameProjectionParams;
+	RTScreenProbeGIViewParam.LightDir = glm::vec4(RenderFrameNormalizedLightDir, LightIntensity);
+	RTScreenProbeGIViewParam.RandomOffset = glm::vec2(RenderFrameShaderTime, RenderFrameShaderTime);
 	RTScreenProbeGIViewParam.ProbeSpacing = probeSpacing;
 	RTScreenProbeGIViewParam.ProbeGridSize = glm::vec2(probeGridWidth, probeGridHeight);
 	RTScreenProbeGIViewParam.RTSize = glm::vec2(GetRenderWidth(), GetRenderHeight());
+	RTScreenProbeGIViewParam.FrameCounter = RenderFrameIndex;
+	RTScreenProbeGIViewParam.BlueNoiseOffsetStride = RTGIViewParam.BlueNoiseOffsetStride;
+	RTScreenProbeGIViewParam.NoiseMode = RenderFrameRayNoiseMode;
 	RTScreenProbeGIViewParam.RaysPerProbe = std::clamp(RTScreenProbeGIViewParam.RaysPerProbe, 1u, 4u);
 	RTScreenProbeGIViewParam.HistoryValid = (bScreenProbeGIAtlasHistoryValid && !bScreenProbeLightingBootstrapPending) ? 1u : 0u;
+	RTScreenProbeGIViewParam.ViewSpreadAngle = glm::tan(Fov * 0.5f) / (0.5f * GetRenderHeight());
 	RTScreenProbeGIViewParam.LightingBootstrap = bScreenProbeLightingBootstrapPending ? 1u : 0u;
+	RTScreenProbeGIViewParam.BootstrapRays = screenProbeLightingBootstrapRays;
 	RTScreenProbeGIViewParam.SHCoefficientCount = ScreenProbeGICB.SHCoefficientCount <= 4u ? 4u : 9u;
 	RTScreenProbeGIViewParam.TemporalAlpha = std::clamp(ScreenProbeGICB.TemporalAlpha, 0.02f, 1.0f);
 	RTScreenProbeGIViewParam.HistoryDepthWeight = ScreenProbeGICB.HistoryDepthWeight;
 	RTScreenProbeGIViewParam.HistoryNormalWeight = ScreenProbeGICB.HistoryNormalWeight;
+	RTScreenProbeGIViewParam.bIncludeSkyLighting = RenderFrameDiffuseGISkyLightingEnabled;
+	RTScreenProbeGIViewParam.SkyColorTop = SkyColorTop;
+	RTScreenProbeGIViewParam.SkyIntensity = RenderFrameDiffuseGISkyIntensity;
+	RTScreenProbeGIViewParam.SkyColorBottom = SkyColorBottom;
+	RTScreenProbeGIViewParam.LightColor = RenderFrameLightColor;
 
 	renderBackend->TransitionTexture(ScreenProbeGIRadiance[writeIndex].get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
 	for (UINT coefficientIndex = 0; coefficientIndex < ScreenProbeSHCoefficientCount; ++coefficientIndex)
@@ -274,9 +342,12 @@ void Corona::ScreenProbeGIPass()
 	ScreenProbeGICB.EdgeNormalWeight = std::clamp(ScreenProbeGICB.EdgeNormalWeight, 1.0f, 96.0f);
 	ScreenProbeGICB.EdgeSampleCount = std::clamp(ScreenProbeGICB.EdgeSampleCount, 1u, 4u);
 	ScreenProbeGICB.SHCoefficientCount = ScreenProbeGICB.SHCoefficientCount <= 4u ? 4u : 9u;
+	ScreenProbeGICB.ProjectionParams = FrameProjectionParams;
+	ScreenProbeGICB.RTSize = glm::vec2(GetRenderWidth(), GetRenderHeight());
 	ScreenProbeGICB.ProbeGridSize = glm::vec2(
 		static_cast<float>((GetRenderWidth() + ScreenProbeGICB.ProbeSpacing - 1u) / ScreenProbeGICB.ProbeSpacing),
 		static_cast<float>((GetRenderHeight() + ScreenProbeGICB.ProbeSpacing - 1u) / ScreenProbeGICB.ProbeSpacing));
+	ScreenProbeGICB.FrameIndex = RenderFrameIndex;
 	ScreenProbeGICB.TemporalAlpha = std::clamp(ScreenProbeGICB.TemporalAlpha, 0.02f, 1.0f);
 	ScreenProbeGICB.HistoryValid = (bScreenProbeGIHistoryValid && !bScreenProbeLightingBootstrapPending) ? 1u : 0u;
 	ScreenProbeGIPSO->SetCBVValue("ScreenProbeGIConstant", &ScreenProbeGICB);

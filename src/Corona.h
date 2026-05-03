@@ -121,7 +121,18 @@ private:
 		Count
 	};
 
+	enum class ECpuUpdatePhase : UINT32
+	{
+		CameraPhysics = 0,
+		Input,
+		LuauScripts,
+		CameraPath,
+		RenderSync,
+		Count
+	};
+
 	static constexpr UINT32 GpuPassCount = static_cast<UINT32>(EGpuPass::Count);
+	static constexpr UINT32 CpuUpdatePhaseCount = static_cast<UINT32>(ECpuUpdatePhase::Count);
 	static constexpr UINT32 GpuQueriesPerPass = 2;
 	using CpuClock = std::chrono::steady_clock;
 
@@ -196,6 +207,7 @@ private:
 		glm::mat4x4 UnjitteredViewProjMat;
 		glm::mat4x4 PrevUnjitteredViewProjMat;
 		glm::vec4 ViewDir;
+		glm::vec4 BaseColorFactor = glm::vec4(1.0f);
 		glm::vec2 RTSize;
 		glm::vec2 RougnessMetalic;
 		UINT32 bOverrideRougnessMetallic;
@@ -460,7 +472,8 @@ private:
 		UINT32 BlueNoiseOffsetStride = 1;
 		float ViewSpreadAngle;
 		UINT32 NoiseMode = 1;
-		glm::vec2 _noisePadding;
+		UINT32 bIncludeSkyLighting = 0;
+		float _noisePadding = 0.0f;
 		glm::vec3 SkyColorTop;
 		float SkyIntensity;
 		glm::vec3 SkyColorBottom;
@@ -493,7 +506,7 @@ private:
 		float TemporalAlpha = 0.06f;
 		float HistoryDepthWeight = 32.0f;
 		float HistoryNormalWeight = 32.0f;
-		UINT32 Padding = 0;
+		UINT32 bIncludeSkyLighting = 0;
 		glm::vec3 SkyColorTop;
 		float SkyIntensity = 3.0f;
 		glm::vec3 SkyColorBottom;
@@ -528,13 +541,21 @@ private:
 		glm::vec3 LightColor;
 		float _padding2 = 0.0f;
 		UINT32 ActiveCellCapacity = SpatialHashGIActiveCellCapacity;
-		UINT32 _padding3 = 0;
+		UINT32 bIncludeSkyLighting = 0;
 		UINT32 _padding4 = 0;
 		UINT32 _padding5 = 0;
 	};
 
 	RTSpatialHashGIViewParamCB RTSpatialHashGIViewParam;
 	shared_ptr<RTPipelineStateObject> PSO_RT_SPATIAL_HASH_GI;
+
+	static constexpr UINT32 MaxPointLights = 8;
+
+	struct PointLightParam
+	{
+		glm::vec4 PositionAndRadius = glm::vec4(0.0f);
+		glm::vec4 ColorAndIntensity = glm::vec4(1.0f);
+	};
 	
 	// Path Tracing
 	enum class EPathTracingDebugMode
@@ -578,6 +599,9 @@ private:
 		UINT32 bEnableDirectSpecular;
 		UINT32 bEnableRTAO;
 		UINT32 _rtaoPadding[3] = {};
+		PointLightParam PointLights[MaxPointLights];
+		UINT32 PointLightCount = 0;
+		glm::vec3 PointLightPadding = glm::vec3(0.0f);
 	};
 
 	PathTracingViewParamCB PathTracingViewParam;
@@ -597,6 +621,8 @@ private:
 	glm::vec3 PrevIndirectSkyColorTop = glm::vec3(0.0f);
 	glm::vec3 PrevIndirectSkyColorBottom = glm::vec3(0.0f);
 	float PrevIndirectSkyIntensity = 0.0f;
+	float PrevIndirectSkyLightingStrength = 0.0f;
+	bool PrevIndirectDiffuseGISkyLightingEnabled = false;
 	float PrevIndirectPrefilteredEnvRoughnessThreshold = 0.0f;
 	float PrevIndirectPrefilteredEnvRoughnessFade = 0.0f;
 	bool PrevIndirectPrefilteredEnvSpecularEnabled = false;
@@ -659,6 +685,7 @@ private:
 	{
 		glm::mat4x4 ViewMatrix;
 		glm::mat4x4 InvViewMatrix;
+		glm::mat4x4 InvProjMatrix;
 		glm::vec4 LightDir;
 		glm::vec2 RTSize;
 		float TAABlendFactor;
@@ -677,6 +704,9 @@ private:
 		float SurfaceBounceSaturation;
 		float SkyLightingStrength;
 		UINT32 LightingOutputMode = 0;
+		PointLightParam PointLights[MaxPointLights];
+		UINT32 PointLightCount = 0;
+		glm::vec3 PointLightPadding = glm::vec3(0.0f);
 	};
 	
 	shared_ptr<PipelineStateObject> LightingPSO;
@@ -765,6 +795,7 @@ private:
 	bool bEnableDirectSpecular = true;
 	bool bEnableRTAO = true;
 	bool bEnableSkyLighting = true;
+	bool bEnableRayTracedSkyLighting = true;
 	float RTAOIndirectStrength = 0.25f;
 	float RTAOIndirectFloor = 0.55f;
 	float SurfaceBounceStrength = 0.35f;
@@ -921,7 +952,6 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	// mesh
 	shared_ptr<Mesh> mesh;
 
-	float SponzaRoughnessMultiplier = 1;
 	shared_ptr<Scene> Sponza;
 	SceneObjectHandle SponzaObject = InvalidSceneObjectHandle;
 
@@ -930,7 +960,6 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	glm::vec3 BuddhaCenterPosition = glm::vec3(273.0f, -12.0f, -6.0f);
 	glm::vec3 BuddhaCenterRotationDegrees = glm::vec3(0.0f, -12.0f, 0.0f);
 
-	float ShaderBallRoughnessMultiplier = 0.15;
 	shared_ptr<Scene> ShaderBall;
 	SceneObjectHandle ShaderBallObject = InvalidSceneObjectHandle;
 	glm::vec3 ShaderBallCenterPosition = glm::vec3(0.0f, -4.0f, -72.0f);
@@ -957,6 +986,7 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 		bool bVisible = true;
 		bool bRayTracing = true;
 		bool bPhysicsQuery = true;
+		UINT32 RenderDirtyBits = 0;
 	};
 	vector<SceneObject> SceneObjects;
 	SceneObjectHandle NextSceneObjectHandle = 1;
@@ -977,19 +1007,91 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	};
 	struct LuauScriptState
 	{
+		struct LoadedScript
+		{
+			std::wstring Path;
+			int UpdateRef = 0;
+			int ShutdownRef = 0;
+			int ImGuiRef = 0;
+			int UiRef = 0;
+		};
+
 		lua_State* L = nullptr;
-		int UpdateRef = 0;
+		std::vector<LoadedScript> Scripts;
 	};
 	std::unique_ptr<LuauScriptState> ScriptState;
+	enum class ScriptUiCommandType
+	{
+		Separator,
+		Text,
+		SameLine,
+		BeginWindow,
+		EndWindow,
+		Button,
+		SliderFloat,
+		SliderInt,
+		Combo,
+		Checkbox,
+		OverlayText,
+		Gizmo3D,
+		WorldAxis,
+	};
+	struct ScriptUiCommand
+	{
+		ScriptUiCommandType Type = ScriptUiCommandType::Text;
+		std::string Id;
+		std::string Label;
+		float FloatValue = 0.0f;
+		float MinValue = 0.0f;
+		float MaxValue = 0.0f;
+		int IntValue = 0;
+		int MinIntValue = 0;
+		int MaxIntValue = 0;
+		bool BoolValue = false;
+		glm::vec3 Vec3Value = glm::vec3(0.0f);
+		std::vector<std::string> Items;
+	};
+	enum class PersistentScriptControlType
+	{
+		Number,
+		Bool,
+		Vec3,
+	};
+	struct PersistentScriptControlValue
+	{
+		PersistentScriptControlType Type = PersistentScriptControlType::Number;
+		float Number = 0.0f;
+		bool Bool = false;
+		glm::vec3 Vec3 = glm::vec3(0.0f);
+	};
+	std::mutex ScriptUiMutex;
+	std::vector<ScriptUiCommand> ScriptUiBuildCommands;
+	std::vector<ScriptUiCommand> ScriptUiRenderCommands;
+	std::map<std::string, bool> ScriptUiClickedResults;
+	std::map<std::string, float> ScriptUiFloatResults;
+	std::map<std::string, int> ScriptUiIntResults;
+	std::map<std::string, bool> ScriptUiBoolResults;
+	std::map<std::string, glm::vec3> ScriptUiVec3Results;
+	std::map<std::string, PersistentScriptControlValue> PersistentScriptControls;
+	bool bPersistentSceneStateDirty = false;
 	std::map<ScriptSceneHandle, ScriptSceneEntry> ScriptScenes;
 	std::map<std::wstring, ScriptSceneHandle> ScriptSceneByPath;
 	std::map<SceneObjectHandle, ScriptObjectState> ScriptObjects;
 	ScriptSceneHandle NextScriptSceneHandle = 1;
 	bool bEnableStartupLuauScript = true;
 	bool bScriptCameraControlEnabled = false;
+	bool bLuauImGuiFrameActive = false;
 	std::array<bool, 256> ScriptKeyDown = {};
 	std::array<bool, 256> ScriptKeyPressed = {};
 	std::array<bool, 256> ScriptKeyReleased = {};
+	bool bScriptRightMouseDown = false;
+	bool bScriptRightMousePressed = false;
+	bool bScriptRightMouseReleased = false;
+	int ScriptMouseX = 0;
+	int ScriptMouseY = 0;
+	int ScriptMouseDeltaX = 0;
+	int ScriptMouseDeltaY = 0;
+	bool bScriptMousePositionInitialized = false;
 	struct CpuPhysicsState;
 	struct CpuPhysicsStateDeleter
 	{
@@ -1040,6 +1142,184 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	// misc
 	glm::vec3 LightDir = glm::normalize(glm::vec3(0.901, 0.88, 0.176));
 	float LightIntensity = 0.4;
+	struct PointLightState
+	{
+		UINT32 Id = 0;
+		bool bEnabled = true;
+		glm::vec3 Position = glm::vec3(0.0f);
+		float Radius = 320.0f;
+		glm::vec3 Color = glm::vec3(1.0f);
+		float Intensity = 10.0f;
+		UINT32 RenderDirtyBits = 0;
+	};
+	std::vector<PointLightState> PointLights;
+	UINT32 NextPointLightId = 1;
+
+	enum class ERenderDeltaOp : UINT8
+	{
+		Upsert,
+		Remove,
+	};
+
+	static constexpr UINT32 kSceneObjectDirtyScene = 1u << 0;
+	static constexpr UINT32 kSceneObjectDirtyTransform = 1u << 1;
+	static constexpr UINT32 kSceneObjectDirtyMaterial = 1u << 2;
+	static constexpr UINT32 kSceneObjectDirtyVisibility = 1u << 3;
+	static constexpr UINT32 kSceneObjectDirtyRayTracing = 1u << 4;
+	static constexpr UINT32 kSceneObjectDirtyAll =
+		kSceneObjectDirtyScene |
+		kSceneObjectDirtyTransform |
+		kSceneObjectDirtyMaterial |
+		kSceneObjectDirtyVisibility |
+		kSceneObjectDirtyRayTracing;
+
+	static constexpr UINT32 kPointLightDirtyEnabled = 1u << 0;
+	static constexpr UINT32 kPointLightDirtyTransform = 1u << 1;
+	static constexpr UINT32 kPointLightDirtyShape = 1u << 2;
+	static constexpr UINT32 kPointLightDirtyEmission = 1u << 3;
+	static constexpr UINT32 kPointLightDirtyAll =
+		kPointLightDirtyEnabled |
+		kPointLightDirtyTransform |
+		kPointLightDirtyShape |
+		kPointLightDirtyEmission;
+
+	struct RenderSceneObjectDelta
+	{
+		ERenderDeltaOp Op = ERenderDeltaOp::Upsert;
+		UINT32 DirtyBits = 0;
+		SceneObject Object;
+		SceneObjectHandle Handle = InvalidSceneObjectHandle;
+	};
+
+	struct RenderPointLightDelta
+	{
+		ERenderDeltaOp Op = ERenderDeltaOp::Upsert;
+		UINT32 DirtyBits = 0;
+		PointLightState Light;
+		UINT32 Id = 0;
+	};
+
+	struct RenderFrameSourceState
+	{
+		glm::vec3 CameraPosition = glm::vec3(0.0f);
+		glm::vec3 CameraLookDirection = glm::vec3(0.0f, 0.0f, 1.0f);
+		glm::vec3 CameraUpDirection = glm::vec3(0.0f, 1.0f, 0.0f);
+		float Fov = 0.8f;
+		float NearPlane = 10.0f;
+		float FarPlane = 20000.0f;
+		float AspectRatio = 1.0f;
+		float TotalSeconds = 0.0f;
+		ERenderingMode RenderingMode = ERenderingMode::HYBRID;
+		EAntiAliasingMode AntiAliasingMode = EAntiAliasingMode::TAA;
+		EDLSSQualityMode DLSSQualityMode = EDLSSQualityMode::QUALITY;
+		ERayNoiseMode RayNoiseMode = ERayNoiseMode::R2_LOW_DISCREPANCY;
+		EDiffuseGIMode DiffuseGIMode = EDiffuseGIMode::SPATIAL_HASH;
+		bool bEnableDiffuseGI = true;
+		bool bEnableSpecularGI = true;
+		bool bEnableDirectDiffuse = true;
+		bool bEnableDirectSpecular = true;
+		bool bEnableRTAO = true;
+		bool bEnableSkyLighting = true;
+		bool bEnableRayTracedSkyLighting = true;
+		float RTAOIndirectStrength = 0.25f;
+		float RTAOIndirectFloor = 0.55f;
+		float SurfaceBounceStrength = 0.35f;
+		float SurfaceBounceSaturation = 0.45f;
+		float SkyLightingStrength = 0.35f;
+		float JitterScale = 0.6f;
+		UINT32 TAASampleCount = 32;
+		float DLSSJitterPhaseScale = 4.0f;
+		UINT32 DLSSJitterPhaseCountOverride = 0;
+		glm::vec3 LightDir = glm::vec3(0.0f, 1.0f, 0.0f);
+		float LightIntensity = 0.4f;
+		glm::vec3 SkyColorTop = glm::vec3(1.0f);
+		glm::vec3 SkyColorBottom = glm::vec3(0.8f);
+		float SkyIntensity = 3.0f;
+		bool bEnablePrefilteredEnvSpecular = false;
+		float PrefilteredEnvRoughnessThreshold = 0.65f;
+		float PrefilteredEnvRoughnessFade = 0.10f;
+		float ShadowLightRadius = 0.001f;
+		UINT32 ShadowSampleCount = 8;
+		float RTAORadius = 96.0f;
+		float RTAOPower = 1.10f;
+		float RTAONormalBias = 0.35f;
+		UINT32 RTAOSampleCount = 16;
+		float SkyLightingRayLength = 10000.0f;
+		float SkyLightingNormalBias = 0.5f;
+		UINT32 SkyLightingSampleCount = 32;
+		float SkyLightingUpBias = 0.65f;
+		float SkyLightingDirectionPower = 2.25f;
+		float SkyLightingMinWorldY = 0.02f;
+		UINT32 SkyLightingMaxSampleAttempts = 4;
+		UINT32 SkyLightingDenoiseRadius = 5;
+		UINT32 ScreenProbeSpacing = 8;
+		UINT32 ScreenProbeGatherRadius = 3;
+		UINT32 ScreenProbeRaysPerProbe = 4;
+		UINT32 ScreenProbeSHCoefficientCount = 4;
+		float ScreenProbeRawBlend = 0.02f;
+		float ScreenProbeMinResolveWeight = 0.02f;
+		float ScreenProbeDepthWeight = 8.0f;
+		float ScreenProbeNormalWeight = 8.0f;
+		float ScreenProbeResolveDepthWeight = 24.0f;
+		float ScreenProbeResolveNormalWeight = 16.0f;
+		float ScreenProbeTemporalAlpha = 0.06f;
+		float ScreenProbeHistoryDepthWeight = 32.0f;
+		float ScreenProbeHistoryNormalWeight = 32.0f;
+		float ScreenProbeEdgeDepthWeight = 32.0f;
+		float ScreenProbeEdgeNormalWeight = 16.0f;
+		UINT32 ScreenProbeEdgeSampleCount = 3;
+		float SpatialHashCellSize = 48.0f;
+		float SpatialHashTemporalAlpha = 0.08f;
+		float SpatialHashSmoothingStrength = 0.65f;
+		float SpatialHashInterpolationStrength = 1.0f;
+		UINT32 SpatialHashRaysPerCell = 2;
+		UINT32 SpatialHashMaxBounces = 2;
+		UINT32 PathTracingDirectLightSampleCount = 1;
+		UINT32 PathTracingMaxBounces = 4;
+		UINT32 PathTracingSamplesPerPixel = 1;
+		UINT32 PathTracingDebugMode = 0;
+	};
+
+	struct RenderFrameDelta
+	{
+		uint64_t FrameId = 0;
+		bool bHasFrameSourceState = false;
+		RenderFrameSourceState FrameSourceState;
+		bool bFullSceneObjectSync = false;
+		bool bFullPointLightSync = false;
+		std::vector<RenderSceneObjectDelta> SceneObjectDeltas;
+		std::vector<RenderPointLightDelta> PointLightDeltas;
+	};
+
+	struct RenderWorldMirror
+	{
+		std::vector<SceneObject> SceneObjects;
+		std::vector<PointLightState> PointLights;
+		bool bHasFrameSourceState = false;
+		RenderFrameSourceState FrameSourceState;
+	};
+
+	using RenderSyncCollectFn = void (Corona::*)(RenderFrameDelta&);
+	using RenderSyncApplyFn = void (Corona::*)(const RenderFrameDelta&);
+	struct RenderSyncChannel
+	{
+		const char* Name = nullptr;
+		RenderSyncCollectFn Collect = nullptr;
+		RenderSyncApplyFn Apply = nullptr;
+	};
+
+	RenderWorldMirror RenderWorld;
+	std::vector<RenderSyncChannel> RenderSyncChannels;
+	bool bRenderSyncChannelsInitialized = false;
+	bool bSceneObjectFullSyncPending = false;
+	bool bPointLightFullSyncPending = false;
+	std::vector<SceneObjectHandle> DirtySceneObjectHandles;
+	std::vector<SceneObjectHandle> RemovedSceneObjectHandles;
+	std::vector<UINT32> DirtyPointLightIds;
+	std::vector<UINT32> RemovedPointLightIds;
+	std::mutex RenderFrameDeltaMutex;
+	std::deque<RenderFrameDelta> PendingRenderFrameDeltas;
+	uint64_t NextRenderFrameDeltaId = 1;
 	
 	// Sky colors for path tracing
 	glm::vec3 SkyColorTop = glm::vec3(1.0f, 1.0f, 1.0f);
@@ -1058,10 +1338,19 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	glm::mat4x4 UnjitteredProjMat;
 	glm::mat4x4 InvViewMat;
 	glm::mat4x4 InvProjMat;
+	glm::mat4x4 UnjitteredInvProjMat;
 	glm::mat4x4 ViewProjMat;
 	glm::mat4x4 InvViewProjMat;
 	glm::mat4x4 PrevViewMat;
 	glm::mat4x4 PrevViewProjMat;
+	glm::vec4 FrameProjectionParams = glm::vec4(0.0f);
+	glm::vec3 RenderFrameNormalizedLightDir = glm::vec3(0.0f, 1.0f, 0.0f);
+	glm::vec3 RenderFrameLightColor = glm::vec3(1.0f);
+	float RenderFrameShaderTime = 0.0f;
+	float RenderFrameDiffuseGISkyIntensity = 3.0f;
+	UINT32 RenderFrameRayNoiseMode = 0;
+	UINT32 RenderFrameDiffuseGISkyLightingEnabled = 0;
+	UINT32 RenderFrameIndex = 0;
 	glm::vec2 JitterOffset;
 	glm::vec2 PrevJitter;
 	glm::vec2 CurrentJitter;
@@ -1128,12 +1417,20 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	std::array<float, GpuPassCount> GpuPassLastTimeMs = {};
 	std::array<float, GpuPassCount> GpuPassAverageTimeMs = {};
 	std::array<std::deque<float>, GpuPassCount> GpuPassHistoryMs = {};
+	float CpuUpdateLastTimeMs = 0.0f;
+	float CpuUpdateAverageTimeMs = 0.0f;
+	std::deque<float> CpuUpdateHistoryMs;
+	std::array<float, CpuUpdatePhaseCount> CpuUpdatePhaseLastTimeMs = {};
+	std::array<float, CpuUpdatePhaseCount> CpuUpdatePhaseAverageTimeMs = {};
+	std::array<std::deque<float>, CpuUpdatePhaseCount> CpuUpdatePhaseHistoryMs = {};
 	bool bFramePerfLogInitialized = false;
 	UINT64 FramePerfLogTotalFrameCount = 0;
 	UINT32 FramePerfLogSampleFrameCount = 0;
 	double FramePerfLogAccumFrameMs = 0.0;
 	double FramePerfLogMinFrameMs = 1.0e30;
 	double FramePerfLogMaxFrameMs = 0.0;
+	double FramePerfLogAccumCpuUpdateMs = 0.0;
+	std::array<double, CpuUpdatePhaseCount> FramePerfLogAccumCpuUpdatePhaseMs = {};
 	double FramePerfLogAccumBeginFrameMs = 0.0;
 	double FramePerfLogAccumRecordMs = 0.0;
 	double FramePerfLogAccumExecuteMs = 0.0;
@@ -1154,6 +1451,10 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	void BeginGpuPassTiming(EGpuPass pass);
 	void EndGpuPassTiming(EGpuPass pass);
 	const char* GetGpuPassName(EGpuPass pass) const;
+	const char* GetCpuUpdatePhaseName(ECpuUpdatePhase phase) const;
+	void AddCpuUpdatePhaseTiming(ECpuUpdatePhase phase, const CpuClock::time_point& begin, const CpuClock::time_point& end);
+	void FinishCpuUpdateTiming(const CpuClock::time_point& begin, const CpuClock::time_point& end);
+	void TrimCpuUpdateTimingHistory();
 	std::wstring BuildFinalScreenshotPath();
 	void RequestFinalBackbufferScreenshot();
 	void ConsumeFinalBackbufferScreenshotResult();
@@ -1239,6 +1540,7 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 		const glm::vec3& position = glm::vec3(0.0f),
 		const glm::vec3& rotationDegrees = glm::vec3(0.0f));
 	shared_ptr<Scene> CreateMirrorCubeScene();
+	bool ShouldIncludeSceneObjectInRayTracingAS(const SceneObject& object) const;
 	void MarkRayTracingSceneDirty();
 	void MarkRayTracingTransformsDirty();
 	void FlushSceneObjectChanges();
@@ -1283,6 +1585,7 @@ public:
 		const glm::vec3& direction,
 		float maxDistance,
 		CpuPhysicsRaycastHit& hit);
+	ScriptSceneHandle CreateProceduralBlockCharacterSceneForScript(UINT32 seed);
 	ScriptSceneHandle LoadSceneForScript(const std::wstring& assetPath);
 	SceneObjectHandle SpawnSceneObjectForScript(
 		ScriptSceneHandle sceneHandle,
@@ -1319,15 +1622,74 @@ public:
 		float& pitchDegrees) const;
 	void RecordScriptKeyDown(UINT8 key);
 	void RecordScriptKeyUp(UINT8 key);
+	void RecordScriptRButtonDown(int x, int y);
+	void RecordScriptRButtonUp();
+	void RecordScriptMouseMove(int x, int y);
+	void PollScriptMouseState();
 	bool IsScriptKeyDownForScript(UINT8 key) const;
 	bool WasScriptKeyPressedForScript(UINT8 key) const;
 	bool WasScriptKeyReleasedForScript(UINT8 key) const;
+	void GetScriptMouseForScript(
+		int& x,
+		int& y,
+		int& deltaX,
+		int& deltaY,
+		bool& rightDown,
+		bool& rightPressed,
+		bool& rightReleased) const;
 	void ClearScriptInputFrameState();
 	void InitLuauScripting();
 	void RunStartupLuauScript();
+	bool LoadLuauScriptFile(const std::filesystem::path& scriptPath);
+	void CallLuauShutdownCallbacks();
 	void ReloadLuauScripting();
 	void UpdateLuauScripting(float dt);
+	void BuildLuauUi();
+	void RenderQueuedLuauUi();
+	void DrawLuauImGui();
 	void ShutdownLuauScripting();
+	bool IsLuauImGuiFrameActive() const;
+	void QueueScriptUiSeparatorForScript();
+	void QueueScriptUiTextForScript(const std::string& text);
+	void QueueScriptUiSameLineForScript();
+	void QueueScriptUiBeginWindowForScript(const std::string& title);
+	void QueueScriptUiEndWindowForScript();
+	void QueueScriptUiOverlayTextForScript(const std::string& text, float x, float y);
+	void QueueScriptUiWorldAxisForScript(
+		const std::string& id,
+		const glm::vec3& position,
+		float length,
+		float thickness);
+	glm::vec3 QueueScriptUiGizmo3DForScript(
+		const std::string& id,
+		const std::string& label,
+		const glm::vec3& value,
+		float size,
+		int mode);
+	bool QueueScriptUiButtonForScript(const std::string& id, const std::string& label);
+	float QueueScriptUiSliderFloatForScript(
+		const std::string& id,
+		const std::string& label,
+		float value,
+		float minValue,
+		float maxValue);
+	int QueueScriptUiSliderIntForScript(
+		const std::string& id,
+		const std::string& label,
+		int value,
+		int minValue,
+		int maxValue);
+	int QueueScriptUiComboForScript(
+		const std::string& id,
+		const std::string& label,
+		int selectedIndex,
+		const std::vector<std::string>& items);
+	bool QueueScriptUiCheckboxForScript(const std::string& id, const std::string& label, bool value);
+	void PushLuauUiStateForScript(lua_State* L);
+	bool SetLuauUiValueForScript(const std::string& name, lua_State* L, int valueIndex);
+	bool RunLuauUiCommandForScript(const std::string& name, lua_State* L, int argIndex);
+	void PushPersistentScriptControlForScript(lua_State* L, const std::string& name, int defaultIndex);
+	bool SetPersistentScriptControlForScript(const std::string& name, lua_State* L, int valueIndex);
 	
 
 	void LoadPipeline();
@@ -1335,6 +1697,7 @@ public:
 	void LoadAssets();
 
 	shared_ptr<Scene> LoadModel(string fileName);
+	shared_ptr<Scene> CreateProceduralBlockCharacterScene(UINT32 seed);
 	shared_ptr<Scene> LoadBinaryMeshModel(const std::wstring& binaryFileName, const std::wstring& sourceFileName);
 
 	void InitRTPSO();
@@ -1366,6 +1729,9 @@ public:
 	bool LoadCameraState();
 	void SaveCameraState();
 	std::wstring GetCameraStatePath();
+	bool LoadSceneState();
+	void SaveSceneState();
+	std::wstring GetSceneStatePath();
 
 	void InitBlueNoiseTexture();
 
@@ -1441,6 +1807,7 @@ public:
 	void WaitForAsyncImageDumps();
 	void StopAsyncImageDumpWorkers();
 	bool EnqueueAsyncImageDump(DirectX::ScratchImage&& captured, const std::wstring& filePath, bool bHDR);
+	void ProcessRenderThreadRequests();
 #if WITH_STREAMLINE
 	void InitStreamline();
 	void ShutdownStreamline();
@@ -1451,10 +1818,18 @@ public:
 #endif
 
 	void OnInit();
+	void UpdateStartupLoadingProgress(float progress, const std::wstring& status);
+	void DrawStartupLoadingScreen();
+	bool IsStartupLoadingScreenActive() const { return bStartupLoadingScreenActive; }
 
 	void OnUpdate();
 
 	void OnRender();
+
+	void StartGameThread();
+	void StopGameThread();
+	void RenderThreadTick();
+	void GameThreadMain();
 
 	void OnDestroy();
 
@@ -1475,6 +1850,27 @@ public:
 private:
 	std::wstring GetAssetFullPath(LPCWSTR assetName) const;
 	void SetCustomWindowText(LPCWSTR text);
+	void PumpStartupWindowMessages();
+	void InitRenderSyncChannels();
+	void MarkSceneObjectRenderDirty(SceneObjectHandle handle, UINT32 dirtyBits);
+	void MarkSceneObjectRenderRemoved(SceneObjectHandle handle);
+	void MarkAllSceneObjectsForRenderSync();
+	void MarkPointLightRenderDirty(UINT32 id, UINT32 dirtyBits);
+	void MarkPointLightRenderRemoved(UINT32 id);
+	void MarkAllPointLightsForRenderSync();
+	void CollectRenderFrameDeltas();
+	void PublishRenderFrameDelta(RenderFrameDelta&& delta);
+	void ApplyPendingRenderFrameDeltas();
+	RenderFrameSourceState CaptureRenderFrameSourceState() const;
+	void ApplyRenderFrameSourceState(const RenderFrameSourceState& state);
+	void CollectFrameSourceRenderSync(RenderFrameDelta& delta);
+	void ApplyFrameSourceRenderSync(const RenderFrameDelta& delta);
+	void CollectSceneObjectRenderSync(RenderFrameDelta& delta);
+	void ApplySceneObjectRenderSync(const RenderFrameDelta& delta);
+	void CollectPointLightRenderSync(RenderFrameDelta& delta);
+	void ApplyPointLightRenderSync(const RenderFrameDelta& delta);
+	void BuildRenderFrameDerivedState(const RenderFrameSourceState* sourceState);
+	void ApplyRenderPointLightsToFrameParams();
 
 	UINT m_width = 0;
 	UINT m_height = 0;
@@ -1484,4 +1880,19 @@ private:
 	std::wstring m_title;
 	std::string m_imguiIniPath;
 	std::string m_imguiLogPath;
+	float StartupLoadingProgress = 0.0f;
+	std::wstring StartupLoadingStatus;
+	CpuClock::time_point StartupLoadingTimingStart = {};
+	CpuClock::time_point StartupLoadingTimingLast = {};
+	std::wstring StartupLoadingTimingLastStatus;
+	bool bStartupLoadingTimingStarted = false;
+	bool bStartupLoadingScreenActive = false;
+	std::mutex GameRenderStateMutex;
+	std::mutex GameThreadMutex;
+	std::condition_variable GameThreadCv;
+	std::thread GameThread;
+	bool bSplitGameRenderThreads = true;
+	bool bGameThreadStarted = false;
+	bool bGameThreadStopRequested = false;
+	bool bGameFrameReady = false;
 };

@@ -20,6 +20,14 @@
 
 namespace
 {
+	constexpr COLORREF kStartupBackgroundColor = RGB(6, 9, 13);
+
+	HBRUSH GetStartupBackgroundBrush()
+	{
+		static HBRUSH brush = CreateSolidBrush(kStartupBackgroundColor);
+		return brush;
+	}
+
 	void AppendStartupTrace(const std::wstring& line)
 	{
 		const std::filesystem::path tracePath = RuntimePaths::LogFile(L"vulkan_runtime_trace.log");
@@ -27,6 +35,13 @@ namespace
 		std::wofstream traceFile(tracePath, std::ios::app);
 		if (traceFile.is_open())
 			traceFile << line << L"\n";
+	}
+
+	void FillStartupBackground(HWND hWnd, HDC hdc)
+	{
+		RECT clientRect = {};
+		GetClientRect(hWnd, &clientRect);
+		FillRect(hdc, &clientRect, GetStartupBackgroundBrush());
 	}
 }
 
@@ -65,6 +80,7 @@ int Win32Application::Run(Corona* app, HINSTANCE hInstance, int nCmdShow)
 	windowClass.lpfnWndProc = WindowProc;
 	windowClass.hInstance = hInstance;
 	windowClass.hCursor = LoadCursor(NULL, IDC_ARROW);
+	windowClass.hbrBackground = GetStartupBackgroundBrush();
 	windowClass.lpszClassName = L"CoronaWindowClass";
 	RegisterClassExW(&windowClass);
 
@@ -102,6 +118,7 @@ int Win32Application::Run(Corona* app, HINSTANCE hInstance, int nCmdShow)
 	AppendStartupTrace(L"[Run] before OnInit");
 	app->OnInit();
 	m_appInitialized = true;
+	app->StartGameThread();
 	AppendStartupTrace(L"[Run] after OnInit");
 
 	ShowWindow(m_hwnd, effectiveCmdShow);
@@ -128,12 +145,18 @@ int Win32Application::Run(Corona* app, HINSTANCE hInstance, int nCmdShow)
 		}
 		else if (app)
 		{
-			app->OnUpdate();
-			app->OnRender();
+			app->RenderThreadTick();
 		}
 	}
 
+	AppendStartupTrace(
+		L"[Run] message loop exit message=" + std::to_wstring(msg.message) +
+		L", wParam=" + std::to_wstring(static_cast<int>(msg.wParam)));
+	if (app)
+		app->StopGameThread();
+	AppendStartupTrace(L"[Run] before OnDestroy");
 	app->OnDestroy();
+	AppendStartupTrace(L"[Run] after OnDestroy");
 
 	// Return this part of the WM_QUIT message to Windows.
 	return static_cast<char>(msg.wParam);
@@ -153,6 +176,7 @@ LRESULT CALLBACK Win32Application::WindowProc(HWND hWnd, UINT message, WPARAM wP
 	{
 	case WM_CREATE:
 		{
+			AppendStartupTrace(L"[WindowProc] WM_CREATE");
 			LPCREATESTRUCT pCreateStruct = reinterpret_cast<LPCREATESTRUCT>(lParam);
 			SetWindowLongPtr(hWnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(pCreateStruct->lpCreateParams));
 		}
@@ -175,6 +199,7 @@ LRESULT CALLBACK Win32Application::WindowProc(HWND hWnd, UINT message, WPARAM wP
 	case WM_RBUTTONDOWN:
 		if (app)
 		{
+			SetCapture(hWnd);
 			int xPos = GET_X_LPARAM(lParam);
 			int yPos = GET_Y_LPARAM(lParam);
 			app->OnRButtonDown(xPos, yPos);
@@ -182,6 +207,8 @@ LRESULT CALLBACK Win32Application::WindowProc(HWND hWnd, UINT message, WPARAM wP
 		return 0;
 
 	case WM_RBUTTONUP:
+		if (GetCapture() == hWnd)
+			ReleaseCapture();
 		if (app)
 		{
 			app->OnRButtonUp();
@@ -197,21 +224,38 @@ LRESULT CALLBACK Win32Application::WindowProc(HWND hWnd, UINT message, WPARAM wP
 		}
 		return 0;
 
+	case WM_ERASEBKGND:
+		FillStartupBackground(hWnd, reinterpret_cast<HDC>(wParam));
+		return 1;
+
 	case WM_PAINT:
-		if (app && m_appInitialized)
+		if (app && app->IsStartupLoadingScreenActive())
 		{
-			app->OnUpdate();
-			app->OnRender();
+			PAINTSTRUCT paint;
+			HDC hdc = BeginPaint(hWnd, &paint);
+			FillStartupBackground(hWnd, hdc);
+			EndPaint(hWnd, &paint);
+			app->DrawStartupLoadingScreen();
+		}
+		else if (app && m_appInitialized)
+		{
+			app->RenderThreadTick();
 		}
 		else
 		{
 			PAINTSTRUCT paint;
-			BeginPaint(hWnd, &paint);
+			HDC hdc = BeginPaint(hWnd, &paint);
+			FillStartupBackground(hWnd, hdc);
 			EndPaint(hWnd, &paint);
 		}
 		return 0;
 
+	case WM_CLOSE:
+		AppendStartupTrace(L"[WindowProc] WM_CLOSE");
+		break;
+
 	case WM_DESTROY:
+		AppendStartupTrace(L"[WindowProc] WM_DESTROY");
 		PostQuitMessage(0);
 		return 0;
 	}

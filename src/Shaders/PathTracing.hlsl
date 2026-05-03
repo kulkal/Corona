@@ -13,6 +13,14 @@ Texture2D NormalTex : register(t6);
 Texture2D RoughnessTex : register(t7);
 Texture2D MetallicTex : register(t8);
 
+#define MAX_POINT_LIGHTS 8
+
+struct PointLightParam
+{
+    float4 PositionAndRadius;
+    float4 ColorAndIntensity;
+};
+
 cbuffer ViewParameter : register(b0)
 {
     float4x4 ViewMatrix;
@@ -41,6 +49,11 @@ cbuffer ViewParameter : register(b0)
     uint bEnableSpecularGI;
     uint bEnableDirectDiffuse;
     uint bEnableDirectSpecular;
+    uint bEnableRTAO;
+    uint3 _rtaoPadding;
+    PointLightParam PointLights[MAX_POINT_LIGHTS];
+    uint PointLightCount;
+    float3 PointLightPadding;
 };
 
 SamplerState sampleWrap : register(s0);
@@ -415,6 +428,7 @@ void PathTracingClosestHit(inout PathTracingPayload payload, in BuiltInTriangleI
     float lightIntensity = LightDirAndIntensity.w;
     
     float3 directLight = float3(0, 0, 0);
+    float3 directF0 = lerp(float3(0.04, 0.04, 0.04), albedo, metallic);
 
     const uint kMaxDirectLightSamples = 8;
     uint directLightSampleCount = min(max(DirectLightSampleCount, 1u), kMaxDirectLightSamples);
@@ -455,8 +469,7 @@ void PathTracingClosestHit(inout PathTracingPayload payload, in BuiltInTriangleI
                 float3 diffuse = bEnableDirectDiffuse ? (albedo * (1.0 - metallic)) : float3(0, 0, 0);
 
                 // Match the raster lighting pass: direct specular uses the shared GGX BRDF.
-                float3 F0 = lerp(float3(0.04, 0.04, 0.04), albedo, metallic);
-                float3 specular = bEnableDirectSpecular ? EvaluateGGXSpecularBRDF(N, V, lightDir, roughness, F0) : float3(0, 0, 0);
+                float3 specular = bEnableDirectSpecular ? EvaluateGGXSpecularBRDF(N, V, lightDir, roughness, directF0) : float3(0, 0, 0);
 
                 // Combine diffuse and specular with light color
                 directLight += (diffuse + specular) * NdotL * lightIntensity * LightColor;
@@ -465,6 +478,55 @@ void PathTracingClosestHit(inout PathTracingPayload payload, in BuiltInTriangleI
     }
 
     directLight /= float(directLightSampleCount);
+
+    uint activePointLightCount = min(PointLightCount, MAX_POINT_LIGHTS);
+    [loop]
+    for (uint pointLightIndex = 0u; pointLightIndex < MAX_POINT_LIGHTS; ++pointLightIndex)
+    {
+        if (pointLightIndex >= activePointLightCount)
+            break;
+
+        float3 pointPosition = PointLights[pointLightIndex].PositionAndRadius.xyz;
+        float pointRadius = max(PointLights[pointLightIndex].PositionAndRadius.w, 0.01f);
+        float3 pointColor = max(PointLights[pointLightIndex].ColorAndIntensity.xyz, 0.0f.xxx);
+        float pointIntensity = max(PointLights[pointLightIndex].ColorAndIntensity.w, 0.0f);
+
+        float3 toLight = pointPosition - hitPos;
+        float distanceSq = max(dot(toLight, toLight), 1.0e-4f);
+        float distanceToLight = sqrt(distanceSq);
+        float3 pointLightDir = toLight / distanceToLight;
+        float rangeAttenuation = saturate(1.0f - distanceToLight / pointRadius);
+        rangeAttenuation *= rangeAttenuation;
+        float inverseSquareAttenuation = 1.0f / max(1.0f, distanceSq * 0.0001f);
+        float attenuation = rangeAttenuation * inverseSquareAttenuation;
+        float pointNdotL = max(0.0f, dot(N, pointLightDir));
+
+        if (pointNdotL <= 0.0f || attenuation <= 0.0f || pointIntensity <= 0.0f)
+            continue;
+
+        RayDesc pointShadowRay;
+        pointShadowRay.Origin = hitPos;
+        pointShadowRay.Direction = pointLightDir;
+        pointShadowRay.TMin = 0.01f;
+        pointShadowRay.TMax = max(distanceToLight - 0.02f, 0.01f);
+
+        ShadowRayPayload pointShadowPayload;
+        pointShadowPayload.bHit = true;
+        TraceRay(gRtScene,
+                 RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH |
+                 RAY_FLAG_SKIP_CLOSEST_HIT_SHADER |
+                 RAY_FLAG_FORCE_OPAQUE |
+                 RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES,
+                 0xFF, 0, 0, 1, pointShadowRay, pointShadowPayload);
+
+        if (!pointShadowPayload.bHit)
+        {
+            float3 pointRadiance = pointColor * pointIntensity * attenuation;
+            float3 pointDiffuse = bEnableDirectDiffuse ? (albedo * (1.0 - metallic)) : float3(0, 0, 0);
+            float3 pointSpecular = bEnableDirectSpecular ? EvaluateGGXSpecularBRDF(N, V, pointLightDir, roughness, directF0) : float3(0, 0, 0);
+            directLight += (pointDiffuse + pointSpecular) * pointNdotL * pointRadiance;
+        }
+    }
     
     // Set direct lighting contribution
     payload.radiance = directLight;

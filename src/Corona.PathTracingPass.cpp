@@ -98,7 +98,7 @@ void Corona::PathTracingPass()
 	}
 	
 	// Check if light direction or intensity changed
-	glm::vec3 currentLightDir = glm::normalize(LightDir);
+	glm::vec3 currentLightDir = RenderFrameNormalizedLightDir;
 	bool lightDirChanged = glm::length(currentLightDir - PrevPathTracingLightDir) > 0.0001f;
 	bool lightIntensityChanged = abs(LightIntensity - PrevPathTracingLightIntensity) > 0.0001f;
 	
@@ -109,7 +109,8 @@ void Corona::PathTracingPass()
 	
 	if (cameraChanged || lightDirChanged || lightIntensityChanged || skyColorChanged)
 	{
-		FrameCounter = 0;
+		RenderFrameIndex = 0;
+		FrameCounter = PathTracingViewParam.DebugMode == 0 ? 1u : 0u;
 		PrevPathTracingViewMat = ViewMat;
 		PrevPathTracingLightDir = currentLightDir;
 		PrevPathTracingLightIntensity = LightIntensity;
@@ -119,6 +120,28 @@ void Corona::PathTracingPass()
 		
 		// Note: Buffer will be cleared in shader when FrameCounter == 0
 	}
+
+	PathTracingViewParam.ViewMatrix = glm::transpose(ViewMat);
+	PathTracingViewParam.InvViewMatrix = glm::transpose(InvViewMat);
+	PathTracingViewParam.ProjMatrix = glm::transpose(ProjMat);
+	PathTracingViewParam.InvProjMatrix = glm::transpose(InvProjMat);
+	PathTracingViewParam.ProjectionParams = FrameProjectionParams;
+	PathTracingViewParam.LightDirAndIntensity = glm::vec4(RenderFrameNormalizedLightDir, LightIntensity);
+	PathTracingViewParam.DirectLightAngularRadius = RTShadowViewParam.ShadowLightRadius;
+	PathTracingViewParam.DirectLightSampleCount = std::clamp(PathTracingViewParam.DirectLightSampleCount, 1u, 8u);
+	PathTracingViewParam.RandomOffset = glm::vec2(RenderFrameShaderTime, RenderFrameShaderTime);
+	PathTracingViewParam.FrameCounter = RenderFrameIndex;
+	PathTracingViewParam.ViewSpreadAngle = glm::tan(Fov * 0.5f) / (0.5f * m_height);
+	PathTracingViewParam.SkyColorTop = SkyColorTop;
+	PathTracingViewParam.SkyIntensity = SkyIntensity;
+	PathTracingViewParam.SkyColorBottom = SkyColorBottom;
+	PathTracingViewParam.LightColor = RenderFrameLightColor;
+	PathTracingViewParam.bEnableDiffuseGI = bEnableDiffuseGI ? 1u : 0u;
+	PathTracingViewParam.bEnableSpecularGI = bEnableSpecularGI ? 1u : 0u;
+	PathTracingViewParam.bEnableDirectDiffuse = bEnableDirectDiffuse ? 1u : 0u;
+	PathTracingViewParam.bEnableDirectSpecular = bEnableDirectSpecular ? 1u : 0u;
+	PathTracingViewParam.bEnableRTAO = 0u;
+	ApplyRenderPointLightsToFrameParams();
 
 	RTPassBuilder pass(*this, PSO_PATH_TRACING);
 	pass.BeginScene()

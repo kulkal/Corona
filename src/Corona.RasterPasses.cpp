@@ -585,7 +585,7 @@ void Corona::InitTemporalAAPass()
 
 
 		TEMP_TemporalAAPSO->BindSampler("samplerWrap", 0);
-		TEMP_TemporalAAPSO->BindCBV("LightingParam", 0, sizeof(LightingParam));
+		TEMP_TemporalAAPSO->BindCBV("TemporalAAParam", 0, sizeof(TemporalAAParam));
 	bool bSuccess = TEMP_TemporalAAPSO->Init();
 	if (bSuccess)
 		TemporalAAPSO = TEMP_TemporalAAPSO;
@@ -1222,6 +1222,7 @@ void Corona::LightingPass()
 	LightingParam Param;
 	Param.ViewMatrix = glm::transpose(ViewMat);
 	Param.InvViewMatrix = glm::transpose(InvViewMat);
+	Param.InvProjMatrix = glm::transpose(InvProjMat);
 	Param.LightDir = glm::vec4(normalizedLightDir, LightIntensity);
 	
 	Param.RTSize.x = GetRenderWidth();
@@ -1239,13 +1240,25 @@ void Corona::LightingPass()
 	Param.bEnableDirectDiffuse = bEnableDirectDiffuse ? 1 : 0;
 	Param.bEnableDirectSpecular = bEnableDirectSpecular ? 1 : 0;
 	Param.bEnableRTAO = (bEnableRTAO && bRTAOOutputValidThisFrame && AmbientOcclusionBuffer) ? 1 : 0;
-	Param.bEnableSkyLighting = (bEnableSkyLighting && bSkyLightingOutputValidThisFrame && SkyLightingBuffer) ? 1 : 0;
+	Param.bEnableSkyLighting = (bEnableSkyLighting && bEnableRayTracedSkyLighting && bSkyLightingOutputValidThisFrame && SkyLightingBuffer) ? 1 : 0;
 	Param.RTAOIndirectStrength = RTAOIndirectStrength;
 	Param.RTAOIndirectFloor = RTAOIndirectFloor;
 	Param.SurfaceBounceStrength = std::clamp(SurfaceBounceStrength, 0.0f, 1.0f);
 	Param.SurfaceBounceSaturation = std::clamp(SurfaceBounceSaturation, 0.0f, 1.0f);
 	Param.SkyLightingStrength = std::clamp(SkyLightingStrength, 0.0f, 1.0f);
 	Param.LightingOutputMode = 0;
+	Param.PointLightCount = 0;
+	for (const PointLightState& pointLight : RenderWorld.PointLights)
+	{
+		if (!pointLight.bEnabled || Param.PointLightCount >= MaxPointLights)
+			continue;
+
+		const UINT32 pointLightIndex = Param.PointLightCount++;
+		Param.PointLights[pointLightIndex].PositionAndRadius =
+			glm::vec4(pointLight.Position, std::max(pointLight.Radius, 0.01f));
+		Param.PointLights[pointLightIndex].ColorAndIntensity =
+			glm::vec4(glm::max(pointLight.Color, glm::vec3(0.0f)), std::max(pointLight.Intensity, 0.0f));
+	}
 
 	glm::normalize(Param.LightDir);
 
@@ -1419,7 +1432,7 @@ void Corona::TemporalAAPass()
 	Param.HistoryValid = bTemporalAAHistoryValid ? 1u : 0u;
 	Param.CurrentJitter = IsJitterEnabled() ? (CurrentJitter * 0.5f) : glm::vec2(0.0f);
 
-	TemporalAAPSO->SetCBVValue("LightingParam", &Param);
+	TemporalAAPSO->SetCBVValue("TemporalAAParam", &Param);
 	TemporalAAPSO->Apply();
 
 	renderBackend->SetRenderTarget(ResolveTarget);
@@ -1578,6 +1591,7 @@ void Corona::DrawScene(shared_ptr<Scene> scene, const glm::mat4x4& instanceTrans
 			objCB.ViewDir.y = m_camera.m_lookDirection.y;
 			objCB.ViewDir.z = m_camera.m_lookDirection.z;
 			objCB.ViewDir.w = 0.0f;
+			objCB.BaseColorFactor = drawcall.mat ? drawcall.mat->BaseColorFactor : glm::vec4(1.0f);
 
 			objCB.RTSize.x = GetRenderWidth();
 			objCB.RTSize.y = GetRenderHeight();
@@ -1660,15 +1674,15 @@ void Corona::GBufferPass()
 
 	if (!bMultiThreadRendering)
 	{
-		for (const SceneObject& object : SceneObjects)
+		for (const SceneObject& object : RenderWorld.SceneObjects)
 		{
 			if (!object.bVisible || !object.ScenePtr)
 				continue;
 			DrawScene(
 				object.ScenePtr,
 				object.Transform,
-				object.Handle == SponzaObject ? SponzaRoughnessMultiplier : (object.Handle == ShaderBallObject ? ShaderBallRoughnessMultiplier : object.Roughness),
-				object.Handle == ShaderBallObject ? 1.0f : object.Metallic,
+				object.Roughness,
+				object.Metallic,
 				object.bOverrideRoughnessMetallic);
 		}
 	}

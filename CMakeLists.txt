@@ -38,7 +38,7 @@ file(GLOB CORONA_SHADER_FILES CONFIGURE_DEPENDS
 set_source_files_properties(${CORONA_SHADER_FILES} PROPERTIES HEADER_FILE_ONLY TRUE)
 source_group(TREE "${CORONA_SRC_DIR}/Shaders" PREFIX "Shaders" FILES ${CORONA_SHADER_FILES})
 
-file(GLOB CORONA_SCRIPT_FILES CONFIGURE_DEPENDS
+file(GLOB_RECURSE CORONA_SCRIPT_FILES CONFIGURE_DEPENDS
     "${CORONA_SRC_DIR}/scripts/*.luau"
 )
 set_source_files_properties(${CORONA_SCRIPT_FILES} PROPERTIES HEADER_FILE_ONLY TRUE)
@@ -103,6 +103,11 @@ set(CORONA_PHYSX_DLLS
 set(CORONA_REPO_STREAMLINE_SDK_ROOT "${CORONA_SRC_DIR}/external/streamline-sdk")
 set(CORONA_STREAMLINE_SDK_ROOT "${CORONA_REPO_STREAMLINE_SDK_ROOT}" CACHE PATH "Path to the NVIDIA Streamline SDK")
 if(CORONA_STREAMLINE_SDK_ROOT MATCHES "^[Hh]:[/\\\\]dev[/\\\\]streamline_test[/\\\\]streamline-sdk$")
+    set(CORONA_STREAMLINE_SDK_ROOT "${CORONA_REPO_STREAMLINE_SDK_ROOT}" CACHE PATH "Path to the NVIDIA Streamline SDK" FORCE)
+endif()
+if((NOT EXISTS "${CORONA_STREAMLINE_SDK_ROOT}/include/sl.h" OR NOT EXISTS "${CORONA_STREAMLINE_SDK_ROOT}/lib/x64/sl.interposer.lib")
+   AND EXISTS "${CORONA_REPO_STREAMLINE_SDK_ROOT}/include/sl.h"
+   AND EXISTS "${CORONA_REPO_STREAMLINE_SDK_ROOT}/lib/x64/sl.interposer.lib")
     set(CORONA_STREAMLINE_SDK_ROOT "${CORONA_REPO_STREAMLINE_SDK_ROOT}" CACHE PATH "Path to the NVIDIA Streamline SDK" FORCE)
 endif()
 set(CORONA_STREAMLINE_LIB "")
@@ -176,6 +181,7 @@ target_link_libraries(Corona PRIVATE
     ${CORONA_PHYSX_LIBS}
     Luau.Compiler
     Luau.VM
+    Dbghelp
 )
 if(CORONA_STREAMLINE_LIB)
     target_link_libraries(Corona PRIVATE "${CORONA_STREAMLINE_LIB}")
@@ -324,6 +330,11 @@ target_compile_definitions(Corona PRIVATE
     $<$<CONFIG:Debug>:DEBUG>
     $<$<CONFIG:Release>:NDEBUG>
 )
+
+if(MSVC)
+    target_compile_options(Corona PRIVATE $<$<CONFIG:Release>:/Zi>)
+    target_link_options(Corona PRIVATE $<$<CONFIG:Release>:/DEBUG:FULL>)
+endif()
 
 set_target_properties(Corona PROPERTIES
     VS_DEBUGGER_WORKING_DIRECTORY "${CORONA_OUT_DIR}"

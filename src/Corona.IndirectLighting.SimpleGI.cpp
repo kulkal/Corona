@@ -73,7 +73,21 @@ void Corona::RaytraceGIPass()
 	renderBackend->ClearTextureUAVFloat(DiffuseGIRawAux.get(), clearGI);
 	renderBackend->ClearTextureUAVFloat(DiffuseGIRaw.get(), clearGI);
 
-	RTGIViewParam.ViewSpreadAngle = glm::tan(Fov * 0.5) / (0.5f * GetRenderHeight());
+	RTGIViewParam.ViewMatrix = glm::transpose(ViewMat);
+	RTGIViewParam.InvViewMatrix = glm::transpose(InvViewMat);
+	RTGIViewParam.ProjMatrix = glm::transpose(UnjitteredProjMat);
+	RTGIViewParam.InvProjMatrix = glm::transpose(UnjitteredInvProjMat);
+	RTGIViewParam.ProjectionParams = FrameProjectionParams;
+	RTGIViewParam.LightDir = glm::vec4(RenderFrameNormalizedLightDir, LightIntensity);
+	RTGIViewParam.RandomOffset = glm::vec2(RenderFrameShaderTime, RenderFrameShaderTime);
+	RTGIViewParam.FrameCounter = RenderFrameIndex;
+	RTGIViewParam.ViewSpreadAngle = glm::tan(Fov * 0.5f) / (0.5f * GetRenderHeight());
+	RTGIViewParam.NoiseMode = RenderFrameRayNoiseMode;
+	RTGIViewParam.bIncludeSkyLighting = RenderFrameDiffuseGISkyLightingEnabled;
+	RTGIViewParam.SkyColorTop = SkyColorTop;
+	RTGIViewParam.SkyIntensity = RenderFrameDiffuseGISkyIntensity;
+	RTGIViewParam.SkyColorBottom = SkyColorBottom;
+	RTGIViewParam.LightColor = RenderFrameLightColor;
 
 	RTPassBuilder pass(*this, PSO_RT_GI);
 	pass.BeginScene()

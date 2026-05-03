@@ -147,8 +147,11 @@ void Corona::SpatialHashGIPass()
 	SpatialHashGICB.HashEntryMask = SpatialHashGIEntryCount - 1u;
 	SpatialHashGICB.ActiveCellCapacity = SpatialHashGIActiveCellCapacity;
 	SpatialHashGICB.TraceCellBudget = spatialHashTraceCellBudget;
+	SpatialHashGICB.InvViewMatrix = glm::transpose(InvViewMat);
+	SpatialHashGICB.InvProjMatrix = glm::transpose(UnjitteredInvProjMat);
+	SpatialHashGICB.ProjectionParams = FrameProjectionParams;
 	SpatialHashGICB.RTSize = glm::vec2(GetRenderWidth(), GetRenderHeight());
-	SpatialHashGICB.FrameIndex = FrameCounter;
+	SpatialHashGICB.FrameIndex = RenderFrameIndex;
 	SpatialHashGICB.HistoryValid = bSpatialHashGIHistoryValid ? 1u : 0u;
 	SpatialHashGICB.MaxProbeSteps = std::clamp(SpatialHashGICB.MaxProbeSteps, 1u, 16u);
 	SpatialHashGICB.CellSize = std::clamp(SpatialHashGICB.CellSize, 4.0f, 256.0f);
@@ -156,14 +159,22 @@ void Corona::SpatialHashGIPass()
 	SpatialHashGICB.SmoothingStrength = std::clamp(SpatialHashGICB.SmoothingStrength, 0.0f, 1.0f);
 	SpatialHashGICB.TemporalAlpha = std::clamp(SpatialHashGICB.TemporalAlpha, 0.02f, 1.0f);
 	SpatialHashGICB.InterpolationStrength = std::clamp(SpatialHashGICB.InterpolationStrength, 0.0f, 1.0f);
+	RTSpatialHashGIViewParam.LightDir = glm::vec4(RenderFrameNormalizedLightDir, LightIntensity);
 	RTSpatialHashGIViewParam.HashEntryCount = spatialHashTraceCellBudget;
-	RTSpatialHashGIViewParam.FrameCounter = FrameCounter;
+	RTSpatialHashGIViewParam.FrameCounter = RenderFrameIndex;
+	RTSpatialHashGIViewParam.BlueNoiseOffsetStride = RTGIViewParam.BlueNoiseOffsetStride;
+	RTSpatialHashGIViewParam.NoiseMode = RenderFrameRayNoiseMode;
 	RTSpatialHashGIViewParam.RaysPerCell = std::clamp(RTSpatialHashGIViewParam.RaysPerCell, 1u, 8u);
 	RTSpatialHashGIViewParam.MaxBounces = std::clamp(RTSpatialHashGIViewParam.MaxBounces, 1u, 8u);
 	RTSpatialHashGIViewParam.CellSize = SpatialHashGICB.CellSize;
 	RTSpatialHashGIViewParam.RayBias = std::clamp(SpatialHashGICB.CellSize * 0.02f, 0.05f, 0.5f);
 	RTSpatialHashGIViewParam.ViewSpreadAngle = glm::tan(Fov * 0.5f) / (0.5f * GetRenderHeight());
+	RTSpatialHashGIViewParam.SkyColorTop = SkyColorTop;
+	RTSpatialHashGIViewParam.SkyIntensity = RenderFrameDiffuseGISkyIntensity;
+	RTSpatialHashGIViewParam.SkyColorBottom = SkyColorBottom;
+	RTSpatialHashGIViewParam.LightColor = RenderFrameLightColor;
 	RTSpatialHashGIViewParam.ActiveCellCapacity = SpatialHashGIActiveCellCapacity;
+	RTSpatialHashGIViewParam.bIncludeSkyLighting = RenderFrameDiffuseGISkyLightingEnabled;
 
 	renderBackend->TransitionBuffer(SpatialHashGIActiveFlags.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
 	renderBackend->TransitionBuffer(SpatialHashGIActiveCellSlots.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);

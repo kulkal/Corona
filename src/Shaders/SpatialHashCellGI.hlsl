@@ -38,7 +38,7 @@ cbuffer ViewParameter : register(b0)
     float3 LightColor;
     float _padding2;
     uint ActiveCellCapacity;
-    uint _padding3;
+    uint bIncludeSkyLighting;
     uint _padding4;
     uint _padding5;
 };
@@ -144,7 +144,14 @@ float3x3 BuildTBN(float3 normal)
 float3 EvaluateSkyColor(float3 direction)
 {
     float t = 0.5f * (direction.y + 1.0f);
-    return lerp(SkyColorBottom, SkyColorTop, t) * SkyIntensity;
+    return max(lerp(SkyColorBottom, SkyColorTop, t) * SkyIntensity, 0.0f.xxx);
+}
+
+float3 EvaluateSkyDiffuseBounce(float3 normal)
+{
+    float3 averageSky = 0.5f * (SkyColorTop + SkyColorBottom);
+    float3 skyGradient = 0.5f * (SkyColorTop - SkyColorBottom);
+    return max((averageSky + (2.0f / 3.0f) * skyGradient * normal.y) * SkyIntensity, 0.0f.xxx);
 }
 
 bool IsDirectLightVisible(float3 worldPos, float3 normal)
@@ -225,13 +232,15 @@ float3 TraceDiffusePath(float3 origin, float3 direction, uint2 noiseCoord, uint 
 
         if (!payload.bHit)
         {
-            // Direct sky diffuse is supplied by the dedicated sky-lighting pass.
-            // Spatial hash GI should not add environment miss energy on top.
+            if (bIncludeSkyLighting != 0u)
+                radiance += throughput * EvaluateSkyColor(rayDirection);
             break;
         }
 
         float3 hitNormal = SafeNormalize(payload.normal, float3(0.0f, 1.0f, 0.0f));
         float3 hitAlbedo = max(SanitizeFloat3(payload.color), 0.0f.xxx);
+        if (bIncludeSkyLighting != 0u)
+            radiance += throughput * EvaluateSkyDiffuseBounce(hitNormal) * hitAlbedo;
         radiance += throughput * EvaluateDirectSurfaceRadiance(payload.position, hitNormal, hitAlbedo);
 
         if (bounceIndex + 1u >= bounceCount)

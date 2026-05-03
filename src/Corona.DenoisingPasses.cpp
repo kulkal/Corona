@@ -153,6 +153,8 @@ void Corona::SpatialDenoisingPass()
 
 	UINT WriteIndex = 0;
 	UINT ReadIndex = 1;
+	SpatialFilterCB.ProjectionParams = FrameProjectionParams;
+	SpatialFilterCB.AccumulatedFrames = IndirectAccumulatedFrames;
 	for (int i = 0; i < 4; i++)
 	{
 		WriteIndex = 1 - WriteIndex; // 1
@@ -262,6 +264,14 @@ void Corona::TemporalDenoisingPass()
 	//TemporalDenoisingFilterPSO->SetUAV("OutSpecularGIDS", SpecularGISpatial[0]->GpuHandleUAV, renderBackend->GetGraphicsCommandList());
 
 	TemporalDenoisingFilterPSO->SetSampler("BilinearClamp", samplerBilinearWrap.get());
+	TemporalFilterCB.InvViewMatrix = glm::transpose(InvViewMat);
+	TemporalFilterCB.InvProjMatrix = glm::transpose(InvProjMat);
+	TemporalFilterCB.ProjectionParams = FrameProjectionParams;
+	TemporalFilterCB.RTSize = glm::vec2(GetRenderWidth(), GetRenderHeight());
+	TemporalFilterCB.FrameIndex = RenderFrameIndex;
+	TemporalFilterCB.AccumulationAlpha = bTemporalDenoiserHistoryValid ? (1.0f / float(std::min(IndirectAccumulatedFrames + 1u, 32u))) : 1.0f;
+	TemporalFilterCB.SpecularAccumulationAlpha = bTemporalDenoiserHistoryValid ? (1.0f / float(std::min(IndirectAccumulatedFrames + 1u, 64u))) : 1.0f;
+	TemporalFilterCB.JitterOffset = IsJitterEnabled() ? JitterOffset : glm::vec2(0.0f);
 	TemporalFilterCB.HistoryValid = bTemporalDenoiserHistoryValid ? 1u : 0u;
 
 	TemporalDenoisingFilterPSO->SetCBVValue("TemporalFilterConstant", &TemporalFilterCB);

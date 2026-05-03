@@ -413,6 +413,22 @@ namespace
 		"ImGui",
 	};
 
+	constexpr std::array<const char*, 5> kCpuUpdatePhaseNames = {
+		"Camera / Physics",
+		"Input",
+		"Luau Scripts",
+		"Camera Path",
+		"Render Sync",
+	};
+
+	constexpr std::array<const char*, 5> kCpuUpdatePhaseLogColumnNames = {
+		"camera_physics",
+		"input",
+		"luau_scripts",
+		"camera_path",
+		"render_sync",
+	};
+
 	const std::filesystem::path kFramePerfLogPath =
 		RuntimePaths::LogFile(L"fps_perf.log");
 
@@ -421,6 +437,13 @@ namespace
 		const std::chrono::steady_clock::time_point& end)
 	{
 		return std::chrono::duration<double, std::milli>(end - begin).count();
+	}
+
+	std::wstring FormatMilliseconds(double milliseconds)
+	{
+		std::wostringstream stream;
+		stream << std::fixed << std::setprecision(3) << milliseconds;
+		return stream.str();
 	}
 
 	constexpr char kCoronaMeshMagic[8] = { 'C', 'R', 'N', 'M', 'E', 'S', 'H', '\0' };
@@ -691,6 +714,7 @@ Corona::Corona(UINT width, UINT height, std::wstring name) :
 
 Corona::~Corona()
 {
+	StopGameThread();
 	ShutdownLuauScripting();
 	ShutdownCpuPhysics();
 }
@@ -721,7 +745,11 @@ void Corona::BeginFramePerfLogging()
 		{
 			logFile << "# Corona frame performance log. One row is an approximately one-second sample.\n";
 			logFile << "sample,total_frames,backend,mode,timer_fps,avg_fps,avg_frame_ms,min_frame_ms,max_frame_ms,"
-				"avg_begin_frame_ms,avg_record_ms,avg_execute_ms,avg_end_frame_ms";
+				"avg_update_ms,avg_begin_frame_ms,avg_record_ms,avg_execute_ms,avg_end_frame_ms";
+			for (UINT phaseIndex = 0; phaseIndex < CpuUpdatePhaseCount; ++phaseIndex)
+			{
+				logFile << ",avg_update_" << kCpuUpdatePhaseLogColumnNames[phaseIndex] << "_ms";
+			}
 			for (UINT passIndex = 0; passIndex < GpuPassCount; ++passIndex)
 			{
 				logFile << ",cpu_" << GetGpuPassName(static_cast<EGpuPass>(passIndex)) << "_ms";
@@ -753,6 +781,11 @@ void Corona::FinishFramePerfLogging(double beginFrameMs, double executeMs, doubl
 	FramePerfLogAccumFrameMs += frameMs;
 	FramePerfLogMinFrameMs = std::min(FramePerfLogMinFrameMs, frameMs);
 	FramePerfLogMaxFrameMs = std::max(FramePerfLogMaxFrameMs, frameMs);
+	FramePerfLogAccumCpuUpdateMs += CpuUpdateLastTimeMs;
+	for (UINT phaseIndex = 0; phaseIndex < CpuUpdatePhaseCount; ++phaseIndex)
+	{
+		FramePerfLogAccumCpuUpdatePhaseMs[phaseIndex] += CpuUpdatePhaseLastTimeMs[phaseIndex];
+	}
 	FramePerfLogAccumBeginFrameMs += beginFrameMs;
 	FramePerfLogAccumRecordMs += recordMs;
 	FramePerfLogAccumExecuteMs += executeMs;
@@ -787,10 +820,15 @@ void Corona::FinishFramePerfLogging(double beginFrameMs, double executeMs, doubl
 			<< "," << avgFrameMs
 			<< "," << FramePerfLogMinFrameMs
 			<< "," << FramePerfLogMaxFrameMs
+			<< "," << (FramePerfLogAccumCpuUpdateMs / sampleFrameCount)
 			<< "," << (FramePerfLogAccumBeginFrameMs / sampleFrameCount)
 			<< "," << (FramePerfLogAccumRecordMs / sampleFrameCount)
 			<< "," << (FramePerfLogAccumExecuteMs / sampleFrameCount)
 			<< "," << (FramePerfLogAccumEndFrameMs / sampleFrameCount);
+		for (UINT phaseIndex = 0; phaseIndex < CpuUpdatePhaseCount; ++phaseIndex)
+		{
+			logFile << "," << (FramePerfLogAccumCpuUpdatePhaseMs[phaseIndex] / sampleFrameCount);
+		}
 		for (UINT passIndex = 0; passIndex < GpuPassCount; ++passIndex)
 		{
 			logFile << "," << (CpuPassAccumTimeMs[passIndex] / sampleFrameCount);
@@ -807,6 +845,8 @@ void Corona::FinishFramePerfLogging(double beginFrameMs, double executeMs, doubl
 	FramePerfLogAccumFrameMs = 0.0;
 	FramePerfLogMinFrameMs = 1.0e30;
 	FramePerfLogMaxFrameMs = 0.0;
+	FramePerfLogAccumCpuUpdateMs = 0.0;
+	FramePerfLogAccumCpuUpdatePhaseMs.fill(0.0);
 	FramePerfLogAccumBeginFrameMs = 0.0;
 	FramePerfLogAccumRecordMs = 0.0;
 	FramePerfLogAccumExecuteMs = 0.0;
@@ -924,6 +964,57 @@ void Corona::EndGpuPassTiming(EGpuPass pass)
 const char* Corona::GetGpuPassName(EGpuPass pass) const
 {
 	return kGpuPassNames[static_cast<size_t>(pass)];
+}
+
+const char* Corona::GetCpuUpdatePhaseName(ECpuUpdatePhase phase) const
+{
+	return kCpuUpdatePhaseNames[static_cast<size_t>(phase)];
+}
+
+void Corona::AddCpuUpdatePhaseTiming(
+	ECpuUpdatePhase phase,
+	const CpuClock::time_point& begin,
+	const CpuClock::time_point& end)
+{
+	const UINT phaseIndex = static_cast<UINT>(phase);
+	CpuUpdatePhaseLastTimeMs[phaseIndex] += static_cast<float>(ElapsedMilliseconds(begin, end));
+}
+
+void Corona::FinishCpuUpdateTiming(
+	const CpuClock::time_point& begin,
+	const CpuClock::time_point& end)
+{
+	CpuUpdateLastTimeMs = static_cast<float>(ElapsedMilliseconds(begin, end));
+	CpuUpdateHistoryMs.push_back(CpuUpdateLastTimeMs);
+	for (UINT phaseIndex = 0; phaseIndex < CpuUpdatePhaseCount; ++phaseIndex)
+	{
+		CpuUpdatePhaseHistoryMs[phaseIndex].push_back(CpuUpdatePhaseLastTimeMs[phaseIndex]);
+	}
+	TrimCpuUpdateTimingHistory();
+}
+
+void Corona::TrimCpuUpdateTimingHistory()
+{
+	auto trimAndAverage = [this](std::deque<float>& history) -> float
+	{
+		while (history.size() > GpuTimingAverageFrameCount)
+		{
+			history.pop_front();
+		}
+
+		float sumMs = 0.0f;
+		for (float sampleMs : history)
+		{
+			sumMs += sampleMs;
+		}
+		return history.empty() ? 0.0f : sumMs / static_cast<float>(history.size());
+	};
+
+	CpuUpdateAverageTimeMs = trimAndAverage(CpuUpdateHistoryMs);
+	for (UINT phaseIndex = 0; phaseIndex < CpuUpdatePhaseCount; ++phaseIndex)
+	{
+		CpuUpdatePhaseAverageTimeMs[phaseIndex] = trimAndAverage(CpuUpdatePhaseHistoryMs[phaseIndex]);
+	}
 }
 
 #if WITH_STREAMLINE
@@ -1568,6 +1659,8 @@ void Corona::ReloadRenderResolutionAssets()
 	PrevIndirectSkyColorTop = SkyColorTop;
 	PrevIndirectSkyColorBottom = SkyColorBottom;
 	PrevIndirectSkyIntensity = SkyIntensity;
+	PrevIndirectSkyLightingStrength = SkyLightingStrength;
+	PrevIndirectDiffuseGISkyLightingEnabled = bEnableSkyLighting && !bEnableRayTracedSkyLighting;
 	PrevIndirectPrefilteredEnvRoughnessThreshold = PrefilteredEnvRoughnessThreshold;
 	PrevIndirectPrefilteredEnvRoughnessFade = PrefilteredEnvRoughnessFade;
 	PrevIndirectPrefilteredEnvSpecularEnabled = bEnablePrefilteredEnvSpecular;
@@ -4615,6 +4708,943 @@ void Corona::SaveCameraState()
 	file << "light_intensity " << LightIntensity << '\n';
 }
 
+std::wstring Corona::GetSceneStatePath()
+{
+	return RuntimePaths::ConfigFile(L"scene_state.cfg").wstring();
+}
+
+bool Corona::LoadSceneState()
+{
+	std::ifstream file{ std::filesystem::path(GetSceneStatePath()) };
+	if (!file.is_open())
+		return false;
+
+	std::string versionTag;
+	int version = 0;
+	if (!(file >> versionTag >> version))
+		return false;
+	if (versionTag != "version" || version != 1)
+		return false;
+
+	PersistentScriptControls.clear();
+	PointLights.clear();
+	NextPointLightId = 1;
+
+	UINT32 maxLoadedPointLightId = 0;
+	std::string token;
+	while (file >> token)
+	{
+		if (token == "control_number")
+		{
+			std::string name;
+			float value = 0.0f;
+			if (!(file >> name >> value))
+				break;
+
+			PersistentScriptControlValue controlValue;
+			controlValue.Type = PersistentScriptControlType::Number;
+			controlValue.Number = value;
+			PersistentScriptControls[name] = controlValue;
+		}
+		else if (token == "control_bool")
+		{
+			std::string name;
+			int value = 0;
+			if (!(file >> name >> value))
+				break;
+
+			PersistentScriptControlValue controlValue;
+			controlValue.Type = PersistentScriptControlType::Bool;
+			controlValue.Bool = value != 0;
+			PersistentScriptControls[name] = controlValue;
+		}
+		else if (token == "control_vec3")
+		{
+			std::string name;
+			glm::vec3 value(0.0f);
+			if (!(file >> name >> value.x >> value.y >> value.z))
+				break;
+
+			PersistentScriptControlValue controlValue;
+			controlValue.Type = PersistentScriptControlType::Vec3;
+			controlValue.Vec3 = value;
+			PersistentScriptControls[name] = controlValue;
+		}
+		else if (token == "next_point_light_id")
+		{
+			file >> NextPointLightId;
+		}
+		else if (token == "point_light_count")
+		{
+			size_t ignoredCount = 0;
+			file >> ignoredCount;
+		}
+		else if (token == "point_light")
+		{
+			PointLightState pointLight;
+			int enabled = 1;
+			if (!(file >>
+				pointLight.Id >>
+				enabled >>
+				pointLight.Position.x >>
+				pointLight.Position.y >>
+				pointLight.Position.z >>
+				pointLight.Radius >>
+				pointLight.Intensity >>
+				pointLight.Color.x >>
+				pointLight.Color.y >>
+				pointLight.Color.z))
+			{
+				break;
+			}
+
+			if (pointLight.Id == 0)
+				pointLight.Id = ++maxLoadedPointLightId;
+			pointLight.bEnabled = enabled != 0;
+			pointLight.Radius = std::clamp(pointLight.Radius, 1.0f, 100000.0f);
+			pointLight.Intensity = std::max(0.0f, pointLight.Intensity);
+			pointLight.Color = glm::max(pointLight.Color, glm::vec3(0.0f));
+			PointLights.push_back(pointLight);
+			maxLoadedPointLightId = std::max(maxLoadedPointLightId, pointLight.Id);
+		}
+		else
+		{
+			std::string ignoredLine;
+			std::getline(file, ignoredLine);
+		}
+	}
+
+	NextPointLightId = std::max(NextPointLightId, maxLoadedPointLightId + 1);
+	MarkAllPointLightsForRenderSync();
+	bPersistentSceneStateDirty = false;
+	return true;
+}
+
+void Corona::SaveSceneState()
+{
+	const std::filesystem::path sceneStatePath = std::filesystem::path(GetSceneStatePath());
+	std::filesystem::create_directories(sceneStatePath.parent_path());
+	std::ofstream file{ sceneStatePath, std::ios::trunc };
+	if (!file.is_open())
+		return;
+
+	auto isSafeControlName = [](const std::string& name)
+	{
+		if (name.empty())
+			return false;
+		for (char c : name)
+		{
+			if (static_cast<unsigned char>(c) <= 0x20)
+				return false;
+		}
+		return true;
+	};
+
+	file << std::fixed << std::setprecision(9);
+	file << "version 1\n";
+	for (const auto& [name, value] : PersistentScriptControls)
+	{
+		if (!isSafeControlName(name))
+			continue;
+
+		switch (value.Type)
+		{
+		case PersistentScriptControlType::Number:
+			file << "control_number " << name << ' ' << value.Number << '\n';
+			break;
+		case PersistentScriptControlType::Bool:
+			file << "control_bool " << name << ' ' << (value.Bool ? 1 : 0) << '\n';
+			break;
+		case PersistentScriptControlType::Vec3:
+			file << "control_vec3 " << name << ' ' << value.Vec3.x << ' ' << value.Vec3.y << ' ' << value.Vec3.z << '\n';
+			break;
+		default:
+			break;
+		}
+	}
+
+	file << "next_point_light_id " << NextPointLightId << '\n';
+	file << "point_light_count " << PointLights.size() << '\n';
+	for (const PointLightState& pointLight : PointLights)
+	{
+		file <<
+			"point_light " <<
+			pointLight.Id << ' ' <<
+			(pointLight.bEnabled ? 1 : 0) << ' ' <<
+			pointLight.Position.x << ' ' <<
+			pointLight.Position.y << ' ' <<
+			pointLight.Position.z << ' ' <<
+			pointLight.Radius << ' ' <<
+			pointLight.Intensity << ' ' <<
+			pointLight.Color.x << ' ' <<
+			pointLight.Color.y << ' ' <<
+			pointLight.Color.z << '\n';
+	}
+
+	bPersistentSceneStateDirty = false;
+}
+
+void Corona::InitRenderSyncChannels()
+{
+	if (bRenderSyncChannelsInitialized)
+		return;
+
+	RenderSyncChannels.push_back({ "frame_source", &Corona::CollectFrameSourceRenderSync, &Corona::ApplyFrameSourceRenderSync });
+	RenderSyncChannels.push_back({ "scene_objects", &Corona::CollectSceneObjectRenderSync, &Corona::ApplySceneObjectRenderSync });
+	RenderSyncChannels.push_back({ "point_lights", &Corona::CollectPointLightRenderSync, &Corona::ApplyPointLightRenderSync });
+	bRenderSyncChannelsInitialized = true;
+}
+
+void Corona::MarkSceneObjectRenderDirty(SceneObjectHandle handle, UINT32 dirtyBits)
+{
+	if (handle == InvalidSceneObjectHandle || dirtyBits == 0)
+		return;
+
+	const auto it = std::find_if(SceneObjects.begin(), SceneObjects.end(), [handle](const SceneObject& object)
+	{
+		return object.Handle == handle;
+	});
+	if (it == SceneObjects.end())
+		return;
+
+	const bool bWasClean = it->RenderDirtyBits == 0;
+	it->RenderDirtyBits |= dirtyBits;
+	if (bWasClean)
+		DirtySceneObjectHandles.push_back(handle);
+}
+
+void Corona::MarkSceneObjectRenderRemoved(SceneObjectHandle handle)
+{
+	if (handle == InvalidSceneObjectHandle)
+		return;
+
+	RemovedSceneObjectHandles.push_back(handle);
+}
+
+void Corona::MarkAllSceneObjectsForRenderSync()
+{
+	bSceneObjectFullSyncPending = true;
+	for (SceneObject& object : SceneObjects)
+		object.RenderDirtyBits = 0;
+	DirtySceneObjectHandles.clear();
+	RemovedSceneObjectHandles.clear();
+}
+
+void Corona::MarkPointLightRenderDirty(UINT32 id, UINT32 dirtyBits)
+{
+	if (id == 0 || dirtyBits == 0)
+		return;
+
+	const auto it = std::find_if(PointLights.begin(), PointLights.end(), [id](const PointLightState& pointLight)
+	{
+		return pointLight.Id == id;
+	});
+	if (it == PointLights.end())
+		return;
+
+	const bool bWasClean = it->RenderDirtyBits == 0;
+	it->RenderDirtyBits |= dirtyBits;
+	if (bWasClean)
+		DirtyPointLightIds.push_back(id);
+}
+
+void Corona::MarkPointLightRenderRemoved(UINT32 id)
+{
+	if (id == 0)
+		return;
+
+	RemovedPointLightIds.push_back(id);
+}
+
+void Corona::MarkAllPointLightsForRenderSync()
+{
+	bPointLightFullSyncPending = true;
+	for (PointLightState& pointLight : PointLights)
+		pointLight.RenderDirtyBits = 0;
+	DirtyPointLightIds.clear();
+	RemovedPointLightIds.clear();
+}
+
+Corona::RenderFrameSourceState Corona::CaptureRenderFrameSourceState() const
+{
+	auto normalizeOrFallback = [](const glm::vec3& value, const glm::vec3& fallback)
+	{
+		const float length = glm::length(value);
+		return length > 0.0001f ? value / length : fallback;
+	};
+
+	RenderFrameSourceState state;
+	state.CameraPosition = m_camera.m_position;
+	state.CameraLookDirection = normalizeOrFallback(m_camera.m_lookDirection, glm::vec3(0.0f, 0.0f, 1.0f));
+	state.CameraUpDirection = normalizeOrFallback(m_camera.m_upDirection, glm::vec3(0.0f, 1.0f, 0.0f));
+	state.Fov = Fov;
+	state.NearPlane = Near;
+	state.FarPlane = Far;
+	state.AspectRatio = m_aspectRatio;
+	state.TotalSeconds = static_cast<float>(m_timer.GetTotalSeconds());
+	state.RenderingMode = RenderingMode;
+	state.AntiAliasingMode = AntiAliasingMode;
+	state.DLSSQualityMode = DLSSQualityMode;
+	state.RayNoiseMode = RayNoiseMode;
+	state.DiffuseGIMode = DiffuseGIMode;
+	state.bEnableDiffuseGI = bEnableDiffuseGI;
+	state.bEnableSpecularGI = bEnableSpecularGI;
+	state.bEnableDirectDiffuse = bEnableDirectDiffuse;
+	state.bEnableDirectSpecular = bEnableDirectSpecular;
+	state.bEnableRTAO = bEnableRTAO;
+	state.bEnableSkyLighting = bEnableSkyLighting;
+	state.bEnableRayTracedSkyLighting = bEnableRayTracedSkyLighting;
+	state.RTAOIndirectStrength = RTAOIndirectStrength;
+	state.RTAOIndirectFloor = RTAOIndirectFloor;
+	state.SurfaceBounceStrength = SurfaceBounceStrength;
+	state.SurfaceBounceSaturation = SurfaceBounceSaturation;
+	state.SkyLightingStrength = SkyLightingStrength;
+	state.JitterScale = JitterScale;
+	state.TAASampleCount = TAASampleCount;
+	state.DLSSJitterPhaseScale = DLSSJitterPhaseScale;
+	state.DLSSJitterPhaseCountOverride = DLSSJitterPhaseCountOverride;
+	state.LightDir = normalizeOrFallback(LightDir, glm::vec3(0.0f, 1.0f, 0.0f));
+	state.LightIntensity = LightIntensity;
+	state.SkyColorTop = SkyColorTop;
+	state.SkyColorBottom = SkyColorBottom;
+	state.SkyIntensity = SkyIntensity;
+	state.bEnablePrefilteredEnvSpecular = bEnablePrefilteredEnvSpecular;
+	state.PrefilteredEnvRoughnessThreshold = PrefilteredEnvRoughnessThreshold;
+	state.PrefilteredEnvRoughnessFade = PrefilteredEnvRoughnessFade;
+	state.ShadowLightRadius = RTShadowViewParam.ShadowLightRadius;
+	state.ShadowSampleCount = RTShadowViewParam.ShadowSampleCount;
+	state.RTAORadius = RTAOViewParam.Radius;
+	state.RTAOPower = RTAOViewParam.Power;
+	state.RTAONormalBias = RTAOViewParam.NormalBias;
+	state.RTAOSampleCount = RTAOViewParam.SampleCount;
+	state.SkyLightingRayLength = RTSkyLightingViewParam.RayLength;
+	state.SkyLightingNormalBias = RTSkyLightingViewParam.NormalBias;
+	state.SkyLightingSampleCount = RTSkyLightingViewParam.SampleCount;
+	state.SkyLightingUpBias = RTSkyLightingViewParam.SkyUpBias;
+	state.SkyLightingDirectionPower = RTSkyLightingViewParam.SkyDirectionPower;
+	state.SkyLightingMinWorldY = RTSkyLightingViewParam.SkyMinWorldY;
+	state.SkyLightingMaxSampleAttempts = RTSkyLightingViewParam.SkyMaxSampleAttempts;
+	state.SkyLightingDenoiseRadius = SkyLightingDenoiseParam.Radius;
+	state.ScreenProbeSpacing = ScreenProbeGICB.ProbeSpacing;
+	state.ScreenProbeGatherRadius = ScreenProbeGICB.GatherRadius;
+	state.ScreenProbeRaysPerProbe = RTScreenProbeGIViewParam.RaysPerProbe;
+	state.ScreenProbeSHCoefficientCount = ScreenProbeGICB.SHCoefficientCount;
+	state.ScreenProbeRawBlend = ScreenProbeGICB.RawBlend;
+	state.ScreenProbeMinResolveWeight = ScreenProbeGICB.MinResolveWeight;
+	state.ScreenProbeDepthWeight = ScreenProbeGICB.ProbeDepthWeight;
+	state.ScreenProbeNormalWeight = ScreenProbeGICB.ProbeNormalWeight;
+	state.ScreenProbeResolveDepthWeight = ScreenProbeGICB.ResolveDepthWeight;
+	state.ScreenProbeResolveNormalWeight = ScreenProbeGICB.ResolveNormalWeight;
+	state.ScreenProbeTemporalAlpha = ScreenProbeGICB.TemporalAlpha;
+	state.ScreenProbeHistoryDepthWeight = ScreenProbeGICB.HistoryDepthWeight;
+	state.ScreenProbeHistoryNormalWeight = ScreenProbeGICB.HistoryNormalWeight;
+	state.ScreenProbeEdgeDepthWeight = ScreenProbeGICB.EdgeDepthWeight;
+	state.ScreenProbeEdgeNormalWeight = ScreenProbeGICB.EdgeNormalWeight;
+	state.ScreenProbeEdgeSampleCount = ScreenProbeGICB.EdgeSampleCount;
+	state.SpatialHashCellSize = SpatialHashGICB.CellSize;
+	state.SpatialHashTemporalAlpha = SpatialHashGICB.TemporalAlpha;
+	state.SpatialHashSmoothingStrength = SpatialHashGICB.SmoothingStrength;
+	state.SpatialHashInterpolationStrength = SpatialHashGICB.InterpolationStrength;
+	state.SpatialHashRaysPerCell = RTSpatialHashGIViewParam.RaysPerCell;
+	state.SpatialHashMaxBounces = RTSpatialHashGIViewParam.MaxBounces;
+	state.PathTracingDirectLightSampleCount = PathTracingViewParam.DirectLightSampleCount;
+	state.PathTracingMaxBounces = PathTracingViewParam.MaxBounces;
+	state.PathTracingSamplesPerPixel = PathTracingViewParam.SamplesPerPixel;
+	state.PathTracingDebugMode = PathTracingViewParam.DebugMode;
+	return state;
+}
+
+void Corona::ApplyRenderFrameSourceState(const RenderFrameSourceState& state)
+{
+	const ERenderingMode previousRenderingMode = RenderingMode;
+	RenderingMode = state.RenderingMode;
+	AntiAliasingMode = state.AntiAliasingMode;
+	DLSSQualityMode = state.DLSSQualityMode;
+	RayNoiseMode = state.RayNoiseMode;
+	DiffuseGIMode = state.DiffuseGIMode;
+	bEnableDiffuseGI = state.bEnableDiffuseGI;
+	bEnableSpecularGI = state.bEnableSpecularGI;
+	bEnableDirectDiffuse = state.bEnableDirectDiffuse;
+	bEnableDirectSpecular = state.bEnableDirectSpecular;
+	bEnableRTAO = state.bEnableRTAO;
+	bEnableSkyLighting = state.bEnableSkyLighting;
+	bEnableRayTracedSkyLighting = state.bEnableRayTracedSkyLighting;
+	RTAOIndirectStrength = state.RTAOIndirectStrength;
+	RTAOIndirectFloor = state.RTAOIndirectFloor;
+	SurfaceBounceStrength = state.SurfaceBounceStrength;
+	SurfaceBounceSaturation = state.SurfaceBounceSaturation;
+	SkyLightingStrength = state.SkyLightingStrength;
+	JitterScale = state.JitterScale;
+	TAASampleCount = state.TAASampleCount;
+	DLSSJitterPhaseScale = state.DLSSJitterPhaseScale;
+	DLSSJitterPhaseCountOverride = state.DLSSJitterPhaseCountOverride;
+	Fov = state.Fov;
+	Near = state.NearPlane;
+	Far = state.FarPlane;
+	m_aspectRatio = state.AspectRatio;
+	LightDir = glm::length(state.LightDir) > 0.0001f ? glm::normalize(state.LightDir) : glm::vec3(0.0f, 1.0f, 0.0f);
+	LightIntensity = state.LightIntensity;
+	SkyColorTop = state.SkyColorTop;
+	SkyColorBottom = state.SkyColorBottom;
+	SkyIntensity = state.SkyIntensity;
+	bEnablePrefilteredEnvSpecular = state.bEnablePrefilteredEnvSpecular;
+	PrefilteredEnvRoughnessThreshold = state.PrefilteredEnvRoughnessThreshold;
+	PrefilteredEnvRoughnessFade = state.PrefilteredEnvRoughnessFade;
+	RTShadowViewParam.ShadowLightRadius = state.ShadowLightRadius;
+	RTShadowViewParam.ShadowSampleCount = state.ShadowSampleCount;
+	RTAOViewParam.Radius = state.RTAORadius;
+	RTAOViewParam.Power = state.RTAOPower;
+	RTAOViewParam.NormalBias = state.RTAONormalBias;
+	RTAOViewParam.SampleCount = state.RTAOSampleCount;
+	RTSkyLightingViewParam.RayLength = state.SkyLightingRayLength;
+	RTSkyLightingViewParam.NormalBias = state.SkyLightingNormalBias;
+	RTSkyLightingViewParam.SampleCount = state.SkyLightingSampleCount;
+	RTSkyLightingViewParam.SkyUpBias = state.SkyLightingUpBias;
+	RTSkyLightingViewParam.SkyDirectionPower = state.SkyLightingDirectionPower;
+	RTSkyLightingViewParam.SkyMinWorldY = state.SkyLightingMinWorldY;
+	RTSkyLightingViewParam.SkyMaxSampleAttempts = state.SkyLightingMaxSampleAttempts;
+	SkyLightingDenoiseParam.Radius = state.SkyLightingDenoiseRadius;
+	ScreenProbeGICB.ProbeSpacing = state.ScreenProbeSpacing;
+	ScreenProbeGICB.GatherRadius = state.ScreenProbeGatherRadius;
+	RTScreenProbeGIViewParam.RaysPerProbe = state.ScreenProbeRaysPerProbe;
+	ScreenProbeGICB.SHCoefficientCount = state.ScreenProbeSHCoefficientCount;
+	ScreenProbeGICB.RawBlend = state.ScreenProbeRawBlend;
+	ScreenProbeGICB.MinResolveWeight = state.ScreenProbeMinResolveWeight;
+	ScreenProbeGICB.ProbeDepthWeight = state.ScreenProbeDepthWeight;
+	ScreenProbeGICB.ProbeNormalWeight = state.ScreenProbeNormalWeight;
+	ScreenProbeGICB.ResolveDepthWeight = state.ScreenProbeResolveDepthWeight;
+	ScreenProbeGICB.ResolveNormalWeight = state.ScreenProbeResolveNormalWeight;
+	ScreenProbeGICB.TemporalAlpha = state.ScreenProbeTemporalAlpha;
+	ScreenProbeGICB.HistoryDepthWeight = state.ScreenProbeHistoryDepthWeight;
+	ScreenProbeGICB.HistoryNormalWeight = state.ScreenProbeHistoryNormalWeight;
+	ScreenProbeGICB.EdgeDepthWeight = state.ScreenProbeEdgeDepthWeight;
+	ScreenProbeGICB.EdgeNormalWeight = state.ScreenProbeEdgeNormalWeight;
+	ScreenProbeGICB.EdgeSampleCount = state.ScreenProbeEdgeSampleCount;
+	SpatialHashGICB.CellSize = state.SpatialHashCellSize;
+	SpatialHashGICB.TemporalAlpha = state.SpatialHashTemporalAlpha;
+	SpatialHashGICB.SmoothingStrength = state.SpatialHashSmoothingStrength;
+	SpatialHashGICB.InterpolationStrength = state.SpatialHashInterpolationStrength;
+	RTSpatialHashGIViewParam.RaysPerCell = state.SpatialHashRaysPerCell;
+	RTSpatialHashGIViewParam.MaxBounces = state.SpatialHashMaxBounces;
+	PathTracingViewParam.DirectLightSampleCount = state.PathTracingDirectLightSampleCount;
+	PathTracingViewParam.MaxBounces = state.PathTracingMaxBounces;
+	PathTracingViewParam.SamplesPerPixel = state.PathTracingSamplesPerPixel;
+	PathTracingViewParam.DebugMode = state.PathTracingDebugMode;
+	if (RenderingMode != previousRenderingMode)
+		MarkRayTracingSceneDirty();
+}
+
+void Corona::CollectFrameSourceRenderSync(RenderFrameDelta& delta)
+{
+	if (!bSplitGameRenderThreads)
+		return;
+
+	delta.bHasFrameSourceState = true;
+	delta.FrameSourceState = CaptureRenderFrameSourceState();
+}
+
+void Corona::ApplyFrameSourceRenderSync(const RenderFrameDelta& delta)
+{
+	if (!delta.bHasFrameSourceState)
+		return;
+
+	const RenderFrameSourceState& newState = delta.FrameSourceState;
+	const RenderFrameSourceState& oldState = RenderWorld.FrameSourceState;
+	auto floatChanged = [](float a, float b, float epsilon = 0.0001f)
+	{
+		return std::abs(a - b) > epsilon;
+	};
+
+	const bool bHadFrameSourceState = RenderWorld.bHasFrameSourceState;
+	const bool bIndirectSettingsChanged =
+		bHadFrameSourceState &&
+		(oldState.DiffuseGIMode != newState.DiffuseGIMode ||
+		 oldState.RayNoiseMode != newState.RayNoiseMode ||
+		 oldState.bEnableDiffuseGI != newState.bEnableDiffuseGI ||
+		 oldState.bEnableSpecularGI != newState.bEnableSpecularGI ||
+		 oldState.bEnableRTAO != newState.bEnableRTAO ||
+		 oldState.bEnableSkyLighting != newState.bEnableSkyLighting ||
+		 oldState.bEnableRayTracedSkyLighting != newState.bEnableRayTracedSkyLighting ||
+		 oldState.bEnablePrefilteredEnvSpecular != newState.bEnablePrefilteredEnvSpecular ||
+		 oldState.ShadowSampleCount != newState.ShadowSampleCount ||
+		 oldState.RTAOSampleCount != newState.RTAOSampleCount ||
+		 oldState.SkyLightingSampleCount != newState.SkyLightingSampleCount ||
+		 oldState.SkyLightingDenoiseRadius != newState.SkyLightingDenoiseRadius ||
+		 oldState.ScreenProbeSpacing != newState.ScreenProbeSpacing ||
+		 oldState.ScreenProbeGatherRadius != newState.ScreenProbeGatherRadius ||
+		 oldState.ScreenProbeRaysPerProbe != newState.ScreenProbeRaysPerProbe ||
+		 oldState.ScreenProbeSHCoefficientCount != newState.ScreenProbeSHCoefficientCount ||
+		 oldState.ScreenProbeEdgeSampleCount != newState.ScreenProbeEdgeSampleCount ||
+		 oldState.SpatialHashRaysPerCell != newState.SpatialHashRaysPerCell ||
+		 oldState.SpatialHashMaxBounces != newState.SpatialHashMaxBounces ||
+		 floatChanged(oldState.RTAOIndirectStrength, newState.RTAOIndirectStrength) ||
+		 floatChanged(oldState.RTAOIndirectFloor, newState.RTAOIndirectFloor) ||
+		 floatChanged(oldState.SurfaceBounceStrength, newState.SurfaceBounceStrength) ||
+		 floatChanged(oldState.SurfaceBounceSaturation, newState.SurfaceBounceSaturation) ||
+		 floatChanged(oldState.SkyLightingStrength, newState.SkyLightingStrength) ||
+		 floatChanged(oldState.SkyIntensity, newState.SkyIntensity) ||
+		 floatChanged(oldState.PrefilteredEnvRoughnessThreshold, newState.PrefilteredEnvRoughnessThreshold) ||
+		 floatChanged(oldState.PrefilteredEnvRoughnessFade, newState.PrefilteredEnvRoughnessFade) ||
+		 floatChanged(oldState.ShadowLightRadius, newState.ShadowLightRadius) ||
+		 floatChanged(oldState.RTAORadius, newState.RTAORadius) ||
+		 floatChanged(oldState.RTAOPower, newState.RTAOPower) ||
+		 floatChanged(oldState.RTAONormalBias, newState.RTAONormalBias) ||
+		 floatChanged(oldState.SkyLightingRayLength, newState.SkyLightingRayLength) ||
+		 floatChanged(oldState.SkyLightingNormalBias, newState.SkyLightingNormalBias) ||
+		 floatChanged(oldState.SkyLightingUpBias, newState.SkyLightingUpBias) ||
+		 floatChanged(oldState.SkyLightingDirectionPower, newState.SkyLightingDirectionPower) ||
+		 floatChanged(oldState.SkyLightingMinWorldY, newState.SkyLightingMinWorldY) ||
+		 floatChanged(oldState.ScreenProbeRawBlend, newState.ScreenProbeRawBlend) ||
+		 floatChanged(oldState.ScreenProbeResolveDepthWeight, newState.ScreenProbeResolveDepthWeight) ||
+		 floatChanged(oldState.ScreenProbeResolveNormalWeight, newState.ScreenProbeResolveNormalWeight) ||
+		 floatChanged(oldState.ScreenProbeEdgeDepthWeight, newState.ScreenProbeEdgeDepthWeight) ||
+		 floatChanged(oldState.ScreenProbeEdgeNormalWeight, newState.ScreenProbeEdgeNormalWeight) ||
+		 floatChanged(oldState.SpatialHashCellSize, newState.SpatialHashCellSize) ||
+		 floatChanged(oldState.SpatialHashTemporalAlpha, newState.SpatialHashTemporalAlpha) ||
+		 floatChanged(oldState.SpatialHashSmoothingStrength, newState.SpatialHashSmoothingStrength) ||
+		 floatChanged(oldState.SpatialHashInterpolationStrength, newState.SpatialHashInterpolationStrength));
+
+	RenderWorld.FrameSourceState = delta.FrameSourceState;
+	RenderWorld.bHasFrameSourceState = true;
+
+	if (bIndirectSettingsChanged)
+	{
+		FrameCounter = 0;
+		IndirectAccumulatedFrames = 0;
+		bTemporalDenoiserHistoryValid = false;
+		bScreenProbeGIAtlasHistoryValid = false;
+		bScreenProbeGIHistoryValid = false;
+		bSpatialHashGIHistoryValid = false;
+		bPendingTemporalHistoryClear = true;
+		bResetTemporalStateNextUpdate = true;
+		bUseLightingBufferFallbackForToneMap = true;
+		bDLSSRROutputValidThisFrame = false;
+		PrevPathTracingViewMat = glm::mat4x4(0.0f);
+		PrevPathTracingLightDir = glm::vec3(0.0f);
+		PrevPathTracingLightIntensity = 0.0f;
+#if WITH_STREAMLINE
+		bDLSSResetNeeded = true;
+#endif
+	}
+}
+
+void Corona::CollectSceneObjectRenderSync(RenderFrameDelta& delta)
+{
+	if (bSceneObjectFullSyncPending)
+	{
+		delta.bFullSceneObjectSync = true;
+		delta.SceneObjectDeltas.reserve(delta.SceneObjectDeltas.size() + SceneObjects.size());
+		for (SceneObject& object : SceneObjects)
+		{
+			RenderSceneObjectDelta objectDelta;
+			objectDelta.Op = ERenderDeltaOp::Upsert;
+			objectDelta.DirtyBits = kSceneObjectDirtyAll;
+			objectDelta.Object = object;
+			objectDelta.Object.RenderDirtyBits = 0;
+			objectDelta.Handle = object.Handle;
+			delta.SceneObjectDeltas.push_back(std::move(objectDelta));
+			object.RenderDirtyBits = 0;
+		}
+		bSceneObjectFullSyncPending = false;
+		DirtySceneObjectHandles.clear();
+		RemovedSceneObjectHandles.clear();
+		return;
+	}
+
+	for (SceneObjectHandle handle : RemovedSceneObjectHandles)
+	{
+		RenderSceneObjectDelta objectDelta;
+		objectDelta.Op = ERenderDeltaOp::Remove;
+		objectDelta.Handle = handle;
+		delta.SceneObjectDeltas.push_back(std::move(objectDelta));
+	}
+	RemovedSceneObjectHandles.clear();
+
+	for (SceneObjectHandle handle : DirtySceneObjectHandles)
+	{
+		const auto it = std::find_if(SceneObjects.begin(), SceneObjects.end(), [handle](const SceneObject& object)
+		{
+			return object.Handle == handle;
+		});
+		if (it == SceneObjects.end() || it->RenderDirtyBits == 0)
+			continue;
+
+		RenderSceneObjectDelta objectDelta;
+		objectDelta.Op = ERenderDeltaOp::Upsert;
+		objectDelta.DirtyBits = it->RenderDirtyBits;
+		objectDelta.Object = *it;
+		objectDelta.Object.RenderDirtyBits = 0;
+		objectDelta.Handle = it->Handle;
+		delta.SceneObjectDeltas.push_back(std::move(objectDelta));
+		it->RenderDirtyBits = 0;
+	}
+	DirtySceneObjectHandles.clear();
+}
+
+void Corona::ApplySceneObjectRenderSync(const RenderFrameDelta& delta)
+{
+	if (delta.bFullSceneObjectSync)
+	{
+		RenderWorld.SceneObjects.clear();
+		bRayTracingSceneDirty = true;
+		bRayTracingTransformDirty = false;
+		PrevPathTracingViewMat = glm::mat4x4(0.0f);
+	}
+
+	for (const RenderSceneObjectDelta& objectDelta : delta.SceneObjectDeltas)
+	{
+		const SceneObjectHandle handle =
+			objectDelta.Handle != InvalidSceneObjectHandle ?
+			objectDelta.Handle :
+			objectDelta.Object.Handle;
+
+		if (objectDelta.Op == ERenderDeltaOp::Remove)
+		{
+			const auto it = std::find_if(RenderWorld.SceneObjects.begin(), RenderWorld.SceneObjects.end(), [handle](const SceneObject& object)
+			{
+				return object.Handle == handle;
+			});
+			if (it != RenderWorld.SceneObjects.end())
+			{
+				RenderWorld.SceneObjects.erase(it);
+				MarkRayTracingSceneDirty();
+			}
+			continue;
+		}
+
+		SceneObject object = objectDelta.Object;
+		object.RenderDirtyBits = 0;
+		auto it = std::find_if(RenderWorld.SceneObjects.begin(), RenderWorld.SceneObjects.end(), [handle](const SceneObject& candidate)
+		{
+			return candidate.Handle == handle;
+		});
+
+		if (it == RenderWorld.SceneObjects.end())
+		{
+			RenderWorld.SceneObjects.push_back(std::move(object));
+			MarkRayTracingSceneDirty();
+			continue;
+		}
+
+		const bool bRayTracingSceneRelevant =
+			(objectDelta.DirtyBits & (kSceneObjectDirtyScene | kSceneObjectDirtyVisibility | kSceneObjectDirtyRayTracing)) != 0;
+		const bool bRayTracingTransformRelevant =
+			(objectDelta.DirtyBits & kSceneObjectDirtyTransform) != 0;
+
+		*it = std::move(object);
+		if (bRayTracingSceneRelevant)
+			MarkRayTracingSceneDirty();
+		else if (bRayTracingTransformRelevant && ShouldIncludeSceneObjectInRayTracingAS(*it))
+			MarkRayTracingTransformsDirty();
+	}
+}
+
+void Corona::CollectPointLightRenderSync(RenderFrameDelta& delta)
+{
+	if (bPointLightFullSyncPending)
+	{
+		delta.bFullPointLightSync = true;
+		delta.PointLightDeltas.reserve(delta.PointLightDeltas.size() + PointLights.size());
+		for (PointLightState& pointLight : PointLights)
+		{
+			RenderPointLightDelta lightDelta;
+			lightDelta.Op = ERenderDeltaOp::Upsert;
+			lightDelta.DirtyBits = kPointLightDirtyAll;
+			lightDelta.Light = pointLight;
+			lightDelta.Light.RenderDirtyBits = 0;
+			lightDelta.Id = pointLight.Id;
+			delta.PointLightDeltas.push_back(std::move(lightDelta));
+			pointLight.RenderDirtyBits = 0;
+		}
+		bPointLightFullSyncPending = false;
+		DirtyPointLightIds.clear();
+		RemovedPointLightIds.clear();
+		return;
+	}
+
+	for (UINT32 id : RemovedPointLightIds)
+	{
+		RenderPointLightDelta lightDelta;
+		lightDelta.Op = ERenderDeltaOp::Remove;
+		lightDelta.Id = id;
+		delta.PointLightDeltas.push_back(std::move(lightDelta));
+	}
+	RemovedPointLightIds.clear();
+
+	for (UINT32 id : DirtyPointLightIds)
+	{
+		const auto it = std::find_if(PointLights.begin(), PointLights.end(), [id](const PointLightState& pointLight)
+		{
+			return pointLight.Id == id;
+		});
+		if (it == PointLights.end() || it->RenderDirtyBits == 0)
+			continue;
+
+		RenderPointLightDelta lightDelta;
+		lightDelta.Op = ERenderDeltaOp::Upsert;
+		lightDelta.DirtyBits = it->RenderDirtyBits;
+		lightDelta.Light = *it;
+		lightDelta.Light.RenderDirtyBits = 0;
+		lightDelta.Id = it->Id;
+		delta.PointLightDeltas.push_back(std::move(lightDelta));
+		it->RenderDirtyBits = 0;
+	}
+	DirtyPointLightIds.clear();
+}
+
+void Corona::ApplyPointLightRenderSync(const RenderFrameDelta& delta)
+{
+	if (delta.bFullPointLightSync)
+		RenderWorld.PointLights.clear();
+
+	bool bChanged = delta.bFullPointLightSync;
+	for (const RenderPointLightDelta& lightDelta : delta.PointLightDeltas)
+	{
+		const UINT32 id = lightDelta.Id != 0 ? lightDelta.Id : lightDelta.Light.Id;
+		if (lightDelta.Op == ERenderDeltaOp::Remove)
+		{
+			const auto it = std::find_if(RenderWorld.PointLights.begin(), RenderWorld.PointLights.end(), [id](const PointLightState& pointLight)
+			{
+				return pointLight.Id == id;
+			});
+			if (it != RenderWorld.PointLights.end())
+			{
+				RenderWorld.PointLights.erase(it);
+				bChanged = true;
+			}
+			continue;
+		}
+
+		PointLightState light = lightDelta.Light;
+		light.RenderDirtyBits = 0;
+		auto it = std::find_if(RenderWorld.PointLights.begin(), RenderWorld.PointLights.end(), [id](const PointLightState& pointLight)
+		{
+			return pointLight.Id == id;
+		});
+		if (it == RenderWorld.PointLights.end())
+			RenderWorld.PointLights.push_back(std::move(light));
+		else
+			*it = std::move(light);
+		bChanged = true;
+	}
+
+	if (bChanged)
+	{
+		FrameCounter = 0;
+		IndirectAccumulatedFrames = 0;
+		bTemporalDenoiserHistoryValid = false;
+		bScreenProbeGIAtlasHistoryValid = false;
+		bScreenProbeGIHistoryValid = false;
+		bSpatialHashGIHistoryValid = false;
+		bPendingTemporalHistoryClear = true;
+		bResetTemporalStateNextUpdate = true;
+		PrevPathTracingViewMat = glm::mat4x4(0.0f);
+		PrevPathTracingLightDir = glm::vec3(0.0f);
+		PrevPathTracingLightIntensity = 0.0f;
+	}
+}
+
+void Corona::CollectRenderFrameDeltas()
+{
+	InitRenderSyncChannels();
+
+	RenderFrameDelta delta;
+	delta.FrameId = NextRenderFrameDeltaId++;
+	for (const RenderSyncChannel& channel : RenderSyncChannels)
+	{
+		if (channel.Collect)
+			(this->*channel.Collect)(delta);
+	}
+
+	if (delta.SceneObjectDeltas.empty() &&
+		delta.PointLightDeltas.empty() &&
+		!delta.bHasFrameSourceState &&
+		!delta.bFullSceneObjectSync &&
+		!delta.bFullPointLightSync)
+	{
+		return;
+	}
+
+	PublishRenderFrameDelta(std::move(delta));
+}
+
+void Corona::PublishRenderFrameDelta(RenderFrameDelta&& delta)
+{
+	std::lock_guard<std::mutex> lock(RenderFrameDeltaMutex);
+	PendingRenderFrameDeltas.push_back(std::move(delta));
+}
+
+void Corona::ApplyPendingRenderFrameDeltas()
+{
+	InitRenderSyncChannels();
+
+	std::deque<RenderFrameDelta> pendingDeltas;
+	{
+		std::lock_guard<std::mutex> lock(RenderFrameDeltaMutex);
+		pendingDeltas.swap(PendingRenderFrameDeltas);
+	}
+
+	for (const RenderFrameDelta& delta : pendingDeltas)
+	{
+		for (const RenderSyncChannel& channel : RenderSyncChannels)
+		{
+			if (channel.Apply)
+				(this->*channel.Apply)(delta);
+		}
+	}
+}
+
+void Corona::ApplyRenderPointLightsToFrameParams()
+{
+	PathTracingViewParam.PointLightCount = 0;
+	for (const PointLightState& pointLight : RenderWorld.PointLights)
+	{
+		if (!pointLight.bEnabled || PathTracingViewParam.PointLightCount >= MaxPointLights)
+			continue;
+
+		const UINT32 pointLightIndex = PathTracingViewParam.PointLightCount++;
+		PathTracingViewParam.PointLights[pointLightIndex].PositionAndRadius =
+			glm::vec4(pointLight.Position, std::max(pointLight.Radius, 0.01f));
+		PathTracingViewParam.PointLights[pointLightIndex].ColorAndIntensity =
+			glm::vec4(glm::max(pointLight.Color, glm::vec3(0.0f)), std::max(pointLight.Intensity, 0.0f));
+	}
+}
+
+
+void Corona::PumpStartupWindowMessages()
+{
+	MSG msg = {};
+	while (PeekMessage(&msg, nullptr, 0, 0, PM_REMOVE))
+	{
+		if (msg.message == WM_QUIT)
+		{
+			PostQuitMessage(static_cast<int>(msg.wParam));
+			break;
+		}
+		TranslateMessage(&msg);
+		DispatchMessage(&msg);
+	}
+}
+
+void Corona::DrawStartupLoadingScreen()
+{
+	if (!bStartupLoadingScreenActive || !renderBackend || !bImguiInitialized)
+		return;
+
+	try
+	{
+		renderBackend->BeginFrame();
+
+		Texture* backbuffer = renderBackend->GetCurrentWindowRenderTarget();
+		if (renderBackend->GetAPI() == ERenderBackendAPI::D3D12 && !backbuffer)
+		{
+			renderBackend->EndFrame();
+			return;
+		}
+
+		const float clearColor[4] = { 0.025f, 0.032f, 0.045f, 1.0f };
+		if (renderBackend->GetAPI() == ERenderBackendAPI::D3D12)
+			renderBackend->PrepareWindowRenderTarget(backbuffer);
+		renderBackend->ClearRenderTarget(backbuffer, clearColor);
+		renderBackend->SetRenderTarget(backbuffer);
+		renderBackend->SetViewportAndScissor(m_width, m_height);
+
+		renderBackend->NewImGuiFrame();
+		ImGui_ImplWin32_NewFrame();
+		ImGui::NewFrame();
+
+		ImGuiIO& io = ImGui::GetIO();
+		ImDrawList* drawList = ImGui::GetBackgroundDrawList();
+		const ImVec2 displaySize = io.DisplaySize;
+		const float width = std::max(displaySize.x, 1.0f);
+		const float height = std::max(displaySize.y, 1.0f);
+		const ImVec2 center(width * 0.5f, height * 0.5f - 50.0f);
+		const float progress = std::clamp(StartupLoadingProgress, 0.0f, 1.0f);
+
+		drawList->AddRectFilled(ImVec2(0.0f, 0.0f), displaySize, IM_COL32(6, 9, 13, 255));
+		drawList->AddCircle(center, 58.0f, IM_COL32(25, 53, 78, 210), 96, 13.0f);
+		drawList->AddCircle(center, 49.0f, IM_COL32(79, 197, 255, 245), 96, 4.0f);
+		drawList->PathArcTo(center, 38.0f, 0.15f, 4.95f, 72);
+		drawList->PathStroke(IM_COL32(226, 246, 255, 235), 0, 5.0f);
+
+		ImFont* font = ImGui::GetFont();
+		auto addCenteredText = [&](const char* text, float fontSize, float y, ImU32 color)
+		{
+			const ImVec2 textSize = font->CalcTextSizeA(fontSize, FLT_MAX, 0.0f, text);
+			drawList->AddText(font, fontSize, ImVec2(width * 0.5f - textSize.x * 0.5f, y), color, text);
+		};
+
+		addCenteredText("C", 46.0f, center.y - 29.0f, IM_COL32(229, 247, 255, 255));
+		addCenteredText("CORONA", 34.0f, center.y + 84.0f, IM_COL32(238, 246, 250, 255));
+
+		const std::string status = WideToUtf8(StartupLoadingStatus.empty() ? L"Starting renderer" : StartupLoadingStatus);
+		addCenteredText(status.c_str(), 18.0f, center.y + 130.0f, IM_COL32(160, 180, 191, 255));
+
+		const float barWidth = std::min(width - 120.0f, 560.0f);
+		const float barHeight = 10.0f;
+		const ImVec2 barMin(width * 0.5f - barWidth * 0.5f, center.y + 174.0f);
+		const ImVec2 barMax(barMin.x + barWidth, barMin.y + barHeight);
+		drawList->AddRectFilled(barMin, barMax, IM_COL32(27, 37, 48, 255), 5.0f);
+		drawList->AddRectFilled(barMin, ImVec2(barMin.x + barWidth * progress, barMax.y), IM_COL32(75, 196, 255, 255), 5.0f);
+		drawList->AddRect(barMin, barMax, IM_COL32(74, 95, 110, 255), 5.0f);
+
+		const std::string percentText = std::to_string(static_cast<int>(std::round(progress * 100.0f))) + "%";
+		addCenteredText(percentText.c_str(), 14.0f, barMax.y + 16.0f, IM_COL32(123, 146, 158, 255));
+
+		ImGui::Render();
+		renderBackend->RenderImGuiDrawData(ImGui::GetDrawData());
+		renderBackend->FinalizeWindowRenderTarget(backbuffer);
+		renderBackend->ExecuteCurrentCommandList();
+		renderBackend->EndFrame();
+	}
+	catch (const std::exception& e)
+	{
+		AppendCpuRuntimeTrace(L"[StartupLoading] render failed: " + AnsiToWString(e.what()));
+	}
+}
+
+void Corona::UpdateStartupLoadingProgress(float progress, const std::wstring& status)
+{
+	const auto now = CpuClock::now();
+	const float previousProgress = StartupLoadingProgress;
+	if (!bStartupLoadingTimingStarted)
+	{
+		bStartupLoadingTimingStarted = true;
+		StartupLoadingTimingStart = now;
+		StartupLoadingTimingLast = now;
+		StartupLoadingTimingLastStatus = status;
+		AppendCpuRuntimeTrace(
+			L"[StartupTiming] begin progress=" + std::to_wstring(static_cast<int>(std::round(progress * 100.0f))) +
+			L"% status=\"" + status + L"\"");
+	}
+	else
+	{
+		const double stepMs = ElapsedMilliseconds(StartupLoadingTimingLast, now);
+		const double totalMs = ElapsedMilliseconds(StartupLoadingTimingStart, now);
+		AppendCpuRuntimeTrace(
+			L"[StartupTiming] step=\"" + StartupLoadingTimingLastStatus +
+			L"\", stepMs=" + FormatMilliseconds(stepMs) +
+			L", totalMs=" + FormatMilliseconds(totalMs) +
+			L", progress=" + std::to_wstring(static_cast<int>(std::round(previousProgress * 100.0f))) +
+			L"->" + std::to_wstring(static_cast<int>(std::round(progress * 100.0f))) +
+			L"% next=\"" + status + L"\"");
+		StartupLoadingTimingLast = now;
+		StartupLoadingTimingLastStatus = status;
+	}
+
+	bStartupLoadingScreenActive = true;
+	StartupLoadingProgress = std::clamp(progress, StartupLoadingProgress, 1.0f);
+	StartupLoadingStatus = status;
+	PumpStartupWindowMessages();
+	DrawStartupLoadingScreen();
+
+	if (status == L"Ready")
+	{
+		AppendCpuRuntimeTrace(
+			L"[StartupTiming] complete totalMs=" +
+			FormatMilliseconds(ElapsedMilliseconds(StartupLoadingTimingStart, CpuClock::now())));
+	}
+}
 
 void Corona::OnInit()
 {
@@ -4622,24 +5652,30 @@ void Corona::OnInit()
 
 	CoInitialize(NULL);
 	AppendCpuRuntimeTrace(L"[OnInit] begin");
+	UpdateStartupLoadingProgress(0.02f, L"Starting Corona");
 
 	g_TS.Initialize(8);
 	AppendCpuRuntimeTrace(L"[OnInit] after g_TS.Initialize");
+	UpdateStartupLoadingProgress(0.04f, L"Initializing task system");
 
 	m_camera.Init({ 458, 781, 185 });
 	m_camera.SetMoveSpeed(200);
 	LoadCameraState();
+	LoadSceneState();
 	AppendCpuRuntimeTrace(L"[OnInit] after camera init");
+	UpdateStartupLoadingProgress(0.06f, L"Restoring camera and scene state");
 
 	RenderWidth = m_width;
 	RenderHeight = m_height;
 	AppendCpuRuntimeTrace(L"[OnInit] after render size init");
+	UpdateStartupLoadingProgress(0.08f, L"Preparing render size");
 #if WITH_STREAMLINE
 	const bool bStartupRequestsVulkan =
 		bCommandLineRenderBackendOverrideSet &&
 		CommandLineRenderBackendAPI == ERenderBackendAPI::Vulkan;
 	if (!bStartupRequestsVulkan)
 	{
+		UpdateStartupLoadingProgress(0.10f, L"Initializing Streamline");
 		InitStreamline();
 		AppendCpuRuntimeTrace(L"[OnInit] after InitStreamline");
 	}
@@ -4648,8 +5684,10 @@ void Corona::OnInit()
 		AppendCpuRuntimeTrace(L"[OnInit] skip InitStreamline for Vulkan startup");
 	}
 #endif
+	UpdateStartupLoadingProgress(0.12f, L"Creating render backend");
 	LoadPipeline();
 	AppendCpuRuntimeTrace(L"[OnInit] after LoadPipeline");
+	UpdateStartupLoadingProgress(0.16f, L"Choosing startup rendering mode");
 	PromptStartupModeSelection();
 	AppendCpuRuntimeTrace(
 		L"[OnInit] after PromptStartupModeSelection backend=" + std::to_wstring(static_cast<int>(StartupRenderBackendAPI)) +
@@ -4658,6 +5696,20 @@ void Corona::OnInit()
 		L", dlssAvailable=" + std::to_wstring(bDLSSAvailable ? 1 : 0) +
 		L", dlssRRAvailable=" + std::to_wstring(bDLSSRRAvailable ? 1 : 0) +
 		L", autoDump=" + std::to_wstring(bAutoAADumpEnabled ? 1 : 0));
+	const bool bStartupLoadingVulkanHybrid =
+		renderBackend &&
+		renderBackend->GetAPI() == ERenderBackendAPI::Vulkan &&
+		StartupRenderingMode == ERenderingMode::HYBRID;
+	const bool bStartupLoadingCanUseImgui =
+		!bCommandLineDisableImgui &&
+		!bAutoAADumpEnabled &&
+		(!bStartupLoadingVulkanHybrid || renderBackend->GetMaxSupportedHybridStage() >= 7u);
+	if (bStartupLoadingCanUseImgui && !bImguiInitialized)
+	{
+		InitImgui();
+		bImguiInitialized = true;
+	}
+	UpdateStartupLoadingProgress(0.18f, L"Render backend ready");
 	const bool bVulkanHybridStartup =
 		StartupRenderingMode == ERenderingMode::HYBRID &&
 		StartupRenderBackendAPI == ERenderBackendAPI::Vulkan;
@@ -4674,16 +5726,22 @@ void Corona::OnInit()
 		}
 	}
 	AppendCpuRuntimeTrace(L"[OnInit] before RefreshUpscaleSettings");
+	UpdateStartupLoadingProgress(0.18f, L"Configuring resolution and upscaling");
 	RefreshUpscaleSettings(false);
 	AppendCpuRuntimeTrace(L"[OnInit] after RefreshUpscaleSettings");
 	AppendCpuRuntimeTrace(L"[OnInit] before LoadAssets");
+	UpdateStartupLoadingProgress(0.20f, L"Preparing renderer assets");
 	LoadAssets();
 	AppendCpuRuntimeTrace(L"[OnInit] after LoadAssets");
+	UpdateStartupLoadingProgress(0.92f, L"Initializing CPU physics");
 	InitCpuPhysics();
+	UpdateStartupLoadingProgress(0.94f, L"Initializing Luau scripting");
 	InitLuauScripting();
+	UpdateStartupLoadingProgress(0.95f, L"Running startup scripts");
 	RunStartupLuauScript();
 	AppendCpuRuntimeTrace(L"[OnInit] after RunStartupLuauScript");
 	bPendingTemporalHistoryClear = true;
+	UpdateStartupLoadingProgress(0.98f, L"Preparing first frame");
 	InitializeAutoAADump();
 	AppendCpuRuntimeTrace(
 		L"[OnInit] after InitializeAutoAADump initialized=" + std::to_wstring(bAutoAADumpInitialized ? 1 : 0) +
@@ -4715,6 +5773,8 @@ void Corona::OnInit()
 			PostQuitMessage(1);
 		}
 	}
+	UpdateStartupLoadingProgress(1.0f, L"Ready");
+	bStartupLoadingScreenActive = false;
 }
 
 void AppendCpuRuntimeTrace(const std::wstring& line)
@@ -5016,6 +6076,366 @@ shared_ptr<Scene> Corona::CreateMirrorCubeScene()
 	return scene;
 }
 
+shared_ptr<Scene> Corona::CreateProceduralBlockCharacterScene(UINT32 seed)
+{
+	if (!renderBackend)
+		return nullptr;
+
+	struct Vertex
+	{
+		glm::vec3 Position;
+		glm::vec3 Normal;
+		glm::vec2 UV;
+		glm::vec3 Tangent;
+	};
+
+	struct CubeFace
+	{
+		glm::vec3 Normal;
+		glm::vec3 Tangent;
+		glm::vec3 Positions[4];
+	};
+
+	auto scene = std::make_shared<Scene>();
+
+	UINT32 randomState = seed ? seed : 1u;
+	auto random01 = [&randomState]() -> float
+	{
+		randomState = randomState * 1664525u + 1013904223u;
+		return static_cast<float>((randomState >> 8) & 0xFFFFu) / 65535.0f;
+	};
+	auto randomRange = [&random01](float minValue, float maxValue) -> float
+	{
+		return minValue + (maxValue - minValue) * random01();
+	};
+	auto randomInt = [&random01](UINT32 count) -> UINT32
+	{
+		if (count == 0)
+			return 0;
+		return static_cast<UINT32>(random01() * static_cast<float>(count)) % count;
+	};
+	auto randomSign = [&random01]() -> float
+	{
+		return random01() < 0.5f ? -1.0f : 1.0f;
+	};
+	auto jitterColor = [&random01](const glm::vec3& color, float amount) -> glm::vec3
+	{
+		const glm::vec3 delta(
+			random01() * 2.0f - 1.0f,
+			random01() * 2.0f - 1.0f,
+			random01() * 2.0f - 1.0f);
+		return glm::clamp(color + delta * amount, glm::vec3(0.02f), glm::vec3(1.0f));
+	};
+	auto makeMaterial = [&scene, this](const glm::vec3& baseColor) -> shared_ptr<Material>
+	{
+		shared_ptr<Material> material = std::make_shared<Material>();
+		material->BaseColorFactor = glm::vec4(baseColor, 1.0f);
+		material->Diffuse = DefaultWhiteTex;
+		material->Normal = DefaultNormalTex;
+		material->Roughness = DefaultRougnessTex;
+		material->Metallic = DefaultBlackTex;
+		scene->Materials.push_back(material);
+		return material;
+	};
+
+	const glm::vec3 skinPalette[] =
+	{
+		glm::vec3(0.86f, 0.58f, 0.42f),
+		glm::vec3(0.78f, 0.48f, 0.33f),
+		glm::vec3(0.63f, 0.38f, 0.28f),
+		glm::vec3(0.91f, 0.69f, 0.53f),
+	};
+	const glm::vec3 coatPalette[] =
+	{
+		glm::vec3(0.10f, 0.42f, 0.50f),
+		glm::vec3(0.45f, 0.16f, 0.45f),
+		glm::vec3(0.18f, 0.42f, 0.22f),
+		glm::vec3(0.62f, 0.28f, 0.13f),
+		glm::vec3(0.26f, 0.28f, 0.34f),
+	};
+	const glm::vec3 pantsPalette[] =
+	{
+		glm::vec3(0.09f, 0.14f, 0.30f),
+		glm::vec3(0.12f, 0.18f, 0.16f),
+		glm::vec3(0.24f, 0.20f, 0.15f),
+		glm::vec3(0.12f, 0.12f, 0.14f),
+	};
+	const glm::vec3 hairPalette[] =
+	{
+		glm::vec3(0.18f, 0.075f, 0.035f),
+		glm::vec3(0.05f, 0.045f, 0.040f),
+		glm::vec3(0.58f, 0.43f, 0.24f),
+		glm::vec3(0.34f, 0.18f, 0.07f),
+	};
+	const glm::vec3 accentPalette[] =
+	{
+		glm::vec3(0.83f, 0.19f, 0.16f),
+		glm::vec3(0.95f, 0.64f, 0.20f),
+		glm::vec3(0.20f, 0.58f, 0.85f),
+		glm::vec3(0.62f, 0.78f, 0.26f),
+		glm::vec3(0.84f, 0.34f, 0.66f),
+	};
+	const glm::vec3 skinBase = skinPalette[randomInt(4u)];
+	const glm::vec3 coatBase = coatPalette[randomInt(5u)];
+	const glm::vec3 accentBase = accentPalette[randomInt(5u)];
+
+	const shared_ptr<Material> skin = makeMaterial(jitterColor(skinBase, 0.035f));
+	const shared_ptr<Material> skinShadow = makeMaterial(jitterColor(skinBase * 0.72f, 0.025f));
+	const shared_ptr<Material> coat = makeMaterial(jitterColor(coatBase, 0.04f));
+	const shared_ptr<Material> coatLight = makeMaterial(jitterColor(glm::min(coatBase * 1.28f + glm::vec3(0.035f), glm::vec3(1.0f)), 0.035f));
+	const shared_ptr<Material> pants = makeMaterial(jitterColor(pantsPalette[randomInt(4u)], 0.025f));
+	const shared_ptr<Material> boots = makeMaterial(jitterColor(glm::vec3(0.035f, 0.035f, 0.055f), 0.015f));
+	const shared_ptr<Material> hair = makeMaterial(jitterColor(hairPalette[randomInt(4u)], 0.025f));
+	const shared_ptr<Material> scarf = makeMaterial(jitterColor(accentBase, 0.035f));
+	const shared_ptr<Material> eye = makeMaterial(glm::vec3(0.035f, 0.045f, 0.060f));
+	const shared_ptr<Material> eyeHighlight = makeMaterial(glm::vec3(0.82f, 0.92f, 1.0f));
+	const shared_ptr<Material> trim = makeMaterial(jitterColor(glm::vec3(0.94f, 0.72f, 0.38f), 0.025f));
+	const shared_ptr<Material> accessory = makeMaterial(jitterColor(glm::min(accentBase * 0.62f + glm::vec3(0.02f), glm::vec3(1.0f)), 0.02f));
+
+	std::vector<Vertex> vertices;
+	std::vector<UINT32> indices;
+	vertices.reserve(512);
+	indices.reserve(768);
+
+	glm::vec3 boundsMin(0.0f);
+	glm::vec3 boundsMax(0.0f);
+	bool bHasBounds = false;
+	auto includeBounds = [&boundsMin, &boundsMax, &bHasBounds](const glm::vec3& p)
+	{
+		if (!bHasBounds)
+		{
+			boundsMin = p;
+			boundsMax = p;
+			bHasBounds = true;
+			return;
+		}
+		boundsMin = glm::min(boundsMin, p);
+		boundsMax = glm::max(boundsMax, p);
+	};
+
+	Mesh* mesh = new Mesh;
+	mesh->Owner = renderBackend.get();
+	mesh->transform = glm::mat4x4(1.0f);
+	mesh->IndexFormat = DXGI_FORMAT_R32_UINT;
+	mesh->VertexStride = sizeof(Vertex);
+	mesh->Mat = skin;
+
+	auto appendBox = [&](
+		const glm::vec3& center,
+		const glm::vec3& size,
+		const shared_ptr<Material>& material)
+	{
+		const glm::vec3 halfSize = size * 0.5f;
+		const glm::vec3 mn = center - halfSize;
+		const glm::vec3 mx = center + halfSize;
+		const CubeFace faces[] =
+		{
+			{ glm::vec3( 0.0f,  0.0f,  1.0f), glm::vec3( 1.0f,  0.0f,  0.0f), { glm::vec3(mn.x, mn.y, mx.z), glm::vec3(mx.x, mn.y, mx.z), glm::vec3(mx.x, mx.y, mx.z), glm::vec3(mn.x, mx.y, mx.z) } },
+			{ glm::vec3( 0.0f,  0.0f, -1.0f), glm::vec3(-1.0f,  0.0f,  0.0f), { glm::vec3(mx.x, mn.y, mn.z), glm::vec3(mn.x, mn.y, mn.z), glm::vec3(mn.x, mx.y, mn.z), glm::vec3(mx.x, mx.y, mn.z) } },
+			{ glm::vec3( 1.0f,  0.0f,  0.0f), glm::vec3( 0.0f,  0.0f, -1.0f), { glm::vec3(mx.x, mn.y, mx.z), glm::vec3(mx.x, mn.y, mn.z), glm::vec3(mx.x, mx.y, mn.z), glm::vec3(mx.x, mx.y, mx.z) } },
+			{ glm::vec3(-1.0f,  0.0f,  0.0f), glm::vec3( 0.0f,  0.0f,  1.0f), { glm::vec3(mn.x, mn.y, mn.z), glm::vec3(mn.x, mn.y, mx.z), glm::vec3(mn.x, mx.y, mx.z), glm::vec3(mn.x, mx.y, mn.z) } },
+			{ glm::vec3( 0.0f,  1.0f,  0.0f), glm::vec3( 1.0f,  0.0f,  0.0f), { glm::vec3(mn.x, mx.y, mx.z), glm::vec3(mx.x, mx.y, mx.z), glm::vec3(mx.x, mx.y, mn.z), glm::vec3(mn.x, mx.y, mn.z) } },
+			{ glm::vec3( 0.0f, -1.0f,  0.0f), glm::vec3( 1.0f,  0.0f,  0.0f), { glm::vec3(mn.x, mn.y, mn.z), glm::vec3(mx.x, mn.y, mn.z), glm::vec3(mx.x, mn.y, mx.z), glm::vec3(mn.x, mn.y, mx.z) } },
+		};
+		const glm::vec2 uvs[] =
+		{
+			glm::vec2(0.0f, 1.0f),
+			glm::vec2(1.0f, 1.0f),
+			glm::vec2(1.0f, 0.0f),
+			glm::vec2(0.0f, 0.0f),
+		};
+
+		const UINT32 indexStart = static_cast<UINT32>(indices.size());
+		for (const CubeFace& face : faces)
+		{
+			const UINT32 baseVertex = static_cast<UINT32>(vertices.size());
+			for (UINT32 vertexIndex = 0; vertexIndex < 4; ++vertexIndex)
+			{
+				Vertex vertex = {};
+				vertex.Position = face.Positions[vertexIndex];
+				vertex.Normal = face.Normal;
+				vertex.UV = uvs[vertexIndex];
+				vertex.Tangent = face.Tangent;
+				vertices.push_back(vertex);
+				includeBounds(vertex.Position);
+			}
+
+			indices.push_back(baseVertex + 0);
+			indices.push_back(baseVertex + 1);
+			indices.push_back(baseVertex + 2);
+			indices.push_back(baseVertex + 0);
+			indices.push_back(baseVertex + 2);
+			indices.push_back(baseVertex + 3);
+		}
+
+		Mesh::DrawCall drawCall = {};
+		drawCall.IndexStart = indexStart;
+		drawCall.IndexCount = static_cast<UINT>(indices.size()) - indexStart;
+		drawCall.VertexBase = 0;
+		drawCall.VertexCount = static_cast<UINT>(vertices.size());
+		drawCall.mat = material;
+		mesh->Draws.push_back(drawCall);
+	};
+
+	const float bootHeight = randomRange(0.16f, 0.30f);
+	const float legHeight = randomRange(0.78f, 1.18f);
+	const float legWidth = randomRange(0.22f, 0.36f);
+	const float legDepth = randomRange(0.26f, 0.42f);
+	const float legGap = randomRange(0.10f, 0.24f);
+	const float legOffsetX = legGap * 0.5f + legWidth * 0.5f;
+	const float legCenterY = bootHeight * 0.62f + legHeight * 0.5f;
+	const float hipY = bootHeight * 0.62f + legHeight;
+	const float bootWidth = legWidth + randomRange(0.04f, 0.16f);
+	const float bootDepth = legDepth + randomRange(0.08f, 0.24f);
+	const float bootForward = randomRange(0.02f, 0.09f);
+
+	appendBox(glm::vec3(-legOffsetX, legCenterY, 0.00f), glm::vec3(legWidth, legHeight, legDepth), pants);
+	appendBox(glm::vec3( legOffsetX, legCenterY, 0.00f), glm::vec3(legWidth, legHeight, legDepth), pants);
+	appendBox(glm::vec3(-legOffsetX, bootHeight * 0.5f, bootForward), glm::vec3(bootWidth, bootHeight, bootDepth), boots);
+	appendBox(glm::vec3( legOffsetX, bootHeight * 0.5f, bootForward), glm::vec3(bootWidth, bootHeight, bootDepth), boots);
+
+	const float torsoHeight = randomRange(0.78f, 1.10f);
+	const float torsoWidth = randomRange(0.68f, 1.00f);
+	const float torsoDepth = randomRange(0.34f, 0.54f);
+	const float torsoCenterY = hipY + torsoHeight * 0.48f;
+	const float torsoTopY = hipY + torsoHeight;
+	const float panelWidth = torsoWidth * randomRange(0.38f, 0.72f);
+	const float panelHeight = torsoHeight * randomRange(0.55f, 0.82f);
+	const float beltHeight = randomRange(0.07f, 0.14f);
+
+	appendBox(glm::vec3(0.00f, torsoCenterY, 0.00f), glm::vec3(torsoWidth, torsoHeight, torsoDepth), coat);
+	appendBox(glm::vec3(0.00f, hipY + torsoHeight * 0.52f, torsoDepth * 0.5f + 0.022f), glm::vec3(panelWidth, panelHeight, 0.044f), coatLight);
+	appendBox(glm::vec3(0.00f, hipY + beltHeight * 0.8f, torsoDepth * 0.5f + 0.026f), glm::vec3(torsoWidth * 1.04f, beltHeight, 0.052f), trim);
+
+	const float armWidth = randomRange(0.20f, 0.34f);
+	const float armHeight = randomRange(0.66f, 1.04f);
+	const float armDepth = randomRange(0.24f, 0.40f);
+	const float armOutset = randomRange(0.02f, 0.12f);
+	const float armPoseOffset = randomRange(-0.10f, 0.16f);
+	const float leftArmY = torsoTopY - armHeight * 0.50f + armPoseOffset;
+	const float rightArmY = torsoTopY - armHeight * 0.50f - armPoseOffset * 0.45f;
+	const float armX = torsoWidth * 0.5f + armWidth * 0.5f + armOutset;
+	const float handHeight = randomRange(0.18f, 0.30f);
+	const float handDepth = armDepth + randomRange(-0.02f, 0.04f);
+
+	appendBox(glm::vec3(-armX, leftArmY, randomRange(-0.03f, 0.04f)), glm::vec3(armWidth, armHeight, armDepth), coat);
+	appendBox(glm::vec3( armX, rightArmY, randomRange(-0.03f, 0.04f)), glm::vec3(armWidth, armHeight, armDepth), coat);
+	appendBox(glm::vec3(-armX, leftArmY - armHeight * 0.5f - handHeight * 0.26f, 0.02f), glm::vec3(armWidth * 1.03f, handHeight, handDepth), skin);
+	appendBox(glm::vec3( armX, rightArmY - armHeight * 0.5f - handHeight * 0.26f, 0.02f), glm::vec3(armWidth * 1.03f, handHeight, handDepth), skin);
+
+	const float neckHeight = randomRange(0.06f, 0.16f);
+	const float headWidth = randomRange(0.62f, 0.90f);
+	const float headHeight = randomRange(0.62f, 0.92f);
+	const float headDepth = randomRange(0.58f, 0.84f);
+	const float headCenterZ = randomRange(-0.025f, 0.035f);
+	const float headCenterY = torsoTopY + neckHeight + headHeight * 0.5f;
+	const float headTopY = headCenterY + headHeight * 0.5f;
+
+	appendBox(glm::vec3(0.00f, torsoTopY + neckHeight * 0.52f, 0.00f), glm::vec3(headWidth * 0.28f, neckHeight * 1.2f, headDepth * 0.42f), skinShadow);
+	appendBox(glm::vec3(0.00f, headCenterY, headCenterZ), glm::vec3(headWidth, headHeight, headDepth), skin);
+
+	const float scarfHeight = randomRange(0.10f, 0.18f);
+	const float scarfY = torsoTopY + neckHeight * 0.35f;
+	appendBox(glm::vec3(0.00f, scarfY, torsoDepth * 0.5f + 0.03f), glm::vec3(torsoWidth * 1.08f, scarfHeight, 0.08f), scarf);
+	const float scarfTailSide = randomSign();
+	const float scarfTailHeight = randomRange(0.28f, 0.58f);
+	appendBox(
+		glm::vec3(scarfTailSide * randomRange(0.10f, 0.26f), scarfY - scarfTailHeight * 0.44f, torsoDepth * 0.5f + 0.052f),
+		glm::vec3(randomRange(0.11f, 0.22f), scarfTailHeight, 0.06f),
+		scarf);
+
+	const UINT32 hairStyle = randomInt(5u);
+	if (hairStyle == 0)
+	{
+		const float capHeight = randomRange(0.12f, 0.24f);
+		appendBox(glm::vec3(0.00f, headTopY + capHeight * 0.42f, headCenterZ), glm::vec3(headWidth * 1.04f, capHeight, headDepth * 1.02f), hair);
+		appendBox(glm::vec3(0.00f, headCenterY + headHeight * 0.18f, headCenterZ + headDepth * 0.52f), glm::vec3(headWidth * 0.74f, headHeight * 0.18f, 0.10f), hair);
+	}
+	else if (hairStyle == 1)
+	{
+		appendBox(glm::vec3(0.00f, headTopY + 0.06f, headCenterZ), glm::vec3(headWidth * 1.08f, 0.16f, headDepth * 0.96f), hair);
+		appendBox(glm::vec3(-headWidth * 0.54f, headCenterY - headHeight * 0.02f, headCenterZ), glm::vec3(0.12f, headHeight * 0.72f, headDepth * 0.92f), hair);
+		appendBox(glm::vec3( headWidth * 0.54f, headCenterY - headHeight * 0.02f, headCenterZ), glm::vec3(0.12f, headHeight * 0.72f, headDepth * 0.92f), hair);
+	}
+	else if (hairStyle == 2)
+	{
+		appendBox(glm::vec3(0.00f, headTopY + 0.15f, headCenterZ), glm::vec3(headWidth * 0.34f, 0.34f, headDepth * 0.72f), hair);
+		appendBox(glm::vec3(0.00f, headCenterY + headHeight * 0.26f, headCenterZ + headDepth * 0.48f), glm::vec3(headWidth * 0.84f, 0.16f, 0.09f), hair);
+	}
+	else if (hairStyle == 3)
+	{
+		appendBox(glm::vec3(0.00f, headTopY + 0.05f, headCenterZ - headDepth * 0.04f), glm::vec3(headWidth * 0.92f, 0.14f, headDepth * 1.06f), hair);
+		appendBox(glm::vec3(0.00f, headCenterY - headHeight * 0.03f, headCenterZ - headDepth * 0.52f), glm::vec3(headWidth * 0.86f, headHeight * 0.52f, 0.13f), hair);
+	}
+	else
+	{
+		const float side = randomSign();
+		appendBox(glm::vec3(0.00f, headTopY + 0.06f, headCenterZ), glm::vec3(headWidth * 0.98f, 0.15f, headDepth * 0.92f), hair);
+		appendBox(glm::vec3(side * headWidth * 0.20f, headCenterY + headHeight * 0.16f, headCenterZ + headDepth * 0.51f), glm::vec3(headWidth * 0.72f, 0.22f, 0.10f), hair);
+	}
+
+	const float eyeY = headCenterY + headHeight * randomRange(0.06f, 0.18f);
+	const float eyeZ = headCenterZ + headDepth * 0.5f + 0.018f;
+	const float eyeSpacing = headWidth * randomRange(0.19f, 0.28f);
+	const float eyeWidth = randomRange(0.09f, 0.15f);
+	const float eyeHeight = randomRange(0.055f, 0.095f);
+	appendBox(glm::vec3(-eyeSpacing, eyeY, eyeZ), glm::vec3(eyeWidth, eyeHeight, 0.030f), eye);
+	appendBox(glm::vec3( eyeSpacing, eyeY, eyeZ), glm::vec3(eyeWidth, eyeHeight, 0.030f), eye);
+	appendBox(glm::vec3(-eyeSpacing + eyeWidth * 0.22f, eyeY + eyeHeight * 0.22f, eyeZ + 0.017f), glm::vec3(eyeWidth * 0.30f, eyeHeight * 0.30f, 0.018f), eyeHighlight);
+	appendBox(glm::vec3( eyeSpacing + eyeWidth * 0.22f, eyeY + eyeHeight * 0.22f, eyeZ + 0.017f), glm::vec3(eyeWidth * 0.30f, eyeHeight * 0.30f, 0.018f), eyeHighlight);
+	appendBox(glm::vec3(0.00f, headCenterY - headHeight * 0.04f, eyeZ + 0.002f), glm::vec3(randomRange(0.09f, 0.16f), randomRange(0.035f, 0.07f), 0.028f), skinShadow);
+	appendBox(glm::vec3(0.00f, headCenterY - headHeight * 0.22f, eyeZ + 0.004f), glm::vec3(randomRange(0.16f, 0.28f), randomRange(0.028f, 0.052f), 0.028f), scarf);
+
+	const UINT32 accessoryStyle = randomInt(5u);
+	if (accessoryStyle == 0)
+	{
+		const float brimY = headTopY + randomRange(0.02f, 0.08f);
+		appendBox(glm::vec3(0.00f, brimY, headCenterZ + headDepth * 0.48f), glm::vec3(headWidth * 0.96f, 0.08f, randomRange(0.16f, 0.28f)), accessory);
+		appendBox(glm::vec3(0.00f, brimY + 0.11f, headCenterZ), glm::vec3(headWidth * 0.78f, 0.22f, headDepth * 0.76f), accessory);
+	}
+	else if (accessoryStyle == 1)
+	{
+		appendBox(glm::vec3(-eyeSpacing, eyeY, eyeZ + 0.026f), glm::vec3(eyeWidth * 1.45f, eyeHeight * 1.20f, 0.020f), accessory);
+		appendBox(glm::vec3( eyeSpacing, eyeY, eyeZ + 0.026f), glm::vec3(eyeWidth * 1.45f, eyeHeight * 1.20f, 0.020f), accessory);
+		appendBox(glm::vec3(0.00f, eyeY, eyeZ + 0.030f), glm::vec3(eyeSpacing * 1.18f, 0.028f, 0.018f), accessory);
+	}
+	else if (accessoryStyle == 2)
+	{
+		appendBox(glm::vec3(0.00f, torsoCenterY + torsoHeight * 0.03f, -torsoDepth * 0.5f - 0.11f), glm::vec3(torsoWidth * 0.72f, torsoHeight * 0.76f, 0.22f), accessory);
+	}
+	else if (accessoryStyle == 3)
+	{
+		appendBox(glm::vec3(-torsoWidth * 0.30f, torsoTopY - 0.12f, torsoDepth * 0.5f + 0.04f), glm::vec3(torsoWidth * 0.24f, 0.08f, 0.08f), trim);
+		appendBox(glm::vec3( torsoWidth * 0.30f, torsoTopY - 0.12f, torsoDepth * 0.5f + 0.04f), glm::vec3(torsoWidth * 0.24f, 0.08f, 0.08f), trim);
+	}
+	else
+	{
+		appendBox(glm::vec3(randomSign() * torsoWidth * 0.22f, torsoCenterY + torsoHeight * 0.18f, torsoDepth * 0.5f + 0.052f), glm::vec3(0.11f, 0.11f, 0.026f), trim);
+	}
+
+	mesh->NumVertices = static_cast<UINT>(vertices.size());
+	mesh->NumIndices = static_cast<UINT>(indices.size());
+	mesh->Vb = renderBackend->CreateVertexBuffer(
+		static_cast<uint32_t>(sizeof(Vertex) * vertices.size()),
+		sizeof(Vertex),
+		vertices.data());
+	mesh->Ib = renderBackend->CreateIndexBuffer(
+		mesh->IndexFormat,
+		static_cast<uint32_t>(sizeof(UINT32) * indices.size()),
+		indices.data());
+	mesh->CpuPositions.reserve(vertices.size());
+	for (const Vertex& vertex : vertices)
+		mesh->CpuPositions.push_back(vertex.Position);
+	mesh->CpuIndices = indices;
+
+	scene->meshes.push_back(shared_ptr<Mesh>(mesh));
+	scene->bHasBounds = bHasBounds;
+	scene->BoundsMin = boundsMin;
+	scene->BoundsMax = boundsMax;
+
+	return scene;
+}
+
 void Corona::LoadAssets()
 {
 	const bool bVulkanBackend =
@@ -5046,14 +6466,17 @@ void Corona::LoadAssets()
 		AppendCpuRuntimeTrace(L"[LoadAssets] begin Vulkan hybrid bootstrap");
 	else if (bVulkanHybridStartup)
 		AppendCpuRuntimeTrace(L"[LoadAssets] begin Vulkan hybrid stage-aware init stage=" + std::to_wstring(maxSupportedHybridStage));
+	UpdateStartupLoadingProgress(0.22f, L"Preparing render resources");
 
 	if (bAllowBlueNoiseInit && !bBlueNoiseInitialized)
 	{
+		UpdateStartupLoadingProgress(0.23f, L"Loading blue-noise texture");
 		InitBlueNoiseTexture();
 		bBlueNoiseInitialized = true;
 	}
 	if (bAllowImguiInit && !bImguiInitialized)
 	{
+		UpdateStartupLoadingProgress(0.24f, L"Initializing UI renderer");
 		InitImgui();
 		bImguiInitialized = true;
 	}
@@ -5064,11 +6487,13 @@ void Corona::LoadAssets()
 	}
 
 	AppendCpuRuntimeTrace(L"[LoadAssets] before InitGBufferPass");
+	UpdateStartupLoadingProgress(0.26f, L"Compiling G-buffer pass");
 	InitGBufferPass();
 	AppendCpuRuntimeTrace(L"[LoadAssets] after InitGBufferPass");
 	if (bSupportsFullHybridPresentation)
 	{
 		AppendCpuRuntimeTrace(L"[LoadAssets] before full hybrid presentation pass init");
+		UpdateStartupLoadingProgress(0.30f, L"Compiling presentation passes");
 		InitLightingPass();
 		InitToneMapPass();
 		if (!bVulkanPathTracingStartup)
@@ -5083,6 +6508,7 @@ void Corona::LoadAssets()
 	if (bSupportsShadowDenoise)
 	{
 		AppendCpuRuntimeTrace(L"[LoadAssets] before InitShadowDenoisePass");
+		UpdateStartupLoadingProgress(0.34f, L"Compiling shadow and sky denoisers");
 		InitShadowDenoisePass();
 		AppendCpuRuntimeTrace(L"[LoadAssets] after InitShadowDenoisePass");
 		AppendCpuRuntimeTrace(L"[LoadAssets] before InitSkyLightingDenoisePass");
@@ -5092,28 +6518,33 @@ void Corona::LoadAssets()
 	if (bSupportsTemporalDenoise)
 	{
 		AppendCpuRuntimeTrace(L"[LoadAssets] before InitTemporalDenoisingPass");
+		UpdateStartupLoadingProgress(0.37f, L"Compiling temporal denoiser");
 		InitTemporalDenoisingPass();
 		AppendCpuRuntimeTrace(L"[LoadAssets] after InitTemporalDenoisingPass");
 	}
 	if (bSupportsScreenProbeGI)
 	{
 		AppendCpuRuntimeTrace(L"[LoadAssets] before InitScreenProbeGIPass");
+		UpdateStartupLoadingProgress(0.39f, L"Compiling screen-probe GI");
 		InitScreenProbeGIPass();
 		AppendCpuRuntimeTrace(L"[LoadAssets] after InitScreenProbeGIPass");
 	}
 	if (bSupportsTemporalDenoise)
 	{
 		AppendCpuRuntimeTrace(L"[LoadAssets] before InitSpatialHashGIPass");
+		UpdateStartupLoadingProgress(0.41f, L"Compiling spatial hash GI");
 		InitSpatialHashGIPass();
 		AppendCpuRuntimeTrace(L"[LoadAssets] after InitSpatialHashGIPass");
 	}
 	if (bSupportsTemporalDenoise || bSupportsSpatialDenoise)
 	{
 		AppendCpuRuntimeTrace(L"[LoadAssets] before InitSpatialDenoisingPass");
+		UpdateStartupLoadingProgress(0.43f, L"Compiling spatial denoiser");
 		InitSpatialDenoisingPass();
 		AppendCpuRuntimeTrace(L"[LoadAssets] after InitSpatialDenoisingPass");
 	}
 	AppendCpuRuntimeTrace(L"[LoadAssets] before InitGpuTimingResources");
+	UpdateStartupLoadingProgress(0.45f, L"Preparing GPU timing resources");
 	InitGpuTimingResources();
 	AppendCpuRuntimeTrace(L"[LoadAssets] after InitGpuTimingResources");
 
@@ -5171,6 +6602,7 @@ void Corona::LoadAssets()
 		ColorBuffers[0]->textureDesc.Height != DisplayHeight;
 	if (bRecreateColorBuffers)
 	{
+		UpdateStartupLoadingProgress(0.48f, L"Allocating color buffers");
 		ColorBuffers[0] = createTexture2D(ETextureFormat::RGBA16Float, TextureUsage_RenderTarget | TextureUsage_UnorderedAccess, DisplayWidth, DisplayHeight, 1);
 		ColorBuffers[0]->MakeRTV();
 
@@ -5200,6 +6632,7 @@ void Corona::LoadAssets()
 	}
 
 	// Path tracing accumulation buffers
+	UpdateStartupLoadingProgress(0.52f, L"Allocating path tracing buffers");
 	PathTracingAccumBuffer[0] = createTexture2D(ETextureFormat::RGBA32Float, TextureUsage_UnorderedAccess, DisplayWidth, DisplayHeight, 1, glm::vec4(0.0f));
 
 	NAME_D3D12_OBJECT(PathTracingAccumBuffer[0]->resource);
@@ -5210,6 +6643,7 @@ void Corona::LoadAssets()
 	AppendCpuRuntimeTrace(L"[LoadAssets] after path tracing buffers");
 
 	// lighting result
+	UpdateStartupLoadingProgress(0.55f, L"Allocating lighting buffers");
 	LightingBuffer = createTexture2D(ETextureFormat::RGBA16Float, TextureUsage_RenderTarget | TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
 	LightingBuffer->MakeRTV();
 
@@ -5225,6 +6659,7 @@ void Corona::LoadAssets()
 	AppendCpuRuntimeTrace(L"[LoadAssets] after lighting buffer");
 
 	// world normal
+	UpdateStartupLoadingProgress(0.58f, L"Allocating shadow and normal buffers");
 	NormalBuffers[0] = createTexture2D(ETextureFormat::RGBA16Float, TextureUsage_RenderTarget, RenderWidthLocal, RenderHeightLocal, 1, glm::vec4(0.0f, -0.1f, 0.0f, 0.0f));
 	NormalBuffers[0]->MakeRTV();
 
@@ -5269,6 +6704,7 @@ void Corona::LoadAssets()
 	AppendCpuRuntimeTrace(L"[LoadAssets] after shadow buffers");
 
 	// refleciton result
+	UpdateStartupLoadingProgress(0.62f, L"Allocating GI buffers");
 	SpecularGIRaw = createTexture2D(HybridFloat4UAVFormat, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
 
 	NAME_D3D12_OBJECT(SpecularGIRaw->resource);
@@ -5399,6 +6835,7 @@ void Corona::LoadAssets()
 	AppendCpuRuntimeTrace(L"[LoadAssets] after temporal GI buffers");
 
 	// albedo
+	UpdateStartupLoadingProgress(0.66f, L"Allocating G-buffer textures");
 	AlbedoBuffer = createTexture2D(ETextureFormat::RGBA8Unorm, TextureUsage_RenderTarget, RenderWidthLocal, RenderHeightLocal, 1);
 	AlbedoBuffer->MakeRTV();
 
@@ -5434,6 +6871,7 @@ void Corona::LoadAssets()
 	NAME_D3D12_OBJECT(UnjitteredDepthBuffers[1]->resource);
 	AppendCpuRuntimeTrace(L"[LoadAssets] after gbuffer textures");
 
+	UpdateStartupLoadingProgress(0.70f, L"Loading default textures");
 	if (!DefaultWhiteTex) DefaultWhiteTex = renderBackend->CreateTextureFromFile(GetAssetFullPath(L"assets\\default\\default_white.png"), false);
 	if (!DefaultBlackTex) DefaultBlackTex = renderBackend->CreateTextureFromFile(GetAssetFullPath(L"assets\\default\\default_black.png"), false);
 	if (!DefaultNormalTex) DefaultNormalTex = renderBackend->CreateTextureFromFile(GetAssetFullPath(L"assets\\default\\default_normal.png"), true);
@@ -5441,13 +6879,14 @@ void Corona::LoadAssets()
 	if (bVulkanHybridStartup)
 		AppendCpuRuntimeTrace(L"[LoadAssets] after default textures");
 
+	UpdateStartupLoadingProgress(0.72f, L"Loading Sponza scene");
 	if (!Sponza) Sponza = LoadModel(WideToUtf8(GetAssetFullPath(L"assets\\Sponza\\Sponza.fbx")));
 	if (Sponza && SponzaObject == InvalidSceneObjectHandle)
 	{
 		SceneObjectDesc desc;
 		desc.ScenePtr = Sponza;
 		desc.Transform = glm::mat4x4(1.0f);
-		desc.Roughness = SponzaRoughnessMultiplier;
+		desc.Roughness = 1.0f;
 		desc.Metallic = 0.0f;
 		desc.bOverrideRoughnessMetallic = false;
 		SponzaObject = AddSceneObject(desc);
@@ -5455,11 +6894,11 @@ void Corona::LoadAssets()
 	if (bVulkanHybridStartup)
 		AppendCpuRuntimeTrace(L"[LoadAssets] after sponza load");
 
-	if (!Buddha)
+	if (!bEnableStartupLuauScript && !Buddha)
 	{
 		Buddha = LoadModel(WideToUtf8(GetAssetFullPath(L"assets\\buddha\\buddha.obj")));
 	}
-	if (Buddha && BuddhaObject == InvalidSceneObjectHandle)
+	if (!bEnableStartupLuauScript && Buddha && BuddhaObject == InvalidSceneObjectHandle)
 	{
 		BuddhaObject = AddCenteredSceneObject(
 			Buddha,
@@ -5471,16 +6910,16 @@ void Corona::LoadAssets()
 			BuddhaCenterRotationDegrees);
 	}
 
-	if (!ShaderBall)
+	if (!bEnableStartupLuauScript && !ShaderBall)
 	{
 		ShaderBall = LoadModel(WideToUtf8(GetAssetFullPath(L"assets\\shaderBall\\shaderBall.fbx")));
 	}
-	if (ShaderBall && ShaderBallObject == InvalidSceneObjectHandle)
+	if (!bEnableStartupLuauScript && ShaderBall && ShaderBallObject == InvalidSceneObjectHandle)
 	{
 		ShaderBallObject = AddCenteredSceneObject(
 			ShaderBall,
 			220.0f,
-			ShaderBallRoughnessMultiplier,
+			0.15f,
 			1.0f,
 			false,
 			ShaderBallCenterPosition,
@@ -5505,6 +6944,7 @@ void Corona::LoadAssets()
 
 	if (!MirrorCube)
 	{
+		UpdateStartupLoadingProgress(0.80f, L"Creating mirror cube");
 		MirrorCube = CreateMirrorCubeScene();
 	}
 	if (MirrorCube && MirrorCubeObject == InvalidSceneObjectHandle)
@@ -5522,6 +6962,7 @@ void Corona::LoadAssets()
 	// Describe and create a sampler.
 	if (!samplerWrap)
 	{
+		UpdateStartupLoadingProgress(0.82f, L"Creating samplers");
 		SamplerCreateDesc samplerDesc = {};
 		samplerDesc.Filter = ESamplerFilter::Anisotropic;
 		samplerDesc.AddressU = ESamplerAddressMode::Wrap;
@@ -5561,18 +7002,22 @@ void Corona::LoadAssets()
 	if (bSupportsHybridRaytracing)
 	{
 		AppendCpuRuntimeTrace(L"[LoadAssets] before InitRaytracingData");
+		UpdateStartupLoadingProgress(0.86f, L"Building ray tracing scene data");
 		InitRaytracingData();
 		AppendCpuRuntimeTrace(L"[LoadAssets] after InitRaytracingData");
 		AppendCpuRuntimeTrace(L"[LoadAssets] before InitRTPSO");
+		UpdateStartupLoadingProgress(0.89f, L"Compiling ray tracing pipelines");
 		InitRTPSO();
 		AppendCpuRuntimeTrace(L"[LoadAssets] after InitRTPSO");
 		if (StartupRenderingMode == ERenderingMode::PATHTRACING)
 		{
 			AppendCpuRuntimeTrace(L"[LoadAssets] before InitPathTracingPass");
+			UpdateStartupLoadingProgress(0.91f, L"Compiling path tracing pipeline");
 			InitPathTracingPass();
 			AppendCpuRuntimeTrace(L"[LoadAssets] after InitPathTracingPass");
 		}
 	}
+	UpdateStartupLoadingProgress(0.92f, L"Renderer assets ready");
 	AppendCpuRuntimeTrace(L"[LoadAssets] return");
 
 }
@@ -5581,6 +7026,11 @@ void Corona::LoadAssets()
 
 shared_ptr<Scene> Corona::LoadBinaryMeshModel(const std::wstring& binaryFileName, const std::wstring& sourceFileName)
 {
+	if (bStartupLoadingScreenActive)
+		UpdateStartupLoadingProgress(
+			std::max(StartupLoadingProgress, 0.72f),
+			L"Loading mesh cache: " + GetFileName(binaryFileName.c_str()));
+
 	const auto loadStart = CpuClock::now();
 	std::ifstream file(binaryFileName, std::ios::binary);
 	if (!file)
@@ -5775,6 +7225,10 @@ shared_ptr<Scene> Corona::LoadModel(string fileName)
 
 	std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> converter;
 	wstring wide = converter.from_bytes(fileName);
+	if (bStartupLoadingScreenActive)
+		UpdateStartupLoadingProgress(
+			std::max(StartupLoadingProgress, 0.72f),
+			L"Loading model: " + GetFileName(wide.c_str()));
 	const std::filesystem::path binaryMeshPath = GetCoronaMeshCachePath(wide);
 	if (IsCoronaMeshCacheUsable(binaryMeshPath, std::filesystem::path(wide)))
 	{
@@ -6170,12 +7624,11 @@ inline glm::vec2 Hammersley2D(uint64 sampleIdx, uint64 numSamples)
 
 void Corona::OnUpdate()
 {
-	if (bPendingUpscaleRefresh)
-	{
-		RefreshUpscaleSettings(true);
-		bPendingUpscaleRefresh = false;
-	}
+	std::lock_guard<std::mutex> stateLock(GameRenderStateMutex);
+	const auto updateStart = CpuClock::now();
+	CpuUpdatePhaseLastTimeMs.fill(0.0f);
 
+	auto phaseStart = CpuClock::now();
 	m_timer.Tick(NULL);
 	const float elapsedSeconds = static_cast<float>(m_timer.GetElapsedSeconds());
 
@@ -6184,76 +7637,100 @@ void Corona::OnUpdate()
 		// Update window text with FPS value.
 		wchar_t fps[64];
 		swprintf_s(fps, L"%ufps", m_timer.GetFramesPerSecond());
-		SetCustomWindowText(fps);
+		if (!bSplitGameRenderThreads)
+			SetCustomWindowText(fps);
 		m_frameCounter = 0;
 	}
 
 	m_frameCounter++;
 
 	const glm::vec3 cameraPositionBeforeNativeUpdate = m_camera.m_position;
-	if (!bScriptCameraControlEnabled)
+	const bool bCameraPathDrivesCamera = bCameraPathPlaying || bCameraPathDumping;
+	if (!bScriptCameraControlEnabled && !bCameraPathDrivesCamera)
 	{
 		m_camera.SetTurnSpeed(m_turnSpeed);
 		m_camera.Update(elapsedSeconds);
-		UpdateCameraPathState();
 		m_camera.m_position = ResolveCameraPhysicsMovement(cameraPositionBeforeNativeUpdate, m_camera.m_position);
 	}
-	const glm::vec3 cameraPositionBeforeScriptUpdate = m_camera.m_position;
+	AddCpuUpdatePhaseTiming(ECpuUpdatePhase::CameraPhysics, phaseStart, CpuClock::now());
+
+	phaseStart = CpuClock::now();
+	PollScriptMouseState();
+	AddCpuUpdatePhaseTiming(ECpuUpdatePhase::Input, phaseStart, CpuClock::now());
+
+	phaseStart = CpuClock::now();
 	UpdateLuauScripting(elapsedSeconds);
-	if (bScriptCameraControlEnabled)
-		m_camera.m_position = ResolveCameraPhysicsMovement(cameraPositionBeforeScriptUpdate, m_camera.m_position);
+	AddCpuUpdatePhaseTiming(ECpuUpdatePhase::LuauScripts, phaseStart, CpuClock::now());
+
+	phaseStart = CpuClock::now();
 	ClearScriptInputFrameState();
+	AddCpuUpdatePhaseTiming(ECpuUpdatePhase::Input, phaseStart, CpuClock::now());
+
+	phaseStart = CpuClock::now();
+	UpdateCameraPathState();
+	AddCpuUpdatePhaseTiming(ECpuUpdatePhase::CameraPath, phaseStart, CpuClock::now());
+
+	phaseStart = CpuClock::now();
+	CollectRenderFrameDeltas();
+	AddCpuUpdatePhaseTiming(ECpuUpdatePhase::RenderSync, phaseStart, CpuClock::now());
+
+	FinishCpuUpdateTiming(updateStart, CpuClock::now());
+}
+
+void Corona::ProcessRenderThreadRequests()
+{
+	if (bPendingUpscaleRefresh)
+	{
+		RefreshUpscaleSettings(true);
+		bPendingUpscaleRefresh = false;
+	}
+
+	if (bRecompileShaders)
+	{
+		RecompileShaders();
+		bRecompileShaders = false;
+	}
+}
+
+void Corona::BuildRenderFrameDerivedState(const RenderFrameSourceState* sourceState)
+{
+	if (sourceState)
+		ApplyRenderFrameSourceState(*sourceState);
 
 	const float effectiveNear = Near;
 	const float effectiveFar = Far;
 
-	ViewMat = m_camera.GetViewMatrix();
-	ProjMat = m_camera.GetProjectionMatrix(Fov, m_aspectRatio, effectiveNear, effectiveFar);
+	if (sourceState)
+	{
+		auto normalizeOrFallback = [](const glm::vec3& value, const glm::vec3& fallback)
+		{
+			const float length = glm::length(value);
+			return length > 0.0001f ? value / length : fallback;
+		};
+
+		const glm::vec3 cameraLook = normalizeOrFallback(sourceState->CameraLookDirection, glm::vec3(0.0f, 0.0f, 1.0f));
+		glm::vec3 cameraUp = normalizeOrFallback(sourceState->CameraUpDirection, glm::vec3(0.0f, 1.0f, 0.0f));
+		if (glm::length(glm::cross(cameraLook, cameraUp)) < 0.0001f)
+			cameraUp = std::abs(cameraLook.y) < 0.99f ? glm::vec3(0.0f, 1.0f, 0.0f) : glm::vec3(1.0f, 0.0f, 0.0f);
+
+		ViewMat = glm::lookAtRH(sourceState->CameraPosition, sourceState->CameraPosition + cameraLook, cameraUp);
+		ProjMat = glm::perspectiveRH<float>(Fov, m_aspectRatio, effectiveNear, effectiveFar);
+	}
+	else
+	{
+		ViewMat = m_camera.GetViewMatrix();
+		ProjMat = m_camera.GetProjectionMatrix(Fov, m_aspectRatio, effectiveNear, effectiveFar);
+	}
 	UnjitteredProjMat = ProjMat;
 	UnjitteredViewProjMat = ProjMat * ViewMat;
 
 	InvViewMat = glm::inverse(ViewMat);
 	InvProjMat = glm::inverse(ProjMat);
-
-	RTShadowViewParam.ViewMatrix = glm::transpose(ViewMat);
-	RTShadowViewParam.InvViewMatrix = glm::transpose(InvViewMat);
-	RTShadowViewParam.ProjMatrix = glm::transpose(ProjMat);
-	RTShadowViewParam.InvProjMatrix = glm::transpose(InvProjMat);
-	RTShadowViewParam.ProjectionParams.x = effectiveFar / (effectiveFar - effectiveNear);
-	RTShadowViewParam.ProjectionParams.y = effectiveNear / (effectiveNear - effectiveFar);
-	RTShadowViewParam.ProjectionParams.z = effectiveNear;
-	RTShadowViewParam.ProjectionParams.w = effectiveFar;
-	RTShadowViewParam.LightDir = glm::vec4(LightDir, 0);
-	RTShadowViewParam.ShadowLightRadius = std::clamp(RTShadowViewParam.ShadowLightRadius, 0.0f, 0.03f);
-	RTShadowViewParam.ShadowSampleCount = std::clamp(RTShadowViewParam.ShadowSampleCount, 1u, 16u);
-
-	RTAOViewParam.ViewMatrix = glm::transpose(ViewMat);
-	RTAOViewParam.InvViewMatrix = glm::transpose(InvViewMat);
-	RTAOViewParam.ProjMatrix = glm::transpose(UnjitteredProjMat);
-	RTAOViewParam.InvProjMatrix = glm::transpose(glm::inverse(UnjitteredProjMat));
-	RTAOViewParam.ProjectionParams.x = effectiveFar / (effectiveFar - effectiveNear);
-	RTAOViewParam.ProjectionParams.y = effectiveNear / (effectiveNear - effectiveFar);
-	RTAOViewParam.ProjectionParams.z = effectiveNear;
-	RTAOViewParam.ProjectionParams.w = effectiveFar;
-	RTAOViewParam.RTSize = glm::vec2(GetRenderWidth(), GetRenderHeight());
-	RTAOViewParam.Radius = std::clamp(RTAOViewParam.Radius, 2.0f, 256.0f);
-	RTAOViewParam.Power = std::clamp(RTAOViewParam.Power, 0.25f, 4.0f);
-	RTAOViewParam.SampleCount = std::clamp(RTAOViewParam.SampleCount, 1u, 16u);
-	RTAOViewParam.NormalBias = std::clamp(RTAOViewParam.NormalBias, 0.01f, 2.0f);
-
-	RTSkyLightingViewParam.ViewMatrix = RTAOViewParam.ViewMatrix;
-	RTSkyLightingViewParam.InvViewMatrix = RTAOViewParam.InvViewMatrix;
-	RTSkyLightingViewParam.ProjMatrix = RTAOViewParam.ProjMatrix;
-	RTSkyLightingViewParam.InvProjMatrix = RTAOViewParam.InvProjMatrix;
-	RTSkyLightingViewParam.ProjectionParams = RTAOViewParam.ProjectionParams;
-	RTSkyLightingViewParam.RTSize = RTAOViewParam.RTSize;
-	RTSkyLightingViewParam.RayLength = std::clamp(RTSkyLightingViewParam.RayLength, 1.0f, 100000.0f);
-	RTSkyLightingViewParam.NormalBias = std::clamp(RTSkyLightingViewParam.NormalBias, 0.01f, 4.0f);
-	RTSkyLightingViewParam.SampleCount = std::clamp(RTSkyLightingViewParam.SampleCount, 1u, 32u);
-	RTSkyLightingViewParam.SkyUpBias = std::clamp(RTSkyLightingViewParam.SkyUpBias, 0.0f, 1.0f);
-	RTSkyLightingViewParam.SkyDirectionPower = std::clamp(RTSkyLightingViewParam.SkyDirectionPower, 0.25f, 8.0f);
-	RTSkyLightingViewParam.SkyMinWorldY = std::clamp(RTSkyLightingViewParam.SkyMinWorldY, -0.25f, 0.75f);
-	RTSkyLightingViewParam.SkyMaxSampleAttempts = std::clamp(RTSkyLightingViewParam.SkyMaxSampleAttempts, 1u, 8u);
+	UnjitteredInvProjMat = glm::inverse(UnjitteredProjMat);
+	FrameProjectionParams.x = effectiveFar / (effectiveFar - effectiveNear);
+	FrameProjectionParams.y = effectiveNear / (effectiveNear - effectiveFar);
+	FrameProjectionParams.z = effectiveNear;
+	FrameProjectionParams.w = effectiveFar;
 
 	glm::vec2 Jitter;
 	const uint64 ActiveJitterSampleCount = IsDLSSUpscaleEnabled() ? std::max<uint64>(1, DLSSJitterPhaseCount) : std::max<uint64>(1, TAASampleCount);
@@ -6273,10 +7750,8 @@ void Corona::OnUpdate()
 	PrevJitter = CurrentJitter;
 	glm::mat4x4 JitterMat = glm::translate(glm::vec3(offsetX, -offsetY, 0));
 
-
 	if (IsJitterEnabled())
 		ProjMat = JitterMat * ProjMat;
-
 
 	ViewProjMat = ProjMat * ViewMat;
 	if (bResetTemporalStateNextUpdate)
@@ -6295,45 +7770,44 @@ void Corona::OnUpdate()
 	}
 
 	InvViewProjMat = glm::inverse(ViewProjMat);
-	glm::mat4x4 UnjitteredInvProjMat = glm::inverse(UnjitteredProjMat);
+	RenderFrameShaderTime = sourceState ? sourceState->TotalSeconds : static_cast<float>(m_timer.GetTotalSeconds());
+	RenderFrameShaderTime *= 0.01f;
+	RenderFrameNormalizedLightDir = glm::length(LightDir) > 0.0001f ? glm::normalize(LightDir) : glm::vec3(0.0f, 1.0f, 0.0f);
+	const float lightDirT = 0.5f * (RenderFrameNormalizedLightDir.y + 1.0f);
+	RenderFrameLightColor = glm::mix(SkyColorBottom, SkyColorTop, lightDirT);
+	RenderFrameRayNoiseMode = static_cast<UINT32>(RayNoiseMode);
+	const bool bDiffuseGIIncludesSkyLighting = bEnableSkyLighting && !bEnableRayTracedSkyLighting;
+	RenderFrameDiffuseGISkyLightingEnabled = bDiffuseGIIncludesSkyLighting ? 1u : 0u;
+	RenderFrameDiffuseGISkyIntensity = bDiffuseGIIncludesSkyLighting ? SkyIntensity * std::clamp(SkyLightingStrength, 0.0f, 1.0f) : SkyIntensity;
+	RenderFrameIndex = FrameCounter;
 
-	float timeElapsed = m_timer.GetTotalSeconds();
-	timeElapsed *= 0.01f;
-	// Calculate light color from sky gradient based on light direction
-	glm::vec3 normalizedLightDir = glm::normalize(LightDir);
-	float lightDirT = 0.5f * (normalizedLightDir.y + 1.0f);
-	glm::vec3 lightColor = glm::mix(SkyColorBottom, SkyColorTop, lightDirT);
-	const UINT32 rayNoiseMode = static_cast<UINT32>(RayNoiseMode);
-	constexpr UINT32 kScreenProbeLightingBootstrapRays = 100u;
-
-	RTAOViewParam.FrameCounter = FrameCounter;
-	RTAOViewParam.NoiseMode = rayNoiseMode;
-	RTAOViewParam.BlueNoiseOffsetStride = RTGIViewParam.BlueNoiseOffsetStride;
-	RTSkyLightingViewParam.FrameCounter = FrameCounter;
-	RTSkyLightingViewParam.NoiseMode = rayNoiseMode;
-	RTSkyLightingViewParam.BlueNoiseOffsetStride = RTGIViewParam.BlueNoiseOffsetStride;
-	RTSkyLightingViewParam.SkyColorTop = SkyColorTop;
-	RTSkyLightingViewParam.SkyColorBottom = SkyColorBottom;
-	RTSkyLightingViewParam.SkyIntensity = SkyIntensity;
-
-	const bool indirectLightDirChanged = glm::length(normalizedLightDir - PrevIndirectAccumLightDir) > 0.0001f;
+	const bool indirectLightDirChanged = glm::length(RenderFrameNormalizedLightDir - PrevIndirectAccumLightDir) > 0.0001f;
 	const bool indirectLightIntensityChanged = abs(LightIntensity - PrevIndirectAccumLightIntensity) > 0.0001f;
 	const bool indirectSkyChanged =
 		glm::length(SkyColorTop - PrevIndirectSkyColorTop) > 0.0001f ||
 		glm::length(SkyColorBottom - PrevIndirectSkyColorBottom) > 0.0001f ||
 		abs(SkyIntensity - PrevIndirectSkyIntensity) > 0.0001f;
+	const bool indirectDiffuseGISkyLightingChanged =
+		bDiffuseGIIncludesSkyLighting != PrevIndirectDiffuseGISkyLightingEnabled;
+	const bool indirectSkyLightingStrengthChanged =
+		bDiffuseGIIncludesSkyLighting &&
+		abs(SkyLightingStrength - PrevIndirectSkyLightingStrength) > 0.0001f;
 	const bool indirectPrefilteredEnvChanged =
 		abs(PrefilteredEnvRoughnessThreshold - PrevIndirectPrefilteredEnvRoughnessThreshold) > 0.0001f ||
 		abs(PrefilteredEnvRoughnessFade - PrevIndirectPrefilteredEnvRoughnessFade) > 0.0001f ||
 		bEnablePrefilteredEnvSpecular != PrevIndirectPrefilteredEnvSpecularEnabled;
-	const bool indirectLightingChanged = indirectLightDirChanged || indirectLightIntensityChanged || indirectSkyChanged || indirectPrefilteredEnvChanged;
-	float spatialHashHistorySampleDecay = 1.0f;
+	const bool indirectLightingChanged =
+		indirectLightDirChanged ||
+		indirectLightIntensityChanged ||
+		indirectSkyChanged ||
+		indirectDiffuseGISkyLightingChanged ||
+		indirectSkyLightingStrengthChanged ||
+		indirectPrefilteredEnvChanged;
 
 	if (indirectLightingChanged)
 	{
 		if (DiffuseGIMode == EDiffuseGIMode::SPATIAL_HASH)
 		{
-			// Spatial hash GI keeps visible cells live and lets new rays converge the cache.
 		}
 		else
 		{
@@ -6349,179 +7823,36 @@ void Corona::OnUpdate()
 				bScreenProbeLightingBootstrapPending = false;
 			}
 		}
-		PrevIndirectAccumLightDir = normalizedLightDir;
+		PrevIndirectAccumLightDir = RenderFrameNormalizedLightDir;
 		PrevIndirectAccumLightIntensity = LightIntensity;
 		PrevIndirectSkyColorTop = SkyColorTop;
 		PrevIndirectSkyColorBottom = SkyColorBottom;
 		PrevIndirectSkyIntensity = SkyIntensity;
+		PrevIndirectSkyLightingStrength = SkyLightingStrength;
+		PrevIndirectDiffuseGISkyLightingEnabled = bDiffuseGIIncludesSkyLighting;
 		PrevIndirectPrefilteredEnvRoughnessThreshold = PrefilteredEnvRoughnessThreshold;
 		PrevIndirectPrefilteredEnvRoughnessFade = PrefilteredEnvRoughnessFade;
 		PrevIndirectPrefilteredEnvSpecularEnabled = bEnablePrefilteredEnvSpecular;
 	}
 	PrevIndirectAccumViewMat = ViewMat;
 
-	// reflection view param
-	RTReflectionViewParam.ViewMatrix = glm::transpose(ViewMat);
-	RTReflectionViewParam.InvViewMatrix = glm::transpose(InvViewMat);
-	RTReflectionViewParam.ProjMatrix = glm::transpose(UnjitteredProjMat);
-	RTReflectionViewParam.InvProjMatrix = glm::transpose(UnjitteredInvProjMat);
-	RTReflectionViewParam.ProjectionParams.x = effectiveFar / (effectiveFar - effectiveNear);
-	RTReflectionViewParam.ProjectionParams.y = effectiveNear / (effectiveNear - effectiveFar);
-	RTReflectionViewParam.ProjectionParams.z = effectiveNear;
-	RTReflectionViewParam.ProjectionParams.w = effectiveFar;
-	RTReflectionViewParam.LightDir = glm::vec4(normalizedLightDir, LightIntensity);
-	RTReflectionViewParam.RandomOffset = glm::vec2(timeElapsed, timeElapsed);
-	RTReflectionViewParam.FrameCounter = FrameCounter;
-	RTReflectionViewParam.SkyColorTop = SkyColorTop;
-	RTReflectionViewParam.SkyColorBottom = SkyColorBottom;
-	RTReflectionViewParam.SkyIntensity = SkyIntensity;
-	RTReflectionViewParam.LightColor = lightColor;
-	RTReflectionViewParam.PrefilteredEnvRoughnessThreshold = PrefilteredEnvRoughnessThreshold;
-	RTReflectionViewParam.PrefilteredEnvRoughnessFade = PrefilteredEnvRoughnessFade;
-	RTReflectionViewParam.bEnablePrefilteredEnvSpecular = bEnablePrefilteredEnvSpecular ? 1u : 0u;
-	RTReflectionViewParam.NoiseMode = rayNoiseMode;
-
-	// GI view param
-	RTGIViewParam.ViewMatrix = glm::transpose(ViewMat);
-	RTGIViewParam.InvViewMatrix = glm::transpose(InvViewMat);
-	RTGIViewParam.ProjMatrix = glm::transpose(UnjitteredProjMat);
-	RTGIViewParam.InvProjMatrix = glm::transpose(UnjitteredInvProjMat);
-	RTGIViewParam.ProjectionParams.x = effectiveFar / (effectiveFar - effectiveNear);
-	RTGIViewParam.ProjectionParams.y = effectiveNear / (effectiveNear - effectiveFar);
-	RTGIViewParam.ProjectionParams.z = effectiveNear;
-	RTGIViewParam.ProjectionParams.w = effectiveFar;
-	RTGIViewParam.LightDir = glm::vec4(normalizedLightDir, LightIntensity);
-	RTGIViewParam.RandomOffset = glm::vec2(timeElapsed, timeElapsed);
-	RTGIViewParam.FrameCounter = FrameCounter;
-	RTGIViewParam.SkyColorTop = SkyColorTop;
-	RTGIViewParam.SkyColorBottom = SkyColorBottom;
-	RTGIViewParam.SkyIntensity = SkyIntensity;
-	RTGIViewParam.LightColor = lightColor;
-	RTGIViewParam.NoiseMode = rayNoiseMode;
-
-	const UINT32 screenProbeSpacing = std::clamp(ScreenProbeGICB.ProbeSpacing, 4u, 64u);
-	const glm::vec2 screenProbeGridSize = glm::vec2(
-		static_cast<float>((GetRenderWidth() + screenProbeSpacing - 1u) / screenProbeSpacing),
-		static_cast<float>((GetRenderHeight() + screenProbeSpacing - 1u) / screenProbeSpacing));
-
-	RTScreenProbeGIViewParam.ViewMatrix = glm::transpose(ViewMat);
-	RTScreenProbeGIViewParam.InvViewMatrix = glm::transpose(InvViewMat);
-	RTScreenProbeGIViewParam.ProjMatrix = glm::transpose(UnjitteredProjMat);
-	RTScreenProbeGIViewParam.InvProjMatrix = glm::transpose(UnjitteredInvProjMat);
-	RTScreenProbeGIViewParam.ProjectionParams = RTGIViewParam.ProjectionParams;
-	RTScreenProbeGIViewParam.LightDir = glm::vec4(normalizedLightDir, LightIntensity);
-	RTScreenProbeGIViewParam.RandomOffset = glm::vec2(timeElapsed, timeElapsed);
-	RTScreenProbeGIViewParam.RTSize = glm::vec2(GetRenderWidth(), GetRenderHeight());
-	RTScreenProbeGIViewParam.ProbeGridSize = screenProbeGridSize;
-	RTScreenProbeGIViewParam.FrameCounter = FrameCounter;
-	RTScreenProbeGIViewParam.BlueNoiseOffsetStride = RTGIViewParam.BlueNoiseOffsetStride;
-	RTScreenProbeGIViewParam.NoiseMode = rayNoiseMode;
-	RTScreenProbeGIViewParam.ProbeSpacing = screenProbeSpacing;
-	RTScreenProbeGIViewParam.RaysPerProbe = std::clamp(RTScreenProbeGIViewParam.RaysPerProbe, 1u, 4u);
-	RTScreenProbeGIViewParam.HistoryValid = (bScreenProbeGIAtlasHistoryValid && !bScreenProbeLightingBootstrapPending) ? 1u : 0u;
-	RTScreenProbeGIViewParam.ViewSpreadAngle = glm::tan(Fov * 0.5f) / (0.5f * GetRenderHeight());
-	RTScreenProbeGIViewParam.TemporalAlpha = std::clamp(ScreenProbeGICB.TemporalAlpha, 0.02f, 1.0f);
-	RTScreenProbeGIViewParam.HistoryDepthWeight = ScreenProbeGICB.HistoryDepthWeight;
-	RTScreenProbeGIViewParam.HistoryNormalWeight = ScreenProbeGICB.HistoryNormalWeight;
-	RTScreenProbeGIViewParam.SkyColorTop = SkyColorTop;
-	RTScreenProbeGIViewParam.SkyColorBottom = SkyColorBottom;
-	RTScreenProbeGIViewParam.SkyIntensity = SkyIntensity;
-	RTScreenProbeGIViewParam.LightColor = lightColor;
-	RTScreenProbeGIViewParam.LightingBootstrap = bScreenProbeLightingBootstrapPending ? 1u : 0u;
-	RTScreenProbeGIViewParam.BootstrapRays = kScreenProbeLightingBootstrapRays;
-	RTScreenProbeGIViewParam.SHCoefficientCount = ScreenProbeGICB.SHCoefficientCount <= 4u ? 4u : 9u;
-	const UINT32 spatialHashTraceCellBudget = std::min(SpatialHashGITraceCellBudget, SpatialHashGIActiveCellCapacity);
-
-	RTSpatialHashGIViewParam.LightDir = glm::vec4(normalizedLightDir, LightIntensity);
-	RTSpatialHashGIViewParam.HashEntryCount = spatialHashTraceCellBudget;
-	RTSpatialHashGIViewParam.FrameCounter = FrameCounter;
-	RTSpatialHashGIViewParam.BlueNoiseOffsetStride = RTGIViewParam.BlueNoiseOffsetStride;
-	RTSpatialHashGIViewParam.NoiseMode = rayNoiseMode;
-	RTSpatialHashGIViewParam.ViewSpreadAngle = glm::tan(Fov * 0.5f) / (0.5f * GetRenderHeight());
-	RTSpatialHashGIViewParam.CellSize = SpatialHashGICB.CellSize;
-	RTSpatialHashGIViewParam.RayBias = std::clamp(SpatialHashGICB.CellSize * 0.02f, 0.05f, 0.5f);
-	RTSpatialHashGIViewParam.SkyColorTop = SkyColorTop;
-	RTSpatialHashGIViewParam.SkyColorBottom = SkyColorBottom;
-	RTSpatialHashGIViewParam.SkyIntensity = SkyIntensity;
-	RTSpatialHashGIViewParam.LightColor = lightColor;
-	RTSpatialHashGIViewParam.ActiveCellCapacity = SpatialHashGIActiveCellCapacity;
-
-	// Path Tracing view param
-	PathTracingViewParam.ViewMatrix = glm::transpose(ViewMat);
-	PathTracingViewParam.InvViewMatrix = glm::transpose(InvViewMat);
-	PathTracingViewParam.ProjMatrix = glm::transpose(ProjMat);
-	PathTracingViewParam.InvProjMatrix = glm::transpose(InvProjMat);
-	PathTracingViewParam.ProjectionParams.x = effectiveFar / (effectiveFar - effectiveNear);
-	PathTracingViewParam.ProjectionParams.y = effectiveNear / (effectiveNear - effectiveFar);
-	PathTracingViewParam.ProjectionParams.z = effectiveNear;
-	PathTracingViewParam.ProjectionParams.w = effectiveFar;
-	PathTracingViewParam.LightDirAndIntensity = glm::vec4(normalizedLightDir, LightIntensity);
-	PathTracingViewParam.DirectLightAngularRadius = RTShadowViewParam.ShadowLightRadius;
-	PathTracingViewParam.DirectLightSampleCount = std::clamp(PathTracingViewParam.DirectLightSampleCount, 1u, 8u);
-	PathTracingViewParam.RandomOffset = glm::vec2(timeElapsed, timeElapsed);
-	PathTracingViewParam.FrameCounter = FrameCounter;
-	PathTracingViewParam.ViewSpreadAngle = glm::tan(Fov * 0.5) / (0.5f * m_height);
-	PathTracingViewParam.SkyColorTop = SkyColorTop;
-	PathTracingViewParam.SkyColorBottom = SkyColorBottom;
-	PathTracingViewParam.SkyIntensity = SkyIntensity;
-	PathTracingViewParam.LightColor = lightColor;
-	PathTracingViewParam.bEnableDiffuseGI = bEnableDiffuseGI ? 1 : 0;
-	PathTracingViewParam.bEnableSpecularGI = bEnableSpecularGI ? 1 : 0;
-	PathTracingViewParam.bEnableDirectDiffuse = bEnableDirectDiffuse ? 1 : 0;
-	PathTracingViewParam.bEnableDirectSpecular = bEnableDirectSpecular ? 1 : 0;
-
-	SpatialFilterCB.ProjectionParams.z = effectiveNear;
-	SpatialFilterCB.ProjectionParams.w = effectiveFar;
-	SpatialFilterCB.AccumulatedFrames = IndirectAccumulatedFrames;
-
-
-	TemporalFilterCB.InvViewMatrix = glm::transpose(InvViewMat);
-	TemporalFilterCB.InvProjMatrix = glm::transpose(InvProjMat);
-	TemporalFilterCB.ProjectionParams.z = effectiveNear;
-	TemporalFilterCB.ProjectionParams.w = effectiveFar;
-	TemporalFilterCB.RTSize.x = GetRenderWidth();
-	TemporalFilterCB.RTSize.y = GetRenderHeight();
-	TemporalFilterCB.FrameIndex = FrameCounter;
-	TemporalFilterCB.AccumulationAlpha = bTemporalDenoiserHistoryValid ? (1.0f / float(std::min(IndirectAccumulatedFrames + 1u, 32u))) : 1.0f;
-	TemporalFilterCB.SpecularAccumulationAlpha = bTemporalDenoiserHistoryValid ? (1.0f / float(std::min(IndirectAccumulatedFrames + 1u, 64u))) : 1.0f;
-	TemporalFilterCB.JitterOffset = IsJitterEnabled() ? JitterOffset : glm::vec2(0.0f);
-	ScreenProbeGICB.ProjectionParams.z = effectiveNear;
-	ScreenProbeGICB.ProjectionParams.w = effectiveFar;
-	ScreenProbeGICB.RTSize.x = GetRenderWidth();
-	ScreenProbeGICB.RTSize.y = GetRenderHeight();
-	ScreenProbeGICB.ProbeGridSize = screenProbeGridSize;
-	ScreenProbeGICB.FrameIndex = FrameCounter;
-	ScreenProbeGICB.SHCoefficientCount = ScreenProbeGICB.SHCoefficientCount <= 4u ? 4u : 9u;
-
-	SpatialHashGICB.InvViewMatrix = glm::transpose(InvViewMat);
-	SpatialHashGICB.InvProjMatrix = glm::transpose(UnjitteredInvProjMat);
-	SpatialHashGICB.ProjectionParams = RTGIViewParam.ProjectionParams;
-	SpatialHashGICB.RTSize = glm::vec2(GetRenderWidth(), GetRenderHeight());
-	SpatialHashGICB.HashEntryCount = SpatialHashGIEntryCount;
-	SpatialHashGICB.HashEntryMask = SpatialHashGIEntryCount - 1u;
-	SpatialHashGICB.ActiveCellCapacity = SpatialHashGIActiveCellCapacity;
-	SpatialHashGICB.TraceCellBudget = spatialHashTraceCellBudget;
-	SpatialHashGICB.FrameIndex = FrameCounter;
-	SpatialHashGICB.HistorySampleDecay = spatialHashHistorySampleDecay;
-
-	// Don't increment frame counter in debug mode (to avoid accumulation noise)
 	if (PathTracingViewParam.DebugMode == 0)
 	{
 		FrameCounter++;
-	}
-
-	//ColorBufferWriteIndex = FrameCounter % 2;
-
-	if (bRecompileShaders)
-	{
-		RecompileShaders();
-		bRecompileShaders = false;
 	}
 }
 
 // Render the scene.
 void Corona::OnRender()
 {
+	std::unique_lock<std::mutex> stateLock(GameRenderStateMutex);
+	ProcessRenderThreadRequests();
+	ApplyPendingRenderFrameDeltas();
+	if (bSplitGameRenderThreads && RenderWorld.bHasFrameSourceState)
+		BuildRenderFrameDerivedState(&RenderWorld.FrameSourceState);
+	else if (!bSplitGameRenderThreads)
+		BuildRenderFrameDerivedState(nullptr);
+
 	BeginFramePerfLogging();
 	double beginFrameMs = 0.0;
 	double executeMs = 0.0;
@@ -6600,7 +7931,7 @@ void Corona::OnRender()
 			EndGpuPassTiming(EGpuPass::RaytraceAO);
 		}
 
-		if (bRunLighting && bEnableSkyLighting)
+		if (bRunLighting && bEnableSkyLighting && bEnableRayTracedSkyLighting)
 		{
 			BeginGpuPassTiming(EGpuPass::RaytraceSkyLighting);
 			RaytraceSkyLightingPass();
@@ -6855,44 +8186,171 @@ void Corona::OnRender()
 
 		//ImGui::ShowDemoWindow(&show_demo_window);
 
-		char fps[64];
-		sprintf(fps, "FPS : %u fps", m_timer.GetFramesPerSecond());
+		char fpsText[64];
+		sprintf(fpsText, "FPS : %u fps", m_timer.GetFramesPerSecond());
+
+		const ImVec2 fpsTextPos(10.0f, 8.0f);
+		ImDrawList* foregroundDrawList = ImGui::GetForegroundDrawList();
+		foregroundDrawList->AddText(ImVec2(fpsTextPos.x + 1.0f, fpsTextPos.y + 1.0f), IM_COL32(0, 0, 0, 180), fpsText);
+		foregroundDrawList->AddText(fpsTextPos, IM_COL32(255, 255, 255, 235), fpsText);
+
+		const bool bUseLuauImguiControls = bEnableStartupLuauScript && ScriptState && !ScriptState->Scripts.empty();
+		if (bUseLuauImguiControls)
+		{
+			ImGui::Begin("Hi, Let's traceray!");
+			RenderQueuedLuauUi();
+			DrawLuauImGui();
+			ImGui::End();
+		}
+		if (!bUseLuauImguiControls)
+		{
+			char debugText[64];
 
 		ImGui::Begin("Hi, Let's traceray!");
-		ImGui::Text(fps);
 		if (renderBackend)
 		{
 			ImGui::Text("Render Backend: %s", renderBackend->GetBackendName());
 		}
+		{
+			static ImGuiComboFlags renderingModeComboFlags = 0;
+			const char* renderingModeItems[] = {
+				"HYBRID (Raster + RT)",
+				"PATH TRACING",
+			};
+			int renderingModeIndex = static_cast<int>(RenderingMode);
+			renderingModeIndex = std::clamp(renderingModeIndex, 0, static_cast<int>(IM_ARRAYSIZE(renderingModeItems)) - 1);
+			const char* renderingModeCurrent = renderingModeItems[renderingModeIndex];
+			if (ImGui::BeginCombo("Rendering Mode", renderingModeCurrent, renderingModeComboFlags))
+			{
+				for (int n = 0; n < IM_ARRAYSIZE(renderingModeItems); n++)
+				{
+					bool isSelected = (renderingModeIndex == n);
+					if (ImGui::Selectable(renderingModeItems[n], isSelected))
+					{
+						const ERenderingMode previousRenderingMode = RenderingMode;
+						RenderingMode = (ERenderingMode)n;
+
+						if (RenderingMode != previousRenderingMode)
+							MarkRayTracingSceneDirty();
+						if (RenderingMode == ERenderingMode::PATHTRACING && RenderingMode != previousRenderingMode)
+						{
+							FrameCounter = 0;
+							PrevPathTracingViewMat = glm::mat4x4(0.0f);
+							PrevPathTracingLightDir = glm::vec3(0.0f);
+							PrevPathTracingLightIntensity = 0.0f;
+						}
+					}
+					if (isSelected)
+					{
+						ImGui::SetItemDefaultFocus();
+					}
+				}
+				ImGui::EndCombo();
+			}
+		}
+		ImGui::Text("Arrow keys : rotate camera imGui\nWASD keys : move camera imGui\nI : show/hide imGui\nB : show/hide buffer visualization\nT : cycle anti-aliasing mode");
+		const bool bDebugVisualizationAvailable =
+			renderBackend &&
+			renderBackend->GetAPI() == ERenderBackendAPI::D3D12 &&
+			BufferVisualizePSO != nullptr;
+		if (bDebugVisualizationAvailable)
+		{
+			ImGui::Checkbox("Visualize Buffers", &bDebugDraw);
+		}
+		else
+		{
+			bDebugDraw = false;
+			bool disabledDebugDraw = false;
+			ImGui::BeginDisabled();
+			ImGui::Checkbox("Visualize Buffers", &disabledDebugDraw);
+			ImGui::EndDisabled();
+			ImGui::TextDisabled("Visualize Buffers is currently available on the DX12 backend.");
+		}
+		{
+			static ImGuiComboFlags debugVisualizationComboFlags = 0;
+			const char* debugVisualizationItems[] = {
+				"SHADOW",
+				"WORLD_NORMAL",
+				"GEO_NORMAL",
+				"DEPTH",
+				"RAW_DIFFUSE_GI",
+				"RAW_DIFFUSE_GI_AUX",
+				"SCREEN_PROBE_DIFFUSE_GI",
+				"SCREEN_PROBE_PROBES",
+				"SCREEN_PROBE_HISTORY_LENGTH",
+				"SCREEN_PROBE_ATLAS_HISTORY_LENGTH",
+				"TEMPORAL_FILTERED_DIFFUSE_GI",
+				"SPATIAL_FILTERED_DIFFUSE_GI",
+				"FINAL_DIFFUSE_GI",
+				"ALBEDO",
+				"VELOCITY",
+				"ROUGNESS_METALLIC",
+				"SPECULAR_RAW",
+				"TEMPORAL_FILTERED_SPECULAR",
+				"BLOOM",
+				"SPEC_HISTORY_LENGTH",
+				"RTAO",
+				"NO_FULLSCREEN",
+			};
+			int debugVisualizationIndex = std::clamp(
+				static_cast<int>(FullscreenDebugBuffer),
+				0,
+				static_cast<int>(IM_ARRAYSIZE(debugVisualizationItems)) - 1);
+			const char* debugVisualizationCurrent = debugVisualizationItems[debugVisualizationIndex];
+			if (ImGui::BeginCombo("Visualize Full Screen", debugVisualizationCurrent, debugVisualizationComboFlags))
+			{
+				for (int n = 0; n < IM_ARRAYSIZE(debugVisualizationItems); n++)
+				{
+					bool isSelected = (debugVisualizationIndex == n);
+					if (ImGui::Selectable(debugVisualizationItems[n], isSelected))
+					{
+						FullscreenDebugBuffer = (EDebugVisualization)n;
+					}
+					if (isSelected)
+					{
+						ImGui::SetItemDefaultFocus();
+					}
+				}
+				ImGui::EndCombo();
+			}
+		}
+		ImGui::Separator();
 
 		glm::vec4 test = glm::vec4(0, -0, 0, 1) * glm::transpose(UnjitteredViewProjMat);
 		test.x /= test.w;
 		test.y /= test.w;
 		//test.z /= test.w;
-		sprintf(fps, "test : %f %f %f", test.x, test.y, test.z);
-		ImGui::Text(fps);
-		if (ImGui::Button("GPU Pass Timings"))
+		sprintf(debugText, "test : %f %f %f", test.x, test.y, test.z);
+		ImGui::Text(debugText);
+
+		if (ImGui::CollapsingHeader("Capture & Profiling", ImGuiTreeNodeFlags_DefaultOpen))
 		{
-			bShowGpuTimingWindow = true;
+			if (ImGui::Button("GPU Pass Timings"))
+			{
+				bShowGpuTimingWindow = true;
+			}
+			ImGui::SameLine();
+			if (ImGui::Button("Recompile all shaders"))
+				bRecompileShaders = true;
+
+			if (bFinalScreenshotRequested || bFinalScreenshotCaptureInFlight)
+				ImGui::BeginDisabled();
+			if (ImGui::Button("Capture Final Backbuffer"))
+			{
+				bFinalScreenshotRequested = true;
+				LastFinalScreenshotStatus = L"Screenshot will be captured on the next frame without ImGui.";
+			}
+			if (bFinalScreenshotRequested || bFinalScreenshotCaptureInFlight)
+				ImGui::EndDisabled();
+			if (!LastFinalScreenshotStatus.empty())
+			{
+				const std::string statusText = WideToUtf8(LastFinalScreenshotStatus);
+				ImGui::TextWrapped("Screenshot: %s", statusText.c_str());
+			}
 		}
 
-		if (bFinalScreenshotRequested || bFinalScreenshotCaptureInFlight)
-			ImGui::BeginDisabled();
-		if (ImGui::Button("Capture Final Backbuffer"))
+		if (ImGui::CollapsingHeader("Camera Path Capture"))
 		{
-			bFinalScreenshotRequested = true;
-			LastFinalScreenshotStatus = L"Screenshot will be captured on the next frame without ImGui.";
-		}
-		if (bFinalScreenshotRequested || bFinalScreenshotCaptureInFlight)
-			ImGui::EndDisabled();
-		if (!LastFinalScreenshotStatus.empty())
-		{
-			const std::string statusText = WideToUtf8(LastFinalScreenshotStatus);
-			ImGui::TextWrapped("Screenshot: %s", statusText.c_str());
-		}
-
-		ImGui::Separator();
-		ImGui::Text("Camera Path Capture");
 		const bool bCameraPathBusy = bCameraPathRecording || bCameraPathPlaying || bCameraPathDumping;
 		if (bCameraPathBusy)
 			ImGui::BeginDisabled();
@@ -7042,6 +8500,7 @@ void Corona::OnRender()
 			const std::string commandText = WideToUtf8(LastCameraPathVideoCommand);
 			ImGui::TextWrapped("Video command: %s", commandText.c_str());
 		}
+		}
 
 		if (bShowGpuTimingWindow)
 		{
@@ -7066,6 +8525,22 @@ void Corona::OnRender()
 					}
 					GpuPassAverageTimeMs[passIndex] = history.empty() ? 0.0f : (sumMs / static_cast<float>(history.size()));
 				}
+				TrimCpuUpdateTimingHistory();
+			}
+			ImGui::Separator();
+			ImGui::Text(
+				"CPU Update: %.3f ms (avg %uF %.3f ms)",
+				CpuUpdateLastTimeMs,
+				static_cast<unsigned>(CpuUpdateHistoryMs.size()),
+				CpuUpdateAverageTimeMs);
+			for (UINT phaseIndex = 0; phaseIndex < CpuUpdatePhaseCount; ++phaseIndex)
+			{
+				ImGui::Text(
+					"  %s: %.3f ms (avg %uF %.3f ms)",
+					GetCpuUpdatePhaseName(static_cast<ECpuUpdatePhase>(phaseIndex)),
+					CpuUpdatePhaseLastTimeMs[phaseIndex],
+					static_cast<unsigned>(CpuUpdatePhaseHistoryMs[phaseIndex].size()),
+					CpuUpdatePhaseAverageTimeMs[phaseIndex]);
 			}
 			ImGui::Separator();
 			for (UINT passIndex = 0; passIndex < GpuPassCount; ++passIndex)
@@ -7083,11 +8558,8 @@ void Corona::OnRender()
 			ImGui::End();
 		}
 
-		if (ImGui::Button("Recompile all shaders"))
-			bRecompileShaders = true;
-
-		ImGui::Separator();
-		ImGui::Text("Scene Center Objects");
+		if (ImGui::CollapsingHeader("Scene Objects", ImGuiTreeNodeFlags_DefaultOpen))
+		{
 		auto drawCenterObjectToggle = [&](
 			const char* label,
 			const wchar_t* assetPath,
@@ -7163,39 +8635,42 @@ void Corona::OnRender()
 
 			ImGui::PopID();
 		};
-		drawCenterObjectToggle(
-			"Buddha",
-			L"assets\\buddha\\buddha.obj",
-			Buddha,
-			BuddhaObject,
-			260.0f,
-			0.65f,
-			0.0f,
-			false,
-			&BuddhaCenterPosition,
-			&BuddhaCenterRotationDegrees);
-		drawCenterObjectToggle(
-			"ShaderBall",
-			L"assets\\shaderBall\\shaderBall.fbx",
-			ShaderBall,
-			ShaderBallObject,
-			220.0f,
-			ShaderBallRoughnessMultiplier,
-			1.0f,
-			false,
-			&ShaderBallCenterPosition,
-			&ShaderBallCenterRotationDegrees);
-		drawCenterObjectToggle(
-			"Pistol",
-			L"assets\\pistol\\pistol.obj",
-			Pistol,
-			PistolObject,
-			280.0f,
-			0.55f,
-			0.0f,
-			false,
-			&PistolCenterPosition,
-			&PistolCenterRotationDegrees);
+		if (!bEnableStartupLuauScript)
+		{
+			drawCenterObjectToggle(
+				"Buddha",
+				L"assets\\buddha\\buddha.obj",
+				Buddha,
+				BuddhaObject,
+				260.0f,
+				0.65f,
+				0.0f,
+				false,
+				&BuddhaCenterPosition,
+				&BuddhaCenterRotationDegrees);
+			drawCenterObjectToggle(
+				"ShaderBall",
+				L"assets\\shaderBall\\shaderBall.fbx",
+				ShaderBall,
+				ShaderBallObject,
+				220.0f,
+				0.15f,
+				1.0f,
+				false,
+				&ShaderBallCenterPosition,
+				&ShaderBallCenterRotationDegrees);
+			drawCenterObjectToggle(
+				"Pistol",
+				L"assets\\pistol\\pistol.obj",
+				Pistol,
+				PistolObject,
+				280.0f,
+				0.55f,
+				0.0f,
+				false,
+				&PistolCenterPosition,
+				&PistolCenterRotationDegrees);
+		}
 		drawCenterObjectToggle(
 			"Mirror Cube",
 			nullptr,
@@ -7207,13 +8682,12 @@ void Corona::OnRender()
 			true,
 			&MirrorCubeCenterPosition,
 			&MirrorCubeCenterRotationDegrees);
+		RenderQueuedLuauUi();
+		DrawLuauImGui();
+		}
 
-		ImGui::Text("\nArrow keys : rotate camera imGui\
-			\nWASD keys : move camera imGui\
-			\nI : show/hide imGui\
-			\nB : show/hide buffer visualization\
-			\nT : cycle anti-aliasing mode\n\n");
-
+		if (ImGui::CollapsingHeader("Camera & Anti-Aliasing", ImGuiTreeNodeFlags_DefaultOpen))
+		{
 		ImGui::SliderFloat("Camera turn speed", &m_turnSpeed, 0.0f, glm::half_pi<float>()*2);
 		{
 			static const char* AAModes[] = { "Off", "TAA", "DLSS SR", "DLSS RR" };
@@ -7233,27 +8707,6 @@ void Corona::OnRender()
 #endif
 				AntiAliasingMode = RequestedMode;
 				ResetAllAccumulationState(IsDLSSMode(PreviousMode) || IsDLSSMode(RequestedMode));
-			}
-			if (IsTemporalAAEnabled())
-			{
-				int TAASampleCountUI = static_cast<int>(TAASampleCount);
-				if (ImGui::SliderInt("TAA Jitter Samples", &TAASampleCountUI, 1, 64))
-				{
-					TAASampleCount = static_cast<UINT32>(TAASampleCountUI);
-					FrameCounter = 0;
-					PrevJitter = glm::vec2(0.0f);
-					bTemporalAAHistoryValid = false;
-					bTemporalDenoiserHistoryValid = false;
-					bResetTemporalStateNextUpdate = true;
-				}
-			}
-			if (ImGui::SliderFloat("TAA Jitter Scale", &JitterScale, 0.0f, 1.0f))
-			{
-				FrameCounter = 0;
-				PrevJitter = glm::vec2(0.0f);
-				bTemporalAAHistoryValid = false;
-				bTemporalDenoiserHistoryValid = false;
-				bResetTemporalStateNextUpdate = true;
 			}
 #if WITH_STREAMLINE
 			if (bDLSSAvailable || bDLSSRRAvailable)
@@ -7288,204 +8741,229 @@ void Corona::OnRender()
 			}
 #endif
 		}
-		const bool bDebugVisualizationAvailable =
-			renderBackend &&
-			renderBackend->GetAPI() == ERenderBackendAPI::D3D12 &&
-			BufferVisualizePSO != nullptr;
-		if (bDebugVisualizationAvailable)
-		{
-			ImGui::Checkbox("Visualize Buffers", &bDebugDraw);
 		}
-		else
+		if (ImGui::CollapsingHeader("Debug Toggles"))
 		{
-			bDebugDraw = false;
-			bool disabledDebugDraw = false;
-			ImGui::BeginDisabled();
-			ImGui::Checkbox("Visualize Buffers", &disabledDebugDraw);
-			ImGui::EndDisabled();
-			ImGui::TextDisabled("Visualize Buffers is currently available on the DX12 backend.");
+			ImGui::Checkbox("Draw Histogram", &bDrawHistogram);
 		}
-		ImGui::Checkbox("Draw Histogram", &bDrawHistogram);
 
 		// Lighting control options (both Hybrid and Path Tracing)
 		if (RenderingMode == ERenderingMode::HYBRID || RenderingMode == ERenderingMode::PATHTRACING)
 		{
-			ImGui::Separator();
-			ImGui::Text("Lighting Control");
-
+			if (ImGui::CollapsingHeader("Lighting & GI", ImGuiTreeNodeFlags_DefaultOpen))
+			{
 			bool bLightingChanged = false;
-			if (ImGui::Checkbox("Enable Direct Diffuse", &bEnableDirectDiffuse)) bLightingChanged = true;
-			if (ImGui::Checkbox("Enable Direct Specular", &bEnableDirectSpecular)) bLightingChanged = true;
-			if (ImGui::Checkbox("Enable Indirect Specular (GI)", &bEnableSpecularGI)) bLightingChanged = true;
-			if (ImGui::SliderFloat("Sun Angular Radius", &RTShadowViewParam.ShadowLightRadius, 0.0f, 0.03f, "%.4f rad"))
-				bLightingChanged = true;
+
+			if (ImGui::TreeNodeEx("Direct Lighting", ImGuiTreeNodeFlags_DefaultOpen))
+			{
+				if (ImGui::Checkbox("Enable Direct Diffuse", &bEnableDirectDiffuse)) bLightingChanged = true;
+				if (ImGui::Checkbox("Enable Direct Specular", &bEnableDirectSpecular)) bLightingChanged = true;
+				if (ImGui::Checkbox("Enable Indirect Specular (GI)", &bEnableSpecularGI)) bLightingChanged = true;
+				if (ImGui::SliderFloat("Sun Angular Radius", &RTShadowViewParam.ShadowLightRadius, 0.0f, 0.03f, "%.4f rad"))
+					bLightingChanged = true;
+				if (RenderingMode == ERenderingMode::HYBRID)
+				{
+					int shadowSamples = static_cast<int>(RTShadowViewParam.ShadowSampleCount);
+					if (ImGui::SliderInt("Hybrid Shadow Samples", &shadowSamples, 1, 16))
+					{
+						RTShadowViewParam.ShadowSampleCount = static_cast<UINT32>(shadowSamples);
+						bLightingChanged = true;
+					}
+				}
+				else if (RenderingMode == ERenderingMode::PATHTRACING)
+				{
+					int directLightSamples = static_cast<int>(PathTracingViewParam.DirectLightSampleCount);
+					if (ImGui::SliderInt("Path Tracing Sun Samples", &directLightSamples, 1, 8))
+					{
+						PathTracingViewParam.DirectLightSampleCount = static_cast<UINT32>(directLightSamples);
+						bLightingChanged = true;
+					}
+				}
+				ImGui::TreePop();
+			}
+
 			if (RenderingMode == ERenderingMode::HYBRID)
 			{
-				int shadowSamples = static_cast<int>(RTShadowViewParam.ShadowSampleCount);
-				if (ImGui::SliderInt("Hybrid Shadow Samples", &shadowSamples, 1, 16))
+				if (ImGui::TreeNodeEx("RTAO"))
 				{
-					RTShadowViewParam.ShadowSampleCount = static_cast<UINT32>(shadowSamples);
-					bLightingChanged = true;
-				}
-				if (ImGui::Checkbox("Enable RTAO", &bEnableRTAO))
-					bLightingChanged = true;
-				if (bEnableRTAO)
-				{
-					int rtaoSamples = static_cast<int>(RTAOViewParam.SampleCount);
-					if (ImGui::SliderInt("RTAO Samples", &rtaoSamples, 1, 16))
+					if (ImGui::Checkbox("Enable RTAO", &bEnableRTAO))
+						bLightingChanged = true;
+					if (bEnableRTAO)
 					{
-						RTAOViewParam.SampleCount = static_cast<UINT32>(rtaoSamples);
-						bLightingChanged = true;
+						int rtaoSamples = static_cast<int>(RTAOViewParam.SampleCount);
+						if (ImGui::SliderInt("RTAO Samples", &rtaoSamples, 1, 16))
+						{
+							RTAOViewParam.SampleCount = static_cast<UINT32>(rtaoSamples);
+							bLightingChanged = true;
+						}
+						if (ImGui::SliderFloat("RTAO Radius", &RTAOViewParam.Radius, 2.0f, 256.0f, "%.1f"))
+							bLightingChanged = true;
+						if (ImGui::SliderFloat("RTAO Power", &RTAOViewParam.Power, 0.25f, 4.0f, "%.2f"))
+							bLightingChanged = true;
+						if (ImGui::SliderFloat("RTAO Normal Bias", &RTAOViewParam.NormalBias, 0.01f, 2.0f, "%.2f"))
+							bLightingChanged = true;
 					}
-					if (ImGui::SliderFloat("RTAO Radius", &RTAOViewParam.Radius, 2.0f, 256.0f, "%.1f"))
-						bLightingChanged = true;
-					if (ImGui::SliderFloat("RTAO Power", &RTAOViewParam.Power, 0.25f, 4.0f, "%.2f"))
-						bLightingChanged = true;
-					if (ImGui::SliderFloat("RTAO Normal Bias", &RTAOViewParam.NormalBias, 0.01f, 2.0f, "%.2f"))
-						bLightingChanged = true;
+					ImGui::TreePop();
 				}
-				if (ImGui::Checkbox("Enable Sky Lighting", &bEnableSkyLighting))
-					bLightingChanged = true;
-				if (bEnableSkyLighting)
+
+				if (ImGui::TreeNodeEx("Sky Lighting", ImGuiTreeNodeFlags_DefaultOpen))
 				{
-					int skySamples = static_cast<int>(RTSkyLightingViewParam.SampleCount);
-					if (ImGui::SliderInt("Sky Lighting Samples", &skySamples, 1, 32))
+					if (ImGui::Checkbox("Enable Sky Lighting", &bEnableSkyLighting))
+						bLightingChanged = true;
+					if (bEnableSkyLighting)
 					{
-						RTSkyLightingViewParam.SampleCount = static_cast<UINT32>(skySamples);
-						bLightingChanged = true;
+						if (ImGui::SliderFloat("Sky Lighting Strength", &SkyLightingStrength, 0.0f, 1.0f, "%.2f"))
+							bLightingChanged = true;
+						if (ImGui::Checkbox("Ray Traced Sky Pass", &bEnableRayTracedSkyLighting))
+							bLightingChanged = true;
+						if (bEnableRayTracedSkyLighting)
+						{
+							int skySamples = static_cast<int>(RTSkyLightingViewParam.SampleCount);
+							if (ImGui::SliderInt("Sky Lighting Samples", &skySamples, 1, 32))
+							{
+								RTSkyLightingViewParam.SampleCount = static_cast<UINT32>(skySamples);
+								bLightingChanged = true;
+							}
+							if (ImGui::SliderFloat("Sky Lighting Ray Length", &RTSkyLightingViewParam.RayLength, 16.0f, 10000.0f, "%.1f"))
+								bLightingChanged = true;
+							if (ImGui::SliderFloat("Sky Lighting Normal Bias", &RTSkyLightingViewParam.NormalBias, 0.01f, 4.0f, "%.2f"))
+								bLightingChanged = true;
+							if (ImGui::SliderFloat("Sky Lighting Up Bias", &RTSkyLightingViewParam.SkyUpBias, 0.0f, 1.0f, "%.2f"))
+								bLightingChanged = true;
+							if (ImGui::SliderFloat("Sky Lighting Direction Power", &RTSkyLightingViewParam.SkyDirectionPower, 0.25f, 8.0f, "%.2f"))
+								bLightingChanged = true;
+							if (ImGui::SliderFloat("Sky Lighting Min World Y", &RTSkyLightingViewParam.SkyMinWorldY, -0.25f, 0.75f, "%.2f"))
+								bLightingChanged = true;
+							int skyDenoiseRadius = static_cast<int>(SkyLightingDenoiseParam.Radius);
+							if (ImGui::SliderInt("Sky Lighting Denoise Radius", &skyDenoiseRadius, 1, 6))
+							{
+								SkyLightingDenoiseParam.Radius = static_cast<UINT32>(skyDenoiseRadius);
+								bLightingChanged = true;
+							}
+						}
+						else
+						{
+							ImGui::TextDisabled("RT sky pass is skipped; Diffuse GI adds sky miss lighting.");
+						}
 					}
-					if (ImGui::SliderFloat("Sky Lighting Ray Length", &RTSkyLightingViewParam.RayLength, 16.0f, 10000.0f, "%.1f"))
-						bLightingChanged = true;
-					if (ImGui::SliderFloat("Sky Lighting Strength", &SkyLightingStrength, 0.0f, 1.0f, "%.2f"))
-						bLightingChanged = true;
-					if (ImGui::SliderFloat("Sky Lighting Normal Bias", &RTSkyLightingViewParam.NormalBias, 0.01f, 4.0f, "%.2f"))
-						bLightingChanged = true;
-					if (ImGui::SliderFloat("Sky Lighting Up Bias", &RTSkyLightingViewParam.SkyUpBias, 0.0f, 1.0f, "%.2f"))
-						bLightingChanged = true;
-					if (ImGui::SliderFloat("Sky Lighting Direction Power", &RTSkyLightingViewParam.SkyDirectionPower, 0.25f, 8.0f, "%.2f"))
-						bLightingChanged = true;
-					if (ImGui::SliderFloat("Sky Lighting Min World Y", &RTSkyLightingViewParam.SkyMinWorldY, -0.25f, 0.75f, "%.2f"))
-						bLightingChanged = true;
-					int skyDenoiseRadius = static_cast<int>(SkyLightingDenoiseParam.Radius);
-					if (ImGui::SliderInt("Sky Lighting Denoise Radius", &skyDenoiseRadius, 1, 6))
-					{
-						SkyLightingDenoiseParam.Radius = static_cast<UINT32>(skyDenoiseRadius);
-						bLightingChanged = true;
-					}
+					ImGui::TreePop();
 				}
-				if (ImGui::SliderFloat("Surface Bounce Strength", &SurfaceBounceStrength, 0.0f, 1.0f, "%.2f"))
-					bLightingChanged = true;
-				if (ImGui::SliderFloat("Surface Bounce Saturation", &SurfaceBounceSaturation, 0.0f, 1.0f, "%.2f"))
-					bLightingChanged = true;
-			}
-			else if (RenderingMode == ERenderingMode::PATHTRACING)
-			{
-				int directLightSamples = static_cast<int>(PathTracingViewParam.DirectLightSampleCount);
-				if (ImGui::SliderInt("Path Tracing Sun Samples", &directLightSamples, 1, 8))
+
+				if (ImGui::TreeNodeEx("Surface Bounce"))
 				{
-					PathTracingViewParam.DirectLightSampleCount = static_cast<UINT32>(directLightSamples);
-					bLightingChanged = true;
+					if (ImGui::SliderFloat("Surface Bounce Strength", &SurfaceBounceStrength, 0.0f, 1.0f, "%.2f"))
+						bLightingChanged = true;
+					if (ImGui::SliderFloat("Surface Bounce Saturation", &SurfaceBounceSaturation, 0.0f, 1.0f, "%.2f"))
+						bLightingChanged = true;
+					ImGui::TreePop();
 				}
 			}
 
-			ImGui::Separator();
-			ImGui::Text("Diffuse GI");
-			if (ImGui::Checkbox("Enable Diffuse GI", &bEnableDiffuseGI)) bLightingChanged = true;
+			if (ImGui::TreeNodeEx("Diffuse GI", ImGuiTreeNodeFlags_DefaultOpen))
+			{
+				if (ImGui::Checkbox("Enable Diffuse GI", &bEnableDiffuseGI)) bLightingChanged = true;
 
-			static const char* DiffuseGIModes[] = { "Simple Raytrace", "Spatial Hash", "Screen Probe" };
-			int DiffuseGIModeIndex = static_cast<int>(DiffuseGIMode);
-			const bool bDiffuseGIMethodAvailable = RenderingMode == ERenderingMode::HYBRID;
-			if (!bDiffuseGIMethodAvailable)
-			{
-				ImGui::BeginDisabled();
+				static const char* DiffuseGIModes[] = { "Simple Raytrace", "Spatial Hash", "Screen Probe" };
+				int DiffuseGIModeIndex = static_cast<int>(DiffuseGIMode);
+				const bool bDiffuseGIMethodAvailable = RenderingMode == ERenderingMode::HYBRID;
+				if (!bDiffuseGIMethodAvailable)
+				{
+					ImGui::BeginDisabled();
+				}
+				ImGui::SetNextItemWidth(220.0f);
+				if (ImGui::Combo("Method##DiffuseGI", &DiffuseGIModeIndex, DiffuseGIModes, IM_ARRAYSIZE(DiffuseGIModes)))
+				{
+					DiffuseGIMode = static_cast<EDiffuseGIMode>(DiffuseGIModeIndex);
+					bLightingChanged = true;
+				}
+				if (!bDiffuseGIMethodAvailable)
+				{
+					ImGui::EndDisabled();
+					ImGui::TextDisabled("Diffuse GI method selection is used by Hybrid rendering.");
+				}
+				else if (DiffuseGIMode == EDiffuseGIMode::SCREEN_PROBE)
+				{
+					int probeSpacing = static_cast<int>(ScreenProbeGICB.ProbeSpacing);
+					if (ImGui::SliderInt("Screen Probe Spacing", &probeSpacing, 4, 64))
+					{
+						ScreenProbeGICB.ProbeSpacing = static_cast<UINT32>(probeSpacing);
+						bLightingChanged = true;
+					}
+					int gatherRadius = static_cast<int>(ScreenProbeGICB.GatherRadius);
+					if (ImGui::SliderInt("Screen Probe Gather Radius", &gatherRadius, 1, 3))
+					{
+						ScreenProbeGICB.GatherRadius = static_cast<UINT32>(gatherRadius);
+						bLightingChanged = true;
+					}
+					int raysPerProbe = static_cast<int>(RTScreenProbeGIViewParam.RaysPerProbe);
+					if (ImGui::SliderInt("Screen Probe Rays / Probe", &raysPerProbe, 1, 4))
+					{
+						RTScreenProbeGIViewParam.RaysPerProbe = static_cast<UINT32>(raysPerProbe);
+						bLightingChanged = true;
+					}
+					static const char* ScreenProbeSHModes[] = { "4 coeffs (L0 + L1)", "9 coeffs (L0 + L1 + L2)" };
+					int screenProbeSHMode = ScreenProbeGICB.SHCoefficientCount <= 4u ? 0 : 1;
+					if (ImGui::Combo("Screen Probe SH Coefficients", &screenProbeSHMode, ScreenProbeSHModes, IM_ARRAYSIZE(ScreenProbeSHModes)))
+					{
+						ScreenProbeGICB.SHCoefficientCount = screenProbeSHMode == 0 ? 4u : 9u;
+						bLightingChanged = true;
+					}
+					if (ImGui::SliderFloat("Screen Probe Raw Blend", &ScreenProbeGICB.RawBlend, 0.0f, 0.35f, "%.3f"))
+						bLightingChanged = true;
+					ImGui::TextDisabled("Screen Probe history converges with a running 1/N radiance average.");
+					if (ImGui::SliderFloat("Screen Probe Resolve Depth", &ScreenProbeGICB.ResolveDepthWeight, 1.0f, 96.0f, "%.1f"))
+						bLightingChanged = true;
+					if (ImGui::SliderFloat("Screen Probe Resolve Normal", &ScreenProbeGICB.ResolveNormalWeight, 1.0f, 96.0f, "%.1f"))
+						bLightingChanged = true;
+					if (ImGui::SliderFloat("Screen Probe Edge Depth", &ScreenProbeGICB.EdgeDepthWeight, 8.0f, 192.0f, "%.1f"))
+						bLightingChanged = true;
+					if (ImGui::SliderFloat("Screen Probe Edge Normal", &ScreenProbeGICB.EdgeNormalWeight, 1.0f, 96.0f, "%.1f"))
+						bLightingChanged = true;
+					int edgeSamples = static_cast<int>(ScreenProbeGICB.EdgeSampleCount);
+					if (ImGui::SliderInt("Screen Probe Edge Samples", &edgeSamples, 1, 4))
+					{
+						ScreenProbeGICB.EdgeSampleCount = static_cast<UINT32>(edgeSamples);
+						bLightingChanged = true;
+					}
+				}
+				else if (DiffuseGIMode == EDiffuseGIMode::SPATIAL_HASH)
+				{
+					if (ImGui::SliderFloat("Spatial Hash Cell Size", &SpatialHashGICB.CellSize, 4.0f, 256.0f))
+						bLightingChanged = true;
+					int raysPerCell = static_cast<int>(RTSpatialHashGIViewParam.RaysPerCell);
+					if (ImGui::SliderInt("Spatial Hash Rays / Cell", &raysPerCell, 1, 8))
+					{
+						RTSpatialHashGIViewParam.RaysPerCell = static_cast<UINT32>(raysPerCell);
+						bLightingChanged = true;
+					}
+					int maxBounces = static_cast<int>(RTSpatialHashGIViewParam.MaxBounces);
+					if (ImGui::SliderInt("Spatial Hash Max Bounces", &maxBounces, 1, 8))
+					{
+						RTSpatialHashGIViewParam.MaxBounces = static_cast<UINT32>(maxBounces);
+						bLightingChanged = true;
+					}
+					if (ImGui::SliderFloat("Spatial Hash Interpolation", &SpatialHashGICB.InterpolationStrength, 0.0f, 1.0f))
+						bLightingChanged = true;
+					if (ImGui::SliderFloat("Spatial Hash Smoothing", &SpatialHashGICB.SmoothingStrength, 0.0f, 1.0f))
+						bLightingChanged = true;
+					if (ImGui::SliderFloat("Spatial Hash Temporal Alpha", &SpatialHashGICB.TemporalAlpha, 0.02f, 1.0f))
+						bLightingChanged = true;
+				}
+				ImGui::TreePop();
 			}
-			ImGui::SetNextItemWidth(220.0f);
-			if (ImGui::Combo("Method##DiffuseGI", &DiffuseGIModeIndex, DiffuseGIModes, IM_ARRAYSIZE(DiffuseGIModes)))
+
+			if (ImGui::TreeNodeEx("Ray Sampling"))
 			{
-				DiffuseGIMode = static_cast<EDiffuseGIMode>(DiffuseGIModeIndex);
-				bLightingChanged = true;
+				static const char* RayNoiseModes[] = { "Blue Noise", "R2 Low Discrepancy", "Stable Hash" };
+				int RayNoiseModeIndex = static_cast<int>(RayNoiseMode);
+				if (ImGui::Combo("RT Noise", &RayNoiseModeIndex, RayNoiseModes, IM_ARRAYSIZE(RayNoiseModes)))
+				{
+					RayNoiseMode = static_cast<ERayNoiseMode>(RayNoiseModeIndex);
+					bLightingChanged = true;
+				}
+				ImGui::TextDisabled("R2 usually converges more calmly with DLSS RR; Blue Noise is kept for comparison.");
+				ImGui::TreePop();
 			}
-			if (!bDiffuseGIMethodAvailable)
-			{
-				ImGui::EndDisabled();
-				ImGui::TextDisabled("Diffuse GI method selection is used by Hybrid rendering.");
-			}
-			else if (DiffuseGIMode == EDiffuseGIMode::SCREEN_PROBE)
-			{
-				int probeSpacing = static_cast<int>(ScreenProbeGICB.ProbeSpacing);
-				if (ImGui::SliderInt("Screen Probe Spacing", &probeSpacing, 4, 64))
-				{
-					ScreenProbeGICB.ProbeSpacing = static_cast<UINT32>(probeSpacing);
-					bLightingChanged = true;
-				}
-				int gatherRadius = static_cast<int>(ScreenProbeGICB.GatherRadius);
-				if (ImGui::SliderInt("Screen Probe Gather Radius", &gatherRadius, 1, 3))
-				{
-					ScreenProbeGICB.GatherRadius = static_cast<UINT32>(gatherRadius);
-					bLightingChanged = true;
-				}
-				int raysPerProbe = static_cast<int>(RTScreenProbeGIViewParam.RaysPerProbe);
-				if (ImGui::SliderInt("Screen Probe Rays / Probe", &raysPerProbe, 1, 4))
-				{
-					RTScreenProbeGIViewParam.RaysPerProbe = static_cast<UINT32>(raysPerProbe);
-					bLightingChanged = true;
-				}
-				static const char* ScreenProbeSHModes[] = { "4 coeffs (L0 + L1)", "9 coeffs (L0 + L1 + L2)" };
-				int screenProbeSHMode = ScreenProbeGICB.SHCoefficientCount <= 4u ? 0 : 1;
-				if (ImGui::Combo("Screen Probe SH Coefficients", &screenProbeSHMode, ScreenProbeSHModes, IM_ARRAYSIZE(ScreenProbeSHModes)))
-				{
-					ScreenProbeGICB.SHCoefficientCount = screenProbeSHMode == 0 ? 4u : 9u;
-					bLightingChanged = true;
-				}
-				if (ImGui::SliderFloat("Screen Probe Raw Blend", &ScreenProbeGICB.RawBlend, 0.0f, 0.35f, "%.3f"))
-					bLightingChanged = true;
-				ImGui::TextDisabled("Screen Probe history converges with a running 1/N radiance average.");
-				if (ImGui::SliderFloat("Screen Probe Resolve Depth", &ScreenProbeGICB.ResolveDepthWeight, 1.0f, 96.0f, "%.1f"))
-					bLightingChanged = true;
-				if (ImGui::SliderFloat("Screen Probe Resolve Normal", &ScreenProbeGICB.ResolveNormalWeight, 1.0f, 96.0f, "%.1f"))
-					bLightingChanged = true;
-				if (ImGui::SliderFloat("Screen Probe Edge Depth", &ScreenProbeGICB.EdgeDepthWeight, 8.0f, 192.0f, "%.1f"))
-					bLightingChanged = true;
-				if (ImGui::SliderFloat("Screen Probe Edge Normal", &ScreenProbeGICB.EdgeNormalWeight, 1.0f, 96.0f, "%.1f"))
-					bLightingChanged = true;
-				int edgeSamples = static_cast<int>(ScreenProbeGICB.EdgeSampleCount);
-				if (ImGui::SliderInt("Screen Probe Edge Samples", &edgeSamples, 1, 4))
-				{
-					ScreenProbeGICB.EdgeSampleCount = static_cast<UINT32>(edgeSamples);
-					bLightingChanged = true;
-				}
-			}
-			else if (DiffuseGIMode == EDiffuseGIMode::SPATIAL_HASH)
-			{
-				if (ImGui::SliderFloat("Spatial Hash Cell Size", &SpatialHashGICB.CellSize, 4.0f, 256.0f))
-					bLightingChanged = true;
-				int raysPerCell = static_cast<int>(RTSpatialHashGIViewParam.RaysPerCell);
-				if (ImGui::SliderInt("Spatial Hash Rays / Cell", &raysPerCell, 1, 8))
-				{
-					RTSpatialHashGIViewParam.RaysPerCell = static_cast<UINT32>(raysPerCell);
-					bLightingChanged = true;
-				}
-				int maxBounces = static_cast<int>(RTSpatialHashGIViewParam.MaxBounces);
-				if (ImGui::SliderInt("Spatial Hash Max Bounces", &maxBounces, 1, 8))
-				{
-					RTSpatialHashGIViewParam.MaxBounces = static_cast<UINT32>(maxBounces);
-					bLightingChanged = true;
-				}
-				if (ImGui::SliderFloat("Spatial Hash Interpolation", &SpatialHashGICB.InterpolationStrength, 0.0f, 1.0f))
-					bLightingChanged = true;
-				if (ImGui::SliderFloat("Spatial Hash Smoothing", &SpatialHashGICB.SmoothingStrength, 0.0f, 1.0f))
-					bLightingChanged = true;
-				if (ImGui::SliderFloat("Spatial Hash Temporal Alpha", &SpatialHashGICB.TemporalAlpha, 0.02f, 1.0f))
-					bLightingChanged = true;
-			}
-			static const char* RayNoiseModes[] = { "Blue Noise", "R2 Low Discrepancy", "Stable Hash" };
-			int RayNoiseModeIndex = static_cast<int>(RayNoiseMode);
-			if (ImGui::Combo("RT Noise", &RayNoiseModeIndex, RayNoiseModes, IM_ARRAYSIZE(RayNoiseModes)))
-			{
-				RayNoiseMode = static_cast<ERayNoiseMode>(RayNoiseModeIndex);
-				bLightingChanged = true;
-			}
-			ImGui::TextDisabled("R2 usually converges more calmly with DLSS RR; Blue Noise is kept for comparison.");
 
 			// Lighting toggles only invalidate shading history; they do not require
 			// DLSS/RR resource reallocation or render-resolution changes.
@@ -7493,115 +8971,6 @@ void Corona::OnRender()
 			{
 				ResetAllAccumulationState(false);
 			}
-		}
-
-
-		/*
-		enum class EDebugVisualization
-		{
-				SHADOW,
-		WORLD_NORMAL,
-		GEO_NORMAL,
-		DEPTH,
-		RAW_DIFFUSE_GI,
-		RAW_DIFFUSE_GI_AUX,
-		SCREEN_PROBE_DIFFUSE_GI,
-		SCREEN_PROBE_PROBES,
-		SCREEN_PROBE_HISTORY_LENGTH,
-		SCREEN_PROBE_ATLAS_HISTORY_LENGTH,
-		TEMPORAL_FILTERED_DIFFUSE_GI,
-		SPATIAL_FILTERED_DIFFUSE_GI,
-		FINAL_DIFFUSE_GI,
-		ALBEDO,
-		VELOCITY,
-		ROUGNESS_METALLIC,
-		SPECULAR_RAW,
-		TEMPORAL_FILTERED_SPECULAR,
-		BLOOM,
-		SPEC_HISTORY_LENGTH,
-		RTAO,
-		NO_FULLSCREEN,
-		};
-		*/
-		static ImGuiComboFlags flags = 0;
-		const char* items[] = {
-			"SHADOW",
-			"WORLD_NORMAL",
-			"GEO_NORMAL",
-			"DEPTH",
-			"RAW_DIFFUSE_GI",
-			"RAW_DIFFUSE_GI_AUX",
-			"SCREEN_PROBE_DIFFUSE_GI",
-			"SCREEN_PROBE_PROBES",
-			"SCREEN_PROBE_HISTORY_LENGTH",
-			"SCREEN_PROBE_ATLAS_HISTORY_LENGTH",
-			"TEMPORAL_FILTERED_DIFFUSE_GI",
-			"SPATIAL_FILTERED_DIFFUSE_GI",
-			"FINAL_DIFFUSE_GI",
-			"ALBEDO",
-			"VELOCITY",
-			"ROUGNESS_METALLIC",
-			"SPECULAR_RAW",
-			"TEMPORAL_FILTERED_SPECULAR",
-			"BLOOM",
-			"SPEC_HISTORY_LENGTH",
-			"RTAO",
-			"NO_FULLSCREEN",
-		};
-		static const char* item_current = items[UINT(EDebugVisualization::NO_FULLSCREEN)];
-		if (ImGui::BeginCombo("Visualize Full Screen", item_current, flags))
-		{
-			for (int n = 0; n < IM_ARRAYSIZE(items); n++)
-			{
-				bool is_selected = (item_current == items[n]);
-				if (ImGui::Selectable(items[n], is_selected))\
-				{
-					item_current = items[n];
-					FullscreenDebugBuffer = (EDebugVisualization)n;
-				}
-				if (is_selected)
-				{
-					ImGui::SetItemDefaultFocus();
-				}
-
-			}
-			ImGui::EndCombo();
-		}
-
-		// Rendering Mode selector
-		{
-			static ImGuiComboFlags flags = 0;
-			const char* items[] = {
-				"HYBRID (Raster + RT)",
-				"PATH TRACING",
-			};
-			int renderingModeIndex = static_cast<int>(RenderingMode);
-			renderingModeIndex = std::clamp(renderingModeIndex, 0, static_cast<int>(IM_ARRAYSIZE(items)) - 1);
-			const char* item_current = items[renderingModeIndex];
-			if (ImGui::BeginCombo("Rendering Mode", item_current, flags))
-			{
-				for (int n = 0; n < IM_ARRAYSIZE(items); n++)
-				{
-					bool is_selected = (renderingModeIndex == n);
-					if (ImGui::Selectable(items[n], is_selected))
-					{
-						RenderingMode = (ERenderingMode)n;
-
-						// Reset frame counter when switching modes for path tracing accumulation
-						if (RenderingMode == ERenderingMode::PATHTRACING)
-						{
-							FrameCounter = 0;
-							PrevPathTracingViewMat = glm::mat4x4(0.0f); // Force camera change detection on first frame
-							PrevPathTracingLightDir = glm::vec3(0.0f); // Force light change detection
-							PrevPathTracingLightIntensity = 0.0f;
-						}
-					}
-					if (is_selected)
-					{
-						ImGui::SetItemDefaultFocus();
-					}
-				}
-				ImGui::EndCombo();
 			}
 		}
 
@@ -7710,45 +9079,7 @@ if (ImGui::Button("Reset Accumulation"))
 			ResetAllAccumulationState(false);
 		if (ImGui::SliderFloat("Prefiltered Env Roughness Fade", &PrefilteredEnvRoughnessFade, 0.0f, 0.5f))
 			ResetAllAccumulationState(false);
-		ImGui::Separator();
 
-		ImGui::SliderFloat("SponzaRoughness multiplier", &SponzaRoughnessMultiplier, 0.0f, 1.0f);
-		ImGui::SliderFloat("ShaderBallRoughness multiplier", &ShaderBallRoughnessMultiplier, 0.0f, 1.0f);
-
-
-		ImGui::SliderFloat("IndirectDiffuse Depth Weight Factor", &SpatialFilterCB.IndirectDiffuseWeightFactorDepth, 0.0f, 20.0f);
-		ImGui::SliderFloat("IndirectDiffuse Normal Weight Factor", &SpatialFilterCB.IndirectDiffuseWeightFactorNormal, 0.0f, 20.0f);
-		ImGui::SliderFloat("IndirectSpecular Depth Weight Factor", &SpatialFilterCB.IndirectSpecularWeightFactorDepth, 0.0f, 20.0f);
-		ImGui::SliderFloat("IndirectSpecular Normal Weight Factor", &SpatialFilterCB.IndirectSpecularWeightFactorNormal, 0.0f, 64.0f);
-		ImGui::SliderFloat("IndirectSpecular Luminance Weight", &SpatialFilterCB.IndirectSpecularLuminanceWeight, 0.0f, 8.0f);
-		ImGui::SliderFloat("IndirectSpecular Energy Preservation", &SpatialFilterCB.IndirectSpecularEnergyPreservation, 0.0f, 1.0f);
-
-		ImGui::SliderFloat("TemporalValidParams.x", &TemporalFilterCB.TemporalValidParams.x, 0.0f, 128);
-
-		ImGui::SliderFloat("BloomSigma", &BloomSigma, 0.0f, 2.0f);
-
-		ImGui::SliderFloat("BloomThreshHold", &BloomCB.BloomThreshHold, 0.0f, 2.0f);
-
-		ImGui::SliderFloat("BloomStrength", &BloomStrength, 0.0f, 4.0f);
-
-		ImGui::SliderFloat("TargetLuminance", &AdaptExposureCB.TargetLuminance, 0.001f, 0.990f);
-
-		ImGui::SliderFloat("AdaptationRate", &AdaptExposureCB.AdaptationRate, 0.01f, 1.0f);
-
-		ImGui::SliderFloat("MinExposure", &AdaptExposureCB.MinExposure, -8.0f, 0.0f);
-		ImGui::SliderFloat("MaxExposure", &AdaptExposureCB.MaxExposure, 0.0f, 8.0f);
-
-		ImGui::SliderFloat("BayerRotScale", &TemporalFilterCB.BayerRotScale, 0.0f, 1.0f);
-
-		ImGui::SliderFloat("SpecularBlurRadius", &TemporalFilterCB.SpecularBlurRadius, 0.0f, 5.0f);
-
-		ImGui::SliderFloat("Point2PlaneDistScale", &TemporalFilterCB.Point2PlaneDistScale, 0.0f, 1000.0f);
-
-	/*	AdaptExposureCB.TargetLuminance = 0.08;
-		AdaptExposureCB.AdaptationRate = 0.05;
-		AdaptExposureCB.MinExposure = 1.0f / 64.0f;
-		AdaptExposureCB.MaxExposure = 64.0f;
-		*/
 		if (!renderBackend->GetErrorString().empty())
 		{
 			if (!ImGui::IsPopupOpen("Msg"))
@@ -7779,6 +9110,7 @@ if (ImGui::Button("Reset Accumulation"))
 		}
 
 		ImGui::End();
+		}
 
 		if (bDebugDraw && FullscreenDebugBuffer == EDebugVisualization::NO_FULLSCREEN)
 		{
@@ -7815,6 +9147,21 @@ if (ImGui::Button("Reset Accumulation"))
 
 	renderBackend->TransitionTexture(backbuffer, EResourceState::RenderTarget, EResourceState::Present);
 
+	const bool bAllowGameUpdateDuringSubmit =
+		bSplitGameRenderThreads &&
+		!bAutoAADumpEnabled &&
+		!bCameraPathRecording &&
+		!bCameraPathPlaying &&
+		!bCameraPathDumping &&
+		!bFinalScreenshotRequested &&
+		!bFinalScreenshotCaptureInFlight;
+	if (bAllowGameUpdateDuringSubmit)
+	{
+		PrevViewProjMat = ViewProjMat;
+		PrevViewMat = ViewMat;
+		PrevUnjitteredViewProjMat = UnjitteredViewProjMat;
+		stateLock.unlock();
+	}
 
 	const auto executeStart = CpuClock::now();
 	renderBackend->ExecuteCurrentCommandList();
@@ -7823,6 +9170,10 @@ if (ImGui::Button("Reset Accumulation"))
 	const auto endFrameStart = CpuClock::now();
 	renderBackend->EndFrame();
 	endFrameMs = ElapsedMilliseconds(endFrameStart, CpuClock::now());
+
+	if (!stateLock.owns_lock())
+		stateLock.lock();
+
 	FinishFramePerfLogging(beginFrameMs, executeMs, endFrameMs);
 
 	ConsumeCameraPathDumpCaptureResult();
@@ -7841,19 +9192,128 @@ if (ImGui::Button("Reset Accumulation"))
 		}
 	}
 
-	PrevViewProjMat = ViewProjMat;
-	PrevViewMat = ViewMat;
+	if (!bAllowGameUpdateDuringSubmit)
+	{
+		PrevViewProjMat = ViewProjMat;
+		PrevViewMat = ViewMat;
+		PrevUnjitteredViewProjMat = UnjitteredViewProjMat;
+	}
+}
 
-	PrevUnjitteredViewProjMat = UnjitteredViewProjMat;
+void Corona::StartGameThread()
+{
+	if (!bSplitGameRenderThreads)
+		return;
+
+	{
+		std::lock_guard<std::mutex> lock(GameThreadMutex);
+		if (bGameThreadStarted)
+			return;
+
+		bGameThreadStopRequested = false;
+		bGameFrameReady = false;
+		bGameThreadStarted = true;
+	}
+
+	GameThread = std::thread(&Corona::GameThreadMain, this);
+	AppendCpuRuntimeTrace(L"[Threading] game thread started");
+}
+
+void Corona::StopGameThread()
+{
+	{
+		std::lock_guard<std::mutex> lock(GameThreadMutex);
+		if (!bGameThreadStarted)
+			return;
+
+		bGameThreadStopRequested = true;
+	}
+	GameThreadCv.notify_all();
+
+	if (GameThread.joinable())
+		GameThread.join();
+
+	{
+		std::lock_guard<std::mutex> lock(GameThreadMutex);
+		bGameThreadStarted = false;
+		bGameThreadStopRequested = false;
+		bGameFrameReady = false;
+	}
+	AppendCpuRuntimeTrace(L"[Threading] game thread stopped");
+}
+
+void Corona::RenderThreadTick()
+{
+	if (!bSplitGameRenderThreads)
+	{
+		OnUpdate();
+		OnRender();
+		return;
+	}
+
+	{
+		std::unique_lock<std::mutex> lock(GameThreadMutex);
+		if (!bGameThreadStarted)
+		{
+			lock.unlock();
+			OnUpdate();
+			OnRender();
+			return;
+		}
+
+		GameThreadCv.wait(lock, [this]()
+		{
+			return bGameThreadStopRequested || bGameFrameReady;
+		});
+
+		if (bGameThreadStopRequested)
+			return;
+
+		bGameFrameReady = false;
+	}
+	GameThreadCv.notify_all();
+
+	OnRender();
+}
+
+void Corona::GameThreadMain()
+{
+	for (;;)
+	{
+		{
+			std::unique_lock<std::mutex> lock(GameThreadMutex);
+			GameThreadCv.wait(lock, [this]()
+			{
+				return bGameThreadStopRequested || !bGameFrameReady;
+			});
+
+			if (bGameThreadStopRequested)
+				break;
+		}
+
+		OnUpdate();
+
+		{
+			std::lock_guard<std::mutex> lock(GameThreadMutex);
+			if (bGameThreadStopRequested)
+				break;
+			bGameFrameReady = true;
+		}
+		GameThreadCv.notify_all();
+	}
 }
 
 void Corona::OnDestroy()
 {
+	AppendCpuRuntimeTrace(L"[OnDestroy] begin");
+	StopGameThread();
 	SaveCameraState();
+	SaveSceneState();
 	StopAsyncImageDumpWorkers();
 	if (!renderBackend)
 	{
 		CoUninitialize();
+		AppendCpuRuntimeTrace(L"[OnDestroy] end no renderBackend");
 		return;
 	}
 	renderBackend->WaitForGpu();
@@ -7873,10 +9333,12 @@ void Corona::OnDestroy()
 		bImguiInitialized = false;
 	}
 	CoUninitialize();
+	AppendCpuRuntimeTrace(L"[OnDestroy] end");
 }
 
 void Corona::OnKeyDown(UINT8 key)
 {
+	std::lock_guard<std::mutex> stateLock(GameRenderStateMutex);
 	RecordScriptKeyDown(key);
 
 	switch (key)
@@ -7917,7 +9379,7 @@ void Corona::OnKeyDown(UINT8 key)
 		ClampMode = ClampMode % 3;
 		break;
 	case 'R':
-		RecompileShaders();
+		bRecompileShaders = true;
 		break;
 	case 'I':
 		bShowImgui = !bShowImgui;
@@ -7935,6 +9397,7 @@ void Corona::OnKeyDown(UINT8 key)
 
 void Corona::OnKeyUp(UINT8 key)
 {
+	std::lock_guard<std::mutex> stateLock(GameRenderStateMutex);
 	RecordScriptKeyUp(key);
 
 	if (!bScriptCameraControlEnabled)
@@ -7943,18 +9406,27 @@ void Corona::OnKeyUp(UINT8 key)
 
 void Corona::OnRButtonDown(int x, int y)
 {
+	std::lock_guard<std::mutex> stateLock(GameRenderStateMutex);
+	RecordScriptRButtonDown(x, y);
+
 	if (!bScriptCameraControlEnabled)
 		m_camera.OnMouseDown(x, y);
 }
 
 void Corona::OnRButtonUp()
 {
+	std::lock_guard<std::mutex> stateLock(GameRenderStateMutex);
+	RecordScriptRButtonUp();
+
 	if (!bScriptCameraControlEnabled)
 		m_camera.OnMouseUp();
 }
 
 void Corona::OnMouseMove(int x, int y)
 {
+	std::lock_guard<std::mutex> stateLock(GameRenderStateMutex);
+	RecordScriptMouseMove(x, y);
+
 	if (!bScriptCameraControlEnabled)
 		m_camera.OnMouseMove(x, y);
 }

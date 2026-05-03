@@ -13,14 +13,40 @@
 #include "Corona.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
+#include <iomanip>
 #include <iterator>
 #include <map>
+#include <sstream>
+
+void AppendCpuRuntimeTrace(const std::wstring& line);
 
 namespace
 {
 	constexpr uint32_t kRTInstanceFlagAlphaTested = 1u << 0;
+
+	std::wstring FormatRTInitMilliseconds(double milliseconds)
+	{
+		std::wostringstream stream;
+		stream << std::fixed << std::setprecision(3) << milliseconds;
+		return stream.str();
+	}
+
+	std::wstring FormatRTHex(uint64_t value)
+	{
+		std::wostringstream stream;
+		stream << L"0x" << std::hex << std::uppercase << value;
+		return stream.str();
+	}
+
+	double ElapsedRTInitMilliseconds(
+		const std::chrono::steady_clock::time_point& begin,
+		const std::chrono::steady_clock::time_point& end)
+	{
+		return std::chrono::duration<double, std::milli>(end - begin).count();
+	}
 
 	void AddMeshesToRayTracingInstances(
 		vector<RTInstanceDesc>& instances,
@@ -87,7 +113,7 @@ Corona::SceneObjectHandle Corona::AddSceneObject(const SceneObjectDesc& desc)
 	object.Transform = desc.Transform;
 	SceneObjects.push_back(object);
 
-	MarkRayTracingSceneDirty();
+	MarkSceneObjectRenderDirty(object.Handle, kSceneObjectDirtyAll);
 	MarkCpuPhysicsSceneDirty();
 	return object.Handle;
 }
@@ -112,6 +138,7 @@ bool Corona::RemoveSceneObject(SceneObjectHandle handle)
 	if (it == SceneObjects.end())
 		return false;
 
+	MarkSceneObjectRenderRemoved(handle);
 	SceneObjects.erase(it);
 	ScriptObjects.erase(handle);
 	if (SponzaObject == handle)
@@ -124,7 +151,6 @@ bool Corona::RemoveSceneObject(SceneObjectHandle handle)
 		PistolObject = InvalidSceneObjectHandle;
 	if (MirrorCubeObject == handle)
 		MirrorCubeObject = InvalidSceneObjectHandle;
-	MarkRayTracingSceneDirty();
 	MarkCpuPhysicsSceneDirty();
 	return true;
 }
@@ -139,8 +165,7 @@ bool Corona::SetSceneObjectTransform(SceneObjectHandle handle, const glm::mat4x4
 		return false;
 
 	it->Transform = transform;
-	if (it->bVisible && it->bRayTracing)
-		MarkRayTracingTransformsDirty();
+	MarkSceneObjectRenderDirty(handle, kSceneObjectDirtyTransform);
 	if (it->bVisible && it->bPhysicsQuery)
 		MarkCpuPhysicsSceneDirty();
 	return true;
@@ -158,7 +183,7 @@ bool Corona::SetSceneObjectVisibility(SceneObjectHandle handle, bool visible)
 	if (it->bVisible != visible)
 	{
 		it->bVisible = visible;
-		MarkRayTracingSceneDirty();
+		MarkSceneObjectRenderDirty(handle, kSceneObjectDirtyVisibility);
 		if (it->bPhysicsQuery)
 			MarkCpuPhysicsSceneDirty();
 	}
@@ -177,9 +202,19 @@ bool Corona::SetSceneObjectRayTracingEnabled(SceneObjectHandle handle, bool enab
 	if (it->bRayTracing != enabled)
 	{
 		it->bRayTracing = enabled;
-		MarkRayTracingSceneDirty();
+		MarkSceneObjectRenderDirty(handle, kSceneObjectDirtyRayTracing);
 	}
 	return true;
+}
+
+bool Corona::ShouldIncludeSceneObjectInRayTracingAS(const SceneObject& object) const
+{
+	if (!object.bVisible || !object.ScenePtr)
+		return false;
+
+	// In hybrid mode this flag lets script objects opt out of RT effects.
+	// Path tracing has no raster fallback, so every visible object must be in the AS.
+	return object.bRayTracing || RenderingMode == ERenderingMode::PATHTRACING;
 }
 
 void Corona::MarkRayTracingSceneDirty()
@@ -223,15 +258,15 @@ void Corona::UpdateRayTracingInstanceTransforms()
 
 	vector<RTInstanceDesc> updatedInstances;
 	size_t meshCount = 0;
-	for (const SceneObject& object : SceneObjects)
+	for (const SceneObject& object : RenderWorld.SceneObjects)
 	{
-		if (object.bVisible && object.bRayTracing && object.ScenePtr)
+		if (ShouldIncludeSceneObjectInRayTracingAS(object))
 			meshCount += object.ScenePtr->meshes.size();
 	}
 	updatedInstances.reserve(meshCount);
-	for (const SceneObject& object : SceneObjects)
+	for (const SceneObject& object : RenderWorld.SceneObjects)
 	{
-		if (object.bVisible && object.bRayTracing)
+		if (ShouldIncludeSceneObjectInRayTracingAS(object))
 			AddMeshesToRayTracingInstances(updatedInstances, RayTracingBLASCache, object.ScenePtr, object.Transform);
 	}
 
@@ -242,6 +277,10 @@ void Corona::UpdateRayTracingInstanceTransforms()
 		RebuildAccelerationStructures();
 		return;
 	}
+
+	// TLAS and the instance property buffer are currently single-buffered.
+	// Updating them in place while the previous frame is still tracing can remove the D3D12 device.
+	renderBackend->WaitForGpu();
 
 	RayTracingInstances = std::move(updatedInstances);
 	if (!renderBackend->UpdateTLAS(TLAS, RayTracingInstances))
@@ -291,12 +330,18 @@ void Corona::UpdateInstancePropertyBuffer()
 		NAME_D3D12_OBJECT(InstancePropertyBuffer->resource);
 	}
 
-	// Map and update instance properties
-	uint8_t* pData;
-	InstancePropertyBuffer->resource->Map(0, nullptr, (void**)&pData);
+	uint8_t* pData = nullptr;
+	const HRESULT mapResult = InstancePropertyBuffer->resource->Map(0, nullptr, reinterpret_cast<void**>(&pData));
+	if (FAILED(mapResult) || !pData)
+	{
+		AppendCpuRuntimeTrace(
+			L"[RTAS] InstancePropertyBuffer Map failed hr=" + FormatRTHex(static_cast<uint32_t>(mapResult)) +
+			L", capacity=" + std::to_wstring(instanceCapacity) +
+			L", instances=" + std::to_wstring(RayTracingInstances.size()));
+		return;
+	}
 
 	memcpy(pData, instanceProperties.data(), instanceProperties.size() * sizeof(InstanceProperty));
-
 	InstancePropertyBuffer->resource->Unmap(0, nullptr);
 }
 
@@ -313,7 +358,7 @@ void Corona::RebuildAccelerationStructures()
 	RayTracingInstances.clear();
 	size_t meshCount = 0;
 	vector<Mesh*> retainedMeshes;
-	for (const SceneObject& object : SceneObjects)
+	for (const SceneObject& object : RenderWorld.SceneObjects)
 	{
 		if (!object.ScenePtr)
 			continue;
@@ -324,13 +369,13 @@ void Corona::RebuildAccelerationStructures()
 				retainedMeshes.push_back(mesh.get());
 		}
 
-		if (object.bVisible && object.bRayTracing)
+		if (ShouldIncludeSceneObjectInRayTracingAS(object))
 			meshCount += object.ScenePtr->meshes.size();
 	}
 	RayTracingInstances.reserve(meshCount);
-	for (const SceneObject& object : SceneObjects)
+	for (const SceneObject& object : RenderWorld.SceneObjects)
 	{
-		if (object.bVisible && object.bRayTracing)
+		if (ShouldIncludeSceneObjectInRayTracingAS(object))
 			AddMeshesToRayTracingInstances(RayTracingInstances, RayTracingBLASCache, object.ScenePtr, object.Transform);
 	}
 
@@ -365,10 +410,14 @@ void Corona::RebuildAccelerationStructures()
 
 void Corona::InitRaytracingData()
 {
+	RenderWorld.SceneObjects = SceneObjects;
+	for (SceneObject& object : RenderWorld.SceneObjects)
+		object.RenderDirtyBits = 0;
+
 	size_t NumTotalMesh = 0;
-	for (const SceneObject& object : SceneObjects)
+	for (const SceneObject& object : RenderWorld.SceneObjects)
 	{
-		if (object.bVisible && object.bRayTracing && object.ScenePtr)
+		if (ShouldIncludeSceneObjectInRayTracingAS(object))
 			NumTotalMesh += object.ScenePtr->meshes.size();
 	}
 	RayTracingInstances.reserve(NumTotalMesh);
@@ -384,19 +433,47 @@ void Corona::InitRaytracingData()
 
 void Corona::InitRTPSO()
 {
+	const auto totalStart = std::chrono::steady_clock::now();
 	const uint32_t maxSupportedHybridStage = renderBackend ? renderBackend->GetMaxSupportedHybridStage() : 7u;
 	const bool bInitReflectionRT = !renderBackend || renderBackend->GetAPI() != ERenderBackendAPI::Vulkan || maxSupportedHybridStage >= 3u;
 	const bool bInitGIRT = !renderBackend || renderBackend->GetAPI() != ERenderBackendAPI::Vulkan || maxSupportedHybridStage >= 4u;
 
-	InitRaytracingShadowPass();
-	InitRaytracingAOPass();
-	InitRaytracingSkyLightingPass();
+	AppendCpuRuntimeTrace(
+		L"[StartupTiming][RTPSO] begin maxSupportedHybridStage=" + std::to_wstring(maxSupportedHybridStage) +
+		L", initReflection=" + std::to_wstring(bInitReflectionRT ? 1 : 0) +
+		L", initGI=" + std::to_wstring(bInitGIRT ? 1 : 0));
+
+	auto timePass = [](const wchar_t* name, const auto& initFunc)
+	{
+		const auto passStart = std::chrono::steady_clock::now();
+		AppendCpuRuntimeTrace(L"[StartupTiming][RTPSO] begin pass=\"" + std::wstring(name) + L"\"");
+		initFunc();
+		const double elapsedMs = ElapsedRTInitMilliseconds(passStart, std::chrono::steady_clock::now());
+		AppendCpuRuntimeTrace(
+			L"[StartupTiming][RTPSO] pass=\"" + std::wstring(name) +
+			L"\", elapsedMs=" + FormatRTInitMilliseconds(elapsedMs));
+	};
+
+	timePass(L"RaytracingShadow", [&]() { InitRaytracingShadowPass(); });
+	timePass(L"RaytracingAO", [&]() { InitRaytracingAOPass(); });
+	timePass(L"RaytracingSkyLighting", [&]() { InitRaytracingSkyLightingPass(); });
 	if (bInitReflectionRT)
-		InitRaytracingReflectionPass();
+		timePass(L"RaytracingReflection", [&]() { InitRaytracingReflectionPass(); });
+	else
+		AppendCpuRuntimeTrace(L"[StartupTiming][RTPSO] skip pass=\"RaytracingReflection\"");
 	if (bInitGIRT)
 	{
-		InitRaytracingSimpleGIPass();
-		InitRaytracingScreenProbePass();
-		InitRaytracingSpatialHashPass();
+		timePass(L"RaytracingSimpleGI", [&]() { InitRaytracingSimpleGIPass(); });
+		timePass(L"RaytracingScreenProbeGI", [&]() { InitRaytracingScreenProbePass(); });
+		timePass(L"RaytracingSpatialHashGI", [&]() { InitRaytracingSpatialHashPass(); });
 	}
+	else
+	{
+		AppendCpuRuntimeTrace(L"[StartupTiming][RTPSO] skip pass=\"RaytracingSimpleGI\"");
+		AppendCpuRuntimeTrace(L"[StartupTiming][RTPSO] skip pass=\"RaytracingScreenProbeGI\"");
+		AppendCpuRuntimeTrace(L"[StartupTiming][RTPSO] skip pass=\"RaytracingSpatialHashGI\"");
+	}
+
+	const double totalMs = ElapsedRTInitMilliseconds(totalStart, std::chrono::steady_clock::now());
+	AppendCpuRuntimeTrace(L"[StartupTiming][RTPSO] complete totalMs=" + FormatRTInitMilliseconds(totalMs));
 }

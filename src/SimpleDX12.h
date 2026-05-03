@@ -105,7 +105,8 @@ public:
 		UINT rootParamIndex;
 		UINT baseRegister;
 		UINT numDescriptors;
-		UINT cbSize;
+		UINT sourceSize = 0;
+		UINT cbSize = 0;
 
 		Texture* texture;
 		Sampler* sampler;
@@ -192,7 +193,8 @@ private:
 	{
 		D3D12_DESCRIPTOR_RANGE_TYPE Type;
 		string name;
-		UINT cbSize;
+		UINT sourceSize = 0;
+		UINT cbSize = 0;
 
 		Texture* texture;
 		Sampler* sampler;
@@ -500,6 +502,7 @@ class Material
 {
 public:
 	bool bHasAlpha = false;
+	glm::vec4 BaseColorFactor = glm::vec4(1.0f);
 
 	shared_ptr<Texture> Diffuse;
 	shared_ptr<Texture> Normal;

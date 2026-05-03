@@ -75,7 +75,23 @@ void Corona::RaytraceReflectionPass()
 	const FLOAT clearReflection[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
 	renderBackend->ClearTextureUAVFloat(SpecularGIRaw.get(), clearReflection);
 
-	RTReflectionViewParam.ViewSpreadAngle = glm::tan(Fov * 0.5) / (0.5f * GetRenderHeight());
+	RTReflectionViewParam.ViewMatrix = glm::transpose(ViewMat);
+	RTReflectionViewParam.InvViewMatrix = glm::transpose(InvViewMat);
+	RTReflectionViewParam.ProjMatrix = glm::transpose(UnjitteredProjMat);
+	RTReflectionViewParam.InvProjMatrix = glm::transpose(UnjitteredInvProjMat);
+	RTReflectionViewParam.ProjectionParams = FrameProjectionParams;
+	RTReflectionViewParam.LightDir = glm::vec4(RenderFrameNormalizedLightDir, LightIntensity);
+	RTReflectionViewParam.RandomOffset = glm::vec2(RenderFrameShaderTime, RenderFrameShaderTime);
+	RTReflectionViewParam.FrameCounter = RenderFrameIndex;
+	RTReflectionViewParam.ViewSpreadAngle = glm::tan(Fov * 0.5f) / (0.5f * GetRenderHeight());
+	RTReflectionViewParam.NoiseMode = RenderFrameRayNoiseMode;
+	RTReflectionViewParam.SkyColorTop = SkyColorTop;
+	RTReflectionViewParam.SkyIntensity = SkyIntensity;
+	RTReflectionViewParam.SkyColorBottom = SkyColorBottom;
+	RTReflectionViewParam.LightColor = RenderFrameLightColor;
+	RTReflectionViewParam.PrefilteredEnvRoughnessThreshold = PrefilteredEnvRoughnessThreshold;
+	RTReflectionViewParam.PrefilteredEnvRoughnessFade = PrefilteredEnvRoughnessFade;
+	RTReflectionViewParam.bEnablePrefilteredEnvSpecular = bEnablePrefilteredEnvSpecular ? 1u : 0u;
 
 	RTPassBuilder pass(*this, PSO_RT_REFLECTION);
 	pass.BeginScene()

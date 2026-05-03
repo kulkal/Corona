@@ -64,6 +64,26 @@ void Corona::RaytraceSkyLightingPass()
 
 	Texture* traceTarget = (SkyLightingDenoisePSO && SkyLightingRawBuffer) ? SkyLightingRawBuffer.get() : SkyLightingBuffer.get();
 
+	RTSkyLightingViewParam.ViewMatrix = glm::transpose(ViewMat);
+	RTSkyLightingViewParam.InvViewMatrix = glm::transpose(InvViewMat);
+	RTSkyLightingViewParam.ProjMatrix = glm::transpose(UnjitteredProjMat);
+	RTSkyLightingViewParam.InvProjMatrix = glm::transpose(UnjitteredInvProjMat);
+	RTSkyLightingViewParam.ProjectionParams = FrameProjectionParams;
+	RTSkyLightingViewParam.RTSize = glm::vec2(GetRenderWidth(), GetRenderHeight());
+	RTSkyLightingViewParam.RayLength = std::clamp(RTSkyLightingViewParam.RayLength, 1.0f, 100000.0f);
+	RTSkyLightingViewParam.NormalBias = std::clamp(RTSkyLightingViewParam.NormalBias, 0.01f, 4.0f);
+	RTSkyLightingViewParam.SkyColorTop = SkyColorTop;
+	RTSkyLightingViewParam.SkyIntensity = SkyIntensity;
+	RTSkyLightingViewParam.SkyColorBottom = SkyColorBottom;
+	RTSkyLightingViewParam.SampleCount = std::clamp(RTSkyLightingViewParam.SampleCount, 1u, 32u);
+	RTSkyLightingViewParam.FrameCounter = RenderFrameIndex;
+	RTSkyLightingViewParam.NoiseMode = RenderFrameRayNoiseMode;
+	RTSkyLightingViewParam.BlueNoiseOffsetStride = RTGIViewParam.BlueNoiseOffsetStride;
+	RTSkyLightingViewParam.SkyUpBias = std::clamp(RTSkyLightingViewParam.SkyUpBias, 0.0f, 1.0f);
+	RTSkyLightingViewParam.SkyDirectionPower = std::clamp(RTSkyLightingViewParam.SkyDirectionPower, 0.25f, 8.0f);
+	RTSkyLightingViewParam.SkyMinWorldY = std::clamp(RTSkyLightingViewParam.SkyMinWorldY, -0.25f, 0.75f);
+	RTSkyLightingViewParam.SkyMaxSampleAttempts = std::clamp(RTSkyLightingViewParam.SkyMaxSampleAttempts, 1u, 8u);
+
 	renderBackend->TransitionTexture(traceTarget, EResourceState::ShaderRead, EResourceState::UnorderedAccess);
 	const FLOAT clearSkyLighting[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
 	renderBackend->ClearTextureUAVFloat(traceTarget, clearSkyLighting);

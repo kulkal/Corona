@@ -71,6 +71,20 @@ void Corona::RaytraceAOPass()
 	const FLOAT clearAO[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
 	renderBackend->ClearTextureUAVFloat(AmbientOcclusionBuffer.get(), clearAO);
 
+	RTAOViewParam.ViewMatrix = glm::transpose(ViewMat);
+	RTAOViewParam.InvViewMatrix = glm::transpose(InvViewMat);
+	RTAOViewParam.ProjMatrix = glm::transpose(UnjitteredProjMat);
+	RTAOViewParam.InvProjMatrix = glm::transpose(UnjitteredInvProjMat);
+	RTAOViewParam.ProjectionParams = FrameProjectionParams;
+	RTAOViewParam.RTSize = glm::vec2(GetRenderWidth(), GetRenderHeight());
+	RTAOViewParam.Radius = std::clamp(RTAOViewParam.Radius, 2.0f, 256.0f);
+	RTAOViewParam.Power = std::clamp(RTAOViewParam.Power, 0.25f, 4.0f);
+	RTAOViewParam.SampleCount = std::clamp(RTAOViewParam.SampleCount, 1u, 16u);
+	RTAOViewParam.FrameCounter = RenderFrameIndex;
+	RTAOViewParam.NoiseMode = RenderFrameRayNoiseMode;
+	RTAOViewParam.BlueNoiseOffsetStride = RTGIViewParam.BlueNoiseOffsetStride;
+	RTAOViewParam.NormalBias = std::clamp(RTAOViewParam.NormalBias, 0.01f, 2.0f);
+
 	RTPassBuilder pass(*this, PSO_RT_AO);
 	pass.BeginScene()
 		.SetTextureUAV("global", "AmbientOcclusionResult", AmbientOcclusionBuffer.get())

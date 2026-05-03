@@ -60,7 +60,7 @@ cbuffer ViewParameter : register(b0)
     float TemporalAlpha;
     float HistoryDepthWeight;
     float HistoryNormalWeight;
-    uint Padding;
+    uint bIncludeSkyLighting;
     float3 SkyColorTop;
     float SkyIntensity;
     float3 SkyColorBottom;
@@ -320,10 +320,10 @@ float ComputeProbeAnchorLocalStability(ProbeAnchor anchor)
     float stability = 0.0f;
     float weightSum = 0.0f;
 
-    [unroll]
+    [loop]
     for (int oy = -2; oy <= 2; ++oy)
     {
-        [unroll]
+        [loop]
         for (int ox = -2; ox <= 2; ++ox)
         {
             if (ox == 0 && oy == 0)
@@ -359,10 +359,10 @@ ProbeAnchor SelectStableProbeAnchor(uint2 centerPixelPos, uint2 probeCoord)
     ProbeAnchor bestAnchor = fallbackAnchor;
     float bestScore = -1e20f;
 
-    [unroll]
+    [loop]
     for (int oy = -2; oy <= 2; ++oy)
     {
-        [unroll]
+        [loop]
         for (int ox = -2; ox <= 2; ++ox)
         {
             uint2 candidatePos = ClampProbePixelCoord(int2(centerPixelPos) + int2(ox, oy));
@@ -465,7 +465,7 @@ float3 TraceDiffuseProbeRay(float3 worldPos, float3 worldNormal, uint2 probeCoor
         payload);
 
     if (!payload.bHit)
-        return 0.0f.xxx;
+        return (bIncludeSkyLighting != 0u) ? max(EvaluateSkyColor(sampleDirWorld), 0.0f.xxx) : 0.0f.xxx;
 
     float3 lightDir = normalize(LightDirAndIntensity.xyz);
     RayDesc shadowRay;
@@ -489,9 +489,9 @@ float3 TraceDiffuseProbeRay(float3 worldPos, float3 worldNormal, uint2 probeCoor
         shadowRay,
         shadowPayload);
 
-    // Direct sky diffuse is handled by RaytracedSkyLighting. Probe GI only
-    // keeps surface/direct-light bounce energy so sky is not counted twice.
     float3 radiance = 0.0f.xxx;
+    if (bIncludeSkyLighting != 0u)
+        radiance += EvaluateSkyDiffuseBounce(payload.normal) * max(payload.color, 0.0f.xxx);
     if (!shadowPayload.bHit)
     {
         float nDotL = saturate(dot(lightDir, payload.normal));
@@ -745,6 +745,7 @@ void rayGen()
     }
 
     uint rayCount = lightingBootstrap ? clamp(BootstrapRays, 1u, 128u) : clamp(RaysPerProbe, 1u, 4u);
+    [loop]
     for (uint sampleIndex = 0; sampleIndex < rayCount; ++sampleIndex)
     {
         float3 sampleDirWorld = worldNormal;

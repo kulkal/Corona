@@ -65,6 +65,15 @@ void Corona::RaytraceShadowPass()
 		PIXScopedEvent(renderBackend->GetGraphicsCommandList(), PIX_COLOR(rand()%255, rand() % 255, rand() % 255), "RaytraceShadowPass");
 	}
 
+	RTShadowViewParam.ViewMatrix = glm::transpose(ViewMat);
+	RTShadowViewParam.InvViewMatrix = glm::transpose(InvViewMat);
+	RTShadowViewParam.ProjMatrix = glm::transpose(UnjitteredProjMat);
+	RTShadowViewParam.InvProjMatrix = glm::transpose(UnjitteredInvProjMat);
+	RTShadowViewParam.ProjectionParams = FrameProjectionParams;
+	RTShadowViewParam.LightDir = glm::vec4(RenderFrameNormalizedLightDir, 0.0f);
+	RTShadowViewParam.ShadowLightRadius = std::clamp(RTShadowViewParam.ShadowLightRadius, 0.0f, 0.03f);
+	RTShadowViewParam.ShadowSampleCount = std::clamp(RTShadowViewParam.ShadowSampleCount, 1u, 16u);
+
 	renderBackend->TransitionTexture(ShadowBuffer.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
 
 	RTPassBuilder pass(*this, PSO_RT_SHADOW);
