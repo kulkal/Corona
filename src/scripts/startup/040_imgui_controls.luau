@@ -14,7 +14,7 @@ local DEBUG_BUFFER_ITEMS = {
     "SCREEN_PROBE_HISTORY_LENGTH",
     "SCREEN_PROBE_ATLAS_HISTORY_LENGTH",
     "TEMPORAL_FILTERED_DIFFUSE_GI",
-    "SPATIAL_FILTERED_DIFFUSE_GI",
+    "RESOLVED_DIFFUSE_GI",
     "FINAL_DIFFUSE_GI",
     "ALBEDO",
     "VELOCITY",
@@ -601,7 +601,6 @@ local function draw_sky_controls(state)
             slider_float_state(state, "sky_lighting_up_bias", "Sky Lighting Up Bias", "script.sky.up_bias", 0.0, 1.0)
             slider_float_state(state, "sky_lighting_direction_power", "Sky Lighting Direction Power", "script.sky.direction_power", 0.25, 8.0)
             slider_float_state(state, "sky_lighting_min_world_y", "Sky Lighting Min World Y", "script.sky.min_world_y", -0.25, 0.75)
-            slider_int_state(state, "sky_lighting_denoise_radius", "Sky Lighting Denoise Radius", "script.sky.denoise_radius", 1, 6)
         else
             ui.text("Diffuse GI handles sky contribution")
         end

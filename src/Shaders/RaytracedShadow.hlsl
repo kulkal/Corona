@@ -10,6 +10,7 @@ ByteAddressBuffer indices : register(t4);
 Texture2D AlbedoTex : register(t5);
 ByteAddressBuffer InstanceProperty : register(t6);
 Texture2D GeoNormalTex : register(t7);
+Texture3D RayNoiseBlueNoiseSource : register(t8);
 
 
 cbuffer ViewParameter : register(b0)
@@ -22,8 +23,10 @@ cbuffer ViewParameter : register(b0)
     float4 LightDir;
     float ShadowLightRadius;
     uint ShadowSampleCount;
-    float2 _padding;
-    float4 pad;
+    uint FrameCounter;
+    uint BlueNoiseOffsetStride;
+    uint NoiseMode;
+    uint3 _padding;
 };
 SamplerState sampleWrap : register(s0);
 
@@ -48,11 +51,6 @@ static const uint RT_SHADOW_RAY_FLAGS =
     RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH |
     RAY_FLAG_SKIP_CLOSEST_HIT_SHADER |
     RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES;
-
-float random(float2 p)
-{
-    return frac(sin(dot(p, float2(12.9898, 78.233))) * 43758.5453);
-}
 
 float3 offset_ray(float3 p, float3 n)
 {
@@ -102,9 +100,9 @@ void rayGen()
         if (sampleIndex >= sampleCount)
             break;
 
-        float2 randUV = float2(
-            random(float2(pixelPos) + float2(sampleIndex * 13.17f, 17.31f)),
-            random(float2(pixelPos) + float2(sampleIndex * 29.73f, 47.77f)));
+        uint2 noisePixel = pixelPos + uint2(sampleIndex * 17u, sampleIndex * 31u);
+        uint noiseFrame = FrameCounter + sampleIndex * 13u;
+        float2 randUV = GenerateRaySample2D(RayNoiseBlueNoiseSource, noisePixel, noiseFrame, BlueNoiseOffsetStride, NoiseMode);
         float3 rayDir = SampleDirectionalLightSphereCap(baseLightDir, ShadowLightRadius, randUV);
         float3 rayBiasNormal = dot(traceNormal, rayDir) < 0.0f ? -traceNormal : traceNormal;
 

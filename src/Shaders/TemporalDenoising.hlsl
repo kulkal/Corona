@@ -17,10 +17,8 @@ Texture2D PrevMomentsTex : register(t12);
 
 RWTexture2D<float4> OutGIResultSH : register(u0);
 RWTexture2D<float4> OutGIResultColor: register(u1);
-RWTexture2D<float4> OutGIResultSHDS : register(u2);
-RWTexture2D<float4> OutGIResultColorDS: register(u3);
-RWTexture2D<float4> OutSpecularGI: register(u4);
-RWTexture2D<float2> OutMoments: register(u5);
+RWTexture2D<float4> OutSpecularGI: register(u2);
+RWTexture2D<float2> OutMoments: register(u3);
 
 SamplerState BilinearClamp : register(s0);
 
@@ -28,6 +26,7 @@ cbuffer TemporalFilterConstant : register(b0)
 {
     float4x4 InvViewMatrix;
     float4x4 InvProjMatrix;
+    float4x4 PrevUnjitteredViewProjMatrix;
 	float4 ProjectionParams;
 	float4 TemporalValidParams;
 	float2 RTSize;
@@ -208,6 +207,34 @@ float3 SafeNormalize(float3 value, float3 fallback)
 	return lenSq > 1e-12f ? value * rsqrt(lenSq) : fallback;
 }
 
+float3 ReconstructWorldPosition(uint2 pixelPos, float deviceDepth)
+{
+    float2 uv = (float2(pixelPos) + 0.5f) / RTSize;
+    float2 screenPosition = uv * 2.0f - 1.0f;
+    screenPosition.y = -screenPosition.y;
+    float3 viewPosition = GetViewPosition(deviceDepth, screenPosition, InvProjMatrix);
+    return SanitizeFloat3(mul(float4(viewPosition, 1.0f), InvViewMatrix).xyz);
+}
+
+bool ProjectToScreenUVAndDepth(float3 worldPos, float4x4 viewProj, out float2 uv, out float deviceDepth)
+{
+    float4 clip = mul(float4(worldPos, 1.0f), viewProj);
+    if (abs(clip.w) <= 1.0e-6f)
+    {
+        uv = 0.0f.xx;
+        deviceDepth = 1.0f;
+        return false;
+    }
+
+    float3 ndc = clip.xyz * rcp(clip.w);
+    uv = ndc.xy * float2(0.5f, -0.5f) + 0.5f;
+    deviceDepth = ndc.z;
+    if (any(isnan(uv)) || any(isinf(uv)) || isnan(deviceDepth) || isinf(deviceDepth))
+        return false;
+
+    return deviceDepth >= 0.0f && deviceDepth <= 1.0f;
+}
+
 float3 LoadSpecularColor(int2 pos)
 {
     float4 value = SanitizeFloat4(InSpecularGITex[pos]);
@@ -257,7 +284,7 @@ void ComputeSpecularNeighborhoodStats(uint2 centerPos, uint2 textureSize, float 
     edgeFactor = saturate(1.0f - neighborWeightSum / 8.0f);
 }
 
-bool SelectPrevSurfacePixel(float2 prevUV, uint2 textureSize, float currentLinearDepth, float3 currentNormal, out int2 bestPos, out float bestWeight)
+bool SelectPrevSurfacePixel(float2 prevUV, uint2 textureSize, float expectedPrevLinearDepth, float3 currentNormal, out int2 bestPos, out float bestWeight)
 {
     float2 prevPixel = prevUV * float2(textureSize) - 0.5f;
     int2 basePos = int2(floor(prevPixel));
@@ -279,8 +306,8 @@ bool SelectPrevSurfacePixel(float2 prevUV, uint2 textureSize, float currentLinea
             float2 sampleCenter = float2(samplePos) + 0.5f;
             float2 pixelDelta = sampleCenter - prevUV * float2(textureSize);
             float filterWeight = exp(-dot(pixelDelta, pixelDelta) * 1.0f);
-            float depthDelta = abs(currentLinearDepth - prevLinearDepth) / max(currentLinearDepth, 1e-3f);
-            float depthWeight = exp(-depthDelta * 32.0f);
+            float depthDelta = abs(expectedPrevLinearDepth - prevLinearDepth) / max(expectedPrevLinearDepth, 1e-3f);
+            float depthWeight = exp(-depthDelta * 48.0f);
             float normalWeight = pow(saturate(dot(currentNormal, prevNormal)), 16.0f);
             float weight = filterWeight * depthWeight * normalWeight;
 
@@ -333,14 +360,24 @@ void TemporalFilter( uint3 DTid : SV_DispatchThreadID, uint3 GTid : SV_GroupThre
     if (HistoryValid != 0)
     {
         float2 velocity = VelocityTex[SafePixelPos].xy;
-        float2 prevUV = (float2(SafePixelPos) + 0.5f - velocity * RTSize - JitterOffset) / RTSize;
+        float2 velocityPrevUV = (float2(SafePixelPos) + 0.5f - velocity * RTSize) / RTSize;
+        float3 currentWorldPos = ReconstructWorldPosition(SafePixelPos, currentDepth);
+        float2 reprojectedPrevUV = velocityPrevUV;
+        float expectedPrevDeviceDepth = currentDepth;
+        bool reprojectionValid = ProjectToScreenUVAndDepth(
+            currentWorldPos,
+            PrevUnjitteredViewProjMatrix,
+            reprojectedPrevUV,
+            expectedPrevDeviceDepth);
+        float2 prevUV = reprojectionValid ? reprojectedPrevUV : velocityPrevUV;
+        float expectedPrevLinearDepth = GetLinearDepthOpenGL(expectedPrevDeviceDepth, ProjectionParams.z, ProjectionParams.w);
 
         bool validHistory = all(prevUV >= 0.0.xx) && all(prevUV <= 1.0.xx);
         int2 bestPrevSpecularPos = int2(0, 0);
         float bestPrevSpecularWeight = 0.0f;
         if (validHistory)
         {
-            validHistory = SelectPrevSurfacePixel(prevUV, TextureSize, currentLinearDepth, currentNormal, bestPrevSpecularPos, bestPrevSpecularWeight);
+            validHistory = SelectPrevSurfacePixel(prevUV, TextureSize, expectedPrevLinearDepth, currentNormal, bestPrevSpecularPos, bestPrevSpecularWeight);
         }
 
         if (validHistory)
@@ -350,8 +387,8 @@ void TemporalFilter( uint3 DTid : SV_DispatchThreadID, uint3 GTid : SV_GroupThre
 
             float3 prevNormal = SafeNormalize(PrevNormalTex[bestPrevSpecularPos].xyz, currentNormal);
 
-            float depthDelta = abs(currentLinearDepth - prevLinearDepth) / max(currentLinearDepth, 1e-3f);
-            float depthWeight = exp(-depthDelta * 24.0f);
+            float depthDelta = abs(expectedPrevLinearDepth - prevLinearDepth) / max(expectedPrevLinearDepth, 1e-3f);
+            float depthWeight = exp(-depthDelta * 36.0f);
             float normalDot = saturate(dot(currentNormal, prevNormal));
             float diffuseNormalWeight = pow(normalDot, 32.0f);
             float specularNormalPower = lerp(32.0f, 12.0f, roughness);
@@ -419,8 +456,6 @@ void TemporalFilter( uint3 DTid : SV_DispatchThreadID, uint3 GTid : SV_GroupThre
 		BlendedSpecular.xyz = max(BlendedSpecular.xyz, 0.0f.xxx);
 		OutGIResultSH[PixelPos] = 0.0f.xxxx;
 		OutGIResultColor[PixelPos] = BlendedDiffuse;
-		OutGIResultSHDS[PixelPos] = 0.0f.xxxx;
-		OutGIResultColorDS[PixelPos] = BlendedDiffuse;
 		OutSpecularGI[PixelPos] = BlendedSpecular;
         OutMoments[PixelPos] = max(BlendedMoments, 0.0f.xx);
 	}

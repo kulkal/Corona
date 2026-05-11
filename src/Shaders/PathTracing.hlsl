@@ -13,7 +13,6 @@ RWTexture2D<float> OutSpecularHitDistance : register(u8);
 RWTexture2D<float2> OutSpecularMotionVector : register(u9);
 
 RaytracingAccelerationStructure gRtScene : register(t0);
-Texture3D BlueNoiseTex : register(t4);
 ByteAddressBuffer vertices : register(t1);
 ByteAddressBuffer indices : register(t2);
 ByteAddressBuffer InstanceProperty : register(t3);
@@ -63,6 +62,7 @@ cbuffer ViewParameter : register(b0)
     uint bEnableRTAO;
     uint bWritePrimaryGBuffer;
     float SpecularMotionVectorScale;
+    uint bStabilizePrimaryRaySamples;
     uint _rtaoPadding;
     PointLightParam PointLights[MAX_POINT_LIGHTS];
     uint PointLightCount;
@@ -84,6 +84,7 @@ struct PathTracingPayload
     uint seed;
     bool done;
     uint guideRay;
+    uint hit;
     float hitDistance;
     
     // Debug visualization data (only for primary hit)
@@ -150,6 +151,7 @@ PathTracingPayload MakePathTracingPayload(float3 rayOrigin, float3 rayDirection,
     payload.seed = seed;
     payload.done = false;
     payload.guideRay = guideRay;
+    payload.hit = 0u;
     payload.hitDistance = ProjectionParams.w;
     payload.debugAlbedo = float3(0, 0, 0);
     payload.debugNormal = float3(0, 0, 0);
@@ -217,7 +219,22 @@ float3 sample_ggx(float3 N, float roughness, inout uint seed)
     return GGXSafeNormalize(mul(H, TBN), N);
 }
 
-float3 ApplyPathTracingNormalMap(float3 vertexNormal, float3 vertexTangent, float2 uv, uint instanceID)
+float ComputePathTracingTextureMipLevel(uint instanceID, Vertex vertex, float3 viewDir, float hitDistance)
+{
+    uint textureWidth = 1;
+    uint textureHeight = 1;
+    AlbedoTex.GetDimensions(textureWidth, textureHeight);
+
+    float halfLog2NumTexPixels = 0.5f * log2(max(float(textureWidth) * float(textureHeight), 1.0f));
+    float triangleLodConstant = vertex.textureLODConstant + halfLog2NumTexPixels;
+    float3 normal = GGXSafeNormalize(vertex.normal, -viewDir);
+    float3 V = GGXSafeNormalize(-viewDir, normal);
+    float NoV = max(abs(dot(normal, V)), 1.0e-4f);
+    float rayConeWidth = max(ViewSpreadAngle * max(hitDistance, 0.0f), 1.0e-6f);
+    return computeTextureLOD(NoV, rayConeWidth, triangleLodConstant);
+}
+
+float3 ApplyPathTracingNormalMap(float3 vertexNormal, float3 vertexTangent, float2 uv, uint instanceID, float mipLevel)
 {
     float3 N = GGXSafeNormalize(vertexNormal, float3(0.0f, 1.0f, 0.0f));
     float tangentLenSq = dot(vertexTangent, vertexTangent);
@@ -235,7 +252,7 @@ float3 ApplyPathTracingNormalMap(float3 vertexNormal, float3 vertexTangent, floa
     if (dot(B, B) < 1e-8f)
         return N;
 
-    float3 normalMap = NormalTex.SampleLevel(sampleWrap, uv, 0).xyz;
+    float3 normalMap = NormalTex.SampleLevel(sampleWrap, uv, mipLevel).xyz;
     if (any(isnan(normalMap)) || any(isinf(normalMap)))
         return N;
     normalMap = normalMap * 2.0f - 1.0f;
@@ -257,6 +274,25 @@ float2 ProjectToScreenUV(float3 worldPos, float4x4 viewProj)
     float invW = abs(clip.w) > 1.0e-6f ? rcp(clip.w) : 0.0f;
     float2 uv = (clip.xy * invW) * float2(0.5f, -0.5f) + 0.5f;
     return (any(isnan(uv)) || any(isinf(uv))) ? float2(0.0f, 0.0f) : uv;
+}
+
+bool ProjectToScreenUVChecked(float3 worldPos, float4x4 viewProj, out float2 uv)
+{
+    float4 clip = mul(float4(worldPos, 1.0f), viewProj);
+    if (abs(clip.w) <= 1.0e-6f)
+    {
+        uv = float2(0.0f, 0.0f);
+        return false;
+    }
+
+    float3 ndc = clip.xyz * rcp(clip.w);
+    uv = ndc.xy * float2(0.5f, -0.5f) + 0.5f;
+    if (any(isnan(uv)) || any(isinf(uv)) || any(isnan(ndc)) || any(isinf(ndc)))
+        return false;
+
+    return ndc.z >= 0.0f && ndc.z <= 1.0f &&
+           all(uv >= float2(-0.25f, -0.25f)) &&
+           all(uv <= float2(1.25f, 1.25f));
 }
 
 void WritePrimaryHitGBuffer(uint2 pixel, PathTracingPayload payload, bool bHit, float specularHitDistance, float2 specularMotionVector)
@@ -312,9 +348,12 @@ void PathTracingRayGen()
         uint seed = init_path_seed(launchIndex.xy, frameCounter, sampleIndex);
         float2 clipXY = inUV * 2.0f - 1.0f;
 
-        // Keep the RR guiding GBuffer deterministic. The first sample uses the
-        // pixel center; extra samples still provide stochastic AA/noise reduction.
-        bool bCenterPrimaryRay = (bWritePrimaryGBuffer != 0 && sampleIndex == 0);
+        // Keep the RR guiding GBuffer deterministic. During camera motion, lock
+        // all primary samples to the same pixel center so color/depth/normal
+        // describe the same primary surface for RR reprojection.
+        bool bCenterPrimaryRay =
+            (bWritePrimaryGBuffer != 0) &&
+            (sampleIndex == 0 || bStabilizePrimaryRaySamples != 0);
         if (DebugMode == 0 && !bCenterPrimaryRay)
         {
             float2 jitter = float2(random_float(seed), random_float(seed)) - 0.5;
@@ -356,7 +395,8 @@ void PathTracingRayGen()
             {
                 float specularHitDistance = ProjectionParams.w;
                 float2 specularMotionVector = float2(0.0f, 0.0f);
-                if (!payload.done)
+                bool primaryHit = payload.hit != 0u;
+                if (primaryHit)
                 {
                     float roughness = clamp(payload.debugRoughness, 0.02f, 1.0f);
                     float3 specularAlbedo = lerp(0.04f.xxx, saturate(payload.debugAlbedo), saturate(payload.debugMetallic));
@@ -384,22 +424,28 @@ void PathTracingRayGen()
                                      RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH |
                                      RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES,
                                      0xFF, 0, 0, 0, guideRay, guidePayload);
-                            if (!guidePayload.done)
+                            if (guidePayload.hit != 0u)
                             {
                                 specularHitDistance = guidePayload.hitDistance;
-                                float2 specCurrentUV = ProjectToScreenUV(guidePayload.debugWorldPos, UnjitteredViewProjMatrix);
-                                float2 specPrevUV = ProjectToScreenUV(guidePayload.debugWorldPos, PrevUnjitteredViewProjMatrix);
-                                specularMotionVector = (specPrevUV - specCurrentUV) * float2(launchDim.xy) * SpecularMotionVectorScale;
+                                float2 specCurrentUV;
+                                float2 specPrevUV;
+                                if (ProjectToScreenUVChecked(guidePayload.debugWorldPos, UnjitteredViewProjMatrix, specCurrentUV) &&
+                                    ProjectToScreenUVChecked(guidePayload.debugWorldPos, PrevUnjitteredViewProjMatrix, specPrevUV))
+                                {
+                                    float2 candidateMotionVector = (specPrevUV - specCurrentUV) * float2(launchDim.xy) * SpecularMotionVectorScale;
+                                    if (all(abs(candidateMotionVector) <= float2(launchDim.xy)))
+                                        specularMotionVector = candidateMotionVector;
+                                }
                             }
                         }
                     }
                 }
-                WritePrimaryHitGBuffer(launchIndex.xy, payload, !payload.done, specularHitDistance, specularMotionVector);
+                WritePrimaryHitGBuffer(launchIndex.xy, payload, primaryHit, specularHitDistance, specularMotionVector);
             }
             
             if (DebugMode > 0 && bounce == 0)
             {
-                if (!payload.done)
+                if (payload.hit != 0u)
                 {
                     if (DebugMode == 1)
                         radiance = payload.debugAlbedo;
@@ -533,6 +579,7 @@ void PathTracingClosestHit(inout PathTracingPayload payload, in BuiltInTriangleI
     {
         payload.hitDistance = RayTCurrent();
         payload.debugWorldPos = payload.origin + payload.direction * payload.hitDistance;
+        payload.hit = 1u;
         payload.done = false;
         return;
     }
@@ -544,11 +591,15 @@ void PathTracingClosestHit(inout PathTracingPayload payload, in BuiltInTriangleI
     uint triangleIndex = PrimitiveIndex();
     uint instanceID = InstanceID();
     Vertex vertex = GetVertexAttributes(instanceID, vertices, indices, InstanceProperty, triangleIndex, barycentrics);
+    float hitDistance = RayTCurrent();
+    float textureMipLevel = ComputePathTracingTextureMipLevel(instanceID, vertex, payload.direction, hitDistance);
+    payload.hit = 1u;
+    payload.hitDistance = hitDistance;
     
     // Get material properties
-    float3 albedo = AlbedoTex.SampleLevel(sampleWrap, vertex.uv, 0).xyz;
-    float roughness = clamp(RoughnessTex.SampleLevel(sampleWrap, vertex.uv, 0).x, 0.02f, 1.0f);
-    float metallic = saturate(MetallicTex.SampleLevel(sampleWrap, vertex.uv, 0).x);
+    float3 albedo = AlbedoTex.SampleLevel(sampleWrap, vertex.uv, textureMipLevel).xyz;
+    float roughness = clamp(RoughnessTex.SampleLevel(sampleWrap, vertex.uv, textureMipLevel).x, 0.02f, 1.0f);
+    float metallic = saturate(MetallicTex.SampleLevel(sampleWrap, vertex.uv, textureMipLevel).x);
     ApplyInstanceRoughnessMetallic(instanceID, InstanceProperty, roughness, metallic);
     
     // Store debug information for primary hit (depth == 0)
@@ -567,7 +618,7 @@ void PathTracingClosestHit(inout PathTracingPayload payload, in BuiltInTriangleI
     
     // Sample normal map when a valid tangent basis exists. Models without UVs
     // such as buddha.obj have no tangents, so fall back to the geometric normal.
-    float3 N = ApplyPathTracingNormalMap(vertex.normal, vertex.tangent, vertex.uv, instanceID);
+    float3 N = ApplyPathTracingNormalMap(vertex.normal, vertex.tangent, vertex.uv, instanceID, textureMipLevel);
     float3 V = GGXSafeNormalize(-payload.direction, N);
     float3 geomNormal = GGXSafeNormalize(vertex.normal, N);
     // Path tracing hits both sides of imported meshes. Keep the shading normal
@@ -791,9 +842,10 @@ void PathTracingAnyHit(inout PathTracingPayload payload, in BuiltInTriangleInter
         return;
 
     Vertex vertex = GetVertexAttributes(instanceID, vertices, indices, InstanceProperty, triangleIndex, barycentrics);
+    float textureMipLevel = ComputePathTracingTextureMipLevel(instanceID, vertex, payload.direction, RayTCurrent());
     
     // Sample albedo alpha channel
-    float alpha = AlbedoTex.SampleLevel(sampleWrap, vertex.uv, 0).w;
+    float alpha = AlbedoTex.SampleLevel(sampleWrap, vertex.uv, textureMipLevel).w;
     
     // If alpha is too low, ignore this hit and continue ray traversal
     if (alpha < 0.1)

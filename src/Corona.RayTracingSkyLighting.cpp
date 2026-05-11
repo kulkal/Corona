@@ -31,7 +31,7 @@ void Corona::InitRaytracingSkyLightingPass()
 	tempPSO->BindSRV("global", "gRtScene", 0);
 	tempPSO->BindSRV("global", "DepthTex", 1);
 	tempPSO->BindSRV("global", "WorldNormalTex", 2);
-	tempPSO->BindSRV("global", "BlueNoiseTex", 3);
+	tempPSO->BindSRV("global", "RayNoiseBlueNoiseSource", 3);
 	tempPSO->BindSRV("global", "GeoNormalTex", 8);
 	tempPSO->BindCBV("global", "ViewParameter", 0, sizeof(RTSkyLightingViewParam), 1);
 	tempPSO->BindSampler("global", "sampleWrap", 0);
@@ -62,8 +62,6 @@ void Corona::RaytraceSkyLightingPass()
 		PIXScopedEvent(renderBackend->GetGraphicsCommandList(), PIX_COLOR(rand() % 255, rand() % 255, rand() % 255), "RaytraceSkyLightingPass");
 	}
 
-	Texture* traceTarget = (SkyLightingDenoisePSO && SkyLightingRawBuffer) ? SkyLightingRawBuffer.get() : SkyLightingBuffer.get();
-
 	RTSkyLightingViewParam.ViewMatrix = glm::transpose(ViewMat);
 	RTSkyLightingViewParam.InvViewMatrix = glm::transpose(InvViewMat);
 	RTSkyLightingViewParam.ProjMatrix = glm::transpose(UnjitteredProjMat);
@@ -84,25 +82,23 @@ void Corona::RaytraceSkyLightingPass()
 	RTSkyLightingViewParam.SkyMinWorldY = std::clamp(RTSkyLightingViewParam.SkyMinWorldY, -0.25f, 0.75f);
 	RTSkyLightingViewParam.SkyMaxSampleAttempts = std::clamp(RTSkyLightingViewParam.SkyMaxSampleAttempts, 1u, 8u);
 
-	renderBackend->TransitionTexture(traceTarget, EResourceState::ShaderRead, EResourceState::UnorderedAccess);
+	renderBackend->TransitionTexture(SkyLightingBuffer.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
 	const FLOAT clearSkyLighting[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
-	renderBackend->ClearTextureUAVFloat(traceTarget, clearSkyLighting);
+	renderBackend->ClearTextureUAVFloat(SkyLightingBuffer.get(), clearSkyLighting);
 
 	RTPassBuilder pass(*this, PSO_RT_SKY_LIGHTING);
 	pass.BeginScene()
-		.SetTextureUAV("global", "SkyLightingResult", traceTarget)
+		.SetTextureUAV("global", "SkyLightingResult", SkyLightingBuffer.get())
 		.SetAccelerationStructure("global", "gRtScene", TLAS)
 		.SetTextureSRV("global", "DepthTex", UnjitteredDepthBuffers[ColorBufferWriteIndex].get())
 		.SetTextureSRV("global", "WorldNormalTex", NormalBuffers[ColorBufferWriteIndex].get())
-		.SetTextureSRV("global", "BlueNoiseTex", BlueNoiseTex.get())
+		.SetTextureSRV("global", "RayNoiseBlueNoiseSource", BlueNoiseTex.get())
 		.SetTextureSRV("global", "GeoNormalTex", GeomNormalBuffers[ColorBufferWriteIndex].get())
 		.SetCBVValue("global", "ViewParameter", &RTSkyLightingViewParam)
 		.SetSampler("global", "sampleWrap", samplerWrap.get());
 	pass.BindSceneHitPrograms();
 	pass.Dispatch(GetRenderWidth(), GetRenderHeight());
 
-	renderBackend->TransitionTexture(traceTarget, EResourceState::UnorderedAccess, EResourceState::ShaderRead);
-	if (traceTarget == SkyLightingRawBuffer.get())
-		SkyLightingDenoisePass();
+	renderBackend->TransitionTexture(SkyLightingBuffer.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
 	bSkyLightingOutputValidThisFrame = true;
 }

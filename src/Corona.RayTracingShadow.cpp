@@ -33,6 +33,7 @@ void Corona::InitRaytracingShadowPass()
 		TEMP_PSO_RT_SHADOW->BindSRV("global", "DepthTex", 1);
 		TEMP_PSO_RT_SHADOW->BindSRV("global", "WorldNormalTex", 2);
 		TEMP_PSO_RT_SHADOW->BindSRV("global", "GeoNormalTex", 7);
+		TEMP_PSO_RT_SHADOW->BindSRV("global", "RayNoiseBlueNoiseSource", 8);
 
 		TEMP_PSO_RT_SHADOW->BindCBV("global", "ViewParameter", 0, sizeof(RTShadowViewParamCB), 1);
 		TEMP_PSO_RT_SHADOW->BindSampler("global", "sampleWrap", 0);
@@ -73,6 +74,9 @@ void Corona::RaytraceShadowPass()
 	RTShadowViewParam.LightDir = glm::vec4(RenderFrameNormalizedLightDir, 0.0f);
 	RTShadowViewParam.ShadowLightRadius = std::clamp(RTShadowViewParam.ShadowLightRadius, 0.0f, 0.03f);
 	RTShadowViewParam.ShadowSampleCount = std::clamp(RTShadowViewParam.ShadowSampleCount, 1u, 16u);
+	RTShadowViewParam.FrameCounter = RenderFrameIndex;
+	RTShadowViewParam.BlueNoiseOffsetStride = RTGIViewParam.BlueNoiseOffsetStride;
+	RTShadowViewParam.NoiseMode = RenderFrameRayNoiseMode;
 
 	renderBackend->TransitionTexture(ShadowBuffer.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
 
@@ -83,6 +87,7 @@ void Corona::RaytraceShadowPass()
 		.SetTextureSRV("global", "DepthTex", UnjitteredDepthBuffers[ColorBufferWriteIndex].get())
 		.SetTextureSRV("global", "WorldNormalTex", NormalBuffers[ColorBufferWriteIndex].get())
 		.SetTextureSRV("global", "GeoNormalTex", GeomNormalBuffers[ColorBufferWriteIndex].get())
+		.SetTextureSRV("global", "RayNoiseBlueNoiseSource", BlueNoiseTex.get())
 		.SetCBVValue("global", "ViewParameter", &RTShadowViewParam)
 		.SetSampler("global", "sampleWrap", samplerWrap.get());
 	pass.BindSceneHitPrograms();

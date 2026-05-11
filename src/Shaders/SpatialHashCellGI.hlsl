@@ -9,7 +9,7 @@ RaytracingAccelerationStructure gRtScene : register(t0);
 StructuredBuffer<uint> CellKeys : register(t1);
 StructuredBuffer<float4> CellPosition : register(t2);
 StructuredBuffer<float4> CellNormal : register(t3);
-Texture3D BlueNoiseTex : register(t4);
+Texture3D RayNoiseBlueNoiseSource : register(t4);
 ByteAddressBuffer vertices : register(t5);
 ByteAddressBuffer indices : register(t6);
 Texture2D AlbedoTex : register(t7);
@@ -239,8 +239,6 @@ float3 TraceDiffusePath(float3 origin, float3 direction, uint2 noiseCoord, uint 
 
         float3 hitNormal = SafeNormalize(payload.normal, float3(0.0f, 1.0f, 0.0f));
         float3 hitAlbedo = max(SanitizeFloat3(payload.color), 0.0f.xxx);
-        if (bIncludeSkyLighting != 0u)
-            radiance += throughput * EvaluateSkyDiffuseBounce(hitNormal) * hitAlbedo;
         radiance += throughput * EvaluateDirectSurfaceRadiance(payload.position, hitNormal, hitAlbedo);
 
         if (bounceIndex + 1u >= bounceCount)
@@ -252,8 +250,8 @@ float3 TraceDiffusePath(float3 origin, float3 direction, uint2 noiseCoord, uint 
             break;
 
         uint2 bounceNoiseCoord = noiseCoord + uint2(37u * (bounceIndex + 1u), 53u * (sampleIndex + 1u));
-        float2 randomUV = LoadRayNoise2(
-            BlueNoiseTex,
+        float2 randomUV = GenerateRaySample2D(
+            RayNoiseBlueNoiseSource,
             bounceNoiseCoord,
             FrameCounter + 19u * (bounceIndex + 1u) + 7u * sampleIndex,
             BlueNoiseOffsetStride,
@@ -320,8 +318,8 @@ void rayGen()
             break;
 
         uint2 noiseCoord = baseNoiseCoord + uint2(sampleIndex * 17u, sampleIndex * 31u);
-        float2 randomUV = LoadRayNoise2(
-            BlueNoiseTex,
+        float2 randomUV = GenerateRaySample2D(
+            RayNoiseBlueNoiseSource,
             noiseCoord,
             FrameCounter + sampleIndex * 13u,
             BlueNoiseOffsetStride,

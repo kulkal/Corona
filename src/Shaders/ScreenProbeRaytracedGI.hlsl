@@ -19,7 +19,7 @@ ByteAddressBuffer vertices : register(t3);
 ByteAddressBuffer indices : register(t4);
 Texture2D AlbedoTex : register(t5);
 ByteAddressBuffer InstanceProperty : register(t6);
-Texture3D BlueNoiseTex : register(t7);
+Texture3D RayNoiseBlueNoiseSource : register(t7);
 Texture2D PrevProbeRadianceTex : register(t8);
 Texture2D PrevProbeMetaTex : register(t9);
 Texture2D VelocityTex : register(t10);
@@ -431,7 +431,7 @@ float3 ReconstructWorldPosition(float2 pixelCenter, float deviceDepth)
 float3 TraceDiffuseProbeRay(float3 worldPos, float3 worldNormal, uint2 probeCoord, uint sampleIndex, out float3 sampleDirWorld, out float sampleCosTheta, out float samplePdf)
 {
     uint2 noiseCoord = probeCoord * uint2(17u, 29u) + uint2(sampleIndex * 11u, sampleIndex * 7u);
-    float2 randomUV = LoadRayNoise2(BlueNoiseTex, noiseCoord, FrameCounter + sampleIndex * 13u, BlueNoiseOffsetStride, NoiseMode);
+    float2 randomUV = GenerateRaySample2D(RayNoiseBlueNoiseSource, noiseCoord, FrameCounter + sampleIndex * 13u, BlueNoiseOffsetStride, NoiseMode);
 
     // SH represents incoming radiance over directions, so use a uniform
     // hemisphere estimator and apply 1/pdf when projecting into SH.
@@ -490,8 +490,6 @@ float3 TraceDiffuseProbeRay(float3 worldPos, float3 worldNormal, uint2 probeCoor
         shadowPayload);
 
     float3 radiance = 0.0f.xxx;
-    if (bIncludeSkyLighting != 0u)
-        radiance += EvaluateSkyDiffuseBounce(payload.normal) * max(payload.color, 0.0f.xxx);
     if (!shadowPayload.bHit)
     {
         float nDotL = saturate(dot(lightDir, payload.normal));

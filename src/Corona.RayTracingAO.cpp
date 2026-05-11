@@ -31,7 +31,7 @@ void Corona::InitRaytracingAOPass()
 	tempPSO->BindSRV("global", "gRtScene", 0);
 	tempPSO->BindSRV("global", "DepthTex", 1);
 	tempPSO->BindSRV("global", "WorldNormalTex", 2);
-	tempPSO->BindSRV("global", "BlueNoiseTex", 3);
+	tempPSO->BindSRV("global", "RayNoiseBlueNoiseSource", 3);
 	tempPSO->BindSRV("global", "GeoNormalTex", 8);
 	tempPSO->BindCBV("global", "ViewParameter", 0, sizeof(RTAOViewParam), 1);
 	tempPSO->BindSampler("global", "sampleWrap", 0);
@@ -91,7 +91,7 @@ void Corona::RaytraceAOPass()
 		.SetAccelerationStructure("global", "gRtScene", TLAS)
 		.SetTextureSRV("global", "DepthTex", UnjitteredDepthBuffers[ColorBufferWriteIndex].get())
 		.SetTextureSRV("global", "WorldNormalTex", NormalBuffers[ColorBufferWriteIndex].get())
-		.SetTextureSRV("global", "BlueNoiseTex", BlueNoiseTex.get())
+		.SetTextureSRV("global", "RayNoiseBlueNoiseSource", BlueNoiseTex.get())
 		.SetTextureSRV("global", "GeoNormalTex", GeomNormalBuffers[ColorBufferWriteIndex].get())
 		.SetCBVValue("global", "ViewParameter", &RTAOViewParam)
 		.SetSampler("global", "sampleWrap", samplerWrap.get());

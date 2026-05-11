@@ -91,7 +91,7 @@ void Corona::InitRaytracingSpatialHashPass()
 		tempPSO->BindSRV("global", "CellKeys", 1);
 		tempPSO->BindSRV("global", "CellPosition", 2);
 		tempPSO->BindSRV("global", "CellNormal", 3);
-		tempPSO->BindSRV("global", "BlueNoiseTex", 4);
+		tempPSO->BindSRV("global", "RayNoiseBlueNoiseSource", 4);
 		tempPSO->BindSRV("global", "ActiveCellSlots", 9);
 		tempPSO->BindSRV("global", "ActiveCounter", 10);
 		tempPSO->BindCBV("global", "ViewParameter", 0, sizeof(RTSpatialHashGIViewParamCB), 1);
@@ -250,7 +250,7 @@ void Corona::SpatialHashGIPass()
 		.SetBufferSRV("global", "CellKeys", SpatialHashGIResolvedKeys[cacheIndex].get())
 		.SetBufferSRV("global", "CellPosition", SpatialHashGICellPosition.get())
 		.SetBufferSRV("global", "CellNormal", SpatialHashGICellNormal.get())
-		.SetTextureSRV("global", "BlueNoiseTex", BlueNoiseTex.get())
+		.SetTextureSRV("global", "RayNoiseBlueNoiseSource", BlueNoiseTex.get())
 		.SetBufferSRV("global", "ActiveCellSlots", SpatialHashGIActiveCellSlots.get())
 		.SetBufferSRV("global", "ActiveCounter", SpatialHashGIActiveCounter.get())
 		.SetCBVValue("global", "ViewParameter", &RTSpatialHashGIViewParam)

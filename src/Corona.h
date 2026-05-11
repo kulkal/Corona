@@ -81,7 +81,7 @@ public:
 		SCREEN_PROBE_HISTORY_LENGTH,
 		SCREEN_PROBE_ATLAS_HISTORY_LENGTH,
 		TEMPORAL_FILTERED_DIFFUSE_GI,
-		SPATIAL_FILTERED_DIFFUSE_GI,
+		RESOLVED_DIFFUSE_GI,
 		FINAL_DIFFUSE_GI,
 		ALBEDO,
 		VELOCITY,
@@ -102,14 +102,12 @@ private:
 		Frame = 0,
 		GBuffer,
 		RaytraceShadow,
-		ShadowDenoise,
 		RaytraceAO,
 		RaytraceSkyLighting,
 		RaytraceReflection,
 		RaytraceGI,
 		ScreenProbeGI,
 		TemporalDenoise,
-		SpatialDenoise,
 		Lighting,
 		DLSSRR,
 		DLSSSR,
@@ -154,15 +152,12 @@ private:
 	shared_ptr<Texture> PathTracingSpecularHitDistanceBuffer;
 	shared_ptr<Texture> PathTracingSpecularMotionVectorBuffer;
 	shared_ptr<Texture> ShadowBuffer;
-	shared_ptr<Texture> ShadowDenoisedBuffer;
 	shared_ptr<Texture> AmbientOcclusionBuffer;
-	shared_ptr<Texture> SkyLightingRawBuffer;
 	shared_ptr<Texture> SkyLightingBuffer;
 
 	shared_ptr<Texture> SpecularGIRaw;
 
 	shared_ptr<Texture> SpecularGITemporal[2];
-	shared_ptr<Texture> SpecularGISpatial[2];
 
 	shared_ptr<Texture> SpecularGIMoments[2];
 
@@ -187,9 +182,6 @@ private:
 	shared_ptr<Texture> ScreenProbeGIHistory[2];
 	UINT ScreenProbeGIAtlasWriteIndex = 0;
 	UINT ScreenProbeGIHistoryWriteIndex = 0;
-
-	shared_ptr<Texture> DiffuseGISpatialAux[2];
-	shared_ptr<Texture> DiffuseGISpatial[2];
 
 	shared_ptr<Texture> BloomBlurPingPong[2];
 	shared_ptr<Texture> LumaBuffer;
@@ -218,33 +210,12 @@ private:
 
 	std::shared_ptr<GraphicsPipelineHandle> GBufferGraphicsPipeline;
 
-	// spatial denoising
-	struct SpatialFilterConstant
-	{
-		glm::vec4 ProjectionParams;
-		UINT32 Iteration;
-		UINT32 GIBufferScale;
-		UINT32 AccumulatedFrames = 0;
-		UINT32 Padding = 0;
-		float IndirectDiffuseWeightFactorDepth = 0.5f;
-		float IndirectDiffuseWeightFactorNormal = 1.0f;
-		float IndirectSpecularWeightFactorDepth = 0.5f;
-		float IndirectSpecularWeightFactorNormal = 2.0f;
-		float IndirectSpecularLuminanceWeight = 1.5f;
-		float IndirectSpecularEnergyPreservation = 0.85f;
-	};
-
-	SpatialFilterConstant SpatialFilterCB;
-
-	shared_ptr<ComputePipelineStateObject> SpatialDenoisingFilterPSO;
-
-
-
 	// temporal denoising
 	struct TemporalFilterConstant
 	{
 		glm::mat4x4 InvViewMatrix;
 		glm::mat4x4 InvProjMatrix;
+		glm::mat4x4 PrevUnjitteredViewProjMatrix;
 		glm::vec4 ProjectionParams;
 		glm::vec4 TemporalValidParams = glm::vec4(28, 0, 0, 0);
 		glm::vec2 RTSize;
@@ -346,8 +317,12 @@ private:
 		glm::vec4 LightDir;
 		float ShadowLightRadius = 0.001f;
 		UINT32 ShadowSampleCount = 8;
-		glm::vec2 _padding;
-		glm::vec4 pad;
+		UINT32 FrameCounter = 0;
+		UINT32 BlueNoiseOffsetStride = 1;
+		UINT32 NoiseMode = 1;
+		UINT32 _padding0 = 0;
+		UINT32 _padding1 = 0;
+		UINT32 _padding2 = 0;
 	};
 
 	RTShadowViewParamCB RTShadowViewParam;
@@ -406,30 +381,6 @@ private:
 	shared_ptr<RTPipelineStateObject> PSO_RT_SKY_LIGHTING;
 	bool bSkyLightingOutputValidThisFrame = false;
 
-	struct SkyLightingDenoiseCB
-	{
-		glm::vec4 ProjectionParams;
-		glm::vec2 RTSize;
-		float DepthSigma = 48.0f;
-		float NormalSigma = 48.0f;
-		float VisibilitySigma = 8.0f;
-		UINT32 Radius = 5;
-		glm::vec2 _padding = glm::vec2(0.0f);
-	};
-	SkyLightingDenoiseCB SkyLightingDenoiseParam;
-	shared_ptr<ComputePipelineStateObject> SkyLightingDenoisePSO;
-
-	struct ShadowDenoiseCB
-	{
-		glm::vec4 ProjectionParams;
-		glm::vec2 RTSize;
-		float DepthSigma = 32.0f;
-		float NormalSigma = 64.0f;
-	};
-	ShadowDenoiseCB ShadowDenoiseParam;
-	shared_ptr<ComputePipelineStateObject> ShadowDenoisePSO;
-
-
 	// RT reflection
 	struct RTReflectionViewParamCB
 	{
@@ -437,6 +388,8 @@ private:
 		glm::mat4x4 InvViewMatrix;
 		glm::mat4x4 ProjMatrix;
 		glm::mat4x4 InvProjMatrix;
+		glm::mat4x4 UnjitteredViewProjMatrix;
+		glm::mat4x4 PrevUnjitteredViewProjMatrix;
 		glm::vec4 ProjectionParams;
 		glm::vec4	LightDir;
 		glm::vec2 RandomOffset;
@@ -453,7 +406,10 @@ private:
 		float PrefilteredEnvRoughnessThreshold = 0.65f;
 		float PrefilteredEnvRoughnessFade = 0.10f;
 		UINT32 bEnablePrefilteredEnvSpecular = 0;
-		glm::vec2 _prefilteredEnvPadding = glm::vec2(0.0f);
+		float SpecularMotionVectorScale = 1.0f;
+		UINT32 bWriteRRSpecularMotionVectors = 0;
+		UINT32 bWriteRRSpecularHitDistance = 0;
+		UINT32 bUseRRSpecularGuideRay = 1;
 	};
 
 	RTReflectionViewParamCB RTReflectionViewParam;
@@ -604,6 +560,7 @@ private:
 		UINT32 bEnableRTAO;
 		UINT32 bWritePrimaryGBuffer = 0;
 		float SpecularMotionVectorScale = 1.0f;
+		UINT32 bStabilizePrimaryRaySamples = 0;
 		UINT32 _rtaoPadding = 0;
 		PointLightParam PointLights[MaxPointLights];
 		UINT32 PointLightCount = 0;
@@ -619,6 +576,11 @@ private:
 	float PathTracingRRSpecularMotionVectorScale = 1.0f;
 	bool bEnablePathTracingRRSpecularMotionVectors = true;
 	bool bEnablePathTracingRRSpecularHitDistance = false;
+	bool bEnablePathTracingRRPrimaryRayStabilization = true;
+	float HybridRRSpecularMotionVectorScale = 1.0f;
+	bool bEnableHybridRRSpecularMotionVectors = true;
+	bool bEnableHybridRRSpecularHitDistance = true;
+	bool bEnableHybridRRSpecularGuideRay = true;
 	glm::mat4x4 PrevPathTracingViewMat = glm::mat4x4(0.0f);
 	glm::vec3 PrevPathTracingLightDir;
 	float PrevPathTracingLightIntensity = 0.0f;
@@ -813,7 +775,7 @@ private:
 	bool bEnableDirectDiffuse = true;
 	bool bEnableDirectSpecular = true;
 	bool bEnableRTAO = true;
-	bool bEnableSkyLighting = true;
+	bool bEnableSkyLighting = false;
 	bool bEnableRayTracedSkyLighting = true;
 	float RTAOIndirectStrength = 0.25f;
 	float RTAOIndirectFloor = 0.55f;
@@ -1258,7 +1220,7 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 		bool bEnableDirectDiffuse = true;
 		bool bEnableDirectSpecular = true;
 		bool bEnableRTAO = true;
-		bool bEnableSkyLighting = true;
+		bool bEnableSkyLighting = false;
 		bool bEnableRayTracedSkyLighting = true;
 		float RTAOIndirectStrength = 0.25f;
 		float RTAOIndirectFloor = 0.55f;
@@ -1290,7 +1252,6 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 		float SkyLightingDirectionPower = 2.25f;
 		float SkyLightingMinWorldY = 0.02f;
 		UINT32 SkyLightingMaxSampleAttempts = 4;
-		UINT32 SkyLightingDenoiseRadius = 5;
 		UINT32 ScreenProbeSpacing = 8;
 		UINT32 ScreenProbeGatherRadius = 3;
 		UINT32 ScreenProbeRaysPerProbe = 4;
@@ -1791,8 +1752,6 @@ public:
 
 	void InitRTPSO();
 
-	void InitSpatialDenoisingPass();
-
 	void InitTemporalDenoisingPass();
 	void InitScreenProbeGIPass();
 	void InitSpatialHashGIPass();
@@ -1804,9 +1763,6 @@ public:
 	void InitDebugPass();
 
 	void InitLightingPass();
-
-	void InitShadowDenoisePass();
-	void InitSkyLightingDenoisePass();
 
 	void InitTemporalAAPass();
 
@@ -1837,12 +1793,10 @@ public:
 
 	void RaytraceShadowPass();
 
-	void ShadowDenoisePass();
 	void InitRaytracingAOPass();
 	void RaytraceAOPass();
 	void InitRaytracingSkyLightingPass();
 	void RaytraceSkyLightingPass();
-	void SkyLightingDenoisePass();
 
 	void RaytraceReflectionPass();
 
@@ -1850,9 +1804,6 @@ public:
 	void SpatialHashGIPass();
 	void ScreenProbeRaytraceGIPass();
 	void ScreenProbeGIPass();
-
-	void SpatialDenoisingPass();
-
 
 	void TemporalDenoisingPass();
 
@@ -1877,15 +1828,18 @@ public:
 	bool IsDLSSSREnabled() const { return AntiAliasingMode == EAntiAliasingMode::DLSS_SR && bDLSSAvailable; }
 	bool IsDLSSRREnabled() const { return AntiAliasingMode == EAntiAliasingMode::DLSS_RR && bDLSSRRAvailable; }
 	bool IsPathTracingDLSSRREnabled() const { return RenderingMode == ERenderingMode::PATHTRACING && bEnablePathTracingDLSSRR && IsDLSSRREnabled(); }
-	bool IsDLSSUpscaleEnabled() const { return IsDLSSSREnabled() || IsDLSSRREnabled(); }
+	bool IsDLSSUpscaleEnabled() const { return RenderingMode == ERenderingMode::HYBRID && (IsDLSSSREnabled() || IsDLSSRREnabled()); }
 	bool IsJitterEnabled() const { return IsTemporalAAEnabled() || IsDLSSUpscaleEnabled(); }
-	UINT GetRenderWidth() const { return IsDLSSUpscaleEnabled() && RenderingMode == ERenderingMode::HYBRID ? RenderWidth : m_width; }
-	UINT GetRenderHeight() const { return IsDLSSUpscaleEnabled() && RenderingMode == ERenderingMode::HYBRID ? RenderHeight : m_height; }
+	UINT GetRenderWidth() const { return IsDLSSUpscaleEnabled() ? RenderWidth : m_width; }
+	UINT GetRenderHeight() const { return IsDLSSUpscaleEnabled() ? RenderHeight : m_height; }
 	UINT GetWidth() const { return m_width; }
 	UINT GetHeight() const { return m_height; }
 	const WCHAR* GetTitle() const { return m_title.c_str(); }
 
 	void GenMipSpecularGIPass();
+	EAntiAliasingMode NormalizeAntiAliasingMode(ERenderingMode renderingMode, EAntiAliasingMode requestedMode) const;
+	void ApplyRenderingAndAAMode(ERenderingMode requestedRenderingMode, EAntiAliasingMode requestedAAMode);
+	bool RenderResolutionResourcesMatchCurrentState() const;
 	void ResetAllAccumulationState(bool forceUpscaleReload);
 	void ResetTemporalHistoryBuffers();
 	void RecreateRenderResolutionResources();
@@ -1900,6 +1854,7 @@ public:
 	const wchar_t* GetHybridStageAutoDumpPhaseName(uint32_t phase) const;
 	bool DumpTextureHDR(Texture* source, const std::wstring& filePath, D3D12_RESOURCE_STATES beforeState);
 	bool DumpTexturePNG(Texture* source, const std::wstring& filePath, D3D12_RESOURCE_STATES beforeState);
+	bool DumpTextureRawFloat(Texture* source, const std::wstring& filePath, D3D12_RESOURCE_STATES beforeState, DXGI_FORMAT targetFormat, uint32_t channelCount);
 	bool StartAsyncImageDumpWorkers();
 	void AsyncImageDumpWorkerMain();
 	void WaitForAsyncImageDumps();

@@ -248,11 +248,11 @@ void scale_SH(inout SH sh, float scale)
 	sh.CoCg *= scale;
 }
 
-float2 LoadBlueNoise2(Texture3D blueNoiseTex, uint2 launchIndex, uint frameCounter, uint stride)
+float2 LoadBlueNoise2(Texture3D blueNoiseSource, uint2 launchIndex, uint frameCounter, uint stride)
 {
     uint offset = frameCounter;
     uint3 addr = uint3(launchIndex.x % 64, launchIndex.y % 64, (offset/2) % 64);
-    float4 Noise = blueNoiseTex[addr];
+    float4 Noise = blueNoiseSource[addr];
 
     if(offset % 2 == 0)
         return Noise.xy;
@@ -287,10 +287,12 @@ float2 LoadR2LowDiscrepancyNoise2(uint2 launchIndex, uint frameCounter)
     return frac(LoadStableHashNoise2(launchIndex) + r2 * float(frameCounter));
 }
 
-float2 LoadRayNoise2(Texture3D blueNoiseTex, uint2 launchIndex, uint frameCounter, uint stride, uint noiseMode)
+// blueNoiseSource is sampled only when noiseMode selects BLUE_NOISE.
+// R2 low-discrepancy and stable-hash modes are generated analytically.
+float2 GenerateRaySample2D(Texture3D blueNoiseSource, uint2 launchIndex, uint frameCounter, uint stride, uint noiseMode)
 {
     if (noiseMode == 0u)
-        return LoadBlueNoise2(blueNoiseTex, launchIndex, frameCounter, stride);
+        return LoadBlueNoise2(blueNoiseSource, launchIndex, frameCounter, stride);
 
     if (noiseMode == 2u)
         return LoadStableHashNoise2(launchIndex);

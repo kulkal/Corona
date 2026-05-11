@@ -119,7 +119,7 @@ void Corona::InitRaytracingScreenProbePass()
 		tempPSO->BindSRV("global", "gRtScene", 0);
 		tempPSO->BindSRV("global", "DepthTex", 1);
 		tempPSO->BindSRV("global", "WorldNormalTex", 2);
-		tempPSO->BindSRV("global", "BlueNoiseTex", 7);
+		tempPSO->BindSRV("global", "RayNoiseBlueNoiseSource", 7);
 		tempPSO->BindSRV("global", "PrevProbeRadianceTex", 8);
 		tempPSO->BindSRV("global", "PrevProbeMetaTex", 9);
 		tempPSO->BindSRV("global", "VelocityTex", 10);
@@ -256,7 +256,7 @@ void Corona::ScreenProbeRaytraceGIPass()
 	pass.SetAccelerationStructure("global", "gRtScene", TLAS);
 	pass.SetTextureSRV("global", "DepthTex", UnjitteredDepthBuffers[ColorBufferWriteIndex].get());
 	pass.SetTextureSRV("global", "WorldNormalTex", NormalBuffers[ColorBufferWriteIndex].get());
-	pass.SetTextureSRV("global", "BlueNoiseTex", BlueNoiseTex.get());
+	pass.SetTextureSRV("global", "RayNoiseBlueNoiseSource", BlueNoiseTex.get());
 	pass.SetTextureSRV("global", "PrevProbeRadianceTex", ScreenProbeGIRadiance[readIndex].get());
 	pass.SetTextureSRV("global", "PrevProbeMetaTex", ScreenProbeGIMetadata[readIndex].get());
 	for (UINT coefficientIndex = 0; coefficientIndex < ScreenProbeSHCoefficientCount; ++coefficientIndex)

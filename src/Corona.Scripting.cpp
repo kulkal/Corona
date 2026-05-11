@@ -1738,11 +1738,6 @@ namespace
 		return true;
 	}
 
-	bool IsDLSSUiMode(Corona::EAntiAliasingMode mode)
-	{
-		return mode == Corona::EAntiAliasingMode::DLSS_SR || mode == Corona::EAntiAliasingMode::DLSS_RR;
-	}
-
 	std::string ReadTextFileUtf8(const std::filesystem::path& path)
 	{
 		std::ifstream file(path, std::ios::binary);
@@ -2655,7 +2650,6 @@ void Corona::PushLuauUiStateForScript(lua_State* L)
 	PushNumberField(L, "sky_lighting_up_bias", RTSkyLightingViewParam.SkyUpBias);
 	PushNumberField(L, "sky_lighting_direction_power", RTSkyLightingViewParam.SkyDirectionPower);
 	PushNumberField(L, "sky_lighting_min_world_y", RTSkyLightingViewParam.SkyMinWorldY);
-	PushIntegerField(L, "sky_lighting_denoise_radius", static_cast<lua_Integer>(SkyLightingDenoiseParam.Radius));
 	PushNumberField(L, "surface_bounce_strength", SurfaceBounceStrength);
 	PushNumberField(L, "surface_bounce_saturation", SurfaceBounceSaturation);
 	PushIntegerField(L, "diffuse_gi_mode", static_cast<lua_Integer>(DiffuseGIMode));
@@ -2885,16 +2879,12 @@ bool Corona::SetLuauUiValueForScript(const std::string& name, lua_State* L, int 
 	if (name == "aa_mode")
 	{
 		const EAntiAliasingMode previousMode = AntiAliasingMode;
-		EAntiAliasingMode requestedMode = static_cast<EAntiAliasingMode>(
+		const EAntiAliasingMode requestedMode = static_cast<EAntiAliasingMode>(
 			std::clamp(readInt(), 0, static_cast<int>(EAntiAliasingMode::COUNT) - 1));
-		if (requestedMode == EAntiAliasingMode::DLSS_SR && !bDLSSAvailable)
-			requestedMode = EAntiAliasingMode::TAA;
-		if (requestedMode == EAntiAliasingMode::DLSS_RR && !bDLSSRRAvailable)
-			requestedMode = EAntiAliasingMode::TAA;
-		if (requestedMode == previousMode)
+		const EAntiAliasingMode normalizedMode = NormalizeAntiAliasingMode(RenderingMode, requestedMode);
+		if (normalizedMode == previousMode)
 			return true;
-		AntiAliasingMode = requestedMode;
-		ResetAllAccumulationState(IsDLSSUiMode(previousMode) || IsDLSSUiMode(requestedMode));
+		ApplyRenderingAndAAMode(RenderingMode, normalizedMode);
 		return true;
 	}
 	if (name == "dlss_quality")
@@ -2946,14 +2936,12 @@ bool Corona::SetLuauUiValueForScript(const std::string& name, lua_State* L, int 
 	}
 	if (name == "rendering_mode")
 	{
-		const int mode = std::clamp(readInt(), 0, 1);
+		const ERenderingMode requestedMode = static_cast<ERenderingMode>(std::clamp(readInt(), 0, 1));
 		const ERenderingMode previousMode = RenderingMode;
-		RenderingMode = static_cast<ERenderingMode>(mode);
-		if (RenderingMode == previousMode)
+		const EAntiAliasingMode previousAAMode = AntiAliasingMode;
+		ApplyRenderingAndAAMode(requestedMode, AntiAliasingMode);
+		if (RenderingMode == previousMode && AntiAliasingMode == previousAAMode)
 			return true;
-		if (RenderingMode == ERenderingMode::PATHTRACING)
-			resetPathTracing();
-		MarkRayTracingSceneDirty();
 		return true;
 	}
 	if (name == "fullscreen_debug_buffer")
@@ -3153,7 +3141,6 @@ bool Corona::SetLuauUiValueForScript(const std::string& name, lua_State* L, int 
 	if (setFloat("sky_lighting_up_bias", RTSkyLightingViewParam.SkyUpBias, true)) return true;
 	if (setFloat("sky_lighting_direction_power", RTSkyLightingViewParam.SkyDirectionPower, true)) return true;
 	if (setFloat("sky_lighting_min_world_y", RTSkyLightingViewParam.SkyMinWorldY, true)) return true;
-	if (setUInt("sky_lighting_denoise_radius", SkyLightingDenoiseParam.Radius, 1, 6, true)) return true;
 	if (setFloat("surface_bounce_strength", SurfaceBounceStrength, true)) return true;
 	if (setFloat("surface_bounce_saturation", SurfaceBounceSaturation, true)) return true;
 	if (setUInt("screen_probe_spacing", ScreenProbeGICB.ProbeSpacing, 4, 64, true)) return true;

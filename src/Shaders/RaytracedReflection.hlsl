@@ -1,12 +1,14 @@
 #include "Common.hlsl"
 
 RWTexture2D<float4> ReflectionResult : register(u0);
+RWTexture2D<float> SpecularHitDistanceResult : register(u1);
+RWTexture2D<float2> SpecularMotionVectorResult : register(u2);
 
 RaytracingAccelerationStructure gRtScene : register(t0);
 Texture2D DepthTex : register(t1);
 Texture2D GeoNormalTex : register(t2);
 Texture2D RougnessMetallicTex : register(t6);
-Texture3D BlueNoiseTex : register(t7);
+Texture3D RayNoiseBlueNoiseSource : register(t7);
 Texture2D WorldNormalTex : register(t8);
 ByteAddressBuffer vertices : register(t3);
 ByteAddressBuffer indices : register(t4);
@@ -19,6 +21,8 @@ cbuffer ViewParameter : register(b0)
     float4x4 InvViewMatrix;
     float4x4 ProjMatrix;
     float4x4 InvProjMatrix;
+    float4x4 UnjitteredViewProjMatrix;
+    float4x4 PrevUnjitteredViewProjMatrix;
     float4 ProjectionParams;
     float4 LightDirAndIntensity;
     float2 RandomOffset;
@@ -35,7 +39,10 @@ cbuffer ViewParameter : register(b0)
     float PrefilteredEnvRoughnessThreshold;
     float PrefilteredEnvRoughnessFade;
     uint bEnablePrefilteredEnvSpecular;
-    float2 PrefilteredEnvPadding;
+    float SpecularMotionVectorScale;
+    uint bWriteRRSpecularMotionVectors;
+    uint bWriteRRSpecularHitDistance;
+    uint bUseRRSpecularGuideRay;
 };
 
 SamplerState sampleWrap : register(s0);
@@ -233,6 +240,93 @@ static const float MAX_HIT_DIST = 10000;
 
 #define RT_REFLECTION_SURFACE_RAY_FLAGS (RAY_FLAG_FORCE_OPAQUE | RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES)
 
+bool ProjectToScreenUVChecked(float3 worldPos, float4x4 viewProj, out float2 uv)
+{
+    float4 clip = mul(float4(worldPos, 1.0f), viewProj);
+    if (abs(clip.w) <= 1.0e-6f)
+    {
+        uv = float2(0.0f, 0.0f);
+        return false;
+    }
+
+    float3 ndc = clip.xyz * rcp(clip.w);
+    uv = ndc.xy * float2(0.5f, -0.5f) + 0.5f;
+    if (any(isnan(uv)) || any(isinf(uv)) || any(isnan(ndc)) || any(isinf(ndc)))
+        return false;
+
+    return ndc.z >= 0.0f && ndc.z <= 1.0f &&
+           all(uv >= float2(-0.25f, -0.25f)) &&
+           all(uv <= float2(1.25f, 1.25f));
+}
+
+void WriteRRSpecularGuides(uint2 pixel, uint2 renderSize, bool primarySurfaceValid, float3 primaryWorldPos, float3 primaryGeomNormal, float3 mirrorDir, float roughness, float metallic, RayPayload reflectionPayload)
+{
+    float specularHitDistance = ProjectionParams.w;
+    float2 specularMotionVector = float2(0.0f, 0.0f);
+
+    if (!primarySurfaceValid || (bWriteRRSpecularHitDistance == 0 && bWriteRRSpecularMotionVectors == 0))
+    {
+        SpecularHitDistanceResult[pixel] = specularHitDistance;
+        SpecularMotionVectorResult[pixel] = specularMotionVector;
+        return;
+    }
+
+    RayPayload guidePayload = reflectionPayload;
+    bool guideHit = reflectionPayload.bHit;
+
+    float smoothGuide = saturate((0.38f - roughness) / 0.18f);
+    float metalGuide = saturate(metallic) * saturate((0.55f - roughness) / 0.25f);
+    float specularEnergy = lerp(0.04f, 1.0f, saturate(metallic));
+    float specularGuideWeight = specularEnergy * max(smoothGuide, metalGuide);
+
+    if (bUseRRSpecularGuideRay != 0 && specularGuideWeight > 0.025f && dot(mirrorDir, primaryGeomNormal) > 1.0e-4f)
+    {
+        RayDesc guideRay;
+        guideRay.Origin = SpecSanitizeFloat3(primaryWorldPos + primaryGeomNormal * 0.5f, primaryWorldPos);
+        guideRay.Direction = SpecSafeNormalize(mirrorDir, primaryGeomNormal);
+        guideRay.TMin = 0.01f;
+        guideRay.TMax = min(ProjectionParams.w, MAX_HIT_DIST);
+
+        guidePayload.position = guideRay.Origin + guideRay.Direction * guideRay.TMax;
+        guidePayload.color = 0.0f.xxx;
+        guidePayload.normal = primaryGeomNormal;
+        guidePayload.coneWidth = 0.0f;
+        guidePayload.spreadAngle = 0.0f;
+        guidePayload.hitDist = ProjectionParams.w;
+        guidePayload.bHit = false;
+        TraceRay(
+            gRtScene,
+            RT_REFLECTION_SURFACE_RAY_FLAGS,
+            0xFF,
+            0,
+            0,
+            0,
+            guideRay,
+            guidePayload);
+        guideHit = guidePayload.bHit;
+    }
+
+    if (guideHit)
+    {
+        specularHitDistance = clamp(guidePayload.hitDist, 0.0f, ProjectionParams.w);
+        if (bWriteRRSpecularMotionVectors != 0)
+        {
+            float2 specCurrentUV;
+            float2 specPrevUV;
+            if (ProjectToScreenUVChecked(guidePayload.position, UnjitteredViewProjMatrix, specCurrentUV) &&
+                ProjectToScreenUVChecked(guidePayload.position, PrevUnjitteredViewProjMatrix, specPrevUV))
+            {
+                float2 candidateMotionVector = (specPrevUV - specCurrentUV) * float2(renderSize) * SpecularMotionVectorScale;
+                if (all(abs(candidateMotionVector) <= float2(renderSize)))
+                    specularMotionVector = candidateMotionVector;
+            }
+        }
+    }
+
+    SpecularHitDistanceResult[pixel] = (bWriteRRSpecularHitDistance != 0) ? specularHitDistance : ProjectionParams.w;
+    SpecularMotionVectorResult[pixel] = (bWriteRRSpecularMotionVectors != 0) ? specularMotionVector : float2(0.0f, 0.0f);
+}
+
 [shader("raygeneration")]
 void rayGen
 ()
@@ -251,6 +345,7 @@ void rayGen
 
 	float2 UV = crd / dims;
 	float DeviceDepth = DepthTex.SampleLevel(sampleWrap, UV, 0).x;
+    bool primarySurfaceValid = DeviceDepth < 0.999999f;
 
 	float3 WorldNormal = SpecSafeNormalize(WorldNormalTex.SampleLevel(sampleWrap, UV, 0).xyz, float3(0.0f, 1.0f, 0.0f));
   
@@ -269,7 +364,9 @@ void rayGen
 
 	float3 WorldPos = SpecSanitizeFloat3(mul(float4(ViewPosition, 1), InvViewMatrix).xyz, 0.0f.xxx);
 
-    float Rougness = clamp(SpecSanitizeFloat(RougnessMetallicTex.SampleLevel(sampleWrap, UV, 0).x, 0.65f), 0.02f, 1.0f);
+    float4 material = SpecSanitizeFloat4(RougnessMetallicTex.SampleLevel(sampleWrap, UV, 0), float4(0.65f, 0.0f, 0.0f, 0.0f));
+    float Rougness = clamp(material.x, 0.02f, 1.0f);
+    float Metallic = saturate(material.y);
     float3 viewRay = SpecSafeNormalize(float3(dim.x * aspectRatio, -dim.y, -1), float3(0.0f, 0.0f, -1.0f));
     float3 V = SpecSafeNormalize(mul(float4(viewRay, 0.0f), InvViewMatrix).xyz, -WorldNormal);
     float3 MirrorL = SpecSafeNormalize(reflect(V, WorldNormal), WorldNormal);
@@ -288,7 +385,7 @@ void rayGen
     float3 L = MirrorL;
     if (!useDeterministicPrefilteredEnvRay)
     {
-        float2 RandomUV = LoadRayNoise2(BlueNoiseTex, launchIndex.xy, FrameCounter, BlueNoiseOffsetStride, NoiseMode);
+        float2 RandomUV = GenerateRaySample2D(RayNoiseBlueNoiseSource, launchIndex.xy, FrameCounter, BlueNoiseOffsetStride, NoiseMode);
         float3x3 TBN = buildTBN(WorldNormal);
         float3 H = ImportanceSampleGGX_VNDF(RandomUV, Rougness, -V, TBN, WorldNormal);
         L = SpecSafeNormalize(reflect(V, H), reflect(V, WorldNormal));
@@ -375,6 +472,7 @@ void rayGen
     // become flooded by unoccluded sky radiance.
     float3 finalRadiance = payload.bHit ? tracedRadiance : lerp(tracedRadiance, prefilteredEnvRadiance, prefilteredEnvBlend);
     ReflectionResult[launchIndex.xy] = SpecSanitizeFloat4(float4(Reinhard(max(finalRadiance, 0.0f.xxx)), 1), float4(0.0f, 0.0f, 0.0f, 1.0f));
+    WriteRRSpecularGuides(launchIndex.xy, launchDim.xy, primarySurfaceValid, WorldPos, GeoNormal, MirrorL, Rougness, Metallic, payload);
 
     float reflectionDistance = MAX_HIT_DIST;
     if (payload.bHit)

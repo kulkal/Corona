@@ -7,7 +7,7 @@ RWTexture2D<float4> GIResultColor : register(u1);
 RaytracingAccelerationStructure gRtScene : register(t0);
 Texture2D DepthTex : register(t1);
 Texture2D WorldNormalTex : register(t2);
-Texture3D BlueNoiseTex : register(t7);
+Texture3D RayNoiseBlueNoiseSource : register(t7);
 ByteAddressBuffer vertices : register(t3);
 ByteAddressBuffer indices : register(t4);
 Texture2D AlbedoTex : register(t5);
@@ -164,7 +164,7 @@ void rayGen
     float rand_u = random(crd + RandomOffset);
     float rand_v = random(crd + RandomOffset + float2(100, 100));
 
-    float2 RandomUV = LoadRayNoise2(BlueNoiseTex, launchIndex.xy, FrameCounter, BlueNoiseOffsetStride, NoiseMode);
+    float2 RandomUV = GenerateRaySample2D(RayNoiseBlueNoiseSource, launchIndex.xy, FrameCounter, BlueNoiseOffsetStride, NoiseMode);
 
     float LightIntensity = max(CommonSanitizeFloat(LightDirAndIntensity.w, 0.0f), 0.0f);
 
@@ -243,8 +243,6 @@ void rayGen
         float3 Albedo = max(CommonSanitizeFloat3(payload.color, 1.0f.xxx), 0.0f.xxx);
         SH sh_indirect = init_SH();
         float3 Irradiance = 0.0f.xxx;
-        if (bIncludeSkyLighting != 0u)
-            Irradiance += max(EvaluateSkyDiffuseBounce(payload.normal), 0.0f.xxx) * Albedo;
         if(shadowPayload.bHit == false)
         {
             // miss - apply light color

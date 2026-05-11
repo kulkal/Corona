@@ -36,7 +36,7 @@ void Corona::InitRaytracingSimpleGIPass()
 		TEMP_PSO_RT_GI->BindSRV("global", "WorldNormalTex", 2);
 		TEMP_PSO_RT_GI->BindCBV("global", "ViewParameter", 0, sizeof(RTGIViewParam), 1);
 		TEMP_PSO_RT_GI->BindSampler("global", "sampleWrap", 0);
-		TEMP_PSO_RT_GI->BindSRV("global", "BlueNoiseTex", 7);
+		TEMP_PSO_RT_GI->BindSRV("global", "RayNoiseBlueNoiseSource", 7);
 
 		TEMP_PSO_RT_GI->AddShader("miss", RTPipelineStateObject::MISS);
 		TEMP_PSO_RT_GI->AddShader("missShadow", RTPipelineStateObject::MISS);
@@ -96,7 +96,7 @@ void Corona::RaytraceGIPass()
 		.SetAccelerationStructure("global", "gRtScene", TLAS)
 		.SetTextureSRV("global", "DepthTex", UnjitteredDepthBuffers[ColorBufferWriteIndex].get())
 		.SetTextureSRV("global", "WorldNormalTex", NormalBuffers[ColorBufferWriteIndex].get())
-		.SetTextureSRV("global", "BlueNoiseTex", BlueNoiseTex.get())
+		.SetTextureSRV("global", "RayNoiseBlueNoiseSource", BlueNoiseTex.get())
 		.SetCBVValue("global", "ViewParameter", &RTGIViewParam)
 		.SetSampler("global", "sampleWrap", samplerWrap.get());
 	pass.BindSceneHitPrograms();

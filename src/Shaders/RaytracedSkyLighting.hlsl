@@ -5,7 +5,7 @@ RWTexture2D<float4> SkyLightingResult : register(u0);
 RaytracingAccelerationStructure gRtScene : register(t0);
 Texture2D DepthTex : register(t1);
 Texture2D WorldNormalTex : register(t2);
-Texture3D BlueNoiseTex : register(t3);
+Texture3D RayNoiseBlueNoiseSource : register(t3);
 ByteAddressBuffer vertices : register(t4);
 ByteAddressBuffer indices : register(t5);
 Texture2D AlbedoTex : register(t6);
@@ -89,7 +89,7 @@ float ComputeDiffuseSkySampleWeight(float3 rayDir, float3 traceNormal, float3 gu
 
 float2 SampleSkySequence(uint2 pixelPos, uint sampleIndex)
 {
-    float2 baseNoise = LoadRayNoise2(BlueNoiseTex, pixelPos, FrameCounter + sampleIndex * 19u, BlueNoiseOffsetStride, NoiseMode);
+    float2 baseNoise = GenerateRaySample2D(RayNoiseBlueNoiseSource, pixelPos, FrameCounter + sampleIndex * 19u, BlueNoiseOffsetStride, NoiseMode);
     uint seed = pixelPos.x * 1973u + pixelPos.y * 9277u + FrameCounter * 26699u + sampleIndex * 1299709u;
     float2 hashed = float2(HashToUnitFloat(seed), HashToUnitFloat(seed ^ 0x85EBCA6Bu));
     return frac(baseNoise + hashed);

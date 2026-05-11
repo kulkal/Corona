@@ -10,6 +10,7 @@
 //*********************************************************
 
 #include "ShaderResourceBindings.hlsli"
+#include "Common.hlsl"
 
 TEXTURE2D_BINDING(AlbedoTex, 0);
 TEXTURE2D_BINDING(NormalTex, 1);
@@ -154,16 +155,17 @@ PS_OUTPUT PSMain(PSInput input)
 
     if(bOverrideRougnessMetallic)
     {
-        output.Material.x = RougnessMetalic.x;
-        output.Material.y = RougnessMetalic.y;
+        output.Material.x = clamp(RougnessMetalic.x, 0.02f, 1.0f);
+        output.Material.y = saturate(RougnessMetalic.y);
     }
     else
     {
-        output.Material.x = max(Roughness, 0.01) * RougnessMetalic.x;
-        output.Material.y = max(Metallic, 0.01) * RougnessMetalic.y;
+        output.Material.x = clamp(Roughness * RougnessMetalic.x, 0.02f, 1.0f);
+        output.Material.y = saturate(Metallic * RougnessMetalic.y);
     }
 
-    output.SpecularAlbedo.xyz = lerp(0.04f.xxx, Albedo.xyz, output.Material.y);
+    float3 surfaceToView = CommonSafeNormalize(-ViewDir.xyz, WorldNormal);
+    output.SpecularAlbedo.xyz = ComputeDLSSRRSpecularAlbedo(Albedo.xyz, output.Material.y, output.Material.x, WorldNormal, surfaceToView);
     output.SpecularAlbedo.w = 1.0f;
 
     return output;

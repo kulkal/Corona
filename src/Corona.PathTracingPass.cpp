@@ -41,7 +41,6 @@ void Corona::InitPathTracingPass()
 	TEMP_PSO_PATH_TRACING->BindSRV("global", "gRtScene", 0);
 	TEMP_PSO_PATH_TRACING->BindCBV("global", "ViewParameter", 0, sizeof(PathTracingViewParam), 1);
 	TEMP_PSO_PATH_TRACING->BindSampler("global", "sampleWrap", 0);
-	TEMP_PSO_PATH_TRACING->BindSRV("global", "BlueNoiseTex", 4);
 
 	TEMP_PSO_PATH_TRACING->AddShader("PathTracingMiss", RTPipelineStateObject::MISS);
 	TEMP_PSO_PATH_TRACING->AddShader("ShadowMiss", RTPipelineStateObject::MISS);
@@ -140,6 +139,10 @@ void Corona::PathTracingPass()
 	bool skyColorChanged = glm::length(SkyColorTop - PrevSkyColorTop) > 0.0001f ||
 	                       glm::length(SkyColorBottom - PrevSkyColorBottom) > 0.0001f ||
 	                       abs(SkyIntensity - PrevSkyIntensity) > 0.0001f;
+	const bool bStabilizePrimaryRaySamples =
+		bWritePrimaryGBuffer &&
+		bEnablePathTracingRRPrimaryRayStabilization &&
+		cameraChanged;
 	
 	if (cameraChanged || lightDirChanged || lightIntensityChanged || skyColorChanged)
 	{
@@ -183,6 +186,7 @@ void Corona::PathTracingPass()
 	PathTracingViewParam.bEnableRTAO = 0u;
 	PathTracingViewParam.bWritePrimaryGBuffer = bWritePrimaryGBuffer ? 1u : 0u;
 	PathTracingViewParam.SpecularMotionVectorScale = PathTracingRRSpecularMotionVectorScale;
+	PathTracingViewParam.bStabilizePrimaryRaySamples = bStabilizePrimaryRaySamples ? 1u : 0u;
 	ApplyRenderPointLightsToFrameParams();
 	const UINT32 targetSamplesPerPixel = std::clamp(PathTracingViewParam.SamplesPerPixel, 1u, 16u);
 	UINT32 dispatchSamplesPerPixel = targetSamplesPerPixel;
@@ -211,7 +215,6 @@ void Corona::PathTracingPass()
 		.SetTextureUAV("global", "OutSpecularHitDistance", PathTracingSpecularHitDistanceBuffer.get())
 		.SetTextureUAV("global", "OutSpecularMotionVector", PathTracingSpecularMotionVectorBuffer.get())
 		.SetAccelerationStructure("global", "gRtScene", TLAS)
-		.SetTextureSRV("global", "BlueNoiseTex", BlueNoiseTex.get())
 		.SetCBVValue("global", "ViewParameter", &dispatchViewParam)
 		.SetSampler("global", "sampleWrap", samplerWrap.get());
 

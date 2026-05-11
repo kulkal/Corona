@@ -978,10 +978,10 @@ void Corona::DebugPass()
 		renderBackend->DrawFullscreenQuad(FullScreenVB.get());
 	});
 	functions.push_back([&](EDebugVisualization eFS) {
-		// spatial filtered diffuse gi
+		// resolved diffuse gi
 		DebugPassCB cb;
 
-		if (eFS == EDebugVisualization::SPATIAL_FILTERED_DIFFUSE_GI)
+		if (eFS == EDebugVisualization::RESOLVED_DIFFUSE_GI)
 		{
 			cb.Offset = glm::vec4(0, 0, 0, 0);
 			cb.Scale = glm::vec4(1, 1, 0, 0);
@@ -998,7 +998,11 @@ void Corona::DebugPass()
 
 		cb.DebugMode = RAW_COPY;
 		BufferVisualizePSO->SetCBVValue("DebugPassCB", &cb);
-		BufferVisualizePSO->SetSRV("SrcTex", DiffuseGISpatial[0]->GpuHandleSRV);
+		Texture* resolvedDiffuse =
+			(DiffuseGIMode == EDiffuseGIMode::SCREEN_PROBE && ScreenProbeGIResolved) ?
+			ScreenProbeGIResolved.get() :
+			DiffuseGITemporal[GIBufferWriteIndex].get();
+		BufferVisualizePSO->SetSRV("SrcTex", resolvedDiffuse->GpuHandleSRV);
 		renderBackend->DrawFullscreenQuad(FullScreenVB.get());
 	});
 	functions.push_back([&](EDebugVisualization eFS) {
@@ -1024,8 +1028,12 @@ void Corona::DebugPass()
 
 		cb.DebugMode = SH_LIGHTING;
 		BufferVisualizePSO->SetCBVValue("DebugPassCB", &cb);
-		BufferVisualizePSO->SetSRV("SrcTex", DiffuseGISpatial[0]->GpuHandleSRV);
-		BufferVisualizePSO->SetSRV("SrcTexSH", DiffuseGISpatialAux[0]->GpuHandleSRV);
+		Texture* resolvedDiffuse =
+			(DiffuseGIMode == EDiffuseGIMode::SCREEN_PROBE && ScreenProbeGIResolved) ?
+			ScreenProbeGIResolved.get() :
+			DiffuseGITemporal[GIBufferWriteIndex].get();
+		BufferVisualizePSO->SetSRV("SrcTex", resolvedDiffuse->GpuHandleSRV);
+		BufferVisualizePSO->SetSRV("SrcTexSH", DiffuseGITemporalAux[GIBufferWriteIndex]->GpuHandleSRV);
 		BufferVisualizePSO->SetSRV("SrcTexNormal", NormalBuffers[ColorBufferWriteIndex]->GpuHandleSRV);
 
 		renderBackend->DrawFullscreenQuad(FullScreenVB.get());
@@ -1248,6 +1256,11 @@ void Corona::LightingPass()
 	}
 
 	glm::normalize(Param.LightDir);
+	Texture* lightingDiffuseAuxTex = DiffuseGITemporalAux[GIBufferWriteIndex].get();
+	Texture* lightingDiffuseTex = DiffuseGITemporal[GIBufferWriteIndex].get();
+	if (DiffuseGIMode == EDiffuseGIMode::SCREEN_PROBE && ScreenProbeGIResolved)
+		lightingDiffuseTex = ScreenProbeGIResolved.get();
+	Texture* lightingSpecularTex = SpecularGITemporal[GIBufferWriteIndex].get();
 
 	if (renderBackend && renderBackend->GetAPI() == ERenderBackendAPI::Vulkan)
 	{
@@ -1256,12 +1269,12 @@ void Corona::LightingPass()
 
 		renderBackend->BindGraphicsPipelineTexture(LightingGraphicsPipeline.get(), "AlbedoTex", AlbedoBuffer.get());
 		renderBackend->BindGraphicsPipelineTexture(LightingGraphicsPipeline.get(), "NormalTex", NormalBuffers[ColorBufferWriteIndex].get());
-		renderBackend->BindGraphicsPipelineTexture(LightingGraphicsPipeline.get(), "ShadowTex", ShadowDenoisedBuffer ? ShadowDenoisedBuffer.get() : ShadowBuffer.get());
+		renderBackend->BindGraphicsPipelineTexture(LightingGraphicsPipeline.get(), "ShadowTex", ShadowBuffer.get());
 		renderBackend->BindGraphicsPipelineTexture(LightingGraphicsPipeline.get(), "VelocityTex", VelocityBuffer.get());
 		renderBackend->BindGraphicsPipelineTexture(LightingGraphicsPipeline.get(), "DepthTex", DepthBuffer.get());
-		renderBackend->BindGraphicsPipelineTexture(LightingGraphicsPipeline.get(), "GIResultSHTex", DiffuseGISpatialAux[0].get());
-		renderBackend->BindGraphicsPipelineTexture(LightingGraphicsPipeline.get(), "GIResultColorTex", DiffuseGISpatial[0].get());
-		renderBackend->BindGraphicsPipelineTexture(LightingGraphicsPipeline.get(), "SpecularGITex", SpecularGISpatial[0].get());
+		renderBackend->BindGraphicsPipelineTexture(LightingGraphicsPipeline.get(), "GIResultSHTex", lightingDiffuseAuxTex);
+		renderBackend->BindGraphicsPipelineTexture(LightingGraphicsPipeline.get(), "GIResultColorTex", lightingDiffuseTex);
+		renderBackend->BindGraphicsPipelineTexture(LightingGraphicsPipeline.get(), "SpecularGITex", lightingSpecularTex);
 		renderBackend->BindGraphicsPipelineTexture(LightingGraphicsPipeline.get(), "RoughnessMetalicTex", RoughnessMetalicBuffer.get());
 		renderBackend->BindGraphicsPipelineTexture(LightingGraphicsPipeline.get(), "AmbientOcclusionTex", AmbientOcclusionBuffer ? AmbientOcclusionBuffer.get() : DefaultWhiteTex.get());
 		renderBackend->BindGraphicsPipelineTexture(LightingGraphicsPipeline.get(), "SkyLightingTex", SkyLightingBuffer ? SkyLightingBuffer.get() : DefaultBlackTex.get());
@@ -1296,13 +1309,13 @@ void Corona::LightingPass()
 	LightingPSO->SetSampler("samplerWrap", samplerWrap.get());
 	LightingPSO->SetSRV("AlbedoTex", AlbedoBuffer->GpuHandleSRV);
 	LightingPSO->SetSRV("NormalTex", NormalBuffers[ColorBufferWriteIndex]->GpuHandleSRV);
-	LightingPSO->SetSRV("ShadowTex", ShadowDenoisedBuffer ? ShadowDenoisedBuffer->GpuHandleSRV : ShadowBuffer->GpuHandleSRV);
+	LightingPSO->SetSRV("ShadowTex", ShadowBuffer->GpuHandleSRV);
 
 	LightingPSO->SetSRV("VelocityTex", VelocityBuffer->GpuHandleSRV);
 	LightingPSO->SetSRV("DepthTex", DepthBuffer->GpuHandleSRV);
-	LightingPSO->SetSRV("GIResultSHTex", DiffuseGISpatialAux[0]->GpuHandleSRV);
-	LightingPSO->SetSRV("GIResultColorTex", DiffuseGISpatial[0]->GpuHandleSRV);
-	LightingPSO->SetSRV("SpecularGITex", SpecularGISpatial[0]->GpuHandleSRV);
+	LightingPSO->SetSRV("GIResultSHTex", lightingDiffuseAuxTex->GpuHandleSRV);
+	LightingPSO->SetSRV("GIResultColorTex", lightingDiffuseTex->GpuHandleSRV);
+	LightingPSO->SetSRV("SpecularGITex", lightingSpecularTex->GpuHandleSRV);
 	LightingPSO->SetSRV("RoughnessMetalicTex", RoughnessMetalicBuffer->GpuHandleSRV);
 	LightingPSO->SetSRV("AmbientOcclusionTex", AmbientOcclusionBuffer ? AmbientOcclusionBuffer->GpuHandleSRV : DefaultWhiteTex->GpuHandleSRV);
 	LightingPSO->SetSRV("SkyLightingTex", SkyLightingBuffer ? SkyLightingBuffer->GpuHandleSRV : DefaultBlackTex->GpuHandleSRV);

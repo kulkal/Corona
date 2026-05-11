@@ -278,6 +278,109 @@ namespace
 		return true;
 	}
 
+	const char* GetRawFloatFormatName(DXGI_FORMAT format)
+	{
+		switch (format)
+		{
+		case DXGI_FORMAT_R32_FLOAT:
+			return "R32_FLOAT";
+		case DXGI_FORMAT_R32G32_FLOAT:
+			return "R32G32_FLOAT";
+		case DXGI_FORMAT_R32G32B32A32_FLOAT:
+			return "R32G32B32A32_FLOAT";
+		default:
+			return "UNKNOWN";
+		}
+	}
+
+	bool SaveCapturedTextureRawFloat(
+		const ScratchImage& captured,
+		const std::wstring& filePath,
+		DXGI_FORMAT targetFormat,
+		uint32_t channelCount,
+		std::wstring* errorMessage)
+	{
+		const Image* image = captured.GetImage(0, 0, 0);
+		if (!image)
+		{
+			if (errorMessage)
+				*errorMessage = L"missing captured image";
+			return false;
+		}
+
+		if (channelCount == 0 || channelCount > 4)
+		{
+			if (errorMessage)
+				*errorMessage = L"invalid raw channel count";
+			return false;
+		}
+
+		const bool bUseSourceImage =
+			(targetFormat == DXGI_FORMAT_R32_FLOAT &&
+				(image->format == DXGI_FORMAT_R32_FLOAT || image->format == DXGI_FORMAT_D32_FLOAT)) ||
+			(targetFormat == DXGI_FORMAT_R32G32_FLOAT && image->format == DXGI_FORMAT_R32G32_FLOAT) ||
+			(targetFormat == DXGI_FORMAT_R32G32B32A32_FLOAT && image->format == DXGI_FORMAT_R32G32B32A32_FLOAT);
+
+		ScratchImage converted;
+		if (!bUseSourceImage)
+		{
+			HRESULT hr = Convert(*image, targetFormat, TEX_FILTER_DEFAULT, TEX_THRESHOLD_DEFAULT, converted);
+			if (FAILED(hr))
+			{
+				if (errorMessage)
+					*errorMessage = L"raw float convert failed hr=0x" + std::to_wstring(static_cast<unsigned long>(hr));
+				return false;
+			}
+		}
+
+		const Image* convertedImage = bUseSourceImage ? image : converted.GetImage(0, 0, 0);
+		if (!convertedImage)
+		{
+			if (errorMessage)
+				*errorMessage = L"missing converted raw image";
+			return false;
+		}
+
+		const size_t bytesPerPixel = sizeof(float) * static_cast<size_t>(channelCount);
+		const size_t rowBytes = convertedImage->width * bytesPerPixel;
+		if (convertedImage->rowPitch < rowBytes)
+		{
+			if (errorMessage)
+				*errorMessage = L"raw row pitch is smaller than expected";
+			return false;
+		}
+
+		std::ofstream file(filePath, std::ios::binary | std::ios::trunc);
+		if (!file.is_open())
+		{
+			if (errorMessage)
+				*errorMessage = L"failed to open raw output";
+			return false;
+		}
+
+		file << "CORONA_RAW_FLOAT 1\n";
+		file << "width " << convertedImage->width << "\n";
+		file << "height " << convertedImage->height << "\n";
+		file << "channels " << channelCount << "\n";
+		file << "format " << GetRawFloatFormatName(targetFormat) << "\n";
+		file << "endianness little\n";
+		file << "data\n";
+
+		for (size_t y = 0; y < convertedImage->height; ++y)
+		{
+			const uint8_t* row = convertedImage->pixels + y * convertedImage->rowPitch;
+			file.write(reinterpret_cast<const char*>(row), static_cast<std::streamsize>(rowBytes));
+			if (!file.good())
+			{
+				if (errorMessage)
+					*errorMessage = L"raw write failed";
+				return false;
+			}
+		}
+
+		return true;
+	}
+
 	bool SaveCapturedTexturePNG(const ScratchImage& captured, const std::wstring& filePath, std::wstring* errorMessage)
 	{
 		const Image* image = captured.GetImage(0, 0, 0);
@@ -488,18 +591,16 @@ namespace
 		return mode == Corona::EAntiAliasingMode::DLSS_SR || mode == Corona::EAntiAliasingMode::DLSS_RR;
 	}
 
-	constexpr std::array<const char*, 19> kGpuPassNames = {
+	constexpr std::array<const char*, 17> kGpuPassNames = {
 		"Frame Total",
 		"GBuffer",
 		"RT Shadow",
-		"Shadow Denoise",
 		"RT AO",
 		"RT Sky",
 		"RT Reflection",
 		"RT Diffuse GI",
 		"Screen Probe GI",
 		"Temporal Denoise",
-		"Spatial Denoise",
 		"Lighting",
 		"DLSS RR",
 		"DLSS SR",
@@ -1284,6 +1385,12 @@ bool Corona::DLSSRRPass()
 
 	Texture* inputColor = IsPathTracingDLSSRREnabled() ? PathTracingAccumBuffer[PathTracingWriteIndex].get() : LightingBuffer.get();
 	Texture* outputTarget = DLSSRRBuffer.get();
+	const bool bUseRRSpecularMotionVectors =
+		(IsPathTracingDLSSRREnabled() && bEnablePathTracingRRSpecularMotionVectors) ||
+		(RenderingMode == ERenderingMode::HYBRID && bEnableHybridRRSpecularMotionVectors);
+	const bool bUseRRSpecularHitDistance =
+		(IsPathTracingDLSSRREnabled() && bEnablePathTracingRRSpecularHitDistance) ||
+		(RenderingMode == ERenderingMode::HYBRID && bEnableHybridRRSpecularHitDistance);
 	if (!inputColor ||
 		!outputTarget ||
 		!UnjitteredDepthBuffers[ColorBufferWriteIndex] ||
@@ -1292,7 +1399,8 @@ bool Corona::DLSSRRPass()
 		!RoughnessMetalicBuffer ||
 		!AlbedoBuffer ||
 		!SpecularAlbedoBuffer ||
-		(IsPathTracingDLSSRREnabled() && (!PathTracingSpecularHitDistanceBuffer || !PathTracingSpecularMotionVectorBuffer)))
+		(bUseRRSpecularHitDistance && !PathTracingSpecularHitDistanceBuffer) ||
+		(bUseRRSpecularMotionVectors && !PathTracingSpecularMotionVectorBuffer))
 		return false;
 	renderBackend->TransitionTexture(outputTarget, EResourceState::ShaderRead, EResourceState::UnorderedAccess);
 
@@ -1329,11 +1437,11 @@ bool Corona::DLSSRRPass()
 		albedoTag,
 		specularAlbedoTag,
 	};
-	if (IsPathTracingDLSSRREnabled() && bEnablePathTracingRRSpecularMotionVectors)
+	if (bUseRRSpecularMotionVectors)
 	{
 		tags.push_back(specularMotionVectorTag);
 	}
-	if (IsPathTracingDLSSRREnabled() && bEnablePathTracingRRSpecularHitDistance)
+	if (bUseRRSpecularHitDistance)
 	{
 		tags.push_back(specularHitDistanceTag);
 	}
@@ -1349,9 +1457,9 @@ bool Corona::DLSSRRPass()
 		static_cast<const sl::BaseStructure*>(&specularAlbedoTag),
 		static_cast<const sl::BaseStructure*>(&motionTag),
 	};
-	if (IsPathTracingDLSSRREnabled() && bEnablePathTracingRRSpecularMotionVectors)
+	if (bUseRRSpecularMotionVectors)
 		inputs.push_back(static_cast<const sl::BaseStructure*>(&specularMotionVectorTag));
-	if (IsPathTracingDLSSRREnabled() && bEnablePathTracingRRSpecularHitDistance)
+	if (bUseRRSpecularHitDistance)
 		inputs.push_back(static_cast<const sl::BaseStructure*>(&specularHitDistanceTag));
 	const sl::Result evalResult = slEvaluateFeature(sl::kFeatureDLSS_RR, *StreamlineFrameToken, inputs.data(), static_cast<uint32_t>(inputs.size()), renderBackend->GetGraphicsCommandList());
 	bDLSSResetNeeded = false;
@@ -1390,8 +1498,6 @@ void Corona::ResetTemporalHistoryBuffers()
 	ClearTextureUAV(SpecularGIRaw.get(), clear4);
 	ClearTextureUAV(SpecularGITemporal[0].get(), clear4);
 	ClearTextureUAV(SpecularGITemporal[1].get(), clear4);
-	ClearTextureUAV(SpecularGISpatial[0].get(), clear4);
-	ClearTextureUAV(SpecularGISpatial[1].get(), clear4);
 	ClearTextureUAV(SpecularGIMoments[0].get(), clear2);
 	ClearTextureUAV(SpecularGIMoments[1].get(), clear2);
 	ClearTextureUAV(DiffuseGIRawAux.get(), clear4);
@@ -1415,17 +1521,143 @@ void Corona::ResetTemporalHistoryBuffers()
 	ClearTextureUAV(DiffuseGITemporalAux[1].get(), clear4);
 	ClearTextureUAV(DiffuseGITemporal[0].get(), clear4);
 	ClearTextureUAV(DiffuseGITemporal[1].get(), clear4);
-	ClearTextureUAV(DiffuseGISpatialAux[0].get(), clear4);
-	ClearTextureUAV(DiffuseGISpatialAux[1].get(), clear4);
-	ClearTextureUAV(DiffuseGISpatial[0].get(), clear4);
-	ClearTextureUAV(DiffuseGISpatial[1].get(), clear4);
+}
+
+Corona::EAntiAliasingMode Corona::NormalizeAntiAliasingMode(ERenderingMode renderingMode, EAntiAliasingMode requestedMode) const
+{
+	if (static_cast<int>(requestedMode) < 0 || requestedMode >= EAntiAliasingMode::COUNT)
+		requestedMode = EAntiAliasingMode::OFF;
+
+	const bool bD3D12Backend =
+		renderBackend &&
+		renderBackend->GetAPI() == ERenderBackendAPI::D3D12;
+
+#if WITH_STREAMLINE
+	if (!bD3D12Backend && IsDLSSMode(requestedMode))
+		return renderingMode == ERenderingMode::PATHTRACING ? EAntiAliasingMode::OFF : EAntiAliasingMode::TAA;
+#else
+	if (IsDLSSMode(requestedMode))
+		return renderingMode == ERenderingMode::PATHTRACING ? EAntiAliasingMode::OFF : EAntiAliasingMode::TAA;
+#endif
+
+	if (renderingMode == ERenderingMode::PATHTRACING)
+	{
+		if (requestedMode == EAntiAliasingMode::DLSS_RR ||
+			requestedMode == EAntiAliasingMode::DLSS_SR)
+		{
+#if WITH_STREAMLINE
+			return (bDLSSRRAvailable && bEnablePathTracingDLSSRR) ? EAntiAliasingMode::DLSS_RR : EAntiAliasingMode::OFF;
+#else
+			return EAntiAliasingMode::OFF;
+#endif
+		}
+
+		return requestedMode == EAntiAliasingMode::TAA ? EAntiAliasingMode::OFF : requestedMode;
+	}
+
+#if WITH_STREAMLINE
+	if (requestedMode == EAntiAliasingMode::DLSS_RR)
+	{
+		if (bDLSSRRAvailable && bDLSSAvailable)
+			return EAntiAliasingMode::DLSS_RR;
+		return bDLSSAvailable ? EAntiAliasingMode::DLSS_SR : EAntiAliasingMode::TAA;
+	}
+	if (requestedMode == EAntiAliasingMode::DLSS_SR && !bDLSSAvailable)
+		return EAntiAliasingMode::TAA;
+#endif
+
+	return requestedMode;
+}
+
+void Corona::ApplyRenderingAndAAMode(ERenderingMode requestedRenderingMode, EAntiAliasingMode requestedAAMode)
+{
+	if (requestedRenderingMode != ERenderingMode::HYBRID &&
+		requestedRenderingMode != ERenderingMode::PATHTRACING)
+		requestedRenderingMode = ERenderingMode::HYBRID;
+
+	const ERenderingMode previousRenderingMode = RenderingMode;
+	const EAntiAliasingMode previousAAMode = AntiAliasingMode;
+	const EAntiAliasingMode normalizedAAMode = NormalizeAntiAliasingMode(requestedRenderingMode, requestedAAMode);
+
+	if (previousRenderingMode == requestedRenderingMode && previousAAMode == normalizedAAMode)
+		return;
+
+	RenderingMode = requestedRenderingMode;
+	AntiAliasingMode = normalizedAAMode;
+	if (RenderWorld.bHasFrameSourceState)
+	{
+		RenderWorld.FrameSourceState.RenderingMode = RenderingMode;
+		RenderWorld.FrameSourceState.AntiAliasingMode = AntiAliasingMode;
+	}
+	{
+		std::lock_guard<std::mutex> pendingDeltaLock(RenderFrameDeltaMutex);
+		for (RenderFrameDelta& pendingDelta : PendingRenderFrameDeltas)
+		{
+			if (!pendingDelta.bHasFrameSourceState)
+				continue;
+			pendingDelta.FrameSourceState.RenderingMode = RenderingMode;
+			pendingDelta.FrameSourceState.AntiAliasingMode = AntiAliasingMode;
+		}
+	}
+
+	const bool bRenderingModeChanged = previousRenderingMode != RenderingMode;
+	if (bRenderingModeChanged)
+		MarkRayTracingSceneDirty();
+
+	const bool bForceResourceReload =
+		bRenderingModeChanged ||
+		IsDLSSMode(previousAAMode) ||
+		IsDLSSMode(AntiAliasingMode);
+	ResetAllAccumulationState(bForceResourceReload);
+
+	AppendCpuRuntimeTrace(
+		L"[ApplyRenderingAndAAMode] renderMode " + std::to_wstring(static_cast<int>(previousRenderingMode)) +
+		L"->" + std::to_wstring(static_cast<int>(RenderingMode)) +
+		L", aa " + std::wstring(GetAntiAliasingModeName(previousAAMode)) +
+		L"->" + std::wstring(GetAntiAliasingModeName(AntiAliasingMode)) +
+		L", forceReload=" + std::to_wstring(bForceResourceReload ? 1 : 0));
+}
+
+bool Corona::RenderResolutionResourcesMatchCurrentState() const
+{
+	const UINT displayWidth = m_width;
+	const UINT displayHeight = m_height;
+	const UINT renderWidth = GetRenderWidth();
+	const UINT renderHeight = GetRenderHeight();
+	const auto textureMatches = [](const std::shared_ptr<Texture>& texture, UINT width, UINT height)
+	{
+		return texture &&
+			texture->textureDesc.Width == width &&
+			texture->textureDesc.Height == height;
+	};
+
+	if (!textureMatches(ColorBuffers[0], displayWidth, displayHeight) ||
+		!textureMatches(ColorBuffers[1], displayWidth, displayHeight) ||
+		!textureMatches(PathTracingAccumBuffer[0], displayWidth, displayHeight) ||
+		!textureMatches(PathTracingAccumBuffer[1], displayWidth, displayHeight))
+		return false;
+
+	if (!textureMatches(LightingBuffer, renderWidth, renderHeight) ||
+		!textureMatches(DirectLightingBuffer, renderWidth, renderHeight) ||
+		!textureMatches(DLSSRRBuffer, renderWidth, renderHeight) ||
+		!textureMatches(AlbedoBuffer, renderWidth, renderHeight) ||
+		!textureMatches(SpecularAlbedoBuffer, renderWidth, renderHeight) ||
+		!textureMatches(VelocityBuffer, renderWidth, renderHeight) ||
+		!textureMatches(RoughnessMetalicBuffer, renderWidth, renderHeight) ||
+		!textureMatches(UnjitteredDepthBuffers[0], renderWidth, renderHeight) ||
+		!textureMatches(UnjitteredDepthBuffers[1], renderWidth, renderHeight) ||
+		!textureMatches(PathTracingSpecularHitDistanceBuffer, renderWidth, renderHeight) ||
+		!textureMatches(PathTracingSpecularMotionVectorBuffer, renderWidth, renderHeight))
+		return false;
+
+	return true;
 }
 
 void Corona::ResetAllAccumulationState(bool forceUpscaleReload)
 {
 	bPendingUpscaleRefresh = true;
-	bForceUpscaleReload = forceUpscaleReload;
-	DLSSTransitionFramesRemaining = forceUpscaleReload ? 2u : 0u;
+	bForceUpscaleReload = bForceUpscaleReload || forceUpscaleReload;
+	DLSSTransitionFramesRemaining = bForceUpscaleReload ? 2u : 0u;
 	FrameCounter = 0;
 	PathTracingAccumulatedFrames = 0;
 	IndirectAccumulatedFrames = 0;
@@ -1510,15 +1742,11 @@ void Corona::RecreateRenderResolutionResources()
 	releaseTexture(GeomNormalBuffers[0]);
 	releaseTexture(GeomNormalBuffers[1]);
 	releaseTexture(ShadowBuffer);
-	releaseTexture(ShadowDenoisedBuffer);
 	releaseTexture(AmbientOcclusionBuffer);
-	releaseTexture(SkyLightingRawBuffer);
 	releaseTexture(SkyLightingBuffer);
 	releaseTexture(SpecularGIRaw);
 	releaseTexture(SpecularGITemporal[0]);
 	releaseTexture(SpecularGITemporal[1]);
-	releaseTexture(SpecularGISpatial[0]);
-	releaseTexture(SpecularGISpatial[1]);
 	releaseTexture(SpecularGIMoments[0]);
 	releaseTexture(SpecularGIMoments[1]);
 	releaseTexture(DiffuseGIRawAux);
@@ -1542,10 +1770,6 @@ void Corona::RecreateRenderResolutionResources()
 	releaseTexture(DiffuseGITemporalAux[1]);
 	releaseTexture(DiffuseGITemporal[0]);
 	releaseTexture(DiffuseGITemporal[1]);
-	releaseTexture(DiffuseGISpatialAux[0]);
-	releaseTexture(DiffuseGISpatialAux[1]);
-	releaseTexture(DiffuseGISpatial[0]);
-	releaseTexture(DiffuseGISpatial[1]);
 	releaseTexture(AlbedoBuffer);
 	releaseTexture(SpecularAlbedoBuffer);
 	releaseTexture(VelocityBuffer);
@@ -1603,14 +1827,8 @@ void Corona::RecreateRenderResolutionResources()
 	ShadowBuffer = createTexture2D(ETextureFormat::RGBA32Float, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
 	NAME_D3D12_OBJECT(ShadowBuffer->resource);
 
-	ShadowDenoisedBuffer = createTexture2D(ETextureFormat::RGBA32Float, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
-	NAME_D3D12_OBJECT(ShadowDenoisedBuffer->resource);
-
 	AmbientOcclusionBuffer = createTexture2D(ETextureFormat::RGBA16Float, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1, glm::vec4(1.0f));
 	NAME_D3D12_OBJECT(AmbientOcclusionBuffer->resource);
-
-	SkyLightingRawBuffer = createTexture2D(ETextureFormat::RGBA16Float, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1, glm::vec4(0.0f, 0.0f, 0.0f, 1.0f));
-	NAME_D3D12_OBJECT(SkyLightingRawBuffer->resource);
 
 	SkyLightingBuffer = createTexture2D(ETextureFormat::RGBA16Float, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1, glm::vec4(0.0f, 0.0f, 0.0f, 1.0f));
 	NAME_D3D12_OBJECT(SkyLightingBuffer->resource);
@@ -1623,12 +1841,6 @@ void Corona::RecreateRenderResolutionResources()
 
 	SpecularGITemporal[1] = createTexture2D(HybridFloat4UAVFormat, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
 	NAME_D3D12_OBJECT(SpecularGITemporal[1]->resource);
-
-	SpecularGISpatial[0] = createTexture2D(HybridFloat4UAVFormat, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
-	NAME_D3D12_OBJECT(SpecularGISpatial[0]->resource);
-
-	SpecularGISpatial[1] = createTexture2D(HybridFloat4UAVFormat, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
-	NAME_D3D12_OBJECT(SpecularGISpatial[1]->resource);
 
 	SpecularGIMoments[0] = createTexture2D(ETextureFormat::RG16Float, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
 	NAME_D3D12_OBJECT(SpecularGIMoments[0]->resource);
@@ -1696,18 +1908,6 @@ void Corona::RecreateRenderResolutionResources()
 	DiffuseGITemporal[1] = createTexture2D(HybridFloat4UAVFormat, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
 	NAME_D3D12_OBJECT(DiffuseGITemporal[1]->resource);
 
-	DiffuseGISpatialAux[0] = createTexture2D(HybridFloat4UAVFormat, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
-	NAME_D3D12_OBJECT(DiffuseGISpatialAux[0]->resource);
-
-	DiffuseGISpatialAux[1] = createTexture2D(HybridFloat4UAVFormat, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
-	NAME_D3D12_OBJECT(DiffuseGISpatialAux[1]->resource);
-
-	DiffuseGISpatial[0] = createTexture2D(HybridFloat4UAVFormat, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
-	NAME_D3D12_OBJECT(DiffuseGISpatial[0]->resource);
-
-	DiffuseGISpatial[1] = createTexture2D(HybridFloat4UAVFormat, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
-	NAME_D3D12_OBJECT(DiffuseGISpatial[1]->resource);
-
 	AlbedoBuffer = createTexture2D(ETextureFormat::RGBA8Unorm, TextureUsage_RenderTarget | TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
 	AlbedoBuffer->MakeRTV();
 	NAME_D3D12_OBJECT(AlbedoBuffer->resource);
@@ -1752,7 +1952,7 @@ void Corona::RecreateRenderResolutionResources()
 
 void Corona::ReloadRenderResolutionAssets()
 {
-	if (!dx12_rhi)
+	if (!renderBackend)
 		return;
 
 	const auto reloadStart = CpuClock::now();
@@ -1795,7 +1995,7 @@ void Corona::ReloadRenderResolutionAssets()
 	PrevIndirectSkyColorBottom = SkyColorBottom;
 	PrevIndirectSkyIntensity = SkyIntensity;
 	PrevIndirectSkyLightingStrength = SkyLightingStrength;
-	PrevIndirectDiffuseGISkyLightingEnabled = bEnableSkyLighting && !bEnableRayTracedSkyLighting;
+	PrevIndirectDiffuseGISkyLightingEnabled = !(bEnableSkyLighting && bEnableRayTracedSkyLighting);
 	PrevIndirectPrefilteredEnvRoughnessThreshold = PrefilteredEnvRoughnessThreshold;
 	PrevIndirectPrefilteredEnvRoughnessFade = PrefilteredEnvRoughnessFade;
 	PrevIndirectPrefilteredEnvSpecularEnabled = bEnablePrefilteredEnvSpecular;
@@ -1827,7 +2027,7 @@ void Corona::RefreshUpscaleSettings(bool reloadAssets)
 	};
 
 #if WITH_STREAMLINE
-	if (bDLSSAvailable && AntiAliasingMode == EAntiAliasingMode::DLSS_SR)
+	if (RenderingMode == ERenderingMode::HYBRID && bDLSSAvailable && AntiAliasingMode == EAntiAliasingMode::DLSS_SR)
 	{
 		sl::DLSSOptions opts{};
 		opts.mode = ToSLDLSSMode(DLSSQualityMode);
@@ -1847,7 +2047,7 @@ void Corona::RefreshUpscaleSettings(bool reloadAssets)
 		ApplyDLSSJitterPhaseSettings(static_cast<UINT32>(std::max(1.0f, ceilf(8.0f * static_cast<float>(m_width) / static_cast<float>(desiredRenderWidth)))));
 		bDLSSResetNeeded = true;
 	}
-	else if (bDLSSRRAvailable && AntiAliasingMode == EAntiAliasingMode::DLSS_RR)
+	else if (RenderingMode == ERenderingMode::HYBRID && bDLSSRRAvailable && AntiAliasingMode == EAntiAliasingMode::DLSS_RR)
 	{
 		sl::DLSSDOptions opts{};
 		const glm::mat4 identity(1.0f);
@@ -1872,6 +2072,13 @@ void Corona::RefreshUpscaleSettings(bool reloadAssets)
 		ApplyDLSSJitterPhaseSettings(static_cast<UINT32>(std::max(1.0f, ceilf(8.0f * static_cast<float>(m_width) / static_cast<float>(desiredRenderWidth)))));
 		bDLSSResetNeeded = true;
 	}
+	else if (RenderingMode == ERenderingMode::PATHTRACING && IsPathTracingDLSSRREnabled())
+	{
+		desiredRenderWidth = m_width;
+		desiredRenderHeight = m_height;
+		ApplyDLSSJitterPhaseSettings(1u);
+		bDLSSResetNeeded = true;
+	}
 #endif
 
 	const bool bResolutionChanged = desiredRenderWidth != RenderWidth || desiredRenderHeight != RenderHeight;
@@ -1880,6 +2087,10 @@ void Corona::RefreshUpscaleSettings(bool reloadAssets)
 	AppendCpuRuntimeTrace(
 		L"[RefreshUpscaleSettings] render=" + std::to_wstring(RenderWidth) +
 		L"x" + std::to_wstring(RenderHeight) +
+		L", effective=" + std::to_wstring(GetRenderWidth()) +
+		L"x" + std::to_wstring(GetRenderHeight()) +
+		L", mode=" + std::to_wstring(static_cast<int>(RenderingMode)) +
+		L", aa=" + std::wstring(GetAntiAliasingModeName(AntiAliasingMode)) +
 		L", dlssJitter=" + std::to_wstring(DLSSJitterPhaseCount) +
 		L", dlssJitterAuto=" + std::to_wstring(DLSSJitterPhaseCountAuto) +
 		L", dlssJitterScale=" + std::to_wstring(DLSSJitterPhaseScale) +
@@ -2043,6 +2254,59 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 		if (arg == L"--no-pt-rr-specular-hit-distance" || arg == L"--no-pt-rr-specular-hitdist")
 		{
 			bEnablePathTracingRRSpecularHitDistance = false;
+			continue;
+		}
+		if (arg == L"--pt-rr-stable-primary-rays" || arg == L"--pt-rr-primary-ray-stability")
+		{
+			bEnablePathTracingRRPrimaryRayStabilization = true;
+			continue;
+		}
+		if (arg == L"--no-pt-rr-stable-primary-rays" || arg == L"--no-pt-rr-primary-ray-stability")
+		{
+			bEnablePathTracingRRPrimaryRayStabilization = false;
+			continue;
+		}
+		if (arg == L"--hybrid-rr-specular-mv" || arg == L"--enable-hybrid-rr-specular-mv")
+		{
+			bEnableHybridRRSpecularMotionVectors = true;
+			continue;
+		}
+		if (arg == L"--no-hybrid-rr-specular-mv" || arg == L"--disable-hybrid-rr-specular-mv")
+		{
+			bEnableHybridRRSpecularMotionVectors = false;
+			continue;
+		}
+		if (arg == L"--hybrid-rr-specular-hit-distance" || arg == L"--hybrid-rr-specular-hitdist")
+		{
+			bEnableHybridRRSpecularHitDistance = true;
+			continue;
+		}
+		if (arg == L"--no-hybrid-rr-specular-hit-distance" || arg == L"--no-hybrid-rr-specular-hitdist")
+		{
+			bEnableHybridRRSpecularHitDistance = false;
+			continue;
+		}
+		if (arg == L"--hybrid-rr-specular-guide-ray")
+		{
+			bEnableHybridRRSpecularGuideRay = true;
+			continue;
+		}
+		if (arg == L"--no-hybrid-rr-specular-guide-ray")
+		{
+			bEnableHybridRRSpecularGuideRay = false;
+			continue;
+		}
+		std::wstring hybridSpecularMVScaleValue = ParseValueArg(arg, L"--hybrid-rr-specular-mv-scale", L"-hybrid-rr-specular-mv-scale", i);
+		if (!hybridSpecularMVScaleValue.empty())
+		{
+			try
+			{
+				HybridRRSpecularMotionVectorScale = std::clamp(std::stof(hybridSpecularMVScaleValue), -2.0f, 2.0f);
+				bEnableHybridRRSpecularMotionVectors = fabsf(HybridRRSpecularMotionVectorScale) > 1.0e-4f;
+			}
+			catch (...)
+			{
+			}
 			continue;
 		}
 		std::wstring specularMVScaleValue = ParseValueArg(arg, L"--pt-rr-specular-mv-scale", L"-pt-rr-specular-mv-scale", i);
@@ -2672,6 +2936,11 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 		L", ptRRSpecularMV=" + std::to_wstring(bEnablePathTracingRRSpecularMotionVectors ? 1 : 0) +
 		L", ptRRSpecularMVScale=" + std::to_wstring(PathTracingRRSpecularMotionVectorScale) +
 		L", ptRRSpecularHitDistance=" + std::to_wstring(bEnablePathTracingRRSpecularHitDistance ? 1 : 0) +
+		L", ptRRPrimaryRayStability=" + std::to_wstring(bEnablePathTracingRRPrimaryRayStabilization ? 1 : 0) +
+		L", hybridRRSpecularMV=" + std::to_wstring(bEnableHybridRRSpecularMotionVectors ? 1 : 0) +
+		L", hybridRRSpecularMVScale=" + std::to_wstring(HybridRRSpecularMotionVectorScale) +
+		L", hybridRRSpecularHitDistance=" + std::to_wstring(bEnableHybridRRSpecularHitDistance ? 1 : 0) +
+		L", hybridRRSpecularGuideRay=" + std::to_wstring(bEnableHybridRRSpecularGuideRay ? 1 : 0) +
 		L", sponzaFly=" + std::to_wstring(bStartupSponzaFlyMode ? 1 : 0) +
 		L", startupScripts=" + std::to_wstring(bEnableStartupLuauScript ? 1 : 0) +
 		L", dlssJitterScale=" + std::to_wstring(DLSSJitterPhaseScale) +
@@ -3152,11 +3421,11 @@ const wchar_t* Corona::GetHybridStageAutoDumpPhaseName(uint32_t phase) const
 	{
 	case 0: return L"stage_00_gbuffer_only";
 	case 1: return L"stage_01_shadow_raw";
-	case 2: return L"stage_02_shadow_denoise";
+	case 2: return L"stage_02_shadow_raw";
 	case 3: return L"stage_03_reflection";
 	case 4: return L"stage_04_gi_raw";
 	case 5: return L"stage_05_gi_temporal";
-	case 6: return L"stage_06_gi_spatial";
+	case 6: return L"stage_06_gi_resolved";
 	case 7: return L"stage_07_lighting_tonemap";
 	default: return L"stage_unknown";
 	}
@@ -3360,6 +3629,31 @@ bool Corona::DumpTexturePNG(Texture* source, const std::wstring& filePath, D3D12
 	return bSaved;
 }
 
+bool Corona::DumpTextureRawFloat(
+	Texture* source,
+	const std::wstring& filePath,
+	D3D12_RESOURCE_STATES beforeState,
+	DXGI_FORMAT targetFormat,
+	uint32_t channelCount)
+{
+	if (!source || !renderBackend)
+		return false;
+
+	ScratchImage captured;
+	HRESULT hr = renderBackend->CaptureTexture(source, captured, beforeState);
+	if (FAILED(hr))
+	{
+		AppendAutoAADumpLog(L"[capture] raw failed hr=0x" + std::to_wstring(static_cast<unsigned long>(hr)));
+		return false;
+	}
+
+	std::wstring errorMessage;
+	const bool bSaved = SaveCapturedTextureRawFloat(captured, filePath, targetFormat, channelCount, &errorMessage);
+	if (!bSaved && !errorMessage.empty())
+		AppendAutoAADumpLog(L"[capture] raw " + errorMessage);
+	return bSaved;
+}
+
 void Corona::AdvanceAutoAADump(Texture* backbuffer)
 {
 	if (!bAutoAADumpEnabled || !bAutoAADumpInitialized || bAutoAADumpCompleted)
@@ -3411,7 +3705,6 @@ void Corona::AdvanceAutoAADump(Texture* backbuffer)
 
 			dumpResource(L"specular_raw", SpecularGIRaw.get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
 			dumpResource(L"specular_temporal", SpecularGITemporal[GIBufferWriteIndex].get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-			dumpResource(L"specular_spatial", SpecularGISpatial[0].get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
 			dumpResource(L"specular_moments", SpecularGIMoments[GIBufferWriteIndex].get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
 			dumpResource(L"specular_moments_prev", SpecularGIMoments[1 - GIBufferWriteIndex].get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
 			dumpResource(L"gbuffer_world_normal", NormalBuffers[ColorBufferWriteIndex].get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
@@ -3419,9 +3712,9 @@ void Corona::AdvanceAutoAADump(Texture* backbuffer)
 			dumpResource(L"gbuffer_velocity", VelocityBuffer.get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
 			dumpResource(L"gbuffer_depth", UnjitteredDepthBuffers[ColorBufferWriteIndex].get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
 			dumpResource(L"gbuffer_rm", RoughnessMetalicBuffer.get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+			dumpResource(L"rr_specular_hit_distance", PathTracingSpecularHitDistanceBuffer.get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+			dumpResource(L"rr_specular_motion", PathTracingSpecularMotionVectorBuffer.get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
 			dumpResource(L"rtao", AmbientOcclusionBuffer.get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-			if (SkyLightingRawBuffer)
-				dumpResource(L"sky_lighting_raw", SkyLightingRawBuffer.get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
 			dumpResource(L"sky_lighting", SkyLightingBuffer.get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
 			if (DirectLightingBuffer)
 				dumpResource(L"direct_lighting", DirectLightingBuffer.get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
@@ -3677,7 +3970,6 @@ void Corona::AdvanceAutoAADump(Texture* backbuffer)
 			dumpResource(L"screen_probe_gi", ScreenProbeGIResolved.get(), true);
 			dumpResource(L"screen_probe_probes", ScreenProbeGIProbeDebug.get(), true);
 			dumpResource(L"gi_diffuse_temporal", DiffuseGITemporal[GIBufferWriteIndex].get(), true);
-			dumpResource(L"gi_diffuse_spatial", DiffuseGISpatial[0].get(), true);
 			if (!bCanCaptureTexture)
 				AppendAutoAADumpLog(std::wstring(L"[") + currentPhaseName + L"] texture capture skipped for non-DX12 backend");
 		}
@@ -3755,8 +4047,6 @@ void Corona::AdvanceAutoAADump(Texture* backbuffer)
 
 				if (AutoAADumpPhase >= 1)
 					dumpResource(L"shadow_raw", ShadowBuffer.get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, false);
-				if (AutoAADumpPhase >= 2)
-					dumpResource(L"shadow_denoised", ShadowDenoisedBuffer.get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, false);
 				if (AutoAADumpPhase >= 3)
 					dumpResource(L"specular_raw", SpecularGIRaw.get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, true);
 				if (AutoAADumpPhase >= 4)
@@ -3777,15 +4067,12 @@ void Corona::AdvanceAutoAADump(Texture* backbuffer)
 				}
 				if (AutoAADumpPhase >= 6)
 				{
-					dumpResource(L"gi_diffuse_spatial", DiffuseGISpatial[0].get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, true);
-					dumpResource(L"gi_diffuse_spatial_aux", DiffuseGISpatialAux[0].get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, true);
-					dumpResource(L"gi_specular_spatial", SpecularGISpatial[0].get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, true);
+					dumpResource(L"gi_diffuse_resolved", ((DiffuseGIMode == EDiffuseGIMode::SCREEN_PROBE && ScreenProbeGIResolved) ? ScreenProbeGIResolved.get() : DiffuseGITemporal[GIBufferWriteIndex].get()), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, true);
+					dumpResource(L"gi_specular_resolved", SpecularGITemporal[GIBufferWriteIndex].get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, true);
 				}
 				if (bLightingStage)
 				{
 					dumpResource(L"rtao", AmbientOcclusionBuffer.get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, false);
-					if (SkyLightingRawBuffer)
-						dumpResource(L"sky_lighting_raw", SkyLightingRawBuffer.get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, false);
 					dumpResource(L"sky_lighting", SkyLightingBuffer.get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, false);
 					dumpResource(L"direct_lighting", DirectLightingBuffer.get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, true);
 					dumpResource(L"lighting", LightingBuffer.get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, true);
@@ -3936,8 +4223,6 @@ void Corona::AdvanceAutoAADump(Texture* backbuffer)
 			dumpResource(L"gbuffer_velocity", VelocityBuffer.get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, false);
 			dumpResource(L"gbuffer_depth", UnjitteredDepthBuffers[ColorBufferWriteIndex].get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, false);
 			dumpResource(L"rtao", AmbientOcclusionBuffer.get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, false);
-			if (SkyLightingRawBuffer)
-				dumpResource(L"sky_lighting_raw", SkyLightingRawBuffer.get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, false);
 			dumpResource(L"sky_lighting", SkyLightingBuffer.get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, false);
 			dumpResource(L"direct_lighting", DirectLightingBuffer.get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, true);
 			dumpResource(L"gi_diffuse_raw", DiffuseGIRaw.get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, true);
@@ -3946,7 +4231,6 @@ void Corona::AdvanceAutoAADump(Texture* backbuffer)
 			dumpResource(L"screen_probe_meta", ScreenProbeGIMetadata[ScreenProbeGIAtlasWriteIndex].get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, false);
 			dumpResource(L"screen_probe_gi", ScreenProbeGIResolved.get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, true);
 			dumpResource(L"screen_probe_probes", ScreenProbeGIProbeDebug.get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, true);
-			dumpResource(L"gi_diffuse_spatial", DiffuseGISpatial[0].get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, true);
 			dumpResource(L"gi_diffuse_temporal", DiffuseGITemporal[GIBufferWriteIndex].get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, true);
 			dumpResource(L"gi_specular_temporal", SpecularGITemporal[GIBufferWriteIndex].get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, true);
 		}
@@ -4739,6 +5023,8 @@ void Corona::StartCameraPathDump()
 	{
 		infoFile << L"fps " << static_cast<int>(kCameraPathDumpFps) << L"\n";
 		infoFile << L"frame_count " << CameraPathDumpFrameCount << L"\n";
+		infoFile << L"render_size " << m_width << L" " << m_height << L"\n";
+		infoFile << L"near_far " << Near << L" " << Far << L"\n";
 		infoFile << L"camera_path " << ActiveCameraPathFile << L"\n";
 	}
 
@@ -4821,7 +5107,7 @@ void Corona::DumpCameraPathDiagnosticFrame()
 	framePrefix << L"frame_" << std::setfill(L'0') << std::setw(6) << CameraPathDumpFrameIndex;
 	const std::filesystem::path basePath = diagnosticDir / framePrefix.str();
 
-	auto dumpTexture = [&](const wchar_t* suffix, Texture* texture, bool bDumpHdr)
+	auto dumpTexture = [&](const wchar_t* suffix, Texture* texture, bool bDumpHdr, DXGI_FORMAT rawFormat = DXGI_FORMAT_UNKNOWN, uint32_t rawChannelCount = 0)
 	{
 		if (!texture)
 			return;
@@ -4830,18 +5116,38 @@ void Corona::DumpCameraPathDiagnosticFrame()
 		DumpTexturePNG(texture, fileBase + L"_preview.png", shaderReadState);
 		if (bDumpHdr)
 			DumpTextureHDR(texture, fileBase + L".hdr", shaderReadState);
+		if (rawFormat != DXGI_FORMAT_UNKNOWN && rawChannelCount > 0)
+			DumpTextureRawFloat(texture, fileBase + L".rawf", shaderReadState, rawFormat, rawChannelCount);
 	};
 
 	dumpTexture(L"pt_input", PathTracingAccumBuffer[PathTracingWriteIndex].get(), true);
 	dumpTexture(L"rr_output", DLSSRRBuffer.get(), true);
-	dumpTexture(L"depth", UnjitteredDepthBuffers[ColorBufferWriteIndex].get(), true);
-	dumpTexture(L"motion", VelocityBuffer.get(), true);
-	dumpTexture(L"specular_motion", PathTracingSpecularMotionVectorBuffer.get(), true);
+	dumpTexture(L"depth", UnjitteredDepthBuffers[ColorBufferWriteIndex].get(), true, DXGI_FORMAT_R32_FLOAT, 1);
+	dumpTexture(L"motion", VelocityBuffer.get(), true, DXGI_FORMAT_R32G32_FLOAT, 2);
+	dumpTexture(L"specular_hit_distance", PathTracingSpecularHitDistanceBuffer.get(), true, DXGI_FORMAT_R32_FLOAT, 1);
+	dumpTexture(L"specular_motion", PathTracingSpecularMotionVectorBuffer.get(), true, DXGI_FORMAT_R32G32_FLOAT, 2);
 	dumpTexture(L"roughness_metallic", RoughnessMetalicBuffer.get(), true);
 	dumpTexture(L"specular_albedo", SpecularAlbedoBuffer.get(), true);
 	dumpTexture(L"albedo", AlbedoBuffer.get(), false);
 	dumpTexture(L"normal", NormalBuffers[ColorBufferWriteIndex].get(), false);
 	dumpTexture(L"geom_normal", GeomNormalBuffers[ColorBufferWriteIndex].get(), false);
+	dumpTexture(L"specular_raw", SpecularGIRaw.get(), true);
+	dumpTexture(L"specular_temporal", SpecularGITemporal[GIBufferWriteIndex].get(), true);
+	dumpTexture(L"specular_temporal_prev", SpecularGITemporal[1 - GIBufferWriteIndex].get(), true);
+	dumpTexture(L"specular_moments", SpecularGIMoments[GIBufferWriteIndex].get(), true);
+	dumpTexture(L"diffuse_raw", DiffuseGIRaw.get(), true);
+	dumpTexture(L"diffuse_raw_aux", DiffuseGIRawAux.get(), true);
+	dumpTexture(L"diffuse_hash_cached", DiffuseGIHashCached.get(), true);
+	dumpTexture(L"diffuse_temporal", DiffuseGITemporal[GIBufferWriteIndex].get(), true);
+	dumpTexture(L"diffuse_temporal_prev", DiffuseGITemporal[1 - GIBufferWriteIndex].get(), true);
+	if (ScreenProbeGIResolved)
+		dumpTexture(L"screen_probe_gi", ScreenProbeGIResolved.get(), true);
+	if (SkyLightingBuffer)
+		dumpTexture(L"sky_lighting", SkyLightingBuffer.get(), true);
+	if (DirectLightingBuffer)
+		dumpTexture(L"direct_lighting", DirectLightingBuffer.get(), true);
+	if (LightingBuffer)
+		dumpTexture(L"lighting", LightingBuffer.get(), true);
 }
 
 void Corona::RequestCameraPathDumpFrameCapture()
@@ -5343,7 +5649,6 @@ Corona::RenderFrameSourceState Corona::CaptureRenderFrameSourceState() const
 	state.SkyLightingDirectionPower = RTSkyLightingViewParam.SkyDirectionPower;
 	state.SkyLightingMinWorldY = RTSkyLightingViewParam.SkyMinWorldY;
 	state.SkyLightingMaxSampleAttempts = RTSkyLightingViewParam.SkyMaxSampleAttempts;
-	state.SkyLightingDenoiseRadius = SkyLightingDenoiseParam.Radius;
 	state.ScreenProbeSpacing = ScreenProbeGICB.ProbeSpacing;
 	state.ScreenProbeGatherRadius = ScreenProbeGICB.GatherRadius;
 	state.ScreenProbeRaysPerProbe = RTScreenProbeGIViewParam.RaysPerProbe;
@@ -5422,7 +5727,6 @@ void Corona::ApplyRenderFrameSourceState(const RenderFrameSourceState& state)
 	RTSkyLightingViewParam.SkyDirectionPower = state.SkyLightingDirectionPower;
 	RTSkyLightingViewParam.SkyMinWorldY = state.SkyLightingMinWorldY;
 	RTSkyLightingViewParam.SkyMaxSampleAttempts = state.SkyLightingMaxSampleAttempts;
-	SkyLightingDenoiseParam.Radius = state.SkyLightingDenoiseRadius;
 	ScreenProbeGICB.ProbeSpacing = state.ScreenProbeSpacing;
 	ScreenProbeGICB.GatherRadius = state.ScreenProbeGatherRadius;
 	RTScreenProbeGIViewParam.RaysPerProbe = state.ScreenProbeRaysPerProbe;
@@ -5475,6 +5779,11 @@ void Corona::ApplyFrameSourceRenderSync(const RenderFrameDelta& delta)
 	};
 
 	const bool bHadFrameSourceState = RenderWorld.bHasFrameSourceState;
+	const bool bModeOrAAModeChanged =
+		bHadFrameSourceState &&
+		(oldState.RenderingMode != newState.RenderingMode ||
+		 oldState.AntiAliasingMode != newState.AntiAliasingMode ||
+		 oldState.DLSSQualityMode != newState.DLSSQualityMode);
 	const bool bIndirectSettingsChanged =
 		bHadFrameSourceState &&
 		(oldState.DiffuseGIMode != newState.DiffuseGIMode ||
@@ -5488,7 +5797,6 @@ void Corona::ApplyFrameSourceRenderSync(const RenderFrameDelta& delta)
 		 oldState.ShadowSampleCount != newState.ShadowSampleCount ||
 		 oldState.RTAOSampleCount != newState.RTAOSampleCount ||
 		 oldState.SkyLightingSampleCount != newState.SkyLightingSampleCount ||
-		 oldState.SkyLightingDenoiseRadius != newState.SkyLightingDenoiseRadius ||
 		 oldState.ScreenProbeSpacing != newState.ScreenProbeSpacing ||
 		 oldState.ScreenProbeGatherRadius != newState.ScreenProbeGatherRadius ||
 		 oldState.ScreenProbeRaysPerProbe != newState.ScreenProbeRaysPerProbe ||
@@ -5522,6 +5830,25 @@ void Corona::ApplyFrameSourceRenderSync(const RenderFrameDelta& delta)
 		 floatChanged(oldState.SpatialHashTemporalAlpha, newState.SpatialHashTemporalAlpha) ||
 		 floatChanged(oldState.SpatialHashSmoothingStrength, newState.SpatialHashSmoothingStrength) ||
 		 floatChanged(oldState.SpatialHashInterpolationStrength, newState.SpatialHashInterpolationStrength));
+
+	if (bModeOrAAModeChanged)
+	{
+		const bool bForceResourceReload =
+			oldState.RenderingMode != newState.RenderingMode ||
+			oldState.DLSSQualityMode != newState.DLSSQualityMode ||
+			IsDLSSMode(oldState.AntiAliasingMode) ||
+			IsDLSSMode(newState.AntiAliasingMode);
+		ResetAllAccumulationState(bForceResourceReload);
+		if (oldState.RenderingMode != newState.RenderingMode)
+			MarkRayTracingSceneDirty();
+		AppendCpuRuntimeTrace(
+			L"[ApplyFrameSourceRenderSync] mode/aa changed renderMode " +
+			std::to_wstring(static_cast<int>(oldState.RenderingMode)) +
+			L"->" + std::to_wstring(static_cast<int>(newState.RenderingMode)) +
+			L", aa " + std::wstring(GetAntiAliasingModeName(oldState.AntiAliasingMode)) +
+			L"->" + std::wstring(GetAntiAliasingModeName(newState.AntiAliasingMode)) +
+			L", forceReload=" + std::to_wstring(bForceResourceReload ? 1 : 0));
+	}
 
 	RenderWorld.FrameSourceState = delta.FrameSourceState;
 	RenderWorld.bHasFrameSourceState = true;
@@ -6938,12 +7265,10 @@ void Corona::LoadAssets()
 		renderBackend->GetMaxSupportedHybridStage() : 7u;
 	const bool bVulkanHybridBootstrap = bVulkanHybridStartup && maxSupportedHybridStage == 0u;
 	const bool bSupportsHybridRaytracing = !bVulkanHybridStartup || maxSupportedHybridStage >= 1u;
-	const bool bSupportsShadowDenoise = !bVulkanHybridStartup || maxSupportedHybridStage >= 2u;
 	const bool bSupportsScreenProbeGI = !bVulkanHybridStartup || maxSupportedHybridStage >= 4u;
 	const bool bSupportsTemporalDenoise = !bVulkanHybridStartup || maxSupportedHybridStage >= 5u;
-	const bool bSupportsSpatialDenoise = !bVulkanHybridStartup || maxSupportedHybridStage >= 6u;
 	const bool bSupportsFullHybridPresentation = !bVulkanHybridStartup || maxSupportedHybridStage >= 7u;
-	const bool bAllowBlueNoiseInit = !bVulkanHybridStartup || maxSupportedHybridStage >= 3u;
+	const bool bAllowBlueNoiseInit = !bVulkanHybridStartup || maxSupportedHybridStage >= 1u;
 	const bool bAllowImguiInit =
 		!bCommandLineDisableImgui &&
 		(!bVulkanHybridStartup ||
@@ -6991,16 +7316,6 @@ void Corona::LoadAssets()
 		}
 		AppendCpuRuntimeTrace(L"[LoadAssets] after full hybrid presentation pass init");
 	}
-	if (bSupportsShadowDenoise)
-	{
-		AppendCpuRuntimeTrace(L"[LoadAssets] before InitShadowDenoisePass");
-		UpdateStartupLoadingProgress(0.34f, L"Compiling shadow and sky denoisers");
-		InitShadowDenoisePass();
-		AppendCpuRuntimeTrace(L"[LoadAssets] after InitShadowDenoisePass");
-		AppendCpuRuntimeTrace(L"[LoadAssets] before InitSkyLightingDenoisePass");
-		InitSkyLightingDenoisePass();
-		AppendCpuRuntimeTrace(L"[LoadAssets] after InitSkyLightingDenoisePass");
-	}
 	if (bSupportsTemporalDenoise)
 	{
 		AppendCpuRuntimeTrace(L"[LoadAssets] before InitTemporalDenoisingPass");
@@ -7021,13 +7336,6 @@ void Corona::LoadAssets()
 		UpdateStartupLoadingProgress(0.41f, L"Compiling spatial hash GI");
 		InitSpatialHashGIPass();
 		AppendCpuRuntimeTrace(L"[LoadAssets] after InitSpatialHashGIPass");
-	}
-	if (bSupportsTemporalDenoise || bSupportsSpatialDenoise)
-	{
-		AppendCpuRuntimeTrace(L"[LoadAssets] before InitSpatialDenoisingPass");
-		UpdateStartupLoadingProgress(0.43f, L"Compiling spatial denoiser");
-		InitSpatialDenoisingPass();
-		AppendCpuRuntimeTrace(L"[LoadAssets] after InitSpatialDenoisingPass");
 	}
 	AppendCpuRuntimeTrace(L"[LoadAssets] before InitGpuTimingResources");
 	UpdateStartupLoadingProgress(0.45f, L"Preparing GPU timing resources");
@@ -7172,17 +7480,9 @@ void Corona::LoadAssets()
 
 	NAME_D3D12_OBJECT(ShadowBuffer->resource);
 
-	ShadowDenoisedBuffer = createTexture2D(ETextureFormat::RGBA32Float, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
-
-	NAME_D3D12_OBJECT(ShadowDenoisedBuffer->resource);
-
 	AmbientOcclusionBuffer = createTexture2D(ETextureFormat::RGBA16Float, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1, glm::vec4(1.0f));
 
 	NAME_D3D12_OBJECT(AmbientOcclusionBuffer->resource);
-
-	SkyLightingRawBuffer = createTexture2D(ETextureFormat::RGBA16Float, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1, glm::vec4(0.0f, 0.0f, 0.0f, 1.0f));
-
-	NAME_D3D12_OBJECT(SkyLightingRawBuffer->resource);
 
 	SkyLightingBuffer = createTexture2D(ETextureFormat::RGBA16Float, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1, glm::vec4(0.0f, 0.0f, 0.0f, 1.0f));
 
@@ -8212,6 +8512,15 @@ void Corona::ProcessRenderThreadRequests()
 		RefreshUpscaleSettings(true);
 		bPendingUpscaleRefresh = false;
 	}
+	if (!RenderResolutionResourcesMatchCurrentState())
+	{
+		AppendCpuRuntimeTrace(
+			L"[ProcessRenderThreadRequests] render resource size mismatch, forcing reload render=" +
+			std::to_wstring(GetRenderWidth()) + L"x" + std::to_wstring(GetRenderHeight()) +
+			L", display=" + std::to_wstring(m_width) + L"x" + std::to_wstring(m_height));
+		bForceUpscaleReload = true;
+		RefreshUpscaleSettings(true);
+	}
 
 	if (bRecompileShaders)
 	{
@@ -8304,9 +8613,10 @@ void Corona::BuildRenderFrameDerivedState(const RenderFrameSourceState* sourceSt
 	const float lightDirT = 0.5f * (RenderFrameNormalizedLightDir.y + 1.0f);
 	RenderFrameLightColor = glm::mix(SkyColorBottom, SkyColorTop, lightDirT);
 	RenderFrameRayNoiseMode = static_cast<UINT32>(RayNoiseMode);
-	const bool bDiffuseGIIncludesSkyLighting = bEnableSkyLighting && !bEnableRayTracedSkyLighting;
+	const bool bDiffuseGIUsesSkyLightingStrength = bEnableSkyLighting && !bEnableRayTracedSkyLighting;
+	const bool bDiffuseGIIncludesSkyLighting = !(bEnableSkyLighting && bEnableRayTracedSkyLighting);
 	RenderFrameDiffuseGISkyLightingEnabled = bDiffuseGIIncludesSkyLighting ? 1u : 0u;
-	RenderFrameDiffuseGISkyIntensity = bDiffuseGIIncludesSkyLighting ? SkyIntensity * std::clamp(SkyLightingStrength, 0.0f, 1.0f) : SkyIntensity;
+	RenderFrameDiffuseGISkyIntensity = bDiffuseGIUsesSkyLightingStrength ? SkyIntensity * std::clamp(SkyLightingStrength, 0.0f, 1.0f) : SkyIntensity;
 	RenderFrameIndex = FrameCounter;
 
 	const bool indirectLightDirChanged = glm::length(RenderFrameNormalizedLightDir - PrevIndirectAccumLightDir) > 0.0001f;
@@ -8318,7 +8628,7 @@ void Corona::BuildRenderFrameDerivedState(const RenderFrameSourceState* sourceSt
 	const bool indirectDiffuseGISkyLightingChanged =
 		bDiffuseGIIncludesSkyLighting != PrevIndirectDiffuseGISkyLightingEnabled;
 	const bool indirectSkyLightingStrengthChanged =
-		bDiffuseGIIncludesSkyLighting &&
+		bDiffuseGIUsesSkyLightingStrength &&
 		abs(SkyLightingStrength - PrevIndirectSkyLightingStrength) > 0.0001f;
 	const bool indirectPrefilteredEnvChanged =
 		abs(PrefilteredEnvRoughnessThreshold - PrevIndirectPrefilteredEnvRoughnessThreshold) > 0.0001f ||
@@ -8423,11 +8733,9 @@ void Corona::OnRender()
 				GetHybridStageAutoDumpPhaseName(hybridStage));
 		}
 		const bool bRunShadow = hybridStage >= 1;
-		const bool bRunShadowDenoise = hybridStage >= 2;
 		const bool bRunReflection = hybridStage >= 3;
 		const bool bRunGI = hybridStage >= 4;
 		const bool bRunTemporalDenoise = hybridStage >= 5;
-		const bool bRunSpatialDenoise = hybridStage >= 6;
 		const bool bRunLighting = hybridStage >= 7;
 		const bool bVulkanHybridBackend =
 			renderBackend &&
@@ -8443,13 +8751,6 @@ void Corona::OnRender()
 			BeginGpuPassTiming(EGpuPass::RaytraceShadow);
 			RaytraceShadowPass();
 			EndGpuPassTiming(EGpuPass::RaytraceShadow);
-		}
-
-		if (bRunShadowDenoise)
-		{
-			BeginGpuPassTiming(EGpuPass::ShadowDenoise);
-			ShadowDenoisePass();
-			EndGpuPassTiming(EGpuPass::ShadowDenoise);
 		}
 
 		if (bRunLighting && bEnableRTAO)
@@ -8491,7 +8792,7 @@ void Corona::OnRender()
 			EndGpuPassTiming(EGpuPass::RaytraceGI);
 		}
 
-		// Simple GI denoising: edge-aware temporal accumulation + spatial bilateral.
+		// Simple GI denoising: edge-aware temporal accumulation.
 		if (bRunTemporalDenoise)
 		{
 			BeginGpuPassTiming(EGpuPass::TemporalDenoise);
@@ -8504,13 +8805,7 @@ void Corona::OnRender()
 			ScreenProbeGIPass();
 			EndGpuPassTiming(EGpuPass::ScreenProbeGI);
 		}
-		// GenMipSpecularGIPass();
-		if (bRunSpatialDenoise)
-		{
-			BeginGpuPassTiming(EGpuPass::SpatialDenoise);
-			SpatialDenoisingPass();
-			EndGpuPassTiming(EGpuPass::SpatialDenoise);
-		}
+		// DLSS RR now receives the temporally accumulated GI/specular signal directly.
 
 		if (bRunLighting)
 		{
@@ -8645,7 +8940,7 @@ void Corona::OnRender()
 			{
 			case 0: previewTexture = AlbedoBuffer.get(); break;
 			case 1: previewTexture = ShadowBuffer.get(); break;
-			case 2: previewTexture = ShadowDenoisedBuffer.get(); break;
+			case 2: previewTexture = ShadowBuffer.get(); break;
 			case 3: previewTexture = SpecularGIRaw.get(); break;
 			case 4:
 				previewTexture =
@@ -8653,7 +8948,7 @@ void Corona::OnRender()
 					((DiffuseGIMode == EDiffuseGIMode::SCREEN_PROBE && ScreenProbeGIResolved) ? ScreenProbeGIResolved.get() : DiffuseGIRaw.get());
 				break;
 			case 5: previewTexture = (DiffuseGIMode == EDiffuseGIMode::SCREEN_PROBE && ScreenProbeGIResolved) ? ScreenProbeGIResolved.get() : DiffuseGITemporal[GIBufferWriteIndex].get(); break;
-			case 6: previewTexture = DiffuseGISpatial[0].get(); break;
+			case 6: previewTexture = (DiffuseGIMode == EDiffuseGIMode::SCREEN_PROBE && ScreenProbeGIResolved) ? ScreenProbeGIResolved.get() : DiffuseGITemporal[GIBufferWriteIndex].get(); break;
 			default: previewTexture = nullptr; break;
 			}
 			vkBackend->PreviewTextureOnWindow(previewTexture ? previewTexture : AlbedoBuffer.get());
@@ -8778,19 +9073,7 @@ void Corona::OnRender()
 					bool isSelected = (renderingModeIndex == n);
 					if (ImGui::Selectable(renderingModeItems[n], isSelected))
 					{
-						const ERenderingMode previousRenderingMode = RenderingMode;
-						RenderingMode = (ERenderingMode)n;
-
-						if (RenderingMode != previousRenderingMode)
-							MarkRayTracingSceneDirty();
-						if (RenderingMode == ERenderingMode::PATHTRACING && RenderingMode != previousRenderingMode)
-						{
-							FrameCounter = 0;
-							PathTracingAccumulatedFrames = 0;
-							PrevPathTracingViewMat = glm::mat4x4(0.0f);
-							PrevPathTracingLightDir = glm::vec3(0.0f);
-							PrevPathTracingLightIntensity = 0.0f;
-						}
+						ApplyRenderingAndAAMode(static_cast<ERenderingMode>(n), AntiAliasingMode);
 					}
 					if (isSelected)
 					{
@@ -8832,7 +9115,7 @@ void Corona::OnRender()
 				"SCREEN_PROBE_HISTORY_LENGTH",
 				"SCREEN_PROBE_ATLAS_HISTORY_LENGTH",
 				"TEMPORAL_FILTERED_DIFFUSE_GI",
-				"SPATIAL_FILTERED_DIFFUSE_GI",
+				"RESOLVED_DIFFUSE_GI",
 				"FINAL_DIFFUSE_GI",
 				"ALBEDO",
 				"VELOCITY",
@@ -9246,19 +9529,7 @@ void Corona::OnRender()
 			int AAModeIndex = static_cast<int>(AntiAliasingMode);
 			if (ImGui::Combo("Anti-Aliasing", &AAModeIndex, AAModes, IM_ARRAYSIZE(AAModes)))
 			{
-				const EAntiAliasingMode PreviousMode = AntiAliasingMode;
-				EAntiAliasingMode RequestedMode = static_cast<EAntiAliasingMode>(AAModeIndex);
-#if WITH_STREAMLINE
-				if (RequestedMode == EAntiAliasingMode::DLSS_SR && !bDLSSAvailable)
-					RequestedMode = EAntiAliasingMode::TAA;
-				if (RequestedMode == EAntiAliasingMode::DLSS_RR && !bDLSSRRAvailable)
-					RequestedMode = EAntiAliasingMode::TAA;
-#else
-				if (RequestedMode == EAntiAliasingMode::DLSS_SR || RequestedMode == EAntiAliasingMode::DLSS_RR)
-					RequestedMode = EAntiAliasingMode::TAA;
-#endif
-				AntiAliasingMode = RequestedMode;
-				ResetAllAccumulationState(IsDLSSMode(PreviousMode) || IsDLSSMode(RequestedMode));
+				ApplyRenderingAndAAMode(RenderingMode, static_cast<EAntiAliasingMode>(AAModeIndex));
 			}
 #if WITH_STREAMLINE
 			if (bDLSSAvailable || bDLSSRRAvailable)
@@ -9279,6 +9550,17 @@ void Corona::OnRender()
 				{
 					DLSSJitterPhaseCountOverride = static_cast<UINT32>(DLSSJitterPhaseOverrideUI);
 					ResetAllAccumulationState(false);
+				}
+				if (RenderingMode == ERenderingMode::HYBRID && AntiAliasingMode == EAntiAliasingMode::DLSS_RR)
+				{
+					if (ImGui::Checkbox("Hybrid RR specular motion vectors", &bEnableHybridRRSpecularMotionVectors))
+						ResetAllAccumulationState(false);
+					if (ImGui::Checkbox("Hybrid RR specular hit distance", &bEnableHybridRRSpecularHitDistance))
+						ResetAllAccumulationState(false);
+					if (ImGui::Checkbox("Hybrid RR specular guide ray", &bEnableHybridRRSpecularGuideRay))
+						ResetAllAccumulationState(false);
+					if (ImGui::SliderFloat("Hybrid RR specular MV scale", &HybridRRSpecularMotionVectorScale, -2.0f, 2.0f, "%.2f"))
+						ResetAllAccumulationState(false);
 				}
 				ImGui::Text("DLSS SR Available: %s", bDLSSAvailable ? "Yes" : "No");
 				ImGui::Text("DLSS RR Available: %s", bDLSSRRAvailable ? "Yes" : "No");
@@ -9386,12 +9668,6 @@ void Corona::OnRender()
 								bLightingChanged = true;
 							if (ImGui::SliderFloat("Sky Lighting Min World Y", &RTSkyLightingViewParam.SkyMinWorldY, -0.25f, 0.75f, "%.2f"))
 								bLightingChanged = true;
-							int skyDenoiseRadius = static_cast<int>(SkyLightingDenoiseParam.Radius);
-							if (ImGui::SliderInt("Sky Lighting Denoise Radius", &skyDenoiseRadius, 1, 6))
-							{
-								SkyLightingDenoiseParam.Radius = static_cast<UINT32>(skyDenoiseRadius);
-								bLightingChanged = true;
-							}
 						}
 						else
 						{
@@ -9536,8 +9812,9 @@ void Corona::OnRender()
 #if WITH_STREAMLINE
 		if (ImGui::Checkbox("Primary-hit GBuffer for DLSS RR", &bEnablePathTracingDLSSRR))
 		{
-			ResetAllAccumulationState(false);
+			ApplyRenderingAndAAMode(RenderingMode, AntiAliasingMode);
 		}
+		ImGui::Checkbox("Stabilize moving primary rays for RR", &bEnablePathTracingRRPrimaryRayStabilization);
 #endif
 	ImGui::Text("Accumulated Frames: %u", PathTracingAccumulatedFrames);
 	ImGui::Text("Dispatch SPP: %u", PathTracingLastDispatchSamplesPerPixel);
@@ -9688,7 +9965,7 @@ if (ImGui::Button("Reset Accumulation"))
 			{
 				ImGui::Text("VisualizeBuffer Tile Labels");
 				ImGui::Separator();
-				ImGui::Text("Row1: SPEC_HISTORY_LENGTH | RTAO | SPATIAL_FILTERED_DIFFUSE_GI | FINAL_DIFFUSE_GI");
+				ImGui::Text("Row1: SPEC_HISTORY_LENGTH | RTAO | RESOLVED_DIFFUSE_GI | FINAL_DIFFUSE_GI");
 				ImGui::Text("Row2: TEMPORAL_FILTERED_SPECULAR | BLOOM | TEMPORAL_FILTERED_DIFFUSE_GI | ROUGNESS_METALLIC");
 				ImGui::Text("Row3: SPECULAR_RAW | GEO_NORMAL | RAW_DIFFUSE_GI + RAW_DIFFUSE_GI_AUX | VELOCITY");
 				ImGui::Text("Row4: SHADOW | WORLD_NORMAL | DEPTH | ALBEDO");
@@ -9922,17 +10199,17 @@ void Corona::OnKeyDown(UINT8 key)
 	case 'T':
 	{
 		const EAntiAliasingMode PreviousMode = AntiAliasingMode;
-		AntiAliasingMode = static_cast<EAntiAliasingMode>((static_cast<int>(AntiAliasingMode) + 1) % static_cast<int>(EAntiAliasingMode::COUNT));
-#if WITH_STREAMLINE
-		if (AntiAliasingMode == EAntiAliasingMode::DLSS_SR && !bDLSSAvailable)
-			AntiAliasingMode = EAntiAliasingMode::DLSS_RR;
-		if (AntiAliasingMode == EAntiAliasingMode::DLSS_RR && !bDLSSRRAvailable)
-			AntiAliasingMode = EAntiAliasingMode::OFF;
-#else
-		if (AntiAliasingMode == EAntiAliasingMode::DLSS_SR || AntiAliasingMode == EAntiAliasingMode::DLSS_RR)
-			AntiAliasingMode = EAntiAliasingMode::OFF;
-#endif
-		ResetAllAccumulationState(IsDLSSMode(PreviousMode) || IsDLSSMode(AntiAliasingMode));
+		for (int i = 1; i <= static_cast<int>(EAntiAliasingMode::COUNT); ++i)
+		{
+			const EAntiAliasingMode RequestedMode = static_cast<EAntiAliasingMode>(
+				(static_cast<int>(PreviousMode) + i) % static_cast<int>(EAntiAliasingMode::COUNT));
+			const EAntiAliasingMode NormalizedMode = NormalizeAntiAliasingMode(RenderingMode, RequestedMode);
+			if (NormalizedMode != PreviousMode)
+			{
+				ApplyRenderingAndAAMode(RenderingMode, NormalizedMode);
+				break;
+			}
+		}
 		break;
 	}
 	case 'C':
@@ -10022,7 +10299,6 @@ void Corona::RecompileShaders()
 
 	InitRTPSO();
 	InitPathTracingPass();
-	InitSpatialDenoisingPass();
 	InitTemporalDenoisingPass();
 	InitSpatialHashGIPass();
 	InitGBufferPass();
