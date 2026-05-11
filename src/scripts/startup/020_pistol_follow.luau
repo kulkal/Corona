@@ -1,5 +1,11 @@
 local script = {}
 
+corona_script_controls = corona_script_controls or {}
+if corona_script_controls.dungeon ~= nil and corona_script_controls.dungeon.enabled then
+    corona.log("startup pistol follow skipped for dungeon mode")
+    return {}
+end
+
 local pistolScene = corona.load_scene("assets/pistol/pistol.obj")
 
 corona_script_controls = corona_script_controls or {}

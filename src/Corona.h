@@ -151,6 +151,8 @@ private:
 	shared_ptr<Texture> GeomNormalBuffers[2];
 	shared_ptr<Texture> VelocityBuffer;
 	shared_ptr<Texture> RoughnessMetalicBuffer;
+	shared_ptr<Texture> PathTracingSpecularHitDistanceBuffer;
+	shared_ptr<Texture> PathTracingSpecularMotionVectorBuffer;
 	shared_ptr<Texture> ShadowBuffer;
 	shared_ptr<Texture> ShadowDenoisedBuffer;
 	shared_ptr<Texture> AmbientOcclusionBuffer;
@@ -575,6 +577,8 @@ private:
 		glm::mat4x4 InvViewMatrix;
 		glm::mat4x4 ProjMatrix;
 		glm::mat4x4 InvProjMatrix;
+		glm::mat4x4 UnjitteredViewProjMatrix;
+		glm::mat4x4 PrevUnjitteredViewProjMatrix;
 		glm::vec4 ProjectionParams;
 		glm::vec4 LightDirAndIntensity;
 		float DirectLightAngularRadius = 0.001f;
@@ -598,7 +602,9 @@ private:
 		UINT32 bEnableDirectDiffuse;
 		UINT32 bEnableDirectSpecular;
 		UINT32 bEnableRTAO;
-		UINT32 _rtaoPadding[3] = {};
+		UINT32 bWritePrimaryGBuffer = 0;
+		float SpecularMotionVectorScale = 1.0f;
+		UINT32 _rtaoPadding = 0;
 		PointLightParam PointLights[MaxPointLights];
 		UINT32 PointLightCount = 0;
 		glm::vec3 PointLightPadding = glm::vec3(0.0f);
@@ -608,6 +614,11 @@ private:
 	shared_ptr<RTPipelineStateObject> PSO_PATH_TRACING;
 	shared_ptr<Texture> PathTracingAccumBuffer[2];
 	UINT PathTracingWriteIndex = 0;
+	UINT32 PathTracingAccumulatedFrames = 0;
+	UINT32 PathTracingLastDispatchSamplesPerPixel = 1;
+	float PathTracingRRSpecularMotionVectorScale = 1.0f;
+	bool bEnablePathTracingRRSpecularMotionVectors = true;
+	bool bEnablePathTracingRRSpecularHitDistance = false;
 	glm::mat4x4 PrevPathTracingViewMat = glm::mat4x4(0.0f);
 	glm::vec3 PrevPathTracingLightDir;
 	float PrevPathTracingLightIntensity = 0.0f;
@@ -763,6 +774,12 @@ public:
 	using ScriptSceneHandle = uint32_t;
 	static constexpr ScriptSceneHandle InvalidScriptSceneHandle = 0;
 
+	enum class EPhysicsCollisionShape : UINT8
+	{
+		TriangleMesh,
+		Box,
+	};
+
 	struct SceneObjectDesc
 	{
 		shared_ptr<Scene> ScenePtr;
@@ -773,6 +790,8 @@ public:
 		bool bVisible = true;
 		bool bRayTracing = true;
 		bool bPhysicsQuery = true;
+		EPhysicsCollisionShape PhysicsCollisionShape = EPhysicsCollisionShape::TriangleMesh;
+		glm::vec3 PhysicsBoxHalfExtent = glm::vec3(0.5f);
 	};
 
 	struct CpuPhysicsRaycastHit
@@ -810,6 +829,7 @@ private:
 	UINT32 DLSSJitterPhaseCountAuto = 32;
 	UINT32 DLSSJitterPhaseCount = 32;
 	UINT32 DLSSJitterPhaseCountOverride = 0;
+	bool bEnablePathTracingDLSSRR = true;
 	UINT RenderWidth = 0;
 	UINT RenderHeight = 0;
 	bool bPendingUpscaleRefresh = false;
@@ -847,6 +867,7 @@ private:
 	bool bCommandLineRenderBackendOverrideSet = false;
 	ERenderBackendAPI CommandLineRenderBackendAPI = ERenderBackendAPI::D3D12;
 	bool bCommandLineDisableImgui = false;
+	bool bStartupSponzaFlyMode = false;
 	bool bCommandLineDiffuseGIAutoDumpMode = false;
 	bool bCommandLineReadmeScreenshotDumpMode = false;
 	bool bCommandLinePathTracingScreenshotDumpMode = false;
@@ -854,6 +875,7 @@ private:
 	bool bCommandLineAASwitchDumpMode = false;
 	bool bCommandLineSpecularSequenceDumpMode = false;
 	bool bCommandLineCameraPathDump = false;
+	bool bCommandLineCameraPathDiagnostics = false;
 	bool bCommandLineLoadLatestCameraPath = false;
 	std::wstring CommandLineCameraPathFile;
 
@@ -943,6 +965,7 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	shared_ptr<Texture> DefaultBlackTex;
 	shared_ptr<Texture> DefaultNormalTex;
 	shared_ptr<Texture> DefaultRougnessTex;
+	shared_ptr<Texture> ProceduralDungeonBrickDiffuseTex;
 
 	// global wrap sampler
 	std::shared_ptr<Sampler> samplerWrap;
@@ -986,6 +1009,8 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 		bool bVisible = true;
 		bool bRayTracing = true;
 		bool bPhysicsQuery = true;
+		EPhysicsCollisionShape PhysicsCollisionShape = EPhysicsCollisionShape::TriangleMesh;
+		glm::vec3 PhysicsBoxHalfExtent = glm::vec3(0.5f);
 		UINT32 RenderDirtyBits = 0;
 	};
 	vector<SceneObject> SceneObjects;
@@ -997,6 +1022,8 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	{
 		shared_ptr<Scene> ScenePtr;
 		std::wstring Path;
+		EPhysicsCollisionShape PhysicsCollisionShape = EPhysicsCollisionShape::TriangleMesh;
+		glm::vec3 PhysicsBoxHalfExtent = glm::vec3(0.5f);
 	};
 	struct ScriptObjectState
 	{
@@ -1004,6 +1031,8 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 		glm::vec3 Position = glm::vec3(0.0f);
 		glm::vec3 RotationDegrees = glm::vec3(0.0f);
 		float TargetExtent = 1.0f;
+		glm::vec3 Scale = glm::vec3(1.0f);
+		bool bUseScale = false;
 	};
 	struct LuauScriptState
 	{
@@ -1092,6 +1121,16 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	int ScriptMouseDeltaX = 0;
 	int ScriptMouseDeltaY = 0;
 	bool bScriptMousePositionInitialized = false;
+	bool bScriptGamepadConnected = false;
+	float ScriptGamepadLeftX = 0.0f;
+	float ScriptGamepadLeftY = 0.0f;
+	float ScriptGamepadRightX = 0.0f;
+	float ScriptGamepadRightY = 0.0f;
+	float ScriptGamepadLeftTrigger = 0.0f;
+	float ScriptGamepadRightTrigger = 0.0f;
+	uint16_t ScriptGamepadButtonsDown = 0;
+	uint16_t ScriptGamepadButtonsPressed = 0;
+	uint16_t ScriptGamepadButtonsReleased = 0;
 	struct CpuPhysicsState;
 	struct CpuPhysicsStateDeleter
 	{
@@ -1309,6 +1348,26 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	};
 
 	RenderWorldMirror RenderWorld;
+	struct SceneObjectCullingState
+	{
+		bool LastVisible = true;
+		bool HasPendingOcclusionQuery = false;
+		uint32_t LastQueryIndex = 0;
+		uint32_t LastQueryFrameIndex = 0;
+		uint64_t LastTestFrame = 0;
+		glm::vec3 LastBoundsCenter = glm::vec3(0.0f);
+		float LastBoundsRadius = 0.0f;
+		bool HasBounds = false;
+	};
+	std::map<SceneObjectHandle, SceneObjectCullingState> SceneObjectCullingStates;
+	uint32_t GBufferOcclusionQueryCapacityPerFrame = 0;
+	uint32_t GBufferOcclusionFrameIndex = 0;
+	uint32_t GBufferOcclusionQueryCount = 0;
+	bool bGBufferOcclusionQueriesActive = false;
+	uint64_t GBufferLastTotalObjectCount = 0;
+	uint64_t GBufferLastVisibleObjectCount = 0;
+	uint64_t GBufferLastFrustumCulledObjectCount = 0;
+	uint64_t GBufferLastOcclusionCulledObjectCount = 0;
 	std::vector<RenderSyncChannel> RenderSyncChannels;
 	bool bRenderSyncChannelsInitialized = false;
 	bool bSceneObjectFullSyncPending = false;
@@ -1367,7 +1426,9 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 		UINT32 VertexOffset = 0;
 		UINT32 IndexOffset = 0;
 		UINT32 Flags = 0;
-		UINT32 Padding = 0;
+		UINT32 bOverrideRoughnessMetallic = 0;
+		glm::vec2 RoughnessMetallic = glm::vec2(1.0f, 0.0f);
+		glm::vec2 Padding = glm::vec2(0.0f);
 	};
 
 	std::shared_ptr<Buffer> InstancePropertyBuffer;
@@ -1479,6 +1540,7 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	void StopCameraPathDump();
 	void UpdateCameraPathState();
 	std::wstring BuildCameraPathFrameDumpPath() const;
+	void DumpCameraPathDiagnosticFrame();
 	void RequestCameraPathDumpFrameCapture();
 	void ConsumeCameraPathDumpCaptureResult();
 	void LaunchCameraPathVideoEncode();
@@ -1531,6 +1593,11 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 		float targetExtent,
 		const glm::vec3& position = glm::vec3(0.0f),
 		const glm::vec3& rotationDegrees = glm::vec3(0.0f)) const;
+	glm::mat4x4 BuildScaledSceneTransform(
+		const shared_ptr<Scene>& scene,
+		const glm::vec3& scale,
+		const glm::vec3& position = glm::vec3(0.0f),
+		const glm::vec3& rotationDegrees = glm::vec3(0.0f)) const;
 	SceneObjectHandle AddCenteredSceneObject(
 		const shared_ptr<Scene>& scene,
 		float targetExtent,
@@ -1540,6 +1607,8 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 		const glm::vec3& position = glm::vec3(0.0f),
 		const glm::vec3& rotationDegrees = glm::vec3(0.0f));
 	shared_ptr<Scene> CreateMirrorCubeScene();
+	shared_ptr<Texture> GetProceduralDungeonBrickDiffuseTexture();
+	shared_ptr<Scene> CreateProceduralBoxScene(const glm::vec3& baseColor, bool bUseBrickTexture = false, float uvRepeat = 1.0f);
 	bool ShouldIncludeSceneObjectInRayTracingAS(const SceneObject& object) const;
 	void MarkRayTracingSceneDirty();
 	void MarkRayTracingTransformsDirty();
@@ -1586,12 +1655,15 @@ public:
 		float maxDistance,
 		CpuPhysicsRaycastHit& hit);
 	ScriptSceneHandle CreateProceduralBlockCharacterSceneForScript(UINT32 seed);
+	ScriptSceneHandle CreateProceduralBoxSceneForScript(const glm::vec3& baseColor, bool bUseBrickTexture = false, float uvRepeat = 1.0f);
 	ScriptSceneHandle LoadSceneForScript(const std::wstring& assetPath);
 	SceneObjectHandle SpawnSceneObjectForScript(
 		ScriptSceneHandle sceneHandle,
 		const glm::vec3& position,
 		const glm::vec3& rotationDegrees,
 		float targetExtent,
+		const glm::vec3& scale,
+		bool bUseScale,
 		float roughness,
 		float metallic,
 		bool bOverrideRoughnessMetallic,
@@ -1602,12 +1674,17 @@ public:
 		SceneObjectHandle handle,
 		const glm::vec3& position,
 		const glm::vec3& rotationDegrees,
-		float targetExtent);
+		float targetExtent,
+		const glm::vec3& scale,
+		bool bUseScale);
 	bool GetSceneObjectTransformForScript(
 		SceneObjectHandle handle,
 		glm::vec3& position,
 		glm::vec3& rotationDegrees,
-		float& targetExtent) const;
+		float& targetExtent,
+		glm::vec3& scale,
+		bool& bUseScale) const;
+	bool SetDefaultWorldVisibleForScript(bool visible);
 	bool SetScriptCameraControlForScript(bool enabled);
 	bool SetCameraForScript(
 		const glm::vec3& position,
@@ -1626,6 +1703,7 @@ public:
 	void RecordScriptRButtonUp();
 	void RecordScriptMouseMove(int x, int y);
 	void PollScriptMouseState();
+	void PollScriptGamepadState();
 	bool IsScriptKeyDownForScript(UINT8 key) const;
 	bool WasScriptKeyPressedForScript(UINT8 key) const;
 	bool WasScriptKeyReleasedForScript(UINT8 key) const;
@@ -1637,6 +1715,17 @@ public:
 		bool& rightDown,
 		bool& rightPressed,
 		bool& rightReleased) const;
+	void GetScriptGamepadForScript(
+		bool& connected,
+		float& leftX,
+		float& leftY,
+		float& rightX,
+		float& rightY,
+		float& leftTrigger,
+		float& rightTrigger,
+		uint16_t& buttonsDown,
+		uint16_t& buttonsPressed,
+		uint16_t& buttonsReleased) const;
 	void ClearScriptInputFrameState();
 	void InitLuauScripting();
 	void RunStartupLuauScript();
@@ -1736,6 +1825,13 @@ public:
 	void InitBlueNoiseTexture();
 
 	void DrawScene(shared_ptr<Scene> scene, const glm::mat4x4& instanceTransform, float Roughness, float Metalic, bool bOverrideRoughnessMetallic);
+	bool GetSceneObjectWorldBounds(const SceneObject& object, glm::vec3& boundsMin, glm::vec3& boundsMax, glm::vec3& center, float& radius) const;
+	bool IsWorldAabbInViewFrustum(const glm::vec3& boundsMin, const glm::vec3& boundsMax) const;
+	void PrepareGBufferCulling(uint32_t sceneObjectCount);
+	bool ShouldDrawSceneObjectInGBuffer(const SceneObject& object, const glm::vec3& boundsCenter, float boundsRadius);
+	uint32_t BeginGBufferOcclusionQuery(SceneObjectHandle handle);
+	void EndGBufferOcclusionQuery(SceneObjectHandle handle, uint32_t queryIndex);
+	void FinishGBufferCulling();
 
 	void GBufferPass();
 
@@ -1766,6 +1862,7 @@ public:
 
 	void PathTracingPass();
 	void ApplyHybridDefaultCamera();
+	void ApplySponzaFlyCamera();
 	void EnsureWindowFramebuffers();
 
 	void ToneMapPass();
@@ -1779,6 +1876,7 @@ public:
 	bool IsTemporalAAEnabled() const { return AntiAliasingMode == EAntiAliasingMode::TAA; }
 	bool IsDLSSSREnabled() const { return AntiAliasingMode == EAntiAliasingMode::DLSS_SR && bDLSSAvailable; }
 	bool IsDLSSRREnabled() const { return AntiAliasingMode == EAntiAliasingMode::DLSS_RR && bDLSSRRAvailable; }
+	bool IsPathTracingDLSSRREnabled() const { return RenderingMode == ERenderingMode::PATHTRACING && bEnablePathTracingDLSSRR && IsDLSSRREnabled(); }
 	bool IsDLSSUpscaleEnabled() const { return IsDLSSSREnabled() || IsDLSSRREnabled(); }
 	bool IsJitterEnabled() const { return IsTemporalAAEnabled() || IsDLSSUpscaleEnabled(); }
 	UINT GetRenderWidth() const { return IsDLSSUpscaleEnabled() && RenderingMode == ERenderingMode::HYBRID ? RenderWidth : m_width; }

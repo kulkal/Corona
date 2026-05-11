@@ -181,6 +181,9 @@ struct RTInstanceDesc
 {
 	std::shared_ptr<RTAS> BottomLevelAS;
 	glm::mat4x4 Transform = glm::mat4x4(1.0f);
+	float Roughness = 1.0f;
+	float Metallic = 0.0f;
+	uint32_t bOverrideRoughnessMetallic = 0;
 	uint32_t Flags = 0;
 };
 
@@ -242,6 +245,12 @@ public:
 	virtual void WriteGpuTimestamp(uint32_t queryIndex) = 0;
 	virtual void ResolveGpuTimestampRange(uint32_t startQueryIndex, uint32_t queryCount) = 0;
 	virtual uint64_t ReadGpuTimestampValue(uint32_t queryIndex) const = 0;
+	virtual void InitializeOcclusionQueries(uint32_t queryCount) = 0;
+	virtual void ShutdownOcclusionQueries() = 0;
+	virtual void BeginOcclusionQuery(uint32_t queryIndex) = 0;
+	virtual void EndOcclusionQuery(uint32_t queryIndex) = 0;
+	virtual void ResolveOcclusionQueryRange(uint32_t startQueryIndex, uint32_t queryCount) = 0;
+	virtual uint64_t ReadOcclusionQueryValue(uint32_t queryIndex) const = 0;
 	virtual void SetRenderTarget(Texture* colorTarget, Texture* depthTarget = nullptr) = 0;
 	virtual void SetRenderTargets(Texture* const* colorTargets, uint32_t colorTargetCount, Texture* depthTarget = nullptr) = 0;
 	virtual void ClearRenderTarget(Texture* colorTarget, const float clearColor[4]) = 0;

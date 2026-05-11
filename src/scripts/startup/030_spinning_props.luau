@@ -1,5 +1,11 @@
 local script = {}
 
+corona_script_controls = corona_script_controls or {}
+if corona_script_controls.dungeon ~= nil and corona_script_controls.dungeon.enabled then
+    corona.log("startup spinning props skipped for dungeon mode")
+    return {}
+end
+
 local buddhaScene = corona.load_scene("assets/buddha/buddha.obj")
 local shaderBallScene = corona.load_scene("assets/shaderBall/shaderBall.fbx")
 

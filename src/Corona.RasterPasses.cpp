@@ -13,9 +13,13 @@
 #include "Corona.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdlib>
 #include <iterator>
+#include <limits>
+
+void AppendCpuRuntimeTrace(const std::wstring& line);
 
 void Corona::InitBloomPass()
 {
@@ -604,13 +608,7 @@ void Corona::ToneMapPass()
 		if (!ToneMapGraphicsPipeline)
 			return;
 
-		Texture* ResolveTarget = nullptr;
-		if (RenderingMode == ERenderingMode::PATHTRACING)
-			ResolveTarget = PathTracingAccumBuffer[PathTracingWriteIndex].get();
-		else if (bUseLightingBufferFallbackForToneMap && LightingBuffer)
-			ResolveTarget = LightingBuffer.get();
-		else
-			ResolveTarget = ColorBuffers[ResolvedColorBufferIndex].get();
+		Texture* ResolveTarget = GetCurrentResolveSource();
 		if (!ResolveTarget)
 			return;
 
@@ -629,20 +627,9 @@ void Corona::ToneMapPass()
 
 
 	Texture* backbuffer = framebuffers[renderBackend->GetCurrentFrameIndex()].get();
-	Texture* ResolveTarget = nullptr;
-	
-	// Select source texture based on rendering mode
-	if (RenderingMode == ERenderingMode::PATHTRACING)
-	{
-		ResolveTarget = PathTracingAccumBuffer[PathTracingWriteIndex].get();
-	}
-	else
-	{
-		if (bUseLightingBufferFallbackForToneMap && LightingBuffer)
-			ResolveTarget = LightingBuffer.get();
-		else
-			ResolveTarget = ColorBuffers[ResolvedColorBufferIndex].get();
-	}
+	Texture* ResolveTarget = GetCurrentResolveSource();
+	if (!ResolveTarget)
+		return;
 
 	ToneMapPSO->Apply();
 
@@ -1619,6 +1606,179 @@ void Corona::DrawScene(shared_ptr<Scene> scene, const glm::mat4x4& instanceTrans
 	}
 }
 
+bool Corona::GetSceneObjectWorldBounds(
+	const SceneObject& object,
+	glm::vec3& boundsMin,
+	glm::vec3& boundsMax,
+	glm::vec3& center,
+	float& radius) const
+{
+	if (!object.ScenePtr || !object.ScenePtr->bHasBounds)
+		return false;
+
+	const glm::vec3 localMin = object.ScenePtr->BoundsMin;
+	const glm::vec3 localMax = object.ScenePtr->BoundsMax;
+	const std::array<glm::vec3, 8> corners =
+	{
+		glm::vec3(localMin.x, localMin.y, localMin.z),
+		glm::vec3(localMax.x, localMin.y, localMin.z),
+		glm::vec3(localMin.x, localMax.y, localMin.z),
+		glm::vec3(localMax.x, localMax.y, localMin.z),
+		glm::vec3(localMin.x, localMin.y, localMax.z),
+		glm::vec3(localMax.x, localMin.y, localMax.z),
+		glm::vec3(localMin.x, localMax.y, localMax.z),
+		glm::vec3(localMax.x, localMax.y, localMax.z),
+	};
+
+	boundsMin = glm::vec3(std::numeric_limits<float>::max());
+	boundsMax = glm::vec3(-std::numeric_limits<float>::max());
+	for (const glm::vec3& corner : corners)
+	{
+		const glm::vec3 worldCorner = glm::vec3(object.Transform * glm::vec4(corner, 1.0f));
+		boundsMin = glm::min(boundsMin, worldCorner);
+		boundsMax = glm::max(boundsMax, worldCorner);
+	}
+
+	center = (boundsMin + boundsMax) * 0.5f;
+	radius = glm::length(boundsMax - boundsMin) * 0.5f;
+	return radius > 0.001f;
+}
+
+bool Corona::IsWorldAabbInViewFrustum(const glm::vec3& boundsMin, const glm::vec3& boundsMax) const
+{
+	const std::array<glm::vec3, 8> corners =
+	{
+		glm::vec3(boundsMin.x, boundsMin.y, boundsMin.z),
+		glm::vec3(boundsMax.x, boundsMin.y, boundsMin.z),
+		glm::vec3(boundsMin.x, boundsMax.y, boundsMin.z),
+		glm::vec3(boundsMax.x, boundsMax.y, boundsMin.z),
+		glm::vec3(boundsMin.x, boundsMin.y, boundsMax.z),
+		glm::vec3(boundsMax.x, boundsMin.y, boundsMax.z),
+		glm::vec3(boundsMin.x, boundsMax.y, boundsMax.z),
+		glm::vec3(boundsMax.x, boundsMax.y, boundsMax.z),
+	};
+
+	std::array<uint32_t, 6> outsideCounts = {};
+	for (const glm::vec3& corner : corners)
+	{
+		const glm::vec4 clip = UnjitteredViewProjMat * glm::vec4(corner, 1.0f);
+		if (clip.x < -clip.w) ++outsideCounts[0];
+		if (clip.x >  clip.w) ++outsideCounts[1];
+		if (clip.y < -clip.w) ++outsideCounts[2];
+		if (clip.y >  clip.w) ++outsideCounts[3];
+		if (clip.z < -clip.w) ++outsideCounts[4];
+		if (clip.z >  clip.w) ++outsideCounts[5];
+	}
+
+	for (uint32_t outsideCount : outsideCounts)
+	{
+		if (outsideCount == corners.size())
+			return false;
+	}
+	return true;
+}
+
+void Corona::PrepareGBufferCulling(uint32_t sceneObjectCount)
+{
+	GBufferLastTotalObjectCount = 0;
+	GBufferLastVisibleObjectCount = 0;
+	GBufferLastFrustumCulledObjectCount = 0;
+	GBufferLastOcclusionCulledObjectCount = 0;
+	GBufferOcclusionQueryCount = 0;
+	bGBufferOcclusionQueriesActive = false;
+
+	if (!renderBackend || renderBackend->GetAPI() != ERenderBackendAPI::D3D12 || sceneObjectCount == 0)
+		return;
+
+	uint32_t capacityPerFrame = 256u;
+	while (capacityPerFrame < sceneObjectCount + 32u)
+		capacityPerFrame *= 2u;
+
+	if (capacityPerFrame != GBufferOcclusionQueryCapacityPerFrame)
+	{
+		GBufferOcclusionQueryCapacityPerFrame = capacityPerFrame;
+		SceneObjectCullingStates.clear();
+		renderBackend->InitializeOcclusionQueries(GBufferOcclusionQueryCapacityPerFrame * std::max<uint32_t>(1u, renderBackend->GetFrameCount()));
+	}
+
+	GBufferOcclusionFrameIndex = renderBackend->GetCurrentFrameIndex();
+	bGBufferOcclusionQueriesActive = GBufferOcclusionQueryCapacityPerFrame > 0;
+}
+
+bool Corona::ShouldDrawSceneObjectInGBuffer(const SceneObject& object, const glm::vec3& boundsCenter, float boundsRadius)
+{
+	if (!bGBufferOcclusionQueriesActive || object.Handle == InvalidSceneObjectHandle)
+		return true;
+
+	SceneObjectCullingState& state = SceneObjectCullingStates[object.Handle];
+	const float movementThreshold = std::max(4.0f, boundsRadius * 0.05f);
+	const bool boundsChanged =
+		!state.HasBounds ||
+		glm::length(boundsCenter - state.LastBoundsCenter) > movementThreshold ||
+		std::abs(boundsRadius - state.LastBoundsRadius) > movementThreshold;
+	if (boundsChanged)
+	{
+		state.LastVisible = true;
+		state.HasPendingOcclusionQuery = false;
+		state.LastTestFrame = 0;
+		state.LastBoundsCenter = boundsCenter;
+		state.LastBoundsRadius = boundsRadius;
+		state.HasBounds = true;
+	}
+
+	if (state.HasPendingOcclusionQuery && state.LastQueryFrameIndex == GBufferOcclusionFrameIndex)
+	{
+		state.LastVisible = renderBackend->ReadOcclusionQueryValue(state.LastQueryIndex) != 0;
+		state.HasPendingOcclusionQuery = false;
+	}
+
+	constexpr uint64_t kMaxOcclusionSkipFrames = 8;
+	const uint64_t framesSinceTest =
+		FrameCounter >= state.LastTestFrame ?
+		static_cast<uint64_t>(FrameCounter) - state.LastTestFrame :
+		kMaxOcclusionSkipFrames + 1u;
+	if (!state.LastVisible && framesSinceTest <= kMaxOcclusionSkipFrames)
+	{
+		++GBufferLastOcclusionCulledObjectCount;
+		return false;
+	}
+
+	return true;
+}
+
+uint32_t Corona::BeginGBufferOcclusionQuery(SceneObjectHandle handle)
+{
+	if (!bGBufferOcclusionQueriesActive || handle == InvalidSceneObjectHandle || GBufferOcclusionQueryCount >= GBufferOcclusionQueryCapacityPerFrame)
+		return std::numeric_limits<uint32_t>::max();
+
+	const uint32_t queryIndex = GBufferOcclusionFrameIndex * GBufferOcclusionQueryCapacityPerFrame + GBufferOcclusionQueryCount;
+	++GBufferOcclusionQueryCount;
+	renderBackend->BeginOcclusionQuery(queryIndex);
+	return queryIndex;
+}
+
+void Corona::EndGBufferOcclusionQuery(SceneObjectHandle handle, uint32_t queryIndex)
+{
+	if (queryIndex == std::numeric_limits<uint32_t>::max() || handle == InvalidSceneObjectHandle)
+		return;
+
+	renderBackend->EndOcclusionQuery(queryIndex);
+	SceneObjectCullingState& state = SceneObjectCullingStates[handle];
+	state.HasPendingOcclusionQuery = true;
+	state.LastQueryIndex = queryIndex;
+	state.LastQueryFrameIndex = GBufferOcclusionFrameIndex;
+	state.LastTestFrame = FrameCounter;
+}
+
+void Corona::FinishGBufferCulling()
+{
+	if (!bGBufferOcclusionQueriesActive || GBufferOcclusionQueryCount == 0)
+		return;
+
+	const uint32_t firstQuery = GBufferOcclusionFrameIndex * GBufferOcclusionQueryCapacityPerFrame;
+	renderBackend->ResolveOcclusionQueryRange(firstQuery, GBufferOcclusionQueryCount);
+}
+
 void Corona::GBufferPass()
 {
 	ColorBufferWriteIndex = 1 - ColorBufferWriteIndex;
@@ -1672,18 +1832,47 @@ void Corona::GBufferPass()
 	renderBackend->BindGraphicsPipeline(GBufferGraphicsPipeline.get());
 	renderBackend->BindGraphicsPipelineSampler(GBufferGraphicsPipeline.get(), "samplerWrap", samplerWrap.get());
 
+	PrepareGBufferCulling(static_cast<uint32_t>(RenderWorld.SceneObjects.size()));
+
 	if (!bMultiThreadRendering)
 	{
 		for (const SceneObject& object : RenderWorld.SceneObjects)
 		{
 			if (!object.bVisible || !object.ScenePtr)
 				continue;
+			++GBufferLastTotalObjectCount;
+
+			glm::vec3 boundsMin(0.0f);
+			glm::vec3 boundsMax(0.0f);
+			glm::vec3 boundsCenter(0.0f);
+			float boundsRadius = 0.0f;
+			if (GetSceneObjectWorldBounds(object, boundsMin, boundsMax, boundsCenter, boundsRadius))
+			{
+				if (!IsWorldAabbInViewFrustum(boundsMin, boundsMax))
+				{
+					++GBufferLastFrustumCulledObjectCount;
+					auto stateIt = SceneObjectCullingStates.find(object.Handle);
+					if (stateIt != SceneObjectCullingStates.end())
+					{
+						stateIt->second.LastVisible = true;
+						stateIt->second.HasPendingOcclusionQuery = false;
+					}
+					continue;
+				}
+
+				if (!ShouldDrawSceneObjectInGBuffer(object, boundsCenter, boundsRadius))
+					continue;
+			}
+
+			const uint32_t occlusionQueryIndex = BeginGBufferOcclusionQuery(object.Handle);
 			DrawScene(
 				object.ScenePtr,
 				object.Transform,
 				object.Roughness,
 				object.Metallic,
 				object.bOverrideRoughnessMetallic);
+			EndGBufferOcclusionQuery(object.Handle, occlusionQueryIndex);
+			++GBufferLastVisibleObjectCount;
 		}
 	}
 	else
@@ -1723,6 +1912,23 @@ void Corona::GBufferPass()
 		//}
 
 		//g_TS.WaitforAll();
+	}
+
+	FinishGBufferCulling();
+
+	if ((FrameCounter % 120u) == 0u &&
+		(GBufferLastTotalObjectCount != 0 ||
+		 GBufferLastVisibleObjectCount != 0 ||
+		 GBufferLastFrustumCulledObjectCount != 0 ||
+		 GBufferLastOcclusionCulledObjectCount != 0))
+	{
+		AppendCpuRuntimeTrace(
+			L"[GBufferCulling] rendered=" + std::to_wstring(GBufferLastVisibleObjectCount) +
+			L"/" + std::to_wstring(GBufferLastTotalObjectCount) +
+			L", frustum=" + std::to_wstring(GBufferLastFrustumCulledObjectCount) +
+			L", occlusion=" + std::to_wstring(GBufferLastOcclusionCulledObjectCount) +
+			L", queries=" + std::to_wstring(GBufferOcclusionQueryCount) +
+			L", active=" + std::to_wstring(bGBufferOcclusionQueriesActive ? 1 : 0));
 	}
 	
 	renderBackend->TransitionTexture(AlbedoBuffer.get(), EResourceState::RenderTarget, EResourceState::ShaderRead);

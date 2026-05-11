@@ -4400,6 +4400,38 @@ uint64_t VulkanBackend::ReadGpuTimestampValue(uint32_t queryIndex) const
 	return result;
 #endif
 }
+
+void VulkanBackend::InitializeOcclusionQueries(uint32_t queryCount)
+{
+	(void)queryCount;
+}
+
+void VulkanBackend::ShutdownOcclusionQueries()
+{
+}
+
+void VulkanBackend::BeginOcclusionQuery(uint32_t queryIndex)
+{
+	(void)queryIndex;
+}
+
+void VulkanBackend::EndOcclusionQuery(uint32_t queryIndex)
+{
+	(void)queryIndex;
+}
+
+void VulkanBackend::ResolveOcclusionQueryRange(uint32_t startQueryIndex, uint32_t queryCount)
+{
+	(void)startQueryIndex;
+	(void)queryCount;
+}
+
+uint64_t VulkanBackend::ReadOcclusionQueryValue(uint32_t queryIndex) const
+{
+	(void)queryIndex;
+	return 1;
+}
+
 void VulkanBackend::SetRenderTarget(Texture* colorTarget, Texture* depthTarget)
 {
 #if !CORONA_HAS_VULKAN

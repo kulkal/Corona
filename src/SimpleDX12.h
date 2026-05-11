@@ -609,6 +609,10 @@ public:
 	ComPtr<ID3D12Resource> GpuTimestampReadbackBuffer;
 	UINT64* GpuTimestampReadbackMapped = nullptr;
 	uint32_t GpuTimestampQueryCount = 0;
+	ComPtr<ID3D12QueryHeap> OcclusionQueryHeap;
+	ComPtr<ID3D12Resource> OcclusionReadbackBuffer;
+	UINT64* OcclusionReadbackMapped = nullptr;
+	uint32_t OcclusionQueryCount = 0;
 
 	string errorString;
 
@@ -659,6 +663,12 @@ public:
 	void WriteGpuTimestamp(uint32_t queryIndex) override;
 	void ResolveGpuTimestampRange(uint32_t startQueryIndex, uint32_t queryCount) override;
 	uint64_t ReadGpuTimestampValue(uint32_t queryIndex) const override;
+	void InitializeOcclusionQueries(uint32_t queryCount) override;
+	void ShutdownOcclusionQueries() override;
+	void BeginOcclusionQuery(uint32_t queryIndex) override;
+	void EndOcclusionQuery(uint32_t queryIndex) override;
+	void ResolveOcclusionQueryRange(uint32_t startQueryIndex, uint32_t queryCount) override;
+	uint64_t ReadOcclusionQueryValue(uint32_t queryIndex) const override;
 	void SetRenderTarget(Texture* colorTarget, Texture* depthTarget = nullptr) override;
 	void SetRenderTargets(Texture* const* colorTargets, uint32_t colorTargetCount, Texture* depthTarget = nullptr) override;
 	void ClearRenderTarget(Texture* colorTarget, const float clearColor[4]) override;

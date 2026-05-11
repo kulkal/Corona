@@ -30,6 +30,50 @@ float3 CommonSanitizeFloat3(float3 value, float3 fallback)
     return value;
 }
 
+float3 EnvBRDFApprox2(float3 specularColor, float alpha, float NoV)
+{
+    NoV = abs(NoV);
+
+    float4 X;
+    X.x = 1.0f;
+    X.y = NoV;
+    X.z = NoV * NoV;
+    X.w = NoV * X.z;
+
+    float4 Y;
+    Y.x = 1.0f;
+    Y.y = alpha;
+    Y.z = alpha * alpha;
+    Y.w = alpha * Y.z;
+
+    float2x2 M1 = float2x2(0.99044f, -1.28514f, 1.29678f, -0.755907f);
+    float3x3 M2 = float3x3(1.0f, 2.92338f, 59.4188f,
+                            20.3225f, -27.0302f, 222.592f,
+                            121.563f, 626.13f, 316.627f);
+    float2x2 M3 = float2x2(0.0365463f, 3.32707f, 9.0632f, -9.04756f);
+    float3x3 M4 = float3x3(1.0f, 3.59685f, -1.36772f,
+                            9.04401f, -16.3174f, 9.22949f,
+                            5.56589f, 19.7886f, -20.2123f);
+
+    float biasDenom = dot(mul(M2, X.xyw), Y.xyw);
+    float scaleDenom = dot(mul(M4, X.xzw), Y.xyw);
+    float bias = dot(mul(M1, X.xy), Y.xy) / max(abs(biasDenom), 1.0e-6f);
+    float scale = dot(mul(M3, X.xy), Y.xy) / max(abs(scaleDenom), 1.0e-6f);
+
+    bias *= saturate(specularColor.g * 50.0f);
+    return mad(specularColor, max(0.0f, scale), max(0.0f, bias));
+}
+
+float3 ComputeDLSSRRSpecularAlbedo(float3 baseColor, float metallic, float roughness, float3 normal, float3 viewDir)
+{
+    float3 F0 = lerp(0.04f.xxx, saturate(baseColor), saturate(metallic));
+    float3 N = CommonSafeNormalize(normal, float3(0.0f, 1.0f, 0.0f));
+    float3 V = CommonSafeNormalize(viewDir, N);
+    float NoV = saturate(dot(N, V));
+    float alpha = saturate(roughness) * saturate(roughness);
+    return saturate(EnvBRDFApprox2(F0, alpha, NoV));
+}
+
 
 float GetLinearDepth(float DeviceDepth, float ParamX, float ParamY, float ParamZ)
 {
@@ -395,11 +439,13 @@ uint3 GetIndices(ByteAddressBuffer ib, uint triangleIndex)
     return index;
 }
 
-static const uint INSTANCE_PROPERTY_STRIDE = 80;
+static const uint INSTANCE_PROPERTY_STRIDE = 96;
 static const uint INSTANCE_PROPERTY_WORLD_MATRIX_OFFSET = 0;
 static const uint INSTANCE_PROPERTY_VERTEX_OFFSET = 64;
 static const uint INSTANCE_PROPERTY_INDEX_OFFSET = 68;
 static const uint INSTANCE_PROPERTY_FLAGS_OFFSET = 72;
+static const uint INSTANCE_PROPERTY_OVERRIDE_RM_OFFSET = 76;
+static const uint INSTANCE_PROPERTY_ROUGHNESS_METALLIC_OFFSET = 80;
 static const uint INSTANCE_FLAG_ALPHA_TESTED = 1u << 0;
 
 bool IsAlphaTestedInstance(uint instanceID, ByteAddressBuffer ip)
@@ -407,6 +453,38 @@ bool IsAlphaTestedInstance(uint instanceID, ByteAddressBuffer ip)
     uint instancePropertyBase = instanceID * INSTANCE_PROPERTY_STRIDE;
     uint flags = ip.Load(instancePropertyBase + INSTANCE_PROPERTY_FLAGS_OFFSET);
     return (flags & INSTANCE_FLAG_ALPHA_TESTED) != 0u;
+}
+
+uint GetInstanceRoughnessMetallicOverride(uint instanceID, ByteAddressBuffer ip)
+{
+    uint instancePropertyBase = instanceID * INSTANCE_PROPERTY_STRIDE;
+    return ip.Load(instancePropertyBase + INSTANCE_PROPERTY_OVERRIDE_RM_OFFSET);
+}
+
+float2 GetInstanceRoughnessMetallic(uint instanceID, ByteAddressBuffer ip)
+{
+    uint instancePropertyBase = instanceID * INSTANCE_PROPERTY_STRIDE;
+    return asfloat(ip.Load2(instancePropertyBase + INSTANCE_PROPERTY_ROUGHNESS_METALLIC_OFFSET));
+}
+
+void ApplyInstanceRoughnessMetallic(uint instanceID, ByteAddressBuffer ip, inout float roughness, inout float metallic)
+{
+    float2 instanceRoughnessMetallic = GetInstanceRoughnessMetallic(instanceID, ip);
+    instanceRoughnessMetallic = max(instanceRoughnessMetallic, float2(0.0f, 0.0f));
+
+    if (GetInstanceRoughnessMetallicOverride(instanceID, ip) != 0u)
+    {
+        roughness = instanceRoughnessMetallic.x;
+        metallic = instanceRoughnessMetallic.y;
+    }
+    else
+    {
+        roughness = max(roughness, 0.01f) * instanceRoughnessMetallic.x;
+        metallic = max(metallic, 0.01f) * instanceRoughnessMetallic.y;
+    }
+
+    roughness = clamp(roughness, 0.02f, 1.0f);
+    metallic = saturate(metallic);
 }
 
 uint3 GetIndicesWithOffset(ByteAddressBuffer ib, uint triangleIndex, uint indexOffset)

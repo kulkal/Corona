@@ -52,7 +52,10 @@ namespace
 		vector<RTInstanceDesc>& instances,
 		map<Mesh*, shared_ptr<RTAS>>& blasCache,
 		const shared_ptr<Scene>& scene,
-		const glm::mat4x4& instanceTransform)
+		const glm::mat4x4& instanceTransform,
+		float roughness,
+		float metallic,
+		bool bOverrideRoughnessMetallic)
 	{
 		if (!scene)
 			return;
@@ -81,6 +84,9 @@ namespace
 			RTInstanceDesc instance;
 			instance.BottomLevelAS = blas;
 			instance.Transform = instanceTransform * mesh->transform;
+			instance.Roughness = roughness;
+			instance.Metallic = metallic;
+			instance.bOverrideRoughnessMetallic = bOverrideRoughnessMetallic ? 1u : 0u;
 			for (const Mesh::DrawCall& draw : mesh->Draws)
 			{
 				if (draw.mat && draw.mat->bHasAlpha)
@@ -110,6 +116,8 @@ Corona::SceneObjectHandle Corona::AddSceneObject(const SceneObjectDesc& desc)
 	object.bVisible = desc.bVisible;
 	object.bRayTracing = desc.bRayTracing;
 	object.bPhysicsQuery = desc.bPhysicsQuery;
+	object.PhysicsCollisionShape = desc.PhysicsCollisionShape;
+	object.PhysicsBoxHalfExtent = desc.PhysicsBoxHalfExtent;
 	object.Transform = desc.Transform;
 	SceneObjects.push_back(object);
 
@@ -267,7 +275,14 @@ void Corona::UpdateRayTracingInstanceTransforms()
 	for (const SceneObject& object : RenderWorld.SceneObjects)
 	{
 		if (ShouldIncludeSceneObjectInRayTracingAS(object))
-			AddMeshesToRayTracingInstances(updatedInstances, RayTracingBLASCache, object.ScenePtr, object.Transform);
+			AddMeshesToRayTracingInstances(
+				updatedInstances,
+				RayTracingBLASCache,
+				object.ScenePtr,
+				object.Transform,
+				object.Roughness,
+				object.Metallic,
+				object.bOverrideRoughnessMetallic);
 	}
 
 	if (updatedInstances.size() != RayTracingInstances.size())
@@ -307,6 +322,8 @@ void Corona::UpdateInstancePropertyBuffer()
 		instanceProperties[i].VertexOffset = 0;
 		instanceProperties[i].IndexOffset = 0;
 		instanceProperties[i].Flags = RayTracingInstances[i].Flags;
+		instanceProperties[i].bOverrideRoughnessMetallic = RayTracingInstances[i].bOverrideRoughnessMetallic;
+		instanceProperties[i].RoughnessMetallic = glm::vec2(RayTracingInstances[i].Roughness, RayTracingInstances[i].Metallic);
 	}
 
 	if (renderBackend && renderBackend->GetAPI() == ERenderBackendAPI::Vulkan)
@@ -376,7 +393,14 @@ void Corona::RebuildAccelerationStructures()
 	for (const SceneObject& object : RenderWorld.SceneObjects)
 	{
 		if (ShouldIncludeSceneObjectInRayTracingAS(object))
-			AddMeshesToRayTracingInstances(RayTracingInstances, RayTracingBLASCache, object.ScenePtr, object.Transform);
+			AddMeshesToRayTracingInstances(
+				RayTracingInstances,
+				RayTracingBLASCache,
+				object.ScenePtr,
+				object.Transform,
+				object.Roughness,
+				object.Metallic,
+				object.bOverrideRoughnessMetallic);
 	}
 
 	for (auto it = RayTracingBLASCache.begin(); it != RayTracingBLASCache.end();)

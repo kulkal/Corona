@@ -116,6 +116,105 @@ namespace
 		return pathKey.rfind(directoryKey, 0) == 0;
 	}
 
+	bool WriteProceduralDungeonBrickBmp(const std::filesystem::path& filePath)
+	{
+		constexpr uint32_t kWidth = 128;
+		constexpr uint32_t kHeight = 128;
+		constexpr uint32_t kBytesPerPixel = 4;
+		constexpr uint32_t kHeaderSize = 14 + 40;
+		constexpr uint32_t kPixelDataSize = kWidth * kHeight * kBytesPerPixel;
+		constexpr uint32_t kFileSize = kHeaderSize + kPixelDataSize;
+
+		std::ofstream file(filePath, std::ios::binary | std::ios::trunc);
+		if (!file)
+			return false;
+
+		auto writeU16 = [&file](uint16_t value)
+		{
+			const char bytes[2] =
+			{
+				static_cast<char>(value & 0xffu),
+				static_cast<char>((value >> 8) & 0xffu),
+			};
+			file.write(bytes, sizeof(bytes));
+		};
+		auto writeU32 = [&file](uint32_t value)
+		{
+			const char bytes[4] =
+			{
+				static_cast<char>(value & 0xffu),
+				static_cast<char>((value >> 8) & 0xffu),
+				static_cast<char>((value >> 16) & 0xffu),
+				static_cast<char>((value >> 24) & 0xffu),
+			};
+			file.write(bytes, sizeof(bytes));
+		};
+		auto writeI32 = [&writeU32](int32_t value)
+		{
+			writeU32(static_cast<uint32_t>(value));
+		};
+		auto clampByte = [](int value) -> uint8_t
+		{
+			return static_cast<uint8_t>(std::clamp(value, 0, 255));
+		};
+
+		file.write("BM", 2);
+		writeU32(kFileSize);
+		writeU16(0);
+		writeU16(0);
+		writeU32(kHeaderSize);
+		writeU32(40);
+		writeI32(static_cast<int32_t>(kWidth));
+		writeI32(static_cast<int32_t>(kHeight));
+		writeU16(1);
+		writeU16(32);
+		writeU32(0);
+		writeU32(kPixelDataSize);
+		writeI32(2835);
+		writeI32(2835);
+		writeU32(0);
+		writeU32(0);
+
+		for (int y = static_cast<int>(kHeight) - 1; y >= 0; --y)
+		{
+			const int brickRow = y / 16;
+			const int rowLocal = y % 16;
+			const int stagger = (brickRow & 1) ? 16 : 0;
+			for (uint32_t x = 0; x < kWidth; ++x)
+			{
+				const int shiftedX = (static_cast<int>(x) + stagger) % 32;
+				const bool bMortar = rowLocal < 2 || shiftedX < 2;
+				uint8_t r = 76;
+				uint8_t g = 70;
+				uint8_t b = 62;
+				if (!bMortar)
+				{
+					const int brickColumn = (static_cast<int>(x) + stagger) / 32;
+					const uint32_t hash =
+						static_cast<uint32_t>(brickRow * 73856093) ^
+						static_cast<uint32_t>(brickColumn * 19349663);
+					const int variation = static_cast<int>((hash >> 4) & 31u) - 15;
+					const int edgeShade = (rowLocal > 13 || shiftedX > 29) ? -10 : 0;
+					const int surfaceNoise = static_cast<int>(((hash + x * 13u + static_cast<uint32_t>(y) * 7u) >> 3) & 7u) - 3;
+					r = clampByte(132 + variation + edgeShade + surfaceNoise);
+					g = clampByte(64 + variation / 3 + edgeShade + surfaceNoise);
+					b = clampByte(42 + variation / 4 + edgeShade + surfaceNoise);
+				}
+
+				const char pixel[4] =
+				{
+					static_cast<char>(b),
+					static_cast<char>(g),
+					static_cast<char>(r),
+					static_cast<char>(255),
+				};
+				file.write(pixel, sizeof(pixel));
+			}
+		}
+
+		return file.good();
+	}
+
 	std::wstring TrimLeadingWhitespace(std::wstring value)
 	{
 		while (!value.empty() && iswspace(value.front()))
@@ -324,24 +423,22 @@ namespace
 
 	sl::Constants BuildStreamlineConstants(
 		const glm::mat4x4& unjitteredProjMat,
-		const glm::mat4x4& unjitteredViewProjMat,
-		const glm::mat4x4& prevUnjitteredViewProjMat,
+		const glm::mat4x4& prevViewMat,
 		const glm::mat4x4& invViewMat,
 		const glm::vec2& currentJitter,
-		const glm::vec3& cameraLookDirection,
 		float nearPlane,
 		float farPlane,
 		float fov,
 		float aspectRatio,
+		bool bCameraMotionIncluded,
 		bool bResetNeeded)
 	{
 		sl::Constants consts{};
 		const glm::mat4x4 currentProj = unjitteredProjMat;
 		const glm::mat4x4 currentInvProj = glm::inverse(currentProj);
-		const glm::mat4x4 currentClipToWorld = glm::inverse(unjitteredViewProjMat);
-		const glm::mat4x4 prevClipToWorld = glm::inverse(prevUnjitteredViewProjMat);
-		const glm::mat4x4 clipToPrevClip = prevUnjitteredViewProjMat * currentClipToWorld;
-		const glm::mat4x4 prevClipToClip = unjitteredViewProjMat * prevClipToWorld;
+		const glm::mat4x4 currentViewToPrevView = prevViewMat * invViewMat;
+		const glm::mat4x4 clipToPrevClip = currentProj * currentViewToPrevView * currentInvProj;
+		const glm::mat4x4 prevClipToClip = glm::inverse(clipToPrevClip);
 
 		consts.cameraViewToClip = ToSLMatrix(currentProj);
 		consts.clipToCameraView = ToSLMatrix(currentInvProj);
@@ -352,17 +449,16 @@ namespace
 		// so convert the stored sequence sample to the actual pixel jitter used.
 		const glm::vec2 appliedPixelJitter = currentJitter * 0.5f;
 		consts.jitterOffset = sl::float2(appliedPixelJitter.x, appliedPixelJitter.y);
-		// Corona's velocity buffer stores (current - previous) in normalized screen space.
-		// Streamline/DLSS expects vectors that reproject current pixels back to the
-		// previous frame, so flip the sign at integration time without affecting the
-		// engine's internal TAA/denoiser path.
+		// Keep the sign convention that matches the current Streamline/NGX path.
+		// Corona stores uvCurrent - uvPrevious; with this integration the RR
+		// history lookup is correct only when the scale is negated here.
 		consts.mvecScale = sl::float2(-1.0f, -1.0f);
 		consts.cameraPinholeOffset = sl::float2(0.0f, 0.0f);
 
 		glm::vec3 cameraPos = glm::vec3(invViewMat[3]);
 		glm::vec3 cameraRight = glm::normalize(glm::vec3(invViewMat[0]));
 		glm::vec3 cameraUp = glm::normalize(glm::vec3(invViewMat[1]));
-		glm::vec3 cameraFwd = glm::normalize(cameraLookDirection);
+		glm::vec3 cameraFwd = -glm::normalize(glm::vec3(invViewMat[2]));
 		consts.cameraPos = sl::float3(cameraPos.x, cameraPos.y, cameraPos.z);
 		consts.cameraRight = sl::float3(cameraRight.x, cameraRight.y, cameraRight.z);
 		consts.cameraUp = sl::float3(cameraUp.x, cameraUp.y, cameraUp.z);
@@ -372,7 +468,8 @@ namespace
 		consts.cameraFOV = fov;
 		consts.cameraAspectRatio = aspectRatio;
 		consts.depthInverted = sl::Boolean::eFalse;
-		consts.cameraMotionIncluded = sl::Boolean::eTrue;
+		consts.motionVectorsInvalidValue = 0.0f;
+		consts.cameraMotionIncluded = bCameraMotionIncluded ? sl::Boolean::eTrue : sl::Boolean::eFalse;
 		consts.motionVectors3D = sl::Boolean::eFalse;
 		consts.reset = bResetNeeded ? sl::Boolean::eTrue : sl::Boolean::eFalse;
 		consts.orthographicProjection = sl::Boolean::eFalse;
@@ -1082,17 +1179,20 @@ bool Corona::EnsureStreamlineConstants()
 		return true;
 
 	sl::ViewportHandle vp(0);
+	const glm::vec2 streamlineJitter =
+		RenderingMode == ERenderingMode::PATHTRACING ? glm::vec2(0.0f) : CurrentJitter;
+	const bool bStreamlineCameraMotionIncluded =
+		!(RenderingMode == ERenderingMode::PATHTRACING && IsPathTracingDLSSRREnabled());
 	sl::Constants consts = BuildStreamlineConstants(
 		UnjitteredProjMat,
-		UnjitteredViewProjMat,
-		PrevUnjitteredViewProjMat,
+		PrevViewMat,
 		InvViewMat,
-		CurrentJitter,
-		m_camera.m_lookDirection,
+		streamlineJitter,
 		Near,
 		Far,
 		Fov,
 		static_cast<float>(m_width) / static_cast<float>(m_height),
+		bStreamlineCameraMotionIncluded,
 		bDLSSResetNeeded);
 	if (slSetConstants(consts, *StreamlineFrameToken, vp) != sl::Result::eOk)
 		return false;
@@ -1182,9 +1282,17 @@ bool Corona::DLSSRRPass()
 	opts.cameraViewToWorld = ToSLMatrix(InvViewMat);
 	slDLSSDSetOptions(sl::ViewportHandle(0), opts);
 
-	Texture* inputColor = LightingBuffer.get();
+	Texture* inputColor = IsPathTracingDLSSRREnabled() ? PathTracingAccumBuffer[PathTracingWriteIndex].get() : LightingBuffer.get();
 	Texture* outputTarget = DLSSRRBuffer.get();
-	if (!inputColor || !outputTarget)
+	if (!inputColor ||
+		!outputTarget ||
+		!UnjitteredDepthBuffers[ColorBufferWriteIndex] ||
+		!VelocityBuffer ||
+		!NormalBuffers[ColorBufferWriteIndex] ||
+		!RoughnessMetalicBuffer ||
+		!AlbedoBuffer ||
+		!SpecularAlbedoBuffer ||
+		(IsPathTracingDLSSRREnabled() && (!PathTracingSpecularHitDistanceBuffer || !PathTracingSpecularMotionVectorBuffer)))
 		return false;
 	renderBackend->TransitionTexture(outputTarget, EResourceState::ShaderRead, EResourceState::UnorderedAccess);
 
@@ -1198,6 +1306,8 @@ bool Corona::DLSSRRPass()
 	sl::Resource roughnessRes(sl::ResourceType::eTex2d, RoughnessMetalicBuffer->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
 	sl::Resource albedoRes(sl::ResourceType::eTex2d, AlbedoBuffer->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
 	sl::Resource specularAlbedoRes(sl::ResourceType::eTex2d, SpecularAlbedoBuffer->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+	sl::Resource specularHitDistanceRes(sl::ResourceType::eTex2d, PathTracingSpecularHitDistanceBuffer ? PathTracingSpecularHitDistanceBuffer->resource.Get() : nullptr, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+	sl::Resource specularMotionVectorRes(sl::ResourceType::eTex2d, PathTracingSpecularMotionVectorBuffer ? PathTracingSpecularMotionVectorBuffer->resource.Get() : nullptr, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
 	sl::Resource outputRes(sl::ResourceType::eTex2d, outputTarget->resource.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
 	sl::ResourceTag colorTag(&colorRes, sl::kBufferTypeScalingInputColor, sl::ResourceLifecycle::eOnlyValidNow, &renderExtent);
@@ -1207,8 +1317,10 @@ bool Corona::DLSSRRPass()
 	sl::ResourceTag roughnessTag(&roughnessRes, sl::kBufferTypeRoughness, sl::ResourceLifecycle::eOnlyValidNow, &renderExtent);
 	sl::ResourceTag albedoTag(&albedoRes, sl::kBufferTypeAlbedo, sl::ResourceLifecycle::eOnlyValidNow, &renderExtent);
 	sl::ResourceTag specularAlbedoTag(&specularAlbedoRes, sl::kBufferTypeSpecularAlbedo, sl::ResourceLifecycle::eOnlyValidNow, &renderExtent);
+	sl::ResourceTag specularHitDistanceTag(&specularHitDistanceRes, sl::kBufferTypeSpecularHitDistance, sl::ResourceLifecycle::eOnlyValidNow, &renderExtent);
+	sl::ResourceTag specularMotionVectorTag(&specularMotionVectorRes, sl::kBufferTypeSpecularMotionVectors, sl::ResourceLifecycle::eOnlyValidNow, &renderExtent);
 	sl::ResourceTag outputTag(&outputRes, sl::kBufferTypeScalingOutputColor, sl::ResourceLifecycle::eOnlyValidNow, &outputExtent);
-	sl::ResourceTag tags[] = {
+	std::vector<sl::ResourceTag> tags = {
 		colorTag,
 		depthTag,
 		motionTag,
@@ -1216,11 +1328,19 @@ bool Corona::DLSSRRPass()
 		roughnessTag,
 		albedoTag,
 		specularAlbedoTag,
-		outputTag,
 	};
-	slSetTagForFrame(*StreamlineFrameToken, vp, tags, _countof(tags), renderBackend->GetGraphicsCommandList());
+	if (IsPathTracingDLSSRREnabled() && bEnablePathTracingRRSpecularMotionVectors)
+	{
+		tags.push_back(specularMotionVectorTag);
+	}
+	if (IsPathTracingDLSSRREnabled() && bEnablePathTracingRRSpecularHitDistance)
+	{
+		tags.push_back(specularHitDistanceTag);
+	}
+	tags.push_back(outputTag);
+	slSetTagForFrame(*StreamlineFrameToken, vp, tags.data(), static_cast<uint32_t>(tags.size()), renderBackend->GetGraphicsCommandList());
 
-	const sl::BaseStructure* inputs[] = {
+	std::vector<const sl::BaseStructure*> inputs = {
 		static_cast<const sl::BaseStructure*>(&vp),
 		static_cast<const sl::BaseStructure*>(&depthTag),
 		static_cast<const sl::BaseStructure*>(&normalTag),
@@ -1229,7 +1349,12 @@ bool Corona::DLSSRRPass()
 		static_cast<const sl::BaseStructure*>(&specularAlbedoTag),
 		static_cast<const sl::BaseStructure*>(&motionTag),
 	};
-	const sl::Result evalResult = slEvaluateFeature(sl::kFeatureDLSS_RR, *StreamlineFrameToken, inputs, _countof(inputs), renderBackend->GetGraphicsCommandList());
+	if (IsPathTracingDLSSRREnabled() && bEnablePathTracingRRSpecularMotionVectors)
+		inputs.push_back(static_cast<const sl::BaseStructure*>(&specularMotionVectorTag));
+	if (IsPathTracingDLSSRREnabled() && bEnablePathTracingRRSpecularHitDistance)
+		inputs.push_back(static_cast<const sl::BaseStructure*>(&specularHitDistanceTag));
+	const sl::Result evalResult = slEvaluateFeature(sl::kFeatureDLSS_RR, *StreamlineFrameToken, inputs.data(), static_cast<uint32_t>(inputs.size()), renderBackend->GetGraphicsCommandList());
+	bDLSSResetNeeded = false;
 
 	renderBackend->TransitionTexture(outputTarget, EResourceState::UnorderedAccess, EResourceState::ShaderRead);
 	if (evalResult == sl::Result::eOk)
@@ -1302,6 +1427,7 @@ void Corona::ResetAllAccumulationState(bool forceUpscaleReload)
 	bForceUpscaleReload = forceUpscaleReload;
 	DLSSTransitionFramesRemaining = forceUpscaleReload ? 2u : 0u;
 	FrameCounter = 0;
+	PathTracingAccumulatedFrames = 0;
 	IndirectAccumulatedFrames = 0;
 	ResolvedColorBufferIndex = ColorBufferWriteIndex;
 	PrevJitter = glm::vec2(0.0f);
@@ -1424,6 +1550,8 @@ void Corona::RecreateRenderResolutionResources()
 	releaseTexture(SpecularAlbedoBuffer);
 	releaseTexture(VelocityBuffer);
 	releaseTexture(RoughnessMetalicBuffer);
+	releaseTexture(PathTracingSpecularHitDistanceBuffer);
+	releaseTexture(PathTracingSpecularMotionVectorBuffer);
 	releaseTexture(DepthBuffer);
 	releaseTexture(UnjitteredDepthBuffers[0]);
 	releaseTexture(UnjitteredDepthBuffers[1]);
@@ -1456,19 +1584,19 @@ void Corona::RecreateRenderResolutionResources()
 	DLSSRRBuffer = createTexture2D(ETextureFormat::RGBA16Float, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
 	NAME_D3D12_OBJECT(DLSSRRBuffer->resource);
 
-	NormalBuffers[0] = createTexture2D(ETextureFormat::RGBA16Float, TextureUsage_RenderTarget, RenderWidthLocal, RenderHeightLocal, 1, glm::vec4(0.0f, -0.1f, 0.0f, 0.0f));
+	NormalBuffers[0] = createTexture2D(ETextureFormat::RGBA16Float, TextureUsage_RenderTarget | TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1, glm::vec4(0.0f, -0.1f, 0.0f, 0.0f));
 	NormalBuffers[0]->MakeRTV();
 	NAME_D3D12_OBJECT(NormalBuffers[0]->resource);
 
-	NormalBuffers[1] = createTexture2D(ETextureFormat::RGBA16Float, TextureUsage_RenderTarget, RenderWidthLocal, RenderHeightLocal, 1, glm::vec4(0.0f, -0.1f, 0.0f, 0.0f));
+	NormalBuffers[1] = createTexture2D(ETextureFormat::RGBA16Float, TextureUsage_RenderTarget | TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1, glm::vec4(0.0f, -0.1f, 0.0f, 0.0f));
 	NormalBuffers[1]->MakeRTV();
 	NAME_D3D12_OBJECT(NormalBuffers[1]->resource);
 
-	GeomNormalBuffers[0] = createTexture2D(ETextureFormat::RGBA16Float, TextureUsage_RenderTarget, RenderWidthLocal, RenderHeightLocal, 1, glm::vec4(0.0f, -0.1f, 0.0f, 0.0f));
+	GeomNormalBuffers[0] = createTexture2D(ETextureFormat::RGBA16Float, TextureUsage_RenderTarget | TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1, glm::vec4(0.0f, -0.1f, 0.0f, 0.0f));
 	GeomNormalBuffers[0]->MakeRTV();
 	NAME_D3D12_OBJECT(GeomNormalBuffers[0]->resource);
 
-	GeomNormalBuffers[1] = createTexture2D(ETextureFormat::RGBA16Float, TextureUsage_RenderTarget, RenderWidthLocal, RenderHeightLocal, 1, glm::vec4(0.0f, -0.1f, 0.0f, 0.0f));
+	GeomNormalBuffers[1] = createTexture2D(ETextureFormat::RGBA16Float, TextureUsage_RenderTarget | TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1, glm::vec4(0.0f, -0.1f, 0.0f, 0.0f));
 	GeomNormalBuffers[1]->MakeRTV();
 	NAME_D3D12_OBJECT(GeomNormalBuffers[1]->resource);
 
@@ -1580,31 +1708,37 @@ void Corona::RecreateRenderResolutionResources()
 	DiffuseGISpatial[1] = createTexture2D(HybridFloat4UAVFormat, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
 	NAME_D3D12_OBJECT(DiffuseGISpatial[1]->resource);
 
-	AlbedoBuffer = createTexture2D(ETextureFormat::RGBA8Unorm, TextureUsage_RenderTarget, RenderWidthLocal, RenderHeightLocal, 1);
+	AlbedoBuffer = createTexture2D(ETextureFormat::RGBA8Unorm, TextureUsage_RenderTarget | TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
 	AlbedoBuffer->MakeRTV();
 	NAME_D3D12_OBJECT(AlbedoBuffer->resource);
 
-	SpecularAlbedoBuffer = createTexture2D(ETextureFormat::RGBA8Unorm, TextureUsage_RenderTarget, RenderWidthLocal, RenderHeightLocal, 1);
+	SpecularAlbedoBuffer = createTexture2D(ETextureFormat::RGBA8Unorm, TextureUsage_RenderTarget | TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
 	SpecularAlbedoBuffer->MakeRTV();
 	NAME_D3D12_OBJECT(SpecularAlbedoBuffer->resource);
 
-	VelocityBuffer = createTexture2D(ETextureFormat::RG16Float, TextureUsage_RenderTarget, RenderWidthLocal, RenderHeightLocal, 1, glm::vec4(0.0f));
+	VelocityBuffer = createTexture2D(ETextureFormat::RG16Float, TextureUsage_RenderTarget | TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1, glm::vec4(0.0f));
 	VelocityBuffer->MakeRTV();
 	NAME_D3D12_OBJECT(VelocityBuffer->resource);
 
-	RoughnessMetalicBuffer = createTexture2D(ETextureFormat::RGBA8Unorm, TextureUsage_RenderTarget, RenderWidthLocal, RenderHeightLocal, 1, glm::vec4(0.001f, 0.0f, 0.0f, 0.0f));
+	RoughnessMetalicBuffer = createTexture2D(ETextureFormat::RGBA8Unorm, TextureUsage_RenderTarget | TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1, glm::vec4(0.001f, 0.0f, 0.0f, 0.0f));
 	RoughnessMetalicBuffer->MakeRTV();
 	NAME_D3D12_OBJECT(RoughnessMetalicBuffer->resource);
+
+	PathTracingSpecularHitDistanceBuffer = createTexture2D(ETextureFormat::R32Float, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1, glm::vec4(Far));
+	NAME_D3D12_OBJECT(PathTracingSpecularHitDistanceBuffer->resource);
+
+	PathTracingSpecularMotionVectorBuffer = createTexture2D(ETextureFormat::RG16Float, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1, glm::vec4(0.0f));
+	NAME_D3D12_OBJECT(PathTracingSpecularMotionVectorBuffer->resource);
 
 	DepthBuffer = createTexture2D(ETextureFormat::D32Float, TextureUsage_DepthStencil, RenderWidthLocal, RenderHeightLocal, 1);
 	DepthBuffer->MakeDSV();
 	NAME_D3D12_OBJECT(DepthBuffer->resource);
 
-	UnjitteredDepthBuffers[0] = createTexture2D(ETextureFormat::R32Float, TextureUsage_RenderTarget, RenderWidthLocal, RenderHeightLocal, 1);
+	UnjitteredDepthBuffers[0] = createTexture2D(ETextureFormat::R32Float, TextureUsage_RenderTarget | TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
 	UnjitteredDepthBuffers[0]->MakeRTV();
 	NAME_D3D12_OBJECT(UnjitteredDepthBuffers[0]->resource);
 
-	UnjitteredDepthBuffers[1] = createTexture2D(ETextureFormat::R32Float, TextureUsage_RenderTarget, RenderWidthLocal, RenderHeightLocal, 1);
+	UnjitteredDepthBuffers[1] = createTexture2D(ETextureFormat::R32Float, TextureUsage_RenderTarget | TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
 	UnjitteredDepthBuffers[1]->MakeRTV();
 	NAME_D3D12_OBJECT(UnjitteredDepthBuffers[1]->resource);
 
@@ -1636,6 +1770,7 @@ void Corona::ReloadRenderResolutionAssets()
 	GIBufferWriteIndex = 0;
 	DLSSTransitionFramesRemaining = 2u;
 	FrameCounter = 0;
+	PathTracingAccumulatedFrames = 0;
 	IndirectAccumulatedFrames = 0;
 	PrevJitter = glm::vec2(0.0f);
 	CurrentJitter = glm::vec2(0.0f);
@@ -1757,7 +1892,14 @@ void Corona::RefreshUpscaleSettings(bool reloadAssets)
 Texture* Corona::GetCurrentResolveSource() const
 {
 	if (RenderingMode == ERenderingMode::PATHTRACING)
+	{
+		if (IsPathTracingDLSSRREnabled())
+		{
+			if (bDLSSRROutputValidThisFrame && DLSSRRBuffer)
+				return DLSSRRBuffer.get();
+		}
 		return PathTracingAccumBuffer[PathTracingWriteIndex].get();
+	}
 
 	if (bUseLightingBufferFallbackForToneMap && LightingBuffer)
 	{
@@ -1850,6 +1992,87 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 			bShowImgui = false;
 			continue;
 		}
+		if (arg == L"--sponza-fly" || arg == L"--sponza" || arg == L"--scene-sponza" || arg == L"--fly-camera")
+		{
+			bStartupSponzaFlyMode = true;
+			bEnableStartupLuauScript = false;
+			bCommandLineAutoDumpOverrideSet = true;
+			bCommandLineAutoDumpEnabled = false;
+			continue;
+		}
+		if (arg == L"--startup-scripts" || arg == L"--game-character" || arg == L"--dungeon-character")
+		{
+			bStartupSponzaFlyMode = false;
+			bEnableStartupLuauScript = true;
+			continue;
+		}
+		if (arg == L"--no-startup-scripts" || arg == L"--disable-startup-scripts")
+		{
+			bEnableStartupLuauScript = false;
+			continue;
+		}
+		if (arg == L"--pt-dlss-rr" || arg == L"--pathtracing-dlss-rr" || arg == L"--pt-rr-gbuffer")
+		{
+			bEnablePathTracingDLSSRR = true;
+			bCommandLineAAOverrideSet = true;
+			CommandLineSelectedAAMode = EAntiAliasingMode::DLSS_RR;
+			continue;
+		}
+		if (arg == L"--no-pt-dlss-rr" || arg == L"--disable-pt-dlss-rr" || arg == L"--no-pt-rr-gbuffer")
+		{
+			bEnablePathTracingDLSSRR = false;
+			continue;
+		}
+		if (arg == L"--pt-rr-specular-mv" || arg == L"--enable-pt-rr-specular-mv")
+		{
+			bEnablePathTracingRRSpecularMotionVectors = true;
+			bEnablePathTracingRRSpecularHitDistance = false;
+			continue;
+		}
+		if (arg == L"--no-pt-rr-specular-mv" || arg == L"--disable-pt-rr-specular-mv")
+		{
+			bEnablePathTracingRRSpecularMotionVectors = false;
+			continue;
+		}
+		if (arg == L"--pt-rr-specular-hit-distance" || arg == L"--pt-rr-specular-hitdist")
+		{
+			bEnablePathTracingRRSpecularHitDistance = true;
+			bEnablePathTracingRRSpecularMotionVectors = false;
+			continue;
+		}
+		if (arg == L"--no-pt-rr-specular-hit-distance" || arg == L"--no-pt-rr-specular-hitdist")
+		{
+			bEnablePathTracingRRSpecularHitDistance = false;
+			continue;
+		}
+		std::wstring specularMVScaleValue = ParseValueArg(arg, L"--pt-rr-specular-mv-scale", L"-pt-rr-specular-mv-scale", i);
+		if (!specularMVScaleValue.empty())
+		{
+			try
+			{
+				PathTracingRRSpecularMotionVectorScale = std::clamp(std::stof(specularMVScaleValue), -2.0f, 2.0f);
+				bEnablePathTracingRRSpecularMotionVectors = fabsf(PathTracingRRSpecularMotionVectorScale) > 1.0e-4f;
+			}
+			catch (...)
+			{
+			}
+			continue;
+		}
+		std::wstring ptSppValue = ParseValueArg(arg, L"--pt-spp", L"-pt-spp", i);
+		if (ptSppValue.empty())
+			ptSppValue = ParseValueArg(arg, L"--spp", L"-spp", i);
+		if (!ptSppValue.empty())
+		{
+			try
+			{
+				const unsigned long value = std::stoul(ptSppValue);
+				PathTracingViewParam.SamplesPerPixel = static_cast<UINT32>(std::clamp<unsigned long>(value, 1ul, 16ul));
+			}
+			catch (...)
+			{
+			}
+			continue;
+		}
 		if (arg == L"--rtao")
 		{
 			bEnableRTAO = true;
@@ -1868,6 +2091,44 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 		if (arg == L"--no-diffuse-gi" || arg == L"--disable-diffuse-gi")
 		{
 			bEnableDiffuseGI = false;
+			continue;
+		}
+		if (arg == L"--specular-gi" || arg == L"--enable-specular-gi" || arg == L"--indirect-specular" || arg == L"--enable-indirect-specular")
+		{
+			bEnableSpecularGI = true;
+			continue;
+		}
+		if (arg == L"--no-specular-gi" || arg == L"--disable-specular-gi" || arg == L"--no-indirect-specular" || arg == L"--disable-indirect-specular")
+		{
+			bEnableSpecularGI = false;
+			continue;
+		}
+		if (arg == L"--direct-diffuse" || arg == L"--enable-direct-diffuse")
+		{
+			bEnableDirectDiffuse = true;
+			continue;
+		}
+		if (arg == L"--no-direct-diffuse" || arg == L"--disable-direct-diffuse")
+		{
+			bEnableDirectDiffuse = false;
+			continue;
+		}
+		if (arg == L"--direct-specular" || arg == L"--enable-direct-specular")
+		{
+			bEnableDirectSpecular = true;
+			continue;
+		}
+		if (arg == L"--no-direct-specular" || arg == L"--disable-direct-specular")
+		{
+			bEnableDirectSpecular = false;
+			continue;
+		}
+		if (arg == L"--indirect-specular-only" || arg == L"--specular-gi-only")
+		{
+			bEnableDiffuseGI = false;
+			bEnableSpecularGI = true;
+			bEnableDirectDiffuse = false;
+			bEnableDirectSpecular = false;
 			continue;
 		}
 		if (arg == L"--sky-lighting" || arg == L"--enable-sky-lighting")
@@ -1960,6 +2221,11 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 			bCommandLineCameraPathDump = true;
 			bCommandLineAutoDumpOverrideSet = true;
 			bCommandLineAutoDumpEnabled = false;
+			continue;
+		}
+		if (arg == L"--camera-path-diagnostics" || arg == L"--pt-rr-camera-path-diagnostics")
+		{
+			bCommandLineCameraPathDiagnostics = true;
 			continue;
 		}
 		if (arg == L"--camera-path" || arg == L"-camera-path")
@@ -2387,6 +2653,9 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 		L", rayNoise=" + std::wstring(GetRayNoiseModeNameW(RayNoiseMode)) +
 		L", diffuseGI=" + std::wstring(GetDiffuseGIModeNameW(DiffuseGIMode)) +
 		L", diffuseGIEnabled=" + std::to_wstring(bEnableDiffuseGI ? 1 : 0) +
+		L", specularGIEnabled=" + std::to_wstring(bEnableSpecularGI ? 1 : 0) +
+		L", directDiffuse=" + std::to_wstring(bEnableDirectDiffuse ? 1 : 0) +
+		L", directSpecular=" + std::to_wstring(bEnableDirectSpecular ? 1 : 0) +
 		L", skyLighting=" + std::to_wstring(bEnableSkyLighting ? 1 : 0) +
 		L", surfaceBounceStrength=" + std::to_wstring(SurfaceBounceStrength) +
 		L", skyLightingStrength=" + std::to_wstring(SkyLightingStrength) +
@@ -2397,6 +2666,14 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 		L", specularSequenceDump=" + std::to_wstring(bCommandLineSpecularSequenceDumpMode ? 1 : 0) +
 		L", autoDumpFrames=" + std::to_wstring(AutoAADumpFrameCountOverride) +
 		L", cameraPathDump=" + std::to_wstring(bCommandLineCameraPathDump ? 1 : 0) +
+		L", cameraPathDiagnostics=" + std::to_wstring(bCommandLineCameraPathDiagnostics ? 1 : 0) +
+		L", ptDLSSRR=" + std::to_wstring(bEnablePathTracingDLSSRR ? 1 : 0) +
+		L", ptSPP=" + std::to_wstring(PathTracingViewParam.SamplesPerPixel) +
+		L", ptRRSpecularMV=" + std::to_wstring(bEnablePathTracingRRSpecularMotionVectors ? 1 : 0) +
+		L", ptRRSpecularMVScale=" + std::to_wstring(PathTracingRRSpecularMotionVectorScale) +
+		L", ptRRSpecularHitDistance=" + std::to_wstring(bEnablePathTracingRRSpecularHitDistance ? 1 : 0) +
+		L", sponzaFly=" + std::to_wstring(bStartupSponzaFlyMode ? 1 : 0) +
+		L", startupScripts=" + std::to_wstring(bEnableStartupLuauScript ? 1 : 0) +
 		L", dlssJitterScale=" + std::to_wstring(DLSSJitterPhaseScale) +
 		L", dlssJitterOverride=" + std::to_wstring(DLSSJitterPhaseCountOverride) +
 		L", autoDumpOverride=" + std::to_wstring(bCommandLineAutoDumpOverrideSet ? 1 : 0) +
@@ -4526,6 +4803,47 @@ std::wstring Corona::BuildCameraPathFrameDumpPath() const
 	return (std::filesystem::path(LastCameraPathDumpDir) / filename.str()).wstring();
 }
 
+void Corona::DumpCameraPathDiagnosticFrame()
+{
+	if (!bCommandLineCameraPathDiagnostics || LastCameraPathDumpDir.empty())
+		return;
+
+	const D3D12_RESOURCE_STATES shaderReadState =
+		D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+
+	std::filesystem::path diagnosticDir = std::filesystem::path(LastCameraPathDumpDir) / L"diagnostics";
+	std::error_code ec;
+	std::filesystem::create_directories(diagnosticDir, ec);
+	if (ec)
+		return;
+
+	std::wstringstream framePrefix;
+	framePrefix << L"frame_" << std::setfill(L'0') << std::setw(6) << CameraPathDumpFrameIndex;
+	const std::filesystem::path basePath = diagnosticDir / framePrefix.str();
+
+	auto dumpTexture = [&](const wchar_t* suffix, Texture* texture, bool bDumpHdr)
+	{
+		if (!texture)
+			return;
+
+		const std::wstring fileBase = (basePath.wstring() + L"_" + suffix);
+		DumpTexturePNG(texture, fileBase + L"_preview.png", shaderReadState);
+		if (bDumpHdr)
+			DumpTextureHDR(texture, fileBase + L".hdr", shaderReadState);
+	};
+
+	dumpTexture(L"pt_input", PathTracingAccumBuffer[PathTracingWriteIndex].get(), true);
+	dumpTexture(L"rr_output", DLSSRRBuffer.get(), true);
+	dumpTexture(L"depth", UnjitteredDepthBuffers[ColorBufferWriteIndex].get(), true);
+	dumpTexture(L"motion", VelocityBuffer.get(), true);
+	dumpTexture(L"specular_motion", PathTracingSpecularMotionVectorBuffer.get(), true);
+	dumpTexture(L"roughness_metallic", RoughnessMetalicBuffer.get(), true);
+	dumpTexture(L"specular_albedo", SpecularAlbedoBuffer.get(), true);
+	dumpTexture(L"albedo", AlbedoBuffer.get(), false);
+	dumpTexture(L"normal", NormalBuffers[ColorBufferWriteIndex].get(), false);
+	dumpTexture(L"geom_normal", GeomNormalBuffers[ColorBufferWriteIndex].get(), false);
+}
+
 void Corona::RequestCameraPathDumpFrameCapture()
 {
 	if (!renderBackend || !bCameraPathDumping || bCameraPathDumpCaptureInFlight)
@@ -4537,6 +4855,7 @@ void Corona::RequestCameraPathDumpFrameCapture()
 		return;
 	}
 
+	DumpCameraPathDiagnosticFrame();
 	renderBackend->RequestWindowCapture(BuildCameraPathFrameDumpPath());
 	bCameraPathDumpCaptureInFlight = true;
 }
@@ -5210,6 +5529,7 @@ void Corona::ApplyFrameSourceRenderSync(const RenderFrameDelta& delta)
 	if (bIndirectSettingsChanged)
 	{
 		FrameCounter = 0;
+		PathTracingAccumulatedFrames = 0;
 		IndirectAccumulatedFrames = 0;
 		bTemporalDenoiserHistoryValid = false;
 		bScreenProbeGIAtlasHistoryValid = false;
@@ -5733,6 +6053,11 @@ void Corona::OnInit()
 	UpdateStartupLoadingProgress(0.20f, L"Preparing renderer assets");
 	LoadAssets();
 	AppendCpuRuntimeTrace(L"[OnInit] after LoadAssets");
+	if (bStartupSponzaFlyMode)
+	{
+		ApplySponzaFlyCamera();
+		AppendCpuRuntimeTrace(L"[OnInit] after ApplySponzaFlyCamera");
+	}
 	UpdateStartupLoadingProgress(0.92f, L"Initializing CPU physics");
 	InitCpuPhysics();
 	UpdateStartupLoadingProgress(0.94f, L"Initializing Luau scripting");
@@ -5952,6 +6277,29 @@ glm::mat4x4 Corona::BuildCenteredSceneTransform(
 		glm::translate(glm::vec3(-center.x, -scene->BoundsMin.y, -center.z));
 }
 
+glm::mat4x4 Corona::BuildScaledSceneTransform(
+	const shared_ptr<Scene>& scene,
+	const glm::vec3& scale,
+	const glm::vec3& position,
+	const glm::vec3& rotationDegrees) const
+{
+	if (!scene || !scene->bHasBounds)
+		return glm::mat4x4(1.0f);
+
+	const glm::vec3 safeScale = glm::max(scale, glm::vec3(0.001f));
+	const glm::vec3 center = (scene->BoundsMin + scene->BoundsMax) * 0.5f;
+	const glm::mat4x4 rotation =
+		glm::rotate(glm::radians(rotationDegrees.z), glm::vec3(0.0f, 0.0f, 1.0f)) *
+		glm::rotate(glm::radians(rotationDegrees.y), glm::vec3(0.0f, 1.0f, 0.0f)) *
+		glm::rotate(glm::radians(rotationDegrees.x), glm::vec3(1.0f, 0.0f, 0.0f));
+
+	return
+		glm::translate(position) *
+		rotation *
+		glm::scale(safeScale) *
+		glm::translate(glm::vec3(-center.x, -scene->BoundsMin.y, -center.z));
+}
+
 Corona::SceneObjectHandle Corona::AddCenteredSceneObject(
 	const shared_ptr<Scene>& scene,
 	float targetExtent,
@@ -6042,6 +6390,144 @@ shared_ptr<Scene> Corona::CreateMirrorCubeScene()
 	material->Normal = DefaultNormalTex;
 	material->Roughness = DefaultBlackTex;
 	material->Metallic = DefaultWhiteTex;
+
+	Mesh* mesh = new Mesh;
+	mesh->Owner = renderBackend.get();
+	mesh->transform = glm::mat4x4(1.0f);
+	mesh->NumVertices = static_cast<UINT>(vertices.size());
+	mesh->NumIndices = static_cast<UINT>(indices.size());
+	mesh->VertexStride = sizeof(Vertex);
+	mesh->IndexFormat = DXGI_FORMAT_R32_UINT;
+	mesh->Mat = material;
+	mesh->Vb = renderBackend->CreateVertexBuffer(sizeof(Vertex) * vertices.size(), sizeof(Vertex), vertices.data());
+	mesh->Ib = renderBackend->CreateIndexBuffer(mesh->IndexFormat, sizeof(UINT32) * indices.size(), indices.data());
+	mesh->CpuPositions.reserve(vertices.size());
+	for (const Vertex& vertex : vertices)
+		mesh->CpuPositions.push_back(vertex.Position);
+	mesh->CpuIndices = indices;
+
+	Mesh::DrawCall drawCall = {};
+	drawCall.IndexStart = 0;
+	drawCall.IndexCount = mesh->NumIndices;
+	drawCall.VertexBase = 0;
+	drawCall.VertexCount = mesh->NumVertices;
+	drawCall.mat = material;
+	mesh->Draws.push_back(drawCall);
+
+	shared_ptr<Scene> scene = std::make_shared<Scene>();
+	scene->Materials.push_back(material);
+	scene->meshes.push_back(shared_ptr<Mesh>(mesh));
+	scene->bHasBounds = true;
+	scene->BoundsMin = glm::vec3(-kHalfExtent, -kHalfExtent, -kHalfExtent);
+	scene->BoundsMax = glm::vec3( kHalfExtent,  kHalfExtent,  kHalfExtent);
+
+	return scene;
+}
+
+shared_ptr<Texture> Corona::GetProceduralDungeonBrickDiffuseTexture()
+{
+	if (ProceduralDungeonBrickDiffuseTex)
+		return ProceduralDungeonBrickDiffuseTex;
+	if (!renderBackend)
+		return DefaultWhiteTex;
+
+	const std::filesystem::path texturePath = GetAssetFullPath(L"assets\\procedural\\dungeon_brick.bmp");
+	std::error_code ec;
+	std::filesystem::create_directories(texturePath.parent_path(), ec);
+	if (ec)
+	{
+		AppendCpuRuntimeTrace(L"[ProceduralTexture] failed to create directory: " + texturePath.parent_path().wstring());
+		return DefaultWhiteTex;
+	}
+
+	if (!WriteProceduralDungeonBrickBmp(texturePath))
+	{
+		AppendCpuRuntimeTrace(L"[ProceduralTexture] failed to write dungeon brick texture: " + texturePath.wstring());
+		return DefaultWhiteTex;
+	}
+
+	ProceduralDungeonBrickDiffuseTex = renderBackend->CreateTextureFromFile(texturePath.wstring(), false);
+	if (!ProceduralDungeonBrickDiffuseTex)
+	{
+		AppendCpuRuntimeTrace(L"[ProceduralTexture] failed to load dungeon brick texture: " + texturePath.wstring());
+		return DefaultWhiteTex;
+	}
+
+	AppendCpuRuntimeTrace(L"[ProceduralTexture] generated dungeon brick texture: " + texturePath.wstring());
+	return ProceduralDungeonBrickDiffuseTex;
+}
+
+shared_ptr<Scene> Corona::CreateProceduralBoxScene(const glm::vec3& baseColor, bool bUseBrickTexture, float uvRepeat)
+{
+	if (!renderBackend)
+		return nullptr;
+
+	struct Vertex
+	{
+		glm::vec3 Position;
+		glm::vec3 Normal;
+		glm::vec2 UV;
+		glm::vec3 Tangent;
+	};
+
+	struct CubeFace
+	{
+		glm::vec3 Normal;
+		glm::vec3 Tangent;
+		glm::vec3 Positions[4];
+	};
+
+	constexpr float kHalfExtent = 0.5f;
+	const CubeFace faces[] =
+	{
+		{ glm::vec3( 0.0f,  0.0f,  1.0f), glm::vec3( 1.0f,  0.0f,  0.0f), { glm::vec3(-kHalfExtent, -kHalfExtent,  kHalfExtent), glm::vec3( kHalfExtent, -kHalfExtent,  kHalfExtent), glm::vec3( kHalfExtent,  kHalfExtent,  kHalfExtent), glm::vec3(-kHalfExtent,  kHalfExtent,  kHalfExtent) } },
+		{ glm::vec3( 0.0f,  0.0f, -1.0f), glm::vec3(-1.0f,  0.0f,  0.0f), { glm::vec3( kHalfExtent, -kHalfExtent, -kHalfExtent), glm::vec3(-kHalfExtent, -kHalfExtent, -kHalfExtent), glm::vec3(-kHalfExtent,  kHalfExtent, -kHalfExtent), glm::vec3( kHalfExtent,  kHalfExtent, -kHalfExtent) } },
+		{ glm::vec3( 1.0f,  0.0f,  0.0f), glm::vec3( 0.0f,  0.0f, -1.0f), { glm::vec3( kHalfExtent, -kHalfExtent,  kHalfExtent), glm::vec3( kHalfExtent, -kHalfExtent, -kHalfExtent), glm::vec3( kHalfExtent,  kHalfExtent, -kHalfExtent), glm::vec3( kHalfExtent,  kHalfExtent,  kHalfExtent) } },
+		{ glm::vec3(-1.0f,  0.0f,  0.0f), glm::vec3( 0.0f,  0.0f,  1.0f), { glm::vec3(-kHalfExtent, -kHalfExtent, -kHalfExtent), glm::vec3(-kHalfExtent, -kHalfExtent,  kHalfExtent), glm::vec3(-kHalfExtent,  kHalfExtent,  kHalfExtent), glm::vec3(-kHalfExtent,  kHalfExtent, -kHalfExtent) } },
+		{ glm::vec3( 0.0f,  1.0f,  0.0f), glm::vec3( 1.0f,  0.0f,  0.0f), { glm::vec3(-kHalfExtent,  kHalfExtent,  kHalfExtent), glm::vec3( kHalfExtent,  kHalfExtent,  kHalfExtent), glm::vec3( kHalfExtent,  kHalfExtent, -kHalfExtent), glm::vec3(-kHalfExtent,  kHalfExtent, -kHalfExtent) } },
+		{ glm::vec3( 0.0f, -1.0f,  0.0f), glm::vec3( 1.0f,  0.0f,  0.0f), { glm::vec3(-kHalfExtent, -kHalfExtent, -kHalfExtent), glm::vec3( kHalfExtent, -kHalfExtent, -kHalfExtent), glm::vec3( kHalfExtent, -kHalfExtent,  kHalfExtent), glm::vec3(-kHalfExtent, -kHalfExtent,  kHalfExtent) } },
+	};
+
+	std::vector<Vertex> vertices;
+	vertices.reserve(24);
+	std::vector<UINT32> indices;
+	indices.reserve(36);
+	const float safeUvRepeat = std::clamp(uvRepeat, 1.0f, 64.0f);
+	const glm::vec2 uvs[] =
+	{
+		glm::vec2(0.0f, safeUvRepeat),
+		glm::vec2(safeUvRepeat, safeUvRepeat),
+		glm::vec2(safeUvRepeat, 0.0f),
+		glm::vec2(0.0f, 0.0f),
+	};
+
+	for (const CubeFace& face : faces)
+	{
+		const UINT32 baseVertex = static_cast<UINT32>(vertices.size());
+		for (UINT32 vertexIndex = 0; vertexIndex < 4; ++vertexIndex)
+		{
+			Vertex vertex = {};
+			vertex.Position = face.Positions[vertexIndex];
+			vertex.Normal = face.Normal;
+			vertex.UV = uvs[vertexIndex];
+			vertex.Tangent = face.Tangent;
+			vertices.push_back(vertex);
+		}
+
+		indices.push_back(baseVertex + 0);
+		indices.push_back(baseVertex + 1);
+		indices.push_back(baseVertex + 2);
+		indices.push_back(baseVertex + 0);
+		indices.push_back(baseVertex + 2);
+		indices.push_back(baseVertex + 3);
+	}
+
+	shared_ptr<Material> material = std::make_shared<Material>();
+	material->BaseColorFactor = glm::vec4(glm::clamp(baseColor, glm::vec3(0.0f), glm::vec3(1.0f)), 1.0f);
+	material->Diffuse = bUseBrickTexture ? GetProceduralDungeonBrickDiffuseTexture() : DefaultWhiteTex;
+	material->Normal = DefaultNormalTex;
+	material->Roughness = DefaultRougnessTex;
+	material->Metallic = DefaultBlackTex;
 
 	Mesh* mesh = new Mesh;
 	mesh->Owner = renderBackend.get();
@@ -6660,23 +7146,23 @@ void Corona::LoadAssets()
 
 	// world normal
 	UpdateStartupLoadingProgress(0.58f, L"Allocating shadow and normal buffers");
-	NormalBuffers[0] = createTexture2D(ETextureFormat::RGBA16Float, TextureUsage_RenderTarget, RenderWidthLocal, RenderHeightLocal, 1, glm::vec4(0.0f, -0.1f, 0.0f, 0.0f));
+	NormalBuffers[0] = createTexture2D(ETextureFormat::RGBA16Float, TextureUsage_RenderTarget | TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1, glm::vec4(0.0f, -0.1f, 0.0f, 0.0f));
 	NormalBuffers[0]->MakeRTV();
 
 	NAME_D3D12_OBJECT(NormalBuffers[0]->resource);
 
-	NormalBuffers[1] = createTexture2D(ETextureFormat::RGBA16Float, TextureUsage_RenderTarget, RenderWidthLocal, RenderHeightLocal, 1, glm::vec4(0.0f, -0.1f, 0.0f, 0.0f));
+	NormalBuffers[1] = createTexture2D(ETextureFormat::RGBA16Float, TextureUsage_RenderTarget | TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1, glm::vec4(0.0f, -0.1f, 0.0f, 0.0f));
 	NormalBuffers[1]->MakeRTV();
 
 	NAME_D3D12_OBJECT(NormalBuffers[1]->resource);
 
 	// geometry world normal
-	GeomNormalBuffers[0] = createTexture2D(ETextureFormat::RGBA16Float, TextureUsage_RenderTarget, RenderWidthLocal, RenderHeightLocal, 1, glm::vec4(0.0f, -0.1f, 0.0f, 0.0f));
+	GeomNormalBuffers[0] = createTexture2D(ETextureFormat::RGBA16Float, TextureUsage_RenderTarget | TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1, glm::vec4(0.0f, -0.1f, 0.0f, 0.0f));
 	GeomNormalBuffers[0]->MakeRTV();
 
 	NAME_D3D12_OBJECT(GeomNormalBuffers[0]->resource);
 
-	GeomNormalBuffers[1] = createTexture2D(ETextureFormat::RGBA16Float, TextureUsage_RenderTarget, RenderWidthLocal, RenderHeightLocal, 1, glm::vec4(0.0f, -0.1f, 0.0f, 0.0f));
+	GeomNormalBuffers[1] = createTexture2D(ETextureFormat::RGBA16Float, TextureUsage_RenderTarget | TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1, glm::vec4(0.0f, -0.1f, 0.0f, 0.0f));
 	GeomNormalBuffers[1]->MakeRTV();
 
 	NAME_D3D12_OBJECT(GeomNormalBuffers[1]->resource);
@@ -6836,37 +7322,43 @@ void Corona::LoadAssets()
 
 	// albedo
 	UpdateStartupLoadingProgress(0.66f, L"Allocating G-buffer textures");
-	AlbedoBuffer = createTexture2D(ETextureFormat::RGBA8Unorm, TextureUsage_RenderTarget, RenderWidthLocal, RenderHeightLocal, 1);
+	AlbedoBuffer = createTexture2D(ETextureFormat::RGBA8Unorm, TextureUsage_RenderTarget | TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
 	AlbedoBuffer->MakeRTV();
 
 	NAME_D3D12_OBJECT(AlbedoBuffer->resource);
 
-	SpecularAlbedoBuffer = createTexture2D(ETextureFormat::RGBA8Unorm, TextureUsage_RenderTarget, RenderWidthLocal, RenderHeightLocal, 1);
+	SpecularAlbedoBuffer = createTexture2D(ETextureFormat::RGBA8Unorm, TextureUsage_RenderTarget | TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
 	SpecularAlbedoBuffer->MakeRTV();
 
 	NAME_D3D12_OBJECT(SpecularAlbedoBuffer->resource);
 
 	// velocity
-	VelocityBuffer = createTexture2D(ETextureFormat::RG16Float, TextureUsage_RenderTarget, RenderWidthLocal, RenderHeightLocal, 1, glm::vec4(0.0f));
+	VelocityBuffer = createTexture2D(ETextureFormat::RG16Float, TextureUsage_RenderTarget | TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1, glm::vec4(0.0f));
 	VelocityBuffer->MakeRTV();
 	NAME_D3D12_OBJECT(VelocityBuffer->resource);
 
 	// pbr material
-	RoughnessMetalicBuffer = createTexture2D(ETextureFormat::RGBA8Unorm, TextureUsage_RenderTarget, RenderWidthLocal, RenderHeightLocal, 1, glm::vec4(0.001f, 0.0f, 0.0f, 0.0f));
+	RoughnessMetalicBuffer = createTexture2D(ETextureFormat::RGBA8Unorm, TextureUsage_RenderTarget | TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1, glm::vec4(0.001f, 0.0f, 0.0f, 0.0f));
 	RoughnessMetalicBuffer->MakeRTV();
 
 	NAME_D3D12_OBJECT(RoughnessMetalicBuffer->resource);
+
+	PathTracingSpecularHitDistanceBuffer = createTexture2D(ETextureFormat::R32Float, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1, glm::vec4(Far));
+	NAME_D3D12_OBJECT(PathTracingSpecularHitDistanceBuffer->resource);
+
+	PathTracingSpecularMotionVectorBuffer = createTexture2D(ETextureFormat::RG16Float, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1, glm::vec4(0.0f));
+	NAME_D3D12_OBJECT(PathTracingSpecularMotionVectorBuffer->resource);
 
 	// depth
 	DepthBuffer = createTexture2D(ETextureFormat::D32Float, TextureUsage_DepthStencil, RenderWidthLocal, RenderHeightLocal, 1);
 	DepthBuffer->MakeDSV();
 	NAME_D3D12_OBJECT(DepthBuffer->resource);
 
-	UnjitteredDepthBuffers[0] = createTexture2D(ETextureFormat::R32Float, TextureUsage_RenderTarget, RenderWidthLocal, RenderHeightLocal, 1);
+	UnjitteredDepthBuffers[0] = createTexture2D(ETextureFormat::R32Float, TextureUsage_RenderTarget | TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
 	UnjitteredDepthBuffers[0]->MakeRTV();
 	NAME_D3D12_OBJECT(UnjitteredDepthBuffers[0]->resource);
 
-	UnjitteredDepthBuffers[1] = createTexture2D(ETextureFormat::R32Float, TextureUsage_RenderTarget, RenderWidthLocal, RenderHeightLocal, 1);
+	UnjitteredDepthBuffers[1] = createTexture2D(ETextureFormat::R32Float, TextureUsage_RenderTarget | TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
 	UnjitteredDepthBuffers[1]->MakeRTV();
 	NAME_D3D12_OBJECT(UnjitteredDepthBuffers[1]->resource);
 	AppendCpuRuntimeTrace(L"[LoadAssets] after gbuffer textures");
@@ -6894,11 +7386,12 @@ void Corona::LoadAssets()
 	if (bVulkanHybridStartup)
 		AppendCpuRuntimeTrace(L"[LoadAssets] after sponza load");
 
-	if (!bEnableStartupLuauScript && !Buddha)
+	const bool bLoadStandaloneDemoObjects = !bEnableStartupLuauScript && !bStartupSponzaFlyMode;
+	if (bLoadStandaloneDemoObjects && !Buddha)
 	{
 		Buddha = LoadModel(WideToUtf8(GetAssetFullPath(L"assets\\buddha\\buddha.obj")));
 	}
-	if (!bEnableStartupLuauScript && Buddha && BuddhaObject == InvalidSceneObjectHandle)
+	if (bLoadStandaloneDemoObjects && Buddha && BuddhaObject == InvalidSceneObjectHandle)
 	{
 		BuddhaObject = AddCenteredSceneObject(
 			Buddha,
@@ -6910,11 +7403,11 @@ void Corona::LoadAssets()
 			BuddhaCenterRotationDegrees);
 	}
 
-	if (!bEnableStartupLuauScript && !ShaderBall)
+	if (bLoadStandaloneDemoObjects && !ShaderBall)
 	{
 		ShaderBall = LoadModel(WideToUtf8(GetAssetFullPath(L"assets\\shaderBall\\shaderBall.fbx")));
 	}
-	if (!bEnableStartupLuauScript && ShaderBall && ShaderBallObject == InvalidSceneObjectHandle)
+	if (bLoadStandaloneDemoObjects && ShaderBall && ShaderBallObject == InvalidSceneObjectHandle)
 	{
 		ShaderBallObject = AddCenteredSceneObject(
 			ShaderBall,
@@ -6926,11 +7419,11 @@ void Corona::LoadAssets()
 			ShaderBallCenterRotationDegrees);
 	}
 
-	if (!bEnableStartupLuauScript && !Pistol)
+	if (bLoadStandaloneDemoObjects && !Pistol)
 	{
 		Pistol = LoadModel(WideToUtf8(GetAssetFullPath(L"assets\\pistol\\pistol.obj")));
 	}
-	if (!bEnableStartupLuauScript && Pistol && PistolObject == InvalidSceneObjectHandle)
+	if (bLoadStandaloneDemoObjects && Pistol && PistolObject == InvalidSceneObjectHandle)
 	{
 		PistolObject = AddCenteredSceneObject(
 			Pistol,
@@ -6942,12 +7435,12 @@ void Corona::LoadAssets()
 			PistolCenterRotationDegrees);
 	}
 
-	if (!MirrorCube)
+	if (!bStartupSponzaFlyMode && !MirrorCube)
 	{
 		UpdateStartupLoadingProgress(0.80f, L"Creating mirror cube");
 		MirrorCube = CreateMirrorCubeScene();
 	}
-	if (MirrorCube && MirrorCubeObject == InvalidSceneObjectHandle)
+	if (!bStartupSponzaFlyMode && MirrorCube && MirrorCubeObject == InvalidSceneObjectHandle)
 	{
 		MirrorCubeObject = AddCenteredSceneObject(
 			MirrorCube,
@@ -7606,6 +8099,40 @@ void Corona::ApplyHybridDefaultCamera()
 	bResetTemporalStateNextUpdate = true;
 }
 
+void Corona::ApplySponzaFlyCamera()
+{
+	const glm::vec3 position(458.0f, 781.0f, 185.0f);
+	const float yaw = 4.4f;
+	const float pitch = -0.40f;
+
+	m_camera.m_initialPosition = position;
+	m_camera.m_position = position;
+	m_camera.m_yaw = yaw;
+	m_camera.m_pitch = pitch;
+	m_camera.m_upDirection = glm::vec3(0.0f, 1.0f, 0.0f);
+	m_camera.m_keysPressed = {};
+	m_camera.m_mouseButtonDown = false;
+	m_camera.SetMoveSpeed(520.0f);
+
+	const float r = cosf(m_camera.m_pitch);
+	m_camera.m_lookDirection.x = r * sinf(m_camera.m_yaw);
+	m_camera.m_lookDirection.y = sinf(m_camera.m_pitch);
+	m_camera.m_lookDirection.z = r * cosf(m_camera.m_yaw);
+
+	bScriptCameraControlEnabled = false;
+	if (SponzaObject != InvalidSceneObjectHandle)
+		SetSceneObjectVisibility(SponzaObject, true);
+
+	FrameCounter = 0;
+	PathTracingAccumulatedFrames = 0;
+	PrevPathTracingViewMat = glm::mat4x4(0.0f);
+	PrevPathTracingLightDir = glm::vec3(0.0f);
+	PrevPathTracingLightIntensity = 0.0f;
+	bTemporalAAHistoryValid = false;
+	bTemporalDenoiserHistoryValid = false;
+	bResetTemporalStateNextUpdate = true;
+}
+
 static const float OneMinusEpsilon = 0.9999999403953552f;
 
 inline float RadicalInverseBase2(uint32 bits)
@@ -7656,6 +8183,7 @@ void Corona::OnUpdate()
 
 	phaseStart = CpuClock::now();
 	PollScriptMouseState();
+	PollScriptGamepadState();
 	AddCpuUpdatePhaseTiming(ECpuUpdatePhase::Input, phaseStart, CpuClock::now());
 
 	phaseStart = CpuClock::now();
@@ -7714,7 +8242,7 @@ void Corona::BuildRenderFrameDerivedState(const RenderFrameSourceState* sourceSt
 			cameraUp = std::abs(cameraLook.y) < 0.99f ? glm::vec3(0.0f, 1.0f, 0.0f) : glm::vec3(1.0f, 0.0f, 0.0f);
 
 		ViewMat = glm::lookAtRH(sourceState->CameraPosition, sourceState->CameraPosition + cameraLook, cameraUp);
-		ProjMat = glm::perspectiveRH<float>(Fov, m_aspectRatio, effectiveNear, effectiveFar);
+		ProjMat = m_camera.GetProjectionMatrix(Fov, m_aspectRatio, effectiveNear, effectiveFar);
 	}
 	else
 	{
@@ -8059,8 +8587,19 @@ void Corona::OnRender()
 		PathTracingPass();
 		EndGpuPassTiming(EGpuPass::PathTracing);
 
-		// Copy path tracing result to color buffer for tonemap
-		// (In a complete implementation, you would copy PathTracingAccumBuffer to ColorBuffers)
+#if WITH_STREAMLINE
+		if (IsPathTracingDLSSRREnabled() && PathTracingViewParam.DebugMode == 0)
+		{
+			BeginGpuPassTiming(EGpuPass::DLSSRR);
+			const bool bRRPassed = DLSSRRPass();
+			EndGpuPassTiming(EGpuPass::DLSSRR);
+			if (!bRRPassed)
+			{
+				bDLSSRROutputValidThisFrame = false;
+				bUseLightingBufferFallbackForToneMap = true;
+			}
+		}
+#endif
 	}
 
 
@@ -8194,6 +8733,18 @@ void Corona::OnRender()
 		foregroundDrawList->AddText(ImVec2(fpsTextPos.x + 1.0f, fpsTextPos.y + 1.0f), IM_COL32(0, 0, 0, 180), fpsText);
 		foregroundDrawList->AddText(fpsTextPos, IM_COL32(255, 255, 255, 235), fpsText);
 
+		char cullingText[160];
+		sprintf_s(
+			cullingText,
+			"Rendered %llu / %llu objects  |  Frustum %llu  Occlusion %llu",
+			static_cast<unsigned long long>(GBufferLastVisibleObjectCount),
+			static_cast<unsigned long long>(GBufferLastTotalObjectCount),
+			static_cast<unsigned long long>(GBufferLastFrustumCulledObjectCount),
+			static_cast<unsigned long long>(GBufferLastOcclusionCulledObjectCount));
+		const ImVec2 cullingTextPos(10.0f, 26.0f);
+		foregroundDrawList->AddText(ImVec2(cullingTextPos.x + 1.0f, cullingTextPos.y + 1.0f), IM_COL32(0, 0, 0, 180), cullingText);
+		foregroundDrawList->AddText(cullingTextPos, IM_COL32(190, 235, 255, 235), cullingText);
+
 		const bool bUseLuauImguiControls = bEnableStartupLuauScript && ScriptState && !ScriptState->Scripts.empty();
 		if (bUseLuauImguiControls)
 		{
@@ -8235,6 +8786,7 @@ void Corona::OnRender()
 						if (RenderingMode == ERenderingMode::PATHTRACING && RenderingMode != previousRenderingMode)
 						{
 							FrameCounter = 0;
+							PathTracingAccumulatedFrames = 0;
 							PrevPathTracingViewMat = glm::mat4x4(0.0f);
 							PrevPathTracingLightDir = glm::vec3(0.0f);
 							PrevPathTracingLightIntensity = 0.0f;
@@ -8981,10 +9533,18 @@ void Corona::OnRender()
 		ImGui::Text("Path Tracing Settings");
 		ImGui::SliderInt("Max Bounces", (int*)&PathTracingViewParam.MaxBounces, 1, 8);
 		ImGui::SliderInt("Samples Per Pixel", (int*)&PathTracingViewParam.SamplesPerPixel, 1, 16);
-	ImGui::Text("Accumulated Frames: %u", FrameCounter);
+#if WITH_STREAMLINE
+		if (ImGui::Checkbox("Primary-hit GBuffer for DLSS RR", &bEnablePathTracingDLSSRR))
+		{
+			ResetAllAccumulationState(false);
+		}
+#endif
+	ImGui::Text("Accumulated Frames: %u", PathTracingAccumulatedFrames);
+	ImGui::Text("Dispatch SPP: %u", PathTracingLastDispatchSamplesPerPixel);
 if (ImGui::Button("Reset Accumulation"))
 {
 	FrameCounter = 0;
+	PathTracingAccumulatedFrames = 0;
 	PrevPathTracingViewMat = glm::mat4x4(0.0f);
 	PrevPathTracingLightDir = glm::vec3(0.0f);
 	PrevPathTracingLightIntensity = 0.0f;
@@ -8998,6 +9558,7 @@ if (ImGui::Button("Reset Accumulation"))
 		{
 			PathTracingViewParam.DebugMode = debugMode;
 			FrameCounter = 0; // Reset accumulation when changing debug mode
+			PathTracingAccumulatedFrames = 0;
 			PrevPathTracingViewMat = glm::mat4x4(0.0f);
 		}
 

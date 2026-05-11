@@ -2,6 +2,15 @@
 #include "GGX.hlsli"
 
 RWTexture2D<float4> OutputColor : register(u0);
+RWTexture2D<float4> OutAlbedo : register(u1);
+RWTexture2D<float4> OutSpecularAlbedo : register(u2);
+RWTexture2D<float4> OutNormal : register(u3);
+RWTexture2D<float4> OutGeomNormal : register(u4);
+RWTexture2D<float2> OutVelocity : register(u5);
+RWTexture2D<float4> OutRoughnessMetallic : register(u6);
+RWTexture2D<float> OutDepth : register(u7);
+RWTexture2D<float> OutSpecularHitDistance : register(u8);
+RWTexture2D<float2> OutSpecularMotionVector : register(u9);
 
 RaytracingAccelerationStructure gRtScene : register(t0);
 Texture3D BlueNoiseTex : register(t4);
@@ -27,6 +36,8 @@ cbuffer ViewParameter : register(b0)
     float4x4 InvViewMatrix;
     float4x4 ProjMatrix;
     float4x4 InvProjMatrix;
+    float4x4 UnjitteredViewProjMatrix;
+    float4x4 PrevUnjitteredViewProjMatrix;
     float4 ProjectionParams;
     float4 LightDirAndIntensity;
     float DirectLightAngularRadius;
@@ -50,7 +61,9 @@ cbuffer ViewParameter : register(b0)
     uint bEnableDirectDiffuse;
     uint bEnableDirectSpecular;
     uint bEnableRTAO;
-    uint3 _rtaoPadding;
+    uint bWritePrimaryGBuffer;
+    float SpecularMotionVectorScale;
+    uint _rtaoPadding;
     PointLightParam PointLights[MAX_POINT_LIGHTS];
     uint PointLightCount;
     float3 PointLightPadding;
@@ -59,6 +72,7 @@ cbuffer ViewParameter : register(b0)
 SamplerState sampleWrap : register(s0);
 
 static const float INV_PI = 1.0 / PI;
+static const float PATH_TRACING_RAY_BIAS = 0.5f;
 
 struct PathTracingPayload
 {
@@ -69,10 +83,13 @@ struct PathTracingPayload
     uint depth;
     uint seed;
     bool done;
+    uint guideRay;
+    float hitDistance;
     
     // Debug visualization data (only for primary hit)
     float3 debugAlbedo;
     float3 debugNormal;
+    float3 debugGeomNormal;
     float3 debugWorldPos;
     float debugRoughness;
     float debugMetallic;
@@ -99,6 +116,52 @@ float random_float(inout uint seed)
 {
     seed = pcg_hash(seed);
     return float(seed) / 4294967296.0;
+}
+
+uint init_path_seed(uint2 pixel, uint frameIndex, uint sampleIndex)
+{
+    uint seed = pixel.x * 0x9E3779B9u;
+    seed ^= pixel.y * 0xBB67AE85u;
+    seed ^= frameIndex * 0x3C6EF372u;
+    seed ^= sampleIndex * 0xA54FF53Au;
+    seed = pcg_hash(seed ^ 0x510E527Fu);
+    seed ^= pcg_hash(seed + pixel.x + 0x1F83D9ABu);
+    seed ^= pcg_hash(seed + pixel.y + 0x5BE0CD19u);
+    return seed | 1u;
+}
+
+float3 clamp_firefly(float3 radiance)
+{
+    const float kMaxRadiance = 48.0f;
+    float maxChannel = max(radiance.x, max(radiance.y, radiance.z));
+    if (maxChannel > kMaxRadiance)
+        radiance *= kMaxRadiance / maxChannel;
+    return radiance;
+}
+
+PathTracingPayload MakePathTracingPayload(float3 rayOrigin, float3 rayDirection, uint depth, uint seed, float3 throughput, uint guideRay)
+{
+    PathTracingPayload payload;
+    payload.radiance = float3(0, 0, 0);
+    payload.throughput = throughput;
+    payload.origin = rayOrigin;
+    payload.direction = rayDirection;
+    payload.depth = depth;
+    payload.seed = seed;
+    payload.done = false;
+    payload.guideRay = guideRay;
+    payload.hitDistance = ProjectionParams.w;
+    payload.debugAlbedo = float3(0, 0, 0);
+    payload.debugNormal = float3(0, 0, 0);
+    payload.debugGeomNormal = float3(0, 0, 0);
+    payload.debugWorldPos = float3(0, 0, 0);
+    payload.debugRoughness = 0;
+    payload.debugMetallic = 0;
+    payload.debugBarycentric = float3(0, 0, 0);
+    payload.debugUV = float2(0, 0);
+    payload.debugInstanceID = 0;
+    payload.debugTriangleIndex = 0;
+    return payload;
 }
 
 float3 random_in_unit_sphere(inout uint seed)
@@ -180,6 +243,57 @@ float3 ApplyPathTracingNormalMap(float3 vertexNormal, float3 vertexTangent, floa
     return GGXSafeNormalize(mul(normalMap, float3x3(T, B, N)), N);
 }
 
+float ProjectToDeviceDepth(float3 worldPos, float4x4 viewProj)
+{
+    float4 clip = mul(float4(worldPos, 1.0f), viewProj);
+    float invW = abs(clip.w) > 1.0e-6f ? rcp(clip.w) : 0.0f;
+    float deviceDepth = clip.z * invW;
+    return (isnan(deviceDepth) || isinf(deviceDepth)) ? 1.0f : deviceDepth;
+}
+
+float2 ProjectToScreenUV(float3 worldPos, float4x4 viewProj)
+{
+    float4 clip = mul(float4(worldPos, 1.0f), viewProj);
+    float invW = abs(clip.w) > 1.0e-6f ? rcp(clip.w) : 0.0f;
+    float2 uv = (clip.xy * invW) * float2(0.5f, -0.5f) + 0.5f;
+    return (any(isnan(uv)) || any(isinf(uv))) ? float2(0.0f, 0.0f) : uv;
+}
+
+void WritePrimaryHitGBuffer(uint2 pixel, PathTracingPayload payload, bool bHit, float specularHitDistance, float2 specularMotionVector)
+{
+    if (!bHit)
+    {
+        OutAlbedo[pixel] = float4(0.0f, 0.0f, 0.0f, 1.0f);
+        OutSpecularAlbedo[pixel] = float4(0.0f, 0.0f, 0.0f, 1.0f);
+        OutNormal[pixel] = float4(0.0f, -0.1f, 0.0f, 0.0f);
+        OutGeomNormal[pixel] = float4(0.0f, -0.1f, 0.0f, 0.0f);
+        OutVelocity[pixel] = float2(0.0f, 0.0f);
+        OutRoughnessMetallic[pixel] = float4(0.001f, 0.0f, 0.0f, 0.0f);
+        OutDepth[pixel] = 1.0f;
+        OutSpecularHitDistance[pixel] = ProjectionParams.w;
+        OutSpecularMotionVector[pixel] = float2(0.0f, 0.0f);
+        return;
+    }
+
+    float3 albedo = saturate(payload.debugAlbedo);
+    float roughness = clamp(payload.debugRoughness, 0.01f, 1.0f);
+    float metallic = saturate(payload.debugMetallic);
+    float3 normal = GGXSafeNormalize(payload.debugNormal, float3(0.0f, 1.0f, 0.0f));
+    float3 geomNormal = GGXSafeNormalize(payload.debugGeomNormal, normal);
+    float3 surfaceToView = GGXSafeNormalize(-payload.direction, normal);
+
+    OutAlbedo[pixel] = float4(albedo, 1.0f);
+    OutSpecularAlbedo[pixel] = float4(ComputeDLSSRRSpecularAlbedo(albedo, metallic, roughness, normal, surfaceToView), 1.0f);
+    OutNormal[pixel] = float4(normal, 0.0f);
+    OutGeomNormal[pixel] = float4(geomNormal, 0.0f);
+    // PT+RR asks Streamline to rebuild camera motion from depth and clipToPrevClip.
+    OutVelocity[pixel] = float2(0.0f, 0.0f);
+    OutRoughnessMetallic[pixel] = float4(roughness, metallic, 0.0f, 0.0f);
+    OutDepth[pixel] = ProjectToDeviceDepth(payload.debugWorldPos, UnjitteredViewProjMatrix);
+    OutSpecularHitDistance[pixel] = clamp(specularHitDistance, 0.0f, ProjectionParams.w);
+    OutSpecularMotionVector[pixel] = specularMotionVector;
+}
+
 [shader("raygeneration")]
 void PathTracingRayGen()
 {
@@ -188,151 +302,190 @@ void PathTracingRayGen()
     
     float2 pixelCenter = float2(launchIndex.xy) + float2(0.5, 0.5);
     float2 inUV = pixelCenter / float2(launchDim.xy);
-    float2 d = inUV * 2.0 - 1.0;
     
-    float aspectRatio = float(launchDim.x) / float(launchDim.y);
-    
-    // Initialize random seed
-    // In debug mode, use fixed seed to avoid noise
-    uint frameCounter = (DebugMode > 0) ? 0 : FrameCounter;
-    uint seed = (launchIndex.x * 1973 + launchIndex.y * 9277 + frameCounter * 26699) | 1;
-    
-    // Add jitter for antialiasing if accumulating (but not in debug mode)
-    if (DebugMode == 0)
+    uint frameCounter = (DebugMode > 0) ? 0 : BlueNoiseOffsetStride;
+    uint sampleCount = (DebugMode > 0) ? 1u : clamp(SamplesPerPixel, 1u, 16u);
+    float3 radianceSum = float3(0, 0, 0);
+
+    for (uint sampleIndex = 0; sampleIndex < sampleCount; ++sampleIndex)
     {
-        float2 jitter = float2(random_float(seed), random_float(seed)) - 0.5;
-        d += jitter / float2(launchDim.xy);
-    }
-    
-    d.y = -d.y;
-    d *= tan(0.8 / 2.0);
-    d.x *= aspectRatio;
-    
-    float3 rayDir = normalize(float3(d.x, d.y, -1.0));
-    rayDir = normalize(mul(float4(rayDir, 0), InvViewMatrix).xyz);
-    
-    float3 rayOrigin = mul(float4(0, 0, 0, 1), InvViewMatrix).xyz;
-    
-    // Path tracing loop
-    float3 radiance = float3(0, 0, 0);
-    float3 throughput = float3(1, 1, 1);
-    
-    for (uint bounce = 0; bounce < MaxBounces; bounce++)
-    {
-        RayDesc ray;
-        ray.Origin = rayOrigin;
-        ray.Direction = rayDir;
-        ray.TMin = 0.0001;
-        ray.TMax = 100000;
-        
-        PathTracingPayload payload;
-        payload.radiance = float3(0, 0, 0);
-        payload.throughput = throughput;
-        payload.origin = rayOrigin;
-        payload.direction = rayDir;
-        payload.depth = bounce;
-        payload.seed = seed;
-        payload.done = false;
-        payload.debugAlbedo = float3(0, 0, 0);
-        payload.debugNormal = float3(0, 0, 0);
-        payload.debugWorldPos = float3(0, 0, 0);
-        payload.debugRoughness = 0;
-        payload.debugMetallic = 0;
-        payload.debugUV = float2(0, 0);
-        payload.debugInstanceID = 0;
-        payload.debugTriangleIndex = 0;
-        
-        TraceRay(gRtScene, RAY_FLAG_NONE, 0xFF, 0, 0, 0, ray, payload);
-        
-        seed = payload.seed;
-        
-        // Debug visualization for primary hit only
-        if (DebugMode > 0 && bounce == 0)
+        uint seed = init_path_seed(launchIndex.xy, frameCounter, sampleIndex);
+        float2 clipXY = inUV * 2.0f - 1.0f;
+
+        // Keep the RR guiding GBuffer deterministic. The first sample uses the
+        // pixel center; extra samples still provide stochastic AA/noise reduction.
+        bool bCenterPrimaryRay = (bWritePrimaryGBuffer != 0 && sampleIndex == 0);
+        if (DebugMode == 0 && !bCenterPrimaryRay)
         {
-            if (!payload.done) // Only visualize if we hit something
+            float2 jitter = float2(random_float(seed), random_float(seed)) - 0.5;
+            clipXY += (2.0f * jitter) / float2(launchDim.xy);
+        }
+
+        clipXY.y = -clipXY.y;
+        float4 viewFarH = mul(float4(clipXY, 1.0f, 1.0f), InvProjMatrix);
+        float invViewFarW = abs(viewFarH.w) > 1.0e-6f ? rcp(viewFarH.w) : 1.0f;
+        float3 viewRayDir = viewFarH.xyz * invViewFarW;
+        if (any(isnan(viewRayDir)) || any(isinf(viewRayDir)) || dot(viewRayDir, viewRayDir) < 1.0e-8f)
+            viewRayDir = float3(0.0f, 0.0f, -1.0f);
+        else
+            viewRayDir = normalize(viewRayDir);
+        float primaryRayTScale = rcp(max(-viewRayDir.z, 1.0e-4f));
+        float primaryRayTMin = max(0.0001f, ProjectionParams.z * primaryRayTScale);
+        float primaryRayTMax = max(primaryRayTMin + 0.0001f, ProjectionParams.w * primaryRayTScale);
+        float3 rayDir = normalize(mul(float4(viewRayDir, 0), InvViewMatrix).xyz);
+
+        float3 rayOrigin = mul(float4(0, 0, 0, 1), InvViewMatrix).xyz;
+        float3 radiance = float3(0, 0, 0);
+        float3 throughput = float3(1, 1, 1);
+
+        for (uint bounce = 0; bounce < MaxBounces; bounce++)
+        {
+            RayDesc ray;
+            ray.Origin = rayOrigin;
+            ray.Direction = rayDir;
+            ray.TMin = bounce == 0 ? primaryRayTMin : 0.0001f;
+            ray.TMax = bounce == 0 ? primaryRayTMax : 100000.0f;
+            
+            PathTracingPayload payload = MakePathTracingPayload(rayOrigin, rayDir, bounce, seed, throughput, 0u);
+            
+            TraceRay(gRtScene, RAY_FLAG_NONE, 0xFF, 0, 0, 0, ray, payload);
+            
+            seed = payload.seed;
+
+            if (bWritePrimaryGBuffer != 0 && sampleIndex == 0 && bounce == 0)
             {
-                if (DebugMode == 1) // Albedo
-                    radiance = payload.debugAlbedo;
-                else if (DebugMode == 2) // Normal (remap from [-1,1] to [0,1])
-                    radiance = payload.debugNormal * 0.5 + 0.5;
-                else if (DebugMode == 3) // Roughness
-                    radiance = float3(payload.debugRoughness, payload.debugRoughness, payload.debugRoughness);
-                else if (DebugMode == 4) // Metallic
-                    radiance = float3(payload.debugMetallic, payload.debugMetallic, payload.debugMetallic);
-                else if (DebugMode == 5) // World Position (adjust scale for better visualization)
+                float specularHitDistance = ProjectionParams.w;
+                float2 specularMotionVector = float2(0.0f, 0.0f);
+                if (!payload.done)
                 {
-                    // Grid pattern with 10 unit spacing
-                    radiance = frac(payload.debugWorldPos * 0.1);
+                    float roughness = clamp(payload.debugRoughness, 0.02f, 1.0f);
+                    float3 specularAlbedo = lerp(0.04f.xxx, saturate(payload.debugAlbedo), saturate(payload.debugMetallic));
+                    float specularEnergy = max(specularAlbedo.x, max(specularAlbedo.y, specularAlbedo.z));
+                    float smoothGuide = saturate((0.38f - roughness) / 0.18f);
+                    float metalGuide = saturate(payload.debugMetallic) * saturate((0.55f - roughness) / 0.25f);
+                    float specularGuideWeight = specularEnergy * max(smoothGuide, metalGuide);
+
+                    if (specularGuideWeight > 0.025f)
+                    {
+                        float3 guideNormal = GGXSafeNormalize(payload.debugGeomNormal, float3(0.0f, 1.0f, 0.0f));
+                        float3 guideDir = GGXSafeNormalize(reflect(ray.Direction, guideNormal), guideNormal);
+
+                        if (dot(guideDir, guideNormal) > 1.0e-4f)
+                        {
+                            RayDesc guideRay;
+                            guideRay.Origin = payload.debugWorldPos + guideNormal * PATH_TRACING_RAY_BIAS;
+                            guideRay.Direction = guideDir;
+                            guideRay.TMin = 0.01f;
+                            guideRay.TMax = ProjectionParams.w;
+
+                            PathTracingPayload guidePayload = MakePathTracingPayload(guideRay.Origin, guideRay.Direction, 0u, seed, float3(0, 0, 0), 1u);
+                            guidePayload.done = true;
+                            TraceRay(gRtScene,
+                                     RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH |
+                                     RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES,
+                                     0xFF, 0, 0, 0, guideRay, guidePayload);
+                            if (!guidePayload.done)
+                            {
+                                specularHitDistance = guidePayload.hitDistance;
+                                float2 specCurrentUV = ProjectToScreenUV(guidePayload.debugWorldPos, UnjitteredViewProjMatrix);
+                                float2 specPrevUV = ProjectToScreenUV(guidePayload.debugWorldPos, PrevUnjitteredViewProjMatrix);
+                                specularMotionVector = (specPrevUV - specCurrentUV) * float2(launchDim.xy) * SpecularMotionVectorScale;
+                            }
+                        }
+                    }
                 }
-                else if (DebugMode == 6) // Barycentric coordinates
-                {
-                    radiance = payload.debugBarycentric;
-                }
-                else if (DebugMode == 7) // UV
-                {
-                    radiance = float3(payload.debugUV, 0);
-                }
-                else if (DebugMode == 8) // InstanceID
-                {
-                    // Visualize instance ID as a color (modulo 8 for variety)
-                    uint id = payload.debugInstanceID % 8;
-                    float3 colors[8] = {
-                        float3(1, 0, 0), float3(0, 1, 0), float3(0, 0, 1), float3(1, 1, 0),
-                        float3(1, 0, 1), float3(0, 1, 1), float3(1, 1, 1), float3(0.5, 0.5, 0.5)
-                    };
-                    radiance = colors[id];
-                }
-                else if (DebugMode == 9) // Triangle Index
-                {
-                    // Visualize triangle index with a gradient
-                    float t = frac(float(payload.debugTriangleIndex) * 0.01);
-                    radiance = float3(t, t, t);
-                }
-            }
-            else
-            {
-                // Hit sky - show gray background for debug modes
-                radiance = float3(0.5, 0.5, 0.5);
+                WritePrimaryHitGBuffer(launchIndex.xy, payload, !payload.done, specularHitDistance, specularMotionVector);
             }
             
-            break; // Stop after first hit when debugging
-        }
-        
-        // Always accumulate radiance from this bounce
-        radiance += payload.radiance * throughput;
-        
-        if (payload.done)
-        {
-            // Hit sky - stop tracing
-            break;
-        }
-        
-        // Update for next bounce
-        rayOrigin = payload.origin;
-        rayDir = payload.direction;
-        throughput = payload.throughput;
-        
-        // Validate throughput
-        if (any(isnan(throughput)) || any(isinf(throughput)) || all(throughput <= 0.0))
-        {
-            break;
-        }
-        
-        // Russian roulette
-        if (bounce > 2)
-        {
-            float p = max(throughput.x, max(throughput.y, throughput.z));
+            if (DebugMode > 0 && bounce == 0)
+            {
+                if (!payload.done)
+                {
+                    if (DebugMode == 1)
+                        radiance = payload.debugAlbedo;
+                    else if (DebugMode == 2)
+                        radiance = payload.debugNormal * 0.5 + 0.5;
+                    else if (DebugMode == 3)
+                        radiance = float3(payload.debugRoughness, payload.debugRoughness, payload.debugRoughness);
+                    else if (DebugMode == 4)
+                        radiance = float3(payload.debugMetallic, payload.debugMetallic, payload.debugMetallic);
+                    else if (DebugMode == 5)
+                    {
+                        radiance = frac(payload.debugWorldPos * 0.1);
+                    }
+                    else if (DebugMode == 6)
+                    {
+                        radiance = payload.debugBarycentric;
+                    }
+                    else if (DebugMode == 7)
+                    {
+                        radiance = float3(payload.debugUV, 0);
+                    }
+                    else if (DebugMode == 8)
+                    {
+                        uint id = payload.debugInstanceID % 8;
+                        float3 colors[8] = {
+                            float3(1, 0, 0), float3(0, 1, 0), float3(0, 0, 1), float3(1, 1, 0),
+                            float3(1, 0, 1), float3(0, 1, 1), float3(1, 1, 1), float3(0.5, 0.5, 0.5)
+                        };
+                        radiance = colors[id];
+                    }
+                    else if (DebugMode == 9)
+                    {
+                        float t = frac(float(payload.debugTriangleIndex) * 0.01);
+                        radiance = float3(t, t, t);
+                    }
+                }
+                else
+                {
+                    radiance = float3(0.5, 0.5, 0.5);
+                }
+                
+                break;
+            }
             
-            // If throughput is too small, terminate
-            if (p < 0.001)
+            radiance += payload.radiance * throughput;
+            
+            if (payload.done)
+            {
                 break;
-                
-            if (random_float(seed) > p)
+            }
+            
+            rayOrigin = payload.origin;
+            rayDir = payload.direction;
+            throughput = payload.throughput;
+            
+            if (any(isnan(throughput)) || any(isinf(throughput)) || all(throughput <= 0.0))
+            {
                 break;
+            }
+            
+            if (bounce > 2)
+            {
+                float p = max(throughput.x, max(throughput.y, throughput.z));
                 
-            throughput /= max(p, 0.001); // Avoid division by very small numbers
+                if (p < 0.001)
+                    break;
+                    
+                if (random_float(seed) > p)
+                    break;
+                    
+                throughput /= max(p, 0.001);
+            }
         }
+        
+        if (any(isnan(radiance)) || any(isinf(radiance)))
+        {
+            radiance = float3(0, 0, 0);
+        }
+        if (DebugMode == 0)
+        {
+            radiance = clamp_firefly(max(radiance, 0.0f.xxx));
+        }
+        radianceSum += radiance;
     }
+    
+    float3 radiance = radianceSum / float(sampleCount);
     
     // Validate radiance (check for NaN/Inf)
     if (any(isnan(radiance)) || any(isinf(radiance)))
@@ -376,6 +529,14 @@ void PathTracingRayGen()
 [shader("closesthit")]
 void PathTracingClosestHit(inout PathTracingPayload payload, in BuiltInTriangleIntersectionAttributes attribs)
 {
+    if (payload.guideRay != 0)
+    {
+        payload.hitDistance = RayTCurrent();
+        payload.debugWorldPos = payload.origin + payload.direction * payload.hitDistance;
+        payload.done = false;
+        return;
+    }
+
     float3 barycentrics = float3(1.0 - attribs.barycentrics.x - attribs.barycentrics.y, 
                                   attribs.barycentrics.x, 
                                   attribs.barycentrics.y);
@@ -388,6 +549,7 @@ void PathTracingClosestHit(inout PathTracingPayload payload, in BuiltInTriangleI
     float3 albedo = AlbedoTex.SampleLevel(sampleWrap, vertex.uv, 0).xyz;
     float roughness = clamp(RoughnessTex.SampleLevel(sampleWrap, vertex.uv, 0).x, 0.02f, 1.0f);
     float metallic = saturate(MetallicTex.SampleLevel(sampleWrap, vertex.uv, 0).x);
+    ApplyInstanceRoughnessMetallic(instanceID, InstanceProperty, roughness, metallic);
     
     // Store debug information for primary hit (depth == 0)
     if (payload.depth == 0)
@@ -407,21 +569,24 @@ void PathTracingClosestHit(inout PathTracingPayload payload, in BuiltInTriangleI
     // such as buddha.obj have no tangents, so fall back to the geometric normal.
     float3 N = ApplyPathTracingNormalMap(vertex.normal, vertex.tangent, vertex.uv, instanceID);
     float3 V = GGXSafeNormalize(-payload.direction, N);
+    float3 geomNormal = GGXSafeNormalize(vertex.normal, N);
     // Path tracing hits both sides of imported meshes. Keep the shading normal
     // on the visible side so inverted/two-sided OBJ normals do not trap paths.
     if (dot(N, V) < 0.0f)
         N = -N;
+    if (dot(geomNormal, V) < 0.0f)
+        geomNormal = -geomNormal;
     
     // Store final normal for debug visualization
     if (payload.depth == 0)
     {
         payload.debugNormal = N;
+        payload.debugGeomNormal = geomNormal;
     }
     
     // Offset ray origin to avoid self-intersection
     // Use larger offset for path tracing to prevent shadow acne
-    const float kPathTracingRayBias = 0.5f;
-    float3 hitPos = vertex.position + N * kPathTracingRayBias;
+    float3 hitPos = vertex.position + N * PATH_TRACING_RAY_BIAS;
     
     // Direct lighting - sample the sun as a small spherical cap.
     float3 baseLightDir = GGXSafeNormalize(LightDirAndIntensity.xyz, float3(0.0f, 1.0f, 0.0f));
@@ -543,9 +708,15 @@ void PathTracingClosestHit(inout PathTracingPayload payload, in BuiltInTriangleI
     // branch probabilities so the chosen lobe is properly weighted.
     float specularWeight = (F.x + F.y + F.z) / 3.0;
     specularWeight *= (1.0 - roughness * 0.5);
-    specularWeight = saturate(specularWeight);
-    float diffuseWeight = saturate(1.0 - specularWeight);
-    float totalWeight = max(specularWeight + diffuseWeight, 1e-4);
+    specularWeight = (bEnableSpecularGI != 0) ? saturate(specularWeight) : 0.0f;
+    float diffuseWeight = (bEnableDiffuseGI != 0) ? saturate(1.0 - specularWeight) : 0.0f;
+    float totalWeight = specularWeight + diffuseWeight;
+    if (totalWeight <= 1e-4f)
+    {
+        payload.throughput = float3(0, 0, 0);
+        payload.done = true;
+        return;
+    }
     specularWeight /= totalWeight;
     diffuseWeight /= totalWeight;
     
@@ -563,10 +734,7 @@ void PathTracingClosestHit(inout PathTracingPayload payload, in BuiltInTriangleI
         
         // Compensate for the stochastic lobe selection probability. This is not
         // full MIS yet, but it removes a major dark bias from the path tracer.
-        if (bEnableSpecularGI)
-            payload.throughput *= F / max(specularWeight, 1e-4);
-        else
-            payload.throughput = float3(0, 0, 0);
+        payload.throughput *= F / max(specularWeight, 1e-4);
     }
     else
     {
@@ -577,10 +745,7 @@ void PathTracingClosestHit(inout PathTracingPayload payload, in BuiltInTriangleI
         
         // Lambertian BRDF under cosine-weighted sampling reduces to albedo, but
         // we still need to divide by the branch probability.
-        if (bEnableDiffuseGI)
-            payload.throughput *= (albedo * (1.0 - metallic)) / max(diffuseWeight, 1e-4);
-        else
-            payload.throughput = float3(0, 0, 0);
+        payload.throughput *= (albedo * (1.0 - metallic)) / max(diffuseWeight, 1e-4);
     }
     
     payload.origin = hitPos;
@@ -591,6 +756,13 @@ void PathTracingClosestHit(inout PathTracingPayload payload, in BuiltInTriangleI
 [shader("miss")]
 void PathTracingMiss(inout PathTracingPayload payload)
 {
+    if (payload.guideRay != 0)
+    {
+        payload.hitDistance = ProjectionParams.w;
+        payload.done = true;
+        return;
+    }
+
     // Sky color - gradient based on view direction
     float t = 0.5 * (payload.direction.y + 1.0);
     float3 skyColor = lerp(SkyColorBottom, SkyColorTop, t);

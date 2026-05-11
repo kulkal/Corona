@@ -1,6 +1,11 @@
 local script = {}
 
 corona_script_controls = corona_script_controls or {}
+if corona_script_controls.dungeon ~= nil and corona_script_controls.dungeon.enabled then
+    corona.log("startup standalone procedural character skipped for dungeon mode")
+    return {}
+end
+
 corona_script_controls.blockCharacter = corona_script_controls.blockCharacter or {}
 
 local controls = corona_script_controls.blockCharacter

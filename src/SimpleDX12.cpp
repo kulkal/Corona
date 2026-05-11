@@ -570,6 +570,105 @@ uint64_t SimpleDX12::ReadGpuTimestampValue(uint32_t queryIndex) const
 	return GpuTimestampReadbackMapped[queryIndex];
 }
 
+void SimpleDX12::InitializeOcclusionQueries(uint32_t queryCount)
+{
+	if (OcclusionQueryHeap && OcclusionQueryCount == queryCount)
+		return;
+
+	ShutdownOcclusionQueries();
+	if (queryCount == 0)
+		return;
+
+	D3D12_QUERY_HEAP_DESC queryHeapDesc = {};
+	queryHeapDesc.Count = queryCount;
+	queryHeapDesc.Type = D3D12_QUERY_HEAP_TYPE_OCCLUSION;
+	ThrowIfFailed(Device->CreateQueryHeap(&queryHeapDesc, IID_PPV_ARGS(&OcclusionQueryHeap)));
+
+	const UINT64 readbackSize = sizeof(UINT64) * queryCount;
+	D3D12_HEAP_PROPERTIES heapProps = {};
+	heapProps.Type = D3D12_HEAP_TYPE_READBACK;
+	heapProps.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
+	heapProps.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
+	heapProps.CreationNodeMask = 1;
+	heapProps.VisibleNodeMask = 1;
+
+	D3D12_RESOURCE_DESC bufferDesc = {};
+	bufferDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+	bufferDesc.Width = readbackSize;
+	bufferDesc.Height = 1;
+	bufferDesc.DepthOrArraySize = 1;
+	bufferDesc.MipLevels = 1;
+	bufferDesc.Format = DXGI_FORMAT_UNKNOWN;
+	bufferDesc.SampleDesc.Count = 1;
+	bufferDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+
+	ThrowIfFailed(Device->CreateCommittedResource(
+		&heapProps,
+		D3D12_HEAP_FLAG_NONE,
+		&bufferDesc,
+		D3D12_RESOURCE_STATE_COPY_DEST,
+		nullptr,
+		IID_PPV_ARGS(&OcclusionReadbackBuffer)));
+
+	CD3DX12_RANGE readRange(0, static_cast<SIZE_T>(readbackSize));
+	ThrowIfFailed(OcclusionReadbackBuffer->Map(0, &readRange, reinterpret_cast<void**>(&OcclusionReadbackMapped)));
+	std::fill_n(OcclusionReadbackMapped, queryCount, 1ull);
+	OcclusionQueryCount = queryCount;
+}
+
+void SimpleDX12::ShutdownOcclusionQueries()
+{
+	if (OcclusionReadbackBuffer && OcclusionReadbackMapped)
+	{
+		OcclusionReadbackBuffer->Unmap(0, nullptr);
+		OcclusionReadbackMapped = nullptr;
+	}
+
+	OcclusionReadbackBuffer.Reset();
+	OcclusionQueryHeap.Reset();
+	OcclusionQueryCount = 0;
+}
+
+void SimpleDX12::BeginOcclusionQuery(uint32_t queryIndex)
+{
+	if (!OcclusionQueryHeap || !GlobalCmdList || queryIndex >= OcclusionQueryCount)
+		return;
+
+	GlobalCmdList->CmdList->BeginQuery(OcclusionQueryHeap.Get(), D3D12_QUERY_TYPE_BINARY_OCCLUSION, queryIndex);
+}
+
+void SimpleDX12::EndOcclusionQuery(uint32_t queryIndex)
+{
+	if (!OcclusionQueryHeap || !GlobalCmdList || queryIndex >= OcclusionQueryCount)
+		return;
+
+	GlobalCmdList->CmdList->EndQuery(OcclusionQueryHeap.Get(), D3D12_QUERY_TYPE_BINARY_OCCLUSION, queryIndex);
+}
+
+void SimpleDX12::ResolveOcclusionQueryRange(uint32_t startQueryIndex, uint32_t queryCount)
+{
+	if (!OcclusionQueryHeap || !OcclusionReadbackBuffer || !GlobalCmdList || queryCount == 0 || startQueryIndex >= OcclusionQueryCount)
+		return;
+
+	queryCount = std::min(queryCount, OcclusionQueryCount - startQueryIndex);
+	const UINT64 bufferOffset = static_cast<UINT64>(startQueryIndex) * sizeof(UINT64);
+	GlobalCmdList->CmdList->ResolveQueryData(
+		OcclusionQueryHeap.Get(),
+		D3D12_QUERY_TYPE_BINARY_OCCLUSION,
+		startQueryIndex,
+		queryCount,
+		OcclusionReadbackBuffer.Get(),
+		bufferOffset);
+}
+
+uint64_t SimpleDX12::ReadOcclusionQueryValue(uint32_t queryIndex) const
+{
+	if (!OcclusionReadbackMapped || queryIndex >= OcclusionQueryCount)
+		return 1;
+
+	return OcclusionReadbackMapped[queryIndex];
+}
+
 void SimpleDX12::SetRenderTarget(Texture* colorTarget, Texture* depthTarget)
 {
 	if (!colorTarget)
@@ -1084,6 +1183,8 @@ SimpleDX12::SimpleDX12(ComPtr<ID3D12Device5> InDevice)
 SimpleDX12::~SimpleDX12()
 {
 	CmdQ->WaitGPU();
+	ShutdownOcclusionQueries();
+	ShutdownGpuTimestampQueries();
 }
 
 void PipelineStateObject::BindUAV(string name, int baseRegister)

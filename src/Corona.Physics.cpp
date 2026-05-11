@@ -384,11 +384,49 @@ void Corona::RebuildCpuPhysicsScene()
 	CpuPhysics->ClearSceneActors();
 
 	uint64_t actorCount = 0;
+	uint64_t boxCount = 0;
 	uint64_t triangleCount = 0;
 	for (const SceneObject& object : SceneObjects)
 	{
 		if (!object.bVisible || !object.bPhysicsQuery || !object.ScenePtr)
 			continue;
+
+		if (object.PhysicsCollisionShape == EPhysicsCollisionShape::Box)
+		{
+			const DecomposedTransform decomposed = DecomposeTransform(object.Transform);
+			if (!decomposed.bValid)
+				continue;
+
+			const PxVec3 halfExtents(
+				decomposed.Scale.x * std::max(0.001f, object.PhysicsBoxHalfExtent.x),
+				decomposed.Scale.y * std::max(0.001f, object.PhysicsBoxHalfExtent.y),
+				decomposed.Scale.z * std::max(0.001f, object.PhysicsBoxHalfExtent.z));
+			PxBoxGeometry geometry(halfExtents);
+			if (!geometry.isValid())
+				continue;
+
+			PxRigidStatic* actor = CpuPhysics->Physics->createRigidStatic(decomposed.Pose);
+			if (!actor)
+				continue;
+
+			PxShape* shape = CpuPhysics->Physics->createShape(geometry, *CpuPhysics->Material, true);
+			if (!shape)
+			{
+				actor->release();
+				continue;
+			}
+
+			actor->userData = reinterpret_cast<void*>(static_cast<uintptr_t>(object.Handle));
+			shape->userData = reinterpret_cast<void*>(static_cast<uintptr_t>(object.Handle));
+			actor->attachShape(*shape);
+			shape->release();
+			CpuPhysics->Scene->addActor(*actor);
+			CpuPhysics->Actors.push_back({ actor, object.Handle });
+
+			++actorCount;
+			++boxCount;
+			continue;
+		}
 
 		for (const shared_ptr<Mesh>& mesh : object.ScenePtr->meshes)
 		{
@@ -434,6 +472,7 @@ void Corona::RebuildCpuPhysicsScene()
 	bCpuPhysicsSceneDirty = false;
 	AppendCpuRuntimeTrace(
 		L"[PhysX] rebuilt CPU scene query world actors=" + std::to_wstring(actorCount) +
+		L", boxes=" + std::to_wstring(boxCount) +
 		L", triangles=" + std::to_wstring(triangleCount));
 }
 

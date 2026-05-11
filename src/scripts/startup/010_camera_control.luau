@@ -1,5 +1,11 @@
 local script = {}
 
+corona_script_controls = corona_script_controls or {}
+if corona_script_controls.dungeon ~= nil and corona_script_controls.dungeon.enabled then
+    corona.log("startup free camera control skipped for dungeon mode")
+    return {}
+end
+
 local moveSpeed = 200.0
 local fastMoveSpeed = 520.0
 local turnSpeed = 90.0

@@ -23,6 +23,7 @@
 #include <fstream>
 #include <locale>
 #include <sstream>
+#include <xinput.h>
 
 void AppendCpuRuntimeTrace(const std::wstring& line);
 
@@ -50,6 +51,58 @@ namespace
 	{
 		const char* text = lua_tostring(L, index);
 		return text ? std::string(text) : std::string();
+	}
+
+	using XInputGetStateProc = DWORD(WINAPI*)(DWORD, XINPUT_STATE*);
+
+	XInputGetStateProc GetXInputGetStateProc()
+	{
+		static bool bTriedLoad = false;
+		static HMODULE module = nullptr;
+		static XInputGetStateProc getState = nullptr;
+		if (bTriedLoad)
+			return getState;
+
+		bTriedLoad = true;
+		const char* dllNames[] =
+		{
+			"xinput1_4.dll",
+			"xinput1_3.dll",
+			"xinput9_1_0.dll",
+		};
+		for (const char* dllName : dllNames)
+		{
+			module = LoadLibraryA(dllName);
+			if (module)
+			{
+				getState = reinterpret_cast<XInputGetStateProc>(GetProcAddress(module, "XInputGetState"));
+				if (getState)
+					break;
+				FreeLibrary(module);
+				module = nullptr;
+			}
+		}
+		return getState;
+	}
+
+	float NormalizeGamepadStick(SHORT value, SHORT deadZone)
+	{
+		const int magnitude = std::abs(static_cast<int>(value));
+		if (magnitude <= deadZone)
+			return 0.0f;
+
+		const float normalized = static_cast<float>(magnitude - deadZone) / static_cast<float>(32767 - deadZone);
+		return std::clamp(normalized, 0.0f, 1.0f) * (value < 0 ? -1.0f : 1.0f);
+	}
+
+	float NormalizeGamepadTrigger(BYTE value)
+	{
+		if (value <= XINPUT_GAMEPAD_TRIGGER_THRESHOLD)
+			return 0.0f;
+		const float normalized =
+			static_cast<float>(value - XINPUT_GAMEPAD_TRIGGER_THRESHOLD) /
+			static_cast<float>(255 - XINPUT_GAMEPAD_TRIGGER_THRESHOLD);
+		return std::clamp(normalized, 0.0f, 1.0f);
 	}
 
 	std::string NormalizeKeyName(const char* name)
@@ -224,6 +277,8 @@ namespace
 		glm::vec3& position,
 		glm::vec3& rotationDegrees,
 		float& targetExtent,
+		glm::vec3* scale,
+		bool* useScale,
 		float* roughness,
 		float* metallic,
 		bool* overrideMaterial,
@@ -244,6 +299,28 @@ namespace
 		{
 			if (!ReadNumberField(L, tableIndex, "targetExtent", targetExtent))
 				ReadNumberField(L, tableIndex, "scale", targetExtent);
+		}
+
+		if (scale && useScale)
+		{
+			glm::vec3 readScale = *scale;
+			bool hasScale = false;
+			lua_getfield(L, tableIndex, "scale");
+			if (lua_istable(L, -1) && ReadVec3At(L, -1, readScale))
+				hasScale = true;
+			lua_pop(L, 1);
+			if (!hasScale)
+				hasScale = ReadVec3Field(L, tableIndex, "size", readScale);
+			if (!hasScale)
+				hasScale = ReadVec3Field(L, tableIndex, "extent", readScale);
+			if (!hasScale)
+				hasScale = ReadVec3Field(L, tableIndex, "extents", readScale);
+
+			if (hasScale)
+			{
+				*scale = glm::max(readScale, glm::vec3(0.001f));
+				*useScale = true;
+			}
 		}
 
 		if (roughness)
@@ -352,6 +429,46 @@ namespace
 		return 1;
 	}
 
+	int LuaCoronaCreateBoxScene(lua_State* L)
+	{
+		Corona* host = GetHost(L);
+		if (!host)
+		{
+			luaL_error(L, "corona host is not available");
+			return 0;
+		}
+
+		glm::vec3 color(0.72f, 0.72f, 0.72f);
+		bool brickTexture = false;
+		float uvRepeat = 1.0f;
+		if (lua_istable(L, 1))
+		{
+			const int tableIndex = lua_absindex(L, 1);
+			if (!ReadVec3Field(L, tableIndex, "color", color))
+			{
+				if (!ReadVec3Field(L, tableIndex, "base_color", color))
+					ReadVec3Field(L, tableIndex, "baseColor", color);
+			}
+			if (!ReadBoolField(L, tableIndex, "brick_texture", brickTexture))
+				ReadBoolField(L, tableIndex, "brickTexture", brickTexture);
+			if (!ReadNumberField(L, tableIndex, "uv_repeat", uvRepeat))
+			{
+				if (!ReadNumberField(L, tableIndex, "uvRepeat", uvRepeat))
+					ReadNumberField(L, tableIndex, "texture_repeat", uvRepeat);
+			}
+		}
+
+		const Corona::ScriptSceneHandle handle = host->CreateProceduralBoxSceneForScript(color, brickTexture, uvRepeat);
+		if (handle == Corona::InvalidScriptSceneHandle)
+		{
+			luaL_error(L, "failed to create procedural box scene");
+			return 0;
+		}
+
+		lua_pushinteger(L, static_cast<int>(handle));
+		return 1;
+	}
+
 	int LuaCoronaSpawn(lua_State* L)
 	{
 		Corona* host = GetHost(L);
@@ -365,13 +482,15 @@ namespace
 		glm::vec3 position(0.0f);
 		glm::vec3 rotationDegrees(0.0f);
 		float targetExtent = 1.0f;
+		glm::vec3 scale(1.0f);
+		bool useScale = false;
 		float roughness = 1.0f;
 		float metallic = 0.0f;
 		bool overrideMaterial = false;
 		bool visible = true;
 		bool rayTracing = true;
 		bool physicsQuery = true;
-		if (!ReadTransformDesc(L, 2, position, rotationDegrees, targetExtent, &roughness, &metallic, &overrideMaterial, &visible, &rayTracing, &physicsQuery))
+		if (!ReadTransformDesc(L, 2, position, rotationDegrees, targetExtent, &scale, &useScale, &roughness, &metallic, &overrideMaterial, &visible, &rayTracing, &physicsQuery))
 		{
 			luaL_error(L, "corona.spawn expects a descriptor table");
 			return 0;
@@ -382,6 +501,8 @@ namespace
 			position,
 			rotationDegrees,
 			targetExtent,
+			scale,
+			useScale,
 			roughness,
 			metallic,
 			overrideMaterial,
@@ -411,14 +532,16 @@ namespace
 		glm::vec3 position(0.0f);
 		glm::vec3 rotationDegrees(0.0f);
 		float targetExtent = 1.0f;
+		glm::vec3 scale(1.0f);
+		bool useScale = false;
 
-		if (!ReadTransformDesc(L, 2, position, rotationDegrees, targetExtent, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr))
+		if (!ReadTransformDesc(L, 2, position, rotationDegrees, targetExtent, &scale, &useScale, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr))
 		{
 			luaL_error(L, "corona.set_transform expects a descriptor table");
 			return 0;
 		}
 
-		lua_pushboolean(L, host->SetSceneObjectTransformForScript(handle, position, rotationDegrees, targetExtent) ? 1 : 0);
+		lua_pushboolean(L, host->SetSceneObjectTransformForScript(handle, position, rotationDegrees, targetExtent, scale, useScale) ? 1 : 0);
 		return 1;
 	}
 
@@ -435,7 +558,9 @@ namespace
 		glm::vec3 position(0.0f);
 		glm::vec3 rotationDegrees(0.0f);
 		float targetExtent = 1.0f;
-		if (!host->GetSceneObjectTransformForScript(handle, position, rotationDegrees, targetExtent))
+		glm::vec3 scale(1.0f);
+		bool useScale = false;
+		if (!host->GetSceneObjectTransformForScript(handle, position, rotationDegrees, targetExtent, scale, useScale))
 		{
 			lua_pushnil(L);
 			return 1;
@@ -448,6 +573,11 @@ namespace
 		lua_setfield(L, -2, "rotation");
 		lua_pushnumber(L, static_cast<double>(targetExtent));
 		lua_setfield(L, -2, "target_extent");
+		if (useScale)
+		{
+			PushVec3(L, scale);
+			lua_setfield(L, -2, "scale");
+		}
 		return 1;
 	}
 
@@ -492,6 +622,19 @@ namespace
 
 		const Corona::SceneObjectHandle handle = static_cast<Corona::SceneObjectHandle>(luaL_checkinteger(L, 1));
 		lua_pushboolean(L, host->RemoveSceneObject(handle) ? 1 : 0);
+		return 1;
+	}
+
+	int LuaCoronaSetDefaultWorldVisible(lua_State* L)
+	{
+		Corona* host = GetHost(L);
+		if (!host)
+		{
+			luaL_error(L, "corona host is not available");
+			return 0;
+		}
+
+		lua_pushboolean(L, host->SetDefaultWorldVisibleForScript(luaL_checkboolean(L, 1) != 0) ? 1 : 0);
 		return 1;
 	}
 
@@ -728,6 +871,86 @@ namespace
 		lua_setfield(L, -2, "right_pressed");
 		lua_pushboolean(L, rightReleased ? 1 : 0);
 		lua_setfield(L, -2, "right_released");
+		return 1;
+	}
+
+	void PushGamepadButton(lua_State* L, const char* name, uint16_t mask, uint16_t down, uint16_t pressed, uint16_t released)
+	{
+		lua_pushboolean(L, (down & mask) != 0);
+		lua_setfield(L, -2, name);
+
+		std::string pressedName = std::string(name) + "_pressed";
+		lua_pushboolean(L, (pressed & mask) != 0);
+		lua_setfield(L, -2, pressedName.c_str());
+
+		std::string releasedName = std::string(name) + "_released";
+		lua_pushboolean(L, (released & mask) != 0);
+		lua_setfield(L, -2, releasedName.c_str());
+	}
+
+	int LuaCoronaGetGamepad(lua_State* L)
+	{
+		Corona* host = GetHost(L);
+		if (!host)
+		{
+			luaL_error(L, "corona host is not available");
+			return 0;
+		}
+
+		bool connected = false;
+		float leftX = 0.0f;
+		float leftY = 0.0f;
+		float rightX = 0.0f;
+		float rightY = 0.0f;
+		float leftTrigger = 0.0f;
+		float rightTrigger = 0.0f;
+		uint16_t buttonsDown = 0;
+		uint16_t buttonsPressed = 0;
+		uint16_t buttonsReleased = 0;
+		host->GetScriptGamepadForScript(
+			connected,
+			leftX,
+			leftY,
+			rightX,
+			rightY,
+			leftTrigger,
+			rightTrigger,
+			buttonsDown,
+			buttonsPressed,
+			buttonsReleased);
+
+		lua_newtable(L);
+		lua_pushboolean(L, connected ? 1 : 0);
+		lua_setfield(L, -2, "connected");
+		lua_pushnumber(L, leftX);
+		lua_setfield(L, -2, "left_x");
+		lua_pushnumber(L, leftY);
+		lua_setfield(L, -2, "left_y");
+		lua_pushnumber(L, rightX);
+		lua_setfield(L, -2, "right_x");
+		lua_pushnumber(L, rightY);
+		lua_setfield(L, -2, "right_y");
+		lua_pushnumber(L, leftTrigger);
+		lua_setfield(L, -2, "left_trigger");
+		lua_pushnumber(L, rightTrigger);
+		lua_setfield(L, -2, "right_trigger");
+		lua_pushinteger(L, buttonsDown);
+		lua_setfield(L, -2, "buttons");
+
+		PushGamepadButton(L, "a", XINPUT_GAMEPAD_A, buttonsDown, buttonsPressed, buttonsReleased);
+		PushGamepadButton(L, "b", XINPUT_GAMEPAD_B, buttonsDown, buttonsPressed, buttonsReleased);
+		PushGamepadButton(L, "x", XINPUT_GAMEPAD_X, buttonsDown, buttonsPressed, buttonsReleased);
+		PushGamepadButton(L, "y", XINPUT_GAMEPAD_Y, buttonsDown, buttonsPressed, buttonsReleased);
+		PushGamepadButton(L, "left_shoulder", XINPUT_GAMEPAD_LEFT_SHOULDER, buttonsDown, buttonsPressed, buttonsReleased);
+		PushGamepadButton(L, "right_shoulder", XINPUT_GAMEPAD_RIGHT_SHOULDER, buttonsDown, buttonsPressed, buttonsReleased);
+		PushGamepadButton(L, "back", XINPUT_GAMEPAD_BACK, buttonsDown, buttonsPressed, buttonsReleased);
+		PushGamepadButton(L, "start", XINPUT_GAMEPAD_START, buttonsDown, buttonsPressed, buttonsReleased);
+		PushGamepadButton(L, "left_thumb", XINPUT_GAMEPAD_LEFT_THUMB, buttonsDown, buttonsPressed, buttonsReleased);
+		PushGamepadButton(L, "right_thumb", XINPUT_GAMEPAD_RIGHT_THUMB, buttonsDown, buttonsPressed, buttonsReleased);
+		PushGamepadButton(L, "dpad_up", XINPUT_GAMEPAD_DPAD_UP, buttonsDown, buttonsPressed, buttonsReleased);
+		PushGamepadButton(L, "dpad_down", XINPUT_GAMEPAD_DPAD_DOWN, buttonsDown, buttonsPressed, buttonsReleased);
+		PushGamepadButton(L, "dpad_left", XINPUT_GAMEPAD_DPAD_LEFT, buttonsDown, buttonsPressed, buttonsReleased);
+		PushGamepadButton(L, "dpad_right", XINPUT_GAMEPAD_DPAD_RIGHT, buttonsDown, buttonsPressed, buttonsReleased);
 		return 1;
 	}
 
@@ -1324,6 +1547,8 @@ namespace
 		lua_setfield(L, -2, "load_scene");
 		lua_pushcfunction(L, LuaCoronaCreateBlockCharacterScene, "corona.create_block_character_scene");
 		lua_setfield(L, -2, "create_block_character_scene");
+		lua_pushcfunction(L, LuaCoronaCreateBoxScene, "corona.create_box_scene");
+		lua_setfield(L, -2, "create_box_scene");
 		lua_pushcfunction(L, LuaCoronaSpawn, "corona.spawn");
 		lua_setfield(L, -2, "spawn");
 		lua_pushcfunction(L, LuaCoronaSetTransform, "corona.set_transform");
@@ -1336,6 +1561,8 @@ namespace
 		lua_setfield(L, -2, "set_ray_tracing");
 		lua_pushcfunction(L, LuaCoronaDestroy, "corona.destroy");
 		lua_setfield(L, -2, "destroy");
+		lua_pushcfunction(L, LuaCoronaSetDefaultWorldVisible, "corona.set_default_world_visible");
+		lua_setfield(L, -2, "set_default_world_visible");
 		lua_pushcfunction(L, LuaCoronaSetCameraControl, "corona.set_camera_control");
 		lua_setfield(L, -2, "set_camera_control");
 		lua_pushcfunction(L, LuaCoronaSetCamera, "corona.set_camera");
@@ -1352,6 +1579,8 @@ namespace
 		lua_setfield(L, -2, "was_key_released");
 		lua_pushcfunction(L, LuaCoronaGetMouse, "corona.get_mouse");
 		lua_setfield(L, -2, "get_mouse");
+		lua_pushcfunction(L, LuaCoronaGetGamepad, "corona.get_gamepad");
+		lua_setfield(L, -2, "get_gamepad");
 		lua_pushcfunction(L, LuaCoronaGetUiState, "corona.get_ui_state");
 		lua_setfield(L, -2, "get_ui_state");
 		lua_pushcfunction(L, LuaCoronaSetUiValue, "corona.set_ui_value");
@@ -1590,6 +1819,41 @@ Corona::ScriptSceneHandle Corona::CreateProceduralBlockCharacterSceneForScript(U
 	return handle;
 }
 
+Corona::ScriptSceneHandle Corona::CreateProceduralBoxSceneForScript(const glm::vec3& baseColor, bool bUseBrickTexture, float uvRepeat)
+{
+	if (!renderBackend)
+		return InvalidScriptSceneHandle;
+
+	const glm::ivec3 quantizedColor = glm::clamp(
+		glm::ivec3(glm::round(glm::clamp(baseColor, glm::vec3(0.0f), glm::vec3(1.0f)) * 255.0f)),
+		glm::ivec3(0),
+		glm::ivec3(255));
+	const int quantizedUvRepeat = std::clamp(static_cast<int>(std::round(std::clamp(uvRepeat, 1.0f, 64.0f) * 100.0f)), 100, 6400);
+	const std::wstring key =
+		L"procedural://box/" +
+		std::to_wstring(quantizedColor.x) + L"/" +
+		std::to_wstring(quantizedColor.y) + L"/" +
+		std::to_wstring(quantizedColor.z) + L"/" +
+		(bUseBrickTexture ? L"brick" : L"flat") + L"/" +
+		std::to_wstring(quantizedUvRepeat);
+	const auto cachedIt = ScriptSceneByPath.find(key);
+	if (cachedIt != ScriptSceneByPath.end())
+		return cachedIt->second;
+
+	shared_ptr<Scene> scene = CreateProceduralBoxScene(glm::vec3(quantizedColor) / 255.0f, bUseBrickTexture, static_cast<float>(quantizedUvRepeat) / 100.0f);
+	if (!scene)
+		return InvalidScriptSceneHandle;
+
+	ScriptSceneHandle handle = NextScriptSceneHandle++;
+	if (handle == InvalidScriptSceneHandle)
+		handle = NextScriptSceneHandle++;
+
+	ScriptScenes[handle] = { scene, key, EPhysicsCollisionShape::Box, glm::vec3(0.5f) };
+	ScriptSceneByPath[key] = handle;
+	AppendCpuRuntimeTrace(L"[Luau] create_box_scene handle=" + std::to_wstring(handle) + L" key=" + key);
+	return handle;
+}
+
 Corona::ScriptSceneHandle Corona::LoadSceneForScript(const std::wstring& assetPath)
 {
 	if (!renderBackend || assetPath.empty())
@@ -1659,6 +1923,8 @@ Corona::SceneObjectHandle Corona::SpawnSceneObjectForScript(
 	const glm::vec3& position,
 	const glm::vec3& rotationDegrees,
 	float targetExtent,
+	const glm::vec3& scale,
+	bool bUseScale,
 	float roughness,
 	float metallic,
 	bool bOverrideRoughnessMetallic,
@@ -1672,19 +1938,25 @@ Corona::SceneObjectHandle Corona::SpawnSceneObjectForScript(
 
 	SceneObjectDesc desc;
 	desc.ScenePtr = sceneIt->second.ScenePtr;
-	desc.Transform = BuildCenteredSceneTransform(desc.ScenePtr, std::max(targetExtent, 0.001f), position, rotationDegrees);
+	const float safeTargetExtent = std::max(targetExtent, 0.001f);
+	const glm::vec3 safeScale = glm::max(scale, glm::vec3(0.001f));
+	desc.Transform = bUseScale ?
+		BuildScaledSceneTransform(desc.ScenePtr, safeScale, position, rotationDegrees) :
+		BuildCenteredSceneTransform(desc.ScenePtr, safeTargetExtent, position, rotationDegrees);
 	desc.Roughness = roughness;
 	desc.Metallic = metallic;
 	desc.bOverrideRoughnessMetallic = bOverrideRoughnessMetallic;
 	desc.bVisible = bVisible;
 	desc.bRayTracing = bRayTracing;
 	desc.bPhysicsQuery = bPhysicsQuery;
+	desc.PhysicsCollisionShape = sceneIt->second.PhysicsCollisionShape;
+	desc.PhysicsBoxHalfExtent = sceneIt->second.PhysicsBoxHalfExtent;
 
 	const SceneObjectHandle handle = AddSceneObject(desc);
 	if (handle == InvalidSceneObjectHandle)
 		return handle;
 
-	ScriptObjects[handle] = { sceneHandle, position, rotationDegrees, std::max(targetExtent, 0.001f) };
+	ScriptObjects[handle] = { sceneHandle, position, rotationDegrees, safeTargetExtent, safeScale, bUseScale };
 	if (desc.ScenePtr == Pistol && PistolObject == InvalidSceneObjectHandle)
 	{
 		PistolObject = handle;
@@ -1712,7 +1984,9 @@ bool Corona::SetSceneObjectTransformForScript(
 	SceneObjectHandle handle,
 	const glm::vec3& position,
 	const glm::vec3& rotationDegrees,
-	float targetExtent)
+	float targetExtent,
+	const glm::vec3& scale,
+	bool bUseScale)
 {
 	const auto stateIt = ScriptObjects.find(handle);
 	if (stateIt == ScriptObjects.end())
@@ -1723,9 +1997,12 @@ bool Corona::SetSceneObjectTransformForScript(
 		return false;
 
 	const float safeTargetExtent = std::max(targetExtent, 0.001f);
+	const glm::vec3 safeScale = glm::max(scale, glm::vec3(0.001f));
 	stateIt->second.Position = position;
 	stateIt->second.RotationDegrees = rotationDegrees;
 	stateIt->second.TargetExtent = safeTargetExtent;
+	stateIt->second.Scale = safeScale;
+	stateIt->second.bUseScale = bUseScale;
 
 	if (handle == PistolObject)
 	{
@@ -1745,14 +2022,18 @@ bool Corona::SetSceneObjectTransformForScript(
 
 	return SetSceneObjectTransform(
 		handle,
-		BuildCenteredSceneTransform(sceneIt->second.ScenePtr, safeTargetExtent, position, rotationDegrees));
+		bUseScale ?
+			BuildScaledSceneTransform(sceneIt->second.ScenePtr, safeScale, position, rotationDegrees) :
+			BuildCenteredSceneTransform(sceneIt->second.ScenePtr, safeTargetExtent, position, rotationDegrees));
 }
 
 bool Corona::GetSceneObjectTransformForScript(
 	SceneObjectHandle handle,
 	glm::vec3& position,
 	glm::vec3& rotationDegrees,
-	float& targetExtent) const
+	float& targetExtent,
+	glm::vec3& scale,
+	bool& bUseScale) const
 {
 	const auto stateIt = ScriptObjects.find(handle);
 	if (stateIt == ScriptObjects.end())
@@ -1761,7 +2042,29 @@ bool Corona::GetSceneObjectTransformForScript(
 	position = stateIt->second.Position;
 	rotationDegrees = stateIt->second.RotationDegrees;
 	targetExtent = stateIt->second.TargetExtent;
+	scale = stateIt->second.Scale;
+	bUseScale = stateIt->second.bUseScale;
 	return true;
+}
+
+bool Corona::SetDefaultWorldVisibleForScript(bool visible)
+{
+	const SceneObjectHandle handles[] =
+	{
+		SponzaObject,
+		BuddhaObject,
+		ShaderBallObject,
+		PistolObject,
+		MirrorCubeObject,
+	};
+
+	bool ok = true;
+	for (SceneObjectHandle handle : handles)
+	{
+		if (handle != InvalidSceneObjectHandle)
+			ok = SetSceneObjectVisibility(handle, visible) && ok;
+	}
+	return ok;
 }
 
 bool Corona::SetScriptCameraControlForScript(bool enabled)
@@ -1887,6 +2190,7 @@ void Corona::PollScriptMouseState()
 	{
 		if (bScriptRightMouseDown)
 			RecordScriptRButtonUp();
+		bScriptMousePositionInitialized = false;
 		return;
 	}
 
@@ -1907,14 +2211,62 @@ void Corona::PollScriptMouseState()
 	else if (!bRightDownNow && bScriptRightMouseDown)
 		RecordScriptRButtonUp();
 
-	if (bRightDownNow)
-		RecordScriptMouseMove(cursorPosition.x, cursorPosition.y);
-	else if (!bScriptMousePositionInitialized)
+	RecordScriptMouseMove(cursorPosition.x, cursorPosition.y);
+}
+
+void Corona::PollScriptGamepadState()
+{
+	const uint16_t previousButtons = ScriptGamepadButtonsDown;
+	auto clearState = [this, previousButtons]()
 	{
-		ScriptMouseX = cursorPosition.x;
-		ScriptMouseY = cursorPosition.y;
-		bScriptMousePositionInitialized = true;
+		bScriptGamepadConnected = false;
+		ScriptGamepadLeftX = 0.0f;
+		ScriptGamepadLeftY = 0.0f;
+		ScriptGamepadRightX = 0.0f;
+		ScriptGamepadRightY = 0.0f;
+		ScriptGamepadLeftTrigger = 0.0f;
+		ScriptGamepadRightTrigger = 0.0f;
+		ScriptGamepadButtonsDown = 0;
+		ScriptGamepadButtonsPressed = 0;
+		ScriptGamepadButtonsReleased = previousButtons;
+	};
+
+	HWND hwnd = Win32Application::GetHwnd();
+	const bool bWindowCanReceiveInput =
+		hwnd &&
+		(GetForegroundWindow() == hwnd || GetCapture() == hwnd);
+	if (!bWindowCanReceiveInput)
+	{
+		clearState();
+		return;
 	}
+
+	XInputGetStateProc getState = GetXInputGetStateProc();
+	if (!getState)
+	{
+		clearState();
+		return;
+	}
+
+	XINPUT_STATE state = {};
+	if (getState(0, &state) != ERROR_SUCCESS)
+	{
+		clearState();
+		return;
+	}
+
+	const XINPUT_GAMEPAD& pad = state.Gamepad;
+	const uint16_t currentButtons = static_cast<uint16_t>(pad.wButtons);
+	bScriptGamepadConnected = true;
+	ScriptGamepadLeftX = NormalizeGamepadStick(pad.sThumbLX, XINPUT_GAMEPAD_LEFT_THUMB_DEADZONE);
+	ScriptGamepadLeftY = NormalizeGamepadStick(pad.sThumbLY, XINPUT_GAMEPAD_LEFT_THUMB_DEADZONE);
+	ScriptGamepadRightX = NormalizeGamepadStick(pad.sThumbRX, XINPUT_GAMEPAD_RIGHT_THUMB_DEADZONE);
+	ScriptGamepadRightY = NormalizeGamepadStick(pad.sThumbRY, XINPUT_GAMEPAD_RIGHT_THUMB_DEADZONE);
+	ScriptGamepadLeftTrigger = NormalizeGamepadTrigger(pad.bLeftTrigger);
+	ScriptGamepadRightTrigger = NormalizeGamepadTrigger(pad.bRightTrigger);
+	ScriptGamepadButtonsDown = currentButtons;
+	ScriptGamepadButtonsPressed = static_cast<uint16_t>(currentButtons & ~previousButtons);
+	ScriptGamepadButtonsReleased = static_cast<uint16_t>(previousButtons & ~currentButtons);
 }
 
 bool Corona::IsScriptKeyDownForScript(UINT8 key) const
@@ -1950,6 +2302,30 @@ void Corona::GetScriptMouseForScript(
 	rightReleased = bScriptRightMouseReleased;
 }
 
+void Corona::GetScriptGamepadForScript(
+	bool& connected,
+	float& leftX,
+	float& leftY,
+	float& rightX,
+	float& rightY,
+	float& leftTrigger,
+	float& rightTrigger,
+	uint16_t& buttonsDown,
+	uint16_t& buttonsPressed,
+	uint16_t& buttonsReleased) const
+{
+	connected = bScriptGamepadConnected;
+	leftX = ScriptGamepadLeftX;
+	leftY = ScriptGamepadLeftY;
+	rightX = ScriptGamepadRightX;
+	rightY = ScriptGamepadRightY;
+	leftTrigger = ScriptGamepadLeftTrigger;
+	rightTrigger = ScriptGamepadRightTrigger;
+	buttonsDown = ScriptGamepadButtonsDown;
+	buttonsPressed = ScriptGamepadButtonsPressed;
+	buttonsReleased = ScriptGamepadButtonsReleased;
+}
+
 void Corona::ClearScriptInputFrameState()
 {
 	ScriptKeyPressed.fill(false);
@@ -1958,6 +2334,8 @@ void Corona::ClearScriptInputFrameState()
 	bScriptRightMouseReleased = false;
 	ScriptMouseDeltaX = 0;
 	ScriptMouseDeltaY = 0;
+	ScriptGamepadButtonsPressed = 0;
+	ScriptGamepadButtonsReleased = 0;
 }
 
 void Corona::QueueScriptUiSeparatorForScript()
@@ -3540,5 +3918,13 @@ void Corona::ShutdownLuauScripting()
 	ScriptKeyDown.fill(false);
 	bScriptRightMouseDown = false;
 	bScriptMousePositionInitialized = false;
+	bScriptGamepadConnected = false;
+	ScriptGamepadLeftX = 0.0f;
+	ScriptGamepadLeftY = 0.0f;
+	ScriptGamepadRightX = 0.0f;
+	ScriptGamepadRightY = 0.0f;
+	ScriptGamepadLeftTrigger = 0.0f;
+	ScriptGamepadRightTrigger = 0.0f;
+	ScriptGamepadButtonsDown = 0;
 	ClearScriptInputFrameState();
 }
