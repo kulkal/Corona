@@ -5,10 +5,28 @@ Corona pandemic made me to spend some time for this hobby project. That is the r
 Requirements:
 
 * Visual Studio 2022 with the MSVC C++ toolchain.
-* CMake with the repository presets.
-* NuGet CLI or another way to restore NuGet packages locally.
-* `WinPixEventRuntime` under `build/packages/`.
-* Vulkan SDK with DXC available when building the Vulkan backend.
+* CMake 3.21 or newer, available on `PATH`.
+* Git, available on `PATH`, for submodule restore.
+* Network access for the first dependency restore.
+* The NuGet CLI is vendored at `tools/nuget/nuget.exe`; no system-wide NuGet install is required.
+
+Recommended fresh-clone bootstrap:
+
+```powershell
+.\scripts\bootstrap_windows.ps1
+```
+
+The bootstrap script keeps MSBuild and CMake as host requirements. It updates submodules, restores NuGet packages with `tools/nuget/nuget.exe`, installs a copy-only Vulkan SDK under `.deps/VulkanSDK/` when a compatible SDK is not already configured, generates the local PhysX install tree, configures CMake, builds the Release preset, and checks the expected runtime DLLs under `bin/`.
+
+Useful bootstrap options:
+
+```powershell
+.\scripts\bootstrap_windows.ps1 -Configuration Debug
+.\scripts\bootstrap_windows.ps1 -SkipVulkanSdk
+.\scripts\bootstrap_windows.ps1 -ForceVulkanSdkInstall
+```
+
+Manual setup:
 
 Clone with submodules, or initialize them after cloning:
 
@@ -32,17 +50,17 @@ Dependency layout:
 | PhysX source | `src/external/physx` | Git submodule | The source checkout is not enough by itself; Corona links against the generated PhysX SDK install tree. |
 | PhysX SDK install | `src/external/physx/physx/install/vc17win64-cpu-only/PhysX` | Generated locally | Must contain `PhysX_64.lib`, `PhysXFoundation_64.lib`, `PhysXCommon_64.lib`, `PhysXCooking_64.lib`, and matching DLLs. |
 | DXC import library and headers | `src/external/dxc` | Vendored in this repo | Used for D3D12 runtime shader compilation. |
-| DXC runtime DLLs | `bin/dxcompiler.dll`, `bin/dxil.dll`, or `%VULKAN_SDK%\Bin` | Local runtime dependency | `bin/` is ignored by Git. Put the DLLs next to `Corona.exe`, or install/configure a Vulkan SDK that provides them. |
-| DirectX 12 Agility SDK runtime | `src/external/_packages/Microsoft.Direct3D.D3D12.1.619.2/build/native/bin/x64` | NuGet restore | CMake copies `D3D12Core.dll` and `d3d12SDKLayers.dll` to `bin/D3D12/`. Needed for newer D3D12 features such as SM 6.9/SER. |
+| DXC runtime DLLs | `bin/dxcompiler.dll`, `bin/dxil.dll`, or `%VULKAN_SDK%\Bin` | Vulkan SDK / bootstrap copy | `bin/` is ignored by Git. The bootstrap script copies these DLLs from the selected Vulkan SDK after a build. |
+| DirectX 12 Agility SDK runtime | `src/external/_packages/Microsoft.Direct3D.D3D12.1.619.2/build/native/bin/x64` | NuGet restore through `tools/nuget/nuget.exe` | CMake copies `D3D12Core.dll` and `d3d12SDKLayers.dll` to `bin/D3D12/`. Needed for newer D3D12 features such as SM 6.9/SER. |
 | NVIDIA Streamline SDK | `src/external/streamline-sdk` | Vendored in this repo | Enables DLSS SR/RR on the DX12 path when `include/sl.h` and `lib/x64/sl.interposer.lib` are present. |
 | NVIDIA Aftermath | `src/external/GFSDK_Aftermath` | Vendored in this repo | Linked for D3D12 GPU crash diagnostics; DLL is copied to `bin/`. |
-| WinPixEventRuntime | `build/packages/WinPixEventRuntime.*` | Local NuGet/package restore | Required at CMake configure time; DLL is copied to `bin/`. |
+| WinPixEventRuntime | `build/packages/WinPixEventRuntime.*` | NuGet restore through `tools/nuget/nuget.exe` | Required at CMake configure time; DLL is copied to `bin/`. |
 | DirectXTex | `src/external/DirectXTex July 2017` | Vendored in this repo | Used by the renderer and texture import tool. |
 | Assimp | `src/external/assimp` | Vendored in this repo | Used for model import; `lib/assimp.dll` is copied to `bin/` after building. |
 | ImGui | `src/external/imgui` | Vendored in this repo | Used by the runtime UI and both DX12/Vulkan backend bindings. |
 | enkiTS | `src/external/enkiTS` | Vendored in this repo | Built directly by CMake for task scheduling. |
 | glm | `src/external/glm` | Vendored in this repo | Header-only math dependency used by renderer/UI code. |
-| Vulkan SDK | `%VULKAN_SDK%` or `C:\VulkanSDK\1.4.341.1` | Local SDK install | Required for the Vulkan backend and Vulkan SPIR-V shader generation. |
+| Vulkan SDK | `%VULKAN_SDK%`, `C:\VulkanSDK\1.4.341.1`, or `.deps/VulkanSDK/1.4.341.1` | Local SDK install or bootstrap copy-only install | Required for the Vulkan backend and Vulkan SPIR-V shader generation. |
 
 To generate the PhysX install tree expected by Corona:
 
@@ -53,22 +71,17 @@ cmake --build compiler\vc17win64-cpu-only --config release --target INSTALL
 cd ..\..\..\..
 ```
 
-Restore the DirectX 12 Agility SDK from NuGet before configuring CMake:
+Restore the NuGet runtime packages before configuring CMake:
 
 ```powershell
-nuget install Microsoft.Direct3D.D3D12 -Version 1.619.2 -OutputDirectory src\external\_packages
+.\tools\nuget\nuget.exe install Microsoft.Direct3D.D3D12 -Version 1.619.2 -OutputDirectory src\external\_packages
+.\tools\nuget\nuget.exe install WinPixEventRuntime -Version 1.0.240308001 -OutputDirectory build\packages
 ```
 
 CMake auto-detects compatible `Microsoft.Direct3D.D3D12.1.619.*` packages under `src/external/_packages` and copies the runtime DLLs to `bin/D3D12/`. The exported `D3D12SDKVersion` is currently `619`, so keep the package on the `1.619.x` line unless `CORONA_D3D12_AGILITY_SDK_VERSION` is updated too. To override the runtime location manually, point CMake at the folder that contains `D3D12Core.dll` and `d3d12SDKLayers.dll`:
 
 ```powershell
 cmake --preset vs2022-x64 -DCORONA_D3D12_AGILITY_BIN_DIR="C:\path\to\Microsoft.Direct3D.D3D12.1.619.2\build\native\bin\x64"
-```
-
-To restore WinPixEventRuntime, place an unpacked `WinPixEventRuntime.*` package under `build/packages/`. For example, with NuGet:
-
-```powershell
-nuget install WinPixEventRuntime -OutputDirectory build\packages
 ```
 
 Current CMake lookup uses `build/packages/WinPixEventRuntime.*` for WinPix. Do not rely on `src/external/WinPixEventRuntime` as the active restore path for a fresh clone.
