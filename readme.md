@@ -2,111 +2,19 @@
 Corona pandemic made me to spend some time for this hobby project. That is the reason why the name of the project is Corona.
 
 ## Build
-Requirements:
+Install the host build tools first:
 
 * Visual Studio 2022 with the MSVC C++ toolchain.
-* CMake 3.21 or newer, available on `PATH`.
-* Git and Git LFS, available on `PATH`, for submodule restore and large binary dependencies.
-* Network access for the first dependency restore.
-* The NuGet CLI is vendored at `tools/nuget/nuget.exe`; no system-wide NuGet install is required.
+* CMake 3.21 or newer on `PATH`.
+* Git and Git LFS on `PATH`.
 
-Recommended fresh-clone bootstrap:
+After cloning the repository, run the Windows bootstrap script:
 
 ```powershell
 .\scripts\bootstrap_windows.ps1
 ```
 
-The bootstrap script keeps MSBuild and CMake as host requirements. It updates submodules, restores NuGet packages with `tools/nuget/nuget.exe`, installs a copy-only Vulkan SDK under `.deps/VulkanSDK/` when a compatible SDK is not already configured, generates the local PhysX install tree, configures CMake, builds the Release preset, and checks the expected runtime DLLs under `bin/`.
-
-Useful bootstrap options:
-
-```powershell
-.\scripts\bootstrap_windows.ps1 -Configuration Debug
-.\scripts\bootstrap_windows.ps1 -SkipVulkanSdk
-.\scripts\bootstrap_windows.ps1 -ForceVulkanSdkInstall
-```
-
-Manual setup:
-
-Clone with submodules, or initialize them after cloning:
-
-```powershell
-git clone --recurse-submodules <repo-url>
-```
-
-If the repository was already cloned:
-
-```powershell
-git submodule update --init --recursive
-```
-
-`src/external/physx` is tracked as a Git submodule. The top-level repository stores the PhysX commit reference, not the full PhysX file tree. Local PhysX build/install outputs such as `src/external/physx/physx/install/` are generated artifacts and are not committed by the top-level repository.
-
-Dependency layout:
-
-| Dependency | Location | How it is provided | Notes |
-|---|---|---|---|
-| Luau | `src/external/luau` | Git submodule | Required by CMake through `add_subdirectory`. |
-| PhysX source | `src/external/physx` | Git submodule | The source checkout is not enough by itself; Corona links against the generated PhysX SDK install tree. |
-| PhysX SDK install | `src/external/physx/physx/install/vc17win64-cpu-only/PhysX` | Generated locally | Must contain `PhysX_64.lib`, `PhysXFoundation_64.lib`, `PhysXCommon_64.lib`, `PhysXCooking_64.lib`, and matching DLLs. |
-| DXC import library and headers | `src/external/dxc` | Vendored in this repo | Used for D3D12 runtime shader compilation. |
-| DXC runtime DLLs | `bin/dxcompiler.dll`, `bin/dxil.dll`, or `%VULKAN_SDK%\Bin` | Vulkan SDK / bootstrap copy | `bin/` is ignored by Git. The bootstrap script copies these DLLs from the selected Vulkan SDK after a build. |
-| DirectX 12 Agility SDK runtime | `src/external/_packages/Microsoft.Direct3D.D3D12.1.619.2/build/native/bin/x64` | NuGet restore through `tools/nuget/nuget.exe` | CMake copies `D3D12Core.dll` and `d3d12SDKLayers.dll` to `bin/D3D12/`. Needed for newer D3D12 features such as SM 6.9/SER. |
-| NVIDIA Streamline SDK | `src/external/streamline-sdk` | Vendored in this repo through Git LFS | Enables DLSS SR/RR on the DX12 path when `include/sl.h`, `lib/x64/sl.interposer.lib`, and `bin/x64/sl.interposer.dll` are present. CMake disables Streamline if the runtime DLLs are missing, avoiding launch-time DLL failures. |
-| NVIDIA Aftermath | `src/external/GFSDK_Aftermath` | Vendored in this repo | Linked for D3D12 GPU crash diagnostics; DLL is copied to `bin/`. |
-| WinPixEventRuntime | `build/packages/WinPixEventRuntime.*` | NuGet restore through `tools/nuget/nuget.exe` | Required at CMake configure time; DLL is copied to `bin/`. |
-| DirectXTex | `src/external/DirectXTex July 2017` | Vendored in this repo | Used by the renderer and texture import tool. |
-| Assimp | `src/external/assimp` | Vendored in this repo | Used for model import; `lib/assimp.dll` is copied to `bin/` after building. |
-| ImGui | `src/external/imgui` | Vendored in this repo | Used by the runtime UI and both DX12/Vulkan backend bindings. |
-| enkiTS | `src/external/enkiTS` | Vendored in this repo | Built directly by CMake for task scheduling. |
-| glm | `src/external/glm` | Vendored in this repo | Header-only math dependency used by renderer/UI code. |
-| Vulkan SDK | `%VULKAN_SDK%`, `C:\VulkanSDK\1.4.341.1`, or `.deps/VulkanSDK/1.4.341.1` | Local SDK install or bootstrap copy-only install | Required for the Vulkan backend and Vulkan SPIR-V shader generation. |
-
-To generate the PhysX install tree expected by Corona:
-
-```powershell
-cd src\external\physx\physx
-.\generate_projects.bat vc17win64-cpu-only
-cmake --build compiler\vc17win64-cpu-only --config release --target INSTALL
-cd ..\..\..\..
-```
-
-Restore the NuGet runtime packages before configuring CMake:
-
-```powershell
-.\tools\nuget\nuget.exe install Microsoft.Direct3D.D3D12 -Version 1.619.2 -OutputDirectory src\external\_packages
-.\tools\nuget\nuget.exe install WinPixEventRuntime -Version 1.0.240308001 -OutputDirectory build\packages
-```
-
-CMake auto-detects compatible `Microsoft.Direct3D.D3D12.1.619.*` packages under `src/external/_packages` and copies the runtime DLLs to `bin/D3D12/`. The exported `D3D12SDKVersion` is currently `619`, so keep the package on the `1.619.x` line unless `CORONA_D3D12_AGILITY_SDK_VERSION` is updated too. To override the runtime location manually, point CMake at the folder that contains `D3D12Core.dll` and `d3d12SDKLayers.dll`:
-
-```powershell
-cmake --preset vs2022-x64 -DCORONA_D3D12_AGILITY_BIN_DIR="C:\path\to\Microsoft.Direct3D.D3D12.1.619.2\build\native\bin\x64"
-```
-
-Current CMake lookup uses `build/packages/WinPixEventRuntime.*` for WinPix. Do not rely on `src/external/WinPixEventRuntime` as the active restore path for a fresh clone.
-
-Generate and build:
-
-```powershell
-cmake --preset vs2022-x64
-cmake --build --preset release
-```
-
-If the Vulkan SDK is not globally configured, set it before building:
-
-```powershell
-$env:VULKAN_SDK='C:\VulkanSDK\1.4.341.1'
-cmake --build --preset release
-```
-
-The executable is emitted to `bin/Corona.exe`, and the Visual Studio debugger working directory is `bin/`. The solution is generated at `out/build/vs2022-x64/Corona.sln`.
-
-Shader build outputs:
-
-* DX12 uses the HLSL sources directly through the existing shader compile path.
-* Vulkan SPIR-V files are generated during the CMake build.
-* Generated Vulkan shader files are written under the CMake build directory, not the source shader directory.
+The script restores dependencies, configures CMake, builds the Release preset, and writes the executable to `bin/Corona.exe`.
 
 ## Render Backends
 Corona now has a small render backend abstraction with two runtime backends:
