@@ -80,6 +80,7 @@ list(GET CORONA_WINPIX_PACKAGES 0 CORONA_WINPIX_ROOT)
 
 set(CORONA_DIRECTXTEX_LIB_DIR "${CORONA_SRC_DIR}/external/DirectXTex July 2017/Lib 2017")
 set(CORONA_ASSIMP_LIB "${CORONA_SRC_DIR}/external/assimp/lib/assimp.lib")
+set(CORONA_ASSIMP_DLL "${CORONA_SRC_DIR}/external/assimp/lib/assimp.dll")
 set(CORONA_DXCOMPILER_LIB "${CORONA_SRC_DIR}/external/dxc/lib/x64/dxcompiler.lib")
 set(CORONA_AFTERMATH_LIB "${CORONA_SRC_DIR}/external/GFSDK_Aftermath/lib/x64/GFSDK_Aftermath_Lib.x64.lib")
 set(CORONA_AFTERMATH_DLL "${CORONA_SRC_DIR}/external/GFSDK_Aftermath/lib/x64/GFSDK_Aftermath_Lib.x64.dll")
@@ -172,6 +173,7 @@ add_subdirectory("${CORONA_SRC_DIR}/external/luau" "${CMAKE_CURRENT_BINARY_DIR}/
 
 foreach(required_path IN ITEMS
     "${CORONA_ASSIMP_LIB}"
+    "${CORONA_ASSIMP_DLL}"
     "${CORONA_DXCOMPILER_LIB}"
     "${CORONA_AFTERMATH_LIB}"
     "${CORONA_WINPIX_LIB}"
@@ -394,6 +396,9 @@ set_target_properties(Corona PROPERTIES
 )
 
 add_custom_command(TARGET Corona POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CORONA_ASSIMP_DLL}"
+        "${CORONA_OUT_DIR}/assimp.dll"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "${CORONA_AFTERMATH_DLL}"
         "${CORONA_OUT_DIR}/GFSDK_Aftermath_Lib.x64.dll"

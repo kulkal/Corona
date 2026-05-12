@@ -38,7 +38,7 @@ Dependency layout:
 | NVIDIA Aftermath | `src/external/GFSDK_Aftermath` | Vendored in this repo | Linked for D3D12 GPU crash diagnostics; DLL is copied to `bin/`. |
 | WinPixEventRuntime | `build/packages/WinPixEventRuntime.*` | Local NuGet/package restore | Required at CMake configure time; DLL is copied to `bin/`. |
 | DirectXTex | `src/external/DirectXTex July 2017` | Vendored in this repo | Used by the renderer and texture import tool. |
-| Assimp | `src/external/assimp` | Vendored in this repo | Used for model import. |
+| Assimp | `src/external/assimp` | Vendored in this repo | Used for model import; `lib/assimp.dll` is copied to `bin/` after building. |
 | ImGui | `src/external/imgui` | Vendored in this repo | Used by the runtime UI and both DX12/Vulkan backend bindings. |
 | enkiTS | `src/external/enkiTS` | Vendored in this repo | Built directly by CMake for task scheduling. |
 | glm | `src/external/glm` | Vendored in this repo | Header-only math dependency used by renderer/UI code. |
@@ -232,7 +232,7 @@ cd bin
 .\Corona.exe --user-mode --backend dx12 --render-mode hybrid --gi-mode spatial-hash --spatial-hash-rays 2 --spatial-hash-bounces 2
 ```
 
-Launching without arguments starts the interactive DX12 hybrid renderer with DLSS RR selected by default.
+Launching without arguments starts the interactive DX12 hybrid renderer on the Sponza scene, with DLSS RR selected by default. Use `--startup-scripts` to launch the Luau-driven procedural startup scene instead.
 This guide lists the launch options that are useful for interactive/user-mode runs.
 
 Supported options:
@@ -243,6 +243,9 @@ Supported options:
 | `--backend`, `-backend` | `dx12`, `vulkan`, `vk` | Selects the render backend. Unknown values fall back to DX12. |
 | `--render-mode`, `-render` | `hybrid`, `pt`, `pathtracing`, `path-tracing`, `path_tracing` | Selects hybrid rendering or full-screen path tracing. |
 | `--aa`, `-aa` | `off`, `taa`, `dlss`, `dlss-sr`, `sr`, `dlss-rr`, `rr` | Sets the startup AA mode. DLSS modes fall back to TAA when Streamline/DLSS is unavailable. |
+| `--sponza`, `--scene-sponza`, `--sponza-fly`, `--fly-camera` | none | Launches the hybrid Sponza inspection scene and disables startup scripts. This is also the no-argument default. |
+| `--startup-scripts`, `--game-character`, `--dungeon-character` | none | Enables the Luau startup scripts/procedural scene instead of the no-argument Sponza default. |
+| `--no-startup-scripts`, `--disable-startup-scripts` | none | Disables Luau startup scripts without forcing the Sponza fly camera. |
 | `--ray-noise`, `--noise`, `-noise`, `-n` | `r2`, `blue`, `stable` | Selects the hybrid RT GI/reflection sampling noise. `r2` is the default for calmer DLSS RR convergence. |
 | `--rtao`, `--no-rtao` | none | Enables or disables the hybrid ray-traced contact AO pass. |
 | `--rtao-radius`, `--rtao-samples`, `--rtao-power`, `--rtao-bias` | numeric | Tunes the RTAO ray distance, sample count, contrast, and normal bias. |

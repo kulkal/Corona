@@ -2237,7 +2237,9 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 		CommandLineSelectedAAMode = EAntiAliasingMode::DLSS_RR;
 		bCommandLineAutoDumpOverrideSet = true;
 		bCommandLineAutoDumpEnabled = false;
-		AppendStartupTrace(L"[ParseCommandLineArgs] no args: default dx12, hybrid, dlss-rr, user-mode");
+		bStartupSponzaFlyMode = true;
+		bEnableStartupLuauScript = false;
+		AppendStartupTrace(L"[ParseCommandLineArgs] no args: default dx12, hybrid, dlss-rr, sponza, user-mode");
 	}
 
 	for (int i = 1; i < argc; ++i)
