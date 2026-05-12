@@ -6,8 +6,72 @@ Requirements:
 
 * Visual Studio 2022 with the MSVC C++ toolchain.
 * CMake with the repository presets.
+* NuGet CLI or another way to restore NuGet packages locally.
 * `WinPixEventRuntime` under `build/packages/`.
 * Vulkan SDK with DXC available when building the Vulkan backend.
+
+Clone with submodules, or initialize them after cloning:
+
+```powershell
+git clone --recurse-submodules <repo-url>
+```
+
+If the repository was already cloned:
+
+```powershell
+git submodule update --init --recursive
+```
+
+`src/external/physx` is tracked as a Git submodule. The top-level repository stores the PhysX commit reference, not the full PhysX file tree. Local PhysX build/install outputs such as `src/external/physx/physx/install/` are generated artifacts and are not committed by the top-level repository.
+
+Dependency layout:
+
+| Dependency | Location | How it is provided | Notes |
+|---|---|---|---|
+| Luau | `src/external/luau` | Git submodule | Required by CMake through `add_subdirectory`. |
+| PhysX source | `src/external/physx` | Git submodule | The source checkout is not enough by itself; Corona links against the generated PhysX SDK install tree. |
+| PhysX SDK install | `src/external/physx/physx/install/vc17win64-cpu-only/PhysX` | Generated locally | Must contain `PhysX_64.lib`, `PhysXFoundation_64.lib`, `PhysXCommon_64.lib`, `PhysXCooking_64.lib`, and matching DLLs. |
+| DXC import library and headers | `src/external/dxc` | Vendored in this repo | Used for D3D12 runtime shader compilation. |
+| DXC runtime DLLs | `bin/dxcompiler.dll`, `bin/dxil.dll`, or `%VULKAN_SDK%\Bin` | Local runtime dependency | `bin/` is ignored by Git. Put the DLLs next to `Corona.exe`, or install/configure a Vulkan SDK that provides them. |
+| DirectX 12 Agility SDK runtime | `src/external/_packages/Microsoft.Direct3D.D3D12.1.619.2/build/native/bin/x64` | NuGet restore | CMake copies `D3D12Core.dll` and `d3d12SDKLayers.dll` to `bin/D3D12/`. Needed for newer D3D12 features such as SM 6.9/SER. |
+| NVIDIA Streamline SDK | `src/external/streamline-sdk` | Vendored in this repo | Enables DLSS SR/RR on the DX12 path when `include/sl.h` and `lib/x64/sl.interposer.lib` are present. |
+| NVIDIA Aftermath | `src/external/GFSDK_Aftermath` | Vendored in this repo | Linked for D3D12 GPU crash diagnostics; DLL is copied to `bin/`. |
+| WinPixEventRuntime | `build/packages/WinPixEventRuntime.*` | Local NuGet/package restore | Required at CMake configure time; DLL is copied to `bin/`. |
+| DirectXTex | `src/external/DirectXTex July 2017` | Vendored in this repo | Used by the renderer and texture import tool. |
+| Assimp | `src/external/assimp` | Vendored in this repo | Used for model import. |
+| ImGui | `src/external/imgui` | Vendored in this repo | Used by the runtime UI and both DX12/Vulkan backend bindings. |
+| enkiTS | `src/external/enkiTS` | Vendored in this repo | Built directly by CMake for task scheduling. |
+| glm | `src/external/glm` | Vendored in this repo | Header-only math dependency used by renderer/UI code. |
+| Vulkan SDK | `%VULKAN_SDK%` or `C:\VulkanSDK\1.4.341.1` | Local SDK install | Required for the Vulkan backend and Vulkan SPIR-V shader generation. |
+
+To generate the PhysX install tree expected by Corona:
+
+```powershell
+cd src\external\physx\physx
+.\generate_projects.bat vc17win64-cpu-only
+cmake --build compiler\vc17win64-cpu-only --config release --target INSTALL
+cd ..\..\..\..
+```
+
+Restore the DirectX 12 Agility SDK from NuGet before configuring CMake:
+
+```powershell
+nuget install Microsoft.Direct3D.D3D12 -Version 1.619.2 -OutputDirectory src\external\_packages
+```
+
+CMake auto-detects compatible `Microsoft.Direct3D.D3D12.1.619.*` packages under `src/external/_packages` and copies the runtime DLLs to `bin/D3D12/`. The exported `D3D12SDKVersion` is currently `619`, so keep the package on the `1.619.x` line unless `CORONA_D3D12_AGILITY_SDK_VERSION` is updated too. To override the runtime location manually, point CMake at the folder that contains `D3D12Core.dll` and `d3d12SDKLayers.dll`:
+
+```powershell
+cmake --preset vs2022-x64 -DCORONA_D3D12_AGILITY_BIN_DIR="C:\path\to\Microsoft.Direct3D.D3D12.1.619.2\build\native\bin\x64"
+```
+
+To restore WinPixEventRuntime, place an unpacked `WinPixEventRuntime.*` package under `build/packages/`. For example, with NuGet:
+
+```powershell
+nuget install WinPixEventRuntime -OutputDirectory build\packages
+```
+
+Current CMake lookup uses `build/packages/WinPixEventRuntime.*` for WinPix. Do not rely on `src/external/WinPixEventRuntime` as the active restore path for a fresh clone.
 
 Generate and build:
 
@@ -23,7 +87,7 @@ $env:VULKAN_SDK='C:\VulkanSDK\1.4.341.1'
 cmake --build --preset release
 ```
 
-The executable is emitted to `bin/Corona.exe`, and the Visual Studio debugger working directory is `src/`. The solution is generated at `out/build/vs2022-x64/Corona.sln`.
+The executable is emitted to `bin/Corona.exe`, and the Visual Studio debugger working directory is `bin/`. The solution is generated at `out/build/vs2022-x64/Corona.sln`.
 
 Shader build outputs:
 
@@ -88,7 +152,7 @@ The default spatial hash path stores diffuse GI in a sparse surface cache:
 ### Contact AO And Sky Lighting
 The hybrid lighting path also includes a full-resolution RTAO pass and a dedicated ray-traced sky lighting pass. RTAO fills high-frequency contact occlusion that the lower-frequency diffuse GI cache can miss, then applies it gently to surface-bounce diffuse GI instead of multiplying the whole final image. Sky lighting traces visibility toward an up-guided sky hemisphere, denoises the raw result, and adds the visible sky diffuse term separately in `LightingPS.hlsl`.
 
-Useful controls include `--rtao`, `--no-rtao`, `--rtao-radius`, `--rtao-samples`, `--sky-lighting`, `--no-sky-lighting`, and `--sky-lighting-strength`. A fuller implementation note is available in [`RTAO_SKY_LIGHTING_IMPLEMENTATION.md`](./RTAO_SKY_LIGHTING_IMPLEMENTATION.md).
+Useful controls include `--rtao`, `--no-rtao`, `--rtao-radius`, `--rtao-samples`, `--sky-lighting`, `--no-sky-lighting`, and `--sky-lighting-strength`. A fuller implementation note is available in [`RTAO_SKY_LIGHTING_IMPLEMENTATION.md`](./reports/RTAO_SKY_LIGHTING_IMPLEMENTATION.md).
 
 ### Spatial Hash Diffuse GI
 The spatial hash GI mode is inspired by NVIDIA SHaRC, but the current implementation is intentionally small and renderer-local. It does not store radiance in a dense voxel texture. Instead, it uses a sparse hash table of visible surface cells backed by `StructuredBuffer` resources:

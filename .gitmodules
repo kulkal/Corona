@@ -1,3 +1,12 @@
 # [submodule "src/imgui"]
 # 	path = src/imgui
 # 	url = https://github.com/ocornut/imgui.git
+
+[submodule "src/external/physx"]
+	path = src/external/physx
+	url = https://github.com/NVIDIA-Omniverse/PhysX.git
+	ignore = untracked
+
+[submodule "src/external/luau"]
+	path = src/external/luau
+	url = https://github.com/luau-lang/luau.git

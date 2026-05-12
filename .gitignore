@@ -13,12 +13,17 @@ obj/
 config/
 logs/
 dumps/
+_backups/
+_downloads/
 camera_state.cfg
+debug.log
+imgui.ini
 sl.log
 src/camera_state.cfg
 src/imgui.ini
 src/sl.log
 src/external/_downloads/
+src/external/_packages/
 
 # vs filters
 *.filters
