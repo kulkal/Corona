@@ -223,6 +223,18 @@ function Assert-BuildOutputs {
         "bin\PhysXCooking_64.dll"
     )
 
+    if (Test-Path (Join-Path $RepoRoot "src\external\streamline-sdk\bin\x64\sl.interposer.dll")) {
+        $requiredOutputs += @(
+            "bin\sl.interposer.dll",
+            "bin\sl.common.dll",
+            "bin\sl.pcl.dll",
+            "bin\sl.dlss.dll",
+            "bin\nvngx_dlss.dll",
+            "bin\sl.dlss_d.dll",
+            "bin\nvngx_dlssd.dll"
+        )
+    }
+
     foreach ($relativePath in $requiredOutputs) {
         $path = Join-Path $RepoRoot $relativePath
         if (-not (Test-Path $path)) {

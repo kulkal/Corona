@@ -5,6 +5,17 @@
 
 # no bin folder
 bin/
+!src/external/streamline-sdk/bin/
+src/external/streamline-sdk/bin/*
+!src/external/streamline-sdk/bin/x64/
+src/external/streamline-sdk/bin/x64/*
+!src/external/streamline-sdk/bin/x64/sl.interposer.dll
+!src/external/streamline-sdk/bin/x64/sl.common.dll
+!src/external/streamline-sdk/bin/x64/sl.pcl.dll
+!src/external/streamline-sdk/bin/x64/sl.dlss.dll
+!src/external/streamline-sdk/bin/x64/nvngx_dlss.dll
+!src/external/streamline-sdk/bin/x64/sl.dlss_d.dll
+!src/external/streamline-sdk/bin/x64/nvngx_dlssd.dll
 
 # no obj folder
 obj/

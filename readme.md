@@ -6,7 +6,7 @@ Requirements:
 
 * Visual Studio 2022 with the MSVC C++ toolchain.
 * CMake 3.21 or newer, available on `PATH`.
-* Git, available on `PATH`, for submodule restore.
+* Git and Git LFS, available on `PATH`, for submodule restore and large binary dependencies.
 * Network access for the first dependency restore.
 * The NuGet CLI is vendored at `tools/nuget/nuget.exe`; no system-wide NuGet install is required.
 
@@ -52,7 +52,7 @@ Dependency layout:
 | DXC import library and headers | `src/external/dxc` | Vendored in this repo | Used for D3D12 runtime shader compilation. |
 | DXC runtime DLLs | `bin/dxcompiler.dll`, `bin/dxil.dll`, or `%VULKAN_SDK%\Bin` | Vulkan SDK / bootstrap copy | `bin/` is ignored by Git. The bootstrap script copies these DLLs from the selected Vulkan SDK after a build. |
 | DirectX 12 Agility SDK runtime | `src/external/_packages/Microsoft.Direct3D.D3D12.1.619.2/build/native/bin/x64` | NuGet restore through `tools/nuget/nuget.exe` | CMake copies `D3D12Core.dll` and `d3d12SDKLayers.dll` to `bin/D3D12/`. Needed for newer D3D12 features such as SM 6.9/SER. |
-| NVIDIA Streamline SDK | `src/external/streamline-sdk` | Vendored in this repo | Enables DLSS SR/RR on the DX12 path when `include/sl.h` and `lib/x64/sl.interposer.lib` are present. |
+| NVIDIA Streamline SDK | `src/external/streamline-sdk` | Vendored in this repo through Git LFS | Enables DLSS SR/RR on the DX12 path when `include/sl.h`, `lib/x64/sl.interposer.lib`, and `bin/x64/sl.interposer.dll` are present. CMake disables Streamline if the runtime DLLs are missing, avoiding launch-time DLL failures. |
 | NVIDIA Aftermath | `src/external/GFSDK_Aftermath` | Vendored in this repo | Linked for D3D12 GPU crash diagnostics; DLL is copied to `bin/`. |
 | WinPixEventRuntime | `build/packages/WinPixEventRuntime.*` | NuGet restore through `tools/nuget/nuget.exe` | Required at CMake configure time; DLL is copied to `bin/`. |
 | DirectXTex | `src/external/DirectXTex July 2017` | Vendored in this repo | Used by the renderer and texture import tool. |

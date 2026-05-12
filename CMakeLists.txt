@@ -106,12 +106,16 @@ set(CORONA_STREAMLINE_SDK_ROOT "${CORONA_REPO_STREAMLINE_SDK_ROOT}" CACHE PATH "
 if(CORONA_STREAMLINE_SDK_ROOT MATCHES "^[Hh]:[/\\\\]dev[/\\\\]streamline_test[/\\\\]streamline-sdk$")
     set(CORONA_STREAMLINE_SDK_ROOT "${CORONA_REPO_STREAMLINE_SDK_ROOT}" CACHE PATH "Path to the NVIDIA Streamline SDK" FORCE)
 endif()
-if((NOT EXISTS "${CORONA_STREAMLINE_SDK_ROOT}/include/sl.h" OR NOT EXISTS "${CORONA_STREAMLINE_SDK_ROOT}/lib/x64/sl.interposer.lib")
+if((NOT EXISTS "${CORONA_STREAMLINE_SDK_ROOT}/include/sl.h"
+        OR NOT EXISTS "${CORONA_STREAMLINE_SDK_ROOT}/lib/x64/sl.interposer.lib"
+        OR NOT EXISTS "${CORONA_STREAMLINE_SDK_ROOT}/bin/x64/sl.interposer.dll")
    AND EXISTS "${CORONA_REPO_STREAMLINE_SDK_ROOT}/include/sl.h"
-   AND EXISTS "${CORONA_REPO_STREAMLINE_SDK_ROOT}/lib/x64/sl.interposer.lib")
+   AND EXISTS "${CORONA_REPO_STREAMLINE_SDK_ROOT}/lib/x64/sl.interposer.lib"
+   AND EXISTS "${CORONA_REPO_STREAMLINE_SDK_ROOT}/bin/x64/sl.interposer.dll")
     set(CORONA_STREAMLINE_SDK_ROOT "${CORONA_REPO_STREAMLINE_SDK_ROOT}" CACHE PATH "Path to the NVIDIA Streamline SDK" FORCE)
 endif()
 set(CORONA_STREAMLINE_LIB "")
+set(CORONA_STREAMLINE_RUNTIME_DLL "${CORONA_STREAMLINE_SDK_ROOT}/bin/x64/sl.interposer.dll")
 option(CORONA_USE_AFTERMATH "Enable NVIDIA Aftermath markers for D3D12 GPU crash diagnostics" ON)
 set(CORONA_D3D12_AGILITY_SDK_VERSION "619" CACHE STRING "DirectX 12 Agility SDK version exported by Corona.")
 set(CORONA_D3D12_AGILITY_NUGET_VERSION "1.619.2" CACHE STRING "Microsoft.Direct3D.D3D12 NuGet package version used for Agility SDK restore.")
@@ -130,8 +134,12 @@ if(CORONA_D3D12_AGILITY_CACHED_BIN_DIR)
 endif()
 set(CORONA_D3D12_AGILITY_BIN_DIR "${CORONA_D3D12_AGILITY_CACHED_BIN_DIR}")
 set(CORONA_D3D12_AGILITY_BIN_DIR "${CORONA_D3D12_AGILITY_BIN_DIR}" CACHE PATH "Directory containing D3D12Core.dll and d3d12SDKLayers.dll." FORCE)
-if(EXISTS "${CORONA_STREAMLINE_SDK_ROOT}/include/sl.h" AND EXISTS "${CORONA_STREAMLINE_SDK_ROOT}/lib/x64/sl.interposer.lib")
+if(EXISTS "${CORONA_STREAMLINE_SDK_ROOT}/include/sl.h"
+    AND EXISTS "${CORONA_STREAMLINE_SDK_ROOT}/lib/x64/sl.interposer.lib"
+    AND EXISTS "${CORONA_STREAMLINE_RUNTIME_DLL}")
     set(CORONA_STREAMLINE_LIB "${CORONA_STREAMLINE_SDK_ROOT}/lib/x64/sl.interposer.lib")
+elseif(EXISTS "${CORONA_STREAMLINE_SDK_ROOT}/include/sl.h" OR EXISTS "${CORONA_STREAMLINE_SDK_ROOT}/lib/x64/sl.interposer.lib")
+    message(WARNING "NVIDIA Streamline SDK headers/libs were found, but runtime DLLs are missing under ${CORONA_STREAMLINE_SDK_ROOT}/bin/x64. Streamline/DLSS will be disabled to avoid a launch-time DLL failure.")
 endif()
 
 if(NOT CORONA_D3D12_AGILITY_BIN_DIR)
@@ -427,7 +435,7 @@ foreach(CORONA_PHYSX_DLL IN LISTS CORONA_PHYSX_DLLS)
     )
 endforeach()
 if(CORONA_STREAMLINE_LIB)
-    foreach(CORONA_STREAMLINE_DLL IN ITEMS sl.interposer.dll sl.common.dll sl.dlss.dll nvngx_dlss.dll sl.dlss_d.dll nvngx_dlssd.dll)
+    foreach(CORONA_STREAMLINE_DLL IN ITEMS sl.interposer.dll sl.common.dll sl.pcl.dll sl.dlss.dll nvngx_dlss.dll sl.dlss_d.dll nvngx_dlssd.dll)
         if(EXISTS "${CORONA_STREAMLINE_SDK_ROOT}/bin/x64/${CORONA_STREAMLINE_DLL}")
             add_custom_command(TARGET Corona POST_BUILD
                 COMMAND ${CMAKE_COMMAND} -E copy_if_different
