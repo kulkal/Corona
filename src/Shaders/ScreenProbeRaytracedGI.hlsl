@@ -88,20 +88,47 @@ static const float PROBE_ANCHOR_SUPPORT_WEIGHT = 4.0f;
 
 #define SCREEN_PROBE_RAY_FLAGS (RAY_FLAG_FORCE_OPAQUE | RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES)
 
-struct RayPayload
+struct RT_DIFFUSE_GI_RAY_PAYLOAD RayPayload
 {
-    float3 position;
-    float3 color;
-    float3 normal;
-    float spreadAngle;
-    float coneWidth;
-    bool bHit;
+    float3 position RT_DIFFUSE_GI_PAYLOAD_RW;
+    float3 color RT_DIFFUSE_GI_PAYLOAD_RW;
+    float3 normal RT_DIFFUSE_GI_PAYLOAD_RW;
+    float spreadAngle RT_DIFFUSE_GI_PAYLOAD_RW;
+    float coneWidth RT_DIFFUSE_GI_PAYLOAD_RW;
+    bool bHit RT_DIFFUSE_GI_PAYLOAD_RW;
 };
 
-struct ShadowRayPayload
+struct RT_DIFFUSE_GI_RAY_PAYLOAD ShadowRayPayload
 {
-    bool bHit;
+    bool bHit RT_DIFFUSE_GI_SHADOW_PAYLOAD_RW;
 };
+
+void TraceDiffuseGIRay(RayDesc ray, inout RayPayload payload)
+{
+#if RT_DIFFUSE_GI_USE_SER
+    dx::HitObject hit = dx::HitObject::TraceRay(
+        gRtScene,
+        SCREEN_PROBE_RAY_FLAGS,
+        0xFF,
+        0,
+        0,
+        0,
+        ray,
+        payload);
+    dx::MaybeReorderThread(hit, hit.GetInstanceID(), RT_DIFFUSE_GI_SER_MATERIAL_HINT_BITS);
+    dx::HitObject::Invoke(hit, payload);
+#else
+    TraceRay(
+        gRtScene,
+        SCREEN_PROBE_RAY_FLAGS,
+        0xFF,
+        0,
+        0,
+        0,
+        ray,
+        payload);
+#endif
+}
 
 struct SH3RGB
 {
@@ -454,15 +481,7 @@ float3 TraceDiffuseProbeRay(float3 worldPos, float3 worldNormal, uint2 probeCoor
     payload.coneWidth = 0.0f;
     payload.bHit = false;
 
-    TraceRay(
-        gRtScene,
-        SCREEN_PROBE_RAY_FLAGS,
-        0xFF,
-        0,
-        0,
-        0,
-        ray,
-        payload);
+    TraceDiffuseGIRay(ray, payload);
 
     if (!payload.bHit)
         return (bIncludeSkyLighting != 0u) ? max(EvaluateSkyColor(sampleDirWorld), 0.0f.xxx) : 0.0f.xxx;

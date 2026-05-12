@@ -25,6 +25,14 @@
 
 #pragma comment(lib, "Dbghelp.lib")
 
+#if CORONA_D3D12_AGILITY_ENABLED
+extern "C"
+{
+	__declspec(dllexport) extern const unsigned int D3D12SDKVersion = CORONA_D3D12_AGILITY_SDK_VERSION;
+	__declspec(dllexport) extern const char* D3D12SDKPath = ".\\D3D12\\";
+}
+#endif
+
 namespace
 {
 	constexpr DWORD kCrashDialogErrorMode =

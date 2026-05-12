@@ -59,10 +59,6 @@ void Corona::TemporalDenoisingPass()
 	if (!TemporalDenoisingFilterPSO)
 		return;
 	renderBackend->EmitGpuCrashMarker("TemporalDenoisingPass");
-	if (renderBackend && renderBackend->GetAPI() == ERenderBackendAPI::D3D12)
-	{
-		PIXScopedEvent(renderBackend->GetGraphicsCommandList(), PIX_COLOR(rand() % 255, rand() % 255, rand() % 255), "TemporalDenoisingPass");
-	}
 
 	GIBufferWriteIndex = 1 - GIBufferWriteIndex;
 	UINT WriteIndex = GIBufferWriteIndex;

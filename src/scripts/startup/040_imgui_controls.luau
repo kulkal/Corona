@@ -528,6 +528,9 @@ local function draw_lighting_controls(state)
     checkbox_state(state, "enable_direct_diffuse", "Enable Direct Diffuse", "script.lighting.direct_diffuse")
     checkbox_state(state, "enable_direct_specular", "Enable Direct Specular", "script.lighting.direct_specular")
     checkbox_state(state, "enable_specular_gi", "Enable Indirect Specular (GI)", "script.lighting.specular_gi")
+    if state.rt_reflection_ser_available then
+        checkbox_state(state, "rt_reflection_ser", "RT Reflection SER", "script.lighting.reflection.ser")
+    end
     if state.camera_path_owns_light_controls then
         ui.text("Camera path playback is controlling the directional light.")
     else
@@ -548,6 +551,9 @@ local function draw_lighting_controls(state)
     end
 
     checkbox_state(state, "enable_diffuse_gi", "Enable Diffuse GI", "script.lighting.diffuse_gi")
+    if state.rt_diffuse_gi_ser_available then
+        checkbox_state(state, "rt_diffuse_gi_ser", "RT Diffuse GI SER", "script.lighting.diffuse_gi.ser")
+    end
     if state.rendering_mode == 0 then
         combo_state_zero_based(state, "diffuse_gi_mode", "Diffuse GI Method", "script.lighting.diffuse_gi.mode", {
             "Simple Raytrace",

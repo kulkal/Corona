@@ -1142,6 +1142,17 @@ void VulkanRTPipelineStateObject::BindCBV(const std::string& shader, const std::
 	CBVBindings.push_back(MakeRTBindingDesc(shader, name, baseRegister, ToVulkanConstantBufferBinding(baseRegister), size));
 }
 
+void VulkanRTPipelineStateObject::SetShaderDefine(const std::string& name, const std::string& value)
+{
+	(void)name;
+	(void)value;
+}
+
+void VulkanRTPipelineStateObject::SetShaderLibraryTarget(const std::string& target)
+{
+	(void)target;
+}
+
 void VulkanRTPipelineStateObject::BeginShaderTable() {}
 void VulkanRTPipelineStateObject::EndShaderTable() {}
 void VulkanRTPipelineStateObject::SetTextureUAV(const std::string& shader, const std::string& bindingName, Texture* texture, int instanceIndex)

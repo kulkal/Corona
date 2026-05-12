@@ -90,10 +90,6 @@ void Corona::PathTracingPass()
 	if (!TLAS || !outputColor)
 		return;
 	renderBackend->EmitGpuCrashMarker("PathTracingPass");
-	if (renderBackend && renderBackend->GetAPI() == ERenderBackendAPI::D3D12)
-	{
-		PIXScopedEvent(renderBackend->GetGraphicsCommandList(), PIX_COLOR(rand() % 255, rand() % 255, rand() % 255), "PathTracingPass");
-	}
 
 	if (!PSO_PATH_TRACING)
 	{

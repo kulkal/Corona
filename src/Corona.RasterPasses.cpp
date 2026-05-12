@@ -29,6 +29,7 @@ void Corona::InitBloomPass()
 
 		shared_ptr<PipelineStateObject> TEMP_BloomExtractPSO = shared_ptr<PipelineStateObject>(new PipelineStateObject);
 		TEMP_BloomExtractPSO->Owner = dx12_rhi;
+		TEMP_BloomExtractPSO->DebugName = L"ComputePSO: BloomBlur.BloomExtract";
 		TEMP_BloomExtractPSO->cs = cs;
 		TEMP_BloomExtractPSO->computePSODesc = computePsoDesc;
 		TEMP_BloomExtractPSO->BindSRV("SrcTex", 0, 1);
@@ -48,6 +49,7 @@ void Corona::InitBloomPass()
 
 		shared_ptr<PipelineStateObject> TEMP_BloomBlurPSO = shared_ptr<PipelineStateObject>(new PipelineStateObject);
 		TEMP_BloomBlurPSO->Owner = dx12_rhi;
+		TEMP_BloomBlurPSO->DebugName = L"ComputePSO: BloomBlur.BloomBlur";
 		TEMP_BloomBlurPSO->cs = cs;
 		TEMP_BloomBlurPSO->computePSODesc = computePsoDesc;
 		TEMP_BloomBlurPSO->BindSRV("SrcTex", 0, 1);
@@ -66,6 +68,7 @@ void Corona::InitBloomPass()
 
 		shared_ptr<PipelineStateObject> TEMP_HistogramPSO = shared_ptr<PipelineStateObject>(new PipelineStateObject);
 		TEMP_HistogramPSO->Owner = dx12_rhi;
+		TEMP_HistogramPSO->DebugName = L"ComputePSO: Histogram.GenerateHistogram";
 		TEMP_HistogramPSO->cs = cs;
 		TEMP_HistogramPSO->computePSODesc = computePsoDesc;
 		TEMP_HistogramPSO->BindSRV("LumaTex", 0, 1);
@@ -83,6 +86,7 @@ void Corona::InitBloomPass()
 
 		shared_ptr<PipelineStateObject> TEMP_DrawHistogramPSO = shared_ptr<PipelineStateObject>(new PipelineStateObject);
 		TEMP_DrawHistogramPSO->Owner = dx12_rhi;
+		TEMP_DrawHistogramPSO->DebugName = L"ComputePSO: DrawHistogram.DrawHistogram";
 		TEMP_DrawHistogramPSO->cs = cs;
 		TEMP_DrawHistogramPSO->computePSODesc = computePsoDesc;
 		TEMP_DrawHistogramPSO->BindSRV("Histogram", 0, 1);
@@ -101,6 +105,7 @@ void Corona::InitBloomPass()
 
 		shared_ptr<PipelineStateObject> TEMP_ClearHistogramPSO = shared_ptr<PipelineStateObject>(new PipelineStateObject);
 		TEMP_ClearHistogramPSO->Owner = dx12_rhi;
+		TEMP_ClearHistogramPSO->DebugName = L"ComputePSO: Histogram.ClearHistogram";
 		TEMP_ClearHistogramPSO->cs = cs;
 		TEMP_ClearHistogramPSO->computePSODesc = computePsoDesc;
 		TEMP_ClearHistogramPSO->BindUAV("Histogram", 0);
@@ -118,6 +123,7 @@ void Corona::InitBloomPass()
 
 		shared_ptr<PipelineStateObject> TEMP_AdapteExposurePSO = shared_ptr<PipelineStateObject>(new PipelineStateObject);
 		TEMP_AdapteExposurePSO->Owner = dx12_rhi;
+		TEMP_AdapteExposurePSO->DebugName = L"ComputePSO: AdaptExposureCS.AdaptExposure";
 		TEMP_AdapteExposurePSO->cs = cs;
 		TEMP_AdapteExposurePSO->computePSODesc = computePsoDesc;
 		TEMP_AdapteExposurePSO->BindSRV("Histogram", 0, 1);
@@ -293,6 +299,7 @@ void Corona::InitToneMapPass()
 
 	shared_ptr<PipelineStateObject> TEMP_ToneMapPSO = shared_ptr<PipelineStateObject>(new PipelineStateObject);
 	TEMP_ToneMapPSO->Owner = dx12_rhi;
+	TEMP_ToneMapPSO->DebugName = L"GraphicsPSO: ToneMap.VSMain/PSMain";
 	TEMP_ToneMapPSO->ps = ps;
 	TEMP_ToneMapPSO->vs = vs;
 	TEMP_ToneMapPSO->graphicsPSODesc = psoDesc;
@@ -362,6 +369,7 @@ void Corona::InitDebugPass()
 
 	shared_ptr<PipelineStateObject> TEMP_BufferVisualizePSO = shared_ptr<PipelineStateObject>(new PipelineStateObject);
 	TEMP_BufferVisualizePSO->Owner = dx12_rhi;
+	TEMP_BufferVisualizePSO->DebugName = L"GraphicsPSO: DebugPS.VSMain/PSMain";
 	TEMP_BufferVisualizePSO->ps = ps;
 	TEMP_BufferVisualizePSO->vs = vs;
 	TEMP_BufferVisualizePSO->graphicsPSODesc = psoDesc;
@@ -464,6 +472,7 @@ void Corona::InitLightingPass()
 
 	shared_ptr<PipelineStateObject> TEMP_LightingPSO = shared_ptr<PipelineStateObject>(new PipelineStateObject);
 	TEMP_LightingPSO->Owner = dx12_rhi;
+	TEMP_LightingPSO->DebugName = L"GraphicsPSO: Lighting.VSMain/PSMain";
 	TEMP_LightingPSO->ps = ps;
 	TEMP_LightingPSO->vs = vs;
 	TEMP_LightingPSO->graphicsPSODesc = psoDesc;
@@ -576,6 +585,7 @@ void Corona::InitTemporalAAPass()
 
 	shared_ptr<PipelineStateObject> TEMP_TemporalAAPSO = shared_ptr<PipelineStateObject>(new PipelineStateObject);
 	TEMP_TemporalAAPSO->Owner = dx12_rhi;
+	TEMP_TemporalAAPSO->DebugName = L"GraphicsPSO: TemporalAA.VSMain/PSMain";
 	TEMP_TemporalAAPSO->ps = ps;
 	TEMP_TemporalAAPSO->vs = vs;
 	TEMP_TemporalAAPSO->graphicsPSODesc = psoDesc;
@@ -597,11 +607,7 @@ void Corona::InitTemporalAAPass()
 
 void Corona::ToneMapPass()
 {
-	renderBackend->EmitGpuCrashMarker("CopyPass");
-	if (renderBackend && renderBackend->GetAPI() == ERenderBackendAPI::D3D12)
-	{
-		PIXScopedEvent(renderBackend->GetGraphicsCommandList(), PIX_COLOR(rand() % 255, rand() % 255, rand() % 255), "CopyPass");
-	}
+	renderBackend->EmitGpuCrashMarker("ToneMapPass");
 
 	if (renderBackend && renderBackend->GetAPI() == ERenderBackendAPI::Vulkan)
 	{
@@ -662,7 +668,6 @@ void Corona::DebugPass()
 	}
 
 	renderBackend->EmitGpuCrashMarker("DebugPass");
-	PIXScopedEvent(renderBackend->GetGraphicsCommandList(), PIX_COLOR(rand() % 255, rand() % 255, rand() % 255), "DebugPass");
 
 	BufferVisualizePSO->Apply();
 	BufferVisualizePSO->SetSampler("samplerWrap", samplerWrap.get());
@@ -1200,10 +1205,6 @@ void Corona::DebugPass()
 void Corona::LightingPass()
 {
 	renderBackend->EmitGpuCrashMarker("LightingPass");
-	if (renderBackend && renderBackend->GetAPI() == ERenderBackendAPI::D3D12)
-	{
-		PIXScopedEvent(renderBackend->GetGraphicsCommandList(), PIX_COLOR(rand() % 255, rand() % 255, rand() % 255), "LightingPass");
-	}
 
 	renderBackend->TransitionTexture(LightingBuffer.get(), EResourceState::ShaderRead, EResourceState::RenderTarget);
 
@@ -1346,10 +1347,6 @@ void Corona::LightingPass()
 void Corona::TemporalAAPass()
 {
 	renderBackend->EmitGpuCrashMarker("TemporalAAPass");
-	if (renderBackend && renderBackend->GetAPI() == ERenderBackendAPI::D3D12)
-	{
-		PIXScopedEvent(renderBackend->GetGraphicsCommandList(), PIX_COLOR(rand() % 255, rand() % 255, rand() % 255), "TemporalAAPass");
-	}
 
 	UINT PrevColorBufferIndex = 1 - ColorBufferWriteIndex;
 	Texture* ResolveTarget = ColorBuffers[ColorBufferWriteIndex].get();
@@ -1460,7 +1457,6 @@ void Corona::TemporalAAPass()
 void Corona::BloomPass()
 {
 	renderBackend->EmitGpuCrashMarker("BloomPass");
-	PIXScopedEvent(renderBackend->GetGraphicsCommandList(), PIX_COLOR(rand() % 255, rand() % 255, rand() % 255), "BloomPass");
 
 	BloomCB.RTSize.x = BloomBufferWidth;
 	BloomCB.RTSize.y = BloomBufferHeight;
@@ -1797,10 +1793,6 @@ void Corona::GBufferPass()
 	ColorBufferWriteIndex = 1 - ColorBufferWriteIndex;
 	//DepthBufferWriteIndex = 1 - DepthBufferWriteIndex;
 	renderBackend->EmitGpuCrashMarker("GBufferPass");
-	if (renderBackend && renderBackend->GetAPI() == ERenderBackendAPI::D3D12)
-	{
-		PIXScopedEvent(renderBackend->GetGraphicsCommandList(), PIX_COLOR(rand() % 255, rand() % 255, rand() % 255), "GBufferPass");
-	}
 
 	renderBackend->TransitionTexture(AlbedoBuffer.get(), EResourceState::ShaderRead, EResourceState::RenderTarget);
 	renderBackend->TransitionTexture(SpecularAlbedoBuffer.get(), EResourceState::ShaderRead, EResourceState::RenderTarget);

@@ -17,6 +17,8 @@
 #include <cstdlib>
 #include <iterator>
 
+void AppendCpuRuntimeTrace(const std::wstring& line);
+
 void Corona::InitSpatialHashGIPass()
 {
 	auto createSpatialHashPSO = [&](const std::string& entryPoint)
@@ -73,11 +75,17 @@ void Corona::InitSpatialHashGIPass()
 	SpatialHashGIQueryPSO = createSpatialHashPSO("SpatialHashQuery");
 }
 
-void Corona::InitRaytracingSpatialHashPass()
+shared_ptr<RTPipelineStateObject> Corona::CreateRaytracingSpatialHashGIPSO(bool bUseSER)
 {
 		shared_ptr<RTPipelineStateObject> tempPSO = renderBackend->CreateRTPipelineStateObject();
 		if (!tempPSO)
-			return;
+			return nullptr;
+		if (bUseSER)
+		{
+			tempPSO->SetShaderDefine("RT_DIFFUSE_GI_USE_SER", "1");
+			tempPSO->SetShaderDefine("RT_DIFFUSE_GI_SER_MATERIAL_HINT_BITS", "8");
+			tempPSO->SetShaderLibraryTarget("lib_6_9");
+		}
 		tempPSO->SetNumInstances(static_cast<uint32_t>(RayTracingInstances.size()));
 
 		tempPSO->AddHitGroup("HitGroup", "chs", "");
@@ -107,8 +115,38 @@ void Corona::InitRaytracingSpatialHashPass()
 		tempPSO->BindSRV("chs", "InstanceProperty", 8);
 		tempPSO->Configure(1, sizeof(float) * 12, sizeof(float) * 2);
 
-		if (tempPSO->InitRS("Shaders\\SpatialHashCellGI.hlsl"))
-			PSO_RT_SPATIAL_HASH_GI = tempPSO;
+		return tempPSO->InitRS("Shaders\\SpatialHashCellGI.hlsl") ? tempPSO : nullptr;
+}
+
+void Corona::InitRaytracingSpatialHashPass()
+{
+	PSO_RT_SPATIAL_HASH_GI = CreateRaytracingSpatialHashGIPSO(false);
+	if (bEnableRTDiffuseGISER && renderBackend && renderBackend->GetAPI() == ERenderBackendAPI::D3D12)
+		InitRaytracingSpatialHashGISERPass();
+}
+
+bool Corona::InitRaytracingSpatialHashGISERPass()
+{
+	if (PSO_RT_SPATIAL_HASH_GI_SER)
+		return true;
+	if (bRTDiffuseGISpatialHashSERInitFailed)
+		return false;
+	if (!renderBackend || renderBackend->GetAPI() != ERenderBackendAPI::D3D12)
+		return false;
+	if (!bD3D12ShaderModel69Supported)
+	{
+		bRTDiffuseGISpatialHashSERInitFailed = true;
+		AppendCpuRuntimeTrace(L"[RTDiffuseGI][SER] Spatial Hash SER skipped: D3D12 Shader Model 6.9 is not supported");
+		return false;
+	}
+
+	PSO_RT_SPATIAL_HASH_GI_SER = CreateRaytracingSpatialHashGIPSO(true);
+	if (!PSO_RT_SPATIAL_HASH_GI_SER)
+	{
+		bRTDiffuseGISpatialHashSERInitFailed = true;
+		AppendCpuRuntimeTrace(L"[RTDiffuseGI][SER] Spatial Hash SER PSO creation failed");
+	}
+	return PSO_RT_SPATIAL_HASH_GI_SER != nullptr;
 }
 
 void Corona::SpatialHashGIPass()
@@ -125,7 +163,11 @@ void Corona::SpatialHashGIPass()
 		return true;
 	};
 
-	if (!TLAS || !PSO_RT_SPATIAL_HASH_GI ||
+	shared_ptr<RTPipelineStateObject> rtPSO = PSO_RT_SPATIAL_HASH_GI;
+	if (bEnableRTDiffuseGISER && renderBackend && renderBackend->GetAPI() == ERenderBackendAPI::D3D12 && InitRaytracingSpatialHashGISERPass())
+		rtPSO = PSO_RT_SPATIAL_HASH_GI_SER;
+
+	if (!TLAS || !rtPSO ||
 		!SpatialHashGIClearPSO || !SpatialHashGIUpdatePSO || !SpatialHashGIResolvePSO || !SpatialHashGIQueryPSO ||
 		!SpatialHashGIActiveFlags || !SpatialHashGIActiveCellSlots || !SpatialHashGIActiveCounter ||
 		!SpatialHashGICellPosition || !SpatialHashGICellNormal || !SpatialHashGICellScore ||
@@ -135,10 +177,6 @@ void Corona::SpatialHashGIPass()
 		return;
 
 	renderBackend->EmitGpuCrashMarker("SpatialHashGIPass");
-	if (renderBackend && renderBackend->GetAPI() == ERenderBackendAPI::D3D12)
-	{
-		PIXScopedEvent(renderBackend->GetGraphicsCommandList(), PIX_COLOR(rand() % 255, rand() % 255, rand() % 255), "SpatialHashGIPass");
-	}
 
 	const UINT32 cacheIndex = 0u;
 	const UINT32 spatialHashTraceCellBudget = std::min(SpatialHashGITraceCellBudget, SpatialHashGIActiveCellCapacity);
@@ -240,7 +278,7 @@ void Corona::SpatialHashGIPass()
 	renderBackend->TransitionBuffer(SpatialHashGICellScore.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
 	renderBackend->TransitionBuffer(SpatialHashGIResolvedKeys[cacheIndex].get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
 
-	RTPassBuilder pass(*this, PSO_RT_SPATIAL_HASH_GI);
+	RTPassBuilder pass(*this, rtPSO);
 	pass.BeginScene()
 		.SetBufferUAV("global", "TraceSH0", SpatialHashGITraceSH[0].get())
 		.SetBufferUAV("global", "TraceSH1", SpatialHashGITraceSH[1].get())

@@ -78,20 +78,20 @@ float3 linearToSrgb(float3 c)
     return srgb;
 }
 
-struct RayPayload
+struct RT_REFLECTION_RAY_PAYLOAD RayPayload
 {
-    float3 position;
-    float3 color;
-    float3 normal;
-    float spreadAngle;
-    float coneWidth;
-    float hitDist;
-    bool bHit;
+    float3 position RT_REFLECTION_PAYLOAD_RW;
+    float3 color RT_REFLECTION_PAYLOAD_RW;
+    float3 normal RT_REFLECTION_PAYLOAD_RW;
+    float spreadAngle RT_REFLECTION_PAYLOAD_RW;
+    float coneWidth RT_REFLECTION_PAYLOAD_RW;
+    float hitDist RT_REFLECTION_PAYLOAD_RW;
+    bool bHit RT_REFLECTION_PAYLOAD_RW;
 };
 
-struct ShadowRayPayload
+struct RT_REFLECTION_SHADOW_RAY_PAYLOAD ShadowRayPayload
 {
-    bool bHit;
+    bool bHit RT_REFLECTION_SHADOW_PAYLOAD_RW;
 };
 
 /*
@@ -240,6 +240,33 @@ static const float MAX_HIT_DIST = 10000;
 
 #define RT_REFLECTION_SURFACE_RAY_FLAGS (RAY_FLAG_FORCE_OPAQUE | RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES)
 
+void TraceReflectionSurfaceRay(RayDesc ray, inout RayPayload payload)
+{
+#if RT_REFLECTION_USE_SER
+    dx::HitObject hit = dx::HitObject::TraceRay(
+        gRtScene,
+        RT_REFLECTION_SURFACE_RAY_FLAGS,
+        0xFF,
+        0,
+        0,
+        0,
+        ray,
+        payload);
+    dx::MaybeReorderThread(hit, hit.GetInstanceID(), RT_REFLECTION_SER_MATERIAL_HINT_BITS);
+    dx::HitObject::Invoke(hit, payload);
+#else
+    TraceRay(
+        gRtScene,
+        RT_REFLECTION_SURFACE_RAY_FLAGS,
+        0xFF,
+        0,
+        0,
+        0,
+        ray,
+        payload);
+#endif
+}
+
 bool ProjectToScreenUVChecked(float3 worldPos, float4x4 viewProj, out float2 uv)
 {
     float4 clip = mul(float4(worldPos, 1.0f), viewProj);
@@ -294,15 +321,7 @@ void WriteRRSpecularGuides(uint2 pixel, uint2 renderSize, bool primarySurfaceVal
         guidePayload.spreadAngle = 0.0f;
         guidePayload.hitDist = ProjectionParams.w;
         guidePayload.bHit = false;
-        TraceRay(
-            gRtScene,
-            RT_REFLECTION_SURFACE_RAY_FLAGS,
-            0xFF,
-            0,
-            0,
-            0,
-            guideRay,
-            guidePayload);
+        TraceReflectionSurfaceRay(guideRay, guidePayload);
         guideHit = guidePayload.bHit;
     }
 
@@ -409,15 +428,7 @@ void rayGen
     payload.spreadAngle = max(SpecSanitizeFloat(ViewSpreadAngle, 0.0f), 0.0f);
     payload.hitDist = MAX_HIT_DIST;
     payload.bHit = false;
-    TraceRay(
-        gRtScene,
-        RT_REFLECTION_SURFACE_RAY_FLAGS,
-        0xFF,
-        0,
-        0,
-        0,
-        ray,
-        payload);
+    TraceReflectionSurfaceRay(ray, payload);
 
     float3 tracedRadiance = 0.0f.xxx;
     if(payload.bHit == false)

@@ -62,10 +62,6 @@ void Corona::RaytraceAOPass()
 		return;
 
 	renderBackend->EmitGpuCrashMarker("RaytraceAOPass");
-	if (renderBackend && renderBackend->GetAPI() == ERenderBackendAPI::D3D12)
-	{
-		PIXScopedEvent(renderBackend->GetGraphicsCommandList(), PIX_COLOR(rand() % 255, rand() % 255, rand() % 255), "RaytraceAOPass");
-	}
 
 	renderBackend->TransitionTexture(AmbientOcclusionBuffer.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
 	const FLOAT clearAO[4] = { 1.0f, 1.0f, 1.0f, 1.0f };

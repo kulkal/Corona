@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstring>
+#include <cstdlib>
 #include <iomanip>
 #include <sstream>
 #include <fstream>
@@ -48,6 +49,77 @@ namespace
 	std::wstring ToWide(const std::string& value)
 	{
 		return std::wstring(value.begin(), value.end());
+	}
+
+	std::wstring FormatHexHRESULT(HRESULT hr)
+	{
+		std::wstringstream stream;
+		stream << L"0x" << std::hex << std::uppercase << static_cast<unsigned long>(hr);
+		return stream.str();
+	}
+
+	void AppendD3D12InfoQueueMessages(ID3D12Device* device, const std::wstring& context)
+	{
+		if (!device)
+			return;
+
+		ComPtr<ID3D12InfoQueue> infoQueue;
+		if (FAILED(device->QueryInterface(IID_PPV_ARGS(&infoQueue))) || !infoQueue)
+			return;
+
+		const UINT64 messageCount = infoQueue->GetNumStoredMessagesAllowedByRetrievalFilter();
+		const UINT64 firstMessage = messageCount > 16 ? messageCount - 16 : 0;
+		AppendCpuRuntimeTrace(
+			L"[D3D12InfoQueue] context=\"" + context +
+			L"\", storedMessages=" + std::to_wstring(messageCount));
+
+		for (UINT64 messageIndex = firstMessage; messageIndex < messageCount; ++messageIndex)
+		{
+			SIZE_T messageLength = 0;
+			if (FAILED(infoQueue->GetMessage(messageIndex, nullptr, &messageLength)) || messageLength == 0)
+				continue;
+
+			std::vector<char> messageData(messageLength);
+			D3D12_MESSAGE* message = reinterpret_cast<D3D12_MESSAGE*>(messageData.data());
+			if (FAILED(infoQueue->GetMessage(messageIndex, message, &messageLength)) || !message->pDescription)
+				continue;
+
+			AppendCpuRuntimeTrace(
+				L"[D3D12InfoQueue] id=" + std::to_wstring(message->ID) +
+				L", severity=" + std::to_wstring(message->Severity) +
+				L", desc=\"" + ToWide(std::string(message->pDescription)) + L"\"");
+		}
+	}
+
+	std::wstring ShaderDebugStem(const std::wstring& shaderPath)
+	{
+		if (shaderPath.empty())
+			return L"UnknownShader";
+
+		std::filesystem::path path(shaderPath);
+		std::wstring stem = path.stem().wstring();
+		if (stem.empty())
+			stem = path.filename().wstring();
+		return stem.empty() ? L"UnknownShader" : stem;
+	}
+
+	std::wstring ShaderDebugStem(const std::string& shaderPath)
+	{
+		return ShaderDebugStem(ToWide(shaderPath));
+	}
+
+	std::wstring MakePipelineDebugName(
+		const wchar_t* pipelineType,
+		const std::wstring& shaderPath,
+		const std::string& primaryEntry,
+		const std::string& secondaryEntry = {})
+	{
+		std::wstring name = std::wstring(pipelineType) + L": " + ShaderDebugStem(shaderPath);
+		if (!primaryEntry.empty())
+			name += L"." + ToWide(primaryEntry);
+		if (!secondaryEntry.empty())
+			name += L"/" + ToWide(secondaryEntry);
+		return name;
 	}
 
 	std::wstring FormatDx12InitMilliseconds(double milliseconds)
@@ -1474,14 +1546,19 @@ bool PipelineStateObject::Init()
 		OutputDebugStringA(reinterpret_cast<const char*>(error->GetBufferPointer()));
 	}
 
-	NAME_D3D12_OBJECT(RS);
+	const std::wstring rootSignatureName =
+		DebugName.empty()
+		? (IsCompute ? L"ComputeRootSignature" : L"GraphicsRootSignature")
+		: (L"RootSignature: " + DebugName);
+	SetName(RS.Get(), rootSignatureName.c_str());
 	if (IsCompute)
 	{
 		computePSODesc.CS = CD3DX12_SHADER_BYTECODE(cs->GetBufferPointer(), cs->GetBufferSize());
 		computePSODesc.pRootSignature = RS.Get();
 		HRESULT hr;
 		ThrowIfFailed(hr = owner->Device->CreateComputePipelineState(&computePSODesc, IID_PPV_ARGS(&PSO)));
-		NAME_D3D12_OBJECT(PSO);
+		const std::wstring psoName = DebugName.empty() ? L"ComputePSO" : DebugName;
+		SetName(PSO.Get(), psoName.c_str());
 		return SUCCEEDED(hr);
 
 	}
@@ -1493,7 +1570,8 @@ bool PipelineStateObject::Init()
 		graphicsPSODesc.pRootSignature = RS.Get();
 		HRESULT hr;
 		ThrowIfFailed(hr = owner->Device->CreateGraphicsPipelineState(&graphicsPSODesc, IID_PPV_ARGS(&PSO)));
-		NAME_D3D12_OBJECT(PSO);
+		const std::wstring psoName = DebugName.empty() ? L"GraphicsPSO" : DebugName;
+		SetName(PSO.Get(), psoName.c_str());
 		return SUCCEEDED(hr);
 	}
 }
@@ -1551,6 +1629,7 @@ bool D3D12ComputePipelineStateObject::InitCS(const std::wstring& shaderFile, con
 
 	PSO->Owner = Owner;
 	PSO->IsCompute = true;
+	PSO->DebugName = MakePipelineDebugName(L"ComputePSO", shaderFile, entryPoint);
 	PSO->computePSODesc = {};
 	PSO->cs = compileShaderDXC(Owner, shaderFile.c_str(), entryPoint, L"cs_6_0");
 	if (!PSO->cs)
@@ -2463,9 +2542,71 @@ std::string convertBlobToString(BlotType* pBlob)
 
 static dxc::DxcDllSupport gDxcDllHelper;
 
+static HRESULT InitializeDxcCompiler(SimpleDX12* owner)
+{
+	static bool bInitialized = false;
+	static HRESULT initResult = E_FAIL;
+	static std::wstring loadedPath;
+
+	if (bInitialized)
+		return initResult;
+
+	bInitialized = true;
+
+#ifdef _WIN32
+	std::vector<std::filesystem::path> candidateDlls;
+	candidateDlls.push_back(RuntimePaths::RootDirectory() / L"bin" / L"dxcompiler.dll");
+
+	wchar_t modulePath[MAX_PATH] = {};
+	const DWORD modulePathLength = GetModuleFileNameW(nullptr, modulePath, static_cast<DWORD>(std::size(modulePath)));
+	if (modulePathLength > 0 && modulePathLength < std::size(modulePath))
+		candidateDlls.push_back(std::filesystem::path(modulePath).parent_path() / L"dxcompiler.dll");
+
+	if (const wchar_t* vulkanSdk = _wgetenv(L"VULKAN_SDK"))
+		candidateDlls.push_back(std::filesystem::path(vulkanSdk) / L"Bin" / L"dxcompiler.dll");
+
+	for (const std::filesystem::path& candidate : candidateDlls)
+	{
+		if (!std::filesystem::exists(candidate))
+			continue;
+
+		initResult = gDxcDllHelper.InitializeForDll(candidate.c_str(), "DxcCreateInstance");
+		if (SUCCEEDED(initResult))
+		{
+			loadedPath = candidate.wstring();
+			break;
+		}
+	}
+#endif
+
+	if (FAILED(initResult))
+	{
+		initResult = gDxcDllHelper.Initialize();
+		if (SUCCEEDED(initResult))
+			loadedPath = L"dxcompiler.dll";
+	}
+
+	if (SUCCEEDED(initResult))
+	{
+		AppendCpuRuntimeTrace(L"[DXC] loaded " + loadedPath);
+	}
+	else
+	{
+		std::wstringstream hrStream;
+		hrStream << std::hex << std::uppercase << static_cast<unsigned long>(initResult);
+		AppendCpuRuntimeTrace(L"[DXC] failed to load dxcompiler.dll hr=0x" + hrStream.str());
+		if (owner)
+			owner->errorString += "Failed to load dxcompiler.dll.\n";
+	}
+
+	return initResult;
+}
+
 ComPtr<ID3DBlob> compileShaderDXC(SimpleDX12* owner, const WCHAR* filename, const std::string& entryPoint, const WCHAR* targetString)
 {
-	gDxcDllHelper.Initialize();
+	if (FAILED(InitializeDxcCompiler(owner)))
+		return nullptr;
+
 	ComPtr<IDxcCompiler> pCompiler;
 	ComPtr<IDxcLibrary> pLibrary;
 	ComPtr<IDxcIncludeHandler> dxcIncludeHandler;
@@ -2525,10 +2666,15 @@ ComPtr<ID3DBlob> compileShaderDXC(SimpleDX12* owner, const WCHAR* filename, cons
 	return ComPtr<ID3DBlob>(pBlob);
 }
 
-ComPtr<ID3DBlob> compileShaderLibrary(SimpleDX12* owner, const WCHAR* filename, const WCHAR* targetString)
+ComPtr<ID3DBlob> compileShaderLibrary(
+	SimpleDX12* owner,
+	const WCHAR* filename,
+	const WCHAR* targetString,
+	const std::vector<std::pair<std::string, std::string>>& defines = {})
 {
-	// Initialize the helper
-	gDxcDllHelper.Initialize();
+	if (FAILED(InitializeDxcCompiler(owner)))
+		return nullptr;
+
 	ComPtr<IDxcCompiler> pCompiler;
 	ComPtr<IDxcLibrary> pLibrary;
 	ComPtr<IDxcIncludeHandler> dxcIncludeHandler;
@@ -2558,6 +2704,24 @@ ComPtr<ID3DBlob> compileShaderLibrary(SimpleDX12* owner, const WCHAR* filename, 
 #else
 	LPCWSTR compileArgs[] = { DXC_ARG_OPTIMIZATION_LEVEL3 };
 #endif
+	std::vector<std::wstring> defineNames;
+	std::vector<std::wstring> defineValues;
+	std::vector<DxcDefine> dxcDefines;
+	defineNames.reserve(defines.size());
+	defineValues.reserve(defines.size());
+	dxcDefines.reserve(defines.size());
+	for (const auto& define : defines)
+	{
+		defineNames.push_back(ToWide(define.first));
+		defineValues.push_back(ToWide(define.second));
+	}
+	for (size_t defineIndex = 0; defineIndex < defines.size(); ++defineIndex)
+	{
+		DxcDefine dxcDefine{};
+		dxcDefine.Name = defineNames[defineIndex].c_str();
+		dxcDefine.Value = defineValues[defineIndex].c_str();
+		dxcDefines.push_back(dxcDefine);
+	}
 	pCompiler->Compile(
 		pTextBlob.Get(),
 		filename,
@@ -2565,8 +2729,8 @@ ComPtr<ID3DBlob> compileShaderLibrary(SimpleDX12* owner, const WCHAR* filename, 
 		targetString,
 		compileArgs,
 		_countof(compileArgs),
-		nullptr,
-		0,
+		dxcDefines.empty() ? nullptr : dxcDefines.data(),
+		static_cast<UINT32>(dxcDefines.size()),
 		dxcIncludeHandler.Get(),
 		&pResult);
 
@@ -2583,6 +2747,10 @@ ComPtr<ID3DBlob> compileShaderLibrary(SimpleDX12* owner, const WCHAR* filename, 
 		{
 			owner->errorString += log;
 		}
+		AppendCpuRuntimeTrace(
+			L"[DXC] library compile failed shader=\"" + std::wstring(filename) +
+			L"\" target=\"" + std::wstring(targetString) +
+			L"\" log=\"" + ToWide(log.substr(0, 4096)) + L"\"");
 		OutputDebugStringA(log.c_str());
 
 		return nullptr;
@@ -2736,15 +2904,25 @@ struct ShaderConfig
 
 struct PipelineConfig
 {
-	PipelineConfig(uint32_t maxTraceRecursionDepth)
+	PipelineConfig(uint32_t maxTraceRecursionDepth, bool bUseConfig1)
 	{
-		config.MaxTraceRecursionDepth = maxTraceRecursionDepth;
-
-		subobject.Type = D3D12_STATE_SUBOBJECT_TYPE_RAYTRACING_PIPELINE_CONFIG;
-		subobject.pDesc = &config;
+		if (bUseConfig1)
+		{
+			config1.MaxTraceRecursionDepth = maxTraceRecursionDepth;
+			config1.Flags = D3D12_RAYTRACING_PIPELINE_FLAG_NONE;
+			subobject.Type = D3D12_STATE_SUBOBJECT_TYPE_RAYTRACING_PIPELINE_CONFIG1;
+			subobject.pDesc = &config1;
+		}
+		else
+		{
+			config.MaxTraceRecursionDepth = maxTraceRecursionDepth;
+			subobject.Type = D3D12_STATE_SUBOBJECT_TYPE_RAYTRACING_PIPELINE_CONFIG;
+			subobject.pDesc = &config;
+		}
 	}
 
 	D3D12_RAYTRACING_PIPELINE_CONFIG config = {};
+	D3D12_RAYTRACING_PIPELINE_CONFIG1 config1 = {};
 	D3D12_STATE_SUBOBJECT subobject = {};
 };
 
@@ -2890,6 +3068,17 @@ void D3D12RTPipelineStateObject::BindCBV(const string& shader, const string& nam
 
 		bindingInfo.Binding.push_back(binding);
 	}
+}
+
+void D3D12RTPipelineStateObject::SetShaderDefine(const string& name, const string& value)
+{
+	ShaderDefines.emplace_back(name, value);
+}
+
+void D3D12RTPipelineStateObject::SetShaderLibraryTarget(const string& target)
+{
+	if (!target.empty())
+		ShaderLibraryTarget = target;
 }
 
 void D3D12RTPipelineStateObject::BeginShaderTable()
@@ -3322,13 +3511,13 @@ bool D3D12RTPipelineStateObject::InitRS(const string& ShaderFile)
 	if (shaderPath.is_relative())
 		shaderPath = RuntimePaths::SourceDirectory() / shaderPath;
 	wstring wShaderFile = shaderPath.wstring();
-	ComPtr<ID3DBlob> pDxilLib = compileShaderLibrary(owner, wShaderFile.c_str(), L"lib_6_3");
+	ComPtr<ID3DBlob> pDxilLib = compileShaderLibrary(owner, wShaderFile.c_str(), ToWide(ShaderLibraryTarget).c_str(), ShaderDefines);
 	if (!pDxilLib)
 	{
 		traceStep(L"Compile DXIL library failed");
 		return false;
 	}
-	traceStep(L"Compile DXIL library lib_6_3");
+	traceStep((L"Compile DXIL library " + ToWide(ShaderLibraryTarget)).c_str());
 
 	vector<const WCHAR*> entryPoints;
 	entryPoints.reserve(ShaderBinding.size());
@@ -3418,7 +3607,9 @@ bool D3D12RTPipelineStateObject::InitRS(const string& ShaderFile)
 		}
 
 		bindingInfo.RS = CreateRootSignature(owner->Device, Desc);
-		NAME_D3D12_OBJECT(bindingInfo.RS);
+		const std::wstring localRootName =
+			L"RTLocalRootSignature: " + ShaderDebugStem(ShaderFile) + L"." + bindingInfo.ShaderName;
+		SetName(bindingInfo.RS.Get(), localRootName.c_str());
 
 		bindingInfo.pInterface = bindingInfo.RS.Get();
 		bindingInfo.subobject.pDesc = &bindingInfo.pInterface;
@@ -3460,7 +3651,8 @@ bool D3D12RTPipelineStateObject::InitRS(const string& ShaderFile)
 
 
 	// pipeline config
-	PipelineConfig config(MaxRecursion);
+	const bool bUsePipelineConfig1 = ShaderLibraryTarget >= "lib_6_9";
+	PipelineConfig config(MaxRecursion, bUsePipelineConfig1);
 	subobjects[index++] = config.subobject;
 
 	// global root signature
@@ -3503,7 +3695,8 @@ bool D3D12RTPipelineStateObject::InitRS(const string& ShaderFile)
 	Desc.pParameters = rootParamVec.data();
 
 	GlobalRS = CreateRootSignature(owner->Device, Desc);
-	NAME_D3D12_OBJECT(GlobalRS);
+	const std::wstring globalRootName = L"RTGlobalRootSignature: " + ShaderDebugStem(ShaderFile);
+	SetName(GlobalRS.Get(), globalRootName.c_str());
 
 	pInterfaceGlobalRS = GlobalRS.Get();
 	subobjectGlobalRS.pDesc = &pInterfaceGlobalRS;
@@ -3523,6 +3716,11 @@ bool D3D12RTPipelineStateObject::InitRS(const string& ShaderFile)
 	if (FAILED(hr))
 	{
 		traceStep(L"CreateStateObject failed");
+		AppendCpuRuntimeTrace(
+			L"[DX12RTInitRS] CreateStateObject failed shader=\"" + shaderFileWide +
+			L"\", target=\"" + ToWide(ShaderLibraryTarget) +
+			L"\", hr=" + FormatHexHRESULT(hr));
+		AppendD3D12InfoQueueMessages(owner->Device.Get(), L"CreateStateObject " + shaderFileWide + L" " + ToWide(ShaderLibraryTarget));
 		stringstream ss;
 		ss << "Failed to compile shader : " << ShaderFile << "\n";
 		owner->errorString += ss.str();
@@ -3531,7 +3729,8 @@ bool D3D12RTPipelineStateObject::InitRS(const string& ShaderFile)
 	}
 	traceStep(L"CreateStateObject");
 
-	NAME_D3D12_OBJECT(RTPipelineState);
+	const std::wstring rtPipelineName = L"RTPSO: " + ShaderDebugStem(ShaderFile);
+	SetName(RTPipelineState.Get(), rtPipelineName.c_str());
 
 	AppendCpuRuntimeTrace(
 		L"[StartupTiming][DX12RTInitRS] complete shader=\"" + shaderFileWide +
@@ -3690,18 +3889,18 @@ CommandQueue::CommandQueue(ID3D12Device5* device, bool bEnableAftermathMarkers)
 	queueDesc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
 
 	ThrowIfFailed(device->CreateCommandQueue(&queueDesc, IID_PPV_ARGS(&CmdQueue)));
-	NAME_D3D12_OBJECT(CmdQueue);
+	SetName(CmdQueue.Get(), L"Corona Graphics Queue");
 
 	CommandListPool.reserve(CommandListPoolSize);
 	for (int i = 0; i < CommandListPoolSize; i++)
 	{
 		CommandList * cmdList = new CommandList;
 		ThrowIfFailed(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&cmdList->CmdAllocator)));
-		NAME_D3D12_OBJECT(cmdList->CmdAllocator);
+		SetNameIndexed(cmdList->CmdAllocator.Get(), L"Corona Command Allocator", i);
 
 		ThrowIfFailed(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, cmdList->CmdAllocator.Get(), nullptr, IID_PPV_ARGS(&cmdList->CmdList)));
 		cmdList->CmdList->Close();
-		NAME_D3D12_OBJECT(cmdList->CmdList);
+		SetNameIndexed(cmdList->CmdList.Get(), L"Corona Command List", i);
 
 		CommandListPool.emplace_back(shared_ptr<CommandList>(cmdList));
 	}
@@ -4032,6 +4231,11 @@ std::shared_ptr<GraphicsPipelineHandle> SimpleDX12::CreateGraphicsPipeline(const
 	pso->Owner = this;
 	pso->vs = vs;
 	pso->ps = ps;
+	pso->DebugName = MakePipelineDebugName(
+		L"GraphicsPSO",
+		desc.ShaderPath,
+		desc.VertexEntryPoint,
+		desc.PixelEntryPoint);
 	pso->graphicsPSODesc = psoDesc;
 	if (desc.ConstantBufferSize > 0)
 		pso->BindCBV("__CB0", desc.ConstantBufferBinding, desc.ConstantBufferSize);

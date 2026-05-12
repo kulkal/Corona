@@ -61,10 +61,6 @@ void Corona::RaytraceShadowPass()
 	if (!TLAS || !PSO_RT_SHADOW || !UnjitteredDepthBuffers[ColorBufferWriteIndex] || !NormalBuffers[ColorBufferWriteIndex] || !GeomNormalBuffers[ColorBufferWriteIndex])
 		return;
 	renderBackend->EmitGpuCrashMarker("RaytraceShadowPass");
-	if (renderBackend && renderBackend->GetAPI() == ERenderBackendAPI::D3D12)
-	{
-		PIXScopedEvent(renderBackend->GetGraphicsCommandList(), PIX_COLOR(rand()%255, rand() % 255, rand() % 255), "RaytraceShadowPass");
-	}
 
 	RTShadowViewParam.ViewMatrix = glm::transpose(ViewMat);
 	RTShadowViewParam.InvViewMatrix = glm::transpose(InvViewMat);

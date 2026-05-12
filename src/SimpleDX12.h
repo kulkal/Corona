@@ -135,6 +135,7 @@ public:
 
 	ComPtr<ID3D12RootSignature> RS;
 	ComPtr<ID3D12PipelineState> PSO;
+	std::wstring DebugName;
 
 	D3D12_GRAPHICS_PIPELINE_STATE_DESC graphicsPSODesc;
 	D3D12_COMPUTE_PIPELINE_STATE_DESC computePSODesc;
@@ -263,6 +264,8 @@ public:
 	UINT MaxRecursion = 1;
 	UINT MaxPayloadSizeInBytes = 0;
 	UINT MaxAttributeSizeInBytes = 0;
+	std::string ShaderLibraryTarget = "lib_6_3";
+	std::vector<std::pair<std::string, std::string>> ShaderDefines;
 
 	uint32_t ShaderTableEntrySize = 0;
 	UINT ShaderTableSize = 0;
@@ -278,6 +281,8 @@ public:
 	void BindSRV(const std::string& shader, const std::string& name, uint32_t baseRegister) override;
 	void BindSampler(const std::string& shader, const std::string& name, uint32_t baseRegister) override;
 	void BindCBV(const std::string& shader, const std::string& name, uint32_t baseRegister, uint32_t size, uint32_t numInstance) override;
+	void SetShaderDefine(const std::string& name, const std::string& value) override;
+	void SetShaderLibraryTarget(const std::string& target) override;
 	void BeginShaderTable() override;
 	void EndShaderTable() override;
 	void SetTextureUAV(const std::string& shader, const std::string& bindingName, Texture* texture, int instanceIndex = -1) override;

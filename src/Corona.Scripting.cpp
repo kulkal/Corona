@@ -2633,7 +2633,11 @@ void Corona::PushLuauUiStateForScript(lua_State* L)
 	PushBoolField(L, "enable_direct_diffuse", bEnableDirectDiffuse);
 	PushBoolField(L, "enable_direct_specular", bEnableDirectSpecular);
 	PushBoolField(L, "enable_specular_gi", bEnableSpecularGI);
+	PushBoolField(L, "rt_reflection_ser", bEnableRTReflectionSER);
+	PushBoolField(L, "rt_reflection_ser_available", renderBackend && renderBackend->GetAPI() == ERenderBackendAPI::D3D12 && bD3D12ShaderModel69Supported);
 	PushBoolField(L, "enable_diffuse_gi", bEnableDiffuseGI);
+	PushBoolField(L, "rt_diffuse_gi_ser", bEnableRTDiffuseGISER);
+	PushBoolField(L, "rt_diffuse_gi_ser_available", renderBackend && renderBackend->GetAPI() == ERenderBackendAPI::D3D12 && bD3D12ShaderModel69Supported);
 	PushBoolField(L, "enable_rtao", bEnableRTAO);
 	PushBoolField(L, "enable_sky_lighting", bEnableSkyLighting);
 	PushBoolField(L, "enable_ray_traced_sky_lighting", bEnableRayTracedSkyLighting);
@@ -3124,7 +3128,9 @@ bool Corona::SetLuauUiValueForScript(const std::string& name, lua_State* L, int 
 	if (setBool("enable_direct_diffuse", bEnableDirectDiffuse, true)) return true;
 	if (setBool("enable_direct_specular", bEnableDirectSpecular, true)) return true;
 	if (setBool("enable_specular_gi", bEnableSpecularGI, true)) return true;
+	if (setBool("rt_reflection_ser", bEnableRTReflectionSER, true)) return true;
 	if (setBool("enable_diffuse_gi", bEnableDiffuseGI, true)) return true;
+	if (setBool("rt_diffuse_gi_ser", bEnableRTDiffuseGISER, true)) return true;
 	if (setBool("enable_rtao", bEnableRTAO, true)) return true;
 	if (setBool("enable_sky_lighting", bEnableSkyLighting, true)) return true;
 	if (setBool("enable_ray_traced_sky_lighting", bEnableRayTracedSkyLighting, true)) return true;

@@ -57,10 +57,6 @@ void Corona::RaytraceSkyLightingPass()
 		return;
 
 	renderBackend->EmitGpuCrashMarker("RaytraceSkyLightingPass");
-	if (renderBackend && renderBackend->GetAPI() == ERenderBackendAPI::D3D12)
-	{
-		PIXScopedEvent(renderBackend->GetGraphicsCommandList(), PIX_COLOR(rand() % 255, rand() % 255, rand() % 255), "RaytraceSkyLightingPass");
-	}
 
 	RTSkyLightingViewParam.ViewMatrix = glm::transpose(ViewMat);
 	RTSkyLightingViewParam.InvViewMatrix = glm::transpose(InvViewMat);

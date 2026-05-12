@@ -67,21 +67,48 @@ float3 linearToSrgb(float3 c)
     return srgb;
 }
 
-struct RayPayload
+struct RT_DIFFUSE_GI_RAY_PAYLOAD RayPayload
 {
-    float3 position;
-    float3 color;
-    float3 normal;
-    float spreadAngle;
-    float coneWidth;
-    bool bHit;
+    float3 position RT_DIFFUSE_GI_PAYLOAD_RW;
+    float3 color RT_DIFFUSE_GI_PAYLOAD_RW;
+    float3 normal RT_DIFFUSE_GI_PAYLOAD_RW;
+    float spreadAngle RT_DIFFUSE_GI_PAYLOAD_RW;
+    float coneWidth RT_DIFFUSE_GI_PAYLOAD_RW;
+    bool bHit RT_DIFFUSE_GI_PAYLOAD_RW;
 };
 
 
-struct ShadowRayPayload
+struct RT_DIFFUSE_GI_RAY_PAYLOAD ShadowRayPayload
 {
-    bool bHit;
+    bool bHit RT_DIFFUSE_GI_SHADOW_PAYLOAD_RW;
 };
+
+void TraceDiffuseGIRay(RayDesc ray, inout RayPayload payload)
+{
+#if RT_DIFFUSE_GI_USE_SER
+    dx::HitObject hit = dx::HitObject::TraceRay(
+        gRtScene,
+        RT_GI_SURFACE_RAY_FLAGS,
+        0xFF,
+        0,
+        0,
+        0,
+        ray,
+        payload);
+    dx::MaybeReorderThread(hit, hit.GetInstanceID(), RT_DIFFUSE_GI_SER_MATERIAL_HINT_BITS);
+    dx::HitObject::Invoke(hit, payload);
+#else
+    TraceRay(
+        gRtScene,
+        RT_GI_SURFACE_RAY_FLAGS,
+        0xFF,
+        0,
+        0,
+        0,
+        ray,
+        payload);
+#endif
+}
 
 float3 offset_ray(float3 p, float3 n)
 {
@@ -195,15 +222,7 @@ void rayGen
     payload.coneWidth = 0;
     payload.spreadAngle = ViewSpreadAngle; 
     payload.bHit = false;
-	TraceRay(
-        gRtScene,
-        RT_GI_SURFACE_RAY_FLAGS,
-        0xFF,
-        0,
-        0,
-        0,
-        ray,
-        payload);
+    TraceDiffuseGIRay(ray, payload);
     if(payload.bHit == false)
     {
         float3 Irradiance = (bIncludeSkyLighting != 0u) ? max(EvaluateSkyColor(sampleDirWorld), 0.0f.xxx) : 0.0f.xxx;

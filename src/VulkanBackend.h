@@ -142,6 +142,8 @@ struct VulkanRTPipelineStateObject : RTPipelineStateObject
 	void BindSRV(const std::string& shader, const std::string& name, uint32_t baseRegister) override;
 	void BindSampler(const std::string& shader, const std::string& name, uint32_t baseRegister) override;
 	void BindCBV(const std::string& shader, const std::string& name, uint32_t baseRegister, uint32_t size, uint32_t numInstance) override;
+	void SetShaderDefine(const std::string& name, const std::string& value) override;
+	void SetShaderLibraryTarget(const std::string& target) override;
 	void BeginShaderTable() override;
 	void EndShaderTable() override;
 	void SetTextureUAV(const std::string& shader, const std::string& bindingName, Texture* texture, int instanceIndex = -1) override;

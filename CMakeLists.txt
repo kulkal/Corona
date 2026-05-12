@@ -112,8 +112,30 @@ if((NOT EXISTS "${CORONA_STREAMLINE_SDK_ROOT}/include/sl.h" OR NOT EXISTS "${COR
 endif()
 set(CORONA_STREAMLINE_LIB "")
 option(CORONA_USE_AFTERMATH "Enable NVIDIA Aftermath markers for D3D12 GPU crash diagnostics" ON)
+set(CORONA_D3D12_AGILITY_SDK_VERSION "619" CACHE STRING "DirectX 12 Agility SDK version exported by Corona.")
+set(CORONA_D3D12_AGILITY_BIN_DIR "" CACHE PATH "Directory containing D3D12Core.dll and d3d12SDKLayers.dll.")
 if(EXISTS "${CORONA_STREAMLINE_SDK_ROOT}/include/sl.h" AND EXISTS "${CORONA_STREAMLINE_SDK_ROOT}/lib/x64/sl.interposer.lib")
     set(CORONA_STREAMLINE_LIB "${CORONA_STREAMLINE_SDK_ROOT}/lib/x64/sl.interposer.lib")
+endif()
+
+if(NOT CORONA_D3D12_AGILITY_BIN_DIR)
+    set(CORONA_D3D12_AGILITY_CANDIDATES
+        "REDACTED_LOCAL_TOOL_PATH"
+        "REDACTED_LOCAL_TOOL_PATH"
+    )
+    foreach(CORONA_D3D12_AGILITY_CANDIDATE IN LISTS CORONA_D3D12_AGILITY_CANDIDATES)
+        if(EXISTS "${CORONA_D3D12_AGILITY_CANDIDATE}/D3D12Core.dll" AND EXISTS "${CORONA_D3D12_AGILITY_CANDIDATE}/d3d12SDKLayers.dll")
+            set(CORONA_D3D12_AGILITY_BIN_DIR "${CORONA_D3D12_AGILITY_CANDIDATE}" CACHE PATH "Directory containing D3D12Core.dll and d3d12SDKLayers.dll." FORCE)
+            break()
+        endif()
+    endforeach()
+endif()
+set(CORONA_D3D12_AGILITY_ENABLED OFF)
+if(CORONA_D3D12_AGILITY_BIN_DIR AND EXISTS "${CORONA_D3D12_AGILITY_BIN_DIR}/D3D12Core.dll")
+    set(CORONA_D3D12_AGILITY_ENABLED ON)
+    message(STATUS "Using DirectX 12 Agility SDK ${CORONA_D3D12_AGILITY_SDK_VERSION}: ${CORONA_D3D12_AGILITY_BIN_DIR}")
+else()
+    message(WARNING "DirectX 12 Agility SDK runtime was not found; SM 6.9/SER PSOs will fall back at runtime.")
 endif()
 
 set(LUAU_BUILD_CLI OFF CACHE BOOL "" FORCE)
@@ -327,6 +349,8 @@ target_compile_definitions(Corona PRIVATE
     $<$<NOT:$<BOOL:${Vulkan_FOUND}>>:CORONA_HAS_VULKAN=0>
     $<$<BOOL:${CORONA_STREAMLINE_LIB}>:WITH_STREAMLINE=1>
     USE_AFTERMATH=$<BOOL:${CORONA_USE_AFTERMATH}>
+    CORONA_D3D12_AGILITY_ENABLED=$<BOOL:${CORONA_D3D12_AGILITY_ENABLED}>
+    CORONA_D3D12_AGILITY_SDK_VERSION=${CORONA_D3D12_AGILITY_SDK_VERSION}
     $<$<CONFIG:Debug>:DEBUG>
     $<$<CONFIG:Release>:NDEBUG>
 )
@@ -351,6 +375,18 @@ add_custom_command(TARGET Corona POST_BUILD
         "${CORONA_WINPIX_DLL}"
         "${CORONA_OUT_DIR}/WinPixEventRuntime.dll"
 )
+if(CORONA_D3D12_AGILITY_ENABLED)
+    add_custom_command(TARGET Corona POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory
+            "${CORONA_OUT_DIR}/D3D12"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${CORONA_D3D12_AGILITY_BIN_DIR}/D3D12Core.dll"
+            "${CORONA_OUT_DIR}/D3D12/D3D12Core.dll"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${CORONA_D3D12_AGILITY_BIN_DIR}/d3d12SDKLayers.dll"
+            "${CORONA_OUT_DIR}/D3D12/d3d12SDKLayers.dll"
+    )
+endif()
 foreach(CORONA_PHYSX_DLL IN LISTS CORONA_PHYSX_DLLS)
     get_filename_component(CORONA_PHYSX_DLL_NAME "${CORONA_PHYSX_DLL}" NAME)
     add_custom_command(TARGET Corona POST_BUILD

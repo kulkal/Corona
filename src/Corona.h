@@ -316,7 +316,7 @@ private:
 		glm::vec4 ProjectionParams;
 		glm::vec4 LightDir;
 		float ShadowLightRadius = 0.001f;
-		UINT32 ShadowSampleCount = 8;
+		UINT32 ShadowSampleCount = 1;
 		UINT32 FrameCounter = 0;
 		UINT32 BlueNoiseOffsetStride = 1;
 		UINT32 NoiseMode = 1;
@@ -341,7 +341,7 @@ private:
 		glm::vec2 RTSize;
 		float Radius = 96.0f;
 		float Power = 1.10f;
-		UINT32 SampleCount = 16;
+		UINT32 SampleCount = 1;
 		UINT32 FrameCounter = 0;
 		UINT32 NoiseMode = 1;
 		UINT32 BlueNoiseOffsetStride = 1;
@@ -415,6 +415,8 @@ private:
 	RTReflectionViewParamCB RTReflectionViewParam;
 	
 	shared_ptr<RTPipelineStateObject> PSO_RT_REFLECTION;
+	shared_ptr<RTPipelineStateObject> PSO_RT_REFLECTION_SER;
+	bool bRTReflectionSERInitFailed = false;
 
 	// RT GI
 	struct RTGIViewParamCB
@@ -442,6 +444,8 @@ private:
 
 	RTGIViewParamCB RTGIViewParam;
 	shared_ptr<RTPipelineStateObject> PSO_RT_GI;
+	shared_ptr<RTPipelineStateObject> PSO_RT_GI_SER;
+	bool bRTDiffuseGISimpleSERInitFailed = false;
 
 	struct RTScreenProbeGIViewParamCB
 	{
@@ -479,6 +483,8 @@ private:
 
 	RTScreenProbeGIViewParamCB RTScreenProbeGIViewParam;
 	shared_ptr<RTPipelineStateObject> PSO_RT_SCREEN_PROBE_GI;
+	shared_ptr<RTPipelineStateObject> PSO_RT_SCREEN_PROBE_GI_SER;
+	bool bRTDiffuseGIScreenProbeSERInitFailed = false;
 
 	struct RTSpatialHashGIViewParamCB
 	{
@@ -506,6 +512,8 @@ private:
 
 	RTSpatialHashGIViewParamCB RTSpatialHashGIViewParam;
 	shared_ptr<RTPipelineStateObject> PSO_RT_SPATIAL_HASH_GI;
+	shared_ptr<RTPipelineStateObject> PSO_RT_SPATIAL_HASH_GI_SER;
+	bool bRTDiffuseGISpatialHashSERInitFailed = false;
 
 	static constexpr UINT32 MaxPointLights = 8;
 
@@ -771,6 +779,9 @@ private:
 	ERayNoiseMode RayNoiseMode = ERayNoiseMode::R2_LOW_DISCREPANCY;
 	EDiffuseGIMode DiffuseGIMode = EDiffuseGIMode::SPATIAL_HASH;
 	bool bEnableDiffuseGI = true;
+	bool bEnableRTDiffuseGISER = false;
+	bool bEnableRTReflectionSER = false;
+	bool bD3D12ShaderModel69Supported = false;
 	bool bEnableSpecularGI = true;
 	bool bEnableDirectDiffuse = true;
 	bool bEnableDirectSpecular = true;
@@ -839,6 +850,7 @@ private:
 	bool bCommandLineCameraPathDump = false;
 	bool bCommandLineCameraPathDiagnostics = false;
 	bool bCommandLineLoadLatestCameraPath = false;
+	UINT32 CommandLineExitAfterFrames = 0;
 	std::wstring CommandLineCameraPathFile;
 
 	shared_ptr<PipelineStateObject> TemporalAAPSO;
@@ -1216,6 +1228,8 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 		ERayNoiseMode RayNoiseMode = ERayNoiseMode::R2_LOW_DISCREPANCY;
 		EDiffuseGIMode DiffuseGIMode = EDiffuseGIMode::SPATIAL_HASH;
 		bool bEnableDiffuseGI = true;
+		bool bEnableRTDiffuseGISER = false;
+		bool bEnableRTReflectionSER = false;
 		bool bEnableSpecularGI = true;
 		bool bEnableDirectDiffuse = true;
 		bool bEnableDirectSpecular = true;
@@ -1240,11 +1254,11 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 		float PrefilteredEnvRoughnessThreshold = 0.65f;
 		float PrefilteredEnvRoughnessFade = 0.10f;
 		float ShadowLightRadius = 0.001f;
-		UINT32 ShadowSampleCount = 8;
+		UINT32 ShadowSampleCount = 1;
 		float RTAORadius = 96.0f;
 		float RTAOPower = 1.10f;
 		float RTAONormalBias = 0.35f;
-		UINT32 RTAOSampleCount = 16;
+		UINT32 RTAOSampleCount = 1;
 		float SkyLightingRayLength = 10000.0f;
 		float SkyLightingNormalBias = 0.5f;
 		UINT32 SkyLightingSampleCount = 32;
@@ -1597,9 +1611,17 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 		const glm::vec3& desiredPosition);
 	void InitRaytracingShadowPass();
 	void InitRaytracingReflectionPass();
+	shared_ptr<RTPipelineStateObject> CreateRaytracingReflectionPSO(bool bUseSER);
+	bool InitRaytracingReflectionSERPass();
 	void InitRaytracingSimpleGIPass();
+	shared_ptr<RTPipelineStateObject> CreateRaytracingSimpleGIPSO(bool bUseSER);
+	bool InitRaytracingSimpleGISERPass();
 	void InitRaytracingScreenProbePass();
+	shared_ptr<RTPipelineStateObject> CreateRaytracingScreenProbeGIPSO(bool bUseSER);
+	bool InitRaytracingScreenProbeGISERPass();
 	void InitRaytracingSpatialHashPass();
+	shared_ptr<RTPipelineStateObject> CreateRaytracingSpatialHashGIPSO(bool bUseSER);
+	bool InitRaytracingSpatialHashGISERPass();
 	
 public:
 

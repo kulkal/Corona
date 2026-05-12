@@ -17,50 +17,80 @@
 #include <cstdlib>
 #include <iterator>
 
+void AppendCpuRuntimeTrace(const std::wstring& line);
+
+shared_ptr<RTPipelineStateObject> Corona::CreateRaytracingReflectionPSO(bool bUseSER)
+{
+	shared_ptr<RTPipelineStateObject> tempPSO = renderBackend->CreateRTPipelineStateObject();
+	if (!tempPSO)
+		return nullptr;
+
+	tempPSO->SetNumInstances(static_cast<uint32_t>(RayTracingInstances.size()));
+	if (bUseSER)
+	{
+		tempPSO->SetShaderDefine("RT_REFLECTION_USE_SER", "1");
+		tempPSO->SetShaderDefine("RT_REFLECTION_SER_MATERIAL_HINT_BITS", "8");
+		tempPSO->SetShaderLibraryTarget("lib_6_9");
+	}
+
+	tempPSO->AddHitGroup("HitGroup", "chs", "");
+	//tempPSO->AddHitGroup("ShadowHitGroup", "chsShadow", "");
+
+	tempPSO->AddShader("rayGen", RTPipelineStateObject::RAYGEN);
+	
+	tempPSO->BindUAV("global", "ReflectionResult", 0);
+	tempPSO->BindUAV("global", "SpecularHitDistanceResult", 1);
+	tempPSO->BindUAV("global", "SpecularMotionVectorResult", 2);
+	tempPSO->BindSRV("global", "gRtScene", 0);
+	tempPSO->BindSRV("global", "DepthTex", 1);
+	tempPSO->BindSRV("global", "GeoNormalTex", 2);
+	tempPSO->BindSRV("global", "RougnessMetallicTex", 6);
+	tempPSO->BindSRV("global", "RayNoiseBlueNoiseSource", 7);
+	tempPSO->BindSRV("global", "WorldNormalTex", 8);
+
+	tempPSO->BindCBV("global", "ViewParameter", 0, sizeof(RTReflectionViewParam), 1);
+	tempPSO->BindSampler("global", "sampleWrap", 0);
+
+	tempPSO->AddShader("miss", RTPipelineStateObject::MISS);
+	tempPSO->AddShader("missShadow", RTPipelineStateObject::MISS);
+
+	tempPSO->AddShader("chs", RTPipelineStateObject::HIT);
+	tempPSO->BindSRV("chs", "vertices", 3);
+	tempPSO->BindSRV("chs", "indices", 4);
+	tempPSO->BindSRV("chs", "AlbedoTex", 5);
+	tempPSO->BindSRV("chs", "InstanceProperty", 9);
+	tempPSO->Configure(1, sizeof(float) * 13, sizeof(float) * 2);
+
+	return tempPSO->InitRS("Shaders\\RaytracedReflection.hlsl") ? tempPSO : nullptr;
+}
+
 void Corona::InitRaytracingReflectionPass()
 {
-		shared_ptr<RTPipelineStateObject> TEMP_PSO_RT_REFLECTION = renderBackend->CreateRTPipelineStateObject();
-		if (!TEMP_PSO_RT_REFLECTION)
-			return;
-		TEMP_PSO_RT_REFLECTION->SetNumInstances(static_cast<uint32_t>(RayTracingInstances.size()));
+	PSO_RT_REFLECTION = CreateRaytracingReflectionPSO(false);
+	if (bEnableRTReflectionSER && renderBackend && renderBackend->GetAPI() == ERenderBackendAPI::D3D12)
+		InitRaytracingReflectionSERPass();
+}
 
-		TEMP_PSO_RT_REFLECTION->AddHitGroup("HitGroup", "chs", "");
-		//TEMP_PSO_RT_REFLECTION->AddHitGroup("ShadowHitGroup", "chsShadow", "");
+bool Corona::InitRaytracingReflectionSERPass()
+{
+	if (PSO_RT_REFLECTION_SER)
+		return true;
+	if (bRTReflectionSERInitFailed)
+		return false;
+	if (!bD3D12ShaderModel69Supported)
+	{
+		bRTReflectionSERInitFailed = true;
+		AppendCpuRuntimeTrace(L"[RTReflection][SER] SER skipped: D3D12 Shader Model 6.9 is not supported");
+		return false;
+	}
 
-
-		TEMP_PSO_RT_REFLECTION->AddShader("rayGen", RTPipelineStateObject::RAYGEN);
-		
-		TEMP_PSO_RT_REFLECTION->BindUAV("global", "ReflectionResult", 0);
-		TEMP_PSO_RT_REFLECTION->BindUAV("global", "SpecularHitDistanceResult", 1);
-		TEMP_PSO_RT_REFLECTION->BindUAV("global", "SpecularMotionVectorResult", 2);
-		TEMP_PSO_RT_REFLECTION->BindSRV("global", "gRtScene", 0);
-		TEMP_PSO_RT_REFLECTION->BindSRV("global", "DepthTex", 1);
-		TEMP_PSO_RT_REFLECTION->BindSRV("global", "GeoNormalTex", 2);
-		TEMP_PSO_RT_REFLECTION->BindSRV("global", "RougnessMetallicTex", 6);
-		TEMP_PSO_RT_REFLECTION->BindSRV("global", "RayNoiseBlueNoiseSource", 7);
-		TEMP_PSO_RT_REFLECTION->BindSRV("global", "WorldNormalTex", 8);
-
-
-		TEMP_PSO_RT_REFLECTION->BindCBV("global", "ViewParameter", 0, sizeof(RTReflectionViewParam), 1);
-		TEMP_PSO_RT_REFLECTION->BindSampler("global", "sampleWrap", 0);
-
-		TEMP_PSO_RT_REFLECTION->AddShader("miss", RTPipelineStateObject::MISS);
-		TEMP_PSO_RT_REFLECTION->AddShader("missShadow", RTPipelineStateObject::MISS);
-
-
-		TEMP_PSO_RT_REFLECTION->AddShader("chs", RTPipelineStateObject::HIT);
-		TEMP_PSO_RT_REFLECTION->BindSRV("chs", "vertices", 3);
-		TEMP_PSO_RT_REFLECTION->BindSRV("chs", "indices", 4);
-		TEMP_PSO_RT_REFLECTION->BindSRV("chs", "AlbedoTex", 5);
-		TEMP_PSO_RT_REFLECTION->BindSRV("chs", "InstanceProperty", 9);
-		TEMP_PSO_RT_REFLECTION->Configure(1, sizeof(float) * 13, sizeof(float) * 2);
-
-		bool bSuccess = TEMP_PSO_RT_REFLECTION->InitRS("Shaders\\RaytracedReflection.hlsl");
-
-		if (bSuccess)
-		{
-			PSO_RT_REFLECTION = TEMP_PSO_RT_REFLECTION;
-		}
+	PSO_RT_REFLECTION_SER = CreateRaytracingReflectionPSO(true);
+	if (!PSO_RT_REFLECTION_SER)
+	{
+		bRTReflectionSERInitFailed = true;
+		AppendCpuRuntimeTrace(L"[RTReflection][SER] SER PSO creation failed");
+	}
+	return PSO_RT_REFLECTION_SER != nullptr;
 }
 
 void Corona::RaytraceReflectionPass()
@@ -70,10 +100,9 @@ void Corona::RaytraceReflectionPass()
 		!PathTracingSpecularMotionVectorBuffer)
 		return;
 	renderBackend->EmitGpuCrashMarker("RaytraceReflectionPass");
-	if (renderBackend && renderBackend->GetAPI() == ERenderBackendAPI::D3D12)
-	{
-		PIXScopedEvent(renderBackend->GetGraphicsCommandList(), PIX_COLOR(rand() % 255, rand() % 255, rand() % 255), "RaytraceReflectionPass");
-	}
+	shared_ptr<RTPipelineStateObject> pso = PSO_RT_REFLECTION;
+	if (bEnableRTReflectionSER && renderBackend && renderBackend->GetAPI() == ERenderBackendAPI::D3D12 && InitRaytracingReflectionSERPass())
+		pso = PSO_RT_REFLECTION_SER;
 
 	renderBackend->TransitionTexture(SpecularGIRaw.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
 	renderBackend->TransitionTexture(PathTracingSpecularHitDistanceBuffer.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
@@ -111,7 +140,7 @@ void Corona::RaytraceReflectionPass()
 		(IsDLSSRREnabled() && bEnableHybridRRSpecularHitDistance) ? 1u : 0u;
 	RTReflectionViewParam.bUseRRSpecularGuideRay = bEnableHybridRRSpecularGuideRay ? 1u : 0u;
 
-	RTPassBuilder pass(*this, PSO_RT_REFLECTION);
+	RTPassBuilder pass(*this, pso);
 	pass.BeginScene()
 		.SetTextureUAV("global", "ReflectionResult", SpecularGIRaw.get())
 		.SetTextureUAV("global", "SpecularHitDistanceResult", PathTracingSpecularHitDistanceBuffer.get())

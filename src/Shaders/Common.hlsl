@@ -2,6 +2,44 @@
 
 #define DOWNSAMPLE_SIZE 3
 
+#ifndef RT_DIFFUSE_GI_USE_SER
+#define RT_DIFFUSE_GI_USE_SER 0
+#endif
+
+#ifndef RT_DIFFUSE_GI_SER_MATERIAL_HINT_BITS
+#define RT_DIFFUSE_GI_SER_MATERIAL_HINT_BITS 8
+#endif
+
+#ifndef RT_REFLECTION_USE_SER
+#define RT_REFLECTION_USE_SER 0
+#endif
+
+#ifndef RT_REFLECTION_SER_MATERIAL_HINT_BITS
+#define RT_REFLECTION_SER_MATERIAL_HINT_BITS 8
+#endif
+
+#if RT_DIFFUSE_GI_USE_SER
+#define RT_DIFFUSE_GI_RAY_PAYLOAD [raypayload]
+#define RT_DIFFUSE_GI_PAYLOAD_RW : read(caller, closesthit, miss) : write(caller, closesthit, miss)
+#define RT_DIFFUSE_GI_SHADOW_PAYLOAD_RW : read(caller, miss) : write(caller, miss)
+#else
+#define RT_DIFFUSE_GI_RAY_PAYLOAD
+#define RT_DIFFUSE_GI_PAYLOAD_RW
+#define RT_DIFFUSE_GI_SHADOW_PAYLOAD_RW
+#endif
+
+#if RT_REFLECTION_USE_SER
+#define RT_REFLECTION_RAY_PAYLOAD [raypayload]
+#define RT_REFLECTION_PAYLOAD_RW : read(caller, closesthit, miss) : write(caller, closesthit, miss)
+#define RT_REFLECTION_SHADOW_RAY_PAYLOAD [raypayload]
+#define RT_REFLECTION_SHADOW_PAYLOAD_RW : read(caller, miss) : write(caller, miss)
+#else
+#define RT_REFLECTION_RAY_PAYLOAD
+#define RT_REFLECTION_PAYLOAD_RW
+#define RT_REFLECTION_SHADOW_RAY_PAYLOAD
+#define RT_REFLECTION_SHADOW_PAYLOAD_RW
+#endif
+
 float3 CommonSafeNormalize(float3 value, float3 fallback)
 {
     if (any(isnan(value)) || any(isinf(value)))

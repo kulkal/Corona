@@ -74,7 +74,7 @@ void Corona::InitScreenProbeGIPass()
 }
 
 
-void Corona::InitRaytracingScreenProbePass()
+shared_ptr<RTPipelineStateObject> Corona::CreateRaytracingScreenProbeGIPSO(bool bUseSER)
 {
 		const auto totalStart = std::chrono::steady_clock::now();
 		auto stepStart = totalStart;
@@ -96,7 +96,13 @@ void Corona::InitRaytracingScreenProbePass()
 		if (!tempPSO)
 		{
 			AppendCpuRuntimeTrace(L"[StartupTiming][ScreenProbeRT] create RTPipelineStateObject failed");
-			return;
+			return nullptr;
+		}
+		if (bUseSER)
+		{
+			tempPSO->SetShaderDefine("RT_DIFFUSE_GI_USE_SER", "1");
+			tempPSO->SetShaderDefine("RT_DIFFUSE_GI_SER_MATERIAL_HINT_BITS", "8");
+			tempPSO->SetShaderLibraryTarget("lib_6_9");
 		}
 		traceStep(L"CreateRTPipelineStateObject");
 
@@ -151,13 +157,45 @@ void Corona::InitRaytracingScreenProbePass()
 		tempPSO->Configure(1, sizeof(float) * 12, sizeof(float) * 2);
 		traceStep(L"Bind hit program resources");
 
-		if (tempPSO->InitRS("Shaders\\ScreenProbeRaytracedGI.hlsl"))
-			PSO_RT_SCREEN_PROBE_GI = tempPSO;
+		const bool bSuccess = tempPSO->InitRS("Shaders\\ScreenProbeRaytracedGI.hlsl");
 		traceStep(L"InitRS ScreenProbeRaytracedGI.hlsl");
 		AppendCpuRuntimeTrace(
 			L"[StartupTiming][ScreenProbeRT] complete totalMs=" +
 			FormatScreenProbeInitMilliseconds(ElapsedScreenProbeInitMilliseconds(totalStart, std::chrono::steady_clock::now())) +
-			L", success=" + std::to_wstring(PSO_RT_SCREEN_PROBE_GI ? 1 : 0));
+			L", success=" + std::to_wstring(bSuccess ? 1 : 0) +
+			L", ser=" + std::to_wstring(bUseSER ? 1 : 0));
+		return bSuccess ? tempPSO : nullptr;
+}
+
+void Corona::InitRaytracingScreenProbePass()
+{
+	PSO_RT_SCREEN_PROBE_GI = CreateRaytracingScreenProbeGIPSO(false);
+	if (bEnableRTDiffuseGISER && renderBackend && renderBackend->GetAPI() == ERenderBackendAPI::D3D12)
+		InitRaytracingScreenProbeGISERPass();
+}
+
+bool Corona::InitRaytracingScreenProbeGISERPass()
+{
+	if (PSO_RT_SCREEN_PROBE_GI_SER)
+		return true;
+	if (bRTDiffuseGIScreenProbeSERInitFailed)
+		return false;
+	if (!renderBackend || renderBackend->GetAPI() != ERenderBackendAPI::D3D12)
+		return false;
+	if (!bD3D12ShaderModel69Supported)
+	{
+		bRTDiffuseGIScreenProbeSERInitFailed = true;
+		AppendCpuRuntimeTrace(L"[RTDiffuseGI][SER] Screen Probe SER skipped: D3D12 Shader Model 6.9 is not supported");
+		return false;
+	}
+
+	PSO_RT_SCREEN_PROBE_GI_SER = CreateRaytracingScreenProbeGIPSO(true);
+	if (!PSO_RT_SCREEN_PROBE_GI_SER)
+	{
+		bRTDiffuseGIScreenProbeSERInitFailed = true;
+		AppendCpuRuntimeTrace(L"[RTDiffuseGI][SER] Screen Probe SER PSO creation failed");
+	}
+	return PSO_RT_SCREEN_PROBE_GI_SER != nullptr;
 }
 
 void Corona::ScreenProbeRaytraceGIPass()
@@ -172,13 +210,13 @@ void Corona::ScreenProbeRaytraceGIPass()
 		return true;
 	};
 
-	if (!TLAS || !PSO_RT_SCREEN_PROBE_GI || !ScreenProbeGIRadiance[0] || !ScreenProbeGIRadiance[1] || !hasScreenProbeSHSet(0) || !hasScreenProbeSHSet(1) || !ScreenProbeGIMetadata[0] || !ScreenProbeGIMetadata[1])
+	shared_ptr<RTPipelineStateObject> pso = PSO_RT_SCREEN_PROBE_GI;
+	if (bEnableRTDiffuseGISER && renderBackend && renderBackend->GetAPI() == ERenderBackendAPI::D3D12 && InitRaytracingScreenProbeGISERPass())
+		pso = PSO_RT_SCREEN_PROBE_GI_SER;
+
+	if (!TLAS || !pso || !ScreenProbeGIRadiance[0] || !ScreenProbeGIRadiance[1] || !hasScreenProbeSHSet(0) || !hasScreenProbeSHSet(1) || !ScreenProbeGIMetadata[0] || !ScreenProbeGIMetadata[1])
 		return;
 	renderBackend->EmitGpuCrashMarker("ScreenProbeRaytraceGIPass");
-	if (renderBackend && renderBackend->GetAPI() == ERenderBackendAPI::D3D12)
-	{
-		PIXScopedEvent(renderBackend->GetGraphicsCommandList(), PIX_COLOR(rand() % 255, rand() % 255, rand() % 255), "ScreenProbeRaytraceGIPass");
-	}
 
 	ScreenProbeGIAtlasWriteIndex = 1 - ScreenProbeGIAtlasWriteIndex;
 	const UINT writeIndex = ScreenProbeGIAtlasWriteIndex;
@@ -246,7 +284,7 @@ void Corona::ScreenProbeRaytraceGIPass()
 		renderBackend->TransitionTexture(ScreenProbeGISH[writeIndex][coefficientIndex].get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
 	renderBackend->TransitionTexture(ScreenProbeGIMetadata[writeIndex].get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
 
-	RTPassBuilder pass(*this, PSO_RT_SCREEN_PROBE_GI);
+	RTPassBuilder pass(*this, pso);
 	pass.BeginScene();
 
 	pass.SetTextureUAV("global", "ProbeRadiance", ScreenProbeGIRadiance[writeIndex].get());
@@ -295,10 +333,6 @@ void Corona::ScreenProbeGIPass()
 		!ScreenProbeGIRadiance[ScreenProbeGIAtlasWriteIndex] || !hasScreenProbeSHSet(ScreenProbeGIAtlasWriteIndex) || !ScreenProbeGIMetadata[ScreenProbeGIAtlasWriteIndex])
 		return;
 	renderBackend->EmitGpuCrashMarker("ScreenProbeGIPass");
-	if (renderBackend && renderBackend->GetAPI() == ERenderBackendAPI::D3D12)
-	{
-		PIXScopedEvent(renderBackend->GetGraphicsCommandList(), PIX_COLOR(rand() % 255, rand() % 255, rand() % 255), "ScreenProbeGIPass");
-	}
 
 	ScreenProbeGIHistoryWriteIndex = 1 - ScreenProbeGIHistoryWriteIndex;
 	const UINT historyWriteIndex = ScreenProbeGIHistoryWriteIndex;

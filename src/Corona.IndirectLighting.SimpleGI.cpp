@@ -17,11 +17,19 @@
 #include <cstdlib>
 #include <iterator>
 
-void Corona::InitRaytracingSimpleGIPass()
+void AppendCpuRuntimeTrace(const std::wstring& line);
+
+shared_ptr<RTPipelineStateObject> Corona::CreateRaytracingSimpleGIPSO(bool bUseSER)
 {
 		shared_ptr<RTPipelineStateObject> TEMP_PSO_RT_GI = renderBackend->CreateRTPipelineStateObject();
 		if (!TEMP_PSO_RT_GI)
-			return;
+			return nullptr;
+		if (bUseSER)
+		{
+			TEMP_PSO_RT_GI->SetShaderDefine("RT_DIFFUSE_GI_USE_SER", "1");
+			TEMP_PSO_RT_GI->SetShaderDefine("RT_DIFFUSE_GI_SER_MATERIAL_HINT_BITS", "8");
+			TEMP_PSO_RT_GI->SetShaderLibraryTarget("lib_6_9");
+		}
 		TEMP_PSO_RT_GI->SetNumInstances(static_cast<uint32_t>(RayTracingInstances.size()));
 
 		TEMP_PSO_RT_GI->AddHitGroup("HitGroup", "chs", "");
@@ -49,23 +57,51 @@ void Corona::InitRaytracingSimpleGIPass()
 		TEMP_PSO_RT_GI->BindSRV("chs", "InstanceProperty", 6);
 		TEMP_PSO_RT_GI->Configure(1, sizeof(float) * 12, sizeof(float) * 2);
 
-		bool bSuccess = TEMP_PSO_RT_GI->InitRS("Shaders\\RaytracedGI.hlsl");
+		const bool bSuccess = TEMP_PSO_RT_GI->InitRS("Shaders\\RaytracedGI.hlsl");
 
-		if (bSuccess)
-		{
-			PSO_RT_GI = TEMP_PSO_RT_GI;
-		}
+		return bSuccess ? TEMP_PSO_RT_GI : nullptr;
+}
+
+void Corona::InitRaytracingSimpleGIPass()
+{
+	PSO_RT_GI = CreateRaytracingSimpleGIPSO(false);
+	if (bEnableRTDiffuseGISER && renderBackend && renderBackend->GetAPI() == ERenderBackendAPI::D3D12)
+		InitRaytracingSimpleGISERPass();
+}
+
+bool Corona::InitRaytracingSimpleGISERPass()
+{
+	if (PSO_RT_GI_SER)
+		return true;
+	if (bRTDiffuseGISimpleSERInitFailed)
+		return false;
+	if (!renderBackend || renderBackend->GetAPI() != ERenderBackendAPI::D3D12)
+		return false;
+	if (!bD3D12ShaderModel69Supported)
+	{
+		bRTDiffuseGISimpleSERInitFailed = true;
+		AppendCpuRuntimeTrace(L"[RTDiffuseGI][SER] Simple Raytrace SER skipped: D3D12 Shader Model 6.9 is not supported");
+		return false;
+	}
+
+	PSO_RT_GI_SER = CreateRaytracingSimpleGIPSO(true);
+	if (!PSO_RT_GI_SER)
+	{
+		bRTDiffuseGISimpleSERInitFailed = true;
+		AppendCpuRuntimeTrace(L"[RTDiffuseGI][SER] Simple Raytrace SER PSO creation failed");
+	}
+	return PSO_RT_GI_SER != nullptr;
 }
 
 void Corona::RaytraceGIPass()
 {
-	if (!TLAS || !PSO_RT_GI)
+	shared_ptr<RTPipelineStateObject> pso = PSO_RT_GI;
+	if (bEnableRTDiffuseGISER && renderBackend && renderBackend->GetAPI() == ERenderBackendAPI::D3D12 && InitRaytracingSimpleGISERPass())
+		pso = PSO_RT_GI_SER;
+
+	if (!TLAS || !pso)
 		return;
 	renderBackend->EmitGpuCrashMarker("RaytraceGIPass");
-	if (renderBackend && renderBackend->GetAPI() == ERenderBackendAPI::D3D12)
-	{
-		PIXScopedEvent(renderBackend->GetGraphicsCommandList(), PIX_COLOR(rand() % 255, rand() % 255, rand() % 255), "RaytraceGIPass");
-	}
 
 	renderBackend->TransitionTexture(DiffuseGIRawAux.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
 	renderBackend->TransitionTexture(DiffuseGIRaw.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
@@ -89,7 +125,7 @@ void Corona::RaytraceGIPass()
 	RTGIViewParam.SkyColorBottom = SkyColorBottom;
 	RTGIViewParam.LightColor = RenderFrameLightColor;
 
-	RTPassBuilder pass(*this, PSO_RT_GI);
+	RTPassBuilder pass(*this, pso);
 	pass.BeginScene()
 		.SetTextureUAV("global", "GIResultSH", DiffuseGIRawAux.get())
 		.SetTextureUAV("global", "GIResultColor", DiffuseGIRaw.get())

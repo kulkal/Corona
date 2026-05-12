@@ -83,6 +83,13 @@ namespace
 		return result;
 	}
 
+	std::wstring FormatHex32(uint32_t value)
+	{
+		std::wstringstream stream;
+		stream << std::hex << std::uppercase << value;
+		return stream.str();
+	}
+
 	std::wstring NormalizePathForCompare(const std::wstring& value)
 	{
 		if (value.empty())
@@ -611,6 +618,55 @@ namespace
 		"ImGui",
 	};
 
+	const std::array<UINT64, 17> kGpuPassPixColors = {
+		PIX_COLOR(210, 210, 210),
+		PIX_COLOR(86, 156, 214),
+		PIX_COLOR(214, 86, 86),
+		PIX_COLOR(214, 145, 86),
+		PIX_COLOR(156, 214, 86),
+		PIX_COLOR(214, 86, 189),
+		PIX_COLOR(86, 214, 169),
+		PIX_COLOR(86, 214, 214),
+		PIX_COLOR(181, 140, 255),
+		PIX_COLOR(245, 214, 86),
+		PIX_COLOR(86, 145, 245),
+		PIX_COLOR(86, 189, 245),
+		PIX_COLOR(245, 145, 86),
+		PIX_COLOR(189, 86, 245),
+		PIX_COLOR(245, 245, 245),
+		PIX_COLOR(145, 145, 145),
+		PIX_COLOR(86, 245, 145),
+	};
+
+	void BeginGpuPassMarker(IRenderBackend* backend, UINT passIndex, const char* markerName)
+	{
+		if (!backend ||
+			backend->GetAPI() != ERenderBackendAPI::D3D12 ||
+			passIndex >= kGpuPassPixColors.size() ||
+			!markerName)
+		{
+			return;
+		}
+
+		ID3D12GraphicsCommandList* commandList = backend->GetGraphicsCommandList();
+		if (!commandList)
+			return;
+
+		PIXBeginEvent(commandList, kGpuPassPixColors[passIndex], "%s", markerName);
+	}
+
+	void EndGpuPassMarker(IRenderBackend* backend)
+	{
+		if (!backend || backend->GetAPI() != ERenderBackendAPI::D3D12)
+			return;
+
+		ID3D12GraphicsCommandList* commandList = backend->GetGraphicsCommandList();
+		if (!commandList)
+			return;
+
+		PIXEndEvent(commandList);
+	}
+
 	constexpr std::array<const char*, 5> kCpuUpdatePhaseNames = {
 		"Camera / Physics",
 		"Input",
@@ -1131,6 +1187,8 @@ void Corona::BeginGpuPassTiming(EGpuPass pass)
 	const UINT passIndex = static_cast<UINT>(pass);
 	CpuPassActiveMask[passIndex] = 1;
 	CpuPassStartTimes[passIndex] = CpuClock::now();
+	const char* markerName = (pass == EGpuPass::Frame) ? "Frame" : GetGpuPassName(pass);
+	BeginGpuPassMarker(renderBackend.get(), passIndex, markerName);
 
 	if (!bGpuTimingResourcesInitialized)
 		return;
@@ -1150,6 +1208,7 @@ void Corona::EndGpuPassTiming(EGpuPass pass)
 		CpuPassLastTimeMs[passIndex] =
 			static_cast<float>(ElapsedMilliseconds(CpuPassStartTimes[passIndex], CpuClock::now()));
 	}
+	EndGpuPassMarker(renderBackend.get());
 
 	if (!bGpuTimingResourcesInitialized)
 		return;
@@ -2357,6 +2416,26 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 			bEnableDiffuseGI = false;
 			continue;
 		}
+		if (arg == L"--rt-diffuse-gi-ser" || arg == L"--enable-rt-diffuse-gi-ser" || arg == L"--diffuse-gi-ser")
+		{
+			bEnableRTDiffuseGISER = true;
+			continue;
+		}
+		if (arg == L"--no-rt-diffuse-gi-ser" || arg == L"--disable-rt-diffuse-gi-ser" || arg == L"--no-diffuse-gi-ser")
+		{
+			bEnableRTDiffuseGISER = false;
+			continue;
+		}
+		if (arg == L"--rt-reflection-ser" || arg == L"--enable-rt-reflection-ser" || arg == L"--reflection-ser")
+		{
+			bEnableRTReflectionSER = true;
+			continue;
+		}
+		if (arg == L"--no-rt-reflection-ser" || arg == L"--disable-rt-reflection-ser" || arg == L"--no-reflection-ser")
+		{
+			bEnableRTReflectionSER = false;
+			continue;
+		}
 		if (arg == L"--specular-gi" || arg == L"--enable-specular-gi" || arg == L"--indirect-specular" || arg == L"--enable-indirect-specular")
 		{
 			bEnableSpecularGI = true;
@@ -2709,6 +2788,22 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 			continue;
 		}
 
+		std::wstring exitAfterFramesValue = ParseValueArg(arg, L"--exit-after-frames", L"-exit-after-frames", i);
+		if (exitAfterFramesValue.empty())
+			exitAfterFramesValue = ParseValueArg(arg, L"--quit-after-frames", L"-quit-after-frames", i);
+		if (!exitAfterFramesValue.empty())
+		{
+			try
+			{
+				const unsigned long value = std::stoul(exitAfterFramesValue);
+				CommandLineExitAfterFrames = static_cast<UINT32>(std::clamp<unsigned long>(value, 1ul, 100000ul));
+			}
+			catch (...)
+			{
+			}
+			continue;
+		}
+
 		std::wstring aaValue = ParseValueArg(arg, L"--aa", L"-aa", i);
 		if (!aaValue.empty())
 		{
@@ -2929,6 +3024,7 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 		L", lightingCompareDump=" + std::to_wstring(bCommandLineLightingCompareDumpMode ? 1 : 0) +
 		L", specularSequenceDump=" + std::to_wstring(bCommandLineSpecularSequenceDumpMode ? 1 : 0) +
 		L", autoDumpFrames=" + std::to_wstring(AutoAADumpFrameCountOverride) +
+		L", exitAfterFrames=" + std::to_wstring(CommandLineExitAfterFrames) +
 		L", cameraPathDump=" + std::to_wstring(bCommandLineCameraPathDump ? 1 : 0) +
 		L", cameraPathDiagnostics=" + std::to_wstring(bCommandLineCameraPathDiagnostics ? 1 : 0) +
 		L", ptDLSSRR=" + std::to_wstring(bEnablePathTracingDLSSRR ? 1 : 0) +
@@ -5613,6 +5709,8 @@ Corona::RenderFrameSourceState Corona::CaptureRenderFrameSourceState() const
 	state.RayNoiseMode = RayNoiseMode;
 	state.DiffuseGIMode = DiffuseGIMode;
 	state.bEnableDiffuseGI = bEnableDiffuseGI;
+	state.bEnableRTDiffuseGISER = bEnableRTDiffuseGISER;
+	state.bEnableRTReflectionSER = bEnableRTReflectionSER;
 	state.bEnableSpecularGI = bEnableSpecularGI;
 	state.bEnableDirectDiffuse = bEnableDirectDiffuse;
 	state.bEnableDirectSpecular = bEnableDirectSpecular;
@@ -5687,6 +5785,8 @@ void Corona::ApplyRenderFrameSourceState(const RenderFrameSourceState& state)
 	RayNoiseMode = state.RayNoiseMode;
 	DiffuseGIMode = state.DiffuseGIMode;
 	bEnableDiffuseGI = state.bEnableDiffuseGI;
+	bEnableRTDiffuseGISER = state.bEnableRTDiffuseGISER;
+	bEnableRTReflectionSER = state.bEnableRTReflectionSER;
 	bEnableSpecularGI = state.bEnableSpecularGI;
 	bEnableDirectDiffuse = state.bEnableDirectDiffuse;
 	bEnableDirectSpecular = state.bEnableDirectSpecular;
@@ -5789,6 +5889,8 @@ void Corona::ApplyFrameSourceRenderSync(const RenderFrameDelta& delta)
 		(oldState.DiffuseGIMode != newState.DiffuseGIMode ||
 		 oldState.RayNoiseMode != newState.RayNoiseMode ||
 		 oldState.bEnableDiffuseGI != newState.bEnableDiffuseGI ||
+		 oldState.bEnableRTDiffuseGISER != newState.bEnableRTDiffuseGISER ||
+		 oldState.bEnableRTReflectionSER != newState.bEnableRTReflectionSER ||
 		 oldState.bEnableSpecularGI != newState.bEnableSpecularGI ||
 		 oldState.bEnableRTAO != newState.bEnableRTAO ||
 		 oldState.bEnableSkyLighting != newState.bEnableSkyLighting ||
@@ -6467,10 +6569,17 @@ void Corona::LoadPipeline()
 
 	UINT dxgiFactoryFlags = 0;
 
+	const bool bEnableD3D12DebugLayer =
 #if defined(_DEBUG)
-	// Enable the debug layer (requires the Graphics Tools "optional feature").
-	// NOTE: Enabling the debug layer after device creation will invalidate the active device.
+		true;
+#else
+		_wgetenv(L"CORONA_D3D12_DEBUG") != nullptr;
+#endif
+
+	if (bEnableD3D12DebugLayer)
 	{
+		// Enable the debug layer (requires the Graphics Tools "optional feature").
+		// NOTE: Enabling the debug layer after device creation will invalidate the active device.
 		ComPtr<ID3D12Debug> debugController;
 		if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debugController))))
 		{
@@ -6479,13 +6588,13 @@ void Corona::LoadPipeline()
 			// Enable additional debug layers.
 			dxgiFactoryFlags |= DXGI_CREATE_FACTORY_DEBUG;
 
+			ComPtr<ID3D12Debug1> spDebugController1;
+			if (SUCCEEDED(debugController->QueryInterface(IID_PPV_ARGS(&spDebugController1))))
+			{
+				//spDebugController1->SetEnableGPUBasedValidation(true);
+			}
 		}
-
-		ComPtr<ID3D12Debug1> spDebugController1;
-		debugController->QueryInterface(IID_PPV_ARGS(&spDebugController1));
-		//spDebugController1->SetEnableGPUBasedValidation(true);
 	}
-#endif
 
 	ComPtr<IDXGIFactory4> factory;
 	ThrowIfFailed(CreateDXGIFactory2(dxgiFactoryFlags, IID_PPV_ARGS(&factory)));
@@ -6505,6 +6614,17 @@ void Corona::LoadPipeline()
 			D3D_FEATURE_LEVEL_12_1,
 			IID_PPV_ARGS(&m_device)
 		));
+
+		D3D12_FEATURE_DATA_SHADER_MODEL shaderModel = {};
+		shaderModel.HighestShaderModel = D3D_SHADER_MODEL_6_9;
+		HRESULT shaderModelHr = m_device->CheckFeatureSupport(D3D12_FEATURE_SHADER_MODEL, &shaderModel, sizeof(shaderModel));
+		bD3D12ShaderModel69Supported =
+			SUCCEEDED(shaderModelHr) &&
+			shaderModel.HighestShaderModel >= D3D_SHADER_MODEL_6_9;
+		AppendCpuRuntimeTrace(
+			L"[D3D12Caps] shaderModelHr=0x" + FormatHex32(static_cast<uint32_t>(shaderModelHr)) +
+			L", highestShaderModel=0x" + FormatHex32(static_cast<uint32_t>(shaderModel.HighestShaderModel)) +
+			L", shaderModel69Supported=" + std::to_wstring(bD3D12ShaderModel69Supported ? 1 : 0));
 
 #if WITH_STREAMLINE
 		if (bStreamlineInitialized)
@@ -9593,6 +9713,18 @@ void Corona::OnRender()
 				if (ImGui::Checkbox("Enable Direct Diffuse", &bEnableDirectDiffuse)) bLightingChanged = true;
 				if (ImGui::Checkbox("Enable Direct Specular", &bEnableDirectSpecular)) bLightingChanged = true;
 				if (ImGui::Checkbox("Enable Indirect Specular (GI)", &bEnableSpecularGI)) bLightingChanged = true;
+				const bool bRTReflectionSERAvailable =
+					renderBackend &&
+					renderBackend->GetAPI() == ERenderBackendAPI::D3D12 &&
+					bD3D12ShaderModel69Supported;
+				if (!bRTReflectionSERAvailable)
+					ImGui::BeginDisabled();
+				if (ImGui::Checkbox("RT Reflection SER", &bEnableRTReflectionSER))
+					bLightingChanged = true;
+				if (!bRTReflectionSERAvailable)
+					ImGui::EndDisabled();
+				if (!bRTReflectionSERAvailable && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+					ImGui::SetTooltip("Requires DX12 Shader Model 6.9.");
 				if (ImGui::SliderFloat("Sun Angular Radius", &RTShadowViewParam.ShadowLightRadius, 0.0f, 0.03f, "%.4f rad"))
 					bLightingChanged = true;
 				if (RenderingMode == ERenderingMode::HYBRID)
@@ -9690,6 +9822,18 @@ void Corona::OnRender()
 			if (ImGui::TreeNodeEx("Diffuse GI", ImGuiTreeNodeFlags_DefaultOpen))
 			{
 				if (ImGui::Checkbox("Enable Diffuse GI", &bEnableDiffuseGI)) bLightingChanged = true;
+				const bool bRTDiffuseGISERAvailable =
+					renderBackend &&
+					renderBackend->GetAPI() == ERenderBackendAPI::D3D12 &&
+					bD3D12ShaderModel69Supported;
+				if (!bRTDiffuseGISERAvailable)
+					ImGui::BeginDisabled();
+				if (ImGui::Checkbox("RT Diffuse GI SER", &bEnableRTDiffuseGISER))
+					bLightingChanged = true;
+				if (!bRTDiffuseGISERAvailable)
+					ImGui::EndDisabled();
+				if (!bRTDiffuseGISERAvailable && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+					ImGui::SetTooltip("Requires DX12 Shader Model 6.9.");
 
 				static const char* DiffuseGIModes[] = { "Simple Raytrace", "Spatial Hash", "Screen Probe" };
 				int DiffuseGIModeIndex = static_cast<int>(DiffuseGIMode);
@@ -10035,6 +10179,15 @@ if (ImGui::Button("Reset Accumulation"))
 		PrevViewProjMat = ViewProjMat;
 		PrevViewMat = ViewMat;
 		PrevUnjitteredViewProjMat = UnjitteredViewProjMat;
+	}
+
+	if (CommandLineExitAfterFrames > 0 && FrameCounter >= CommandLineExitAfterFrames)
+	{
+		AppendCpuRuntimeTrace(
+			L"[OnRender] exit-after-frames reached frame=" + std::to_wstring(FrameCounter) +
+			L", target=" + std::to_wstring(CommandLineExitAfterFrames));
+		PostQuitMessage(0);
+		CommandLineExitAfterFrames = 0;
 	}
 }
 
