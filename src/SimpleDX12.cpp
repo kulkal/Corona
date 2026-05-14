@@ -2271,6 +2271,8 @@ std::shared_ptr<RTAS> SimpleDX12::CreateBLASForMesh(Mesh* mesh)
 		OutputDebugStringA(ss.str().c_str());*/
 
 		owner->Device->CreateCommittedResource(&kDefaultHeapProps, D3D12_HEAP_FLAG_NONE, &bufDesc, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, IID_PPV_ARGS(&as->Scratch));
+		if (as->Scratch)
+			as->Scratch->SetName(L"Corona BLAS Scratch");
 	}
 	
 	{
@@ -2293,6 +2295,8 @@ std::shared_ptr<RTAS> SimpleDX12::CreateBLASForMesh(Mesh* mesh)
 
 
 		owner->Device->CreateCommittedResource(&kDefaultHeapProps, D3D12_HEAP_FLAG_NONE, &bufDesc, D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE, nullptr, IID_PPV_ARGS(&as->Result));
+		if (as->Result)
+			as->Result->SetName(L"Corona BLAS Result");
 	}
 
 	CommandList* cmd = owner->CmdQ->AllocCmdList();
@@ -2302,15 +2306,23 @@ std::shared_ptr<RTAS> SimpleDX12::CreateBLASForMesh(Mesh* mesh)
 	asDesc.DestAccelerationStructureData = as->Result->GetGPUVirtualAddress();
 	asDesc.ScratchAccelerationStructureData = as->Scratch->GetGPUVirtualAddress();
 
-	D3D12_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO_DESC postInfo;
-	cmd->CmdList->BuildRaytracingAccelerationStructure(&asDesc, 0, &postInfo);
+	AppendCpuRuntimeTrace(
+		L"[DX12RTAS] BuildBLAS begin vertices=" + std::to_wstring(mesh->Vb->numVertices) +
+		L", indices=" + std::to_wstring(mesh->Ib->numIndices) +
+		L", result=" + FormatDx12Hex(asDesc.DestAccelerationStructureData) +
+		L", scratch=" + FormatDx12Hex(asDesc.ScratchAccelerationStructureData) +
+		L", resultBytes=" + std::to_wstring(info.ResultDataMaxSizeInBytes) +
+		L", scratchBytes=" + std::to_wstring(info.ScratchDataSizeInBytes));
+	cmd->CmdList->BuildRaytracingAccelerationStructure(&asDesc, 0, nullptr);
 
-	/*D3D12_RESOURCE_BARRIER uavBarrier = {};
+	D3D12_RESOURCE_BARRIER uavBarrier = {};
 	uavBarrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
 	uavBarrier.UAV.pResource = as->Result.Get();
-	cmd->CmdList->ResourceBarrier(1, &uavBarrier);*/
+	cmd->CmdList->ResourceBarrier(1, &uavBarrier);
 
 	owner->CmdQ->ExecuteCommandList(cmd);
+	AppendCpuRuntimeTrace(
+		L"[DX12RTAS] BuildBLAS submitted result=" + FormatDx12Hex(asDesc.DestAccelerationStructureData));
 
 	as->MeshPtr = mesh;
 	return shared_ptr<RTAS>(as);
@@ -2391,6 +2403,8 @@ std::shared_ptr<RTAS> SimpleDX12::CreateTLAS(const std::vector<RTInstanceDesc>& 
 		bufDesc.Width = scratchDataSize;
 
 		Device->CreateCommittedResource(&kDefaultHeapProps, D3D12_HEAP_FLAG_NONE, &bufDesc, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, IID_PPV_ARGS(&as->Scratch));
+		if (as->Scratch)
+			as->Scratch->SetName(L"Corona TLAS Scratch");
 	}
 
 	{
@@ -2408,6 +2422,8 @@ std::shared_ptr<RTAS> SimpleDX12::CreateTLAS(const std::vector<RTInstanceDesc>& 
 		bufDesc.Width = info.ResultDataMaxSizeInBytes;
 
 		Device->CreateCommittedResource(&kDefaultHeapProps, D3D12_HEAP_FLAG_NONE, &bufDesc, D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE, nullptr, IID_PPV_ARGS(&as->Result));
+		if (as->Result)
+			as->Result->SetName(L"Corona TLAS Result");
 	}
 
 	{
@@ -2425,6 +2441,8 @@ std::shared_ptr<RTAS> SimpleDX12::CreateTLAS(const std::vector<RTInstanceDesc>& 
 		bufDesc.Width = sizeof(D3D12_RAYTRACING_INSTANCE_DESC) * instances.size();
 
 		Device->CreateCommittedResource(&kUploadHeapProps, D3D12_HEAP_FLAG_NONE, &bufDesc, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&as->Instance));
+		if (as->Instance)
+			as->Instance->SetName(L"Corona TLAS Instance Descs");
 	}
 
 	if (!WriteD3D12TLASInstanceDescs(as, instances))
@@ -2445,9 +2463,14 @@ std::shared_ptr<RTAS> SimpleDX12::CreateTLAS(const std::vector<RTInstanceDesc>& 
 	asDesc.DestAccelerationStructureData = as->Result->GetGPUVirtualAddress();
 	asDesc.ScratchAccelerationStructureData = as->Scratch->GetGPUVirtualAddress();
 
-	D3D12_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO_DESC postInfo;
-
-	cmd->CmdList->BuildRaytracingAccelerationStructure(&asDesc, 0, &postInfo);
+	AppendCpuRuntimeTrace(
+		L"[DX12RTAS] BuildTLAS begin instances=" + std::to_wstring(instances.size()) +
+		L", result=" + FormatDx12Hex(asDesc.DestAccelerationStructureData) +
+		L", scratch=" + FormatDx12Hex(asDesc.ScratchAccelerationStructureData) +
+		L", instanceDesc=" + FormatDx12Hex(asDesc.Inputs.InstanceDescs) +
+		L", resultBytes=" + std::to_wstring(info.ResultDataMaxSizeInBytes) +
+		L", scratchBytes=" + std::to_wstring(scratchDataSize));
+	cmd->CmdList->BuildRaytracingAccelerationStructure(&asDesc, 0, nullptr);
 
 	// We need to insert a UAV barrier before using the acceleration structures in a raytracing operation
 	D3D12_RESOURCE_BARRIER uavBarrier = {};
@@ -2467,6 +2490,8 @@ std::shared_ptr<RTAS> SimpleDX12::CreateTLAS(const std::vector<RTInstanceDesc>& 
 	Device->CreateShaderResourceView(nullptr, &srvDesc, as->CPUHandle);
 
 	CmdQ->ExecuteCommandList(cmd);
+	AppendCpuRuntimeTrace(
+		L"[DX12RTAS] BuildTLAS submitted result=" + FormatDx12Hex(asDesc.DestAccelerationStructureData));
 
 	as->NumInstances = static_cast<UINT>(instances.size());
 	return shared_ptr<RTAS>(as);
@@ -2500,6 +2525,18 @@ bool SimpleDX12::UpdateTLAS(const std::shared_ptr<RTAS>& topLevelAS, const std::
 	asDesc.DestAccelerationStructureData = as->Result->GetGPUVirtualAddress();
 	asDesc.ScratchAccelerationStructureData = as->Scratch->GetGPUVirtualAddress();
 
+	static UINT64 sUpdateTlasTraceCount = 0;
+	const UINT64 updateTraceIndex = sUpdateTlasTraceCount++;
+	const bool bTraceUpdateTlas = updateTraceIndex < 8 || (updateTraceIndex % 120) == 0;
+	if (bTraceUpdateTlas)
+	{
+		AppendCpuRuntimeTrace(
+			L"[DX12RTAS] UpdateTLAS begin updateIndex=" + std::to_wstring(updateTraceIndex) +
+			L", instances=" + std::to_wstring(instances.size()) +
+			L", result=" + FormatDx12Hex(asDesc.DestAccelerationStructureData) +
+			L", scratch=" + FormatDx12Hex(asDesc.ScratchAccelerationStructureData) +
+			L", instanceDesc=" + FormatDx12Hex(asDesc.Inputs.InstanceDescs));
+	}
 	cmd->CmdList->BuildRaytracingAccelerationStructure(&asDesc, 0, nullptr);
 
 	D3D12_RESOURCE_BARRIER uavBarrier = {};
@@ -2508,6 +2545,12 @@ bool SimpleDX12::UpdateTLAS(const std::shared_ptr<RTAS>& topLevelAS, const std::
 	cmd->CmdList->ResourceBarrier(1, &uavBarrier);
 
 	CmdQ->ExecuteCommandList(cmd);
+	if (bTraceUpdateTlas)
+	{
+		AppendCpuRuntimeTrace(
+			L"[DX12RTAS] UpdateTLAS submitted updateIndex=" + std::to_wstring(updateTraceIndex) +
+			L", result=" + FormatDx12Hex(asDesc.DestAccelerationStructureData));
+	}
 	return true;
 }
 

@@ -1583,9 +1583,9 @@ void Corona::DrawScene(shared_ptr<Scene> scene, const glm::mat4x4& instanceTrans
 
 			objCB.UnjitteredViewProjMat = glm::transpose(UnjitteredViewProjMat);
 			objCB.PrevUnjitteredViewProjMat = glm::transpose(PrevUnjitteredViewProjMat);
-			objCB.ViewDir.x = m_camera.m_lookDirection.x;
-			objCB.ViewDir.y = m_camera.m_lookDirection.y;
-			objCB.ViewDir.z = m_camera.m_lookDirection.z;
+			objCB.ViewDir.x = RenderFrameCameraLookDirection.x;
+			objCB.ViewDir.y = RenderFrameCameraLookDirection.y;
+			objCB.ViewDir.z = RenderFrameCameraLookDirection.z;
 			objCB.ViewDir.w = 0.0f;
 			objCB.BaseColorFactor = drawcall.mat ? drawcall.mat->BaseColorFactor : glm::vec4(1.0f);
 

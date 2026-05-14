@@ -6,8 +6,6 @@ if corona_script_controls.dungeon ~= nil and corona_script_controls.dungeon.enab
     return {}
 end
 
-local pistolScene = corona.load_scene("assets/pistol/pistol.obj")
-
 corona_script_controls = corona_script_controls or {}
 corona_script_controls.pistol = corona_script_controls.pistol or {}
 
@@ -43,7 +41,9 @@ local function spawn_pistol()
         return
     end
 
-    pistol = corona.spawn(pistolScene, {
+    pistol = corona.Entity.create("Pistol")
+    local ok = corona.MeshComponent.add(pistol, {
+        path = "assets/pistol/pistol.obj",
         position = { 0.0, 0.0, 0.0 },
         rotation = { 0.0, 0.0, 0.0 },
         target_extent = pistolControls.weaponExtent,
@@ -52,6 +52,10 @@ local function spawn_pistol()
         ray_tracing = true,
         physics = false,
     })
+    if not ok then
+        corona.Entity.destroy(pistol)
+        pistol = nil
+    end
     pistolControls.spawned = pistol ~= nil
 end
 
@@ -61,7 +65,7 @@ local function remove_pistol()
         return
     end
 
-    corona.destroy(pistol)
+    corona.Entity.destroy(pistol)
     pistol = nil
     pistolControls.spawned = false
 end
@@ -84,7 +88,7 @@ local function update_weapon()
     weaponPosition = add(weaponPosition, mul(camera.right, pistolControls.weaponRightOffset))
     weaponPosition = add(weaponPosition, mul(camera.up, -pistolControls.weaponDownOffset))
 
-    corona.set_transform(pistol, {
+    corona.MeshComponent.set(pistol, {
         position = weaponPosition,
         rotation = {
             -camera.pitch + pistolControls.pitchOffset,

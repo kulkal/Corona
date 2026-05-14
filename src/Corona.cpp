@@ -683,6 +683,52 @@ namespace
 		"render_sync",
 	};
 
+	constexpr std::array<const char*, 8> kRenderCommandPhaseNames = {
+		"Scene Flush",
+		"GPU Timing Readback",
+		"Frame Setup",
+		"Render Passes",
+		"Backbuffer / ToneMap",
+		"Capture / UI",
+		"GPU Timing Resolve",
+		"Present Transition",
+	};
+
+	constexpr std::array<const char*, 8> kRenderCommandPhaseLogColumnNames = {
+		"scene_flush",
+		"gpu_timing_readback",
+		"frame_setup",
+		"render_passes",
+		"backbuffer_tonemap",
+		"capture_ui",
+		"gpu_timing_resolve",
+		"present_transition",
+	};
+
+	constexpr std::array<const char*, 9> kSceneFlushPhaseNames = {
+		"update.Gather Instances",
+		"update.GPU Wait",
+		"update.Update TLAS",
+		"update.Instance Props",
+		"rebuild.GPU Wait",
+		"rebuild.Gather Instances",
+		"rebuild.Build/Update TLAS",
+		"rebuild.Instance Props",
+		"rebuild.PSO Refresh",
+	};
+
+	constexpr std::array<const char*, 9> kSceneFlushPhaseLogColumnNames = {
+		"update_gather_instances",
+		"update_gpu_wait",
+		"update_tlas",
+		"update_instance_props",
+		"rebuild_gpu_wait",
+		"rebuild_gather_instances",
+		"rebuild_tlas",
+		"rebuild_instance_props",
+		"rebuild_pso_refresh",
+	};
+
 	const std::filesystem::path kFramePerfLogPath =
 		RuntimePaths::LogFile(L"fps_perf.log");
 
@@ -999,7 +1045,15 @@ void Corona::BeginFramePerfLogging()
 		{
 			logFile << "# Corona frame performance log. One row is an approximately one-second sample.\n";
 			logFile << "sample,total_frames,backend,mode,timer_fps,avg_fps,avg_frame_ms,min_frame_ms,max_frame_ms,"
-				"avg_update_ms,avg_begin_frame_ms,avg_record_ms,avg_execute_ms,avg_end_frame_ms";
+				"avg_update_ms,avg_begin_frame_ms,avg_record_ms,avg_execute_ms,avg_end_frame_ms,avg_render_wait_ms";
+			for (UINT phaseIndex = 0; phaseIndex < RenderCommandPhaseCount; ++phaseIndex)
+			{
+				logFile << ",avg_record_" << kRenderCommandPhaseLogColumnNames[phaseIndex] << "_ms";
+			}
+			for (UINT phaseIndex = 0; phaseIndex < SceneFlushPhaseCount; ++phaseIndex)
+			{
+				logFile << ",avg_scene_flush_" << kSceneFlushPhaseLogColumnNames[phaseIndex] << "_ms";
+			}
 			for (UINT phaseIndex = 0; phaseIndex < CpuUpdatePhaseCount; ++phaseIndex)
 			{
 				logFile << ",avg_update_" << kCpuUpdatePhaseLogColumnNames[phaseIndex] << "_ms";
@@ -1019,16 +1073,18 @@ void Corona::BeginFramePerfLogging()
 	FramePerfLogFrameStart = now;
 	CpuPassLastTimeMs.fill(0.0f);
 	CpuPassActiveMask.fill(0);
+	RenderCommandPhaseLastTimeMs.fill(0.0f);
+	SceneFlushPhaseLastTimeMs.fill(0.0f);
 }
 
-void Corona::FinishFramePerfLogging(double beginFrameMs, double executeMs, double endFrameMs)
+void Corona::FinishFramePerfLogging(double beginFrameMs, double executeMs, double endFrameMs, double renderWaitMs)
 {
 	if (!bFramePerfLogInitialized)
 		return;
 
 	const auto now = CpuClock::now();
 	const double frameMs = ElapsedMilliseconds(FramePerfLogFrameStart, now);
-	const double recordMs = std::max(0.0, frameMs - beginFrameMs - executeMs - endFrameMs);
+	const double recordMs = std::max(0.0, frameMs - beginFrameMs - executeMs - endFrameMs - renderWaitMs);
 
 	++FramePerfLogTotalFrameCount;
 	++FramePerfLogSampleFrameCount;
@@ -1040,10 +1096,54 @@ void Corona::FinishFramePerfLogging(double beginFrameMs, double executeMs, doubl
 	{
 		FramePerfLogAccumCpuUpdatePhaseMs[phaseIndex] += CpuUpdatePhaseLastTimeMs[phaseIndex];
 	}
+	for (UINT phaseIndex = 0; phaseIndex < RenderCommandPhaseCount; ++phaseIndex)
+	{
+		const float phaseMs = RenderCommandPhaseLastTimeMs[phaseIndex];
+		RenderCommandPhaseCompletedLastTimeMs[phaseIndex] = phaseMs;
+		FramePerfLogAccumRenderCommandPhaseMs[phaseIndex] += phaseMs;
+		auto& history = RenderCommandPhaseHistoryMs[phaseIndex];
+		history.push_back(phaseMs);
+		while (history.size() > GpuTimingAverageFrameCount)
+			history.pop_front();
+
+		float sumMs = 0.0f;
+		for (float sampleMs : history)
+			sumMs += sampleMs;
+		RenderCommandPhaseAverageTimeMs[phaseIndex] = history.empty() ? 0.0f : (sumMs / static_cast<float>(history.size()));
+	}
+	for (UINT phaseIndex = 0; phaseIndex < SceneFlushPhaseCount; ++phaseIndex)
+	{
+		const float phaseMs = SceneFlushPhaseLastTimeMs[phaseIndex];
+		SceneFlushPhaseCompletedLastTimeMs[phaseIndex] = phaseMs;
+		FramePerfLogAccumSceneFlushPhaseMs[phaseIndex] += phaseMs;
+		auto& history = SceneFlushPhaseHistoryMs[phaseIndex];
+		history.push_back(phaseMs);
+		while (history.size() > GpuTimingAverageFrameCount)
+			history.pop_front();
+
+		float sumMs = 0.0f;
+		for (float sampleMs : history)
+			sumMs += sampleMs;
+		SceneFlushPhaseAverageTimeMs[phaseIndex] = history.empty() ? 0.0f : (sumMs / static_cast<float>(history.size()));
+	}
 	FramePerfLogAccumBeginFrameMs += beginFrameMs;
 	FramePerfLogAccumRecordMs += recordMs;
 	FramePerfLogAccumExecuteMs += executeMs;
 	FramePerfLogAccumEndFrameMs += endFrameMs;
+	FramePerfLogAccumRenderWaitMs += renderWaitMs;
+	const double sampleFrameCountForDisplay = static_cast<double>(FramePerfLogSampleFrameCount);
+	FramePerfLastFrameMs = static_cast<float>(frameMs);
+	FramePerfAverageFrameMs = static_cast<float>(FramePerfLogAccumFrameMs / sampleFrameCountForDisplay);
+	FramePerfLastBeginFrameMs = static_cast<float>(beginFrameMs);
+	FramePerfAverageBeginFrameMs = static_cast<float>(FramePerfLogAccumBeginFrameMs / sampleFrameCountForDisplay);
+	FramePerfLastRecordMs = static_cast<float>(recordMs);
+	FramePerfAverageRecordMs = static_cast<float>(FramePerfLogAccumRecordMs / sampleFrameCountForDisplay);
+	FramePerfLastExecuteMs = static_cast<float>(executeMs);
+	FramePerfAverageExecuteMs = static_cast<float>(FramePerfLogAccumExecuteMs / sampleFrameCountForDisplay);
+	FramePerfLastEndFrameMs = static_cast<float>(endFrameMs);
+	FramePerfAverageEndFrameMs = static_cast<float>(FramePerfLogAccumEndFrameMs / sampleFrameCountForDisplay);
+	FramePerfLastRenderWaitMs = static_cast<float>(renderWaitMs);
+	FramePerfAverageRenderWaitMs = static_cast<float>(FramePerfLogAccumRenderWaitMs / sampleFrameCountForDisplay);
 	for (UINT passIndex = 0; passIndex < GpuPassCount; ++passIndex)
 	{
 		// Divide by sample frame count when flushing so inactive passes naturally show as 0 cost.
@@ -1078,7 +1178,16 @@ void Corona::FinishFramePerfLogging(double beginFrameMs, double executeMs, doubl
 			<< "," << (FramePerfLogAccumBeginFrameMs / sampleFrameCount)
 			<< "," << (FramePerfLogAccumRecordMs / sampleFrameCount)
 			<< "," << (FramePerfLogAccumExecuteMs / sampleFrameCount)
-			<< "," << (FramePerfLogAccumEndFrameMs / sampleFrameCount);
+			<< "," << (FramePerfLogAccumEndFrameMs / sampleFrameCount)
+			<< "," << (FramePerfLogAccumRenderWaitMs / sampleFrameCount);
+		for (UINT phaseIndex = 0; phaseIndex < RenderCommandPhaseCount; ++phaseIndex)
+		{
+			logFile << "," << (FramePerfLogAccumRenderCommandPhaseMs[phaseIndex] / sampleFrameCount);
+		}
+		for (UINT phaseIndex = 0; phaseIndex < SceneFlushPhaseCount; ++phaseIndex)
+		{
+			logFile << "," << (FramePerfLogAccumSceneFlushPhaseMs[phaseIndex] / sampleFrameCount);
+		}
 		for (UINT phaseIndex = 0; phaseIndex < CpuUpdatePhaseCount; ++phaseIndex)
 		{
 			logFile << "," << (FramePerfLogAccumCpuUpdatePhaseMs[phaseIndex] / sampleFrameCount);
@@ -1101,10 +1210,13 @@ void Corona::FinishFramePerfLogging(double beginFrameMs, double executeMs, doubl
 	FramePerfLogMaxFrameMs = 0.0;
 	FramePerfLogAccumCpuUpdateMs = 0.0;
 	FramePerfLogAccumCpuUpdatePhaseMs.fill(0.0);
+	FramePerfLogAccumRenderCommandPhaseMs.fill(0.0);
+	FramePerfLogAccumSceneFlushPhaseMs.fill(0.0);
 	FramePerfLogAccumBeginFrameMs = 0.0;
 	FramePerfLogAccumRecordMs = 0.0;
 	FramePerfLogAccumExecuteMs = 0.0;
 	FramePerfLogAccumEndFrameMs = 0.0;
+	FramePerfLogAccumRenderWaitMs = 0.0;
 	CpuPassAccumTimeMs.fill(0.0);
 }
 
@@ -1226,6 +1338,34 @@ const char* Corona::GetGpuPassName(EGpuPass pass) const
 const char* Corona::GetCpuUpdatePhaseName(ECpuUpdatePhase phase) const
 {
 	return kCpuUpdatePhaseNames[static_cast<size_t>(phase)];
+}
+
+const char* Corona::GetRenderCommandPhaseName(ERenderCommandPhase phase) const
+{
+	return kRenderCommandPhaseNames[static_cast<size_t>(phase)];
+}
+
+const char* Corona::GetSceneFlushPhaseName(ESceneFlushPhase phase) const
+{
+	return kSceneFlushPhaseNames[static_cast<size_t>(phase)];
+}
+
+void Corona::AddRenderCommandPhaseTiming(
+	ERenderCommandPhase phase,
+	const CpuClock::time_point& begin,
+	const CpuClock::time_point& end)
+{
+	const UINT phaseIndex = static_cast<UINT>(phase);
+	RenderCommandPhaseLastTimeMs[phaseIndex] += static_cast<float>(ElapsedMilliseconds(begin, end));
+}
+
+void Corona::AddSceneFlushPhaseTiming(
+	ESceneFlushPhase phase,
+	const CpuClock::time_point& begin,
+	const CpuClock::time_point& end)
+{
+	const UINT phaseIndex = static_cast<UINT>(phase);
+	SceneFlushPhaseLastTimeMs[phaseIndex] += static_cast<float>(ElapsedMilliseconds(begin, end));
 }
 
 void Corona::AddCpuUpdatePhaseTiming(
@@ -2264,6 +2404,16 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 			bShowImgui = false;
 			continue;
 		}
+		if (arg == L"--no-streamline" || arg == L"--disable-streamline")
+		{
+			bCommandLineDisableStreamline = true;
+			continue;
+		}
+		if (arg == L"--nvfraps-bvh-live-tlas" || arg == L"--force-tlas-update" || arg == L"--rtas-live-tlas")
+		{
+			bCommandLineNvFrapsBvhLiveTlas = true;
+			continue;
+		}
 		if (arg == L"--sponza-fly" || arg == L"--sponza" || arg == L"--scene-sponza" || arg == L"--fly-camera")
 		{
 			bStartupSponzaFlyMode = true;
@@ -2272,10 +2422,17 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 			bCommandLineAutoDumpEnabled = false;
 			continue;
 		}
-		if (arg == L"--startup-scripts" || arg == L"--game-character" || arg == L"--dungeon-character")
+		if (arg == L"--startup-scripts")
 		{
 			bStartupSponzaFlyMode = false;
 			bEnableStartupLuauScript = true;
+			continue;
+		}
+		if (arg == L"--dungeon-character")
+		{
+			bStartupSponzaFlyMode = false;
+			bEnableStartupLuauScript = true;
+			bCommandLineDungeonCharacterMode = true;
 			continue;
 		}
 		if (arg == L"--no-startup-scripts" || arg == L"--disable-startup-scripts")
@@ -3045,7 +3202,9 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 		L", dlssJitterOverride=" + std::to_wstring(DLSSJitterPhaseCountOverride) +
 		L", autoDumpOverride=" + std::to_wstring(bCommandLineAutoDumpOverrideSet ? 1 : 0) +
 		L", autoDump=" + std::to_wstring(bCommandLineAutoDumpEnabled ? 1 : 0) +
-		L", noImgui=" + std::to_wstring(bCommandLineDisableImgui ? 1 : 0));
+		L", noImgui=" + std::to_wstring(bCommandLineDisableImgui ? 1 : 0) +
+		L", noStreamline=" + std::to_wstring(bCommandLineDisableStreamline ? 1 : 0) +
+		L", nvfrapsBvhLiveTlas=" + std::to_wstring(bCommandLineNvFrapsBvhLiveTlas ? 1 : 0));
 }
 
 void Corona::PromptStartupModeSelection()
@@ -5411,6 +5570,7 @@ bool Corona::LoadCameraState()
 		if (lightDirLength > 0.0f)
 			LightDir = savedLightDir / lightDirLength;
 		LightIntensity = savedLightIntensity;
+		UpdateMainDirectionalLightEntityFromState();
 	}
 	return true;
 }
@@ -5450,6 +5610,8 @@ bool Corona::LoadSceneState()
 		return false;
 
 	PersistentScriptControls.clear();
+	for (PointLightState& pointLight : PointLights)
+		DestroyPointLightEntity(pointLight);
 	PointLights.clear();
 	NextPointLightId = 1;
 
@@ -5538,6 +5700,8 @@ bool Corona::LoadSceneState()
 	}
 
 	NextPointLightId = std::max(NextPointLightId, maxLoadedPointLightId + 1);
+	for (PointLightState& pointLight : PointLights)
+		CreatePointLightEntity(pointLight);
 	MarkAllPointLightsForRenderSync();
 	bPersistentSceneStateDirty = false;
 	return true;
@@ -5665,6 +5829,8 @@ void Corona::MarkPointLightRenderDirty(UINT32 id, UINT32 dirtyBits)
 	if (it == PointLights.end())
 		return;
 
+	CreatePointLightEntity(*it);
+	UpdatePointLightEntity(*it);
 	const bool bWasClean = it->RenderDirtyBits == 0;
 	it->RenderDirtyBits |= dirtyBits;
 	if (bWasClean)
@@ -5697,12 +5863,27 @@ Corona::RenderFrameSourceState Corona::CaptureRenderFrameSourceState() const
 	};
 
 	RenderFrameSourceState state;
-	state.CameraPosition = m_camera.m_position;
-	state.CameraLookDirection = normalizeOrFallback(m_camera.m_lookDirection, glm::vec3(0.0f, 0.0f, 1.0f));
-	state.CameraUpDirection = normalizeOrFallback(m_camera.m_upDirection, glm::vec3(0.0f, 1.0f, 0.0f));
-	state.Fov = Fov;
-	state.NearPlane = Near;
-	state.FarPlane = Far;
+	const CoronaECS::Entity activeCameraEntity = EntityWorld.GetActiveCameraEntity();
+	const CoronaECS::CameraComponent* activeCamera = EntityWorld.GetCamera(activeCameraEntity);
+	const CoronaECS::TransformComponent* activeCameraTransform = EntityWorld.GetTransform(activeCameraEntity);
+	if (activeCamera && activeCameraTransform)
+	{
+		state.CameraPosition = activeCameraTransform->GetPosition();
+		state.CameraLookDirection = normalizeOrFallback(activeCamera->LookDirection, glm::vec3(0.0f, 0.0f, 1.0f));
+		state.CameraUpDirection = normalizeOrFallback(activeCamera->UpDirection, glm::vec3(0.0f, 1.0f, 0.0f));
+		state.Fov = activeCamera->Fov;
+		state.NearPlane = activeCamera->NearPlane;
+		state.FarPlane = activeCamera->FarPlane;
+	}
+	else
+	{
+		state.CameraPosition = m_camera.m_position;
+		state.CameraLookDirection = normalizeOrFallback(m_camera.m_lookDirection, glm::vec3(0.0f, 0.0f, 1.0f));
+		state.CameraUpDirection = normalizeOrFallback(m_camera.m_upDirection, glm::vec3(0.0f, 1.0f, 0.0f));
+		state.Fov = Fov;
+		state.NearPlane = Near;
+		state.FarPlane = Far;
+	}
 	state.AspectRatio = m_aspectRatio;
 	state.TotalSeconds = static_cast<float>(m_timer.GetTotalSeconds());
 	state.RenderingMode = RenderingMode;
@@ -5728,8 +5909,17 @@ Corona::RenderFrameSourceState Corona::CaptureRenderFrameSourceState() const
 	state.TAASampleCount = TAASampleCount;
 	state.DLSSJitterPhaseScale = DLSSJitterPhaseScale;
 	state.DLSSJitterPhaseCountOverride = DLSSJitterPhaseCountOverride;
-	state.LightDir = normalizeOrFallback(LightDir, glm::vec3(0.0f, 1.0f, 0.0f));
-	state.LightIntensity = LightIntensity;
+	const CoronaECS::LightComponent* directionalLight = EntityWorld.GetLight(MainDirectionalLightEntity);
+	if (directionalLight && directionalLight->Type == CoronaECS::LightType::Directional)
+	{
+		state.LightDir = normalizeOrFallback(directionalLight->Direction, glm::vec3(0.0f, 1.0f, 0.0f));
+		state.LightIntensity = directionalLight->bEnabled ? directionalLight->Intensity : 0.0f;
+	}
+	else
+	{
+		state.LightDir = normalizeOrFallback(LightDir, glm::vec3(0.0f, 1.0f, 0.0f));
+		state.LightIntensity = LightIntensity;
+	}
 	state.SkyColorTop = SkyColorTop;
 	state.SkyColorBottom = SkyColorBottom;
 	state.SkyIntensity = SkyIntensity;
@@ -5781,6 +5971,9 @@ Corona::RenderFrameSourceState Corona::CaptureRenderFrameSourceState() const
 void Corona::ApplyRenderFrameSourceState(const RenderFrameSourceState& state)
 {
 	const ERenderingMode previousRenderingMode = RenderingMode;
+	Fov = state.Fov;
+	Near = state.NearPlane;
+	Far = state.FarPlane;
 	RenderingMode = state.RenderingMode;
 	AntiAliasingMode = state.AntiAliasingMode;
 	DLSSQualityMode = state.DLSSQualityMode;
@@ -6079,13 +6272,13 @@ void Corona::ApplySceneObjectRenderSync(const RenderFrameDelta& delta)
 
 		const bool bRayTracingSceneRelevant =
 			(objectDelta.DirtyBits & (kSceneObjectDirtyScene | kSceneObjectDirtyVisibility | kSceneObjectDirtyRayTracing)) != 0;
-		const bool bRayTracingTransformRelevant =
-			(objectDelta.DirtyBits & kSceneObjectDirtyTransform) != 0;
+		const bool bRayTracingInstanceRelevant =
+			(objectDelta.DirtyBits & (kSceneObjectDirtyTransform | kSceneObjectDirtyMaterial)) != 0;
 
 		*it = std::move(object);
 		if (bRayTracingSceneRelevant)
 			MarkRayTracingSceneDirty();
-		else if (bRayTracingTransformRelevant && ShouldIncludeSceneObjectInRayTracingAS(*it))
+		else if (bRayTracingInstanceRelevant && ShouldIncludeSceneObjectInRayTracingAS(*it))
 			MarkRayTracingTransformsDirty();
 	}
 }
@@ -6411,8 +6604,27 @@ void Corona::OnInit()
 
 	m_camera.Init({ 458, 781, 185 });
 	m_camera.SetMoveSpeed(200);
+	InitializeWorldEntity();
+	InitializeLevelEntity();
 	LoadCameraState();
+	InitializeMainCameraEntity();
+	UpdateMainCameraEntityFromSimpleCamera();
+	InitializeMainDirectionalLightEntity();
+	UpdateMainDirectionalLightEntityFromState();
 	LoadSceneState();
+	if (bCommandLineDungeonCharacterMode)
+	{
+		auto setScriptBoolOverride = [this](const std::string& name, bool value)
+		{
+			PersistentScriptControlValue controlValue;
+			controlValue.Type = PersistentScriptControlType::Bool;
+			controlValue.Bool = value;
+			PersistentScriptControls[name] = controlValue;
+		};
+
+		setScriptBoolOverride("dungeon.enabled", true);
+	}
+	UpdateMainDirectionalLightEntityFromState();
 	AppendCpuRuntimeTrace(L"[OnInit] after camera init");
 	UpdateStartupLoadingProgress(0.06f, L"Restoring camera and scene state");
 
@@ -6424,7 +6636,7 @@ void Corona::OnInit()
 	const bool bStartupRequestsVulkan =
 		bCommandLineRenderBackendOverrideSet &&
 		CommandLineRenderBackendAPI == ERenderBackendAPI::Vulkan;
-	if (!bStartupRequestsVulkan)
+	if (!bStartupRequestsVulkan && !bCommandLineDisableStreamline)
 	{
 		UpdateStartupLoadingProgress(0.10f, L"Initializing Streamline");
 		InitStreamline();
@@ -6432,7 +6644,10 @@ void Corona::OnInit()
 	}
 	else
 	{
-		AppendCpuRuntimeTrace(L"[OnInit] skip InitStreamline for Vulkan startup");
+		AppendCpuRuntimeTrace(
+			bCommandLineDisableStreamline ?
+			L"[OnInit] skip InitStreamline by command line" :
+			L"[OnInit] skip InitStreamline for Vulkan startup");
 	}
 #endif
 	UpdateStartupLoadingProgress(0.12f, L"Creating render backend");
@@ -6487,6 +6702,8 @@ void Corona::OnInit()
 	if (bStartupSponzaFlyMode)
 	{
 		ApplySponzaFlyCamera();
+		UpdateMainCameraEntityFromSimpleCamera();
+		UpdateMainDirectionalLightEntityFromState();
 		AppendCpuRuntimeTrace(L"[OnInit] after ApplySponzaFlyCamera");
 	}
 	UpdateStartupLoadingProgress(0.92f, L"Initializing CPU physics");
@@ -8519,6 +8736,7 @@ void Corona::ApplyHybridDefaultCamera()
 	bTemporalAAHistoryValid = false;
 	bTemporalDenoiserHistoryValid = false;
 	bResetTemporalStateNextUpdate = true;
+	UpdateMainCameraEntityFromSimpleCamera();
 }
 
 void Corona::ApplySponzaFlyCamera()
@@ -8553,6 +8771,7 @@ void Corona::ApplySponzaFlyCamera()
 	bTemporalAAHistoryValid = false;
 	bTemporalDenoiserHistoryValid = false;
 	bResetTemporalStateNextUpdate = true;
+	UpdateMainCameraEntityFromSimpleCamera();
 }
 
 static const float OneMinusEpsilon = 0.9999999403953552f;
@@ -8620,6 +8839,9 @@ void Corona::OnUpdate()
 	UpdateCameraPathState();
 	AddCpuUpdatePhaseTiming(ECpuUpdatePhase::CameraPath, phaseStart, CpuClock::now());
 
+	UpdateMainCameraEntityFromSimpleCamera();
+	UpdateMainDirectionalLightEntityFromState();
+
 	phaseStart = CpuClock::now();
 	CollectRenderFrameDeltas();
 	AddCpuUpdatePhaseTiming(ECpuUpdatePhase::RenderSync, phaseStart, CpuClock::now());
@@ -8672,11 +8894,16 @@ void Corona::BuildRenderFrameDerivedState(const RenderFrameSourceState* sourceSt
 		if (glm::length(glm::cross(cameraLook, cameraUp)) < 0.0001f)
 			cameraUp = std::abs(cameraLook.y) < 0.99f ? glm::vec3(0.0f, 1.0f, 0.0f) : glm::vec3(1.0f, 0.0f, 0.0f);
 
+		RenderFrameCameraLookDirection = cameraLook;
 		ViewMat = glm::lookAtRH(sourceState->CameraPosition, sourceState->CameraPosition + cameraLook, cameraUp);
 		ProjMat = m_camera.GetProjectionMatrix(Fov, m_aspectRatio, effectiveNear, effectiveFar);
 	}
 	else
 	{
+		RenderFrameCameraLookDirection =
+			glm::length(m_camera.m_lookDirection) > 0.0001f ?
+			glm::normalize(m_camera.m_lookDirection) :
+			glm::vec3(0.0f, 0.0f, 1.0f);
 		ViewMat = m_camera.GetViewMatrix();
 		ProjMat = m_camera.GetProjectionMatrix(Fov, m_aspectRatio, effectiveNear, effectiveFar);
 	}
@@ -8817,14 +9044,49 @@ void Corona::OnRender()
 	double beginFrameMs = 0.0;
 	double executeMs = 0.0;
 	double endFrameMs = 0.0;
+	double renderWaitMs = 0.0;
 
+	auto renderCommandPhaseStart = CpuClock::now();
 	FlushSceneObjectChanges();
+	AddRenderCommandPhaseTiming(ERenderCommandPhase::SceneFlush, renderCommandPhaseStart, CpuClock::now());
+
+	bool bNotifyGameThreadFrameConsumed = false;
+	if (bSplitGameRenderThreads)
+	{
+		std::lock_guard<std::mutex> gameLock(GameThreadMutex);
+		if (bGameThreadStarted && bGameFrameReady)
+		{
+			bGameFrameReady = false;
+			bNotifyGameThreadFrameConsumed = true;
+		}
+	}
+	if (bNotifyGameThreadFrameConsumed)
+		GameThreadCv.notify_all();
+
+	const bool bAllowGameUpdateDuringRender =
+		bSplitGameRenderThreads &&
+		RenderWorld.bHasFrameSourceState &&
+		!bAutoAADumpEnabled &&
+		!bCameraPathRecording &&
+		!bCameraPathPlaying &&
+		!bCameraPathDumping &&
+		!bFinalScreenshotRequested &&
+		!bFinalScreenshotCaptureInFlight;
+	const ERenderingMode renderingModeThisFrame = RenderingMode;
+	const bool bDebugDrawThisFrame = bDebugDraw;
+	if (bAllowGameUpdateDuringRender)
+		stateLock.unlock();
 
 	const auto beginFrameStart = CpuClock::now();
 	renderBackend->BeginFrame();
 	beginFrameMs = ElapsedMilliseconds(beginFrameStart, CpuClock::now());
+
+	renderCommandPhaseStart = CpuClock::now();
 	UpdateGpuTimingReadback();
 	BeginGpuTimingFrame();
+	AddRenderCommandPhaseTiming(ERenderCommandPhase::GpuTimingReadback, renderCommandPhaseStart, CpuClock::now());
+
+	renderCommandPhaseStart = CpuClock::now();
 #if WITH_STREAMLINE
 	StreamlineFrameToken = nullptr;
 	bStreamlineConstantsSetThisFrame = false;
@@ -8837,11 +9099,13 @@ void Corona::OnRender()
 		ResetTemporalHistoryBuffers();
 		bPendingTemporalHistoryClear = false;
 	}
+	AddRenderCommandPhaseTiming(ERenderCommandPhase::FrameSetup, renderCommandPhaseStart, CpuClock::now());
 
 	// Record all the commands we need to render the scene into the command list.
+	renderCommandPhaseStart = CpuClock::now();
 	BeginGpuPassTiming(EGpuPass::Frame);
 
-	if (RenderingMode == ERenderingMode::HYBRID)
+	if (renderingModeThisFrame == ERenderingMode::HYBRID)
 	{
 		const bool bStageDump = IsHybridStageAutoDumpPhase();
 		const uint32_t maxSupportedHybridStage = renderBackend ? renderBackend->GetMaxSupportedHybridStage() : 7u;
@@ -8997,7 +9261,7 @@ void Corona::OnRender()
 			}
 		}
 	}
-	else if (RenderingMode == ERenderingMode::PATHTRACING)
+	else if (renderingModeThisFrame == ERenderingMode::PATHTRACING)
 	{
 		// Full path tracing
 		BeginGpuPassTiming(EGpuPass::PathTracing);
@@ -9018,7 +9282,9 @@ void Corona::OnRender()
 		}
 #endif
 	}
+	AddRenderCommandPhaseTiming(ERenderCommandPhase::RenderPasses, renderCommandPhaseStart, CpuClock::now());
 
+	renderCommandPhaseStart = CpuClock::now();
 
 	Texture* backbuffer = nullptr;
 	if (renderBackend->GetCurrentFrameIndex() < framebuffers.size())
@@ -9026,7 +9292,7 @@ void Corona::OnRender()
 	if (!backbuffer)
 		backbuffer = renderBackend->GetCurrentWindowRenderTarget();
 	const bool bVulkanHybridBackend =
-		RenderingMode == ERenderingMode::HYBRID &&
+		renderingModeThisFrame == ERenderingMode::HYBRID &&
 		renderBackend &&
 		renderBackend->GetAPI() == ERenderBackendAPI::Vulkan;
 	const bool bVulkanHybridAutoDump = bVulkanHybridBackend && IsHybridStageAutoDumpPhase();
@@ -9081,7 +9347,7 @@ void Corona::OnRender()
 		renderBackend->TransitionTexture(backbuffer, EResourceState::Present, EResourceState::RenderTarget);
 		renderBackend->SetRenderTarget(backbuffer);
 	}
-	if (!bVulkanStagePreview && RenderingMode == ERenderingMode::HYBRID &&
+	if (!bVulkanStagePreview && renderingModeThisFrame == ERenderingMode::HYBRID &&
 		IsHybridStageAutoDumpPhase() && AutoAADumpPhase < 7)
 	{
 		static const float kStageClearColor[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
@@ -9095,13 +9361,22 @@ void Corona::OnRender()
 	}
 	AdvanceAutoAADump(backbuffer);
 
-	if(bDebugDraw)
+	if (bDebugDrawThisFrame)
 	{
 		BeginGpuPassTiming(EGpuPass::Debug);
 		DebugPass();
 		EndGpuPassTiming(EGpuPass::Debug);
 	}
+	AddRenderCommandPhaseTiming(ERenderCommandPhase::BackbufferToneMap, renderCommandPhaseStart, CpuClock::now());
 
+	if (!stateLock.owns_lock())
+	{
+		const auto waitStart = CpuClock::now();
+		stateLock.lock();
+		renderWaitMs += ElapsedMilliseconds(waitStart, CpuClock::now());
+	}
+
+	renderCommandPhaseStart = CpuClock::now();
 	bool bSuppressImguiForCapture = false;
 	if (bCameraPathDumping)
 	{
@@ -9150,19 +9425,25 @@ void Corona::OnRender()
 		foregroundDrawList->AddText(ImVec2(fpsTextPos.x + 1.0f, fpsTextPos.y + 1.0f), IM_COL32(0, 0, 0, 180), fpsText);
 		foregroundDrawList->AddText(fpsTextPos, IM_COL32(255, 255, 255, 235), fpsText);
 
-		char cullingText[160];
-		sprintf_s(
-			cullingText,
-			"Rendered %llu / %llu objects  |  Frustum %llu  Occlusion %llu",
-			static_cast<unsigned long long>(GBufferLastVisibleObjectCount),
-			static_cast<unsigned long long>(GBufferLastTotalObjectCount),
-			static_cast<unsigned long long>(GBufferLastFrustumCulledObjectCount),
-			static_cast<unsigned long long>(GBufferLastOcclusionCulledObjectCount));
-		const ImVec2 cullingTextPos(10.0f, 26.0f);
-		foregroundDrawList->AddText(ImVec2(cullingTextPos.x + 1.0f, cullingTextPos.y + 1.0f), IM_COL32(0, 0, 0, 180), cullingText);
-		foregroundDrawList->AddText(cullingTextPos, IM_COL32(190, 235, 255, 235), cullingText);
+		if (bShowCullingTextOverlay)
+		{
+			char cullingText[160];
+			sprintf_s(
+				cullingText,
+				"Rendered %llu / %llu objects  |  Frustum %llu  Occlusion %llu",
+				static_cast<unsigned long long>(GBufferLastVisibleObjectCount),
+				static_cast<unsigned long long>(GBufferLastTotalObjectCount),
+				static_cast<unsigned long long>(GBufferLastFrustumCulledObjectCount),
+				static_cast<unsigned long long>(GBufferLastOcclusionCulledObjectCount));
+			const ImVec2 cullingTextPos(10.0f, 26.0f);
+			foregroundDrawList->AddText(ImVec2(cullingTextPos.x + 1.0f, cullingTextPos.y + 1.0f), IM_COL32(0, 0, 0, 180), cullingText);
+			foregroundDrawList->AddText(cullingTextPos, IM_COL32(190, 235, 255, 235), cullingText);
+		}
 
-		const bool bUseLuauImguiControls = bEnableStartupLuauScript && ScriptState && !ScriptState->Scripts.empty();
+		const bool bUseLuauImguiControls =
+			bEnableStartupLuauScript &&
+			ScriptState &&
+			EntityWorld.GetScriptComponentCount() > 0;
 		if (bUseLuauImguiControls)
 		{
 			ImGui::Begin("Hi, Let's traceray!");
@@ -10125,21 +10406,18 @@ if (ImGui::Button("Reset Accumulation"))
 		EndGpuPassTiming(EGpuPass::ImGui);
 
 	}
+	AddRenderCommandPhaseTiming(ERenderCommandPhase::CaptureUi, renderCommandPhaseStart, CpuClock::now());
 
+	renderCommandPhaseStart = CpuClock::now();
 	EndGpuPassTiming(EGpuPass::Frame);
 	ResolveGpuTimingFrame();
+	AddRenderCommandPhaseTiming(ERenderCommandPhase::GpuTimingResolve, renderCommandPhaseStart, CpuClock::now());
 
+	renderCommandPhaseStart = CpuClock::now();
 	renderBackend->TransitionTexture(backbuffer, EResourceState::RenderTarget, EResourceState::Present);
+	AddRenderCommandPhaseTiming(ERenderCommandPhase::PresentTransition, renderCommandPhaseStart, CpuClock::now());
 
-	const bool bAllowGameUpdateDuringSubmit =
-		bSplitGameRenderThreads &&
-		!bAutoAADumpEnabled &&
-		!bCameraPathRecording &&
-		!bCameraPathPlaying &&
-		!bCameraPathDumping &&
-		!bFinalScreenshotRequested &&
-		!bFinalScreenshotCaptureInFlight;
-	if (bAllowGameUpdateDuringSubmit)
+	if (bAllowGameUpdateDuringRender && stateLock.owns_lock())
 	{
 		PrevViewProjMat = ViewProjMat;
 		PrevViewMat = ViewMat;
@@ -10156,9 +10434,13 @@ if (ImGui::Button("Reset Accumulation"))
 	endFrameMs = ElapsedMilliseconds(endFrameStart, CpuClock::now());
 
 	if (!stateLock.owns_lock())
+	{
+		const auto waitStart = CpuClock::now();
 		stateLock.lock();
+		renderWaitMs += ElapsedMilliseconds(waitStart, CpuClock::now());
+	}
 
-	FinishFramePerfLogging(beginFrameMs, executeMs, endFrameMs);
+	FinishFramePerfLogging(beginFrameMs, executeMs, endFrameMs, renderWaitMs);
 
 	ConsumeCameraPathDumpCaptureResult();
 	ConsumeFinalBackbufferScreenshotResult();
@@ -10176,7 +10458,7 @@ if (ImGui::Button("Reset Accumulation"))
 		}
 	}
 
-	if (!bAllowGameUpdateDuringSubmit)
+	if (!bAllowGameUpdateDuringRender)
 	{
 		PrevViewProjMat = ViewProjMat;
 		PrevViewMat = ViewMat;
@@ -10188,6 +10470,7 @@ if (ImGui::Button("Reset Accumulation"))
 		AppendCpuRuntimeTrace(
 			L"[OnRender] exit-after-frames reached frame=" + std::to_wstring(FrameCounter) +
 			L", target=" + std::to_wstring(CommandLineExitAfterFrames));
+		DumpScriptProfileStats();
 		PostQuitMessage(0);
 		CommandLineExitAfterFrames = 0;
 	}
@@ -10261,10 +10544,7 @@ void Corona::RenderThreadTick()
 
 		if (bGameThreadStopRequested)
 			return;
-
-		bGameFrameReady = false;
 	}
-	GameThreadCv.notify_all();
 
 	OnRender();
 }

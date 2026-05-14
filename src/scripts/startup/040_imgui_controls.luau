@@ -93,27 +93,13 @@ local function ensure_props_controls()
     return props
 end
 
-local function ensure_block_character_controls()
-    corona_script_controls.blockCharacter = corona_script_controls.blockCharacter or {}
-    local character = corona_script_controls.blockCharacter
-    set_persistent_default(character, "block_character", "enabled", true)
-    set_persistent_default(character, "block_character", "position", { -28.0, -12.0, -48.0 })
-    set_persistent_default(character, "block_character", "targetExtent", 105.0)
-    set_persistent_default(character, "block_character", "baseYaw", 18.0)
-    set_persistent_default(character, "block_character", "pitch", 0.0)
-    set_persistent_default(character, "block_character", "roll", 0.0)
-    set_persistent_default(character, "block_character", "spinSpeed", 12.0)
-    set_persistent_default(character, "block_character", "bobHeight", 3.5)
-    set_persistent_default(character, "block_character", "bobSpeed", 1.15)
-    set_persistent_default(character, "block_character", "shapeSeed", 20260503)
-    set_default(character, "spawned", false)
-    set_default(character, "forceRespawn", false)
-    return character
-end
-
 local function ensure_window_controls()
     corona_script_controls.windows = corona_script_controls.windows or {}
     local windows = corona_script_controls.windows
+    set_default(windows, "renderControlsOpen", false)
+    set_default(windows, "cameraPathOpen", false)
+    set_default(windows, "lightingControlsOpen", false)
+    set_default(windows, "skyControlsOpen", false)
     set_default(windows, "objectControlsOpen", false)
     set_default(windows, "pointLightsOpen", false)
     set_default(windows, "pointLightAxesVisible", true)
@@ -124,12 +110,19 @@ local function ensure_gpu_controls()
     corona_script_controls.gpu = corona_script_controls.gpu or {}
     local gpu = corona_script_controls.gpu
     set_default(gpu, "showOverlay", false)
+    set_default(gpu, "showScriptProfile", true)
     return gpu
 end
 
 local function section(title)
     ui.separator()
     ui.text(title)
+end
+
+local function toggle_window_button(windows, key, label, id)
+    if ui.button((windows[key] and "Hide " or "") .. label, id) then
+        windows[key] = not windows[key]
+    end
 end
 
 local function reset_pistol(pistol)
@@ -154,20 +147,6 @@ local function reset_props(props)
     props.spinSpeed = 35.0
     props.buddhaEnabled = true
     props.shaderBallEnabled = true
-end
-
-local function reset_block_character(character)
-    character.enabled = true
-    character.position = { -28.0, -12.0, -48.0 }
-    character.targetExtent = 105.0
-    character.baseYaw = 18.0
-    character.pitch = 0.0
-    character.roll = 0.0
-    character.spinSpeed = 12.0
-    character.bobHeight = 3.5
-    character.bobSpeed = 1.15
-    character.shapeSeed = 20260503
-    character.forceRespawn = true
 end
 
 local function set_value_if_changed(key, old_value, new_value)
@@ -348,6 +327,55 @@ local function draw_capture_controls(state)
 
     slider_int_state(state, "gpu_timing_average_frames", "GPU Timing Average Frames", "script.gpu.average_frames", 1, 240)
     gpu.showOverlay = ui.checkbox("Show Frame Timings On Screen", "script.gpu.show_overlay", gpu.showOverlay)
+    local show_culling_overlay = checkbox_state(state, "show_culling_overlay", "Show Culling Text Overlay", "script.gpu.show_culling_overlay")
+    if show_culling_overlay == nil then
+        show_culling_overlay = state.show_culling_overlay or false
+    end
+
+    section("Script Profile")
+    gpu.showScriptProfile = ui.checkbox("Show Script Profile", "script.profile.show", gpu.showScriptProfile)
+    local hide_game_ui = gpu.showOverlay or show_culling_overlay
+    if gpu.lastGameUiHidden ~= hide_game_ui then
+        corona.set_ui_value("hide_game_ui", hide_game_ui)
+        gpu.lastGameUiHidden = hide_game_ui
+    end
+    if ui.button("Reset Script Profile", "script.profile.reset") then
+        corona.run_ui_command("reset_script_profile")
+    end
+    ui.same_line()
+    if ui.button("Dump Script Profile CSV", "script.profile.dump") then
+        corona.run_ui_command("dump_script_profile")
+    end
+    if state.script_profile_status ~= nil and state.script_profile_status ~= "" then
+        ui.text(state.script_profile_status)
+    end
+    if gpu.showScriptProfile and state.script_profile_functions ~= nil then
+        local profile = state.script_profile_functions
+        gpu.profileTotalLine = string.format("Script/frame total %.3fms", profile.frame_total_ms or 0.0)
+        gpu.profileRows = {}
+        local shown = 0
+        for _, stat in ipairs(profile.functions or {}) do
+            if shown >= 12 then
+                break
+            end
+            table.insert(gpu.profileRows, string.format(
+                "%s / %.3fms / calls=%d / min=%.4f max=%.4f avg=%.4f",
+                stat.name or "script",
+                stat.total_ms or 0.0,
+                stat.call_count or 0,
+                stat.min_ms or 0.0,
+                stat.max_ms or 0.0,
+                stat.average_ms or 0.0
+            ))
+            shown = shown + 1
+        end
+    end
+    if gpu.showScriptProfile and gpu.profileTotalLine ~= nil then
+        ui.text(gpu.profileTotalLine)
+        for _, row in ipairs(gpu.profileRows or {}) do
+            ui.text(row)
+        end
+    end
 end
 
 local function draw_gpu_timing_overlay(state)
@@ -374,31 +402,172 @@ local function draw_gpu_timing_overlay(state)
         end
     end
 
+    local frame_average_ms = state.frame_time_average_ms or 0.0
+    local frame_fps = frame_average_ms > 0.0 and (1000.0 / frame_average_ms) or (state.fps or 0.0)
+    local render_cpu_last =
+        (state.frame_begin_frame_last_ms or 0.0) +
+        (state.frame_record_last_ms or 0.0) +
+        (state.frame_execute_last_ms or 0.0) +
+        (state.frame_end_frame_last_ms or 0.0)
+    local render_cpu_average =
+        (state.frame_begin_frame_average_ms or 0.0) +
+        (state.frame_record_average_ms or 0.0) +
+        (state.frame_execute_average_ms or 0.0) +
+        (state.frame_end_frame_average_ms or 0.0)
+    local render_wait_average = state.frame_render_wait_average_ms or 0.0
+    local cpu_update_average = state.cpu_update_average_ms or 0.0
+    local render_path_average = render_cpu_average + render_wait_average
+    local record_phase_last_total = 0.0
+    local record_phase_average_total = 0.0
+    local dominant_record_phase_name = nil
+    local dominant_record_phase_average = 0.0
+    if state.render_command_phases ~= nil then
+        for _, phase in ipairs(state.render_command_phases) do
+            local phase_last = phase.last_ms or 0.0
+            local phase_average = phase.average_ms or 0.0
+            record_phase_last_total = record_phase_last_total + phase_last
+            record_phase_average_total = record_phase_average_total + phase_average
+            if phase_average > dominant_record_phase_average then
+                dominant_record_phase_name = phase.name or "record phase"
+                dominant_record_phase_average = phase_average
+            end
+        end
+    end
+    local record_untracked_last = math.max(0.0, (state.frame_record_last_ms or 0.0) - record_phase_last_total)
+    local record_untracked_average = math.max(0.0, (state.frame_record_average_ms or 0.0) - record_phase_average_total)
+    local dominant_render_stage = "record"
+    local dominant_render_stage_ms = state.frame_record_average_ms or 0.0
+    if (state.frame_begin_frame_average_ms or 0.0) > dominant_render_stage_ms then
+        dominant_render_stage = "begin"
+        dominant_render_stage_ms = state.frame_begin_frame_average_ms or 0.0
+    end
+    if (state.frame_execute_average_ms or 0.0) > dominant_render_stage_ms then
+        dominant_render_stage = "execute"
+        dominant_render_stage_ms = state.frame_execute_average_ms or 0.0
+    end
+    if (state.frame_end_frame_average_ms or 0.0) > dominant_render_stage_ms then
+        dominant_render_stage = "end"
+        dominant_render_stage_ms = state.frame_end_frame_average_ms or 0.0
+    end
+
+    local bound_label = "Mixed"
+    local bound_ms = math.max(render_path_average, cpu_update_average, total_average)
+    local untracked_average = math.max(0.0, frame_average_ms - bound_ms)
+    if frame_average_ms > 0.0 and untracked_average > 1.0 and untracked_average > frame_average_ms * 0.25 then
+        bound_label = "Present/frame pacing gap"
+        bound_ms = untracked_average
+    elseif frame_average_ms > 0.0 and render_wait_average > 0.5 and render_wait_average > frame_average_ms * 0.10 then
+        bound_label = "Game/render sync wait"
+        bound_ms = render_wait_average
+    elseif total_average > render_path_average * 1.10 and total_average > cpu_update_average * 1.10 then
+        bound_label = "GPU"
+        bound_ms = total_average
+    elseif cpu_update_average > render_path_average * 1.10 and cpu_update_average > total_average * 1.10 then
+        bound_label = "Game thread update"
+        bound_ms = cpu_update_average
+    elseif render_path_average > cpu_update_average * 1.05 and render_path_average > total_average * 1.05 then
+        if dominant_render_stage == "record" and dominant_record_phase_name ~= nil then
+            bound_label = "Render thread record: " .. dominant_record_phase_name
+        else
+            bound_label = "Render thread " .. dominant_render_stage
+        end
+        bound_ms = render_path_average
+    end
     local lines = {
-        string.format("GPU frame: %.3f ms (avg %.3f ms)", total_last, total_average),
         string.format(
-            "CPU update: %.3f ms (avg %.3f ms)",
-            state.cpu_update_last_ms or 0.0,
-            state.cpu_update_average_ms or 0.0
+            "Frame wall: %.3f ms (avg %.3f ms, %.1f fps)",
+            state.frame_time_last_ms or 0.0,
+            frame_average_ms,
+            frame_fps
         ),
+        string.format("Bound(avg): %s (%.3f ms)", bound_label, bound_ms),
+        string.format("GPU frame: %.3f ms (avg %.3f ms)", total_last, total_average),
     }
+
+    local shown_gpu_passes = 0
+    for _, pass in ipairs(state.gpu_passes) do
+        if shown_gpu_passes < 10 and pass.name ~= "Frame Total" then
+            table.insert(lines, string.format(
+                "  gpu.%s: %.3f ms (avg %.3f)",
+                pass.name,
+                pass.last_ms,
+                pass.average_ms
+            ))
+            shown_gpu_passes = shown_gpu_passes + 1
+        end
+    end
+
+    table.insert(lines, string.format(
+        "RenderCommand Recording (CPU): total %.3f ms (avg %.3f)",
+        render_cpu_last,
+        render_cpu_average
+    ))
+    table.insert(lines, string.format(
+        "  stage.begin %.3f ms (avg %.3f)  stage.record %.3f ms (avg %.3f)",
+        state.frame_begin_frame_last_ms or 0.0,
+        state.frame_begin_frame_average_ms or 0.0,
+        state.frame_record_last_ms or 0.0,
+        state.frame_record_average_ms or 0.0
+    ))
+    table.insert(lines, string.format(
+        "  stage.execute %.3f ms (avg %.3f)  stage.end %.3f ms (avg %.3f)",
+        state.frame_execute_last_ms or 0.0,
+        state.frame_execute_average_ms or 0.0,
+        state.frame_end_frame_last_ms or 0.0,
+        state.frame_end_frame_average_ms or 0.0
+    ))
+    table.insert(lines, string.format(
+        "  record breakdown: tracked %.3f ms (avg %.3f), untracked %.3f ms (avg %.3f)",
+        record_phase_last_total,
+        record_phase_average_total,
+        record_untracked_last,
+        record_untracked_average
+    ))
+
+    if state.render_command_phases ~= nil then
+        for _, phase in ipairs(state.render_command_phases) do
+            if (phase.last_ms or 0.0) > 0.001 or (phase.average_ms or 0.0) > 0.001 then
+                table.insert(lines, string.format(
+                    "    record.%s: %.3f ms (avg %.3f)",
+                    phase.name or "phase",
+                    phase.last_ms or 0.0,
+                    phase.average_ms or 0.0
+                ))
+                if phase.name == "Scene Flush" and state.scene_flush_phases ~= nil then
+                    for _, flush_phase in ipairs(state.scene_flush_phases) do
+                        if (flush_phase.last_ms or 0.0) > 0.001 or (flush_phase.average_ms or 0.0) > 0.001 then
+                            table.insert(lines, string.format(
+                                "      scene_flush.%s: %.3f ms (avg %.3f)",
+                                flush_phase.name or "phase",
+                                flush_phase.last_ms or 0.0,
+                                flush_phase.average_ms or 0.0
+                            ))
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    table.insert(lines, string.format(
+        "  wait: %.3f ms (avg %.3f ms)",
+        state.frame_render_wait_last_ms or 0.0,
+        render_wait_average
+    ))
+    table.insert(lines, string.format(
+        "CPU update: %.3f ms (avg %.3f ms)",
+        state.cpu_update_last_ms or 0.0,
+        cpu_update_average
+    ))
 
     if state.cpu_update_phases ~= nil then
         for _, phase in ipairs(state.cpu_update_phases) do
             table.insert(lines, string.format(
-                "  %s: %.3f ms (avg %.3f)",
+                "  update.%s: %.3f ms (avg %.3f)",
                 phase.name or "CPU phase",
                 phase.last_ms or 0.0,
                 phase.average_ms or 0.0
             ))
-        end
-    end
-
-    local shown = 0
-    for _, pass in ipairs(state.gpu_passes) do
-        if shown < 10 then
-            table.insert(lines, string.format("%s: %.3f ms (avg %.3f)", pass.name, pass.last_ms, pass.average_ms))
-            shown = shown + 1
         end
     end
 
@@ -639,7 +808,70 @@ local function draw_tonemap_controls(state)
     end
 end
 
-local function draw_object_controls_window(windows, pistol, props, block_character)
+local function draw_render_controls_window(windows, state)
+    if not windows.renderControlsOpen then
+        return
+    end
+
+    ui.begin_window("Render Controls")
+    if ui.button("Close", "script.render.close") then
+        windows.renderControlsOpen = false
+    end
+
+    draw_top_controls(state)
+    draw_camera_aa_controls(state)
+    draw_path_tracing_controls(state)
+    draw_tonemap_controls(state)
+
+    ui.end_window()
+end
+
+local function draw_camera_path_window(windows, state)
+    if not windows.cameraPathOpen then
+        return
+    end
+
+    ui.begin_window("Camera Path")
+    if ui.button("Close", "script.camera_path.close") then
+        windows.cameraPathOpen = false
+    end
+
+    draw_camera_path_controls(state)
+
+    ui.end_window()
+end
+
+local function draw_lighting_controls_window(windows, state)
+    if not windows.lightingControlsOpen then
+        return
+    end
+
+    ui.begin_window("Lighting / GI")
+    if ui.button("Close", "script.lighting.close") then
+        windows.lightingControlsOpen = false
+    end
+
+    draw_lighting_controls(state)
+
+    ui.end_window()
+end
+
+local function draw_sky_controls_window(windows, state)
+    if not windows.skyControlsOpen then
+        return
+    end
+
+    ui.begin_window("Sky / Environment")
+    if ui.button("Close", "script.sky.close") then
+        windows.skyControlsOpen = false
+    end
+
+    draw_sky_controls(state)
+
+    ui.end_window()
+end
+
+local function draw_object_controls_window(windows, pistol, props)
     if not windows.objectControlsOpen then
         return
     end
@@ -654,7 +886,6 @@ local function draw_object_controls_window(windows, pistol, props, block_charact
     draw_spawn_toggle("Buddha", props, "buddhaEnabled", "buddhaSpawned", "script.objects.buddha", "props")
     draw_spawn_toggle("ShaderBall", props, "shaderBallEnabled", "shaderBallSpawned", "script.objects.shaderball", "props")
     draw_spawn_toggle("Pistol", pistol, "enabled", "spawned", "script.objects.pistol", "pistol")
-    draw_spawn_toggle("Procedural Character", block_character, "enabled", "spawned", "script.objects.block_character", "block_character")
 
     section("Buddha")
     persistent_slider_vec3(props, "props", "buddhaPosition", "Buddha Position", "script.props.buddha.position", -1000.0, 1000.0)
@@ -702,40 +933,6 @@ local function draw_object_controls_window(windows, pistol, props, block_charact
             "pitchOffset",
             "rollOffset",
             "enabled",
-        })
-    end
-
-    section("Procedural Character")
-    persistent_slider_vec3(block_character, "block_character", "position", "Character Position", "script.block_character.position", -500.0, 500.0)
-    persistent_slider_float(block_character, "block_character", "targetExtent", "Character Size", "script.block_character.size", 20.0, 240.0)
-    persistent_slider_float(block_character, "block_character", "baseYaw", "Character Yaw", "script.block_character.yaw", -180.0, 180.0)
-    persistent_slider_float(block_character, "block_character", "pitch", "Character Pitch", "script.block_character.pitch", -90.0, 90.0)
-    persistent_slider_float(block_character, "block_character", "roll", "Character Roll", "script.block_character.roll", -90.0, 90.0)
-    persistent_slider_float(block_character, "block_character", "spinSpeed", "Character Spin Speed", "script.block_character.spin_speed", -180.0, 180.0)
-    persistent_slider_float(block_character, "block_character", "bobHeight", "Character Bob Height", "script.block_character.bob_height", 0.0, 80.0)
-    persistent_slider_float(block_character, "block_character", "bobSpeed", "Character Bob Speed", "script.block_character.bob_speed", 0.0, 6.0)
-    ui.text("Character Shape Seed: " .. tostring(block_character.shapeSeed))
-    if ui.button("Randomize character shape", "script.block_character.randomize") then
-        local seed = math.floor(block_character.shapeSeed or 20260503) + 1
-        if seed > 2147480000 then
-            seed = 20260503
-        end
-        block_character.shapeSeed = persist_control("block_character", "shapeSeed", seed)
-        block_character.forceRespawn = true
-    end
-    if ui.button("Reset character", "script.block_character.reset") then
-        reset_block_character(block_character)
-        save_persistent_controls("block_character", block_character, {
-            "enabled",
-            "position",
-            "targetExtent",
-            "baseYaw",
-            "pitch",
-            "roll",
-            "spinSpeed",
-            "bobHeight",
-            "bobSpeed",
-            "shapeSeed",
         })
     end
 
@@ -832,40 +1029,56 @@ local function draw_point_lights_window(windows, state)
 end
 
 function script.ui()
-    local state = corona.get_ui_state()
+    local windows = ensure_window_controls()
+    local gpu = ensure_gpu_controls()
+    gpu.profileUiTick = (gpu.profileUiTick or 0) + 1
+    local refresh_profile = gpu.showScriptProfile and (gpu.profileTotalLine == nil or (gpu.profileUiTick % 6) == 1)
+    local needs_full_state =
+        windows.renderControlsOpen or
+        windows.cameraPathOpen or
+        windows.lightingControlsOpen or
+        windows.skyControlsOpen or
+        windows.objectControlsOpen or
+        windows.pointLightsOpen
+    local state_mode
+    if needs_full_state then
+        state_mode = refresh_profile and "full" or "full_no_profile"
+    else
+        state_mode = refresh_profile and "compact" or "compact_no_profile"
+    end
+    local state = corona.get_ui_state(state_mode)
     if state == nil then
         return
     end
 
-    local windows = ensure_window_controls()
-    local props = ensure_props_controls()
-    local pistol = ensure_pistol_controls()
-    local block_character = ensure_block_character_controls()
+    ui.text("Render Backend: " .. (state.backend or "None"))
+    toggle_window_button(windows, "renderControlsOpen", "Render Controls", "script.render.open")
+    ui.same_line()
+    toggle_window_button(windows, "cameraPathOpen", "Camera Path", "script.camera_path.open")
+    ui.same_line()
+    toggle_window_button(windows, "lightingControlsOpen", "Lighting / GI", "script.lighting.open")
+    ui.same_line()
+    toggle_window_button(windows, "skyControlsOpen", "Sky / Env", "script.sky.open")
 
-    draw_top_controls(state)
     draw_capture_controls(state)
     draw_gpu_timing_overlay(state)
-    draw_camera_path_controls(state)
 
     section("Script Objects")
-    if ui.button(windows.objectControlsOpen and "Hide Object Controls" or "Object Controls", "script.objects.open") then
-        windows.objectControlsOpen = not windows.objectControlsOpen
-    end
+    toggle_window_button(windows, "objectControlsOpen", "Object Controls", "script.objects.open")
     ui.same_line()
-    ui.text("Buddha / ShaderBall / Pistol / Character")
-    if ui.button(windows.pointLightsOpen and "Hide Point Lights" or "Point Lights", "script.point_lights.open") then
-        windows.pointLightsOpen = not windows.pointLightsOpen
-    end
+    ui.text("Buddha / ShaderBall / Pistol")
+    toggle_window_button(windows, "pointLightsOpen", "Point Lights", "script.point_lights.open")
     ui.same_line()
     ui.text("Add / Remove / Move / Radius / Intensity")
 
-    draw_object_controls_window(windows, pistol, props, block_character)
+    if windows.objectControlsOpen then
+        draw_object_controls_window(windows, ensure_pistol_controls(), ensure_props_controls())
+    end
     draw_point_lights_window(windows, state)
-    draw_camera_aa_controls(state)
-    draw_path_tracing_controls(state)
-    draw_lighting_controls(state)
-    draw_sky_controls(state)
-    draw_tonemap_controls(state)
+    draw_render_controls_window(windows, state)
+    draw_camera_path_window(windows, state)
+    draw_lighting_controls_window(windows, state)
+    draw_sky_controls_window(windows, state)
 
     if state.shader_error ~= nil and state.shader_error ~= "" then
         section("Shader Error")

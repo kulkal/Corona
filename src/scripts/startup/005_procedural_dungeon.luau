@@ -20,11 +20,9 @@ end
 
 corona_script_controls.pistol = corona_script_controls.pistol or {}
 corona_script_controls.props = corona_script_controls.props or {}
-corona_script_controls.blockCharacter = corona_script_controls.blockCharacter or {}
 corona_script_controls.pistol.enabled = false
 corona_script_controls.props.buddhaEnabled = false
 corona_script_controls.props.shaderBallEnabled = false
-corona_script_controls.blockCharacter.enabled = false
 
 corona.set_default_world_visible(false)
 
@@ -59,14 +57,6 @@ local function clamp(value, minValue, maxValue)
         return maxValue
     end
     return value
-end
-
-local function vec_add(a, b)
-    return { a[1] + b[1], a[2] + b[2], a[3] + b[3] }
-end
-
-local function vec_mul(a, s)
-    return { a[1] * s, a[2] * s, a[3] * s }
 end
 
 local floor = {}
@@ -253,15 +243,12 @@ local function rect_world_center(x, y, w, h)
     return cell_world(cx, cy)
 end
 
-local function world_to_cell(x, z)
-    return {
-        x = math.floor(x / tile + originX + 0.5),
-        y = math.floor(z / tile + originY + 0.5),
-    }
-end
-
 local function floor_at(x, y)
     return floor[y] ~= nil and floor[y][x] == true
+end
+
+local function cell_key(x, y)
+    return tostring(x) .. ":" .. tostring(y)
 end
 
 local startRoom = rooms[1]
@@ -306,16 +293,19 @@ local function choose_door()
 end
 
 local door = choose_door()
-local floorScene = corona.create_box_scene({ color = { 0.34, 0.33, 0.30 } })
-local wallScene = corona.create_box_scene({ color = { 0.96, 0.92, 0.86 }, brick_texture = true, uv_repeat = 6.0 })
-local pillarScene = corona.create_box_scene({ color = { 0.78, 0.74, 0.68 }, brick_texture = true, uv_repeat = 4.0 })
-local doorScene = corona.create_box_scene({ color = { 0.45, 0.23, 0.11 } })
-local characterScene = corona.create_block_character_scene({ seed = seed + 77 })
+local floorMesh = { primitive = "box", color = { 0.34, 0.33, 0.30 } }
+local wallMesh = { primitive = "box", color = { 0.96, 0.92, 0.86 }, brick_texture = true, uv_repeat = 6.0 }
+local pillarMesh = { primitive = "box", color = { 0.78, 0.74, 0.68 }, brick_texture = true, uv_repeat = 4.0 }
 
 local spawned = {}
 
-local function spawn_box(sceneHandle, position, scale, roughness, physics)
-    local handle = corona.spawn(sceneHandle, {
+local function spawn_box(meshDesc, position, scale, roughness, physics)
+    local entity = corona.Entity.create("DungeonBox")
+    local ok = corona.MeshComponent.add(entity, {
+        primitive = meshDesc.primitive,
+        color = meshDesc.color,
+        brick_texture = meshDesc.brick_texture,
+        uv_repeat = meshDesc.uv_repeat,
         position = position,
         scale = scale,
         roughness = roughness or 0.84,
@@ -324,8 +314,12 @@ local function spawn_box(sceneHandle, position, scale, roughness, physics)
         ray_tracing = true,
         physics = physics,
     })
-    table.insert(spawned, handle)
-    return handle
+    if not ok then
+        corona.Entity.destroy(entity)
+        return nil
+    end
+    table.insert(spawned, entity)
+    return entity
 end
 
 for chunkY = 2, mapHeight - 1, floorChunkTiles do
@@ -346,7 +340,7 @@ for chunkY = 2, mapHeight - 1, floorChunkTiles do
             local chunkHeight = chunkEndY - chunkY + 1
             local center = rect_world_center(chunkX, chunkY, chunkWidth, chunkHeight)
             spawn_box(
-                floorScene,
+                floorMesh,
                 { center[1], -floorThickness, center[2] },
                 { chunkWidth * tile, floorThickness, chunkHeight * tile },
                 0.9,
@@ -384,7 +378,7 @@ for y = 2, mapHeight - 1 do
 
             local center = rect_world_center(x, y, width, height)
             spawn_box(
-                wallScene,
+                wallMesh,
                 { center[1], 0.0, center[2] },
                 { width * tile, wallHeight, height * tile },
                 0.82,
@@ -405,14 +399,29 @@ for _, room in ipairs(rooms) do
         }
         for _, cell in ipairs(pillarCells) do
             local p = cell_world(cell[1], cell[2])
-            spawn_box(pillarScene, { p[1], 0.0, p[2] }, { 34.0, 138.0, 34.0 }, 0.78, true)
+            spawn_box(pillarMesh, { p[1], 0.0, p[2] }, { 34.0, 138.0, 34.0 }, 0.78, true)
         end
     end
 end
 
 local doorWorld = cell_world(door.x, door.y)
 local doorScale = door.axis == "z" and { tile * 0.88, doorHeight, 18.0 } or { 18.0, doorHeight, tile * 0.88 }
-local doorHandle = spawn_box(doorScene, { doorWorld[1], 0.0, doorWorld[2] }, doorScale, 0.62, false)
+local doorEntity = corona.Entity.create("DungeonDoor")
+local doorOk = corona.MeshComponent.add(doorEntity, {
+    primitive = "box",
+    color = { 0.45, 0.23, 0.11 },
+    position = { doorWorld[1], 0.0, doorWorld[2] },
+    scale = doorScale,
+    roughness = 0.62,
+    metallic = 0.0,
+    override_material = true,
+    ray_tracing = true,
+    physics = false,
+})
+if not doorOk then
+    corona.Entity.destroy(doorEntity)
+    doorEntity = nil
+end
 
 local startWorld = cell_world(startCell.x, startCell.y)
 local endWorld = cell_world(endCell.x, endCell.y)
@@ -420,8 +429,13 @@ local player = {
     x = startWorld[1],
     z = startWorld[2],
     yaw = math.deg(math.atan2(endWorld[1] - startWorld[1], endWorld[2] - startWorld[2])),
+    health = 100.0,
+    maxHealth = 100.0,
 }
-local character = corona.spawn(characterScene, {
+local character = corona.Entity.create("DungeonCharacter")
+local characterOk = corona.MeshComponent.add(character, {
+    primitive = "block_character",
+    seed = seed + 77,
     position = { player.x, 0.0, player.z },
     rotation = { 0.0, player.yaw, 0.0 },
     target_extent = 82.0,
@@ -431,200 +445,300 @@ local character = corona.spawn(characterScene, {
     ray_tracing = true,
     physics = false,
 })
-
-local doorOpen = false
-local doorOpenAmount = 0.0
-local walkBob = 0.0
-local cameraYaw = player.yaw
-local cameraPitch = 26.0
-local mouseSensitivity = math.deg(0.003)
-local gamepadYawSpeed = 165.0
-local gamepadPitchSpeed = 115.0
-
-local function forward_from_yaw(yaw)
-    local radians = math.rad(yaw)
-    return {
-        math.sin(radians),
-        0.0,
-        math.cos(radians),
-    }
+if not characterOk then
+    corona.Entity.destroy(character)
+    character = nil
 end
 
-local function is_door_blocking_cell(cell)
-    return not doorOpen and cell.x == door.x and cell.y == door.y
+local enemyStates = {}
+local enemyByEntity = {}
+local usedEnemyCells = {}
+usedEnemyCells[cell_key(endCell.x, endCell.y)] = true
+
+local function is_enemy_spawn_cell(x, y, minStartDistanceSq)
+    if not floor_at(x, y) then
+        return false
+    end
+    if x == endCell.x and y == endCell.y then
+        return false
+    end
+    if door ~= nil and x == door.x and y == door.y then
+        return false
+    end
+    local dx = x - startCell.x
+    local dy = y - startCell.y
+    if dx * dx + dy * dy < minStartDistanceSq then
+        return false
+    end
+    return usedEnemyCells[cell_key(x, y)] ~= true
 end
 
-local function is_walkable_position(x, z)
-    local radius = tile * 0.28
-    local samples = {
-        { 0.0, 0.0 },
-        { radius, 0.0 },
-        { -radius, 0.0 },
-        { 0.0, radius },
-        { 0.0, -radius },
-    }
-
-    for _, sample in ipairs(samples) do
-        local cell = world_to_cell(x + sample[1], z + sample[2])
-        if not floor_at(cell.x, cell.y) or is_door_blocking_cell(cell) then
-            return false
+local function choose_enemy_cell(minStartDistanceSq)
+    for _ = 1, 180 do
+        local x = rand_int(2, mapWidth - 1)
+        local y = rand_int(2, mapHeight - 1)
+        if is_enemy_spawn_cell(x, y, minStartDistanceSq) then
+            usedEnemyCells[cell_key(x, y)] = true
+            return { x = x, y = y }
         end
     end
-    return true
+
+    for y = 2, mapHeight - 1 do
+        for x = 2, mapWidth - 1 do
+            if is_enemy_spawn_cell(x, y, minStartDistanceSq) then
+                usedEnemyCells[cell_key(x, y)] = true
+                return { x = x, y = y }
+            end
+        end
+    end
+    return { x = endCell.x, y = endCell.y }
 end
 
-local function try_move(dx, dz)
-    local nextX = player.x + dx
-    local nextZ = player.z + dz
-    if is_walkable_position(nextX, player.z) then
-        player.x = nextX
-    end
-    if is_walkable_position(player.x, nextZ) then
-        player.z = nextZ
+local function register_enemy(state)
+    table.insert(enemyStates, state)
+    if state.entity ~= nil then
+        enemyByEntity[state.entity] = state
     end
 end
 
-local function update_door(dt)
-    local target = doorOpen and 1.0 or 0.0
-    doorOpenAmount = doorOpenAmount + (target - doorOpenAmount) * clamp(dt * 9.0, 0.0, 1.0)
-    local yaw = doorOpenAmount * 88.0
-    if door.axis == "x" then
-        yaw = -yaw
-    end
-    corona.set_transform(doorHandle, {
-        position = { doorWorld[1], 0.0, doorWorld[2] },
+local function spawn_enemy(index)
+    local cell = choose_enemy_cell(30)
+    local world = cell_world(cell.x, cell.y)
+    local enemy = corona.Entity.create("DungeonEnemy")
+    local yaw = rand() * 360.0
+    local ok = corona.MeshComponent.add(enemy, {
+        primitive = "block_character",
+        seed = seed + 900 + index * 17,
+        position = { world[1], 0.0, world[2] },
         rotation = { 0.0, yaw, 0.0 },
-        scale = doorScale,
+        target_extent = 68.0,
+        roughness = 0.78,
+        metallic = 0.0,
+        override_material = true,
+        ray_tracing = true,
+        physics = false,
     })
-end
-
-local function update_character(dt, moving)
-    if moving then
-        walkBob = walkBob + dt * 9.0
-    else
-        walkBob = walkBob + dt * 2.5
+    if not ok then
+        corona.Entity.destroy(enemy)
+        return nil
     end
-    local bob = math.sin(walkBob) * (moving and 5.0 or 1.4)
-    corona.set_transform(character, {
-        position = { player.x, bob, player.z },
-        rotation = { 0.0, player.yaw, 0.0 },
-        target_extent = 82.0,
-    })
+
+    local state = {
+        entity = enemy,
+        kind = "enemy",
+        x = world[1],
+        z = world[2],
+        meshY = 0.0,
+        yaw = yaw,
+        health = 70.0,
+        maxHealth = 70.0,
+        radius = 38.0,
+        targetExtent = 68.0,
+        speed = 78.0 + rand() * 22.0,
+        aggroRange = tile * 5.5,
+        stopDistance = 88.0,
+        wanderAngle = yaw,
+        wanderTimer = rand() * 1.4,
+        walkBob = rand() * 6.28,
+        hitFlash = 0.0,
+        stunTimer = 0.0,
+        attackDamage = 7.0,
+        attackCooldown = 1.05,
+        attackTimer = rand() * 0.7,
+        alive = true,
+    }
+    register_enemy(state)
+    return state
 end
 
-local function update_camera()
-    local forward = forward_from_yaw(cameraYaw)
-    local focus = { player.x, 72.0, player.z }
-    local pitchRadians = math.rad(cameraPitch)
-    local cameraDistance = 300.0
-    local horizontalDistance = math.cos(pitchRadians) * cameraDistance
-    local verticalOffset = 80.0 + math.sin(pitchRadians) * cameraDistance
-    local desired = vec_add(focus, vec_add(vec_mul(forward, -horizontalDistance), { 0.0, verticalOffset, 0.0 }))
-    corona.set_camera({
-        position = desired,
-        look_at = vec_add(focus, vec_mul(forward, 86.0)),
-        up = { 0.0, 1.0, 0.0 },
-    })
+for i = 1, 5 do
+    spawn_enemy(i)
 end
+
+local bossWorld = cell_world(endCell.x, endCell.y)
+local boss = corona.Entity.create("DungeonBossBuddha")
+local bossYaw = math.deg(math.atan2(startWorld[1] - bossWorld[1], startWorld[2] - bossWorld[2]))
+local bossOk = corona.MeshComponent.add(boss, {
+    path = "assets/buddha/buddha.obj",
+    position = { bossWorld[1], -8.0, bossWorld[2] },
+    rotation = { 0.0, bossYaw, 0.0 },
+    target_extent = 190.0,
+    roughness = 0.65,
+    metallic = 0.0,
+    ray_tracing = true,
+    physics = false,
+})
+if bossOk then
+    usedEnemyCells[cell_key(endCell.x, endCell.y)] = true
+    register_enemy({
+        entity = boss,
+        kind = "boss",
+        x = bossWorld[1],
+        z = bossWorld[2],
+        meshY = -8.0,
+        yaw = bossYaw,
+        health = 260.0,
+        maxHealth = 260.0,
+        radius = 96.0,
+        targetExtent = 190.0,
+        speed = 42.0,
+        aggroRange = tile * 8.0,
+        stopDistance = 150.0,
+        wanderAngle = bossYaw,
+        wanderTimer = 0.0,
+        walkBob = 0.0,
+        hitFlash = 0.0,
+        stunTimer = 0.0,
+        attackDamage = 18.0,
+        attackCooldown = 1.55,
+        attackTimer = 0.6,
+        alive = true,
+    })
+else
+    corona.Entity.destroy(boss)
+    boss = nil
+end
+
+local cameraEntity = corona.Entity.create("DungeonCamera")
+corona.CameraComponent.add(cameraEntity, {
+    position = { player.x, 180.0, player.z - 300.0 },
+    look_at = { player.x, 72.0, player.z },
+    up = { 0.0, 1.0, 0.0 },
+    fov = 0.8,
+    near_plane = 10.0,
+    far_plane = 20000.0,
+    active = true,
+})
+
+local sunEntity = corona.Entity.create("DungeonSun")
+local sunOk = corona.LightComponent.add(sunEntity, {
+    type = "directional",
+    enabled = true,
+    direction = { 0.44, 0.82, 0.36 },
+    color = { 1.0, 0.95, 0.84 },
+    intensity = 0.72,
+    persistent = false,
+})
+if not sunOk then
+    corona.Entity.destroy(sunEntity)
+    sunEntity = nil
+end
+
+local hudEntity = corona.Entity.create("DungeonHud")
+
+corona_dungeon_runtime = {
+    tile = tile,
+    originX = originX,
+    originY = originY,
+    floor = floor,
+    door = door,
+    doorWorld = doorWorld,
+    doorEntity = doorEntity,
+    doorScale = doorScale,
+    doorInteractDistance = tile * 1.35,
+    doorOpen = false,
+    doorOpenAmount = 0.0,
+    player = player,
+    enemies = enemyStates,
+    enemyByEntity = enemyByEntity,
+    playerAttackCooldown = 0.0,
+    playerAttackTimer = 0.0,
+    playerAttackRange = 150.0,
+    playerAttackHalfAngleCos = 0.42,
+    playerAttackDamage = 35.0,
+    playerHurtTimer = 0.0,
+    walkBob = 0.0,
+    cameraYaw = player.yaw,
+    cameraPitch = 26.0,
+    mouseSensitivity = math.deg(0.003),
+    gamepadYawSpeed = 165.0,
+    gamepadPitchSpeed = 115.0,
+    cameraEntity = cameraEntity,
+    sunEntity = sunEntity,
+    hudEntity = hudEntity,
+    sunAngle = 28.0,
+    sunAngularSpeed = 8.0,
+    sunIntensity = 0.72,
+    characterTargetExtent = 82.0,
+}
 
 corona.set_camera_control(true)
-update_character(0.0, false)
-update_door(0.0)
-update_camera()
-corona.log("procedural BSP dungeon loaded")
+if character ~= nil then
+    local attached = corona.ScriptComponent.attach_file(character, "scripts/entity/dungeon_character_controller.luau")
+    if not attached then
+        corona.log("failed to attach dungeon character controller")
+    end
+end
+if doorEntity ~= nil then
+    local attached = corona.ScriptComponent.attach_file(doorEntity, "scripts/entity/dungeon_door_controller.luau")
+    if not attached then
+        corona.log("failed to attach dungeon door controller")
+    end
+end
+for _, enemy in ipairs(enemyStates) do
+    if enemy.entity ~= nil and enemy.alive then
+        local attached = corona.ScriptComponent.attach_file(enemy.entity, "scripts/entity/dungeon_enemy_controller.luau")
+        if not attached then
+            corona.log("failed to attach dungeon enemy controller")
+        end
+    end
+end
+if cameraEntity ~= nil then
+    local attached = corona.ScriptComponent.attach_file(cameraEntity, "scripts/entity/dungeon_camera_controller.luau")
+    if not attached then
+        corona.log("failed to attach dungeon camera controller")
+    end
+end
+if sunEntity ~= nil then
+    local attached = corona.ScriptComponent.attach_file(sunEntity, "scripts/entity/dungeon_sun_controller.luau")
+    if not attached then
+        corona.log("failed to attach dungeon sun controller")
+    end
+end
+if hudEntity ~= nil then
+    local attached = corona.ScriptComponent.attach_file(hudEntity, "scripts/entity/dungeon_hud.luau")
+    if not attached then
+        corona.log("failed to attach dungeon HUD")
+    end
+end
 
 local dungeonScript = {}
-
-function dungeonScript.update(dt)
-    local gamepad = corona.get_gamepad ~= nil and corona.get_gamepad() or { connected = false }
-    local fastMove = corona.is_key_down("SHIFT") or (gamepad.connected and (gamepad.right_shoulder or gamepad.right_trigger > 0.35 or gamepad.left_thumb))
-    local turnSpeed = fastMove and 170.0 or 125.0
-    local moveSpeed = fastMove and 285.0 or 180.0
-
-    local mouse = corona.get_mouse()
-    if mouse.dx ~= 0 or mouse.dy ~= 0 then
-        cameraYaw = cameraYaw - mouse.dx * mouseSensitivity
-        cameraPitch = clamp(cameraPitch + mouse.dy * mouseSensitivity, 12.0, 52.0)
-    end
-    if gamepad.connected then
-        cameraYaw = cameraYaw - gamepad.right_x * gamepadYawSpeed * dt
-        cameraPitch = clamp(cameraPitch - gamepad.right_y * gamepadPitchSpeed * dt, 12.0, 52.0)
-    end
-    if corona.is_key_down("LEFT") then
-        cameraYaw = cameraYaw + turnSpeed * dt
-    end
-    if corona.is_key_down("RIGHT") then
-        cameraYaw = cameraYaw - turnSpeed * dt
-    end
-    player.yaw = cameraYaw
-
-    local move = 0.0
-    if corona.is_key_down("W") or corona.is_key_down("UP") then
-        move = move + 1.0
-    end
-    if corona.is_key_down("S") or corona.is_key_down("DOWN") then
-        move = move - 1.0
-    end
-    if gamepad.connected then
-        move = move + gamepad.left_y
-        if gamepad.dpad_up then
-            move = move + 1.0
-        end
-        if gamepad.dpad_down then
-            move = move - 1.0
-        end
-    end
-
-    local strafe = 0.0
-    if corona.is_key_down("A") or corona.is_key_down("Q") then
-        strafe = strafe + 1.0
-    end
-    if corona.is_key_down("D") or corona.is_key_down("E") then
-        strafe = strafe - 1.0
-    end
-    if gamepad.connected then
-        strafe = strafe - gamepad.left_x
-        if gamepad.dpad_left then
-            strafe = strafe + 1.0
-        end
-        if gamepad.dpad_right then
-            strafe = strafe - 1.0
-        end
-    end
-    local moveLength = math.sqrt(move * move + strafe * strafe)
-    if moveLength > 1.0 then
-        move = move / moveLength
-        strafe = strafe / moveLength
-    end
-
-    local forward = forward_from_yaw(cameraYaw)
-    local right = { forward[3], 0.0, -forward[1] }
-    local dx = (forward[1] * move + right[1] * strafe) * moveSpeed * dt
-    local dz = (forward[3] * move + right[3] * strafe) * moveSpeed * dt
-    local moving = math.abs(dx) + math.abs(dz) > 0.001
-    try_move(dx, dz)
-
-    if corona.was_key_pressed("SPACE") or (gamepad.connected and (gamepad.a_pressed or gamepad.x_pressed)) then
-        local distanceToDoor = math.sqrt((player.x - doorWorld[1]) * (player.x - doorWorld[1]) + (player.z - doorWorld[2]) * (player.z - doorWorld[2]))
-        if distanceToDoor < tile * 1.35 then
-            doorOpen = not doorOpen
-        end
-    end
-
-    update_door(dt)
-    update_character(dt, moving)
-    update_camera()
-end
+corona.log("procedural BSP dungeon loaded")
 
 function dungeonScript.shutdown()
     if character ~= nil then
-        corona.destroy(character)
+        corona.Entity.destroy(character)
         character = nil
     end
+    if doorEntity ~= nil then
+        corona.Entity.destroy(doorEntity)
+        doorEntity = nil
+    end
+    for _, enemy in ipairs(enemyStates) do
+        if enemy.entity ~= nil then
+            corona.Entity.destroy(enemy.entity)
+            enemy.entity = nil
+        end
+    end
+    enemyStates = {}
+    enemyByEntity = {}
+    if cameraEntity ~= nil then
+        corona.Entity.destroy(cameraEntity)
+        cameraEntity = nil
+    end
+    if sunEntity ~= nil then
+        corona.Entity.destroy(sunEntity)
+        sunEntity = nil
+    end
+    if hudEntity ~= nil then
+        corona.Entity.destroy(hudEntity)
+        hudEntity = nil
+    end
     for _, handle in ipairs(spawned) do
-        corona.destroy(handle)
+        corona.Entity.destroy(handle)
     end
     spawned = {}
+    corona_dungeon_runtime = nil
     corona.set_default_world_visible(true)
 end
 

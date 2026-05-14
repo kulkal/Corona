@@ -6,9 +6,6 @@ if corona_script_controls.dungeon ~= nil and corona_script_controls.dungeon.enab
     return {}
 end
 
-local buddhaScene = corona.load_scene("assets/buddha/buddha.obj")
-local shaderBallScene = corona.load_scene("assets/shaderBall/shaderBall.fbx")
-
 corona_script_controls = corona_script_controls or {}
 corona_script_controls.props = corona_script_controls.props or {}
 
@@ -51,7 +48,9 @@ local function spawn_buddha()
         return
     end
 
-    buddha = corona.spawn(buddhaScene, {
+    buddha = corona.Entity.create("Buddha")
+    local ok = corona.MeshComponent.add(buddha, {
+        path = "assets/buddha/buddha.obj",
         position = propsControls.buddhaPosition,
         rotation = { 0.0, propsControls.buddhaBaseYaw, 0.0 },
         target_extent = propsControls.buddhaExtent,
@@ -60,6 +59,10 @@ local function spawn_buddha()
         ray_tracing = true,
         physics = false,
     })
+    if not ok then
+        corona.Entity.destroy(buddha)
+        buddha = nil
+    end
     propsControls.buddhaSpawned = buddha ~= nil
 end
 
@@ -69,7 +72,7 @@ local function remove_buddha()
         return
     end
 
-    corona.destroy(buddha)
+    corona.Entity.destroy(buddha)
     buddha = nil
     propsControls.buddhaSpawned = false
 end
@@ -81,7 +84,9 @@ local function spawn_shader_ball()
         return
     end
 
-    shaderBall = corona.spawn(shaderBallScene, {
+    shaderBall = corona.Entity.create("ShaderBall")
+    local ok = corona.MeshComponent.add(shaderBall, {
+        path = "assets/shaderBall/shaderBall.fbx",
         position = propsControls.shaderBallPosition,
         rotation = { 0.0, propsControls.shaderBallBaseYaw, 0.0 },
         target_extent = propsControls.shaderBallExtent,
@@ -90,6 +95,10 @@ local function spawn_shader_ball()
         ray_tracing = true,
         physics = false,
     })
+    if not ok then
+        corona.Entity.destroy(shaderBall)
+        shaderBall = nil
+    end
     propsControls.shaderBallSpawned = shaderBall ~= nil
 end
 
@@ -99,7 +108,7 @@ local function remove_shader_ball()
         return
     end
 
-    corona.destroy(shaderBall)
+    corona.Entity.destroy(shaderBall)
     shaderBall = nil
     propsControls.shaderBallSpawned = false
 end
@@ -125,7 +134,7 @@ local function update_props()
     }
 
     if buddha ~= nil then
-        corona.set_transform(buddha, {
+        corona.MeshComponent.set(buddha, {
             position = buddhaBobPosition,
             rotation = { 0.0, propsControls.buddhaBaseYaw + angle, 0.0 },
             target_extent = propsControls.buddhaExtent,
@@ -133,7 +142,7 @@ local function update_props()
     end
 
     if shaderBall ~= nil then
-        corona.set_transform(shaderBall, {
+        corona.MeshComponent.set(shaderBall, {
             position = shaderBallPosition,
             rotation = { 0.0, propsControls.shaderBallBaseYaw - angle * 1.35, 0.0 },
             target_extent = propsControls.shaderBallExtent,

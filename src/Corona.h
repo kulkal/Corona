@@ -12,6 +12,7 @@
 #pragma once
 #define GLM_FORCE_CTOR_INIT
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <deque>
@@ -35,6 +36,7 @@
 #include "SimpleCamera.h"
 #include "RenderBackend.h"
 #include "SimpleDX12.h"
+#include "EntityComponentSystem.h"
 #include "enkiTS/TaskScheduler.h"
 #define PROFILE_BUILD 1
 #include "pix3.h"
@@ -58,6 +60,7 @@ using Microsoft::WRL::ComPtr;
 using namespace std;
 
 struct lua_State;
+struct lua_Callbacks;
 
 class Corona
 {
@@ -129,8 +132,37 @@ private:
 		Count
 	};
 
+	enum class ERenderCommandPhase : UINT32
+	{
+		SceneFlush = 0,
+		GpuTimingReadback,
+		FrameSetup,
+		RenderPasses,
+		BackbufferToneMap,
+		CaptureUi,
+		GpuTimingResolve,
+		PresentTransition,
+		Count
+	};
+
+	enum class ESceneFlushPhase : UINT32
+	{
+		UpdateGatherInstances = 0,
+		UpdateGpuWait,
+		UpdateTlas,
+		UpdateInstanceProperties,
+		RebuildGpuWait,
+		RebuildGatherInstances,
+		RebuildTlas,
+		RebuildInstanceProperties,
+		RebuildPipelineState,
+		Count
+	};
+
 	static constexpr UINT32 GpuPassCount = static_cast<UINT32>(EGpuPass::Count);
 	static constexpr UINT32 CpuUpdatePhaseCount = static_cast<UINT32>(ECpuUpdatePhase::Count);
+	static constexpr UINT32 RenderCommandPhaseCount = static_cast<UINT32>(ERenderCommandPhase::Count);
+	static constexpr UINT32 SceneFlushPhaseCount = static_cast<UINT32>(ESceneFlushPhase::Count);
 	static constexpr UINT32 GpuQueriesPerPass = 2;
 	using CpuClock = std::chrono::steady_clock;
 
@@ -744,6 +776,36 @@ public:
 	using ScriptSceneHandle = uint32_t;
 	static constexpr ScriptSceneHandle InvalidScriptSceneHandle = 0;
 
+	struct NativeEntityScriptCallbacks
+	{
+		std::function<void(Corona&, CoronaECS::Entity, float)> Update;
+		std::function<void(Corona&, CoronaECS::Entity)> Shutdown;
+		std::function<void(Corona&, CoronaECS::Entity)> Ui;
+		std::function<void(Corona&, CoronaECS::Entity)> ImGui;
+	};
+
+	struct ScriptFunctionProfileStat
+	{
+		std::wstring SourceName;
+		std::string CallbackName;
+		bool bNative = false;
+		uint64_t CallCount = 0;
+		double TotalMs = 0.0;
+		double LastMs = 0.0;
+		double MinMs = 0.0;
+		double MaxMs = 0.0;
+	};
+	struct ScriptFunctionSampleStat
+	{
+		std::wstring SourceName;
+		std::string FunctionName;
+		int LineDefined = -1;
+		uint64_t InclusiveSamples = 0;
+		uint64_t SelfSamples = 0;
+		double InclusiveMs = 0.0;
+		double SelfMs = 0.0;
+	};
+
 	enum class EPhysicsCollisionShape : UINT8
 	{
 		TriangleMesh,
@@ -752,6 +814,7 @@ public:
 
 	struct SceneObjectDesc
 	{
+		CoronaECS::Entity EntityHandle;
 		shared_ptr<Scene> ScenePtr;
 		glm::mat4x4 Transform = glm::mat4x4(1.0f);
 		float Roughness = 1.0f;
@@ -840,6 +903,8 @@ private:
 	bool bCommandLineRenderBackendOverrideSet = false;
 	ERenderBackendAPI CommandLineRenderBackendAPI = ERenderBackendAPI::D3D12;
 	bool bCommandLineDisableImgui = false;
+	bool bCommandLineDisableStreamline = false;
+	bool bCommandLineNvFrapsBvhLiveTlas = false;
 	bool bStartupSponzaFlyMode = false;
 	bool bCommandLineDiffuseGIAutoDumpMode = false;
 	bool bCommandLineReadmeScreenshotDumpMode = false;
@@ -975,6 +1040,7 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	struct SceneObject
 	{
 		SceneObjectHandle Handle = InvalidSceneObjectHandle;
+		CoronaECS::Entity EntityHandle;
 		shared_ptr<Scene> ScenePtr;
 		glm::mat4x4 Transform = glm::mat4x4(1.0f);
 		float Roughness = 1.0f;
@@ -989,6 +1055,10 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	};
 	vector<SceneObject> SceneObjects;
 	SceneObjectHandle NextSceneObjectHandle = 1;
+	CoronaECS::EntityComponentSystem EntityWorld;
+	CoronaECS::Entity WorldEntity;
+	CoronaECS::Entity LevelEntity;
+	CoronaECS::Entity MainCameraEntity;
 	bool bRayTracingSceneDirty = false;
 	bool bRayTracingTransformDirty = false;
 
@@ -1010,17 +1080,7 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	};
 	struct LuauScriptState
 	{
-		struct LoadedScript
-		{
-			std::wstring Path;
-			int UpdateRef = 0;
-			int ShutdownRef = 0;
-			int ImGuiRef = 0;
-			int UiRef = 0;
-		};
-
 		lua_State* L = nullptr;
-		std::vector<LoadedScript> Scripts;
 	};
 	std::unique_ptr<LuauScriptState> ScriptState;
 	enum class ScriptUiCommandType
@@ -1036,8 +1096,15 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 		Combo,
 		Checkbox,
 		OverlayText,
+		OverlayLine,
+		OverlayRect,
+		OverlayRectFilled,
+		OverlayProgressBar,
 		Gizmo3D,
 		WorldAxis,
+		WorldText,
+		WorldProgressBar,
+		WorldHealthBar,
 	};
 	struct ScriptUiCommand
 	{
@@ -1052,6 +1119,9 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 		int MaxIntValue = 0;
 		bool BoolValue = false;
 		glm::vec3 Vec3Value = glm::vec3(0.0f);
+		glm::vec4 ColorValue = glm::vec4(1.0f);
+		glm::vec4 SecondaryColorValue = glm::vec4(0.0f);
+		glm::vec4 TertiaryColorValue = glm::vec4(1.0f);
 		std::vector<std::string> Items;
 	};
 	enum class PersistentScriptControlType
@@ -1081,9 +1151,28 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	std::map<std::wstring, ScriptSceneHandle> ScriptSceneByPath;
 	std::map<SceneObjectHandle, ScriptObjectState> ScriptObjects;
 	ScriptSceneHandle NextScriptSceneHandle = 1;
+	std::map<std::string, NativeEntityScriptCallbacks> NativeEntityScripts;
+	std::mutex ScriptProfileMutex;
+	std::map<std::string, ScriptFunctionProfileStat> ScriptProfileStats;
+	std::map<std::string, ScriptFunctionProfileStat> ScriptProfileCurrentFrameStats;
+	std::vector<ScriptFunctionProfileStat> ScriptProfileLastFrameStats;
+	double ScriptProfileCurrentFrameTotalMs = 0.0;
+	double ScriptProfileLastFrameTotalMs = 0.0;
+	std::map<std::string, ScriptFunctionSampleStat> ScriptProfileSamples;
+	std::wstring ScriptProfileLastDumpStatus;
+	std::atomic<bool> bScriptProfileSamplerStop = false;
+	std::atomic<int> ScriptProfileActiveDepth = 0;
+	std::atomic<uint64_t> ScriptProfileSamplerTicksNs = 0;
+	std::atomic<uint64_t> ScriptProfileSamplerRequests = 0;
+	std::atomic<lua_Callbacks*> ScriptProfileLuaCallbacks = nullptr;
+	std::thread ScriptProfileSamplerThread;
+	uint64_t ScriptProfileLastSampleTickNs = 0;
+	int ScriptProfileSampleHz = 1000;
 	bool bEnableStartupLuauScript = true;
+	bool bCommandLineDungeonCharacterMode = false;
 	bool bScriptCameraControlEnabled = false;
 	bool bLuauImGuiFrameActive = false;
+	bool bScriptGameUiHidden = false;
 	std::array<bool, 256> ScriptKeyDown = {};
 	std::array<bool, 256> ScriptKeyPressed = {};
 	std::array<bool, 256> ScriptKeyReleased = {};
@@ -1158,6 +1247,7 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	struct PointLightState
 	{
 		UINT32 Id = 0;
+		CoronaECS::Entity EntityHandle;
 		bool bEnabled = true;
 		glm::vec3 Position = glm::vec3(0.0f);
 		float Radius = 320.0f;
@@ -1167,6 +1257,7 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	};
 	std::vector<PointLightState> PointLights;
 	UINT32 NextPointLightId = 1;
+	CoronaECS::Entity MainDirectionalLightEntity;
 
 	enum class ERenderDeltaOp : UINT8
 	{
@@ -1343,6 +1434,7 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	uint64_t GBufferLastVisibleObjectCount = 0;
 	uint64_t GBufferLastFrustumCulledObjectCount = 0;
 	uint64_t GBufferLastOcclusionCulledObjectCount = 0;
+	bool bShowCullingTextOverlay = false;
 	std::vector<RenderSyncChannel> RenderSyncChannels;
 	bool bRenderSyncChannelsInitialized = false;
 	bool bSceneObjectFullSyncPending = false;
@@ -1378,6 +1470,7 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	glm::mat4x4 PrevViewMat;
 	glm::mat4x4 PrevViewProjMat;
 	glm::vec4 FrameProjectionParams = glm::vec4(0.0f);
+	glm::vec3 RenderFrameCameraLookDirection = glm::vec3(0.0f, 0.0f, 1.0f);
 	glm::vec3 RenderFrameNormalizedLightDir = glm::vec3(0.0f, 1.0f, 0.0f);
 	glm::vec3 RenderFrameLightColor = glm::vec3(1.0f);
 	float RenderFrameShaderTime = 0.0f;
@@ -1408,6 +1501,9 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 
 	std::shared_ptr<Buffer> InstancePropertyBuffer;
 	shared_ptr<RTAS> TLAS;
+	std::vector<std::shared_ptr<Buffer>> InstancePropertyFrameBuffers;
+	std::vector<shared_ptr<RTAS>> TLASFrameResources;
+	std::vector<UINT32> TLASFrameInstanceCounts;
 	std::map<Mesh*, std::shared_ptr<RTAS>> RayTracingBLASCache;
 	std::vector<RTInstanceDesc> RayTracingInstances;
 	
@@ -1459,6 +1555,14 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	std::array<float, CpuUpdatePhaseCount> CpuUpdatePhaseLastTimeMs = {};
 	std::array<float, CpuUpdatePhaseCount> CpuUpdatePhaseAverageTimeMs = {};
 	std::array<std::deque<float>, CpuUpdatePhaseCount> CpuUpdatePhaseHistoryMs = {};
+	std::array<float, RenderCommandPhaseCount> RenderCommandPhaseLastTimeMs = {};
+	std::array<float, RenderCommandPhaseCount> RenderCommandPhaseCompletedLastTimeMs = {};
+	std::array<float, RenderCommandPhaseCount> RenderCommandPhaseAverageTimeMs = {};
+	std::array<std::deque<float>, RenderCommandPhaseCount> RenderCommandPhaseHistoryMs = {};
+	std::array<float, SceneFlushPhaseCount> SceneFlushPhaseLastTimeMs = {};
+	std::array<float, SceneFlushPhaseCount> SceneFlushPhaseCompletedLastTimeMs = {};
+	std::array<float, SceneFlushPhaseCount> SceneFlushPhaseAverageTimeMs = {};
+	std::array<std::deque<float>, SceneFlushPhaseCount> SceneFlushPhaseHistoryMs = {};
 	bool bFramePerfLogInitialized = false;
 	UINT64 FramePerfLogTotalFrameCount = 0;
 	UINT32 FramePerfLogSampleFrameCount = 0;
@@ -1467,10 +1571,25 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	double FramePerfLogMaxFrameMs = 0.0;
 	double FramePerfLogAccumCpuUpdateMs = 0.0;
 	std::array<double, CpuUpdatePhaseCount> FramePerfLogAccumCpuUpdatePhaseMs = {};
+	std::array<double, RenderCommandPhaseCount> FramePerfLogAccumRenderCommandPhaseMs = {};
+	std::array<double, SceneFlushPhaseCount> FramePerfLogAccumSceneFlushPhaseMs = {};
 	double FramePerfLogAccumBeginFrameMs = 0.0;
 	double FramePerfLogAccumRecordMs = 0.0;
 	double FramePerfLogAccumExecuteMs = 0.0;
 	double FramePerfLogAccumEndFrameMs = 0.0;
+	double FramePerfLogAccumRenderWaitMs = 0.0;
+	float FramePerfLastFrameMs = 0.0f;
+	float FramePerfAverageFrameMs = 0.0f;
+	float FramePerfLastBeginFrameMs = 0.0f;
+	float FramePerfAverageBeginFrameMs = 0.0f;
+	float FramePerfLastRecordMs = 0.0f;
+	float FramePerfAverageRecordMs = 0.0f;
+	float FramePerfLastExecuteMs = 0.0f;
+	float FramePerfAverageExecuteMs = 0.0f;
+	float FramePerfLastEndFrameMs = 0.0f;
+	float FramePerfAverageEndFrameMs = 0.0f;
+	float FramePerfLastRenderWaitMs = 0.0f;
+	float FramePerfAverageRenderWaitMs = 0.0f;
 	std::array<float, GpuPassCount> CpuPassLastTimeMs = {};
 	std::array<double, GpuPassCount> CpuPassAccumTimeMs = {};
 	std::array<uint8_t, GpuPassCount> CpuPassActiveMask = {};
@@ -1479,7 +1598,7 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	CpuClock::time_point FramePerfLogLastFlush = {};
 	void RecompileShaders();
 	void BeginFramePerfLogging();
-	void FinishFramePerfLogging(double beginFrameMs, double executeMs, double endFrameMs);
+	void FinishFramePerfLogging(double beginFrameMs, double executeMs, double endFrameMs, double renderWaitMs);
 	void InitGpuTimingResources();
 	void BeginGpuTimingFrame();
 	void ResolveGpuTimingFrame();
@@ -1488,6 +1607,10 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	void EndGpuPassTiming(EGpuPass pass);
 	const char* GetGpuPassName(EGpuPass pass) const;
 	const char* GetCpuUpdatePhaseName(ECpuUpdatePhase phase) const;
+	const char* GetRenderCommandPhaseName(ERenderCommandPhase phase) const;
+	const char* GetSceneFlushPhaseName(ESceneFlushPhase phase) const;
+	void AddRenderCommandPhaseTiming(ERenderCommandPhase phase, const CpuClock::time_point& begin, const CpuClock::time_point& end);
+	void AddSceneFlushPhaseTiming(ESceneFlushPhase phase, const CpuClock::time_point& begin, const CpuClock::time_point& end);
 	void AddCpuUpdatePhaseTiming(ECpuUpdatePhase phase, const CpuClock::time_point& begin, const CpuClock::time_point& end);
 	void FinishCpuUpdateTiming(const CpuClock::time_point& begin, const CpuClock::time_point& end);
 	void TrimCpuUpdateTimingHistory();
@@ -1588,6 +1711,10 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	void MarkRayTracingSceneDirty();
 	void MarkRayTracingTransformsDirty();
 	void FlushSceneObjectChanges();
+	UINT32 GetRayTracingFrameResourceIndex() const;
+	void EnsureRayTracingFrameResourceSlots();
+	void ActivateCurrentRayTracingFrameResources();
+	bool IsCurrentRayTracingFrameResourceReady() const;
 	void UpdateRayTracingInstanceTransforms();
 	void UpdateInstancePropertyBuffer();
 	void RebuildAccelerationStructures();
@@ -1609,6 +1736,20 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	glm::vec3 ResolveCameraPhysicsMovement(
 		const glm::vec3& startPosition,
 		const glm::vec3& desiredPosition);
+	void InitializeWorldEntity();
+	void InitializeLevelEntity();
+	CoronaECS::Entity CreateSceneObjectEntity(const SceneObject& object);
+	void UpdateSceneObjectEntity(const SceneObject& object);
+	void InitializeMainCameraEntity();
+	void UpdateMainCameraEntityFromSimpleCamera();
+	void InitializeMainDirectionalLightEntity();
+	void UpdateMainDirectionalLightEntityFromState();
+	void ApplyDirectionalLightEntityToState();
+	CoronaECS::Entity CreatePointLightEntity(PointLightState& pointLight);
+	void UpdatePointLightEntity(const PointLightState& pointLight);
+	void DestroyPointLightEntity(PointLightState& pointLight);
+	PointLightState* FindPointLightByEntity(CoronaECS::Entity entity);
+	const PointLightState* FindPointLightByEntity(CoronaECS::Entity entity) const;
 	void InitRaytracingShadowPass();
 	void InitRaytracingReflectionPass();
 	shared_ptr<RTPipelineStateObject> CreateRaytracingReflectionPSO(bool bUseSER);
@@ -1626,6 +1767,11 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 public:
 
 	void InitRaytracingData();
+	CoronaECS::Entity CreateEntity(const std::string& name = std::string());
+	CoronaECS::Entity GetSceneObjectEntity(SceneObjectHandle handle) const;
+	SceneObjectHandle GetEntitySceneObject(CoronaECS::Entity entity) const;
+	CoronaECS::EntityComponentSystem& GetEntityWorld();
+	const CoronaECS::EntityComponentSystem& GetEntityWorld() const;
 	SceneObjectHandle AddSceneObject(const SceneObjectDesc& desc);
 	SceneObjectHandle AddSceneInstance(const shared_ptr<Scene>& scene, const glm::mat4x4& transform);
 	bool RemoveSceneObject(SceneObjectHandle handle);
@@ -1653,6 +1799,19 @@ public:
 		bool bVisible,
 		bool bRayTracing,
 		bool bPhysicsQuery);
+	CoronaECS::Entity SpawnEntityForScript(
+		ScriptSceneHandle sceneHandle,
+		const glm::vec3& position,
+		const glm::vec3& rotationDegrees,
+		float targetExtent,
+		const glm::vec3& scale,
+		bool bUseScale,
+		float roughness,
+		float metallic,
+		bool bOverrideRoughnessMetallic,
+		bool bVisible,
+		bool bRayTracing,
+		bool bPhysicsQuery);
 	bool SetSceneObjectTransformForScript(
 		SceneObjectHandle handle,
 		const glm::vec3& position,
@@ -1667,6 +1826,117 @@ public:
 		float& targetExtent,
 		glm::vec3& scale,
 		bool& bUseScale) const;
+	bool AddMeshComponentForScript(
+		CoronaECS::Entity entity,
+		ScriptSceneHandle sceneHandle,
+		const glm::vec3& position,
+		const glm::vec3& rotationDegrees,
+		float targetExtent,
+		const glm::vec3& scale,
+		bool bUseScale,
+		float roughness,
+		float metallic,
+		bool bOverrideRoughnessMetallic,
+		bool bVisible,
+		bool bRayTracing,
+		bool bPhysicsQuery);
+	bool SetEntityMeshTransformForScript(
+		CoronaECS::Entity entity,
+		const glm::vec3& position,
+		const glm::vec3& rotationDegrees,
+		float targetExtent,
+		const glm::vec3& scale,
+		bool bUseScale);
+	bool SetEntityMeshComponentForScript(
+		CoronaECS::Entity entity,
+		const glm::vec3& position,
+		const glm::vec3& rotationDegrees,
+		float targetExtent,
+		const glm::vec3& scale,
+		bool bUseScale,
+		float roughness,
+		float metallic,
+		bool bOverrideRoughnessMetallic,
+		bool bVisible,
+		bool bRayTracing,
+		bool bPhysicsQuery);
+	bool GetEntityMeshForScript(
+		CoronaECS::Entity entity,
+		CoronaECS::MeshComponent& component) const;
+	CoronaECS::Entity GetWorldEntityForScript();
+	CoronaECS::Entity GetLevelEntityForScript();
+	CoronaECS::Entity GetMainCameraEntityForScript() const;
+	CoronaECS::Entity GetMainDirectionalLightEntityForScript();
+	CoronaECS::Entity SpawnPointLightEntityForScript(
+		const glm::vec3& position,
+		float radius,
+		const glm::vec3& color,
+		float intensity,
+		bool bEnabled);
+	bool SetEntityTransformForScript(
+		CoronaECS::Entity entity,
+		const glm::vec3& position,
+		const glm::vec3& rotationDegrees,
+		const glm::vec3& scale);
+	bool GetEntityTransformForScript(
+		CoronaECS::Entity entity,
+		glm::vec3& position) const;
+	bool SetEntityPhysicsForScript(
+		CoronaECS::Entity entity,
+		bool bQueryEnabled,
+		CoronaECS::PhysicsCollisionShape collisionShape,
+		const glm::vec3& boxHalfExtent);
+	bool GetEntityPhysicsForScript(
+		CoronaECS::Entity entity,
+		CoronaECS::PhysicsComponent& component) const;
+	bool SetEntityLightForScript(
+		CoronaECS::Entity entity,
+		const CoronaECS::LightComponent& component,
+		bool bPersistSceneState = true);
+	bool GetEntityLightForScript(
+		CoronaECS::Entity entity,
+		CoronaECS::LightComponent& component) const;
+	bool SetEntityCameraComponentForScript(
+		CoronaECS::Entity entity,
+		const CoronaECS::CameraComponent& component);
+	bool GetEntityCameraComponentForScript(
+		CoronaECS::Entity entity,
+		CoronaECS::CameraComponent& component) const;
+	bool SetEntityVisibilityForScript(CoronaECS::Entity entity, bool visible);
+	bool SetEntityRayTracingForScript(CoronaECS::Entity entity, bool enabled);
+	bool DestroyEntityForScript(CoronaECS::Entity entity);
+	bool AttachEntityScriptForScript(
+		CoronaECS::Entity entity,
+		int updateRef,
+		int shutdownRef,
+		int imguiRef,
+		int uiRef,
+		const std::wstring& sourceName,
+		bool bPassEntityToCallbacks = true);
+	bool AttachEntityScriptFileForScript(
+		CoronaECS::Entity entity,
+		const std::wstring& scriptPath);
+	void RegisterNativeEntityScript(
+		const std::string& name,
+		NativeEntityScriptCallbacks callbacks);
+	bool HasNativeEntityScript(const std::string& name) const;
+	bool AttachNativeEntityScriptForScript(
+		CoronaECS::Entity entity,
+		const std::string& nativeScriptName);
+	bool DetachEntityScriptForScript(CoronaECS::Entity entity);
+	void RecordScriptFunctionProfile(
+		const std::wstring& sourceName,
+		const std::string& callbackName,
+		double elapsedMs,
+		bool bNative);
+	void PublishScriptProfileFrame();
+	void RecordLuauScriptProfileSample(lua_State* L, int gcState);
+	void BeginLuauScriptProfileExecution();
+	void EndLuauScriptProfileExecution();
+	void ResetScriptProfileStats();
+	bool DumpScriptProfileStats();
+	void PushScriptProfileStatsForScript(lua_State* L);
+	void PushScriptProfileSamplesForScript(lua_State* L);
 	bool SetDefaultWorldVisibleForScript(bool visible);
 	bool SetScriptCameraControlForScript(bool enabled);
 	bool SetCameraForScript(
@@ -1711,15 +1981,23 @@ public:
 		uint16_t& buttonsReleased) const;
 	void ClearScriptInputFrameState();
 	void InitLuauScripting();
-	void RunStartupLuauScript();
+	void RunStartupLuauScript(bool bShowLoadingProgress = true);
 	bool LoadLuauScriptFile(const std::filesystem::path& scriptPath);
 	void CallLuauShutdownCallbacks();
+	void CallEntityScriptShutdownCallbacks();
 	void ReloadLuauScripting();
 	void UpdateLuauScripting(float dt);
+	void UpdateEntityScripts(float dt);
 	void BuildLuauUi();
+	void BuildEntityScriptUi();
 	void RenderQueuedLuauUi();
 	void DrawLuauImGui();
+	void DrawEntityScriptImGui();
 	void ShutdownLuauScripting();
+	void StartLuauScriptProfileSampler(lua_State* L);
+	void StopLuauScriptProfileSampler();
+	void ScriptProfileSamplerLoop();
+	void DestroyEntityScriptComponent(CoronaECS::Entity entity);
 	bool IsLuauImGuiFrameActive() const;
 	void QueueScriptUiSeparatorForScript();
 	void QueueScriptUiTextForScript(const std::string& text);
@@ -1727,11 +2005,68 @@ public:
 	void QueueScriptUiBeginWindowForScript(const std::string& title);
 	void QueueScriptUiEndWindowForScript();
 	void QueueScriptUiOverlayTextForScript(const std::string& text, float x, float y);
+	void QueueScriptUiOverlayLineForScript(
+		float x0,
+		float y0,
+		float x1,
+		float y1,
+		const glm::vec4& color,
+		float thickness);
+	void QueueScriptUiOverlayRectForScript(
+		float x,
+		float y,
+		float width,
+		float height,
+		const glm::vec4& color,
+		float thickness,
+		float rounding);
+	void QueueScriptUiOverlayRectFilledForScript(
+		float x,
+		float y,
+		float width,
+		float height,
+		const glm::vec4& color,
+		float rounding);
+	void QueueScriptUiOverlayProgressBarForScript(
+		const std::string& id,
+		float x,
+		float y,
+		float width,
+		float height,
+		float fraction,
+		const std::string& label,
+		const glm::vec4& fillColor,
+		const glm::vec4& backgroundColor,
+		const glm::vec4& borderColor);
 	void QueueScriptUiWorldAxisForScript(
 		const std::string& id,
 		const glm::vec3& position,
 		float length,
 		float thickness);
+	void QueueScriptUiWorldTextForScript(
+		const std::string& id,
+		const glm::vec3& position,
+		const std::string& text,
+		float xOffset,
+		float yOffset,
+		const glm::vec4& color);
+	void QueueScriptUiWorldProgressBarForScript(
+		const std::string& id,
+		const glm::vec3& position,
+		float fraction,
+		const std::string& label,
+		float width,
+		float height,
+		const glm::vec4& fillColor,
+		const glm::vec4& backgroundColor,
+		const glm::vec4& borderColor);
+	void QueueScriptUiWorldHealthBarForScript(
+		const std::string& id,
+		const glm::vec3& position,
+		float fraction,
+		const std::string& label,
+		float width,
+		float height);
 	glm::vec3 QueueScriptUiGizmo3DForScript(
 		const std::string& id,
 		const std::string& label,
@@ -1757,7 +2092,7 @@ public:
 		int selectedIndex,
 		const std::vector<std::string>& items);
 	bool QueueScriptUiCheckboxForScript(const std::string& id, const std::string& label, bool value);
-	void PushLuauUiStateForScript(lua_State* L);
+	void PushLuauUiStateForScript(lua_State* L, const std::string& mode = std::string());
 	bool SetLuauUiValueForScript(const std::string& name, lua_State* L, int valueIndex);
 	bool RunLuauUiCommandForScript(const std::string& name, lua_State* L, int argIndex);
 	void PushPersistentScriptControlForScript(lua_State* L, const std::string& name, int defaultIndex);

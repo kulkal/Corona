@@ -20,6 +20,7 @@ local initialPitch = initialCamera.pitch
 local yaw = initialYaw
 local pitch = initialPitch
 local cameraPathWasDriving = false
+local cameraEntity = corona.Entity.main_camera()
 
 local function add(a, b)
     return { a[1] + b[1], a[2] + b[2], a[3] + b[3] }
@@ -48,10 +49,11 @@ end
 
 local function apply_camera(position)
     local forward = forward_from_angles(yaw, pitch)
-    corona.set_camera({
+    corona.CameraComponent.set(cameraEntity, {
         position = position,
         look_at = add(position, forward),
         up = worldUp,
+        active = true,
     })
 end
 

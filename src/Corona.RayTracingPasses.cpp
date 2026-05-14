@@ -119,6 +119,11 @@ Corona::SceneObjectHandle Corona::AddSceneObject(const SceneObjectDesc& desc)
 	object.PhysicsCollisionShape = desc.PhysicsCollisionShape;
 	object.PhysicsBoxHalfExtent = desc.PhysicsBoxHalfExtent;
 	object.Transform = desc.Transform;
+	object.EntityHandle = desc.EntityHandle;
+	if (EntityWorld.IsAlive(object.EntityHandle))
+		UpdateSceneObjectEntity(object);
+	else
+		object.EntityHandle = CreateSceneObjectEntity(object);
 	SceneObjects.push_back(object);
 
 	MarkSceneObjectRenderDirty(object.Handle, kSceneObjectDirtyAll);
@@ -146,8 +151,11 @@ bool Corona::RemoveSceneObject(SceneObjectHandle handle)
 	if (it == SceneObjects.end())
 		return false;
 
+	const CoronaECS::Entity entity = it->EntityHandle;
+	DestroyEntityScriptComponent(entity);
 	MarkSceneObjectRenderRemoved(handle);
 	SceneObjects.erase(it);
+	EntityWorld.DestroyEntity(entity);
 	ScriptObjects.erase(handle);
 	if (SponzaObject == handle)
 		SponzaObject = InvalidSceneObjectHandle;
@@ -173,6 +181,7 @@ bool Corona::SetSceneObjectTransform(SceneObjectHandle handle, const glm::mat4x4
 		return false;
 
 	it->Transform = transform;
+	UpdateSceneObjectEntity(*it);
 	MarkSceneObjectRenderDirty(handle, kSceneObjectDirtyTransform);
 	if (it->bVisible && it->bPhysicsQuery)
 		MarkCpuPhysicsSceneDirty();
@@ -191,6 +200,7 @@ bool Corona::SetSceneObjectVisibility(SceneObjectHandle handle, bool visible)
 	if (it->bVisible != visible)
 	{
 		it->bVisible = visible;
+		UpdateSceneObjectEntity(*it);
 		MarkSceneObjectRenderDirty(handle, kSceneObjectDirtyVisibility);
 		if (it->bPhysicsQuery)
 			MarkCpuPhysicsSceneDirty();
@@ -210,6 +220,7 @@ bool Corona::SetSceneObjectRayTracingEnabled(SceneObjectHandle handle, bool enab
 	if (it->bRayTracing != enabled)
 	{
 		it->bRayTracing = enabled;
+		UpdateSceneObjectEntity(*it);
 		MarkSceneObjectRenderDirty(handle, kSceneObjectDirtyRayTracing);
 	}
 	return true;
@@ -243,12 +254,64 @@ void Corona::FlushSceneObjectChanges()
 {
 	if (!bRayTracingSceneDirty || !renderBackend)
 	{
-		if (bRayTracingTransformDirty && renderBackend)
+		if ((bRayTracingTransformDirty || bCommandLineNvFrapsBvhLiveTlas || !IsCurrentRayTracingFrameResourceReady()) && renderBackend)
 			UpdateRayTracingInstanceTransforms();
+		else
+			ActivateCurrentRayTracingFrameResources();
 		return;
 	}
 
 	RebuildAccelerationStructures();
+}
+
+UINT32 Corona::GetRayTracingFrameResourceIndex() const
+{
+	if (!renderBackend)
+		return 0;
+
+	const UINT32 frameCount = std::max<UINT32>(1u, renderBackend->GetFrameCount());
+	return std::min(renderBackend->GetCurrentFrameIndex(), frameCount - 1u);
+}
+
+void Corona::EnsureRayTracingFrameResourceSlots()
+{
+	const UINT32 frameCount = renderBackend ? std::max<UINT32>(1u, renderBackend->GetFrameCount()) : 1u;
+	if (TLASFrameResources.size() != frameCount)
+		TLASFrameResources.resize(frameCount);
+	if (TLASFrameInstanceCounts.size() != frameCount)
+		TLASFrameInstanceCounts.resize(frameCount, 0u);
+	if (InstancePropertyFrameBuffers.size() != frameCount)
+		InstancePropertyFrameBuffers.resize(frameCount);
+}
+
+void Corona::ActivateCurrentRayTracingFrameResources()
+{
+	EnsureRayTracingFrameResourceSlots();
+	const UINT32 frameIndex = GetRayTracingFrameResourceIndex();
+	if (frameIndex < TLASFrameResources.size() && TLASFrameResources[frameIndex])
+		TLAS = TLASFrameResources[frameIndex];
+	if (frameIndex < InstancePropertyFrameBuffers.size() && InstancePropertyFrameBuffers[frameIndex])
+		InstancePropertyBuffer = InstancePropertyFrameBuffers[frameIndex];
+}
+
+bool Corona::IsCurrentRayTracingFrameResourceReady() const
+{
+	if (!renderBackend || RayTracingInstances.empty())
+		return true;
+
+	const UINT32 frameIndex = GetRayTracingFrameResourceIndex();
+	if (frameIndex >= TLASFrameResources.size() || frameIndex >= TLASFrameInstanceCounts.size())
+		return false;
+	if (!TLASFrameResources[frameIndex])
+		return false;
+	if (TLASFrameInstanceCounts[frameIndex] != static_cast<UINT32>(RayTracingInstances.size()))
+		return false;
+	if (renderBackend->GetAPI() == ERenderBackendAPI::D3D12 &&
+		(frameIndex >= InstancePropertyFrameBuffers.size() || !InstancePropertyFrameBuffers[frameIndex]))
+	{
+		return false;
+	}
+	return true;
 }
 
 void Corona::UpdateRayTracingInstanceTransforms()
@@ -256,15 +319,8 @@ void Corona::UpdateRayTracingInstanceTransforms()
 	if (!renderBackend)
 		return;
 
-	if (!TLAS)
-	{
-		bRayTracingSceneDirty = true;
-		bRayTracingTransformDirty = false;
-		RebuildAccelerationStructures();
-		return;
-	}
-
 	vector<RTInstanceDesc> updatedInstances;
+	auto phaseStart = CpuClock::now();
 	size_t meshCount = 0;
 	for (const SceneObject& object : RenderWorld.SceneObjects)
 	{
@@ -284,8 +340,17 @@ void Corona::UpdateRayTracingInstanceTransforms()
 				object.Metallic,
 				object.bOverrideRoughnessMetallic);
 	}
+	AddSceneFlushPhaseTiming(ESceneFlushPhase::UpdateGatherInstances, phaseStart, CpuClock::now());
 
-	if (updatedInstances.size() != RayTracingInstances.size())
+	if (updatedInstances.empty())
+	{
+		RayTracingInstances.clear();
+		TLAS = nullptr;
+		bRayTracingTransformDirty = false;
+		return;
+	}
+
+	if (RayTracingInstances.empty() || updatedInstances.size() != RayTracingInstances.size())
 	{
 		bRayTracingSceneDirty = true;
 		bRayTracingTransformDirty = false;
@@ -293,25 +358,53 @@ void Corona::UpdateRayTracingInstanceTransforms()
 		return;
 	}
 
-	// TLAS and the instance property buffer are currently single-buffered.
-	// Updating them in place while the previous frame is still tracing can remove the D3D12 device.
-	renderBackend->WaitForGpu();
+	EnsureRayTracingFrameResourceSlots();
+	const UINT32 frameIndex = GetRayTracingFrameResourceIndex();
 
+	phaseStart = CpuClock::now();
+	// Frame-indexed TLAS resources are protected by BeginFrame's per-frame fence.
+	// The old single-buffered path had to WaitForGpu() here before in-place updates.
+	AddSceneFlushPhaseTiming(ESceneFlushPhase::UpdateGpuWait, phaseStart, CpuClock::now());
+
+	phaseStart = CpuClock::now();
 	RayTracingInstances = std::move(updatedInstances);
-	if (!renderBackend->UpdateTLAS(TLAS, RayTracingInstances))
+	std::shared_ptr<RTAS>& frameTLAS = TLASFrameResources[frameIndex];
+	const bool bCanUpdateFrameTLAS =
+		frameTLAS &&
+		frameIndex < TLASFrameInstanceCounts.size() &&
+		TLASFrameInstanceCounts[frameIndex] == static_cast<UINT32>(RayTracingInstances.size());
+	if (bCanUpdateFrameTLAS)
 	{
+		if (!renderBackend->UpdateTLAS(frameTLAS, RayTracingInstances))
+			frameTLAS.reset();
+	}
+	if (!frameTLAS)
+	{
+		frameTLAS = renderBackend->CreateTLAS(RayTracingInstances);
+	}
+	if (!frameTLAS)
+	{
+		AddSceneFlushPhaseTiming(ESceneFlushPhase::UpdateTlas, phaseStart, CpuClock::now());
 		bRayTracingSceneDirty = true;
 		bRayTracingTransformDirty = false;
 		RebuildAccelerationStructures();
 		return;
 	}
+	TLASFrameInstanceCounts[frameIndex] = static_cast<UINT32>(RayTracingInstances.size());
+	TLAS = frameTLAS;
+	AddSceneFlushPhaseTiming(ESceneFlushPhase::UpdateTlas, phaseStart, CpuClock::now());
 
+	phaseStart = CpuClock::now();
 	UpdateInstancePropertyBuffer();
+	AddSceneFlushPhaseTiming(ESceneFlushPhase::UpdateInstanceProperties, phaseStart, CpuClock::now());
 	bRayTracingTransformDirty = false;
 }
 
 void Corona::UpdateInstancePropertyBuffer()
 {
+	if (!renderBackend)
+		return;
+
 	constexpr UINT32 kMinInstancePropertyCapacity = 500u;
 	const UINT32 instanceCapacity = std::max(kMinInstancePropertyCapacity, static_cast<UINT32>(RayTracingInstances.size()));
 	std::vector<InstanceProperty> instanceProperties(instanceCapacity);
@@ -340,12 +433,16 @@ void Corona::UpdateInstancePropertyBuffer()
 		return;
 	}
 
-	if (!InstancePropertyBuffer || InstancePropertyBuffer->NumElements < instanceCapacity)
+	EnsureRayTracingFrameResourceSlots();
+	const UINT32 frameIndex = GetRayTracingFrameResourceIndex();
+	std::shared_ptr<Buffer>& frameInstancePropertyBuffer = InstancePropertyFrameBuffers[frameIndex];
+	if (!frameInstancePropertyBuffer || frameInstancePropertyBuffer->NumElements < instanceCapacity)
 	{
-		InstancePropertyBuffer = renderBackend->CreateBuffer({ instanceCapacity, sizeof(InstanceProperty), EInitialResourceState::GenericRead, false, nullptr });
-		InstancePropertyBuffer->MakeByteAddressBufferSRV();
-		NAME_D3D12_OBJECT(InstancePropertyBuffer->resource);
+		frameInstancePropertyBuffer = renderBackend->CreateBuffer({ instanceCapacity, sizeof(InstanceProperty), EInitialResourceState::GenericRead, false, nullptr });
+		frameInstancePropertyBuffer->MakeByteAddressBufferSRV();
+		NAME_D3D12_OBJECT(frameInstancePropertyBuffer->resource);
 	}
+	InstancePropertyBuffer = frameInstancePropertyBuffer;
 
 	uint8_t* pData = nullptr;
 	const HRESULT mapResult = InstancePropertyBuffer->resource->Map(0, nullptr, reinterpret_cast<void**>(&pData));
@@ -370,8 +467,15 @@ void Corona::RebuildAccelerationStructures()
 	const size_t previousInstanceCount = RayTracingInstances.size();
 
 	// Wait for GPU to finish using current structures
+	auto phaseStart = CpuClock::now();
 	renderBackend->WaitForGpu();
+	AddSceneFlushPhaseTiming(ESceneFlushPhase::RebuildGpuWait, phaseStart, CpuClock::now());
+	EnsureRayTracingFrameResourceSlots();
+	std::fill(TLASFrameResources.begin(), TLASFrameResources.end(), std::shared_ptr<RTAS>());
+	std::fill(TLASFrameInstanceCounts.begin(), TLASFrameInstanceCounts.end(), 0u);
+	std::fill(InstancePropertyFrameBuffers.begin(), InstancePropertyFrameBuffers.end(), std::shared_ptr<Buffer>());
 
+	phaseStart = CpuClock::now();
 	RayTracingInstances.clear();
 	size_t meshCount = 0;
 	vector<Mesh*> retainedMeshes;
@@ -410,24 +514,35 @@ void Corona::RebuildAccelerationStructures()
 		else
 			++it;
 	}
+	AddSceneFlushPhaseTiming(ESceneFlushPhase::RebuildGatherInstances, phaseStart, CpuClock::now());
 
+	phaseStart = CpuClock::now();
 	const bool bInstanceCountChanged = previousInstanceCount != RayTracingInstances.size();
 	if (RayTracingInstances.empty())
 	{
 		TLAS = nullptr;
 	}
-	else if (!TLAS || bInstanceCountChanged || !renderBackend->UpdateTLAS(TLAS, RayTracingInstances))
+	else
 	{
-		TLAS = renderBackend->CreateTLAS(RayTracingInstances);
+		const UINT32 frameIndex = GetRayTracingFrameResourceIndex();
+		std::shared_ptr<RTAS>& frameTLAS = TLASFrameResources[frameIndex];
+		frameTLAS = renderBackend->CreateTLAS(RayTracingInstances);
+		TLASFrameInstanceCounts[frameIndex] = frameTLAS ? static_cast<UINT32>(RayTracingInstances.size()) : 0u;
+		TLAS = frameTLAS;
 	}
+	AddSceneFlushPhaseTiming(ESceneFlushPhase::RebuildTlas, phaseStart, CpuClock::now());
 	
 	// Update instance property buffer
+	phaseStart = CpuClock::now();
 	UpdateInstancePropertyBuffer();
+	AddSceneFlushPhaseTiming(ESceneFlushPhase::RebuildInstanceProperties, phaseStart, CpuClock::now());
 
+	phaseStart = CpuClock::now();
 	if (bInstanceCountChanged && (PSO_RT_SHADOW || PSO_RT_AO || PSO_RT_SKY_LIGHTING || PSO_RT_REFLECTION || PSO_RT_GI || PSO_RT_SCREEN_PROBE_GI || PSO_RT_SPATIAL_HASH_GI))
 		InitRTPSO();
 	if (PSO_PATH_TRACING)
 		InitPathTracingPass();
+	AddSceneFlushPhaseTiming(ESceneFlushPhase::RebuildPipelineState, phaseStart, CpuClock::now());
 
 	bRayTracingSceneDirty = false;
 }
@@ -445,11 +560,6 @@ void Corona::InitRaytracingData()
 			NumTotalMesh += object.ScenePtr->meshes.size();
 	}
 	RayTracingInstances.reserve(NumTotalMesh);
-
-	// Create initial instance property buffer (large enough for many instances)
-	InstancePropertyBuffer = renderBackend->CreateBuffer({ 500u, sizeof(InstanceProperty), EInitialResourceState::GenericRead, false, nullptr });
-	InstancePropertyBuffer->MakeByteAddressBufferSRV();
-	NAME_D3D12_OBJECT(InstancePropertyBuffer->resource);
 
 	bRayTracingSceneDirty = true;
 	RebuildAccelerationStructures();
