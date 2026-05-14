@@ -26,6 +26,7 @@ logs/
 dumps/
 _backups/
 _downloads/
+_captures/
 .deps/
 camera_state.cfg
 debug.log
