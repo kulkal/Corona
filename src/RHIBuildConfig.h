@@ -33,3 +33,14 @@
 #ifndef CORONA_HAS_AFTERMATH
 #  define CORONA_HAS_AFTERMATH 0
 #endif
+
+// NVIDIA Streamline (DLSS RR/SR) is DX12-only. The CMake build also exposes
+// WITH_STREAMLINE; force it off when the D3D12 backend itself isn't compiled,
+// to keep mobile / Vulkan-only builds from pulling in DX12-specific
+// Streamline call sites in Corona.cpp.
+#if !CORONA_HAS_D3D12
+#  ifdef WITH_STREAMLINE
+#    undef WITH_STREAMLINE
+#  endif
+#  define WITH_STREAMLINE 0
+#endif

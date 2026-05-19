@@ -498,24 +498,32 @@ namespace
 		"ImGui",
 	};
 
+	// API-neutral analogue of pix3.h's PIX_COLOR (r,g,b) packed into UINT64 with
+	// alpha 0xFF. Lets the gpu-marker color table compile in builds that omit
+	// WinPixEventRuntime (CORONA_HAS_PIX=0).
+	constexpr uint64_t MakeGpuMarkerColor(uint8_t r, uint8_t g, uint8_t b)
+	{
+		return 0xFF000000ull | (static_cast<uint64_t>(b) << 16) | (static_cast<uint64_t>(g) << 8) | static_cast<uint64_t>(r);
+	}
+
 	const std::array<UINT64, 17> kGpuPassPixColors = {
-		PIX_COLOR(210, 210, 210),
-		PIX_COLOR(86, 156, 214),
-		PIX_COLOR(214, 86, 86),
-		PIX_COLOR(214, 145, 86),
-		PIX_COLOR(156, 214, 86),
-		PIX_COLOR(214, 86, 189),
-		PIX_COLOR(86, 214, 169),
-		PIX_COLOR(86, 214, 214),
-		PIX_COLOR(181, 140, 255),
-		PIX_COLOR(245, 214, 86),
-		PIX_COLOR(86, 145, 245),
-		PIX_COLOR(86, 189, 245),
-		PIX_COLOR(245, 145, 86),
-		PIX_COLOR(189, 86, 245),
-		PIX_COLOR(245, 245, 245),
-		PIX_COLOR(145, 145, 145),
-		PIX_COLOR(86, 245, 145),
+		MakeGpuMarkerColor(210, 210, 210),
+		MakeGpuMarkerColor(86, 156, 214),
+		MakeGpuMarkerColor(214, 86, 86),
+		MakeGpuMarkerColor(214, 145, 86),
+		MakeGpuMarkerColor(156, 214, 86),
+		MakeGpuMarkerColor(214, 86, 189),
+		MakeGpuMarkerColor(86, 214, 169),
+		MakeGpuMarkerColor(86, 214, 214),
+		MakeGpuMarkerColor(181, 140, 255),
+		MakeGpuMarkerColor(245, 214, 86),
+		MakeGpuMarkerColor(86, 145, 245),
+		MakeGpuMarkerColor(86, 189, 245),
+		MakeGpuMarkerColor(245, 145, 86),
+		MakeGpuMarkerColor(189, 86, 245),
+		MakeGpuMarkerColor(245, 245, 245),
+		MakeGpuMarkerColor(145, 145, 145),
+		MakeGpuMarkerColor(86, 245, 145),
 	};
 
 	void BeginGpuPassMarker(IRenderBackend* backend, UINT passIndex, const char* markerName)
@@ -1686,6 +1694,11 @@ void Corona::ApplyRenderingAndAAMode(ERenderingMode requestedRenderingMode, EAnt
 
 bool Corona::RenderResolutionResourcesMatchCurrentState() const
 {
+#if !CORONA_HAS_D3D12
+	// TODO: expose API-neutral Width/Height accessors on Texture so this can
+	// run on the Vulkan-only build. For now assume resources match.
+	return true;
+#else
 	const UINT displayWidth = m_width;
 	const UINT displayHeight = m_height;
 	const UINT renderWidth = GetRenderWidth();
@@ -1717,6 +1730,7 @@ bool Corona::RenderResolutionResourcesMatchCurrentState() const
 		return false;
 
 	return true;
+#endif // CORONA_HAS_D3D12 (RenderResolutionResourcesMatchCurrentState DX12 body)
 }
 
 void Corona::ResetAllAccumulationState(bool forceUpscaleReload)
@@ -1759,6 +1773,13 @@ void Corona::RecreateRenderResolutionResources()
 	if (!renderBackend)
 		return;
 
+#if !CORONA_HAS_D3D12
+	// This function touches DX12-only Texture members (MakeRTV, ->resource,
+	// ->textureDesc). Real Vulkan/mobile support needs Texture to expose
+	// API-neutral Width/Height accessors and the RTV creation handled inside
+	// the backend rather than on the renderer side.
+	return;
+#else
 	const UINT DisplayWidth = m_width;
 	const UINT DisplayHeight = m_height;
 	const UINT RenderWidthLocal = GetRenderWidth();
@@ -2014,6 +2035,7 @@ void Corona::RecreateRenderResolutionResources()
 		L", display=" + std::to_wstring(DisplayWidth) +
 		L"x" + std::to_wstring(DisplayHeight) +
 		L", displaySized=" + std::to_wstring(bRecreateDisplaySizedBuffers ? 1 : 0));
+#endif // CORONA_HAS_D3D12 (RecreateRenderResolutionResources DX12 body)
 }
 
 void Corona::ReloadRenderResolutionAssets()
@@ -6658,6 +6680,11 @@ void Corona::LoadPipeline()
 		return;
 	}
 
+#if !CORONA_HAS_D3D12
+	// Builds without the D3D12 backend must request the Vulkan one explicitly
+	// on the command line; the remaining bootstrap is the D3D12 path.
+	throw std::runtime_error("D3D12 backend is not available in this build (CORONA_HAS_D3D12=0). Use --backend vulkan.");
+#else
 	UINT dxgiFactoryFlags = 0;
 
 	const bool bEnableD3D12DebugLayer =
@@ -6793,6 +6820,7 @@ void Corona::LoadPipeline()
 		m_width,
 		m_height,
 		ETextureFormat::RGBA8Unorm);
+#endif // CORONA_HAS_D3D12 (LoadPipeline DX12 bootstrap)
 }
 
 glm::mat4x4 Corona::BuildCenteredSceneTransform(

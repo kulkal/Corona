@@ -5803,7 +5803,12 @@ void Corona::PushLuauUiStateForScript(lua_State* L, const std::string& mode)
 	PushNumberField(L, "dlss_jitter_phase_scale", DLSSJitterPhaseScale);
 	PushNumberField(L, "camera_turn_speed", m_turnSpeed);
 	PushBoolField(L, "debug_visualization_available",
-		renderBackend && renderBackend->GetAPI() == ERenderBackendAPI::D3D12 && BufferVisualizePSO != nullptr);
+#if CORONA_HAS_D3D12
+		renderBackend && renderBackend->GetAPI() == ERenderBackendAPI::D3D12 && BufferVisualizePSO != nullptr
+#else
+		false
+#endif
+	);
 	PushBoolField(L, "visualize_buffers", bDebugDraw);
 	PushBoolField(L, "draw_histogram", bDrawHistogram);
 	PushIntegerField(L, "fullscreen_debug_buffer", static_cast<lua_Integer>(FullscreenDebugBuffer));

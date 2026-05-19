@@ -646,6 +646,7 @@ void Corona::ToneMapPass()
 	}
 
 
+#if CORONA_HAS_D3D12
 	Texture* backbuffer = framebuffers[renderBackend->GetCurrentFrameIndex()].get();
 	Texture* ResolveTarget = GetCurrentResolveSource();
 	if (!ResolveTarget)
@@ -667,10 +668,12 @@ void Corona::ToneMapPass()
 	renderBackend->SetViewportAndScissor(m_width, m_height);
 	renderBackend->DrawFullscreenQuad(FullScreenVB.get());
 
-	
+
 	//PIXEndEvent(renderBackend->GetGraphicsCommandList());
+#endif // CORONA_HAS_D3D12 (ToneMapPass DX12 tail)
 }
 
+#if CORONA_HAS_D3D12
 void Corona::DebugPass()
 {
 	if (!renderBackend ||
@@ -1215,6 +1218,7 @@ void Corona::DebugPass()
 		f(FullscreenDebugBuffer);
 	}
 }
+#endif // CORONA_HAS_D3D12 (DebugPass)
 
 void Corona::LightingPass()
 {
@@ -1319,6 +1323,7 @@ void Corona::LightingPass()
 		return;
 	}
 
+#if CORONA_HAS_D3D12
 	LightingPSO->Apply();
 
 	LightingPSO->SetSampler("samplerWrap", samplerWrap.get());
@@ -1356,6 +1361,7 @@ void Corona::LightingPass()
 		renderBackend->DrawFullscreenQuad(FullScreenVB.get());
 		renderBackend->TransitionTexture(DirectLightingBuffer.get(), EResourceState::RenderTarget, EResourceState::ShaderRead);
 	}
+#endif // CORONA_HAS_D3D12 (LightingPass DX12 tail)
 }
 
 void Corona::TemporalAAPass()
@@ -1415,6 +1421,7 @@ void Corona::TemporalAAPass()
 		return;
 	}
 
+#if CORONA_HAS_D3D12
 	renderBackend->TransitionTexture(ResolveTarget, EResourceState::ShaderRead, EResourceState::RenderTarget);
 
 	TemporalAAPSO->Apply();
@@ -1465,9 +1472,11 @@ void Corona::TemporalAAPass()
 	bTemporalAAHistoryValid = IsTemporalAAEnabled();
 	bUseLightingBufferFallbackForToneMap = false;
 	ResolvedColorBufferIndex = ColorBufferWriteIndex;
+#endif // CORONA_HAS_D3D12 (TemporalAAPass DX12 tail)
 
 }
 
+#if CORONA_HAS_D3D12
 void Corona::BloomPass()
 {
 	renderBackend->EmitGpuCrashMarker("BloomPass");
@@ -1576,6 +1585,7 @@ void Corona::BloomPass()
 	renderBackend->TransitionBuffer(ExposureData.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
 
 }
+#endif // CORONA_HAS_D3D12 (BloomPass)
 
 void Corona::DrawScene(shared_ptr<Scene> scene, const glm::mat4x4& instanceTransform, float Roughness, float Metalic, bool bOverrideRoughnessMetallic)
 {

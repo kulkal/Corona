@@ -404,6 +404,11 @@ void Corona::UpdateInstancePropertyBuffer()
 {
 	if (!renderBackend)
 		return;
+#if CORONA_HAS_D3D12
+	// The DX12 path lays InstanceProperty out in a ByteAddressBuffer that hit
+	// shaders look up via instance ID. The Vulkan path manages its own
+	// instance descriptor copy inside VulkanBackend, so this whole helper is
+	// DX12-only.
 
 	constexpr UINT32 kMinInstancePropertyCapacity = 500u;
 	const UINT32 instanceCapacity = std::max(kMinInstancePropertyCapacity, static_cast<UINT32>(RayTracingInstances.size()));
@@ -457,6 +462,7 @@ void Corona::UpdateInstancePropertyBuffer()
 
 	memcpy(pData, instanceProperties.data(), instanceProperties.size() * sizeof(InstanceProperty));
 	InstancePropertyBuffer->resource->Unmap(0, nullptr);
+#endif // CORONA_HAS_D3D12 (UpdateInstancePropertyBuffer DX12 path)
 }
 
 void Corona::RebuildAccelerationStructures()

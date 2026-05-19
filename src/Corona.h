@@ -670,7 +670,9 @@ private:
 
 
 	UINT32 ToneMapMode = FILMIC_HABLE;
+#if CORONA_HAS_D3D12
 	shared_ptr<PipelineStateObject> ToneMapPSO;
+#endif
 	std::shared_ptr<GraphicsPipelineHandle> ToneMapGraphicsPipeline;
 
 	// debug pass
@@ -696,7 +698,9 @@ private:
 		UINT32 DebugMode;
 	};
 
+#if CORONA_HAS_D3D12
 	shared_ptr<PipelineStateObject> BufferVisualizePSO;
+#endif
 
 	// lighting pass
 	
@@ -728,7 +732,9 @@ private:
 		glm::vec3 PointLightPadding = glm::vec3(0.0f);
 	};
 	
+#if CORONA_HAS_D3D12
 	shared_ptr<PipelineStateObject> LightingPSO;
+#endif
 	std::shared_ptr<GraphicsPipelineHandle> LightingGraphicsPipeline;
 
 	// temporalAA
@@ -924,7 +930,9 @@ private:
 	UINT32 CommandLineExitAfterFrames = 0;
 	std::wstring CommandLineCameraPathFile;
 
+#if CORONA_HAS_D3D12
 	shared_ptr<PipelineStateObject> TemporalAAPSO;
+#endif
 	std::shared_ptr<GraphicsPipelineHandle> TemporalAAGraphicsPipeline;
 	bool bTemporalAAHistoryValid = false;
 	bool bTemporalDenoiserHistoryValid = false;
@@ -974,6 +982,7 @@ private:
 	UINT BloomBufferWidth = 640;
 	UINT  BloomBufferHeight = 384;
 
+#if CORONA_HAS_D3D12
 	shared_ptr<PipelineStateObject> BloomBlurPSO;
 
 	shared_ptr<PipelineStateObject> BloomExtractPSO;
@@ -981,8 +990,10 @@ private:
 	shared_ptr<PipelineStateObject> HistogramPSO;
 
 	shared_ptr<PipelineStateObject> ClearHistogramPSO;
+#endif
 
 	bool bDrawHistogram = false;
+#if CORONA_HAS_D3D12
 	shared_ptr<PipelineStateObject> DrawHistogramPSO;
 
 	struct AdaptExposureCB
@@ -1001,6 +1012,7 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	AdaptExposureCB AdaptExposureCB;
 
 	shared_ptr<PipelineStateObject> AdapteExposurePSO;
+#endif // CORONA_HAS_D3D12 (DX12-only post-process PSOs)
 
 	shared_ptr<VertexBuffer> FullScreenVB;
 
