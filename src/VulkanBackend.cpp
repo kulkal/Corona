@@ -1,6 +1,6 @@
 #include "stdafx.h"
 #include "VulkanBackend.h"
-#include "SimpleDX12.h"
+#include "DX12Backend.h"
 #include "Utils.h"
 
 #include <algorithm>
@@ -779,25 +779,23 @@ namespace
 		case ETextureFormat::RGBA32Float: return VK_FORMAT_R32G32B32A32_SFLOAT;
 		case ETextureFormat::RG16Float: return VK_FORMAT_R16G16_SFLOAT;
 		case ETextureFormat::RGBA8Unorm: return VK_FORMAT_R8G8B8A8_UNORM;
+		case ETextureFormat::BGRA8Unorm: return VK_FORMAT_B8G8R8A8_UNORM;
 		case ETextureFormat::D32Float: return VK_FORMAT_D32_SFLOAT;
 		case ETextureFormat::R32Float: return VK_FORMAT_R32_SFLOAT;
 		case ETextureFormat::R8Uint: return VK_FORMAT_R8_UINT;
-		default: return VK_FORMAT_R8G8B8A8_UNORM;
 		}
+		return VK_FORMAT_R8G8B8A8_UNORM;
 	}
 
-	VkFormat ToVkFormat(DXGI_FORMAT format)
+	VkFormat ToVkVertexFormat(EVertexAttributeFormat format)
 	{
 		switch (format)
 		{
-		case DXGI_FORMAT_R8G8B8A8_UNORM: return VK_FORMAT_R8G8B8A8_UNORM;
-		case DXGI_FORMAT_B8G8R8A8_UNORM: return VK_FORMAT_B8G8R8A8_UNORM;
-		case DXGI_FORMAT_R16G16B16A16_FLOAT: return VK_FORMAT_R16G16B16A16_SFLOAT;
-		case DXGI_FORMAT_R16G16_FLOAT: return VK_FORMAT_R16G16_SFLOAT;
-		case DXGI_FORMAT_R32_FLOAT: return VK_FORMAT_R32_SFLOAT;
-		case DXGI_FORMAT_D32_FLOAT: return VK_FORMAT_D32_SFLOAT;
-		default: return VK_FORMAT_R8G8B8A8_UNORM;
+		case EVertexAttributeFormat::Float2: return VK_FORMAT_R32G32_SFLOAT;
+		case EVertexAttributeFormat::Float3: return VK_FORMAT_R32G32B32_SFLOAT;
+		case EVertexAttributeFormat::Float4: return VK_FORMAT_R32G32B32A32_SFLOAT;
 		}
+		return VK_FORMAT_R32G32B32A32_SFLOAT;
 	}
 
 	VkImageAspectFlags GetImageAspectFlags(ETextureFormat format)
@@ -3045,7 +3043,7 @@ uint32_t VulkanBackend::GetFrameCount() const
 #endif
 }
 uint32_t VulkanBackend::GetCurrentFrameIndex() const { return CurrentFrameIndex; }
-SimpleDX12* VulkanBackend::AsSimpleDX12() { return nullptr; }
+DX12Backend* VulkanBackend::AsDX12Backend() { return nullptr; }
 std::shared_ptr<Texture> VulkanBackend::CreateTexture2D(const TextureCreateDesc& desc)
 {
 #if !CORONA_HAS_VULKAN
@@ -3329,7 +3327,6 @@ std::shared_ptr<Texture> VulkanBackend::CreateTextureFromFile(const std::wstring
 	return texture;
 #endif
 }
-std::shared_ptr<Texture> VulkanBackend::WrapNativeTexture(const Microsoft::WRL::ComPtr<ID3D12Resource>& resource) { (void)resource; ThrowNotImplemented(__FUNCTION__); }
 std::shared_ptr<Texture> VulkanBackend::CreateTexture3D(ETextureFormat format, ETextureUsageFlags usage, EInitialResourceState initialState, int width, int height, int depth, int mipLevels)
 {
 #if !CORONA_HAS_VULKAN
@@ -3542,16 +3539,16 @@ std::shared_ptr<VertexBuffer> VulkanBackend::CreateVertexBuffer(uint32_t size, u
 	return std::shared_ptr<VertexBuffer>(vertexBuffer);
 #endif
 }
-std::shared_ptr<IndexBuffer> VulkanBackend::CreateIndexBuffer(DXGI_FORMAT format, uint32_t size, void* srcData)
+std::shared_ptr<IndexBuffer> VulkanBackend::CreateIndexBuffer(EIndexFormat format, uint32_t size, void* srcData)
 {
 #if !CORONA_HAS_VULKAN
 	(void)format; (void)size; (void)srcData; ThrowNotImplemented(__FUNCTION__);
 #else
 	IndexBuffer* indexBuffer = new IndexBuffer();
-	indexBuffer->numIndices = format == DXGI_FORMAT_R16_UINT ? static_cast<int>(size / 2) : static_cast<int>(size / 4);
+	indexBuffer->numIndices = format == EIndexFormat::U16 ? static_cast<int>(size / 2) : static_cast<int>(size / 4);
 
 	VulkanBufferAllocation allocation{};
-	allocation.Stride = format == DXGI_FORMAT_R16_UINT ? 2u : 4u;
+	allocation.Stride = format == EIndexFormat::U16 ? 2u : 4u;
 	allocation.SizeInBytes = size;
 
 	VkBufferUsageFlags bufferUsage = VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
@@ -3599,7 +3596,7 @@ std::shared_ptr<RTAS> VulkanBackend::CreateBLASForMesh(Mesh* mesh)
 	triangles.vertexData.deviceAddress = GetBufferDeviceAddress(vbIt->second.Buffer);
 	triangles.vertexStride = mesh->VertexStride;
 	triangles.maxVertex = static_cast<uint32_t>(mesh->Vb->numVertices);
-	triangles.indexType = mesh->IndexFormat == DXGI_FORMAT_R16_UINT ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32;
+	triangles.indexType = mesh->IndexFormat == EIndexFormat::U16 ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32;
 	triangles.indexData.deviceAddress = GetBufferDeviceAddress(ibIt->second.Buffer);
 
 	VkAccelerationStructureGeometryKHR geometry{};
@@ -3912,11 +3909,16 @@ std::shared_ptr<ComputePipelineStateObject> VulkanBackend::CreateComputePipeline
 	return pso;
 #endif
 }
-Microsoft::WRL::ComPtr<ID3DBlob> VulkanBackend::CreateShader(const std::wstring& fileName, const std::string& entryPoint, const std::string& target) { (void)fileName; (void)entryPoint; (void)target; ThrowNotImplemented(__FUNCTION__); }
-void VulkanBackend::ResetDynamicResources() {}
-void VulkanBackend::CreateSwapChainForWindow(IDXGIFactory4* factory, HWND hwnd, uint32_t width, uint32_t height, DXGI_FORMAT format)
+ShaderBytecode VulkanBackend::CreateShader(const std::wstring& fileName, const std::string& entryPoint, const std::string& target)
 {
-	(void)factory;
+	// Vulkan loads SPIR-V from build outputs, not via runtime HLSL compile.
+	(void)fileName; (void)entryPoint; (void)target;
+	return {};
+}
+void VulkanBackend::ResetDynamicResources() {}
+void VulkanBackend::CreateSwapChainForWindow(WindowHandle window, uint32_t width, uint32_t height, ETextureFormat format)
+{
+	HWND hwnd = static_cast<HWND>(window.PlatformHandle);
 	(void)format;
 #if !CORONA_HAS_VULKAN
 	ThrowNotImplemented(__FUNCTION__);
@@ -4193,11 +4195,23 @@ void VulkanBackend::CreateSwapChainForWindow(IDXGIFactory4* factory, HWND hwnd, 
 	AppendVulkanRuntimeTraceBackend(L"[VulkanBackend::CreateSwapChainForWindow] after RecreateSwapchain");
 #endif
 }
-Microsoft::WRL::ComPtr<ID3D12Resource> VulkanBackend::GetSwapChainBuffer(uint32_t bufferIndex) { (void)bufferIndex; ThrowNotImplemented(__FUNCTION__); }
-HRESULT VulkanBackend::CaptureTexture(Texture* source, DirectX::ScratchImage& captured, D3D12_RESOURCE_STATES beforeState) { (void)source; (void)captured; (void)beforeState; ThrowNotImplemented(__FUNCTION__); }
-void VulkanBackend::InitializeImGuiBackend(HWND hwnd, DXGI_FORMAT rtvFormat)
+std::shared_ptr<Texture> VulkanBackend::GetSwapChainTexture(uint32_t bufferIndex)
 {
-	(void)hwnd;
+	// Vulkan's swapchain images are owned and presented by the backend itself; the
+	// renderer does not wrap them as Texture handles the way the D3D12 path does.
+	(void)bufferIndex;
+	return nullptr;
+}
+bool VulkanBackend::CaptureTexture(Texture* source, CapturedImage& captured, EResourceState beforeState)
+{
+	// Vulkan-side arbitrary-texture capture is not implemented yet; swapchain
+	// capture goes through CaptureCurrentSwapchainImageToPNG.
+	(void)source; (void)captured; (void)beforeState;
+	return false;
+}
+void VulkanBackend::InitializeImGuiBackend(WindowHandle window, ETextureFormat rtvFormat)
+{
+	(void)window;
 	(void)rtvFormat;
 #if !CORONA_HAS_VULKAN
 	ThrowNotImplemented(__FUNCTION__);
@@ -4875,7 +4889,12 @@ void VulkanBackend::ExecuteCurrentCommandList()
 	AppendVulkanRuntimeTraceBackend(L"[VulkanBackend::ExecuteCurrentCommandList] end");
 #endif
 }
-ID3D12GraphicsCommandList* VulkanBackend::GetGraphicsCommandList() { return nullptr; }
+void VulkanBackend::BeginGpuMarker(uint64_t color, const char* label)
+{
+	// VK_EXT_debug_utils support is left for a future change; use Nsight/RenderDoc on the Vulkan path for now.
+	(void)color; (void)label;
+}
+void VulkanBackend::EndGpuMarker() {}
 void VulkanBackend::TransitionTexture(Texture* texture, EResourceState stateBefore, EResourceState stateAfter)
 {
 #if !CORONA_HAS_VULKAN
@@ -5620,10 +5639,7 @@ std::shared_ptr<GraphicsPipelineHandle> VulkanBackend::CreateGraphicsPipeline(co
 		VkVertexInputAttributeDescription attr{};
 		attr.location = i;
 		attr.binding = 0;
-		attr.format =
-			desc.VertexElements[i].Format == DXGI_FORMAT_R32G32B32_FLOAT ? VK_FORMAT_R32G32B32_SFLOAT :
-			desc.VertexElements[i].Format == DXGI_FORMAT_R32G32_FLOAT ? VK_FORMAT_R32G32_SFLOAT :
-			VK_FORMAT_R32G32B32A32_SFLOAT;
+		attr.format = ToVkVertexFormat(desc.VertexElements[i].Format);
 		attr.offset = desc.VertexElements[i].Offset;
 		attributeDescriptions.push_back(attr);
 	}
@@ -5699,12 +5715,12 @@ std::shared_ptr<GraphicsPipelineHandle> VulkanBackend::CreateGraphicsPipeline(co
 		Swapchain != VK_NULL_HANDLE &&
 		desc.ColorFormats.size() == 1 &&
 		!desc.bDepthEnable &&
-		desc.ColorFormats[0] == DXGI_FORMAT_R8G8B8A8_UNORM;
+		desc.ColorFormats[0] == ETextureFormat::RGBA8Unorm;
 	if (!bUseSwapchainRenderPass)
 	{
 		std::vector<VkAttachmentDescription> attachments;
 		attachments.reserve(desc.ColorFormats.size() + (desc.bDepthEnable ? 1 : 0));
-		for (DXGI_FORMAT colorFormat : desc.ColorFormats)
+		for (ETextureFormat colorFormat : desc.ColorFormats)
 		{
 			VkAttachmentDescription attachment{};
 			attachment.format = ToVkFormat(colorFormat);
@@ -5730,7 +5746,7 @@ std::shared_ptr<GraphicsPipelineHandle> VulkanBackend::CreateGraphicsPipeline(co
 		if (desc.bDepthEnable)
 		{
 			VkAttachmentDescription depthAttachment{};
-			depthAttachment.format = ToVkFormat(desc.DepthFormat);
+			depthAttachment.format = ToVkFormat(desc.DepthFormat.value_or(ETextureFormat::D32Float));
 			depthAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
 			depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
 			depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;

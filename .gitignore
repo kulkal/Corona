@@ -21,6 +21,7 @@ src/external/streamline-sdk/bin/x64/*
 obj/
 
 # runtime-local state and generated diagnostics
+.claude/settings.local.json
 config/
 logs/
 dumps/

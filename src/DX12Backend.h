@@ -35,9 +35,10 @@
 using namespace Microsoft::WRL;
 using namespace std;
 
-class SimpleDX12;
+class DX12Backend;
 class Texture;
 class Sampler;
+struct CoronaBvhViewerD3D12Handle;
 //class ThreadDescriptorHeapPool;
 
 class CommandList
@@ -60,6 +61,7 @@ class CommandQueue
 public:
 	const UINT32 CommandListPoolSize = 4096;
 
+	DX12Backend* Owner = nullptr;
 	ComPtr<ID3D12CommandQueue> CmdQueue;
 
 	std::vector<shared_ptr<CommandList>> CommandListPool;
@@ -74,7 +76,7 @@ public:
 	bool bAftermathMarkersEnabled = false;
 #endif
 public:
-	CommandQueue(ID3D12Device5* device, bool bEnableAftermathMarkers = false);
+	CommandQueue(DX12Backend* owner, ID3D12Device5* device, bool bEnableAftermathMarkers = false);
 	virtual ~CommandQueue();
 
 	CommandList* AllocCmdList();
@@ -97,7 +99,7 @@ public:
 class PipelineStateObject
 {
 public:
-	SimpleDX12* Owner = nullptr;
+	DX12Backend* Owner = nullptr;
 	bool IsCompute = false;
 	struct BindingData
 	{
@@ -126,9 +128,9 @@ public:
 	//shared_ptr<Shader> ps;
 	//shared_ptr<Shader> cs;
 
-	ComPtr<ID3DBlob> vs;
-	ComPtr<ID3DBlob> ps;
-	ComPtr<ID3DBlob> cs;
+	ShaderBytecode vs;
+	ShaderBytecode ps;
+	ShaderBytecode cs;
 
 
 
@@ -164,7 +166,7 @@ public:
 class D3D12ComputePipelineStateObject : public ComputePipelineStateObject
 {
 public:
-	SimpleDX12* Owner = nullptr;
+	DX12Backend* Owner = nullptr;
 	std::shared_ptr<PipelineStateObject> PSO;
 	std::map<std::string, D3D12_GPU_DESCRIPTOR_HANDLE> PendingSRVs;
 	std::map<std::string, D3D12_GPU_DESCRIPTOR_HANDLE> PendingUAVs;
@@ -188,7 +190,7 @@ public:
 class D3D12RTPipelineStateObject : public RTPipelineStateObject
 {
 public:
-	SimpleDX12* Owner = nullptr;
+	DX12Backend* Owner = nullptr;
 private:
 	struct BindingData
 	{
@@ -309,7 +311,7 @@ public:
 class Buffer
 {
 public:
-	SimpleDX12* Owner = nullptr;
+	DX12Backend* Owner = nullptr;
 	enum BufferType
 	{
 		BYTE_ADDRESS,
@@ -364,7 +366,7 @@ public:
 class Texture 
 {
 public:
-	SimpleDX12* Owner = nullptr;
+	DX12Backend* Owner = nullptr;
 	D3D12_RESOURCE_DESC textureDesc;
 
 	ComPtr<ID3D12Resource> resource;
@@ -543,7 +545,7 @@ public:
 
 	UINT VertexStride;
 
-	DXGI_FORMAT IndexFormat = DXGI_FORMAT_R32_UINT;
+	EIndexFormat IndexFormat = EIndexFormat::U32;
 
 	shared_ptr<IndexBuffer> Ib;
 	shared_ptr<VertexBuffer> Vb;
@@ -573,7 +575,7 @@ public:
 public:
 };
 
-class SimpleDX12 : public IRenderBackend
+class DX12Backend : public IRenderBackend
 {
 public:
 	friend class DescriptorHeap;
@@ -620,6 +622,7 @@ public:
 	uint32_t OcclusionQueryCount = 0;
 
 	string errorString;
+	CoronaBvhViewerD3D12Handle* BvhViewerD3D12 = nullptr;
 
 #if USE_AFTERMATH
 	bool bAftermathEnabled = false;
@@ -637,29 +640,34 @@ public:
 	uint64_t GetTimestampFrequency() const override { UINT64 frequency = 0; CmdQ->CmdQueue->GetTimestampFrequency(&frequency); return frequency; }
 	uint32_t GetFrameCount() const override { return NumFrame; }
 	uint32_t GetCurrentFrameIndex() const override { return CurrentFrameIndex; }
-	SimpleDX12* AsSimpleDX12() override { return this; }
+	DX12Backend* AsDX12Backend() override { return this; }
+	bool IsBvhViewerD3D12Available() const;
+	bool IsBvhViewerD3D12WindowVisible() const;
+	bool ShowBvhViewerD3D12Window(uint32_t width = 1280, uint32_t height = 720);
+	void HideBvhViewerD3D12Window();
 	std::shared_ptr<Texture> CreateTexture2D(const TextureCreateDesc& desc) override;
 	std::shared_ptr<Buffer> CreateBuffer(const BufferCreateDesc& desc) override;
 	std::shared_ptr<Sampler> CreateSampler(const SamplerCreateDesc& desc) override;
 	std::shared_ptr<Texture> CreateTextureFromFile(const std::wstring& fileName, bool nonSRGB) override;
-	std::shared_ptr<Texture> WrapNativeTexture(const Microsoft::WRL::ComPtr<ID3D12Resource>& resource) override;
+	std::shared_ptr<Texture> WrapNativeTexture(const Microsoft::WRL::ComPtr<ID3D12Resource>& resource);
 	std::shared_ptr<Texture> CreateTexture3D(ETextureFormat format, ETextureUsageFlags usage, EInitialResourceState initialState, int width, int height, int depth, int mipLevels) override;
 	void UploadTexture3D(Texture* texture, const void* data, uint64_t rowPitch, uint64_t slicePitch) override;
 	std::shared_ptr<VertexBuffer> CreateVertexBuffer(uint32_t size, uint32_t stride, void* srcData) override;
-	std::shared_ptr<IndexBuffer> CreateIndexBuffer(DXGI_FORMAT format, uint32_t size, void* srcData) override;
+	std::shared_ptr<IndexBuffer> CreateIndexBuffer(EIndexFormat format, uint32_t size, void* srcData) override;
 	std::shared_ptr<RTAS> CreateBLASForMesh(Mesh* mesh) override;
 	std::shared_ptr<RTAS> CreateTLAS(const std::vector<RTInstanceDesc>& instances) override;
 	bool UpdateTLAS(const std::shared_ptr<RTAS>& topLevelAS, const std::vector<RTInstanceDesc>& instances) override;
 	std::shared_ptr<RTPipelineStateObject> CreateRTPipelineStateObject() override;
 	std::shared_ptr<ComputePipelineStateObject> CreateComputePipelineStateObject() override;
-	Microsoft::WRL::ComPtr<ID3DBlob> CreateShader(const std::wstring& fileName, const std::string& entryPoint, const std::string& target) override;
+	ShaderBytecode CreateShader(const std::wstring& fileName, const std::string& entryPoint, const std::string& target) override;
 	void ResetDynamicResources() override { DynamicTextures.clear(); DynamicBuffers.clear(); }
 	void ForgetDynamicTexture(Texture* texture) { if (texture) DynamicTextures.remove_if([texture](const std::shared_ptr<Texture>& entry) { return entry.get() == texture; }); }
 	void ForgetDynamicBuffer(Buffer* buffer) { if (buffer) DynamicBuffers.remove_if([buffer](const std::shared_ptr<Buffer>& entry) { return entry.get() == buffer; }); }
-	void CreateSwapChainForWindow(IDXGIFactory4* factory, HWND hwnd, uint32_t width, uint32_t height, DXGI_FORMAT format) override;
-	Microsoft::WRL::ComPtr<ID3D12Resource> GetSwapChainBuffer(uint32_t bufferIndex) override;
-	HRESULT CaptureTexture(Texture* source, DirectX::ScratchImage& captured, D3D12_RESOURCE_STATES beforeState) override;
-	void InitializeImGuiBackend(HWND hwnd, DXGI_FORMAT rtvFormat) override;
+	void CreateSwapChainForWindow(WindowHandle window, uint32_t width, uint32_t height, ETextureFormat format) override;
+	std::shared_ptr<Texture> GetSwapChainTexture(uint32_t bufferIndex) override;
+	bool CaptureTexture(Texture* source, CapturedImage& captured, EResourceState beforeState) override;
+	void InitializeImGuiBackend(WindowHandle window, ETextureFormat rtvFormat) override;
+	void SetExternalDXGIFactory(IDXGIFactory4* factory) { ExternalDXGIFactory = factory; }
 	void NewImGuiFrame() override;
 	void RenderImGuiDrawData(ImDrawData* drawData) override;
 	void ShutdownImGuiBackend() override;
@@ -686,7 +694,9 @@ public:
 	void Dispatch(uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ) override;
 	void ClearTextureUAVFloat(Texture* texture, const float clearColor[4]) override;
 	void ExecuteCurrentCommandList() override;
-	ID3D12GraphicsCommandList* GetGraphicsCommandList() override { return GlobalCmdList ? GlobalCmdList->CmdList.Get() : nullptr; }
+	void BeginGpuMarker(uint64_t color, const char* label) override;
+	void EndGpuMarker() override;
+	ID3D12GraphicsCommandList* GetGraphicsCommandList() { return GlobalCmdList ? GlobalCmdList->CmdList.Get() : nullptr; }
 	void TransitionTexture(Texture* texture, EResourceState stateBefore, EResourceState stateAfter) override;
 	void TransitionBuffer(Buffer* buffer, EResourceState stateBefore, EResourceState stateAfter) override;
 	Texture* GetCurrentWindowRenderTarget() override;
@@ -711,6 +721,8 @@ public:
 	shared_ptr<Buffer> CreateBuffer(UINT InNumElements, UINT InElementSize, D3D12_RESOURCE_STATES initResState, bool isUAV, void* SrcData = nullptr);
 
 	std::vector<std::shared_ptr<Texture>> SwapChainRenderTargets;
+	std::vector<std::shared_ptr<Texture>> SwapChainWrappedTextures;
+	IDXGIFactory4* ExternalDXGIFactory = nullptr;
 	std::wstring PendingWindowCapturePath;
 	std::wstring LastWindowCapturePath;
 	std::wstring LastWindowCaptureError;
@@ -721,8 +733,8 @@ public:
 	void PresentBarrier(Texture* rt);
 	void ResourceBarrier(ID3D12Resource* Resource, D3D12_RESOURCE_STATES StateBefore, D3D12_RESOURCE_STATES StateAfter);
 
-	SimpleDX12(ComPtr<ID3D12Device5> pDevice);
-	virtual ~SimpleDX12();
+	DX12Backend(ComPtr<ID3D12Device5> pDevice);
+	virtual ~DX12Backend();
 };
 
 

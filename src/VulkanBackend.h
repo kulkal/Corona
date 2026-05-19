@@ -6,6 +6,7 @@
 #ifndef VK_USE_PLATFORM_WIN32_KHR
 #define VK_USE_PLATFORM_WIN32_KHR 1
 #endif
+#include <array>
 #include <unordered_map>
 #include <utility>
 #include <vulkan/vulkan.h>
@@ -248,27 +249,26 @@ public:
 	uint64_t GetTimestampFrequency() const override;
 	uint32_t GetFrameCount() const override;
 	uint32_t GetCurrentFrameIndex() const override;
-	SimpleDX12* AsSimpleDX12() override;
+	DX12Backend* AsDX12Backend() override;
 	std::shared_ptr<Texture> CreateTexture2D(const TextureCreateDesc& desc) override;
 	std::shared_ptr<Buffer> CreateBuffer(const BufferCreateDesc& desc) override;
 	std::shared_ptr<Sampler> CreateSampler(const SamplerCreateDesc& desc) override;
 	std::shared_ptr<Texture> CreateTextureFromFile(const std::wstring& fileName, bool nonSRGB) override;
-	std::shared_ptr<Texture> WrapNativeTexture(const Microsoft::WRL::ComPtr<ID3D12Resource>& resource) override;
 	std::shared_ptr<Texture> CreateTexture3D(ETextureFormat format, ETextureUsageFlags usage, EInitialResourceState initialState, int width, int height, int depth, int mipLevels) override;
 	void UploadTexture3D(Texture* texture, const void* data, uint64_t rowPitch, uint64_t slicePitch) override;
 	std::shared_ptr<VertexBuffer> CreateVertexBuffer(uint32_t size, uint32_t stride, void* srcData) override;
-	std::shared_ptr<IndexBuffer> CreateIndexBuffer(DXGI_FORMAT format, uint32_t size, void* srcData) override;
+	std::shared_ptr<IndexBuffer> CreateIndexBuffer(EIndexFormat format, uint32_t size, void* srcData) override;
 	std::shared_ptr<RTAS> CreateBLASForMesh(Mesh* mesh) override;
 	std::shared_ptr<RTAS> CreateTLAS(const std::vector<RTInstanceDesc>& instances) override;
 	bool UpdateTLAS(const std::shared_ptr<RTAS>& topLevelAS, const std::vector<RTInstanceDesc>& instances) override;
 	std::shared_ptr<RTPipelineStateObject> CreateRTPipelineStateObject() override;
 	std::shared_ptr<ComputePipelineStateObject> CreateComputePipelineStateObject() override;
-	Microsoft::WRL::ComPtr<ID3DBlob> CreateShader(const std::wstring& fileName, const std::string& entryPoint, const std::string& target) override;
+	ShaderBytecode CreateShader(const std::wstring& fileName, const std::string& entryPoint, const std::string& target) override;
 	void ResetDynamicResources() override;
-	void CreateSwapChainForWindow(IDXGIFactory4* factory, HWND hwnd, uint32_t width, uint32_t height, DXGI_FORMAT format) override;
-	Microsoft::WRL::ComPtr<ID3D12Resource> GetSwapChainBuffer(uint32_t bufferIndex) override;
-	HRESULT CaptureTexture(Texture* source, DirectX::ScratchImage& captured, D3D12_RESOURCE_STATES beforeState) override;
-	void InitializeImGuiBackend(HWND hwnd, DXGI_FORMAT rtvFormat) override;
+	void CreateSwapChainForWindow(WindowHandle window, uint32_t width, uint32_t height, ETextureFormat format) override;
+	std::shared_ptr<Texture> GetSwapChainTexture(uint32_t bufferIndex) override;
+	bool CaptureTexture(Texture* source, CapturedImage& captured, EResourceState beforeState) override;
+	void InitializeImGuiBackend(WindowHandle window, ETextureFormat rtvFormat) override;
 	void NewImGuiFrame() override;
 	void RenderImGuiDrawData(ImDrawData* drawData) override;
 	void ShutdownImGuiBackend() override;
@@ -295,7 +295,8 @@ public:
 	void Dispatch(uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ) override;
 	void ClearTextureUAVFloat(Texture* texture, const float clearColor[4]) override;
 	void ExecuteCurrentCommandList() override;
-	ID3D12GraphicsCommandList* GetGraphicsCommandList() override;
+	void BeginGpuMarker(uint64_t color, const char* label) override;
+	void EndGpuMarker() override;
 	void TransitionTexture(Texture* texture, EResourceState stateBefore, EResourceState stateAfter) override;
 	void TransitionBuffer(Buffer* buffer, EResourceState stateBefore, EResourceState stateAfter) override;
 	Texture* GetCurrentWindowRenderTarget() override;

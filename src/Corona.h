@@ -34,12 +34,17 @@
 
 #include "StepTimer.h"
 #include "SimpleCamera.h"
+#include "RHIBuildConfig.h"
 #include "RenderBackend.h"
-#include "SimpleDX12.h"
+#if CORONA_HAS_D3D12
+#include "DX12Backend.h"
+#endif
 #include "EntityComponentSystem.h"
 #include "enkiTS/TaskScheduler.h"
+#if CORONA_HAS_PIX
 #define PROFILE_BUILD 1
 #include "pix3.h"
+#endif
 #ifndef WITH_STREAMLINE
 #define WITH_STREAMLINE 0
 #endif
@@ -1522,7 +1527,7 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	CD3DX12_RECT m_scissorRect;
 	ComPtr<ID3D12Device5> m_device;
 	std::unique_ptr<IRenderBackend> renderBackend;
-	SimpleDX12* dx12_rhi = nullptr;
+	DX12Backend* dx12_rhi = nullptr;
 
 	enki::TaskScheduler g_TS;
 
@@ -2216,7 +2221,7 @@ public:
 	void AsyncImageDumpWorkerMain();
 	void WaitForAsyncImageDumps();
 	void StopAsyncImageDumpWorkers();
-	bool EnqueueAsyncImageDump(DirectX::ScratchImage&& captured, const std::wstring& filePath, bool bHDR);
+	bool EnqueueAsyncImageDump(CapturedImage&& captured, const std::wstring& filePath, bool bHDR);
 	void ProcessRenderThreadRequests();
 #if WITH_STREAMLINE
 	void InitStreamline();

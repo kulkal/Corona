@@ -1,27 +1,20 @@
 #pragma once
 
+#include <cfloat>
 #include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>
 #include <vector>
-#include <wrl/client.h>
-#include <d3d12.h>
-#include <dxgi1_4.h>
 #include "glm/mat4x4.hpp"
 #include "glm/vec4.hpp"
 #include "ComputePipelineStateObject.h"
 #include "RTAS.h"
 #include "RTPipelineStateObject.h"
 
-namespace DirectX
-{
-	class ScratchImage;
-}
-
 struct ImDrawData;
 
-class SimpleDX12;
+class DX12Backend;
 class Texture;
 class Buffer;
 class Sampler;
@@ -42,9 +35,52 @@ enum class ETextureFormat
 	RGBA32Float,
 	RG16Float,
 	RGBA8Unorm,
+	BGRA8Unorm,
 	D32Float,
 	R32Float,
 	R8Uint,
+};
+
+enum class EVertexAttributeFormat
+{
+	Float2,
+	Float3,
+	Float4,
+};
+
+enum class EIndexFormat
+{
+	U16,
+	U32,
+};
+
+struct ShaderBytecode
+{
+	std::vector<uint8_t> Data;
+	bool IsValid() const { return !Data.empty(); }
+	const void* GetPointer() const { return Data.data(); }
+	size_t GetSize() const { return Data.size(); }
+};
+
+// Opaque native window handle. PlatformHandle stores an HWND on Windows, an
+// ANativeWindow* on Android, a CAMetalLayer* on iOS (MoltenVK), etc. Backends
+// interpret it based on their platform; the abstract interface does not.
+struct WindowHandle
+{
+	void* PlatformHandle = nullptr;
+};
+
+// Raw 2D image payload produced by IRenderBackend::CaptureTexture. The data is
+// expected to be the first mip of the first array slice, laid out row-by-row.
+struct CapturedImage
+{
+	ETextureFormat Format = ETextureFormat::RGBA8Unorm;
+	uint32_t Width = 0;
+	uint32_t Height = 0;
+	uint32_t RowPitch = 0;
+	std::vector<uint8_t> Pixels;
+
+	bool IsEmpty() const { return Pixels.empty(); }
 };
 
 enum class EInitialResourceState
@@ -121,7 +157,7 @@ struct SamplerCreateDesc
 	ESamplerAddressMode AddressV = ESamplerAddressMode::Wrap;
 	ESamplerAddressMode AddressW = ESamplerAddressMode::Wrap;
 	float MinLOD = 0.0f;
-	float MaxLOD = D3D12_FLOAT32_MAX;
+	float MaxLOD = FLT_MAX;
 	float MipLODBias = 0.0f;
 	uint32_t MaxAnisotropy = 1;
 };
@@ -130,7 +166,7 @@ struct GraphicsVertexElementDesc
 {
 	std::string SemanticName;
 	uint32_t SemanticIndex = 0;
-	DXGI_FORMAT Format = DXGI_FORMAT_UNKNOWN;
+	EVertexAttributeFormat Format = EVertexAttributeFormat::Float4;
 	uint32_t Offset = 0;
 };
 
@@ -162,8 +198,8 @@ struct GraphicsPipelineDesc
 	std::vector<GraphicsBufferBindingDesc> BufferBindings;
 	std::vector<GraphicsSamplerBindingDesc> SamplerBindings;
 	uint32_t VertexStride = 0;
-	std::vector<DXGI_FORMAT> ColorFormats = { DXGI_FORMAT_R8G8B8A8_UNORM };
-	DXGI_FORMAT DepthFormat = DXGI_FORMAT_UNKNOWN;
+	std::vector<ETextureFormat> ColorFormats = { ETextureFormat::RGBA8Unorm };
+	std::optional<ETextureFormat> DepthFormat;
 	bool bDepthEnable = false;
 	bool bCullBackFaces = true;
 	bool bTriangleStrip = false;
@@ -204,12 +240,11 @@ public:
 	virtual uint64_t GetTimestampFrequency() const = 0;
 	virtual uint32_t GetFrameCount() const = 0;
 	virtual uint32_t GetCurrentFrameIndex() const = 0;
-	virtual SimpleDX12* AsSimpleDX12() = 0;
+	virtual DX12Backend* AsDX12Backend() = 0;
 	virtual std::shared_ptr<Texture> CreateTexture2D(const TextureCreateDesc& desc) = 0;
 	virtual std::shared_ptr<Buffer> CreateBuffer(const BufferCreateDesc& desc) = 0;
 	virtual std::shared_ptr<Sampler> CreateSampler(const SamplerCreateDesc& desc) = 0;
 	virtual std::shared_ptr<Texture> CreateTextureFromFile(const std::wstring& fileName, bool nonSRGB) = 0;
-	virtual std::shared_ptr<Texture> WrapNativeTexture(const Microsoft::WRL::ComPtr<ID3D12Resource>& resource) = 0;
 	virtual std::shared_ptr<Texture> CreateTexture3D(
 		ETextureFormat format,
 		ETextureUsageFlags usage,
@@ -220,23 +255,22 @@ public:
 		int mipLevels) = 0;
 	virtual void UploadTexture3D(Texture* texture, const void* data, uint64_t rowPitch, uint64_t slicePitch) = 0;
 	virtual std::shared_ptr<VertexBuffer> CreateVertexBuffer(uint32_t size, uint32_t stride, void* srcData) = 0;
-	virtual std::shared_ptr<IndexBuffer> CreateIndexBuffer(DXGI_FORMAT format, uint32_t size, void* srcData) = 0;
+	virtual std::shared_ptr<IndexBuffer> CreateIndexBuffer(EIndexFormat format, uint32_t size, void* srcData) = 0;
 	virtual std::shared_ptr<RTAS> CreateBLASForMesh(Mesh* mesh) = 0;
 	virtual std::shared_ptr<RTAS> CreateTLAS(const std::vector<RTInstanceDesc>& instances) = 0;
 	virtual bool UpdateTLAS(const std::shared_ptr<RTAS>& topLevelAS, const std::vector<RTInstanceDesc>& instances) = 0;
 	virtual std::shared_ptr<RTPipelineStateObject> CreateRTPipelineStateObject() = 0;
 	virtual std::shared_ptr<ComputePipelineStateObject> CreateComputePipelineStateObject() = 0;
-	virtual Microsoft::WRL::ComPtr<ID3DBlob> CreateShader(const std::wstring& fileName, const std::string& entryPoint, const std::string& target) = 0;
+	virtual ShaderBytecode CreateShader(const std::wstring& fileName, const std::string& entryPoint, const std::string& target) = 0;
 	virtual void ResetDynamicResources() = 0;
 	virtual void CreateSwapChainForWindow(
-		IDXGIFactory4* factory,
-		HWND hwnd,
+		WindowHandle window,
 		uint32_t width,
 		uint32_t height,
-		DXGI_FORMAT format) = 0;
-	virtual Microsoft::WRL::ComPtr<ID3D12Resource> GetSwapChainBuffer(uint32_t bufferIndex) = 0;
-	virtual HRESULT CaptureTexture(Texture* source, DirectX::ScratchImage& captured, D3D12_RESOURCE_STATES beforeState) = 0;
-	virtual void InitializeImGuiBackend(HWND hwnd, DXGI_FORMAT rtvFormat) = 0;
+		ETextureFormat format) = 0;
+	virtual std::shared_ptr<Texture> GetSwapChainTexture(uint32_t bufferIndex) = 0;
+	virtual bool CaptureTexture(Texture* source, CapturedImage& captured, EResourceState beforeState) = 0;
+	virtual void InitializeImGuiBackend(WindowHandle window, ETextureFormat rtvFormat) = 0;
 	virtual void NewImGuiFrame() = 0;
 	virtual void RenderImGuiDrawData(ImDrawData* drawData) = 0;
 	virtual void ShutdownImGuiBackend() = 0;
@@ -263,7 +297,8 @@ public:
 	virtual void Dispatch(uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ) = 0;
 	virtual void ClearTextureUAVFloat(Texture* texture, const float clearColor[4]) = 0;
 	virtual void ExecuteCurrentCommandList() = 0;
-	virtual ID3D12GraphicsCommandList* GetGraphicsCommandList() = 0;
+	virtual void BeginGpuMarker(uint64_t color, const char* label) = 0;
+	virtual void EndGpuMarker() = 0;
 	virtual void TransitionTexture(Texture* texture, EResourceState stateBefore, EResourceState stateAfter) = 0;
 	virtual void TransitionBuffer(Buffer* buffer, EResourceState stateBefore, EResourceState stateAfter) = 0;
 	virtual Texture* GetCurrentWindowRenderTarget() = 0;
@@ -279,4 +314,7 @@ public:
 	virtual void BindGraphicsPipelineSampler(GraphicsPipelineHandle* pipeline, const std::string& bindingName, Sampler* sampler) = 0;
 };
 
-std::unique_ptr<IRenderBackend> CreateRenderBackend(ERenderBackendAPI api, const Microsoft::WRL::ComPtr<ID3D12Device5>& device);
+// API-neutral factory. DX12 path requires a pre-created device so the bootstrap
+// constructs DX12Backend directly via #include "DX12Backend.h"; this factory
+// handles non-DX12 backends and returns nullptr for D3D12.
+std::unique_ptr<IRenderBackend> CreateRenderBackend(ERenderBackendAPI api);

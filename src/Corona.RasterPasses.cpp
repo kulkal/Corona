@@ -24,7 +24,7 @@ void AppendCpuRuntimeTrace(const std::wstring& line);
 void Corona::InitBloomPass()
 {
 	{
-		ComPtr<ID3DBlob> cs = renderBackend->CreateShader(GetAssetFullPath(L"Shaders\\BloomBlur.hlsl"), "BloomExtract", "cs_6_0");
+		ShaderBytecode cs = renderBackend->CreateShader(GetAssetFullPath(L"Shaders\\BloomBlur.hlsl"), "BloomExtract", "cs_6_0");
 		D3D12_COMPUTE_PIPELINE_STATE_DESC computePsoDesc = {};
 
 		shared_ptr<PipelineStateObject> TEMP_BloomExtractPSO = shared_ptr<PipelineStateObject>(new PipelineStateObject);
@@ -44,7 +44,7 @@ void Corona::InitBloomPass()
 			BloomExtractPSO = TEMP_BloomExtractPSO;
 	}
 	{
-		ComPtr<ID3DBlob> cs = renderBackend->CreateShader(GetAssetFullPath(L"Shaders\\BloomBlur.hlsl"), "BloomBlur", "cs_6_0");
+		ShaderBytecode cs = renderBackend->CreateShader(GetAssetFullPath(L"Shaders\\BloomBlur.hlsl"), "BloomBlur", "cs_6_0");
 		D3D12_COMPUTE_PIPELINE_STATE_DESC computePsoDesc = {};
 
 		shared_ptr<PipelineStateObject> TEMP_BloomBlurPSO = shared_ptr<PipelineStateObject>(new PipelineStateObject);
@@ -63,7 +63,7 @@ void Corona::InitBloomPass()
 	}
 
 	{
-		ComPtr<ID3DBlob> cs = renderBackend->CreateShader(GetAssetFullPath(L"Shaders\\Histogram.hlsl"), "GenerateHistogram", "cs_6_0");
+		ShaderBytecode cs = renderBackend->CreateShader(GetAssetFullPath(L"Shaders\\Histogram.hlsl"), "GenerateHistogram", "cs_6_0");
 		D3D12_COMPUTE_PIPELINE_STATE_DESC computePsoDesc = {};
 
 		shared_ptr<PipelineStateObject> TEMP_HistogramPSO = shared_ptr<PipelineStateObject>(new PipelineStateObject);
@@ -81,7 +81,7 @@ void Corona::InitBloomPass()
 	}
 
 	{
-		ComPtr<ID3DBlob> cs = renderBackend->CreateShader(GetAssetFullPath(L"Shaders\\DrawHistogram.hlsl"), "DrawHistogram", "cs_6_0");
+		ShaderBytecode cs = renderBackend->CreateShader(GetAssetFullPath(L"Shaders\\DrawHistogram.hlsl"), "DrawHistogram", "cs_6_0");
 		D3D12_COMPUTE_PIPELINE_STATE_DESC computePsoDesc = {};
 
 		shared_ptr<PipelineStateObject> TEMP_DrawHistogramPSO = shared_ptr<PipelineStateObject>(new PipelineStateObject);
@@ -100,7 +100,7 @@ void Corona::InitBloomPass()
 	}
 
 	{
-		ComPtr<ID3DBlob> cs = renderBackend->CreateShader(GetAssetFullPath(L"Shaders\\Histogram.hlsl"), "ClearHistogram", "cs_6_0");
+		ShaderBytecode cs = renderBackend->CreateShader(GetAssetFullPath(L"Shaders\\Histogram.hlsl"), "ClearHistogram", "cs_6_0");
 		D3D12_COMPUTE_PIPELINE_STATE_DESC computePsoDesc = {};
 
 		shared_ptr<PipelineStateObject> TEMP_ClearHistogramPSO = shared_ptr<PipelineStateObject>(new PipelineStateObject);
@@ -118,7 +118,7 @@ void Corona::InitBloomPass()
 
 
 	{
-		ComPtr<ID3DBlob> cs = renderBackend->CreateShader(GetAssetFullPath(L"Shaders\\AdaptExposureCS.hlsl"), "AdaptExposure", "cs_6_0");
+		ShaderBytecode cs = renderBackend->CreateShader(GetAssetFullPath(L"Shaders\\AdaptExposureCS.hlsl"), "AdaptExposure", "cs_6_0");
 		D3D12_COMPUTE_PIPELINE_STATE_DESC computePsoDesc = {};
 
 		shared_ptr<PipelineStateObject> TEMP_AdapteExposurePSO = shared_ptr<PipelineStateObject>(new PipelineStateObject);
@@ -181,10 +181,10 @@ void Corona::InitGBufferPass()
 	desc.VertexEntryPoint = "VSMain";
 	desc.PixelEntryPoint = "PSMain";
 	desc.VertexElements = {
-		{ "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0 },
-		{ "NORMAL", 0, DXGI_FORMAT_R32G32B32_FLOAT, 12 },
-		{ "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 24 },
-		{ "TANGENT", 0, DXGI_FORMAT_R32G32B32_FLOAT, 32 },
+		{ "POSITION", 0, EVertexAttributeFormat::Float3, 0 },
+		{ "NORMAL", 0, EVertexAttributeFormat::Float3, 12 },
+		{ "TEXCOORD", 0, EVertexAttributeFormat::Float2, 24 },
+		{ "TANGENT", 0, EVertexAttributeFormat::Float3, 32 },
 	};
 	desc.TextureBindings = {
 		{ "AlbedoTex", 0 },
@@ -197,15 +197,15 @@ void Corona::InitGBufferPass()
 	};
 	desc.VertexStride = 44;
 	desc.ColorFormats = {
-		DXGI_FORMAT_R8G8B8A8_UNORM,
-		DXGI_FORMAT_R8G8B8A8_UNORM,
-		DXGI_FORMAT_R16G16B16A16_FLOAT,
-		DXGI_FORMAT_R16G16B16A16_FLOAT,
-		DXGI_FORMAT_R16G16_FLOAT,
-		DXGI_FORMAT_R8G8B8A8_UNORM,
-		DXGI_FORMAT_R32_FLOAT,
+		ETextureFormat::RGBA8Unorm,
+		ETextureFormat::RGBA8Unorm,
+		ETextureFormat::RGBA16Float,
+		ETextureFormat::RGBA16Float,
+		ETextureFormat::RG16Float,
+		ETextureFormat::RGBA8Unorm,
+		ETextureFormat::R32Float,
 	};
-	desc.DepthFormat = DXGI_FORMAT_D32_FLOAT;
+	desc.DepthFormat = ETextureFormat::D32Float;
 	desc.bDepthEnable = true;
 	desc.bCullBackFaces = false;
 	desc.ConstantBufferSize = sizeof(GBufferConstantBuffer);
@@ -247,15 +247,15 @@ void Corona::InitToneMapPass()
 		desc.VertexEntryPoint = "VSMain";
 		desc.PixelEntryPoint = "PSMain";
 		desc.VertexStride = vertexBufferStride;
-		desc.ColorFormats = { DXGI_FORMAT_R8G8B8A8_UNORM };
+		desc.ColorFormats = { ETextureFormat::RGBA8Unorm };
 		desc.bDepthEnable = false;
 		desc.bCullBackFaces = false;
 		desc.bTriangleStrip = true;
 		desc.ConstantBufferSize = sizeof(ToneMapCB);
 		desc.ConstantBufferBinding = 0;
 		desc.VertexElements = {
-			{ "POSITION", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0 },
-			{ "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 16 }
+			{ "POSITION", 0, EVertexAttributeFormat::Float4, 0 },
+			{ "TEXCOORD", 0, EVertexAttributeFormat::Float2, 16 }
 		};
 		desc.TextureBindings = {
 			{ "SrcTex", 0 }
@@ -268,8 +268,8 @@ void Corona::InitToneMapPass()
 		return;
 	}
 	
-	ComPtr<ID3DBlob> vs = renderBackend->CreateShader(GetAssetFullPath(L"Shaders\\ToneMapPS.hlsl"), "VSMain", "vs_6_0");
-	ComPtr<ID3DBlob> ps = renderBackend->CreateShader(GetAssetFullPath(L"Shaders\\ToneMapPS.hlsl"), "PSMain", "ps_6_0");
+	ShaderBytecode vs = renderBackend->CreateShader(GetAssetFullPath(L"Shaders\\ToneMapPS.hlsl"), "VSMain", "vs_6_0");
+	ShaderBytecode ps = renderBackend->CreateShader(GetAssetFullPath(L"Shaders\\ToneMapPS.hlsl"), "PSMain", "ps_6_0");
 
 
 	CD3DX12_RASTERIZER_DESC rasterizerStateDesc(D3D12_DEFAULT);
@@ -339,8 +339,8 @@ void Corona::InitDebugPass()
 
 	FullScreenVB = renderBackend->CreateVertexBuffer(vertexBufferSize, vertexBufferStride, &quadVertices);
 
-	ComPtr<ID3DBlob> vs = renderBackend->CreateShader(GetAssetFullPath(L"Shaders\\DebugPS.hlsl"), "VSMain", "vs_6_0");
-	ComPtr<ID3DBlob> ps = renderBackend->CreateShader(GetAssetFullPath(L"Shaders\\DebugPS.hlsl"), "PSMain", "ps_6_0");
+	ShaderBytecode vs = renderBackend->CreateShader(GetAssetFullPath(L"Shaders\\DebugPS.hlsl"), "VSMain", "vs_6_0");
+	ShaderBytecode ps = renderBackend->CreateShader(GetAssetFullPath(L"Shaders\\DebugPS.hlsl"), "PSMain", "ps_6_0");
 
 	CD3DX12_RASTERIZER_DESC rasterizerStateDesc(D3D12_DEFAULT);
 	rasterizerStateDesc.CullMode = D3D12_CULL_MODE_NONE;
@@ -411,15 +411,15 @@ void Corona::InitLightingPass()
 		desc.VertexEntryPoint = "VSMain";
 		desc.PixelEntryPoint = "PSMain";
 		desc.VertexStride = sizeof(PostVertex);
-		desc.ColorFormats = { DXGI_FORMAT_R16G16B16A16_FLOAT };
+		desc.ColorFormats = { ETextureFormat::RGBA16Float };
 		desc.bDepthEnable = false;
 		desc.bCullBackFaces = false;
 		desc.bTriangleStrip = true;
 		desc.ConstantBufferSize = sizeof(LightingParam);
 		desc.ConstantBufferBinding = 0;
 		desc.VertexElements = {
-			{ "POSITION", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0 },
-			{ "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 16 }
+			{ "POSITION", 0, EVertexAttributeFormat::Float4, 0 },
+			{ "TEXCOORD", 0, EVertexAttributeFormat::Float2, 16 }
 		};
 		desc.TextureBindings = {
 			{ "AlbedoTex", 0 },
@@ -442,8 +442,8 @@ void Corona::InitLightingPass()
 		return;
 	}
 
-	ComPtr<ID3DBlob> vs = renderBackend->CreateShader(GetAssetFullPath(L"Shaders\\LightingPS.hlsl"), "VSMain", "vs_6_0");
-	ComPtr<ID3DBlob> ps = renderBackend->CreateShader(GetAssetFullPath(L"Shaders\\LightingPS.hlsl"), "PSMain", "ps_6_0");
+	ShaderBytecode vs = renderBackend->CreateShader(GetAssetFullPath(L"Shaders\\LightingPS.hlsl"), "VSMain", "vs_6_0");
+	ShaderBytecode ps = renderBackend->CreateShader(GetAssetFullPath(L"Shaders\\LightingPS.hlsl"), "PSMain", "ps_6_0");
 
 	CD3DX12_RASTERIZER_DESC rasterizerStateDesc(D3D12_DEFAULT);
 	rasterizerStateDesc.CullMode = D3D12_CULL_MODE_NONE;
@@ -528,15 +528,15 @@ void Corona::InitTemporalAAPass()
 		desc.VertexEntryPoint = "VSMain";
 		desc.PixelEntryPoint = "PSMain";
 		desc.VertexStride = sizeof(PostVertex);
-		desc.ColorFormats = { DXGI_FORMAT_R16G16B16A16_FLOAT };
+		desc.ColorFormats = { ETextureFormat::RGBA16Float };
 		desc.bDepthEnable = false;
 		desc.bCullBackFaces = false;
 		desc.bTriangleStrip = true;
 		desc.ConstantBufferSize = sizeof(TemporalAAParam);
 		desc.ConstantBufferBinding = 0;
 		desc.VertexElements = {
-			{ "POSITION", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0 },
-			{ "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 16 }
+			{ "POSITION", 0, EVertexAttributeFormat::Float4, 0 },
+			{ "TEXCOORD", 0, EVertexAttributeFormat::Float2, 16 }
 		};
 		desc.TextureBindings = {
 			{ "CurrentColorTex", 0 },
@@ -556,8 +556,8 @@ void Corona::InitTemporalAAPass()
 		return;
 	}
 
-	ComPtr<ID3DBlob> vs = renderBackend->CreateShader(GetAssetFullPath(L"Shaders\\TemporalAA.hlsl"), "VSMain", "vs_6_0");
-	ComPtr<ID3DBlob> ps = renderBackend->CreateShader(GetAssetFullPath(L"Shaders\\TemporalAA.hlsl"), "PSMain", "ps_6_0");
+	ShaderBytecode vs = renderBackend->CreateShader(GetAssetFullPath(L"Shaders\\TemporalAA.hlsl"), "VSMain", "vs_6_0");
+	ShaderBytecode ps = renderBackend->CreateShader(GetAssetFullPath(L"Shaders\\TemporalAA.hlsl"), "PSMain", "ps_6_0");
 	CD3DX12_RASTERIZER_DESC rasterizerStateDesc(D3D12_DEFAULT);
 	rasterizerStateDesc.CullMode = D3D12_CULL_MODE_NONE;
 

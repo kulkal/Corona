@@ -14,8 +14,11 @@
 #include "D3D12Helpers.h"
 #include "Win32Application.h"
 #include "VulkanBackend.h"
+#include "CoronaImageIO.h"
+#if CORONA_HAS_DXC_RUNTIME
 #include <dxcapi.use.h>
 //#include <dxcapi.h>
+#endif
 #include "Utils.h"
 #include <iostream>
 #include <algorithm>
@@ -229,60 +232,9 @@ namespace
 		return value;
 	}
 
-	void ForceOpaqueAlpha(const Image* image)
+	bool SaveCapturedTextureHDR(const CapturedImage& captured, const std::wstring& filePath, std::wstring* errorMessage)
 	{
-		if (!image || !image->pixels)
-			return;
-
-		if (image->format != DXGI_FORMAT_B8G8R8A8_UNORM &&
-			image->format != DXGI_FORMAT_R8G8B8A8_UNORM &&
-			image->format != DXGI_FORMAT_B8G8R8X8_UNORM)
-			return;
-
-		for (size_t y = 0; y < image->height; ++y)
-		{
-			uint8_t* row = image->pixels + y * image->rowPitch;
-			for (size_t x = 0; x < image->width; ++x)
-				row[x * 4 + 3] = 0xff;
-		}
-	}
-
-	bool SaveCapturedTextureHDR(const ScratchImage& captured, const std::wstring& filePath, std::wstring* errorMessage)
-	{
-		const Image* image = captured.GetImage(0, 0, 0);
-		if (!image)
-		{
-			if (errorMessage)
-				*errorMessage = L"missing captured image";
-			return false;
-		}
-
-		ScratchImage converted;
-		HRESULT hr = Convert(*image, DXGI_FORMAT_R32G32B32A32_FLOAT, TEX_FILTER_DEFAULT, TEX_THRESHOLD_DEFAULT, converted);
-		if (FAILED(hr))
-		{
-			if (errorMessage)
-				*errorMessage = L"hdr convert failed hr=0x" + std::to_wstring(static_cast<unsigned long>(hr));
-			return false;
-		}
-
-		const Image* convertedImage = converted.GetImage(0, 0, 0);
-		if (!convertedImage)
-		{
-			if (errorMessage)
-				*errorMessage = L"missing converted hdr image";
-			return false;
-		}
-
-		hr = SaveToHDRFile(*convertedImage, filePath.c_str());
-		if (FAILED(hr))
-		{
-			if (errorMessage)
-				*errorMessage = L"hdr save failed hr=0x" + std::to_wstring(static_cast<unsigned long>(hr));
-			return false;
-		}
-
-		return true;
+		return CoronaImageIO::SaveHDR(captured, filePath, errorMessage);
 	}
 
 	const char* GetRawFloatFormatName(DXGI_FORMAT format)
@@ -300,15 +252,17 @@ namespace
 		}
 	}
 
+	// Raw-float dumps only flow through this function with source/target format
+	// pairs whose bit layout is identical (32-bit float per channel). We assert
+	// that and emit the raw bytes; no DirectXTex conversion path needed.
 	bool SaveCapturedTextureRawFloat(
-		const ScratchImage& captured,
+		const CapturedImage& captured,
 		const std::wstring& filePath,
 		DXGI_FORMAT targetFormat,
 		uint32_t channelCount,
 		std::wstring* errorMessage)
 	{
-		const Image* image = captured.GetImage(0, 0, 0);
-		if (!image)
+		if (captured.IsEmpty())
 		{
 			if (errorMessage)
 				*errorMessage = L"missing captured image";
@@ -322,35 +276,21 @@ namespace
 			return false;
 		}
 
-		const bool bUseSourceImage =
+		const bool bCompatible =
 			(targetFormat == DXGI_FORMAT_R32_FLOAT &&
-				(image->format == DXGI_FORMAT_R32_FLOAT || image->format == DXGI_FORMAT_D32_FLOAT)) ||
-			(targetFormat == DXGI_FORMAT_R32G32_FLOAT && image->format == DXGI_FORMAT_R32G32_FLOAT) ||
-			(targetFormat == DXGI_FORMAT_R32G32B32A32_FLOAT && image->format == DXGI_FORMAT_R32G32B32A32_FLOAT);
-
-		ScratchImage converted;
-		if (!bUseSourceImage)
-		{
-			HRESULT hr = Convert(*image, targetFormat, TEX_FILTER_DEFAULT, TEX_THRESHOLD_DEFAULT, converted);
-			if (FAILED(hr))
-			{
-				if (errorMessage)
-					*errorMessage = L"raw float convert failed hr=0x" + std::to_wstring(static_cast<unsigned long>(hr));
-				return false;
-			}
-		}
-
-		const Image* convertedImage = bUseSourceImage ? image : converted.GetImage(0, 0, 0);
-		if (!convertedImage)
+				(captured.Format == ETextureFormat::R32Float || captured.Format == ETextureFormat::D32Float)) ||
+			(targetFormat == DXGI_FORMAT_R32G32_FLOAT && captured.Format == ETextureFormat::RG16Float) ||
+			(targetFormat == DXGI_FORMAT_R32G32B32A32_FLOAT && captured.Format == ETextureFormat::RGBA32Float);
+		if (!bCompatible)
 		{
 			if (errorMessage)
-				*errorMessage = L"missing converted raw image";
+				*errorMessage = L"raw float source/target format pair not supported by stb path";
 			return false;
 		}
 
 		const size_t bytesPerPixel = sizeof(float) * static_cast<size_t>(channelCount);
-		const size_t rowBytes = convertedImage->width * bytesPerPixel;
-		if (convertedImage->rowPitch < rowBytes)
+		const size_t rowBytes = static_cast<size_t>(captured.Width) * bytesPerPixel;
+		if (captured.RowPitch < rowBytes)
 		{
 			if (errorMessage)
 				*errorMessage = L"raw row pitch is smaller than expected";
@@ -366,16 +306,16 @@ namespace
 		}
 
 		file << "CORONA_RAW_FLOAT 1\n";
-		file << "width " << convertedImage->width << "\n";
-		file << "height " << convertedImage->height << "\n";
+		file << "width " << captured.Width << "\n";
+		file << "height " << captured.Height << "\n";
 		file << "channels " << channelCount << "\n";
 		file << "format " << GetRawFloatFormatName(targetFormat) << "\n";
 		file << "endianness little\n";
 		file << "data\n";
 
-		for (size_t y = 0; y < convertedImage->height; ++y)
+		for (size_t y = 0; y < captured.Height; ++y)
 		{
-			const uint8_t* row = convertedImage->pixels + y * convertedImage->rowPitch;
+			const uint8_t* row = captured.Pixels.data() + y * captured.RowPitch;
 			file.write(reinterpret_cast<const char*>(row), static_cast<std::streamsize>(rowBytes));
 			if (!file.good())
 			{
@@ -388,71 +328,9 @@ namespace
 		return true;
 	}
 
-	bool SaveCapturedTexturePNG(const ScratchImage& captured, const std::wstring& filePath, std::wstring* errorMessage)
+	bool SaveCapturedTexturePNG(const CapturedImage& captured, const std::wstring& filePath, std::wstring* errorMessage)
 	{
-		const Image* image = captured.GetImage(0, 0, 0);
-		if (!image)
-		{
-			if (errorMessage)
-				*errorMessage = L"missing captured image";
-			return false;
-		}
-
-		const bool bCanSaveWithoutConvert =
-			image->format == DXGI_FORMAT_R8G8B8A8_UNORM ||
-			image->format == DXGI_FORMAT_B8G8R8A8_UNORM;
-		if (bCanSaveWithoutConvert)
-		{
-			ScratchImage pngImage;
-			HRESULT hr = pngImage.InitializeFromImage(*image);
-			const Image* pngOutputImage = SUCCEEDED(hr) ? pngImage.GetImage(0, 0, 0) : nullptr;
-			if (!pngOutputImage)
-				hr = E_FAIL;
-			if (SUCCEEDED(hr))
-			{
-				ForceOpaqueAlpha(pngOutputImage);
-				hr = SaveToWICFile(*pngOutputImage, DirectX::WIC_FLAGS_NONE, GUID_ContainerFormatPng, filePath.c_str());
-			}
-			if (FAILED(hr))
-			{
-				if (errorMessage)
-					*errorMessage = L"png direct save failed hr=0x" + std::to_wstring(static_cast<unsigned long>(hr));
-				return false;
-			}
-			return true;
-		}
-
-		ScratchImage converted;
-		HRESULT hr = Convert(*image, DXGI_FORMAT_R8G8B8A8_UNORM, TEX_FILTER_DEFAULT, TEX_THRESHOLD_DEFAULT, converted);
-		if (FAILED(hr))
-		{
-			if (errorMessage)
-			{
-				*errorMessage =
-					L"png convert failed hr=0x" + std::to_wstring(static_cast<unsigned long>(hr)) +
-					L", srcFormat=" + std::to_wstring(static_cast<unsigned int>(image->format)) +
-					L", size=" + std::to_wstring(image->width) + L"x" + std::to_wstring(image->height);
-			}
-			return false;
-		}
-
-		const Image* convertedImage = converted.GetImage(0, 0, 0);
-		if (!convertedImage)
-		{
-			if (errorMessage)
-				*errorMessage = L"missing converted png image";
-			return false;
-		}
-
-		ForceOpaqueAlpha(convertedImage);
-		hr = SaveToWICFile(*convertedImage, DirectX::WIC_FLAGS_NONE, GUID_ContainerFormatPng, filePath.c_str());
-		if (FAILED(hr))
-		{
-			if (errorMessage)
-				*errorMessage = L"png save failed hr=0x" + std::to_wstring(static_cast<unsigned long>(hr));
-			return false;
-		}
-		return true;
+		return CoronaImageIO::SavePNG(captured, filePath, errorMessage);
 	}
 
 	std::wstring Utf8ToWide(const std::string& value)
@@ -640,31 +518,16 @@ namespace
 
 	void BeginGpuPassMarker(IRenderBackend* backend, UINT passIndex, const char* markerName)
 	{
-		if (!backend ||
-			backend->GetAPI() != ERenderBackendAPI::D3D12 ||
-			passIndex >= kGpuPassPixColors.size() ||
-			!markerName)
-		{
+		if (!backend || passIndex >= kGpuPassPixColors.size() || !markerName)
 			return;
-		}
-
-		ID3D12GraphicsCommandList* commandList = backend->GetGraphicsCommandList();
-		if (!commandList)
-			return;
-
-		PIXBeginEvent(commandList, kGpuPassPixColors[passIndex], "%s", markerName);
+		backend->BeginGpuMarker(kGpuPassPixColors[passIndex], markerName);
 	}
 
 	void EndGpuPassMarker(IRenderBackend* backend)
 	{
-		if (!backend || backend->GetAPI() != ERenderBackendAPI::D3D12)
+		if (!backend)
 			return;
-
-		ID3D12GraphicsCommandList* commandList = backend->GetGraphicsCommandList();
-		if (!commandList)
-			return;
-
-		PIXEndEvent(commandList);
+		backend->EndGpuMarker();
 	}
 
 	constexpr std::array<const char*, 5> kCpuUpdatePhaseNames = {
@@ -928,7 +791,7 @@ namespace
 
 struct Corona::AsyncImageDumpJob
 {
-	ScratchImage Image;
+	CapturedImage Image;
 	std::wstring FilePath;
 	bool bHDR = false;
 };
@@ -1541,13 +1404,13 @@ bool Corona::DLSSPass()
 		motionTag,
 		outputTag,
 	};
-	slSetTagForFrame(*StreamlineFrameToken, vp, tags, _countof(tags), renderBackend->GetGraphicsCommandList());
+	slSetTagForFrame(*StreamlineFrameToken, vp, tags, _countof(tags), dx12_rhi->GetGraphicsCommandList());
 
 	const sl::BaseStructure* inputs[] = {
 		static_cast<const sl::BaseStructure*>(&vp),
 		static_cast<const sl::BaseStructure*>(&depthTag),
 	};
-	const sl::Result evalResult = slEvaluateFeature(sl::kFeatureDLSS, *StreamlineFrameToken, inputs, _countof(inputs), renderBackend->GetGraphicsCommandList());
+	const sl::Result evalResult = slEvaluateFeature(sl::kFeatureDLSS, *StreamlineFrameToken, inputs, _countof(inputs), dx12_rhi->GetGraphicsCommandList());
 	bDLSSResetNeeded = false;
 
 	renderBackend->TransitionTexture(outputTarget, EResourceState::UnorderedAccess, EResourceState::ShaderRead);
@@ -1645,7 +1508,7 @@ bool Corona::DLSSRRPass()
 		tags.push_back(specularHitDistanceTag);
 	}
 	tags.push_back(outputTag);
-	slSetTagForFrame(*StreamlineFrameToken, vp, tags.data(), static_cast<uint32_t>(tags.size()), renderBackend->GetGraphicsCommandList());
+	slSetTagForFrame(*StreamlineFrameToken, vp, tags.data(), static_cast<uint32_t>(tags.size()), dx12_rhi->GetGraphicsCommandList());
 
 	std::vector<const sl::BaseStructure*> inputs = {
 		static_cast<const sl::BaseStructure*>(&vp),
@@ -1660,7 +1523,7 @@ bool Corona::DLSSRRPass()
 		inputs.push_back(static_cast<const sl::BaseStructure*>(&specularMotionVectorTag));
 	if (bUseRRSpecularHitDistance)
 		inputs.push_back(static_cast<const sl::BaseStructure*>(&specularHitDistanceTag));
-	const sl::Result evalResult = slEvaluateFeature(sl::kFeatureDLSS_RR, *StreamlineFrameToken, inputs.data(), static_cast<uint32_t>(inputs.size()), renderBackend->GetGraphicsCommandList());
+	const sl::Result evalResult = slEvaluateFeature(sl::kFeatureDLSS_RR, *StreamlineFrameToken, inputs.data(), static_cast<uint32_t>(inputs.size()), dx12_rhi->GetGraphicsCommandList());
 	bDLSSResetNeeded = false;
 
 	renderBackend->TransitionTexture(outputTarget, EResourceState::UnorderedAccess, EResourceState::ShaderRead);
@@ -3727,7 +3590,7 @@ bool Corona::StartAsyncImageDumpWorkers()
 	return true;
 }
 
-bool Corona::EnqueueAsyncImageDump(ScratchImage&& captured, const std::wstring& filePath, bool bHDR)
+bool Corona::EnqueueAsyncImageDump(CapturedImage&& captured, const std::wstring& filePath, bool bHDR)
 {
 	if (!StartAsyncImageDumpWorkers())
 		return false;
@@ -3845,11 +3708,13 @@ bool Corona::DumpTextureHDR(Texture* source, const std::wstring& filePath, D3D12
 	if (!source || !renderBackend)
 		return false;
 
-	ScratchImage captured;
-	HRESULT hr = renderBackend->CaptureTexture(source, captured, beforeState);
-	if (FAILED(hr))
+	const EResourceState abstractState =
+		(beforeState & D3D12_RESOURCE_STATE_RENDER_TARGET) ? EResourceState::RenderTarget : EResourceState::ShaderRead;
+
+	CapturedImage captured;
+	if (!renderBackend->CaptureTexture(source, captured, abstractState))
 	{
-		AppendAutoAADumpLog(L"[capture] hdr failed hr=0x" + std::to_wstring(static_cast<unsigned long>(hr)));
+		AppendAutoAADumpLog(L"[capture] hdr failed");
 		return false;
 	}
 
@@ -3868,11 +3733,13 @@ bool Corona::DumpTexturePNG(Texture* source, const std::wstring& filePath, D3D12
 	if (!source || !renderBackend)
 		return false;
 
-	ScratchImage captured;
-	HRESULT hr = renderBackend->CaptureTexture(source, captured, beforeState);
-	if (FAILED(hr))
+	const EResourceState abstractState =
+		(beforeState & D3D12_RESOURCE_STATE_RENDER_TARGET) ? EResourceState::RenderTarget : EResourceState::ShaderRead;
+
+	CapturedImage captured;
+	if (!renderBackend->CaptureTexture(source, captured, abstractState))
 	{
-		AppendAutoAADumpLog(L"[capture] png failed hr=0x" + std::to_wstring(static_cast<unsigned long>(hr)));
+		AppendAutoAADumpLog(L"[capture] png failed");
 		return false;
 	}
 
@@ -3896,11 +3763,13 @@ bool Corona::DumpTextureRawFloat(
 	if (!source || !renderBackend)
 		return false;
 
-	ScratchImage captured;
-	HRESULT hr = renderBackend->CaptureTexture(source, captured, beforeState);
-	if (FAILED(hr))
+	const EResourceState abstractState =
+		(beforeState & D3D12_RESOURCE_STATE_RENDER_TARGET) ? EResourceState::RenderTarget : EResourceState::ShaderRead;
+
+	CapturedImage captured;
+	if (!renderBackend->CaptureTexture(source, captured, abstractState))
 	{
-		AppendAutoAADumpLog(L"[capture] raw failed hr=0x" + std::to_wstring(static_cast<unsigned long>(hr)));
+		AppendAutoAADumpLog(L"[capture] raw failed");
 		return false;
 	}
 
@@ -6766,7 +6635,7 @@ void Corona::LoadPipeline()
 	if (bCommandLineRenderBackendOverrideSet && CommandLineRenderBackendAPI == ERenderBackendAPI::Vulkan)
 	{
 		AppendCpuRuntimeTrace(L"[LoadPipeline] begin Vulkan path");
-		renderBackend = CreateRenderBackend(ERenderBackendAPI::Vulkan, nullptr);
+		renderBackend = CreateRenderBackend(ERenderBackendAPI::Vulkan);
 		dx12_rhi = nullptr;
 		if (!renderBackend)
 		{
@@ -6777,11 +6646,10 @@ void Corona::LoadPipeline()
 			L", name=" + std::wstring(renderBackend->GetBackendName(), renderBackend->GetBackendName() + std::strlen(renderBackend->GetBackendName())));
 
 		renderBackend->CreateSwapChainForWindow(
-			nullptr,
-			Win32Application::GetHwnd(),
+			WindowHandle{ Win32Application::GetHwnd() },
 			m_width,
 			m_height,
-			DXGI_FORMAT_R8G8B8A8_UNORM);
+			ETextureFormat::RGBA8Unorm);
 		AppendCpuRuntimeTrace(L"[LoadPipeline] after CreateSwapChainForWindow Vulkan");
 		return;
 	}
@@ -6903,19 +6771,24 @@ void Corona::LoadPipeline()
 	}
 #endif
 
-	renderBackend = CreateRenderBackend(ERenderBackendAPI::D3D12, m_device);
-	dx12_rhi = renderBackend ? renderBackend->AsSimpleDX12() : nullptr;
+	// DX12 backend requires the pre-created device, so construct directly rather
+	// than going through the API-neutral factory.
+	{
+		auto dx12Backend = std::make_unique<DX12Backend>(m_device);
+		dx12_rhi = dx12Backend.get();
+		renderBackend = std::move(dx12Backend);
+	}
 	if (!dx12_rhi)
 	{
 		throw std::runtime_error("Failed to create D3D12 render backend.");
 	}
+	dx12_rhi->SetExternalDXGIFactory(factory.Get());
 
 	renderBackend->CreateSwapChainForWindow(
-		factory.Get(),
-		Win32Application::GetHwnd(),
+		WindowHandle{ Win32Application::GetHwnd() },
 		m_width,
 		m_height,
-		DXGI_FORMAT_R8G8B8A8_UNORM);
+		ETextureFormat::RGBA8Unorm);
 }
 
 glm::mat4x4 Corona::BuildCenteredSceneTransform(
@@ -7063,7 +6936,7 @@ shared_ptr<Scene> Corona::CreateMirrorCubeScene()
 	mesh->NumVertices = static_cast<UINT>(vertices.size());
 	mesh->NumIndices = static_cast<UINT>(indices.size());
 	mesh->VertexStride = sizeof(Vertex);
-	mesh->IndexFormat = DXGI_FORMAT_R32_UINT;
+	mesh->IndexFormat = EIndexFormat::U32;
 	mesh->Mat = material;
 	mesh->Vb = renderBackend->CreateVertexBuffer(sizeof(Vertex) * vertices.size(), sizeof(Vertex), vertices.data());
 	mesh->Ib = renderBackend->CreateIndexBuffer(mesh->IndexFormat, sizeof(UINT32) * indices.size(), indices.data());
@@ -7201,7 +7074,7 @@ shared_ptr<Scene> Corona::CreateProceduralBoxScene(const glm::vec3& baseColor, b
 	mesh->NumVertices = static_cast<UINT>(vertices.size());
 	mesh->NumIndices = static_cast<UINT>(indices.size());
 	mesh->VertexStride = sizeof(Vertex);
-	mesh->IndexFormat = DXGI_FORMAT_R32_UINT;
+	mesh->IndexFormat = EIndexFormat::U32;
 	mesh->Mat = material;
 	mesh->Vb = renderBackend->CreateVertexBuffer(sizeof(Vertex) * vertices.size(), sizeof(Vertex), vertices.data());
 	mesh->Ib = renderBackend->CreateIndexBuffer(mesh->IndexFormat, sizeof(UINT32) * indices.size(), indices.data());
@@ -7368,7 +7241,7 @@ shared_ptr<Scene> Corona::CreateProceduralBlockCharacterScene(UINT32 seed)
 	Mesh* mesh = new Mesh;
 	mesh->Owner = renderBackend.get();
 	mesh->transform = glm::mat4x4(1.0f);
-	mesh->IndexFormat = DXGI_FORMAT_R32_UINT;
+	mesh->IndexFormat = EIndexFormat::U32;
 	mesh->VertexStride = sizeof(Vertex);
 	mesh->Mat = skin;
 
@@ -7697,10 +7570,7 @@ void Corona::LoadAssets()
 	{
 		for (UINT i = 0; i < renderBackend->GetFrameCount(); i++)
 		{
-			ComPtr<ID3D12Resource> rendertarget = renderBackend->GetSwapChainBuffer(i);
-			shared_ptr<Texture> rt = renderBackend->WrapNativeTexture(rendertarget);
-			rt->MakeRTV();
-			framebuffers.push_back(rt);
+			framebuffers.push_back(renderBackend->GetSwapChainTexture(i));
 		}
 	}
 
@@ -8292,7 +8162,7 @@ shared_ptr<Scene> Corona::LoadBinaryMeshModel(const std::wstring& binaryFileName
 		mesh->NumVertices = vertexCount;
 		mesh->NumIndices = indexCount;
 		mesh->VertexStride = sizeof(CoronaMeshDiskVertex);
-		mesh->IndexFormat = DXGI_FORMAT_R32_UINT;
+		mesh->IndexFormat = EIndexFormat::U32;
 		mesh->Vb = renderBackend->CreateVertexBuffer(static_cast<UINT>(vertices.size() * sizeof(CoronaMeshDiskVertex)), sizeof(CoronaMeshDiskVertex), vertices.data());
 		mesh->Ib = renderBackend->CreateIndexBuffer(mesh->IndexFormat, static_cast<UINT>(indices.size() * sizeof(UINT32)), indices.data());
 		mesh->CpuPositions.reserve(vertices.size());
@@ -8588,7 +8458,7 @@ shared_ptr<Scene> Corona::LoadModel(string fileName)
 
 		mesh->Vb = renderBackend->CreateVertexBuffer(sizeof(Vertex) * mesh->NumVertices, sizeof(Vertex), vertices.data());
 		mesh->VertexStride = sizeof(Vertex);
-		mesh->IndexFormat = DXGI_FORMAT_R32_UINT;
+		mesh->IndexFormat = EIndexFormat::U32;
 
 		mesh->Ib = renderBackend->CreateIndexBuffer(mesh->IndexFormat, sizeof(UINT32)*3*numTriangles, indices.data());
 		mesh->CpuPositions.reserve(vertices.size());
@@ -8634,7 +8504,7 @@ void Corona::InitImgui()
 	io.LogFilename = m_imguiLogPath.c_str();
 
 	ImGui_ImplWin32_Init(Win32Application::GetHwnd());
-	renderBackend->InitializeImGuiBackend(Win32Application::GetHwnd(), DXGI_FORMAT_R8G8B8A8_UNORM);
+	renderBackend->InitializeImGuiBackend(WindowHandle{ Win32Application::GetHwnd() }, ETextureFormat::RGBA8Unorm);
 }
 
 void Corona::InitBlueNoiseTexture()
@@ -8708,10 +8578,7 @@ void Corona::EnsureWindowFramebuffers()
 
 	for (UINT i = 0; i < renderBackend->GetFrameCount(); i++)
 	{
-		ComPtr<ID3D12Resource> rendertarget = renderBackend->GetSwapChainBuffer(i);
-		shared_ptr<Texture> rt = renderBackend->WrapNativeTexture(rendertarget);
-		rt->MakeRTV();
-		framebuffers.push_back(rt);
+		framebuffers.push_back(renderBackend->GetSwapChainTexture(i));
 	}
 }
 
@@ -9570,6 +9437,27 @@ void Corona::OnRender()
 			ImGui::SameLine();
 			if (ImGui::Button("Recompile all shaders"))
 				bRecompileShaders = true;
+
+#if CORONA_HAS_D3D12
+			DX12Backend* dx12BackendForBvh = renderBackend ? renderBackend->AsDX12Backend() : nullptr;
+			bool bBvhViewerVisible = dx12BackendForBvh && dx12BackendForBvh->IsBvhViewerD3D12WindowVisible();
+			if (!dx12BackendForBvh)
+				ImGui::BeginDisabled();
+			if (ImGui::Checkbox("BVH Viewer Window", &bBvhViewerVisible))
+			{
+				if (bBvhViewerVisible)
+					dx12BackendForBvh->ShowBvhViewerD3D12Window();
+				else
+					dx12BackendForBvh->HideBvhViewerD3D12Window();
+			}
+			ImGui::SameLine();
+			if (ImGui::Button("Focus BVH Viewer"))
+			{
+				dx12BackendForBvh->ShowBvhViewerD3D12Window();
+			}
+			if (!dx12BackendForBvh)
+				ImGui::EndDisabled();
+#endif
 
 			if (bFinalScreenshotRequested || bFinalScreenshotCaptureInFlight)
 				ImGui::BeginDisabled();

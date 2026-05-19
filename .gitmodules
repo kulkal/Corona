@@ -10,3 +10,9 @@
 [submodule "src/external/luau"]
 	path = src/external/luau
 	url = https://github.com/luau-lang/luau.git
+[submodule "src/external/real-time-bvh-viewer"]
+	path = src/external/real-time-bvh-viewer
+	url = https://gitlab-master.nvidia.com/ipovarov/real-time-bvh-viewer.git
+[submodule "src/external/mathlib"]
+	path = src/external/mathlib
+	url = https://github.com/NVIDIA-RTX/MathLib.git
