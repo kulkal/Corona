@@ -186,6 +186,7 @@ set(LUAU_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(LUAU_BUILD_WEB OFF CACHE BOOL "" FORCE)
 set(LUAU_EXTERN_C ON CACHE BOOL "" FORCE)
 add_subdirectory("${CORONA_SRC_DIR}/external/luau" "${CMAKE_CURRENT_BINARY_DIR}/luau" EXCLUDE_FROM_ALL)
+add_subdirectory("${CORONA_SRC_DIR}/external/nv_bvh_viewer" "${CMAKE_CURRENT_BINARY_DIR}/nv_bvh_viewer" EXCLUDE_FROM_ALL)
 
 foreach(required_path IN ITEMS
     "${CORONA_ASSIMP_LIB}"
@@ -248,6 +249,7 @@ target_link_libraries(Corona PRIVATE
     Luau.Compiler
     Luau.VM
     Dbghelp
+    CoronaBvhViewerD3D12
 )
 if(CORONA_STREAMLINE_LIB)
     target_link_libraries(Corona PRIVATE "${CORONA_STREAMLINE_LIB}")
