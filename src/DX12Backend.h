@@ -31,6 +31,7 @@
 
 #include "D3D12Helpers.h"
 #include "RenderBackend.h"
+#include "RenderResources.h"
 
 using namespace Microsoft::WRL;
 using namespace std;
@@ -503,76 +504,6 @@ public:
 	ComPtr<ID3D12Resource> Result;
 	ComPtr<ID3D12Resource> Instance;
 	UINT NumInstances = 0;
-};
-
-class Material
-{
-public:
-	bool bHasAlpha = false;
-	glm::vec4 BaseColorFactor = glm::vec4(1.0f);
-
-	shared_ptr<Texture> Diffuse;
-	shared_ptr<Texture> Normal;
-	shared_ptr<Texture> Roughness;
-	shared_ptr<Texture> Metallic;
-	Material() {}
-	~Material()
-	{
-		int a = 0;
-	}
-};
-
-class Mesh
-{
-public:
-	IRenderBackend* Owner = nullptr;
-	struct DrawCall
-	{
-		shared_ptr<Material> mat;
-		INT DiffuseTextureIndex;
-		INT NormalTextureIndex;
-		INT SpecularTextureIndex;
-		UINT IndexStart;
-		UINT IndexCount;
-		UINT VertexBase;
-		UINT VertexCount;
-	};
-public:
-	bool bTransparent = false;
-	glm::mat4x4 transform;
-	UINT NumIndices;
-	UINT NumVertices;
-
-	UINT VertexStride;
-
-	EIndexFormat IndexFormat = EIndexFormat::U32;
-
-	shared_ptr<IndexBuffer> Ib;
-	shared_ptr<VertexBuffer> Vb;
-	vector<glm::vec3> CpuPositions;
-	vector<UINT32> CpuIndices;
-	vector<shared_ptr<Texture>> Textures;
-
-	shared_ptr<Material> Mat;
-
-	vector<DrawCall> Draws;
-
-	shared_ptr<RTAS> CreateBLAS();
-};
-
-class Scene
-{
-public:
-	
-	void SetTransform(glm::mat4x4 inTransform);
-
-public:
-	vector<shared_ptr<Mesh>> meshes;
-	vector<shared_ptr<Material>> Materials;
-	bool bHasBounds = false;
-	glm::vec3 BoundsMin = glm::vec3(0.0f);
-	glm::vec3 BoundsMax = glm::vec3(0.0f);
-public:
 };
 
 class DX12Backend : public IRenderBackend

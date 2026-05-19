@@ -21,6 +21,10 @@
 
 void AppendCpuRuntimeTrace(const std::wstring& line);
 
+#if CORONA_HAS_D3D12
+// InitBloomPass / InitDebugPass use the DX12-native PipelineStateObject without
+// an abstract fallback. Mobile / Vulkan-only builds compile these out; the
+// runtime gate at the call site (bVulkanBackend) already skips them.
 void Corona::InitBloomPass()
 {
 	{
@@ -173,6 +177,7 @@ void Corona::InitBloomPass()
 	NAME_D3D12_OBJECT(ExposureData->resource);
 
 }
+#endif // CORONA_HAS_D3D12 (InitBloomPass)
 
 void Corona::InitGBufferPass()
 {
@@ -267,7 +272,9 @@ void Corona::InitToneMapPass()
 		ToneMapGraphicsPipeline = renderBackend->CreateGraphicsPipeline(desc);
 		return;
 	}
-	
+
+#if CORONA_HAS_D3D12
+	// DX12-native fallback path using the direct PipelineStateObject class.
 	ShaderBytecode vs = renderBackend->CreateShader(GetAssetFullPath(L"Shaders\\ToneMapPS.hlsl"), "VSMain", "vs_6_0");
 	ShaderBytecode ps = renderBackend->CreateShader(GetAssetFullPath(L"Shaders\\ToneMapPS.hlsl"), "PSMain", "ps_6_0");
 
@@ -311,8 +318,10 @@ void Corona::InitToneMapPass()
 	bool bSuccess = TEMP_ToneMapPSO->Init();
 	if (bSuccess)
 		ToneMapPSO = TEMP_ToneMapPSO;
+#endif // CORONA_HAS_D3D12 (ToneMap DX12 fallback)
 }
 
+#if CORONA_HAS_D3D12
 void Corona::InitDebugPass()
 {
 	struct PostVertex
@@ -385,6 +394,7 @@ void Corona::InitDebugPass()
 	if (bSuccess)
 		BufferVisualizePSO = TEMP_BufferVisualizePSO;
 }
+#endif // CORONA_HAS_D3D12 (InitDebugPass)
 
 void Corona::InitLightingPass()
 {
@@ -442,6 +452,7 @@ void Corona::InitLightingPass()
 		return;
 	}
 
+#if CORONA_HAS_D3D12
 	ShaderBytecode vs = renderBackend->CreateShader(GetAssetFullPath(L"Shaders\\LightingPS.hlsl"), "VSMain", "vs_6_0");
 	ShaderBytecode ps = renderBackend->CreateShader(GetAssetFullPath(L"Shaders\\LightingPS.hlsl"), "PSMain", "ps_6_0");
 
@@ -501,6 +512,7 @@ void Corona::InitLightingPass()
 	bool bSuccess = TEMP_LightingPSO->Init();
 	if (bSuccess)
 		LightingPSO = TEMP_LightingPSO;
+#endif // CORONA_HAS_D3D12 (Lighting DX12 fallback)
 }
 
 void Corona::InitTemporalAAPass()
@@ -556,6 +568,7 @@ void Corona::InitTemporalAAPass()
 		return;
 	}
 
+#if CORONA_HAS_D3D12
 	ShaderBytecode vs = renderBackend->CreateShader(GetAssetFullPath(L"Shaders\\TemporalAA.hlsl"), "VSMain", "vs_6_0");
 	ShaderBytecode ps = renderBackend->CreateShader(GetAssetFullPath(L"Shaders\\TemporalAA.hlsl"), "PSMain", "ps_6_0");
 	CD3DX12_RASTERIZER_DESC rasterizerStateDesc(D3D12_DEFAULT);
@@ -603,6 +616,7 @@ void Corona::InitTemporalAAPass()
 	bool bSuccess = TEMP_TemporalAAPSO->Init();
 	if (bSuccess)
 		TemporalAAPSO = TEMP_TemporalAAPSO;
+#endif // CORONA_HAS_D3D12 (TemporalAA DX12 fallback)
 }
 
 void Corona::ToneMapPass()

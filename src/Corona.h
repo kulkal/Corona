@@ -36,6 +36,7 @@
 #include "SimpleCamera.h"
 #include "RHIBuildConfig.h"
 #include "RenderBackend.h"
+#include "RenderResources.h"
 #if CORONA_HAS_D3D12
 #include "DX12Backend.h"
 #endif

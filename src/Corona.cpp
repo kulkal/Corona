@@ -58,7 +58,9 @@
 #define arraysize(a) (sizeof(a)/sizeof(a[0]))
 #define align_to(_alignment, _val) (((_val + _alignment - 1) / _alignment) * _alignment)
 
+#if CORONA_HAS_DXC_RUNTIME
 static dxc::DxcDllSupport gDxcDllHelper;
+#endif
 
 void AppendCpuRuntimeTrace(const std::wstring& line);
 
@@ -805,6 +807,7 @@ std::string convertBlobToString(BlotType* pBlob)
 	return std::string(infoLog.data());
 }
 
+#if CORONA_HAS_DXC_RUNTIME
 ComPtr<ID3DBlob> compileLibrary(const WCHAR* filename, const WCHAR* targetString)
 {
 	// Initialize the helper
@@ -849,6 +852,7 @@ ComPtr<ID3DBlob> compileLibrary(const WCHAR* filename, const WCHAR* targetString
 	pResult->GetResult((IDxcBlob**)&pBlob);
 	return ComPtr<ID3DBlob>(pBlob);
 }
+#endif // CORONA_HAS_DXC_RUNTIME
 
 Corona::Corona(UINT width, UINT height, std::wstring name) :
 	m_viewport(0.0f, 0.0f, static_cast<float>(width), static_cast<float>(height)),

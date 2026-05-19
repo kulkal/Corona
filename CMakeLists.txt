@@ -12,6 +12,15 @@ endif()
 
 project(Corona LANGUAGES CXX)
 
+# CORONA_DISABLE_D3D12=ON forces CORONA_HAS_D3D12=0 even on Windows, used as a
+# probe for the mobile-readiness work (Tier 3). With it on, all DX12 includes,
+# PIX, DXC runtime, DirectXTex, Streamline, Aftermath, etc. are expected to be
+# guarded out behind their respective macros.
+option(CORONA_DISABLE_D3D12 "Compile without the D3D12 backend (probe for mobile readiness)." OFF)
+if(CORONA_DISABLE_D3D12)
+    add_compile_definitions(CORONA_DISABLE_D3D12=1)
+endif()
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -186,7 +195,9 @@ set(LUAU_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(LUAU_BUILD_WEB OFF CACHE BOOL "" FORCE)
 set(LUAU_EXTERN_C ON CACHE BOOL "" FORCE)
 add_subdirectory("${CORONA_SRC_DIR}/external/luau" "${CMAKE_CURRENT_BINARY_DIR}/luau" EXCLUDE_FROM_ALL)
-add_subdirectory("${CORONA_SRC_DIR}/external/nv_bvh_viewer" "${CMAKE_CURRENT_BINARY_DIR}/nv_bvh_viewer" EXCLUDE_FROM_ALL)
+if(NOT CORONA_DISABLE_D3D12)
+    add_subdirectory("${CORONA_SRC_DIR}/external/nv_bvh_viewer" "${CMAKE_CURRENT_BINARY_DIR}/nv_bvh_viewer" EXCLUDE_FROM_ALL)
+endif()
 
 foreach(required_path IN ITEMS
     "${CORONA_ASSIMP_LIB}"
@@ -249,7 +260,7 @@ target_link_libraries(Corona PRIVATE
     Luau.Compiler
     Luau.VM
     Dbghelp
-    CoronaBvhViewerD3D12
+    $<$<NOT:$<BOOL:${CORONA_DISABLE_D3D12}>>:CoronaBvhViewerD3D12>
 )
 if(CORONA_STREAMLINE_LIB)
     target_link_libraries(Corona PRIVATE "${CORONA_STREAMLINE_LIB}")
