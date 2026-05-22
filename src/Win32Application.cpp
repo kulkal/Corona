@@ -10,6 +10,10 @@
 //*********************************************************
 
 #include "stdafx.h"
+#include "RHIBuildConfig.h"
+
+#if CORONA_PLATFORM_IS_WINDOWS
+
 #include "Corona.h"
 #include "Win32Application.h"
 #include "Utils.h"
@@ -263,3 +267,5 @@ LRESULT CALLBACK Win32Application::WindowProc(HWND hWnd, UINT message, WPARAM wP
 	// Handle any messages the switch statement didn't.
 	return DefWindowProc(hWnd, message, wParam, lParam);
 }
+
+#endif

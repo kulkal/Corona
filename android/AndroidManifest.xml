@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.corona.renderer">
+    <uses-feature android:name="android.hardware.vulkan.version" android:version="0x00401000" android:required="true" />
+    <uses-feature android:name="android.hardware.touchscreen" android:required="true" />
+
+    <application
+        android:label="Corona"
+        android:debuggable="true"
+        android:hasCode="false"
+        android:extractNativeLibs="true"
+        android:theme="@android:style/Theme.NoTitleBar.Fullscreen">
+        <activity
+            android:name="android.app.NativeActivity"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize"
+            android:exported="true"
+            android:screenOrientation="landscape">
+            <meta-data android:name="android.app.lib_name" android:value="Corona" />
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

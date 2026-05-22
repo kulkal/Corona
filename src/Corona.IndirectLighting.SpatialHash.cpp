@@ -121,7 +121,7 @@ shared_ptr<RTPipelineStateObject> Corona::CreateRaytracingSpatialHashGIPSO(bool 
 void Corona::InitRaytracingSpatialHashPass()
 {
 	PSO_RT_SPATIAL_HASH_GI = CreateRaytracingSpatialHashGIPSO(false);
-	if (bEnableRTDiffuseGISER && renderBackend && renderBackend->GetAPI() == ERenderBackendAPI::D3D12)
+	if (bEnableRTDiffuseGISER && renderBackend && renderBackend->SupportsShaderExecutionReordering())
 		InitRaytracingSpatialHashGISERPass();
 }
 
@@ -131,12 +131,12 @@ bool Corona::InitRaytracingSpatialHashGISERPass()
 		return true;
 	if (bRTDiffuseGISpatialHashSERInitFailed)
 		return false;
-	if (!renderBackend || renderBackend->GetAPI() != ERenderBackendAPI::D3D12)
+	if (!renderBackend)
 		return false;
-	if (!bD3D12ShaderModel69Supported)
+	if (!renderBackend->SupportsShaderExecutionReordering())
 	{
 		bRTDiffuseGISpatialHashSERInitFailed = true;
-		AppendCpuRuntimeTrace(L"[RTDiffuseGI][SER] Spatial Hash SER skipped: D3D12 Shader Model 6.9 is not supported");
+		AppendCpuRuntimeTrace(L"[RTDiffuseGI][SER] Spatial Hash SER skipped: backend does not support shader execution reordering");
 		return false;
 	}
 
@@ -164,7 +164,7 @@ void Corona::SpatialHashGIPass()
 	};
 
 	shared_ptr<RTPipelineStateObject> rtPSO = PSO_RT_SPATIAL_HASH_GI;
-	if (bEnableRTDiffuseGISER && renderBackend && renderBackend->GetAPI() == ERenderBackendAPI::D3D12 && InitRaytracingSpatialHashGISERPass())
+	if (bEnableRTDiffuseGISER && renderBackend && renderBackend->SupportsShaderExecutionReordering() && InitRaytracingSpatialHashGISERPass())
 		rtPSO = PSO_RT_SPATIAL_HASH_GI_SER;
 
 	if (!TLAS || !rtPSO ||

@@ -1,10 +1,22 @@
 #pragma once
 
+#include "RHIBuildConfig.h"
 #include "RenderBackend.h"
+#include "RenderResources.h"
 
 #if CORONA_HAS_VULKAN
-#ifndef VK_USE_PLATFORM_WIN32_KHR
-#define VK_USE_PLATFORM_WIN32_KHR 1
+#if CORONA_PLATFORM_IS_WINDOWS
+#  ifndef VK_USE_PLATFORM_WIN32_KHR
+#    define VK_USE_PLATFORM_WIN32_KHR 1
+#  endif
+#elif CORONA_PLATFORM_IS_ANDROID
+#  ifndef VK_USE_PLATFORM_ANDROID_KHR
+#    define VK_USE_PLATFORM_ANDROID_KHR 1
+#  endif
+#elif CORONA_PLATFORM_IS_MACOS || CORONA_PLATFORM_IS_IOS
+#  ifndef VK_USE_PLATFORM_METAL_EXT
+#    define VK_USE_PLATFORM_METAL_EXT 1
+#  endif
 #endif
 #include <array>
 #include <unordered_map>
@@ -238,7 +250,9 @@ public:
 
 	ERenderBackendAPI GetAPI() const override { return ERenderBackendAPI::Vulkan; }
 	const char* GetBackendName() const override { return "Vulkan"; }
-	uint32_t GetMaxSupportedHybridStage() const override { return 7u; }
+	uint32_t GetMaxSupportedHybridStage() const override { return SupportsRayTracing() ? 7u : 0u; }
+	bool SupportsRayTracing() const override;
+	bool SupportsShaderExecutionReordering() const override { return false; }
 
 	void BeginFrame() override;
 	void EndFrame() override;
@@ -311,6 +325,8 @@ public:
 	void BindGraphicsPipelineBuffer(GraphicsPipelineHandle* pipeline, const std::string& bindingName, Buffer* buffer) override;
 	void BindGraphicsPipelineSampler(GraphicsPipelineHandle* pipeline, const std::string& bindingName, Sampler* sampler) override;
 	void PreviewTextureOnWindow(Texture* texture);
+	void DrawWindowTestTriangle();
+	void DrawActiveRenderPassTestTriangle();
 
 private:
 	[[noreturn]] void ThrowNotImplemented(const char* functionName) const;
@@ -346,6 +362,7 @@ private:
 	void DestroyWindowContext();
 	void DestroyFrameContexts();
 	void TrackFrameDescriptorSet(VkDescriptorPool descriptorPool, VkDescriptorSet descriptorSet);
+	VkPipeline CreateTestTrianglePipeline(VkRenderPass compatibleRenderPass, uint32_t colorAttachmentCount);
 	void CreateWindowTrianglePipeline(VkFormat swapchainFormat);
 	void RecreateSwapchain(uint32_t width, uint32_t height);
 	bool CaptureCurrentSwapchainImageToPNG(uint32_t imageIndex, const std::wstring& outputPath, std::wstring* errorMessage);
@@ -442,6 +459,9 @@ private:
 	uint32_t PendingViewportWidth = 0;
 	uint32_t PendingViewportHeight = 0;
 	VkQueryPool TimestampQueryPool = VK_NULL_HANDLE;
+	VkRenderPass ActiveGraphicsRenderPass = VK_NULL_HANDLE;
+	uint32_t ActiveColorAttachmentCount = 0;
+	std::unordered_map<VkRenderPass, VkPipeline> TestTrianglePipelines;
 	uint32_t TimestampQueryCount = 0;
 	uint32_t TimestampQueriesPerFrame = 0;
 	uint32_t TimestampValidBits = 0;

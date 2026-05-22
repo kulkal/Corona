@@ -12,6 +12,15 @@
 #include "stdafx.h"
 #include "SimpleCamera.h"
 
+namespace
+{
+	constexpr uint32_t kKeyLeft = 0x25;
+	constexpr uint32_t kKeyUp = 0x26;
+	constexpr uint32_t kKeyRight = 0x27;
+	constexpr uint32_t kKeyDown = 0x28;
+	constexpr uint32_t kKeyEscape = 0x1B;
+}
+
 SimpleCamera::SimpleCamera():
 	m_initialPosition(0, 0, 0),
 	m_position(m_initialPosition),
@@ -21,6 +30,7 @@ SimpleCamera::SimpleCamera():
 	m_upDirection(0, 1, 0),
 	m_moveSpeed(200.0f),
 	m_turnSpeed(glm::half_pi<float>()),
+	m_virtualMoveInput(0.0f),
 	m_keysPressed{},
 	m_mouseButtonDown(false),
 	m_lastMouseX(0),
@@ -43,6 +53,20 @@ void SimpleCamera::SetMoveSpeed(float unitsPerSecond)
 void SimpleCamera::SetTurnSpeed(float radiansPerSecond)
 {
 	m_turnSpeed = radiansPerSecond;
+}
+
+void SimpleCamera::SetVirtualMoveInput(float strafe, float forward, float vertical)
+{
+	m_virtualMoveInput = glm::vec3(strafe, vertical, forward);
+}
+
+void SimpleCamera::AddLookDelta(float deltaX, float deltaY)
+{
+	m_yaw -= deltaX * m_mouseSensitivity;
+	m_pitch -= deltaY * m_mouseSensitivity;
+
+	m_pitch = glm::min(m_pitch, glm::quarter_pi<float>());
+	m_pitch = glm::max(-glm::quarter_pi<float>(), m_pitch);
 }
 
 void SimpleCamera::Reset()
@@ -71,6 +95,11 @@ void SimpleCamera::Update(float elapsedSeconds)
 		move.y -= 1.0f;
 	if (m_keysPressed.e)
 		move.y += 1.0f;
+
+	move += m_virtualMoveInput;
+	const float moveLength = glm::length(move);
+	if (moveLength > 1.0f)
+		move /= moveLength;
 
 	/*if (fabs(move.x) > 0.1f && fabs(move.z) > 0.1f)
 	{
@@ -121,7 +150,7 @@ glm::mat4x4 SimpleCamera::GetProjectionMatrix(float fov, float aspectRatio, floa
 	return glm::perspectiveRH<float>(fov, aspectRatio, nearPlane, farPlane);
 }
 
-void SimpleCamera::OnKeyDown(WPARAM key)
+void SimpleCamera::OnKeyDown(uint32_t key)
 {
 	switch (key)
 	{
@@ -143,25 +172,25 @@ void SimpleCamera::OnKeyDown(WPARAM key)
 	case 'E':
 		m_keysPressed.e = true;
 		break;
-	case VK_LEFT:
+	case kKeyLeft:
 		m_keysPressed.left = true;
 		break;
-	case VK_RIGHT:
+	case kKeyRight:
 		m_keysPressed.right = true;
 		break;
-	case VK_UP:
+	case kKeyUp:
 		m_keysPressed.up = true;
 		break;
-	case VK_DOWN:
+	case kKeyDown:
 		m_keysPressed.down = true;
 		break;
-	case VK_ESCAPE:
+	case kKeyEscape:
 		Reset();
 		break;
 	}
 }
 
-void SimpleCamera::OnKeyUp(WPARAM key)
+void SimpleCamera::OnKeyUp(uint32_t key)
 {
 	switch (key)
 	{
@@ -183,16 +212,16 @@ void SimpleCamera::OnKeyUp(WPARAM key)
 	case 'E':
 		m_keysPressed.e = false;
 		break;
-	case VK_LEFT:
+	case kKeyLeft:
 		m_keysPressed.left = false;
 		break;
-	case VK_RIGHT:
+	case kKeyRight:
 		m_keysPressed.right = false;
 		break;
-	case VK_UP:
+	case kKeyUp:
 		m_keysPressed.up = false;
 		break;
-	case VK_DOWN:
+	case kKeyDown:
 		m_keysPressed.down = false;
 		break;
 	}
@@ -216,15 +245,9 @@ void SimpleCamera::OnMouseMove(int x, int y)
 	{
 		int deltaX = x - m_lastMouseX;
 		int deltaY = y - m_lastMouseY;
-		
-		// Update yaw and pitch based on mouse movement
-		m_yaw -= deltaX * m_mouseSensitivity;
-		m_pitch -= deltaY * m_mouseSensitivity;
-		
-		// Prevent looking too far up or down
-		m_pitch = glm::min(m_pitch, glm::quarter_pi<float>());
-		m_pitch = glm::max(-glm::quarter_pi<float>(), m_pitch);
-		
+
+		AddLookDelta(static_cast<float>(deltaX), static_cast<float>(deltaY));
+
 		m_lastMouseX = x;
 		m_lastMouseY = y;
 	}

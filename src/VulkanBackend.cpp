@@ -1,6 +1,11 @@
 #include "stdafx.h"
+#include "CoronaImageIO.h"
+#include "PlatformSystem.h"
 #include "VulkanBackend.h"
+#include "RHIBuildConfig.h"
+#if CORONA_HAS_D3D12
 #include "DX12Backend.h"
+#endif
 #include "Utils.h"
 
 #include <algorithm>
@@ -15,15 +20,13 @@
 #include <stdexcept>
 #include <unordered_set>
 #include <vector>
-#include <wincodec.h>
 
 #include "glm/glm.hpp"
 #include "glm/gtc/matrix_transform.hpp"
 
-#include "external/assimp/include/Importer.hpp"
-#include "external/assimp/include/scene.h"
-#include "external/assimp/include/postprocess.h"
+#if CORONA_HAS_DIRECTXTEX
 #include "DirectXTex.h"
+#endif
 
 #if CORONA_HAS_VULKAN
 #include <vulkan/vulkan.h>
@@ -36,6 +39,19 @@ namespace
 	constexpr uint32_t kVulkanUavBindingBase = 32;
 	constexpr uint32_t kVulkanSamplerBindingBase = 64;
 	constexpr uint32_t kVulkanConstantBufferBindingBase = 128;
+
+	const char* GetVulkanPlatformSurfaceExtension()
+	{
+#if CORONA_PLATFORM_IS_WINDOWS
+		return VK_KHR_WIN32_SURFACE_EXTENSION_NAME;
+#elif CORONA_PLATFORM_IS_ANDROID
+		return VK_KHR_ANDROID_SURFACE_EXTENSION_NAME;
+#elif CORONA_PLATFORM_IS_MACOS || CORONA_PLATFORM_IS_IOS
+		return VK_EXT_METAL_SURFACE_EXTENSION_NAME;
+#else
+		return nullptr;
+#endif
+	}
 	constexpr uint32_t kVulkanGraphicsDescriptorSetsPerPool = 4096;
 	constexpr uint32_t kVulkanComputeDescriptorSetsPerPool = 256;
 	constexpr VkDeviceSize kVulkanTransientUniformBytesPerFrame = 16ull * 1024ull * 1024ull;
@@ -192,145 +208,71 @@ namespace
 			return entrySpecificPath;
 		return ResolveVulkanSpirvPath(shaderStem + L"Vulkan.comp.spv");
 	}
+
+	std::filesystem::path ResolveVulkanGraphicsVertexSpirvPath(const std::wstring& shaderStem, const std::string& entryPoint)
+	{
+		const std::wstring entryPointWide(entryPoint.begin(), entryPoint.end());
+		const std::filesystem::path entrySpecificPath = ResolveVulkanSpirvPath(shaderStem + L"_" + entryPointWide + L"Vulkan.vert.spv");
+		if (std::filesystem::exists(entrySpecificPath))
+			return entrySpecificPath;
+		return ResolveVulkanSpirvPath(shaderStem + L"Vulkan.vert.spv");
+	}
 #endif
+
+	std::filesystem::path NormalizeShaderPath(std::string shaderPath)
+	{
+		std::replace(shaderPath.begin(), shaderPath.end(), '\\', '/');
+		return std::filesystem::path(shaderPath);
+	}
+
+	std::filesystem::path NormalizeShaderPath(std::wstring shaderPath)
+	{
+		std::replace(shaderPath.begin(), shaderPath.end(), L'\\', L'/');
+		return std::filesystem::path(shaderPath);
+	}
 
 	std::wstring Utf8ToWide(const std::string& text)
 	{
-		if (text.empty())
-			return std::wstring();
+		return PlatformUtf8ToWide(text);
+	}
 
-		const int requiredChars = MultiByteToWideChar(CP_UTF8, 0, text.c_str(), static_cast<int>(text.size()), nullptr, 0);
-		if (requiredChars <= 0)
-			return std::wstring(text.begin(), text.end());
-
-		std::wstring result(requiredChars, L'\0');
-		MultiByteToWideChar(CP_UTF8, 0, text.c_str(), static_cast<int>(text.size()), result.data(), requiredChars);
-		return result;
+	bool HasExtensionI(const std::wstring& filePath, const wchar_t* extension)
+	{
+		const std::wstring actual = std::filesystem::path(filePath).extension().wstring();
+		const std::wstring expected = extension ? std::wstring(extension) : std::wstring();
+		if (actual.size() != expected.size())
+			return false;
+		for (size_t i = 0; i < actual.size(); ++i)
+		{
+			if (std::towlower(actual[i]) != std::towlower(expected[i]))
+				return false;
+		}
+		return true;
 	}
 
 	bool WriteRGBA8PNG(const std::wstring& outputPath, const std::vector<uint8_t>& rgbaPixels, uint32_t width, uint32_t height, std::wstring* errorMessage)
 	{
-		Microsoft::WRL::ComPtr<IWICImagingFactory> imagingFactory;
-		HRESULT hr = CoCreateInstance(
-			CLSID_WICImagingFactory,
-			nullptr,
-			CLSCTX_INPROC_SERVER,
-			IID_PPV_ARGS(&imagingFactory));
-		if (FAILED(hr))
+		if (width == 0 || height == 0 || rgbaPixels.size() < static_cast<size_t>(width) * height * 4u)
 		{
 			if (errorMessage)
-				*errorMessage = L"Failed to create WIC imaging factory for Vulkan PNG output.";
+				*errorMessage = L"Vulkan PNG output has invalid dimensions or pixel data.";
 			return false;
 		}
 
-		Microsoft::WRL::ComPtr<IWICStream> stream;
-		hr = imagingFactory->CreateStream(&stream);
-		if (FAILED(hr))
-		{
-			if (errorMessage)
-				*errorMessage = L"Failed to create WIC stream for Vulkan PNG output.";
-			return false;
-		}
-
-		hr = stream->InitializeFromFilename(outputPath.c_str(), GENERIC_WRITE);
-		if (FAILED(hr))
-		{
-			if (errorMessage)
-				*errorMessage = L"Failed to open Vulkan PNG output file.";
-			return false;
-		}
-
-		Microsoft::WRL::ComPtr<IWICBitmapEncoder> encoder;
-		hr = imagingFactory->CreateEncoder(GUID_ContainerFormatPng, nullptr, &encoder);
-		if (FAILED(hr))
-		{
-			if (errorMessage)
-				*errorMessage = L"Failed to create WIC PNG encoder.";
-			return false;
-		}
-
-		hr = encoder->Initialize(stream.Get(), WICBitmapEncoderNoCache);
-		if (FAILED(hr))
-		{
-			if (errorMessage)
-				*errorMessage = L"Failed to initialize WIC PNG encoder.";
-			return false;
-		}
-
-		Microsoft::WRL::ComPtr<IWICBitmapFrameEncode> frame;
-		Microsoft::WRL::ComPtr<IPropertyBag2> propertyBag;
-		hr = encoder->CreateNewFrame(&frame, &propertyBag);
-		if (FAILED(hr))
-		{
-			if (errorMessage)
-				*errorMessage = L"Failed to create WIC PNG frame.";
-			return false;
-		}
-
-		hr = frame->Initialize(propertyBag.Get());
-		if (FAILED(hr))
-		{
-			if (errorMessage)
-				*errorMessage = L"Failed to initialize WIC PNG frame.";
-			return false;
-		}
-
-		hr = frame->SetSize(width, height);
-		if (FAILED(hr))
-		{
-			if (errorMessage)
-				*errorMessage = L"Failed to set WIC PNG frame size.";
-			return false;
-		}
-
-		WICPixelFormatGUID pixelFormat = GUID_WICPixelFormat32bppBGRA;
-		hr = frame->SetPixelFormat(&pixelFormat);
-		if (FAILED(hr) || pixelFormat != GUID_WICPixelFormat32bppBGRA)
-		{
-			if (errorMessage)
-				*errorMessage = L"Failed to configure WIC PNG pixel format.";
-			return false;
-		}
-
-		std::vector<uint8_t> bgraPixels(rgbaPixels.size());
-		for (size_t i = 0; i < rgbaPixels.size(); i += 4)
-		{
-			bgraPixels[i + 0] = rgbaPixels[i + 2];
-			bgraPixels[i + 1] = rgbaPixels[i + 1];
-			bgraPixels[i + 2] = rgbaPixels[i + 0];
-			bgraPixels[i + 3] = 0xff;
-		}
-
-		const UINT stride = width * 4;
-		hr = frame->WritePixels(height, stride, static_cast<UINT>(bgraPixels.size()), bgraPixels.data());
-		if (FAILED(hr))
-		{
-			if (errorMessage)
-				*errorMessage = L"Failed to write Vulkan PNG pixels.";
-			return false;
-		}
-
-		hr = frame->Commit();
-		if (FAILED(hr))
-		{
-			if (errorMessage)
-				*errorMessage = L"Failed to commit Vulkan PNG frame.";
-			return false;
-		}
-
-		hr = encoder->Commit();
-		if (FAILED(hr))
-		{
-			if (errorMessage)
-				*errorMessage = L"Failed to finalize Vulkan PNG output.";
-			return false;
-		}
-
-		return true;
+		CapturedImage image;
+		image.Format = ETextureFormat::RGBA8Unorm;
+		image.Width = width;
+		image.Height = height;
+		image.RowPitch = width * 4u;
+		image.Pixels = rgbaPixels;
+		for (size_t i = 3; i < image.Pixels.size(); i += 4)
+			image.Pixels[i] = 0xff;
+		return CoronaImageIO::SavePNG(image, outputPath, errorMessage);
 	}
 
 	bool LoadRGBA8TextureFromFile(const std::wstring& filePath, std::vector<uint8_t>& outPixels, uint32_t& outWidth, uint32_t& outHeight, std::wstring* errorMessage)
 	{
+#if CORONA_HAS_DIRECTXTEX
 		auto copyRGBA8Image = [&](const DirectX::Image& image)
 		{
 			if (!image.pixels || image.width == 0 || image.height == 0)
@@ -342,6 +284,11 @@ namespace
 			outWidth = static_cast<uint32_t>(image.width);
 			outHeight = static_cast<uint32_t>(image.height);
 			const size_t dstRowPitch = static_cast<size_t>(outWidth) * 4u;
+			if (image.rowPitch < dstRowPitch)
+			{
+				if (errorMessage) *errorMessage = L"DDS texture row pitch is smaller than expected.";
+				return false;
+			}
 			outPixels.resize(dstRowPitch * static_cast<size_t>(outHeight));
 			for (uint32_t row = 0; row < outHeight; ++row)
 			{
@@ -352,7 +299,7 @@ namespace
 			return true;
 		};
 
-		if (_wcsicmp(std::filesystem::path(filePath).extension().c_str(), L".dds") == 0)
+		if (HasExtensionI(filePath, L".dds"))
 		{
 			DirectX::TexMetadata metadata{};
 			DirectX::ScratchImage sourceImage;
@@ -400,78 +347,65 @@ namespace
 
 			return rgbaImage && copyRGBA8Image(*rgbaImage);
 		}
-
-		Microsoft::WRL::ComPtr<IWICImagingFactory> imagingFactory;
-		HRESULT hr = CoCreateInstance(
-			CLSID_WICImagingFactory,
-			nullptr,
-			CLSCTX_INPROC_SERVER,
-			IID_PPV_ARGS(&imagingFactory));
-		if (FAILED(hr))
+#else
+		if (HasExtensionI(filePath, L".dds"))
 		{
-			if (errorMessage) *errorMessage = L"Failed to create WIC factory.";
+			if (errorMessage) *errorMessage = L"DDS not supported in this build (CORONA_HAS_DIRECTXTEX=0).";
+			return false;
+		}
+#endif // CORONA_HAS_DIRECTXTEX
+
+		CapturedImage image;
+		if (!CoronaImageIO::Load(filePath, image, false, errorMessage))
+			return false;
+		if (image.Width == 0 || image.Height == 0 || image.Pixels.empty())
+		{
+			if (errorMessage) *errorMessage = L"Texture has invalid dimensions or pixels.";
+			return false;
+		}
+		if (image.Format != ETextureFormat::RGBA8Unorm && image.Format != ETextureFormat::BGRA8Unorm)
+		{
+			if (errorMessage) *errorMessage = L"Texture format is not RGBA8-compatible for Vulkan upload.";
 			return false;
 		}
 
-		Microsoft::WRL::ComPtr<IWICBitmapDecoder> decoder;
-		hr = imagingFactory->CreateDecoderFromFilename(filePath.c_str(), nullptr, GENERIC_READ, WICDecodeMetadataCacheOnDemand, &decoder);
-		if (FAILED(hr))
+		outWidth = image.Width;
+		outHeight = image.Height;
+		const size_t dstRowPitch = static_cast<size_t>(outWidth) * 4u;
+		if (image.RowPitch < dstRowPitch)
 		{
-			if (errorMessage) *errorMessage = L"Failed to open texture file.";
+			if (errorMessage) *errorMessage = L"Texture row pitch is smaller than expected.";
 			return false;
 		}
-
-		Microsoft::WRL::ComPtr<IWICBitmapFrameDecode> frame;
-		hr = decoder->GetFrame(0, &frame);
-		if (FAILED(hr))
+		outPixels.resize(dstRowPitch * static_cast<size_t>(outHeight));
+		for (uint32_t row = 0; row < outHeight; ++row)
 		{
-			if (errorMessage) *errorMessage = L"Failed to read texture frame.";
-			return false;
-		}
-
-		UINT width = 0;
-		UINT height = 0;
-		frame->GetSize(&width, &height);
-		if (width == 0 || height == 0)
-		{
-			if (errorMessage) *errorMessage = L"Texture has invalid dimensions.";
-			return false;
-		}
-
-		Microsoft::WRL::ComPtr<IWICFormatConverter> converter;
-		hr = imagingFactory->CreateFormatConverter(&converter);
-		if (FAILED(hr))
-		{
-			if (errorMessage) *errorMessage = L"Failed to create WIC format converter.";
-			return false;
-		}
-
-		hr = converter->Initialize(frame.Get(), GUID_WICPixelFormat32bppRGBA, WICBitmapDitherTypeNone, nullptr, 0.0, WICBitmapPaletteTypeCustom);
-		if (FAILED(hr))
-		{
-			if (errorMessage) *errorMessage = L"Failed to convert texture to RGBA8.";
-			return false;
-		}
-
-		outWidth = width;
-		outHeight = height;
-		outPixels.resize(static_cast<size_t>(width) * static_cast<size_t>(height) * 4);
-		const UINT stride = width * 4;
-		hr = converter->CopyPixels(nullptr, stride, static_cast<UINT>(outPixels.size()), outPixels.data());
-		if (FAILED(hr))
-		{
-			if (errorMessage) *errorMessage = L"Failed to read texture pixels.";
-			return false;
+			const uint8_t* srcRow = image.Pixels.data() + static_cast<size_t>(row) * image.RowPitch;
+			uint8_t* dstRow = outPixels.data() + static_cast<size_t>(row) * dstRowPitch;
+			if (image.Format == ETextureFormat::RGBA8Unorm)
+			{
+				std::memcpy(dstRow, srcRow, dstRowPitch);
+			}
+			else
+			{
+				for (uint32_t x = 0; x < outWidth; ++x)
+				{
+					dstRow[x * 4 + 0] = srcRow[x * 4 + 2];
+					dstRow[x * 4 + 1] = srcRow[x * 4 + 1];
+					dstRow[x * 4 + 2] = srcRow[x * 4 + 0];
+					dstRow[x * 4 + 3] = srcRow[x * 4 + 3];
+				}
+			}
 		}
 
 		return true;
 	}
 
-	std::vector<uint32_t> LoadSpirvFile(const std::wstring& filePath)
+	std::vector<uint32_t> LoadSpirvFile(const std::filesystem::path& filePath)
 	{
-		std::ifstream file(std::filesystem::path(filePath), std::ios::binary | std::ios::ate);
+		std::ifstream file(filePath, std::ios::binary | std::ios::ate);
 		if (!file.is_open())
-			throw std::runtime_error("Failed to open SPIR-V shader file.");
+			throw std::runtime_error("Failed to open SPIR-V shader file: " + filePath.string());
 
 		const std::streamsize fileSize = file.tellg();
 		if (fileSize <= 0 || (fileSize % 4) != 0)
@@ -510,18 +444,18 @@ namespace
 	}
 
 #if CORONA_HAS_VULKAN
-	const std::filesystem::path kVulkanValidationLogPath = RuntimePaths::LogFile(L"vulkan_validation.log");
-	const std::filesystem::path kVulkanRuntimeTracePath = RuntimePaths::LogFile(L"vulkan_runtime_trace.log");
-
 	void AppendVulkanValidationLog(const std::string& line)
 	{
-		std::filesystem::create_directories(kVulkanValidationLogPath.parent_path());
-		std::ofstream logFile(kVulkanValidationLogPath, std::ios::app);
+		const std::filesystem::path logPath = RuntimePaths::LogFile(L"vulkan_validation.log");
+		std::filesystem::create_directories(logPath.parent_path());
+		std::ofstream logFile(logPath, std::ios::app);
 		if (logFile.is_open())
 		{
 			logFile << line << "\n";
 		}
+#if CORONA_PLATFORM_IS_WINDOWS
 		OutputDebugStringA((line + "\n").c_str());
+#endif
 	}
 
 	void AppendVulkanRuntimeTraceBackend(const std::wstring& line)
@@ -544,20 +478,20 @@ namespace
 			}
 		}
 
-		std::filesystem::create_directories(kVulkanRuntimeTracePath.parent_path());
-		std::wofstream traceFile(kVulkanRuntimeTracePath, std::ios::app);
+		const std::filesystem::path tracePath = RuntimePaths::LogFile(L"vulkan_runtime_trace.log");
+		std::filesystem::create_directories(tracePath.parent_path());
+		std::ofstream traceFile(tracePath, std::ios::app);
 		if (traceFile.is_open())
-			traceFile << line << L"\n";
+			traceFile << PlatformWideToUtf8(line) << "\n";
 	}
 
 	bool IsVulkanValidationEnabled()
 	{
-		wchar_t value[32] = {};
-		const DWORD length = GetEnvironmentVariableW(L"CORONA_VULKAN_VALIDATION", value, static_cast<DWORD>(_countof(value)));
-		if (length == 0 || length >= _countof(value))
+		const auto value = GetPlatformEnvironmentVariable(L"CORONA_VULKAN_VALIDATION");
+		if (!value || value->empty())
 			return false;
 
-		std::wstring normalized(value, length);
+		std::wstring normalized = *value;
 		std::transform(normalized.begin(), normalized.end(), normalized.begin(), [](wchar_t ch)
 		{
 			return static_cast<wchar_t>(std::towlower(ch));
@@ -745,6 +679,13 @@ namespace
 
 	VkPresentModeKHR ChoosePresentMode(const std::vector<VkPresentModeKHR>& presentModes)
 	{
+#if CORONA_PLATFORM_IS_ANDROID
+		for (VkPresentModeKHR presentMode : presentModes)
+		{
+			if (presentMode == VK_PRESENT_MODE_FIFO_KHR)
+				return presentMode;
+		}
+#endif
 		for (VkPresentModeKHR presentMode : presentModes)
 		{
 			if (presentMode == VK_PRESENT_MODE_IMMEDIATE_KHR)
@@ -760,6 +701,18 @@ namespace
 		return VK_PRESENT_MODE_FIFO_KHR;
 	}
 
+	const wchar_t* GetPresentModeName(VkPresentModeKHR presentMode)
+	{
+		switch (presentMode)
+		{
+		case VK_PRESENT_MODE_IMMEDIATE_KHR: return L"Immediate";
+		case VK_PRESENT_MODE_MAILBOX_KHR: return L"Mailbox";
+		case VK_PRESENT_MODE_FIFO_KHR: return L"Fifo";
+		case VK_PRESENT_MODE_FIFO_RELAXED_KHR: return L"FifoRelaxed";
+		default: return L"Unknown";
+		}
+	}
+
 	VkExtent2D ChooseSwapchainExtent(const VkSurfaceCapabilitiesKHR& capabilities, uint32_t width, uint32_t height)
 	{
 		if (capabilities.currentExtent.width != UINT32_MAX)
@@ -769,6 +722,15 @@ namespace
 		extent.width = (std::max)(capabilities.minImageExtent.width, (std::min)(capabilities.maxImageExtent.width, width));
 		extent.height = (std::max)(capabilities.minImageExtent.height, (std::min)(capabilities.maxImageExtent.height, height));
 		return extent;
+	}
+
+	VkSurfaceTransformFlagBitsKHR ChooseSwapchainPreTransform(const VkSurfaceCapabilitiesKHR& capabilities)
+	{
+#if CORONA_PLATFORM_IS_ANDROID
+		if ((capabilities.supportedTransforms & VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR) != 0)
+			return VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
+#endif
+		return capabilities.currentTransform;
 	}
 
 	VkFormat ToVkFormat(ETextureFormat format)
@@ -1253,7 +1215,7 @@ bool VulkanRTPipelineStateObject::InitRS(const std::string& shaderFile)
 	Release();
 	Owner = backendOwner;
 
-	std::filesystem::path shaderPath(shaderFile);
+	std::filesystem::path shaderPath = NormalizeShaderPath(shaderFile);
 	if (shaderPath.is_relative())
 		shaderPath = RuntimePaths::SourceDirectory() / shaderPath;
 	std::ifstream shaderStream(shaderPath);
@@ -1376,7 +1338,7 @@ bool VulkanRTPipelineStateObject::InitRS(const std::string& shaderFile)
 		return false;
 	}
 
-	const std::vector<uint32_t> shaderSpirv = LoadSpirvFile(spirvPath.wstring());
+	const std::vector<uint32_t> shaderSpirv = LoadSpirvFile(spirvPath);
 	VkShaderModuleCreateInfo shaderModuleInfo{};
 	shaderModuleInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
 	shaderModuleInfo.codeSize = shaderSpirv.size() * sizeof(uint32_t);
@@ -2110,8 +2072,10 @@ bool VulkanComputePipelineStateObject::InitCS(const std::wstring& shaderFile, co
 	if (!Owner || Owner->Device == VK_NULL_HANDLE)
 		return false;
 
-	const std::wstring shaderStem = std::filesystem::path(shaderFile).stem().wstring();
-	const std::filesystem::path shaderPath(shaderFile);
+	std::filesystem::path shaderPath = NormalizeShaderPath(shaderFile);
+	const std::wstring shaderStem = shaderPath.stem().wstring();
+	if (shaderPath.is_relative())
+		shaderPath = RuntimePaths::SourceDirectory() / shaderPath;
 	const std::unordered_map<std::string, VkDescriptorType> descriptorTypesByName = ParseHlslDescriptorTypes(shaderPath);
 	auto applyDescriptorInference = [&](std::vector<BindingDesc>& bindings)
 	{
@@ -2134,7 +2098,7 @@ bool VulkanComputePipelineStateObject::InitCS(const std::wstring& shaderFile, co
 		return false;
 	}
 
-	const std::vector<uint32_t> shaderSpirv = LoadSpirvFile(spirvPath.wstring());
+	const std::vector<uint32_t> shaderSpirv = LoadSpirvFile(spirvPath);
 	VkShaderModuleCreateInfo shaderModuleInfo{};
 	shaderModuleInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
 	shaderModuleInfo.codeSize = shaderSpirv.size() * sizeof(uint32_t);
@@ -2969,11 +2933,19 @@ void VulkanBackend::EndFrame()
 	presentInfo.pSwapchains = &Swapchain;
 	presentInfo.pImageIndices = &ActiveSwapchainImageIndex;
 	const VkResult presentResult = vkQueuePresentKHR(GraphicsQueue, &presentInfo);
-	if (presentResult == VK_ERROR_OUT_OF_DATE_KHR || presentResult == VK_SUBOPTIMAL_KHR)
+	const bool bRecreateSwapchainAfterPresent =
+		presentResult == VK_ERROR_OUT_OF_DATE_KHR ||
+		presentResult == VK_SUBOPTIMAL_KHR;
+	if (presentResult == VK_SUBOPTIMAL_KHR)
 	{
-		RecreateSwapchain(SwapchainExtent.width, SwapchainExtent.height);
+		static bool bLoggedSuboptimalPresent = false;
+		if (!bLoggedSuboptimalPresent)
+		{
+			AppendVulkanRuntimeTraceBackend(L"[VulkanBackend::EndFrame] present returned SUBOPTIMAL; recreating swapchain after frame cleanup.");
+			bLoggedSuboptimalPresent = true;
+		}
 	}
-	else if (presentResult != VK_SUCCESS)
+	else if (presentResult != VK_SUCCESS && presentResult != VK_ERROR_OUT_OF_DATE_KHR)
 	{
 		throw std::runtime_error("Failed to present Vulkan frame.");
 	}
@@ -2981,6 +2953,8 @@ void VulkanBackend::EndFrame()
 	bFrameActive = false;
 	bRenderPassActive = false;
 	bViewportBound = false;
+	ActiveGraphicsRenderPass = VK_NULL_HANDLE;
+	ActiveColorAttachmentCount = 0;
 	ActiveCommandBuffer = VK_NULL_HANDLE;
 	frame.FramebuffersToDestroy.insert(
 		frame.FramebuffersToDestroy.end(),
@@ -2993,6 +2967,8 @@ void VulkanBackend::EndFrame()
 	PendingTextureClearColors.clear();
 	PendingDepthClearValues.clear();
 	AppendVulkanRuntimeTraceBackend(L"[VulkanBackend::EndFrame] end");
+	if (bRecreateSwapchainAfterPresent)
+		RecreateSwapchain(SwapchainExtent.width, SwapchainExtent.height);
 #endif
 }
 void VulkanBackend::WaitForGpu()
@@ -3043,6 +3019,14 @@ uint32_t VulkanBackend::GetFrameCount() const
 #endif
 }
 uint32_t VulkanBackend::GetCurrentFrameIndex() const { return CurrentFrameIndex; }
+bool VulkanBackend::SupportsRayTracing() const
+{
+#if CORONA_HAS_VULKAN
+	return bRayTracingEnabled;
+#else
+	return false;
+#endif
+}
 DX12Backend* VulkanBackend::AsDX12Backend() { return nullptr; }
 std::shared_ptr<Texture> VulkanBackend::CreateTexture2D(const TextureCreateDesc& desc)
 {
@@ -3051,6 +3035,11 @@ std::shared_ptr<Texture> VulkanBackend::CreateTexture2D(const TextureCreateDesc&
 	ThrowNotImplemented(__FUNCTION__);
 #else
 	auto texture = std::make_shared<Texture>();
+	texture->Width = static_cast<uint32_t>(desc.Width);
+	texture->Height = static_cast<uint32_t>(desc.Height);
+	texture->MipLevels = static_cast<uint32_t>((std::max)(desc.MipLevels, 1));
+	texture->Format = desc.Format;
+	texture->Usage = desc.Usage;
 
 	VulkanTextureAllocation allocation{};
 	allocation.Format = ToVkFormat(desc.Format);
@@ -3237,7 +3226,12 @@ std::shared_ptr<Texture> VulkanBackend::CreateTextureFromFile(const std::wstring
 	uint32_t height = 0;
 	std::wstring errorMessage;
 	if (!LoadRGBA8TextureFromFile(fileName, pixels, width, height, &errorMessage))
-		throw std::runtime_error("Failed to load Vulkan texture file.");
+	{
+		std::string message = "Failed to load Vulkan texture file: " + std::filesystem::path(fileName).string();
+		if (!errorMessage.empty())
+			message += " (" + PlatformWideToUtf8(errorMessage) + ")";
+		throw std::runtime_error(message);
+	}
 
 	TextureCreateDesc desc{};
 	desc.Format = ETextureFormat::RGBA8Unorm;
@@ -3891,6 +3885,8 @@ std::shared_ptr<RTPipelineStateObject> VulkanBackend::CreateRTPipelineStateObjec
 #if !CORONA_HAS_VULKAN
 	ThrowNotImplemented(__FUNCTION__);
 #else
+	if (!SupportsRayTracing())
+		return nullptr;
 	auto pso = std::make_shared<VulkanRTPipelineStateObject>();
 	pso->Owner = this;
 	RayTracingPipelines.push_back(pso);
@@ -3918,9 +3914,11 @@ ShaderBytecode VulkanBackend::CreateShader(const std::wstring& fileName, const s
 void VulkanBackend::ResetDynamicResources() {}
 void VulkanBackend::CreateSwapChainForWindow(WindowHandle window, uint32_t width, uint32_t height, ETextureFormat format)
 {
-	HWND hwnd = static_cast<HWND>(window.PlatformHandle);
 	(void)format;
 #if !CORONA_HAS_VULKAN
+	(void)window;
+	(void)width;
+	(void)height;
 	ThrowNotImplemented(__FUNCTION__);
 #else
 	AppendVulkanRuntimeTraceBackend(L"[VulkanBackend::CreateSwapChainForWindow] begin");
@@ -3935,10 +3933,13 @@ void VulkanBackend::CreateSwapChainForWindow(WindowHandle window, uint32_t width
 	appInfo.apiVersion = VK_API_VERSION_1_1;
 
 	std::error_code resetValidationLogError;
-	std::filesystem::remove(kVulkanValidationLogPath, resetValidationLogError);
+	std::filesystem::remove(RuntimePaths::LogFile(L"vulkan_validation.log"), resetValidationLogError);
 	AppendVulkanRuntimeTraceBackend(L"[VulkanBackend::CreateSwapChainForWindow] after reset validation log");
 
-	std::vector<const char*> instanceExtensions = { VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_WIN32_SURFACE_EXTENSION_NAME };
+	const char* platformSurfaceExtension = GetVulkanPlatformSurfaceExtension();
+	if (!platformSurfaceExtension)
+		throw std::runtime_error("Vulkan window surfaces are not implemented for this Corona platform.");
+	std::vector<const char*> instanceExtensions = { VK_KHR_SURFACE_EXTENSION_NAME, platformSurfaceExtension };
 	std::vector<const char*> instanceLayers;
 	VkDebugUtilsMessengerCreateInfoEXT debugMessengerInfo{};
 	bValidationLayersEnabled = false;
@@ -3992,6 +3993,8 @@ void VulkanBackend::CreateSwapChainForWindow(WindowHandle window, uint32_t width
 		}
 	}
 
+#if CORONA_PLATFORM_IS_WINDOWS
+	HWND hwnd = static_cast<HWND>(window.PlatformHandle);
 	VkWin32SurfaceCreateInfoKHR surfaceInfo{};
 	surfaceInfo.sType = VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR;
 	surfaceInfo.hinstance = GetModuleHandleW(nullptr);
@@ -3999,6 +4002,18 @@ void VulkanBackend::CreateSwapChainForWindow(WindowHandle window, uint32_t width
 	if (vkCreateWin32SurfaceKHR(Instance, &surfaceInfo, nullptr, &Surface) != VK_SUCCESS)
 		throw std::runtime_error("Failed to create Vulkan Win32 surface.");
 	AppendVulkanRuntimeTraceBackend(L"[VulkanBackend::CreateSwapChainForWindow] after vkCreateWin32SurfaceKHR");
+#elif CORONA_PLATFORM_IS_ANDROID
+	ANativeWindow* nativeWindow = static_cast<ANativeWindow*>(window.PlatformHandle);
+	VkAndroidSurfaceCreateInfoKHR surfaceInfo{};
+	surfaceInfo.sType = VK_STRUCTURE_TYPE_ANDROID_SURFACE_CREATE_INFO_KHR;
+	surfaceInfo.window = nativeWindow;
+	if (vkCreateAndroidSurfaceKHR(Instance, &surfaceInfo, nullptr, &Surface) != VK_SUCCESS)
+		throw std::runtime_error("Failed to create Vulkan Android surface.");
+	AppendVulkanRuntimeTraceBackend(L"[VulkanBackend::CreateSwapChainForWindow] after vkCreateAndroidSurfaceKHR");
+#else
+	(void)window;
+	throw std::runtime_error("Vulkan surface creation is not implemented for this Corona platform.");
+#endif
 
 	uint32_t physicalDeviceCount = 0;
 	vkEnumeratePhysicalDevices(Instance, &physicalDeviceCount, nullptr);
@@ -4040,6 +4055,15 @@ void VulkanBackend::CreateSwapChainForWindow(WindowHandle window, uint32_t width
 	UniformBufferAlignment = std::max<VkDeviceSize>(256, physicalDeviceProperties.limits.minUniformBufferOffsetAlignment);
 	MaxUniformBufferRange = physicalDeviceProperties.limits.maxUniformBufferRange;
 	AppendVulkanRuntimeTraceBackend(L"[VulkanBackend::CreateSwapChainForWindow] after select physical device");
+	AppendVulkanRuntimeTraceBackend(
+		L"[VulkanBackend::CreateSwapChainForWindow] physical device=" +
+		Utf8ToWide(std::string(physicalDeviceProperties.deviceName)) +
+		L", maxColorAttachments=" +
+		std::to_wstring(physicalDeviceProperties.limits.maxColorAttachments) +
+		L", maxFragmentOutputAttachments=" +
+		std::to_wstring(physicalDeviceProperties.limits.maxFragmentOutputAttachments) +
+		L", maxFragmentCombinedOutputResources=" +
+		std::to_wstring(physicalDeviceProperties.limits.maxFragmentCombinedOutputResources));
 	AppendVulkanRuntimeTraceBackend(
 		L"[VulkanBackend::CreateSwapChainForWindow] timestamp valid bits=" +
 		std::to_wstring(TimestampValidBits) +
@@ -4482,6 +4506,8 @@ void VulkanBackend::SetRenderTarget(Texture* colorTarget, Texture* depthTarget)
 	renderPassBeginInfo.pClearValues = &clearValue;
 	vkCmdBeginRenderPass(ActiveCommandBuffer, &renderPassBeginInfo, VK_SUBPASS_CONTENTS_INLINE);
 	bRenderPassActive = true;
+	ActiveGraphicsRenderPass = RenderPass;
+	ActiveColorAttachmentCount = 1;
 #endif
 }
 void VulkanBackend::SetRenderTargets(Texture* const* colorTargets, uint32_t colorTargetCount, Texture* depthTarget)
@@ -4728,6 +4754,176 @@ void VulkanBackend::DrawFullscreenQuad(VertexBuffer* vertexBuffer)
 	vkCmdDraw(ActiveCommandBuffer, 4, 1, 0, 0);
 #endif
 }
+#if CORONA_HAS_VULKAN
+VkPipeline VulkanBackend::CreateTestTrianglePipeline(VkRenderPass compatibleRenderPass, uint32_t colorAttachmentCount)
+{
+	if (compatibleRenderPass == VK_NULL_HANDLE ||
+		PipelineLayout == VK_NULL_HANDLE ||
+		VertexShaderModule == VK_NULL_HANDLE ||
+		FragmentShaderModule == VK_NULL_HANDLE)
+	{
+		return VK_NULL_HANDLE;
+	}
+
+	VkPipelineShaderStageCreateInfo shaderStages[2]{};
+	shaderStages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+	shaderStages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+	shaderStages[0].module = VertexShaderModule;
+	shaderStages[0].pName = "main";
+	shaderStages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+	shaderStages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+	shaderStages[1].module = FragmentShaderModule;
+	shaderStages[1].pName = "main";
+
+	VkPipelineVertexInputStateCreateInfo vertexInputInfo{};
+	vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+
+	VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
+	inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+	inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+
+	VkPipelineViewportStateCreateInfo viewportState{};
+	viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+	viewportState.viewportCount = 1;
+	viewportState.scissorCount = 1;
+
+	VkPipelineRasterizationStateCreateInfo rasterizer{};
+	rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+	rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
+	rasterizer.cullMode = VK_CULL_MODE_NONE;
+	rasterizer.frontFace = VK_FRONT_FACE_CLOCKWISE;
+	rasterizer.lineWidth = 1.0f;
+
+	VkPipelineMultisampleStateCreateInfo multisampling{};
+	multisampling.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+	multisampling.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+	VkPipelineDepthStencilStateCreateInfo depthStencil{};
+	depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+	depthStencil.depthTestEnable = VK_FALSE;
+	depthStencil.depthWriteEnable = VK_FALSE;
+	depthStencil.depthCompareOp = VK_COMPARE_OP_ALWAYS;
+
+	std::vector<VkPipelineColorBlendAttachmentState> colorBlendAttachments(
+		std::max<uint32_t>(1u, colorAttachmentCount));
+	for (auto& colorBlendAttachment : colorBlendAttachments)
+	{
+		colorBlendAttachment.colorWriteMask =
+			VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+			VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+	}
+
+	VkPipelineColorBlendStateCreateInfo colorBlending{};
+	colorBlending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+	colorBlending.attachmentCount = static_cast<uint32_t>(colorBlendAttachments.size());
+	colorBlending.pAttachments = colorBlendAttachments.data();
+
+	const VkDynamicState dynamicStates[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+	VkPipelineDynamicStateCreateInfo dynamicState{};
+	dynamicState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+	dynamicState.dynamicStateCount = 2;
+	dynamicState.pDynamicStates = dynamicStates;
+
+	VkGraphicsPipelineCreateInfo pipelineInfo{};
+	pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+	pipelineInfo.stageCount = 2;
+	pipelineInfo.pStages = shaderStages;
+	pipelineInfo.pVertexInputState = &vertexInputInfo;
+	pipelineInfo.pInputAssemblyState = &inputAssembly;
+	pipelineInfo.pViewportState = &viewportState;
+	pipelineInfo.pRasterizationState = &rasterizer;
+	pipelineInfo.pMultisampleState = &multisampling;
+	pipelineInfo.pDepthStencilState = &depthStencil;
+	pipelineInfo.pColorBlendState = &colorBlending;
+	pipelineInfo.pDynamicState = &dynamicState;
+	pipelineInfo.layout = PipelineLayout;
+	pipelineInfo.renderPass = compatibleRenderPass;
+	pipelineInfo.subpass = 0;
+
+	VkPipeline pipeline = VK_NULL_HANDLE;
+	if (vkCreateGraphicsPipelines(Device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &pipeline) != VK_SUCCESS)
+		throw std::runtime_error("Failed to create Vulkan test triangle pipeline.");
+	return pipeline;
+}
+#endif
+void VulkanBackend::DrawWindowTestTriangle()
+{
+#if !CORONA_HAS_VULKAN
+	ThrowNotImplemented(__FUNCTION__);
+#else
+	if (!bFrameActive || ActiveCommandBuffer == VK_NULL_HANDLE || GraphicsPipeline == VK_NULL_HANDLE)
+		return;
+
+	if (!bRenderPassActive)
+		SetRenderTarget(nullptr);
+	if (!bRenderPassActive)
+		return;
+
+	vkCmdBindPipeline(ActiveCommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, GraphicsPipeline);
+	if (!bViewportBound)
+		SetViewportAndScissor(SwapchainExtent.width, SwapchainExtent.height);
+	vkCmdDraw(ActiveCommandBuffer, 3, 1, 0, 0);
+
+	static bool bLoggedWindowTestTriangle = false;
+	if (!bLoggedWindowTestTriangle)
+	{
+		AppendVulkanRuntimeTraceBackend(L"[VulkanBackend::DrawWindowTestTriangle] submitted forced swapchain triangle");
+		bLoggedWindowTestTriangle = true;
+	}
+#endif
+}
+void VulkanBackend::DrawActiveRenderPassTestTriangle()
+{
+#if !CORONA_HAS_VULKAN
+	ThrowNotImplemented(__FUNCTION__);
+#else
+	if (!bFrameActive ||
+		!bRenderPassActive ||
+		ActiveCommandBuffer == VK_NULL_HANDLE ||
+		ActiveGraphicsRenderPass == VK_NULL_HANDLE)
+	{
+		return;
+	}
+
+	VkPipeline pipeline = VK_NULL_HANDLE;
+	if (ActiveGraphicsRenderPass == RenderPass && ActiveColorAttachmentCount == 1)
+	{
+		pipeline = GraphicsPipeline;
+	}
+	else
+	{
+		auto pipelineIt = TestTrianglePipelines.find(ActiveGraphicsRenderPass);
+		if (pipelineIt == TestTrianglePipelines.end())
+		{
+			pipeline = CreateTestTrianglePipeline(ActiveGraphicsRenderPass, ActiveColorAttachmentCount);
+			TestTrianglePipelines[ActiveGraphicsRenderPass] = pipeline;
+		}
+		else
+		{
+			pipeline = pipelineIt->second;
+		}
+	}
+
+	if (pipeline == VK_NULL_HANDLE)
+		return;
+
+	vkCmdBindPipeline(ActiveCommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+	if (!bViewportBound)
+		SetViewportAndScissor(
+			PendingViewportWidth > 0 ? PendingViewportWidth : SwapchainExtent.width,
+			PendingViewportHeight > 0 ? PendingViewportHeight : SwapchainExtent.height);
+	vkCmdDraw(ActiveCommandBuffer, 3, 1, 0, 0);
+
+	static bool bLoggedActiveRenderPassTestTriangle = false;
+	if (!bLoggedActiveRenderPassTestTriangle)
+	{
+		AppendVulkanRuntimeTraceBackend(
+			L"[VulkanBackend::DrawActiveRenderPassTestTriangle] submitted forced active render pass triangle, attachments=" +
+			std::to_wstring(ActiveColorAttachmentCount));
+		bLoggedActiveRenderPassTestTriangle = true;
+	}
+#endif
+}
 void VulkanBackend::BindMeshBuffers(VertexBuffer* vertexBuffer, IndexBuffer* indexBuffer)
 {
 #if !CORONA_HAS_VULKAN
@@ -4738,13 +4934,35 @@ void VulkanBackend::BindMeshBuffers(VertexBuffer* vertexBuffer, IndexBuffer* ind
 	auto vbIt = VertexBufferAllocations.find(vertexBuffer);
 	auto ibIt = IndexBufferAllocations.find(indexBuffer);
 	if (vbIt == VertexBufferAllocations.end() || ibIt == IndexBufferAllocations.end())
+	{
+		static bool bLoggedMissingMeshBuffer = false;
+		if (!bLoggedMissingMeshBuffer)
+		{
+			AppendVulkanRuntimeTraceBackend(L"[VulkanBackend::BindMeshBuffers] missing allocation");
+			bLoggedMissingMeshBuffer = true;
+		}
 		return;
+	}
 
 	const VkDeviceSize offsets[] = { 0 };
 	BoundVertexBuffer = vbIt->second.Buffer;
 	BoundIndexBuffer = ibIt->second.Buffer;
 	vkCmdBindVertexBuffers(ActiveCommandBuffer, 0, 1, &BoundVertexBuffer, offsets);
 	vkCmdBindIndexBuffer(ActiveCommandBuffer, BoundIndexBuffer, 0, ibIt->second.Stride == 2 ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32);
+	static bool bLoggedFirstMeshBufferBind = false;
+	if (!bLoggedFirstMeshBufferBind)
+	{
+		AppendVulkanRuntimeTraceBackend(
+			L"[VulkanBackend::BindMeshBuffers] first bind vbSize=" +
+			std::to_wstring(vbIt->second.SizeInBytes) +
+			L", vbStride=" +
+			std::to_wstring(vbIt->second.Stride) +
+			L", ibSize=" +
+			std::to_wstring(ibIt->second.SizeInBytes) +
+			L", ibStride=" +
+			std::to_wstring(ibIt->second.Stride));
+		bLoggedFirstMeshBufferBind = true;
+	}
 #endif
 }
 void VulkanBackend::DrawIndexed(uint32_t indexCount, uint32_t startIndexLocation, int32_t baseVertexLocation)
@@ -4767,6 +4985,24 @@ void VulkanBackend::DrawIndexed(uint32_t indexCount, uint32_t startIndexLocation
 		SetViewportAndScissor(
 			PendingViewportWidth > 0 ? PendingViewportWidth : SwapchainExtent.width,
 			PendingViewportHeight > 0 ? PendingViewportHeight : SwapchainExtent.height);
+	static bool bLoggedFirstDrawIndexed = false;
+	if (!bLoggedFirstDrawIndexed)
+	{
+		AppendVulkanRuntimeTraceBackend(
+			L"[VulkanBackend::DrawIndexed] first draw indexCount=" +
+			std::to_wstring(indexCount) +
+			L", startIndex=" +
+			std::to_wstring(startIndexLocation) +
+			L", baseVertex=" +
+			std::to_wstring(baseVertexLocation) +
+			L", vbBound=" +
+			std::to_wstring(BoundVertexBuffer != VK_NULL_HANDLE ? 1 : 0) +
+			L", ibBound=" +
+			std::to_wstring(BoundIndexBuffer != VK_NULL_HANDLE ? 1 : 0) +
+			L", activeAttachments=" +
+			std::to_wstring(ActiveColorAttachmentCount));
+		bLoggedFirstDrawIndexed = true;
+	}
 	vkCmdDrawIndexed(ActiveCommandBuffer, indexCount, 1, startIndexLocation, baseVertexLocation, 0);
 #endif
 }
@@ -5027,6 +5263,25 @@ void VulkanBackend::DestroyWindowContext()
 	DestroyFrameContexts();
 	AppendVulkanRuntimeTraceBackend(L"[VulkanBackend::DestroyWindowContext] after swapchain image cleanup");
 
+	for (auto& entry : TestTrianglePipelines)
+	{
+		if (entry.second != VK_NULL_HANDLE)
+			vkDestroyPipeline(Device, entry.second, nullptr);
+	}
+	TestTrianglePipelines.clear();
+	if (GraphicsPipeline != VK_NULL_HANDLE)
+		vkDestroyPipeline(Device, GraphicsPipeline, nullptr);
+	if (PipelineLayout != VK_NULL_HANDLE)
+		vkDestroyPipelineLayout(Device, PipelineLayout, nullptr);
+	if (VertexShaderModule != VK_NULL_HANDLE)
+		vkDestroyShaderModule(Device, VertexShaderModule, nullptr);
+	if (FragmentShaderModule != VK_NULL_HANDLE)
+		vkDestroyShaderModule(Device, FragmentShaderModule, nullptr);
+	GraphicsPipeline = VK_NULL_HANDLE;
+	PipelineLayout = VK_NULL_HANDLE;
+	VertexShaderModule = VK_NULL_HANDLE;
+	FragmentShaderModule = VK_NULL_HANDLE;
+
 	if (RenderPass != VK_NULL_HANDLE)
 		vkDestroyRenderPass(Device, RenderPass, nullptr);
 	AppendVulkanRuntimeTraceBackend(L"[VulkanBackend::DestroyWindowContext] after window render pass cleanup");
@@ -5116,6 +5371,10 @@ void VulkanBackend::DestroyWindowContext()
 	PresentQueueFamilyIndex = UINT32_MAX;
 	CommandPool = VK_NULL_HANDLE;
 	RenderPass = VK_NULL_HANDLE;
+	PipelineLayout = VK_NULL_HANDLE;
+	GraphicsPipeline = VK_NULL_HANDLE;
+	VertexShaderModule = VK_NULL_HANDLE;
+	FragmentShaderModule = VK_NULL_HANDLE;
 	SwapchainFormat = VK_FORMAT_UNDEFINED;
 	SwapchainExtent = {};
 	PendingCapturePath.clear();
@@ -5131,6 +5390,7 @@ void VulkanBackend::DestroyWindowContext()
 	RayTracingPipelines.clear();
 	ComputePipelines.clear();
 	GraphicsPipelines.clear();
+	TestTrianglePipelines.clear();
 	RayTracingAccelerationStructures.clear();
 	CurrentFrameIndex = 0;
 	ActiveFrameContextIndex = 0;
@@ -5186,6 +5446,88 @@ void VulkanBackend::CreateWindowTrianglePipeline(VkFormat swapchainFormat)
 	renderPassInfo.pDependencies = &dependency;
 	if (vkCreateRenderPass(Device, &renderPassInfo, nullptr, &RenderPass) != VK_SUCCESS)
 		throw std::runtime_error("Failed to create Vulkan window render pass.");
+
+	VkShaderModuleCreateInfo shaderModuleInfo{};
+	shaderModuleInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+	shaderModuleInfo.codeSize = sizeof(kTriangleVertexShaderSpirv);
+	shaderModuleInfo.pCode = kTriangleVertexShaderSpirv.data();
+	if (vkCreateShaderModule(Device, &shaderModuleInfo, nullptr, &VertexShaderModule) != VK_SUCCESS)
+		throw std::runtime_error("Failed to create Vulkan window test triangle vertex shader.");
+	shaderModuleInfo.codeSize = sizeof(kTriangleFragmentShaderSpirv);
+	shaderModuleInfo.pCode = kTriangleFragmentShaderSpirv.data();
+	if (vkCreateShaderModule(Device, &shaderModuleInfo, nullptr, &FragmentShaderModule) != VK_SUCCESS)
+		throw std::runtime_error("Failed to create Vulkan window test triangle fragment shader.");
+
+	VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
+	pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+	if (vkCreatePipelineLayout(Device, &pipelineLayoutInfo, nullptr, &PipelineLayout) != VK_SUCCESS)
+		throw std::runtime_error("Failed to create Vulkan window test triangle pipeline layout.");
+
+	VkPipelineShaderStageCreateInfo shaderStages[2]{};
+	shaderStages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+	shaderStages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+	shaderStages[0].module = VertexShaderModule;
+	shaderStages[0].pName = "main";
+	shaderStages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+	shaderStages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+	shaderStages[1].module = FragmentShaderModule;
+	shaderStages[1].pName = "main";
+
+	VkPipelineVertexInputStateCreateInfo vertexInputInfo{};
+	vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+
+	VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
+	inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+	inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+
+	VkPipelineViewportStateCreateInfo viewportState{};
+	viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+	viewportState.viewportCount = 1;
+	viewportState.scissorCount = 1;
+
+	VkPipelineRasterizationStateCreateInfo rasterizer{};
+	rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+	rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
+	rasterizer.cullMode = VK_CULL_MODE_NONE;
+	rasterizer.frontFace = VK_FRONT_FACE_CLOCKWISE;
+	rasterizer.lineWidth = 1.0f;
+
+	VkPipelineMultisampleStateCreateInfo multisampling{};
+	multisampling.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+	multisampling.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+	VkPipelineColorBlendAttachmentState colorBlendAttachment{};
+	colorBlendAttachment.colorWriteMask =
+		VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+		VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+
+	VkPipelineColorBlendStateCreateInfo colorBlending{};
+	colorBlending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+	colorBlending.attachmentCount = 1;
+	colorBlending.pAttachments = &colorBlendAttachment;
+
+	const VkDynamicState dynamicStates[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+	VkPipelineDynamicStateCreateInfo dynamicState{};
+	dynamicState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+	dynamicState.dynamicStateCount = 2;
+	dynamicState.pDynamicStates = dynamicStates;
+
+	VkGraphicsPipelineCreateInfo pipelineInfo{};
+	pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+	pipelineInfo.stageCount = 2;
+	pipelineInfo.pStages = shaderStages;
+	pipelineInfo.pVertexInputState = &vertexInputInfo;
+	pipelineInfo.pInputAssemblyState = &inputAssembly;
+	pipelineInfo.pViewportState = &viewportState;
+	pipelineInfo.pRasterizationState = &rasterizer;
+	pipelineInfo.pMultisampleState = &multisampling;
+	pipelineInfo.pColorBlendState = &colorBlending;
+	pipelineInfo.pDynamicState = &dynamicState;
+	pipelineInfo.layout = PipelineLayout;
+	pipelineInfo.renderPass = RenderPass;
+	pipelineInfo.subpass = 0;
+	if (vkCreateGraphicsPipelines(Device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &GraphicsPipeline) != VK_SUCCESS)
+		throw std::runtime_error("Failed to create Vulkan window test triangle pipeline.");
 #endif
 }
 
@@ -5216,6 +5558,12 @@ void VulkanBackend::RecreateSwapchain(uint32_t width, uint32_t height)
 		}
 		SwapchainImageViews.clear();
 		SwapchainImages.clear();
+		for (auto& entry : TestTrianglePipelines)
+		{
+			if (entry.second != VK_NULL_HANDLE)
+				vkDestroyPipeline(Device, entry.second, nullptr);
+		}
+		TestTrianglePipelines.clear();
 		if (GraphicsPipeline != VK_NULL_HANDLE)
 			vkDestroyPipeline(Device, GraphicsPipeline, nullptr);
 		if (PipelineLayout != VK_NULL_HANDLE)
@@ -5250,6 +5598,7 @@ void VulkanBackend::RecreateSwapchain(uint32_t width, uint32_t height)
 	vkGetPhysicalDeviceSurfacePresentModesKHR(PhysicalDevice, Surface, &presentModeCount, presentModes.data());
 
 	VkExtent2D extent = ChooseSwapchainExtent(surfaceCapabilities, width, height);
+	const VkPresentModeKHR selectedPresentMode = ChoosePresentMode(presentModes);
 	uint32_t imageCount = surfaceCapabilities.minImageCount + 1;
 	if (surfaceCapabilities.maxImageCount > 0 && imageCount > surfaceCapabilities.maxImageCount)
 		imageCount = surfaceCapabilities.maxImageCount;
@@ -5264,11 +5613,24 @@ void VulkanBackend::RecreateSwapchain(uint32_t width, uint32_t height)
 	swapchainInfo.imageArrayLayers = 1;
 	swapchainInfo.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
 	swapchainInfo.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
-	swapchainInfo.preTransform = surfaceCapabilities.currentTransform;
+	swapchainInfo.preTransform = ChooseSwapchainPreTransform(surfaceCapabilities);
 	swapchainInfo.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
-	swapchainInfo.presentMode = ChoosePresentMode(presentModes);
+	swapchainInfo.presentMode = selectedPresentMode;
 	swapchainInfo.clipped = VK_TRUE;
 	swapchainInfo.oldSwapchain = VK_NULL_HANDLE;
+	std::wstring supportedPresentModes;
+	for (VkPresentModeKHR mode : presentModes)
+	{
+		if (!supportedPresentModes.empty())
+			supportedPresentModes += L"|";
+		supportedPresentModes += GetPresentModeName(mode);
+	}
+	AppendVulkanRuntimeTraceBackend(
+		L"[VulkanBackend::RecreateSwapchain] extent=" +
+		std::to_wstring(extent.width) + L"x" + std::to_wstring(extent.height) +
+		L", requestedImages=" + std::to_wstring(imageCount) +
+		L", presentMode=" + GetPresentModeName(selectedPresentMode) +
+		L", supportedPresentModes=" + supportedPresentModes);
 	if (vkCreateSwapchainKHR(Device, &swapchainInfo, nullptr, &Swapchain) != VK_SUCCESS)
 		throw std::runtime_error("Failed to create Vulkan swapchain.");
 
@@ -5509,9 +5871,9 @@ std::shared_ptr<GraphicsPipelineHandle> VulkanBackend::CreateGraphicsPipeline(co
 	for (const auto& binding : desc.SamplerBindings)
 		handle->SamplerBindingSlots[binding.Name] = ToVulkanSamplerBinding(binding.Slot);
 
-	const std::wstring stem = std::filesystem::path(desc.ShaderPath).stem().wstring();
-	const std::vector<uint32_t> vertexSpirv = LoadSpirvFile(ResolveVulkanSpirvPath(stem + L"Vulkan.vert.spv").wstring());
-	const std::vector<uint32_t> fragmentSpirv = LoadSpirvFile(ResolveVulkanSpirvPath(stem + L"Vulkan.frag.spv").wstring());
+	const std::wstring stem = NormalizeShaderPath(desc.ShaderPath).stem().wstring();
+	const std::vector<uint32_t> vertexSpirv = LoadSpirvFile(ResolveVulkanGraphicsVertexSpirvPath(stem, desc.VertexEntryPoint));
+	const std::vector<uint32_t> fragmentSpirv = LoadSpirvFile(ResolveVulkanSpirvPath(stem + L"Vulkan.frag.spv"));
 
 	VkShaderModuleCreateInfo shaderInfo{};
 	shaderInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
@@ -5568,7 +5930,7 @@ std::shared_ptr<GraphicsPipelineHandle> VulkanBackend::CreateGraphicsPipeline(co
 		descriptorBinding.binding = ToVulkanTextureBinding(binding.Slot);
 		descriptorBinding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
 		descriptorBinding.descriptorCount = 1;
-		descriptorBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+		descriptorBinding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
 		descriptorBindings.push_back(descriptorBinding);
 		addPoolSize(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
 	}
@@ -5666,6 +6028,10 @@ std::shared_ptr<GraphicsPipelineHandle> VulkanBackend::CreateGraphicsPipeline(co
 	rasterizer.cullMode = desc.bCullBackFaces ? VK_CULL_MODE_BACK_BIT : VK_CULL_MODE_NONE;
 	rasterizer.frontFace = VK_FRONT_FACE_CLOCKWISE;
 	rasterizer.lineWidth = 1.0f;
+	rasterizer.depthBiasEnable = desc.bDepthBiasEnable ? VK_TRUE : VK_FALSE;
+	rasterizer.depthBiasConstantFactor = desc.DepthBiasConstantFactor;
+	rasterizer.depthBiasClamp = desc.DepthBiasClamp;
+	rasterizer.depthBiasSlopeFactor = desc.DepthBiasSlopeFactor;
 
 	VkPipelineMultisampleStateCreateInfo multisampling{};
 	multisampling.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
@@ -5678,7 +6044,20 @@ std::shared_ptr<GraphicsPipelineHandle> VulkanBackend::CreateGraphicsPipeline(co
 	depthStencil.depthCompareOp = desc.bDepthEnable ? VK_COMPARE_OP_LESS_OR_EQUAL : VK_COMPARE_OP_ALWAYS;
 
 	std::vector<VkPipelineColorBlendAttachmentState> colorBlendAttachments;
-	const uint32_t colorAttachmentCount = static_cast<uint32_t>(desc.ColorFormats.empty() ? 1 : desc.ColorFormats.size());
+	const uint32_t colorAttachmentCount = static_cast<uint32_t>(desc.ColorFormats.size());
+	if (PhysicalDevice != VK_NULL_HANDLE)
+	{
+		VkPhysicalDeviceProperties physicalDeviceProperties{};
+		vkGetPhysicalDeviceProperties(PhysicalDevice, &physicalDeviceProperties);
+		if (colorAttachmentCount > physicalDeviceProperties.limits.maxColorAttachments)
+		{
+			AppendVulkanRuntimeTraceBackend(
+				L"[VulkanBackend::CreateGraphicsPipeline] warning colorAttachmentCount=" +
+				std::to_wstring(colorAttachmentCount) +
+				L" exceeds maxColorAttachments=" +
+				std::to_wstring(physicalDeviceProperties.limits.maxColorAttachments));
+		}
+	}
 	colorBlendAttachments.resize(colorAttachmentCount);
 	for (auto& colorBlendAttachment : colorBlendAttachments)
 	{
@@ -5690,7 +6069,7 @@ std::shared_ptr<GraphicsPipelineHandle> VulkanBackend::CreateGraphicsPipeline(co
 	VkPipelineColorBlendStateCreateInfo colorBlending{};
 	colorBlending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
 	colorBlending.attachmentCount = colorAttachmentCount;
-	colorBlending.pAttachments = colorBlendAttachments.data();
+	colorBlending.pAttachments = colorAttachmentCount > 0 ? colorBlendAttachments.data() : nullptr;
 
 	const VkDynamicState dynamicStates[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
 	VkPipelineDynamicStateCreateInfo dynamicState{};
@@ -5763,7 +6142,7 @@ std::shared_ptr<GraphicsPipelineHandle> VulkanBackend::CreateGraphicsPipeline(co
 		VkSubpassDescription subpass{};
 		subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
 		subpass.colorAttachmentCount = static_cast<uint32_t>(colorReferences.size());
-		subpass.pColorAttachments = colorReferences.data();
+		subpass.pColorAttachments = colorReferences.empty() ? nullptr : colorReferences.data();
 		if (desc.bDepthEnable)
 			subpass.pDepthStencilAttachment = &depthReference;
 
@@ -5792,7 +6171,10 @@ void VulkanBackend::BindGraphicsPipeline(GraphicsPipelineHandle* pipeline)
 	if (!bRenderPassActive)
 	{
 		auto* vkPipeline = dynamic_cast<VulkanGraphicsPipelineHandle*>(pipeline);
-		if (vkPipeline && vkPipeline->CompatibleRenderPass != VK_NULL_HANDLE && !PendingOffscreenColorTargets.empty() && bFrameActive)
+		if (vkPipeline &&
+			vkPipeline->CompatibleRenderPass != VK_NULL_HANDLE &&
+			(!PendingOffscreenColorTargets.empty() || PendingOffscreenDepthTarget) &&
+			bFrameActive)
 		{
 			std::vector<VkImageView> attachments;
 			attachments.reserve(PendingOffscreenColorTargets.size() + (PendingOffscreenDepthTarget ? 1 : 0));
@@ -5829,6 +6211,11 @@ void VulkanBackend::BindGraphicsPipeline(GraphicsPipelineHandle* pipeline)
 				auto depthIt = TextureAllocations.find(PendingOffscreenDepthTarget);
 				if (depthIt == TextureAllocations.end())
 					return;
+				if (width == 0)
+				{
+					width = depthIt->second.Width;
+					height = depthIt->second.Height;
+				}
 				attachments.push_back(depthIt->second.ImageView);
 				VkClearValue clearValue{};
 				const auto clearIt = PendingDepthClearValues.find(PendingOffscreenDepthTarget);
@@ -5860,6 +6247,8 @@ void VulkanBackend::BindGraphicsPipeline(GraphicsPipelineHandle* pipeline)
 			renderPassBeginInfo.pClearValues = clearValues.data();
 			vkCmdBeginRenderPass(ActiveCommandBuffer, &renderPassBeginInfo, VK_SUBPASS_CONTENTS_INLINE);
 			bRenderPassActive = true;
+			ActiveGraphicsRenderPass = vkPipeline->CompatibleRenderPass;
+			ActiveColorAttachmentCount = static_cast<uint32_t>(PendingOffscreenColorTargets.size());
 			if (PendingViewportWidth > 0 && PendingViewportHeight > 0)
 				SetViewportAndScissor(PendingViewportWidth, PendingViewportHeight);
 		}

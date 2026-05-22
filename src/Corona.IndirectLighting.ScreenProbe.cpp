@@ -170,7 +170,7 @@ shared_ptr<RTPipelineStateObject> Corona::CreateRaytracingScreenProbeGIPSO(bool 
 void Corona::InitRaytracingScreenProbePass()
 {
 	PSO_RT_SCREEN_PROBE_GI = CreateRaytracingScreenProbeGIPSO(false);
-	if (bEnableRTDiffuseGISER && renderBackend && renderBackend->GetAPI() == ERenderBackendAPI::D3D12)
+	if (bEnableRTDiffuseGISER && renderBackend && renderBackend->SupportsShaderExecutionReordering())
 		InitRaytracingScreenProbeGISERPass();
 }
 
@@ -180,12 +180,12 @@ bool Corona::InitRaytracingScreenProbeGISERPass()
 		return true;
 	if (bRTDiffuseGIScreenProbeSERInitFailed)
 		return false;
-	if (!renderBackend || renderBackend->GetAPI() != ERenderBackendAPI::D3D12)
+	if (!renderBackend)
 		return false;
-	if (!bD3D12ShaderModel69Supported)
+	if (!renderBackend->SupportsShaderExecutionReordering())
 	{
 		bRTDiffuseGIScreenProbeSERInitFailed = true;
-		AppendCpuRuntimeTrace(L"[RTDiffuseGI][SER] Screen Probe SER skipped: D3D12 Shader Model 6.9 is not supported");
+		AppendCpuRuntimeTrace(L"[RTDiffuseGI][SER] Screen Probe SER skipped: backend does not support shader execution reordering");
 		return false;
 	}
 
@@ -211,7 +211,7 @@ void Corona::ScreenProbeRaytraceGIPass()
 	};
 
 	shared_ptr<RTPipelineStateObject> pso = PSO_RT_SCREEN_PROBE_GI;
-	if (bEnableRTDiffuseGISER && renderBackend && renderBackend->GetAPI() == ERenderBackendAPI::D3D12 && InitRaytracingScreenProbeGISERPass())
+	if (bEnableRTDiffuseGISER && renderBackend && renderBackend->SupportsShaderExecutionReordering() && InitRaytracingScreenProbeGISERPass())
 		pso = PSO_RT_SCREEN_PROBE_GI_SER;
 
 	if (!TLAS || !pso || !ScreenProbeGIRadiance[0] || !ScreenProbeGIRadiance[1] || !hasScreenProbeSHSet(0) || !hasScreenProbeSHSet(1) || !ScreenProbeGIMetadata[0] || !ScreenProbeGIMetadata[1])

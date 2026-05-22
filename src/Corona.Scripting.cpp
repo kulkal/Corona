@@ -6,8 +6,8 @@
 
 #include "stdafx.h"
 #include "Corona.h"
+#include "PlatformWindow.h"
 #include "Utils.h"
-#include "Win32Application.h"
 
 #include "imgui.h"
 #include "imGuIZMO.h"
@@ -30,7 +30,6 @@
 #include <sstream>
 #include <thread>
 #include <utility>
-#include <xinput.h>
 
 void AppendCpuRuntimeTrace(const std::wstring& line);
 
@@ -156,58 +155,6 @@ namespace
 		return text ? std::string(text) : std::string();
 	}
 
-	using XInputGetStateProc = DWORD(WINAPI*)(DWORD, XINPUT_STATE*);
-
-	XInputGetStateProc GetXInputGetStateProc()
-	{
-		static bool bTriedLoad = false;
-		static HMODULE module = nullptr;
-		static XInputGetStateProc getState = nullptr;
-		if (bTriedLoad)
-			return getState;
-
-		bTriedLoad = true;
-		const char* dllNames[] =
-		{
-			"xinput1_4.dll",
-			"xinput1_3.dll",
-			"xinput9_1_0.dll",
-		};
-		for (const char* dllName : dllNames)
-		{
-			module = LoadLibraryA(dllName);
-			if (module)
-			{
-				getState = reinterpret_cast<XInputGetStateProc>(GetProcAddress(module, "XInputGetState"));
-				if (getState)
-					break;
-				FreeLibrary(module);
-				module = nullptr;
-			}
-		}
-		return getState;
-	}
-
-	float NormalizeGamepadStick(SHORT value, SHORT deadZone)
-	{
-		const int magnitude = std::abs(static_cast<int>(value));
-		if (magnitude <= deadZone)
-			return 0.0f;
-
-		const float normalized = static_cast<float>(magnitude - deadZone) / static_cast<float>(32767 - deadZone);
-		return std::clamp(normalized, 0.0f, 1.0f) * (value < 0 ? -1.0f : 1.0f);
-	}
-
-	float NormalizeGamepadTrigger(BYTE value)
-	{
-		if (value <= XINPUT_GAMEPAD_TRIGGER_THRESHOLD)
-			return 0.0f;
-		const float normalized =
-			static_cast<float>(value - XINPUT_GAMEPAD_TRIGGER_THRESHOLD) /
-			static_cast<float>(255 - XINPUT_GAMEPAD_TRIGGER_THRESHOLD);
-		return std::clamp(normalized, 0.0f, 1.0f);
-	}
-
 	std::string NormalizeKeyName(const char* name)
 	{
 		std::string result;
@@ -315,21 +262,39 @@ namespace
 				Host->BeginLuauScriptProfileExecution();
 		}
 
-		~ScopedLuauScriptProfileExecution()
-		{
-			if (Host)
-				Host->EndLuauScriptProfileExecution();
-		}
+	~ScopedLuauScriptProfileExecution()
+	{
+		if (Host)
+			Host->EndLuauScriptProfileExecution();
+	}
 
-	private:
-		Corona* Host = nullptr;
-	};
+private:
+	Corona* Host = nullptr;
+};
+
+	bool IsFiniteVec3Local(const glm::vec3& value)
+	{
+		return std::isfinite(value.x) && std::isfinite(value.y) && std::isfinite(value.z);
+	}
+
+	bool IsReasonableScriptWorldPosition(const glm::vec3& value)
+	{
+		constexpr float kMaxReasonableWorldCoordinate = 1000000.0f;
+		return
+			IsFiniteVec3Local(value) &&
+			std::abs(value.x) <= kMaxReasonableWorldCoordinate &&
+			std::abs(value.y) <= kMaxReasonableWorldCoordinate &&
+			std::abs(value.z) <= kMaxReasonableWorldCoordinate;
+	}
 
 	bool ReadNumberAt(lua_State* L, int index, float& value)
 	{
 		if (!lua_isnumber(L, index))
 			return false;
-		value = static_cast<float>(lua_tonumber(L, index));
+		const float readValue = static_cast<float>(lua_tonumber(L, index));
+		if (!std::isfinite(readValue))
+			return false;
+		value = readValue;
 		return true;
 	}
 
@@ -926,6 +891,13 @@ namespace
 		return 0;
 	}
 
+	int LuaCoronaRequestExit(lua_State* L)
+	{
+		(void)L;
+		QuitPlatformApplication(0);
+		return 0;
+	}
+
 	int LuaCoronaLoadScene(lua_State* L)
 	{
 		Corona* host = GetHost(L);
@@ -1017,6 +989,92 @@ namespace
 		}
 
 		lua_pushinteger(L, static_cast<int>(handle));
+		return 1;
+	}
+
+	int LuaCoronaCreateSpineScene(lua_State* L)
+	{
+		Corona* host = GetHost(L);
+		if (!host)
+		{
+			luaL_error(L, "corona host is not available");
+			return 0;
+		}
+
+		std::string path;
+		std::string animation;
+		float timeSeconds = 0.0f;
+		float sourceScale = 1.0f;
+		if (lua_istable(L, 1))
+		{
+			const int tableIndex = lua_absindex(L, 1);
+			path = ReadFirstStringField(L, tableIndex, { "path", "asset", "asset_path", "assetPath", "skeleton" });
+			animation = ReadFirstStringField(L, tableIndex, { "animation", "anim", "animation_name", "animationName" });
+			if (!ReadNumberField(L, tableIndex, "time", timeSeconds))
+			{
+				if (!ReadNumberField(L, tableIndex, "time_seconds", timeSeconds))
+				{
+					if (!ReadNumberField(L, tableIndex, "timeSeconds", timeSeconds))
+						ReadNumberField(L, tableIndex, "sample_time", timeSeconds);
+				}
+			}
+			if (!ReadNumberField(L, tableIndex, "source_scale", sourceScale))
+			{
+				if (!ReadNumberField(L, tableIndex, "sourceScale", sourceScale))
+					ReadNumberField(L, tableIndex, "scale", sourceScale);
+			}
+		}
+		else
+		{
+			const char* pathArg = luaL_checkstring(L, 1);
+			path = pathArg ? pathArg : "";
+			if (lua_gettop(L) >= 2 && lua_isstring(L, 2))
+				animation = lua_tostring(L, 2);
+			if (lua_gettop(L) >= 3 && lua_isnumber(L, 3))
+				timeSeconds = static_cast<float>(lua_tonumber(L, 3));
+			if (lua_gettop(L) >= 4 && lua_isnumber(L, 4))
+				sourceScale = static_cast<float>(lua_tonumber(L, 4));
+		}
+
+		if (path.empty())
+		{
+			luaL_error(L, "SpineComponent.create_scene expects a spine skeleton path");
+			return 0;
+		}
+
+		const Corona::ScriptSceneHandle handle = host->CreateSpineSceneForScript(
+			Utf8ToWideLocal(path),
+			animation,
+			timeSeconds,
+			sourceScale);
+		if (handle == Corona::InvalidScriptSceneHandle)
+		{
+			luaL_error(L, "failed to create spine scene '%s'", path.c_str());
+			return 0;
+		}
+
+		lua_pushinteger(L, static_cast<int>(handle));
+		return 1;
+	}
+
+	int LuaCoronaGetSpineSceneHeight(lua_State* L)
+	{
+		Corona* host = GetHost(L);
+		if (!host)
+		{
+			luaL_error(L, "corona host is not available");
+			return 0;
+		}
+
+		Corona::ScriptSceneHandle sceneHandle = Corona::InvalidScriptSceneHandle;
+		if (lua_isnumber(L, 1))
+		{
+			const lua_Integer rawHandle = lua_tointeger(L, 1);
+			if (rawHandle > 0)
+				sceneHandle = static_cast<Corona::ScriptSceneHandle>(rawHandle);
+		}
+
+		lua_pushnumber(L, static_cast<lua_Number>(host->GetScriptSceneHeightForScript(sceneHandle)));
 		return 1;
 	}
 
@@ -1480,9 +1538,40 @@ namespace
 			}
 			else
 			{
-				const std::string path = ReadFirstStringField(L, tableIndex, { "path", "asset", "asset_path", "assetPath", "model" });
+				bool isSpine = false;
+				ReadBoolField(L, tableIndex, "spine", isSpine);
+				if (!isSpine)
+					isSpine = HasAnyField(L, tableIndex, { "skeleton", "spine_path", "spinePath", "animation", "anim" });
+				const std::string path = ReadFirstStringField(
+					L,
+					tableIndex,
+					isSpine ?
+						std::initializer_list<const char*>{ "path", "asset", "asset_path", "assetPath", "skeleton", "spine_path", "spinePath" } :
+						std::initializer_list<const char*>{ "path", "asset", "asset_path", "assetPath", "model" });
 				if (!path.empty())
-					sceneHandle = host->LoadSceneForScript(Utf8ToWideLocal(path));
+				{
+					if (isSpine)
+					{
+						const std::string animation = ReadFirstStringField(L, tableIndex, { "animation", "anim", "animation_name", "animationName" });
+						float timeSeconds = 0.0f;
+						if (!ReadNumberField(L, tableIndex, "time", timeSeconds))
+						{
+							if (!ReadNumberField(L, tableIndex, "time_seconds", timeSeconds))
+								ReadNumberField(L, tableIndex, "timeSeconds", timeSeconds);
+						}
+						float sourceScale = 1.0f;
+						if (!ReadNumberField(L, tableIndex, "source_scale", sourceScale))
+						{
+							if (!ReadNumberField(L, tableIndex, "sourceScale", sourceScale))
+								ReadNumberField(L, tableIndex, "scale", sourceScale);
+						}
+						sceneHandle = host->CreateSpineSceneForScript(Utf8ToWideLocal(path), animation, timeSeconds, sourceScale);
+					}
+					else
+					{
+						sceneHandle = host->LoadSceneForScript(Utf8ToWideLocal(path));
+					}
+				}
 			}
 		}
 
@@ -1597,6 +1686,50 @@ namespace
 		return 1;
 	}
 
+	int LuaCoronaSpineSetPose(lua_State* L)
+	{
+		Corona* host = GetHost(L);
+		if (!host)
+		{
+			luaL_error(L, "corona host is not available");
+			return 0;
+		}
+
+		const CoronaECS::Entity entity = ReadScriptEntity(L, host, 1);
+		Corona::ScriptSceneHandle sceneHandle = Corona::InvalidScriptSceneHandle;
+		if (lua_isnumber(L, 2))
+		{
+			const lua_Integer rawHandle = lua_tointeger(L, 2);
+			if (rawHandle > 0)
+				sceneHandle = static_cast<Corona::ScriptSceneHandle>(rawHandle);
+		}
+
+		const glm::vec3 position(
+			static_cast<float>(luaL_checknumber(L, 3)),
+			static_cast<float>(luaL_checknumber(L, 4)),
+			static_cast<float>(luaL_checknumber(L, 5)));
+		const glm::vec3 rotationDegrees(0.0f, static_cast<float>(luaL_checknumber(L, 6)), 0.0f);
+		const float targetHeight = static_cast<float>(luaL_checknumber(L, 7));
+		const float roughness = static_cast<float>(luaL_optnumber(L, 8, 1.0));
+		const float metallic = static_cast<float>(luaL_optnumber(L, 9, 0.0));
+		const bool bMirrorX = lua_gettop(L) >= 10 && lua_toboolean(L, 10) != 0;
+		const bool bUseWorldScale = lua_gettop(L) >= 11 && lua_toboolean(L, 11) != 0;
+
+		const bool ok = host->SetSpinePoseForScript(
+			entity,
+			sceneHandle,
+			position,
+			rotationDegrees,
+			targetHeight,
+			roughness,
+			metallic,
+			bMirrorX,
+			bUseWorldScale);
+
+		lua_pushboolean(L, ok ? 1 : 0);
+		return 1;
+	}
+
 	int LuaCoronaCameraComponentSet(lua_State* L)
 	{
 		Corona* host = GetHost(L);
@@ -1654,9 +1787,40 @@ namespace
 		ReadBoolField(L, tableIndex, "active", component.bActive);
 
 		bool ok = true;
+		glm::vec3 storedAfterTransform(0.0f);
+		bool bHasStoredAfterTransform = false;
 		if (hasPosition)
+		{
 			ok = host->SetEntityTransformForScript(entity, position, glm::vec3(0.0f), glm::vec3(1.0f));
+			bHasStoredAfterTransform = host->GetEntityTransformForScript(entity, storedAfterTransform);
+		}
 		ok = host->SetEntityCameraComponentForScript(entity, component) && ok;
+		static int cameraSetLogCount = 0;
+		if (cameraSetLogCount < 12 && (component.bActive || hasPosition))
+		{
+			glm::vec3 storedPosition(0.0f);
+			const bool bHasStoredPosition = host->GetEntityTransformForScript(entity, storedPosition);
+			AppendCpuRuntimeTrace(
+				L"[Luau][CameraComponent.set] entity=" + std::to_wstring(entity.GetId()) +
+				L", ok=" + std::to_wstring(ok ? 1 : 0) +
+				L", active=" + std::to_wstring(component.bActive ? 1 : 0) +
+				L", hasPosition=" + std::to_wstring(hasPosition ? 1 : 0) +
+				L", inputPosition=(" + std::to_wstring(position.x) +
+				L"," + std::to_wstring(position.y) +
+				L"," + std::to_wstring(position.z) +
+				L"), afterTransform=(" + std::to_wstring(storedAfterTransform.x) +
+				L"," + std::to_wstring(storedAfterTransform.y) +
+				L"," + std::to_wstring(storedAfterTransform.z) +
+				L"), hasAfterTransform=" + std::to_wstring(bHasStoredAfterTransform ? 1 : 0) +
+				L", storedPosition=(" + std::to_wstring(storedPosition.x) +
+				L"," + std::to_wstring(storedPosition.y) +
+				L"," + std::to_wstring(storedPosition.z) +
+				L"), hasStored=" + std::to_wstring(bHasStoredPosition ? 1 : 0) +
+				L", look=(" + std::to_wstring(component.LookDirection.x) +
+				L"," + std::to_wstring(component.LookDirection.y) +
+				L"," + std::to_wstring(component.LookDirection.z) + L")");
+			++cameraSetLogCount;
+		}
 		lua_pushboolean(L, ok ? 1 : 0);
 		return 1;
 	}
@@ -2325,20 +2489,20 @@ namespace
 		lua_pushinteger(L, buttonsDown);
 		lua_setfield(L, -2, "buttons");
 
-		PushGamepadButton(L, "a", XINPUT_GAMEPAD_A, buttonsDown, buttonsPressed, buttonsReleased);
-		PushGamepadButton(L, "b", XINPUT_GAMEPAD_B, buttonsDown, buttonsPressed, buttonsReleased);
-		PushGamepadButton(L, "x", XINPUT_GAMEPAD_X, buttonsDown, buttonsPressed, buttonsReleased);
-		PushGamepadButton(L, "y", XINPUT_GAMEPAD_Y, buttonsDown, buttonsPressed, buttonsReleased);
-		PushGamepadButton(L, "left_shoulder", XINPUT_GAMEPAD_LEFT_SHOULDER, buttonsDown, buttonsPressed, buttonsReleased);
-		PushGamepadButton(L, "right_shoulder", XINPUT_GAMEPAD_RIGHT_SHOULDER, buttonsDown, buttonsPressed, buttonsReleased);
-		PushGamepadButton(L, "back", XINPUT_GAMEPAD_BACK, buttonsDown, buttonsPressed, buttonsReleased);
-		PushGamepadButton(L, "start", XINPUT_GAMEPAD_START, buttonsDown, buttonsPressed, buttonsReleased);
-		PushGamepadButton(L, "left_thumb", XINPUT_GAMEPAD_LEFT_THUMB, buttonsDown, buttonsPressed, buttonsReleased);
-		PushGamepadButton(L, "right_thumb", XINPUT_GAMEPAD_RIGHT_THUMB, buttonsDown, buttonsPressed, buttonsReleased);
-		PushGamepadButton(L, "dpad_up", XINPUT_GAMEPAD_DPAD_UP, buttonsDown, buttonsPressed, buttonsReleased);
-		PushGamepadButton(L, "dpad_down", XINPUT_GAMEPAD_DPAD_DOWN, buttonsDown, buttonsPressed, buttonsReleased);
-		PushGamepadButton(L, "dpad_left", XINPUT_GAMEPAD_DPAD_LEFT, buttonsDown, buttonsPressed, buttonsReleased);
-		PushGamepadButton(L, "dpad_right", XINPUT_GAMEPAD_DPAD_RIGHT, buttonsDown, buttonsPressed, buttonsReleased);
+		PushGamepadButton(L, "a", PlatformGamepadButton::A, buttonsDown, buttonsPressed, buttonsReleased);
+		PushGamepadButton(L, "b", PlatformGamepadButton::B, buttonsDown, buttonsPressed, buttonsReleased);
+		PushGamepadButton(L, "x", PlatformGamepadButton::X, buttonsDown, buttonsPressed, buttonsReleased);
+		PushGamepadButton(L, "y", PlatformGamepadButton::Y, buttonsDown, buttonsPressed, buttonsReleased);
+		PushGamepadButton(L, "left_shoulder", PlatformGamepadButton::LeftShoulder, buttonsDown, buttonsPressed, buttonsReleased);
+		PushGamepadButton(L, "right_shoulder", PlatformGamepadButton::RightShoulder, buttonsDown, buttonsPressed, buttonsReleased);
+		PushGamepadButton(L, "back", PlatformGamepadButton::Back, buttonsDown, buttonsPressed, buttonsReleased);
+		PushGamepadButton(L, "start", PlatformGamepadButton::Start, buttonsDown, buttonsPressed, buttonsReleased);
+		PushGamepadButton(L, "left_thumb", PlatformGamepadButton::LeftThumb, buttonsDown, buttonsPressed, buttonsReleased);
+		PushGamepadButton(L, "right_thumb", PlatformGamepadButton::RightThumb, buttonsDown, buttonsPressed, buttonsReleased);
+		PushGamepadButton(L, "dpad_up", PlatformGamepadButton::DPadUp, buttonsDown, buttonsPressed, buttonsReleased);
+		PushGamepadButton(L, "dpad_down", PlatformGamepadButton::DPadDown, buttonsDown, buttonsPressed, buttonsReleased);
+		PushGamepadButton(L, "dpad_left", PlatformGamepadButton::DPadLeft, buttonsDown, buttonsPressed, buttonsReleased);
+		PushGamepadButton(L, "dpad_right", PlatformGamepadButton::DPadRight, buttonsDown, buttonsPressed, buttonsReleased);
 		return 1;
 	}
 
@@ -2830,6 +2994,41 @@ namespace
 		return 0;
 	}
 
+	int LuaUiOverlayButton(lua_State* L)
+	{
+		Corona* host = GetHost(L);
+		if (!host)
+		{
+			luaL_error(L, "corona host is not available");
+			return 0;
+		}
+
+		const char* id = luaL_checkstring(L, 1);
+		const char* label = luaL_checkstring(L, 2);
+		const float x = static_cast<float>(luaL_checknumber(L, 3));
+		const float y = static_cast<float>(luaL_checknumber(L, 4));
+		const float width = static_cast<float>(luaL_checknumber(L, 5));
+		const float height = static_cast<float>(luaL_checknumber(L, 6));
+		const glm::vec4 fillColor = ReadColorArg(L, 7, glm::vec4(0.12f, 0.18f, 0.24f, 0.92f));
+		const glm::vec4 hoverColor = ReadColorArg(L, 8, glm::vec4(0.18f, 0.38f, 0.48f, 0.96f));
+		const glm::vec4 borderColor = ReadColorArg(L, 9, glm::vec4(0.80f, 0.92f, 1.0f, 0.88f));
+		const float rounding = static_cast<float>(luaL_optnumber(L, 10, 6.0));
+		lua_pushboolean(
+			L,
+			host->QueueScriptUiOverlayButtonForScript(
+				id ? id : "",
+				label ? label : "",
+				x,
+				y,
+				width,
+				height,
+				fillColor,
+				hoverColor,
+				borderColor,
+				rounding) ? 1 : 0);
+		return 1;
+	}
+
 	int LuaUiOverlayProgressBar(lua_State* L)
 	{
 		Corona* host = GetHost(L);
@@ -3113,6 +3312,8 @@ namespace
 
 		lua_pushcfunction(L, LuaCoronaLog, "corona.log");
 		lua_setfield(L, -2, "log");
+		lua_pushcfunction(L, LuaCoronaRequestExit, "corona.request_exit");
+		lua_setfield(L, -2, "request_exit");
 
 		lua_newtable(L);
 		lua_pushcfunction(L, LuaCoronaEntityCreate, "corona.Entity.create");
@@ -3156,6 +3357,28 @@ namespace
 		lua_pushcfunction(L, LuaCoronaEntitySetRayTracing, "corona.MeshComponent.set_ray_tracing");
 		lua_setfield(L, -2, "set_ray_tracing");
 		lua_setfield(L, -2, "MeshComponent");
+
+		lua_newtable(L);
+		lua_pushcfunction(L, LuaCoronaCreateSpineScene, "corona.SpineComponent.create_scene");
+		lua_setfield(L, -2, "create_scene");
+		lua_pushcfunction(L, LuaCoronaCreateSpineScene, "corona.SpineComponent.sample_scene");
+		lua_setfield(L, -2, "sample_scene");
+		lua_pushcfunction(L, LuaCoronaGetSpineSceneHeight, "corona.SpineComponent.get_scene_height");
+		lua_setfield(L, -2, "get_scene_height");
+		lua_pushcfunction(L, LuaCoronaSpineSetPose, "corona.SpineComponent.set_pose");
+		lua_setfield(L, -2, "set_pose");
+		lua_setfield(L, -2, "SpineComponent");
+
+		lua_newtable(L);
+		lua_pushcfunction(L, LuaCoronaCreateSpineScene, "corona.Spine.create_scene");
+		lua_setfield(L, -2, "create_scene");
+		lua_pushcfunction(L, LuaCoronaCreateSpineScene, "corona.Spine.sample_scene");
+		lua_setfield(L, -2, "sample_scene");
+		lua_pushcfunction(L, LuaCoronaGetSpineSceneHeight, "corona.Spine.get_scene_height");
+		lua_setfield(L, -2, "get_scene_height");
+		lua_pushcfunction(L, LuaCoronaSpineSetPose, "corona.Spine.set_pose");
+		lua_setfield(L, -2, "set_pose");
+		lua_setfield(L, -2, "Spine");
 
 		lua_newtable(L);
 		lua_pushcfunction(L, LuaCoronaEntitySetPhysics, "corona.PhysicsComponent.set");
@@ -3241,6 +3464,10 @@ namespace
 		lua_setfield(L, -2, "has_native_script");
 		lua_pushcfunction(L, LuaCoronaDetachScript, "corona.detach_script");
 		lua_setfield(L, -2, "detach_script");
+		lua_pushcfunction(L, LuaCoronaCreateSpineScene, "corona.create_spine_scene");
+		lua_setfield(L, -2, "create_spine_scene");
+		lua_pushcfunction(L, LuaCoronaGetSpineSceneHeight, "corona.get_spine_scene_height");
+		lua_setfield(L, -2, "get_spine_scene_height");
 		lua_pushcfunction(L, LuaCoronaSetDefaultWorldVisible, "corona.set_default_world_visible");
 		lua_setfield(L, -2, "set_default_world_visible");
 		lua_pushcfunction(L, LuaCoronaSetCameraControl, "corona.set_camera_control");
@@ -3345,6 +3572,8 @@ namespace
 		lua_setfield(L, -2, "overlay_rect");
 		lua_pushcfunction(L, LuaUiOverlayRectFilled, "ui.overlay_rect_filled");
 		lua_setfield(L, -2, "overlay_rect_filled");
+		lua_pushcfunction(L, LuaUiOverlayButton, "ui.overlay_button");
+		lua_setfield(L, -2, "overlay_button");
 		lua_pushcfunction(L, LuaUiOverlayProgressBar, "ui.progress_bar");
 		lua_setfield(L, -2, "progress_bar");
 		lua_pushcfunction(L, LuaUiOverlayProgressBar, "ui.overlay_progress_bar");
@@ -3485,6 +3714,41 @@ namespace
 		lua_setglobal(L, "update");
 		lua_pushnil(L);
 		lua_setglobal(L, "shutdown");
+	}
+
+	float SanitizeScriptScaleAxis(float value)
+	{
+		if (!std::isfinite(value))
+			return 1.0f;
+
+		const float sign = value < 0.0f ? -1.0f : 1.0f;
+		return sign * std::max(std::abs(value), 0.001f);
+	}
+
+	glm::vec3 SanitizeScriptScale(const glm::vec3& scale)
+	{
+		return glm::vec3(
+			SanitizeScriptScaleAxis(scale.x),
+			SanitizeScriptScaleAxis(scale.y),
+			SanitizeScriptScaleAxis(scale.z));
+	}
+
+	float ComputeSceneSourceHeight(const shared_ptr<Scene>& scene)
+	{
+		if (!scene || !scene->bHasBounds)
+			return 0.0f;
+
+		const glm::vec3 boundsSize = scene->BoundsMax - scene->BoundsMin;
+		float sourceHeight = boundsSize.y;
+		if (sourceHeight <= 1.0e-4f)
+			sourceHeight = std::max(std::max(boundsSize.x, boundsSize.y), boundsSize.z);
+		return sourceHeight;
+	}
+
+	float ComputeSceneTargetHeightScale(const shared_ptr<Scene>& scene, float targetHeight)
+	{
+		const float sourceHeight = ComputeSceneSourceHeight(scene);
+		return sourceHeight > 1.0e-4f ? std::max(targetHeight, 0.001f) / sourceHeight : 1.0f;
 	}
 }
 
@@ -3632,7 +3896,7 @@ Corona::SceneObjectHandle Corona::SpawnSceneObjectForScript(
 	SceneObjectDesc desc;
 	desc.ScenePtr = sceneIt->second.ScenePtr;
 	const float safeTargetExtent = std::max(targetExtent, 0.001f);
-	const glm::vec3 safeScale = glm::max(scale, glm::vec3(0.001f));
+	const glm::vec3 safeScale = SanitizeScriptScale(scale);
 	desc.Transform = bUseScale ?
 		BuildScaledSceneTransform(desc.ScenePtr, safeScale, position, rotationDegrees) :
 		BuildCenteredSceneTransform(desc.ScenePtr, safeTargetExtent, position, rotationDegrees);
@@ -3720,7 +3984,7 @@ bool Corona::SetSceneObjectTransformForScript(
 		return false;
 
 	const float safeTargetExtent = std::max(targetExtent, 0.001f);
-	const glm::vec3 safeScale = glm::max(scale, glm::vec3(0.001f));
+	const glm::vec3 safeScale = SanitizeScriptScale(scale);
 	stateIt->second.Position = position;
 	stateIt->second.RotationDegrees = rotationDegrees;
 	stateIt->second.TargetExtent = safeTargetExtent;
@@ -3770,6 +4034,137 @@ bool Corona::GetSceneObjectTransformForScript(
 	return true;
 }
 
+float Corona::GetScriptSceneHeightForScript(ScriptSceneHandle sceneHandle) const
+{
+	const auto sceneIt = ScriptScenes.find(sceneHandle);
+	if (sceneIt == ScriptScenes.end() || !sceneIt->second.ScenePtr)
+		return 0.0f;
+
+	return ComputeSceneSourceHeight(sceneIt->second.ScenePtr);
+}
+
+bool Corona::SetSpinePoseForScript(
+	CoronaECS::Entity entity,
+	ScriptSceneHandle sceneHandle,
+	const glm::vec3& position,
+	const glm::vec3& rotationDegrees,
+	float targetHeight,
+	float roughness,
+	float metallic,
+	bool bMirrorX,
+	bool bUseWorldScale)
+{
+	if (!EntityWorld.IsAlive(entity))
+		return false;
+
+	const float safeScaleOrTargetHeight = std::max(targetHeight, 0.001f);
+	ScriptSceneHandle resolvedSceneHandle = sceneHandle;
+	shared_ptr<Scene> scene;
+	if (sceneHandle != InvalidScriptSceneHandle)
+	{
+		const auto sceneIt = ScriptScenes.find(sceneHandle);
+		if (sceneIt == ScriptScenes.end() || !sceneIt->second.ScenePtr)
+			return false;
+		scene = sceneIt->second.ScenePtr;
+	}
+
+	const SceneObjectHandle objectHandle = GetEntitySceneObject(entity);
+	if (!scene && objectHandle != InvalidSceneObjectHandle)
+	{
+		const auto objectIt = std::find_if(SceneObjects.begin(), SceneObjects.end(), [objectHandle](const SceneObject& object)
+		{
+			return object.Handle == objectHandle;
+		});
+		if (objectIt == SceneObjects.end() || !objectIt->ScenePtr)
+			return false;
+
+		scene = objectIt->ScenePtr;
+		const auto scriptStateIt = ScriptObjects.find(objectHandle);
+		if (scriptStateIt != ScriptObjects.end())
+			resolvedSceneHandle = scriptStateIt->second.SceneHandle;
+	}
+
+	if (!scene)
+		return false;
+
+	const float uniformScale = bUseWorldScale ?
+		safeScaleOrTargetHeight :
+		ComputeSceneTargetHeightScale(scene, safeScaleOrTargetHeight);
+	const glm::vec3 signedScale = SanitizeScriptScale(glm::vec3(
+		bMirrorX ? -uniformScale : uniformScale,
+		uniformScale,
+		uniformScale));
+	const glm::mat4x4 transform = BuildScaledSceneTransform(scene, signedScale, position, rotationDegrees);
+
+	if (objectHandle != InvalidSceneObjectHandle)
+	{
+		const auto objectIt = std::find_if(SceneObjects.begin(), SceneObjects.end(), [objectHandle](const SceneObject& object)
+		{
+			return object.Handle == objectHandle;
+		});
+		if (objectIt == SceneObjects.end())
+			return false;
+
+		UINT32 dirtyBits = kSceneObjectDirtyTransform;
+		if (objectIt->ScenePtr != scene)
+		{
+			objectIt->ScenePtr = scene;
+			objectIt->PhysicsCollisionShape = EPhysicsCollisionShape::TriangleMesh;
+			objectIt->PhysicsBoxHalfExtent = glm::vec3(0.5f);
+			dirtyBits |= kSceneObjectDirtyAll;
+		}
+		if (objectIt->Roughness != roughness ||
+			objectIt->Metallic != metallic ||
+			objectIt->bOverrideRoughnessMetallic)
+		{
+			dirtyBits |= kSceneObjectDirtyMaterial;
+		}
+		if (!objectIt->bVisible)
+			dirtyBits |= kSceneObjectDirtyVisibility;
+		if (objectIt->bRayTracing)
+			dirtyBits |= kSceneObjectDirtyRayTracing;
+
+		const bool bPhysicsQueryChanged = objectIt->bPhysicsQuery;
+		objectIt->Transform = transform;
+		objectIt->Roughness = roughness;
+		objectIt->Metallic = metallic;
+		objectIt->bOverrideRoughnessMetallic = false;
+		objectIt->bVisible = true;
+		objectIt->bRayTracing = false;
+		objectIt->bPhysicsQuery = false;
+		UpdateSceneObjectEntity(*objectIt);
+		MarkSceneObjectRenderDirty(objectHandle, dirtyBits);
+		if (bPhysicsQueryChanged)
+			MarkCpuPhysicsSceneDirty();
+
+		ScriptObjects[objectHandle] = { resolvedSceneHandle, position, rotationDegrees, safeScaleOrTargetHeight, signedScale, true };
+		return true;
+	}
+
+	if (sceneHandle == InvalidScriptSceneHandle)
+		return false;
+
+	SceneObjectDesc desc;
+	desc.EntityHandle = entity;
+	desc.ScenePtr = scene;
+	desc.Transform = transform;
+	desc.Roughness = roughness;
+	desc.Metallic = metallic;
+	desc.bOverrideRoughnessMetallic = false;
+	desc.bVisible = true;
+	desc.bRayTracing = false;
+	desc.bPhysicsQuery = false;
+	desc.PhysicsCollisionShape = EPhysicsCollisionShape::TriangleMesh;
+	desc.PhysicsBoxHalfExtent = glm::vec3(0.5f);
+
+	const SceneObjectHandle handle = AddSceneObject(desc);
+	if (handle == InvalidSceneObjectHandle)
+		return false;
+
+	ScriptObjects[handle] = { sceneHandle, position, rotationDegrees, safeScaleOrTargetHeight, signedScale, true };
+	return true;
+}
+
 bool Corona::AddMeshComponentForScript(
 	CoronaECS::Entity entity,
 	ScriptSceneHandle sceneHandle,
@@ -3793,7 +4188,7 @@ bool Corona::AddMeshComponentForScript(
 		return false;
 
 	const float safeTargetExtent = std::max(targetExtent, 0.001f);
-	const glm::vec3 safeScale = glm::max(scale, glm::vec3(0.001f));
+	const glm::vec3 safeScale = SanitizeScriptScale(scale);
 	const glm::mat4x4 transform = bUseScale ?
 		BuildScaledSceneTransform(sceneIt->second.ScenePtr, safeScale, position, rotationDegrees) :
 		BuildCenteredSceneTransform(sceneIt->second.ScenePtr, safeTargetExtent, position, rotationDegrees);
@@ -3911,7 +4306,7 @@ bool Corona::SetEntityMeshComponentForScript(
 		return false;
 
 	const float safeTargetExtent = std::max(targetExtent, 0.001f);
-	const glm::vec3 safeScale = glm::max(scale, glm::vec3(0.001f));
+	const glm::vec3 safeScale = SanitizeScriptScale(scale);
 	const glm::mat4x4 nextTransform = bUseScale ?
 		BuildScaledSceneTransform(objectIt->ScenePtr, safeScale, position, rotationDegrees) :
 		BuildCenteredSceneTransform(objectIt->ScenePtr, safeTargetExtent, position, rotationDegrees);
@@ -4037,8 +4432,25 @@ bool Corona::SetEntityTransformForScript(
 {
 	if (!EntityWorld.IsAlive(entity))
 		return false;
+	if (!std::isfinite(position.x) || !std::isfinite(position.y) || !std::isfinite(position.z) ||
+		!std::isfinite(rotationDegrees.x) || !std::isfinite(rotationDegrees.y) || !std::isfinite(rotationDegrees.z) ||
+		!std::isfinite(scale.x) || !std::isfinite(scale.y) || !std::isfinite(scale.z))
+	{
+		return false;
+	}
+	if (!IsReasonableScriptWorldPosition(position))
+	{
+		AppendCpuRuntimeTrace(
+			L"[Luau][TransformComponent] rejected unreasonable position entity=" +
+			std::to_wstring(entity.GetId()) +
+			L", position=(" + std::to_wstring(position.x) +
+			L"," + std::to_wstring(position.y) +
+			L"," + std::to_wstring(position.z) + L")");
+		return false;
+	}
 
-	const glm::mat4x4 transform = CoronaECS::TransformComponent::FromTRS(position, rotationDegrees, glm::max(scale, glm::vec3(0.001f))).LocalToWorld;
+	const CoronaECS::TransformComponent transformComponentValue =
+		CoronaECS::TransformComponent::FromTRS(position, rotationDegrees, glm::max(scale, glm::vec3(0.001f)));
 
 	const bool bIsActiveCamera = EntityWorld.GetActiveCameraEntity() == entity;
 	if (bIsActiveCamera && entity == MainCameraEntity)
@@ -4050,7 +4462,7 @@ bool Corona::SetEntityTransformForScript(
 
 	const SceneObjectHandle objectHandle = GetEntitySceneObject(entity);
 	if (objectHandle != InvalidSceneObjectHandle)
-		return SetSceneObjectTransform(objectHandle, transform);
+		return SetSceneObjectTransform(objectHandle, transformComponentValue.LocalToWorld);
 
 	if (PointLightState* pointLight = FindPointLightByEntity(entity))
 	{
@@ -4069,7 +4481,7 @@ bool Corona::SetEntityTransformForScript(
 	if (!transformComponent)
 		return false;
 
-	transformComponent->LocalToWorld = transform;
+	*transformComponent = transformComponentValue;
 	return true;
 }
 
@@ -4271,14 +4683,32 @@ bool Corona::SetEntityCameraComponentForScript(
 		return false;
 
 	CoronaECS::CameraComponent cameraComponent = component;
+	if (!std::isfinite(cameraComponent.LookDirection.x) ||
+		!std::isfinite(cameraComponent.LookDirection.y) ||
+		!std::isfinite(cameraComponent.LookDirection.z))
+	{
+		cameraComponent.LookDirection = glm::vec3(0.0f, 0.0f, 1.0f);
+	}
 	if (glm::length(cameraComponent.LookDirection) > 0.0001f)
 		cameraComponent.LookDirection = glm::normalize(cameraComponent.LookDirection);
 	else
 		cameraComponent.LookDirection = glm::vec3(0.0f, 0.0f, 1.0f);
+	if (!std::isfinite(cameraComponent.UpDirection.x) ||
+		!std::isfinite(cameraComponent.UpDirection.y) ||
+		!std::isfinite(cameraComponent.UpDirection.z))
+	{
+		cameraComponent.UpDirection = glm::vec3(0.0f, 1.0f, 0.0f);
+	}
 	if (glm::length(cameraComponent.UpDirection) > 0.0001f)
 		cameraComponent.UpDirection = glm::normalize(cameraComponent.UpDirection);
 	else
 		cameraComponent.UpDirection = glm::vec3(0.0f, 1.0f, 0.0f);
+	if (!std::isfinite(cameraComponent.Fov))
+		cameraComponent.Fov = Fov;
+	if (!std::isfinite(cameraComponent.NearPlane))
+		cameraComponent.NearPlane = Near;
+	if (!std::isfinite(cameraComponent.FarPlane))
+		cameraComponent.FarPlane = Far;
 	cameraComponent.Fov = std::clamp(cameraComponent.Fov, 0.05f, glm::pi<float>() - 0.05f);
 	cameraComponent.NearPlane = std::max(0.001f, cameraComponent.NearPlane);
 	cameraComponent.FarPlane = std::max(cameraComponent.NearPlane + 1.0f, cameraComponent.FarPlane);
@@ -5037,6 +5467,11 @@ bool Corona::SetCameraForScript(
 	const glm::vec3& lookAt,
 	const glm::vec3& upDirection)
 {
+	if (!std::isfinite(position.x) || !std::isfinite(position.y) || !std::isfinite(position.z) ||
+		!std::isfinite(lookAt.x) || !std::isfinite(lookAt.y) || !std::isfinite(lookAt.z))
+	{
+		return false;
+	}
 	const glm::vec3 lookVector = lookAt - position;
 	const float lookLengthSq = glm::dot(lookVector, lookVector);
 	if (lookLengthSq < 1.0e-6f)
@@ -5131,16 +5566,91 @@ void Corona::RecordScriptMouseMove(int x, int y)
 	ScriptMouseY = y;
 }
 
+void Corona::UpdateMobileVirtualMoveFromTouch(const PlatformTouchState& touchState)
+{
+#if CORONA_PLATFORM_MOBILE
+	const float shortEdge = static_cast<float>(std::max<UINT>(1u, std::min(m_width, m_height)));
+	const float joystickRadius = std::clamp(shortEdge * 0.12f, 72.0f, 150.0f);
+	const float attackRadius = std::clamp(shortEdge * 0.085f, 62.0f, 96.0f);
+	const float attackMargin = std::clamp(shortEdge * 0.070f, 56.0f, 92.0f);
+	MobileVirtualJoystickRadius = joystickRadius;
+	MobileVirtualAttackRadius = attackRadius;
+	MobileVirtualAttackCenter = glm::vec2(
+		static_cast<float>(m_width) - attackMargin - attackRadius,
+		static_cast<float>(m_height) - attackMargin - attackRadius);
+	bMobileVirtualAttackDown = touchState.bAttackActive;
+	bMobileVirtualAttackPressed = touchState.bAttackPressed;
+	bMobileVirtualAttackReleased = touchState.bAttackReleased;
+
+	if (!touchState.bMoveActive)
+	{
+		bMobileVirtualJoystickActive = false;
+		MobileVirtualMoveAxis = glm::vec2(0.0f);
+		MobileVirtualJoystickCenter = glm::vec2(0.0f);
+		MobileVirtualJoystickDrag = glm::vec2(0.0f);
+		bMobileVirtualMoveForward = false;
+		bMobileVirtualMoveBackward = false;
+		bMobileVirtualMoveLeft = false;
+		bMobileVirtualMoveRight = false;
+		return;
+	}
+
+	bMobileVirtualJoystickActive = true;
+	MobileVirtualJoystickCenter = glm::vec2(touchState.MoveStartX, touchState.MoveStartY);
+	MobileVirtualJoystickDrag = glm::vec2(touchState.MoveX, touchState.MoveY);
+
+	glm::vec2 axis(
+		(touchState.MoveX - touchState.MoveStartX) / joystickRadius,
+		-(touchState.MoveY - touchState.MoveStartY) / joystickRadius);
+	const float axisLength = glm::length(axis);
+	if (axisLength > 1.0f)
+		axis /= axisLength;
+	else if (axisLength < 0.08f)
+		axis = glm::vec2(0.0f);
+
+	MobileVirtualMoveAxis = axis;
+	bMobileVirtualMoveForward = axis.y > 0.30f;
+	bMobileVirtualMoveBackward = axis.y < -0.30f;
+	bMobileVirtualMoveLeft = axis.x < -0.30f;
+	bMobileVirtualMoveRight = axis.x > 0.30f;
+#else
+	(void)touchState;
+	bMobileVirtualAttackDown = false;
+	bMobileVirtualAttackPressed = false;
+	bMobileVirtualAttackReleased = false;
+#endif
+}
+
 void Corona::PollScriptMouseState()
 {
-	HWND hwnd = Win32Application::GetHwnd();
-	if (!hwnd)
+#if CORONA_PLATFORM_MOBILE
+	PlatformTouchState touchState;
+	if (PollMainPlatformTouchState(touchState))
+	{
+		UpdateMobileVirtualMoveFromTouch(touchState);
+		const int x = static_cast<int>(std::lround(touchState.X));
+		const int y = static_cast<int>(std::lround(touchState.Y));
+		if (touchState.bLookActive)
+		{
+			if (!bScriptRightMouseDown)
+				RecordScriptRButtonDown(x, y);
+			else
+				RecordScriptMouseMove(x, y);
+			return;
+		}
+
+		if (bScriptRightMouseDown)
+			RecordScriptRButtonUp();
+		bScriptMousePositionInitialized = false;
+		return;
+	}
+#endif
+
+	PlatformMouseState mouseState;
+	if (!PollMainPlatformMouseState(mouseState))
 		return;
 
-	const bool bWindowCanReceiveMouse =
-		GetForegroundWindow() == hwnd ||
-		GetCapture() == hwnd;
-	if (!bWindowCanReceiveMouse)
+	if (!mouseState.bWindowCanReceiveMouse)
 	{
 		if (bScriptRightMouseDown)
 			RecordScriptRButtonUp();
@@ -5148,24 +5658,12 @@ void Corona::PollScriptMouseState()
 		return;
 	}
 
-	POINT cursorPosition = {};
-	if (!GetCursorPos(&cursorPosition))
-		return;
-	if (!ScreenToClient(hwnd, &cursorPosition))
-		return;
-
-	const bool bRightDownNow = (GetAsyncKeyState(VK_RBUTTON) & 0x8000) != 0;
-	if (bRightDownNow && GetCapture() == nullptr)
-		SetCapture(hwnd);
-	else if (!bRightDownNow && GetCapture() == hwnd)
-		ReleaseCapture();
-
-	if (bRightDownNow && !bScriptRightMouseDown)
-		RecordScriptRButtonDown(cursorPosition.x, cursorPosition.y);
-	else if (!bRightDownNow && bScriptRightMouseDown)
+	if (mouseState.bRightButtonDown && !bScriptRightMouseDown)
+		RecordScriptRButtonDown(mouseState.X, mouseState.Y);
+	else if (!mouseState.bRightButtonDown && bScriptRightMouseDown)
 		RecordScriptRButtonUp();
 
-	RecordScriptMouseMove(cursorPosition.x, cursorPosition.y);
+	RecordScriptMouseMove(mouseState.X, mouseState.Y);
 }
 
 void Corona::PollScriptGamepadState()
@@ -5185,39 +5683,41 @@ void Corona::PollScriptGamepadState()
 		ScriptGamepadButtonsReleased = previousButtons;
 	};
 
-	HWND hwnd = Win32Application::GetHwnd();
-	const bool bWindowCanReceiveInput =
-		hwnd &&
-		(GetForegroundWindow() == hwnd || GetCapture() == hwnd);
-	if (!bWindowCanReceiveInput)
+	PlatformGamepadState state;
+	if (!PollMainPlatformGamepadState(state))
+		state = PlatformGamepadState{};
+
+#if CORONA_PLATFORM_MOBILE
+	const float virtualLeftX = MobileVirtualMoveAxis.x;
+	const float virtualLeftY = MobileVirtualMoveAxis.y;
+	const bool bVirtualAttack = bMobileVirtualAttackDown || bMobileVirtualAttackPressed;
+	const bool bHasVirtualMove =
+		std::abs(virtualLeftX) > 0.001f ||
+		std::abs(virtualLeftY) > 0.001f;
+	if (bHasVirtualMove || bVirtualAttack)
+	{
+		state.bConnected = true;
+		state.LeftX = std::clamp(state.LeftX + virtualLeftX, -1.0f, 1.0f);
+		state.LeftY = std::clamp(state.LeftY + virtualLeftY, -1.0f, 1.0f);
+		if (bVirtualAttack)
+			state.Buttons |= PlatformGamepadButton::B;
+	}
+#endif
+
+	if (!state.bConnected)
 	{
 		clearState();
 		return;
 	}
 
-	XInputGetStateProc getState = GetXInputGetStateProc();
-	if (!getState)
-	{
-		clearState();
-		return;
-	}
-
-	XINPUT_STATE state = {};
-	if (getState(0, &state) != ERROR_SUCCESS)
-	{
-		clearState();
-		return;
-	}
-
-	const XINPUT_GAMEPAD& pad = state.Gamepad;
-	const uint16_t currentButtons = static_cast<uint16_t>(pad.wButtons);
+	const uint16_t currentButtons = state.Buttons;
 	bScriptGamepadConnected = true;
-	ScriptGamepadLeftX = NormalizeGamepadStick(pad.sThumbLX, XINPUT_GAMEPAD_LEFT_THUMB_DEADZONE);
-	ScriptGamepadLeftY = NormalizeGamepadStick(pad.sThumbLY, XINPUT_GAMEPAD_LEFT_THUMB_DEADZONE);
-	ScriptGamepadRightX = NormalizeGamepadStick(pad.sThumbRX, XINPUT_GAMEPAD_RIGHT_THUMB_DEADZONE);
-	ScriptGamepadRightY = NormalizeGamepadStick(pad.sThumbRY, XINPUT_GAMEPAD_RIGHT_THUMB_DEADZONE);
-	ScriptGamepadLeftTrigger = NormalizeGamepadTrigger(pad.bLeftTrigger);
-	ScriptGamepadRightTrigger = NormalizeGamepadTrigger(pad.bRightTrigger);
+	ScriptGamepadLeftX = state.LeftX;
+	ScriptGamepadLeftY = state.LeftY;
+	ScriptGamepadRightX = state.RightX;
+	ScriptGamepadRightY = state.RightY;
+	ScriptGamepadLeftTrigger = state.LeftTrigger;
+	ScriptGamepadRightTrigger = state.RightTrigger;
 	ScriptGamepadButtonsDown = currentButtons;
 	ScriptGamepadButtonsPressed = static_cast<uint16_t>(currentButtons & ~previousButtons);
 	ScriptGamepadButtonsReleased = static_cast<uint16_t>(previousButtons & ~currentButtons);
@@ -5292,11 +5792,17 @@ void Corona::ClearScriptInputFrameState()
 	ScriptGamepadButtonsReleased = 0;
 }
 
+void Corona::QueueScriptUiCommandForScript(ScriptUiCommand command)
+{
+	command.bGameUi = bCurrentScriptUiIsGame;
+	ScriptUiBuildCommands.push_back(std::move(command));
+}
+
 void Corona::QueueScriptUiSeparatorForScript()
 {
 	ScriptUiCommand command;
 	command.Type = ScriptUiCommandType::Separator;
-	ScriptUiBuildCommands.push_back(command);
+	QueueScriptUiCommandForScript(std::move(command));
 }
 
 void Corona::QueueScriptUiTextForScript(const std::string& text)
@@ -5304,14 +5810,14 @@ void Corona::QueueScriptUiTextForScript(const std::string& text)
 	ScriptUiCommand command;
 	command.Type = ScriptUiCommandType::Text;
 	command.Label = text;
-	ScriptUiBuildCommands.push_back(command);
+	QueueScriptUiCommandForScript(std::move(command));
 }
 
 void Corona::QueueScriptUiSameLineForScript()
 {
 	ScriptUiCommand command;
 	command.Type = ScriptUiCommandType::SameLine;
-	ScriptUiBuildCommands.push_back(command);
+	QueueScriptUiCommandForScript(std::move(command));
 }
 
 void Corona::QueueScriptUiBeginWindowForScript(const std::string& title)
@@ -5319,14 +5825,14 @@ void Corona::QueueScriptUiBeginWindowForScript(const std::string& title)
 	ScriptUiCommand command;
 	command.Type = ScriptUiCommandType::BeginWindow;
 	command.Label = title;
-	ScriptUiBuildCommands.push_back(command);
+	QueueScriptUiCommandForScript(std::move(command));
 }
 
 void Corona::QueueScriptUiEndWindowForScript()
 {
 	ScriptUiCommand command;
 	command.Type = ScriptUiCommandType::EndWindow;
-	ScriptUiBuildCommands.push_back(command);
+	QueueScriptUiCommandForScript(std::move(command));
 }
 
 void Corona::QueueScriptUiOverlayTextForScript(const std::string& text, float x, float y)
@@ -5336,7 +5842,7 @@ void Corona::QueueScriptUiOverlayTextForScript(const std::string& text, float x,
 	command.Label = text;
 	command.FloatValue = x;
 	command.MinValue = y;
-	ScriptUiBuildCommands.push_back(command);
+	QueueScriptUiCommandForScript(std::move(command));
 }
 
 void Corona::QueueScriptUiOverlayLineForScript(
@@ -5355,7 +5861,7 @@ void Corona::QueueScriptUiOverlayLineForScript(
 	command.Vec3Value = glm::vec3(y1, 0.0f, 0.0f);
 	command.ColorValue = color;
 	command.IntValue = static_cast<int>(std::max(thickness, 1.0f) * 100.0f);
-	ScriptUiBuildCommands.push_back(command);
+	QueueScriptUiCommandForScript(std::move(command));
 }
 
 void Corona::QueueScriptUiOverlayRectForScript(
@@ -5376,7 +5882,7 @@ void Corona::QueueScriptUiOverlayRectForScript(
 	command.ColorValue = color;
 	command.IntValue = static_cast<int>(std::max(thickness, 1.0f) * 100.0f);
 	command.MinIntValue = static_cast<int>(std::max(rounding, 0.0f) * 100.0f);
-	ScriptUiBuildCommands.push_back(command);
+	QueueScriptUiCommandForScript(std::move(command));
 }
 
 void Corona::QueueScriptUiOverlayRectFilledForScript(
@@ -5395,7 +5901,42 @@ void Corona::QueueScriptUiOverlayRectFilledForScript(
 	command.Vec3Value = glm::vec3(height, 0.0f, 0.0f);
 	command.ColorValue = color;
 	command.MinIntValue = static_cast<int>(std::max(rounding, 0.0f) * 100.0f);
-	ScriptUiBuildCommands.push_back(command);
+	QueueScriptUiCommandForScript(std::move(command));
+}
+
+bool Corona::QueueScriptUiOverlayButtonForScript(
+	const std::string& id,
+	const std::string& label,
+	float x,
+	float y,
+	float width,
+	float height,
+	const glm::vec4& fillColor,
+	const glm::vec4& hoverColor,
+	const glm::vec4& borderColor,
+	float rounding)
+{
+	ScriptUiCommand command;
+	command.Type = ScriptUiCommandType::OverlayButton;
+	command.Id = id;
+	command.Label = label;
+	command.FloatValue = x;
+	command.MinValue = y;
+	command.MaxValue = width;
+	command.Vec3Value = glm::vec3(height, 0.0f, 0.0f);
+	command.ColorValue = fillColor;
+	command.SecondaryColorValue = hoverColor;
+	command.TertiaryColorValue = borderColor;
+	command.MinIntValue = static_cast<int>(std::max(rounding, 0.0f) * 100.0f);
+	QueueScriptUiCommandForScript(std::move(command));
+
+	const auto result = ScriptUiClickedResults.find(id);
+	if (result == ScriptUiClickedResults.end())
+		return false;
+
+	const bool clicked = result->second;
+	ScriptUiClickedResults.erase(result);
+	return clicked;
 }
 
 void Corona::QueueScriptUiOverlayProgressBarForScript(
@@ -5422,7 +5963,7 @@ void Corona::QueueScriptUiOverlayProgressBarForScript(
 	command.ColorValue = fillColor;
 	command.SecondaryColorValue = backgroundColor;
 	command.TertiaryColorValue = borderColor;
-	ScriptUiBuildCommands.push_back(command);
+	QueueScriptUiCommandForScript(std::move(command));
 }
 
 void Corona::QueueScriptUiWorldAxisForScript(
@@ -5437,7 +5978,7 @@ void Corona::QueueScriptUiWorldAxisForScript(
 	command.Vec3Value = position;
 	command.FloatValue = length;
 	command.MinValue = thickness;
-	ScriptUiBuildCommands.push_back(command);
+	QueueScriptUiCommandForScript(std::move(command));
 }
 
 void Corona::QueueScriptUiWorldTextForScript(
@@ -5456,7 +5997,7 @@ void Corona::QueueScriptUiWorldTextForScript(
 	command.FloatValue = xOffset;
 	command.MinValue = yOffset;
 	command.ColorValue = color;
-	ScriptUiBuildCommands.push_back(command);
+	QueueScriptUiCommandForScript(std::move(command));
 }
 
 void Corona::QueueScriptUiWorldProgressBarForScript(
@@ -5481,7 +6022,7 @@ void Corona::QueueScriptUiWorldProgressBarForScript(
 	command.ColorValue = fillColor;
 	command.SecondaryColorValue = backgroundColor;
 	command.TertiaryColorValue = borderColor;
-	ScriptUiBuildCommands.push_back(command);
+	QueueScriptUiCommandForScript(std::move(command));
 }
 
 void Corona::QueueScriptUiWorldHealthBarForScript(
@@ -5500,7 +6041,7 @@ void Corona::QueueScriptUiWorldHealthBarForScript(
 	command.FloatValue = std::clamp(fraction, 0.0f, 1.0f);
 	command.MinValue = width;
 	command.MaxValue = height;
-	ScriptUiBuildCommands.push_back(command);
+	QueueScriptUiCommandForScript(std::move(command));
 }
 
 glm::vec3 Corona::QueueScriptUiGizmo3DForScript(
@@ -5528,7 +6069,7 @@ glm::vec3 Corona::QueueScriptUiGizmo3DForScript(
 	command.Vec3Value = effectiveValue;
 	command.FloatValue = size;
 	command.IntValue = mode;
-	ScriptUiBuildCommands.push_back(command);
+	QueueScriptUiCommandForScript(std::move(command));
 	return effectiveValue;
 }
 
@@ -5538,7 +6079,7 @@ bool Corona::QueueScriptUiButtonForScript(const std::string& id, const std::stri
 	command.Type = ScriptUiCommandType::Button;
 	command.Id = id;
 	command.Label = label;
-	ScriptUiBuildCommands.push_back(command);
+	QueueScriptUiCommandForScript(std::move(command));
 
 	std::lock_guard<std::mutex> lock(ScriptUiMutex);
 	const auto result = ScriptUiClickedResults.find(id);
@@ -5575,7 +6116,7 @@ float Corona::QueueScriptUiSliderFloatForScript(
 	command.FloatValue = effectiveValue;
 	command.MinValue = minValue;
 	command.MaxValue = maxValue;
-	ScriptUiBuildCommands.push_back(command);
+	QueueScriptUiCommandForScript(std::move(command));
 	return effectiveValue;
 }
 
@@ -5604,7 +6145,7 @@ int Corona::QueueScriptUiSliderIntForScript(
 	command.IntValue = std::clamp(effectiveValue, minValue, maxValue);
 	command.MinIntValue = minValue;
 	command.MaxIntValue = maxValue;
-	ScriptUiBuildCommands.push_back(command);
+	QueueScriptUiCommandForScript(std::move(command));
 	return command.IntValue;
 }
 
@@ -5632,7 +6173,7 @@ int Corona::QueueScriptUiComboForScript(
 	command.Label = label;
 	command.IntValue = std::clamp(effectiveIndex, 1, maxIndex);
 	command.Items = items;
-	ScriptUiBuildCommands.push_back(command);
+	QueueScriptUiCommandForScript(std::move(command));
 	return command.IntValue;
 }
 
@@ -5654,7 +6195,7 @@ bool Corona::QueueScriptUiCheckboxForScript(const std::string& id, const std::st
 	command.Id = id;
 	command.Label = label;
 	command.BoolValue = effectiveValue;
-	ScriptUiBuildCommands.push_back(command);
+	QueueScriptUiCommandForScript(std::move(command));
 	return effectiveValue;
 }
 
@@ -5818,10 +6359,10 @@ void Corona::PushLuauUiStateForScript(lua_State* L, const std::string& mode)
 	PushBoolField(L, "enable_direct_specular", bEnableDirectSpecular);
 	PushBoolField(L, "enable_specular_gi", bEnableSpecularGI);
 	PushBoolField(L, "rt_reflection_ser", bEnableRTReflectionSER);
-	PushBoolField(L, "rt_reflection_ser_available", renderBackend && renderBackend->GetAPI() == ERenderBackendAPI::D3D12 && bD3D12ShaderModel69Supported);
+	PushBoolField(L, "rt_reflection_ser_available", renderBackend && renderBackend->SupportsShaderExecutionReordering());
 	PushBoolField(L, "enable_diffuse_gi", bEnableDiffuseGI);
 	PushBoolField(L, "rt_diffuse_gi_ser", bEnableRTDiffuseGISER);
-	PushBoolField(L, "rt_diffuse_gi_ser_available", renderBackend && renderBackend->GetAPI() == ERenderBackendAPI::D3D12 && bD3D12ShaderModel69Supported);
+	PushBoolField(L, "rt_diffuse_gi_ser_available", renderBackend && renderBackend->SupportsShaderExecutionReordering());
 	PushBoolField(L, "enable_rtao", bEnableRTAO);
 	PushBoolField(L, "enable_sky_lighting", bEnableSkyLighting);
 	PushBoolField(L, "enable_ray_traced_sky_lighting", bEnableRayTracedSkyLighting);
@@ -6702,7 +7243,21 @@ void Corona::RunStartupLuauScript(bool bShowLoadingProgress)
 
 	std::sort(scriptPaths.begin(), scriptPaths.end(), [](const std::filesystem::path& a, const std::filesystem::path& b)
 	{
+#if CORONA_PLATFORM_IS_WINDOWS
 		return _wcsicmp(a.filename().c_str(), b.filename().c_str()) < 0;
+#else
+		std::string lhs = a.filename().string();
+		std::string rhs = b.filename().string();
+		std::transform(lhs.begin(), lhs.end(), lhs.begin(), [](unsigned char c)
+		{
+			return static_cast<char>(std::tolower(c));
+		});
+		std::transform(rhs.begin(), rhs.end(), rhs.begin(), [](unsigned char c)
+		{
+			return static_cast<char>(std::tolower(c));
+		});
+		return lhs < rhs;
+#endif
 	});
 
 	if (scriptPaths.empty())
@@ -7092,6 +7647,26 @@ void Corona::BuildEntityScriptUi()
 	if (!ScriptState || !ScriptState->L)
 		return;
 
+	struct ScopedScriptUiSource
+	{
+		Corona* Owner = nullptr;
+		bool bPreviousGameUi = false;
+
+		ScopedScriptUiSource(Corona* owner, bool bGameUi)
+			: Owner(owner)
+			, bPreviousGameUi(owner ? owner->bCurrentScriptUiIsGame : false)
+		{
+			if (Owner)
+				Owner->bCurrentScriptUiIsGame = bGameUi;
+		}
+
+		~ScopedScriptUiSource()
+		{
+			if (Owner)
+				Owner->bCurrentScriptUiIsGame = bPreviousGameUi;
+		}
+	};
+
 	lua_State* L = ScriptState->L;
 	const std::vector<CoronaECS::Entity> scriptEntities = EntityWorld.GetEntitiesWithScript();
 	for (CoronaECS::Entity entity : scriptEntities)
@@ -7113,8 +7688,10 @@ void Corona::BuildEntityScriptUi()
 				continue;
 
 			const std::wstring sourceName = script->SourceName;
-			if (bScriptGameUiHidden && !IsStartupScriptSource(sourceName))
+			const bool bStartupSource = IsStartupScriptSource(sourceName);
+			if (bScriptGameUiHidden && !bStartupSource)
 				continue;
+			ScopedScriptUiSource uiSourceScope(this, !bStartupSource);
 
 			const std::string nativeScriptName = script->NativeScriptName;
 			if (!nativeScriptName.empty())
@@ -7179,7 +7756,7 @@ void Corona::BuildEntityScriptUi()
 	}
 }
 
-void Corona::RenderQueuedLuauUi()
+void Corona::RenderQueuedLuauUi(bool bRenderToolUi, bool bRenderGameUi)
 {
 	std::vector<ScriptUiCommand> commands;
 	{
@@ -7199,6 +7776,9 @@ void Corona::RenderQueuedLuauUi()
 	};
 	for (const ScriptUiCommand& command : commands)
 	{
+		if ((command.bGameUi && !bRenderGameUi) || (!command.bGameUi && !bRenderToolUi))
+			continue;
+
 		switch (command.Type)
 		{
 		case ScriptUiCommandType::Separator:
@@ -7272,6 +7852,48 @@ void Corona::RenderQueuedLuauUi()
 				ImVec2(command.FloatValue + width, command.MinValue + height),
 				ToImU32(command.ColorValue),
 				rounding);
+			break;
+		}
+		case ScriptUiCommandType::OverlayButton:
+		{
+			ImDrawList* foregroundDrawList = ImGui::GetForegroundDrawList();
+			const float width = std::max(command.MaxValue, 1.0f);
+			const float height = std::clamp(command.Vec3Value.x, 16.0f, 180.0f);
+			const float rounding = std::max(static_cast<float>(command.MinIntValue) / 100.0f, 0.0f);
+			const ImVec2 buttonMin(command.FloatValue, command.MinValue);
+			const ImVec2 buttonMax(command.FloatValue + width, command.MinValue + height);
+			const ImGuiIO& io = ImGui::GetIO();
+			const bool hovered =
+				io.MousePos.x >= buttonMin.x &&
+				io.MousePos.x <= buttonMax.x &&
+				io.MousePos.y >= buttonMin.y &&
+				io.MousePos.y <= buttonMax.y;
+			if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
+				clickedResults[command.Id] = true;
+
+			const glm::vec4 fillColor = hovered ? command.SecondaryColorValue : command.ColorValue;
+			foregroundDrawList->AddRectFilled(buttonMin, buttonMax, ToImU32(fillColor), rounding);
+			foregroundDrawList->AddRect(buttonMin, buttonMax, ToImU32(command.TertiaryColorValue), rounding, 0, 1.35f);
+
+			const float accentWidth = std::min(5.0f, width * 0.08f);
+			foregroundDrawList->AddRectFilled(
+				buttonMin,
+				ImVec2(buttonMin.x + accentWidth, buttonMax.y),
+				ToImU32(command.TertiaryColorValue),
+				rounding);
+
+			if (!command.Label.empty())
+			{
+				const ImVec2 textSize = ImGui::CalcTextSize(command.Label.c_str());
+				const ImVec2 textPos(
+					buttonMin.x + width * 0.5f - textSize.x * 0.5f,
+					buttonMin.y + height * 0.5f - textSize.y * 0.5f);
+				foregroundDrawList->AddText(
+					ImVec2(textPos.x + 1.0f, textPos.y + 1.0f),
+					IM_COL32(0, 0, 0, 210),
+					command.Label.c_str());
+				foregroundDrawList->AddText(textPos, IM_COL32(246, 252, 255, 245), command.Label.c_str());
+			}
 			break;
 		}
 		case ScriptUiCommandType::OverlayProgressBar:

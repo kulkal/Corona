@@ -12,7 +12,8 @@
 #include "stdafx.h"
 #include "Corona.h"
 #include "D3D12Helpers.h"
-#include "Win32Application.h"
+#include "PlatformSystem.h"
+#include "PlatformWindow.h"
 #include "VulkanBackend.h"
 #include "CoronaImageIO.h"
 #if CORONA_HAS_DXC_RUNTIME
@@ -26,20 +27,21 @@
 #include <sstream>
 #include <fstream>
 #include <iomanip>
+#include <iterator>
+#include <limits>
 #include <stdexcept>
 #include <variant>
 #include <codecvt>
+#include <cstdio>
 #include <cstring>
-#include <dxgidebug.h>
+#include <cmath>
+#if CORONA_HAS_ASSIMP
 #include "assimp/include/Importer.hpp"
 #include "assimp/include/scene.h"
 #include "assimp/include/postprocess.h"
-//#pragma comment(lib, "assimp\\lib\\assimp.lib")
+#endif
 #include "imgui.h"
-#include "imgui_impl_win32.h"
 #include "imGuIZMO.h"
-#include "DirectXTex.h"
-#include <wincodec.h>
 #include <filesystem>
 #include <fstream>
 #if WITH_STREAMLINE
@@ -66,7 +68,9 @@ void AppendCpuRuntimeTrace(const std::wstring& line);
 
 
 using namespace glm;
+#if CORONA_PLATFORM_IS_WINDOWS
 using namespace DirectX;
+#endif
 
 namespace
 {
@@ -75,16 +79,138 @@ namespace
 
 	std::string WideToUtf8(const std::wstring& value)
 	{
-		if (value.empty())
-			return {};
+		return PlatformWideToUtf8(value);
+	}
 
-		const int valueLength = static_cast<int>(value.size());
-		const int requiredSize = WideCharToMultiByte(CP_UTF8, 0, value.data(), valueLength, nullptr, 0, nullptr, nullptr);
-		if (requiredSize <= 0)
-			return {};
+	void ConfigureVulkanImplicitLayerPolicy(bool bKeepImplicitLayers)
+	{
+		const auto existingPolicy = GetPlatformEnvironmentVariable(L"VK_LOADER_LAYERS_DISABLE");
+		if (existingPolicy.has_value())
+		{
+			AppendCpuRuntimeTrace(L"[LoadPipeline] preserving VK_LOADER_LAYERS_DISABLE=" + *existingPolicy);
+			return;
+		}
 
-		std::string result(static_cast<size_t>(requiredSize), '\0');
-		WideCharToMultiByte(CP_UTF8, 0, value.data(), valueLength, result.data(), requiredSize, nullptr, nullptr);
+		if (bKeepImplicitLayers)
+		{
+			AppendCpuRuntimeTrace(L"[LoadPipeline] Vulkan implicit layers left enabled for live TLAS capture");
+			return;
+		}
+
+		if (SetPlatformEnvironmentVariable(L"VK_LOADER_LAYERS_DISABLE", L"~implicit~"))
+		{
+			AppendCpuRuntimeTrace(L"[LoadPipeline] set VK_LOADER_LAYERS_DISABLE=~implicit~ for Vulkan startup");
+		}
+		else
+		{
+			AppendCpuRuntimeTrace(L"[LoadPipeline] failed to set VK_LOADER_LAYERS_DISABLE for Vulkan startup");
+		}
+	}
+
+	bool IsFiniteFloat(float value)
+	{
+		return std::isfinite(value);
+	}
+
+	bool IsFiniteVec3(const glm::vec3& value)
+	{
+		return IsFiniteFloat(value.x) && IsFiniteFloat(value.y) && IsFiniteFloat(value.z);
+	}
+
+	bool IsReasonableWorldPosition(const glm::vec3& value)
+	{
+		constexpr float kMaxReasonableWorldCoordinate = 1000000.0f;
+		return
+			IsFiniteVec3(value) &&
+			std::abs(value.x) <= kMaxReasonableWorldCoordinate &&
+			std::abs(value.y) <= kMaxReasonableWorldCoordinate &&
+			std::abs(value.z) <= kMaxReasonableWorldCoordinate;
+	}
+
+	bool IsFiniteMat4(const glm::mat4x4& value)
+	{
+		for (int column = 0; column < 4; ++column)
+		{
+			for (int row = 0; row < 4; ++row)
+			{
+				if (!IsFiniteFloat(value[column][row]))
+					return false;
+			}
+		}
+		return true;
+	}
+
+	glm::vec3 FiniteVec3Or(const glm::vec3& value, const glm::vec3& fallback)
+	{
+		return IsFiniteVec3(value) ? value : fallback;
+	}
+
+	glm::vec3 ReasonableWorldPositionOr(const glm::vec3& value, const glm::vec3& fallback)
+	{
+		return IsReasonableWorldPosition(value) ? value : fallback;
+	}
+
+	float FiniteFloatOr(float value, float fallback)
+	{
+		return IsFiniteFloat(value) ? value : fallback;
+	}
+
+	float FiniteClampedOr(float value, float fallback, float minValue, float maxValue)
+	{
+		return std::clamp(FiniteFloatOr(value, fallback), minValue, maxValue);
+	}
+
+	glm::vec3 NormalizeFiniteVec3Or(const glm::vec3& value, const glm::vec3& fallback)
+	{
+		glm::vec3 safeFallback = fallback;
+		if (!IsFiniteVec3(safeFallback))
+			safeFallback = glm::vec3(0.0f, 0.0f, 1.0f);
+		const float fallbackLength = glm::length(safeFallback);
+		if (!std::isfinite(fallbackLength) || fallbackLength <= 0.0001f)
+			safeFallback = glm::vec3(0.0f, 0.0f, 1.0f);
+		else
+			safeFallback /= fallbackLength;
+
+		if (!IsFiniteVec3(value))
+			return safeFallback;
+		const float length = glm::length(value);
+		return std::isfinite(length) && length > 0.0001f ? value / length : safeFallback;
+	}
+
+	glm::mat4x4 BuildSafeLookAtRH(const glm::vec3& position, const glm::vec3& lookDirection, const glm::vec3& upDirection)
+	{
+		const glm::vec3 eye = FiniteVec3Or(position, glm::vec3(0.0f, 0.2f, 3.2f));
+		const glm::vec3 forward = NormalizeFiniteVec3Or(lookDirection, glm::vec3(0.0f, 0.0f, 1.0f));
+		glm::vec3 up = NormalizeFiniteVec3Or(upDirection, glm::vec3(0.0f, 1.0f, 0.0f));
+
+		glm::vec3 right = glm::cross(forward, up);
+		float rightLength = glm::length(right);
+		if (!std::isfinite(rightLength) || rightLength <= 0.0001f)
+		{
+			up = std::abs(forward.y) < 0.99f ? glm::vec3(0.0f, 1.0f, 0.0f) : glm::vec3(1.0f, 0.0f, 0.0f);
+			right = glm::cross(forward, up);
+			rightLength = glm::length(right);
+		}
+		if (!std::isfinite(rightLength) || rightLength <= 0.0001f)
+			right = glm::vec3(1.0f, 0.0f, 0.0f);
+		else
+			right /= rightLength;
+
+		const glm::vec3 correctedUp = glm::cross(right, forward);
+
+		glm::mat4x4 result(1.0f);
+		result[0][0] = right.x;
+		result[1][0] = right.y;
+		result[2][0] = right.z;
+		result[0][1] = correctedUp.x;
+		result[1][1] = correctedUp.y;
+		result[2][1] = correctedUp.z;
+		result[0][2] = -forward.x;
+		result[1][2] = -forward.y;
+		result[2][2] = -forward.z;
+		result[3][0] = -glm::dot(right, eye);
+		result[3][1] = -glm::dot(correctedUp, eye);
+		result[3][2] = glm::dot(forward, eye);
 		return result;
 	}
 
@@ -137,7 +263,7 @@ namespace
 		constexpr uint32_t kPixelDataSize = kWidth * kHeight * kBytesPerPixel;
 		constexpr uint32_t kFileSize = kHeaderSize + kPixelDataSize;
 
-		std::ofstream file(filePath, std::ios::binary | std::ios::trunc);
+		std::ofstream file(std::filesystem::path(filePath), std::ios::binary | std::ios::trunc);
 		if (!file)
 			return false;
 
@@ -239,15 +365,15 @@ namespace
 		return CoronaImageIO::SaveHDR(captured, filePath, errorMessage);
 	}
 
-	const char* GetRawFloatFormatName(DXGI_FORMAT format)
+	const char* GetRawFloatFormatName(ERawFloatDumpFormat format)
 	{
 		switch (format)
 		{
-		case DXGI_FORMAT_R32_FLOAT:
+		case ERawFloatDumpFormat::R32Float:
 			return "R32_FLOAT";
-		case DXGI_FORMAT_R32G32_FLOAT:
+		case ERawFloatDumpFormat::R32G32Float:
 			return "R32G32_FLOAT";
-		case DXGI_FORMAT_R32G32B32A32_FLOAT:
+		case ERawFloatDumpFormat::R32G32B32A32Float:
 			return "R32G32B32A32_FLOAT";
 		default:
 			return "UNKNOWN";
@@ -260,7 +386,7 @@ namespace
 	bool SaveCapturedTextureRawFloat(
 		const CapturedImage& captured,
 		const std::wstring& filePath,
-		DXGI_FORMAT targetFormat,
+		ERawFloatDumpFormat targetFormat,
 		uint32_t channelCount,
 		std::wstring* errorMessage)
 	{
@@ -279,10 +405,10 @@ namespace
 		}
 
 		const bool bCompatible =
-			(targetFormat == DXGI_FORMAT_R32_FLOAT &&
+			(targetFormat == ERawFloatDumpFormat::R32Float &&
 				(captured.Format == ETextureFormat::R32Float || captured.Format == ETextureFormat::D32Float)) ||
-			(targetFormat == DXGI_FORMAT_R32G32_FLOAT && captured.Format == ETextureFormat::RG16Float) ||
-			(targetFormat == DXGI_FORMAT_R32G32B32A32_FLOAT && captured.Format == ETextureFormat::RGBA32Float);
+			(targetFormat == ERawFloatDumpFormat::R32G32Float && captured.Format == ETextureFormat::RG16Float) ||
+			(targetFormat == ERawFloatDumpFormat::R32G32B32A32Float && captured.Format == ETextureFormat::RGBA32Float);
 		if (!bCompatible)
 		{
 			if (errorMessage)
@@ -299,7 +425,7 @@ namespace
 			return false;
 		}
 
-		std::ofstream file(filePath, std::ios::binary | std::ios::trunc);
+		std::ofstream file(std::filesystem::path(filePath), std::ios::binary | std::ios::trunc);
 		if (!file.is_open())
 		{
 			if (errorMessage)
@@ -337,17 +463,7 @@ namespace
 
 	std::wstring Utf8ToWide(const std::string& value)
 	{
-		if (value.empty())
-			return {};
-
-		const int valueLength = static_cast<int>(value.size());
-		const int requiredSize = MultiByteToWideChar(CP_UTF8, 0, value.data(), valueLength, nullptr, 0);
-		if (requiredSize <= 0)
-			return std::wstring(value.begin(), value.end());
-
-		std::wstring result(static_cast<size_t>(requiredSize), L'\0');
-		MultiByteToWideChar(CP_UTF8, 0, value.data(), valueLength, result.data(), requiredSize);
-		return result;
+		return PlatformUtf8ToWide(value);
 	}
 
 	std::wstring ReadTextFilePreview(const std::filesystem::path& filePath, size_t maxChars)
@@ -602,8 +718,10 @@ namespace
 		"rebuild_pso_refresh",
 	};
 
-	const std::filesystem::path kFramePerfLogPath =
-		RuntimePaths::LogFile(L"fps_perf.log");
+	std::filesystem::path GetFramePerfLogPath()
+	{
+		return RuntimePaths::LogFile(L"fps_perf.log");
+	}
 
 	double ElapsedMilliseconds(
 		const std::chrono::steady_clock::time_point& begin,
@@ -863,15 +981,18 @@ ComPtr<ID3DBlob> compileLibrary(const WCHAR* filename, const WCHAR* targetString
 #endif // CORONA_HAS_DXC_RUNTIME
 
 Corona::Corona(UINT width, UINT height, std::wstring name) :
-	m_viewport(0.0f, 0.0f, static_cast<float>(width), static_cast<float>(height)),
-	m_scissorRect(0, 0, static_cast<LONG>(width), static_cast<LONG>(height)),
 	m_width(width),
 	m_height(height),
 	m_aspectRatio(static_cast<float>(width) / static_cast<float>(height)),
 	m_title(std::move(name))
 {
-	m_assetsPath = RuntimePaths::SourceDirectory().wstring();
+	m_assetsPath = RuntimePaths::AssetDirectory().wstring();
 
+#if CORONA_PLATFORM_MOBILE
+	bSplitGameRenderThreads = false;
+#endif
+
+#if CORONA_PLATFORM_IS_WINDOWS
 	int tmpFlag = _CrtSetDbgFlag(_CRTDBG_REPORT_FLAG);
 
 	// Turn on leak-checking bit.
@@ -885,6 +1006,7 @@ Corona::Corona(UINT width, UINT height, std::wstring name) :
 
 	// Set flag to the new value.
 	_CrtSetDbgFlag(tmpFlag);
+#endif
 }
 
 Corona::~Corona()
@@ -896,13 +1018,22 @@ Corona::~Corona()
 
 std::wstring Corona::GetAssetFullPath(LPCWSTR assetName) const
 {
-	return (std::filesystem::path(m_assetsPath) / assetName).wstring();
+	std::wstring normalizedAssetName = assetName ? assetName : L"";
+	std::replace(normalizedAssetName.begin(), normalizedAssetName.end(), L'\\', L'/');
+
+	const std::wstring assetPrefix = L"assets/";
+	if (normalizedAssetName == L"assets")
+		return m_assetsPath;
+	if (normalizedAssetName.rfind(assetPrefix, 0) == 0)
+		return (std::filesystem::path(m_assetsPath) / normalizedAssetName.substr(assetPrefix.size())).wstring();
+
+	return (RuntimePaths::SourceDirectory() / normalizedAssetName).wstring();
 }
 
 void Corona::SetCustomWindowText(LPCWSTR text)
 {
 	std::wstring windowText = m_title + L": " + text;
-	SetWindowTextW(Win32Application::GetHwnd(), windowText.c_str());
+	SetMainPlatformWindowTitle(windowText);
 }
 
 void Corona::BeginFramePerfLogging()
@@ -913,9 +1044,10 @@ void Corona::BeginFramePerfLogging()
 		bFramePerfLogInitialized = true;
 		FramePerfLogLastFlush = now;
 		std::error_code createDirectoryError;
-		std::filesystem::create_directories(kFramePerfLogPath.parent_path(), createDirectoryError);
+		const std::filesystem::path framePerfLogPath = GetFramePerfLogPath();
+		std::filesystem::create_directories(framePerfLogPath.parent_path(), createDirectoryError);
 
-		std::ofstream logFile(kFramePerfLogPath, std::ios::trunc);
+		std::ofstream logFile(framePerfLogPath, std::ios::trunc);
 		if (logFile.is_open())
 		{
 			logFile << "# Corona frame performance log. One row is an approximately one-second sample.\n";
@@ -1036,7 +1168,7 @@ void Corona::FinishFramePerfLogging(double beginFrameMs, double executeMs, doubl
 		? (sampleFrameCount * 1000.0 / FramePerfLogAccumFrameMs)
 		: 0.0;
 
-	std::ofstream logFile(kFramePerfLogPath, std::ios::app);
+	std::ofstream logFile(GetFramePerfLogPath(), std::ios::app);
 	if (logFile.is_open())
 	{
 		logFile << std::fixed << std::setprecision(3)
@@ -1077,6 +1209,29 @@ void Corona::FinishFramePerfLogging(double beginFrameMs, double executeMs, doubl
 		}
 		logFile << "\n";
 	}
+
+#if CORONA_PLATFORM_MOBILE
+	AppendCpuRuntimeTrace(
+		L"[MobileFramePerf] avgFps=" + std::to_wstring(avgFps) +
+		L", avgFrameMs=" + std::to_wstring(avgFrameMs) +
+		L", avgUpdateMs=" + std::to_wstring(FramePerfLogAccumCpuUpdateMs / sampleFrameCount) +
+		L", avgRecordMs=" + std::to_wstring(FramePerfLogAccumRecordMs / sampleFrameCount) +
+		L", avgExecuteMs=" + std::to_wstring(FramePerfLogAccumExecuteMs / sampleFrameCount) +
+		L", avgEndFrameMs=" + std::to_wstring(FramePerfLogAccumEndFrameMs / sampleFrameCount) +
+		L", avgRenderWaitMs=" + std::to_wstring(FramePerfLogAccumRenderWaitMs / sampleFrameCount) +
+		L", gpuFrameMs=" + std::to_wstring(GpuPassAverageTimeMs[static_cast<UINT>(EGpuPass::Frame)]) +
+		L", gpuGBufferMs=" + std::to_wstring(GpuPassAverageTimeMs[static_cast<UINT>(EGpuPass::GBuffer)]) +
+		L", gpuLightingMs=" + std::to_wstring(GpuPassAverageTimeMs[static_cast<UINT>(EGpuPass::Lighting)]) +
+		L", gpuTaaMs=" + std::to_wstring(GpuPassAverageTimeMs[static_cast<UINT>(EGpuPass::TemporalAA)]) +
+		L", gpuToneMapMs=" + std::to_wstring(GpuPassAverageTimeMs[static_cast<UINT>(EGpuPass::ToneMap)]) +
+		L", gpuImGuiMs=" + std::to_wstring(GpuPassAverageTimeMs[static_cast<UINT>(EGpuPass::ImGui)]) +
+		L", visible=" + std::to_wstring(GBufferLastVisibleObjectCount) +
+		L"/" + std::to_wstring(GBufferLastTotalObjectCount) +
+		L", render=" + std::to_wstring(GetRenderWidth()) +
+		L"x" + std::to_wstring(GetRenderHeight()) +
+		L", backbuffer=" + std::to_wstring(m_width) +
+		L"x" + std::to_wstring(m_height));
+#endif
 
 	FramePerfLogLastFlush = now;
 	FramePerfLogSampleFrameCount = 0;
@@ -1602,6 +1757,10 @@ Corona::EAntiAliasingMode Corona::NormalizeAntiAliasingMode(ERenderingMode rende
 	if (static_cast<int>(requestedMode) < 0 || requestedMode >= EAntiAliasingMode::COUNT)
 		requestedMode = EAntiAliasingMode::OFF;
 
+#if CORONA_PLATFORM_MOBILE
+	return EAntiAliasingMode::TAA;
+#endif
+
 	const bool bD3D12Backend =
 		renderBackend &&
 		renderBackend->GetAPI() == ERenderBackendAPI::D3D12;
@@ -1649,6 +1808,11 @@ void Corona::ApplyRenderingAndAAMode(ERenderingMode requestedRenderingMode, EAnt
 		requestedRenderingMode != ERenderingMode::PATHTRACING)
 		requestedRenderingMode = ERenderingMode::HYBRID;
 
+#if CORONA_PLATFORM_MOBILE
+	requestedRenderingMode = ERenderingMode::HYBRID;
+	requestedAAMode = EAntiAliasingMode::TAA;
+#endif
+
 	const ERenderingMode previousRenderingMode = RenderingMode;
 	const EAntiAliasingMode previousAAMode = AntiAliasingMode;
 	const EAntiAliasingMode normalizedAAMode = NormalizeAntiAliasingMode(requestedRenderingMode, requestedAAMode);
@@ -1694,43 +1858,57 @@ void Corona::ApplyRenderingAndAAMode(ERenderingMode requestedRenderingMode, EAnt
 
 bool Corona::RenderResolutionResourcesMatchCurrentState() const
 {
-#if !CORONA_HAS_D3D12
-	// TODO: expose API-neutral Width/Height accessors on Texture so this can
-	// run on the Vulkan-only build. For now assume resources match.
-	return true;
-#else
 	const UINT displayWidth = m_width;
 	const UINT displayHeight = m_height;
 	const UINT renderWidth = GetRenderWidth();
 	const UINT renderHeight = GetRenderHeight();
+	const UINT colorBufferWidth = CORONA_PLATFORM_MOBILE ? renderWidth : displayWidth;
+	const UINT colorBufferHeight = CORONA_PLATFORM_MOBILE ? renderHeight : displayHeight;
 	const auto textureMatches = [](const std::shared_ptr<Texture>& texture, UINT width, UINT height)
 	{
 		return texture &&
-			texture->textureDesc.Width == width &&
-			texture->textureDesc.Height == height;
+			texture->Width == width &&
+			texture->Height == height;
 	};
 
-	if (!textureMatches(ColorBuffers[0], displayWidth, displayHeight) ||
-		!textureMatches(ColorBuffers[1], displayWidth, displayHeight) ||
-		!textureMatches(PathTracingAccumBuffer[0], displayWidth, displayHeight) ||
-		!textureMatches(PathTracingAccumBuffer[1], displayWidth, displayHeight))
+	if (!textureMatches(ColorBuffers[0], colorBufferWidth, colorBufferHeight) ||
+		!textureMatches(ColorBuffers[1], colorBufferWidth, colorBufferHeight))
+		return false;
+
+	const bool bMobileHybridDirectOnly =
+		CORONA_PLATFORM_MOBILE &&
+		RenderingMode == ERenderingMode::HYBRID;
+	if (!bMobileHybridDirectOnly &&
+		(!textureMatches(PathTracingAccumBuffer[0], displayWidth, displayHeight) ||
+		 !textureMatches(PathTracingAccumBuffer[1], displayWidth, displayHeight)))
+		return false;
+	if (bMobileHybridDirectOnly &&
+		!textureMatches(ShadowBuffer, MobileShadowMapResolution, MobileShadowMapResolution))
 		return false;
 
 	if (!textureMatches(LightingBuffer, renderWidth, renderHeight) ||
-		!textureMatches(DirectLightingBuffer, renderWidth, renderHeight) ||
-		!textureMatches(DLSSRRBuffer, renderWidth, renderHeight) ||
 		!textureMatches(AlbedoBuffer, renderWidth, renderHeight) ||
 		!textureMatches(SpecularAlbedoBuffer, renderWidth, renderHeight) ||
+		!textureMatches(NormalBuffers[0], renderWidth, renderHeight) ||
+		!textureMatches(NormalBuffers[1], renderWidth, renderHeight) ||
+		!textureMatches(GeomNormalBuffers[0], renderWidth, renderHeight) ||
+		!textureMatches(GeomNormalBuffers[1], renderWidth, renderHeight) ||
 		!textureMatches(VelocityBuffer, renderWidth, renderHeight) ||
 		!textureMatches(RoughnessMetalicBuffer, renderWidth, renderHeight) ||
+		!textureMatches(DepthBuffer, renderWidth, renderHeight) ||
 		!textureMatches(UnjitteredDepthBuffers[0], renderWidth, renderHeight) ||
-		!textureMatches(UnjitteredDepthBuffers[1], renderWidth, renderHeight) ||
-		!textureMatches(PathTracingSpecularHitDistanceBuffer, renderWidth, renderHeight) ||
-		!textureMatches(PathTracingSpecularMotionVectorBuffer, renderWidth, renderHeight))
+		!textureMatches(UnjitteredDepthBuffers[1], renderWidth, renderHeight))
+		return false;
+
+	if (!bMobileHybridDirectOnly &&
+		(!textureMatches(DirectLightingBuffer, renderWidth, renderHeight) ||
+		 !textureMatches(ShadowBuffer, renderWidth, renderHeight) ||
+		 !textureMatches(DLSSRRBuffer, renderWidth, renderHeight) ||
+		 !textureMatches(PathTracingSpecularHitDistanceBuffer, renderWidth, renderHeight) ||
+		 !textureMatches(PathTracingSpecularMotionVectorBuffer, renderWidth, renderHeight)))
 		return false;
 
 	return true;
-#endif // CORONA_HAS_D3D12 (RenderResolutionResourcesMatchCurrentState DX12 body)
 }
 
 void Corona::ResetAllAccumulationState(bool forceUpscaleReload)
@@ -1757,6 +1935,8 @@ void Corona::ResetAllAccumulationState(bool forceUpscaleReload)
 	bResetTemporalStateNextUpdate = true;
 	bUseLightingBufferFallbackForToneMap = true;
 	bDLSSRROutputValidThisFrame = false;
+	bShadowOutputValidThisFrame = false;
+	bMobileShadowMapValidThisFrame = false;
 	PrevPathTracingViewMat = glm::mat4x4(0.0f);
 	PrevPathTracingLightDir = glm::vec3(0.0f);
 	PrevPathTracingLightIntensity = 0.0f;
@@ -1784,10 +1964,14 @@ void Corona::RecreateRenderResolutionResources()
 	const UINT DisplayHeight = m_height;
 	const UINT RenderWidthLocal = GetRenderWidth();
 	const UINT RenderHeightLocal = GetRenderHeight();
+	const UINT ColorBufferWidth = CORONA_PLATFORM_MOBILE ? RenderWidthLocal : DisplayWidth;
+	const UINT ColorBufferHeight = CORONA_PLATFORM_MOBILE ? RenderHeightLocal : DisplayHeight;
 	const ETextureFormat HybridFloat4UAVFormat =
 		(renderBackend && renderBackend->GetAPI() == ERenderBackendAPI::Vulkan)
 		? ETextureFormat::RGBA32Float
 		: ETextureFormat::RGBA16Float;
+	const bool bNeedExtendedHybridResources =
+		!(CORONA_PLATFORM_MOBILE && RenderingMode == ERenderingMode::HYBRID);
 
 	auto releaseTexture = [&](std::shared_ptr<Texture>& texture)
 	{
@@ -1809,14 +1993,22 @@ void Corona::RecreateRenderResolutionResources()
 		return renderBackend->CreateTexture2D(desc);
 	};
 
-	const bool bRecreateDisplaySizedBuffers =
+	const bool bRecreateColorBuffers =
 		!ColorBuffers[0] ||
-		ColorBuffers[0]->textureDesc.Width != DisplayWidth ||
-		ColorBuffers[0]->textureDesc.Height != DisplayHeight;
-	if (bRecreateDisplaySizedBuffers)
+		ColorBuffers[0]->Width != ColorBufferWidth ||
+		ColorBuffers[0]->Height != ColorBufferHeight;
+	const bool bRecreatePathTracingAccumBuffers =
+		bNeedExtendedHybridResources &&
+		(!PathTracingAccumBuffer[0] ||
+		 PathTracingAccumBuffer[0]->Width != DisplayWidth ||
+		 PathTracingAccumBuffer[0]->Height != DisplayHeight);
+	if (bRecreateColorBuffers)
 	{
 		releaseTexture(ColorBuffers[0]);
 		releaseTexture(ColorBuffers[1]);
+	}
+	if (bRecreatePathTracingAccumBuffers)
+	{
 		releaseTexture(PathTracingAccumBuffer[0]);
 		releaseTexture(PathTracingAccumBuffer[1]);
 	}
@@ -1867,16 +2059,17 @@ void Corona::RecreateRenderResolutionResources()
 	releaseTexture(UnjitteredDepthBuffers[0]);
 	releaseTexture(UnjitteredDepthBuffers[1]);
 
-	if (bRecreateDisplaySizedBuffers)
+	if (bRecreateColorBuffers)
 	{
-		ColorBuffers[0] = createTexture2D(ETextureFormat::RGBA16Float, TextureUsage_RenderTarget | TextureUsage_UnorderedAccess, DisplayWidth, DisplayHeight, 1);
-		ColorBuffers[0]->MakeRTV();
+		ColorBuffers[0] = createTexture2D(ETextureFormat::RGBA16Float, TextureUsage_RenderTarget | TextureUsage_UnorderedAccess, ColorBufferWidth, ColorBufferHeight, 1);
 		NAME_D3D12_OBJECT(ColorBuffers[0]->resource);
 
-		ColorBuffers[1] = createTexture2D(ETextureFormat::RGBA16Float, TextureUsage_RenderTarget | TextureUsage_UnorderedAccess, DisplayWidth, DisplayHeight, 1);
-		ColorBuffers[1]->MakeRTV();
+		ColorBuffers[1] = createTexture2D(ETextureFormat::RGBA16Float, TextureUsage_RenderTarget | TextureUsage_UnorderedAccess, ColorBufferWidth, ColorBufferHeight, 1);
 		NAME_D3D12_OBJECT(ColorBuffers[1]->resource);
+	}
 
+	if (bRecreatePathTracingAccumBuffers)
+	{
 		PathTracingAccumBuffer[0] = createTexture2D(ETextureFormat::RGBA32Float, TextureUsage_UnorderedAccess, DisplayWidth, DisplayHeight, 1, glm::vec4(0.0f));
 		NAME_D3D12_OBJECT(PathTracingAccumBuffer[0]->resource);
 
@@ -1885,30 +2078,26 @@ void Corona::RecreateRenderResolutionResources()
 	}
 
 	LightingBuffer = createTexture2D(ETextureFormat::RGBA16Float, TextureUsage_RenderTarget | TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
-	LightingBuffer->MakeRTV();
 	NAME_D3D12_OBJECT(LightingBuffer->resource);
 
 	DirectLightingBuffer = createTexture2D(ETextureFormat::RGBA16Float, TextureUsage_RenderTarget | TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
-	DirectLightingBuffer->MakeRTV();
 	NAME_D3D12_OBJECT(DirectLightingBuffer->resource);
 
 	DLSSRRBuffer = createTexture2D(ETextureFormat::RGBA16Float, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
 	NAME_D3D12_OBJECT(DLSSRRBuffer->resource);
 
-	NormalBuffers[0] = createTexture2D(ETextureFormat::RGBA16Float, TextureUsage_RenderTarget | TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1, glm::vec4(0.0f, -0.1f, 0.0f, 0.0f));
-	NormalBuffers[0]->MakeRTV();
+	const ETextureFormat normalBufferFormat = CORONA_PLATFORM_MOBILE ? ETextureFormat::RGBA8Unorm : ETextureFormat::RGBA16Float;
+	const glm::vec4 normalClearValue = CORONA_PLATFORM_MOBILE ? glm::vec4(0.5f, 0.45f, 0.5f, 0.0f) : glm::vec4(0.0f, -0.1f, 0.0f, 0.0f);
+	NormalBuffers[0] = createTexture2D(normalBufferFormat, TextureUsage_RenderTarget | TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1, normalClearValue);
 	NAME_D3D12_OBJECT(NormalBuffers[0]->resource);
 
-	NormalBuffers[1] = createTexture2D(ETextureFormat::RGBA16Float, TextureUsage_RenderTarget | TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1, glm::vec4(0.0f, -0.1f, 0.0f, 0.0f));
-	NormalBuffers[1]->MakeRTV();
+	NormalBuffers[1] = createTexture2D(normalBufferFormat, TextureUsage_RenderTarget | TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1, normalClearValue);
 	NAME_D3D12_OBJECT(NormalBuffers[1]->resource);
 
 	GeomNormalBuffers[0] = createTexture2D(ETextureFormat::RGBA16Float, TextureUsage_RenderTarget | TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1, glm::vec4(0.0f, -0.1f, 0.0f, 0.0f));
-	GeomNormalBuffers[0]->MakeRTV();
 	NAME_D3D12_OBJECT(GeomNormalBuffers[0]->resource);
 
 	GeomNormalBuffers[1] = createTexture2D(ETextureFormat::RGBA16Float, TextureUsage_RenderTarget | TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1, glm::vec4(0.0f, -0.1f, 0.0f, 0.0f));
-	GeomNormalBuffers[1]->MakeRTV();
 	NAME_D3D12_OBJECT(GeomNormalBuffers[1]->resource);
 
 	ShadowBuffer = createTexture2D(ETextureFormat::RGBA32Float, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
@@ -1996,37 +2185,33 @@ void Corona::RecreateRenderResolutionResources()
 	NAME_D3D12_OBJECT(DiffuseGITemporal[1]->resource);
 
 	AlbedoBuffer = createTexture2D(ETextureFormat::RGBA8Unorm, TextureUsage_RenderTarget | TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
-	AlbedoBuffer->MakeRTV();
 	NAME_D3D12_OBJECT(AlbedoBuffer->resource);
 
 	SpecularAlbedoBuffer = createTexture2D(ETextureFormat::RGBA8Unorm, TextureUsage_RenderTarget | TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
-	SpecularAlbedoBuffer->MakeRTV();
 	NAME_D3D12_OBJECT(SpecularAlbedoBuffer->resource);
 
 	VelocityBuffer = createTexture2D(ETextureFormat::RG16Float, TextureUsage_RenderTarget | TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1, glm::vec4(0.0f));
-	VelocityBuffer->MakeRTV();
 	NAME_D3D12_OBJECT(VelocityBuffer->resource);
 
 	RoughnessMetalicBuffer = createTexture2D(ETextureFormat::RGBA8Unorm, TextureUsage_RenderTarget | TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1, glm::vec4(0.001f, 0.0f, 0.0f, 0.0f));
-	RoughnessMetalicBuffer->MakeRTV();
 	NAME_D3D12_OBJECT(RoughnessMetalicBuffer->resource);
 
-	PathTracingSpecularHitDistanceBuffer = createTexture2D(ETextureFormat::R32Float, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1, glm::vec4(Far));
-	NAME_D3D12_OBJECT(PathTracingSpecularHitDistanceBuffer->resource);
+	if (bNeedExtendedHybridResources)
+	{
+		PathTracingSpecularHitDistanceBuffer = createTexture2D(ETextureFormat::R32Float, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1, glm::vec4(Far));
+		NAME_D3D12_OBJECT(PathTracingSpecularHitDistanceBuffer->resource);
 
-	PathTracingSpecularMotionVectorBuffer = createTexture2D(ETextureFormat::RG16Float, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1, glm::vec4(0.0f));
-	NAME_D3D12_OBJECT(PathTracingSpecularMotionVectorBuffer->resource);
+		PathTracingSpecularMotionVectorBuffer = createTexture2D(ETextureFormat::RG16Float, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1, glm::vec4(0.0f));
+		NAME_D3D12_OBJECT(PathTracingSpecularMotionVectorBuffer->resource);
+	}
 
 	DepthBuffer = createTexture2D(ETextureFormat::D32Float, TextureUsage_DepthStencil, RenderWidthLocal, RenderHeightLocal, 1);
-	DepthBuffer->MakeDSV();
 	NAME_D3D12_OBJECT(DepthBuffer->resource);
 
 	UnjitteredDepthBuffers[0] = createTexture2D(ETextureFormat::R32Float, TextureUsage_RenderTarget | TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
-	UnjitteredDepthBuffers[0]->MakeRTV();
 	NAME_D3D12_OBJECT(UnjitteredDepthBuffers[0]->resource);
 
 	UnjitteredDepthBuffers[1] = createTexture2D(ETextureFormat::R32Float, TextureUsage_RenderTarget | TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
-	UnjitteredDepthBuffers[1]->MakeRTV();
 	NAME_D3D12_OBJECT(UnjitteredDepthBuffers[1]->resource);
 
 	AppendCpuRuntimeTrace(
@@ -2034,7 +2219,9 @@ void Corona::RecreateRenderResolutionResources()
 		L"x" + std::to_wstring(RenderHeightLocal) +
 		L", display=" + std::to_wstring(DisplayWidth) +
 		L"x" + std::to_wstring(DisplayHeight) +
-		L", displaySized=" + std::to_wstring(bRecreateDisplaySizedBuffers ? 1 : 0));
+		L", color=" + std::to_wstring(ColorBufferWidth) +
+		L"x" + std::to_wstring(ColorBufferHeight) +
+		L", colorRecreate=" + std::to_wstring(bRecreateColorBuffers ? 1 : 0));
 #endif // CORONA_HAS_D3D12 (RecreateRenderResolutionResources DX12 body)
 }
 
@@ -2089,6 +2276,8 @@ void Corona::ReloadRenderResolutionAssets()
 	PrevIndirectPrefilteredEnvSpecularEnabled = bEnablePrefilteredEnvSpecular;
 	bUseLightingBufferFallbackForToneMap = true;
 	bDLSSRROutputValidThisFrame = false;
+	bShadowOutputValidThisFrame = false;
+	bMobileShadowMapValidThisFrame = false;
 #if WITH_STREAMLINE
 	bDLSSResetNeeded = true;
 #endif
@@ -2169,6 +2358,18 @@ void Corona::RefreshUpscaleSettings(bool reloadAssets)
 	}
 #endif
 
+#if CORONA_PLATFORM_MOBILE
+	constexpr float kMobileRenderScale = 0.50f;
+	const auto scaleMobileDimension = [](UINT value) -> UINT
+	{
+		const float scaled = static_cast<float>(std::max<UINT>(1u, value)) * kMobileRenderScale;
+		return std::max<UINT>(1u, static_cast<UINT>(std::round(scaled)));
+	};
+	desiredRenderWidth = scaleMobileDimension(m_width);
+	desiredRenderHeight = scaleMobileDimension(m_height);
+	ApplyDLSSJitterPhaseSettings(8u);
+#endif
+
 	const bool bResolutionChanged = desiredRenderWidth != RenderWidth || desiredRenderHeight != RenderHeight;
 	RenderWidth = desiredRenderWidth;
 	RenderHeight = desiredRenderHeight;
@@ -2190,7 +2391,7 @@ void Corona::RefreshUpscaleSettings(bool reloadAssets)
 
 Texture* Corona::GetCurrentResolveSource() const
 {
-	if (RenderingMode == ERenderingMode::PATHTRACING)
+	if (!CORONA_PLATFORM_MOBILE && RenderingMode == ERenderingMode::PATHTRACING)
 	{
 		if (IsPathTracingDLSSRREnabled())
 		{
@@ -2296,6 +2497,18 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 		if (arg == L"--no-streamline" || arg == L"--disable-streamline")
 		{
 			bCommandLineDisableStreamline = true;
+			continue;
+		}
+		if (arg == L"--bvh-viewer" || arg == L"--show-bvh-viewer" || arg == L"--enable-bvh-viewer")
+		{
+			bCommandLineBvhViewerOverrideSet = true;
+			bCommandLineBvhViewerEnabled = true;
+			continue;
+		}
+		if (arg == L"--no-bvh-viewer" || arg == L"--disable-bvh-viewer")
+		{
+			bCommandLineBvhViewerOverrideSet = true;
+			bCommandLineBvhViewerEnabled = false;
 			continue;
 		}
 		if (arg == L"--nvfraps-bvh-live-tlas" || arg == L"--force-tlas-update" || arg == L"--rtas-live-tlas")
@@ -2667,6 +2880,10 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 				bCommandLineAutoDumpEnabled = true;
 				bCommandLineLightingCompareDumpMode = true;
 			}
+			else if (dumpModeValue == L"mobile-gbuffer" || dumpModeValue == L"mobile_gbuffer" || dumpModeValue == L"mobile-debug" || dumpModeValue == L"mobile_debug")
+			{
+				bCommandLineMobileGBufferDumpMode = true;
+			}
 			else if (dumpModeValue == L"aa-switch" || dumpModeValue == L"aa_switch" || dumpModeValue == L"aaswitch" || dumpModeValue == L"aa-modes" || dumpModeValue == L"aa_modes")
 			{
 				bCommandLineAutoDumpOverrideSet = true;
@@ -2700,6 +2917,11 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 			bCommandLineAutoDumpOverrideSet = true;
 			bCommandLineAutoDumpEnabled = true;
 			bCommandLineLightingCompareDumpMode = true;
+			continue;
+		}
+		if (arg == L"--mobile-gbuffer-dump" || arg == L"--mobile-debug-dump")
+		{
+			bCommandLineMobileGBufferDumpMode = true;
 			continue;
 		}
 		if (arg == L"--aa-switch-dump" || arg == L"--aa-modes-dump")
@@ -3050,6 +3272,36 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 			continue;
 		}
 	}
+
+#if CORONA_PLATFORM_MOBILE
+	bCommandLineRenderBackendOverrideSet = true;
+	CommandLineRenderBackendAPI = ERenderBackendAPI::Vulkan;
+	bCommandLineRenderModeOverrideSet = true;
+	CommandLineRenderingMode = ERenderingMode::HYBRID;
+	bCommandLineAAOverrideSet = true;
+	CommandLineSelectedAAMode = EAntiAliasingMode::TAA;
+	bCommandLineAutoDumpOverrideSet = true;
+	bCommandLineAutoDumpEnabled = false;
+	bCommandLinePathTracingScreenshotDumpMode = false;
+	bPathTracingScreenshotDumpMode = false;
+	bStartupSponzaFlyMode = false;
+	bEnableStartupLuauScript = true;
+	bCommandLineDungeonCharacterMode = true;
+	bCommandLineDisableStreamline = true;
+	bEnableDiffuseGI = false;
+	bEnableSpecularGI = false;
+	bEnableRTAO = false;
+	bEnableRayTracedSkyLighting = false;
+	bEnablePrefilteredEnvSpecular = false;
+	const std::filesystem::path mobileDebugDumpFlag = RuntimePaths::RootDirectory() / L"mobile_debug_dump.flag";
+	if (std::filesystem::exists(mobileDebugDumpFlag))
+	{
+		bCommandLineMobileGBufferDumpMode = true;
+		AppendStartupTrace(L"[ParseCommandLineArgs] mobile debug dump flag found: " + mobileDebugDumpFlag.wstring());
+	}
+	AppendStartupTrace(L"[ParseCommandLineArgs] mobile override: vulkan hybrid taa dungeon-only");
+#endif
+
 	AppendStartupTrace(
 		L"[ParseCommandLineArgs] end backendOverride=" + std::to_wstring(bCommandLineRenderBackendOverrideSet ? 1 : 0) +
 		L", backend=" + std::to_wstring(static_cast<int>(CommandLineRenderBackendAPI)) +
@@ -3070,6 +3322,7 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 		L", readmeDump=" + std::to_wstring(bCommandLineReadmeScreenshotDumpMode ? 1 : 0) +
 		L", pathTracingDump=" + std::to_wstring(bCommandLinePathTracingScreenshotDumpMode ? 1 : 0) +
 		L", lightingCompareDump=" + std::to_wstring(bCommandLineLightingCompareDumpMode ? 1 : 0) +
+		L", mobileGBufferDump=" + std::to_wstring(bCommandLineMobileGBufferDumpMode ? 1 : 0) +
 		L", specularSequenceDump=" + std::to_wstring(bCommandLineSpecularSequenceDumpMode ? 1 : 0) +
 		L", autoDumpFrames=" + std::to_wstring(AutoAADumpFrameCountOverride) +
 		L", exitAfterFrames=" + std::to_wstring(CommandLineExitAfterFrames) +
@@ -3093,6 +3346,8 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 		L", autoDump=" + std::to_wstring(bCommandLineAutoDumpEnabled ? 1 : 0) +
 		L", noImgui=" + std::to_wstring(bCommandLineDisableImgui ? 1 : 0) +
 		L", noStreamline=" + std::to_wstring(bCommandLineDisableStreamline ? 1 : 0) +
+		L", bvhViewerOverride=" + std::to_wstring(bCommandLineBvhViewerOverrideSet ? 1 : 0) +
+		L", bvhViewer=" + std::to_wstring(bCommandLineBvhViewerEnabled ? 1 : 0) +
 		L", nvfrapsBvhLiveTlas=" + std::to_wstring(bCommandLineNvFrapsBvhLiveTlas ? 1 : 0));
 }
 
@@ -3101,7 +3356,6 @@ void Corona::PromptStartupModeSelection()
 	if (bStartupModeConfigured)
 		return;
 
-	wchar_t envValue[32] = {};
 	auto ToLower = [](std::wstring value)
 	{
 		for (auto& ch : value)
@@ -3135,11 +3389,15 @@ void Corona::PromptStartupModeSelection()
 	if (bReadmeScreenshotDumpMode)
 		bAutoAADumpEnabled = true;
 	bPathTracingScreenshotDumpMode = bCommandLinePathTracingScreenshotDumpMode;
-	if (bPathTracingScreenshotDumpMode)
+	if (!CORONA_PLATFORM_MOBILE && bPathTracingScreenshotDumpMode)
 		bAutoAADumpEnabled = true;
 	bLightingCompareDumpMode = bCommandLineLightingCompareDumpMode;
 	if (bLightingCompareDumpMode)
 		bAutoAADumpEnabled = true;
+	bMobileGBufferDumpMode = bCommandLineMobileGBufferDumpMode;
+	bMobileGBufferDumpCompleted = false;
+	MobileGBufferDumpPhase = 0;
+	MobileGBufferDumpDir.clear();
 	bAASwitchDumpMode = bCommandLineAASwitchDumpMode;
 	if (bAASwitchDumpMode)
 		bAutoAADumpEnabled = true;
@@ -3147,14 +3405,15 @@ void Corona::PromptStartupModeSelection()
 	if (bSpecularSequenceDumpMode)
 		bAutoAADumpEnabled = true;
 
-	const DWORD dumpEnvLength = GetEnvironmentVariableW(L"CORONA_AUTO_DUMP", envValue, _countof(envValue));
-	if (!bCommandLineAutoDumpOverrideSet && dumpEnvLength > 0)
+	if (!bCommandLineAutoDumpOverrideSet)
 	{
-		const std::wstring dumpMode = ToLower(envValue);
-		bAutoAADumpEnabled = (dumpMode == L"1" || dumpMode == L"true" || dumpMode == L"yes" || dumpMode == L"dump");
+		if (const auto dumpEnv = GetPlatformEnvironmentVariable(L"CORONA_AUTO_DUMP"); dumpEnv && !dumpEnv->empty())
+		{
+			const std::wstring dumpMode = ToLower(*dumpEnv);
+			bAutoAADumpEnabled = (dumpMode == L"1" || dumpMode == L"true" || dumpMode == L"yes" || dumpMode == L"dump");
+		}
 	}
 
-	std::fill(std::begin(envValue), std::end(envValue), 0);
 	if (bCommandLineRenderModeOverrideSet)
 	{
 		StartupRenderingMode = CommandLineRenderingMode;
@@ -3163,58 +3422,60 @@ void Corona::PromptStartupModeSelection()
 	{
 		StartupRenderBackendAPI = CommandLineRenderBackendAPI;
 	}
-	const DWORD renderEnvLength = GetEnvironmentVariableW(L"CORONA_START_RENDER_MODE", envValue, _countof(envValue));
-	if (!bCommandLineRenderModeOverrideSet && renderEnvLength > 0)
+	if (!bCommandLineRenderModeOverrideSet)
 	{
-		const std::wstring renderMode = ToLower(envValue);
-		if (renderMode == L"pt" || renderMode == L"pathtracing" || renderMode == L"path_tracing" || renderMode == L"path tracing")
+		if (const auto renderEnv = GetPlatformEnvironmentVariable(L"CORONA_START_RENDER_MODE"); renderEnv && !renderEnv->empty())
 		{
-			StartupRenderingMode = ERenderingMode::PATHTRACING;
-		}
-		else
-		{
-			StartupRenderingMode = ERenderingMode::HYBRID;
+			const std::wstring renderMode = ToLower(*renderEnv);
+			if (renderMode == L"pt" || renderMode == L"pathtracing" || renderMode == L"path_tracing" || renderMode == L"path tracing")
+			{
+				StartupRenderingMode = ERenderingMode::PATHTRACING;
+			}
+			else
+			{
+				StartupRenderingMode = ERenderingMode::HYBRID;
+			}
 		}
 	}
 
-	std::fill(std::begin(envValue), std::end(envValue), 0);
-	const DWORD aaEnvLength = GetEnvironmentVariableW(L"CORONA_START_AA", envValue, _countof(envValue));
 	if (bCommandLineAAOverrideSet)
 	{
 		StartupSelectedAAMode = CommandLineSelectedAAMode;
 	}
-	if (!bCommandLineAAOverrideSet && aaEnvLength > 0)
+	if (!bCommandLineAAOverrideSet)
 	{
-		const std::wstring aaMode = ToLower(envValue);
-
-		if (aaMode == L"off")
+		if (const auto aaEnv = GetPlatformEnvironmentVariable(L"CORONA_START_AA"); aaEnv && !aaEnv->empty())
 		{
-			StartupSelectedAAMode = EAntiAliasingMode::OFF;
-		}
-		else if (aaMode == L"taa")
-		{
-			StartupSelectedAAMode = EAntiAliasingMode::TAA;
-		}
-		else if (aaMode == L"dlss" || aaMode == L"dlss_sr" || aaMode == L"dlss sr")
-		{
-#if WITH_STREAMLINE
-			StartupSelectedAAMode = SelectDefaultAAMode();
-#else
-			StartupSelectedAAMode = EAntiAliasingMode::TAA;
-#endif
-		}
-		else if (aaMode == L"rr" || aaMode == L"dlssrr" || aaMode == L"dlss-rr" || aaMode == L"dlss_rr" || aaMode == L"dlss rr")
-		{
-#if WITH_STREAMLINE
-			if (bDLSSRRAvailable)
-				StartupSelectedAAMode = EAntiAliasingMode::DLSS_RR;
-			else if (bDLSSAvailable)
-				StartupSelectedAAMode = EAntiAliasingMode::DLSS_SR;
-			else
+			const std::wstring aaMode = ToLower(*aaEnv);
+			if (aaMode == L"off")
+			{
+				StartupSelectedAAMode = EAntiAliasingMode::OFF;
+			}
+			else if (aaMode == L"taa")
+			{
 				StartupSelectedAAMode = EAntiAliasingMode::TAA;
+			}
+			else if (aaMode == L"dlss" || aaMode == L"dlss_sr" || aaMode == L"dlss sr")
+			{
+#if WITH_STREAMLINE
+				StartupSelectedAAMode = SelectDefaultAAMode();
 #else
-			StartupSelectedAAMode = EAntiAliasingMode::TAA;
+				StartupSelectedAAMode = EAntiAliasingMode::TAA;
 #endif
+			}
+			else if (aaMode == L"rr" || aaMode == L"dlssrr" || aaMode == L"dlss-rr" || aaMode == L"dlss_rr" || aaMode == L"dlss rr")
+			{
+#if WITH_STREAMLINE
+				if (bDLSSRRAvailable)
+					StartupSelectedAAMode = EAntiAliasingMode::DLSS_RR;
+				else if (bDLSSAvailable)
+					StartupSelectedAAMode = EAntiAliasingMode::DLSS_SR;
+				else
+					StartupSelectedAAMode = EAntiAliasingMode::TAA;
+#else
+				StartupSelectedAAMode = EAntiAliasingMode::TAA;
+#endif
+			}
 		}
 	}
 
@@ -3245,6 +3506,20 @@ void Corona::PromptStartupModeSelection()
 		StartupSelectedAAMode = EAntiAliasingMode::TAA;
 	}
 
+#if CORONA_PLATFORM_MOBILE
+	StartupRenderBackendAPI = ERenderBackendAPI::Vulkan;
+	CommandLineRenderBackendAPI = ERenderBackendAPI::Vulkan;
+	bCommandLineRenderBackendOverrideSet = true;
+	StartupRenderingMode = ERenderingMode::HYBRID;
+	StartupSelectedAAMode = EAntiAliasingMode::TAA;
+	bAutoAADumpEnabled = false;
+	bPathTracingScreenshotDumpMode = false;
+	bCommandLinePathTracingScreenshotDumpMode = false;
+	bStartupSponzaFlyMode = false;
+	bEnableStartupLuauScript = true;
+	bCommandLineDungeonCharacterMode = true;
+#endif
+
 	AntiAliasingMode = StartupSelectedAAMode;
 	RenderingMode = StartupRenderingMode;
 	bStartupModeConfigured = true;
@@ -3254,16 +3529,18 @@ void Corona::PromptStartupModeSelection()
 		L", aa=" + std::wstring(GetAntiAliasingModeName(StartupSelectedAAMode)) +
 		L", dlssAvailable=" + std::to_wstring(bDLSSAvailable ? 1 : 0) +
 		L", dlssRRAvailable=" + std::to_wstring(bDLSSRRAvailable ? 1 : 0) +
-		L", autoDump=" + std::to_wstring(bAutoAADumpEnabled ? 1 : 0));
+		L", autoDump=" + std::to_wstring(bAutoAADumpEnabled ? 1 : 0) +
+		L", mobileGBufferDump=" + std::to_wstring(bMobileGBufferDumpMode ? 1 : 0));
 	return;
 
-	const int runModeResult = MessageBoxW(
-		Win32Application::GetHwnd(),
+	const EPlatformDialogResult runModeResult = ShowPlatformMessageBox(
 		L"Startup mode:\n\nYes = Automatic dump mode\nNo = Manual inspection mode",
 		L"Corona Startup Mode",
-		MB_ICONQUESTION | MB_YESNO | MB_DEFBUTTON2);
+		EPlatformDialogButtons::YesNo,
+		EPlatformDialogIcon::Question,
+		EPlatformDialogDefaultButton::Button2);
 
-	bAutoAADumpEnabled = (runModeResult == IDYES);
+	bAutoAADumpEnabled = (runModeResult == EPlatformDialogResult::Yes);
 
 	std::wstring aaMessage =
 		L"Initial anti-aliasing mode:\n\n"
@@ -3280,15 +3557,16 @@ void Corona::PromptStartupModeSelection()
 	aaMessage += L"\n\nDLSS RR is unavailable in this build, so Cancel will fall back to TAA.";
 #endif
 
-	const int aaModeResult = MessageBoxW(
-		Win32Application::GetHwnd(),
+	const EPlatformDialogResult aaModeResult = ShowPlatformMessageBox(
 		aaMessage.c_str(),
 		L"Corona Initial AA Mode",
-		MB_ICONQUESTION | MB_YESNOCANCEL | MB_DEFBUTTON2);
+		EPlatformDialogButtons::YesNoCancel,
+		EPlatformDialogIcon::Question,
+		EPlatformDialogDefaultButton::Button2);
 
-	if (aaModeResult == IDYES)
+	if (aaModeResult == EPlatformDialogResult::Yes)
 		StartupSelectedAAMode = EAntiAliasingMode::OFF;
-	else if (aaModeResult == IDNO)
+	else if (aaModeResult == EPlatformDialogResult::No)
 		StartupSelectedAAMode = EAntiAliasingMode::TAA;
 	else
 	{
@@ -3308,7 +3586,7 @@ void Corona::InitializeAutoAADump()
 	if (this->bAutoAADumpInitialized || !this->bAutoAADumpEnabled)
 		return;
 
-	if (bPathTracingScreenshotDumpMode)
+	if (!CORONA_PLATFORM_MOBILE && bPathTracingScreenshotDumpMode)
 	{
 		std::filesystem::path dumpDir = RuntimePaths::DumpDirectory() / L"path_tracing_screenshots";
 		std::filesystem::create_directories(dumpDir);
@@ -3645,8 +3923,7 @@ bool Corona::EnqueueAsyncImageDump(CapturedImage&& captured, const std::wstring&
 
 void Corona::AsyncImageDumpWorkerMain()
 {
-	const HRESULT coInitResult = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-	const bool bShouldCoUninitialize = SUCCEEDED(coInitResult);
+	PlatformComScope workerComScope(true);
 
 	for (;;)
 	{
@@ -3689,8 +3966,6 @@ void Corona::AsyncImageDumpWorkerMain()
 		AsyncImageDumpCV.notify_all();
 	}
 
-	if (bShouldCoUninitialize)
-		CoUninitialize();
 }
 
 void Corona::WaitForAsyncImageDumps()
@@ -3729,16 +4004,13 @@ void Corona::StopAsyncImageDumpWorkers()
 	AppendCpuRuntimeTrace(L"[AsyncImageDump] stopped");
 }
 
-bool Corona::DumpTextureHDR(Texture* source, const std::wstring& filePath, D3D12_RESOURCE_STATES beforeState)
+bool Corona::DumpTextureHDR(Texture* source, const std::wstring& filePath, EResourceState beforeState)
 {
 	if (!source || !renderBackend)
 		return false;
 
-	const EResourceState abstractState =
-		(beforeState & D3D12_RESOURCE_STATE_RENDER_TARGET) ? EResourceState::RenderTarget : EResourceState::ShaderRead;
-
 	CapturedImage captured;
-	if (!renderBackend->CaptureTexture(source, captured, abstractState))
+	if (!renderBackend->CaptureTexture(source, captured, beforeState))
 	{
 		AppendAutoAADumpLog(L"[capture] hdr failed");
 		return false;
@@ -3754,16 +4026,13 @@ bool Corona::DumpTextureHDR(Texture* source, const std::wstring& filePath, D3D12
 	return bSaved;
 }
 
-bool Corona::DumpTexturePNG(Texture* source, const std::wstring& filePath, D3D12_RESOURCE_STATES beforeState)
+bool Corona::DumpTexturePNG(Texture* source, const std::wstring& filePath, EResourceState beforeState)
 {
 	if (!source || !renderBackend)
 		return false;
 
-	const EResourceState abstractState =
-		(beforeState & D3D12_RESOURCE_STATE_RENDER_TARGET) ? EResourceState::RenderTarget : EResourceState::ShaderRead;
-
 	CapturedImage captured;
-	if (!renderBackend->CaptureTexture(source, captured, abstractState))
+	if (!renderBackend->CaptureTexture(source, captured, beforeState))
 	{
 		AppendAutoAADumpLog(L"[capture] png failed");
 		return false;
@@ -3782,18 +4051,15 @@ bool Corona::DumpTexturePNG(Texture* source, const std::wstring& filePath, D3D12
 bool Corona::DumpTextureRawFloat(
 	Texture* source,
 	const std::wstring& filePath,
-	D3D12_RESOURCE_STATES beforeState,
-	DXGI_FORMAT targetFormat,
+	EResourceState beforeState,
+	ERawFloatDumpFormat targetFormat,
 	uint32_t channelCount)
 {
 	if (!source || !renderBackend)
 		return false;
 
-	const EResourceState abstractState =
-		(beforeState & D3D12_RESOURCE_STATE_RENDER_TARGET) ? EResourceState::RenderTarget : EResourceState::ShaderRead;
-
 	CapturedImage captured;
-	if (!renderBackend->CaptureTexture(source, captured, abstractState))
+	if (!renderBackend->CaptureTexture(source, captured, beforeState))
 	{
 		AppendAutoAADumpLog(L"[capture] raw failed");
 		return false;
@@ -3804,6 +4070,77 @@ bool Corona::DumpTextureRawFloat(
 	if (!bSaved && !errorMessage.empty())
 		AppendAutoAADumpLog(L"[capture] raw " + errorMessage);
 	return bSaved;
+}
+
+bool Corona::AdvanceMobileGBufferDump(Texture* backbuffer)
+{
+	(void)backbuffer;
+#if CORONA_PLATFORM_MOBILE
+	if (!bMobileGBufferDumpMode || bMobileGBufferDumpCompleted || !renderBackend)
+		return false;
+	if (renderBackend->GetAPI() != ERenderBackendAPI::Vulkan)
+		return false;
+	if (FrameCounter < 30u || GBufferLastVisibleObjectCount == 0)
+		return false;
+
+	auto* vkBackend = dynamic_cast<VulkanBackend*>(renderBackend.get());
+	if (!vkBackend)
+	{
+		bMobileGBufferDumpCompleted = true;
+		return false;
+	}
+
+	if (MobileGBufferDumpDir.empty())
+	{
+		const std::filesystem::path dumpDir = RuntimePaths::DumpDirectory() / L"mobile_gbuffer";
+		std::filesystem::create_directories(dumpDir);
+		MobileGBufferDumpDir = dumpDir.wstring();
+		AppendCpuRuntimeTrace(L"[MobileGBufferDump] begin dir=" + MobileGBufferDumpDir);
+	}
+
+	struct MobileGBufferDumpEntry
+	{
+		const wchar_t* Name = L"";
+		Texture* Source = nullptr;
+	};
+
+	Texture* resolveSource = GetCurrentResolveSource();
+	MobileGBufferDumpEntry entries[] =
+	{
+		{ L"gbuffer_albedo", AlbedoBuffer.get() },
+		{ L"gbuffer_world_normal", NormalBuffers[ColorBufferWriteIndex].get() },
+		{ L"gbuffer_velocity", VelocityBuffer.get() },
+		{ L"gbuffer_roughness_metallic", RoughnessMetalicBuffer.get() },
+		{ L"lighting", LightingBuffer.get() },
+		{ L"taa_resolve", resolveSource },
+	};
+	const UINT32 entryCount = static_cast<UINT32>(std::size(entries));
+	while (MobileGBufferDumpPhase < entryCount && entries[MobileGBufferDumpPhase].Source == nullptr)
+		++MobileGBufferDumpPhase;
+
+	if (MobileGBufferDumpPhase >= entryCount)
+	{
+		bMobileGBufferDumpCompleted = true;
+		AppendCpuRuntimeTrace(L"[MobileGBufferDump] complete");
+		return false;
+	}
+
+	const MobileGBufferDumpEntry& entry = entries[MobileGBufferDumpPhase];
+	const std::filesystem::path outputPath =
+		std::filesystem::path(MobileGBufferDumpDir) /
+		(std::wstring(entry.Name) + L"_screen_preview.png");
+
+	vkBackend->PreviewTextureOnWindow(entry.Source);
+	renderBackend->RequestWindowCapture(outputPath.wstring());
+	AppendCpuRuntimeTrace(
+		L"[MobileGBufferDump] requested phase=" + std::to_wstring(MobileGBufferDumpPhase) +
+		L", name=" + std::wstring(entry.Name) +
+		L", path=" + outputPath.wstring());
+	++MobileGBufferDumpPhase;
+	return true;
+#else
+	return false;
+#endif
 }
 
 void Corona::AdvanceAutoAADump(Texture* backbuffer)
@@ -3843,7 +4180,7 @@ void Corona::AdvanceAutoAADump(Texture* backbuffer)
 				<< std::setfill(L'0') << std::setw(4) << captureIndex;
 			const std::wstring base = AutoAADumpDir + L"\\" + frameName.str();
 
-			auto dumpResource = [&](const wchar_t* suffix, Texture* texture, D3D12_RESOURCE_STATES state)
+			auto dumpResource = [&](const wchar_t* suffix, Texture* texture, EResourceState state)
 			{
 				if (!texture)
 					return false;
@@ -3855,27 +4192,27 @@ void Corona::AdvanceAutoAADump(Texture* backbuffer)
 				return pngResult;
 			};
 
-			dumpResource(L"specular_raw", SpecularGIRaw.get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-			dumpResource(L"specular_temporal", SpecularGITemporal[GIBufferWriteIndex].get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-			dumpResource(L"specular_moments", SpecularGIMoments[GIBufferWriteIndex].get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-			dumpResource(L"specular_moments_prev", SpecularGIMoments[1 - GIBufferWriteIndex].get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-			dumpResource(L"gbuffer_world_normal", NormalBuffers[ColorBufferWriteIndex].get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-			dumpResource(L"gbuffer_geo_normal", GeomNormalBuffers[ColorBufferWriteIndex].get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-			dumpResource(L"gbuffer_velocity", VelocityBuffer.get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-			dumpResource(L"gbuffer_depth", UnjitteredDepthBuffers[ColorBufferWriteIndex].get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-			dumpResource(L"gbuffer_rm", RoughnessMetalicBuffer.get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-			dumpResource(L"rr_specular_hit_distance", PathTracingSpecularHitDistanceBuffer.get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-			dumpResource(L"rr_specular_motion", PathTracingSpecularMotionVectorBuffer.get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-			dumpResource(L"rtao", AmbientOcclusionBuffer.get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-			dumpResource(L"sky_lighting", SkyLightingBuffer.get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+			dumpResource(L"specular_raw", SpecularGIRaw.get(), EResourceState::ShaderRead);
+			dumpResource(L"specular_temporal", SpecularGITemporal[GIBufferWriteIndex].get(), EResourceState::ShaderRead);
+			dumpResource(L"specular_moments", SpecularGIMoments[GIBufferWriteIndex].get(), EResourceState::ShaderRead);
+			dumpResource(L"specular_moments_prev", SpecularGIMoments[1 - GIBufferWriteIndex].get(), EResourceState::ShaderRead);
+			dumpResource(L"gbuffer_world_normal", NormalBuffers[ColorBufferWriteIndex].get(), EResourceState::ShaderRead);
+			dumpResource(L"gbuffer_geo_normal", GeomNormalBuffers[ColorBufferWriteIndex].get(), EResourceState::ShaderRead);
+			dumpResource(L"gbuffer_velocity", VelocityBuffer.get(), EResourceState::ShaderRead);
+			dumpResource(L"gbuffer_depth", UnjitteredDepthBuffers[ColorBufferWriteIndex].get(), EResourceState::ShaderRead);
+			dumpResource(L"gbuffer_rm", RoughnessMetalicBuffer.get(), EResourceState::ShaderRead);
+			dumpResource(L"rr_specular_hit_distance", PathTracingSpecularHitDistanceBuffer.get(), EResourceState::ShaderRead);
+			dumpResource(L"rr_specular_motion", PathTracingSpecularMotionVectorBuffer.get(), EResourceState::ShaderRead);
+			dumpResource(L"rtao", AmbientOcclusionBuffer.get(), EResourceState::ShaderRead);
+			dumpResource(L"sky_lighting", SkyLightingBuffer.get(), EResourceState::ShaderRead);
 			if (DirectLightingBuffer)
-				dumpResource(L"direct_lighting", DirectLightingBuffer.get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+				dumpResource(L"direct_lighting", DirectLightingBuffer.get(), EResourceState::ShaderRead);
 			if (LightingBuffer)
-				dumpResource(L"lighting", LightingBuffer.get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+				dumpResource(L"lighting", LightingBuffer.get(), EResourceState::ShaderRead);
 			if (Texture* resolveTarget = GetCurrentResolveSource())
-				dumpResource(L"resolve", resolveTarget, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+				dumpResource(L"resolve", resolveTarget, EResourceState::ShaderRead);
 			if (backbuffer)
-				dumpResource(L"screen", backbuffer, D3D12_RESOURCE_STATE_RENDER_TARGET);
+				dumpResource(L"screen", backbuffer, EResourceState::RenderTarget);
 
 			AppendAutoAADumpLog(
 				L"[specular_sequence] frame=" + std::to_wstring(captureIndex) +
@@ -3893,9 +4230,8 @@ void Corona::AdvanceAutoAADump(Texture* backbuffer)
 			return;
 
 		bAutoAADumpCompleted = true;
-		if (HWND hwnd = Win32Application::GetHwnd())
-			PostMessage(hwnd, WM_CLOSE, 0, 0);
-		PostQuitMessage(0);
+		RequestMainPlatformWindowClose();
+		QuitPlatformApplication(0);
 		return;
 	}
 
@@ -3953,7 +4289,7 @@ void Corona::AdvanceAutoAADump(Texture* backbuffer)
 		if (AutoAADumpFramesInPhase == targetFrameCount - 1)
 		{
 			const std::wstring base = AutoAADumpDir + L"\\" + currentPhaseName;
-			auto dumpResource = [&](const wchar_t* suffix, Texture* texture, D3D12_RESOURCE_STATES state, bool dumpHdr)
+			auto dumpResource = [&](const wchar_t* suffix, Texture* texture, EResourceState state, bool dumpHdr)
 			{
 				if (!texture)
 					return;
@@ -3969,11 +4305,11 @@ void Corona::AdvanceAutoAADump(Texture* backbuffer)
 			};
 
 			Texture* resolveTarget = GetCurrentResolveSource();
-			dumpResource(L"resolve", resolveTarget, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, true);
+			dumpResource(L"resolve", resolveTarget, EResourceState::ShaderRead, true);
 			if (LightingBuffer)
-				dumpResource(L"lighting", LightingBuffer.get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, true);
+				dumpResource(L"lighting", LightingBuffer.get(), EResourceState::ShaderRead, true);
 			if (RenderingMode == ERenderingMode::HYBRID && ColorBuffers[ResolvedColorBufferIndex])
-				dumpResource(L"colorbuffer", ColorBuffers[ResolvedColorBufferIndex].get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, true);
+				dumpResource(L"colorbuffer", ColorBuffers[ResolvedColorBufferIndex].get(), EResourceState::ShaderRead, true);
 			if (renderBackend)
 			{
 				renderBackend->RequestWindowCapture(base + L"_screen_preview.png");
@@ -4006,9 +4342,8 @@ void Corona::AdvanceAutoAADump(Texture* backbuffer)
 		}
 
 		bAutoAADumpCompleted = true;
-		if (HWND hwnd = Win32Application::GetHwnd())
-			PostMessage(hwnd, WM_CLOSE, 0, 0);
-		PostQuitMessage(0);
+		RequestMainPlatformWindowClose();
+		QuitPlatformApplication(0);
 		return;
 	}
 
@@ -4030,8 +4365,8 @@ void Corona::AdvanceAutoAADump(Texture* backbuffer)
 		{
 			Texture* resolveTarget = GetCurrentResolveSource();
 			const std::wstring base = AutoAADumpDir + L"\\path_tracing";
-			const bool hdrOk = DumpTextureHDR(resolveTarget, base + L".hdr", D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-			const bool resolvePngOk = DumpTexturePNG(resolveTarget, base + L"_resolve_preview.png", D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+			const bool hdrOk = DumpTextureHDR(resolveTarget, base + L".hdr", EResourceState::ShaderRead);
+			const bool resolvePngOk = DumpTexturePNG(resolveTarget, base + L"_resolve_preview.png", EResourceState::ShaderRead);
 			AppendAutoAADumpLog(
 				L"[path_tracing] frameCounter=" + std::to_wstring(FrameCounter) +
 				L", spp=" + std::to_wstring(targetFrameCount) +
@@ -4039,13 +4374,13 @@ void Corona::AdvanceAutoAADump(Texture* backbuffer)
 			AppendAutoAADumpLog(std::wstring(L"[path_tracing] resolve hdr=") + (hdrOk ? L"ok" : L"fail") + L", resolve png=" + (resolvePngOk ? L"ok" : L"fail"));
 			if (LightingBuffer)
 			{
-				const bool lightingHdrOk = DumpTextureHDR(LightingBuffer.get(), base + L"_lighting.hdr", D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-				const bool lightingPngOk = DumpTexturePNG(LightingBuffer.get(), base + L"_lighting_preview.png", D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+				const bool lightingHdrOk = DumpTextureHDR(LightingBuffer.get(), base + L"_lighting.hdr", EResourceState::ShaderRead);
+				const bool lightingPngOk = DumpTexturePNG(LightingBuffer.get(), base + L"_lighting_preview.png", EResourceState::ShaderRead);
 				AppendAutoAADumpLog(std::wstring(L"[path_tracing] lighting hdr=") + (lightingHdrOk ? L"ok" : L"fail") + L", lighting png=" + (lightingPngOk ? L"ok" : L"fail"));
 			}
 			if (backbuffer)
 			{
-				const bool screenPngOk = DumpTexturePNG(backbuffer, base + L"_screen_preview.png", D3D12_RESOURCE_STATE_RENDER_TARGET);
+				const bool screenPngOk = DumpTexturePNG(backbuffer, base + L"_screen_preview.png", EResourceState::RenderTarget);
 				AppendAutoAADumpLog(std::wstring(L"[path_tracing] screen png=") + (screenPngOk ? L"ok" : L"fail"));
 			}
 		}
@@ -4055,9 +4390,8 @@ void Corona::AdvanceAutoAADump(Texture* backbuffer)
 			return;
 
 		bAutoAADumpCompleted = true;
-		if (HWND hwnd = Win32Application::GetHwnd())
-			PostMessage(hwnd, WM_CLOSE, 0, 0);
-		PostQuitMessage(0);
+		RequestMainPlatformWindowClose();
+		QuitPlatformApplication(0);
 		return;
 	}
 
@@ -4103,8 +4437,8 @@ void Corona::AdvanceAutoAADump(Texture* backbuffer)
 				const std::wstring fileBase = base + L"_" + suffix;
 				bool hdrOk = true;
 				if (dumpHdr)
-					hdrOk = DumpTextureHDR(texture, fileBase + L".hdr", D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-				const bool pngOk = DumpTexturePNG(texture, fileBase + L"_preview.png", D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+					hdrOk = DumpTextureHDR(texture, fileBase + L".hdr", EResourceState::ShaderRead);
+				const bool pngOk = DumpTexturePNG(texture, fileBase + L"_preview.png", EResourceState::ShaderRead);
 				AppendAutoAADumpLog(std::wstring(L"[") + currentPhaseName + L"] " + suffix +
 					L" hdr=" + (dumpHdr ? (hdrOk ? L"ok" : L"fail") : L"skip") +
 					L", png=" + (pngOk ? L"ok" : L"fail"));
@@ -4144,9 +4478,8 @@ void Corona::AdvanceAutoAADump(Texture* backbuffer)
 		}
 
 		bAutoAADumpCompleted = true;
-		if (HWND hwnd = Win32Application::GetHwnd())
-			PostMessage(hwnd, WM_CLOSE, 0, 0);
-		PostQuitMessage(0);
+		RequestMainPlatformWindowClose();
+		QuitPlatformApplication(0);
 		return;
 	}
 
@@ -4174,7 +4507,7 @@ void Corona::AdvanceAutoAADump(Texture* backbuffer)
 			}
 			else
 			{
-			auto dumpResource = [&](const wchar_t* suffix, Texture* texture, D3D12_RESOURCE_STATES state, bool dumpHdr)
+			auto dumpResource = [&](const wchar_t* suffix, Texture* texture, EResourceState state, bool dumpHdr)
 			{
 				if (!texture)
 					return;
@@ -4190,49 +4523,49 @@ void Corona::AdvanceAutoAADump(Texture* backbuffer)
 
 			if (!bLimitedHybridStageDump)
 			{
-				dumpResource(L"gbuffer_albedo", AlbedoBuffer.get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, false);
-				dumpResource(L"gbuffer_world_normal", NormalBuffers[ColorBufferWriteIndex].get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, false);
-				dumpResource(L"gbuffer_geo_normal", GeomNormalBuffers[ColorBufferWriteIndex].get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, false);
-				dumpResource(L"gbuffer_velocity", VelocityBuffer.get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, false);
-				dumpResource(L"gbuffer_depth", UnjitteredDepthBuffers[ColorBufferWriteIndex].get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, false);
-				dumpResource(L"gbuffer_rm", RoughnessMetalicBuffer.get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, false);
+				dumpResource(L"gbuffer_albedo", AlbedoBuffer.get(), EResourceState::ShaderRead, false);
+				dumpResource(L"gbuffer_world_normal", NormalBuffers[ColorBufferWriteIndex].get(), EResourceState::ShaderRead, false);
+				dumpResource(L"gbuffer_geo_normal", GeomNormalBuffers[ColorBufferWriteIndex].get(), EResourceState::ShaderRead, false);
+				dumpResource(L"gbuffer_velocity", VelocityBuffer.get(), EResourceState::ShaderRead, false);
+				dumpResource(L"gbuffer_depth", UnjitteredDepthBuffers[ColorBufferWriteIndex].get(), EResourceState::ShaderRead, false);
+				dumpResource(L"gbuffer_rm", RoughnessMetalicBuffer.get(), EResourceState::ShaderRead, false);
 
 				if (AutoAADumpPhase >= 1)
-					dumpResource(L"shadow_raw", ShadowBuffer.get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, false);
+					dumpResource(L"shadow_raw", ShadowBuffer.get(), EResourceState::ShaderRead, false);
 				if (AutoAADumpPhase >= 3)
-					dumpResource(L"specular_raw", SpecularGIRaw.get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, true);
+					dumpResource(L"specular_raw", SpecularGIRaw.get(), EResourceState::ShaderRead, true);
 				if (AutoAADumpPhase >= 4)
 				{
-					dumpResource(L"gi_diffuse_raw", DiffuseGIRaw.get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, true);
-					dumpResource(L"gi_diffuse_raw_aux", DiffuseGIRawAux.get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, true);
-					dumpResource(L"screen_probe_atlas", ScreenProbeGIRadiance[ScreenProbeGIAtlasWriteIndex].get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, true);
-					dumpResource(L"screen_probe_sh", ScreenProbeGISH[ScreenProbeGIAtlasWriteIndex][0].get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, false);
-					dumpResource(L"screen_probe_meta", ScreenProbeGIMetadata[ScreenProbeGIAtlasWriteIndex].get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, false);
-					dumpResource(L"screen_probe_gi", ScreenProbeGIResolved.get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, true);
-					dumpResource(L"screen_probe_probes", ScreenProbeGIProbeDebug.get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, true);
+					dumpResource(L"gi_diffuse_raw", DiffuseGIRaw.get(), EResourceState::ShaderRead, true);
+					dumpResource(L"gi_diffuse_raw_aux", DiffuseGIRawAux.get(), EResourceState::ShaderRead, true);
+					dumpResource(L"screen_probe_atlas", ScreenProbeGIRadiance[ScreenProbeGIAtlasWriteIndex].get(), EResourceState::ShaderRead, true);
+					dumpResource(L"screen_probe_sh", ScreenProbeGISH[ScreenProbeGIAtlasWriteIndex][0].get(), EResourceState::ShaderRead, false);
+					dumpResource(L"screen_probe_meta", ScreenProbeGIMetadata[ScreenProbeGIAtlasWriteIndex].get(), EResourceState::ShaderRead, false);
+					dumpResource(L"screen_probe_gi", ScreenProbeGIResolved.get(), EResourceState::ShaderRead, true);
+					dumpResource(L"screen_probe_probes", ScreenProbeGIProbeDebug.get(), EResourceState::ShaderRead, true);
 				}
 				if (AutoAADumpPhase >= 5)
 				{
-					dumpResource(L"gi_diffuse_temporal", DiffuseGITemporal[GIBufferWriteIndex].get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, true);
-					dumpResource(L"gi_diffuse_temporal_aux", DiffuseGITemporalAux[GIBufferWriteIndex].get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, true);
-					dumpResource(L"gi_specular_temporal", SpecularGITemporal[GIBufferWriteIndex].get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, true);
+					dumpResource(L"gi_diffuse_temporal", DiffuseGITemporal[GIBufferWriteIndex].get(), EResourceState::ShaderRead, true);
+					dumpResource(L"gi_diffuse_temporal_aux", DiffuseGITemporalAux[GIBufferWriteIndex].get(), EResourceState::ShaderRead, true);
+					dumpResource(L"gi_specular_temporal", SpecularGITemporal[GIBufferWriteIndex].get(), EResourceState::ShaderRead, true);
 				}
 				if (AutoAADumpPhase >= 6)
 				{
-					dumpResource(L"gi_diffuse_resolved", ((DiffuseGIMode == EDiffuseGIMode::SCREEN_PROBE && ScreenProbeGIResolved) ? ScreenProbeGIResolved.get() : DiffuseGITemporal[GIBufferWriteIndex].get()), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, true);
-					dumpResource(L"gi_specular_resolved", SpecularGITemporal[GIBufferWriteIndex].get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, true);
+					dumpResource(L"gi_diffuse_resolved", ((DiffuseGIMode == EDiffuseGIMode::SCREEN_PROBE && ScreenProbeGIResolved) ? ScreenProbeGIResolved.get() : DiffuseGITemporal[GIBufferWriteIndex].get()), EResourceState::ShaderRead, true);
+					dumpResource(L"gi_specular_resolved", SpecularGITemporal[GIBufferWriteIndex].get(), EResourceState::ShaderRead, true);
 				}
 				if (bLightingStage)
 				{
-					dumpResource(L"rtao", AmbientOcclusionBuffer.get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, false);
-					dumpResource(L"sky_lighting", SkyLightingBuffer.get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, false);
-					dumpResource(L"direct_lighting", DirectLightingBuffer.get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, true);
-					dumpResource(L"lighting", LightingBuffer.get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, true);
+					dumpResource(L"rtao", AmbientOcclusionBuffer.get(), EResourceState::ShaderRead, false);
+					dumpResource(L"sky_lighting", SkyLightingBuffer.get(), EResourceState::ShaderRead, false);
+					dumpResource(L"direct_lighting", DirectLightingBuffer.get(), EResourceState::ShaderRead, true);
+					dumpResource(L"lighting", LightingBuffer.get(), EResourceState::ShaderRead, true);
 					Texture* resolveTarget = GetCurrentResolveSource();
-					dumpResource(L"resolve", resolveTarget, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, true);
+					dumpResource(L"resolve", resolveTarget, EResourceState::ShaderRead, true);
 					if (backbuffer)
 					{
-						const bool screenPngOk = DumpTexturePNG(backbuffer, base + L"_screen_preview.png", D3D12_RESOURCE_STATE_RENDER_TARGET);
+						const bool screenPngOk = DumpTexturePNG(backbuffer, base + L"_screen_preview.png", EResourceState::RenderTarget);
 						AppendAutoAADumpLog(std::wstring(L"[") + currentPhaseName + L"] screen png=" + (screenPngOk ? L"ok" : L"fail"));
 					}
 				}
@@ -4263,9 +4596,8 @@ void Corona::AdvanceAutoAADump(Texture* backbuffer)
 		}
 
 		bAutoAADumpCompleted = true;
-		if (HWND hwnd = Win32Application::GetHwnd())
-			PostMessage(hwnd, WM_CLOSE, 0, 0);
-		PostQuitMessage(0);
+		RequestMainPlatformWindowClose();
+		QuitPlatformApplication(0);
 		return;
 	}
 
@@ -4293,7 +4625,9 @@ void Corona::AdvanceAutoAADump(Texture* backbuffer)
 	const bool bLightingPathTracingPhase = bLightingCompareDumpMode && AutoAADumpPhase == 4;
 	const bool bHybridOnPhase = !bLightingCompareDumpMode && AutoAADumpPhase == 0;
 	const bool bHybridOffPhase = !bLightingCompareDumpMode && !bReadmeScreenshotDumpMode && AutoAADumpPhase == 1;
-	const bool bPathTracingPhase = bLightingCompareDumpMode ? bLightingPathTracingPhase : (bReadmeScreenshotDumpMode ? AutoAADumpPhase == 1 : AutoAADumpPhase == 2);
+	const bool bPathTracingPhase =
+		!CORONA_PLATFORM_MOBILE &&
+		(bLightingCompareDumpMode ? bLightingPathTracingPhase : (bReadmeScreenshotDumpMode ? AutoAADumpPhase == 1 : AutoAADumpPhase == 2));
 	const bool bHybridPhase = !bPathTracingPhase;
 	const UINT32 targetFrameCount = bHybridPhase ? kHybridDumpFrames : kPathTracingDumpFrames;
 	const ERenderingMode targetRenderingMode = bHybridPhase ? ERenderingMode::HYBRID : ERenderingMode::PATHTRACING;
@@ -4330,7 +4664,7 @@ void Corona::AdvanceAutoAADump(Texture* backbuffer)
 		Texture* resolveTarget = GetCurrentResolveSource();
 		Texture* resolvedColorBuffer = (RenderingMode == ERenderingMode::HYBRID && ColorBuffers[ResolvedColorBufferIndex]) ? ColorBuffers[ResolvedColorBufferIndex].get() : nullptr;
 		const std::wstring base = AutoAADumpDir + L"\\" + currentPhaseName;
-		auto dumpResource = [&](const wchar_t* suffix, Texture* texture, D3D12_RESOURCE_STATES state, bool dumpHdr)
+		auto dumpResource = [&](const wchar_t* suffix, Texture* texture, EResourceState state, bool dumpHdr)
 		{
 			if (!texture)
 				return;
@@ -4345,8 +4679,8 @@ void Corona::AdvanceAutoAADump(Texture* backbuffer)
 				L", png=" + (pngResult ? L"ok" : L"fail"));
 		};
 
-		const bool hdrOk = DumpTextureHDR(resolveTarget, base + L".hdr", D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-		const bool resolvePngOk = DumpTexturePNG(resolveTarget, base + L"_resolve_preview.png", D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+		const bool hdrOk = DumpTextureHDR(resolveTarget, base + L".hdr", EResourceState::ShaderRead);
+		const bool resolvePngOk = DumpTexturePNG(resolveTarget, base + L"_resolve_preview.png", EResourceState::ShaderRead);
 		AppendAutoAADumpLog(std::wstring(L"[") + currentPhaseName + L"] frameCounter=" + std::to_wstring(FrameCounter) +
 			L", taaHistory=" + (bTemporalAAHistoryValid ? L"1" : L"0") +
 			L", fallback=" + (bUseLightingBufferFallbackForToneMap ? L"1" : L"0") +
@@ -4358,38 +4692,38 @@ void Corona::AdvanceAutoAADump(Texture* backbuffer)
 		AppendAutoAADumpLog(std::wstring(L"[") + currentPhaseName + L"] resolve hdr=" + (hdrOk ? L"ok" : L"fail") + L", resolve png=" + (resolvePngOk ? L"ok" : L"fail"));
 		if (resolvedColorBuffer)
 		{
-			const bool resolvedBufferHdrOk = DumpTextureHDR(resolvedColorBuffer, base + L"_colorbuffer.hdr", D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-			const bool resolvedBufferPngOk = DumpTexturePNG(resolvedColorBuffer, base + L"_colorbuffer_preview.png", D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+			const bool resolvedBufferHdrOk = DumpTextureHDR(resolvedColorBuffer, base + L"_colorbuffer.hdr", EResourceState::ShaderRead);
+			const bool resolvedBufferPngOk = DumpTexturePNG(resolvedColorBuffer, base + L"_colorbuffer_preview.png", EResourceState::ShaderRead);
 			AppendAutoAADumpLog(std::wstring(L"[") + currentPhaseName + L"] colorbuffer hdr=" + (resolvedBufferHdrOk ? L"ok" : L"fail") + L", colorbuffer png=" + (resolvedBufferPngOk ? L"ok" : L"fail"));
 		}
 		if (LightingBuffer)
 		{
-			const bool lightingHdrOk = DumpTextureHDR(LightingBuffer.get(), base + L"_lighting.hdr", D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-			const bool lightingPngOk = DumpTexturePNG(LightingBuffer.get(), base + L"_lighting_preview.png", D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+			const bool lightingHdrOk = DumpTextureHDR(LightingBuffer.get(), base + L"_lighting.hdr", EResourceState::ShaderRead);
+			const bool lightingPngOk = DumpTexturePNG(LightingBuffer.get(), base + L"_lighting_preview.png", EResourceState::ShaderRead);
 			AppendAutoAADumpLog(std::wstring(L"[") + currentPhaseName + L"] lighting hdr=" + (lightingHdrOk ? L"ok" : L"fail") + L", lighting png=" + (lightingPngOk ? L"ok" : L"fail"));
 		}
 
 		if (RenderingMode == ERenderingMode::HYBRID)
 		{
-			dumpResource(L"gbuffer_world_normal", NormalBuffers[ColorBufferWriteIndex].get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, false);
-			dumpResource(L"gbuffer_velocity", VelocityBuffer.get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, false);
-			dumpResource(L"gbuffer_depth", UnjitteredDepthBuffers[ColorBufferWriteIndex].get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, false);
-			dumpResource(L"rtao", AmbientOcclusionBuffer.get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, false);
-			dumpResource(L"sky_lighting", SkyLightingBuffer.get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, false);
-			dumpResource(L"direct_lighting", DirectLightingBuffer.get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, true);
-			dumpResource(L"gi_diffuse_raw", DiffuseGIRaw.get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, true);
-			dumpResource(L"screen_probe_atlas", ScreenProbeGIRadiance[ScreenProbeGIAtlasWriteIndex].get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, true);
-			dumpResource(L"screen_probe_sh", ScreenProbeGISH[ScreenProbeGIAtlasWriteIndex][0].get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, false);
-			dumpResource(L"screen_probe_meta", ScreenProbeGIMetadata[ScreenProbeGIAtlasWriteIndex].get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, false);
-			dumpResource(L"screen_probe_gi", ScreenProbeGIResolved.get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, true);
-			dumpResource(L"screen_probe_probes", ScreenProbeGIProbeDebug.get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, true);
-			dumpResource(L"gi_diffuse_temporal", DiffuseGITemporal[GIBufferWriteIndex].get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, true);
-			dumpResource(L"gi_specular_temporal", SpecularGITemporal[GIBufferWriteIndex].get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, true);
+			dumpResource(L"gbuffer_world_normal", NormalBuffers[ColorBufferWriteIndex].get(), EResourceState::ShaderRead, false);
+			dumpResource(L"gbuffer_velocity", VelocityBuffer.get(), EResourceState::ShaderRead, false);
+			dumpResource(L"gbuffer_depth", UnjitteredDepthBuffers[ColorBufferWriteIndex].get(), EResourceState::ShaderRead, false);
+			dumpResource(L"rtao", AmbientOcclusionBuffer.get(), EResourceState::ShaderRead, false);
+			dumpResource(L"sky_lighting", SkyLightingBuffer.get(), EResourceState::ShaderRead, false);
+			dumpResource(L"direct_lighting", DirectLightingBuffer.get(), EResourceState::ShaderRead, true);
+			dumpResource(L"gi_diffuse_raw", DiffuseGIRaw.get(), EResourceState::ShaderRead, true);
+			dumpResource(L"screen_probe_atlas", ScreenProbeGIRadiance[ScreenProbeGIAtlasWriteIndex].get(), EResourceState::ShaderRead, true);
+			dumpResource(L"screen_probe_sh", ScreenProbeGISH[ScreenProbeGIAtlasWriteIndex][0].get(), EResourceState::ShaderRead, false);
+			dumpResource(L"screen_probe_meta", ScreenProbeGIMetadata[ScreenProbeGIAtlasWriteIndex].get(), EResourceState::ShaderRead, false);
+			dumpResource(L"screen_probe_gi", ScreenProbeGIResolved.get(), EResourceState::ShaderRead, true);
+			dumpResource(L"screen_probe_probes", ScreenProbeGIProbeDebug.get(), EResourceState::ShaderRead, true);
+			dumpResource(L"gi_diffuse_temporal", DiffuseGITemporal[GIBufferWriteIndex].get(), EResourceState::ShaderRead, true);
+			dumpResource(L"gi_specular_temporal", SpecularGITemporal[GIBufferWriteIndex].get(), EResourceState::ShaderRead, true);
 		}
 
 		if (backbuffer)
 		{
-			const bool screenPngOk = DumpTexturePNG(backbuffer, base + L"_screen_preview.png", D3D12_RESOURCE_STATE_RENDER_TARGET);
+			const bool screenPngOk = DumpTexturePNG(backbuffer, base + L"_screen_preview.png", EResourceState::RenderTarget);
 			AppendAutoAADumpLog(std::wstring(L"[") + currentPhaseName + L"] screen png=" + (screenPngOk ? L"ok" : L"fail"));
 		}
 	}
@@ -4409,7 +4743,9 @@ void Corona::AdvanceAutoAADump(Texture* backbuffer)
 		const bool bNextLightingHybridNoDiffusePhase = bLightingCompareDumpMode && AutoAADumpPhase == 2;
 		const bool bNextLightingHybridDirectOnlyPhase = bLightingCompareDumpMode && AutoAADumpPhase == 3;
 		const bool bNextLightingPathTracingPhase = bLightingCompareDumpMode && AutoAADumpPhase == 4;
-		const bool bNextHybridPhase = bLightingCompareDumpMode ? !bNextLightingPathTracingPhase : (bReadmeScreenshotDumpMode ? AutoAADumpPhase == 0 : AutoAADumpPhase < 2);
+		const bool bNextHybridPhase =
+			CORONA_PLATFORM_MOBILE ||
+			(bLightingCompareDumpMode ? !bNextLightingPathTracingPhase : (bReadmeScreenshotDumpMode ? AutoAADumpPhase == 0 : AutoAADumpPhase < 2));
 		RenderingMode = bNextHybridPhase ? ERenderingMode::HYBRID : ERenderingMode::PATHTRACING;
 		AntiAliasingMode = (RenderingMode == ERenderingMode::HYBRID) ? StartupSelectedAAMode : EAntiAliasingMode::OFF;
 		bEnableDiffuseGI = bLightingCompareDumpMode ? !(bNextLightingHybridNoDiffusePhase || bNextLightingHybridDirectOnlyPhase) : (bReadmeScreenshotDumpMode ? true : (AutoAADumpPhase != 1));
@@ -4418,7 +4754,9 @@ void Corona::AdvanceAutoAADump(Texture* backbuffer)
 		ResetAllAccumulationState(RenderingMode == ERenderingMode::HYBRID);
 		const bool bNextHybridOnPhase = !bLightingCompareDumpMode && AutoAADumpPhase == 0;
 		const bool bNextHybridOffPhase = !bLightingCompareDumpMode && !bReadmeScreenshotDumpMode && AutoAADumpPhase == 1;
-		const bool bNextPathTracingPhase = bLightingCompareDumpMode ? bNextLightingPathTracingPhase : (bReadmeScreenshotDumpMode ? AutoAADumpPhase == 1 : AutoAADumpPhase == 2);
+		const bool bNextPathTracingPhase =
+			!CORONA_PLATFORM_MOBILE &&
+			(bLightingCompareDumpMode ? bNextLightingPathTracingPhase : (bReadmeScreenshotDumpMode ? AutoAADumpPhase == 1 : AutoAADumpPhase == 2));
 		const UINT32 nextFrameCount = RenderingMode == ERenderingMode::HYBRID ? kHybridDumpFrames : kPathTracingDumpFrames;
 		const wchar_t* nextPhaseName =
 			bLightingCompareDumpMode ?
@@ -4437,11 +4775,8 @@ void Corona::AdvanceAutoAADump(Texture* backbuffer)
 	if (AutoAADumpPhase >= kNumDumpPhases)
 	{
 		bAutoAADumpCompleted = true;
-		if (HWND hwnd = Win32Application::GetHwnd())
-		{
-			PostMessage(hwnd, WM_CLOSE, 0, 0);
-		}
-		PostQuitMessage(0);
+		RequestMainPlatformWindowClose();
+		QuitPlatformApplication(0);
 		return;
 	}
 }
@@ -5246,8 +5581,8 @@ void Corona::DumpCameraPathDiagnosticFrame()
 	if (!bCommandLineCameraPathDiagnostics || LastCameraPathDumpDir.empty())
 		return;
 
-	const D3D12_RESOURCE_STATES shaderReadState =
-		D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+	const EResourceState shaderReadState =
+		EResourceState::ShaderRead;
 
 	std::filesystem::path diagnosticDir = std::filesystem::path(LastCameraPathDumpDir) / L"diagnostics";
 	std::error_code ec;
@@ -5259,7 +5594,7 @@ void Corona::DumpCameraPathDiagnosticFrame()
 	framePrefix << L"frame_" << std::setfill(L'0') << std::setw(6) << CameraPathDumpFrameIndex;
 	const std::filesystem::path basePath = diagnosticDir / framePrefix.str();
 
-	auto dumpTexture = [&](const wchar_t* suffix, Texture* texture, bool bDumpHdr, DXGI_FORMAT rawFormat = DXGI_FORMAT_UNKNOWN, uint32_t rawChannelCount = 0)
+	auto dumpTexture = [&](const wchar_t* suffix, Texture* texture, bool bDumpHdr, ERawFloatDumpFormat rawFormat = ERawFloatDumpFormat::Unknown, uint32_t rawChannelCount = 0)
 	{
 		if (!texture)
 			return;
@@ -5268,16 +5603,16 @@ void Corona::DumpCameraPathDiagnosticFrame()
 		DumpTexturePNG(texture, fileBase + L"_preview.png", shaderReadState);
 		if (bDumpHdr)
 			DumpTextureHDR(texture, fileBase + L".hdr", shaderReadState);
-		if (rawFormat != DXGI_FORMAT_UNKNOWN && rawChannelCount > 0)
+		if (rawFormat != ERawFloatDumpFormat::Unknown && rawChannelCount > 0)
 			DumpTextureRawFloat(texture, fileBase + L".rawf", shaderReadState, rawFormat, rawChannelCount);
 	};
 
 	dumpTexture(L"pt_input", PathTracingAccumBuffer[PathTracingWriteIndex].get(), true);
 	dumpTexture(L"rr_output", DLSSRRBuffer.get(), true);
-	dumpTexture(L"depth", UnjitteredDepthBuffers[ColorBufferWriteIndex].get(), true, DXGI_FORMAT_R32_FLOAT, 1);
-	dumpTexture(L"motion", VelocityBuffer.get(), true, DXGI_FORMAT_R32G32_FLOAT, 2);
-	dumpTexture(L"specular_hit_distance", PathTracingSpecularHitDistanceBuffer.get(), true, DXGI_FORMAT_R32_FLOAT, 1);
-	dumpTexture(L"specular_motion", PathTracingSpecularMotionVectorBuffer.get(), true, DXGI_FORMAT_R32G32_FLOAT, 2);
+	dumpTexture(L"depth", UnjitteredDepthBuffers[ColorBufferWriteIndex].get(), true, ERawFloatDumpFormat::R32Float, 1);
+	dumpTexture(L"motion", VelocityBuffer.get(), true, ERawFloatDumpFormat::R32G32Float, 2);
+	dumpTexture(L"specular_hit_distance", PathTracingSpecularHitDistanceBuffer.get(), true, ERawFloatDumpFormat::R32Float, 1);
+	dumpTexture(L"specular_motion", PathTracingSpecularMotionVectorBuffer.get(), true, ERawFloatDumpFormat::R32G32Float, 2);
 	dumpTexture(L"roughness_metallic", RoughnessMetalicBuffer.get(), true);
 	dumpTexture(L"specular_albedo", SpecularAlbedoBuffer.get(), true);
 	dumpTexture(L"albedo", AlbedoBuffer.get(), false);
@@ -5338,7 +5673,7 @@ void Corona::ConsumeCameraPathDumpCaptureResult()
 		if (!errorMessage.empty())
 			LastCameraPathStatus += L": " + errorMessage;
 		if (bCameraPathDumpExitWhenComplete)
-			PostQuitMessage(1);
+			QuitPlatformApplication(1);
 	}
 	else if (CameraPathDumpFrameIndex >= CameraPathDumpFrameCount)
 	{
@@ -5348,7 +5683,7 @@ void Corona::ConsumeCameraPathDumpCaptureResult()
 			L"Camera path playback and frame dump complete: " + LastCameraPathDumpDir +
 			L" (" + std::to_wstring(CameraPathDumpFrameCount) + L" frames)";
 		if (bCameraPathDumpExitWhenComplete)
-			PostQuitMessage(0);
+			QuitPlatformApplication(0);
 	}
 	else
 	{
@@ -5382,6 +5717,10 @@ void Corona::LaunchCameraPathVideoEncode()
 		L"\" --fps 30 --output \"" + outputPath.wstring() + L"\"";
 	std::wstring command = displayCommand + L" > \"" + logPath.wstring() + L"\" 2>&1";
 	LastCameraPathVideoCommand = displayCommand;
+#if !CORONA_PLATFORM_IS_WINDOWS
+	LastCameraPathStatus = L"Video conversion is only implemented on Windows.";
+	return;
+#else
 	const int result = _wsystem(command.c_str());
 	if (result == 0)
 		LastCameraPathStatus = L"Video conversion complete: " + outputPath.wstring();
@@ -5392,6 +5731,7 @@ void Corona::LaunchCameraPathVideoEncode()
 		if (!logPreview.empty())
 			LastCameraPathStatus += L"\n" + logPreview;
 	}
+#endif
 }
 
 std::wstring Corona::GetCameraStatePath()
@@ -5753,8 +6093,10 @@ Corona::RenderFrameSourceState Corona::CaptureRenderFrameSourceState() const
 {
 	auto normalizeOrFallback = [](const glm::vec3& value, const glm::vec3& fallback)
 	{
+		if (!IsFiniteVec3(value))
+			return fallback;
 		const float length = glm::length(value);
-		return length > 0.0001f ? value / length : fallback;
+		return std::isfinite(length) && length > 0.0001f ? value / length : fallback;
 	};
 
 	RenderFrameSourceState state;
@@ -5763,23 +6105,40 @@ Corona::RenderFrameSourceState Corona::CaptureRenderFrameSourceState() const
 	const CoronaECS::TransformComponent* activeCameraTransform = EntityWorld.GetTransform(activeCameraEntity);
 	if (activeCamera && activeCameraTransform)
 	{
-		state.CameraPosition = activeCameraTransform->GetPosition();
+		const glm::vec3 rawCameraPosition = activeCameraTransform->GetPosition();
+		const glm::vec3 fallbackCameraPosition =
+			ReasonableWorldPositionOr(m_camera.m_position, glm::vec3(0.0f, 260.0f, -300.0f));
+		state.CameraPosition = ReasonableWorldPositionOr(rawCameraPosition, fallbackCameraPosition);
+		static bool bLoggedBadCapturedCameraPosition = false;
+		if (!IsReasonableWorldPosition(rawCameraPosition) && !bLoggedBadCapturedCameraPosition)
+		{
+			AppendCpuRuntimeTrace(
+				L"[FrameSourceCapture] rejected active camera position entity=" +
+				std::to_wstring(activeCameraEntity.GetId()) +
+				L", raw=(" + std::to_wstring(rawCameraPosition.x) +
+				L"," + std::to_wstring(rawCameraPosition.y) +
+				L"," + std::to_wstring(rawCameraPosition.z) +
+				L"), fallback=(" + std::to_wstring(state.CameraPosition.x) +
+				L"," + std::to_wstring(state.CameraPosition.y) +
+				L"," + std::to_wstring(state.CameraPosition.z) + L")");
+			bLoggedBadCapturedCameraPosition = true;
+		}
 		state.CameraLookDirection = normalizeOrFallback(activeCamera->LookDirection, glm::vec3(0.0f, 0.0f, 1.0f));
 		state.CameraUpDirection = normalizeOrFallback(activeCamera->UpDirection, glm::vec3(0.0f, 1.0f, 0.0f));
-		state.Fov = activeCamera->Fov;
-		state.NearPlane = activeCamera->NearPlane;
-		state.FarPlane = activeCamera->FarPlane;
+		state.Fov = FiniteClampedOr(activeCamera->Fov, Fov, 0.05f, glm::pi<float>() - 0.05f);
+		state.NearPlane = std::max(0.001f, FiniteFloatOr(activeCamera->NearPlane, Near));
+		state.FarPlane = std::max(state.NearPlane + 1.0f, FiniteFloatOr(activeCamera->FarPlane, Far));
 	}
 	else
 	{
-		state.CameraPosition = m_camera.m_position;
+		state.CameraPosition = ReasonableWorldPositionOr(m_camera.m_position, glm::vec3(0.0f, 260.0f, -300.0f));
 		state.CameraLookDirection = normalizeOrFallback(m_camera.m_lookDirection, glm::vec3(0.0f, 0.0f, 1.0f));
 		state.CameraUpDirection = normalizeOrFallback(m_camera.m_upDirection, glm::vec3(0.0f, 1.0f, 0.0f));
-		state.Fov = Fov;
-		state.NearPlane = Near;
-		state.FarPlane = Far;
+		state.Fov = FiniteClampedOr(Fov, 0.8f, 0.05f, glm::pi<float>() - 0.05f);
+		state.NearPlane = std::max(0.001f, FiniteFloatOr(Near, 10.0f));
+		state.FarPlane = std::max(state.NearPlane + 1.0f, FiniteFloatOr(Far, 20000.0f));
 	}
-	state.AspectRatio = m_aspectRatio;
+	state.AspectRatio = std::max(0.001f, FiniteFloatOr(m_aspectRatio, 16.0f / 9.0f));
 	state.TotalSeconds = static_cast<float>(m_timer.GetTotalSeconds());
 	state.RenderingMode = RenderingMode;
 	state.AntiAliasingMode = AntiAliasingMode;
@@ -5866,11 +6225,19 @@ Corona::RenderFrameSourceState Corona::CaptureRenderFrameSourceState() const
 void Corona::ApplyRenderFrameSourceState(const RenderFrameSourceState& state)
 {
 	const ERenderingMode previousRenderingMode = RenderingMode;
-	Fov = state.Fov;
-	Near = state.NearPlane;
-	Far = state.FarPlane;
+	const float safeFov = FiniteClampedOr(state.Fov, Fov, 0.05f, glm::pi<float>() - 0.05f);
+	const float safeNear = std::max(0.001f, FiniteFloatOr(state.NearPlane, Near));
+	const float safeFar = std::max(safeNear + 1.0f, FiniteFloatOr(state.FarPlane, Far));
+	const float safeAspectRatio = std::max(0.001f, FiniteFloatOr(state.AspectRatio, m_aspectRatio));
+	Fov = safeFov;
+	Near = safeNear;
+	Far = safeFar;
 	RenderingMode = state.RenderingMode;
 	AntiAliasingMode = state.AntiAliasingMode;
+#if CORONA_PLATFORM_MOBILE
+	RenderingMode = ERenderingMode::HYBRID;
+	AntiAliasingMode = EAntiAliasingMode::TAA;
+#endif
 	DLSSQualityMode = state.DLSSQualityMode;
 	RayNoiseMode = state.RayNoiseMode;
 	DiffuseGIMode = state.DiffuseGIMode;
@@ -5892,10 +6259,10 @@ void Corona::ApplyRenderFrameSourceState(const RenderFrameSourceState& state)
 	TAASampleCount = state.TAASampleCount;
 	DLSSJitterPhaseScale = state.DLSSJitterPhaseScale;
 	DLSSJitterPhaseCountOverride = state.DLSSJitterPhaseCountOverride;
-	Fov = state.Fov;
-	Near = state.NearPlane;
-	Far = state.FarPlane;
-	m_aspectRatio = state.AspectRatio;
+	Fov = safeFov;
+	Near = safeNear;
+	Far = safeFar;
+	m_aspectRatio = safeAspectRatio;
 	LightDir = glm::length(state.LightDir) > 0.0001f ? glm::normalize(state.LightDir) : glm::vec3(0.0f, 1.0f, 0.0f);
 	LightIntensity = state.LightIntensity;
 	SkyColorTop = state.SkyColorTop;
@@ -6352,17 +6719,7 @@ void Corona::ApplyRenderPointLightsToFrameParams()
 
 void Corona::PumpStartupWindowMessages()
 {
-	MSG msg = {};
-	while (PeekMessage(&msg, nullptr, 0, 0, PM_REMOVE))
-	{
-		if (msg.message == WM_QUIT)
-		{
-			PostQuitMessage(static_cast<int>(msg.wParam));
-			break;
-		}
-		TranslateMessage(&msg);
-		DispatchMessage(&msg);
-	}
+	PumpPlatformWindowMessages();
 }
 
 void Corona::DrawStartupLoadingScreen()
@@ -6389,7 +6746,7 @@ void Corona::DrawStartupLoadingScreen()
 		renderBackend->SetViewportAndScissor(m_width, m_height);
 
 		renderBackend->NewImGuiFrame();
-		ImGui_ImplWin32_NewFrame();
+		NewPlatformImGuiFrame();
 		ImGui::NewFrame();
 
 		ImGuiIO& io = ImGui::GetIO();
@@ -6489,7 +6846,7 @@ void Corona::OnInit()
 {
 	//_CrtSetBreakAlloc(4207117);
 
-	CoInitialize(NULL);
+	InitializePlatformRuntime();
 	AppendCpuRuntimeTrace(L"[OnInit] begin");
 	UpdateStartupLoadingProgress(0.02f, L"Starting Corona");
 
@@ -6507,7 +6864,7 @@ void Corona::OnInit()
 	InitializeMainDirectionalLightEntity();
 	UpdateMainDirectionalLightEntityFromState();
 	LoadSceneState();
-	if (bCommandLineDungeonCharacterMode)
+	if (bCommandLineDungeonCharacterMode || CORONA_PLATFORM_MOBILE)
 	{
 		auto setScriptBoolOverride = [this](const std::string& name, bool value)
 		{
@@ -6518,6 +6875,8 @@ void Corona::OnInit()
 		};
 
 		setScriptBoolOverride("dungeon.enabled", true);
+		bStartupSponzaFlyMode = false;
+		bEnableStartupLuauScript = true;
 	}
 	UpdateMainDirectionalLightEntityFromState();
 	AppendCpuRuntimeTrace(L"[OnInit] after camera init");
@@ -6561,7 +6920,11 @@ void Corona::OnInit()
 		renderBackend &&
 		renderBackend->GetAPI() == ERenderBackendAPI::Vulkan &&
 		StartupRenderingMode == ERenderingMode::HYBRID;
+	const bool bStartupMobileHybridDirectOnly =
+		CORONA_PLATFORM_MOBILE &&
+		StartupRenderingMode == ERenderingMode::HYBRID;
 	const bool bStartupLoadingCanUseImgui =
+		!bStartupMobileHybridDirectOnly &&
 		!bCommandLineDisableImgui &&
 		!bAutoAADumpEnabled &&
 		(!bStartupLoadingVulkanHybrid || renderBackend->GetMaxSupportedHybridStage() >= 7u);
@@ -6638,7 +7001,7 @@ void Corona::OnInit()
 		}
 		else if (!bLoadedCameraPath && bCommandLineCameraPathDump)
 		{
-			PostQuitMessage(1);
+			QuitPlatformApplication(1);
 		}
 	}
 	UpdateStartupLoadingProgress(1.0f, L"Ready");
@@ -6649,10 +7012,10 @@ void AppendCpuRuntimeTrace(const std::wstring& line)
 {
 	const std::filesystem::path tracePath = RuntimePaths::LogFile(L"cpu_runtime_trace.log");
 	std::filesystem::create_directories(tracePath.parent_path());
-	std::wofstream traceFile(tracePath, std::ios::app);
+	std::ofstream traceFile(tracePath, std::ios::app);
 	if (traceFile.is_open())
 	{
-		traceFile << line << L"\n";
+		traceFile << WideToUtf8(line) << "\n";
 	}
 }
 
@@ -6661,6 +7024,7 @@ void Corona::LoadPipeline()
 	if (bCommandLineRenderBackendOverrideSet && CommandLineRenderBackendAPI == ERenderBackendAPI::Vulkan)
 	{
 		AppendCpuRuntimeTrace(L"[LoadPipeline] begin Vulkan path");
+		ConfigureVulkanImplicitLayerPolicy(bCommandLineNvFrapsBvhLiveTlas);
 		renderBackend = CreateRenderBackend(ERenderBackendAPI::Vulkan);
 		dx12_rhi = nullptr;
 		if (!renderBackend)
@@ -6672,7 +7036,7 @@ void Corona::LoadPipeline()
 			L", name=" + std::wstring(renderBackend->GetBackendName(), renderBackend->GetBackendName() + std::strlen(renderBackend->GetBackendName())));
 
 		renderBackend->CreateSwapChainForWindow(
-			WindowHandle{ Win32Application::GetHwnd() },
+			GetMainPlatformWindowHandle(),
 			m_width,
 			m_height,
 			ETextureFormat::RGBA8Unorm);
@@ -6814,12 +7178,34 @@ void Corona::LoadPipeline()
 		throw std::runtime_error("Failed to create D3D12 render backend.");
 	}
 	dx12_rhi->SetExternalDXGIFactory(factory.Get());
+	const bool bBlockBvhViewerForStreamline =
+#if WITH_STREAMLINE
+		bStreamlineInitialized;
+#else
+		false;
+#endif
+	dx12_rhi->SetBvhViewerD3D12Allowed(!bBlockBvhViewerForStreamline);
+	if (bBlockBvhViewerForStreamline)
+	{
+		AppendCpuRuntimeTrace(L"[BvhViewerD3D12] disabled while Streamline is initialized to avoid D3D12 hook contention");
+	}
 
 	renderBackend->CreateSwapChainForWindow(
-		WindowHandle{ Win32Application::GetHwnd() },
+		GetMainPlatformWindowHandle(),
 		m_width,
 		m_height,
 		ETextureFormat::RGBA8Unorm);
+	if (bCommandLineBvhViewerOverrideSet && bCommandLineBvhViewerEnabled)
+	{
+		if (bBlockBvhViewerForStreamline)
+		{
+			AppendCpuRuntimeTrace(L"[BvhViewerD3D12] command-line show skipped because Streamline is active; relaunch with --no-streamline --bvh-viewer");
+		}
+		else
+		{
+			dx12_rhi->ShowBvhViewerD3D12Window(1280, 720);
+		}
+	}
 #endif // CORONA_HAS_D3D12 (LoadPipeline DX12 bootstrap)
 }
 
@@ -6857,7 +7243,17 @@ glm::mat4x4 Corona::BuildScaledSceneTransform(
 	if (!scene || !scene->bHasBounds)
 		return glm::mat4x4(1.0f);
 
-	const glm::vec3 safeScale = glm::max(scale, glm::vec3(0.001f));
+	const auto sanitizeScaleAxis = [](float value)
+	{
+		if (!std::isfinite(value))
+			return 1.0f;
+		const float sign = value < 0.0f ? -1.0f : 1.0f;
+		return sign * std::max(std::abs(value), 0.001f);
+	};
+	const glm::vec3 safeScale(
+		sanitizeScaleAxis(scale.x),
+		sanitizeScaleAxis(scale.y),
+		sanitizeScaleAxis(scale.z));
 	const glm::vec3 center = (scene->BoundsMin + scene->BoundsMax) * 0.5f;
 	const glm::mat4x4 rotation =
 		glm::rotate(glm::radians(rotationDegrees.z), glm::vec3(0.0f, 0.0f, 1.0f)) *
@@ -7504,21 +7900,45 @@ void Corona::LoadAssets()
 	const bool bVulkanPathTracingStartup =
 		bVulkanBackend &&
 		StartupRenderingMode == ERenderingMode::PATHTRACING;
+	const bool bMobileHybridDirectOnlyStartup =
+		CORONA_PLATFORM_MOBILE &&
+		StartupRenderingMode == ERenderingMode::HYBRID;
+	const bool bMobileDungeonOnlyStartup = CORONA_PLATFORM_MOBILE;
 	const uint32_t maxSupportedHybridStage =
 		(renderBackend && StartupRenderingMode == ERenderingMode::HYBRID) ?
 		renderBackend->GetMaxSupportedHybridStage() : 7u;
-	const bool bVulkanHybridBootstrap = bVulkanHybridStartup && maxSupportedHybridStage == 0u;
-	const bool bSupportsHybridRaytracing = !bVulkanHybridStartup || maxSupportedHybridStage >= 1u;
-	const bool bSupportsScreenProbeGI = !bVulkanHybridStartup || maxSupportedHybridStage >= 4u;
-	const bool bSupportsTemporalDenoise = !bVulkanHybridStartup || maxSupportedHybridStage >= 5u;
-	const bool bSupportsFullHybridPresentation = !bVulkanHybridStartup || maxSupportedHybridStage >= 7u;
-	const bool bAllowBlueNoiseInit = !bVulkanHybridStartup || maxSupportedHybridStage >= 1u;
+	const bool bVulkanHybridBootstrap =
+		!bMobileHybridDirectOnlyStartup &&
+		bVulkanHybridStartup &&
+		maxSupportedHybridStage == 0u;
+	const bool bSupportsHybridRaytracing =
+		!bMobileHybridDirectOnlyStartup &&
+		(!bVulkanHybridStartup || maxSupportedHybridStage >= 1u);
+	const bool bSupportsScreenProbeGI =
+		!bMobileHybridDirectOnlyStartup &&
+		(!bVulkanHybridStartup || maxSupportedHybridStage >= 4u);
+	const bool bSupportsTemporalDenoise =
+		!bMobileHybridDirectOnlyStartup &&
+		(!bVulkanHybridStartup || maxSupportedHybridStage >= 5u);
+	const bool bSupportsFullHybridPresentation =
+		bMobileHybridDirectOnlyStartup ||
+		(!bVulkanHybridStartup || maxSupportedHybridStage >= 7u);
+	const bool bAllowBlueNoiseInit =
+		!bMobileHybridDirectOnlyStartup &&
+		(!bVulkanHybridStartup || maxSupportedHybridStage >= 1u);
+	const bool bAllowMobileVirtualControls =
+		CORONA_PLATFORM_MOBILE &&
+		!bCommandLineDisableImgui;
 	const bool bAllowImguiInit =
 		!bCommandLineDisableImgui &&
-		(!bVulkanHybridStartup ||
-			(bSupportsFullHybridPresentation && !bAutoAADumpEnabled));
+		(bAllowMobileVirtualControls ||
+			(!bMobileHybridDirectOnlyStartup &&
+				(!bVulkanHybridStartup ||
+					(bSupportsFullHybridPresentation && !bAutoAADumpEnabled))));
 	if (bVulkanHybridBootstrap)
 		AppendCpuRuntimeTrace(L"[LoadAssets] begin Vulkan hybrid bootstrap");
+	else if (bMobileHybridDirectOnlyStartup)
+		AppendCpuRuntimeTrace(L"[LoadAssets] begin mobile hybrid direct-light-only init");
 	else if (bVulkanHybridStartup)
 		AppendCpuRuntimeTrace(L"[LoadAssets] begin Vulkan hybrid stage-aware init stage=" + std::to_wstring(maxSupportedHybridStage));
 	UpdateStartupLoadingProgress(0.22f, L"Preparing render resources");
@@ -7540,11 +7960,22 @@ void Corona::LoadAssets()
 		bShowImgui = false;
 		bImguiInitialized = false;
 	}
+#if CORONA_PLATFORM_MOBILE
+	if (bAllowMobileVirtualControls)
+		bShowImgui = false;
+#endif
 
 	AppendCpuRuntimeTrace(L"[LoadAssets] before InitGBufferPass");
 	UpdateStartupLoadingProgress(0.26f, L"Compiling G-buffer pass");
 	InitGBufferPass();
 	AppendCpuRuntimeTrace(L"[LoadAssets] after InitGBufferPass");
+	if (bMobileHybridDirectOnlyStartup)
+	{
+		AppendCpuRuntimeTrace(L"[LoadAssets] before InitMobileShadowMapPass");
+		UpdateStartupLoadingProgress(0.28f, L"Compiling shadow map pass");
+		InitMobileShadowMapPass();
+		AppendCpuRuntimeTrace(L"[LoadAssets] after InitMobileShadowMapPass");
+	}
 	if (bSupportsFullHybridPresentation)
 	{
 		AppendCpuRuntimeTrace(L"[LoadAssets] before full hybrid presentation pass init");
@@ -7553,11 +7984,13 @@ void Corona::LoadAssets()
 		InitToneMapPass();
 		if (!bVulkanPathTracingStartup)
 			InitTemporalAAPass();
+#if CORONA_HAS_D3D12
 		if (!bVulkanBackend)
 		{
 			InitDebugPass();
 			InitBloomPass();
 		}
+#endif
 		AppendCpuRuntimeTrace(L"[LoadAssets] after full hybrid presentation pass init");
 	}
 	if (bSupportsTemporalDenoise)
@@ -7590,10 +8023,14 @@ void Corona::LoadAssets()
 	const UINT DisplayHeight = m_height;
 	const UINT RenderWidthLocal = GetRenderWidth();
 	const UINT RenderHeightLocal = GetRenderHeight();
+	const UINT ColorBufferWidth = CORONA_PLATFORM_MOBILE ? RenderWidthLocal : DisplayWidth;
+	const UINT ColorBufferHeight = CORONA_PLATFORM_MOBILE ? RenderHeightLocal : DisplayHeight;
 	const ETextureFormat HybridFloat4UAVFormat =
 		(renderBackend && renderBackend->GetAPI() == ERenderBackendAPI::Vulkan)
 		? ETextureFormat::RGBA32Float
 		: ETextureFormat::RGBA16Float;
+	const bool bNeedExtendedHybridResources = !bMobileHybridDirectOnlyStartup;
+	const bool bNeedMobileShadowMap = bMobileHybridDirectOnlyStartup;
 
 	if (bSupportsFullHybridPresentation &&
 		renderBackend &&
@@ -7627,24 +8064,34 @@ void Corona::LoadAssets()
 		desc.InitialState = initialState;
 		desc.bAllowUnorderedAccess = allowUAV;
 		desc.InitialData = initialData;
+		desc.Shape = EBufferShape::ByteAddress;
+		return renderBackend->CreateBuffer(desc);
+	};
+	auto createStructuredBuffer = [&](uint32_t numElements, uint32_t elementSize, bool allowUAV, void* initialData = nullptr, EInitialResourceState initialState = EInitialResourceState::ShaderRead)
+	{
+		BufferCreateDesc desc = {};
+		desc.NumElements = numElements;
+		desc.ElementSize = elementSize;
+		desc.InitialState = initialState;
+		desc.bAllowUnorderedAccess = allowUAV;
+		desc.InitialData = initialData;
+		desc.Shape = EBufferShape::Structured;
 		return renderBackend->CreateBuffer(desc);
 	};
 
 	// TAA pingping buffer
 	const bool bRecreateColorBuffers =
 		!ColorBuffers[0] ||
-		ColorBuffers[0]->textureDesc.Width != DisplayWidth ||
-		ColorBuffers[0]->textureDesc.Height != DisplayHeight;
+		ColorBuffers[0]->Width != ColorBufferWidth ||
+		ColorBuffers[0]->Height != ColorBufferHeight;
 	if (bRecreateColorBuffers)
 	{
 		UpdateStartupLoadingProgress(0.48f, L"Allocating color buffers");
-		ColorBuffers[0] = createTexture2D(ETextureFormat::RGBA16Float, TextureUsage_RenderTarget | TextureUsage_UnorderedAccess, DisplayWidth, DisplayHeight, 1);
-		ColorBuffers[0]->MakeRTV();
+		ColorBuffers[0] = createTexture2D(ETextureFormat::RGBA16Float, TextureUsage_RenderTarget | TextureUsage_UnorderedAccess, ColorBufferWidth, ColorBufferHeight, 1);
 
 		NAME_D3D12_OBJECT(ColorBuffers[0]->resource);
 
-		ColorBuffers[1] = createTexture2D(ETextureFormat::RGBA16Float, TextureUsage_RenderTarget | TextureUsage_UnorderedAccess, DisplayWidth, DisplayHeight, 1);
-		ColorBuffers[1]->MakeRTV();
+		ColorBuffers[1] = createTexture2D(ETextureFormat::RGBA16Float, TextureUsage_RenderTarget | TextureUsage_UnorderedAccess, ColorBufferWidth, ColorBufferHeight, 1);
 
 		NAME_D3D12_OBJECT(ColorBuffers[1]->resource);
 	}
@@ -7666,241 +8113,244 @@ void Corona::LoadAssets()
 		ExposureData = createBuffer(8u, sizeof(float), true, initExposure);
 	}
 
-	// Path tracing accumulation buffers
-	UpdateStartupLoadingProgress(0.52f, L"Allocating path tracing buffers");
-	PathTracingAccumBuffer[0] = createTexture2D(ETextureFormat::RGBA32Float, TextureUsage_UnorderedAccess, DisplayWidth, DisplayHeight, 1, glm::vec4(0.0f));
+	if (bNeedExtendedHybridResources)
+	{
+		// Path tracing accumulation buffers
+		UpdateStartupLoadingProgress(0.52f, L"Allocating path tracing buffers");
+		PathTracingAccumBuffer[0] = createTexture2D(ETextureFormat::RGBA32Float, TextureUsage_UnorderedAccess, DisplayWidth, DisplayHeight, 1, glm::vec4(0.0f));
 
-	NAME_D3D12_OBJECT(PathTracingAccumBuffer[0]->resource);
+		NAME_D3D12_OBJECT(PathTracingAccumBuffer[0]->resource);
 
-	PathTracingAccumBuffer[1] = createTexture2D(ETextureFormat::RGBA32Float, TextureUsage_UnorderedAccess, DisplayWidth, DisplayHeight, 1, glm::vec4(0.0f));
+		PathTracingAccumBuffer[1] = createTexture2D(ETextureFormat::RGBA32Float, TextureUsage_UnorderedAccess, DisplayWidth, DisplayHeight, 1, glm::vec4(0.0f));
 
-	NAME_D3D12_OBJECT(PathTracingAccumBuffer[1]->resource);
-	AppendCpuRuntimeTrace(L"[LoadAssets] after path tracing buffers");
+		NAME_D3D12_OBJECT(PathTracingAccumBuffer[1]->resource);
+		AppendCpuRuntimeTrace(L"[LoadAssets] after path tracing buffers");
+	}
 
 	// lighting result
 	UpdateStartupLoadingProgress(0.55f, L"Allocating lighting buffers");
 	LightingBuffer = createTexture2D(ETextureFormat::RGBA16Float, TextureUsage_RenderTarget | TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
-	LightingBuffer->MakeRTV();
 
 	NAME_D3D12_OBJECT(LightingBuffer->resource);
 
-	DirectLightingBuffer = createTexture2D(ETextureFormat::RGBA16Float, TextureUsage_RenderTarget | TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
-	DirectLightingBuffer->MakeRTV();
+	if (bNeedExtendedHybridResources)
+	{
+		DirectLightingBuffer = createTexture2D(ETextureFormat::RGBA16Float, TextureUsage_RenderTarget | TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
 
-	NAME_D3D12_OBJECT(DirectLightingBuffer->resource);
+		NAME_D3D12_OBJECT(DirectLightingBuffer->resource);
 
-	DLSSRRBuffer = createTexture2D(ETextureFormat::RGBA16Float, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
-	NAME_D3D12_OBJECT(DLSSRRBuffer->resource);
+		DLSSRRBuffer = createTexture2D(ETextureFormat::RGBA16Float, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
+		NAME_D3D12_OBJECT(DLSSRRBuffer->resource);
+	}
 	AppendCpuRuntimeTrace(L"[LoadAssets] after lighting buffer");
 
 	// world normal
 	UpdateStartupLoadingProgress(0.58f, L"Allocating shadow and normal buffers");
-	NormalBuffers[0] = createTexture2D(ETextureFormat::RGBA16Float, TextureUsage_RenderTarget | TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1, glm::vec4(0.0f, -0.1f, 0.0f, 0.0f));
-	NormalBuffers[0]->MakeRTV();
+	const ETextureFormat normalBufferFormat = CORONA_PLATFORM_MOBILE ? ETextureFormat::RGBA8Unorm : ETextureFormat::RGBA16Float;
+	const glm::vec4 normalClearValue = CORONA_PLATFORM_MOBILE ? glm::vec4(0.5f, 0.45f, 0.5f, 0.0f) : glm::vec4(0.0f, -0.1f, 0.0f, 0.0f);
+	NormalBuffers[0] = createTexture2D(normalBufferFormat, TextureUsage_RenderTarget | TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1, normalClearValue);
 
 	NAME_D3D12_OBJECT(NormalBuffers[0]->resource);
 
-	NormalBuffers[1] = createTexture2D(ETextureFormat::RGBA16Float, TextureUsage_RenderTarget | TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1, glm::vec4(0.0f, -0.1f, 0.0f, 0.0f));
-	NormalBuffers[1]->MakeRTV();
+	NormalBuffers[1] = createTexture2D(normalBufferFormat, TextureUsage_RenderTarget | TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1, normalClearValue);
 
 	NAME_D3D12_OBJECT(NormalBuffers[1]->resource);
 
 	// geometry world normal
 	GeomNormalBuffers[0] = createTexture2D(ETextureFormat::RGBA16Float, TextureUsage_RenderTarget | TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1, glm::vec4(0.0f, -0.1f, 0.0f, 0.0f));
-	GeomNormalBuffers[0]->MakeRTV();
 
 	NAME_D3D12_OBJECT(GeomNormalBuffers[0]->resource);
 
 	GeomNormalBuffers[1] = createTexture2D(ETextureFormat::RGBA16Float, TextureUsage_RenderTarget | TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1, glm::vec4(0.0f, -0.1f, 0.0f, 0.0f));
-	GeomNormalBuffers[1]->MakeRTV();
 
 	NAME_D3D12_OBJECT(GeomNormalBuffers[1]->resource);
 
-	// shadow result
-	ShadowBuffer = createTexture2D(ETextureFormat::RGBA32Float, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
-
-	NAME_D3D12_OBJECT(ShadowBuffer->resource);
-
-	AmbientOcclusionBuffer = createTexture2D(ETextureFormat::RGBA16Float, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1, glm::vec4(1.0f));
-
-	NAME_D3D12_OBJECT(AmbientOcclusionBuffer->resource);
-
-	SkyLightingBuffer = createTexture2D(ETextureFormat::RGBA16Float, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1, glm::vec4(0.0f, 0.0f, 0.0f, 1.0f));
-
-	NAME_D3D12_OBJECT(SkyLightingBuffer->resource);
-	AppendCpuRuntimeTrace(L"[LoadAssets] after shadow buffers");
-
-	// refleciton result
-	UpdateStartupLoadingProgress(0.62f, L"Allocating GI buffers");
-	SpecularGIRaw = createTexture2D(HybridFloat4UAVFormat, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
-
-	NAME_D3D12_OBJECT(SpecularGIRaw->resource);
-
-	SpecularGITemporal[0] = createTexture2D(HybridFloat4UAVFormat, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
-
-	NAME_D3D12_OBJECT(SpecularGITemporal[0]->resource);
-
-	SpecularGITemporal[1] = createTexture2D(HybridFloat4UAVFormat, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
-
-	NAME_D3D12_OBJECT(SpecularGITemporal[1]->resource);
-
-	// moments
-	SpecularGIMoments[0] = createTexture2D(ETextureFormat::RG16Float, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
-
-	NAME_D3D12_OBJECT(SpecularGIMoments[0]->resource);
-
-	SpecularGIMoments[1] = createTexture2D(ETextureFormat::RG16Float, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
-
-	NAME_D3D12_OBJECT(SpecularGIMoments[1]->resource);
-	// diffuse gi
-
-	DiffuseGIRawAux = createTexture2D(HybridFloat4UAVFormat, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
-
-	NAME_D3D12_OBJECT(DiffuseGIRawAux->resource);
-
-	DiffuseGIRaw = createTexture2D(HybridFloat4UAVFormat, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
-
-	NAME_D3D12_OBJECT(DiffuseGIRaw->resource);
-
-	DiffuseGIHashCachedAux = createTexture2D(HybridFloat4UAVFormat, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
-
-	NAME_D3D12_OBJECT(DiffuseGIHashCachedAux->resource);
-
-	DiffuseGIHashCached = createTexture2D(HybridFloat4UAVFormat, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
-
-	NAME_D3D12_OBJECT(DiffuseGIHashCached->resource);
-
-	SpatialHashGIActiveFlags = createBuffer(SpatialHashGIEntryCount, sizeof(UINT32), true);
-	SpatialHashGIActiveCellSlots = createBuffer(SpatialHashGIActiveCellCapacity, sizeof(UINT32), true);
-	SpatialHashGIActiveCounter = createBuffer(4u, sizeof(UINT32), true);
-	SpatialHashGICellPosition = createBuffer(SpatialHashGIEntryCount, sizeof(float) * 4u, true);
-	SpatialHashGICellNormal = createBuffer(SpatialHashGIEntryCount, sizeof(float) * 4u, true);
-	SpatialHashGICellScore = createBuffer(SpatialHashGIEntryCount, sizeof(UINT32), true);
-	for (UINT coefficientIndex = 0; coefficientIndex < SpatialHashGISHCoefficientCount; ++coefficientIndex)
-		SpatialHashGITraceSH[coefficientIndex] = createBuffer(SpatialHashGIActiveCellCapacity, sizeof(float) * 4u, true);
-	SpatialHashGIResolvedKeys[0] = createBuffer(SpatialHashGIEntryCount, sizeof(UINT32), true);
-	for (UINT coefficientIndex = 0; coefficientIndex < SpatialHashGISHCoefficientCount; ++coefficientIndex)
-		SpatialHashGIResolvedSH[0][coefficientIndex] = createBuffer(SpatialHashGIEntryCount, sizeof(float) * 4u, true);
-	if (SpatialHashGIActiveFlags) SpatialHashGIActiveFlags->MakeStructuredBufferSRV();
-	if (SpatialHashGIActiveCellSlots) SpatialHashGIActiveCellSlots->MakeStructuredBufferSRV();
-	if (SpatialHashGIActiveCounter) SpatialHashGIActiveCounter->MakeStructuredBufferSRV();
-	if (SpatialHashGICellPosition) SpatialHashGICellPosition->MakeStructuredBufferSRV();
-	if (SpatialHashGICellNormal) SpatialHashGICellNormal->MakeStructuredBufferSRV();
-	if (SpatialHashGICellScore) SpatialHashGICellScore->MakeStructuredBufferSRV();
-	for (UINT coefficientIndex = 0; coefficientIndex < SpatialHashGISHCoefficientCount; ++coefficientIndex)
+	if (bNeedExtendedHybridResources)
 	{
-		if (SpatialHashGITraceSH[coefficientIndex]) SpatialHashGITraceSH[coefficientIndex]->MakeStructuredBufferSRV();
-	}
-	if (SpatialHashGIResolvedKeys[0]) SpatialHashGIResolvedKeys[0]->MakeStructuredBufferSRV();
-	for (UINT coefficientIndex = 0; coefficientIndex < SpatialHashGISHCoefficientCount; ++coefficientIndex)
-	{
-		if (SpatialHashGIResolvedSH[0][coefficientIndex]) SpatialHashGIResolvedSH[0][coefficientIndex]->MakeStructuredBufferSRV();
-	}
+		// shadow result
+		ShadowBuffer = createTexture2D(ETextureFormat::RGBA32Float, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
 
-	ScreenProbeGIResolved = createTexture2D(HybridFloat4UAVFormat, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
+		NAME_D3D12_OBJECT(ShadowBuffer->resource);
 
-	NAME_D3D12_OBJECT(ScreenProbeGIResolved->resource);
+		AmbientOcclusionBuffer = createTexture2D(ETextureFormat::RGBA16Float, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1, glm::vec4(1.0f));
 
-	ScreenProbeGIProbeDebug = createTexture2D(HybridFloat4UAVFormat, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
+		NAME_D3D12_OBJECT(AmbientOcclusionBuffer->resource);
 
-	NAME_D3D12_OBJECT(ScreenProbeGIProbeDebug->resource);
+		SkyLightingBuffer = createTexture2D(ETextureFormat::RGBA16Float, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1, glm::vec4(0.0f, 0.0f, 0.0f, 1.0f));
 
-	const int ScreenProbeAtlasWidth = std::max(1, (static_cast<int>(RenderWidthLocal) + 3) / 4);
-	const int ScreenProbeAtlasHeight = std::max(1, (static_cast<int>(RenderHeightLocal) + 3) / 4);
+		NAME_D3D12_OBJECT(SkyLightingBuffer->resource);
+		AppendCpuRuntimeTrace(L"[LoadAssets] after shadow buffers");
 
-	ScreenProbeGIRadiance[0] = createTexture2D(HybridFloat4UAVFormat, TextureUsage_UnorderedAccess, ScreenProbeAtlasWidth, ScreenProbeAtlasHeight, 1);
+		// refleciton result
+		UpdateStartupLoadingProgress(0.62f, L"Allocating GI buffers");
+		SpecularGIRaw = createTexture2D(HybridFloat4UAVFormat, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
 
-	NAME_D3D12_OBJECT(ScreenProbeGIRadiance[0]->resource);
+		NAME_D3D12_OBJECT(SpecularGIRaw->resource);
 
-	ScreenProbeGIRadiance[1] = createTexture2D(HybridFloat4UAVFormat, TextureUsage_UnorderedAccess, ScreenProbeAtlasWidth, ScreenProbeAtlasHeight, 1);
+		SpecularGITemporal[0] = createTexture2D(HybridFloat4UAVFormat, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
 
-	NAME_D3D12_OBJECT(ScreenProbeGIRadiance[1]->resource);
+		NAME_D3D12_OBJECT(SpecularGITemporal[0]->resource);
 
-	for (UINT historyIndex = 0; historyIndex < 2; ++historyIndex)
-	{
-		for (UINT coefficientIndex = 0; coefficientIndex < ScreenProbeSHCoefficientCount; ++coefficientIndex)
+		SpecularGITemporal[1] = createTexture2D(HybridFloat4UAVFormat, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
+
+		NAME_D3D12_OBJECT(SpecularGITemporal[1]->resource);
+
+		// moments
+		SpecularGIMoments[0] = createTexture2D(ETextureFormat::RG16Float, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
+
+		NAME_D3D12_OBJECT(SpecularGIMoments[0]->resource);
+
+		SpecularGIMoments[1] = createTexture2D(ETextureFormat::RG16Float, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
+
+		NAME_D3D12_OBJECT(SpecularGIMoments[1]->resource);
+		// diffuse gi
+
+		DiffuseGIRawAux = createTexture2D(HybridFloat4UAVFormat, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
+
+		NAME_D3D12_OBJECT(DiffuseGIRawAux->resource);
+
+		DiffuseGIRaw = createTexture2D(HybridFloat4UAVFormat, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
+
+		NAME_D3D12_OBJECT(DiffuseGIRaw->resource);
+
+		DiffuseGIHashCachedAux = createTexture2D(HybridFloat4UAVFormat, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
+
+		NAME_D3D12_OBJECT(DiffuseGIHashCachedAux->resource);
+
+		DiffuseGIHashCached = createTexture2D(HybridFloat4UAVFormat, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
+
+		NAME_D3D12_OBJECT(DiffuseGIHashCached->resource);
+
+		SpatialHashGIActiveFlags = createStructuredBuffer(SpatialHashGIEntryCount, sizeof(UINT32), true);
+		SpatialHashGIActiveCellSlots = createStructuredBuffer(SpatialHashGIActiveCellCapacity, sizeof(UINT32), true);
+		SpatialHashGIActiveCounter = createStructuredBuffer(4u, sizeof(UINT32), true);
+		SpatialHashGICellPosition = createStructuredBuffer(SpatialHashGIEntryCount, sizeof(float) * 4u, true);
+		SpatialHashGICellNormal = createStructuredBuffer(SpatialHashGIEntryCount, sizeof(float) * 4u, true);
+		SpatialHashGICellScore = createStructuredBuffer(SpatialHashGIEntryCount, sizeof(UINT32), true);
+		for (UINT coefficientIndex = 0; coefficientIndex < SpatialHashGISHCoefficientCount; ++coefficientIndex)
+			SpatialHashGITraceSH[coefficientIndex] = createStructuredBuffer(SpatialHashGIActiveCellCapacity, sizeof(float) * 4u, true);
+		SpatialHashGIResolvedKeys[0] = createStructuredBuffer(SpatialHashGIEntryCount, sizeof(UINT32), true);
+		for (UINT coefficientIndex = 0; coefficientIndex < SpatialHashGISHCoefficientCount; ++coefficientIndex)
+			SpatialHashGIResolvedSH[0][coefficientIndex] = createStructuredBuffer(SpatialHashGIEntryCount, sizeof(float) * 4u, true);
+
+		ScreenProbeGIResolved = createTexture2D(HybridFloat4UAVFormat, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
+
+		NAME_D3D12_OBJECT(ScreenProbeGIResolved->resource);
+
+		ScreenProbeGIProbeDebug = createTexture2D(HybridFloat4UAVFormat, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
+
+		NAME_D3D12_OBJECT(ScreenProbeGIProbeDebug->resource);
+
+		const int ScreenProbeAtlasWidth = std::max(1, (static_cast<int>(RenderWidthLocal) + 3) / 4);
+		const int ScreenProbeAtlasHeight = std::max(1, (static_cast<int>(RenderHeightLocal) + 3) / 4);
+
+		ScreenProbeGIRadiance[0] = createTexture2D(HybridFloat4UAVFormat, TextureUsage_UnorderedAccess, ScreenProbeAtlasWidth, ScreenProbeAtlasHeight, 1);
+
+		NAME_D3D12_OBJECT(ScreenProbeGIRadiance[0]->resource);
+
+		ScreenProbeGIRadiance[1] = createTexture2D(HybridFloat4UAVFormat, TextureUsage_UnorderedAccess, ScreenProbeAtlasWidth, ScreenProbeAtlasHeight, 1);
+
+		NAME_D3D12_OBJECT(ScreenProbeGIRadiance[1]->resource);
+
+		for (UINT historyIndex = 0; historyIndex < 2; ++historyIndex)
 		{
-			ScreenProbeGISH[historyIndex][coefficientIndex] = createTexture2D(ETextureFormat::RGBA32Float, TextureUsage_UnorderedAccess, ScreenProbeAtlasWidth, ScreenProbeAtlasHeight, 1);
+			for (UINT coefficientIndex = 0; coefficientIndex < ScreenProbeSHCoefficientCount; ++coefficientIndex)
+			{
+				ScreenProbeGISH[historyIndex][coefficientIndex] = createTexture2D(ETextureFormat::RGBA32Float, TextureUsage_UnorderedAccess, ScreenProbeAtlasWidth, ScreenProbeAtlasHeight, 1);
 
-			NAME_D3D12_OBJECT(ScreenProbeGISH[historyIndex][coefficientIndex]->resource);
+				NAME_D3D12_OBJECT(ScreenProbeGISH[historyIndex][coefficientIndex]->resource);
+			}
 		}
+
+		ScreenProbeGIMetadata[0] = createTexture2D(ETextureFormat::RGBA32Float, TextureUsage_UnorderedAccess, ScreenProbeAtlasWidth, ScreenProbeAtlasHeight, 1);
+
+		NAME_D3D12_OBJECT(ScreenProbeGIMetadata[0]->resource);
+
+		ScreenProbeGIMetadata[1] = createTexture2D(ETextureFormat::RGBA32Float, TextureUsage_UnorderedAccess, ScreenProbeAtlasWidth, ScreenProbeAtlasHeight, 1);
+
+		NAME_D3D12_OBJECT(ScreenProbeGIMetadata[1]->resource);
+
+		ScreenProbeGIHistory[0] = createTexture2D(HybridFloat4UAVFormat, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
+
+		NAME_D3D12_OBJECT(ScreenProbeGIHistory[0]->resource);
+
+		ScreenProbeGIHistory[1] = createTexture2D(HybridFloat4UAVFormat, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
+
+		NAME_D3D12_OBJECT(ScreenProbeGIHistory[1]->resource);
+
+		// gi result sh
+		DiffuseGITemporalAux[0] = createTexture2D(HybridFloat4UAVFormat, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
+
+		NAME_D3D12_OBJECT(DiffuseGITemporalAux[0]->resource);
+
+		DiffuseGITemporalAux[1] = createTexture2D(HybridFloat4UAVFormat, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
+
+		NAME_D3D12_OBJECT(DiffuseGITemporalAux[1]->resource);
+
+		// gi result color
+		DiffuseGITemporal[0] = createTexture2D(HybridFloat4UAVFormat, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
+
+		NAME_D3D12_OBJECT(DiffuseGITemporal[0]->resource);
+
+		DiffuseGITemporal[1] = createTexture2D(HybridFloat4UAVFormat, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
+
+		NAME_D3D12_OBJECT(DiffuseGITemporal[1]->resource);
+		AppendCpuRuntimeTrace(L"[LoadAssets] after temporal GI buffers");
 	}
-
-	ScreenProbeGIMetadata[0] = createTexture2D(ETextureFormat::RGBA32Float, TextureUsage_UnorderedAccess, ScreenProbeAtlasWidth, ScreenProbeAtlasHeight, 1);
-
-	NAME_D3D12_OBJECT(ScreenProbeGIMetadata[0]->resource);
-
-	ScreenProbeGIMetadata[1] = createTexture2D(ETextureFormat::RGBA32Float, TextureUsage_UnorderedAccess, ScreenProbeAtlasWidth, ScreenProbeAtlasHeight, 1);
-
-	NAME_D3D12_OBJECT(ScreenProbeGIMetadata[1]->resource);
-
-	ScreenProbeGIHistory[0] = createTexture2D(HybridFloat4UAVFormat, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
-
-	NAME_D3D12_OBJECT(ScreenProbeGIHistory[0]->resource);
-
-	ScreenProbeGIHistory[1] = createTexture2D(HybridFloat4UAVFormat, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
-
-	NAME_D3D12_OBJECT(ScreenProbeGIHistory[1]->resource);
-
-	// gi result sh
-	DiffuseGITemporalAux[0] = createTexture2D(HybridFloat4UAVFormat, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
-
-	NAME_D3D12_OBJECT(DiffuseGITemporalAux[0]->resource);
-
-	DiffuseGITemporalAux[1] = createTexture2D(HybridFloat4UAVFormat, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
-
-	NAME_D3D12_OBJECT(DiffuseGITemporalAux[1]->resource);
-
-	// gi result color
-	DiffuseGITemporal[0] = createTexture2D(HybridFloat4UAVFormat, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
-
-	NAME_D3D12_OBJECT(DiffuseGITemporal[0]->resource);
-
-	DiffuseGITemporal[1] = createTexture2D(HybridFloat4UAVFormat, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
-
-	NAME_D3D12_OBJECT(DiffuseGITemporal[1]->resource);
-	AppendCpuRuntimeTrace(L"[LoadAssets] after temporal GI buffers");
+	else
+	{
+		AppendCpuRuntimeTrace(L"[LoadAssets] skipped RT/GI buffers for mobile direct-light-only hybrid");
+	}
+	if (bNeedMobileShadowMap)
+	{
+		ShadowBuffer = createTexture2D(
+			ETextureFormat::D32Float,
+			TextureUsage_DepthStencil,
+			MobileShadowMapResolution,
+			MobileShadowMapResolution,
+			1,
+			std::nullopt,
+			EInitialResourceState::ShaderRead);
+		NAME_D3D12_OBJECT(ShadowBuffer->resource);
+		AppendCpuRuntimeTrace(L"[LoadAssets] after mobile shadow map buffer");
+	}
 
 	// albedo
 	UpdateStartupLoadingProgress(0.66f, L"Allocating G-buffer textures");
 	AlbedoBuffer = createTexture2D(ETextureFormat::RGBA8Unorm, TextureUsage_RenderTarget | TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
-	AlbedoBuffer->MakeRTV();
 
 	NAME_D3D12_OBJECT(AlbedoBuffer->resource);
 
 	SpecularAlbedoBuffer = createTexture2D(ETextureFormat::RGBA8Unorm, TextureUsage_RenderTarget | TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
-	SpecularAlbedoBuffer->MakeRTV();
 
 	NAME_D3D12_OBJECT(SpecularAlbedoBuffer->resource);
 
 	// velocity
 	VelocityBuffer = createTexture2D(ETextureFormat::RG16Float, TextureUsage_RenderTarget | TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1, glm::vec4(0.0f));
-	VelocityBuffer->MakeRTV();
 	NAME_D3D12_OBJECT(VelocityBuffer->resource);
 
 	// pbr material
 	RoughnessMetalicBuffer = createTexture2D(ETextureFormat::RGBA8Unorm, TextureUsage_RenderTarget | TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1, glm::vec4(0.001f, 0.0f, 0.0f, 0.0f));
-	RoughnessMetalicBuffer->MakeRTV();
 
 	NAME_D3D12_OBJECT(RoughnessMetalicBuffer->resource);
 
-	PathTracingSpecularHitDistanceBuffer = createTexture2D(ETextureFormat::R32Float, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1, glm::vec4(Far));
-	NAME_D3D12_OBJECT(PathTracingSpecularHitDistanceBuffer->resource);
+	if (bNeedExtendedHybridResources)
+	{
+		PathTracingSpecularHitDistanceBuffer = createTexture2D(ETextureFormat::R32Float, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1, glm::vec4(Far));
+		NAME_D3D12_OBJECT(PathTracingSpecularHitDistanceBuffer->resource);
 
-	PathTracingSpecularMotionVectorBuffer = createTexture2D(ETextureFormat::RG16Float, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1, glm::vec4(0.0f));
-	NAME_D3D12_OBJECT(PathTracingSpecularMotionVectorBuffer->resource);
+		PathTracingSpecularMotionVectorBuffer = createTexture2D(ETextureFormat::RG16Float, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1, glm::vec4(0.0f));
+		NAME_D3D12_OBJECT(PathTracingSpecularMotionVectorBuffer->resource);
+	}
 
 	// depth
 	DepthBuffer = createTexture2D(ETextureFormat::D32Float, TextureUsage_DepthStencil, RenderWidthLocal, RenderHeightLocal, 1);
-	DepthBuffer->MakeDSV();
 	NAME_D3D12_OBJECT(DepthBuffer->resource);
 
 	UnjitteredDepthBuffers[0] = createTexture2D(ETextureFormat::R32Float, TextureUsage_RenderTarget | TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
-	UnjitteredDepthBuffers[0]->MakeRTV();
 	NAME_D3D12_OBJECT(UnjitteredDepthBuffers[0]->resource);
 
 	UnjitteredDepthBuffers[1] = createTexture2D(ETextureFormat::R32Float, TextureUsage_RenderTarget | TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
-	UnjitteredDepthBuffers[1]->MakeRTV();
 	NAME_D3D12_OBJECT(UnjitteredDepthBuffers[1]->resource);
 	AppendCpuRuntimeTrace(L"[LoadAssets] after gbuffer textures");
 
@@ -7912,22 +8362,30 @@ void Corona::LoadAssets()
 	if (bVulkanHybridStartup)
 		AppendCpuRuntimeTrace(L"[LoadAssets] after default textures");
 
-	UpdateStartupLoadingProgress(0.72f, L"Loading Sponza scene");
-	if (!Sponza) Sponza = LoadModel(WideToUtf8(GetAssetFullPath(L"assets\\Sponza\\Sponza.fbx")));
-	if (Sponza && SponzaObject == InvalidSceneObjectHandle)
+	if (!bMobileDungeonOnlyStartup)
 	{
-		SceneObjectDesc desc;
-		desc.ScenePtr = Sponza;
-		desc.Transform = glm::mat4x4(1.0f);
-		desc.Roughness = 1.0f;
-		desc.Metallic = 0.0f;
-		desc.bOverrideRoughnessMetallic = false;
-		SponzaObject = AddSceneObject(desc);
+		UpdateStartupLoadingProgress(0.72f, L"Loading Sponza scene");
+		if (!Sponza) Sponza = LoadModel(WideToUtf8(GetAssetFullPath(L"assets\\Sponza\\Sponza.fbx")));
+		if (Sponza && SponzaObject == InvalidSceneObjectHandle)
+		{
+			SceneObjectDesc desc;
+			desc.ScenePtr = Sponza;
+			desc.Transform = glm::mat4x4(1.0f);
+			desc.Roughness = 1.0f;
+			desc.Metallic = 0.0f;
+			desc.bOverrideRoughnessMetallic = false;
+			SponzaObject = AddSceneObject(desc);
+		}
+		if (bVulkanHybridStartup)
+			AppendCpuRuntimeTrace(L"[LoadAssets] after sponza load");
 	}
-	if (bVulkanHybridStartup)
-		AppendCpuRuntimeTrace(L"[LoadAssets] after sponza load");
+	else
+	{
+		UpdateStartupLoadingProgress(0.72f, L"Preparing dungeon scene");
+		AppendCpuRuntimeTrace(L"[LoadAssets] mobile dungeon-only: skipped Sponza load");
+	}
 
-	const bool bLoadStandaloneDemoObjects = !bEnableStartupLuauScript && !bStartupSponzaFlyMode;
+	const bool bLoadStandaloneDemoObjects = !bMobileDungeonOnlyStartup && !bEnableStartupLuauScript && !bStartupSponzaFlyMode;
 	if (bLoadStandaloneDemoObjects && !Buddha)
 	{
 		Buddha = LoadModel(WideToUtf8(GetAssetFullPath(L"assets\\buddha\\buddha.obj")));
@@ -7976,12 +8434,12 @@ void Corona::LoadAssets()
 			PistolCenterRotationDegrees);
 	}
 
-	if (!bStartupSponzaFlyMode && !MirrorCube)
+	if (!bMobileDungeonOnlyStartup && !bStartupSponzaFlyMode && !MirrorCube)
 	{
 		UpdateStartupLoadingProgress(0.80f, L"Creating mirror cube");
 		MirrorCube = CreateMirrorCubeScene();
 	}
-	if (!bStartupSponzaFlyMode && MirrorCube && MirrorCubeObject == InvalidSceneObjectHandle)
+	if (!bMobileDungeonOnlyStartup && !bStartupSponzaFlyMode && MirrorCube && MirrorCubeObject == InvalidSceneObjectHandle)
 	{
 		MirrorCubeObject = AddCenteredSceneObject(
 			MirrorCube,
@@ -8003,7 +8461,7 @@ void Corona::LoadAssets()
 		samplerDesc.AddressV = ESamplerAddressMode::Wrap;
 		samplerDesc.AddressW = ESamplerAddressMode::Wrap;
 		samplerDesc.MinLOD = 0.0f;
-		samplerDesc.MaxLOD = D3D12_FLOAT32_MAX;
+		samplerDesc.MaxLOD = std::numeric_limits<float>::max();
 		samplerDesc.MipLODBias = -1.0f;
 		samplerDesc.MaxAnisotropy = 1;
 
@@ -8019,7 +8477,7 @@ void Corona::LoadAssets()
 		samplerDesc.AddressV = ESamplerAddressMode::Clamp;
 		samplerDesc.AddressW = ESamplerAddressMode::Clamp;
 		samplerDesc.MinLOD = 0.0f;
-		samplerDesc.MaxLOD = D3D12_FLOAT32_MAX;
+		samplerDesc.MaxLOD = std::numeric_limits<float>::max();
 		samplerDesc.MipLODBias = -1.0f;
 		samplerDesc.MaxAnisotropy = 1;
 
@@ -8043,7 +8501,7 @@ void Corona::LoadAssets()
 		UpdateStartupLoadingProgress(0.89f, L"Compiling ray tracing pipelines");
 		InitRTPSO();
 		AppendCpuRuntimeTrace(L"[LoadAssets] after InitRTPSO");
-		if (StartupRenderingMode == ERenderingMode::PATHTRACING)
+		if (!CORONA_PLATFORM_MOBILE && StartupRenderingMode == ERenderingMode::PATHTRACING)
 		{
 			AppendCpuRuntimeTrace(L"[LoadAssets] before InitPathTracingPass");
 			UpdateStartupLoadingProgress(0.91f, L"Compiling path tracing pipeline");
@@ -8066,7 +8524,7 @@ shared_ptr<Scene> Corona::LoadBinaryMeshModel(const std::wstring& binaryFileName
 			L"Loading mesh cache: " + GetFileName(binaryFileName.c_str()));
 
 	const auto loadStart = CpuClock::now();
-	std::ifstream file(binaryFileName, std::ios::binary);
+	std::ifstream file(std::filesystem::path(binaryFileName), std::ios::binary);
 	if (!file)
 	{
 		AppendCpuRuntimeTrace(L"[LoadBinaryMeshModel] open failed: " + binaryFileName);
@@ -8271,6 +8729,10 @@ shared_ptr<Scene> Corona::LoadModel(string fileName)
 		AppendCpuRuntimeTrace(L"[LoadModel] binary cache rejected, falling back to Assimp: " + binaryMeshPath.wstring());
 	}
 
+#if !CORONA_HAS_ASSIMP
+	AppendCpuRuntimeTrace(L"[LoadModel] Assimp is not available on this target and no usable binary mesh cache exists: " + wide);
+	return nullptr;
+#else
 	wstring dir = GetDirectoryFromFilePath(wide.c_str());
 	//wstring dir = L"Sponza/";
 
@@ -8521,6 +8983,7 @@ shared_ptr<Scene> Corona::LoadModel(string fileName)
 		L", cacheHint=" + binaryMeshPath.wstring());
 
 	return scenePtr;
+#endif
 }
 
 void Corona::InitImgui()
@@ -8535,8 +8998,250 @@ void Corona::InitImgui()
 	io.IniFilename = m_imguiIniPath.c_str();
 	io.LogFilename = m_imguiLogPath.c_str();
 
-	ImGui_ImplWin32_Init(Win32Application::GetHwnd());
-	renderBackend->InitializeImGuiBackend(WindowHandle{ Win32Application::GetHwnd() }, ETextureFormat::RGBA8Unorm);
+	const WindowHandle platformWindow = GetMainPlatformWindowHandle();
+	InitializePlatformImGuiBackend(platformWindow);
+	renderBackend->InitializeImGuiBackend(platformWindow, ETextureFormat::RGBA8Unorm);
+}
+
+void Corona::DrawMobileVirtualControls()
+{
+#if CORONA_PLATFORM_MOBILE
+	ImGuiIO& io = ImGui::GetIO();
+	const ImVec2 displaySize = io.DisplaySize;
+	if (displaySize.x <= 1.0f || displaySize.y <= 1.0f)
+		return;
+
+	const float shortEdge = std::max(1.0f, std::min(displaySize.x, displaySize.y));
+	const float attackRadius = std::clamp(shortEdge * 0.085f, 62.0f, 96.0f);
+	const float attackMargin = std::clamp(shortEdge * 0.070f, 56.0f, 92.0f);
+	const ImVec2 attackCenter(
+		displaySize.x - attackMargin - attackRadius,
+		displaySize.y - attackMargin - attackRadius);
+	const bool bAttackDown = bMobileVirtualAttackDown;
+	const float attackPulse = bAttackDown ? 1.0f : 0.0f;
+
+	ImDrawList* drawList = ImGui::GetForegroundDrawList();
+	drawList->AddCircleFilled(
+		attackCenter,
+		attackRadius,
+		bAttackDown ? IM_COL32(185, 70, 52, 185) : IM_COL32(28, 26, 30, 135),
+		48);
+	drawList->AddCircle(
+		attackCenter,
+		attackRadius,
+		bAttackDown ? IM_COL32(255, 205, 180, 230) : IM_COL32(255, 245, 235, 150),
+		48,
+		3.0f + attackPulse * 1.5f);
+	drawList->AddCircle(
+		attackCenter,
+		attackRadius * 0.68f,
+		IM_COL32(255, 245, 230, bAttackDown ? 180 : 105),
+		40,
+		2.0f);
+
+	const float blade = attackRadius * 0.46f;
+	const float guard = attackRadius * 0.24f;
+	const ImVec2 bladeStart(attackCenter.x - blade * 0.36f, attackCenter.y + blade * 0.36f);
+	const ImVec2 bladeEnd(attackCenter.x + blade * 0.40f, attackCenter.y - blade * 0.40f);
+	const ImU32 iconColor = IM_COL32(255, 250, 232, bAttackDown ? 245 : 205);
+	drawList->AddLine(bladeStart, bladeEnd, iconColor, 5.0f);
+	drawList->AddLine(
+		ImVec2(attackCenter.x - guard, attackCenter.y - guard * 0.15f),
+		ImVec2(attackCenter.x + guard * 0.15f, attackCenter.y + guard),
+		iconColor,
+		4.0f);
+	drawList->AddCircleFilled(
+		ImVec2(attackCenter.x - blade * 0.48f, attackCenter.y + blade * 0.48f),
+		attackRadius * 0.075f,
+		iconColor,
+		16);
+
+	if (!bMobileVirtualJoystickActive)
+		return;
+
+	const float radius = std::max(1.0f, MobileVirtualJoystickRadius);
+	const ImVec2 center(MobileVirtualJoystickCenter.x, MobileVirtualJoystickCenter.y);
+	const ImVec2 drag(MobileVirtualJoystickDrag.x, MobileVirtualJoystickDrag.y);
+	const ImVec2 clamped(
+		center.x + MobileVirtualMoveAxis.x * radius,
+		center.y - MobileVirtualMoveAxis.y * radius);
+	const float axisStrength = std::clamp(glm::length(MobileVirtualMoveAxis), 0.0f, 1.0f);
+	const float centerRadius = std::clamp(radius * 0.22f, 18.0f, 30.0f);
+	const float dragRadius = std::clamp(radius * 0.18f, 16.0f, 26.0f);
+	const ImU32 ringColor = IM_COL32(215, 245, 255, 95);
+	const ImU32 activeColor = IM_COL32(95, 190, 215, static_cast<int>(145.0f + axisStrength * 70.0f));
+	const ImU32 lineColor = IM_COL32(235, 250, 255, static_cast<int>(120.0f + axisStrength * 85.0f));
+
+	drawList->AddCircle(center, radius, ringColor, 64, 2.0f);
+	drawList->AddCircleFilled(center, centerRadius, IM_COL32(20, 28, 32, 150), 32);
+	drawList->AddCircle(center, centerRadius, IM_COL32(235, 252, 255, 205), 32, 2.0f);
+	drawList->AddLine(
+		ImVec2(center.x - centerRadius * 0.45f, center.y),
+		ImVec2(center.x + centerRadius * 0.45f, center.y),
+		IM_COL32(235, 252, 255, 175),
+		2.0f);
+	drawList->AddLine(
+		ImVec2(center.x, center.y - centerRadius * 0.45f),
+		ImVec2(center.x, center.y + centerRadius * 0.45f),
+		IM_COL32(235, 252, 255, 175),
+		2.0f);
+
+	drawList->AddLine(center, drag, lineColor, std::clamp(radius * 0.035f, 3.0f, 6.0f));
+	drawList->AddCircleFilled(clamped, radius * 0.12f, activeColor, 32);
+	drawList->AddCircle(drag, dragRadius, IM_COL32(20, 28, 32, 170), 32, 5.0f);
+	drawList->AddCircleFilled(drag, dragRadius, activeColor, 32);
+	drawList->AddCircle(drag, dragRadius, IM_COL32(245, 252, 255, 225), 32, 2.0f);
+#else
+	bMobileVirtualMoveForward = false;
+	bMobileVirtualMoveBackward = false;
+	bMobileVirtualMoveLeft = false;
+	bMobileVirtualMoveRight = false;
+	bMobileVirtualJoystickActive = false;
+	MobileVirtualMoveAxis = glm::vec2(0.0f);
+	bMobileVirtualAttackDown = false;
+	bMobileVirtualAttackPressed = false;
+	bMobileVirtualAttackReleased = false;
+#endif
+}
+
+void Corona::DrawMobilePerformanceOverlay()
+{
+#if CORONA_PLATFORM_MOBILE
+	ImGuiIO& io = ImGui::GetIO();
+	const ImVec2 displaySize = io.DisplaySize;
+	if (displaySize.x <= 1.0f || displaySize.y <= 1.0f)
+		return;
+
+	const float avgFrameMs = FramePerfAverageFrameMs > 0.0f ? FramePerfAverageFrameMs : FramePerfLastFrameMs;
+	const float avgFps = avgFrameMs > 0.001f ? (1000.0f / avgFrameMs) : static_cast<float>(m_timer.GetFramesPerSecond());
+	const float renderScaleX = m_width > 0 ? static_cast<float>(GetRenderWidth()) / static_cast<float>(m_width) : 1.0f;
+	const float renderScaleY = m_height > 0 ? static_cast<float>(GetRenderHeight()) / static_cast<float>(m_height) : 1.0f;
+	const float renderScale = std::min(renderScaleX, renderScaleY);
+
+	auto passAvg = [this](EGpuPass pass) -> float
+	{
+		return GpuPassAverageTimeMs[static_cast<UINT>(pass)];
+	};
+	auto passCpu = [this](EGpuPass pass) -> float
+	{
+		return CpuPassLastTimeMs[static_cast<UINT>(pass)];
+	};
+
+	std::vector<std::string> lines;
+	lines.reserve(8);
+
+	char buffer[256];
+	std::snprintf(
+		buffer,
+		sizeof(buffer),
+		"FPS %.1f  frame %.2f ms avg / %.2f ms last",
+		avgFps,
+		avgFrameMs,
+		FramePerfLastFrameMs);
+	lines.emplace_back(buffer);
+
+	std::snprintf(
+		buffer,
+		sizeof(buffer),
+		"Render %ux%u -> %ux%u  scale %.2f",
+		GetRenderWidth(),
+		GetRenderHeight(),
+		m_width,
+		m_height,
+		renderScale);
+	lines.emplace_back(buffer);
+
+	std::snprintf(
+		buffer,
+		sizeof(buffer),
+		"CPU update %.2f  record %.2f  exec %.2f  present %.2f  wait %.2f",
+		CpuUpdateAverageTimeMs,
+		FramePerfAverageRecordMs,
+		FramePerfAverageExecuteMs,
+		FramePerfAverageEndFrameMs,
+		FramePerfAverageRenderWaitMs);
+	lines.emplace_back(buffer);
+
+	std::snprintf(
+		buffer,
+		sizeof(buffer),
+		"GPU frame %.2f  gbuf %.2f  shadow %.2f  light %.2f  taa %.2f  tone %.2f  ui %.2f",
+		passAvg(EGpuPass::Frame),
+		passAvg(EGpuPass::GBuffer),
+		passAvg(EGpuPass::RaytraceShadow),
+		passAvg(EGpuPass::Lighting),
+		passAvg(EGpuPass::TemporalAA),
+		passAvg(EGpuPass::ToneMap),
+		passAvg(EGpuPass::ImGui));
+	lines.emplace_back(buffer);
+
+	std::snprintf(
+		buffer,
+		sizeof(buffer),
+		"CPU pass gbuf %.2f  shadow %.2f  light %.2f  taa %.2f  tone %.2f  ui %.2f",
+		passCpu(EGpuPass::GBuffer),
+		passCpu(EGpuPass::RaytraceShadow),
+		passCpu(EGpuPass::Lighting),
+		passCpu(EGpuPass::TemporalAA),
+		passCpu(EGpuPass::ToneMap),
+		passCpu(EGpuPass::ImGui));
+	lines.emplace_back(buffer);
+
+	std::snprintf(
+		buffer,
+		sizeof(buffer),
+		"Record scene %.2f  passes %.2f  UI %.2f  present %.2f",
+		RenderCommandPhaseAverageTimeMs[static_cast<UINT>(ERenderCommandPhase::SceneFlush)],
+		RenderCommandPhaseAverageTimeMs[static_cast<UINT>(ERenderCommandPhase::RenderPasses)],
+		RenderCommandPhaseAverageTimeMs[static_cast<UINT>(ERenderCommandPhase::CaptureUi)],
+		RenderCommandPhaseAverageTimeMs[static_cast<UINT>(ERenderCommandPhase::PresentTransition)]);
+	lines.emplace_back(buffer);
+
+	std::snprintf(
+		buffer,
+		sizeof(buffer),
+		"GBuffer visible %llu/%llu  culled %llu",
+		static_cast<unsigned long long>(GBufferLastVisibleObjectCount),
+		static_cast<unsigned long long>(GBufferLastTotalObjectCount),
+		static_cast<unsigned long long>(GBufferLastFrustumCulledObjectCount));
+	lines.emplace_back(buffer);
+
+	std::snprintf(
+		buffer,
+		sizeof(buffer),
+		"Shadow casters %llu/%llu  candidates %llu  receivers %llu  guaranteed %llu  culled %llu",
+		static_cast<unsigned long long>(MobileShadowLastCasterObjectCount),
+		static_cast<unsigned long long>(MobileShadowLastTotalObjectCount),
+		static_cast<unsigned long long>(MobileShadowLastCandidateObjectCount),
+		static_cast<unsigned long long>(MobileShadowLastReceiverObjectCount),
+		static_cast<unsigned long long>(MobileShadowLastGuaranteedCasterCount),
+		static_cast<unsigned long long>(MobileShadowLastCulledObjectCount));
+	lines.emplace_back(buffer);
+
+	ImDrawList* drawList = ImGui::GetForegroundDrawList();
+	const float padding = 10.0f;
+	const float margin = 18.0f;
+	const float lineSpacing = 2.0f;
+	float panelWidth = 0.0f;
+	const float lineHeight = ImGui::GetTextLineHeight();
+	for (const std::string& line : lines)
+		panelWidth = std::max(panelWidth, ImGui::CalcTextSize(line.c_str()).x);
+	const float panelHeight = padding * 2.0f + static_cast<float>(lines.size()) * lineHeight + static_cast<float>(lines.size() - 1) * lineSpacing;
+	panelWidth += padding * 2.0f;
+
+	const ImVec2 panelMax(displaySize.x - margin, margin + panelHeight);
+	const ImVec2 panelMin(std::max(margin, panelMax.x - panelWidth), margin);
+	drawList->AddRectFilled(panelMin, panelMax, IM_COL32(5, 7, 9, 178), 6.0f);
+	drawList->AddRect(panelMin, panelMax, IM_COL32(210, 235, 245, 70), 6.0f, 0, 1.0f);
+
+	ImVec2 textPos(panelMin.x + padding, panelMin.y + padding);
+	for (const std::string& line : lines)
+	{
+		drawList->AddText(ImVec2(textPos.x + 1.0f, textPos.y + 1.0f), IM_COL32(0, 0, 0, 180), line.c_str());
+		drawList->AddText(textPos, IM_COL32(226, 242, 246, 235), line.c_str());
+		textPos.y += lineHeight + lineSpacing;
+	}
+#endif
 }
 
 void Corona::InitBlueNoiseTexture()
@@ -8588,13 +9293,11 @@ void Corona::InitBlueNoiseTexture()
 				ss << "\n";
 		}
 
-		D3D12_SUBRESOURCE_DATA textureData = {};
-		textureData.pData = NoiseDataFloat;
-		textureData.RowPitch = Shape[0] * nChannel * sizeof(UINT32);
-		textureData.SlicePitch = textureData.RowPitch * Shape[1];
+		const uint64_t rowPitch = Shape[0] * nChannel * sizeof(UINT32);
+		const uint64_t slicePitch = rowPitch * Shape[1];
 
 		BlueNoiseTex = renderBackend->CreateTexture3D(ETextureFormat::RGBA32Float, TextureUsage_None, EInitialResourceState::CopyDest, Shape[0], Shape[1], Shape[2], 1);
-		renderBackend->UploadTexture3D(BlueNoiseTex.get(), textureData.pData, textureData.RowPitch, textureData.SlicePitch);
+		renderBackend->UploadTexture3D(BlueNoiseTex.get(), NoiseDataFloat, rowPitch, slicePitch);
 
 		delete[] NoiseDataRaw;
 		delete[] NoiseDataFloat;
@@ -8703,7 +9406,7 @@ void Corona::OnUpdate()
 	{
 		// Update window text with FPS value.
 		wchar_t fps[64];
-		swprintf_s(fps, L"%ufps", m_timer.GetFramesPerSecond());
+		swprintf(fps, _countof(fps), L"%ufps", m_timer.GetFramesPerSecond());
 		if (!bSplitGameRenderThreads)
 			SetCustomWindowText(fps);
 		m_frameCounter = 0;
@@ -8711,20 +9414,22 @@ void Corona::OnUpdate()
 
 	m_frameCounter++;
 
+	phaseStart = CpuClock::now();
+	PollScriptMouseState();
+	PollScriptGamepadState();
+	AddCpuUpdatePhaseTiming(ECpuUpdatePhase::Input, phaseStart, CpuClock::now());
+
+	phaseStart = CpuClock::now();
 	const glm::vec3 cameraPositionBeforeNativeUpdate = m_camera.m_position;
 	const bool bCameraPathDrivesCamera = bCameraPathPlaying || bCameraPathDumping;
 	if (!bScriptCameraControlEnabled && !bCameraPathDrivesCamera)
 	{
 		m_camera.SetTurnSpeed(m_turnSpeed);
+		UpdateMobileTouchCameraInput(elapsedSeconds);
 		m_camera.Update(elapsedSeconds);
 		m_camera.m_position = ResolveCameraPhysicsMovement(cameraPositionBeforeNativeUpdate, m_camera.m_position);
 	}
 	AddCpuUpdatePhaseTiming(ECpuUpdatePhase::CameraPhysics, phaseStart, CpuClock::now());
-
-	phaseStart = CpuClock::now();
-	PollScriptMouseState();
-	PollScriptGamepadState();
-	AddCpuUpdatePhaseTiming(ECpuUpdatePhase::Input, phaseStart, CpuClock::now());
 
 	phaseStart = CpuClock::now();
 	UpdateLuauScripting(elapsedSeconds);
@@ -8746,6 +9451,25 @@ void Corona::OnUpdate()
 	AddCpuUpdatePhaseTiming(ECpuUpdatePhase::RenderSync, phaseStart, CpuClock::now());
 
 	FinishCpuUpdateTiming(updateStart, CpuClock::now());
+}
+
+void Corona::UpdateMobileTouchCameraInput(float elapsedSeconds)
+{
+	(void)elapsedSeconds;
+#if CORONA_PLATFORM_MOBILE
+	if (bScriptRightMouseDown && (ScriptMouseDeltaX != 0 || ScriptMouseDeltaY != 0))
+	{
+		m_camera.AddLookDelta(
+			static_cast<float>(ScriptMouseDeltaX) * MobileTouchLookSensitivityScale,
+			static_cast<float>(ScriptMouseDeltaY) * MobileTouchLookSensitivityScale);
+	}
+
+	const float strafe = MobileVirtualMoveAxis.x;
+	const float forward = -MobileVirtualMoveAxis.y;
+	m_camera.SetVirtualMoveInput(strafe, forward, 0.0f);
+#else
+	m_camera.SetVirtualMoveInput(0.0f, 0.0f, 0.0f);
+#endif
 }
 
 void Corona::ProcessRenderThreadRequests()
@@ -8777,34 +9501,51 @@ void Corona::BuildRenderFrameDerivedState(const RenderFrameSourceState* sourceSt
 	if (sourceState)
 		ApplyRenderFrameSourceState(*sourceState);
 
-	const float effectiveNear = Near;
-	const float effectiveFar = Far;
+	const float effectiveNear = std::max(0.001f, FiniteFloatOr(Near, 10.0f));
+	const float effectiveFar = std::max(effectiveNear + 1.0f, FiniteFloatOr(Far, 20000.0f));
+	const float effectiveFov = FiniteClampedOr(Fov, 0.8f, 0.05f, glm::pi<float>() - 0.05f);
+	const float effectiveAspectRatio = std::max(0.001f, FiniteFloatOr(m_aspectRatio, 16.0f / 9.0f));
+	glm::vec3 debugCameraPosition(0.0f);
+	glm::vec3 debugCameraLook(0.0f, 0.0f, 1.0f);
+	glm::vec3 debugCameraUp(0.0f, 1.0f, 0.0f);
 
 	if (sourceState)
 	{
 		auto normalizeOrFallback = [](const glm::vec3& value, const glm::vec3& fallback)
 		{
+			if (!IsFiniteVec3(value))
+				return fallback;
 			const float length = glm::length(value);
-			return length > 0.0001f ? value / length : fallback;
+			return std::isfinite(length) && length > 0.0001f ? value / length : fallback;
 		};
 
+		const glm::vec3 fallbackPosition = ReasonableWorldPositionOr(m_camera.m_position, glm::vec3(0.0f, 260.0f, -300.0f));
+		const glm::vec3 cameraPosition = ReasonableWorldPositionOr(sourceState->CameraPosition, fallbackPosition);
 		const glm::vec3 cameraLook = normalizeOrFallback(sourceState->CameraLookDirection, glm::vec3(0.0f, 0.0f, 1.0f));
 		glm::vec3 cameraUp = normalizeOrFallback(sourceState->CameraUpDirection, glm::vec3(0.0f, 1.0f, 0.0f));
 		if (glm::length(glm::cross(cameraLook, cameraUp)) < 0.0001f)
 			cameraUp = std::abs(cameraLook.y) < 0.99f ? glm::vec3(0.0f, 1.0f, 0.0f) : glm::vec3(1.0f, 0.0f, 0.0f);
 
 		RenderFrameCameraLookDirection = cameraLook;
-		ViewMat = glm::lookAtRH(sourceState->CameraPosition, sourceState->CameraPosition + cameraLook, cameraUp);
-		ProjMat = m_camera.GetProjectionMatrix(Fov, m_aspectRatio, effectiveNear, effectiveFar);
+		debugCameraPosition = cameraPosition;
+		debugCameraLook = cameraLook;
+		debugCameraUp = cameraUp;
+		ViewMat = BuildSafeLookAtRH(cameraPosition, cameraLook, cameraUp);
+		ProjMat = m_camera.GetProjectionMatrix(effectiveFov, effectiveAspectRatio, effectiveNear, effectiveFar);
 	}
 	else
 	{
 		RenderFrameCameraLookDirection =
-			glm::length(m_camera.m_lookDirection) > 0.0001f ?
+			IsFiniteVec3(m_camera.m_lookDirection) && glm::length(m_camera.m_lookDirection) > 0.0001f ?
 			glm::normalize(m_camera.m_lookDirection) :
 			glm::vec3(0.0f, 0.0f, 1.0f);
-		ViewMat = m_camera.GetViewMatrix();
-		ProjMat = m_camera.GetProjectionMatrix(Fov, m_aspectRatio, effectiveNear, effectiveFar);
+		const glm::vec3 cameraPosition = ReasonableWorldPositionOr(m_camera.m_position, glm::vec3(0.0f, 260.0f, -300.0f));
+		const glm::vec3 cameraUp = FiniteVec3Or(m_camera.m_upDirection, glm::vec3(0.0f, 1.0f, 0.0f));
+		debugCameraPosition = cameraPosition;
+		debugCameraLook = RenderFrameCameraLookDirection;
+		debugCameraUp = cameraUp;
+		ViewMat = BuildSafeLookAtRH(cameraPosition, RenderFrameCameraLookDirection, cameraUp);
+		ProjMat = m_camera.GetProjectionMatrix(effectiveFov, effectiveAspectRatio, effectiveNear, effectiveFar);
 	}
 	UnjitteredProjMat = ProjMat;
 	UnjitteredViewProjMat = ProjMat * ViewMat;
@@ -8839,6 +9580,42 @@ void Corona::BuildRenderFrameDerivedState(const RenderFrameSourceState* sourceSt
 		ProjMat = JitterMat * ProjMat;
 
 	ViewProjMat = ProjMat * ViewMat;
+	const bool bDerivedStateFinite =
+		IsFiniteMat4(ViewMat) &&
+		IsFiniteMat4(ProjMat) &&
+		IsFiniteMat4(UnjitteredViewProjMat) &&
+		IsFiniteMat4(ViewProjMat);
+	static bool bLoggedRenderFrameDerivedState = false;
+	if (!bLoggedRenderFrameDerivedState || !bDerivedStateFinite)
+	{
+		AppendCpuRuntimeTrace(
+			L"[RenderFrameDerivedState] source=" + std::to_wstring(sourceState ? 1 : 0) +
+			L", finite=" + std::to_wstring(bDerivedStateFinite ? 1 : 0) +
+			L", viewFinite=" + std::to_wstring(IsFiniteMat4(ViewMat) ? 1 : 0) +
+			L", projFinite=" + std::to_wstring(IsFiniteMat4(ProjMat) ? 1 : 0) +
+			L", viewProjFinite=" + std::to_wstring(IsFiniteMat4(ViewProjMat) ? 1 : 0) +
+			L", fov=" + std::to_wstring(effectiveFov) +
+			L", aspect=" + std::to_wstring(effectiveAspectRatio) +
+			L", near=" + std::to_wstring(effectiveNear) +
+			L", far=" + std::to_wstring(effectiveFar) +
+			L", render=" + std::to_wstring(GetRenderWidth()) + L"x" + std::to_wstring(GetRenderHeight()) +
+			L", jitterScale=" + std::to_wstring(JitterScale) +
+			L", jitter=(" + std::to_wstring(Jitter.x) + L"," + std::to_wstring(Jitter.y) + L")" +
+			L", offset=(" + std::to_wstring(offsetX) + L"," + std::to_wstring(offsetY) + L")" +
+			L", camera=(" + std::to_wstring(debugCameraPosition.x) +
+			L"," + std::to_wstring(debugCameraPosition.y) +
+			L"," + std::to_wstring(debugCameraPosition.z) +
+			L"), look=(" + std::to_wstring(debugCameraLook.x) +
+			L"," + std::to_wstring(debugCameraLook.y) +
+			L"," + std::to_wstring(debugCameraLook.z) +
+			L"), up=(" + std::to_wstring(debugCameraUp.x) +
+			L"," + std::to_wstring(debugCameraUp.y) +
+			L"," + std::to_wstring(debugCameraUp.z) + L")" +
+			L", view00=" + std::to_wstring(ViewMat[0][0]) +
+			L", proj00=" + std::to_wstring(ProjMat[0][0]) +
+			L", vp00=" + std::to_wstring(ViewProjMat[0][0]));
+		bLoggedRenderFrameDerivedState = true;
+	}
 	if (bResetTemporalStateNextUpdate)
 	{
 		PrevViewProjMat = ViewProjMat;
@@ -8934,10 +9711,17 @@ void Corona::OnRender()
 	std::unique_lock<std::mutex> stateLock(GameRenderStateMutex);
 	ProcessRenderThreadRequests();
 	ApplyPendingRenderFrameDeltas();
-	if (bSplitGameRenderThreads && RenderWorld.bHasFrameSourceState)
-		BuildRenderFrameDerivedState(&RenderWorld.FrameSourceState);
-	else if (!bSplitGameRenderThreads)
-		BuildRenderFrameDerivedState(nullptr);
+	RenderFrameSourceState singleThreadFrameSourceState;
+	if (bSplitGameRenderThreads)
+	{
+		if (RenderWorld.bHasFrameSourceState)
+			BuildRenderFrameDerivedState(&RenderWorld.FrameSourceState);
+	}
+	else
+	{
+		singleThreadFrameSourceState = CaptureRenderFrameSourceState();
+		BuildRenderFrameDerivedState(&singleThreadFrameSourceState);
+	}
 
 	BeginFramePerfLogging();
 	double beginFrameMs = 0.0;
@@ -8971,7 +9755,15 @@ void Corona::OnRender()
 		!bCameraPathDumping &&
 		!bFinalScreenshotRequested &&
 		!bFinalScreenshotCaptureInFlight;
-	const ERenderingMode renderingModeThisFrame = RenderingMode;
+	ERenderingMode renderingModeThisFrame = RenderingMode;
+#if CORONA_PLATFORM_MOBILE
+	if (renderingModeThisFrame == ERenderingMode::PATHTRACING)
+	{
+		RenderingMode = ERenderingMode::HYBRID;
+		AntiAliasingMode = EAntiAliasingMode::TAA;
+		renderingModeThisFrame = ERenderingMode::HYBRID;
+	}
+#endif
 	const bool bDebugDrawThisFrame = bDebugDraw;
 	if (bAllowGameUpdateDuringRender)
 		stateLock.unlock();
@@ -8991,6 +9783,8 @@ void Corona::OnRender()
 	bStreamlineConstantsSetThisFrame = false;
 #endif
 	bDLSSRROutputValidThisFrame = false;
+	bShadowOutputValidThisFrame = false;
+	bMobileShadowMapValidThisFrame = false;
 	bRTAOOutputValidThisFrame = false;
 	bSkyLightingOutputValidThisFrame = false;
 	if (bPendingTemporalHistoryClear)
@@ -9006,8 +9800,11 @@ void Corona::OnRender()
 
 	if (renderingModeThisFrame == ERenderingMode::HYBRID)
 	{
-		const bool bStageDump = IsHybridStageAutoDumpPhase();
-		const uint32_t maxSupportedHybridStage = renderBackend ? renderBackend->GetMaxSupportedHybridStage() : 7u;
+		const bool bMobileHybridDirectOnly = CORONA_PLATFORM_MOBILE;
+		const bool bStageDump = !bMobileHybridDirectOnly && IsHybridStageAutoDumpPhase();
+		const uint32_t maxSupportedHybridStage =
+			bMobileHybridDirectOnly ? 7u :
+			(renderBackend ? renderBackend->GetMaxSupportedHybridStage() : 7u);
 		const uint32_t requestedHybridStage = bStageDump ? AutoAADumpPhase : 7u;
 		const uint32_t hybridStage = std::min(requestedHybridStage, maxSupportedHybridStage);
 		if (!bLoggedHybridStageLimit && requestedHybridStage > hybridStage)
@@ -9017,10 +9814,14 @@ void Corona::OnRender()
 				std::wstring(L"[OnRender] hybrid stage limited by backend to ") +
 				GetHybridStageAutoDumpPhaseName(hybridStage));
 		}
-		const bool bRunShadow = hybridStage >= 1;
-		const bool bRunReflection = hybridStage >= 3;
-		const bool bRunGI = hybridStage >= 4;
-		const bool bRunTemporalDenoise = hybridStage >= 5;
+		const bool bRunShadowMap =
+			bMobileHybridDirectOnly &&
+			MobileShadowMapGraphicsPipeline &&
+			ShadowBuffer;
+		const bool bRunRayTracedShadow = !bMobileHybridDirectOnly && hybridStage >= 1;
+		const bool bRunReflection = !bMobileHybridDirectOnly && hybridStage >= 3;
+		const bool bRunGI = !bMobileHybridDirectOnly && hybridStage >= 4;
+		const bool bRunTemporalDenoise = !bMobileHybridDirectOnly && hybridStage >= 5;
 		const bool bRunLighting = hybridStage >= 7;
 		const bool bVulkanHybridBackend =
 			renderBackend &&
@@ -9031,21 +9832,27 @@ void Corona::OnRender()
 		GBufferPass();
 		EndGpuPassTiming(EGpuPass::GBuffer);
 
-		if (bRunShadow)
+		if (bRunShadowMap)
+		{
+			BeginGpuPassTiming(EGpuPass::RaytraceShadow);
+			MobileShadowMapPass();
+			EndGpuPassTiming(EGpuPass::RaytraceShadow);
+		}
+		else if (bRunRayTracedShadow)
 		{
 			BeginGpuPassTiming(EGpuPass::RaytraceShadow);
 			RaytraceShadowPass();
 			EndGpuPassTiming(EGpuPass::RaytraceShadow);
 		}
 
-		if (bRunLighting && bEnableRTAO)
+		if (!bMobileHybridDirectOnly && bRunLighting && bEnableRTAO)
 		{
 			BeginGpuPassTiming(EGpuPass::RaytraceAO);
 			RaytraceAOPass();
 			EndGpuPassTiming(EGpuPass::RaytraceAO);
 		}
 
-		if (bRunLighting && bEnableSkyLighting && bEnableRayTracedSkyLighting)
+		if (!bMobileHybridDirectOnly && bRunLighting && bEnableSkyLighting && bEnableRayTracedSkyLighting)
 		{
 			BeginGpuPassTiming(EGpuPass::RaytraceSkyLighting);
 			RaytraceSkyLightingPass();
@@ -9160,7 +9967,7 @@ void Corona::OnRender()
 			}
 		}
 	}
-	else if (renderingModeThisFrame == ERenderingMode::PATHTRACING)
+	else if (!CORONA_PLATFORM_MOBILE && renderingModeThisFrame == ERenderingMode::PATHTRACING)
 	{
 		// Full path tracing
 		BeginGpuPassTiming(EGpuPass::PathTracing);
@@ -9194,14 +10001,23 @@ void Corona::OnRender()
 		renderingModeThisFrame == ERenderingMode::HYBRID &&
 		renderBackend &&
 		renderBackend->GetAPI() == ERenderBackendAPI::Vulkan;
-	const bool bVulkanHybridAutoDump = bVulkanHybridBackend && IsHybridStageAutoDumpPhase();
+	const bool bMobileHybridDirectOnlyFrame =
+		CORONA_PLATFORM_MOBILE &&
+		renderingModeThisFrame == ERenderingMode::HYBRID;
+	const bool bVulkanHybridAutoDump =
+		!bMobileHybridDirectOnlyFrame &&
+		bVulkanHybridBackend &&
+		IsHybridStageAutoDumpPhase();
 	const uint32_t vulkanPreviewStage =
-		bVulkanHybridBackend
+		(bVulkanHybridBackend && !bMobileHybridDirectOnlyFrame)
 			? (bVulkanHybridAutoDump
 				? std::min<uint32_t>(AutoAADumpPhase, renderBackend->GetMaxSupportedHybridStage())
 				: renderBackend->GetMaxSupportedHybridStage())
 			: 7u;
-	const bool bVulkanStagePreview = bVulkanHybridBackend && vulkanPreviewStage < 7u;
+	const bool bVulkanStagePreview =
+		!bMobileHybridDirectOnlyFrame &&
+		bVulkanHybridBackend &&
+		vulkanPreviewStage < 7u;
 	const UINT32 vulkanStageDumpCaptureFrame =
 		bVulkanHybridAutoDump
 			? GetHybridStageAutoDumpFrameCount(
@@ -9246,7 +10062,7 @@ void Corona::OnRender()
 		renderBackend->TransitionTexture(backbuffer, EResourceState::Present, EResourceState::RenderTarget);
 		renderBackend->SetRenderTarget(backbuffer);
 	}
-	if (!bVulkanStagePreview && renderingModeThisFrame == ERenderingMode::HYBRID &&
+	if (!bVulkanStagePreview && !bMobileHybridDirectOnlyFrame && renderingModeThisFrame == ERenderingMode::HYBRID &&
 		IsHybridStageAutoDumpPhase() && AutoAADumpPhase < 7)
 	{
 		static const float kStageClearColor[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
@@ -9258,14 +10074,17 @@ void Corona::OnRender()
 		ToneMapPass();
 		EndGpuPassTiming(EGpuPass::ToneMap);
 	}
+	const bool bMobileGBufferDumpCaptureThisFrame = AdvanceMobileGBufferDump(backbuffer);
 	AdvanceAutoAADump(backbuffer);
 
+#if CORONA_HAS_D3D12
 	if (bDebugDrawThisFrame)
 	{
 		BeginGpuPassTiming(EGpuPass::Debug);
 		DebugPass();
 		EndGpuPassTiming(EGpuPass::Debug);
 	}
+#endif
 	AddRenderCommandPhaseTiming(ERenderCommandPhase::BackbufferToneMap, renderCommandPhaseStart, CpuClock::now());
 
 	if (!stateLock.owns_lock())
@@ -9276,7 +10095,7 @@ void Corona::OnRender()
 	}
 
 	renderCommandPhaseStart = CpuClock::now();
-	bool bSuppressImguiForCapture = false;
+	bool bSuppressImguiForCapture = bMobileGBufferDumpCaptureThisFrame;
 	if (bCameraPathDumping)
 	{
 		if (!bVulkanStagePreview)
@@ -9305,13 +10124,32 @@ void Corona::OnRender()
 		}
 	}
 
-	if (!bSuppressImguiForCapture && bShowImgui && bImguiInitialized)
+	if (!bSuppressImguiForCapture && bImguiInitialized && (bShowImgui || CORONA_PLATFORM_MOBILE))
 	{
 
 		renderBackend->NewImGuiFrame();
-		ImGui_ImplWin32_NewFrame();
+		NewPlatformImGuiFrame();
 		ImGui::NewFrame();
 
+#if CORONA_PLATFORM_MOBILE
+		DrawMobileVirtualControls();
+#endif
+
+		const bool bUseLuauImguiControls =
+			bEnableStartupLuauScript &&
+			ScriptState &&
+			EntityWorld.GetScriptComponentCount() > 0;
+
+#if CORONA_PLATFORM_MOBILE
+		if (bUseLuauImguiControls)
+		{
+			RenderQueuedLuauUi(false, true);
+		}
+		DrawMobilePerformanceOverlay();
+#endif
+
+		if (bShowImgui)
+		{
 		bool show_demo_window = true;
 
 		//ImGui::ShowDemoWindow(&show_demo_window);
@@ -9327,8 +10165,9 @@ void Corona::OnRender()
 		if (bShowCullingTextOverlay)
 		{
 			char cullingText[160];
-			sprintf_s(
+			snprintf(
 				cullingText,
+				sizeof(cullingText),
 				"Rendered %llu / %llu objects  |  Frustum %llu  Occlusion %llu",
 				static_cast<unsigned long long>(GBufferLastVisibleObjectCount),
 				static_cast<unsigned long long>(GBufferLastTotalObjectCount),
@@ -9339,14 +10178,14 @@ void Corona::OnRender()
 			foregroundDrawList->AddText(cullingTextPos, IM_COL32(190, 235, 255, 235), cullingText);
 		}
 
-		const bool bUseLuauImguiControls =
-			bEnableStartupLuauScript &&
-			ScriptState &&
-			EntityWorld.GetScriptComponentCount() > 0;
 		if (bUseLuauImguiControls)
 		{
 			ImGui::Begin("Hi, Let's traceray!");
+#if CORONA_PLATFORM_MOBILE
+			RenderQueuedLuauUi(true, false);
+#else
 			RenderQueuedLuauUi();
+#endif
 			DrawLuauImGui();
 			ImGui::End();
 		}
@@ -9361,10 +10200,16 @@ void Corona::OnRender()
 		}
 		{
 			static ImGuiComboFlags renderingModeComboFlags = 0;
+#if CORONA_PLATFORM_MOBILE
+			const char* renderingModeItems[] = {
+				"HYBRID",
+			};
+#else
 			const char* renderingModeItems[] = {
 				"HYBRID (Raster + RT)",
 				"PATH TRACING",
 			};
+#endif
 			int renderingModeIndex = static_cast<int>(RenderingMode);
 			renderingModeIndex = std::clamp(renderingModeIndex, 0, static_cast<int>(IM_ARRAYSIZE(renderingModeItems)) - 1);
 			const char* renderingModeCurrent = renderingModeItems[renderingModeIndex];
@@ -9387,9 +10232,14 @@ void Corona::OnRender()
 		}
 		ImGui::Text("Arrow keys : rotate camera imGui\nWASD keys : move camera imGui\nI : show/hide imGui\nB : show/hide buffer visualization\nT : cycle anti-aliasing mode");
 		const bool bDebugVisualizationAvailable =
+#if CORONA_HAS_D3D12
 			renderBackend &&
 			renderBackend->GetAPI() == ERenderBackendAPI::D3D12 &&
-			BufferVisualizePSO != nullptr;
+			BufferVisualizePSO != nullptr
+#else
+			false
+#endif
+			;
 		if (bDebugVisualizationAvailable)
 		{
 			ImGui::Checkbox("Visualize Buffers", &bDebugDraw);
@@ -9458,7 +10308,7 @@ void Corona::OnRender()
 		test.y /= test.w;
 		//test.z /= test.w;
 		sprintf(debugText, "test : %f %f %f", test.x, test.y, test.z);
-		ImGui::Text(debugText);
+		ImGui::Text("%s", debugText);
 
 		if (ImGui::CollapsingHeader("Capture & Profiling", ImGuiTreeNodeFlags_DefaultOpen))
 		{
@@ -9472,8 +10322,9 @@ void Corona::OnRender()
 
 #if CORONA_HAS_D3D12
 			DX12Backend* dx12BackendForBvh = renderBackend ? renderBackend->AsDX12Backend() : nullptr;
+			const bool bBvhViewerAllowed = dx12BackendForBvh && dx12BackendForBvh->IsBvhViewerD3D12Allowed();
 			bool bBvhViewerVisible = dx12BackendForBvh && dx12BackendForBvh->IsBvhViewerD3D12WindowVisible();
-			if (!dx12BackendForBvh)
+			if (!bBvhViewerAllowed)
 				ImGui::BeginDisabled();
 			if (ImGui::Checkbox("BVH Viewer Window", &bBvhViewerVisible))
 			{
@@ -9487,8 +10338,10 @@ void Corona::OnRender()
 			{
 				dx12BackendForBvh->ShowBvhViewerD3D12Window();
 			}
-			if (!dx12BackendForBvh)
+			if (!bBvhViewerAllowed)
 				ImGui::EndDisabled();
+			if (dx12BackendForBvh && !bBvhViewerAllowed)
+				ImGui::TextDisabled("BVH Viewer is disabled while Streamline is active.");
 #endif
 
 			if (bFinalScreenshotRequested || bFinalScreenshotCaptureInFlight)
@@ -9918,8 +10771,7 @@ void Corona::OnRender()
 				if (ImGui::Checkbox("Enable Indirect Specular (GI)", &bEnableSpecularGI)) bLightingChanged = true;
 				const bool bRTReflectionSERAvailable =
 					renderBackend &&
-					renderBackend->GetAPI() == ERenderBackendAPI::D3D12 &&
-					bD3D12ShaderModel69Supported;
+					renderBackend->SupportsShaderExecutionReordering();
 				if (!bRTReflectionSERAvailable)
 					ImGui::BeginDisabled();
 				if (ImGui::Checkbox("RT Reflection SER", &bEnableRTReflectionSER))
@@ -9927,7 +10779,7 @@ void Corona::OnRender()
 				if (!bRTReflectionSERAvailable)
 					ImGui::EndDisabled();
 				if (!bRTReflectionSERAvailable && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-					ImGui::SetTooltip("Requires DX12 Shader Model 6.9.");
+					ImGui::SetTooltip("Requires backend shader execution reordering support.");
 				if (ImGui::SliderFloat("Sun Angular Radius", &RTShadowViewParam.ShadowLightRadius, 0.0f, 0.03f, "%.4f rad"))
 					bLightingChanged = true;
 				if (RenderingMode == ERenderingMode::HYBRID)
@@ -10027,8 +10879,7 @@ void Corona::OnRender()
 				if (ImGui::Checkbox("Enable Diffuse GI", &bEnableDiffuseGI)) bLightingChanged = true;
 				const bool bRTDiffuseGISERAvailable =
 					renderBackend &&
-					renderBackend->GetAPI() == ERenderBackendAPI::D3D12 &&
-					bD3D12ShaderModel69Supported;
+					renderBackend->SupportsShaderExecutionReordering();
 				if (!bRTDiffuseGISERAvailable)
 					ImGui::BeginDisabled();
 				if (ImGui::Checkbox("RT Diffuse GI SER", &bEnableRTDiffuseGISER))
@@ -10036,7 +10887,7 @@ void Corona::OnRender()
 				if (!bRTDiffuseGISERAvailable)
 					ImGui::EndDisabled();
 				if (!bRTDiffuseGISERAvailable && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-					ImGui::SetTooltip("Requires DX12 Shader Model 6.9.");
+					ImGui::SetTooltip("Requires backend shader execution reordering support.");
 
 				static const char* DiffuseGIModes[] = { "Simple Raytrace", "Spatial Hash", "Screen Probe" };
 				int DiffuseGIModeIndex = static_cast<int>(DiffuseGIMode);
@@ -10275,7 +11126,7 @@ if (ImGui::Button("Reset Accumulation"))
 
 			if (ImGui::BeginPopupModal("Msg"))
 			{
-				ImGui::TextWrapped(renderBackend->GetErrorString().c_str());
+				ImGui::TextWrapped("%s", renderBackend->GetErrorString().c_str());
 
 				if (ImGui::Button("Compile again", ImVec2(120, 0)))
 				{
@@ -10318,6 +11169,7 @@ if (ImGui::Button("Reset Accumulation"))
 				ImGui::Text("Row4: SHADOW | WORLD_NORMAL | DEPTH | ALBEDO");
 			}
 			ImGui::End();
+		}
 		}
 
 		ImGui::Render();
@@ -10391,7 +11243,8 @@ if (ImGui::Button("Reset Accumulation"))
 			L"[OnRender] exit-after-frames reached frame=" + std::to_wstring(FrameCounter) +
 			L", target=" + std::to_wstring(CommandLineExitAfterFrames));
 		DumpScriptProfileStats();
-		PostQuitMessage(0);
+		bCommandLineExitAfterFramesTriggered = true;
+		QuitPlatformApplication(0);
 		CommandLineExitAfterFrames = 0;
 	}
 }
@@ -10505,7 +11358,7 @@ void Corona::OnDestroy()
 	StopAsyncImageDumpWorkers();
 	if (!renderBackend)
 	{
-		CoUninitialize();
+		ShutdownPlatformRuntime();
 		AppendCpuRuntimeTrace(L"[OnDestroy] end no renderBackend");
 		return;
 	}
@@ -10513,19 +11366,19 @@ void Corona::OnDestroy()
 	renderBackend->ShutdownGpuTimestampQueries();
 
 #if WITH_STREAMLINE
-	// Streamline can spend a long time in plugin shutdown after automated captures.
-	// The process is exiting immediately, so let the OS tear it down in this path.
-	if (!bAutoAADumpEnabled)
+	// Streamline can spend a long time in plugin shutdown after automated captures
+	// and frame-count smoke tests. In those paths, let process teardown handle it.
+	if (!bAutoAADumpEnabled && !bCommandLineExitAfterFramesTriggered)
 		ShutdownStreamline();
 #endif
 	if (bImguiInitialized)
 	{
 		renderBackend->ShutdownImGuiBackend();
-		ImGui_ImplWin32_Shutdown();
+		ShutdownPlatformImGuiBackend();
 		ImGui::DestroyContext();
 		bImguiInitialized = false;
 	}
-	CoUninitialize();
+	ShutdownPlatformRuntime();
 	AppendCpuRuntimeTrace(L"[OnDestroy] end");
 }
 
@@ -10540,6 +11393,7 @@ void Corona::OnKeyDown(UINT8 key)
 		bMultiThreadRendering = !bMultiThreadRendering;
 		break;*/
 	case 'B':
+#if CORONA_HAS_D3D12
 		if (renderBackend &&
 			renderBackend->GetAPI() == ERenderBackendAPI::D3D12 &&
 			BufferVisualizePSO)
@@ -10550,6 +11404,9 @@ void Corona::OnKeyDown(UINT8 key)
 		{
 			bDebugDraw = false;
 		}
+#else
+		bDebugDraw = false;
+#endif
 		break;
 	case 'T':
 	{
@@ -10652,6 +11509,13 @@ void Corona::RecompileShaders()
 	IndirectAccumulatedFrames = 0;
 	bResetTemporalStateNextUpdate = true;
 
+#if CORONA_PLATFORM_MOBILE
+	InitGBufferPass();
+	InitToneMapPass();
+	InitLightingPass();
+	InitTemporalAAPass();
+	return;
+#else
 	InitRTPSO();
 	InitPathTracingPass();
 	InitTemporalDenoisingPass();
@@ -10660,18 +11524,23 @@ void Corona::RecompileShaders()
 	InitToneMapPass();
 	InitLightingPass();
 	InitTemporalAAPass();
+#if CORONA_HAS_D3D12
 	if (!renderBackend || renderBackend->GetAPI() == ERenderBackendAPI::D3D12)
 	{
 		InitDebugPass();
 		InitBloomPass();
 	}
+#endif
 	//InitGenMipSpecularGIPass();
+#endif
 }
 
+#if CORONA_HAS_D3D12
 vector<UINT64> ResourceInt64array(ComPtr<ID3D12Resource> resource, int size)
 {
 	uint8_t* pData;
 	HRESULT hr = resource->Map(0, nullptr, (void**)&pData);
+	(void)hr;
 
 	int size64 = size / sizeof(UINT64);
 	vector<UINT64> mem;
@@ -10683,3 +11552,4 @@ vector<UINT64> ResourceInt64array(ComPtr<ID3D12Resource> resource, int size)
 
 	return mem;
 }
+#endif

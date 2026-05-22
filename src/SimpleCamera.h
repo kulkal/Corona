@@ -13,6 +13,8 @@
 
 #define GLM_FORCE_DEPTH_ZERO_TO_ONE
 
+#include <cstdint>
+
 #include "glm/glm.hpp"
 #define GLM_ENABLE_EXPERIMENTAL
 #include "glm/gtx/transform.hpp"
@@ -32,9 +34,11 @@ public:
 	glm::mat4x4 GetProjectionMatrix(float fov, float aspectRatio, float nearPlane = 1.0f, float farPlane = 10000.0f);
 	void SetMoveSpeed(float unitsPerSecond);
 	void SetTurnSpeed(float radiansPerSecond);
+	void SetVirtualMoveInput(float strafe, float forward, float vertical = 0.0f);
+	void AddLookDelta(float deltaX, float deltaY);
 
-	void OnKeyDown(WPARAM key);
-	void OnKeyUp(WPARAM key);
+	void OnKeyDown(uint32_t key);
+	void OnKeyUp(uint32_t key);
 	
 	void OnMouseDown(int x, int y);
 	void OnMouseUp();
@@ -68,6 +72,7 @@ public:
 	glm::vec3 m_upDirection;
 	float m_moveSpeed;			// Speed at which the camera moves, in units per second.
 	float m_turnSpeed;			// Speed at which the camera turns, in radians per second.
+	glm::vec3 m_virtualMoveInput;
 
 	KeysPressed m_keysPressed;
 	

@@ -11,6 +11,7 @@ namespace CoronaECS
 	{
 		TransformComponent component;
 		component.LocalToWorld = matrix;
+		component.Position = glm::vec3(matrix[3]);
 		return component;
 	}
 
@@ -29,16 +30,18 @@ namespace CoronaECS
 			glm::translate(glm::mat4x4(1.0f), position) *
 			rotation *
 			glm::scale(glm::mat4x4(1.0f), scale);
+		component.Position = position;
 		return component;
 	}
 
 	glm::vec3 TransformComponent::GetPosition() const
 	{
-		return glm::vec3(LocalToWorld[3]);
+		return Position;
 	}
 
 	void TransformComponent::SetPosition(const glm::vec3& position)
 	{
+		Position = position;
 		LocalToWorld[3] = glm::vec4(position, LocalToWorld[3].w);
 	}
 

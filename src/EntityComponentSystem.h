@@ -43,6 +43,7 @@ namespace CoronaECS
 	struct TransformComponent
 	{
 		glm::mat4x4 LocalToWorld = glm::mat4x4(1.0f);
+		glm::vec3 Position = glm::vec3(0.0f);
 
 		static TransformComponent FromMatrix(const glm::mat4x4& matrix);
 		static TransformComponent FromTRS(

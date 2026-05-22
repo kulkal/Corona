@@ -1,6 +1,9 @@
 #pragma once
 
 #include "AftermathConfig.h"
+#include "RHIBuildConfig.h"
+
+#if CORONA_HAS_D3D12
 
 #include <algorithm>
 #include <cstdint>
@@ -60,3 +63,13 @@ inline void SetNameIndexed(ID3D12Object* object, LPCWSTR name, UINT index)
 
 #define NAME_D3D12_OBJECT(x) SetName(x.Get(), L#x)
 #define NAME_D3D12_OBJECT_INDEXED(x, n) SetNameIndexed(x[n].Get(), L#x, n)
+
+#else // CORONA_HAS_D3D12
+
+// In non-DX12 builds these become no-ops; the macro argument is never
+// evaluated, so renderer code touching DX12-only members (texture->resource,
+// etc.) inside the call still compiles.
+#define NAME_D3D12_OBJECT(x) ((void)0)
+#define NAME_D3D12_OBJECT_INDEXED(x, n) ((void)0)
+
+#endif // CORONA_HAS_D3D12

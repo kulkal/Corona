@@ -11,13 +11,17 @@
 
 #include "stdafx.h"
 #include "Corona.h"
+#include "VulkanBackend.h"
 
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cmath>
 #include <cstdlib>
 #include <iterator>
 #include <limits>
+
+#include "glm/gtc/matrix_transform.hpp"
 
 void AppendCpuRuntimeTrace(const std::wstring& line);
 
@@ -182,7 +186,7 @@ void Corona::InitBloomPass()
 void Corona::InitGBufferPass()
 {
 	GraphicsPipelineDesc desc{};
-	desc.ShaderPath = GetAssetFullPath(L"Shaders\\GBuffer.hlsl");
+	desc.ShaderPath = GetAssetFullPath(CORONA_PLATFORM_MOBILE ? L"Shaders\\GBufferMobile.hlsl" : L"Shaders\\GBuffer.hlsl");
 	desc.VertexEntryPoint = "VSMain";
 	desc.PixelEntryPoint = "PSMain";
 	desc.VertexElements = {
@@ -201,15 +205,27 @@ void Corona::InitGBufferPass()
 		{ "samplerWrap", 0 },
 	};
 	desc.VertexStride = 44;
-	desc.ColorFormats = {
-		ETextureFormat::RGBA8Unorm,
-		ETextureFormat::RGBA8Unorm,
-		ETextureFormat::RGBA16Float,
-		ETextureFormat::RGBA16Float,
-		ETextureFormat::RG16Float,
-		ETextureFormat::RGBA8Unorm,
-		ETextureFormat::R32Float,
-	};
+	if (CORONA_PLATFORM_MOBILE)
+	{
+		desc.ColorFormats = {
+			ETextureFormat::RGBA8Unorm,
+			ETextureFormat::RGBA8Unorm,
+			ETextureFormat::RG16Float,
+			ETextureFormat::RGBA8Unorm,
+		};
+	}
+	else
+	{
+		desc.ColorFormats = {
+			ETextureFormat::RGBA8Unorm,
+			ETextureFormat::RGBA8Unorm,
+			ETextureFormat::RGBA16Float,
+			ETextureFormat::RGBA16Float,
+			ETextureFormat::RG16Float,
+			ETextureFormat::RGBA8Unorm,
+			ETextureFormat::R32Float,
+		};
+	}
 	desc.DepthFormat = ETextureFormat::D32Float;
 	desc.bDepthEnable = true;
 	desc.bCullBackFaces = false;
@@ -217,6 +233,31 @@ void Corona::InitGBufferPass()
 	desc.ConstantBufferBinding = 0;
 
 	GBufferGraphicsPipeline = renderBackend->CreateGraphicsPipeline(desc);
+
+	GraphicsPipelineDesc spineDesc = desc;
+	spineDesc.VertexEntryPoint = "SpineVSMain";
+	spineDesc.VertexElements.clear();
+	spineDesc.VertexStride = 0;
+	spineDesc.BufferBindings = {
+		{ "SpineVertices", 4 },
+	};
+	SpineGBufferGraphicsPipeline = renderBackend->CreateGraphicsPipeline(spineDesc);
+	if (!SpineGBufferGraphicsPipeline)
+		AppendCpuRuntimeTrace(L"[InitGBufferPass] failed to create Spine GBuffer pipeline");
+
+	auto spineSkinningPSO = renderBackend->CreateComputePipelineStateObject();
+	if (spineSkinningPSO)
+	{
+		spineSkinningPSO->BindSRV("InputVertices", 0, 1);
+		spineSkinningPSO->BindSRV("Influences", 1, 1);
+		spineSkinningPSO->BindSRV("Bones", 2, 1);
+		spineSkinningPSO->BindUAV("OutputVertices", 0);
+		spineSkinningPSO->BindCBV("SpineSkinningConstant", 0, sizeof(SpineSkinningConstant));
+		if (spineSkinningPSO->InitCS(GetAssetFullPath(L"Shaders\\SpineSkinningCS.hlsl"), "SkinMain"))
+			SpineSkinningPSO = spineSkinningPSO;
+		else
+			AppendCpuRuntimeTrace(L"[InitGBufferPass] failed to create Spine skinning compute PSO");
+	}
 }
 
 void Corona::InitToneMapPass()
@@ -513,6 +554,51 @@ void Corona::InitLightingPass()
 	if (bSuccess)
 		LightingPSO = TEMP_LightingPSO;
 #endif // CORONA_HAS_D3D12 (Lighting DX12 fallback)
+}
+
+void Corona::InitMobileShadowMapPass()
+{
+	if (!renderBackend)
+		return;
+
+	GraphicsPipelineDesc desc{};
+	desc.ShaderPath = GetAssetFullPath(L"Shaders\\MobileShadowMap.hlsl");
+	desc.VertexEntryPoint = "VSMain";
+	desc.PixelEntryPoint = "PSMain";
+	desc.VertexStride = 44;
+	desc.ColorFormats.clear();
+	desc.DepthFormat = ETextureFormat::D32Float;
+	desc.bDepthEnable = true;
+	desc.bCullBackFaces = false;
+	desc.bDepthBiasEnable = true;
+	desc.DepthBiasConstantFactor = 1.25f;
+	desc.DepthBiasClamp = 0.0f;
+	desc.DepthBiasSlopeFactor = 2.0f;
+	desc.ConstantBufferSize = sizeof(ShadowMapConstantBuffer);
+	desc.ConstantBufferBinding = 0;
+	desc.VertexElements = {
+		{ "POSITION", 0, EVertexAttributeFormat::Float3, 0 },
+		{ "NORMAL", 0, EVertexAttributeFormat::Float3, 12 },
+		{ "TEXCOORD", 0, EVertexAttributeFormat::Float2, 24 },
+		{ "TANGENT", 0, EVertexAttributeFormat::Float3, 32 }
+	};
+	desc.TextureBindings.clear();
+	desc.SamplerBindings.clear();
+
+	MobileShadowMapGraphicsPipeline = renderBackend->CreateGraphicsPipeline(desc);
+	if (!MobileShadowMapGraphicsPipeline)
+		AppendCpuRuntimeTrace(L"[InitMobileShadowMapPass] failed to create mobile shadow map pipeline");
+
+	GraphicsPipelineDesc spineDesc = desc;
+	spineDesc.VertexEntryPoint = "SpineVSMain";
+	spineDesc.VertexElements.clear();
+	spineDesc.VertexStride = 0;
+	spineDesc.BufferBindings = {
+		{ "SpineVertices", 4 },
+	};
+	SpineMobileShadowMapGraphicsPipeline = renderBackend->CreateGraphicsPipeline(spineDesc);
+	if (!SpineMobileShadowMapGraphicsPipeline)
+		AppendCpuRuntimeTrace(L"[InitMobileShadowMapPass] failed to create Spine mobile shadow map pipeline");
 }
 
 void Corona::InitTemporalAAPass()
@@ -1237,6 +1323,7 @@ void Corona::LightingPass()
 	Param.ViewMatrix = glm::transpose(ViewMat);
 	Param.InvViewMatrix = glm::transpose(InvViewMat);
 	Param.InvProjMatrix = glm::transpose(InvProjMat);
+	Param.ShadowViewProjectionMatrix = glm::transpose(MobileShadowViewProjMat);
 	Param.LightDir = glm::vec4(normalizedLightDir, LightIntensity);
 	
 	Param.RTSize.x = GetRenderWidth();
@@ -1247,20 +1334,56 @@ void Corona::LightingPass()
 	else
 		Param.TAABlendFactor = 1.0;
 
+	const bool bMobileHybridDirectOnly =
+		CORONA_PLATFORM_MOBILE &&
+		RenderingMode == ERenderingMode::HYBRID;
 	Param.GIBufferScale = GIBufferScale;
 	Param.LightColor = lightColor;
-	Param.bEnableDiffuseGI = bEnableDiffuseGI ? 1 : 0;
-	Param.bEnableSpecularGI = bEnableSpecularGI ? 1 : 0;
+	Param.bEnableDiffuseGI = (!bMobileHybridDirectOnly && bEnableDiffuseGI) ? 1 : 0;
+	Param.bEnableSpecularGI = (!bMobileHybridDirectOnly && bEnableSpecularGI) ? 1 : 0;
 	Param.bEnableDirectDiffuse = bEnableDirectDiffuse ? 1 : 0;
 	Param.bEnableDirectSpecular = bEnableDirectSpecular ? 1 : 0;
-	Param.bEnableRTAO = (bEnableRTAO && bRTAOOutputValidThisFrame && AmbientOcclusionBuffer) ? 1 : 0;
-	Param.bEnableSkyLighting = (bEnableSkyLighting && bEnableRayTracedSkyLighting && bSkyLightingOutputValidThisFrame && SkyLightingBuffer) ? 1 : 0;
+	Param.bEnableRTAO = (!bMobileHybridDirectOnly && bEnableRTAO && bRTAOOutputValidThisFrame && AmbientOcclusionBuffer) ? 1 : 0;
+	Param.bEnableSkyLighting = (!bMobileHybridDirectOnly && bEnableSkyLighting && bEnableRayTracedSkyLighting && bSkyLightingOutputValidThisFrame && SkyLightingBuffer) ? 1 : 0;
+	Param.bEnableSimpleSkyLighting = bEnableSkyLighting ? 1u : 0u;
 	Param.RTAOIndirectStrength = RTAOIndirectStrength;
 	Param.RTAOIndirectFloor = RTAOIndirectFloor;
 	Param.SurfaceBounceStrength = std::clamp(SurfaceBounceStrength, 0.0f, 1.0f);
 	Param.SurfaceBounceSaturation = std::clamp(SurfaceBounceSaturation, 0.0f, 1.0f);
 	Param.SkyLightingStrength = std::clamp(SkyLightingStrength, 0.0f, 1.0f);
-	Param.LightingOutputMode = 0;
+	Param.LightingOutputMode = bMobileHybridDirectOnly ? 2u : 0u;
+	const bool bUseMobileShadowMap =
+		bMobileHybridDirectOnly &&
+		bMobileShadowMapValidThisFrame &&
+		ShadowBuffer;
+	const bool bDirectionalShadowAvailable =
+		bUseMobileShadowMap ||
+		(!bMobileHybridDirectOnly && ShadowBuffer);
+	Param.bEnableDirectionalShadow = bDirectionalShadowAvailable ? 1u : 0u;
+	Param.bUseShadowMap = bUseMobileShadowMap ? 1u : 0u;
+	static bool bLoggedMissingDesktopShadowOutput = false;
+	if (!bMobileHybridDirectOnly &&
+		ShadowBuffer &&
+		!bShadowOutputValidThisFrame &&
+		!bLoggedMissingDesktopShadowOutput)
+	{
+		AppendCpuRuntimeTrace(L"[LightingPass] desktop shadow buffer bound before a valid shadow output; preserving previous-frame shadow visibility");
+		bLoggedMissingDesktopShadowOutput = true;
+	}
+	if (bMobileHybridDirectOnly)
+	{
+		const glm::vec3 mobileSkyAmbientColor =
+			glm::max(glm::mix(SkyColorBottom, SkyColorTop, 0.68f), glm::vec3(0.0f));
+		const glm::vec3 mobileGroundAmbientColor =
+			glm::max(glm::mix(SkyColorBottom, SkyColorTop, 0.18f), glm::vec3(0.0f));
+		Param.AmbientSkyColorAndStrength = glm::vec4(mobileSkyAmbientColor, 0.18f);
+		Param.AmbientGroundColorAndStrength = glm::vec4(mobileGroundAmbientColor, 0.075f);
+	}
+	else
+	{
+		Param.AmbientSkyColorAndStrength = glm::vec4(0.0f);
+		Param.AmbientGroundColorAndStrength = glm::vec4(0.0f);
+	}
 	Param.PointLightCount = 0;
 	for (const PointLightState& pointLight : RenderWorld.PointLights)
 	{
@@ -1275,11 +1398,32 @@ void Corona::LightingPass()
 	}
 
 	glm::normalize(Param.LightDir);
-	Texture* lightingDiffuseAuxTex = DiffuseGITemporalAux[GIBufferWriteIndex].get();
-	Texture* lightingDiffuseTex = DiffuseGITemporal[GIBufferWriteIndex].get();
-	if (DiffuseGIMode == EDiffuseGIMode::SCREEN_PROBE && ScreenProbeGIResolved)
+	Texture* lightingDiffuseAuxTex =
+		(!bMobileHybridDirectOnly && DiffuseGITemporalAux[GIBufferWriteIndex]) ?
+		DiffuseGITemporalAux[GIBufferWriteIndex].get() :
+		DefaultBlackTex.get();
+	Texture* lightingDiffuseTex =
+		(!bMobileHybridDirectOnly && DiffuseGITemporal[GIBufferWriteIndex]) ?
+		DiffuseGITemporal[GIBufferWriteIndex].get() :
+		DefaultBlackTex.get();
+	if (!bMobileHybridDirectOnly && DiffuseGIMode == EDiffuseGIMode::SCREEN_PROBE && ScreenProbeGIResolved)
 		lightingDiffuseTex = ScreenProbeGIResolved.get();
-	Texture* lightingSpecularTex = SpecularGITemporal[GIBufferWriteIndex].get();
+	Texture* lightingSpecularTex =
+		(!bMobileHybridDirectOnly && SpecularGITemporal[GIBufferWriteIndex]) ?
+		SpecularGITemporal[GIBufferWriteIndex].get() :
+		DefaultBlackTex.get();
+	Texture* shadowTex =
+		bDirectionalShadowAvailable ?
+		ShadowBuffer.get() :
+		DefaultWhiteTex.get();
+	Texture* ambientOcclusionTex =
+		(!bMobileHybridDirectOnly && AmbientOcclusionBuffer) ?
+		AmbientOcclusionBuffer.get() :
+		DefaultWhiteTex.get();
+	Texture* skyLightingTex =
+		(!bMobileHybridDirectOnly && SkyLightingBuffer) ?
+		SkyLightingBuffer.get() :
+		DefaultBlackTex.get();
 
 	if (renderBackend && renderBackend->GetAPI() == ERenderBackendAPI::Vulkan)
 	{
@@ -1288,18 +1432,17 @@ void Corona::LightingPass()
 
 		renderBackend->BindGraphicsPipelineTexture(LightingGraphicsPipeline.get(), "AlbedoTex", AlbedoBuffer.get());
 		renderBackend->BindGraphicsPipelineTexture(LightingGraphicsPipeline.get(), "NormalTex", NormalBuffers[ColorBufferWriteIndex].get());
-		renderBackend->BindGraphicsPipelineTexture(LightingGraphicsPipeline.get(), "ShadowTex", ShadowBuffer.get());
+		renderBackend->BindGraphicsPipelineTexture(LightingGraphicsPipeline.get(), "ShadowTex", shadowTex);
 		renderBackend->BindGraphicsPipelineTexture(LightingGraphicsPipeline.get(), "VelocityTex", VelocityBuffer.get());
 		renderBackend->BindGraphicsPipelineTexture(LightingGraphicsPipeline.get(), "DepthTex", DepthBuffer.get());
 		renderBackend->BindGraphicsPipelineTexture(LightingGraphicsPipeline.get(), "GIResultSHTex", lightingDiffuseAuxTex);
 		renderBackend->BindGraphicsPipelineTexture(LightingGraphicsPipeline.get(), "GIResultColorTex", lightingDiffuseTex);
 		renderBackend->BindGraphicsPipelineTexture(LightingGraphicsPipeline.get(), "SpecularGITex", lightingSpecularTex);
 		renderBackend->BindGraphicsPipelineTexture(LightingGraphicsPipeline.get(), "RoughnessMetalicTex", RoughnessMetalicBuffer.get());
-		renderBackend->BindGraphicsPipelineTexture(LightingGraphicsPipeline.get(), "AmbientOcclusionTex", AmbientOcclusionBuffer ? AmbientOcclusionBuffer.get() : DefaultWhiteTex.get());
-		renderBackend->BindGraphicsPipelineTexture(LightingGraphicsPipeline.get(), "SkyLightingTex", SkyLightingBuffer ? SkyLightingBuffer.get() : DefaultBlackTex.get());
+		renderBackend->BindGraphicsPipelineTexture(LightingGraphicsPipeline.get(), "AmbientOcclusionTex", ambientOcclusionTex);
+		renderBackend->BindGraphicsPipelineTexture(LightingGraphicsPipeline.get(), "SkyLightingTex", skyLightingTex);
 		renderBackend->BindGraphicsPipelineSampler(LightingGraphicsPipeline.get(), "sampleWrap", samplerWrap.get());
 
-		Param.LightingOutputMode = 0;
 		renderBackend->SetGraphicsPipelineConstantData(LightingGraphicsPipeline.get(), 0, &Param, sizeof(Param));
 		Texture* lightingTarget = LightingBuffer.get();
 		renderBackend->SetRenderTargets(&lightingTarget, 1, nullptr);
@@ -1329,7 +1472,7 @@ void Corona::LightingPass()
 	LightingPSO->SetSampler("samplerWrap", samplerWrap.get());
 	LightingPSO->SetSRV("AlbedoTex", AlbedoBuffer->GpuHandleSRV);
 	LightingPSO->SetSRV("NormalTex", NormalBuffers[ColorBufferWriteIndex]->GpuHandleSRV);
-	LightingPSO->SetSRV("ShadowTex", ShadowBuffer->GpuHandleSRV);
+	LightingPSO->SetSRV("ShadowTex", shadowTex->GpuHandleSRV);
 
 	LightingPSO->SetSRV("VelocityTex", VelocityBuffer->GpuHandleSRV);
 	LightingPSO->SetSRV("DepthTex", DepthBuffer->GpuHandleSRV);
@@ -1337,8 +1480,8 @@ void Corona::LightingPass()
 	LightingPSO->SetSRV("GIResultColorTex", lightingDiffuseTex->GpuHandleSRV);
 	LightingPSO->SetSRV("SpecularGITex", lightingSpecularTex->GpuHandleSRV);
 	LightingPSO->SetSRV("RoughnessMetalicTex", RoughnessMetalicBuffer->GpuHandleSRV);
-	LightingPSO->SetSRV("AmbientOcclusionTex", AmbientOcclusionBuffer ? AmbientOcclusionBuffer->GpuHandleSRV : DefaultWhiteTex->GpuHandleSRV);
-	LightingPSO->SetSRV("SkyLightingTex", SkyLightingBuffer ? SkyLightingBuffer->GpuHandleSRV : DefaultBlackTex->GpuHandleSRV);
+	LightingPSO->SetSRV("AmbientOcclusionTex", ambientOcclusionTex->GpuHandleSRV);
+	LightingPSO->SetSRV("SkyLightingTex", skyLightingTex->GpuHandleSRV);
 	LightingPSO->SetCBVValue("LightingParam", &Param);
 
 
@@ -1587,10 +1730,80 @@ void Corona::BloomPass()
 }
 #endif // CORONA_HAS_D3D12 (BloomPass)
 
+void Corona::DispatchSpineSkinningForMesh(Mesh* mesh)
+{
+	if (!renderBackend ||
+		!SpineSkinningPSO ||
+		!mesh ||
+		!mesh->bGpuSpineSkinned ||
+		mesh->bGpuSpineSkinningDispatched ||
+		mesh->GpuSpineSkinningVertexCount == 0 ||
+		!mesh->GpuSpineInputVertices ||
+		!mesh->GpuSpineInfluences ||
+		!mesh->GpuSpineBones ||
+		!mesh->GpuSpineSkinnedVertices)
+	{
+		return;
+	}
+
+	SpineSkinningConstant constants = {};
+	constants.VertexCount = mesh->GpuSpineSkinningVertexCount;
+	constants.SourceScale = mesh->GpuSpineSkinningSourceScale;
+
+	renderBackend->TransitionBuffer(mesh->GpuSpineSkinnedVertices.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
+	SpineSkinningPSO->SetBufferSRV("InputVertices", mesh->GpuSpineInputVertices.get());
+	SpineSkinningPSO->SetBufferSRV("Influences", mesh->GpuSpineInfluences.get());
+	SpineSkinningPSO->SetBufferSRV("Bones", mesh->GpuSpineBones.get());
+	SpineSkinningPSO->SetBufferUAV("OutputVertices", mesh->GpuSpineSkinnedVertices.get());
+	SpineSkinningPSO->SetCBVValue("SpineSkinningConstant", &constants);
+	SpineSkinningPSO->Apply();
+	renderBackend->Dispatch((mesh->GpuSpineSkinningVertexCount + 63u) / 64u, 1, 1);
+	renderBackend->TransitionBuffer(mesh->GpuSpineSkinnedVertices.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
+
+	mesh->bGpuSpineSkinningDispatched = true;
+}
+
+void Corona::DispatchSpineSkinningForScene(const shared_ptr<Scene>& scene)
+{
+	if (!scene)
+		return;
+
+	for (const auto& mesh : scene->meshes)
+		DispatchSpineSkinningForMesh(mesh.get());
+}
+
+void Corona::DispatchSpineSkinningForRenderWorld()
+{
+	if (!renderBackend || !SpineSkinningPSO)
+		return;
+
+	for (const SceneObject& object : RenderWorld.SceneObjects)
+	{
+		if (!object.bVisible || !object.ScenePtr)
+			continue;
+		DispatchSpineSkinningForScene(object.ScenePtr);
+	}
+}
+
 void Corona::DrawScene(shared_ptr<Scene> scene, const glm::mat4x4& instanceTransform, float Roughness, float Metalic, bool bOverrideRoughnessMetallic)
 {
 	for (auto& mesh : scene->meshes)
 	{
+		if (!mesh)
+			continue;
+
+		const bool bUseSpineVertexFetch =
+			mesh->bGpuSpineSkinned &&
+			mesh->bGpuSpineSkinningDispatched &&
+			mesh->GpuSpineSkinnedVertices &&
+			SpineGBufferGraphicsPipeline;
+		GraphicsPipelineHandle* activeGBufferPipeline =
+			bUseSpineVertexFetch ? SpineGBufferGraphicsPipeline.get() : GBufferGraphicsPipeline.get();
+		renderBackend->BindGraphicsPipeline(activeGBufferPipeline);
+		renderBackend->BindGraphicsPipelineSampler(activeGBufferPipeline, "samplerWrap", samplerWrap.get());
+		if (bUseSpineVertexFetch)
+			renderBackend->BindGraphicsPipelineBuffer(activeGBufferPipeline, "SpineVertices", mesh->GpuSpineSkinnedVertices.get());
+
 		renderBackend->BindMeshBuffers(mesh->Vb.get(), mesh->Ib.get());
 
 		for (int i = 0; i < mesh->Draws.size(); i++)
@@ -1620,23 +1833,471 @@ void Corona::DrawScene(shared_ptr<Scene> scene, const glm::mat4x4& instanceTrans
 			objCB.RougnessMetalic.y = Metalic;
 
 			objCB.bOverrideRougnessMetallic = bOverrideRoughnessMetallic ? 1 : 0;
+			objCB.bTwoSidedLighting = bUseSpineVertexFetch ? 1u : 0u;
+			objCB.bUnlitMaterial = bUseSpineVertexFetch ? 1u : 0u;
 
-			renderBackend->SetGraphicsPipelineConstantData(GBufferGraphicsPipeline.get(), 0, &objCB, sizeof(objCB));
+			renderBackend->SetGraphicsPipelineConstantData(activeGBufferPipeline, 0, &objCB, sizeof(objCB));
 
 			Texture* AlbedoTex = drawcall.mat->Diffuse ? drawcall.mat->Diffuse.get() : DefaultWhiteTex.get();
 			Texture* NormalTex = drawcall.mat->Normal ? drawcall.mat->Normal.get() : DefaultNormalTex.get();
 			Texture* RoughnessTex = drawcall.mat->Roughness ? drawcall.mat->Roughness.get() : DefaultRougnessTex.get();
 			Texture* MetallicTex = drawcall.mat->Metallic ? drawcall.mat->Metallic.get() : DefaultBlackTex.get();
 
-			renderBackend->BindGraphicsPipelineTexture(GBufferGraphicsPipeline.get(), "AlbedoTex", AlbedoTex);
-			renderBackend->BindGraphicsPipelineTexture(GBufferGraphicsPipeline.get(), "NormalTex", NormalTex);
-			renderBackend->BindGraphicsPipelineTexture(GBufferGraphicsPipeline.get(), "RoughnessTex", RoughnessTex);
-			renderBackend->BindGraphicsPipelineTexture(GBufferGraphicsPipeline.get(), "MetallicTex", MetallicTex);
+			renderBackend->BindGraphicsPipelineTexture(activeGBufferPipeline, "AlbedoTex", AlbedoTex);
+			renderBackend->BindGraphicsPipelineTexture(activeGBufferPipeline, "NormalTex", NormalTex);
+			renderBackend->BindGraphicsPipelineTexture(activeGBufferPipeline, "RoughnessTex", RoughnessTex);
+			renderBackend->BindGraphicsPipelineTexture(activeGBufferPipeline, "MetallicTex", MetallicTex);
 
+			static bool bLoggedFirstGBufferDraw = false;
+			if (!bLoggedFirstGBufferDraw && !mesh->CpuPositions.empty() && !mesh->CpuIndices.empty() && drawcall.IndexCount >= 3)
+			{
+				const glm::mat4 world = instanceTransform * mesh->transform;
+				auto matrixFinite = [](const glm::mat4& matrix)
+				{
+					for (int column = 0; column < 4; ++column)
+					{
+						for (int row = 0; row < 4; ++row)
+						{
+							if (!std::isfinite(matrix[column][row]))
+								return false;
+						}
+					}
+					return true;
+				};
+				std::wstring logLine =
+					L"[GBufferFirstDraw] stride=" + std::to_wstring(mesh->VertexStride) +
+					L", vertices=" + std::to_wstring(mesh->NumVertices) +
+					L", indices=" + std::to_wstring(mesh->NumIndices) +
+					L", indexStart=" + std::to_wstring(drawcall.IndexStart) +
+					L", indexCount=" + std::to_wstring(drawcall.IndexCount) +
+					L", vertexBase=" + std::to_wstring(drawcall.VertexBase) +
+					L", worldFinite=" + std::to_wstring(matrixFinite(world) ? 1 : 0) +
+					L", viewProjFinite=" + std::to_wstring(matrixFinite(ViewProjMat) ? 1 : 0) +
+					L", viewFinite=" + std::to_wstring(matrixFinite(ViewMat) ? 1 : 0) +
+					L", projFinite=" + std::to_wstring(matrixFinite(ProjMat) ? 1 : 0) +
+					L", world00=" + std::to_wstring(world[0][0]) +
+					L", world30=" + std::to_wstring(world[3][0]) +
+					L", world31=" + std::to_wstring(world[3][1]) +
+					L", world32=" + std::to_wstring(world[3][2]) +
+					L", vp00=" + std::to_wstring(ViewProjMat[0][0]);
+				for (uint32_t cornerIndex = 0; cornerIndex < 3; ++cornerIndex)
+				{
+					const uint32_t indexOffset = drawcall.IndexStart + cornerIndex;
+					if (indexOffset >= mesh->CpuIndices.size())
+						break;
+					const int32_t vertexIndex = static_cast<int32_t>(mesh->CpuIndices[indexOffset]) + drawcall.VertexBase;
+					if (vertexIndex < 0 || static_cast<size_t>(vertexIndex) >= mesh->CpuPositions.size())
+						break;
+					const glm::vec4 local = glm::vec4(mesh->CpuPositions[vertexIndex], 1.0f);
+					const glm::vec4 worldPos = world * local;
+					const glm::vec4 clip = ViewProjMat * worldPos;
+					const glm::vec3 ndc =
+						std::abs(clip.w) > 1e-6f ?
+						glm::vec3(clip.x / clip.w, clip.y / clip.w, clip.z / clip.w) :
+						glm::vec3(0.0f);
+					logLine +=
+						L", v" + std::to_wstring(cornerIndex) +
+						L"Idx=" + std::to_wstring(vertexIndex) +
+						L", local=(" + std::to_wstring(local.x) +
+						L"," + std::to_wstring(local.y) +
+						L"," + std::to_wstring(local.z) +
+						L"), world=(" + std::to_wstring(worldPos.x) +
+						L"," + std::to_wstring(worldPos.y) +
+						L"," + std::to_wstring(worldPos.z) +
+						L"," + std::to_wstring(worldPos.w) +
+						L")" +
+						L", clip=(" + std::to_wstring(clip.x) +
+						L"," + std::to_wstring(clip.y) +
+						L"," + std::to_wstring(clip.z) +
+						L"," + std::to_wstring(clip.w) +
+						L"), ndc=(" + std::to_wstring(ndc.x) +
+						L"," + std::to_wstring(ndc.y) +
+						L"," + std::to_wstring(ndc.z) + L")";
+				}
+				AppendCpuRuntimeTrace(logLine);
+				bLoggedFirstGBufferDraw = true;
+			}
 
 			renderBackend->DrawIndexed(drawcall.IndexCount, drawcall.IndexStart, drawcall.VertexBase);
 		}
 	}
+}
+
+void Corona::DrawSceneShadowMap(shared_ptr<Scene> scene, const glm::mat4x4& instanceTransform)
+{
+	if (!scene || !MobileShadowMapGraphicsPipeline)
+		return;
+
+	for (auto& mesh : scene->meshes)
+	{
+		if (!mesh)
+			continue;
+
+		const bool bUseSpineVertexFetch =
+			mesh->bGpuSpineSkinned &&
+			mesh->bGpuSpineSkinningDispatched &&
+			mesh->GpuSpineSkinnedVertices &&
+			SpineMobileShadowMapGraphicsPipeline;
+		GraphicsPipelineHandle* activeShadowPipeline =
+			bUseSpineVertexFetch ? SpineMobileShadowMapGraphicsPipeline.get() : MobileShadowMapGraphicsPipeline.get();
+		renderBackend->BindGraphicsPipeline(activeShadowPipeline);
+		if (bUseSpineVertexFetch)
+			renderBackend->BindGraphicsPipelineBuffer(activeShadowPipeline, "SpineVertices", mesh->GpuSpineSkinnedVertices.get());
+
+		renderBackend->BindMeshBuffers(mesh->Vb.get(), mesh->Ib.get());
+
+		for (int i = 0; i < mesh->Draws.size(); i++)
+		{
+			Mesh::DrawCall& drawcall = mesh->Draws[i];
+			ShadowMapConstantBuffer objCB = {};
+			objCB.LightViewProjectionMatrix = glm::transpose(MobileShadowViewProjMat);
+			objCB.WorldMatrix = glm::transpose(instanceTransform * mesh->transform);
+			objCB.BaseColorFactor = glm::vec4(1.0f);
+
+			renderBackend->SetGraphicsPipelineConstantData(activeShadowPipeline, 0, &objCB, sizeof(objCB));
+
+			renderBackend->DrawIndexed(drawcall.IndexCount, drawcall.IndexStart, drawcall.VertexBase);
+		}
+	}
+}
+
+bool Corona::BuildMobileShadowViewProjection(glm::mat4x4& lightViewProj)
+{
+	auto isFinite3 = [](const glm::vec3& value)
+	{
+		return std::isfinite(value.x) && std::isfinite(value.y) && std::isfinite(value.z);
+	};
+
+	auto makeAabbCorners = [](const glm::vec3& boundsMin, const glm::vec3& boundsMax)
+	{
+		return std::array<glm::vec3, 8>
+		{
+			glm::vec3(boundsMin.x, boundsMin.y, boundsMin.z),
+			glm::vec3(boundsMax.x, boundsMin.y, boundsMin.z),
+			glm::vec3(boundsMin.x, boundsMax.y, boundsMin.z),
+			glm::vec3(boundsMax.x, boundsMax.y, boundsMin.z),
+			glm::vec3(boundsMin.x, boundsMin.y, boundsMax.z),
+			glm::vec3(boundsMax.x, boundsMin.y, boundsMax.z),
+			glm::vec3(boundsMin.x, boundsMax.y, boundsMax.z),
+			glm::vec3(boundsMax.x, boundsMax.y, boundsMax.z),
+		};
+	};
+
+	auto expandBounds = [](glm::vec3& boundsMin, glm::vec3& boundsMax, const glm::vec3& point)
+	{
+		boundsMin = glm::min(boundsMin, point);
+		boundsMax = glm::max(boundsMax, point);
+	};
+
+	struct MobileShadowObjectBounds
+	{
+		uint32_t ObjectIndex = 0;
+		glm::vec3 BoundsMin = glm::vec3(0.0f);
+		glm::vec3 BoundsMax = glm::vec3(0.0f);
+		glm::vec3 Extents = glm::vec3(0.0f);
+		glm::vec3 Center = glm::vec3(0.0f);
+		float Radius = 0.0f;
+		float CameraDistance = 0.0f;
+		bool bCameraVisible = false;
+		bool bCameraReceiver = false;
+		bool bPlayerCharacter = false;
+	};
+
+	MobileShadowCasterObjectIndices.clear();
+	MobileShadowLastTotalObjectCount = 0;
+	MobileShadowLastCandidateObjectCount = 0;
+	MobileShadowLastReceiverObjectCount = 0;
+	MobileShadowLastCasterObjectCount = 0;
+	MobileShadowLastGuaranteedCasterCount = 0;
+	MobileShadowLastCulledObjectCount = 0;
+	MobileShadowLastDistanceCulledObjectCount = 0;
+
+	std::vector<MobileShadowObjectBounds> boundedObjects;
+	boundedObjects.reserve(RenderWorld.SceneObjects.size());
+
+	const glm::vec3 cameraPosition =
+		isFinite3(m_camera.m_position) ?
+		m_camera.m_position :
+		glm::vec3(InvViewMat[3]);
+	glm::vec3 cameraForward =
+		isFinite3(m_camera.m_lookDirection) && glm::length(m_camera.m_lookDirection) > 0.0001f ?
+		glm::normalize(m_camera.m_lookDirection) :
+		glm::vec3(0.0f, 0.0f, 1.0f);
+	const glm::vec3 focusReceiverCenter = cameraPosition + cameraForward * MobileShadowFocusDistance;
+	const glm::vec3 focusReceiverHalfExtent(
+		MobileShadowFocusRadius,
+		MobileShadowFocusRadius * 0.60f,
+		MobileShadowFocusRadius);
+	glm::vec3 receiverMin(std::numeric_limits<float>::max());
+	glm::vec3 receiverMax(-std::numeric_limits<float>::max());
+	bool bHasReceiverBounds = false;
+
+	for (uint32_t objectIndex = 0; objectIndex < static_cast<uint32_t>(RenderWorld.SceneObjects.size()); ++objectIndex)
+	{
+		const SceneObject& object = RenderWorld.SceneObjects[objectIndex];
+		if (!object.bVisible || !object.ScenePtr)
+			continue;
+
+		++MobileShadowLastTotalObjectCount;
+
+		glm::vec3 boundsMin(0.0f);
+		glm::vec3 boundsMax(0.0f);
+		glm::vec3 boundsCenter(0.0f);
+		float boundsRadius = 0.0f;
+		if (!GetSceneObjectWorldBounds(object, boundsMin, boundsMax, boundsCenter, boundsRadius))
+			continue;
+		if (!isFinite3(boundsMin) || !isFinite3(boundsMax))
+			continue;
+
+		MobileShadowObjectBounds objectBounds = {};
+		objectBounds.ObjectIndex = objectIndex;
+		objectBounds.BoundsMin = boundsMin;
+		objectBounds.BoundsMax = boundsMax;
+		objectBounds.Extents = glm::max(boundsMax - boundsMin, glm::vec3(0.0f));
+		objectBounds.Center = boundsCenter;
+		objectBounds.Radius = boundsRadius;
+		objectBounds.CameraDistance = std::max(0.0f, glm::length(boundsCenter - cameraPosition) - boundsRadius);
+		objectBounds.bCameraVisible = IsWorldAabbInViewFrustum(boundsMin, boundsMax);
+		if (const std::string* entityName = EntityWorld.GetName(object.EntityHandle))
+			objectBounds.bPlayerCharacter = *entityName == "DungeonCharacter";
+		boundedObjects.push_back(objectBounds);
+	}
+
+	const MobileShadowObjectBounds* playerBounds = nullptr;
+	for (const MobileShadowObjectBounds& objectBounds : boundedObjects)
+	{
+		if (objectBounds.bPlayerCharacter)
+		{
+			playerBounds = &objectBounds;
+			break;
+		}
+	}
+
+	const glm::vec3 shadowFocusCenter = playerBounds ? playerBounds->Center : focusReceiverCenter;
+	receiverMin = shadowFocusCenter - focusReceiverHalfExtent;
+	receiverMax = shadowFocusCenter + focusReceiverHalfExtent;
+	bHasReceiverBounds = true;
+	if (playerBounds)
+	{
+		receiverMin = glm::min(receiverMin, playerBounds->BoundsMin);
+		receiverMax = glm::max(receiverMax, playerBounds->BoundsMax);
+	}
+
+	if (!bHasReceiverBounds)
+		return false;
+
+	glm::vec3 lightDir = RenderFrameNormalizedLightDir;
+	if (!isFinite3(lightDir) || glm::length(lightDir) < 0.0001f)
+		lightDir = LightDir;
+	if (!isFinite3(lightDir) || glm::length(lightDir) < 0.0001f)
+		lightDir = glm::vec3(0.3f, 0.8f, 0.4f);
+	lightDir = glm::normalize(lightDir);
+
+	const glm::vec3 receiverCenter = (receiverMin + receiverMax) * 0.5f;
+	const float receiverRadius = std::max(glm::length(receiverMax - receiverMin) * 0.5f, 8.0f);
+	const glm::vec3 eye = receiverCenter + lightDir * (receiverRadius + 32.0f);
+	glm::vec3 up = std::abs(glm::dot(lightDir, glm::vec3(0.0f, 1.0f, 0.0f))) > 0.95f ?
+		glm::vec3(0.0f, 0.0f, 1.0f) :
+		glm::vec3(0.0f, 1.0f, 0.0f);
+
+	const glm::mat4x4 lightView = glm::lookAtRH(eye, receiverCenter, up);
+
+	struct LightSpaceBounds
+	{
+		glm::vec3 Min = glm::vec3(std::numeric_limits<float>::max());
+		glm::vec3 Max = glm::vec3(-std::numeric_limits<float>::max());
+	};
+
+	auto computeLightSpaceBounds = [&](const glm::vec3& boundsMin, const glm::vec3& boundsMax)
+	{
+		LightSpaceBounds lightBounds;
+		for (const glm::vec3& corner : makeAabbCorners(boundsMin, boundsMax))
+		{
+			const glm::vec3 lightSpaceCorner = glm::vec3(lightView * glm::vec4(corner, 1.0f));
+			expandBounds(lightBounds.Min, lightBounds.Max, lightSpaceCorner);
+		}
+		return lightBounds;
+	};
+
+	glm::vec3 receiverLightMin(std::numeric_limits<float>::max());
+	glm::vec3 receiverLightMax(-std::numeric_limits<float>::max());
+	const LightSpaceBounds focusLightBounds = computeLightSpaceBounds(receiverMin, receiverMax);
+	expandBounds(receiverLightMin, receiverLightMax, focusLightBounds.Min);
+	expandBounds(receiverLightMin, receiverLightMax, focusLightBounds.Max);
+
+	const float xyPadding = std::clamp(receiverRadius * 0.03f, 4.0f, 64.0f);
+	const float zPadding = std::clamp(receiverRadius * 0.05f, 6.0f, 128.0f);
+	glm::vec3 projectionLightMin = receiverLightMin;
+	glm::vec3 projectionLightMax = receiverLightMax;
+
+	float shadowMinZ = receiverLightMin.z;
+	float shadowMaxZ = receiverLightMax.z;
+
+	struct NearbyCasterCandidate
+	{
+		const MobileShadowObjectBounds* Bounds = nullptr;
+		float DistanceSq = 0.0f;
+	};
+
+	std::vector<const MobileShadowObjectBounds*> selectedCasterBounds;
+	selectedCasterBounds.reserve(static_cast<size_t>(MobileShadowNearbyCasterCount + 1));
+	std::vector<NearbyCasterCandidate> nearbyCandidates;
+	nearbyCandidates.reserve(boundedObjects.size());
+	for (const MobileShadowObjectBounds& objectBounds : boundedObjects)
+	{
+		if (objectBounds.bPlayerCharacter)
+		{
+			selectedCasterBounds.push_back(&objectBounds);
+			++MobileShadowLastGuaranteedCasterCount;
+			continue;
+		}
+
+		if (!objectBounds.bCameraVisible || objectBounds.Extents.y < MobileShadowMinCasterHeight)
+			continue;
+
+		const glm::vec3 delta = objectBounds.Center - shadowFocusCenter;
+		nearbyCandidates.push_back({ &objectBounds, glm::dot(delta, delta) });
+	}
+	MobileShadowLastCandidateObjectCount =
+		static_cast<uint64_t>(nearbyCandidates.size() + selectedCasterBounds.size());
+	std::sort(nearbyCandidates.begin(), nearbyCandidates.end(), [](const NearbyCasterCandidate& lhs, const NearbyCasterCandidate& rhs)
+	{
+		if (lhs.DistanceSq != rhs.DistanceSq)
+			return lhs.DistanceSq < rhs.DistanceSq;
+		const float lhsRadius = lhs.Bounds ? lhs.Bounds->Radius : 0.0f;
+		const float rhsRadius = rhs.Bounds ? rhs.Bounds->Radius : 0.0f;
+		return lhsRadius < rhsRadius;
+	});
+	for (const NearbyCasterCandidate& candidate : nearbyCandidates)
+	{
+		if (selectedCasterBounds.size() >= static_cast<size_t>(MobileShadowNearbyCasterCount + (playerBounds ? 1u : 0u)))
+			break;
+		if (candidate.Bounds)
+			selectedCasterBounds.push_back(candidate.Bounds);
+	}
+
+	for (const MobileShadowObjectBounds* objectBounds : selectedCasterBounds)
+	{
+		if (!objectBounds)
+			continue;
+
+		MobileShadowCasterObjectIndices.push_back(objectBounds->ObjectIndex);
+		const LightSpaceBounds casterLightBounds = computeLightSpaceBounds(objectBounds->BoundsMin, objectBounds->BoundsMax);
+		expandBounds(projectionLightMin, projectionLightMax, casterLightBounds.Min);
+		expandBounds(projectionLightMin, projectionLightMax, casterLightBounds.Max);
+		shadowMinZ = std::min(shadowMinZ, casterLightBounds.Min.z);
+		shadowMaxZ = std::max(shadowMaxZ, casterLightBounds.Max.z);
+		if (objectBounds->bCameraVisible)
+		{
+			++MobileShadowLastReceiverObjectCount;
+			receiverMin = glm::min(receiverMin, objectBounds->BoundsMin);
+			receiverMax = glm::max(receiverMax, objectBounds->BoundsMax);
+		}
+	}
+
+	MobileShadowLastCasterObjectCount = MobileShadowCasterObjectIndices.size();
+	MobileShadowLastCulledObjectCount =
+		MobileShadowLastTotalObjectCount > MobileShadowLastCasterObjectCount ?
+		MobileShadowLastTotalObjectCount - MobileShadowLastCasterObjectCount :
+		0;
+	if (MobileShadowCasterObjectIndices.empty())
+		return false;
+
+	float left = projectionLightMin.x - xyPadding;
+	float right = projectionLightMax.x + xyPadding;
+	float bottom = projectionLightMin.y - xyPadding;
+	float top = projectionLightMax.y + xyPadding;
+	const float minExtent = 8.0f;
+	if (right - left < minExtent)
+	{
+		const float center = (left + right) * 0.5f;
+		left = center - minExtent * 0.5f;
+		right = center + minExtent * 0.5f;
+	}
+	if (top - bottom < minExtent)
+	{
+		const float center = (bottom + top) * 0.5f;
+		bottom = center - minExtent * 0.5f;
+		top = center + minExtent * 0.5f;
+	}
+
+	auto snapBoundsToShadowTexels = [](float& minValue, float& maxValue)
+	{
+		const float extent = maxValue - minValue;
+		if (extent <= 0.0f)
+			return;
+
+		const float texelSize = extent / static_cast<float>(MobileShadowMapResolution);
+		if (texelSize <= 1.0e-5f)
+			return;
+
+		const float center = (minValue + maxValue) * 0.5f;
+		const float snappedCenter = std::floor((center / texelSize) + 0.5f) * texelSize;
+		minValue = snappedCenter - extent * 0.5f;
+		maxValue = snappedCenter + extent * 0.5f;
+	};
+	snapBoundsToShadowTexels(left, right);
+	snapBoundsToShadowTexels(bottom, top);
+
+	const float nearPlane = std::max(0.1f, -shadowMaxZ - zPadding);
+	const float farPlane = std::max(nearPlane + 1.0f, -shadowMinZ + zPadding);
+	const glm::mat4x4 lightProjection = glm::orthoRH(left, right, bottom, top, nearPlane, farPlane);
+	lightViewProj = lightProjection * lightView;
+	return true;
+}
+
+void Corona::MobileShadowMapPass()
+{
+	bMobileShadowMapValidThisFrame = false;
+	if (!renderBackend ||
+		RenderingMode != ERenderingMode::HYBRID ||
+		!MobileShadowMapGraphicsPipeline ||
+		!ShadowBuffer)
+	{
+		return;
+	}
+
+	glm::mat4x4 lightViewProj(1.0f);
+	if (!BuildMobileShadowViewProjection(lightViewProj))
+		return;
+
+	MobileShadowViewProjMat = lightViewProj;
+	renderBackend->EmitGpuCrashMarker("MobileShadowMapPass");
+	DispatchSpineSkinningForRenderWorld();
+	renderBackend->TransitionTexture(ShadowBuffer.get(), EResourceState::ShaderRead, EResourceState::DepthWrite);
+	renderBackend->ClearDepth(ShadowBuffer.get(), 1.0f);
+	renderBackend->SetViewportAndScissor(MobileShadowMapResolution, MobileShadowMapResolution);
+	renderBackend->SetRenderTargets(nullptr, 0, ShadowBuffer.get());
+	renderBackend->BindGraphicsPipeline(MobileShadowMapGraphicsPipeline.get());
+
+	for (uint32_t objectIndex : MobileShadowCasterObjectIndices)
+	{
+		if (objectIndex >= RenderWorld.SceneObjects.size())
+			continue;
+		const SceneObject& object = RenderWorld.SceneObjects[objectIndex];
+		if (!object.bVisible || !object.ScenePtr)
+			continue;
+		DrawSceneShadowMap(object.ScenePtr, object.Transform);
+	}
+
+	if ((FrameCounter % 120u) == 0u &&
+		(MobileShadowLastTotalObjectCount != 0 ||
+		 MobileShadowLastCasterObjectCount != 0 ||
+		 MobileShadowLastCulledObjectCount != 0))
+	{
+		AppendCpuRuntimeTrace(
+			L"[MobileShadowCulling] casters=" + std::to_wstring(MobileShadowLastCasterObjectCount) +
+			L"/" + std::to_wstring(MobileShadowLastTotalObjectCount) +
+			L", candidates=" + std::to_wstring(MobileShadowLastCandidateObjectCount) +
+			L", receivers=" + std::to_wstring(MobileShadowLastReceiverObjectCount) +
+			L", guaranteed=" + std::to_wstring(MobileShadowLastGuaranteedCasterCount) +
+			L", culled=" + std::to_wstring(MobileShadowLastCulledObjectCount) +
+			L", distance=" + std::to_wstring(MobileShadowLastDistanceCulledObjectCount));
+	}
+
+	renderBackend->TransitionTexture(ShadowBuffer.get(), EResourceState::DepthWrite, EResourceState::ShaderRead);
+	bMobileShadowMapValidThisFrame = true;
+	bShadowOutputValidThisFrame = true;
 }
 
 bool Corona::GetSceneObjectWorldBounds(
@@ -1817,46 +2478,77 @@ void Corona::GBufferPass()
 	ColorBufferWriteIndex = 1 - ColorBufferWriteIndex;
 	//DepthBufferWriteIndex = 1 - DepthBufferWriteIndex;
 	renderBackend->EmitGpuCrashMarker("GBufferPass");
+	const bool bMobileDirectGBuffer =
+		CORONA_PLATFORM_MOBILE &&
+		RenderingMode == ERenderingMode::HYBRID;
 
 	renderBackend->TransitionTexture(AlbedoBuffer.get(), EResourceState::ShaderRead, EResourceState::RenderTarget);
-	renderBackend->TransitionTexture(SpecularAlbedoBuffer.get(), EResourceState::ShaderRead, EResourceState::RenderTarget);
+	if (!bMobileDirectGBuffer)
+		renderBackend->TransitionTexture(SpecularAlbedoBuffer.get(), EResourceState::ShaderRead, EResourceState::RenderTarget);
 	renderBackend->TransitionTexture(NormalBuffers[ColorBufferWriteIndex].get(), EResourceState::ShaderRead, EResourceState::RenderTarget);
-	renderBackend->TransitionTexture(GeomNormalBuffers[ColorBufferWriteIndex].get(), EResourceState::ShaderRead, EResourceState::RenderTarget);
+	if (!bMobileDirectGBuffer)
+		renderBackend->TransitionTexture(GeomNormalBuffers[ColorBufferWriteIndex].get(), EResourceState::ShaderRead, EResourceState::RenderTarget);
 	renderBackend->TransitionTexture(VelocityBuffer.get(), EResourceState::ShaderRead, EResourceState::RenderTarget);
 	renderBackend->TransitionTexture(RoughnessMetalicBuffer.get(), EResourceState::ShaderRead, EResourceState::RenderTarget);
 
 	renderBackend->TransitionTexture(DepthBuffer.get(), EResourceState::ShaderRead, EResourceState::DepthWrite);
-	renderBackend->TransitionTexture(UnjitteredDepthBuffers[ColorBufferWriteIndex].get(), EResourceState::ShaderRead, EResourceState::RenderTarget);
+	if (!bMobileDirectGBuffer)
+		renderBackend->TransitionTexture(UnjitteredDepthBuffers[ColorBufferWriteIndex].get(), EResourceState::ShaderRead, EResourceState::RenderTarget);
 
 	const float clearColor[] = { 0.0f, 0.2f, 0.4f, 1.0f };
 	renderBackend->ClearRenderTarget(AlbedoBuffer.get(), clearColor);
-	renderBackend->ClearRenderTarget(SpecularAlbedoBuffer.get(), clearColor);
-	const float normalClearColor[] = { 0.0f, -0.1f, 0.0f, 0.0f };
+	if (!bMobileDirectGBuffer)
+		renderBackend->ClearRenderTarget(SpecularAlbedoBuffer.get(), clearColor);
+	const float normalClearColor[] =
+	{
+		bMobileDirectGBuffer ? 0.5f : 0.0f,
+		bMobileDirectGBuffer ? 0.45f : -0.1f,
+		bMobileDirectGBuffer ? 0.5f : 0.0f,
+		0.0f
+	};
 	renderBackend->ClearRenderTarget(NormalBuffers[ColorBufferWriteIndex].get(), normalClearColor);
-	renderBackend->ClearRenderTarget(GeomNormalBuffers[ColorBufferWriteIndex].get(), normalClearColor);
+	if (!bMobileDirectGBuffer)
+		renderBackend->ClearRenderTarget(GeomNormalBuffers[ColorBufferWriteIndex].get(), normalClearColor);
 	const float velocityClearColor[] = { 0.0f, 0.0f};
 	renderBackend->ClearRenderTarget(VelocityBuffer.get(), velocityClearColor);
 	const float roughnessClearColor[] = { 0.001f, 0.0f, 0.0f, 0.0f };
 	renderBackend->ClearRenderTarget(RoughnessMetalicBuffer.get(), roughnessClearColor);
 
 	renderBackend->ClearDepth(DepthBuffer.get(), 1.0f);
-	const float ujitteredDepthClearColor[] = { 1.0f, 1.0f, 1.0f, 1.0f};
-	renderBackend->ClearRenderTarget(UnjitteredDepthBuffers[ColorBufferWriteIndex].get(), ujitteredDepthClearColor);
+	if (!bMobileDirectGBuffer)
+	{
+		const float ujitteredDepthClearColor[] = { 1.0f, 1.0f, 1.0f, 1.0f};
+		renderBackend->ClearRenderTarget(UnjitteredDepthBuffers[ColorBufferWriteIndex].get(), ujitteredDepthClearColor);
+	}
 
 
 	renderBackend->BindDefaultDescriptorHeaps();
+	DispatchSpineSkinningForRenderWorld();
 
 	renderBackend->SetViewportAndScissor(GetRenderWidth(), GetRenderHeight());
-	Texture* renderTargets[] = {
-		AlbedoBuffer.get(),
-		SpecularAlbedoBuffer.get(),
-		NormalBuffers[ColorBufferWriteIndex].get(),
-		GeomNormalBuffers[ColorBufferWriteIndex].get(),
-		VelocityBuffer.get(),
-		RoughnessMetalicBuffer.get(),
-		UnjitteredDepthBuffers[ColorBufferWriteIndex].get()
-	};
-	renderBackend->SetRenderTargets(renderTargets, static_cast<uint32_t>(std::size(renderTargets)), DepthBuffer.get());
+	if (bMobileDirectGBuffer)
+	{
+		Texture* renderTargets[] = {
+			AlbedoBuffer.get(),
+			NormalBuffers[ColorBufferWriteIndex].get(),
+			VelocityBuffer.get(),
+			RoughnessMetalicBuffer.get()
+		};
+		renderBackend->SetRenderTargets(renderTargets, static_cast<uint32_t>(std::size(renderTargets)), DepthBuffer.get());
+	}
+	else
+	{
+		Texture* renderTargets[] = {
+			AlbedoBuffer.get(),
+			SpecularAlbedoBuffer.get(),
+			NormalBuffers[ColorBufferWriteIndex].get(),
+			GeomNormalBuffers[ColorBufferWriteIndex].get(),
+			VelocityBuffer.get(),
+			RoughnessMetalicBuffer.get(),
+			UnjitteredDepthBuffers[ColorBufferWriteIndex].get()
+		};
+		renderBackend->SetRenderTargets(renderTargets, static_cast<uint32_t>(std::size(renderTargets)), DepthBuffer.get());
+	}
 
 	renderBackend->BindGraphicsPipeline(GBufferGraphicsPipeline.get());
 	renderBackend->BindGraphicsPipelineSampler(GBufferGraphicsPipeline.get(), "samplerWrap", samplerWrap.get());
@@ -1961,13 +2653,16 @@ void Corona::GBufferPass()
 	}
 	
 	renderBackend->TransitionTexture(AlbedoBuffer.get(), EResourceState::RenderTarget, EResourceState::ShaderRead);
-	renderBackend->TransitionTexture(SpecularAlbedoBuffer.get(), EResourceState::RenderTarget, EResourceState::ShaderRead);
+	if (!bMobileDirectGBuffer)
+		renderBackend->TransitionTexture(SpecularAlbedoBuffer.get(), EResourceState::RenderTarget, EResourceState::ShaderRead);
 	renderBackend->TransitionTexture(NormalBuffers[ColorBufferWriteIndex].get(), EResourceState::RenderTarget, EResourceState::ShaderRead);
-	renderBackend->TransitionTexture(GeomNormalBuffers[ColorBufferWriteIndex].get(), EResourceState::RenderTarget, EResourceState::ShaderRead);
+	if (!bMobileDirectGBuffer)
+		renderBackend->TransitionTexture(GeomNormalBuffers[ColorBufferWriteIndex].get(), EResourceState::RenderTarget, EResourceState::ShaderRead);
 	renderBackend->TransitionTexture(VelocityBuffer.get(), EResourceState::RenderTarget, EResourceState::ShaderRead);
 	renderBackend->TransitionTexture(RoughnessMetalicBuffer.get(), EResourceState::RenderTarget, EResourceState::ShaderRead);
 
 
 	renderBackend->TransitionTexture(DepthBuffer.get(), EResourceState::DepthWrite, EResourceState::ShaderRead);
-	renderBackend->TransitionTexture(UnjitteredDepthBuffers[ColorBufferWriteIndex].get(), EResourceState::RenderTarget, EResourceState::ShaderRead);
+	if (!bMobileDirectGBuffer)
+		renderBackend->TransitionTexture(UnjitteredDepthBuffers[ColorBufferWriteIndex].get(), EResourceState::RenderTarget, EResourceState::ShaderRead);
 }

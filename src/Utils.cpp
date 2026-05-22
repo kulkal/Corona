@@ -1,6 +1,18 @@
 #include "Utils.h"
+#include "RHIBuildConfig.h"
+#if CORONA_HAS_D3D12
 #include "DX12Backend.h"
+#endif
 
+#if CORONA_PLATFORM_IS_WINDOWS
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
+
+#include <cwchar>
+#include <cstdlib>
 #include <vector>
 
 namespace
@@ -36,6 +48,7 @@ namespace
 
 	std::filesystem::path GetExecutableDirectory()
 	{
+#if CORONA_PLATFORM_IS_WINDOWS
 		std::wstring modulePath(MAX_PATH, L'\0');
 		const DWORD length = GetModuleFileNameW(nullptr, modulePath.data(), static_cast<DWORD>(modulePath.size()));
 		if (length == 0 || length >= modulePath.size())
@@ -43,10 +56,25 @@ namespace
 
 		modulePath.resize(length);
 		return std::filesystem::path(modulePath).parent_path();
+#else
+		std::error_code ec;
+		return std::filesystem::current_path(ec);
+#endif
 	}
 
 	std::filesystem::path ResolveRuntimeRoot()
 	{
+		if (const char* runtimeRootOverride = std::getenv("CORONA_RUNTIME_ROOT"))
+		{
+			if (runtimeRootOverride[0] != '\0')
+			{
+				std::error_code ec;
+				std::filesystem::path overridePath(runtimeRootOverride);
+				std::filesystem::path canonical = std::filesystem::weakly_canonical(overridePath, ec);
+				return ec ? overridePath : canonical;
+			}
+		}
+
 		std::vector<std::filesystem::path> candidates;
 
 		std::error_code ec;
@@ -81,13 +109,22 @@ namespace RuntimePaths
 {
 	std::filesystem::path RootDirectory()
 	{
+#if CORONA_PLATFORM_IS_ANDROID
+		return ResolveRuntimeRoot();
+#else
 		static const std::filesystem::path root = ResolveRuntimeRoot();
 		return root;
+#endif
 	}
 
 	std::filesystem::path SourceDirectory()
 	{
 		return RootDirectory() / L"src";
+	}
+
+	std::filesystem::path AssetDirectory()
+	{
+		return RootDirectory() / L"assets";
 	}
 
 	std::filesystem::path ConfigDirectory()
@@ -123,12 +160,29 @@ namespace RuntimePaths
 
 std::wstring AnsiToWString(const char* ansiString)
 {
-	WCHAR buffer[512];
+	if (!ansiString)
+		return {};
+
+#if CORONA_PLATFORM_IS_WINDOWS
+	wchar_t buffer[512];
 	MultiByteToWideChar(CP_ACP, 0, ansiString, -1, buffer, 512);
 	return std::wstring(buffer);
+#else
+	std::mbstate_t state{};
+	const char* source = ansiString;
+	const size_t length = std::mbsrtowcs(nullptr, &source, 0, &state);
+	if (length == static_cast<size_t>(-1))
+		return {};
+
+	std::wstring result(length, L'\0');
+	state = std::mbstate_t{};
+	source = ansiString;
+	std::mbsrtowcs(result.data(), &source, result.size(), &state);
+	return result;
+#endif
 }
 
-std::wstring GetDirectoryFromFilePath(const WCHAR* filePath_)
+std::wstring GetDirectoryFromFilePath(const wchar_t* filePath_)
 {
 	std::wstring filePath(filePath_);
 	size_t idx = filePath.find_last_of(L"\\/");
@@ -139,7 +193,7 @@ std::wstring GetDirectoryFromFilePath(const WCHAR* filePath_)
 }
 
 // Returns the name of the file given the path (extension included)
-std::wstring GetFileName(const WCHAR* filePath_)
+std::wstring GetFileName(const wchar_t* filePath_)
 {
 
 	std::wstring filePath(filePath_);
@@ -156,19 +210,16 @@ std::wstring GetFileName(const WCHAR* filePath_)
 	}
 }
 
-bool FileExists(const WCHAR* filePath)
+bool FileExists(const wchar_t* filePath)
 {
 	if (filePath == NULL)
 		return false;
 
-	DWORD fileAttr = GetFileAttributesW(filePath);
-	if (fileAttr == INVALID_FILE_ATTRIBUTES)
-		return false;
-
-	return true;
+	std::error_code ec;
+	return std::filesystem::exists(filePath, ec);
 }
 
-std::wstring GetFileExtension(const WCHAR* filePath_)
+std::wstring GetFileExtension(const wchar_t* filePath_)
 {
 	std::wstring filePath(filePath_);
 	size_t idx = filePath.rfind(L'.');
@@ -178,15 +229,12 @@ std::wstring GetFileExtension(const WCHAR* filePath_)
 		return std::wstring(L"");
 }
 
+#if USE_AFTERMATH && CORONA_HAS_D3D12
 void NVAftermathMarker(GFSDK_Aftermath_ContextHandle ah, std::string markerName)
 {
-#if USE_AFTERMATH
 	if (!ah || markerName.empty())
 		return;
 	GFSDK_Aftermath_Result ar = GFSDK_Aftermath_SetEventMarker(ah, markerName.c_str(), static_cast<uint32_t>(markerName.length()));
 	(void)ar;
-#else
-	(void)ah;
-	(void)markerName;
-#endif
 }
+#endif

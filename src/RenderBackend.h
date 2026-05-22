@@ -129,6 +129,14 @@ struct TextureCreateDesc
 	std::optional<glm::vec4> ClearColor = std::nullopt;
 };
 
+enum class EBufferShape
+{
+	// Default: SRV created as a byte-address buffer (raw load4 access in HLSL).
+	ByteAddress,
+	// Structured buffer SRV (typed structured load in HLSL).
+	Structured,
+};
+
 struct BufferCreateDesc
 {
 	uint32_t NumElements = 0;
@@ -136,6 +144,7 @@ struct BufferCreateDesc
 	EInitialResourceState InitialState = EInitialResourceState::ShaderRead;
 	bool bAllowUnorderedAccess = false;
 	void* InitialData = nullptr;
+	EBufferShape Shape = EBufferShape::ByteAddress;
 };
 
 enum class ESamplerFilter
@@ -203,6 +212,10 @@ struct GraphicsPipelineDesc
 	bool bDepthEnable = false;
 	bool bCullBackFaces = true;
 	bool bTriangleStrip = false;
+	bool bDepthBiasEnable = false;
+	float DepthBiasConstantFactor = 0.0f;
+	float DepthBiasClamp = 0.0f;
+	float DepthBiasSlopeFactor = 0.0f;
 	uint32_t ConstantBufferSize = 0;
 	uint32_t ConstantBufferBinding = 0;
 };
@@ -231,6 +244,8 @@ public:
 	virtual ERenderBackendAPI GetAPI() const = 0;
 	virtual const char* GetBackendName() const = 0;
 	virtual uint32_t GetMaxSupportedHybridStage() const = 0;
+	virtual bool SupportsRayTracing() const = 0;
+	virtual bool SupportsShaderExecutionReordering() const = 0;
 	virtual void BeginFrame() = 0;
 	virtual void EndFrame() = 0;
 	virtual void WaitForGpu() = 0;

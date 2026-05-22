@@ -110,7 +110,10 @@ void Corona::UpdateSceneObjectEntity(const SceneObject& object)
 	if (!transformComponent)
 		transformComponent = EntityWorld.AddTransform(object.EntityHandle);
 	if (transformComponent)
+	{
 		transformComponent->LocalToWorld = object.Transform;
+		transformComponent->Position = glm::vec3(object.Transform[3]);
+	}
 
 	CoronaECS::MeshComponent meshComponent;
 	meshComponent.ScenePtr = object.ScenePtr;

@@ -1,4 +1,5 @@
 #include "CoronaImageIO.h"
+#include "PlatformSystem.h"
 #include "RHIBuildConfig.h"
 
 #include <cstdio>
@@ -24,16 +25,12 @@ namespace
 	// support wchar paths on Windows without depending on stb's narrow fopen.
 	bool ReadFileToBuffer(const std::wstring& filePath, std::vector<uint8_t>& out)
 	{
-#ifdef _WIN32
+#if CORONA_PLATFORM_IS_WINDOWS
 		FILE* f = nullptr;
 		if (_wfopen_s(&f, filePath.c_str(), L"rb") != 0 || !f)
 			return false;
 #else
-		// Best-effort UTF-8 conversion for portable builds.
-		std::string narrow;
-		narrow.reserve(filePath.size());
-		for (wchar_t wc : filePath)
-			narrow.push_back(static_cast<char>(wc));
+		const std::string narrow = PlatformWideToUtf8(filePath);
 		FILE* f = std::fopen(narrow.c_str(), "rb");
 		if (!f)
 			return false;
@@ -54,15 +51,12 @@ namespace
 
 	bool WriteFileFromBuffer(const std::wstring& filePath, const void* data, size_t size)
 	{
-#ifdef _WIN32
+#if CORONA_PLATFORM_IS_WINDOWS
 		FILE* f = nullptr;
 		if (_wfopen_s(&f, filePath.c_str(), L"wb") != 0 || !f)
 			return false;
 #else
-		std::string narrow;
-		narrow.reserve(filePath.size());
-		for (wchar_t wc : filePath)
-			narrow.push_back(static_cast<char>(wc));
+		const std::string narrow = PlatformWideToUtf8(filePath);
 		FILE* f = std::fopen(narrow.c_str(), "wb");
 		if (!f)
 			return false;

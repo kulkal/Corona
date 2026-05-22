@@ -65,7 +65,7 @@ shared_ptr<RTPipelineStateObject> Corona::CreateRaytracingSimpleGIPSO(bool bUseS
 void Corona::InitRaytracingSimpleGIPass()
 {
 	PSO_RT_GI = CreateRaytracingSimpleGIPSO(false);
-	if (bEnableRTDiffuseGISER && renderBackend && renderBackend->GetAPI() == ERenderBackendAPI::D3D12)
+	if (bEnableRTDiffuseGISER && renderBackend && renderBackend->SupportsShaderExecutionReordering())
 		InitRaytracingSimpleGISERPass();
 }
 
@@ -75,12 +75,12 @@ bool Corona::InitRaytracingSimpleGISERPass()
 		return true;
 	if (bRTDiffuseGISimpleSERInitFailed)
 		return false;
-	if (!renderBackend || renderBackend->GetAPI() != ERenderBackendAPI::D3D12)
+	if (!renderBackend)
 		return false;
-	if (!bD3D12ShaderModel69Supported)
+	if (!renderBackend->SupportsShaderExecutionReordering())
 	{
 		bRTDiffuseGISimpleSERInitFailed = true;
-		AppendCpuRuntimeTrace(L"[RTDiffuseGI][SER] Simple Raytrace SER skipped: D3D12 Shader Model 6.9 is not supported");
+		AppendCpuRuntimeTrace(L"[RTDiffuseGI][SER] Simple Raytrace SER skipped: backend does not support shader execution reordering");
 		return false;
 	}
 
@@ -96,7 +96,7 @@ bool Corona::InitRaytracingSimpleGISERPass()
 void Corona::RaytraceGIPass()
 {
 	shared_ptr<RTPipelineStateObject> pso = PSO_RT_GI;
-	if (bEnableRTDiffuseGISER && renderBackend && renderBackend->GetAPI() == ERenderBackendAPI::D3D12 && InitRaytracingSimpleGISERPass())
+	if (bEnableRTDiffuseGISER && renderBackend && renderBackend->SupportsShaderExecutionReordering() && InitRaytracingSimpleGISERPass())
 		pso = PSO_RT_GI_SER;
 
 	if (!TLAS || !pso)

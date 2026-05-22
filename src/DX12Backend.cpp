@@ -19,6 +19,7 @@
 #include <dxcapi.use.h>
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstring>
 #include <cstdlib>
 #include <iomanip>
@@ -854,7 +855,17 @@ void DX12Backend::SetRenderTarget(Texture* colorTarget, Texture* depthTarget)
 void DX12Backend::SetRenderTargets(Texture* const* colorTargets, uint32_t colorTargetCount, Texture* depthTarget)
 {
 	if (!colorTargets || colorTargetCount == 0)
+	{
+		if (depthTarget)
+		{
+			GlobalCmdList->CmdList->OMSetRenderTargets(
+				0,
+				nullptr,
+				FALSE,
+				&depthTarget->CpuHandleDSV);
+		}
 		return;
+	}
 
 	std::vector<D3D12_CPU_DESCRIPTOR_HANDLE> renderTargetHandles;
 	renderTargetHandles.reserve(colorTargetCount);
@@ -1010,12 +1021,20 @@ shared_ptr<Sampler> DX12Backend::CreateSampler(D3D12_SAMPLER_DESC& InSamplerDesc
 
 std::shared_ptr<Buffer> DX12Backend::CreateBuffer(const BufferCreateDesc& desc)
 {
-	return CreateBuffer(
+	std::shared_ptr<Buffer> buffer = CreateBuffer(
 		desc.NumElements,
 		desc.ElementSize,
 		ToD3D12ResourceState(desc.InitialState),
 		desc.bAllowUnorderedAccess,
 		desc.InitialData);
+	if (buffer)
+	{
+		if (desc.Shape == EBufferShape::Structured)
+			buffer->MakeStructuredBufferSRV();
+		else
+			buffer->MakeByteAddressBufferSRV();
+	}
+	return buffer;
 }
 
 std::shared_ptr<Buffer> DX12Backend::CreateBuffer(UINT InNumElements, UINT InElementSize, D3D12_RESOURCE_STATES initResState, bool isUAV, void* SrcData)
@@ -1356,13 +1375,45 @@ DX12Backend::DX12Backend(ComPtr<ID3D12Device5> InDevice)
 	GlobalCBRing = std::make_unique<ConstantBufferRingBuffer>(Device.Get(), 1024 * 1024 * 10, NumFrame);
 	
 	CmdQ->WaitGPU();
+	AppendCpuRuntimeTrace(L"[BvhViewerD3D12] auto-open skipped; use --bvh-viewer or the debug UI to open it explicitly");
+}
 
-	ShowBvhViewerD3D12Window(1280, 720);
+bool DX12Backend::SupportsRayTracing() const
+{
+	if (!Device)
+		return false;
+
+	D3D12_FEATURE_DATA_D3D12_OPTIONS5 features5 = {};
+	const HRESULT hr = Device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS5, &features5, sizeof(features5));
+	return SUCCEEDED(hr) && features5.RaytracingTier != D3D12_RAYTRACING_TIER_NOT_SUPPORTED;
+}
+
+bool DX12Backend::SupportsShaderExecutionReordering() const
+{
+	if (!Device)
+		return false;
+
+	D3D12_FEATURE_DATA_SHADER_MODEL shaderModel = {};
+	shaderModel.HighestShaderModel = D3D_SHADER_MODEL_6_9;
+	const HRESULT hr = Device->CheckFeatureSupport(D3D12_FEATURE_SHADER_MODEL, &shaderModel, sizeof(shaderModel));
+	return SUCCEEDED(hr) && shaderModel.HighestShaderModel >= D3D_SHADER_MODEL_6_9;
 }
 
 bool DX12Backend::IsBvhViewerD3D12Available() const
 {
 	return BvhViewerD3D12 && CoronaBvhViewerD3D12_IsReady(BvhViewerD3D12);
+}
+
+void DX12Backend::SetBvhViewerD3D12Allowed(bool allowed)
+{
+	bBvhViewerD3D12Allowed = allowed;
+	if (allowed || !BvhViewerD3D12)
+		return;
+
+	AppendCpuRuntimeTrace(L"[BvhViewerD3D12] shutting down because viewer hooks are disabled for this run");
+	CoronaBvhViewerD3D12_Shutdown(BvhViewerD3D12);
+	CoronaBvhViewerD3D12_Destroy(BvhViewerD3D12);
+	BvhViewerD3D12 = nullptr;
 }
 
 bool DX12Backend::IsBvhViewerD3D12WindowVisible() const
@@ -1372,6 +1423,12 @@ bool DX12Backend::IsBvhViewerD3D12WindowVisible() const
 
 bool DX12Backend::ShowBvhViewerD3D12Window(uint32_t width, uint32_t height)
 {
+	if (!bBvhViewerD3D12Allowed)
+	{
+		AppendCpuRuntimeTrace(L"[BvhViewerD3D12] show skipped because viewer hooks are disabled for this run");
+		return false;
+	}
+
 	if (!BvhViewerD3D12)
 		BvhViewerD3D12 = CoronaBvhViewerD3D12_Create();
 
@@ -1925,7 +1982,7 @@ std::shared_ptr<Texture> DX12Backend::CreateTexture2DFromResource(ComPtr<ID3D12R
 
 std::shared_ptr<Texture> DX12Backend::CreateTexture2D(const TextureCreateDesc& desc)
 {
-	return CreateTexture2D(
+	std::shared_ptr<Texture> texture = CreateTexture2D(
 		ToDXGIFormat(desc.Format),
 		ToD3D12ResourceFlags(desc.Usage),
 		ToD3D12ResourceState(desc.InitialState),
@@ -1933,6 +1990,19 @@ std::shared_ptr<Texture> DX12Backend::CreateTexture2D(const TextureCreateDesc& d
 		desc.Height,
 		desc.MipLevels,
 		desc.ClearColor);
+	if (texture)
+	{
+		texture->Width = static_cast<uint32_t>(desc.Width);
+		texture->Height = static_cast<uint32_t>(desc.Height);
+		texture->MipLevels = static_cast<uint32_t>(desc.MipLevels);
+		texture->Format = desc.Format;
+		texture->Usage = desc.Usage;
+		if (HasTextureUsage(desc.Usage, TextureUsage_RenderTarget))
+			texture->MakeRTV();
+		if (HasTextureUsage(desc.Usage, TextureUsage_DepthStencil))
+			texture->MakeDSV();
+	}
+	return texture;
 }
 
 std::shared_ptr<Texture> DX12Backend::CreateTexture3D(ETextureFormat format, ETextureUsageFlags usage, EInitialResourceState initialState, int width, int height, int depth, int mipLevels)
@@ -2369,12 +2439,6 @@ static const D3D12_HEAP_PROPERTIES kUploadHeapProps =
 	0,
 	0,
 };
-
-shared_ptr<RTAS> Mesh::CreateBLAS()
-{
-	assert(Owner);
-	return Owner->CreateBLASForMesh(this);
-}
 
 std::shared_ptr<RTAS> DX12Backend::CreateBLASForMesh(Mesh* mesh)
 {
@@ -4447,6 +4511,12 @@ std::shared_ptr<GraphicsPipelineHandle> DX12Backend::CreateGraphicsPipeline(cons
 
 	CD3DX12_RASTERIZER_DESC rasterizerStateDesc(D3D12_DEFAULT);
 	rasterizerStateDesc.CullMode = desc.bCullBackFaces ? D3D12_CULL_MODE_BACK : D3D12_CULL_MODE_NONE;
+	if (desc.bDepthBiasEnable)
+	{
+		rasterizerStateDesc.DepthBias = static_cast<INT>(std::lround(desc.DepthBiasConstantFactor));
+		rasterizerStateDesc.DepthBiasClamp = desc.DepthBiasClamp;
+		rasterizerStateDesc.SlopeScaledDepthBias = desc.DepthBiasSlopeFactor;
+	}
 
 	D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDesc = {};
 	psoDesc.InputLayout = { vertexElements.data(), static_cast<UINT>(vertexElements.size()) };
@@ -4458,7 +4528,7 @@ std::shared_ptr<GraphicsPipelineHandle> DX12Backend::CreateGraphicsPipeline(cons
 	psoDesc.DepthStencilState.StencilEnable = FALSE;
 	psoDesc.SampleMask = UINT_MAX;
 	psoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-	psoDesc.NumRenderTargets = static_cast<UINT>(desc.ColorFormats.empty() ? 1 : desc.ColorFormats.size());
+	psoDesc.NumRenderTargets = static_cast<UINT>(desc.ColorFormats.size());
 	for (UINT i = 0; i < psoDesc.NumRenderTargets; ++i)
 		psoDesc.RTVFormats[i] = ToDXGIFormat(desc.ColorFormats[i]);
 	psoDesc.DSVFormat = desc.DepthFormat.has_value() ? ToDXGIFormat(*desc.DepthFormat) : DXGI_FORMAT_UNKNOWN;
@@ -4540,6 +4610,3 @@ void DX12Backend::BindGraphicsPipelineSampler(GraphicsPipelineHandle* pipeline, 
 
 	dxPipeline->PSO->SetSampler(bindingName, sampler);
 }
-
-
-

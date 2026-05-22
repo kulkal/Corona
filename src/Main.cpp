@@ -10,11 +10,17 @@
 //*********************************************************
 
 #include "stdafx.h"
+#include "RHIBuildConfig.h"
+
+#if CORONA_PLATFORM_IS_WINDOWS
+
 #include "Corona.h"
 #include "Win32Application.h"
 #include "Utils.h"
 #include <DbgHelp.h>
+#if CORONA_HAS_D3D12
 #include <dxgidebug.h>
+#endif
 #include <cwchar>
 #include <exception>
 #include <filesystem>
@@ -342,11 +348,13 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow)
 	}
 	else
 	{
+#if CORONA_HAS_D3D12
 		ComPtr<IDXGIDebug1> dxgiDebug;
 		if (SUCCEEDED(DXGIGetDebugInterface1(0, IID_PPV_ARGS(&dxgiDebug))))
 		{
 			dxgiDebug->ReportLiveObjects(DXGI_DEBUG_ALL, DXGI_DEBUG_RLO_ALL);
 		}
+#endif
 
 		_CrtCheckMemory();
 		_CrtDumpMemoryLeaks();
@@ -354,3 +362,5 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow)
 
 	return 0;
 }
+
+#endif

@@ -11,6 +11,28 @@
 
 #pragma once
 
+#include "RHIBuildConfig.h"
+
+#if !CORONA_PLATFORM_IS_WINDOWS
+#include <chrono>
+
+struct LARGE_INTEGER
+{
+	int64_t QuadPart = 0;
+};
+
+inline void QueryPerformanceFrequency(LARGE_INTEGER* value)
+{
+	value->QuadPart = 1000000000ll;
+}
+
+inline void QueryPerformanceCounter(LARGE_INTEGER* value)
+{
+	const auto now = std::chrono::steady_clock::now().time_since_epoch();
+	value->QuadPart = std::chrono::duration_cast<std::chrono::nanoseconds>(now).count();
+}
+#endif
+
 // Helper class for animation and simulation timing.
 class StepTimer
 {

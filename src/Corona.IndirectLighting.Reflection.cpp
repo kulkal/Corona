@@ -67,7 +67,7 @@ shared_ptr<RTPipelineStateObject> Corona::CreateRaytracingReflectionPSO(bool bUs
 void Corona::InitRaytracingReflectionPass()
 {
 	PSO_RT_REFLECTION = CreateRaytracingReflectionPSO(false);
-	if (bEnableRTReflectionSER && renderBackend && renderBackend->GetAPI() == ERenderBackendAPI::D3D12)
+	if (bEnableRTReflectionSER && renderBackend && renderBackend->SupportsShaderExecutionReordering())
 		InitRaytracingReflectionSERPass();
 }
 
@@ -77,10 +77,10 @@ bool Corona::InitRaytracingReflectionSERPass()
 		return true;
 	if (bRTReflectionSERInitFailed)
 		return false;
-	if (!bD3D12ShaderModel69Supported)
+	if (!renderBackend || !renderBackend->SupportsShaderExecutionReordering())
 	{
 		bRTReflectionSERInitFailed = true;
-		AppendCpuRuntimeTrace(L"[RTReflection][SER] SER skipped: D3D12 Shader Model 6.9 is not supported");
+		AppendCpuRuntimeTrace(L"[RTReflection][SER] SER skipped: backend does not support shader execution reordering");
 		return false;
 	}
 
@@ -101,7 +101,7 @@ void Corona::RaytraceReflectionPass()
 		return;
 	renderBackend->EmitGpuCrashMarker("RaytraceReflectionPass");
 	shared_ptr<RTPipelineStateObject> pso = PSO_RT_REFLECTION;
-	if (bEnableRTReflectionSER && renderBackend && renderBackend->GetAPI() == ERenderBackendAPI::D3D12 && InitRaytracingReflectionSERPass())
+	if (bEnableRTReflectionSER && renderBackend && renderBackend->SupportsShaderExecutionReordering() && InitRaytracingReflectionSERPass())
 		pso = PSO_RT_REFLECTION_SER;
 
 	renderBackend->TransitionTexture(SpecularGIRaw.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);

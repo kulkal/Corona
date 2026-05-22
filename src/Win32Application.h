@@ -11,6 +11,10 @@
 
 #pragma once
 
+#include "RHIBuildConfig.h"
+
+#if CORONA_PLATFORM_IS_WINDOWS
+
 #include <windows.h>
 
 class Corona;
@@ -28,3 +32,5 @@ private:
 	static HWND m_hwnd;
 	static bool m_appInitialized;
 };
+
+#endif

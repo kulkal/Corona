@@ -8,19 +8,24 @@
 #include "Corona.h"
 #include "Utils.h"
 
+#if CORONA_HAS_PHYSX
 #include "PxPhysicsAPI.h"
 #include "cooking/PxCooking.h"
 #include "cooking/PxTriangleMeshDesc.h"
+#endif
 
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
+#if CORONA_HAS_PHYSX
 #include <malloc.h>
+#endif
 #include <memory>
 #include <unordered_map>
 
 void AppendCpuRuntimeTrace(const std::wstring& line);
 
+#if CORONA_HAS_PHYSX
 namespace
 {
 	using namespace physx;
@@ -624,3 +629,83 @@ bool Corona::CpuPhysicsRaycastForScript(
 {
 	return CpuPhysicsRaycast(origin, direction, maxDistance, hit);
 }
+
+#else // CORONA_HAS_PHYSX
+
+struct Corona::CpuPhysicsState
+{
+};
+
+void Corona::CpuPhysicsStateDeleter::operator()(CpuPhysicsState* state) const
+{
+	delete state;
+}
+
+void Corona::InitCpuPhysics()
+{
+	CpuPhysics.reset();
+	bCpuPhysicsSceneDirty = false;
+}
+
+void Corona::ShutdownCpuPhysics()
+{
+	CpuPhysics.reset();
+	bCpuPhysicsSceneDirty = false;
+}
+
+void Corona::MarkCpuPhysicsSceneDirty()
+{
+	bCpuPhysicsSceneDirty = false;
+}
+
+void Corona::RebuildCpuPhysicsScene()
+{
+	bCpuPhysicsSceneDirty = false;
+}
+
+bool Corona::CpuPhysicsRaycast(
+	const glm::vec3& origin,
+	const glm::vec3& direction,
+	float maxDistance,
+	CpuPhysicsRaycastHit& hit)
+{
+	(void)origin;
+	(void)direction;
+	(void)maxDistance;
+	hit = CpuPhysicsRaycastHit();
+	return false;
+}
+
+bool Corona::CpuPhysicsSphereSweep(
+	const glm::vec3& origin,
+	float radius,
+	const glm::vec3& direction,
+	float maxDistance,
+	CpuPhysicsRaycastHit& hit)
+{
+	(void)origin;
+	(void)radius;
+	(void)direction;
+	(void)maxDistance;
+	hit = CpuPhysicsRaycastHit();
+	return false;
+}
+
+glm::vec3 Corona::ResolveCameraPhysicsMovement(
+	const glm::vec3& startPosition,
+	const glm::vec3& desiredPosition)
+{
+	(void)startPosition;
+	return desiredPosition;
+}
+
+bool Corona::CpuPhysicsRaycastForScript(
+	const glm::vec3& origin,
+	const glm::vec3& direction,
+	float maxDistance,
+	CpuPhysicsRaycastHit& hit)
+{
+	return CpuPhysicsRaycast(origin, direction, maxDistance, hit);
+}
+
+#endif // CORONA_HAS_PHYSX

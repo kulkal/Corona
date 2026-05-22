@@ -252,9 +252,28 @@ void Corona::MarkRayTracingTransformsDirty()
 
 void Corona::FlushSceneObjectChanges()
 {
-	if (!bRayTracingSceneDirty || !renderBackend)
+	if (!renderBackend)
+		return;
+
+	const bool bMobileHybridDirectOnly =
+		CORONA_PLATFORM_MOBILE &&
+		RenderingMode == ERenderingMode::HYBRID;
+	if (bMobileHybridDirectOnly || !renderBackend->SupportsRayTracing())
 	{
-		if ((bRayTracingTransformDirty || bCommandLineNvFrapsBvhLiveTlas || !IsCurrentRayTracingFrameResourceReady()) && renderBackend)
+		RayTracingInstances.clear();
+		TLAS = nullptr;
+		InstancePropertyBuffer = nullptr;
+		TLASFrameResources.clear();
+		TLASFrameInstanceCounts.clear();
+		InstancePropertyFrameBuffers.clear();
+		bRayTracingSceneDirty = false;
+		bRayTracingTransformDirty = false;
+		return;
+	}
+
+	if (!bRayTracingSceneDirty)
+	{
+		if (bRayTracingTransformDirty || bCommandLineNvFrapsBvhLiveTlas || !IsCurrentRayTracingFrameResourceReady())
 			UpdateRayTracingInstanceTransforms();
 		else
 			ActivateCurrentRayTracingFrameResources();
@@ -316,7 +335,7 @@ bool Corona::IsCurrentRayTracingFrameResourceReady() const
 
 void Corona::UpdateRayTracingInstanceTransforms()
 {
-	if (!renderBackend)
+	if (!renderBackend || !renderBackend->SupportsRayTracing())
 		return;
 
 	vector<RTInstanceDesc> updatedInstances;
@@ -467,7 +486,7 @@ void Corona::UpdateInstancePropertyBuffer()
 
 void Corona::RebuildAccelerationStructures()
 {
-	if (!renderBackend)
+	if (!renderBackend || !renderBackend->SupportsRayTracing())
 		return;
 
 	const size_t previousInstanceCount = RayTracingInstances.size();
@@ -555,6 +574,9 @@ void Corona::RebuildAccelerationStructures()
 
 void Corona::InitRaytracingData()
 {
+	if (!renderBackend || !renderBackend->SupportsRayTracing())
+		return;
+
 	RenderWorld.SceneObjects = SceneObjects;
 	for (SceneObject& object : RenderWorld.SceneObjects)
 		object.RenderDirtyBits = 0;
@@ -575,8 +597,10 @@ void Corona::InitRTPSO()
 {
 	const auto totalStart = std::chrono::steady_clock::now();
 	const uint32_t maxSupportedHybridStage = renderBackend ? renderBackend->GetMaxSupportedHybridStage() : 7u;
-	const bool bInitReflectionRT = !renderBackend || renderBackend->GetAPI() != ERenderBackendAPI::Vulkan || maxSupportedHybridStage >= 3u;
-	const bool bInitGIRT = !renderBackend || renderBackend->GetAPI() != ERenderBackendAPI::Vulkan || maxSupportedHybridStage >= 4u;
+	const bool bInitReflectionRT =
+		(!renderBackend || renderBackend->GetAPI() != ERenderBackendAPI::Vulkan || maxSupportedHybridStage >= 3u);
+	const bool bInitGIRT =
+		(!renderBackend || renderBackend->GetAPI() != ERenderBackendAPI::Vulkan || maxSupportedHybridStage >= 4u);
 
 	AppendCpuRuntimeTrace(
 		L"[StartupTiming][RTPSO] begin maxSupportedHybridStage=" + std::to_wstring(maxSupportedHybridStage) +

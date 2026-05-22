@@ -31,6 +31,9 @@ CBUFFER_BINDING_BEGIN(GBufferConstantBuffer, 0)
     float2 RTSize;
     float2 RougnessMetalic;
     uint bOverrideRougnessMetallic;
+    uint bTwoSidedLighting;
+    uint bUnlitMaterial;
+    uint Padding;
 } CBUFFER_BINDING_END;
 
 struct VSInput
@@ -40,6 +43,16 @@ struct VSInput
     float2 uv : TEXCOORD0;
     float3 tangent : TANGENT;
 };
+
+struct SpineSkinnedVertex
+{
+    float3 position;
+    float3 normal;
+    float2 uv;
+    float3 tangent;
+};
+
+StructuredBuffer<SpineSkinnedVertex> SpineVertices : register(t4);
 
 struct PSInput
 {
@@ -51,22 +64,32 @@ struct PSInput
     float3 tangent : TANGENT;
 };
 
-PSInput VSMain(
-    VSInput input)
+PSInput BuildGBufferVertex(float3 position, float3 normal, float2 uv, float3 tangent)
 {
     PSInput result;
-	float4 worldPos = mul(float4(input.position, 1.0f), WorldMatrix);
+	float4 worldPos = mul(float4(position, 1.0f), WorldMatrix);
     result.position = mul(worldPos, ViewProjectionMatrix);
 
     result.unjitteredPosition = mul(worldPos, UnjitteredViewProjMat);
 
     result.prevPosition = mul(worldPos, PrevUnjitteredViewProjMat);
 
-	result.normal = normalize(mul(float4(input.normal, 0), WorldMatrix));
-    result.tangent = normalize(mul(float4(input.tangent, 0), WorldMatrix));
-    result.uv = input.uv;
+	result.normal = normalize(mul(float4(normal, 0), WorldMatrix));
+    result.tangent = normalize(mul(float4(tangent, 0), WorldMatrix));
+    result.uv = uv;
 	
     return result;
+}
+
+PSInput VSMain(VSInput input)
+{
+    return BuildGBufferVertex(input.position, input.normal, input.uv, input.tangent);
+}
+
+PSInput SpineVSMain(uint vertexId : SV_VertexID)
+{
+    SpineSkinnedVertex input = SpineVertices[vertexId];
+    return BuildGBufferVertex(input.position, input.normal, input.uv, input.tangent);
 }
 
 
@@ -145,11 +168,21 @@ PS_OUTPUT PSMain(PSInput input)
         discard;
 
     float3 WorldNormal = CalcPerPixelNormal(input.uv, input.normal, input.tangent);
+    float3 GeomNormal = CommonSafeNormalize(input.normal, float3(0.0f, 1.0f, 0.0f));
+    if (bTwoSidedLighting != 0)
+    {
+        float3 surfaceToViewForNormal = CommonSafeNormalize(-ViewDir.xyz, WorldNormal);
+        if (dot(WorldNormal, surfaceToViewForNormal) < 0.0f)
+        {
+            WorldNormal = -WorldNormal;
+            GeomNormal = -GeomNormal;
+        }
+    }
 	
     PS_OUTPUT output;
     output.Albedo.xyz = Albedo.xyz;
     output.Normal.xyz = WorldNormal;
-    output.GeomNormal.xyz = input.normal;
+    output.GeomNormal.xyz = GeomNormal;
     output.Velocity.xy = velocity;
     output.UnjitteredDepth = input.unjitteredPosition.z/input.unjitteredPosition.w;
 
@@ -163,6 +196,8 @@ PS_OUTPUT PSMain(PSInput input)
         output.Material.x = clamp(Roughness * RougnessMetalic.x, 0.02f, 1.0f);
         output.Material.y = saturate(Metallic * RougnessMetalic.y);
     }
+    output.Material.z = bUnlitMaterial != 0 ? 1.0f : 0.0f;
+    output.Material.w = 0.0f;
 
     float3 surfaceToView = CommonSafeNormalize(-ViewDir.xyz, WorldNormal);
     output.SpecularAlbedo.xyz = ComputeDLSSRRSpecularAlbedo(Albedo.xyz, output.Material.y, output.Material.x, WorldNormal, surfaceToView);

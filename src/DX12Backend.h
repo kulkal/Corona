@@ -309,93 +309,9 @@ public:
 	void AddDescriptor2HitProgram(const std::string& hitGroup, D3D12_GPU_DESCRIPTOR_HANDLE srvHandle, UINT instanceIndex);
 };
 
-class Buffer
-{
-public:
-	DX12Backend* Owner = nullptr;
-	enum BufferType
-	{
-		BYTE_ADDRESS,
-		STRUCTURED,
-		UNKNOWN,
-	};
-	BufferType Type = UNKNOWN;
-	UINT NumElements;
-	UINT ElementSize;
-	ComPtr<ID3D12Resource> resource;
-	D3D12_CPU_DESCRIPTOR_HANDLE CpuHandleSRV;
-	D3D12_GPU_DESCRIPTOR_HANDLE GpuHandleSRV;
-
-	D3D12_CPU_DESCRIPTOR_HANDLE CpuHandleUAV;
-	D3D12_GPU_DESCRIPTOR_HANDLE GpuHandleUAV;
-
-	void MakeByteAddressBufferSRV();
-	void MakeStructuredBufferSRV();
-};
-
-class IndexBuffer
-{
-public:
-	int numIndices;
-	ComPtr<ID3D12Resource> resource;
-	D3D12_INDEX_BUFFER_VIEW view;
-
-	D3D12_CPU_DESCRIPTOR_HANDLE CpuHandleSRV;
-	D3D12_GPU_DESCRIPTOR_HANDLE GpuHandleSRV;
-};
-
-class VertexBuffer
-{
-public:
-	int numVertices;
-	ComPtr<ID3D12Resource> resource;
-	D3D12_VERTEX_BUFFER_VIEW view;
-
-	D3D12_CPU_DESCRIPTOR_HANDLE CpuHandleSRV;
-	D3D12_GPU_DESCRIPTOR_HANDLE GpuHandleSRV;
-};
-
-class Sampler
-{
-public:
-	D3D12_SAMPLER_DESC SamplerDesc;
-	ComPtr<ID3D12Resource> resource;
-	D3D12_CPU_DESCRIPTOR_HANDLE CpuHandle;
-	D3D12_GPU_DESCRIPTOR_HANDLE GpuHandle;
-};
-
-class Texture 
-{
-public:
-	DX12Backend* Owner = nullptr;
-	D3D12_RESOURCE_DESC textureDesc;
-
-	ComPtr<ID3D12Resource> resource;
-
-	D3D12_CPU_DESCRIPTOR_HANDLE CpuHandleUAV;
-	D3D12_GPU_DESCRIPTOR_HANDLE GpuHandleUAV;
-
-
-	D3D12_CPU_DESCRIPTOR_HANDLE CpuHandleRTV;
-	D3D12_GPU_DESCRIPTOR_HANDLE GpuHandleRTV;
-
-	D3D12_CPU_DESCRIPTOR_HANDLE CpuHandleDSV;
-	D3D12_GPU_DESCRIPTOR_HANDLE GpuHandleDSV;
-
-	D3D12_CPU_DESCRIPTOR_HANDLE CpuHandleSRV;
-	D3D12_GPU_DESCRIPTOR_HANDLE GpuHandleSRV;
-
-	void MakeStaticSRV();
-	void MakeRTV(bool isBackBuffer = false);
-	void MakeDSV();
-
-	void UploadSRCData3D(D3D12_SUBRESOURCE_DATA* SrcData);
-	Texture(){}
-	~Texture()
-	{
-		int a = 0;
-	}
-};
+// Buffer / IndexBuffer / VertexBuffer / Sampler / Texture are defined in
+// RenderResources.h. Their DX12-specific members are gated by CORONA_HAS_D3D12
+// and only this backend builds method bodies for them.
 
 class DescriptorHeap
 {
@@ -554,6 +470,7 @@ public:
 
 	string errorString;
 	CoronaBvhViewerD3D12Handle* BvhViewerD3D12 = nullptr;
+	bool bBvhViewerD3D12Allowed = true;
 
 #if USE_AFTERMATH
 	bool bAftermathEnabled = false;
@@ -562,6 +479,8 @@ public:
 	ERenderBackendAPI GetAPI() const override { return ERenderBackendAPI::D3D12; }
 	const char* GetBackendName() const override { return "Direct3D 12"; }
 	uint32_t GetMaxSupportedHybridStage() const override { return 7; }
+	bool SupportsRayTracing() const override;
+	bool SupportsShaderExecutionReordering() const override;
 	void BeginFrame() override;
 	void EndFrame() override;
 	void WaitForGpu() override { CmdQ->WaitGPU(); }
@@ -573,6 +492,8 @@ public:
 	uint32_t GetCurrentFrameIndex() const override { return CurrentFrameIndex; }
 	DX12Backend* AsDX12Backend() override { return this; }
 	bool IsBvhViewerD3D12Available() const;
+	bool IsBvhViewerD3D12Allowed() const { return bBvhViewerD3D12Allowed; }
+	void SetBvhViewerD3D12Allowed(bool allowed);
 	bool IsBvhViewerD3D12WindowVisible() const;
 	bool ShowBvhViewerD3D12Window(uint32_t width = 1280, uint32_t height = 720);
 	void HideBvhViewerD3D12Window();
@@ -667,5 +588,3 @@ public:
 	DX12Backend(ComPtr<ID3D12Device5> pDevice);
 	virtual ~DX12Backend();
 };
-
-

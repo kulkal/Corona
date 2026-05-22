@@ -55,6 +55,8 @@
 #include "sl_dlss.h"
 #include "sl_dlss_d.h"
 #endif
+
+#if CORONA_PLATFORM_IS_WINDOWS
 using namespace DirectX;
 
 // Note that while ComPtr is used to manage the lifetime of resources on the CPU,
@@ -63,10 +65,20 @@ using namespace DirectX;
 // referenced by the GPU.
 // An example of this can be found in the class method: OnDestroy().
 using Microsoft::WRL::ComPtr;
+#endif
 using namespace std;
 
 struct lua_State;
 struct lua_Callbacks;
+struct PlatformTouchState;
+
+enum class ERawFloatDumpFormat
+{
+	Unknown,
+	R32Float,
+	R32G32Float,
+	R32G32B32A32Float,
+};
 
 class Corona
 {
@@ -170,6 +182,11 @@ private:
 	static constexpr UINT32 RenderCommandPhaseCount = static_cast<UINT32>(ERenderCommandPhase::Count);
 	static constexpr UINT32 SceneFlushPhaseCount = static_cast<UINT32>(ESceneFlushPhase::Count);
 	static constexpr UINT32 GpuQueriesPerPass = 2;
+	static constexpr UINT32 MobileShadowMapResolution = 512;
+	static constexpr UINT32 MobileShadowNearbyCasterCount = 10;
+	static constexpr float MobileShadowFocusDistance = 320.0f;
+	static constexpr float MobileShadowFocusRadius = 420.0f;
+	static constexpr float MobileShadowMinCasterHeight = 24.0f;
 	using CpuClock = std::chrono::steady_clock;
 
 	shared_ptr<Texture> DepthBuffer;
@@ -192,6 +209,9 @@ private:
 	shared_ptr<Texture> ShadowBuffer;
 	shared_ptr<Texture> AmbientOcclusionBuffer;
 	shared_ptr<Texture> SkyLightingBuffer;
+	glm::mat4x4 MobileShadowViewProjMat = glm::mat4x4(1.0f);
+	bool bMobileShadowMapValidThisFrame = false;
+	std::vector<uint32_t> MobileShadowCasterObjectIndices;
 
 	shared_ptr<Texture> SpecularGIRaw;
 
@@ -243,10 +263,20 @@ private:
 		glm::vec2 RTSize;
 		glm::vec2 RougnessMetalic;
 		UINT32 bOverrideRougnessMetallic;
-		UINT32 Padding[3] = {};
+		UINT32 bTwoSidedLighting;
+		UINT32 bUnlitMaterial;
+		UINT32 Padding[1] = {};
 	};
 
 	std::shared_ptr<GraphicsPipelineHandle> GBufferGraphicsPipeline;
+	std::shared_ptr<GraphicsPipelineHandle> SpineGBufferGraphicsPipeline;
+	struct SpineSkinningConstant
+	{
+		UINT32 VertexCount = 0;
+		float SourceScale = 1.0f;
+		glm::vec2 Padding = glm::vec2(0.0f);
+	};
+	shared_ptr<ComputePipelineStateObject> SpineSkinningPSO;
 
 	// temporal denoising
 	struct TemporalFilterConstant
@@ -366,6 +396,7 @@ private:
 	RTShadowViewParamCB RTShadowViewParam;
 	
 	shared_ptr<RTPipelineStateObject> PSO_RT_SHADOW;
+	bool bShadowOutputValidThisFrame = false;
 
 	// RT ambient occlusion. This is intentionally short-range contact AO; diffuse
 	// GI remains responsible for broad, low-frequency lighting.
@@ -709,6 +740,7 @@ private:
 		glm::mat4x4 ViewMatrix;
 		glm::mat4x4 InvViewMatrix;
 		glm::mat4x4 InvProjMatrix;
+		glm::mat4x4 ShadowViewProjectionMatrix;
 		glm::vec4 LightDir;
 		glm::vec2 RTSize;
 		float TAABlendFactor;
@@ -727,6 +759,12 @@ private:
 		float SurfaceBounceSaturation;
 		float SkyLightingStrength;
 		UINT32 LightingOutputMode = 0;
+		UINT32 bEnableDirectionalShadow = 1;
+		UINT32 bUseShadowMap = 0;
+		UINT32 bEnableSimpleSkyLighting = 0;
+		UINT32 LightingPadding1 = 0;
+		glm::vec4 AmbientSkyColorAndStrength = glm::vec4(0.0f);
+		glm::vec4 AmbientGroundColorAndStrength = glm::vec4(0.0f);
 		PointLightParam PointLights[MaxPointLights];
 		UINT32 PointLightCount = 0;
 		glm::vec3 PointLightPadding = glm::vec3(0.0f);
@@ -736,6 +774,15 @@ private:
 	shared_ptr<PipelineStateObject> LightingPSO;
 #endif
 	std::shared_ptr<GraphicsPipelineHandle> LightingGraphicsPipeline;
+
+	struct ShadowMapConstantBuffer
+	{
+		glm::mat4x4 LightViewProjectionMatrix;
+		glm::mat4x4 WorldMatrix;
+		glm::vec4 BaseColorFactor = glm::vec4(1.0f);
+	};
+	std::shared_ptr<GraphicsPipelineHandle> MobileShadowMapGraphicsPipeline;
+	std::shared_ptr<GraphicsPipelineHandle> SpineMobileShadowMapGraphicsPipeline;
 
 	// temporalAA
 	struct TemporalAAParam
@@ -894,15 +941,19 @@ private:
 	bool bReadmeScreenshotDumpMode = false;
 	bool bPathTracingScreenshotDumpMode = false;
 	bool bLightingCompareDumpMode = false;
+	bool bMobileGBufferDumpMode = false;
 	bool bAASwitchDumpMode = false;
 	bool bSpecularSequenceDumpMode = false;
 	bool bLoggedHybridStageLimit = false;
+	bool bMobileGBufferDumpCompleted = false;
 	bool bStartupModeConfigured = false;
 	UINT32 AutoAADumpPhase = 0;
 	UINT32 AutoAADumpFramesInPhase = 0;
 	UINT32 AutoAADumpFrameCountOverride = 0;
 	UINT32 DiffuseGIAutoDumpFrameCount = 96;
+	UINT32 MobileGBufferDumpPhase = 0;
 	std::wstring AutoAADumpDir;
+	std::wstring MobileGBufferDumpDir;
 	EAntiAliasingMode StartupSelectedAAMode = EAntiAliasingMode::DLSS_RR;
 	ERenderingMode StartupRenderingMode = ERenderingMode::HYBRID;
 	ERenderBackendAPI StartupRenderBackendAPI = ERenderBackendAPI::D3D12;
@@ -916,18 +967,22 @@ private:
 	ERenderBackendAPI CommandLineRenderBackendAPI = ERenderBackendAPI::D3D12;
 	bool bCommandLineDisableImgui = false;
 	bool bCommandLineDisableStreamline = false;
+	bool bCommandLineBvhViewerOverrideSet = false;
+	bool bCommandLineBvhViewerEnabled = false;
 	bool bCommandLineNvFrapsBvhLiveTlas = false;
 	bool bStartupSponzaFlyMode = false;
 	bool bCommandLineDiffuseGIAutoDumpMode = false;
 	bool bCommandLineReadmeScreenshotDumpMode = false;
 	bool bCommandLinePathTracingScreenshotDumpMode = false;
 	bool bCommandLineLightingCompareDumpMode = false;
+	bool bCommandLineMobileGBufferDumpMode = false;
 	bool bCommandLineAASwitchDumpMode = false;
 	bool bCommandLineSpecularSequenceDumpMode = false;
 	bool bCommandLineCameraPathDump = false;
 	bool bCommandLineCameraPathDiagnostics = false;
 	bool bCommandLineLoadLatestCameraPath = false;
 	UINT32 CommandLineExitAfterFrames = 0;
+	bool bCommandLineExitAfterFramesTriggered = false;
 	std::wstring CommandLineCameraPathFile;
 
 #if CORONA_HAS_D3D12
@@ -1117,6 +1172,7 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 		OverlayLine,
 		OverlayRect,
 		OverlayRectFilled,
+		OverlayButton,
 		OverlayProgressBar,
 		Gizmo3D,
 		WorldAxis,
@@ -1127,6 +1183,7 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	struct ScriptUiCommand
 	{
 		ScriptUiCommandType Type = ScriptUiCommandType::Text;
+		bool bGameUi = false;
 		std::string Id;
 		std::string Label;
 		float FloatValue = 0.0f;
@@ -1191,6 +1248,7 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	bool bScriptCameraControlEnabled = false;
 	bool bLuauImGuiFrameActive = false;
 	bool bScriptGameUiHidden = false;
+	bool bCurrentScriptUiIsGame = false;
 	std::array<bool, 256> ScriptKeyDown = {};
 	std::array<bool, 256> ScriptKeyPressed = {};
 	std::array<bool, 256> ScriptKeyReleased = {};
@@ -1226,6 +1284,21 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	float m_turnSpeed = glm::half_pi<float>();
 
 	SimpleCamera m_camera;
+	bool bMobileVirtualMoveForward = false;
+	bool bMobileVirtualMoveBackward = false;
+	bool bMobileVirtualMoveLeft = false;
+	bool bMobileVirtualMoveRight = false;
+	bool bMobileVirtualJoystickActive = false;
+	glm::vec2 MobileVirtualMoveAxis = glm::vec2(0.0f);
+	glm::vec2 MobileVirtualJoystickCenter = glm::vec2(0.0f);
+	glm::vec2 MobileVirtualJoystickDrag = glm::vec2(0.0f);
+	float MobileVirtualJoystickRadius = 1.0f;
+	bool bMobileVirtualAttackDown = false;
+	bool bMobileVirtualAttackPressed = false;
+	bool bMobileVirtualAttackReleased = false;
+	glm::vec2 MobileVirtualAttackCenter = glm::vec2(0.0f);
+	float MobileVirtualAttackRadius = 1.0f;
+	float MobileTouchLookSensitivityScale = 1.15f;
 	struct CameraPathKeyframe
 	{
 		double TimeSeconds = 0.0;
@@ -1452,6 +1525,13 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	uint64_t GBufferLastVisibleObjectCount = 0;
 	uint64_t GBufferLastFrustumCulledObjectCount = 0;
 	uint64_t GBufferLastOcclusionCulledObjectCount = 0;
+	uint64_t MobileShadowLastTotalObjectCount = 0;
+	uint64_t MobileShadowLastCandidateObjectCount = 0;
+	uint64_t MobileShadowLastReceiverObjectCount = 0;
+	uint64_t MobileShadowLastCasterObjectCount = 0;
+	uint64_t MobileShadowLastGuaranteedCasterCount = 0;
+	uint64_t MobileShadowLastCulledObjectCount = 0;
+	uint64_t MobileShadowLastDistanceCulledObjectCount = 0;
 	bool bShowCullingTextOverlay = false;
 	std::vector<RenderSyncChannel> RenderSyncChannels;
 	bool bRenderSyncChannelsInitialized = false;
@@ -1536,9 +1616,9 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	UINT FrameCounter = 0;
 
 	// Pipeline objects.
-	CD3DX12_VIEWPORT m_viewport;
-	CD3DX12_RECT m_scissorRect;
+#if CORONA_HAS_D3D12
 	ComPtr<ID3D12Device5> m_device;
+#endif
 	std::unique_ptr<IRenderBackend> renderBackend;
 	DX12Backend* dx12_rhi = nullptr;
 
@@ -1664,11 +1744,20 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 
 	struct RTSceneHitProgramDesc
 	{
-		const char* HitGroup = "HitGroup";
-		bool bBindSceneGeometry = true;
-		bool bBindDiffuseTexture = true;
-		bool bBindInstanceProperty = true;
-		bool bBindInstancePropertyBeforeDiffuse = false;
+		RTSceneHitProgramDesc()
+			: HitGroup("HitGroup")
+			, bBindSceneGeometry(true)
+			, bBindDiffuseTexture(true)
+			, bBindInstanceProperty(true)
+			, bBindInstancePropertyBeforeDiffuse(false)
+		{
+		}
+
+		const char* HitGroup;
+		bool bBindSceneGeometry;
+		bool bBindDiffuseTexture;
+		bool bBindInstanceProperty;
+		bool bBindInstancePropertyBeforeDiffuse;
 	};
 
 	class RTPassBuilder
@@ -1803,6 +1892,18 @@ public:
 		CpuPhysicsRaycastHit& hit);
 	ScriptSceneHandle CreateProceduralBlockCharacterSceneForScript(UINT32 seed);
 	ScriptSceneHandle CreateProceduralBoxSceneForScript(const glm::vec3& baseColor, bool bUseBrickTexture = false, float uvRepeat = 1.0f);
+	ScriptSceneHandle CreateSpineSceneForScript(const std::wstring& assetPath, const std::string& animationName, float timeSeconds, float sourceScale = 1.0f);
+	float GetScriptSceneHeightForScript(ScriptSceneHandle sceneHandle) const;
+	bool SetSpinePoseForScript(
+		CoronaECS::Entity entity,
+		ScriptSceneHandle sceneHandle,
+		const glm::vec3& position,
+		const glm::vec3& rotationDegrees,
+		float targetHeight,
+		float roughness,
+		float metallic,
+		bool bMirrorX,
+		bool bUseWorldScale = false);
 	ScriptSceneHandle LoadSceneForScript(const std::wstring& assetPath);
 	SceneObjectHandle SpawnSceneObjectForScript(
 		ScriptSceneHandle sceneHandle,
@@ -2008,7 +2109,7 @@ public:
 	void UpdateEntityScripts(float dt);
 	void BuildLuauUi();
 	void BuildEntityScriptUi();
-	void RenderQueuedLuauUi();
+	void RenderQueuedLuauUi(bool bRenderToolUi = true, bool bRenderGameUi = true);
 	void DrawLuauImGui();
 	void DrawEntityScriptImGui();
 	void ShutdownLuauScripting();
@@ -2017,6 +2118,7 @@ public:
 	void ScriptProfileSamplerLoop();
 	void DestroyEntityScriptComponent(CoronaECS::Entity entity);
 	bool IsLuauImGuiFrameActive() const;
+	void QueueScriptUiCommandForScript(ScriptUiCommand command);
 	void QueueScriptUiSeparatorForScript();
 	void QueueScriptUiTextForScript(const std::string& text);
 	void QueueScriptUiSameLineForScript();
@@ -2044,6 +2146,17 @@ public:
 		float width,
 		float height,
 		const glm::vec4& color,
+		float rounding);
+	bool QueueScriptUiOverlayButtonForScript(
+		const std::string& id,
+		const std::string& label,
+		float x,
+		float y,
+		float width,
+		float height,
+		const glm::vec4& fillColor,
+		const glm::vec4& hoverColor,
+		const glm::vec4& borderColor,
 		float rounding);
 	void QueueScriptUiOverlayProgressBarForScript(
 		const std::string& id,
@@ -2138,6 +2251,7 @@ public:
 	void InitDebugPass();
 
 	void InitLightingPass();
+	void InitMobileShadowMapPass();
 
 	void InitTemporalAAPass();
 
@@ -2146,6 +2260,9 @@ public:
 	void InitGenMipSpecularGIPass();
 
 	void InitImgui();
+	void DrawMobileVirtualControls();
+	void DrawMobilePerformanceOverlay();
+	void UpdateMobileVirtualMoveFromTouch(const PlatformTouchState& touchState);
 	bool LoadCameraState();
 	void SaveCameraState();
 	std::wstring GetCameraStatePath();
@@ -2156,6 +2273,11 @@ public:
 	void InitBlueNoiseTexture();
 
 	void DrawScene(shared_ptr<Scene> scene, const glm::mat4x4& instanceTransform, float Roughness, float Metalic, bool bOverrideRoughnessMetallic);
+	void DrawSceneShadowMap(shared_ptr<Scene> scene, const glm::mat4x4& instanceTransform);
+	void DispatchSpineSkinningForMesh(Mesh* mesh);
+	void DispatchSpineSkinningForScene(const shared_ptr<Scene>& scene);
+	void DispatchSpineSkinningForRenderWorld();
+	bool BuildMobileShadowViewProjection(glm::mat4x4& lightViewProj);
 	bool GetSceneObjectWorldBounds(const SceneObject& object, glm::vec3& boundsMin, glm::vec3& boundsMax, glm::vec3& center, float& radius) const;
 	bool IsWorldAabbInViewFrustum(const glm::vec3& boundsMin, const glm::vec3& boundsMax) const;
 	void PrepareGBufferCulling(uint32_t sceneObjectCount);
@@ -2165,6 +2287,7 @@ public:
 	void FinishGBufferCulling();
 
 	void GBufferPass();
+	void MobileShadowMapPass();
 
 	void RaytraceShadowPass();
 
@@ -2205,8 +2328,22 @@ public:
 	bool IsPathTracingDLSSRREnabled() const { return RenderingMode == ERenderingMode::PATHTRACING && bEnablePathTracingDLSSRR && IsDLSSRREnabled(); }
 	bool IsDLSSUpscaleEnabled() const { return RenderingMode == ERenderingMode::HYBRID && (IsDLSSSREnabled() || IsDLSSRREnabled()); }
 	bool IsJitterEnabled() const { return IsTemporalAAEnabled() || IsDLSSUpscaleEnabled(); }
-	UINT GetRenderWidth() const { return IsDLSSUpscaleEnabled() ? RenderWidth : m_width; }
-	UINT GetRenderHeight() const { return IsDLSSUpscaleEnabled() ? RenderHeight : m_height; }
+	UINT GetRenderWidth() const
+	{
+#if CORONA_PLATFORM_MOBILE
+		return RenderWidth > 0 ? RenderWidth : m_width;
+#else
+		return IsDLSSUpscaleEnabled() ? RenderWidth : m_width;
+#endif
+	}
+	UINT GetRenderHeight() const
+	{
+#if CORONA_PLATFORM_MOBILE
+		return RenderHeight > 0 ? RenderHeight : m_height;
+#else
+		return IsDLSSUpscaleEnabled() ? RenderHeight : m_height;
+#endif
+	}
 	UINT GetWidth() const { return m_width; }
 	UINT GetHeight() const { return m_height; }
 	const WCHAR* GetTitle() const { return m_title.c_str(); }
@@ -2223,13 +2360,14 @@ public:
 	Texture* GetCurrentResolveSource() const;
 	void PromptStartupModeSelection();
 	void InitializeAutoAADump();
+	bool AdvanceMobileGBufferDump(Texture* backbuffer);
 	void AdvanceAutoAADump(Texture* backbuffer);
 	void AppendAutoAADumpLog(const std::wstring& line);
 	bool IsHybridStageAutoDumpPhase() const;
 	const wchar_t* GetHybridStageAutoDumpPhaseName(uint32_t phase) const;
-	bool DumpTextureHDR(Texture* source, const std::wstring& filePath, D3D12_RESOURCE_STATES beforeState);
-	bool DumpTexturePNG(Texture* source, const std::wstring& filePath, D3D12_RESOURCE_STATES beforeState);
-	bool DumpTextureRawFloat(Texture* source, const std::wstring& filePath, D3D12_RESOURCE_STATES beforeState, DXGI_FORMAT targetFormat, uint32_t channelCount);
+	bool DumpTextureHDR(Texture* source, const std::wstring& filePath, EResourceState beforeState);
+	bool DumpTexturePNG(Texture* source, const std::wstring& filePath, EResourceState beforeState);
+	bool DumpTextureRawFloat(Texture* source, const std::wstring& filePath, EResourceState beforeState, ERawFloatDumpFormat targetFormat, uint32_t channelCount);
 	bool StartAsyncImageDumpWorkers();
 	void AsyncImageDumpWorkerMain();
 	void WaitForAsyncImageDumps();
@@ -2251,6 +2389,7 @@ public:
 	bool IsStartupLoadingScreenActive() const { return bStartupLoadingScreenActive; }
 
 	void OnUpdate();
+	void UpdateMobileTouchCameraInput(float elapsedSeconds);
 
 	void OnRender();
 

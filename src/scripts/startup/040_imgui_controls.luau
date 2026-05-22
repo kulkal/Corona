@@ -93,6 +93,23 @@ local function ensure_props_controls()
     return props
 end
 
+local function ensure_spine_controls()
+    corona_script_controls.spine = corona_script_controls.spine or {}
+    local spine = corona_script_controls.spine
+    set_persistent_default(spine, "spine", "enabled", true)
+    set_persistent_default(spine, "spine", "position", { -150.0, -12.0, -72.0 })
+    set_persistent_default(spine, "spine", "yaw", 0.0)
+    set_persistent_default(spine, "spine", "extent", 150.0)
+    set_persistent_default(spine, "spine", "sampleFps", 12.0)
+    set_persistent_default(spine, "spine", "loopSeconds", 2.0)
+    set_persistent_default(spine, "spine", "sourceScale", 1.0)
+    set_persistent_default(spine, "spine", "showLabel", true)
+    set_default(spine, "asset", "assets/spine/zed/zed.json")
+    set_default(spine, "animation", "idle")
+    set_default(spine, "spawned", false)
+    return spine
+end
+
 local function ensure_window_controls()
     corona_script_controls.windows = corona_script_controls.windows or {}
     local windows = corona_script_controls.windows
@@ -147,6 +164,17 @@ local function reset_props(props)
     props.spinSpeed = 35.0
     props.buddhaEnabled = true
     props.shaderBallEnabled = true
+end
+
+local function reset_spine(spine)
+    spine.enabled = true
+    spine.position = { -150.0, -12.0, -72.0 }
+    spine.yaw = 0.0
+    spine.extent = 150.0
+    spine.sampleFps = 12.0
+    spine.loopSeconds = 2.0
+    spine.sourceScale = 1.0
+    spine.showLabel = true
 end
 
 local function set_value_if_changed(key, old_value, new_value)
@@ -871,7 +899,7 @@ local function draw_sky_controls_window(windows, state)
     ui.end_window()
 end
 
-local function draw_object_controls_window(windows, pistol, props)
+local function draw_object_controls_window(windows, pistol, props, spine)
     if not windows.objectControlsOpen then
         return
     end
@@ -886,6 +914,7 @@ local function draw_object_controls_window(windows, pistol, props)
     draw_spawn_toggle("Buddha", props, "buddhaEnabled", "buddhaSpawned", "script.objects.buddha", "props")
     draw_spawn_toggle("ShaderBall", props, "shaderBallEnabled", "shaderBallSpawned", "script.objects.shaderball", "props")
     draw_spawn_toggle("Pistol", pistol, "enabled", "spawned", "script.objects.pistol", "pistol")
+    draw_spawn_toggle("Spine Zed", spine, "enabled", "spawned", "script.objects.spine_zed", "spine")
 
     section("Buddha")
     persistent_slider_vec3(props, "props", "buddhaPosition", "Buddha Position", "script.props.buddha.position", -1000.0, 1000.0)
@@ -913,6 +942,29 @@ local function draw_object_controls_window(windows, pistol, props)
             "spinSpeed",
             "buddhaEnabled",
             "shaderBallEnabled",
+        })
+    end
+
+    section("Spine Zed")
+    persistent_slider_vec3(spine, "spine", "position", "Spine Position", "script.spine.position", -1000.0, 1000.0)
+    persistent_slider_float(spine, "spine", "extent", "Spine Size", "script.spine.extent", 20.0, 400.0)
+    persistent_slider_float(spine, "spine", "yaw", "Spine Yaw", "script.spine.yaw", -180.0, 180.0)
+    persistent_slider_float(spine, "spine", "sampleFps", "Spine Sample FPS", "script.spine.sample_fps", 1.0, 30.0)
+    persistent_slider_float(spine, "spine", "loopSeconds", "Spine Loop Seconds", "script.spine.loop_seconds", 0.1, 5.0)
+    persistent_slider_float(spine, "spine", "sourceScale", "Spine Source Scale", "script.spine.source_scale", 0.01, 5.0)
+    spine.showLabel = ui.checkbox("Show Spine Label", "script.spine.show_label", spine.showLabel == true)
+    persist_control("spine", "showLabel", spine.showLabel)
+    if ui.button("Reset Spine Zed", "script.spine.reset") then
+        reset_spine(spine)
+        save_persistent_controls("spine", spine, {
+            "enabled",
+            "position",
+            "yaw",
+            "extent",
+            "sampleFps",
+            "loopSeconds",
+            "sourceScale",
+            "showLabel",
         })
     end
 
@@ -1066,13 +1118,13 @@ function script.ui()
     section("Script Objects")
     toggle_window_button(windows, "objectControlsOpen", "Object Controls", "script.objects.open")
     ui.same_line()
-    ui.text("Buddha / ShaderBall / Pistol")
+    ui.text("Buddha / ShaderBall / Pistol / Spine")
     toggle_window_button(windows, "pointLightsOpen", "Point Lights", "script.point_lights.open")
     ui.same_line()
     ui.text("Add / Remove / Move / Radius / Intensity")
 
     if windows.objectControlsOpen then
-        draw_object_controls_window(windows, ensure_pistol_controls(), ensure_props_controls())
+        draw_object_controls_window(windows, ensure_pistol_controls(), ensure_props_controls(), ensure_spine_controls())
     end
     draw_point_lights_window(windows, state)
     draw_render_controls_window(windows, state)

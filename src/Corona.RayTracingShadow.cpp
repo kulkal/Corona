@@ -58,7 +58,7 @@ void Corona::InitRaytracingShadowPass()
 
 void Corona::RaytraceShadowPass()
 {
-	if (!TLAS || !PSO_RT_SHADOW || !UnjitteredDepthBuffers[ColorBufferWriteIndex] || !NormalBuffers[ColorBufferWriteIndex] || !GeomNormalBuffers[ColorBufferWriteIndex])
+	if (!ShadowBuffer || !BlueNoiseTex || !TLAS || !PSO_RT_SHADOW || !UnjitteredDepthBuffers[ColorBufferWriteIndex] || !NormalBuffers[ColorBufferWriteIndex] || !GeomNormalBuffers[ColorBufferWriteIndex])
 		return;
 	renderBackend->EmitGpuCrashMarker("RaytraceShadowPass");
 
@@ -90,4 +90,5 @@ void Corona::RaytraceShadowPass()
 	pass.Dispatch(GetRenderWidth(), GetRenderHeight());
 
 	renderBackend->TransitionTexture(ShadowBuffer.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
+	bShadowOutputValidThisFrame = true;
 }
