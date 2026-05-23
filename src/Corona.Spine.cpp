@@ -21,11 +21,14 @@
 #include <spine/WeightedMeshAttachment.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <filesystem>
+#include <iomanip>
 #include <limits>
 #include <memory>
+#include <sstream>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -162,6 +165,34 @@ namespace
 
 	constexpr int kRegionQuadTriangles[] = { 0, 1, 2, 2, 3, 0 };
 	constexpr float kSpineAttachmentLocalDepthStep = 0.02f;
+
+	using SpineHighResClock = std::chrono::steady_clock;
+
+	double MillisecondsBetween(const SpineHighResClock::time_point& start, const SpineHighResClock::time_point& end)
+	{
+		const std::chrono::duration<double, std::milli> delta = end - start;
+		return delta.count();
+	}
+
+	struct SpineClipScopedTimer
+	{
+		double* Accumulator;
+		SpineHighResClock::time_point Start;
+		SpineClipScopedTimer(double* accumulator)
+			: Accumulator(accumulator), Start(SpineHighResClock::now()) {}
+		~SpineClipScopedTimer()
+		{
+			if (Accumulator)
+				*Accumulator += MillisecondsBetween(Start, SpineHighResClock::now());
+		}
+	};
+
+	std::wstring FormatMillisecondsFixed(double value)
+	{
+		std::wostringstream stream;
+		stream << std::fixed << std::setprecision(3) << value;
+		return stream.str();
+	}
 
 	std::string ToUtf8Path(const std::filesystem::path& path)
 	{
@@ -576,6 +607,9 @@ Corona::ScriptSceneHandle Corona::CreateSpineSceneForScript(
 	if (!renderBackend || assetPath.empty())
 		return InvalidScriptSceneHandle;
 
+	++SpineStats.InstancesEvaluated;
+	++SpineStatsCallsSinceReport;
+
 	std::filesystem::path skeletonPath(assetPath);
 	if (skeletonPath.is_relative())
 		skeletonPath = GetAssetFullPath(assetPath.c_str());
@@ -597,7 +631,12 @@ Corona::ScriptSceneHandle Corona::CreateSpineSceneForScript(
 
 	const auto cachedIt = ScriptSceneByPath.find(key);
 	if (cachedIt != ScriptSceneByPath.end())
+	{
+		++SpineStats.ScriptSceneCacheHits;
+		if (SpineStatsReportIntervalCalls > 0 && SpineStatsCallsSinceReport >= SpineStatsReportIntervalCalls)
+			DumpSpineFrameStatsToTrace(L"interval");
 		return cachedIt->second;
+	}
 
 	if (GSpineRuntimeAssetCacheBackend != renderBackend.get())
 	{
@@ -626,7 +665,10 @@ Corona::ScriptSceneHandle Corona::CreateSpineSceneForScript(
 		const std::string atlasPathUtf8 = ToUtf8Path(atlasPath);
 		const std::string skeletonPathUtf8 = ToUtf8Path(skeletonPath);
 
-		newRuntimeAsset->Atlas.reset(spAtlas_createFromFile(atlasPathUtf8.c_str(), nullptr));
+		{
+			SpineClipScopedTimer atlasTimer(&SpineStats.AtlasLoadMs);
+			newRuntimeAsset->Atlas.reset(spAtlas_createFromFile(atlasPathUtf8.c_str(), nullptr));
+		}
 		if (!newRuntimeAsset->Atlas)
 		{
 			AppendCpuRuntimeTrace(L"[SpineComponent] failed to load atlas: " + atlasPath.wstring());
@@ -641,7 +683,10 @@ Corona::ScriptSceneHandle Corona::CreateSpineSceneForScript(
 		}
 		json->scale = 1.0f;
 
-		newRuntimeAsset->SkeletonData.reset(spSkeletonJson_readSkeletonDataFile(json.get(), skeletonPathUtf8.c_str()));
+		{
+			SpineClipScopedTimer skeletonTimer(&SpineStats.SkeletonReadMs);
+			newRuntimeAsset->SkeletonData.reset(spSkeletonJson_readSkeletonDataFile(json.get(), skeletonPathUtf8.c_str()));
+		}
 		if (!newRuntimeAsset->SkeletonData)
 		{
 			const char* error = json->error ? json->error : "unknown";
@@ -674,29 +719,41 @@ Corona::ScriptSceneHandle Corona::CreateSpineSceneForScript(
 	if (!runtimeAsset || !runtimeAsset->SkeletonData)
 		return InvalidScriptSceneHandle;
 
-	std::unique_ptr<spSkeleton, SpineSkeletonDeleter> skeleton(spSkeleton_create(runtimeAsset->SkeletonData.get()));
-	if (!skeleton)
-	{
-		AppendCpuRuntimeTrace(L"[SpineComponent] failed to create skeleton instance");
-		return InvalidScriptSceneHandle;
-	}
-
+	std::unique_ptr<spSkeleton, SpineSkeletonDeleter> skeleton;
 	const char* selectedAnimation = SelectAnimationName(runtimeAsset->SkeletonData.get(), animationName);
-	spSkeleton_setToSetupPose(skeleton.get());
-	if (selectedAnimation)
 	{
-		spAnimation* animation = spSkeletonData_findAnimation(runtimeAsset->SkeletonData.get(), selectedAnimation);
-		if (animation)
-			spAnimation_apply(animation, skeleton.get(), 0.0f, sampleTimeSeconds, 1, nullptr, nullptr);
+		SpineClipScopedTimer animTimer(&SpineStats.AnimationEvaluationMs);
+		skeleton.reset(spSkeleton_create(runtimeAsset->SkeletonData.get()));
+		if (!skeleton)
+		{
+			AppendCpuRuntimeTrace(L"[SpineComponent] failed to create skeleton instance");
+			return InvalidScriptSceneHandle;
+		}
+		++SpineStats.SkeletonInstancesBuilt;
+		spSkeleton_setToSetupPose(skeleton.get());
+		if (selectedAnimation)
+		{
+			spAnimation* animation = spSkeletonData_findAnimation(runtimeAsset->SkeletonData.get(), selectedAnimation);
+			if (animation)
+				spAnimation_apply(animation, skeleton.get(), 0.0f, sampleTimeSeconds, 1, nullptr, nullptr);
+		}
+		spSkeleton_updateWorldTransform(skeleton.get());
 	}
-	spSkeleton_updateWorldTransform(skeleton.get());
 
 #if CORONA_PLATFORM_MOBILE
 	const bool bRequestGpuSpineSkinning = false;
 #else
 	const bool bRequestGpuSpineSkinning = bEnableGpuSpineSkinning;
 #endif
-	SpineSampleMesh sampleMesh = BuildSpineSampleMesh(skeleton.get(), safeSourceScale, !bRequestGpuSpineSkinning);
+	SpineSampleMesh sampleMesh;
+	{
+		SpineClipScopedTimer meshTimer(&SpineStats.MeshBuildMs);
+		sampleMesh = BuildSpineSampleMesh(skeleton.get(), safeSourceScale, !bRequestGpuSpineSkinning);
+	}
+	SpineStats.SlotsProcessed += static_cast<UINT32>(std::max(0, skeleton ? skeleton->slotsCount : 0));
+	SpineStats.VerticesGenerated += static_cast<UINT32>(sampleMesh.Vertices.size());
+	SpineStats.IndicesGenerated += static_cast<UINT32>(sampleMesh.Indices.size());
+	SpineStats.DrawRangesBuilt += static_cast<UINT32>(sampleMesh.Draws.size());
 	if (sampleMesh.Vertices.empty() || sampleMesh.Indices.empty())
 	{
 		AppendCpuRuntimeTrace(L"[SpineComponent] skeleton produced no drawable mesh: " + skeletonPath.wstring());
@@ -724,14 +781,23 @@ Corona::ScriptSceneHandle Corona::CreateSpineSceneForScript(
 	mesh->IndexFormat = EIndexFormat::U32;
 	mesh->Mat = material;
 	mesh->Textures.push_back(material->Diffuse);
-	mesh->Vb = renderBackend->CreateVertexBuffer(
-		static_cast<UINT32>(sizeof(SpineSampleVertex) * sampleMesh.Vertices.size()),
-		sizeof(SpineSampleVertex),
-		sampleMesh.Vertices.data());
-	mesh->Ib = renderBackend->CreateIndexBuffer(
-		mesh->IndexFormat,
-		static_cast<UINT32>(sizeof(UINT32) * sampleMesh.Indices.size()),
-		sampleMesh.Indices.data());
+	{
+		SpineClipScopedTimer uploadTimer(&SpineStats.GpuUploadMs);
+		mesh->Vb = renderBackend->CreateVertexBuffer(
+			static_cast<UINT32>(sizeof(SpineSampleVertex) * sampleMesh.Vertices.size()),
+			sizeof(SpineSampleVertex),
+			sampleMesh.Vertices.data());
+		mesh->Ib = renderBackend->CreateIndexBuffer(
+			mesh->IndexFormat,
+			static_cast<UINT32>(sizeof(UINT32) * sampleMesh.Indices.size()),
+			sampleMesh.Indices.data());
+	}
+	SpineStats.RuntimeGpuBufferCreations += 2;
+	// This call site creates VB+IB synchronously during gameplay. Mirror it
+	// as an upload-stall candidate so the forbidden-path counter from the
+	// optimization plan has a concrete signal — Phase 3 will replace this
+	// with a dynamic ring buffer in the sprite batcher.
+	++SpineStats.RuntimeGpuUploadStalls;
 	// Adreno Vulkan stalls hard when running the Spine compute skinning
 	// pipeline. On mobile we skip the GPU skinning infrastructure entirely
 	// and draw the CPU-skinned mesh->Vb through the standard vertex-
@@ -743,6 +809,7 @@ Corona::ScriptSceneHandle Corona::CreateSpineSceneForScript(
 		!sampleMesh.SkinInfluences.empty() &&
 		!sampleMesh.SkinBones.empty())
 	{
+		SpineClipScopedTimer uploadTimer(&SpineStats.GpuUploadMs);
 		mesh->GpuSpineInputVertices = renderBackend->CreateBuffer({
 			static_cast<uint32_t>(sampleMesh.SkinVertices.size()),
 			static_cast<uint32_t>(sizeof(SpineSkinInputVertex)),
@@ -778,6 +845,7 @@ Corona::ScriptSceneHandle Corona::CreateSpineSceneForScript(
 			mesh->GpuSpineSkinnedVertices;
 		mesh->GpuSpineSkinningVertexCount = mesh->bGpuSpineSkinned ? mesh->NumVertices : 0;
 		mesh->GpuSpineSkinningSourceScale = safeSourceScale;
+		SpineStats.RuntimeGpuBufferCreations += 4;
 	}
 #endif
 	mesh->CpuPositions.reserve(sampleMesh.Vertices.size());
@@ -847,5 +915,48 @@ Corona::ScriptSceneHandle Corona::CreateSpineSceneForScript(
 		L" diffuse_exists=" + std::to_wstring(runtimeAsset->bDiffuseFileExists ? 1 : 0) +
 		L" diffuse_loaded=" + std::to_wstring(runtimeAsset->bDiffuseLoaded ? 1 : 0));
 
+	if (SpineStatsReportIntervalCalls > 0 && SpineStatsCallsSinceReport >= SpineStatsReportIntervalCalls)
+		DumpSpineFrameStatsToTrace(L"interval");
+
 	return handle;
+}
+
+void Corona::SpineFrameStats::Reset()
+{
+	*this = SpineFrameStats{};
+}
+
+void Corona::ResetSpineFrameStats()
+{
+	SpineStatsLastReport = SpineStats;
+	SpineStats.Reset();
+	SpineStatsCallsSinceReport = 0;
+}
+
+void Corona::DumpSpineFrameStatsToTrace(const wchar_t* reasonTag)
+{
+	const std::wstring tag = reasonTag ? std::wstring(reasonTag) : std::wstring(L"manual");
+	AppendCpuRuntimeTrace(
+		L"[SpineStats] reason=" + tag +
+		L" calls=" + std::to_wstring(SpineStats.InstancesEvaluated) +
+		L" scene_hits=" + std::to_wstring(SpineStats.ScriptSceneCacheHits) +
+		L" clip_hits=" + std::to_wstring(SpineStats.ClipCacheHits) +
+		L" clip_misses=" + std::to_wstring(SpineStats.ClipCacheMisses) +
+		L" clip_evictions=" + std::to_wstring(SpineStats.ClipCacheEvictions) +
+		L" clip_entries=" + std::to_wstring(SpineStats.ClipCacheEntries) +
+		L" clip_bytes=" + std::to_wstring(SpineStats.ClipCacheBytes) +
+		L" skel_built=" + std::to_wstring(SpineStats.SkeletonInstancesBuilt) +
+		L" slots=" + std::to_wstring(SpineStats.SlotsProcessed) +
+		L" vertices=" + std::to_wstring(SpineStats.VerticesGenerated) +
+		L" indices=" + std::to_wstring(SpineStats.IndicesGenerated) +
+		L" draw_ranges=" + std::to_wstring(SpineStats.DrawRangesBuilt) +
+		L" gpu_buf_creates=" + std::to_wstring(SpineStats.RuntimeGpuBufferCreations) +
+		L" gpu_upload_stalls=" + std::to_wstring(SpineStats.RuntimeGpuUploadStalls) +
+		L" atlas_ms=" + FormatMillisecondsFixed(SpineStats.AtlasLoadMs) +
+		L" skel_read_ms=" + FormatMillisecondsFixed(SpineStats.SkeletonReadMs) +
+		L" anim_eval_ms=" + FormatMillisecondsFixed(SpineStats.AnimationEvaluationMs) +
+		L" mesh_build_ms=" + FormatMillisecondsFixed(SpineStats.MeshBuildMs) +
+		L" skinning_ms=" + FormatMillisecondsFixed(SpineStats.SkinningMs) +
+		L" gpu_upload_ms=" + FormatMillisecondsFixed(SpineStats.GpuUploadMs));
+	ResetSpineFrameStats();
 }

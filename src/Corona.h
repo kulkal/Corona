@@ -279,6 +279,42 @@ private:
 	};
 	shared_ptr<ComputePipelineStateObject> SpineSkinningPSO;
 
+	// Spine sprite/skinning profiling counters (Phase 1 of the platformer
+	// Spine optimization plan). All values accumulate across script-driven
+	// Spine evaluations between DumpSpineFrameStatsToTrace() calls.
+	struct SpineFrameStats
+	{
+		// Counters
+		UINT32 InstancesEvaluated = 0;        // CreateSpineSceneForScript invocations
+		UINT32 ScriptSceneCacheHits = 0;      // ScriptSceneByPath returned an existing scene
+		UINT32 ClipCacheHits = 0;             // reserved for Phase 2 SpineClipFrameCache hits
+		UINT32 ClipCacheMisses = 0;           // reserved for Phase 2 cache misses
+		UINT32 ClipCacheEvictions = 0;        // reserved for Phase 2 LRU evictions
+		UINT32 ClipCacheEntries = 0;          // reserved for Phase 2 entry count snapshot
+		UINT64 ClipCacheBytes = 0;            // reserved for Phase 2 cache-byte snapshot
+		UINT32 SkeletonInstancesBuilt = 0;    // spSkeleton_create calls
+		UINT32 SlotsProcessed = 0;            // Spine slots iterated by mesh build
+		UINT32 VerticesGenerated = 0;         // CPU-skinned vertices produced
+		UINT32 IndicesGenerated = 0;
+		UINT32 DrawRangesBuilt = 0;
+		UINT32 RuntimeGpuBufferCreations = 0; // VB+IB created from a Spine animation update
+		UINT32 RuntimeGpuUploadStalls = 0;    // immediate uploads that can stall the queue
+		// Frame-time breakdown (cumulative milliseconds since last reset)
+		double AtlasLoadMs = 0.0;
+		double SkeletonReadMs = 0.0;
+		double AnimationEvaluationMs = 0.0;
+		double SkinningMs = 0.0;
+		double MeshBuildMs = 0.0;
+		double GpuUploadMs = 0.0;
+		void Reset();
+	};
+	SpineFrameStats SpineStats;
+	SpineFrameStats SpineStatsLastReport;
+	UINT32 SpineStatsCallsSinceReport = 0;
+	UINT32 SpineStatsReportIntervalCalls = 64;
+	void ResetSpineFrameStats();
+	void DumpSpineFrameStatsToTrace(const wchar_t* reasonTag);
+
 	// temporal denoising
 	struct TemporalFilterConstant
 	{
