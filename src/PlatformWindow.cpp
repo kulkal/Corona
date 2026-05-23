@@ -29,6 +29,8 @@ namespace
 	float gLookLastY = 0.0f;
 	int32_t gMovePointerId = -1;
 	int32_t gAttackPointerId = -1;
+	int32_t gAttack2PointerId = -1;
+	int32_t gAttack3PointerId = -1;
 
 	bool GetAndroidWindowSize(float& width, float& height)
 	{
@@ -56,7 +58,14 @@ namespace
 		return width * 0.5f;
 	}
 
-	bool IsAndroidAttackTouch(float x, float y)
+	bool GetAndroidAttackButtonLayout(
+		float& primaryCenterX,
+		float& primaryCenterY,
+		float& secondaryCenterX,
+		float& secondaryCenterY,
+		float& jumpCenterX,
+		float& jumpCenterY,
+		float& radius)
 	{
 		float width = 0.0f;
 		float height = 0.0f;
@@ -64,13 +73,71 @@ namespace
 			return false;
 
 		const float shortEdge = std::max(1.0f, std::min(width, height));
-		const float radius = std::clamp(shortEdge * 0.085f, 62.0f, 96.0f);
+		radius = std::clamp(shortEdge * 0.085f, 62.0f, 96.0f);
 		const float margin = std::clamp(shortEdge * 0.070f, 56.0f, 92.0f);
-		const float centerX = width - margin - radius;
-		const float centerY = height - margin - radius;
+		// Jump button sits at the absolute bottom-right; the existing
+		// attack buttons stack above it so the jump is the most accessible
+		// thumb target.
+		jumpCenterX = width - margin - radius;
+		jumpCenterY = height - margin - radius;
+		primaryCenterX = jumpCenterX;
+		primaryCenterY = std::max(margin + radius, jumpCenterY - radius * 2.45f);
+		secondaryCenterX = primaryCenterX;
+		secondaryCenterY = std::max(margin + radius, primaryCenterY - radius * 2.45f);
+		return true;
+	}
+
+	bool IsAndroidAttackTouch(float x, float y)
+	{
+		float primaryCenterX = 0.0f;
+		float primaryCenterY = 0.0f;
+		float secondaryCenterX = 0.0f;
+		float secondaryCenterY = 0.0f;
+		float jumpCenterX = 0.0f;
+		float jumpCenterY = 0.0f;
+		float radius = 0.0f;
+		if (!GetAndroidAttackButtonLayout(primaryCenterX, primaryCenterY, secondaryCenterX, secondaryCenterY, jumpCenterX, jumpCenterY, radius))
+			return false;
+
 		const float hitRadius = radius * 1.25f;
-		const float dx = x - centerX;
-		const float dy = y - centerY;
+		const float dx = x - primaryCenterX;
+		const float dy = y - primaryCenterY;
+		return (dx * dx + dy * dy) <= (hitRadius * hitRadius);
+	}
+
+	bool IsAndroidAttack2Touch(float x, float y)
+	{
+		float primaryCenterX = 0.0f;
+		float primaryCenterY = 0.0f;
+		float secondaryCenterX = 0.0f;
+		float secondaryCenterY = 0.0f;
+		float jumpCenterX = 0.0f;
+		float jumpCenterY = 0.0f;
+		float radius = 0.0f;
+		if (!GetAndroidAttackButtonLayout(primaryCenterX, primaryCenterY, secondaryCenterX, secondaryCenterY, jumpCenterX, jumpCenterY, radius))
+			return false;
+
+		const float hitRadius = radius * 1.25f;
+		const float dx = x - secondaryCenterX;
+		const float dy = y - secondaryCenterY;
+		return (dx * dx + dy * dy) <= (hitRadius * hitRadius);
+	}
+
+	bool IsAndroidAttack3Touch(float x, float y)
+	{
+		float primaryCenterX = 0.0f;
+		float primaryCenterY = 0.0f;
+		float secondaryCenterX = 0.0f;
+		float secondaryCenterY = 0.0f;
+		float jumpCenterX = 0.0f;
+		float jumpCenterY = 0.0f;
+		float radius = 0.0f;
+		if (!GetAndroidAttackButtonLayout(primaryCenterX, primaryCenterY, secondaryCenterX, secondaryCenterY, jumpCenterX, jumpCenterY, radius))
+			return false;
+
+		const float hitRadius = radius * 1.25f;
+		const float dx = x - jumpCenterX;
+		const float dy = y - jumpCenterY;
 		return (dx * dx + dy * dy) <= (hitRadius * hitRadius);
 	}
 
@@ -143,6 +210,34 @@ namespace
 		gTouchState.bAttackActive = true;
 	}
 
+	void BeginAndroidAttack2Touch(const AInputEvent* event, int32_t pointerIndex)
+	{
+		const float x = AMotionEvent_getX(event, pointerIndex);
+		const float y = AMotionEvent_getY(event, pointerIndex);
+		if (!IsAndroidAttack2Touch(x, y))
+			return;
+
+		std::lock_guard<std::mutex> lock(gTouchStateMutex);
+		gAttack2PointerId = AMotionEvent_getPointerId(event, pointerIndex);
+		if (!gTouchState.bAttack2Active)
+			gTouchState.bAttack2Pressed = true;
+		gTouchState.bAttack2Active = true;
+	}
+
+	void BeginAndroidAttack3Touch(const AInputEvent* event, int32_t pointerIndex)
+	{
+		const float x = AMotionEvent_getX(event, pointerIndex);
+		const float y = AMotionEvent_getY(event, pointerIndex);
+		if (!IsAndroidAttack3Touch(x, y))
+			return;
+
+		std::lock_guard<std::mutex> lock(gTouchStateMutex);
+		gAttack3PointerId = AMotionEvent_getPointerId(event, pointerIndex);
+		if (!gTouchState.bAttack3Active)
+			gTouchState.bAttack3Pressed = true;
+		gTouchState.bAttack3Active = true;
+	}
+
 	void UpdateAndroidTouchState(const AInputEvent* event)
 	{
 		if (!event || AInputEvent_getType(event) != AINPUT_EVENT_TYPE_MOTION)
@@ -160,14 +255,28 @@ namespace
 		case AMOTION_EVENT_ACTION_POINTER_DOWN:
 			{
 				bool bAttackTouch = false;
+				bool bAttack2Touch = false;
+				bool bAttack3Touch = false;
 				{
 					std::lock_guard<std::mutex> lock(gTouchStateMutex);
 					const float x = AMotionEvent_getX(event, actionPointerIndex);
 					const float y = AMotionEvent_getY(event, actionPointerIndex);
-					bAttackTouch = IsAndroidAttackTouch(x, y);
-					if (bAttackTouch)
+					bAttack3Touch = IsAndroidAttack3Touch(x, y);
+					bAttackTouch = !bAttack3Touch && IsAndroidAttackTouch(x, y);
+					bAttack2Touch = !bAttack3Touch && !bAttackTouch && IsAndroidAttack2Touch(x, y);
+					if (bAttack3Touch)
+					{
+						if (gAttack3PointerId >= 0)
+							break;
+					}
+					else if (bAttackTouch)
 					{
 						if (gAttackPointerId >= 0)
+							break;
+					}
+					else if (bAttack2Touch)
+					{
+						if (gAttack2PointerId >= 0)
 							break;
 					}
 					else if (IsAndroidMoveTouch(x))
@@ -180,9 +289,19 @@ namespace
 						break;
 					}
 				}
+				if (bAttack3Touch)
+				{
+					BeginAndroidAttack3Touch(event, actionPointerIndex);
+					break;
+				}
 				if (bAttackTouch)
 				{
 					BeginAndroidAttackTouch(event, actionPointerIndex);
+					break;
+				}
+				if (bAttack2Touch)
+				{
+					BeginAndroidAttack2Touch(event, actionPointerIndex);
 					break;
 				}
 			}
@@ -222,6 +341,22 @@ namespace
 					const float y = AMotionEvent_getY(event, attackPointerIndex);
 					gTouchState.bAttackActive = IsAndroidAttackTouch(x, y);
 				}
+
+				const int32_t attack2PointerIndex = FindAndroidPointerIndexById(event, gAttack2PointerId);
+				if (attack2PointerIndex >= 0)
+				{
+					const float x = AMotionEvent_getX(event, attack2PointerIndex);
+					const float y = AMotionEvent_getY(event, attack2PointerIndex);
+					gTouchState.bAttack2Active = IsAndroidAttack2Touch(x, y);
+				}
+
+				const int32_t attack3PointerIndex = FindAndroidPointerIndexById(event, gAttack3PointerId);
+				if (attack3PointerIndex >= 0)
+				{
+					const float x = AMotionEvent_getX(event, attack3PointerIndex);
+					const float y = AMotionEvent_getY(event, attack3PointerIndex);
+					gTouchState.bAttack3Active = IsAndroidAttack3Touch(x, y);
+				}
 			}
 			break;
 
@@ -251,6 +386,20 @@ namespace
 					if (gTouchState.bAttackActive)
 						gTouchState.bAttackReleased = true;
 					gTouchState.bAttackActive = false;
+				}
+				if (liftedPointerId == gAttack2PointerId || actionMasked == AMOTION_EVENT_ACTION_CANCEL)
+				{
+					gAttack2PointerId = -1;
+					if (gTouchState.bAttack2Active)
+						gTouchState.bAttack2Released = true;
+					gTouchState.bAttack2Active = false;
+				}
+				if (liftedPointerId == gAttack3PointerId || actionMasked == AMOTION_EVENT_ACTION_CANCEL)
+				{
+					gAttack3PointerId = -1;
+					if (gTouchState.bAttack3Active)
+						gTouchState.bAttack3Released = true;
+					gTouchState.bAttack3Active = false;
 				}
 			}
 			break;
@@ -560,6 +709,10 @@ bool PollMainPlatformTouchState(PlatformTouchState& state)
 	gTouchState.DeltaY = 0.0f;
 	gTouchState.bAttackPressed = false;
 	gTouchState.bAttackReleased = false;
+	gTouchState.bAttack2Pressed = false;
+	gTouchState.bAttack2Released = false;
+	gTouchState.bAttack3Pressed = false;
+	gTouchState.bAttack3Released = false;
 #endif
 	return true;
 }

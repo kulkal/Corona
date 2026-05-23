@@ -210,6 +210,7 @@ struct GraphicsPipelineDesc
 	std::vector<ETextureFormat> ColorFormats = { ETextureFormat::RGBA8Unorm };
 	std::optional<ETextureFormat> DepthFormat;
 	bool bDepthEnable = false;
+	bool bDepthWriteEnable = true;
 	bool bCullBackFaces = true;
 	bool bTriangleStrip = false;
 	bool bDepthBiasEnable = false;

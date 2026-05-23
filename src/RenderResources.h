@@ -168,6 +168,7 @@ public:
 	std::shared_ptr<VertexBuffer> Vb;
 	bool bGpuSpineSkinned = false;
 	bool bGpuSpineSkinningDispatched = false;
+	bool bSpineMesh = false; // marks Spine-sourced meshes for unlit + two-sided rendering regardless of skinning path
 	uint32_t GpuSpineSkinningVertexCount = 0;
 	float GpuSpineSkinningSourceScale = 1.0f;
 	std::shared_ptr<Buffer> GpuSpineInputVertices;

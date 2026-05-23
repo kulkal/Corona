@@ -72,6 +72,12 @@ struct PlatformTouchState
 	bool bAttackActive = false;
 	bool bAttackPressed = false;
 	bool bAttackReleased = false;
+	bool bAttack2Active = false;
+	bool bAttack2Pressed = false;
+	bool bAttack2Released = false;
+	bool bAttack3Active = false;
+	bool bAttack3Pressed = false;
+	bool bAttack3Released = false;
 };
 
 namespace PlatformGamepadButton

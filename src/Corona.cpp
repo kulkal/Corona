@@ -35,6 +35,7 @@
 #include <cstdio>
 #include <cstring>
 #include <cmath>
+#include <cwctype>
 #if CORONA_HAS_ASSIMP
 #include "assimp/include/Importer.hpp"
 #include "assimp/include/scene.h"
@@ -337,6 +338,226 @@ namespace
 					r = clampByte(132 + variation + edgeShade + surfaceNoise);
 					g = clampByte(64 + variation / 3 + edgeShade + surfaceNoise);
 					b = clampByte(42 + variation / 4 + edgeShade + surfaceNoise);
+				}
+
+				const char pixel[4] =
+				{
+					static_cast<char>(b),
+					static_cast<char>(g),
+					static_cast<char>(r),
+					static_cast<char>(255),
+				};
+				file.write(pixel, sizeof(pixel));
+			}
+		}
+
+		return file.good();
+	}
+
+	std::wstring NormalizeProceduralBoxTextureKind(std::wstring value)
+	{
+		std::wstring key;
+		key.reserve(value.size());
+		for (wchar_t ch : value)
+		{
+			if (ch == L'_' || ch == L'-' || std::iswspace(ch))
+				continue;
+			key.push_back(static_cast<wchar_t>(std::towlower(ch)));
+		}
+
+		if (key.empty() || key == L"none" || key == L"flat" || key == L"solid" || key == L"default")
+			return std::wstring();
+		if (key == L"brick" || key == L"dungeonbrick" || key == L"dungeonstone")
+			return L"brick";
+		if (key == L"grass" || key == L"meadow" || key == L"field" || key == L"ground")
+			return L"grass";
+		if (key == L"leaf" || key == L"leaves" || key == L"bush" || key == L"foliage" || key == L"vine")
+			return L"leaf";
+		if (key == L"rock" || key == L"stone" || key == L"boulder")
+			return L"rock";
+		if (key == L"flower" || key == L"flowers" || key == L"petal" || key == L"petals")
+			return L"flower";
+		if (key == L"cloud" || key == L"mist")
+			return L"cloud";
+		if (key == L"sky")
+			return L"sky";
+		if (key == L"dirt" || key == L"soil" || key == L"earth")
+			return L"dirt";
+		return std::wstring();
+	}
+
+	std::wstring ResolveProceduralBoxTextureAssetPath(std::wstring value)
+	{
+		const auto first = std::find_if_not(value.begin(), value.end(), [](wchar_t ch) { return std::iswspace(ch) != 0; });
+		const auto last = std::find_if_not(value.rbegin(), value.rend(), [](wchar_t ch) { return std::iswspace(ch) != 0; }).base();
+		if (first >= last)
+			return std::wstring();
+
+		std::wstring path(first, last);
+		std::replace(path.begin(), path.end(), L'\\', L'/');
+		if (path.rfind(L"asset:", 0) == 0)
+			path = path.substr(6);
+		else if (path.rfind(L"tmx:", 0) == 0)
+			path = L"assets/platformer/tmx_tiles/" + path.substr(4);
+
+		while (!path.empty() && path.front() == L'/')
+			path.erase(path.begin());
+		if (path.find(L"..") != std::wstring::npos)
+			return std::wstring();
+
+		std::wstring lowerPath = path;
+		std::transform(lowerPath.begin(), lowerPath.end(), lowerPath.begin(), [](wchar_t ch) { return static_cast<wchar_t>(std::towlower(ch)); });
+		const bool hasImageExtension =
+			lowerPath.size() >= 4 &&
+			(lowerPath.rfind(L".png") == lowerPath.size() - 4 ||
+			 lowerPath.rfind(L".bmp") == lowerPath.size() - 4 ||
+			 lowerPath.rfind(L".jpg") == lowerPath.size() - 4);
+		if (!hasImageExtension)
+			return std::wstring();
+		if (lowerPath.rfind(L"assets/", 0) == 0)
+			return path;
+		if (lowerPath.rfind(L"platformer/tmx_tiles/", 0) == 0)
+			return L"assets/" + path;
+		return std::wstring();
+	}
+
+	uint32_t ProceduralTextureHash(uint32_t x, uint32_t y, uint32_t salt)
+	{
+		uint32_t h = x * 374761393u + y * 668265263u + salt * 2246822519u;
+		h = (h ^ (h >> 13)) * 1274126177u;
+		return h ^ (h >> 16);
+	}
+
+	bool WriteProceduralPlatformerBoxBmp(const std::filesystem::path& filePath, const std::wstring& textureKind)
+	{
+		constexpr uint32_t kWidth = 128;
+		constexpr uint32_t kHeight = 128;
+		constexpr uint32_t kBytesPerPixel = 4;
+		constexpr uint32_t kHeaderSize = 14 + 40;
+		constexpr uint32_t kPixelDataSize = kWidth * kHeight * kBytesPerPixel;
+		constexpr uint32_t kFileSize = kHeaderSize + kPixelDataSize;
+
+		std::ofstream file(std::filesystem::path(filePath), std::ios::binary | std::ios::trunc);
+		if (!file)
+			return false;
+
+		auto writeU16 = [&file](uint16_t value)
+		{
+			const char bytes[2] =
+			{
+				static_cast<char>(value & 0xffu),
+				static_cast<char>((value >> 8) & 0xffu),
+			};
+			file.write(bytes, sizeof(bytes));
+		};
+		auto writeU32 = [&file](uint32_t value)
+		{
+			const char bytes[4] =
+			{
+				static_cast<char>(value & 0xffu),
+				static_cast<char>((value >> 8) & 0xffu),
+				static_cast<char>((value >> 16) & 0xffu),
+				static_cast<char>((value >> 24) & 0xffu),
+			};
+			file.write(bytes, sizeof(bytes));
+		};
+		auto writeI32 = [&writeU32](int32_t value)
+		{
+			writeU32(static_cast<uint32_t>(value));
+		};
+		auto clampByte = [](int value) -> uint8_t
+		{
+			return static_cast<uint8_t>(std::clamp(value, 0, 255));
+		};
+
+		file.write("BM", 2);
+		writeU32(kFileSize);
+		writeU16(0);
+		writeU16(0);
+		writeU32(kHeaderSize);
+		writeU32(40);
+		writeI32(static_cast<int32_t>(kWidth));
+		writeI32(static_cast<int32_t>(kHeight));
+		writeU16(1);
+		writeU16(32);
+		writeU32(0);
+		writeU32(kPixelDataSize);
+		writeI32(2835);
+		writeI32(2835);
+		writeU32(0);
+		writeU32(0);
+
+		const std::wstring kind = NormalizeProceduralBoxTextureKind(textureKind);
+		uint32_t salt = 11u;
+		for (wchar_t ch : kind)
+			salt = salt * 33u + static_cast<uint32_t>(ch);
+
+		for (int y = static_cast<int>(kHeight) - 1; y >= 0; --y)
+		{
+			for (uint32_t x = 0; x < kWidth; ++x)
+			{
+				const uint32_t hash = ProceduralTextureHash(x, static_cast<uint32_t>(y), salt);
+				const int noise = static_cast<int>(hash & 31u) - 15;
+				uint8_t r = 255;
+				uint8_t g = 255;
+				uint8_t b = 255;
+
+				if (kind == L"grass")
+				{
+					const int blade = ((static_cast<int>(x) + static_cast<int>((hash >> 5) & 15u) + y * 2) % 21) < 5 ? 22 : 0;
+					const int seam = (y % 29) < 2 ? -9 : 0;
+					const int depthShade = static_cast<int>((static_cast<float>(y) / static_cast<float>(kHeight)) * 22.0f) - 7;
+					r = clampByte(176 + noise / 2 + depthShade - blade / 3 + seam);
+					g = clampByte(222 + noise + depthShade + blade + seam);
+					b = clampByte(154 + noise / 2 + blade / 5 + seam);
+				}
+				else if (kind == L"leaf")
+				{
+					const int vein = (std::abs(static_cast<int>((x + y * 2u) % 31u) - 15) <= 1) ? 26 : 0;
+					const int edge = ((x + y + ((hash >> 9) & 7u)) % 37u) < 4u ? -14 : 0;
+					r = clampByte(162 + noise / 2 + edge);
+					g = clampByte(214 + noise + vein + edge);
+					b = clampByte(148 + noise / 2 + vein / 3 + edge);
+				}
+				else if (kind == L"rock")
+				{
+					const int cell = static_cast<int>(((x / 17u) * 13u + (static_cast<uint32_t>(y) / 19u) * 19u + (hash >> 6)) & 23u) - 11;
+					const bool crack = ((x + y * 3u + (hash >> 3)) % 47u) < 2u || ((x * 3u + y + (hash >> 7)) % 53u) < 2u;
+					const int crackShade = crack ? -42 : 0;
+					r = clampByte(210 + noise + cell + crackShade);
+					g = clampByte(214 + noise + cell + crackShade);
+					b = clampByte(206 + noise + cell + crackShade);
+				}
+				else if (kind == L"flower")
+				{
+					const int petalBand = ((x + (static_cast<uint32_t>(y) / 3u) * 5u + (hash >> 8)) % 37u) < 13u ? 32 : 0;
+					const int dx = static_cast<int>(x) - 64;
+					const int dy = y - 64;
+					const bool pollen = (dx * dx + dy * dy) < 420;
+					r = clampByte(pollen ? 255 : 218 + noise + petalBand);
+					g = clampByte(pollen ? 196 : 174 + noise / 2 + petalBand / 5);
+					b = clampByte(pollen ? 48 : 224 + noise + petalBand / 2);
+				}
+				else if (kind == L"cloud")
+				{
+					const int soft = static_cast<int>((ProceduralTextureHash(x / 4u, static_cast<uint32_t>(y) / 4u, salt + 3u) >> 4) & 23u);
+					r = clampByte(220 + soft + noise / 4);
+					g = clampByte(232 + soft + noise / 4);
+					b = clampByte(246 + soft + noise / 5);
+				}
+				else if (kind == L"sky")
+				{
+					const int vertical = static_cast<int>((static_cast<float>(y) / static_cast<float>(kHeight)) * 22.0f);
+					r = clampByte(158 + vertical + noise / 6);
+					g = clampByte(204 + vertical + noise / 6);
+					b = clampByte(252 + noise / 6);
+				}
+				else if (kind == L"dirt")
+				{
+					const int pebble = ((x * 5u + static_cast<uint32_t>(y) * 7u + (hash >> 5)) % 41u) < 5u ? 18 : 0;
+					r = clampByte(214 + noise + pebble);
+					g = clampByte(186 + noise / 2 + pebble / 2);
+					b = clampByte(142 + noise / 3 + pebble / 3);
 				}
 
 				const char pixel[4] =
@@ -2530,11 +2751,54 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 			bEnableStartupLuauScript = true;
 			continue;
 		}
-		if (arg == L"--dungeon-character")
+		if (arg == L"--platformer" || arg == L"--platformer-mode" || arg == L"--platformer-character")
+		{
+			bStartupSponzaFlyMode = false;
+			bEnableStartupLuauScript = true;
+			StartupLuauMode = L"platformer";
+			bCommandLineDungeonCharacterMode = false;
+			continue;
+		}
+		if (arg == L"--dungeon-character" || arg == L"--dungeon" || arg == L"--dungeon-mode")
 		{
 			bStartupSponzaFlyMode = false;
 			bEnableStartupLuauScript = true;
 			bCommandLineDungeonCharacterMode = true;
+			StartupLuauMode = L"dungeon";
+			continue;
+		}
+		if (arg == L"--sandbox" || arg == L"--sandbox-mode" || arg == L"--sample-scripts")
+		{
+			bStartupSponzaFlyMode = false;
+			bEnableStartupLuauScript = true;
+			bCommandLineDungeonCharacterMode = false;
+			StartupLuauMode = L"sandbox";
+			continue;
+		}
+		std::wstring startupModeValue = ParseValueArg(arg, L"--startup-mode", L"-startup-mode", i);
+		if (!startupModeValue.empty())
+		{
+			if (startupModeValue == L"dungeon" || startupModeValue == L"procedural-dungeon" || startupModeValue == L"procedural_dungeon")
+			{
+				bStartupSponzaFlyMode = false;
+				bEnableStartupLuauScript = true;
+				bCommandLineDungeonCharacterMode = true;
+				StartupLuauMode = L"dungeon";
+			}
+			else if (startupModeValue == L"platformer" || startupModeValue == L"spine-platformer" || startupModeValue == L"spine_platformer")
+			{
+				bStartupSponzaFlyMode = false;
+				bEnableStartupLuauScript = true;
+				bCommandLineDungeonCharacterMode = false;
+				StartupLuauMode = L"platformer";
+			}
+			else if (startupModeValue == L"sandbox" || startupModeValue == L"samples" || startupModeValue == L"sample")
+			{
+				bStartupSponzaFlyMode = false;
+				bEnableStartupLuauScript = true;
+				bCommandLineDungeonCharacterMode = false;
+				StartupLuauMode = L"sandbox";
+			}
 			continue;
 		}
 		if (arg == L"--no-startup-scripts" || arg == L"--disable-startup-scripts")
@@ -3286,7 +3550,6 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 	bPathTracingScreenshotDumpMode = false;
 	bStartupSponzaFlyMode = false;
 	bEnableStartupLuauScript = true;
-	bCommandLineDungeonCharacterMode = true;
 	bCommandLineDisableStreamline = true;
 	bEnableDiffuseGI = false;
 	bEnableSpecularGI = false;
@@ -3299,7 +3562,7 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 		bCommandLineMobileGBufferDumpMode = true;
 		AppendStartupTrace(L"[ParseCommandLineArgs] mobile debug dump flag found: " + mobileDebugDumpFlag.wstring());
 	}
-	AppendStartupTrace(L"[ParseCommandLineArgs] mobile override: vulkan hybrid taa dungeon-only");
+	AppendStartupTrace(L"[ParseCommandLineArgs] mobile override: vulkan hybrid taa startup scripts");
 #endif
 
 	AppendStartupTrace(
@@ -3517,8 +3780,17 @@ void Corona::PromptStartupModeSelection()
 	bCommandLinePathTracingScreenshotDumpMode = false;
 	bStartupSponzaFlyMode = false;
 	bEnableStartupLuauScript = true;
-	bCommandLineDungeonCharacterMode = true;
 #endif
+
+	// Platformer mode runs without TAA / Streamline upscaling — the gameplay
+	// is fast and the temporal smearing/ghosting is more disruptive than the
+	// aliasing. The user explicitly opted out for this mode. Force OFF even
+	// when the mobile bootstrap hardcoded AA=TAA via the command-line path.
+	if (StartupLuauMode == L"platformer")
+	{
+		StartupSelectedAAMode = EAntiAliasingMode::OFF;
+		CommandLineSelectedAAMode = EAntiAliasingMode::OFF;
+	}
 
 	AntiAliasingMode = StartupSelectedAAMode;
 	RenderingMode = StartupRenderingMode;
@@ -6864,7 +7136,7 @@ void Corona::OnInit()
 	InitializeMainDirectionalLightEntity();
 	UpdateMainDirectionalLightEntityFromState();
 	LoadSceneState();
-	if (bCommandLineDungeonCharacterMode || CORONA_PLATFORM_MOBILE)
+	if (bEnableStartupLuauScript)
 	{
 		auto setScriptBoolOverride = [this](const std::string& name, bool value)
 		{
@@ -6874,9 +7146,16 @@ void Corona::OnInit()
 			PersistentScriptControls[name] = controlValue;
 		};
 
-		setScriptBoolOverride("dungeon.enabled", true);
+		if (bCommandLineDungeonCharacterMode)
+			StartupLuauMode = L"dungeon";
+		if (StartupLuauMode != L"dungeon" && StartupLuauMode != L"sandbox")
+			StartupLuauMode = L"platformer";
+
+		const bool bDungeonStartupMode = StartupLuauMode == L"dungeon";
+		const bool bPlatformerStartupMode = StartupLuauMode == L"platformer";
+		setScriptBoolOverride("platformer.enabled", bPlatformerStartupMode);
+		setScriptBoolOverride("dungeon.enabled", bDungeonStartupMode);
 		bStartupSponzaFlyMode = false;
-		bEnableStartupLuauScript = true;
 	}
 	UpdateMainDirectionalLightEntityFromState();
 	AppendCpuRuntimeTrace(L"[OnInit] after camera init");
@@ -7424,7 +7703,71 @@ shared_ptr<Texture> Corona::GetProceduralDungeonBrickDiffuseTexture()
 	return ProceduralDungeonBrickDiffuseTex;
 }
 
-shared_ptr<Scene> Corona::CreateProceduralBoxScene(const glm::vec3& baseColor, bool bUseBrickTexture, float uvRepeat)
+shared_ptr<Texture> Corona::GetProceduralBoxDiffuseTexture(const std::wstring& textureKind)
+{
+	const std::wstring assetTexturePath = ResolveProceduralBoxTextureAssetPath(textureKind);
+	if (!assetTexturePath.empty())
+	{
+		const std::wstring cacheKey = L"asset:" + assetTexturePath;
+		const auto cachedIt = ProceduralBoxDiffuseTextures.find(cacheKey);
+		if (cachedIt != ProceduralBoxDiffuseTextures.end())
+			return cachedIt->second ? cachedIt->second : DefaultWhiteTex;
+		if (!renderBackend)
+			return DefaultWhiteTex;
+
+		const std::filesystem::path texturePath = GetAssetFullPath(assetTexturePath.c_str());
+		shared_ptr<Texture> texture = renderBackend->CreateTextureFromFile(texturePath.wstring(), false);
+		if (!texture)
+		{
+			AppendCpuRuntimeTrace(L"[ProceduralTexture] failed to load platformer asset texture: " + texturePath.wstring());
+			return DefaultWhiteTex;
+		}
+
+		ProceduralBoxDiffuseTextures[cacheKey] = texture;
+		AppendCpuRuntimeTrace(L"[ProceduralTexture] loaded platformer asset texture: " + texturePath.wstring());
+		return texture;
+	}
+
+	const std::wstring kind = NormalizeProceduralBoxTextureKind(textureKind);
+	if (kind.empty())
+		return DefaultWhiteTex;
+	if (kind == L"brick")
+		return GetProceduralDungeonBrickDiffuseTexture();
+
+	const auto cachedIt = ProceduralBoxDiffuseTextures.find(kind);
+	if (cachedIt != ProceduralBoxDiffuseTextures.end())
+		return cachedIt->second ? cachedIt->second : DefaultWhiteTex;
+	if (!renderBackend)
+		return DefaultWhiteTex;
+
+	const std::filesystem::path texturePath = GetAssetFullPath((L"assets\\procedural\\platformer_" + kind + L".bmp").c_str());
+	std::error_code ec;
+	std::filesystem::create_directories(texturePath.parent_path(), ec);
+	if (ec)
+	{
+		AppendCpuRuntimeTrace(L"[ProceduralTexture] failed to create directory: " + texturePath.parent_path().wstring());
+		return DefaultWhiteTex;
+	}
+
+	if (!WriteProceduralPlatformerBoxBmp(texturePath, kind))
+	{
+		AppendCpuRuntimeTrace(L"[ProceduralTexture] failed to write platformer " + kind + L" texture: " + texturePath.wstring());
+		return DefaultWhiteTex;
+	}
+
+	shared_ptr<Texture> texture = renderBackend->CreateTextureFromFile(texturePath.wstring(), false);
+	if (!texture)
+	{
+		AppendCpuRuntimeTrace(L"[ProceduralTexture] failed to load platformer " + kind + L" texture: " + texturePath.wstring());
+		return DefaultWhiteTex;
+	}
+
+	ProceduralBoxDiffuseTextures[kind] = texture;
+	AppendCpuRuntimeTrace(L"[ProceduralTexture] generated platformer " + kind + L" texture: " + texturePath.wstring());
+	return texture;
+}
+
+shared_ptr<Scene> Corona::CreateProceduralBoxScene(const glm::vec3& baseColor, bool bUseBrickTexture, float uvRepeat, const std::wstring& textureKind)
 {
 	if (!renderBackend)
 		return nullptr;
@@ -7491,10 +7834,19 @@ shared_ptr<Scene> Corona::CreateProceduralBoxScene(const glm::vec3& baseColor, b
 
 	shared_ptr<Material> material = std::make_shared<Material>();
 	material->BaseColorFactor = glm::vec4(glm::clamp(baseColor, glm::vec3(0.0f), glm::vec3(1.0f)), 1.0f);
-	material->Diffuse = bUseBrickTexture ? GetProceduralDungeonBrickDiffuseTexture() : DefaultWhiteTex;
+	const std::wstring assetTexturePath = ResolveProceduralBoxTextureAssetPath(textureKind);
+	const std::wstring resolvedTextureKind = !assetTexturePath.empty() || !NormalizeProceduralBoxTextureKind(textureKind).empty()
+		? textureKind
+		: (bUseBrickTexture ? L"brick" : L"");
+	material->Diffuse = GetProceduralBoxDiffuseTexture(resolvedTextureKind);
 	material->Normal = DefaultNormalTex;
 	material->Roughness = DefaultRougnessTex;
 	material->Metallic = DefaultBlackTex;
+	// Raw TMX tiles (under .../tmx_tiles/<set>/raw/) carry alpha; mark them
+	// alpha-tested so the GBuffer discard and RT any-hit shaders honor the
+	// transparent pixels.
+	const bool bAlphaTested = !assetTexturePath.empty() && assetTexturePath.find(L"/raw/") != std::wstring::npos;
+	material->bHasAlpha = bAlphaTested;
 
 	Mesh* mesh = new Mesh;
 	mesh->Owner = renderBackend.get();
@@ -7503,6 +7855,7 @@ shared_ptr<Scene> Corona::CreateProceduralBoxScene(const glm::vec3& baseColor, b
 	mesh->NumIndices = static_cast<UINT>(indices.size());
 	mesh->VertexStride = sizeof(Vertex);
 	mesh->IndexFormat = EIndexFormat::U32;
+	mesh->bTransparent = bAlphaTested;
 	mesh->Mat = material;
 	mesh->Vb = renderBackend->CreateVertexBuffer(sizeof(Vertex) * vertices.size(), sizeof(Vertex), vertices.data());
 	mesh->Ib = renderBackend->CreateIndexBuffer(mesh->IndexFormat, sizeof(UINT32) * indices.size(), indices.data());
@@ -9014,13 +9367,59 @@ void Corona::DrawMobileVirtualControls()
 	const float shortEdge = std::max(1.0f, std::min(displaySize.x, displaySize.y));
 	const float attackRadius = std::clamp(shortEdge * 0.085f, 62.0f, 96.0f);
 	const float attackMargin = std::clamp(shortEdge * 0.070f, 56.0f, 92.0f);
-	const ImVec2 attackCenter(
+	const ImVec2 jumpCenter(
 		displaySize.x - attackMargin - attackRadius,
 		displaySize.y - attackMargin - attackRadius);
+	const ImVec2 attackCenter(
+		jumpCenter.x,
+		std::max(attackMargin + attackRadius, jumpCenter.y - attackRadius * 2.45f));
+	const ImVec2 attack2Center(
+		attackCenter.x,
+		std::max(attackMargin + attackRadius, attackCenter.y - attackRadius * 2.45f));
 	const bool bAttackDown = bMobileVirtualAttackDown;
+	const bool bAttack2Down = bMobileVirtualAttack2Down;
+	const bool bJumpDown = bMobileVirtualAttack3Down;
 	const float attackPulse = bAttackDown ? 1.0f : 0.0f;
+	const float attack2Pulse = bAttack2Down ? 1.0f : 0.0f;
+	const float jumpPulse = bJumpDown ? 1.0f : 0.0f;
 
 	ImDrawList* drawList = ImGui::GetForegroundDrawList();
+	drawList->AddCircleFilled(
+		attack2Center,
+		attackRadius,
+		bAttack2Down ? IM_COL32(220, 105, 34, 190) : IM_COL32(28, 26, 30, 135),
+		48);
+	drawList->AddCircle(
+		attack2Center,
+		attackRadius,
+		bAttack2Down ? IM_COL32(255, 220, 145, 235) : IM_COL32(255, 245, 215, 150),
+		48,
+		3.0f + attack2Pulse * 1.5f);
+	drawList->AddCircle(
+		attack2Center,
+		attackRadius * 0.68f,
+		IM_COL32(255, 210, 120, bAttack2Down ? 190 : 112),
+		40,
+		2.0f);
+	const ImU32 flameColor = IM_COL32(255, 244, 190, bAttack2Down ? 250 : 210);
+	const ImU32 flameCoreColor = IM_COL32(255, 112, 48, bAttack2Down ? 240 : 185);
+	const float flame = attackRadius * 0.44f;
+	drawList->AddCircleFilled(
+		ImVec2(attack2Center.x, attack2Center.y + flame * 0.12f),
+		flame * 0.42f,
+		flameCoreColor,
+		24);
+	drawList->AddTriangleFilled(
+		ImVec2(attack2Center.x, attack2Center.y - flame * 0.72f),
+		ImVec2(attack2Center.x - flame * 0.48f, attack2Center.y + flame * 0.18f),
+		ImVec2(attack2Center.x + flame * 0.48f, attack2Center.y + flame * 0.18f),
+		flameColor);
+	drawList->AddCircleFilled(
+		ImVec2(attack2Center.x + flame * 0.20f, attack2Center.y - flame * 0.10f),
+		flame * 0.22f,
+		IM_COL32(255, 250, 210, bAttack2Down ? 245 : 205),
+		16);
+
 	drawList->AddCircleFilled(
 		attackCenter,
 		attackRadius,
@@ -9055,6 +9454,43 @@ void Corona::DrawMobileVirtualControls()
 		attackRadius * 0.075f,
 		iconColor,
 		16);
+
+	// Jump pad at the bottom-right corner — a sky-blue circle with an
+	// upward chevron icon.
+	drawList->AddCircleFilled(
+		jumpCenter,
+		attackRadius,
+		bJumpDown ? IM_COL32(80, 150, 220, 195) : IM_COL32(28, 28, 36, 135),
+		48);
+	drawList->AddCircle(
+		jumpCenter,
+		attackRadius,
+		bJumpDown ? IM_COL32(195, 230, 255, 235) : IM_COL32(230, 245, 255, 150),
+		48,
+		3.0f + jumpPulse * 1.5f);
+	drawList->AddCircle(
+		jumpCenter,
+		attackRadius * 0.68f,
+		IM_COL32(220, 240, 255, bJumpDown ? 200 : 120),
+		40,
+		2.0f);
+	const float chevron = attackRadius * 0.46f;
+	const ImU32 jumpIconColor = IM_COL32(240, 250, 255, bJumpDown ? 245 : 215);
+	drawList->AddLine(
+		ImVec2(jumpCenter.x - chevron * 0.55f, jumpCenter.y + chevron * 0.18f),
+		ImVec2(jumpCenter.x, jumpCenter.y - chevron * 0.42f),
+		jumpIconColor,
+		5.0f);
+	drawList->AddLine(
+		ImVec2(jumpCenter.x, jumpCenter.y - chevron * 0.42f),
+		ImVec2(jumpCenter.x + chevron * 0.55f, jumpCenter.y + chevron * 0.18f),
+		jumpIconColor,
+		5.0f);
+	drawList->AddLine(
+		ImVec2(jumpCenter.x, jumpCenter.y - chevron * 0.42f),
+		ImVec2(jumpCenter.x, jumpCenter.y + chevron * 0.50f),
+		jumpIconColor,
+		5.0f);
 
 	if (!bMobileVirtualJoystickActive)
 		return;
@@ -9101,6 +9537,12 @@ void Corona::DrawMobileVirtualControls()
 	bMobileVirtualAttackDown = false;
 	bMobileVirtualAttackPressed = false;
 	bMobileVirtualAttackReleased = false;
+	bMobileVirtualAttack2Down = false;
+	bMobileVirtualAttack2Pressed = false;
+	bMobileVirtualAttack2Released = false;
+	bMobileVirtualAttack3Down = false;
+	bMobileVirtualAttack3Pressed = false;
+	bMobileVirtualAttack3Released = false;
 #endif
 }
 

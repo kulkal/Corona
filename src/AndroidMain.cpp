@@ -181,25 +181,70 @@ namespace
 
 		if (app && app->activity && app->activity->assetManager)
 		{
-			CopyAssetTree(app->activity->assetManager, kAssetRoot, runtimeRoot);
-
-			const struct RuntimeAssetTree
+			// AAssetDir_getNextFileName only enumerates files in a single
+			// directory, not subdirectories. The packaging script writes
+			// asset_manifest.txt with the full relative path of every
+			// runtime asset, so we walk that explicit list instead of
+			// trying to recurse blindly.
+			AAssetManager* assetManager = app->activity->assetManager;
+			const std::string manifestAssetPath = std::string(kAssetRoot) + "/asset_manifest.txt";
+			AAsset* manifestAsset = AAssetManager_open(assetManager, manifestAssetPath.c_str(), AASSET_MODE_BUFFER);
+			if (manifestAsset)
 			{
-				const char* AssetPath;
-				const char* DestinationPath;
-			} runtimeAssetTrees[] =
-			{
-				{ "VulkanShaders", "VulkanShaders" },
-				{ "assets/default", "assets/default" },
-				{ "src/scripts/entity", "src/scripts/entity" },
-				{ "src/scripts/startup", "src/scripts/startup" }
-			};
+				const off_t manifestSize = AAsset_getLength(manifestAsset);
+				std::string manifestText;
+				if (manifestSize > 0)
+				{
+					manifestText.resize(static_cast<size_t>(manifestSize));
+					AAsset_read(manifestAsset, manifestText.data(), static_cast<size_t>(manifestSize));
+				}
+				AAsset_close(manifestAsset);
 
-			for (const RuntimeAssetTree& tree : runtimeAssetTrees)
-				CopyAssetTree(
-					app->activity->assetManager,
-					std::string(kAssetRoot) + "/" + tree.AssetPath,
-					runtimeRoot / tree.DestinationPath);
+				size_t lineStart = 0;
+				while (lineStart < manifestText.size())
+				{
+					size_t lineEnd = manifestText.find('\n', lineStart);
+					if (lineEnd == std::string::npos)
+						lineEnd = manifestText.size();
+					std::string relPath = manifestText.substr(lineStart, lineEnd - lineStart);
+					lineStart = lineEnd + 1;
+
+					while (!relPath.empty() && (relPath.back() == '\r' || relPath.back() == ' ' || relPath.back() == '\t'))
+						relPath.pop_back();
+					if (relPath.empty())
+						continue;
+
+					const std::string assetPath = std::string(kAssetRoot) + "/" + relPath;
+					const std::filesystem::path destination = runtimeRoot / relPath;
+					std::filesystem::create_directories(destination.parent_path(), ec);
+					CopyAssetFile(assetManager, assetPath, destination);
+				}
+			}
+			else
+			{
+				// Fallback for older packages without a manifest — copy the
+				// historically-known trees so the app still launches with
+				// some content.
+				CopyAssetTree(assetManager, kAssetRoot, runtimeRoot);
+
+				const struct RuntimeAssetTree
+				{
+					const char* AssetPath;
+					const char* DestinationPath;
+				} runtimeAssetTrees[] =
+				{
+					{ "VulkanShaders", "VulkanShaders" },
+					{ "assets/default", "assets/default" },
+					{ "src/scripts/entity", "src/scripts/entity" },
+					{ "src/scripts/startup", "src/scripts/startup" }
+				};
+
+				for (const RuntimeAssetTree& tree : runtimeAssetTrees)
+					CopyAssetTree(
+						assetManager,
+						std::string(kAssetRoot) + "/" + tree.AssetPath,
+						runtimeRoot / tree.DestinationPath);
+			}
 		}
 
 		setenv("CORONA_RUNTIME_ROOT", runtimeRoot.string().c_str(), 1);

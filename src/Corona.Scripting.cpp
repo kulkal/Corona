@@ -169,6 +169,69 @@ namespace
 		return result;
 	}
 
+	std::string NormalizeProceduralBoxAssetTexturePathForScript(const std::string& value)
+	{
+		const auto first = std::find_if_not(value.begin(), value.end(), [](unsigned char ch) { return std::isspace(ch) != 0; });
+		const auto last = std::find_if_not(value.rbegin(), value.rend(), [](unsigned char ch) { return std::isspace(ch) != 0; }).base();
+		if (first >= last)
+			return std::string();
+
+		std::string path(first, last);
+		std::replace(path.begin(), path.end(), '\\', '/');
+		if (path.rfind("asset:", 0) == 0)
+			path = path.substr(6);
+		else if (path.rfind("tmx:", 0) == 0)
+			path = std::string("assets/platformer/tmx_tiles/") + path.substr(4);
+
+		while (!path.empty() && path.front() == '/')
+			path.erase(path.begin());
+		if (path.find("..") != std::string::npos)
+			return std::string();
+
+		std::string lowerPath = path;
+		std::transform(lowerPath.begin(), lowerPath.end(), lowerPath.begin(), [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+		const bool hasImageExtension =
+			lowerPath.size() >= 4 &&
+			(lowerPath.rfind(".png") == lowerPath.size() - 4 ||
+			 lowerPath.rfind(".bmp") == lowerPath.size() - 4 ||
+			 lowerPath.rfind(".jpg") == lowerPath.size() - 4);
+		if (!hasImageExtension)
+			return std::string();
+		if (lowerPath.rfind("assets/", 0) == 0)
+			return path;
+		if (lowerPath.rfind("platformer/tmx_tiles/", 0) == 0)
+			return std::string("assets/") + path;
+		return std::string();
+	}
+
+	std::string NormalizeProceduralBoxTextureKindForScript(const std::string& value)
+	{
+		const std::string assetPath = NormalizeProceduralBoxAssetTexturePathForScript(value);
+		if (!assetPath.empty())
+			return assetPath;
+
+		const std::string key = NormalizeKeyName(value.c_str());
+		if (key.empty() || key == "NONE" || key == "FLAT" || key == "SOLID" || key == "DEFAULT")
+			return std::string();
+		if (key == "BRICK" || key == "DUNGEONBRICK" || key == "DUNGEONSTONE")
+			return "brick";
+		if (key == "GRASS" || key == "MEADOW" || key == "FIELD" || key == "GROUND")
+			return "grass";
+		if (key == "LEAF" || key == "LEAVES" || key == "BUSH" || key == "FOLIAGE" || key == "VINE")
+			return "leaf";
+		if (key == "ROCK" || key == "STONE" || key == "BOULDER")
+			return "rock";
+		if (key == "FLOWER" || key == "FLOWERS" || key == "PETAL" || key == "PETALS")
+			return "flower";
+		if (key == "CLOUD" || key == "MIST")
+			return "cloud";
+		if (key == "SKY")
+			return "sky";
+		if (key == "DIRT" || key == "SOIL" || key == "EARTH")
+			return "dirt";
+		return std::string();
+	}
+
 	bool TryReadKeyCode(lua_State* L, int index, UINT8& key)
 	{
 		if (lua_isnumber(L, index))
@@ -964,6 +1027,7 @@ private:
 		glm::vec3 color(0.72f, 0.72f, 0.72f);
 		bool brickTexture = false;
 		float uvRepeat = 1.0f;
+		std::string textureKind;
 		if (lua_istable(L, 1))
 		{
 			const int tableIndex = lua_absindex(L, 1);
@@ -979,9 +1043,13 @@ private:
 				if (!ReadNumberField(L, tableIndex, "uvRepeat", uvRepeat))
 					ReadNumberField(L, tableIndex, "texture_repeat", uvRepeat);
 			}
+			textureKind = NormalizeProceduralBoxTextureKindForScript(ReadFirstStringField(
+				L,
+				tableIndex,
+				{ "texture_kind", "textureKind", "texture", "terrain_texture", "terrainTexture", "material_kind", "materialKind" }));
 		}
 
-		const Corona::ScriptSceneHandle handle = host->CreateProceduralBoxSceneForScript(color, brickTexture, uvRepeat);
+		const Corona::ScriptSceneHandle handle = host->CreateProceduralBoxSceneForScript(color, brickTexture, uvRepeat, Utf8ToWideLocal(textureKind));
 		if (handle == Corona::InvalidScriptSceneHandle)
 		{
 			luaL_error(L, "failed to create procedural box scene");
@@ -1513,6 +1581,7 @@ private:
 				glm::vec3 color(0.72f, 0.72f, 0.72f);
 				bool brickTexture = false;
 				float uvRepeat = 1.0f;
+				std::string textureKind;
 				if (!ReadVec3Field(L, tableIndex, "color", color))
 				{
 					if (!ReadVec3Field(L, tableIndex, "base_color", color))
@@ -1525,7 +1594,11 @@ private:
 					if (!ReadNumberField(L, tableIndex, "uvRepeat", uvRepeat))
 						ReadNumberField(L, tableIndex, "texture_repeat", uvRepeat);
 				}
-				sceneHandle = host->CreateProceduralBoxSceneForScript(color, brickTexture, uvRepeat);
+				textureKind = NormalizeProceduralBoxTextureKindForScript(ReadFirstStringField(
+					L,
+					tableIndex,
+					{ "texture_kind", "textureKind", "texture", "terrain_texture", "terrainTexture", "material_kind", "materialKind" }));
+				sceneHandle = host->CreateProceduralBoxSceneForScript(color, brickTexture, uvRepeat, Utf8ToWideLocal(textureKind));
 			}
 			else if (primitive == "BLOCKCHARACTER" || primitive == "CHARACTER")
 			{
@@ -1714,6 +1787,7 @@ private:
 		const float metallic = static_cast<float>(luaL_optnumber(L, 9, 0.0));
 		const bool bMirrorX = lua_gettop(L) >= 10 && lua_toboolean(L, 10) != 0;
 		const bool bUseWorldScale = lua_gettop(L) >= 11 && lua_toboolean(L, 11) != 0;
+		const bool bRayTracing = lua_gettop(L) >= 12 && lua_toboolean(L, 12) != 0;
 
 		const bool ok = host->SetSpinePoseForScript(
 			entity,
@@ -1724,7 +1798,8 @@ private:
 			roughness,
 			metallic,
 			bMirrorX,
-			bUseWorldScale);
+			bUseWorldScale,
+			bRayTracing);
 
 		lua_pushboolean(L, ok ? 1 : 0);
 		return 1;
@@ -3776,11 +3851,16 @@ Corona::ScriptSceneHandle Corona::CreateProceduralBlockCharacterSceneForScript(U
 	return handle;
 }
 
-Corona::ScriptSceneHandle Corona::CreateProceduralBoxSceneForScript(const glm::vec3& baseColor, bool bUseBrickTexture, float uvRepeat)
+Corona::ScriptSceneHandle Corona::CreateProceduralBoxSceneForScript(const glm::vec3& baseColor, bool bUseBrickTexture, float uvRepeat, const std::wstring& textureKind)
 {
 	if (!renderBackend)
 		return InvalidScriptSceneHandle;
 
+	const std::string normalizedTextureKindUtf8 = NormalizeProceduralBoxTextureKindForScript(WideToUtf8Local(textureKind));
+	const std::wstring normalizedTextureKind = Utf8ToWideLocal(normalizedTextureKindUtf8);
+	const std::wstring textureKey = normalizedTextureKind.empty()
+		? (bUseBrickTexture ? L"brick" : L"flat")
+		: normalizedTextureKind;
 	const glm::ivec3 quantizedColor = glm::clamp(
 		glm::ivec3(glm::round(glm::clamp(baseColor, glm::vec3(0.0f), glm::vec3(1.0f)) * 255.0f)),
 		glm::ivec3(0),
@@ -3791,13 +3871,13 @@ Corona::ScriptSceneHandle Corona::CreateProceduralBoxSceneForScript(const glm::v
 		std::to_wstring(quantizedColor.x) + L"/" +
 		std::to_wstring(quantizedColor.y) + L"/" +
 		std::to_wstring(quantizedColor.z) + L"/" +
-		(bUseBrickTexture ? L"brick" : L"flat") + L"/" +
+		textureKey + L"/" +
 		std::to_wstring(quantizedUvRepeat);
 	const auto cachedIt = ScriptSceneByPath.find(key);
 	if (cachedIt != ScriptSceneByPath.end())
 		return cachedIt->second;
 
-	shared_ptr<Scene> scene = CreateProceduralBoxScene(glm::vec3(quantizedColor) / 255.0f, bUseBrickTexture, static_cast<float>(quantizedUvRepeat) / 100.0f);
+	shared_ptr<Scene> scene = CreateProceduralBoxScene(glm::vec3(quantizedColor) / 255.0f, bUseBrickTexture, static_cast<float>(quantizedUvRepeat) / 100.0f, normalizedTextureKind);
 	if (!scene)
 		return InvalidScriptSceneHandle;
 
@@ -4052,7 +4132,8 @@ bool Corona::SetSpinePoseForScript(
 	float roughness,
 	float metallic,
 	bool bMirrorX,
-	bool bUseWorldScale)
+	bool bUseWorldScale,
+	bool bRayTracing)
 {
 	if (!EntityWorld.IsAlive(entity))
 		return false;
@@ -4121,7 +4202,7 @@ bool Corona::SetSpinePoseForScript(
 		}
 		if (!objectIt->bVisible)
 			dirtyBits |= kSceneObjectDirtyVisibility;
-		if (objectIt->bRayTracing)
+		if (objectIt->bRayTracing != bRayTracing)
 			dirtyBits |= kSceneObjectDirtyRayTracing;
 
 		const bool bPhysicsQueryChanged = objectIt->bPhysicsQuery;
@@ -4130,7 +4211,7 @@ bool Corona::SetSpinePoseForScript(
 		objectIt->Metallic = metallic;
 		objectIt->bOverrideRoughnessMetallic = false;
 		objectIt->bVisible = true;
-		objectIt->bRayTracing = false;
+		objectIt->bRayTracing = bRayTracing;
 		objectIt->bPhysicsQuery = false;
 		UpdateSceneObjectEntity(*objectIt);
 		MarkSceneObjectRenderDirty(objectHandle, dirtyBits);
@@ -4152,7 +4233,7 @@ bool Corona::SetSpinePoseForScript(
 	desc.Metallic = metallic;
 	desc.bOverrideRoughnessMetallic = false;
 	desc.bVisible = true;
-	desc.bRayTracing = false;
+	desc.bRayTracing = bRayTracing;
 	desc.bPhysicsQuery = false;
 	desc.PhysicsCollisionShape = EPhysicsCollisionShape::TriangleMesh;
 	desc.PhysicsBoxHalfExtent = glm::vec3(0.5f);
@@ -5575,12 +5656,26 @@ void Corona::UpdateMobileVirtualMoveFromTouch(const PlatformTouchState& touchSta
 	const float attackMargin = std::clamp(shortEdge * 0.070f, 56.0f, 92.0f);
 	MobileVirtualJoystickRadius = joystickRadius;
 	MobileVirtualAttackRadius = attackRadius;
-	MobileVirtualAttackCenter = glm::vec2(
+	// Jump pad pinned to the bottom-right corner; the two attack pads stack
+	// above it. Layout mirrors PlatformWindow.cpp GetAndroidAttackButtonLayout.
+	MobileVirtualAttack3Center = glm::vec2(
 		static_cast<float>(m_width) - attackMargin - attackRadius,
 		static_cast<float>(m_height) - attackMargin - attackRadius);
+	MobileVirtualAttackCenter = glm::vec2(
+		MobileVirtualAttack3Center.x,
+		std::max(attackMargin + attackRadius, MobileVirtualAttack3Center.y - attackRadius * 2.45f));
+	MobileVirtualAttack2Center = glm::vec2(
+		MobileVirtualAttackCenter.x,
+		std::max(attackMargin + attackRadius, MobileVirtualAttackCenter.y - attackRadius * 2.45f));
 	bMobileVirtualAttackDown = touchState.bAttackActive;
 	bMobileVirtualAttackPressed = touchState.bAttackPressed;
 	bMobileVirtualAttackReleased = touchState.bAttackReleased;
+	bMobileVirtualAttack2Down = touchState.bAttack2Active;
+	bMobileVirtualAttack2Pressed = touchState.bAttack2Pressed;
+	bMobileVirtualAttack2Released = touchState.bAttack2Released;
+	bMobileVirtualAttack3Down = touchState.bAttack3Active;
+	bMobileVirtualAttack3Pressed = touchState.bAttack3Pressed;
+	bMobileVirtualAttack3Released = touchState.bAttack3Released;
 
 	if (!touchState.bMoveActive)
 	{
@@ -5618,6 +5713,12 @@ void Corona::UpdateMobileVirtualMoveFromTouch(const PlatformTouchState& touchSta
 	bMobileVirtualAttackDown = false;
 	bMobileVirtualAttackPressed = false;
 	bMobileVirtualAttackReleased = false;
+	bMobileVirtualAttack2Down = false;
+	bMobileVirtualAttack2Pressed = false;
+	bMobileVirtualAttack2Released = false;
+	bMobileVirtualAttack3Down = false;
+	bMobileVirtualAttack3Pressed = false;
+	bMobileVirtualAttack3Released = false;
 #endif
 }
 
@@ -5691,16 +5792,25 @@ void Corona::PollScriptGamepadState()
 	const float virtualLeftX = MobileVirtualMoveAxis.x;
 	const float virtualLeftY = MobileVirtualMoveAxis.y;
 	const bool bVirtualAttack = bMobileVirtualAttackDown || bMobileVirtualAttackPressed;
+	const bool bVirtualAttack2 = bMobileVirtualAttack2Down || bMobileVirtualAttack2Pressed;
+	const bool bVirtualAttack3 = bMobileVirtualAttack3Down || bMobileVirtualAttack3Pressed;
 	const bool bHasVirtualMove =
 		std::abs(virtualLeftX) > 0.001f ||
 		std::abs(virtualLeftY) > 0.001f;
-	if (bHasVirtualMove || bVirtualAttack)
+	if (bHasVirtualMove || bVirtualAttack || bVirtualAttack2 || bVirtualAttack3)
 	{
 		state.bConnected = true;
 		state.LeftX = std::clamp(state.LeftX + virtualLeftX, -1.0f, 1.0f);
 		state.LeftY = std::clamp(state.LeftY + virtualLeftY, -1.0f, 1.0f);
 		if (bVirtualAttack)
 			state.Buttons |= PlatformGamepadButton::B;
+		if (bVirtualAttack2)
+		{
+			state.Buttons |= PlatformGamepadButton::Y;
+			state.RightTrigger = std::max(state.RightTrigger, 1.0f);
+		}
+		if (bVirtualAttack3)
+			state.Buttons |= PlatformGamepadButton::A;
 	}
 #endif
 
@@ -7227,47 +7337,67 @@ void Corona::RunStartupLuauScript(bool bShowLoadingProgress)
 	if (!ScriptState || !ScriptState->L)
 		return;
 
-	std::vector<std::filesystem::path> scriptPaths;
-	const std::filesystem::path startupDir = GetAssetFullPath(L"scripts\\startup");
-	std::error_code ec;
-	if (std::filesystem::is_directory(startupDir, ec))
+	auto sortScriptPaths = [](std::vector<std::filesystem::path>& paths)
 	{
-		for (const std::filesystem::directory_entry& entry : std::filesystem::directory_iterator(startupDir, ec))
+		std::sort(paths.begin(), paths.end(), [](const std::filesystem::path& a, const std::filesystem::path& b)
 		{
-			if (ec)
-				break;
-			if (entry.is_regular_file(ec) && entry.path().extension() == L".luau")
-				scriptPaths.push_back(entry.path());
-		}
-	}
-
-	std::sort(scriptPaths.begin(), scriptPaths.end(), [](const std::filesystem::path& a, const std::filesystem::path& b)
-	{
 #if CORONA_PLATFORM_IS_WINDOWS
-		return _wcsicmp(a.filename().c_str(), b.filename().c_str()) < 0;
+			return _wcsicmp(a.filename().c_str(), b.filename().c_str()) < 0;
 #else
-		std::string lhs = a.filename().string();
-		std::string rhs = b.filename().string();
-		std::transform(lhs.begin(), lhs.end(), lhs.begin(), [](unsigned char c)
-		{
-			return static_cast<char>(std::tolower(c));
-		});
-		std::transform(rhs.begin(), rhs.end(), rhs.begin(), [](unsigned char c)
-		{
-			return static_cast<char>(std::tolower(c));
-		});
-		return lhs < rhs;
+			std::string lhs = a.filename().string();
+			std::string rhs = b.filename().string();
+			std::transform(lhs.begin(), lhs.end(), lhs.begin(), [](unsigned char c)
+			{
+				return static_cast<char>(std::tolower(c));
+			});
+			std::transform(rhs.begin(), rhs.end(), rhs.begin(), [](unsigned char c)
+			{
+				return static_cast<char>(std::tolower(c));
+			});
+			return lhs < rhs;
 #endif
-	});
+		});
+	};
+
+	auto appendDirectLuauScripts = [&](const std::filesystem::path& directory, std::vector<std::filesystem::path>& output)
+	{
+		std::error_code entryEc;
+		if (!std::filesystem::is_directory(directory, entryEc))
+			return;
+
+		std::vector<std::filesystem::path> paths;
+		for (const std::filesystem::directory_entry& entry : std::filesystem::directory_iterator(directory, entryEc))
+		{
+			if (entryEc)
+				break;
+			if (entry.is_regular_file(entryEc) && entry.path().extension() == L".luau")
+				paths.push_back(entry.path());
+		}
+		sortScriptPaths(paths);
+		output.insert(output.end(), paths.begin(), paths.end());
+	};
+
+	const std::filesystem::path startupDir = GetAssetFullPath(L"scripts\\startup");
+	std::wstring startupMode = StartupLuauMode.empty() ? L"platformer" : StartupLuauMode;
+	if (startupMode != L"dungeon" && startupMode != L"sandbox")
+		startupMode = L"platformer";
+
+	std::vector<std::filesystem::path> scriptPaths;
+	appendDirectLuauScripts(startupDir / startupMode, scriptPaths);
+	appendDirectLuauScripts(startupDir / L"common", scriptPaths);
+	appendDirectLuauScripts(startupDir, scriptPaths);
 
 	if (scriptPaths.empty())
 	{
+		std::error_code ec;
 		const std::filesystem::path legacyScriptPath = GetAssetFullPath(L"scripts\\startup_pistol_spin.luau");
 		if (std::filesystem::exists(legacyScriptPath, ec))
 			scriptPaths.push_back(legacyScriptPath);
 	}
 
-	AppendCpuRuntimeTrace(L"[Luau] startup script count=" + std::to_wstring(scriptPaths.size()));
+	AppendCpuRuntimeTrace(
+		L"[Luau] startup mode=" + startupMode +
+		L", script count=" + std::to_wstring(scriptPaths.size()));
 	for (size_t scriptIndex = 0; scriptIndex < scriptPaths.size(); ++scriptIndex)
 	{
 		const std::filesystem::path& scriptPath = scriptPaths[scriptIndex];

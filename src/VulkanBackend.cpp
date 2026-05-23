@@ -6040,7 +6040,7 @@ std::shared_ptr<GraphicsPipelineHandle> VulkanBackend::CreateGraphicsPipeline(co
 	VkPipelineDepthStencilStateCreateInfo depthStencil{};
 	depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
 	depthStencil.depthTestEnable = desc.bDepthEnable ? VK_TRUE : VK_FALSE;
-	depthStencil.depthWriteEnable = desc.bDepthEnable ? VK_TRUE : VK_FALSE;
+	depthStencil.depthWriteEnable = (desc.bDepthEnable && desc.bDepthWriteEnable) ? VK_TRUE : VK_FALSE;
 	depthStencil.depthCompareOp = desc.bDepthEnable ? VK_COMPARE_OP_LESS_OR_EQUAL : VK_COMPARE_OP_ALWAYS;
 
 	std::vector<VkPipelineColorBlendAttachmentState> colorBlendAttachments;

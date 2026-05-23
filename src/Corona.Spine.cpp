@@ -221,18 +221,27 @@ namespace
 		if (!triangles || triangleIndexCount <= 0)
 			return;
 
+		// Indices are stored *local* to the attachment's vertex range.
+		// The renderer passes drawcall.VertexBase = baseVertex to
+		// vkCmdDrawIndexed / DrawIndexedInstanced, which adds it to each
+		// fetched index — so adding baseVertex here too would double-offset
+		// and read the wrong vertices (manifests as zig-zag / flying-head
+		// garbage on multi-attachment Spine meshes).
+		//
+		// Only emit a single winding per triangle. The GBuffer pipeline runs
+		// with backface culling disabled, so two-sided visibility is already
+		// covered; emitting the reversed winding too would put two coplanar
+		// triangles at identical depth and trigger flickering z-fights
+		// (visible as e.g. alternating-eye disappearance on Spine faces).
+		(void)baseVertex;
 		for (int i = 0; i + 2 < triangleIndexCount; i += 3)
 		{
-			const UINT32 a = baseVertex + static_cast<UINT32>(triangles[i]);
-			const UINT32 b = baseVertex + static_cast<UINT32>(triangles[i + 1]);
-			const UINT32 c = baseVertex + static_cast<UINT32>(triangles[i + 2]);
+			const UINT32 a = static_cast<UINT32>(triangles[i]);
+			const UINT32 b = static_cast<UINT32>(triangles[i + 1]);
+			const UINT32 c = static_cast<UINT32>(triangles[i + 2]);
 			outMesh.Indices.push_back(a);
 			outMesh.Indices.push_back(b);
 			outMesh.Indices.push_back(c);
-
-			outMesh.Indices.push_back(c);
-			outMesh.Indices.push_back(b);
-			outMesh.Indices.push_back(a);
 		}
 	}
 
@@ -433,7 +442,7 @@ namespace
 
 		// Spine drawOrder is already the intended back-to-front painter order.
 		// Keep that order explicitly and give each attachment a tiny depth layer
-		// so depth-tested GBuffer rendering cannot reorder overlapping parts.
+		// for stable tests against world depth without making sprites look thick.
 		const int slotCount = skeleton ? skeleton->slotsCount : 0;
 		for (int slotIndex = 0; slotIndex < slotCount; ++slotIndex)
 		{
@@ -640,7 +649,8 @@ Corona::ScriptSceneHandle Corona::CreateSpineSceneForScript(
 
 	auto material = std::make_shared<Material>();
 	material->bHasAlpha = true;
-	material->BaseColorFactor = glm::vec4(2.2f, 3.2f, 2.0f, 1.0f);
+	// Spine renders unlit; show diffuse texture color as-is (no boost).
+	material->BaseColorFactor = glm::vec4(1.0f, 1.0f, 1.0f, 1.0f);
 	material->Diffuse = runtimeAsset->DiffuseTexture ? runtimeAsset->DiffuseTexture : DefaultWhiteTex;
 	material->Normal = DefaultNormalTex;
 	material->Roughness = DefaultRougnessTex;
@@ -650,6 +660,7 @@ Corona::ScriptSceneHandle Corona::CreateSpineSceneForScript(
 	mesh->Owner = renderBackend.get();
 	mesh->transform = glm::mat4x4(1.0f);
 	mesh->bTransparent = true;
+	mesh->bSpineMesh = true;
 	mesh->NumVertices = static_cast<UINT32>(sampleMesh.Vertices.size());
 	mesh->NumIndices = static_cast<UINT32>(sampleMesh.Indices.size());
 	mesh->VertexStride = sizeof(SpineSampleVertex);
@@ -664,6 +675,11 @@ Corona::ScriptSceneHandle Corona::CreateSpineSceneForScript(
 		mesh->IndexFormat,
 		static_cast<UINT32>(sizeof(UINT32) * sampleMesh.Indices.size()),
 		sampleMesh.Indices.data());
+	// Adreno Vulkan stalls hard when running the Spine compute skinning
+	// pipeline. On mobile we skip the GPU skinning infrastructure entirely
+	// and draw the CPU-skinned mesh->Vb through the standard vertex-
+	// attribute path. Desktop keeps the compute path for performance.
+#if !CORONA_PLATFORM_MOBILE
 	if (sampleMesh.SkinVertices.size() == sampleMesh.Vertices.size() &&
 		!sampleMesh.SkinVertices.empty() &&
 		!sampleMesh.SkinInfluences.empty() &&
@@ -705,6 +721,7 @@ Corona::ScriptSceneHandle Corona::CreateSpineSceneForScript(
 		mesh->GpuSpineSkinningVertexCount = mesh->bGpuSpineSkinned ? mesh->NumVertices : 0;
 		mesh->GpuSpineSkinningSourceScale = safeSourceScale;
 	}
+#endif
 	mesh->CpuPositions.reserve(sampleMesh.Vertices.size());
 	for (const SpineSampleVertex& vertex : sampleMesh.Vertices)
 		mesh->CpuPositions.push_back(vertex.Position);

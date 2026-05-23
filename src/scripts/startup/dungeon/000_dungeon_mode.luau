@@ -1,0 +1,19 @@
+local script = {}
+
+corona_script_startup_mode = "dungeon"
+
+corona_script_controls = corona_script_controls or {}
+corona_script_controls.platformer = corona_script_controls.platformer or {}
+corona_script_controls.dungeon = corona_script_controls.dungeon or {}
+
+corona_script_controls.platformer.enabled = false
+corona_script_controls.dungeon.enabled = true
+
+if corona.set_persistent_control ~= nil then
+    corona.set_persistent_control("platformer.enabled", false)
+    corona.set_persistent_control("dungeon.enabled", true)
+end
+
+corona.log("startup mode selected: dungeon")
+
+return script

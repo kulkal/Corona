@@ -1078,6 +1078,7 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	shared_ptr<Texture> DefaultNormalTex;
 	shared_ptr<Texture> DefaultRougnessTex;
 	shared_ptr<Texture> ProceduralDungeonBrickDiffuseTex;
+	std::map<std::wstring, shared_ptr<Texture>> ProceduralBoxDiffuseTextures;
 
 	// global wrap sampler
 	std::shared_ptr<Sampler> samplerWrap;
@@ -1245,6 +1246,7 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	int ScriptProfileSampleHz = 1000;
 	bool bEnableStartupLuauScript = true;
 	bool bCommandLineDungeonCharacterMode = false;
+	std::wstring StartupLuauMode = L"platformer";
 	bool bScriptCameraControlEnabled = false;
 	bool bLuauImGuiFrameActive = false;
 	bool bScriptGameUiHidden = false;
@@ -1297,6 +1299,14 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	bool bMobileVirtualAttackPressed = false;
 	bool bMobileVirtualAttackReleased = false;
 	glm::vec2 MobileVirtualAttackCenter = glm::vec2(0.0f);
+	bool bMobileVirtualAttack2Down = false;
+	bool bMobileVirtualAttack2Pressed = false;
+	bool bMobileVirtualAttack2Released = false;
+	glm::vec2 MobileVirtualAttack2Center = glm::vec2(0.0f);
+	bool bMobileVirtualAttack3Down = false;
+	bool bMobileVirtualAttack3Pressed = false;
+	bool bMobileVirtualAttack3Released = false;
+	glm::vec2 MobileVirtualAttack3Center = glm::vec2(0.0f);
 	float MobileVirtualAttackRadius = 1.0f;
 	float MobileTouchLookSensitivityScale = 1.15f;
 	struct CameraPathKeyframe
@@ -1813,7 +1823,8 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 		const glm::vec3& rotationDegrees = glm::vec3(0.0f));
 	shared_ptr<Scene> CreateMirrorCubeScene();
 	shared_ptr<Texture> GetProceduralDungeonBrickDiffuseTexture();
-	shared_ptr<Scene> CreateProceduralBoxScene(const glm::vec3& baseColor, bool bUseBrickTexture = false, float uvRepeat = 1.0f);
+	shared_ptr<Texture> GetProceduralBoxDiffuseTexture(const std::wstring& textureKind);
+	shared_ptr<Scene> CreateProceduralBoxScene(const glm::vec3& baseColor, bool bUseBrickTexture = false, float uvRepeat = 1.0f, const std::wstring& textureKind = std::wstring());
 	bool ShouldIncludeSceneObjectInRayTracingAS(const SceneObject& object) const;
 	void MarkRayTracingSceneDirty();
 	void MarkRayTracingTransformsDirty();
@@ -1891,7 +1902,7 @@ public:
 		float maxDistance,
 		CpuPhysicsRaycastHit& hit);
 	ScriptSceneHandle CreateProceduralBlockCharacterSceneForScript(UINT32 seed);
-	ScriptSceneHandle CreateProceduralBoxSceneForScript(const glm::vec3& baseColor, bool bUseBrickTexture = false, float uvRepeat = 1.0f);
+	ScriptSceneHandle CreateProceduralBoxSceneForScript(const glm::vec3& baseColor, bool bUseBrickTexture = false, float uvRepeat = 1.0f, const std::wstring& textureKind = std::wstring());
 	ScriptSceneHandle CreateSpineSceneForScript(const std::wstring& assetPath, const std::string& animationName, float timeSeconds, float sourceScale = 1.0f);
 	float GetScriptSceneHeightForScript(ScriptSceneHandle sceneHandle) const;
 	bool SetSpinePoseForScript(
@@ -1903,7 +1914,8 @@ public:
 		float roughness,
 		float metallic,
 		bool bMirrorX,
-		bool bUseWorldScale = false);
+		bool bUseWorldScale = false,
+		bool bRayTracing = false);
 	ScriptSceneHandle LoadSceneForScript(const std::wstring& assetPath);
 	SceneObjectHandle SpawnSceneObjectForScript(
 		ScriptSceneHandle sceneHandle,

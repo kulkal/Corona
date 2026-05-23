@@ -1,5 +1,9 @@
 {
     "files.associations": {
         "*.luau": "lua"
-    }
+    },
+    "claudeCode.initialPermissionMode": "acceptEdits",
+    "claude.autoApproveEdits": true,
+    "claude.autoApproveTerminalCommands": true,
+    "claude.askBeforeRunningCommands": false
 }

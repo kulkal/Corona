@@ -208,6 +208,18 @@ float3 EvaluateSimpleSkyAmbient(float3 worldNormal, float3 albedo, float metalli
     return ambient * albedo * (1.0f - metallic);
 }
 
+float3 EvaluateSkyBackground(float2 screenUV)
+{
+    float vertical = saturate(1.0f - screenUV.y);
+    float3 skyTop = max(AmbientSkyColorAndStrength.rgb, 0.0f.xxx);
+    float3 skyBottom = max(AmbientGroundColorAndStrength.rgb, 0.0f.xxx);
+    if (dot(skyTop, 1.0f.xxx) <= 1.0e-5f)
+        skyTop = float3(0.58f, 0.84f, 1.10f);
+    if (dot(skyBottom, 1.0f.xxx) <= 1.0e-5f)
+        skyBottom = float3(0.88f, 0.98f, 1.12f);
+    return lerp(skyBottom, skyTop, vertical) * 1.65f;
+}
+
 float4 PSMain(PSInput input) : SV_TARGET
 {
     float LowFreqWeight = 0.25f;
@@ -227,6 +239,9 @@ float4 PSMain(PSInput input) : SV_TARGET
     float3 NormalSample = SanitizeFloat3(NormalTex[PixelPos].xyz);
     float3 WorldNormal = SafeNormalize(bMobileDirectOnly ? (NormalSample * 2.0f - 1.0f) : NormalSample, float3(0.0f, 1.0f, 0.0f));
     float DeviceDepth = DepthTex[PixelPos].x;
+    if (DeviceDepth >= 0.999999f)
+        return float4(EvaluateSkyBackground(screenUV), 1.0f);
+
     float3 DirectVisibility = EvaluateDirectionalVisibility(screenUV, DeviceDepth, WorldNormal);
 
     float2 Velocity = VelocityTex[PixelPos];
@@ -305,12 +320,6 @@ float4 PSMain(PSInput input) : SV_TARGET
     float3 DirectSpecular = max(DirectionalSpecular + PointSpecular, 0);
 
     float3 DirectLighting = max(DiffuseLighting + DirectSpecular, 0);
-    if (bMobileDirectOnly && DeviceDepth >= 0.999999f)
-    {
-        float vertical = saturate(1.0f - screenUV.y);
-        float3 dungeonBackground = lerp(float3(0.010f, 0.011f, 0.013f), float3(0.045f, 0.050f, 0.055f), vertical);
-        return float4(dungeonBackground, 1);
-    }
     if (bDirectOutput)
         return float4(SanitizeFloat3(DirectLighting), 1);
 

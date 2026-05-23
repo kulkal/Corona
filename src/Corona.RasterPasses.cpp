@@ -238,6 +238,7 @@ void Corona::InitGBufferPass()
 	spineDesc.VertexEntryPoint = "SpineVSMain";
 	spineDesc.VertexElements.clear();
 	spineDesc.VertexStride = 0;
+	spineDesc.bDepthWriteEnable = false;
 	spineDesc.BufferBindings = {
 		{ "SpineVertices", 4 },
 	};
@@ -1358,7 +1359,7 @@ void Corona::LightingPass()
 		ShadowBuffer;
 	const bool bDirectionalShadowAvailable =
 		bUseMobileShadowMap ||
-		(!bMobileHybridDirectOnly && ShadowBuffer);
+		(!bMobileHybridDirectOnly && bShadowOutputValidThisFrame && ShadowBuffer);
 	Param.bEnableDirectionalShadow = bDirectionalShadowAvailable ? 1u : 0u;
 	Param.bUseShadowMap = bUseMobileShadowMap ? 1u : 0u;
 	static bool bLoggedMissingDesktopShadowOutput = false;
@@ -1372,17 +1373,13 @@ void Corona::LightingPass()
 	}
 	if (bMobileHybridDirectOnly)
 	{
-		const glm::vec3 mobileSkyAmbientColor =
-			glm::max(glm::mix(SkyColorBottom, SkyColorTop, 0.68f), glm::vec3(0.0f));
-		const glm::vec3 mobileGroundAmbientColor =
-			glm::max(glm::mix(SkyColorBottom, SkyColorTop, 0.18f), glm::vec3(0.0f));
-		Param.AmbientSkyColorAndStrength = glm::vec4(mobileSkyAmbientColor, 0.18f);
-		Param.AmbientGroundColorAndStrength = glm::vec4(mobileGroundAmbientColor, 0.075f);
+		Param.AmbientSkyColorAndStrength = glm::vec4(glm::max(SkyColorTop, glm::vec3(0.0f)), 0.18f);
+		Param.AmbientGroundColorAndStrength = glm::vec4(glm::max(SkyColorBottom, glm::vec3(0.0f)), 0.075f);
 	}
 	else
 	{
-		Param.AmbientSkyColorAndStrength = glm::vec4(0.0f);
-		Param.AmbientGroundColorAndStrength = glm::vec4(0.0f);
+		Param.AmbientSkyColorAndStrength = glm::vec4(glm::max(SkyColorTop, glm::vec3(0.0f)), 0.0f);
+		Param.AmbientGroundColorAndStrength = glm::vec4(glm::max(SkyColorBottom, glm::vec3(0.0f)), 0.0f);
 	}
 	Param.PointLightCount = 0;
 	for (const PointLightState& pointLight : RenderWorld.PointLights)
@@ -1746,6 +1743,7 @@ void Corona::DispatchSpineSkinningForMesh(Mesh* mesh)
 		return;
 	}
 
+
 	SpineSkinningConstant constants = {};
 	constants.VertexCount = mesh->GpuSpineSkinningVertexCount;
 	constants.SourceScale = mesh->GpuSpineSkinningSourceScale;
@@ -1833,8 +1831,12 @@ void Corona::DrawScene(shared_ptr<Scene> scene, const glm::mat4x4& instanceTrans
 			objCB.RougnessMetalic.y = Metalic;
 
 			objCB.bOverrideRougnessMetallic = bOverrideRoughnessMetallic ? 1 : 0;
-			objCB.bTwoSidedLighting = bUseSpineVertexFetch ? 1u : 0u;
-			objCB.bUnlitMaterial = bUseSpineVertexFetch ? 1u : 0u;
+			// Spine meshes always render unlit + two-sided regardless of
+			// whether they go through the compute-skinning vertex-fetch
+			// pipeline or the CPU-skinned VBO path (mobile fallback).
+			const bool bSpineUnlit = bUseSpineVertexFetch || mesh->bSpineMesh;
+			objCB.bTwoSidedLighting = bSpineUnlit ? 1u : 0u;
+			objCB.bUnlitMaterial = bSpineUnlit ? 1u : 0u;
 
 			renderBackend->SetGraphicsPipelineConstantData(activeGBufferPipeline, 0, &objCB, sizeof(objCB));
 
@@ -2035,7 +2037,7 @@ bool Corona::BuildMobileShadowViewProjection(glm::mat4x4& lightViewProj)
 	for (uint32_t objectIndex = 0; objectIndex < static_cast<uint32_t>(RenderWorld.SceneObjects.size()); ++objectIndex)
 	{
 		const SceneObject& object = RenderWorld.SceneObjects[objectIndex];
-		if (!object.bVisible || !object.ScenePtr)
+		if (!object.bVisible || !object.ScenePtr || !object.bRayTracing)
 			continue;
 
 		++MobileShadowLastTotalObjectCount;
@@ -2557,43 +2559,63 @@ void Corona::GBufferPass()
 
 	if (!bMultiThreadRendering)
 	{
-		for (const SceneObject& object : RenderWorld.SceneObjects)
+		auto sceneUsesSpineVertexFetch = [](const std::shared_ptr<Scene>& scene)
 		{
-			if (!object.bVisible || !object.ScenePtr)
-				continue;
-			++GBufferLastTotalObjectCount;
-
-			glm::vec3 boundsMin(0.0f);
-			glm::vec3 boundsMax(0.0f);
-			glm::vec3 boundsCenter(0.0f);
-			float boundsRadius = 0.0f;
-			if (GetSceneObjectWorldBounds(object, boundsMin, boundsMax, boundsCenter, boundsRadius))
+			if (!scene)
+				return false;
+			for (const auto& mesh : scene->meshes)
 			{
-				if (!IsWorldAabbInViewFrustum(boundsMin, boundsMax))
-				{
-					++GBufferLastFrustumCulledObjectCount;
-					auto stateIt = SceneObjectCullingStates.find(object.Handle);
-					if (stateIt != SceneObjectCullingStates.end())
-					{
-						stateIt->second.LastVisible = true;
-						stateIt->second.HasPendingOcclusionQuery = false;
-					}
+				if (mesh && mesh->bGpuSpineSkinned)
+					return true;
+			}
+			return false;
+		};
+
+		for (int drawSpinePass = 0; drawSpinePass < 2; ++drawSpinePass)
+		{
+			for (const SceneObject& object : RenderWorld.SceneObjects)
+			{
+				if (!object.bVisible || !object.ScenePtr)
 					continue;
+
+				const bool bSpineObject = sceneUsesSpineVertexFetch(object.ScenePtr);
+				if ((drawSpinePass == 0 && bSpineObject) || (drawSpinePass == 1 && !bSpineObject))
+					continue;
+
+				++GBufferLastTotalObjectCount;
+
+				glm::vec3 boundsMin(0.0f);
+				glm::vec3 boundsMax(0.0f);
+				glm::vec3 boundsCenter(0.0f);
+				float boundsRadius = 0.0f;
+				if (GetSceneObjectWorldBounds(object, boundsMin, boundsMax, boundsCenter, boundsRadius))
+				{
+					if (!IsWorldAabbInViewFrustum(boundsMin, boundsMax))
+					{
+						++GBufferLastFrustumCulledObjectCount;
+						auto stateIt = SceneObjectCullingStates.find(object.Handle);
+						if (stateIt != SceneObjectCullingStates.end())
+						{
+							stateIt->second.LastVisible = true;
+							stateIt->second.HasPendingOcclusionQuery = false;
+						}
+						continue;
+					}
+
+					if (!ShouldDrawSceneObjectInGBuffer(object, boundsCenter, boundsRadius))
+						continue;
 				}
 
-				if (!ShouldDrawSceneObjectInGBuffer(object, boundsCenter, boundsRadius))
-					continue;
+				const uint32_t occlusionQueryIndex = BeginGBufferOcclusionQuery(object.Handle);
+				DrawScene(
+					object.ScenePtr,
+					object.Transform,
+					object.Roughness,
+					object.Metallic,
+					object.bOverrideRoughnessMetallic);
+				EndGBufferOcclusionQuery(object.Handle, occlusionQueryIndex);
+				++GBufferLastVisibleObjectCount;
 			}
-
-			const uint32_t occlusionQueryIndex = BeginGBufferOcclusionQuery(object.Handle);
-			DrawScene(
-				object.ScenePtr,
-				object.Transform,
-				object.Roughness,
-				object.Metallic,
-				object.bOverrideRoughnessMetallic);
-			EndGBufferOcclusionQuery(object.Handle, occlusionQueryIndex);
-			++GBufferLastVisibleObjectCount;
 		}
 	}
 	else
