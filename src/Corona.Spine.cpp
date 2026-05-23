@@ -408,24 +408,22 @@ namespace
 		if (!triangles || triangleIndexCount <= 0)
 			return;
 
-		// Indices are stored *local* to the attachment's vertex range.
-		// The renderer passes drawcall.VertexBase = baseVertex to
-		// vkCmdDrawIndexed / DrawIndexedInstanced, which adds it to each
-		// fetched index — so adding baseVertex here too would double-offset
-		// and read the wrong vertices (manifests as zig-zag / flying-head
-		// garbage on multi-attachment Spine meshes).
+		// Indices are emitted GLOBALLY — each value already includes the
+		// attachment's `baseVertex` offset. Paired DrawRanges therefore set
+		// `VertexBase = 0`, which is what lets the Phase 4 pass collapse
+		// adjacent same-material attachments into a single DrawIndexed
+		// without re-binding offsets.
 		//
-		// Only emit a single winding per triangle. The GBuffer pipeline runs
+		// Only emit one winding per triangle. The GBuffer pipeline runs
 		// with backface culling disabled, so two-sided visibility is already
-		// covered; emitting the reversed winding too would put two coplanar
-		// triangles at identical depth and trigger flickering z-fights
-		// (visible as e.g. alternating-eye disappearance on Spine faces).
-		(void)baseVertex;
+		// covered; emitting both windings would create coplanar triangles
+		// at identical depth and trigger z-fight flicker (e.g. alternating
+		// eye disappearance on Spine faces).
 		for (int i = 0; i + 2 < triangleIndexCount; i += 3)
 		{
-			const UINT32 a = static_cast<UINT32>(triangles[i]);
-			const UINT32 b = static_cast<UINT32>(triangles[i + 1]);
-			const UINT32 c = static_cast<UINT32>(triangles[i + 2]);
+			const UINT32 a = static_cast<UINT32>(triangles[i]) + baseVertex;
+			const UINT32 b = static_cast<UINT32>(triangles[i + 1]) + baseVertex;
+			const UINT32 c = static_cast<UINT32>(triangles[i + 2]) + baseVertex;
 			outMesh.Indices.push_back(a);
 			outMesh.Indices.push_back(b);
 			outMesh.Indices.push_back(c);
@@ -659,7 +657,51 @@ namespace
 		if (indexCount == 0 || vertexCount == 0)
 			return;
 
+		// Indices are now globally addressed (see AppendAttachmentIndices),
+		// so per-draw VertexBase is 0. We still record `baseVertex` /
+		// `vertexCount` as informational metadata for the cache entry.
 		outMesh.Draws.push_back({ indexStart, indexCount, baseVertex, vertexCount });
+	}
+
+	// Phase 4: collapse a SpineSampleMesh's per-attachment Draws into a
+	// minimal set of merged Draws. All attachments of a single Spine
+	// character share the same material (atlas+blend), so adjacent draws
+	// can fuse — typically yielding exactly one DrawIndexed per character
+	// instead of ~22 (one per slot/attachment). Spine drawOrder is
+	// preserved automatically because attachments are appended into the
+	// index buffer in slot order.
+	void CollapseSpineDrawsForBatching(SpineSampleMesh& mesh)
+	{
+		if (mesh.Draws.empty())
+			return;
+
+		std::vector<SpineSampleMesh::DrawRange> merged;
+		merged.reserve(mesh.Draws.size());
+		SpineSampleMesh::DrawRange current = mesh.Draws.front();
+		current.VertexBase = 0; // global indices
+		for (size_t i = 1; i < mesh.Draws.size(); ++i)
+		{
+			const SpineSampleMesh::DrawRange& next = mesh.Draws[i];
+			const bool bContiguous = (current.IndexStart + current.IndexCount) == next.IndexStart;
+			if (bContiguous)
+			{
+				// Extend the open range; vertex span widens to include the
+				// new attachment's vertices.
+				current.IndexCount += next.IndexCount;
+				const UINT32 nextVertexEnd = next.VertexBase + next.VertexCount;
+				const UINT32 currentVertexEnd = current.VertexBase + current.VertexCount;
+				const UINT32 endVertex = std::max(currentVertexEnd, nextVertexEnd);
+				current.VertexCount = endVertex - current.VertexBase;
+			}
+			else
+			{
+				merged.push_back(current);
+				current = next;
+				current.VertexBase = 0;
+			}
+		}
+		merged.push_back(current);
+		mesh.Draws = std::move(merged);
 	}
 
 	SpineSampleMesh BuildSpineSampleMesh(spSkeleton* skeleton, float sourceScale, bool bBuildCpuFallbackVertices)
@@ -747,6 +789,11 @@ namespace
 			mesh.BoundsMin = glm::vec3(0.0f);
 			mesh.BoundsMax = glm::vec3(0.0f);
 		}
+
+		// Phase 4: collapse per-attachment draws into a minimal set. Spine
+		// characters share one atlas across all attachments, so this
+		// typically yields one DrawIndexed per character (down from ~22).
+		CollapseSpineDrawsForBatching(mesh);
 
 		return mesh;
 	}
