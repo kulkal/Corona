@@ -3565,118 +3565,25 @@ local function spawn_character()
     add_spawned(character)
 end
 
-function corona_platformer_build_spine_benchmark_assets(count)
-    local assets = {}
-    for _, asset in ipairs(enemyAssets or {}) do
-        if asset.path ~= nil and (corona_platformer_is_player_candidate == nil or corona_platformer_is_player_candidate(asset)) then
-            table.insert(assets, asset)
-            if #assets >= count then
-                break
-            end
-        end
-    end
-
-    if #assets <= 0 then
-        table.insert(assets, {
-            name = "ares",
-            path = "assets/spine/chars/ares/ares.json",
-        })
-    end
-    return assets
-end
-
-function corona_platformer_spawn_spine_benchmark_characters()
-    if controls.spineSkinningBenchmark ~= true then
-        return
-    end
-
-    corona_platformer_spine_benchmark_actors = {}
-    corona_platformer_spine_benchmark_spawned_count = 0
-    local requestedCount = math.max(1, math.min(200, math.floor(controls.spineSkinningBenchmarkCharacterCount or 50)))
-    local assets = corona_platformer_build_spine_benchmark_assets(requestedCount)
-    local columns = math.max(1, math.min(requestedCount, math.floor(controls.spineSkinningBenchmarkColumns or 10)))
-    local rows = math.max(1, math.ceil(requestedCount / columns))
-    local worldScale = math.max(0.001, controls.spineSkinningBenchmarkWorldScale or 0.42)
-    local spacingX = math.max(90.0, controls.spineSkinningBenchmarkSpacingX or 138.0)
-    local spacingY = math.max(90.0, controls.spineSkinningBenchmarkSpacingY or 132.0)
-    local sampleFps = math.max(1.0, controls.spineSkinningBenchmarkSampleFps or 12.0)
-    local animation = controls.spineSkinningBenchmarkAnimation or "walk"
-    local fallbackAnimation = controls.spineSkinningBenchmarkFallbackAnimation or "idle"
-    local baseX = player.x - (columns - 1) * spacingX * 0.5
-    local baseY = player.y + playerVisualFootOffset
-
-    for index = 1, requestedCount do
-        local asset = assets[((index - 1) % #assets) + 1]
-        local row = math.floor((index - 1) / columns)
-        local column = (index - 1) % columns
-        local phase = (index - 1) * 0.037
-        local sampleTime = phase % (loopSeconds[animation] or 1.0)
-        local handle, frame, resolved = get_spine_scene(asset.path, animation, sampleTime, sampleFps, nil, true)
-        local actorAnimation = animation
-        if handle == nil and fallbackAnimation ~= animation then
-            actorAnimation = fallbackAnimation
-            sampleTime = phase % (loopSeconds[actorAnimation] or 1.0)
-            handle, frame, resolved = get_spine_scene(asset.path, actorAnimation, sampleTime, sampleFps, nil, true)
-        end
-        if handle ~= nil then
-            local entity = add_spawned(corona.Entity.create("PlatformerSpineBenchmark_" .. tostring(index)))
-            local x = baseX + column * spacingX
-            local y = baseY + (rows - row - 1) * spacingY
-            set_spine_pose(entity, handle, x, y, characterZ, 0.0, worldScale, 0.72, 0.0, false, true, false)
-            table.insert(corona_platformer_spine_benchmark_actors, {
-                entity = entity,
-                asset = asset,
-                animation = actorAnimation,
-                phase = phase,
-                x = x,
-                y = y,
-                worldScale = worldScale,
-                lastHandle = handle,
-                lastFrame = frame or -1,
-                lastAnimation = actorAnimation,
-            })
-            if resolved then
-                corona_platformer_spine_benchmark_spawned_count = corona_platformer_spine_benchmark_spawned_count + 1
-            end
-        end
-    end
-
-    corona.log(
-        "platformer spine benchmark spawned count=" .. tostring(#corona_platformer_spine_benchmark_actors) ..
-        " requested=" .. tostring(requestedCount) ..
-        " sample_fps=" .. tostring(sampleFps) ..
-        " world_scale=" .. tostring(worldScale) ..
-        " gpu_skinning=" .. tostring(controls.spineSkinningBenchmarkGpuSkinning or "command-line"))
-end
-
-function corona_platformer_update_spine_benchmark_characters(force)
-    if controls.spineSkinningBenchmark ~= true then
-        return
-    end
-
-    local sampleFps = math.max(1.0, controls.spineSkinningBenchmarkSampleFps or 12.0)
-    for index, actor in ipairs(corona_platformer_spine_benchmark_actors) do
-        local duration = loopSeconds[actor.animation] or 1.0
-        local sampleTime = (time + actor.phase) % duration
-        local sampleFrame = math.floor(sampleTime * sampleFps + 0.0001)
-        local mirrorX = (index % 2) == 0
-        if not force and sampleFrame == actor.lastFrame then
-            set_spine_pose(actor.entity, nil, actor.x, actor.y, characterZ, 0.0, actor.worldScale or 0.42, 0.72, 0.0, mirrorX, true, false)
-        else
-            local handle, frame, resolved = get_spine_scene(actor.asset.path, actor.animation, sampleTime, sampleFps, actor.lastHandle, force)
-            if handle ~= nil then
-                local sceneHandle = nil
-                if force or (resolved and frame ~= actor.lastFrame) then
-                    sceneHandle = handle
-                    if resolved then
-                        actor.lastFrame = frame
-                        actor.lastHandle = handle
-                    end
-                end
-                set_spine_pose(actor.entity, sceneHandle, actor.x, actor.y, characterZ, 0.0, actor.worldScale or 0.42, 0.72, 0.0, mirrorX, true, false)
-            end
-        end
-    end
+-- Phase 5 of the platformer Spine optimization plan (script register-limit
+-- relief): expose the locals and helpers that 005_platformer_spine_benchmark
+-- needs to a small shared global table so the benchmark code can live in its
+-- own .luau chunk. The benchmark file references everything through
+-- `corona_platformer_locals.<name>` instead of bare identifiers, which would
+-- otherwise be invisible across the chunk boundary.
+corona_platformer_locals = corona_platformer_locals or {}
+corona_platformer_locals.enemyAssets = enemyAssets
+corona_platformer_locals.player = player
+corona_platformer_locals.loopSeconds = loopSeconds
+corona_platformer_locals.playerVisualFootOffset = playerVisualFootOffset
+corona_platformer_locals.characterZ = characterZ
+corona_platformer_locals.add_spawned = add_spawned
+corona_platformer_locals.get_spine_scene = get_spine_scene
+corona_platformer_locals.set_spine_pose = set_spine_pose
+-- `time` is mutated inside script.update — expose a getter so the benchmark
+-- always sees the latest value (Lua locals can't be aliased into a table).
+function corona_platformer_locals.get_time()
+    return time
 end
 
 local function spawn_camera_and_light()
