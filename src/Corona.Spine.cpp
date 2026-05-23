@@ -27,10 +27,12 @@
 #include <filesystem>
 #include <iomanip>
 #include <limits>
+#include <list>
 #include <memory>
 #include <sstream>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 void AppendCpuRuntimeTrace(const std::wstring& line);
@@ -192,6 +194,158 @@ namespace
 		std::wostringstream stream;
 		stream << std::fixed << std::setprecision(3) << value;
 		return stream.str();
+	}
+
+	// Phase 2: CPU-side cached geometry produced by BuildSpineSampleMesh.
+	// Stored on the CPU only — the doc forbids creating per-frame GPU
+	// vertex/index buffers during the cache miss path itself.
+	struct SpineClipFrameCacheEntry
+	{
+		std::vector<SpineSampleVertex> Vertices;
+		std::vector<UINT32> Indices;
+		std::vector<SpineSampleMesh::DrawRange> Draws;
+		glm::vec3 BoundsMin = glm::vec3(0.0f);
+		glm::vec3 BoundsMax = glm::vec3(0.0f);
+		UINT32 RegionAttachmentCount = 0;
+		UINT32 MeshAttachmentCount = 0;
+		UINT32 WeightedMeshAttachmentCount = 0;
+		UINT64 ApproxByteSize = 0;
+		UINT64 LastUsedFrame = 0;
+	};
+
+	UINT64 EstimateClipEntryByteSize(const SpineSampleMesh& mesh)
+	{
+		UINT64 bytes = 0;
+		bytes += static_cast<UINT64>(mesh.Vertices.size()) * sizeof(SpineSampleVertex);
+		bytes += static_cast<UINT64>(mesh.Indices.size()) * sizeof(UINT32);
+		bytes += static_cast<UINT64>(mesh.Draws.size()) * sizeof(SpineSampleMesh::DrawRange);
+		bytes += sizeof(SpineClipFrameCacheEntry);
+		return bytes;
+	}
+
+	struct SpineClipFrameCache
+	{
+		// LRU eviction policy: keep newest-used entries at the front of the
+		// list; the back is the eviction candidate. The map points into the
+		// list for O(1) move-to-front on lookup.
+		std::list<std::wstring> LruOrder;
+		std::unordered_map<std::wstring, std::pair<std::shared_ptr<SpineClipFrameCacheEntry>, std::list<std::wstring>::iterator>> Entries;
+		UINT64 CurrentBytes = 0;
+		UINT64 MemoryBudgetBytes = 64ull * 1024ull * 1024ull; // 64 MiB default; sufficient for ~50 platformer chars
+		UINT64 InsertCounter = 0;
+		UINT32 EvictionCount = 0;
+
+		std::shared_ptr<SpineClipFrameCacheEntry> Lookup(const std::wstring& key)
+		{
+			auto it = Entries.find(key);
+			if (it == Entries.end())
+				return nullptr;
+			LruOrder.splice(LruOrder.begin(), LruOrder, it->second.second);
+			it->second.second = LruOrder.begin();
+			it->second.first->LastUsedFrame = ++InsertCounter;
+			return it->second.first;
+		}
+
+		void Touch(const std::wstring& key)
+		{
+			auto it = Entries.find(key);
+			if (it == Entries.end())
+				return;
+			LruOrder.splice(LruOrder.begin(), LruOrder, it->second.second);
+			it->second.second = LruOrder.begin();
+		}
+
+		std::shared_ptr<SpineClipFrameCacheEntry> Insert(const std::wstring& key, std::shared_ptr<SpineClipFrameCacheEntry> entry)
+		{
+			auto existing = Entries.find(key);
+			if (existing != Entries.end())
+			{
+				CurrentBytes -= existing->second.first->ApproxByteSize;
+				existing->second.first = entry;
+				CurrentBytes += entry->ApproxByteSize;
+				LruOrder.splice(LruOrder.begin(), LruOrder, existing->second.second);
+				existing->second.second = LruOrder.begin();
+				return entry;
+			}
+
+			LruOrder.push_front(key);
+			Entries.emplace(key, std::make_pair(entry, LruOrder.begin()));
+			CurrentBytes += entry->ApproxByteSize;
+			entry->LastUsedFrame = ++InsertCounter;
+			return entry;
+		}
+
+		UINT32 EvictUntilUnderBudget()
+		{
+			UINT32 evicted = 0;
+			while (CurrentBytes > MemoryBudgetBytes && !LruOrder.empty())
+			{
+				const std::wstring victimKey = LruOrder.back();
+				auto victim = Entries.find(victimKey);
+				if (victim != Entries.end())
+				{
+					CurrentBytes -= victim->second.first->ApproxByteSize;
+					Entries.erase(victim);
+				}
+				LruOrder.pop_back();
+				++evicted;
+				++EvictionCount;
+			}
+			return evicted;
+		}
+
+		size_t Size() const { return Entries.size(); }
+		UINT64 Bytes() const { return CurrentBytes; }
+		UINT64 Budget() const { return MemoryBudgetBytes; }
+		void SetBudget(UINT64 bytes)
+		{
+			MemoryBudgetBytes = bytes;
+			EvictUntilUnderBudget();
+		}
+		void Clear()
+		{
+			Entries.clear();
+			LruOrder.clear();
+			CurrentBytes = 0;
+			InsertCounter = 0;
+		}
+	};
+
+	SpineClipFrameCache GSpineClipFrameCache;
+	void* GSpineClipFrameCacheBackend = nullptr;
+
+	void EnsureSpineClipCacheBackendMatches(void* backendPtr)
+	{
+		if (GSpineClipFrameCacheBackend == backendPtr)
+			return;
+		GSpineClipFrameCache.Clear();
+		GSpineClipFrameCacheBackend = backendPtr;
+	}
+
+	void PopulateClipEntryFromSampleMesh(SpineClipFrameCacheEntry& entry, const SpineSampleMesh& mesh)
+	{
+		entry.Vertices = mesh.Vertices;
+		entry.Indices = mesh.Indices;
+		entry.Draws = mesh.Draws;
+		entry.BoundsMin = mesh.BoundsMin;
+		entry.BoundsMax = mesh.BoundsMax;
+		entry.RegionAttachmentCount = static_cast<UINT32>(std::max(0, mesh.RegionAttachmentCount));
+		entry.MeshAttachmentCount = static_cast<UINT32>(std::max(0, mesh.MeshAttachmentCount));
+		entry.WeightedMeshAttachmentCount = static_cast<UINT32>(std::max(0, mesh.WeightedMeshAttachmentCount));
+		entry.ApproxByteSize = EstimateClipEntryByteSize(mesh);
+	}
+
+	std::wstring BuildSpineClipCacheKey(
+		const std::wstring& normalizedSkeletonPath,
+		const std::string& animationName,
+		int sampleFrame120,
+		int quantizedScale)
+	{
+		return
+			L"spine://" + normalizedSkeletonPath +
+			L"|anim=" + std::wstring(animationName.begin(), animationName.end()) +
+			L"|frame120=" + std::to_wstring(sampleFrame120) +
+			L"|scale=" + std::to_wstring(quantizedScale);
 	}
 
 	std::string ToUtf8Path(const std::filesystem::path& path)
@@ -623,16 +777,17 @@ Corona::ScriptSceneHandle Corona::CreateSpineSceneForScript(
 	const float sampleTimeSeconds = static_cast<float>(sampleFrame120) / 120.0f;
 	const float safeSourceScale = std::clamp(sourceScale, 0.0001f, 100.0f);
 	const int quantizedScale = static_cast<int>(std::round(safeSourceScale * 100000.0f));
-	const std::wstring key =
-		L"spine://" + normalizedSkeletonPath +
-		L"|anim=" + std::wstring(animationName.begin(), animationName.end()) +
-		L"|frame120=" + std::to_wstring(sampleFrame120) +
-		L"|scale=" + std::to_wstring(quantizedScale);
+	const std::wstring key = BuildSpineClipCacheKey(normalizedSkeletonPath, animationName, sampleFrame120, quantizedScale);
 
 	const auto cachedIt = ScriptSceneByPath.find(key);
 	if (cachedIt != ScriptSceneByPath.end())
 	{
 		++SpineStats.ScriptSceneCacheHits;
+		// Promote the matching clip-cache entry too so the LRU reflects real
+		// demand. A scene-cache hit conceptually implies a clip hit, but the
+		// clip cache might have been evicted independently — that's OK.
+		EnsureSpineClipCacheBackendMatches(renderBackend.get());
+		GSpineClipFrameCache.Touch(key);
 		if (SpineStatsReportIntervalCalls > 0 && SpineStatsCallsSinceReport >= SpineStatsReportIntervalCalls)
 			DumpSpineFrameStatsToTrace(L"interval");
 		return cachedIt->second;
@@ -643,6 +798,7 @@ Corona::ScriptSceneHandle Corona::CreateSpineSceneForScript(
 		GSpineRuntimeAssetCache.clear();
 		GSpineRuntimeAssetCacheBackend = renderBackend.get();
 	}
+	EnsureSpineClipCacheBackendMatches(renderBackend.get());
 
 	if (!std::filesystem::exists(skeletonPath) || !std::filesystem::exists(atlasPath))
 	{
@@ -719,41 +875,91 @@ Corona::ScriptSceneHandle Corona::CreateSpineSceneForScript(
 	if (!runtimeAsset || !runtimeAsset->SkeletonData)
 		return InvalidScriptSceneHandle;
 
-	std::unique_ptr<spSkeleton, SpineSkeletonDeleter> skeleton;
-	const char* selectedAnimation = SelectAnimationName(runtimeAsset->SkeletonData.get(), animationName);
-	{
-		SpineClipScopedTimer animTimer(&SpineStats.AnimationEvaluationMs);
-		skeleton.reset(spSkeleton_create(runtimeAsset->SkeletonData.get()));
-		if (!skeleton)
-		{
-			AppendCpuRuntimeTrace(L"[SpineComponent] failed to create skeleton instance");
-			return InvalidScriptSceneHandle;
-		}
-		++SpineStats.SkeletonInstancesBuilt;
-		spSkeleton_setToSetupPose(skeleton.get());
-		if (selectedAnimation)
-		{
-			spAnimation* animation = spSkeletonData_findAnimation(runtimeAsset->SkeletonData.get(), selectedAnimation);
-			if (animation)
-				spAnimation_apply(animation, skeleton.get(), 0.0f, sampleTimeSeconds, 1, nullptr, nullptr);
-		}
-		spSkeleton_updateWorldTransform(skeleton.get());
-	}
-
 #if CORONA_PLATFORM_MOBILE
 	const bool bRequestGpuSpineSkinning = false;
 #else
 	const bool bRequestGpuSpineSkinning = bEnableGpuSpineSkinning;
 #endif
+
+	const char* selectedAnimation = SelectAnimationName(runtimeAsset->SkeletonData.get(), animationName);
+
+	// Phase 2: try the CPU clip cache before re-running animation evaluation
+	// and CPU skinning. The cache is only consulted when GPU skinning is off
+	// because the GPU path also needs skin/influence/bone buffers, which the
+	// CPU cache does not retain.
+	std::shared_ptr<SpineClipFrameCacheEntry> clipEntry;
+	if (!bRequestGpuSpineSkinning)
+		clipEntry = GSpineClipFrameCache.Lookup(key);
+
 	SpineSampleMesh sampleMesh;
+	UINT32 slotCountForStats = 0;
+	if (clipEntry)
 	{
-		SpineClipScopedTimer meshTimer(&SpineStats.MeshBuildMs);
-		sampleMesh = BuildSpineSampleMesh(skeleton.get(), safeSourceScale, !bRequestGpuSpineSkinning);
+		++SpineStats.ClipCacheHits;
+		sampleMesh.Vertices = clipEntry->Vertices;
+		sampleMesh.Indices = clipEntry->Indices;
+		sampleMesh.Draws = clipEntry->Draws;
+		sampleMesh.BoundsMin = clipEntry->BoundsMin;
+		sampleMesh.BoundsMax = clipEntry->BoundsMax;
+		sampleMesh.RegionAttachmentCount = static_cast<int>(clipEntry->RegionAttachmentCount);
+		sampleMesh.MeshAttachmentCount = static_cast<int>(clipEntry->MeshAttachmentCount);
+		sampleMesh.WeightedMeshAttachmentCount = static_cast<int>(clipEntry->WeightedMeshAttachmentCount);
 	}
-	SpineStats.SlotsProcessed += static_cast<UINT32>(std::max(0, skeleton ? skeleton->slotsCount : 0));
-	SpineStats.VerticesGenerated += static_cast<UINT32>(sampleMesh.Vertices.size());
-	SpineStats.IndicesGenerated += static_cast<UINT32>(sampleMesh.Indices.size());
-	SpineStats.DrawRangesBuilt += static_cast<UINT32>(sampleMesh.Draws.size());
+	else
+	{
+		++SpineStats.ClipCacheMisses;
+		std::unique_ptr<spSkeleton, SpineSkeletonDeleter> skeleton;
+		{
+			SpineClipScopedTimer animTimer(&SpineStats.AnimationEvaluationMs);
+			skeleton.reset(spSkeleton_create(runtimeAsset->SkeletonData.get()));
+			if (!skeleton)
+			{
+				AppendCpuRuntimeTrace(L"[SpineComponent] failed to create skeleton instance");
+				return InvalidScriptSceneHandle;
+			}
+			++SpineStats.SkeletonInstancesBuilt;
+			spSkeleton_setToSetupPose(skeleton.get());
+			if (selectedAnimation)
+			{
+				spAnimation* animation = spSkeletonData_findAnimation(runtimeAsset->SkeletonData.get(), selectedAnimation);
+				if (animation)
+					spAnimation_apply(animation, skeleton.get(), 0.0f, sampleTimeSeconds, 1, nullptr, nullptr);
+			}
+			spSkeleton_updateWorldTransform(skeleton.get());
+		}
+
+		slotCountForStats = static_cast<UINT32>(std::max(0, skeleton ? skeleton->slotsCount : 0));
+		{
+			SpineClipScopedTimer meshTimer(&SpineStats.MeshBuildMs);
+			sampleMesh = BuildSpineSampleMesh(skeleton.get(), safeSourceScale, !bRequestGpuSpineSkinning);
+		}
+		SpineStats.VerticesGenerated += static_cast<UINT32>(sampleMesh.Vertices.size());
+		SpineStats.IndicesGenerated += static_cast<UINT32>(sampleMesh.Indices.size());
+		SpineStats.DrawRangesBuilt += static_cast<UINT32>(sampleMesh.Draws.size());
+
+		if (sampleMesh.Vertices.empty() || sampleMesh.Indices.empty())
+		{
+			AppendCpuRuntimeTrace(L"[SpineComponent] skeleton produced no drawable mesh: " + skeletonPath.wstring());
+			return InvalidScriptSceneHandle;
+		}
+
+		// Insert into the clip cache (CPU-only payload), then evict if we
+		// exceed the configured memory budget. This satisfies the doc's
+		// nonblocking miss path: no CreateVertexBuffer or CreateIndexBuffer
+		// is performed inside the cache itself.
+		if (!bRequestGpuSpineSkinning)
+		{
+			auto entry = std::make_shared<SpineClipFrameCacheEntry>();
+			PopulateClipEntryFromSampleMesh(*entry, sampleMesh);
+			GSpineClipFrameCache.Insert(key, entry);
+			const UINT32 evicted = GSpineClipFrameCache.EvictUntilUnderBudget();
+			SpineStats.ClipCacheEvictions += evicted;
+		}
+	}
+
+	SpineStats.SlotsProcessed += slotCountForStats;
+	SpineStats.ClipCacheEntries = static_cast<UINT32>(GSpineClipFrameCache.Size());
+	SpineStats.ClipCacheBytes = GSpineClipFrameCache.Bytes();
 	if (sampleMesh.Vertices.empty() || sampleMesh.Indices.empty())
 	{
 		AppendCpuRuntimeTrace(L"[SpineComponent] skeleton produced no drawable mesh: " + skeletonPath.wstring());
@@ -911,6 +1117,9 @@ Corona::ScriptSceneHandle Corona::CreateSpineSceneForScript(
 		L" gpu_placeholder_vertices=" + std::to_wstring(sampleMesh.GpuPlaceholderVertexCount) +
 		L" skin_influences=" + std::to_wstring(sampleMesh.SkinInfluences.size()) +
 		L" bones=" + std::to_wstring(sampleMesh.SkinBones.size()) +
+		L" clip_cache_hit=" + std::to_wstring(clipEntry ? 1 : 0) +
+		L" clip_cache_entries=" + std::to_wstring(GSpineClipFrameCache.Size()) +
+		L" clip_cache_bytes=" + std::to_wstring(GSpineClipFrameCache.Bytes()) +
 		L" diffuse=" + runtimeAsset->DiffusePath.wstring() +
 		L" diffuse_exists=" + std::to_wstring(runtimeAsset->bDiffuseFileExists ? 1 : 0) +
 		L" diffuse_loaded=" + std::to_wstring(runtimeAsset->bDiffuseLoaded ? 1 : 0));
@@ -952,6 +1161,8 @@ void Corona::DumpSpineFrameStatsToTrace(const wchar_t* reasonTag)
 		L" draw_ranges=" + std::to_wstring(SpineStats.DrawRangesBuilt) +
 		L" gpu_buf_creates=" + std::to_wstring(SpineStats.RuntimeGpuBufferCreations) +
 		L" gpu_upload_stalls=" + std::to_wstring(SpineStats.RuntimeGpuUploadStalls) +
+		L" prewarm_hits=" + std::to_wstring(SpineStats.PrewarmCallsHit) +
+		L" prewarm_misses=" + std::to_wstring(SpineStats.PrewarmCallsMiss) +
 		L" atlas_ms=" + FormatMillisecondsFixed(SpineStats.AtlasLoadMs) +
 		L" skel_read_ms=" + FormatMillisecondsFixed(SpineStats.SkeletonReadMs) +
 		L" anim_eval_ms=" + FormatMillisecondsFixed(SpineStats.AnimationEvaluationMs) +
@@ -959,4 +1170,172 @@ void Corona::DumpSpineFrameStatsToTrace(const wchar_t* reasonTag)
 		L" skinning_ms=" + FormatMillisecondsFixed(SpineStats.SkinningMs) +
 		L" gpu_upload_ms=" + FormatMillisecondsFixed(SpineStats.GpuUploadMs));
 	ResetSpineFrameStats();
+}
+
+bool Corona::PrewarmSpineClipFrameForScript(
+	const std::wstring& assetPath,
+	const std::string& animationName,
+	float timeSeconds,
+	float sourceScale)
+{
+	if (!renderBackend || assetPath.empty())
+		return false;
+
+	std::filesystem::path skeletonPath(assetPath);
+	if (skeletonPath.is_relative())
+		skeletonPath = GetAssetFullPath(assetPath.c_str());
+
+	const std::wstring normalizedSkeletonPath = NormalizePathForKey(skeletonPath);
+	skeletonPath = normalizedSkeletonPath;
+	std::filesystem::path atlasPath = skeletonPath;
+	atlasPath.replace_extension(L".atlas");
+
+	const int sampleFrame120 = std::max(0, static_cast<int>(std::round(std::max(0.0f, timeSeconds) * 120.0f)));
+	const float sampleTimeSeconds = static_cast<float>(sampleFrame120) / 120.0f;
+	const float safeSourceScale = std::clamp(sourceScale, 0.0001f, 100.0f);
+	const int quantizedScale = static_cast<int>(std::round(safeSourceScale * 100000.0f));
+	const std::wstring key = BuildSpineClipCacheKey(normalizedSkeletonPath, animationName, sampleFrame120, quantizedScale);
+
+	EnsureSpineClipCacheBackendMatches(renderBackend.get());
+
+	if (auto existing = GSpineClipFrameCache.Lookup(key))
+	{
+		++SpineStats.PrewarmCallsHit;
+		return true;
+	}
+	++SpineStats.PrewarmCallsMiss;
+
+	if (GSpineRuntimeAssetCacheBackend != renderBackend.get())
+	{
+		GSpineRuntimeAssetCache.clear();
+		GSpineRuntimeAssetCacheBackend = renderBackend.get();
+	}
+
+	if (!std::filesystem::exists(skeletonPath) || !std::filesystem::exists(atlasPath))
+	{
+		AppendCpuRuntimeTrace(L"[SpineComponent] prewarm missing skeleton or atlas: " + skeletonPath.wstring());
+		return false;
+	}
+
+	SpineRuntimeAsset* runtimeAsset = nullptr;
+	auto runtimeAssetIt = GSpineRuntimeAssetCache.find(normalizedSkeletonPath);
+	if (runtimeAssetIt != GSpineRuntimeAssetCache.end())
+	{
+		runtimeAsset = runtimeAssetIt->second.get();
+	}
+	else
+	{
+		auto newRuntimeAsset = std::make_unique<SpineRuntimeAsset>();
+		newRuntimeAsset->SkeletonPath = skeletonPath;
+		newRuntimeAsset->AtlasPath = atlasPath;
+
+		const std::string atlasPathUtf8 = ToUtf8Path(atlasPath);
+		const std::string skeletonPathUtf8 = ToUtf8Path(skeletonPath);
+
+		{
+			SpineClipScopedTimer atlasTimer(&SpineStats.AtlasLoadMs);
+			newRuntimeAsset->Atlas.reset(spAtlas_createFromFile(atlasPathUtf8.c_str(), nullptr));
+		}
+		if (!newRuntimeAsset->Atlas)
+			return false;
+
+		std::unique_ptr<spSkeletonJson, SpineSkeletonJsonDeleter> json(spSkeletonJson_create(newRuntimeAsset->Atlas.get()));
+		if (!json)
+			return false;
+		json->scale = 1.0f;
+
+		{
+			SpineClipScopedTimer skelTimer(&SpineStats.SkeletonReadMs);
+			newRuntimeAsset->SkeletonData.reset(spSkeletonJson_readSkeletonDataFile(json.get(), skeletonPathUtf8.c_str()));
+		}
+		if (!newRuntimeAsset->SkeletonData)
+			return false;
+
+		newRuntimeAsset->DiffusePath = atlasPath.parent_path();
+		if (newRuntimeAsset->Atlas->pages && newRuntimeAsset->Atlas->pages->name)
+			newRuntimeAsset->DiffusePath /= std::filesystem::path(newRuntimeAsset->Atlas->pages->name);
+		else
+			newRuntimeAsset->DiffusePath = std::filesystem::path(skeletonPath).replace_extension(L".png");
+		newRuntimeAsset->bDiffuseFileExists = std::filesystem::exists(newRuntimeAsset->DiffusePath);
+		// Prewarm intentionally skips texture upload — the caller will load
+		// the texture lazily via CreateSpineSceneForScript on first render.
+
+		runtimeAsset = newRuntimeAsset.get();
+		GSpineRuntimeAssetCache[normalizedSkeletonPath] = std::move(newRuntimeAsset);
+	}
+
+	if (!runtimeAsset || !runtimeAsset->SkeletonData)
+		return false;
+
+	const char* selectedAnimation = SelectAnimationName(runtimeAsset->SkeletonData.get(), animationName);
+
+	std::unique_ptr<spSkeleton, SpineSkeletonDeleter> skeleton;
+	{
+		SpineClipScopedTimer animTimer(&SpineStats.AnimationEvaluationMs);
+		skeleton.reset(spSkeleton_create(runtimeAsset->SkeletonData.get()));
+		if (!skeleton)
+			return false;
+		++SpineStats.SkeletonInstancesBuilt;
+		spSkeleton_setToSetupPose(skeleton.get());
+		if (selectedAnimation)
+		{
+			spAnimation* animation = spSkeletonData_findAnimation(runtimeAsset->SkeletonData.get(), selectedAnimation);
+			if (animation)
+				spAnimation_apply(animation, skeleton.get(), 0.0f, sampleTimeSeconds, 1, nullptr, nullptr);
+		}
+		spSkeleton_updateWorldTransform(skeleton.get());
+	}
+
+	SpineSampleMesh sampleMesh;
+	{
+		SpineClipScopedTimer meshTimer(&SpineStats.MeshBuildMs);
+		// Always build the CPU-skinned fallback variant: the cache stores
+		// final CPU-resolved positions so a future sprite batcher can stream
+		// them directly without re-running the skinning step.
+		sampleMesh = BuildSpineSampleMesh(skeleton.get(), safeSourceScale, true);
+	}
+	SpineStats.VerticesGenerated += static_cast<UINT32>(sampleMesh.Vertices.size());
+	SpineStats.IndicesGenerated += static_cast<UINT32>(sampleMesh.Indices.size());
+	SpineStats.DrawRangesBuilt += static_cast<UINT32>(sampleMesh.Draws.size());
+	SpineStats.SlotsProcessed += static_cast<UINT32>(std::max(0, skeleton ? skeleton->slotsCount : 0));
+
+	if (sampleMesh.Vertices.empty() || sampleMesh.Indices.empty())
+		return false;
+
+	auto entry = std::make_shared<SpineClipFrameCacheEntry>();
+	PopulateClipEntryFromSampleMesh(*entry, sampleMesh);
+	GSpineClipFrameCache.Insert(key, entry);
+	SpineStats.ClipCacheEvictions += GSpineClipFrameCache.EvictUntilUnderBudget();
+	SpineStats.ClipCacheEntries = static_cast<UINT32>(GSpineClipFrameCache.Size());
+	SpineStats.ClipCacheBytes = GSpineClipFrameCache.Bytes();
+	return true;
+}
+
+size_t Corona::GetSpineClipFrameCacheMemoryBytes() const
+{
+	return static_cast<size_t>(GSpineClipFrameCache.Bytes());
+}
+
+size_t Corona::GetSpineClipFrameCacheEntryCount() const
+{
+	return GSpineClipFrameCache.Size();
+}
+
+size_t Corona::GetSpineClipFrameCacheMemoryBudgetBytes() const
+{
+	return static_cast<size_t>(GSpineClipFrameCache.Budget());
+}
+
+void Corona::SetSpineClipFrameCacheMemoryBudgetBytes(size_t budgetBytes)
+{
+	GSpineClipFrameCache.SetBudget(static_cast<UINT64>(budgetBytes));
+	SpineStats.ClipCacheEntries = static_cast<UINT32>(GSpineClipFrameCache.Size());
+	SpineStats.ClipCacheBytes = GSpineClipFrameCache.Bytes();
+}
+
+void Corona::ResetSpineClipFrameCache()
+{
+	GSpineClipFrameCache.Clear();
+	SpineStats.ClipCacheEntries = 0;
+	SpineStats.ClipCacheBytes = 0;
 }

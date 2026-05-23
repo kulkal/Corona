@@ -287,18 +287,20 @@ private:
 		// Counters
 		UINT32 InstancesEvaluated = 0;        // CreateSpineSceneForScript invocations
 		UINT32 ScriptSceneCacheHits = 0;      // ScriptSceneByPath returned an existing scene
-		UINT32 ClipCacheHits = 0;             // reserved for Phase 2 SpineClipFrameCache hits
-		UINT32 ClipCacheMisses = 0;           // reserved for Phase 2 cache misses
-		UINT32 ClipCacheEvictions = 0;        // reserved for Phase 2 LRU evictions
-		UINT32 ClipCacheEntries = 0;          // reserved for Phase 2 entry count snapshot
-		UINT64 ClipCacheBytes = 0;            // reserved for Phase 2 cache-byte snapshot
-		UINT32 SkeletonInstancesBuilt = 0;    // spSkeleton_create calls
+		UINT32 ClipCacheHits = 0;             // SpineClipFrameCache served pre-built CPU geometry
+		UINT32 ClipCacheMisses = 0;           // BuildSpineSampleMesh actually ran
+		UINT32 ClipCacheEvictions = 0;        // LRU evictions from SpineClipFrameCache
+		UINT32 ClipCacheEntries = 0;          // Snapshot of current cache size at last report
+		UINT64 ClipCacheBytes = 0;            // Snapshot of current cache bytes at last report
+		UINT32 SkeletonInstancesBuilt = 0;    // spSkeleton_create calls (miss-path only)
 		UINT32 SlotsProcessed = 0;            // Spine slots iterated by mesh build
-		UINT32 VerticesGenerated = 0;         // CPU-skinned vertices produced
+		UINT32 VerticesGenerated = 0;         // CPU-skinned vertices written to a cache entry
 		UINT32 IndicesGenerated = 0;
 		UINT32 DrawRangesBuilt = 0;
 		UINT32 RuntimeGpuBufferCreations = 0; // VB+IB created from a Spine animation update
 		UINT32 RuntimeGpuUploadStalls = 0;    // immediate uploads that can stall the queue
+		UINT32 PrewarmCallsHit = 0;
+		UINT32 PrewarmCallsMiss = 0;
 		// Frame-time breakdown (cumulative milliseconds since last reset)
 		double AtlasLoadMs = 0.0;
 		double SkeletonReadMs = 0.0;
@@ -1948,6 +1950,17 @@ public:
 	ScriptSceneHandle CreateProceduralBlockCharacterSceneForScript(UINT32 seed);
 	ScriptSceneHandle CreateProceduralBoxSceneForScript(const glm::vec3& baseColor, bool bUseBrickTexture = false, float uvRepeat = 1.0f, const std::wstring& textureKind = std::wstring(), float uvRepeatY = -1.0f, bool bFrontOnly = false);
 	ScriptSceneHandle CreateSpineSceneForScript(const std::wstring& assetPath, const std::string& animationName, float timeSeconds, float sourceScale = 1.0f);
+	// Phase 2: SpineClipFrameCache management. PrewarmSpineClipFrameForScript
+	// fills the CPU-side cache without creating any GPU vertex/index buffers
+	// (matches the doc's "nonblocking miss path" requirement). The cache is
+	// keyed by quantized (asset + animation + sample-frame + scale), and the
+	// other helpers report and bound its memory footprint.
+	bool PrewarmSpineClipFrameForScript(const std::wstring& assetPath, const std::string& animationName, float timeSeconds, float sourceScale = 1.0f);
+	size_t GetSpineClipFrameCacheMemoryBytes() const;
+	size_t GetSpineClipFrameCacheEntryCount() const;
+	size_t GetSpineClipFrameCacheMemoryBudgetBytes() const;
+	void SetSpineClipFrameCacheMemoryBudgetBytes(size_t budgetBytes);
+	void ResetSpineClipFrameCache();
 	float GetScriptSceneHeightForScript(ScriptSceneHandle sceneHandle) const;
 	bool SetSpinePoseForScript(
 		CoronaECS::Entity entity,
