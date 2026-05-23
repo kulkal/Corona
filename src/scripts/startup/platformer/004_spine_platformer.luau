@@ -1086,7 +1086,7 @@ local function update_safe_respawn_point()
     set_respawn_point(player.x, player.y + 2.0, player.facing, player.groundPlatform)
 end
 
-local function configure_level(levelIndex)
+function corona_platformer_configure_level(levelIndex)
     currentLevel = clamp(math.floor(levelIndex or 1), 1, levelCount)
     currentLayout = levelLayouts[currentLevel]
     currentLevelEnemyStart = (currentLevel - 1) * enemiesPerLevel + 1
@@ -1673,7 +1673,7 @@ function corona_platformer_spawn_grass_tufts(x, y, width, height, depth, centerZ
     end
 end
 
-local function spawn_platform(x, y, width, height, depth, color, ownerList, zone, styleKind)
+function corona_platformer_spawn_platform(x, y, width, height, depth, color, ownerList, zone, styleKind)
     local safeDepth = math.max(0.001, depth or platformDepth)
     local centerZ = corona_platformer_platform_center_z(safeDepth)
     local visualStyle = corona_platformer_get_platform_visual_style(styleKind)
@@ -1818,7 +1818,7 @@ local function spawn_layout_blocks(blocks, fallbackColor, styleKind)
     end
 
     for _, block in ipairs(blocks) do
-        spawn_platform(
+        corona_platformer_spawn_platform(
             block.x or 0.0,
             block.y or 0.0,
             block.w or 1.0,
@@ -2354,7 +2354,7 @@ local function add_goal_flag_part(entity, offsetX, offsetY, offsetZ, wave, scale
     return entity
 end
 
-local function spawn_goal_flag()
+function corona_platformer_spawn_goal_flag()
     goalFlagParts = {}
 
     local z = characterZ + 12.0
@@ -3088,7 +3088,7 @@ local function begin_level_zone_load(zone)
     return true
 end
 
-local function process_level_zone_load(zone, budget)
+function corona_platformer_process_level_zone_load(zone, budget)
     if zone == nil or zone.loaded then
         return false, 0
     end
@@ -3104,7 +3104,7 @@ local function process_level_zone_load(zone, budget)
         zone.loadPlatformIndex = zone.loadPlatformIndex + 1
         remaining = remaining - 1
         used = used + 1
-        spawn_platform(desc.x, desc.y, desc.w, desc.h, desc.depth, desc.color, zone.entities, zone, desc.styleKind)
+        corona_platformer_spawn_platform(desc.x, desc.y, desc.w, desc.h, desc.depth, desc.color, zone.entities, zone, desc.styleKind)
     end
 
     while remaining > 0 and zone.loadBoxIndex <= #zone.boxes do
@@ -3186,7 +3186,7 @@ local function load_level_zone(zone, budget)
     local completed = false
     while not completed and loadBudget > 0 do
         local used = 0
-        completed, used = process_level_zone_load(zone, loadBudget)
+        completed, used = corona_platformer_process_level_zone_load(zone, loadBudget)
         if used <= 0 then
             break
         end
@@ -3241,7 +3241,7 @@ local function zone_overlaps_frustum(zone, minX, maxX, minY, maxY, margin)
         zone.minY <= maxY + margin
 end
 
-local function spawn_goal_spine_effects()
+function corona_platformer_spawn_goal_spine_effects()
     queue_streaming_spine_effect("movingflag", goalX + 118.0, corona_platformer_goal_surface_y + 218.0, {
         z = spineEffectZ,
         targetExtent = 138.0,
@@ -3256,7 +3256,7 @@ local function spawn_goal_spine_effects()
     })
 end
 
-local function spawn_layout_spine_effects()
+function corona_platformer_spawn_layout_spine_effects()
     if currentLayout == nil or currentLayout.obstacles == nil then
         return
     end
@@ -3450,7 +3450,7 @@ function corona_platformer_queue_fantasy_background_segment(backdropX, backdropW
     end
 end
 
-local function build_level()
+function corona_platformer_build_level()
     reset_level_streaming()
     corona_platformer_queue_sky_clouds()
     if controls.platformerBackgroundGeometry == true then
@@ -3525,8 +3525,8 @@ local function build_level()
         goalTrigger = true,
     })
     queue_goal_flag()
-    spawn_goal_spine_effects()
-    spawn_layout_spine_effects()
+    corona_platformer_spawn_goal_spine_effects()
+    corona_platformer_spawn_layout_spine_effects()
     corona.log(
         "platformer level zones=" .. tostring(#levelZones) ..
         " decoy_platforms=" .. tostring(decoyPlatformCount) ..
@@ -3631,7 +3631,7 @@ function corona_platformer_locals.start_new_game()
     return start_new_game()
 end
 
-local function spawn_camera_and_light()
+function corona_platformer_spawn_camera_and_light()
     cameraEntity = add_spawned(corona.Entity.create("PlatformerCamera"))
     local focusX = player.x
     local focusY = player.y + (controls.cameraVerticalOffset or 112.0)
@@ -4483,7 +4483,7 @@ update_level_streaming = function(force)
         if remainingObjects <= 0 then
             break
         end
-        local completed, used = process_level_zone_load(zone, remainingObjects)
+        local completed, used = corona_platformer_process_level_zone_load(zone, remainingObjects)
         remainingObjects = math.max(0, remainingObjects - used)
         if completed then
             levelStreamingLoadFrame = levelStreamingLoadFrame + 1
@@ -4512,7 +4512,7 @@ update_level_streaming = function(force)
         end
         begin_level_zone_load(zone)
         startedThisFrame = startedThisFrame + 1
-        local completed, used = process_level_zone_load(zone, remainingObjects)
+        local completed, used = corona_platformer_process_level_zone_load(zone, remainingObjects)
         remainingObjects = math.max(0, remainingObjects - used)
         if completed then
             levelStreamingLoadFrame = levelStreamingLoadFrame + 1
@@ -4589,7 +4589,7 @@ end
 load_level = function(levelIndex)
     refresh_vitals_config()
     destroy_level_entities()
-    configure_level(levelIndex)
+    corona_platformer_configure_level(levelIndex)
     defeatedEnemyCount = 0
     if currentLevel == 1 then
         deathCount = 0
@@ -4602,7 +4602,7 @@ load_level = function(levelIndex)
     lastCharacterHandle = nil
 
     reset_player()
-    build_level()
+    corona_platformer_build_level()
     if controls.spineSkinningBenchmark == true then
         currentLevelEnemyStart = 1
         currentLevelEnemyEnd = 0
@@ -4610,7 +4610,7 @@ load_level = function(levelIndex)
     else
         build_enemy_slots()
     end
-    spawn_camera_and_light()
+    corona_platformer_spawn_camera_and_light()
     spawn_character()
     corona_platformer_spawn_spine_benchmark_characters()
     update_character(true)
@@ -4677,7 +4677,7 @@ if controls.startInMenu ~= true then
 end
 
 if gameState == "menu" then
-    configure_level(1)
+    corona_platformer_configure_level(1)
     prewarm_effect_cache()
 else
     prewarm_effect_cache()
