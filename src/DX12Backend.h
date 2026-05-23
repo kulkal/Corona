@@ -448,6 +448,37 @@ public:
 	std::unique_ptr<DescriptorHeapRing> TextureDHRing;
 	std::unique_ptr<DescriptorHeapRing> GeomtryDHRing;
 
+	// Phase 3.5: large UPLOAD-heap blocks that CreateUploadVertexBuffer /
+	// CreateUploadIndexBuffer sub-allocate from. Each block is a single
+	// CreateCommittedResource + persistent Map; sub-allocs are returned as
+	// shared ComPtrs to the block's resource + offset/CPU pointer. Block
+	// lifetime is extended by every issued VB/IB ComPtr — the active block
+	// pointer here only tracks the *current bump target*; retired blocks
+	// stay alive automatically until their last sub-allocation dies.
+	struct UploadHeapBlock
+	{
+		ComPtr<ID3D12Resource> resource;
+		uint8_t* mappedBase = nullptr;
+		UINT64 gpuVA = 0;
+		UINT64 capacity = 0;
+		UINT64 cursor = 0;
+	};
+	std::shared_ptr<UploadHeapBlock> ActiveUploadBlock;
+	UINT64 UploadBlockDefaultSize = 16ull * 1024ull * 1024ull; // 16 MiB
+	UINT32 UploadBlockCount = 0;
+	UINT32 UploadAllocationCount = 0;
+	UINT64 UploadBytesIssued = 0;
+	UINT64 UploadBytesReserved = 0;
+
+	struct UploadAllocation
+	{
+		ComPtr<ID3D12Resource> resource;
+		UINT64 offset = 0;
+		void* cpu = nullptr;
+		UINT64 gpuVA = 0;
+	};
+	UploadAllocation AllocateUploadBytes(UINT64 size, UINT64 alignment);
+
 	std::unique_ptr<ConstantBufferRingBuffer> GlobalCBRing;
 
 	std::vector<std::shared_ptr<Texture>> renderTargetTextures;

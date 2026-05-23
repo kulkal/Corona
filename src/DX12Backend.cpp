@@ -1261,27 +1261,81 @@ shared_ptr<VertexBuffer> DX12Backend::CreateVertexBuffer(UINT Size, UINT Stride,
 	return shared_ptr<VertexBuffer>(vb);
 }
 
-// Cheap VB/IB creation paths: allocate in an UPLOAD heap, write through a
-// CPU mapping, no DEFAULT-heap copy, no ExecuteCommandList, no WaitGPU.
-// The buffers are immediately usable for drawing — GPU reads CPU-mapped
-// memory across PCIe.
+// Cheap VB/IB creation paths: sub-allocate from a large UPLOAD-heap block.
+// Each block is a single CreateCommittedResource + persistent Map; the
+// per-VB/IB cost is now just a bump-allocate cursor advance + memcpy. The
+// block's ID3D12Resource is shared between every VB/IB ComPtr it issued,
+// so the block stays alive automatically until its last sub-allocation
+// dies. When the active block fills, a new block is committed and the old
+// one is "retired" (the pool stops pointing at it; existing VB/IB ComPtrs
+// still keep it alive). Designed for dynamic geometry like Spine sprite
+// frames where the unique-key space ranges from hundreds to thousands of
+// tiny buffers per session.
 //
-// Cost trade: per-draw PCIe read vs. an extra GPU copy + GPU sync at
-// creation. For sprite-scale or per-frame geometry (e.g. Spine sprite
-// frames, ~169 vertices × ~38 fresh scenes/sec), PCIe reads are negligible
-// (~0.2 ms/sec total) while the eliminated WaitGPU stalls were dominating
-// ~140 ms/sec in the CPU-skinning Spine benchmark.
-namespace
+// SRV is intentionally NOT created on this path — the CPU-skinning Spine
+// pipeline consumes VB/IB through BindMeshBuffers (no SRV). Callers that
+// need an SRV-backed buffer should use the regular CreateVertexBuffer /
+// CreateIndexBuffer.
+DX12Backend::UploadAllocation DX12Backend::AllocateUploadBytes(UINT64 size, UINT64 alignment)
 {
-	void MapAndMemcpy(ID3D12Resource* resource, const void* srcData, UINT size)
+	if (size == 0)
+		return {};
+
+	const UINT64 align = alignment > 0 ? alignment : 4;
+	auto allocateFromActive = [&]() -> UploadAllocation
 	{
-		if (!srcData || size == 0)
-			return;
-		void* mapped = nullptr;
-		ThrowIfFailed(resource->Map(0, nullptr, &mapped));
-		memcpy(mapped, srcData, size);
-		resource->Unmap(0, nullptr);
+		UploadHeapBlock* block = ActiveUploadBlock.get();
+		const UINT64 alignedCursor = (block->cursor + align - 1) & ~(align - 1);
+		if (alignedCursor + size > block->capacity)
+			return {};
+		const UINT64 offset = alignedCursor;
+		block->cursor = alignedCursor + size;
+		UploadAllocation alloc;
+		alloc.resource = block->resource;
+		alloc.offset = offset;
+		alloc.cpu = block->mappedBase + offset;
+		alloc.gpuVA = block->gpuVA + offset;
+		++UploadAllocationCount;
+		UploadBytesIssued += size;
+		return alloc;
+	};
+
+	if (ActiveUploadBlock)
+	{
+		UploadAllocation alloc = allocateFromActive();
+		if (alloc.resource)
+			return alloc;
 	}
+
+	// Need a new block. Size it to fit at least this request, but never
+	// smaller than the default so subsequent small allocations amortise the
+	// CreateCommittedResource cost.
+	const UINT64 requestedSize = size + align; // padding so the first aligned cursor still fits
+	const UINT64 blockSize = std::max<UINT64>(UploadBlockDefaultSize, requestedSize);
+
+	auto newBlock = std::make_shared<UploadHeapBlock>();
+	ThrowIfFailed(Device->CreateCommittedResource(
+		&CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD),
+		D3D12_HEAP_FLAG_NONE,
+		&CD3DX12_RESOURCE_DESC::Buffer(blockSize),
+		D3D12_RESOURCE_STATE_GENERIC_READ,
+		nullptr,
+		IID_PPV_ARGS(&newBlock->resource)));
+	NAME_D3D12_OBJECT(newBlock->resource);
+
+	void* mapped = nullptr;
+	ThrowIfFailed(newBlock->resource->Map(0, nullptr, &mapped));
+	newBlock->mappedBase = static_cast<uint8_t*>(mapped);
+	newBlock->gpuVA = newBlock->resource->GetGPUVirtualAddress();
+	newBlock->capacity = blockSize;
+	newBlock->cursor = 0;
+
+	ActiveUploadBlock = std::move(newBlock);
+	++UploadBlockCount;
+	UploadBytesReserved += blockSize;
+
+	UploadAllocation alloc = allocateFromActive();
+	return alloc;
 }
 
 shared_ptr<VertexBuffer> DX12Backend::CreateUploadVertexBuffer(UINT size, UINT stride, const void* srcData)
@@ -1289,36 +1343,20 @@ shared_ptr<VertexBuffer> DX12Backend::CreateUploadVertexBuffer(UINT size, UINT s
 	if (size == 0)
 		return nullptr;
 
-	auto* vb = new VertexBuffer;
-	ThrowIfFailed(Device->CreateCommittedResource(
-		&CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD),
-		D3D12_HEAP_FLAG_NONE,
-		&CD3DX12_RESOURCE_DESC::Buffer(size),
-		D3D12_RESOURCE_STATE_GENERIC_READ,
-		nullptr,
-		IID_PPV_ARGS(&vb->resource)));
-	NAME_D3D12_OBJECT(vb->resource);
-	MapAndMemcpy(vb->resource.Get(), srcData, size);
+	const UINT64 align = stride > 0 ? stride : 4u;
+	UploadAllocation alloc = AllocateUploadBytes(size, align);
+	if (!alloc.resource)
+		return nullptr;
 
-	vb->view.BufferLocation = vb->resource->GetGPUVirtualAddress();
+	if (srcData)
+		memcpy(alloc.cpu, srcData, size);
+
+	auto* vb = new VertexBuffer;
+	vb->resource = alloc.resource; // shared with the block; block stays alive while VB lives
+	vb->view.BufferLocation = alloc.gpuVA;
 	vb->view.StrideInBytes = stride;
 	vb->view.SizeInBytes = size;
 	vb->numVertices = stride > 0 ? (size / stride) : 0;
-
-	// Provide the byte-address SRV so the buffer can also be consumed by
-	// vertex-fetch compute / vertex-pulling shader paths (mirrors the
-	// behavior of the regular DEFAULT-heap CreateVertexBuffer).
-	D3D12_SHADER_RESOURCE_VIEW_DESC vertexSRVDesc = {};
-	vertexSRVDesc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
-	vertexSRVDesc.Format = DXGI_FORMAT_R32_TYPELESS;
-	vertexSRVDesc.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
-	vertexSRVDesc.Buffer.StructureByteStride = 0;
-	vertexSRVDesc.Buffer.FirstElement = 0;
-	vertexSRVDesc.Buffer.NumElements = size / sizeof(float);
-	vertexSRVDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-	GeomtryDHRing->AllocDescriptor(vb->CpuHandleSRV, vb->GpuHandleSRV);
-	Device->CreateShaderResourceView(vb->resource.Get(), &vertexSRVDesc, vb->CpuHandleSRV);
-
 	return shared_ptr<VertexBuffer>(vb);
 }
 
@@ -1327,33 +1365,20 @@ shared_ptr<IndexBuffer> DX12Backend::CreateUploadIndexBuffer(EIndexFormat format
 	if (size == 0)
 		return nullptr;
 
-	auto* ib = new IndexBuffer;
-	ThrowIfFailed(Device->CreateCommittedResource(
-		&CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD),
-		D3D12_HEAP_FLAG_NONE,
-		&CD3DX12_RESOURCE_DESC::Buffer(size),
-		D3D12_RESOURCE_STATE_GENERIC_READ,
-		nullptr,
-		IID_PPV_ARGS(&ib->resource)));
-	NAME_D3D12_OBJECT(ib->resource);
-	MapAndMemcpy(ib->resource.Get(), srcData, size);
+	const UINT64 align = format == EIndexFormat::U32 ? 4u : 2u;
+	UploadAllocation alloc = AllocateUploadBytes(size, align);
+	if (!alloc.resource)
+		return nullptr;
 
-	ib->view.BufferLocation = ib->resource->GetGPUVirtualAddress();
+	if (srcData)
+		memcpy(alloc.cpu, srcData, size);
+
+	auto* ib = new IndexBuffer;
+	ib->resource = alloc.resource; // shared with the block
+	ib->view.BufferLocation = alloc.gpuVA;
 	ib->view.Format = ToDXGIFormat(format);
 	ib->view.SizeInBytes = size;
 	ib->numIndices = format == EIndexFormat::U32 ? (size / 4) : (size / 2);
-
-	D3D12_SHADER_RESOURCE_VIEW_DESC ibSRVDesc = {};
-	ibSRVDesc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
-	ibSRVDesc.Format = DXGI_FORMAT_R32_TYPELESS;
-	ibSRVDesc.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
-	ibSRVDesc.Buffer.StructureByteStride = 0;
-	ibSRVDesc.Buffer.FirstElement = 0;
-	ibSRVDesc.Buffer.NumElements = size / sizeof(float);
-	ibSRVDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-	GeomtryDHRing->AllocDescriptor(ib->CpuHandleSRV, ib->GpuHandleSRV);
-	Device->CreateShaderResourceView(ib->resource.Get(), &ibSRVDesc, ib->CpuHandleSRV);
-
 	return shared_ptr<IndexBuffer>(ib);
 }
 
