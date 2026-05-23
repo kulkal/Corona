@@ -2776,7 +2776,7 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 			try
 			{
 				const unsigned long value = std::stoul(spineBenchmarkCountValue);
-				CommandLinePlatformerSpineBenchmarkCount = static_cast<UINT32>(std::clamp<unsigned long>(value, 1ul, 200ul));
+				CommandLinePlatformerSpineBenchmarkCount = static_cast<UINT32>(std::clamp<unsigned long>(value, 1ul, 1000ul));
 				bCommandLinePlatformerSpineBenchmark = true;
 				bStartupSponzaFlyMode = false;
 				bEnableStartupLuauScript = true;
