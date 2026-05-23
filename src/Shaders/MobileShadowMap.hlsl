@@ -17,6 +17,8 @@ CBUFFER_BINDING_BEGIN(ShadowMapConstantBuffer, 0)
     float4x4 LightViewProjectionMatrix;
     float4x4 WorldMatrix;
     float4 BaseColorFactor;
+    uint SpineVertexBase;
+    uint3 Padding;
 } CBUFFER_BINDING_END;
 
 struct VSInput
@@ -59,7 +61,7 @@ PSInput VSMain(VSInput input)
 
 PSInput SpineVSMain(uint vertexId : SV_VertexID)
 {
-    SpineSkinnedVertex input = SpineVertices[vertexId];
+    SpineSkinnedVertex input = SpineVertices[SpineVertexBase + vertexId];
     return BuildShadowVertex(input.position, input.uv);
 }
 

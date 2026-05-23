@@ -234,6 +234,12 @@ void Corona::InitGBufferPass()
 
 	GBufferGraphicsPipeline = renderBackend->CreateGraphicsPipeline(desc);
 
+	GraphicsPipelineDesc cpuSpineDesc = desc;
+	cpuSpineDesc.bDepthWriteEnable = false;
+	CpuSpineGBufferGraphicsPipeline = renderBackend->CreateGraphicsPipeline(cpuSpineDesc);
+	if (!CpuSpineGBufferGraphicsPipeline)
+		AppendCpuRuntimeTrace(L"[InitGBufferPass] failed to create CPU Spine GBuffer pipeline");
+
 	GraphicsPipelineDesc spineDesc = desc;
 	spineDesc.VertexEntryPoint = "SpineVSMain";
 	spineDesc.VertexElements.clear();
@@ -1730,6 +1736,7 @@ void Corona::BloomPass()
 void Corona::DispatchSpineSkinningForMesh(Mesh* mesh)
 {
 	if (!renderBackend ||
+		!bEnableGpuSpineSkinning ||
 		!SpineSkinningPSO ||
 		!mesh ||
 		!mesh->bGpuSpineSkinned ||
@@ -1772,7 +1779,7 @@ void Corona::DispatchSpineSkinningForScene(const shared_ptr<Scene>& scene)
 
 void Corona::DispatchSpineSkinningForRenderWorld()
 {
-	if (!renderBackend || !SpineSkinningPSO)
+	if (!renderBackend || !bEnableGpuSpineSkinning || !SpineSkinningPSO)
 		return;
 
 	for (const SceneObject& object : RenderWorld.SceneObjects)
@@ -1795,8 +1802,13 @@ void Corona::DrawScene(shared_ptr<Scene> scene, const glm::mat4x4& instanceTrans
 			mesh->bGpuSpineSkinningDispatched &&
 			mesh->GpuSpineSkinnedVertices &&
 			SpineGBufferGraphicsPipeline;
+		const bool bUseCpuSpinePipeline =
+			!bUseSpineVertexFetch &&
+			mesh->bSpineMesh &&
+			CpuSpineGBufferGraphicsPipeline;
 		GraphicsPipelineHandle* activeGBufferPipeline =
-			bUseSpineVertexFetch ? SpineGBufferGraphicsPipeline.get() : GBufferGraphicsPipeline.get();
+			bUseSpineVertexFetch ? SpineGBufferGraphicsPipeline.get() :
+			(bUseCpuSpinePipeline ? CpuSpineGBufferGraphicsPipeline.get() : GBufferGraphicsPipeline.get());
 		renderBackend->BindGraphicsPipeline(activeGBufferPipeline);
 		renderBackend->BindGraphicsPipelineSampler(activeGBufferPipeline, "samplerWrap", samplerWrap.get());
 		if (bUseSpineVertexFetch)
@@ -1837,6 +1849,7 @@ void Corona::DrawScene(shared_ptr<Scene> scene, const glm::mat4x4& instanceTrans
 			const bool bSpineUnlit = bUseSpineVertexFetch || mesh->bSpineMesh;
 			objCB.bTwoSidedLighting = bSpineUnlit ? 1u : 0u;
 			objCB.bUnlitMaterial = bSpineUnlit ? 1u : 0u;
+			objCB.SpineVertexBase = bUseSpineVertexFetch ? drawcall.VertexBase : 0u;
 
 			renderBackend->SetGraphicsPipelineConstantData(activeGBufferPipeline, 0, &objCB, sizeof(objCB));
 
@@ -1920,7 +1933,10 @@ void Corona::DrawScene(shared_ptr<Scene> scene, const glm::mat4x4& instanceTrans
 				bLoggedFirstGBufferDraw = true;
 			}
 
-			renderBackend->DrawIndexed(drawcall.IndexCount, drawcall.IndexStart, drawcall.VertexBase);
+			renderBackend->DrawIndexed(
+				drawcall.IndexCount,
+				drawcall.IndexStart,
+				bUseSpineVertexFetch ? 0 : drawcall.VertexBase);
 		}
 	}
 }
@@ -1955,10 +1971,14 @@ void Corona::DrawSceneShadowMap(shared_ptr<Scene> scene, const glm::mat4x4& inst
 			objCB.LightViewProjectionMatrix = glm::transpose(MobileShadowViewProjMat);
 			objCB.WorldMatrix = glm::transpose(instanceTransform * mesh->transform);
 			objCB.BaseColorFactor = glm::vec4(1.0f);
+			objCB.SpineVertexBase = bUseSpineVertexFetch ? drawcall.VertexBase : 0u;
 
 			renderBackend->SetGraphicsPipelineConstantData(activeShadowPipeline, 0, &objCB, sizeof(objCB));
 
-			renderBackend->DrawIndexed(drawcall.IndexCount, drawcall.IndexStart, drawcall.VertexBase);
+			renderBackend->DrawIndexed(
+				drawcall.IndexCount,
+				drawcall.IndexStart,
+				bUseSpineVertexFetch ? 0 : drawcall.VertexBase);
 		}
 	}
 }
@@ -2559,13 +2579,13 @@ void Corona::GBufferPass()
 
 	if (!bMultiThreadRendering)
 	{
-		auto sceneUsesSpineVertexFetch = [](const std::shared_ptr<Scene>& scene)
+		auto sceneUsesSpineMesh = [](const std::shared_ptr<Scene>& scene)
 		{
 			if (!scene)
 				return false;
 			for (const auto& mesh : scene->meshes)
 			{
-				if (mesh && mesh->bGpuSpineSkinned)
+				if (mesh && mesh->bSpineMesh)
 					return true;
 			}
 			return false;
@@ -2578,7 +2598,7 @@ void Corona::GBufferPass()
 				if (!object.bVisible || !object.ScenePtr)
 					continue;
 
-				const bool bSpineObject = sceneUsesSpineVertexFetch(object.ScenePtr);
+				const bool bSpineObject = sceneUsesSpineMesh(object.ScenePtr);
 				if ((drawSpinePass == 0 && bSpineObject) || (drawSpinePass == 1 && !bSpineObject))
 					continue;
 

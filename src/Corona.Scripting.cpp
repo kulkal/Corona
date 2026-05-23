@@ -149,6 +149,17 @@ namespace
 		return normalized.find(L"\\scripts\\startup\\") != std::wstring::npos;
 	}
 
+	bool IsPlatformerStartupScriptSource(const std::wstring& sourceName)
+	{
+		std::wstring normalized = sourceName;
+		std::replace(normalized.begin(), normalized.end(), L'/', L'\\');
+		std::transform(normalized.begin(), normalized.end(), normalized.begin(), [](wchar_t c)
+		{
+			return static_cast<wchar_t>(std::towlower(c));
+		});
+		return normalized.find(L"\\scripts\\startup\\platformer\\") != std::wstring::npos;
+	}
+
 	std::string LuaToString(lua_State* L, int index)
 	{
 		const char* text = lua_tostring(L, index);
@@ -1027,6 +1038,8 @@ private:
 		glm::vec3 color(0.72f, 0.72f, 0.72f);
 		bool brickTexture = false;
 		float uvRepeat = 1.0f;
+		float uvRepeatY = -1.0f;
+		bool frontOnly = false;
 		std::string textureKind;
 		if (lua_istable(L, 1))
 		{
@@ -1043,13 +1056,37 @@ private:
 				if (!ReadNumberField(L, tableIndex, "uvRepeat", uvRepeat))
 					ReadNumberField(L, tableIndex, "texture_repeat", uvRepeat);
 			}
+			if (!ReadNumberField(L, tableIndex, "uv_repeat_y", uvRepeatY))
+			{
+				if (!ReadNumberField(L, tableIndex, "uvRepeatY", uvRepeatY))
+				{
+					if (!ReadNumberField(L, tableIndex, "texture_repeat_y", uvRepeatY))
+						ReadNumberField(L, tableIndex, "textureRepeatY", uvRepeatY);
+				}
+			}
+			if (!ReadNumberField(L, tableIndex, "uv_repeat_x", uvRepeat))
+			{
+				if (!ReadNumberField(L, tableIndex, "uvRepeatX", uvRepeat))
+				{
+					if (!ReadNumberField(L, tableIndex, "texture_repeat_x", uvRepeat))
+						ReadNumberField(L, tableIndex, "textureRepeatX", uvRepeat);
+				}
+			}
+			if (!ReadBoolField(L, tableIndex, "front_only", frontOnly))
+			{
+				if (!ReadBoolField(L, tableIndex, "frontOnly", frontOnly))
+				{
+					if (!ReadBoolField(L, tableIndex, "surface_only", frontOnly))
+						ReadBoolField(L, tableIndex, "surfaceOnly", frontOnly);
+				}
+			}
 			textureKind = NormalizeProceduralBoxTextureKindForScript(ReadFirstStringField(
 				L,
 				tableIndex,
 				{ "texture_kind", "textureKind", "texture", "terrain_texture", "terrainTexture", "material_kind", "materialKind" }));
 		}
 
-		const Corona::ScriptSceneHandle handle = host->CreateProceduralBoxSceneForScript(color, brickTexture, uvRepeat, Utf8ToWideLocal(textureKind));
+		const Corona::ScriptSceneHandle handle = host->CreateProceduralBoxSceneForScript(color, brickTexture, uvRepeat, Utf8ToWideLocal(textureKind), uvRepeatY, frontOnly);
 		if (handle == Corona::InvalidScriptSceneHandle)
 		{
 			luaL_error(L, "failed to create procedural box scene");
@@ -1576,11 +1613,13 @@ private:
 		if (sceneHandle == Corona::InvalidScriptSceneHandle)
 		{
 			const std::string primitive = NormalizeKeyName(ReadFirstStringField(L, tableIndex, { "primitive", "type" }).c_str());
-			if (primitive == "BOX" || primitive == "CUBE")
+			if (primitive == "BOX" || primitive == "CUBE" || primitive == "PLANE" || primitive == "QUAD")
 			{
 				glm::vec3 color(0.72f, 0.72f, 0.72f);
 				bool brickTexture = false;
 				float uvRepeat = 1.0f;
+				float uvRepeatY = -1.0f;
+				bool frontOnly = primitive == "PLANE" || primitive == "QUAD";
 				std::string textureKind;
 				if (!ReadVec3Field(L, tableIndex, "color", color))
 				{
@@ -1594,11 +1633,35 @@ private:
 					if (!ReadNumberField(L, tableIndex, "uvRepeat", uvRepeat))
 						ReadNumberField(L, tableIndex, "texture_repeat", uvRepeat);
 				}
+				if (!ReadNumberField(L, tableIndex, "uv_repeat_y", uvRepeatY))
+				{
+					if (!ReadNumberField(L, tableIndex, "uvRepeatY", uvRepeatY))
+					{
+						if (!ReadNumberField(L, tableIndex, "texture_repeat_y", uvRepeatY))
+							ReadNumberField(L, tableIndex, "textureRepeatY", uvRepeatY);
+					}
+				}
+				if (!ReadNumberField(L, tableIndex, "uv_repeat_x", uvRepeat))
+				{
+					if (!ReadNumberField(L, tableIndex, "uvRepeatX", uvRepeat))
+					{
+						if (!ReadNumberField(L, tableIndex, "texture_repeat_x", uvRepeat))
+							ReadNumberField(L, tableIndex, "textureRepeatX", uvRepeat);
+					}
+				}
+				if (!ReadBoolField(L, tableIndex, "front_only", frontOnly))
+				{
+					if (!ReadBoolField(L, tableIndex, "frontOnly", frontOnly))
+					{
+						if (!ReadBoolField(L, tableIndex, "surface_only", frontOnly))
+							ReadBoolField(L, tableIndex, "surfaceOnly", frontOnly);
+					}
+				}
 				textureKind = NormalizeProceduralBoxTextureKindForScript(ReadFirstStringField(
 					L,
 					tableIndex,
 					{ "texture_kind", "textureKind", "texture", "terrain_texture", "terrainTexture", "material_kind", "materialKind" }));
-				sceneHandle = host->CreateProceduralBoxSceneForScript(color, brickTexture, uvRepeat, Utf8ToWideLocal(textureKind));
+				sceneHandle = host->CreateProceduralBoxSceneForScript(color, brickTexture, uvRepeat, Utf8ToWideLocal(textureKind), uvRepeatY, frontOnly);
 			}
 			else if (primitive == "BLOCKCHARACTER" || primitive == "CHARACTER")
 			{
@@ -3851,7 +3914,7 @@ Corona::ScriptSceneHandle Corona::CreateProceduralBlockCharacterSceneForScript(U
 	return handle;
 }
 
-Corona::ScriptSceneHandle Corona::CreateProceduralBoxSceneForScript(const glm::vec3& baseColor, bool bUseBrickTexture, float uvRepeat, const std::wstring& textureKind)
+Corona::ScriptSceneHandle Corona::CreateProceduralBoxSceneForScript(const glm::vec3& baseColor, bool bUseBrickTexture, float uvRepeat, const std::wstring& textureKind, float uvRepeatY, bool bFrontOnly)
 {
 	if (!renderBackend)
 		return InvalidScriptSceneHandle;
@@ -3865,19 +3928,28 @@ Corona::ScriptSceneHandle Corona::CreateProceduralBoxSceneForScript(const glm::v
 		glm::ivec3(glm::round(glm::clamp(baseColor, glm::vec3(0.0f), glm::vec3(1.0f)) * 255.0f)),
 		glm::ivec3(0),
 		glm::ivec3(255));
-	const int quantizedUvRepeat = std::clamp(static_cast<int>(std::round(std::clamp(uvRepeat, 1.0f, 64.0f) * 100.0f)), 100, 6400);
+	const int quantizedUvRepeatX = std::clamp(static_cast<int>(std::round(std::clamp(uvRepeat, 1.0f, 64.0f) * 100.0f)), 100, 6400);
+	const int quantizedUvRepeatY = std::clamp(static_cast<int>(std::round(std::clamp(uvRepeatY > 0.0f ? uvRepeatY : uvRepeat, 1.0f, 64.0f) * 100.0f)), 100, 6400);
 	const std::wstring key =
 		L"procedural://box/" +
 		std::to_wstring(quantizedColor.x) + L"/" +
 		std::to_wstring(quantizedColor.y) + L"/" +
 		std::to_wstring(quantizedColor.z) + L"/" +
+		(bFrontOnly ? L"front/" : L"solid/") +
 		textureKey + L"/" +
-		std::to_wstring(quantizedUvRepeat);
+		std::to_wstring(quantizedUvRepeatX) + L"/" +
+		std::to_wstring(quantizedUvRepeatY);
 	const auto cachedIt = ScriptSceneByPath.find(key);
 	if (cachedIt != ScriptSceneByPath.end())
 		return cachedIt->second;
 
-	shared_ptr<Scene> scene = CreateProceduralBoxScene(glm::vec3(quantizedColor) / 255.0f, bUseBrickTexture, static_cast<float>(quantizedUvRepeat) / 100.0f, normalizedTextureKind);
+	shared_ptr<Scene> scene = CreateProceduralBoxScene(
+		glm::vec3(quantizedColor) / 255.0f,
+		bUseBrickTexture,
+		static_cast<float>(quantizedUvRepeatX) / 100.0f,
+		normalizedTextureKind,
+		static_cast<float>(quantizedUvRepeatY) / 100.0f,
+		bFrontOnly);
 	if (!scene)
 		return InvalidScriptSceneHandle;
 
@@ -4175,7 +4247,13 @@ bool Corona::SetSpinePoseForScript(
 		bMirrorX ? -uniformScale : uniformScale,
 		uniformScale,
 		uniformScale));
-	const glm::mat4x4 transform = BuildScaledSceneTransform(scene, signedScale, position, rotationDegrees);
+	const glm::mat4x4 rotation =
+		glm::rotate(glm::radians(rotationDegrees.z), glm::vec3(0.0f, 0.0f, 1.0f)) *
+		glm::rotate(glm::radians(rotationDegrees.y), glm::vec3(0.0f, 1.0f, 0.0f)) *
+		glm::rotate(glm::radians(rotationDegrees.x), glm::vec3(1.0f, 0.0f, 0.0f));
+	const glm::mat4x4 transform = bUseWorldScale ?
+		(glm::translate(position) * rotation * glm::scale(signedScale)) :
+		BuildScaledSceneTransform(scene, signedScale, position, rotationDegrees);
 
 	if (objectHandle != InvalidSceneObjectHandle)
 	{
@@ -7819,9 +7897,10 @@ void Corona::BuildEntityScriptUi()
 
 			const std::wstring sourceName = script->SourceName;
 			const bool bStartupSource = IsStartupScriptSource(sourceName);
-			if (bScriptGameUiHidden && !bStartupSource)
+			const bool bGameUiSource = !bStartupSource || IsPlatformerStartupScriptSource(sourceName);
+			if (bScriptGameUiHidden && bGameUiSource)
 				continue;
-			ScopedScriptUiSource uiSourceScope(this, !bStartupSource);
+			ScopedScriptUiSource uiSourceScope(this, bGameUiSource);
 
 			const std::string nativeScriptName = script->NativeScriptName;
 			if (!nativeScriptName.empty())

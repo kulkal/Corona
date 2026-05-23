@@ -1081,6 +1081,17 @@ local function draw_point_lights_window(windows, state)
 end
 
 function script.ui()
+    local platformerBenchmark =
+        corona_script_controls ~= nil and
+        corona_script_controls.platformer ~= nil and
+        corona_script_controls.platformer.spineSkinningBenchmark == true
+    if not platformerBenchmark and corona.get_persistent_control ~= nil then
+        platformerBenchmark = corona.get_persistent_control("platformer.spineSkinningBenchmark", false) == true
+    end
+    if platformerBenchmark then
+        return
+    end
+
     local windows = ensure_window_controls()
     local gpu = ensure_gpu_controls()
     gpu.profileUiTick = (gpu.profileUiTick or 0) + 1

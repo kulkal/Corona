@@ -85,7 +85,7 @@ namespace
 			app->activity->vm->DetachCurrentThread();
 	}
 
-	void RequestPreferredFrameRate(android_app* app)
+	void RequestPreferredFrameRate(android_app* app, float targetFrameRate)
 	{
 		if (!app || !app->window)
 			return;
@@ -102,13 +102,27 @@ namespace
 
 		const int32_t result = setFrameRateWithChangeStrategy(
 			app->window,
-			120.0f,
+			targetFrameRate,
 			ANATIVEWINDOW_FRAME_RATE_COMPATIBILITY_DEFAULT,
 			ANATIVEWINDOW_CHANGE_FRAME_RATE_ALWAYS);
-		__android_log_print(ANDROID_LOG_INFO, kLogTag, "Requested 120Hz window frame rate: result=%d", result);
+		__android_log_print(ANDROID_LOG_INFO, kLogTag, "Requested %.1fHz window frame rate: result=%d", targetFrameRate, result);
 #else
 		(void)app;
+		(void)targetFrameRate;
 #endif
+	}
+
+	std::chrono::steady_clock::duration GetFrameRateLimitInterval(const Corona* app)
+	{
+		if (!app)
+			return std::chrono::steady_clock::duration::zero();
+
+		const double targetHz = app->GetTargetFrameRateLimitHz();
+		if (!(targetHz > 0.0))
+			return std::chrono::steady_clock::duration::zero();
+
+		return std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+			std::chrono::duration<double>(1.0 / targetHz));
 	}
 
 	bool CopyAssetFile(AAssetManager* assetManager, const std::string& assetPath, const std::filesystem::path& destination)
@@ -292,7 +306,6 @@ namespace
 		gLoggedWaitingForLandscapeWindow = false;
 
 		SetMainPlatformWindowHandle(app->window);
-		RequestPreferredFrameRate(app);
 		const std::filesystem::path runtimeRoot = PrepareRuntimeFiles(app);
 		__android_log_print(ANDROID_LOG_INFO, kLogTag, "Runtime root: %s", runtimeRoot.string().c_str());
 
@@ -307,6 +320,8 @@ namespace
 		wchar_t arg0[] = L"Corona";
 		wchar_t* argv[] = { arg0 };
 		gCoronaApp->ParseCommandLineArgs(argv, static_cast<int>(_countof(argv)));
+		const double targetFrameRate = gCoronaApp->GetTargetFrameRateLimitHz();
+		RequestPreferredFrameRate(app, targetFrameRate > 0.0 ? static_cast<float>(targetFrameRate) : 120.0f);
 		gCoronaApp->OnInit();
 		gCoronaInitialized = true;
 		gCoronaApp->StartGameThread();
@@ -370,7 +385,7 @@ void android_main(android_app* app)
 	RequestLandscapeOrientation(app);
 	LogInfo("android_main started.");
 
-	constexpr auto kAndroidTargetFrameInterval = std::chrono::microseconds(8333);
+	constexpr auto kAndroidDefaultTargetFrameInterval = std::chrono::microseconds(8333);
 
 	for (;;)
 	{
@@ -400,8 +415,13 @@ void android_main(android_app* app)
 				const auto frameStart = std::chrono::steady_clock::now();
 				gCoronaApp->RenderThreadTick();
 				const auto frameElapsed = std::chrono::steady_clock::now() - frameStart;
-				if (frameElapsed < kAndroidTargetFrameInterval)
-					std::this_thread::sleep_for(kAndroidTargetFrameInterval - frameElapsed);
+				const auto targetFrameInterval = GetFrameRateLimitInterval(gCoronaApp.get());
+				const auto effectiveFrameInterval =
+					targetFrameInterval > std::chrono::steady_clock::duration::zero() ?
+					targetFrameInterval :
+					std::chrono::duration_cast<std::chrono::steady_clock::duration>(kAndroidDefaultTargetFrameInterval);
+				if (frameElapsed < effectiveFrameInterval)
+					std::this_thread::sleep_for(effectiveFrameInterval - frameElapsed);
 			}
 			catch (const std::exception& exception)
 			{

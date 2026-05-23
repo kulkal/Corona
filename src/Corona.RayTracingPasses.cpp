@@ -258,7 +258,14 @@ void Corona::FlushSceneObjectChanges()
 	const bool bMobileHybridDirectOnly =
 		CORONA_PLATFORM_MOBILE &&
 		RenderingMode == ERenderingMode::HYBRID;
-	if (bMobileHybridDirectOnly || !renderBackend->SupportsRayTracing())
+#if CORONA_PLATFORM_MOBILE
+	const bool bPlatformerHybridDirectOnly = false;
+#else
+	const bool bPlatformerHybridDirectOnly =
+		RenderingMode == ERenderingMode::HYBRID &&
+		StartupLuauMode == L"platformer";
+#endif
+	if (bMobileHybridDirectOnly || bPlatformerHybridDirectOnly || !renderBackend->SupportsRayTracing())
 	{
 		RayTracingInstances.clear();
 		TLAS = nullptr;

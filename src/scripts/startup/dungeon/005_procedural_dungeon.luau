@@ -744,7 +744,7 @@ function dungeonScript.shutdown()
     end
     spawned = {}
     corona_dungeon_runtime = nil
-    corona.set_default_world_visible(true)
+    corona.set_default_world_visible(false)
 end
 
 return dungeonScript

@@ -265,10 +265,11 @@ private:
 		UINT32 bOverrideRougnessMetallic;
 		UINT32 bTwoSidedLighting;
 		UINT32 bUnlitMaterial;
-		UINT32 Padding[1] = {};
+		UINT32 SpineVertexBase = 0;
 	};
 
 	std::shared_ptr<GraphicsPipelineHandle> GBufferGraphicsPipeline;
+	std::shared_ptr<GraphicsPipelineHandle> CpuSpineGBufferGraphicsPipeline;
 	std::shared_ptr<GraphicsPipelineHandle> SpineGBufferGraphicsPipeline;
 	struct SpineSkinningConstant
 	{
@@ -780,6 +781,8 @@ private:
 		glm::mat4x4 LightViewProjectionMatrix;
 		glm::mat4x4 WorldMatrix;
 		glm::vec4 BaseColorFactor = glm::vec4(1.0f);
+		UINT32 SpineVertexBase = 0;
+		UINT32 Padding[3] = {};
 	};
 	std::shared_ptr<GraphicsPipelineHandle> MobileShadowMapGraphicsPipeline;
 	std::shared_ptr<GraphicsPipelineHandle> SpineMobileShadowMapGraphicsPipeline;
@@ -967,6 +970,11 @@ private:
 	ERenderBackendAPI CommandLineRenderBackendAPI = ERenderBackendAPI::D3D12;
 	bool bCommandLineDisableImgui = false;
 	bool bCommandLineDisableStreamline = false;
+	bool bEnableGpuSpineSkinning = true;
+	bool bCommandLineSpineSkinningOverrideSet = false;
+	bool bCommandLineSpineGpuSkinningEnabled = true;
+	bool bCommandLinePlatformerSpineBenchmark = false;
+	UINT32 CommandLinePlatformerSpineBenchmarkCount = 50;
 	bool bCommandLineBvhViewerOverrideSet = false;
 	bool bCommandLineBvhViewerEnabled = false;
 	bool bCommandLineNvFrapsBvhLiveTlas = false;
@@ -1824,7 +1832,7 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	shared_ptr<Scene> CreateMirrorCubeScene();
 	shared_ptr<Texture> GetProceduralDungeonBrickDiffuseTexture();
 	shared_ptr<Texture> GetProceduralBoxDiffuseTexture(const std::wstring& textureKind);
-	shared_ptr<Scene> CreateProceduralBoxScene(const glm::vec3& baseColor, bool bUseBrickTexture = false, float uvRepeat = 1.0f, const std::wstring& textureKind = std::wstring());
+	shared_ptr<Scene> CreateProceduralBoxScene(const glm::vec3& baseColor, bool bUseBrickTexture = false, float uvRepeat = 1.0f, const std::wstring& textureKind = std::wstring(), float uvRepeatY = -1.0f, bool bFrontOnly = false);
 	bool ShouldIncludeSceneObjectInRayTracingAS(const SceneObject& object) const;
 	void MarkRayTracingSceneDirty();
 	void MarkRayTracingTransformsDirty();
@@ -1902,7 +1910,7 @@ public:
 		float maxDistance,
 		CpuPhysicsRaycastHit& hit);
 	ScriptSceneHandle CreateProceduralBlockCharacterSceneForScript(UINT32 seed);
-	ScriptSceneHandle CreateProceduralBoxSceneForScript(const glm::vec3& baseColor, bool bUseBrickTexture = false, float uvRepeat = 1.0f, const std::wstring& textureKind = std::wstring());
+	ScriptSceneHandle CreateProceduralBoxSceneForScript(const glm::vec3& baseColor, bool bUseBrickTexture = false, float uvRepeat = 1.0f, const std::wstring& textureKind = std::wstring(), float uvRepeatY = -1.0f, bool bFrontOnly = false);
 	ScriptSceneHandle CreateSpineSceneForScript(const std::wstring& assetPath, const std::string& animationName, float timeSeconds, float sourceScale = 1.0f);
 	float GetScriptSceneHeightForScript(ScriptSceneHandle sceneHandle) const;
 	bool SetSpinePoseForScript(
@@ -2359,6 +2367,7 @@ public:
 	UINT GetWidth() const { return m_width; }
 	UINT GetHeight() const { return m_height; }
 	const WCHAR* GetTitle() const { return m_title.c_str(); }
+	double GetTargetFrameRateLimitHz() const;
 
 	void GenMipSpecularGIPass();
 	EAntiAliasingMode NormalizeAntiAliasingMode(ERenderingMode renderingMode, EAntiAliasingMode requestedMode) const;

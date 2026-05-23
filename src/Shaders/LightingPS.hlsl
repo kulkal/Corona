@@ -239,6 +239,13 @@ float4 PSMain(PSInput input) : SV_TARGET
     float3 NormalSample = SanitizeFloat3(NormalTex[PixelPos].xyz);
     float3 WorldNormal = SafeNormalize(bMobileDirectOnly ? (NormalSample * 2.0f - 1.0f) : NormalSample, float3(0.0f, 1.0f, 0.0f));
     float DeviceDepth = DepthTex[PixelPos].x;
+    float4 RoughnessMetallic = SanitizeFloat4(RoughnessMetalicTex[PixelPos]);
+    float UnlitMaterial = saturate(RoughnessMetallic.z);
+    // Spine sprites keep depth writes disabled so attachment draw order stays
+    // faithful to the source data. Their unlit GBuffer pixels must survive the
+    // sky-depth fallback even when no platform wrote depth behind them.
+    if (UnlitMaterial > 0.5f)
+        return float4(Albedo, 1.0f);
     if (DeviceDepth >= 0.999999f)
         return float4(EvaluateSkyBackground(screenUV), 1.0f);
 
@@ -249,11 +256,6 @@ float4 PSMain(PSInput input) : SV_TARGET
     float3 LightDir = normalize(LightDirAndIntensity.xyz);
     float LightIntensity = LightDirAndIntensity.w;
     float NdotL = saturate(dot(LightDir, WorldNormal));
-    float4 RoughnessMetallic = SanitizeFloat4(RoughnessMetalicTex[PixelPos]);
-    float UnlitMaterial = saturate(RoughnessMetallic.z);
-    if (UnlitMaterial > 0.5f && DeviceDepth < 0.999999f)
-        return float4(Albedo, 1.0f);
-
     float Roughness = clamp(RoughnessMetallic.x, 0.02f, 1.0f);
     float Metallic = saturate(RoughnessMetallic.y);
     float3 F0 = lerp(0.04f.xxx, Albedo.xyz, Metallic);

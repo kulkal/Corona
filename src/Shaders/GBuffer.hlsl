@@ -33,7 +33,7 @@ CBUFFER_BINDING_BEGIN(GBufferConstantBuffer, 0)
     uint bOverrideRougnessMetallic;
     uint bTwoSidedLighting;
     uint bUnlitMaterial;
-    uint Padding;
+    uint SpineVertexBase;
 } CBUFFER_BINDING_END;
 
 struct VSInput
@@ -88,7 +88,7 @@ PSInput VSMain(VSInput input)
 
 PSInput SpineVSMain(uint vertexId : SV_VertexID)
 {
-    SpineSkinnedVertex input = SpineVertices[vertexId];
+    SpineSkinnedVertex input = SpineVertices[SpineVertexBase + vertexId];
     return BuildGBufferVertex(input.position, input.normal, input.uv, input.tangent);
 }
 

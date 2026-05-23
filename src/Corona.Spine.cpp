@@ -102,6 +102,8 @@ namespace
 		std::vector<SpineSkinBone> SkinBones;
 		glm::vec3 BoundsMin = glm::vec3(std::numeric_limits<float>::max());
 		glm::vec3 BoundsMax = glm::vec3(std::numeric_limits<float>::lowest());
+		UINT32 CpuFallbackVertexCount = 0;
+		UINT32 GpuPlaceholderVertexCount = 0;
 		int RegionAttachmentCount = 0;
 		int MeshAttachmentCount = 0;
 		int WeightedMeshAttachmentCount = 0;
@@ -337,6 +339,46 @@ namespace
 			}
 
 			AddSpineFallbackVertex(outMesh, worldPosition, skinVertex.UV, skinVertex.LocalZ, sourceScale);
+			++outMesh.CpuFallbackVertexCount;
+		}
+	}
+
+	void AppendSkinPlaceholderVertices(
+		SpineSampleMesh& outMesh,
+		UINT32 skinVertexStart,
+		float sourceScale)
+	{
+		const UINT32 skinVertexEnd = static_cast<UINT32>(outMesh.SkinVertices.size());
+		for (UINT32 skinVertexIndex = skinVertexStart; skinVertexIndex < skinVertexEnd; ++skinVertexIndex)
+		{
+			const SpineSkinInputVertex& skinVertex = outMesh.SkinVertices[skinVertexIndex];
+			glm::vec2 approximateLocalPosition(0.0f);
+			float accumulatedWeight = 0.0f;
+			for (UINT32 influenceIndex = 0; influenceIndex < skinVertex.InfluenceCount; ++influenceIndex)
+			{
+				const UINT32 sourceInfluenceIndex = skinVertex.InfluenceOffset + influenceIndex;
+				if (sourceInfluenceIndex >= outMesh.SkinInfluences.size())
+					continue;
+
+				const SpineSkinInfluence& influence = outMesh.SkinInfluences[sourceInfluenceIndex];
+				approximateLocalPosition += influence.LocalPosition * influence.Weight;
+				accumulatedWeight += influence.Weight;
+			}
+			if (accumulatedWeight > 1.0e-5f && std::abs(accumulatedWeight - 1.0f) > 1.0e-4f)
+				approximateLocalPosition /= accumulatedWeight;
+
+			SpineSampleVertex vertex = {};
+			vertex.Position = glm::vec3(
+				approximateLocalPosition.x * sourceScale,
+				approximateLocalPosition.y * sourceScale,
+				skinVertex.LocalZ * sourceScale);
+			vertex.Normal = glm::vec3(0.0f, 0.0f, 1.0f);
+			vertex.UV = skinVertex.UV;
+			vertex.Tangent = glm::vec3(1.0f, 0.0f, 0.0f);
+			outMesh.Vertices.push_back(vertex);
+			outMesh.BoundsMin = glm::min(outMesh.BoundsMin, vertex.Position);
+			outMesh.BoundsMax = glm::max(outMesh.BoundsMax, vertex.Position);
+			++outMesh.GpuPlaceholderVertexCount;
 		}
 	}
 
@@ -435,7 +477,7 @@ namespace
 		outMesh.Draws.push_back({ indexStart, indexCount, baseVertex, vertexCount });
 	}
 
-	SpineSampleMesh BuildSpineSampleMesh(spSkeleton* skeleton, float sourceScale)
+	SpineSampleMesh BuildSpineSampleMesh(spSkeleton* skeleton, float sourceScale, bool bBuildCpuFallbackVertices)
 	{
 		SpineSampleMesh mesh;
 		BuildSkinBones(mesh, skeleton);
@@ -462,7 +504,10 @@ namespace
 				AppendRegionSkinVertices(mesh, skeleton, slot, attachment, localZ);
 				if (mesh.SkinVertices.size() > skinVertexStart)
 				{
-					AppendSkinFallbackVertices(mesh, skinVertexStart, sourceScale);
+					if (bBuildCpuFallbackVertices)
+						AppendSkinFallbackVertices(mesh, skinVertexStart, sourceScale);
+					else
+						AppendSkinPlaceholderVertices(mesh, skinVertexStart, sourceScale);
 					AppendAttachmentIndices(mesh, baseVertex, kRegionQuadTriangles, 6);
 					AppendSpineDrawRange(mesh, baseVertex, indexStart);
 				}
@@ -478,7 +523,10 @@ namespace
 				AppendMeshSkinVertices(mesh, skeleton, slot, attachment, localZ);
 				if (mesh.SkinVertices.size() > skinVertexStart)
 				{
-					AppendSkinFallbackVertices(mesh, skinVertexStart, sourceScale);
+					if (bBuildCpuFallbackVertices)
+						AppendSkinFallbackVertices(mesh, skinVertexStart, sourceScale);
+					else
+						AppendSkinPlaceholderVertices(mesh, skinVertexStart, sourceScale);
 					AppendAttachmentIndices(mesh, baseVertex, attachment->triangles, attachment->trianglesCount);
 					AppendSpineDrawRange(mesh, baseVertex, indexStart);
 				}
@@ -494,7 +542,10 @@ namespace
 				AppendWeightedMeshSkinVertices(mesh, slot, attachment, localZ);
 				if (mesh.SkinVertices.size() > skinVertexStart)
 				{
-					AppendSkinFallbackVertices(mesh, skinVertexStart, sourceScale);
+					if (bBuildCpuFallbackVertices)
+						AppendSkinFallbackVertices(mesh, skinVertexStart, sourceScale);
+					else
+						AppendSkinPlaceholderVertices(mesh, skinVertexStart, sourceScale);
 					AppendAttachmentIndices(mesh, baseVertex, attachment->triangles, attachment->trianglesCount);
 					AppendSpineDrawRange(mesh, baseVertex, indexStart);
 				}
@@ -640,7 +691,12 @@ Corona::ScriptSceneHandle Corona::CreateSpineSceneForScript(
 	}
 	spSkeleton_updateWorldTransform(skeleton.get());
 
-	SpineSampleMesh sampleMesh = BuildSpineSampleMesh(skeleton.get(), safeSourceScale);
+#if CORONA_PLATFORM_MOBILE
+	const bool bRequestGpuSpineSkinning = false;
+#else
+	const bool bRequestGpuSpineSkinning = bEnableGpuSpineSkinning;
+#endif
+	SpineSampleMesh sampleMesh = BuildSpineSampleMesh(skeleton.get(), safeSourceScale, !bRequestGpuSpineSkinning);
 	if (sampleMesh.Vertices.empty() || sampleMesh.Indices.empty())
 	{
 		AppendCpuRuntimeTrace(L"[SpineComponent] skeleton produced no drawable mesh: " + skeletonPath.wstring());
@@ -649,8 +705,9 @@ Corona::ScriptSceneHandle Corona::CreateSpineSceneForScript(
 
 	auto material = std::make_shared<Material>();
 	material->bHasAlpha = true;
-	// Spine renders unlit; show diffuse texture color as-is (no boost).
-	material->BaseColorFactor = glm::vec4(1.0f, 1.0f, 1.0f, 1.0f);
+	// Spine renders unlit. Give sprite textures a small post-tonemap headroom
+	// boost so character art does not read darker than the source on DX12.
+	material->BaseColorFactor = glm::vec4(1.22f, 1.22f, 1.22f, 1.0f);
 	material->Diffuse = runtimeAsset->DiffuseTexture ? runtimeAsset->DiffuseTexture : DefaultWhiteTex;
 	material->Normal = DefaultNormalTex;
 	material->Roughness = DefaultRougnessTex;
@@ -680,7 +737,8 @@ Corona::ScriptSceneHandle Corona::CreateSpineSceneForScript(
 	// and draw the CPU-skinned mesh->Vb through the standard vertex-
 	// attribute path. Desktop keeps the compute path for performance.
 #if !CORONA_PLATFORM_MOBILE
-	if (sampleMesh.SkinVertices.size() == sampleMesh.Vertices.size() &&
+	if (bEnableGpuSpineSkinning &&
+		sampleMesh.SkinVertices.size() == sampleMesh.Vertices.size() &&
 		!sampleMesh.SkinVertices.empty() &&
 		!sampleMesh.SkinInfluences.empty() &&
 		!sampleMesh.SkinBones.empty())
@@ -780,6 +838,9 @@ Corona::ScriptSceneHandle Corona::CreateSpineSceneForScript(
 		L" mesh=" + std::to_wstring(sampleMesh.MeshAttachmentCount) +
 		L" weightedmesh=" + std::to_wstring(sampleMesh.WeightedMeshAttachmentCount) +
 		L" gpu_skin=" + std::to_wstring(mesh->bGpuSpineSkinned ? 1 : 0) +
+		L" cpu_fallback_skin=" + std::to_wstring(sampleMesh.CpuFallbackVertexCount > 0 ? 1 : 0) +
+		L" cpu_fallback_vertices=" + std::to_wstring(sampleMesh.CpuFallbackVertexCount) +
+		L" gpu_placeholder_vertices=" + std::to_wstring(sampleMesh.GpuPlaceholderVertexCount) +
 		L" skin_influences=" + std::to_wstring(sampleMesh.SkinInfluences.size()) +
 		L" bones=" + std::to_wstring(sampleMesh.SkinBones.size()) +
 		L" diffuse=" + runtimeAsset->DiffusePath.wstring() +

@@ -2759,6 +2759,65 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 			bCommandLineDungeonCharacterMode = false;
 			continue;
 		}
+		if (arg == L"--platformer-spine-benchmark" || arg == L"--spine-benchmark")
+		{
+			bStartupSponzaFlyMode = false;
+			bEnableStartupLuauScript = true;
+			StartupLuauMode = L"platformer";
+			bCommandLineDungeonCharacterMode = false;
+			bCommandLinePlatformerSpineBenchmark = true;
+			continue;
+		}
+		std::wstring spineBenchmarkCountValue = ParseValueArg(arg, L"--platformer-spine-benchmark-count", L"-platformer-spine-benchmark-count", i);
+		if (spineBenchmarkCountValue.empty())
+			spineBenchmarkCountValue = ParseValueArg(arg, L"--spine-benchmark-count", L"-spine-benchmark-count", i);
+		if (!spineBenchmarkCountValue.empty())
+		{
+			try
+			{
+				const unsigned long value = std::stoul(spineBenchmarkCountValue);
+				CommandLinePlatformerSpineBenchmarkCount = static_cast<UINT32>(std::clamp<unsigned long>(value, 1ul, 200ul));
+				bCommandLinePlatformerSpineBenchmark = true;
+				bStartupSponzaFlyMode = false;
+				bEnableStartupLuauScript = true;
+				StartupLuauMode = L"platformer";
+				bCommandLineDungeonCharacterMode = false;
+			}
+			catch (...)
+			{
+			}
+			continue;
+		}
+		if (arg == L"--spine-skinning-cpu" || arg == L"--cpu-spine-skinning" || arg == L"--disable-spine-compute-skinning")
+		{
+			bCommandLineSpineSkinningOverrideSet = true;
+			bCommandLineSpineGpuSkinningEnabled = false;
+			bEnableGpuSpineSkinning = false;
+			continue;
+		}
+		if (arg == L"--spine-skinning-compute" || arg == L"--gpu-spine-skinning" || arg == L"--enable-spine-compute-skinning")
+		{
+			bCommandLineSpineSkinningOverrideSet = true;
+			bCommandLineSpineGpuSkinningEnabled = true;
+			bEnableGpuSpineSkinning = true;
+			continue;
+		}
+		std::wstring spineSkinningValue = ParseValueArg(arg, L"--spine-skinning", L"-spine-skinning", i);
+		if (!spineSkinningValue.empty())
+		{
+			bCommandLineSpineSkinningOverrideSet = true;
+			if (spineSkinningValue == L"cpu" || spineSkinningValue == L"fallback" || spineSkinningValue == L"off")
+			{
+				bCommandLineSpineGpuSkinningEnabled = false;
+				bEnableGpuSpineSkinning = false;
+			}
+			else
+			{
+				bCommandLineSpineGpuSkinningEnabled = true;
+				bEnableGpuSpineSkinning = true;
+			}
+			continue;
+		}
 		if (arg == L"--dungeon-character" || arg == L"--dungeon" || arg == L"--dungeon-mode")
 		{
 			bStartupSponzaFlyMode = false;
@@ -3589,6 +3648,9 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 		L", specularSequenceDump=" + std::to_wstring(bCommandLineSpecularSequenceDumpMode ? 1 : 0) +
 		L", autoDumpFrames=" + std::to_wstring(AutoAADumpFrameCountOverride) +
 		L", exitAfterFrames=" + std::to_wstring(CommandLineExitAfterFrames) +
+		L", spineGpuSkinning=" + std::to_wstring(bEnableGpuSpineSkinning ? 1 : 0) +
+		L", platformerSpineBenchmark=" + std::to_wstring(bCommandLinePlatformerSpineBenchmark ? 1 : 0) +
+		L", platformerSpineBenchmarkCount=" + std::to_wstring(CommandLinePlatformerSpineBenchmarkCount) +
 		L", cameraPathDump=" + std::to_wstring(bCommandLineCameraPathDump ? 1 : 0) +
 		L", cameraPathDiagnostics=" + std::to_wstring(bCommandLineCameraPathDiagnostics ? 1 : 0) +
 		L", ptDLSSRR=" + std::to_wstring(bEnablePathTracingDLSSRR ? 1 : 0) +
@@ -6233,12 +6295,26 @@ void Corona::SaveSceneState()
 		}
 		return true;
 	};
+	auto isTransientBenchmarkControl = [](const std::string& name)
+	{
+		return
+			name == "platformer.spineSkinningBenchmark" ||
+			name == "platformer.spineSkinningBenchmarkCharacterCount" ||
+			name == "platformer.spineSkinningBenchmarkSampleFps" ||
+			name == "platformer.startInMenu" ||
+			name == "platformer.showHud" ||
+			name == "platformer.enemyStreaming" ||
+			name == "platformer.maxSceneSamplesPerFrame" ||
+			name == "platformer.deferSpineSamplingWhileStreamingSeconds";
+	};
 
 	file << std::fixed << std::setprecision(9);
 	file << "version 1\n";
 	for (const auto& [name, value] : PersistentScriptControls)
 	{
 		if (!isSafeControlName(name))
+			continue;
+		if (bCommandLinePlatformerSpineBenchmark && isTransientBenchmarkControl(name))
 			continue;
 
 		switch (value.Type)
@@ -7145,9 +7221,21 @@ void Corona::OnInit()
 			controlValue.Bool = value;
 			PersistentScriptControls[name] = controlValue;
 		};
+		auto setScriptNumberOverride = [this](const std::string& name, float value)
+		{
+			PersistentScriptControlValue controlValue;
+			controlValue.Type = PersistentScriptControlType::Number;
+			controlValue.Number = value;
+			PersistentScriptControls[name] = controlValue;
+		};
 
 		if (bCommandLineDungeonCharacterMode)
 			StartupLuauMode = L"dungeon";
+		if (bCommandLinePlatformerSpineBenchmark)
+		{
+			StartupLuauMode = L"platformer";
+			bCommandLineDungeonCharacterMode = false;
+		}
 		if (StartupLuauMode != L"dungeon" && StartupLuauMode != L"sandbox")
 			StartupLuauMode = L"platformer";
 
@@ -7155,6 +7243,16 @@ void Corona::OnInit()
 		const bool bPlatformerStartupMode = StartupLuauMode == L"platformer";
 		setScriptBoolOverride("platformer.enabled", bPlatformerStartupMode);
 		setScriptBoolOverride("dungeon.enabled", bDungeonStartupMode);
+		if (bCommandLinePlatformerSpineBenchmark)
+		{
+			setScriptBoolOverride("platformer.spineSkinningBenchmark", true);
+			setScriptNumberOverride("platformer.spineSkinningBenchmarkCharacterCount", static_cast<float>(CommandLinePlatformerSpineBenchmarkCount));
+			setScriptBoolOverride("platformer.startInMenu", false);
+			setScriptBoolOverride("platformer.showHud", false);
+			setScriptBoolOverride("platformer.enemyStreaming", false);
+			setScriptNumberOverride("platformer.maxSceneSamplesPerFrame", static_cast<float>(std::max<UINT32>(CommandLinePlatformerSpineBenchmarkCount, 64u)));
+			setScriptNumberOverride("platformer.deferSpineSamplingWhileStreamingSeconds", 0.0f);
+		}
 		bStartupSponzaFlyMode = false;
 	}
 	UpdateMainDirectionalLightEntityFromState();
@@ -7767,7 +7865,7 @@ shared_ptr<Texture> Corona::GetProceduralBoxDiffuseTexture(const std::wstring& t
 	return texture;
 }
 
-shared_ptr<Scene> Corona::CreateProceduralBoxScene(const glm::vec3& baseColor, bool bUseBrickTexture, float uvRepeat, const std::wstring& textureKind)
+shared_ptr<Scene> Corona::CreateProceduralBoxScene(const glm::vec3& baseColor, bool bUseBrickTexture, float uvRepeat, const std::wstring& textureKind, float uvRepeatY, bool bFrontOnly)
 {
 	if (!renderBackend)
 		return nullptr;
@@ -7797,21 +7895,33 @@ shared_ptr<Scene> Corona::CreateProceduralBoxScene(const glm::vec3& baseColor, b
 		{ glm::vec3( 0.0f,  1.0f,  0.0f), glm::vec3( 1.0f,  0.0f,  0.0f), { glm::vec3(-kHalfExtent,  kHalfExtent,  kHalfExtent), glm::vec3( kHalfExtent,  kHalfExtent,  kHalfExtent), glm::vec3( kHalfExtent,  kHalfExtent, -kHalfExtent), glm::vec3(-kHalfExtent,  kHalfExtent, -kHalfExtent) } },
 		{ glm::vec3( 0.0f, -1.0f,  0.0f), glm::vec3( 1.0f,  0.0f,  0.0f), { glm::vec3(-kHalfExtent, -kHalfExtent, -kHalfExtent), glm::vec3( kHalfExtent, -kHalfExtent, -kHalfExtent), glm::vec3( kHalfExtent, -kHalfExtent,  kHalfExtent), glm::vec3(-kHalfExtent, -kHalfExtent,  kHalfExtent) } },
 	};
+	const CubeFace frontOnlyFace =
+	{
+		glm::vec3(0.0f, 0.0f, -1.0f),
+		glm::vec3(1.0f, 0.0f, 0.0f),
+		{
+			glm::vec3(-kHalfExtent, -kHalfExtent, -kHalfExtent),
+			glm::vec3( kHalfExtent, -kHalfExtent, -kHalfExtent),
+			glm::vec3( kHalfExtent,  kHalfExtent, -kHalfExtent),
+			glm::vec3(-kHalfExtent,  kHalfExtent, -kHalfExtent)
+		}
+	};
 
 	std::vector<Vertex> vertices;
-	vertices.reserve(24);
+	vertices.reserve(bFrontOnly ? 4 : 24);
 	std::vector<UINT32> indices;
-	indices.reserve(36);
-	const float safeUvRepeat = std::clamp(uvRepeat, 1.0f, 64.0f);
+	indices.reserve(bFrontOnly ? 6 : 36);
+	const float safeUvRepeatX = std::clamp(uvRepeat, 1.0f, 64.0f);
+	const float safeUvRepeatY = std::clamp(uvRepeatY > 0.0f ? uvRepeatY : uvRepeat, 1.0f, 64.0f);
 	const glm::vec2 uvs[] =
 	{
-		glm::vec2(0.0f, safeUvRepeat),
-		glm::vec2(safeUvRepeat, safeUvRepeat),
-		glm::vec2(safeUvRepeat, 0.0f),
+		glm::vec2(0.0f, safeUvRepeatY),
+		glm::vec2(safeUvRepeatX, safeUvRepeatY),
+		glm::vec2(safeUvRepeatX, 0.0f),
 		glm::vec2(0.0f, 0.0f),
 	};
 
-	for (const CubeFace& face : faces)
+	auto appendFace = [&](const CubeFace& face)
 	{
 		const UINT32 baseVertex = static_cast<UINT32>(vertices.size());
 		for (UINT32 vertexIndex = 0; vertexIndex < 4; ++vertexIndex)
@@ -7830,6 +7940,16 @@ shared_ptr<Scene> Corona::CreateProceduralBoxScene(const glm::vec3& baseColor, b
 		indices.push_back(baseVertex + 0);
 		indices.push_back(baseVertex + 2);
 		indices.push_back(baseVertex + 3);
+	};
+
+	if (bFrontOnly)
+	{
+		appendFace(frontOnlyFace);
+	}
+	else
+	{
+		for (const CubeFace& face : faces)
+			appendFace(face);
 	}
 
 	shared_ptr<Material> material = std::make_shared<Material>();
@@ -8715,7 +8835,14 @@ void Corona::LoadAssets()
 	if (bVulkanHybridStartup)
 		AppendCpuRuntimeTrace(L"[LoadAssets] after default textures");
 
-	if (!bMobileDungeonOnlyStartup)
+	const bool bGameplayStartupMode =
+		bEnableStartupLuauScript &&
+		(StartupLuauMode.empty() ||
+		 StartupLuauMode == L"platformer" ||
+		 StartupLuauMode == L"dungeon" ||
+		 bCommandLineDungeonCharacterMode);
+
+	if (!bMobileDungeonOnlyStartup && !bGameplayStartupMode)
 	{
 		UpdateStartupLoadingProgress(0.72f, L"Loading Sponza scene");
 		if (!Sponza) Sponza = LoadModel(WideToUtf8(GetAssetFullPath(L"assets\\Sponza\\Sponza.fbx")));
@@ -8734,8 +8861,8 @@ void Corona::LoadAssets()
 	}
 	else
 	{
-		UpdateStartupLoadingProgress(0.72f, L"Preparing dungeon scene");
-		AppendCpuRuntimeTrace(L"[LoadAssets] mobile dungeon-only: skipped Sponza load");
+		UpdateStartupLoadingProgress(0.72f, L"Preparing startup scene");
+		AppendCpuRuntimeTrace(L"[LoadAssets] startup gameplay mode: skipped Sponza load");
 	}
 
 	const bool bLoadStandaloneDemoObjects = !bMobileDungeonOnlyStartup && !bEnableStartupLuauScript && !bStartupSponzaFlyMode;
@@ -8787,12 +8914,12 @@ void Corona::LoadAssets()
 			PistolCenterRotationDegrees);
 	}
 
-	if (!bMobileDungeonOnlyStartup && !bStartupSponzaFlyMode && !MirrorCube)
+	if (bLoadStandaloneDemoObjects && !MirrorCube)
 	{
 		UpdateStartupLoadingProgress(0.80f, L"Creating mirror cube");
 		MirrorCube = CreateMirrorCubeScene();
 	}
-	if (!bMobileDungeonOnlyStartup && !bStartupSponzaFlyMode && MirrorCube && MirrorCubeObject == InvalidSceneObjectHandle)
+	if (bLoadStandaloneDemoObjects && MirrorCube && MirrorCubeObject == InvalidSceneObjectHandle)
 	{
 		MirrorCubeObject = AddCenteredSceneObject(
 			MirrorCube,
@@ -9895,6 +10022,14 @@ void Corona::OnUpdate()
 	FinishCpuUpdateTiming(updateStart, CpuClock::now());
 }
 
+double Corona::GetTargetFrameRateLimitHz() const
+{
+	if (bEnableStartupLuauScript && StartupLuauMode == L"platformer")
+		return 60.0;
+
+	return 0.0;
+}
+
 void Corona::UpdateMobileTouchCameraInput(float elapsedSeconds)
 {
 	(void)elapsedSeconds;
@@ -10243,9 +10378,15 @@ void Corona::OnRender()
 	if (renderingModeThisFrame == ERenderingMode::HYBRID)
 	{
 		const bool bMobileHybridDirectOnly = CORONA_PLATFORM_MOBILE;
-		const bool bStageDump = !bMobileHybridDirectOnly && IsHybridStageAutoDumpPhase();
+#if CORONA_PLATFORM_MOBILE
+		const bool bPlatformerHybridDirectOnly = false;
+#else
+		const bool bPlatformerHybridDirectOnly = StartupLuauMode == L"platformer";
+#endif
+		const bool bHybridDirectOnly = bMobileHybridDirectOnly || bPlatformerHybridDirectOnly;
+		const bool bStageDump = !bHybridDirectOnly && IsHybridStageAutoDumpPhase();
 		const uint32_t maxSupportedHybridStage =
-			bMobileHybridDirectOnly ? 7u :
+			bHybridDirectOnly ? 7u :
 			(renderBackend ? renderBackend->GetMaxSupportedHybridStage() : 7u);
 		const uint32_t requestedHybridStage = bStageDump ? AutoAADumpPhase : 7u;
 		const uint32_t hybridStage = std::min(requestedHybridStage, maxSupportedHybridStage);
@@ -10260,10 +10401,10 @@ void Corona::OnRender()
 			bMobileHybridDirectOnly &&
 			MobileShadowMapGraphicsPipeline &&
 			ShadowBuffer;
-		const bool bRunRayTracedShadow = !bMobileHybridDirectOnly && hybridStage >= 1;
-		const bool bRunReflection = !bMobileHybridDirectOnly && hybridStage >= 3;
-		const bool bRunGI = !bMobileHybridDirectOnly && hybridStage >= 4;
-		const bool bRunTemporalDenoise = !bMobileHybridDirectOnly && hybridStage >= 5;
+		const bool bRunRayTracedShadow = !bHybridDirectOnly && hybridStage >= 1;
+		const bool bRunReflection = !bHybridDirectOnly && hybridStage >= 3;
+		const bool bRunGI = !bHybridDirectOnly && hybridStage >= 4;
+		const bool bRunTemporalDenoise = !bHybridDirectOnly && hybridStage >= 5;
 		const bool bRunLighting = hybridStage >= 7;
 		const bool bVulkanHybridBackend =
 			renderBackend &&
@@ -10287,14 +10428,14 @@ void Corona::OnRender()
 			EndGpuPassTiming(EGpuPass::RaytraceShadow);
 		}
 
-		if (!bMobileHybridDirectOnly && bRunLighting && bEnableRTAO)
+		if (!bHybridDirectOnly && bRunLighting && bEnableRTAO)
 		{
 			BeginGpuPassTiming(EGpuPass::RaytraceAO);
 			RaytraceAOPass();
 			EndGpuPassTiming(EGpuPass::RaytraceAO);
 		}
 
-		if (!bMobileHybridDirectOnly && bRunLighting && bEnableSkyLighting && bEnableRayTracedSkyLighting)
+		if (!bHybridDirectOnly && bRunLighting && bEnableSkyLighting && bEnableRayTracedSkyLighting)
 		{
 			BeginGpuPassTiming(EGpuPass::RaytraceSkyLighting);
 			RaytraceSkyLightingPass();

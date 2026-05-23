@@ -21,6 +21,7 @@
 #include <cwchar>
 #include <filesystem>
 #include <fstream>
+#include <thread>
 
 namespace
 {
@@ -46,6 +47,30 @@ namespace
 		RECT clientRect = {};
 		GetClientRect(hWnd, &clientRect);
 		FillRect(hdc, &clientRect, GetStartupBackgroundBrush());
+	}
+
+	std::chrono::steady_clock::duration GetFrameRateLimitInterval(const Corona* app)
+	{
+		if (!app)
+			return std::chrono::steady_clock::duration::zero();
+
+		const double targetHz = app->GetTargetFrameRateLimitHz();
+		if (!(targetHz > 0.0))
+			return std::chrono::steady_clock::duration::zero();
+
+		return std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+			std::chrono::duration<double>(1.0 / targetHz));
+	}
+
+	void SleepForFrameRateLimit(const Corona* app, std::chrono::steady_clock::time_point frameStart)
+	{
+		const std::chrono::steady_clock::duration targetInterval = GetFrameRateLimitInterval(app);
+		if (targetInterval <= std::chrono::steady_clock::duration::zero())
+			return;
+
+		const auto elapsed = std::chrono::steady_clock::now() - frameStart;
+		if (elapsed < targetInterval)
+			std::this_thread::sleep_for(targetInterval - elapsed);
 	}
 }
 
@@ -149,7 +174,9 @@ int Win32Application::Run(Corona* app, HINSTANCE hInstance, int nCmdShow)
 		}
 		else if (app)
 		{
+			const auto frameStart = std::chrono::steady_clock::now();
 			app->RenderThreadTick();
+			SleepForFrameRateLimit(app, frameStart);
 		}
 	}
 
