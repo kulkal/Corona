@@ -377,12 +377,34 @@ private:
 	uint32_t CurrentFrameIndex = 0;
 
 #if CORONA_HAS_VULKAN
+	// Phase 3.5 (Vulkan): large HOST_VISIBLE block sub-allocated by
+	// CreateUploadVertexBuffer / CreateUploadIndexBuffer. One persistent
+	// mapping, bump-allocate cursor, combined VERTEX+INDEX buffer usage so
+	// the same backing VkBuffer serves both APIs.
+	struct VulkanUploadHeapBlock
+	{
+		VkDevice OwningDevice = VK_NULL_HANDLE;
+		VkBuffer Buffer = VK_NULL_HANDLE;
+		VkDeviceMemory Memory = VK_NULL_HANDLE;
+		uint8_t* MappedBase = nullptr;
+		VkDeviceSize Capacity = 0;
+		VkDeviceSize Cursor = 0;
+		~VulkanUploadHeapBlock();
+	};
+
 	struct VulkanBufferAllocation
 	{
 		VkBuffer Buffer = VK_NULL_HANDLE;
 		VkDeviceMemory Memory = VK_NULL_HANDLE;
 		uint32_t Stride = 0;
 		uint32_t SizeInBytes = 0;
+		VkDeviceSize Offset = 0;
+		// Phase 3.5 (Vulkan): non-null only when this allocation came from
+		// the HOST_VISIBLE upload pool. Holding a shared_ptr keeps the
+		// pool block alive until every sub-allocation that referenced it
+		// has been released — Buffer/Memory above are non-owning views
+		// into that block in this case.
+		std::shared_ptr<VulkanUploadHeapBlock> PoolBlock;
 	};
 
 	struct VulkanTextureAllocation
@@ -477,6 +499,26 @@ private:
 	uint32_t TransientUniformFrameCount = 0;
 	VkDeviceSize UniformBufferAlignment = 256;
 	VkDeviceSize MaxUniformBufferRange = 0;
+
+	// Phase 3.5 (Vulkan) — UPLOAD-heap-style sub-allocator that mirrors the
+	// DX12 path. Returns a sub-range of a persistent HOST_VISIBLE block
+	// suitable for raster VB/IB binding; the block stays alive via the
+	// returned allocation's PoolBlock shared_ptr.
+	bool AllocateUploadBufferRange(
+		VkDeviceSize size,
+		VkDeviceSize alignment,
+		const void* srcData,
+		VulkanBufferAllocation& outAllocation);
+
+	// Phase 3.5 (Vulkan) upload pool state. ActiveUploadBlock is the
+	// current bump-target; retired blocks stay alive via outstanding
+	// VulkanBufferAllocation::PoolBlock shared_ptrs.
+	std::shared_ptr<VulkanUploadHeapBlock> ActiveUploadBlock;
+	VkDeviceSize UploadBlockDefaultSize = 16ull * 1024ull * 1024ull;
+	uint32_t UploadBlockCount = 0;
+	uint32_t UploadAllocationCount = 0;
+	uint64_t UploadBytesIssued = 0;
+	uint64_t UploadBytesReserved = 0;
 	uint64_t TransientUniformOverflowCount = 0;
 	std::unordered_map<Buffer*, VulkanBufferAllocation> BufferAllocations;
 	std::unordered_map<VertexBuffer*, VulkanBufferAllocation> VertexBufferAllocations;

@@ -3569,22 +3569,203 @@ std::shared_ptr<IndexBuffer> VulkanBackend::CreateIndexBuffer(EIndexFormat forma
 #endif
 }
 
-// Vulkan upload-buffer fallback: defer to the existing staged-upload paths
-// for now. The mobile Adreno staging path is its own optimization
-// milestone — a follow-up patch will swap these for a HOST_VISIBLE
-// direct-write variant to mirror the DX12 UPLOAD-heap shortcut.
+// Phase 3.5 (Vulkan) — HOST_VISIBLE direct-write upload pool. Sub-allocates
+// VB/IB ranges from a large persistent VkBuffer, eliminating the staged
+// copy path's per-call vkQueueSubmit + vkQueueWaitIdle. On Adreno's
+// unified-memory architecture, HOST_VISIBLE | HOST_COHERENT reads from
+// the GPU are essentially free, so the trade-off is strictly favourable
+// for many small per-frame buffers like Spine sprite geometry.
+//
+// Lifetime: the pool keeps `ActiveUploadBlock` as a bump-target. Each
+// VulkanBufferAllocation that came from the pool holds a shared_ptr to
+// its block via `PoolBlock`. When the block fills, a new block is
+// committed; the old one stays alive automatically while any sub-alloc
+// still references it. The block destructor unmaps, frees memory, and
+// destroys the VkBuffer.
+VulkanBackend::VulkanUploadHeapBlock::~VulkanUploadHeapBlock()
+{
+#if CORONA_HAS_VULKAN
+	if (OwningDevice == VK_NULL_HANDLE)
+		return;
+	if (MappedBase != nullptr && Memory != VK_NULL_HANDLE)
+		vkUnmapMemory(OwningDevice, Memory);
+	if (Buffer != VK_NULL_HANDLE)
+		vkDestroyBuffer(OwningDevice, Buffer, nullptr);
+	if (Memory != VK_NULL_HANDLE)
+		vkFreeMemory(OwningDevice, Memory, nullptr);
+	OwningDevice = VK_NULL_HANDLE;
+	Buffer = VK_NULL_HANDLE;
+	Memory = VK_NULL_HANDLE;
+	MappedBase = nullptr;
+#endif
+}
+
+bool VulkanBackend::AllocateUploadBufferRange(
+	VkDeviceSize size,
+	VkDeviceSize alignment,
+	const void* srcData,
+	VulkanBufferAllocation& outAllocation)
+{
+	outAllocation = {};
+#if !CORONA_HAS_VULKAN
+	(void)size; (void)alignment; (void)srcData;
+	return false;
+#else
+	if (size == 0)
+		return false;
+	if (alignment == 0)
+		alignment = 4;
+
+	auto tryAllocateFromActive = [&]() -> bool
+	{
+		if (!ActiveUploadBlock)
+			return false;
+		VulkanUploadHeapBlock& block = *ActiveUploadBlock;
+		const VkDeviceSize alignedCursor = (block.Cursor + alignment - 1) & ~(alignment - 1);
+		if (alignedCursor + size > block.Capacity)
+			return false;
+		outAllocation.Buffer = block.Buffer;
+		outAllocation.Memory = block.Memory;
+		outAllocation.Offset = alignedCursor;
+		outAllocation.SizeInBytes = static_cast<uint32_t>(size);
+		outAllocation.PoolBlock = ActiveUploadBlock;
+		if (srcData)
+			std::memcpy(block.MappedBase + alignedCursor, srcData, static_cast<size_t>(size));
+		block.Cursor = alignedCursor + size;
+		++UploadAllocationCount;
+		UploadBytesIssued += size;
+		return true;
+	};
+
+	if (tryAllocateFromActive())
+		return true;
+
+	// Need a new block. Size to at least this request + alignment padding.
+	const VkDeviceSize requestedSize = size + alignment;
+	const VkDeviceSize blockSize = std::max<VkDeviceSize>(UploadBlockDefaultSize, requestedSize);
+
+	auto newBlock = std::make_shared<VulkanUploadHeapBlock>();
+	newBlock->OwningDevice = Device;
+	newBlock->Capacity = blockSize;
+
+	VkBufferCreateInfo bufferInfo{};
+	bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+	bufferInfo.size = blockSize;
+	// The block backs both VBs and IBs; combine the usage flags.
+	bufferInfo.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
+	bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+	if (vkCreateBuffer(Device, &bufferInfo, nullptr, &newBlock->Buffer) != VK_SUCCESS)
+		return false;
+
+	VkMemoryRequirements memReq{};
+	vkGetBufferMemoryRequirements(Device, newBlock->Buffer, &memReq);
+
+	// HOST_VISIBLE | HOST_COHERENT — readable by the GPU without explicit
+	// flush, writable by the CPU via persistent mapping. Skip
+	// HOST_CACHED so writes go straight to GPU-visible memory.
+	uint32_t memoryTypeIndex = UINT32_MAX;
+	VkPhysicalDeviceMemoryProperties memProps{};
+	vkGetPhysicalDeviceMemoryProperties(PhysicalDevice, &memProps);
+	const VkMemoryPropertyFlags wantProps =
+		VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+	for (uint32_t i = 0; i < memProps.memoryTypeCount; ++i)
+	{
+		if (!(memReq.memoryTypeBits & (1u << i)))
+			continue;
+		if ((memProps.memoryTypes[i].propertyFlags & wantProps) == wantProps)
+		{
+			memoryTypeIndex = i;
+			break;
+		}
+	}
+	if (memoryTypeIndex == UINT32_MAX)
+	{
+		vkDestroyBuffer(Device, newBlock->Buffer, nullptr);
+		newBlock->Buffer = VK_NULL_HANDLE;
+		return false;
+	}
+
+	VkMemoryAllocateInfo allocInfo{};
+	allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+	allocInfo.allocationSize = memReq.size;
+	allocInfo.memoryTypeIndex = memoryTypeIndex;
+	if (vkAllocateMemory(Device, &allocInfo, nullptr, &newBlock->Memory) != VK_SUCCESS)
+	{
+		vkDestroyBuffer(Device, newBlock->Buffer, nullptr);
+		newBlock->Buffer = VK_NULL_HANDLE;
+		return false;
+	}
+	if (vkBindBufferMemory(Device, newBlock->Buffer, newBlock->Memory, 0) != VK_SUCCESS)
+	{
+		vkFreeMemory(Device, newBlock->Memory, nullptr);
+		vkDestroyBuffer(Device, newBlock->Buffer, nullptr);
+		newBlock->Memory = VK_NULL_HANDLE;
+		newBlock->Buffer = VK_NULL_HANDLE;
+		return false;
+	}
+
+	void* mapped = nullptr;
+	if (vkMapMemory(Device, newBlock->Memory, 0, VK_WHOLE_SIZE, 0, &mapped) != VK_SUCCESS)
+	{
+		vkFreeMemory(Device, newBlock->Memory, nullptr);
+		vkDestroyBuffer(Device, newBlock->Buffer, nullptr);
+		newBlock->Memory = VK_NULL_HANDLE;
+		newBlock->Buffer = VK_NULL_HANDLE;
+		return false;
+	}
+	newBlock->MappedBase = static_cast<uint8_t*>(mapped);
+	newBlock->Cursor = 0;
+
+	ActiveUploadBlock = std::move(newBlock);
+	++UploadBlockCount;
+	UploadBytesReserved += blockSize;
+
+	return tryAllocateFromActive();
+#endif
+}
+
 std::shared_ptr<VertexBuffer> VulkanBackend::CreateUploadVertexBuffer(uint32_t size, uint32_t stride, const void* srcData)
 {
 	if (size == 0)
 		return nullptr;
-	return CreateVertexBuffer(size, stride, const_cast<void*>(srcData));
+#if !CORONA_HAS_VULKAN
+	(void)stride; (void)srcData;
+	return nullptr;
+#else
+	VulkanBufferAllocation allocation{};
+	const VkDeviceSize align = stride > 0 ? stride : 4;
+	if (!AllocateUploadBufferRange(size, align, srcData, allocation))
+		return nullptr;
+
+	allocation.Stride = stride;
+
+	auto* vb = new VertexBuffer();
+	vb->numVertices = stride > 0 ? static_cast<int>(size / stride) : 0;
+	VertexBufferAllocations[vb] = allocation;
+	return std::shared_ptr<VertexBuffer>(vb);
+#endif
 }
 
 std::shared_ptr<IndexBuffer> VulkanBackend::CreateUploadIndexBuffer(EIndexFormat format, uint32_t size, const void* srcData)
 {
 	if (size == 0)
 		return nullptr;
-	return CreateIndexBuffer(format, size, const_cast<void*>(srcData));
+#if !CORONA_HAS_VULKAN
+	(void)format; (void)srcData;
+	return nullptr;
+#else
+	VulkanBufferAllocation allocation{};
+	const VkDeviceSize align = format == EIndexFormat::U16 ? 2u : 4u;
+	if (!AllocateUploadBufferRange(size, align, srcData, allocation))
+		return nullptr;
+
+	allocation.Stride = format == EIndexFormat::U16 ? 2u : 4u;
+
+	auto* ib = new IndexBuffer();
+	ib->numIndices = format == EIndexFormat::U16 ? static_cast<int>(size / 2) : static_cast<int>(size / 4);
+	IndexBufferAllocations[ib] = allocation;
+	return std::shared_ptr<IndexBuffer>(ib);
+#endif
 }
 
 std::shared_ptr<RTAS> VulkanBackend::CreateBLASForMesh(Mesh* mesh)
@@ -4963,11 +5144,11 @@ void VulkanBackend::BindMeshBuffers(VertexBuffer* vertexBuffer, IndexBuffer* ind
 		return;
 	}
 
-	const VkDeviceSize offsets[] = { 0 };
+	const VkDeviceSize vbOffsets[] = { vbIt->second.Offset };
 	BoundVertexBuffer = vbIt->second.Buffer;
 	BoundIndexBuffer = ibIt->second.Buffer;
-	vkCmdBindVertexBuffers(ActiveCommandBuffer, 0, 1, &BoundVertexBuffer, offsets);
-	vkCmdBindIndexBuffer(ActiveCommandBuffer, BoundIndexBuffer, 0, ibIt->second.Stride == 2 ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32);
+	vkCmdBindVertexBuffers(ActiveCommandBuffer, 0, 1, &BoundVertexBuffer, vbOffsets);
+	vkCmdBindIndexBuffer(ActiveCommandBuffer, BoundIndexBuffer, ibIt->second.Offset, ibIt->second.Stride == 2 ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32);
 	static bool bLoggedFirstMeshBufferBind = false;
 	if (!bLoggedFirstMeshBufferBind)
 	{
@@ -5331,6 +5512,11 @@ void VulkanBackend::DestroyWindowContext()
 	DestroyTransientUniformBuffer();
 	for (auto& entry : VertexBufferAllocations)
 	{
+		// Pool-backed allocations share the block's VkBuffer/VkDeviceMemory;
+		// the block's destructor frees them when its shared_ptr refcount
+		// hits zero. Skip explicit cleanup here for those entries.
+		if (entry.second.PoolBlock)
+			continue;
 		if (entry.second.Buffer != VK_NULL_HANDLE)
 			vkDestroyBuffer(Device, entry.second.Buffer, nullptr);
 		if (entry.second.Memory != VK_NULL_HANDLE)
@@ -5338,11 +5524,16 @@ void VulkanBackend::DestroyWindowContext()
 	}
 	for (auto& entry : IndexBufferAllocations)
 	{
+		if (entry.second.PoolBlock)
+			continue;
 		if (entry.second.Buffer != VK_NULL_HANDLE)
 			vkDestroyBuffer(Device, entry.second.Buffer, nullptr);
 		if (entry.second.Memory != VK_NULL_HANDLE)
 			vkFreeMemory(Device, entry.second.Memory, nullptr);
 	}
+	// Drop the active block reference. Any pool-backed VB/IB still alive
+	// keeps its block alive via VulkanBufferAllocation::PoolBlock.
+	ActiveUploadBlock.reset();
 	for (auto& entry : BufferAllocations)
 	{
 		if (entry.second.Buffer != VK_NULL_HANDLE)
