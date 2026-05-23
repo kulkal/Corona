@@ -3568,6 +3568,25 @@ std::shared_ptr<IndexBuffer> VulkanBackend::CreateIndexBuffer(EIndexFormat forma
 	return std::shared_ptr<IndexBuffer>(indexBuffer);
 #endif
 }
+
+// Vulkan upload-buffer fallback: defer to the existing staged-upload paths
+// for now. The mobile Adreno staging path is its own optimization
+// milestone — a follow-up patch will swap these for a HOST_VISIBLE
+// direct-write variant to mirror the DX12 UPLOAD-heap shortcut.
+std::shared_ptr<VertexBuffer> VulkanBackend::CreateUploadVertexBuffer(uint32_t size, uint32_t stride, const void* srcData)
+{
+	if (size == 0)
+		return nullptr;
+	return CreateVertexBuffer(size, stride, const_cast<void*>(srcData));
+}
+
+std::shared_ptr<IndexBuffer> VulkanBackend::CreateUploadIndexBuffer(EIndexFormat format, uint32_t size, const void* srcData)
+{
+	if (size == 0)
+		return nullptr;
+	return CreateIndexBuffer(format, size, const_cast<void*>(srcData));
+}
+
 std::shared_ptr<RTAS> VulkanBackend::CreateBLASForMesh(Mesh* mesh)
 {
 	if (!mesh)

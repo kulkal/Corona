@@ -272,6 +272,17 @@ public:
 	virtual void UploadTexture3D(Texture* texture, const void* data, uint64_t rowPitch, uint64_t slicePitch) = 0;
 	virtual std::shared_ptr<VertexBuffer> CreateVertexBuffer(uint32_t size, uint32_t stride, void* srcData) = 0;
 	virtual std::shared_ptr<IndexBuffer> CreateIndexBuffer(EIndexFormat format, uint32_t size, void* srcData) = 0;
+	// Cheap creation path for short-lived, frequently-changing vertex/index
+	// data: allocate in an UPLOAD heap (DX12) / HOST_VISIBLE memory
+	// (Vulkan) and write through a CPU mapping. No staging copy, no
+	// ExecuteCommandList, no WaitGPU on creation. Returned buffers are
+	// immediately usable for drawing — the GPU reads through PCIe (DX12)
+	// or host-coherent memory (Vulkan), which is fine for sprite-scale or
+	// per-frame geometry. Anything driving many small CreateVertexBuffer /
+	// CreateIndexBuffer calls during gameplay (Spine sprites, dynamic
+	// debug meshes, immediate-mode UI, etc.) should prefer these.
+	virtual std::shared_ptr<VertexBuffer> CreateUploadVertexBuffer(uint32_t size, uint32_t stride, const void* srcData) = 0;
+	virtual std::shared_ptr<IndexBuffer> CreateUploadIndexBuffer(EIndexFormat format, uint32_t size, const void* srcData) = 0;
 	virtual std::shared_ptr<RTAS> CreateBLASForMesh(Mesh* mesh) = 0;
 	virtual std::shared_ptr<RTAS> CreateTLAS(const std::vector<RTInstanceDesc>& instances) = 0;
 	virtual bool UpdateTLAS(const std::shared_ptr<RTAS>& topLevelAS, const std::vector<RTInstanceDesc>& instances) = 0;

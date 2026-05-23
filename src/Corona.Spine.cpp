@@ -989,21 +989,29 @@ Corona::ScriptSceneHandle Corona::CreateSpineSceneForScript(
 	mesh->Textures.push_back(material->Diffuse);
 	{
 		SpineClipScopedTimer uploadTimer(&SpineStats.GpuUploadMs);
-		mesh->Vb = renderBackend->CreateVertexBuffer(
+		// Phase 3: use the generic upload-heap-only buffer path. This skips
+		// the per-call ExecuteCommandList + WaitGPU stall that was
+		// dominating the runtime CPU cost in the baseline (~3.66 ms/call
+		// from Phase 1 measurements). The CPU-skinning Spine pipeline
+		// binds VB/IB through BindMeshBuffers without requiring
+		// DEFAULT-heap residency, so a HOST_VISIBLE / UPLOAD-heap buffer
+		// suffices.
+		mesh->Vb = renderBackend->CreateUploadVertexBuffer(
 			static_cast<UINT32>(sizeof(SpineSampleVertex) * sampleMesh.Vertices.size()),
 			sizeof(SpineSampleVertex),
 			sampleMesh.Vertices.data());
-		mesh->Ib = renderBackend->CreateIndexBuffer(
+		mesh->Ib = renderBackend->CreateUploadIndexBuffer(
 			mesh->IndexFormat,
 			static_cast<UINT32>(sizeof(UINT32) * sampleMesh.Indices.size()),
 			sampleMesh.Indices.data());
 	}
 	SpineStats.RuntimeGpuBufferCreations += 2;
-	// This call site creates VB+IB synchronously during gameplay. Mirror it
-	// as an upload-stall candidate so the forbidden-path counter from the
-	// optimization plan has a concrete signal — Phase 3 will replace this
-	// with a dynamic ring buffer in the sprite batcher.
+	// Upload-heap path no longer issues ExecuteCommandList + WaitGPU on
+	// DX12. Mobile/Vulkan still uses the staged path until that backend
+	// gets its HOST_VISIBLE shortcut.
+#if CORONA_PLATFORM_MOBILE
 	++SpineStats.RuntimeGpuUploadStalls;
+#endif
 	// Adreno Vulkan stalls hard when running the Spine compute skinning
 	// pipeline. On mobile we skip the GPU skinning infrastructure entirely
 	// and draw the CPU-skinned mesh->Vb through the standard vertex-
