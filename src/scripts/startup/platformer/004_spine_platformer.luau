@@ -9,7 +9,7 @@ corona_script_controls.spine = corona_script_controls.spine or {}
 
 local controls = corona_script_controls.platformer
 
-local function platformer_persistent_default(name, value)
+function corona_platformer_platformer_persistent_default(name, value)
     if corona.get_persistent_control ~= nil then
         return corona.get_persistent_control("platformer." .. name, value)
     end
@@ -17,25 +17,25 @@ local function platformer_persistent_default(name, value)
 end
 
 if controls.enabled == nil then
-    controls.enabled = platformer_persistent_default("enabled", true)
+    controls.enabled = corona_platformer_platformer_persistent_default("enabled", true)
 end
 if controls.showHud == nil then
-    controls.showHud = platformer_persistent_default("showHud", true)
+    controls.showHud = corona_platformer_platformer_persistent_default("showHud", true)
 end
 if controls.enemyStreaming == nil then
-    controls.enemyStreaming = platformer_persistent_default("enemyStreaming", true)
+    controls.enemyStreaming = corona_platformer_platformer_persistent_default("enemyStreaming", true)
 end
 if controls.maxSceneSamplesPerFrame == nil then
-    controls.maxSceneSamplesPerFrame = platformer_persistent_default("maxSceneSamplesPerFrame", 1)
+    controls.maxSceneSamplesPerFrame = corona_platformer_platformer_persistent_default("maxSceneSamplesPerFrame", 1)
 end
 if controls.spineSkinningBenchmark == nil then
-    controls.spineSkinningBenchmark = platformer_persistent_default("spineSkinningBenchmark", false)
+    controls.spineSkinningBenchmark = corona_platformer_platformer_persistent_default("spineSkinningBenchmark", false)
 end
 if controls.spineSkinningBenchmarkCharacterCount == nil then
-    controls.spineSkinningBenchmarkCharacterCount = platformer_persistent_default("spineSkinningBenchmarkCharacterCount", 50)
+    controls.spineSkinningBenchmarkCharacterCount = corona_platformer_platformer_persistent_default("spineSkinningBenchmarkCharacterCount", 50)
 end
 if controls.spineSkinningBenchmarkSampleFps == nil then
-    controls.spineSkinningBenchmarkSampleFps = platformer_persistent_default("spineSkinningBenchmarkSampleFps", 12.0)
+    controls.spineSkinningBenchmarkSampleFps = corona_platformer_platformer_persistent_default("spineSkinningBenchmarkSampleFps", 12.0)
 end
 if controls.spineSkinningBenchmark == true then
     controls.maxSceneSamplesPerFrame = math.max(
@@ -51,20 +51,20 @@ if controls.spineSkinningBenchmark == true then
     end
 end
 if controls.maxEnemySpawnsPerFrame == nil then
-    controls.maxEnemySpawnsPerFrame = platformer_persistent_default("maxEnemySpawnsPerFrame", 1)
+    controls.maxEnemySpawnsPerFrame = corona_platformer_platformer_persistent_default("maxEnemySpawnsPerFrame", 1)
 end
 controls.levelStreaming = false
 if controls.streamingZoneWidth == nil then
-    controls.streamingZoneWidth = platformer_persistent_default("streamingZoneWidth", 780.0)
+    controls.streamingZoneWidth = corona_platformer_platformer_persistent_default("streamingZoneWidth", 780.0)
 end
 if controls.streamingPreloadMargin == nil then
-    controls.streamingPreloadMargin = platformer_persistent_default("streamingPreloadMargin", 460.0)
+    controls.streamingPreloadMargin = corona_platformer_platformer_persistent_default("streamingPreloadMargin", 460.0)
 end
 if controls.streamingUnloadMargin == nil then
-    controls.streamingUnloadMargin = platformer_persistent_default("streamingUnloadMargin", 980.0)
+    controls.streamingUnloadMargin = corona_platformer_platformer_persistent_default("streamingUnloadMargin", 980.0)
 end
 if controls.maxLevelZoneLoadsPerFrame == nil then
-    controls.maxLevelZoneLoadsPerFrame = platformer_persistent_default("maxLevelZoneLoadsPerFrame", 1)
+    controls.maxLevelZoneLoadsPerFrame = corona_platformer_platformer_persistent_default("maxLevelZoneLoadsPerFrame", 1)
 end
 if controls.maxLevelZoneObjectsPerFrame == nil then
     controls.maxLevelZoneObjectsPerFrame = 2
@@ -576,7 +576,7 @@ if corona.SpineComponent ~= nil then
     native_spine_get_scene_height = corona.SpineComponent.get_scene_height
 end
 
-local function set_spine_pose(entity, sceneHandle, x, y, z, yaw, targetExtent, roughness, metallic, mirrorX, useWorldScale, rayTracing)
+function corona_platformer_set_spine_pose(entity, sceneHandle, x, y, z, yaw, targetExtent, roughness, metallic, mirrorX, useWorldScale, rayTracing)
     local castRayTracingShadow = rayTracing == true
     if native_spine_set_pose ~= nil then
         return native_spine_set_pose(
@@ -614,7 +614,7 @@ local function set_spine_pose(entity, sceneHandle, x, y, z, yaw, targetExtent, r
     return corona.MeshComponent.set(entity, patch)
 end
 
-local function set_effect_entity_visible(entity, visible)
+function corona_platformer_set_effect_entity_visible(entity, visible)
     if entity == nil then
         return false
     end
@@ -629,7 +629,7 @@ end
 
 local characterReferenceSourceHeight = nil
 
-local function get_spine_scene_source_height(handle)
+function corona_platformer_get_spine_scene_source_height(handle)
     if handle == nil then
         return nil
     end
@@ -645,12 +645,12 @@ local function get_spine_scene_source_height(handle)
     return nil
 end
 
-local function set_character_scale_reference(handle)
+function corona_platformer_set_character_scale_reference(handle)
     if characterReferenceSourceHeight ~= nil then
         return
     end
 
-    local sourceHeight = get_spine_scene_source_height(handle)
+    local sourceHeight = corona_platformer_get_spine_scene_source_height(handle)
     if sourceHeight == nil then
         return
     end
@@ -663,8 +663,8 @@ local function set_character_scale_reference(handle)
         " clamp=" .. tostring(characterMinVisualScale) .. "-" .. tostring(characterMaxVisualScale))
 end
 
-local function set_character_spine_pose(entity, sceneHandle, x, y, z, yaw, visualExtent, roughness, metallic, mirrorX, rayTracing)
-    return set_spine_pose(
+function corona_platformer_set_character_spine_pose(entity, sceneHandle, x, y, z, yaw, visualExtent, roughness, metallic, mirrorX, rayTracing)
+    return corona_platformer_set_spine_pose(
         entity,
         sceneHandle,
         x,
@@ -679,8 +679,8 @@ local function set_character_spine_pose(entity, sceneHandle, x, y, z, yaw, visua
         rayTracing == true)
 end
 
-local function character_visual_extent_from_scene(handle)
-    local sourceHeight = get_spine_scene_source_height(handle)
+function corona_platformer_character_visual_extent_from_scene(handle)
+    local sourceHeight = corona_platformer_get_spine_scene_source_height(handle)
     if sourceHeight == nil or characterReferenceSourceHeight == nil then
         return sharedCharacterVisualExtent
     end
@@ -736,7 +736,7 @@ local update_camera = nil
 local update_level_streaming = nil
 local destroy_level_entities = nil
 
-local function clamp(value, minValue, maxValue)
+function corona_platformer_clamp(value, minValue, maxValue)
     if value < minValue then
         return minValue
     end
@@ -760,7 +760,7 @@ function corona_platformer_color_component(color, index, fallback)
 end
 
 function corona_platformer_mix_color(color, tint, amount)
-    local t = clamp(amount or 0.5, 0.0, 1.0)
+    local t = corona_platformer_clamp(amount or 0.5, 0.0, 1.0)
     return {
         corona_platformer_color_component(color, 1, tint[1]) * (1.0 - t) + tint[1] * t,
         corona_platformer_color_component(color, 2, tint[2]) * (1.0 - t) + tint[2] * t,
@@ -950,7 +950,7 @@ function corona_platformer_get_platform_visual_style(styleKind)
 end
 
 function corona_platformer_quantize_uv_repeat(value, maxRepeat)
-    return clamp(math.floor((value or 1.0) + 0.5), 1.0, maxRepeat or 64.0)
+    return corona_platformer_clamp(math.floor((value or 1.0) + 0.5), 1.0, maxRepeat or 64.0)
 end
 
 function corona_platformer_platform_uv_repeat(width, height, style)
@@ -994,7 +994,7 @@ function corona_platformer_texture_uv_repeat_for_width(width, tileWidth, fallbac
     return corona_platformer_quantize_uv_repeat(fallbackRepeat or 1.0, maxRepeat or 4.0)
 end
 
-local function approach(value, target, amount)
+function corona_platformer_approach(value, target, amount)
     if value < target then
         return math.min(value + amount, target)
     end
@@ -1004,20 +1004,20 @@ local function approach(value, target, amount)
     return target
 end
 
-local function get_player_animation_sample_fps(animation)
+function corona_platformer_get_player_animation_sample_fps(animation)
     return playerAnimationSampleFps[animation] or playerSampleFps
 end
 
-local function screen_axis_to_world_axis(axis)
+function corona_platformer_screen_axis_to_world_axis(axis)
     return -axis
 end
 
-local function enemy_mirror_x(enemy)
+function corona_platformer_enemy_mirror_x(enemy)
     return enemy ~= nil and (enemy.facing or 1.0) > 0.0
 end
 
 function corona_platformer_progress_world_direction()
-    local direction = screen_axis_to_world_axis(1.0)
+    local direction = corona_platformer_screen_axis_to_world_axis(1.0)
     return direction >= 0.0 and 1.0 or -1.0
 end
 
@@ -1032,27 +1032,27 @@ combat.rangedProjectileStartOffset = controls.rangedProjectileStartOffset or 58.
 combat.rangedProjectileVerticalOffset = controls.rangedProjectileVerticalOffset or 82.0
 combat.rangedProjectileExtent = math.max(8.0, controls.rangedProjectileExtent or 86.0)
 combat.rangedAmmoMax = math.max(1, math.floor(controls.rangedAmmoMax or 9))
-combat.rangedAmmo = clamp(math.floor(controls.startingRangedAmmo or 0), 0, combat.rangedAmmoMax)
+combat.rangedAmmo = corona_platformer_clamp(math.floor(controls.startingRangedAmmo or 0), 0, combat.rangedAmmoMax)
 combat.rangedAmmoDropAmount = math.max(0, math.floor(controls.rangedAmmoDropAmount or 1))
-combat.rangedAmmoDropChance = clamp(controls.rangedAmmoDropChance or 1.0, 0.0, 1.0)
+combat.rangedAmmoDropChance = corona_platformer_clamp(controls.rangedAmmoDropChance or 1.0, 0.0, 1.0)
 combat.rangedPickupRadius = math.max(12.0, controls.rangedPickupRadius or 46.0)
 combat.rangedPickupLifetime = math.max(1.0, controls.rangedPickupLifetime or 22.0)
 combat.rangedAmmoPickups = {}
 combat.healthPickupHealAmount = math.max(1, math.floor(controls.healthPickupHealAmount or 20))
-combat.healthPickupDropChance = clamp(controls.healthPickupDropChance or 0.35, 0.0, 1.0)
+combat.healthPickupDropChance = corona_platformer_clamp(controls.healthPickupDropChance or 0.35, 0.0, 1.0)
 combat.healthPickupRadius = math.max(12.0, controls.healthPickupRadius or 46.0)
 combat.healthPickupLifetime = math.max(1.0, controls.healthPickupLifetime or 22.0)
 combat.healthPickups = {}
 
-local function refresh_vitals_config()
+function corona_platformer_refresh_vitals_config()
     maxLives = math.max(1, math.floor(controls.maxLives or 5))
     maxHealth = math.max(1, math.floor(controls.maxHealth or 100))
     enemyDamage = math.max(1, math.floor(controls.enemyDamage or 5))
-    lives = clamp(lives, 0, maxLives)
-    health = clamp(health, 0, maxHealth)
+    lives = corona_platformer_clamp(lives, 0, maxLives)
+    health = corona_platformer_clamp(health, 0, maxHealth)
 end
 
-local function request_exit()
+function corona_platformer_request_exit()
     if corona.request_exit ~= nil then
         corona.request_exit()
     else
@@ -1060,34 +1060,34 @@ local function request_exit()
     end
 end
 
-local function add_spawned(entity)
+function corona_platformer_add_spawned(entity)
     if entity ~= nil then
         table.insert(spawned, entity)
     end
     return entity
 end
 
-local function set_respawn_point(x, y, facing, platform)
+function corona_platformer_set_respawn_point(x, y, facing, platform)
     local safeX = x or startX
     if platform ~= nil then
-        safeX = clamp(safeX, platform.left + respawnPlatformInset, platform.right - respawnPlatformInset)
+        safeX = corona_platformer_clamp(safeX, platform.left + respawnPlatformInset, platform.right - respawnPlatformInset)
     end
-    respawnX = clamp(safeX, worldMinX, levelEndX)
+    respawnX = corona_platformer_clamp(safeX, worldMinX, levelEndX)
     respawnY = math.max(y or 18.0, 18.0)
     if facing ~= nil and math.abs(facing) > 0.001 then
         respawnFacing = facing >= 0.0 and 1.0 or -1.0
     end
 end
 
-local function update_safe_respawn_point()
+function corona_platformer_update_safe_respawn_point()
     if player.dead or player.won or not player.grounded then
         return
     end
-    set_respawn_point(player.x, player.y + 2.0, player.facing, player.groundPlatform)
+    corona_platformer_set_respawn_point(player.x, player.y + 2.0, player.facing, player.groundPlatform)
 end
 
 function corona_platformer_configure_level(levelIndex)
-    currentLevel = clamp(math.floor(levelIndex or 1), 1, levelCount)
+    currentLevel = corona_platformer_clamp(math.floor(levelIndex or 1), 1, levelCount)
     currentLayout = levelLayouts[currentLevel]
     currentLevelEnemyStart = (currentLevel - 1) * enemiesPerLevel + 1
     currentLevelEnemyEnd = math.min(totalEnemyAssets, currentLevel * enemiesPerLevel)
@@ -1147,13 +1147,13 @@ function corona_platformer_configure_level(levelIndex)
 
     if currentLevelEnemyTotal > 1 then
         local spacing = ((goalX - enemyStartX) * progressDirection - 500.0) / (currentLevelEnemyTotal - 1)
-        enemySpacing = progressDirection * clamp(spacing, 210.0, 620.0)
+        enemySpacing = progressDirection * corona_platformer_clamp(spacing, 210.0, 620.0)
     else
         enemySpacing = progressDirection * 260.0
     end
 end
 
-local function spawn_box(name, position, scale, color, roughness, rayTracing, ownerList, options)
+function corona_platformer_spawn_box(name, position, scale, color, roughness, rayTracing, ownerList, options)
     options = options or {}
     local entity = corona.Entity.create(name)
     local ok = corona.MeshComponent.add(entity, {
@@ -1181,7 +1181,7 @@ local function spawn_box(name, position, scale, color, roughness, rayTracing, ow
         table.insert(ownerList, entity)
         return entity
     end
-    return add_spawned(entity)
+    return corona_platformer_add_spawned(entity)
 end
 
 function combat.destroy_ranged_ammo_pickup(pickup)
@@ -1237,9 +1237,9 @@ function combat.spawn_ranged_ammo_pickup(x, y, amount)
         entities = {},
     }
 
-    spawn_box("PlatformerRangedAmmoCore", { pickup.x, pickup.y, pickup.z }, { 20.0, 24.0, 8.0 }, { 1.0, 0.38, 0.10 }, 0.36, false, pickup.entities)
-    spawn_box("PlatformerRangedAmmoFlame", { pickup.x, pickup.y + 18.0, pickup.z - 0.4 }, { 12.0, 20.0, 7.0 }, { 1.0, 0.74, 0.18 }, 0.28, false, pickup.entities)
-    spawn_box("PlatformerRangedAmmoGlow", { pickup.x, pickup.y + 2.0, pickup.z - 0.8 }, { 34.0, 8.0, 6.0 }, { 1.0, 0.88, 0.38 }, 0.52, false, pickup.entities)
+    corona_platformer_spawn_box("PlatformerRangedAmmoCore", { pickup.x, pickup.y, pickup.z }, { 20.0, 24.0, 8.0 }, { 1.0, 0.38, 0.10 }, 0.36, false, pickup.entities)
+    corona_platformer_spawn_box("PlatformerRangedAmmoFlame", { pickup.x, pickup.y + 18.0, pickup.z - 0.4 }, { 12.0, 20.0, 7.0 }, { 1.0, 0.74, 0.18 }, 0.28, false, pickup.entities)
+    corona_platformer_spawn_box("PlatformerRangedAmmoGlow", { pickup.x, pickup.y + 2.0, pickup.z - 0.8 }, { 34.0, 8.0, 6.0 }, { 1.0, 0.88, 0.38 }, 0.52, false, pickup.entities)
 
     if #pickup.entities > 0 then
         table.insert(combat.rangedAmmoPickups, pickup)
@@ -1272,7 +1272,7 @@ combat.update_ranged_ammo_pickups = function(dt)
         local dx = pickup.x - player.x
         local dy = y - (player.y + playerHeight * 0.50)
         if collectable and math.abs(dx) < (playerRadius + pickup.radius) and math.abs(dy) < (playerHeight * 0.50 + pickup.radius) then
-            combat.rangedAmmo = clamp(combat.rangedAmmo + pickup.amount, 0, combat.rangedAmmoMax)
+            combat.rangedAmmo = corona_platformer_clamp(combat.rangedAmmo + pickup.amount, 0, combat.rangedAmmoMax)
             spawn_spine_effect("skill_ready", pickup.x, y, {
                 z = spineEffectZ,
                 facing = player.facing,
@@ -1325,9 +1325,9 @@ function combat.spawn_health_pickup(x, y, amount)
         entities = {},
     }
 
-    spawn_box("PlatformerHealthPickupCore", { pickup.x, pickup.y, pickup.z }, { 24.0, 24.0, 8.0 }, { 0.12, 0.94, 0.38 }, 0.34, false, pickup.entities)
-    spawn_box("PlatformerHealthPickupBarH", { pickup.x, pickup.y, pickup.z - 0.5 }, { 36.0, 10.0, 7.0 }, { 0.76, 1.0, 0.78 }, 0.30, false, pickup.entities)
-    spawn_box("PlatformerHealthPickupBarV", { pickup.x, pickup.y, pickup.z - 0.9 }, { 10.0, 36.0, 7.0 }, { 0.76, 1.0, 0.78 }, 0.30, false, pickup.entities)
+    corona_platformer_spawn_box("PlatformerHealthPickupCore", { pickup.x, pickup.y, pickup.z }, { 24.0, 24.0, 8.0 }, { 0.12, 0.94, 0.38 }, 0.34, false, pickup.entities)
+    corona_platformer_spawn_box("PlatformerHealthPickupBarH", { pickup.x, pickup.y, pickup.z - 0.5 }, { 36.0, 10.0, 7.0 }, { 0.76, 1.0, 0.78 }, 0.30, false, pickup.entities)
+    corona_platformer_spawn_box("PlatformerHealthPickupBarV", { pickup.x, pickup.y, pickup.z - 0.9 }, { 10.0, 36.0, 7.0 }, { 0.76, 1.0, 0.78 }, 0.30, false, pickup.entities)
 
     if #pickup.entities > 0 then
         table.insert(combat.healthPickups, pickup)
@@ -1342,7 +1342,7 @@ function combat.maybe_spawn_health_drop(enemy)
         return
     end
 
-    local offset = screen_axis_to_world_axis(player.facing)
+    local offset = corona_platformer_screen_axis_to_world_axis(player.facing)
     if math.abs(offset) < 0.001 then
         offset = 1.0
     end
@@ -1365,7 +1365,7 @@ combat.update_health_pickups = function(dt)
         local dx = pickup.x - player.x
         local dy = y - (player.y + playerHeight * 0.50)
         if collectable and math.abs(dx) < (playerRadius + pickup.radius) and math.abs(dy) < (playerHeight * 0.50 + pickup.radius) then
-            health = clamp(health + pickup.amount, 0, maxHealth)
+            health = corona_platformer_clamp(health + pickup.amount, 0, maxHealth)
             spawn_spine_effect("skill_ready", pickup.x, y, {
                 z = spineEffectZ,
                 facing = player.facing,
@@ -1401,7 +1401,7 @@ function corona_platformer_mark_collision_debug_dirty()
 end
 
 function corona_platformer_spawn_collision_debug_edge(name, position, scale)
-    spawn_box(name, position, scale, corona_platformer_collision_debug_color, 0.42, false, corona_platformer_collision_debug_entities)
+    corona_platformer_spawn_box(name, position, scale, corona_platformer_collision_debug_color, 0.42, false, corona_platformer_collision_debug_entities)
 end
 
 function corona_platformer_spawn_collision_wire_box(platform)
@@ -1456,7 +1456,7 @@ function corona_platformer_spawn_surface_decoration(ownerList, name, tile, fallb
     local safeHeight = math.max(2.0, corona_platformer_screen_matched_height(height or corona_platformer_surface_decoration_screen_height(tile), z))
     local width = corona_platformer_texture_width_for_height(textureKind, safeHeight, 1.0) * (widthScale or 1.0)
     local centerY = surfaceY + safeHeight * 0.5 + (verticalOffset or -1.0)
-    return spawn_box(
+    return corona_platformer_spawn_box(
         name,
         { x, centerY, z },
         { width, safeHeight, 4.0 },
@@ -1552,13 +1552,13 @@ function corona_platformer_spawn_grass_tufts(x, y, width, height, depth, centerZ
         return
     end
     local seed = math.floor((x * 13.17 + y * 7.31) % 6000.0)
-    local density = clamp(controls.platformSurfaceDecorationDensity or 1.0, 0.25, 2.0)
-    local tuftCount = clamp(math.floor(width / (210.0 / density)), 1, 4)
+    local density = corona_platformer_clamp(controls.platformSurfaceDecorationDensity or 1.0, 0.25, 2.0)
+    local tuftCount = corona_platformer_clamp(math.floor(width / (210.0 / density)), 1, 4)
     local spacing = width / (tuftCount + 1)
     local decorationZ = corona_platformer_platform_surface_z + 1.0
     local surfaceY = y + height * 0.5
     if styleKind == "platform" then
-        local ruinCount = clamp(math.floor(width / 460.0), 1, 2)
+        local ruinCount = corona_platformer_clamp(math.floor(width / 460.0), 1, 2)
         local ruinSpacing = width / (ruinCount + 1)
         for ruinIndex = 1, ruinCount do
             local roll = (seed + ruinIndex * 181) % 100
@@ -1590,7 +1590,7 @@ function corona_platformer_spawn_grass_tufts(x, y, width, height, depth, centerZ
             local tw = corona_platformer_texture_width_for_height(textureKind, th, 1.0)
             local verticalOffset = -1.0
             local ty = surfaceY + th * 0.5 + verticalOffset
-            spawn_box(
+            corona_platformer_spawn_box(
                 "PlatformerGrassTuft",
                 { tx, ty, decorationZ },
                 { tw, th, 4.0 },
@@ -1610,7 +1610,7 @@ function corona_platformer_spawn_grass_tufts(x, y, width, height, depth, centerZ
             local detailRoll = (seed + i * 251) % 100
             if width >= 180.0 and detailRoll >= 78 then
                 local direction = detailRoll % 2 == 0 and 1.0 or -1.0
-                local extraX = clamp(tx + direction * (26.0 + (detailRoll % 17)), x - width * 0.5 + 22.0, x + width * 0.5 - 22.0)
+                local extraX = corona_platformer_clamp(tx + direction * (26.0 + (detailRoll % 17)), x - width * 0.5 + 22.0, x + width * 0.5 - 22.0)
                 if detailRoll >= 91 then
                     corona_platformer_spawn_surface_decoration(
                         ownerList,
@@ -1679,7 +1679,7 @@ function corona_platformer_spawn_platform(x, y, width, height, depth, color, own
     local visualStyle = corona_platformer_get_platform_visual_style(styleKind)
     local visualColor = corona_platformer_mix_color(color, visualStyle.base, 0.72)
     local uvRepeat = corona_platformer_platform_uv_repeat(width, height, visualStyle)
-    local entity = spawn_box(
+    local entity = corona_platformer_spawn_box(
         "PlatformerBlock",
         { x, y, centerZ },
         { width, height, safeDepth },
@@ -1697,8 +1697,8 @@ function corona_platformer_spawn_platform(x, y, width, height, depth, color, own
         })
 
     if controls.platformMaterialDetails ~= false and width >= 72.0 and height >= 18.0 then
-        local capHeight = visualStyle.capHeight or clamp(height * 0.18, 4.0, 8.0)
-        capHeight = clamp(capHeight, 4.0, math.max(4.0, height * 0.72))
+        local capHeight = visualStyle.capHeight or corona_platformer_clamp(height * 0.18, 4.0, 8.0)
+        capHeight = corona_platformer_clamp(capHeight, 4.0, math.max(4.0, height * 0.72))
         local capTextureKind = visualStyle.capTexture or visualStyle.texture
         local capUvRepeat = corona_platformer_texture_uv_repeat_for_box(
             width,
@@ -1708,7 +1708,7 @@ function corona_platformer_spawn_platform(x, y, width, height, depth, color, own
             math.max(1.0, uvRepeat * 0.65),
             visualStyle.capUvDensity,
             visualStyle.capUvMax)
-        spawn_box(
+        corona_platformer_spawn_box(
             "PlatformerBlockGrassCap",
             { x, y + height * 0.5 - capHeight * 0.5, centerZ - 0.35 },
             { width * 1.012, capHeight, safeDepth + 0.7 },
@@ -1725,12 +1725,12 @@ function corona_platformer_spawn_platform(x, y, width, height, depth, color, own
                 })
 
         if styleKind == "platform" and y > 52.0 and width >= 160.0 then
-            local supportHeight = clamp((y - height * 0.5) - 18.0, 18.0, 110.0)
+            local supportHeight = corona_platformer_clamp((y - height * 0.5) - 18.0, 18.0, 110.0)
             local supportY = 18.0 + supportHeight * 0.5
-            local supportWidth = clamp(width * 0.055, 10.0, 18.0)
-            local inset = clamp(width * 0.30, 44.0, 118.0)
+            local supportWidth = corona_platformer_clamp(width * 0.055, 10.0, 18.0)
+            local inset = corona_platformer_clamp(width * 0.30, 44.0, 118.0)
             for support = -1, 1, 2 do
-                spawn_box(
+                corona_platformer_spawn_box(
                     "PlatformerBlockVineSupport",
                     { x + inset * support, supportY, centerZ + 0.22 },
                     { supportWidth, supportHeight, safeDepth * 0.68 },
@@ -1750,8 +1750,8 @@ function corona_platformer_spawn_platform(x, y, width, height, depth, color, own
     end
 
     if controls.platformTrim ~= false and width >= 72.0 and height >= 18.0 then
-        local underHeight = clamp(height * 0.12, 4.0, 9.0)
-        local glowHeight = clamp(height * 0.045, 2.0, 4.0)
+        local underHeight = corona_platformer_clamp(height * 0.12, 4.0, 9.0)
+        local glowHeight = corona_platformer_clamp(height * 0.045, 2.0, 4.0)
         local underTextureKind = visualStyle.underTexture or visualStyle.texture
         local underUvRepeat = corona_platformer_texture_uv_repeat_for_box(
             width,
@@ -1761,7 +1761,7 @@ function corona_platformer_spawn_platform(x, y, width, height, depth, color, own
             math.max(1.0, uvRepeat * 0.45),
             visualStyle.underUvDensity,
             visualStyle.underUvMax)
-        spawn_box(
+        corona_platformer_spawn_box(
             "PlatformerBlockShadowLip",
             { x, y - height * 0.5 - underHeight * 0.5, centerZ },
             { width, underHeight, safeDepth },
@@ -1776,7 +1776,7 @@ function corona_platformer_spawn_platform(x, y, width, height, depth, color, own
                     uvRepeatX = underUvRepeat,
                     uvRepeatY = 1.0,
                 })
-        spawn_box(
+        corona_platformer_spawn_box(
             "PlatformerBlockMagicSeam",
             { x, y - height * 0.5 - underHeight - glowHeight * 0.5, centerZ },
             { width * 0.94, glowHeight, safeDepth },
@@ -1812,7 +1812,7 @@ function corona_platformer_spawn_platform(x, y, width, height, depth, color, own
     corona_platformer_mark_collision_debug_dirty()
 end
 
-local function spawn_layout_blocks(blocks, fallbackColor, styleKind)
+function corona_platformer_spawn_layout_blocks(blocks, fallbackColor, styleKind)
     if blocks == nil then
         return
     end
@@ -1831,20 +1831,20 @@ local function spawn_layout_blocks(blocks, fallbackColor, styleKind)
     end
 end
 
-local function reset_level_streaming()
+function corona_platformer_reset_level_streaming()
     levelZones = {}
     loadedLevelZoneCount = 0
     levelStreamingLoadFrame = 0
 end
 
-local function clone_vec3(value, fallback)
+function corona_platformer_clone_vec3(value, fallback)
     if value == nil then
         return { fallback[1], fallback[2], fallback[3] }
     end
     return { value[1] or fallback[1], value[2] or fallback[2], value[3] or fallback[3] }
 end
 
-local function expand_zone_bounds(zone, minX, maxX, minY, maxY, minZ, maxZ)
+function corona_platformer_expand_zone_bounds(zone, minX, maxX, minY, maxY, minZ, maxZ)
     zone.minX = math.min(zone.minX, minX)
     zone.maxX = math.max(zone.maxX, maxX)
     zone.minY = math.min(zone.minY, minY)
@@ -1853,7 +1853,7 @@ local function expand_zone_bounds(zone, minX, maxX, minY, maxY, minZ, maxZ)
     zone.maxZ = math.max(zone.maxZ, maxZ)
 end
 
-local function get_level_zone_for_bounds(minX, maxX, minY, maxY, minZ, maxZ)
+function corona_platformer_get_level_zone_for_bounds(minX, maxX, minY, maxY, minZ, maxZ)
     local centerX = (minX + maxX) * 0.5
     local index = math.floor((centerX - firstPlayableX) / levelZoneWidth) + 1
     if not levelStreamingEnabled then
@@ -1891,11 +1891,11 @@ local function get_level_zone_for_bounds(minX, maxX, minY, maxY, minZ, maxZ)
         }
         levelZones[index] = zone
     end
-    expand_zone_bounds(zone, minX, maxX, minY, maxY, minZ, maxZ)
+    corona_platformer_expand_zone_bounds(zone, minX, maxX, minY, maxY, minZ, maxZ)
     return zone
 end
 
-local function queue_streaming_box(name, position, scale, color, roughness, rayTracing, options)
+function corona_platformer_queue_streaming_box(name, position, scale, color, roughness, rayTracing, options)
     options = options or {}
     local px = position[1] or 0.0
     local py = position[2] or 0.0
@@ -1903,7 +1903,7 @@ local function queue_streaming_box(name, position, scale, color, roughness, rayT
     local sx = math.max(0.001, scale[1] or 1.0)
     local sy = math.max(0.001, scale[2] or 1.0)
     local sz = math.max(0.001, scale[3] or 1.0)
-    local zone = get_level_zone_for_bounds(
+    local zone = corona_platformer_get_level_zone_for_bounds(
         px - sx * 0.5,
         px + sx * 0.5,
         py - sy * 0.5,
@@ -1915,7 +1915,7 @@ local function queue_streaming_box(name, position, scale, color, roughness, rayT
         name = name,
         position = { px, py, pz },
         scale = { sx, sy, sz },
-        color = clone_vec3(color, { 0.7, 0.7, 0.7 }),
+        color = corona_platformer_clone_vec3(color, { 0.7, 0.7, 0.7 }),
         roughness = roughness,
         rayTracing = rayTracing,
         brickTexture = options.brickTexture == true or options.brick_texture == true,
@@ -1935,7 +1935,7 @@ function corona_platformer_queue_background_box(name, position, scale, color, ro
         return nil
     end
     local backgroundScale = corona_platformer_background_camera_scale
-    spawn_box(
+    corona_platformer_spawn_box(
         name,
         {
             position[1] or 0.0,
@@ -1959,7 +1959,7 @@ function corona_platformer_queue_background_box(name, position, scale, color, ro
         })
 end
 
-local function queue_streaming_platform(x, y, width, height, depth, color, styleKind)
+function corona_platformer_queue_streaming_platform(x, y, width, height, depth, color, styleKind)
     local safeWidth = math.max(0.001, width or 1.0)
     local safeHeight = math.max(0.001, height or 1.0)
     local resolvedStyleKind = styleKind or "platform"
@@ -1971,7 +1971,7 @@ local function queue_streaming_platform(x, y, width, height, depth, color, style
     end
     local safeDepth = math.max(0.001, depth or platformDepth)
     local centerZ = corona_platformer_platform_center_z(safeDepth)
-    local zone = get_level_zone_for_bounds(
+    local zone = corona_platformer_get_level_zone_for_bounds(
         x - safeWidth * 0.5,
         x + safeWidth * 0.5,
         y - safeHeight * 0.5,
@@ -1986,7 +1986,7 @@ local function queue_streaming_platform(x, y, width, height, depth, color, style
         w = safeWidth,
         h = safeHeight,
         depth = safeDepth,
-        color = clone_vec3(color, { 0.34, 0.42, 0.36 }),
+        color = corona_platformer_clone_vec3(color, { 0.34, 0.42, 0.36 }),
         styleKind = resolvedStyleKind,
     })
 end
@@ -2067,7 +2067,7 @@ function corona_platformer_find_safe_enemy_spawn(enemy, desiredX)
         end
 
         for _, offset in ipairs(offsets) do
-            local sampleX = clamp(desiredX + offset, worldMinX + inset, levelEndX - inset)
+            local sampleX = corona_platformer_clamp(desiredX + offset, worldMinX + inset, levelEndX - inset)
             for _, platform in ipairs(platformData) do
                 if platform.w >= inset * 2.0 and sampleX >= platform.left + inset and sampleX <= platform.right - inset then
                     local spawnY = platform.top + math.max(0.0, controls.enemySpawnLift or 4.0)
@@ -2109,7 +2109,7 @@ function corona_platformer_snap_enemy_to_safe_spawn(enemy)
     return true
 end
 
-local function queue_layout_blocks(blocks, fallbackColor, styleKind)
+function corona_platformer_queue_layout_blocks(blocks, fallbackColor, styleKind)
     if blocks == nil then
         return
     end
@@ -2117,7 +2117,7 @@ local function queue_layout_blocks(blocks, fallbackColor, styleKind)
     for _, block in ipairs(blocks) do
         local resolvedStyleKind = block.style or styleKind
         local blockHeight = block.h or 1.0
-        queue_streaming_platform(
+        corona_platformer_queue_streaming_platform(
             corona_platformer_transform_layout_x(block.x),
             corona_platformer_quantize_layout_platform_y(block.y or 0.0, blockHeight, resolvedStyleKind),
             block.w or 1.0,
@@ -2134,15 +2134,15 @@ function corona_platformer_vertical_route_tier(index, count, maxTier, elevatedGo
     end
     local climbSteps = math.max(2, maxTier)
     if index <= climbSteps then
-        return clamp(index, 1, maxTier)
+        return corona_platformer_clamp(index, 1, maxTier)
     end
     if elevatedGoal then
         local wave = ((index + currentLevel) % 3) - 1
-        return clamp(maxTier + wave, 1, maxTier)
+        return corona_platformer_clamp(maxTier + wave, 1, maxTier)
     end
     local remaining = count - index
     if remaining < maxTier then
-        return clamp(remaining + 1, 1, maxTier)
+        return corona_platformer_clamp(remaining + 1, 1, maxTier)
     end
     local midWave = ((index + currentLevel * 2) % 5)
     if midWave == 0 then
@@ -2171,7 +2171,7 @@ function corona_platformer_queue_vertical_platform_route()
 
     local maxTier = 3 + ((currentLevel * 7) % 3) -- deterministic 3..5 tier route
     local elevatedGoal = (currentLevel % 2) == 1 or currentLevel == levelCount
-    local platformCount = clamp(math.floor(span / 300.0), maxTier + 3, 24)
+    local platformCount = corona_platformer_clamp(math.floor(span / 300.0), maxTier + 3, 24)
     local routeStep = span / math.max(1.0, platformCount - 1)
     local previousTier = 0
 
@@ -2194,7 +2194,7 @@ function corona_platformer_queue_vertical_platform_route()
             width = elevatedGoal and 460.0 or 360.0
             corona_platformer_goal_surface_y = topY
         end
-        queue_streaming_platform(
+        corona_platformer_queue_streaming_platform(
             x,
             topY - h * 0.5,
             width,
@@ -2223,13 +2223,13 @@ function corona_platformer_queue_decoy_platform_routes()
 
     local maxTier = 3 + ((currentLevel * 7) % 3)
     local elevatedGoal = (currentLevel % 2) == 1 or currentLevel == levelCount
-    local platformCount = clamp(math.floor(span / 300.0), maxTier + 3, 24)
+    local platformCount = corona_platformer_clamp(math.floor(span / 300.0), maxTier + 3, 24)
     local routeStep = span / math.max(1.0, platformCount - 1)
-    local branchCount = clamp(math.floor(1 + (currentLevel % 3)), 1, 3)
+    local branchCount = corona_platformer_clamp(math.floor(1 + (currentLevel % 3)), 1, 3)
     local placed = 0
 
     for branch = 1, branchCount do
-        local anchorIndex = clamp(3 + branch * 3 + (currentLevel % 2), 3, platformCount - 3)
+        local anchorIndex = corona_platformer_clamp(3 + branch * 3 + (currentLevel % 2), 3, platformCount - 3)
         local anchorTier = corona_platformer_vertical_route_tier(anchorIndex, platformCount, maxTier, elevatedGoal)
         local branchDir = -progress
         local branchLen = 2 + ((currentLevel + branch) % 2)
@@ -2243,7 +2243,7 @@ function corona_platformer_queue_decoy_platform_routes()
             local x = baseX + branchDir * sideStep * step
             local h = controls.platformRaisedTileHeight or 36.0
             local width = step == branchLen and 190.0 or 236.0
-            queue_streaming_platform(
+            corona_platformer_queue_streaming_platform(
                 x,
                 topY - h * 0.5,
                 width,
@@ -2308,7 +2308,7 @@ function corona_platformer_validate_platform_step_heights()
     return lowStepCount
 end
 
-local function queue_streaming_spine_effect(kind, x, y, options)
+function corona_platformer_queue_streaming_spine_effect(kind, x, y, options)
     local def = effectAssets[kind]
     if def == nil then
         return
@@ -2317,7 +2317,7 @@ local function queue_streaming_spine_effect(kind, x, y, options)
     options = options or {}
     local targetExtent = options.targetExtent or def.targetExtent or 96.0
     local z = options.z or spineEffectZ
-    local zone = get_level_zone_for_bounds(
+    local zone = corona_platformer_get_level_zone_for_bounds(
         x - targetExtent * 0.5,
         x + targetExtent * 0.5,
         y - targetExtent * 0.5,
@@ -2340,7 +2340,7 @@ local function queue_streaming_spine_effect(kind, x, y, options)
     })
 end
 
-local function add_goal_flag_part(entity, offsetX, offsetY, offsetZ, wave, scale)
+function corona_platformer_add_goal_flag_part(entity, offsetX, offsetY, offsetZ, wave, scale)
     if entity ~= nil then
         table.insert(goalFlagParts, {
             entity = entity,
@@ -2363,48 +2363,48 @@ function corona_platformer_spawn_goal_flag()
     local poleHeight = 270.0
     local poleCenterY = poleBaseY + poleHeight * 0.5
 
-    add_goal_flag_part(
-        spawn_box("PlatformerGoalFlagBase", { poleX, poleBaseY + 8.0, z }, { 92.0, 16.0, 86.0 }, { 0.62, 0.55, 0.42 }, 0.72, true),
+    corona_platformer_add_goal_flag_part(
+        corona_platformer_spawn_box("PlatformerGoalFlagBase", { poleX, poleBaseY + 8.0, z }, { 92.0, 16.0, 86.0 }, { 0.62, 0.55, 0.42 }, 0.72, true),
         0.0,
         poleBaseY + 8.0,
         0.0,
         0.0,
         { 92.0, 16.0, 86.0 })
 
-    add_goal_flag_part(
-        spawn_box("PlatformerGoalFlagPole", { poleX, poleCenterY, z }, { 16.0, poleHeight, 16.0 }, { 0.88, 0.86, 0.76 }, 0.46, true),
+    corona_platformer_add_goal_flag_part(
+        corona_platformer_spawn_box("PlatformerGoalFlagPole", { poleX, poleCenterY, z }, { 16.0, poleHeight, 16.0 }, { 0.88, 0.86, 0.76 }, 0.46, true),
         0.0,
         poleCenterY,
         0.0,
         0.0,
         { 16.0, poleHeight, 16.0 })
 
-    add_goal_flag_part(
-        spawn_box("PlatformerGoalFlagCap", { poleX, poleBaseY + poleHeight + 12.0, z }, { 44.0, 24.0, 44.0 }, { 1.0, 0.80, 0.22 }, 0.36, true),
+    corona_platformer_add_goal_flag_part(
+        corona_platformer_spawn_box("PlatformerGoalFlagCap", { poleX, poleBaseY + poleHeight + 12.0, z }, { 44.0, 24.0, 44.0 }, { 1.0, 0.80, 0.22 }, 0.36, true),
         0.0,
         poleBaseY + poleHeight + 12.0,
         0.0,
         0.2,
         { 44.0, 24.0, 44.0 })
 
-    add_goal_flag_part(
-        spawn_box("PlatformerGoalFlagClothA", { poleX + 76.0, poleBaseY + 224.0, z - 2.0 }, { 136.0, 74.0, 12.0 }, { 0.86, 0.12, 0.14 }, 0.68, true),
+    corona_platformer_add_goal_flag_part(
+        corona_platformer_spawn_box("PlatformerGoalFlagClothA", { poleX + 76.0, poleBaseY + 224.0, z - 2.0 }, { 136.0, 74.0, 12.0 }, { 0.86, 0.12, 0.14 }, 0.68, true),
         76.0,
         poleBaseY + 224.0,
         -2.0,
         1.0,
         { 136.0, 74.0, 12.0 })
 
-    add_goal_flag_part(
-        spawn_box("PlatformerGoalFlagClothB", { poleX + 148.0, poleBaseY + 206.0, z - 2.0 }, { 92.0, 56.0, 12.0 }, { 0.96, 0.26, 0.20 }, 0.7, true),
+    corona_platformer_add_goal_flag_part(
+        corona_platformer_spawn_box("PlatformerGoalFlagClothB", { poleX + 148.0, poleBaseY + 206.0, z - 2.0 }, { 92.0, 56.0, 12.0 }, { 0.96, 0.26, 0.20 }, 0.7, true),
         148.0,
         poleBaseY + 206.0,
         -2.0,
         1.7,
         { 92.0, 56.0, 12.0 })
 
-    add_goal_flag_part(
-        spawn_box("PlatformerGoalFlagStripe", { poleX + 108.0, poleBaseY + 224.0, z - 9.0 }, { 154.0, 12.0, 8.0 }, { 1.0, 0.88, 0.34 }, 0.5, true),
+    corona_platformer_add_goal_flag_part(
+        corona_platformer_spawn_box("PlatformerGoalFlagStripe", { poleX + 108.0, poleBaseY + 224.0, z - 9.0 }, { 154.0, 12.0, 8.0 }, { 1.0, 0.88, 0.34 }, 0.5, true),
         108.0,
         poleBaseY + 224.0,
         -9.0,
@@ -2412,34 +2412,34 @@ function corona_platformer_spawn_goal_flag()
         { 154.0, 12.0, 8.0 })
 end
 
-local function queue_goal_flag()
+function corona_platformer_queue_goal_flag()
     local z = characterZ + 12.0
     local poleX = goalX
     local poleBaseY = corona_platformer_goal_surface_y
     local poleHeight = 270.0
     local poleCenterY = poleBaseY + poleHeight * 0.5
 
-    queue_streaming_box("PlatformerGoalFlagBase", { poleX, poleBaseY + 8.0, z }, { 92.0, 16.0, 86.0 }, { 0.62, 0.55, 0.42 }, 0.72, true, {
+    corona_platformer_queue_streaming_box("PlatformerGoalFlagBase", { poleX, poleBaseY + 8.0, z }, { 92.0, 16.0, 86.0 }, { 0.62, 0.55, 0.42 }, 0.72, true, {
         goalPart = { offsetX = 0.0, offsetY = poleBaseY + 8.0, offsetZ = 0.0, wave = 0.0, scale = { 92.0, 16.0, 86.0 } },
     })
-    queue_streaming_box("PlatformerGoalFlagPole", { poleX, poleCenterY, z }, { 16.0, poleHeight, 16.0 }, { 0.88, 0.86, 0.76 }, 0.46, true, {
+    corona_platformer_queue_streaming_box("PlatformerGoalFlagPole", { poleX, poleCenterY, z }, { 16.0, poleHeight, 16.0 }, { 0.88, 0.86, 0.76 }, 0.46, true, {
         goalPart = { offsetX = 0.0, offsetY = poleCenterY, offsetZ = 0.0, wave = 0.0, scale = { 16.0, poleHeight, 16.0 } },
     })
-    queue_streaming_box("PlatformerGoalFlagCap", { poleX, poleBaseY + poleHeight + 12.0, z }, { 44.0, 24.0, 44.0 }, { 1.0, 0.80, 0.22 }, 0.36, true, {
+    corona_platformer_queue_streaming_box("PlatformerGoalFlagCap", { poleX, poleBaseY + poleHeight + 12.0, z }, { 44.0, 24.0, 44.0 }, { 1.0, 0.80, 0.22 }, 0.36, true, {
         goalPart = { offsetX = 0.0, offsetY = poleBaseY + poleHeight + 12.0, offsetZ = 0.0, wave = 0.2, scale = { 44.0, 24.0, 44.0 } },
     })
-    queue_streaming_box("PlatformerGoalFlagClothA", { poleX + 76.0, poleBaseY + 224.0, z - 2.0 }, { 136.0, 74.0, 12.0 }, { 0.86, 0.12, 0.14 }, 0.68, true, {
+    corona_platformer_queue_streaming_box("PlatformerGoalFlagClothA", { poleX + 76.0, poleBaseY + 224.0, z - 2.0 }, { 136.0, 74.0, 12.0 }, { 0.86, 0.12, 0.14 }, 0.68, true, {
         goalPart = { offsetX = 76.0, offsetY = poleBaseY + 224.0, offsetZ = -2.0, wave = 1.0, scale = { 136.0, 74.0, 12.0 } },
     })
-    queue_streaming_box("PlatformerGoalFlagClothB", { poleX + 148.0, poleBaseY + 206.0, z - 2.0 }, { 92.0, 56.0, 12.0 }, { 0.96, 0.26, 0.20 }, 0.7, true, {
+    corona_platformer_queue_streaming_box("PlatformerGoalFlagClothB", { poleX + 148.0, poleBaseY + 206.0, z - 2.0 }, { 92.0, 56.0, 12.0 }, { 0.96, 0.26, 0.20 }, 0.7, true, {
         goalPart = { offsetX = 148.0, offsetY = poleBaseY + 206.0, offsetZ = -2.0, wave = 1.7, scale = { 92.0, 56.0, 12.0 } },
     })
-    queue_streaming_box("PlatformerGoalFlagStripe", { poleX + 108.0, poleBaseY + 224.0, z - 9.0 }, { 154.0, 12.0, 8.0 }, { 1.0, 0.88, 0.34 }, 0.5, true, {
+    corona_platformer_queue_streaming_box("PlatformerGoalFlagStripe", { poleX + 108.0, poleBaseY + 224.0, z - 9.0 }, { 154.0, 12.0, 8.0 }, { 1.0, 0.88, 0.34 }, 0.5, true, {
         goalPart = { offsetX = 108.0, offsetY = poleBaseY + 224.0, offsetZ = -9.0, wave = 2.2, scale = { 154.0, 12.0, 8.0 } },
     })
 end
 
-local function reset_player()
+function corona_platformer_reset_player()
     player.x = startX
     player.y = 18.0
     player.vx = 0.0
@@ -2456,7 +2456,7 @@ local function reset_player()
     health = maxHealth
     hitInvulnerabilityTimer = 0.0
     winPulse = 0.0
-    set_respawn_point(startX, 18.0, 1.0, nil)
+    corona_platformer_set_respawn_point(startX, 18.0, 1.0, nil)
     corona_platformer_air_peak_y = player.y
     gamepadJumpHeldLast = false
     gamepadAttackTriggerHeldLast = false
@@ -2465,7 +2465,7 @@ local function reset_player()
     end
 end
 
-local function respawn_player()
+function corona_platformer_respawn_player()
     player.x = respawnX
     player.y = respawnY
     player.vx = 0.0
@@ -2498,7 +2498,7 @@ local function respawn_player()
     update_character(true)
 end
 
-local function enter_menu(reason)
+function corona_platformer_enter_menu(reason)
     gameState = "menu"
     menuReason = reason or "title"
     player.dead = false
@@ -2516,7 +2516,7 @@ local function enter_menu(reason)
     end
 end
 
-local function kill_player(reason)
+function corona_platformer_kill_player(reason)
     if gameState ~= "playing" or player.dead or player.won or gameCompleted then
         return
     end
@@ -2550,7 +2550,7 @@ local function kill_player(reason)
     })
 end
 
-local function update_death(dt)
+function corona_platformer_update_death(dt)
     deathTimer = math.max(0.0, deathTimer - dt)
     update_spine_effects(dt)
     update_character(false)
@@ -2559,11 +2559,11 @@ local function update_death(dt)
     local gamepad = corona.get_gamepad ~= nil and corona.get_gamepad() or { connected = false }
     if deathTimer <= 0.0 or corona.was_key_pressed("R") or (gamepad.connected and (gamepad.start_pressed or gamepad.back_pressed)) then
         if lives <= 0 then
-            enter_menu("game_over")
+            corona_platformer_enter_menu("game_over")
             update_camera()
             update_level_streaming(true)
         else
-            respawn_player()
+            corona_platformer_respawn_player()
             update_camera()
             update_level_streaming(true)
         end
@@ -2600,7 +2600,7 @@ function corona_platformer_get_scene_cache_bucket(root, assetPath, animation, sa
     return byRate
 end
 
-local function get_spine_scene(assetPath, animation, sampleTime, fps, fallbackHandle, forceSample)
+function corona_platformer_get_spine_scene(assetPath, animation, sampleTime, fps, fallbackHandle, forceSample)
     local sampleRate = fps or playerSampleFps
     local frame = math.floor(sampleTime * sampleRate + 0.0001)
     local cachedFrames = corona_platformer_get_scene_cache_bucket(sceneCache, assetPath, animation, sampleRate, false)
@@ -2653,7 +2653,7 @@ local function get_spine_scene(assetPath, animation, sampleTime, fps, fallbackHa
     return result, frame, true
 end
 
-local function acquire_effect_entity(kind)
+function corona_platformer_acquire_effect_entity(kind)
     local pool = effectEntityPools[kind]
     if pool ~= nil and #pool > 0 then
         local entity = pool[#pool]
@@ -2664,14 +2664,14 @@ local function acquire_effect_entity(kind)
     return corona.Entity.create("PlatformerSpineEffect_" .. tostring(kind))
 end
 
-local function release_effect_entity(effect)
+function corona_platformer_release_effect_entity(effect)
     if effect == nil or effect.entity == nil then
         return
     end
 
     local entity = effect.entity
     effect.entity = nil
-    set_effect_entity_visible(entity, false)
+    corona_platformer_set_effect_entity_visible(entity, false)
 
     if effectPoolLimitPerKind <= 0 then
         corona.Entity.destroy(entity)
@@ -2692,7 +2692,7 @@ local function release_effect_entity(effect)
     end
 end
 
-local function discard_effect_entity(effect)
+function corona_platformer_discard_effect_entity(effect)
     if effect ~= nil and effect.entity ~= nil then
         corona.Entity.destroy(effect.entity)
         effect.entity = nil
@@ -2700,10 +2700,10 @@ local function discard_effect_entity(effect)
 end
 
 destroy_effect = function(effect)
-    release_effect_entity(effect)
+    corona_platformer_release_effect_entity(effect)
 end
 
-local function destroy_cached_effect_entities()
+function corona_platformer_destroy_cached_effect_entities()
     for _, pool in pairs(effectEntityPools) do
         for _, entity in ipairs(pool) do
             corona.Entity.destroy(entity)
@@ -2718,7 +2718,7 @@ local function destroy_cached_effect_entities()
     corona_platformer_effect_prewarm_next_time = 0.0
 end
 
-local function clear_spine_effects()
+function corona_platformer_clear_spine_effects()
     for _, effect in ipairs(effects) do
         destroy_effect(effect)
     end
@@ -2729,7 +2729,7 @@ local function clear_spine_effects()
     loopEffects = {}
 end
 
-local function apply_effect_pose(effect, force)
+function corona_platformer_apply_effect_pose(effect, force)
     local def = effect.def
     if def == nil then
         return false
@@ -2749,7 +2749,7 @@ local function apply_effect_pose(effect, force)
     local z = effect.z or spineEffectZ
     local targetExtent = effect.targetExtent or def.targetExtent
     if effect.entity ~= nil and not force and effect.lastHandle ~= nil and frame == effect.lastFrame then
-        local ok = set_spine_pose(
+        local ok = corona_platformer_set_spine_pose(
             effect.entity,
             nil,
             effect.x,
@@ -2761,13 +2761,13 @@ local function apply_effect_pose(effect, force)
             0.0,
             mirrorX)
         if not ok then
-            discard_effect_entity(effect)
+            corona_platformer_discard_effect_entity(effect)
             return false
         end
         return true
     end
 
-    local handle, resolvedFrame, resolved = get_spine_scene(def.path, def.animation or "idle", sampleTime, sampleRate, effect.lastHandle, force)
+    local handle, resolvedFrame, resolved = corona_platformer_get_spine_scene(def.path, def.animation or "idle", sampleTime, sampleRate, effect.lastHandle, force)
     if handle == nil then
         return false
     end
@@ -2775,10 +2775,10 @@ local function apply_effect_pose(effect, force)
 
     local useSceneHandle = force or effect.entity == nil or (resolved and frame ~= effect.lastFrame)
     if effect.entity == nil then
-        effect.entity = acquire_effect_entity(effect.kind)
+        effect.entity = corona_platformer_acquire_effect_entity(effect.kind)
     end
 
-    local ok = set_spine_pose(
+    local ok = corona_platformer_set_spine_pose(
         effect.entity,
         useSceneHandle and handle or nil,
         effect.x,
@@ -2790,7 +2790,7 @@ local function apply_effect_pose(effect, force)
         0.0,
         mirrorX)
     if not ok then
-        discard_effect_entity(effect)
+        corona_platformer_discard_effect_entity(effect)
         return false
     end
 
@@ -2825,8 +2825,8 @@ function spawn_spine_effect(kind, x, y, options)
         loop = options.loop == true,
     }
 
-    if not apply_effect_pose(effect, true) then
-        discard_effect_entity(effect)
+    if not corona_platformer_apply_effect_pose(effect, true) then
+        corona_platformer_discard_effect_entity(effect)
         return nil
     end
 
@@ -2846,17 +2846,17 @@ function update_spine_effects(dt)
             destroy_effect(effect)
             table.remove(effects, index)
         else
-            apply_effect_pose(effect, false)
+            corona_platformer_apply_effect_pose(effect, false)
         end
     end
 
     for _, effect in ipairs(loopEffects) do
         effect.elapsed = effect.elapsed + dt
-        apply_effect_pose(effect, false)
+        corona_platformer_apply_effect_pose(effect, false)
     end
 end
 
-local function prewarm_effect_cache()
+function corona_platformer_prewarm_effect_cache()
     if effectPoolPrewarmed or effectPrewarmPerKind <= 0 or effectPoolLimitPerKind <= 0 then
         return
     end
@@ -2930,10 +2930,10 @@ function corona_platformer_process_effect_prewarm_queue()
         local entity = nil
         if prewarmSceneHandles then
             local sampleRate = def.fps or playerSampleFps
-            local handle = select(1, get_spine_scene(def.path, def.animation or "idle", 0.0, sampleRate, nil, false))
+            local handle = select(1, corona_platformer_get_spine_scene(def.path, def.animation or "idle", 0.0, sampleRate, nil, false))
             if handle ~= nil then
                 entity = corona.Entity.create("PlatformerSpineEffect_" .. tostring(kind) .. "_Cached")
-                local ok = set_spine_pose(
+                local ok = corona_platformer_set_spine_pose(
                     entity,
                     handle,
                     0.0,
@@ -2951,11 +2951,11 @@ function corona_platformer_process_effect_prewarm_queue()
             end
         else
             entity = corona.Entity.create("PlatformerSpineEffect_" .. tostring(kind) .. "_Cached")
-            set_effect_entity_visible(entity, false)
+            corona_platformer_set_effect_entity_visible(entity, false)
         end
 
         if entity ~= nil then
-            set_effect_entity_visible(entity, false)
+            corona_platformer_set_effect_entity_visible(entity, false)
             local pool = effectEntityPools[kind]
             if pool == nil then
                 pool = {}
@@ -2979,7 +2979,7 @@ function corona_platformer_process_effect_prewarm_queue()
     end
 end
 
-local function remove_effect_from_list(list, effect)
+function corona_platformer_remove_effect_from_list(list, effect)
     for index = #list, 1, -1 do
         if list[index] == effect then
             table.remove(list, index)
@@ -2987,33 +2987,33 @@ local function remove_effect_from_list(list, effect)
     end
 end
 
-local function destroy_streamed_effect(effect)
+function corona_platformer_destroy_streamed_effect(effect)
     if effect == nil then
         return
     end
-    remove_effect_from_list(effects, effect)
-    remove_effect_from_list(loopEffects, effect)
+    corona_platformer_remove_effect_from_list(effects, effect)
+    corona_platformer_remove_effect_from_list(loopEffects, effect)
     destroy_effect(effect)
 end
 
-local function destroy_projectile_effect(projectile)
+function corona_platformer_destroy_projectile_effect(projectile)
     if projectile ~= nil and projectile.effect ~= nil then
-        destroy_streamed_effect(projectile.effect)
+        corona_platformer_destroy_streamed_effect(projectile.effect)
         projectile.effect = nil
     end
 end
 
 combat.clear_projectiles = function()
     for _, projectile in ipairs(combat.projectiles) do
-        destroy_projectile_effect(projectile)
+        corona_platformer_destroy_projectile_effect(projectile)
     end
     combat.projectiles = {}
 end
 
-local function remove_projectile_at(index)
+function corona_platformer_remove_projectile_at(index)
     local projectile = combat.projectiles[index]
     if projectile ~= nil then
-        destroy_projectile_effect(projectile)
+        corona_platformer_destroy_projectile_effect(projectile)
     end
     table.remove(combat.projectiles, index)
 end
@@ -3027,7 +3027,7 @@ combat.spawn_fire_projectile = function()
         return false
     end
 
-    local worldDirection = screen_axis_to_world_axis(player.facing)
+    local worldDirection = corona_platformer_screen_axis_to_world_axis(player.facing)
     if math.abs(worldDirection) < 0.001 then
         worldDirection = 1.0
     end
@@ -3065,7 +3065,7 @@ combat.spawn_fire_projectile = function()
     return true
 end
 
-local function remove_zone_goal_parts(zone)
+function corona_platformer_remove_zone_goal_parts(zone)
     for index = #goalFlagParts, 1, -1 do
         if goalFlagParts[index].zone == zone then
             table.remove(goalFlagParts, index)
@@ -3073,7 +3073,7 @@ local function remove_zone_goal_parts(zone)
     end
 end
 
-local function begin_level_zone_load(zone)
+function corona_platformer_begin_level_zone_load(zone)
     if zone == nil or zone.loaded or zone.loading then
         return false
     end
@@ -3093,7 +3093,7 @@ function corona_platformer_process_level_zone_load(zone, budget)
         return false, 0
     end
     if not zone.loading then
-        begin_level_zone_load(zone)
+        corona_platformer_begin_level_zone_load(zone)
     end
 
     local remaining = math.max(1, math.floor(budget or 1))
@@ -3113,7 +3113,7 @@ function corona_platformer_process_level_zone_load(zone, budget)
         remaining = remaining - 1
         used = used + 1
 
-        local entity = spawn_box(
+        local entity = corona_platformer_spawn_box(
             desc.name,
             desc.position,
             desc.scale,
@@ -3178,7 +3178,7 @@ function corona_platformer_process_level_zone_load(zone, budget)
     return false, used
 end
 
-local function load_level_zone(zone, budget)
+function corona_platformer_load_level_zone(zone, budget)
     if zone == nil or zone.loaded then
         return false
     end
@@ -3195,13 +3195,13 @@ local function load_level_zone(zone, budget)
     return completed
 end
 
-local function unload_level_zone(zone)
+function corona_platformer_unload_level_zone(zone)
     if zone == nil or (not zone.loaded and not zone.loading) then
         return false
     end
 
     for _, effect in ipairs(zone.effects) do
-        destroy_streamed_effect(effect)
+        corona_platformer_destroy_streamed_effect(effect)
     end
     zone.effects = {}
 
@@ -3213,7 +3213,7 @@ local function unload_level_zone(zone)
     zone.platforms = {}
     corona_platformer_mark_collision_debug_dirty()
 
-    remove_zone_goal_parts(zone)
+    corona_platformer_remove_zone_goal_parts(zone)
     for _, entity in ipairs(zone.entities) do
         if entity == goalEntity then
             goalEntity = nil
@@ -3233,7 +3233,7 @@ local function unload_level_zone(zone)
     return true
 end
 
-local function zone_overlaps_frustum(zone, minX, maxX, minY, maxY, margin)
+function corona_platformer_zone_overlaps_frustum(zone, minX, maxX, minY, maxY, margin)
     return
         zone.maxX >= minX - margin and
         zone.minX <= maxX + margin and
@@ -3242,13 +3242,13 @@ local function zone_overlaps_frustum(zone, minX, maxX, minY, maxY, margin)
 end
 
 function corona_platformer_spawn_goal_spine_effects()
-    queue_streaming_spine_effect("movingflag", goalX + 118.0, corona_platformer_goal_surface_y + 218.0, {
+    corona_platformer_queue_streaming_spine_effect("movingflag", goalX + 118.0, corona_platformer_goal_surface_y + 218.0, {
         z = spineEffectZ,
         targetExtent = 138.0,
         loop = true,
         phase = 0.25,
     })
-    queue_streaming_spine_effect("skill_ready", goalX, corona_platformer_goal_surface_y + 54.0, {
+    corona_platformer_queue_streaming_spine_effect("skill_ready", goalX, corona_platformer_goal_surface_y + 54.0, {
         z = spineEffectZ,
         targetExtent = 190.0,
         loop = true,
@@ -3265,7 +3265,7 @@ function corona_platformer_spawn_layout_spine_effects()
     for index, block in ipairs(currentLayout.obstacles) do
         if index % 6 == 0 and markerCount < 3 then
             markerCount = markerCount + 1
-            queue_streaming_spine_effect("skill_ready", corona_platformer_transform_layout_x(block.x), block.y + block.h * 0.5 + 44.0, {
+            corona_platformer_queue_streaming_spine_effect("skill_ready", corona_platformer_transform_layout_x(block.x), block.y + block.h * 0.5 + 44.0, {
                 z = spineEffectZ,
                 targetExtent = 92.0,
                 loop = true,
@@ -3275,7 +3275,7 @@ function corona_platformer_spawn_layout_spine_effects()
     end
 end
 
-local function choose_animation()
+function corona_platformer_choose_animation()
     if attackTimer > 0.0 then
         return "attack"
     end
@@ -3285,7 +3285,7 @@ local function choose_animation()
     return "idle"
 end
 
-local function player_spine_y()
+function corona_platformer_player_spine_y()
     return player.y + playerVisualFootOffset
 end
 
@@ -3294,34 +3294,34 @@ function update_character(force)
         return
     end
 
-    local animation = choose_animation()
+    local animation = corona_platformer_choose_animation()
     local duration = loopSeconds[animation] or 1.0
     local sampleTime = time % duration
-    local sampleFps = get_player_animation_sample_fps(animation)
+    local sampleFps = corona_platformer_get_player_animation_sample_fps(animation)
     local sampleFrame = math.floor(sampleTime * sampleFps + 0.0001)
     local forceSample = force or lastCharacterHandle == nil or animation ~= lastAnimation
     local mirrorX = player.facing < 0.0
     local yaw = 0.0
-    local visualY = player_spine_y()
+    local visualY = corona_platformer_player_spine_y()
     if not forceSample and sampleFrame == lastFrame then
-        set_character_spine_pose(character, nil, player.x, visualY, characterZ, yaw, playerVisualExtent, 0.72, 0.0, mirrorX, false)
+        corona_platformer_set_character_spine_pose(character, nil, player.x, visualY, characterZ, yaw, playerVisualExtent, 0.72, 0.0, mirrorX, false)
         return
     end
 
-    local handle, frame, resolved = get_spine_scene(spineAsset, animation, sampleTime, sampleFps, lastCharacterHandle, forceSample)
+    local handle, frame, resolved = corona_platformer_get_spine_scene(spineAsset, animation, sampleTime, sampleFps, lastCharacterHandle, forceSample)
     if handle == nil then
         return
     end
 
     if force or (resolved and (frame ~= lastFrame or animation ~= lastAnimation)) then
-        set_character_spine_pose(character, handle, player.x, visualY, characterZ, yaw, playerVisualExtent, 0.72, 0.0, mirrorX, false)
+        corona_platformer_set_character_spine_pose(character, handle, player.x, visualY, characterZ, yaw, playerVisualExtent, 0.72, 0.0, mirrorX, false)
         if resolved then
             lastFrame = frame
             lastAnimation = animation
             lastCharacterHandle = handle
         end
     else
-        set_character_spine_pose(character, nil, player.x, visualY, characterZ, yaw, playerVisualExtent, 0.72, 0.0, mirrorX, false)
+        corona_platformer_set_character_spine_pose(character, nil, player.x, visualY, characterZ, yaw, playerVisualExtent, 0.72, 0.0, mirrorX, false)
     end
 end
 
@@ -3342,21 +3342,21 @@ function corona_platformer_queue_fantasy_cloud(x, y, z, width, variant)
     local puffCWidth = width * 0.46
     local puffBHeight = math.max(36.0, puffBWidth / cloudAspect)
     local puffCHeight = math.max(34.0, puffCWidth / cloudAspect)
-    queue_streaming_box("PlatformerCloudPuffA", { x, y, z }, { width, baseHeight, 4.0 }, color, 0.96, false, {
+    corona_platformer_queue_streaming_box("PlatformerCloudPuffA", { x, y, z }, { width, baseHeight, 4.0 }, color, 0.96, false, {
         textureKind = cloudTexture,
         uvRepeat = 1.0,
         uvRepeatY = 1.0,
         frontOnly = true,
         background = true,
     })
-    queue_streaming_box("PlatformerCloudPuffB", { x - width * 0.24, y + baseHeight * 0.28, z + 1.0 }, { puffBWidth, puffBHeight, 4.0 }, color, 0.96, false, {
+    corona_platformer_queue_streaming_box("PlatformerCloudPuffB", { x - width * 0.24, y + baseHeight * 0.28, z + 1.0 }, { puffBWidth, puffBHeight, 4.0 }, color, 0.96, false, {
         textureKind = cloudTexture,
         uvRepeat = 1.0,
         uvRepeatY = 1.0,
         frontOnly = true,
         background = true,
     })
-    queue_streaming_box("PlatformerCloudPuffC", { x + width * 0.22, y + baseHeight * 0.22, z + 2.0 }, { puffCWidth, puffCHeight, 4.0 }, color, 0.96, false, {
+    corona_platformer_queue_streaming_box("PlatformerCloudPuffC", { x + width * 0.22, y + baseHeight * 0.22, z + 2.0 }, { puffCWidth, puffCHeight, 4.0 }, color, 0.96, false, {
         textureKind = cloudTexture,
         uvRepeat = 1.0,
         uvRepeatY = 1.0,
@@ -3372,7 +3372,7 @@ function corona_platformer_queue_sky_clouds()
     local minX = math.min(firstPlayableX, levelEndX)
     local maxX = math.max(firstPlayableX, levelEndX)
     local span = math.max(900.0, maxX - minX)
-    local count = clamp(math.floor(controls.skyCloudCount or 7), 3, 12)
+    local count = corona_platformer_clamp(math.floor(controls.skyCloudCount or 7), 3, 12)
     for index = 1, count do
         local t = index / (count + 1)
         local wave = ((index * 37 + currentLevel * 11) % 100) / 100.0
@@ -3451,7 +3451,7 @@ function corona_platformer_queue_fantasy_background_segment(backdropX, backdropW
 end
 
 function corona_platformer_build_level()
-    reset_level_streaming()
+    corona_platformer_reset_level_streaming()
     corona_platformer_queue_sky_clouds()
     if controls.platformerBackgroundGeometry == true then
         local backdropWidth = 900.0
@@ -3466,9 +3466,9 @@ function corona_platformer_build_level()
 
     local usingAuthoredLayout = currentLayout ~= nil
     if usingAuthoredLayout then
-        queue_layout_blocks(currentLayout.floors, { 0.27, 0.38, 0.32 }, "floor")
-        queue_layout_blocks(currentLayout.platforms, { 0.28, 0.39, 0.43 }, "platform")
-        queue_layout_blocks(currentLayout.obstacles, { 0.42, 0.32, 0.24 }, "obstacle")
+        corona_platformer_queue_layout_blocks(currentLayout.floors, { 0.27, 0.38, 0.32 }, "floor")
+        corona_platformer_queue_layout_blocks(currentLayout.platforms, { 0.28, 0.39, 0.43 }, "platform")
+        corona_platformer_queue_layout_blocks(currentLayout.obstacles, { 0.42, 0.32, 0.24 }, "obstacle")
     else
         local floorWidth = 780.0 + (currentLevel % 4) * 34.0
         local floorGap = 52.0 + (currentLevel % 5) * 9.0
@@ -3476,7 +3476,7 @@ function corona_platformer_build_level()
         local floorIndex = 0
         while floorX < levelEndX + floorWidth do
             local tint = 0.31 + (floorIndex % 4) * 0.025
-            queue_streaming_platform(
+            corona_platformer_queue_streaming_platform(
                 floorX,
                 0.0,
                 floorWidth + 18.0,
@@ -3495,7 +3495,7 @@ function corona_platformer_build_level()
             local tier = 1 + ((i + currentLevel) % 4)
             local h = 30.0
             local y = 18.0 + tier * (controls.verticalRouteTierHeight or 150.0) - h * 0.5
-            queue_streaming_platform(
+            corona_platformer_queue_streaming_platform(
                 x,
                 y,
                 220.0 + ((i + currentLevel) % 3) * 42.0,
@@ -3507,7 +3507,7 @@ function corona_platformer_build_level()
     end
 
     if not usingAuthoredLayout then
-        queue_streaming_platform(
+        corona_platformer_queue_streaming_platform(
             startX,
             0.0,
             math.max(260.0, controls.startPlatformWidth or 540.0),
@@ -3515,16 +3515,16 @@ function corona_platformer_build_level()
             platformDepth,
             { 0.34, 0.46, 0.36 },
             "floor")
-        queue_streaming_platform(firstPlayableX + 50.0, 96.0, 38.0, 190.0, platformDepth, { 0.26, 0.32, 0.29 }, "obstacle")
-        queue_streaming_platform(startX + 410.0, 56.0, 92.0, 74.0, platformDepth, { 0.29, 0.37, 0.39 }, "obstacle")
+        corona_platformer_queue_streaming_platform(firstPlayableX + 50.0, 96.0, 38.0, 190.0, platformDepth, { 0.26, 0.32, 0.29 }, "obstacle")
+        corona_platformer_queue_streaming_platform(startX + 410.0, 56.0, 92.0, 74.0, platformDepth, { 0.29, 0.37, 0.39 }, "obstacle")
     end
     corona_platformer_queue_vertical_platform_route()
     local decoyPlatformCount = corona_platformer_queue_decoy_platform_routes()
     local lowStepCount = corona_platformer_validate_platform_step_heights()
-    queue_streaming_box("PlatformerGoalTrigger", { goalX, corona_platformer_goal_surface_y + 10.0, characterZ + 12.0 }, { 170.0, 20.0, 92.0 }, { 0.92, 0.72, 0.20 }, 0.52, true, {
+    corona_platformer_queue_streaming_box("PlatformerGoalTrigger", { goalX, corona_platformer_goal_surface_y + 10.0, characterZ + 12.0 }, { 170.0, 20.0, 92.0 }, { 0.92, 0.72, 0.20 }, 0.52, true, {
         goalTrigger = true,
     })
-    queue_goal_flag()
+    corona_platformer_queue_goal_flag()
     corona_platformer_spawn_goal_spine_effects()
     corona_platformer_spawn_layout_spine_effects()
     corona.log(
@@ -3535,34 +3535,34 @@ function corona_platformer_build_level()
         " load_mode=" .. (levelStreamingEnabled and "camera_streaming" or "full_level"))
     if not levelStreamingEnabled then
         for _, zone in pairs(levelZones) do
-            load_level_zone(zone)
+            corona_platformer_load_level_zone(zone)
         end
     end
 end
 
-local function spawn_character()
+function corona_platformer_spawn_character()
     if controls.spineSkinningBenchmark == true then
         return
     end
 
-    local handle = select(1, get_spine_scene(spineAsset, "idle", 0.0, get_player_animation_sample_fps("idle"), nil, true))
+    local handle = select(1, corona_platformer_get_spine_scene(spineAsset, "idle", 0.0, corona_platformer_get_player_animation_sample_fps("idle"), nil, true))
     if handle == nil then
         corona.log("platformer player spawn failed asset=" .. tostring(spineAsset) .. " name=" .. tostring(playerAssetName))
         return
     end
     lastCharacterHandle = handle
-    set_character_scale_reference(handle)
-    playerVisualExtent = character_visual_extent_from_scene(handle)
+    corona_platformer_set_character_scale_reference(handle)
+    playerVisualExtent = corona_platformer_character_visual_extent_from_scene(handle)
 
     character = corona.Entity.create("Platformer" .. playerDisplayName)
     corona.log("platformer player spawn asset=" .. tostring(spineAsset) .. " name=" .. tostring(playerAssetName) .. " z=" .. tostring(characterZ))
-    local ok = set_character_spine_pose(character, handle, player.x, player_spine_y(), characterZ, 0.0, playerVisualExtent, 0.72, 0.0, false, false)
+    local ok = corona_platformer_set_character_spine_pose(character, handle, player.x, corona_platformer_player_spine_y(), characterZ, 0.0, playerVisualExtent, 0.72, 0.0, false, false)
     if not ok then
         corona.Entity.destroy(character)
         character = nil
         return
     end
-    add_spawned(character)
+    corona_platformer_add_spawned(character)
 end
 
 -- Phase 5 of the platformer Spine optimization plan (script register-limit
@@ -3587,13 +3587,13 @@ corona_platformer_locals.levelCount = levelCount
 corona_platformer_locals.goalX = goalX
 corona_platformer_locals.startX = startX
 -- Local helper functions
-corona_platformer_locals.add_spawned = add_spawned
-corona_platformer_locals.get_spine_scene = get_spine_scene
-corona_platformer_locals.set_spine_pose = set_spine_pose
-corona_platformer_locals.set_character_spine_pose = set_character_spine_pose
-corona_platformer_locals.set_effect_entity_visible = set_effect_entity_visible
-corona_platformer_locals.clamp = clamp
-corona_platformer_locals.request_exit = request_exit
+corona_platformer_locals.add_spawned = corona_platformer_add_spawned
+corona_platformer_locals.get_spine_scene = corona_platformer_get_spine_scene
+corona_platformer_locals.set_spine_pose = corona_platformer_set_spine_pose
+corona_platformer_locals.set_character_spine_pose = corona_platformer_set_character_spine_pose
+corona_platformer_locals.set_effect_entity_visible = corona_platformer_set_effect_entity_visible
+corona_platformer_locals.clamp = corona_platformer_clamp
+corona_platformer_locals.request_exit = corona_platformer_request_exit
 -- Mutable scalars must be accessed through getters because Lua locals
 -- cannot be aliased into a table by reference. The closures capture each
 -- upvalue, so callers always see the latest value.
@@ -3632,7 +3632,7 @@ function corona_platformer_locals.start_new_game()
 end
 
 function corona_platformer_spawn_camera_and_light()
-    cameraEntity = add_spawned(corona.Entity.create("PlatformerCamera"))
+    cameraEntity = corona_platformer_add_spawned(corona.Entity.create("PlatformerCamera"))
     local focusX = player.x
     local focusY = player.y + (controls.cameraVerticalOffset or 112.0)
     local cameraDistance = controls.cameraDistance or 2200.0
@@ -3646,7 +3646,7 @@ function corona_platformer_spawn_camera_and_light()
         active = true,
     })
 
-    sunEntity = add_spawned(corona.Entity.create("PlatformerSun"))
+    sunEntity = corona_platformer_add_spawned(corona.Entity.create("PlatformerSun"))
     corona.LightComponent.add(sunEntity, {
         type = "directional",
         enabled = true,
@@ -3657,11 +3657,11 @@ function corona_platformer_spawn_camera_and_light()
     })
 end
 
-local function enemy_target_extent(name)
+function corona_platformer_enemy_target_extent(name)
     return sharedCharacterVisualExtent
 end
 
-local function resolve_enemy_asset(index)
+function corona_platformer_resolve_enemy_asset(index)
     local asset = enemyAssets[index]
     if asset == nil or asset.name ~= playerAssetName then
         return asset
@@ -3680,17 +3680,17 @@ local function resolve_enemy_asset(index)
     return nil
 end
 
-local function build_enemy_slots()
+function corona_platformer_build_enemy_slots()
     enemies = {}
     for index = currentLevelEnemyStart, currentLevelEnemyEnd do
-        local asset = resolve_enemy_asset(index)
+        local asset = corona_platformer_resolve_enemy_asset(index)
         if asset == nil then
             break
         end
         local slotIndex = index - currentLevelEnemyStart + 1
         local x = enemyStartX + (slotIndex - 1) * enemySpacing
         local direction = ((index + currentLevel) % 2 == 0) and -1.0 or 1.0
-        local extent = enemy_target_extent(asset.name)
+        local extent = corona_platformer_enemy_target_extent(asset.name)
         enemies[slotIndex] = {
             asset = asset,
             assetIndex = index,
@@ -3715,7 +3715,7 @@ local function build_enemy_slots()
     end
 end
 
-local function destroy_enemy_entity(enemy)
+function corona_platformer_destroy_enemy_entity(enemy)
     if enemy.entity ~= nil then
         corona.Entity.destroy(enemy.entity)
         enemy.entity = nil
@@ -3725,11 +3725,11 @@ local function destroy_enemy_entity(enemy)
     end
 end
 
-local function reset_all_enemies()
+function corona_platformer_reset_all_enemies()
     defeatedEnemyCount = 0
     activeEnemyCount = 0
     for index, enemy in ipairs(enemies) do
-        destroy_enemy_entity(enemy)
+        corona_platformer_destroy_enemy_entity(enemy)
         enemy.baseX = enemy.desiredX or enemy.baseX
         enemy.x = enemy.baseX
         enemy.y = 18.0
@@ -3742,8 +3742,8 @@ local function reset_all_enemies()
     end
 end
 
-local function sync_enemy_source_extent(enemy, handle)
-    local extent = character_visual_extent_from_scene(handle)
+function corona_platformer_sync_enemy_source_extent(enemy, handle)
+    local extent = corona_platformer_character_visual_extent_from_scene(handle)
     enemy.targetExtent = extent
     enemy.hitRadius = math.max(34.0, extent * 0.34)
     enemy.hitHeight = math.max(72.0, extent * 0.84)
@@ -3758,16 +3758,16 @@ function corona_platformer_enemy_render_z(enemy)
     return enemyZ - (assetIndex % 9) * spriteEntityDepthStep
 end
 
-local function spawn_enemy_entity(enemy)
-    local handle = select(1, get_spine_scene(enemy.asset.path, "idle", enemy.phase, enemySampleFps, nil, true))
+function corona_platformer_spawn_enemy_entity(enemy)
+    local handle = select(1, corona_platformer_get_spine_scene(enemy.asset.path, "idle", enemy.phase, enemySampleFps, nil, true))
     if handle == nil then
         return false
     end
-    sync_enemy_source_extent(enemy, handle)
+    corona_platformer_sync_enemy_source_extent(enemy, handle)
     corona_platformer_snap_enemy_to_safe_spawn(enemy)
 
     enemy.entity = corona.Entity.create("PlatformerEnemy")
-    local ok = set_character_spine_pose(
+    local ok = corona_platformer_set_character_spine_pose(
         enemy.entity,
         handle,
         enemy.x,
@@ -3777,7 +3777,7 @@ local function spawn_enemy_entity(enemy)
         enemy.targetExtent,
         0.84,
         0.0,
-        enemy_mirror_x(enemy))
+        corona_platformer_enemy_mirror_x(enemy))
     if not ok then
         corona.Entity.destroy(enemy.entity)
         enemy.entity = nil
@@ -3794,7 +3794,7 @@ local function spawn_enemy_entity(enemy)
     return true
 end
 
-local function defeat_enemy(enemy, cause)
+function corona_platformer_defeat_enemy(enemy, cause)
     if not enemy.alive then
         return
     end
@@ -3806,7 +3806,7 @@ local function defeat_enemy(enemy, cause)
     })
     combat.maybe_spawn_ranged_ammo_drop(enemy)
     combat.maybe_spawn_health_drop(enemy)
-    destroy_enemy_entity(enemy)
+    corona_platformer_destroy_enemy_entity(enemy)
     enemy.alive = false
     defeatedEnemyCount = defeatedEnemyCount + 1
 end
@@ -3875,7 +3875,7 @@ function projectile_hits_platform(projectile, previousX, previousY)
 
         if clip_axis(previousX, deltaX, minX, maxX, range) and clip_axis(previousY, deltaY, minY, maxY, range) then
             if range.exit >= 0.0 and range.enter <= 1.0 then
-                local hitT = clamp(range.enter, 0.0, 1.0)
+                local hitT = corona_platformer_clamp(range.enter, 0.0, 1.0)
                 if bestHit == nil or hitT < bestHit.t then
                     bestHit = {
                         t = hitT,
@@ -3923,7 +3923,7 @@ combat.update_projectiles = function(dt)
         if not removeProjectile then
             for _, enemy in ipairs(enemies) do
                 if projectile_hits_enemy(projectile, enemy) then
-                    defeat_enemy(enemy, "fire")
+                    corona_platformer_defeat_enemy(enemy, "fire")
                     removeProjectile = true
                     break
                 end
@@ -3931,7 +3931,7 @@ combat.update_projectiles = function(dt)
         end
 
         if removeProjectile then
-            remove_projectile_at(index)
+            corona_platformer_remove_projectile_at(index)
         end
     end
 end
@@ -3941,7 +3941,7 @@ function enemy_stomp_y(enemy)
 end
 
 function is_enemy_in_melee_arc(enemy)
-    local forwardDistance = (enemy.x - player.x) * screen_axis_to_world_axis(player.facing)
+    local forwardDistance = (enemy.x - player.x) * corona_platformer_screen_axis_to_world_axis(player.facing)
     if forwardDistance < -meleeAttackBackReach then
         return false
     end
@@ -4007,7 +4007,7 @@ function damage_player(enemy, amount)
     end
 
     if health <= 0 then
-        kill_player("health")
+        corona_platformer_kill_player("health")
         return "death"
     end
     return "hit"
@@ -4023,14 +4023,14 @@ function corona_platformer_update_enemy_animation(enemy, force)
     local sampleTime = (time + enemy.phase) % duration
     local sampleFrame = math.floor(sampleTime * enemySampleFps + 0.0001)
     local forceSample = force or enemy.lastHandle == nil or animation ~= enemy.lastAnimation
-    local mirrorX = enemy_mirror_x(enemy)
+    local mirrorX = corona_platformer_enemy_mirror_x(enemy)
     local yaw = 0.0
     if not forceSample and sampleFrame == enemy.lastFrame then
-        set_character_spine_pose(enemy.entity, nil, enemy.x, corona_platformer_enemy_spine_y(enemy), corona_platformer_enemy_render_z(enemy), yaw, enemy.targetExtent, 0.84, 0.0, mirrorX)
+        corona_platformer_set_character_spine_pose(enemy.entity, nil, enemy.x, corona_platformer_enemy_spine_y(enemy), corona_platformer_enemy_render_z(enemy), yaw, enemy.targetExtent, 0.84, 0.0, mirrorX)
         return
     end
 
-    local handle, frame, resolved = get_spine_scene(enemy.asset.path, animation, sampleTime, enemySampleFps, enemy.lastHandle, forceSample)
+    local handle, frame, resolved = corona_platformer_get_spine_scene(enemy.asset.path, animation, sampleTime, enemySampleFps, enemy.lastHandle, forceSample)
     if handle == nil then
         return
     end
@@ -4044,7 +4044,7 @@ function corona_platformer_update_enemy_animation(enemy, force)
             enemy.lastHandle = handle
         end
     end
-    set_character_spine_pose(enemy.entity, sceneHandle, enemy.x, corona_platformer_enemy_spine_y(enemy), corona_platformer_enemy_render_z(enemy), yaw, enemy.targetExtent, 0.84, 0.0, mirrorX)
+    corona_platformer_set_character_spine_pose(enemy.entity, sceneHandle, enemy.x, corona_platformer_enemy_spine_y(enemy), corona_platformer_enemy_render_z(enemy), yaw, enemy.targetExtent, 0.84, 0.0, mirrorX)
 end
 
 function corona_platformer_actor_overlaps_platform(x, y, halfWidth, height, platform)
@@ -4124,7 +4124,7 @@ function corona_platformer_resolve_player_platform_collisions(previousX, previou
                 playerHeight,
                 platform)
             if face ~= nil then
-                player.x = clamp(resolvedX, worldMinX, levelEndX)
+                player.x = corona_platformer_clamp(resolvedX, worldMinX, levelEndX)
                 player.y = resolvedY
                 resolvedAny = true
 
@@ -4202,7 +4202,7 @@ function corona_platformer_update_enemy_contact(enemy, previousY, fallingVelocit
 
     if can_stomp_enemy(enemy, previousY, fallingVelocity) then
         local bounceY = enemy_stomp_y(enemy) + 2.0
-        defeat_enemy(enemy, "stomp")
+        corona_platformer_defeat_enemy(enemy, "stomp")
         player.y = math.max(player.y, bounceY)
         player.vy = stompBounceVelocity
         player.grounded = false
@@ -4210,7 +4210,7 @@ function corona_platformer_update_enemy_contact(enemy, previousY, fallingVelocit
     end
 
     if is_melee_attack_active() and is_enemy_in_melee_arc(enemy) then
-        defeat_enemy(enemy, "melee")
+        corona_platformer_defeat_enemy(enemy, "melee")
         return "melee"
     end
 
@@ -4240,7 +4240,7 @@ function corona_platformer_update_enemies(dt, previousY, fallingVelocity)
                     local maxEnemySpawns = math.max(1, math.floor(controls.maxEnemySpawnsPerFrame or 1))
                     if enemySpawnsThisFrame < maxEnemySpawns then
                         enemySpawnsThisFrame = enemySpawnsThisFrame + 1
-                        spawn_enemy_entity(enemy)
+                        corona_platformer_spawn_enemy_entity(enemy)
                     end
                 end
 
@@ -4266,10 +4266,10 @@ function corona_platformer_update_enemies(dt, previousY, fallingVelocity)
                     corona_platformer_update_enemy_animation(enemy, false)
                 end
             elseif enemy.entity ~= nil and distance > enemyDespawnDistance then
-                destroy_enemy_entity(enemy)
+                corona_platformer_destroy_enemy_entity(enemy)
             end
         elseif enemy.entity ~= nil then
-            destroy_enemy_entity(enemy)
+            corona_platformer_destroy_enemy_entity(enemy)
         end
     end
 end
@@ -4296,17 +4296,17 @@ function corona_platformer_update_input(dt)
         if gamepad.dpad_right then
             axis = axis + 1.0
         end
-        axis = clamp(axis, -1.0, 1.0)
+        axis = corona_platformer_clamp(axis, -1.0, 1.0)
     end
 
     if axis ~= 0.0 then
-        local worldAxis = screen_axis_to_world_axis(axis)
-        player.vx = approach(player.vx, worldAxis * moveSpeed, acceleration * dt)
+        local worldAxis = corona_platformer_screen_axis_to_world_axis(axis)
+        player.vx = corona_platformer_approach(player.vx, worldAxis * moveSpeed, acceleration * dt)
         if math.abs(axis) > 0.18 then
             player.facing = axis
         end
     else
-        player.vx = approach(player.vx, 0.0, friction * dt)
+        player.vx = corona_platformer_approach(player.vx, 0.0, friction * dt)
     end
 
     -- Jump triggers: keyboard (SPACE/W/UP), gamepad A/X face buttons, and
@@ -4360,8 +4360,8 @@ function corona_platformer_update_input(dt)
         elseif load_level ~= nil then
             load_level(gameCompleted and 1 or currentLevel)
         else
-            reset_player()
-            reset_all_enemies()
+            corona_platformer_reset_player()
+            corona_platformer_reset_all_enemies()
         end
     end
 end
@@ -4430,11 +4430,11 @@ function corona_platformer_compute_camera_focus()
         return player.x, focusY
     end
 
-    local lead = clamp(player.vx * 0.28, -85.0, 110.0)
+    local lead = corona_platformer_clamp(player.vx * 0.28, -85.0, 110.0)
     local minFocusX = math.min(worldMinX + 170.0, levelEndX - 170.0)
     local maxFocusX = math.max(worldMinX + 170.0, levelEndX - 170.0)
-    local focusX = clamp(player.x + lead, minFocusX, maxFocusX)
-    local focusY = clamp(player.y + (controls.cameraVerticalOffset or 112.0), 94.0, 820.0)
+    local focusX = corona_platformer_clamp(player.x + lead, minFocusX, maxFocusX)
+    local focusY = corona_platformer_clamp(player.y + (controls.cameraVerticalOffset or 112.0), 94.0, 820.0)
     return focusX, focusY
 end
 
@@ -4460,8 +4460,8 @@ update_level_streaming = function(force)
     local minX, maxX, minY, maxY = corona_platformer_camera_frustum_bounds()
     local unloadMargin = math.max(0.0, controls.streamingUnloadMargin or 980.0)
     for _, zone in pairs(levelZones) do
-        if (zone.loaded or zone.loading) and not zone_overlaps_frustum(zone, minX, maxX, minY, maxY, unloadMargin) then
-            unload_level_zone(zone)
+        if (zone.loaded or zone.loading) and not corona_platformer_zone_overlaps_frustum(zone, minX, maxX, minY, maxY, unloadMargin) then
+            corona_platformer_unload_level_zone(zone)
         end
     end
 
@@ -4493,7 +4493,7 @@ update_level_streaming = function(force)
     local preloadMargin = math.max(0.0, controls.streamingPreloadMargin or 460.0)
     local candidates = {}
     for _, zone in pairs(levelZones) do
-        if not zone.loaded and not zone.loading and zone_overlaps_frustum(zone, minX, maxX, minY, maxY, preloadMargin) then
+        if not zone.loaded and not zone.loading and corona_platformer_zone_overlaps_frustum(zone, minX, maxX, minY, maxY, preloadMargin) then
             table.insert(candidates, zone)
         end
     end
@@ -4510,7 +4510,7 @@ update_level_streaming = function(force)
         if startedThisFrame >= loadBudget or remainingObjects <= 0 then
             break
         end
-        begin_level_zone_load(zone)
+        corona_platformer_begin_level_zone_load(zone)
         startedThisFrame = startedThisFrame + 1
         local completed, used = corona_platformer_process_level_zone_load(zone, remainingObjects)
         remainingObjects = math.max(0, remainingObjects - used)
@@ -4543,14 +4543,14 @@ destroy_level_entities = function()
     corona_platformer_destroy_collision_debug_entities()
     corona_platformer_mark_collision_debug_dirty()
     for _, zone in pairs(levelZones) do
-        unload_level_zone(zone)
+        corona_platformer_unload_level_zone(zone)
     end
-    reset_level_streaming()
+    corona_platformer_reset_level_streaming()
     combat.clear_projectiles()
     combat.clear_pickups()
-    clear_spine_effects()
+    corona_platformer_clear_spine_effects()
     for _, enemy in ipairs(enemies) do
-        destroy_enemy_entity(enemy)
+        corona_platformer_destroy_enemy_entity(enemy)
     end
     for _, entity in ipairs(spawned) do
         corona.Entity.destroy(entity)
@@ -4587,7 +4587,7 @@ function corona_platformer_advance_level()
 end
 
 load_level = function(levelIndex)
-    refresh_vitals_config()
+    corona_platformer_refresh_vitals_config()
     destroy_level_entities()
     corona_platformer_configure_level(levelIndex)
     defeatedEnemyCount = 0
@@ -4601,17 +4601,17 @@ load_level = function(levelIndex)
     lastAnimation = ""
     lastCharacterHandle = nil
 
-    reset_player()
+    corona_platformer_reset_player()
     corona_platformer_build_level()
     if controls.spineSkinningBenchmark == true then
         currentLevelEnemyStart = 1
         currentLevelEnemyEnd = 0
         currentLevelEnemyTotal = 0
     else
-        build_enemy_slots()
+        corona_platformer_build_enemy_slots()
     end
     corona_platformer_spawn_camera_and_light()
-    spawn_character()
+    corona_platformer_spawn_character()
     corona_platformer_spawn_spine_benchmark_characters()
     update_character(true)
     corona_platformer_update_spine_benchmark_characters(true)
@@ -4641,7 +4641,7 @@ load_level = function(levelIndex)
 end
 
 start_new_game = function()
-    refresh_vitals_config()
+    corona_platformer_refresh_vitals_config()
     lives = maxLives
     health = maxHealth
     local selectedCandidate, selectedIndex = corona_platformer_get_selected_player_candidate()
@@ -4657,7 +4657,7 @@ start_new_game = function()
         failedSceneCache = {}
         corona.log("platformer player start selected_index=" .. tostring(selectedIndex) .. " name=" .. tostring(playerAssetName) .. " path=" .. tostring(spineAsset))
     end
-    combat.rangedAmmo = clamp(math.floor(controls.startingRangedAmmo or 0), 0, combat.rangedAmmoMax)
+    combat.rangedAmmo = corona_platformer_clamp(math.floor(controls.startingRangedAmmo or 0), 0, combat.rangedAmmoMax)
     deathCount = 0
     fallDeathCount = 0
     hitInvulnerabilityTimer = 0.0
@@ -4678,9 +4678,9 @@ end
 
 if gameState == "menu" then
     corona_platformer_configure_level(1)
-    prewarm_effect_cache()
+    corona_platformer_prewarm_effect_cache()
 else
-    prewarm_effect_cache()
+    corona_platformer_prewarm_effect_cache()
     load_level(1)
 end
 corona.log(
@@ -4734,7 +4734,7 @@ function script.update(dt)
             return
         end
         if corona.was_key_pressed("ESCAPE") or corona.was_key_pressed("Q") or (gamepad.connected and gamepad.back_pressed) then
-            request_exit()
+            corona_platformer_request_exit()
             return
         end
 
@@ -4749,7 +4749,7 @@ function script.update(dt)
     end
 
     if player.dead then
-        update_death(dt)
+        corona_platformer_update_death(dt)
         return
     end
 
@@ -4786,7 +4786,7 @@ function script.update(dt)
     local previousY = player.y
     player.vy = math.max(player.vy + gravity * dt, maxFallSpeed)
     local fallingVelocity = player.vy
-    player.x = clamp(player.x + player.vx * dt, worldMinX, levelEndX)
+    player.x = corona_platformer_clamp(player.x + player.vx * dt, worldMinX, levelEndX)
     player.y = player.y + player.vy * dt
     corona_platformer_air_peak_y = math.max(corona_platformer_air_peak_y or previousY, previousY, player.y)
 
@@ -4796,7 +4796,7 @@ function script.update(dt)
         local fatalFallDistance = math.max(1.0, controls.fallDeathMinTiers or 3.0) * math.max(1.0, controls.fallDeathTierHeight or 72.0)
         corona_platformer_air_peak_y = player.y
         if controls.fallDeathEnabled and fallDistance >= fatalFallDistance then
-            kill_player("fall")
+            corona_platformer_kill_player("fall")
             combat.update_projectiles(dt)
             combat.update_pickups(dt)
             update_spine_effects(dt)
@@ -4818,12 +4818,12 @@ function script.update(dt)
             targetExtent = 104.0,
         })
     end
-    update_safe_respawn_point()
+    corona_platformer_update_safe_respawn_point()
     if player.y < worldMinY then
         if controls.fallDeathEnabled then
-            kill_player("fall")
+            corona_platformer_kill_player("fall")
         else
-            reset_player()
+            corona_platformer_reset_player()
         end
         combat.update_projectiles(dt)
         combat.update_pickups(dt)
@@ -4887,7 +4887,7 @@ end
 
 function script.shutdown()
     destroy_level_entities()
-    destroy_cached_effect_entities()
+    corona_platformer_destroy_cached_effect_entities()
     sceneCache = {}
     failedSceneCache = {}
     lastCharacterHandle = nil
