@@ -175,6 +175,17 @@ public:
 	std::shared_ptr<Buffer> GpuSpineInfluences;
 	std::shared_ptr<Buffer> GpuSpineBones;
 	std::shared_ptr<Buffer> GpuSpineSkinnedVertices;
+
+	// 3D skeletal skinning (Corona.Skeletal.*). Fully separate from the Spine
+	// fields above; a mesh is never both bSpineMesh and bSkeletalSkinned.
+	bool bSkeletalSkinned = false;
+	bool bSkeletalSkinningDispatched = false;
+	uint32_t SkeletalVertexCount = 0;
+	uint32_t SkeletalBoneCount = 0;
+	std::shared_ptr<Buffer> SkeletalInputVertices;
+	std::shared_ptr<Buffer> SkeletalBoneMatrices;
+	std::shared_ptr<VertexBuffer> SkeletalOutputVb;
+
 	std::vector<glm::vec3> CpuPositions;
 	std::vector<uint32_t> CpuIndices;
 	std::vector<std::shared_ptr<Texture>> Textures;

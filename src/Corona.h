@@ -279,6 +279,34 @@ private:
 	};
 	shared_ptr<ComputePipelineStateObject> SpineSkinningPSO;
 
+	// 3D skeletal skinning (Corona.Skeletal.*). Fully separate from the Spine
+	// compute path above. The PSO consumes SkinInputVertex SBV + SkinBone SBV
+	// and writes a standard-layout vertex buffer that the existing GBuffer /
+	// shadow PSOs read through their normal IA input layout.
+	struct SkeletalSkinningConstant
+	{
+		UINT32 VertexCount = 0;
+		UINT32 BoneBase = 0;
+		UINT32 Pad0 = 0;
+		UINT32 Pad1 = 0;
+	};
+	shared_ptr<ComputePipelineStateObject> SkeletalSkinningPSO;
+
+	struct SkeletalFrameStats
+	{
+		UINT32 CharactersAnimated = 0;
+		UINT32 VerticesSkinned = 0;
+		UINT32 BonesUploaded = 0;
+		UINT32 DispatchCount = 0;
+		UINT32 TransitionCount = 0;
+		UINT32 BlasUpdates = 0;
+		float AnimationEvalMs = 0.0f;
+		float BoneUploadMs = 0.0f;
+		float DispatchMs = 0.0f;
+		float BlasMs = 0.0f;
+	};
+	SkeletalFrameStats SkeletalStats;
+
 	// Spine sprite/skinning profiling counters (Phase 1 of the platformer
 	// Spine optimization plan). All values accumulate across script-driven
 	// Spine evaluations between DumpSpineFrameStatsToTrace() calls.
@@ -1013,6 +1041,8 @@ private:
 	bool bCommandLineSpineGpuSkinningEnabled = true;
 	bool bCommandLinePlatformerSpineBenchmark = false;
 	UINT32 CommandLinePlatformerSpineBenchmarkCount = 50;
+	bool bCommandLineSpawnSkeletalTest = false;
+	UINT32 CommandLineSkeletalTestCount = 1;
 	bool bCommandLineBvhViewerOverrideSet = false;
 	bool bCommandLineBvhViewerEnabled = false;
 	bool bCommandLineNvFrapsBvhLiveTlas = false;
@@ -2346,6 +2376,14 @@ public:
 	void DispatchSpineSkinningForMesh(Mesh* mesh);
 	void DispatchSpineSkinningForScene(const shared_ptr<Scene>& scene);
 	void DispatchSpineSkinningForRenderWorld();
+
+	// 3D skeletal skinning entry points (implemented in Corona.Skeletal.cpp).
+	// Spawn helpers create procedural box characters for Sponza-mode testing.
+	void InitSkeletalSkinningPSO();
+	void DispatchSkeletalSkinningForRenderWorld();
+	void SpawnSkeletalTestCharacters();
+	void UpdateSkeletalTestCharacters(float timeSeconds);
+	void DumpSkeletalFrameStatsToTrace();
 	bool BuildMobileShadowViewProjection(glm::mat4x4& lightViewProj);
 	bool GetSceneObjectWorldBounds(const SceneObject& object, glm::vec3& boundsMin, glm::vec3& boundsMax, glm::vec3& center, float& radius) const;
 	bool IsWorldAabbInViewFrustum(const glm::vec3& boundsMin, const glm::vec3& boundsMax) const;

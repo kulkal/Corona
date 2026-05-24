@@ -2788,6 +2788,27 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 			}
 			continue;
 		}
+		if (arg == L"--skeletal-test" || arg == L"--skeletal-skinning-test")
+		{
+			bCommandLineSpawnSkeletalTest = true;
+			continue;
+		}
+		std::wstring skeletalTestCountValue = ParseValueArg(arg, L"--skeletal-test-count", L"-skeletal-test-count", i);
+		if (skeletalTestCountValue.empty())
+			skeletalTestCountValue = ParseValueArg(arg, L"--skeletal-skinning-test-count", L"-skeletal-skinning-test-count", i);
+		if (!skeletalTestCountValue.empty())
+		{
+			try
+			{
+				const unsigned long value = std::stoul(skeletalTestCountValue);
+				CommandLineSkeletalTestCount = static_cast<UINT32>(std::clamp<unsigned long>(value, 1ul, 4096ul));
+				bCommandLineSpawnSkeletalTest = true;
+			}
+			catch (...)
+			{
+			}
+			continue;
+		}
 		if (arg == L"--spine-skinning-cpu" || arg == L"--cpu-spine-skinning" || arg == L"--disable-spine-compute-skinning")
 		{
 			bCommandLineSpineSkinningOverrideSet = true;
