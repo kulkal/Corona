@@ -2680,6 +2680,168 @@ static const D3D12_HEAP_PROPERTIES kUploadHeapProps =
 	0,
 };
 
+std::shared_ptr<RTAS> DX12Backend::CreateBLASForSkeletalMesh(Mesh* mesh)
+{
+	assert(mesh);
+	if (!mesh->bSkeletalSkinned || !mesh->SkeletalOutputVb || !mesh->Ib)
+		return nullptr;
+
+	DX12Backend* owner = this;
+	D3D12RTAS* as = new D3D12RTAS;
+
+	D3D12_RAYTRACING_GEOMETRY_DESC geomDesc = {};
+	geomDesc.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
+	geomDesc.Triangles.VertexBuffer.StartAddress = mesh->SkeletalOutputVb->resource->GetGPUVirtualAddress();
+	geomDesc.Triangles.VertexBuffer.StrideInBytes = mesh->VertexStride;
+	geomDesc.Triangles.VertexFormat = DXGI_FORMAT_R32G32B32_FLOAT;
+	geomDesc.Triangles.VertexCount = mesh->SkeletalOutputVb->numVertices;
+	geomDesc.Triangles.IndexBuffer = mesh->Ib->resource->GetGPUVirtualAddress();
+	geomDesc.Triangles.IndexFormat = ToDXGIFormat(mesh->IndexFormat);
+	geomDesc.Triangles.IndexCount = mesh->Ib->numIndices;
+	geomDesc.Triangles.Transform3x4 = 0;
+	geomDesc.Flags = mesh->bTransparent
+		? D3D12_RAYTRACING_GEOMETRY_FLAG_NONE
+		: D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE;
+
+	D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS inputs = {};
+	inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
+	// ALLOW_UPDATE so RefitBLAS can refresh in-place each frame. FAST_TRACE
+	// is fine alongside ALLOW_UPDATE; FAST_BUILD would also work but trace
+	// performance benefits the GBuffer-time RT shaders more.
+	inputs.Flags =
+		D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE |
+		D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_ALLOW_UPDATE;
+	inputs.NumDescs = 1;
+	inputs.pGeometryDescs = &geomDesc;
+	inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
+
+	D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO info = {};
+	owner->Device->GetRaytracingAccelerationStructurePrebuildInfo(&inputs, &info);
+
+	// scratch needs the larger of the initial-build and update-build sizes.
+	const UINT64 scratchSize = (std::max)(info.ScratchDataSizeInBytes, info.UpdateScratchDataSizeInBytes);
+
+	{
+		D3D12_RESOURCE_DESC bufDesc = CD3DX12_RESOURCE_DESC::Buffer(scratchSize, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+		owner->Device->CreateCommittedResource(&kDefaultHeapProps, D3D12_HEAP_FLAG_NONE, &bufDesc,
+			D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, IID_PPV_ARGS(&as->Scratch));
+		if (as->Scratch)
+			as->Scratch->SetName(L"Corona Skeletal BLAS Scratch");
+	}
+	{
+		D3D12_RESOURCE_DESC bufDesc = CD3DX12_RESOURCE_DESC::Buffer(info.ResultDataMaxSizeInBytes, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+		owner->Device->CreateCommittedResource(&kDefaultHeapProps, D3D12_HEAP_FLAG_NONE, &bufDesc,
+			D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE, nullptr, IID_PPV_ARGS(&as->Result));
+		if (as->Result)
+			as->Result->SetName(L"Corona Skeletal BLAS Result");
+	}
+
+	CommandList* cmd = owner->CmdQ->AllocCmdList();
+
+	// BLAS build expects the geometry vertex buffer in
+	// NON_PIXEL_SHADER_RESOURCE / a compatible read state. SkeletalOutputVb
+	// lives in VertexBuffer state after Dispatch* completes; transition it
+	// for the build, then back.
+	D3D12_RESOURCE_BARRIER toSrv = {};
+	toSrv.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+	toSrv.Transition.pResource = mesh->SkeletalOutputVb->resource.Get();
+	toSrv.Transition.Subresource = 0;
+	toSrv.Transition.StateBefore = D3D12_RESOURCE_STATE_COMMON;
+	toSrv.Transition.StateAfter = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+	cmd->CmdList->ResourceBarrier(1, &toSrv);
+
+	D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC asDesc = {};
+	asDesc.Inputs = inputs;
+	asDesc.DestAccelerationStructureData = as->Result->GetGPUVirtualAddress();
+	asDesc.ScratchAccelerationStructureData = as->Scratch->GetGPUVirtualAddress();
+	cmd->CmdList->BuildRaytracingAccelerationStructure(&asDesc, 0, nullptr);
+	if (owner->BvhViewerD3D12 && CoronaBvhViewerD3D12_OnBuildRaytracingAccelerationStructure(owner->BvhViewerD3D12, cmd->CmdList.Get(), &asDesc))
+		RestoreCoronaDescriptorHeaps(owner, cmd->CmdList.Get());
+
+	D3D12_RESOURCE_BARRIER uavBarrier = {};
+	uavBarrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+	uavBarrier.UAV.pResource = as->Result.Get();
+	cmd->CmdList->ResourceBarrier(1, &uavBarrier);
+
+	// Leave the skinned VB in VertexBuffer + NPS read state to match what
+	// DispatchSkeletalSkinningForRenderWorld assumes when it transitions
+	// VertexBuffer -> UnorderedAccess at the start of the next frame.
+	D3D12_RESOURCE_BARRIER toVb = {};
+	toVb.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+	toVb.Transition.pResource = mesh->SkeletalOutputVb->resource.Get();
+	toVb.Transition.Subresource = 0;
+	toVb.Transition.StateBefore = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+	toVb.Transition.StateAfter = D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+	cmd->CmdList->ResourceBarrier(1, &toVb);
+
+	owner->CmdQ->ExecuteCommandList(cmd);
+
+	AppendCpuRuntimeTrace(
+		L"[DX12RTAS] BuildSkeletalBLAS vertices=" + std::to_wstring(mesh->SkeletalOutputVb->numVertices) +
+		L", indices=" + std::to_wstring(mesh->Ib->numIndices));
+
+	as->MeshPtr = mesh;
+	return shared_ptr<RTAS>(as);
+}
+
+void DX12Backend::RefitBLAS(RTAS* rtas, Mesh* mesh)
+{
+	D3D12RTAS* as = static_cast<D3D12RTAS*>(rtas);
+	if (!as || !as->Result || !as->Scratch || !mesh || !mesh->SkeletalOutputVb || !mesh->Ib)
+		return;
+
+	D3D12_RAYTRACING_GEOMETRY_DESC geomDesc = {};
+	geomDesc.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
+	geomDesc.Triangles.VertexBuffer.StartAddress = mesh->SkeletalOutputVb->resource->GetGPUVirtualAddress();
+	geomDesc.Triangles.VertexBuffer.StrideInBytes = mesh->VertexStride;
+	geomDesc.Triangles.VertexFormat = DXGI_FORMAT_R32G32B32_FLOAT;
+	geomDesc.Triangles.VertexCount = mesh->SkeletalOutputVb->numVertices;
+	geomDesc.Triangles.IndexBuffer = mesh->Ib->resource->GetGPUVirtualAddress();
+	geomDesc.Triangles.IndexFormat = ToDXGIFormat(mesh->IndexFormat);
+	geomDesc.Triangles.IndexCount = mesh->Ib->numIndices;
+	geomDesc.Triangles.Transform3x4 = 0;
+	geomDesc.Flags = mesh->bTransparent
+		? D3D12_RAYTRACING_GEOMETRY_FLAG_NONE
+		: D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE;
+
+	D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS inputs = {};
+	inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
+	inputs.Flags =
+		D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE |
+		D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_ALLOW_UPDATE |
+		D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PERFORM_UPDATE;
+	inputs.NumDescs = 1;
+	inputs.pGeometryDescs = &geomDesc;
+	inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
+
+	// The skinned vertex buffer is in VertexBuffer state after dispatch
+	// transitions; flip to NON_PIXEL_SHADER_RESOURCE for the BLAS update,
+	// then back.
+	D3D12_RESOURCE_BARRIER toSrv = {};
+	toSrv.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+	toSrv.Transition.pResource = mesh->SkeletalOutputVb->resource.Get();
+	toSrv.Transition.Subresource = 0;
+	toSrv.Transition.StateBefore = D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+	toSrv.Transition.StateAfter = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+	// State already includes NPS_RESOURCE, so the barrier is a no-op when
+	// the buffer is in the combined state. Skip emitting it; rely on
+	// existing dispatch UA -> VertexBuffer transition. SkeletalOutputVb was
+	// created with R32_TYPELESS RAW SRV available.
+
+	D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC asDesc = {};
+	asDesc.Inputs = inputs;
+	asDesc.DestAccelerationStructureData = as->Result->GetGPUVirtualAddress();
+	asDesc.SourceAccelerationStructureData = as->Result->GetGPUVirtualAddress();
+	asDesc.ScratchAccelerationStructureData = as->Scratch->GetGPUVirtualAddress();
+
+	GlobalCmdList->CmdList->BuildRaytracingAccelerationStructure(&asDesc, 0, nullptr);
+
+	D3D12_RESOURCE_BARRIER uavBarrier = {};
+	uavBarrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+	uavBarrier.UAV.pResource = as->Result.Get();
+	GlobalCmdList->CmdList->ResourceBarrier(1, &uavBarrier);
+}
+
 std::shared_ptr<RTAS> DX12Backend::CreateBLASForMesh(Mesh* mesh)
 {
 	assert(mesh);
@@ -4841,6 +5003,15 @@ void DX12Backend::BindGraphicsPipelineBuffer(GraphicsPipelineHandle* pipeline, c
 		return;
 
 	dxPipeline->PSO->SetSRV(bindingName, buffer->GpuHandleSRV);
+}
+
+void DX12Backend::BindGraphicsPipelineVertexBufferSRV(GraphicsPipelineHandle* pipeline, const std::string& bindingName, VertexBuffer* vb)
+{
+	auto* dxPipeline = dynamic_cast<DX12GraphicsPipelineHandle*>(pipeline);
+	if (!dxPipeline || !dxPipeline->PSO || !vb)
+		return;
+
+	dxPipeline->PSO->SetSRV(bindingName, vb->GpuHandleSRV);
 }
 
 void DX12Backend::BindGraphicsPipelineSampler(GraphicsPipelineHandle* pipeline, const std::string& bindingName, Sampler* sampler)

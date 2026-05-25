@@ -271,6 +271,11 @@ private:
 	std::shared_ptr<GraphicsPipelineHandle> GBufferGraphicsPipeline;
 	std::shared_ptr<GraphicsPipelineHandle> CpuSpineGBufferGraphicsPipeline;
 	std::shared_ptr<GraphicsPipelineHandle> SpineGBufferGraphicsPipeline;
+	// Phase 11: GBuffer PSO variant for 3D skeletal-skinned meshes. Same IA
+	// layout/state as GBufferGraphicsPipeline but the VS samples a SBV of
+	// previous-frame skinned positions to emit accurate per-vertex motion
+	// vectors (fixes TAA ghosting on rotating limbs).
+	std::shared_ptr<GraphicsPipelineHandle> SkeletalGBufferGraphicsPipeline;
 	struct SpineSkinningConstant
 	{
 		UINT32 VertexCount = 0;

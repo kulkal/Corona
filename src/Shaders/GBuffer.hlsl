@@ -54,6 +54,13 @@ struct SpineSkinnedVertex
 
 StructuredBuffer<SpineSkinnedVertex> SpineVertices : register(t4);
 
+// Phase 11: previous-frame skinned vertex positions for the 3D skeletal
+// compute path. Bound only by the skeletal GBuffer PSO; the standard and
+// Spine pipelines do not reference it so they don't need this slot.
+// Layout matches the standard 48-byte StandardVertex (position at offset 0
+// as float3/float4 — Load3 reads the first 12 bytes).
+ByteAddressBuffer SkeletalPrevPositions : register(t5);
+
 struct PSInput
 {
     float4 position : SV_POSITION;
@@ -90,6 +97,31 @@ PSInput SpineVSMain(uint vertexId : SV_VertexID)
 {
     SpineSkinnedVertex input = SpineVertices[SpineVertexBase + vertexId];
     return BuildGBufferVertex(input.position, input.normal, input.uv, input.tangent);
+}
+
+// Phase 11: GBuffer VS variant for skeletal-skinned meshes. Curr-frame
+// position comes from the standard IA layout (filled by the compute
+// skinning pass each frame). Prev-frame position is sampled from a SBV
+// ping-pong buffer the dispatcher swaps at the start of each frame, so
+// the motion vector reflects per-vertex skinning velocity rather than
+// just the camera/world delta. Layout of SkeletalPrevPositions matches
+// StandardVertex stride 48 with position at offset 0.
+PSInput SkeletalVSMain(VSInput input, uint vertexId : SV_VertexID)
+{
+    PSInput result;
+    float4 worldPos = mul(float4(input.position, 1.0f), WorldMatrix);
+    result.position = mul(worldPos, ViewProjectionMatrix);
+    result.unjitteredPosition = mul(worldPos, UnjitteredViewProjMat);
+
+    uint prevByteOffset = vertexId * 48u;
+    float3 prevPos = asfloat(SkeletalPrevPositions.Load3(prevByteOffset));
+    float4 prevWorldPos = mul(float4(prevPos, 1.0f), WorldMatrix);
+    result.prevPosition = mul(prevWorldPos, PrevUnjitteredViewProjMat);
+
+    result.normal = normalize(mul(float4(input.normal, 0), WorldMatrix));
+    result.tangent = normalize(mul(float4(input.tangent, 0), WorldMatrix));
+    result.uv = input.uv;
+    return result;
 }
 
 

@@ -544,6 +544,8 @@ public:
 	std::shared_ptr<Buffer> CreateUploadStructuredBuffer(uint32_t numElements, uint32_t elementSize) override;
 	void UpdateUploadStructuredBuffer(Buffer* buffer, const void* srcData, uint32_t sizeInBytes) override;
 	std::shared_ptr<RTAS> CreateBLASForMesh(Mesh* mesh) override;
+	std::shared_ptr<RTAS> CreateBLASForSkeletalMesh(Mesh* mesh) override;
+	void RefitBLAS(RTAS* rtas, Mesh* mesh) override;
 	std::shared_ptr<RTAS> CreateTLAS(const std::vector<RTInstanceDesc>& instances) override;
 	bool UpdateTLAS(const std::shared_ptr<RTAS>& topLevelAS, const std::vector<RTInstanceDesc>& instances) override;
 	std::shared_ptr<RTPipelineStateObject> CreateRTPipelineStateObject() override;
@@ -599,6 +601,7 @@ public:
 	void SetGraphicsPipelineConstantData(GraphicsPipelineHandle* pipeline, uint32_t slot, const void* data, uint32_t size) override;
 	void BindGraphicsPipelineTexture(GraphicsPipelineHandle* pipeline, const std::string& bindingName, Texture* texture) override;
 	void BindGraphicsPipelineBuffer(GraphicsPipelineHandle* pipeline, const std::string& bindingName, Buffer* buffer) override;
+	void BindGraphicsPipelineVertexBufferSRV(GraphicsPipelineHandle* pipeline, const std::string& bindingName, VertexBuffer* vb) override;
 	void BindGraphicsPipelineSampler(GraphicsPipelineHandle* pipeline, const std::string& bindingName, Sampler* sampler) override;
 	void DrawTriangleList(VertexBuffer* vertexBuffer, uint32_t vertexCount);
 	void RenderWindowTriangleFrame(uint32_t width, uint32_t height, float timeSeconds);

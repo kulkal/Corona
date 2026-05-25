@@ -7386,6 +7386,12 @@ void Corona::OnInit()
 	if (bCommandLineSpawnSkeletalTest)
 	{
 		SpawnSkeletalTestCharacters();
+		// Re-sync RenderWorld.SceneObjects + rebuild RTAS so the procedural
+		// skeletal characters get a BLAS (built from SkeletalOutputVb with
+		// ALLOW_UPDATE) and a TLAS entry. The initial InitRaytracingData()
+		// inside LoadAssets ran before our spawn, so without this second
+		// call the skinned meshes would be invisible to RT passes.
+		InitRaytracingData();
 		AppendCpuRuntimeTrace(L"[OnInit] after SpawnSkeletalTestCharacters");
 	}
 	UpdateStartupLoadingProgress(0.92f, L"Initializing CPU physics");
@@ -11913,6 +11919,14 @@ if (ImGui::Button("Reset Accumulation"))
 		{
 			const bool ok = DumpTexturePNG(NormalBuffers[ColorBufferWriteIndex].get(), base + L"_world_normal.png", EResourceState::ShaderRead);
 			AppendCpuRuntimeTrace(L"[SkeletalTestScreenshot] world_normal png=" + std::to_wstring(ok ? 1 : 0));
+		}
+		// Phase 11: motion-vector verification. Skinned limbs should show
+		// nonzero velocity even when the camera is still and the character
+		// world transform is constant.
+		if (VelocityBuffer)
+		{
+			const bool ok = DumpTexturePNG(VelocityBuffer.get(), base + L"_velocity.png", EResourceState::ShaderRead);
+			AppendCpuRuntimeTrace(L"[SkeletalTestScreenshot] velocity png=" + std::to_wstring(ok ? 1 : 0));
 		}
 		bSkeletalTestScreenshotDone = true;
 	}

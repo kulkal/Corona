@@ -295,6 +295,14 @@ public:
 	virtual std::shared_ptr<Buffer> CreateUploadStructuredBuffer(uint32_t numElements, uint32_t elementSize) = 0;
 	virtual void UpdateUploadStructuredBuffer(Buffer* buffer, const void* srcData, uint32_t sizeInBytes) = 0;
 	virtual std::shared_ptr<RTAS> CreateBLASForMesh(Mesh* mesh) = 0;
+	// Build a BLAS from the skeletal-skinning output VB (SkeletalOutputVb)
+	// with the ALLOW_UPDATE flag so RefitBLAS can refresh it cheaply each
+	// frame. Returns nullptr for meshes without skeletal data.
+	virtual std::shared_ptr<RTAS> CreateBLASForSkeletalMesh(Mesh* mesh) = 0;
+	// In-place refresh of a BLAS built with ALLOW_UPDATE. The acceleration
+	// structure resource address is unchanged; existing TLAS references stay
+	// valid.
+	virtual void RefitBLAS(RTAS* rtas, Mesh* mesh) = 0;
 	virtual std::shared_ptr<RTAS> CreateTLAS(const std::vector<RTInstanceDesc>& instances) = 0;
 	virtual bool UpdateTLAS(const std::shared_ptr<RTAS>& topLevelAS, const std::vector<RTInstanceDesc>& instances) = 0;
 	virtual std::shared_ptr<RTPipelineStateObject> CreateRTPipelineStateObject() = 0;
@@ -350,6 +358,11 @@ public:
 	virtual void SetGraphicsPipelineConstantData(GraphicsPipelineHandle* pipeline, uint32_t slot, const void* data, uint32_t size) = 0;
 	virtual void BindGraphicsPipelineTexture(GraphicsPipelineHandle* pipeline, const std::string& bindingName, Texture* texture) = 0;
 	virtual void BindGraphicsPipelineBuffer(GraphicsPipelineHandle* pipeline, const std::string& bindingName, Buffer* buffer) = 0;
+	// Phase 11: bind a VertexBuffer's raw-byte SRV (registered by
+	// CreateRWVertexBuffer) to a named SBV slot on a graphics PSO. Used by
+	// the skeletal GBuffer VS to sample the previous frame's compute-skinned
+	// vertex output for motion vectors.
+	virtual void BindGraphicsPipelineVertexBufferSRV(GraphicsPipelineHandle* pipeline, const std::string& bindingName, VertexBuffer* vb) = 0;
 	virtual void BindGraphicsPipelineSampler(GraphicsPipelineHandle* pipeline, const std::string& bindingName, Sampler* sampler) = 0;
 };
 

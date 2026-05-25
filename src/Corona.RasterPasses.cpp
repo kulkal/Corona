@@ -252,6 +252,21 @@ void Corona::InitGBufferPass()
 	if (!SpineGBufferGraphicsPipeline)
 		AppendCpuRuntimeTrace(L"[InitGBufferPass] failed to create Spine GBuffer pipeline");
 
+	// Phase 11: Skeletal GBuffer PSO. Same IA layout as the standard
+	// GBufferGraphicsPipeline (it reads the same StandardVertex stride from
+	// SkeletalOutputVb the compute shader fills), but the VS variant pulls
+	// the previous frame's skinned positions from a SBV bound at slot 5 so
+	// the velocity buffer reflects per-vertex skinning motion, not just the
+	// world-matrix delta.
+	GraphicsPipelineDesc skeletalDesc = desc;
+	skeletalDesc.VertexEntryPoint = "SkeletalVSMain";
+	skeletalDesc.BufferBindings = {
+		{ "SkeletalPrevPositions", 5 },
+	};
+	SkeletalGBufferGraphicsPipeline = renderBackend->CreateGraphicsPipeline(skeletalDesc);
+	if (!SkeletalGBufferGraphicsPipeline)
+		AppendCpuRuntimeTrace(L"[InitGBufferPass] failed to create Skeletal GBuffer pipeline");
+
 	auto spineSkinningPSO = renderBackend->CreateComputePipelineStateObject();
 	if (spineSkinningPSO)
 	{
@@ -1809,13 +1824,27 @@ void Corona::DrawScene(shared_ptr<Scene> scene, const glm::mat4x4& instanceTrans
 			!bUseSpineVertexFetch &&
 			mesh->bSpineMesh &&
 			CpuSpineGBufferGraphicsPipeline;
+		// Phase 11: skeletal mesh with both ping-pong VBs available uses the
+		// skeletal-VS PSO so motion vectors reflect per-vertex skinning
+		// velocity, not just camera/world motion. Falls back to the standard
+		// PSO if double buffering isn't ready (e.g. very first frame, or if
+		// PSO creation failed).
+		const bool bUseSkeletalSkinned =
+			mesh->bSkeletalSkinned &&
+			mesh->bSkeletalSkinningDispatched &&
+			mesh->SkeletalOutputVb &&
+			mesh->SkeletalOutputVbPrev &&
+			SkeletalGBufferGraphicsPipeline;
 		GraphicsPipelineHandle* activeGBufferPipeline =
-			bUseSpineVertexFetch ? SpineGBufferGraphicsPipeline.get() :
-			(bUseCpuSpinePipeline ? CpuSpineGBufferGraphicsPipeline.get() : GBufferGraphicsPipeline.get());
+			bUseSkeletalSkinned ? SkeletalGBufferGraphicsPipeline.get() :
+			(bUseSpineVertexFetch ? SpineGBufferGraphicsPipeline.get() :
+			(bUseCpuSpinePipeline ? CpuSpineGBufferGraphicsPipeline.get() : GBufferGraphicsPipeline.get()));
 		renderBackend->BindGraphicsPipeline(activeGBufferPipeline);
 		renderBackend->BindGraphicsPipelineSampler(activeGBufferPipeline, "samplerWrap", samplerWrap.get());
 		if (bUseSpineVertexFetch)
 			renderBackend->BindGraphicsPipelineBuffer(activeGBufferPipeline, "SpineVertices", mesh->GpuSpineSkinnedVertices.get());
+		if (bUseSkeletalSkinned)
+			renderBackend->BindGraphicsPipelineVertexBufferSRV(activeGBufferPipeline, "SkeletalPrevPositions", mesh->SkeletalOutputVbPrev.get());
 
 		// 3D skeletal skinning: swap the bind-pose VB for the compute-skinned
 		// output VB. Layout matches the standard IA so the GBuffer PSO is

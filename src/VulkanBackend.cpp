@@ -3793,6 +3793,19 @@ std::shared_ptr<IndexBuffer> VulkanBackend::CreateUploadIndexBuffer(EIndexFormat
 #endif
 }
 
+std::shared_ptr<RTAS> VulkanBackend::CreateBLASForSkeletalMesh(Mesh* mesh)
+{
+	// Skeletal compute path is DX12-only. Mobile (Vulkan) uses CPU
+	// skinning and the standard CreateBLASForMesh path.
+	(void)mesh;
+	return nullptr;
+}
+
+void VulkanBackend::RefitBLAS(RTAS* rtas, Mesh* mesh)
+{
+	(void)rtas; (void)mesh;
+}
+
 std::shared_ptr<RTAS> VulkanBackend::CreateBLASForMesh(Mesh* mesh)
 {
 	if (!mesh)
@@ -6538,6 +6551,15 @@ void VulkanBackend::BindGraphicsPipelineBuffer(GraphicsPipelineHandle* pipeline,
 	(void)bindingName;
 	(void)buffer;
 #endif
+}
+
+void VulkanBackend::BindGraphicsPipelineVertexBufferSRV(GraphicsPipelineHandle* pipeline, const std::string& bindingName, VertexBuffer* vb)
+{
+	// Skeletal compute path is DX12-only; mobile (Vulkan) does CPU skinning
+	// and does not need this binding.
+	(void)pipeline;
+	(void)bindingName;
+	(void)vb;
 }
 
 void VulkanBackend::BindGraphicsPipelineSampler(GraphicsPipelineHandle* pipeline, const std::string& bindingName, Sampler* sampler)

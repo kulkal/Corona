@@ -458,6 +458,18 @@ void Corona::DispatchSkeletalSkinningForRenderWorld()
 	SkeletalStats.TransitionCount = 0;
 	SkeletalStats.VerticesSkinned = 0;
 	SkeletalStats.BonesUploaded = 0;
+	SkeletalStats.BlasUpdates = 0;
+
+	// Phase 11: ping-pong the output VB so the skeletal GBuffer VS can read
+	// the previous frame's skinned positions for accurate per-vertex motion
+	// vectors. After swap: SkeletalOutputVb = the buffer that compute will
+	// overwrite (was 2-frames-old); SkeletalOutputVbPrev = last frame's
+	// output that the VS samples this frame.
+	for (Mesh* mesh : skinnedMeshes)
+	{
+		if (mesh->SkeletalOutputVbPrev)
+			std::swap(mesh->SkeletalOutputVb, mesh->SkeletalOutputVbPrev);
+	}
 
 	// Batch transitions: SR -> UA for all outputs.
 	for (Mesh* mesh : skinnedMeshes)
@@ -492,6 +504,20 @@ void Corona::DispatchSkeletalSkinningForRenderWorld()
 		renderBackend->TransitionVertexBuffer(mesh->SkeletalOutputVb.get(),
 			EResourceState::UnorderedAccess, EResourceState::VertexBuffer);
 		++SkeletalStats.TransitionCount;
+	}
+
+	// Phase 10: refit BLAS for each skinned mesh so RT passes (reflection,
+	// GI, shadow if RT) see the current skinned geometry. The combined
+	// VertexBuffer | NON_PIXEL_SHADER_RESOURCE state set by the UA->VB
+	// transition above is compatible with BLAS build inputs, so no extra
+	// state transitions are needed.
+	for (Mesh* mesh : skinnedMeshes)
+	{
+		if (mesh->SkeletalBlas)
+		{
+			renderBackend->RefitBLAS(mesh->SkeletalBlas.get(), mesh);
+			++SkeletalStats.BlasUpdates;
+		}
 	}
 }
 
@@ -646,6 +672,14 @@ void Corona::SpawnSkeletalTestCharacters()
 
 		// RW vertex buffer — compute writes here, GBuffer IA reads it.
 		mesh->SkeletalOutputVb = renderBackend->CreateRWVertexBuffer(
+			static_cast<UINT32>(sizeof(StandardVertex) * vertices.size()),
+			sizeof(StandardVertex));
+		// Phase 11: companion ping-pong VB that holds the previous frame's
+		// skinning output. Swapped with SkeletalOutputVb at the start of
+		// each dispatch so the compute always writes the new frame's output.
+		// First-frame contents are uninitialized — motion vector reads will
+		// produce garbage for the very first frame and then track correctly.
+		mesh->SkeletalOutputVbPrev = renderBackend->CreateRWVertexBuffer(
 			static_cast<UINT32>(sizeof(StandardVertex) * vertices.size()),
 			sizeof(StandardVertex));
 

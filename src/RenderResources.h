@@ -193,6 +193,17 @@ public:
 	std::shared_ptr<Buffer> SkeletalInputVertices;
 	std::shared_ptr<Buffer> SkeletalBoneMatrices;
 	std::shared_ptr<VertexBuffer> SkeletalOutputVb;
+	// Phase 11: ping-pong companion to SkeletalOutputVb that holds the
+	// previous frame's skinning output. The skeletal GBuffer VS samples it
+	// to compute correct prev-frame clip space for the motion vector pass,
+	// fixing TAA ghosting on rotating limbs. Swapped with SkeletalOutputVb
+	// at the start of each compute skinning dispatch so the compute always
+	// writes the new frame's output.
+	std::shared_ptr<VertexBuffer> SkeletalOutputVbPrev;
+	// Cached BLAS built from SkeletalOutputVb with ALLOW_UPDATE. Refreshed
+	// each frame by RefitBLAS after the compute skinning dispatch so RT
+	// passes see the current skinned geometry.
+	std::shared_ptr<RTAS> SkeletalBlas;
 
 	std::vector<glm::vec3> CpuPositions;
 	std::vector<uint32_t> CpuIndices;
@@ -204,7 +215,14 @@ public:
 
 	std::shared_ptr<RTAS> CreateBLAS()
 	{
-		return Owner ? Owner->CreateBLASForMesh(this) : nullptr;
+		if (!Owner) return nullptr;
+		if (bSkeletalSkinned && SkeletalOutputVb)
+		{
+			if (!SkeletalBlas)
+				SkeletalBlas = Owner->CreateBLASForSkeletalMesh(this);
+			return SkeletalBlas;
+		}
+		return Owner->CreateBLASForMesh(this);
 	}
 };
 
