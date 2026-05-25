@@ -289,6 +289,11 @@ public:
 	// can be bound as a UAV through any ComputePipelineStateObject and then
 	// transitioned to VertexBuffer state for IA fetch.
 	virtual std::shared_ptr<VertexBuffer> CreateRWVertexBuffer(uint32_t size, uint32_t stride) = 0;
+	// Persistent-mapped UPLOAD-heap structured buffer for dynamic SBV data
+	// (e.g. per-character bone matrices). Reuse the same buffer across
+	// frames; call UpdateUploadStructuredBuffer to refresh contents.
+	virtual std::shared_ptr<Buffer> CreateUploadStructuredBuffer(uint32_t numElements, uint32_t elementSize) = 0;
+	virtual void UpdateUploadStructuredBuffer(Buffer* buffer, const void* srcData, uint32_t sizeInBytes) = 0;
 	virtual std::shared_ptr<RTAS> CreateBLASForMesh(Mesh* mesh) = 0;
 	virtual std::shared_ptr<RTAS> CreateTLAS(const std::vector<RTInstanceDesc>& instances) = 0;
 	virtual bool UpdateTLAS(const std::shared_ptr<RTAS>& topLevelAS, const std::vector<RTInstanceDesc>& instances) = 0;

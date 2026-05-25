@@ -626,9 +626,10 @@ void Corona::SpawnSkeletalTestCharacters()
 		mesh->SkeletalInputVertices = renderBackend->CreateBuffer(inputDesc);
 		AppendCpuRuntimeTrace(L"[SkeletalSpawn] inst=" + std::to_wstring(instance) + L" after CreateBuffer(SkinInputVertex)");
 
-		// Bone matrix SBV — one mat3x4 (48 B) per bone. Phase 6 will populate
-		// these every frame from CPU-side animation; for now (Phase 4-5) we
-		// fill with identity so the skinning output matches bind pose.
+		// Bone matrix SBV — one mat3x4 (48 B) per bone, persistent-mapped on
+		// UPLOAD heap so per-frame UpdateSkeletalTestCharacters can refresh
+		// via a single memcpy (no CreateCommittedResource, no staging copy,
+		// no WaitGPU per character).
 		struct InitialBoneMatrix { float r0[4]; float r1[4]; float r2[4]; };
 		static_assert(sizeof(InitialBoneMatrix) == 48, "SkinBone size drift");
 		std::vector<InitialBoneMatrix> identityBones(BONE_COUNT);
@@ -638,14 +639,15 @@ void Corona::SpawnSkeletalTestCharacters()
 			m.r1[0] = 0.0f; m.r1[1] = 1.0f; m.r1[2] = 0.0f; m.r1[3] = 0.0f;
 			m.r2[0] = 0.0f; m.r2[1] = 0.0f; m.r2[2] = 1.0f; m.r2[3] = 0.0f;
 		}
-		BufferCreateDesc boneDesc = {};
-		boneDesc.NumElements = static_cast<UINT32>(identityBones.size());
-		boneDesc.ElementSize = sizeof(InitialBoneMatrix);
-		boneDesc.InitialState = EInitialResourceState::ShaderRead;
-		boneDesc.bAllowUnorderedAccess = true;
-		boneDesc.InitialData = identityBones.data();
-		boneDesc.Shape = EBufferShape::Structured;
-		mesh->SkeletalBoneMatrices = renderBackend->CreateBuffer(boneDesc);
+		mesh->SkeletalBoneMatrices = renderBackend->CreateUploadStructuredBuffer(
+			static_cast<UINT32>(identityBones.size()), sizeof(InitialBoneMatrix));
+		if (mesh->SkeletalBoneMatrices)
+		{
+			renderBackend->UpdateUploadStructuredBuffer(
+				mesh->SkeletalBoneMatrices.get(),
+				identityBones.data(),
+				static_cast<UINT32>(identityBones.size() * sizeof(InitialBoneMatrix)));
+		}
 
 		// RW vertex buffer — compute writes here, GBuffer IA reads it.
 		mesh->SkeletalOutputVb = renderBackend->CreateRWVertexBuffer(
@@ -779,14 +781,16 @@ void Corona::UpdateSkeletalTestCharacters(float timeSeconds)
 				packed[i].r2[0] = t[2][0]; packed[i].r2[1] = t[2][1]; packed[i].r2[2] = t[2][2]; packed[i].r2[3] = t[2][3];
 			}
 
-			BufferCreateDesc boneDesc = {};
-			boneDesc.NumElements = static_cast<UINT32>(packed.size());
-			boneDesc.ElementSize = sizeof(SkinBoneRow);
-			boneDesc.InitialState = EInitialResourceState::ShaderRead;
-			boneDesc.bAllowUnorderedAccess = true;
-			boneDesc.InitialData = packed.data();
-			boneDesc.Shape = EBufferShape::Structured;
-			mesh->SkeletalBoneMatrices = renderBackend->CreateBuffer(boneDesc);
+			// Phase 8: refresh the persistent-mapped UPLOAD-heap buffer
+			// created at spawn time with a single memcpy. No new
+			// CreateCommittedResource, no command list, no WaitGPU.
+			if (mesh->SkeletalBoneMatrices)
+			{
+				renderBackend->UpdateUploadStructuredBuffer(
+					mesh->SkeletalBoneMatrices.get(),
+					packed.data(),
+					static_cast<UINT32>(packed.size() * sizeof(SkinBoneRow)));
+			}
 
 			++instanceIndex;
 		}

@@ -1278,6 +1278,50 @@ shared_ptr<VertexBuffer> DX12Backend::CreateVertexBuffer(UINT Size, UINT Stride,
 	return shared_ptr<VertexBuffer>(vb);
 }
 
+shared_ptr<Buffer> DX12Backend::CreateUploadStructuredBuffer(uint32_t NumElements, uint32_t ElementSize)
+{
+	if (NumElements == 0 || ElementSize == 0)
+		return nullptr;
+
+	const UINT SizeInBytes = NumElements * ElementSize;
+
+	Buffer* buffer = new Buffer;
+	buffer->Owner = this;
+	buffer->NumElements = NumElements;
+	buffer->ElementSize = ElementSize;
+
+	D3D12_RESOURCE_DESC desc = CD3DX12_RESOURCE_DESC::Buffer(SizeInBytes, D3D12_RESOURCE_FLAG_NONE);
+	D3D12_HEAP_PROPERTIES heapProp = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD);
+
+	ThrowIfFailed(Device->CreateCommittedResource(
+		&heapProp, D3D12_HEAP_FLAG_NONE, &desc,
+		D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+		IID_PPV_ARGS(&buffer->resource)));
+
+	NAME_D3D12_OBJECT(buffer->resource);
+
+	// Persistent-map for the lifetime of the buffer. CPU writes flow through
+	// PCIe to the GPU at read time; for SBV reads that are tiny per-character
+	// this is markedly cheaper than the staged DEFAULT-heap upload path.
+	D3D12_RANGE readRange{ 0, 0 };
+	ThrowIfFailed(buffer->resource->Map(0, &readRange, &buffer->MappedPtr));
+	buffer->MappedSizeInBytes = SizeInBytes;
+
+	// Structured SRV.
+	buffer->MakeStructuredBufferSRV();
+
+	return shared_ptr<Buffer>(buffer);
+}
+
+void DX12Backend::UpdateUploadStructuredBuffer(Buffer* buffer, const void* srcData, uint32_t sizeInBytes)
+{
+	if (!buffer || !buffer->MappedPtr || !srcData || sizeInBytes == 0)
+		return;
+	if (sizeInBytes > buffer->MappedSizeInBytes)
+		return;
+	memcpy(buffer->MappedPtr, srcData, sizeInBytes);
+}
+
 shared_ptr<VertexBuffer> DX12Backend::CreateRWVertexBuffer(uint32_t Size, uint32_t Stride)
 {
 	if (Size == 0 || Stride == 0)

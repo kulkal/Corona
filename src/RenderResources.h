@@ -49,6 +49,10 @@ public:
 	D3D12_GPU_DESCRIPTOR_HANDLE GpuHandleSRV{};
 	D3D12_CPU_DESCRIPTOR_HANDLE CpuHandleUAV{};
 	D3D12_GPU_DESCRIPTOR_HANDLE GpuHandleUAV{};
+	// Persistent CPU pointer for UPLOAD-heap buffers — set by
+	// CreateUploadStructuredBuffer. Null for DEFAULT-heap buffers.
+	void* MappedPtr = nullptr;
+	uint32_t MappedSizeInBytes = 0;
 
 	void MakeByteAddressBufferSRV();
 	void MakeStructuredBufferSRV();

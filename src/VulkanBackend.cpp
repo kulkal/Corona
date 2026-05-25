@@ -3738,6 +3738,17 @@ std::shared_ptr<VertexBuffer> VulkanBackend::CreateRWVertexBuffer(uint32_t size,
 	return nullptr;
 }
 
+std::shared_ptr<Buffer> VulkanBackend::CreateUploadStructuredBuffer(uint32_t numElements, uint32_t elementSize)
+{
+	(void)numElements; (void)elementSize;
+	return nullptr;
+}
+
+void VulkanBackend::UpdateUploadStructuredBuffer(Buffer* buffer, const void* srcData, uint32_t sizeInBytes)
+{
+	(void)buffer; (void)srcData; (void)sizeInBytes;
+}
+
 std::shared_ptr<VertexBuffer> VulkanBackend::CreateUploadVertexBuffer(uint32_t size, uint32_t stride, const void* srcData)
 {
 	if (size == 0)
