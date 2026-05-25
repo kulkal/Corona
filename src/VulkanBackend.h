@@ -228,6 +228,7 @@ struct VulkanComputePipelineStateObject : ComputePipelineStateObject
 	void SetTextureUAV(const std::string& name, Texture* texture) override;
 	void SetBufferSRV(const std::string& name, Buffer* buffer) override;
 	void SetBufferUAV(const std::string& name, Buffer* buffer) override;
+	void SetVertexBufferUAV(const std::string& name, VertexBuffer* vertexBuffer) override;
 	void SetSampler(const std::string& name, Sampler* sampler) override;
 	void SetCBVValue(const std::string& name, void* pData) override;
 };
@@ -274,6 +275,7 @@ public:
 	std::shared_ptr<IndexBuffer> CreateIndexBuffer(EIndexFormat format, uint32_t size, void* srcData) override;
 	std::shared_ptr<VertexBuffer> CreateUploadVertexBuffer(uint32_t size, uint32_t stride, const void* srcData) override;
 	std::shared_ptr<IndexBuffer> CreateUploadIndexBuffer(EIndexFormat format, uint32_t size, const void* srcData) override;
+	std::shared_ptr<VertexBuffer> CreateRWVertexBuffer(uint32_t size, uint32_t stride) override;
 	std::shared_ptr<RTAS> CreateBLASForMesh(Mesh* mesh) override;
 	std::shared_ptr<RTAS> CreateTLAS(const std::vector<RTInstanceDesc>& instances) override;
 	bool UpdateTLAS(const std::shared_ptr<RTAS>& topLevelAS, const std::vector<RTInstanceDesc>& instances) override;
@@ -315,6 +317,7 @@ public:
 	void EndGpuMarker() override;
 	void TransitionTexture(Texture* texture, EResourceState stateBefore, EResourceState stateAfter) override;
 	void TransitionBuffer(Buffer* buffer, EResourceState stateBefore, EResourceState stateAfter) override;
+	void TransitionVertexBuffer(VertexBuffer* vertexBuffer, EResourceState stateBefore, EResourceState stateAfter) override;
 	Texture* GetCurrentWindowRenderTarget() override;
 	void PrepareWindowRenderTarget(Texture* renderTarget) override;
 	void FinalizeWindowRenderTarget(Texture* renderTarget) override;

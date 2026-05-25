@@ -98,6 +98,7 @@ enum class EResourceState
 	Present,
 	DepthWrite,
 	CopyDest,
+	VertexBuffer,
 };
 
 enum ETextureUsageFlags : uint32_t
@@ -283,6 +284,11 @@ public:
 	// debug meshes, immediate-mode UI, etc.) should prefer these.
 	virtual std::shared_ptr<VertexBuffer> CreateUploadVertexBuffer(uint32_t size, uint32_t stride, const void* srcData) = 0;
 	virtual std::shared_ptr<IndexBuffer> CreateUploadIndexBuffer(EIndexFormat format, uint32_t size, const void* srcData) = 0;
+	// GPU-writeable vertex buffer for skeletal skinning output. Allocated in
+	// DEFAULT heap with ALLOW_UNORDERED_ACCESS. The returned VertexBuffer
+	// can be bound as a UAV through any ComputePipelineStateObject and then
+	// transitioned to VertexBuffer state for IA fetch.
+	virtual std::shared_ptr<VertexBuffer> CreateRWVertexBuffer(uint32_t size, uint32_t stride) = 0;
 	virtual std::shared_ptr<RTAS> CreateBLASForMesh(Mesh* mesh) = 0;
 	virtual std::shared_ptr<RTAS> CreateTLAS(const std::vector<RTInstanceDesc>& instances) = 0;
 	virtual bool UpdateTLAS(const std::shared_ptr<RTAS>& topLevelAS, const std::vector<RTInstanceDesc>& instances) = 0;
@@ -328,6 +334,7 @@ public:
 	virtual void EndGpuMarker() = 0;
 	virtual void TransitionTexture(Texture* texture, EResourceState stateBefore, EResourceState stateAfter) = 0;
 	virtual void TransitionBuffer(Buffer* buffer, EResourceState stateBefore, EResourceState stateAfter) = 0;
+	virtual void TransitionVertexBuffer(VertexBuffer* vertexBuffer, EResourceState stateBefore, EResourceState stateAfter) = 0;
 	virtual Texture* GetCurrentWindowRenderTarget() = 0;
 	virtual void PrepareWindowRenderTarget(Texture* renderTarget) = 0;
 	virtual void FinalizeWindowRenderTarget(Texture* renderTarget) = 0;

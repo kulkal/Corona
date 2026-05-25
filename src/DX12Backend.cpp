@@ -317,6 +317,8 @@ namespace
 			return D3D12_RESOURCE_STATE_DEPTH_WRITE;
 		case EResourceState::CopyDest:
 			return D3D12_RESOURCE_STATE_COPY_DEST;
+		case EResourceState::VertexBuffer:
+			return D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
 		case EResourceState::ShaderRead:
 		default:
 			return D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
@@ -1009,6 +1011,21 @@ void DX12Backend::TransitionBuffer(Buffer* buffer, EResourceState stateBefore, E
 	GlobalCmdList->CmdList->ResourceBarrier(1, &barrierDesc);
 }
 
+void DX12Backend::TransitionVertexBuffer(VertexBuffer* vertexBuffer, EResourceState stateBefore, EResourceState stateAfter)
+{
+	if (!vertexBuffer || !vertexBuffer->resource)
+		return;
+
+	D3D12_RESOURCE_BARRIER barrierDesc = {};
+	barrierDesc.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+	barrierDesc.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+	barrierDesc.Transition.pResource = vertexBuffer->resource.Get();
+	barrierDesc.Transition.Subresource = 0;
+	barrierDesc.Transition.StateBefore = ToD3D12ResourceState(stateBefore);
+	barrierDesc.Transition.StateAfter = ToD3D12ResourceState(stateAfter);
+	GlobalCmdList->CmdList->ResourceBarrier(1, &barrierDesc);
+}
+
 shared_ptr<Sampler> DX12Backend::CreateSampler(D3D12_SAMPLER_DESC& InSamplerDesc)
 {
 	Sampler* sampler = new Sampler;
@@ -1257,6 +1274,58 @@ shared_ptr<VertexBuffer> DX12Backend::CreateVertexBuffer(UINT Size, UINT Stride,
 		CmdQ->ExecuteCommandList(cmd);
 		CmdQ->WaitGPU();
 	}
+
+	return shared_ptr<VertexBuffer>(vb);
+}
+
+shared_ptr<VertexBuffer> DX12Backend::CreateRWVertexBuffer(uint32_t Size, uint32_t Stride)
+{
+	if (Size == 0 || Stride == 0)
+		return nullptr;
+
+	VertexBuffer* vb = new VertexBuffer;
+
+	D3D12_RESOURCE_DESC desc = CD3DX12_RESOURCE_DESC::Buffer(Size, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+
+	ThrowIfFailed(Device->CreateCommittedResource(
+		&CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT),
+		D3D12_HEAP_FLAG_NONE,
+		&desc,
+		D3D12_RESOURCE_STATE_COMMON,
+		nullptr,
+		IID_PPV_ARGS(&vb->resource)));
+
+	NAME_D3D12_OBJECT(vb->resource);
+
+	vb->view.BufferLocation = vb->resource->GetGPUVirtualAddress();
+	vb->view.StrideInBytes = Stride;
+	vb->view.SizeInBytes = Size;
+	vb->numVertices = Size / Stride;
+
+	// Byte-address SRV/UAV. The compute shader binds Output as a
+	// RWByteAddressBuffer; we expose the SRV in case any future consumer
+	// wants vertex-pull mode through SV_VertexID.
+	GeomtryDHRing->AllocDescriptor(vb->CpuHandleSRV, vb->GpuHandleSRV);
+	D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+	srvDesc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+	srvDesc.Format = DXGI_FORMAT_R32_TYPELESS;
+	srvDesc.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
+	srvDesc.Buffer.StructureByteStride = 0;
+	srvDesc.Buffer.FirstElement = 0;
+	srvDesc.Buffer.NumElements = static_cast<UINT>(Size) / sizeof(float);
+	srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+	Device->CreateShaderResourceView(vb->resource.Get(), &srvDesc, vb->CpuHandleSRV);
+
+	GeomtryDHRing->AllocDescriptor(vb->CpuHandleUAV, vb->GpuHandleUAV);
+	D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc = {};
+	uavDesc.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+	uavDesc.Format = DXGI_FORMAT_R32_TYPELESS;
+	uavDesc.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
+	uavDesc.Buffer.StructureByteStride = 0;
+	uavDesc.Buffer.FirstElement = 0;
+	uavDesc.Buffer.NumElements = static_cast<UINT>(Size) / sizeof(float);
+	uavDesc.Buffer.CounterOffsetInBytes = 0;
+	Device->CreateUnorderedAccessView(vb->resource.Get(), nullptr, &uavDesc, vb->CpuHandleUAV);
 
 	return shared_ptr<VertexBuffer>(vb);
 }
@@ -2017,6 +2086,12 @@ void D3D12ComputePipelineStateObject::SetBufferUAV(const std::string& name, Buff
 {
 	if (PSO && buffer)
 		PendingUAVs[name] = buffer->GpuHandleUAV;
+}
+
+void D3D12ComputePipelineStateObject::SetVertexBufferUAV(const std::string& name, VertexBuffer* vertexBuffer)
+{
+	if (PSO && vertexBuffer)
+		PendingUAVs[name] = vertexBuffer->GpuHandleUAV;
 }
 
 void D3D12ComputePipelineStateObject::SetSampler(const std::string& name, Sampler* sampler)

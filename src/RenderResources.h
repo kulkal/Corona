@@ -80,6 +80,10 @@ public:
 	D3D12_VERTEX_BUFFER_VIEW view{};
 	D3D12_CPU_DESCRIPTOR_HANDLE CpuHandleSRV{};
 	D3D12_GPU_DESCRIPTOR_HANDLE GpuHandleSRV{};
+	// Optional UAV view — populated by CreateRWVertexBuffer for compute
+	// skinning outputs. Zero-initialized for the read-only paths.
+	D3D12_CPU_DESCRIPTOR_HANDLE CpuHandleUAV{};
+	D3D12_GPU_DESCRIPTOR_HANDLE GpuHandleUAV{};
 #endif
 };
 

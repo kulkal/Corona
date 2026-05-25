@@ -428,7 +428,71 @@ void Corona::InitSkeletalSkinningPSO()
 
 void Corona::DispatchSkeletalSkinningForRenderWorld()
 {
-	// Phase 4 fills this in.
+	if (!renderBackend || !SkeletalSkinningPSO)
+		return;
+
+	// Gather visible skeletal meshes (single pass).
+	std::vector<Mesh*> skinnedMeshes;
+	skinnedMeshes.reserve(64);
+	for (const SceneObject& object : SceneObjects)
+	{
+		if (!object.bVisible || !object.ScenePtr)
+			continue;
+		for (const std::shared_ptr<Mesh>& mesh : object.ScenePtr->meshes)
+		{
+			if (mesh && mesh->bSkeletalSkinned &&
+				mesh->SkeletalInputVertices &&
+				mesh->SkeletalBoneMatrices &&
+				mesh->SkeletalOutputVb &&
+				mesh->SkeletalVertexCount > 0)
+			{
+				skinnedMeshes.push_back(mesh.get());
+			}
+		}
+	}
+	if (skinnedMeshes.empty())
+		return;
+
+	SkeletalStats.CharactersAnimated = static_cast<UINT32>(skinnedMeshes.size());
+	SkeletalStats.DispatchCount = 0;
+	SkeletalStats.TransitionCount = 0;
+	SkeletalStats.VerticesSkinned = 0;
+	SkeletalStats.BonesUploaded = 0;
+
+	// Batch transitions: SR -> UA for all outputs.
+	for (Mesh* mesh : skinnedMeshes)
+	{
+		renderBackend->TransitionVertexBuffer(mesh->SkeletalOutputVb.get(),
+			EResourceState::VertexBuffer, EResourceState::UnorderedAccess);
+		++SkeletalStats.TransitionCount;
+	}
+
+	SkeletalSkinningPSO->Apply();
+	for (Mesh* mesh : skinnedMeshes)
+	{
+		SkeletalSkinningConstant constants = {};
+		constants.VertexCount = mesh->SkeletalVertexCount;
+		constants.BoneBase = 0;
+
+		SkeletalSkinningPSO->SetBufferSRV("Inputs", mesh->SkeletalInputVertices.get());
+		SkeletalSkinningPSO->SetBufferSRV("Bones", mesh->SkeletalBoneMatrices.get());
+		SkeletalSkinningPSO->SetVertexBufferUAV("Output", mesh->SkeletalOutputVb.get());
+		SkeletalSkinningPSO->SetCBVValue("Constants", &constants);
+		renderBackend->Dispatch((mesh->SkeletalVertexCount + 63u) / 64u, 1, 1);
+
+		mesh->bSkeletalSkinningDispatched = true;
+		++SkeletalStats.DispatchCount;
+		SkeletalStats.VerticesSkinned += mesh->SkeletalVertexCount;
+		SkeletalStats.BonesUploaded += mesh->SkeletalBoneCount;
+	}
+
+	// Batch transitions: UA -> VertexBuffer for IA read.
+	for (Mesh* mesh : skinnedMeshes)
+	{
+		renderBackend->TransitionVertexBuffer(mesh->SkeletalOutputVb.get(),
+			EResourceState::UnorderedAccess, EResourceState::VertexBuffer);
+		++SkeletalStats.TransitionCount;
+	}
 }
 
 void Corona::SpawnSkeletalTestCharacters()
@@ -561,6 +625,34 @@ void Corona::SpawnSkeletalTestCharacters()
 			L" stride=" + std::to_wstring(inputDesc.ElementSize));
 		mesh->SkeletalInputVertices = renderBackend->CreateBuffer(inputDesc);
 		AppendCpuRuntimeTrace(L"[SkeletalSpawn] inst=" + std::to_wstring(instance) + L" after CreateBuffer(SkinInputVertex)");
+
+		// Bone matrix SBV — one mat3x4 (48 B) per bone. Phase 6 will populate
+		// these every frame from CPU-side animation; for now (Phase 4-5) we
+		// fill with identity so the skinning output matches bind pose.
+		struct InitialBoneMatrix { float r0[4]; float r1[4]; float r2[4]; };
+		static_assert(sizeof(InitialBoneMatrix) == 48, "SkinBone size drift");
+		std::vector<InitialBoneMatrix> identityBones(BONE_COUNT);
+		for (auto& m : identityBones)
+		{
+			m.r0[0] = 1.0f; m.r0[1] = 0.0f; m.r0[2] = 0.0f; m.r0[3] = 0.0f;
+			m.r1[0] = 0.0f; m.r1[1] = 1.0f; m.r1[2] = 0.0f; m.r1[3] = 0.0f;
+			m.r2[0] = 0.0f; m.r2[1] = 0.0f; m.r2[2] = 1.0f; m.r2[3] = 0.0f;
+		}
+		BufferCreateDesc boneDesc = {};
+		boneDesc.NumElements = static_cast<UINT32>(identityBones.size());
+		boneDesc.ElementSize = sizeof(InitialBoneMatrix);
+		boneDesc.InitialState = EInitialResourceState::ShaderRead;
+		boneDesc.bAllowUnorderedAccess = true;
+		boneDesc.InitialData = identityBones.data();
+		boneDesc.Shape = EBufferShape::Structured;
+		mesh->SkeletalBoneMatrices = renderBackend->CreateBuffer(boneDesc);
+
+		// RW vertex buffer — compute writes here, GBuffer IA reads it.
+		mesh->SkeletalOutputVb = renderBackend->CreateRWVertexBuffer(
+			static_cast<UINT32>(sizeof(StandardVertex) * vertices.size()),
+			sizeof(StandardVertex));
+		AppendCpuRuntimeTrace(L"[SkeletalSpawn] inst=" + std::to_wstring(instance) +
+			L" output vb=" + std::to_wstring(mesh->SkeletalOutputVb ? 1 : 0));
 
 		scene->meshes.push_back(mesh);
 		scene->bHasBounds = true;

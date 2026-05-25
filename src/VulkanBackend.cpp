@@ -2340,6 +2340,12 @@ void VulkanComputePipelineStateObject::SetBufferUAV(const std::string& name, Buf
 	BindingValues[name].TextureValue = nullptr;
 }
 
+void VulkanComputePipelineStateObject::SetVertexBufferUAV(const std::string& name, VertexBuffer* vertexBuffer)
+{
+	// Skeletal skinning compute path is DX12-only; Vulkan path is unused.
+	(void)name; (void)vertexBuffer;
+}
+
 void VulkanComputePipelineStateObject::SetSampler(const std::string& name, Sampler* sampler)
 {
 	BindingValues[name].SamplerValue = sampler;
@@ -3722,6 +3728,14 @@ bool VulkanBackend::AllocateUploadBufferRange(
 
 	return tryAllocateFromActive();
 #endif
+}
+
+std::shared_ptr<VertexBuffer> VulkanBackend::CreateRWVertexBuffer(uint32_t size, uint32_t stride)
+{
+	// Skeletal skinning compute path is DX12-only for now (see
+	// docs/skeletal_skinning_implementation_progress.md "작업 범위").
+	(void)size; (void)stride;
+	return nullptr;
 }
 
 std::shared_ptr<VertexBuffer> VulkanBackend::CreateUploadVertexBuffer(uint32_t size, uint32_t stride, const void* srcData)
@@ -5401,6 +5415,13 @@ void VulkanBackend::TransitionBuffer(Buffer* buffer, EResourceState stateBefore,
 		0, nullptr);
 #endif
 }
+void VulkanBackend::TransitionVertexBuffer(VertexBuffer* vertexBuffer, EResourceState stateBefore, EResourceState stateAfter)
+{
+	// Skeletal skinning compute path is DX12-only; Vulkan never produces a
+	// CreateRWVertexBuffer result so this is a no-op fallback.
+	(void)vertexBuffer; (void)stateBefore; (void)stateAfter;
+}
+
 Texture* VulkanBackend::GetCurrentWindowRenderTarget() { return nullptr; }
 void VulkanBackend::PrepareWindowRenderTarget(Texture* renderTarget) { (void)renderTarget; }
 void VulkanBackend::FinalizeWindowRenderTarget(Texture* renderTarget) { (void)renderTarget; }

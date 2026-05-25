@@ -1817,7 +1817,13 @@ void Corona::DrawScene(shared_ptr<Scene> scene, const glm::mat4x4& instanceTrans
 		if (bUseSpineVertexFetch)
 			renderBackend->BindGraphicsPipelineBuffer(activeGBufferPipeline, "SpineVertices", mesh->GpuSpineSkinnedVertices.get());
 
-		renderBackend->BindMeshBuffers(mesh->Vb.get(), mesh->Ib.get());
+		// 3D skeletal skinning: swap the bind-pose VB for the compute-skinned
+		// output VB. Layout matches the standard IA so the GBuffer PSO is
+		// unchanged.
+		VertexBuffer* drawVb = mesh->Vb.get();
+		if (mesh->bSkeletalSkinned && mesh->bSkeletalSkinningDispatched && mesh->SkeletalOutputVb)
+			drawVb = mesh->SkeletalOutputVb.get();
+		renderBackend->BindMeshBuffers(drawVb, mesh->Ib.get());
 
 		for (int i = 0; i < mesh->Draws.size(); i++)
 		{
@@ -2549,6 +2555,7 @@ void Corona::GBufferPass()
 
 	renderBackend->BindDefaultDescriptorHeaps();
 	DispatchSpineSkinningForRenderWorld();
+	DispatchSkeletalSkinningForRenderWorld();
 
 	renderBackend->SetViewportAndScissor(GetRenderWidth(), GetRenderHeight());
 	if (bMobileDirectGBuffer)

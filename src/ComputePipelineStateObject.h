@@ -6,6 +6,7 @@
 
 class Texture;
 class Buffer;
+class VertexBuffer;
 class Sampler;
 
 class ComputePipelineStateObject
@@ -25,6 +26,7 @@ public:
 	virtual void SetTextureUAV(const std::string& name, Texture* texture) = 0;
 	virtual void SetBufferSRV(const std::string& name, Buffer* buffer) = 0;
 	virtual void SetBufferUAV(const std::string& name, Buffer* buffer) = 0;
+	virtual void SetVertexBufferUAV(const std::string& name, VertexBuffer* vertexBuffer) = 0;
 	virtual void SetSampler(const std::string& name, Sampler* sampler) = 0;
 	virtual void SetCBVValue(const std::string& name, void* pData) = 0;
 };
