@@ -2791,6 +2791,29 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 		if (arg == L"--skeletal-test" || arg == L"--skeletal-skinning-test")
 		{
 			bCommandLineSpawnSkeletalTest = true;
+			AppendStartupTrace(L"[ParseCommandLineArgs] --skeletal-test enabled");
+			continue;
+		}
+		std::wstring skeletalScreenshotValue = ParseValueArg(arg, L"--skeletal-test-screenshot", L"-skeletal-test-screenshot", i);
+		if (!skeletalScreenshotValue.empty())
+		{
+			try
+			{
+				const unsigned long value = std::stoul(skeletalScreenshotValue);
+				SkeletalTestScreenshotFrame = static_cast<UINT32>(std::clamp<unsigned long>(value, 1ul, 100000ul));
+				bCommandLineSkeletalTestScreenshot = true;
+				bCommandLineSpawnSkeletalTest = true;
+				AppendStartupTrace(L"[ParseCommandLineArgs] --skeletal-test-screenshot frame=" + std::to_wstring(SkeletalTestScreenshotFrame));
+			}
+			catch (...)
+			{
+			}
+			continue;
+		}
+		if (arg == L"--skeletal-test-screenshot")
+		{
+			bCommandLineSkeletalTestScreenshot = true;
+			bCommandLineSpawnSkeletalTest = true;
 			continue;
 		}
 		std::wstring skeletalTestCountValue = ParseValueArg(arg, L"--skeletal-test-count", L"-skeletal-test-count", i);
@@ -7362,6 +7385,11 @@ void Corona::OnInit()
 		UpdateMainDirectionalLightEntityFromState();
 		AppendCpuRuntimeTrace(L"[OnInit] after ApplySponzaFlyCamera");
 	}
+	if (bCommandLineSpawnSkeletalTest)
+	{
+		SpawnSkeletalTestCharacters();
+		AppendCpuRuntimeTrace(L"[OnInit] after SpawnSkeletalTestCharacters");
+	}
 	UpdateStartupLoadingProgress(0.92f, L"Initializing CPU physics");
 	InitCpuPhysics();
 	UpdateStartupLoadingProgress(0.94f, L"Initializing Luau scripting");
@@ -11850,6 +11878,37 @@ if (ImGui::Button("Reset Accumulation"))
 		bCommandLineExitAfterFramesTriggered = true;
 		QuitPlatformApplication(0);
 		CommandLineExitAfterFrames = 0;
+	}
+
+	// Skeletal test: trigger the existing final-backbuffer screenshot facility
+	// once at the requested frame. Uses RequestFinalBackbufferScreenshot ->
+	// renderBackend->RequestWindowCapture path, the same one F-key UI uses.
+	// Also dumps the G-buffer albedo / world-normal so the procedural
+	// character can be verified independent of lighting.
+	if (bCommandLineSkeletalTestScreenshot && !bSkeletalTestScreenshotDone &&
+		FrameCounter >= SkeletalTestScreenshotFrame &&
+		!bFinalScreenshotCaptureInFlight)
+	{
+		RequestFinalBackbufferScreenshot();
+		AppendCpuRuntimeTrace(
+			L"[SkeletalTestScreenshot] requested at frame=" + std::to_wstring(FrameCounter) +
+			L", target=" + PendingFinalScreenshotPath);
+
+		std::filesystem::path gbufDir = RuntimePaths::DumpDirectory() / L"skeletal_test_gbuffer";
+		std::error_code ec;
+		std::filesystem::create_directories(gbufDir, ec);
+		const std::wstring base = (gbufDir / (L"frame_" + std::to_wstring(FrameCounter))).wstring();
+		if (AlbedoBuffer)
+		{
+			const bool ok = DumpTexturePNG(AlbedoBuffer.get(), base + L"_albedo.png", EResourceState::ShaderRead);
+			AppendCpuRuntimeTrace(L"[SkeletalTestScreenshot] albedo png=" + std::to_wstring(ok ? 1 : 0));
+		}
+		if (NormalBuffers[ColorBufferWriteIndex])
+		{
+			const bool ok = DumpTexturePNG(NormalBuffers[ColorBufferWriteIndex].get(), base + L"_world_normal.png", EResourceState::ShaderRead);
+			AppendCpuRuntimeTrace(L"[SkeletalTestScreenshot] world_normal png=" + std::to_wstring(ok ? 1 : 0));
+		}
+		bSkeletalTestScreenshotDone = true;
 	}
 }
 

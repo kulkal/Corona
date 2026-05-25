@@ -1043,6 +1043,10 @@ private:
 	UINT32 CommandLinePlatformerSpineBenchmarkCount = 50;
 	bool bCommandLineSpawnSkeletalTest = false;
 	UINT32 CommandLineSkeletalTestCount = 1;
+	bool bCommandLineSkeletalTestScreenshot = false;
+	UINT32 SkeletalTestScreenshotFrame = 60;
+	std::wstring SkeletalTestScreenshotPath;
+	bool bSkeletalTestScreenshotDone = false;
 	bool bCommandLineBvhViewerOverrideSet = false;
 	bool bCommandLineBvhViewerEnabled = false;
 	bool bCommandLineNvFrapsBvhLiveTlas = false;
