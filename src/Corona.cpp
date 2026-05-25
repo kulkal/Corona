@@ -10020,6 +10020,10 @@ void Corona::OnUpdate()
 	m_timer.Tick(NULL);
 	const float elapsedSeconds = static_cast<float>(m_timer.GetElapsedSeconds());
 
+	// Drive procedural skeletal animation when test characters are present.
+	if (bCommandLineSpawnSkeletalTest)
+		UpdateSkeletalTestCharacters(static_cast<float>(m_timer.GetTotalSeconds()));
+
 	if (m_frameCounter == 100)
 	{
 		// Update window text with FPS value.
@@ -11879,6 +11883,10 @@ if (ImGui::Button("Reset Accumulation"))
 		QuitPlatformApplication(0);
 		CommandLineExitAfterFrames = 0;
 	}
+
+	// Skeletal stats: dump every 64 frames so benchmark runs leave a trace.
+	if (bCommandLineSpawnSkeletalTest && FrameCounter > 0 && (FrameCounter % 64) == 0)
+		DumpSkeletalFrameStatsToTrace();
 
 	// Skeletal test: trigger the existing final-backbuffer screenshot facility
 	// once at the requested frame. Uses RequestFinalBackbufferScreenshot ->

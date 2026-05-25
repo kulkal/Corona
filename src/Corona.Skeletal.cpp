@@ -676,12 +676,131 @@ void Corona::SpawnSkeletalTestCharacters()
 		L"[SkeletalSpawn] done count=" + std::to_wstring(desiredCount));
 }
 
-void Corona::UpdateSkeletalTestCharacters(float /*timeSeconds*/)
+namespace
 {
-	// Phase 6 fills this in.
+	// One mat4 per bone; multiply parent * local along the chain to get
+	// world. Final skinning matrix = world * inverse(bind_world).
+	struct AnimatedBone
+	{
+		glm::mat4 LocalTransform = glm::mat4(1.0f);
+		glm::mat4 WorldTransform = glm::mat4(1.0f);
+	};
+
+	// Build a per-frame skinning palette (mat3x4 each) for the procedural
+	// box-character skeleton.
+	void ComputeSkeletalPalette(float timeSeconds, std::vector<glm::mat4>& outPalette, int instanceIndex)
+	{
+		std::vector<BoneSegment> bones;
+		BuildSkeleton(bones);
+		std::vector<glm::vec3> boneHeads, boneTails;
+		ComputeBindPoseBoneEndpoints(bones, boneHeads, boneTails);
+
+		// Per-instance phase offset so a crowd doesn't move in lockstep.
+		const float phase = static_cast<float>(instanceIndex) * 0.37f;
+		const float t = timeSeconds + phase;
+
+		std::vector<AnimatedBone> anim(bones.size());
+		for (size_t i = 0; i < bones.size(); ++i)
+		{
+			// Start from bind-pose local: translate(HeadLocalOffset).
+			anim[i].LocalTransform = glm::translate(glm::mat4(1.0f), bones[i].HeadLocalOffset);
+		}
+		// Apply per-bone procedural rotations around their head joint.
+		auto rotateAroundHead = [&](int boneIdx, const glm::vec3& axis, float angle)
+		{
+			if (boneIdx < 0 || boneIdx >= static_cast<int>(anim.size()))
+				return;
+			// translate(head) * rotate(axis, angle) instead of just translate(head).
+			anim[boneIdx].LocalTransform =
+				glm::translate(glm::mat4(1.0f), bones[boneIdx].HeadLocalOffset) *
+				glm::rotate(glm::mat4(1.0f), angle, axis);
+		};
+
+		rotateAroundHead(BONE_UPPER_ARM_R, glm::vec3(0, 0, 1),  std::sin(t * 2.0f)        * 0.9f);
+		rotateAroundHead(BONE_LOWER_ARM_R, glm::vec3(0, 0, 1),  std::sin(t * 2.0f + 1.0f) * 0.7f);
+		rotateAroundHead(BONE_UPPER_ARM_L, glm::vec3(0, 0, 1),  std::sin(t * 2.0f + 3.14f) * 0.9f);
+		rotateAroundHead(BONE_LOWER_ARM_L, glm::vec3(0, 0, 1),  std::sin(t * 2.0f + 4.14f) * 0.7f);
+		rotateAroundHead(BONE_UPPER_LEG_L, glm::vec3(1, 0, 0),  std::sin(t * 1.5f)        * 0.4f);
+		rotateAroundHead(BONE_LOWER_LEG_L, glm::vec3(1, 0, 0),  std::max(0.0f, std::sin(t * 1.5f + 0.5f) * 0.4f));
+		rotateAroundHead(BONE_UPPER_LEG_R, glm::vec3(1, 0, 0),  std::sin(t * 1.5f + 3.14f) * 0.4f);
+		rotateAroundHead(BONE_LOWER_LEG_R, glm::vec3(1, 0, 0),  std::max(0.0f, std::sin(t * 1.5f + 3.64f) * 0.4f));
+		rotateAroundHead(BONE_SPINE,       glm::vec3(0, 1, 0),  std::sin(t * 1.0f)        * 0.15f);
+		rotateAroundHead(BONE_HEAD,        glm::vec3(0, 1, 0),  std::sin(t * 0.8f)        * 0.25f);
+
+		// Parent -> child accumulation.
+		anim[BONE_ROOT].WorldTransform = anim[BONE_ROOT].LocalTransform;
+		for (size_t i = 1; i < bones.size(); ++i)
+		{
+			const int p = bones[i].ParentIndex;
+			anim[i].WorldTransform = anim[p].WorldTransform * anim[i].LocalTransform;
+		}
+
+		// Final skinning = world * inverse(bind_world). Bind pose is pure
+		// translation by boneHeads[i] so the inverse is translate(-head).
+		outPalette.resize(bones.size());
+		for (size_t i = 0; i < bones.size(); ++i)
+		{
+			const glm::mat4 bindWorldInv = glm::translate(glm::mat4(1.0f), -boneHeads[i]);
+			outPalette[i] = anim[i].WorldTransform * bindWorldInv;
+		}
+	}
+}
+
+void Corona::UpdateSkeletalTestCharacters(float timeSeconds)
+{
+	if (!renderBackend)
+		return;
+
+	int instanceIndex = 0;
+	std::vector<glm::mat4> palette;
+	struct SkinBoneRow { float r0[4]; float r1[4]; float r2[4]; };
+	std::vector<SkinBoneRow> packed;
+
+	for (SceneObject& object : SceneObjects)
+	{
+		if (!object.ScenePtr)
+			continue;
+		for (const std::shared_ptr<Mesh>& mesh : object.ScenePtr->meshes)
+		{
+			if (!mesh || !mesh->bSkeletalSkinned)
+				continue;
+
+			ComputeSkeletalPalette(timeSeconds, palette, instanceIndex);
+			packed.resize(palette.size());
+			for (size_t i = 0; i < palette.size(); ++i)
+			{
+				// glm::mat4 is column-major. We want row-major mat3x4 so that
+				// the shader's Row0/Row1/Row2 are the top 3 rows of the
+				// transform. transpose() converts to row-major; we then take
+				// rows 0..2 (each is 4 floats).
+				const glm::mat4 t = glm::transpose(palette[i]);
+				packed[i].r0[0] = t[0][0]; packed[i].r0[1] = t[0][1]; packed[i].r0[2] = t[0][2]; packed[i].r0[3] = t[0][3];
+				packed[i].r1[0] = t[1][0]; packed[i].r1[1] = t[1][1]; packed[i].r1[2] = t[1][2]; packed[i].r1[3] = t[1][3];
+				packed[i].r2[0] = t[2][0]; packed[i].r2[1] = t[2][1]; packed[i].r2[2] = t[2][2]; packed[i].r2[3] = t[2][3];
+			}
+
+			BufferCreateDesc boneDesc = {};
+			boneDesc.NumElements = static_cast<UINT32>(packed.size());
+			boneDesc.ElementSize = sizeof(SkinBoneRow);
+			boneDesc.InitialState = EInitialResourceState::ShaderRead;
+			boneDesc.bAllowUnorderedAccess = true;
+			boneDesc.InitialData = packed.data();
+			boneDesc.Shape = EBufferShape::Structured;
+			mesh->SkeletalBoneMatrices = renderBackend->CreateBuffer(boneDesc);
+
+			++instanceIndex;
+		}
+	}
 }
 
 void Corona::DumpSkeletalFrameStatsToTrace()
 {
-	// Phase 6 fills this in.
+	AppendCpuRuntimeTrace(
+		L"[SkeletalStats]"
+		L" chars=" + std::to_wstring(SkeletalStats.CharactersAnimated) +
+		L" verts=" + std::to_wstring(SkeletalStats.VerticesSkinned) +
+		L" bones=" + std::to_wstring(SkeletalStats.BonesUploaded) +
+		L" dispatch=" + std::to_wstring(SkeletalStats.DispatchCount) +
+		L" transitions=" + std::to_wstring(SkeletalStats.TransitionCount) +
+		L" blas=" + std::to_wstring(SkeletalStats.BlasUpdates));
 }
