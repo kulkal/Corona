@@ -265,6 +265,9 @@ void Corona::InitGBufferPass()
 		else
 			AppendCpuRuntimeTrace(L"[InitGBufferPass] failed to create Spine skinning compute PSO");
 	}
+
+	// 3D skeletal skinning PSO (separate path from Spine).
+	InitSkeletalSkinningPSO();
 }
 
 void Corona::InitToneMapPass()

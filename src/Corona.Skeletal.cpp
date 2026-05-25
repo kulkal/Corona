@@ -8,6 +8,7 @@
 #include "stdafx.h"
 #include "Corona.h"
 #include "RenderResources.h"
+#include "ComputePipelineStateObject.h"
 
 #include <cmath>
 #include <cstring>
@@ -401,7 +402,28 @@ namespace
 
 void Corona::InitSkeletalSkinningPSO()
 {
-	// Phase 3 fills this in.
+	if (!renderBackend)
+		return;
+
+	std::shared_ptr<ComputePipelineStateObject> pso = renderBackend->CreateComputePipelineStateObject();
+	if (!pso)
+	{
+		AppendCpuRuntimeTrace(L"[SkeletalSkinningPSO] CreateComputePipelineStateObject failed");
+		return;
+	}
+	pso->BindSRV("Inputs", 0, 1);
+	pso->BindSRV("Bones", 1, 1);
+	pso->BindUAV("Output", 0);
+	pso->BindCBV("Constants", 0, sizeof(SkeletalSkinningConstant));
+	if (pso->InitCS(GetAssetFullPath(L"Shaders\\SkeletalSkinningCS.hlsl"), "SkinMain"))
+	{
+		SkeletalSkinningPSO = pso;
+		AppendCpuRuntimeTrace(L"[SkeletalSkinningPSO] InitCS succeeded");
+	}
+	else
+	{
+		AppendCpuRuntimeTrace(L"[SkeletalSkinningPSO] InitCS failed");
+	}
 }
 
 void Corona::DispatchSkeletalSkinningForRenderWorld()
