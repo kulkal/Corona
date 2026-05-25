@@ -2741,6 +2741,13 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 		{
 			bStartupSponzaFlyMode = true;
 			bEnableStartupLuauScript = false;
+			// StartupLuauMode defaults to "platformer", which forces
+			// bPlatformerHybridDirectOnly=true in OnRender and disables every
+			// hybrid RT pass (shadow / AO / reflection / GI). sponza-fly is a
+			// generic free-flight scene, not the platformer mobile path, so
+			// override the mode here. Without this RT shadows/GI silently
+			// vanish even though render-mode=hybrid is selected.
+			StartupLuauMode = L"sponza";
 			bCommandLineAutoDumpOverrideSet = true;
 			bCommandLineAutoDumpEnabled = false;
 			continue;
@@ -6183,6 +6190,7 @@ bool Corona::LoadCameraState()
 		LightIntensity = savedLightIntensity;
 		UpdateMainDirectionalLightEntityFromState();
 	}
+	bCameraStateRestoredFromDisk = true;
 	return true;
 }
 
@@ -6653,8 +6661,20 @@ void Corona::ApplyRenderFrameSourceState(const RenderFrameSourceState& state)
 	Near = safeNear;
 	Far = safeFar;
 	m_aspectRatio = safeAspectRatio;
-	LightDir = glm::length(state.LightDir) > 0.0001f ? glm::normalize(state.LightDir) : glm::vec3(0.0f, 1.0f, 0.0f);
-	LightIntensity = state.LightIntensity;
+	// Render-thread gizmo just modified the sun? Skip this overwrite and
+	// let the game thread catch up next tick via the directional light
+	// entity component the gizmo also updated. Otherwise a stale capture
+	// taken before the drag would snap the gizmo back, causing the visible
+	// "wiggle" when dragging in split game/render mode.
+	if (bRenderThreadOwnsLightDirNextFrame)
+	{
+		bRenderThreadOwnsLightDirNextFrame = false;
+	}
+	else
+	{
+		LightDir = glm::length(state.LightDir) > 0.0001f ? glm::normalize(state.LightDir) : glm::vec3(0.0f, 1.0f, 0.0f);
+		LightIntensity = state.LightIntensity;
+	}
 	SkyColorTop = state.SkyColorTop;
 	SkyColorBottom = state.SkyColorBottom;
 	SkyIntensity = state.SkyIntensity;
@@ -9965,6 +9985,34 @@ void Corona::ApplyHybridDefaultCamera()
 
 void Corona::ApplySponzaFlyCamera()
 {
+	// If we successfully loaded a camera state from disk, keep the user's
+	// last vantage point instead of snapping back to the sponza-fly preset.
+	// Light direction was also loaded from the same file in LoadCameraState
+	// so we skip the sponza-default light reset too — debugging shadow or
+	// lighting issues from a specific viewpoint stays reproducible across
+	// runs.
+	if (bCameraStateRestoredFromDisk)
+	{
+		bScriptCameraControlEnabled = false;
+		if (SponzaObject != InvalidSceneObjectHandle)
+			SetSceneObjectVisibility(SponzaObject, true);
+		FrameCounter = 0;
+		PathTracingAccumulatedFrames = 0;
+		PrevPathTracingViewMat = glm::mat4x4(0.0f);
+		PrevPathTracingLightDir = glm::vec3(0.0f);
+		PrevPathTracingLightIntensity = 0.0f;
+		bTemporalAAHistoryValid = false;
+		bTemporalDenoiserHistoryValid = false;
+		bResetTemporalStateNextUpdate = true;
+		UpdateMainCameraEntityFromSimpleCamera();
+		AppendCpuRuntimeTrace(
+			L"[ApplySponzaFlyCamera] kept restored camera position=" +
+			std::to_wstring(m_camera.m_position.x) + L"," +
+			std::to_wstring(m_camera.m_position.y) + L"," +
+			std::to_wstring(m_camera.m_position.z));
+		return;
+	}
+
 	const glm::vec3 position(458.0f, 781.0f, 185.0f);
 	const float yaw = 4.4f;
 	const float pitch = -0.40f;
@@ -9986,6 +10034,16 @@ void Corona::ApplySponzaFlyCamera()
 	bScriptCameraControlEnabled = false;
 	if (SponzaObject != InvalidSceneObjectHandle)
 		SetSceneObjectVisibility(SponzaObject, true);
+
+	// LoadCameraState() runs early in OnInit and may load a stale light
+	// direction from a previous platformer-mode session (which scripts the
+	// sun very low: dir ~= (-0.08, 0.22, -0.97), intensity 1.35). Override
+	// with a generic above-side sun so RT shadows / GI behave sensibly in
+	// the sponza-fly scene and the in-game gizmo starts from a reasonable
+	// orientation.
+	LightDir = glm::normalize(glm::vec3(0.3f, 0.85f, 0.3f));
+	LightIntensity = 3.5f;
+	UpdateMainDirectionalLightEntityFromState();
 
 	FrameCounter = 0;
 	PathTracingAccumulatedFrames = 0;
@@ -10609,6 +10667,13 @@ void Corona::OnRender()
 	}
 	else if (!CORONA_PLATFORM_MOBILE && renderingModeThisFrame == ERenderingMode::PATHTRACING)
 	{
+		// Path tracing has no raster GBuffer pass, so the skeletal compute
+		// skinning + BLAS refit (normally invoked from GBufferPass setup in
+		// the hybrid path) need an explicit call here. Otherwise the BLAS
+		// stays at bind pose and the character appears frozen.
+		renderBackend->BindDefaultDescriptorHeaps();
+		DispatchSkeletalSkinningForRenderWorld();
+
 		// Full path tracing
 		BeginGpuPassTiming(EGpuPass::PathTracing);
 		PathTracingPass();
@@ -11730,6 +11795,8 @@ if (ImGui::Button("Reset Accumulation"))
 		const bool bCameraPathOwnsLightControls = bCameraPathPlaying || bCameraPathDumping;
 		if (bCameraPathOwnsLightControls)
 			ImGui::BeginDisabled();
+		const glm::vec3 prevLightDir = LightDir;
+		const float prevLightIntensity = LightIntensity;
 		glm::vec3 LD = glm::vec3(LightDir.z, -LightDir.y, -LightDir.x);
 		ImGui::gizmo3D("##gizmo1", LD, 200 /* mode */);
 		LightDir = glm::vec3(-LD.z, -LD.y, LD.x);
@@ -11738,6 +11805,21 @@ if (ImGui::Button("Reset Accumulation"))
 
 
 		ImGui::SliderFloat("Light Brightness", &LightIntensity, 0.0f, 20.0f);
+		// If the user just dragged the gizmo or slider, the render thread now
+		// holds the authoritative LightDir/LightIntensity. Mark this so the
+		// next ApplyFrameSourceRenderSync doesn't revert it with the stale
+		// game-thread snapshot. Also push the change into the directional
+		// light entity component so the next game-thread capture observes
+		// the new value (the entity is what CaptureRenderFrameSourceState
+		// reads — see Corona.cpp ~line 6563).
+		const bool bUserDraggedLightDir =
+			glm::length(prevLightDir - LightDir) > 1e-5f ||
+			std::abs(prevLightIntensity - LightIntensity) > 1e-5f;
+		if (bUserDraggedLightDir)
+		{
+			bRenderThreadOwnsLightDirNextFrame = true;
+			UpdateMainDirectionalLightEntityFromState();
+		}
 		if (bCameraPathOwnsLightControls)
 		{
 			ImGui::EndDisabled();
@@ -11895,8 +11977,6 @@ if (ImGui::Button("Reset Accumulation"))
 	// Skeletal test: trigger the existing final-backbuffer screenshot facility
 	// once at the requested frame. Uses RequestFinalBackbufferScreenshot ->
 	// renderBackend->RequestWindowCapture path, the same one F-key UI uses.
-	// Also dumps the G-buffer albedo / world-normal so the procedural
-	// character can be verified independent of lighting.
 	if (bCommandLineSkeletalTestScreenshot && !bSkeletalTestScreenshotDone &&
 		FrameCounter >= SkeletalTestScreenshotFrame &&
 		!bFinalScreenshotCaptureInFlight)
@@ -11927,6 +12007,25 @@ if (ImGui::Button("Reset Accumulation"))
 		{
 			const bool ok = DumpTexturePNG(VelocityBuffer.get(), base + L"_velocity.png", EResourceState::ShaderRead);
 			AppendCpuRuntimeTrace(L"[SkeletalTestScreenshot] velocity png=" + std::to_wstring(ok ? 1 : 0));
+		}
+		// Shadow debugging: dump the RT shadow buffer + the GBuffer depth and
+		// geom-normal so we can diagnose whether the skinned character is
+		// visible to the shadow pass (BLAS in TLAS, geometry correct) and
+		// whether it receives shadows (pixels rendered into depth/normal).
+		if (ShadowBuffer)
+		{
+			const bool ok = DumpTexturePNG(ShadowBuffer.get(), base + L"_shadow.png", EResourceState::ShaderRead);
+			AppendCpuRuntimeTrace(L"[SkeletalTestScreenshot] shadow png=" + std::to_wstring(ok ? 1 : 0));
+		}
+		if (UnjitteredDepthBuffers[ColorBufferWriteIndex])
+		{
+			const bool ok = DumpTexturePNG(UnjitteredDepthBuffers[ColorBufferWriteIndex].get(), base + L"_depth.png", EResourceState::ShaderRead);
+			AppendCpuRuntimeTrace(L"[SkeletalTestScreenshot] depth png=" + std::to_wstring(ok ? 1 : 0));
+		}
+		if (GeomNormalBuffers[ColorBufferWriteIndex])
+		{
+			const bool ok = DumpTexturePNG(GeomNormalBuffers[ColorBufferWriteIndex].get(), base + L"_geom_normal.png", EResourceState::ShaderRead);
+			AppendCpuRuntimeTrace(L"[SkeletalTestScreenshot] geom_normal png=" + std::to_wstring(ok ? 1 : 0));
 		}
 		bSkeletalTestScreenshotDone = true;
 	}

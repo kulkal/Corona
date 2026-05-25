@@ -280,10 +280,15 @@ void Corona::FlushSceneObjectChanges()
 
 	if (!bRayTracingSceneDirty)
 	{
-		if (bRayTracingTransformDirty || bCommandLineNvFrapsBvhLiveTlas || !IsCurrentRayTracingFrameResourceReady())
-			UpdateRayTracingInstanceTransforms();
-		else
-			ActivateCurrentRayTracingFrameResources();
+		// Even when no transforms changed, a per-frame BLAS refit (e.g.
+		// skeletal compute skinning) requires the TLAS to be re-issued each
+		// frame: TLAS slots cycle with triple buffering, and a slot that
+		// only saw an old activate (no UpdateTLAS / no Build) keeps a stale
+		// reference to the BLAS data — observed as a one-frame-in-three
+		// shadow drop when a skinned character was present. PERFORM_UPDATE
+		// on the active TLAS slot every frame fixes the flicker; the cost
+		// is microseconds for typical instance counts.
+		UpdateRayTracingInstanceTransforms();
 		return;
 	}
 

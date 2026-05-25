@@ -460,16 +460,17 @@ void Corona::DispatchSkeletalSkinningForRenderWorld()
 	SkeletalStats.BonesUploaded = 0;
 	SkeletalStats.BlasUpdates = 0;
 
-	// Phase 11: ping-pong the output VB so the skeletal GBuffer VS can read
-	// the previous frame's skinned positions for accurate per-vertex motion
-	// vectors. After swap: SkeletalOutputVb = the buffer that compute will
-	// overwrite (was 2-frames-old); SkeletalOutputVbPrev = last frame's
-	// output that the VS samples this frame.
-	for (Mesh* mesh : skinnedMeshes)
-	{
-		if (mesh->SkeletalOutputVbPrev)
-			std::swap(mesh->SkeletalOutputVb, mesh->SkeletalOutputVbPrev);
-	}
+	// Phase 11 motion vector wanted ping-pong (swap curr/prev output VB)
+	// here so the GBuffer VS could read last frame's positions. But that
+	// also changes the GPU VA the BLAS was built from, and D3D12
+	// PERFORM_UPDATE expects the source vertex buffer pointer to stay the
+	// same across refits — the BLAS ended up tracking the OTHER buffer (the
+	// one the compute is about to overwrite), so shadow rays missed the
+	// character. The correct fix is to keep SkeletalOutputVb stable and
+	// copy its prior contents into SkeletalOutputVbPrev before the compute
+	// writes, but for now disable the swap so RT shadows and reflections
+	// stay correct; motion vectors will revert to camera-only until that
+	// copy path is implemented.
 
 	// Batch transitions: SR -> UA for all outputs.
 	for (Mesh* mesh : skinnedMeshes)
@@ -546,11 +547,28 @@ void Corona::SpawnSkeletalTestCharacters()
 	indices.reserve(8192);
 	skin.reserve(4096);
 
+	// Uniform per-box weights: every vertex on a box rigidly follows the
+	// box's PrimaryBone. The smooth distance-based weight blend at joints
+	// (previous PaintWeights pass) caused per-face normal blending after
+	// compute skinning — vertices on the same face ended up with different
+	// bone weights, so the bone-rotated normals diverged across the face
+	// and the box character looked oddly smooth-shaded / dirty rather than
+	// crisply flat. With rigid weights each box rotates as a unit, so all
+	// vertices on a face share the exact same skinned normal → true
+	// per-face flat shading. Trade-off: joints show small geometric gaps
+	// between boxes, which is the expected look for a box-and-bone test
+	// character.
 	for (const BoxPart& part : parts)
+	{
+		const size_t vertStart = skin.size();
 		AppendBox(vertices, indices, skin, part, boneHeads, boneTails);
-
-	const std::vector<float> radii = BuildBoneInfluenceRadii();
-	PaintWeights(skin, boneHeads, boneTails, radii);
+		const size_t vertEnd = skin.size();
+		for (size_t i = vertStart; i < vertEnd; ++i)
+		{
+			skin[i].BoneIndicesPacked = static_cast<UINT32>(part.PrimaryBone & 0xFF);
+			skin[i].BoneWeights = glm::vec4(1.0f, 0.0f, 0.0f, 0.0f);
+		}
+	}
 
 	const UINT32 vertexCount = static_cast<UINT32>(vertices.size());
 	const UINT32 indexCount = static_cast<UINT32>(indices.size());

@@ -4698,6 +4698,13 @@ function script.update(dt)
     sceneSamplesThisFrame = 0
     enemySpawnsThisFrame = 0
 
+    -- Pin sun direction/intensity to platformer defaults every frame so
+    -- the imgui gizmo can't drag them off-target during a play session.
+    -- The platformer level lighting is tuned to this specific sun setup
+    -- (see corona_platformer_sun_direction at module init).
+    corona.set_ui_value("light_dir", corona_platformer_sun_direction)
+    corona.set_ui_value("light_intensity", corona_platformer_sun_intensity)
+
     if gameState == "menu" then
         local gamepad = corona.get_gamepad ~= nil and corona.get_gamepad() or { connected = false }
         corona_platformer_update_menu_previews(dt)

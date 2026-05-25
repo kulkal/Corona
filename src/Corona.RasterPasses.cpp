@@ -1824,17 +1824,13 @@ void Corona::DrawScene(shared_ptr<Scene> scene, const glm::mat4x4& instanceTrans
 			!bUseSpineVertexFetch &&
 			mesh->bSpineMesh &&
 			CpuSpineGBufferGraphicsPipeline;
-		// Phase 11: skeletal mesh with both ping-pong VBs available uses the
-		// skeletal-VS PSO so motion vectors reflect per-vertex skinning
-		// velocity, not just camera/world motion. Falls back to the standard
-		// PSO if double buffering isn't ready (e.g. very first frame, or if
-		// PSO creation failed).
-		const bool bUseSkeletalSkinned =
-			mesh->bSkeletalSkinned &&
-			mesh->bSkeletalSkinningDispatched &&
-			mesh->SkeletalOutputVb &&
-			mesh->SkeletalOutputVbPrev &&
-			SkeletalGBufferGraphicsPipeline;
+		// Phase 11 skeletal VS variant disabled while the bone-matrix-based
+		// prev-position path is being wired in. The previous ping-pong path
+		// was sampling an undefined buffer (SkeletalOutputVbPrev never gets
+		// written after the swap was removed), which produced random
+		// per-vertex prev clip values, corrupted velocity, and caused the
+		// shadow temporal denoiser to flicker across frames.
+		const bool bUseSkeletalSkinned = false;
 		GraphicsPipelineHandle* activeGBufferPipeline =
 			bUseSkeletalSkinned ? SkeletalGBufferGraphicsPipeline.get() :
 			(bUseSpineVertexFetch ? SpineGBufferGraphicsPipeline.get() :

@@ -1430,6 +1430,16 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	// misc
 	glm::vec3 LightDir = glm::normalize(glm::vec3(0.901, 0.88, 0.176));
 	float LightIntensity = 0.4;
+	// Render thread sets this when the C++ imgui sun-direction gizmo
+	// modifies LightDir; the next ApplyFrameSourceRenderSync skips its
+	// LightDir/LightIntensity overwrite so the user's drag isn't reverted
+	// by a stale game-thread state capture (split game/render threads).
+	bool bRenderThreadOwnsLightDirNextFrame = false;
+	// Set by LoadCameraState() on success so ApplySponzaFlyCamera can keep
+	// the restored camera position/rotation/light instead of snapping back
+	// to the sponza-fly preset — useful for resuming an inspection of the
+	// scene at the same vantage point across runs.
+	bool bCameraStateRestoredFromDisk = false;
 	struct PointLightState
 	{
 		UINT32 Id = 0;
