@@ -562,7 +562,6 @@ void Corona::SpawnSkeletalTestCharacters()
 
 	for (UINT32 instance = 0; instance < desiredCount; ++instance)
 	{
-		AppendCpuRuntimeTrace(L"[SkeletalSpawn] inst=" + std::to_wstring(instance) + L" begin");
 		const int gx = static_cast<int>(instance) % gridSide;
 		const int gz = static_cast<int>(instance) / gridSide;
 		const float wx = spawnOrigin.x + gridOffset + gx * spacing;
@@ -589,12 +588,10 @@ void Corona::SpawnSkeletalTestCharacters()
 		mesh->Vb = renderBackend->CreateVertexBuffer(
 			static_cast<UINT32>(sizeof(StandardVertex) * vertices.size()),
 			sizeof(StandardVertex), vertices.data());
-		AppendCpuRuntimeTrace(L"[SkeletalSpawn] inst=" + std::to_wstring(instance) + L" after CreateVertexBuffer");
 		mesh->Ib = renderBackend->CreateIndexBuffer(
 			mesh->IndexFormat,
 			static_cast<UINT32>(sizeof(UINT32) * indices.size()),
 			indices.data());
-		AppendCpuRuntimeTrace(L"[SkeletalSpawn] inst=" + std::to_wstring(instance) + L" after CreateIndexBuffer");
 		mesh->CpuPositions.reserve(vertices.size());
 		for (const StandardVertex& v : vertices)
 			mesh->CpuPositions.emplace_back(glm::vec3(v.Position));
@@ -617,14 +614,12 @@ void Corona::SpawnSkeletalTestCharacters()
 		inputDesc.NumElements = static_cast<UINT32>(skin.size());
 		inputDesc.ElementSize = sizeof(SkinInputVertex);
 		inputDesc.InitialState = EInitialResourceState::ShaderRead;
-		inputDesc.bAllowUnorderedAccess = true; // match Spine pattern that succeeds
+		// UAV flag picks the DEFAULT-heap path which is required when
+		// CreateBuffer is asked to upload InitialData on the GPU.
+		inputDesc.bAllowUnorderedAccess = true;
 		inputDesc.InitialData = skin.data();
 		inputDesc.Shape = EBufferShape::Structured;
-		AppendCpuRuntimeTrace(L"[SkeletalSpawn] inst=" + std::to_wstring(instance) +
-			L" pre CreateBuffer elems=" + std::to_wstring(inputDesc.NumElements) +
-			L" stride=" + std::to_wstring(inputDesc.ElementSize));
 		mesh->SkeletalInputVertices = renderBackend->CreateBuffer(inputDesc);
-		AppendCpuRuntimeTrace(L"[SkeletalSpawn] inst=" + std::to_wstring(instance) + L" after CreateBuffer(SkinInputVertex)");
 
 		// Bone matrix SBV — one mat3x4 (48 B) per bone, persistent-mapped on
 		// UPLOAD heap so per-frame UpdateSkeletalTestCharacters can refresh
@@ -653,8 +648,6 @@ void Corona::SpawnSkeletalTestCharacters()
 		mesh->SkeletalOutputVb = renderBackend->CreateRWVertexBuffer(
 			static_cast<UINT32>(sizeof(StandardVertex) * vertices.size()),
 			sizeof(StandardVertex));
-		AppendCpuRuntimeTrace(L"[SkeletalSpawn] inst=" + std::to_wstring(instance) +
-			L" output vb=" + std::to_wstring(mesh->SkeletalOutputVb ? 1 : 0));
 
 		scene->meshes.push_back(mesh);
 		scene->bHasBounds = true;
@@ -669,9 +662,7 @@ void Corona::SpawnSkeletalTestCharacters()
 		desc.bOverrideRoughnessMetallic = true;
 		desc.bRayTracing = true;
 		desc.bPhysicsQuery = false;
-		AppendCpuRuntimeTrace(L"[SkeletalSpawn] inst=" + std::to_wstring(instance) + L" before AddSceneObject");
 		(void)AddSceneObject(desc);
-		AppendCpuRuntimeTrace(L"[SkeletalSpawn] inst=" + std::to_wstring(instance) + L" after AddSceneObject");
 	}
 
 	AppendCpuRuntimeTrace(

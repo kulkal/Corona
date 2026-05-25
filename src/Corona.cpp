@@ -2791,7 +2791,6 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 		if (arg == L"--skeletal-test" || arg == L"--skeletal-skinning-test")
 		{
 			bCommandLineSpawnSkeletalTest = true;
-			AppendStartupTrace(L"[ParseCommandLineArgs] --skeletal-test enabled");
 			continue;
 		}
 		std::wstring skeletalScreenshotValue = ParseValueArg(arg, L"--skeletal-test-screenshot", L"-skeletal-test-screenshot", i);
@@ -2803,7 +2802,6 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 				SkeletalTestScreenshotFrame = static_cast<UINT32>(std::clamp<unsigned long>(value, 1ul, 100000ul));
 				bCommandLineSkeletalTestScreenshot = true;
 				bCommandLineSpawnSkeletalTest = true;
-				AppendStartupTrace(L"[ParseCommandLineArgs] --skeletal-test-screenshot frame=" + std::to_wstring(SkeletalTestScreenshotFrame));
 			}
 			catch (...)
 			{
