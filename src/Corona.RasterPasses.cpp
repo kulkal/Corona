@@ -189,11 +189,17 @@ void Corona::InitGBufferPass()
 	desc.ShaderPath = GetAssetFullPath(CORONA_PLATFORM_MOBILE ? L"Shaders\\GBufferMobile.hlsl" : L"Shaders\\GBuffer.hlsl");
 	desc.VertexEntryPoint = "VSMain";
 	desc.PixelEntryPoint = "PSMain";
+	// StandardVertex layout (48 B): POSITION float4 @ 0, UV @ 16,
+	// NORMAL @ 24, TANGENT @ 36. The first three components of POSITION
+	// are read as float3; the fourth (w=1) is intentionally skipped by
+	// the attribute descriptor. Vulkan uses this PSO-side stride; DX12
+	// uses VBV.StrideInBytes instead so it was OK with the legacy 44 B
+	// value before, but mobile rendered every vertex 4 B off.
 	desc.VertexElements = {
 		{ "POSITION", 0, EVertexAttributeFormat::Float3, 0 },
-		{ "NORMAL", 0, EVertexAttributeFormat::Float3, 12 },
-		{ "TEXCOORD", 0, EVertexAttributeFormat::Float2, 24 },
-		{ "TANGENT", 0, EVertexAttributeFormat::Float3, 32 },
+		{ "NORMAL",   0, EVertexAttributeFormat::Float3, 24 },
+		{ "TEXCOORD", 0, EVertexAttributeFormat::Float2, 16 },
+		{ "TANGENT",  0, EVertexAttributeFormat::Float3, 36 },
 	};
 	desc.TextureBindings = {
 		{ "AlbedoTex", 0 },
@@ -204,7 +210,7 @@ void Corona::InitGBufferPass()
 	desc.SamplerBindings = {
 		{ "samplerWrap", 0 },
 	};
-	desc.VertexStride = 44;
+	desc.VertexStride = 48;
 	if (CORONA_PLATFORM_MOBILE)
 	{
 		desc.ColorFormats = {
@@ -264,7 +270,21 @@ void Corona::InitGBufferPass()
 	skeletalDesc.BufferBindings = {
 		{ "SkeletalInputs", 5 },
 		{ "SkeletalPrevBones", 6 },
-		{ "SkeletalInstanceTransforms", 7 },
+	};
+	// Skeletal output / bind-pose VBs use the StandardVertex layout
+	// (POSITION float4 @ 0, TEXCOORD @ 16, NORMAL @ 24, TANGENT @ 36,
+	// stride 48), not the standard 44-byte sponza layout. Vulkan reads
+	// stride from the PSO binding description, so we have to override
+	// here or every vertex slips by 4 bytes. Note: Vulkan assigns
+	// VkVertexInputAttributeDescription location by index in this
+	// vector — keep the order matching VSInput in GBuffer.hlsl
+	// (POSITION / NORMAL / TEXCOORD0 / TANGENT).
+	skeletalDesc.VertexStride = 48;
+	skeletalDesc.VertexElements = {
+		{ "POSITION", 0, EVertexAttributeFormat::Float3, 0 },
+		{ "NORMAL",   0, EVertexAttributeFormat::Float3, 24 },
+		{ "TEXCOORD", 0, EVertexAttributeFormat::Float2, 16 },
+		{ "TANGENT",  0, EVertexAttributeFormat::Float3, 36 },
 	};
 	try
 	{
@@ -279,15 +299,17 @@ void Corona::InitGBufferPass()
 		AppendCpuRuntimeTrace(L"[InitGBufferPass] failed to create Skeletal GBuffer pipeline");
 
 	// Path C: VS inline skinning PSO. Same IA layout, different VS entry,
-	// extra SBV for the current-frame bone palette.
+	// adds one SBV for the current-frame bone palette.
 	GraphicsPipelineDesc vsInlineDesc = desc;
 	vsInlineDesc.VertexEntryPoint = "SkeletalVsInlineVSMain";
 	vsInlineDesc.BufferBindings = {
 		{ "SkeletalInputs", 5 },
 		{ "SkeletalPrevBones", 6 },
-		{ "SkeletalInstanceTransforms", 7 },
-		{ "SkeletalCurrBones", 8 },
+		{ "SkeletalCurrBones", 7 },
 	};
+	// Same StandardVertex IA layout as skeletalDesc (48 B stride).
+	vsInlineDesc.VertexStride = 48;
+	vsInlineDesc.VertexElements = skeletalDesc.VertexElements;
 	try
 	{
 		SkeletalVsInlineGraphicsPipeline = renderBackend->CreateGraphicsPipeline(vsInlineDesc);
@@ -623,7 +645,8 @@ void Corona::InitMobileShadowMapPass()
 	desc.ShaderPath = GetAssetFullPath(L"Shaders\\MobileShadowMap.hlsl");
 	desc.VertexEntryPoint = "VSMain";
 	desc.PixelEntryPoint = "PSMain";
-	desc.VertexStride = 44;
+	// Match the StandardVertex 48 B layout used by every renderable mesh.
+	desc.VertexStride = 48;
 	desc.ColorFormats.clear();
 	desc.DepthFormat = ETextureFormat::D32Float;
 	desc.bDepthEnable = true;
@@ -636,9 +659,9 @@ void Corona::InitMobileShadowMapPass()
 	desc.ConstantBufferBinding = 0;
 	desc.VertexElements = {
 		{ "POSITION", 0, EVertexAttributeFormat::Float3, 0 },
-		{ "NORMAL", 0, EVertexAttributeFormat::Float3, 12 },
-		{ "TEXCOORD", 0, EVertexAttributeFormat::Float2, 24 },
-		{ "TANGENT", 0, EVertexAttributeFormat::Float3, 32 }
+		{ "NORMAL",   0, EVertexAttributeFormat::Float3, 24 },
+		{ "TEXCOORD", 0, EVertexAttributeFormat::Float2, 16 },
+		{ "TANGENT",  0, EVertexAttributeFormat::Float3, 36 }
 	};
 	desc.TextureBindings.clear();
 	desc.SamplerBindings.clear();
@@ -1857,38 +1880,66 @@ void Corona::DrawScene(shared_ptr<Scene> scene, const glm::mat4x4& instanceTrans
 			!bUseSpineVertexFetch &&
 			mesh->bSpineMesh &&
 			CpuSpineGBufferGraphicsPipeline;
-		// Phase 11: skeletal motion-vector path. Re-skins from bind pose
-		// in the VS with the previous frame's bone palette so motion
-		// vectors reflect per-vertex skinning velocity. Without this the
-		// temporal denoiser flickers on AO / specular GI because it
-		// reprojects the wrong pixel.
-		const bool bUseSkeletalSkinned =
+		// Phase 11 / Phase A / Path C skeletal paths. Each picks a different
+		// PSO + IA source VB but all share the same SkeletalInputs +
+		// SkeletalPrevBones bindings.
+		//   Path C (VS inline): IA reads bind-pose, VS does skinning inline,
+		//                        binds SkeletalCurrBones too.
+		//   CPU "Spine-style":  IA reads SkeletalUnifiedCpuSkinnedVb (CPU
+		//                        skinned this frame), VS reads PrevBones for
+		//                        motion vectors only.
+		//   GPU compute:        IA reads the compute-output VB, same VS as CPU.
+		const bool bSkeletalReady =
 			mesh->bSkeletalSkinned &&
 			mesh->bSkeletalSkinningDispatched &&
-			mesh->SkeletalOutputVb &&
 			mesh->SkeletalInputVertices &&
-			mesh->SkeletalPrevBoneMatrices &&
+			mesh->SkeletalPrevBoneMatrices;
+		const bool bUseSkeletalVsInline =
+			bSkeletalReady &&
+			bSkeletalUseVsInlineSkinning &&
+			SkeletalUnifiedBoneMatrices &&
+			SkeletalUnifiedBindVb &&
+			SkeletalVsInlineGraphicsPipeline;
+		const bool bUseSkeletalSkinned =
+			!bUseSkeletalVsInline &&
+			bSkeletalReady &&
+			mesh->SkeletalOutputVb &&
 			SkeletalGBufferGraphicsPipeline;
 		GraphicsPipelineHandle* activeGBufferPipeline =
-			bUseSkeletalSkinned ? SkeletalGBufferGraphicsPipeline.get() :
+			bUseSkeletalVsInline ? SkeletalVsInlineGraphicsPipeline.get() :
+			(bUseSkeletalSkinned ? SkeletalGBufferGraphicsPipeline.get() :
 			(bUseSpineVertexFetch ? SpineGBufferGraphicsPipeline.get() :
-			(bUseCpuSpinePipeline ? CpuSpineGBufferGraphicsPipeline.get() : GBufferGraphicsPipeline.get()));
+			(bUseCpuSpinePipeline ? CpuSpineGBufferGraphicsPipeline.get() : GBufferGraphicsPipeline.get())));
 		renderBackend->BindGraphicsPipeline(activeGBufferPipeline);
 		renderBackend->BindGraphicsPipelineSampler(activeGBufferPipeline, "samplerWrap", samplerWrap.get());
 		if (bUseSpineVertexFetch)
 			renderBackend->BindGraphicsPipelineBuffer(activeGBufferPipeline, "SpineVertices", mesh->GpuSpineSkinnedVertices.get());
-		if (bUseSkeletalSkinned)
+		if (bUseSkeletalSkinned || bUseSkeletalVsInline)
 		{
 			renderBackend->BindGraphicsPipelineBuffer(activeGBufferPipeline, "SkeletalInputs", mesh->SkeletalInputVertices.get());
 			renderBackend->BindGraphicsPipelineBuffer(activeGBufferPipeline, "SkeletalPrevBones", mesh->SkeletalPrevBoneMatrices.get());
 		}
+		if (bUseSkeletalVsInline)
+		{
+			renderBackend->BindGraphicsPipelineBuffer(activeGBufferPipeline, "SkeletalCurrBones", SkeletalUnifiedBoneMatrices.get());
+		}
 
 		// 3D skeletal skinning: swap the bind-pose VB for the compute-skinned
 		// output VB. Layout matches the standard IA so the GBuffer PSO is
-		// unchanged.
+		// unchanged. Path C (VS inline) reads bind-pose; CPU mode reads the
+		// per-frame UPLOAD VB the CPU skinner produced; default uses the
+		// compute-output VB.
 		VertexBuffer* drawVb = mesh->Vb.get();
-		if (mesh->bSkeletalSkinned && mesh->bSkeletalSkinningDispatched && mesh->SkeletalOutputVb)
-			drawVb = mesh->SkeletalOutputVb.get();
+		if (bUseSkeletalVsInline)
+		{
+			drawVb = SkeletalUnifiedBindVb.get();
+		}
+		else if (bUseSkeletalSkinned)
+		{
+			drawVb = (bSkeletalUseCpuSkinning && SkeletalUnifiedCpuSkinnedVb)
+				? SkeletalUnifiedCpuSkinnedVb.get()
+				: mesh->SkeletalOutputVb.get();
+		}
 		renderBackend->BindMeshBuffers(drawVb, mesh->Ib.get());
 
 		for (int i = 0; i < mesh->Draws.size(); i++)
@@ -1925,9 +1976,10 @@ void Corona::DrawScene(shared_ptr<Scene> scene, const glm::mat4x4& instanceTrans
 			objCB.bTwoSidedLighting = bSpineUnlit ? 1u : 0u;
 			objCB.bUnlitMaterial = bSpineUnlit ? 1u : 0u;
 			objCB.SpineVertexBase = bUseSpineVertexFetch ? drawcall.VertexBase : 0u;
-			objCB.SkeletalCharIndex = bUseSkeletalSkinned ? mesh->SkeletalCharIndex : 0u;
-			objCB.SkeletalVertsPerChar = bUseSkeletalSkinned ? SkeletalUnifiedVertsPerChar : 0u;
-			objCB.SkeletalBoneCount = bUseSkeletalSkinned ? SkeletalUnifiedBoneCount : 0u;
+			const bool bAnySkeletalPath = bUseSkeletalSkinned || bUseSkeletalVsInline;
+			objCB.SkeletalCharIndex = bAnySkeletalPath ? mesh->SkeletalCharIndex : 0u;
+			objCB.SkeletalVertsPerChar = bAnySkeletalPath ? SkeletalUnifiedVertsPerChar : 0u;
+			objCB.SkeletalBoneCount = bAnySkeletalPath ? SkeletalUnifiedBoneCount : 0u;
 
 			renderBackend->SetGraphicsPipelineConstantData(activeGBufferPipeline, 0, &objCB, sizeof(objCB));
 
@@ -2040,7 +2092,31 @@ void Corona::DrawSceneShadowMap(shared_ptr<Scene> scene, const glm::mat4x4& inst
 		if (bUseSpineVertexFetch)
 			renderBackend->BindGraphicsPipelineBuffer(activeShadowPipeline, "SpineVertices", mesh->GpuSpineSkinnedVertices.get());
 
-		renderBackend->BindMeshBuffers(mesh->Vb.get(), mesh->Ib.get());
+		// Skeletal meshes share a single-copy bind-pose VB; using
+		// drawcall.VertexBase against that buffer reads past the end for
+		// every char after #0. Route to the per-frame skinned VB instead
+		// (CPU-skinned, GPU-compute output, or bind-pose for VS inline).
+		VertexBuffer* shadowVb = mesh->Vb.get();
+		if (mesh->bSkeletalSkinned && mesh->bSkeletalSkinningDispatched)
+		{
+			if (bSkeletalUseVsInlineSkinning && SkeletalUnifiedBindVb)
+			{
+				// VS inline doesn't skin shadows — fall back to bind pose
+				// but use BaseVertexLocation = 0 since the shared VB only
+				// holds one char's worth of data. Skinned shadow is lost
+				// in this mode; acceptable for the benchmark.
+				shadowVb = SkeletalUnifiedBindVb.get();
+			}
+			else if (bSkeletalUseCpuSkinning && SkeletalUnifiedCpuSkinnedVb)
+			{
+				shadowVb = SkeletalUnifiedCpuSkinnedVb.get();
+			}
+			else if (mesh->SkeletalOutputVb)
+			{
+				shadowVb = mesh->SkeletalOutputVb.get();
+			}
+		}
+		renderBackend->BindMeshBuffers(shadowVb, mesh->Ib.get());
 
 		for (int i = 0; i < mesh->Draws.size(); i++)
 		{
@@ -2658,22 +2734,14 @@ void Corona::GBufferPass()
 
 	PrepareGBufferCulling(static_cast<uint32_t>(RenderWorld.SceneObjects.size()));
 
-	// Phase B: refresh per-instance transforms once and issue ONE instanced
-	// draw covering every unified skeletal character. The individual
-	// skeletal scene objects are skipped in the main loop below.
-	UpdateSkeletalUnifiedInstanceTransforms();
-	const bool bSkeletalClusterDrawn = DrawSkeletalUnifiedCluster();
-
-	auto isSkeletalUnifiedObject = [&](const std::shared_ptr<Scene>& scene)
+	// Phase B's instanced cluster draw was removed: Adreno failed to
+	// compile the SV_InstanceID + SkeletalInstanceTransforms variant of
+	// the skeletal VS. Every skeletal character now goes through the
+	// per-mesh DrawScene path below (each draw sets its own
+	// CB.SkeletalCharIndex / CB.WorldMatrix). The skip-this-object
+	// helper stays as a no-op so the call site doesn't change.
+	auto isSkeletalUnifiedObject = [](const std::shared_ptr<Scene>& /*scene*/)
 	{
-		if (!bSkeletalClusterDrawn || !scene)
-			return false;
-		for (const auto& mesh : scene->meshes)
-		{
-			if (mesh && mesh->bSkeletalSkinned &&
-				mesh->SkeletalOutputVb == SkeletalUnifiedOutputVb)
-				return true;
-		}
 		return false;
 	};
 

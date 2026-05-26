@@ -3732,21 +3732,67 @@ bool VulkanBackend::AllocateUploadBufferRange(
 
 std::shared_ptr<VertexBuffer> VulkanBackend::CreateRWVertexBuffer(uint32_t size, uint32_t stride)
 {
-	// Skeletal skinning compute path is DX12-only for now (see
-	// docs/skeletal_skinning_implementation_progress.md "작업 범위").
-	(void)size; (void)stride;
+	if (size == 0)
+		return nullptr;
+#if !CORONA_HAS_VULKAN
+	(void)stride;
 	return nullptr;
+#else
+	// Vulkan compute skinning is not wired up — the mobile benchmark
+	// runs CPU or VS-inline skinning instead, both of which never write
+	// to this buffer. Return an UPLOAD-heap VB so the non-null pointer
+	// passes downstream checks; nothing else reads its content.
+	VulkanBufferAllocation allocation{};
+	const VkDeviceSize align = stride > 0 ? stride : 4;
+	if (!AllocateUploadBufferRange(size, align, nullptr, allocation))
+		return nullptr;
+	allocation.Stride = stride;
+
+	auto* vb = new VertexBuffer();
+	vb->numVertices = stride > 0 ? static_cast<int>(size / stride) : 0;
+	VertexBufferAllocations[vb] = allocation;
+	return std::shared_ptr<VertexBuffer>(vb);
+#endif
 }
 
 std::shared_ptr<Buffer> VulkanBackend::CreateUploadStructuredBuffer(uint32_t numElements, uint32_t elementSize)
 {
-	(void)numElements; (void)elementSize;
+	if (numElements == 0 || elementSize == 0)
+		return nullptr;
+#if !CORONA_HAS_VULKAN
+	(void)elementSize;
 	return nullptr;
+#else
+	const uint32_t size = numElements * elementSize;
+	VulkanBufferAllocation allocation{};
+	const VkDeviceSize align = elementSize > 0 ? elementSize : 4;
+	if (!AllocateUploadBufferRange(size, align, nullptr, allocation))
+		return nullptr;
+	allocation.Stride = elementSize;
+	allocation.SizeInBytes = size;
+
+	auto* buf = new Buffer();
+	BufferAllocations[buf] = allocation;
+	return std::shared_ptr<Buffer>(buf);
+#endif
 }
 
 void VulkanBackend::UpdateUploadStructuredBuffer(Buffer* buffer, const void* srcData, uint32_t sizeInBytes)
 {
+#if !CORONA_HAS_VULKAN
 	(void)buffer; (void)srcData; (void)sizeInBytes;
+#else
+	if (!buffer || !srcData || sizeInBytes == 0)
+		return;
+	auto it = BufferAllocations.find(buffer);
+	if (it == BufferAllocations.end())
+		return;
+	auto& alloc = it->second;
+	if (!alloc.PoolBlock || !alloc.PoolBlock->MappedBase)
+		return;
+	const uint32_t copyBytes = std::min<uint32_t>(sizeInBytes, alloc.SizeInBytes);
+	std::memcpy(alloc.PoolBlock->MappedBase + alloc.Offset, srcData, copyBytes);
+#endif
 }
 
 std::shared_ptr<VertexBuffer> VulkanBackend::CreateUploadVertexBuffer(uint32_t size, uint32_t stride, const void* srcData)

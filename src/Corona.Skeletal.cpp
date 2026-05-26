@@ -478,6 +478,15 @@ void Corona::DispatchSkeletalSkinningForRenderWorld()
 		SkeletalStats.VerticesSkinned = SkeletalUnifiedCharCount * SkeletalUnifiedVertsPerChar;
 		SkeletalStats.BonesUploaded = SkeletalUnifiedCharCount * SkeletalUnifiedBoneCount;
 		SkeletalStats.BlasUpdates = 0;
+		// Mark every skeletal mesh as "skinning ready" so the GBuffer
+		// path picks the skeletal PSO + the CPU-skinned VB instead of
+		// falling back to the static bind VB.
+		for (SceneObject& object : SceneObjects)
+		{
+			if (!object.ScenePtr) continue;
+			for (const std::shared_ptr<Mesh>& mesh : object.ScenePtr->meshes)
+				if (mesh && mesh->bSkeletalSkinned) mesh->bSkeletalSkinningDispatched = true;
+		}
 		return;
 	}
 
