@@ -89,6 +89,10 @@ StructuredBuffer<SkinBone_t>        SkeletalPrevBones : register(t6);
 // instanced GBuffer draw passes SkeletalCharIndex = 0xFFFFFFFF to tell the
 // VS to use SV_InstanceID for the char slot AND read its WorldMatrix here.
 StructuredBuffer<float4x4>          SkeletalInstanceTransforms : register(t7);
+// Path C (VS inline skinning): current-frame bone palette. Only the
+// inline-VS variant binds this; the compute pre-pass variant leaves it
+// unbound because the skinning has already been baked into the IA VB.
+StructuredBuffer<SkinBone_t>        SkeletalCurrBones : register(t8);
 
 struct PSInput
 {
@@ -190,6 +194,99 @@ PSInput SkeletalVSMain(VSInput input, uint vertexId : SV_VertexID, uint instance
     result.normal = normalize(mul(float4(input.normal, 0), worldMatrix));
     result.tangent = normalize(mul(float4(input.tangent, 0), worldMatrix));
     result.uv = input.uv;
+    return result;
+}
+
+// Path C — pure VS skinning. There is no compute pre-pass, no skinned
+// VB. IA is bound to the static bind-pose VB; the VS pulls the bone
+// indices/weights from SkeletalInputs and the per-char palette from
+// SkeletalCurrBones (curr-frame) and SkeletalPrevBones (prev-frame for
+// motion vectors). All draws use the instanced path (SV_InstanceID =
+// charIdx, no SkeletalCharIndex sentinel needed because this VS is
+// only ever bound by the instanced draw).
+PSInput SkeletalVsInlineVSMain(VSInput input, uint vertexId : SV_VertexID, uint instanceId : SV_InstanceID)
+{
+    PSInput result;
+
+    const uint charIndex = instanceId;
+    const uint boneBase = charIndex * SkeletalBoneCount;
+    float4x4 worldMatrix = SkeletalInstanceTransforms[charIndex];
+
+    SkinInputVertex_t v = SkeletalInputs[vertexId];
+    uint i0 = (v.BoneIndicesPacked >>  0) & 0xFFu;
+    uint i1 = (v.BoneIndicesPacked >>  8) & 0xFFu;
+    uint i2 = (v.BoneIndicesPacked >> 16) & 0xFFu;
+    uint i3 = (v.BoneIndicesPacked >> 24) & 0xFFu;
+    float w0 = v.BoneWeights.x;
+    float w1 = v.BoneWeights.y;
+    float w2 = v.BoneWeights.z;
+    float w3 = v.BoneWeights.w;
+    float4 bp = float4(v.BindPosition, 1.0f);
+
+    // Curr-frame skin → object space.
+    SkinBone_t c0 = SkeletalCurrBones[boneBase + i0];
+    SkinBone_t c1 = SkeletalCurrBones[boneBase + i1];
+    SkinBone_t c2 = SkeletalCurrBones[boneBase + i2];
+    SkinBone_t c3 = SkeletalCurrBones[boneBase + i3];
+    float3 CP0 = float3(dot(c0.Row0, bp), dot(c0.Row1, bp), dot(c0.Row2, bp));
+    float3 CP1 = float3(dot(c1.Row0, bp), dot(c1.Row1, bp), dot(c1.Row2, bp));
+    float3 CP2 = float3(dot(c2.Row0, bp), dot(c2.Row1, bp), dot(c2.Row2, bp));
+    float3 CP3 = float3(dot(c3.Row0, bp), dot(c3.Row1, bp), dot(c3.Row2, bp));
+    float3 currObjPos = CP0 * w0 + CP1 * w1 + CP2 * w2 + CP3 * w3;
+
+    // Curr-frame normal + tangent: only the 3x3 portion of each bone.
+    float3 N0 = float3(c0.Row0.x * input.normal.x + c0.Row0.y * input.normal.y + c0.Row0.z * input.normal.z,
+                       c0.Row1.x * input.normal.x + c0.Row1.y * input.normal.y + c0.Row1.z * input.normal.z,
+                       c0.Row2.x * input.normal.x + c0.Row2.y * input.normal.y + c0.Row2.z * input.normal.z);
+    float3 N1 = float3(c1.Row0.x * input.normal.x + c1.Row0.y * input.normal.y + c1.Row0.z * input.normal.z,
+                       c1.Row1.x * input.normal.x + c1.Row1.y * input.normal.y + c1.Row1.z * input.normal.z,
+                       c1.Row2.x * input.normal.x + c1.Row2.y * input.normal.y + c1.Row2.z * input.normal.z);
+    float3 N2 = float3(c2.Row0.x * input.normal.x + c2.Row0.y * input.normal.y + c2.Row0.z * input.normal.z,
+                       c2.Row1.x * input.normal.x + c2.Row1.y * input.normal.y + c2.Row1.z * input.normal.z,
+                       c2.Row2.x * input.normal.x + c2.Row2.y * input.normal.y + c2.Row2.z * input.normal.z);
+    float3 N3 = float3(c3.Row0.x * input.normal.x + c3.Row0.y * input.normal.y + c3.Row0.z * input.normal.z,
+                       c3.Row1.x * input.normal.x + c3.Row1.y * input.normal.y + c3.Row1.z * input.normal.z,
+                       c3.Row2.x * input.normal.x + c3.Row2.y * input.normal.y + c3.Row2.z * input.normal.z);
+    float3 currObjNormal = normalize(N0 * w0 + N1 * w1 + N2 * w2 + N3 * w3);
+
+    float3 T0 = float3(c0.Row0.x * input.tangent.x + c0.Row0.y * input.tangent.y + c0.Row0.z * input.tangent.z,
+                       c0.Row1.x * input.tangent.x + c0.Row1.y * input.tangent.y + c0.Row1.z * input.tangent.z,
+                       c0.Row2.x * input.tangent.x + c0.Row2.y * input.tangent.y + c0.Row2.z * input.tangent.z);
+    float3 T1 = float3(c1.Row0.x * input.tangent.x + c1.Row0.y * input.tangent.y + c1.Row0.z * input.tangent.z,
+                       c1.Row1.x * input.tangent.x + c1.Row1.y * input.tangent.y + c1.Row1.z * input.tangent.z,
+                       c1.Row2.x * input.tangent.x + c1.Row2.y * input.tangent.y + c1.Row2.z * input.tangent.z);
+    float3 T2 = float3(c2.Row0.x * input.tangent.x + c2.Row0.y * input.tangent.y + c2.Row0.z * input.tangent.z,
+                       c2.Row1.x * input.tangent.x + c2.Row1.y * input.tangent.y + c2.Row1.z * input.tangent.z,
+                       c2.Row2.x * input.tangent.x + c2.Row2.y * input.tangent.y + c2.Row2.z * input.tangent.z);
+    float3 T3 = float3(c3.Row0.x * input.tangent.x + c3.Row0.y * input.tangent.y + c3.Row0.z * input.tangent.z,
+                       c3.Row1.x * input.tangent.x + c3.Row1.y * input.tangent.y + c3.Row1.z * input.tangent.z,
+                       c3.Row2.x * input.tangent.x + c3.Row2.y * input.tangent.y + c3.Row2.z * input.tangent.z);
+    float3 currObjTangent = T0 * w0 + T1 * w1 + T2 * w2 + T3 * w3;
+    currObjTangent = normalize(currObjTangent - currObjNormal * dot(currObjNormal, currObjTangent));
+
+    float4 worldPos = mul(float4(currObjPos, 1.0f), worldMatrix);
+    result.position = mul(worldPos, ViewProjectionMatrix);
+    result.unjitteredPosition = mul(worldPos, UnjitteredViewProjMat);
+
+    // Prev-frame skin (motion vector). Same math with the previous-frame
+    // bone palette. Note: VS inline cannot use a per-instance prev-frame
+    // world transform — uses the current world matrix (animated joints
+    // dominate the motion vector for stationary characters).
+    SkinBone_t p0 = SkeletalPrevBones[boneBase + i0];
+    SkinBone_t p1 = SkeletalPrevBones[boneBase + i1];
+    SkinBone_t p2 = SkeletalPrevBones[boneBase + i2];
+    SkinBone_t p3 = SkeletalPrevBones[boneBase + i3];
+    float3 PP0 = float3(dot(p0.Row0, bp), dot(p0.Row1, bp), dot(p0.Row2, bp));
+    float3 PP1 = float3(dot(p1.Row0, bp), dot(p1.Row1, bp), dot(p1.Row2, bp));
+    float3 PP2 = float3(dot(p2.Row0, bp), dot(p2.Row1, bp), dot(p2.Row2, bp));
+    float3 PP3 = float3(dot(p3.Row0, bp), dot(p3.Row1, bp), dot(p3.Row2, bp));
+    float3 prevObjPos = PP0 * w0 + PP1 * w1 + PP2 * w2 + PP3 * w3;
+    float4 prevWorldPos = mul(float4(prevObjPos, 1.0f), worldMatrix);
+    result.prevPosition = mul(prevWorldPos, PrevUnjitteredViewProjMat);
+
+    result.normal = normalize(mul(float4(currObjNormal, 0), worldMatrix));
+    result.tangent = normalize(mul(float4(currObjTangent, 0), worldMatrix));
+    result.uv = v.UV;
     return result;
 }
 

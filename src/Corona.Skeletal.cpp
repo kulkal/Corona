@@ -443,6 +443,27 @@ void Corona::DispatchSkeletalSkinningForRenderWorld()
 	if (!renderBackend || !SkeletalSkinningPSO)
 		return;
 
+	// Path C: VS inline skinning. No compute, no CPU skin pass, no
+	// upload VB — the GBuffer VS does all the skinning math itself.
+	if (bSkeletalUseVsInlineSkinning)
+	{
+		SkeletalStats.CharactersAnimated = SkeletalUnifiedCharCount;
+		SkeletalStats.DispatchCount = 0;
+		SkeletalStats.TransitionCount = 0;
+		SkeletalStats.VerticesSkinned = 0;
+		SkeletalStats.BonesUploaded = SkeletalUnifiedCharCount * SkeletalUnifiedBoneCount;
+		SkeletalStats.BlasUpdates = 0;
+		// Mark meshes dispatched so the GBuffer path treats them as
+		// "ready" (some code branches still gate on this flag).
+		for (SceneObject& object : SceneObjects)
+		{
+			if (!object.ScenePtr) continue;
+			for (const std::shared_ptr<Mesh>& mesh : object.ScenePtr->meshes)
+				if (mesh && mesh->bSkeletalSkinned) mesh->bSkeletalSkinningDispatched = true;
+		}
+		return;
+	}
+
 	// Phase S: CPU-skinning benchmark path. Skip the GPU compute pre-pass
 	// and skin every character on the CPU into a fresh UPLOAD-heap VB
 	// the GBuffer draw will read instead of SkeletalUnifiedOutputVb.
@@ -1353,14 +1374,30 @@ void Corona::UpdateSkeletalUnifiedInstanceTransforms()
 
 bool Corona::DrawSkeletalUnifiedCluster()
 {
-	// Pick the VB the GBuffer IA will read from: GPU compute output by
-	// default, the per-frame CPU-skinned UPLOAD VB when the Spine-style
-	// path is active.
-	VertexBuffer* drawVb = bSkeletalUseCpuSkinning
-		? SkeletalUnifiedCpuSkinnedVb.get()
-		: SkeletalUnifiedOutputVb.get();
+	// Pick the VB the GBuffer IA will read from based on mode:
+	//   - GPU compute (default): the compute-output skinned VB
+	//   - CPU "Spine-style":    the per-frame CPU-skinned UPLOAD VB
+	//   - VS inline (Path C):   the static bind-pose VB; the VS does
+	//                           the skinning itself
+	VertexBuffer* drawVb;
+	GraphicsPipelineHandle* pso;
+	if (bSkeletalUseVsInlineSkinning)
+	{
+		drawVb = SkeletalUnifiedBindVb.get();
+		pso = SkeletalVsInlineGraphicsPipeline ? SkeletalVsInlineGraphicsPipeline.get() : nullptr;
+	}
+	else if (bSkeletalUseCpuSkinning)
+	{
+		drawVb = SkeletalUnifiedCpuSkinnedVb.get();
+		pso = SkeletalGBufferGraphicsPipeline.get();
+	}
+	else
+	{
+		drawVb = SkeletalUnifiedOutputVb.get();
+		pso = SkeletalGBufferGraphicsPipeline.get();
+	}
 
-	if (!SkeletalGBufferGraphicsPipeline ||
+	if (!pso ||
 		!drawVb || !SkeletalUnifiedIb ||
 		!SkeletalUnifiedInputVertices || !SkeletalUnifiedPrevBoneMatrices ||
 		!SkeletalUnifiedInstanceTransforms ||
@@ -1370,12 +1407,15 @@ bool Corona::DrawSkeletalUnifiedCluster()
 		return false;
 	}
 
-	GraphicsPipelineHandle* pso = SkeletalGBufferGraphicsPipeline.get();
 	renderBackend->BindGraphicsPipeline(pso);
 	renderBackend->BindGraphicsPipelineSampler(pso, "samplerWrap", samplerWrap.get());
 	renderBackend->BindGraphicsPipelineBuffer(pso, "SkeletalInputs", SkeletalUnifiedInputVertices.get());
 	renderBackend->BindGraphicsPipelineBuffer(pso, "SkeletalPrevBones", SkeletalUnifiedPrevBoneMatrices.get());
 	renderBackend->BindGraphicsPipelineBuffer(pso, "SkeletalInstanceTransforms", SkeletalUnifiedInstanceTransforms.get());
+	if (bSkeletalUseVsInlineSkinning && SkeletalUnifiedBoneMatrices)
+	{
+		renderBackend->BindGraphicsPipelineBuffer(pso, "SkeletalCurrBones", SkeletalUnifiedBoneMatrices.get());
+	}
 
 	renderBackend->BindMeshBuffers(drawVb, SkeletalUnifiedIb.get());
 

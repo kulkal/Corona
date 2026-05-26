@@ -2462,6 +2462,11 @@ public:
 	// compute path so the comparison reflects skinning cost only.
 	// RT visuals freeze at the bind pose while this is on.
 	bool bSkeletalSkipBlas = false;
+	// Path C: VS inline skinning. Skips both the compute pre-pass and
+	// CPU skinning; the GBuffer VS reads bind-pose verts from IA and
+	// runs the skinning math inline.
+	bool bSkeletalUseVsInlineSkinning = false;
+	std::shared_ptr<GraphicsPipelineHandle> SkeletalVsInlineGraphicsPipeline;
 	struct SkinBoneRowCpu { float r0[4]; float r1[4]; float r2[4]; };
 	std::vector<SkinBoneRowCpu> SkeletalUnifiedPaletteCpu;
 	std::vector<SkinBoneRowCpu> SkeletalUnifiedPalettePrevCpu;

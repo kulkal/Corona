@@ -270,6 +270,20 @@ void Corona::InitGBufferPass()
 	if (!SkeletalGBufferGraphicsPipeline)
 		AppendCpuRuntimeTrace(L"[InitGBufferPass] failed to create Skeletal GBuffer pipeline");
 
+	// Path C: VS inline skinning PSO. Same IA layout, different VS entry,
+	// extra SBV for the current-frame bone palette.
+	GraphicsPipelineDesc vsInlineDesc = desc;
+	vsInlineDesc.VertexEntryPoint = "SkeletalVsInlineVSMain";
+	vsInlineDesc.BufferBindings = {
+		{ "SkeletalInputs", 5 },
+		{ "SkeletalPrevBones", 6 },
+		{ "SkeletalInstanceTransforms", 7 },
+		{ "SkeletalCurrBones", 8 },
+	};
+	SkeletalVsInlineGraphicsPipeline = renderBackend->CreateGraphicsPipeline(vsInlineDesc);
+	if (!SkeletalVsInlineGraphicsPipeline)
+		AppendCpuRuntimeTrace(L"[InitGBufferPass] failed to create Skeletal VS-inline GBuffer pipeline");
+
 	auto spineSkinningPSO = renderBackend->CreateComputePipelineStateObject();
 	if (spineSkinningPSO)
 	{

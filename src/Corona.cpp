@@ -2859,6 +2859,17 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 			bSkeletalSkipBlas = true;
 			continue;
 		}
+		// Path C — pure VS inline skinning. The GBuffer VS reads bind-pose
+		// vertices from IA and runs the four-bone weighted skin inline,
+		// using both curr and prev palette SBVs. No compute pre-pass, no
+		// CPU skinning, no skinned VB. Implies --skeletal-skip-blas
+		// (no skinned VB means no BLAS source).
+		if (arg == L"--skeletal-vs-inline" || arg == L"--skeletal-vs")
+		{
+			bSkeletalUseVsInlineSkinning = true;
+			bSkeletalSkipBlas = true;
+			continue;
+		}
 		std::wstring skeletalScreenshotValue = ParseValueArg(arg, L"--skeletal-test-screenshot", L"-skeletal-test-screenshot", i);
 		if (!skeletalScreenshotValue.empty())
 		{
