@@ -2740,7 +2740,11 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 		if (arg == L"--sponza-fly" || arg == L"--sponza" || arg == L"--scene-sponza" || arg == L"--fly-camera")
 		{
 			bStartupSponzaFlyMode = true;
-			bEnableStartupLuauScript = false;
+			// Enable scripting so the categorized imgui windows from
+			// common/040_imgui_controls.luau load. Mode-specific game
+			// scripts (platformer / dungeon) are skipped via the "sponza"
+			// startup-mode branch in RunStartupLuauScript.
+			bEnableStartupLuauScript = true;
 			// StartupLuauMode defaults to "platformer", which forces
 			// bPlatformerHybridDirectOnly=true in OnRender and disables every
 			// hybrid RT pass (shadow / AO / reflection / GI). sponza-fly is a
@@ -2798,6 +2802,22 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 		if (arg == L"--skeletal-test" || arg == L"--skeletal-skinning-test")
 		{
 			bCommandLineSpawnSkeletalTest = true;
+			continue;
+		}
+		// Skeletal-skinning standalone benchmark: skip Sponza and any
+		// platformer/dungeon content, spawn the procedural box characters
+		// at the world origin so the only thing on screen is the skinned
+		// crowd. Useful for measuring compute skinning + BLAS refit cost
+		// without the cathedral's overdraw / RT shadow load mixed in.
+		if (arg == L"--skeletal-benchmark" || arg == L"--skeletal-bench" || arg == L"--skeletal-only")
+		{
+			bCommandLineSkeletalBenchMode = true;
+			bCommandLineSpawnSkeletalTest = true;
+			bStartupSponzaFlyMode = false;
+			bEnableStartupLuauScript = true;
+			StartupLuauMode = L"sponza";
+			bCommandLineAutoDumpOverrideSet = true;
+			bCommandLineAutoDumpEnabled = false;
 			continue;
 		}
 		std::wstring skeletalScreenshotValue = ParseValueArg(arg, L"--skeletal-test-screenshot", L"-skeletal-test-screenshot", i);
@@ -7298,7 +7318,7 @@ void Corona::OnInit()
 			StartupLuauMode = L"platformer";
 			bCommandLineDungeonCharacterMode = false;
 		}
-		if (StartupLuauMode != L"dungeon" && StartupLuauMode != L"sandbox")
+		if (StartupLuauMode != L"dungeon" && StartupLuauMode != L"sandbox" && StartupLuauMode != L"sponza")
 			StartupLuauMode = L"platformer";
 
 		const bool bDungeonStartupMode = StartupLuauMode == L"dungeon";
@@ -7315,7 +7335,10 @@ void Corona::OnInit()
 			setScriptNumberOverride("platformer.maxSceneSamplesPerFrame", static_cast<float>(std::max<UINT32>(CommandLinePlatformerSpineBenchmarkCount, 64u)));
 			setScriptNumberOverride("platformer.deferSpineSamplingWhileStreamingSeconds", 0.0f);
 		}
-		bStartupSponzaFlyMode = false;
+		// Don't unset sponza-fly: the sponza luau mode runs only the common
+		// imgui-controls script and leaves the C++ Sponza scene path intact.
+		if (StartupLuauMode != L"sponza")
+			bStartupSponzaFlyMode = false;
 	}
 	UpdateMainDirectionalLightEntityFromState();
 	AppendCpuRuntimeTrace(L"[OnInit] after camera init");
@@ -7405,6 +7428,34 @@ void Corona::OnInit()
 	}
 	if (bCommandLineSpawnSkeletalTest)
 	{
+		if (bCommandLineSkeletalBenchMode && !bCameraStateRestoredFromDisk)
+		{
+			// Diagonal vantage above the grid. Visibility of distant
+			// characters at large N is still being tuned — start with a
+			// fixed framing the user can drive around to inspect.
+			const glm::vec3 position(800.0f, 600.0f, 800.0f);
+			m_camera.m_initialPosition = position;
+			m_camera.m_position = position;
+			m_camera.m_pitch = -0.40f;
+			m_camera.m_yaw = 3.92699f;  // 225° → look toward -X, -Z (origin)
+			const float r = cosf(m_camera.m_pitch);
+			m_camera.m_lookDirection.x = r * sinf(m_camera.m_yaw);
+			m_camera.m_lookDirection.y = sinf(m_camera.m_pitch);
+			m_camera.m_lookDirection.z = r * cosf(m_camera.m_yaw);
+			m_camera.SetMoveSpeed(300.0f);
+			UpdateMainCameraEntityFromSimpleCamera();
+			// Without Sponza we also need to give the scene a usable sun
+			// — the global LightDir default is dim (intensity 0.4). Match
+			// the sponza-fly preset so characters are clearly lit.
+			LightDir = glm::normalize(glm::vec3(0.3f, 0.85f, 0.3f));
+			LightIntensity = 3.5f;
+			UpdateMainDirectionalLightEntityFromState();
+			AppendCpuRuntimeTrace(
+				L"[SkeletalBench] N=" + std::to_wstring(CommandLineSkeletalTestCount) +
+				L" cameraPos=(" + std::to_wstring(position.x) +
+				L"," + std::to_wstring(position.y) +
+				L"," + std::to_wstring(position.z) + L")");
+		}
 		SpawnSkeletalTestCharacters();
 		// Re-sync RenderWorld.SceneObjects + rebuild RTAS so the procedural
 		// skeletal characters get a BLAS (built from SkeletalOutputVb with
@@ -8915,7 +8966,7 @@ void Corona::LoadAssets()
 		 StartupLuauMode == L"dungeon" ||
 		 bCommandLineDungeonCharacterMode);
 
-	if (!bMobileDungeonOnlyStartup && !bGameplayStartupMode)
+	if (!bMobileDungeonOnlyStartup && !bGameplayStartupMode && !bCommandLineSkeletalBenchMode)
 	{
 		UpdateStartupLoadingProgress(0.72f, L"Loading Sponza scene");
 		if (!Sponza) Sponza = LoadModel(WideToUtf8(GetAssetFullPath(L"assets\\Sponza\\Sponza.fbx")));

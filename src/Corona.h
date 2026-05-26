@@ -1048,6 +1048,11 @@ private:
 	UINT32 CommandLinePlatformerSpineBenchmarkCount = 50;
 	bool bCommandLineSpawnSkeletalTest = false;
 	UINT32 CommandLineSkeletalTestCount = 1;
+	// Standalone skeletal-skinning benchmark mode: no Sponza, no other
+	// scene content — just the procedural box characters dropped at the
+	// origin so the GPU cost (compute skin + BLAS refit + GBuffer draw)
+	// is the only thing being measured.
+	bool bCommandLineSkeletalBenchMode = false;
 	bool bCommandLineSkeletalTestScreenshot = false;
 	UINT32 SkeletalTestScreenshotFrame = 60;
 	std::wstring SkeletalTestScreenshotPath;
@@ -2402,6 +2407,11 @@ public:
 	void DispatchSkeletalSkinningForRenderWorld();
 	void SpawnSkeletalTestCharacters();
 	void UpdateSkeletalTestCharacters(float timeSeconds);
+	// Time the previous frame's skeletal palette was sampled at, used by
+	// UpdateSkeletalTestCharacters to compute the prev-frame bone matrices
+	// it uploads to SkeletalPrevBoneMatrices for the motion-vector VS.
+	float SkeletalPrevUpdateTimeSeconds = 0.0f;
+	bool bSkeletalPrevUpdateTimeValid = false;
 	void DumpSkeletalFrameStatsToTrace();
 	bool BuildMobileShadowViewProjection(glm::mat4x4& lightViewProj);
 	bool GetSceneObjectWorldBounds(const SceneObject& object, glm::vec3& boundsMin, glm::vec3& boundsMax, glm::vec3& center, float& radius) const;

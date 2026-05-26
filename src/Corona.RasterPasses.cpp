@@ -252,16 +252,18 @@ void Corona::InitGBufferPass()
 	if (!SpineGBufferGraphicsPipeline)
 		AppendCpuRuntimeTrace(L"[InitGBufferPass] failed to create Spine GBuffer pipeline");
 
-	// Phase 11: Skeletal GBuffer PSO. Same IA layout as the standard
-	// GBufferGraphicsPipeline (it reads the same StandardVertex stride from
-	// SkeletalOutputVb the compute shader fills), but the VS variant pulls
-	// the previous frame's skinned positions from a SBV bound at slot 5 so
-	// the velocity buffer reflects per-vertex skinning motion, not just the
-	// world-matrix delta.
+	// Phase 11 (revised): Skeletal GBuffer PSO. Same IA layout as the
+	// standard GBufferGraphicsPipeline, but the VS variant re-skins the
+	// bind-pose vertex with the previous frame's bone palette so velocity
+	// reflects per-vertex skinning motion, not just camera/world delta.
+	// Two SBVs:
+	//   t5 = SkeletalInputs    (bind position + bone indices/weights)
+	//   t6 = SkeletalPrevBones (previous frame's mat3x4 per bone)
 	GraphicsPipelineDesc skeletalDesc = desc;
 	skeletalDesc.VertexEntryPoint = "SkeletalVSMain";
 	skeletalDesc.BufferBindings = {
-		{ "SkeletalPrevPositions", 5 },
+		{ "SkeletalInputs", 5 },
+		{ "SkeletalPrevBones", 6 },
 	};
 	SkeletalGBufferGraphicsPipeline = renderBackend->CreateGraphicsPipeline(skeletalDesc);
 	if (!SkeletalGBufferGraphicsPipeline)
@@ -1824,12 +1826,9 @@ void Corona::DrawScene(shared_ptr<Scene> scene, const glm::mat4x4& instanceTrans
 			!bUseSpineVertexFetch &&
 			mesh->bSpineMesh &&
 			CpuSpineGBufferGraphicsPipeline;
-		// Phase 11 skeletal VS variant disabled while the bone-matrix-based
-		// prev-position path is being wired in. The previous ping-pong path
-		// was sampling an undefined buffer (SkeletalOutputVbPrev never gets
-		// written after the swap was removed), which produced random
-		// per-vertex prev clip values, corrupted velocity, and caused the
-		// shadow temporal denoiser to flicker across frames.
+		// TEMP: skeletal motion-vector PSO disabled while we diagnose why
+		// it stops rendering characters. Fall back to the standard GBuffer
+		// PSO so the skinned mesh draws at all (camera-only motion).
 		const bool bUseSkeletalSkinned = false;
 		GraphicsPipelineHandle* activeGBufferPipeline =
 			bUseSkeletalSkinned ? SkeletalGBufferGraphicsPipeline.get() :
@@ -1840,7 +1839,10 @@ void Corona::DrawScene(shared_ptr<Scene> scene, const glm::mat4x4& instanceTrans
 		if (bUseSpineVertexFetch)
 			renderBackend->BindGraphicsPipelineBuffer(activeGBufferPipeline, "SpineVertices", mesh->GpuSpineSkinnedVertices.get());
 		if (bUseSkeletalSkinned)
-			renderBackend->BindGraphicsPipelineVertexBufferSRV(activeGBufferPipeline, "SkeletalPrevPositions", mesh->SkeletalOutputVbPrev.get());
+		{
+			renderBackend->BindGraphicsPipelineBuffer(activeGBufferPipeline, "SkeletalInputs", mesh->SkeletalInputVertices.get());
+			renderBackend->BindGraphicsPipelineBuffer(activeGBufferPipeline, "SkeletalPrevBones", mesh->SkeletalPrevBoneMatrices.get());
+		}
 
 		// 3D skeletal skinning: swap the bind-pose VB for the compute-skinned
 		// output VB. Layout matches the standard IA so the GBuffer PSO is

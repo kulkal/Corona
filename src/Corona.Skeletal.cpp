@@ -594,13 +594,27 @@ void Corona::SpawnSkeletalTestCharacters()
 	// is ~1.8 units tall in object space; scale by ~140 so each character
 	// is ~250 units tall (roughly Buddha-statue size) for easy verification.
 	const float characterScale = 140.0f;
-	const float spacing = 150.0f;
-	// Aim point ~500 units along the look direction from the camera, then
-	// snap to the Sponza floor (y ≈ -12).
-	const glm::vec3 cameraPos(458.0f, 781.0f, 185.0f);
-	const glm::vec3 lookDir(-0.876484f, -0.389418f, -0.283072f);
-	const glm::vec3 spawnAim = cameraPos + lookDir * 600.0f;
-	const glm::vec3 spawnOrigin(spawnAim.x, -12.0f, spawnAim.z);
+	float spacing = 150.0f;
+	glm::vec3 spawnOrigin;
+	if (bCommandLineSkeletalBenchMode)
+	{
+		// Standalone benchmark: no Sponza, drop the grid at the world
+		// origin so the entire crowd is visible from a single camera
+		// vantage point set up by OnInit below. Use wider spacing so
+		// individual characters stay countable visually (characters are
+		// ~70 units wide after scale).
+		spawnOrigin = glm::vec3(0.0f, 0.0f, 0.0f);
+		spacing = 250.0f;
+	}
+	else
+	{
+		// Aim point ~600 units along the look direction from the sponza-fly
+		// startup camera, then snap to the Sponza floor (y ≈ -12).
+		const glm::vec3 cameraPos(458.0f, 781.0f, 185.0f);
+		const glm::vec3 lookDir(-0.876484f, -0.389418f, -0.283072f);
+		const glm::vec3 spawnAim = cameraPos + lookDir * 600.0f;
+		spawnOrigin = glm::vec3(spawnAim.x, -12.0f, spawnAim.z);
+	}
 	const int gridSide = static_cast<int>(std::ceil(std::sqrt(static_cast<float>(desiredCount))));
 	const float gridOffset = -0.5f * (gridSide - 1) * spacing;
 
@@ -684,6 +698,19 @@ void Corona::SpawnSkeletalTestCharacters()
 		{
 			renderBackend->UpdateUploadStructuredBuffer(
 				mesh->SkeletalBoneMatrices.get(),
+				identityBones.data(),
+				static_cast<UINT32>(identityBones.size() * sizeof(InitialBoneMatrix)));
+		}
+
+		// Phase 11 (revised): previous-frame bone palette. Same layout as
+		// SkeletalBoneMatrices. Initialized to identity so the very first
+		// frame's motion vector is zero (no ghosting / popping).
+		mesh->SkeletalPrevBoneMatrices = renderBackend->CreateUploadStructuredBuffer(
+			static_cast<UINT32>(identityBones.size()), sizeof(InitialBoneMatrix));
+		if (mesh->SkeletalPrevBoneMatrices)
+		{
+			renderBackend->UpdateUploadStructuredBuffer(
+				mesh->SkeletalPrevBoneMatrices.get(),
 				identityBones.data(),
 				static_cast<UINT32>(identityBones.size() * sizeof(InitialBoneMatrix)));
 		}
@@ -796,10 +823,32 @@ void Corona::UpdateSkeletalTestCharacters(float timeSeconds)
 	if (!renderBackend)
 		return;
 
+	// Phase 11 motion vector: compute the palette TWICE per character —
+	// once for the current frame's time and once for the previous frame's
+	// time — and upload both. The skeletal GBuffer VS re-skins from the
+	// bind pose with the previous palette to derive a per-vertex prev
+	// clip position. First frame falls back to prev = curr so no motion
+	// is reported.
+	const float prevTimeSeconds = bSkeletalPrevUpdateTimeValid ? SkeletalPrevUpdateTimeSeconds : timeSeconds;
+
 	int instanceIndex = 0;
 	std::vector<glm::mat4> palette;
+	std::vector<glm::mat4> palettePrev;
 	struct SkinBoneRow { float r0[4]; float r1[4]; float r2[4]; };
 	std::vector<SkinBoneRow> packed;
+	std::vector<SkinBoneRow> packedPrev;
+
+	auto packPalette = [](const std::vector<glm::mat4>& src, std::vector<SkinBoneRow>& dst)
+	{
+		dst.resize(src.size());
+		for (size_t i = 0; i < src.size(); ++i)
+		{
+			const glm::mat4 t = glm::transpose(src[i]);
+			dst[i].r0[0] = t[0][0]; dst[i].r0[1] = t[0][1]; dst[i].r0[2] = t[0][2]; dst[i].r0[3] = t[0][3];
+			dst[i].r1[0] = t[1][0]; dst[i].r1[1] = t[1][1]; dst[i].r1[2] = t[1][2]; dst[i].r1[3] = t[1][3];
+			dst[i].r2[0] = t[2][0]; dst[i].r2[1] = t[2][1]; dst[i].r2[2] = t[2][2]; dst[i].r2[3] = t[2][3];
+		}
+	};
 
 	for (SceneObject& object : SceneObjects)
 	{
@@ -811,22 +860,10 @@ void Corona::UpdateSkeletalTestCharacters(float timeSeconds)
 				continue;
 
 			ComputeSkeletalPalette(timeSeconds, palette, instanceIndex);
-			packed.resize(palette.size());
-			for (size_t i = 0; i < palette.size(); ++i)
-			{
-				// glm::mat4 is column-major. We want row-major mat3x4 so that
-				// the shader's Row0/Row1/Row2 are the top 3 rows of the
-				// transform. transpose() converts to row-major; we then take
-				// rows 0..2 (each is 4 floats).
-				const glm::mat4 t = glm::transpose(palette[i]);
-				packed[i].r0[0] = t[0][0]; packed[i].r0[1] = t[0][1]; packed[i].r0[2] = t[0][2]; packed[i].r0[3] = t[0][3];
-				packed[i].r1[0] = t[1][0]; packed[i].r1[1] = t[1][1]; packed[i].r1[2] = t[1][2]; packed[i].r1[3] = t[1][3];
-				packed[i].r2[0] = t[2][0]; packed[i].r2[1] = t[2][1]; packed[i].r2[2] = t[2][2]; packed[i].r2[3] = t[2][3];
-			}
+			ComputeSkeletalPalette(prevTimeSeconds, palettePrev, instanceIndex);
+			packPalette(palette, packed);
+			packPalette(palettePrev, packedPrev);
 
-			// Phase 8: refresh the persistent-mapped UPLOAD-heap buffer
-			// created at spawn time with a single memcpy. No new
-			// CreateCommittedResource, no command list, no WaitGPU.
 			if (mesh->SkeletalBoneMatrices)
 			{
 				renderBackend->UpdateUploadStructuredBuffer(
@@ -834,10 +871,20 @@ void Corona::UpdateSkeletalTestCharacters(float timeSeconds)
 					packed.data(),
 					static_cast<UINT32>(packed.size() * sizeof(SkinBoneRow)));
 			}
+			if (mesh->SkeletalPrevBoneMatrices)
+			{
+				renderBackend->UpdateUploadStructuredBuffer(
+					mesh->SkeletalPrevBoneMatrices.get(),
+					packedPrev.data(),
+					static_cast<UINT32>(packedPrev.size() * sizeof(SkinBoneRow)));
+			}
 
 			++instanceIndex;
 		}
 	}
+
+	SkeletalPrevUpdateTimeSeconds = timeSeconds;
+	bSkeletalPrevUpdateTimeValid = true;
 }
 
 void Corona::DumpSkeletalFrameStatsToTrace()

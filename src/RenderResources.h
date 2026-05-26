@@ -193,14 +193,17 @@ public:
 	std::shared_ptr<Buffer> SkeletalInputVertices;
 	std::shared_ptr<Buffer> SkeletalBoneMatrices;
 	std::shared_ptr<VertexBuffer> SkeletalOutputVb;
-	// Phase 11: companion ping-pong VB that held the previous frame's
-	// skinning output. The swap had to be disabled because it changed the
-	// BLAS source GPU VA each frame and broke D3D12 PERFORM_UPDATE on the
-	// BLAS (the BLAS Result then tracked the *other* buffer, so shadow rays
-	// missed the character). The buffer is still allocated so the spawn
-	// path stays consistent, but it is no longer bound or written — the
-	// upcoming motion-vector rework will replace it with a previous-frame
-	// bone-matrix SBV (re-skin from bind in the VS).
+	// Phase 11 (revised): previous-frame bone palette uploaded alongside
+	// SkeletalBoneMatrices each frame. The skeletal GBuffer VS re-skins
+	// from the bind pose with these matrices to derive an accurate prev
+	// clip position for motion vectors — no ping-pong VB, no extra GPU
+	// memory bandwidth, and the BLAS source GPU VA stays constant so
+	// PERFORM_UPDATE on the BLAS keeps working.
+	std::shared_ptr<Buffer> SkeletalPrevBoneMatrices;
+	// Leftover from the original ping-pong design; no longer bound or
+	// written. Kept for the moment so the spawn path doesn't need to be
+	// reworked in the same commit — will be removed once the new motion
+	// vector path is validated.
 	std::shared_ptr<VertexBuffer> SkeletalOutputVbPrev;
 	// Cached BLAS built from SkeletalOutputVb with ALLOW_UPDATE. Refreshed
 	// each frame by RefitBLAS after the compute skinning dispatch so RT

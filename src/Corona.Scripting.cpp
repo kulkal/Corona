@@ -7457,11 +7457,15 @@ void Corona::RunStartupLuauScript(bool bShowLoadingProgress)
 
 	const std::filesystem::path startupDir = GetAssetFullPath(L"scripts\\startup");
 	std::wstring startupMode = StartupLuauMode.empty() ? L"platformer" : StartupLuauMode;
-	if (startupMode != L"dungeon" && startupMode != L"sandbox")
+	if (startupMode != L"dungeon" && startupMode != L"sandbox" && startupMode != L"sponza")
 		startupMode = L"platformer";
 
 	std::vector<std::filesystem::path> scriptPaths;
-	appendDirectLuauScripts(startupDir / startupMode, scriptPaths);
+	// "sponza" mode is the free-flight Sponza sandbox — it intentionally
+	// runs *only* the common scripts (imgui controls etc.) and skips the
+	// per-mode game scripts so the scene stays a clean RT playground.
+	if (startupMode != L"sponza")
+		appendDirectLuauScripts(startupDir / startupMode, scriptPaths);
 	appendDirectLuauScripts(startupDir / L"common", scriptPaths);
 	appendDirectLuauScripts(startupDir, scriptPaths);
 
