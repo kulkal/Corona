@@ -1826,10 +1826,18 @@ void Corona::DrawScene(shared_ptr<Scene> scene, const glm::mat4x4& instanceTrans
 			!bUseSpineVertexFetch &&
 			mesh->bSpineMesh &&
 			CpuSpineGBufferGraphicsPipeline;
-		// TEMP: skeletal motion-vector PSO disabled while we diagnose why
-		// it stops rendering characters. Fall back to the standard GBuffer
-		// PSO so the skinned mesh draws at all (camera-only motion).
-		const bool bUseSkeletalSkinned = false;
+		// Phase 11: skeletal motion-vector path. Re-skins from bind pose
+		// in the VS with the previous frame's bone palette so motion
+		// vectors reflect per-vertex skinning velocity. Without this the
+		// temporal denoiser flickers on AO / specular GI because it
+		// reprojects the wrong pixel.
+		const bool bUseSkeletalSkinned =
+			mesh->bSkeletalSkinned &&
+			mesh->bSkeletalSkinningDispatched &&
+			mesh->SkeletalOutputVb &&
+			mesh->SkeletalInputVertices &&
+			mesh->SkeletalPrevBoneMatrices &&
+			SkeletalGBufferGraphicsPipeline;
 		GraphicsPipelineHandle* activeGBufferPipeline =
 			bUseSkeletalSkinned ? SkeletalGBufferGraphicsPipeline.get() :
 			(bUseSpineVertexFetch ? SpineGBufferGraphicsPipeline.get() :
