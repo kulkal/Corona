@@ -571,13 +571,17 @@ void Corona::DispatchSkeletalSkinningForRenderWorld()
 	// Phase 10: refit BLAS for each skinned mesh so RT passes (reflection,
 	// GI, shadow if RT) see the current skinned geometry. BLAS is still
 	// per-character — each one was built with the char's vertex slice in
-	// the unified output VB.
-	for (Mesh* mesh : skinnedMeshes)
+	// the unified output VB. Benchmark mode can skip the refit loop with
+	// --skeletal-skip-blas so the reported skinning cost excludes BLAS.
+	if (!bSkeletalSkipBlas)
 	{
-		if (mesh->SkeletalBlas)
+		for (Mesh* mesh : skinnedMeshes)
 		{
-			renderBackend->RefitBLAS(mesh->SkeletalBlas.get(), mesh);
-			++SkeletalStats.BlasUpdates;
+			if (mesh->SkeletalBlas)
+			{
+				renderBackend->RefitBLAS(mesh->SkeletalBlas.get(), mesh);
+				++SkeletalStats.BlasUpdates;
+			}
 		}
 	}
 }

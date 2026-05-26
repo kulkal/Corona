@@ -2851,6 +2851,14 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 			bSkeletalUseCpuSkinning = true;
 			continue;
 		}
+		// Benchmark fairness flag: turn off per-character BLAS refit
+		// so the compute path's reported cost reflects skinning only,
+		// not RT-only bookkeeping. RT visuals freeze at the bind pose.
+		if (arg == L"--skeletal-skip-blas" || arg == L"--skeletal-no-blas")
+		{
+			bSkeletalSkipBlas = true;
+			continue;
+		}
 		std::wstring skeletalScreenshotValue = ParseValueArg(arg, L"--skeletal-test-screenshot", L"-skeletal-test-screenshot", i);
 		if (!skeletalScreenshotValue.empty())
 		{

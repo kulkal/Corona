@@ -2458,6 +2458,10 @@ public:
 	// UpdateSkeletalTestCharacters computes so the render thread can
 	// read it without re-running the math.
 	bool bSkeletalUseCpuSkinning = false;
+	// Path C benchmark flag: skip per-character BLAS refit inside the
+	// compute path so the comparison reflects skinning cost only.
+	// RT visuals freeze at the bind pose while this is on.
+	bool bSkeletalSkipBlas = false;
 	struct SkinBoneRowCpu { float r0[4]; float r1[4]; float r2[4]; };
 	std::vector<SkinBoneRowCpu> SkeletalUnifiedPaletteCpu;
 	std::vector<SkinBoneRowCpu> SkeletalUnifiedPalettePrevCpu;
