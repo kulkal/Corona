@@ -7461,7 +7461,7 @@ void Corona::RunStartupLuauScript(bool bShowLoadingProgress)
 
 	const std::filesystem::path startupDir = GetAssetFullPath(L"scripts\\startup");
 	std::wstring startupMode = StartupLuauMode.empty() ? L"platformer" : StartupLuauMode;
-	if (startupMode != L"dungeon" && startupMode != L"sandbox" && startupMode != L"sponza")
+	if (startupMode != L"dungeon" && startupMode != L"sandbox" && startupMode != L"sponza" && startupMode != L"spine_benchmark")
 		startupMode = L"platformer";
 
 	std::vector<std::filesystem::path> scriptPaths;

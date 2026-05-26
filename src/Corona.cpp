@@ -2810,7 +2810,7 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 			try
 			{
 				const unsigned long value = std::stoul(spineBenchmarkCountValue);
-				CommandLinePlatformerSpineBenchmarkCount = static_cast<UINT32>(std::clamp<unsigned long>(value, 1ul, 1000ul));
+				CommandLinePlatformerSpineBenchmarkCount = static_cast<UINT32>(std::clamp<unsigned long>(value, 1ul, 4000ul));
 				bCommandLinePlatformerSpineBenchmark = true;
 				bStartupSponzaFlyMode = false;
 				bEnableStartupLuauScript = true;
@@ -7373,25 +7373,24 @@ void Corona::OnInit()
 			StartupLuauMode = L"dungeon";
 		if (bCommandLinePlatformerSpineBenchmark)
 		{
-			StartupLuauMode = L"platformer";
+			// Spine benchmark gets its own minimal startup mode so the
+			// heavy platformer setup (level streaming, player physics,
+			// enemies) doesn't interfere with the spine-only benchmark.
+			StartupLuauMode = L"spine_benchmark";
 			bCommandLineDungeonCharacterMode = false;
 		}
-		if (StartupLuauMode != L"dungeon" && StartupLuauMode != L"sandbox" && StartupLuauMode != L"sponza")
+		if (StartupLuauMode != L"dungeon" && StartupLuauMode != L"sandbox" && StartupLuauMode != L"sponza" && StartupLuauMode != L"spine_benchmark")
 			StartupLuauMode = L"platformer";
 
 		const bool bDungeonStartupMode = StartupLuauMode == L"dungeon";
 		const bool bPlatformerStartupMode = StartupLuauMode == L"platformer";
+		const bool bSpineBenchmarkStartupMode = StartupLuauMode == L"spine_benchmark";
 		setScriptBoolOverride("platformer.enabled", bPlatformerStartupMode);
 		setScriptBoolOverride("dungeon.enabled", bDungeonStartupMode);
+		setScriptBoolOverride("spine_benchmark.enabled", bSpineBenchmarkStartupMode);
 		if (bCommandLinePlatformerSpineBenchmark)
 		{
-			setScriptBoolOverride("platformer.spineSkinningBenchmark", true);
-			setScriptNumberOverride("platformer.spineSkinningBenchmarkCharacterCount", static_cast<float>(CommandLinePlatformerSpineBenchmarkCount));
-			setScriptBoolOverride("platformer.startInMenu", false);
-			setScriptBoolOverride("platformer.showHud", false);
-			setScriptBoolOverride("platformer.enemyStreaming", false);
-			setScriptNumberOverride("platformer.maxSceneSamplesPerFrame", static_cast<float>(std::max<UINT32>(CommandLinePlatformerSpineBenchmarkCount, 64u)));
-			setScriptNumberOverride("platformer.deferSpineSamplingWhileStreamingSeconds", 0.0f);
+			setScriptNumberOverride("spine_benchmark.characterCount", static_cast<float>(CommandLinePlatformerSpineBenchmarkCount));
 		}
 		// Don't unset sponza-fly: the sponza luau mode runs only the common
 		// imgui-controls script and leaves the C++ Sponza scene path intact.
@@ -9025,6 +9024,7 @@ void Corona::LoadAssets()
 		(StartupLuauMode.empty() ||
 		 StartupLuauMode == L"platformer" ||
 		 StartupLuauMode == L"dungeon" ||
+		 StartupLuauMode == L"spine_benchmark" ||
 		 bCommandLineDungeonCharacterMode);
 
 	if (!bMobileDungeonOnlyStartup && !bGameplayStartupMode && !bCommandLineSkeletalBenchMode)
