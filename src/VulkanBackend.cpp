@@ -1764,7 +1764,7 @@ void VulkanRTPipelineStateObject::Apply(uint32_t width, uint32_t height)
 		{
 			auto bufferIt = Owner->BufferAllocations.find(valueIt->second.BufferValue);
 			if (bufferIt != Owner->BufferAllocations.end())
-				appendBufferWrite(binding.DescriptorBinding, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, bufferIt->second.Buffer, 0, bufferIt->second.SizeInBytes);
+				appendBufferWrite(binding.DescriptorBinding, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, bufferIt->second.Buffer, bufferIt->second.Offset, bufferIt->second.SizeInBytes);
 		}
 	}
 
@@ -1786,7 +1786,7 @@ void VulkanRTPipelineStateObject::Apply(uint32_t width, uint32_t height)
 		}
 		else if (bufferIt != Owner->BufferAllocations.end())
 		{
-			appendBufferWrite(binding.DescriptorBinding, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, bufferIt->second.Buffer, 0, bufferIt->second.SizeInBytes);
+			appendBufferWrite(binding.DescriptorBinding, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, bufferIt->second.Buffer, bufferIt->second.Offset, bufferIt->second.SizeInBytes);
 		}
 		else if (rtas && rtas->AccelerationStructure != VK_NULL_HANDLE)
 		{
@@ -2252,7 +2252,7 @@ void VulkanComputePipelineStateObject::Apply()
 		{
 			auto bufferIt = Owner->BufferAllocations.find(valueIt->second.BufferValue);
 			if (bufferIt != Owner->BufferAllocations.end())
-				appendBufferWrite(binding.DescriptorBinding, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, bufferIt->second.Buffer, 0, bufferIt->second.SizeInBytes);
+				appendBufferWrite(binding.DescriptorBinding, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, bufferIt->second.Buffer, bufferIt->second.Offset, bufferIt->second.SizeInBytes);
 		}
 	}
 
@@ -2271,7 +2271,7 @@ void VulkanComputePipelineStateObject::Apply()
 		{
 			auto bufferIt = Owner->BufferAllocations.find(valueIt->second.BufferValue);
 			if (bufferIt != Owner->BufferAllocations.end())
-				appendBufferWrite(binding.DescriptorBinding, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, bufferIt->second.Buffer, 0, bufferIt->second.SizeInBytes);
+				appendBufferWrite(binding.DescriptorBinding, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, bufferIt->second.Buffer, bufferIt->second.Offset, bufferIt->second.SizeInBytes);
 		}
 	}
 
@@ -3657,8 +3657,14 @@ bool VulkanBackend::AllocateUploadBufferRange(
 	VkBufferCreateInfo bufferInfo{};
 	bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
 	bufferInfo.size = blockSize;
-	// The block backs both VBs and IBs; combine the usage flags.
-	bufferInfo.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
+	// The block backs VBs, IBs, AND structured buffers (live spine bones,
+	// skeletal instance transforms) — all three usage bits are required
+	// or Adreno silently reads garbage when an UPLOAD-pool allocation is
+	// bound as VK_DESCRIPTOR_TYPE_STORAGE_BUFFER.
+	bufferInfo.usage =
+		VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
+		VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
+		VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
 	bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 	if (vkCreateBuffer(Device, &bufferInfo, nullptr, &newBlock->Buffer) != VK_SUCCESS)
 		return false;
@@ -3763,13 +3769,53 @@ std::shared_ptr<Buffer> VulkanBackend::CreateUploadStructuredBuffer(uint32_t num
 	(void)elementSize;
 	return nullptr;
 #else
+	// Dedicated VkBuffer + VkMemory per upload structured buffer so the
+	// descriptor binding has offset=0 (avoids the pool sub-allocation
+	// offset alignment + usage-flag traps that hit Adreno). The cost is
+	// a few extra allocator round-trips at scene-creation time; runtime
+	// updates still go through a persistent host-coherent mapping.
 	const uint32_t size = numElements * elementSize;
-	VulkanBufferAllocation allocation{};
-	const VkDeviceSize align = elementSize > 0 ? elementSize : 4;
-	if (!AllocateUploadBufferRange(size, align, nullptr, allocation))
+	VkBuffer vkBuf = VK_NULL_HANDLE;
+	VkDeviceMemory vkMem = VK_NULL_HANDLE;
+	const VkBufferUsageFlags usage =
+		VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+		VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+	if (!CreateBufferWithMemory(
+		size,
+		usage,
+		VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+		false,
+		vkBuf,
+		vkMem))
+	{
 		return nullptr;
+	}
+	// Persistent map so UpdateUploadStructuredBuffer can memcpy directly.
+	void* mapped = nullptr;
+	if (vkMapMemory(Device, vkMem, 0, size, 0, &mapped) != VK_SUCCESS)
+	{
+		vkDestroyBuffer(Device, vkBuf, nullptr);
+		vkFreeMemory(Device, vkMem, nullptr);
+		return nullptr;
+	}
+	// Store as a fake "PoolBlock" so the persistent mapping survives in
+	// UpdateUploadStructuredBuffer without inventing a new field. The
+	// block is dedicated so Offset stays 0 in BufferAllocations.
+	auto block = std::make_shared<VulkanUploadHeapBlock>();
+	block->OwningDevice = Device;
+	block->Buffer = vkBuf;
+	block->Memory = vkMem;
+	block->MappedBase = static_cast<uint8_t*>(mapped);
+	block->Capacity = size;
+	block->Cursor = size;
+
+	VulkanBufferAllocation allocation{};
+	allocation.Buffer = vkBuf;
+	allocation.Memory = vkMem;
 	allocation.Stride = elementSize;
 	allocation.SizeInBytes = size;
+	allocation.Offset = 0;
+	allocation.PoolBlock = block;
 
 	auto* buf = new Buffer();
 	BufferAllocations[buf] = allocation;

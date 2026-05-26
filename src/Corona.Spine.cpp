@@ -165,9 +165,11 @@ namespace
 	std::unordered_map<std::wstring, std::unique_ptr<SpineRuntimeAsset>> GSpineRuntimeAssetCache;
 	void* GSpineRuntimeAssetCacheBackend = nullptr;
 
-	// Live Spine: per-handle persistent skeleton + animation state. Stores
-	// the persistent VB/IB capacities so UpdateLiveSpineForScript can
-	// memcpy in place without reallocating each frame.
+	// Live Spine: per-handle persistent skeleton + animation state.
+	// Persistent UPLOAD-heap VB/IB are sized at spawn so the CPU-skin
+	// path can memcpy in place each frame. The VS-inline path uses the
+	// static input/influence SBVs (built at spawn) + a small bones SBV
+	// re-uploaded each frame via UpdateUploadStructuredBuffer.
 	struct SpineLiveState
 	{
 		std::unique_ptr<spSkeleton, SpineSkeletonDeleter> Skeleton;
@@ -181,6 +183,7 @@ namespace
 		Mesh* MeshPtr = nullptr;
 		uint32_t MaxVertexBytes = 0;
 		uint32_t MaxIndexBytes = 0;
+		uint32_t BoneCount = 0;
 	};
 	std::unordered_map<Corona::ScriptSceneHandle, std::unique_ptr<SpineLiveState>> GSpineLiveStates;
 
@@ -1268,6 +1271,10 @@ Corona::ScriptSceneHandle Corona::CreateLiveSpineForScript(
 		spAnimation_apply(liveState->Animation, liveState->Skeleton.get(), 0.0f, 0.0f, 1, nullptr, nullptr);
 	spSkeleton_updateWorldTransform(liveState->Skeleton.get());
 
+	// Build the initial pose. We need bBuildCpuFallbackVertices = true so
+	// the CPU-skin VB has valid data on the first frame, AND we keep the
+	// SkinVertices/SkinInfluences/SkinBones arrays the VS-inline path
+	// reads from.
 	SpineSampleMesh sampleMesh = BuildSpineSampleMesh(liveState->Skeleton.get(), safeSourceScale, true);
 	if (sampleMesh.Vertices.empty() || sampleMesh.Indices.empty())
 		return InvalidScriptSceneHandle;
@@ -1310,6 +1317,54 @@ Corona::ScriptSceneHandle Corona::CreateLiveSpineForScript(
 	renderBackend->UpdateUploadIndexBuffer(mesh->Ib.get(),
 		sampleMesh.Indices.data(),
 		static_cast<uint32_t>(sizeof(UINT32) * sampleMesh.Indices.size()));
+
+	// VS-inline path resources. SpineVsInline VB / SBVs let the GBuffer
+	// VS skin from bones every frame. InputVertices + Influences are
+	// animation-independent (bind-pose data + weight tables), so they
+	// stay static after spawn. Bones SBV is rewritten every frame by
+	// UpdateLiveSpineForScript when the VS-inline mode is active.
+	if (bEnableGpuSpineSkinning &&
+		sampleMesh.SkinVertices.size() == sampleMesh.Vertices.size() &&
+		!sampleMesh.SkinVertices.empty() &&
+		!sampleMesh.SkinInfluences.empty() &&
+		!sampleMesh.SkinBones.empty())
+	{
+		mesh->GpuSpineInputVertices = renderBackend->CreateBuffer({
+			static_cast<uint32_t>(sampleMesh.SkinVertices.size()),
+			static_cast<uint32_t>(sizeof(SpineSkinInputVertex)),
+			EInitialResourceState::ShaderRead,
+			true,
+			sampleMesh.SkinVertices.data(),
+			EBufferShape::Structured });
+		mesh->GpuSpineInfluences = renderBackend->CreateBuffer({
+			static_cast<uint32_t>(sampleMesh.SkinInfluences.size()),
+			static_cast<uint32_t>(sizeof(SpineSkinInfluence)),
+			EInitialResourceState::ShaderRead,
+			true,
+			sampleMesh.SkinInfluences.data(),
+			EBufferShape::Structured });
+		// Bones SBV is dynamic: persistent UPLOAD-heap so we can refresh
+		// per frame without a CreateBuffer call.
+		mesh->GpuSpineBones = renderBackend->CreateUploadStructuredBuffer(
+			static_cast<uint32_t>(sampleMesh.SkinBones.size()),
+			static_cast<uint32_t>(sizeof(SpineSkinBone)));
+		if (mesh->GpuSpineBones)
+		{
+			renderBackend->UpdateUploadStructuredBuffer(mesh->GpuSpineBones.get(),
+				sampleMesh.SkinBones.data(),
+				static_cast<uint32_t>(sizeof(SpineSkinBone) * sampleMesh.SkinBones.size()));
+		}
+		mesh->bGpuSpineSkinned =
+			mesh->GpuSpineInputVertices &&
+			mesh->GpuSpineInfluences &&
+			mesh->GpuSpineBones;
+		// Live VS-inline shares no compute pre-pass; mark dispatched so
+		// the per-mesh routing in DrawScene treats it as ready.
+		mesh->bGpuSpineSkinningDispatched = true;
+		mesh->GpuSpineSkinningVertexCount = mesh->bGpuSpineSkinned ? mesh->NumVertices : 0;
+		mesh->GpuSpineSkinningSourceScale = safeSourceScale;
+		liveState->BoneCount = static_cast<uint32_t>(sampleMesh.SkinBones.size());
+	}
 
 	Mesh::DrawCall drawCall = {};
 	drawCall.mat = material;
@@ -1361,6 +1416,43 @@ bool Corona::UpdateLiveSpineForScript(ScriptSceneHandle handle, float deltaSecon
 		spAnimation_apply(live.Animation, live.Skeleton.get(), 0.0f, t, 1, nullptr, nullptr);
 	}
 	spSkeleton_updateWorldTransform(live.Skeleton.get());
+
+	// VS-inline live: only the bones SBV changes per frame. The VS reads
+	// the static InputVertices + Influences buffers and computes world
+	// positions on the GPU. No CPU skin work, no VB upload.
+	const bool bVsInline =
+		bSpineUseVsInlineSkinning &&
+		live.MeshPtr->bGpuSpineSkinned &&
+		live.MeshPtr->GpuSpineBones;
+	if (bVsInline)
+	{
+		// Fast bones-only path: skip BuildSpineSampleMesh entirely. The
+		// attachment walk + influence/vertex-array assembly that
+		// function does is irrelevant when the VS skins on the GPU.
+		// We just need the bones[] world transforms.
+		const spSkeleton* sk = live.Skeleton.get();
+		const int boneCount = sk->bonesCount;
+		std::vector<SpineSkinBone> bones(boneCount);
+		const float skX = sk->x;
+		const float skY = sk->y;
+		for (int b = 0; b < boneCount; ++b)
+		{
+			const spBone* bone = sk->bones[b];
+			if (bone)
+			{
+				bones[b].X = glm::vec4(bone->a, bone->b, bone->worldX + skX, 0.0f);
+				bones[b].Y = glm::vec4(bone->c, bone->d, bone->worldY + skY, 0.0f);
+			}
+		}
+		const uint32_t needed = static_cast<uint32_t>(sizeof(SpineSkinBone) * bones.size());
+		const uint32_t live_bones_size = static_cast<uint32_t>(sizeof(SpineSkinBone) * live.BoneCount);
+		if (needed > live_bones_size && live.BoneCount > 0)
+			bones.resize(live.BoneCount); // clamp; topology grew unexpectedly
+		renderBackend->UpdateUploadStructuredBuffer(live.MeshPtr->GpuSpineBones.get(),
+			bones.data(),
+			static_cast<uint32_t>(sizeof(SpineSkinBone) * bones.size()));
+		return true;
+	}
 
 	SpineSampleMesh sampleMesh = BuildSpineSampleMesh(live.Skeleton.get(), live.SourceScale, true);
 	if (sampleMesh.Vertices.empty() || sampleMesh.Indices.empty())
