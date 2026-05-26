@@ -480,17 +480,25 @@ void Corona::DispatchSkeletalSkinningForRenderWorld()
 		++SkeletalStats.TransitionCount;
 	}
 
-	SkeletalSkinningPSO->Apply();
 	for (Mesh* mesh : skinnedMeshes)
 	{
 		SkeletalSkinningConstant constants = {};
 		constants.VertexCount = mesh->SkeletalVertexCount;
 		constants.BoneBase = 0;
 
+		// D3D12ComputePipelineStateObject's Set* are *deferred* — they
+		// only update PendingSRVs/PendingUAVs/PendingCBVs in CPU memory.
+		// Apply() is what actually flushes those bindings into root
+		// descriptor table commands on the command list. The previous
+		// single Apply() outside the loop caused every Dispatch to
+		// re-use the same GPU descriptors, so every character was
+		// skinned from instance-0's input/bone/output. Apply() per
+		// dispatch fixes that.
 		SkeletalSkinningPSO->SetBufferSRV("Inputs", mesh->SkeletalInputVertices.get());
 		SkeletalSkinningPSO->SetBufferSRV("Bones", mesh->SkeletalBoneMatrices.get());
 		SkeletalSkinningPSO->SetVertexBufferUAV("Output", mesh->SkeletalOutputVb.get());
 		SkeletalSkinningPSO->SetCBVValue("Constants", &constants);
+		SkeletalSkinningPSO->Apply();
 		renderBackend->Dispatch((mesh->SkeletalVertexCount + 63u) / 64u, 1, 1);
 
 		mesh->bSkeletalSkinningDispatched = true;
@@ -742,6 +750,114 @@ void Corona::SpawnSkeletalTestCharacters()
 		desc.bRayTracing = true;
 		desc.bPhysicsQuery = false;
 		(void)AddSceneObject(desc);
+	}
+
+	// Bench mode: add a large flat ground box under the grid so we have a
+	// surface for shadows to land on and a reference for whether the
+	// characters are actually rendering. Use a separate procedural cube
+	// scaled flat (XZ wide, Y thin).
+	if (bCommandLineSkeletalBenchMode)
+	{
+		const float groundHalfXZ = std::max(2000.0f, static_cast<float>(gridSide) * spacing + 1000.0f);
+		const float groundHalfY = 5.0f;
+
+		// 8 corner positions of a unit cube spanning [-1, 1] in each axis.
+		static const glm::vec3 kCubeCorners[8] = {
+			{-1.0f, -1.0f, -1.0f}, { 1.0f, -1.0f, -1.0f}, { 1.0f,  1.0f, -1.0f}, {-1.0f,  1.0f, -1.0f},
+			{-1.0f, -1.0f,  1.0f}, { 1.0f, -1.0f,  1.0f}, { 1.0f,  1.0f,  1.0f}, {-1.0f,  1.0f,  1.0f},
+		};
+		static const int kFaceCorners[6][4] = {
+			{0, 1, 2, 3}, // -Z
+			{5, 4, 7, 6}, // +Z
+			{4, 0, 3, 7}, // -X
+			{1, 5, 6, 2}, // +X
+			{3, 2, 6, 7}, // +Y (top)
+			{4, 5, 1, 0}, // -Y (bottom)
+		};
+		static const glm::vec3 kFaceNormals[6] = {
+			{ 0,  0, -1}, { 0,  0,  1}, {-1,  0,  0}, { 1,  0,  0}, { 0,  1,  0}, { 0, -1,  0},
+		};
+		static const glm::vec3 kFaceTangents[6] = {
+			{ 1,  0,  0}, {-1,  0,  0}, { 0,  0,  1}, { 0,  0, -1}, { 1,  0,  0}, { 1,  0,  0},
+		};
+
+		std::vector<StandardVertex> gv;
+		std::vector<UINT32> gi;
+		gv.reserve(24);
+		gi.reserve(36);
+		for (int f = 0; f < 6; ++f)
+		{
+			const UINT32 base = static_cast<UINT32>(gv.size());
+			for (int c = 0; c < 4; ++c)
+			{
+				const glm::vec3 corner = kCubeCorners[kFaceCorners[f][c]];
+				StandardVertex v = {};
+				v.Position = glm::vec4(corner.x * groundHalfXZ, corner.y * groundHalfY, corner.z * groundHalfXZ, 1.0f);
+				v.UV = glm::vec2(c == 1 || c == 2 ? 1.0f : 0.0f, c >= 2 ? 1.0f : 0.0f);
+				v.Normal = kFaceNormals[f];
+				v.Tangent = kFaceTangents[f];
+				gv.push_back(v);
+			}
+			gi.push_back(base + 0); gi.push_back(base + 1); gi.push_back(base + 2);
+			gi.push_back(base + 0); gi.push_back(base + 2); gi.push_back(base + 3);
+		}
+
+		std::shared_ptr<Material> groundMat = std::make_shared<Material>();
+		groundMat->Diffuse = DefaultWhiteTex;
+		groundMat->Normal = DefaultNormalTex;
+		groundMat->Roughness = DefaultBlackTex;
+		groundMat->Metallic = DefaultBlackTex;
+
+		std::shared_ptr<Scene> groundScene = std::make_shared<Scene>();
+		groundScene->Materials.push_back(groundMat);
+
+		auto groundMesh = std::make_shared<Mesh>();
+		groundMesh->Owner = renderBackend.get();
+		groundMesh->transform = glm::mat4x4(1.0f);
+		groundMesh->NumVertices = static_cast<UINT32>(gv.size());
+		groundMesh->NumIndices = static_cast<UINT32>(gi.size());
+		groundMesh->VertexStride = sizeof(StandardVertex);
+		groundMesh->IndexFormat = EIndexFormat::U32;
+		groundMesh->Mat = groundMat;
+		groundMesh->Vb = renderBackend->CreateVertexBuffer(
+			static_cast<UINT32>(sizeof(StandardVertex) * gv.size()),
+			sizeof(StandardVertex), gv.data());
+		groundMesh->Ib = renderBackend->CreateIndexBuffer(
+			groundMesh->IndexFormat,
+			static_cast<UINT32>(sizeof(UINT32) * gi.size()),
+			gi.data());
+		groundMesh->CpuPositions.reserve(gv.size());
+		for (const StandardVertex& v : gv)
+			groundMesh->CpuPositions.emplace_back(glm::vec3(v.Position));
+		groundMesh->CpuIndices = gi;
+
+		Mesh::DrawCall groundDraw = {};
+		groundDraw.mat = groundMat;
+		groundDraw.IndexStart = 0;
+		groundDraw.IndexCount = static_cast<UINT32>(gi.size());
+		groundDraw.VertexBase = 0;
+		groundDraw.VertexCount = static_cast<UINT32>(gv.size());
+		groundMesh->Draws.push_back(groundDraw);
+
+		groundScene->meshes.push_back(groundMesh);
+		groundScene->bHasBounds = true;
+		groundScene->BoundsMin = glm::vec3(-groundHalfXZ, -groundHalfY, -groundHalfXZ);
+		groundScene->BoundsMax = glm::vec3( groundHalfXZ,  groundHalfY,  groundHalfXZ);
+
+		// Sit slightly below grid floor (Y=0) so characters stand on it.
+		SceneObjectDesc groundDesc;
+		groundDesc.ScenePtr = groundScene;
+		groundDesc.Transform = glm::translate(glm::mat4x4(1.0f), glm::vec3(0.0f, -groundHalfY, 0.0f));
+		groundDesc.Roughness = 0.6f;
+		groundDesc.Metallic = 0.0f;
+		groundDesc.bOverrideRoughnessMetallic = true;
+		groundDesc.bRayTracing = true;
+		groundDesc.bPhysicsQuery = false;
+		(void)AddSceneObject(groundDesc);
+
+		AppendCpuRuntimeTrace(
+			L"[SkeletalBench] added ground halfXZ=" + std::to_wstring(groundHalfXZ) +
+			L" halfY=" + std::to_wstring(groundHalfY));
 	}
 
 	AppendCpuRuntimeTrace(
