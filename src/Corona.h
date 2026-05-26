@@ -277,12 +277,18 @@ private:
 		UINT32 SkeletalCharIndex = 0;
 		UINT32 SkeletalVertsPerChar = 0;
 		UINT32 SkeletalBoneCount = 0;
-		UINT32 _SkeletalPad = 0;
+		// Spine VS-inline skinning (desktop-only): per-mesh source scale.
+		float SpineSourceScale = 1.0f;
 	};
 
 	std::shared_ptr<GraphicsPipelineHandle> GBufferGraphicsPipeline;
 	std::shared_ptr<GraphicsPipelineHandle> CpuSpineGBufferGraphicsPipeline;
 	std::shared_ptr<GraphicsPipelineHandle> SpineGBufferGraphicsPipeline;
+	// Desktop-only Spine VS-inline path: skinning math executes in the
+	// vertex shader, so the compute pre-pass + GpuSpineSkinnedVertices SBV
+	// are bypassed. Null on mobile (Spine GPU skinning is disabled there).
+	std::shared_ptr<GraphicsPipelineHandle> SpineVsInlineGBufferGraphicsPipeline;
+	bool bSpineUseVsInlineSkinning = false;
 	// Phase 11: GBuffer PSO variant for 3D skeletal-skinned meshes. Same IA
 	// layout/state as GBufferGraphicsPipeline but the VS samples a SBV of
 	// previous-frame skinned positions to emit accurate per-vertex motion

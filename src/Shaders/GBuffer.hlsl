@@ -38,7 +38,10 @@ CBUFFER_BINDING_BEGIN(GBufferConstantBuffer, 0)
     uint SkeletalCharIndex;
     uint SkeletalVertsPerChar;
     uint SkeletalBoneCount;
-    uint _SkeletalPad;
+    // Spine VS-inline skinning (desktop-only): per-mesh source scale
+    // applied to the influence-weighted position. Matches the
+    // SpineSkinningConstant.SourceScale used by SpineSkinningCS.hlsl.
+    float SpineSourceScale;
 } CBUFFER_BINDING_END;
 
 struct VSInput
@@ -98,6 +101,34 @@ StructuredBuffer<SkinBone_t>        SkeletalCurrBones : register(t7);
 // SPIR-V build skips the cluster VS entry naturally.
 StructuredBuffer<SkinBone_t>        SkeletalInstanceTransforms : register(t8);
 
+// Spine VS-inline skinning (desktop-only). Layouts must match the host
+// SpineSkinInputVertex / SpineSkinInfluence / SpineSkinBone structs in
+// Corona.Spine.cpp and the compute-path inputs in SpineSkinningCS.hlsl.
+// Mobile (GBufferMobile.hlsl) omits these bindings because Spine GPU
+// skinning is disabled on mobile entirely.
+struct SpineSkinInputVertex_t
+{
+    float2 uv;
+    float  localZ;
+    uint   influenceOffset;
+    uint   influenceCount;
+    uint   _pad;
+};
+struct SpineSkinInfluence_t
+{
+    float2 localPosition;
+    uint   boneIndex;
+    float  weight;
+};
+struct SpineSkinBone_t
+{
+    float4 xformX;
+    float4 xformY;
+};
+StructuredBuffer<SpineSkinInputVertex_t> SpineVsInlineInputVertices : register(t9);
+StructuredBuffer<SpineSkinInfluence_t>   SpineVsInlineInfluences    : register(t10);
+StructuredBuffer<SpineSkinBone_t>        SpineVsInlineBones         : register(t11);
+
 float4x4 BuildWorldMatrixFromMat3x4Cluster(SkinBone_t m)
 {
     return float4x4(
@@ -143,6 +174,34 @@ PSInput SpineVSMain(uint vertexId : SV_VertexID)
 {
     SpineSkinnedVertex input = SpineVertices[SpineVertexBase + vertexId];
     return BuildGBufferVertex(input.position, input.normal, input.uv, input.tangent);
+}
+
+// Spine VS-inline skinning (desktop-only). Same math as
+// SpineSkinningCS::SkinMain but executed in the vertex shader, so the
+// compute pre-pass and the GpuSpineSkinnedVertices buffer are skipped.
+// SpineSourceScale (from CB) replaces the constant the CS read from its
+// SpineSkinningConstant cbuffer.
+PSInput SpineVsInlineVSMain(uint vertexId : SV_VertexID)
+{
+    SpineSkinInputVertex_t v = SpineVsInlineInputVertices[vertexId];
+
+    float2 worldPosition = float2(0.0f, 0.0f);
+    [loop]
+    for (uint i = 0; i < v.influenceCount; ++i)
+    {
+        SpineSkinInfluence_t inf = SpineVsInlineInfluences[v.influenceOffset + i];
+        SpineSkinBone_t bone = SpineVsInlineBones[inf.boneIndex];
+        const float2 lp = inf.localPosition;
+        const float2 skinned = float2(
+            lp.x * bone.xformX.x + lp.y * bone.xformX.y + bone.xformX.z,
+            lp.x * bone.xformY.x + lp.y * bone.xformY.y + bone.xformY.z);
+        worldPosition += skinned * inf.weight;
+    }
+
+    const float3 position = float3(worldPosition * SpineSourceScale, v.localZ * SpineSourceScale);
+    const float3 normal   = float3(0.0f, 0.0f, 1.0f);
+    const float3 tangent  = float3(1.0f, 0.0f, 0.0f);
+    return BuildGBufferVertex(position, normal, v.uv, tangent);
 }
 
 // Phase 11 (revised) — GBuffer VS variant for skeletal-skinned meshes.

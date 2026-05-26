@@ -2870,6 +2870,14 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 			bSkeletalSkipBlas = true;
 			continue;
 		}
+		// Spine VS-inline (desktop-only): skinning math executes in the
+		// vertex shader. Skips the compute pre-pass and bypasses the
+		// per-mesh GpuSpineSkinnedVertices SBV.
+		if (arg == L"--spine-vs-inline" || arg == L"--spine-vs")
+		{
+			bSpineUseVsInlineSkinning = true;
+			continue;
+		}
 		std::wstring skeletalScreenshotValue = ParseValueArg(arg, L"--skeletal-test-screenshot", L"-skeletal-test-screenshot", i);
 		if (!skeletalScreenshotValue.empty())
 		{

@@ -258,6 +258,34 @@ void Corona::InitGBufferPass()
 	if (!SpineGBufferGraphicsPipeline)
 		AppendCpuRuntimeTrace(L"[InitGBufferPass] failed to create Spine GBuffer pipeline");
 
+	// Desktop-only Spine VS-inline PSO: same vertex-fetch-via-SBV layout as
+	// SpineGBufferGraphicsPipeline but the VS skins from
+	// SpineVsInlineInputVertices/Influences/Bones instead of reading
+	// pre-skinned vertices. Mobile leaves this null (the SPIR-V entry
+	// doesn't exist in GBufferMobile.hlsl). try/catch so missing-entry
+	// failures degrade gracefully.
+	if (!CORONA_PLATFORM_MOBILE)
+	{
+		GraphicsPipelineDesc spineVsInlineDesc = spineDesc;
+		spineVsInlineDesc.VertexEntryPoint = "SpineVsInlineVSMain";
+		spineVsInlineDesc.BufferBindings = {
+			{ "SpineVsInlineInputVertices", 9 },
+			{ "SpineVsInlineInfluences", 10 },
+			{ "SpineVsInlineBones", 11 },
+		};
+		try
+		{
+			SpineVsInlineGBufferGraphicsPipeline = renderBackend->CreateGraphicsPipeline(spineVsInlineDesc);
+		}
+		catch (const std::exception& ex)
+		{
+			AppendCpuRuntimeTrace(L"[InitGBufferPass] SpineVsInline pipeline create exception");
+			(void)ex;
+		}
+		if (!SpineVsInlineGBufferGraphicsPipeline)
+			AppendCpuRuntimeTrace(L"[InitGBufferPass] failed to create Spine VS-inline GBuffer pipeline");
+	}
+
 	// Phase 11 (revised): Skeletal GBuffer PSO. Same IA layout as the
 	// standard GBufferGraphicsPipeline, but the VS variant re-skins the
 	// bind-pose vertex with the previous frame's bone palette so velocity
@@ -1841,6 +1869,15 @@ void Corona::BloomPass()
 
 void Corona::DispatchSpineSkinningForMesh(Mesh* mesh)
 {
+	// Spine VS-inline mode bypasses the compute pre-pass; the VS reads the
+	// input SBVs directly each frame. Mark the mesh "dispatched" so the
+	// downstream readiness checks treat it as ready to draw.
+	if (bSpineUseVsInlineSkinning && mesh && mesh->bGpuSpineSkinned)
+	{
+		mesh->bGpuSpineSkinningDispatched = true;
+		return;
+	}
+
 	if (!renderBackend ||
 		!bEnableGpuSpineSkinning ||
 		!SpineSkinningPSO ||
@@ -1903,12 +1940,26 @@ void Corona::DrawScene(shared_ptr<Scene> scene, const glm::mat4x4& instanceTrans
 		if (!mesh)
 			continue;
 
+		// Desktop-only Spine VS-inline path: skinning math runs in the VS,
+		// reading directly from the input SBVs each frame instead of a
+		// pre-skinned vertex buffer. Mobile keeps the existing routes
+		// because SpineVsInlineGBufferGraphicsPipeline is null there.
+		const bool bUseSpineVsInline =
+			bSpineUseVsInlineSkinning &&
+			mesh->bGpuSpineSkinned &&
+			mesh->bGpuSpineSkinningDispatched &&
+			mesh->GpuSpineInputVertices &&
+			mesh->GpuSpineInfluences &&
+			mesh->GpuSpineBones &&
+			SpineVsInlineGBufferGraphicsPipeline;
 		const bool bUseSpineVertexFetch =
+			!bUseSpineVsInline &&
 			mesh->bGpuSpineSkinned &&
 			mesh->bGpuSpineSkinningDispatched &&
 			mesh->GpuSpineSkinnedVertices &&
 			SpineGBufferGraphicsPipeline;
 		const bool bUseCpuSpinePipeline =
+			!bUseSpineVsInline &&
 			!bUseSpineVertexFetch &&
 			mesh->bSpineMesh &&
 			CpuSpineGBufferGraphicsPipeline;
@@ -1940,12 +1991,19 @@ void Corona::DrawScene(shared_ptr<Scene> scene, const glm::mat4x4& instanceTrans
 		GraphicsPipelineHandle* activeGBufferPipeline =
 			bUseSkeletalVsInline ? SkeletalVsInlineGraphicsPipeline.get() :
 			(bUseSkeletalSkinned ? SkeletalGBufferGraphicsPipeline.get() :
+			(bUseSpineVsInline ? SpineVsInlineGBufferGraphicsPipeline.get() :
 			(bUseSpineVertexFetch ? SpineGBufferGraphicsPipeline.get() :
-			(bUseCpuSpinePipeline ? CpuSpineGBufferGraphicsPipeline.get() : GBufferGraphicsPipeline.get())));
+			(bUseCpuSpinePipeline ? CpuSpineGBufferGraphicsPipeline.get() : GBufferGraphicsPipeline.get()))));
 		renderBackend->BindGraphicsPipeline(activeGBufferPipeline);
 		renderBackend->BindGraphicsPipelineSampler(activeGBufferPipeline, "samplerWrap", samplerWrap.get());
 		if (bUseSpineVertexFetch)
 			renderBackend->BindGraphicsPipelineBuffer(activeGBufferPipeline, "SpineVertices", mesh->GpuSpineSkinnedVertices.get());
+		if (bUseSpineVsInline)
+		{
+			renderBackend->BindGraphicsPipelineBuffer(activeGBufferPipeline, "SpineVsInlineInputVertices", mesh->GpuSpineInputVertices.get());
+			renderBackend->BindGraphicsPipelineBuffer(activeGBufferPipeline, "SpineVsInlineInfluences", mesh->GpuSpineInfluences.get());
+			renderBackend->BindGraphicsPipelineBuffer(activeGBufferPipeline, "SpineVsInlineBones", mesh->GpuSpineBones.get());
+		}
 		if (bUseSkeletalSkinned || bUseSkeletalVsInline)
 		{
 			renderBackend->BindGraphicsPipelineBuffer(activeGBufferPipeline, "SkeletalInputs", mesh->SkeletalInputVertices.get());
@@ -2003,11 +2061,13 @@ void Corona::DrawScene(shared_ptr<Scene> scene, const glm::mat4x4& instanceTrans
 			objCB.bOverrideRougnessMetallic = bOverrideRoughnessMetallic ? 1 : 0;
 			// Spine meshes always render unlit + two-sided regardless of
 			// whether they go through the compute-skinning vertex-fetch
-			// pipeline or the CPU-skinned VBO path (mobile fallback).
-			const bool bSpineUnlit = bUseSpineVertexFetch || mesh->bSpineMesh;
+			// pipeline, the VS-inline path, or the CPU-skinned VBO path.
+			const bool bSpineUnlit = bUseSpineVertexFetch || bUseSpineVsInline || mesh->bSpineMesh;
 			objCB.bTwoSidedLighting = bSpineUnlit ? 1u : 0u;
 			objCB.bUnlitMaterial = bSpineUnlit ? 1u : 0u;
 			objCB.SpineVertexBase = bUseSpineVertexFetch ? drawcall.VertexBase : 0u;
+			objCB.SpineSourceScale = (bUseSpineVsInline && mesh->GpuSpineSkinningSourceScale > 0.0f)
+				? mesh->GpuSpineSkinningSourceScale : 1.0f;
 			const bool bAnySkeletalPath = bUseSkeletalSkinned || bUseSkeletalVsInline;
 			objCB.SkeletalCharIndex = bAnySkeletalPath ? mesh->SkeletalCharIndex : 0u;
 			objCB.SkeletalVertsPerChar = bAnySkeletalPath ? SkeletalUnifiedVertsPerChar : 0u;
