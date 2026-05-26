@@ -460,66 +460,89 @@ void Corona::DispatchSkeletalSkinningForRenderWorld()
 	SkeletalStats.BonesUploaded = 0;
 	SkeletalStats.BlasUpdates = 0;
 
-	// Phase 11 motion vector wanted ping-pong (swap curr/prev output VB)
-	// here so the GBuffer VS could read last frame's positions. But that
-	// also changes the GPU VA the BLAS was built from, and D3D12
-	// PERFORM_UPDATE expects the source vertex buffer pointer to stay the
-	// same across refits — the BLAS ended up tracking the OTHER buffer (the
-	// one the compute is about to overwrite), so shadow rays missed the
-	// character. The correct fix is to keep SkeletalOutputVb stable and
-	// copy its prior contents into SkeletalOutputVbPrev before the compute
-	// writes, but for now disable the swap so RT shadows and reflections
-	// stay correct; motion vectors will revert to camera-only until that
-	// copy path is implemented.
+	// Phase A: every visible skeletal mesh aliases the unified output VB.
+	// One transition + one dispatch covers all characters. Verify all
+	// meshes share the expected unified output VB; bail to per-mesh path
+	// otherwise (e.g. user adds a non-unified skeletal mesh later).
+	const bool bAllUnified = SkeletalUnifiedOutputVb && SkeletalUnifiedBoneMatrices &&
+		SkeletalUnifiedInputVertices &&
+		std::all_of(skinnedMeshes.begin(), skinnedMeshes.end(), [&](Mesh* m) {
+			return m->SkeletalOutputVb == SkeletalUnifiedOutputVb &&
+				m->SkeletalInputVertices == SkeletalUnifiedInputVertices &&
+				m->SkeletalBoneMatrices == SkeletalUnifiedBoneMatrices;
+		});
 
-	// Batch transitions: SR -> UA for all outputs.
-	for (Mesh* mesh : skinnedMeshes)
+	if (!bAllUnified)
 	{
-		renderBackend->TransitionVertexBuffer(mesh->SkeletalOutputVb.get(),
+		// Fallback: legacy per-mesh dispatch loop. Kept so future mesh
+		// templates that haven't migrated to the unified buffers still
+		// render correctly.
+		for (Mesh* mesh : skinnedMeshes)
+		{
+			renderBackend->TransitionVertexBuffer(mesh->SkeletalOutputVb.get(),
+				EResourceState::VertexBuffer, EResourceState::UnorderedAccess);
+			++SkeletalStats.TransitionCount;
+
+			// Single-character mesh: shader still uses the same compute
+			// path but with VertsPerChar = full vertex count, so charIndex
+			// resolves to 0 inside the dispatch.
+			SkeletalSkinningConstant constants = {};
+			constants.TotalVertexCount = mesh->SkeletalVertexCount;
+			constants.VertsPerChar = mesh->SkeletalVertexCount;
+			constants.BoneCount = mesh->SkeletalBoneCount;
+			SkeletalSkinningPSO->SetBufferSRV("Inputs", mesh->SkeletalInputVertices.get());
+			SkeletalSkinningPSO->SetBufferSRV("Bones", mesh->SkeletalBoneMatrices.get());
+			SkeletalSkinningPSO->SetVertexBufferUAV("Output", mesh->SkeletalOutputVb.get());
+			SkeletalSkinningPSO->SetCBVValue("Constants", &constants);
+			SkeletalSkinningPSO->Apply();
+			renderBackend->Dispatch((mesh->SkeletalVertexCount + 63u) / 64u, 1, 1);
+
+			mesh->bSkeletalSkinningDispatched = true;
+			++SkeletalStats.DispatchCount;
+			SkeletalStats.VerticesSkinned += mesh->SkeletalVertexCount;
+			SkeletalStats.BonesUploaded += mesh->SkeletalBoneCount;
+
+			renderBackend->TransitionVertexBuffer(mesh->SkeletalOutputVb.get(),
+				EResourceState::UnorderedAccess, EResourceState::VertexBuffer);
+			++SkeletalStats.TransitionCount;
+		}
+	}
+	else
+	{
+		// Phase A fast path: single dispatch covers every character.
+		renderBackend->TransitionVertexBuffer(SkeletalUnifiedOutputVb.get(),
 			EResourceState::VertexBuffer, EResourceState::UnorderedAccess);
 		++SkeletalStats.TransitionCount;
-	}
 
-	for (Mesh* mesh : skinnedMeshes)
-	{
+		const UINT32 totalVertexCount = SkeletalUnifiedCharCount * SkeletalUnifiedVertsPerChar;
 		SkeletalSkinningConstant constants = {};
-		constants.VertexCount = mesh->SkeletalVertexCount;
-		constants.BoneBase = 0;
-
-		// D3D12ComputePipelineStateObject's Set* are *deferred* — they
-		// only update PendingSRVs/PendingUAVs/PendingCBVs in CPU memory.
-		// Apply() is what actually flushes those bindings into root
-		// descriptor table commands on the command list. The previous
-		// single Apply() outside the loop caused every Dispatch to
-		// re-use the same GPU descriptors, so every character was
-		// skinned from instance-0's input/bone/output. Apply() per
-		// dispatch fixes that.
-		SkeletalSkinningPSO->SetBufferSRV("Inputs", mesh->SkeletalInputVertices.get());
-		SkeletalSkinningPSO->SetBufferSRV("Bones", mesh->SkeletalBoneMatrices.get());
-		SkeletalSkinningPSO->SetVertexBufferUAV("Output", mesh->SkeletalOutputVb.get());
+		constants.TotalVertexCount = totalVertexCount;
+		constants.VertsPerChar = SkeletalUnifiedVertsPerChar;
+		constants.BoneCount = SkeletalUnifiedBoneCount;
+		SkeletalSkinningPSO->SetBufferSRV("Inputs", SkeletalUnifiedInputVertices.get());
+		SkeletalSkinningPSO->SetBufferSRV("Bones", SkeletalUnifiedBoneMatrices.get());
+		SkeletalSkinningPSO->SetVertexBufferUAV("Output", SkeletalUnifiedOutputVb.get());
 		SkeletalSkinningPSO->SetCBVValue("Constants", &constants);
 		SkeletalSkinningPSO->Apply();
-		renderBackend->Dispatch((mesh->SkeletalVertexCount + 63u) / 64u, 1, 1);
+		renderBackend->Dispatch((totalVertexCount + 63u) / 64u, 1, 1);
 
-		mesh->bSkeletalSkinningDispatched = true;
-		++SkeletalStats.DispatchCount;
-		SkeletalStats.VerticesSkinned += mesh->SkeletalVertexCount;
-		SkeletalStats.BonesUploaded += mesh->SkeletalBoneCount;
-	}
+		for (Mesh* mesh : skinnedMeshes)
+		{
+			mesh->bSkeletalSkinningDispatched = true;
+			SkeletalStats.VerticesSkinned += mesh->SkeletalVertexCount;
+			SkeletalStats.BonesUploaded += mesh->SkeletalBoneCount;
+		}
+		SkeletalStats.DispatchCount = 1;
 
-	// Batch transitions: UA -> VertexBuffer for IA read.
-	for (Mesh* mesh : skinnedMeshes)
-	{
-		renderBackend->TransitionVertexBuffer(mesh->SkeletalOutputVb.get(),
+		renderBackend->TransitionVertexBuffer(SkeletalUnifiedOutputVb.get(),
 			EResourceState::UnorderedAccess, EResourceState::VertexBuffer);
 		++SkeletalStats.TransitionCount;
 	}
 
 	// Phase 10: refit BLAS for each skinned mesh so RT passes (reflection,
-	// GI, shadow if RT) see the current skinned geometry. The combined
-	// VertexBuffer | NON_PIXEL_SHADER_RESOURCE state set by the UA->VB
-	// transition above is compatible with BLAS build inputs, so no extra
-	// state transitions are needed.
+	// GI, shadow if RT) see the current skinned geometry. BLAS is still
+	// per-character — each one was built with the char's vertex slice in
+	// the unified output VB.
 	for (Mesh* mesh : skinnedMeshes)
 	{
 		if (mesh->SkeletalBlas)
@@ -626,6 +649,76 @@ void Corona::SpawnSkeletalTestCharacters()
 	const int gridSide = static_cast<int>(std::ceil(std::sqrt(static_cast<float>(desiredCount))));
 	const float gridOffset = -0.5f * (gridSide - 1) * spacing;
 
+	// Phase A: build a single unified set of skeletal resources once and
+	// share the pointers across every test character. SBV layouts:
+	//   SkeletalUnifiedInputVertices: VertsPerChar entries (single shared
+	//                                 bind-pose copy)
+	//   SkeletalUnifiedBoneMatrices : CharCount * BoneCount entries
+	//   SkeletalUnifiedPrevBoneMatrices: same
+	//   SkeletalUnifiedOutputVb     : CharCount * VertsPerChar vertices
+	//   SkeletalUnifiedBindVb       : VertsPerChar vertices (single shared)
+	//   SkeletalUnifiedIb           : indexCount indices (single shared)
+	// Each Mesh's per-char SkeletalCharIndex stores its slot.
+	SkeletalUnifiedCharCount = desiredCount;
+	SkeletalUnifiedVertsPerChar = vertexCount;
+	SkeletalUnifiedBoneCount = static_cast<UINT32>(BONE_COUNT);
+
+	{
+		BufferCreateDesc inputDesc = {};
+		inputDesc.NumElements = static_cast<UINT32>(skin.size());
+		inputDesc.ElementSize = sizeof(SkinInputVertex);
+		inputDesc.InitialState = EInitialResourceState::ShaderRead;
+		inputDesc.bAllowUnorderedAccess = true;
+		inputDesc.InitialData = skin.data();
+		inputDesc.Shape = EBufferShape::Structured;
+		SkeletalUnifiedInputVertices = renderBackend->CreateBuffer(inputDesc);
+	}
+
+	struct InitialBoneMatrix { float r0[4]; float r1[4]; float r2[4]; };
+	static_assert(sizeof(InitialBoneMatrix) == 48, "SkinBone size drift");
+	{
+		std::vector<InitialBoneMatrix> identityBones(
+			static_cast<size_t>(SkeletalUnifiedCharCount) * BONE_COUNT);
+		const InitialBoneMatrix identity = {
+			{1.0f, 0.0f, 0.0f, 0.0f},
+			{0.0f, 1.0f, 0.0f, 0.0f},
+			{0.0f, 0.0f, 1.0f, 0.0f}
+		};
+		for (auto& m : identityBones) m = identity;
+		SkeletalUnifiedBoneMatrices = renderBackend->CreateUploadStructuredBuffer(
+			static_cast<UINT32>(identityBones.size()), sizeof(InitialBoneMatrix));
+		if (SkeletalUnifiedBoneMatrices)
+		{
+			renderBackend->UpdateUploadStructuredBuffer(
+				SkeletalUnifiedBoneMatrices.get(),
+				identityBones.data(),
+				static_cast<UINT32>(identityBones.size() * sizeof(InitialBoneMatrix)));
+		}
+		SkeletalUnifiedPrevBoneMatrices = renderBackend->CreateUploadStructuredBuffer(
+			static_cast<UINT32>(identityBones.size()), sizeof(InitialBoneMatrix));
+		if (SkeletalUnifiedPrevBoneMatrices)
+		{
+			renderBackend->UpdateUploadStructuredBuffer(
+				SkeletalUnifiedPrevBoneMatrices.get(),
+				identityBones.data(),
+				static_cast<UINT32>(identityBones.size() * sizeof(InitialBoneMatrix)));
+		}
+	}
+
+	// Shared bind-pose VB and IB (single copy used by every character).
+	SkeletalUnifiedBindVb = renderBackend->CreateVertexBuffer(
+		static_cast<UINT32>(sizeof(StandardVertex) * vertices.size()),
+		sizeof(StandardVertex), vertices.data());
+	SkeletalUnifiedIb = renderBackend->CreateIndexBuffer(
+		EIndexFormat::U32,
+		static_cast<UINT32>(sizeof(UINT32) * indices.size()),
+		indices.data());
+
+	// Unified RW output VB sized for all characters.
+	SkeletalUnifiedOutputVb = renderBackend->CreateRWVertexBuffer(
+		static_cast<UINT32>(sizeof(StandardVertex) * vertices.size()) * SkeletalUnifiedCharCount,
+		sizeof(StandardVertex));
+
 	for (UINT32 instance = 0; instance < desiredCount; ++instance)
 	{
 		const int gx = static_cast<int>(instance) % gridSide;
@@ -647,17 +740,10 @@ void Corona::SpawnSkeletalTestCharacters()
 		mesh->VertexStride = sizeof(StandardVertex);
 		mesh->IndexFormat = EIndexFormat::U32;
 		mesh->Mat = material;
-		// In Phase 2 we use the bind-pose vertices as the only vertex buffer
-		// so the GBuffer path can render the character before compute
-		// skinning exists. Phase 5 will swap to SkeletalOutputVb produced by
-		// the compute shader.
-		mesh->Vb = renderBackend->CreateVertexBuffer(
-			static_cast<UINT32>(sizeof(StandardVertex) * vertices.size()),
-			sizeof(StandardVertex), vertices.data());
-		mesh->Ib = renderBackend->CreateIndexBuffer(
-			mesh->IndexFormat,
-			static_cast<UINT32>(sizeof(UINT32) * indices.size()),
-			indices.data());
+		// All per-char meshes share the unified bind-pose VB / IB. The
+		// per-char slice is selected at draw time via VertexBase.
+		mesh->Vb = SkeletalUnifiedBindVb;
+		mesh->Ib = SkeletalUnifiedIb;
 		mesh->CpuPositions.reserve(vertices.size());
 		for (const StandardVertex& v : vertices)
 			mesh->CpuPositions.emplace_back(glm::vec3(v.Position));
@@ -667,74 +753,27 @@ void Corona::SpawnSkeletalTestCharacters()
 		drawCall.mat = material;
 		drawCall.IndexStart = 0;
 		drawCall.IndexCount = indexCount;
-		drawCall.VertexBase = 0;
+		// Skeletal draw reads from the unified output VB at this slot's
+		// slice. Bind-pose fallback works too because the unified bind VB
+		// has a single copy and SV_VertexID stays inside [0, VertsPerChar)
+		// for that draw — but the GBuffer skeletal VS subtracts the char
+		// base anyway, so this BaseVertex value matters only for the IA
+		// when reading the unified output VB.
+		drawCall.VertexBase = static_cast<int32_t>(instance * vertexCount);
 		drawCall.VertexCount = vertexCount;
 		mesh->Draws.push_back(drawCall);
 
-		// 3D skeletal fields. SkeletalInputVertices SBV created here; the
-		// bone matrix / output VB are populated in later phases.
 		mesh->bSkeletalSkinned = true;
 		mesh->SkeletalVertexCount = vertexCount;
 		mesh->SkeletalBoneCount = static_cast<UINT32>(BONE_COUNT);
-		BufferCreateDesc inputDesc = {};
-		inputDesc.NumElements = static_cast<UINT32>(skin.size());
-		inputDesc.ElementSize = sizeof(SkinInputVertex);
-		inputDesc.InitialState = EInitialResourceState::ShaderRead;
-		// UAV flag picks the DEFAULT-heap path which is required when
-		// CreateBuffer is asked to upload InitialData on the GPU.
-		inputDesc.bAllowUnorderedAccess = true;
-		inputDesc.InitialData = skin.data();
-		inputDesc.Shape = EBufferShape::Structured;
-		mesh->SkeletalInputVertices = renderBackend->CreateBuffer(inputDesc);
-
-		// Bone matrix SBV — one mat3x4 (48 B) per bone, persistent-mapped on
-		// UPLOAD heap so per-frame UpdateSkeletalTestCharacters can refresh
-		// via a single memcpy (no CreateCommittedResource, no staging copy,
-		// no WaitGPU per character).
-		struct InitialBoneMatrix { float r0[4]; float r1[4]; float r2[4]; };
-		static_assert(sizeof(InitialBoneMatrix) == 48, "SkinBone size drift");
-		std::vector<InitialBoneMatrix> identityBones(BONE_COUNT);
-		for (auto& m : identityBones)
-		{
-			m.r0[0] = 1.0f; m.r0[1] = 0.0f; m.r0[2] = 0.0f; m.r0[3] = 0.0f;
-			m.r1[0] = 0.0f; m.r1[1] = 1.0f; m.r1[2] = 0.0f; m.r1[3] = 0.0f;
-			m.r2[0] = 0.0f; m.r2[1] = 0.0f; m.r2[2] = 1.0f; m.r2[3] = 0.0f;
-		}
-		mesh->SkeletalBoneMatrices = renderBackend->CreateUploadStructuredBuffer(
-			static_cast<UINT32>(identityBones.size()), sizeof(InitialBoneMatrix));
-		if (mesh->SkeletalBoneMatrices)
-		{
-			renderBackend->UpdateUploadStructuredBuffer(
-				mesh->SkeletalBoneMatrices.get(),
-				identityBones.data(),
-				static_cast<UINT32>(identityBones.size() * sizeof(InitialBoneMatrix)));
-		}
-
-		// Phase 11 (revised): previous-frame bone palette. Same layout as
-		// SkeletalBoneMatrices. Initialized to identity so the very first
-		// frame's motion vector is zero (no ghosting / popping).
-		mesh->SkeletalPrevBoneMatrices = renderBackend->CreateUploadStructuredBuffer(
-			static_cast<UINT32>(identityBones.size()), sizeof(InitialBoneMatrix));
-		if (mesh->SkeletalPrevBoneMatrices)
-		{
-			renderBackend->UpdateUploadStructuredBuffer(
-				mesh->SkeletalPrevBoneMatrices.get(),
-				identityBones.data(),
-				static_cast<UINT32>(identityBones.size() * sizeof(InitialBoneMatrix)));
-		}
-
-		// RW vertex buffer — compute writes here, GBuffer IA reads it.
-		mesh->SkeletalOutputVb = renderBackend->CreateRWVertexBuffer(
-			static_cast<UINT32>(sizeof(StandardVertex) * vertices.size()),
-			sizeof(StandardVertex));
-		// Phase 11: companion ping-pong VB that holds the previous frame's
-		// skinning output. Swapped with SkeletalOutputVb at the start of
-		// each dispatch so the compute always writes the new frame's output.
-		// First-frame contents are uninitialized — motion vector reads will
-		// produce garbage for the very first frame and then track correctly.
-		mesh->SkeletalOutputVbPrev = renderBackend->CreateRWVertexBuffer(
-			static_cast<UINT32>(sizeof(StandardVertex) * vertices.size()),
-			sizeof(StandardVertex));
+		mesh->SkeletalCharIndex = instance;
+		// Per-mesh skeletal pointers all alias to the unified resources.
+		// Pre-existing callers that walk mesh->SkeletalInputVertices etc.
+		// keep working without knowing about the unification.
+		mesh->SkeletalInputVertices = SkeletalUnifiedInputVertices;
+		mesh->SkeletalBoneMatrices = SkeletalUnifiedBoneMatrices;
+		mesh->SkeletalPrevBoneMatrices = SkeletalUnifiedPrevBoneMatrices;
+		mesh->SkeletalOutputVb = SkeletalUnifiedOutputVb;
 
 		scene->meshes.push_back(mesh);
 		scene->bHasBounds = true;
@@ -994,17 +1033,21 @@ void Corona::UpdateSkeletalTestCharacters(float timeSeconds)
 
 	const size_t jobCount = jobs.size();
 	// One mat3x4 palette per bone, two palettes per character (curr + prev),
-	// laid out contiguously so workers write disjoint ranges.
-	std::vector<SkinBoneRow> packed(jobCount * BONE_COUNT);
-	std::vector<SkinBoneRow> packedPrev(jobCount * BONE_COUNT);
+	// laid out contiguously so workers write disjoint ranges. Indexed by
+	// SkeletalCharIndex so the unified buffer slice matches what the
+	// compute / GBuffer shader expects.
+	const size_t paletteSize = static_cast<size_t>(SkeletalUnifiedCharCount) * BONE_COUNT;
+	std::vector<SkinBoneRow> packed(paletteSize);
+	std::vector<SkinBoneRow> packedPrev(paletteSize);
 
 	const auto computeStart = CpuClock::now();
 
 	auto computeJob = [&](size_t j)
 	{
 		const SkinJob& job = jobs[j];
-		ComputeSkeletalPalettePacked(timeSeconds, packed.data() + j * BONE_COUNT, job.InstanceIndex);
-		ComputeSkeletalPalettePacked(prevTimeSeconds, packedPrev.data() + j * BONE_COUNT, job.InstanceIndex);
+		const size_t slot = static_cast<size_t>(job.MeshPtr->SkeletalCharIndex);
+		ComputeSkeletalPalettePacked(timeSeconds, packed.data() + slot * BONE_COUNT, job.InstanceIndex);
+		ComputeSkeletalPalettePacked(prevTimeSeconds, packedPrev.data() + slot * BONE_COUNT, job.InstanceIndex);
 	};
 
 	// Parallelize palette compute across hardware threads. For very small
@@ -1046,24 +1089,21 @@ void Corona::UpdateSkeletalTestCharacters(float timeSeconds)
 	// visible in the overlay for comparison with the pre-fusion baseline.
 	AddCpuUpdatePhaseTiming(ECpuUpdatePhase::SkeletalPack, computeEnd, computeEnd);
 
-	for (size_t j = 0; j < jobCount; ++j)
+	// Single contiguous upload covers all characters at once. The unified
+	// buffer is persistent-mapped UPLOAD heap, so this is one memcpy.
+	if (SkeletalUnifiedBoneMatrices && !packed.empty())
 	{
-		Mesh* mesh = jobs[j].MeshPtr;
-		const UINT32 byteSize = static_cast<UINT32>(BONE_COUNT * sizeof(SkinBoneRow));
-		if (mesh->SkeletalBoneMatrices)
-		{
-			renderBackend->UpdateUploadStructuredBuffer(
-				mesh->SkeletalBoneMatrices.get(),
-				packed.data() + j * BONE_COUNT,
-				byteSize);
-		}
-		if (mesh->SkeletalPrevBoneMatrices)
-		{
-			renderBackend->UpdateUploadStructuredBuffer(
-				mesh->SkeletalPrevBoneMatrices.get(),
-				packedPrev.data() + j * BONE_COUNT,
-				byteSize);
-		}
+		renderBackend->UpdateUploadStructuredBuffer(
+			SkeletalUnifiedBoneMatrices.get(),
+			packed.data(),
+			static_cast<UINT32>(packed.size() * sizeof(SkinBoneRow)));
+	}
+	if (SkeletalUnifiedPrevBoneMatrices && !packedPrev.empty())
+	{
+		renderBackend->UpdateUploadStructuredBuffer(
+			SkeletalUnifiedPrevBoneMatrices.get(),
+			packedPrev.data(),
+			static_cast<UINT32>(packedPrev.size() * sizeof(SkinBoneRow)));
 	}
 	AddCpuUpdatePhaseTiming(ECpuUpdatePhase::SkeletalUpload, computeEnd, CpuClock::now());
 

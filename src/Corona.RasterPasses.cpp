@@ -1894,6 +1894,9 @@ void Corona::DrawScene(shared_ptr<Scene> scene, const glm::mat4x4& instanceTrans
 			objCB.bTwoSidedLighting = bSpineUnlit ? 1u : 0u;
 			objCB.bUnlitMaterial = bSpineUnlit ? 1u : 0u;
 			objCB.SpineVertexBase = bUseSpineVertexFetch ? drawcall.VertexBase : 0u;
+			objCB.SkeletalCharIndex = bUseSkeletalSkinned ? mesh->SkeletalCharIndex : 0u;
+			objCB.SkeletalVertsPerChar = bUseSkeletalSkinned ? SkeletalUnifiedVertsPerChar : 0u;
+			objCB.SkeletalBoneCount = bUseSkeletalSkinned ? SkeletalUnifiedBoneCount : 0u;
 
 			renderBackend->SetGraphicsPipelineConstantData(activeGBufferPipeline, 0, &objCB, sizeof(objCB));
 

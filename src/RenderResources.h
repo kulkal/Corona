@@ -190,6 +190,9 @@ public:
 	bool bSkeletalSkinningDispatched = false;
 	uint32_t SkeletalVertexCount = 0;
 	uint32_t SkeletalBoneCount = 0;
+	// Slot inside the unified skeletal buffers. The shader uses this to pick
+	// the right palette / output range. Stored zero-based.
+	uint32_t SkeletalCharIndex = 0;
 	std::shared_ptr<Buffer> SkeletalInputVertices;
 	std::shared_ptr<Buffer> SkeletalBoneMatrices;
 	std::shared_ptr<VertexBuffer> SkeletalOutputVb;

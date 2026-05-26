@@ -45,12 +45,19 @@ StructuredBuffer<SkinInputVertex> Inputs : register(t0);
 StructuredBuffer<SkinBone>        Bones  : register(t1);
 RWByteAddressBuffer               Output : register(u0);
 
+// Phase A: unified-buffer batched dispatch. One Dispatch covers every
+// character. `Inputs` holds a single shared copy of the bind-pose vertices
+// (size = VertsPerChar) because the test characters share one mesh.
+// `Bones` is a flat array sized CharCount * BoneCount; the slice for
+// character c starts at index c*BoneCount. `Output` is sized
+// CharCount * VertsPerChar * sizeof(StandardVertex); the slice for
+// character c starts at vertex c*VertsPerChar.
 cbuffer SkeletalSkinningConstant : register(b0)
 {
-    uint VertexCount;
-    uint BoneBase;
-    uint Pad0;
-    uint Pad1;
+    uint TotalVertexCount;   // CharCount * VertsPerChar
+    uint VertsPerChar;
+    uint BoneCount;
+    uint _Pad;
 };
 
 // Apply a mat3x4 to a homogeneous point (w=1).
@@ -72,21 +79,25 @@ float3 TransformDirection(SkinBone bone, float3 d)
 [numthreads(64, 1, 1)]
 void SkinMain(uint3 dispatchThreadID : SV_DispatchThreadID)
 {
-    const uint vertexIndex = dispatchThreadID.x;
-    if (vertexIndex >= VertexCount)
+    const uint globalVertex = dispatchThreadID.x;
+    if (globalVertex >= TotalVertexCount)
         return;
 
-    SkinInputVertex v = Inputs[vertexIndex];
+    const uint charIndex = globalVertex / VertsPerChar;
+    const uint localVertex = globalVertex - charIndex * VertsPerChar;
+    const uint boneBase = charIndex * BoneCount;
+
+    SkinInputVertex v = Inputs[localVertex];
 
     const uint i0 = (v.BoneIndicesPacked >>  0) & 0xFFu;
     const uint i1 = (v.BoneIndicesPacked >>  8) & 0xFFu;
     const uint i2 = (v.BoneIndicesPacked >> 16) & 0xFFu;
     const uint i3 = (v.BoneIndicesPacked >> 24) & 0xFFu;
 
-    const SkinBone b0 = Bones[BoneBase + i0];
-    const SkinBone b1 = Bones[BoneBase + i1];
-    const SkinBone b2 = Bones[BoneBase + i2];
-    const SkinBone b3 = Bones[BoneBase + i3];
+    const SkinBone b0 = Bones[boneBase + i0];
+    const SkinBone b1 = Bones[boneBase + i1];
+    const SkinBone b2 = Bones[boneBase + i2];
+    const SkinBone b3 = Bones[boneBase + i3];
 
     const float w0 = v.BoneWeights.x;
     const float w1 = v.BoneWeights.y;
@@ -114,8 +125,10 @@ void SkinMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     T = normalize(T - N * dot(N, T));
 
     // Write to standard vertex layout: float4 pos @ 0, float2 uv @ 16,
-    // float3 nrm @ 24, float3 tan @ 36. Stride 48 B.
-    const uint addr = vertexIndex * 48u;
+    // float3 nrm @ 24, float3 tan @ 36. Stride 48 B. Address uses
+    // globalVertex so each character writes into its own slice of the
+    // unified output VB.
+    const uint addr = globalVertex * 48u;
     Output.Store4(addr +  0u, asuint(float4(P, 1.0f)));
     Output.Store2(addr + 16u, asuint(v.UV));
     Output.Store3(addr + 24u, asuint(N));

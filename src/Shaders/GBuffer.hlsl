@@ -22,7 +22,7 @@ SAMPLER_BINDING(sampleWrap, 0);
 CBUFFER_BINDING_BEGIN(GBufferConstantBuffer, 0)
 {
     float4x4 ViewProjectionMatrix;
-    float4x4 PrevViewProjectionMatrix;  
+    float4x4 PrevViewProjectionMatrix;
     float4x4 WorldMatrix;
     float4x4 UnjitteredViewProjMat;
     float4x4 PrevUnjitteredViewProjMat;
@@ -34,6 +34,11 @@ CBUFFER_BINDING_BEGIN(GBufferConstantBuffer, 0)
     uint bTwoSidedLighting;
     uint bUnlitMaterial;
     uint SpineVertexBase;
+    // Phase A: per-draw locator into the unified skeletal buffers.
+    uint SkeletalCharIndex;
+    uint SkeletalVertsPerChar;
+    uint SkeletalBoneCount;
+    uint _SkeletalPad;
 } CBUFFER_BINDING_END;
 
 struct VSInput
@@ -132,16 +137,23 @@ PSInput SkeletalVSMain(VSInput input, uint vertexId : SV_VertexID)
     result.position = mul(worldPos, ViewProjectionMatrix);
     result.unjitteredPosition = mul(worldPos, UnjitteredViewProjMat);
 
-    // Re-skin from bind position using prev bones.
-    SkinInputVertex_t v = SkeletalInputs[vertexId];
+    // Phase A: SkeletalInputs holds a single shared bind-pose copy
+    // (VertsPerChar entries). With BaseVertexLocation = charIdx*VertsPerChar
+    // on the per-character draw, SV_VertexID arrives offset; subtract the
+    // char's base to land on the local slot.
+    uint localVertex = vertexId - SkeletalCharIndex * SkeletalVertsPerChar;
+    uint boneBase = SkeletalCharIndex * SkeletalBoneCount;
+
+    // Re-skin from bind position using prev bones for this character's slice.
+    SkinInputVertex_t v = SkeletalInputs[localVertex];
     uint i0 = (v.BoneIndicesPacked >>  0) & 0xFFu;
     uint i1 = (v.BoneIndicesPacked >>  8) & 0xFFu;
     uint i2 = (v.BoneIndicesPacked >> 16) & 0xFFu;
     uint i3 = (v.BoneIndicesPacked >> 24) & 0xFFu;
-    SkinBone_t b0 = SkeletalPrevBones[i0];
-    SkinBone_t b1 = SkeletalPrevBones[i1];
-    SkinBone_t b2 = SkeletalPrevBones[i2];
-    SkinBone_t b3 = SkeletalPrevBones[i3];
+    SkinBone_t b0 = SkeletalPrevBones[boneBase + i0];
+    SkinBone_t b1 = SkeletalPrevBones[boneBase + i1];
+    SkinBone_t b2 = SkeletalPrevBones[boneBase + i2];
+    SkinBone_t b3 = SkeletalPrevBones[boneBase + i3];
     float4 bp = float4(v.BindPosition, 1.0f);
     float3 P0 = float3(dot(b0.Row0, bp), dot(b0.Row1, bp), dot(b0.Row2, bp));
     float3 P1 = float3(dot(b1.Row0, bp), dot(b1.Row1, bp), dot(b1.Row2, bp));

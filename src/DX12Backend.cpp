@@ -2689,12 +2689,23 @@ std::shared_ptr<RTAS> DX12Backend::CreateBLASForSkeletalMesh(Mesh* mesh)
 	DX12Backend* owner = this;
 	D3D12RTAS* as = new D3D12RTAS;
 
+	// Phase A: if the mesh's SkeletalOutputVb is the unified buffer, every
+	// character's vertices are packed contiguously and this mesh owns the
+	// slice starting at SkeletalCharIndex * SkeletalVertexCount. BLAS
+	// VertexCount stays at the per-char vertex count; the StartAddress
+	// shifts by the char's slot.
+	const UINT64 vertexByteOffset =
+		static_cast<UINT64>(mesh->SkeletalCharIndex) *
+		static_cast<UINT64>(mesh->SkeletalVertexCount) *
+		static_cast<UINT64>(mesh->VertexStride);
+
 	D3D12_RAYTRACING_GEOMETRY_DESC geomDesc = {};
 	geomDesc.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
-	geomDesc.Triangles.VertexBuffer.StartAddress = mesh->SkeletalOutputVb->resource->GetGPUVirtualAddress();
+	geomDesc.Triangles.VertexBuffer.StartAddress =
+		mesh->SkeletalOutputVb->resource->GetGPUVirtualAddress() + vertexByteOffset;
 	geomDesc.Triangles.VertexBuffer.StrideInBytes = mesh->VertexStride;
 	geomDesc.Triangles.VertexFormat = DXGI_FORMAT_R32G32B32_FLOAT;
-	geomDesc.Triangles.VertexCount = mesh->SkeletalOutputVb->numVertices;
+	geomDesc.Triangles.VertexCount = mesh->SkeletalVertexCount;
 	geomDesc.Triangles.IndexBuffer = mesh->Ib->resource->GetGPUVirtualAddress();
 	geomDesc.Triangles.IndexFormat = ToDXGIFormat(mesh->IndexFormat);
 	geomDesc.Triangles.IndexCount = mesh->Ib->numIndices;
@@ -2790,12 +2801,20 @@ void DX12Backend::RefitBLAS(RTAS* rtas, Mesh* mesh)
 	if (!as || !as->Result || !as->Scratch || !mesh || !mesh->SkeletalOutputVb || !mesh->Ib)
 		return;
 
+	// Phase A: per-char vertex offset into the unified output VB. Must
+	// match what CreateBLASForSkeletalMesh used at build time.
+	const UINT64 vertexByteOffset =
+		static_cast<UINT64>(mesh->SkeletalCharIndex) *
+		static_cast<UINT64>(mesh->SkeletalVertexCount) *
+		static_cast<UINT64>(mesh->VertexStride);
+
 	D3D12_RAYTRACING_GEOMETRY_DESC geomDesc = {};
 	geomDesc.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
-	geomDesc.Triangles.VertexBuffer.StartAddress = mesh->SkeletalOutputVb->resource->GetGPUVirtualAddress();
+	geomDesc.Triangles.VertexBuffer.StartAddress =
+		mesh->SkeletalOutputVb->resource->GetGPUVirtualAddress() + vertexByteOffset;
 	geomDesc.Triangles.VertexBuffer.StrideInBytes = mesh->VertexStride;
 	geomDesc.Triangles.VertexFormat = DXGI_FORMAT_R32G32B32_FLOAT;
-	geomDesc.Triangles.VertexCount = mesh->SkeletalOutputVb->numVertices;
+	geomDesc.Triangles.VertexCount = mesh->SkeletalVertexCount;
 	geomDesc.Triangles.IndexBuffer = mesh->Ib->resource->GetGPUVirtualAddress();
 	geomDesc.Triangles.IndexFormat = ToDXGIFormat(mesh->IndexFormat);
 	geomDesc.Triangles.IndexCount = mesh->Ib->numIndices;

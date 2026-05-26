@@ -271,6 +271,13 @@ private:
 		UINT32 bTwoSidedLighting;
 		UINT32 bUnlitMaterial;
 		UINT32 SpineVertexBase = 0;
+		// Phase A: unified skeletal buffers. The skeletal GBuffer VS uses
+		// SkeletalCharIndex / SkeletalVertsPerChar / SkeletalBoneCount to
+		// locate this draw's slice inside the shared SBVs.
+		UINT32 SkeletalCharIndex = 0;
+		UINT32 SkeletalVertsPerChar = 0;
+		UINT32 SkeletalBoneCount = 0;
+		UINT32 _SkeletalPad = 0;
 	};
 
 	std::shared_ptr<GraphicsPipelineHandle> GBufferGraphicsPipeline;
@@ -295,10 +302,10 @@ private:
 	// shadow PSOs read through their normal IA input layout.
 	struct SkeletalSkinningConstant
 	{
-		UINT32 VertexCount = 0;
-		UINT32 BoneBase = 0;
-		UINT32 Pad0 = 0;
-		UINT32 Pad1 = 0;
+		UINT32 TotalVertexCount = 0;  // CharCount * VertsPerChar
+		UINT32 VertsPerChar = 0;
+		UINT32 BoneCount = 0;
+		UINT32 _Pad = 0;
 	};
 	shared_ptr<ComputePipelineStateObject> SkeletalSkinningPSO;
 
@@ -2419,6 +2426,23 @@ public:
 	// it uploads to SkeletalPrevBoneMatrices for the motion-vector VS.
 	float SkeletalPrevUpdateTimeSeconds = 0.0f;
 	bool bSkeletalPrevUpdateTimeValid = false;
+	// Phase A render-thread optimization: every test character points at
+	// these shared unified buffers so the compute path can drive all
+	// characters with a single Dispatch and the GBuffer pulls each
+	// character's slice via BaseVertexLocation + a per-draw char index.
+	// Owned by the spawn function; identical pointers are also stored on
+	// each Mesh's per-character SkeletalInputVertices / SkeletalBoneMatrices
+	// / SkeletalPrevBoneMatrices / SkeletalOutputVb so existing
+	// per-mesh code paths keep working.
+	std::shared_ptr<Buffer> SkeletalUnifiedInputVertices;
+	std::shared_ptr<Buffer> SkeletalUnifiedBoneMatrices;
+	std::shared_ptr<Buffer> SkeletalUnifiedPrevBoneMatrices;
+	std::shared_ptr<VertexBuffer> SkeletalUnifiedOutputVb;
+	std::shared_ptr<VertexBuffer> SkeletalUnifiedBindVb;
+	std::shared_ptr<IndexBuffer>  SkeletalUnifiedIb;
+	uint32_t SkeletalUnifiedCharCount = 0;
+	uint32_t SkeletalUnifiedVertsPerChar = 0;
+	uint32_t SkeletalUnifiedBoneCount = 0;
 	void DumpSkeletalFrameStatsToTrace();
 	bool BuildMobileShadowViewProjection(glm::mat4x4& lightViewProj);
 	bool GetSceneObjectWorldBounds(const SceneObject& object, glm::vec3& boundsMin, glm::vec3& boundsMax, glm::vec3& center, float& radius) const;
