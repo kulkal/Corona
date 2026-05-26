@@ -2843,6 +2843,14 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 			bCommandLineAutoDumpEnabled = false;
 			continue;
 		}
+		// Spine-style CPU skinning: skip the GPU compute pre-pass and
+		// skin every character on the CPU into a fresh UPLOAD VB each
+		// frame. Pairs with --skeletal-benchmark to compare paths.
+		if (arg == L"--skeletal-cpu-skinning" || arg == L"--skeletal-cpu")
+		{
+			bSkeletalUseCpuSkinning = true;
+			continue;
+		}
 		std::wstring skeletalScreenshotValue = ParseValueArg(arg, L"--skeletal-test-screenshot", L"-skeletal-test-screenshot", i);
 		if (!skeletalScreenshotValue.empty())
 		{

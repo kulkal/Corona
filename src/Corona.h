@@ -2451,8 +2451,39 @@ public:
 	uint32_t SkeletalUnifiedCharCount = 0;
 	uint32_t SkeletalUnifiedVertsPerChar = 0;
 	uint32_t SkeletalUnifiedBoneCount = 0;
+	// Phase S (CPU skinning): when bSkeletalUseCpuSkinning is true, the
+	// dispatch step skips the compute pre-pass and instead CPU-skins
+	// every character into an UPLOAD-heap VB created fresh each frame.
+	// `SkeletalUnifiedPaletteCpu` mirrors the packed bone palette that
+	// UpdateSkeletalTestCharacters computes so the render thread can
+	// read it without re-running the math.
+	bool bSkeletalUseCpuSkinning = false;
+	struct SkinBoneRowCpu { float r0[4]; float r1[4]; float r2[4]; };
+	std::vector<SkinBoneRowCpu> SkeletalUnifiedPaletteCpu;
+	std::vector<SkinBoneRowCpu> SkeletalUnifiedPalettePrevCpu;
+	std::shared_ptr<VertexBuffer> SkeletalUnifiedCpuSkinnedVb;
+	// Ring buffer of previous-frame CPU-skinned VBs so the D3D12 debug
+	// layer doesn't trip "object deleted while still in use" when we
+	// re-allocate per frame from the upload pool. Sized for the max
+	// number of frames in flight.
+	std::array<std::shared_ptr<VertexBuffer>, 4> SkeletalUnifiedCpuSkinnedVbRing;
+	uint32_t SkeletalUnifiedCpuSkinnedVbRingIndex = 0;
+	// Cached bind-pose data so the CPU skin pass doesn't need to read
+	// back from a GPU SBV. Filled at spawn from the same arrays that
+	// build SkeletalUnifiedInputVertices.
+	struct SkinInputVertexCpu
+	{
+		float BindPosition[3];
+		float BindNormal[3];
+		float BindTangent[3];
+		float UV[2];
+		uint32_t BoneIndicesPacked;
+		float BoneWeights[4];
+	};
+	std::vector<SkinInputVertexCpu> SkeletalUnifiedBindPoseCpu;
 	bool DrawSkeletalUnifiedCluster();
 	void UpdateSkeletalUnifiedInstanceTransforms();
+	void CpuSkinSkeletalCharactersForRenderWorld();
 	void DumpSkeletalFrameStatsToTrace();
 	bool BuildMobileShadowViewProjection(glm::mat4x4& lightViewProj);
 	bool GetSceneObjectWorldBounds(const SceneObject& object, glm::vec3& boundsMin, glm::vec3& boundsMax, glm::vec3& center, float& radius) const;
