@@ -2440,11 +2440,12 @@ public:
 	std::shared_ptr<VertexBuffer> SkeletalUnifiedOutputVb;
 	std::shared_ptr<VertexBuffer> SkeletalUnifiedBindVb;
 	std::shared_ptr<IndexBuffer>  SkeletalUnifiedIb;
-	// Phase B: per-instance world transform SBV used by the instanced
-	// GBuffer draw. Layout: CharCount mat4x4 entries indexed by
-	// SV_InstanceID inside SkeletalVSMain. Sized for SkeletalUnifiedCharCount
-	// and refreshed each frame from RenderWorld.SceneObjects (so animated
-	// instance transforms still work).
+	// Phase D (desktop-only cluster draw): per-instance world transform
+	// SBV indexed by SV_InstanceID in SkeletalVsInlineClusterVSMain.
+	// Stored as mat3x4 (SkinBone_t layout, 48 B per entry) to match the
+	// other unified palette buffers. Refreshed each frame from
+	// RenderWorld.SceneObjects. Mobile (GBufferMobile.hlsl) doesn't have
+	// the cluster shader entry so this SBV isn't bound there.
 	std::shared_ptr<Buffer> SkeletalUnifiedInstanceTransforms;
 	std::shared_ptr<Material> SkeletalUnifiedMaterial;
 	uint32_t SkeletalUnifiedIndexCount = 0;
@@ -2467,6 +2468,12 @@ public:
 	// runs the skinning math inline.
 	bool bSkeletalUseVsInlineSkinning = false;
 	std::shared_ptr<GraphicsPipelineHandle> SkeletalVsInlineGraphicsPipeline;
+	// Phase D: desktop-only cluster-draw variant of the VS inline PSO.
+	// One DrawIndexedInstanced(IndexCount, CharCount, ...) replaces N
+	// per-mesh draws. Mobile (GBufferMobile.hlsl) lacks the matching
+	// shader entry, so the SPIR-V build skips it and this stays null.
+	std::shared_ptr<GraphicsPipelineHandle> SkeletalVsInlineClusterGraphicsPipeline;
+	bool DrawSkeletalVsInlineClusterDesktop();
 	struct SkinBoneRowCpu { float r0[4]; float r1[4]; float r2[4]; };
 	std::vector<SkinBoneRowCpu> SkeletalUnifiedPaletteCpu;
 	std::vector<SkinBoneRowCpu> SkeletalUnifiedPalettePrevCpu;
@@ -2490,7 +2497,6 @@ public:
 		float BoneWeights[4];
 	};
 	std::vector<SkinInputVertexCpu> SkeletalUnifiedBindPoseCpu;
-	bool DrawSkeletalUnifiedCluster();
 	void UpdateSkeletalUnifiedInstanceTransforms();
 	void CpuSkinSkeletalCharactersForRenderWorld();
 	void DumpSkeletalFrameStatsToTrace();

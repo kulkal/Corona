@@ -322,6 +322,38 @@ void Corona::InitGBufferPass()
 	if (!SkeletalVsInlineGraphicsPipeline)
 		AppendCpuRuntimeTrace(L"[InitGBufferPass] failed to create Skeletal VS-inline GBuffer pipeline");
 
+	// Phase D (desktop only): instanced cluster PSO. One DrawIndexedInstanced
+	// draws every skeletal character; the VS reads its world matrix from
+	// SkeletalInstanceTransforms[SV_InstanceID]. Mobile shaders
+	// (GBufferMobile.hlsl) deliberately do not contain this entry — the
+	// Adreno SPIR-V compiler couldn't handle the SV_InstanceID +
+	// SkeletalInstanceTransforms variant. We try/catch so missing-entry
+	// failures on mobile leave the PSO null and the caller falls back.
+	if (!CORONA_PLATFORM_MOBILE)
+	{
+		GraphicsPipelineDesc vsClusterDesc = desc;
+		vsClusterDesc.VertexEntryPoint = "SkeletalVsInlineClusterVSMain";
+		vsClusterDesc.BufferBindings = {
+			{ "SkeletalInputs", 5 },
+			{ "SkeletalPrevBones", 6 },
+			{ "SkeletalCurrBones", 7 },
+			{ "SkeletalInstanceTransforms", 8 },
+		};
+		vsClusterDesc.VertexStride = 48;
+		vsClusterDesc.VertexElements = skeletalDesc.VertexElements;
+		try
+		{
+			SkeletalVsInlineClusterGraphicsPipeline = renderBackend->CreateGraphicsPipeline(vsClusterDesc);
+		}
+		catch (const std::exception& ex)
+		{
+			AppendCpuRuntimeTrace(L"[InitGBufferPass] SkeletalVsInlineCluster pipeline create exception");
+			(void)ex;
+		}
+		if (!SkeletalVsInlineClusterGraphicsPipeline)
+			AppendCpuRuntimeTrace(L"[InitGBufferPass] failed to create Skeletal VS-inline cluster GBuffer pipeline");
+	}
+
 	auto spineSkinningPSO = renderBackend->CreateComputePipelineStateObject();
 	if (spineSkinningPSO)
 	{
@@ -2734,14 +2766,37 @@ void Corona::GBufferPass()
 
 	PrepareGBufferCulling(static_cast<uint32_t>(RenderWorld.SceneObjects.size()));
 
-	// Phase B's instanced cluster draw was removed: Adreno failed to
-	// compile the SV_InstanceID + SkeletalInstanceTransforms variant of
-	// the skeletal VS. Every skeletal character now goes through the
-	// per-mesh DrawScene path below (each draw sets its own
-	// CB.SkeletalCharIndex / CB.WorldMatrix). The skip-this-object
-	// helper stays as a no-op so the call site doesn't change.
-	auto isSkeletalUnifiedObject = [](const std::shared_ptr<Scene>& /*scene*/)
+	// Phase D (desktop only): if the cluster PSO is live AND we're in the
+	// VS-inline skinning mode, draw all skeletal characters with a single
+	// DrawIndexedInstanced (SV_InstanceID picks the per-char world matrix
+	// from SkeletalInstanceTransforms). Mobile leaves
+	// SkeletalVsInlineClusterGraphicsPipeline null (Adreno couldn't
+	// compile the SV_InstanceID + SBV variant) and falls back to the
+	// per-mesh DrawScene path below.
+	const bool bClusterDrawActive =
+		bSkeletalUseVsInlineSkinning &&
+		SkeletalVsInlineClusterGraphicsPipeline &&
+		SkeletalUnifiedCharCount > 0;
+	if (bClusterDrawActive)
 	{
+		UpdateSkeletalUnifiedInstanceTransforms();
+		if (!DrawSkeletalVsInlineClusterDesktop())
+		{
+			// Fall back to per-mesh path this frame if the draw bailed.
+		}
+		renderBackend->BindGraphicsPipeline(GBufferGraphicsPipeline.get());
+		renderBackend->BindGraphicsPipelineSampler(GBufferGraphicsPipeline.get(), "samplerWrap", samplerWrap.get());
+	}
+
+	auto isSkeletalUnifiedObject = [bClusterDrawActive](const std::shared_ptr<Scene>& scene)
+	{
+		if (!bClusterDrawActive || !scene)
+			return false;
+		for (const auto& mesh : scene->meshes)
+		{
+			if (mesh && mesh->bSkeletalSkinned)
+				return true;
+		}
 		return false;
 	};
 

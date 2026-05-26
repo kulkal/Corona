@@ -91,6 +91,21 @@ StructuredBuffer<SkinBone_t>        SkeletalPrevBones : register(t6);
 // fall back to per-mesh draws that read WorldMatrix from the CB. The
 // VS still uses SkeletalCharIndex (from CB) to index Bones / PrevBones.
 StructuredBuffer<SkinBone_t>        SkeletalCurrBones : register(t7);
+// Phase D (desktop-only): per-instance world transform indexed by
+// SV_InstanceID for the cluster-draw variant. Stored as mat3x4 row
+// layout (last row implicit 0,0,0,1) so it's small + cheap to upload.
+// GBufferMobile.hlsl does NOT include this binding, so the mobile
+// SPIR-V build skips the cluster VS entry naturally.
+StructuredBuffer<SkinBone_t>        SkeletalInstanceTransforms : register(t8);
+
+float4x4 BuildWorldMatrixFromMat3x4Cluster(SkinBone_t m)
+{
+    return float4x4(
+        m.Row0.x, m.Row1.x, m.Row2.x, 0.0f,
+        m.Row0.y, m.Row1.y, m.Row2.y, 0.0f,
+        m.Row0.z, m.Row1.z, m.Row2.z, 0.0f,
+        m.Row0.w, m.Row1.w, m.Row2.w, 1.0f);
+}
 
 struct PSInput
 {
@@ -270,6 +285,74 @@ PSInput SkeletalVsInlineVSMain(VSInput input, uint vertexId : SV_VertexID)
     float3 PP2 = float3(dot(p2.Row0, bp), dot(p2.Row1, bp), dot(p2.Row2, bp));
     float3 PP3 = float3(dot(p3.Row0, bp), dot(p3.Row1, bp), dot(p3.Row2, bp));
     float3 prevObjPos = PP0 * w0 + PP1 * w1 + PP2 * w2 + PP3 * w3;
+    float4 prevWorldPos = mul(float4(prevObjPos, 1.0f), worldMatrix);
+    result.prevPosition = mul(prevWorldPos, PrevUnjitteredViewProjMat);
+
+    result.normal = normalize(mul(float4(currObjNormal, 0), worldMatrix));
+    result.tangent = normalize(mul(float4(currObjTangent, 0), worldMatrix));
+    result.uv = v.UV;
+    return result;
+}
+
+// Phase D — desktop-only cluster draw variant. One DrawIndexedInstanced
+// covers every character. SV_InstanceID picks the char's bone palette
+// slice + the world matrix from SkeletalInstanceTransforms[InstanceID].
+// Identical skinning math to SkeletalVsInlineVSMain.
+PSInput SkeletalVsInlineClusterVSMain(VSInput input, uint vertexId : SV_VertexID, uint instanceId : SV_InstanceID)
+{
+    PSInput result;
+
+    const uint charIndex = instanceId;
+    const uint boneBase = charIndex * SkeletalBoneCount;
+    float4x4 worldMatrix = BuildWorldMatrixFromMat3x4Cluster(SkeletalInstanceTransforms[charIndex]);
+
+    SkinInputVertex_t v = SkeletalInputs[vertexId];
+    uint i0 = (v.BoneIndicesPacked >>  0) & 0xFFu;
+    uint i1 = (v.BoneIndicesPacked >>  8) & 0xFFu;
+    uint i2 = (v.BoneIndicesPacked >> 16) & 0xFFu;
+    uint i3 = (v.BoneIndicesPacked >> 24) & 0xFFu;
+    float w0 = v.BoneWeights.x;
+    float w1 = v.BoneWeights.y;
+    float w2 = v.BoneWeights.z;
+    float w3 = v.BoneWeights.w;
+    float4 bp = float4(v.BindPosition, 1.0f);
+
+    SkinBone_t c0 = SkeletalCurrBones[boneBase + i0];
+    SkinBone_t c1 = SkeletalCurrBones[boneBase + i1];
+    SkinBone_t c2 = SkeletalCurrBones[boneBase + i2];
+    SkinBone_t c3 = SkeletalCurrBones[boneBase + i3];
+    float3 CP0 = float3(dot(c0.Row0, bp), dot(c0.Row1, bp), dot(c0.Row2, bp));
+    float3 CP1 = float3(dot(c1.Row0, bp), dot(c1.Row1, bp), dot(c1.Row2, bp));
+    float3 CP2 = float3(dot(c2.Row0, bp), dot(c2.Row1, bp), dot(c2.Row2, bp));
+    float3 CP3 = float3(dot(c3.Row0, bp), dot(c3.Row1, bp), dot(c3.Row2, bp));
+    float3 currObjPos = CP0*w0 + CP1*w1 + CP2*w2 + CP3*w3;
+
+    float3 N0 = float3(dot(c0.Row0.xyz, input.normal), dot(c0.Row1.xyz, input.normal), dot(c0.Row2.xyz, input.normal));
+    float3 N1 = float3(dot(c1.Row0.xyz, input.normal), dot(c1.Row1.xyz, input.normal), dot(c1.Row2.xyz, input.normal));
+    float3 N2 = float3(dot(c2.Row0.xyz, input.normal), dot(c2.Row1.xyz, input.normal), dot(c2.Row2.xyz, input.normal));
+    float3 N3 = float3(dot(c3.Row0.xyz, input.normal), dot(c3.Row1.xyz, input.normal), dot(c3.Row2.xyz, input.normal));
+    float3 currObjNormal = normalize(N0*w0 + N1*w1 + N2*w2 + N3*w3);
+
+    float3 T0 = float3(dot(c0.Row0.xyz, input.tangent), dot(c0.Row1.xyz, input.tangent), dot(c0.Row2.xyz, input.tangent));
+    float3 T1 = float3(dot(c1.Row0.xyz, input.tangent), dot(c1.Row1.xyz, input.tangent), dot(c1.Row2.xyz, input.tangent));
+    float3 T2 = float3(dot(c2.Row0.xyz, input.tangent), dot(c2.Row1.xyz, input.tangent), dot(c2.Row2.xyz, input.tangent));
+    float3 T3 = float3(dot(c3.Row0.xyz, input.tangent), dot(c3.Row1.xyz, input.tangent), dot(c3.Row2.xyz, input.tangent));
+    float3 currObjTangent = T0*w0 + T1*w1 + T2*w2 + T3*w3;
+    currObjTangent = normalize(currObjTangent - currObjNormal * dot(currObjNormal, currObjTangent));
+
+    float4 worldPos = mul(float4(currObjPos, 1.0f), worldMatrix);
+    result.position = mul(worldPos, ViewProjectionMatrix);
+    result.unjitteredPosition = mul(worldPos, UnjitteredViewProjMat);
+
+    SkinBone_t p0 = SkeletalPrevBones[boneBase + i0];
+    SkinBone_t p1 = SkeletalPrevBones[boneBase + i1];
+    SkinBone_t p2 = SkeletalPrevBones[boneBase + i2];
+    SkinBone_t p3 = SkeletalPrevBones[boneBase + i3];
+    float3 PP0 = float3(dot(p0.Row0, bp), dot(p0.Row1, bp), dot(p0.Row2, bp));
+    float3 PP1 = float3(dot(p1.Row0, bp), dot(p1.Row1, bp), dot(p1.Row2, bp));
+    float3 PP2 = float3(dot(p2.Row0, bp), dot(p2.Row1, bp), dot(p2.Row2, bp));
+    float3 PP3 = float3(dot(p3.Row0, bp), dot(p3.Row1, bp), dot(p3.Row2, bp));
+    float3 prevObjPos = PP0*w0 + PP1*w1 + PP2*w2 + PP3*w3;
     float4 prevWorldPos = mul(float4(prevObjPos, 1.0f), worldMatrix);
     result.prevPosition = mul(prevWorldPos, PrevUnjitteredViewProjMat);
 

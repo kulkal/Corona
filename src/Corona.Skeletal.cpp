@@ -806,11 +806,10 @@ void Corona::SpawnSkeletalTestCharacters()
 		static_cast<UINT32>(sizeof(StandardVertex) * vertices.size()) * SkeletalUnifiedCharCount,
 		sizeof(StandardVertex));
 
-	// Phase B: per-instance world transform SBV. Layout matches SkinBone_t
-	// in the HLSL (mat3x4 row layout, 48 B per entry) so Adreno's HLSL→
-	// SPIR-V path doesn't have to deal with StructuredBuffer<float4x4>
-	// (which it fails to compile). The last row of an affine instance
-	// transform is always (0, 0, 0, 1), so dropping it loses no info.
+	// Phase D (desktop cluster draw): per-instance world transform SBV
+	// indexed by SV_InstanceID in the cluster VS variant. Layout matches
+	// SkinBone_t (mat3x4 row, 48 B per entry) — affine-only, last row
+	// implicit (0, 0, 0, 1). Mobile doesn't bind this SBV.
 	{
 		const InitialBoneMatrix identity = {
 			{1.0f, 0.0f, 0.0f, 0.0f},
@@ -1404,35 +1403,24 @@ void Corona::UpdateSkeletalUnifiedInstanceTransforms()
 		static_cast<UINT32>(transforms.size() * sizeof(InstanceXform)));
 }
 
-bool Corona::DrawSkeletalUnifiedCluster()
+bool Corona::DrawSkeletalVsInlineClusterDesktop()
 {
-	// Pick the VB the GBuffer IA will read from based on mode:
-	//   - GPU compute (default): the compute-output skinned VB
-	//   - CPU "Spine-style":    the per-frame CPU-skinned UPLOAD VB
-	//   - VS inline (Path C):   the static bind-pose VB; the VS does
-	//                           the skinning itself
-	VertexBuffer* drawVb;
-	GraphicsPipelineHandle* pso;
-	if (bSkeletalUseVsInlineSkinning)
-	{
-		drawVb = SkeletalUnifiedBindVb.get();
-		pso = SkeletalVsInlineGraphicsPipeline ? SkeletalVsInlineGraphicsPipeline.get() : nullptr;
-	}
-	else if (bSkeletalUseCpuSkinning)
-	{
-		drawVb = SkeletalUnifiedCpuSkinnedVb.get();
-		pso = SkeletalGBufferGraphicsPipeline.get();
-	}
-	else
-	{
-		drawVb = SkeletalUnifiedOutputVb.get();
-		pso = SkeletalGBufferGraphicsPipeline.get();
-	}
-
+	// Desktop-only Phase D: a single DrawIndexedInstanced covers every
+	// skeletal character. The cluster VS (`SkeletalVsInlineClusterVSMain`)
+	// reads its per-character world matrix from
+	// `SkeletalInstanceTransforms[SV_InstanceID]` and skins the bind-pose
+	// vertex from the current/prev bone palettes -- no compute pre-pass
+	// and no per-mesh draw call.
+	//
+	// Mobile (Adreno) cannot compile the SV_InstanceID +
+	// SkeletalInstanceTransforms variant, so this PSO is null on mobile
+	// and callers fall back to the per-mesh VS-inline path.
+	GraphicsPipelineHandle* pso = SkeletalVsInlineClusterGraphicsPipeline
+		? SkeletalVsInlineClusterGraphicsPipeline.get() : nullptr;
 	if (!pso ||
-		!drawVb || !SkeletalUnifiedIb ||
+		!SkeletalUnifiedBindVb || !SkeletalUnifiedIb ||
 		!SkeletalUnifiedInputVertices || !SkeletalUnifiedPrevBoneMatrices ||
-		!SkeletalUnifiedInstanceTransforms ||
+		!SkeletalUnifiedBoneMatrices || !SkeletalUnifiedInstanceTransforms ||
 		!SkeletalUnifiedMaterial ||
 		SkeletalUnifiedCharCount == 0 || SkeletalUnifiedIndexCount == 0)
 	{
@@ -1443,19 +1431,16 @@ bool Corona::DrawSkeletalUnifiedCluster()
 	renderBackend->BindGraphicsPipelineSampler(pso, "samplerWrap", samplerWrap.get());
 	renderBackend->BindGraphicsPipelineBuffer(pso, "SkeletalInputs", SkeletalUnifiedInputVertices.get());
 	renderBackend->BindGraphicsPipelineBuffer(pso, "SkeletalPrevBones", SkeletalUnifiedPrevBoneMatrices.get());
+	renderBackend->BindGraphicsPipelineBuffer(pso, "SkeletalCurrBones", SkeletalUnifiedBoneMatrices.get());
 	renderBackend->BindGraphicsPipelineBuffer(pso, "SkeletalInstanceTransforms", SkeletalUnifiedInstanceTransforms.get());
-	if (bSkeletalUseVsInlineSkinning && SkeletalUnifiedBoneMatrices)
-	{
-		renderBackend->BindGraphicsPipelineBuffer(pso, "SkeletalCurrBones", SkeletalUnifiedBoneMatrices.get());
-	}
 
-	renderBackend->BindMeshBuffers(drawVb, SkeletalUnifiedIb.get());
+	renderBackend->BindMeshBuffers(SkeletalUnifiedBindVb.get(), SkeletalUnifiedIb.get());
 
 	GBufferConstantBuffer objCB = {};
 	objCB.ViewProjectionMatrix = glm::transpose(ViewProjMat);
 	objCB.PrevViewProjectionMatrix = glm::transpose(PrevViewProjMat);
-	// Per-instance transform comes from the SBV at SV_InstanceID. The
-	// CB WorldMatrix is unused in the instanced path (VS overrides).
+	// Per-instance transform comes from the SBV at SV_InstanceID;
+	// CB.WorldMatrix is unused by the cluster VS.
 	objCB.WorldMatrix = glm::mat4x4(1.0f);
 	objCB.UnjitteredViewProjMat = glm::transpose(UnjitteredViewProjMat);
 	objCB.PrevUnjitteredViewProjMat = glm::transpose(PrevUnjitteredViewProjMat);
@@ -1472,9 +1457,8 @@ bool Corona::DrawSkeletalUnifiedCluster()
 	objCB.bTwoSidedLighting = 0u;
 	objCB.bUnlitMaterial = 0u;
 	objCB.SpineVertexBase = 0u;
-	// Sentinel telling the VS to use SV_InstanceID for per-char indexing
-	// AND read the world matrix from SkeletalInstanceTransforms.
-	objCB.SkeletalCharIndex = 0xFFFFFFFFu;
+	// Cluster VS picks the char index from SV_InstanceID, not from CB.
+	objCB.SkeletalCharIndex = 0u;
 	objCB.SkeletalVertsPerChar = SkeletalUnifiedVertsPerChar;
 	objCB.SkeletalBoneCount = SkeletalUnifiedBoneCount;
 	renderBackend->SetGraphicsPipelineConstantData(pso, 0, &objCB, sizeof(objCB));
@@ -1488,9 +1472,6 @@ bool Corona::DrawSkeletalUnifiedCluster()
 	renderBackend->BindGraphicsPipelineTexture(pso, "RoughnessTex", rough);
 	renderBackend->BindGraphicsPipelineTexture(pso, "MetallicTex", metal);
 
-	// Single instanced draw covers every character. IB indices are local
-	// [0, VertsPerChar), so we use BaseVertexLocation=0 and let the VS
-	// fold SV_InstanceID into a unified output VB offset.
 	renderBackend->DrawIndexedInstanced(
 		SkeletalUnifiedIndexCount,
 		SkeletalUnifiedCharCount,
