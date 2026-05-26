@@ -264,6 +264,7 @@ void Corona::InitGBufferPass()
 	skeletalDesc.BufferBindings = {
 		{ "SkeletalInputs", 5 },
 		{ "SkeletalPrevBones", 6 },
+		{ "SkeletalInstanceTransforms", 7 },
 	};
 	SkeletalGBufferGraphicsPipeline = renderBackend->CreateGraphicsPipeline(skeletalDesc);
 	if (!SkeletalGBufferGraphicsPipeline)
@@ -2627,6 +2628,25 @@ void Corona::GBufferPass()
 
 	PrepareGBufferCulling(static_cast<uint32_t>(RenderWorld.SceneObjects.size()));
 
+	// Phase B: refresh per-instance transforms once and issue ONE instanced
+	// draw covering every unified skeletal character. The individual
+	// skeletal scene objects are skipped in the main loop below.
+	UpdateSkeletalUnifiedInstanceTransforms();
+	const bool bSkeletalClusterDrawn = DrawSkeletalUnifiedCluster();
+
+	auto isSkeletalUnifiedObject = [&](const std::shared_ptr<Scene>& scene)
+	{
+		if (!bSkeletalClusterDrawn || !scene)
+			return false;
+		for (const auto& mesh : scene->meshes)
+		{
+			if (mesh && mesh->bSkeletalSkinned &&
+				mesh->SkeletalOutputVb == SkeletalUnifiedOutputVb)
+				return true;
+		}
+		return false;
+	};
+
 	if (!bMultiThreadRendering)
 	{
 		auto sceneUsesSpineMesh = [](const std::shared_ptr<Scene>& scene)
@@ -2650,6 +2670,9 @@ void Corona::GBufferPass()
 
 				const bool bSpineObject = sceneUsesSpineMesh(object.ScenePtr);
 				if ((drawSpinePass == 0 && bSpineObject) || (drawSpinePass == 1 && !bSpineObject))
+					continue;
+
+				if (isSkeletalUnifiedObject(object.ScenePtr))
 					continue;
 
 				++GBufferLastTotalObjectCount;

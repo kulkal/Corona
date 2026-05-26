@@ -719,6 +719,25 @@ void Corona::SpawnSkeletalTestCharacters()
 		static_cast<UINT32>(sizeof(StandardVertex) * vertices.size()) * SkeletalUnifiedCharCount,
 		sizeof(StandardVertex));
 
+	// Phase B: per-instance world transform SBV. Initialized to identity;
+	// UpdateSkeletalUnifiedInstanceTransforms re-fills it each frame from
+	// scene-object transforms (so animated character placement still works).
+	{
+		std::vector<glm::mat4x4> identityTransforms(SkeletalUnifiedCharCount, glm::mat4x4(1.0f));
+		SkeletalUnifiedInstanceTransforms = renderBackend->CreateUploadStructuredBuffer(
+			SkeletalUnifiedCharCount,
+			static_cast<UINT32>(sizeof(glm::mat4x4)));
+		if (SkeletalUnifiedInstanceTransforms)
+		{
+			renderBackend->UpdateUploadStructuredBuffer(
+				SkeletalUnifiedInstanceTransforms.get(),
+				identityTransforms.data(),
+				static_cast<UINT32>(identityTransforms.size() * sizeof(glm::mat4x4)));
+		}
+	}
+	SkeletalUnifiedMaterial = material;
+	SkeletalUnifiedIndexCount = indexCount;
+
 	for (UINT32 instance = 0; instance < desiredCount; ++instance)
 	{
 		const int gx = static_cast<int>(instance) % gridSide;
@@ -1109,6 +1128,108 @@ void Corona::UpdateSkeletalTestCharacters(float timeSeconds)
 
 	SkeletalPrevUpdateTimeSeconds = timeSeconds;
 	bSkeletalPrevUpdateTimeValid = true;
+}
+
+void Corona::UpdateSkeletalUnifiedInstanceTransforms()
+{
+	if (!SkeletalUnifiedInstanceTransforms || SkeletalUnifiedCharCount == 0)
+		return;
+
+	// Build a contiguous array of world transforms ordered by
+	// SkeletalCharIndex, then memcpy into the persistent-mapped SBV.
+	std::vector<glm::mat4x4> transforms(SkeletalUnifiedCharCount, glm::mat4x4(1.0f));
+	for (const SceneObject& object : RenderWorld.SceneObjects)
+	{
+		if (!object.bVisible || !object.ScenePtr)
+			continue;
+		for (const std::shared_ptr<Mesh>& mesh : object.ScenePtr->meshes)
+		{
+			if (!mesh || !mesh->bSkeletalSkinned)
+				continue;
+			if (mesh->SkeletalOutputVb != SkeletalUnifiedOutputVb)
+				continue;
+			const uint32_t slot = mesh->SkeletalCharIndex;
+			if (slot < SkeletalUnifiedCharCount)
+			{
+				// VS expects column-major mul-from-the-left; mirror the
+				// transpose the per-mesh path used (glm::transpose).
+				transforms[slot] = glm::transpose(object.Transform * mesh->transform);
+			}
+		}
+	}
+	renderBackend->UpdateUploadStructuredBuffer(
+		SkeletalUnifiedInstanceTransforms.get(),
+		transforms.data(),
+		static_cast<UINT32>(transforms.size() * sizeof(glm::mat4x4)));
+}
+
+bool Corona::DrawSkeletalUnifiedCluster()
+{
+	if (!SkeletalGBufferGraphicsPipeline ||
+		!SkeletalUnifiedOutputVb || !SkeletalUnifiedIb ||
+		!SkeletalUnifiedInputVertices || !SkeletalUnifiedPrevBoneMatrices ||
+		!SkeletalUnifiedInstanceTransforms ||
+		!SkeletalUnifiedMaterial ||
+		SkeletalUnifiedCharCount == 0 || SkeletalUnifiedIndexCount == 0)
+	{
+		return false;
+	}
+
+	GraphicsPipelineHandle* pso = SkeletalGBufferGraphicsPipeline.get();
+	renderBackend->BindGraphicsPipeline(pso);
+	renderBackend->BindGraphicsPipelineSampler(pso, "samplerWrap", samplerWrap.get());
+	renderBackend->BindGraphicsPipelineBuffer(pso, "SkeletalInputs", SkeletalUnifiedInputVertices.get());
+	renderBackend->BindGraphicsPipelineBuffer(pso, "SkeletalPrevBones", SkeletalUnifiedPrevBoneMatrices.get());
+	renderBackend->BindGraphicsPipelineBuffer(pso, "SkeletalInstanceTransforms", SkeletalUnifiedInstanceTransforms.get());
+
+	renderBackend->BindMeshBuffers(SkeletalUnifiedOutputVb.get(), SkeletalUnifiedIb.get());
+
+	GBufferConstantBuffer objCB = {};
+	objCB.ViewProjectionMatrix = glm::transpose(ViewProjMat);
+	objCB.PrevViewProjectionMatrix = glm::transpose(PrevViewProjMat);
+	// Per-instance transform comes from the SBV at SV_InstanceID. The
+	// CB WorldMatrix is unused in the instanced path (VS overrides).
+	objCB.WorldMatrix = glm::mat4x4(1.0f);
+	objCB.UnjitteredViewProjMat = glm::transpose(UnjitteredViewProjMat);
+	objCB.PrevUnjitteredViewProjMat = glm::transpose(PrevUnjitteredViewProjMat);
+	objCB.ViewDir.x = RenderFrameCameraLookDirection.x;
+	objCB.ViewDir.y = RenderFrameCameraLookDirection.y;
+	objCB.ViewDir.z = RenderFrameCameraLookDirection.z;
+	objCB.ViewDir.w = 0.0f;
+	objCB.BaseColorFactor = SkeletalUnifiedMaterial->BaseColorFactor;
+	objCB.RTSize.x = GetRenderWidth();
+	objCB.RTSize.y = GetRenderHeight();
+	objCB.RougnessMetalic.x = 0.6f;
+	objCB.RougnessMetalic.y = 0.0f;
+	objCB.bOverrideRougnessMetallic = 1u;
+	objCB.bTwoSidedLighting = 0u;
+	objCB.bUnlitMaterial = 0u;
+	objCB.SpineVertexBase = 0u;
+	// Sentinel telling the VS to use SV_InstanceID for per-char indexing
+	// AND read the world matrix from SkeletalInstanceTransforms.
+	objCB.SkeletalCharIndex = 0xFFFFFFFFu;
+	objCB.SkeletalVertsPerChar = SkeletalUnifiedVertsPerChar;
+	objCB.SkeletalBoneCount = SkeletalUnifiedBoneCount;
+	renderBackend->SetGraphicsPipelineConstantData(pso, 0, &objCB, sizeof(objCB));
+
+	Texture* albedo = SkeletalUnifiedMaterial->Diffuse ? SkeletalUnifiedMaterial->Diffuse.get() : DefaultWhiteTex.get();
+	Texture* normal = SkeletalUnifiedMaterial->Normal ? SkeletalUnifiedMaterial->Normal.get() : DefaultNormalTex.get();
+	Texture* rough  = SkeletalUnifiedMaterial->Roughness ? SkeletalUnifiedMaterial->Roughness.get() : DefaultRougnessTex.get();
+	Texture* metal  = SkeletalUnifiedMaterial->Metallic ? SkeletalUnifiedMaterial->Metallic.get() : DefaultBlackTex.get();
+	renderBackend->BindGraphicsPipelineTexture(pso, "AlbedoTex", albedo);
+	renderBackend->BindGraphicsPipelineTexture(pso, "NormalTex", normal);
+	renderBackend->BindGraphicsPipelineTexture(pso, "RoughnessTex", rough);
+	renderBackend->BindGraphicsPipelineTexture(pso, "MetallicTex", metal);
+
+	// Single instanced draw covers every character. IB indices are local
+	// [0, VertsPerChar), so we use BaseVertexLocation=0 and let the VS
+	// fold SV_InstanceID into a unified output VB offset.
+	renderBackend->DrawIndexedInstanced(
+		SkeletalUnifiedIndexCount,
+		SkeletalUnifiedCharCount,
+		0, 0, 0);
+
+	return true;
 }
 
 void Corona::DumpSkeletalFrameStatsToTrace()

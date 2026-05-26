@@ -940,6 +940,11 @@ void DX12Backend::DrawIndexed(uint32_t indexCount, uint32_t startIndexLocation, 
 	GlobalCmdList->CmdList->DrawIndexedInstanced(indexCount, 1, startIndexLocation, baseVertexLocation, 0);
 }
 
+void DX12Backend::DrawIndexedInstanced(uint32_t indexCountPerInstance, uint32_t instanceCount, uint32_t startIndexLocation, int32_t baseVertexLocation, uint32_t startInstanceLocation)
+{
+	GlobalCmdList->CmdList->DrawIndexedInstanced(indexCountPerInstance, instanceCount, startIndexLocation, baseVertexLocation, startInstanceLocation);
+}
+
 void DX12Backend::Dispatch(uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ)
 {
 	GlobalCmdList->CmdList->Dispatch(groupCountX, groupCountY, groupCountZ);

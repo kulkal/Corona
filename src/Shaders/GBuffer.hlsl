@@ -85,6 +85,10 @@ struct SkinBone_t
 
 StructuredBuffer<SkinInputVertex_t> SkeletalInputs    : register(t5);
 StructuredBuffer<SkinBone_t>        SkeletalPrevBones : register(t6);
+// Phase B: per-instance world transform indexed by SV_InstanceID. The
+// instanced GBuffer draw passes SkeletalCharIndex = 0xFFFFFFFF to tell the
+// VS to use SV_InstanceID for the char slot AND read its WorldMatrix here.
+StructuredBuffer<float4x4>          SkeletalInstanceTransforms : register(t7);
 
 struct PSInput
 {
@@ -130,19 +134,35 @@ PSInput SpineVSMain(uint vertexId : SV_VertexID)
 // derived by re-skinning the bind-pose vertex with the *previous* frame's
 // bone palette, which sits in SkeletalPrevBones. This keeps the BLAS
 // source VB stable (no ping-pong) and stays accurate per-vertex.
-PSInput SkeletalVSMain(VSInput input, uint vertexId : SV_VertexID)
+PSInput SkeletalVSMain(VSInput input, uint vertexId : SV_VertexID, uint instanceId : SV_InstanceID)
 {
     PSInput result;
-    float4 worldPos = mul(float4(input.position, 1.0f), WorldMatrix);
+
+    // Phase B: SkeletalCharIndex == 0xFFFFFFFF tells the VS this draw is
+    // the unified instanced path. Use SV_InstanceID for the char slot
+    // and read the world matrix from SkeletalInstanceTransforms[InstanceID].
+    // Per-character (legacy) path keeps reading WorldMatrix from the CB.
+    uint charIndex = SkeletalCharIndex;
+    float4x4 worldMatrix = WorldMatrix;
+    if (SkeletalCharIndex == 0xFFFFFFFFu)
+    {
+        charIndex = instanceId;
+        worldMatrix = SkeletalInstanceTransforms[instanceId];
+    }
+
+    float4 worldPos = mul(float4(input.position, 1.0f), worldMatrix);
     result.position = mul(worldPos, ViewProjectionMatrix);
     result.unjitteredPosition = mul(worldPos, UnjitteredViewProjMat);
 
     // Phase A: SkeletalInputs holds a single shared bind-pose copy
-    // (VertsPerChar entries). With BaseVertexLocation = charIdx*VertsPerChar
-    // on the per-character draw, SV_VertexID arrives offset; subtract the
-    // char's base to land on the local slot.
-    uint localVertex = vertexId - SkeletalCharIndex * SkeletalVertsPerChar;
-    uint boneBase = SkeletalCharIndex * SkeletalBoneCount;
+    // (VertsPerChar entries). For the legacy per-mesh path the per-draw
+    // BaseVertexLocation = charIdx*VertsPerChar offsets SV_VertexID; for
+    // the instanced path BaseVertex = 0 and IB values are local, so
+    // SV_VertexID is already the local vertex.
+    uint localVertex = (SkeletalCharIndex == 0xFFFFFFFFu)
+        ? vertexId
+        : vertexId - SkeletalCharIndex * SkeletalVertsPerChar;
+    uint boneBase = charIndex * SkeletalBoneCount;
 
     // Re-skin from bind position using prev bones for this character's slice.
     SkinInputVertex_t v = SkeletalInputs[localVertex];
@@ -164,11 +184,11 @@ PSInput SkeletalVSMain(VSInput input, uint vertexId : SV_VertexID)
         P1 * v.BoneWeights.y +
         P2 * v.BoneWeights.z +
         P3 * v.BoneWeights.w;
-    float4 prevWorldPos = mul(float4(prevObjPos, 1.0f), WorldMatrix);
+    float4 prevWorldPos = mul(float4(prevObjPos, 1.0f), worldMatrix);
     result.prevPosition = mul(prevWorldPos, PrevUnjitteredViewProjMat);
 
-    result.normal = normalize(mul(float4(input.normal, 0), WorldMatrix));
-    result.tangent = normalize(mul(float4(input.tangent, 0), WorldMatrix));
+    result.normal = normalize(mul(float4(input.normal, 0), worldMatrix));
+    result.tangent = normalize(mul(float4(input.tangent, 0), worldMatrix));
     result.uv = input.uv;
     return result;
 }

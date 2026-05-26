@@ -5244,6 +5244,25 @@ void VulkanBackend::DrawIndexed(uint32_t indexCount, uint32_t startIndexLocation
 	vkCmdDrawIndexed(ActiveCommandBuffer, indexCount, 1, startIndexLocation, baseVertexLocation, 0);
 #endif
 }
+void VulkanBackend::DrawIndexedInstanced(uint32_t indexCountPerInstance, uint32_t instanceCount, uint32_t startIndexLocation, int32_t baseVertexLocation, uint32_t startInstanceLocation)
+{
+#if !CORONA_HAS_VULKAN
+	(void)indexCountPerInstance; (void)instanceCount; (void)startIndexLocation; (void)baseVertexLocation; (void)startInstanceLocation; ThrowNotImplemented(__FUNCTION__);
+#else
+	if (!bRenderPassActive)
+		return;
+	auto* pipeline = dynamic_cast<VulkanGraphicsPipelineHandle*>(BoundGraphicsPipeline);
+	if (pipeline)
+		BindGraphicsPipelineForDraw(pipeline);
+	else
+		return;
+	if (!bViewportBound)
+		SetViewportAndScissor(
+			PendingViewportWidth > 0 ? PendingViewportWidth : SwapchainExtent.width,
+			PendingViewportHeight > 0 ? PendingViewportHeight : SwapchainExtent.height);
+	vkCmdDrawIndexed(ActiveCommandBuffer, indexCountPerInstance, instanceCount, startIndexLocation, baseVertexLocation, startInstanceLocation);
+#endif
+}
 void VulkanBackend::Dispatch(uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ)
 {
 #if !CORONA_HAS_VULKAN

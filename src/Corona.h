@@ -2440,9 +2440,19 @@ public:
 	std::shared_ptr<VertexBuffer> SkeletalUnifiedOutputVb;
 	std::shared_ptr<VertexBuffer> SkeletalUnifiedBindVb;
 	std::shared_ptr<IndexBuffer>  SkeletalUnifiedIb;
+	// Phase B: per-instance world transform SBV used by the instanced
+	// GBuffer draw. Layout: CharCount mat4x4 entries indexed by
+	// SV_InstanceID inside SkeletalVSMain. Sized for SkeletalUnifiedCharCount
+	// and refreshed each frame from RenderWorld.SceneObjects (so animated
+	// instance transforms still work).
+	std::shared_ptr<Buffer> SkeletalUnifiedInstanceTransforms;
+	std::shared_ptr<Material> SkeletalUnifiedMaterial;
+	uint32_t SkeletalUnifiedIndexCount = 0;
 	uint32_t SkeletalUnifiedCharCount = 0;
 	uint32_t SkeletalUnifiedVertsPerChar = 0;
 	uint32_t SkeletalUnifiedBoneCount = 0;
+	bool DrawSkeletalUnifiedCluster();
+	void UpdateSkeletalUnifiedInstanceTransforms();
 	void DumpSkeletalFrameStatsToTrace();
 	bool BuildMobileShadowViewProjection(glm::mat4x4& lightViewProj);
 	bool GetSceneObjectWorldBounds(const SceneObject& object, glm::vec3& boundsMin, glm::vec3& boundsMax, glm::vec3& center, float& radius) const;

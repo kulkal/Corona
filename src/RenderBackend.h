@@ -340,6 +340,7 @@ public:
 	virtual void DrawFullscreenQuad(VertexBuffer* vertexBuffer) = 0;
 	virtual void BindMeshBuffers(VertexBuffer* vertexBuffer, IndexBuffer* indexBuffer) = 0;
 	virtual void DrawIndexed(uint32_t indexCount, uint32_t startIndexLocation, int32_t baseVertexLocation) = 0;
+	virtual void DrawIndexedInstanced(uint32_t indexCountPerInstance, uint32_t instanceCount, uint32_t startIndexLocation, int32_t baseVertexLocation, uint32_t startInstanceLocation) = 0;
 	virtual void Dispatch(uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ) = 0;
 	virtual void ClearTextureUAVFloat(Texture* texture, const float clearColor[4]) = 0;
 	virtual void ExecuteCurrentCommandList() = 0;
