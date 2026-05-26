@@ -317,9 +317,53 @@ namespace
 			static_cast<UINT>(height),
 			L"Corona Android");
 
-		wchar_t arg0[] = L"Corona";
-		wchar_t* argv[] = { arg0 };
-		gCoronaApp->ParseCommandLineArgs(argv, static_cast<int>(_countof(argv)));
+		// Optional benchmark args injection. If
+		// /data/local/tmp/corona_args.txt exists, tokenize its
+		// contents on whitespace and pass each token to
+		// ParseCommandLineArgs alongside the synthetic argv[0].
+		// Writable via `adb push args.txt /data/local/tmp/corona_args.txt`
+		// without root, readable by the app process in debug builds.
+		std::vector<std::wstring> argWideStorage;
+		std::vector<wchar_t*> argvVec;
+		argWideStorage.emplace_back(L"Corona");
+		{
+			std::ifstream argFile("/data/local/tmp/corona_args.txt");
+			if (argFile.good())
+			{
+				std::string narrow((std::istreambuf_iterator<char>(argFile)),
+					std::istreambuf_iterator<char>());
+				size_t pos = 0;
+				while (pos < narrow.size())
+				{
+					while (pos < narrow.size() &&
+						(narrow[pos] == ' ' || narrow[pos] == '\t' ||
+							narrow[pos] == '\r' || narrow[pos] == '\n'))
+					{
+						++pos;
+					}
+					const size_t tokenStart = pos;
+					while (pos < narrow.size() &&
+						narrow[pos] != ' ' && narrow[pos] != '\t' &&
+						narrow[pos] != '\r' && narrow[pos] != '\n')
+					{
+						++pos;
+					}
+					if (pos > tokenStart)
+					{
+						const std::string token = narrow.substr(tokenStart, pos - tokenStart);
+						std::wstring wide(token.begin(), token.end());
+						argWideStorage.push_back(std::move(wide));
+					}
+				}
+				__android_log_print(ANDROID_LOG_INFO, kLogTag,
+					"corona_args.txt parsed %zu tokens",
+					argWideStorage.size() - 1);
+			}
+		}
+		argvVec.reserve(argWideStorage.size());
+		for (auto& a : argWideStorage)
+			argvVec.push_back(a.data());
+		gCoronaApp->ParseCommandLineArgs(argvVec.data(), static_cast<int>(argvVec.size()));
 		const double targetFrameRate = gCoronaApp->GetTargetFrameRateLimitHz();
 		RequestPreferredFrameRate(app, targetFrameRate > 0.0 ? static_cast<float>(targetFrameRate) : 120.0f);
 		gCoronaApp->OnInit();
