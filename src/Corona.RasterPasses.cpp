@@ -266,7 +266,15 @@ void Corona::InitGBufferPass()
 		{ "SkeletalPrevBones", 6 },
 		{ "SkeletalInstanceTransforms", 7 },
 	};
-	SkeletalGBufferGraphicsPipeline = renderBackend->CreateGraphicsPipeline(skeletalDesc);
+	try
+	{
+		SkeletalGBufferGraphicsPipeline = renderBackend->CreateGraphicsPipeline(skeletalDesc);
+	}
+	catch (const std::exception& ex)
+	{
+		AppendCpuRuntimeTrace(L"[InitGBufferPass] SkeletalGBuffer pipeline create exception");
+		(void)ex;
+	}
 	if (!SkeletalGBufferGraphicsPipeline)
 		AppendCpuRuntimeTrace(L"[InitGBufferPass] failed to create Skeletal GBuffer pipeline");
 
@@ -280,7 +288,15 @@ void Corona::InitGBufferPass()
 		{ "SkeletalInstanceTransforms", 7 },
 		{ "SkeletalCurrBones", 8 },
 	};
-	SkeletalVsInlineGraphicsPipeline = renderBackend->CreateGraphicsPipeline(vsInlineDesc);
+	try
+	{
+		SkeletalVsInlineGraphicsPipeline = renderBackend->CreateGraphicsPipeline(vsInlineDesc);
+	}
+	catch (const std::exception& ex)
+	{
+		AppendCpuRuntimeTrace(L"[InitGBufferPass] SkeletalVsInline pipeline create exception");
+		(void)ex;
+	}
 	if (!SkeletalVsInlineGraphicsPipeline)
 		AppendCpuRuntimeTrace(L"[InitGBufferPass] failed to create Skeletal VS-inline GBuffer pipeline");
 

@@ -797,20 +797,27 @@ void Corona::SpawnSkeletalTestCharacters()
 		static_cast<UINT32>(sizeof(StandardVertex) * vertices.size()) * SkeletalUnifiedCharCount,
 		sizeof(StandardVertex));
 
-	// Phase B: per-instance world transform SBV. Initialized to identity;
-	// UpdateSkeletalUnifiedInstanceTransforms re-fills it each frame from
-	// scene-object transforms (so animated character placement still works).
+	// Phase B: per-instance world transform SBV. Layout matches SkinBone_t
+	// in the HLSL (mat3x4 row layout, 48 B per entry) so Adreno's HLSL→
+	// SPIR-V path doesn't have to deal with StructuredBuffer<float4x4>
+	// (which it fails to compile). The last row of an affine instance
+	// transform is always (0, 0, 0, 1), so dropping it loses no info.
 	{
-		std::vector<glm::mat4x4> identityTransforms(SkeletalUnifiedCharCount, glm::mat4x4(1.0f));
+		const InitialBoneMatrix identity = {
+			{1.0f, 0.0f, 0.0f, 0.0f},
+			{0.0f, 1.0f, 0.0f, 0.0f},
+			{0.0f, 0.0f, 1.0f, 0.0f}
+		};
+		std::vector<InitialBoneMatrix> identityTransforms(SkeletalUnifiedCharCount, identity);
 		SkeletalUnifiedInstanceTransforms = renderBackend->CreateUploadStructuredBuffer(
 			SkeletalUnifiedCharCount,
-			static_cast<UINT32>(sizeof(glm::mat4x4)));
+			static_cast<UINT32>(sizeof(InitialBoneMatrix)));
 		if (SkeletalUnifiedInstanceTransforms)
 		{
 			renderBackend->UpdateUploadStructuredBuffer(
 				SkeletalUnifiedInstanceTransforms.get(),
 				identityTransforms.data(),
-				static_cast<UINT32>(identityTransforms.size() * sizeof(glm::mat4x4)));
+				static_cast<UINT32>(identityTransforms.size() * sizeof(InitialBoneMatrix)));
 		}
 	}
 	SkeletalUnifiedMaterial = material;
@@ -1344,9 +1351,21 @@ void Corona::UpdateSkeletalUnifiedInstanceTransforms()
 	if (!SkeletalUnifiedInstanceTransforms || SkeletalUnifiedCharCount == 0)
 		return;
 
-	// Build a contiguous array of world transforms ordered by
-	// SkeletalCharIndex, then memcpy into the persistent-mapped SBV.
-	std::vector<glm::mat4x4> transforms(SkeletalUnifiedCharCount, glm::mat4x4(1.0f));
+	// mat3x4 packing for the per-instance world transform. The HLSL VS
+	// rebuilds a 4x4 matrix from these 3 rows (last row is implicit
+	// 0, 0, 0, 1). Matches the SkinBone_t layout that
+	// SkeletalUnifiedBoneMatrices uses, which Adreno's compiler accepts
+	// even though it rejects StructuredBuffer<float4x4>.
+	struct InstanceXform { float r0[4]; float r1[4]; float r2[4]; };
+	static_assert(sizeof(InstanceXform) == 48, "Instance xform layout drift");
+	std::vector<InstanceXform> transforms(SkeletalUnifiedCharCount);
+	const InstanceXform identity = {
+		{1.0f, 0.0f, 0.0f, 0.0f},
+		{0.0f, 1.0f, 0.0f, 0.0f},
+		{0.0f, 0.0f, 1.0f, 0.0f}
+	};
+	for (auto& m : transforms) m = identity;
+
 	for (const SceneObject& object : RenderWorld.SceneObjects)
 	{
 		if (!object.bVisible || !object.ScenePtr)
@@ -1358,18 +1377,22 @@ void Corona::UpdateSkeletalUnifiedInstanceTransforms()
 			if (mesh->SkeletalOutputVb != SkeletalUnifiedOutputVb)
 				continue;
 			const uint32_t slot = mesh->SkeletalCharIndex;
-			if (slot < SkeletalUnifiedCharCount)
-			{
-				// VS expects column-major mul-from-the-left; mirror the
-				// transpose the per-mesh path used (glm::transpose).
-				transforms[slot] = glm::transpose(object.Transform * mesh->transform);
-			}
+			if (slot >= SkeletalUnifiedCharCount) continue;
+
+			const glm::mat4 world = object.Transform * mesh->transform;
+			// Transpose to row layout (mul-from-the-left in HLSL),
+			// then drop the implicit last row.
+			const glm::mat4 t = glm::transpose(world);
+			InstanceXform& dst = transforms[slot];
+			dst.r0[0] = t[0][0]; dst.r0[1] = t[0][1]; dst.r0[2] = t[0][2]; dst.r0[3] = t[0][3];
+			dst.r1[0] = t[1][0]; dst.r1[1] = t[1][1]; dst.r1[2] = t[1][2]; dst.r1[3] = t[1][3];
+			dst.r2[0] = t[2][0]; dst.r2[1] = t[2][1]; dst.r2[2] = t[2][2]; dst.r2[3] = t[2][3];
 		}
 	}
 	renderBackend->UpdateUploadStructuredBuffer(
 		SkeletalUnifiedInstanceTransforms.get(),
 		transforms.data(),
-		static_cast<UINT32>(transforms.size() * sizeof(glm::mat4x4)));
+		static_cast<UINT32>(transforms.size() * sizeof(InstanceXform)));
 }
 
 bool Corona::DrawSkeletalUnifiedCluster()

@@ -88,11 +88,27 @@ StructuredBuffer<SkinBone_t>        SkeletalPrevBones : register(t6);
 // Phase B: per-instance world transform indexed by SV_InstanceID. The
 // instanced GBuffer draw passes SkeletalCharIndex = 0xFFFFFFFF to tell the
 // VS to use SV_InstanceID for the char slot AND read its WorldMatrix here.
-StructuredBuffer<float4x4>          SkeletalInstanceTransforms : register(t7);
+// Stored as mat3x4 (SkinBone_t layout) — affine-only, last row is
+// implicit (0, 0, 0, 1). Adreno's HLSL→SPIR-V path struggles with
+// StructuredBuffer<float4x4> directly, so we reuse the bone layout.
+StructuredBuffer<SkinBone_t>        SkeletalInstanceTransforms : register(t7);
 // Path C (VS inline skinning): current-frame bone palette. Only the
 // inline-VS variant binds this; the compute pre-pass variant leaves it
 // unbound because the skinning has already been baked into the IA VB.
 StructuredBuffer<SkinBone_t>        SkeletalCurrBones : register(t8);
+
+// Reconstruct a column-major mul-from-the-left float4x4 from a
+// SkinBone_t mat3x4 row layout. The C++ side stored each instance
+// transform via glm::transpose, so the bone rows already contain
+// transposed columns; rebuild the matrix accordingly.
+float4x4 BuildWorldMatrixFromMat3x4(SkinBone_t m)
+{
+    return float4x4(
+        m.Row0.x, m.Row1.x, m.Row2.x, 0.0f,
+        m.Row0.y, m.Row1.y, m.Row2.y, 0.0f,
+        m.Row0.z, m.Row1.z, m.Row2.z, 0.0f,
+        m.Row0.w, m.Row1.w, m.Row2.w, 1.0f);
+}
 
 struct PSInput
 {
@@ -151,7 +167,7 @@ PSInput SkeletalVSMain(VSInput input, uint vertexId : SV_VertexID, uint instance
     if (SkeletalCharIndex == 0xFFFFFFFFu)
     {
         charIndex = instanceId;
-        worldMatrix = SkeletalInstanceTransforms[instanceId];
+        worldMatrix = BuildWorldMatrixFromMat3x4(SkeletalInstanceTransforms[instanceId]);
     }
 
     float4 worldPos = mul(float4(input.position, 1.0f), worldMatrix);
@@ -210,7 +226,7 @@ PSInput SkeletalVsInlineVSMain(VSInput input, uint vertexId : SV_VertexID, uint 
 
     const uint charIndex = instanceId;
     const uint boneBase = charIndex * SkeletalBoneCount;
-    float4x4 worldMatrix = SkeletalInstanceTransforms[charIndex];
+    float4x4 worldMatrix = BuildWorldMatrixFromMat3x4(SkeletalInstanceTransforms[charIndex]);
 
     SkinInputVertex_t v = SkeletalInputs[vertexId];
     uint i0 = (v.BoneIndicesPacked >>  0) & 0xFFu;
