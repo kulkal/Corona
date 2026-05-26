@@ -2582,7 +2582,9 @@ void Corona::GBufferPass()
 
 	renderBackend->BindDefaultDescriptorHeaps();
 	DispatchSpineSkinningForRenderWorld();
+	BeginGpuPassTiming(EGpuPass::SkeletalSkinning);
 	DispatchSkeletalSkinningForRenderWorld();
+	EndGpuPassTiming(EGpuPass::SkeletalSkinning);
 
 	renderBackend->SetViewportAndScissor(GetRenderWidth(), GetRenderHeight());
 	if (bMobileDirectGBuffer)

@@ -815,8 +815,9 @@ namespace
 		return mode == Corona::EAntiAliasingMode::DLSS_SR || mode == Corona::EAntiAliasingMode::DLSS_RR;
 	}
 
-	constexpr std::array<const char*, 17> kGpuPassNames = {
+	constexpr std::array<const char*, 18> kGpuPassNames = {
 		"Frame Total",
+		"Skeletal Skinning",
 		"GBuffer",
 		"RT Shadow",
 		"RT AO",
@@ -10723,7 +10724,9 @@ void Corona::OnRender()
 		// the hybrid path) need an explicit call here. Otherwise the BLAS
 		// stays at bind pose and the character appears frozen.
 		renderBackend->BindDefaultDescriptorHeaps();
+		BeginGpuPassTiming(EGpuPass::SkeletalSkinning);
 		DispatchSkeletalSkinningForRenderWorld();
+		EndGpuPassTiming(EGpuPass::SkeletalSkinning);
 
 		// Full path tracing
 		BeginGpuPassTiming(EGpuPass::PathTracing);

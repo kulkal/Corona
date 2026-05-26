@@ -121,6 +121,7 @@ private:
 	enum class EGpuPass : UINT32
 	{
 		Frame = 0,
+		SkeletalSkinning,
 		GBuffer,
 		RaytraceShadow,
 		RaytraceAO,
