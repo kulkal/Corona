@@ -37,7 +37,9 @@ CBUFFER_BINDING_BEGIN(GBufferConstantBuffer, 0)
     uint SkeletalCharIndex;
     uint SkeletalVertsPerChar;
     uint SkeletalBoneCount;
-    uint _SkeletalPad;
+    // Spine VS-inline source scale. Layout must stay in sync with the
+    // GBufferConstantBuffer in GBuffer.hlsl / Corona.h.
+    float SpineSourceScale;
 } CBUFFER_BINDING_END;
 
 struct SkinInputVertex_t
@@ -82,6 +84,34 @@ struct SpineSkinnedVertex
 
 StructuredBuffer<SpineSkinnedVertex> SpineVertices : register(t4);
 
+// Mobile Spine VS-inline skinning (Adreno). Layouts mirror the host
+// SpineSkinInputVertex / SpineSkinInfluence / SpineSkinBone structs
+// from Corona.Spine.cpp and the desktop bindings in GBuffer.hlsl.
+// Spine compute skinning stays disabled on mobile (Adreno stalls);
+// this path runs the influence-weighted skin in the VS instead.
+struct SpineSkinInputVertex_t
+{
+    float2 uv;
+    float  localZ;
+    uint   influenceOffset;
+    uint   influenceCount;
+    uint   _pad;
+};
+struct SpineSkinInfluence_t
+{
+    float2 localPosition;
+    uint   boneIndex;
+    float  weight;
+};
+struct SpineSkinBone_t
+{
+    float4 xformX;
+    float4 xformY;
+};
+StructuredBuffer<SpineSkinInputVertex_t> SpineVsInlineInputVertices : register(t9);
+StructuredBuffer<SpineSkinInfluence_t>   SpineVsInlineInfluences    : register(t10);
+StructuredBuffer<SpineSkinBone_t>        SpineVsInlineBones         : register(t11);
+
 struct PSInput
 {
     float4 position : SV_POSITION;
@@ -114,6 +144,32 @@ PSInput SpineVSMain(uint vertexId : SV_VertexID)
 {
     SpineSkinnedVertex input = SpineVertices[SpineVertexBase + vertexId];
     return BuildGBufferVertex(input.position, input.normal, input.uv, input.tangent);
+}
+
+// Mobile Spine VS-inline skinning: same math as SpineSkinningCS::SkinMain
+// but inlined into the VS. Mobile keeps Spine compute disabled, so this
+// is the only GPU-skin path available there.
+PSInput SpineVsInlineVSMain(uint vertexId : SV_VertexID)
+{
+    SpineSkinInputVertex_t v = SpineVsInlineInputVertices[vertexId];
+
+    float2 worldPosition = float2(0.0f, 0.0f);
+    [loop]
+    for (uint i = 0; i < v.influenceCount; ++i)
+    {
+        SpineSkinInfluence_t inf = SpineVsInlineInfluences[v.influenceOffset + i];
+        SpineSkinBone_t bone = SpineVsInlineBones[inf.boneIndex];
+        const float2 lp = inf.localPosition;
+        const float2 skinned = float2(
+            lp.x * bone.xformX.x + lp.y * bone.xformX.y + bone.xformX.z,
+            lp.x * bone.xformY.x + lp.y * bone.xformY.y + bone.xformY.z);
+        worldPosition += skinned * inf.weight;
+    }
+
+    const float3 position = float3(worldPosition * SpineSourceScale, v.localZ * SpineSourceScale);
+    const float3 normal   = float3(0.0f, 0.0f, 1.0f);
+    const float3 tangent  = float3(1.0f, 0.0f, 0.0f);
+    return BuildGBufferVertex(position, normal, v.uv, tangent);
 }
 
 // Skeletal motion-vector path. IA reads either the compute-skinned VB

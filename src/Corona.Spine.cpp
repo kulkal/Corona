@@ -1059,11 +1059,10 @@ Corona::ScriptSceneHandle Corona::CreateSpineSceneForScript(
 #if CORONA_PLATFORM_MOBILE
 	++SpineStats.RuntimeGpuUploadStalls;
 #endif
-	// Adreno Vulkan stalls hard when running the Spine compute skinning
-	// pipeline. On mobile we skip the GPU skinning infrastructure entirely
-	// and draw the CPU-skinned mesh->Vb through the standard vertex-
-	// attribute path. Desktop keeps the compute path for performance.
-#if !CORONA_PLATFORM_MOBILE
+	// Adreno Vulkan stalls hard when running the Spine compute *pre-pass*,
+	// so mobile only uploads the inputs the VS-inline path needs and
+	// leaves GpuSpineSkinnedVertices null. Desktop still creates the
+	// compute output buffer for the compute-skinning fast path.
 	if (bEnableGpuSpineSkinning &&
 		sampleMesh.SkinVertices.size() == sampleMesh.Vertices.size() &&
 		!sampleMesh.SkinVertices.empty() &&
@@ -1092,6 +1091,7 @@ Corona::ScriptSceneHandle Corona::CreateSpineSceneForScript(
 			true,
 			sampleMesh.SkinBones.data(),
 			EBufferShape::Structured });
+#if !CORONA_PLATFORM_MOBILE
 		mesh->GpuSpineSkinnedVertices = renderBackend->CreateBuffer({
 			static_cast<uint32_t>(sampleMesh.Vertices.size()),
 			static_cast<uint32_t>(sizeof(SpineSampleVertex)),
@@ -1099,16 +1099,18 @@ Corona::ScriptSceneHandle Corona::CreateSpineSceneForScript(
 			true,
 			sampleMesh.Vertices.data(),
 			EBufferShape::Structured });
+#endif
 		mesh->bGpuSpineSkinned =
 			mesh->GpuSpineInputVertices &&
 			mesh->GpuSpineInfluences &&
-			mesh->GpuSpineBones &&
-			mesh->GpuSpineSkinnedVertices;
+			mesh->GpuSpineBones;
+#if !CORONA_PLATFORM_MOBILE
+		mesh->bGpuSpineSkinned = mesh->bGpuSpineSkinned && mesh->GpuSpineSkinnedVertices;
+#endif
 		mesh->GpuSpineSkinningVertexCount = mesh->bGpuSpineSkinned ? mesh->NumVertices : 0;
 		mesh->GpuSpineSkinningSourceScale = safeSourceScale;
 		SpineStats.RuntimeGpuBufferCreations += 4;
 	}
-#endif
 	mesh->CpuPositions.reserve(sampleMesh.Vertices.size());
 	for (const SpineSampleVertex& vertex : sampleMesh.Vertices)
 		mesh->CpuPositions.push_back(vertex.Position);

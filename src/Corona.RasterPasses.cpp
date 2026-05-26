@@ -189,17 +189,18 @@ void Corona::InitGBufferPass()
 	desc.ShaderPath = GetAssetFullPath(CORONA_PLATFORM_MOBILE ? L"Shaders\\GBufferMobile.hlsl" : L"Shaders\\GBuffer.hlsl");
 	desc.VertexEntryPoint = "VSMain";
 	desc.PixelEntryPoint = "PSMain";
-	// StandardVertex layout (48 B): POSITION float4 @ 0, UV @ 16,
-	// NORMAL @ 24, TANGENT @ 36. The first three components of POSITION
-	// are read as float3; the fourth (w=1) is intentionally skipped by
-	// the attribute descriptor. Vulkan uses this PSO-side stride; DX12
-	// uses VBV.StrideInBytes instead so it was OK with the legacy 44 B
-	// value before, but mobile rendered every vertex 4 B off.
+	// Default mesh layout (44 B legacy "Vertex"): POSITION float3 @ 0,
+	// NORMAL float3 @ 12, UV float2 @ 24, TANGENT float3 @ 32. This is
+	// what CreateMeshFromVertices and the platformer scene meshes upload.
+	// Skeletal meshes use a different 48 B StandardVertex layout; their
+	// pipelines override this stride + offsets explicitly. Vulkan reads
+	// the stride from the PSO, so getting the default wrong slides every
+	// non-skeletal vertex 4 B on mobile.
 	desc.VertexElements = {
 		{ "POSITION", 0, EVertexAttributeFormat::Float3, 0 },
-		{ "NORMAL",   0, EVertexAttributeFormat::Float3, 24 },
-		{ "TEXCOORD", 0, EVertexAttributeFormat::Float2, 16 },
-		{ "TANGENT",  0, EVertexAttributeFormat::Float3, 36 },
+		{ "NORMAL",   0, EVertexAttributeFormat::Float3, 12 },
+		{ "TEXCOORD", 0, EVertexAttributeFormat::Float2, 24 },
+		{ "TANGENT",  0, EVertexAttributeFormat::Float3, 32 },
 	};
 	desc.TextureBindings = {
 		{ "AlbedoTex", 0 },
@@ -210,7 +211,7 @@ void Corona::InitGBufferPass()
 	desc.SamplerBindings = {
 		{ "samplerWrap", 0 },
 	};
-	desc.VertexStride = 48;
+	desc.VertexStride = 44;
 	if (CORONA_PLATFORM_MOBILE)
 	{
 		desc.ColorFormats = {
@@ -240,8 +241,20 @@ void Corona::InitGBufferPass()
 
 	GBufferGraphicsPipeline = renderBackend->CreateGraphicsPipeline(desc);
 
+	// CPU Spine path uses `mesh->Vb` filled with SpineSampleVertex (44 B:
+	// POSITION @ 0, NORMAL @ 12, UV @ 24, TANGENT @ 32). The base desc
+	// declares the 48 B StandardVertex layout for Skeletal — that stride
+	// would slip every Spine vertex 4 B on Vulkan (PSO stride wins).
+	// Override here so the CPU-skinned VB is fetched correctly.
 	GraphicsPipelineDesc cpuSpineDesc = desc;
 	cpuSpineDesc.bDepthWriteEnable = false;
+	cpuSpineDesc.VertexStride = 44;
+	cpuSpineDesc.VertexElements = {
+		{ "POSITION", 0, EVertexAttributeFormat::Float3, 0 },
+		{ "NORMAL",   0, EVertexAttributeFormat::Float3, 12 },
+		{ "TEXCOORD", 0, EVertexAttributeFormat::Float2, 24 },
+		{ "TANGENT",  0, EVertexAttributeFormat::Float3, 32 },
+	};
 	CpuSpineGBufferGraphicsPipeline = renderBackend->CreateGraphicsPipeline(cpuSpineDesc);
 	if (!CpuSpineGBufferGraphicsPipeline)
 		AppendCpuRuntimeTrace(L"[InitGBufferPass] failed to create CPU Spine GBuffer pipeline");
@@ -258,13 +271,13 @@ void Corona::InitGBufferPass()
 	if (!SpineGBufferGraphicsPipeline)
 		AppendCpuRuntimeTrace(L"[InitGBufferPass] failed to create Spine GBuffer pipeline");
 
-	// Desktop-only Spine VS-inline PSO: same vertex-fetch-via-SBV layout as
+	// Spine VS-inline PSO: same vertex-fetch-via-SBV layout as
 	// SpineGBufferGraphicsPipeline but the VS skins from
 	// SpineVsInlineInputVertices/Influences/Bones instead of reading
-	// pre-skinned vertices. Mobile leaves this null (the SPIR-V entry
-	// doesn't exist in GBufferMobile.hlsl). try/catch so missing-entry
-	// failures degrade gracefully.
-	if (!CORONA_PLATFORM_MOBILE)
+	// pre-skinned vertices. Desktop and mobile both expose this entry
+	// (GBuffer.hlsl + GBufferMobile.hlsl) -- on mobile this replaces the
+	// compute pre-pass entirely. try/catch so missing-entry failures
+	// degrade gracefully.
 	{
 		GraphicsPipelineDesc spineVsInlineDesc = spineDesc;
 		spineVsInlineDesc.VertexEntryPoint = "SpineVsInlineVSMain";
@@ -705,8 +718,10 @@ void Corona::InitMobileShadowMapPass()
 	desc.ShaderPath = GetAssetFullPath(L"Shaders\\MobileShadowMap.hlsl");
 	desc.VertexEntryPoint = "VSMain";
 	desc.PixelEntryPoint = "PSMain";
-	// Match the StandardVertex 48 B layout used by every renderable mesh.
-	desc.VertexStride = 48;
+	// Default mesh layout (44 B legacy "Vertex"). Skeletal-skinned meshes
+	// upload a different 48 B StandardVertex layout; the Skeletal shadow
+	// PSO below overrides stride + offsets to match.
+	desc.VertexStride = 44;
 	desc.ColorFormats.clear();
 	desc.DepthFormat = ETextureFormat::D32Float;
 	desc.bDepthEnable = true;
@@ -719,9 +734,9 @@ void Corona::InitMobileShadowMapPass()
 	desc.ConstantBufferBinding = 0;
 	desc.VertexElements = {
 		{ "POSITION", 0, EVertexAttributeFormat::Float3, 0 },
-		{ "NORMAL",   0, EVertexAttributeFormat::Float3, 24 },
-		{ "TEXCOORD", 0, EVertexAttributeFormat::Float2, 16 },
-		{ "TANGENT",  0, EVertexAttributeFormat::Float3, 36 }
+		{ "NORMAL",   0, EVertexAttributeFormat::Float3, 12 },
+		{ "TEXCOORD", 0, EVertexAttributeFormat::Float2, 24 },
+		{ "TANGENT",  0, EVertexAttributeFormat::Float3, 32 }
 	};
 	desc.TextureBindings.clear();
 	desc.SamplerBindings.clear();
@@ -729,6 +744,18 @@ void Corona::InitMobileShadowMapPass()
 	MobileShadowMapGraphicsPipeline = renderBackend->CreateGraphicsPipeline(desc);
 	if (!MobileShadowMapGraphicsPipeline)
 		AppendCpuRuntimeTrace(L"[InitMobileShadowMapPass] failed to create mobile shadow map pipeline");
+
+	GraphicsPipelineDesc skeletalShadowDesc = desc;
+	skeletalShadowDesc.VertexStride = 48;
+	skeletalShadowDesc.VertexElements = {
+		{ "POSITION", 0, EVertexAttributeFormat::Float3, 0 },
+		{ "NORMAL",   0, EVertexAttributeFormat::Float3, 24 },
+		{ "TEXCOORD", 0, EVertexAttributeFormat::Float2, 16 },
+		{ "TANGENT",  0, EVertexAttributeFormat::Float3, 36 },
+	};
+	SkeletalMobileShadowMapGraphicsPipeline = renderBackend->CreateGraphicsPipeline(skeletalShadowDesc);
+	if (!SkeletalMobileShadowMapGraphicsPipeline)
+		AppendCpuRuntimeTrace(L"[InitMobileShadowMapPass] failed to create Skeletal mobile shadow map pipeline");
 
 	GraphicsPipelineDesc spineDesc = desc;
 	spineDesc.VertexEntryPoint = "SpineVSMain";
@@ -1940,14 +1967,14 @@ void Corona::DrawScene(shared_ptr<Scene> scene, const glm::mat4x4& instanceTrans
 		if (!mesh)
 			continue;
 
-		// Desktop-only Spine VS-inline path: skinning math runs in the VS,
-		// reading directly from the input SBVs each frame instead of a
-		// pre-skinned vertex buffer. Mobile keeps the existing routes
-		// because SpineVsInlineGBufferGraphicsPipeline is null there.
+		// Spine VS-inline path: skinning math runs in the VS, reading
+		// directly from the input SBVs each frame instead of a
+		// pre-skinned vertex buffer. No compute pre-pass needed, so we
+		// don't gate on bGpuSpineSkinningDispatched. Works on both
+		// desktop and mobile (mobile keeps compute disabled separately).
 		const bool bUseSpineVsInline =
 			bSpineUseVsInlineSkinning &&
 			mesh->bGpuSpineSkinned &&
-			mesh->bGpuSpineSkinningDispatched &&
 			mesh->GpuSpineInputVertices &&
 			mesh->GpuSpineInfluences &&
 			mesh->GpuSpineBones &&
@@ -2178,8 +2205,17 @@ void Corona::DrawSceneShadowMap(shared_ptr<Scene> scene, const glm::mat4x4& inst
 			mesh->bGpuSpineSkinningDispatched &&
 			mesh->GpuSpineSkinnedVertices &&
 			SpineMobileShadowMapGraphicsPipeline;
+		// Skeletal meshes upload StandardVertex (48 B). Their skinned shadow
+		// VBs share the same layout. The base shadow PSO uses the 44 B
+		// platformer Vertex layout, so route Skeletal to its own PSO.
+		const bool bUseSkeletalShadow =
+			!bUseSpineVertexFetch &&
+			mesh->bSkeletalSkinned &&
+			SkeletalMobileShadowMapGraphicsPipeline;
 		GraphicsPipelineHandle* activeShadowPipeline =
-			bUseSpineVertexFetch ? SpineMobileShadowMapGraphicsPipeline.get() : MobileShadowMapGraphicsPipeline.get();
+			bUseSpineVertexFetch ? SpineMobileShadowMapGraphicsPipeline.get() :
+			(bUseSkeletalShadow ? SkeletalMobileShadowMapGraphicsPipeline.get() :
+			MobileShadowMapGraphicsPipeline.get());
 		renderBackend->BindGraphicsPipeline(activeShadowPipeline);
 		if (bUseSpineVertexFetch)
 			renderBackend->BindGraphicsPipelineBuffer(activeShadowPipeline, "SpineVertices", mesh->GpuSpineSkinnedVertices.get());

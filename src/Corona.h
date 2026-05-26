@@ -284,9 +284,10 @@ private:
 	std::shared_ptr<GraphicsPipelineHandle> GBufferGraphicsPipeline;
 	std::shared_ptr<GraphicsPipelineHandle> CpuSpineGBufferGraphicsPipeline;
 	std::shared_ptr<GraphicsPipelineHandle> SpineGBufferGraphicsPipeline;
-	// Desktop-only Spine VS-inline path: skinning math executes in the
-	// vertex shader, so the compute pre-pass + GpuSpineSkinnedVertices SBV
-	// are bypassed. Null on mobile (Spine GPU skinning is disabled there).
+	// Spine VS-inline path: skinning math executes in the vertex shader,
+	// bypassing the compute pre-pass + GpuSpineSkinnedVertices SBV.
+	// Available on both desktop and mobile (mobile keeps Spine compute
+	// disabled; VS-inline is the only GPU path it has).
 	std::shared_ptr<GraphicsPipelineHandle> SpineVsInlineGBufferGraphicsPipeline;
 	bool bSpineUseVsInlineSkinning = false;
 	// Phase 11: GBuffer PSO variant for 3D skeletal-skinned meshes. Same IA
@@ -874,6 +875,7 @@ private:
 		UINT32 Padding[3] = {};
 	};
 	std::shared_ptr<GraphicsPipelineHandle> MobileShadowMapGraphicsPipeline;
+	std::shared_ptr<GraphicsPipelineHandle> SkeletalMobileShadowMapGraphicsPipeline;
 	std::shared_ptr<GraphicsPipelineHandle> SpineMobileShadowMapGraphicsPipeline;
 
 	// temporalAA
