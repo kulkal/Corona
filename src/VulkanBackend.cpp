@@ -10,6 +10,8 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <cassert>
 #include <cctype>
 #include <cwctype>
 #include <cstring>
@@ -5300,6 +5302,41 @@ void VulkanBackend::BindMeshBuffers(VertexBuffer* vertexBuffer, IndexBuffer* ind
 			bLoggedMissingMeshBuffer = true;
 		}
 		return;
+	}
+
+	// Validate VB stride vs the currently-bound PSO. Vulkan reads stride
+	// from the PSO (VkVertexInputBindingDescription::stride), not from
+	// the VB binding — so a mismatch here means every vertex slips by
+	// the delta with no validation-layer error. Always check (a single
+	// integer compare is below noise next to the map lookups we already
+	// did); assert in debug, log once in release.
+	if (auto* pipeline = dynamic_cast<VulkanGraphicsPipelineHandle*>(BoundGraphicsPipeline))
+	{
+		const uint32_t psoStride = pipeline->Desc.VertexStride;
+		const uint32_t vbStride = vbIt->second.Stride;
+		// PSO with stride 0 fetches vertices via SBV / SV_VertexID and
+		// doesn't consume the IA — that's the Spine / cluster-draw
+		// pattern. VB without recorded stride (legacy paths) is also
+		// skipped. Anything else with mismatched stride is a bug.
+		if (psoStride != 0 && vbStride != 0 && psoStride != vbStride)
+		{
+			static std::atomic<bool> bLoggedStrideMismatch{ false };
+			bool expected = false;
+			if (bLoggedStrideMismatch.compare_exchange_strong(expected, true))
+			{
+				AppendVulkanRuntimeTraceBackend(
+					L"[VulkanBackend::BindMeshBuffers] STRIDE MISMATCH — PSO=" +
+					std::to_wstring(psoStride) +
+					L" VB=" + std::to_wstring(vbStride) +
+					L" path=" + pipeline->Desc.ShaderPath +
+					L" — every vertex will read " +
+					std::to_wstring(int32_t(psoStride) - int32_t(vbStride)) +
+					L" B past its slot. Vulkan stride is taken from PSO.");
+			}
+#if defined(_DEBUG) || defined(DEBUG)
+			assert(false && "Vulkan PSO/VB stride mismatch — see runtime trace");
+#endif
+		}
 	}
 
 	const VkDeviceSize vbOffsets[] = { vbIt->second.Offset };

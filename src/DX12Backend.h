@@ -625,6 +625,11 @@ public:
 	bool bLastWindowCaptureResultValid = false;
 	bool bLastWindowCaptureSucceeded = false;
 
+	// Used by BindMeshBuffers to validate VB stride against the currently
+	// bound PSO. DX12 itself reads stride from VBV (so it would still
+	// render correctly), but a mismatch indicates the same code will
+	// silently break on Vulkan. Non-owning — caller owns the handle.
+	GraphicsPipelineHandle* BoundGraphicsPipelineForDiag = nullptr;
 
 	void PresentBarrier(Texture* rt);
 	void ResourceBarrier(ID3D12Resource* Resource, D3D12_RESOURCE_STATES StateBefore, D3D12_RESOURCE_STATES StateAfter);

@@ -18,6 +18,7 @@
 #include "Utils.h"
 #include <dxcapi.use.h>
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstring>
@@ -181,6 +182,14 @@ namespace
 	{
 		std::shared_ptr<PipelineStateObject> PSO;
 		uint32_t ConstantBufferSize = 0;
+		// Cached at create time so BindMeshBuffers can sanity-check the
+		// bound VB stride against what the IA layout expects. DX12
+		// itself reads the runtime stride from the VBV, but a mismatch
+		// here means the same code will silently corrupt vertices on
+		// Vulkan — log it so Vulkan-only bugs are caught on the desktop
+		// dev cycle.
+		uint32_t VertexStride = 0;
+		std::wstring ShaderPathForDiag;
 	};
 
 	void ForceOpaqueAlpha(const DirectX::Image* image)
@@ -929,6 +938,37 @@ void DX12Backend::BindMeshBuffers(VertexBuffer* vertexBuffer, IndexBuffer* index
 {
 	if (!vertexBuffer || !indexBuffer)
 		return;
+
+	// Diagnostic: warn (and assert in debug) when the bound PSO's
+	// vertex stride disagrees with the VB's. DX12 itself takes stride
+	// from the VBV so this is rendered correctly, but the same setup
+	// will silently corrupt vertices on Vulkan (which uses PSO stride).
+	// Catching the mismatch on the desktop dev cycle is much cheaper
+	// than chasing the artifact through an Android APK install.
+	if (auto* dxPipeline = dynamic_cast<DX12GraphicsPipelineHandle*>(BoundGraphicsPipelineForDiag))
+	{
+		const uint32_t psoStride = dxPipeline->VertexStride;
+		const uint32_t vbStride = vertexBuffer->view.StrideInBytes;
+		if (psoStride != 0 && vbStride != 0 && psoStride != vbStride)
+		{
+			static std::atomic<bool> bLoggedStrideMismatch{ false };
+			bool expected = false;
+			if (bLoggedStrideMismatch.compare_exchange_strong(expected, true))
+			{
+				AppendCpuRuntimeTrace(
+					L"[DX12Backend::BindMeshBuffers] STRIDE MISMATCH — PSO=" +
+					std::to_wstring(psoStride) +
+					L" VB=" + std::to_wstring(vbStride) +
+					L" path=" + dxPipeline->ShaderPathForDiag +
+					L" — DX12 will still render (uses VBV stride) but Vulkan reads PSO stride and would slip " +
+					std::to_wstring(int32_t(psoStride) - int32_t(vbStride)) +
+					L" B per vertex.");
+			}
+#if defined(_DEBUG) || defined(DEBUG)
+			assert(false && "DX12 PSO/VB stride mismatch — same code will corrupt vertices on Vulkan");
+#endif
+		}
+	}
 
 	GlobalCmdList->CmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 	GlobalCmdList->CmdList->IASetIndexBuffer(&indexBuffer->view);
@@ -5011,6 +5051,8 @@ std::shared_ptr<GraphicsPipelineHandle> DX12Backend::CreateGraphicsPipeline(cons
 
 	handle->PSO = pso;
 	handle->ConstantBufferSize = desc.ConstantBufferSize;
+	handle->VertexStride = desc.VertexStride;
+	handle->ShaderPathForDiag = desc.ShaderPath;
 	return handle;
 }
 
@@ -5019,6 +5061,7 @@ void DX12Backend::BindGraphicsPipeline(GraphicsPipelineHandle* pipeline)
 	auto* dxPipeline = dynamic_cast<DX12GraphicsPipelineHandle*>(pipeline);
 	if (dxPipeline && dxPipeline->PSO)
 		dxPipeline->PSO->Apply();
+	BoundGraphicsPipelineForDiag = dxPipeline;
 }
 
 void DX12Backend::SetGraphicsPipelineConstantData(GraphicsPipelineHandle* pipeline, uint32_t slot, const void* data, uint32_t size)
