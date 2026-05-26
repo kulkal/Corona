@@ -165,6 +165,25 @@ namespace
 	std::unordered_map<std::wstring, std::unique_ptr<SpineRuntimeAsset>> GSpineRuntimeAssetCache;
 	void* GSpineRuntimeAssetCacheBackend = nullptr;
 
+	// Live Spine: per-handle persistent skeleton + animation state. Stores
+	// the persistent VB/IB capacities so UpdateLiveSpineForScript can
+	// memcpy in place without reallocating each frame.
+	struct SpineLiveState
+	{
+		std::unique_ptr<spSkeleton, SpineSkeletonDeleter> Skeleton;
+		SpineRuntimeAsset* RuntimeAsset = nullptr;
+		std::string AnimationName;
+		spAnimation* Animation = nullptr;
+		float ElapsedTime = 0.0f;
+		float SourceScale = 1.0f;
+		Corona::ScriptSceneHandle SceneHandle = 0;
+		std::shared_ptr<Scene> Scene_;
+		Mesh* MeshPtr = nullptr;
+		uint32_t MaxVertexBytes = 0;
+		uint32_t MaxIndexBytes = 0;
+	};
+	std::unordered_map<Corona::ScriptSceneHandle, std::unique_ptr<SpineLiveState>> GSpineLiveStates;
+
 	constexpr int kRegionQuadTriangles[] = { 0, 1, 2, 2, 3, 0 };
 	constexpr float kSpineAttachmentLocalDepthStep = 0.02f;
 
@@ -1185,6 +1204,197 @@ Corona::ScriptSceneHandle Corona::CreateSpineSceneForScript(
 		DumpSpineFrameStatsToTrace(L"interval");
 
 	return handle;
+}
+
+namespace
+{
+	SpineRuntimeAsset* EnsureSpineRuntimeAsset(Corona* corona, const std::filesystem::path& skeletonPath)
+	{
+		const std::wstring normalizedSkeletonPath = NormalizePathForKey(skeletonPath);
+		auto it = GSpineRuntimeAssetCache.find(normalizedSkeletonPath);
+		if (it != GSpineRuntimeAssetCache.end())
+			return it->second.get();
+		// Fall back to the full create path which populates the cache as
+		// a side effect.
+		(void)corona;
+		return nullptr;
+	}
+}
+
+Corona::ScriptSceneHandle Corona::CreateLiveSpineForScript(
+	const std::wstring& assetPath,
+	const std::string& animationName,
+	float sourceScale)
+{
+	if (!renderBackend || assetPath.empty())
+		return InvalidScriptSceneHandle;
+
+	// Seed the runtime-asset cache by going through the normal scene
+	// builder once at time=0 (cheap clip-cache hit on subsequent
+	// CreateLiveSpine calls of the same asset). We immediately drop the
+	// returned scene handle — only the cached SpineRuntimeAsset is
+	// reused. This keeps live-Spine self-contained without duplicating
+	// the atlas/skeleton-data loading code.
+	ScriptSceneHandle seedHandle = CreateSpineSceneForScript(assetPath, animationName, 0.0f, sourceScale);
+	if (seedHandle == InvalidScriptSceneHandle)
+		return InvalidScriptSceneHandle;
+
+	std::filesystem::path skeletonPath(assetPath);
+	if (skeletonPath.is_relative())
+		skeletonPath = GetAssetFullPath(assetPath.c_str());
+	const std::wstring normalizedSkeletonPath = NormalizePathForKey(skeletonPath);
+	SpineRuntimeAsset* runtimeAsset = nullptr;
+	auto runtimeAssetIt = GSpineRuntimeAssetCache.find(normalizedSkeletonPath);
+	if (runtimeAssetIt != GSpineRuntimeAssetCache.end())
+		runtimeAsset = runtimeAssetIt->second.get();
+	if (!runtimeAsset || !runtimeAsset->SkeletonData)
+		return InvalidScriptSceneHandle;
+
+	const float safeSourceScale = std::clamp(sourceScale, 0.0001f, 100.0f);
+
+	auto liveState = std::make_unique<SpineLiveState>();
+	liveState->RuntimeAsset = runtimeAsset;
+	liveState->AnimationName = animationName;
+	liveState->SourceScale = safeSourceScale;
+	liveState->ElapsedTime = 0.0f;
+	liveState->Skeleton.reset(spSkeleton_create(runtimeAsset->SkeletonData.get()));
+	if (!liveState->Skeleton)
+		return InvalidScriptSceneHandle;
+	spSkeleton_setToSetupPose(liveState->Skeleton.get());
+	liveState->Animation = !animationName.empty()
+		? spSkeletonData_findAnimation(runtimeAsset->SkeletonData.get(), animationName.c_str())
+		: nullptr;
+	if (liveState->Animation)
+		spAnimation_apply(liveState->Animation, liveState->Skeleton.get(), 0.0f, 0.0f, 1, nullptr, nullptr);
+	spSkeleton_updateWorldTransform(liveState->Skeleton.get());
+
+	SpineSampleMesh sampleMesh = BuildSpineSampleMesh(liveState->Skeleton.get(), safeSourceScale, true);
+	if (sampleMesh.Vertices.empty() || sampleMesh.Indices.empty())
+		return InvalidScriptSceneHandle;
+
+	// Capacity headroom: real-time skinning may grow/shrink the active
+	// attachment vertex count slightly. 2x the initial pose covers
+	// typical Spine walk/idle cycles without resizing.
+	const uint32_t vbCapacity = static_cast<uint32_t>(sizeof(SpineSampleVertex) * sampleMesh.Vertices.size()) * 2u;
+	const uint32_t ibCapacity = static_cast<uint32_t>(sizeof(UINT32) * sampleMesh.Indices.size()) * 2u;
+
+	auto material = std::make_shared<Material>();
+	material->bHasAlpha = true;
+	material->BaseColorFactor = glm::vec4(1.22f, 1.22f, 1.22f, 1.0f);
+	material->Diffuse = runtimeAsset->DiffuseTexture ? runtimeAsset->DiffuseTexture : DefaultWhiteTex;
+	material->Normal = DefaultNormalTex;
+	material->Roughness = DefaultRougnessTex;
+	material->Metallic = DefaultBlackTex;
+
+	auto* mesh = new Mesh;
+	mesh->Owner = renderBackend.get();
+	mesh->transform = glm::mat4x4(1.0f);
+	mesh->bTransparent = true;
+	mesh->bSpineMesh = true;
+	mesh->NumVertices = static_cast<UINT>(sampleMesh.Vertices.size());
+	mesh->NumIndices = static_cast<UINT>(sampleMesh.Indices.size());
+	mesh->VertexStride = sizeof(SpineSampleVertex);
+	mesh->IndexFormat = EIndexFormat::U32;
+	mesh->Mat = material;
+	mesh->Textures.push_back(material->Diffuse);
+	mesh->Vb = renderBackend->CreateUploadVertexBuffer(vbCapacity, sizeof(SpineSampleVertex), nullptr);
+	mesh->Ib = renderBackend->CreateUploadIndexBuffer(EIndexFormat::U32, ibCapacity, nullptr);
+	if (!mesh->Vb || !mesh->Ib)
+	{
+		delete mesh;
+		return InvalidScriptSceneHandle;
+	}
+	renderBackend->UpdateUploadVertexBuffer(mesh->Vb.get(),
+		sampleMesh.Vertices.data(),
+		static_cast<uint32_t>(sizeof(SpineSampleVertex) * sampleMesh.Vertices.size()));
+	renderBackend->UpdateUploadIndexBuffer(mesh->Ib.get(),
+		sampleMesh.Indices.data(),
+		static_cast<uint32_t>(sizeof(UINT32) * sampleMesh.Indices.size()));
+
+	Mesh::DrawCall drawCall = {};
+	drawCall.mat = material;
+	drawCall.IndexStart = 0;
+	drawCall.IndexCount = static_cast<UINT>(sampleMesh.Indices.size());
+	drawCall.VertexBase = 0;
+	drawCall.VertexCount = static_cast<UINT>(sampleMesh.Vertices.size());
+	mesh->Draws.push_back(drawCall);
+
+	auto scene = std::make_shared<Scene>();
+	scene->Materials.push_back(material);
+	scene->meshes.push_back(std::shared_ptr<Mesh>(mesh));
+	scene->bHasBounds = true;
+	scene->BoundsMin = sampleMesh.BoundsMin;
+	scene->BoundsMax = sampleMesh.BoundsMax;
+
+	ScriptSceneHandle handle = NextScriptSceneHandle++;
+	if (handle == InvalidScriptSceneHandle)
+		handle = NextScriptSceneHandle++;
+	const std::wstring key = L"live:" + std::to_wstring(handle);
+	ScriptScenes[handle] = { scene, key, EPhysicsCollisionShape::TriangleMesh, glm::vec3(0.5f) };
+
+	liveState->SceneHandle = handle;
+	liveState->Scene_ = scene;
+	liveState->MeshPtr = mesh;
+	liveState->MaxVertexBytes = vbCapacity;
+	liveState->MaxIndexBytes = ibCapacity;
+	GSpineLiveStates[handle] = std::move(liveState);
+
+	return handle;
+}
+
+bool Corona::UpdateLiveSpineForScript(ScriptSceneHandle handle, float deltaSeconds)
+{
+	auto it = GSpineLiveStates.find(handle);
+	if (it == GSpineLiveStates.end() || !it->second)
+		return false;
+	SpineLiveState& live = *it->second;
+	if (!live.Skeleton || !live.MeshPtr || !live.MeshPtr->Vb || !live.MeshPtr->Ib)
+		return false;
+
+	live.ElapsedTime += deltaSeconds;
+	if (live.Animation)
+	{
+		const float duration = live.Animation->duration > 0.0f ? live.Animation->duration : 1.0f;
+		float t = std::fmod(live.ElapsedTime, duration);
+		if (t < 0.0f) t += duration;
+		spSkeleton_setToSetupPose(live.Skeleton.get());
+		spAnimation_apply(live.Animation, live.Skeleton.get(), 0.0f, t, 1, nullptr, nullptr);
+	}
+	spSkeleton_updateWorldTransform(live.Skeleton.get());
+
+	SpineSampleMesh sampleMesh = BuildSpineSampleMesh(live.Skeleton.get(), live.SourceScale, true);
+	if (sampleMesh.Vertices.empty() || sampleMesh.Indices.empty())
+		return false;
+
+	const uint32_t vbBytes = static_cast<uint32_t>(sizeof(SpineSampleVertex) * sampleMesh.Vertices.size());
+	const uint32_t ibBytes = static_cast<uint32_t>(sizeof(UINT32) * sampleMesh.Indices.size());
+	if (vbBytes > live.MaxVertexBytes || ibBytes > live.MaxIndexBytes)
+	{
+		// Topology grew beyond reserved capacity; drop this tick rather
+		// than crash. The next tick will retry; benchmark animations
+		// (walk/idle) are stable in vertex count so this is rare.
+		return false;
+	}
+	renderBackend->UpdateUploadVertexBuffer(live.MeshPtr->Vb.get(), sampleMesh.Vertices.data(), vbBytes);
+	renderBackend->UpdateUploadIndexBuffer(live.MeshPtr->Ib.get(), sampleMesh.Indices.data(), ibBytes);
+	live.MeshPtr->NumVertices = static_cast<UINT>(sampleMesh.Vertices.size());
+	live.MeshPtr->NumIndices = static_cast<UINT>(sampleMesh.Indices.size());
+	if (!live.MeshPtr->Draws.empty())
+	{
+		live.MeshPtr->Draws[0].IndexCount = static_cast<UINT>(sampleMesh.Indices.size());
+		live.MeshPtr->Draws[0].VertexCount = static_cast<UINT>(sampleMesh.Vertices.size());
+	}
+	return true;
+}
+
+bool Corona::DestroyLiveSpineForScript(ScriptSceneHandle handle)
+{
+	auto it = GSpineLiveStates.find(handle);
+	if (it == GSpineLiveStates.end())
+		return false;
+	GSpineLiveStates.erase(it);
+	ScriptScenes.erase(handle);
+	return true;
 }
 
 void Corona::SpineFrameStats::Reset()

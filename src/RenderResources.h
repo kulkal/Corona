@@ -64,6 +64,9 @@ class IndexBuffer
 public:
 	// API-neutral
 	int numIndices = 0;
+	// Same in-place update path as VertexBuffer::MappedCpu.
+	void* MappedCpu = nullptr;
+	uint32_t MappedCapacityBytes = 0;
 
 #if CORONA_HAS_D3D12
 	Microsoft::WRL::ComPtr<ID3D12Resource> resource;
@@ -78,6 +81,13 @@ class VertexBuffer
 public:
 	// API-neutral
 	int numVertices = 0;
+	// Live-Spine fast path: for UPLOAD-heap VBs created via
+	// CreateUploadVertexBuffer, holds the persistent CPU-mapped pointer +
+	// capacity so UpdateUploadVertexBuffer can memcpy in place each frame
+	// without going through the staged upload route. Null for non-upload
+	// or non-mapped allocations.
+	void* MappedCpu = nullptr;
+	uint32_t MappedCapacityBytes = 0;
 
 #if CORONA_HAS_D3D12
 	Microsoft::WRL::ComPtr<ID3D12Resource> resource;

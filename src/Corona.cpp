@@ -2878,6 +2878,16 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 			bSpineUseVsInlineSkinning = true;
 			continue;
 		}
+		// Live Spine: bypass the snapshot cache. Each frame the bench
+		// script calls SpineComponent.update_live which re-runs
+		// spAnimation_apply + spSkeleton_updateWorldTransform +
+		// BuildSpineSampleMesh and memcpys the result into persistent
+		// UPLOAD-heap VBs. Matches the official Spine runtime model.
+		if (arg == L"--spine-live")
+		{
+			bCommandLineSpineBenchmarkLive = true;
+			continue;
+		}
 		std::wstring skeletalScreenshotValue = ParseValueArg(arg, L"--skeletal-test-screenshot", L"-skeletal-test-screenshot", i);
 		if (!skeletalScreenshotValue.empty())
 		{
@@ -7391,6 +7401,7 @@ void Corona::OnInit()
 		if (bCommandLinePlatformerSpineBenchmark)
 		{
 			setScriptNumberOverride("spine_benchmark.characterCount", static_cast<float>(CommandLinePlatformerSpineBenchmarkCount));
+			setScriptBoolOverride("spine_benchmark.live", bCommandLineSpineBenchmarkLive);
 		}
 		// Don't unset sponza-fly: the sponza luau mode runs only the common
 		// imgui-controls script and leaves the C++ Sponza scene path intact.

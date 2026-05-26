@@ -1162,6 +1162,67 @@ private:
 		return 1;
 	}
 
+	int LuaCoronaCreateLiveSpine(lua_State* L)
+	{
+		Corona* host = GetHost(L);
+		if (!host)
+		{
+			luaL_error(L, "corona host is not available");
+			return 0;
+		}
+		const char* pathArg = luaL_checkstring(L, 1);
+		std::string path = pathArg ? pathArg : "";
+		std::string animation;
+		float sourceScale = 1.0f;
+		if (lua_gettop(L) >= 2 && lua_isstring(L, 2))
+			animation = lua_tostring(L, 2);
+		if (lua_gettop(L) >= 3 && lua_isnumber(L, 3))
+			sourceScale = static_cast<float>(lua_tonumber(L, 3));
+		if (path.empty())
+		{
+			luaL_error(L, "SpineComponent.create_live expects a spine skeleton path");
+			return 0;
+		}
+		const Corona::ScriptSceneHandle handle = host->CreateLiveSpineForScript(
+			Utf8ToWideLocal(path), animation, sourceScale);
+		if (handle == Corona::InvalidScriptSceneHandle)
+		{
+			lua_pushnil(L);
+			return 1;
+		}
+		lua_pushinteger(L, static_cast<int>(handle));
+		return 1;
+	}
+
+	int LuaCoronaUpdateLiveSpine(lua_State* L)
+	{
+		Corona* host = GetHost(L);
+		if (!host)
+		{
+			luaL_error(L, "corona host is not available");
+			return 0;
+		}
+		const lua_Integer rawHandle = luaL_checkinteger(L, 1);
+		const float dt = static_cast<float>(luaL_checknumber(L, 2));
+		const bool ok = host->UpdateLiveSpineForScript(
+			static_cast<Corona::ScriptSceneHandle>(rawHandle), dt);
+		lua_pushboolean(L, ok ? 1 : 0);
+		return 1;
+	}
+
+	int LuaCoronaDestroyLiveSpine(lua_State* L)
+	{
+		Corona* host = GetHost(L);
+		if (!host)
+		{
+			luaL_error(L, "corona host is not available");
+			return 0;
+		}
+		const lua_Integer rawHandle = luaL_checkinteger(L, 1);
+		host->DestroyLiveSpineForScript(static_cast<Corona::ScriptSceneHandle>(rawHandle));
+		return 0;
+	}
+
 	int LuaCoronaGetSpineSceneHeight(lua_State* L)
 	{
 		Corona* host = GetHost(L);
@@ -3505,6 +3566,12 @@ private:
 		lua_setfield(L, -2, "get_scene_height");
 		lua_pushcfunction(L, LuaCoronaSpineSetPose, "corona.SpineComponent.set_pose");
 		lua_setfield(L, -2, "set_pose");
+		lua_pushcfunction(L, LuaCoronaCreateLiveSpine, "corona.SpineComponent.create_live");
+		lua_setfield(L, -2, "create_live");
+		lua_pushcfunction(L, LuaCoronaUpdateLiveSpine, "corona.SpineComponent.update_live");
+		lua_setfield(L, -2, "update_live");
+		lua_pushcfunction(L, LuaCoronaDestroyLiveSpine, "corona.SpineComponent.destroy_live");
+		lua_setfield(L, -2, "destroy_live");
 		lua_setfield(L, -2, "SpineComponent");
 
 		lua_newtable(L);

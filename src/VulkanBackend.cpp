@@ -3812,6 +3812,11 @@ std::shared_ptr<VertexBuffer> VulkanBackend::CreateUploadVertexBuffer(uint32_t s
 
 	auto* vb = new VertexBuffer();
 	vb->numVertices = stride > 0 ? static_cast<int>(size / stride) : 0;
+	if (allocation.PoolBlock && allocation.PoolBlock->MappedBase)
+	{
+		vb->MappedCpu = allocation.PoolBlock->MappedBase + allocation.Offset;
+		vb->MappedCapacityBytes = size;
+	}
 	VertexBufferAllocations[vb] = allocation;
 	return std::shared_ptr<VertexBuffer>(vb);
 #endif
@@ -3834,9 +3839,32 @@ std::shared_ptr<IndexBuffer> VulkanBackend::CreateUploadIndexBuffer(EIndexFormat
 
 	auto* ib = new IndexBuffer();
 	ib->numIndices = format == EIndexFormat::U16 ? static_cast<int>(size / 2) : static_cast<int>(size / 4);
+	if (allocation.PoolBlock && allocation.PoolBlock->MappedBase)
+	{
+		ib->MappedCpu = allocation.PoolBlock->MappedBase + allocation.Offset;
+		ib->MappedCapacityBytes = size;
+	}
 	IndexBufferAllocations[ib] = allocation;
 	return std::shared_ptr<IndexBuffer>(ib);
 #endif
+}
+
+void VulkanBackend::UpdateUploadVertexBuffer(VertexBuffer* buffer, const void* srcData, uint32_t sizeInBytes)
+{
+	if (!buffer || !buffer->MappedCpu || !srcData || sizeInBytes == 0)
+		return;
+	if (sizeInBytes > buffer->MappedCapacityBytes)
+		sizeInBytes = buffer->MappedCapacityBytes;
+	memcpy(buffer->MappedCpu, srcData, sizeInBytes);
+}
+
+void VulkanBackend::UpdateUploadIndexBuffer(IndexBuffer* buffer, const void* srcData, uint32_t sizeInBytes)
+{
+	if (!buffer || !buffer->MappedCpu || !srcData || sizeInBytes == 0)
+		return;
+	if (sizeInBytes > buffer->MappedCapacityBytes)
+		sizeInBytes = buffer->MappedCapacityBytes;
+	memcpy(buffer->MappedCpu, srcData, sizeInBytes);
 }
 
 std::shared_ptr<RTAS> VulkanBackend::CreateBLASForSkeletalMesh(Mesh* mesh)

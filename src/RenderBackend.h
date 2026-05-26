@@ -284,6 +284,12 @@ public:
 	// debug meshes, immediate-mode UI, etc.) should prefer these.
 	virtual std::shared_ptr<VertexBuffer> CreateUploadVertexBuffer(uint32_t size, uint32_t stride, const void* srcData) = 0;
 	virtual std::shared_ptr<IndexBuffer> CreateUploadIndexBuffer(EIndexFormat format, uint32_t size, const void* srcData) = 0;
+	// In-place refresh of an UPLOAD-heap VB/IB created above. Used by live
+	// Spine instances that regenerate geometry every frame without
+	// allocating new GPU buffers. `sizeInBytes` must fit within the
+	// buffer's original capacity.
+	virtual void UpdateUploadVertexBuffer(VertexBuffer* buffer, const void* srcData, uint32_t sizeInBytes) = 0;
+	virtual void UpdateUploadIndexBuffer(IndexBuffer* buffer, const void* srcData, uint32_t sizeInBytes) = 0;
 	// GPU-writeable vertex buffer for skeletal skinning output. Allocated in
 	// DEFAULT heap with ALLOW_UNORDERED_ACCESS. The returned VertexBuffer
 	// can be bound as a UAV through any ComputePipelineStateObject and then

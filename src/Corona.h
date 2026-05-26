@@ -1065,6 +1065,7 @@ private:
 	bool bCommandLineSpineSkinningOverrideSet = false;
 	bool bCommandLineSpineGpuSkinningEnabled = true;
 	bool bCommandLinePlatformerSpineBenchmark = false;
+	bool bCommandLineSpineBenchmarkLive = false;
 	UINT32 CommandLinePlatformerSpineBenchmarkCount = 50;
 	bool bCommandLineSpawnSkeletalTest = false;
 	UINT32 CommandLineSkeletalTestCount = 1;
@@ -2026,6 +2027,19 @@ public:
 	ScriptSceneHandle CreateProceduralBlockCharacterSceneForScript(UINT32 seed);
 	ScriptSceneHandle CreateProceduralBoxSceneForScript(const glm::vec3& baseColor, bool bUseBrickTexture = false, float uvRepeat = 1.0f, const std::wstring& textureKind = std::wstring(), float uvRepeatY = -1.0f, bool bFrontOnly = false);
 	ScriptSceneHandle CreateSpineSceneForScript(const std::wstring& assetPath, const std::string& animationName, float timeSeconds, float sourceScale = 1.0f);
+	// Live Spine: persistent skeleton + animation state owned per call.
+	// CreateLiveSpineForScript builds the skeleton + initial mesh and
+	// returns a ScriptSceneHandle that can be passed to set_pose. The
+	// underlying VB/IB are allocated once at max-vertex-count and
+	// re-uploaded in place by UpdateLiveSpineForScript every frame.
+	// This bypasses both the Lua sceneCache and the C++
+	// ScriptSceneByPath/clip caches, so it pays the full
+	// `spAnimation_apply + spSkeleton_updateWorldTransform +
+	// BuildSpineSampleMesh + memcpy` cost on every tick — the canonical
+	// "live Spine" model the official runtimes use.
+	ScriptSceneHandle CreateLiveSpineForScript(const std::wstring& assetPath, const std::string& animationName, float sourceScale = 1.0f);
+	bool UpdateLiveSpineForScript(ScriptSceneHandle handle, float deltaSeconds);
+	bool DestroyLiveSpineForScript(ScriptSceneHandle handle);
 	// Phase 2: SpineClipFrameCache management. PrewarmSpineClipFrameForScript
 	// fills the CPU-side cache without creating any GPU vertex/index buffers
 	// (matches the doc's "nonblocking miss path" requirement). The cache is

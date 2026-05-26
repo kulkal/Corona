@@ -1475,6 +1475,8 @@ shared_ptr<VertexBuffer> DX12Backend::CreateUploadVertexBuffer(UINT size, UINT s
 	vb->view.StrideInBytes = stride;
 	vb->view.SizeInBytes = size;
 	vb->numVertices = stride > 0 ? (size / stride) : 0;
+	vb->MappedCpu = alloc.cpu;
+	vb->MappedCapacityBytes = size;
 	return shared_ptr<VertexBuffer>(vb);
 }
 
@@ -1497,7 +1499,32 @@ shared_ptr<IndexBuffer> DX12Backend::CreateUploadIndexBuffer(EIndexFormat format
 	ib->view.Format = ToDXGIFormat(format);
 	ib->view.SizeInBytes = size;
 	ib->numIndices = format == EIndexFormat::U32 ? (size / 4) : (size / 2);
+	ib->MappedCpu = alloc.cpu;
+	ib->MappedCapacityBytes = size;
 	return shared_ptr<IndexBuffer>(ib);
+}
+
+void DX12Backend::UpdateUploadVertexBuffer(VertexBuffer* buffer, const void* srcData, UINT sizeInBytes)
+{
+	if (!buffer || !buffer->MappedCpu || !srcData || sizeInBytes == 0)
+		return;
+	if (sizeInBytes > buffer->MappedCapacityBytes)
+		sizeInBytes = buffer->MappedCapacityBytes;
+	memcpy(buffer->MappedCpu, srcData, sizeInBytes);
+	buffer->view.SizeInBytes = sizeInBytes;
+	buffer->numVertices = buffer->view.StrideInBytes > 0 ? (sizeInBytes / buffer->view.StrideInBytes) : 0;
+}
+
+void DX12Backend::UpdateUploadIndexBuffer(IndexBuffer* buffer, const void* srcData, UINT sizeInBytes)
+{
+	if (!buffer || !buffer->MappedCpu || !srcData || sizeInBytes == 0)
+		return;
+	if (sizeInBytes > buffer->MappedCapacityBytes)
+		sizeInBytes = buffer->MappedCapacityBytes;
+	memcpy(buffer->MappedCpu, srcData, sizeInBytes);
+	buffer->view.SizeInBytes = sizeInBytes;
+	const UINT bpp = buffer->view.Format == DXGI_FORMAT_R32_UINT ? 4u : 2u;
+	buffer->numIndices = sizeInBytes / bpp;
 }
 
 void DX12Backend::PresentBarrier(Texture* rt)
