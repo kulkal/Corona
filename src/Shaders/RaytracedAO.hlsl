@@ -95,7 +95,14 @@ void rayGen()
     const uint kMaxSamples = 16u;
     uint sampleCount = min(max(SampleCount, 1u), kMaxSamples);
     float rayRadius = clamp(Radius, 0.01f, 256.0f);
-    float normalBias = clamp(NormalBias, 0.001f, 2.0f);
+    // Distance-scaled bias to prevent far-pixel self-occlusion. The
+    // configured NormalBias is the lower bound; we add linear+quadratic
+    // distance terms so pixels thousands of units from the camera clear
+    // their own surface after BVH leaf-level rounding.
+    const float distanceToCamera = length(worldPos - cameraWorld);
+    float configuredBias = clamp(NormalBias, 0.001f, 2.0f);
+    float normalBias = max(configuredBias,
+        distanceToCamera * 0.003f + distanceToCamera * distanceToCamera * 5e-8f);
     float3 traceNormal = CommonSafeNormalize(geoNormal + worldNormal * 0.25f, geoNormal);
     float3 rayOrigin = worldPos + traceNormal * normalBias;
     float3x3 tbn = BuildAOTBN(traceNormal);

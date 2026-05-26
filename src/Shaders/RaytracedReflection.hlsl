@@ -414,7 +414,16 @@ void rayGen
 
 
 	RayDesc ray;
-	ray.Origin = SpecSanitizeFloat3(WorldPos + GeoNormal * 0.5f, WorldPos);
+	// Distance-scaled bias so far-pixel reflection rays don't self-hit
+	// the surface they came from after BVH leaf-level rounding. Matches
+	// the bias scheme used in RaytracedShadow / RaytracedAO.
+	{
+		float3 cameraWorldPos = mul(float4(0.0f, 0.0f, 0.0f, 1.0f), InvViewMatrix).xyz;
+		float distanceToCamera = length(WorldPos - cameraWorldPos);
+		float reflectionBias = max(0.5f,
+			distanceToCamera * 0.003f + distanceToCamera * distanceToCamera * 5e-8f);
+		ray.Origin = SpecSanitizeFloat3(WorldPos + GeoNormal * reflectionBias, WorldPos);
+	}
 	ray.Direction = SpecSafeNormalize(L, WorldNormal);
 
 	ray.TMin = 0;

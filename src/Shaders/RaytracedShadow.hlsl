@@ -92,7 +92,16 @@ void rayGen()
     float visibility = 0.0f;
     const uint kMaxShadowSamples = 16;
     uint sampleCount = min(max(ShadowSampleCount, 1), kMaxShadowSamples);
-    float normalBias = 0.5f;
+    // Bias scales with distance from camera so far-floor pixels in
+    // sponza-scale (~thousands of world units) don't self-shadow against
+    // their own geometry. A fixed 0.5 unit bias was fine in tight scenes
+    // but flickered hard on the bench-mode ground plane far from camera.
+    // Use both a linear-in-distance term and a quadratic term so really
+    // distant pixels (10k+ units) get enough headroom to clear the same
+    // surface they were sampled from after BVH leaf-level rounding.
+    const float distanceToCamera = length(worldPos - cameraWorld);
+    float normalBias = max(0.5f,
+        distanceToCamera * 0.003f + distanceToCamera * distanceToCamera * 5e-8f);
 
     [loop]
     for (uint sampleIndex = 0; sampleIndex < kMaxShadowSamples; ++sampleIndex)
