@@ -6493,7 +6493,8 @@ void Corona::PushLuauUiStateForScript(lua_State* L, const std::string& mode)
 	int pushedPassIndex = 1;
 	for (UINT passIndex = 0; passIndex < GpuPassCount; ++passIndex)
 	{
-		if (GpuPassLastTimeMs[passIndex] <= 0.0f && GpuPassAverageTimeMs[passIndex] <= 0.0f)
+		if (GpuPassLastTimeMs[passIndex] <= 0.0f && GpuPassAverageTimeMs[passIndex] <= 0.0f &&
+			CpuPassLastTimeMs[passIndex] <= 0.0f && CpuPassAverageTimeMs[passIndex] <= 0.0f)
 			continue;
 
 		lua_newtable(L);
@@ -6501,6 +6502,9 @@ void Corona::PushLuauUiStateForScript(lua_State* L, const std::string& mode)
 		PushNumberField(L, "last_ms", GpuPassLastTimeMs[passIndex]);
 		PushNumberField(L, "average_ms", GpuPassAverageTimeMs[passIndex]);
 		PushIntegerField(L, "sample_count", static_cast<lua_Integer>(GpuPassHistoryMs[passIndex].size()));
+		PushNumberField(L, "cpu_last_ms", CpuPassLastTimeMs[passIndex]);
+		PushNumberField(L, "cpu_average_ms", CpuPassAverageTimeMs[passIndex]);
+		PushIntegerField(L, "cpu_sample_count", static_cast<lua_Integer>(CpuPassHistoryMs[passIndex].size()));
 		lua_rawseti(L, -2, pushedPassIndex++);
 	}
 	lua_setfield(L, -2, "gpu_passes");

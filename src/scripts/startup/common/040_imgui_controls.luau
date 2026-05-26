@@ -573,6 +573,20 @@ local function draw_gpu_timing_overlay(state)
                         end
                     end
                 end
+                if phase.name == "Render Passes" and state.gpu_passes ~= nil then
+                    for _, pass in ipairs(state.gpu_passes) do
+                        local cpu_last = pass.cpu_last_ms or 0.0
+                        local cpu_avg = pass.cpu_average_ms or 0.0
+                        if pass.name ~= "Frame Total" and (cpu_last > 0.001 or cpu_avg > 0.001) then
+                            table.insert(lines, string.format(
+                                "      pass.%s: %.3f ms (avg %.3f)",
+                                pass.name or "pass",
+                                cpu_last,
+                                cpu_avg
+                            ))
+                        end
+                    end
+                end
             end
         end
     end

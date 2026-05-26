@@ -878,20 +878,28 @@ namespace
 		backend->EndGpuMarker();
 	}
 
-	constexpr std::array<const char*, 5> kCpuUpdatePhaseNames = {
+	constexpr std::array<const char*, 9> kCpuUpdatePhaseNames = {
 		"Camera / Physics",
 		"Input",
 		"Luau Scripts",
 		"Camera Path",
 		"Render Sync",
+		"Skeletal Update",
+		"  Skeletal: Palette",
+		"  Skeletal: Pack",
+		"  Skeletal: Upload",
 	};
 
-	constexpr std::array<const char*, 5> kCpuUpdatePhaseLogColumnNames = {
+	constexpr std::array<const char*, 9> kCpuUpdatePhaseLogColumnNames = {
 		"camera_physics",
 		"input",
 		"luau_scripts",
 		"camera_path",
 		"render_sync",
+		"skeletal_update",
+		"skeletal_palette",
+		"skeletal_pack",
+		"skeletal_upload",
 	};
 
 	constexpr std::array<const char*, 8> kRenderCommandPhaseNames = {
@@ -1569,8 +1577,22 @@ void Corona::EndGpuPassTiming(EGpuPass pass)
 	const UINT passIndex = static_cast<UINT>(pass);
 	if (CpuPassActiveMask[passIndex])
 	{
-		CpuPassLastTimeMs[passIndex] =
+		const float cpuMs =
 			static_cast<float>(ElapsedMilliseconds(CpuPassStartTimes[passIndex], CpuClock::now()));
+		CpuPassLastTimeMs[passIndex] = cpuMs;
+		auto& cpuHistory = CpuPassHistoryMs[passIndex];
+		cpuHistory.push_back(cpuMs);
+		while (cpuHistory.size() > GpuTimingAverageFrameCount)
+		{
+			cpuHistory.pop_front();
+		}
+		float cpuSum = 0.0f;
+		for (float sample : cpuHistory)
+		{
+			cpuSum += sample;
+		}
+		CpuPassAverageTimeMs[passIndex] =
+			cpuHistory.empty() ? 0.0f : (cpuSum / static_cast<float>(cpuHistory.size()));
 	}
 	EndGpuPassMarker(renderBackend.get());
 
@@ -7638,8 +7660,11 @@ void Corona::LoadPipeline()
 		ComPtr<ID3D12InfoQueue> d3dInfoQueue;
 		if (SUCCEEDED(m_device->QueryInterface(__uuidof(ID3D12InfoQueue), (void**)&d3dInfoQueue)))
 		{
-			d3dInfoQueue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_CORRUPTION, true);
-			d3dInfoQueue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_ERROR, true);
+			// Diagnostic: leave break-on-error off so the bench process can
+			// keep running and log the validation message instead of dying.
+			const bool bBreakOnD3D12Error = _wgetenv(L"CORONA_D3D12_BREAK") != nullptr;
+			d3dInfoQueue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_CORRUPTION, bBreakOnD3D12Error);
+			d3dInfoQueue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_ERROR, bBreakOnD3D12Error);
 
 			//D3D12_MESSAGE_ID blockedIds[] = {
 			//	/*	D3D12_MESSAGE_ID_CLEARRENDERTARGETVIEW_MISMATCHINGCLEARVALUE,
@@ -9859,10 +9884,14 @@ void Corona::DrawMobilePerformanceOverlay()
 	std::snprintf(
 		buffer,
 		sizeof(buffer),
-		"GPU frame %.2f  gbuf %.2f  shadow %.2f  light %.2f  taa %.2f  tone %.2f  ui %.2f",
+		"GPU frame %.2f  skel %.2f  gbuf %.2f  shadow %.2f  ao %.2f  refl %.2f  gi %.2f  light %.2f  taa %.2f  tone %.2f  ui %.2f",
 		passAvg(EGpuPass::Frame),
+		passAvg(EGpuPass::SkeletalSkinning),
 		passAvg(EGpuPass::GBuffer),
 		passAvg(EGpuPass::RaytraceShadow),
+		passAvg(EGpuPass::RaytraceAO),
+		passAvg(EGpuPass::RaytraceReflection),
+		passAvg(EGpuPass::RaytraceGI),
 		passAvg(EGpuPass::Lighting),
 		passAvg(EGpuPass::TemporalAA),
 		passAvg(EGpuPass::ToneMap),
@@ -9872,9 +9901,13 @@ void Corona::DrawMobilePerformanceOverlay()
 	std::snprintf(
 		buffer,
 		sizeof(buffer),
-		"CPU pass gbuf %.2f  shadow %.2f  light %.2f  taa %.2f  tone %.2f  ui %.2f",
+		"CPU pass skel %.2f  gbuf %.2f  shadow %.2f  ao %.2f  refl %.2f  gi %.2f  light %.2f  taa %.2f  tone %.2f  ui %.2f",
+		passCpu(EGpuPass::SkeletalSkinning),
 		passCpu(EGpuPass::GBuffer),
 		passCpu(EGpuPass::RaytraceShadow),
+		passCpu(EGpuPass::RaytraceAO),
+		passCpu(EGpuPass::RaytraceReflection),
+		passCpu(EGpuPass::RaytraceGI),
 		passCpu(EGpuPass::Lighting),
 		passCpu(EGpuPass::TemporalAA),
 		passCpu(EGpuPass::ToneMap),
@@ -10136,7 +10169,11 @@ void Corona::OnUpdate()
 
 	// Drive procedural skeletal animation when test characters are present.
 	if (bCommandLineSpawnSkeletalTest)
+	{
+		auto skeletalStart = CpuClock::now();
 		UpdateSkeletalTestCharacters(static_cast<float>(m_timer.GetTotalSeconds()));
+		AddCpuUpdatePhaseTiming(ECpuUpdatePhase::SkeletalUpdate, skeletalStart, CpuClock::now());
+	}
 
 	if (m_frameCounter == 100)
 	{
@@ -11294,6 +11331,18 @@ void Corona::OnRender()
 						sumMs += sampleMs;
 					}
 					GpuPassAverageTimeMs[passIndex] = history.empty() ? 0.0f : (sumMs / static_cast<float>(history.size()));
+
+					auto& cpuHistory = CpuPassHistoryMs[passIndex];
+					while (cpuHistory.size() > GpuTimingAverageFrameCount)
+					{
+						cpuHistory.pop_front();
+					}
+					float cpuSumMs = 0.0f;
+					for (float sampleMs : cpuHistory)
+					{
+						cpuSumMs += sampleMs;
+					}
+					CpuPassAverageTimeMs[passIndex] = cpuHistory.empty() ? 0.0f : (cpuSumMs / static_cast<float>(cpuHistory.size()));
 				}
 				TrimCpuUpdateTimingHistory();
 			}
@@ -11315,15 +11364,17 @@ void Corona::OnRender()
 			ImGui::Separator();
 			for (UINT passIndex = 0; passIndex < GpuPassCount; ++passIndex)
 			{
-				if (GpuPassAverageTimeMs[passIndex] <= 0.0f)
+				if (GpuPassAverageTimeMs[passIndex] <= 0.0f && CpuPassLastTimeMs[passIndex] <= 0.0f)
 					continue;
 
 				ImGui::Text(
-					"%s: %.3f ms (avg %uF %.3f ms)",
+					"%s: gpu %.3f (avg %uF %.3f) | cpu rec %.3f (avg %.3f) ms",
 					GetGpuPassName(static_cast<EGpuPass>(passIndex)),
 					GpuPassLastTimeMs[passIndex],
 					static_cast<unsigned>(GpuPassHistoryMs[passIndex].size()),
-					GpuPassAverageTimeMs[passIndex]);
+					GpuPassAverageTimeMs[passIndex],
+					CpuPassLastTimeMs[passIndex],
+					CpuPassAverageTimeMs[passIndex]);
 			}
 			ImGui::End();
 		}
@@ -12031,7 +12082,30 @@ if (ImGui::Button("Reset Accumulation"))
 	// Skeletal test: trigger the existing final-backbuffer screenshot facility
 	// once at the requested frame. Uses RequestFinalBackbufferScreenshot ->
 	// renderBackend->RequestWindowCapture path, the same one F-key UI uses.
+	// Burst mode: dump shadow + AO + specular GI for 8 consecutive frames
+	// so we can diff flicker between frames.
 	if (bCommandLineSkeletalTestScreenshot && !bSkeletalTestScreenshotDone &&
+		FrameCounter >= SkeletalTestScreenshotFrame &&
+		FrameCounter <= SkeletalTestScreenshotFrame + 7 &&
+		!bFinalScreenshotCaptureInFlight)
+	{
+		if (FrameCounter == SkeletalTestScreenshotFrame + 7)
+			bSkeletalTestScreenshotDone = true;
+		std::filesystem::path gbufDir = RuntimePaths::DumpDirectory() / L"skeletal_test_gbuffer";
+		std::error_code ec;
+		std::filesystem::create_directories(gbufDir, ec);
+		const std::wstring base = (gbufDir / (L"frame_" + std::to_wstring(FrameCounter))).wstring();
+		if (ShadowBuffer)
+			DumpTexturePNG(ShadowBuffer.get(), base + L"_shadow.png", EResourceState::ShaderRead);
+		if (AmbientOcclusionBuffer)
+			DumpTexturePNG(AmbientOcclusionBuffer.get(), base + L"_rtao.png", EResourceState::ShaderRead);
+		if (SpecularGIRaw)
+			DumpTexturePNG(SpecularGIRaw.get(), base + L"_specgi.png", EResourceState::ShaderRead);
+		if (DiffuseGIRaw)
+			DumpTexturePNG(DiffuseGIRaw.get(), base + L"_diffusegi.png", EResourceState::ShaderRead);
+		return;
+	}
+	if (false && bCommandLineSkeletalTestScreenshot && !bSkeletalTestScreenshotDone &&
 		FrameCounter >= SkeletalTestScreenshotFrame &&
 		!bFinalScreenshotCaptureInFlight)
 	{

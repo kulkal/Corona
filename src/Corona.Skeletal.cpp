@@ -752,10 +752,9 @@ void Corona::SpawnSkeletalTestCharacters()
 		(void)AddSceneObject(desc);
 	}
 
-	// Bench mode: add a large flat ground box under the grid so we have a
-	// surface for shadows to land on and a reference for whether the
-	// characters are actually rendering. Use a separate procedural cube
-	// scaled flat (XZ wide, Y thin).
+	// Bench mode: add a large flat ground box under the grid so we have
+	// a surface for shadows to land on and a reference for whether the
+	// characters are actually rendering.
 	if (bCommandLineSkeletalBenchMode)
 	{
 		const float groundHalfXZ = std::max(2000.0f, static_cast<float>(gridSide) * spacing + 1000.0f);
@@ -866,41 +865,58 @@ void Corona::SpawnSkeletalTestCharacters()
 
 namespace
 {
-	// One mat4 per bone; multiply parent * local along the chain to get
-	// world. Final skinning matrix = world * inverse(bind_world).
-	struct AnimatedBone
-	{
-		glm::mat4 LocalTransform = glm::mat4(1.0f);
-		glm::mat4 WorldTransform = glm::mat4(1.0f);
-	};
+	// mat3x4 row layout matching the SBV the compute skinning shader binds.
+	struct SkinBoneRow { float r0[4]; float r1[4]; float r2[4]; };
 
-	// Build a per-frame skinning palette (mat3x4 each) for the procedural
-	// box-character skeleton.
-	void ComputeSkeletalPalette(float timeSeconds, std::vector<glm::mat4>& outPalette, int instanceIndex)
+	// Skeleton + bind-pose data is identical for every test character and
+	// every frame. Build it once on first use and reuse across calls.
+	struct SkeletonCache
 	{
-		std::vector<BoneSegment> bones;
-		BuildSkeleton(bones);
-		std::vector<glm::vec3> boneHeads, boneTails;
-		ComputeBindPoseBoneEndpoints(bones, boneHeads, boneTails);
+		std::array<BoneSegment, BONE_COUNT> Bones;
+		std::array<glm::vec3, BONE_COUNT> BoneHeads;
+		std::array<glm::mat4, BONE_COUNT> BindLocalTranslation;  // translate(HeadLocalOffset)
+		bool Initialized = false;
+	};
+	SkeletonCache& GetSkeletonCache()
+	{
+		static SkeletonCache cache;
+		if (!cache.Initialized)
+		{
+			std::vector<BoneSegment> bonesVec;
+			BuildSkeleton(bonesVec);
+			std::vector<glm::vec3> heads, tails;
+			ComputeBindPoseBoneEndpoints(bonesVec, heads, tails);
+			for (size_t i = 0; i < BONE_COUNT; ++i)
+			{
+				cache.Bones[i] = bonesVec[i];
+				cache.BoneHeads[i] = heads[i];
+				cache.BindLocalTranslation[i] =
+					glm::translate(glm::mat4(1.0f), bonesVec[i].HeadLocalOffset);
+			}
+			cache.Initialized = true;
+		}
+		return cache;
+	}
+
+	// Compute the per-bone skinning matrices for one character and pack
+	// them directly into the mat3x4 row layout the compute shader expects.
+	// No glm::mat4 intermediate palette, no per-call vector allocations,
+	// no BuildSkeleton repeat.
+	void ComputeSkeletalPalettePacked(float timeSeconds, SkinBoneRow* outPacked, int instanceIndex)
+	{
+		const SkeletonCache& cache = GetSkeletonCache();
 
 		// Per-instance phase offset so a crowd doesn't move in lockstep.
 		const float phase = static_cast<float>(instanceIndex) * 0.37f;
 		const float t = timeSeconds + phase;
 
-		std::vector<AnimatedBone> anim(bones.size());
-		for (size_t i = 0; i < bones.size(); ++i)
-		{
-			// Start from bind-pose local: translate(HeadLocalOffset).
-			anim[i].LocalTransform = glm::translate(glm::mat4(1.0f), bones[i].HeadLocalOffset);
-		}
-		// Apply per-bone procedural rotations around their head joint.
+		std::array<glm::mat4, BONE_COUNT> localT = cache.BindLocalTranslation;
+
 		auto rotateAroundHead = [&](int boneIdx, const glm::vec3& axis, float angle)
 		{
-			if (boneIdx < 0 || boneIdx >= static_cast<int>(anim.size()))
+			if (boneIdx < 0 || boneIdx >= static_cast<int>(BONE_COUNT))
 				return;
-			// translate(head) * rotate(axis, angle) instead of just translate(head).
-			anim[boneIdx].LocalTransform =
-				glm::translate(glm::mat4(1.0f), bones[boneIdx].HeadLocalOffset) *
+			localT[boneIdx] = cache.BindLocalTranslation[boneIdx] *
 				glm::rotate(glm::mat4(1.0f), angle, axis);
 		};
 
@@ -915,21 +931,27 @@ namespace
 		rotateAroundHead(BONE_SPINE,       glm::vec3(0, 1, 0),  std::sin(t * 1.0f)        * 0.15f);
 		rotateAroundHead(BONE_HEAD,        glm::vec3(0, 1, 0),  std::sin(t * 0.8f)        * 0.25f);
 
-		// Parent -> child accumulation.
-		anim[BONE_ROOT].WorldTransform = anim[BONE_ROOT].LocalTransform;
-		for (size_t i = 1; i < bones.size(); ++i)
+		// Parent -> child world accumulation.
+		std::array<glm::mat4, BONE_COUNT> worldT;
+		worldT[BONE_ROOT] = localT[BONE_ROOT];
+		for (size_t i = 1; i < BONE_COUNT; ++i)
 		{
-			const int p = bones[i].ParentIndex;
-			anim[i].WorldTransform = anim[p].WorldTransform * anim[i].LocalTransform;
+			worldT[i] = worldT[cache.Bones[i].ParentIndex] * localT[i];
 		}
 
-		// Final skinning = world * inverse(bind_world). Bind pose is pure
-		// translation by boneHeads[i] so the inverse is translate(-head).
-		outPalette.resize(bones.size());
-		for (size_t i = 0; i < bones.size(); ++i)
+		// Final skinning = world * inverse(bind_world). bind_world is pure
+		// translation by BoneHeads[i] so M = world with col3 replaced by
+		// world * vec4(-BoneHeads[i], 1). Pack directly into the row-major
+		// mat3x4 layout the shader binds (rows 0..2 of transposed M).
+		for (size_t i = 0; i < BONE_COUNT; ++i)
 		{
-			const glm::mat4 bindWorldInv = glm::translate(glm::mat4(1.0f), -boneHeads[i]);
-			outPalette[i] = anim[i].WorldTransform * bindWorldInv;
+			const glm::mat4& W = worldT[i];
+			const glm::vec3& bh = cache.BoneHeads[i];
+			const glm::vec4 c3 = W[3] - W[0] * bh.x - W[1] * bh.y - W[2] * bh.z;
+			SkinBoneRow& dst = outPacked[i];
+			dst.r0[0] = W[0].x; dst.r0[1] = W[1].x; dst.r0[2] = W[2].x; dst.r0[3] = c3.x;
+			dst.r1[0] = W[0].y; dst.r1[1] = W[1].y; dst.r1[2] = W[2].y; dst.r1[3] = c3.y;
+			dst.r2[0] = W[0].z; dst.r2[1] = W[1].z; dst.r2[2] = W[2].z; dst.r2[3] = c3.z;
 		}
 	}
 }
@@ -947,25 +969,17 @@ void Corona::UpdateSkeletalTestCharacters(float timeSeconds)
 	// is reported.
 	const float prevTimeSeconds = bSkeletalPrevUpdateTimeValid ? SkeletalPrevUpdateTimeSeconds : timeSeconds;
 
-	int instanceIndex = 0;
-	std::vector<glm::mat4> palette;
-	std::vector<glm::mat4> palettePrev;
-	struct SkinBoneRow { float r0[4]; float r1[4]; float r2[4]; };
-	std::vector<SkinBoneRow> packed;
-	std::vector<SkinBoneRow> packedPrev;
-
-	auto packPalette = [](const std::vector<glm::mat4>& src, std::vector<SkinBoneRow>& dst)
+	// Collect every skeletal mesh that needs an update this frame so the
+	// palette compute step (per-character, independent) can run in parallel
+	// across all of them. Uploads stay serial because they hit D3D12.
+	struct SkinJob
 	{
-		dst.resize(src.size());
-		for (size_t i = 0; i < src.size(); ++i)
-		{
-			const glm::mat4 t = glm::transpose(src[i]);
-			dst[i].r0[0] = t[0][0]; dst[i].r0[1] = t[0][1]; dst[i].r0[2] = t[0][2]; dst[i].r0[3] = t[0][3];
-			dst[i].r1[0] = t[1][0]; dst[i].r1[1] = t[1][1]; dst[i].r1[2] = t[1][2]; dst[i].r1[3] = t[1][3];
-			dst[i].r2[0] = t[2][0]; dst[i].r2[1] = t[2][1]; dst[i].r2[2] = t[2][2]; dst[i].r2[3] = t[2][3];
-		}
+		Mesh* MeshPtr;
+		int InstanceIndex;
 	};
-
+	std::vector<SkinJob> jobs;
+	jobs.reserve(64);
+	int instanceIndex = 0;
 	for (SceneObject& object : SceneObjects)
 	{
 		if (!object.ScenePtr)
@@ -974,30 +988,84 @@ void Corona::UpdateSkeletalTestCharacters(float timeSeconds)
 		{
 			if (!mesh || !mesh->bSkeletalSkinned)
 				continue;
-
-			ComputeSkeletalPalette(timeSeconds, palette, instanceIndex);
-			ComputeSkeletalPalette(prevTimeSeconds, palettePrev, instanceIndex);
-			packPalette(palette, packed);
-			packPalette(palettePrev, packedPrev);
-
-			if (mesh->SkeletalBoneMatrices)
-			{
-				renderBackend->UpdateUploadStructuredBuffer(
-					mesh->SkeletalBoneMatrices.get(),
-					packed.data(),
-					static_cast<UINT32>(packed.size() * sizeof(SkinBoneRow)));
-			}
-			if (mesh->SkeletalPrevBoneMatrices)
-			{
-				renderBackend->UpdateUploadStructuredBuffer(
-					mesh->SkeletalPrevBoneMatrices.get(),
-					packedPrev.data(),
-					static_cast<UINT32>(packedPrev.size() * sizeof(SkinBoneRow)));
-			}
-
-			++instanceIndex;
+			jobs.push_back({ mesh.get(), instanceIndex++ });
 		}
 	}
+
+	const size_t jobCount = jobs.size();
+	// One mat3x4 palette per bone, two palettes per character (curr + prev),
+	// laid out contiguously so workers write disjoint ranges.
+	std::vector<SkinBoneRow> packed(jobCount * BONE_COUNT);
+	std::vector<SkinBoneRow> packedPrev(jobCount * BONE_COUNT);
+
+	const auto computeStart = CpuClock::now();
+
+	auto computeJob = [&](size_t j)
+	{
+		const SkinJob& job = jobs[j];
+		ComputeSkeletalPalettePacked(timeSeconds, packed.data() + j * BONE_COUNT, job.InstanceIndex);
+		ComputeSkeletalPalettePacked(prevTimeSeconds, packedPrev.data() + j * BONE_COUNT, job.InstanceIndex);
+	};
+
+	// Parallelize palette compute across hardware threads. For very small
+	// job counts the dispatch overhead can dwarf the work so fall back to
+	// in-line execution.
+	const unsigned int hwThreads = std::max(1u, std::thread::hardware_concurrency());
+	const size_t kParallelThreshold = 4;
+	if (jobCount <= kParallelThreshold || hwThreads <= 1)
+	{
+		for (size_t j = 0; j < jobCount; ++j)
+			computeJob(j);
+	}
+	else
+	{
+		const unsigned int workerCount = static_cast<unsigned int>(std::min<size_t>(hwThreads, jobCount));
+		std::vector<std::thread> workers;
+		workers.reserve(workerCount - 1u);
+		std::atomic<size_t> nextJob = 0;
+		auto runWorker = [&]()
+		{
+			for (;;)
+			{
+				const size_t j = nextJob.fetch_add(1, std::memory_order_relaxed);
+				if (j >= jobCount)
+					return;
+				computeJob(j);
+			}
+		};
+		for (unsigned int w = 1; w < workerCount; ++w)
+			workers.emplace_back(runWorker);
+		runWorker();
+		for (std::thread& t : workers)
+			t.join();
+	}
+
+	const auto computeEnd = CpuClock::now();
+	AddCpuUpdatePhaseTiming(ECpuUpdatePhase::SkeletalPalette, computeStart, computeEnd);
+	// Pack is now fused into the compute step; report 0 to keep the slot
+	// visible in the overlay for comparison with the pre-fusion baseline.
+	AddCpuUpdatePhaseTiming(ECpuUpdatePhase::SkeletalPack, computeEnd, computeEnd);
+
+	for (size_t j = 0; j < jobCount; ++j)
+	{
+		Mesh* mesh = jobs[j].MeshPtr;
+		const UINT32 byteSize = static_cast<UINT32>(BONE_COUNT * sizeof(SkinBoneRow));
+		if (mesh->SkeletalBoneMatrices)
+		{
+			renderBackend->UpdateUploadStructuredBuffer(
+				mesh->SkeletalBoneMatrices.get(),
+				packed.data() + j * BONE_COUNT,
+				byteSize);
+		}
+		if (mesh->SkeletalPrevBoneMatrices)
+		{
+			renderBackend->UpdateUploadStructuredBuffer(
+				mesh->SkeletalPrevBoneMatrices.get(),
+				packedPrev.data() + j * BONE_COUNT,
+				byteSize);
+		}
+	}
+	AddCpuUpdatePhaseTiming(ECpuUpdatePhase::SkeletalUpload, computeEnd, CpuClock::now());
 
 	SkeletalPrevUpdateTimeSeconds = timeSeconds;
 	bSkeletalPrevUpdateTimeValid = true;

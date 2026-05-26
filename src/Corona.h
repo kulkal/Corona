@@ -148,6 +148,10 @@ private:
 		LuauScripts,
 		CameraPath,
 		RenderSync,
+		SkeletalUpdate,
+		SkeletalPalette,
+		SkeletalPack,
+		SkeletalUpload,
 		Count
 	};
 
@@ -1800,6 +1804,8 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	float FramePerfLastRenderWaitMs = 0.0f;
 	float FramePerfAverageRenderWaitMs = 0.0f;
 	std::array<float, GpuPassCount> CpuPassLastTimeMs = {};
+	std::array<float, GpuPassCount> CpuPassAverageTimeMs = {};
+	std::array<std::deque<float>, GpuPassCount> CpuPassHistoryMs = {};
 	std::array<double, GpuPassCount> CpuPassAccumTimeMs = {};
 	std::array<uint8_t, GpuPassCount> CpuPassActiveMask = {};
 	std::array<CpuClock::time_point, GpuPassCount> CpuPassStartTimes = {};
