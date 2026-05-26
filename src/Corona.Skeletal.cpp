@@ -322,57 +322,69 @@ namespace
 		// Standing T-pose body, head at +Y, feet at Y=0.
 		outParts.clear();
 
+		// Subdivisions tuned so the whole character lands near 2 000 triangles
+		// (representative of casual / mid-tier far-LOD mobile characters where
+		// CPU skinning is most viable). Each part's triangle count is
+		// SubdivAxis * SubdivCross * 12, so the totals here come to roughly
+		// 10 parts * ~190 tris ~= 1900 tris.
+		constexpr int kBodySa = 8;
+		constexpr int kBodySc = 2;
+		constexpr int kHeadSa = 4;
+		constexpr int kHeadSc = 3;
+		constexpr int kLimbSa = 8;
+		constexpr int kLimbSc = 2;
+
 		// Torso (centered on spine between hips and shoulders).
 		outParts.push_back(BoxPart{
 			glm::vec3(0.0f, kHipHeight + kTorsoHeight * 0.5f, 0.0f),
 			glm::vec3(kTorsoWidth, kTorsoHeight, kTorsoDepth),
-			BONE_SPINE, BONE_HIPS, 16, 4 });
+			BONE_SPINE, BONE_HIPS, kBodySa, kBodySc });
 
 		// Head.
 		outParts.push_back(BoxPart{
 			glm::vec3(0.0f, kShoulderY + kNeckHeight + kHeadSize * 0.5f, 0.0f),
 			glm::vec3(kHeadSize, kHeadSize, kHeadSize),
-			BONE_HEAD, BONE_NECK, 8, 4 });
+			BONE_HEAD, BONE_NECK, kHeadSa, kHeadSc });
 
 		// Upper arms (lie along +/- X from shoulder).
 		outParts.push_back(BoxPart{
 			glm::vec3( kShoulderXOff + kUpperArmLen * 0.5f + 0.05f, kShoulderY - 0.18f, 0.0f),
 			glm::vec3(kUpperArmLen, kArmThick, kArmThick),
-			BONE_UPPER_ARM_L, BONE_SHOULDER_L, 14, 4 });
+			BONE_UPPER_ARM_L, BONE_SHOULDER_L, kLimbSa, kLimbSc });
 		outParts.push_back(BoxPart{
 			glm::vec3(-kShoulderXOff - kUpperArmLen * 0.5f - 0.05f, kShoulderY - 0.18f, 0.0f),
 			glm::vec3(kUpperArmLen, kArmThick, kArmThick),
-			BONE_UPPER_ARM_R, BONE_SHOULDER_R, 14, 4 });
+			BONE_UPPER_ARM_R, BONE_SHOULDER_R, kLimbSa, kLimbSc });
 
 		// Lower arms.
 		outParts.push_back(BoxPart{
 			glm::vec3( kShoulderXOff + kUpperArmLen + kLowerArmLen * 0.5f + 0.05f, kShoulderY - 0.18f, 0.0f),
 			glm::vec3(kLowerArmLen, kArmThick * 0.9f, kArmThick * 0.9f),
-			BONE_LOWER_ARM_L, BONE_UPPER_ARM_L, 14, 4 });
+			BONE_LOWER_ARM_L, BONE_UPPER_ARM_L, kLimbSa, kLimbSc });
 		outParts.push_back(BoxPart{
 			glm::vec3(-kShoulderXOff - kUpperArmLen - kLowerArmLen * 0.5f - 0.05f, kShoulderY - 0.18f, 0.0f),
 			glm::vec3(kLowerArmLen, kArmThick * 0.9f, kArmThick * 0.9f),
-			BONE_LOWER_ARM_R, BONE_UPPER_ARM_R, 14, 4 });
+			BONE_LOWER_ARM_R, BONE_UPPER_ARM_R, kLimbSa, kLimbSc });
 
 		// Upper legs (down along -Y from hips).
 		outParts.push_back(BoxPart{
 			glm::vec3( kHipXOff, kHipHeight - 0.02f - kUpperLegLen * 0.5f, 0.0f),
 			glm::vec3(kLegThick, kUpperLegLen, kLegThick),
-			BONE_UPPER_LEG_L, BONE_HIP_L, 16, 4 });
+			BONE_UPPER_LEG_L, BONE_HIP_L, kLimbSa, kLimbSc });
 		outParts.push_back(BoxPart{
 			glm::vec3(-kHipXOff, kHipHeight - 0.02f - kUpperLegLen * 0.5f, 0.0f),
 			glm::vec3(kLegThick, kUpperLegLen, kLegThick),
-			BONE_UPPER_LEG_R, BONE_HIP_R, 16, 4 });
+			BONE_UPPER_LEG_R, BONE_HIP_R, kLimbSa, kLimbSc });
 
 		// Lower legs.
 		outParts.push_back(BoxPart{
 			glm::vec3( kHipXOff, kHipHeight - 0.02f - kUpperLegLen - kLowerLegLen * 0.5f, 0.0f),
 			glm::vec3(kLegThick * 0.9f, kLowerLegLen, kLegThick * 0.9f),
-			BONE_LOWER_LEG_L, BONE_UPPER_LEG_L, 16, 4 });
+			BONE_LOWER_LEG_L, BONE_UPPER_LEG_L, kLimbSa, kLimbSc });
 		outParts.push_back(BoxPart{
 			glm::vec3(-kHipXOff, kHipHeight - 0.02f - kUpperLegLen - kLowerLegLen * 0.5f, 0.0f),
 			glm::vec3(kLegThick * 0.9f, kLowerLegLen, kLegThick * 0.9f),
-			BONE_LOWER_LEG_R, BONE_UPPER_LEG_R, 16, 4 });
+			BONE_LOWER_LEG_R, BONE_UPPER_LEG_R, kLimbSa, kLimbSc });
 	}
 
 	// Per-bone effective influence radius used to normalize distance->weight
@@ -430,6 +442,23 @@ void Corona::DispatchSkeletalSkinningForRenderWorld()
 {
 	if (!renderBackend || !SkeletalSkinningPSO)
 		return;
+
+	// Phase S: CPU-skinning benchmark path. Skip the GPU compute pre-pass
+	// and skin every character on the CPU into a fresh UPLOAD-heap VB
+	// the GBuffer draw will read instead of SkeletalUnifiedOutputVb.
+	// BLAS refit is also skipped — RT visuals will reflect the bind pose
+	// while this mode is active.
+	if (bSkeletalUseCpuSkinning)
+	{
+		CpuSkinSkeletalCharactersForRenderWorld();
+		SkeletalStats.CharactersAnimated = SkeletalUnifiedCharCount;
+		SkeletalStats.DispatchCount = 0;
+		SkeletalStats.TransitionCount = 0;
+		SkeletalStats.VerticesSkinned = SkeletalUnifiedCharCount * SkeletalUnifiedVertsPerChar;
+		SkeletalStats.BonesUploaded = SkeletalUnifiedCharCount * SkeletalUnifiedBoneCount;
+		SkeletalStats.BlasUpdates = 0;
+		return;
+	}
 
 	// Gather visible skeletal meshes (single pass).
 	std::vector<Mesh*> skinnedMeshes;
@@ -672,6 +701,30 @@ void Corona::SpawnSkeletalTestCharacters()
 		inputDesc.InitialData = skin.data();
 		inputDesc.Shape = EBufferShape::Structured;
 		SkeletalUnifiedInputVertices = renderBackend->CreateBuffer(inputDesc);
+
+		// CPU-side mirror of the bind pose for the CPU-skinning benchmark
+		// path. Avoids reading back from a GPU SBV at skin time.
+		SkeletalUnifiedBindPoseCpu.resize(skin.size());
+		for (size_t i = 0; i < skin.size(); ++i)
+		{
+			SkinInputVertexCpu& dst = SkeletalUnifiedBindPoseCpu[i];
+			dst.BindPosition[0] = skin[i].BindPosition.x;
+			dst.BindPosition[1] = skin[i].BindPosition.y;
+			dst.BindPosition[2] = skin[i].BindPosition.z;
+			dst.BindNormal[0] = skin[i].BindNormal.x;
+			dst.BindNormal[1] = skin[i].BindNormal.y;
+			dst.BindNormal[2] = skin[i].BindNormal.z;
+			dst.BindTangent[0] = skin[i].BindTangent.x;
+			dst.BindTangent[1] = skin[i].BindTangent.y;
+			dst.BindTangent[2] = skin[i].BindTangent.z;
+			dst.UV[0] = skin[i].UV.x;
+			dst.UV[1] = skin[i].UV.y;
+			dst.BoneIndicesPacked = skin[i].BoneIndicesPacked;
+			dst.BoneWeights[0] = skin[i].BoneWeights.x;
+			dst.BoneWeights[1] = skin[i].BoneWeights.y;
+			dst.BoneWeights[2] = skin[i].BoneWeights.z;
+			dst.BoneWeights[3] = skin[i].BoneWeights.w;
+		}
 	}
 
 	struct InitialBoneMatrix { float r0[4]; float r1[4]; float r2[4]; };
@@ -1124,10 +1177,141 @@ void Corona::UpdateSkeletalTestCharacters(float timeSeconds)
 			packedPrev.data(),
 			static_cast<UINT32>(packedPrev.size() * sizeof(SkinBoneRow)));
 	}
+
+	// Mirror the packed palettes onto the Corona class so the CPU-skinning
+	// benchmark path can read them on the render thread without a GPU
+	// readback. Same layout as the SBV slots.
+	static_assert(sizeof(SkinBoneRow) == sizeof(SkinBoneRowCpu),
+		"SkinBoneRow layout must match SkinBoneRowCpu");
+	SkeletalUnifiedPaletteCpu.assign(
+		reinterpret_cast<const SkinBoneRowCpu*>(packed.data()),
+		reinterpret_cast<const SkinBoneRowCpu*>(packed.data() + packed.size()));
+	SkeletalUnifiedPalettePrevCpu.assign(
+		reinterpret_cast<const SkinBoneRowCpu*>(packedPrev.data()),
+		reinterpret_cast<const SkinBoneRowCpu*>(packedPrev.data() + packedPrev.size()));
 	AddCpuUpdatePhaseTiming(ECpuUpdatePhase::SkeletalUpload, computeEnd, CpuClock::now());
 
 	SkeletalPrevUpdateTimeSeconds = timeSeconds;
 	bSkeletalPrevUpdateTimeValid = true;
+}
+
+void Corona::CpuSkinSkeletalCharactersForRenderWorld()
+{
+	if (!renderBackend ||
+		SkeletalUnifiedCharCount == 0 ||
+		SkeletalUnifiedVertsPerChar == 0 ||
+		SkeletalUnifiedBindPoseCpu.empty() ||
+		SkeletalUnifiedPaletteCpu.size() < SkeletalUnifiedCharCount * SkeletalUnifiedBoneCount)
+	{
+		SkeletalUnifiedCpuSkinnedVb.reset();
+		return;
+	}
+
+	const uint32_t boneCount = SkeletalUnifiedBoneCount;
+	const uint32_t vertsPerChar = SkeletalUnifiedVertsPerChar;
+	const uint32_t totalVerts = SkeletalUnifiedCharCount * vertsPerChar;
+	std::vector<StandardVertex> skinned(totalVerts);
+
+	auto skinOne = [&](size_t charIdx)
+	{
+		const SkinBoneRowCpu* charBones = &SkeletalUnifiedPaletteCpu[charIdx * boneCount];
+		StandardVertex* dst = &skinned[charIdx * vertsPerChar];
+
+		auto transformPoint = [](const SkinBoneRowCpu& b, float x, float y, float z) -> glm::vec3 {
+			return glm::vec3(
+				b.r0[0]*x + b.r0[1]*y + b.r0[2]*z + b.r0[3],
+				b.r1[0]*x + b.r1[1]*y + b.r1[2]*z + b.r1[3],
+				b.r2[0]*x + b.r2[1]*y + b.r2[2]*z + b.r2[3]);
+		};
+		auto transformDir = [](const SkinBoneRowCpu& b, float x, float y, float z) -> glm::vec3 {
+			return glm::vec3(
+				b.r0[0]*x + b.r0[1]*y + b.r0[2]*z,
+				b.r1[0]*x + b.r1[1]*y + b.r1[2]*z,
+				b.r2[0]*x + b.r2[1]*y + b.r2[2]*z);
+		};
+
+		for (uint32_t v = 0; v < vertsPerChar; ++v)
+		{
+			const SkinInputVertexCpu& src = SkeletalUnifiedBindPoseCpu[v];
+			const uint32_t i0 = (src.BoneIndicesPacked >>  0) & 0xFFu;
+			const uint32_t i1 = (src.BoneIndicesPacked >>  8) & 0xFFu;
+			const uint32_t i2 = (src.BoneIndicesPacked >> 16) & 0xFFu;
+			const uint32_t i3 = (src.BoneIndicesPacked >> 24) & 0xFFu;
+			const float w0 = src.BoneWeights[0];
+			const float w1 = src.BoneWeights[1];
+			const float w2 = src.BoneWeights[2];
+			const float w3 = src.BoneWeights[3];
+
+			const glm::vec3 P0 = transformPoint(charBones[i0], src.BindPosition[0], src.BindPosition[1], src.BindPosition[2]);
+			const glm::vec3 P1 = transformPoint(charBones[i1], src.BindPosition[0], src.BindPosition[1], src.BindPosition[2]);
+			const glm::vec3 P2 = transformPoint(charBones[i2], src.BindPosition[0], src.BindPosition[1], src.BindPosition[2]);
+			const glm::vec3 P3 = transformPoint(charBones[i3], src.BindPosition[0], src.BindPosition[1], src.BindPosition[2]);
+			const glm::vec3 P = P0*w0 + P1*w1 + P2*w2 + P3*w3;
+
+			const glm::vec3 N0 = transformDir(charBones[i0], src.BindNormal[0], src.BindNormal[1], src.BindNormal[2]);
+			const glm::vec3 N1 = transformDir(charBones[i1], src.BindNormal[0], src.BindNormal[1], src.BindNormal[2]);
+			const glm::vec3 N2 = transformDir(charBones[i2], src.BindNormal[0], src.BindNormal[1], src.BindNormal[2]);
+			const glm::vec3 N3 = transformDir(charBones[i3], src.BindNormal[0], src.BindNormal[1], src.BindNormal[2]);
+			glm::vec3 N = N0*w0 + N1*w1 + N2*w2 + N3*w3;
+			const float nLenSq = glm::dot(N, N);
+			if (nLenSq > 1e-12f) N *= 1.0f / std::sqrt(nLenSq);
+
+			const glm::vec3 T0 = transformDir(charBones[i0], src.BindTangent[0], src.BindTangent[1], src.BindTangent[2]);
+			const glm::vec3 T1 = transformDir(charBones[i1], src.BindTangent[0], src.BindTangent[1], src.BindTangent[2]);
+			const glm::vec3 T2 = transformDir(charBones[i2], src.BindTangent[0], src.BindTangent[1], src.BindTangent[2]);
+			const glm::vec3 T3 = transformDir(charBones[i3], src.BindTangent[0], src.BindTangent[1], src.BindTangent[2]);
+			glm::vec3 T = T0*w0 + T1*w1 + T2*w2 + T3*w3;
+			T = T - N * glm::dot(N, T);
+			const float tLenSq = glm::dot(T, T);
+			if (tLenSq > 1e-12f) T *= 1.0f / std::sqrt(tLenSq);
+
+			dst[v].Position = glm::vec4(P, 1.0f);
+			dst[v].UV = glm::vec2(src.UV[0], src.UV[1]);
+			dst[v].Normal = N;
+			dst[v].Tangent = T;
+		}
+	};
+
+	// Parallel skin across characters (work-stealing pool).
+	const unsigned int hwThreads = std::max(1u, std::thread::hardware_concurrency());
+	const size_t jobCount = SkeletalUnifiedCharCount;
+	const size_t kParallelThreshold = 4;
+	if (jobCount <= kParallelThreshold || hwThreads <= 1)
+	{
+		for (size_t j = 0; j < jobCount; ++j)
+			skinOne(j);
+	}
+	else
+	{
+		const unsigned int workerCount = static_cast<unsigned int>(std::min<size_t>(hwThreads, jobCount));
+		std::vector<std::thread> workers;
+		workers.reserve(workerCount - 1u);
+		std::atomic<size_t> nextJob = 0;
+		auto runWorker = [&]() {
+			for (;;) {
+				const size_t j = nextJob.fetch_add(1, std::memory_order_relaxed);
+				if (j >= jobCount) return;
+				skinOne(j);
+			}
+		};
+		for (unsigned int w = 1; w < workerCount; ++w)
+			workers.emplace_back(runWorker);
+		runWorker();
+		for (std::thread& t : workers) t.join();
+	}
+
+	// Upload to a fresh UPLOAD-heap VB and park it in a small ring so the
+	// previous frame's VB (which the GPU may still be reading) is held
+	// alive long enough to satisfy the D3D12 debug layer.
+	SkeletalUnifiedCpuSkinnedVbRingIndex =
+		(SkeletalUnifiedCpuSkinnedVbRingIndex + 1) %
+		static_cast<uint32_t>(SkeletalUnifiedCpuSkinnedVbRing.size());
+	auto& slot = SkeletalUnifiedCpuSkinnedVbRing[SkeletalUnifiedCpuSkinnedVbRingIndex];
+	slot = renderBackend->CreateUploadVertexBuffer(
+		static_cast<UINT32>(skinned.size() * sizeof(StandardVertex)),
+		sizeof(StandardVertex),
+		skinned.data());
+	SkeletalUnifiedCpuSkinnedVb = slot;
 }
 
 void Corona::UpdateSkeletalUnifiedInstanceTransforms()
@@ -1165,8 +1349,15 @@ void Corona::UpdateSkeletalUnifiedInstanceTransforms()
 
 bool Corona::DrawSkeletalUnifiedCluster()
 {
+	// Pick the VB the GBuffer IA will read from: GPU compute output by
+	// default, the per-frame CPU-skinned UPLOAD VB when the Spine-style
+	// path is active.
+	VertexBuffer* drawVb = bSkeletalUseCpuSkinning
+		? SkeletalUnifiedCpuSkinnedVb.get()
+		: SkeletalUnifiedOutputVb.get();
+
 	if (!SkeletalGBufferGraphicsPipeline ||
-		!SkeletalUnifiedOutputVb || !SkeletalUnifiedIb ||
+		!drawVb || !SkeletalUnifiedIb ||
 		!SkeletalUnifiedInputVertices || !SkeletalUnifiedPrevBoneMatrices ||
 		!SkeletalUnifiedInstanceTransforms ||
 		!SkeletalUnifiedMaterial ||
@@ -1182,7 +1373,7 @@ bool Corona::DrawSkeletalUnifiedCluster()
 	renderBackend->BindGraphicsPipelineBuffer(pso, "SkeletalPrevBones", SkeletalUnifiedPrevBoneMatrices.get());
 	renderBackend->BindGraphicsPipelineBuffer(pso, "SkeletalInstanceTransforms", SkeletalUnifiedInstanceTransforms.get());
 
-	renderBackend->BindMeshBuffers(SkeletalUnifiedOutputVb.get(), SkeletalUnifiedIb.get());
+	renderBackend->BindMeshBuffers(drawVb, SkeletalUnifiedIb.get());
 
 	GBufferConstantBuffer objCB = {};
 	objCB.ViewProjectionMatrix = glm::transpose(ViewProjMat);
