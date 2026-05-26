@@ -24,9 +24,12 @@
 #include <cstring>
 #include <cstdlib>
 #include <iomanip>
+#include <mutex>
+#include <set>
 #include <sstream>
 #include <fstream>
 #include <filesystem>
+#include <tuple>
 
 #include <assert.h>
 
@@ -951,14 +954,24 @@ void DX12Backend::BindMeshBuffers(VertexBuffer* vertexBuffer, IndexBuffer* index
 		const uint32_t vbStride = vertexBuffer->view.StrideInBytes;
 		if (psoStride != 0 && vbStride != 0 && psoStride != vbStride)
 		{
-			static std::atomic<bool> bLoggedStrideMismatch{ false };
-			bool expected = false;
-			if (bLoggedStrideMismatch.compare_exchange_strong(expected, true))
+			// Track unique (psoStride, vbStride, path) tuples so the
+			// trace doesn't drown but every distinct callsite is logged
+			// at least once.
+			static std::mutex sMismatchMutex;
+			static std::set<std::tuple<uint32_t, uint32_t, std::wstring>> sLoggedMismatches;
+			const auto key = std::make_tuple(psoStride, vbStride, dxPipeline->ShaderPathForDiag);
+			bool fresh = false;
+			{
+				std::lock_guard<std::mutex> lock(sMismatchMutex);
+				if (sLoggedMismatches.insert(key).second) fresh = true;
+			}
+			if (fresh)
 			{
 				AppendCpuRuntimeTrace(
 					L"[DX12Backend::BindMeshBuffers] STRIDE MISMATCH — PSO=" +
 					std::to_wstring(psoStride) +
 					L" VB=" + std::to_wstring(vbStride) +
+					L" vbNumVerts=" + std::to_wstring(vertexBuffer->numVertices) +
 					L" path=" + dxPipeline->ShaderPathForDiag +
 					L" — DX12 will still render (uses VBV stride) but Vulkan reads PSO stride and would slip " +
 					std::to_wstring(int32_t(psoStride) - int32_t(vbStride)) +

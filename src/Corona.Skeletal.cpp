@@ -931,7 +931,23 @@ void Corona::SpawnSkeletalTestCharacters()
 			{ 1,  0,  0}, {-1,  0,  0}, { 0,  0,  1}, { 0,  0, -1}, { 1,  0,  0}, { 1,  0,  0},
 		};
 
-		std::vector<StandardVertex> gv;
+		// Use the 44 B legacy "Vertex" layout (POS@0 / NORMAL@12 / UV@24 /
+		// TANGENT@32) — same one the base GBufferGraphicsPipeline binds.
+		// Skeletal characters use the 48 B StandardVertex layout against
+		// their own dedicated PSOs, but the ground is a non-skeletal mesh
+		// drawn through the base PSO, so it must match the base stride.
+		// Using StandardVertex here silently worked on DX12 (VBV stride
+		// wins) but would slip every vertex 4 B on Vulkan.
+		struct GroundVertex
+		{
+			glm::vec3 Position;
+			glm::vec3 Normal;
+			glm::vec2 UV;
+			glm::vec3 Tangent;
+		};
+		static_assert(sizeof(GroundVertex) == 44, "GroundVertex must match base GBuffer PSO stride");
+
+		std::vector<GroundVertex> gv;
 		std::vector<UINT32> gi;
 		gv.reserve(24);
 		gi.reserve(36);
@@ -941,8 +957,8 @@ void Corona::SpawnSkeletalTestCharacters()
 			for (int c = 0; c < 4; ++c)
 			{
 				const glm::vec3 corner = kCubeCorners[kFaceCorners[f][c]];
-				StandardVertex v = {};
-				v.Position = glm::vec4(corner.x * groundHalfXZ, corner.y * groundHalfY, corner.z * groundHalfXZ, 1.0f);
+				GroundVertex v = {};
+				v.Position = glm::vec3(corner.x * groundHalfXZ, corner.y * groundHalfY, corner.z * groundHalfXZ);
 				v.UV = glm::vec2(c == 1 || c == 2 ? 1.0f : 0.0f, c >= 2 ? 1.0f : 0.0f);
 				v.Normal = kFaceNormals[f];
 				v.Tangent = kFaceTangents[f];
@@ -966,19 +982,19 @@ void Corona::SpawnSkeletalTestCharacters()
 		groundMesh->transform = glm::mat4x4(1.0f);
 		groundMesh->NumVertices = static_cast<UINT32>(gv.size());
 		groundMesh->NumIndices = static_cast<UINT32>(gi.size());
-		groundMesh->VertexStride = sizeof(StandardVertex);
+		groundMesh->VertexStride = sizeof(GroundVertex);
 		groundMesh->IndexFormat = EIndexFormat::U32;
 		groundMesh->Mat = groundMat;
 		groundMesh->Vb = renderBackend->CreateVertexBuffer(
-			static_cast<UINT32>(sizeof(StandardVertex) * gv.size()),
-			sizeof(StandardVertex), gv.data());
+			static_cast<UINT32>(sizeof(GroundVertex) * gv.size()),
+			sizeof(GroundVertex), gv.data());
 		groundMesh->Ib = renderBackend->CreateIndexBuffer(
 			groundMesh->IndexFormat,
 			static_cast<UINT32>(sizeof(UINT32) * gi.size()),
 			gi.data());
 		groundMesh->CpuPositions.reserve(gv.size());
-		for (const StandardVertex& v : gv)
-			groundMesh->CpuPositions.emplace_back(glm::vec3(v.Position));
+		for (const GroundVertex& v : gv)
+			groundMesh->CpuPositions.emplace_back(v.Position);
 		groundMesh->CpuIndices = gi;
 
 		Mesh::DrawCall groundDraw = {};
