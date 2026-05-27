@@ -1166,19 +1166,13 @@ private:
 	UINT BloomBufferWidth = 640;
 	UINT  BloomBufferHeight = 384;
 
-#if CORONA_HAS_D3D12
-	shared_ptr<PipelineStateObject> BloomBlurPSO;
-
-	shared_ptr<PipelineStateObject> BloomExtractPSO;
-
-	shared_ptr<PipelineStateObject> HistogramPSO;
-
-	shared_ptr<PipelineStateObject> ClearHistogramPSO;
-#endif
+	shared_ptr<ComputePipelineStateObject> BloomBlurPSO;
+	shared_ptr<ComputePipelineStateObject> BloomExtractPSO;
+	shared_ptr<ComputePipelineStateObject> HistogramPSO;
+	shared_ptr<ComputePipelineStateObject> ClearHistogramPSO;
 
 	bool bDrawHistogram = false;
-#if CORONA_HAS_D3D12
-	shared_ptr<PipelineStateObject> DrawHistogramPSO;
+	shared_ptr<ComputePipelineStateObject> DrawHistogramPSO;
 
 	struct AdaptExposureCB
 	{
@@ -1195,8 +1189,7 @@ AdaptExposureCB.MinExposure = 1.0f / 64.0f;
 AdaptExposureCB.MaxExposure = 64.0f;*/
 	AdaptExposureCB AdaptExposureCB;
 
-	shared_ptr<PipelineStateObject> AdapteExposurePSO;
-#endif // CORONA_HAS_D3D12 (DX12-only post-process PSOs)
+	shared_ptr<ComputePipelineStateObject> AdapteExposurePSO;
 
 	shared_ptr<VertexBuffer> FullScreenVB;
 

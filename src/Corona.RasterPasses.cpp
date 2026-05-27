@@ -25,136 +25,78 @@
 
 void AppendCpuRuntimeTrace(const std::wstring& line);
 
-#if CORONA_HAS_D3D12
-// InitBloomPass / InitDebugPass use the DX12-native PipelineStateObject without
-// an abstract fallback. Mobile / Vulkan-only builds compile these out; the
-// runtime gate at the call site (bVulkanBackend) already skips them.
 void Corona::InitBloomPass()
 {
+	auto createPSO = [&](const wchar_t* shaderFile, const std::string& entryPoint,
+		std::initializer_list<std::tuple<const char*, uint32_t, uint32_t>> srvBindings,
+		std::initializer_list<std::tuple<const char*, uint32_t>> uavBindings,
+		std::initializer_list<std::tuple<const char*, uint32_t>> samplerBindings,
+		std::initializer_list<std::tuple<const char*, uint32_t, uint32_t>> cbvBindings)
+		-> std::shared_ptr<ComputePipelineStateObject>
 	{
-		ShaderBytecode cs = renderBackend->CreateShader(GetAssetFullPath(L"Shaders\\BloomBlur.hlsl"), "BloomExtract", "cs_6_0");
-		D3D12_COMPUTE_PIPELINE_STATE_DESC computePsoDesc = {};
+		auto pso = renderBackend->CreateComputePipelineStateObject();
+		if (!pso) return nullptr;
+		for (const auto& b : srvBindings) pso->BindSRV(std::get<0>(b), std::get<1>(b), std::get<2>(b));
+		for (const auto& b : uavBindings) pso->BindUAV(std::get<0>(b), std::get<1>(b));
+		for (const auto& b : samplerBindings) pso->BindSampler(std::get<0>(b), std::get<1>(b));
+		for (const auto& b : cbvBindings) pso->BindCBV(std::get<0>(b), std::get<1>(b), std::get<2>(b));
+		if (!pso->InitCS(GetAssetFullPath(shaderFile), entryPoint))
+			return nullptr;
+		return pso;
+	};
 
-		shared_ptr<PipelineStateObject> TEMP_BloomExtractPSO = make_shared<PipelineStateObject>(dx12_rhi);
-		TEMP_BloomExtractPSO->DebugName = L"ComputePSO: BloomBlur.BloomExtract";
-		TEMP_BloomExtractPSO->cs = cs;
-		TEMP_BloomExtractPSO->computePSODesc = computePsoDesc;
-		TEMP_BloomExtractPSO->BindSRV("SrcTex", 0, 1);
-		TEMP_BloomExtractPSO->BindSRV("Exposure", 1, 1);
-		TEMP_BloomExtractPSO->BindUAV("DstTex", 0);
-		TEMP_BloomExtractPSO->BindUAV("LumaResult", 1);
-		TEMP_BloomExtractPSO->BindSampler("samplerWrap", 0);
-		TEMP_BloomExtractPSO->BindCBV("BloomCB", 0, sizeof(BloomCB));
-		TEMP_BloomExtractPSO->IsCompute = true;
-		bool bSuccess = TEMP_BloomExtractPSO->Init();
-		if (bSuccess)
-			BloomExtractPSO = TEMP_BloomExtractPSO;
-	}
-	{
-		ShaderBytecode cs = renderBackend->CreateShader(GetAssetFullPath(L"Shaders\\BloomBlur.hlsl"), "BloomBlur", "cs_6_0");
-		D3D12_COMPUTE_PIPELINE_STATE_DESC computePsoDesc = {};
+	if (auto pso = createPSO(L"Shaders\\BloomBlur.hlsl", "BloomExtract",
+		{ {"SrcTex", 0, 1}, {"Exposure", 1, 1} },
+		{ {"DstTex", 0}, {"LumaResult", 1} },
+		{ {"samplerWrap", 0} },
+		{ {"BloomCB", 0, sizeof(BloomCB)} }))
+		BloomExtractPSO = pso;
 
-		shared_ptr<PipelineStateObject> TEMP_BloomBlurPSO = make_shared<PipelineStateObject>(dx12_rhi);
-		TEMP_BloomBlurPSO->DebugName = L"ComputePSO: BloomBlur.BloomBlur";
-		TEMP_BloomBlurPSO->cs = cs;
-		TEMP_BloomBlurPSO->computePSODesc = computePsoDesc;
-		TEMP_BloomBlurPSO->BindSRV("SrcTex", 0, 1);
-		TEMP_BloomBlurPSO->BindUAV("DstTex", 0);
-		TEMP_BloomBlurPSO->BindSampler("samplerWrap", 0);
-		TEMP_BloomBlurPSO->BindCBV("BloomCB", 0, sizeof(BloomCB));
-		TEMP_BloomBlurPSO->IsCompute = true;
-		bool bSucess = TEMP_BloomBlurPSO->Init();
-		if (bSucess)
-			BloomBlurPSO = TEMP_BloomBlurPSO;
-	}
+	if (auto pso = createPSO(L"Shaders\\BloomBlur.hlsl", "BloomBlur",
+		{ {"SrcTex", 0, 1} },
+		{ {"DstTex", 0} },
+		{ {"samplerWrap", 0} },
+		{ {"BloomCB", 0, sizeof(BloomCB)} }))
+		BloomBlurPSO = pso;
 
-	{
-		ShaderBytecode cs = renderBackend->CreateShader(GetAssetFullPath(L"Shaders\\Histogram.hlsl"), "GenerateHistogram", "cs_6_0");
-		D3D12_COMPUTE_PIPELINE_STATE_DESC computePsoDesc = {};
+	if (auto pso = createPSO(L"Shaders\\Histogram.hlsl", "GenerateHistogram",
+		{ {"LumaTex", 0, 1} },
+		{ {"Histogram", 0} },
+		{},
+		{}))
+		HistogramPSO = pso;
 
-		shared_ptr<PipelineStateObject> TEMP_HistogramPSO = make_shared<PipelineStateObject>(dx12_rhi);
-		TEMP_HistogramPSO->DebugName = L"ComputePSO: Histogram.GenerateHistogram";
-		TEMP_HistogramPSO->cs = cs;
-		TEMP_HistogramPSO->computePSODesc = computePsoDesc;
-		TEMP_HistogramPSO->BindSRV("LumaTex", 0, 1);
-		TEMP_HistogramPSO->BindUAV("Histogram", 0);
-		TEMP_HistogramPSO->IsCompute = true;
-		bool bSucess = TEMP_HistogramPSO->Init();
-		if (bSucess)
-			HistogramPSO = TEMP_HistogramPSO;
+	if (auto pso = createPSO(L"Shaders\\DrawHistogram.hlsl", "DrawHistogram",
+		{ {"Histogram", 0, 1}, {"Exposure", 1, 1} },
+		{ {"ColorBuffer", 0} },
+		{},
+		{}))
+		DrawHistogramPSO = pso;
 
-	}
+	if (auto pso = createPSO(L"Shaders\\Histogram.hlsl", "ClearHistogram",
+		{},
+		{ {"Histogram", 0} },
+		{},
+		{}))
+		ClearHistogramPSO = pso;
 
-	{
-		ShaderBytecode cs = renderBackend->CreateShader(GetAssetFullPath(L"Shaders\\DrawHistogram.hlsl"), "DrawHistogram", "cs_6_0");
-		D3D12_COMPUTE_PIPELINE_STATE_DESC computePsoDesc = {};
-
-		shared_ptr<PipelineStateObject> TEMP_DrawHistogramPSO = make_shared<PipelineStateObject>(dx12_rhi);
-		TEMP_DrawHistogramPSO->DebugName = L"ComputePSO: DrawHistogram.DrawHistogram";
-		TEMP_DrawHistogramPSO->cs = cs;
-		TEMP_DrawHistogramPSO->computePSODesc = computePsoDesc;
-		TEMP_DrawHistogramPSO->BindSRV("Histogram", 0, 1);
-		TEMP_DrawHistogramPSO->BindSRV("Exposure", 1, 1);
-		TEMP_DrawHistogramPSO->BindUAV("ColorBuffer", 0);
-		TEMP_DrawHistogramPSO->IsCompute = true;
-		bool bSuccess = TEMP_DrawHistogramPSO->Init();
-		if (bSuccess)
-			DrawHistogramPSO = TEMP_DrawHistogramPSO;
-
-	}
-
-	{
-		ShaderBytecode cs = renderBackend->CreateShader(GetAssetFullPath(L"Shaders\\Histogram.hlsl"), "ClearHistogram", "cs_6_0");
-		D3D12_COMPUTE_PIPELINE_STATE_DESC computePsoDesc = {};
-
-		shared_ptr<PipelineStateObject> TEMP_ClearHistogramPSO = make_shared<PipelineStateObject>(dx12_rhi);
-		TEMP_ClearHistogramPSO->DebugName = L"ComputePSO: Histogram.ClearHistogram";
-		TEMP_ClearHistogramPSO->cs = cs;
-		TEMP_ClearHistogramPSO->computePSODesc = computePsoDesc;
-		TEMP_ClearHistogramPSO->BindUAV("Histogram", 0);
-		TEMP_ClearHistogramPSO->IsCompute = true;
-		bool bSuccess = TEMP_ClearHistogramPSO->Init();
-		if (bSuccess)
-			ClearHistogramPSO = TEMP_ClearHistogramPSO;
-
-	}
-
-
-	{
-		ShaderBytecode cs = renderBackend->CreateShader(GetAssetFullPath(L"Shaders\\AdaptExposureCS.hlsl"), "AdaptExposure", "cs_6_0");
-		D3D12_COMPUTE_PIPELINE_STATE_DESC computePsoDesc = {};
-
-		shared_ptr<PipelineStateObject> TEMP_AdapteExposurePSO = make_shared<PipelineStateObject>(dx12_rhi);
-		TEMP_AdapteExposurePSO->DebugName = L"ComputePSO: AdaptExposureCS.AdaptExposure";
-		TEMP_AdapteExposurePSO->cs = cs;
-		TEMP_AdapteExposurePSO->computePSODesc = computePsoDesc;
-		TEMP_AdapteExposurePSO->BindSRV("Histogram", 0, 1);
-		TEMP_AdapteExposurePSO->BindUAV("Exposure", 0);
-		TEMP_AdapteExposurePSO->BindUAV("Exposure", 0);
-		TEMP_AdapteExposurePSO->BindCBV("AdaptExposureCB", 0, sizeof(AdaptExposureCB));
-
-		TEMP_AdapteExposurePSO->IsCompute = true;
-		bool bSucess = TEMP_AdapteExposurePSO->Init();
-		if (bSucess)
-			AdapteExposurePSO = TEMP_AdapteExposurePSO;
-
-	}
+	if (auto pso = createPSO(L"Shaders\\AdaptExposureCS.hlsl", "AdaptExposure",
+		{ {"Histogram", 0, 1} },
+		{ {"Exposure", 0} },
+		{},
+		{ {"AdaptExposureCB", 0, sizeof(AdaptExposureCB)} }))
+		AdapteExposurePSO = pso;
 
 	BloomBlurPingPong[0] = renderBackend->CreateTexture2D({ ETextureFormat::RGBA16Float, TextureUsage_UnorderedAccess, EInitialResourceState::ShaderRead, (int)BloomBufferWidth, (int)BloomBufferHeight, 1, std::nullopt });
-
 	NAME_D3D12_OBJECT(BloomBlurPingPong[0]->resource);
 
 	BloomBlurPingPong[1] = renderBackend->CreateTexture2D({ ETextureFormat::RGBA16Float, TextureUsage_UnorderedAccess, EInitialResourceState::ShaderRead, (int)BloomBufferWidth, (int)BloomBufferHeight, 1, std::nullopt });
-
 	NAME_D3D12_OBJECT(BloomBlurPingPong[1]->resource);
 
-
 	LumaBuffer = renderBackend->CreateTexture2D({ ETextureFormat::R8Uint, TextureUsage_UnorderedAccess, EInitialResourceState::ShaderRead, (int)BloomBufferWidth, (int)BloomBufferHeight, 1, std::nullopt });
-
 	NAME_D3D12_OBJECT(LumaBuffer->resource);
 
-	Histogram = renderBackend->CreateBuffer({ 256u, sizeof(UINT32), EInitialResourceState::ShaderRead, true, nullptr });
-	Histogram->MakeByteAddressBufferSRV();
+	Histogram = renderBackend->CreateBuffer({ 256u, sizeof(UINT32), EInitialResourceState::ShaderRead, true, nullptr, EBufferShape::ByteAddress });
 	NAME_D3D12_OBJECT(Histogram->resource);
 
 	__declspec(align(16)) float initExposure[] =
@@ -170,12 +112,9 @@ void Corona::InitBloomPass()
 		1.0f / (kInitialMaxLog - kInitialMinLog)
 	};
 
-	ExposureData = renderBackend->CreateBuffer({ 8u, sizeof(float), EInitialResourceState::ShaderRead, true, initExposure });
-	ExposureData->MakeStructuredBufferSRV();
+	ExposureData = renderBackend->CreateBuffer({ 8u, sizeof(float), EInitialResourceState::ShaderRead, true, initExposure, EBufferShape::Structured });
 	NAME_D3D12_OBJECT(ExposureData->resource);
-
 }
-#endif // CORONA_HAS_D3D12 (InitBloomPass)
 
 void Corona::InitGBufferPass()
 {
@@ -1758,10 +1697,10 @@ void Corona::TemporalAAPass()
 
 	if (bDrawHistogram)
 	{
+		DrawHistogramPSO->SetBufferSRV("Histogram", Histogram.get());
+		DrawHistogramPSO->SetBufferSRV("Exposure", ExposureData.get());
+		DrawHistogramPSO->SetTextureUAV("ColorBuffer", ResolveTarget);
 		DrawHistogramPSO->Apply();
-		DrawHistogramPSO->SetSRV("Histogram", Histogram->GpuHandleSRV);
-		DrawHistogramPSO->SetSRV("Exposure", ExposureData->GpuHandleSRV);
-		DrawHistogramPSO->SetUAV("ColorBuffer", ResolveTarget->GpuHandleUAV);
 		renderBackend->Dispatch(1, 32, 1);
 	}
 	renderBackend->TransitionTexture(ResolveTarget, EResourceState::UnorderedAccess, EResourceState::ShaderRead);
@@ -1773,7 +1712,6 @@ void Corona::TemporalAAPass()
 
 }
 
-#if CORONA_HAS_D3D12
 void Corona::BloomPass()
 {
 	renderBackend->EmitGpuCrashMarker("BloomPass");
@@ -1797,16 +1735,13 @@ void Corona::BloomPass()
 	renderBackend->TransitionTexture(BloomBlurPingPong[0].get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
 	renderBackend->TransitionTexture(LumaBuffer.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
 
-	BloomExtractPSO->Apply();
-	BloomExtractPSO->SetSRV("SrcTex", LightingBuffer->GpuHandleSRV);
-	BloomExtractPSO->SetSRV("Exposure", ExposureData->GpuHandleSRV);
-	BloomExtractPSO->SetUAV("DstTex", BloomBlurPingPong[0]->GpuHandleUAV);
-	BloomExtractPSO->SetUAV("LumaResult", LumaBuffer->GpuHandleUAV);
-
-
+	BloomExtractPSO->SetTextureSRV("SrcTex", LightingBuffer.get());
+	BloomExtractPSO->SetBufferSRV("Exposure", ExposureData.get());
+	BloomExtractPSO->SetTextureUAV("DstTex", BloomBlurPingPong[0].get());
+	BloomExtractPSO->SetTextureUAV("LumaResult", LumaBuffer.get());
 	BloomExtractPSO->SetSampler("samplerWrap", samplerWrap.get());
-
 	BloomExtractPSO->SetCBVValue("BloomCB", &BloomCB);
+	BloomExtractPSO->Apply();
 
 	renderBackend->Dispatch(BloomBufferWidth / 32, BloomBufferHeight / 32, 1);
 	renderBackend->TransitionTexture(BloomBlurPingPong[0].get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
@@ -1815,74 +1750,55 @@ void Corona::BloomPass()
 	// horizontal pass
 	renderBackend->TransitionTexture(BloomBlurPingPong[1].get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
 
-
-	BloomBlurPSO->Apply();
-
-	BloomBlurPSO->SetSRV("SrcTex", BloomBlurPingPong[0]->GpuHandleSRV);
-	BloomBlurPSO->SetUAV("DstTex", BloomBlurPingPong[1]->GpuHandleUAV);
-
-
+	BloomBlurPSO->SetTextureSRV("SrcTex", BloomBlurPingPong[0].get());
+	BloomBlurPSO->SetTextureUAV("DstTex", BloomBlurPingPong[1].get());
 	BloomBlurPSO->SetSampler("samplerWrap", samplerWrap.get());
-
 	BloomCB.BlurDirection = glm::vec2(1, 0);
 	BloomBlurPSO->SetCBVValue("BloomCB", &BloomCB);
+	BloomBlurPSO->Apply();
 
 	renderBackend->Dispatch(BloomBufferWidth / 32, BloomBufferHeight / 32, 1);
-
 	renderBackend->TransitionTexture(BloomBlurPingPong[1].get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
-
 
 	// vertical pass
 	renderBackend->TransitionTexture(BloomBlurPingPong[0].get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
 
-
-	BloomBlurPSO->Apply();
-
-	BloomBlurPSO->SetSRV("SrcTex", BloomBlurPingPong[1]->GpuHandleSRV);
-	BloomBlurPSO->SetUAV("DstTex", BloomBlurPingPong[0]->GpuHandleUAV);
-
-
+	BloomBlurPSO->SetTextureSRV("SrcTex", BloomBlurPingPong[1].get());
+	BloomBlurPSO->SetTextureUAV("DstTex", BloomBlurPingPong[0].get());
 	BloomBlurPSO->SetSampler("samplerWrap", samplerWrap.get());
-
 	BloomCB.BlurDirection = glm::vec2(0, 1);
 	BloomBlurPSO->SetCBVValue("BloomCB", &BloomCB);
+	BloomBlurPSO->Apply();
 
 	renderBackend->Dispatch(BloomBufferWidth / 32, BloomBufferHeight / 32, 1);
-
 	renderBackend->TransitionTexture(BloomBlurPingPong[0].get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
 
 	// histogram pass
 	renderBackend->TransitionBuffer(Histogram.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
 
+	ClearHistogramPSO->SetBufferUAV("Histogram", Histogram.get());
 	ClearHistogramPSO->Apply();
-	ClearHistogramPSO->SetUAV("Histogram", Histogram->GpuHandleUAV);
 	renderBackend->Dispatch(1, 1, 1);
 
+	HistogramPSO->SetTextureSRV("LumaTex", LumaBuffer.get());
+	HistogramPSO->SetBufferUAV("Histogram", Histogram.get());
 	HistogramPSO->Apply();
-	HistogramPSO->SetSRV("LumaTex", LumaBuffer->GpuHandleSRV);
-	HistogramPSO->SetUAV("Histogram", Histogram->GpuHandleUAV);
 	renderBackend->Dispatch(BloomBufferWidth / 16, 1, 1);
 
 	renderBackend->TransitionBuffer(Histogram.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
 
-
 	// adapte exposure pass
 	renderBackend->TransitionBuffer(ExposureData.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
 
-	AdapteExposurePSO->Apply();
-	AdapteExposurePSO->SetSRV("Histogram", Histogram->GpuHandleSRV);
-	AdapteExposurePSO->SetUAV("Exposure", ExposureData->GpuHandleUAV);
-
-
+	AdapteExposurePSO->SetBufferSRV("Histogram", Histogram.get());
+	AdapteExposurePSO->SetBufferUAV("Exposure", ExposureData.get());
 	AdaptExposureCB.PixelCount = BloomBufferWidth * BloomBufferHeight;
-	
 	AdapteExposurePSO->SetCBVValue("AdaptExposureCB", &AdaptExposureCB);
+	AdapteExposurePSO->Apply();
 
 	renderBackend->Dispatch(1, 1, 1);
 	renderBackend->TransitionBuffer(ExposureData.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
-
 }
-#endif // CORONA_HAS_D3D12 (BloomPass)
 
 void Corona::DispatchSpineSkinningForMesh(Mesh* mesh)
 {
