@@ -12,6 +12,9 @@
 #include <memory>
 #include <vector>
 
+#include "glm/mat4x4.hpp"
+#include "glm/vec3.hpp"
+
 #include "TerrainFormat.h"
 #include "TerrainGenerator.h"
 #include "TerrainMeshBuilder.h"
@@ -36,6 +39,13 @@ namespace Terrain
 			IRenderBackend* backend,
 			const GenerateParams& params,
 			const std::wstring& cacheName);
+
+		// Replace the owning Mesh's DrawCalls with one per chunk whose AABB
+		// passes the conservative 8-corner frustum test against the supplied
+		// world-space view*proj matrix. Returns the visible chunk count.
+		// Assumes GLM_FORCE_DEPTH_ZERO_TO_ONE (D3D-style depth) — Corona's
+		// default for both DX12 and Vulkan paths.
+		uint32_t UpdateCulling(const glm::mat4& viewProj);
 
 		const std::shared_ptr<Scene>& GetScene() const { return ScenePtr; }
 		const std::vector<ChunkMeshInfo>& GetChunks() const { return ChunkInfos; }

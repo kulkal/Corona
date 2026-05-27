@@ -4,6 +4,8 @@
 #include <sstream>
 #include <string>
 
+#include "glm/glm.hpp"
+
 #include "RenderBackend.h"
 #include "RenderResources.h"
 #include "Utils.h"
@@ -80,6 +82,49 @@ bool Component::LoadOrGenerate(const GenerateParams& params, const std::filesyst
 	  << L" minH=" << Stats.MinHeight << L" maxH=" << Stats.MaxHeight << L" meanH=" << Stats.MeanHeight;
 	AppendCpuRuntimeTrace(w.str());
 	return true;
+}
+
+uint32_t Component::UpdateCulling(const glm::mat4& viewProj)
+{
+	if (!MeshPtr || ChunkInfos.empty())
+		return 0;
+
+	MeshPtr->Draws.clear();
+	MeshPtr->Draws.reserve(ChunkInfos.size());
+
+	uint32_t visible = 0;
+	for (const ChunkMeshInfo& ci : ChunkInfos)
+	{
+		// 8-corner conservative AABB-vs-frustum test in clip space.
+		// If all 8 corners share the same outside half-space for any clip
+		// plane, the chunk is culled. D3D depth convention: z ∈ [0, w].
+		int outL = 0, outR = 0, outB = 0, outT = 0, outN = 0, outF = 0;
+		for (int i = 0; i < 8; ++i)
+		{
+			const float x = (i & 1) ? ci.AabbMax[0] : ci.AabbMin[0];
+			const float y = (i & 2) ? ci.AabbMax[1] : ci.AabbMin[1];
+			const float z = (i & 4) ? ci.AabbMax[2] : ci.AabbMin[2];
+			const glm::vec4 c = viewProj * glm::vec4(x, y, z, 1.0f);
+			if (c.x < -c.w) ++outL;
+			if (c.x >  c.w) ++outR;
+			if (c.y < -c.w) ++outB;
+			if (c.y >  c.w) ++outT;
+			if (c.z <  0.0f) ++outN;
+			if (c.z >  c.w) ++outF;
+		}
+		if (outL == 8 || outR == 8 || outB == 8 || outT == 8 || outN == 8 || outF == 8)
+			continue;
+
+		Mesh::DrawCall dc{};
+		dc.mat = MaterialPtr;
+		dc.IndexStart = ci.IndexStart;
+		dc.IndexCount = ci.IndexCount;
+		dc.VertexBase = ci.VertexBase;
+		dc.VertexCount = ci.VertexCount;
+		MeshPtr->Draws.push_back(dc);
+		++visible;
+	}
+	return visible;
 }
 
 bool Component::Initialize(

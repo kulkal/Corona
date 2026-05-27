@@ -10575,6 +10575,12 @@ void Corona::BuildRenderFrameDerivedState(const RenderFrameSourceState* sourceSt
 		ProjMat = JitterMat * ProjMat;
 
 	ViewProjMat = ProjMat * ViewMat;
+
+	if (ActiveTerrain)
+	{
+		ActiveTerrain->UpdateCulling(ViewProjMat);
+	}
+
 	const bool bDerivedStateFinite =
 		IsFiniteMat4(ViewMat) &&
 		IsFiniteMat4(ProjMat) &&
