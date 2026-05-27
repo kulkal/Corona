@@ -49,6 +49,12 @@ BuiltMesh BuildMesh(const TerrainData& data, float uvTileSize)
 	const float worldScale = data.Header.WorldScaleXZ;
 	const float invUvTile = uvTileSize > 0.0f ? (1.0f / uvTileSize) : 1.0f;
 
+	// Pre-center the mesh around origin so BuildCenteredSceneTransform's
+	// auto-centering becomes a no-op and CPU frustum-cull AABBs (in mesh
+	// space) match the rendered world positions exactly.
+	const float centerX = static_cast<float>(data.Header.Width  - 1) * worldScale * 0.5f;
+	const float centerZ = static_cast<float>(data.Header.Depth  - 1) * worldScale * 0.5f;
+
 	for (uint32_t cz = 0; cz < data.Header.NumChunksZ; ++cz)
 	{
 		for (uint32_t cx = 0; cx < data.Header.NumChunksX; ++cx)
@@ -61,8 +67,15 @@ BuiltMesh BuildMesh(const TerrainData& data, float uvTileSize)
 			info.VertexCount = vertsPerChunk;
 			info.IndexStart = chunkIdx * idxPerChunk;
 			info.IndexCount = idxPerChunk;
-			std::copy(std::begin(chunk.AabbMin), std::end(chunk.AabbMin), info.AabbMin);
-			std::copy(std::begin(chunk.AabbMax), std::end(chunk.AabbMax), info.AabbMax);
+			// Apply the same XZ centering to the per-chunk AABB so the
+			// CPU culling test against world-space view*proj sees the
+			// same coordinates the GPU rasterizes.
+			info.AabbMin[0] = chunk.AabbMin[0] - centerX;
+			info.AabbMin[1] = chunk.AabbMin[1];
+			info.AabbMin[2] = chunk.AabbMin[2] - centerZ;
+			info.AabbMax[0] = chunk.AabbMax[0] - centerX;
+			info.AabbMax[1] = chunk.AabbMax[1];
+			info.AabbMax[2] = chunk.AabbMax[2] - centerZ;
 
 			const uint32_t baseSampleX = cx * quads;
 			const uint32_t baseSampleZ = cz * quads;
@@ -72,8 +85,8 @@ BuiltMesh BuildMesh(const TerrainData& data, float uvTileSize)
 				for (uint32_t lx = 0; lx < cs; ++lx)
 				{
 					MeshVertex v{};
-					const float wx = static_cast<float>(baseSampleX + lx) * worldScale;
-					const float wz = static_cast<float>(baseSampleZ + lz) * worldScale;
+					const float wx = static_cast<float>(baseSampleX + lx) * worldScale - centerX;
+					const float wz = static_cast<float>(baseSampleZ + lz) * worldScale - centerZ;
 					const float wy = Sample(chunk, cs, static_cast<int>(lx), static_cast<int>(lz), data);
 					v.Position[0] = wx;
 					v.Position[1] = wy;

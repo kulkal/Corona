@@ -196,11 +196,13 @@ bool Component::Initialize(
 	ScenePtr->Materials.push_back(MaterialPtr);
 	ScenePtr->meshes.push_back(MeshPtr);
 	ScenePtr->bHasBounds = true;
-	ScenePtr->BoundsMin = glm::vec3(0.0f, Params.HeightMin, 0.0f);
-	ScenePtr->BoundsMax = glm::vec3(
-		static_cast<float>(Params.Width  - 1) * Params.WorldScaleXZ,
-		Params.HeightMax,
-		static_cast<float>(Params.Depth  - 1) * Params.WorldScaleXZ);
+	// Mesh vertices are pre-centered around origin (see TerrainMeshBuilder).
+	// Reflect that in Scene bounds so BuildCenteredSceneTransform's center
+	// is (0,0,0) → its auto-translation is identity → world == mesh space.
+	const float halfX = static_cast<float>(Params.Width  - 1) * Params.WorldScaleXZ * 0.5f;
+	const float halfZ = static_cast<float>(Params.Depth  - 1) * Params.WorldScaleXZ * 0.5f;
+	ScenePtr->BoundsMin = glm::vec3(-halfX, Params.HeightMin, -halfZ);
+	ScenePtr->BoundsMax = glm::vec3( halfX, Params.HeightMax,  halfZ);
 
 	const auto tUpload1 = clock::now();
 	const auto upMs = std::chrono::duration_cast<std::chrono::milliseconds>(tUpload1 - tUpload0).count();
