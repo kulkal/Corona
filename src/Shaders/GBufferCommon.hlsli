@@ -20,21 +20,24 @@
 #ifndef GBUFFER_COMMON_HLSLI
 #define GBUFFER_COMMON_HLSLI
 
-#include "ShaderResourceBindings.hlsli"
 #include "Common.hlsl"
 
 // =====================================================================
 // Layer 0: Resource bindings + structs
+//
+// Vulkan SPIR-V binding numbers come from dxc's `-fvk-{t,s,b}-shift`
+// options in CMakeLists.txt (t→0+N, s→64+N, b→128+N). Don't remove
+// those flags without also rewriting these bindings.
 // =====================================================================
 
-TEXTURE2D_BINDING(AlbedoTex,    0);
-TEXTURE2D_BINDING(NormalTex,    1);
-TEXTURE2D_BINDING(RoughnessTex, 2);
-TEXTURE2D_BINDING(MetallicTex,  3);
+Texture2D AlbedoTex    : register(t0);
+Texture2D NormalTex    : register(t1);
+Texture2D RoughnessTex : register(t2);
+Texture2D MetallicTex  : register(t3);
 
-SAMPLER_BINDING(sampleWrap, 0);
+SamplerState sampleWrap : register(s0);
 
-CBUFFER_BINDING_BEGIN(GBufferConstantBuffer, 0)
+cbuffer GBufferConstantBuffer : register(b0)
 {
     float4x4 ViewProjectionMatrix;
     float4x4 PrevViewProjectionMatrix;
@@ -79,7 +82,7 @@ CBUFFER_BINDING_BEGIN(GBufferConstantBuffer, 0)
     // spatial frequency (rad/world-unit, gives blade-to-blade variation),
     // .zw = reserved.
     float4   WindTuning;
-} CBUFFER_BINDING_END;
+};
 
 struct VSInput
 {

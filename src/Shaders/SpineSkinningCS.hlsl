@@ -1,5 +1,3 @@
-#include "ShaderResourceBindings.hlsli"
-
 struct SpineSkinInputVertex
 {
     float2 uv;

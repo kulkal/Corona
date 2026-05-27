@@ -4,8 +4,6 @@
 // matches the standard vertex layout (POSITION/TEXCOORD/NORMAL/TANGENT) so
 // the GBuffer / shadow PSOs can read it through their normal IA input.
 
-#include "ShaderResourceBindings.hlsli"
-
 // Must match SkinInputVertex in Corona.Skeletal.cpp (80 B).
 struct SkinInputVertex
 {

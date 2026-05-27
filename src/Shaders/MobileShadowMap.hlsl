@@ -9,17 +9,18 @@
 //
 //*********************************************************
 
-#include "ShaderResourceBindings.hlsli"
 #include "Common.hlsl"
 
-CBUFFER_BINDING_BEGIN(ShadowMapConstantBuffer, 0)
+// Vulkan SPIR-V binding for `register(b0)` is `128 + 0 = 128`
+// (see dxc -fvk-b-shift in CMakeLists.txt).
+cbuffer ShadowMapConstantBuffer : register(b0)
 {
     float4x4 LightViewProjectionMatrix;
     float4x4 WorldMatrix;
     float4 BaseColorFactor;
     uint SpineVertexBase;
     uint3 Padding;
-} CBUFFER_BINDING_END;
+};
 
 struct VSInput
 {
