@@ -810,9 +810,6 @@ private:
 
 
 	UINT32 ToneMapMode = FILMIC_HABLE;
-#if CORONA_HAS_D3D12
-	shared_ptr<PipelineStateObject> ToneMapPSO;
-#endif
 	std::shared_ptr<GraphicsPipelineHandle> ToneMapGraphicsPipeline;
 
 	// debug pass
@@ -879,9 +876,6 @@ private:
 		glm::vec3 PointLightPadding = glm::vec3(0.0f);
 	};
 	
-#if CORONA_HAS_D3D12
-	shared_ptr<PipelineStateObject> LightingPSO;
-#endif
 	std::shared_ptr<GraphicsPipelineHandle> LightingGraphicsPipeline;
 
 	struct ShadowMapConstantBuffer
@@ -1114,9 +1108,6 @@ private:
 	bool bCommandLineExitAfterFramesTriggered = false;
 	std::wstring CommandLineCameraPathFile;
 
-#if CORONA_HAS_D3D12
-	shared_ptr<PipelineStateObject> TemporalAAPSO;
-#endif
 	std::shared_ptr<GraphicsPipelineHandle> TemporalAAGraphicsPipeline;
 	bool bTemporalAAHistoryValid = false;
 	bool bTemporalDenoiserHistoryValid = false;

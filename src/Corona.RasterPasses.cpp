@@ -365,86 +365,31 @@ void Corona::InitToneMapPass()
 	const UINT vertexBufferSize = sizeof(quadVertices);
 	const UINT vertexBufferStride = sizeof(PostVertex);
 
-	D3D12_SUBRESOURCE_DATA vertexData = {};
-	vertexData.pData = &quadVertices;
-	vertexData.RowPitch = vertexBufferSize;
-	vertexData.SlicePitch = vertexData.RowPitch;
-
 	FullScreenVB = renderBackend->CreateVertexBuffer(vertexBufferSize, vertexBufferStride, &quadVertices);
 
-	if (renderBackend && renderBackend->GetAPI() == ERenderBackendAPI::Vulkan)
-	{
-		GraphicsPipelineDesc desc{};
-		desc.ShaderPath = GetAssetFullPath(L"Shaders\\ToneMapPS.hlsl");
-		desc.VertexEntryPoint = "VSMain";
-		desc.PixelEntryPoint = "PSMain";
-		desc.VertexStride = vertexBufferStride;
-		desc.ColorFormats = { ETextureFormat::RGBA8Unorm };
-		desc.bDepthEnable = false;
-		desc.bCullBackFaces = false;
-		desc.bTriangleStrip = true;
-		desc.ConstantBufferSize = sizeof(ToneMapCB);
-		desc.ConstantBufferBinding = 0;
-		desc.VertexElements = {
-			{ "POSITION", 0, EVertexAttributeFormat::Float4, 0 },
-			{ "TEXCOORD", 0, EVertexAttributeFormat::Float2, 16 }
-		};
-		desc.TextureBindings = {
-			{ "SrcTex", 0 }
-		};
-		desc.SamplerBindings = {
-			{ "sampleWrap", 0 }
-		};
-
-		ToneMapGraphicsPipeline = renderBackend->CreateGraphicsPipeline(desc);
-		return;
-	}
-
-#if CORONA_HAS_D3D12
-	// DX12-native fallback path using the direct PipelineStateObject class.
-	ShaderBytecode vs = renderBackend->CreateShader(GetAssetFullPath(L"Shaders\\ToneMapPS.hlsl"), "VSMain", "vs_6_0");
-	ShaderBytecode ps = renderBackend->CreateShader(GetAssetFullPath(L"Shaders\\ToneMapPS.hlsl"), "PSMain", "ps_6_0");
-
-
-	CD3DX12_RASTERIZER_DESC rasterizerStateDesc(D3D12_DEFAULT);
-	rasterizerStateDesc.CullMode = D3D12_CULL_MODE_NONE;
-
-	D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDesc = {};
-
-	const D3D12_INPUT_ELEMENT_DESC StandardVertexDescription[] =
-	{
-		{ "POSITION", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 0,  D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
-		{ "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT,    0, 16, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+	GraphicsPipelineDesc desc{};
+	desc.ShaderPath = GetAssetFullPath(L"Shaders\\ToneMapPS.hlsl");
+	desc.VertexEntryPoint = "VSMain";
+	desc.PixelEntryPoint = "PSMain";
+	desc.VertexStride = vertexBufferStride;
+	desc.ColorFormats = { ETextureFormat::RGBA8Unorm };
+	desc.bDepthEnable = false;
+	desc.bCullBackFaces = false;
+	desc.bTriangleStrip = true;
+	desc.ConstantBufferSize = sizeof(ToneMapCB);
+	desc.ConstantBufferBinding = 0;
+	desc.VertexElements = {
+		{ "POSITION", 0, EVertexAttributeFormat::Float4, 0 },
+		{ "TEXCOORD", 0, EVertexAttributeFormat::Float2, 16 }
 	};
-	UINT StandardVertexDescriptionNumElements = _countof(StandardVertexDescription);
+	desc.TextureBindings = {
+		{ "SrcTex", 0 }
+	};
+	desc.SamplerBindings = {
+		{ "sampleWrap", 0 }
+	};
 
-	psoDesc.InputLayout = { StandardVertexDescription, StandardVertexDescriptionNumElements };
-	psoDesc.RasterizerState = rasterizerStateDesc;
-	psoDesc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
-	psoDesc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
-	psoDesc.DepthStencilState.DepthEnable = FALSE;
-	psoDesc.DepthStencilState.StencilEnable = FALSE;
-	psoDesc.SampleMask = UINT_MAX;
-	psoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-	psoDesc.NumRenderTargets = 1;
-	psoDesc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
-	//psoDescMesh.DSVFormat = DXGI_FORMAT_D32_FLOAT;
-	psoDesc.SampleDesc.Count = 1;
-
-	shared_ptr<PipelineStateObject> TEMP_ToneMapPSO = make_shared<PipelineStateObject>(dx12_rhi);
-	TEMP_ToneMapPSO->DebugName = L"GraphicsPSO: ToneMap.VSMain/PSMain";
-	TEMP_ToneMapPSO->ps = ps;
-	TEMP_ToneMapPSO->vs = vs;
-	TEMP_ToneMapPSO->graphicsPSODesc = psoDesc;
-
-	TEMP_ToneMapPSO->BindSRV("SrcTex", 0, 1);
-	TEMP_ToneMapPSO->BindSampler("samplerWrap", 0);
-	TEMP_ToneMapPSO->BindCBV("ScaleOffsetParams", 0, sizeof(ToneMapCB));
-
-	bool bSuccess = TEMP_ToneMapPSO->Init();
-	if (bSuccess)
-		ToneMapPSO = TEMP_ToneMapPSO;
-#endif // CORONA_HAS_D3D12 (ToneMap DX12 fallback)
+	ToneMapGraphicsPipeline = renderBackend->CreateGraphicsPipeline(desc);
 }
 
 #if CORONA_HAS_D3D12
@@ -523,120 +468,55 @@ void Corona::InitDebugPass()
 
 void Corona::InitLightingPass()
 {
-	if (renderBackend && renderBackend->GetAPI() == ERenderBackendAPI::Vulkan)
+	struct PostVertex
 	{
-		struct PostVertex
-		{
-			XMFLOAT4 position;
-			XMFLOAT2 uv;
-		};
-
-		PostVertex quadVertices[] =
-		{
-			{ { -1.0f, -1.0f, 0.0f, 1.0f }, { 0.0f, 0.0f } },
-			{ { -1.0f, 1.0f, 0.0f, 1.0f }, { 0.0f, 1.0f } },
-			{ { 1.0f, -1.0f, 0.0f, 1.0f }, { 1.0f, 0.0f } },
-			{ { 1.0f, 1.0f, 0.0f, 1.0f }, { 1.0f, 1.0f } }
-		};
-
-		FullScreenVB = renderBackend->CreateVertexBuffer(sizeof(quadVertices), sizeof(PostVertex), &quadVertices);
-
-		GraphicsPipelineDesc desc{};
-		desc.ShaderPath = GetAssetFullPath(L"Shaders\\LightingPS.hlsl");
-		desc.VertexEntryPoint = "VSMain";
-		desc.PixelEntryPoint = "PSMain";
-		desc.VertexStride = sizeof(PostVertex);
-		desc.ColorFormats = { ETextureFormat::RGBA16Float };
-		desc.bDepthEnable = false;
-		desc.bCullBackFaces = false;
-		desc.bTriangleStrip = true;
-		desc.ConstantBufferSize = sizeof(LightingParam);
-		desc.ConstantBufferBinding = 0;
-		desc.VertexElements = {
-			{ "POSITION", 0, EVertexAttributeFormat::Float4, 0 },
-			{ "TEXCOORD", 0, EVertexAttributeFormat::Float2, 16 }
-		};
-		desc.TextureBindings = {
-			{ "AlbedoTex", 0 },
-			{ "NormalTex", 1 },
-			{ "ShadowTex", 2 },
-			{ "VelocityTex", 3 },
-			{ "DepthTex", 4 },
-			{ "GIResultSHTex", 5 },
-			{ "GIResultColorTex", 6 },
-			{ "SpecularGITex", 7 },
-			{ "RoughnessMetalicTex", 8 },
-			{ "AmbientOcclusionTex", 14 },
-			{ "SkyLightingTex", 15 }
-		};
-		desc.SamplerBindings = {
-			{ "sampleWrap", 0 }
-		};
-
-		LightingGraphicsPipeline = renderBackend->CreateGraphicsPipeline(desc);
-		return;
-	}
-
-#if CORONA_HAS_D3D12
-	ShaderBytecode vs = renderBackend->CreateShader(GetAssetFullPath(L"Shaders\\LightingPS.hlsl"), "VSMain", "vs_6_0");
-	ShaderBytecode ps = renderBackend->CreateShader(GetAssetFullPath(L"Shaders\\LightingPS.hlsl"), "PSMain", "ps_6_0");
-
-	CD3DX12_RASTERIZER_DESC rasterizerStateDesc(D3D12_DEFAULT);
-	rasterizerStateDesc.CullMode = D3D12_CULL_MODE_NONE;
-
-	D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDesc = {};
-
-	const D3D12_INPUT_ELEMENT_DESC StandardVertexDescription[] =
-	{
-		{ "POSITION", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 0,  D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
-		{ "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT,    0, 16, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+		XMFLOAT4 position;
+		XMFLOAT2 uv;
 	};
-	UINT StandardVertexDescriptionNumElements = _countof(StandardVertexDescription);
 
-	psoDesc.InputLayout = { StandardVertexDescription, StandardVertexDescriptionNumElements };
-	psoDesc.RasterizerState = rasterizerStateDesc;
-	psoDesc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
-	psoDesc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
-	psoDesc.DepthStencilState.DepthEnable = FALSE;
-	psoDesc.DepthStencilState.StencilEnable = FALSE;
-	psoDesc.SampleMask = UINT_MAX;
-	psoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-	psoDesc.NumRenderTargets = 1;
-	psoDesc.RTVFormats[0] = DXGI_FORMAT_R16G16B16A16_FLOAT;
-	//psoDescMesh.DSVFormat = DXGI_FORMAT_D32_FLOAT;
-	psoDesc.SampleDesc.Count = 1;
+	PostVertex quadVertices[] =
+	{
+		{ { -1.0f, -1.0f, 0.0f, 1.0f }, { 0.0f, 0.0f } },
+		{ { -1.0f, 1.0f, 0.0f, 1.0f }, { 0.0f, 1.0f } },
+		{ { 1.0f, -1.0f, 0.0f, 1.0f }, { 1.0f, 0.0f } },
+		{ { 1.0f, 1.0f, 0.0f, 1.0f }, { 1.0f, 1.0f } }
+	};
 
-	shared_ptr<PipelineStateObject> TEMP_LightingPSO = make_shared<PipelineStateObject>(dx12_rhi);
-	TEMP_LightingPSO->DebugName = L"GraphicsPSO: Lighting.VSMain/PSMain";
-	TEMP_LightingPSO->ps = ps;
-	TEMP_LightingPSO->vs = vs;
-	TEMP_LightingPSO->graphicsPSODesc = psoDesc;
-	
-	TEMP_LightingPSO->BindSRV("AlbedoTex", 0, 1);
-	TEMP_LightingPSO->BindSRV("NormalTex", 1, 1);
-	TEMP_LightingPSO->BindSRV("ShadowTex", 2, 1);
-	TEMP_LightingPSO->BindSRV("VelocityTex", 3, 1);
-	TEMP_LightingPSO->BindSRV("DepthTex", 4, 1);
-	TEMP_LightingPSO->BindSRV("GIResultSHTex", 5, 1);
-	TEMP_LightingPSO->BindSRV("GIResultColorTex", 6, 1);
-	TEMP_LightingPSO->BindSRV("SpecularGITex", 7, 1);
-	TEMP_LightingPSO->BindSRV("RoughnessMetalicTex", 8, 1);
-	TEMP_LightingPSO->BindSRV("SpecularGITex3x3", 9, 1);
-	TEMP_LightingPSO->BindSRV("SpecularGITexMip1", 10, 1);
-	TEMP_LightingPSO->BindSRV("SpecularGITexMip2", 11, 1);
-	TEMP_LightingPSO->BindSRV("SpecularGITexMip3", 12, 1);
-	TEMP_LightingPSO->BindSRV("SpecularGITexMip4", 13, 1);
-	TEMP_LightingPSO->BindSRV("AmbientOcclusionTex", 14, 1);
-	TEMP_LightingPSO->BindSRV("SkyLightingTex", 15, 1);
-	
-	
-	
-	TEMP_LightingPSO->BindSampler("samplerWrap", 0);
-	TEMP_LightingPSO->BindCBV("LightingParam", 0, sizeof(LightingParam));
-	bool bSuccess = TEMP_LightingPSO->Init();
-	if (bSuccess)
-		LightingPSO = TEMP_LightingPSO;
-#endif // CORONA_HAS_D3D12 (Lighting DX12 fallback)
+	FullScreenVB = renderBackend->CreateVertexBuffer(sizeof(quadVertices), sizeof(PostVertex), &quadVertices);
+
+	GraphicsPipelineDesc desc{};
+	desc.ShaderPath = GetAssetFullPath(L"Shaders\\LightingPS.hlsl");
+	desc.VertexEntryPoint = "VSMain";
+	desc.PixelEntryPoint = "PSMain";
+	desc.VertexStride = sizeof(PostVertex);
+	desc.ColorFormats = { ETextureFormat::RGBA16Float };
+	desc.bDepthEnable = false;
+	desc.bCullBackFaces = false;
+	desc.bTriangleStrip = true;
+	desc.ConstantBufferSize = sizeof(LightingParam);
+	desc.ConstantBufferBinding = 0;
+	desc.VertexElements = {
+		{ "POSITION", 0, EVertexAttributeFormat::Float4, 0 },
+		{ "TEXCOORD", 0, EVertexAttributeFormat::Float2, 16 }
+	};
+	desc.TextureBindings = {
+		{ "AlbedoTex", 0 },
+		{ "NormalTex", 1 },
+		{ "ShadowTex", 2 },
+		{ "VelocityTex", 3 },
+		{ "DepthTex", 4 },
+		{ "GIResultSHTex", 5 },
+		{ "GIResultColorTex", 6 },
+		{ "SpecularGITex", 7 },
+		{ "RoughnessMetalicTex", 8 },
+		{ "AmbientOcclusionTex", 14 },
+		{ "SkyLightingTex", 15 }
+	};
+	desc.SamplerBindings = {
+		{ "sampleWrap", 0 }
+	};
+
+	LightingGraphicsPipeline = renderBackend->CreateGraphicsPipeline(desc);
 }
 
 void Corona::InitMobileShadowMapPass()
@@ -701,159 +581,75 @@ void Corona::InitMobileShadowMapPass()
 
 void Corona::InitTemporalAAPass()
 {
-	if (renderBackend && renderBackend->GetAPI() == ERenderBackendAPI::Vulkan)
+	struct PostVertex
 	{
-		struct PostVertex
-		{
-			XMFLOAT4 position;
-			XMFLOAT2 uv;
-		};
-
-		PostVertex quadVertices[] =
-		{
-			{ { -1.0f, -1.0f, 0.0f, 1.0f }, { 0.0f, 0.0f } },
-			{ { -1.0f, 1.0f, 0.0f, 1.0f }, { 0.0f, 1.0f } },
-			{ { 1.0f, -1.0f, 0.0f, 1.0f }, { 1.0f, 0.0f } },
-			{ { 1.0f, 1.0f, 0.0f, 1.0f }, { 1.0f, 1.0f } }
-		};
-
-		FullScreenVB = renderBackend->CreateVertexBuffer(sizeof(quadVertices), sizeof(PostVertex), &quadVertices);
-
-		GraphicsPipelineDesc desc{};
-		desc.ShaderPath = GetAssetFullPath(L"Shaders\\TemporalAA.hlsl");
-		desc.VertexEntryPoint = "VSMain";
-		desc.PixelEntryPoint = "PSMain";
-		desc.VertexStride = sizeof(PostVertex);
-		desc.ColorFormats = { ETextureFormat::RGBA16Float };
-		desc.bDepthEnable = false;
-		desc.bCullBackFaces = false;
-		desc.bTriangleStrip = true;
-		desc.ConstantBufferSize = sizeof(TemporalAAParam);
-		desc.ConstantBufferBinding = 0;
-		desc.VertexElements = {
-			{ "POSITION", 0, EVertexAttributeFormat::Float4, 0 },
-			{ "TEXCOORD", 0, EVertexAttributeFormat::Float2, 16 }
-		};
-		desc.TextureBindings = {
-			{ "CurrentColorTex", 0 },
-			{ "PrevColorTex", 1 },
-			{ "VelocityTex", 2 },
-			{ "DepthTex", 3 },
-			{ "BloomTex", 4 }
-		};
-		desc.BufferBindings = {
-			{ "Exposure", 5 }
-		};
-		desc.SamplerBindings = {
-			{ "sampleWrap", 0 }
-		};
-
-		TemporalAAGraphicsPipeline = renderBackend->CreateGraphicsPipeline(desc);
-		return;
-	}
-
-#if CORONA_HAS_D3D12
-	ShaderBytecode vs = renderBackend->CreateShader(GetAssetFullPath(L"Shaders\\TemporalAA.hlsl"), "VSMain", "vs_6_0");
-	ShaderBytecode ps = renderBackend->CreateShader(GetAssetFullPath(L"Shaders\\TemporalAA.hlsl"), "PSMain", "ps_6_0");
-	CD3DX12_RASTERIZER_DESC rasterizerStateDesc(D3D12_DEFAULT);
-	rasterizerStateDesc.CullMode = D3D12_CULL_MODE_NONE;
-
-	D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDesc = {};
-
-	const D3D12_INPUT_ELEMENT_DESC StandardVertexDescription[] =
-	{
-		{ "POSITION", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 0,  D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
-		{ "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT,    0, 16, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+		XMFLOAT4 position;
+		XMFLOAT2 uv;
 	};
-	UINT StandardVertexDescriptionNumElements = _countof(StandardVertexDescription);
 
-	psoDesc.InputLayout = { StandardVertexDescription, StandardVertexDescriptionNumElements };
-	psoDesc.RasterizerState = rasterizerStateDesc;
-	psoDesc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
-	psoDesc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
-	psoDesc.DepthStencilState.DepthEnable = FALSE;
-	psoDesc.DepthStencilState.StencilEnable = FALSE;
-	psoDesc.SampleMask = UINT_MAX;
-	psoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-	psoDesc.NumRenderTargets = 1;
-	psoDesc.RTVFormats[0] = DXGI_FORMAT_R16G16B16A16_FLOAT;
-	//psoDescMesh.DSVFormat = DXGI_FORMAT_D32_FLOAT;
-	psoDesc.SampleDesc.Count = 1;
+	PostVertex quadVertices[] =
+	{
+		{ { -1.0f, -1.0f, 0.0f, 1.0f }, { 0.0f, 0.0f } },
+		{ { -1.0f, 1.0f, 0.0f, 1.0f }, { 0.0f, 1.0f } },
+		{ { 1.0f, -1.0f, 0.0f, 1.0f }, { 1.0f, 0.0f } },
+		{ { 1.0f, 1.0f, 0.0f, 1.0f }, { 1.0f, 1.0f } }
+	};
 
-	shared_ptr<PipelineStateObject> TEMP_TemporalAAPSO = make_shared<PipelineStateObject>(dx12_rhi);
-	TEMP_TemporalAAPSO->DebugName = L"GraphicsPSO: TemporalAA.VSMain/PSMain";
-	TEMP_TemporalAAPSO->ps = ps;
-	TEMP_TemporalAAPSO->vs = vs;
-	TEMP_TemporalAAPSO->graphicsPSODesc = psoDesc;
+	FullScreenVB = renderBackend->CreateVertexBuffer(sizeof(quadVertices), sizeof(PostVertex), &quadVertices);
 
-	TEMP_TemporalAAPSO->BindSRV("CurrentColorTex", 0, 1);
-	TEMP_TemporalAAPSO->BindSRV("PrevColorTex", 1, 1);
-	TEMP_TemporalAAPSO->BindSRV("VelocityTex", 2, 1);
-	TEMP_TemporalAAPSO->BindSRV("DepthTex", 3, 1);
-	TEMP_TemporalAAPSO->BindSRV("BloomTex", 4, 1);
-	TEMP_TemporalAAPSO->BindSRV("Exposure", 5, 1);
+	GraphicsPipelineDesc desc{};
+	desc.ShaderPath = GetAssetFullPath(L"Shaders\\TemporalAA.hlsl");
+	desc.VertexEntryPoint = "VSMain";
+	desc.PixelEntryPoint = "PSMain";
+	desc.VertexStride = sizeof(PostVertex);
+	desc.ColorFormats = { ETextureFormat::RGBA16Float };
+	desc.bDepthEnable = false;
+	desc.bCullBackFaces = false;
+	desc.bTriangleStrip = true;
+	desc.ConstantBufferSize = sizeof(TemporalAAParam);
+	desc.ConstantBufferBinding = 0;
+	desc.VertexElements = {
+		{ "POSITION", 0, EVertexAttributeFormat::Float4, 0 },
+		{ "TEXCOORD", 0, EVertexAttributeFormat::Float2, 16 }
+	};
+	desc.TextureBindings = {
+		{ "CurrentColorTex", 0 },
+		{ "PrevColorTex", 1 },
+		{ "VelocityTex", 2 },
+		{ "DepthTex", 3 },
+		{ "BloomTex", 4 }
+	};
+	desc.BufferBindings = {
+		{ "Exposure", 5 }
+	};
+	desc.SamplerBindings = {
+		{ "sampleWrap", 0 }
+	};
 
-
-		TEMP_TemporalAAPSO->BindSampler("samplerWrap", 0);
-		TEMP_TemporalAAPSO->BindCBV("TemporalAAParam", 0, sizeof(TemporalAAParam));
-	bool bSuccess = TEMP_TemporalAAPSO->Init();
-	if (bSuccess)
-		TemporalAAPSO = TEMP_TemporalAAPSO;
-#endif // CORONA_HAS_D3D12 (TemporalAA DX12 fallback)
+	TemporalAAGraphicsPipeline = renderBackend->CreateGraphicsPipeline(desc);
 }
 
 void Corona::ToneMapPass()
 {
 	renderBackend->EmitGpuCrashMarker("ToneMapPass");
 
-	if (renderBackend && renderBackend->GetAPI() == ERenderBackendAPI::Vulkan)
-	{
-		if (!ToneMapGraphicsPipeline)
-			return;
-
-		Texture* ResolveTarget = GetCurrentResolveSource();
-		if (!ResolveTarget)
-			return;
-
-		ToneMapCB.Offset = glm::vec4(0, 0, 0, 0);
-		ToneMapCB.Scale = glm::vec4(1, 1, 0, 0);
-		ToneMapCB.ToneMapMode = ToneMapMode;
-
-		renderBackend->BindGraphicsPipelineTexture(ToneMapGraphicsPipeline.get(), "SrcTex", ResolveTarget);
-		renderBackend->BindGraphicsPipelineSampler(ToneMapGraphicsPipeline.get(), "sampleWrap", samplerWrap.get());
-		renderBackend->SetGraphicsPipelineConstantData(ToneMapGraphicsPipeline.get(), 0, &ToneMapCB, sizeof(ToneMapCB));
-		renderBackend->BindGraphicsPipeline(ToneMapGraphicsPipeline.get());
-		renderBackend->SetViewportAndScissor(m_width, m_height);
-		renderBackend->DrawFullscreenQuad(FullScreenVB.get());
+	if (!ToneMapGraphicsPipeline)
 		return;
-	}
 
-
-#if CORONA_HAS_D3D12
-	Texture* backbuffer = framebuffers[renderBackend->GetCurrentFrameIndex()].get();
 	Texture* ResolveTarget = GetCurrentResolveSource();
 	if (!ResolveTarget)
 		return;
 
-	ToneMapPSO->Apply();
-
-
-	ToneMapPSO->SetSampler("samplerWrap", samplerWrap.get());
-	ToneMapPSO->SetSRV("SrcTex", ResolveTarget->GpuHandleSRV);
-
 	ToneMapCB.Offset = glm::vec4(0, 0, 0, 0);
 	ToneMapCB.Scale = glm::vec4(1, 1, 0, 0);
 	ToneMapCB.ToneMapMode = ToneMapMode;
-	ToneMapPSO->SetCBVValue("ScaleOffsetParams", &ToneMapCB);
 
-	ToneMapPSO->Apply();
-
+	renderBackend->BindGraphicsPipelineTexture(ToneMapGraphicsPipeline.get(), "SrcTex", ResolveTarget);
+	renderBackend->BindGraphicsPipelineSampler(ToneMapGraphicsPipeline.get(), "sampleWrap", samplerWrap.get());
+	renderBackend->SetGraphicsPipelineConstantData(ToneMapGraphicsPipeline.get(), 0, &ToneMapCB, sizeof(ToneMapCB));
+	renderBackend->BindGraphicsPipeline(ToneMapGraphicsPipeline.get());
 	renderBackend->SetViewportAndScissor(m_width, m_height);
 	renderBackend->DrawFullscreenQuad(FullScreenVB.get());
-
-
-	//PIXEndEvent(renderBackend->GetGraphicsCommandList());
-#endif // CORONA_HAS_D3D12 (ToneMapPass DX12 tail)
 }
 
 #if CORONA_HAS_D3D12
@@ -1518,69 +1314,26 @@ void Corona::LightingPass()
 		SkyLightingBuffer.get() :
 		DefaultBlackTex.get();
 
-	if (renderBackend && renderBackend->GetAPI() == ERenderBackendAPI::Vulkan)
-	{
-		if (!LightingGraphicsPipeline)
-			return;
-
-		renderBackend->BindGraphicsPipelineTexture(LightingGraphicsPipeline.get(), "AlbedoTex", AlbedoBuffer.get());
-		renderBackend->BindGraphicsPipelineTexture(LightingGraphicsPipeline.get(), "NormalTex", NormalBuffers[ColorBufferWriteIndex].get());
-		renderBackend->BindGraphicsPipelineTexture(LightingGraphicsPipeline.get(), "ShadowTex", shadowTex);
-		renderBackend->BindGraphicsPipelineTexture(LightingGraphicsPipeline.get(), "VelocityTex", VelocityBuffer.get());
-		renderBackend->BindGraphicsPipelineTexture(LightingGraphicsPipeline.get(), "DepthTex", DepthBuffer.get());
-		renderBackend->BindGraphicsPipelineTexture(LightingGraphicsPipeline.get(), "GIResultSHTex", lightingDiffuseAuxTex);
-		renderBackend->BindGraphicsPipelineTexture(LightingGraphicsPipeline.get(), "GIResultColorTex", lightingDiffuseTex);
-		renderBackend->BindGraphicsPipelineTexture(LightingGraphicsPipeline.get(), "SpecularGITex", lightingSpecularTex);
-		renderBackend->BindGraphicsPipelineTexture(LightingGraphicsPipeline.get(), "RoughnessMetalicTex", RoughnessMetalicBuffer.get());
-		renderBackend->BindGraphicsPipelineTexture(LightingGraphicsPipeline.get(), "AmbientOcclusionTex", ambientOcclusionTex);
-		renderBackend->BindGraphicsPipelineTexture(LightingGraphicsPipeline.get(), "SkyLightingTex", skyLightingTex);
-		renderBackend->BindGraphicsPipelineSampler(LightingGraphicsPipeline.get(), "sampleWrap", samplerWrap.get());
-
-		renderBackend->SetGraphicsPipelineConstantData(LightingGraphicsPipeline.get(), 0, &Param, sizeof(Param));
-		Texture* lightingTarget = LightingBuffer.get();
-		renderBackend->SetRenderTargets(&lightingTarget, 1, nullptr);
-		renderBackend->BindGraphicsPipeline(LightingGraphicsPipeline.get());
-		renderBackend->SetViewportAndScissor(GetRenderWidth(), GetRenderHeight());
-		renderBackend->DrawFullscreenQuad(FullScreenVB.get());
-		renderBackend->TransitionTexture(LightingBuffer.get(), EResourceState::RenderTarget, EResourceState::ShaderRead);
-
-		if (bAutoAADumpEnabled && DirectLightingBuffer)
-		{
-			Param.LightingOutputMode = 1;
-			renderBackend->SetGraphicsPipelineConstantData(LightingGraphicsPipeline.get(), 0, &Param, sizeof(Param));
-			renderBackend->TransitionTexture(DirectLightingBuffer.get(), EResourceState::ShaderRead, EResourceState::RenderTarget);
-			Texture* directLightingTarget = DirectLightingBuffer.get();
-			renderBackend->SetRenderTargets(&directLightingTarget, 1, nullptr);
-			renderBackend->BindGraphicsPipeline(LightingGraphicsPipeline.get());
-			renderBackend->SetViewportAndScissor(GetRenderWidth(), GetRenderHeight());
-			renderBackend->DrawFullscreenQuad(FullScreenVB.get());
-			renderBackend->TransitionTexture(DirectLightingBuffer.get(), EResourceState::RenderTarget, EResourceState::ShaderRead);
-		}
+	if (!LightingGraphicsPipeline)
 		return;
-	}
 
-#if CORONA_HAS_D3D12
-	LightingPSO->Apply();
+	renderBackend->BindGraphicsPipelineTexture(LightingGraphicsPipeline.get(), "AlbedoTex", AlbedoBuffer.get());
+	renderBackend->BindGraphicsPipelineTexture(LightingGraphicsPipeline.get(), "NormalTex", NormalBuffers[ColorBufferWriteIndex].get());
+	renderBackend->BindGraphicsPipelineTexture(LightingGraphicsPipeline.get(), "ShadowTex", shadowTex);
+	renderBackend->BindGraphicsPipelineTexture(LightingGraphicsPipeline.get(), "VelocityTex", VelocityBuffer.get());
+	renderBackend->BindGraphicsPipelineTexture(LightingGraphicsPipeline.get(), "DepthTex", DepthBuffer.get());
+	renderBackend->BindGraphicsPipelineTexture(LightingGraphicsPipeline.get(), "GIResultSHTex", lightingDiffuseAuxTex);
+	renderBackend->BindGraphicsPipelineTexture(LightingGraphicsPipeline.get(), "GIResultColorTex", lightingDiffuseTex);
+	renderBackend->BindGraphicsPipelineTexture(LightingGraphicsPipeline.get(), "SpecularGITex", lightingSpecularTex);
+	renderBackend->BindGraphicsPipelineTexture(LightingGraphicsPipeline.get(), "RoughnessMetalicTex", RoughnessMetalicBuffer.get());
+	renderBackend->BindGraphicsPipelineTexture(LightingGraphicsPipeline.get(), "AmbientOcclusionTex", ambientOcclusionTex);
+	renderBackend->BindGraphicsPipelineTexture(LightingGraphicsPipeline.get(), "SkyLightingTex", skyLightingTex);
+	renderBackend->BindGraphicsPipelineSampler(LightingGraphicsPipeline.get(), "sampleWrap", samplerWrap.get());
 
-	LightingPSO->SetSampler("samplerWrap", samplerWrap.get());
-	LightingPSO->SetSRV("AlbedoTex", AlbedoBuffer->GpuHandleSRV);
-	LightingPSO->SetSRV("NormalTex", NormalBuffers[ColorBufferWriteIndex]->GpuHandleSRV);
-	LightingPSO->SetSRV("ShadowTex", shadowTex->GpuHandleSRV);
-
-	LightingPSO->SetSRV("VelocityTex", VelocityBuffer->GpuHandleSRV);
-	LightingPSO->SetSRV("DepthTex", DepthBuffer->GpuHandleSRV);
-	LightingPSO->SetSRV("GIResultSHTex", lightingDiffuseAuxTex->GpuHandleSRV);
-	LightingPSO->SetSRV("GIResultColorTex", lightingDiffuseTex->GpuHandleSRV);
-	LightingPSO->SetSRV("SpecularGITex", lightingSpecularTex->GpuHandleSRV);
-	LightingPSO->SetSRV("RoughnessMetalicTex", RoughnessMetalicBuffer->GpuHandleSRV);
-	LightingPSO->SetSRV("AmbientOcclusionTex", ambientOcclusionTex->GpuHandleSRV);
-	LightingPSO->SetSRV("SkyLightingTex", skyLightingTex->GpuHandleSRV);
-	LightingPSO->SetCBVValue("LightingParam", &Param);
-
-
-	LightingPSO->Apply();
-
-	renderBackend->SetRenderTarget(LightingBuffer.get());
+	renderBackend->SetGraphicsPipelineConstantData(LightingGraphicsPipeline.get(), 0, &Param, sizeof(Param));
+	Texture* lightingTarget = LightingBuffer.get();
+	renderBackend->SetRenderTargets(&lightingTarget, 1, nullptr);
+	renderBackend->BindGraphicsPipeline(LightingGraphicsPipeline.get());
 	renderBackend->SetViewportAndScissor(GetRenderWidth(), GetRenderHeight());
 	renderBackend->DrawFullscreenQuad(FullScreenVB.get());
 	renderBackend->TransitionTexture(LightingBuffer.get(), EResourceState::RenderTarget, EResourceState::ShaderRead);
@@ -1588,16 +1341,15 @@ void Corona::LightingPass()
 	if (bAutoAADumpEnabled && DirectLightingBuffer)
 	{
 		Param.LightingOutputMode = 1;
-		LightingPSO->SetCBVValue("LightingParam", &Param);
-		LightingPSO->Apply();
-
+		renderBackend->SetGraphicsPipelineConstantData(LightingGraphicsPipeline.get(), 0, &Param, sizeof(Param));
 		renderBackend->TransitionTexture(DirectLightingBuffer.get(), EResourceState::ShaderRead, EResourceState::RenderTarget);
-		renderBackend->SetRenderTarget(DirectLightingBuffer.get());
+		Texture* directLightingTarget = DirectLightingBuffer.get();
+		renderBackend->SetRenderTargets(&directLightingTarget, 1, nullptr);
+		renderBackend->BindGraphicsPipeline(LightingGraphicsPipeline.get());
 		renderBackend->SetViewportAndScissor(GetRenderWidth(), GetRenderHeight());
 		renderBackend->DrawFullscreenQuad(FullScreenVB.get());
 		renderBackend->TransitionTexture(DirectLightingBuffer.get(), EResourceState::RenderTarget, EResourceState::ShaderRead);
 	}
-#endif // CORONA_HAS_D3D12 (LightingPass DX12 tail)
 }
 
 void Corona::TemporalAAPass()
@@ -1607,109 +1359,62 @@ void Corona::TemporalAAPass()
 	UINT PrevColorBufferIndex = 1 - ColorBufferWriteIndex;
 	Texture* ResolveTarget = ColorBuffers[ColorBufferWriteIndex].get();
 
-	if (renderBackend && renderBackend->GetAPI() == ERenderBackendAPI::Vulkan)
+	if (!TemporalAAGraphicsPipeline || !ResolveTarget || !LightingBuffer || !ExposureData)
 	{
-		if (!TemporalAAGraphicsPipeline || !ResolveTarget || !LightingBuffer || !ExposureData)
-		{
-			bUseLightingBufferFallbackForToneMap = true;
-			bTemporalAAHistoryValid = false;
-			return;
-		}
-
-		Texture* PrevColorBuffer = ColorBuffers[PrevColorBufferIndex].get();
-		Texture* BloomTexture = BloomBlurPingPong[0] ? BloomBlurPingPong[0].get() : DefaultBlackTex.get();
-		if (!PrevColorBuffer || !BloomTexture)
-		{
-			bUseLightingBufferFallbackForToneMap = true;
-			bTemporalAAHistoryValid = false;
-			return;
-		}
-
-		TemporalAAParam Param;
-		Param.RTSize.x = GetRenderWidth();
-		Param.RTSize.y = GetRenderHeight();
-		Param.TAABlendFactor = IsTemporalAAEnabled() ? 0.1f : 1.0f;
-		Param.ClampMode = ClampMode;
-		Param.BloomStrength = BloomBlurPingPong[0] ? BloomStrength : 0.0f;
-		Param.HistoryValid = bTemporalAAHistoryValid ? 1u : 0u;
-		Param.CurrentJitter = IsJitterEnabled() ? (CurrentJitter * 0.5f) : glm::vec2(0.0f);
-
-		renderBackend->BindGraphicsPipelineTexture(TemporalAAGraphicsPipeline.get(), "CurrentColorTex", LightingBuffer.get());
-		renderBackend->BindGraphicsPipelineTexture(TemporalAAGraphicsPipeline.get(), "PrevColorTex", PrevColorBuffer);
-		renderBackend->BindGraphicsPipelineTexture(TemporalAAGraphicsPipeline.get(), "VelocityTex", VelocityBuffer.get());
-		renderBackend->BindGraphicsPipelineTexture(TemporalAAGraphicsPipeline.get(), "DepthTex", DepthBuffer.get());
-		renderBackend->BindGraphicsPipelineTexture(TemporalAAGraphicsPipeline.get(), "BloomTex", BloomTexture);
-		renderBackend->BindGraphicsPipelineBuffer(TemporalAAGraphicsPipeline.get(), "Exposure", ExposureData.get());
-		renderBackend->BindGraphicsPipelineSampler(TemporalAAGraphicsPipeline.get(), "sampleWrap", samplerBilinearWrap ? samplerBilinearWrap.get() : samplerWrap.get());
-		renderBackend->SetGraphicsPipelineConstantData(TemporalAAGraphicsPipeline.get(), 0, &Param, sizeof(Param));
-
-		renderBackend->TransitionTexture(ResolveTarget, EResourceState::ShaderRead, EResourceState::RenderTarget);
-		Texture* temporalTarget = ResolveTarget;
-		renderBackend->SetRenderTargets(&temporalTarget, 1, nullptr);
-		renderBackend->BindGraphicsPipeline(TemporalAAGraphicsPipeline.get());
-		renderBackend->SetViewportAndScissor(GetRenderWidth(), GetRenderHeight());
-		renderBackend->DrawFullscreenQuad(FullScreenVB.get());
-		renderBackend->TransitionTexture(ResolveTarget, EResourceState::RenderTarget, EResourceState::ShaderRead);
-
-		bTemporalAAHistoryValid = IsTemporalAAEnabled();
-		bUseLightingBufferFallbackForToneMap = false;
-		ResolvedColorBufferIndex = ColorBufferWriteIndex;
+		bUseLightingBufferFallbackForToneMap = true;
+		bTemporalAAHistoryValid = false;
 		return;
 	}
 
-#if CORONA_HAS_D3D12
-	renderBackend->TransitionTexture(ResolveTarget, EResourceState::ShaderRead, EResourceState::RenderTarget);
-
-	TemporalAAPSO->Apply();
-
-	TemporalAAPSO->SetSampler("samplerWrap", samplerBilinearWrap.get());
-	TemporalAAPSO->SetSRV("CurrentColorTex", LightingBuffer->GpuHandleSRV);
 	Texture* PrevColorBuffer = ColorBuffers[PrevColorBufferIndex].get();
-	TemporalAAPSO->SetSRV("PrevColorTex", PrevColorBuffer->GpuHandleSRV);
-	TemporalAAPSO->SetSRV("VelocityTex", VelocityBuffer->GpuHandleSRV);
-	TemporalAAPSO->SetSRV("DepthTex", DepthBuffer->GpuHandleSRV);
-	TemporalAAPSO->SetSRV("BloomTex", BloomBlurPingPong[0]->GpuHandleSRV);
-	TemporalAAPSO->SetSRV("Exposure", ExposureData->GpuHandleSRV);
+	Texture* BloomTexture = BloomBlurPingPong[0] ? BloomBlurPingPong[0].get() : DefaultBlackTex.get();
+	if (!PrevColorBuffer || !BloomTexture)
+	{
+		bUseLightingBufferFallbackForToneMap = true;
+		bTemporalAAHistoryValid = false;
+		return;
+	}
 
 	TemporalAAParam Param;
-
 	Param.RTSize.x = GetRenderWidth();
 	Param.RTSize.y = GetRenderHeight();
-
-	if (IsTemporalAAEnabled())
-		Param.TAABlendFactor = 0.1;
-	else
-		Param.TAABlendFactor = 1.0;
-
+	Param.TAABlendFactor = IsTemporalAAEnabled() ? 0.1f : 1.0f;
 	Param.ClampMode = ClampMode;
-	Param.BloomStrength = BloomStrength;
+	Param.BloomStrength = BloomBlurPingPong[0] ? BloomStrength : 0.0f;
 	Param.HistoryValid = bTemporalAAHistoryValid ? 1u : 0u;
 	Param.CurrentJitter = IsJitterEnabled() ? (CurrentJitter * 0.5f) : glm::vec2(0.0f);
 
-	TemporalAAPSO->SetCBVValue("TemporalAAParam", &Param);
-	TemporalAAPSO->Apply();
+	renderBackend->BindGraphicsPipelineTexture(TemporalAAGraphicsPipeline.get(), "CurrentColorTex", LightingBuffer.get());
+	renderBackend->BindGraphicsPipelineTexture(TemporalAAGraphicsPipeline.get(), "PrevColorTex", PrevColorBuffer);
+	renderBackend->BindGraphicsPipelineTexture(TemporalAAGraphicsPipeline.get(), "VelocityTex", VelocityBuffer.get());
+	renderBackend->BindGraphicsPipelineTexture(TemporalAAGraphicsPipeline.get(), "DepthTex", DepthBuffer.get());
+	renderBackend->BindGraphicsPipelineTexture(TemporalAAGraphicsPipeline.get(), "BloomTex", BloomTexture);
+	renderBackend->BindGraphicsPipelineBuffer(TemporalAAGraphicsPipeline.get(), "Exposure", ExposureData.get());
+	renderBackend->BindGraphicsPipelineSampler(TemporalAAGraphicsPipeline.get(), "sampleWrap", samplerBilinearWrap ? samplerBilinearWrap.get() : samplerWrap.get());
+	renderBackend->SetGraphicsPipelineConstantData(TemporalAAGraphicsPipeline.get(), 0, &Param, sizeof(Param));
 
-	renderBackend->SetRenderTarget(ResolveTarget);
-	renderBackend->SetViewportAndScissor(static_cast<uint32_t>(m_width), static_cast<uint32_t>(m_height));
+	renderBackend->TransitionTexture(ResolveTarget, EResourceState::ShaderRead, EResourceState::RenderTarget);
+	Texture* temporalTarget = ResolveTarget;
+	renderBackend->SetRenderTargets(&temporalTarget, 1, nullptr);
+	renderBackend->BindGraphicsPipeline(TemporalAAGraphicsPipeline.get());
+	renderBackend->SetViewportAndScissor(GetRenderWidth(), GetRenderHeight());
 	renderBackend->DrawFullscreenQuad(FullScreenVB.get());
-	
-	renderBackend->TransitionTexture(ResolveTarget, EResourceState::RenderTarget, EResourceState::UnorderedAccess);
+	renderBackend->TransitionTexture(ResolveTarget, EResourceState::RenderTarget, EResourceState::ShaderRead);
 
-	if (bDrawHistogram)
+	if (bDrawHistogram && DrawHistogramPSO)
 	{
+		renderBackend->TransitionTexture(ResolveTarget, EResourceState::ShaderRead, EResourceState::UnorderedAccess);
 		DrawHistogramPSO->SetBufferSRV("Histogram", Histogram.get());
 		DrawHistogramPSO->SetBufferSRV("Exposure", ExposureData.get());
 		DrawHistogramPSO->SetTextureUAV("ColorBuffer", ResolveTarget);
 		DrawHistogramPSO->Apply();
 		renderBackend->Dispatch(1, 32, 1);
+		renderBackend->TransitionTexture(ResolveTarget, EResourceState::UnorderedAccess, EResourceState::ShaderRead);
 	}
-	renderBackend->TransitionTexture(ResolveTarget, EResourceState::UnorderedAccess, EResourceState::ShaderRead);
 
 	bTemporalAAHistoryValid = IsTemporalAAEnabled();
 	bUseLightingBufferFallbackForToneMap = false;
 	ResolvedColorBufferIndex = ColorBufferWriteIndex;
-#endif // CORONA_HAS_D3D12 (TemporalAAPass DX12 tail)
-
 }
 
 void Corona::BloomPass()
