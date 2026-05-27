@@ -392,7 +392,6 @@ void Corona::InitToneMapPass()
 	ToneMapGraphicsPipeline = renderBackend->CreateGraphicsPipeline(desc);
 }
 
-#if CORONA_HAS_D3D12
 void Corona::InitDebugPass()
 {
 	struct PostVertex
@@ -412,59 +411,34 @@ void Corona::InitDebugPass()
 	const UINT vertexBufferSize = sizeof(quadVertices);
 	const UINT vertexBufferStride = sizeof(PostVertex);
 
-	D3D12_SUBRESOURCE_DATA vertexData = {};
-	vertexData.pData = &quadVertices;
-	vertexData.RowPitch = vertexBufferSize;
-	vertexData.SlicePitch = vertexData.RowPitch;
-
 	FullScreenVB = renderBackend->CreateVertexBuffer(vertexBufferSize, vertexBufferStride, &quadVertices);
 
-	ShaderBytecode vs = renderBackend->CreateShader(GetAssetFullPath(L"Shaders\\DebugPS.hlsl"), "VSMain", "vs_6_0");
-	ShaderBytecode ps = renderBackend->CreateShader(GetAssetFullPath(L"Shaders\\DebugPS.hlsl"), "PSMain", "ps_6_0");
-
-	CD3DX12_RASTERIZER_DESC rasterizerStateDesc(D3D12_DEFAULT);
-	rasterizerStateDesc.CullMode = D3D12_CULL_MODE_NONE;
-
-	D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDesc = {};
-
-	const D3D12_INPUT_ELEMENT_DESC StandardVertexDescription[] =
-	{
-		{ "POSITION", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 0,  D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
-		{ "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT,    0, 16, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+	GraphicsPipelineDesc desc{};
+	desc.ShaderPath = GetAssetFullPath(L"Shaders\\DebugPS.hlsl");
+	desc.VertexEntryPoint = "VSMain";
+	desc.PixelEntryPoint = "PSMain";
+	desc.VertexStride = vertexBufferStride;
+	desc.ColorFormats = { ETextureFormat::RGBA8Unorm };
+	desc.bDepthEnable = false;
+	desc.bCullBackFaces = false;
+	desc.bTriangleStrip = true;
+	desc.ConstantBufferSize = sizeof(DebugPassCB);
+	desc.ConstantBufferBinding = 0;
+	desc.VertexElements = {
+		{ "POSITION", 0, EVertexAttributeFormat::Float4, 0 },
+		{ "TEXCOORD", 0, EVertexAttributeFormat::Float2, 16 }
 	};
-	UINT StandardVertexDescriptionNumElements = _countof(StandardVertexDescription);
+	desc.TextureBindings = {
+		{ "SrcTex", 0 },
+		{ "SrcTexSH", 1 },
+		{ "SrcTexNormal", 2 }
+	};
+	desc.SamplerBindings = {
+		{ "samplerWrap", 0 }
+	};
 
-	psoDesc.InputLayout = { StandardVertexDescription, StandardVertexDescriptionNumElements };
-	psoDesc.RasterizerState = rasterizerStateDesc;
-	psoDesc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
-	psoDesc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
-	psoDesc.DepthStencilState.DepthEnable = FALSE;
-	psoDesc.DepthStencilState.StencilEnable = FALSE;
-	psoDesc.SampleMask = UINT_MAX;
-	psoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-	psoDesc.NumRenderTargets = 1;
-	psoDesc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
-	//psoDescMesh.DSVFormat = DXGI_FORMAT_D32_FLOAT;
-	psoDesc.SampleDesc.Count = 1;
-
-	shared_ptr<PipelineStateObject> TEMP_BufferVisualizePSO = make_shared<PipelineStateObject>(dx12_rhi);
-	TEMP_BufferVisualizePSO->DebugName = L"GraphicsPSO: DebugPS.VSMain/PSMain";
-	TEMP_BufferVisualizePSO->ps = ps;
-	TEMP_BufferVisualizePSO->vs = vs;
-	TEMP_BufferVisualizePSO->graphicsPSODesc = psoDesc;
-
-	TEMP_BufferVisualizePSO->BindSRV("SrcTex", 0, 1);
-	TEMP_BufferVisualizePSO->BindSRV("SrcTexSH", 1, 1);
-	TEMP_BufferVisualizePSO->BindSRV("SrcTexNormal", 2, 1);
-
-	TEMP_BufferVisualizePSO->BindSampler("samplerWrap", 0);
-	TEMP_BufferVisualizePSO->BindCBV("DebugPassCB", 0, sizeof(DebugPassCB));
-
-	bool bSuccess = TEMP_BufferVisualizePSO->Init();
-	if (bSuccess)
-		BufferVisualizePSO = TEMP_BufferVisualizePSO;
+	BufferVisualizeGraphicsPipeline = renderBackend->CreateGraphicsPipeline(desc);
 }
-#endif // CORONA_HAS_D3D12 (InitDebugPass)
 
 void Corona::InitLightingPass()
 {
@@ -652,12 +626,9 @@ void Corona::ToneMapPass()
 	renderBackend->DrawFullscreenQuad(FullScreenVB.get());
 }
 
-#if CORONA_HAS_D3D12
 void Corona::DebugPass()
 {
-	if (!renderBackend ||
-		renderBackend->GetAPI() != ERenderBackendAPI::D3D12 ||
-		!BufferVisualizePSO)
+	if (!renderBackend || !BufferVisualizeGraphicsPipeline)
 	{
 		bDebugDraw = false;
 		return;
@@ -665,14 +636,26 @@ void Corona::DebugPass()
 
 	renderBackend->EmitGpuCrashMarker("DebugPass");
 
-	BufferVisualizePSO->Apply();
-	BufferVisualizePSO->SetSampler("samplerWrap", samplerWrap.get());
+	renderBackend->BindGraphicsPipelineSampler(BufferVisualizeGraphicsPipeline.get(), "samplerWrap", samplerWrap.get());
 
-	Texture* backbuffer = framebuffers[renderBackend->GetCurrentFrameIndex()].get();
+	auto visualize = [&](const DebugPassCB& cb, Texture* tex) {
+		if (!tex) return;
+		renderBackend->SetGraphicsPipelineConstantData(BufferVisualizeGraphicsPipeline.get(), 0, &cb, sizeof(cb));
+		renderBackend->BindGraphicsPipelineTexture(BufferVisualizeGraphicsPipeline.get(), "SrcTex", tex);
+		renderBackend->BindGraphicsPipeline(BufferVisualizeGraphicsPipeline.get());
+		renderBackend->DrawFullscreenQuad(FullScreenVB.get());
+	};
+	auto visualizeMulti = [&](const DebugPassCB& cb, Texture* tex, Texture* texSH, Texture* texNormal) {
+		if (!tex || !texSH || !texNormal) return;
+		renderBackend->SetGraphicsPipelineConstantData(BufferVisualizeGraphicsPipeline.get(), 0, &cb, sizeof(cb));
+		renderBackend->BindGraphicsPipelineTexture(BufferVisualizeGraphicsPipeline.get(), "SrcTex", tex);
+		renderBackend->BindGraphicsPipelineTexture(BufferVisualizeGraphicsPipeline.get(), "SrcTexSH", texSH);
+		renderBackend->BindGraphicsPipelineTexture(BufferVisualizeGraphicsPipeline.get(), "SrcTexNormal", texNormal);
+		renderBackend->BindGraphicsPipeline(BufferVisualizeGraphicsPipeline.get());
+		renderBackend->DrawFullscreenQuad(FullScreenVB.get());
+	};
 
-	renderBackend->DrawFullscreenQuad(FullScreenVB.get());
 
-	
 
 	std::vector<std::function<void(EDebugVisualization eFS)>> functions;
 	functions.push_back([&](EDebugVisualization eFS){
@@ -694,9 +677,7 @@ void Corona::DebugPass()
 			return;
 		}
 		cb.DebugMode = RAW_COPY;
-		BufferVisualizePSO->SetCBVValue("DebugPassCB", &cb);
-		BufferVisualizePSO->SetSRV("SrcTex", ShadowBuffer->GpuHandleSRV);
-		renderBackend->DrawFullscreenQuad(FullScreenVB.get());
+		visualize(cb, ShadowBuffer.get());
 	});
 
 	functions.push_back([&](EDebugVisualization eFS) {
@@ -720,9 +701,7 @@ void Corona::DebugPass()
 		if (!AmbientOcclusionBuffer)
 			return;
 		cb.DebugMode = CHANNEL_X;
-		BufferVisualizePSO->SetCBVValue("DebugPassCB", &cb);
-		BufferVisualizePSO->SetSRV("SrcTex", AmbientOcclusionBuffer->GpuHandleSRV);
-		renderBackend->DrawFullscreenQuad(FullScreenVB.get());
+		visualize(cb, AmbientOcclusionBuffer.get());
 	});
 
 	functions.push_back([&](EDebugVisualization eFS) {
@@ -744,9 +723,7 @@ void Corona::DebugPass()
 			return;
 		}
 		cb.DebugMode = RAW_COPY;
-		BufferVisualizePSO->SetCBVValue("DebugPassCB", &cb);
-		BufferVisualizePSO->SetSRV("SrcTex", NormalBuffers[ColorBufferWriteIndex]->GpuHandleSRV);
-		renderBackend->DrawFullscreenQuad(FullScreenVB.get());
+		visualize(cb, NormalBuffers[ColorBufferWriteIndex].get());
 	});
 
 	functions.push_back([&](EDebugVisualization eFS) {
@@ -767,9 +744,7 @@ void Corona::DebugPass()
 			return;
 		}
 		cb.DebugMode = RAW_COPY;
-		BufferVisualizePSO->SetCBVValue("DebugPassCB", &cb);
-		BufferVisualizePSO->SetSRV("SrcTex", GeomNormalBuffers[ColorBufferWriteIndex]->GpuHandleSRV);
-		renderBackend->DrawFullscreenQuad(FullScreenVB.get());
+		visualize(cb, GeomNormalBuffers[ColorBufferWriteIndex].get());
 	});
 
 	functions.push_back([&](EDebugVisualization eFS) {
@@ -790,9 +765,7 @@ void Corona::DebugPass()
 			return;
 		}
 		cb.DebugMode = RAW_COPY;
-		BufferVisualizePSO->SetCBVValue("DebugPassCB", &cb);
-		BufferVisualizePSO->SetSRV("SrcTex", BloomBlurPingPong[0]->GpuHandleSRV);
-		renderBackend->DrawFullscreenQuad(FullScreenVB.get());
+		visualize(cb, BloomBlurPingPong[0].get());
 	});
 
 
@@ -818,9 +791,7 @@ void Corona::DebugPass()
 		cb.ProjectionParams.z = Near;
 		cb.ProjectionParams.w = Far;
 		cb.DebugMode = DEPTH;
-		BufferVisualizePSO->SetCBVValue("DebugPassCB", &cb);
-		BufferVisualizePSO->SetSRV("SrcTex", UnjitteredDepthBuffers[ColorBufferWriteIndex]->GpuHandleSRV);
-		renderBackend->DrawFullscreenQuad(FullScreenVB.get());
+		visualize(cb, UnjitteredDepthBuffers[ColorBufferWriteIndex].get());
 	});
 	functions.push_back([&](EDebugVisualization eFS) {
 		// raw diffuse gi
@@ -842,9 +813,7 @@ void Corona::DebugPass()
 		}
 
 		cb.DebugMode = RAW_COPY;
-		BufferVisualizePSO->SetCBVValue("DebugPassCB", &cb);
-		BufferVisualizePSO->SetSRV("SrcTex", DiffuseGIRaw->GpuHandleSRV);
-		renderBackend->DrawFullscreenQuad(FullScreenVB.get());
+		visualize(cb, DiffuseGIRaw.get());
 	});
 	functions.push_back([&](EDebugVisualization eFS) {
 		// raw diffuse gi aux
@@ -866,9 +835,7 @@ void Corona::DebugPass()
 		}
 
 		cb.DebugMode = RAW_COPY;
-		BufferVisualizePSO->SetCBVValue("DebugPassCB", &cb);
-		BufferVisualizePSO->SetSRV("SrcTex", DiffuseGIRawAux->GpuHandleSRV);
-		renderBackend->DrawFullscreenQuad(FullScreenVB.get());
+		visualize(cb, DiffuseGIRawAux.get());
 	});
 	functions.push_back([&](EDebugVisualization eFS) {
 		// screen probe diffuse gi resolve
@@ -887,9 +854,7 @@ void Corona::DebugPass()
 		if (!ScreenProbeGIResolved)
 			return;
 		cb.DebugMode = RAW_COPY;
-		BufferVisualizePSO->SetCBVValue("DebugPassCB", &cb);
-		BufferVisualizePSO->SetSRV("SrcTex", ScreenProbeGIResolved->GpuHandleSRV);
-		renderBackend->DrawFullscreenQuad(FullScreenVB.get());
+		visualize(cb, ScreenProbeGIResolved.get());
 	});
 	functions.push_back([&](EDebugVisualization eFS) {
 		// nearest screen probe radiance debug
@@ -908,9 +873,7 @@ void Corona::DebugPass()
 		if (!ScreenProbeGIProbeDebug)
 			return;
 		cb.DebugMode = RAW_COPY;
-		BufferVisualizePSO->SetCBVValue("DebugPassCB", &cb);
-		BufferVisualizePSO->SetSRV("SrcTex", ScreenProbeGIProbeDebug->GpuHandleSRV);
-		renderBackend->DrawFullscreenQuad(FullScreenVB.get());
+		visualize(cb, ScreenProbeGIProbeDebug.get());
 	});
 	functions.push_back([&](EDebugVisualization eFS) {
 		// full-resolution screen-probe resolve history length
@@ -929,9 +892,7 @@ void Corona::DebugPass()
 		if (!ScreenProbeGIHistory[ScreenProbeGIHistoryWriteIndex])
 			return;
 		cb.DebugMode = HISTORY_LENGTH;
-		BufferVisualizePSO->SetCBVValue("DebugPassCB", &cb);
-		BufferVisualizePSO->SetSRV("SrcTex", ScreenProbeGIHistory[ScreenProbeGIHistoryWriteIndex]->GpuHandleSRV);
-		renderBackend->DrawFullscreenQuad(FullScreenVB.get());
+		visualize(cb, ScreenProbeGIHistory[ScreenProbeGIHistoryWriteIndex].get());
 	});
 	functions.push_back([&](EDebugVisualization eFS) {
 		// probe-atlas radiance history length
@@ -950,9 +911,7 @@ void Corona::DebugPass()
 		if (!ScreenProbeGIRadiance[ScreenProbeGIAtlasWriteIndex])
 			return;
 		cb.DebugMode = HISTORY_LENGTH;
-		BufferVisualizePSO->SetCBVValue("DebugPassCB", &cb);
-		BufferVisualizePSO->SetSRV("SrcTex", ScreenProbeGIRadiance[ScreenProbeGIAtlasWriteIndex]->GpuHandleSRV);
-		renderBackend->DrawFullscreenQuad(FullScreenVB.get());
+		visualize(cb, ScreenProbeGIRadiance[ScreenProbeGIAtlasWriteIndex].get());
 	});
 	functions.push_back([&](EDebugVisualization eFS) {
 		// temporal filtered diffuse gi
@@ -974,9 +933,7 @@ void Corona::DebugPass()
 		}
 
 		cb.DebugMode = RAW_COPY;
-		BufferVisualizePSO->SetCBVValue("DebugPassCB", &cb);
-		BufferVisualizePSO->SetSRV("SrcTex", DiffuseGITemporal[GIBufferWriteIndex]->GpuHandleSRV);
-		renderBackend->DrawFullscreenQuad(FullScreenVB.get());
+		visualize(cb, DiffuseGITemporal[GIBufferWriteIndex].get());
 	});
 	functions.push_back([&](EDebugVisualization eFS) {
 		// resolved diffuse gi
@@ -998,13 +955,11 @@ void Corona::DebugPass()
 		}
 
 		cb.DebugMode = RAW_COPY;
-		BufferVisualizePSO->SetCBVValue("DebugPassCB", &cb);
 		Texture* resolvedDiffuse =
 			(DiffuseGIMode == EDiffuseGIMode::SCREEN_PROBE && ScreenProbeGIResolved) ?
 			ScreenProbeGIResolved.get() :
 			DiffuseGITemporal[GIBufferWriteIndex].get();
-		BufferVisualizePSO->SetSRV("SrcTex", resolvedDiffuse->GpuHandleSRV);
-		renderBackend->DrawFullscreenQuad(FullScreenVB.get());
+		visualize(cb, resolvedDiffuse);
 	});
 	functions.push_back([&](EDebugVisualization eFS) {
 		// final diffuse gi
@@ -1028,16 +983,11 @@ void Corona::DebugPass()
 		}
 
 		cb.DebugMode = SH_LIGHTING;
-		BufferVisualizePSO->SetCBVValue("DebugPassCB", &cb);
 		Texture* resolvedDiffuse =
 			(DiffuseGIMode == EDiffuseGIMode::SCREEN_PROBE && ScreenProbeGIResolved) ?
 			ScreenProbeGIResolved.get() :
 			DiffuseGITemporal[GIBufferWriteIndex].get();
-		BufferVisualizePSO->SetSRV("SrcTex", resolvedDiffuse->GpuHandleSRV);
-		BufferVisualizePSO->SetSRV("SrcTexSH", DiffuseGITemporalAux[GIBufferWriteIndex]->GpuHandleSRV);
-		BufferVisualizePSO->SetSRV("SrcTexNormal", NormalBuffers[ColorBufferWriteIndex]->GpuHandleSRV);
-
-		renderBackend->DrawFullscreenQuad(FullScreenVB.get());
+		visualizeMulti(cb, resolvedDiffuse, DiffuseGITemporalAux[GIBufferWriteIndex].get(), NormalBuffers[ColorBufferWriteIndex].get());
 	});
 	functions.push_back([&](EDebugVisualization eFS) {
 		// albedo
@@ -1059,9 +1009,7 @@ void Corona::DebugPass()
 		}
 
 		cb.DebugMode = RAW_COPY;
-		BufferVisualizePSO->SetCBVValue("DebugPassCB", &cb);
-		BufferVisualizePSO->SetSRV("SrcTex", AlbedoBuffer->GpuHandleSRV);
-		renderBackend->DrawFullscreenQuad(FullScreenVB.get());
+		visualize(cb, AlbedoBuffer.get());
 	});
 	
 	functions.push_back([&](EDebugVisualization eFS) {
@@ -1084,9 +1032,7 @@ void Corona::DebugPass()
 		}
 
 		cb.DebugMode = RAW_COPY;
-		BufferVisualizePSO->SetCBVValue("DebugPassCB", &cb);
-		BufferVisualizePSO->SetSRV("SrcTex", VelocityBuffer->GpuHandleSRV);
-		renderBackend->DrawFullscreenQuad(FullScreenVB.get());
+		visualize(cb, VelocityBuffer.get());
 	});
 	
 	functions.push_back([&](EDebugVisualization eFS) {
@@ -1108,9 +1054,7 @@ void Corona::DebugPass()
 		}
 
 		cb.DebugMode = RAW_COPY;
-		BufferVisualizePSO->SetCBVValue("DebugPassCB", &cb);
-		BufferVisualizePSO->SetSRV("SrcTex", RoughnessMetalicBuffer->GpuHandleSRV);
-		renderBackend->DrawFullscreenQuad(FullScreenVB.get());
+		visualize(cb, RoughnessMetalicBuffer.get());
 	});
 	functions.push_back([&](EDebugVisualization eFS) {
 		// specular raw
@@ -1133,9 +1077,7 @@ void Corona::DebugPass()
 		}
 
 		cb.DebugMode = RAW_COPY;
-		BufferVisualizePSO->SetCBVValue("DebugPassCB", &cb);
-		BufferVisualizePSO->SetSRV("SrcTex", SpecularGIRaw->GpuHandleSRV);
-		renderBackend->DrawFullscreenQuad(FullScreenVB.get());
+		visualize(cb, SpecularGIRaw.get());
 	});
 
 	functions.push_back([&](EDebugVisualization eFS) {
@@ -1159,9 +1101,7 @@ void Corona::DebugPass()
 		}
 
 		cb.DebugMode = RAW_COPY;
-		BufferVisualizePSO->SetCBVValue("DebugPassCB", &cb);
-		BufferVisualizePSO->SetSRV("SrcTex", SpecularGITemporal[GIBufferWriteIndex]->GpuHandleSRV);
-		renderBackend->DrawFullscreenQuad(FullScreenVB.get());
+		visualize(cb, SpecularGITemporal[GIBufferWriteIndex].get());
 	});
 
 	functions.push_back([&](EDebugVisualization eFS) {
@@ -1185,9 +1125,7 @@ void Corona::DebugPass()
 		}
 
 		cb.DebugMode = CHANNEL_W;
-		BufferVisualizePSO->SetCBVValue("DebugPassCB", &cb);
-		BufferVisualizePSO->SetSRV("SrcTex", SpecularGITemporal[GIBufferWriteIndex]->GpuHandleSRV);
-		renderBackend->DrawFullscreenQuad(FullScreenVB.get());
+		visualize(cb, SpecularGITemporal[GIBufferWriteIndex].get());
 	});
 
 	EDebugVisualization FullScreenVisualize = EDebugVisualization::SPECULAR_RAW;
@@ -1197,7 +1135,6 @@ void Corona::DebugPass()
 		f(FullscreenDebugBuffer);
 	}
 }
-#endif // CORONA_HAS_D3D12 (DebugPass)
 
 void Corona::LightingPass()
 {

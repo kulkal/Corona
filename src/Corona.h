@@ -835,9 +835,7 @@ private:
 		UINT32 DebugMode;
 	};
 
-#if CORONA_HAS_D3D12
-	shared_ptr<PipelineStateObject> BufferVisualizePSO;
-#endif
+	std::shared_ptr<GraphicsPipelineHandle> BufferVisualizeGraphicsPipeline;
 
 	// lighting pass
 	

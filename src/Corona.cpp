@@ -11215,15 +11215,7 @@ void Corona::OnRender()
 			}
 		}
 		ImGui::Text("Arrow keys : rotate camera imGui\nWASD keys : move camera imGui\nI : show/hide imGui\nB : show/hide buffer visualization\nT : cycle anti-aliasing mode");
-		const bool bDebugVisualizationAvailable =
-#if CORONA_HAS_D3D12
-			renderBackend &&
-			renderBackend->GetAPI() == ERenderBackendAPI::D3D12 &&
-			BufferVisualizePSO != nullptr
-#else
-			false
-#endif
-			;
+		const bool bDebugVisualizationAvailable = renderBackend && BufferVisualizeGraphicsPipeline;
 		if (bDebugVisualizationAvailable)
 		{
 			ImGui::Checkbox("Visualize Buffers", &bDebugDraw);
@@ -12491,10 +12483,7 @@ void Corona::OnKeyDown(UINT8 key)
 		bMultiThreadRendering = !bMultiThreadRendering;
 		break;*/
 	case 'B':
-#if CORONA_HAS_D3D12
-		if (renderBackend &&
-			renderBackend->GetAPI() == ERenderBackendAPI::D3D12 &&
-			BufferVisualizePSO)
+		if (renderBackend && BufferVisualizeGraphicsPipeline)
 		{
 			bDebugDraw = !bDebugDraw;
 		}
@@ -12502,9 +12491,6 @@ void Corona::OnKeyDown(UINT8 key)
 		{
 			bDebugDraw = false;
 		}
-#else
-		bDebugDraw = false;
-#endif
 		break;
 	case 'T':
 	{
