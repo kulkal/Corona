@@ -100,6 +100,9 @@ public:
 class PipelineStateObject
 {
 public:
+	PipelineStateObject() = default;
+	explicit PipelineStateObject(DX12Backend* owner) : Owner(owner) {}
+
 	DX12Backend* Owner = nullptr;
 	bool IsCompute = false;
 	struct BindingData
