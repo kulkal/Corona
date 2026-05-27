@@ -2811,6 +2811,14 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 			bCommandLineDungeonCharacterMode = false;
 			continue;
 		}
+		if (arg == L"--terrain-demo")
+		{
+			bStartupSponzaFlyMode = false;
+			bEnableStartupLuauScript = true;
+			StartupLuauMode = L"terrain_demo";
+			bCommandLineDungeonCharacterMode = false;
+			continue;
+		}
 		std::wstring spineBenchmarkCountValue = ParseValueArg(arg, L"--platformer-spine-benchmark-count", L"-platformer-spine-benchmark-count", i);
 		if (spineBenchmarkCountValue.empty())
 			spineBenchmarkCountValue = ParseValueArg(arg, L"--spine-benchmark-count", L"-spine-benchmark-count", i);
@@ -7398,7 +7406,7 @@ void Corona::OnInit()
 			StartupLuauMode = L"spine_benchmark";
 			bCommandLineDungeonCharacterMode = false;
 		}
-		if (StartupLuauMode != L"dungeon" && StartupLuauMode != L"sandbox" && StartupLuauMode != L"sponza" && StartupLuauMode != L"spine_benchmark" && StartupLuauMode != L"grass_demo")
+		if (StartupLuauMode != L"dungeon" && StartupLuauMode != L"sandbox" && StartupLuauMode != L"sponza" && StartupLuauMode != L"spine_benchmark" && StartupLuauMode != L"grass_demo" && StartupLuauMode != L"terrain_demo")
 			StartupLuauMode = L"platformer";
 
 		const bool bDungeonStartupMode = StartupLuauMode == L"dungeon";
@@ -8363,6 +8371,16 @@ shared_ptr<Scene> Corona::CreateProceduralTerrainScene(UINT32 seed)
 	}
 
 	shared_ptr<Scene> scene = component->GetScene();
+	// Phase-1 gray material: still needs default texture handles bound,
+	// because the GBuffer PSO unconditionally samples diffuse/normal/rough/metallic.
+	if (scene && !scene->Materials.empty() && scene->Materials.front())
+	{
+		auto& mat = scene->Materials.front();
+		mat->Diffuse   = DefaultWhiteTex;
+		mat->Normal    = DefaultNormalTex;
+		mat->Roughness = DefaultRougnessTex;
+		mat->Metallic  = DefaultBlackTex;
+	}
 	ActiveTerrain = std::move(component);
 	return scene;
 }
@@ -9206,6 +9224,7 @@ void Corona::LoadAssets()
 		 StartupLuauMode == L"dungeon" ||
 		 StartupLuauMode == L"spine_benchmark" ||
 		 StartupLuauMode == L"grass_demo" ||
+		 StartupLuauMode == L"terrain_demo" ||
 		 bCommandLineDungeonCharacterMode);
 
 	if (!bMobileDungeonOnlyStartup && !bGameplayStartupMode && !bCommandLineSkeletalBenchMode)

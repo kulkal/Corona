@@ -4187,7 +4187,10 @@ Corona::ScriptSceneHandle Corona::CreateProceduralTerrainSceneForScript(UINT32 s
 	if (handle == InvalidScriptSceneHandle)
 		handle = NextScriptSceneHandle++;
 
-	ScriptScenes[handle] = { scene, key, EPhysicsCollisionShape::TriangleMesh, glm::vec3(0.5f) };
+	// Phase 1: skip physics triangle-mesh build (terrain has 6M indices —
+	// PhysX bake is heavy and we don't need collision yet). Box shape is
+	// the cheap fallback the loader honors when ray-tracing/physics is off.
+	ScriptScenes[handle] = { scene, key, EPhysicsCollisionShape::Box, glm::vec3(0.5f) };
 	ScriptSceneByPath[key] = handle;
 	AppendCpuRuntimeTrace(
 		L"[Luau][MeshComponent] procedural_terrain handle=" + std::to_wstring(handle) +
@@ -7688,7 +7691,7 @@ void Corona::RunStartupLuauScript(bool bShowLoadingProgress)
 
 	const std::filesystem::path startupDir = GetAssetFullPath(L"scripts\\startup");
 	std::wstring startupMode = StartupLuauMode.empty() ? L"platformer" : StartupLuauMode;
-	if (startupMode != L"dungeon" && startupMode != L"sandbox" && startupMode != L"sponza" && startupMode != L"spine_benchmark" && startupMode != L"grass_demo")
+	if (startupMode != L"dungeon" && startupMode != L"sandbox" && startupMode != L"sponza" && startupMode != L"spine_benchmark" && startupMode != L"grass_demo" && startupMode != L"terrain_demo")
 		startupMode = L"platformer";
 
 	std::vector<std::filesystem::path> scriptPaths;
