@@ -387,7 +387,14 @@ VertexObjSpace LoadVertex_SkeletalCl(VSInput input, uint vertexId, uint instance
 
 VertexObjSpace ApplyVertexDeformations(VertexObjSpace v)
 {
-    // Intentionally empty in Phase 1 — infrastructure-only refactor.
+    // Phase 2 validated empirically (commit message + plan doc Phase 2
+    // log) that a single edit here applies to every mesh type without
+    // touching individual VS entries. Real deformation effects (wind
+    // sway, VAT, displacement, etc.) plug in here as Phase 3+ work.
+    //
+    // Each effect must transform BOTH currObjPos AND prevObjPos using
+    // the same parameters so motion vectors stay consistent. instanceId
+    // is available for per-character phase randomization.
     return v;
 }
 
