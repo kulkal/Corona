@@ -279,6 +279,18 @@ private:
 		UINT32 SkeletalBoneCount = 0;
 		// Spine VS-inline skinning (desktop-only): per-mesh source scale.
 		float SpineSourceScale = 1.0f;
+		// Layer 2 vertex deformation infra. See GBufferCommon.hlsli.
+		// MeshDeformParams: .x = time (seconds), .yzw reserved.
+		glm::vec4 MeshDeformParams = glm::vec4(0.0f);
+		// GrassBendOrigin: .xyz = world position of bend center (player),
+		// .w = bend strength (0 disables grass bend entirely).
+		glm::vec4 GrassBendOrigin = glm::vec4(0.0f);
+		// GrassBendParams: .x = bend radius (units), .y = max blade
+		// height, .zw reserved.
+		glm::vec4 GrassBendParams = glm::vec4(0.0f);
+		// Per-mesh flag — set to 1 when drawing the grass mesh.
+		UINT32 bGrassMesh = 0;
+		UINT32 _GBufferCBPad[3] = { 0, 0, 0 };
 	};
 
 	std::shared_ptr<GraphicsPipelineHandle> GBufferGraphicsPipeline;
@@ -1703,6 +1715,11 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	glm::vec3 RenderFrameNormalizedLightDir = glm::vec3(0.0f, 1.0f, 0.0f);
 	glm::vec3 RenderFrameLightColor = glm::vec3(1.0f);
 	float RenderFrameShaderTime = 0.0f;
+	// Grass bend (Phase 3 vertex deformation effect). Updated each frame
+	// by scripts via corona.set_grass_bend_origin(...). The CB filler in
+	// DrawScene copies these directly into GBufferConstantBuffer.
+	glm::vec4 RenderFrameGrassBendOrigin = glm::vec4(0.0f); // xyz = world pos, w = bend strength (0 disables)
+	glm::vec4 RenderFrameGrassBendParams = glm::vec4(120.0f, 30.0f, 0.0f, 0.0f); // x = radius, y = max blade height
 	float RenderFrameDiffuseGISkyIntensity = 3.0f;
 	UINT32 RenderFrameRayNoiseMode = 0;
 	UINT32 RenderFrameDiffuseGISkyLightingEnabled = 0;
@@ -1948,6 +1965,7 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	shared_ptr<Texture> GetProceduralDungeonBrickDiffuseTexture();
 	shared_ptr<Texture> GetProceduralBoxDiffuseTexture(const std::wstring& textureKind);
 	shared_ptr<Scene> CreateProceduralBoxScene(const glm::vec3& baseColor, bool bUseBrickTexture = false, float uvRepeat = 1.0f, const std::wstring& textureKind = std::wstring(), float uvRepeatY = -1.0f, bool bFrontOnly = false);
+	shared_ptr<Scene> CreateProceduralGrassScene(UINT32 numBlades, float areaSize, float bladeHeight, UINT32 seed);
 	bool ShouldIncludeSceneObjectInRayTracingAS(const SceneObject& object) const;
 	void MarkRayTracingSceneDirty();
 	void MarkRayTracingTransformsDirty();
@@ -2026,6 +2044,16 @@ public:
 		CpuPhysicsRaycastHit& hit);
 	ScriptSceneHandle CreateProceduralBlockCharacterSceneForScript(UINT32 seed);
 	ScriptSceneHandle CreateProceduralBoxSceneForScript(const glm::vec3& baseColor, bool bUseBrickTexture = false, float uvRepeat = 1.0f, const std::wstring& textureKind = std::wstring(), float uvRepeatY = -1.0f, bool bFrontOnly = false);
+	// Procedural grass: a single Mesh containing N upright blades laid out
+	// over a square area. Each blade is a 2-segment quad rooted at Y=0
+	// with the tip at Y=bladeHeight. Marked `bGrassMesh = true` so the
+	// GBuffer VS Layer 2 deformation runs grass bend on it.
+	ScriptSceneHandle CreateProceduralGrassSceneForScript(UINT32 numBlades, float areaSize, float bladeHeight, UINT32 seed);
+	// Script-facing setters for the grass-bend CB inputs. Called from
+	// Lua each frame; the GBuffer CB filler reads
+	// RenderFrameGrassBendOrigin / RenderFrameGrassBendParams.
+	void SetGrassBendOriginForScript(float x, float y, float z, float strength) { RenderFrameGrassBendOrigin = glm::vec4(x, y, z, strength); }
+	void SetGrassBendParamsForScript(float radius, float maxBladeHeight)        { RenderFrameGrassBendParams = glm::vec4(radius, maxBladeHeight, 0.0f, 0.0f); }
 	ScriptSceneHandle CreateSpineSceneForScript(const std::wstring& assetPath, const std::string& animationName, float timeSeconds, float sourceScale = 1.0f);
 	// Live Spine: persistent skeleton + animation state owned per call.
 	// CreateLiveSpineForScript builds the skeleton + initial mesh and

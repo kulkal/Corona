@@ -55,6 +55,23 @@ CBUFFER_BINDING_BEGIN(GBufferConstantBuffer, 0)
     uint     SkeletalBoneCount;
     // Spine VS-inline source scale (matches SpineSkinningCS::SourceScale).
     float    SpineSourceScale;
+    // Layer 2 vertex deformation params. .x = time (seconds), reserved
+    // for future per-effect knobs. Currently unused; kept for future
+    // global deformations.
+    float4   MeshDeformParams;
+    // Grass bend origin (player world position). .xyz = world position,
+    // .w = bend strength * radius (0 disables grass bend). Used by the
+    // grass-blade deformation in ApplyVertexDeformations.
+    float4   GrassBendOrigin;
+    // Grass bend more params. .x = bend radius (units), .y = max blade
+    // height (used to convert object-space Y → "height ratio" so blade
+    // tips bend more than roots), .zw = reserved.
+    float4   GrassBendParams;
+    // Per-mesh flag set by the host when drawing the procedural grass
+    // mesh. Non-zero → ApplyVertexDeformations runs the grass bend on
+    // this mesh's vertices. Every other mesh leaves it at 0.
+    uint     bGrassMesh;
+    uint3    _GBufferCBPad;
 } CBUFFER_BINDING_END;
 
 struct VSInput
@@ -385,16 +402,65 @@ VertexObjSpace LoadVertex_SkeletalCl(VSInput input, uint vertexId, uint instance
 // vectors stay correct.
 // =====================================================================
 
+// Grass-blade bend deformation. The grass mesh is generated with each
+// blade rooted at Y=0 and growing up to Y≈GrassBendParams.y in
+// object-space. As the player approaches, blade tips bend AWAY from the
+// player position in the XZ plane. Roots stay put. Bend strength scales
+// with (heightRatio² × falloffByDistance).
+//
+// Activated by `bGrassMesh` (per-mesh flag). Other meshes (the ground,
+// the dungeon character) ignore the deformation even when the CB is
+// configured.
+float3 ApplyGrassBend(float3 objPos, float3 worldOrigin, float4x4 worldMatrix, float bendStrength, float bendRadius, float maxBladeHeight)
+{
+    // Convert blade vertex to world space so we can compare against the
+    // world-space player origin.
+    float3 worldPos = mul(float4(objPos, 1.0f), worldMatrix).xyz;
+    float2 toBlade  = worldPos.xz - worldOrigin.xz;
+    float  distSq   = dot(toBlade, toBlade);
+    float  radiusSq = bendRadius * bendRadius;
+    if (distSq >= radiusSq || distSq <= 1e-6f)
+        return objPos;
+
+    float dist = sqrt(distSq);
+    float falloff = 1.0f - dist / bendRadius;          // 1 at player, 0 at radius edge
+    falloff = falloff * falloff;                        // softer near edge
+
+    float heightRatio = saturate(objPos.y / max(maxBladeHeight, 1e-3f));
+    float bendAmt = heightRatio * heightRatio * falloff * bendStrength;
+
+    // Bend direction: away from the player, in the XZ plane.
+    float2 bendDirXZ = toBlade / dist;
+    // Object-space ground plane assumes world XZ ≈ object XZ for an
+    // identity world matrix (which the grass mesh is built with). Apply
+    // the offset directly to currObjPos.xz.
+    float3 result = objPos;
+    result.x += bendDirXZ.x * bendAmt;
+    result.z += bendDirXZ.y * bendAmt;
+    // Push the tip down a touch so it really lies over instead of
+    // sliding sideways.
+    result.y -= heightRatio * heightRatio * falloff * bendStrength * 0.5f;
+    return result;
+}
+
 VertexObjSpace ApplyVertexDeformations(VertexObjSpace v)
 {
-    // Phase 2 validated empirically (commit message + plan doc Phase 2
-    // log) that a single edit here applies to every mesh type without
-    // touching individual VS entries. Real deformation effects (wind
-    // sway, VAT, displacement, etc.) plug in here as Phase 3+ work.
-    //
-    // Each effect must transform BOTH currObjPos AND prevObjPos using
-    // the same parameters so motion vectors stay consistent. instanceId
-    // is available for per-character phase randomization.
+    // Grass bend. The CB carries the player world position + strength;
+    // the mesh signals "this is grass" by setting bGrassMesh in the CB
+    // for that draw. We deliberately do NOT key off bone-count or
+    // similar — the deformation needs to apply only to vertex-animated
+    // grass meshes, never to ground / skeletal characters / Spine
+    // sprites etc. The host code that submits the grass draw sets the
+    // flag; everything else leaves it at 0.
+    if (bGrassMesh != 0u && GrassBendOrigin.w > 0.0f)
+    {
+        const float3 worldOrigin    = GrassBendOrigin.xyz;
+        const float  bendStrength   = GrassBendOrigin.w;
+        const float  bendRadius     = GrassBendParams.x;
+        const float  maxBladeHeight = GrassBendParams.y;
+        v.currObjPos = ApplyGrassBend(v.currObjPos, worldOrigin, v.worldMatrix, bendStrength, bendRadius, maxBladeHeight);
+        v.prevObjPos = ApplyGrassBend(v.prevObjPos, worldOrigin, v.prevWorldMatrix, bendStrength, bendRadius, maxBladeHeight);
+    }
     return v;
 }
 

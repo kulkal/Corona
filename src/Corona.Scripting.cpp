@@ -1733,6 +1733,34 @@ private:
 				lua_pop(L, 1);
 				sceneHandle = host->CreateProceduralBlockCharacterSceneForScript(seed);
 			}
+			else if (primitive == "GRASS")
+			{
+				float numBladesF  = 5000.0f;
+				float areaSize    = 1000.0f;
+				float bladeHeight = 30.0f;
+				UINT32 seed       = 20260527u;
+				if (!ReadNumberField(L, tableIndex, "blade_count", numBladesF))
+				{
+					if (!ReadNumberField(L, tableIndex, "bladeCount", numBladesF))
+						ReadNumberField(L, tableIndex, "count", numBladesF);
+				}
+				if (!ReadNumberField(L, tableIndex, "area_size", areaSize))
+				{
+					if (!ReadNumberField(L, tableIndex, "areaSize", areaSize))
+						ReadNumberField(L, tableIndex, "area", areaSize);
+				}
+				if (!ReadNumberField(L, tableIndex, "blade_height", bladeHeight))
+				{
+					if (!ReadNumberField(L, tableIndex, "bladeHeight", bladeHeight))
+						ReadNumberField(L, tableIndex, "height", bladeHeight);
+				}
+				lua_getfield(L, tableIndex, "seed");
+				if (lua_isnumber(L, -1))
+					seed = static_cast<UINT32>(std::max<lua_Integer>(1, lua_tointeger(L, -1)));
+				lua_pop(L, 1);
+				const UINT32 numBlades = static_cast<UINT32>(std::max(1.0f, std::round(numBladesF)));
+				sceneHandle = host->CreateProceduralGrassSceneForScript(numBlades, areaSize, bladeHeight, seed);
+			}
 			else
 			{
 				bool isSpine = false;
@@ -2400,6 +2428,36 @@ private:
 
 		lua_pushboolean(L, host->SetScriptCameraControlForScript(luaL_checkboolean(L, 1) != 0) ? 1 : 0);
 		return 1;
+	}
+
+	int LuaCoronaSetGrassBendOrigin(lua_State* L)
+	{
+		Corona* host = GetHost(L);
+		if (!host)
+		{
+			luaL_error(L, "corona host is not available");
+			return 0;
+		}
+		const float x        = static_cast<float>(luaL_checknumber(L, 1));
+		const float y        = static_cast<float>(luaL_checknumber(L, 2));
+		const float z        = static_cast<float>(luaL_checknumber(L, 3));
+		const float strength = static_cast<float>(luaL_optnumber(L, 4, 20.0));
+		host->SetGrassBendOriginForScript(x, y, z, strength);
+		return 0;
+	}
+
+	int LuaCoronaSetGrassBendParams(lua_State* L)
+	{
+		Corona* host = GetHost(L);
+		if (!host)
+		{
+			luaL_error(L, "corona host is not available");
+			return 0;
+		}
+		const float radius    = static_cast<float>(luaL_checknumber(L, 1));
+		const float maxHeight = static_cast<float>(luaL_optnumber(L, 2, 30.0));
+		host->SetGrassBendParamsForScript(radius, maxHeight);
+		return 0;
 	}
 
 	int LuaCoronaSetCamera(lua_State* L)
@@ -3677,6 +3735,10 @@ private:
 		lua_setfield(L, -2, "set_default_world_visible");
 		lua_pushcfunction(L, LuaCoronaSetCameraControl, "corona.set_camera_control");
 		lua_setfield(L, -2, "set_camera_control");
+		lua_pushcfunction(L, LuaCoronaSetGrassBendOrigin, "corona.set_grass_bend_origin");
+		lua_setfield(L, -2, "set_grass_bend_origin");
+		lua_pushcfunction(L, LuaCoronaSetGrassBendParams, "corona.set_grass_bend_params");
+		lua_setfield(L, -2, "set_grass_bend_params");
 		lua_pushcfunction(L, LuaCoronaSetCamera, "corona.set_camera");
 		lua_setfield(L, -2, "set_camera");
 		lua_pushcfunction(L, LuaCoronaGetCamera, "corona.get_camera");
@@ -4027,6 +4089,44 @@ Corona::ScriptSceneHandle Corona::CreateProceduralBoxSceneForScript(const glm::v
 	ScriptScenes[handle] = { scene, key, EPhysicsCollisionShape::Box, glm::vec3(0.5f) };
 	ScriptSceneByPath[key] = handle;
 	AppendCpuRuntimeTrace(L"[Luau][MeshComponent] procedural_box handle=" + std::to_wstring(handle) + L" key=" + key);
+	return handle;
+}
+
+Corona::ScriptSceneHandle Corona::CreateProceduralGrassSceneForScript(UINT32 numBlades, float areaSize, float bladeHeight, UINT32 seed)
+{
+	if (!renderBackend)
+		return InvalidScriptSceneHandle;
+
+	const UINT32 clampedBlades = std::clamp<UINT32>(numBlades, 1u, 200000u);
+	const float clampedArea    = std::clamp(areaSize, 10.0f, 100000.0f);
+	const float clampedHeight  = std::clamp(bladeHeight, 1.0f, 1000.0f);
+	const UINT32 normalizedSeed = (seed == 0u) ? 1u : seed;
+
+	const std::wstring key =
+		L"procedural://grass/" +
+		std::to_wstring(clampedBlades) + L"/" +
+		std::to_wstring(static_cast<int>(std::round(clampedArea))) + L"/" +
+		std::to_wstring(static_cast<int>(std::round(clampedHeight))) + L"/" +
+		std::to_wstring(normalizedSeed);
+	const auto cachedIt = ScriptSceneByPath.find(key);
+	if (cachedIt != ScriptSceneByPath.end())
+		return cachedIt->second;
+
+	shared_ptr<Scene> scene = CreateProceduralGrassScene(clampedBlades, clampedArea, clampedHeight, normalizedSeed);
+	if (!scene)
+		return InvalidScriptSceneHandle;
+
+	ScriptSceneHandle handle = NextScriptSceneHandle++;
+	if (handle == InvalidScriptSceneHandle)
+		handle = NextScriptSceneHandle++;
+
+	ScriptScenes[handle] = { scene, key, EPhysicsCollisionShape::TriangleMesh, glm::vec3(0.5f) };
+	ScriptSceneByPath[key] = handle;
+	AppendCpuRuntimeTrace(
+		L"[Luau][MeshComponent] procedural_grass handle=" + std::to_wstring(handle) +
+		L" blades=" + std::to_wstring(clampedBlades) +
+		L" area=" + std::to_wstring(static_cast<int>(std::round(clampedArea))) +
+		L" height=" + std::to_wstring(static_cast<int>(std::round(clampedHeight))));
 	return handle;
 }
 
@@ -7528,7 +7628,7 @@ void Corona::RunStartupLuauScript(bool bShowLoadingProgress)
 
 	const std::filesystem::path startupDir = GetAssetFullPath(L"scripts\\startup");
 	std::wstring startupMode = StartupLuauMode.empty() ? L"platformer" : StartupLuauMode;
-	if (startupMode != L"dungeon" && startupMode != L"sandbox" && startupMode != L"sponza" && startupMode != L"spine_benchmark")
+	if (startupMode != L"dungeon" && startupMode != L"sandbox" && startupMode != L"sponza" && startupMode != L"spine_benchmark" && startupMode != L"grass_demo")
 		startupMode = L"platformer";
 
 	std::vector<std::filesystem::path> scriptPaths;

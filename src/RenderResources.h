@@ -187,6 +187,7 @@ public:
 	bool bGpuSpineSkinned = false;
 	bool bGpuSpineSkinningDispatched = false;
 	bool bSpineMesh = false; // marks Spine-sourced meshes for unlit + two-sided rendering regardless of skinning path
+	bool bGrassMesh = false; // marks the procedural grass mesh — DrawScene sets the matching CB flag so ApplyVertexDeformations runs grass bend on this mesh only
 	uint32_t GpuSpineSkinningVertexCount = 0;
 	float GpuSpineSkinningSourceScale = 1.0f;
 	std::shared_ptr<Buffer> GpuSpineInputVertices;

@@ -2802,6 +2802,14 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 			bCommandLinePlatformerSpineBenchmark = true;
 			continue;
 		}
+		if (arg == L"--grass-demo")
+		{
+			bStartupSponzaFlyMode = false;
+			bEnableStartupLuauScript = true;
+			StartupLuauMode = L"grass_demo";
+			bCommandLineDungeonCharacterMode = false;
+			continue;
+		}
 		std::wstring spineBenchmarkCountValue = ParseValueArg(arg, L"--platformer-spine-benchmark-count", L"-platformer-spine-benchmark-count", i);
 		if (spineBenchmarkCountValue.empty())
 			spineBenchmarkCountValue = ParseValueArg(arg, L"--spine-benchmark-count", L"-spine-benchmark-count", i);
@@ -7389,7 +7397,7 @@ void Corona::OnInit()
 			StartupLuauMode = L"spine_benchmark";
 			bCommandLineDungeonCharacterMode = false;
 		}
-		if (StartupLuauMode != L"dungeon" && StartupLuauMode != L"sandbox" && StartupLuauMode != L"sponza" && StartupLuauMode != L"spine_benchmark")
+		if (StartupLuauMode != L"dungeon" && StartupLuauMode != L"sandbox" && StartupLuauMode != L"sponza" && StartupLuauMode != L"spine_benchmark" && StartupLuauMode != L"grass_demo")
 			StartupLuauMode = L"platformer";
 
 		const bool bDungeonStartupMode = StartupLuauMode == L"dungeon";
@@ -8193,6 +8201,120 @@ shared_ptr<Scene> Corona::CreateProceduralBoxScene(const glm::vec3& baseColor, b
 	scene->bHasBounds = true;
 	scene->BoundsMin = glm::vec3(-kHalfExtent, -kHalfExtent, -kHalfExtent);
 	scene->BoundsMax = glm::vec3( kHalfExtent,  kHalfExtent,  kHalfExtent);
+
+	return scene;
+}
+
+shared_ptr<Scene> Corona::CreateProceduralGrassScene(UINT32 numBlades, float areaSize, float bladeHeight, UINT32 seed)
+{
+	if (!renderBackend || numBlades == 0)
+		return nullptr;
+
+	// Legacy 44 B vertex layout — matches the base GBufferGraphicsPipeline,
+	// which the grass mesh is drawn through.
+	struct Vertex
+	{
+		glm::vec3 Position;
+		glm::vec3 Normal;
+		glm::vec2 UV;
+		glm::vec3 Tangent;
+	};
+	static_assert(sizeof(Vertex) == 44, "GrassVertex must match base GBuffer PSO stride");
+
+	const float halfArea = areaSize * 0.5f;
+	const float bladeWidth = std::max(2.0f, bladeHeight * 0.06f);
+
+	// Deterministic PRNG so the same seed reproduces the field.
+	uint32_t rngState = (seed == 0u) ? 1u : seed;
+	auto rng01 = [&rngState]() -> float
+	{
+		// Xorshift32
+		uint32_t x = rngState;
+		x ^= x << 13;
+		x ^= x >> 17;
+		x ^= x << 5;
+		rngState = x;
+		return static_cast<float>(x & 0x00ffffffu) / static_cast<float>(0x01000000u);
+	};
+
+	std::vector<Vertex> vertices;
+	std::vector<UINT32> indices;
+	vertices.reserve(numBlades * 4);
+	indices.reserve(numBlades * 6);
+
+	for (UINT32 b = 0; b < numBlades; ++b)
+	{
+		const float x = (rng01() * 2.0f - 1.0f) * halfArea;
+		const float z = (rng01() * 2.0f - 1.0f) * halfArea;
+		const float yaw = rng01() * 6.2831853f;
+		const float heightJitter = 0.7f + rng01() * 0.6f; // 0.7..1.3 of bladeHeight
+		const float thisHeight = bladeHeight * heightJitter;
+
+		const float c = cosf(yaw);
+		const float s = sinf(yaw);
+		const float halfW = bladeWidth * 0.5f;
+		// Two base verts at Y=0, two top verts at Y=thisHeight.
+		const glm::vec3 baseLeft  = glm::vec3(x + (-halfW * c), 0.0f,        z + (-halfW * s));
+		const glm::vec3 baseRight = glm::vec3(x + ( halfW * c), 0.0f,        z + ( halfW * s));
+		const glm::vec3 tipLeft   = glm::vec3(x + (-halfW * c * 0.4f), thisHeight, z + (-halfW * s * 0.4f));
+		const glm::vec3 tipRight  = glm::vec3(x + ( halfW * c * 0.4f), thisHeight, z + ( halfW * s * 0.4f));
+
+		// Normal: blade faces along its tangent's perpendicular in the XZ
+		// plane. Use a vertical billboard approximation pointing toward +X.
+		const glm::vec3 normal = glm::normalize(glm::vec3(-s, 0.2f, c));
+		const glm::vec3 tangent = glm::normalize(glm::vec3(c, 0.0f, s));
+
+		const UINT32 baseIndex = static_cast<UINT32>(vertices.size());
+		Vertex v0; v0.Position = baseLeft;  v0.Normal = normal; v0.UV = glm::vec2(0.0f, 0.0f); v0.Tangent = tangent; vertices.push_back(v0);
+		Vertex v1; v1.Position = baseRight; v1.Normal = normal; v1.UV = glm::vec2(1.0f, 0.0f); v1.Tangent = tangent; vertices.push_back(v1);
+		Vertex v2; v2.Position = tipRight;  v2.Normal = normal; v2.UV = glm::vec2(1.0f, 1.0f); v2.Tangent = tangent; vertices.push_back(v2);
+		Vertex v3; v3.Position = tipLeft;   v3.Normal = normal; v3.UV = glm::vec2(0.0f, 1.0f); v3.Tangent = tangent; vertices.push_back(v3);
+
+		// Two-sided friendly: emit triangles twice with opposite winding so
+		// either back-face culling setting still shows the blade.
+		indices.push_back(baseIndex + 0); indices.push_back(baseIndex + 1); indices.push_back(baseIndex + 2);
+		indices.push_back(baseIndex + 0); indices.push_back(baseIndex + 2); indices.push_back(baseIndex + 3);
+		indices.push_back(baseIndex + 0); indices.push_back(baseIndex + 2); indices.push_back(baseIndex + 1);
+		indices.push_back(baseIndex + 0); indices.push_back(baseIndex + 3); indices.push_back(baseIndex + 2);
+	}
+
+	shared_ptr<Material> material = std::make_shared<Material>();
+	material->BaseColorFactor = glm::vec4(0.18f, 0.48f, 0.22f, 1.0f); // green
+	material->Diffuse = DefaultWhiteTex;
+	material->Normal = DefaultNormalTex;
+	material->Roughness = DefaultRougnessTex;
+	material->Metallic = DefaultBlackTex;
+
+	Mesh* mesh = new Mesh;
+	mesh->Owner = renderBackend.get();
+	mesh->transform = glm::mat4x4(1.0f);
+	mesh->NumVertices = static_cast<UINT>(vertices.size());
+	mesh->NumIndices = static_cast<UINT>(indices.size());
+	mesh->VertexStride = sizeof(Vertex);
+	mesh->IndexFormat = EIndexFormat::U32;
+	mesh->Mat = material;
+	mesh->bGrassMesh = true;
+	mesh->Vb = renderBackend->CreateVertexBuffer(static_cast<UINT32>(sizeof(Vertex) * vertices.size()), sizeof(Vertex), vertices.data());
+	mesh->Ib = renderBackend->CreateIndexBuffer(mesh->IndexFormat, static_cast<UINT32>(sizeof(UINT32) * indices.size()), indices.data());
+	mesh->CpuPositions.reserve(vertices.size());
+	for (const Vertex& vertex : vertices)
+		mesh->CpuPositions.push_back(vertex.Position);
+	mesh->CpuIndices = indices;
+
+	Mesh::DrawCall drawCall = {};
+	drawCall.mat = material;
+	drawCall.IndexStart = 0;
+	drawCall.IndexCount = mesh->NumIndices;
+	drawCall.VertexBase = 0;
+	drawCall.VertexCount = mesh->NumVertices;
+	mesh->Draws.push_back(drawCall);
+
+	shared_ptr<Scene> scene = std::make_shared<Scene>();
+	scene->Materials.push_back(material);
+	scene->meshes.push_back(shared_ptr<Mesh>(mesh));
+	scene->bHasBounds = true;
+	scene->BoundsMin = glm::vec3(-halfArea, 0.0f, -halfArea);
+	scene->BoundsMax = glm::vec3( halfArea, bladeHeight * 1.3f, halfArea);
 
 	return scene;
 }
@@ -9036,6 +9158,7 @@ void Corona::LoadAssets()
 		 StartupLuauMode == L"platformer" ||
 		 StartupLuauMode == L"dungeon" ||
 		 StartupLuauMode == L"spine_benchmark" ||
+		 StartupLuauMode == L"grass_demo" ||
 		 bCommandLineDungeonCharacterMode);
 
 	if (!bMobileDungeonOnlyStartup && !bGameplayStartupMode && !bCommandLineSkeletalBenchMode)

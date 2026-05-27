@@ -2099,6 +2099,13 @@ void Corona::DrawScene(shared_ptr<Scene> scene, const glm::mat4x4& instanceTrans
 			objCB.SkeletalCharIndex = bAnySkeletalPath ? mesh->SkeletalCharIndex : 0u;
 			objCB.SkeletalVertsPerChar = bAnySkeletalPath ? SkeletalUnifiedVertsPerChar : 0u;
 			objCB.SkeletalBoneCount = bAnySkeletalPath ? SkeletalUnifiedBoneCount : 0u;
+			// Layer 2 deformation: shared across all draws via render-
+			// frame snapshot. Grass bend only fires on meshes flagged
+			// bGrassMesh, which DrawScene sets here per draw.
+			objCB.MeshDeformParams = glm::vec4(RenderFrameShaderTime, 0.0f, 0.0f, 0.0f);
+			objCB.GrassBendOrigin = RenderFrameGrassBendOrigin;
+			objCB.GrassBendParams = RenderFrameGrassBendParams;
+			objCB.bGrassMesh = mesh->bGrassMesh ? 1u : 0u;
 
 			renderBackend->SetGraphicsPipelineConstantData(activeGBufferPipeline, 0, &objCB, sizeof(objCB));
 
