@@ -618,10 +618,13 @@ void Corona::ToneMapPass()
 	ToneMapCB.Scale = glm::vec4(1, 1, 0, 0);
 	ToneMapCB.ToneMapMode = ToneMapMode;
 
+	// DX12 invalidates root-table bindings when SetGraphicsRootSignature
+	// is called inside BindGraphicsPipeline. Bind the pipeline first so
+	// subsequent texture/sampler/CB writes land on the right root sig.
+	renderBackend->BindGraphicsPipeline(ToneMapGraphicsPipeline.get());
 	renderBackend->BindGraphicsPipelineTexture(ToneMapGraphicsPipeline.get(), "SrcTex", ResolveTarget);
 	renderBackend->BindGraphicsPipelineSampler(ToneMapGraphicsPipeline.get(), "sampleWrap", samplerWrap.get());
 	renderBackend->SetGraphicsPipelineConstantData(ToneMapGraphicsPipeline.get(), 0, &ToneMapCB, sizeof(ToneMapCB));
-	renderBackend->BindGraphicsPipeline(ToneMapGraphicsPipeline.get());
 	renderBackend->SetViewportAndScissor(m_width, m_height);
 	renderBackend->DrawFullscreenQuad(FullScreenVB.get());
 }
@@ -636,22 +639,25 @@ void Corona::DebugPass()
 
 	renderBackend->EmitGpuCrashMarker("DebugPass");
 
-	renderBackend->BindGraphicsPipelineSampler(BufferVisualizeGraphicsPipeline.get(), "samplerWrap", samplerWrap.get());
-
+	// DX12 SetGraphicsRootSignature (inside BindGraphicsPipeline) invalidates root
+	// descriptor tables. Each visualize call must bind the pipeline BEFORE writing
+	// textures + CB; the same goes for the once-only sampler bind below.
 	auto visualize = [&](const DebugPassCB& cb, Texture* tex) {
 		if (!tex) return;
-		renderBackend->SetGraphicsPipelineConstantData(BufferVisualizeGraphicsPipeline.get(), 0, &cb, sizeof(cb));
-		renderBackend->BindGraphicsPipelineTexture(BufferVisualizeGraphicsPipeline.get(), "SrcTex", tex);
 		renderBackend->BindGraphicsPipeline(BufferVisualizeGraphicsPipeline.get());
+		renderBackend->BindGraphicsPipelineSampler(BufferVisualizeGraphicsPipeline.get(), "samplerWrap", samplerWrap.get());
+		renderBackend->BindGraphicsPipelineTexture(BufferVisualizeGraphicsPipeline.get(), "SrcTex", tex);
+		renderBackend->SetGraphicsPipelineConstantData(BufferVisualizeGraphicsPipeline.get(), 0, &cb, sizeof(cb));
 		renderBackend->DrawFullscreenQuad(FullScreenVB.get());
 	};
 	auto visualizeMulti = [&](const DebugPassCB& cb, Texture* tex, Texture* texSH, Texture* texNormal) {
 		if (!tex || !texSH || !texNormal) return;
-		renderBackend->SetGraphicsPipelineConstantData(BufferVisualizeGraphicsPipeline.get(), 0, &cb, sizeof(cb));
+		renderBackend->BindGraphicsPipeline(BufferVisualizeGraphicsPipeline.get());
+		renderBackend->BindGraphicsPipelineSampler(BufferVisualizeGraphicsPipeline.get(), "samplerWrap", samplerWrap.get());
 		renderBackend->BindGraphicsPipelineTexture(BufferVisualizeGraphicsPipeline.get(), "SrcTex", tex);
 		renderBackend->BindGraphicsPipelineTexture(BufferVisualizeGraphicsPipeline.get(), "SrcTexSH", texSH);
 		renderBackend->BindGraphicsPipelineTexture(BufferVisualizeGraphicsPipeline.get(), "SrcTexNormal", texNormal);
-		renderBackend->BindGraphicsPipeline(BufferVisualizeGraphicsPipeline.get());
+		renderBackend->SetGraphicsPipelineConstantData(BufferVisualizeGraphicsPipeline.get(), 0, &cb, sizeof(cb));
 		renderBackend->DrawFullscreenQuad(FullScreenVB.get());
 	};
 
@@ -1254,6 +1260,12 @@ void Corona::LightingPass()
 	if (!LightingGraphicsPipeline)
 		return;
 
+	// DX12 SetGraphicsRootSignature (called inside BindGraphicsPipeline) invalidates
+	// previously-written root descriptor tables — bind the pipeline first, then write
+	// textures/samplers/CB. Same order as InitGBufferPass + DrawScene.
+	Texture* lightingTarget = LightingBuffer.get();
+	renderBackend->SetRenderTargets(&lightingTarget, 1, nullptr);
+	renderBackend->BindGraphicsPipeline(LightingGraphicsPipeline.get());
 	renderBackend->BindGraphicsPipelineTexture(LightingGraphicsPipeline.get(), "AlbedoTex", AlbedoBuffer.get());
 	renderBackend->BindGraphicsPipelineTexture(LightingGraphicsPipeline.get(), "NormalTex", NormalBuffers[ColorBufferWriteIndex].get());
 	renderBackend->BindGraphicsPipelineTexture(LightingGraphicsPipeline.get(), "ShadowTex", shadowTex);
@@ -1266,11 +1278,7 @@ void Corona::LightingPass()
 	renderBackend->BindGraphicsPipelineTexture(LightingGraphicsPipeline.get(), "AmbientOcclusionTex", ambientOcclusionTex);
 	renderBackend->BindGraphicsPipelineTexture(LightingGraphicsPipeline.get(), "SkyLightingTex", skyLightingTex);
 	renderBackend->BindGraphicsPipelineSampler(LightingGraphicsPipeline.get(), "sampleWrap", samplerWrap.get());
-
 	renderBackend->SetGraphicsPipelineConstantData(LightingGraphicsPipeline.get(), 0, &Param, sizeof(Param));
-	Texture* lightingTarget = LightingBuffer.get();
-	renderBackend->SetRenderTargets(&lightingTarget, 1, nullptr);
-	renderBackend->BindGraphicsPipeline(LightingGraphicsPipeline.get());
 	renderBackend->SetViewportAndScissor(GetRenderWidth(), GetRenderHeight());
 	renderBackend->DrawFullscreenQuad(FullScreenVB.get());
 	renderBackend->TransitionTexture(LightingBuffer.get(), EResourceState::RenderTarget, EResourceState::ShaderRead);
@@ -1278,11 +1286,12 @@ void Corona::LightingPass()
 	if (bAutoAADumpEnabled && DirectLightingBuffer)
 	{
 		Param.LightingOutputMode = 1;
-		renderBackend->SetGraphicsPipelineConstantData(LightingGraphicsPipeline.get(), 0, &Param, sizeof(Param));
 		renderBackend->TransitionTexture(DirectLightingBuffer.get(), EResourceState::ShaderRead, EResourceState::RenderTarget);
 		Texture* directLightingTarget = DirectLightingBuffer.get();
 		renderBackend->SetRenderTargets(&directLightingTarget, 1, nullptr);
+		// Re-bind pipeline before re-writing CB — same DX12 root-table invalidation rule.
 		renderBackend->BindGraphicsPipeline(LightingGraphicsPipeline.get());
+		renderBackend->SetGraphicsPipelineConstantData(LightingGraphicsPipeline.get(), 0, &Param, sizeof(Param));
 		renderBackend->SetViewportAndScissor(GetRenderWidth(), GetRenderHeight());
 		renderBackend->DrawFullscreenQuad(FullScreenVB.get());
 		renderBackend->TransitionTexture(DirectLightingBuffer.get(), EResourceState::RenderTarget, EResourceState::ShaderRead);
@@ -1321,6 +1330,11 @@ void Corona::TemporalAAPass()
 	Param.HistoryValid = bTemporalAAHistoryValid ? 1u : 0u;
 	Param.CurrentJitter = IsJitterEnabled() ? (CurrentJitter * 0.5f) : glm::vec2(0.0f);
 
+	// DX12 root-table invalidation: bind pipeline before per-pipeline writes.
+	renderBackend->TransitionTexture(ResolveTarget, EResourceState::ShaderRead, EResourceState::RenderTarget);
+	Texture* temporalTarget = ResolveTarget;
+	renderBackend->SetRenderTargets(&temporalTarget, 1, nullptr);
+	renderBackend->BindGraphicsPipeline(TemporalAAGraphicsPipeline.get());
 	renderBackend->BindGraphicsPipelineTexture(TemporalAAGraphicsPipeline.get(), "CurrentColorTex", LightingBuffer.get());
 	renderBackend->BindGraphicsPipelineTexture(TemporalAAGraphicsPipeline.get(), "PrevColorTex", PrevColorBuffer);
 	renderBackend->BindGraphicsPipelineTexture(TemporalAAGraphicsPipeline.get(), "VelocityTex", VelocityBuffer.get());
@@ -1329,11 +1343,6 @@ void Corona::TemporalAAPass()
 	renderBackend->BindGraphicsPipelineBuffer(TemporalAAGraphicsPipeline.get(), "Exposure", ExposureData.get());
 	renderBackend->BindGraphicsPipelineSampler(TemporalAAGraphicsPipeline.get(), "sampleWrap", samplerBilinearWrap ? samplerBilinearWrap.get() : samplerWrap.get());
 	renderBackend->SetGraphicsPipelineConstantData(TemporalAAGraphicsPipeline.get(), 0, &Param, sizeof(Param));
-
-	renderBackend->TransitionTexture(ResolveTarget, EResourceState::ShaderRead, EResourceState::RenderTarget);
-	Texture* temporalTarget = ResolveTarget;
-	renderBackend->SetRenderTargets(&temporalTarget, 1, nullptr);
-	renderBackend->BindGraphicsPipeline(TemporalAAGraphicsPipeline.get());
 	renderBackend->SetViewportAndScissor(GetRenderWidth(), GetRenderHeight());
 	renderBackend->DrawFullscreenQuad(FullScreenVB.get());
 	renderBackend->TransitionTexture(ResolveTarget, EResourceState::RenderTarget, EResourceState::ShaderRead);
