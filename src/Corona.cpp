@@ -8224,6 +8224,13 @@ shared_ptr<Scene> Corona::CreateProceduralGrassScene(UINT32 numBlades, float are
 	const float halfArea = areaSize * 0.5f;
 	const float bladeWidth = std::max(2.0f, bladeHeight * 0.06f);
 
+	// Segment the blade vertically so wind sway (which is a per-vertex
+	// effect) produces a smooth bent curve instead of a straight diagonal
+	// from a single base→tip pair. 4 segments = 5 rows × 2 verts = 10
+	// verts/blade — at 8 K blades that's 80 K verts, very cheap.
+	const UINT32 kBladeSegments = 4;
+	const UINT32 kBladeRows     = kBladeSegments + 1;
+
 	// Deterministic PRNG so the same seed reproduces the field.
 	uint32_t rngState = (seed == 0u) ? 1u : seed;
 	auto rng01 = [&rngState]() -> float
@@ -8239,8 +8246,8 @@ shared_ptr<Scene> Corona::CreateProceduralGrassScene(UINT32 numBlades, float are
 
 	std::vector<Vertex> vertices;
 	std::vector<UINT32> indices;
-	vertices.reserve(numBlades * 4);
-	indices.reserve(numBlades * 6);
+	vertices.reserve(numBlades * kBladeRows * 2u);
+	indices.reserve(numBlades * kBladeSegments * 12u); // 2 sides × 6 indices/segment
 
 	for (UINT32 b = 0; b < numBlades; ++b)
 	{
@@ -8253,29 +8260,47 @@ shared_ptr<Scene> Corona::CreateProceduralGrassScene(UINT32 numBlades, float are
 		const float c = cosf(yaw);
 		const float s = sinf(yaw);
 		const float halfW = bladeWidth * 0.5f;
-		// Two base verts at Y=0, two top verts at Y=thisHeight.
-		const glm::vec3 baseLeft  = glm::vec3(x + (-halfW * c), 0.0f,        z + (-halfW * s));
-		const glm::vec3 baseRight = glm::vec3(x + ( halfW * c), 0.0f,        z + ( halfW * s));
-		const glm::vec3 tipLeft   = glm::vec3(x + (-halfW * c * 0.4f), thisHeight, z + (-halfW * s * 0.4f));
-		const glm::vec3 tipRight  = glm::vec3(x + ( halfW * c * 0.4f), thisHeight, z + ( halfW * s * 0.4f));
 
-		// Normal: blade faces along its tangent's perpendicular in the XZ
-		// plane. Use a vertical billboard approximation pointing toward +X.
-		const glm::vec3 normal = glm::normalize(glm::vec3(-s, 0.2f, c));
+		const glm::vec3 normal  = glm::normalize(glm::vec3(-s, 0.2f, c));
 		const glm::vec3 tangent = glm::normalize(glm::vec3(c, 0.0f, s));
 
 		const UINT32 baseIndex = static_cast<UINT32>(vertices.size());
-		Vertex v0; v0.Position = baseLeft;  v0.Normal = normal; v0.UV = glm::vec2(0.0f, 0.0f); v0.Tangent = tangent; vertices.push_back(v0);
-		Vertex v1; v1.Position = baseRight; v1.Normal = normal; v1.UV = glm::vec2(1.0f, 0.0f); v1.Tangent = tangent; vertices.push_back(v1);
-		Vertex v2; v2.Position = tipRight;  v2.Normal = normal; v2.UV = glm::vec2(1.0f, 1.0f); v2.Tangent = tangent; vertices.push_back(v2);
-		Vertex v3; v3.Position = tipLeft;   v3.Normal = normal; v3.UV = glm::vec2(0.0f, 1.0f); v3.Tangent = tangent; vertices.push_back(v3);
 
-		// Two-sided friendly: emit triangles twice with opposite winding so
-		// either back-face culling setting still shows the blade.
-		indices.push_back(baseIndex + 0); indices.push_back(baseIndex + 1); indices.push_back(baseIndex + 2);
-		indices.push_back(baseIndex + 0); indices.push_back(baseIndex + 2); indices.push_back(baseIndex + 3);
-		indices.push_back(baseIndex + 0); indices.push_back(baseIndex + 2); indices.push_back(baseIndex + 1);
-		indices.push_back(baseIndex + 0); indices.push_back(baseIndex + 3); indices.push_back(baseIndex + 2);
+		// Emit kBladeRows pairs (left, right) from base to tip. Width
+		// tapers from full at the root to 25 % at the tip so the silhouette
+		// looks like a real blade instead of a rectangle.
+		for (UINT32 row = 0; row < kBladeRows; ++row)
+		{
+			const float t = static_cast<float>(row) / static_cast<float>(kBladeSegments); // 0..1
+			const float y = thisHeight * t;
+			const float widthScale = 1.0f - t * 0.75f; // taper
+			const float wHalf = halfW * widthScale;
+
+			Vertex vl;
+			vl.Position = glm::vec3(x + (-wHalf * c), y, z + (-wHalf * s));
+			vl.Normal = normal; vl.UV = glm::vec2(0.0f, t); vl.Tangent = tangent;
+			vertices.push_back(vl);
+
+			Vertex vr;
+			vr.Position = glm::vec3(x + ( wHalf * c), y, z + ( wHalf * s));
+			vr.Normal = normal; vr.UV = glm::vec2(1.0f, t); vr.Tangent = tangent;
+			vertices.push_back(vr);
+		}
+
+		// Two-sided strip: emit each segment quad with both windings so
+		// back-face culling settings don't matter.
+		for (UINT32 seg = 0; seg < kBladeSegments; ++seg)
+		{
+			const UINT32 bl = baseIndex + (seg    ) * 2u;       // bottom-left
+			const UINT32 br = baseIndex + (seg    ) * 2u + 1u;  // bottom-right
+			const UINT32 tl = baseIndex + (seg + 1) * 2u;       // top-left
+			const UINT32 tr = baseIndex + (seg + 1) * 2u + 1u;  // top-right
+			indices.push_back(bl); indices.push_back(br); indices.push_back(tr);
+			indices.push_back(bl); indices.push_back(tr); indices.push_back(tl);
+			// Opposite winding (back-face).
+			indices.push_back(bl); indices.push_back(tr); indices.push_back(br);
+			indices.push_back(bl); indices.push_back(tl); indices.push_back(tr);
+		}
 	}
 
 	shared_ptr<Material> material = std::make_shared<Material>();

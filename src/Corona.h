@@ -291,6 +291,12 @@ private:
 		// Per-mesh flag — set to 1 when drawing the grass mesh.
 		UINT32 bGrassMesh = 0;
 		UINT32 _GBufferCBPad[3] = { 0, 0, 0 };
+		// WindParams: .xyz = wind direction normalized in XZ (Y typically 0),
+		// .w = strength (0 disables wind sway).
+		glm::vec4 WindParams = glm::vec4(0.0f);
+		// WindTuning: .x = temporal frequency (rad/s), .y = spatial frequency
+		// (rad/world-unit), .zw reserved.
+		glm::vec4 WindTuning = glm::vec4(0.0f);
 	};
 
 	std::shared_ptr<GraphicsPipelineHandle> GBufferGraphicsPipeline;
@@ -1720,6 +1726,10 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	// DrawScene copies these directly into GBufferConstantBuffer.
 	glm::vec4 RenderFrameGrassBendOrigin = glm::vec4(0.0f); // xyz = world pos, w = bend strength (0 disables)
 	glm::vec4 RenderFrameGrassBendParams = glm::vec4(120.0f, 30.0f, 0.0f, 0.0f); // x = radius, y = max blade height
+	// Wind sway (Phase 3.5 vertex deformation effect). Composes additively
+	// with grass bend.
+	glm::vec4 RenderFrameWindParams = glm::vec4(0.0f);          // xyz = dir (XZ-normalized), w = strength (0 disables)
+	glm::vec4 RenderFrameWindTuning = glm::vec4(2.0f, 0.015f, 0.0f, 0.0f); // x = temporal freq, y = spatial freq
 	float RenderFrameDiffuseGISkyIntensity = 3.0f;
 	UINT32 RenderFrameRayNoiseMode = 0;
 	UINT32 RenderFrameDiffuseGISkyLightingEnabled = 0;
@@ -2054,6 +2064,15 @@ public:
 	// RenderFrameGrassBendOrigin / RenderFrameGrassBendParams.
 	void SetGrassBendOriginForScript(float x, float y, float z, float strength) { RenderFrameGrassBendOrigin = glm::vec4(x, y, z, strength); }
 	void SetGrassBendParamsForScript(float radius, float maxBladeHeight)        { RenderFrameGrassBendParams = glm::vec4(radius, maxBladeHeight, 0.0f, 0.0f); }
+	// Wind sway: dirX/dirZ should already be XZ-normalized (Lua side does
+	// the normalization for clarity). tempFreq/spaceFreq are tuning knobs;
+	// pass 0 to keep current values.
+	void SetWindParamsForScript(float dirX, float dirZ, float strength, float tempFreq, float spaceFreq)
+	{
+		RenderFrameWindParams = glm::vec4(dirX, 0.0f, dirZ, strength);
+		if (tempFreq  > 0.0f) RenderFrameWindTuning.x = tempFreq;
+		if (spaceFreq > 0.0f) RenderFrameWindTuning.y = spaceFreq;
+	}
 	ScriptSceneHandle CreateSpineSceneForScript(const std::wstring& assetPath, const std::string& animationName, float timeSeconds, float sourceScale = 1.0f);
 	// Live Spine: persistent skeleton + animation state owned per call.
 	// CreateLiveSpineForScript builds the skeleton + initial mesh and

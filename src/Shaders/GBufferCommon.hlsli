@@ -72,6 +72,13 @@ CBUFFER_BINDING_BEGIN(GBufferConstantBuffer, 0)
     // this mesh's vertices. Every other mesh leaves it at 0.
     uint     bGrassMesh;
     uint3    _GBufferCBPad;
+    // Wind sway. .xyz = wind direction normalized in XZ (Y typically 0),
+    // .w = strength (0 disables). Composes additively with grass bend.
+    float4   WindParams;
+    // Wind tuning. .x = temporal frequency (rad/s on the sin), .y =
+    // spatial frequency (rad/world-unit, gives blade-to-blade variation),
+    // .zw = reserved.
+    float4   WindTuning;
 } CBUFFER_BINDING_END;
 
 struct VSInput
@@ -402,6 +409,52 @@ VertexObjSpace LoadVertex_SkeletalCl(VSInput input, uint vertexId, uint instance
 // vectors stay correct.
 // =====================================================================
 
+// Global wind sway. Time-based oscillation in the wind direction with a
+// per-blade phase shift derived from the blade's base XZ position so
+// adjacent blades aren't synced. Strength scales with heightRatio² so
+// roots stay put and tips sway most. Active when WindParams.w > 0.
+//
+// Returns the deformed object-space position. The caller is expected to
+// invoke this both for the current frame's time and (time - dt) for the
+// previous frame so motion vectors track the sway accurately.
+float3 ApplyWindSway(float3 objPos, float time, float maxBladeHeight)
+{
+    if (WindParams.w <= 0.0f)
+        return objPos;
+
+    float heightRatio = saturate(objPos.y / max(maxBladeHeight, 1e-3f));
+    if (heightRatio <= 0.0f)
+        return objPos;
+
+    const float tempFreq  = WindTuning.x;  // primary temporal frequency (rad/s)
+    const float spaceFreq = WindTuning.y;  // primary spatial frequency  (rad/world-unit)
+
+    // Two-octave sway: the primary swing dominates (this is what gives
+    // the "every 2 s" cycle), the secondary is a faint per-blade ripple
+    // so neighbours aren't perfectly synced. Secondary uses a *spatial*
+    // offset only (no extra temporal multiplier) — multiplying time
+    // again would make it buzz and undo the slow primary.
+    const float basePhase     = time * tempFreq + objPos.x * spaceFreq + objPos.z * spaceFreq * 0.7f;
+    const float primarySway   = sin(basePhase);
+    const float secondarySway = sin(basePhase + objPos.x * spaceFreq * 0.5f + 1.3f) * 0.15f;
+
+    // Cubic height curve: roots stay nearly still, tips swing wide. This
+    // is the key to a natural-looking wind — linear/quadratic still moves
+    // the lower portion of the blade visibly.
+    const float heightCurve = heightRatio * heightRatio * heightRatio;
+    const float swayAmt = (primarySway + secondarySway) * heightCurve * WindParams.w;
+
+    const float2 windXZ = WindParams.xz; // normalized in XZ
+    float3 result = objPos;
+    result.x += windXZ.x * swayAmt;
+    result.z += windXZ.y * swayAmt;
+    // Foreshortening: when the tip swings sideways its Y dips because
+    // the blade's arc-length is fixed. Scales with heightCurve so the
+    // droop concentrates at the tip.
+    result.y -= heightCurve * abs(swayAmt) * 0.2f;
+    return result;
+}
+
 // Grass-blade bend deformation. The grass mesh is generated with each
 // blade rooted at Y=0 and growing up to Y≈GrassBendParams.y in
 // object-space. As the player approaches, blade tips bend AWAY from the
@@ -445,21 +498,34 @@ float3 ApplyGrassBend(float3 objPos, float3 worldOrigin, float4x4 worldMatrix, f
 
 VertexObjSpace ApplyVertexDeformations(VertexObjSpace v)
 {
-    // Grass bend. The CB carries the player world position + strength;
-    // the mesh signals "this is grass" by setting bGrassMesh in the CB
+    // Grass bend + wind sway compose additively on the same blade mesh.
+    // The mesh signals "this is grass" by setting bGrassMesh in the CB
     // for that draw. We deliberately do NOT key off bone-count or
     // similar — the deformation needs to apply only to vertex-animated
     // grass meshes, never to ground / skeletal characters / Spine
     // sprites etc. The host code that submits the grass draw sets the
     // flag; everything else leaves it at 0.
-    if (bGrassMesh != 0u && GrassBendOrigin.w > 0.0f)
+    if (bGrassMesh != 0u)
     {
-        const float3 worldOrigin    = GrassBendOrigin.xyz;
-        const float  bendStrength   = GrassBendOrigin.w;
-        const float  bendRadius     = GrassBendParams.x;
-        const float  maxBladeHeight = GrassBendParams.y;
-        v.currObjPos = ApplyGrassBend(v.currObjPos, worldOrigin, v.worldMatrix, bendStrength, bendRadius, maxBladeHeight);
-        v.prevObjPos = ApplyGrassBend(v.prevObjPos, worldOrigin, v.prevWorldMatrix, bendStrength, bendRadius, maxBladeHeight);
+        const float time           = MeshDeformParams.x;
+        const float maxBladeHeight = GrassBendParams.y;
+
+        // Layer 2a — global wind sway (always-on when WindParams.w > 0).
+        // Prev frame uses (time - dt) so motion vectors track the sway
+        // even when nothing else moves.
+        const float prevDt = 1.0f / 60.0f;
+        v.currObjPos = ApplyWindSway(v.currObjPos, time,         maxBladeHeight);
+        v.prevObjPos = ApplyWindSway(v.prevObjPos, time - prevDt, maxBladeHeight);
+
+        // Layer 2b — player-proximity bend on top of the wind base pose.
+        if (GrassBendOrigin.w > 0.0f)
+        {
+            const float3 worldOrigin  = GrassBendOrigin.xyz;
+            const float  bendStrength = GrassBendOrigin.w;
+            const float  bendRadius   = GrassBendParams.x;
+            v.currObjPos = ApplyGrassBend(v.currObjPos, worldOrigin, v.worldMatrix,    bendStrength, bendRadius, maxBladeHeight);
+            v.prevObjPos = ApplyGrassBend(v.prevObjPos, worldOrigin, v.prevWorldMatrix, bendStrength, bendRadius, maxBladeHeight);
+        }
     }
     return v;
 }

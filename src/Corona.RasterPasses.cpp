@@ -2106,6 +2106,8 @@ void Corona::DrawScene(shared_ptr<Scene> scene, const glm::mat4x4& instanceTrans
 			objCB.GrassBendOrigin = RenderFrameGrassBendOrigin;
 			objCB.GrassBendParams = RenderFrameGrassBendParams;
 			objCB.bGrassMesh = mesh->bGrassMesh ? 1u : 0u;
+			objCB.WindParams = RenderFrameWindParams;
+			objCB.WindTuning = RenderFrameWindTuning;
 
 			renderBackend->SetGraphicsPipelineConstantData(activeGBufferPipeline, 0, &objCB, sizeof(objCB));
 

@@ -2460,6 +2460,33 @@ private:
 		return 0;
 	}
 
+	// corona.set_wind_params(dirX, dirZ, strength, [tempFreq], [spaceFreq])
+	// dirX/dirZ are auto-normalized in the XZ plane. strength = 0 disables
+	// wind. tempFreq/spaceFreq default to 0 → "keep current tuning".
+	int LuaCoronaSetWindParams(lua_State* L)
+	{
+		Corona* host = GetHost(L);
+		if (!host)
+		{
+			luaL_error(L, "corona host is not available");
+			return 0;
+		}
+		float dirX     = static_cast<float>(luaL_checknumber(L, 1));
+		float dirZ     = static_cast<float>(luaL_checknumber(L, 2));
+		float strength = static_cast<float>(luaL_checknumber(L, 3));
+		const float tempFreq  = static_cast<float>(luaL_optnumber(L, 4, 0.0));
+		const float spaceFreq = static_cast<float>(luaL_optnumber(L, 5, 0.0));
+		const float lenSq = dirX * dirX + dirZ * dirZ;
+		if (lenSq > 1e-6f)
+		{
+			const float inv = 1.0f / std::sqrt(lenSq);
+			dirX *= inv;
+			dirZ *= inv;
+		}
+		host->SetWindParamsForScript(dirX, dirZ, strength, tempFreq, spaceFreq);
+		return 0;
+	}
+
 	int LuaCoronaSetCamera(lua_State* L)
 	{
 		Corona* host = GetHost(L);
@@ -3739,6 +3766,8 @@ private:
 		lua_setfield(L, -2, "set_grass_bend_origin");
 		lua_pushcfunction(L, LuaCoronaSetGrassBendParams, "corona.set_grass_bend_params");
 		lua_setfield(L, -2, "set_grass_bend_params");
+		lua_pushcfunction(L, LuaCoronaSetWindParams, "corona.set_wind_params");
+		lua_setfield(L, -2, "set_wind_params");
 		lua_pushcfunction(L, LuaCoronaSetCamera, "corona.set_camera");
 		lua_setfield(L, -2, "set_camera");
 		lua_pushcfunction(L, LuaCoronaGetCamera, "corona.get_camera");

@@ -21,13 +21,23 @@ local groundExtent      = 1000.0   -- ground half-extent (world units)
 local grassAreaSize     = 1800.0   -- area covered by grass blades
 local grassBladeCount   = 8000     -- N blades
 local grassBladeHeight  = 28.0
-local grassBendRadius   = 180.0    -- world units of effect radius
-local grassBendStrength = 30.0
+-- Defaults below were dialed in via the imgui panel (user-validated
+-- 2026-05-27); change them if you want a different look at boot.
+local grassBendRadius   = 76.0     -- world units of effect radius
+local grassBendStrength = 53.0
 local playerWalkSpeed   = 300.0    -- units per second
 local cameraDistance    = 200.0
 local cameraHeight      = 90.0     -- lower → bend more visible
 
-corona.set_grass_bend_params(grassBendRadius, grassBladeHeight)
+-- Wind sway: composes additively with player-proximity bend.
+local windDirX          = 0.11     -- world-space wind direction (auto-normalized in C++)
+local windDirZ          = 0.14
+local windStrength      = 12.7     -- peak XZ blade-tip displacement (world units)
+local windTempFreq      = 68.0     -- rad/sec on the primary sin oscillator
+local windSpaceFreq     = 0.0037   -- rad/world-unit → blade-to-blade phase variation
+
+-- Wind + bend params are re-applied every frame inside on_update so
+-- imgui slider edits + hot-reloaded tuning land without restarting.
 
 -- 1. Ground plane ---------------------------------------------------------
 local groundEntity = corona.Entity.create("GrassDemoGround")
@@ -152,8 +162,45 @@ local function on_update(dt)
         active   = true,
     })
 
-    -- Drive grass bend origin in world space. .w = strength (0 disables).
+    -- Drive grass bend origin/params in world space. .w = strength (0 disables).
     corona.set_grass_bend_origin(player.x, 0.0, player.z, grassBendStrength)
+    corona.set_grass_bend_params(grassBendRadius, grassBladeHeight)
+
+    -- Re-push wind params every frame so imgui slider edits +
+    -- hot-reloaded tuning land without restarting the engine.
+    corona.set_wind_params(windDirX, windDirZ, windStrength, windTempFreq, windSpaceFreq)
 end
 
-return { update = on_update }
+-- 7. ImGui control panel -------------------------------------------------
+
+local function on_imgui()
+    if not imgui.begin("Grass Demo") then
+        imgui.end_window()
+        return
+    end
+
+    imgui.text_disabled("Wind Sway")
+    imgui.separator()
+    windDirX,     _ = imgui.slider_float("wind dir X",       windDirX,    -1.0,   1.0)
+    windDirZ,     _ = imgui.slider_float("wind dir Z",       windDirZ,    -1.0,   1.0)
+    windStrength, _ = imgui.slider_float("wind strength",    windStrength, 0.0,  60.0)
+    windTempFreq, _ = imgui.slider_float("wind temp freq",   windTempFreq, 0.0, 200.0)
+    windSpaceFreq,_ = imgui.slider_float("wind space freq",  windSpaceFreq, 0.0,  0.1, "%.4f")
+
+    imgui.text_disabled("Grass Bend")
+    imgui.separator()
+    grassBendRadius,   _ = imgui.slider_float("bend radius",   grassBendRadius,   10.0, 600.0)
+    grassBendStrength, _ = imgui.slider_float("bend strength", grassBendStrength,  0.0, 100.0)
+
+    imgui.text_disabled("Player")
+    imgui.separator()
+    playerWalkSpeed, _ = imgui.slider_float("walk speed", playerWalkSpeed, 0.0, 1000.0)
+    cameraDistance,  _ = imgui.slider_float("cam distance", cameraDistance,  50.0,  500.0)
+    cameraHeight,    _ = imgui.slider_float("cam height",   cameraHeight,    20.0,  400.0)
+    imgui.text(string.format("pos = (%.0f, %.0f, %.0f)  yaw = %.0f",
+                             player.x, player.y, player.z, player.yaw))
+
+    imgui.end_window()
+end
+
+return { update = on_update, imgui = on_imgui }
