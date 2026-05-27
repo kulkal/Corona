@@ -173,6 +173,10 @@ bool Component::Initialize(
 	mesh->Vb = vb;
 	mesh->Ib = ib;
 
+	// CPU-side mirror intentionally left empty — Phase 1 terrain doesn't
+	// participate in physics or RT. Filling 1M positions also caused a
+	// downstream consumer to crash on DX12 (under investigation).
+
 	// Initial Draws = every chunk. Step 1.5 frustum culling will replace
 	// this list per frame.
 	mesh->Draws.reserve(ChunkInfos.size());
