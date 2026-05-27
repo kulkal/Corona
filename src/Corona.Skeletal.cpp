@@ -844,8 +844,7 @@ void Corona::SpawnSkeletalTestCharacters()
 		std::shared_ptr<Scene> scene = std::make_shared<Scene>();
 		scene->Materials.push_back(material);
 
-		auto mesh = std::make_shared<Mesh>();
-		mesh->Owner = renderBackend.get();
+		auto mesh = std::make_shared<Mesh>(renderBackend.get());
 		mesh->transform = glm::mat4x4(1.0f);
 		mesh->NumVertices = vertexCount;
 		mesh->NumIndices = indexCount;
@@ -977,8 +976,7 @@ void Corona::SpawnSkeletalTestCharacters()
 		std::shared_ptr<Scene> groundScene = std::make_shared<Scene>();
 		groundScene->Materials.push_back(groundMat);
 
-		auto groundMesh = std::make_shared<Mesh>();
-		groundMesh->Owner = renderBackend.get();
+		auto groundMesh = std::make_shared<Mesh>(renderBackend.get());
 		groundMesh->transform = glm::mat4x4(1.0f);
 		groundMesh->NumVertices = static_cast<UINT32>(gv.size());
 		groundMesh->NumIndices = static_cast<UINT32>(gi.size());

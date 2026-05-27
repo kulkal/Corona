@@ -1045,8 +1045,7 @@ Corona::ScriptSceneHandle Corona::CreateSpineSceneForScript(
 	material->Roughness = DefaultRougnessTex;
 	material->Metallic = DefaultBlackTex;
 
-	Mesh* mesh = new Mesh;
-	mesh->Owner = renderBackend.get();
+	Mesh* mesh = new Mesh(renderBackend.get());
 	mesh->transform = glm::mat4x4(1.0f);
 	mesh->bTransparent = true;
 	mesh->bSpineMesh = true;
@@ -1293,8 +1292,7 @@ Corona::ScriptSceneHandle Corona::CreateLiveSpineForScript(
 	material->Roughness = DefaultRougnessTex;
 	material->Metallic = DefaultBlackTex;
 
-	auto* mesh = new Mesh;
-	mesh->Owner = renderBackend.get();
+	auto* mesh = new Mesh(renderBackend.get());
 	mesh->transform = glm::mat4x4(1.0f);
 	mesh->bTransparent = true;
 	mesh->bSpineMesh = true;

@@ -159,6 +159,9 @@ public:
 class Mesh
 {
 public:
+	Mesh() = default;
+	explicit Mesh(IRenderBackend* owner) : Owner(owner) {}
+
 	IRenderBackend* Owner = nullptr;
 
 	struct DrawCall

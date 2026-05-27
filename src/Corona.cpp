@@ -7938,8 +7938,7 @@ shared_ptr<Scene> Corona::CreateMirrorCubeScene()
 	material->Roughness = DefaultBlackTex;
 	material->Metallic = DefaultWhiteTex;
 
-	Mesh* mesh = new Mesh;
-	mesh->Owner = renderBackend.get();
+	Mesh* mesh = new Mesh(renderBackend.get());
 	mesh->transform = glm::mat4x4(1.0f);
 	mesh->NumVertices = static_cast<UINT>(vertices.size());
 	mesh->NumIndices = static_cast<UINT>(indices.size());
@@ -8171,8 +8170,7 @@ shared_ptr<Scene> Corona::CreateProceduralBoxScene(const glm::vec3& baseColor, b
 	const bool bAlphaTested = !assetTexturePath.empty() && assetTexturePath.find(L"/raw/") != std::wstring::npos;
 	material->bHasAlpha = bAlphaTested;
 
-	Mesh* mesh = new Mesh;
-	mesh->Owner = renderBackend.get();
+	Mesh* mesh = new Mesh(renderBackend.get());
 	mesh->transform = glm::mat4x4(1.0f);
 	mesh->NumVertices = static_cast<UINT>(vertices.size());
 	mesh->NumIndices = static_cast<UINT>(indices.size());
@@ -8310,8 +8308,7 @@ shared_ptr<Scene> Corona::CreateProceduralGrassScene(UINT32 numBlades, float are
 	material->Roughness = DefaultRougnessTex;
 	material->Metallic = DefaultBlackTex;
 
-	Mesh* mesh = new Mesh;
-	mesh->Owner = renderBackend.get();
+	Mesh* mesh = new Mesh(renderBackend.get());
 	mesh->transform = glm::mat4x4(1.0f);
 	mesh->NumVertices = static_cast<UINT>(vertices.size());
 	mesh->NumIndices = static_cast<UINT>(indices.size());
@@ -8481,8 +8478,7 @@ shared_ptr<Scene> Corona::CreateProceduralBlockCharacterScene(UINT32 seed)
 		boundsMax = glm::max(boundsMax, p);
 	};
 
-	Mesh* mesh = new Mesh;
-	mesh->Owner = renderBackend.get();
+	Mesh* mesh = new Mesh(renderBackend.get());
 	mesh->transform = glm::mat4x4(1.0f);
 	mesh->IndexFormat = EIndexFormat::U32;
 	mesh->VertexStride = sizeof(Vertex);
@@ -9470,8 +9466,7 @@ shared_ptr<Scene> Corona::LoadBinaryMeshModel(const std::wstring& binaryFileName
 			return nullptr;
 		}
 
-		auto mesh = std::make_shared<Mesh>();
-		mesh->Owner = renderBackend.get();
+		auto mesh = std::make_shared<Mesh>(renderBackend.get());
 		mesh->transform = glm::mat4x4(1.0f);
 		mesh->NumVertices = vertexCount;
 		mesh->NumIndices = indexCount;
@@ -9699,8 +9694,7 @@ shared_ptr<Scene> Corona::LoadModel(string fileName)
 	{
 		aiMesh* asMesh = assimpScene->mMeshes[i];
 
-		Mesh* mesh = new Mesh;
-		mesh->Owner = renderBackend.get();
+		Mesh* mesh = new Mesh(renderBackend.get());
 		mesh->transform = glm::mat4x4(1.0f);
 
 		mesh->NumVertices = asMesh->mNumVertices;
