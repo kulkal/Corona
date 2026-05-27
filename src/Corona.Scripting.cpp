@@ -1761,6 +1761,15 @@ private:
 				const UINT32 numBlades = static_cast<UINT32>(std::max(1.0f, std::round(numBladesF)));
 				sceneHandle = host->CreateProceduralGrassSceneForScript(numBlades, areaSize, bladeHeight, seed);
 			}
+			else if (primitive == "TERRAIN")
+			{
+				UINT32 seed = 1u;
+				lua_getfield(L, tableIndex, "seed");
+				if (lua_isnumber(L, -1))
+					seed = static_cast<UINT32>(std::max<lua_Integer>(1, lua_tointeger(L, -1)));
+				lua_pop(L, 1);
+				sceneHandle = host->CreateProceduralTerrainSceneForScript(seed);
+			}
 			else
 			{
 				bool isSpine = false;
@@ -4156,6 +4165,33 @@ Corona::ScriptSceneHandle Corona::CreateProceduralGrassSceneForScript(UINT32 num
 		L" blades=" + std::to_wstring(clampedBlades) +
 		L" area=" + std::to_wstring(static_cast<int>(std::round(clampedArea))) +
 		L" height=" + std::to_wstring(static_cast<int>(std::round(clampedHeight))));
+	return handle;
+}
+
+Corona::ScriptSceneHandle Corona::CreateProceduralTerrainSceneForScript(UINT32 seed)
+{
+	if (!renderBackend)
+		return InvalidScriptSceneHandle;
+
+	const UINT32 normalizedSeed = (seed == 0u) ? 1u : seed;
+	const std::wstring key = L"procedural://terrain/v1/" + std::to_wstring(normalizedSeed);
+	const auto cachedIt = ScriptSceneByPath.find(key);
+	if (cachedIt != ScriptSceneByPath.end())
+		return cachedIt->second;
+
+	shared_ptr<Scene> scene = CreateProceduralTerrainScene(normalizedSeed);
+	if (!scene)
+		return InvalidScriptSceneHandle;
+
+	ScriptSceneHandle handle = NextScriptSceneHandle++;
+	if (handle == InvalidScriptSceneHandle)
+		handle = NextScriptSceneHandle++;
+
+	ScriptScenes[handle] = { scene, key, EPhysicsCollisionShape::TriangleMesh, glm::vec3(0.5f) };
+	ScriptSceneByPath[key] = handle;
+	AppendCpuRuntimeTrace(
+		L"[Luau][MeshComponent] procedural_terrain handle=" + std::to_wstring(handle) +
+		L" seed=" + std::to_wstring(normalizedSeed));
 	return handle;
 }
 

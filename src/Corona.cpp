@@ -11,6 +11,7 @@
 
 #include "stdafx.h"
 #include "Corona.h"
+#include "TerrainComponent.h"
 #include "D3D12Helpers.h"
 #include "PlatformSystem.h"
 #include "PlatformWindow.h"
@@ -8338,6 +8339,31 @@ shared_ptr<Scene> Corona::CreateProceduralGrassScene(UINT32 numBlades, float are
 	scene->BoundsMin = glm::vec3(-halfArea, 0.0f, -halfArea);
 	scene->BoundsMax = glm::vec3( halfArea, bladeHeight * 1.3f, halfArea);
 
+	return scene;
+}
+
+shared_ptr<Scene> Corona::CreateProceduralTerrainScene(UINT32 seed)
+{
+	if (!renderBackend)
+		return nullptr;
+
+	Terrain::GenerateParams params{};
+	params.Width  = 1024;
+	params.Depth  = 1024;
+	params.WorldScaleXZ = 1.0f;
+	params.HeightMin = 0.0f;
+	params.HeightMax = 200.0f;
+	params.Seed = (seed == 0u) ? 1u : seed;
+
+	auto component = std::make_unique<Terrain::Component>();
+	if (!component->Initialize(renderBackend.get(), params, L"terrain_phase1"))
+	{
+		AppendCpuRuntimeTrace(L"[Terrain] Initialize failed");
+		return nullptr;
+	}
+
+	shared_ptr<Scene> scene = component->GetScene();
+	ActiveTerrain = std::move(component);
 	return scene;
 }
 

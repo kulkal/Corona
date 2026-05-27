@@ -41,6 +41,7 @@
 #include "DX12Backend.h"
 #endif
 #include "EntityComponentSystem.h"
+namespace Terrain { class Component; }
 #include "enkiTS/TaskScheduler.h"
 #if CORONA_HAS_PIX
 #define PROFILE_BUILD 1
@@ -1182,6 +1183,10 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 
 	shared_ptr<VertexBuffer> FullScreenVB;
 
+	// Active terrain instance (Phase 1: 1km×1km procedural). Holds per-chunk
+	// AABBs the per-frame culling pass consumes; Mesh + Scene are inside.
+	std::unique_ptr<Terrain::Component> ActiveTerrain;
+
 	// blue noise texture
 	shared_ptr<Texture> BlueNoiseTex;
 	shared_ptr<Texture> DefaultWhiteTex;
@@ -1958,6 +1963,7 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	shared_ptr<Texture> GetProceduralBoxDiffuseTexture(const std::wstring& textureKind);
 	shared_ptr<Scene> CreateProceduralBoxScene(const glm::vec3& baseColor, bool bUseBrickTexture = false, float uvRepeat = 1.0f, const std::wstring& textureKind = std::wstring(), float uvRepeatY = -1.0f, bool bFrontOnly = false);
 	shared_ptr<Scene> CreateProceduralGrassScene(UINT32 numBlades, float areaSize, float bladeHeight, UINT32 seed);
+	shared_ptr<Scene> CreateProceduralTerrainScene(UINT32 seed);
 	bool ShouldIncludeSceneObjectInRayTracingAS(const SceneObject& object) const;
 	void MarkRayTracingSceneDirty();
 	void MarkRayTracingTransformsDirty();
@@ -2041,6 +2047,7 @@ public:
 	// with the tip at Y=bladeHeight. Marked `bGrassMesh = true` so the
 	// GBuffer VS Layer 2 deformation runs grass bend on it.
 	ScriptSceneHandle CreateProceduralGrassSceneForScript(UINT32 numBlades, float areaSize, float bladeHeight, UINT32 seed);
+	ScriptSceneHandle CreateProceduralTerrainSceneForScript(UINT32 seed);
 	// Script-facing setters for the grass-bend CB inputs. Called from
 	// Lua each frame; the GBuffer CB filler reads
 	// RenderFrameGrassBendOrigin / RenderFrameGrassBendParams.
