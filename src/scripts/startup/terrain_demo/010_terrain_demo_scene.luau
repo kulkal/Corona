@@ -55,7 +55,33 @@ corona.LightComponent.add(sunEntity, {
     persistent = false,
 })
 
-corona.log("[terrain_demo] spawned terrain (1024^2, seed=1) + camera + sun")
+-- 4. Grass on the terrain surface ----------------------------------------
+-- GRASS_ON_TERRAIN samples ActiveTerrain->SampleHeight per blade so the
+-- base of every blade sits on the terrain. The mesh re-uses the existing
+-- bGrassMesh path so wind sway + bend hooks work identically to grass_demo.
+local grassEntity = corona.Entity.create("TerrainDemoGrass")
+corona.MeshComponent.add(grassEntity, {
+    primitive    = "GRASS_ON_TERRAIN",
+    blade_count  = 60000,
+    blade_height = 30.0,
+    seed         = 20260527,
+    position     = { 0.0, 0.0, 0.0 },
+    rotation     = { 0.0, 0.0, 0.0 },
+    scale        = { 1.0, 1.0, 1.0 },
+    roughness    = 0.85,
+    metallic     = 0.0,
+    override_material = true,
+    ray_tracing  = false,
+})
+
+-- Wind sway constants (re-pushed every frame so imgui tuning can take effect).
+local windDirX      = 0.11
+local windDirZ      = 0.14
+local windStrength  = 12.7
+local windTempFreq  = 68.0
+local windSpaceFreq = 0.0037
+
+corona.log("[terrain_demo] spawned terrain (1024^2, seed=1) + grass-on-terrain + camera + sun")
 
 -- Free-fly camera state. CameraComponent.add disables the engine's native
 -- WASD/mouse path (bScriptCameraControlEnabled=true), so we drive position
@@ -123,6 +149,13 @@ local function on_update(dt)
         fov      = 0.55,
         active   = true,
     })
+
+    -- Wind sway + bend params. Grass mesh's GBuffer VS reads these from
+    -- per-frame CB; setting them every frame lets imgui sliders take effect
+    -- and keeps the field animated.
+    corona.set_wind_params(windDirX, windDirZ, windStrength, windTempFreq, windSpaceFreq)
+    corona.set_grass_bend_origin(0.0, 0.0, 0.0, 0.0)   -- no player bend in terrain_demo
+    corona.set_grass_bend_params(80.0, 30.0)
 end
 
 return { update = on_update }

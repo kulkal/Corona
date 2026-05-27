@@ -6,6 +6,7 @@
 
 #include "stdafx.h"
 #include "Corona.h"
+#include "TerrainComponent.h"
 #include "PlatformWindow.h"
 #include "Utils.h"
 
@@ -1769,6 +1770,28 @@ private:
 					seed = static_cast<UINT32>(std::max<lua_Integer>(1, lua_tointeger(L, -1)));
 				lua_pop(L, 1);
 				sceneHandle = host->CreateProceduralTerrainSceneForScript(seed);
+			}
+			else if (primitive == "GRASSONTERRAIN")
+			{
+				float numBladesF  = 80000.0f;
+				float bladeHeight = 30.0f;
+				UINT32 seed       = 20260527u;
+				if (!ReadNumberField(L, tableIndex, "blade_count", numBladesF))
+				{
+					if (!ReadNumberField(L, tableIndex, "bladeCount", numBladesF))
+						ReadNumberField(L, tableIndex, "count", numBladesF);
+				}
+				if (!ReadNumberField(L, tableIndex, "blade_height", bladeHeight))
+				{
+					if (!ReadNumberField(L, tableIndex, "bladeHeight", bladeHeight))
+						ReadNumberField(L, tableIndex, "height", bladeHeight);
+				}
+				lua_getfield(L, tableIndex, "seed");
+				if (lua_isnumber(L, -1))
+					seed = static_cast<UINT32>(std::max<lua_Integer>(1, lua_tointeger(L, -1)));
+				lua_pop(L, 1);
+				const UINT32 numBlades = static_cast<UINT32>(std::max(1.0f, std::round(numBladesF)));
+				sceneHandle = host->CreateProceduralGrassOnTerrainSceneForScript(numBlades, bladeHeight, seed);
 			}
 			else
 			{
@@ -4165,6 +4188,45 @@ Corona::ScriptSceneHandle Corona::CreateProceduralGrassSceneForScript(UINT32 num
 		L" blades=" + std::to_wstring(clampedBlades) +
 		L" area=" + std::to_wstring(static_cast<int>(std::round(clampedArea))) +
 		L" height=" + std::to_wstring(static_cast<int>(std::round(clampedHeight))));
+	return handle;
+}
+
+Corona::ScriptSceneHandle Corona::CreateProceduralGrassOnTerrainSceneForScript(UINT32 numBlades, float bladeHeight, UINT32 seed)
+{
+	if (!renderBackend)
+		return InvalidScriptSceneHandle;
+
+	const UINT32 clampedBlades = std::clamp<UINT32>(numBlades, 1u, 1000000u);
+	const float clampedHeight  = std::clamp(bladeHeight, 1.0f, 1000.0f);
+	const UINT32 normalizedSeed = (seed == 0u) ? 1u : seed;
+
+	// Cache key incorporates terrain seed + blade params so the same terrain
+	// shares blade meshes. ActiveTerrain only exists post-Terrain-spawn —
+	// callers should add TERRAIN entity first, then GRASS_ON_TERRAIN.
+	const std::wstring terrainTag = ActiveTerrain ?
+		(L"_t" + std::to_wstring(ActiveTerrain->GetData().Header.Seed)) : L"_flat";
+	const std::wstring key =
+		L"procedural://grass_on_terrain/" +
+		std::to_wstring(clampedBlades) + L"/" +
+		std::to_wstring(static_cast<int>(std::round(clampedHeight))) + L"/" +
+		std::to_wstring(normalizedSeed) + terrainTag;
+	const auto cachedIt = ScriptSceneByPath.find(key);
+	if (cachedIt != ScriptSceneByPath.end())
+		return cachedIt->second;
+
+	shared_ptr<Scene> scene = CreateProceduralGrassOnTerrainScene(clampedBlades, clampedHeight, normalizedSeed);
+	if (!scene)
+		return InvalidScriptSceneHandle;
+
+	ScriptSceneHandle handle = NextScriptSceneHandle++;
+	if (handle == InvalidScriptSceneHandle)
+		handle = NextScriptSceneHandle++;
+
+	ScriptScenes[handle] = { scene, key, EPhysicsCollisionShape::Box, glm::vec3(0.5f) };
+	ScriptSceneByPath[key] = handle;
+	AppendCpuRuntimeTrace(
+		L"[Luau][MeshComponent] procedural_grass_on_terrain handle=" + std::to_wstring(handle) +
+		L" blades=" + std::to_wstring(clampedBlades));
 	return handle;
 }
 

@@ -47,6 +47,11 @@ namespace Terrain
 		// default for both DX12 and Vulkan paths.
 		uint32_t UpdateCulling(const glm::mat4& viewProj);
 
+		// Bilinear height lookup in centered world space. Mesh vertices are
+		// pre-centered around origin (see TerrainMeshBuilder); pass post-
+		// centering world (X, Z). Out-of-bounds clamps to the edge.
+		float SampleHeight(float worldX, float worldZ) const;
+
 		const std::shared_ptr<Scene>& GetScene() const { return ScenePtr; }
 		const std::vector<ChunkMeshInfo>& GetChunks() const { return ChunkInfos; }
 		const std::shared_ptr<Mesh>& GetMesh() const { return MeshPtr; }

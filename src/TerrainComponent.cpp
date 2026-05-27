@@ -84,6 +84,58 @@ bool Component::LoadOrGenerate(const GenerateParams& params, const std::filesyst
 	return true;
 }
 
+float Component::SampleHeight(float worldX, float worldZ) const
+{
+	if (Data.Chunks.empty() || Data.Header.Width == 0 || Data.Header.Depth == 0)
+		return 0.0f;
+
+	const float worldScale = Data.Header.WorldScaleXZ;
+	const uint32_t cs = Data.Header.ChunkSize;
+	if (cs == 0 || worldScale <= 0.0f)
+		return 0.0f;
+
+	// Vertices are pre-centered: world (-halfX..halfX) maps to sample (0..Width-1).
+	const float halfX = static_cast<float>(Data.Header.Width  - 1) * worldScale * 0.5f;
+	const float halfZ = static_cast<float>(Data.Header.Depth  - 1) * worldScale * 0.5f;
+
+	const float sxF = (worldX + halfX) / worldScale;
+	const float szF = (worldZ + halfZ) / worldScale;
+
+	const float widthMinus1 = static_cast<float>(Data.Header.Width  - 1);
+	const float depthMinus1 = static_cast<float>(Data.Header.Depth  - 1);
+
+	const float clX = std::clamp(sxF, 0.0f, widthMinus1);
+	const float clZ = std::clamp(szF, 0.0f, depthMinus1);
+
+	const uint32_t x0 = static_cast<uint32_t>(clX);
+	const uint32_t z0 = static_cast<uint32_t>(clZ);
+	const uint32_t x1 = (std::min)(x0 + 1u, Data.Header.Width  - 1u);
+	const uint32_t z1 = (std::min)(z0 + 1u, Data.Header.Depth  - 1u);
+	const float fx = clX - static_cast<float>(x0);
+	const float fz = clZ - static_cast<float>(z0);
+
+	auto sampleAt = [&](uint32_t sx, uint32_t sz) -> float
+	{
+		const uint32_t quads = cs - 1u;
+		const uint32_t cx = (std::min)(sx / quads, Data.Header.NumChunksX - 1u);
+		const uint32_t cz = (std::min)(sz / quads, Data.Header.NumChunksZ - 1u);
+		const uint32_t lx = sx - cx * quads;
+		const uint32_t lz = sz - cz * quads;
+		const uint32_t lxC = (std::min)(lx, cs - 1u);
+		const uint32_t lzC = (std::min)(lz, cs - 1u);
+		const ChunkData& chunk = Data.Chunks[cz * Data.Header.NumChunksX + cx];
+		return Data.DecodeHeight(chunk.Heights[static_cast<size_t>(lzC) * cs + lxC]);
+	};
+
+	const float h00 = sampleAt(x0, z0);
+	const float h10 = sampleAt(x1, z0);
+	const float h01 = sampleAt(x0, z1);
+	const float h11 = sampleAt(x1, z1);
+	const float h0 = h00 + (h10 - h00) * fx;
+	const float h1 = h01 + (h11 - h01) * fx;
+	return h0 + (h1 - h0) * fz;
+}
+
 uint32_t Component::UpdateCulling(const glm::mat4& viewProj)
 {
 	if (!MeshPtr || ChunkInfos.empty())

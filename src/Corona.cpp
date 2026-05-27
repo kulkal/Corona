@@ -8212,103 +8212,118 @@ shared_ptr<Scene> Corona::CreateProceduralBoxScene(const glm::vec3& baseColor, b
 	return scene;
 }
 
-shared_ptr<Scene> Corona::CreateProceduralGrassScene(UINT32 numBlades, float areaSize, float bladeHeight, UINT32 seed)
+namespace
 {
-	if (!renderBackend || numBlades == 0)
-		return nullptr;
-
-	// Legacy 44 B vertex layout — matches the base GBufferGraphicsPipeline,
-	// which the grass mesh is drawn through.
-	struct Vertex
+	// Shared blade-grid generator. baseYSampler returns each blade root's
+	// world Y; pass `[](float,float){return 0.0f;}` for a flat field.
+	struct GrassVertex
 	{
 		glm::vec3 Position;
 		glm::vec3 Normal;
 		glm::vec2 UV;
 		glm::vec3 Tangent;
 	};
-	static_assert(sizeof(Vertex) == 44, "GrassVertex must match base GBuffer PSO stride");
+	static_assert(sizeof(GrassVertex) == 44, "GrassVertex must match base GBuffer PSO stride");
 
+	void BuildGrassBlades(
+		UINT32 numBlades,
+		float halfArea,
+		float bladeHeight,
+		UINT32 seed,
+		const std::function<float(float, float)>& baseYSampler,
+		std::vector<GrassVertex>& vertices,
+		std::vector<UINT32>& indices,
+		float& outMinY,
+		float& outMaxY)
+	{
+		const float bladeWidth = std::max(2.0f, bladeHeight * 0.06f);
+		const UINT32 kBladeSegments = 4;
+		const UINT32 kBladeRows = kBladeSegments + 1;
+
+		uint32_t rngState = (seed == 0u) ? 1u : seed;
+		auto rng01 = [&rngState]() -> float
+		{
+			uint32_t x = rngState;
+			x ^= x << 13; x ^= x >> 17; x ^= x << 5;
+			rngState = x;
+			return static_cast<float>(x & 0x00ffffffu) / static_cast<float>(0x01000000u);
+		};
+
+		vertices.reserve(numBlades * kBladeRows * 2u);
+		indices.reserve(numBlades * kBladeSegments * 12u);
+
+		outMinY =  std::numeric_limits<float>::infinity();
+		outMaxY = -std::numeric_limits<float>::infinity();
+
+		for (UINT32 b = 0; b < numBlades; ++b)
+		{
+			const float x = (rng01() * 2.0f - 1.0f) * halfArea;
+			const float z = (rng01() * 2.0f - 1.0f) * halfArea;
+			const float yaw = rng01() * 6.2831853f;
+			const float heightJitter = 0.7f + rng01() * 0.6f;
+			const float thisHeight = bladeHeight * heightJitter;
+			const float baseY = baseYSampler(x, z);
+
+			const float c = cosf(yaw);
+			const float s = sinf(yaw);
+			const float halfW = bladeWidth * 0.5f;
+
+			const glm::vec3 normal = glm::normalize(glm::vec3(-s, 0.2f, c));
+			const glm::vec3 tangent = glm::normalize(glm::vec3(c, 0.0f, s));
+
+			const UINT32 baseIndex = static_cast<UINT32>(vertices.size());
+
+			for (UINT32 row = 0; row < kBladeRows; ++row)
+			{
+				const float t = static_cast<float>(row) / static_cast<float>(kBladeSegments);
+				const float y = baseY + thisHeight * t;
+				const float widthScale = 1.0f - t * 0.75f;
+				const float wHalf = halfW * widthScale;
+
+				GrassVertex vl;
+				vl.Position = glm::vec3(x + (-wHalf * c), y, z + (-wHalf * s));
+				vl.Normal = normal; vl.UV = glm::vec2(0.0f, t); vl.Tangent = tangent;
+				vertices.push_back(vl);
+
+				GrassVertex vr;
+				vr.Position = glm::vec3(x + (wHalf * c), y, z + (wHalf * s));
+				vr.Normal = normal; vr.UV = glm::vec2(1.0f, t); vr.Tangent = tangent;
+				vertices.push_back(vr);
+
+				outMinY = std::min(outMinY, y);
+				outMaxY = std::max(outMaxY, y);
+			}
+
+			for (UINT32 seg = 0; seg < kBladeSegments; ++seg)
+			{
+				const UINT32 bl = baseIndex + (seg)*2u;
+				const UINT32 br = baseIndex + (seg)*2u + 1u;
+				const UINT32 tl = baseIndex + (seg + 1) * 2u;
+				const UINT32 tr = baseIndex + (seg + 1) * 2u + 1u;
+				indices.push_back(bl); indices.push_back(br); indices.push_back(tr);
+				indices.push_back(bl); indices.push_back(tr); indices.push_back(tl);
+				indices.push_back(bl); indices.push_back(tr); indices.push_back(br);
+				indices.push_back(bl); indices.push_back(tl); indices.push_back(tr);
+			}
+		}
+	}
+}
+
+shared_ptr<Scene> Corona::CreateProceduralGrassScene(UINT32 numBlades, float areaSize, float bladeHeight, UINT32 seed)
+{
+	if (!renderBackend || numBlades == 0)
+		return nullptr;
+
+	using Vertex = GrassVertex;
 	const float halfArea = areaSize * 0.5f;
 	const float bladeWidth = std::max(2.0f, bladeHeight * 0.06f);
 
-	// Segment the blade vertically so wind sway (which is a per-vertex
-	// effect) produces a smooth bent curve instead of a straight diagonal
-	// from a single base→tip pair. 4 segments = 5 rows × 2 verts = 10
-	// verts/blade — at 8 K blades that's 80 K verts, very cheap.
-	const UINT32 kBladeSegments = 4;
-	const UINT32 kBladeRows     = kBladeSegments + 1;
-
-	// Deterministic PRNG so the same seed reproduces the field.
-	uint32_t rngState = (seed == 0u) ? 1u : seed;
-	auto rng01 = [&rngState]() -> float
-	{
-		// Xorshift32
-		uint32_t x = rngState;
-		x ^= x << 13;
-		x ^= x >> 17;
-		x ^= x << 5;
-		rngState = x;
-		return static_cast<float>(x & 0x00ffffffu) / static_cast<float>(0x01000000u);
-	};
-
 	std::vector<Vertex> vertices;
 	std::vector<UINT32> indices;
-	vertices.reserve(numBlades * kBladeRows * 2u);
-	indices.reserve(numBlades * kBladeSegments * 12u); // 2 sides × 6 indices/segment
-
-	for (UINT32 b = 0; b < numBlades; ++b)
-	{
-		const float x = (rng01() * 2.0f - 1.0f) * halfArea;
-		const float z = (rng01() * 2.0f - 1.0f) * halfArea;
-		const float yaw = rng01() * 6.2831853f;
-		const float heightJitter = 0.7f + rng01() * 0.6f; // 0.7..1.3 of bladeHeight
-		const float thisHeight = bladeHeight * heightJitter;
-
-		const float c = cosf(yaw);
-		const float s = sinf(yaw);
-		const float halfW = bladeWidth * 0.5f;
-
-		const glm::vec3 normal  = glm::normalize(glm::vec3(-s, 0.2f, c));
-		const glm::vec3 tangent = glm::normalize(glm::vec3(c, 0.0f, s));
-
-		const UINT32 baseIndex = static_cast<UINT32>(vertices.size());
-
-		// Emit kBladeRows pairs (left, right) from base to tip. Width
-		// tapers from full at the root to 25 % at the tip so the silhouette
-		// looks like a real blade instead of a rectangle.
-		for (UINT32 row = 0; row < kBladeRows; ++row)
-		{
-			const float t = static_cast<float>(row) / static_cast<float>(kBladeSegments); // 0..1
-			const float y = thisHeight * t;
-			const float widthScale = 1.0f - t * 0.75f; // taper
-			const float wHalf = halfW * widthScale;
-
-			Vertex vl;
-			vl.Position = glm::vec3(x + (-wHalf * c), y, z + (-wHalf * s));
-			vl.Normal = normal; vl.UV = glm::vec2(0.0f, t); vl.Tangent = tangent;
-			vertices.push_back(vl);
-
-			Vertex vr;
-			vr.Position = glm::vec3(x + ( wHalf * c), y, z + ( wHalf * s));
-			vr.Normal = normal; vr.UV = glm::vec2(1.0f, t); vr.Tangent = tangent;
-			vertices.push_back(vr);
-		}
-
-		// Two-sided strip: emit each segment quad with both windings so
-		// back-face culling settings don't matter.
-		for (UINT32 seg = 0; seg < kBladeSegments; ++seg)
-		{
-			const UINT32 bl = baseIndex + (seg    ) * 2u;       // bottom-left
-			const UINT32 br = baseIndex + (seg    ) * 2u + 1u;  // bottom-right
-			const UINT32 tl = baseIndex + (seg + 1) * 2u;       // top-left
-			const UINT32 tr = baseIndex + (seg + 1) * 2u + 1u;  // top-right
-			indices.push_back(bl); indices.push_back(br); indices.push_back(tr);
-			indices.push_back(bl); indices.push_back(tr); indices.push_back(tl);
-			// Opposite winding (back-face).
-			indices.push_back(bl); indices.push_back(tr); indices.push_back(br);
-			indices.push_back(bl); indices.push_back(tl); indices.push_back(tr);
-		}
-	}
+	float minY = 0.0f, maxY = bladeHeight;
+	BuildGrassBlades(numBlades, halfArea, bladeHeight, seed,
+		[](float, float) { return 0.0f; },
+		vertices, indices, minY, maxY);
 
 	shared_ptr<Material> material = std::make_shared<Material>();
 	material->BaseColorFactor = glm::vec4(0.18f, 0.48f, 0.22f, 1.0f); // green
@@ -8347,6 +8362,77 @@ shared_ptr<Scene> Corona::CreateProceduralGrassScene(UINT32 numBlades, float are
 	scene->BoundsMin = glm::vec3(-halfArea, 0.0f, -halfArea);
 	scene->BoundsMax = glm::vec3( halfArea, bladeHeight * 1.3f, halfArea);
 
+	return scene;
+}
+
+shared_ptr<Scene> Corona::CreateProceduralGrassOnTerrainScene(UINT32 numBlades, float bladeHeight, UINT32 seed)
+{
+	if (!renderBackend || numBlades == 0)
+		return nullptr;
+
+	// Use the currently-active terrain (Phase 1: 1km^2 centered at origin)
+	// as the height sampler. Falls back to flat field when no terrain spawned.
+	Terrain::Component* terrain = ActiveTerrain.get();
+	const float terrainSize =
+		terrain
+			? static_cast<float>(terrain->GetData().Header.Width - 1) *
+			  terrain->GetData().Header.WorldScaleXZ
+			: 1024.0f;
+	const float halfArea = terrainSize * 0.5f;
+
+	auto sampler = [terrain](float x, float z) -> float
+	{
+		return terrain ? terrain->SampleHeight(x, z) : 0.0f;
+	};
+
+	std::vector<GrassVertex> vertices;
+	std::vector<UINT32> indices;
+	float minY = 0.0f, maxY = bladeHeight;
+	BuildGrassBlades(numBlades, halfArea, bladeHeight, seed, sampler,
+		vertices, indices, minY, maxY);
+
+	shared_ptr<Material> material = std::make_shared<Material>();
+	material->BaseColorFactor = glm::vec4(0.18f, 0.48f, 0.22f, 1.0f);
+	material->Diffuse = DefaultWhiteTex;
+	material->Normal = DefaultNormalTex;
+	material->Roughness = DefaultRougnessTex;
+	material->Metallic = DefaultBlackTex;
+
+	Mesh* mesh = new Mesh(renderBackend.get());
+	mesh->transform = glm::mat4x4(1.0f);
+	mesh->NumVertices = static_cast<UINT>(vertices.size());
+	mesh->NumIndices = static_cast<UINT>(indices.size());
+	mesh->VertexStride = sizeof(GrassVertex);
+	mesh->IndexFormat = EIndexFormat::U32;
+	mesh->Mat = material;
+	mesh->bGrassMesh = true;
+	mesh->Vb = renderBackend->CreateVertexBuffer(static_cast<UINT32>(sizeof(GrassVertex) * vertices.size()), sizeof(GrassVertex), vertices.data());
+	mesh->Ib = renderBackend->CreateIndexBuffer(mesh->IndexFormat, static_cast<UINT32>(sizeof(UINT32) * indices.size()), indices.data());
+	mesh->CpuPositions.reserve(vertices.size());
+	for (const GrassVertex& vertex : vertices)
+		mesh->CpuPositions.push_back(vertex.Position);
+	mesh->CpuIndices = indices;
+
+	Mesh::DrawCall drawCall{};
+	drawCall.mat = material;
+	drawCall.IndexStart = 0;
+	drawCall.IndexCount = mesh->NumIndices;
+	drawCall.VertexBase = 0;
+	drawCall.VertexCount = mesh->NumVertices;
+	mesh->Draws.push_back(drawCall);
+
+	shared_ptr<Scene> scene = std::make_shared<Scene>();
+	scene->Materials.push_back(material);
+	scene->meshes.push_back(shared_ptr<Mesh>(mesh));
+	scene->bHasBounds = true;
+	scene->BoundsMin = glm::vec3(-halfArea, minY, -halfArea);
+	scene->BoundsMax = glm::vec3( halfArea, maxY + bladeHeight * 0.3f, halfArea);
+
+	AppendCpuRuntimeTrace(
+		L"[Terrain] grass-on-terrain spawned blades=" + std::to_wstring(numBlades) +
+		L" area=" + std::to_wstring(static_cast<int>(std::round(terrainSize))) +
+		L" yMin=" + std::to_wstring(minY) +
+		L" yMax=" + std::to_wstring(maxY));
 	return scene;
 }
 
