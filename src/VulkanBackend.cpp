@@ -5777,6 +5777,25 @@ void VulkanBackend::DestroyWindowContext()
 			vkDestroySampler(Device, entry.second.SamplerHandle, nullptr);
 	}
 	AppendVulkanRuntimeTraceBackend(L"[VulkanBackend::DestroyWindowContext] after resource allocation cleanup");
+
+	// Empty every container that holds RAII Vulkan resources BEFORE
+	// vkDestroyDevice runs. Some elements (notably VulkanUploadHeapBlock,
+	// kept alive by VulkanBufferAllocation::PoolBlock shared_ptrs) cache
+	// the device handle and call vkUnmapMemory/vkDestroyBuffer/vkFreeMemory
+	// in their destructor. If we cleared these containers after destroying
+	// the device, the cached handle would be dangling and the cleanup
+	// would access-violate.
+	VertexBufferAllocations.clear();
+	IndexBufferAllocations.clear();
+	BufferAllocations.clear();
+	TextureAllocations.clear();
+	SamplerAllocations.clear();
+	RayTracingPipelines.clear();
+	ComputePipelines.clear();
+	GraphicsPipelines.clear();
+	TestTrianglePipelines.clear();
+	AppendVulkanRuntimeTraceBackend(L"[VulkanBackend::DestroyWindowContext] after allocation container drop");
+
 	if (Swapchain != VK_NULL_HANDLE)
 		vkDestroySwapchainKHR(Device, Swapchain, nullptr);
 	if (CommandPool != VK_NULL_HANDLE)
@@ -5813,15 +5832,10 @@ void VulkanBackend::DestroyWindowContext()
 	LastCaptureError.clear();
 	bLastCaptureResultValid = false;
 	bLastCaptureSucceeded = false;
-	VertexBufferAllocations.clear();
-	IndexBufferAllocations.clear();
-	BufferAllocations.clear();
-	TextureAllocations.clear();
-	SamplerAllocations.clear();
-	RayTracingPipelines.clear();
-	ComputePipelines.clear();
-	GraphicsPipelines.clear();
-	TestTrianglePipelines.clear();
+	// VB/IB/Buffer/Texture/Sampler/Pipeline containers were already
+	// drained above (before vkDestroyDevice) to keep RAII destructors
+	// from touching a dead device. Only the no-RAII bookkeeping bits
+	// remain for reset here.
 	RayTracingAccelerationStructures.clear();
 	CurrentFrameIndex = 0;
 	ActiveFrameContextIndex = 0;
