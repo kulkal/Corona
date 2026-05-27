@@ -517,6 +517,22 @@ if(Vulkan_FOUND AND (CORONA_PLATFORM_WINDOWS OR CORONA_PLATFORM_ANDROID))
             get_filename_component(CORONA_VULKAN_SHADER_STEM "${CORONA_VULKAN_SHADER}" NAME_WE)
             file(READ "${CORONA_VULKAN_SHADER}" CORONA_VULKAN_SHADER_CONTENT)
 
+            # Follow #include "X.hlsli" one level so entry points that
+            # live in shared headers (e.g. GBufferCommon.hlsli) are still
+            # discovered by the regex matches below. DXC handles the
+            # include itself at compile time; this just lets CMake see
+            # the entry-point names for dispatch.
+            get_filename_component(CORONA_VULKAN_SHADER_DIR_HOST "${CORONA_VULKAN_SHADER}" DIRECTORY)
+            string(REGEX MATCHALL "#include[ \t]+\"[A-Za-z0-9_./-]+\\.hlsli\"" CORONA_VULKAN_INCLUDE_MATCHES "${CORONA_VULKAN_SHADER_CONTENT}")
+            foreach(CORONA_VULKAN_INCLUDE_MATCH IN LISTS CORONA_VULKAN_INCLUDE_MATCHES)
+                string(REGEX REPLACE "#include[ \t]+\"([A-Za-z0-9_./-]+\\.hlsli)\"" "\\1" CORONA_VULKAN_INCLUDE_NAME "${CORONA_VULKAN_INCLUDE_MATCH}")
+                set(CORONA_VULKAN_INCLUDE_PATH "${CORONA_VULKAN_SHADER_DIR_HOST}/${CORONA_VULKAN_INCLUDE_NAME}")
+                if(EXISTS "${CORONA_VULKAN_INCLUDE_PATH}")
+                    file(READ "${CORONA_VULKAN_INCLUDE_PATH}" CORONA_VULKAN_INCLUDE_CONTENT)
+                    string(APPEND CORONA_VULKAN_SHADER_CONTENT "\n${CORONA_VULKAN_INCLUDE_CONTENT}")
+                endif()
+            endforeach()
+
             if(CORONA_VULKAN_SHADER_CONTENT MATCHES [=[\[shader\("raygeneration"\)\]]=])
                 CORONA_ADD_VULKAN_RT_SHADER("${CORONA_VULKAN_SHADER}" "${CORONA_VULKAN_SHADER_STEM}")
             endif()
@@ -536,7 +552,12 @@ if(Vulkan_FOUND AND (CORONA_PLATFORM_WINDOWS OR CORONA_PLATFORM_ANDROID))
             if(CORONA_VULKAN_SHADER_CONTENT MATCHES "SkeletalVsInlineVSMain[ \t\r\n]*\\(")
                 CORONA_ADD_VULKAN_GRAPHICS_VERTEX_ENTRY("${CORONA_VULKAN_SHADER}" "${CORONA_VULKAN_SHADER_STEM}" "SkeletalVsInlineVSMain")
             endif()
-            if(CORONA_VULKAN_SHADER_CONTENT MATCHES "SkeletalVsInlineClusterVSMain[ \t\r\n]*\\(")
+            # Cluster VS is desktop-only — gated by GBUFFER_HAS_CLUSTER in
+            # GBufferCommon.hlsli. The body of the entry is visible to the
+            # regex scan via the .hlsli concat above, but it's only
+            # compilable when the parent file defines GBUFFER_HAS_CLUSTER
+            # before the include.
+            if(CORONA_VULKAN_SHADER_CONTENT MATCHES "SkeletalVsInlineClusterVSMain[ \t\r\n]*\\(" AND CORONA_VULKAN_SHADER_CONTENT MATCHES "#define[ \t]+GBUFFER_HAS_CLUSTER")
                 CORONA_ADD_VULKAN_GRAPHICS_VERTEX_ENTRY("${CORONA_VULKAN_SHADER}" "${CORONA_VULKAN_SHADER_STEM}" "SkeletalVsInlineClusterVSMain")
             endif()
 
