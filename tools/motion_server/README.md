@@ -1,47 +1,41 @@
 # motion_server
 
-Text-to-motion generation server for Corona engine.
+Modules used by `tools/motion_gen.py` to synthesize text-conditioned motion
+on the SMPL 24-joint skeleton.
 
-Provides an HTTP endpoint that takes a natural-language prompt and returns a
-motion file (BVH) on the SMPL 24-joint skeleton, ready to be loaded and
-retargeted in the engine.
+The name is "server" because the eventual MoMask backend will likely run as
+a long-running service (model load is too expensive per-call). For now the
+mock backend runs as a one-shot CLI matching the `tripo_gen.py` pattern.
 
-See `docs/design/llm_motion_generation_pipeline.md` for the full design.
+## Modules
 
-## Modes
+- `smpl_skeleton.py` — canonical SMPL 24-joint hierarchy + T-pose offsets,
+  shared by the BVH writer and any motion generator. Engine side mirrors
+  this table so joints can be addressed by index without remapping.
+- `bvh_writer.py` — minimal BVH writer (Y-up, channel order
+  `Zrotation Xrotation Yrotation`, root has 6 channels).
+- `mock_motion.py` — procedural synth keyed off keywords in the prompt
+  (`walk`, `wave`, `jump`, default `idle`).
 
-- `mock` — produces a synthetic procedural BVH (no model, no GPU). Used for
-  pipeline bring-up and CI.
-- `momask` — runs MoMask inference. Requires model checkpoints, SMPL body
-  model, and a CUDA GPU. (Not implemented yet.)
+## Calling from the engine
 
-## Quick start
-
-```
-pip install -r requirements.txt
-python server.py --mode mock --port 8000
-```
-
-## Endpoint
+The engine console invokes `tools/motion_gen.py` via subprocess and parses
+the last stdout line:
 
 ```
-POST /generate
-{
-  "text": "a person walks forward",
-  "duration": 3.0,
-  "seed": 42
-}
+RESULT_BVH=<absolute path>
 ```
 
-Response:
+See `docs/design/llm_motion_generation_pipeline.md` and
+`docs/design/llm_procedural_animation_progress.md` for the full pipeline.
 
-```
-{
-  "status": "ok",
-  "path": "C:/dev/Corona_aux/_motions/<hash>.bvh",
-  "duration": 3.0,
-  "fps": 20,
-  "joints": 24,
-  "format": "bvh"
-}
-```
+## Mock mode requirements
+
+Stdlib only — no external dependencies. Python 3.8+.
+
+## Future: MoMask mode
+
+Reserved (`--mode momask` in `motion_gen.py`). Needs:
+- MoMask checkpoints
+- SMPL body model (`smpl.is.tue.mpg.de`, license required)
+- CUDA-capable GPU
