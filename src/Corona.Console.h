@@ -1,11 +1,15 @@
 #pragma once
 
 // Quake-style in-engine console with natural-language → 3D asset dispatcher.
-// Bound to the backtick/tilde key. The first slash-command supported is
-// `generate <image_path>` which shells out to the TripoSR Python wrapper
-// (tools/tripo_gen.py) and, when the .obj is ready, loads it into the
-// scene in front of the active camera via Corona's existing LoadModel +
-// AddCenteredSceneObject path.
+// Bound to the backtick/tilde key. Commands:
+//   generate <image>   — shell out to tools/tripo_gen.py (TripoSR)
+//   genmotion "<text>" — shell out to tools/motion_gen.py (LLM motion)
+//   loadmodel <path>   — direct mesh import
+//   savemap/loadmap    — map serialization
+//
+// Subprocess outputs end with RESULT_OBJ=<path> or RESULT_BVH=<path>;
+// the console parses that line, then either loads the .obj into the scene
+// or feeds the BVH to the motion playback system.
 
 #include <chrono>
 #include <deque>
@@ -13,6 +17,8 @@
 #include <memory>
 #include <string>
 #include <vector>
+
+#include "Corona.MotionClip.h"
 
 class Corona;
 
@@ -40,15 +46,24 @@ public:
 	void Submit(const std::string& cmd);
 
 private:
+	enum class JobKind
+	{
+		TripoMesh,   // RESULT_OBJ=<path>, loaded as a mesh
+		LlmMotion,   // RESULT_BVH=<path>, loaded as a motion clip
+	};
+
 	struct PendingJob
 	{
 		std::future<std::string> Result;
 		std::string Prompt;
 		std::chrono::steady_clock::time_point Started;
+		JobKind     Kind = JobKind::TripoMesh;
 	};
 
 	void DispatchTripoSR(const std::string& imagePath);
+	void DispatchMotionGen(const std::string& promptText, float durationSec, int seed);
 	void LoadAndPlaceObj(const std::string& objPath, const std::string& prompt);
+	void LoadAndPlayMotion(const std::string& bvhPath, const std::string& prompt);
 	void Log(const std::string& line);
 
 	Corona* Host;
@@ -66,6 +81,11 @@ private:
 	std::deque<std::string> CommandHistory;
 	int                     HistoryCursor = -1;
 	std::string             DraftBuf;
+
+	// Most recently loaded motion clip. Replaced wholesale on each successful
+	// genmotion. The playback system (Step 6) will read from here.
+	CoronaMotion::MotionClip ActiveMotionClip;
+	bool                     bActiveMotionClipValid = false;
 
 	// Forward-typed via void* so the header doesn't pull in imgui.h.
 	int HandleInputCallback(void* dataPtr);

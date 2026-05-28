@@ -2,6 +2,7 @@
 #include "Corona.Console.h"
 
 #include "Corona.h"
+#include "Corona.MotionClip.h"
 #include "TerrainComponent.h"
 #include "imgui.h"
 #include "PlatformSystem.h"
@@ -22,6 +23,15 @@ namespace
 	const char* kTripoWrapperRel = "tools/tripo_gen.py";
 	const char* kTripoOutSubdir  = "assets/generated";
 	const char* kTripoHfCache    = R"(D:\llm\tripoSR\hf_cache)";
+
+	// LLM motion generation (tools/motion_gen.py). Mock mode is stdlib-only
+	// Python so we use the py launcher rather than a dedicated venv. When the
+	// momask backend lands it may want its own interpreter; keep this as a
+	// single configuration point.
+	const char* kMotionPython    = "py -3";
+	const char* kMotionWrapperRel = "tools/motion_gen.py";
+	const char* kMotionOutSubdir  = "_motions";
+	const char* kMotionMode       = "mock";
 
 	std::string Trim(const std::string& s)
 	{
@@ -48,8 +58,9 @@ namespace
 		return out;
 	}
 
-	// Locate the "RESULT_OBJ=<path>" line emitted by tools/tripo_gen.py.
-	std::string ExtractResultObj(const std::string& stdoutText)
+	// Locate the last "RESULT_<KEY>=<path>" line in captured stdout. Used by
+	// both the TripoSR (KEY=OBJ) and motion (KEY=BVH) dispatchers.
+	std::string ExtractResult(const std::string& stdoutText, const std::string& key)
 	{
 		std::istringstream iss(stdoutText);
 		std::string line;
@@ -58,11 +69,20 @@ namespace
 		{
 			while (!line.empty() && (line.back() == '\r' || line.back() == '\n'))
 				line.pop_back();
-			const std::string kKey = "RESULT_OBJ=";
-			if (line.rfind(kKey, 0) == 0)
-				lastResult = line.substr(kKey.size());
+			if (line.rfind(key, 0) == 0)
+				lastResult = line.substr(key.size());
 		}
 		return lastResult;
+	}
+
+	std::string ExtractResultObj(const std::string& stdoutText)
+	{
+		return ExtractResult(stdoutText, "RESULT_OBJ=");
+	}
+
+	std::string ExtractResultBvh(const std::string& stdoutText)
+	{
+		return ExtractResult(stdoutText, "RESULT_BVH=");
 	}
 }
 
@@ -82,6 +102,7 @@ namespace
 	// first-token completion. Extend here when adding new commands in Submit().
 	const char* const kKnownCommands[] = {
 		"generate",
+		"genmotion",
 		"loadmodel",
 		"savemap",
 		"loadmap",
@@ -390,6 +411,68 @@ void CoronaConsole::Submit(const std::string& cmd)
 		}
 	}
 
+	// genmotion <natural-language prompt> [duration_sec] [seed]
+	// Dispatches tools/motion_gen.py to synth a BVH on the SMPL 24-joint
+	// skeleton. Defaults: duration 3.0s, seed 0.
+	{
+		std::string arg = consumePrefix(std::string("genmotion"));
+		if (!arg.empty())
+		{
+			if (arg == "__bare__")
+			{
+				Log("usage: genmotion <text> [duration_sec] [seed]");
+				return;
+			}
+			// Optional trailing numeric tokens become duration / seed. Walk
+			// tokens from the right so we don't accidentally eat words out of
+			// the prompt; only convert when the rightmost token parses as a
+			// pure number.
+			float duration = 3.0f;
+			int   seed     = 0;
+			std::string promptText = arg;
+
+			auto stripTrailingNumber = [](std::string& s, float& outNum) -> bool
+			{
+				size_t end = s.find_last_not_of(" \t");
+				if (end == std::string::npos) return false;
+				size_t start = s.find_last_of(" \t", end);
+				start = (start == std::string::npos) ? 0 : start + 1;
+				const std::string tail = s.substr(start, end - start + 1);
+				try { size_t consumed; outNum = std::stof(tail, &consumed);
+					  if (consumed != tail.size()) return false; }
+				catch (...) { return false; }
+				s = (start == 0) ? std::string() : Trim(s.substr(0, start));
+				return true;
+			};
+
+			// Try seed first (rightmost), then duration.
+			float numBuf = 0.0f;
+			if (stripTrailingNumber(promptText, numBuf))
+			{
+				seed = static_cast<int>(numBuf);
+				if (stripTrailingNumber(promptText, numBuf))
+					duration = numBuf;
+				else
+				{
+					// Single trailing number — treat it as duration, not seed.
+					duration = numBuf;
+					seed = 0;
+				}
+			}
+
+			// Strip surrounding quotes if user typed them.
+			if (promptText.size() >= 2 && promptText.front() == '"' && promptText.back() == '"')
+				promptText = promptText.substr(1, promptText.size() - 2);
+			if (promptText.empty())
+			{
+				Log("usage: genmotion <text> [duration_sec] [seed]");
+				return;
+			}
+			DispatchMotionGen(promptText, duration, seed);
+			return;
+		}
+	}
+
 	std::string imagePath;
 	const std::string genPrefix = "generate ";
 	if (trimmed.rfind(genPrefix, 0) == 0)
@@ -399,7 +482,7 @@ void CoronaConsole::Submit(const std::string& cmd)
 
 	if (imagePath.empty())
 	{
-		Log("unknown command. usage: generate <image_path> | loadmodel <model_path> | savemap [name] | loadmap <name>");
+		Log("unknown command. usage: generate <image_path> | genmotion <text> [duration] [seed] | loadmodel <model_path> | savemap [name] | loadmap <name>");
 		return;
 	}
 
@@ -446,6 +529,7 @@ void CoronaConsole::DispatchTripoSR(const std::string& imagePath)
 	auto job = std::make_unique<PendingJob>();
 	job->Prompt = imagePath;
 	job->Started = std::chrono::steady_clock::now();
+	job->Kind = JobKind::TripoMesh;
 	job->Result = std::async(std::launch::async, [cmdStr]() -> std::string
 	{
 		const std::string output = RunPythonCaptureStdout(cmdStr);
@@ -456,6 +540,64 @@ void CoronaConsole::DispatchTripoSR(const std::string& imagePath)
 		if (objPath.empty())
 			return std::string("ERROR_OUTPUT\n") + output;
 		return objPath;
+	});
+	Pending.push_back(std::move(job));
+}
+
+void CoronaConsole::DispatchMotionGen(const std::string& promptText, float durationSec, int seed)
+{
+	const std::filesystem::path repoRoot = RuntimePaths::RootDirectory();
+	const std::filesystem::path wrapper  = repoRoot / kMotionWrapperRel;
+	const std::filesystem::path outDir   = repoRoot / kMotionOutSubdir;
+
+	if (!std::filesystem::exists(wrapper))
+	{
+		Log("wrapper not found: " + wrapper.string());
+		return;
+	}
+	std::error_code ec;
+	std::filesystem::create_directories(outDir, ec);
+
+	// Escape embedded double-quotes in the prompt so the cmd line stays
+	// well-formed. Backslash-escape for cmd.exe.
+	std::string safePrompt = promptText;
+	for (size_t i = 0; i < safePrompt.size(); ++i)
+	{
+		if (safePrompt[i] == '"')
+		{
+			safePrompt.insert(i, "\\");
+			++i;
+		}
+	}
+
+	// `py -3` is the Python launcher with an arg, not a quoted single path,
+	// so we don't use the doubled-quote trick that DispatchTripoSR needs for
+	// its venv interpreter path. _popen runs through cmd.exe which parses
+	// this fine as long as each path-with-spaces is individually quoted.
+	std::ostringstream cmd;
+	cmd << kMotionPython << " "
+	    << "\"" << wrapper.string() << "\" "
+	    << "--text \"" << safePrompt << "\" "
+	    << "--output-dir \"" << outDir.string() << "\" "
+	    << "--duration " << durationSec << " "
+	    << "--seed " << seed << " "
+	    << "--mode " << kMotionMode << " 2>&1";
+	const std::string cmdStr = cmd.str();
+
+	Log("dispatching motion_gen (mode=" + std::string(kMotionMode)
+		+ ", duration=" + std::to_string(durationSec) + "s, seed=" + std::to_string(seed) + ") ...");
+
+	auto job = std::make_unique<PendingJob>();
+	job->Prompt = promptText;
+	job->Started = std::chrono::steady_clock::now();
+	job->Kind = JobKind::LlmMotion;
+	job->Result = std::async(std::launch::async, [cmdStr]() -> std::string
+	{
+		const std::string output = RunPythonCaptureStdout(cmdStr);
+		const std::string bvhPath = ExtractResultBvh(output);
+		if (bvhPath.empty())
+			return std::string("ERROR_OUTPUT\n") + output;
+		return bvhPath;
 	});
 	Pending.push_back(std::move(job));
 }
@@ -493,10 +635,40 @@ void CoronaConsole::Update()
 		else
 		{
 			Log("OK   (" + std::to_string(elapsed) + "ms) " + result);
-			LoadAndPlaceObj(result, job.Prompt);
+			switch (job.Kind)
+			{
+			case JobKind::TripoMesh:
+				LoadAndPlaceObj(result, job.Prompt);
+				break;
+			case JobKind::LlmMotion:
+				LoadAndPlayMotion(result, job.Prompt);
+				break;
+			}
 		}
 		it = Pending.erase(it);
 	}
+}
+
+void CoronaConsole::LoadAndPlayMotion(const std::string& bvhPath, const std::string& prompt)
+{
+	CoronaMotion::MotionClip clip;
+	std::string err;
+	if (!CoronaMotion::LoadBVH(bvhPath, clip, err))
+	{
+		Log("BVH load FAILED: " + err);
+		return;
+	}
+	{
+		std::ostringstream os;
+		os << "loaded clip '" << prompt << "': "
+			<< clip.FrameCount << " frames @ " << clip.Fps << " fps ("
+			<< (clip.FrameCount * clip.FrameTime) << "s)";
+		Log(os.str());
+	}
+	// Park the clip on the console for now. The motion playback system
+	// (Step 6) reads from here and drives a procedural SMPL character.
+	ActiveMotionClip = std::move(clip);
+	bActiveMotionClipValid = true;
 }
 
 void CoronaConsole::LoadAndPlaceObj(const std::string& objPath, const std::string& /*prompt*/)
