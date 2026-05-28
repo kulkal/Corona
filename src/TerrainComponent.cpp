@@ -1,13 +1,17 @@
 #include "TerrainComponent.h"
 
+#include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <sstream>
 #include <string>
 
 #include "glm/glm.hpp"
 
+#include "CoronaImageIO.h"
 #include "RenderBackend.h"
 #include "RenderResources.h"
+#include "TerrainGenerator.h"
 #include "Utils.h"
 
 void AppendCpuRuntimeTrace(const std::wstring& line);
@@ -21,6 +25,144 @@ namespace
 		std::wostringstream w;
 		w << static_cast<int>(lo) << L"_" << static_cast<int>(hi);
 		return w.str();
+	}
+
+	// sRGB encode (linear → sRGB). The GBuffer pipeline loads diffuse PNGs as
+	// sRGB (nonSRGB=false) and the GPU sample auto-decodes to linear, so we
+	// pre-encode here to preserve the linear values we picked.
+	inline uint8_t LinearToSrgb8(float linear)
+	{
+		linear = std::clamp(linear, 0.0f, 1.0f);
+		const float srgb = (linear <= 0.0031308f)
+			? (linear * 12.92f)
+			: (1.055f * std::pow(linear, 1.0f / 2.4f) - 0.055f);
+		return static_cast<uint8_t>(srgb * 255.0f + 0.5f);
+	}
+
+	// Procedural grass+dirt albedo for the terrain. Low-freq Simplex picks a
+	// blend weight (0 = grass, 1 = dirt) and a second high-freq Simplex layer
+	// adds per-texel variation within each material. Output is a tileable
+	// RGBA8 image; UV tiling is handled at the mesh side (uvTileSize=16 m).
+	void GenerateTerrainAlbedoPixels(int width, int height, uint32_t seed,
+		std::vector<uint8_t>& outRgba)
+	{
+		outRgba.resize(static_cast<size_t>(width) * height * 4u);
+
+		// Materials: grass (mossy green) and dirt (warm brown). Similar
+		// luminance to the grass-blade material so the terrain doesn't
+		// dominate auto-exposure relative to the wind-swayed grass field.
+		const glm::vec3 grass(0.12f, 0.28f, 0.08f);
+		const glm::vec3 dirt (0.36f, 0.24f, 0.12f);
+
+		const uint32_t blendSeed  = seed ^ 0xA1B2C3D4u;
+		const uint32_t detailSeed = seed ^ 0x5E5E5E5Eu;
+
+		// 2 cycles across the texture → ~8 m patch wavelength on the ground
+		// (UV tiles every 16 m). Detail noise breaks up the patch boundaries.
+		const float blendFreq  = 2.0f / static_cast<float>(width);
+		const float detailFreq = 24.0f / static_cast<float>(width);
+
+		// Noise periods (in noise-space units) so the texture seams seamlessly
+		// when the GPU sampler wraps the UV. Equal to (width * freq) — one
+		// full noise cycle covers the texture, so sampling at (x - W) gives
+		// the same value at the opposite edge.
+		const float blendPeriod  = blendFreq  * static_cast<float>(width);  // = 2.0
+		const float detailPeriod = detailFreq * static_cast<float>(width);  // = 24.0
+
+		// Tileable Simplex via 4-corner blend: sample at (x,y), (x-W,y),
+		// (x,y-H), (x-W,y-H) and lerp by (x/W, y/H). At any edge, the
+		// contribution shifts to the wrapped-coord sample, which matches
+		// the value at the opposite edge — eliminates the UV-wrap seam
+		// that produces the cross-hatch on the rendered terrain.
+		auto tileableSimplex = [](float fx, float fy, float W, float H, uint32_t s)
+		{
+			const float n00 = Simplex2D(fx,     fy,     s);
+			const float n10 = Simplex2D(fx - W, fy,     s);
+			const float n01 = Simplex2D(fx,     fy - H, s);
+			const float n11 = Simplex2D(fx - W, fy - H, s);
+			const float tx = fx / W;
+			const float ty = fy / H;
+			const float a = n00 * (1.0f - tx) + n10 * tx;
+			const float b = n01 * (1.0f - tx) + n11 * tx;
+			return a * (1.0f - ty) + b * ty;
+		};
+
+		for (int y = 0; y < height; ++y)
+		{
+			for (int x = 0; x < width; ++x)
+			{
+				const float fx = static_cast<float>(x);
+				const float fy = static_cast<float>(y);
+
+				// Three-octave tileable FBM for the blend mask. Each octave
+				// must use a period that's an integer multiple of the texture
+				// width — at octave k (period multiplier mk), use period
+				// blendPeriod * mk so wrap stays seamless.
+				const float n0 = tileableSimplex(fx * blendFreq,        fy * blendFreq,        blendPeriod,        blendPeriod,        blendSeed);
+				const float n1 = tileableSimplex(fx * blendFreq * 2.0f, fy * blendFreq * 2.0f, blendPeriod * 2.0f, blendPeriod * 2.0f, blendSeed ^ 0x55555555u);
+				const float n2 = tileableSimplex(fx * blendFreq * 4.0f, fy * blendFreq * 4.0f, blendPeriod * 4.0f, blendPeriod * 4.0f, blendSeed ^ 0xAAAAAAAAu);
+				const float blendNoise = 0.55f * n0 + 0.30f * n1 + 0.15f * n2;
+				// Smoothstep (cubic Hermite) instead of linear+clamp — gives
+				// a soft ease in/out around the threshold so patches blur
+				// into each other rather than crossing a hard line.
+				const float blendRaw = std::clamp(blendNoise * 0.65f + 0.5f, 0.0f, 1.0f);
+				const float t = std::clamp((blendRaw - 0.30f) / 0.40f, 0.0f, 1.0f);
+				const float blendWeight = t * t * (3.0f - 2.0f * t);
+
+				const float dn = tileableSimplex(fx * detailFreq, fy * detailFreq, detailPeriod, detailPeriod, detailSeed);
+				const float detail = dn * 0.5f + 0.5f;     // 0..1
+				const float jitter = (detail - 0.5f) * 0.18f; // ±0.09 RGB variation
+
+				glm::vec3 color = glm::mix(grass, dirt, blendWeight);
+				color += glm::vec3(jitter * 0.7f, jitter, jitter * 0.6f);
+				color = glm::clamp(color, glm::vec3(0.0f), glm::vec3(1.0f));
+
+				const size_t i = (static_cast<size_t>(y) * width + x) * 4u;
+				outRgba[i + 0] = LinearToSrgb8(color.r);
+				outRgba[i + 1] = LinearToSrgb8(color.g);
+				outRgba[i + 2] = LinearToSrgb8(color.b);
+				outRgba[i + 3] = 255u;
+			}
+		}
+	}
+
+	std::shared_ptr<Texture> CreateOrLoadTerrainAlbedoTexture(
+		IRenderBackend* backend, uint32_t seed)
+	{
+		if (!backend)
+			return nullptr;
+
+		const int kTexSize = 512;
+		std::filesystem::path dir =
+			RuntimePaths::RootDirectory() / L"bin" / L"terrain_cache";
+		std::error_code ec;
+		std::filesystem::create_directories(dir, ec);
+		std::filesystem::path texPath =
+			dir / (L"terrain_albedo_" + std::to_wstring(seed) +
+				   L"_" + std::to_wstring(kTexSize) + L".png");
+
+		if (!std::filesystem::exists(texPath))
+		{
+			std::vector<uint8_t> pixels;
+			GenerateTerrainAlbedoPixels(kTexSize, kTexSize, seed, pixels);
+
+			CapturedImage img;
+			img.Format = ETextureFormat::RGBA8Unorm;
+			img.Width = kTexSize;
+			img.Height = kTexSize;
+			img.RowPitch = kTexSize * 4u;
+			img.Pixels = std::move(pixels);
+
+			std::wstring err;
+			if (!CoronaImageIO::SavePNG(img, texPath.wstring(), &err))
+			{
+				AppendCpuRuntimeTrace(L"[Terrain] albedo PNG save failed: " + err);
+				return nullptr;
+			}
+			AppendCpuRuntimeTrace(L"[Terrain] albedo PNG generated " + texPath.wstring());
+		}
+
+		return backend->CreateTextureFromFile(texPath.wstring(), /*nonSRGB=*/false);
 	}
 }
 
@@ -61,7 +203,12 @@ bool Component::LoadOrGenerate(const GenerateParams& params, const std::filesyst
 	const auto t1 = clock::now();
 	const auto genMs = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
 
-	const uint32_t chunkVerts = 65u; // ChunkSize quads = 64 → 65 verts per side; matches 44B Vertex grid
+	// 257 verts per side = 256 quads per chunk → at 1 m vertex spacing a
+	// chunk covers 256 m × 256 m of world. For a 2km × 2km terrain that
+	// gives 8 × 8 = 64 chunks total — large enough that the CPU cull cost
+	// is trivial but small enough that frustum culling still rejects a
+	// meaningful fraction once the camera flies inside the world.
+	const uint32_t chunkVerts = 257u;
 	Data = PackHeights(heights, params.Width, params.Depth, chunkVerts, params.WorldScaleXZ,
 		params.HeightMin, params.HeightMax, params.Seed);
 
@@ -131,9 +278,17 @@ float Component::SampleHeight(float worldX, float worldZ) const
 	const float h10 = sampleAt(x1, z0);
 	const float h01 = sampleAt(x0, z1);
 	const float h11 = sampleAt(x1, z1);
-	const float h0 = h00 + (h10 - h00) * fx;
-	const float h1 = h01 + (h11 - h01) * fx;
-	return h0 + (h1 - h0) * fz;
+
+	// Match TerrainMeshBuilder's triangulation: diagonal from i01 to i10.
+	// Lower-left tri (fx + fz <= 1) uses (h00, h01, h10); upper-right tri
+	// uses (h10, h01, h11). Bilinear ≠ triangular interp on sloped quads —
+	// using triangular here keeps grass roots glued to the rendered surface
+	// instead of sliding above/below it on hillsides.
+	if (fx + fz <= 1.0f)
+	{
+		return (1.0f - fx - fz) * h00 + fz * h01 + fx * h10;
+	}
+	return (1.0f - fz) * h10 + (1.0f - fx) * h01 + (fx + fz - 1.0f) * h11;
 }
 
 uint32_t Component::UpdateCulling(const glm::mat4& viewProj)
@@ -143,6 +298,10 @@ uint32_t Component::UpdateCulling(const glm::mat4& viewProj)
 
 	MeshPtr->Draws.clear();
 	MeshPtr->Draws.reserve(ChunkInfos.size());
+
+	static uint32_t s_frameCounter = 0;
+	static uint32_t s_lastVisible = 0xFFFFFFFFu;
+	++s_frameCounter;
 
 	uint32_t visible = 0;
 	for (const ChunkMeshInfo& ci : ChunkInfos)
@@ -175,6 +334,21 @@ uint32_t Component::UpdateCulling(const glm::mat4& viewProj)
 		dc.VertexCount = ci.VertexCount;
 		MeshPtr->Draws.push_back(dc);
 		++visible;
+	}
+
+	LastVisibleChunkCount = visible;
+
+	// Log when visible-chunk count changes (rate-limited to once per ~30
+	// frames per change) so the trace shows that per-chunk frustum culling
+	// is actually active — the engine-side GBufferCulling counter only
+	// sees the terrain Mesh as a single entity.
+	const bool bChanged = (visible != s_lastVisible);
+	if (bChanged && (s_frameCounter % 30u) == 0u)
+	{
+		AppendCpuRuntimeTrace(
+			L"[Terrain] chunk cull visible=" + std::to_wstring(visible) +
+			L"/" + std::to_wstring(ChunkInfos.size()));
+		s_lastVisible = visible;
 	}
 	return visible;
 }
@@ -211,9 +385,26 @@ bool Component::Initialize(
 		return false;
 	}
 
-	// Gray Phase-1 material. Uses engine defaults so no asset loading needed.
+	// Procedural grass+dirt albedo (cached PNG keyed by seed). BaseColorFactor
+	// stays white so the shader uses the texture unmodulated; pass 2 of
+	// terrain texturing (normal/roughness maps) can layer on top.
 	MaterialPtr = std::make_shared<Material>();
-	MaterialPtr->BaseColorFactor = glm::vec4(0.55f, 0.55f, 0.55f, 1.0f);
+	MaterialPtr->BaseColorFactor = glm::vec4(1.0f);
+	MaterialPtr->Diffuse = CreateOrLoadTerrainAlbedoTexture(backend, Params.Seed);
+	if (!MaterialPtr->Diffuse)
+	{
+		AppendCpuRuntimeTrace(L"[Terrain] albedo texture load failed; falling back to flat gray");
+		MaterialPtr->BaseColorFactor = glm::vec4(0.55f, 0.55f, 0.55f, 1.0f);
+	}
+	else
+	{
+		std::wostringstream w;
+		w << L"[Terrain] albedo texture bound: ptr=" << MaterialPtr->Diffuse.get()
+		  << L" w=" << MaterialPtr->Diffuse->Width
+		  << L" h=" << MaterialPtr->Diffuse->Height
+		  << L" mips=" << MaterialPtr->Diffuse->MipLevels;
+		AppendCpuRuntimeTrace(w.str());
+	}
 
 	auto mesh = std::make_shared<Mesh>(backend);
 	mesh->transform = glm::mat4x4(1.0f);
@@ -224,6 +415,7 @@ bool Component::Initialize(
 	mesh->Mat = MaterialPtr;
 	mesh->Vb = vb;
 	mesh->Ib = ib;
+	mesh->bTerrainMesh = true;
 
 	// CPU-side mirror intentionally left empty — Phase 1 terrain doesn't
 	// participate in physics or RT. Filling 1M positions also caused a

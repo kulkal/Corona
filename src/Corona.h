@@ -83,6 +83,10 @@ enum class ERawFloatDumpFormat
 
 class Corona
 {
+	friend class CoronaConsole; // accesses LoadModel + AddCenteredSceneObject + camera state
+	friend class CoronaSceneInspector; // accesses EntityWorld + render-frame state for the entity list panel
+	friend class CoronaAssetExplorer; // accesses LoadModel / AddCenteredSceneObject for asset right-click spawn
+	friend class CoronaToolbox; // accesses CreateProceduralBoxSceneForScript + AddMeshComponentForScript
 public:
 	enum class ERenderingMode
 	{
@@ -124,6 +128,8 @@ private:
 		Frame = 0,
 		SkeletalSkinning,
 		GBuffer,
+		Terrain,
+		Grass,
 		RaytraceShadow,
 		RaytraceAO,
 		RaytraceSkyLighting,
@@ -291,13 +297,24 @@ private:
 		glm::vec4 GrassBendParams = glm::vec4(0.0f);
 		// Per-mesh flag — set to 1 when drawing the grass mesh.
 		UINT32 bGrassMesh = 0;
-		UINT32 _GBufferCBPad[3] = { 0, 0, 0 };
+		// Per-mesh flag — set to 1 when drawing the terrain mesh. Gates
+		// ApplyTerrainDeform inside ApplyVertexDeformations.
+		UINT32 bTerrainMesh = 0;
+		// Per-mesh opt-out for the global deform sphere (BuildPSInput).
+		// Set to 1 on meshes you don't want to be carved by the shockwave
+		// — e.g. the player avatar that sits at the sphere center.
+		UINT32 bExcludeFromDeformSphere = 0;
+		UINT32 _GBufferCBPad = 0;
 		// WindParams: .xyz = wind direction normalized in XZ (Y typically 0),
 		// .w = strength (0 disables wind sway).
 		glm::vec4 WindParams = glm::vec4(0.0f);
 		// WindTuning: .x = temporal frequency (rad/s), .y = spatial frequency
 		// (rad/world-unit), .zw reserved.
 		glm::vec4 WindTuning = glm::vec4(0.0f);
+		// TerrainDeformSphere: .xyz = world-space sphere center, .w = radius
+		// (0 disables). Lower-hemisphere of the sphere is subtracted from the
+		// terrain mesh in VS — purely visual, no physics/collision sync.
+		glm::vec4 TerrainDeformSphere = glm::vec4(0.0f);
 	};
 
 	std::shared_ptr<GraphicsPipelineHandle> GBufferGraphicsPipeline;
@@ -1187,6 +1204,7 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	// AABBs the per-frame culling pass consumes; Mesh + Scene are inside.
 	std::unique_ptr<Terrain::Component> ActiveTerrain;
 
+
 	// blue noise texture
 	shared_ptr<Texture> BlueNoiseTex;
 	shared_ptr<Texture> DefaultWhiteTex;
@@ -1252,12 +1270,33 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	bool bRayTracingSceneDirty = false;
 	bool bRayTracingTransformDirty = false;
 
+	// Recipe = how the Scene was created, so SaveMap can serialize the
+	// procedural params (seed/blade_count/...) or the asset path without
+	// duplicating that data per-entity.
+	struct SceneRecipe
+	{
+		enum class Kind : uint8_t
+		{
+			Asset,           // loaded from disk (OBJ/FBX/glTF) — AssetPath
+			Terrain,         // procedural terrain — Seed
+			GrassOnTerrain,  // procedural grass on terrain — BladeCount, BladeHeight, Seed
+			Grass,           // flat procedural grass field — BladeCount, AreaSize, BladeHeight, Seed
+			BlockCharacter,  // procedural block character — Seed
+		};
+		Kind RecipeKind = Kind::Asset;
+		std::wstring AssetPath;
+		uint32_t Seed = 0;
+		uint32_t BladeCount = 0;
+		float BladeHeight = 0.0f;
+		float AreaSize = 0.0f;
+	};
 	struct ScriptSceneEntry
 	{
 		shared_ptr<Scene> ScenePtr;
 		std::wstring Path;
 		EPhysicsCollisionShape PhysicsCollisionShape = EPhysicsCollisionShape::TriangleMesh;
 		glm::vec3 PhysicsBoxHalfExtent = glm::vec3(0.5f);
+		SceneRecipe Recipe;
 	};
 	struct ScriptObjectState
 	{
@@ -1717,6 +1756,15 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	// with grass bend.
 	glm::vec4 RenderFrameWindParams = glm::vec4(0.0f);          // xyz = dir (XZ-normalized), w = strength (0 disables)
 	glm::vec4 RenderFrameWindTuning = glm::vec4(2.0f, 0.015f, 0.0f, 0.0f); // x = temporal freq, y = spatial freq
+	// Terrain deformation sphere — visual-only sphere subtract applied to
+	// the terrain mesh in VS. .xyz = world center, .w = radius (0 disables).
+	glm::vec4 RenderFrameTerrainDeformSphere = glm::vec4(0.0f);
+	// World-space position of the active camera (script-driven or default
+	// free-fly) for the frame being built. Console / scripts that need to
+	// place objects in front of the camera read this instead of poking at
+	// m_camera.m_position directly (which is stale when a Luau script is
+	// driving the camera via CameraComponent.set).
+	glm::vec3 RenderFrameCameraPosition = glm::vec3(0.0f);
 	float RenderFrameDiffuseGISkyIntensity = 3.0f;
 	UINT32 RenderFrameRayNoiseMode = 0;
 	UINT32 RenderFrameDiffuseGISkyLightingEnabled = 0;
@@ -1967,6 +2015,7 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	// from the currently-active TerrainComponent so the blades sit on the
 	// terrain surface. Falls back to flat (y=0) when no terrain is active.
 	shared_ptr<Scene> CreateProceduralGrassOnTerrainScene(UINT32 numBlades, float bladeHeight, UINT32 seed);
+	void UpdateGrassCulling(const glm::mat4& viewProj);
 	shared_ptr<Scene> CreateProceduralTerrainScene(UINT32 seed);
 	bool ShouldIncludeSceneObjectInRayTracingAS(const SceneObject& object) const;
 	void MarkRayTracingSceneDirty();
@@ -2027,6 +2076,39 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	
 public:
 
+	// Accessor for the active terrain (Phase 1, single-instance). Returns
+	// nullptr when no terrain has been spawned yet.
+	Terrain::Component* GetActiveTerrain() const { return ActiveTerrain.get(); }
+
+	// Grass chunk DrawCall + AABB record. Public so the Lua callbacks +
+	// the BuildGrassBlades helper (anonymous namespace) can reference it.
+	struct GrassChunkInfo
+	{
+		uint32_t IndexStart = 0;
+		uint32_t IndexCount = 0;
+		uint32_t VertexBase = 0;
+		uint32_t VertexCount = 0;
+		float    CenterX = 0.0f;
+		float    CenterZ = 0.0f;
+		float    AabbMin[3] = {0,0,0};
+		float    AabbMax[3] = {0,0,0};
+	};
+	// Origin (typically player or camera world position) used by the
+	// distance check inside UpdateGrassCulling.
+	glm::vec3 GrassRenderOrigin = glm::vec3(0.0f);
+	// Distance in world units from GrassRenderOrigin within which a grass
+	// chunk is allowed to render. 0 = unlimited (frustum-only cull).
+	float GrassRenderDistance = 300.0f;
+	// Per-bin DrawCall + AABB list for the active grass field. Populated
+	// once at spawn, consumed by UpdateGrassCulling each frame.
+	std::shared_ptr<Mesh>       ActiveGrassMesh;
+	std::shared_ptr<Material>   ActiveGrassMaterial;
+	std::vector<GrassChunkInfo> ActiveGrassChunks;
+	// Weak ref to the Scene that owns ActiveGrassMesh. Used by the GBuffer
+	// draw loop to wrap the grass draw in its own GPU timing pass.
+	std::weak_ptr<Scene>        ActiveGrassScene;
+	uint32_t LastVisibleGrassChunkCount = 0;
+
 	void InitRaytracingData();
 	CoronaECS::Entity CreateEntity(const std::string& name = std::string());
 	CoronaECS::Entity GetSceneObjectEntity(SceneObjectHandle handle) const;
@@ -2066,6 +2148,11 @@ public:
 		RenderFrameWindParams = glm::vec4(dirX, 0.0f, dirZ, strength);
 		if (tempFreq  > 0.0f) RenderFrameWindTuning.x = tempFreq;
 		if (spaceFreq > 0.0f) RenderFrameWindTuning.y = spaceFreq;
+	}
+	// Visual-only terrain sphere subtract. radius=0 disables.
+	void SetTerrainDeformSphereForScript(float x, float y, float z, float radius)
+	{
+		RenderFrameTerrainDeformSphere = glm::vec4(x, y, z, radius);
 	}
 	ScriptSceneHandle CreateSpineSceneForScript(const std::wstring& assetPath, const std::string& animationName, float timeSeconds, float sourceScale = 1.0f);
 	// Live Spine: persistent skeleton + animation state owned per call.
@@ -2166,6 +2253,7 @@ public:
 		float targetExtent,
 		const glm::vec3& scale,
 		bool bUseScale);
+	bool SetEntityExcludeFromDeformSphereForScript(CoronaECS::Entity entity, bool bExclude);
 	bool SetEntityMeshComponentForScript(
 		CoronaECS::Entity entity,
 		const glm::vec3& position,
@@ -2436,6 +2524,33 @@ public:
 
 	shared_ptr<Scene> LoadModel(string fileName);
 	shared_ptr<Scene> CreateProceduralBlockCharacterScene(UINT32 seed);
+
+	// Console (~ key) accessors so CoronaConsole can spawn assets in front
+	// of the camera the renderer is actually using. RenderFrameCameraPosition
+	// reflects whichever camera (script-driven or default) drove the most
+	// recent frame — m_camera.m_position is stale when a Luau script uses
+	// CameraComponent.set since that path doesn't write back into m_camera.
+	glm::vec3 GetCameraPositionForConsole() const { return RenderFrameCameraPosition; }
+	glm::vec3 GetCameraLookDirForConsole() const { return RenderFrameCameraLookDirection; }
+	Terrain::Component* GetActiveTerrainForConsole() const { return ActiveTerrain.get(); }
+
+	// Map serialization (Corona.MapFormat.cpp). Writes / reads a Luau-syntax
+	// snapshot of the script-spawned entity graph (mesh recipes, transforms,
+	// material overrides, lights, cameras) plus global state (wind / grass
+	// deform / terrain deform sphere). Used by the console `savemap` /
+	// `loadmap` commands and by mode scripts that want to skip the explicit
+	// spawn block when a cached map is already on disk.
+	bool SaveMapToFile(const std::wstring& name, std::wstring* outError = nullptr);
+	bool LoadMapFromFile(const std::wstring& name, std::wstring* outError = nullptr);
+	void ClearScriptSpawnedScene();
+	std::filesystem::path ResolveMapPath(const std::wstring& name) const;
+	// Last successful save_map / load_map name. Empty if no map has been
+	// touched this session. `savemap` (no args) overwrites this; the console
+	// reports "no current map" if nothing is loaded yet.
+	const std::wstring& GetCurrentMapName() const { return CurrentMapName; }
+private:
+	std::wstring CurrentMapName;
+public:
 	shared_ptr<Scene> LoadBinaryMeshModel(const std::wstring& binaryFileName, const std::wstring& sourceFileName);
 
 	void InitRTPSO();
@@ -2700,6 +2815,21 @@ public:
 	Corona(UINT width, UINT height, std::wstring name);
 
 	~Corona();
+
+	// Quake-style ~/` toggled console with TripoSR dispatcher (Phase 1
+	// natural-language asset generation pipeline). Lazy-initialized inside
+	// the ImGui pass so headless/mobile builds without ImGui don't pay
+	// for it.
+	std::unique_ptr<class CoronaConsole> Console;
+	// Left-anchored scene inspector — entity list + per-entity component
+	// editor. Toggled via a floating "Show Scene" button at the bottom-left.
+	std::unique_ptr<class CoronaSceneInspector> SceneInspector;
+	// Bin/assets file browser — right-click to spawn models, load maps,
+	// delete files. Toggled via a button next to the scene inspector toggle.
+	std::unique_ptr<class CoronaAssetExplorer> AssetExplorer;
+	// Spawn toolbox — directional/point lights, primitive shapes. Toggled
+	// via the third bottom button.
+	std::unique_ptr<class CoronaToolbox> Toolbox;
 
 private:
 	std::wstring GetAssetFullPath(LPCWSTR assetName) const;

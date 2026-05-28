@@ -11,6 +11,7 @@
 
 #include "stdafx.h"
 #include "Corona.h"
+#include "TerrainComponent.h"
 #include "VulkanBackend.h"
 
 #include <algorithm>
@@ -1663,8 +1664,11 @@ void Corona::DrawScene(shared_ptr<Scene> scene, const glm::mat4x4& instanceTrans
 			objCB.GrassBendOrigin = RenderFrameGrassBendOrigin;
 			objCB.GrassBendParams = RenderFrameGrassBendParams;
 			objCB.bGrassMesh = mesh->bGrassMesh ? 1u : 0u;
+			objCB.bTerrainMesh = mesh->bTerrainMesh ? 1u : 0u;
+			objCB.bExcludeFromDeformSphere = mesh->bExcludeFromDeformSphere ? 1u : 0u;
 			objCB.WindParams = RenderFrameWindParams;
 			objCB.WindTuning = RenderFrameWindTuning;
+			objCB.TerrainDeformSphere = RenderFrameTerrainDeformSphere;
 
 			renderBackend->SetGraphicsPipelineConstantData(activeGBufferPipeline, 0, &objCB, sizeof(objCB));
 
@@ -2515,12 +2519,25 @@ void Corona::GBufferPass()
 				}
 
 				const uint32_t occlusionQueryIndex = BeginGBufferOcclusionQuery(object.Handle);
+				const std::shared_ptr<Scene> activeGrassScene = ActiveGrassScene.lock();
+				const bool bTerrainScene =
+					ActiveTerrain && object.ScenePtr == ActiveTerrain->GetScene();
+				const bool bGrassScene =
+					activeGrassScene && object.ScenePtr == activeGrassScene;
+				if (bTerrainScene)
+					BeginGpuPassTiming(EGpuPass::Terrain);
+				else if (bGrassScene)
+					BeginGpuPassTiming(EGpuPass::Grass);
 				DrawScene(
 					object.ScenePtr,
 					object.Transform,
 					object.Roughness,
 					object.Metallic,
 					object.bOverrideRoughnessMetallic);
+				if (bTerrainScene)
+					EndGpuPassTiming(EGpuPass::Terrain);
+				else if (bGrassScene)
+					EndGpuPassTiming(EGpuPass::Grass);
 				EndGBufferOcclusionQuery(object.Handle, occlusionQueryIndex);
 				++GBufferLastVisibleObjectCount;
 			}

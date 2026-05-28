@@ -6,6 +6,8 @@
 
 #include "stdafx.h"
 #include "Corona.h"
+#include "Corona.Console.h"
+#include "PlatformSystem.h"
 #include "TerrainComponent.h"
 #include "PlatformWindow.h"
 #include "Utils.h"
@@ -1508,6 +1510,23 @@ private:
 		return 1;
 	}
 
+	// corona.Entity.by_name(name) — first alive entity with that name, or nil.
+	// Useful after corona.load_map() to fetch the handles the map restored.
+	int LuaCoronaEntityByName(lua_State* L)
+	{
+		Corona* host = GetHost(L);
+		if (!host) { luaL_error(L, "corona host is not available"); return 0; }
+		const char* name = luaL_checkstring(L, 1);
+		const CoronaECS::Entity entity = host->GetEntityWorld().FindEntityByName(name ? name : "");
+		if (!entity.IsValid())
+		{
+			lua_pushnil(L);
+			return 1;
+		}
+		PushScriptEntity(L, entity);
+		return 1;
+	}
+
 	int LuaCoronaEntitySetTransform(lua_State* L)
 	{
 		Corona* host = GetHost(L);
@@ -2490,6 +2509,135 @@ private:
 		const float maxHeight = static_cast<float>(luaL_optnumber(L, 2, 30.0));
 		host->SetGrassBendParamsForScript(radius, maxHeight);
 		return 0;
+	}
+
+	// corona.save_map(name) — writes the script-spawned scene to bin/maps/<name>.crmap
+	// Returns true on success, false (+ error string on stack) on failure.
+	int LuaCoronaSaveMap(lua_State* L)
+	{
+		Corona* host = GetHost(L);
+		if (!host) { luaL_error(L, "corona host is not available"); return 0; }
+		const std::string name = luaL_checkstring(L, 1);
+		std::wstring err;
+		const bool ok = host->SaveMapToFile(PlatformUtf8ToWide(name), &err);
+		lua_pushboolean(L, ok ? 1 : 0);
+		if (!ok) { lua_pushstring(L, PlatformWideToUtf8(err).c_str()); return 2; }
+		return 1;
+	}
+
+	// corona.load_map(name) — clears current script-spawned scene + replays
+	// the named map from bin/maps/<name>.crmap.
+	int LuaCoronaLoadMap(lua_State* L)
+	{
+		Corona* host = GetHost(L);
+		if (!host) { luaL_error(L, "corona host is not available"); return 0; }
+		const std::string name = luaL_checkstring(L, 1);
+		std::wstring err;
+		const bool ok = host->LoadMapFromFile(PlatformUtf8ToWide(name), &err);
+		lua_pushboolean(L, ok ? 1 : 0);
+		if (!ok) { lua_pushstring(L, PlatformWideToUtf8(err).c_str()); return 2; }
+		return 1;
+	}
+
+	// corona.map_exists(name) — true if bin/maps/<name>.crmap can be opened.
+	int LuaCoronaMapExists(lua_State* L)
+	{
+		Corona* host = GetHost(L);
+		if (!host) { luaL_error(L, "corona host is not available"); return 0; }
+		const std::string name = luaL_checkstring(L, 1);
+		const auto path = host->ResolveMapPath(PlatformUtf8ToWide(name));
+		lua_pushboolean(L, std::filesystem::exists(path) ? 1 : 0);
+		return 1;
+	}
+
+	// corona.set_terrain_deform_sphere(x, y, z, radius)
+	// World-space sphere whose lower hemisphere is carved out of the terrain
+	// mesh in the vertex shader. radius=0 disables. Visual-only — does not
+	// affect SampleHeight or PhysX collision.
+	int LuaCoronaSetTerrainDeformSphere(lua_State* L)
+	{
+		Corona* host = GetHost(L);
+		if (!host)
+		{
+			luaL_error(L, "corona host is not available");
+			return 0;
+		}
+		const float x      = static_cast<float>(luaL_checknumber(L, 1));
+		const float y      = static_cast<float>(luaL_checknumber(L, 2));
+		const float z      = static_cast<float>(luaL_checknumber(L, 3));
+		const float radius = static_cast<float>(luaL_checknumber(L, 4));
+		host->SetTerrainDeformSphereForScript(x, y, z, std::max(0.0f, radius));
+		return 0;
+	}
+
+	// corona.set_entity_exclude_deform_sphere(entity, exclude)
+	// Opt the given entity's mesh(es) out of the global deform sphere — used
+	// to keep the player avatar (which sits at the sphere center) from being
+	// carved into its own crater. Boolean arg; defaults to true if omitted.
+	int LuaCoronaSetEntityExcludeDeformSphere(lua_State* L)
+	{
+		Corona* host = GetHost(L);
+		if (!host)
+		{
+			luaL_error(L, "corona host is not available");
+			return 0;
+		}
+		const CoronaECS::Entity entity = ReadScriptEntity(L, host, 1);
+		const bool bExclude = lua_isboolean(L, 2) ? (lua_toboolean(L, 2) != 0) : true;
+		lua_pushboolean(L, host->SetEntityExcludeFromDeformSphereForScript(entity, bExclude) ? 1 : 0);
+		return 1;
+	}
+
+	// corona.set_grass_render_distance(d)
+	// World units within which a grass chunk is allowed to render. 0 disables
+	// distance culling (only frustum cull is applied).
+	int LuaCoronaSetGrassRenderDistance(lua_State* L)
+	{
+		Corona* host = GetHost(L);
+		if (!host)
+		{
+			luaL_error(L, "corona host is not available");
+			return 0;
+		}
+		const float d = static_cast<float>(luaL_checknumber(L, 1));
+		host->GrassRenderDistance = std::max(0.0f, d);
+		return 0;
+	}
+
+	// corona.set_grass_render_origin(x, y, z)
+	// World-space point that GrassRenderDistance is measured from. Typically
+	// the player position — pass it every frame so the culling tracks motion.
+	int LuaCoronaSetGrassRenderOrigin(lua_State* L)
+	{
+		Corona* host = GetHost(L);
+		if (!host)
+		{
+			luaL_error(L, "corona host is not available");
+			return 0;
+		}
+		host->GrassRenderOrigin = glm::vec3(
+			static_cast<float>(luaL_checknumber(L, 1)),
+			static_cast<float>(luaL_checknumber(L, 2)),
+			static_cast<float>(luaL_checknumber(L, 3)));
+		return 0;
+	}
+
+	// corona.terrain_sample_height(x, z) → float
+	// Returns the active terrain's bilinear-interpolated height at world XZ.
+	// 0 if no terrain is active. Useful for placing characters on the surface.
+	int LuaCoronaTerrainSampleHeight(lua_State* L)
+	{
+		Corona* host = GetHost(L);
+		Terrain::Component* terrain = host ? host->GetActiveTerrain() : nullptr;
+		if (!terrain)
+		{
+			lua_pushnumber(L, 0.0);
+			return 1;
+		}
+		const float x = static_cast<float>(luaL_checknumber(L, 1));
+		const float z = static_cast<float>(luaL_checknumber(L, 2));
+		lua_pushnumber(L, terrain->SampleHeight(x, z));
+		return 1;
 	}
 
 	// corona.set_wind_params(dirX, dirZ, strength, [tempFreq], [spaceFreq])
@@ -3638,6 +3786,8 @@ private:
 		lua_setfield(L, -2, "destroy");
 		lua_pushcfunction(L, LuaCoronaEntityExists, "corona.Entity.exists");
 		lua_setfield(L, -2, "exists");
+		lua_pushcfunction(L, LuaCoronaEntityByName, "corona.Entity.by_name");
+		lua_setfield(L, -2, "by_name");
 		lua_pushcfunction(L, LuaCoronaGetWorldEntity, "corona.Entity.world");
 		lua_setfield(L, -2, "world");
 		lua_pushcfunction(L, LuaCoronaGetLevelEntity, "corona.Entity.level");
@@ -3798,8 +3948,24 @@ private:
 		lua_setfield(L, -2, "set_grass_bend_origin");
 		lua_pushcfunction(L, LuaCoronaSetGrassBendParams, "corona.set_grass_bend_params");
 		lua_setfield(L, -2, "set_grass_bend_params");
+		lua_pushcfunction(L, LuaCoronaSetTerrainDeformSphere, "corona.set_terrain_deform_sphere");
+		lua_setfield(L, -2, "set_terrain_deform_sphere");
+		lua_pushcfunction(L, LuaCoronaSetEntityExcludeDeformSphere, "corona.set_entity_exclude_deform_sphere");
+		lua_setfield(L, -2, "set_entity_exclude_deform_sphere");
+		lua_pushcfunction(L, LuaCoronaSaveMap, "corona.save_map");
+		lua_setfield(L, -2, "save_map");
+		lua_pushcfunction(L, LuaCoronaLoadMap, "corona.load_map");
+		lua_setfield(L, -2, "load_map");
+		lua_pushcfunction(L, LuaCoronaMapExists, "corona.map_exists");
+		lua_setfield(L, -2, "map_exists");
 		lua_pushcfunction(L, LuaCoronaSetWindParams, "corona.set_wind_params");
 		lua_setfield(L, -2, "set_wind_params");
+		lua_pushcfunction(L, LuaCoronaTerrainSampleHeight, "corona.terrain_sample_height");
+		lua_setfield(L, -2, "terrain_sample_height");
+		lua_pushcfunction(L, LuaCoronaSetGrassRenderDistance, "corona.set_grass_render_distance");
+		lua_setfield(L, -2, "set_grass_render_distance");
+		lua_pushcfunction(L, LuaCoronaSetGrassRenderOrigin, "corona.set_grass_render_origin");
+		lua_setfield(L, -2, "set_grass_render_origin");
 		lua_pushcfunction(L, LuaCoronaSetCamera, "corona.set_camera");
 		lua_setfield(L, -2, "set_camera");
 		lua_pushcfunction(L, LuaCoronaGetCamera, "corona.get_camera");
@@ -4099,6 +4265,11 @@ Corona::ScriptSceneHandle Corona::CreateProceduralBlockCharacterSceneForScript(U
 		handle = NextScriptSceneHandle++;
 
 	ScriptScenes[handle] = { scene, key };
+	{
+		SceneRecipe& r = ScriptScenes[handle].Recipe;
+		r.RecipeKind = SceneRecipe::Kind::BlockCharacter;
+		r.Seed = seed;
+	}
 	ScriptSceneByPath[key] = handle;
 	AppendCpuRuntimeTrace(L"[Luau][MeshComponent] procedural_block_character handle=" + std::to_wstring(handle) + L" seed=" + std::to_wstring(seed));
 	return handle;
@@ -4182,6 +4353,14 @@ Corona::ScriptSceneHandle Corona::CreateProceduralGrassSceneForScript(UINT32 num
 		handle = NextScriptSceneHandle++;
 
 	ScriptScenes[handle] = { scene, key, EPhysicsCollisionShape::TriangleMesh, glm::vec3(0.5f) };
+	{
+		SceneRecipe& r = ScriptScenes[handle].Recipe;
+		r.RecipeKind = SceneRecipe::Kind::Grass;
+		r.BladeCount = clampedBlades;
+		r.AreaSize = clampedArea;
+		r.BladeHeight = clampedHeight;
+		r.Seed = normalizedSeed;
+	}
 	ScriptSceneByPath[key] = handle;
 	AppendCpuRuntimeTrace(
 		L"[Luau][MeshComponent] procedural_grass handle=" + std::to_wstring(handle) +
@@ -4196,8 +4375,10 @@ Corona::ScriptSceneHandle Corona::CreateProceduralGrassOnTerrainSceneForScript(U
 	if (!renderBackend)
 		return InvalidScriptSceneHandle;
 
-	const UINT32 clampedBlades = std::clamp<UINT32>(numBlades, 1u, 1000000u);
-	const float clampedHeight  = std::clamp(bladeHeight, 1.0f, 1000.0f);
+	const UINT32 clampedBlades = std::clamp<UINT32>(numBlades, 1u, 20000000u);
+	// Allow sub-meter blades (terrain_demo uses 0.6 m); upper bound stays
+	// for the legacy giant grass demo at 28 m.
+	const float clampedHeight  = std::clamp(bladeHeight, 0.01f, 1000.0f);
 	const UINT32 normalizedSeed = (seed == 0u) ? 1u : seed;
 
 	// Cache key incorporates terrain seed + blade params so the same terrain
@@ -4208,7 +4389,7 @@ Corona::ScriptSceneHandle Corona::CreateProceduralGrassOnTerrainSceneForScript(U
 	const std::wstring key =
 		L"procedural://grass_on_terrain/" +
 		std::to_wstring(clampedBlades) + L"/" +
-		std::to_wstring(static_cast<int>(std::round(clampedHeight))) + L"/" +
+		std::to_wstring(static_cast<int>(std::round(clampedHeight * 100.0f))) + L"/" +
 		std::to_wstring(normalizedSeed) + terrainTag;
 	const auto cachedIt = ScriptSceneByPath.find(key);
 	if (cachedIt != ScriptSceneByPath.end())
@@ -4223,6 +4404,13 @@ Corona::ScriptSceneHandle Corona::CreateProceduralGrassOnTerrainSceneForScript(U
 		handle = NextScriptSceneHandle++;
 
 	ScriptScenes[handle] = { scene, key, EPhysicsCollisionShape::Box, glm::vec3(0.5f) };
+	{
+		SceneRecipe& r = ScriptScenes[handle].Recipe;
+		r.RecipeKind = SceneRecipe::Kind::GrassOnTerrain;
+		r.BladeCount = clampedBlades;
+		r.BladeHeight = clampedHeight;
+		r.Seed = normalizedSeed;
+	}
 	ScriptSceneByPath[key] = handle;
 	AppendCpuRuntimeTrace(
 		L"[Luau][MeshComponent] procedural_grass_on_terrain handle=" + std::to_wstring(handle) +
@@ -4253,6 +4441,11 @@ Corona::ScriptSceneHandle Corona::CreateProceduralTerrainSceneForScript(UINT32 s
 	// PhysX bake is heavy and we don't need collision yet). Box shape is
 	// the cheap fallback the loader honors when ray-tracing/physics is off.
 	ScriptScenes[handle] = { scene, key, EPhysicsCollisionShape::Box, glm::vec3(0.5f) };
+	{
+		SceneRecipe& r = ScriptScenes[handle].Recipe;
+		r.RecipeKind = SceneRecipe::Kind::Terrain;
+		r.Seed = normalizedSeed;
+	}
 	ScriptSceneByPath[key] = handle;
 	AppendCpuRuntimeTrace(
 		L"[Luau][MeshComponent] procedural_terrain handle=" + std::to_wstring(handle) +
@@ -4319,6 +4512,11 @@ Corona::ScriptSceneHandle Corona::LoadSceneForScript(const std::wstring& assetPa
 		handle = NextScriptSceneHandle++;
 
 	ScriptScenes[handle] = { scene, key };
+	{
+		SceneRecipe& r = ScriptScenes[handle].Recipe;
+		r.RecipeKind = SceneRecipe::Kind::Asset;
+		r.AssetPath = key;
+	}
 	ScriptSceneByPath[key] = handle;
 	AppendCpuRuntimeTrace(L"[Luau][MeshComponent] load_asset handle=" + std::to_wstring(handle) + L" path=" + key);
 	return handle;
@@ -4733,6 +4931,29 @@ bool Corona::SetEntityMeshTransformForScript(
 		bUseScale);
 }
 
+bool Corona::SetEntityExcludeFromDeformSphereForScript(CoronaECS::Entity entity, bool bExclude)
+{
+	const SceneObjectHandle objectHandle = GetEntitySceneObject(entity);
+	if (objectHandle == InvalidSceneObjectHandle)
+		return false;
+
+	const auto objectIt = std::find_if(SceneObjects.begin(), SceneObjects.end(),
+		[objectHandle](const SceneObject& object) { return object.Handle == objectHandle; });
+	if (objectIt == SceneObjects.end() || !objectIt->ScenePtr)
+		return false;
+
+	// Set on every mesh resource the scene owns. The flag is currently
+	// MeshResource-scoped, so meshes shared with other scene objects
+	// would inherit this opt-out — fine for procedural single-instance
+	// meshes like the block_character avatar.
+	for (auto& mesh : objectIt->ScenePtr->meshes)
+	{
+		if (mesh)
+			mesh->bExcludeFromDeformSphere = bExclude;
+	}
+	return true;
+}
+
 bool Corona::SetEntityMeshComponentForScript(
 	CoronaECS::Entity entity,
 	const glm::vec3& position,
@@ -5047,6 +5268,13 @@ bool Corona::SetEntityLightForScript(
 		MainDirectionalLightEntity = entity;
 		EntityWorld.AddLight(entity, lightComponent);
 		ApplyDirectionalLightEntityToState();
+		// If this setter ran on the render thread (e.g. Scene Inspector gizmo),
+		// the legacy LightDir/LightIntensity globals just got updated. Mark
+		// them so ApplyFrameSourceRenderSync skips the next game-thread
+		// snapshot — without this the stale capture would revert the edit
+		// for one frame and the game-thread UpdateMainDirectionalLightEntityFromState
+		// would then write the stale value back into this entity.
+		bRenderThreadOwnsLightDirNextFrame = true;
 		// Directional-light deltas are handled in BuildRenderFrameDerivedState.
 		// Spatial hash GI intentionally keeps history across gradual sun motion.
 		if (bPersistSceneState && bLightChanged)
@@ -6210,16 +6438,25 @@ void Corona::PollScriptGamepadState()
 
 bool Corona::IsScriptKeyDownForScript(UINT8 key) const
 {
+	// Console captures the keyboard → keep all script-side key queries
+	// as "up" so the character doesn't drift / camera doesn't pan while
+	// the user is typing a command.
+	if (Console && Console->IsVisible())
+		return false;
 	return ScriptKeyDown[static_cast<size_t>(key)];
 }
 
 bool Corona::WasScriptKeyPressedForScript(UINT8 key) const
 {
+	if (Console && Console->IsVisible())
+		return false;
 	return ScriptKeyPressed[static_cast<size_t>(key)];
 }
 
 bool Corona::WasScriptKeyReleasedForScript(UINT8 key) const
 {
+	if (Console && Console->IsVisible())
+		return false;
 	return ScriptKeyReleased[static_cast<size_t>(key)];
 }
 

@@ -57,6 +57,8 @@ namespace Terrain
 		const std::shared_ptr<Mesh>& GetMesh() const { return MeshPtr; }
 		const GenerateStats& GetStats() const { return Stats; }
 		const TerrainData& GetData() const { return Data; }
+		uint32_t GetLastVisibleChunkCount() const { return LastVisibleChunkCount; }
+		uint32_t GetTotalChunkCount() const { return static_cast<uint32_t>(ChunkInfos.size()); }
 
 	private:
 		std::filesystem::path ResolveCachePath(const std::wstring& cacheName) const;
@@ -69,5 +71,6 @@ namespace Terrain
 		std::shared_ptr<Mesh> MeshPtr;
 		std::shared_ptr<Material> MaterialPtr;
 		std::shared_ptr<Scene> ScenePtr;
+		uint32_t LastVisibleChunkCount = 0;
 	};
 }

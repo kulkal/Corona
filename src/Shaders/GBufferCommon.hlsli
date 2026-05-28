@@ -74,7 +74,13 @@ cbuffer GBufferConstantBuffer : register(b0)
     // mesh. Non-zero → ApplyVertexDeformations runs the grass bend on
     // this mesh's vertices. Every other mesh leaves it at 0.
     uint     bGrassMesh;
-    uint3    _GBufferCBPad;
+    // Per-mesh flag for the terrain mesh; kept for potential future
+    // terrain-only effects. The global deform sphere no longer reads it.
+    uint     bTerrainMesh;
+    // Per-mesh opt-out for the global deform sphere — set on the player
+    // mesh so the shockwave doesn't carve the actor at its own center.
+    uint     bExcludeFromDeformSphere;
+    uint     _GBufferCBPad;
     // Wind sway. .xyz = wind direction normalized in XZ (Y typically 0),
     // .w = strength (0 disables). Composes additively with grass bend.
     float4   WindParams;
@@ -82,6 +88,10 @@ cbuffer GBufferConstantBuffer : register(b0)
     // spatial frequency (rad/world-unit, gives blade-to-blade variation),
     // .zw = reserved.
     float4   WindTuning;
+    // Terrain deformation sphere. .xyz = world-space center, .w = radius
+    // (0 disables). Lower hemisphere of the sphere is carved out of the
+    // terrain in the vertex shader.
+    float4   TerrainDeformSphere;
 };
 
 struct VSInput
@@ -420,12 +430,16 @@ VertexObjSpace LoadVertex_SkeletalCl(VSInput input, uint vertexId, uint instance
 // Returns the deformed object-space position. The caller is expected to
 // invoke this both for the current frame's time and (time - dt) for the
 // previous frame so motion vectors track the sway accurately.
-float3 ApplyWindSway(float3 objPos, float time, float maxBladeHeight)
+float3 ApplyWindSway(float3 objPos, float time, float maxBladeHeight, float heightRatio01)
 {
     if (WindParams.w <= 0.0f)
         return objPos;
 
-    float heightRatio = saturate(objPos.y / max(maxBladeHeight, 1e-3f));
+    // heightRatio01 is the blade's local 0..1 root→tip coordinate, supplied by
+    // the caller (uv.y from the blade mesh). This decouples the sway curve from
+    // objPos.y so blades whose root sits at non-zero Y (e.g. grass placed on
+    // terrain height) still keep their roots planted instead of sweeping.
+    float heightRatio = saturate(heightRatio01);
     if (heightRatio <= 0.0f)
         return objPos;
 
@@ -467,7 +481,7 @@ float3 ApplyWindSway(float3 objPos, float time, float maxBladeHeight)
 // Activated by `bGrassMesh` (per-mesh flag). Other meshes (the ground,
 // the dungeon character) ignore the deformation even when the CB is
 // configured.
-float3 ApplyGrassBend(float3 objPos, float3 worldOrigin, float4x4 worldMatrix, float bendStrength, float bendRadius, float maxBladeHeight)
+float3 ApplyGrassBend(float3 objPos, float3 worldOrigin, float4x4 worldMatrix, float bendStrength, float bendRadius, float heightRatio01)
 {
     // Convert blade vertex to world space so we can compare against the
     // world-space player origin.
@@ -482,7 +496,11 @@ float3 ApplyGrassBend(float3 objPos, float3 worldOrigin, float4x4 worldMatrix, f
     float falloff = 1.0f - dist / bendRadius;          // 1 at player, 0 at radius edge
     falloff = falloff * falloff;                        // softer near edge
 
-    float heightRatio = saturate(objPos.y / max(maxBladeHeight, 1e-3f));
+    // heightRatio01 is the blade's local 0..1 root→tip coordinate (uv.y),
+    // same decoupling as ApplyWindSway. Using objPos.y here would saturate
+    // to 1 for terrain-mounted blades (root Y ≫ maxBladeHeight) and bend
+    // the whole blade as a rigid body instead of just the tip.
+    float heightRatio = saturate(heightRatio01);
     float bendAmt = heightRatio * heightRatio * falloff * bendStrength;
 
     // Bend direction: away from the player, in the XZ plane.
@@ -497,6 +515,67 @@ float3 ApplyGrassBend(float3 objPos, float3 worldOrigin, float4x4 worldMatrix, f
     // sliding sideways.
     result.y -= heightRatio * heightRatio * falloff * bendStrength * 0.5f;
     return result;
+}
+
+// Lower-hemisphere sphere "carve" deform, applied in WORLD space so it
+// works for any mesh regardless of its world matrix (rotation, scale,
+// translation). Used as an explosion-shockwave / impact crater effect:
+// every world-space vertex inside the sphere's XZ footprint gets clamped
+// down to the bowl surface; vertices already below the bowl are left
+// alone. Visual-only — no physics / collision sync.
+//
+//   d²    = (vx - cx)² + (vz - cz)²
+//   bowlY = cy - sqrt(r² - d²)        ← lower hemisphere of the sphere
+//   newY  = min(vy, bowlY)
+//
+// World-space inputs let BuildPSInput call this AFTER the
+// objPos × worldMatrix transform, so no inverse world matrix is needed.
+void ApplyDeformSphereWorld(inout float3 worldPos, inout float3 worldNormal, inout float3 worldTangent)
+{
+    if (TerrainDeformSphere.w <= 0.0f)
+        return;
+
+    const float3 center = TerrainDeformSphere.xyz;
+    const float  radius = TerrainDeformSphere.w;
+    const float  r2     = radius * radius;
+
+    const float2 dxz = worldPos.xz - center.xz;
+    const float  d2  = dot(dxz, dxz);
+    if (d2 >= r2)
+        return;
+
+    const float bowlY = center.y - sqrt(r2 - d2);
+    if (worldPos.y <= bowlY)
+        return; // vertex already below the bowl surface — leave it
+
+    worldPos.y = bowlY;
+
+    // Rebuild normal/tangent as the radial outward of the bowl (points
+    // from the deformed vertex back toward the sphere center → "inside
+    // of bowl faces up").
+    const float3 newNormal = normalize(center - worldPos);
+    worldNormal = newNormal;
+    const float3 projected = worldTangent - newNormal * dot(worldTangent, newNormal);
+    const float  projLen   = length(projected);
+    worldTangent = (projLen > 1.0e-5f) ? (projected / projLen) : worldTangent;
+}
+
+// Position-only variant for the previous-frame world position. Skips
+// normal/tangent — they're only read from the current frame.
+void ApplyDeformSphereWorldPosOnly(inout float3 worldPos)
+{
+    if (TerrainDeformSphere.w <= 0.0f)
+        return;
+    const float3 center = TerrainDeformSphere.xyz;
+    const float  radius = TerrainDeformSphere.w;
+    const float  r2     = radius * radius;
+    const float2 dxz = worldPos.xz - center.xz;
+    const float  d2  = dot(dxz, dxz);
+    if (d2 >= r2)
+        return;
+    const float bowlY = center.y - sqrt(r2 - d2);
+    if (worldPos.y > bowlY)
+        worldPos.y = bowlY;
 }
 
 VertexObjSpace ApplyVertexDeformations(VertexObjSpace v)
@@ -517,8 +596,8 @@ VertexObjSpace ApplyVertexDeformations(VertexObjSpace v)
         // Prev frame uses (time - dt) so motion vectors track the sway
         // even when nothing else moves.
         const float prevDt = 1.0f / 60.0f;
-        v.currObjPos = ApplyWindSway(v.currObjPos, time,         maxBladeHeight);
-        v.prevObjPos = ApplyWindSway(v.prevObjPos, time - prevDt, maxBladeHeight);
+        v.currObjPos = ApplyWindSway(v.currObjPos, time,         maxBladeHeight, v.uv.y);
+        v.prevObjPos = ApplyWindSway(v.prevObjPos, time - prevDt, maxBladeHeight, v.uv.y);
 
         // Layer 2b — player-proximity bend on top of the wind base pose.
         if (GrassBendOrigin.w > 0.0f)
@@ -526,10 +605,15 @@ VertexObjSpace ApplyVertexDeformations(VertexObjSpace v)
             const float3 worldOrigin  = GrassBendOrigin.xyz;
             const float  bendStrength = GrassBendOrigin.w;
             const float  bendRadius   = GrassBendParams.x;
-            v.currObjPos = ApplyGrassBend(v.currObjPos, worldOrigin, v.worldMatrix,    bendStrength, bendRadius, maxBladeHeight);
-            v.prevObjPos = ApplyGrassBend(v.prevObjPos, worldOrigin, v.prevWorldMatrix, bendStrength, bendRadius, maxBladeHeight);
+            v.currObjPos = ApplyGrassBend(v.currObjPos, worldOrigin, v.worldMatrix,    bendStrength, bendRadius, v.uv.y);
+            v.prevObjPos = ApplyGrassBend(v.prevObjPos, worldOrigin, v.prevWorldMatrix, bendStrength, bendRadius, v.uv.y);
         }
     }
+
+    // Deform sphere is applied globally in WORLD space inside BuildPSInput
+    // (Layer 3) — not here. That avoids needing an inverse world matrix
+    // for non-identity transforms.
+
     return v;
 }
 
@@ -540,15 +624,29 @@ VertexObjSpace ApplyVertexDeformations(VertexObjSpace v)
 PSInput BuildPSInput(VertexObjSpace v)
 {
     PSInput result;
-    float4 worldPos = mul(float4(v.currObjPos, 1.0f), v.worldMatrix);
-    result.position           = mul(worldPos, ViewProjectionMatrix);
-    result.unjitteredPosition = mul(worldPos, UnjitteredViewProjMat);
 
-    float4 prevWorldPos = mul(float4(v.prevObjPos, 1.0f), v.prevWorldMatrix);
-    result.prevPosition       = mul(prevWorldPos, PrevUnjitteredViewProjMat);
+    // Object → world for current frame.
+    float3 worldPos     = mul(float4(v.currObjPos,    1.0f), v.worldMatrix).xyz;
+    float3 worldNormal  = normalize(mul(float4(v.currObjNormal,  0.0f), v.worldMatrix).xyz);
+    float3 worldTangent = normalize(mul(float4(v.currObjTangent, 0.0f), v.worldMatrix).xyz);
 
-    result.normal             = normalize(mul(float4(v.currObjNormal,  0), v.worldMatrix));
-    result.tangent            = normalize(mul(float4(v.currObjTangent, 0), v.worldMatrix));
+    // Global shockwave-style sphere carve — applies to every mesh except
+    // those that opt out (e.g. the player avatar that sits at the sphere
+    // center). Operating in world space lets us skip the inverse world
+    // matrix that an object-space variant would need.
+    if (bExcludeFromDeformSphere == 0u)
+        ApplyDeformSphereWorld(worldPos, worldNormal, worldTangent);
+
+    result.position           = mul(float4(worldPos, 1.0f), ViewProjectionMatrix);
+    result.unjitteredPosition = mul(float4(worldPos, 1.0f), UnjitteredViewProjMat);
+
+    float3 prevWorldPos = mul(float4(v.prevObjPos, 1.0f), v.prevWorldMatrix).xyz;
+    if (bExcludeFromDeformSphere == 0u)
+        ApplyDeformSphereWorldPosOnly(prevWorldPos);
+    result.prevPosition       = mul(float4(prevWorldPos, 1.0f), PrevUnjitteredViewProjMat);
+
+    result.normal             = worldNormal;
+    result.tangent            = worldTangent;
     result.uv                 = v.uv;
     return result;
 }

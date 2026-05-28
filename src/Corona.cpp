@@ -11,6 +11,10 @@
 
 #include "stdafx.h"
 #include "Corona.h"
+#include "Corona.AssetExplorer.h"
+#include "Corona.Console.h"
+#include "Corona.SceneInspector.h"
+#include "Corona.Toolbox.h"
 #include "TerrainComponent.h"
 #include "D3D12Helpers.h"
 #include "PlatformSystem.h"
@@ -816,10 +820,12 @@ namespace
 		return mode == Corona::EAntiAliasingMode::DLSS_SR || mode == Corona::EAntiAliasingMode::DLSS_RR;
 	}
 
-	constexpr std::array<const char*, 18> kGpuPassNames = {
+	constexpr std::array<const char*, 20> kGpuPassNames = {
 		"Frame Total",
 		"Skeletal Skinning",
 		"GBuffer",
+		"Terrain",
+		"Grass",
 		"RT Shadow",
 		"RT AO",
 		"RT Sky",
@@ -8234,11 +8240,15 @@ namespace
 		std::vector<GrassVertex>& vertices,
 		std::vector<UINT32>& indices,
 		float& outMinY,
-		float& outMaxY)
+		float& outMaxY,
+		uint32_t gridDim = 0,
+		std::vector<Corona::GrassChunkInfo>* outChunks = nullptr)
 	{
-		const float bladeWidth = std::max(2.0f, bladeHeight * 0.06f);
+		const float bladeWidth = bladeHeight * 0.06f;
 		const UINT32 kBladeSegments = 4;
 		const UINT32 kBladeRows = kBladeSegments + 1;
+		const UINT32 kVertsPerBlade = kBladeRows * 2u;
+		const UINT32 kIdxPerBlade = kBladeSegments * 12u;
 
 		uint32_t rngState = (seed == 0u) ? 1u : seed;
 		auto rng01 = [&rngState]() -> float
@@ -8249,18 +8259,16 @@ namespace
 			return static_cast<float>(x & 0x00ffffffu) / static_cast<float>(0x01000000u);
 		};
 
-		vertices.reserve(numBlades * kBladeRows * 2u);
-		indices.reserve(numBlades * kBladeSegments * 12u);
-
 		outMinY =  std::numeric_limits<float>::infinity();
 		outMaxY = -std::numeric_limits<float>::infinity();
 
-		for (UINT32 b = 0; b < numBlades; ++b)
+		// Emit one blade's geometry into the supplied output buffers. baseIndex
+		// is the chunk-local vertex offset (added at draw time via VertexBase).
+		auto emitBlade = [&](float x, float z, float yaw, float heightJitter,
+			std::vector<GrassVertex>& vOut, std::vector<UINT32>& iOut,
+			float& chunkMinX, float& chunkMinY, float& chunkMinZ,
+			float& chunkMaxX, float& chunkMaxY, float& chunkMaxZ)
 		{
-			const float x = (rng01() * 2.0f - 1.0f) * halfArea;
-			const float z = (rng01() * 2.0f - 1.0f) * halfArea;
-			const float yaw = rng01() * 6.2831853f;
-			const float heightJitter = 0.7f + rng01() * 0.6f;
 			const float thisHeight = bladeHeight * heightJitter;
 			const float baseY = baseYSampler(x, z);
 
@@ -8271,7 +8279,7 @@ namespace
 			const glm::vec3 normal = glm::normalize(glm::vec3(-s, 0.2f, c));
 			const glm::vec3 tangent = glm::normalize(glm::vec3(c, 0.0f, s));
 
-			const UINT32 baseIndex = static_cast<UINT32>(vertices.size());
+			const UINT32 baseIndex = static_cast<UINT32>(vOut.size());
 
 			for (UINT32 row = 0; row < kBladeRows; ++row)
 			{
@@ -8283,12 +8291,23 @@ namespace
 				GrassVertex vl;
 				vl.Position = glm::vec3(x + (-wHalf * c), y, z + (-wHalf * s));
 				vl.Normal = normal; vl.UV = glm::vec2(0.0f, t); vl.Tangent = tangent;
-				vertices.push_back(vl);
+				vOut.push_back(vl);
 
 				GrassVertex vr;
 				vr.Position = glm::vec3(x + (wHalf * c), y, z + (wHalf * s));
 				vr.Normal = normal; vr.UV = glm::vec2(1.0f, t); vr.Tangent = tangent;
-				vertices.push_back(vr);
+				vOut.push_back(vr);
+
+				chunkMinX = std::min(chunkMinX, vl.Position.x);
+				chunkMinX = std::min(chunkMinX, vr.Position.x);
+				chunkMaxX = std::max(chunkMaxX, vl.Position.x);
+				chunkMaxX = std::max(chunkMaxX, vr.Position.x);
+				chunkMinY = std::min(chunkMinY, y);
+				chunkMaxY = std::max(chunkMaxY, y);
+				chunkMinZ = std::min(chunkMinZ, vl.Position.z);
+				chunkMinZ = std::min(chunkMinZ, vr.Position.z);
+				chunkMaxZ = std::max(chunkMaxZ, vl.Position.z);
+				chunkMaxZ = std::max(chunkMaxZ, vr.Position.z);
 
 				outMinY = std::min(outMinY, y);
 				outMaxY = std::max(outMaxY, y);
@@ -8300,10 +8319,106 @@ namespace
 				const UINT32 br = baseIndex + (seg)*2u + 1u;
 				const UINT32 tl = baseIndex + (seg + 1) * 2u;
 				const UINT32 tr = baseIndex + (seg + 1) * 2u + 1u;
-				indices.push_back(bl); indices.push_back(br); indices.push_back(tr);
-				indices.push_back(bl); indices.push_back(tr); indices.push_back(tl);
-				indices.push_back(bl); indices.push_back(tr); indices.push_back(br);
-				indices.push_back(bl); indices.push_back(tl); indices.push_back(tr);
+				iOut.push_back(bl); iOut.push_back(br); iOut.push_back(tr);
+				iOut.push_back(bl); iOut.push_back(tr); iOut.push_back(tl);
+				iOut.push_back(bl); iOut.push_back(tr); iOut.push_back(br);
+				iOut.push_back(bl); iOut.push_back(tl); iOut.push_back(tr);
+			}
+		};
+
+		if (gridDim == 0 || !outChunks)
+		{
+			// Single-bucket path (unchanged behaviour for the flat grass demo).
+			vertices.reserve(static_cast<size_t>(numBlades) * kVertsPerBlade);
+			indices.reserve(static_cast<size_t>(numBlades) * kIdxPerBlade);
+			float minX = 0, minY = 0, minZ = 0, maxX = 0, maxY = 0, maxZ = 0;
+			for (UINT32 b = 0; b < numBlades; ++b)
+			{
+				const float x = (rng01() * 2.0f - 1.0f) * halfArea;
+				const float z = (rng01() * 2.0f - 1.0f) * halfArea;
+				const float yaw = rng01() * 6.2831853f;
+				const float hj  = 0.7f + rng01() * 0.6f;
+				emitBlade(x, z, yaw, hj, vertices, indices,
+					minX, minY, minZ, maxX, maxY, maxZ);
+			}
+			return;
+		}
+
+		// Spatial-binning path. Pass 1: deterministic blade seeds (32 B
+		// each). Pass 2: bucket by chunk. Pass 3: emit indices chunk by
+		// chunk so each chunk's verts/indices form a contiguous DrawCall
+		// range (vertices reuse chunk-local indices + VertexBase at draw
+		// time, identical to TerrainMeshBuilder).
+		struct BladeSeed { float x, z, yaw, hj; };
+		std::vector<BladeSeed> seeds(numBlades);
+		for (UINT32 b = 0; b < numBlades; ++b)
+		{
+			seeds[b].x = (rng01() * 2.0f - 1.0f) * halfArea;
+			seeds[b].z = (rng01() * 2.0f - 1.0f) * halfArea;
+			seeds[b].yaw = rng01() * 6.2831853f;
+			seeds[b].hj  = 0.7f + rng01() * 0.6f;
+		}
+
+		const float chunkSize = (halfArea * 2.0f) / static_cast<float>(gridDim);
+		const uint32_t numChunks = gridDim * gridDim;
+		std::vector<std::vector<uint32_t>> bins(numChunks);
+		for (UINT32 b = 0; b < numBlades; ++b)
+		{
+			int cx = static_cast<int>((seeds[b].x + halfArea) / chunkSize);
+			int cz = static_cast<int>((seeds[b].z + halfArea) / chunkSize);
+			if (cx < 0) cx = 0; else if (cx >= static_cast<int>(gridDim)) cx = static_cast<int>(gridDim) - 1;
+			if (cz < 0) cz = 0; else if (cz >= static_cast<int>(gridDim)) cz = static_cast<int>(gridDim) - 1;
+			bins[static_cast<uint32_t>(cz) * gridDim + static_cast<uint32_t>(cx)].push_back(b);
+		}
+
+		vertices.reserve(static_cast<size_t>(numBlades) * kVertsPerBlade);
+		indices.reserve(static_cast<size_t>(numBlades) * kIdxPerBlade);
+		outChunks->clear();
+		outChunks->reserve(numChunks);
+
+		for (uint32_t cz = 0; cz < gridDim; ++cz)
+		{
+			for (uint32_t cx = 0; cx < gridDim; ++cx)
+			{
+				const auto& bin = bins[cz * gridDim + cx];
+				if (bin.empty())
+					continue;
+
+				Corona::GrassChunkInfo info{};
+				info.VertexBase = static_cast<uint32_t>(vertices.size());
+				info.IndexStart = static_cast<uint32_t>(indices.size());
+				float minX =  std::numeric_limits<float>::infinity();
+				float minY =  std::numeric_limits<float>::infinity();
+				float minZ =  std::numeric_limits<float>::infinity();
+				float maxX = -std::numeric_limits<float>::infinity();
+				float maxY = -std::numeric_limits<float>::infinity();
+				float maxZ = -std::numeric_limits<float>::infinity();
+
+				// Re-base indices to be chunk-local — emitBlade's baseIndex
+				// is computed as vertices.size(), but DrawCall uses
+				// VertexBase relocation, so we need indices to start at 0
+				// per chunk. Emit into temp lists then concatenate.
+				const size_t vbBefore = vertices.size();
+				const size_t ibBefore = indices.size();
+				for (uint32_t bi : bin)
+				{
+					const BladeSeed& sd = seeds[bi];
+					emitBlade(sd.x, sd.z, sd.yaw, sd.hj, vertices, indices,
+						minX, minY, minZ, maxX, maxY, maxZ);
+				}
+				// Re-base the indices we just appended so they are chunk-local
+				// [0, chunk vert count) — VertexBase relocates them at draw.
+				const uint32_t vertexBase = static_cast<uint32_t>(vbBefore);
+				for (size_t i = ibBefore; i < indices.size(); ++i)
+					indices[i] -= vertexBase;
+
+				info.VertexCount = static_cast<uint32_t>(vertices.size()) - info.VertexBase;
+				info.IndexCount = static_cast<uint32_t>(indices.size()) - info.IndexStart;
+				info.AabbMin[0] = minX; info.AabbMin[1] = minY; info.AabbMin[2] = minZ;
+				info.AabbMax[0] = maxX; info.AabbMax[1] = maxY; info.AabbMax[2] = maxZ;
+				info.CenterX = (minX + maxX) * 0.5f;
+				info.CenterZ = (minZ + maxZ) * 0.5f;
+				outChunks->push_back(info);
 			}
 		}
 	}
@@ -8370,6 +8485,21 @@ shared_ptr<Scene> Corona::CreateProceduralGrassOnTerrainScene(UINT32 numBlades, 
 	if (!renderBackend || numBlades == 0)
 		return nullptr;
 
+	// RenderBackend::CreateVertexBuffer takes UINT (uint32) for byte size, so
+	// sizeof(GrassVertex)=44B × kVertsPerBlade=10 × numBlades must fit in
+	// uint32 (≤ 4GB). Cap aggressively at 9.5M blades = 4.18GB raw — D3D12
+	// CreateCommittedResource starts struggling well before the theoretical
+	// limit and the BVH AABB SRV indexing uses uint32 NumElements too.
+	constexpr UINT32 kMaxBladesUint32Safe = 9'500'000u;
+	if (numBlades > kMaxBladesUint32Safe)
+	{
+		AppendCpuRuntimeTrace(
+			L"[Terrain] grass-on-terrain blade_count=" + std::to_wstring(numBlades) +
+			L" exceeds uint32 buffer-size limit; capping to " +
+			std::to_wstring(kMaxBladesUint32Safe));
+		numBlades = kMaxBladesUint32Safe;
+	}
+
 	// Use the currently-active terrain (Phase 1: 1km^2 centered at origin)
 	// as the height sampler. Falls back to flat field when no terrain spawned.
 	Terrain::Component* terrain = ActiveTerrain.get();
@@ -8385,11 +8515,19 @@ shared_ptr<Scene> Corona::CreateProceduralGrassOnTerrainScene(UINT32 numBlades, 
 		return terrain ? terrain->SampleHeight(x, z) : 0.0f;
 	};
 
+	// Spatial chunk grid for per-frame frustum + distance culling. Each cell
+	// is ~64 m wide at 2km terrain, so the camera-frustum cone @300m
+	// intersects ~25-50 cells depending on view angle.
+	constexpr float kGrassChunkSize = 64.0f;
+	const uint32_t gridDim = std::max<uint32_t>(1u,
+		static_cast<uint32_t>(std::round(terrainSize / kGrassChunkSize)));
+
 	std::vector<GrassVertex> vertices;
 	std::vector<UINT32> indices;
 	float minY = 0.0f, maxY = bladeHeight;
+	std::vector<GrassChunkInfo> chunks;
 	BuildGrassBlades(numBlades, halfArea, bladeHeight, seed, sampler,
-		vertices, indices, minY, maxY);
+		vertices, indices, minY, maxY, gridDim, &chunks);
 
 	shared_ptr<Material> material = std::make_shared<Material>();
 	material->BaseColorFactor = glm::vec4(0.18f, 0.48f, 0.22f, 1.0f);
@@ -8408,32 +8546,125 @@ shared_ptr<Scene> Corona::CreateProceduralGrassOnTerrainScene(UINT32 numBlades, 
 	mesh->bGrassMesh = true;
 	mesh->Vb = renderBackend->CreateVertexBuffer(static_cast<UINT32>(sizeof(GrassVertex) * vertices.size()), sizeof(GrassVertex), vertices.data());
 	mesh->Ib = renderBackend->CreateIndexBuffer(mesh->IndexFormat, static_cast<UINT32>(sizeof(UINT32) * indices.size()), indices.data());
-	mesh->CpuPositions.reserve(vertices.size());
-	for (const GrassVertex& vertex : vertices)
-		mesh->CpuPositions.push_back(vertex.Position);
-	mesh->CpuIndices = indices;
+	// CpuPositions / CpuIndices intentionally left empty — physics + ray
+	// tracing are off for the grass field, and a 5GB+ duplicate is wasteful.
 
-	Mesh::DrawCall drawCall{};
-	drawCall.mat = material;
-	drawCall.IndexStart = 0;
-	drawCall.IndexCount = mesh->NumIndices;
-	drawCall.VertexBase = 0;
-	drawCall.VertexCount = mesh->NumVertices;
-	mesh->Draws.push_back(drawCall);
+	// One DrawCall per chunk to start with; UpdateGrassCulling rebuilds
+	// Mesh::Draws each frame from the visible subset.
+	mesh->Draws.reserve(chunks.size());
+	for (const auto& ci : chunks)
+	{
+		Mesh::DrawCall dc{};
+		dc.mat = material;
+		dc.IndexStart = ci.IndexStart;
+		dc.IndexCount = ci.IndexCount;
+		dc.VertexBase = ci.VertexBase;
+		dc.VertexCount = ci.VertexCount;
+		mesh->Draws.push_back(dc);
+	}
+
+	// Stash on Corona for the per-frame culling pass.
+	ActiveGrassMesh = std::shared_ptr<Mesh>(mesh, [](Mesh*) { /* owned by scene */ });
+	ActiveGrassMaterial = material;
+	ActiveGrassChunks = chunks;
 
 	shared_ptr<Scene> scene = std::make_shared<Scene>();
 	scene->Materials.push_back(material);
 	scene->meshes.push_back(shared_ptr<Mesh>(mesh));
+	// Re-point ActiveGrassMesh at the Scene's owning shared_ptr so
+	// destruction order is correct.
+	ActiveGrassMesh = scene->meshes.back();
+	ActiveGrassScene = scene;
+
 	scene->bHasBounds = true;
-	scene->BoundsMin = glm::vec3(-halfArea, minY, -halfArea);
+	scene->BoundsMin = glm::vec3(-halfArea, 0.0f, -halfArea);
 	scene->BoundsMax = glm::vec3( halfArea, maxY + bladeHeight * 0.3f, halfArea);
 
+	const uint64_t vbBytes = static_cast<uint64_t>(sizeof(GrassVertex)) * vertices.size();
+	const uint64_t ibBytes = static_cast<uint64_t>(sizeof(UINT32)) * indices.size();
 	AppendCpuRuntimeTrace(
 		L"[Terrain] grass-on-terrain spawned blades=" + std::to_wstring(numBlades) +
+		L" verts=" + std::to_wstring(vertices.size()) +
+		L" idx=" + std::to_wstring(indices.size()) +
+		L" vb=" + std::to_wstring(vbBytes / (1024ull * 1024ull)) + L"MB" +
+		L" ib=" + std::to_wstring(ibBytes / (1024ull * 1024ull)) + L"MB" +
 		L" area=" + std::to_wstring(static_cast<int>(std::round(terrainSize))) +
+		L" chunks=" + std::to_wstring(chunks.size()) + L"/" + std::to_wstring(gridDim * gridDim) +
 		L" yMin=" + std::to_wstring(minY) +
 		L" yMax=" + std::to_wstring(maxY));
 	return scene;
+}
+
+void Corona::UpdateGrassCulling(const glm::mat4& viewProj)
+{
+	if (!ActiveGrassMesh || ActiveGrassChunks.empty())
+	{
+		LastVisibleGrassChunkCount = 0;
+		return;
+	}
+
+	ActiveGrassMesh->Draws.clear();
+	ActiveGrassMesh->Draws.reserve(ActiveGrassChunks.size());
+
+	const glm::vec3& origin = GrassRenderOrigin;
+	const float distSq = GrassRenderDistance * GrassRenderDistance;
+	uint32_t visible = 0;
+	for (const auto& ci : ActiveGrassChunks)
+	{
+		// Distance test: closest point on chunk's XZ AABB to GrassRenderOrigin.
+		const float cxMin = ci.AabbMin[0], cxMax = ci.AabbMax[0];
+		const float czMin = ci.AabbMin[2], czMax = ci.AabbMax[2];
+		const float cpx = std::clamp(origin.x, cxMin, cxMax);
+		const float cpz = std::clamp(origin.z, czMin, czMax);
+		const float dx = cpx - origin.x;
+		const float dz = cpz - origin.z;
+		if (GrassRenderDistance > 0.0f && (dx * dx + dz * dz) > distSq)
+			continue;
+
+		// 8-corner conservative frustum test in clip space (same as
+		// TerrainComponent::UpdateCulling).
+		int outL = 0, outR = 0, outB = 0, outT = 0, outN = 0, outF = 0;
+		for (int i = 0; i < 8; ++i)
+		{
+			const float x = (i & 1) ? ci.AabbMax[0] : ci.AabbMin[0];
+			const float y = (i & 2) ? ci.AabbMax[1] : ci.AabbMin[1];
+			const float z = (i & 4) ? ci.AabbMax[2] : ci.AabbMin[2];
+			const glm::vec4 c = viewProj * glm::vec4(x, y, z, 1.0f);
+			if (c.x < -c.w) ++outL;
+			if (c.x >  c.w) ++outR;
+			if (c.y < -c.w) ++outB;
+			if (c.y >  c.w) ++outT;
+			if (c.z <  0.0f) ++outN;
+			if (c.z >  c.w) ++outF;
+		}
+		if (outL == 8 || outR == 8 || outB == 8 || outT == 8 || outN == 8 || outF == 8)
+			continue;
+
+		Mesh::DrawCall dc{};
+		dc.mat = ActiveGrassMaterial;
+		dc.IndexStart = ci.IndexStart;
+		dc.IndexCount = ci.IndexCount;
+		dc.VertexBase = ci.VertexBase;
+		dc.VertexCount = ci.VertexCount;
+		ActiveGrassMesh->Draws.push_back(dc);
+		++visible;
+	}
+	LastVisibleGrassChunkCount = visible;
+
+	static uint32_t s_grassFrame = 0;
+	static uint32_t s_lastGrassVisible = 0xFFFFFFFFu;
+	++s_grassFrame;
+	if (visible != s_lastGrassVisible && (s_grassFrame % 30u) == 0u)
+	{
+		AppendCpuRuntimeTrace(
+			L"[Grass] chunk cull visible=" + std::to_wstring(visible) +
+			L"/" + std::to_wstring(ActiveGrassChunks.size()) +
+			L" origin=(" + std::to_wstring(static_cast<int>(origin.x)) +
+			L"," + std::to_wstring(static_cast<int>(origin.y)) +
+			L"," + std::to_wstring(static_cast<int>(origin.z)) +
+			L") dist=" + std::to_wstring(static_cast<int>(GrassRenderDistance)));
+		s_lastGrassVisible = visible;
+	}
 }
 
 shared_ptr<Scene> Corona::CreateProceduralTerrainScene(UINT32 seed)
@@ -8442,12 +8673,15 @@ shared_ptr<Scene> Corona::CreateProceduralTerrainScene(UINT32 seed)
 		return nullptr;
 
 	Terrain::GenerateParams params{};
-	params.Width  = 1024;
-	params.Depth  = 1024;
-	params.WorldScaleXZ = 1.0f;
+	params.Width  = 2048;            // 2km on each side at 1m vertex spacing
+	params.Depth  = 2048;
+	params.WorldScaleXZ = 1.0f;      // 1 m per sample at the highest LOD
 	params.HeightMin = 0.0f;
-	params.HeightMax = 200.0f;
+	params.HeightMax = 80.0f;        // gentle rolling hills (smaller world → flatter)
 	params.Seed = (seed == 0u) ? 1u : seed;
+	params.RidgeWeight   = 0.03f;
+	params.WarpAmplitude = 40.0f;
+	params.NoiseFrequency = 1.0f / 500.0f;  // ~500m wavelength → broad rolls
 
 	auto component = std::make_unique<Terrain::Component>();
 	if (!component->Initialize(renderBackend.get(), params, L"terrain_phase1"))
@@ -8457,12 +8691,14 @@ shared_ptr<Scene> Corona::CreateProceduralTerrainScene(UINT32 seed)
 	}
 
 	shared_ptr<Scene> scene = component->GetScene();
-	// Phase-1 gray material: still needs default texture handles bound,
-	// because the GBuffer PSO unconditionally samples diffuse/normal/rough/metallic.
+	// Bind engine-default textures for Normal/Roughness/Metallic only.
+	// TerrainComponent::Initialize sets a procedural grass+dirt albedo on
+	// Diffuse; do NOT overwrite it here (the GBuffer PSO falls back to
+	// DefaultWhiteTex internally when Diffuse is null, so the procedural
+	// path is the only way to get the patterned terrain).
 	if (scene && !scene->Materials.empty() && scene->Materials.front())
 	{
 		auto& mat = scene->Materials.front();
-		mat->Diffuse   = DefaultWhiteTex;
 		mat->Normal    = DefaultNormalTex;
 		mat->Roughness = DefaultRougnessTex;
 		mat->Metallic  = DefaultBlackTex;
@@ -10627,6 +10863,7 @@ void Corona::BuildRenderFrameDerivedState(const RenderFrameSourceState* sourceSt
 			cameraUp = std::abs(cameraLook.y) < 0.99f ? glm::vec3(0.0f, 1.0f, 0.0f) : glm::vec3(1.0f, 0.0f, 0.0f);
 
 		RenderFrameCameraLookDirection = cameraLook;
+		RenderFrameCameraPosition = cameraPosition;
 		debugCameraPosition = cameraPosition;
 		debugCameraLook = cameraLook;
 		debugCameraUp = cameraUp;
@@ -10641,6 +10878,7 @@ void Corona::BuildRenderFrameDerivedState(const RenderFrameSourceState* sourceSt
 			glm::vec3(0.0f, 0.0f, 1.0f);
 		const glm::vec3 cameraPosition = ReasonableWorldPositionOr(m_camera.m_position, glm::vec3(0.0f, 260.0f, -300.0f));
 		const glm::vec3 cameraUp = FiniteVec3Or(m_camera.m_upDirection, glm::vec3(0.0f, 1.0f, 0.0f));
+		RenderFrameCameraPosition = cameraPosition;
 		debugCameraPosition = cameraPosition;
 		debugCameraLook = RenderFrameCameraLookDirection;
 		debugCameraUp = cameraUp;
@@ -10684,6 +10922,10 @@ void Corona::BuildRenderFrameDerivedState(const RenderFrameSourceState* sourceSt
 	if (ActiveTerrain)
 	{
 		ActiveTerrain->UpdateCulling(ViewProjMat);
+	}
+	if (ActiveGrassMesh && !ActiveGrassChunks.empty())
+	{
+		UpdateGrassCulling(ViewProjMat);
 	}
 
 	const bool bDerivedStateFinite =
@@ -11252,6 +11494,31 @@ void Corona::OnRender()
 		NewPlatformImGuiFrame();
 		ImGui::NewFrame();
 
+		// Console (~ / `) — lazy-init, then poll async TripoSR jobs and
+		// handle key toggle. RouteGlobal so the InputText inside the
+		// console (when it has focus) doesn't swallow the toggle key.
+		if (!Console)
+			Console = std::make_unique<CoronaConsole>(this);
+		Console->Update();
+		if (ImGui::Shortcut(ImGuiKey_GraveAccent, ImGuiInputFlags_RouteGlobal))
+			Console->OnKeyToggle();
+		Console->RenderImGui();
+
+		// Scene inspector — left-anchored entity list + bottom toggle button.
+		if (!SceneInspector)
+			SceneInspector = std::make_unique<CoronaSceneInspector>(this);
+		SceneInspector->RenderImGui();
+
+		// Asset explorer — bin/assets/ file browser, right-click to spawn.
+		if (!AssetExplorer)
+			AssetExplorer = std::make_unique<CoronaAssetExplorer>(this);
+		AssetExplorer->RenderImGui();
+
+		// Toolbox — directional/point lights + primitive shape spawn buttons.
+		if (!Toolbox)
+			Toolbox = std::make_unique<CoronaToolbox>(this);
+		Toolbox->RenderImGui();
+
 #if CORONA_PLATFORM_MOBILE
 		DrawMobileVirtualControls();
 #endif
@@ -11285,18 +11552,70 @@ void Corona::OnRender()
 
 		if (bShowCullingTextOverlay)
 		{
-			char cullingText[160];
+			char cullingText[320];
+			char terrainPart[80];
+			terrainPart[0] = '\0';
+			if (ActiveTerrain)
+			{
+				snprintf(terrainPart, sizeof(terrainPart),
+					"  |  Terrain %u / %u",
+					ActiveTerrain->GetLastVisibleChunkCount(),
+					ActiveTerrain->GetTotalChunkCount());
+			}
+			char grassPart[80];
+			grassPart[0] = '\0';
+			if (!ActiveGrassChunks.empty())
+			{
+				snprintf(grassPart, sizeof(grassPart),
+					"  |  Grass %u / %zu",
+					LastVisibleGrassChunkCount,
+					ActiveGrassChunks.size());
+			}
 			snprintf(
 				cullingText,
 				sizeof(cullingText),
-				"Rendered %llu / %llu objects  |  Frustum %llu  Occlusion %llu",
+				"Rendered %llu / %llu objects  |  Frustum %llu  Occlusion %llu%s%s",
 				static_cast<unsigned long long>(GBufferLastVisibleObjectCount),
 				static_cast<unsigned long long>(GBufferLastTotalObjectCount),
 				static_cast<unsigned long long>(GBufferLastFrustumCulledObjectCount),
-				static_cast<unsigned long long>(GBufferLastOcclusionCulledObjectCount));
+				static_cast<unsigned long long>(GBufferLastOcclusionCulledObjectCount),
+				terrainPart,
+				grassPart);
 			const ImVec2 cullingTextPos(10.0f, 26.0f);
 			foregroundDrawList->AddText(ImVec2(cullingTextPos.x + 1.0f, cullingTextPos.y + 1.0f), IM_COL32(0, 0, 0, 180), cullingText);
 			foregroundDrawList->AddText(cullingTextPos, IM_COL32(190, 235, 255, 235), cullingText);
+
+			// Per-pass cost line (terrain/grass GPU + CPU recording ms).
+			// Avg uses the same rolling window as the Stats panel.
+			if (ActiveTerrain || !ActiveGrassChunks.empty())
+			{
+				char costText[256];
+				char terrainCost[120];
+				terrainCost[0] = '\0';
+				if (ActiveTerrain)
+				{
+					const UINT idx = static_cast<UINT>(EGpuPass::Terrain);
+					snprintf(terrainCost, sizeof(terrainCost),
+						"Terrain  gpu %.2f ms (avg %.2f)  cpu %.2f ms",
+						GpuPassLastTimeMs[idx], GpuPassAverageTimeMs[idx],
+						CpuPassLastTimeMs[idx]);
+				}
+				char grassCost[120];
+				grassCost[0] = '\0';
+				if (!ActiveGrassChunks.empty())
+				{
+					const UINT idx = static_cast<UINT>(EGpuPass::Grass);
+					snprintf(grassCost, sizeof(grassCost),
+						"%sGrass    gpu %.2f ms (avg %.2f)  cpu %.2f ms",
+						ActiveTerrain ? "  |  " : "",
+						GpuPassLastTimeMs[idx], GpuPassAverageTimeMs[idx],
+						CpuPassLastTimeMs[idx]);
+				}
+				snprintf(costText, sizeof(costText), "%s%s", terrainCost, grassCost);
+				const ImVec2 costTextPos(10.0f, 44.0f);
+				foregroundDrawList->AddText(ImVec2(costTextPos.x + 1.0f, costTextPos.y + 1.0f), IM_COL32(0, 0, 0, 180), costText);
+				foregroundDrawList->AddText(costTextPos, IM_COL32(190, 235, 255, 235), costText);
+			}
 		}
 
 		if (bUseLuauImguiControls)
@@ -12612,6 +12931,14 @@ void Corona::OnDestroy()
 void Corona::OnKeyDown(UINT8 key)
 {
 	std::lock_guard<std::mutex> stateLock(GameRenderStateMutex);
+	// When the in-engine console (~ key) is visible it owns the keyboard.
+	// Pass through only the toggle key so the user can still close it; all
+	// other keys would otherwise hit the global hotkey switch below — most
+	// notably 'R' which kicks off shader recompile and locks the engine.
+	const bool bConsoleCapturing = Console && Console->IsVisible();
+	if (bConsoleCapturing && key != VK_OEM_3)
+		return;
+
 	RecordScriptKeyDown(key);
 
 	switch (key)
@@ -12649,9 +12976,9 @@ void Corona::OnKeyDown(UINT8 key)
 		ClampMode++;
 		ClampMode = ClampMode % 3;
 		break;
-	case 'R':
-		bRecompileShaders = true;
-		break;
+	// 'R' shader recompile hotkey removed — the ImGui debug panel has a
+	// "Recompile shaders" button, which is plenty and doesn't conflict
+	// with typing 'r' into the console / other text fields.
 	case 'I':
 		bShowImgui = !bShowImgui;
 		break;
@@ -12669,6 +12996,12 @@ void Corona::OnKeyDown(UINT8 key)
 void Corona::OnKeyUp(UINT8 key)
 {
 	std::lock_guard<std::mutex> stateLock(GameRenderStateMutex);
+	// Mirror OnKeyDown: while console captures the keyboard, suppress key-up
+	// notifications too so the camera state machine doesn't think a key is
+	// stuck and the script side doesn't see released-without-press events.
+	if (Console && Console->IsVisible() && key != VK_OEM_3)
+		return;
+
 	RecordScriptKeyUp(key);
 
 	if (!bScriptCameraControlEnabled)

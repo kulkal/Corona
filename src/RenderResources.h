@@ -191,6 +191,8 @@ public:
 	bool bGpuSpineSkinningDispatched = false;
 	bool bSpineMesh = false; // marks Spine-sourced meshes for unlit + two-sided rendering regardless of skinning path
 	bool bGrassMesh = false; // marks the procedural grass mesh — DrawScene sets the matching CB flag so ApplyVertexDeformations runs grass bend on this mesh only
+	bool bTerrainMesh = false; // marks the terrain mesh — kept for potential future terrain-only effects (no longer gates the deform sphere; that's global now)
+	bool bExcludeFromDeformSphere = false; // opt-out from the global deform sphere — set on meshes you don't want carved (e.g. the player avatar at the sphere center)
 	uint32_t GpuSpineSkinningVertexCount = 0;
 	float GpuSpineSkinningSourceScale = 1.0f;
 	std::shared_ptr<Buffer> GpuSpineInputVertices;

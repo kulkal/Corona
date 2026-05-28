@@ -181,6 +181,7 @@ namespace CoronaECS
 		CameraComponent* GetActiveCamera();
 		const CameraComponent* GetActiveCamera() const;
 
+		Entity FindEntityByName(const std::string& name) const;
 		Entity FindEntityForRenderObject(uint32_t renderObjectHandle) const;
 		Entity FindEntityForRuntimeLight(uint32_t runtimeLightId) const;
 		std::vector<Entity> GetEntitiesWithMeshAndTransform() const;

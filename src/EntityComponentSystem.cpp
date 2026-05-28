@@ -447,6 +447,18 @@ namespace CoronaECS
 		return Entity();
 	}
 
+	Entity EntityComponentSystem::FindEntityByName(const std::string& name) const
+	{
+		if (name.empty())
+			return Entity();
+		for (const auto& [id, n] : EntityNames)
+		{
+			if (n == name)
+				return MakeEntity(id);
+		}
+		return Entity();
+	}
+
 	Entity EntityComponentSystem::FindEntityForRuntimeLight(uint32_t runtimeLightId) const
 	{
 		if (runtimeLightId == 0)
