@@ -26,7 +26,14 @@ cbuffer ViewParameter : register(b0)
     uint FrameCounter;
     uint BlueNoiseOffsetStride;
     uint NoiseMode;
-    uint3 _padding;
+    // Number of point lights (0..3) whose visibility is written into the
+    // G/B/A channels of ShadowResult. Channel R remains the directional
+    // sun visibility for the existing LightingPS consumer.
+    uint ShadowedPointLightCount;
+    uint2 _padding;
+    // xyz = world position, w = radius. Matches LightingPS PointLights[]
+    // layout so the C++ side can copy the top-3 entries directly.
+    float4 ShadowedPointLights[3];
 };
 SamplerState sampleWrap : register(s0);
 
@@ -132,7 +139,64 @@ void rayGen()
     }
 
     visibility /= sampleCount;
-    ShadowResult[pixelPos] = float4(visibility.xxx, 1.0);
+
+    // Per-point-light shadow rays into G/B/A. Single sample per light per
+    // frame — temporal accumulation in the denoising / GI passes handles
+    // residual noise. Lights with count<3 leave their channel at 1.0
+    // (fully lit) so LightingPS doesn't shadow them by accident.
+    float4 outShadow = float4(visibility, 1.0f, 1.0f, 1.0f);
+    [loop]
+    for (uint lightIdx = 0; lightIdx < 3u; ++lightIdx)
+    {
+        if (lightIdx >= ShadowedPointLightCount)
+            break;
+
+        float3 lightPos = ShadowedPointLights[lightIdx].xyz;
+        float lightRadius = max(ShadowedPointLights[lightIdx].w, 0.01f);
+        float3 toLight = lightPos - worldPos;
+        float distToLight = length(toLight);
+        // Outside the light's effective range — treat as fully lit (no
+        // shadow contribution to begin with so the channel value is moot).
+        if (distToLight > lightRadius || distToLight < 1.0e-3f)
+            continue;
+
+        float3 lightDir = toLight / distToLight;
+        // Skip back-facing surfaces (NdotL <= 0). The point light's direct
+        // contribution is already zero there, so saving the ray cast.
+        if (dot(worldNormal, lightDir) <= 0.0f)
+        {
+            // Write 0 so LightingPS shadows it (consistent with NdotL=0).
+            float pointVis = 0.0f;
+            if (lightIdx == 0u) outShadow.g = pointVis;
+            else if (lightIdx == 1u) outShadow.b = pointVis;
+            else                     outShadow.a = pointVis;
+            continue;
+        }
+
+        float3 rayBiasNormal = dot(traceNormal, lightDir) < 0.0f ? -traceNormal : traceNormal;
+        RayDesc pointRay;
+        pointRay.Origin = worldPos + rayBiasNormal * normalBias;
+        pointRay.Direction = lightDir;
+        pointRay.TMin = max(0.05f, normalBias * 0.25f);
+        // Cap TMax just shy of the light position so the ray doesn't keep
+        // going and accidentally treat geometry behind the light as
+        // occluder.
+        pointRay.TMax = max(distToLight - max(normalBias * 0.5f, 0.05f), pointRay.TMin + 0.05f);
+
+        RayPayload pointPayload;
+        pointPayload.bHit = 1u;
+        pointPayload._padding = 0.0f.xxx;
+        TraceRay(gRtScene,
+            RT_SHADOW_RAY_FLAGS,
+            0xFF, 0, 0, 0, pointRay, pointPayload);
+
+        float pointVis = (pointPayload.bHit == 0u) ? 1.0f : 0.0f;
+        if (lightIdx == 0u) outShadow.g = pointVis;
+        else if (lightIdx == 1u) outShadow.b = pointVis;
+        else                     outShadow.a = pointVis;
+    }
+
+    ShadowResult[pixelPos] = outShadow;
 
 }
 

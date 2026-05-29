@@ -555,9 +555,17 @@ private:
 		UINT32 FrameCounter = 0;
 		UINT32 BlueNoiseOffsetStride = 1;
 		UINT32 NoiseMode = 1;
-		UINT32 _padding0 = 0;
+		// Active point-light count (0..3). The shadow shader writes
+		// ShadowResult.gba = visibility for ShadowedPointLights[0..2].
+		// Channel R remains the directional sun. Picked by the C++ side
+		// per frame (top contribution / first 3 enabled). When count<3 the
+		// unused channels are set to 1 so LightingPS doesn't apply spurious
+		// shadow.
+		UINT32 ShadowedPointLightCount = 0;
 		UINT32 _padding1 = 0;
 		UINT32 _padding2 = 0;
+		// xyz = world position, w = radius. Matches the LightingPS layout.
+		glm::vec4 ShadowedPointLights[3] = { glm::vec4(0.0f), glm::vec4(0.0f), glm::vec4(0.0f) };
 	};
 
 	RTShadowViewParamCB RTShadowViewParam;

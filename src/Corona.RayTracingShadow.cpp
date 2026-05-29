@@ -74,6 +74,24 @@ void Corona::RaytraceShadowPass()
 	RTShadowViewParam.BlueNoiseOffsetStride = RTGIViewParam.BlueNoiseOffsetStride;
 	RTShadowViewParam.NoiseMode = RenderFrameRayNoiseMode;
 
+	// Channel-pack up to 3 point lights into ShadowBuffer.gba. Pick the
+	// first 3 enabled lights in registration order — when richer importance
+	// sampling is needed swap in a brightness/distance heuristic here.
+	uint32_t shadowedCount = 0;
+	for (const PointLightState& pl : RenderWorld.PointLights)
+	{
+		if (shadowedCount >= 3u)
+			break;
+		if (!pl.bEnabled || pl.Intensity <= 0.0f)
+			continue;
+		RTShadowViewParam.ShadowedPointLights[shadowedCount] =
+			glm::vec4(pl.Position, std::max(pl.Radius, 0.01f));
+		++shadowedCount;
+	}
+	for (uint32_t i = shadowedCount; i < 3u; ++i)
+		RTShadowViewParam.ShadowedPointLights[i] = glm::vec4(0.0f);
+	RTShadowViewParam.ShadowedPointLightCount = shadowedCount;
+
 	renderBackend->TransitionTexture(ShadowBuffer.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
 
 	RTPassBuilder pass(*this, PSO_RT_SHADOW);

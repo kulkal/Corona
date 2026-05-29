@@ -166,7 +166,14 @@ float3 EvaluateDirectionalVisibility(float2 screenUV, float deviceDepth, float3 
         return 1.0f.xxx;
 
     if (bUseShadowMap == 0)
-        return saturate(SanitizeFloat3(ShadowTex[uint2(screenUV * RTSize)].xyz));
+    {
+        // ShadowTex layout: R = directional sun visibility, GBA = up to 3
+        // shadowed point lights (channel-packed Option A). Sun reads R
+        // only — older code that splat xyz worked only because the entire
+        // buffer was sun visibility.
+        float sunVis = saturate(SanitizeFloat3(ShadowTex[uint2(screenUV * RTSize)].xyz).x);
+        return sunVis.xxx;
+    }
 
     float3 worldPosition = ReconstructWorldPosition(screenUV, deviceDepth);
     worldPosition += SafeNormalize(worldNormal, float3(0.0f, 1.0f, 0.0f)) * 1.75f;
@@ -289,6 +296,14 @@ float4 PSMain(PSInput input) : SV_TARGET
     float3 PointSpecular = 0.0f.xxx;
     if (PointLightCount > 0 && DeviceDepth < 0.999999f)
     {
+        // RT shadow channel-pack: ShadowTex.gba = visibility for the top
+        // 3 enabled point lights in registration order. Lights past index 2
+        // fall through to fully-lit (no shadow buffer slot available).
+        float4 shadowSample = bEnableDirectionalShadow != 0 ?
+            saturate(SanitizeFloat4(ShadowTex[uint2(screenUV * RTSize)])) :
+            float4(1.0f, 1.0f, 1.0f, 1.0f);
+        float3 PointVis = float3(shadowSample.g, shadowSample.b, shadowSample.a);
+
         float3 WorldPosition = ReconstructWorldPosition(screenUV, DeviceDepth);
         uint activePointLightCount = min(PointLightCount, MAX_POINT_LIGHTS);
         [loop]
@@ -308,7 +323,10 @@ float4 PSMain(PSInput input) : SV_TARGET
             float inverseSquareAttenuation = 1.0f / max(1.0f, distanceSq * 0.0001f);
             float attenuation = rangeAttenuation * inverseSquareAttenuation;
             float pointNdotL = saturate(dot(pointLightDir, WorldNormal));
-            float3 pointRadiance = pointColor * pointIntensity * attenuation;
+            // Indices 0..2 read their packed visibility; later lights stay
+            // unshadowed (channel index would be out of range).
+            float pointVisibility = lightIndex < 3u ? PointVis[lightIndex] : 1.0f;
+            float3 pointRadiance = pointColor * pointIntensity * attenuation * pointVisibility;
 
             if (bEnableDirectDiffuse)
                 PointDiffuse += pointNdotL * pointRadiance * Albedo * (1.0f - Metallic);
