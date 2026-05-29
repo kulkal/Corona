@@ -74,22 +74,36 @@ void Corona::RaytraceShadowPass()
 	RTShadowViewParam.BlueNoiseOffsetStride = RTGIViewParam.BlueNoiseOffsetStride;
 	RTShadowViewParam.NoiseMode = RenderFrameRayNoiseMode;
 
-	// Channel-pack up to 3 point lights into ShadowBuffer.gba. Pick the
-	// first 3 enabled lights in registration order — when richer importance
-	// sampling is needed swap in a brightness/distance heuristic here.
+	// Shadow mode handling:
+	//   Option A (default): first 3 enabled lights packed into ShadowBuffer
+	//                       GBA channels. The shader caps at 3.
+	//   ReSTIR Phase 1    : up to 8 candidates, each weighted by luma *
+	//                       intensity for RIS. The shader picks 1 per pixel.
+	RTShadowViewParam.ShadowMode = bEnableReSTIRDirectShadow ? 1u : 0u;
+	const uint32_t maxShadowed = bEnableReSTIRDirectShadow ? 8u : 3u;
 	uint32_t shadowedCount = 0;
 	for (const PointLightState& pl : RenderWorld.PointLights)
 	{
-		if (shadowedCount >= 3u)
+		if (shadowedCount >= maxShadowed)
 			break;
 		if (!pl.bEnabled || pl.Intensity <= 0.0f)
 			continue;
 		RTShadowViewParam.ShadowedPointLights[shadowedCount] =
 			glm::vec4(pl.Position, std::max(pl.Radius, 0.01f));
+		// Candidate weight: perceptual luma of color × intensity. This
+		// drives RIS selection probability so brighter lights are sampled
+		// more often. Option A ignores the weights but they cost nothing
+		// to compute, so we always populate them.
+		const float luma = 0.2126f * pl.Color.r + 0.7152f * pl.Color.g + 0.0722f * pl.Color.b;
+		const float weight = std::max(0.0f, luma) * std::max(0.0f, pl.Intensity);
+		RTShadowViewParam.ShadowedPointLightWeights[shadowedCount] = glm::vec4(weight, 0.0f, 0.0f, 0.0f);
 		++shadowedCount;
 	}
-	for (uint32_t i = shadowedCount; i < 3u; ++i)
+	for (uint32_t i = shadowedCount; i < 8u; ++i)
+	{
 		RTShadowViewParam.ShadowedPointLights[i] = glm::vec4(0.0f);
+		RTShadowViewParam.ShadowedPointLightWeights[i] = glm::vec4(0.0f);
+	}
 	RTShadowViewParam.ShadowedPointLightCount = shadowedCount;
 
 	renderBackend->TransitionTexture(ShadowBuffer.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);

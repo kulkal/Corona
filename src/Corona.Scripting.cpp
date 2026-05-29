@@ -7344,6 +7344,7 @@ void Corona::PushLuauUiStateForScript(lua_State* L, const std::string& mode)
 	PushBoolField(L, "rt_diffuse_gi_ser", bEnableRTDiffuseGISER);
 	PushBoolField(L, "rt_diffuse_gi_ser_available", renderBackend && renderBackend->SupportsShaderExecutionReordering());
 	PushBoolField(L, "enable_rtao", bEnableRTAO);
+	PushBoolField(L, "enable_restir_direct_shadow", bEnableReSTIRDirectShadow);
 	PushBoolField(L, "enable_sky_lighting", bEnableSkyLighting);
 	PushBoolField(L, "enable_ray_traced_sky_lighting", bEnableRayTracedSkyLighting);
 	PushNumberField(L, "sun_angular_radius", RTShadowViewParam.ShadowLightRadius);
@@ -7862,6 +7863,7 @@ bool Corona::SetLuauUiValueForScript(const std::string& name, lua_State* L, int 
 	if (setBool("enable_diffuse_gi", bEnableDiffuseGI, true)) return true;
 	if (setBool("rt_diffuse_gi_ser", bEnableRTDiffuseGISER, true)) return true;
 	if (setBool("enable_rtao", bEnableRTAO, true)) return true;
+	if (setBool("enable_restir_direct_shadow", bEnableReSTIRDirectShadow)) return true;
 	if (setBool("enable_sky_lighting", bEnableSkyLighting, true)) return true;
 	if (setBool("enable_ray_traced_sky_lighting", bEnableRayTracedSkyLighting, true)) return true;
 	if (setFloat("sun_angular_radius", RTShadowViewParam.ShadowLightRadius, true)) return true;

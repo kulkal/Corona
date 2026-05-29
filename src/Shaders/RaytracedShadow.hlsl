@@ -26,14 +26,18 @@ cbuffer ViewParameter : register(b0)
     uint FrameCounter;
     uint BlueNoiseOffsetStride;
     uint NoiseMode;
-    // Number of point lights (0..3) whose visibility is written into the
-    // G/B/A channels of ShadowResult. Channel R remains the directional
-    // sun visibility for the existing LightingPS consumer.
-    uint ShadowedPointLightCount;
-    uint2 _padding;
-    // xyz = world position, w = radius. Matches LightingPS PointLights[]
-    // layout so the C++ side can copy the top-3 entries directly.
-    float4 ShadowedPointLights[3];
+    // 0 = Option A channel-pack (sun in R, top-3 lights in GBA),
+    // 1 = ReSTIR Phase 1 single-light reservoir (sun in R, G=lightIdx,
+    //     B=lightWeight, A=visibility). The two modes write different
+    //     ShadowBuffer semantics; LightingPS branches on the same flag.
+    uint ShadowMode;
+    uint ShadowedPointLightCount; // 0..3 (Option A) or 0..8 (ReSTIR)
+    uint _padding2;
+    // First 3 entries are used by Option A; ReSTIR iterates up to 8.
+    float4 ShadowedPointLights[8];
+    // RIS weights for ReSTIR. x = candidate weight (luma * intensity).
+    // y/z/w unused for now (room for distance hints, history flags).
+    float4 ShadowedPointLightWeights[8];
 };
 SamplerState sampleWrap : register(s0);
 
@@ -140,60 +144,136 @@ void rayGen()
 
     visibility /= sampleCount;
 
-    // Per-point-light shadow rays into G/B/A. Single sample per light per
-    // frame — temporal accumulation in the denoising / GI passes handles
-    // residual noise. Lights with count<3 leave their channel at 1.0
-    // (fully lit) so LightingPS doesn't shadow them by accident.
+    // Helper: cast a single occlusion ray to a world-space point light
+    // position. Returns 1.0 if unoccluded, 0.0 if shadowed (skipping rays
+    // for back-facing surfaces or out-of-range lights). Shared between
+    // Option A's fixed channel pack and ReSTIR's single-light reservoir.
+    #define COMPUTE_POINT_LIGHT_VIS(visOut, lightPos, lightRadius)         \
+    {                                                                      \
+        float3 _toLight = (lightPos) - worldPos;                           \
+        float _distToLight = length(_toLight);                             \
+        if (_distToLight > (lightRadius) || _distToLight < 1.0e-3f)        \
+        {                                                                  \
+            visOut = 1.0f; /* out of range — direct attenuation handles */ \
+        }                                                                  \
+        else                                                               \
+        {                                                                  \
+            float3 _lightDir = _toLight / _distToLight;                    \
+            if (dot(worldNormal, _lightDir) <= 0.0f)                       \
+            {                                                              \
+                visOut = 0.0f; /* back-facing → NdotL=0 anyway */          \
+            }                                                              \
+            else                                                           \
+            {                                                              \
+                float3 _bias = dot(traceNormal, _lightDir) < 0.0f          \
+                    ? -traceNormal : traceNormal;                          \
+                RayDesc _ray;                                              \
+                _ray.Origin = worldPos + _bias * normalBias;               \
+                _ray.Direction = _lightDir;                                \
+                _ray.TMin = max(0.05f, normalBias * 0.25f);                \
+                _ray.TMax = max(_distToLight - max(normalBias * 0.5f, 0.05f), _ray.TMin + 0.05f); \
+                RayPayload _p;                                             \
+                _p.bHit = 1u;                                              \
+                _p._padding = 0.0f.xxx;                                    \
+                TraceRay(gRtScene, RT_SHADOW_RAY_FLAGS,                    \
+                    0xFF, 0, 0, 0, _ray, _p);                              \
+                visOut = (_p.bHit == 0u) ? 1.0f : 0.0f;                    \
+            }                                                              \
+        }                                                                  \
+    }
+
     float4 outShadow = float4(visibility, 1.0f, 1.0f, 1.0f);
-    [loop]
-    for (uint lightIdx = 0; lightIdx < 3u; ++lightIdx)
+
+    if (ShadowMode == 0u)
     {
-        if (lightIdx >= ShadowedPointLightCount)
-            break;
-
-        float3 lightPos = ShadowedPointLights[lightIdx].xyz;
-        float lightRadius = max(ShadowedPointLights[lightIdx].w, 0.01f);
-        float3 toLight = lightPos - worldPos;
-        float distToLight = length(toLight);
-        // Outside the light's effective range — treat as fully lit (no
-        // shadow contribution to begin with so the channel value is moot).
-        if (distToLight > lightRadius || distToLight < 1.0e-3f)
-            continue;
-
-        float3 lightDir = toLight / distToLight;
-        // Skip back-facing surfaces (NdotL <= 0). The point light's direct
-        // contribution is already zero there, so saving the ray cast.
-        if (dot(worldNormal, lightDir) <= 0.0f)
+        // -------------- Option A: channel-pack first 3 lights ----------
+        [loop]
+        for (uint lightIdx = 0; lightIdx < 3u; ++lightIdx)
         {
-            // Write 0 so LightingPS shadows it (consistent with NdotL=0).
-            float pointVis = 0.0f;
+            if (lightIdx >= ShadowedPointLightCount)
+                break;
+            float pointVis = 1.0f;
+            COMPUTE_POINT_LIGHT_VIS(pointVis,
+                ShadowedPointLights[lightIdx].xyz,
+                max(ShadowedPointLights[lightIdx].w, 0.01f));
             if (lightIdx == 0u) outShadow.g = pointVis;
             else if (lightIdx == 1u) outShadow.b = pointVis;
             else                     outShadow.a = pointVis;
-            continue;
+        }
+    }
+    else
+    {
+        // -------------- ReSTIR Phase 1: per-pixel RIS over all lights --
+        // Pick one light per pixel proportional to luma*intensity (target
+        // PDF). NO temporal / spatial reuse yet — that's Phase 2/3.
+        // Outputs to ShadowBuffer.gba :
+        //   G = chosen light index (cast back to uint in LightingPS),
+        //   B = candidate weight ratio (W / pdf) for unbiased estimate,
+        //   A = visibility of the chosen light.
+        uint chosenIdx = 0xFFFFFFFFu;
+        float chosenWeight = 0.0f;
+        float weightSum = 0.0f;
+
+        [loop]
+        for (uint candIdx = 0; candIdx < 8u; ++candIdx)
+        {
+            if (candIdx >= ShadowedPointLightCount)
+                break;
+            float3 candPos = ShadowedPointLights[candIdx].xyz;
+            float candRadius = max(ShadowedPointLights[candIdx].w, 0.01f);
+            float candLuma = ShadowedPointLightWeights[candIdx].x;
+            if (candLuma <= 0.0f)
+                continue;
+
+            // Per-candidate unshadowed contribution estimate: luma /
+            // (distance² + range² damping). Higher means better candidate.
+            float3 toCand = candPos - worldPos;
+            float distSq = max(dot(toCand, toCand), 1.0e-4f);
+            float dist = sqrt(distSq);
+            float rangeAtten = saturate(1.0f - dist / candRadius);
+            float NdotL = saturate(dot(worldNormal, toCand) / max(dist, 1.0e-3f));
+            float targetPdf = candLuma * rangeAtten * rangeAtten * NdotL / max(distSq * 0.0001f, 1.0f);
+            if (targetPdf <= 0.0f)
+                continue;
+
+            weightSum += targetPdf;
+
+            // Reservoir update: keep with probability targetPdf/weightSum.
+            // Use a tiny LCG seeded by pixelPos + FrameCounter + candIdx.
+            uint seed = (pixelPos.x * 1973u + pixelPos.y * 9277u + FrameCounter * 26699u + candIdx * 49u) * 6151u;
+            seed ^= seed >> 13u;
+            seed *= 0x5bd1e995u;
+            seed ^= seed >> 15u;
+            float u = (seed & 0x00FFFFFFu) / 16777216.0f;
+            if (u * weightSum <= targetPdf)
+            {
+                chosenIdx = candIdx;
+                chosenWeight = targetPdf;
+            }
         }
 
-        float3 rayBiasNormal = dot(traceNormal, lightDir) < 0.0f ? -traceNormal : traceNormal;
-        RayDesc pointRay;
-        pointRay.Origin = worldPos + rayBiasNormal * normalBias;
-        pointRay.Direction = lightDir;
-        pointRay.TMin = max(0.05f, normalBias * 0.25f);
-        // Cap TMax just shy of the light position so the ray doesn't keep
-        // going and accidentally treat geometry behind the light as
-        // occluder.
-        pointRay.TMax = max(distToLight - max(normalBias * 0.5f, 0.05f), pointRay.TMin + 0.05f);
-
-        RayPayload pointPayload;
-        pointPayload.bHit = 1u;
-        pointPayload._padding = 0.0f.xxx;
-        TraceRay(gRtScene,
-            RT_SHADOW_RAY_FLAGS,
-            0xFF, 0, 0, 0, pointRay, pointPayload);
-
-        float pointVis = (pointPayload.bHit == 0u) ? 1.0f : 0.0f;
-        if (lightIdx == 0u) outShadow.g = pointVis;
-        else if (lightIdx == 1u) outShadow.b = pointVis;
-        else                     outShadow.a = pointVis;
+        if (chosenIdx != 0xFFFFFFFFu)
+        {
+            float pointVis = 1.0f;
+            COMPUTE_POINT_LIGHT_VIS(pointVis,
+                ShadowedPointLights[chosenIdx].xyz,
+                max(ShadowedPointLights[chosenIdx].w, 0.01f));
+            // Unbiased estimator weight: weightSum / targetPdf. The
+            // LightingPS consumer multiplies the chosen light's evaluated
+            // BRDF by this factor so the result matches the all-lights
+            // average in expectation.
+            float ratio = weightSum / max(chosenWeight, 1.0e-6f);
+            outShadow.g = (float)chosenIdx;
+            outShadow.b = ratio;
+            outShadow.a = pointVis;
+        }
+        else
+        {
+            // No candidates — encode sentinel index so LightingPS skips.
+            outShadow.g = 255.0f;
+            outShadow.b = 0.0f;
+            outShadow.a = 1.0f;
+        }
     }
 
     ShadowResult[pixelPos] = outShadow;

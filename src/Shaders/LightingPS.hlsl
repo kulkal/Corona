@@ -68,7 +68,12 @@ cbuffer LightingParam : register(b0)
     uint bEnableDirectionalShadow;
     uint bUseShadowMap;
     uint bEnableSimpleSkyLighting;
-    uint LightingPadding1;
+    // 0 = Option A channel-pack (ShadowTex.gba = visibility for first 3
+    //     enabled point lights),
+    // 1 = ReSTIR Phase 1 reservoir (ShadowTex.g = chosen light index as
+    //     float, .b = weight ratio, .a = visibility). LightingPS uses the
+    //     same flag to branch its point-light loop.
+    uint ShadowMode;
     float4 AmbientSkyColorAndStrength;
     float4 AmbientGroundColorAndStrength;
     PointLightParam PointLights[MAX_POINT_LIGHTS];
@@ -296,42 +301,79 @@ float4 PSMain(PSInput input) : SV_TARGET
     float3 PointSpecular = 0.0f.xxx;
     if (PointLightCount > 0 && DeviceDepth < 0.999999f)
     {
-        // RT shadow channel-pack: ShadowTex.gba = visibility for the top
-        // 3 enabled point lights in registration order. Lights past index 2
-        // fall through to fully-lit (no shadow buffer slot available).
         float4 shadowSample = bEnableDirectionalShadow != 0 ?
             saturate(SanitizeFloat4(ShadowTex[uint2(screenUV * RTSize)])) :
             float4(1.0f, 1.0f, 1.0f, 1.0f);
-        float3 PointVis = float3(shadowSample.g, shadowSample.b, shadowSample.a);
 
         float3 WorldPosition = ReconstructWorldPosition(screenUV, DeviceDepth);
         uint activePointLightCount = min(PointLightCount, MAX_POINT_LIGHTS);
-        [loop]
-        for (uint lightIndex = 0; lightIndex < activePointLightCount; ++lightIndex)
+
+        if (ShadowMode == 1u)
         {
-            float3 pointPosition = PointLights[lightIndex].PositionAndRadius.xyz;
-            float pointRadius = max(PointLights[lightIndex].PositionAndRadius.w, 0.01f);
-            float3 pointColor = max(PointLights[lightIndex].ColorAndIntensity.xyz, 0.0f.xxx);
-            float pointIntensity = max(PointLights[lightIndex].ColorAndIntensity.w, 0.0f);
+            // ReSTIR Phase 1: shadow buffer stores a single chosen light
+            // index, candidate weight ratio, and visibility for THIS pixel.
+            // Evaluate that one light at full BRDF weighted by the RIS
+            // ratio. Other point lights contribute nothing this pixel —
+            // temporal accumulation across frames + neighboring pixels
+            // covers the full lighting (each pixel rolls its own light).
+            float rawIdx = ShadowTex[uint2(screenUV * RTSize)].g;
+            uint chosenIdx = (uint)(rawIdx + 0.5f);
+            float ratio = ShadowTex[uint2(screenUV * RTSize)].b;
+            float vis = saturate(ShadowTex[uint2(screenUV * RTSize)].a);
+            if (chosenIdx < activePointLightCount && ratio > 0.0f)
+            {
+                float3 pointPosition = PointLights[chosenIdx].PositionAndRadius.xyz;
+                float pointRadius = max(PointLights[chosenIdx].PositionAndRadius.w, 0.01f);
+                float3 pointColor = max(PointLights[chosenIdx].ColorAndIntensity.xyz, 0.0f.xxx);
+                float pointIntensity = max(PointLights[chosenIdx].ColorAndIntensity.w, 0.0f);
 
-            float3 toLight = pointPosition - WorldPosition;
-            float distanceSq = max(dot(toLight, toLight), 1.0e-4f);
-            float distanceToLight = sqrt(distanceSq);
-            float3 pointLightDir = toLight / distanceToLight;
-            float rangeAttenuation = saturate(1.0f - distanceToLight / pointRadius);
-            rangeAttenuation *= rangeAttenuation;
-            float inverseSquareAttenuation = 1.0f / max(1.0f, distanceSq * 0.0001f);
-            float attenuation = rangeAttenuation * inverseSquareAttenuation;
-            float pointNdotL = saturate(dot(pointLightDir, WorldNormal));
-            // Indices 0..2 read their packed visibility; later lights stay
-            // unshadowed (channel index would be out of range).
-            float pointVisibility = lightIndex < 3u ? PointVis[lightIndex] : 1.0f;
-            float3 pointRadiance = pointColor * pointIntensity * attenuation * pointVisibility;
+                float3 toLight = pointPosition - WorldPosition;
+                float distanceSq = max(dot(toLight, toLight), 1.0e-4f);
+                float distanceToLight = sqrt(distanceSq);
+                float3 pointLightDir = toLight / distanceToLight;
+                float rangeAttenuation = saturate(1.0f - distanceToLight / pointRadius);
+                rangeAttenuation *= rangeAttenuation;
+                float inverseSquareAttenuation = 1.0f / max(1.0f, distanceSq * 0.0001f);
+                float attenuation = rangeAttenuation * inverseSquareAttenuation;
+                float pointNdotL = saturate(dot(pointLightDir, WorldNormal));
+                float3 pointRadiance = pointColor * pointIntensity * attenuation * vis * ratio;
 
-            if (bEnableDirectDiffuse)
-                PointDiffuse += pointNdotL * pointRadiance * Albedo * (1.0f - Metallic);
-            if (bEnableDirectSpecular)
-                PointSpecular += EvaluateGGXSpecularBRDF(WorldNormal, V, pointLightDir, Roughness, F0) * pointNdotL * pointRadiance;
+                if (bEnableDirectDiffuse)
+                    PointDiffuse += pointNdotL * pointRadiance * Albedo * (1.0f - Metallic);
+                if (bEnableDirectSpecular)
+                    PointSpecular += EvaluateGGXSpecularBRDF(WorldNormal, V, pointLightDir, Roughness, F0) * pointNdotL * pointRadiance;
+            }
+        }
+        else
+        {
+            // Option A: first 3 lights get hard shadow from .gba. Lights
+            // past index 2 stay unshadowed (no buffer slot available).
+            float3 PointVis = float3(shadowSample.g, shadowSample.b, shadowSample.a);
+            [loop]
+            for (uint lightIndex = 0; lightIndex < activePointLightCount; ++lightIndex)
+            {
+                float3 pointPosition = PointLights[lightIndex].PositionAndRadius.xyz;
+                float pointRadius = max(PointLights[lightIndex].PositionAndRadius.w, 0.01f);
+                float3 pointColor = max(PointLights[lightIndex].ColorAndIntensity.xyz, 0.0f.xxx);
+                float pointIntensity = max(PointLights[lightIndex].ColorAndIntensity.w, 0.0f);
+
+                float3 toLight = pointPosition - WorldPosition;
+                float distanceSq = max(dot(toLight, toLight), 1.0e-4f);
+                float distanceToLight = sqrt(distanceSq);
+                float3 pointLightDir = toLight / distanceToLight;
+                float rangeAttenuation = saturate(1.0f - distanceToLight / pointRadius);
+                rangeAttenuation *= rangeAttenuation;
+                float inverseSquareAttenuation = 1.0f / max(1.0f, distanceSq * 0.0001f);
+                float attenuation = rangeAttenuation * inverseSquareAttenuation;
+                float pointNdotL = saturate(dot(pointLightDir, WorldNormal));
+                float pointVisibility = lightIndex < 3u ? PointVis[lightIndex] : 1.0f;
+                float3 pointRadiance = pointColor * pointIntensity * attenuation * pointVisibility;
+
+                if (bEnableDirectDiffuse)
+                    PointDiffuse += pointNdotL * pointRadiance * Albedo * (1.0f - Metallic);
+                if (bEnableDirectSpecular)
+                    PointSpecular += EvaluateGGXSpecularBRDF(WorldNormal, V, pointLightDir, Roughness, F0) * pointNdotL * pointRadiance;
+            }
         }
     }
 

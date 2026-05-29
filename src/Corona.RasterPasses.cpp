@@ -1402,6 +1402,7 @@ void Corona::LightingPass()
 		(!bMobileHybridDirectOnly && bShadowOutputValidThisFrame && ShadowBuffer);
 	Param.bEnableDirectionalShadow = bDirectionalShadowAvailable ? 1u : 0u;
 	Param.bUseShadowMap = bUseMobileShadowMap ? 1u : 0u;
+	Param.ShadowMode = bEnableReSTIRDirectShadow ? 1u : 0u;
 	static bool bLoggedMissingDesktopShadowOutput = false;
 	if (!bMobileHybridDirectOnly &&
 		ShadowBuffer &&

@@ -555,17 +555,24 @@ private:
 		UINT32 FrameCounter = 0;
 		UINT32 BlueNoiseOffsetStride = 1;
 		UINT32 NoiseMode = 1;
-		// Active point-light count (0..3). The shadow shader writes
-		// ShadowResult.gba = visibility for ShadowedPointLights[0..2].
-		// Channel R remains the directional sun. Picked by the C++ side
-		// per frame (top contribution / first 3 enabled). When count<3 the
-		// unused channels are set to 1 so LightingPS doesn't apply spurious
-		// shadow.
+		// Mode: 0 = Option A channel-pack (sun in R, top-3 point lights in GBA),
+		//       1 = ReSTIR Phase 1 single-light reservoir (sun in R; G=light
+		//           index, B=light weight, A=visibility for the RIS-chosen
+		//           point light). Phase 1 has no temporal/spatial reuse —
+		//           per-pixel single-frame RIS only. Phase 2 adds reuse.
+		UINT32 ShadowMode = 0;
+		// For Option A: 0..3 (number of channel-packed lights).
+		// For ReSTIR : 0..MaxPointLights (number of candidate lights iterated).
 		UINT32 ShadowedPointLightCount = 0;
-		UINT32 _padding1 = 0;
 		UINT32 _padding2 = 0;
-		// xyz = world position, w = radius. Matches the LightingPS layout.
-		glm::vec4 ShadowedPointLights[3] = { glm::vec4(0.0f), glm::vec4(0.0f), glm::vec4(0.0f) };
+		// Up to 8 point lights, each xyz = position, w = radius. The first
+		// ShadowedPointLightCount entries are valid. Same packing for both
+		// shadow modes; the shader chooses how to consume them.
+		glm::vec4 ShadowedPointLights[8] = {};
+		// Per-light intensity used as RIS candidate weight (color luma *
+		// intensity * range scaling). Only ReSTIR mode reads these; Option
+		// A treats every shadowed light as equal-cost.
+		glm::vec4 ShadowedPointLightWeights[8] = {};
 	};
 
 	RTShadowViewParamCB RTShadowViewParam;
@@ -943,7 +950,9 @@ private:
 		UINT32 bEnableDirectionalShadow = 1;
 		UINT32 bUseShadowMap = 0;
 		UINT32 bEnableSimpleSkyLighting = 0;
-		UINT32 LightingPadding1 = 0;
+		// Mirror RTShadowViewParamCB::ShadowMode (0 = Option A, 1 = ReSTIR
+		// Phase 1). LightingPS branches its point-light loop accordingly.
+		UINT32 ShadowMode = 0;
 		glm::vec4 AmbientSkyColorAndStrength = glm::vec4(0.0f);
 		glm::vec4 AmbientGroundColorAndStrength = glm::vec4(0.0f);
 		PointLightParam PointLights[MaxPointLights];
@@ -1089,6 +1098,12 @@ private:
 	bool bEnableDirectDiffuse = true;
 	bool bEnableDirectSpecular = true;
 	bool bEnableRTAO = true;
+	// Point-light shadow mode: false = 4-channel pack (sun + first 3 lights,
+	// hard-cap), true = ReSTIR Phase 1 reservoir (single-light per pixel,
+	// scales to MaxPointLights candidates). Phase 1 has no temporal reuse
+	// yet so it's noisier — leave Option A as the default until Phase 2
+	// reuse lands.
+	bool bEnableReSTIRDirectShadow = false;
 	bool bEnableSkyLighting = false;
 	bool bEnableRayTracedSkyLighting = true;
 	float RTAOIndirectStrength = 0.25f;

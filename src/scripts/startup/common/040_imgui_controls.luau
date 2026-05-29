@@ -752,6 +752,7 @@ local function draw_lighting_controls(state)
 
     if state.rendering_mode == 0 then
         slider_int_state(state, "hybrid_shadow_samples", "Hybrid Shadow Samples", "script.lighting.shadow_samples", 1, 16)
+        checkbox_state(state, "enable_restir_direct_shadow", "ReSTIR DI Shadow (else 4-channel)", "script.lighting.restir_direct_shadow")
         checkbox_state(state, "enable_rtao", "Enable RTAO", "script.lighting.rtao.enable")
         if state.enable_rtao then
             slider_int_state(state, "rtao_samples", "RTAO Samples", "script.lighting.rtao.samples", 1, 16)
