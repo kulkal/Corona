@@ -2728,6 +2728,12 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 		bCommandLineAutoDumpEnabled = false;
 		bStartupSponzaFlyMode = true;
 		bEnableStartupLuauScript = false;
+		// Mirror the --sponza arm: leaving StartupLuauMode at its "platformer"
+		// default makes bPlatformerHybridDirectOnly=true in OnRender and
+		// silently disables every hybrid RT pass (shadow/AO/GI/reflection).
+		// The no-arg path was missing this override so the default launch
+		// looked like Sponza but rendered with RT off.
+		StartupLuauMode = L"sponza";
 		AppendStartupTrace(L"[ParseCommandLineArgs] no args: default dx12, hybrid, dlss-rr, sponza, user-mode");
 	}
 
@@ -12972,6 +12978,10 @@ if (ImGui::Button("Reset Accumulation"))
 			DumpTexturePNG(SpecularGIRaw.get(), base + L"_specgi.png", EResourceState::ShaderRead);
 		if (DiffuseGIRaw)
 			DumpTexturePNG(DiffuseGIRaw.get(), base + L"_diffusegi.png", EResourceState::ShaderRead);
+		if (LightingBuffer)
+			DumpTexturePNG(LightingBuffer.get(), base + L"_lighting.png", EResourceState::ShaderRead);
+		if (AlbedoBuffer)
+			DumpTexturePNG(AlbedoBuffer.get(), base + L"_albedo.png", EResourceState::ShaderRead);
 		return;
 	}
 	if (false && bCommandLineSkeletalTestScreenshot && !bSkeletalTestScreenshotDone &&
