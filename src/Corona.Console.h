@@ -19,7 +19,6 @@
 #include <vector>
 
 #include "Corona.MotionClip.h"
-#include "Corona.MotionPlayback.h"
 
 class Corona;
 
@@ -83,15 +82,6 @@ private:
 	int                     HistoryCursor = -1;
 	std::string             DraftBuf;
 
-	// Drives playback of the most recently loaded motion clip. Replaced
-	// wholesale on each successful `genmotion`. Update() advances time,
-	// RenderImGui() draws the debug skeleton onto the foreground drawlist.
-	CoronaMotion::MotionPlayback Playback;
-
-	// Wall-clock baseline for computing per-frame dt that drives playback.
-	// Initialized lazily on the first Update() call after a clip is set.
-	std::chrono::steady_clock::time_point LastPlaybackTick{};
-	bool                                  bPlaybackTickInit = false;
 
 	// Forward-typed via void* so the header doesn't pull in imgui.h.
 	int HandleInputCallback(void* dataPtr);

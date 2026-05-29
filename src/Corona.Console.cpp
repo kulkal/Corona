@@ -604,24 +604,6 @@ void CoronaConsole::DispatchMotionGen(const std::string& promptText, float durat
 
 void CoronaConsole::Update()
 {
-	// Advance motion playback by real-time dt. We init lazily on the first
-	// tick after a clip arrives so the initial dt is ~0 rather than the
-	// huge gap since process start.
-	if (Playback.HasClip())
-	{
-		const auto now = std::chrono::steady_clock::now();
-		if (!bPlaybackTickInit)
-		{
-			LastPlaybackTick = now;
-			bPlaybackTickInit = true;
-		}
-		const float dt = std::chrono::duration<float>(now - LastPlaybackTick).count();
-		LastPlaybackTick = now;
-		// Clamp dt so a window stall (debugger break, etc.) doesn't
-		// teleport the clip half a loop forward.
-		Playback.Tick(std::clamp(dt, 0.0f, 0.1f));
-	}
-
 	for (auto it = Pending.begin(); it != Pending.end();)
 	{
 		auto& job = **it;
@@ -683,21 +665,20 @@ void CoronaConsole::LoadAndPlayMotion(const std::string& bvhPath, const std::str
 			<< (clip.FrameCount * clip.FrameTime) << "s)";
 		Log(os.str());
 	}
-	// Hand the clip to the playback driver. Set the world anchor to the
-	// spawn point in front of the active camera so the user sees the figure
-	// without needing to fly the camera around. Step 8 will swap this for
-	// the terrain-spawned anchor.
+	// Pick a spawn point in front of the active camera so the user sees
+	// the figure without needing to fly around. Step 8 swaps this for the
+	// terrain-snapped position when running on the terrain bench. The
+	// host's SetMotionClipForPlayback lazy-spawns one SMPL character on
+	// first call; subsequent clips reuse it.
 	const glm::vec3 cameraPos  = Host->GetCameraPositionForConsole();
 	const glm::vec3 cameraLook = Host->GetCameraLookDirForConsole();
-	glm::vec3 anchor = cameraPos + cameraLook * 3.0f;
-	// Drop pelvis to roughly hip height above the camera target ray's hit
-	// point. We don't have a ground sample here yet (it's done at Step 8);
-	// for now just place the figure at the camera-eye Y minus 0.5 m so it's
-	// in the user's view without sinking below the floor.
-	anchor.y = cameraPos.y - 0.5f;
-	Playback.SetWorldAnchor(anchor);
-	Playback.SetClip(std::move(clip));
-	bPlaybackTickInit = false;
+	glm::vec3 spawnPos = cameraPos + cameraLook * 4.0f;
+	spawnPos.y = cameraPos.y - 1.0f;
+	// Engine world units are ~100× SMPL meters in Corona test scenes; the
+	// existing humanoid uses characterScale 140. Match scale here so the
+	// SMPL character is visible alongside other props.
+	const float kSmplWorldScale = 100.0f;
+	Host->SetMotionClipForPlayback(std::move(clip), spawnPos, kSmplWorldScale);
 }
 
 void CoronaConsole::LoadAndPlaceObj(const std::string& objPath, const std::string& /*prompt*/)

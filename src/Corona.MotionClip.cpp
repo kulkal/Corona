@@ -14,7 +14,6 @@
 #include <unordered_map>
 
 #include "glm/gtc/quaternion.hpp"
-#include "glm/gtx/quaternion.hpp"
 
 namespace CoronaMotion
 {

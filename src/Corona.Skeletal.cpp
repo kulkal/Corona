@@ -443,6 +443,12 @@ void Corona::DispatchSkeletalSkinningForRenderWorld()
 	if (!renderBackend || !SkeletalSkinningPSO)
 		return;
 
+	// LLM-driven SMPL character: refresh its bone palette from the current
+	// MotionPlayback pose before the generic skeletal compute dispatch
+	// runs. The SMPL mesh has bSkeletalSkinned=true, so it gets picked up
+	// by the same gathering loop below without any path-specific glue.
+	UpdateSmplMotionCharacterPalette();
+
 	// Path C: VS inline skinning. No compute, no CPU skin pass, no
 	// upload VB — the GBuffer VS does all the skinning math itself.
 	if (bSkeletalUseVsInlineSkinning)
