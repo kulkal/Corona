@@ -2735,9 +2735,11 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 		// "Hi, Let's traceray!" window shows up instead of the categorized
 		// Lighting/Sky/Point-Lights panels other modes ship with. Both flags
 		// must match --sponza for the no-arg launch to look identical to it.
+		// "sponza_demo" runs the Luau-driven map-based spawn (replaces the
+		// hardcoded LoadModel("Sponza.fbx") path).
 		bEnableStartupLuauScript = true;
-		StartupLuauMode = L"sponza";
-		AppendStartupTrace(L"[ParseCommandLineArgs] no args: default dx12, hybrid, dlss-rr, sponza, user-mode");
+		StartupLuauMode = L"sponza_demo";
+		AppendStartupTrace(L"[ParseCommandLineArgs] no args: default dx12, hybrid, dlss-rr, sponza_demo, user-mode");
 	}
 
 	for (int i = 1; i < argc; ++i)
@@ -2798,7 +2800,9 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 			// generic free-flight scene, not the platformer mobile path, so
 			// override the mode here. Without this RT shadows/GI silently
 			// vanish even though render-mode=hybrid is selected.
-			StartupLuauMode = L"sponza";
+			// "sponza_demo" loads Sponza.fbx via the Luau map system instead
+			// of the legacy C++ LoadModel hardcoded path.
+			StartupLuauMode = L"sponza_demo";
 			bCommandLineAutoDumpOverrideSet = true;
 			bCommandLineAutoDumpEnabled = false;
 			continue;
@@ -7421,7 +7425,10 @@ void Corona::OnInit()
 			StartupLuauMode = L"spine_benchmark";
 			bCommandLineDungeonCharacterMode = false;
 		}
-		if (StartupLuauMode != L"dungeon" && StartupLuauMode != L"sandbox" && StartupLuauMode != L"sponza" && StartupLuauMode != L"spine_benchmark" && StartupLuauMode != L"grass_demo" && StartupLuauMode != L"terrain_demo" && StartupLuauMode != L"particle_demo")
+		if (StartupLuauMode != L"dungeon" && StartupLuauMode != L"sandbox" &&
+			StartupLuauMode != L"sponza" && StartupLuauMode != L"sponza_demo" &&
+			StartupLuauMode != L"spine_benchmark" && StartupLuauMode != L"grass_demo" &&
+			StartupLuauMode != L"terrain_demo" && StartupLuauMode != L"particle_demo")
 			StartupLuauMode = L"platformer";
 
 		const bool bDungeonStartupMode = StartupLuauMode == L"dungeon";
@@ -7519,6 +7526,11 @@ void Corona::OnInit()
 	UpdateStartupLoadingProgress(0.20f, L"Preparing renderer assets");
 	LoadAssets();
 	AppendCpuRuntimeTrace(L"[OnInit] after LoadAssets");
+	// sponza_demo (Luau-driven Sponza spawn) still needs ApplySponzaFlyCamera
+	// so SimpleCamera (m_camera) is initialized with mouse/WASD-bindable
+	// state — without it the user can't fly around because the script's
+	// CameraComponent doesn't currently consume mouse delta. The script
+	// just provides the mesh + sun entities.
 	if (bStartupSponzaFlyMode)
 	{
 		ApplySponzaFlyCamera();
@@ -9755,6 +9767,7 @@ void Corona::LoadAssets()
 		 StartupLuauMode == L"grass_demo" ||
 		 StartupLuauMode == L"terrain_demo" ||
 		 StartupLuauMode == L"particle_demo" ||
+		 StartupLuauMode == L"sponza_demo" ||
 		 bCommandLineDungeonCharacterMode);
 
 	if (!bMobileDungeonOnlyStartup && !bGameplayStartupMode && !bCommandLineSkeletalBenchMode)

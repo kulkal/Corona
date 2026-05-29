@@ -8262,13 +8262,18 @@ void Corona::RunStartupLuauScript(bool bShowLoadingProgress)
 
 	const std::filesystem::path startupDir = GetAssetFullPath(L"scripts\\startup");
 	std::wstring startupMode = StartupLuauMode.empty() ? L"platformer" : StartupLuauMode;
-	if (startupMode != L"dungeon" && startupMode != L"sandbox" && startupMode != L"sponza" && startupMode != L"spine_benchmark" && startupMode != L"grass_demo" && startupMode != L"terrain_demo" && startupMode != L"particle_demo")
+	if (startupMode != L"dungeon" && startupMode != L"sandbox" &&
+		startupMode != L"sponza" && startupMode != L"sponza_demo" &&
+		startupMode != L"spine_benchmark" && startupMode != L"grass_demo" &&
+		startupMode != L"terrain_demo" && startupMode != L"particle_demo")
 		startupMode = L"platformer";
 
 	std::vector<std::filesystem::path> scriptPaths;
-	// "sponza" mode is the free-flight Sponza sandbox — it intentionally
-	// runs *only* the common scripts (imgui controls etc.) and skips the
-	// per-mode game scripts so the scene stays a clean RT playground.
+	// Legacy "sponza" mode is the free-flight Sponza sandbox driven by the
+	// C++ hardcoded LoadModel("Sponza.fbx") path — it intentionally runs
+	// *only* the common scripts (imgui controls etc.). The newer
+	// "sponza_demo" mode replaces that with a Luau-spawned mesh entity +
+	// load_map round-trip and ships its own startup/sponza_demo scripts.
 	if (startupMode != L"sponza")
 		appendDirectLuauScripts(startupDir / startupMode, scriptPaths);
 	appendDirectLuauScripts(startupDir / L"common", scriptPaths);
@@ -8346,6 +8351,16 @@ bool Corona::LoadLuauScriptFile(const std::filesystem::path& scriptPath)
 	CoronaECS::ScriptInstance loadedScript;
 	loadedScript.SourceName = scriptPath.wstring();
 	loadedScript.bPassEntityToCallbacks = false;
+	// Luau defines LUA_REFNIL = 0, but ScriptInstance's default sentinel is
+	// InvalidRef = -1. HasScriptCallbacks below uses != LUA_REFNIL, so the
+	// uninitialized -1 would falsely flag callbacks present and attach
+	// scripts that have none — every per-frame call then errors with
+	// "attempt to call a nil value". Force the Luau sentinel here so the
+	// branches below either populate a real ref or leave it == LUA_REFNIL.
+	loadedScript.UpdateRef = LUA_REFNIL;
+	loadedScript.ShutdownRef = LUA_REFNIL;
+	loadedScript.ImGuiRef = LUA_REFNIL;
+	loadedScript.UiRef = LUA_REFNIL;
 
 	if (lua_istable(L, -1))
 	{

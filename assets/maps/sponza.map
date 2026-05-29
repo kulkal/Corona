@@ -1,0 +1,160 @@
+-- Corona map (auto-generated; safe to edit by hand)
+return {
+  version = 1,
+  name    = "sponza",
+  entities = {
+    {
+      name = "SponzaModel",
+      mesh = {
+        primitive = "asset",
+        path = "C:\\dev\\Corona\\assets\\Sponza\\Sponza.fbx",
+        transform = {
+          position = {0,0,0},
+          rotation = {0,0,0},
+          scale = {1,1,1},
+        },
+        material = {
+          roughness = 1,
+          metallic  = 0,
+          override  = false,
+        },
+        ray_tracing = true,
+        visible     = true,
+      },
+    },
+    {
+      name = "Box_1",
+      mesh = {
+        primitive = "asset",
+        path = "",
+        transform = {
+          position = {712.165,249.545,52.3116},
+          rotation = {0,0,0},
+          target_extent = 50.6,
+        },
+        material = {
+          roughness = 0.6,
+          metallic  = 0,
+          override  = true,
+        },
+        ray_tracing = true,
+        visible     = true,
+      },
+    },
+    {
+      name = "Sphere_2",
+      mesh = {
+        primitive = "asset",
+        path = "",
+        transform = {
+          position = {259.536,200,67.9482},
+          rotation = {0,0,0},
+          target_extent = 51.2,
+        },
+        material = {
+          roughness = 0.4,
+          metallic  = 0,
+          override  = true,
+        },
+        ray_tracing = true,
+        visible     = true,
+      },
+    },
+    {
+      name = "MainDirectionalLight",
+      light = {
+        type      = "directional",
+        direction = {-0.246934,0.968914,-0.0151805},
+        color     = {1,1,1},
+        intensity = 3.5,
+        radius    = 320,
+        enabled   = true,
+      },
+    },
+    {
+      name = "PointLight_1",
+      light = {
+        type      = "point",
+        position  = {1214.21,181.953,53.82},
+        direction = {0,1,0},
+        color     = {1,0.184,0.184},
+        intensity = 16,
+        radius    = 420,
+        enabled   = true,
+      },
+    },
+    {
+      name = "PointLight_2",
+      light = {
+        type      = "point",
+        position  = {-1228.35,234.774,10.804},
+        direction = {0,1,0},
+        color     = {0.123995,0.838235,0.028763},
+        intensity = 26.8,
+        radius    = 420,
+        enabled   = true,
+      },
+    },
+    {
+      name = "PointLight_3",
+      light = {
+        type      = "point",
+        position  = {-1224.49,506.803,408.163},
+        direction = {0,1,0},
+        color     = {0.014,0.92,2},
+        intensity = 16,
+        radius    = 420,
+        enabled   = true,
+      },
+    },
+    {
+      name = "PointLight_4",
+      light = {
+        type      = "point",
+        position  = {-0.76391,52.687,-1.96953},
+        direction = {0,1,0},
+        color     = {0.941176,0.0322953,0.0322953},
+        intensity = 10,
+        radius    = 20,
+        enabled   = true,
+      },
+    },
+    {
+      name = "PointLight_5",
+      light = {
+        type      = "point",
+        position  = {0,-0.7,0},
+        direction = {0,1,0},
+        color     = {0.941176,0.0322953,0.0322953},
+        intensity = 5.1,
+        radius    = 20,
+        enabled   = true,
+      },
+    },
+    {
+      name = "MainCamera",
+      camera = {
+        position       = {387.538,296.993,-39.99},
+        look_direction = {-0.86225,-0.346088,0.369795},
+        up             = {0,1,0},
+        fov            = 0.8,
+        near_plane     = 10,
+        far_plane      = 20000,
+        active         = true,
+      },
+    },
+  },
+  globals = {
+    wind = {
+      params = {0,0,0,0},
+      tuning = {2,0.015,0,0},
+    },
+    grass = {
+      bend_origin    = {0,0,0,0},
+      bend_params    = {120,30,0,0},
+      render_origin  = {0,0,0},
+      render_distance = 300,
+    },
+    terrain_deform_sphere = {0,0,0,0},
+  },
+}
