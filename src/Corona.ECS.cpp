@@ -203,10 +203,22 @@ void Corona::UpdateMainDirectionalLightEntityFromState()
 		return;
 
 	lightComponent->Type = CoronaECS::LightType::Directional;
-	lightComponent->bEnabled = LightIntensity > 0.0f;
+	// bEnabled is the user's intent (inspector toggle) — don't derive it from
+	// LightIntensity here. The previous `bEnabled = LightIntensity > 0` formed a
+	// loop with ApplyDirectionalLightEntityToState (which zeroes LightIntensity
+	// when disabled): toggling enable with cached Intensity=0 would round-trip
+	// back to disabled. The Lighting pass already gates on Intensity == 0 so a
+	// "disabled" sun stays dark even if bEnabled is left at true elsewhere.
 	lightComponent->Direction = NormalizeOrFallback(LightDir, glm::vec3(0.0f, 1.0f, 0.0f));
 	lightComponent->Color = glm::vec3(1.0f);
-	lightComponent->Intensity = LightIntensity;
+	// Preserve user-set intensity when C++ side reports zero (light disabled).
+	// Without this, toggling enable in the inspector finds ECS.Intensity=0 and
+	// the slider can never push above zero because each frame UpdateMain
+	// overwrote it.
+	if (LightIntensity > 0.0f)
+		lightComponent->Intensity = LightIntensity;
+	else if (lightComponent->Intensity <= 0.0f)
+		lightComponent->Intensity = 3.5f;
 	lightComponent->RuntimeLightId = 0;
 }
 
@@ -217,6 +229,12 @@ void Corona::ApplyDirectionalLightEntityToState()
 		return;
 
 	LightDir = NormalizeOrFallback(lightComponent->Direction, glm::vec3(0.0f, 1.0f, 0.0f));
+	// Enabling with cached Intensity=0 (e.g. light was previously disabled and
+	// saved that way) leaves the sun dark even though the toggle reads on.
+	// Restore the sponza-default intensity in that case so the user sees the
+	// expected effect immediately.
+	if (lightComponent->bEnabled && lightComponent->Intensity <= 0.0f)
+		lightComponent->Intensity = 3.5f;
 	LightIntensity = lightComponent->bEnabled ? std::max(0.0f, lightComponent->Intensity) : 0.0f;
 }
 

@@ -27,6 +27,7 @@ private:
 	void DrawEntityRow(CoronaECS::Entity entity);
 	void DrawSelectedEntityDetails();
 	void DrawBottomToggleButton();
+	void DrawSelectedEntityViewportGizmo();
 
 	Corona* Host;
 	bool bVisible = false;
@@ -42,6 +43,14 @@ private:
 	CoronaECS::Entity SaveAssetEntity;
 	bool bOpenSaveAssetPopup = false;
 	char SaveAssetNameBuf[64] = {};
+
+	// Cached rotation+scale for non-mesh entities (lights/cameras/world).
+	// TransformComponent stores only Position + LocalToWorld matrix, so we
+	// keep euler/scale inspector-side to avoid lossy matrix decomposition
+	// every frame. Reset when SelectedEntity changes.
+	CoronaECS::Entity NonMeshTransformCacheEntity;
+	glm::vec3 NonMeshTransformCacheRotation = glm::vec3(0.0f);
+	glm::vec3 NonMeshTransformCacheScale = glm::vec3(1.0f);
 
 	// Grass-blade recipe editor staging buffer. Snapshotted from the live
 	// recipe whenever the selected entity changes so the user's pending

@@ -309,6 +309,15 @@ bool Corona::SaveMapToFile(const std::wstring& name, std::wstring* outError)
 		out << "      name = " << EscapeLuaString(entityName) << ",\n";
 		out << "      light = {\n";
 		out << "        type      = " << EscapeLuaString(light->Type == CoronaECS::LightType::Directional ? "directional" : "point") << ",\n";
+		// Position only matters for point lights (directional sun is shared
+		// by the whole world). Persisting it makes inspector position edits
+		// survive map reload — without this the runtime PointLight.Position
+		// got reset to the entity-creation default on every load.
+		if (light->Type == CoronaECS::LightType::Point)
+		{
+			if (const auto* trans = ecs.GetTransform(entity))
+				out << "        position  = " << Vec3Lua(trans->GetPosition()) << ",\n";
+		}
 		out << "        direction = " << Vec3Lua(light->Direction) << ",\n";
 		out << "        color     = " << Vec3Lua(light->Color) << ",\n";
 		out << "        intensity = " << light->Intensity << ",\n";
@@ -793,6 +802,13 @@ bool Corona::LoadMapFromFile(const std::wstring& name, std::wstring* outError)
 				if (LuaGetNumber(L, lIdx, "intensity", intensity)) comp.Intensity = static_cast<float>(intensity);
 				if (LuaGetNumber(L, lIdx, "radius", radius))       comp.Radius = static_cast<float>(radius);
 				LuaGetBool(L, lIdx, "enabled", comp.bEnabled);
+				// Point light position — restored before AddLight so the
+				// TransformComponent created downstream has the saved value
+				// instead of the entity-default origin.
+				glm::vec3 pointLightPosition(0.0f);
+				const bool bHasPointLightPosition =
+					(comp.Type == CoronaECS::LightType::Point) &&
+					LuaGetVec3(L, lIdx, "position", pointLightPosition);
 
 				// Directional lights are an engine singleton — the very first
 				// one we see fills `MainDirectionalLightEntity`, and any extra
@@ -809,11 +825,31 @@ bool Corona::LoadMapFromFile(const std::wstring& name, std::wstring* outError)
 				{
 					CoronaECS::Entity le = CreateEntity(entityName);
 					comp.RuntimeLightId = 0;
-					EntityWorld.AddLight(le, comp);
 					if (bDirectional)
 					{
+						EntityWorld.AddLight(le, comp);
 						MainDirectionalLightEntity = le;
 						ApplyDirectionalLightEntityToState();
+					}
+					else
+					{
+						// Point light: seed TransformComponent with the
+						// saved position before SetEntityLightForScript
+						// reads it back into the runtime PointLights[]
+						// entry (PointLight.Position is initialized from
+						// the entity's transform). Without this the saved
+						// position would never reach the renderer because
+						// SetEntityLightForScript runs after AddLight and
+						// reads transform, not the loaded comp.
+						if (bHasPointLightPosition)
+						{
+							auto* trans = EntityWorld.GetTransform(le);
+							if (!trans)
+								trans = EntityWorld.AddTransform(le, CoronaECS::TransformComponent::FromTRS(pointLightPosition));
+							else
+								trans->SetPosition(pointLightPosition);
+						}
+						SetEntityLightForScript(le, comp, /*persist*/ false);
 					}
 				}
 			}

@@ -209,6 +209,109 @@ void CoronaSceneInspector::RenderImGui()
 	ImGui::End();
 	ImGui::PopStyleVar();
 	ImGui::PopStyleColor();
+
+	// Viewport-space gizmo for the selected entity. Drawn as an ImGui foreground
+	// overlay (axis lines + crosshair) so it sits on top of the world render.
+	DrawSelectedEntityViewportGizmo();
+}
+
+void CoronaSceneInspector::DrawSelectedEntityViewportGizmo()
+{
+	if (!Host)
+		return;
+	if (!SelectedEntity.IsValid())
+		return;
+
+	const auto& ecs = Host->GetEntityWorld();
+	if (!ecs.IsAlive(SelectedEntity))
+		return;
+
+	// Resolve world position of the selected entity. Mesh entities expose
+	// authoritative position via SceneObject transform; non-mesh (lights,
+	// cameras) fall back to ECS TransformComponent.
+	glm::vec3 worldPos(0.0f);
+	bool gotPos = false;
+	if (const auto* m = ecs.GetMesh(SelectedEntity))
+	{
+		glm::vec3 spawnPos(0.0f), rot(0.0f), scl(1.0f);
+		float te = 1.0f;
+		bool us = false;
+		if (Host->GetSceneObjectTransformForScript(
+			static_cast<Corona::SceneObjectHandle>(m->RenderObjectHandle),
+			spawnPos, rot, te, scl, us))
+		{
+			worldPos = spawnPos;
+			gotPos = true;
+		}
+	}
+	if (!gotPos)
+	{
+		if (const auto* t = ecs.GetTransform(SelectedEntity))
+		{
+			worldPos = t->GetPosition();
+			gotPos = true;
+		}
+	}
+	if (!gotPos)
+		return;
+
+	const glm::mat4 viewProj = Host->GetUnjitteredViewProjForOverlay();
+	const ImGuiViewport* vp = ImGui::GetMainViewport();
+	const float vw = vp->WorkSize.x;
+	const float vh = vp->WorkSize.y;
+	const float vx = vp->WorkPos.x;
+	const float vy = vp->WorkPos.y;
+
+	auto worldToScreen = [&](const glm::vec3& world, ImVec2& out) -> bool
+	{
+		const glm::vec4 clip = viewProj * glm::vec4(world, 1.0f);
+		if (clip.w <= 0.0001f)
+			return false;
+		const float ndcX = clip.x / clip.w;
+		const float ndcY = clip.y / clip.w;
+		const float ndcZ = clip.z / clip.w;
+		if (ndcZ < 0.0f || ndcZ > 1.0f)
+			return false;
+		out.x = vx + (ndcX * 0.5f + 0.5f) * vw;
+		out.y = vy + (1.0f - (ndcY * 0.5f + 0.5f)) * vh;
+		return true;
+	};
+
+	ImVec2 centerScreen;
+	if (!worldToScreen(worldPos, centerScreen))
+		return;
+
+	// Axis length tuned to feel large at typical scene scale (Sponza extents
+	// are ~10-20m, terrain is 2km wide). 30 m axes are visible across the
+	// whole Sponza interior while not overwhelming up close.
+	const float kAxisWorldLen = 30.0f;
+	ImVec2 xTip, yTip, zTip;
+	const bool gotX = worldToScreen(worldPos + glm::vec3(kAxisWorldLen, 0, 0), xTip);
+	const bool gotY = worldToScreen(worldPos + glm::vec3(0, kAxisWorldLen, 0), yTip);
+	const bool gotZ = worldToScreen(worldPos + glm::vec3(0, 0, kAxisWorldLen), zTip);
+
+	ImDrawList* draw = ImGui::GetForegroundDrawList();
+	const ImU32 colX = IM_COL32(235, 80, 80, 230);
+	const ImU32 colY = IM_COL32(110, 220, 110, 230);
+	const ImU32 colZ = IM_COL32(80, 140, 240, 230);
+	const ImU32 colCenter = IM_COL32(255, 255, 255, 230);
+	const ImU32 colCenterShadow = IM_COL32(0, 0, 0, 180);
+
+	const float thickness = 2.5f;
+	if (gotX) draw->AddLine(centerScreen, xTip, colX, thickness);
+	if (gotY) draw->AddLine(centerScreen, yTip, colY, thickness);
+	if (gotZ) draw->AddLine(centerScreen, zTip, colZ, thickness);
+
+	// Center marker — small filled circle with shadow ring; tuned down from
+	// the 5x first pass to ~1.67x original so it stays visible without
+	// dominating the viewport at close range.
+	draw->AddCircle(centerScreen, 12.0f, colCenterShadow, 20, 3.0f);
+	draw->AddCircleFilled(centerScreen, 7.0f, colCenter);
+
+	// Axis tips labels (X/Y/Z) for quick orientation while editing.
+	if (gotX) draw->AddText(ImVec2(xTip.x + 4.0f, xTip.y - 6.0f), colX, "X");
+	if (gotY) draw->AddText(ImVec2(yTip.x + 4.0f, yTip.y - 6.0f), colY, "Y");
+	if (gotZ) draw->AddText(ImVec2(zTip.x + 4.0f, zTip.y - 6.0f), colZ, "Z");
 }
 
 void CoronaSceneInspector::DrawEntityRow(CoronaECS::Entity entity)
@@ -353,14 +456,35 @@ void CoronaSceneInspector::DrawSelectedEntityDetails()
 		{
 			float arrPos[3] = { position.x, position.y, position.z };
 			float arrRot[3] = { rotation.x, rotation.y, rotation.z };
+			float arrScale[3] = { scale.x, scale.y, scale.z };
 			bool changed = false;
 			if (ImGui::DragFloat3("Position##t", arrPos, 0.05f))
 				changed = true;
 			if (ImGui::DragFloat3("Rotation##t", arrRot, 1.0f))
 				changed = true;
+			// Show Scale unconditionally — entities spawned with useScale=false
+			// rely on TargetExtent for auto-fit, but a user editing here means
+			// they want explicit scale control. Switching the radio promotes
+			// the current effective scale so the mesh doesn't jump.
+			if (ImGui::RadioButton("Explicit Scale##tmode", useScale))
+			{
+				if (!useScale)
+				{
+					useScale = true;
+					changed = true;
+				}
+			}
+			ImGui::SameLine();
+			if (ImGui::RadioButton("Auto-fit (TargetExtent)##tmode", !useScale))
+			{
+				if (useScale)
+				{
+					useScale = false;
+					changed = true;
+				}
+			}
 			if (useScale)
 			{
-				float arrScale[3] = { scale.x, scale.y, scale.z };
 				if (ImGui::DragFloat3("Scale##t", arrScale, 0.01f, 0.001f, 100.0f))
 				{
 					scale = glm::vec3(arrScale[0], arrScale[1], arrScale[2]);
@@ -371,6 +495,7 @@ void CoronaSceneInspector::DrawSelectedEntityDetails()
 			{
 				if (ImGui::DragFloat("TargetExtent##t", &targetExtent, 0.05f, 0.001f, 10000.0f))
 					changed = true;
+				ImGui::TextDisabled("(scale derived from mesh bounds)");
 			}
 			if (changed)
 			{
@@ -383,6 +508,66 @@ void CoronaSceneInspector::DrawSelectedEntityDetails()
 					useScale);
 			}
 		}
+	}
+	// Non-mesh entities (point lights, cameras, world entities) keep their
+	// position on the ECS TransformComponent. The Mesh branch above writes
+	// through the renderer's SceneObject for live preview; here we route to
+	// SetEntityTransformForScript which is the same path the toolbox uses
+	// when spawning a point light.
+	else if (auto* t = ecs.GetTransform(SelectedEntity))
+	{
+		if (ImGui::CollapsingHeader("Transform", ImGuiTreeNodeFlags_DefaultOpen))
+		{
+			// Non-mesh entities (lights, cameras, generic world entities) —
+			// TransformComponent only stores Position + LocalToWorld matrix.
+			// Rotation/Scale are tracked inspector-side because decomposing
+			// the matrix every frame would lose euler precision and reset
+			// the user's pending edit. Cache resets to identity each time
+			// SelectedEntity changes.
+			if (NonMeshTransformCacheEntity != SelectedEntity)
+			{
+				NonMeshTransformCacheEntity = SelectedEntity;
+				NonMeshTransformCacheRotation = glm::vec3(0.0f);
+				NonMeshTransformCacheScale = glm::vec3(1.0f);
+			}
+			glm::vec3 position = t->GetPosition();
+			float arrPos[3] = { position.x, position.y, position.z };
+			float arrRot[3] = {
+				NonMeshTransformCacheRotation.x,
+				NonMeshTransformCacheRotation.y,
+				NonMeshTransformCacheRotation.z,
+			};
+			float arrScale[3] = {
+				NonMeshTransformCacheScale.x,
+				NonMeshTransformCacheScale.y,
+				NonMeshTransformCacheScale.z,
+			};
+			bool changed = false;
+			if (ImGui::DragFloat3("Position##tnm", arrPos, 0.05f))
+				changed = true;
+			if (ImGui::DragFloat3("Rotation##tnm", arrRot, 1.0f))
+			{
+				NonMeshTransformCacheRotation = glm::vec3(arrRot[0], arrRot[1], arrRot[2]);
+				changed = true;
+			}
+			if (ImGui::DragFloat3("Scale##tnm", arrScale, 0.01f, 0.001f, 100.0f))
+			{
+				NonMeshTransformCacheScale = glm::vec3(arrScale[0], arrScale[1], arrScale[2]);
+				changed = true;
+			}
+			if (changed)
+			{
+				Host->SetEntityTransformForScript(
+					SelectedEntity,
+					glm::vec3(arrPos[0], arrPos[1], arrPos[2]),
+					NonMeshTransformCacheRotation,
+					NonMeshTransformCacheScale);
+			}
+		}
+	}
+
+	if (const auto* mesh = ecs.GetMesh(SelectedEntity))
+	{
 
 		if (ImGui::CollapsingHeader("Mesh"))
 		{

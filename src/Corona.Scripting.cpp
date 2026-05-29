@@ -5355,7 +5355,6 @@ CoronaECS::Entity Corona::SpawnPointLightEntityForScript(
 	const CoronaECS::Entity entity = pointLight.EntityHandle;
 	PointLights.push_back(pointLight);
 	MarkPointLightRenderDirty(pointLight.Id, kPointLightDirtyAll);
-	ResetAllAccumulationState(false);
 	bPersistentSceneStateDirty = true;
 	SaveSceneState();
 	return entity;
@@ -5406,7 +5405,10 @@ bool Corona::SetEntityTransformForScript(
 		pointLight->Position = position;
 		UpdatePointLightEntity(*pointLight);
 		MarkPointLightRenderDirty(pointLight->Id, kPointLightDirtyTransform);
-		ResetAllAccumulationState(false);
+		// GI / temporal denoiser converges to the new state on its own; the
+		// nuclear ResetAllAccumulationState here used to wipe TAA + screen-
+		// probe + spatial-hash history every time the inspector dragged a
+		// point light, making accumulation impossible to observe.
 		bPersistentSceneStateDirty = true;
 		SaveSceneState();
 		return true;
@@ -5574,7 +5576,6 @@ bool Corona::SetEntityLightForScript(
 	if (bLightChanged)
 	{
 		MarkPointLightRenderDirty(pointLight->Id, kPointLightDirtyAll);
-		ResetAllAccumulationState(false);
 	}
 	if (bPersistSceneState && bLightChanged)
 	{
@@ -5737,7 +5738,6 @@ bool Corona::SetEntityVisibilityForScript(CoronaECS::Entity entity, bool visible
 		pointLight->bEnabled = visible;
 		UpdatePointLightEntity(*pointLight);
 		MarkPointLightRenderDirty(pointLight->Id, kPointLightDirtyEnabled);
-		ResetAllAccumulationState(false);
 		bPersistentSceneStateDirty = true;
 		SaveSceneState();
 		return true;
@@ -5811,7 +5811,6 @@ bool Corona::DestroyEntityForScript(CoronaECS::Entity entity)
 		PointLights.erase(pointLightIt);
 		DestroyEntityScriptComponent(entity);
 		const bool destroyed = EntityWorld.DestroyEntity(entity);
-		ResetAllAccumulationState(false);
 		bPersistentSceneStateDirty = true;
 		SaveSceneState();
 		return destroyed;
@@ -7555,8 +7554,14 @@ bool Corona::SetLuauUiValueForScript(const std::string& name, lua_State* L, int 
 			return true;
 		target = newValue;
 		lastSetterChanged = true;
-		if (resetLighting)
-			ResetAllAccumulationState(false);
+		// Lighting / shadow / RTAO setters used to nuke all accumulation
+		// (TAA / GI / screen probe / spatial hash) on every slider tick,
+		// which froze GI convergence while users were tuning values. The GI
+		// passes already converge to the new state on their own; brief
+		// transient ghosting beats unviewable resets. The resetLighting
+		// flag is kept to avoid churning call sites but no longer triggers
+		// the nuclear reset.
+		(void)resetLighting;
 		return true;
 	};
 	auto setBool = [&](const char* key, bool& target, bool resetLighting = false)
@@ -7569,8 +7574,14 @@ bool Corona::SetLuauUiValueForScript(const std::string& name, lua_State* L, int 
 			return true;
 		target = newValue;
 		lastSetterChanged = true;
-		if (resetLighting)
-			ResetAllAccumulationState(false);
+		// Lighting / shadow / RTAO setters used to nuke all accumulation
+		// (TAA / GI / screen probe / spatial hash) on every slider tick,
+		// which froze GI convergence while users were tuning values. The GI
+		// passes already converge to the new state on their own; brief
+		// transient ghosting beats unviewable resets. The resetLighting
+		// flag is kept to avoid churning call sites but no longer triggers
+		// the nuclear reset.
+		(void)resetLighting;
 		return true;
 	};
 	auto setUInt = [&](const char* key, UINT32& target, int minValue, int maxValue, bool resetLighting = false)
@@ -7583,8 +7594,14 @@ bool Corona::SetLuauUiValueForScript(const std::string& name, lua_State* L, int 
 			return true;
 		target = newValue;
 		lastSetterChanged = true;
-		if (resetLighting)
-			ResetAllAccumulationState(false);
+		// Lighting / shadow / RTAO setters used to nuke all accumulation
+		// (TAA / GI / screen probe / spatial hash) on every slider tick,
+		// which froze GI convergence while users were tuning values. The GI
+		// passes already converge to the new state on their own; brief
+		// transient ghosting beats unviewable resets. The resetLighting
+		// flag is kept to avoid churning call sites but no longer triggers
+		// the nuclear reset.
+		(void)resetLighting;
 		return true;
 	};
 
@@ -7809,7 +7826,6 @@ bool Corona::SetLuauUiValueForScript(const std::string& name, lua_State* L, int 
 		{
 			UpdatePointLightEntity(*pointLight);
 			MarkPointLightRenderDirty(pointLight->Id, kPointLightDirtyAll);
-			ResetAllAccumulationState(false);
 			bPersistentSceneStateDirty = true;
 			SaveSceneState();
 		}
@@ -8029,7 +8045,6 @@ bool Corona::RunLuauUiCommandForScript(const std::string& name, lua_State* L, in
 		pointLight.Color = glm::vec3(1.0f, 0.92f, 0.78f);
 		PointLights.push_back(pointLight);
 		MarkPointLightRenderDirty(pointLight.Id, kPointLightDirtyAll);
-		ResetAllAccumulationState(false);
 		bPersistentSceneStateDirty = true;
 		SaveSceneState();
 		return true;
@@ -8048,7 +8063,6 @@ bool Corona::RunLuauUiCommandForScript(const std::string& name, lua_State* L, in
 			MarkPointLightRenderRemoved(PointLights.back().Id);
 			DestroyPointLightEntity(PointLights.back());
 			PointLights.pop_back();
-			ResetAllAccumulationState(false);
 			bPersistentSceneStateDirty = true;
 			SaveSceneState();
 			return true;
@@ -8064,7 +8078,6 @@ bool Corona::RunLuauUiCommandForScript(const std::string& name, lua_State* L, in
 		MarkPointLightRenderRemoved(it->Id);
 		DestroyPointLightEntity(*it);
 		PointLights.erase(it);
-		ResetAllAccumulationState(false);
 		bPersistentSceneStateDirty = true;
 		SaveSceneState();
 		return true;
@@ -8078,7 +8091,6 @@ bool Corona::RunLuauUiCommandForScript(const std::string& name, lua_State* L, in
 		for (PointLightState& pointLight : PointLights)
 			DestroyPointLightEntity(pointLight);
 		PointLights.clear();
-		ResetAllAccumulationState(false);
 		bPersistentSceneStateDirty = true;
 		SaveSceneState();
 		return true;

@@ -2651,6 +2651,9 @@ public:
 	glm::vec3 GetCameraPositionForConsole() const { return RenderFrameCameraPosition; }
 	glm::vec3 GetCameraLookDirForConsole() const { return RenderFrameCameraLookDirection; }
 	Terrain::Component* GetActiveTerrainForConsole() const { return ActiveTerrain.get(); }
+	glm::mat4x4 GetUnjitteredViewProjForOverlay() const { return UnjitteredViewProjMat; }
+	UINT GetRenderWidthForOverlay() const { return GetRenderWidth(); }
+	UINT GetRenderHeightForOverlay() const { return GetRenderHeight(); }
 
 	// Map serialization (Corona.MapFormat.cpp). Writes / reads a Luau-syntax
 	// snapshot of the script-spawned entity graph (mesh recipes, transforms,

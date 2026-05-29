@@ -2727,12 +2727,15 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 		bCommandLineAutoDumpOverrideSet = true;
 		bCommandLineAutoDumpEnabled = false;
 		bStartupSponzaFlyMode = true;
-		bEnableStartupLuauScript = false;
-		// Mirror the --sponza arm: leaving StartupLuauMode at its "platformer"
-		// default makes bPlatformerHybridDirectOnly=true in OnRender and
-		// silently disables every hybrid RT pass (shadow/AO/GI/reflection).
-		// The no-arg path was missing this override so the default launch
-		// looked like Sponza but rendered with RT off.
+		// Mirror the --sponza arm completely: leaving StartupLuauMode at its
+		// "platformer" default makes bPlatformerHybridDirectOnly=true in
+		// OnRender and silently disables every hybrid RT pass (shadow/AO/GI
+		// /reflection). Likewise leaving bEnableStartupLuauScript=false
+		// suppresses common/040_imgui_controls.luau and the legacy monolithic
+		// "Hi, Let's traceray!" window shows up instead of the categorized
+		// Lighting/Sky/Point-Lights panels other modes ship with. Both flags
+		// must match --sponza for the no-arg launch to look identical to it.
+		bEnableStartupLuauScript = true;
 		StartupLuauMode = L"sponza";
 		AppendStartupTrace(L"[ParseCommandLineArgs] no args: default dx12, hybrid, dlss-rr, sponza, user-mode");
 	}
@@ -6957,20 +6960,13 @@ void Corona::ApplyFrameSourceRenderSync(const RenderFrameDelta& delta)
 
 	if (bIndirectSettingsChanged)
 	{
-		FrameCounter = 0;
-		PathTracingAccumulatedFrames = 0;
-		IndirectAccumulatedFrames = 0;
-		bTemporalDenoiserHistoryValid = false;
-		bScreenProbeGIAtlasHistoryValid = false;
-		bScreenProbeGIHistoryValid = false;
-		bSpatialHashGIHistoryValid = false;
-		bPendingTemporalHistoryClear = true;
-		bResetTemporalStateNextUpdate = true;
-		bUseLightingBufferFallbackForToneMap = true;
-		bDLSSRROutputValidThisFrame = false;
-		PrevPathTracingViewMat = glm::mat4x4(0.0f);
-		PrevPathTracingLightDir = glm::vec3(0.0f);
-		PrevPathTracingLightIntensity = 0.0f;
+		// Indirect lighting setting tweaks (RTAO radius, SH sample counts,
+		// SpatialHash cell size, etc.) used to wipe TAA / screen probe
+		// /spatial hash history every frame the user dragged a slider.
+		// GI converges naturally — let history persist so the user can
+		// watch the new setting settle in. PathTracingPass has its own
+		// per-frame light/sky delta check that still invalidates monte-
+		// carlo samples when needed.
 #if WITH_STREAMLINE
 		bDLSSResetNeeded = true;
 #endif
@@ -7177,20 +7173,11 @@ void Corona::ApplyPointLightRenderSync(const RenderFrameDelta& delta)
 		bChanged = true;
 	}
 
-	if (bChanged)
-	{
-		FrameCounter = 0;
-		IndirectAccumulatedFrames = 0;
-		bTemporalDenoiserHistoryValid = false;
-		bScreenProbeGIAtlasHistoryValid = false;
-		bScreenProbeGIHistoryValid = false;
-		bSpatialHashGIHistoryValid = false;
-		bPendingTemporalHistoryClear = true;
-		bResetTemporalStateNextUpdate = true;
-		PrevPathTracingViewMat = glm::mat4x4(0.0f);
-		PrevPathTracingLightDir = glm::vec3(0.0f);
-		PrevPathTracingLightIntensity = 0.0f;
-	}
+	// Previously: any point-light delta wiped the entire GI/temporal history.
+	// Dragging a light position in the inspector therefore reset spatial hash
+	// every frame. GI / TAA blend converges to the new state on their own;
+	// keep the accumulated history so users can see GI settle while tuning.
+	(void)bChanged;
 }
 
 void Corona::CollectRenderFrameDeltas()
@@ -11250,23 +11237,15 @@ void Corona::BuildRenderFrameDerivedState(const RenderFrameSourceState* sourceSt
 
 	if (indirectLightingChanged)
 	{
-		if (DiffuseGIMode == EDiffuseGIMode::SPATIAL_HASH)
-		{
-		}
-		else
-		{
-			IndirectAccumulatedFrames = 0;
-			bTemporalDenoiserHistoryValid = false;
-			bSpatialHashGIHistoryValid = false;
-			if (DiffuseGIMode == EDiffuseGIMode::SCREEN_PROBE && (bScreenProbeGIAtlasHistoryValid || bScreenProbeGIHistoryValid))
-				bScreenProbeLightingBootstrapPending = true;
-			else
-			{
-				bScreenProbeGIAtlasHistoryValid = false;
-				bScreenProbeGIHistoryValid = false;
-				bScreenProbeLightingBootstrapPending = false;
-			}
-		}
+		// All GI modes now preserve history across light/sky edits. Dragging
+		// a light intensity or rotating the sun used to wipe accumulated
+		// frames every frame (because the 0.0001f delta threshold trips on
+		// every slider tick), which made it impossible to watch GI settle
+		// while tuning. Spatial-hash was already exempted intentionally —
+		// extend the same policy to screen-probe / spatial denoise / non-
+		// spatial paths. The GI passes themselves blend new frames against
+		// the surviving history, so a smooth crossfade is the desired
+		// behaviour instead of a hard reset on every keystroke.
 		PrevIndirectAccumLightDir = RenderFrameNormalizedLightDir;
 		PrevIndirectAccumLightIntensity = LightIntensity;
 		PrevIndirectSkyColorTop = SkyColorTop;
