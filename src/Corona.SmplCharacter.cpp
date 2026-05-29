@@ -27,6 +27,8 @@
 #include "glm/gtc/matrix_transform.hpp"
 #include "glm/gtc/quaternion.hpp"
 
+void AppendCpuRuntimeTrace(const std::wstring& line);
+
 namespace
 {
 	// Must match SkinInputVertex (80 B) in Corona.Skeletal.cpp.
@@ -263,9 +265,22 @@ namespace
 bool Corona::SpawnSmplMotionCharacter(const glm::vec3& worldOrigin, float uniformScale)
 {
 	if (!renderBackend)
+	{
+		AppendCpuRuntimeTrace(L"[LLMAnim] SpawnSmplMotionCharacter aborted: renderBackend null");
 		return false;
+	}
 	if (SmplMotionCharacter)
-		return true; // already spawned; reposition is a separate concern
+	{
+		AppendCpuRuntimeTrace(L"[LLMAnim] SpawnSmplMotionCharacter: already spawned, reusing");
+		return true;
+	}
+	{
+		wchar_t buf[256];
+		swprintf(buf, 256,
+			L"[LLMAnim] SpawnSmplMotionCharacter origin=(%.2f,%.2f,%.2f) scale=%.2f",
+			worldOrigin.x, worldOrigin.y, worldOrigin.z, uniformScale);
+		AppendCpuRuntimeTrace(buf);
+	}
 
 	auto res = std::make_unique<CoronaSmpl::CharacterResources>();
 
@@ -396,10 +411,22 @@ bool Corona::SpawnSmplMotionCharacter(const glm::vec3& worldOrigin, float unifor
 	desc.bRayTracing  = true;
 	desc.bPhysicsQuery = false;
 	const Corona::SceneObjectHandle handle = AddSceneObject(desc);
-	if (handle == Corona::InvalidSceneObjectHandle) return false;
+	if (handle == Corona::InvalidSceneObjectHandle)
+	{
+		AppendCpuRuntimeTrace(L"[LLMAnim] SpawnSmplMotionCharacter: AddSceneObject returned invalid handle");
+		return false;
+	}
 	SmplMotionCharacterHandle = handle;
 
 	SmplMotionCharacter = std::move(res);
+	{
+		wchar_t buf[256];
+		swprintf(buf, 256,
+			L"[LLMAnim] SpawnSmplMotionCharacter OK verts=%u indices=%u handle=%u",
+			SmplMotionCharacter->VertexCount, SmplMotionCharacter->IndexCount,
+			static_cast<unsigned>(handle));
+		AppendCpuRuntimeTrace(buf);
+	}
 	return true;
 }
 

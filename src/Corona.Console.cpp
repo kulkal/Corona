@@ -14,6 +14,8 @@
 
 #include "Utils.h"
 
+void AppendCpuRuntimeTrace(const std::wstring& line);
+
 namespace
 {
 	// The TripoSR install. Configurable via the TRIPOSR_REPO env var picked up
@@ -586,6 +588,10 @@ void CoronaConsole::DispatchMotionGen(const std::string& promptText, float durat
 
 	Log("dispatching motion_gen (mode=" + std::string(kMotionMode)
 		+ ", duration=" + std::to_string(durationSec) + "s, seed=" + std::to_string(seed) + ") ...");
+	{
+		std::wstring w(cmdStr.begin(), cmdStr.end());
+		AppendCpuRuntimeTrace(L"[LLMAnim] DispatchMotionGen cmd: " + w);
+	}
 
 	auto job = std::make_unique<PendingJob>();
 	job->Prompt = promptText;
@@ -651,11 +657,15 @@ void CoronaConsole::Update()
 
 void CoronaConsole::LoadAndPlayMotion(const std::string& bvhPath, const std::string& prompt)
 {
+	AppendCpuRuntimeTrace(L"[LLMAnim] LoadAndPlayMotion bvh=" +
+		std::wstring(bvhPath.begin(), bvhPath.end()));
 	CoronaMotion::MotionClip clip;
 	std::string err;
 	if (!CoronaMotion::LoadBVH(bvhPath, clip, err))
 	{
 		Log("BVH load FAILED: " + err);
+		AppendCpuRuntimeTrace(L"[LLMAnim] BVH load FAILED: " +
+			std::wstring(err.begin(), err.end()));
 		return;
 	}
 	{
@@ -689,6 +699,13 @@ void CoronaConsole::LoadAndPlayMotion(const std::string& bvhPath, const std::str
 	else
 	{
 		spawnPos.y = cameraPos.y - kPelvisAboveFeet;
+	}
+	{
+		wchar_t buf[256];
+		swprintf(buf, 256,
+			L"[LLMAnim] SetMotionClipForPlayback frames=%d fps=%.1f spawn=(%.2f,%.2f,%.2f) scale=%.2f",
+			clip.FrameCount, clip.Fps, spawnPos.x, spawnPos.y, spawnPos.z, kSmplWorldScale);
+		AppendCpuRuntimeTrace(buf);
 	}
 	Host->SetMotionClipForPlayback(std::move(clip), spawnPos, kSmplWorldScale);
 }
