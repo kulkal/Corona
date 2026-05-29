@@ -42,6 +42,9 @@ void Corona::InitRaytracingShadowPass()
 		// shader only reads from these when ShadowMode == 1.
 		TEMP_PSO_RT_SHADOW->BindSRV("global", "ShadowReservoirPrev", 9);
 		TEMP_PSO_RT_SHADOW->BindSRV("global", "VelocityTex", 10);
+		// Phase 2b — per-pixel M tracking. Separate single-channel buffer.
+		TEMP_PSO_RT_SHADOW->BindUAV("global", "ShadowReservoirM", 1);
+		TEMP_PSO_RT_SHADOW->BindSRV("global", "ShadowReservoirMPrev", 11);
 
 		TEMP_PSO_RT_SHADOW->BindCBV("global", "ViewParameter", 0, sizeof(RTShadowViewParamCB), 1);
 		TEMP_PSO_RT_SHADOW->BindSampler("global", "sampleWrap", 0);
@@ -168,9 +171,13 @@ void Corona::RaytraceShadowPass()
 
 	renderBackend->TransitionTexture(ShadowBuffer.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
 
+	if (ShadowReservoirMBuffer)
+		renderBackend->TransitionTexture(ShadowReservoirMBuffer.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
+
 	RTPassBuilder pass(*this, PSO_RT_SHADOW);
 	pass.BeginScene()
 		.SetTextureUAV("global", "ShadowResult", ShadowBuffer.get())
+		.SetTextureUAV("global", "ShadowReservoirM", ShadowReservoirMBuffer.get())
 		.SetAccelerationStructure("global", "gRtScene", TLAS)
 		.SetTextureSRV("global", "DepthTex", UnjitteredDepthBuffers[ColorBufferWriteIndex].get())
 		.SetTextureSRV("global", "WorldNormalTex", NormalBuffers[ColorBufferWriteIndex].get())
@@ -178,6 +185,8 @@ void Corona::RaytraceShadowPass()
 		.SetTextureSRV("global", "RayNoiseBlueNoiseSource", BlueNoiseTex.get())
 		.SetTextureSRV("global", "ShadowReservoirPrev",
 			ShadowReservoirPrevBuffer ? ShadowReservoirPrevBuffer.get() : ShadowBuffer.get())
+		.SetTextureSRV("global", "ShadowReservoirMPrev",
+			ShadowReservoirMPrevBuffer ? ShadowReservoirMPrevBuffer.get() : ShadowBuffer.get())
 		.SetTextureSRV("global", "VelocityTex", VelocityBuffer.get())
 		.SetCBVValue("global", "ViewParameter", &RTShadowViewParam)
 		.SetSampler("global", "sampleWrap", samplerWrap.get());
@@ -185,6 +194,8 @@ void Corona::RaytraceShadowPass()
 	pass.Dispatch(GetRenderWidth(), GetRenderHeight());
 
 	renderBackend->TransitionTexture(ShadowBuffer.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
+	if (ShadowReservoirMBuffer)
+		renderBackend->TransitionTexture(ShadowReservoirMBuffer.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
 
 	// ReSTIR Phase 2 temporal feedback: cache this frame's reservoirs for
 	// next-frame reproject via raw DX12 CopyResource. Only meaningful in
@@ -203,6 +214,21 @@ void Corona::RaytraceShadowPass()
 			EResourceState::CopyDest, EResourceState::ShaderRead);
 		renderBackend->TransitionTexture(ShadowBuffer.get(),
 			EResourceState::CopySource, EResourceState::ShaderRead);
+
+		if (ShadowReservoirMBuffer && ShadowReservoirMPrevBuffer)
+		{
+			renderBackend->TransitionTexture(ShadowReservoirMPrevBuffer.get(),
+				EResourceState::ShaderRead, EResourceState::CopyDest);
+			renderBackend->TransitionTexture(ShadowReservoirMBuffer.get(),
+				EResourceState::ShaderRead, EResourceState::CopySource);
+			dx12_rhi->GetGraphicsCommandList()->CopyResource(
+				ShadowReservoirMPrevBuffer->resource.Get(),
+				ShadowReservoirMBuffer->resource.Get());
+			renderBackend->TransitionTexture(ShadowReservoirMPrevBuffer.get(),
+				EResourceState::CopyDest, EResourceState::ShaderRead);
+			renderBackend->TransitionTexture(ShadowReservoirMBuffer.get(),
+				EResourceState::CopySource, EResourceState::ShaderRead);
+		}
 	}
 
 	bShadowOutputValidThisFrame = true;

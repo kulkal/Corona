@@ -2,6 +2,11 @@
 
 
 RWTexture2D<float4> ShadowResult : register(u0);
+// Phase 2b — current-frame per-pixel M (effective sample count). Lives in
+// a separate single-channel UAV because ShadowResult's 4 RGBA32F slots
+// are spoken for (sun / idx / W / vis). The shader writes M_eff here
+// and the host copies it to ShadowReservoirMPrev for next frame.
+RWTexture2D<float> ShadowReservoirM : register(u1);
 RaytracingAccelerationStructure gRtScene : register(t0);
 Texture2D DepthTex : register(t1);
 Texture2D WorldNormalTex : register(t2);
@@ -17,6 +22,7 @@ Texture3D RayNoiseBlueNoiseSource : register(t8);
 // pixel to combine with the current frame's RIS choice.
 Texture2D ShadowReservoirPrev : register(t9);
 Texture2D VelocityTex : register(t10);
+Texture2D ShadowReservoirMPrev : register(t11);
 
 
 cbuffer ViewParameter : register(b0)
@@ -208,6 +214,9 @@ void rayGen()
             else if (lightIdx == 1u) outShadow.b = pointVis;
             else                     outShadow.a = pointVis;
         }
+        // Option A doesn't use the M side buffer — zero it so a later
+        // runtime toggle into ReSTIR doesn't pick up stale temporal M.
+        ShadowReservoirM[pixelPos] = 0.0f;
     }
     else
     {
@@ -261,12 +270,65 @@ void rayGen()
         }
 
         // Track effective sample count M for the unbiased estimator:
-        // ratio = W_sum / (p_chosen * M). Phase 1 has M=1 only; temporal
-        // reuse below bumps M by 1 when a valid prev sample combines in.
-        // Storing real per-pixel M across frames needs a 4th data channel
-        // we don't currently have (sun is in .r, idx/W/vis use .gba) —
-        // that's the Phase 2b refactor. For now M maxes at 2 per frame.
-        uint M_eff = (chosenIdx == 0xFFFFFFFFu) ? 0u : 1u;
+        // W = W_sum / (p_chosen * M). Phase 2b stores M in a side buffer
+        // (ShadowReservoirM) so temporal reuse can carry it across
+        // frames; M_eff grows over many frames up to a cap, dropping
+        // variance ~1/M. Cap chosen to bound the influence of stale
+        // samples after motion / disocclusion.
+        const float kMaxM = 20.0f;
+        float M_eff = (chosenIdx == 0xFFFFFFFFu) ? 0.0f : 1.0f;
+
+        // ReSTIR Phase 3 — spatial reuse over a small neighbourhood of
+        // the previous frame's reservoirs. Reading prev (not curr) keeps
+        // the pass single-dispatch — the spatial samples are one frame
+        // stale but that's a cheap cost vs the variance reduction. The
+        // network of 3 neighbours + the centre temporal sample below
+        // effectively raises M_eff per pixel without an extra compute
+        // pass, which is what DLSS RR needs to denoise cleanly.
+        const int   kSpatialSamples = 3;
+        const float kSpatialRadius  = 8.0f; // pixels
+        [unroll]
+        for (int sIdx = 0; sIdx < kSpatialSamples; ++sIdx)
+        {
+            uint sSeed = (pixelPos.x * 5237u + pixelPos.y * 6311u + FrameCounter * 17u + (uint)sIdx * 991u) * 1597u;
+            sSeed ^= sSeed >> 13u; sSeed *= 0x5bd1e995u; sSeed ^= sSeed >> 15u;
+            float rA = (sSeed & 0xFFFFu) / 65535.0f;
+            sSeed = sSeed * 1664525u + 1013904223u;
+            float rB = (sSeed & 0xFFFFu) / 65535.0f;
+            const float angle = rA * 6.28318530717958647692f;
+            const float radius = sqrt(rB) * kSpatialRadius;
+            const int2 ofs = int2(round(cos(angle) * radius), round(sin(angle) * radius));
+            const float2 spatialUV = uv + (float2(ofs) / launchSize);
+            if (spatialUV.x < 0.0f || spatialUV.x > 1.0f || spatialUV.y < 0.0f || spatialUV.y > 1.0f)
+                continue;
+            const float4 sp = ShadowReservoirPrev.SampleLevel(sampleWrap, spatialUV, 0);
+            const uint  spIdx   = (uint)(sp.g + 0.5f);
+            const float spRatio = sp.b;
+            const float spM     = ShadowReservoirMPrev.SampleLevel(sampleWrap, spatialUV, 0).x;
+            if (spIdx >= ShadowedPointLightCount || spRatio <= 0.0f || spM <= 0.0f)
+                continue;
+            const float3 cPos = ShadowedPointLights[spIdx].xyz;
+            const float  cRad = max(ShadowedPointLights[spIdx].w, 0.01f);
+            const float  cLum = ShadowedPointLightWeights[spIdx].x;
+            const float3 toC = cPos - worldPos;
+            const float  dSq = max(dot(toC, toC), 1.0e-4f);
+            const float  d   = sqrt(dSq);
+            const float  raC = saturate(1.0f - d / cRad);
+            const float  NLc = saturate(dot(worldNormal, toC) / max(d, 1.0e-3f));
+            const float  tpdfC = cLum * raC * raC * NLc / max(dSq * 0.0001f, 1.0f);
+            const float  spW   = spRatio * tpdfC * spM;
+            if (spW <= 0.0f) continue;
+            weightSum += spW;
+            uint sSeed2 = sSeed * 6151u + 0xdeadbeefu;
+            sSeed2 ^= sSeed2 >> 13u; sSeed2 *= 0x5bd1e995u; sSeed2 ^= sSeed2 >> 15u;
+            const float ru = (sSeed2 & 0x00FFFFFFu) / 16777216.0f;
+            if (ru * weightSum <= spW)
+            {
+                chosenIdx    = spIdx;
+                chosenWeight = tpdfC;
+            }
+            M_eff = min(M_eff + spM * 0.5f, kMaxM); // half-weight neighbours
+        }
 
         // ReSTIR Phase 2 — temporal reuse. Sample the previous frame's
         // reservoir at the motion-reprojected pixel and RIS-combine into
@@ -278,7 +340,8 @@ void rayGen()
             const float4 prev = ShadowReservoirPrev.SampleLevel(sampleWrap, prevUV, 0);
             const uint prevIdx = (uint)(prev.g + 0.5f);
             const float prevRatio = prev.b;
-            if (prevIdx < (uint)MAX_SHADOWED_PT_LIGHTS && prevIdx < ShadowedPointLightCount && prevRatio > 0.0f)
+            const float prevM = ShadowReservoirMPrev.SampleLevel(sampleWrap, prevUV, 0).x;
+            if (prevIdx < (uint)MAX_SHADOWED_PT_LIGHTS && prevIdx < ShadowedPointLightCount && prevRatio > 0.0f && prevM > 0.0f)
             {
                 const float3 candPos = ShadowedPointLights[prevIdx].xyz;
                 const float candRadius = max(ShadowedPointLights[prevIdx].w, 0.01f);
@@ -290,10 +353,9 @@ void rayGen()
                 const float NdotL = saturate(dot(worldNormal, toCand) / max(dist, 1.0e-3f));
                 const float targetPdfPrev = candLuma * rangeAtten * rangeAtten * NdotL / max(distSq * 0.0001f, 1.0f);
                 // RIS combine: prev sample's W-contribution at this pixel
-                // is prevRatio * targetPdfPrev (prevRatio was W_sum_prev
-                // / p_prev(prev.chosen), so multiplying by p_curr at this
-                // pixel weights it properly here).
-                const float prevWeight = prevRatio * targetPdfPrev;
+                // is prev.W_at_curr * prev.M = (prevRatio * targetPdfPrev)
+                // weighted by the prev sample count.
+                const float prevWeight = prevRatio * targetPdfPrev * prevM;
                 if (prevWeight > 0.0f)
                 {
                     weightSum += prevWeight;
@@ -307,24 +369,36 @@ void rayGen()
                         chosenIdx = prevIdx;
                         chosenWeight = targetPdfPrev;
                     }
-                    M_eff = 2u;
+                    // Accumulate prev's M (capped) so subsequent frames'
+                    // variance reduction is proportional to total sample
+                    // history. Without the cap, stale samples after fast
+                    // motion would over-weight.
+                    M_eff = min(M_eff + prevM, kMaxM);
                 }
             }
         }
 
-        if (chosenIdx != 0xFFFFFFFFu && M_eff > 0u)
+        if (chosenIdx != 0xFFFFFFFFu && M_eff > 0.0f)
         {
             float pointVis = 1.0f;
             COMPUTE_POINT_LIGHT_VIS(pointVis,
                 ShadowedPointLights[chosenIdx].xyz,
                 max(ShadowedPointLights[chosenIdx].w, 0.01f));
             // Unbiased estimator weight: W = W_sum / (p_chosen * M).
-            // Previous version forgot the 1/M factor, which doubled
-            // brightness when temporal reuse engaged (M=2 vs M=1).
-            float ratio = weightSum / (max(chosenWeight, 1.0e-6f) * (float)M_eff);
+            // Firefly clamp keeps a single low-pdf sample from spiking
+            // many frames of accumulated weight into one pixel — that's
+            // what the user saw as "camera stops and direct light gets
+            // way too bright with revealed noise". The clamp bounds the
+            // single-sample contribution; over many frames the bias
+            // from clamping is tiny but the variance reduction is
+            // dramatic and DLSS RR can finally denoise the result.
+            const float kFireflyCap = 30.0f;
+            float ratio = weightSum / (max(chosenWeight, 1.0e-6f) * M_eff);
+            ratio = clamp(ratio, 0.0f, kFireflyCap);
             outShadow.g = (float)chosenIdx;
             outShadow.b = ratio;
             outShadow.a = pointVis;
+            ShadowReservoirM[pixelPos] = M_eff;
         }
         else
         {
@@ -332,6 +406,7 @@ void rayGen()
             outShadow.g = 255.0f;
             outShadow.b = 0.0f;
             outShadow.a = 1.0f;
+            ShadowReservoirM[pixelPos] = 0.0f;
         }
     }
 

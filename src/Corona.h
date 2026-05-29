@@ -233,6 +233,13 @@ private:
 	// reproject and combine. RGBA32Float layout matches ShadowBuffer
 	// (.r = sun visibility, .gba = reservoir lightIdx / weight / vis).
 	shared_ptr<Texture> ShadowReservoirPrevBuffer;
+	// Phase 2b — per-pixel effective sample count M. Lives in a separate
+	// single-channel texture because ShadowBuffer's 4 RGBA32F slots are
+	// fully spoken for (sun / idx / W / vis). R16Float gives ample range
+	// for the M cap (~20). Curr is written by the RT shadow shader; Prev
+	// is the CopyResource'd snapshot used by the next frame's combine.
+	shared_ptr<Texture> ShadowReservoirMBuffer;
+	shared_ptr<Texture> ShadowReservoirMPrevBuffer;
 	shared_ptr<Texture> AmbientOcclusionBuffer;
 	shared_ptr<Texture> SkyLightingBuffer;
 	glm::mat4x4 MobileShadowViewProjMat = glm::mat4x4(1.0f);

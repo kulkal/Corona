@@ -325,8 +325,25 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow)
 	if (!HasCommandLineSwitch(commandLine, L"--enable-crash-dialog"))
 		SuppressCrashReportDialogs();
 
-	//Corona* sample = new Corona(2560, 1440, L"Corona");
-	Corona* sample = new Corona(1920, 1080, L"Corona");
+	// Default window 1920x1080. --fullscreen / --4k flips to borderless
+	// fullscreen at the primary monitor's native resolution; --4k forces
+	// 3840x2160 even when the desktop is lower so the renderer pumps
+	// out a 4K backbuffer (useful for capture / benchmark).
+	UINT initialWidth = 1920;
+	UINT initialHeight = 1080;
+	const bool bWantFullscreen = HasCommandLineSwitch(commandLine, L"--fullscreen");
+	const bool bWant4K = HasCommandLineSwitch(commandLine, L"--4k");
+	if (bWant4K)
+	{
+		initialWidth = 3840;
+		initialHeight = 2160;
+	}
+	else if (bWantFullscreen)
+	{
+		initialWidth = GetSystemMetrics(SM_CXSCREEN);
+		initialHeight = GetSystemMetrics(SM_CYSCREEN);
+	}
+	Corona* sample = new Corona(initialWidth, initialHeight, L"Corona");
 	const bool bAutomationRun =
 		HasCommandLineSwitch(commandLine, L"--auto-dump") ||
 		HasCommandLineSwitch(commandLine, L"--readme-dump") ||

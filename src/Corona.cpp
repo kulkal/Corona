@@ -2368,6 +2368,14 @@ void Corona::RecreateRenderResolutionResources()
 	ShadowReservoirPrevBuffer = createTexture2D(ETextureFormat::RGBA32Float,
 		TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
 	NAME_D3D12_OBJECT(ShadowReservoirPrevBuffer->resource);
+	// Phase 2b — per-pixel M (effective sample count). R32Float covers
+	// the 0..20 cap; R16Float would do but isn't in ETextureFormat yet.
+	ShadowReservoirMBuffer = createTexture2D(ETextureFormat::R32Float,
+		TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
+	NAME_D3D12_OBJECT(ShadowReservoirMBuffer->resource);
+	ShadowReservoirMPrevBuffer = createTexture2D(ETextureFormat::R32Float,
+		TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
+	NAME_D3D12_OBJECT(ShadowReservoirMPrevBuffer->resource);
 
 	AmbientOcclusionBuffer = createTexture2D(ETextureFormat::RGBA16Float, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1, glm::vec4(1.0f));
 	NAME_D3D12_OBJECT(AmbientOcclusionBuffer->resource);
@@ -9578,6 +9586,12 @@ void Corona::LoadAssets()
 		ShadowReservoirPrevBuffer = createTexture2D(ETextureFormat::RGBA32Float,
 			TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
 		NAME_D3D12_OBJECT(ShadowReservoirPrevBuffer->resource);
+		ShadowReservoirMBuffer = createTexture2D(ETextureFormat::R32Float,
+			TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
+		NAME_D3D12_OBJECT(ShadowReservoirMBuffer->resource);
+		ShadowReservoirMPrevBuffer = createTexture2D(ETextureFormat::R32Float,
+			TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
+		NAME_D3D12_OBJECT(ShadowReservoirMPrevBuffer->resource);
 
 		AmbientOcclusionBuffer = createTexture2D(ETextureFormat::RGBA16Float, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1, glm::vec4(1.0f));
 

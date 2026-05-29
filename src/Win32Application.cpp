@@ -113,16 +113,28 @@ int Win32Application::Run(Corona* app, HINSTANCE hInstance, int nCmdShow)
 	windowClass.lpszClassName = L"CoronaWindowClass";
 	RegisterClassExW(&windowClass);
 
+	// --fullscreen / --4k: borderless window at the requested dimensions,
+	// positioned at (0,0) covering the primary monitor. No DXGI-exclusive
+	// fullscreen — Alt-Tab stays responsive and overlays / DLSS work
+	// without the swap-chain mode mess.
+	auto hasSwitch = [](const wchar_t* sw)
+	{
+		const wchar_t* cmdline = GetCommandLineW();
+		return cmdline && std::wcsstr(cmdline, sw) != nullptr;
+	};
+	const bool bFullscreenBorderless = hasSwitch(L"--fullscreen") || hasSwitch(L"--4k");
+	const DWORD windowStyle = bFullscreenBorderless ? WS_POPUP : WS_OVERLAPPEDWINDOW;
 	RECT windowRect = { 0, 0, static_cast<LONG>(app->GetWidth()), static_cast<LONG>(app->GetHeight()) };
-	AdjustWindowRect(&windowRect, WS_OVERLAPPEDWINDOW, FALSE);
+	if (!bFullscreenBorderless)
+		AdjustWindowRect(&windowRect, windowStyle, FALSE);
 
 	// Create the window and store a handle to it.
 	m_hwnd = CreateWindowW(
 		windowClass.lpszClassName,
 		app->GetTitle(),
-		WS_OVERLAPPEDWINDOW,
-		CW_USEDEFAULT,
-		CW_USEDEFAULT,
+		windowStyle,
+		bFullscreenBorderless ? 0 : CW_USEDEFAULT,
+		bFullscreenBorderless ? 0 : CW_USEDEFAULT,
 		windowRect.right - windowRect.left,
 		windowRect.bottom - windowRect.top,
 		nullptr,		// We have no parent window.
