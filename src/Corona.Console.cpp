@@ -665,19 +665,31 @@ void CoronaConsole::LoadAndPlayMotion(const std::string& bvhPath, const std::str
 			<< (clip.FrameCount * clip.FrameTime) << "s)";
 		Log(os.str());
 	}
-	// Pick a spawn point in front of the active camera so the user sees
-	// the figure without needing to fly around. Step 8 swaps this for the
-	// terrain-snapped position when running on the terrain bench. The
-	// host's SetMotionClipForPlayback lazy-spawns one SMPL character on
-	// first call; subsequent clips reuse it.
+	// Pick a spawn point in front of the active camera. When a terrain is
+	// loaded (e.g. the terrain_demo startup mode), snap the pelvis to the
+	// terrain height so the figure stands rather than floating; without a
+	// terrain we just use the eye-Y minus the SMPL pelvis-from-feet height.
+	// Engine units are 1m per unit in the terrain_demo / sponza-meter
+	// scenes; the existing 17-bone humanoid uses scale 140 for the older
+	// Sponza scene that ran in centimeter-ish units. We default to 1.0
+	// here, matching the terrain_demo scale.
+	const float kSmplWorldScale = 1.0f;
+	// Pelvis-from-feet height in SMPL meters (joint table accumulation
+	// down through L_hip → L_knee → L_ankle → L_foot is about 0.95 m).
+	const float kPelvisAboveFeet = 0.95f * kSmplWorldScale;
+
 	const glm::vec3 cameraPos  = Host->GetCameraPositionForConsole();
 	const glm::vec3 cameraLook = Host->GetCameraLookDirForConsole();
-	glm::vec3 spawnPos = cameraPos + cameraLook * 4.0f;
-	spawnPos.y = cameraPos.y - 1.0f;
-	// Engine world units are ~100× SMPL meters in Corona test scenes; the
-	// existing humanoid uses characterScale 140. Match scale here so the
-	// SMPL character is visible alongside other props.
-	const float kSmplWorldScale = 100.0f;
+	glm::vec3 spawnPos = cameraPos + cameraLook * 3.0f;
+	if (Terrain::Component* terrain = Host->GetActiveTerrainForConsole())
+	{
+		const float groundY = terrain->SampleHeight(spawnPos.x, spawnPos.z);
+		spawnPos.y = groundY + kPelvisAboveFeet;
+	}
+	else
+	{
+		spawnPos.y = cameraPos.y - kPelvisAboveFeet;
+	}
 	Host->SetMotionClipForPlayback(std::move(clip), spawnPos, kSmplWorldScale);
 }
 

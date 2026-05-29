@@ -64,8 +64,12 @@ def generate(
     frame_time = 1.0 / float(fps)
     n_frames = max(1, int(round(duration * fps)))
 
-    # Stand height — pelvis sits ~0.91m above the ground in SMPL neutral.
-    base_y = 0.91
+    # RootTranslation here is *relative to the bind-pose pelvis* — the
+    # engine builds its SMPL bind pose with pelvis at object origin, so
+    # we report only deviations (forward motion, hop, idle bob). The
+    # engine spawn code adds the pelvis-from-feet offset (~0.95 m) to
+    # the world spawn Y so feet land on the ground.
+    base_y = 0.0
 
     root_translations: List[Tuple[float, float, float]] = []
     poses: List[List[Tuple[float, float, float]]] = []
