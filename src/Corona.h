@@ -74,6 +74,12 @@ struct lua_State;
 struct lua_Callbacks;
 struct PlatformTouchState;
 
+// LLM-driven motion playback (Corona.MotionClip.*, Corona.MotionPlayback.*,
+// Corona.SmplCharacter.*). Forward-declared so Corona.h stays lightweight;
+// Corona.cpp + Corona.SmplCharacter.cpp include the real headers.
+namespace CoronaMotion { struct MotionClip; class MotionPlayback; }
+namespace CoronaSmpl   { struct CharacterResources; }
+
 enum class ERawFloatDumpFormat
 {
 	Unknown,
@@ -2718,6 +2724,27 @@ public:
 	void DispatchSkeletalSkinningForRenderWorld();
 	void SpawnSkeletalTestCharacters();
 	void UpdateSkeletalTestCharacters(float timeSeconds);
+
+	// LLM-driven motion playback path (Corona.SmplCharacter.cpp +
+	// Corona.MotionPlayback.h). The console hands a loaded BVH clip to
+	// SetMotionClipForPlayback; that lazy-spawns one SMPL 24-bone box
+	// character at the camera-spawn point (Step 8 substitutes a terrain-
+	// snapped position) and starts the playback driver. The per-frame
+	// palette upload runs as the first step inside
+	// DispatchSkeletalSkinningForRenderWorld so the existing compute
+	// skinning + GBuffer paths see fresh bone matrices each frame.
+	bool SpawnSmplMotionCharacter(const glm::vec3& worldOrigin, float uniformScale);
+	void UpdateSmplMotionCharacterPalette();
+	void SetMotionClipForPlayback(CoronaMotion::MotionClip&& clip,
+		const glm::vec3& spawnWorldOrigin, float uniformScale);
+	std::unique_ptr<CoronaSmpl::CharacterResources> SmplMotionCharacter;
+	SceneObjectHandle                               SmplMotionCharacterHandle = InvalidSceneObjectHandle;
+	std::unique_ptr<CoronaMotion::MotionPlayback>   MotionPlayback;
+	// Wall-clock baseline for advancing the motion playback time. Refreshed
+	// every UpdateSmplMotionCharacterPalette call; clamped to 0.1 s so a
+	// debugger pause doesn't teleport the clip half a loop forward.
+	std::chrono::steady_clock::time_point           MotionLastTickTime{};
+	bool                                            bMotionTickInit = false;
 	// Time the previous frame's skeletal palette was sampled at, used by
 	// UpdateSkeletalTestCharacters to compute the prev-frame bone matrices
 	// it uploads to SkeletalPrevBoneMatrices for the motion-vector VS.
