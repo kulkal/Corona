@@ -541,6 +541,10 @@ private:
 	std::shared_ptr<Buffer> SpatialHashGIResolvedSH[2][SpatialHashGISHCoefficientCount];
 	UINT32 SpatialHashGIWriteIndex = 0;
 	
+	// Forward decl: the CB layout below indexes by MaxPointLights, but the
+	// canonical constant lives further down with the rest of the lighting
+	// state. Re-state it here so both struct definitions compile.
+	static constexpr UINT32 MaxPointLightsForShadowCB = 128;
 	// RT shadow
 	struct RTShadowViewParamCB
 	{
@@ -565,14 +569,15 @@ private:
 		// For ReSTIR : 0..MaxPointLights (number of candidate lights iterated).
 		UINT32 ShadowedPointLightCount = 0;
 		UINT32 _padding2 = 0;
-		// Up to 8 point lights, each xyz = position, w = radius. The first
-		// ShadowedPointLightCount entries are valid. Same packing for both
-		// shadow modes; the shader chooses how to consume them.
-		glm::vec4 ShadowedPointLights[8] = {};
+		// Up to MaxPointLightsForShadowCB candidates. Option A reads only
+		// the first 3 (channel-pack hard cap); ReSTIR Phase 1 iterates
+		// all valid entries for per-pixel RIS. 128 * 32 B = 4 KB — fits
+		// the CB budget comfortably.
+		glm::vec4 ShadowedPointLights[MaxPointLightsForShadowCB] = {};
 		// Per-light intensity used as RIS candidate weight (color luma *
-		// intensity * range scaling). Only ReSTIR mode reads these; Option
-		// A treats every shadowed light as equal-cost.
-		glm::vec4 ShadowedPointLightWeights[8] = {};
+		// intensity). Only ReSTIR mode reads these; Option A treats every
+		// shadowed light as equal-cost.
+		glm::vec4 ShadowedPointLightWeights[MaxPointLightsForShadowCB] = {};
 	};
 
 	RTShadowViewParamCB RTShadowViewParam;
@@ -766,7 +771,13 @@ private:
 	shared_ptr<RTPipelineStateObject> PSO_RT_SPATIAL_HASH_GI_SER;
 	bool bRTDiffuseGISpatialHashSERInitFailed = false;
 
-	static constexpr UINT32 MaxPointLights = 8;
+	// Raised from 8 → 128 so ReSTIR DI demos with many lights are
+	// meaningful. CB cost: 128 * 32 B = 4 KB per occurrence (LightingParam
+	// + RTShadowViewParamCB), well under the 64 KB cbuffer limit. Keep the
+	// shader-side MAX_POINT_LIGHTS macros in lock-step with this value.
+	static constexpr UINT32 MaxPointLights = 128;
+	static_assert(MaxPointLights == MaxPointLightsForShadowCB,
+		"MaxPointLights and MaxPointLightsForShadowCB must match — the RT shadow CB layout assumes the same cap");
 
 	struct PointLightParam
 	{
@@ -955,6 +966,11 @@ private:
 		UINT32 ShadowMode = 0;
 		glm::vec4 AmbientSkyColorAndStrength = glm::vec4(0.0f);
 		glm::vec4 AmbientGroundColorAndStrength = glm::vec4(0.0f);
+		// Option A channel-pack map: global lightIndex -> channel index
+		// (0/1/2) or 0xFFFFFFFF when the light isn't shadowed this frame.
+		// Packed 4 entries per uvec4 to match HLSL's 16-byte CB array
+		// stride without inflating the cbuffer to N*16 bytes.
+		glm::uvec4 ShadowChannelMap[MaxPointLights / 4];
 		PointLightParam PointLights[MaxPointLights];
 		UINT32 PointLightCount = 0;
 		glm::vec3 PointLightPadding = glm::vec3(0.0f);

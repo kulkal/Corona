@@ -80,26 +80,78 @@ void Corona::RaytraceShadowPass()
 	//   ReSTIR Phase 1    : up to 8 candidates, each weighted by luma *
 	//                       intensity for RIS. The shader picks 1 per pixel.
 	RTShadowViewParam.ShadowMode = bEnableReSTIRDirectShadow ? 1u : 0u;
-	const uint32_t maxShadowed = bEnableReSTIRDirectShadow ? 8u : 3u;
-	uint32_t shadowedCount = 0;
-	for (const PointLightState& pl : RenderWorld.PointLights)
-	{
-		if (shadowedCount >= maxShadowed)
-			break;
-		if (!pl.bEnabled || pl.Intensity <= 0.0f)
-			continue;
-		RTShadowViewParam.ShadowedPointLights[shadowedCount] =
-			glm::vec4(pl.Position, std::max(pl.Radius, 0.01f));
-		// Candidate weight: perceptual luma of color × intensity. This
-		// drives RIS selection probability so brighter lights are sampled
-		// more often. Option A ignores the weights but they cost nothing
-		// to compute, so we always populate them.
+
+	// Candidate gather:
+	//   Option A   — only 3 channels available, so pick the 3 lights most
+	//                relevant to what the camera sees: in-frustum (sphere
+	//                test) ∩ nearest to camera. Frustum culling avoids
+	//                wasting GBA slots on lights outside the view.
+	//   ReSTIR Phase 1 — feed every enabled light as a candidate; the RIS
+	//                pass weights by luma * NdotL * range so the picker
+	//                stays meaningful even at 100+ lights.
+	auto computeLuma = [](const PointLightState& pl) {
 		const float luma = 0.2126f * pl.Color.r + 0.7152f * pl.Color.g + 0.0722f * pl.Color.b;
-		const float weight = std::max(0.0f, luma) * std::max(0.0f, pl.Intensity);
-		RTShadowViewParam.ShadowedPointLightWeights[shadowedCount] = glm::vec4(weight, 0.0f, 0.0f, 0.0f);
-		++shadowedCount;
+		return std::max(0.0f, luma) * std::max(0.0f, pl.Intensity);
+	};
+
+	uint32_t shadowedCount = 0;
+	if (bEnableReSTIRDirectShadow)
+	{
+		for (const PointLightState& pl : RenderWorld.PointLights)
+		{
+			if (shadowedCount >= MaxPointLights)
+				break;
+			if (!pl.bEnabled || pl.Intensity <= 0.0f)
+				continue;
+			RTShadowViewParam.ShadowedPointLights[shadowedCount] =
+				glm::vec4(pl.Position, std::max(pl.Radius, 0.01f));
+			RTShadowViewParam.ShadowedPointLightWeights[shadowedCount] =
+				glm::vec4(computeLuma(pl), 0.0f, 0.0f, 0.0f);
+			++shadowedCount;
+		}
 	}
-	for (uint32_t i = shadowedCount; i < 8u; ++i)
+	else
+	{
+		// Option A — score and sort.
+		struct Candidate {
+			uint32_t Index;
+			float DistSq;
+		};
+		std::vector<Candidate> candidates;
+		candidates.reserve(RenderWorld.PointLights.size());
+		const glm::vec3 camPos = RenderFrameCameraPosition;
+		for (uint32_t i = 0; i < RenderWorld.PointLights.size(); ++i)
+		{
+			const PointLightState& pl = RenderWorld.PointLights[i];
+			if (!pl.bEnabled || pl.Intensity <= 0.0f)
+				continue;
+			const float radius = std::max(pl.Radius, 0.01f);
+			// Sphere-AABB frustum test approximated as point-AABB test
+			// against a slightly inflated bounding box of the light's
+			// reach. Cheap; lights right on the frustum boundary may flip
+			// in/out as the camera rotates but soft shadow / TAA hides it.
+			const glm::vec3 boundsMin = pl.Position - glm::vec3(radius);
+			const glm::vec3 boundsMax = pl.Position + glm::vec3(radius);
+			if (!IsWorldAabbInViewFrustum(boundsMin, boundsMax))
+				continue;
+			const glm::vec3 toLight = pl.Position - camPos;
+			candidates.push_back({ i, glm::dot(toLight, toLight) });
+		}
+		std::sort(candidates.begin(), candidates.end(),
+			[](const Candidate& a, const Candidate& b) { return a.DistSq < b.DistSq; });
+		const uint32_t pick = std::min<uint32_t>(static_cast<uint32_t>(candidates.size()), 3u);
+		for (uint32_t k = 0; k < pick; ++k)
+		{
+			const PointLightState& pl = RenderWorld.PointLights[candidates[k].Index];
+			RTShadowViewParam.ShadowedPointLights[k] =
+				glm::vec4(pl.Position, std::max(pl.Radius, 0.01f));
+			RTShadowViewParam.ShadowedPointLightWeights[k] =
+				glm::vec4(computeLuma(pl), 0.0f, 0.0f, 0.0f);
+		}
+		shadowedCount = pick;
+	}
+
+	for (uint32_t i = shadowedCount; i < MaxPointLights; ++i)
 	{
 		RTShadowViewParam.ShadowedPointLights[i] = glm::vec4(0.0f);
 		RTShadowViewParam.ShadowedPointLightWeights[i] = glm::vec4(0.0f);

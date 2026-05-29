@@ -31,13 +31,15 @@ cbuffer ViewParameter : register(b0)
     //     B=lightWeight, A=visibility). The two modes write different
     //     ShadowBuffer semantics; LightingPS branches on the same flag.
     uint ShadowMode;
-    uint ShadowedPointLightCount; // 0..3 (Option A) or 0..8 (ReSTIR)
+    uint ShadowedPointLightCount; // 0..3 (Option A) or 0..MAX_SHADOWED_PT_LIGHTS (ReSTIR)
     uint _padding2;
-    // First 3 entries are used by Option A; ReSTIR iterates up to 8.
-    float4 ShadowedPointLights[8];
+    // Must match Corona::MaxPointLights in Corona.h. Option A reads only
+    // the first 3 entries; ReSTIR iterates all valid entries.
+    #define MAX_SHADOWED_PT_LIGHTS 128
+    float4 ShadowedPointLights[MAX_SHADOWED_PT_LIGHTS];
     // RIS weights for ReSTIR. x = candidate weight (luma * intensity).
     // y/z/w unused for now (room for distance hints, history flags).
-    float4 ShadowedPointLightWeights[8];
+    float4 ShadowedPointLightWeights[MAX_SHADOWED_PT_LIGHTS];
 };
 SamplerState sampleWrap : register(s0);
 
@@ -215,7 +217,7 @@ void rayGen()
         float weightSum = 0.0f;
 
         [loop]
-        for (uint candIdx = 0; candIdx < 8u; ++candIdx)
+        for (uint candIdx = 0; candIdx < (uint)MAX_SHADOWED_PT_LIGHTS; ++candIdx)
         {
             if (candIdx >= ShadowedPointLightCount)
                 break;

@@ -1423,8 +1423,13 @@ void Corona::LightingPass()
 		Param.AmbientGroundColorAndStrength = glm::vec4(glm::max(SkyColorBottom, glm::vec3(0.0f)), 0.0f);
 	}
 	Param.PointLightCount = 0;
-	for (const PointLightState& pointLight : RenderWorld.PointLights)
+	// Stash original PointLights[] indices so we can map them to shadow
+	// channels later (the RT shadow pass picks the same top-3 in-frustum
+	// closest lights C++-side and writes their visibility into .gba).
+	uint32_t lightSrcGlobalIndex[MaxPointLights] = {};
+	for (uint32_t srcIdx = 0; srcIdx < RenderWorld.PointLights.size(); ++srcIdx)
 	{
+		const PointLightState& pointLight = RenderWorld.PointLights[srcIdx];
 		if (!pointLight.bEnabled || Param.PointLightCount >= MaxPointLights)
 			continue;
 
@@ -1433,6 +1438,46 @@ void Corona::LightingPass()
 			glm::vec4(pointLight.Position, std::max(pointLight.Radius, 0.01f));
 		Param.PointLights[pointLightIndex].ColorAndIntensity =
 			glm::vec4(glm::max(pointLight.Color, glm::vec3(0.0f)), std::max(pointLight.Intensity, 0.0f));
+		lightSrcGlobalIndex[pointLightIndex] = srcIdx;
+	}
+
+	// Initialize shadow channel map to "no shadow" sentinel for every
+	// slot. Option A fills the entries for its top-3 in-frustum closest
+	// lights below; ReSTIR leaves the map unused.
+	for (auto& slot : Param.ShadowChannelMap)
+		slot = glm::uvec4(0xFFFFFFFFu);
+
+	if (!bEnableReSTIRDirectShadow && Param.PointLightCount > 0)
+	{
+		// Mirror the RaytraceShadowPass candidate-selection (in-frustum
+		// closest 3). The shadow pass writes ShadowResult.g/b/a in the
+		// order it picked, so the channel index here matches the C++
+		// candidate order. Use the same sort criterion (distance² to
+		// camera) so the two stay in lockstep frame to frame.
+		struct LocalCandidate { uint32_t LightingPSIndex; float DistSq; };
+		std::vector<LocalCandidate> cands;
+		cands.reserve(Param.PointLightCount);
+		const glm::vec3 camPos = RenderFrameCameraPosition;
+		for (uint32_t i = 0; i < Param.PointLightCount; ++i)
+		{
+			const glm::vec3 pos = glm::vec3(Param.PointLights[i].PositionAndRadius);
+			const float radius = std::max(Param.PointLights[i].PositionAndRadius.w, 0.01f);
+			const glm::vec3 boundsMin = pos - glm::vec3(radius);
+			const glm::vec3 boundsMax = pos + glm::vec3(radius);
+			if (!IsWorldAabbInViewFrustum(boundsMin, boundsMax))
+				continue;
+			const glm::vec3 toLight = pos - camPos;
+			cands.push_back({ i, glm::dot(toLight, toLight) });
+		}
+		std::sort(cands.begin(), cands.end(),
+			[](const LocalCandidate& a, const LocalCandidate& b) { return a.DistSq < b.DistSq; });
+		const uint32_t pick = std::min<uint32_t>(static_cast<uint32_t>(cands.size()), 3u);
+		for (uint32_t k = 0; k < pick; ++k)
+		{
+			const uint32_t lpsIdx = cands[k].LightingPSIndex;
+			Param.ShadowChannelMap[lpsIdx >> 2u][lpsIdx & 3u] = k;
+		}
+		(void)lightSrcGlobalIndex; // already correctly indexed via lpsIdx
 	}
 
 	glm::normalize(Param.LightDir);

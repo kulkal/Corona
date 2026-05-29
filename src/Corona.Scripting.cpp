@@ -8097,6 +8097,101 @@ bool Corona::RunLuauUiCommandForScript(const std::string& name, lua_State* L, in
 		SaveSceneState();
 		return true;
 	}
+	// ReSTIR demo: spawn N random point lights in one call. Args:
+	//   count, areaMin{x,y,z}, areaMax{x,y,z}, radius, intensity, seed
+	// Faster than calling add_point_light + set_ui_value N times from Lua.
+	// The lights get a "RestirDemo" name prefix so clear_demo_point_lights
+	// below can remove only the demo set without touching user lights.
+	if (name == "spawn_random_point_lights")
+	{
+		if (lua_gettop(L) < argIndex || !lua_istable(L, argIndex))
+			return false;
+		const int tableIdx = lua_absindex(L, argIndex);
+
+		float countF = 0.0f;
+		if (!ReadNumberField(L, tableIdx, "count", countF) || countF <= 0.0f)
+			return false;
+		const uint32_t requestCount = static_cast<uint32_t>(std::min<float>(countF, static_cast<float>(MaxPointLights)));
+
+		glm::vec3 areaMin(-300.0f, 50.0f, -300.0f), areaMax(300.0f, 600.0f, 300.0f);
+		ReadVec3Field(L, tableIdx, "area_min", areaMin);
+		ReadVec3Field(L, tableIdx, "area_max", areaMax);
+
+		float radius = 250.0f, intensity = 8.0f;
+		ReadNumberField(L, tableIdx, "radius", radius);
+		ReadNumberField(L, tableIdx, "intensity", intensity);
+
+		float seedF = 1.0f;
+		ReadNumberField(L, tableIdx, "seed", seedF);
+		uint32_t rng = static_cast<uint32_t>(std::max(1.0f, seedF));
+		auto rand01 = [&rng]() {
+			rng = rng * 1664525u + 1013904223u;
+			return static_cast<float>((rng >> 8) & 0xFFFFFFu) / 16777216.0f;
+		};
+
+		const uint32_t available = (PointLights.size() < MaxPointLights)
+			? (MaxPointLights - static_cast<uint32_t>(PointLights.size())) : 0u;
+		const uint32_t toSpawn = std::min(requestCount, available);
+
+		std::vector<uint32_t> spawnedIds;
+		spawnedIds.reserve(toSpawn);
+		for (uint32_t i = 0; i < toSpawn; ++i)
+		{
+			PointLightState pointLight;
+			pointLight.Id = NextPointLightId++;
+			pointLight.bEnabled = true;
+			pointLight.Position = glm::vec3(
+				glm::mix(areaMin.x, areaMax.x, rand01()),
+				glm::mix(areaMin.y, areaMax.y, rand01()),
+				glm::mix(areaMin.z, areaMax.z, rand01()));
+			pointLight.Radius = radius;
+			pointLight.Intensity = intensity;
+			// Saturated random hue: pick one full channel, mid the others.
+			const float r = rand01();
+			const float g = rand01();
+			const float b = rand01();
+			pointLight.Color = glm::vec3(0.2f + r * 0.8f, 0.2f + g * 0.8f, 0.2f + b * 0.8f);
+			PointLights.push_back(pointLight);
+			MarkPointLightRenderDirty(pointLight.Id, kPointLightDirtyAll);
+			spawnedIds.push_back(pointLight.Id);
+		}
+
+		// Return the ids array so the script can track which lights it
+		// spawned (and clear only those later).
+		lua_newtable(L);
+		for (size_t i = 0; i < spawnedIds.size(); ++i)
+		{
+			lua_pushinteger(L, static_cast<lua_Integer>(spawnedIds[i]));
+			lua_rawseti(L, -2, static_cast<int>(i + 1));
+		}
+		return true;
+	}
+	// ReSTIR demo: remove a list of point light ids in one call. Args:
+	//   ids = { id1, id2, ... }
+	if (name == "remove_point_lights_by_ids")
+	{
+		if (lua_gettop(L) < argIndex || !lua_istable(L, argIndex))
+			return false;
+		const int tableIdx = lua_absindex(L, argIndex);
+		const int idCount = static_cast<int>(lua_objlen(L, tableIdx));
+		for (int i = 1; i <= idCount; ++i)
+		{
+			lua_rawgeti(L, tableIdx, i);
+			const lua_Integer rawId = lua_tointeger(L, -1);
+			lua_pop(L, 1);
+			const uint32_t id = static_cast<uint32_t>(std::max<lua_Integer>(0, rawId));
+			if (id == 0)
+				continue;
+			const auto it = std::find_if(PointLights.begin(), PointLights.end(),
+				[id](const PointLightState& pl) { return pl.Id == id; });
+			if (it == PointLights.end())
+				continue;
+			MarkPointLightRenderRemoved(it->Id);
+			DestroyPointLightEntity(*it);
+			PointLights.erase(it);
+		}
+		return true;
+	}
 
 	return false;
 }

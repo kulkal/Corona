@@ -21,7 +21,8 @@ Texture2D NormalTex : register(t6);
 Texture2D RoughnessTex : register(t7);
 Texture2D MetallicTex : register(t8);
 
-#define MAX_POINT_LIGHTS 8
+// Must match Corona::MaxPointLights in Corona.h.
+#define MAX_POINT_LIGHTS 128
 
 struct PointLightParam
 {

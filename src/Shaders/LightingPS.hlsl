@@ -33,7 +33,9 @@ Texture2D SkyLightingTex : register(t15);
 
 SamplerState sampleWrap : register(s0);
 
-#define MAX_POINT_LIGHTS 8
+// Must match Corona::MaxPointLights in Corona.h. Raised from 8 → 128 to
+// support ReSTIR DI demos with many lights.
+#define MAX_POINT_LIGHTS 128
 
 struct PointLightParam
 {
@@ -76,6 +78,10 @@ cbuffer LightingParam : register(b0)
     uint ShadowMode;
     float4 AmbientSkyColorAndStrength;
     float4 AmbientGroundColorAndStrength;
+    // Option A channel-pack map: 4 light->channel entries per uint4.
+    // Read with `ShadowChannelMap[i >> 2][i & 3]`. 0xFFFFFFFF = not
+    // shadowed (light wasn't in the in-frustum top-3 closest this frame).
+    uint4 ShadowChannelMap[MAX_POINT_LIGHTS / 4];
     PointLightParam PointLights[MAX_POINT_LIGHTS];
     uint PointLightCount;
     float3 PointLightPadding;
@@ -346,8 +352,11 @@ float4 PSMain(PSInput input) : SV_TARGET
         }
         else
         {
-            // Option A: first 3 lights get hard shadow from .gba. Lights
-            // past index 2 stay unshadowed (no buffer slot available).
+            // Option A: top-3 in-frustum closest lights get hard shadow
+            // from .gba; the C++ side fills ShadowChannelMap so we can
+            // look up whether *this* lightIndex made the cut (and which
+            // channel got its visibility). Lights that weren't selected
+            // stay unshadowed.
             float3 PointVis = float3(shadowSample.g, shadowSample.b, shadowSample.a);
             [loop]
             for (uint lightIndex = 0; lightIndex < activePointLightCount; ++lightIndex)
@@ -366,7 +375,8 @@ float4 PSMain(PSInput input) : SV_TARGET
                 float inverseSquareAttenuation = 1.0f / max(1.0f, distanceSq * 0.0001f);
                 float attenuation = rangeAttenuation * inverseSquareAttenuation;
                 float pointNdotL = saturate(dot(pointLightDir, WorldNormal));
-                float pointVisibility = lightIndex < 3u ? PointVis[lightIndex] : 1.0f;
+                uint shadowChan = ShadowChannelMap[lightIndex >> 2u][lightIndex & 3u];
+                float pointVisibility = shadowChan < 3u ? PointVis[shadowChan] : 1.0f;
                 float3 pointRadiance = pointColor * pointIntensity * attenuation * pointVisibility;
 
                 if (bEnableDirectDiffuse)

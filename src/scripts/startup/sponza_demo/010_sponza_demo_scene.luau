@@ -1,11 +1,9 @@
--- Sponza fly-around demo: load the Sponza FBX as a script-spawned entity
--- (instead of the legacy hard-coded SceneObject), persist everything to
--- assets/maps/sponza so the next launch is a single load_map call.
---
--- The camera and sun are managed by the C++ engine (ApplySponzaFlyCamera /
--- LoadCameraState) so SimpleCamera's mouse + WASD input keeps working.
--- We only contribute the Sponza mesh entity here. Once CameraComponent
--- can consume mouse delta we can move the camera into the map too.
+-- Sponza fly-around demo: load the Sponza FBX as a script-spawned entity,
+-- persist the scene to assets/maps/sponza, and host a small in-viewport
+-- panel that toggles between the 4-channel hard-shadow path and the
+-- ReSTIR Phase 1 reservoir path. Hitting "RESTIR MODE" also spawns 100
+-- randomly-colored point lights so the difference between modes is
+-- visible — Option A only shadows the first 3, ReSTIR samples all.
 
 local mapName = "sponza"
 local sponzaEntity
@@ -33,9 +31,7 @@ if not sponzaEntity then
         override_material = false,
         ray_tracing  = true,
     })
-
     corona.log("[sponza_demo] spawned Sponza model")
-
     local ok, err = corona.save_map(mapName)
     if ok then
         corona.log("[sponza_demo] saved initial scene to " .. mapName)
@@ -43,3 +39,73 @@ if not sponzaEntity then
         corona.log("[sponza_demo] save_map failed: " .. tostring(err))
     end
 end
+
+-- Track lights spawned by the ReSTIR demo so we can clear only those
+-- (and leave any user-placed lights alone) when switching back to the
+-- 4-channel mode. Persisted in a script-local table; values are the
+-- light ids returned by spawn_random_point_lights.
+local demoLightIds = {}
+
+local function spawn_demo_lights()
+    if #demoLightIds > 0 then
+        return -- already spawned
+    end
+    -- Sponza interior extents roughly [-1000, 1000] in X/Z and [0, 1300]
+    -- in Y. Scatter lights through the cathedral height so the floor and
+    -- the upper galleries both get coverage.
+    local ids = corona.run_ui_command("spawn_random_point_lights", {
+        count     = 100,
+        area_min  = { -1100.0,  60.0, -480.0 },
+        area_max  = {  1100.0, 700.0,  480.0 },
+        radius    = 250.0,
+        intensity = 8.0,
+        seed      = 20260529,
+    })
+    if type(ids) == "table" then
+        demoLightIds = ids
+        corona.log("[sponza_demo] spawned " .. tostring(#ids) .. " ReSTIR demo lights")
+    end
+end
+
+local function clear_demo_lights()
+    if #demoLightIds == 0 then
+        return
+    end
+    corona.run_ui_command("remove_point_lights_by_ids", demoLightIds)
+    corona.log("[sponza_demo] removed " .. tostring(#demoLightIds) .. " ReSTIR demo lights")
+    demoLightIds = {}
+end
+
+local function on_imgui()
+    if not imgui.begin("Sponza Shadow Demo") then
+        imgui.end_window()
+        return
+    end
+
+    -- Read the current shadow mode from engine state. The categorized
+    -- Lighting/GI panel exposes the same toggle via its checkbox; this
+    -- panel keeps the two in sync.
+    local state = corona.get_ui_state and corona.get_ui_state() or {}
+    local restirOn = state.enable_restir_direct_shadow or false
+
+    imgui.text("Current: " .. (restirOn and "ReSTIR DI (single-light reservoir)" or "4-channel (hard cap 3 lights)"))
+    imgui.text(string.format("Demo lights: %d", #demoLightIds))
+
+    if not restirOn then
+        if imgui.button("RESTIR MODE") then
+            spawn_demo_lights()
+            corona.set_ui_value("enable_restir_direct_shadow", true)
+        end
+    else
+        if imgui.button("4CHANNEL MODE") then
+            clear_demo_lights()
+            corona.set_ui_value("enable_restir_direct_shadow", false)
+        end
+    end
+
+    imgui.text("Tip: ReSTIR Phase 1 has no temporal reuse yet —")
+    imgui.text("expect noise until Phase 2 reproject lands.")
+    imgui.end_window()
+end
+
+return { imgui = on_imgui }
