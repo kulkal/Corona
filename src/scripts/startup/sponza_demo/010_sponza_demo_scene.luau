@@ -77,11 +77,10 @@ local function clear_demo_lights()
 end
 
 -- Track the shadow mode script-side so the imgui callback never has to
--- call corona.get_ui_state() (which costs ~4 ms / frame for the heavy
--- state push at 100+ lights). We're the only thing that flips this flag,
--- so a local mirror stays accurate; the categorized Lighting / GI panel
--- exposes the same toggle but it lives in the slower script.ui path.
-local restirOn = false
+-- call corona.get_ui_state() each frame. Defaults to true to mirror the
+-- engine's bEnableReSTIRDirectShadow default — flipping the toggle here
+-- still syncs both sides via corona.set_ui_value.
+local restirOn = true
 
 local function on_imgui()
     if not imgui.begin("Sponza Shadow Demo") then

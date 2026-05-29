@@ -273,12 +273,39 @@ float4 PSMain(PSInput input) : SV_TARGET
 
     float3 LightDir = normalize(LightDirAndIntensity.xyz);
     float LightIntensity = LightDirAndIntensity.w;
-    float NdotL = saturate(dot(LightDir, WorldNormal));
+    float RawNdotL = dot(LightDir, WorldNormal);
+    float NdotL = saturate(RawNdotL);
     float Roughness = clamp(RoughnessMetallic.x, 0.02f, 1.0f);
     float Metallic = saturate(RoughnessMetallic.y);
     float3 F0 = lerp(0.04f.xxx, Albedo.xyz, Metallic);
-	
-    float3 DirectionalDiffuse = bEnableDirectDiffuse ? (NdotL * LightIntensity * LightColor * Albedo * (1.0f - Metallic) * DirectVisibility) : float3(0, 0, 0);
+
+    // Grass / foliage SSS approximation. Material.w == 1 marks grass
+    // blades (set in GBuffer.hlsl on bGrassMesh draws). For these surfaces
+    // we add a back-light wrap term so blades lit from behind glow with a
+    // warmer translucent green instead of going pitch black. The bGrass
+    // flag also already forces two-sided normal flipping at GBuffer time
+    // so the front-of-pixel always faces the camera — meaning RawNdotL
+    // gives the *primary* light angle and the back-light comes from
+    // -LightDir. Wrap diffuse softens the terminator on top of that.
+    const bool bGrassSurface = RoughnessMetallic.w > 0.5f;
+    float WrappedNdotL = NdotL;
+    float3 GrassSSS = float3(0.0f, 0.0f, 0.0f);
+    if (bGrassSurface)
+    {
+        // Wrap term — blade still has nonzero diffuse at NdotL = -0.2.
+        const float wrap = 0.5f;
+        WrappedNdotL = saturate((RawNdotL + wrap) / (1.0f + wrap));
+        // Back-light translucency: when the light is on the far side of
+        // the blade, the front receives a soft greenish glow scaled by
+        // -RawNdotL (only positive when light is behind). A 0.35 scatter
+        // strength keeps it subtle but visible at golden hour.
+        const float backFactor = saturate(-RawNdotL) * 0.65f;
+        GrassSSS = backFactor * LightIntensity * LightColor * Albedo * DirectVisibility;
+    }
+
+    float3 DirectionalDiffuse = bEnableDirectDiffuse ?
+        (WrappedNdotL * LightIntensity * LightColor * Albedo * (1.0f - Metallic) * DirectVisibility + GrassSSS) :
+        float3(0, 0, 0);
 
     float3 V = ComputeSurfaceToViewDirection(screenUV);
     float NdotV = saturate(dot(WorldNormal, V));

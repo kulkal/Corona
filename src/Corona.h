@@ -1120,11 +1120,11 @@ private:
 	bool bEnableDirectSpecular = true;
 	bool bEnableRTAO = true;
 	// Point-light shadow mode: false = 4-channel pack (sun + first 3 lights,
-	// hard-cap), true = ReSTIR Phase 1 reservoir (single-light per pixel,
-	// scales to MaxPointLights candidates). Phase 1 has no temporal reuse
-	// yet so it's noisier — leave Option A as the default until Phase 2
-	// reuse lands.
-	bool bEnableReSTIRDirectShadow = false;
+	// hard-cap), true = ReSTIR Phase 1+2 reservoir (single-light per pixel,
+	// scales to MaxPointLights candidates, with previous-frame reproject).
+	// ReSTIR is now the default — it handles arbitrary light counts; the
+	// 4-channel path stays as a fallback for A/B comparison.
+	bool bEnableReSTIRDirectShadow = true;
 	bool bEnableSkyLighting = false;
 	bool bEnableRayTracedSkyLighting = true;
 	float RTAOIndirectStrength = 0.25f;

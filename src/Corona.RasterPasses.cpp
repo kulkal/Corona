@@ -1903,7 +1903,10 @@ void Corona::DrawScene(shared_ptr<Scene> scene, const glm::mat4x4& instanceTrans
 			// whether they go through the compute-skinning vertex-fetch
 			// pipeline, the VS-inline path, or the CPU-skinned VBO path.
 			const bool bSpineUnlit = bUseSpineVertexFetch || bUseSpineVsInline || mesh->bSpineMesh;
-			objCB.bTwoSidedLighting = bSpineUnlit ? 1u : 0u;
+			// Grass blades are thin and translucent; force two-sided so
+			// back-of-blade pixels get a normal pointing at the camera and
+			// the LightingPS SSS / back-light branch can fire.
+			objCB.bTwoSidedLighting = (bSpineUnlit || mesh->bGrassMesh) ? 1u : 0u;
 			objCB.bUnlitMaterial = bSpineUnlit ? 1u : 0u;
 			objCB.SpineVertexBase = bUseSpineVertexFetch ? drawcall.VertexBase : 0u;
 			objCB.SpineSourceScale = (bUseSpineVsInline && mesh->GpuSpineSkinningSourceScale > 0.0f)

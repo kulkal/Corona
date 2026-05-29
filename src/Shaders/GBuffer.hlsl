@@ -109,7 +109,10 @@ PS_OUTPUT PSMain(PSInput input)
         output.Material.y = saturate(Metallic  * RougnessMetalic.y);
     }
     output.Material.z = bUnlitMaterial != 0 ? 1.0f : 0.0f;
-    output.Material.w = 0.0f;
+    // Material.w = surface-kind flag. 1.0 = grass blade (back-lit SSS in
+    // LightingPS), 0.0 = standard opaque. Spine sprites use the unlit
+    // path so they don't need a separate flag.
+    output.Material.w = bGrassMesh != 0 ? 1.0f : 0.0f;
 
     float3 surfaceToView = CommonSafeNormalize(-ViewDir.xyz, WorldNormal);
     output.SpecularAlbedo.xyz = ComputeDLSSRRSpecularAlbedo(Albedo.xyz, output.Material.y, output.Material.x, WorldNormal, surfaceToView);
