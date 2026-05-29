@@ -11,6 +11,7 @@
 
 #include "stdafx.h"
 #include "Corona.h"
+#include "ParticleSystem.h"
 #include "TerrainComponent.h"
 #include "VulkanBackend.h"
 
@@ -174,6 +175,45 @@ void Corona::InitGBufferPass()
 	desc.ConstantBufferBinding = 0;
 
 	GBufferGraphicsPipeline = renderBackend->CreateGraphicsPipeline(desc);
+
+	// Procedural grass PSO — no IA stream; the VS reads SV_VertexID +
+	// SV_InstanceID and the per-mesh params (PG_*) from b0. Sharing the
+	// GBuffer CB lets DrawScene's existing CB fill code populate the
+	// world/view matrices in one place.
+	{
+		GraphicsPipelineDesc pgDesc = desc;
+		pgDesc.ShaderPath = GetAssetFullPath(L"Shaders\\GrassProcedural.hlsl");
+		pgDesc.VertexEntryPoint = "VSMain";
+		pgDesc.PixelEntryPoint  = "PSMain";
+		pgDesc.VertexElements.clear();
+		pgDesc.VertexStride = 0;
+		pgDesc.TextureBindings.clear();
+		pgDesc.SamplerBindings.clear();
+		// TerrainHeights at t4 (matches binding slot used by SpineVertices
+		// in legacy GBuffer; safe to reuse since procedural has no Spine).
+		pgDesc.BufferBindings = {
+			{ "TerrainHeights", 4 },
+		};
+		ProceduralGrassGraphicsPipeline = renderBackend->CreateGraphicsPipeline(pgDesc);
+		if (!ProceduralGrassGraphicsPipeline)
+			AppendCpuRuntimeTrace(L"[InitGBufferPass] failed to create ProceduralGrass pipeline");
+
+		// Shared sequential IB (0,1,2,…) — sized for the maximum supported
+		// blade tessellation (32 segments × 6 = 192 indices). Created once,
+		// reused by every procedural-grass draw.
+		if (!ProceduralGrassSequentialIb)
+		{
+			constexpr uint32_t kMaxSegments = 32u;
+			constexpr uint32_t kMaxIndices  = kMaxSegments * 6u;
+			std::vector<uint32_t> indices(kMaxIndices);
+			for (uint32_t i = 0; i < kMaxIndices; ++i)
+				indices[i] = i;
+			ProceduralGrassSequentialIb = renderBackend->CreateIndexBuffer(
+				EIndexFormat::U32,
+				static_cast<uint32_t>(indices.size() * sizeof(uint32_t)),
+				indices.data());
+		}
+	}
 
 	// CPU Spine path uses `mesh->Vb` filled with SpineSampleVertex (44 B:
 	// POSITION @ 0, NORMAL @ 12, UV @ 24, TANGENT @ 32). The base desc
@@ -391,6 +431,170 @@ void Corona::InitToneMapPass()
 	};
 
 	ToneMapGraphicsPipeline = renderBackend->CreateGraphicsPipeline(desc);
+}
+
+void Corona::InitParticlePass()
+{
+	if (!renderBackend)
+		return;
+	// Pipeline only needs render-target *formats*, not the live textures, so
+	// this init order is safe even before LightingBuffer is allocated. The
+	// runtime ParticlePass() guards against a missing LightingBuffer.
+
+	GraphicsPipelineDesc desc{};
+	desc.ShaderPath = GetAssetFullPath(L"Shaders\\Particle.hlsl");
+	desc.VertexEntryPoint = "VSMain";
+	desc.PixelEntryPoint = "PSMain";
+	desc.VertexStride = sizeof(Particles::QuadVertex);
+	desc.VertexElements = {
+		{ "POSITION", 0, EVertexAttributeFormat::Float3, 0  },
+		{ "TEXCOORD", 0, EVertexAttributeFormat::Float2, 12 },
+		{ "COLOR",    0, EVertexAttributeFormat::Float4, 20 },
+	};
+	desc.TextureBindings = {
+		{ "ParticleTex", 0 },
+	};
+	desc.SamplerBindings = {
+		{ "samplerClamp", 0 },
+	};
+	// Single-RT pass: draws into the post-light HDR LightingBuffer
+	// (RGBA16Float). Depth-tested against the GBuffer DepthBuffer but never
+	// writes to it. Additive blend by default for M1 (sparks); M3 adds an
+	// alpha-blend variant for smoke.
+	desc.ColorFormats = { ETextureFormat::RGBA16Float };
+	desc.DepthFormat = ETextureFormat::D32Float;
+	desc.bDepthEnable = true;
+	desc.bDepthWriteEnable = false;
+	desc.bCullBackFaces = false;
+	desc.BlendMode = EBlendMode::Additive;
+	desc.ConstantBufferSize = sizeof(ParticleCB);
+	desc.ConstantBufferBinding = 0;
+
+	ParticleGraphicsPipeline = renderBackend->CreateGraphicsPipeline(desc);
+	if (!ParticleGraphicsPipeline)
+		AppendCpuRuntimeTrace(L"[InitParticlePass] pipeline create failed");
+	else
+		AppendCpuRuntimeTrace(L"[InitParticlePass] pipeline created");
+}
+
+void Corona::UpdateParticleSystems(float dt)
+{
+	Terrain::Component* terrain = ActiveTerrain.get();
+	for (auto& sys : ActiveParticleSystems)
+	{
+		if (!sys)
+			continue;
+		sys->SetTerrainCollider(terrain);
+		sys->Tick(dt);
+	}
+}
+
+uint32_t Corona::ParticleBurstForScript(float x, float y, float z, uint32_t count)
+{
+	if (ActiveParticleSystems.empty() || count == 0)
+		return 0;
+	auto& sys = ActiveParticleSystems.front();
+	if (!sys)
+		return 0;
+	return sys->SpawnBurst(glm::vec3(x, y, z), count);
+}
+
+void Corona::UseNativeCameraForScript(bool enabled)
+{
+	if (enabled)
+	{
+		// Seed the SimpleCamera with the active script camera's pose so
+		// the free-fly takeover doesn't jump to a stale location. Pull
+		// position straight from the entity transform, the look direction
+		// from the CameraComponent.
+		if (auto activeCam = EntityWorld.GetActiveCameraEntity(); activeCam.IsValid())
+		{
+			const auto* trans = EntityWorld.GetTransform(activeCam);
+			const auto* cam = EntityWorld.GetCamera(activeCam);
+			if (trans && cam)
+			{
+				m_camera.m_position = trans->GetPosition();
+				const glm::vec3 look = cam->LookDirection;
+				m_camera.m_lookDirection = look;
+				m_camera.m_yaw = std::atan2(look.x, look.z);
+				m_camera.m_pitch = std::asin(std::clamp(look.y, -1.0f, 1.0f));
+				m_camera.m_upDirection = cam->UpDirection;
+			}
+		}
+		EntityWorld.ClearActiveCamera();
+		bScriptCameraControlEnabled = false;
+	}
+	else
+	{
+		// Re-enable script-driven camera updates. The Luau script is
+		// responsible for re-activating its CameraComponent on the next
+		// tick (corona.CameraComponent.set with active=true).
+		bScriptCameraControlEnabled = true;
+	}
+}
+
+void Corona::ParticlePass()
+{
+	if (!renderBackend || !ParticleGraphicsPipeline || ActiveParticleSystems.empty())
+		return;
+	if (!LightingBuffer || !DepthBuffer)
+		return;
+
+	renderBackend->EmitGpuCrashMarker("ParticlePass");
+
+	// LightingPass ends by transitioning LightingBuffer → ShaderRead. Bring
+	// it back to RenderTarget for the additive sprite draws, then restore
+	// the state the downstream TemporalAA/ToneMap path expects.
+	renderBackend->TransitionTexture(LightingBuffer.get(),
+		EResourceState::ShaderRead, EResourceState::RenderTarget);
+
+	Texture* color = LightingBuffer.get();
+	renderBackend->SetRenderTargets(&color, 1, DepthBuffer.get());
+	renderBackend->SetViewportAndScissor(GetRenderWidth(), GetRenderHeight());
+
+	ParticleCB cb{};
+	cb.ViewProj = glm::transpose(ViewProjMat);
+
+	// DX12 SetGraphicsRootSignature (inside BindGraphicsPipeline) invalidates
+	// root-table writes that came before it — bind first, then descriptors.
+	renderBackend->BindGraphicsPipeline(ParticleGraphicsPipeline.get());
+	renderBackend->BindGraphicsPipelineSampler(
+		ParticleGraphicsPipeline.get(), "samplerClamp", samplerBilinearWrap.get());
+
+	uint32_t totalActive = 0;
+	for (auto& sys : ActiveParticleSystems)
+	{
+		if (!sys)
+			continue;
+		sys->UploadQuadVertices(renderBackend.get(), ViewMat);
+		const uint32_t indexCount = sys->GetIndexCount();
+		if (indexCount == 0)
+			continue;
+		auto& tex = sys->GetTexture();
+		auto& vb  = sys->GetVb();
+		auto& ib  = sys->GetIb();
+		if (!tex || !vb || !ib)
+			continue;
+
+		renderBackend->BindGraphicsPipelineTexture(
+			ParticleGraphicsPipeline.get(), "ParticleTex", tex.get());
+		renderBackend->SetGraphicsPipelineConstantData(
+			ParticleGraphicsPipeline.get(), 0, &cb, sizeof(cb));
+		renderBackend->BindMeshBuffers(vb.get(), ib.get());
+		renderBackend->DrawIndexed(indexCount, 0, 0);
+		totalActive += sys->GetActiveCount();
+	}
+
+	renderBackend->TransitionTexture(LightingBuffer.get(),
+		EResourceState::RenderTarget, EResourceState::ShaderRead);
+
+	static uint32_t s_logCounter = 0;
+	if ((++s_logCounter % 120u) == 0u)
+	{
+		AppendCpuRuntimeTrace(
+			L"[Particles] active=" + std::to_wstring(totalActive) +
+			L" systems=" + std::to_wstring(ActiveParticleSystems.size()));
+	}
 }
 
 void Corona::InitDebugPass()
@@ -1573,12 +1777,14 @@ void Corona::DrawScene(shared_ptr<Scene> scene, const glm::mat4x4& instanceTrans
 			bSkeletalReady &&
 			mesh->SkeletalOutputVb &&
 			SkeletalGBufferGraphicsPipeline;
+		const bool bUseProceduralGrass = mesh->bProceduralGrass && ProceduralGrassGraphicsPipeline;
 		GraphicsPipelineHandle* activeGBufferPipeline =
-			bUseSkeletalVsInline ? SkeletalVsInlineGraphicsPipeline.get() :
+			bUseProceduralGrass ? ProceduralGrassGraphicsPipeline.get() :
+			(bUseSkeletalVsInline ? SkeletalVsInlineGraphicsPipeline.get() :
 			(bUseSkeletalSkinned ? SkeletalGBufferGraphicsPipeline.get() :
 			(bUseSpineVsInline ? SpineVsInlineGBufferGraphicsPipeline.get() :
 			(bUseSpineVertexFetch ? SpineGBufferGraphicsPipeline.get() :
-			(bUseCpuSpinePipeline ? CpuSpineGBufferGraphicsPipeline.get() : GBufferGraphicsPipeline.get()))));
+			(bUseCpuSpinePipeline ? CpuSpineGBufferGraphicsPipeline.get() : GBufferGraphicsPipeline.get())))));
 		renderBackend->BindGraphicsPipeline(activeGBufferPipeline);
 		renderBackend->BindGraphicsPipelineSampler(activeGBufferPipeline, "samplerWrap", samplerWrap.get());
 		if (bUseSpineVertexFetch)
@@ -1615,7 +1821,10 @@ void Corona::DrawScene(shared_ptr<Scene> scene, const glm::mat4x4& instanceTrans
 				? SkeletalUnifiedCpuSkinnedVb.get()
 				: mesh->SkeletalOutputVb.get();
 		}
-		renderBackend->BindMeshBuffers(drawVb, mesh->Ib.get());
+		// Procedural grass has no VB/IB — the VS synthesizes geometry. The
+		// existing IA bindings are harmless if we skip BindMeshBuffers.
+		if (!bUseProceduralGrass)
+			renderBackend->BindMeshBuffers(drawVb, mesh->Ib.get());
 
 		for (int i = 0; i < mesh->Draws.size(); i++)
 		{
@@ -1660,7 +1869,7 @@ void Corona::DrawScene(shared_ptr<Scene> scene, const glm::mat4x4& instanceTrans
 			// Layer 2 deformation: shared across all draws via render-
 			// frame snapshot. Grass bend only fires on meshes flagged
 			// bGrassMesh, which DrawScene sets here per draw.
-			objCB.MeshDeformParams = glm::vec4(RenderFrameShaderTime, 0.0f, 0.0f, 0.0f);
+			objCB.MeshDeformParams = glm::vec4(RenderFrameWindTime, 0.0f, 0.0f, 0.0f);
 			objCB.GrassBendOrigin = RenderFrameGrassBendOrigin;
 			objCB.GrassBendParams = RenderFrameGrassBendParams;
 			objCB.bGrassMesh = mesh->bGrassMesh ? 1u : 0u;
@@ -1669,6 +1878,26 @@ void Corona::DrawScene(shared_ptr<Scene> scene, const glm::mat4x4& instanceTrans
 			objCB.WindParams = RenderFrameWindParams;
 			objCB.WindTuning = RenderFrameWindTuning;
 			objCB.TerrainDeformSphere = RenderFrameTerrainDeformSphere;
+			if (bUseProceduralGrass)
+			{
+				objCB.PG_BladeCount    = mesh->Procedural.BladeCount;
+				objCB.PG_BladeSegments = mesh->Procedural.BladeSegments;
+				objCB.PG_BladeHeight   = (std::max)(0.05f, GrassProceduralBladeHeight);
+				objCB.PG_HalfAreaXZ    = mesh->Procedural.HalfAreaXZ;
+				objCB.PG_Seed          = mesh->Procedural.Seed;
+				objCB.PG_BaseY = 0.5f * (mesh->Procedural.HeightMin + mesh->Procedural.HeightMax);
+				if (ActiveTerrain && ActiveTerrain->GetHeightBuffer())
+				{
+					const auto& th = ActiveTerrain->GetData().Header;
+					objCB.PG_TerrainWidth   = th.Width;
+					objCB.PG_TerrainDepth   = th.Depth;
+					objCB.PG_TerrainScaleXZ = th.WorldScaleXZ;
+				}
+				objCB.PG_RenderDistance   = (std::max)(15.0f, GrassRenderDistance);
+				objCB.PG_BladesPerCell    = (std::max)(1, GrassProceduralBladesPerCell);
+				objCB.PG_BladeWidthScale  = (std::max)(0.001f, GrassProceduralBladeWidthScale);
+				objCB.PG_BladeTipWidthScale = std::clamp(GrassProceduralBladeTipWidthScale, 0.0f, 1.0f);
+			}
 
 			renderBackend->SetGraphicsPipelineConstantData(activeGBufferPipeline, 0, &objCB, sizeof(objCB));
 
@@ -1752,10 +1981,41 @@ void Corona::DrawScene(shared_ptr<Scene> scene, const glm::mat4x4& instanceTrans
 				bLoggedFirstGBufferDraw = true;
 			}
 
-			renderBackend->DrawIndexed(
-				drawcall.IndexCount,
-				drawcall.IndexStart,
-				bUseSpineVertexFetch ? 0 : drawcall.VertexBase);
+			if (bUseProceduralGrass)
+			{
+				const uint32_t vertsPerBlade = mesh->Procedural.BladeSegments * 6u;
+				if (ProceduralGrassSequentialIb)
+				{
+					if (ActiveTerrain && ActiveTerrain->GetHeightBuffer())
+					{
+						renderBackend->BindGraphicsPipelineBuffer(
+							activeGBufferPipeline, "TerrainHeights",
+							ActiveTerrain->GetHeightBuffer().get());
+					}
+					// Instance count = cells_in_grid × bladesPerCell, clamped
+					// to the recipe's BladeCount as a hard upper bound.
+					constexpr float kCellSize = 30.0f;
+					const uint32_t halfExt = (std::max)(1u,
+						static_cast<uint32_t>(objCB.PG_RenderDistance / kCellSize));
+					const uint32_t gridSide = halfExt * 2u + 1u;
+					const uint32_t cells = gridSide * gridSide;
+					const uint64_t want = static_cast<uint64_t>(cells) * objCB.PG_BladesPerCell;
+					const uint32_t instanceCount = static_cast<uint32_t>(
+						(std::min<uint64_t>)(want, mesh->Procedural.BladeCount));
+					renderBackend->BindMeshBuffers(nullptr, ProceduralGrassSequentialIb.get());
+					renderBackend->DrawIndexedInstanced(
+						vertsPerBlade,
+						instanceCount,
+						0, 0, 0);
+				}
+			}
+			else
+			{
+				renderBackend->DrawIndexed(
+					drawcall.IndexCount,
+					drawcall.IndexStart,
+					bUseSpineVertexFetch ? 0 : drawcall.VertexBase);
+			}
 		}
 	}
 }
@@ -2522,11 +2782,29 @@ void Corona::GBufferPass()
 				const std::shared_ptr<Scene> activeGrassScene = ActiveGrassScene.lock();
 				const bool bTerrainScene =
 					ActiveTerrain && object.ScenePtr == ActiveTerrain->GetScene();
-				const bool bGrassScene =
-					activeGrassScene && object.ScenePtr == activeGrassScene;
+				// Procedural-grass scenes route through the vertex-pulling PSO
+				// regardless of whether they're the active terrain-anchored
+				// grass (script-spawned) or a toolbox-spawned grass entity, so
+				// detect it from the mesh flag rather than the active-scene
+				// pointer. Legacy VB-backed grass keeps the original Grass
+				// bucket; procedural lands in its own bucket so the overlay
+				// can show their costs separately.
+				bool bProceduralGrassScene = false;
+				for (const std::shared_ptr<Mesh>& sceneMesh : object.ScenePtr->meshes)
+				{
+					if (sceneMesh && sceneMesh->bProceduralGrass)
+					{
+						bProceduralGrassScene = true;
+						break;
+					}
+				}
+				const bool bLegacyGrassScene =
+					!bProceduralGrassScene && activeGrassScene && object.ScenePtr == activeGrassScene;
 				if (bTerrainScene)
 					BeginGpuPassTiming(EGpuPass::Terrain);
-				else if (bGrassScene)
+				else if (bProceduralGrassScene)
+					BeginGpuPassTiming(EGpuPass::ProceduralGrass);
+				else if (bLegacyGrassScene)
 					BeginGpuPassTiming(EGpuPass::Grass);
 				DrawScene(
 					object.ScenePtr,
@@ -2536,7 +2814,9 @@ void Corona::GBufferPass()
 					object.bOverrideRoughnessMetallic);
 				if (bTerrainScene)
 					EndGpuPassTiming(EGpuPass::Terrain);
-				else if (bGrassScene)
+				else if (bProceduralGrassScene)
+					EndGpuPassTiming(EGpuPass::ProceduralGrass);
+				else if (bLegacyGrassScene)
 					EndGpuPassTiming(EGpuPass::Grass);
 				EndGBufferOcclusionQuery(object.Handle, occlusionQueryIndex);
 				++GBufferLastVisibleObjectCount;

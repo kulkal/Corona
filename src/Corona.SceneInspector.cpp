@@ -13,7 +13,7 @@
 namespace
 {
 	// Sticky width for the left dock so toggling visibility doesn't jitter.
-	constexpr float kPanelWidth = 320.0f;
+	constexpr float kPanelWidth = 480.0f;
 	constexpr float kToggleBtnH = 28.0f;
 
 	std::string FormatEntityLabel(uint32_t id, const std::string& name)
@@ -42,11 +42,19 @@ void CoronaSceneInspector::RenderImGui()
 	const ImGuiViewport* vp = ImGui::GetMainViewport();
 	const float h = vp->WorkSize.y;
 	ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x, vp->WorkPos.y));
-	ImGui::SetNextWindowSize(ImVec2(kPanelWidth, h - kToggleBtnH - 4.0f));
+	// Seed size on first appearance only; subsequent frames let the user's
+	// drag-to-resize stick (NoSavedSettings still forgets on relaunch — fine
+	// for now).
+	ImGui::SetNextWindowSize(
+		ImVec2(kPanelWidth, h - kToggleBtnH - 4.0f),
+		ImGuiCond_FirstUseEver);
+	ImGui::SetNextWindowSizeConstraints(
+		ImVec2(240.0f, 200.0f),
+		ImVec2(vp->WorkSize.x * 0.9f, h - kToggleBtnH - 4.0f));
 
 	const ImGuiWindowFlags flags =
 		ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse |
-		ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+		ImGuiWindowFlags_NoTitleBar |
 		ImGuiWindowFlags_NoSavedSettings;
 	ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.06f, 0.07f, 0.09f, 0.94f));
 	ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
@@ -100,6 +108,40 @@ void CoronaSceneInspector::RenderImGui()
 			LastSaveStatus.clear();
 	}
 
+	// Trigger the "Save as asset..." modal — context-menu sets the flag,
+	// OpenPopup must be called inside the panel's window scope (right after
+	// EndPopup() invalidates the prior frame's context).
+	if (bOpenSaveAssetPopup)
+	{
+		ImGui::OpenPopup("Save entity as asset");
+		bOpenSaveAssetPopup = false;
+	}
+	if (ImGui::BeginPopupModal("Save entity as asset", nullptr,
+			ImGuiWindowFlags_AlwaysAutoResize))
+	{
+		ImGui::Text("Asset name (becomes scene_assets/<name>.asset.lua):");
+		ImGui::InputText("##save_asset_name", SaveAssetNameBuf, IM_ARRAYSIZE(SaveAssetNameBuf));
+		ImGui::Spacing();
+		const bool bNameValid = SaveAssetNameBuf[0] != '\0';
+		ImGui::BeginDisabled(!bNameValid || !SaveAssetEntity.IsValid());
+		if (ImGui::Button("Save", ImVec2(120, 0)))
+		{
+			std::wstring err;
+			const std::string name(SaveAssetNameBuf);
+			const bool ok = Host->SaveEntityAsAsset(SaveAssetEntity, name, &err);
+			LastSaveStatus = ok
+				? ("Saved asset: " + name)
+				: ("Asset save failed: " + std::string(err.begin(), err.end()));
+			LastSaveStatusAt = std::chrono::steady_clock::now();
+			ImGui::CloseCurrentPopup();
+		}
+		ImGui::EndDisabled();
+		ImGui::SameLine();
+		if (ImGui::Button("Cancel", ImVec2(120, 0)))
+			ImGui::CloseCurrentPopup();
+		ImGui::EndPopup();
+	}
+
 	ImGui::Separator();
 
 	// Entity list — top 60% of the panel.
@@ -146,7 +188,16 @@ void CoronaSceneInspector::RenderImGui()
 	{
 		auto& mutableEcs = Host->GetEntityWorld();
 		if (mutableEcs.IsAlive(PendingDeleteEntity))
+		{
+			// ECS::DestroyEntity only erases the components map; the
+			// renderer-side SceneObject keeps drawing because it lives in a
+			// parallel list. Strip the visual first, then drop the entity.
+			const Corona::SceneObjectHandle sceneObj =
+				Host->GetEntitySceneObject(PendingDeleteEntity);
+			if (sceneObj != Corona::InvalidSceneObjectHandle)
+				Host->RemoveSceneObject(sceneObj);
 			mutableEcs.DestroyEntity(PendingDeleteEntity);
+		}
 		if (SelectedEntity == PendingDeleteEntity)
 			SelectedEntity = CoronaECS::Entity();
 		PendingDeleteEntity = CoronaECS::Entity();
@@ -191,6 +242,18 @@ void CoronaSceneInspector::DrawEntityRow(CoronaECS::Entity entity)
 	if (ImGui::BeginPopupContextItem(popupId))
 	{
 		SelectedEntity = entity;
+		if (ImGui::MenuItem("Save as asset..."))
+		{
+			SaveAssetEntity = entity;
+			// Pre-fill the asset name with the entity name (sanitization
+			// happens server-side in SaveEntityAsAsset).
+			const auto& ecs = Host->GetEntityWorld();
+			const std::string defaultName =
+				ecs.GetName(entity) ? *ecs.GetName(entity) : "entity";
+			std::snprintf(SaveAssetNameBuf, sizeof(SaveAssetNameBuf),
+				"%s", defaultName.c_str());
+			bOpenSaveAssetPopup = true;
+		}
 		if (ImGui::MenuItem("Delete"))
 			PendingDeleteEntity = entity;
 		ImGui::EndPopup();
@@ -330,6 +393,166 @@ void CoronaSceneInspector::DrawSelectedEntityDetails()
 				mesh->bVisible ? "yes" : "no",
 				mesh->bRayTracing ? "yes" : "no");
 		}
+
+		// Grass-only block: wind / bend / render-distance affect every grass
+		// mesh in the world (they're global frame state), but it only makes
+		// sense to surface them when the user has actually selected a grass
+		// entity. The script (terrain_demo.luau) still writes these every
+		// frame — these sliders are applied *after* the script tick so they
+		// stick within the same frame.
+		if (Host->IsEntityGrassMesh(SelectedEntity))
+		{
+			// --- Per-blade recipe editor + Regenerate button ---
+			if (ImGui::CollapsingHeader("Grass blades", ImGuiTreeNodeFlags_DefaultOpen))
+			{
+				Corona::SceneRecipe recipe;
+				if (Host->GetEntityMeshRecipeForScript(SelectedEntity, recipe))
+				{
+					// Snap the inspector's pending buffer to the live recipe
+					// whenever the selection changes — otherwise we'd carry
+					// stale edits from one entity to another.
+					if (GrassEditEntity != SelectedEntity)
+					{
+						GrassEditEntity = SelectedEntity;
+						GrassEditBladeCount = static_cast<int>(recipe.BladeCount);
+						GrassEditBladeHeight = recipe.BladeHeight;
+						GrassEditBladeSegments = static_cast<int>(recipe.BladeSegments == 0u ? 4u : recipe.BladeSegments);
+						GrassEditSeed = static_cast<int>(recipe.Seed == 0u ? 1u : recipe.Seed);
+						GrassEditProcedural = recipe.bProceduralPath;
+						// Sync the procedural live blade height to the recipe
+						// so the unified slider starts in agreement.
+						Host->GrassProceduralBladeHeight = recipe.BladeHeight;
+					}
+					ImGui::Text("primitive: %s",
+						recipe.RecipeKind == Corona::SceneRecipe::Kind::GrassOnTerrain
+							? "GRASS_ON_TERRAIN" : "GRASS");
+					ImGui::Checkbox("Procedural shader (vertex-pulling, no VB)##gb", &GrassEditProcedural);
+					ImGui::Separator();
+					ImGui::TextDisabled("Live (no rebuild):");
+					ImGui::SliderInt("density (blades / cell)##gb",
+						&Host->GrassProceduralBladesPerCell, 1, 5000);
+					ImGui::DragFloat("blade width scale##gb",
+						&Host->GrassProceduralBladeWidthScale, 0.005f, 0.005f, 0.5f);
+					ImGui::SliderFloat("blade tip width##gb",
+						&Host->GrassProceduralBladeTipWidthScale, 0.0f, 1.0f);
+					if (ImGui::DragFloat("blade height (m)##gb",
+						&Host->GrassProceduralBladeHeight, 0.05f, 0.05f, 30.0f))
+					{
+						// Keep the recipe-staging height in lockstep so an
+						// Apply rebuilds at the value the user just dialed in.
+						GrassEditBladeHeight = Host->GrassProceduralBladeHeight;
+					}
+					ImGui::Separator();
+					ImGui::TextDisabled("Recipe (Apply to rebuild):");
+					ImGui::InputInt("blade count##gb",   &GrassEditBladeCount, 10000, 100000);
+					ImGui::SliderInt("blade segments##gb", &GrassEditBladeSegments, 1, 16);
+					ImGui::InputInt("seed##gb", &GrassEditSeed);
+					if (GrassEditBladeCount < 1)    GrassEditBladeCount = 1;
+					if (GrassEditBladeSegments < 1) GrassEditBladeSegments = 1;
+					if (GrassEditSeed < 1)          GrassEditSeed = 1;
+					// "Are the staged values different from what's actually
+					// being drawn?" — if yes, surface a hint + highlight the
+					// Regenerate button so the user knows the slider edits
+					// don't apply until the mesh is rebuilt.
+					const bool pendingChange =
+						static_cast<uint32_t>(GrassEditBladeCount)    != recipe.BladeCount ||
+						std::fabs(GrassEditBladeHeight - recipe.BladeHeight) > 1e-4f ||
+						static_cast<uint32_t>(GrassEditBladeSegments) != (recipe.BladeSegments == 0u ? 4u : recipe.BladeSegments) ||
+						static_cast<uint32_t>(GrassEditSeed)          != recipe.Seed ||
+						GrassEditProcedural                            != recipe.bProceduralPath;
+					if (pendingChange)
+					{
+						ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.4f, 1.0f),
+							"pending changes — click Apply to rebuild");
+						ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.55f, 0.35f, 0.10f, 1.0f));
+						ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.75f, 0.50f, 0.15f, 1.0f));
+						ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.85f, 0.60f, 0.20f, 1.0f));
+					}
+					const bool regenClicked = ImGui::Button(
+						pendingChange ? "Apply pending changes##gb" : "Apply (rebuild mesh)##gb",
+						ImVec2(-1, 0));
+					if (pendingChange)
+						ImGui::PopStyleColor(3);
+					if (regenClicked)
+					{
+						const bool ok = Host->RegenerateGrassEntityForScript(
+							SelectedEntity,
+							static_cast<uint32_t>(GrassEditBladeCount),
+							GrassEditBladeHeight,
+							static_cast<uint32_t>(GrassEditSeed),
+							static_cast<uint32_t>(GrassEditBladeSegments),
+							GrassEditProcedural);
+						// SelectedEntity was destroyed by Regenerate; clear
+						// so the user can re-pick the new mesh in the list.
+						SelectedEntity = CoronaECS::Entity();
+						GrassEditEntity = CoronaECS::Entity();
+						// Auto-persist to the active map so the new params
+						// survive a relaunch. Without this the regenerated
+						// mesh lives only in the running process.
+						std::string statusMsg = ok ? "Grass regenerated" : "Grass regenerate failed";
+						if (ok)
+						{
+							const std::wstring& mapName = Host->GetCurrentMapName();
+							if (!mapName.empty())
+							{
+								std::wstring saveErr;
+								if (Host->SaveMapToFile(mapName, &saveErr))
+									statusMsg += " + map auto-saved";
+								else
+									statusMsg += " (map save failed: " +
+										std::string(saveErr.begin(), saveErr.end()) + ")";
+							}
+							else
+							{
+								statusMsg += " (no map loaded — Save Map manually)";
+							}
+						}
+						LastSaveStatus = std::move(statusMsg);
+						LastSaveStatusAt = std::chrono::steady_clock::now();
+						return;
+					}
+				}
+			}
+
+			if (ImGui::CollapsingHeader("Grass / Wind", ImGuiTreeNodeFlags_DefaultOpen))
+		{
+			ImGui::DragFloat("Render distance (m)##g",
+				&Host->GrassRenderDistance, 1.0f, 0.0f, 4000.0f);
+
+			float bendRadius    = Host->RenderFrameGrassBendParams.x;
+			float bendMaxHeight = Host->RenderFrameGrassBendParams.y;
+			if (ImGui::DragFloat("Bend radius (m)##g", &bendRadius, 0.05f, 0.0f, 60.0f) ||
+				ImGui::DragFloat("Bend max blade height (m)##g", &bendMaxHeight, 0.05f, 0.05f, 30.0f))
+			{
+				Host->SetGrassBendParamsForScript(bendRadius, bendMaxHeight);
+			}
+
+			// WindParams.xz = direction (XZ-only), .w = strength.
+			float windDir[2] = {
+				Host->RenderFrameWindParams.x,
+				Host->RenderFrameWindParams.z,
+			};
+			float windStrength = Host->RenderFrameWindParams.w;
+			float windTempFreq  = Host->RenderFrameWindTuning.x;
+			float windSpaceFreq = Host->RenderFrameWindTuning.y;
+			bool changed = false;
+			if (ImGui::DragFloat2("Wind dir XZ##g", windDir, 0.01f, -1.0f, 1.0f))
+				changed = true;
+			if (ImGui::SliderFloat("Wind strength##g", &windStrength, 0.0f, 5.0f))
+				changed = true;
+			if (ImGui::SliderFloat("Wind temporal freq##g", &windTempFreq, 0.0f, 40.0f))
+				changed = true;
+			if (ImGui::SliderFloat("Wind spatial freq##g", &windSpaceFreq, 0.0f, 0.5f))
+				changed = true;
+			if (changed)
+			{
+				Host->SetWindParamsForScript(
+					windDir[0], windDir[1], windStrength,
+					windTempFreq > 0.0f ? windTempFreq : 0.0001f,
+					windSpaceFreq > 0.0f ? windSpaceFreq : 0.0001f);
+			}
+		}
+	}
 	}
 
 	if (ecs.HasLight(SelectedEntity))

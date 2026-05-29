@@ -23,6 +23,7 @@ class IRenderBackend;
 class Mesh;
 class Scene;
 class Material;
+class Buffer;
 
 namespace Terrain
 {
@@ -55,6 +56,10 @@ namespace Terrain
 		const std::shared_ptr<Scene>& GetScene() const { return ScenePtr; }
 		const std::vector<ChunkMeshInfo>& GetChunks() const { return ChunkInfos; }
 		const std::shared_ptr<Mesh>& GetMesh() const { return MeshPtr; }
+		// Linear (width × depth) decoded heightmap as a structured-buffer
+		// SRV. Used by the procedural grass shader to anchor each blade to
+		// the terrain surface. Width/depth/scale match Data.Header.
+		const std::shared_ptr<Buffer>& GetHeightBuffer() const { return HeightBuffer; }
 		const GenerateStats& GetStats() const { return Stats; }
 		const TerrainData& GetData() const { return Data; }
 		uint32_t GetLastVisibleChunkCount() const { return LastVisibleChunkCount; }
@@ -71,6 +76,7 @@ namespace Terrain
 		std::shared_ptr<Mesh> MeshPtr;
 		std::shared_ptr<Material> MaterialPtr;
 		std::shared_ptr<Scene> ScenePtr;
+		std::shared_ptr<Buffer> HeightBuffer;
 		uint32_t LastVisibleChunkCount = 0;
 	};
 }

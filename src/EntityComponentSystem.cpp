@@ -402,6 +402,13 @@ namespace CoronaECS
 		return GetScript(entity) != nullptr;
 	}
 
+	void EntityComponentSystem::ClearActiveCamera()
+	{
+		if (CameraComponent* activeCamera = GetActiveCamera())
+			activeCamera->bActive = false;
+		ActiveCameraEntity = Entity();
+	}
+
 	bool EntityComponentSystem::SetActiveCamera(Entity entity)
 	{
 		if (!IsAlive(entity))

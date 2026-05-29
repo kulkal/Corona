@@ -42,6 +42,7 @@
 #endif
 #include "EntityComponentSystem.h"
 namespace Terrain { class Component; }
+namespace Particles { class System; }
 #include "enkiTS/TaskScheduler.h"
 #if CORONA_HAS_PIX
 #define PROFILE_BUILD 1
@@ -130,6 +131,8 @@ private:
 		GBuffer,
 		Terrain,
 		Grass,
+		ProceduralGrass,
+		Particles,
 		RaytraceShadow,
 		RaytraceAO,
 		RaytraceSkyLighting,
@@ -315,9 +318,40 @@ private:
 		// (0 disables). Lower-hemisphere of the sphere is subtracted from the
 		// terrain mesh in VS — purely visual, no physics/collision sync.
 		glm::vec4 TerrainDeformSphere = glm::vec4(0.0f);
+		// Procedural grass (vertex-pulling path). Only meaningful when the
+		// draw was issued via the GrassProceduralGraphicsPipeline PSO; the
+		// legacy VB path leaves these zeroed.
+		UINT32 PG_BladeCount = 0;
+		UINT32 PG_BladeSegments = 0;
+		float  PG_BladeHeight = 0.0f;
+		float  PG_HalfAreaXZ = 0.0f;
+		UINT32 PG_Seed = 0;
+		// Phase B: per-blade Y is sampled from TerrainHeights[] when
+		// PG_TerrainWidth > 0. PG_BaseY is the fallback used when no
+		// heightfield is bound (flat-ground demo).
+		float  PG_BaseY = 0.0f;
+		UINT32 PG_TerrainWidth  = 0;
+		UINT32 PG_TerrainDepth  = 0;
+		float  PG_TerrainScaleXZ = 1.0f;
+		// Procedural grass live-tunables — picked up by VSMain each frame.
+		float  PG_RenderDistance = 100.0f;
+		UINT32 PG_BladesPerCell  = 500u;
+		float  PG_BladeWidthScale = 0.06f; // base width = bladeHeight * this
+		float  PG_BladeTipWidthScale = 0.0f; // tip width as fraction of base (0 = pointy, 1 = flat)
+		float  PG_GrassPad0 = 0.0f;
+		float  PG_GrassPad1 = 0.0f;
+		float  PG_GrassPad2 = 0.0f;
 	};
 
 	std::shared_ptr<GraphicsPipelineHandle> GBufferGraphicsPipeline;
+	// Vertex-pulling procedural grass PSO. Empty IA (no VB/IB), reads
+	// SV_InstanceID / SV_VertexID, samples GBufferConstantBuffer (b0) for
+	// world matrix + wind/bend + PG_* fields.
+	std::shared_ptr<GraphicsPipelineHandle> ProceduralGrassGraphicsPipeline;
+	// Shared sequential IB (0,1,2,…) used by the procedural grass path —
+	// the backend doesn't expose non-indexed instanced draw, so we bind
+	// this trivial IB and let SV_VertexID equal the index value.
+	std::shared_ptr<IndexBuffer> ProceduralGrassSequentialIb;
 	std::shared_ptr<GraphicsPipelineHandle> CpuSpineGBufferGraphicsPipeline;
 	std::shared_ptr<GraphicsPipelineHandle> SpineGBufferGraphicsPipeline;
 	// Spine VS-inline path: skinning math executes in the vertex shader,
@@ -830,6 +864,17 @@ private:
 	UINT32 ToneMapMode = FILMIC_HABLE;
 	std::shared_ptr<GraphicsPipelineHandle> ToneMapGraphicsPipeline;
 
+	// Particle pass (Phase 1 / M1: single static additive billboard).
+	// PSO targets the post-light LightingBuffer with EBlendMode::Additive +
+	// depth-test (no depth write). ActiveParticleSystems is populated by the
+	// startup-mode demo bootstrap and walked once per frame by ParticlePass.
+	std::shared_ptr<GraphicsPipelineHandle> ParticleGraphicsPipeline;
+	std::vector<std::shared_ptr<Particles::System>> ActiveParticleSystems;
+	struct ParticleCB
+	{
+		glm::mat4x4 ViewProj;
+	};
+
 	// debug pass
 	enum EDebugMode
 	{
@@ -1289,6 +1334,13 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 		uint32_t BladeCount = 0;
 		float BladeHeight = 0.0f;
 		float AreaSize = 0.0f;
+		// Per-blade tessellation segments (Grass / GrassOnTerrain only).
+		// 0 = leave the default (currently 4). Higher = smoother bend.
+		uint32_t BladeSegments = 0;
+		// Vertex-pulling path (Grass / GrassOnTerrain). When true the mesh
+		// is spawned via CreateProceduralGrassOnTerrainSceneInstanced — no
+		// VB upload, blade geometry synthesized in the VS.
+		bool bProceduralPath = false;
 	};
 	struct ScriptSceneEntry
 	{
@@ -1747,6 +1799,10 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	glm::vec3 RenderFrameNormalizedLightDir = glm::vec3(0.0f, 1.0f, 0.0f);
 	glm::vec3 RenderFrameLightColor = glm::vec3(1.0f);
 	float RenderFrameShaderTime = 0.0f;
+	// Unscaled real time (seconds since startup) for shader effects that
+	// need true wall-clock rate — currently the wind sway. RT noise paths
+	// stay on the 0.01× ShaderTime to preserve their random-seed range.
+	float RenderFrameWindTime = 0.0f;
 	// Grass bend (Phase 3 vertex deformation effect). Updated each frame
 	// by scripts via corona.set_grass_bend_origin(...). The CB filler in
 	// DrawScene copies these directly into GBufferConstantBuffer.
@@ -2010,11 +2066,21 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	shared_ptr<Texture> GetProceduralDungeonBrickDiffuseTexture();
 	shared_ptr<Texture> GetProceduralBoxDiffuseTexture(const std::wstring& textureKind);
 	shared_ptr<Scene> CreateProceduralBoxScene(const glm::vec3& baseColor, bool bUseBrickTexture = false, float uvRepeat = 1.0f, const std::wstring& textureKind = std::wstring(), float uvRepeatY = -1.0f, bool bFrontOnly = false);
-	shared_ptr<Scene> CreateProceduralGrassScene(UINT32 numBlades, float areaSize, float bladeHeight, UINT32 seed);
+	shared_ptr<Scene> CreateProceduralGrassScene(UINT32 numBlades, float areaSize, float bladeHeight, UINT32 seed, UINT32 bladeSegments = 4u);
+	// Procedural UV sphere generator. `rings` = latitude steps, `segments` =
+	// longitude steps. Standard 44 B Vertex layout so it shares the default
+	// GBuffer PSO.
+	shared_ptr<Scene> CreateProceduralSphereScene(float radius, uint32_t rings = 24, uint32_t segments = 32);
+	ScriptSceneHandle CreateProceduralSphereSceneForScript(float radius, uint32_t rings = 24, uint32_t segments = 32);
 	// Same as CreateProceduralGrassScene but each blade's base Y is sampled
 	// from the currently-active TerrainComponent so the blades sit on the
 	// terrain surface. Falls back to flat (y=0) when no terrain is active.
-	shared_ptr<Scene> CreateProceduralGrassOnTerrainScene(UINT32 numBlades, float bladeHeight, UINT32 seed);
+	shared_ptr<Scene> CreateProceduralGrassOnTerrainScene(UINT32 numBlades, float bladeHeight, UINT32 seed, UINT32 bladeSegments = 4u);
+	// Lightweight twin of CreateProceduralGrassOnTerrainScene: no VB/IB,
+	// just metadata; the renderer issues DrawInstanced through the
+	// ProceduralGrassGraphicsPipeline PSO which synthesizes blade geometry
+	// in the VS.
+	shared_ptr<Scene> CreateProceduralGrassOnTerrainSceneInstanced(UINT32 numBlades, float bladeHeight, UINT32 seed, UINT32 bladeSegments = 4u);
 	void UpdateGrassCulling(const glm::mat4& viewProj);
 	shared_ptr<Scene> CreateProceduralTerrainScene(UINT32 seed);
 	bool ShouldIncludeSceneObjectInRayTracingAS(const SceneObject& object) const;
@@ -2099,6 +2165,14 @@ public:
 	// Distance in world units from GrassRenderOrigin within which a grass
 	// chunk is allowed to render. 0 = unlimited (frustum-only cull).
 	float GrassRenderDistance = 300.0f;
+	// Procedural grass live-tunables, edited via Scene Inspector. Apply to
+	// every procedural-path grass mesh — DrawScene reads them into the CB
+	// each frame and the host-side draw uses BladesPerCell to compute the
+	// per-frame instance count.
+	int   GrassProceduralBladesPerCell  = 500;
+	float GrassProceduralBladeWidthScale = 0.06f;
+	float GrassProceduralBladeTipWidthScale = 0.0f; // 0 = pointy, 1 = flat top
+	float GrassProceduralBladeHeight    = 1.6f;
 	// Per-bin DrawCall + AABB list for the active grass field. Populated
 	// once at spawn, consumed by UpdateGrassCulling each frame.
 	std::shared_ptr<Mesh>       ActiveGrassMesh;
@@ -2132,19 +2206,57 @@ public:
 	// over a square area. Each blade is a 2-segment quad rooted at Y=0
 	// with the tip at Y=bladeHeight. Marked `bGrassMesh = true` so the
 	// GBuffer VS Layer 2 deformation runs grass bend on it.
-	ScriptSceneHandle CreateProceduralGrassSceneForScript(UINT32 numBlades, float areaSize, float bladeHeight, UINT32 seed);
-	ScriptSceneHandle CreateProceduralGrassOnTerrainSceneForScript(UINT32 numBlades, float bladeHeight, UINT32 seed);
+	ScriptSceneHandle CreateProceduralGrassSceneForScript(UINT32 numBlades, float areaSize, float bladeHeight, UINT32 seed, UINT32 bladeSegments = 4u);
+	ScriptSceneHandle CreateProceduralGrassOnTerrainSceneForScript(UINT32 numBlades, float bladeHeight, UINT32 seed, UINT32 bladeSegments = 4u);
+	ScriptSceneHandle CreateProceduralGrassOnTerrainSceneInstancedForScript(UINT32 numBlades, float bladeHeight, UINT32 seed, UINT32 bladeSegments = 4u);
+
+	// Re-spawn the procedural grass mesh on an existing entity using the
+	// supplied params. Used by Scene Inspector's "Regenerate" button so the
+	// user can re-tune blade_count / blade_height / blade_segments without
+	// destroying the entity itself.
+	bool RegenerateGrassEntityForScript(
+		CoronaECS::Entity entity,
+		UINT32 bladeCount,
+		float bladeHeight,
+		UINT32 seed,
+		UINT32 bladeSegments,
+		bool bProcedural);
 	ScriptSceneHandle CreateProceduralTerrainSceneForScript(UINT32 seed);
 	// Script-facing setters for the grass-bend CB inputs. Called from
 	// Lua each frame; the GBuffer CB filler reads
 	// RenderFrameGrassBendOrigin / RenderFrameGrassBendParams.
 	void SetGrassBendOriginForScript(float x, float y, float z, float strength) { RenderFrameGrassBendOrigin = glm::vec4(x, y, z, strength); }
 	void SetGrassBendParamsForScript(float radius, float maxBladeHeight)        { RenderFrameGrassBendParams = glm::vec4(radius, maxBladeHeight, 0.0f, 0.0f); }
+	// Read-only accessors for the Lua get_* bindings (Corona.Scripting.cpp
+	// lives outside the friend list so it can't reach private members
+	// directly).
+	glm::vec4 GetRenderFrameWindParamsForScript() const  { return RenderFrameWindParams; }
+	glm::vec4 GetRenderFrameWindTuningForScript() const  { return RenderFrameWindTuning; }
+	glm::vec4 GetRenderFrameGrassBendParamsForScript() const { return RenderFrameGrassBendParams; }
+	float     GetGrassRenderDistanceForScript() const    { return GrassRenderDistance; }
+	// Inspector helpers: did this entity spawn from a procedural-grass
+	// recipe? Used by the Scene Inspector to surface wind / bend / render-
+	// distance controls only when a grass mesh is selected.
+	bool IsEntityGrassMesh(CoronaECS::Entity entity) const;
+	// Fetch the SceneRecipe a mesh entity was spawned from. Returns false
+	// for engine-internal or pre-recipe meshes; otherwise fills `outRecipe`
+	// with a copy. Used by the inspector to seed its edit fields.
+	bool GetEntityMeshRecipeForScript(CoronaECS::Entity entity, SceneRecipe& outRecipe) const;
 	// Wind sway: dirX/dirZ should already be XZ-normalized (Lua side does
 	// the normalization for clarity). tempFreq/spaceFreq are tuning knobs;
 	// pass 0 to keep current values.
 	void SetWindParamsForScript(float dirX, float dirZ, float strength, float tempFreq, float spaceFreq)
 	{
+		// Normalize the XZ direction so the visible sway amplitude only
+		// depends on `strength`. Earlier callers passed unnormalized small
+		// vectors like (0.11, 0.14) which silently capped the effective
+		// strength to ~18% of the slider's value.
+		const float dirLen = std::sqrt(dirX * dirX + dirZ * dirZ);
+		if (dirLen > 1e-4f)
+		{
+			dirX /= dirLen;
+			dirZ /= dirLen;
+		}
 		RenderFrameWindParams = glm::vec4(dirX, 0.0f, dirZ, strength);
 		if (tempFreq  > 0.0f) RenderFrameWindTuning.x = tempFreq;
 		if (spaceFreq > 0.0f) RenderFrameWindTuning.y = spaceFreq;
@@ -2542,6 +2654,12 @@ public:
 	// spawn block when a cached map is already on disk.
 	bool SaveMapToFile(const std::wstring& name, std::wstring* outError = nullptr);
 	bool LoadMapFromFile(const std::wstring& name, std::wstring* outError = nullptr);
+
+	// Serialize a single entity (mesh / light / camera) as a standalone
+	// asset to `assets/scene_assets/<assetName>.asset.lua`. Returns false +
+	// fills `outError` on failure (entity dead, no serializable component,
+	// I/O error). Loading the asset back is a follow-up to Phase 1.
+	bool SaveEntityAsAsset(CoronaECS::Entity entity, const std::string& assetName, std::wstring* outError = nullptr);
 	void ClearScriptSpawnedScene();
 	std::filesystem::path ResolveMapPath(const std::wstring& name) const;
 	// Last successful save_map / load_map name. Empty if no map has been
@@ -2566,6 +2684,7 @@ public:
 	void InitDebugPass();
 
 	void InitLightingPass();
+	void InitParticlePass();
 	void InitMobileShadowMapPass();
 
 	void InitTemporalAAPass();
@@ -2720,6 +2839,20 @@ public:
 	void DebugPass();
 
 	void LightingPass();
+
+	// Forward-translucent particle draw against the post-light HDR buffer.
+	// Walks ActiveParticleSystems and uploads + draws each system's quads.
+	void ParticlePass();
+	void UpdateParticleSystems(float dt);
+
+	// Spawn-burst the first active particle system. Exposed via the Luau
+	// binding `corona.particle_burst(x, y, z, count)`. Returns the number
+	// actually spawned.
+	uint32_t ParticleBurstForScript(float x, float y, float z, uint32_t count);
+
+	// Toggle between the script-owned active camera and SimpleCamera. Called
+	// from Lua via `corona.use_native_camera(enabled)`.
+	void UseNativeCameraForScript(bool enabled);
 
 	void TemporalAAPass();
 

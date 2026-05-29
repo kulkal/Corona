@@ -191,6 +191,22 @@ public:
 	bool bGpuSpineSkinningDispatched = false;
 	bool bSpineMesh = false; // marks Spine-sourced meshes for unlit + two-sided rendering regardless of skinning path
 	bool bGrassMesh = false; // marks the procedural grass mesh — DrawScene sets the matching CB flag so ApplyVertexDeformations runs grass bend on this mesh only
+	// Vertex-pulling procedural grass: VS synthesizes positions from
+	// SV_InstanceID + SV_VertexID, no VB/IB needed. Coexists with bGrassMesh
+	// (wind/bend still apply); set when the entity was spawned via
+	// CreateProceduralGrassOnTerrainSceneInstanced.
+	bool bProceduralGrass = false;
+	struct ProceduralGrassParams
+	{
+		uint32_t BladeCount = 0;
+		uint32_t BladeSegments = 4;
+		float    BladeHeight = 1.0f;
+		float    HalfAreaXZ = 512.0f;
+		uint32_t Seed = 1u;
+		float    HeightMin = 0.0f;
+		float    HeightMax = 0.0f;
+	};
+	ProceduralGrassParams Procedural{};
 	bool bTerrainMesh = false; // marks the terrain mesh — kept for potential future terrain-only effects (no longer gates the deform sphere; that's global now)
 	bool bExcludeFromDeformSphere = false; // opt-out from the global deform sphere — set on meshes you don't want carved (e.g. the player avatar at the sphere center)
 	uint32_t GpuSpineSkinningVertexCount = 0;

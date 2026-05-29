@@ -198,6 +198,18 @@ struct GraphicsSamplerBindingDesc
 	uint32_t Slot = 0;
 };
 
+// Blend mode for a graphics PSO. Default Opaque preserves prior behavior:
+// every existing pipeline was opaque-only and didn't carry a blend field.
+// Additive / AlphaBlend write the blended result to RT 0 only (RT >= 1 stays
+// fully masked off) so PSOs that target multi-RT GBuffer can sit beside the
+// opaque mesh path without scribbling into Normal/Velocity/Roughness.
+enum class EBlendMode : uint8_t
+{
+	Opaque,
+	Additive,
+	AlphaBlend,
+};
+
 struct GraphicsPipelineDesc
 {
 	std::wstring ShaderPath;
@@ -220,6 +232,7 @@ struct GraphicsPipelineDesc
 	float DepthBiasSlopeFactor = 0.0f;
 	uint32_t ConstantBufferSize = 0;
 	uint32_t ConstantBufferBinding = 0;
+	EBlendMode BlendMode = EBlendMode::Opaque;
 };
 
 class GraphicsPipelineHandle

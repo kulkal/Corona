@@ -5289,11 +5289,15 @@ void VulkanBackend::BindMeshBuffers(VertexBuffer* vertexBuffer, IndexBuffer* ind
 #if !CORONA_HAS_VULKAN
 	(void)vertexBuffer; (void)indexBuffer; ThrowNotImplemented(__FUNCTION__);
 #else
-	if (!bRenderPassActive || !vertexBuffer || !indexBuffer)
+	if (!bRenderPassActive || !indexBuffer)
 		return;
-	auto vbIt = VertexBufferAllocations.find(vertexBuffer);
+	// VB may be null for vertex-pulling PSOs (procedural grass). IB must
+	// always be valid since DrawIndexedInstanced needs it.
+	auto vbIt = vertexBuffer ? VertexBufferAllocations.find(vertexBuffer)
+	                         : VertexBufferAllocations.end();
 	auto ibIt = IndexBufferAllocations.find(indexBuffer);
-	if (vbIt == VertexBufferAllocations.end() || ibIt == IndexBufferAllocations.end())
+	if (ibIt == IndexBufferAllocations.end() ||
+	    (vertexBuffer && vbIt == VertexBufferAllocations.end()))
 	{
 		static bool bLoggedMissingMeshBuffer = false;
 		if (!bLoggedMissingMeshBuffer)
@@ -5310,7 +5314,8 @@ void VulkanBackend::BindMeshBuffers(VertexBuffer* vertexBuffer, IndexBuffer* ind
 	// the delta with no validation-layer error. Always check (a single
 	// integer compare is below noise next to the map lookups we already
 	// did); assert in debug, log once in release.
-	if (auto* pipeline = dynamic_cast<VulkanGraphicsPipelineHandle*>(BoundGraphicsPipeline))
+	auto* pipeline = vertexBuffer ? dynamic_cast<VulkanGraphicsPipelineHandle*>(BoundGraphicsPipeline) : nullptr;
+	if (pipeline)
 	{
 		const uint32_t psoStride = pipeline->Desc.VertexStride;
 		const uint32_t vbStride = vbIt->second.Stride;
@@ -5339,11 +5344,14 @@ void VulkanBackend::BindMeshBuffers(VertexBuffer* vertexBuffer, IndexBuffer* ind
 		}
 	}
 
-	const VkDeviceSize vbOffsets[] = { vbIt->second.Offset };
-	BoundVertexBuffer = vbIt->second.Buffer;
 	BoundIndexBuffer = ibIt->second.Buffer;
-	vkCmdBindVertexBuffers(ActiveCommandBuffer, 0, 1, &BoundVertexBuffer, vbOffsets);
 	vkCmdBindIndexBuffer(ActiveCommandBuffer, BoundIndexBuffer, ibIt->second.Offset, ibIt->second.Stride == 2 ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32);
+	if (vertexBuffer)
+	{
+		const VkDeviceSize vbOffsets[] = { vbIt->second.Offset };
+		BoundVertexBuffer = vbIt->second.Buffer;
+		vkCmdBindVertexBuffers(ActiveCommandBuffer, 0, 1, &BoundVertexBuffer, vbOffsets);
+	}
 	static bool bLoggedFirstMeshBufferBind = false;
 	if (!bLoggedFirstMeshBufferBind)
 	{
@@ -6509,6 +6517,30 @@ std::shared_ptr<GraphicsPipelineHandle> VulkanBackend::CreateGraphicsPipeline(co
 		colorBlendAttachment.colorWriteMask =
 			VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
 			VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+	}
+	if (desc.BlendMode != EBlendMode::Opaque && colorAttachmentCount > 0)
+	{
+		// Mirror DX12: only RT 0 blends; remaining RTs masked off so a
+		// translucent PSO can coexist with the opaque GBuffer pass and not
+		// scribble into Normal/Velocity/Roughness attachments.
+		auto& rt0 = colorBlendAttachments[0];
+		rt0.blendEnable = VK_TRUE;
+		rt0.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+		rt0.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+		rt0.alphaBlendOp = VK_BLEND_OP_ADD;
+		rt0.colorBlendOp = VK_BLEND_OP_ADD;
+		if (desc.BlendMode == EBlendMode::Additive)
+		{
+			rt0.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+			rt0.dstColorBlendFactor = VK_BLEND_FACTOR_ONE;
+		}
+		else // AlphaBlend
+		{
+			rt0.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+			rt0.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+		}
+		for (uint32_t i = 1; i < colorAttachmentCount; ++i)
+			colorBlendAttachments[i].colorWriteMask = 0;
 	}
 
 	VkPipelineColorBlendStateCreateInfo colorBlending{};

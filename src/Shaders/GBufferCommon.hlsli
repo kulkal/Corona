@@ -92,6 +92,24 @@ cbuffer GBufferConstantBuffer : register(b0)
     // (0 disables). Lower hemisphere of the sphere is carved out of the
     // terrain in the vertex shader.
     float4   TerrainDeformSphere;
+    // Procedural grass (vertex-pulling path). Only meaningful for draws
+    // issued through GrassProcedural.hlsl; legacy VB path zeroes these.
+    uint     PG_BladeCount;
+    uint     PG_BladeSegments;
+    float    PG_BladeHeight;
+    float    PG_HalfAreaXZ;
+    uint     PG_Seed;
+    float    PG_BaseY;
+    uint     PG_TerrainWidth;
+    uint     PG_TerrainDepth;
+    float    PG_TerrainScaleXZ;
+    float    PG_RenderDistance;
+    uint     PG_BladesPerCell;
+    float    PG_BladeWidthScale;
+    float    PG_BladeTipWidthScale;
+    float    PG_GrassPad0;
+    float    PG_GrassPad1;
+    float    PG_GrassPad2;
 };
 
 struct VSInput
@@ -430,9 +448,9 @@ VertexObjSpace LoadVertex_SkeletalCl(VSInput input, uint vertexId, uint instance
 // Returns the deformed object-space position. The caller is expected to
 // invoke this both for the current frame's time and (time - dt) for the
 // previous frame so motion vectors track the sway accurately.
-float3 ApplyWindSway(float3 objPos, float time, float maxBladeHeight, float heightRatio01)
+float3 ApplyWindSway(float3 objPos, float time, float maxBladeHeight, float heightRatio01, float windDamp = 1.0f)
 {
-    if (WindParams.w <= 0.0f)
+    if (WindParams.w <= 0.0f || windDamp <= 0.0f)
         return objPos;
 
     // heightRatio01 is the blade's local 0..1 root→tip coordinate, supplied by
@@ -459,7 +477,7 @@ float3 ApplyWindSway(float3 objPos, float time, float maxBladeHeight, float heig
     // is the key to a natural-looking wind — linear/quadratic still moves
     // the lower portion of the blade visibly.
     const float heightCurve = heightRatio * heightRatio * heightRatio;
-    const float swayAmt = (primarySway + secondarySway) * heightCurve * WindParams.w;
+    const float swayAmt = (primarySway + secondarySway) * heightCurve * WindParams.w * windDamp;
 
     const float2 windXZ = WindParams.xz; // normalized in XZ
     float3 result = objPos;
@@ -481,6 +499,22 @@ float3 ApplyWindSway(float3 objPos, float time, float maxBladeHeight, float heig
 // Activated by `bGrassMesh` (per-mesh flag). Other meshes (the ground,
 // the dungeon character) ignore the deformation even when the CB is
 // configured.
+// Bend falloff alone (0 outside the bend radius, 1 at the player). Shared
+// between ApplyGrassBend and the wind-damping path so bent blades stop
+// swaying in synchrony with their upright neighbours — flattened grass
+// barely jiggles in real life.
+float ComputeGrassBendFalloff01(float3 objPos, float3 worldOrigin, float4x4 worldMatrix, float bendRadius)
+{
+    float3 worldPos = mul(float4(objPos, 1.0f), worldMatrix).xyz;
+    float2 toBlade  = worldPos.xz - worldOrigin.xz;
+    float  distSq   = dot(toBlade, toBlade);
+    float  radiusSq = bendRadius * bendRadius;
+    if (distSq >= radiusSq || distSq <= 1e-6f)
+        return 0.0f;
+    float falloff = 1.0f - sqrt(distSq) / bendRadius;
+    return falloff * falloff; // matches ApplyGrassBend's interior curve
+}
+
 float3 ApplyGrassBend(float3 objPos, float3 worldOrigin, float4x4 worldMatrix, float bendStrength, float bendRadius, float heightRatio01)
 {
     // Convert blade vertex to world space so we can compare against the
@@ -592,12 +626,26 @@ VertexObjSpace ApplyVertexDeformations(VertexObjSpace v)
         const float time           = MeshDeformParams.x;
         const float maxBladeHeight = GrassBendParams.y;
 
-        // Layer 2a — global wind sway (always-on when WindParams.w > 0).
-        // Prev frame uses (time - dt) so motion vectors track the sway
-        // even when nothing else moves.
+        // Wind damp: blades inside the player's bend sphere are mostly
+        // laid down — flattened grass barely jiggles in real life, so
+        // scale the wind contribution by (1 - 0.9 × bendFalloff). At
+        // the player's centre the blade keeps ~10% of its sway; outside
+        // the bend radius it sways at full amplitude as before.
+        float windDamp = 1.0f;
+        float windDampPrev = 1.0f;
+        if (GrassBendOrigin.w > 0.0f)
+        {
+            const float bendRadius = GrassBendParams.x;
+            const float falloff      = ComputeGrassBendFalloff01(v.currObjPos, GrassBendOrigin.xyz, v.worldMatrix,    bendRadius);
+            const float falloffPrev  = ComputeGrassBendFalloff01(v.prevObjPos, GrassBendOrigin.xyz, v.prevWorldMatrix, bendRadius);
+            windDamp     = saturate(1.0f - 0.9f * falloff);
+            windDampPrev = saturate(1.0f - 0.9f * falloffPrev);
+        }
+
+        // Layer 2a — global wind sway (damped on bent blades).
         const float prevDt = 1.0f / 60.0f;
-        v.currObjPos = ApplyWindSway(v.currObjPos, time,         maxBladeHeight, v.uv.y);
-        v.prevObjPos = ApplyWindSway(v.prevObjPos, time - prevDt, maxBladeHeight, v.uv.y);
+        v.currObjPos = ApplyWindSway(v.currObjPos, time,         maxBladeHeight, v.uv.y, windDamp);
+        v.prevObjPos = ApplyWindSway(v.prevObjPos, time - prevDt, maxBladeHeight, v.uv.y, windDampPrev);
 
         // Layer 2b — player-proximity bend on top of the wind base pose.
         if (GrassBendOrigin.w > 0.0f)
@@ -652,9 +700,15 @@ PSInput BuildPSInput(VertexObjSpace v)
 }
 
 // =====================================================================
-// Layer 4: VS entry points (thin compositions of Layer 1 → 2 → 3)
+// Layer 4: VS entry points (thin compositions of Layer 1 → 2 → 3).
+//
+// Includers that want to define their own VSMain (e.g. GrassProcedural.hlsl,
+// which synthesizes geometry from SV_InstanceID + SV_VertexID and shares
+// nothing with the IA-based pipeline) can #define GBUFFER_OMIT_ENTRIES
+// before #including this header to skip the legacy entry definitions.
 // =====================================================================
 
+#ifndef GBUFFER_OMIT_ENTRIES
 PSInput VSMain(VSInput input)
 {
     VertexObjSpace v = LoadVertex_Static(input);
@@ -698,5 +752,6 @@ PSInput SkeletalVsInlineClusterVSMain(VSInput input, uint vertexId : SV_VertexID
     return BuildPSInput(v);
 }
 #endif // GBUFFER_HAS_CLUSTER
+#endif // GBUFFER_OMIT_ENTRIES
 
 #endif // GBUFFER_COMMON_HLSLI

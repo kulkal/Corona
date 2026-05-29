@@ -1778,8 +1778,12 @@ private:
 				if (lua_isnumber(L, -1))
 					seed = static_cast<UINT32>(std::max<lua_Integer>(1, lua_tointeger(L, -1)));
 				lua_pop(L, 1);
+				float bladeSegmentsF = 4.0f;
+				if (!ReadNumberField(L, tableIndex, "blade_segments", bladeSegmentsF))
+					ReadNumberField(L, tableIndex, "bladeSegments", bladeSegmentsF);
 				const UINT32 numBlades = static_cast<UINT32>(std::max(1.0f, std::round(numBladesF)));
-				sceneHandle = host->CreateProceduralGrassSceneForScript(numBlades, areaSize, bladeHeight, seed);
+				const UINT32 bladeSegments = static_cast<UINT32>(std::max(1.0f, std::round(bladeSegmentsF)));
+				sceneHandle = host->CreateProceduralGrassSceneForScript(numBlades, areaSize, bladeHeight, seed, bladeSegments);
 			}
 			else if (primitive == "TERRAIN")
 			{
@@ -1809,8 +1813,16 @@ private:
 				if (lua_isnumber(L, -1))
 					seed = static_cast<UINT32>(std::max<lua_Integer>(1, lua_tointeger(L, -1)));
 				lua_pop(L, 1);
+				float bladeSegmentsF = 4.0f;
+				if (!ReadNumberField(L, tableIndex, "blade_segments", bladeSegmentsF))
+					ReadNumberField(L, tableIndex, "bladeSegments", bladeSegmentsF);
+				bool bProcedural = false;
+				ReadBoolField(L, tableIndex, "procedural", bProcedural);
 				const UINT32 numBlades = static_cast<UINT32>(std::max(1.0f, std::round(numBladesF)));
-				sceneHandle = host->CreateProceduralGrassOnTerrainSceneForScript(numBlades, bladeHeight, seed);
+				const UINT32 bladeSegments = static_cast<UINT32>(std::max(1.0f, std::round(bladeSegmentsF)));
+				sceneHandle = bProcedural
+					? host->CreateProceduralGrassOnTerrainSceneInstancedForScript(numBlades, bladeHeight, seed, bladeSegments)
+					: host->CreateProceduralGrassOnTerrainSceneForScript(numBlades, bladeHeight, seed, bladeSegments);
 			}
 			else
 			{
@@ -2509,6 +2521,76 @@ private:
 		const float maxHeight = static_cast<float>(luaL_optnumber(L, 2, 30.0));
 		host->SetGrassBendParamsForScript(radius, maxHeight);
 		return 0;
+	}
+
+	// corona.use_native_camera(enabled) — switch between the script-owned
+	// active camera (orbit, follow, etc.) and the engine's SimpleCamera
+	// (free-fly WASD). When enabled=true the active ECS camera is
+	// deactivated and bScriptCameraControlEnabled is cleared so m_camera.
+	// Update() resumes consuming keyboard input. The Luau script remains
+	// responsible for re-activating its camera via CameraComponent.set when
+	// the user toggles back.
+	// Getters so Luau init paths can synchronize their locals with engine
+	// state instead of unconditionally broadcasting defaults (which would
+	// clobber values just loaded from a saved map).
+	int LuaCoronaGetGrassRenderDistance(lua_State* L)
+	{
+		Corona* host = GetHost(L);
+		if (!host) { luaL_error(L, "corona host is not available"); return 0; }
+		lua_pushnumber(L, host->GetGrassRenderDistanceForScript());
+		return 1;
+	}
+
+	int LuaCoronaGetWindParams(lua_State* L)
+	{
+		Corona* host = GetHost(L);
+		if (!host) { luaL_error(L, "corona host is not available"); return 0; }
+		const glm::vec4 wp = host->GetRenderFrameWindParamsForScript();
+		const glm::vec4 wt = host->GetRenderFrameWindTuningForScript();
+		lua_newtable(L);
+		lua_pushnumber(L, wp.x); lua_setfield(L, -2, "dir_x");
+		lua_pushnumber(L, wp.z); lua_setfield(L, -2, "dir_z");
+		lua_pushnumber(L, wp.w); lua_setfield(L, -2, "strength");
+		lua_pushnumber(L, wt.x); lua_setfield(L, -2, "temp_freq");
+		lua_pushnumber(L, wt.y); lua_setfield(L, -2, "space_freq");
+		return 1;
+	}
+
+	int LuaCoronaGetGrassBendParams(lua_State* L)
+	{
+		Corona* host = GetHost(L);
+		if (!host) { luaL_error(L, "corona host is not available"); return 0; }
+		const glm::vec4 bp = host->GetRenderFrameGrassBendParamsForScript();
+		lua_newtable(L);
+		lua_pushnumber(L, bp.x); lua_setfield(L, -2, "radius");
+		lua_pushnumber(L, bp.y); lua_setfield(L, -2, "max_height");
+		return 1;
+	}
+
+	int LuaCoronaUseNativeCamera(lua_State* L)
+	{
+		Corona* host = GetHost(L);
+		if (!host) { luaL_error(L, "corona host is not available"); return 0; }
+		const bool enabled = lua_toboolean(L, 1) != 0;
+		host->UseNativeCameraForScript(enabled);
+		return 0;
+	}
+
+	// corona.particle_burst(x, y, z, count) — spawn `count` spark particles
+	// centered at (x, y, z) on the first active particle system. Returns the
+	// number actually spawned (may be less than `count` if the pool is full).
+	int LuaCoronaParticleBurst(lua_State* L)
+	{
+		Corona* host = GetHost(L);
+		if (!host) { luaL_error(L, "corona host is not available"); return 0; }
+		const float x = static_cast<float>(luaL_checknumber(L, 1));
+		const float y = static_cast<float>(luaL_checknumber(L, 2));
+		const float z = static_cast<float>(luaL_checknumber(L, 3));
+		const int count = static_cast<int>(luaL_optinteger(L, 4, 16));
+		const uint32_t spawned = host->ParticleBurstForScript(
+			x, y, z, static_cast<uint32_t>((std::max)(0, count)));
+		lua_pushinteger(L, static_cast<lua_Integer>(spawned));
+		return 1;
 	}
 
 	// corona.save_map(name) — writes the script-spawned scene to bin/maps/<name>.crmap
@@ -3946,6 +4028,16 @@ private:
 		lua_setfield(L, -2, "set_camera_control");
 		lua_pushcfunction(L, LuaCoronaSetGrassBendOrigin, "corona.set_grass_bend_origin");
 		lua_setfield(L, -2, "set_grass_bend_origin");
+		lua_pushcfunction(L, LuaCoronaParticleBurst, "corona.particle_burst");
+		lua_setfield(L, -2, "particle_burst");
+		lua_pushcfunction(L, LuaCoronaUseNativeCamera, "corona.use_native_camera");
+		lua_setfield(L, -2, "use_native_camera");
+		lua_pushcfunction(L, LuaCoronaGetGrassRenderDistance, "corona.get_grass_render_distance");
+		lua_setfield(L, -2, "get_grass_render_distance");
+		lua_pushcfunction(L, LuaCoronaGetWindParams, "corona.get_wind_params");
+		lua_setfield(L, -2, "get_wind_params");
+		lua_pushcfunction(L, LuaCoronaGetGrassBendParams, "corona.get_grass_bend_params");
+		lua_setfield(L, -2, "get_grass_bend_params");
 		lua_pushcfunction(L, LuaCoronaSetGrassBendParams, "corona.set_grass_bend_params");
 		lua_setfield(L, -2, "set_grass_bend_params");
 		lua_pushcfunction(L, LuaCoronaSetTerrainDeformSphere, "corona.set_terrain_deform_sphere");
@@ -4324,7 +4416,7 @@ Corona::ScriptSceneHandle Corona::CreateProceduralBoxSceneForScript(const glm::v
 	return handle;
 }
 
-Corona::ScriptSceneHandle Corona::CreateProceduralGrassSceneForScript(UINT32 numBlades, float areaSize, float bladeHeight, UINT32 seed)
+Corona::ScriptSceneHandle Corona::CreateProceduralGrassSceneForScript(UINT32 numBlades, float areaSize, float bladeHeight, UINT32 seed, UINT32 bladeSegments)
 {
 	if (!renderBackend)
 		return InvalidScriptSceneHandle;
@@ -4333,18 +4425,19 @@ Corona::ScriptSceneHandle Corona::CreateProceduralGrassSceneForScript(UINT32 num
 	const float clampedArea    = std::clamp(areaSize, 10.0f, 100000.0f);
 	const float clampedHeight  = std::clamp(bladeHeight, 1.0f, 1000.0f);
 	const UINT32 normalizedSeed = (seed == 0u) ? 1u : seed;
+	const UINT32 clampedSegments = std::clamp<UINT32>(bladeSegments == 0u ? 4u : bladeSegments, 1u, 32u);
 
 	const std::wstring key =
 		L"procedural://grass/" +
 		std::to_wstring(clampedBlades) + L"/" +
 		std::to_wstring(static_cast<int>(std::round(clampedArea))) + L"/" +
 		std::to_wstring(static_cast<int>(std::round(clampedHeight))) + L"/" +
-		std::to_wstring(normalizedSeed);
+		std::to_wstring(normalizedSeed) + L"/s" + std::to_wstring(clampedSegments);
 	const auto cachedIt = ScriptSceneByPath.find(key);
 	if (cachedIt != ScriptSceneByPath.end())
 		return cachedIt->second;
 
-	shared_ptr<Scene> scene = CreateProceduralGrassScene(clampedBlades, clampedArea, clampedHeight, normalizedSeed);
+	shared_ptr<Scene> scene = CreateProceduralGrassScene(clampedBlades, clampedArea, clampedHeight, normalizedSeed, clampedSegments);
 	if (!scene)
 		return InvalidScriptSceneHandle;
 
@@ -4360,6 +4453,7 @@ Corona::ScriptSceneHandle Corona::CreateProceduralGrassSceneForScript(UINT32 num
 		r.AreaSize = clampedArea;
 		r.BladeHeight = clampedHeight;
 		r.Seed = normalizedSeed;
+		r.BladeSegments = clampedSegments;
 	}
 	ScriptSceneByPath[key] = handle;
 	AppendCpuRuntimeTrace(
@@ -4370,7 +4464,7 @@ Corona::ScriptSceneHandle Corona::CreateProceduralGrassSceneForScript(UINT32 num
 	return handle;
 }
 
-Corona::ScriptSceneHandle Corona::CreateProceduralGrassOnTerrainSceneForScript(UINT32 numBlades, float bladeHeight, UINT32 seed)
+Corona::ScriptSceneHandle Corona::CreateProceduralGrassOnTerrainSceneForScript(UINT32 numBlades, float bladeHeight, UINT32 seed, UINT32 bladeSegments)
 {
 	if (!renderBackend)
 		return InvalidScriptSceneHandle;
@@ -4380,6 +4474,7 @@ Corona::ScriptSceneHandle Corona::CreateProceduralGrassOnTerrainSceneForScript(U
 	// for the legacy giant grass demo at 28 m.
 	const float clampedHeight  = std::clamp(bladeHeight, 0.01f, 1000.0f);
 	const UINT32 normalizedSeed = (seed == 0u) ? 1u : seed;
+	const UINT32 clampedSegments = std::clamp<UINT32>(bladeSegments == 0u ? 4u : bladeSegments, 1u, 32u);
 
 	// Cache key incorporates terrain seed + blade params so the same terrain
 	// shares blade meshes. ActiveTerrain only exists post-Terrain-spawn —
@@ -4390,12 +4485,13 @@ Corona::ScriptSceneHandle Corona::CreateProceduralGrassOnTerrainSceneForScript(U
 		L"procedural://grass_on_terrain/" +
 		std::to_wstring(clampedBlades) + L"/" +
 		std::to_wstring(static_cast<int>(std::round(clampedHeight * 100.0f))) + L"/" +
-		std::to_wstring(normalizedSeed) + terrainTag;
+		std::to_wstring(normalizedSeed) + L"/s" + std::to_wstring(clampedSegments) +
+		terrainTag;
 	const auto cachedIt = ScriptSceneByPath.find(key);
 	if (cachedIt != ScriptSceneByPath.end())
 		return cachedIt->second;
 
-	shared_ptr<Scene> scene = CreateProceduralGrassOnTerrainScene(clampedBlades, clampedHeight, normalizedSeed);
+	shared_ptr<Scene> scene = CreateProceduralGrassOnTerrainScene(clampedBlades, clampedHeight, normalizedSeed, clampedSegments);
 	if (!scene)
 		return InvalidScriptSceneHandle;
 
@@ -4410,12 +4506,176 @@ Corona::ScriptSceneHandle Corona::CreateProceduralGrassOnTerrainSceneForScript(U
 		r.BladeCount = clampedBlades;
 		r.BladeHeight = clampedHeight;
 		r.Seed = normalizedSeed;
+		r.BladeSegments = clampedSegments;
 	}
 	ScriptSceneByPath[key] = handle;
 	AppendCpuRuntimeTrace(
 		L"[Luau][MeshComponent] procedural_grass_on_terrain handle=" + std::to_wstring(handle) +
 		L" blades=" + std::to_wstring(clampedBlades));
 	return handle;
+}
+
+Corona::ScriptSceneHandle Corona::CreateProceduralSphereSceneForScript(float radius, uint32_t rings, uint32_t segments)
+{
+	if (!renderBackend) return InvalidScriptSceneHandle;
+	const float r = std::clamp(radius, 0.05f, 100.0f);
+	const uint32_t R = std::clamp<uint32_t>(rings,    4u, 128u);
+	const uint32_t S = std::clamp<uint32_t>(segments, 6u, 256u);
+	const std::wstring key =
+		L"procedural://sphere/" +
+		std::to_wstring(static_cast<int>(std::round(r * 100.0f))) + L"/" +
+		std::to_wstring(R) + L"x" + std::to_wstring(S);
+	const auto it = ScriptSceneByPath.find(key);
+	if (it != ScriptSceneByPath.end()) return it->second;
+
+	auto scene = CreateProceduralSphereScene(r, R, S);
+	if (!scene) return InvalidScriptSceneHandle;
+	ScriptSceneHandle handle = NextScriptSceneHandle++;
+	if (handle == InvalidScriptSceneHandle) handle = NextScriptSceneHandle++;
+	ScriptScenes[handle] = { scene, key, EPhysicsCollisionShape::TriangleMesh, glm::vec3(r) };
+	ScriptSceneByPath[key] = handle;
+	AppendCpuRuntimeTrace(L"[Luau][MeshComponent] procedural_sphere handle=" + std::to_wstring(handle));
+	return handle;
+}
+
+Corona::ScriptSceneHandle Corona::CreateProceduralGrassOnTerrainSceneInstancedForScript(
+	UINT32 numBlades, float bladeHeight, UINT32 seed, UINT32 bladeSegments)
+{
+	if (!renderBackend)
+		return InvalidScriptSceneHandle;
+
+	const UINT32 clampedBlades = std::clamp<UINT32>(numBlades, 1u, 200'000'000u);
+	const float  clampedHeight = std::clamp(bladeHeight, 0.01f, 1000.0f);
+	const UINT32 normalizedSeed = (seed == 0u) ? 1u : seed;
+	const UINT32 clampedSegments = std::clamp<UINT32>(bladeSegments == 0u ? 4u : bladeSegments, 1u, 32u);
+
+	const std::wstring terrainTag = ActiveTerrain ?
+		(L"_t" + std::to_wstring(ActiveTerrain->GetData().Header.Seed)) : L"_flat";
+	const std::wstring key =
+		L"procedural://grass_on_terrain_instanced/" +
+		std::to_wstring(clampedBlades) + L"/" +
+		std::to_wstring(static_cast<int>(std::round(clampedHeight * 100.0f))) + L"/" +
+		std::to_wstring(normalizedSeed) + L"/s" + std::to_wstring(clampedSegments) +
+		terrainTag;
+	const auto cachedIt = ScriptSceneByPath.find(key);
+	if (cachedIt != ScriptSceneByPath.end())
+		return cachedIt->second;
+
+	shared_ptr<Scene> scene = CreateProceduralGrassOnTerrainSceneInstanced(
+		clampedBlades, clampedHeight, normalizedSeed, clampedSegments);
+	if (!scene)
+		return InvalidScriptSceneHandle;
+
+	ScriptSceneHandle handle = NextScriptSceneHandle++;
+	if (handle == InvalidScriptSceneHandle)
+		handle = NextScriptSceneHandle++;
+	ScriptScenes[handle] = { scene, key, EPhysicsCollisionShape::Box, glm::vec3(0.5f) };
+	{
+		SceneRecipe& r = ScriptScenes[handle].Recipe;
+		r.RecipeKind = SceneRecipe::Kind::GrassOnTerrain;
+		r.BladeCount = clampedBlades;
+		r.BladeHeight = clampedHeight;
+		r.Seed = normalizedSeed;
+		r.BladeSegments = clampedSegments;
+		r.bProceduralPath = true;
+	}
+	ScriptSceneByPath[key] = handle;
+	AppendCpuRuntimeTrace(
+		L"[Luau][MeshComponent] procedural_grass_on_terrain_instanced handle=" + std::to_wstring(handle) +
+		L" blades=" + std::to_wstring(clampedBlades));
+	return handle;
+}
+
+bool Corona::RegenerateGrassEntityForScript(
+	CoronaECS::Entity entity,
+	UINT32 bladeCount,
+	float bladeHeight,
+	UINT32 seed,
+	UINT32 bladeSegments,
+	bool bProcedural)
+{
+	if (!EntityWorld.IsAlive(entity))
+		return false;
+
+	// Snapshot the old grass instance so the regenerated entity inherits
+	// transform / material / name. We can't keep the entity ID because the
+	// SceneObject removal path destroys the ECS entity wholesale.
+	const auto* mesh = EntityWorld.GetMesh(entity);
+	if (!mesh)
+		return false;
+	const SceneObjectHandle oldHandle = static_cast<SceneObjectHandle>(mesh->RenderObjectHandle);
+	const auto soIt = ScriptObjects.find(oldHandle);
+	if (soIt == ScriptObjects.end())
+		return false;
+	const auto sceneIt = ScriptScenes.find(soIt->second.SceneHandle);
+	if (sceneIt == ScriptScenes.end())
+		return false;
+	const SceneRecipe::Kind kind = sceneIt->second.Recipe.RecipeKind;
+	if (kind != SceneRecipe::Kind::GrassOnTerrain && kind != SceneRecipe::Kind::Grass)
+		return false;
+
+	const ScriptObjectState oldState = soIt->second;
+	const float oldRoughness = mesh->Roughness;
+	const float oldMetallic = mesh->Metallic;
+	const bool  oldOverrideRM = mesh->bOverrideRoughnessMetallic;
+	const bool  oldVisible = mesh->bVisible;
+	const bool  oldRayTracing = mesh->bRayTracing;
+	const std::string entityName =
+		EntityWorld.GetName(entity) ? *EntityWorld.GetName(entity) : std::string{};
+	const float oldArea =
+		(kind == SceneRecipe::Kind::Grass) ? sceneIt->second.Recipe.AreaSize : 0.0f;
+
+	// Destroy the old SceneObject (this also destroys the ECS entity).
+	RemoveSceneObject(oldHandle);
+
+	// Build a fresh scene with the requested params.
+	ScriptSceneHandle newSceneHandle = InvalidScriptSceneHandle;
+	if (kind == SceneRecipe::Kind::GrassOnTerrain)
+	{
+		newSceneHandle = bProcedural
+			? CreateProceduralGrassOnTerrainSceneInstancedForScript(
+				bladeCount, bladeHeight, seed, bladeSegments)
+			: CreateProceduralGrassOnTerrainSceneForScript(
+				bladeCount, bladeHeight, seed, bladeSegments);
+	}
+	else
+	{
+		// Flat grass path doesn't have a procedural variant yet; the VB
+		// route is the only available path so the flag is ignored.
+		newSceneHandle = CreateProceduralGrassSceneForScript(
+			bladeCount, oldArea, bladeHeight, seed, bladeSegments);
+	}
+	if (newSceneHandle == InvalidScriptSceneHandle)
+		return false;
+
+	const SceneObjectHandle newHandle = SpawnSceneObjectForScript(
+		newSceneHandle,
+		oldState.Position,
+		oldState.RotationDegrees,
+		oldState.TargetExtent,
+		oldState.Scale,
+		oldState.bUseScale,
+		oldRoughness, oldMetallic, oldOverrideRM,
+		oldVisible, oldRayTracing,
+		/*bPhysicsQuery=*/ false);
+	if (newHandle == InvalidSceneObjectHandle)
+		return false;
+
+	// Preserve the user's chosen entity name so the inspector still finds
+	// the regenerated grass under the same label.
+	if (!entityName.empty())
+	{
+		const CoronaECS::Entity newEntity = GetSceneObjectEntity(newHandle);
+		if (newEntity.IsValid())
+			EntityWorld.SetName(newEntity, entityName);
+	}
+
+	AppendCpuRuntimeTrace(
+		L"[Grass] regenerated blades=" + std::to_wstring(bladeCount) +
+		L" height=" + std::to_wstring(bladeHeight) +
+		L" segments=" + std::to_wstring(bladeSegments) +
+		L" seed=" + std::to_wstring(seed));
+	return true;
 }
 
 Corona::ScriptSceneHandle Corona::CreateProceduralTerrainSceneForScript(UINT32 seed)
@@ -7990,7 +8250,7 @@ void Corona::RunStartupLuauScript(bool bShowLoadingProgress)
 
 	const std::filesystem::path startupDir = GetAssetFullPath(L"scripts\\startup");
 	std::wstring startupMode = StartupLuauMode.empty() ? L"platformer" : StartupLuauMode;
-	if (startupMode != L"dungeon" && startupMode != L"sandbox" && startupMode != L"sponza" && startupMode != L"spine_benchmark" && startupMode != L"grass_demo" && startupMode != L"terrain_demo")
+	if (startupMode != L"dungeon" && startupMode != L"sandbox" && startupMode != L"sponza" && startupMode != L"spine_benchmark" && startupMode != L"grass_demo" && startupMode != L"terrain_demo" && startupMode != L"particle_demo")
 		startupMode = L"platformer";
 
 	std::vector<std::filesystem::path> scriptPaths;

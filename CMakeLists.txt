@@ -537,19 +537,27 @@ if(Vulkan_FOUND AND (CORONA_PLATFORM_WINDOWS OR CORONA_PLATFORM_ANDROID))
                 CORONA_ADD_VULKAN_RT_SHADER("${CORONA_VULKAN_SHADER}" "${CORONA_VULKAN_SHADER_STEM}")
             endif()
 
+            # Shaders that defines GBUFFER_OMIT_ENTRIES suppress the legacy
+            # GBufferCommon.hlsli VS entry points (Spine/Skeletal/etc.) —
+            # they bring their own VSMain (e.g. GrassProcedural's vertex-
+            # pulling path). Skip the dispatch rules for those alternates.
+            set(CORONA_VULKAN_OMIT_LEGACY_ENTRIES OFF)
+            if(CORONA_VULKAN_SHADER_CONTENT MATCHES "#define[ \t]+GBUFFER_OMIT_ENTRIES")
+                set(CORONA_VULKAN_OMIT_LEGACY_ENTRIES ON)
+            endif()
             if(CORONA_VULKAN_SHADER_CONTENT MATCHES "VSMain[ \t\r\n]*\\(" AND CORONA_VULKAN_SHADER_CONTENT MATCHES "PSMain[ \t\r\n]*\\(")
                 CORONA_ADD_VULKAN_GRAPHICS_SHADER("${CORONA_VULKAN_SHADER}" "${CORONA_VULKAN_SHADER_STEM}")
             endif()
-            if(CORONA_VULKAN_SHADER_CONTENT MATCHES "SpineVSMain[ \t\r\n]*\\(")
+            if(NOT CORONA_VULKAN_OMIT_LEGACY_ENTRIES AND CORONA_VULKAN_SHADER_CONTENT MATCHES "SpineVSMain[ \t\r\n]*\\(")
                 CORONA_ADD_VULKAN_GRAPHICS_VERTEX_ENTRY("${CORONA_VULKAN_SHADER}" "${CORONA_VULKAN_SHADER_STEM}" "SpineVSMain")
             endif()
-            if(CORONA_VULKAN_SHADER_CONTENT MATCHES "SpineVsInlineVSMain[ \t\r\n]*\\(")
+            if(NOT CORONA_VULKAN_OMIT_LEGACY_ENTRIES AND CORONA_VULKAN_SHADER_CONTENT MATCHES "SpineVsInlineVSMain[ \t\r\n]*\\(")
                 CORONA_ADD_VULKAN_GRAPHICS_VERTEX_ENTRY("${CORONA_VULKAN_SHADER}" "${CORONA_VULKAN_SHADER_STEM}" "SpineVsInlineVSMain")
             endif()
-            if(CORONA_VULKAN_SHADER_CONTENT MATCHES "SkeletalVSMain[ \t\r\n]*\\(")
+            if(NOT CORONA_VULKAN_OMIT_LEGACY_ENTRIES AND CORONA_VULKAN_SHADER_CONTENT MATCHES "SkeletalVSMain[ \t\r\n]*\\(")
                 CORONA_ADD_VULKAN_GRAPHICS_VERTEX_ENTRY("${CORONA_VULKAN_SHADER}" "${CORONA_VULKAN_SHADER_STEM}" "SkeletalVSMain")
             endif()
-            if(CORONA_VULKAN_SHADER_CONTENT MATCHES "SkeletalVsInlineVSMain[ \t\r\n]*\\(")
+            if(NOT CORONA_VULKAN_OMIT_LEGACY_ENTRIES AND CORONA_VULKAN_SHADER_CONTENT MATCHES "SkeletalVsInlineVSMain[ \t\r\n]*\\(")
                 CORONA_ADD_VULKAN_GRAPHICS_VERTEX_ENTRY("${CORONA_VULKAN_SHADER}" "${CORONA_VULKAN_SHADER_STEM}" "SkeletalVsInlineVSMain")
             endif()
             # Cluster VS is desktop-only — gated by GBUFFER_HAS_CLUSTER in
@@ -557,7 +565,7 @@ if(Vulkan_FOUND AND (CORONA_PLATFORM_WINDOWS OR CORONA_PLATFORM_ANDROID))
             # regex scan via the .hlsli concat above, but it's only
             # compilable when the parent file defines GBUFFER_HAS_CLUSTER
             # before the include.
-            if(CORONA_VULKAN_SHADER_CONTENT MATCHES "SkeletalVsInlineClusterVSMain[ \t\r\n]*\\(" AND CORONA_VULKAN_SHADER_CONTENT MATCHES "#define[ \t]+GBUFFER_HAS_CLUSTER")
+            if(NOT CORONA_VULKAN_OMIT_LEGACY_ENTRIES AND CORONA_VULKAN_SHADER_CONTENT MATCHES "SkeletalVsInlineClusterVSMain[ \t\r\n]*\\(" AND CORONA_VULKAN_SHADER_CONTENT MATCHES "#define[ \t]+GBUFFER_HAS_CLUSTER")
                 CORONA_ADD_VULKAN_GRAPHICS_VERTEX_ENTRY("${CORONA_VULKAN_SHADER}" "${CORONA_VULKAN_SHADER_STEM}" "SkeletalVsInlineClusterVSMain")
             endif()
 

@@ -134,7 +134,7 @@ namespace
 
 		const int kTexSize = 512;
 		std::filesystem::path dir =
-			RuntimePaths::RootDirectory() / L"bin" / L"terrain_cache";
+			RuntimePaths::AssetDirectory() / L"terrain_cache";
 		std::error_code ec;
 		std::filesystem::create_directories(dir, ec);
 		std::filesystem::path texPath =
@@ -168,7 +168,7 @@ namespace
 
 std::filesystem::path Component::ResolveCachePath(const std::wstring& cacheName) const
 {
-	std::filesystem::path dir = RuntimePaths::RootDirectory() / L"bin" / L"terrain_cache";
+	std::filesystem::path dir = RuntimePaths::AssetDirectory() / L"terrain_cache";
 	std::wstring fileName =
 		cacheName + L"_" +
 		std::to_wstring(Params.Seed) + L"_" +
@@ -458,6 +458,53 @@ bool Component::Initialize(
 	  << L" ib=" << (ibBytes / (1024u * 1024u)) << L"MB"
 	  << L" upload=" << upMs << L"ms";
 	AppendCpuRuntimeTrace(w.str());
+
+	// Linear decoded heightmap → structured buffer for procedural grass.
+	// Reassembled from the chunked uint16 layout once at terrain init —
+	// the procedural grass VS samples it every frame to anchor each blade
+	// to the terrain surface.
+	{
+		const uint32_t W = Data.Header.Width;
+		const uint32_t D = Data.Header.Depth;
+		const uint32_t chunkSize = Data.Header.ChunkSize;
+		const uint32_t numChunksX = Data.Header.NumChunksX;
+		std::vector<float> linear(static_cast<size_t>(W) * D, 0.0f);
+		for (size_t c = 0; c < Data.Chunks.size(); ++c)
+		{
+			const auto& chunk = Data.Chunks[c];
+			const uint32_t cx = static_cast<uint32_t>(c % numChunksX);
+			const uint32_t cz = static_cast<uint32_t>(c / numChunksX);
+			const uint32_t baseX = cx * (chunkSize - 1u);
+			const uint32_t baseZ = cz * (chunkSize - 1u);
+			for (uint32_t lz = 0; lz < chunkSize; ++lz)
+			{
+				for (uint32_t lx = 0; lx < chunkSize; ++lx)
+				{
+					const uint32_t worldX = baseX + lx;
+					const uint32_t worldZ = baseZ + lz;
+					if (worldX >= W || worldZ >= D) continue;
+					const size_t srcIdx = static_cast<size_t>(lz) * chunkSize + lx;
+					const size_t dstIdx = static_cast<size_t>(worldZ) * W + worldX;
+					linear[dstIdx] = Data.DecodeHeight(chunk.Heights[srcIdx]);
+				}
+			}
+		}
+		HeightBuffer = backend->CreateUploadStructuredBuffer(
+			static_cast<uint32_t>(linear.size()), sizeof(float));
+		if (HeightBuffer)
+		{
+			backend->UpdateUploadStructuredBuffer(
+				HeightBuffer.get(), linear.data(),
+				static_cast<uint32_t>(linear.size() * sizeof(float)));
+			AppendCpuRuntimeTrace(
+				L"[Terrain] heightfield buffer " + std::to_wstring(W) + L"x" + std::to_wstring(D) +
+				L" (" + std::to_wstring(linear.size() * sizeof(float) / (1024 * 1024)) + L" MB)");
+		}
+		else
+		{
+			AppendCpuRuntimeTrace(L"[Terrain] heightfield buffer allocation failed");
+		}
+	}
 
 	return true;
 }

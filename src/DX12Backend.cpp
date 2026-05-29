@@ -939,7 +939,11 @@ void DX12Backend::DrawFullscreenQuad(VertexBuffer* vertexBuffer)
 
 void DX12Backend::BindMeshBuffers(VertexBuffer* vertexBuffer, IndexBuffer* indexBuffer)
 {
-	if (!vertexBuffer || !indexBuffer)
+	// IB-only binding is valid for vertex-pulling PSOs (e.g. procedural
+	// grass) where the VS synthesizes positions from SV_VertexID and the
+	// PSO has an empty IA layout. Skip the VB-stride diagnostic in that
+	// case but still set the IB so DrawIndexedInstanced has indices.
+	if (!indexBuffer)
 		return;
 
 	// Diagnostic: warn (and assert in debug) when the bound PSO's
@@ -948,6 +952,7 @@ void DX12Backend::BindMeshBuffers(VertexBuffer* vertexBuffer, IndexBuffer* index
 	// will silently corrupt vertices on Vulkan (which uses PSO stride).
 	// Catching the mismatch on the desktop dev cycle is much cheaper
 	// than chasing the artifact through an Android APK install.
+	if (vertexBuffer && (BoundGraphicsPipelineForDiag != nullptr))
 	if (auto* dxPipeline = dynamic_cast<DX12GraphicsPipelineHandle*>(BoundGraphicsPipelineForDiag))
 	{
 		const uint32_t psoStride = dxPipeline->VertexStride;
@@ -985,7 +990,8 @@ void DX12Backend::BindMeshBuffers(VertexBuffer* vertexBuffer, IndexBuffer* index
 
 	GlobalCmdList->CmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 	GlobalCmdList->CmdList->IASetIndexBuffer(&indexBuffer->view);
-	GlobalCmdList->CmdList->IASetVertexBuffers(0, 1, &vertexBuffer->view);
+	if (vertexBuffer)
+		GlobalCmdList->CmdList->IASetVertexBuffers(0, 1, &vertexBuffer->view);
 }
 
 void DX12Backend::DrawIndexed(uint32_t indexCount, uint32_t startIndexLocation, int32_t baseVertexLocation)
@@ -1863,11 +1869,17 @@ namespace
 
 void PipelineStateObject::SetSRV(string name, D3D12_GPU_DESCRIPTOR_HANDLE GpuHandleSRV, ID3D12GraphicsCommandList* CommandList)
 {
-	//textureBinding[name].texture = texture;
 	CommandList = ResolveGraphicsCommandList(Owner, CommandList);
 	assert(CommandList);
 
-	UINT RPI = textureBinding[name].rootParamIndex;
+	// std::map::operator[] would silently create a default BindingData
+	// (rootParamIndex=0) for an unknown name, then write SRV to root slot 0
+	// — which on PSOs whose root sig puts a CBV at slot 0 (e.g. procedural
+	// grass with no textures) clobbers the CB. Guard explicitly.
+	auto it = textureBinding.find(name);
+	if (it == textureBinding.end())
+		return;
+	UINT RPI = it->second.rootParamIndex;
 	if (IsCompute)
 		CommandList->SetComputeRootDescriptorTable(RPI, GpuHandleSRV);
 	else
@@ -1892,15 +1904,17 @@ void PipelineStateObject::SetSampler(string name, Sampler* sampler, ID3D12Graphi
 {
 	CommandList = ResolveGraphicsCommandList(Owner, CommandList);
 	assert(CommandList);
-	samplerBinding[name].sampler = sampler;
-
-	D3D12_CPU_DESCRIPTOR_HANDLE ShaderVisibleCPUHandle;
-	D3D12_GPU_DESCRIPTOR_HANDLE ShaderVisibleGpuHandle;
-
+	// Same guard as SetSRV — silently creating an entry on a PSO that
+	// doesn't expose this sampler would write to root slot 0 and clobber
+	// the CB descriptor.
+	auto it = samplerBinding.find(name);
+	if (it == samplerBinding.end())
+		return;
+	it->second.sampler = sampler;
 	if (IsCompute)
-		CommandList->SetComputeRootDescriptorTable(samplerBinding[name].rootParamIndex, sampler->GpuHandle);
+		CommandList->SetComputeRootDescriptorTable(it->second.rootParamIndex, sampler->GpuHandle);
 	else
-		CommandList->SetGraphicsRootDescriptorTable(samplerBinding[name].rootParamIndex, sampler->GpuHandle);
+		CommandList->SetGraphicsRootDescriptorTable(it->second.rootParamIndex, sampler->GpuHandle);
 }
 
 void PipelineStateObject::SetCBVValue(string name, void* pData, ID3D12GraphicsCommandList* CommandList)
@@ -5028,6 +5042,32 @@ std::shared_ptr<GraphicsPipelineHandle> DX12Backend::CreateGraphicsPipeline(cons
 	psoDesc.InputLayout = { vertexElements.data(), static_cast<UINT>(vertexElements.size()) };
 	psoDesc.RasterizerState = rasterizerStateDesc;
 	psoDesc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
+	if (desc.BlendMode != EBlendMode::Opaque)
+	{
+		// Only RT 0 blends; remaining RTs keep write-mask = 0 so additive/
+		// alpha particle PSOs that share the multi-RT GBuffer pass don't
+		// touch Normal/Velocity/Roughness.
+		auto& rt0 = psoDesc.BlendState.RenderTarget[0];
+		rt0.BlendEnable = TRUE;
+		rt0.LogicOpEnable = FALSE;
+		rt0.SrcBlendAlpha = D3D12_BLEND_ONE;
+		rt0.DestBlendAlpha = D3D12_BLEND_ZERO;
+		rt0.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+		rt0.BlendOp = D3D12_BLEND_OP_ADD;
+		rt0.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+		if (desc.BlendMode == EBlendMode::Additive)
+		{
+			rt0.SrcBlend = D3D12_BLEND_SRC_ALPHA;
+			rt0.DestBlend = D3D12_BLEND_ONE;
+		}
+		else // AlphaBlend
+		{
+			rt0.SrcBlend = D3D12_BLEND_SRC_ALPHA;
+			rt0.DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
+		}
+		for (UINT i = 1; i < D3D12_SIMULTANEOUS_RENDER_TARGET_COUNT; ++i)
+			psoDesc.BlendState.RenderTarget[i].RenderTargetWriteMask = 0;
+	}
 	psoDesc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
 	psoDesc.DepthStencilState.DepthEnable = desc.bDepthEnable ? TRUE : FALSE;
 	psoDesc.DepthStencilState.DepthWriteMask =

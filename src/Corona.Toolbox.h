@@ -23,6 +23,7 @@ private:
 	void SpawnPointLight();
 	void SpawnBox();
 	void SpawnSphere();
+	void SpawnGrass();
 
 	Corona* Host;
 	bool bVisible = false;

@@ -15,6 +15,7 @@
 #include "Corona.Console.h"
 #include "Corona.SceneInspector.h"
 #include "Corona.Toolbox.h"
+#include "ParticleSystem.h"
 #include "TerrainComponent.h"
 #include "D3D12Helpers.h"
 #include "PlatformSystem.h"
@@ -820,12 +821,14 @@ namespace
 		return mode == Corona::EAntiAliasingMode::DLSS_SR || mode == Corona::EAntiAliasingMode::DLSS_RR;
 	}
 
-	constexpr std::array<const char*, 20> kGpuPassNames = {
+	constexpr std::array<const char*, 22> kGpuPassNames = {
 		"Frame Total",
 		"Skeletal Skinning",
 		"GBuffer",
 		"Terrain",
 		"Grass",
+		"Grass (procedural)",
+		"Particles",
 		"RT Shadow",
 		"RT AO",
 		"RT Sky",
@@ -1613,6 +1616,8 @@ void Corona::EndGpuPassTiming(EGpuPass pass)
 
 const char* Corona::GetGpuPassName(EGpuPass pass) const
 {
+	static_assert(kGpuPassNames.size() == static_cast<size_t>(EGpuPass::Count),
+		"kGpuPassNames must stay in sync with EGpuPass entries");
 	return kGpuPassNames[static_cast<size_t>(pass)];
 }
 
@@ -2822,6 +2827,14 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 			bStartupSponzaFlyMode = false;
 			bEnableStartupLuauScript = true;
 			StartupLuauMode = L"terrain_demo";
+			bCommandLineDungeonCharacterMode = false;
+			continue;
+		}
+		if (arg == L"--particle-demo")
+		{
+			bStartupSponzaFlyMode = false;
+			bEnableStartupLuauScript = true;
+			StartupLuauMode = L"particle_demo";
 			bCommandLineDungeonCharacterMode = false;
 			continue;
 		}
@@ -7412,7 +7425,7 @@ void Corona::OnInit()
 			StartupLuauMode = L"spine_benchmark";
 			bCommandLineDungeonCharacterMode = false;
 		}
-		if (StartupLuauMode != L"dungeon" && StartupLuauMode != L"sandbox" && StartupLuauMode != L"sponza" && StartupLuauMode != L"spine_benchmark" && StartupLuauMode != L"grass_demo" && StartupLuauMode != L"terrain_demo")
+		if (StartupLuauMode != L"dungeon" && StartupLuauMode != L"sandbox" && StartupLuauMode != L"sponza" && StartupLuauMode != L"spine_benchmark" && StartupLuauMode != L"grass_demo" && StartupLuauMode != L"terrain_demo" && StartupLuauMode != L"particle_demo")
 			StartupLuauMode = L"platformer";
 
 		const bool bDungeonStartupMode = StartupLuauMode == L"dungeon";
@@ -8242,10 +8255,11 @@ namespace
 		float& outMinY,
 		float& outMaxY,
 		uint32_t gridDim = 0,
-		std::vector<Corona::GrassChunkInfo>* outChunks = nullptr)
+		std::vector<Corona::GrassChunkInfo>* outChunks = nullptr,
+		UINT32 bladeSegments = 4)
 	{
 		const float bladeWidth = bladeHeight * 0.06f;
-		const UINT32 kBladeSegments = 4;
+		const UINT32 kBladeSegments = std::clamp<UINT32>(bladeSegments, 1u, 32u);
 		const UINT32 kBladeRows = kBladeSegments + 1;
 		const UINT32 kVertsPerBlade = kBladeRows * 2u;
 		const UINT32 kIdxPerBlade = kBladeSegments * 12u;
@@ -8424,7 +8438,98 @@ namespace
 	}
 }
 
-shared_ptr<Scene> Corona::CreateProceduralGrassScene(UINT32 numBlades, float areaSize, float bladeHeight, UINT32 seed)
+shared_ptr<Scene> Corona::CreateProceduralSphereScene(float radius, uint32_t rings, uint32_t segments)
+{
+	if (!renderBackend || radius <= 0.0f)
+		return nullptr;
+	const uint32_t R = std::clamp<uint32_t>(rings, 4u, 128u);
+	const uint32_t S = std::clamp<uint32_t>(segments, 6u, 256u);
+
+	struct SphereVertex
+	{
+		glm::vec3 Position;
+		glm::vec3 Normal;
+		glm::vec2 UV;
+		glm::vec3 Tangent;
+	};
+	static_assert(sizeof(SphereVertex) == 44, "SphereVertex must match base GBuffer PSO stride");
+
+	std::vector<SphereVertex> verts;
+	std::vector<uint32_t> indices;
+	verts.reserve(static_cast<size_t>(R + 1) * (S + 1));
+	indices.reserve(static_cast<size_t>(R) * S * 6u);
+
+	for (uint32_t ri = 0; ri <= R; ++ri)
+	{
+		const float v = static_cast<float>(ri) / static_cast<float>(R);
+		const float lat = v * glm::pi<float>(); // 0 (north) .. π (south)
+		const float sLat = std::sin(lat), cLat = std::cos(lat);
+		for (uint32_t si = 0; si <= S; ++si)
+		{
+			const float u = static_cast<float>(si) / static_cast<float>(S);
+			const float lon = u * glm::two_pi<float>();
+			const float sLon = std::sin(lon), cLon = std::cos(lon);
+			SphereVertex vx{};
+			const glm::vec3 n = glm::vec3(sLat * cLon, cLat, sLat * sLon);
+			vx.Position = n * radius;
+			vx.Normal = n;
+			vx.UV = glm::vec2(u, v);
+			vx.Tangent = glm::vec3(-sLon, 0.0f, cLon); // dP/du
+			verts.push_back(vx);
+		}
+	}
+	const uint32_t stride = S + 1u;
+	for (uint32_t ri = 0; ri < R; ++ri)
+	{
+		for (uint32_t si = 0; si < S; ++si)
+		{
+			const uint32_t i0 = ri * stride + si;
+			const uint32_t i1 = i0 + 1u;
+			const uint32_t i2 = i0 + stride;
+			const uint32_t i3 = i2 + 1u;
+			indices.push_back(i0); indices.push_back(i2); indices.push_back(i1);
+			indices.push_back(i1); indices.push_back(i2); indices.push_back(i3);
+		}
+	}
+
+	auto material = std::make_shared<Material>();
+	material->BaseColorFactor = glm::vec4(0.7f, 0.7f, 0.75f, 1.0f);
+	material->Diffuse   = DefaultWhiteTex;
+	material->Normal    = DefaultNormalTex;
+	material->Roughness = DefaultRougnessTex;
+	material->Metallic  = DefaultBlackTex;
+
+	auto mesh = std::make_shared<Mesh>(renderBackend.get());
+	mesh->transform = glm::mat4x4(1.0f);
+	mesh->NumVertices = static_cast<uint32_t>(verts.size());
+	mesh->NumIndices  = static_cast<uint32_t>(indices.size());
+	mesh->VertexStride = sizeof(SphereVertex);
+	mesh->IndexFormat = EIndexFormat::U32;
+	mesh->Mat = material;
+	const uint32_t vbBytes = static_cast<uint32_t>(verts.size() * sizeof(SphereVertex));
+	const uint32_t ibBytes = static_cast<uint32_t>(indices.size() * sizeof(uint32_t));
+	mesh->Vb = renderBackend->CreateVertexBuffer(vbBytes, sizeof(SphereVertex), verts.data());
+	mesh->Ib = renderBackend->CreateIndexBuffer(EIndexFormat::U32, ibBytes, indices.data());
+	mesh->CpuPositions.reserve(verts.size());
+	for (const auto& vx : verts) mesh->CpuPositions.push_back(vx.Position);
+	mesh->CpuIndices = indices;
+
+	Mesh::DrawCall dc{};
+	dc.mat = material;
+	dc.IndexCount = mesh->NumIndices;
+	dc.VertexCount = mesh->NumVertices;
+	mesh->Draws.push_back(dc);
+
+	auto scene = std::make_shared<Scene>();
+	scene->Materials.push_back(material);
+	scene->meshes.push_back(mesh);
+	scene->bHasBounds = true;
+	scene->BoundsMin = glm::vec3(-radius);
+	scene->BoundsMax = glm::vec3( radius);
+	return scene;
+}
+
+shared_ptr<Scene> Corona::CreateProceduralGrassScene(UINT32 numBlades, float areaSize, float bladeHeight, UINT32 seed, UINT32 bladeSegments)
 {
 	if (!renderBackend || numBlades == 0)
 		return nullptr;
@@ -8438,7 +8543,7 @@ shared_ptr<Scene> Corona::CreateProceduralGrassScene(UINT32 numBlades, float are
 	float minY = 0.0f, maxY = bladeHeight;
 	BuildGrassBlades(numBlades, halfArea, bladeHeight, seed,
 		[](float, float) { return 0.0f; },
-		vertices, indices, minY, maxY);
+		vertices, indices, minY, maxY, 0u, nullptr, bladeSegments);
 
 	shared_ptr<Material> material = std::make_shared<Material>();
 	material->BaseColorFactor = glm::vec4(0.18f, 0.48f, 0.22f, 1.0f); // green
@@ -8480,23 +8585,97 @@ shared_ptr<Scene> Corona::CreateProceduralGrassScene(UINT32 numBlades, float are
 	return scene;
 }
 
-shared_ptr<Scene> Corona::CreateProceduralGrassOnTerrainScene(UINT32 numBlades, float bladeHeight, UINT32 seed)
+shared_ptr<Scene> Corona::CreateProceduralGrassOnTerrainSceneInstanced(UINT32 numBlades, float bladeHeight, UINT32 seed, UINT32 bladeSegments)
+{
+	if (!renderBackend || numBlades == 0)
+		return nullptr;
+	// Procedural path renders ALL instances via VS dispatch each frame.
+	// The per-frame instance count is `cells × bladesPerCell` (DrawScene),
+	// so this is the hard ceiling — generous enough for high density at
+	// large render distances; per-blade LOD keeps the rasterizer happy.
+	const UINT32 cappedBlades = (std::min)(numBlades, 1'000'000u);
+	const UINT32 clampedSegments = std::clamp<UINT32>(bladeSegments == 0u ? 4u : bladeSegments, 1u, 32u);
+
+	Terrain::Component* terrain = ActiveTerrain.get();
+	const float terrainSize =
+		terrain
+			? static_cast<float>(terrain->GetData().Header.Width - 1) *
+			  terrain->GetData().Header.WorldScaleXZ
+			: 1024.0f;
+	const float halfArea = terrainSize * 0.5f;
+
+	shared_ptr<Material> material = std::make_shared<Material>();
+	material->BaseColorFactor = glm::vec4(0.18f, 0.48f, 0.22f, 1.0f);
+	material->Diffuse = DefaultWhiteTex;
+	material->Normal = DefaultNormalTex;
+	material->Roughness = DefaultRougnessTex;
+	material->Metallic = DefaultBlackTex;
+
+	auto mesh = std::make_shared<Mesh>(renderBackend.get());
+	mesh->transform = glm::mat4x4(1.0f);
+	mesh->NumVertices = 0u;
+	mesh->NumIndices  = 0u;
+	mesh->VertexStride = 0u;
+	mesh->Mat = material;
+	mesh->bGrassMesh = true;
+	mesh->bProceduralGrass = true;
+	mesh->Procedural.BladeCount    = cappedBlades;
+	mesh->Procedural.BladeSegments = clampedSegments;
+	mesh->Procedural.BladeHeight   = bladeHeight;
+	mesh->Procedural.HalfAreaXZ    = halfArea;
+	mesh->Procedural.Seed          = (seed == 0u) ? 1u : seed;
+	if (terrain)
+	{
+		mesh->Procedural.HeightMin = terrain->GetData().Header.HeightMin;
+		mesh->Procedural.HeightMax = terrain->GetData().Header.HeightMax;
+	}
+	// One placeholder DrawCall — DrawScene routes procedural meshes to
+	// DrawInstanced directly, but the SceneObject culling code expects at
+	// least one entry to consider the mesh visible.
+	Mesh::DrawCall dc{};
+	dc.mat = material;
+	dc.IndexStart = 0;
+	dc.IndexCount = clampedSegments * 6u; // verts per blade
+	dc.VertexBase = 0;
+	dc.VertexCount = clampedSegments * 6u;
+	mesh->Draws.push_back(dc);
+
+	auto scene = std::make_shared<Scene>();
+	scene->Materials.push_back(material);
+	scene->meshes.push_back(mesh);
+	scene->bHasBounds = true;
+	// Procedural blades are placed in world space directly from PG_BaseY in
+	// the VS, so we keep BoundsMin.y = 0 — otherwise BuildScaledSceneTransform
+	// would subtract BoundsMin.y and push every blade below the terrain.
+	scene->BoundsMin = glm::vec3(-halfArea, 0.0f, -halfArea);
+	scene->BoundsMax = glm::vec3( halfArea, mesh->Procedural.HeightMax + bladeHeight * 1.3f, halfArea);
+
+	AppendCpuRuntimeTrace(
+		L"[Grass] procedural-instanced spawned blades=" + std::to_wstring(cappedBlades) +
+		L" segments=" + std::to_wstring(clampedSegments));
+	return scene;
+}
+
+shared_ptr<Scene> Corona::CreateProceduralGrassOnTerrainScene(UINT32 numBlades, float bladeHeight, UINT32 seed, UINT32 bladeSegments)
 {
 	if (!renderBackend || numBlades == 0)
 		return nullptr;
 
 	// RenderBackend::CreateVertexBuffer takes UINT (uint32) for byte size, so
-	// sizeof(GrassVertex)=44B × kVertsPerBlade=10 × numBlades must fit in
-	// uint32 (≤ 4GB). Cap aggressively at 9.5M blades = 4.18GB raw — D3D12
-	// CreateCommittedResource starts struggling well before the theoretical
-	// limit and the BVH AABB SRV indexing uses uint32 NumElements too.
-	constexpr UINT32 kMaxBladesUint32Safe = 9'500'000u;
+	// sizeof(GrassVertex)=44B × kVertsPerBlade × numBlades must fit in
+	// uint32 (≤ 4GB). kVertsPerBlade grows with bladeSegments — clamp the
+	// blade count against the actual segments setting, not a fixed 4.
+	const UINT32 effectiveSegments = std::clamp<UINT32>(bladeSegments == 0u ? 4u : bladeSegments, 1u, 32u);
+	const UINT32 vertsPerBlade = (effectiveSegments + 1u) * 2u;
+	const uint64_t maxBytes = 3'800'000'000ull; // ≈3.8 GB headroom under 4 GB uint32 ceiling
+	const uint64_t bytesPerBlade = static_cast<uint64_t>(vertsPerBlade) * 44ull;
+	const UINT32 kMaxBladesUint32Safe = static_cast<UINT32>(maxBytes / bytesPerBlade);
 	if (numBlades > kMaxBladesUint32Safe)
 	{
 		AppendCpuRuntimeTrace(
 			L"[Terrain] grass-on-terrain blade_count=" + std::to_wstring(numBlades) +
-			L" exceeds uint32 buffer-size limit; capping to " +
-			std::to_wstring(kMaxBladesUint32Safe));
+			L" exceeds uint32 buffer-size limit at segments=" + std::to_wstring(effectiveSegments) +
+			L"; capping to " + std::to_wstring(kMaxBladesUint32Safe));
 		numBlades = kMaxBladesUint32Safe;
 	}
 
@@ -8527,7 +8706,7 @@ shared_ptr<Scene> Corona::CreateProceduralGrassOnTerrainScene(UINT32 numBlades, 
 	float minY = 0.0f, maxY = bladeHeight;
 	std::vector<GrassChunkInfo> chunks;
 	BuildGrassBlades(numBlades, halfArea, bladeHeight, seed, sampler,
-		vertices, indices, minY, maxY, gridDim, &chunks);
+		vertices, indices, minY, maxY, gridDim, &chunks, bladeSegments);
 
 	shared_ptr<Material> material = std::make_shared<Material>();
 	material->BaseColorFactor = glm::vec4(0.18f, 0.48f, 0.22f, 1.0f);
@@ -9159,8 +9338,40 @@ void Corona::LoadAssets()
 		UpdateStartupLoadingProgress(0.30f, L"Compiling presentation passes");
 		InitLightingPass();
 		InitToneMapPass();
+		InitParticlePass();
 		if (!bVulkanPathTracingStartup)
 			InitTemporalAAPass();
+		// Bootstrap a spark particle system for any demo mode that needs one.
+		// particle_demo pins a static billboard at (0, 3, 0) so the smoke
+		// test is visible without input; terrain_demo opens a dynamic pool
+		// (no static anchor) that the script can fill via SpawnBurst.
+		const bool bWantParticleDemo = (StartupLuauMode == L"particle_demo");
+		const bool bWantTerrainParticles = (StartupLuauMode == L"terrain_demo");
+		if ((bWantParticleDemo || bWantTerrainParticles) && ParticleGraphicsPipeline)
+		{
+			Particles::EmitterParams params{};
+			params.Kind = Particles::EKind::Spark;
+			params.Capacity = bWantTerrainParticles ? 2048u : 256u;
+			params.Origin = glm::vec3(0.0f, 3.0f, 0.0f);
+			params.Lifetime = 1.4f;
+			params.InitialSpeed = glm::vec3(0.0f, 7.0f, 0.0f);
+			params.SpeedJitter = 4.0f;
+			params.StartSize = bWantParticleDemo ? 0.5f : 0.12f;
+			params.EndSize   = bWantParticleDemo ? 0.5f : 0.08f;
+			// HDR-bright over the whole life (additive blend in linear HDR
+			// means alpha here scales the contribution). Ending at alpha 0.9
+			// keeps the spark visible all the way down to the ground impact.
+			params.StartColor = glm::vec4(2.2f, 1.7f, 0.7f, 1.0f);
+			params.EndColor   = glm::vec4(1.4f, 0.6f, 0.15f, 0.9f);
+			auto system = std::make_shared<Particles::System>();
+			if (system->Initialize(renderBackend.get(), params))
+			{
+				system->SetStaticAnchor(bWantParticleDemo);
+				ActiveParticleSystems.push_back(system);
+			}
+			else
+				AppendCpuRuntimeTrace(L"[Particles] bootstrap failed");
+		}
 #if CORONA_HAS_D3D12
 		if (!bVulkanBackend)
 		{
@@ -9547,6 +9758,7 @@ void Corona::LoadAssets()
 		 StartupLuauMode == L"spine_benchmark" ||
 		 StartupLuauMode == L"grass_demo" ||
 		 StartupLuauMode == L"terrain_demo" ||
+		 StartupLuauMode == L"particle_demo" ||
 		 bCommandLineDungeonCharacterMode);
 
 	if (!bMobileDungeonOnlyStartup && !bGameplayStartupMode && !bCommandLineSkeletalBenchMode)
@@ -10763,6 +10975,11 @@ void Corona::OnUpdate()
 	UpdateLuauScripting(elapsedSeconds);
 	AddCpuUpdatePhaseTiming(ECpuUpdatePhase::LuauScripts, phaseStart, CpuClock::now());
 
+	// Particle simulation tick — runs after Luau so any spawn calls the
+	// scripts made this frame land on the up-to-date pool before the
+	// render-side ParticlePass walks it.
+	UpdateParticleSystems(elapsedSeconds);
+
 	phaseStart = CpuClock::now();
 	ClearScriptInputFrameState();
 	AddCpuUpdatePhaseTiming(ECpuUpdatePhase::Input, phaseStart, CpuClock::now());
@@ -10980,8 +11197,15 @@ void Corona::BuildRenderFrameDerivedState(const RenderFrameSourceState* sourceSt
 	}
 
 	InvViewProjMat = glm::inverse(ViewProjMat);
-	RenderFrameShaderTime = sourceState ? sourceState->TotalSeconds : static_cast<float>(m_timer.GetTotalSeconds());
-	RenderFrameShaderTime *= 0.01f;
+	const float realTime = sourceState ? sourceState->TotalSeconds : static_cast<float>(m_timer.GetTotalSeconds());
+	// Two derived times: RenderFrameShaderTime stays scaled to its legacy
+	// range (≈ wall-time × 0.01) because several RT noise paths fold it
+	// into random-offset seeds and depend on the small magnitude. The wind
+	// shader needs unscaled real time so tempFreq in rad/s actually
+	// produces an oscillation at that frequency — see MeshDeformParams.x
+	// in Corona.RasterPasses.cpp.
+	RenderFrameShaderTime = realTime * 0.01f;
+	RenderFrameWindTime   = realTime;
 	RenderFrameNormalizedLightDir = glm::length(LightDir) > 0.0001f ? glm::normalize(LightDir) : glm::vec3(0.0f, 1.0f, 0.0f);
 	const float lightDirT = 0.5f * (RenderFrameNormalizedLightDir.y + 1.0f);
 	RenderFrameLightColor = glm::mix(SkyColorBottom, SkyColorTop, lightDirT);
@@ -11258,6 +11482,12 @@ void Corona::OnRender()
 			BeginGpuPassTiming(EGpuPass::Lighting);
 			LightingPass();
 			EndGpuPassTiming(EGpuPass::Lighting);
+			// Forward-translucent particle draw against the post-light HDR.
+			// Sits between LightingPass and TemporalAA so the additive
+			// sparks ride through the TAA/DLSS accumulation pipeline.
+			BeginGpuPassTiming(EGpuPass::Particles);
+			ParticlePass();
+			EndGpuPassTiming(EGpuPass::Particles);
 		}
 
 		// BloomPass(); // Disabled for hybrid mode
@@ -13067,6 +13297,7 @@ void Corona::RecompileShaders()
 	InitGBufferPass();
 	InitToneMapPass();
 	InitLightingPass();
+	InitParticlePass();
 	InitTemporalAAPass();
 	return;
 #else
@@ -13077,6 +13308,7 @@ void Corona::RecompileShaders()
 	InitGBufferPass();
 	InitToneMapPass();
 	InitLightingPass();
+	InitParticlePass();
 	InitTemporalAAPass();
 #if CORONA_HAS_D3D12
 	if (!renderBackend || renderBackend->GetAPI() == ERenderBackendAPI::D3D12)

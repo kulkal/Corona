@@ -53,7 +53,7 @@ if not terrainEntity then
     corona.MeshComponent.add(grassEntity, {
         primitive    = "GRASS_ON_TERRAIN",
         blade_count  = 12000000,
-        blade_height = 0.6,
+        blade_height = 1.6,
         seed         = 20260527,
         position     = { 0.0, 0.0, 0.0 },
         rotation     = { 0.0, 0.0, 0.0 },
@@ -101,6 +101,14 @@ if not terrainEntity then
         persistent = false,
     })
 
+    -- First-spawn-only environment setup. After the map is saved these
+    -- values live in the map file; on later launches the load_map path
+    -- restores them, and the inspector lets the user edit + persist via
+    -- "Save Map". Per-frame `on_update` no longer rewrites them.
+    corona.set_grass_bend_params(3.0, 1.6)
+    corona.set_grass_render_distance(grassRenderDistance)
+    corona.set_wind_params(windDirX, windDirZ, windStrength, windTempFreq, windSpaceFreq)
+
     corona.log("[terrain_demo] spawned 2km terrain + 12M grass + ~2m player + orbit camera + sun")
 
     -- Persist this fresh spawn so the next launch can skip the slow blade
@@ -120,19 +128,19 @@ local camDistance      = 6.0
 local camHeightOffset  = 2.5
 local mouseSensitivity = 0.005
 
--- Wind sway constants — scaled for 0.6 m blades. The original grass_demo
--- used 12.7 strength on 28 m grass (ratio 0.453 of blade height). Same
--- visual sway angle on 0.6 m blades → 0.6 × 0.453 ≈ 0.27.
+-- Wind sway constants — scaled for the current 1.6 m blades. The ratio
+-- (sway strength / blade height) ≈ 0.453 keeps visual sway proportional,
+-- so 1.6 m blades use ~0.72.
 local windDirX      = 0.11
 local windDirZ      = 0.14
-local windStrength  = 0.27
-local windTempFreq  = 4.0
+local windStrength  = 0.72
+local windTempFreq  = 12.0
 local windSpaceFreq = 0.04
 
 local walkSpeed = 2.0   -- m/s (Shift = 4× = 8 m/s sprint)
 local grassRenderDistance = 100.0   -- world units; 0 = unlimited
 -- Visual-only sphere depression around the player. 0 = disabled.
-local terrainDeformRadius = 5.0
+local terrainDeformRadius = 0.0
 
 -- Auto-capture: when launched with --exit-after-frames, trigger the engine's
 -- built-in final-backbuffer screenshot a few frames before the cmdline-
@@ -141,14 +149,39 @@ local terrainDeformRadius = 5.0
 local autoCaptureAtFrame = 90
 local frameCounter = 0
 local captureRequested = false
+local freeFlyCamera = false
+
+-- One-shot seeding of engine-side state so the Scene Inspector / engine
+-- sliders see the demo's intended defaults, and so per-frame writes don't
+-- clobber user edits coming from another panel.
+local wantInitialBroadcast = true
 
 local function on_imgui()
     if not imgui.begin("Terrain Demo") then
         imgui.end_window()
         return
     end
-    grassRenderDistance, _ = imgui.slider_float("grass distance (m)", grassRenderDistance, 0.0, 1500.0)
-    terrainDeformRadius, _ = imgui.slider_float("deform radius (m)", terrainDeformRadius, 0.0, 30.0)
+    local newFree, changed = imgui.checkbox("Free-fly camera (WASD)", freeFlyCamera)
+    if changed then
+        freeFlyCamera = newFree
+        if corona.use_native_camera then
+            corona.use_native_camera(freeFlyCamera)
+        end
+    end
+    -- Each slider only writes to the engine when its value actually changes;
+    -- this lets the Scene Inspector (or other panels) edit the same engine
+    -- state without being clobbered by the script the next frame.
+    local v, c
+    v, c = imgui.slider_float("grass distance (m)", grassRenderDistance, 0.0, 1500.0)
+    if c then grassRenderDistance = v; corona.set_grass_render_distance(grassRenderDistance) end
+    v, c = imgui.slider_float("deform radius (m)", terrainDeformRadius, 0.0, 30.0)
+    if c then terrainDeformRadius = v end
+    v, c = imgui.slider_float("wind strength", windStrength, 0.0, 3.0)
+    if c then windStrength = v; corona.set_wind_params(windDirX, windDirZ, windStrength, windTempFreq, windSpaceFreq) end
+    v, c = imgui.slider_float("wind freq (time)", windTempFreq, 0.0, 40.0)
+    if c then windTempFreq = v; corona.set_wind_params(windDirX, windDirZ, windStrength, windTempFreq, windSpaceFreq) end
+    v, c = imgui.slider_float("wind freq (space)", windSpaceFreq, 0.0, 0.5)
+    if c then windSpaceFreq = v; corona.set_wind_params(windDirX, windDirZ, windStrength, windTempFreq, windSpaceFreq) end
     imgui.text(string.format("player @ (%.1f, %.1f, %.1f)", player.x, player.y, player.z))
     imgui.end_window()
 end
@@ -171,6 +204,18 @@ local function on_update(dt)
     grassEntity   = ensureHandle("TerrainDemoGrass",   grassEntity)
     sunEntity     = ensureHandle("TerrainDemoSun",     sunEntity)
 
+    -- Free-fly mode: SimpleCamera owns WASD + mouse rotation, the player
+    -- stays still, the orbit-follow camera is disabled. Only the SPACE
+    -- spark spawn (below) and ImGui controls run; the rest of this
+    -- function returns early.
+    if freeFlyCamera then
+        if corona.was_key_pressed and corona.was_key_pressed("SPACE") then
+            local spawnY = (player.y or 0.0) + 0.5
+            corona.particle_burst(player.x, spawnY, player.z, 288)
+        end
+        return
+    end
+
     local m = corona.get_mouse()
     if m and m.right_down then
         camYaw   = camYaw   - (m.dx or 0) * mouseSensitivity
@@ -192,6 +237,16 @@ local function on_update(dt)
 
     local speed = walkSpeed
     if corona.is_key_down("SHIFT") then speed = speed * 4.0 end
+
+    -- Space → burst a fistful of sparks at the player's feet. Bound to a
+    -- one-shot "pressed this frame" check so holding the key doesn't drain
+    -- the pool every frame.
+    if corona.was_key_pressed and corona.was_key_pressed("SPACE") then
+        local spawnY = (player.y or 0.0) + 0.5
+        local n = corona.particle_burst(player.x, spawnY, player.z, 288)
+        corona.log(string.format("[terrain_demo] spark burst @ (%.1f, %.1f, %.1f) n=%d",
+            player.x, spawnY, player.z, n))
+    end
 
     local lenSq = mf * mf + mr * mr
     if lenSq > 0.0 then
@@ -231,17 +286,38 @@ local function on_update(dt)
     corona.CameraComponent.set(cameraEntity, {
         position = { player.x + camOffsetX, player.y + camOffsetY, player.z + camOffsetZ },
         look_at  = { player.x, player.y + player.eyeHeight, player.z },
-        up       = { 0.0, 1.0, 0.0 },
-        fov      = 0.9,
+        -- intentionally omit fov / up so per-frame writes don't clobber
+        -- inspector edits or values restored from the saved map.
         active   = true,
     })
 
-    corona.set_wind_params(windDirX, windDirZ, windStrength, windTempFreq, windSpaceFreq)
-    -- Bend strength halved (4.0 → 2.0) — 0.6 m blades were lying flat
-    -- when pushed 4 m sideways within the 3 m bend radius.
-    corona.set_grass_bend_origin(player.x, 0.0, player.z, 2.0)
-    corona.set_grass_bend_params(3.0, 0.6)
-    corona.set_grass_render_distance(grassRenderDistance)
+    -- One-shot sync on the first frame. Pull the engine's current state
+    -- (set by map load, or the engine's hardcoded defaults if no map
+    -- existed) into our locals so the demo panel's sliders show the live
+    -- values and we don't clobber map-restored params with hardcoded
+    -- defaults like grassRenderDistance=100.
+    if wantInitialBroadcast then
+        if corona.get_grass_render_distance then
+            grassRenderDistance = corona.get_grass_render_distance()
+        end
+        if corona.get_wind_params then
+            local w = corona.get_wind_params()
+            if w then
+                windDirX      = w.dir_x      or windDirX
+                windDirZ      = w.dir_z      or windDirZ
+                windStrength  = w.strength   or windStrength
+                windTempFreq  = w.temp_freq  or windTempFreq
+                windSpaceFreq = w.space_freq or windSpaceFreq
+            end
+        end
+        wantInitialBroadcast = false
+    end
+    -- These two follow the player every frame — they're not user-edited via
+    -- the inspector, so re-writing them is correct.
+    -- y carries the player's terrain height so the procedural grass
+    -- shader can anchor blade Y to the player's elevation while the
+    -- existing legacy bend code (which only reads .xz) is unaffected.
+    corona.set_grass_bend_origin(player.x, player.y, player.z, 2.0)
     corona.set_grass_render_origin(player.x, player.y, player.z)
     -- Sphere depression centered at the player's terrain-height position.
     -- Visual-only — player stays on the original terrain Y (no fall-in).

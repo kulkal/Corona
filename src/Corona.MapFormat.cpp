@@ -259,12 +259,15 @@ bool Corona::SaveMapToFile(const std::wstring& name, std::wstring* outError)
 		case SceneRecipe::Kind::GrassOnTerrain:
 			out << "        params = { blade_count = " << recipe.BladeCount
 			    << ", blade_height = " << recipe.BladeHeight
+			    << ", blade_segments = " << recipe.BladeSegments
+			    << ", procedural = " << (recipe.bProceduralPath ? "true" : "false")
 			    << ", seed = " << recipe.Seed << " },\n";
 			break;
 		case SceneRecipe::Kind::Grass:
 			out << "        params = { blade_count = " << recipe.BladeCount
 			    << ", area_size = " << recipe.AreaSize
 			    << ", blade_height = " << recipe.BladeHeight
+			    << ", blade_segments = " << recipe.BladeSegments
 			    << ", seed = " << recipe.Seed << " },\n";
 			break;
 		case SceneRecipe::Kind::BlockCharacter:
@@ -371,6 +374,225 @@ bool Corona::SaveMapToFile(const std::wstring& name, std::wstring* outError)
 	return true;
 }
 
+bool Corona::GetEntityMeshRecipeForScript(CoronaECS::Entity entity, SceneRecipe& outRecipe) const
+{
+	if (!EntityWorld.IsAlive(entity))
+		return false;
+	const auto* mesh = EntityWorld.GetMesh(entity);
+	if (!mesh)
+		return false;
+	const SceneObjectHandle soh = static_cast<SceneObjectHandle>(mesh->RenderObjectHandle);
+	const auto soIt = ScriptObjects.find(soh);
+	if (soIt == ScriptObjects.end())
+		return false;
+	const auto sceneIt = ScriptScenes.find(soIt->second.SceneHandle);
+	if (sceneIt == ScriptScenes.end())
+		return false;
+	outRecipe = sceneIt->second.Recipe;
+	return true;
+}
+
+bool Corona::IsEntityGrassMesh(CoronaECS::Entity entity) const
+{
+	if (!EntityWorld.IsAlive(entity))
+		return false;
+	const auto* mesh = EntityWorld.GetMesh(entity);
+	if (!mesh)
+		return false;
+	const SceneObjectHandle soh = static_cast<SceneObjectHandle>(mesh->RenderObjectHandle);
+	const auto soIt = ScriptObjects.find(soh);
+	if (soIt == ScriptObjects.end())
+		return false;
+	const auto sceneIt = ScriptScenes.find(soIt->second.SceneHandle);
+	if (sceneIt == ScriptScenes.end())
+		return false;
+	const SceneRecipe::Kind kind = sceneIt->second.Recipe.RecipeKind;
+	return kind == SceneRecipe::Kind::Grass || kind == SceneRecipe::Kind::GrassOnTerrain;
+}
+
+bool Corona::SaveEntityAsAsset(CoronaECS::Entity entity, const std::string& assetName, std::wstring* outError)
+{
+	if (!EntityWorld.IsAlive(entity))
+	{
+		if (outError) *outError = L"entity is not alive";
+		return false;
+	}
+	if (assetName.empty())
+	{
+		if (outError) *outError = L"asset name is empty";
+		return false;
+	}
+
+	// Reuse the assets/scene_assets/ folder; create it on demand.
+	const std::filesystem::path assetsDir =
+		RuntimePaths::AssetDirectory() / L"scene_assets";
+	std::error_code ec;
+	std::filesystem::create_directories(assetsDir, ec);
+
+	std::string sanitized;
+	sanitized.reserve(assetName.size());
+	for (char c : assetName)
+	{
+		const bool bAllowed = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+			(c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.';
+		sanitized.push_back(bAllowed ? c : '_');
+	}
+	const std::filesystem::path path = assetsDir / (sanitized + ".asset.lua");
+
+	std::string sourceName = sanitized;
+	if (const auto* n = EntityWorld.GetName(entity))
+		sourceName = *n;
+
+	std::ostringstream out;
+	out << "-- Corona scene-asset capture\n";
+	out << "-- saved entity name : " << EscapeLuaString(sourceName) << "\n";
+	out << "return {\n";
+	out << "  name = " << EscapeLuaString(assetName) << ",\n";
+	out << "  source_name = " << EscapeLuaString(sourceName) << ",\n";
+
+	bool bWroteAnyComponent = false;
+
+	// --- Mesh component + procedural recipe ---
+	if (const auto* mesh = EntityWorld.GetMesh(entity))
+	{
+		const SceneObjectHandle soh = static_cast<SceneObjectHandle>(mesh->RenderObjectHandle);
+		const auto soIt = ScriptObjects.find(soh);
+		const ScriptObjectState* so = (soIt != ScriptObjects.end()) ? &soIt->second : nullptr;
+		const SceneRecipe* recipe = nullptr;
+		if (so)
+		{
+			const auto sceneIt = ScriptScenes.find(so->SceneHandle);
+			if (sceneIt != ScriptScenes.end())
+				recipe = &sceneIt->second.Recipe;
+		}
+		if (recipe && so)
+		{
+			const char* primitiveStr = "asset";
+			switch (recipe->RecipeKind)
+			{
+			case SceneRecipe::Kind::Terrain:        primitiveStr = "TERRAIN"; break;
+			case SceneRecipe::Kind::GrassOnTerrain: primitiveStr = "GRASS_ON_TERRAIN"; break;
+			case SceneRecipe::Kind::Grass:          primitiveStr = "GRASS"; break;
+			case SceneRecipe::Kind::BlockCharacter: primitiveStr = "block_character"; break;
+			case SceneRecipe::Kind::Asset:          primitiveStr = "asset"; break;
+			}
+			out << "  mesh = {\n";
+			out << "    primitive = " << EscapeLuaString(primitiveStr) << ",\n";
+			switch (recipe->RecipeKind)
+			{
+			case SceneRecipe::Kind::Terrain:
+				out << "    params = { seed = " << recipe->Seed << " },\n";
+				break;
+			case SceneRecipe::Kind::GrassOnTerrain:
+				out << "    params = { blade_count = " << recipe->BladeCount
+				    << ", blade_height = " << recipe->BladeHeight
+				    << ", blade_segments = " << recipe->BladeSegments
+				    << ", seed = " << recipe->Seed << " },\n";
+				break;
+			case SceneRecipe::Kind::Grass:
+				out << "    params = { blade_count = " << recipe->BladeCount
+				    << ", area_size = " << recipe->AreaSize
+				    << ", blade_height = " << recipe->BladeHeight
+				    << ", blade_segments = " << recipe->BladeSegments
+				    << ", seed = " << recipe->Seed << " },\n";
+				break;
+			case SceneRecipe::Kind::BlockCharacter:
+				out << "    params = { seed = " << recipe->Seed << " },\n";
+				break;
+			case SceneRecipe::Kind::Asset:
+				out << "    path = " << EscapeLuaString(PlatformWideToUtf8(recipe->AssetPath)) << ",\n";
+				break;
+			}
+			out << "    transform = {\n";
+			out << "      position = " << Vec3Lua(so->Position) << ",\n";
+			out << "      rotation = " << Vec3Lua(so->RotationDegrees) << ",\n";
+			if (so->bUseScale)
+				out << "      scale = " << Vec3Lua(so->Scale) << ",\n";
+			else
+				out << "      target_extent = " << so->TargetExtent << ",\n";
+			out << "    },\n";
+			out << "    material = {\n";
+			out << "      roughness = " << mesh->Roughness << ",\n";
+			out << "      metallic  = " << mesh->Metallic << ",\n";
+			out << "      override  = " << (mesh->bOverrideRoughnessMetallic ? "true" : "false") << ",\n";
+			out << "    },\n";
+			out << "    ray_tracing = " << (mesh->bRayTracing ? "true" : "false") << ",\n";
+			out << "  },\n";
+
+			// Grass-only environment block: wind / bend / render-distance
+			// snapshot. These are global frame state in the engine but the
+			// asset captures them so re-loading the grass restores its
+			// "intended look". Loader applies them only when present.
+			const SceneRecipe::Kind k = recipe->RecipeKind;
+			if (k == SceneRecipe::Kind::Grass || k == SceneRecipe::Kind::GrassOnTerrain)
+			{
+				out << "  grass_env = {\n";
+				out << "    render_distance = " << GrassRenderDistance << ",\n";
+				out << "    bend_radius     = " << RenderFrameGrassBendParams.x << ",\n";
+				out << "    bend_max_height = " << RenderFrameGrassBendParams.y << ",\n";
+				out << "    wind_dir        = { "
+				    << RenderFrameWindParams.x << ", "
+				    << RenderFrameWindParams.z << " },\n";
+				out << "    wind_strength   = " << RenderFrameWindParams.w << ",\n";
+				out << "    wind_temp_freq  = " << RenderFrameWindTuning.x << ",\n";
+				out << "    wind_space_freq = " << RenderFrameWindTuning.y << ",\n";
+				out << "  },\n";
+			}
+			bWroteAnyComponent = true;
+		}
+	}
+
+	// --- Light component ---
+	if (const auto* light = EntityWorld.GetLight(entity))
+	{
+		out << "  light = {\n";
+		out << "    type      = " << EscapeLuaString(light->Type == CoronaECS::LightType::Directional ? "directional" : "point") << ",\n";
+		out << "    direction = " << Vec3Lua(light->Direction) << ",\n";
+		out << "    color     = " << Vec3Lua(light->Color) << ",\n";
+		out << "    intensity = " << light->Intensity << ",\n";
+		out << "    radius    = " << light->Radius << ",\n";
+		out << "    enabled   = " << (light->bEnabled ? "true" : "false") << ",\n";
+		out << "  },\n";
+		bWroteAnyComponent = true;
+	}
+
+	// --- Camera component (transform pulled from the entity's TransformComponent) ---
+	if (const auto* cam = EntityWorld.GetCamera(entity))
+	{
+		const auto* trans = EntityWorld.GetTransform(entity);
+		out << "  camera = {\n";
+		out << "    position       = " << Vec3Lua(trans ? trans->GetPosition() : glm::vec3(0.0f)) << ",\n";
+		out << "    look_direction = " << Vec3Lua(cam->LookDirection) << ",\n";
+		out << "    up             = " << Vec3Lua(cam->UpDirection) << ",\n";
+		out << "    fov            = " << cam->Fov << ",\n";
+		out << "    near_plane     = " << cam->NearPlane << ",\n";
+		out << "    far_plane      = " << cam->FarPlane << ",\n";
+		out << "  },\n";
+		bWroteAnyComponent = true;
+	}
+
+	out << "}\n";
+
+	if (!bWroteAnyComponent)
+	{
+		if (outError) *outError = L"entity has no serializable component (mesh/light/camera)";
+		return false;
+	}
+
+	std::ofstream f(path, std::ios::binary);
+	if (!f)
+	{
+		if (outError) *outError = L"cannot open for write: " + path.wstring();
+		return false;
+	}
+	const std::string body = out.str();
+	f.write(body.data(), static_cast<std::streamsize>(body.size()));
+	AppendCpuRuntimeTrace(
+		L"[Asset] saved " + path.wstring() +
+		L" (" + std::to_wstring(body.size()) + L" bytes)");
+	return true;
+}
+
 bool Corona::LoadMapFromFile(const std::wstring& name, std::wstring* outError)
 {
 	const std::filesystem::path path = ResolveMapPath(name);
@@ -458,27 +680,43 @@ bool Corona::LoadMapFromFile(const std::wstring& name, std::wstring* outError)
 				}
 				else if (primitive == "GRASS_ON_TERRAIN")
 				{
-					double bladeCount = 100000.0, bladeHeight = 30.0, seed = 1.0;
+					double bladeCount = 100000.0, bladeHeight = 30.0, seed = 1.0, bladeSegments = 4.0;
+					bool bProcedural = false;
 					LuaGetNumber(L, paramsIdx, "blade_count", bladeCount);
 					LuaGetNumber(L, paramsIdx, "blade_height", bladeHeight);
+					LuaGetNumber(L, paramsIdx, "blade_segments", bladeSegments);
 					LuaGetNumber(L, paramsIdx, "seed", seed);
-					sceneHandle = CreateProceduralGrassOnTerrainSceneForScript(
-						static_cast<UINT32>(bladeCount),
-						static_cast<float>(bladeHeight),
-						static_cast<UINT32>(seed));
+					{
+						lua_getfield(L, paramsIdx, "procedural");
+						if (lua_isboolean(L, -1)) bProcedural = lua_toboolean(L, -1) != 0;
+						lua_pop(L, 1);
+					}
+					sceneHandle = bProcedural
+						? CreateProceduralGrassOnTerrainSceneInstancedForScript(
+							static_cast<UINT32>(bladeCount),
+							static_cast<float>(bladeHeight),
+							static_cast<UINT32>(seed),
+							static_cast<UINT32>(bladeSegments))
+						: CreateProceduralGrassOnTerrainSceneForScript(
+							static_cast<UINT32>(bladeCount),
+							static_cast<float>(bladeHeight),
+							static_cast<UINT32>(seed),
+							static_cast<UINT32>(bladeSegments));
 				}
 				else if (primitive == "GRASS")
 				{
-					double bladeCount = 100000.0, area = 1000.0, bladeHeight = 30.0, seed = 1.0;
+					double bladeCount = 100000.0, area = 1000.0, bladeHeight = 30.0, seed = 1.0, bladeSegments = 4.0;
 					LuaGetNumber(L, paramsIdx, "blade_count", bladeCount);
 					LuaGetNumber(L, paramsIdx, "area_size", area);
 					LuaGetNumber(L, paramsIdx, "blade_height", bladeHeight);
+					LuaGetNumber(L, paramsIdx, "blade_segments", bladeSegments);
 					LuaGetNumber(L, paramsIdx, "seed", seed);
 					sceneHandle = CreateProceduralGrassSceneForScript(
 						static_cast<UINT32>(bladeCount),
 						static_cast<float>(area),
 						static_cast<float>(bladeHeight),
-						static_cast<UINT32>(seed));
+						static_cast<UINT32>(seed),
+						static_cast<UINT32>(bladeSegments));
 				}
 				else if (primitive == "block_character")
 				{

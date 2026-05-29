@@ -177,6 +177,10 @@ namespace CoronaECS
 		bool HasScript(Entity entity) const;
 
 		bool SetActiveCamera(Entity entity);
+		// Drop the active-camera binding without destroying the camera
+		// entity itself. Used by free-fly toggles so the SimpleCamera takes
+		// over while the orbit camera stays available for re-activation.
+		void ClearActiveCamera();
 		Entity GetActiveCameraEntity() const;
 		CameraComponent* GetActiveCamera();
 		const CameraComponent* GetActiveCamera() const;

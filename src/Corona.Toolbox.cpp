@@ -58,6 +58,7 @@ void CoronaToolbox::RenderImGui()
 		if (ImGui::Button("Point Light",       ImVec2(-1, 0))) SpawnPointLight();
 		if (ImGui::Button("Box",               ImVec2(-1, 0))) SpawnBox();
 		if (ImGui::Button("Sphere",            ImVec2(-1, 0))) SpawnSphere();
+		if (ImGui::Button("Grass (procedural)",ImVec2(-1, 0))) SpawnGrass();
 	}
 	ImGui::End();
 }
@@ -114,21 +115,45 @@ void CoronaToolbox::SpawnBox()
 
 void CoronaToolbox::SpawnSphere()
 {
-	// No procedural sphere primitive yet — fall back to the ShaderBall demo
-	// asset as a stand-in. Closes the toolbox UX gap until a real sphere
-	// generator (e.g. icosphere subdivision) lands.
 	const std::string name = NextName("Sphere", NextSpawnId);
-	const std::wstring path = L"assets\\shaderBall\\shaderBall.fbx";
-	const Corona::ScriptSceneHandle sh = Host->LoadSceneForScript(path);
+	const Corona::ScriptSceneHandle sh = Host->CreateProceduralSphereSceneForScript(
+		/*radius*/ 0.5f, /*rings*/ 32, /*segments*/ 48);
 	if (sh == Corona::InvalidScriptSceneHandle)
 		return;
 	const CoronaECS::Entity e = Host->CreateEntity(name);
 	const glm::vec3 pos = SpawnPosInFront(Host, 3.5f, /*snap*/ true);
 	Host->AddMeshComponentForScript(
 		e, sh, pos, glm::vec3(0.0f),
-		/*targetExtent*/ 1.5f, glm::vec3(1.0f), /*useScale*/ false,
+		/*targetExtent*/ 1.0f, glm::vec3(1.0f), /*useScale*/ false,
 		/*roughness*/ 0.4f, /*metallic*/ 0.0f, /*overrideRM*/ true,
 		/*visible*/ true, /*rayTracing*/ true, /*physicsQuery*/ true);
+}
+
+void CoronaToolbox::SpawnGrass()
+{
+	const std::string name = NextName("Grass", NextSpawnId);
+	// Each spawn picks a distinct seed so placement hashes diverge — when
+	// the user drops several grass entities they form a varied carpet
+	// instead of stacking identical blades.
+	const uint32_t seed = static_cast<uint32_t>(20260529u + NextSpawnId * 7919u);
+	const Corona::ScriptSceneHandle sh = Host->CreateProceduralGrassOnTerrainSceneInstancedForScript(
+		/*numBlades*/   200'000u,
+		/*bladeHeight*/ 1.2f,
+		/*seed*/        seed,
+		/*bladeSegments*/ 8u);
+	if (sh == Corona::InvalidScriptSceneHandle)
+		return;
+	const CoronaECS::Entity e = Host->CreateEntity(name);
+	// Procedural grass mesh is centered at origin and the shader anchors
+	// blade XZ to the player's grass-bend origin, so the entity transform
+	// is identity. Toolbox positions the entity at the camera target so
+	// the inspector "Focus" button finds it easily.
+	const glm::vec3 pos = SpawnPosInFront(Host, 3.0f, /*snap*/ true);
+	Host->AddMeshComponentForScript(
+		e, sh, pos, glm::vec3(0.0f),
+		/*targetExtent*/ 1.0f, glm::vec3(1.0f, 1.0f, 1.0f), /*useScale*/ true,
+		/*roughness*/ 0.85f, /*metallic*/ 0.0f, /*overrideRM*/ true,
+		/*visible*/ true, /*rayTracing*/ false, /*physicsQuery*/ false);
 }
 
 void CoronaToolbox::DrawBottomToggleButton()
