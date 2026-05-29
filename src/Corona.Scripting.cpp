@@ -4526,21 +4526,70 @@ Corona::ScriptSceneHandle Corona::CreateProceduralSphereSceneForScript(float rad
 	const float r = std::clamp(radius, 0.05f, 100.0f);
 	const uint32_t R = std::clamp<uint32_t>(rings,    4u, 128u);
 	const uint32_t S = std::clamp<uint32_t>(segments, 6u, 256u);
-	const std::wstring key =
-		L"procedural://sphere/" +
-		std::to_wstring(static_cast<int>(std::round(r * 100.0f))) + L"/" +
-		std::to_wstring(R) + L"x" + std::to_wstring(S);
-	const auto it = ScriptSceneByPath.find(key);
-	if (it != ScriptSceneByPath.end()) return it->second;
+	// Bake to assets/generated/ on first creation so map save can store a
+	// real path (primitive="asset") and the loader can reconstruct the
+	// scene without any procedural-recipe special case. Subsequent calls
+	// with the same params hit the file cache via LoadSceneForScript.
+	wchar_t generatedRel[160];
+	std::swprintf(generatedRel, std::size(generatedRel),
+		L"assets/generated/sphere_r%d_R%u_S%u.obj",
+		static_cast<int>(std::round(r * 100.0f)), R, S);
+	const std::wstring keyRel = generatedRel;
+	const auto cachedIt = ScriptSceneByPath.find(keyRel);
+	if (cachedIt != ScriptSceneByPath.end()) return cachedIt->second;
 
-	auto scene = CreateProceduralSphereScene(r, R, S);
-	if (!scene) return InvalidScriptSceneHandle;
-	ScriptSceneHandle handle = NextScriptSceneHandle++;
-	if (handle == InvalidScriptSceneHandle) handle = NextScriptSceneHandle++;
-	ScriptScenes[handle] = { scene, key, EPhysicsCollisionShape::TriangleMesh, glm::vec3(r) };
-	ScriptSceneByPath[key] = handle;
-	AppendCpuRuntimeTrace(L"[Luau][MeshComponent] procedural_sphere handle=" + std::to_wstring(handle));
-	return handle;
+	const std::filesystem::path absPath = GetAssetFullPath(generatedRel);
+	std::error_code existsEc;
+	if (!std::filesystem::exists(absPath, existsEc))
+	{
+		std::error_code dirEc;
+		std::filesystem::create_directories(absPath.parent_path(), dirEc);
+		// Re-run the procedural generator just to grab CPU-side vertices /
+		// indices and write them to OBJ. The actual scene used at runtime
+		// comes from LoadSceneForScript below so the disk format wins.
+		auto scratchScene = CreateProceduralSphereScene(r, R, S);
+		if (scratchScene && !scratchScene->meshes.empty())
+		{
+			const Mesh& m = *scratchScene->meshes.front();
+			std::ofstream out(absPath);
+			out << "# Corona procedural sphere r=" << r << " R=" << R << " S=" << S << "\n";
+			out << "o sphere\n";
+			for (const glm::vec3& p : m.CpuPositions)
+				out << "v " << p.x << " " << p.y << " " << p.z << "\n";
+			// Reconstruct UV/normal from sphere params (cheap, deterministic).
+			for (uint32_t ri = 0; ri <= R; ++ri)
+			{
+				const float v = static_cast<float>(ri) / static_cast<float>(R);
+				const float lat = v * 3.14159265358979323846f;
+				const float sLat = std::sin(lat), cLat = std::cos(lat);
+				for (uint32_t si = 0; si <= S; ++si)
+				{
+					const float u = static_cast<float>(si) / static_cast<float>(S);
+					const float lon = u * 6.28318530717958647692f;
+					const float sLon = std::sin(lon), cLon = std::cos(lon);
+					out << "vn " << (sLat * cLon) << " " << cLat << " " << (sLat * sLon) << "\n";
+					out << "vt " << u << " " << v << "\n";
+				}
+			}
+			for (size_t i = 0; i + 2 < m.CpuIndices.size(); i += 3)
+			{
+				const uint32_t a = m.CpuIndices[i] + 1;
+				const uint32_t b = m.CpuIndices[i + 1] + 1;
+				const uint32_t c = m.CpuIndices[i + 2] + 1;
+				out << "f " << a << "/" << a << "/" << a
+					<< " " << b << "/" << b << "/" << b
+					<< " " << c << "/" << c << "/" << c << "\n";
+			}
+			out.close();
+			AppendCpuRuntimeTrace(L"[Luau][MeshComponent] baked procedural sphere to " + absPath.wstring());
+		}
+	}
+
+	// Route through the standard asset loader so the resulting scene's
+	// ScriptSceneEntry has Path / Recipe.AssetPath set correctly and the
+	// asset cache works uniformly with other entities. Map save will then
+	// emit `primitive = "asset", path = "..."` and load reads it back.
+	return LoadSceneForScript(generatedRel);
 }
 
 Corona::ScriptSceneHandle Corona::CreateProceduralGrassOnTerrainSceneInstancedForScript(
@@ -7187,15 +7236,11 @@ bool Corona::QueueScriptUiCheckboxForScript(const std::string& id, const std::st
 
 void Corona::RebuildFrameTimingOverlayTextIfStale()
 {
-	const double nowSec = m_timer.GetTotalSeconds();
-	// 250 ms refresh = 4 Hz. The overlay numbers are running averages
-	// anyway, sub-frame freshness brings no signal.
-	if (CachedFrameTimingOverlayTimestampSec >= 0.0 &&
-		(nowSec - CachedFrameTimingOverlayTimestampSec) < 0.25)
-	{
-		return;
-	}
-	CachedFrameTimingOverlayTimestampSec = nowSec;
+	// Per-user request, rebuild every frame so the screen overlay shows
+	// real-time numbers (no 250 ms staleness). The build is cheap — pure
+	// C++ string formatting, no cross-boundary lua calls; previously the
+	// heavy cost was the Lua table iteration which is now eliminated.
+	CachedFrameTimingOverlayTimestampSec = m_timer.GetTotalSeconds();
 
 	// All number formatting happens in C++ now — building this in Lua used
 	// to iterate render_command_phases / scene_flush_phases / cpu_update_
@@ -7307,6 +7352,45 @@ void Corona::RebuildFrameTimingOverlayTextIfStale()
 					sfName ? sfName : "phase", sfLast, sfAvg);
 				out += line;
 			}
+		}
+		// Per-pass CPU recording timings — list each pass under its actual
+		// parent record-phase. ToneMap's BeginGpuPassTiming lives inside
+		// record.Backbuffer/ToneMap and ImGui's inside record.Capture/UI;
+		// everything else falls under record.Render Passes. Without this
+		// split the sum of pass.* avg over-counts the parent record.
+		auto emitPass = [&](EGpuPass pass)
+		{
+			const UINT k = static_cast<UINT>(pass);
+			const float passCpuLast = CpuPassLastTimeMs[k];
+			const float passCpuAvg = CpuPassAverageTimeMs[k];
+			if (passCpuLast <= 0.001f && passCpuAvg <= 0.001f)
+				return;
+			const char* passName = GetGpuPassName(pass);
+			if (!passName)
+				return;
+			fmt(line, sizeof(line), "      pass.%s: %.3f ms (avg %.3f)\n",
+				passName, passCpuLast, passCpuAvg);
+			out += line;
+		};
+		if (phaseName && std::strcmp(phaseName, "Render Passes") == 0)
+		{
+			for (UINT k = 0; k < GpuPassCount; ++k)
+			{
+				const EGpuPass pass = static_cast<EGpuPass>(k);
+				// Skip the Frame Total marker and the passes that belong
+				// to other record-phases (handled below).
+				if (pass == EGpuPass::Frame || pass == EGpuPass::ToneMap || pass == EGpuPass::ImGui)
+					continue;
+				emitPass(pass);
+			}
+		}
+		else if (phaseName && std::strcmp(phaseName, "Backbuffer / ToneMap") == 0)
+		{
+			emitPass(EGpuPass::ToneMap);
+		}
+		else if (phaseName && std::strcmp(phaseName, "Capture / UI") == 0)
+		{
+			emitPass(EGpuPass::ImGui);
 		}
 	}
 

@@ -260,12 +260,17 @@ void rayGen()
             }
         }
 
+        // Track effective sample count M for the unbiased estimator:
+        // ratio = W_sum / (p_chosen * M). Phase 1 has M=1 only; temporal
+        // reuse below bumps M by 1 when a valid prev sample combines in.
+        // Storing real per-pixel M across frames needs a 4th data channel
+        // we don't currently have (sun is in .r, idx/W/vis use .gba) —
+        // that's the Phase 2b refactor. For now M maxes at 2 per frame.
+        uint M_eff = (chosenIdx == 0xFFFFFFFFu) ? 0u : 1u;
+
         // ReSTIR Phase 2 — temporal reuse. Sample the previous frame's
         // reservoir at the motion-reprojected pixel and RIS-combine into
-        // the current pixel's reservoir. The prev sample contributes a
-        // weight equal to the chosen light's current-pixel target pdf
-        // (re-evaluated below), so unbiased after multiplying by the
-        // 1 / targetPdf ratio in the LightingPS consumer.
+        // the current pixel's reservoir.
         const float2 velocity = VelocityTex.SampleLevel(sampleWrap, uv, 0).xy;
         const float2 prevUV = uv - velocity;
         if (prevUV.x >= 0.0f && prevUV.x <= 1.0f && prevUV.y >= 0.0f && prevUV.y <= 1.0f)
@@ -273,8 +278,6 @@ void rayGen()
             const float4 prev = ShadowReservoirPrev.SampleLevel(sampleWrap, prevUV, 0);
             const uint prevIdx = (uint)(prev.g + 0.5f);
             const float prevRatio = prev.b;
-            // Only consider valid prev samples (a non-zero ratio means
-            // the prev frame had a candidate at all).
             if (prevIdx < (uint)MAX_SHADOWED_PT_LIGHTS && prevIdx < ShadowedPointLightCount && prevRatio > 0.0f)
             {
                 const float3 candPos = ShadowedPointLights[prevIdx].xyz;
@@ -286,10 +289,10 @@ void rayGen()
                 const float rangeAtten = saturate(1.0f - dist / candRadius);
                 const float NdotL = saturate(dot(worldNormal, toCand) / max(dist, 1.0e-3f));
                 const float targetPdfPrev = candLuma * rangeAtten * rangeAtten * NdotL / max(distSq * 0.0001f, 1.0f);
-                // Reservoir update with weight = prevRatio * targetPdfPrev
-                // (the prev frame's stored ratio compensates for the prev
-                // frame's pdf, so multiplying by the current targetPdf
-                // weights the candidate correctly for *this* pixel).
+                // RIS combine: prev sample's W-contribution at this pixel
+                // is prevRatio * targetPdfPrev (prevRatio was W_sum_prev
+                // / p_prev(prev.chosen), so multiplying by p_curr at this
+                // pixel weights it properly here).
                 const float prevWeight = prevRatio * targetPdfPrev;
                 if (prevWeight > 0.0f)
                 {
@@ -304,21 +307,21 @@ void rayGen()
                         chosenIdx = prevIdx;
                         chosenWeight = targetPdfPrev;
                     }
+                    M_eff = 2u;
                 }
             }
         }
 
-        if (chosenIdx != 0xFFFFFFFFu)
+        if (chosenIdx != 0xFFFFFFFFu && M_eff > 0u)
         {
             float pointVis = 1.0f;
             COMPUTE_POINT_LIGHT_VIS(pointVis,
                 ShadowedPointLights[chosenIdx].xyz,
                 max(ShadowedPointLights[chosenIdx].w, 0.01f));
-            // Unbiased estimator weight: weightSum / targetPdf. The
-            // LightingPS consumer multiplies the chosen light's evaluated
-            // BRDF by this factor so the result matches the all-lights
-            // average in expectation.
-            float ratio = weightSum / max(chosenWeight, 1.0e-6f);
+            // Unbiased estimator weight: W = W_sum / (p_chosen * M).
+            // Previous version forgot the 1/M factor, which doubled
+            // brightness when temporal reuse engaged (M=2 vs M=1).
+            float ratio = weightSum / (max(chosenWeight, 1.0e-6f) * (float)M_eff);
             outShadow.g = (float)chosenIdx;
             outShadow.b = ratio;
             outShadow.a = pointVis;
