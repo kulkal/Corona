@@ -11,6 +11,9 @@
 
 #include "stdafx.h"
 #include "Corona.h"
+// DX12 raw command list access for the ReSTIR Phase 2 CopyResource path.
+// Vulkan-side support pending; the copy is gated on dx12_rhi being valid.
+#include "DX12Backend.h"
 
 #include <algorithm>
 #include <cmath>
@@ -34,6 +37,11 @@ void Corona::InitRaytracingShadowPass()
 		TEMP_PSO_RT_SHADOW->BindSRV("global", "WorldNormalTex", 2);
 		TEMP_PSO_RT_SHADOW->BindSRV("global", "GeoNormalTex", 7);
 		TEMP_PSO_RT_SHADOW->BindSRV("global", "RayNoiseBlueNoiseSource", 8);
+		// ReSTIR Phase 2 temporal reuse — bound even in Option A mode so
+		// the root signature stays uniform across mode toggles; the
+		// shader only reads from these when ShadowMode == 1.
+		TEMP_PSO_RT_SHADOW->BindSRV("global", "ShadowReservoirPrev", 9);
+		TEMP_PSO_RT_SHADOW->BindSRV("global", "VelocityTex", 10);
 
 		TEMP_PSO_RT_SHADOW->BindCBV("global", "ViewParameter", 0, sizeof(RTShadowViewParamCB), 1);
 		TEMP_PSO_RT_SHADOW->BindSampler("global", "sampleWrap", 0);
@@ -168,11 +176,34 @@ void Corona::RaytraceShadowPass()
 		.SetTextureSRV("global", "WorldNormalTex", NormalBuffers[ColorBufferWriteIndex].get())
 		.SetTextureSRV("global", "GeoNormalTex", GeomNormalBuffers[ColorBufferWriteIndex].get())
 		.SetTextureSRV("global", "RayNoiseBlueNoiseSource", BlueNoiseTex.get())
+		.SetTextureSRV("global", "ShadowReservoirPrev",
+			ShadowReservoirPrevBuffer ? ShadowReservoirPrevBuffer.get() : ShadowBuffer.get())
+		.SetTextureSRV("global", "VelocityTex", VelocityBuffer.get())
 		.SetCBVValue("global", "ViewParameter", &RTShadowViewParam)
 		.SetSampler("global", "sampleWrap", samplerWrap.get());
 	pass.BindSceneHitPrograms();
 	pass.Dispatch(GetRenderWidth(), GetRenderHeight());
 
 	renderBackend->TransitionTexture(ShadowBuffer.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
+
+	// ReSTIR Phase 2 temporal feedback: cache this frame's reservoirs for
+	// next-frame reproject via raw DX12 CopyResource. Only meaningful in
+	// ReSTIR mode; in Option A the copy is skipped. DX12-only for now —
+	// Vulkan path will follow with a backend-abstracted texture copy.
+	if (bEnableReSTIRDirectShadow && ShadowReservoirPrevBuffer && dx12_rhi)
+	{
+		renderBackend->TransitionTexture(ShadowReservoirPrevBuffer.get(),
+			EResourceState::ShaderRead, EResourceState::CopyDest);
+		renderBackend->TransitionTexture(ShadowBuffer.get(),
+			EResourceState::ShaderRead, EResourceState::CopySource);
+		dx12_rhi->GetGraphicsCommandList()->CopyResource(
+			ShadowReservoirPrevBuffer->resource.Get(),
+			ShadowBuffer->resource.Get());
+		renderBackend->TransitionTexture(ShadowReservoirPrevBuffer.get(),
+			EResourceState::CopyDest, EResourceState::ShaderRead);
+		renderBackend->TransitionTexture(ShadowBuffer.get(),
+			EResourceState::CopySource, EResourceState::ShaderRead);
+	}
+
 	bShadowOutputValidThisFrame = true;
 }

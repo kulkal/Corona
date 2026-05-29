@@ -11,6 +11,12 @@ Texture2D AlbedoTex : register(t5);
 ByteAddressBuffer InstanceProperty : register(t6);
 Texture2D GeoNormalTex : register(t7);
 Texture3D RayNoiseBlueNoiseSource : register(t8);
+// ReSTIR Phase 2 — previous-frame reservoir cache. .gba carries
+// (lightIdx, weight, visibility); .r is the previous frame's sun
+// visibility (unused by ReSTIR here). Sample at the motion-reprojected
+// pixel to combine with the current frame's RIS choice.
+Texture2D ShadowReservoirPrev : register(t9);
+Texture2D VelocityTex : register(t10);
 
 
 cbuffer ViewParameter : register(b0)
@@ -251,6 +257,54 @@ void rayGen()
             {
                 chosenIdx = candIdx;
                 chosenWeight = targetPdf;
+            }
+        }
+
+        // ReSTIR Phase 2 — temporal reuse. Sample the previous frame's
+        // reservoir at the motion-reprojected pixel and RIS-combine into
+        // the current pixel's reservoir. The prev sample contributes a
+        // weight equal to the chosen light's current-pixel target pdf
+        // (re-evaluated below), so unbiased after multiplying by the
+        // 1 / targetPdf ratio in the LightingPS consumer.
+        const float2 velocity = VelocityTex.SampleLevel(sampleWrap, uv, 0).xy;
+        const float2 prevUV = uv - velocity;
+        if (prevUV.x >= 0.0f && prevUV.x <= 1.0f && prevUV.y >= 0.0f && prevUV.y <= 1.0f)
+        {
+            const float4 prev = ShadowReservoirPrev.SampleLevel(sampleWrap, prevUV, 0);
+            const uint prevIdx = (uint)(prev.g + 0.5f);
+            const float prevRatio = prev.b;
+            // Only consider valid prev samples (a non-zero ratio means
+            // the prev frame had a candidate at all).
+            if (prevIdx < (uint)MAX_SHADOWED_PT_LIGHTS && prevIdx < ShadowedPointLightCount && prevRatio > 0.0f)
+            {
+                const float3 candPos = ShadowedPointLights[prevIdx].xyz;
+                const float candRadius = max(ShadowedPointLights[prevIdx].w, 0.01f);
+                const float candLuma = ShadowedPointLightWeights[prevIdx].x;
+                const float3 toCand = candPos - worldPos;
+                const float distSq = max(dot(toCand, toCand), 1.0e-4f);
+                const float dist = sqrt(distSq);
+                const float rangeAtten = saturate(1.0f - dist / candRadius);
+                const float NdotL = saturate(dot(worldNormal, toCand) / max(dist, 1.0e-3f));
+                const float targetPdfPrev = candLuma * rangeAtten * rangeAtten * NdotL / max(distSq * 0.0001f, 1.0f);
+                // Reservoir update with weight = prevRatio * targetPdfPrev
+                // (the prev frame's stored ratio compensates for the prev
+                // frame's pdf, so multiplying by the current targetPdf
+                // weights the candidate correctly for *this* pixel).
+                const float prevWeight = prevRatio * targetPdfPrev;
+                if (prevWeight > 0.0f)
+                {
+                    weightSum += prevWeight;
+                    uint seed2 = (pixelPos.x * 31337u + pixelPos.y * 6151u + FrameCounter * 12347u + 0xabcd1234u);
+                    seed2 ^= seed2 >> 13u;
+                    seed2 *= 0x5bd1e995u;
+                    seed2 ^= seed2 >> 15u;
+                    const float u2 = (seed2 & 0x00FFFFFFu) / 16777216.0f;
+                    if (u2 * weightSum <= prevWeight)
+                    {
+                        chosenIdx = prevIdx;
+                        chosenWeight = targetPdfPrev;
+                    }
+                }
             }
         }
 

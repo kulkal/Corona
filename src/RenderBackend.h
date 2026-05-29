@@ -98,6 +98,7 @@ enum class EResourceState
 	Present,
 	DepthWrite,
 	CopyDest,
+	CopySource,
 	VertexBuffer,
 };
 

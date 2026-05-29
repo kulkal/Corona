@@ -329,6 +329,8 @@ namespace
 			return D3D12_RESOURCE_STATE_DEPTH_WRITE;
 		case EResourceState::CopyDest:
 			return D3D12_RESOURCE_STATE_COPY_DEST;
+		case EResourceState::CopySource:
+			return D3D12_RESOURCE_STATE_COPY_SOURCE;
 		case EResourceState::VertexBuffer:
 			return D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
 		case EResourceState::ShaderRead:

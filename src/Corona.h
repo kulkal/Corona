@@ -228,6 +228,11 @@ private:
 	shared_ptr<Texture> PathTracingSpecularHitDistanceBuffer;
 	shared_ptr<Texture> PathTracingSpecularMotionVectorBuffer;
 	shared_ptr<Texture> ShadowBuffer;
+	// ReSTIR DI Phase 2 — previous-frame reservoir cache. Copied from
+	// ShadowBuffer at the end of RaytraceShadowPass so the next frame can
+	// reproject and combine. RGBA32Float layout matches ShadowBuffer
+	// (.r = sun visibility, .gba = reservoir lightIdx / weight / vis).
+	shared_ptr<Texture> ShadowReservoirPrevBuffer;
 	shared_ptr<Texture> AmbientOcclusionBuffer;
 	shared_ptr<Texture> SkyLightingBuffer;
 	glm::mat4x4 MobileShadowViewProjMat = glm::mat4x4(1.0f);

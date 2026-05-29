@@ -2361,6 +2361,13 @@ void Corona::RecreateRenderResolutionResources()
 
 	ShadowBuffer = createTexture2D(ETextureFormat::RGBA32Float, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
 	NAME_D3D12_OBJECT(ShadowBuffer->resource);
+	// ReSTIR DI Phase 2 — previous-frame reservoir cache. CopyDestination
+	// for the per-frame CopyResource from ShadowBuffer, ShaderRead for the
+	// RT shadow shader sampling. Initialized to zero so the first frame
+	// sees an empty history (no temporal contribution).
+	ShadowReservoirPrevBuffer = createTexture2D(ETextureFormat::RGBA32Float,
+		TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
+	NAME_D3D12_OBJECT(ShadowReservoirPrevBuffer->resource);
 
 	AmbientOcclusionBuffer = createTexture2D(ETextureFormat::RGBA16Float, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1, glm::vec4(1.0f));
 	NAME_D3D12_OBJECT(AmbientOcclusionBuffer->resource);
@@ -9567,6 +9574,10 @@ void Corona::LoadAssets()
 		ShadowBuffer = createTexture2D(ETextureFormat::RGBA32Float, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
 
 		NAME_D3D12_OBJECT(ShadowBuffer->resource);
+
+		ShadowReservoirPrevBuffer = createTexture2D(ETextureFormat::RGBA32Float,
+			TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
+		NAME_D3D12_OBJECT(ShadowReservoirPrevBuffer->resource);
 
 		AmbientOcclusionBuffer = createTexture2D(ETextureFormat::RGBA16Float, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1, glm::vec4(1.0f));
 

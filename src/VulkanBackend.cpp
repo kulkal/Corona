@@ -797,6 +797,7 @@ namespace
 		case EResourceState::RenderTarget: return VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 		case EResourceState::DepthWrite: return VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 		case EResourceState::CopyDest: return VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+		case EResourceState::CopySource: return VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
 		case EResourceState::UnorderedAccess: return VK_IMAGE_LAYOUT_GENERAL;
 		case EResourceState::Present: return VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
 		default: return VK_IMAGE_LAYOUT_GENERAL;
@@ -813,6 +814,8 @@ namespace
 			return VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
 		case EResourceState::CopyDest:
 			return VK_ACCESS_TRANSFER_WRITE_BIT;
+		case EResourceState::CopySource:
+			return VK_ACCESS_TRANSFER_READ_BIT;
 		default:
 			return VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
 		}
