@@ -1936,6 +1936,14 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	bool bAsyncImageDumpWorkersStarted = false;
 	bool bGpuTimingResourcesInitialized = false;
 	UINT32 GpuTimingAverageFrameCount = 30;
+
+	// Cached overlay text rebuilt at 4 Hz instead of every frame so the Lua
+	// imgui callback doesn't re-iterate 60+ pass entries × 4 fields each
+	// across the C++↔Lua boundary every frame. Empty if the overlay was
+	// never requested by a script this run.
+	std::string CachedFrameTimingOverlayText;
+	double CachedFrameTimingOverlayTimestampSec = -1.0;
+	void RebuildFrameTimingOverlayTextIfStale();
 	UINT64 GpuTimestampFrequency = 0;
 	std::array<std::array<uint8_t, GpuPassCount>, 3> GpuPassActiveMaskPerFrame = {};
 	std::array<float, GpuPassCount> GpuPassLastTimeMs = {};
@@ -2668,7 +2676,7 @@ public:
 		int selectedIndex,
 		const std::vector<std::string>& items);
 	bool QueueScriptUiCheckboxForScript(const std::string& id, const std::string& label, bool value);
-	void PushLuauUiStateForScript(lua_State* L, const std::string& mode = std::string());
+	void PushLuauUiStateForScript(lua_State* L, const std::string& mode = std::string(), bool bWantPointLights = true);
 	bool SetLuauUiValueForScript(const std::string& name, lua_State* L, int valueIndex);
 	bool RunLuauUiCommandForScript(const std::string& name, lua_State* L, int argIndex);
 	void PushPersistentScriptControlForScript(lua_State* L, const std::string& name, int defaultIndex);

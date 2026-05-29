@@ -3062,7 +3062,12 @@ private:
 		}
 
 		const char* mode = lua_isstring(L, 1) ? lua_tostring(L, 1) : "";
-		host->PushLuauUiStateForScript(L, mode ? mode : "");
+		// Optional second arg: bool indicating the caller wants the
+		// per-frame point_lights table (heavy at large light counts —
+		// 100-light ReSTIR demo pushes 700 lua fields/frame). Defaults
+		// to true so existing callers keep their current behavior.
+		const bool bWantPointLights = lua_isboolean(L, 2) ? (lua_toboolean(L, 2) != 0) : true;
+		host->PushLuauUiStateForScript(L, mode ? mode : "", bWantPointLights);
 		return 1;
 	}
 
@@ -7180,7 +7185,151 @@ bool Corona::QueueScriptUiCheckboxForScript(const std::string& id, const std::st
 	return effectiveValue;
 }
 
-void Corona::PushLuauUiStateForScript(lua_State* L, const std::string& mode)
+void Corona::RebuildFrameTimingOverlayTextIfStale()
+{
+	const double nowSec = m_timer.GetTotalSeconds();
+	// 250 ms refresh = 4 Hz. The overlay numbers are running averages
+	// anyway, sub-frame freshness brings no signal.
+	if (CachedFrameTimingOverlayTimestampSec >= 0.0 &&
+		(nowSec - CachedFrameTimingOverlayTimestampSec) < 0.25)
+	{
+		return;
+	}
+	CachedFrameTimingOverlayTimestampSec = nowSec;
+
+	// All number formatting happens in C++ now — building this in Lua used
+	// to iterate render_command_phases / scene_flush_phases / cpu_update_
+	// phases / gpu_passes tables across the C++↔Lua boundary each frame,
+	// which dominated record.Capture/UI at 60 Hz.
+	auto fmt = [](char* buf, size_t sz, const char* fmtStr, auto&&... args)
+	{
+		std::snprintf(buf, sz, fmtStr, std::forward<decltype(args)>(args)...);
+	};
+	std::string& out = CachedFrameTimingOverlayText;
+	out.clear();
+	out.reserve(4096);
+	char line[256];
+
+	const float frameAverage = FramePerfAverageFrameMs;
+	const float fps = frameAverage > 0.0f ? 1000.0f / frameAverage : 0.0f;
+	fmt(line, sizeof(line), "FPS : %d fps\n", static_cast<int>(m_timer.GetFramesPerSecond()));
+	out += line;
+	fmt(line, sizeof(line), "Frame wall: %.3f ms (avg %.3f ms, %.1f fps)\n",
+		FramePerfLastFrameMs, frameAverage, fps);
+	out += line;
+
+	float totalGpuLast = 0.0f, totalGpuAvg = 0.0f;
+	bool hasFrameTotal = false;
+	for (UINT i = 0; i < GpuPassCount; ++i)
+	{
+		const char* name = GetGpuPassName(static_cast<EGpuPass>(i));
+		if (name && std::strcmp(name, "Frame Total") == 0)
+		{
+			totalGpuLast = GpuPassLastTimeMs[i];
+			totalGpuAvg = GpuPassAverageTimeMs[i];
+			hasFrameTotal = true;
+			break;
+		}
+	}
+	if (!hasFrameTotal)
+	{
+		for (UINT i = 0; i < GpuPassCount; ++i)
+		{
+			totalGpuLast += GpuPassLastTimeMs[i];
+			totalGpuAvg += GpuPassAverageTimeMs[i];
+		}
+	}
+	fmt(line, sizeof(line), "GPU frame: %.3f ms (avg %.3f ms)\n", totalGpuLast, totalGpuAvg);
+	out += line;
+	for (UINT i = 0; i < GpuPassCount; ++i)
+	{
+		const float last = GpuPassLastTimeMs[i];
+		const float avg = GpuPassAverageTimeMs[i];
+		if (last <= 0.001f && avg <= 0.001f)
+			continue;
+		const char* name = GetGpuPassName(static_cast<EGpuPass>(i));
+		if (!name || std::strcmp(name, "Frame Total") == 0)
+			continue;
+		fmt(line, sizeof(line), "  gpu.%s: %.3f ms (avg %.3f)\n", name, last, avg);
+		out += line;
+	}
+
+	const float recordLast = FramePerfLastRecordMs;
+	const float recordAvg = FramePerfAverageRecordMs;
+	fmt(line, sizeof(line), "RenderCommand Recording (CPU): total %.3f ms (avg %.3f)\n",
+		FramePerfLastFrameMs, frameAverage);
+	out += line;
+	fmt(line, sizeof(line),
+		"  stage.begin: %.3f ms (avg %.3f)  stage.record: %.3f ms (avg %.3f)\n",
+		FramePerfLastBeginFrameMs, FramePerfAverageBeginFrameMs,
+		recordLast, recordAvg);
+	out += line;
+	fmt(line, sizeof(line),
+		"  stage.execute %.3f ms (avg %.3f)  stage.end %.3f ms (avg %.3f)\n",
+		FramePerfLastExecuteMs, FramePerfAverageExecuteMs,
+		FramePerfLastEndFrameMs, FramePerfAverageEndFrameMs);
+	out += line;
+
+	float recordPhaseLastTotal = 0.0f, recordPhaseAvgTotal = 0.0f;
+	for (UINT i = 0; i < RenderCommandPhaseCount; ++i)
+	{
+		recordPhaseLastTotal += RenderCommandPhaseCompletedLastTimeMs[i];
+		recordPhaseAvgTotal += RenderCommandPhaseAverageTimeMs[i];
+	}
+	fmt(line, sizeof(line),
+		"  record breakdown: tracked %.3f ms (avg %.3f), untracked %.3f ms (avg %.3f)\n",
+		recordPhaseLastTotal, recordPhaseAvgTotal,
+		std::max(0.0f, recordLast - recordPhaseLastTotal),
+		std::max(0.0f, recordAvg - recordPhaseAvgTotal));
+	out += line;
+	for (UINT i = 0; i < RenderCommandPhaseCount; ++i)
+	{
+		const float phaseLast = RenderCommandPhaseCompletedLastTimeMs[i];
+		const float phaseAvg = RenderCommandPhaseAverageTimeMs[i];
+		if (phaseLast <= 0.001f && phaseAvg <= 0.001f)
+			continue;
+		const char* phaseName = GetRenderCommandPhaseName(static_cast<ERenderCommandPhase>(i));
+		fmt(line, sizeof(line), "    record.%s: %.3f ms (avg %.3f)\n",
+			phaseName ? phaseName : "phase", phaseLast, phaseAvg);
+		out += line;
+		// Nested scene-flush sub-phases when the parent matched.
+		if (phaseName && std::strcmp(phaseName, "Scene Flush") == 0)
+		{
+			for (UINT j = 0; j < SceneFlushPhaseCount; ++j)
+			{
+				const float sfLast = SceneFlushPhaseCompletedLastTimeMs[j];
+				const float sfAvg = SceneFlushPhaseAverageTimeMs[j];
+				if (sfLast <= 0.001f && sfAvg <= 0.001f)
+					continue;
+				const char* sfName = GetSceneFlushPhaseName(static_cast<ESceneFlushPhase>(j));
+				fmt(line, sizeof(line),
+					"      scene_flush.%s: %.3f ms (avg %.3f)\n",
+					sfName ? sfName : "phase", sfLast, sfAvg);
+				out += line;
+			}
+		}
+	}
+
+	fmt(line, sizeof(line), "  wait: %.3f ms (avg %.3f)\n",
+		FramePerfLastRenderWaitMs, FramePerfAverageRenderWaitMs);
+	out += line;
+	fmt(line, sizeof(line), "CPU update: %.3f ms (avg %.3f)\n",
+		CpuUpdateLastTimeMs, CpuUpdateAverageTimeMs);
+	out += line;
+	for (UINT i = 0; i < CpuUpdatePhaseCount; ++i)
+	{
+		const float phaseLast = CpuUpdatePhaseLastTimeMs[i];
+		const float phaseAvg = CpuUpdatePhaseAverageTimeMs[i];
+		if (phaseLast <= 0.001f && phaseAvg <= 0.001f)
+			continue;
+		const char* phaseName = GetCpuUpdatePhaseName(static_cast<ECpuUpdatePhase>(i));
+		fmt(line, sizeof(line), "  update.%s: %.3f ms (avg %.3f)\n",
+			phaseName ? phaseName : "phase", phaseLast, phaseAvg);
+		out += line;
+	}
+}
+
+void Corona::PushLuauUiStateForScript(lua_State* L, const std::string& mode, bool bWantPointLights)
 {
 	const bool bCompactMode = mode == "compact" || mode == "profile" || mode == "compact_no_profile";
 	const bool bSkipScriptProfileStats = mode == "compact_no_profile" || mode == "full_no_profile";
@@ -7218,54 +7367,22 @@ void Corona::PushLuauUiStateForScript(lua_State* L, const std::string& mode)
 	}
 
 	PushIntegerField(L, "gpu_timing_average_frames", static_cast<lua_Integer>(GpuTimingAverageFrameCount));
+	// Frame timings used to push 5+ nested tables (render/scene-flush/cpu-
+	// update phases × ~10 entries × 4 fields) per frame. The Lua-side
+	// overlay then iterated them again to build a 60-line text. Replaced
+	// by a single prebuilt string rebuilt at 4 Hz on the C++ side — Lua
+	// just calls ui.overlay_text(state.frame_timing_overlay_text, x, y).
+	RebuildFrameTimingOverlayTextIfStale();
+	lua_pushlstring(L, CachedFrameTimingOverlayText.data(),
+		CachedFrameTimingOverlayText.size());
+	lua_setfield(L, -2, "frame_timing_overlay_text");
+	// Keep the scalar frame-timing numbers around — a handful of other
+	// panels (Capture / Profiling, script profile rows) read them.
 	PushNumberField(L, "frame_time_last_ms", FramePerfLastFrameMs);
 	PushNumberField(L, "frame_time_average_ms", FramePerfAverageFrameMs);
-	PushNumberField(L, "frame_begin_frame_last_ms", FramePerfLastBeginFrameMs);
-	PushNumberField(L, "frame_begin_frame_average_ms", FramePerfAverageBeginFrameMs);
-	PushNumberField(L, "frame_record_last_ms", FramePerfLastRecordMs);
-	PushNumberField(L, "frame_record_average_ms", FramePerfAverageRecordMs);
-	PushNumberField(L, "frame_execute_last_ms", FramePerfLastExecuteMs);
-	PushNumberField(L, "frame_execute_average_ms", FramePerfAverageExecuteMs);
-	PushNumberField(L, "frame_end_frame_last_ms", FramePerfLastEndFrameMs);
-	PushNumberField(L, "frame_end_frame_average_ms", FramePerfAverageEndFrameMs);
-	PushNumberField(L, "frame_render_wait_last_ms", FramePerfLastRenderWaitMs);
-	PushNumberField(L, "frame_render_wait_average_ms", FramePerfAverageRenderWaitMs);
 	PushNumberField(L, "cpu_update_last_ms", CpuUpdateLastTimeMs);
 	PushNumberField(L, "cpu_update_average_ms", CpuUpdateAverageTimeMs);
-	lua_newtable(L);
-	for (UINT phaseIndex = 0; phaseIndex < RenderCommandPhaseCount; ++phaseIndex)
-	{
-		lua_newtable(L);
-		PushStringField(L, "name", GetRenderCommandPhaseName(static_cast<ERenderCommandPhase>(phaseIndex)));
-		PushNumberField(L, "last_ms", RenderCommandPhaseCompletedLastTimeMs[phaseIndex]);
-		PushNumberField(L, "average_ms", RenderCommandPhaseAverageTimeMs[phaseIndex]);
-		PushIntegerField(L, "sample_count", static_cast<lua_Integer>(RenderCommandPhaseHistoryMs[phaseIndex].size()));
-		lua_rawseti(L, -2, phaseIndex + 1);
-	}
-	lua_setfield(L, -2, "render_command_phases");
-	lua_newtable(L);
-	for (UINT phaseIndex = 0; phaseIndex < SceneFlushPhaseCount; ++phaseIndex)
-	{
-		lua_newtable(L);
-		PushStringField(L, "name", GetSceneFlushPhaseName(static_cast<ESceneFlushPhase>(phaseIndex)));
-		PushNumberField(L, "last_ms", SceneFlushPhaseCompletedLastTimeMs[phaseIndex]);
-		PushNumberField(L, "average_ms", SceneFlushPhaseAverageTimeMs[phaseIndex]);
-		PushIntegerField(L, "sample_count", static_cast<lua_Integer>(SceneFlushPhaseHistoryMs[phaseIndex].size()));
-		lua_rawseti(L, -2, phaseIndex + 1);
-	}
-	lua_setfield(L, -2, "scene_flush_phases");
 	PushIntegerField(L, "cpu_update_sample_count", static_cast<lua_Integer>(CpuUpdateHistoryMs.size()));
-	lua_newtable(L);
-	for (UINT phaseIndex = 0; phaseIndex < CpuUpdatePhaseCount; ++phaseIndex)
-	{
-		lua_newtable(L);
-		PushStringField(L, "name", GetCpuUpdatePhaseName(static_cast<ECpuUpdatePhase>(phaseIndex)));
-		PushNumberField(L, "last_ms", CpuUpdatePhaseLastTimeMs[phaseIndex]);
-		PushNumberField(L, "average_ms", CpuUpdatePhaseAverageTimeMs[phaseIndex]);
-		PushIntegerField(L, "sample_count", static_cast<lua_Integer>(CpuUpdatePhaseHistoryMs[phaseIndex].size()));
-		lua_rawseti(L, -2, phaseIndex + 1);
-	}
-	lua_setfield(L, -2, "cpu_update_phases");
 	if (!bSkipScriptProfileStats)
 	{
 		PushScriptProfileStatsForScript(L);
@@ -7399,23 +7516,33 @@ void Corona::PushLuauUiStateForScript(lua_State* L, const std::string& mode)
 	PushNumberField(L, "light_intensity", LightIntensity);
 	PushBoolField(L, "camera_path_owns_light_controls", bCameraPathPlaying || bCameraPathDumping);
 	PushIntegerField(L, "point_light_max_count", static_cast<lua_Integer>(MaxPointLights));
-	lua_newtable(L);
-	for (int pointLightIndex = 0; pointLightIndex < static_cast<int>(PointLights.size()); ++pointLightIndex)
+	// Point lights array push is the single biggest cost in the UI state
+	// build once light counts climb (100-light ReSTIR demo: 7 lua_push*
+	// calls × 100 entries = 700 cross-boundary calls per frame, plus 100
+	// nested tables). Skip if the caller explicitly didn't ask for it
+	// (default true) AND we're not in compact mode (which never wants the
+	// lights table anyway). Callers should pass false when the Point
+	// Lights window is closed even if other windows force "full" mode.
+	if (!bCompactMode && bWantPointLights)
 	{
-		const PointLightState& pointLight = PointLights[pointLightIndex];
 		lua_newtable(L);
-		PushIntegerField(L, "id", static_cast<lua_Integer>(pointLight.Id));
-		PushIntegerField(L, "index", static_cast<lua_Integer>(pointLightIndex + 1));
-		PushScriptEntity(L, pointLight.EntityHandle);
-		lua_setfield(L, -2, "entity");
-		PushBoolField(L, "enabled", pointLight.bEnabled);
-		PushVec3Field(L, "position", pointLight.Position);
-		PushNumberField(L, "radius", pointLight.Radius);
-		PushNumberField(L, "intensity", pointLight.Intensity);
-		PushVec3Field(L, "color", pointLight.Color);
-		lua_rawseti(L, -2, pointLightIndex + 1);
+		for (int pointLightIndex = 0; pointLightIndex < static_cast<int>(PointLights.size()); ++pointLightIndex)
+		{
+			const PointLightState& pointLight = PointLights[pointLightIndex];
+			lua_newtable(L);
+			PushIntegerField(L, "id", static_cast<lua_Integer>(pointLight.Id));
+			PushIntegerField(L, "index", static_cast<lua_Integer>(pointLightIndex + 1));
+			PushScriptEntity(L, pointLight.EntityHandle);
+			lua_setfield(L, -2, "entity");
+			PushBoolField(L, "enabled", pointLight.bEnabled);
+			PushVec3Field(L, "position", pointLight.Position);
+			PushNumberField(L, "radius", pointLight.Radius);
+			PushNumberField(L, "intensity", pointLight.Intensity);
+			PushVec3Field(L, "color", pointLight.Color);
+			lua_rawseti(L, -2, pointLightIndex + 1);
+		}
+		lua_setfield(L, -2, "point_lights");
 	}
-	lua_setfield(L, -2, "point_lights");
 	PushVec3Field(L, "sky_color_top", SkyColorTop);
 	PushVec3Field(L, "sky_color_bottom", SkyColorBottom);
 	PushNumberField(L, "sky_intensity", SkyIntensity);

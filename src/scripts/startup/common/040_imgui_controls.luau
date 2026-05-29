@@ -408,7 +408,24 @@ end
 
 local function draw_gpu_timing_overlay(state)
     local gpu = ensure_gpu_controls()
-    if not gpu.showOverlay or state.gpu_passes == nil then
+    if not gpu.showOverlay then
+        return
+    end
+
+    -- Fast path: the C++ side rebuilds the overlay text at 4 Hz and
+    -- pushes it as a single prebuilt string. Used to iterate 5+ nested
+    -- tables in Lua every frame; that cost dominated record.Capture/UI
+    -- once gpu pass counts climbed.
+    local prebuilt = state.frame_timing_overlay_text
+    if prebuilt ~= nil and prebuilt ~= "" then
+        ui.overlay_text(prebuilt, 10.0, 30.0)
+        return
+    end
+
+    -- Legacy fallback (kept for the moment for compatibility with
+    -- callers that haven't been migrated; this path is no longer hit
+    -- under the default ui state mode).
+    if state.gpu_passes == nil then
         return
     end
 
@@ -1124,7 +1141,12 @@ function script.ui()
     else
         state_mode = refresh_profile and "compact" or "compact_no_profile"
     end
-    local state = corona.get_ui_state(state_mode)
+    -- Pass `want_point_lights` so the C++ side only iterates the 100+
+    -- point light entries when the Point Lights window is actually open.
+    -- Other "full" mode consumers (Lighting / Sky / Object panels) don't
+    -- read state.point_lights, so skipping the push when only those are
+    -- open keeps record.Capture/UI low even at large light counts.
+    local state = corona.get_ui_state(state_mode, windows.pointLightsOpen == true)
     if state == nil then
         return
     end
