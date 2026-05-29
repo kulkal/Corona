@@ -4397,28 +4397,101 @@ Corona::ScriptSceneHandle Corona::CreateProceduralBoxSceneForScript(const glm::v
 		textureKey + L"/" +
 		std::to_wstring(quantizedUvRepeatX) + L"/" +
 		std::to_wstring(quantizedUvRepeatY);
+	// Bake the box to assets/generated/ on first creation so map save can
+	// store a real Asset path. Filename encodes the params; texture-key
+	// flavours and front-only variants get distinct files. MTL alongside
+	// preserves the spawn color across save / reload.
+	const std::wstring textureKeySanitized = textureKey;
+	wchar_t generatedRel[200];
+	std::swprintf(generatedRel, std::size(generatedRel),
+		L"assets/generated/box_c%02x%02x%02x_%s_%s_uv%dx%d.obj",
+		quantizedColor.x, quantizedColor.y, quantizedColor.z,
+		bFrontOnly ? L"front" : L"solid",
+		textureKeySanitized.c_str(),
+		quantizedUvRepeatX, quantizedUvRepeatY);
+	const std::wstring keyRel = generatedRel;
+	const auto cachedRelIt = ScriptSceneByPath.find(keyRel);
+	if (cachedRelIt != ScriptSceneByPath.end())
+		return cachedRelIt->second;
 	const auto cachedIt = ScriptSceneByPath.find(key);
 	if (cachedIt != ScriptSceneByPath.end())
 		return cachedIt->second;
 
-	shared_ptr<Scene> scene = CreateProceduralBoxScene(
-		glm::vec3(quantizedColor) / 255.0f,
-		bUseBrickTexture,
-		static_cast<float>(quantizedUvRepeatX) / 100.0f,
-		normalizedTextureKind,
-		static_cast<float>(quantizedUvRepeatY) / 100.0f,
-		bFrontOnly);
-	if (!scene)
-		return InvalidScriptSceneHandle;
+	const std::filesystem::path absPath = GetAssetFullPath(generatedRel);
+	std::error_code existsEc;
+	if (!std::filesystem::exists(absPath, existsEc))
+	{
+		std::error_code dirEc;
+		std::filesystem::create_directories(absPath.parent_path(), dirEc);
 
-	ScriptSceneHandle handle = NextScriptSceneHandle++;
-	if (handle == InvalidScriptSceneHandle)
-		handle = NextScriptSceneHandle++;
+		// Re-emit the same per-face geometry CreateProceduralBoxScene
+		// builds. Doing it here (rather than reading back from the GPU
+		// upload) keeps the OBJ deterministic and avoids needing to
+		// retain full vertex attributes on Mesh CPU-side.
+		constexpr float kH = 0.5f;
+		struct ObjFace
+		{
+			glm::vec3 N;
+			glm::vec3 P[4];
+		};
+		const ObjFace faces[] = {
+			{ {  0, 0,  1 }, { { -kH, -kH,  kH }, {  kH, -kH,  kH }, {  kH,  kH,  kH }, { -kH,  kH,  kH } } },
+			{ {  0, 0, -1 }, { {  kH, -kH, -kH }, { -kH, -kH, -kH }, { -kH,  kH, -kH }, {  kH,  kH, -kH } } },
+			{ {  1, 0,  0 }, { {  kH, -kH,  kH }, {  kH, -kH, -kH }, {  kH,  kH, -kH }, {  kH,  kH,  kH } } },
+			{ { -1, 0,  0 }, { { -kH, -kH, -kH }, { -kH, -kH,  kH }, { -kH,  kH,  kH }, { -kH,  kH, -kH } } },
+			{ {  0, 1,  0 }, { { -kH,  kH,  kH }, {  kH,  kH,  kH }, {  kH,  kH, -kH }, { -kH,  kH, -kH } } },
+			{ {  0,-1,  0 }, { { -kH, -kH, -kH }, {  kH, -kH, -kH }, {  kH, -kH,  kH }, { -kH, -kH,  kH } } },
+		};
+		const ObjFace frontOnly = {
+			{ 0, 0, -1 },
+			{ { -kH, -kH, -kH }, {  kH, -kH, -kH }, {  kH,  kH, -kH }, { -kH,  kH, -kH } } };
+		const float uX = static_cast<float>(quantizedUvRepeatX) / 100.0f;
+		const float uY = static_cast<float>(quantizedUvRepeatY) / 100.0f;
+		const glm::vec2 uvs[4] = {
+			{ 0.0f, uY }, { uX, uY }, { uX, 0.0f }, { 0.0f, 0.0f }
+		};
 
-	ScriptScenes[handle] = { scene, key, EPhysicsCollisionShape::Box, glm::vec3(0.5f) };
-	ScriptSceneByPath[key] = handle;
-	AppendCpuRuntimeTrace(L"[Luau][MeshComponent] procedural_box handle=" + std::to_wstring(handle) + L" key=" + key);
-	return handle;
+		const std::filesystem::path mtlPath = absPath.parent_path() / (absPath.stem().wstring() + L".mtl");
+		std::ofstream mtl(mtlPath);
+		const glm::vec3 colorLinear = glm::vec3(quantizedColor) / 255.0f;
+		mtl << "newmtl boxmat\n";
+		mtl << "Kd " << colorLinear.x << " " << colorLinear.y << " " << colorLinear.z << "\n";
+		mtl.close();
+
+		std::ofstream out(absPath);
+		out << "# Corona procedural box c=("
+			<< quantizedColor.x << "," << quantizedColor.y << "," << quantizedColor.z << ")\n";
+		out << "mtllib " << WideToUtf8Local(mtlPath.filename().wstring()) << "\n";
+		out << "o box\n";
+
+		auto emitFace = [&](const ObjFace& f, int& vBase)
+		{
+			for (int i = 0; i < 4; ++i)
+				out << "v " << f.P[i].x << " " << f.P[i].y << " " << f.P[i].z << "\n";
+			for (int i = 0; i < 4; ++i)
+				out << "vn " << f.N.x << " " << f.N.y << " " << f.N.z << "\n";
+			for (int i = 0; i < 4; ++i)
+				out << "vt " << uvs[i].x << " " << uvs[i].y << "\n";
+			const int b = vBase;
+			out << "usemtl boxmat\n";
+			out << "f " << (b+0) << "/" << (b+0) << "/" << (b+0)
+				<< " " << (b+1) << "/" << (b+1) << "/" << (b+1)
+				<< " " << (b+2) << "/" << (b+2) << "/" << (b+2) << "\n";
+			out << "f " << (b+0) << "/" << (b+0) << "/" << (b+0)
+				<< " " << (b+2) << "/" << (b+2) << "/" << (b+2)
+				<< " " << (b+3) << "/" << (b+3) << "/" << (b+3) << "\n";
+			vBase += 4;
+		};
+		int vBase = 1;
+		if (bFrontOnly)
+			emitFace(frontOnly, vBase);
+		else
+			for (const ObjFace& f : faces) emitFace(f, vBase);
+		out.close();
+		AppendCpuRuntimeTrace(L"[Luau][MeshComponent] baked procedural box to " + absPath.wstring());
+	}
+
+	return LoadSceneForScript(generatedRel);
 }
 
 Corona::ScriptSceneHandle Corona::CreateProceduralGrassSceneForScript(UINT32 numBlades, float areaSize, float bladeHeight, UINT32 seed, UINT32 bladeSegments)

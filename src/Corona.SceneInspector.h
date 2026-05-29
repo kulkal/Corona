@@ -52,6 +52,12 @@ private:
 	glm::vec3 NonMeshTransformCacheRotation = glm::vec3(0.0f);
 	glm::vec3 NonMeshTransformCacheScale = glm::vec3(1.0f);
 
+	// Uniform-axis scale lock for the mesh-entity Scale editor. When ON
+	// the slider edits X and we splat the value onto Y/Z; when OFF the
+	// three axes are independent. Persists across selections so a user
+	// who likes uniform scaling doesn't have to re-toggle each time.
+	bool ScaleUniformLock = true;
+
 	// Grass-blade recipe editor staging buffer. Snapshotted from the live
 	// recipe whenever the selected entity changes so the user's pending
 	// edits don't leak between entities.

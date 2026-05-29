@@ -456,46 +456,44 @@ void CoronaSceneInspector::DrawSelectedEntityDetails()
 		{
 			float arrPos[3] = { position.x, position.y, position.z };
 			float arrRot[3] = { rotation.x, rotation.y, rotation.z };
+			// If the entity was spawned with auto-fit (useScale=false),
+			// promote its current effective scale into the explicit slot
+			// so the new always-explicit editor doesn't reset the mesh.
+			if (!useScale)
+			{
+				scale = glm::vec3(targetExtent);
+				useScale = true;
+			}
 			float arrScale[3] = { scale.x, scale.y, scale.z };
 			bool changed = false;
 			if (ImGui::DragFloat3("Position##t", arrPos, 0.05f))
 				changed = true;
 			if (ImGui::DragFloat3("Rotation##t", arrRot, 1.0f))
 				changed = true;
-			// Show Scale unconditionally — entities spawned with useScale=false
-			// rely on TargetExtent for auto-fit, but a user editing here means
-			// they want explicit scale control. Switching the radio promotes
-			// the current effective scale so the mesh doesn't jump.
-			if (ImGui::RadioButton("Explicit Scale##tmode", useScale))
-			{
-				if (!useScale)
-				{
-					useScale = true;
-					changed = true;
-				}
-			}
+			// Simplified Scale: X/Y/Z drag + a "Uniform" checkbox that
+			// locks all three to the X-axis edit. No TargetExtent
+			// confusion any more — every entity is on the explicit-scale
+			// path now.
+			if (ImGui::Checkbox("Uniform##scaleLock", &ScaleUniformLock))
+				; // toggle only; no scale change
 			ImGui::SameLine();
-			if (ImGui::RadioButton("Auto-fit (TargetExtent)##tmode", !useScale))
+			if (ScaleUniformLock)
 			{
-				if (useScale)
+				if (ImGui::DragFloat("Scale##tUniform", &arrScale[0], 0.01f, 0.001f, 1000.0f))
 				{
-					useScale = false;
-					changed = true;
-				}
-			}
-			if (useScale)
-			{
-				if (ImGui::DragFloat3("Scale##t", arrScale, 0.01f, 0.001f, 100.0f))
-				{
-					scale = glm::vec3(arrScale[0], arrScale[1], arrScale[2]);
+					arrScale[1] = arrScale[0];
+					arrScale[2] = arrScale[0];
+					scale = glm::vec3(arrScale[0]);
 					changed = true;
 				}
 			}
 			else
 			{
-				if (ImGui::DragFloat("TargetExtent##t", &targetExtent, 0.05f, 0.001f, 10000.0f))
+				if (ImGui::DragFloat3("Scale X/Y/Z##t", arrScale, 0.01f, 0.001f, 1000.0f))
+				{
+					scale = glm::vec3(arrScale[0], arrScale[1], arrScale[2]);
 					changed = true;
-				ImGui::TextDisabled("(scale derived from mesh bounds)");
+				}
 			}
 			if (changed)
 			{

@@ -116,8 +116,10 @@ void CoronaToolbox::SpawnBox()
 void CoronaToolbox::SpawnSphere()
 {
 	const std::string name = NextName("Sphere", NextSpawnId);
+	// Radius 1.0 (was 0.5) — the previous tiny sphere was hard to see in
+	// scenes the size of Sponza.
 	const Corona::ScriptSceneHandle sh = Host->CreateProceduralSphereSceneForScript(
-		/*radius*/ 0.5f, /*rings*/ 32, /*segments*/ 48);
+		/*radius*/ 1.0f, /*rings*/ 32, /*segments*/ 48);
 	if (sh == Corona::InvalidScriptSceneHandle)
 		return;
 	const CoronaECS::Entity e = Host->CreateEntity(name);
