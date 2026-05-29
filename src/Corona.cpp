@@ -11718,12 +11718,26 @@ void Corona::OnRender()
 		}
 	}
 
+	// Temporary sub-phase timer: when the user / debug build needs to
+	// know which piece of the bShowImgui block costs what, we write
+	// per-segment elapsed times to the runtime trace every 120 frames.
+	// Cheap (clock reads + a counter), disable by setting the static
+	// constant below to false.
+	static constexpr bool kProfileImguiSubphases = false;
+	static int s_imguiProfileFrameCounter = 0;
+	const bool bEmitImguiProfile = kProfileImguiSubphases && (++s_imguiProfileFrameCounter % 120 == 0);
+	double tNewFrame = 0.0, tConsole = 0.0, tSceneInsp = 0.0, tAssetExp = 0.0, tToolbox = 0.0;
+	double tLegacyHud = 0.0, tImguiRender = 0.0, tRenderDraw = 0.0;
+	double tLuauQueued = 0.0, tLuauImgui = 0.0;
 	if (!bSuppressImguiForCapture && bImguiInitialized && (bShowImgui || CORONA_PLATFORM_MOBILE))
 	{
+		const auto imguiStageStart = CpuClock::now();
 
 		renderBackend->NewImGuiFrame();
 		NewPlatformImGuiFrame();
 		ImGui::NewFrame();
+		const auto imguiStageNewFrame = CpuClock::now();
+		tNewFrame = ElapsedMilliseconds(imguiStageStart, imguiStageNewFrame);
 
 		// Console (~ / `) — lazy-init, then poll async TripoSR jobs and
 		// handle key toggle. RouteGlobal so the InputText inside the
@@ -11734,21 +11748,29 @@ void Corona::OnRender()
 		if (ImGui::Shortcut(ImGuiKey_GraveAccent, ImGuiInputFlags_RouteGlobal))
 			Console->OnKeyToggle();
 		Console->RenderImGui();
+		const auto imguiStageConsole = CpuClock::now();
+		tConsole = ElapsedMilliseconds(imguiStageNewFrame, imguiStageConsole);
 
 		// Scene inspector — left-anchored entity list + bottom toggle button.
 		if (!SceneInspector)
 			SceneInspector = std::make_unique<CoronaSceneInspector>(this);
 		SceneInspector->RenderImGui();
+		const auto imguiStageSceneInsp = CpuClock::now();
+		tSceneInsp = ElapsedMilliseconds(imguiStageConsole, imguiStageSceneInsp);
 
 		// Asset explorer — bin/assets/ file browser, right-click to spawn.
 		if (!AssetExplorer)
 			AssetExplorer = std::make_unique<CoronaAssetExplorer>(this);
 		AssetExplorer->RenderImGui();
+		const auto imguiStageAssetExp = CpuClock::now();
+		tAssetExp = ElapsedMilliseconds(imguiStageSceneInsp, imguiStageAssetExp);
 
 		// Toolbox — directional/point lights + primitive shape spawn buttons.
 		if (!Toolbox)
 			Toolbox = std::make_unique<CoronaToolbox>(this);
 		Toolbox->RenderImGui();
+		const auto imguiStageToolbox = CpuClock::now();
+		tToolbox = ElapsedMilliseconds(imguiStageAssetExp, imguiStageToolbox);
 
 #if CORONA_PLATFORM_MOBILE
 		DrawMobileVirtualControls();
@@ -11849,6 +11871,7 @@ void Corona::OnRender()
 			}
 		}
 
+		const auto luauStartTs = CpuClock::now();
 		if (bUseLuauImguiControls)
 		{
 			ImGui::Begin("Hi, Let's traceray!");
@@ -11857,7 +11880,11 @@ void Corona::OnRender()
 #else
 			RenderQueuedLuauUi();
 #endif
+			const auto luauQueuedDoneTs = CpuClock::now();
+			tLuauQueued = ElapsedMilliseconds(luauStartTs, luauQueuedDoneTs);
 			DrawLuauImGui();
+			const auto luauImguiDoneTs = CpuClock::now();
+			tLuauImgui = ElapsedMilliseconds(luauQueuedDoneTs, luauImguiDoneTs);
 			ImGui::End();
 		}
 		if (!bUseLuauImguiControls)
@@ -12866,13 +12893,31 @@ if (ImGui::Button("Reset Accumulation"))
 		}
 		}
 
+		const auto imguiStageBeforeRender = CpuClock::now();
+		tLegacyHud = ElapsedMilliseconds(imguiStageToolbox, imguiStageBeforeRender);
+
 		ImGui::Render();
+		const auto imguiStageAfterImguiRender = CpuClock::now();
+		tImguiRender = ElapsedMilliseconds(imguiStageBeforeRender, imguiStageAfterImguiRender);
+
 		BeginGpuPassTiming(EGpuPass::ImGui);
 		renderBackend->RenderImGuiDrawData(ImGui::GetDrawData());
 		EndGpuPassTiming(EGpuPass::ImGui);
+		const auto imguiStageAfterRenderDraw = CpuClock::now();
+		tRenderDraw = ElapsedMilliseconds(imguiStageAfterImguiRender, imguiStageAfterRenderDraw);
 
 	}
 	AddRenderCommandPhaseTiming(ERenderCommandPhase::CaptureUi, renderCommandPhaseStart, CpuClock::now());
+	if (bEmitImguiProfile)
+	{
+		wchar_t profileLine[512];
+		std::swprintf(profileLine, std::size(profileLine),
+			L"[CaptureUI profile] newFrame=%.3f Console=%.3f SceneInsp=%.3f AssetExp=%.3f Toolbox=%.3f LegacyHud=%.3f (luauQueued=%.3f luauImgui=%.3f) ImGuiRender=%.3f RenderDraw=%.3f total=%.3f",
+			tNewFrame, tConsole, tSceneInsp, tAssetExp, tToolbox,
+			tLegacyHud, tLuauQueued, tLuauImgui, tImguiRender, tRenderDraw,
+			tNewFrame + tConsole + tSceneInsp + tAssetExp + tToolbox + tLegacyHud + tImguiRender + tRenderDraw);
+		AppendCpuRuntimeTrace(profileLine);
+	}
 
 	renderCommandPhaseStart = CpuClock::now();
 	EndGpuPassTiming(EGpuPass::Frame);

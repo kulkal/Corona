@@ -76,17 +76,18 @@ local function clear_demo_lights()
     demoLightIds = {}
 end
 
+-- Track the shadow mode script-side so the imgui callback never has to
+-- call corona.get_ui_state() (which costs ~4 ms / frame for the heavy
+-- state push at 100+ lights). We're the only thing that flips this flag,
+-- so a local mirror stays accurate; the categorized Lighting / GI panel
+-- exposes the same toggle but it lives in the slower script.ui path.
+local restirOn = false
+
 local function on_imgui()
     if not imgui.begin("Sponza Shadow Demo") then
         imgui.end_window()
         return
     end
-
-    -- Read the current shadow mode from engine state. The categorized
-    -- Lighting/GI panel exposes the same toggle via its checkbox; this
-    -- panel keeps the two in sync.
-    local state = corona.get_ui_state and corona.get_ui_state() or {}
-    local restirOn = state.enable_restir_direct_shadow or false
 
     imgui.text("Current: " .. (restirOn and "ReSTIR DI (single-light reservoir)" or "4-channel (hard cap 3 lights)"))
     imgui.text(string.format("Demo lights: %d", #demoLightIds))
@@ -95,11 +96,13 @@ local function on_imgui()
         if imgui.button("RESTIR MODE") then
             spawn_demo_lights()
             corona.set_ui_value("enable_restir_direct_shadow", true)
+            restirOn = true
         end
     else
         if imgui.button("4CHANNEL MODE") then
             clear_demo_lights()
             corona.set_ui_value("enable_restir_direct_shadow", false)
+            restirOn = false
         end
     end
 
