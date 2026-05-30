@@ -330,13 +330,19 @@ void rayGen()
             const float angle = rA * 6.28318530717958647692f;
             const float radius = sqrt(rB) * kSpatialRadius;
             const int2 ofs = int2(round(cos(angle) * radius), round(sin(angle) * radius));
-            const float2 spatialUV = uv + (float2(ofs) / launchSize);
-            if (spatialUV.x < 0.0f || spatialUV.x > 1.0f || spatialUV.y < 0.0f || spatialUV.y > 1.0f)
+            const int2 spatialPx = int2(pixelPos) + ofs;
+            if (spatialPx.x < 0 || spatialPx.x >= (int)launchSize.x ||
+                spatialPx.y < 0 || spatialPx.y >= (int)launchSize.y)
                 continue;
-            const float4 sp = ShadowReservoirPrev.SampleLevel(sampleWrap, spatialUV, 0);
+            // Integer-coord point sampling. SampleLevel bilinear on a
+            // RGBA32F reservoir whose .g channel encodes lightIdx as a
+            // float corrupts the index (4-pixel blend → non-integer →
+            // wrong light), causing apparent history resets/noise
+            // under any sub-pixel motion (TAA jitter included).
+            const float4 sp = ShadowReservoirPrev.Load(int3(spatialPx, 0));
             const uint  spIdx   = (uint)(sp.g + 0.5f);
             const float spRatio = sp.b;
-            const float spM     = ShadowReservoirMPrev.SampleLevel(sampleWrap, spatialUV, 0).x;
+            const float spM     = ShadowReservoirMPrev.Load(int3(spatialPx, 0)).x;
             if (spIdx >= ShadowedPointLightCount || spRatio <= 0.0f || spM <= 0.0f)
                 continue;
             const float3 cPos = ShadowedPointLights[spIdx].xyz;
@@ -377,10 +383,17 @@ void rayGen()
         const float2 prevUV = uv - velocity;
         if (prevUV.x >= 0.0f && prevUV.x <= 1.0f && prevUV.y >= 0.0f && prevUV.y <= 1.0f)
         {
-            const float4 prev = ShadowReservoirPrev.SampleLevel(sampleWrap, prevUV, 0);
+            // Integer-coord point sampling — bilinear on the
+            // RGBA32F reservoir corrupts lightIdx (.g) on any
+            // sub-pixel reprojection (e.g. TAA/DLSS jitter), which
+            // resets the temporal history every frame and produces
+            // strong noise under camera motion. See spatial-reuse
+            // block above for the same fix.
+            const int2 prevPx = int2(prevUV * launchSize);
+            const float4 prev = ShadowReservoirPrev.Load(int3(prevPx, 0));
             const uint prevIdx = (uint)(prev.g + 0.5f);
             const float prevRatio = prev.b;
-            const float prevM = ShadowReservoirMPrev.SampleLevel(sampleWrap, prevUV, 0).x;
+            const float prevM = ShadowReservoirMPrev.Load(int3(prevPx, 0)).x;
             if (prevIdx < (uint)MAX_SHADOWED_PT_LIGHTS && prevIdx < ShadowedPointLightCount && prevRatio > 0.0f && prevM > 0.0f)
             {
                 const float3 candPos = ShadowedPointLights[prevIdx].xyz;
