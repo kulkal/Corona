@@ -406,6 +406,13 @@ bool Corona::SaveMapToFile(const std::wstring& name, std::wstring* outError)
 	// they exist purely as anchor points for behaviour scripts. Without
 	// this block, dungeon HUD / platformer state controllers vanish on
 	// map reload and the gameplay loop breaks (no HUD, no input wiring).
+	// IMPORTANT: skip the engine's `World` entity. Its script instances
+	// are the *startup* luau scripts (sponza_demo / terrain_demo / ...
+	// + 099_persist_map). Saving them here and re-attaching them on
+	// load_map triggers infinite recursion: load_map runs each attached
+	// script → 010_sponza_demo_scene.luau calls `corona.load_map(...)`
+	// again on entry → reload loops until the engine dies.
+	const CoronaECS::Entity worldEntity = WorldEntity;
 	for (auto entity : ecs.GetEntitiesWithScript())
 	{
 		const auto* script = ecs.GetScript(entity);
@@ -413,6 +420,9 @@ bool Corona::SaveMapToFile(const std::wstring& name, std::wstring* outError)
 			continue;
 		// Skip if already serialized above as mesh / light / camera.
 		if (ecs.HasMesh(entity) || ecs.HasLight(entity) || ecs.HasCamera(entity))
+			continue;
+		// Skip the engine-singleton World entity (startup scripts only).
+		if (entity == worldEntity)
 			continue;
 		std::string entityName = "scripted";
 		if (const auto* n = ecs.GetName(entity))

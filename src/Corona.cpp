@@ -1053,6 +1053,101 @@ namespace
 		return cachePath;
 	}
 
+	template<typename T>
+	bool WriteBinaryValue(std::ofstream& file, const T& value)
+	{
+		file.write(reinterpret_cast<const char*>(&value), sizeof(T));
+		return static_cast<bool>(file);
+	}
+
+	bool WriteBinaryBytes(std::ofstream& file, const void* data, size_t byteCount)
+	{
+		if (byteCount == 0)
+			return true;
+		file.write(reinterpret_cast<const char*>(data), static_cast<std::streamsize>(byteCount));
+		return static_cast<bool>(file);
+	}
+
+	bool WriteBinaryString(std::ofstream& file, const std::string& value)
+	{
+		if (value.size() > kCoronaMeshMaxStringBytes)
+			return false;
+		const uint32_t length = static_cast<uint32_t>(value.size());
+		if (!WriteBinaryValue(file, length))
+			return false;
+		return WriteBinaryBytes(file, value.data(), value.size());
+	}
+
+	struct CmeshWriterMeshData
+	{
+		uint32_t MaterialIndex = 0;
+		std::vector<CoronaMeshDiskVertex> Vertices;
+		std::vector<uint32_t> Indices;
+	};
+
+	// Mirror of `LoadBinaryMeshModel`'s on-disk layout. Called at the
+	// end of `Corona::LoadModel` so the next launch can skip the
+	// (slow) Assimp + texture-load pass and read straight from cache.
+	// Errors are non-fatal: the in-memory scene is already built and
+	// usable; the cache will just rebuild next time.
+	bool SaveBinaryMeshModelToDisk(
+		const std::filesystem::path& cachePath,
+		const glm::vec3& boundsMin,
+		const glm::vec3& boundsMax,
+		const std::vector<CoronaMeshDiskMaterial>& diskMaterials,
+		const std::vector<CmeshWriterMeshData>& diskMeshes)
+	{
+		std::error_code ec;
+		std::filesystem::create_directories(cachePath.parent_path(), ec);
+		std::ofstream file(cachePath, std::ios::binary | std::ios::trunc);
+		if (!file)
+			return false;
+
+		CoronaMeshFileHeader header = {};
+		std::memcpy(header.Magic, kCoronaMeshMagic, sizeof(header.Magic));
+		header.Version = kCoronaMeshVersion;
+		header.HeaderSize = sizeof(CoronaMeshFileHeader);
+		header.MaterialCount = static_cast<uint32_t>(diskMaterials.size());
+		header.MeshCount = static_cast<uint32_t>(diskMeshes.size());
+		header.Flags = 0;
+		header.BoundsMin[0] = boundsMin.x;
+		header.BoundsMin[1] = boundsMin.y;
+		header.BoundsMin[2] = boundsMin.z;
+		header.BoundsMax[0] = boundsMax.x;
+		header.BoundsMax[1] = boundsMax.y;
+		header.BoundsMax[2] = boundsMax.z;
+		if (!WriteBinaryValue(file, header))
+			return false;
+
+		for (const auto& m : diskMaterials)
+		{
+			if (!WriteBinaryValue(file, m.Flags) ||
+				!WriteBinaryString(file, m.Diffuse) ||
+				!WriteBinaryString(file, m.Normal) ||
+				!WriteBinaryString(file, m.Roughness) ||
+				!WriteBinaryString(file, m.Metallic))
+				return false;
+		}
+
+		for (const auto& m : diskMeshes)
+		{
+			const uint32_t vertexCount = static_cast<uint32_t>(m.Vertices.size());
+			const uint32_t indexCount = static_cast<uint32_t>(m.Indices.size());
+			const uint32_t reserved = 0;
+			if (!WriteBinaryValue(file, m.MaterialIndex) ||
+				!WriteBinaryValue(file, vertexCount) ||
+				!WriteBinaryValue(file, indexCount) ||
+				!WriteBinaryValue(file, reserved))
+				return false;
+			if (!WriteBinaryBytes(file, m.Vertices.data(), m.Vertices.size() * sizeof(CoronaMeshDiskVertex)))
+				return false;
+			if (!WriteBinaryBytes(file, m.Indices.data(), m.Indices.size() * sizeof(uint32_t)))
+				return false;
+		}
+
+		return static_cast<bool>(file);
+	}
+
 	bool IsCoronaMeshCacheUsable(const std::filesystem::path& cachePath, const std::filesystem::path& sourcePath)
 	{
 		std::error_code errorCode;
@@ -10275,8 +10370,16 @@ shared_ptr<Scene> Corona::LoadModel(string fileName)
 		}
 	};
 
+	// Parallel arrays captured during import so we can write the
+	// .cmesh cache at the end. Texture entries store the basename
+	// only (matches `LoadBinaryMeshModel`'s `loadTextureOrDefault`
+	// which prepends the source directory at load time).
+	std::vector<CoronaMeshDiskMaterial> diskMaterials;
+	std::vector<CmeshWriterMeshData> diskMeshes;
+
 	const int numMaterials = assimpScene->mNumMaterials;
 	scene->Materials.reserve(numMaterials);
+	diskMaterials.reserve(numMaterials);
 	for (int i = 0; i < numMaterials; ++i)
 	{
 		const aiMaterial& aiMat = *assimpScene->mMaterials[i];
@@ -10349,6 +10452,17 @@ shared_ptr<Scene> Corona::LoadModel(string fileName)
 		// HACK!
 		if (wDiffuseTex == L"Sponza_Thorn_diffuse.png" || wDiffuseTex == L"VasePlant_diffuse.png" || wDiffuseTex == L"ChainTexture_Albedo.png")
 			mat->bHasAlpha = true;
+
+		// Capture texture basenames for the cmesh writer. The on-disk
+		// format stores filenames only — the loader prepends the
+		// source directory at load time (see `LoadBinaryMeshModel`).
+		CoronaMeshDiskMaterial diskMat = {};
+		diskMat.Flags = mat->bHasAlpha ? kCoronaMeshMaterialHasAlpha : 0u;
+		diskMat.Diffuse = WideToUtf8(wDiffuseTex);
+		diskMat.Normal = WideToUtf8(wNormalTex);
+		diskMat.Roughness = WideToUtf8(wRoughnessTex);
+		diskMat.Metallic = WideToUtf8(wMetallicTex);
+		diskMaterials.push_back(std::move(diskMat));
 
 		scene->Materials.push_back(shared_ptr<Material>(mat));
 	}
@@ -10450,6 +10564,17 @@ shared_ptr<Scene> Corona::LoadModel(string fileName)
 			mesh->CpuPositions.push_back(vertex.Position);
 		mesh->CpuIndices = indices;
 
+		// Snapshot for cmesh cache write. The local Vertex layout (44
+		// bytes: pos+nrm+uv+tan) matches CoronaMeshDiskVertex exactly,
+		// so we can copy by raw memory rather than per-field.
+		CmeshWriterMeshData diskMesh;
+		diskMesh.MaterialIndex = asMesh->mMaterialIndex;
+		diskMesh.Vertices.resize(vertices.size());
+		std::memcpy(diskMesh.Vertices.data(), vertices.data(),
+			vertices.size() * sizeof(CoronaMeshDiskVertex));
+		diskMesh.Indices = indices;
+		diskMeshes.push_back(std::move(diskMesh));
+
 
 		Mesh::DrawCall dc;
 		dc.IndexCount = numTriangles * 3;
@@ -10473,6 +10598,21 @@ shared_ptr<Scene> Corona::LoadModel(string fileName)
 		L", cacheHint=" + binaryMeshPath.wstring());
 
 	scenePtr->SourceFilePath = wide;
+
+	// Persist the freshly-imported geometry to a sibling .cmesh so the
+	// next launch can skip Assimp + texture resolution (~5s on Sponza
+	// → ~0.5s). Failure is non-fatal; we just won't have a cache.
+	if (SaveBinaryMeshModelToDisk(
+			binaryMeshPath, scene->BoundsMin, scene->BoundsMax,
+			diskMaterials, diskMeshes))
+	{
+		AppendCpuRuntimeTrace(L"[LoadModel] wrote cmesh cache: " + binaryMeshPath.wstring());
+	}
+	else
+	{
+		AppendCpuRuntimeTrace(L"[LoadModel] cmesh cache write failed: " + binaryMeshPath.wstring());
+	}
+
 	return scenePtr;
 #endif
 }
