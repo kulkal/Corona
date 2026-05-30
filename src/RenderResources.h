@@ -277,4 +277,9 @@ public:
 	bool bHasBounds = false;
 	glm::vec3 BoundsMin = glm::vec3(0.0f);
 	glm::vec3 BoundsMax = glm::vec3(0.0f);
+	// Original source asset (FBX/OBJ/etc.) this Scene was loaded from.
+	// Used by tooling (Scene Inspector / Asset Explorer) to offer a
+	// "Re-import" action that invalidates the on-disk cmesh cache.
+	// Empty for procedural meshes (boxes, spheres, grass).
+	std::wstring SourceFilePath;
 };

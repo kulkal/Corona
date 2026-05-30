@@ -2762,6 +2762,13 @@ private:
 public:
 	shared_ptr<Scene> LoadBinaryMeshModel(const std::wstring& binaryFileName, const std::wstring& sourceFileName);
 
+	// Deletes the cmesh cache file paired with `sourceFilePath` (.cmesh
+	// sibling). Next LoadMeshModel of the same source goes through the
+	// FBX importer again — useful when the importer config changes or
+	// the asset was edited externally. Returns true on success or if
+	// no cache exists (which is also "ready for re-import").
+	bool InvalidateMeshCacheForSource(const std::wstring& sourceFilePath, std::wstring* outErr = nullptr);
+
 	void InitRTPSO();
 
 	void InitTemporalDenoisingPass();

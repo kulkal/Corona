@@ -10134,7 +10134,33 @@ shared_ptr<Scene> Corona::LoadBinaryMeshModel(const std::wstring& binaryFileName
 		L", triangles=" + std::to_wstring(totalIndices / 3) +
 		L", elapsedMs=" + std::to_wstring(ElapsedMilliseconds(loadStart, CpuClock::now())));
 
+	scene->SourceFilePath = sourceFileName;
 	return scene;
+}
+
+bool Corona::InvalidateMeshCacheForSource(const std::wstring& sourceFilePath, std::wstring* outErr)
+{
+	if (sourceFilePath.empty())
+	{
+		if (outErr) *outErr = L"empty source path";
+		return false;
+	}
+	const std::filesystem::path cachePath = GetCoronaMeshCachePath(sourceFilePath);
+	std::error_code ec;
+	if (!std::filesystem::exists(cachePath, ec))
+	{
+		// No cache to invalidate — treat as success so next load just
+		// rebuilds from the source.
+		AppendCpuRuntimeTrace(L"[InvalidateMeshCache] no cache at " + cachePath.wstring());
+		return true;
+	}
+	if (!std::filesystem::remove(cachePath, ec) || ec)
+	{
+		if (outErr) *outErr = L"remove failed: " + AnsiToWString(ec.message().c_str());
+		return false;
+	}
+	AppendCpuRuntimeTrace(L"[InvalidateMeshCache] removed " + cachePath.wstring());
+	return true;
 }
 
 shared_ptr<Scene> Corona::LoadModel(string fileName)
@@ -10446,6 +10472,7 @@ shared_ptr<Scene> Corona::LoadModel(string fileName)
 		L", elapsedMs=" + std::to_wstring(ElapsedMilliseconds(loadStart, CpuClock::now())) +
 		L", cacheHint=" + binaryMeshPath.wstring());
 
+	scenePtr->SourceFilePath = wide;
 	return scenePtr;
 #endif
 }

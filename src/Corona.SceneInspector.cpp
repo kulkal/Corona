@@ -357,6 +357,23 @@ void CoronaSceneInspector::DrawEntityRow(CoronaECS::Entity entity)
 				"%s", defaultName.c_str());
 			bOpenSaveAssetPopup = true;
 		}
+		// Re-import: only available for mesh entities whose Scene was
+		// loaded from a source asset (FBX/OBJ/...). Procedural meshes
+		// (box / sphere / grass) and entities without a mesh leave the
+		// item out so the menu stays meaningful per entity type.
+		if (const auto* m = ecs.GetMesh(entity); m && m->ScenePtr && !m->ScenePtr->SourceFilePath.empty())
+		{
+			if (ImGui::MenuItem("Re-import mesh (rebuild .cmesh)"))
+			{
+				std::wstring err;
+				if (Host->InvalidateMeshCacheForSource(m->ScenePtr->SourceFilePath, &err))
+					LastSaveStatus = "cache cleared — reload to re-import";
+				else
+					LastSaveStatus = "re-import failed: " +
+						std::string(err.begin(), err.end());
+				LastSaveStatusAt = std::chrono::steady_clock::now();
+			}
+		}
 		if (ImGui::MenuItem("Delete"))
 			PendingDeleteEntity = entity;
 		ImGui::EndPopup();

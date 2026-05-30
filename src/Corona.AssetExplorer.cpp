@@ -54,6 +54,19 @@ namespace
 		return EndsWithCi(ext, ".png") || EndsWithCi(ext, ".jpg") ||
 		       EndsWithCi(ext, ".jpeg") || EndsWithCi(ext, ".bmp");
 	}
+
+	bool IsMeshCacheFile(const std::filesystem::path& p)
+	{
+		return EndsWithCi(p.extension().string(), ".cmesh");
+	}
+
+	// For a source model path "foo.fbx", return "foo.cmesh" (sibling).
+	std::filesystem::path MeshCachePathFor(const std::filesystem::path& sourcePath)
+	{
+		std::filesystem::path cachePath = sourcePath;
+		cachePath.replace_extension(L".cmesh");
+		return cachePath;
+	}
 }
 
 CoronaAssetExplorer::CoronaAssetExplorer(Corona* host)
@@ -188,6 +201,26 @@ void CoronaAssetExplorer::HandleContextMenu(const Entry& entry)
 	{
 		if (IsModelFile(path))
 		{
+			// Sibling .cmesh cache (if any). Showing the menu only when
+			// the cache actually exists keeps the UI honest — without
+			// a cache there's nothing to invalidate.
+			const std::filesystem::path cachePath = MeshCachePathFor(path);
+			std::error_code cacheEc;
+			const bool bCacheExists = std::filesystem::exists(cachePath, cacheEc);
+			if (bCacheExists)
+			{
+				if (ImGui::MenuItem("Re-import (rebuild .cmesh)"))
+				{
+					std::wstring err;
+					if (!Host->InvalidateMeshCacheForSource(path.wstring(), &err))
+						PendingErrorMessage = "invalidate failed: " + PlatformWideToUtf8(err);
+					else
+					{
+						PendingErrorMessage = "cache cleared — re-import on next load";
+						CurrentListing.clear();
+					}
+				}
+			}
 			if (ImGui::MenuItem("Spawn model"))
 			{
 				const Corona::ScriptSceneHandle sh =
@@ -230,6 +263,24 @@ void CoronaAssetExplorer::HandleContextMenu(const Entry& entry)
 		if (IsImageFile(path))
 		{
 			ImGui::TextDisabled("(image — use console `generate <path>`)");
+		}
+		if (IsMeshCacheFile(path))
+		{
+			// .cmesh files are derived; deleting forces a rebuild from
+			// the sibling source asset on next load.
+			if (ImGui::MenuItem("Delete cache (re-import on next load)"))
+			{
+				std::error_code ec;
+				std::filesystem::remove(path, ec);
+				if (ec)
+					PendingErrorMessage = "delete failed: " + ec.message();
+				else
+				{
+					PendingErrorMessage = "cache cleared";
+					CurrentListing.clear();
+					AppendCpuRuntimeTrace(L"[AssetExplorer] cleared cmesh cache " + path.wstring());
+				}
+			}
 		}
 		ImGui::Separator();
 		if (ImGui::MenuItem("Delete file"))
