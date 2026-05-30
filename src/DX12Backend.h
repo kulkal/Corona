@@ -182,6 +182,7 @@ public:
 	void BindCBV(const std::string& name, uint32_t baseRegister, uint32_t size) override;
 	void BindSampler(const std::string& name, uint32_t baseRegister) override;
 	bool InitCS(const std::wstring& shaderFile, const std::string& entryPoint) override;
+	bool InitCSWithInlineRT(const std::wstring& shaderFile, const std::string& entryPoint) override;
 	void Apply() override;
 	void SetTextureSRV(const std::string& name, Texture* texture) override;
 	void SetTextureUAV(const std::string& name, Texture* texture) override;
@@ -190,6 +191,7 @@ public:
 	void SetVertexBufferUAV(const std::string& name, VertexBuffer* vertexBuffer) override;
 	void SetSampler(const std::string& name, Sampler* sampler) override;
 	void SetCBVValue(const std::string& name, void* pData) override;
+	void SetAccelerationStructure(const std::string& name, const std::shared_ptr<RTAS>& rtas) override;
 };
 
 class D3D12RTPipelineStateObject : public RTPipelineStateObject

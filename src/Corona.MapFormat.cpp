@@ -195,6 +195,11 @@ void Corona::ClearScriptSpawnedScene()
 	const auto activeCam = EntityWorld.GetActiveCameraEntity();
 	if (activeCam.IsValid())
 		EntityWorld.DestroyEntity(activeCam);
+	// Script-only entities (HUD / game controllers that have no mesh /
+	// light / camera). Iterate after the others so we only catch the
+	// remaining script anchors.
+	for (auto e : EntityWorld.GetEntitiesWithScript())
+		EntityWorld.DestroyEntity(e);
 
 	// Reset the cached engine-singleton handles — without this, the
 	// destroyed-light slot stays as a stale id and the next
@@ -248,6 +253,24 @@ bool Corona::SaveMapToFile(const std::wstring& name, std::wstring* outError)
 		case SceneRecipe::Kind::Grass:          primitiveStr = "GRASS"; break;
 		case SceneRecipe::Kind::BlockCharacter: primitiveStr = "block_character"; break;
 		case SceneRecipe::Kind::Asset:          primitiveStr = "asset"; break;
+		}
+		// Attached scripts (file + native). Saved alongside mesh so the
+		// loader replays the attach calls after the entity is re-spawned.
+		// Without this, gameplay-mode entities (dungeon character / enemy
+		// / sun controllers, platformer spine controllers, etc.) lose
+		// their behaviour on map reload — the entity exists but has no
+		// controller bound to it.
+		if (const auto* script = ecs.GetScript(entity); script && !script->Instances.empty())
+		{
+			out << "      scripts = {\n";
+			for (const auto& inst : script->Instances)
+			{
+				if (!inst.SourceName.empty())
+					out << "        { file = " << EscapeLuaString(PlatformWideToUtf8(inst.SourceName)) << " },\n";
+				else if (!inst.NativeScriptName.empty())
+					out << "        { native = " << EscapeLuaString(inst.NativeScriptName) << " },\n";
+			}
+			out << "      },\n";
 		}
 		out << "      mesh = {\n";
 		out << "        primitive = " << EscapeLuaString(primitiveStr) << ",\n";
@@ -307,6 +330,19 @@ bool Corona::SaveMapToFile(const std::wstring& name, std::wstring* outError)
 			entityName = *n;
 		out << "    {\n";
 		out << "      name = " << EscapeLuaString(entityName) << ",\n";
+		// Attached scripts for light entities (sun controllers, etc.).
+		if (const auto* script = ecs.GetScript(entity); script && !script->Instances.empty())
+		{
+			out << "      scripts = {\n";
+			for (const auto& inst : script->Instances)
+			{
+				if (!inst.SourceName.empty())
+					out << "        { file = " << EscapeLuaString(PlatformWideToUtf8(inst.SourceName)) << " },\n";
+				else if (!inst.NativeScriptName.empty())
+					out << "        { native = " << EscapeLuaString(inst.NativeScriptName) << " },\n";
+			}
+			out << "      },\n";
+		}
 		out << "      light = {\n";
 		out << "        type      = " << EscapeLuaString(light->Type == CoronaECS::LightType::Directional ? "directional" : "point") << ",\n";
 		// Position only matters for point lights (directional sun is shared
@@ -339,6 +375,19 @@ bool Corona::SaveMapToFile(const std::wstring& name, std::wstring* outError)
 		{
 			out << "    {\n";
 			out << "      name = " << EscapeLuaString(entityName) << ",\n";
+			// Attached scripts for the camera entity (camera controllers).
+			if (const auto* script = ecs.GetScript(activeCam); script && !script->Instances.empty())
+			{
+				out << "      scripts = {\n";
+				for (const auto& inst : script->Instances)
+				{
+					if (!inst.SourceName.empty())
+						out << "        { file = " << EscapeLuaString(PlatformWideToUtf8(inst.SourceName)) << " },\n";
+					else if (!inst.NativeScriptName.empty())
+						out << "        { native = " << EscapeLuaString(inst.NativeScriptName) << " },\n";
+				}
+				out << "      },\n";
+			}
 			out << "      camera = {\n";
 			out << "        position       = " << Vec3Lua(trans ? trans->GetPosition() : glm::vec3(0.0f)) << ",\n";
 			out << "        look_direction = " << Vec3Lua(cam->LookDirection) << ",\n";
@@ -350,6 +399,36 @@ bool Corona::SaveMapToFile(const std::wstring& name, std::wstring* outError)
 			out << "      },\n";
 			out << "    },\n";
 		}
+	}
+
+	// --- Script-only entities (HUD, game controllers) ---
+	// Entities that have a ScriptComponent but NO mesh/light/camera —
+	// they exist purely as anchor points for behaviour scripts. Without
+	// this block, dungeon HUD / platformer state controllers vanish on
+	// map reload and the gameplay loop breaks (no HUD, no input wiring).
+	for (auto entity : ecs.GetEntitiesWithScript())
+	{
+		const auto* script = ecs.GetScript(entity);
+		if (!script || script->Instances.empty())
+			continue;
+		// Skip if already serialized above as mesh / light / camera.
+		if (ecs.HasMesh(entity) || ecs.HasLight(entity) || ecs.HasCamera(entity))
+			continue;
+		std::string entityName = "scripted";
+		if (const auto* n = ecs.GetName(entity))
+			entityName = *n;
+		out << "    {\n";
+		out << "      name = " << EscapeLuaString(entityName) << ",\n";
+		out << "      scripts = {\n";
+		for (const auto& inst : script->Instances)
+		{
+			if (!inst.SourceName.empty())
+				out << "        { file = " << EscapeLuaString(PlatformWideToUtf8(inst.SourceName)) << " },\n";
+			else if (!inst.NativeScriptName.empty())
+				out << "        { native = " << EscapeLuaString(inst.NativeScriptName) << " },\n";
+		}
+		out << "      },\n";
+		out << "    },\n";
 	}
 
 	out << "  },\n";
@@ -669,6 +748,11 @@ bool Corona::LoadMapFromFile(const std::wstring& name, std::wstring* outError)
 			std::string entityName;
 			LuaGetString(L, eIdx, "name", entityName);
 
+			// Track the entity created by this entry so the `scripts`
+			// block at the end can re-attach controllers. Mesh / light /
+			// camera / script-only branches all set this.
+			CoronaECS::Entity createdEntity;
+
 			// Mesh entry?
 			lua_getfield(L, eIdx, "mesh");
 			if (lua_istable(L, -1))
@@ -783,6 +867,7 @@ bool Corona::LoadMapFromFile(const std::wstring& name, std::wstring* outError)
 						position, rotation, targetExtent, scale, useScale,
 						roughness, metallic, overrideMat,
 						visible, rayTracing, /*physicsQuery*/ true);
+					createdEntity = newEntity;
 				}
 			}
 			lua_pop(L, 1); // mesh
@@ -824,6 +909,7 @@ bool Corona::LoadMapFromFile(const std::wstring& name, std::wstring* outError)
 				if (!bAlreadyHaveDirectional)
 				{
 					CoronaECS::Entity le = CreateEntity(entityName);
+					createdEntity = le;
 					comp.RuntimeLightId = 0;
 					if (bDirectional)
 					{
@@ -861,6 +947,7 @@ bool Corona::LoadMapFromFile(const std::wstring& name, std::wstring* outError)
 			{
 				const int cIdx = lua_gettop(L);
 				CoronaECS::Entity ce = CreateEntity(entityName);
+				createdEntity = ce;
 				CoronaECS::CameraComponent comp;
 				glm::vec3 position(0.0f);
 				LuaGetVec3(L, cIdx, "position", position);
@@ -887,6 +974,51 @@ bool Corona::LoadMapFromFile(const std::wstring& name, std::wstring* outError)
 				}
 			}
 			lua_pop(L, 1); // camera
+
+			// Script-only entry (HUD / game controllers without
+			// mesh/light/camera). Detected by the entry having a
+			// `scripts` table but none of the component blocks above
+			// matched. Create a bare entity so the attach loop below
+			// has somewhere to bind to.
+			if (!createdEntity.IsValid())
+			{
+				lua_getfield(L, eIdx, "scripts");
+				const bool bHasScripts = lua_istable(L, -1);
+				lua_pop(L, 1);
+				if (bHasScripts)
+					createdEntity = CreateEntity(entityName);
+			}
+
+			// --- Re-attach scripts to the entity created above ---
+			if (createdEntity.IsValid())
+			{
+				lua_getfield(L, eIdx, "scripts");
+				if (lua_istable(L, -1))
+				{
+					const int scriptsIdx = lua_gettop(L);
+					const int scriptCount = static_cast<int>(lua_objlen(L, scriptsIdx));
+					for (int si = 1; si <= scriptCount; ++si)
+					{
+						lua_rawgeti(L, scriptsIdx, si);
+						if (lua_istable(L, -1))
+						{
+							const int sIdx = lua_gettop(L);
+							std::string filePath;
+							std::string nativeName;
+							if (LuaGetString(L, sIdx, "file", filePath) && !filePath.empty())
+							{
+								AttachEntityScriptFileForScript(createdEntity, PlatformUtf8ToWide(filePath));
+							}
+							else if (LuaGetString(L, sIdx, "native", nativeName) && !nativeName.empty())
+							{
+								AttachNativeEntityScriptForScript(createdEntity, nativeName);
+							}
+						}
+						lua_pop(L, 1);
+					}
+				}
+				lua_pop(L, 1); // scripts
+			}
 
 			lua_pop(L, 1); // entity
 		}

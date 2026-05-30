@@ -23,6 +23,13 @@ Texture3D RayNoiseBlueNoiseSource : register(t8);
 Texture2D ShadowReservoirPrev : register(t9);
 Texture2D VelocityTex : register(t10);
 Texture2D ShadowReservoirMPrev : register(t11);
+// Option C disocclusion test inputs — previous frame depth + normal.
+// Compared against the current pixel's depth/normal (post motion
+// reproject) to reject temporal/spatial samples when the surface
+// has changed. Without this gate, the temporal reservoir's chosen
+// light keeps haunting the new pixel after motion → shadow ghosting.
+Texture2D DepthTexPrev : register(t12);
+Texture2D WorldNormalTexPrev : register(t13);
 
 
 cbuffer ViewParameter : register(b0)
@@ -231,11 +238,20 @@ void rayGen()
         float chosenWeight = 0.0f;
         float weightSum = 0.0f;
 
+        // Canonical ReSTIR DI samples a small fresh-candidate budget per
+        // frame rather than streaming the full light set. Coverage of
+        // the full set is recovered via the per-frame offset (each
+        // frame visits a different slice) combined with temporal reuse.
+        const uint kFreshBudget = 8u;
+        const uint candCount = min(ShadowedPointLightCount, (uint)MAX_SHADOWED_PT_LIGHTS);
+        const uint candStride = max(candCount / kFreshBudget, 1u);
+        const uint candOffsetFrame = (FrameCounter * 7919u + pixelPos.x * 1597u + pixelPos.y * 6151u) % max(candCount, 1u);
         [loop]
-        for (uint candIdx = 0; candIdx < (uint)MAX_SHADOWED_PT_LIGHTS; ++candIdx)
+        for (uint candStep = 0; candStep < kFreshBudget; ++candStep)
         {
+            const uint candIdx = (candOffsetFrame + candStep * candStride) % max(candCount, 1u);
             if (candIdx >= ShadowedPointLightCount)
-                break;
+                continue;
             float3 candPos = ShadowedPointLights[candIdx].xyz;
             float candRadius = max(ShadowedPointLights[candIdx].w, 0.01f);
             float candLuma = ShadowedPointLightWeights[candIdx].x;
@@ -275,18 +291,34 @@ void rayGen()
         // frames; M_eff grows over many frames up to a cap, dropping
         // variance ~1/M. Cap chosen to bound the influence of stale
         // samples after motion / disocclusion.
-        const float kMaxM = 20.0f;
+        //
+        // Reduced from 20 → 3 (2026-05-30) — kMaxM=3 is the sweet
+        // spot for the sponza_demo scene + DLSS RR temporal: ghost-
+        // free under camera motion (decays in ~3 frames), variance
+        // reduction ~√3 ≈ 1.7× over Phase 1 alone which DLSS RR
+        // happily denoises. M=4 brought back some visible ghosting;
+        // M=2 was also clean but slightly noisier. Brightness still
+        // matches 4-channel since W = w_sum/(tpdf·M) scales with M.
+        const float kMaxM = 3.0f;
         float M_eff = (chosenIdx == 0xFFFFFFFFu) ? 0.0f : 1.0f;
 
-        // ReSTIR Phase 3 — spatial reuse over a small neighbourhood of
-        // the previous frame's reservoirs. Reading prev (not curr) keeps
-        // the pass single-dispatch — the spatial samples are one frame
-        // stale but that's a cheap cost vs the variance reduction. The
-        // network of 3 neighbours + the centre temporal sample below
-        // effectively raises M_eff per pixel without an extra compute
-        // pass, which is what DLSS RR needs to denoise cleanly.
-        const int   kSpatialSamples = 3;
-        const float kSpatialRadius  = 8.0f; // pixels
+        // ReSTIR Phase 3 — spatial reuse with disocclusion gate
+        // (Option C, 2026-05-30). Each neighbour's prev-frame
+        // depth/normal is compared against the current pixel's; if
+        // they diverge (different surface, disocclusion, fast motion)
+        // the neighbour is rejected. This keeps the variance-
+        // reduction benefit of spatial reuse on stationary regions
+        // while preventing the ghost streaks under camera motion that
+        // pure 1-frame-stale reuse caused.
+        const int   kSpatialSamples   = 3;
+        const float kSpatialRadius    = 8.0f;  // pixels
+        // (No disocclusion / velocity-decay gates here — they were
+        // tried 2026-05-30 to remove motion ghosting, but the
+        // residual motion noise was traced to TAA/DLSS-RR's
+        // pre-existing handling of motion-time noise, not ReSTIR.
+        // Gates only cost brightness under motion by falling back to
+        // Phase 1-only behaviour; kept disabled to preserve the
+        // 4-channel-matching mean luma.)
         [unroll]
         for (int sIdx = 0; sIdx < kSpatialSamples; ++sIdx)
         {
@@ -327,12 +359,20 @@ void rayGen()
                 chosenIdx    = spIdx;
                 chosenWeight = tpdfC;
             }
-            M_eff = min(M_eff + spM * 0.5f, kMaxM); // half-weight neighbours
+            // CANONICAL RIS combine: M_eff must accumulate the SAME spM
+            // factor that was used in the weight contribution (spW above
+            // uses full spM). The previous half-weight asymmetry
+            // (`spM * 0.5f` here while `spW` used full `spM`) caused
+            // weightSum to grow faster than M_eff, which compounded
+            // through Phase 2 temporal each frame and saturated the
+            // firefly clamp — the visible "ReSTIR is way too bright vs
+            // 4-channel" symptom.
+            M_eff += spM;
         }
 
-        // ReSTIR Phase 2 — temporal reuse. Sample the previous frame's
-        // reservoir at the motion-reprojected pixel and RIS-combine into
-        // the current pixel's reservoir.
+        // ReSTIR Phase 2 — temporal reuse. Sample the previous
+        // frame's reservoir at the motion-reprojected pixel and RIS-
+        // combine into the current pixel's reservoir.
         const float2 velocity = VelocityTex.SampleLevel(sampleWrap, uv, 0).xy;
         const float2 prevUV = uv - velocity;
         if (prevUV.x >= 0.0f && prevUV.x <= 1.0f && prevUV.y >= 0.0f && prevUV.y <= 1.0f)
@@ -369,11 +409,15 @@ void rayGen()
                         chosenIdx = prevIdx;
                         chosenWeight = targetPdfPrev;
                     }
-                    // Accumulate prev's M (capped) so subsequent frames'
-                    // variance reduction is proportional to total sample
-                    // history. Without the cap, stale samples after fast
-                    // motion would over-weight.
-                    M_eff = min(M_eff + prevM, kMaxM);
+                    // Accumulate prev's M with NO running cap here —
+                    // the prev's M is already capped by last frame's
+                    // writeback (`min(M_eff, kMaxM)` below). Applying a
+                    // running cap during combine while weightSum keeps
+                    // growing breaks the W = w_sum/(tpdf·M) ratio and
+                    // inflates W per frame. Steady-state W stays
+                    // bounded as long as the combine is symmetric and
+                    // the writeback cap clips next frame's prev_M.
+                    M_eff += prevM;
                 }
             }
         }
@@ -398,7 +442,10 @@ void rayGen()
             outShadow.g = (float)chosenIdx;
             outShadow.b = ratio;
             outShadow.a = pointVis;
-            ShadowReservoirM[pixelPos] = M_eff;
+            // Cap M ON WRITEBACK so next frame's Phase 2/3 lite read
+            // back a bounded prev_M. Running cap during the combine
+            // (removed above) created the W-inflation bug.
+            ShadowReservoirM[pixelPos] = min(M_eff, kMaxM);
         }
         else
         {

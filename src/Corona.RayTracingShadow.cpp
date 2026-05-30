@@ -45,6 +45,13 @@ void Corona::InitRaytracingShadowPass()
 		// Phase 2b — per-pixel M tracking. Separate single-channel buffer.
 		TEMP_PSO_RT_SHADOW->BindUAV("global", "ShadowReservoirM", 1);
 		TEMP_PSO_RT_SHADOW->BindSRV("global", "ShadowReservoirMPrev", 11);
+		// Disocclusion test inputs for Option C (temporal/spatial reuse
+		// rejection). Previous-frame depth + normal so Phase 2 can
+		// reject the temporal sample when the reprojected surface
+		// differs from current (motion-vector lag, dynamic geometry,
+		// shadow caster motion).
+		TEMP_PSO_RT_SHADOW->BindSRV("global", "DepthTexPrev", 12);
+		TEMP_PSO_RT_SHADOW->BindSRV("global", "WorldNormalTexPrev", 13);
 
 		TEMP_PSO_RT_SHADOW->BindCBV("global", "ViewParameter", 0, sizeof(RTShadowViewParamCB), 1);
 		TEMP_PSO_RT_SHADOW->BindSampler("global", "sampleWrap", 0);
@@ -65,6 +72,32 @@ void Corona::InitRaytracingShadowPass()
 		{
 			PSO_RT_SHADOW = TEMP_PSO_RT_SHADOW;
 		}
+}
+
+void Corona::InitShadowSpatialReusePass()
+{
+	// ReSTIR DI Phase 3 — proper 2-pass spatial reuse. Compiles with
+	// cs_6_5 so the shader can RayQuery fresh visibility for the post-
+	// spatial chosen light. SRV t-registers must match the .hlsl
+	// layout (see RaytracedShadowSpatialReuse.hlsl).
+	shared_ptr<ComputePipelineStateObject> tempPSO = renderBackend->CreateComputePipelineStateObject();
+	if (!tempPSO)
+		return;
+	tempPSO->BindSRV("PreSpatialReservoir", 0, 1);
+	tempPSO->BindSRV("PreSpatialM",         1, 1);
+	tempPSO->BindSRV("DepthTex",            2, 1);
+	tempPSO->BindSRV("WorldNormalTex",      3, 1);
+	tempPSO->BindSRV("GeoNormalTex",        4, 1);
+	tempPSO->BindSRV("gRtScene",            5, 1);
+	tempPSO->BindUAV("ShadowResult",        0);
+	tempPSO->BindUAV("ShadowReservoirM",    1);
+	tempPSO->BindCBV("ViewParameter",       0, sizeof(RTShadowViewParamCB));
+	tempPSO->BindSampler("sampleWrap",      0);
+	const bool ok = tempPSO->InitCSWithInlineRT(
+		GetAssetFullPath(L"Shaders\\RaytracedShadowSpatialReuse.hlsl"),
+		"main");
+	if (ok)
+		PSO_SHADOW_SPATIAL_REUSE = tempPSO;
 }
 
 void Corona::RaytraceShadowPass()
@@ -169,15 +202,38 @@ void Corona::RaytraceShadowPass()
 	}
 	RTShadowViewParam.ShadowedPointLightCount = shadowedCount;
 
-	renderBackend->TransitionTexture(ShadowBuffer.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
+	// Phase 3 proper 2-pass:
+	//   raygen  writes  ShadowBufferPreSpatial + ShadowReservoirMBufferPreSpatial
+	//   compute reads   those, writes the final ShadowBuffer + ShadowReservoirMBuffer
+	// When the proper 2-pass PSO isn't available (e.g. on hardware
+	// without DXR Tier 1.1, or Vulkan path), fall back to writing
+	// directly into the final ShadowBuffer.
+	//
+	// NOTE: currently OFF by default (bEnableShadowSpatialReuseCompute
+	// = false) because the simple M-weighted RIS combine in the
+	// compute shader produces an over-brightness bias under sponza —
+	// proper balance-heuristic MIS is the follow-up. The
+	// infrastructure (PreSpatial buffers, compute PSO with inline RT,
+	// cs_6_5 compile path) stays in place so re-enabling once MIS is
+	// implemented is a one-flag flip.
+	const bool bUseSpatialReuseCompute =
+		bEnableShadowSpatialReuseCompute &&
+		bEnableReSTIRDirectShadow &&
+		PSO_SHADOW_SPATIAL_REUSE != nullptr &&
+		ShadowBufferPreSpatial != nullptr &&
+		ShadowReservoirMBufferPreSpatial != nullptr;
+	Texture* const raygenShadowTarget = bUseSpatialReuseCompute ? ShadowBufferPreSpatial.get() : ShadowBuffer.get();
+	Texture* const raygenMTarget      = bUseSpatialReuseCompute ? ShadowReservoirMBufferPreSpatial.get() : ShadowReservoirMBuffer.get();
 
-	if (ShadowReservoirMBuffer)
-		renderBackend->TransitionTexture(ShadowReservoirMBuffer.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
+	renderBackend->TransitionTexture(raygenShadowTarget, EResourceState::ShaderRead, EResourceState::UnorderedAccess);
+
+	if (raygenMTarget)
+		renderBackend->TransitionTexture(raygenMTarget, EResourceState::ShaderRead, EResourceState::UnorderedAccess);
 
 	RTPassBuilder pass(*this, PSO_RT_SHADOW);
 	pass.BeginScene()
-		.SetTextureUAV("global", "ShadowResult", ShadowBuffer.get())
-		.SetTextureUAV("global", "ShadowReservoirM", ShadowReservoirMBuffer.get())
+		.SetTextureUAV("global", "ShadowResult", raygenShadowTarget)
+		.SetTextureUAV("global", "ShadowReservoirM", raygenMTarget)
 		.SetAccelerationStructure("global", "gRtScene", TLAS)
 		.SetTextureSRV("global", "DepthTex", UnjitteredDepthBuffers[ColorBufferWriteIndex].get())
 		.SetTextureSRV("global", "WorldNormalTex", NormalBuffers[ColorBufferWriteIndex].get())
@@ -187,15 +243,45 @@ void Corona::RaytraceShadowPass()
 			ShadowReservoirPrevBuffer ? ShadowReservoirPrevBuffer.get() : ShadowBuffer.get())
 		.SetTextureSRV("global", "ShadowReservoirMPrev",
 			ShadowReservoirMPrevBuffer ? ShadowReservoirMPrevBuffer.get() : ShadowBuffer.get())
+		.SetTextureSRV("global", "DepthTexPrev",
+			UnjitteredDepthBuffers[1 - ColorBufferWriteIndex] ? UnjitteredDepthBuffers[1 - ColorBufferWriteIndex].get() : UnjitteredDepthBuffers[ColorBufferWriteIndex].get())
+		.SetTextureSRV("global", "WorldNormalTexPrev",
+			NormalBuffers[1 - ColorBufferWriteIndex] ? NormalBuffers[1 - ColorBufferWriteIndex].get() : NormalBuffers[ColorBufferWriteIndex].get())
 		.SetTextureSRV("global", "VelocityTex", VelocityBuffer.get())
 		.SetCBVValue("global", "ViewParameter", &RTShadowViewParam)
 		.SetSampler("global", "sampleWrap", samplerWrap.get());
 	pass.BindSceneHitPrograms();
 	pass.Dispatch(GetRenderWidth(), GetRenderHeight());
 
-	renderBackend->TransitionTexture(ShadowBuffer.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
-	if (ShadowReservoirMBuffer)
+	renderBackend->TransitionTexture(raygenShadowTarget, EResourceState::UnorderedAccess, EResourceState::ShaderRead);
+	if (raygenMTarget)
+		renderBackend->TransitionTexture(raygenMTarget, EResourceState::UnorderedAccess, EResourceState::ShaderRead);
+
+	// --- Phase 3 spatial reuse compute pass ---
+	if (bUseSpatialReuseCompute)
+	{
+		renderBackend->EmitGpuCrashMarker("ShadowSpatialReusePass");
+		renderBackend->TransitionTexture(ShadowBuffer.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
+		renderBackend->TransitionTexture(ShadowReservoirMBuffer.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
+
+		PSO_SHADOW_SPATIAL_REUSE->SetTextureSRV("PreSpatialReservoir", ShadowBufferPreSpatial.get());
+		PSO_SHADOW_SPATIAL_REUSE->SetTextureSRV("PreSpatialM",         ShadowReservoirMBufferPreSpatial.get());
+		PSO_SHADOW_SPATIAL_REUSE->SetTextureSRV("DepthTex",            UnjitteredDepthBuffers[ColorBufferWriteIndex].get());
+		PSO_SHADOW_SPATIAL_REUSE->SetTextureSRV("WorldNormalTex",      NormalBuffers[ColorBufferWriteIndex].get());
+		PSO_SHADOW_SPATIAL_REUSE->SetTextureSRV("GeoNormalTex",        GeomNormalBuffers[ColorBufferWriteIndex].get());
+		PSO_SHADOW_SPATIAL_REUSE->SetAccelerationStructure("gRtScene", TLAS);
+		PSO_SHADOW_SPATIAL_REUSE->SetTextureUAV("ShadowResult",        ShadowBuffer.get());
+		PSO_SHADOW_SPATIAL_REUSE->SetTextureUAV("ShadowReservoirM",    ShadowReservoirMBuffer.get());
+		PSO_SHADOW_SPATIAL_REUSE->SetCBVValue("ViewParameter",         &RTShadowViewParam);
+		PSO_SHADOW_SPATIAL_REUSE->SetSampler("sampleWrap",             samplerWrap.get());
+		PSO_SHADOW_SPATIAL_REUSE->Apply();
+		const UINT groupX = (GetRenderWidth() + 7) / 8;
+		const UINT groupY = (GetRenderHeight() + 7) / 8;
+		dx12_rhi->GetGraphicsCommandList()->Dispatch(groupX, groupY, 1);
+
+		renderBackend->TransitionTexture(ShadowBuffer.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
 		renderBackend->TransitionTexture(ShadowReservoirMBuffer.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
+	}
 
 	// ReSTIR Phase 2 temporal feedback: cache this frame's reservoirs for
 	// next-frame reproject via raw DX12 CopyResource. Only meaningful in

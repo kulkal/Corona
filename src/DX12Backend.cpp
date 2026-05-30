@@ -2192,6 +2192,33 @@ bool D3D12ComputePipelineStateObject::InitCS(const std::wstring& shaderFile, con
 	return bInit;
 }
 
+bool D3D12ComputePipelineStateObject::InitCSWithInlineRT(const std::wstring& shaderFile, const std::string& entryPoint)
+{
+	// Same as InitCS but compiles with cs_6_5 so the shader can use
+	// RayQuery for inline ray tracing. Requires the device to support
+	// D3D12_RAYTRACING_TIER_1_1; the caller is responsible for not
+	// invoking this on hardware without it.
+	if (!Owner)
+		return false;
+	if (!PSO)
+		PSO = std::make_shared<PipelineStateObject>();
+
+	PSO->Owner = Owner;
+	PSO->IsCompute = true;
+	PSO->DebugName = MakePipelineDebugName(L"ComputePSO_InlineRT", shaderFile, entryPoint);
+	PSO->computePSODesc = {};
+	{
+		ComPtr<ID3DBlob> csBlob = compileShaderDXC(Owner, shaderFile.c_str(), entryPoint, L"cs_6_5");
+		if (!csBlob)
+			return false;
+		const uint8_t* src = static_cast<const uint8_t*>(csBlob->GetBufferPointer());
+		PSO->cs.Data.assign(src, src + csBlob->GetBufferSize());
+	}
+
+	const bool bInit = PSO->Init();
+	return bInit;
+}
+
 void D3D12ComputePipelineStateObject::Apply()
 {
 	if (!PSO)
@@ -2213,6 +2240,17 @@ void D3D12ComputePipelineStateObject::SetTextureSRV(const std::string& name, Tex
 {
 	if (PSO && texture)
 		PendingSRVs[name] = texture->GpuHandleSRV;
+}
+
+void D3D12ComputePipelineStateObject::SetAccelerationStructure(const std::string& name, const std::shared_ptr<RTAS>& rtas)
+{
+	// TLAS is bound as a regular SRV t-register from the compute shader's
+	// perspective (HLSL declares it as `RaytracingAccelerationStructure`).
+	// The GPU descriptor handle already points at the AS view created
+	// during TLAS build; just queue it the same way other SRVs are.
+	D3D12RTAS* dx12RTAS = dynamic_cast<D3D12RTAS*>(rtas.get());
+	if (PSO && dx12RTAS)
+		PendingSRVs[name] = dx12RTAS->GPUHandle;
 }
 
 void D3D12ComputePipelineStateObject::SetTextureUAV(const std::string& name, Texture* texture)

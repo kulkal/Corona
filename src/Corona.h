@@ -240,6 +240,16 @@ private:
 	// is the CopyResource'd snapshot used by the next frame's combine.
 	shared_ptr<Texture> ShadowReservoirMBuffer;
 	shared_ptr<Texture> ShadowReservoirMPrevBuffer;
+	// Phase 3 proper 2-pass scratch buffers. The RT raygen writes here
+	// (Phase 1 RIS + Phase 2 temporal only); the spatial-reuse compute
+	// pass reads these and writes the final ShadowBuffer +
+	// ShadowReservoirMBuffer that LightingPS consumes. Splitting the
+	// pass lets the spatial neighbour sampling see CURRENT-frame
+	// reservoirs (not 1-frame stale prev) and re-trace visibility via
+	// RayQuery so the spatially-chosen light's shadow is correct at
+	// this pixel.
+	shared_ptr<Texture> ShadowBufferPreSpatial;
+	shared_ptr<Texture> ShadowReservoirMBufferPreSpatial;
 	shared_ptr<Texture> AmbientOcclusionBuffer;
 	shared_ptr<Texture> SkyLightingBuffer;
 	glm::mat4x4 MobileShadowViewProjMat = glm::mat4x4(1.0f);
@@ -595,6 +605,10 @@ private:
 	RTShadowViewParamCB RTShadowViewParam;
 	
 	shared_ptr<RTPipelineStateObject> PSO_RT_SHADOW;
+	// Phase 3 spatial-reuse compute PSO. Uses inline RT (RayQuery) so
+	// it can trace fresh visibility for the spatially-chosen light.
+	// Reads the PreSpatial reservoirs; writes the final ShadowBuffer.
+	shared_ptr<ComputePipelineStateObject> PSO_SHADOW_SPATIAL_REUSE;
 	bool bShadowOutputValidThisFrame = false;
 
 	// RT ambient occlusion. This is intentionally short-range contact AO; diffuse
@@ -1132,6 +1146,14 @@ private:
 	// ReSTIR is now the default — it handles arbitrary light counts; the
 	// 4-channel path stays as a fallback for A/B comparison.
 	bool bEnableReSTIRDirectShadow = true;
+	// Phase 3 proper 2-pass spatial reuse compute. Disabled by
+	// default — the current implementation over-brightens sponza
+	// because the simple M-weighted RIS combine doesn't properly MIS-
+	// reweight neighbours whose chosen lights have a higher tpdf at
+	// the current pixel than the centre's. Re-enable once balance-
+	// heuristic MIS is implemented (or set the kSpatialSamples in the
+	// .hlsl back to 4 with a proper MIS pass).
+	bool bEnableShadowSpatialReuseCompute = false;
 	bool bEnableSkyLighting = false;
 	bool bEnableRayTracedSkyLighting = true;
 	float RTAOIndirectStrength = 0.25f;
@@ -2192,6 +2214,7 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	PointLightState* FindPointLightByEntity(CoronaECS::Entity entity);
 	const PointLightState* FindPointLightByEntity(CoronaECS::Entity entity) const;
 	void InitRaytracingShadowPass();
+	void InitShadowSpatialReusePass();
 	void InitRaytracingReflectionPass();
 	shared_ptr<RTPipelineStateObject> CreateRaytracingReflectionPSO(bool bUseSER);
 	bool InitRaytracingReflectionSERPass();

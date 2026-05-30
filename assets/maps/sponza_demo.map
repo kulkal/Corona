@@ -1,7 +1,7 @@
 -- Corona map (auto-generated; safe to edit by hand)
 return {
   version = 1,
-  name    = "sponza",
+  name    = "sponza_demo",
   entities = {
     {
       name = "SponzaModel",
@@ -1579,6 +1579,13 @@ return {
         near_plane     = 10,
         far_plane      = 20000,
         active         = true,
+      },
+    },
+    {
+      name = "World",
+      scripts = {
+        { file = "C:\\dev\\Corona\\src\\scripts/startup\\sponza_demo\\010_sponza_demo_scene.luau" },
+        { file = "C:\\dev\\Corona\\src\\scripts/startup\\common\\040_imgui_controls.luau" },
       },
     },
   },

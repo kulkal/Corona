@@ -631,6 +631,7 @@ void Corona::InitRTPSO()
 	};
 
 	timePass(L"RaytracingShadow", [&]() { InitRaytracingShadowPass(); });
+	timePass(L"ShadowSpatialReuse", [&]() { InitShadowSpatialReusePass(); });
 	timePass(L"RaytracingAO", [&]() { InitRaytracingAOPass(); });
 	timePass(L"RaytracingSkyLighting", [&]() { InitRaytracingSkyLightingPass(); });
 	if (bInitReflectionRT)

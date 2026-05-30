@@ -2376,6 +2376,15 @@ void Corona::RecreateRenderResolutionResources()
 	ShadowReservoirMPrevBuffer = createTexture2D(ETextureFormat::R32Float,
 		TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
 	NAME_D3D12_OBJECT(ShadowReservoirMPrevBuffer->resource);
+	// Phase 3 proper 2-pass: RT raygen writes to these; compute spatial
+	// pass reads them and writes the final ShadowBuffer +
+	// ShadowReservoirMBuffer.
+	ShadowBufferPreSpatial = createTexture2D(ETextureFormat::RGBA32Float,
+		TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
+	NAME_D3D12_OBJECT(ShadowBufferPreSpatial->resource);
+	ShadowReservoirMBufferPreSpatial = createTexture2D(ETextureFormat::R32Float,
+		TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
+	NAME_D3D12_OBJECT(ShadowReservoirMBufferPreSpatial->resource);
 
 	AmbientOcclusionBuffer = createTexture2D(ETextureFormat::RGBA16Float, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1, glm::vec4(1.0f));
 	NAME_D3D12_OBJECT(AmbientOcclusionBuffer->resource);
@@ -9592,6 +9601,13 @@ void Corona::LoadAssets()
 		ShadowReservoirMPrevBuffer = createTexture2D(ETextureFormat::R32Float,
 			TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
 		NAME_D3D12_OBJECT(ShadowReservoirMPrevBuffer->resource);
+		// Phase 3 proper 2-pass scratch buffers.
+		ShadowBufferPreSpatial = createTexture2D(ETextureFormat::RGBA32Float,
+			TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
+		NAME_D3D12_OBJECT(ShadowBufferPreSpatial->resource);
+		ShadowReservoirMBufferPreSpatial = createTexture2D(ETextureFormat::R32Float,
+			TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
+		NAME_D3D12_OBJECT(ShadowReservoirMBufferPreSpatial->resource);
 
 		AmbientOcclusionBuffer = createTexture2D(ETextureFormat::RGBA16Float, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1, glm::vec4(1.0f));
 
@@ -11754,7 +11770,13 @@ void Corona::OnRender()
 	double tNewFrame = 0.0, tConsole = 0.0, tSceneInsp = 0.0, tAssetExp = 0.0, tToolbox = 0.0;
 	double tLegacyHud = 0.0, tImguiRender = 0.0, tRenderDraw = 0.0;
 	double tLuauQueued = 0.0, tLuauImgui = 0.0;
-	if (!bSuppressImguiForCapture && bImguiInitialized && (bShowImgui || CORONA_PLATFORM_MOBILE))
+	// Outer gate: always run imgui frame when initialized so the FPS
+	// overlay below can be drawn even when bShowImgui is off. Sub-
+	// windows (Console / SceneInspector / AssetExplorer / Toolbox /
+	// Luau imgui) are gated by `bShowImgui` further below — pressing
+	// 'I' to hide UI now only skips those heavy windows, not the
+	// imgui frame setup or the FPS text overlay.
+	if (!bSuppressImguiForCapture && bImguiInitialized)
 	{
 		const auto imguiStageStart = CpuClock::now();
 
@@ -11763,6 +11785,16 @@ void Corona::OnRender()
 		ImGui::NewFrame();
 		const auto imguiStageNewFrame = CpuClock::now();
 		tNewFrame = ElapsedMilliseconds(imguiStageStart, imguiStageNewFrame);
+
+		// Hoisted out of the inner gate so the LegacyHud timing line
+		// and the `if (bShowImgui)` debug-panel block below can read
+		// them when the inner gate didn't run.
+		auto imguiStageToolbox = imguiStageNewFrame;
+		bool bUseLuauImguiControls = false;
+
+		// Inner gate: heavy sub-windows only when UI visible.
+		if (bShowImgui || CORONA_PLATFORM_MOBILE)
+		{
 
 		// Console (~ / `) — lazy-init, then poll async TripoSR jobs and
 		// handle key toggle. RouteGlobal so the InputText inside the
@@ -11794,14 +11826,14 @@ void Corona::OnRender()
 		if (!Toolbox)
 			Toolbox = std::make_unique<CoronaToolbox>(this);
 		Toolbox->RenderImGui();
-		const auto imguiStageToolbox = CpuClock::now();
+		imguiStageToolbox = CpuClock::now();
 		tToolbox = ElapsedMilliseconds(imguiStageAssetExp, imguiStageToolbox);
 
 #if CORONA_PLATFORM_MOBILE
 		DrawMobileVirtualControls();
 #endif
 
-		const bool bUseLuauImguiControls =
+		bUseLuauImguiControls =
 			bEnableStartupLuauScript &&
 			ScriptState &&
 			EntityWorld.GetScriptComponentCount() > 0;
@@ -11814,19 +11846,28 @@ void Corona::OnRender()
 		DrawMobilePerformanceOverlay();
 #endif
 
+		} // end inner gate (bShowImgui || MOBILE)
+
+		// FPS overlay — always drawn while imgui frame is active so
+		// pressing 'I' to hide debug panels doesn't kill the
+		// performance readout. Uses ForegroundDrawList so it doesn't
+		// require an open window.
+		{
+			char fpsText[64];
+			sprintf(fpsText, "FPS : %u fps", m_timer.GetFramesPerSecond());
+			const ImVec2 fpsTextPos(10.0f, 8.0f);
+			ImDrawList* foregroundDrawList = ImGui::GetForegroundDrawList();
+			foregroundDrawList->AddText(ImVec2(fpsTextPos.x + 1.0f, fpsTextPos.y + 1.0f), IM_COL32(0, 0, 0, 180), fpsText);
+			foregroundDrawList->AddText(fpsTextPos, IM_COL32(255, 255, 255, 235), fpsText);
+		}
+
 		if (bShowImgui)
 		{
 		bool show_demo_window = true;
 
 		//ImGui::ShowDemoWindow(&show_demo_window);
 
-		char fpsText[64];
-		sprintf(fpsText, "FPS : %u fps", m_timer.GetFramesPerSecond());
-
-		const ImVec2 fpsTextPos(10.0f, 8.0f);
 		ImDrawList* foregroundDrawList = ImGui::GetForegroundDrawList();
-		foregroundDrawList->AddText(ImVec2(fpsTextPos.x + 1.0f, fpsTextPos.y + 1.0f), IM_COL32(0, 0, 0, 180), fpsText);
-		foregroundDrawList->AddText(fpsTextPos, IM_COL32(255, 255, 255, 235), fpsText);
 
 		if (bShowCullingTextOverlay)
 		{
@@ -13044,6 +13085,14 @@ if (ImGui::Button("Reset Accumulation"))
 			DumpTexturePNG(LightingBuffer.get(), base + L"_lighting.png", EResourceState::ShaderRead);
 		if (AlbedoBuffer)
 			DumpTexturePNG(AlbedoBuffer.get(), base + L"_albedo.png", EResourceState::ShaderRead);
+		// DLSS RR output (post-reconstruction, pre-tonemap). When the user
+		// reports "ReSTIR + DLSS RR shows noise after camera-still N
+		// frames", this is the buffer to inspect — if LightingBuffer is
+		// noise-free but DLSSRRBuffer has the noise, the reconstruction
+		// network is the culprit; if both are noisy, ReSTIR didn't
+		// converge.
+		if (DLSSRRBuffer)
+			DumpTexturePNG(DLSSRRBuffer.get(), base + L"_dlssrr.png", EResourceState::ShaderRead);
 		return;
 	}
 	if (false && bCommandLineSkeletalTestScreenshot && !bSkeletalTestScreenshotDone &&
