@@ -590,7 +590,13 @@ private:
 		// For Option A: 0..3 (number of channel-packed lights).
 		// For ReSTIR : 0..MaxPointLights (number of candidate lights iterated).
 		UINT32 ShadowedPointLightCount = 0;
-		UINT32 _padding2 = 0;
+		// ReSTIR DI temporal M cap. Higher = more aggressive history
+		// retention (smoother but slower to respond to motion); lower =
+		// more current-frame-dominant (responsive but noisier on still).
+		// Empirical sweet spot on Sponza: 3.0. Runtime-tunable so the
+		// user can sweep without recompile. Read by Phase 2 temporal
+		// writeback (`min(M_eff, ShadowMaxM)`).
+		float ShadowMaxM = 3.0f;
 		// Up to MaxPointLightsForShadowCB candidates. Option A reads only
 		// the first 3 (channel-pack hard cap); ReSTIR Phase 1 iterates
 		// all valid entries for per-pixel RIS. 128 * 32 B = 4 KB — fits
@@ -1146,6 +1152,10 @@ private:
 	// ReSTIR is now the default — it handles arbitrary light counts; the
 	// 4-channel path stays as a fallback for A/B comparison.
 	bool bEnableReSTIRDirectShadow = true;
+	// Runtime-tunable temporal M cap for the ReSTIR Phase 2 reservoir.
+	// Defaults to the empirical sweet spot tuned on Sponza + DLSS RR.
+	// Surfaced via the Sponza demo's imgui panel.
+	float ReSTIRShadowMaxM = 3.0f;
 	// Phase 3 proper 2-pass spatial reuse compute. Disabled by
 	// default — the current implementation over-brightens sponza
 	// because the simple M-weighted RIS combine doesn't properly MIS-

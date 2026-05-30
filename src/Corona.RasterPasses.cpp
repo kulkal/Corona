@@ -1433,9 +1433,24 @@ void Corona::LightingPass()
 		if (!pointLight.bEnabled || Param.PointLightCount >= MaxPointLights)
 			continue;
 
+		// Sphere-AABB frustum cull. A light whose influence sphere
+		// (centre = position, radius = falloff radius) doesn't touch
+		// the view frustum can't reach any visible pixel — the
+		// `rangeAtten = saturate(1 - dist/radius)` term goes to 0
+		// before any in-frustum surface is reached. Dropping it from
+		// the CB means ReSTIR's per-pixel candidate budget
+		// (`kFreshBudget = 8` in the raygen) only spends slots on
+		// reachable lights, which roughly halves variance on a
+		// scene where most lights illuminate off-screen geometry.
+		const float radius = std::max(pointLight.Radius, 0.01f);
+		const glm::vec3 sphereMin = pointLight.Position - glm::vec3(radius);
+		const glm::vec3 sphereMax = pointLight.Position + glm::vec3(radius);
+		if (!IsWorldAabbInViewFrustum(sphereMin, sphereMax))
+			continue;
+
 		const UINT32 pointLightIndex = Param.PointLightCount++;
 		Param.PointLights[pointLightIndex].PositionAndRadius =
-			glm::vec4(pointLight.Position, std::max(pointLight.Radius, 0.01f));
+			glm::vec4(pointLight.Position, radius);
 		Param.PointLights[pointLightIndex].ColorAndIntensity =
 			glm::vec4(glm::max(pointLight.Color, glm::vec3(0.0f)), std::max(pointLight.Intensity, 0.0f));
 		lightSrcGlobalIndex[pointLightIndex] = srcIdx;

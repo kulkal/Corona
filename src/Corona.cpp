@@ -6570,6 +6570,13 @@ bool Corona::LoadSceneState()
 			pointLight.Radius = std::clamp(pointLight.Radius, 1.0f, 100000.0f);
 			pointLight.Intensity = std::max(0.0f, pointLight.Intensity);
 			pointLight.Color = glm::max(pointLight.Color, glm::vec3(0.0f));
+			// Legacy scene_state.cfg path. New saves do not emit
+			// point_light entries (the .map serializer owns lights now).
+			// Loading is kept as a no-op-friendly path: anything pushed
+			// here gets wiped by ClearScriptSpawnedScene during the
+			// subsequent load_map call anyway, so leaving the parse in
+			// place is just backward-compat for partially-migrated
+			// configs and a hand-edit hatch.
 			PointLights.push_back(pointLight);
 			maxLoadedPointLightId = std::max(maxLoadedPointLightId, pointLight.Id);
 		}
@@ -6645,24 +6652,14 @@ void Corona::SaveSceneState()
 		}
 	}
 
-	file << "next_point_light_id " << NextPointLightId << '\n';
-	file << "point_light_count " << PointLights.size() << '\n';
-	for (const PointLightState& pointLight : PointLights)
-	{
-		file <<
-			"point_light " <<
-			pointLight.Id << ' ' <<
-			(pointLight.bEnabled ? 1 : 0) << ' ' <<
-			pointLight.Position.x << ' ' <<
-			pointLight.Position.y << ' ' <<
-			pointLight.Position.z << ' ' <<
-			pointLight.Radius << ' ' <<
-			pointLight.Intensity << ' ' <<
-			pointLight.Color.x << ' ' <<
-			pointLight.Color.y << ' ' <<
-			pointLight.Color.z << '\n';
-	}
-
+	// Point lights are persisted via the .map serializer now (see
+	// SaveMapToFile / LoadMapFromFile). The scene_state.cfg path
+	// only kept them because the map format didn't exist yet, and
+	// having two stores caused divergence: cfg → PointLights[]
+	// (bypassed ECS), map → ECS entities (Inspector-visible). The
+	// dual write meant ECS got wiped by ClearScriptSpawnedScene
+	// during load_map while the cfg copy kept rendering, producing
+	// "lights visible in scene but missing from Inspector".
 	bPersistentSceneStateDirty = false;
 }
 

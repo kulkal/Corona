@@ -191,6 +191,14 @@ void Corona::ClearScriptSpawnedScene()
 		EntityWorld.DestroyEntity(e);
 	for (auto e : EntityWorld.GetEntitiesWithLight())
 		EntityWorld.DestroyEntity(e);
+	// Drop the runtime PointLights[] mirror — without this, lights
+	// loaded from scene_state.cfg (legacy path) or any prior runtime
+	// state survive past the ECS wipe and load_map then appends the
+	// .map's lights on top, duplicating the count and breaking ECS
+	// <-> PointLights[] index parity that LightingPS depends on.
+	for (PointLightState& pl : PointLights)
+		MarkPointLightRenderRemoved(pl.Id);
+	PointLights.clear();
 	// Cameras: handled by iterating active camera entity if present.
 	const auto activeCam = EntityWorld.GetActiveCameraEntity();
 	if (activeCam.IsValid())

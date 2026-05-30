@@ -8148,6 +8148,7 @@ bool Corona::SetLuauUiValueForScript(const std::string& name, lua_State* L, int 
 	if (setBool("rt_diffuse_gi_ser", bEnableRTDiffuseGISER, true)) return true;
 	if (setBool("enable_rtao", bEnableRTAO, true)) return true;
 	if (setBool("enable_restir_direct_shadow", bEnableReSTIRDirectShadow)) return true;
+	if (setFloat("restir_shadow_max_m", ReSTIRShadowMaxM)) return true;
 	if (setBool("enable_sky_lighting", bEnableSkyLighting, true)) return true;
 	if (setBool("enable_ray_traced_sky_lighting", bEnableRayTracedSkyLighting, true)) return true;
 	if (setFloat("sun_angular_radius", RTShadowViewParam.ShadowLightRadius, true)) return true;
@@ -8330,9 +8331,12 @@ bool Corona::RunLuauUiCommandForScript(const std::string& name, lua_State* L, in
 		pointLight.Intensity = 16.0f;
 		pointLight.Color = glm::vec3(1.0f, 0.92f, 0.78f);
 		PointLights.push_back(pointLight);
+		// Mirror into ECS so the Scene Inspector lists this light and
+		// SaveMapToFile (which walks GetEntitiesWithLight()) can persist
+		// it. Without this the "Add Point Light" imgui control creates
+		// a renderable-but-invisible-to-inspector light.
+		CreatePointLightEntity(PointLights.back());
 		MarkPointLightRenderDirty(pointLight.Id, kPointLightDirtyAll);
-		bPersistentSceneStateDirty = true;
-		SaveSceneState();
 		return true;
 	}
 	if (name == "remove_point_light")
@@ -8436,6 +8440,10 @@ bool Corona::RunLuauUiCommandForScript(const std::string& name, lua_State* L, in
 			const float b = rand01();
 			pointLight.Color = glm::vec3(0.2f + r * 0.8f, 0.2f + g * 0.8f, 0.2f + b * 0.8f);
 			PointLights.push_back(pointLight);
+			// Mirror into ECS — same reasoning as `add_point_light`.
+			// Without this, demo-spawned lights render but never appear
+			// in the Scene Inspector or persist via save_map.
+			CreatePointLightEntity(PointLights.back());
 			MarkPointLightRenderDirty(pointLight.Id, kPointLightDirtyAll);
 			spawnedIds.push_back(pointLight.Id);
 		}

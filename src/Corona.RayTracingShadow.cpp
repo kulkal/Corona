@@ -117,6 +117,11 @@ void Corona::RaytraceShadowPass()
 	RTShadowViewParam.FrameCounter = RenderFrameIndex;
 	RTShadowViewParam.BlueNoiseOffsetStride = RTGIViewParam.BlueNoiseOffsetStride;
 	RTShadowViewParam.NoiseMode = RenderFrameRayNoiseMode;
+	// Push the runtime-tunable temporal M cap. Clamp to a sensible
+	// range so a slider drag past the rails doesn't produce a
+	// degenerate reservoir (M < 1 effectively disables temporal reuse;
+	// M > 64 makes the reservoir refuse to forget anything).
+	RTShadowViewParam.ShadowMaxM = std::clamp(ReSTIRShadowMaxM, 1.0f, 64.0f);
 
 	// Shadow mode handling:
 	//   Option A (default): first 3 enabled lights packed into ShadowBuffer
@@ -141,14 +146,34 @@ void Corona::RaytraceShadowPass()
 	uint32_t shadowedCount = 0;
 	if (bEnableReSTIRDirectShadow)
 	{
+		// MUST mirror the LightingPS feed in `RasterPasses.cpp` exactly
+		// (same iteration order over RenderWorld.PointLights, same
+		// filter predicates) so the chosen index ReSTIR writes into
+		// ShadowBuffer.g is a valid index into LightingPS's
+		// PointLights[]. Diverging either filter breaks CB-index
+		// parity → shading targets a different light than the one
+		// the shadow ray was cast for.
+		//
+		// Filter:
+		//   1. `bEnabled` — same as LightingPS.
+		//   2. `Intensity > 0` is OMITTED here even though it'd save a
+		//      candidate slot, because LightingPS doesn't filter on it
+		//      (see RasterPasses.cpp:1430+). Adding it would shift
+		//      indices.
+		//   3. Sphere-frustum cull — also applied to LightingPS feed.
 		for (const PointLightState& pl : RenderWorld.PointLights)
 		{
 			if (shadowedCount >= MaxPointLights)
 				break;
-			if (!pl.bEnabled || pl.Intensity <= 0.0f)
+			if (!pl.bEnabled)
+				continue;
+			const float radius = std::max(pl.Radius, 0.01f);
+			const glm::vec3 sphereMin = pl.Position - glm::vec3(radius);
+			const glm::vec3 sphereMax = pl.Position + glm::vec3(radius);
+			if (!IsWorldAabbInViewFrustum(sphereMin, sphereMax))
 				continue;
 			RTShadowViewParam.ShadowedPointLights[shadowedCount] =
-				glm::vec4(pl.Position, std::max(pl.Radius, 0.01f));
+				glm::vec4(pl.Position, radius);
 			RTShadowViewParam.ShadowedPointLightWeights[shadowedCount] =
 				glm::vec4(computeLuma(pl), 0.0f, 0.0f, 0.0f);
 			++shadowedCount;

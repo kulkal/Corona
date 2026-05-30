@@ -39,6 +39,11 @@ if not sponzaEntity then
 end
 
 local restirOn = true
+-- Mirrors the C++ default `Corona::ReSTIRShadowMaxM = 3.0f`. Local
+-- shadow value so the slider can read/write without round-tripping
+-- through corona.get_ui_state on every frame; pushed engine-side via
+-- corona.set_ui_value on every drag.
+local restirMaxM = 3.0
 
 local function on_imgui()
     if not imgui.begin("Sponza Shadow Demo") then
@@ -57,6 +62,14 @@ local function on_imgui()
         if imgui.button("4CHANNEL MODE") then
             corona.set_ui_value("enable_restir_direct_shadow", false)
             restirOn = false
+        end
+    end
+
+    if restirOn then
+        local newVal, changed = imgui.slider_float("ReSTIR M cap", restirMaxM, 1.0, 32.0, "%.1f")
+        if changed then
+            restirMaxM = newVal
+            corona.set_ui_value("restir_shadow_max_m", restirMaxM)
         end
     end
 

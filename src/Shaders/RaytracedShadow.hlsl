@@ -51,7 +51,10 @@ cbuffer ViewParameter : register(b0)
     //     ShadowBuffer semantics; LightingPS branches on the same flag.
     uint ShadowMode;
     uint ShadowedPointLightCount; // 0..3 (Option A) or 0..MAX_SHADOWED_PT_LIGHTS (ReSTIR)
-    uint _padding2;
+    // Runtime-tunable temporal M cap. Replaces the previous shader-side
+    // `const float kMaxM = 3.0f`. Set per-frame from the C++
+    // `bEnableReSTIRDirectShadow`-mode UI control.
+    float ShadowMaxM;
     // Must match Corona::MaxPointLights in Corona.h. Option A reads only
     // the first 3 entries; ReSTIR iterates all valid entries.
     #define MAX_SHADOWED_PT_LIGHTS 128
@@ -292,14 +295,11 @@ void rayGen()
         // variance ~1/M. Cap chosen to bound the influence of stale
         // samples after motion / disocclusion.
         //
-        // Reduced from 20 → 3 (2026-05-30) — kMaxM=3 is the sweet
-        // spot for the sponza_demo scene + DLSS RR temporal: ghost-
-        // free under camera motion (decays in ~3 frames), variance
-        // reduction ~√3 ≈ 1.7× over Phase 1 alone which DLSS RR
-        // happily denoises. M=4 brought back some visible ghosting;
-        // M=2 was also clean but slightly noisier. Brightness still
-        // matches 4-channel since W = w_sum/(tpdf·M) scales with M.
-        const float kMaxM = 3.0f;
+        // Runtime-tunable via CB.ShadowMaxM (was a 3.0f compile-time
+        // constant). User-facing slider in the Sponza demo panel.
+        // Empirical sweet spot on Sponza + DLSS RR: 3.0 (ghost-free,
+        // ~√3 ≈ 1.7× variance reduction). Clamped against div-by-zero.
+        const float kMaxM = max(ShadowMaxM, 1.0f);
         float M_eff = (chosenIdx == 0xFFFFFFFFu) ? 0.0f : 1.0f;
 
         // ReSTIR Phase 3 — spatial reuse with disocclusion gate

@@ -34,10 +34,34 @@ return {
       },
     },
     {
+      name = "Light_Pt_1",
+      light = {
+        type      = "point",
+        position  = {1267.77,848.651,-241.627},
+        direction = {0,1,0},
+        color     = {1,0,0},
+        intensity = 10,
+        radius    = 1056,
+        enabled   = true,
+      },
+    },
+    {
+      name = "Light_Pt_1",
+      light = {
+        type      = "point",
+        position  = {590.496,902.651,544.186},
+        direction = {0,1,0},
+        color     = {0,0.117647,1},
+        intensity = 10,
+        radius    = 1690,
+        enabled   = true,
+      },
+    },
+    {
       name = "MainCamera",
       camera = {
-        position       = {1337.15,665.359,576.943},
-        look_direction = {-0.301964,-0.201999,-0.931673},
+        position       = {780.367,897.092,577.591},
+        look_direction = {0.298107,-0.368504,-0.880532},
         up             = {0,1,0},
         fov            = 0.8,
         near_plane     = 10,
