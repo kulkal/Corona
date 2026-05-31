@@ -1,4 +1,5 @@
 #include "Common.hlsl"
+#include "GGX.hlsli"
 
 RWTexture2D<float4> ReflectionResult : register(u0);
 RWTexture2D<float> SpecularHitDistanceResult : register(u1);
@@ -564,6 +565,16 @@ void rayGen
         // (Simpler closed form below — macro above kept as scaffold; we
         // compute tpdf inline to use sample-specific radiance.)
 
+        // target_pdf eval for an arbitrary hit-position sample at the
+        // CURRENT pixel: p_hat ≈ GGX D(N·H_curr) · luma(radiance) ·
+        // NdotL_curr. The GGX D factor downweights prev samples whose
+        // reflected direction no longer aligns with the current view's
+        // specular lobe — without it, a sample that was the lobe peak
+        // last frame still has full weight even after the camera
+        // moves, producing the camera-translation ghosting we saw.
+        // V is the surface-to-camera direction (already in scope).
+        float ggx_a = Rougness * Rougness;
+        float ggx_a2 = ggx_a * ggx_a;
         // Fresh RIS reservoir (M=1, the BRDF-importance sample).
         float weightSum = 0.0f;
         float chosenTpdf = 0.0f;
@@ -576,27 +587,51 @@ void rayGen
             float nDotL = saturate(dot(WorldNormal, Lp));
             if (nDotL > 0.0f)
             {
+                float3 Hp = SpecSafeNormalize(Lp + (-V), WorldNormal);
+                float nDotHp = saturate(dot(WorldNormal, Hp));
+                float dD = (nDotHp * nDotHp) * (ggx_a2 - 1.0f) + 1.0f;
+                float Dp = ggx_a2 / max(3.14159265f * dD * dD, 1e-5f);
                 float lumaR = chosenRadiance.x * 0.2126f +
                               chosenRadiance.y * 0.7152f +
                               chosenRadiance.z * 0.0722f;
-                // p_hat ≈ luma(radiance) · NdotL. BRDF factor cancels
-                // since the source distribution (GGX VNDF) is already
-                // BRDF-proportional; including BRDF in tpdf would
-                // double-count and bias toward bright BRDF lobes.
-                chosenTpdf = lumaR * nDotL;
-                // w_i (fresh) = p_hat / source_pdf. With source_pdf ≈
-                // BRDF (already importance-sampled), w_i ≈ p_hat / BRDF
-                // — approximate by p_hat alone for the prototype.
+                chosenTpdf = Dp * lumaR * nDotL;
                 weightSum = chosenTpdf;
             }
         }
         float M_eff = curHasSample ? 1.0f : 0.0f;
 
-        // Temporal combine with prev reservoir at motion-reprojected pixel.
+        // Temporal combine with prev reservoir at the SPECULAR-correct
+        // reprojected pixel. The standard surface motion vector
+        // (ReflVelocityTex) reprojects to where the OPAQUE GBuffer
+        // pixel was last frame, which is wrong for specular content:
+        // mirrors show the reflected world, not the surface, and the
+        // reflected image moves differently as the camera translates.
+        // Instead, project the current fresh sample's HIT position
+        // through the previous-frame view-projection — that lands on
+        // the prev pixel whose reservoir saw (close to) the same
+        // reflected world point. Fallback to surface velocity if we
+        // didn't get a valid hit this frame (sky reflections etc.).
         float2 reflLaunchSize = float2(max(launchDim.x, 1u), max(launchDim.y, 1u));
         float2 reflUV = (float2(launchIndex.xy) + 0.5f) / reflLaunchSize;
-        float2 reflVel = ReflVelocityTex.SampleLevel(sampleWrap, reflUV, 0).xy;
-        float2 reflPrevUV = reflUV - reflVel;
+        float2 reflPrevUV = float2(-1.0f, -1.0f);
+        if (curHasSample)
+        {
+            float4 prevClip = mul(float4(chosenHit, 1.0f), PrevUnjitteredViewProjMatrix);
+            if (prevClip.w > 1e-4f)
+            {
+                float2 prevNdc = prevClip.xy / prevClip.w;
+                reflPrevUV = prevNdc * float2(0.5f, -0.5f) + 0.5f;
+            }
+        }
+        if (reflPrevUV.x < 0.0f || reflPrevUV.x > 1.0f || reflPrevUV.y < 0.0f || reflPrevUV.y > 1.0f)
+        {
+            // Hit reprojection out of frame or no hit — fall back to
+            // surface motion vector, which is still meaningful for
+            // rough-surface specular (the reflection lobe is wide
+            // enough that surface-relative reuse helps a bit).
+            float2 reflVel = ReflVelocityTex.SampleLevel(sampleWrap, reflUV, 0).xy;
+            reflPrevUV = reflUV - reflVel;
+        }
         if (reflPrevUV.x >= 0.0f && reflPrevUV.x <= 1.0f && reflPrevUV.y >= 0.0f && reflPrevUV.y <= 1.0f)
         {
             int2 prevPx = int2(reflPrevUV * reflLaunchSize);
@@ -608,7 +643,11 @@ void rayGen
             float3 prevRad = max(prevB.xyz, 0.0f.xxx);
             if (prevM > 0.0f && prevW > 0.0f && dot(prevRad, prevRad) > 0.0f)
             {
-                // Re-eval prev's target_pdf at CURRENT pixel.
+                // Re-eval prev's target_pdf at CURRENT pixel — includes
+                // the GGX D factor against the current view direction,
+                // so a sample whose half-vector no longer peaks at the
+                // viewer is downweighted (the fix for translation
+                // ghosting).
                 float3 toHitP = prevHit - WorldPos;
                 float distSqP = max(dot(toHitP, toHitP), 1.0e-4f);
                 float distP = sqrt(distSqP);
@@ -616,10 +655,30 @@ void rayGen
                 float nDotLP = saturate(dot(WorldNormal, LpP));
                 if (nDotLP > 0.0f)
                 {
+                    float3 HpP = SpecSafeNormalize(LpP + (-V), WorldNormal);
+                    float nDotHpP = saturate(dot(WorldNormal, HpP));
+                    float dDp = (nDotHpP * nDotHpP) * (ggx_a2 - 1.0f) + 1.0f;
+                    float DpP = ggx_a2 / max(3.14159265f * dDp * dDp, 1e-5f);
                     float lumaP = prevRad.x * 0.2126f + prevRad.y * 0.7152f + prevRad.z * 0.0722f;
-                    float prevTpdfAtCurr = lumaP * nDotLP;
-                    float w_prev = prevM * prevW * prevTpdfAtCurr;
-                    if (w_prev > 0.0f)
+                    float prevTpdfAtCurr = DpP * lumaP * nDotLP;
+                    // Roughness-aware temporal gate: low-roughness
+                    // surfaces have very narrow GGX lobes; any prev
+                    // sample whose H doesn't peak the current view's
+                    // lobe is essentially "wrong direction" and reusing
+                    // it streaks. Fade temporal contribution in over
+                    // roughness 0.05 → 0.20 so mirrors get fresh-only
+                    // per frame and moderate-rough gets full reuse.
+                    float roughnessGate = smoothstep(0.05f, 0.20f, Rougness);
+                    // Relative-tpdf gate: even at higher roughness,
+                    // a prev sample whose tpdf at the current pixel
+                    // is way below the fresh sample's tpdf is too
+                    // far off the lobe to reuse safely (would
+                    // inflate W via small-tpdf division). Reject
+                    // ratios below 5%.
+                    bool tpdfRatioOk = chosenTpdf <= 0.0f ||
+                        prevTpdfAtCurr > chosenTpdf * 0.05f;
+                    float w_prev = prevM * prevW * prevTpdfAtCurr * roughnessGate;
+                    if (w_prev > 0.0f && tpdfRatioOk)
                     {
                         // Stochastic acceptance vs current fresh-RIS.
                         uint rrng = (launchIndex.x * 6151u) ^ (launchIndex.y * 9277u) ^ (FrameCounter * 31337u);
@@ -647,7 +706,13 @@ void rayGen
             // Multiply BRDF radiance proxy by W; clamp W to bound
             // outlier weights from low-tpdf samples in disoccluded
             // regions.
-            float Wclamp = clamp(W, 0.0f, 8.0f);
+            // Tighter firefly clamp than the initial Phase R1 (8).
+            // Low-roughness disocclusion / lobe-mismatch corner
+            // cases still slip past the gates above and end up with
+            // a small target_pdf → large W; clamp at 2 prevents the
+            // resulting streak without significantly affecting
+            // well-aligned reuse (W stays well under 2 in those).
+            float Wclamp = clamp(W, 0.0f, 2.0f);
             ristedRadiance = chosenRadiance * Wclamp;
         }
         finalRadiance = ristedRadiance;

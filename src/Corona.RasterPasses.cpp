@@ -1506,9 +1506,19 @@ void Corona::LightingPass()
 		DefaultBlackTex.get();
 	if (!bMobileHybridDirectOnly && DiffuseGIMode == EDiffuseGIMode::SCREEN_PROBE && ScreenProbeGIResolved)
 		lightingDiffuseTex = ScreenProbeGIResolved.get();
+	// Specular GI source for LightingPS: prefer the ReSTIR-combined
+	// raw output over the legacy second-stage TemporalDenoisingPass
+	// result. The second-stage denoiser reprojects with the SURFACE
+	// motion vector, which is wrong for specular reflections (mirrors
+	// follow the reflected world, not the surface) and was the cause
+	// of the "noise flowing in random directions" artifact on
+	// low-roughness flat surfaces during camera translation. ReSTIR
+	// (in RaytracedReflection.hlsl) already does specular-correct
+	// temporal reuse via hit-position reprojection + GGX-D-aware
+	// target_pdf, so the redundant denoiser pass is bypassed.
 	Texture* lightingSpecularTex =
-		(!bMobileHybridDirectOnly && SpecularGITemporal[GIBufferWriteIndex]) ?
-		SpecularGITemporal[GIBufferWriteIndex].get() :
+		(!bMobileHybridDirectOnly && SpecularGIRaw) ?
+		SpecularGIRaw.get() :
 		DefaultBlackTex.get();
 	Texture* shadowTex =
 		bDirectionalShadowAvailable ?
