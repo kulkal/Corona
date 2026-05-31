@@ -227,6 +227,19 @@ private:
 	shared_ptr<Texture> RoughnessMetalicBuffer;
 	shared_ptr<Texture> PathTracingSpecularHitDistanceBuffer;
 	shared_ptr<Texture> PathTracingSpecularMotionVectorBuffer;
+	// ReSTIR GI on specular RT path — per-pixel reservoir storage.
+	// `*A`: .xyz = chosen sample's hit world position, .w = M
+	// (effective sample count). `*B`: .xyz = radiance leaving the
+	// hit toward the pixel (LINEAR, pre-Reinhard), .w = W (RIS
+	// weight). Prev buffers receive end-of-frame CopyResource so
+	// the next frame can RIS-combine via motion reprojection.
+	// Sized to match the raytraced reflection output (full render
+	// resolution). RGBA32Float used throughout for unbiased combine
+	// math — packing to FP16 would lose hit-position precision.
+	shared_ptr<Texture> ReflectionReservoirA;
+	shared_ptr<Texture> ReflectionReservoirB;
+	shared_ptr<Texture> ReflectionReservoirAPrev;
+	shared_ptr<Texture> ReflectionReservoirBPrev;
 	shared_ptr<Texture> ShadowBuffer;
 	// ReSTIR DI Phase 2 — previous-frame reservoir cache. Copied from
 	// ShadowBuffer at the end of RaytraceShadowPass so the next frame can

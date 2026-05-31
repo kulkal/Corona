@@ -11,6 +11,9 @@
 
 #include "stdafx.h"
 #include "Corona.h"
+// For dx12_rhi->GetGraphicsCommandList() used by the ReSTIR
+// reservoir-snapshot CopyResource at end-of-pass.
+#include "DX12Backend.h"
 
 #include <algorithm>
 #include <cmath>
@@ -41,12 +44,22 @@ shared_ptr<RTPipelineStateObject> Corona::CreateRaytracingReflectionPSO(bool bUs
 	tempPSO->BindUAV("global", "ReflectionResult", 0);
 	tempPSO->BindUAV("global", "SpecularHitDistanceResult", 1);
 	tempPSO->BindUAV("global", "SpecularMotionVectorResult", 2);
+	// ReSTIR specular GI reservoir UAVs (current frame).
+	tempPSO->BindUAV("global", "ReflReservoirA", 3);
+	tempPSO->BindUAV("global", "ReflReservoirB", 4);
 	tempPSO->BindSRV("global", "gRtScene", 0);
 	tempPSO->BindSRV("global", "DepthTex", 1);
 	tempPSO->BindSRV("global", "GeoNormalTex", 2);
 	tempPSO->BindSRV("global", "RougnessMetallicTex", 6);
 	tempPSO->BindSRV("global", "RayNoiseBlueNoiseSource", 7);
 	tempPSO->BindSRV("global", "WorldNormalTex", 8);
+	// ReSTIR specular GI reservoir SRVs (previous frame) + velocity
+	// for motion reprojection. Bound unconditionally to keep the
+	// root signature stable; the raygen only reads them after the
+	// first frame has produced data.
+	tempPSO->BindSRV("global", "ReflReservoirAPrev", 10);
+	tempPSO->BindSRV("global", "ReflReservoirBPrev", 11);
+	tempPSO->BindSRV("global", "ReflVelocityTex",   12);
 
 	tempPSO->BindCBV("global", "ViewParameter", 0, sizeof(RTReflectionViewParam), 1);
 	tempPSO->BindSampler("global", "sampleWrap", 0);
@@ -140,17 +153,33 @@ void Corona::RaytraceReflectionPass()
 		(IsDLSSRREnabled() && bEnableHybridRRSpecularHitDistance) ? 1u : 0u;
 	RTReflectionViewParam.bUseRRSpecularGuideRay = bEnableHybridRRSpecularGuideRay ? 1u : 0u;
 
+	// ReSTIR specular GI: transition reservoir UAVs.
+	if (ReflectionReservoirA)
+		renderBackend->TransitionTexture(ReflectionReservoirA.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
+	if (ReflectionReservoirB)
+		renderBackend->TransitionTexture(ReflectionReservoirB.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
+
 	RTPassBuilder pass(*this, pso);
 	pass.BeginScene()
 		.SetTextureUAV("global", "ReflectionResult", SpecularGIRaw.get())
 		.SetTextureUAV("global", "SpecularHitDistanceResult", PathTracingSpecularHitDistanceBuffer.get())
 		.SetTextureUAV("global", "SpecularMotionVectorResult", PathTracingSpecularMotionVectorBuffer.get())
+		.SetTextureUAV("global", "ReflReservoirA",
+			ReflectionReservoirA ? ReflectionReservoirA.get() : SpecularGIRaw.get())
+		.SetTextureUAV("global", "ReflReservoirB",
+			ReflectionReservoirB ? ReflectionReservoirB.get() : SpecularGIRaw.get())
 		.SetAccelerationStructure("global", "gRtScene", TLAS)
 		.SetTextureSRV("global", "DepthTex", UnjitteredDepthBuffers[ColorBufferWriteIndex].get())
 		.SetTextureSRV("global", "GeoNormalTex", GeomNormalBuffers[ColorBufferWriteIndex].get())
 		.SetTextureSRV("global", "RougnessMetallicTex", RoughnessMetalicBuffer.get())
 		.SetTextureSRV("global", "RayNoiseBlueNoiseSource", BlueNoiseTex.get())
 		.SetTextureSRV("global", "WorldNormalTex", NormalBuffers[ColorBufferWriteIndex].get())
+		.SetTextureSRV("global", "ReflReservoirAPrev",
+			ReflectionReservoirAPrev ? ReflectionReservoirAPrev.get() : NormalBuffers[ColorBufferWriteIndex].get())
+		.SetTextureSRV("global", "ReflReservoirBPrev",
+			ReflectionReservoirBPrev ? ReflectionReservoirBPrev.get() : NormalBuffers[ColorBufferWriteIndex].get())
+		.SetTextureSRV("global", "ReflVelocityTex",
+			VelocityBuffer ? VelocityBuffer.get() : NormalBuffers[ColorBufferWriteIndex].get())
 		.SetCBVValue("global", "ViewParameter", &RTReflectionViewParam)
 		.SetSampler("global", "sampleWrap", samplerWrap.get());
 	pass.BindSceneHitPrograms();
@@ -159,5 +188,27 @@ void Corona::RaytraceReflectionPass()
 	renderBackend->TransitionTexture(SpecularGIRaw.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
 	renderBackend->TransitionTexture(PathTracingSpecularHitDistanceBuffer.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
 	renderBackend->TransitionTexture(PathTracingSpecularMotionVectorBuffer.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
+
+	// ReSTIR specular GI: snapshot current reservoir → prev for next frame.
+	if (ReflectionReservoirA && ReflectionReservoirAPrev && dx12_rhi)
+	{
+		renderBackend->TransitionTexture(ReflectionReservoirA.get(), EResourceState::UnorderedAccess, EResourceState::CopySource);
+		renderBackend->TransitionTexture(ReflectionReservoirAPrev.get(), EResourceState::ShaderRead, EResourceState::CopyDest);
+		dx12_rhi->GetGraphicsCommandList()->CopyResource(
+			ReflectionReservoirAPrev->resource.Get(),
+			ReflectionReservoirA->resource.Get());
+		renderBackend->TransitionTexture(ReflectionReservoirA.get(), EResourceState::CopySource, EResourceState::ShaderRead);
+		renderBackend->TransitionTexture(ReflectionReservoirAPrev.get(), EResourceState::CopyDest, EResourceState::ShaderRead);
+	}
+	if (ReflectionReservoirB && ReflectionReservoirBPrev && dx12_rhi)
+	{
+		renderBackend->TransitionTexture(ReflectionReservoirB.get(), EResourceState::UnorderedAccess, EResourceState::CopySource);
+		renderBackend->TransitionTexture(ReflectionReservoirBPrev.get(), EResourceState::ShaderRead, EResourceState::CopyDest);
+		dx12_rhi->GetGraphicsCommandList()->CopyResource(
+			ReflectionReservoirBPrev->resource.Get(),
+			ReflectionReservoirB->resource.Get());
+		renderBackend->TransitionTexture(ReflectionReservoirB.get(), EResourceState::CopySource, EResourceState::ShaderRead);
+		renderBackend->TransitionTexture(ReflectionReservoirBPrev.get(), EResourceState::CopyDest, EResourceState::ShaderRead);
+	}
 	//PIXEndEvent();
 }

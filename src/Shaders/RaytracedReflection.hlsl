@@ -3,6 +3,14 @@
 RWTexture2D<float4> ReflectionResult : register(u0);
 RWTexture2D<float> SpecularHitDistanceResult : register(u1);
 RWTexture2D<float2> SpecularMotionVectorResult : register(u2);
+// ReSTIR GI on specular path — per-pixel reservoir storage.
+// `ReflReservoirA`: .xyz = chosen hit world position, .w = M.
+// `ReflReservoirB`: .xyz = chosen radiance (linear, pre-tonemap),
+// .w = W (RIS weight). The Prev versions feed the temporal combine
+// via Load(int3(prevPx, 0)) — bilinear would corrupt the hit
+// position the same way it corrupts lightIdx in direct-shadow.
+RWTexture2D<float4> ReflReservoirA : register(u3);
+RWTexture2D<float4> ReflReservoirB : register(u4);
 
 RaytracingAccelerationStructure gRtScene : register(t0);
 Texture2D DepthTex : register(t1);
@@ -14,6 +22,9 @@ ByteAddressBuffer vertices : register(t3);
 ByteAddressBuffer indices : register(t4);
 Texture2D AlbedoTex : register(t5);
 ByteAddressBuffer InstanceProperty : register(t9);
+Texture2D ReflReservoirAPrev : register(t10);
+Texture2D ReflReservoirBPrev : register(t11);
+Texture2D ReflVelocityTex    : register(t12);
 
 cbuffer ViewParameter : register(b0)
 {
@@ -491,6 +502,166 @@ void rayGen
     // still provide local occlusion/direct lighting, otherwise rough indoor surfaces
     // become flooded by unoccluded sky radiance.
     float3 finalRadiance = payload.bHit ? tracedRadiance : lerp(tracedRadiance, prefilteredEnvRadiance, prefilteredEnvBlend);
+
+    // ==================================================================
+    // ReSTIR GI on specular path — temporal-only first cut.
+    // ==================================================================
+    // The existing path produces ONE BRDF-sampled path per pixel per
+    // frame. Roughness 0.1-0.5 surfaces see large per-pixel variance
+    // from the H jitter. Treat the path's (hit_pos, hit_radiance) as a
+    // reservoir sample, re-evaluate its `target_pdf` at this pixel
+    // using GGX(L_to_hit, V), and RIS-combine with the previous
+    // frame's reservoir at the motion-reprojected pixel.
+    // Output uses the chosen sample's radiance · W; reservoir state is
+    // written to ReflReservoirA/B for next frame's combine via the
+    // end-of-frame CopyResource snapshot.
+    {
+        float3 chosenHit;
+        float3 chosenRadiance;
+        float chosenSourcePdf;
+        bool curHasSample = primarySurfaceValid && payload.bHit && useDeterministicPrefilteredEnvRay == false;
+        if (curHasSample)
+        {
+            chosenHit = payload.position;
+            chosenRadiance = max(finalRadiance, 0.0f.xxx);
+            // p_hat at the chosen sample is GGX(L,V) · luma(radiance) ·
+            // NdotL_at_pixel. The fresh-RIS w_i = p_hat / source_pdf
+            // where the source distribution is the GGX VNDF sample we
+            // already drew (so source_pdf == GGX VNDF pdf at L).
+            chosenSourcePdf = 1.0f; // ratio absorbed by p_hat-only weighting
+        }
+        else
+        {
+            chosenHit = float3(0.0f, 0.0f, 0.0f);
+            chosenRadiance = float3(0.0f, 0.0f, 0.0f);
+            chosenSourcePdf = 0.0f;
+        }
+
+        // Target_pdf at THIS pixel for a given hit world position.
+        // Inline so we can re-use it on the prev sample.
+        // Returns 0 on geometrically invalid samples.
+        #define EVAL_TPDF(outTpdf, hit_world)                                   \
+        {                                                                       \
+            float3 _toHit = (hit_world) - WorldPos;                             \
+            float _distSq = max(dot(_toHit, _toHit), 1.0e-4f);                  \
+            float _dist = sqrt(_distSq);                                        \
+            float3 _L = _toHit / _dist;                                         \
+            float _nDotL = saturate(dot(WorldNormal, _L));                      \
+            if (_nDotL <= 0.0f) { outTpdf = 0.0f; }                             \
+            else {                                                              \
+                float3 _H = SpecSafeNormalize(_L + (-V), float3(0.0f, 0.0f, 1.0f)); \
+                float _nDotH = saturate(dot(WorldNormal, _H));                  \
+                float _nDotV = saturate(dot(WorldNormal, -V));                  \
+                float _alpha = Rougness * Rougness;                             \
+                float _a2 = _alpha * _alpha;                                    \
+                float _d  = (_nDotH * _nDotH) * (_a2 - 1.0f) + 1.0f;            \
+                float _D  = _a2 / max(3.14159265f * _d * _d, 1e-5f);            \
+                float3 _rad = float3(0,0,0); _rad = chosenRadiance;             \
+                /* swap _rad for sample's radiance via caller */                \
+                outTpdf = 0.0f;                                                 \
+            }                                                                   \
+        }
+        // (Simpler closed form below — macro above kept as scaffold; we
+        // compute tpdf inline to use sample-specific radiance.)
+
+        // Fresh RIS reservoir (M=1, the BRDF-importance sample).
+        float weightSum = 0.0f;
+        float chosenTpdf = 0.0f;
+        if (curHasSample)
+        {
+            float3 toHit = chosenHit - WorldPos;
+            float distSq = max(dot(toHit, toHit), 1.0e-4f);
+            float dist = sqrt(distSq);
+            float3 Lp = toHit / dist;
+            float nDotL = saturate(dot(WorldNormal, Lp));
+            if (nDotL > 0.0f)
+            {
+                float lumaR = chosenRadiance.x * 0.2126f +
+                              chosenRadiance.y * 0.7152f +
+                              chosenRadiance.z * 0.0722f;
+                // p_hat ≈ luma(radiance) · NdotL. BRDF factor cancels
+                // since the source distribution (GGX VNDF) is already
+                // BRDF-proportional; including BRDF in tpdf would
+                // double-count and bias toward bright BRDF lobes.
+                chosenTpdf = lumaR * nDotL;
+                // w_i (fresh) = p_hat / source_pdf. With source_pdf ≈
+                // BRDF (already importance-sampled), w_i ≈ p_hat / BRDF
+                // — approximate by p_hat alone for the prototype.
+                weightSum = chosenTpdf;
+            }
+        }
+        float M_eff = curHasSample ? 1.0f : 0.0f;
+
+        // Temporal combine with prev reservoir at motion-reprojected pixel.
+        float2 reflLaunchSize = float2(max(launchDim.x, 1u), max(launchDim.y, 1u));
+        float2 reflUV = (float2(launchIndex.xy) + 0.5f) / reflLaunchSize;
+        float2 reflVel = ReflVelocityTex.SampleLevel(sampleWrap, reflUV, 0).xy;
+        float2 reflPrevUV = reflUV - reflVel;
+        if (reflPrevUV.x >= 0.0f && reflPrevUV.x <= 1.0f && reflPrevUV.y >= 0.0f && reflPrevUV.y <= 1.0f)
+        {
+            int2 prevPx = int2(reflPrevUV * reflLaunchSize);
+            float4 prevA = ReflReservoirAPrev.Load(int3(prevPx, 0));
+            float4 prevB = ReflReservoirBPrev.Load(int3(prevPx, 0));
+            float prevM = prevA.w;
+            float prevW = prevB.w;
+            float3 prevHit = prevA.xyz;
+            float3 prevRad = max(prevB.xyz, 0.0f.xxx);
+            if (prevM > 0.0f && prevW > 0.0f && dot(prevRad, prevRad) > 0.0f)
+            {
+                // Re-eval prev's target_pdf at CURRENT pixel.
+                float3 toHitP = prevHit - WorldPos;
+                float distSqP = max(dot(toHitP, toHitP), 1.0e-4f);
+                float distP = sqrt(distSqP);
+                float3 LpP = toHitP / distP;
+                float nDotLP = saturate(dot(WorldNormal, LpP));
+                if (nDotLP > 0.0f)
+                {
+                    float lumaP = prevRad.x * 0.2126f + prevRad.y * 0.7152f + prevRad.z * 0.0722f;
+                    float prevTpdfAtCurr = lumaP * nDotLP;
+                    float w_prev = prevM * prevW * prevTpdfAtCurr;
+                    if (w_prev > 0.0f)
+                    {
+                        // Stochastic acceptance vs current fresh-RIS.
+                        uint rrng = (launchIndex.x * 6151u) ^ (launchIndex.y * 9277u) ^ (FrameCounter * 31337u);
+                        rrng = rrng * 1664525u + 1013904223u;
+                        float u01 = (rrng & 0x00FFFFFFu) * (1.0f / 16777216.0f);
+                        weightSum += w_prev;
+                        if (u01 * weightSum <= w_prev)
+                        {
+                            chosenHit = prevHit;
+                            chosenRadiance = prevRad;
+                            chosenTpdf = prevTpdfAtCurr;
+                        }
+                        M_eff += prevM;
+                    }
+                }
+            }
+        }
+
+        // Output: chosen sample's radiance × W (RIS estimator).
+        // W = weightSum / (M_uncapped · target_pdf_chosen).
+        float3 ristedRadiance = finalRadiance;
+        if (weightSum > 0.0f && chosenTpdf > 0.0f)
+        {
+            float W = weightSum / (M_eff * chosenTpdf);
+            // Multiply BRDF radiance proxy by W; clamp W to bound
+            // outlier weights from low-tpdf samples in disoccluded
+            // regions.
+            float Wclamp = clamp(W, 0.0f, 8.0f);
+            ristedRadiance = chosenRadiance * Wclamp;
+        }
+        finalRadiance = ristedRadiance;
+
+        // Persist current reservoir state for next-frame combine. Cap
+        // M at 16 so prev contribution stays bounded long-term.
+        const float kReflMaxM = 16.0f;
+        float M_writeback = min(M_eff, kReflMaxM);
+        float W_writeback = (chosenTpdf > 0.0f && M_eff > 0.0f)
+            ? weightSum / (M_eff * chosenTpdf) : 0.0f;
+        ReflReservoirA[launchIndex.xy] = float4(chosenHit, M_writeback);
+        ReflReservoirB[launchIndex.xy] = float4(chosenRadiance, W_writeback);
+    }
+
     ReflectionResult[launchIndex.xy] = SpecSanitizeFloat4(float4(Reinhard(max(finalRadiance, 0.0f.xxx)), 1), float4(0.0f, 0.0f, 0.0f, 1.0f));
     WriteRRSpecularGuides(launchIndex.xy, launchDim.xy, primarySurfaceValid, WorldPos, GeoNormal, MirrorL, Rougness, Metallic, payload);
 

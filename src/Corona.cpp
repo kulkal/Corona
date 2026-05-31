@@ -2492,6 +2492,15 @@ void Corona::RecreateRenderResolutionResources()
 
 	SpecularGIRaw = createTexture2D(HybridFloat4UAVFormat, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
 	NAME_D3D12_OBJECT(SpecularGIRaw->resource);
+	// ReSTIR specular GI reservoir storage.
+	ReflectionReservoirA = createTexture2D(ETextureFormat::RGBA32Float, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
+	NAME_D3D12_OBJECT(ReflectionReservoirA->resource);
+	ReflectionReservoirB = createTexture2D(ETextureFormat::RGBA32Float, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
+	NAME_D3D12_OBJECT(ReflectionReservoirB->resource);
+	ReflectionReservoirAPrev = createTexture2D(ETextureFormat::RGBA32Float, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
+	NAME_D3D12_OBJECT(ReflectionReservoirAPrev->resource);
+	ReflectionReservoirBPrev = createTexture2D(ETextureFormat::RGBA32Float, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
+	NAME_D3D12_OBJECT(ReflectionReservoirBPrev->resource);
 
 	SpecularGITemporal[0] = createTexture2D(HybridFloat4UAVFormat, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
 	NAME_D3D12_OBJECT(SpecularGITemporal[0]->resource);
@@ -9718,6 +9727,16 @@ void Corona::LoadAssets()
 		SpecularGIRaw = createTexture2D(HybridFloat4UAVFormat, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
 
 		NAME_D3D12_OBJECT(SpecularGIRaw->resource);
+
+		// ReSTIR specular GI reservoir storage.
+		ReflectionReservoirA = createTexture2D(ETextureFormat::RGBA32Float, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
+		NAME_D3D12_OBJECT(ReflectionReservoirA->resource);
+		ReflectionReservoirB = createTexture2D(ETextureFormat::RGBA32Float, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
+		NAME_D3D12_OBJECT(ReflectionReservoirB->resource);
+		ReflectionReservoirAPrev = createTexture2D(ETextureFormat::RGBA32Float, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
+		NAME_D3D12_OBJECT(ReflectionReservoirAPrev->resource);
+		ReflectionReservoirBPrev = createTexture2D(ETextureFormat::RGBA32Float, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
+		NAME_D3D12_OBJECT(ReflectionReservoirBPrev->resource);
 
 		SpecularGITemporal[0] = createTexture2D(HybridFloat4UAVFormat, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
 
