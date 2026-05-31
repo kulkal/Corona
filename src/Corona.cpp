@@ -2526,6 +2526,12 @@ void Corona::RecreateRenderResolutionResources()
 	DiffuseGIHashCached = createTexture2D(HybridFloat4UAVFormat, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
 	NAME_D3D12_OBJECT(DiffuseGIHashCached->resource);
 
+	// SpatialHashGI screen-space resolve layer outputs (Option A).
+	DiffuseGIHashFiltered = createTexture2D(HybridFloat4UAVFormat, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
+	NAME_D3D12_OBJECT(DiffuseGIHashFiltered->resource);
+	DiffuseGIHashFilteredPrev = createTexture2D(HybridFloat4UAVFormat, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
+	NAME_D3D12_OBJECT(DiffuseGIHashFilteredPrev->resource);
+
 	ScreenProbeGIResolved = createTexture2D(HybridFloat4UAVFormat, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
 	NAME_D3D12_OBJECT(ScreenProbeGIResolved->resource);
 
@@ -9769,8 +9775,11 @@ void Corona::LoadAssets()
 		NAME_D3D12_OBJECT(DiffuseGIHashCachedAux->resource);
 
 		DiffuseGIHashCached = createTexture2D(HybridFloat4UAVFormat, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
-
 		NAME_D3D12_OBJECT(DiffuseGIHashCached->resource);
+		DiffuseGIHashFiltered = createTexture2D(HybridFloat4UAVFormat, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
+		NAME_D3D12_OBJECT(DiffuseGIHashFiltered->resource);
+		DiffuseGIHashFilteredPrev = createTexture2D(HybridFloat4UAVFormat, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
+		NAME_D3D12_OBJECT(DiffuseGIHashFilteredPrev->resource);
 
 		SpatialHashGIActiveFlags = createStructuredBuffer(SpatialHashGIEntryCount, sizeof(UINT32), true);
 		SpatialHashGIActiveCellSlots = createStructuredBuffer(SpatialHashGIActiveCellCapacity, sizeof(UINT32), true);

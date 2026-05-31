@@ -11,6 +11,9 @@
 
 #include "stdafx.h"
 #include "Corona.h"
+// For dx12_rhi->GetGraphicsCommandList() used by the screen-resolve
+// snapshot CopyResource at end of pass.
+#include "DX12Backend.h"
 
 #include <algorithm>
 #include <cmath>
@@ -48,6 +51,18 @@ void Corona::InitSpatialHashGIPass()
 		pso->BindSRV("ResolvedSH2In", 20, 1);
 		pso->BindSRV("ResolvedSH3In", 21, 1);
 		pso->BindSRV("ActiveCounterIn", 22, 1);
+		// Disocclusion detection inputs for SpatialHashQuery: prev
+		// frame depth+normal (sampled via motion-reprojected pixel)
+		// + velocity. Used to reset history toward the ambient
+		// fallback on newly revealed pixels so previously-cached
+		// neighbours can't leak into the disoccluded surface.
+		pso->BindSRV("VelocityTex", 23, 1);
+		pso->BindSRV("PrevDepthTex", 24, 1);
+		pso->BindSRV("PrevNormalTex", 25, 1);
+		// Option A screen-resolve — prev filtered output for temporal.
+		pso->BindSRV("InDiffuseGIFilteredPrev", 26, 1);
+		// And the resolve's output UAV.
+		pso->BindUAV("OutDiffuseGIFiltered", 13);
 		pso->BindUAV("ActiveFlagsOut", 0);
 		pso->BindUAV("CellPositionOut", 1);
 		pso->BindUAV("CellNormalOut", 2);
@@ -73,6 +88,7 @@ void Corona::InitSpatialHashGIPass()
 	SpatialHashGIUpdatePSO = createSpatialHashPSO("SpatialHashUpdate");
 	SpatialHashGIResolvePSO = createSpatialHashPSO("SpatialHashResolve");
 	SpatialHashGIQueryPSO = createSpatialHashPSO("SpatialHashQuery");
+	SpatialHashGIScreenResolvePSO = createSpatialHashPSO("SpatialHashScreenResolve");
 }
 
 shared_ptr<RTPipelineStateObject> Corona::CreateRaytracingSpatialHashGIPSO(bool bUseSER)
@@ -326,6 +342,12 @@ void Corona::SpatialHashGIPass()
 	SpatialHashGIQueryPSO->SetTextureSRV("DepthTex", UnjitteredDepthBuffers[ColorBufferWriteIndex].get());
 	SpatialHashGIQueryPSO->SetTextureSRV("WorldNormalTex", NormalBuffers[ColorBufferWriteIndex].get());
 	SpatialHashGIQueryPSO->SetTextureSRV("GeoNormalTex", GeomNormalBuffers[ColorBufferWriteIndex].get());
+	// Disocclusion inputs (motion-vector based prev-frame compare).
+	SpatialHashGIQueryPSO->SetTextureSRV("VelocityTex", VelocityBuffer ? VelocityBuffer.get() : NormalBuffers[ColorBufferWriteIndex].get());
+	SpatialHashGIQueryPSO->SetTextureSRV("PrevDepthTex",
+		UnjitteredDepthBuffers[1 - ColorBufferWriteIndex] ? UnjitteredDepthBuffers[1 - ColorBufferWriteIndex].get() : UnjitteredDepthBuffers[ColorBufferWriteIndex].get());
+	SpatialHashGIQueryPSO->SetTextureSRV("PrevNormalTex",
+		NormalBuffers[1 - ColorBufferWriteIndex] ? NormalBuffers[1 - ColorBufferWriteIndex].get() : NormalBuffers[ColorBufferWriteIndex].get());
 	SpatialHashGIQueryPSO->SetBufferSRV("ResolvedKeysIn", SpatialHashGIResolvedKeys[cacheIndex].get());
 	SpatialHashGIQueryPSO->SetBufferSRV("ResolvedSH0In", SpatialHashGIResolvedSH[cacheIndex][0].get());
 	SpatialHashGIQueryPSO->SetBufferSRV("ResolvedSH1In", SpatialHashGIResolvedSH[cacheIndex][1].get());
@@ -339,5 +361,52 @@ void Corona::SpatialHashGIPass()
 
 	renderBackend->TransitionTexture(DiffuseGIHashCached.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
 	renderBackend->TransitionTexture(DiffuseGIHashCachedAux.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
+
+	// =================================================================
+	// Option A — screen-space resolve pass (bilateral + temporal disocc)
+	// =================================================================
+	if (SpatialHashGIScreenResolvePSO && DiffuseGIHashFiltered && DiffuseGIHashFilteredPrev)
+	{
+		renderBackend->TransitionTexture(DiffuseGIHashFiltered.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
+		// The new pass reads DiffuseGIHashCached as a UAV inside the
+		// shader (named OutGIHashColor — same UAV slot, different
+		// access). Re-transition to ShaderResource isn't possible for
+		// the same dispatch, so use the UAV-as-SRV pattern: dispatch
+		// reads via OutGIHashColor (UAV) which is legal even when the
+		// resource isn't transitioned. We'll keep it in
+		// UnorderedAccess until after this pass.
+		renderBackend->TransitionTexture(DiffuseGIHashCached.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
+
+		SpatialHashGIScreenResolvePSO->SetTextureSRV("DepthTex",       UnjitteredDepthBuffers[ColorBufferWriteIndex].get());
+		SpatialHashGIScreenResolvePSO->SetTextureSRV("WorldNormalTex", NormalBuffers[ColorBufferWriteIndex].get());
+		SpatialHashGIScreenResolvePSO->SetTextureSRV("GeoNormalTex",   GeomNormalBuffers[ColorBufferWriteIndex].get());
+		SpatialHashGIScreenResolvePSO->SetTextureSRV("VelocityTex",    VelocityBuffer ? VelocityBuffer.get() : NormalBuffers[ColorBufferWriteIndex].get());
+		SpatialHashGIScreenResolvePSO->SetTextureSRV("PrevDepthTex",
+			UnjitteredDepthBuffers[1 - ColorBufferWriteIndex] ? UnjitteredDepthBuffers[1 - ColorBufferWriteIndex].get() : UnjitteredDepthBuffers[ColorBufferWriteIndex].get());
+		SpatialHashGIScreenResolvePSO->SetTextureSRV("PrevNormalTex",
+			NormalBuffers[1 - ColorBufferWriteIndex] ? NormalBuffers[1 - ColorBufferWriteIndex].get() : NormalBuffers[ColorBufferWriteIndex].get());
+		SpatialHashGIScreenResolvePSO->SetTextureSRV("InDiffuseGIFilteredPrev", DiffuseGIHashFilteredPrev.get());
+		SpatialHashGIScreenResolvePSO->SetTextureUAV("OutGIHashColor",         DiffuseGIHashCached.get());
+		SpatialHashGIScreenResolvePSO->SetTextureUAV("OutDiffuseGIFiltered",   DiffuseGIHashFiltered.get());
+		SpatialHashGIScreenResolvePSO->SetCBVValue("SpatialHashGIConstant", &SpatialHashGICB);
+		SpatialHashGIScreenResolvePSO->Apply();
+		renderBackend->Dispatch((GetRenderWidth() + 7u) / 8u, (GetRenderHeight() + 7u) / 8u, 1u);
+
+		renderBackend->TransitionTexture(DiffuseGIHashCached.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
+		renderBackend->TransitionTexture(DiffuseGIHashFiltered.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
+
+		// End-of-frame snapshot for next frame's temporal blend.
+		if (dx12_rhi)
+		{
+			renderBackend->TransitionTexture(DiffuseGIHashFiltered.get(), EResourceState::ShaderRead, EResourceState::CopySource);
+			renderBackend->TransitionTexture(DiffuseGIHashFilteredPrev.get(), EResourceState::ShaderRead, EResourceState::CopyDest);
+			dx12_rhi->GetGraphicsCommandList()->CopyResource(
+				DiffuseGIHashFilteredPrev->resource.Get(),
+				DiffuseGIHashFiltered->resource.Get());
+			renderBackend->TransitionTexture(DiffuseGIHashFiltered.get(), EResourceState::CopySource, EResourceState::ShaderRead);
+			renderBackend->TransitionTexture(DiffuseGIHashFilteredPrev.get(), EResourceState::CopyDest, EResourceState::ShaderRead);
+		}
+	}
+
 	bSpatialHashGIHistoryValid = true;
 }

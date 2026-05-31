@@ -22,6 +22,14 @@ StructuredBuffer<float4> ResolvedSH1In : register(t19);
 StructuredBuffer<float4> ResolvedSH2In : register(t20);
 StructuredBuffer<float4> ResolvedSH3In : register(t21);
 StructuredBuffer<uint> ActiveCounterIn : register(t22);
+// Disocclusion detection inputs for SpatialHashQuery: velocity +
+// previous-frame depth/normal. Used to fully reset history to the
+// ambient fallback when the current pixel didn't exist on the
+// previous frame (camera-pan disocclusion) so cached neighbour
+// cells from other surfaces can't leak in.
+Texture2D VelocityTex : register(t23);
+Texture2D PrevDepthTex : register(t24);
+Texture2D PrevNormalTex : register(t25);
 
 RWStructuredBuffer<uint> ActiveFlagsOut : register(u0);
 RWStructuredBuffer<float4> CellPositionOut : register(u1);
@@ -417,12 +425,19 @@ bool FindPrevSlotForRead(uint key, out uint slot)
     return false;
 }
 
-bool LoadCachedSHForCell(int3 cell, float3 normal, out SH4RGB sh, out float historyFrames)
+bool LoadCachedSHForCell(int3 cell, float3 normal, float3 queryWorldPos,
+                          out SH4RGB sh, out float historyFrames, out float bilateralWeight)
 {
+    bilateralWeight = 0.0f;
     uint slot = 0u;
     uint key = HashCellKeyFromCell(cell, normal);
     if (FindSlotForRead(key, slot))
     {
+        // Hash bin alone for orientation; per-pixel bilateral
+        // filtering happens in the new SpatialHashScreenResolve
+        // pass downstream of the per-pixel SpatialHashQuery.
+        (void)queryWorldPos;
+        bilateralWeight = 1.0f;
         sh = LoadResolvedSH(slot, historyFrames);
         return historyFrames > 0.0f && SHAbsEnergy(sh) > 1e-7f;
     }
@@ -462,11 +477,13 @@ bool LoadInterpolatedSH(float3 worldPos, float3 normal, out SH4RGB outSH, out fl
 
                 SH4RGB cachedSH = InitSH4RGB();
                 float cachedFrames = 0.0f;
-                if (LoadCachedSHForCell(baseCell + int3(x, y, z), normal, cachedSH, cachedFrames))
+                float bw = 0.0f;
+                if (LoadCachedSHForCell(baseCell + int3(x, y, z), normal, worldPos, cachedSH, cachedFrames, bw))
                 {
-                    weightedSH = AddSH(weightedSH, ScaleSH(cachedSH, weight));
-                    weightedFrames += cachedFrames * weight;
-                    validWeight += weight;
+                    float bilateralWeightedWeight = weight * bw;
+                    weightedSH = AddSH(weightedSH, ScaleSH(cachedSH, bilateralWeightedWeight));
+                    weightedFrames += cachedFrames * bilateralWeightedWeight;
+                    validWeight += bilateralWeightedWeight;
                 }
             }
         }
@@ -485,9 +502,10 @@ bool LoadInterpolatedSH(float3 worldPos, float3 normal, out SH4RGB outSH, out fl
 
     SH4RGB baseSH = InitSH4RGB();
     float baseFrames = 0.0f;
-    if (LoadCachedSHForCell(baseCell, normal, baseSH, baseFrames))
+    float baseBw = 0.0f;
+    if (LoadCachedSHForCell(baseCell, normal, worldPos, baseSH, baseFrames, baseBw))
     {
-        float interpolation = saturate(InterpolationStrength);
+        float interpolation = saturate(InterpolationStrength) * saturate(baseBw);
         interpolatedSH = LerpSH(baseSH, interpolatedSH, interpolation);
         interpolatedFrames = lerp(baseFrames, interpolatedFrames, interpolation);
     }
@@ -538,10 +556,11 @@ bool LoadSmoothedSH(float3 worldPos, float3 normal, out SH4RGB outSH, out float 
 
                 SH4RGB cachedSH = InitSH4RGB();
                 float cachedFrames = 0.0f;
-                if (LoadCachedSHForCell(cell, normal, cachedSH, cachedFrames))
+                float bw = 0.0f;
+                if (LoadCachedSHForCell(cell, normal, worldPos, cachedSH, cachedFrames, bw))
                 {
                     float confidence = saturate(cachedFrames / 8.0f);
-                    float finalWeight = weight * lerp(0.35f, 1.0f, confidence);
+                    float finalWeight = weight * lerp(0.35f, 1.0f, confidence) * bw;
                     weightedSH = AddSH(weightedSH, ScaleSH(cachedSH, finalWeight));
                     weightedFrames += cachedFrames * finalWeight;
                     weightSum += finalWeight;
@@ -670,6 +689,20 @@ void SpatialHashResolve(uint3 DTid : SV_DispatchThreadID)
     {
         float acceptedFrames = min(previousFrames + currentSamples, MAX_SPATIAL_HASH_HISTORY_SAMPLES);
         float alpha = saturate(currentSamples / max(acceptedFrames, 1.0f));
+        // Phase R-disocclusion-B: accelerated convergence for cells
+        // with very low history. For the first ~4 frames after a
+        // cell is allocated, weight the new sample much more
+        // aggressively so newly-exposed surfaces light up in a
+        // handful of frames rather than the legacy ~12-frame ramp.
+        // Past `kNewCellRampFrames` the standard sample-count-based
+        // alpha takes over and the temporal smoothing pattern is
+        // unchanged.
+        const float kNewCellRampFrames = 4.0f;
+        if (previousFrames < kNewCellRampFrames)
+        {
+            float boost = 1.0f - saturate(previousFrames / kNewCellRampFrames);
+            alpha = saturate(alpha + boost * (0.6f - alpha));
+        }
         resolvedSH = LerpSH(previousSH, currentSH, alpha);
         resolvedFrames = acceptedFrames;
     }
@@ -698,7 +731,8 @@ void SpatialHashQuery(uint3 DTid : SV_DispatchThreadID)
     float3 worldPos = ReconstructWorldPosition(pixelPos);
     SH4RGB cachedSH = InitSH4RGB();
     float historyFrames = 0.0f;
-    if (LoadSmoothedSH(worldPos, cacheNormal, cachedSH, historyFrames))
+    const bool bHasCache = LoadSmoothedSH(worldPos, cacheNormal, cachedSH, historyFrames);
+    if (bHasCache)
     {
         float3 radiance = EvaluateSHDiffuse(cachedSH, pixelNormal) * SPATIAL_HASH_DIFFUSE_SCALE;
         OutGIHashColor[pixelPos] = float4(radiance, historyFrames);
@@ -706,7 +740,163 @@ void SpatialHashQuery(uint3 DTid : SV_DispatchThreadID)
     }
     else
     {
-        OutGIHashColor[pixelPos] = 0.0f.xxxx;
-        OutGIHashSH[pixelPos] = 0.0f.xxxx;
+        OutGIHashColor[pixelPos] = float4(0.0f.xxx, 0.0f);
+        OutGIHashSH[pixelPos] = float4(0.0f.xxx, 0.0f);
     }
+}
+
+// =====================================================================
+// SpatialHashScreenResolve — per-pixel screen-space resolve layer.
+//
+// The SpatialHashQuery pass above writes raw cell-evaluated radiance
+// per pixel (DiffuseGIHashCached). World-space cell caches leak across
+// surfaces on camera motion because their gather neighbourhood spans
+// adjacent cells regardless of underlying geometry, and they have no
+// per-pixel disocclusion concept.
+//
+// This pass mirrors ScreenProbeGI's per-pixel resolve: a bilateral
+// gather over the per-pixel cache output (depth + normal weighted),
+// followed by motion-reprojected temporal accumulation with a
+// depth+normal disocclusion gate. Output goes to a separate buffer
+// that LightingPS reads. Prev frame's filtered output is snapshotted
+// at end-of-pass for next-frame temporal reuse.
+// =====================================================================
+RWTexture2D<float4> OutDiffuseGIFiltered : register(u13);
+Texture2D InDiffuseGIFilteredPrev        : register(t26);
+
+[numthreads(8, 8, 1)]
+void SpatialHashScreenResolve(uint3 DTid : SV_DispatchThreadID)
+{
+    uint2 pixelPos = DTid.xy;
+    uint2 textureSize = uint2(RTSize);
+    if (pixelPos.x >= textureSize.x || pixelPos.y >= textureSize.y)
+        return;
+
+    float deviceDepth = DepthTex[pixelPos].x;
+    if (deviceDepth >= 0.99999f)
+    {
+        OutDiffuseGIFiltered[pixelPos] = 0.0f.xxxx;
+        return;
+    }
+
+    // Use GEOmetric normal (bump-free) for the bilateral edge stop.
+    // The per-pixel WorldNormal includes normal-map perturbations
+    // that can deflect 15-25° between adjacent pixels on the same
+    // physical surface, which would falsely trip the hard 0.95
+    // dot cutoff and leave only the centre pixel — that was the
+    // source of the residual 1-pixel-thick edge ghosts.
+    float3 pixelNormal = LoadCacheNormal(pixelPos);
+    float curLinear = max(GetLinearDepthOpenGL(deviceDepth, ProjectionParams.z, ProjectionParams.w), 1e-3f);
+
+    // --- Bilateral spatial gather on the per-pixel cell output ---
+    // 9×9 footprint with hard depth+normal edge stops on the
+    // geometric normal. Larger radius averages more same-surface
+    // samples so per-frame cell-update variance gets smoothed
+    // within a single frame.
+    const int kRadius = 4;
+    float3 sumRgb = 0.0f.xxx;
+    float sumFrames = 0.0f;
+    float sumWeight = 0.0f;
+    [loop]
+    for (int dy = -kRadius; dy <= kRadius; ++dy)
+    {
+        [loop]
+        for (int dx = -kRadius; dx <= kRadius; ++dx)
+        {
+            int2 nPx = int2(pixelPos) + int2(dx, dy);
+            if (nPx.x < 0 || nPx.y < 0 || nPx.x >= int(textureSize.x) || nPx.y >= int(textureSize.y))
+                continue;
+
+            float nDepth = DepthTex[nPx].x;
+            if (nDepth >= 0.99999f)
+                continue;
+            float3 nNormal = LoadCacheNormal(nPx);
+            float nLinear = max(GetLinearDepthOpenGL(nDepth, ProjectionParams.z, ProjectionParams.w), 1e-3f);
+
+            float depthDelta = abs(curLinear - nLinear) / max(curLinear, 1e-3f);
+            float normalDot = saturate(dot(pixelNormal, nNormal));
+            // Hard edge stop: ANY neighbour with > 3% depth delta or
+            // < 0.95 normal dot (~18°) is considered a different
+            // surface and dropped from the gather entirely. Earlier
+            // soft falloff still let very-bright sun-lit column
+            // pixels leak measurably into adjacent wall queries
+            // because the dynamic range is huge (1000:1) — a small
+            // soft weight × huge intensity is still visible.
+            if (depthDelta > 0.03f || normalDot < 0.95f)
+                continue;
+            float spatial = exp(-(dx * dx + dy * dy) * 0.18f);
+            float weight = spatial;
+            if (weight <= 1e-4f)
+                continue;
+            float4 sample = OutGIHashColor[nPx];
+            sumRgb    += sample.xyz * weight;
+            sumFrames += sample.w  * weight;
+            sumWeight += weight;
+        }
+    }
+    float3 filteredRgb = sumWeight > 1e-5f ? (sumRgb / sumWeight) : 0.0f.xxx;
+    float filteredFrames = sumWeight > 1e-5f ? (sumFrames / sumWeight) : 0.0f;
+
+    // --- Per-pixel temporal accumulation with disocclusion gate ---
+    float2 uvNow = (float2(pixelPos) + 0.5f) / float2(textureSize);
+    float2 velocity = VelocityTex[pixelPos].xy;
+    float2 prevUV = uvNow - velocity;
+    bool bHistoryValid = false;
+    float3 prevRgb = 0.0f.xxx;
+    float prevFrames = 0.0f;
+    if (prevUV.x >= 0.0f && prevUV.x <= 1.0f && prevUV.y >= 0.0f && prevUV.y <= 1.0f)
+    {
+        int2 prevPx = clamp(int2(prevUV * float2(textureSize)), int2(0,0), int2(textureSize) - 1);
+        float prevDeviceDepth = PrevDepthTex[prevPx].x;
+        if (prevDeviceDepth < 0.99999f)
+        {
+            // PrevNormalTex is the WORLD normal buffer — for the
+            // disocclusion compare we want the geometric component
+            // only, but we don't have a prev GeoNormal channel.
+            // Treat the world normal as an approximation; the
+            // bilateral gather above uses geo normal directly.
+            float3 prevNormal = SafeNormalize(PrevNormalTex[prevPx].xyz, pixelNormal);
+            float prevLinear = max(GetLinearDepthOpenGL(prevDeviceDepth, ProjectionParams.z, ProjectionParams.w), 1e-3f);
+            float depthDelta = abs(curLinear - prevLinear) / max(curLinear, 1e-3f);
+            float normalDot = saturate(dot(pixelNormal, prevNormal));
+            // Very strict disocclusion gate — sub-pixel motion-vector
+            // truncation can land prevPx on a neighbour pixel from a
+            // DIFFERENT surface at silhouette edges. Tighten depth to
+            // 2 % and normal dot to 0.97 (~14°) so column / wall
+            // edge transitions are reliably rejected even when the
+            // prev pixel is only one texel away from the correct
+            // position. Loose threshold here was the residual
+            // 1-pixel-thick edge ghost source.
+            if (depthDelta < 0.02f && normalDot > 0.97f)
+            {
+                float4 prev = InDiffuseGIFilteredPrev[prevPx];
+                prevRgb = max(SanitizeFloat3(prev.xyz), 0.0f.xxx);
+                // Smaller frame cap = faster forgetfulness. With 32
+                // a wall pixel whose prev value got column-tinted
+                // by last frame's bilateral spread keeps that
+                // contamination for ~33 frames; at 8 it washes out
+                // in a few frames so the user-perceived trail-
+                // edge ghost decays quickly under panning.
+                prevFrames = clamp(prev.w, 0.0f, 4.0f);
+                bHistoryValid = true;
+            }
+        }
+    }
+
+    float3 outRgb;
+    float outFrames;
+    if (bHistoryValid)
+    {
+        float acceptedFrames = min(prevFrames + 1.0f, 4.0f);
+        float alpha = 1.0f / max(acceptedFrames, 1.0f);
+        outRgb = lerp(prevRgb, filteredRgb, alpha);
+        outFrames = acceptedFrames;
+    }
+    else
+    {
+        outRgb = filteredRgb;
+        outFrames = 1.0f;
+    }
+
+    OutDiffuseGIFiltered[pixelPos] = float4(outRgb, outFrames);
 }

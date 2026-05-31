@@ -1013,13 +1013,12 @@ void Corona::DebugPass()
 			cb.Offset = glm::vec4(0, 0, 0, 0);
 			cb.Scale = glm::vec4(1, 1, 0, 0);
 		}
-		else if(eFS == EDebugVisualization::NO_FULLSCREEN)
-		{
-			cb.Offset = glm::vec4(0.25, -0.25, 0, 0);
-			cb.Scale = glm::vec4(0.25, 0.25, 0, 0);
-		}
 		else
 		{
+			// Grid-thumbnail slot removed — only the "Final Diffuse GI"
+			// thumbnail is kept in the overview. Remaining diffuse-GI
+			// debug buffers are still selectable via the fullscreen
+			// dropdown above.
 			return;
 		}
 
@@ -1034,11 +1033,6 @@ void Corona::DebugPass()
 		{
 			cb.Offset = glm::vec4(0, 0, 0, 0);
 			cb.Scale = glm::vec4(1, 1, 0, 0);
-		}
-		else if (eFS == EDebugVisualization::NO_FULLSCREEN)
-		{
-			cb.Offset = glm::vec4(0.25, -0.25, 0, 0);
-			cb.Scale = glm::vec4(0.25, 0.25, 0, 0);
 		}
 		else
 		{
@@ -1133,11 +1127,6 @@ void Corona::DebugPass()
 			cb.Offset = glm::vec4(0, 0, 0, 0);
 			cb.Scale = glm::vec4(1, 1, 0, 0);
 		}
-		else if (eFS == EDebugVisualization::NO_FULLSCREEN)
-		{
-			cb.Offset = glm::vec4(0.25, 0.25, 0, 0);
-			cb.Scale = glm::vec4(0.25, 0.25, 0, 0);
-		}
 		else
 		{
 			return;
@@ -1154,11 +1143,6 @@ void Corona::DebugPass()
 		{
 			cb.Offset = glm::vec4(0, 0, 0, 0);
 			cb.Scale = glm::vec4(1, 1, 0, 0);
-		}
-		else  if (eFS == EDebugVisualization::NO_FULLSCREEN)
-		{
-			cb.Offset = glm::vec4(0.25, 0.75, 0, 0);
-			cb.Scale = glm::vec4(0.25, 0.25, 0, 0);
 		}
 		else
 		{
@@ -1301,13 +1285,13 @@ void Corona::DebugPass()
 			cb.Offset = glm::vec4(0, 0, 0, 0);
 			cb.Scale = glm::vec4(1, 1, 0, 0);
 		}
-		else if (eFS == EDebugVisualization::NO_FULLSCREEN)
-		{
-			cb.Offset = glm::vec4(-0.75, 0.25, 0, 0);
-			cb.Scale = glm::vec4(0.25, 0.25, 0, 0);
-		}
 		else
 		{
+			// Grid-thumbnail slot freed — TemporalDenoisingPass no
+			// longer feeds LightingPS for specular (ReSTIR in the
+			// reflection raygen handles temporal). SpecularGITemporal
+			// is now a stale buffer; thumbnail kept only for the
+			// fullscreen dropdown for now.
 			return;
 		}
 
@@ -1325,13 +1309,10 @@ void Corona::DebugPass()
 			cb.Offset = glm::vec4(0, 0, 0, 0);
 			cb.Scale = glm::vec4(1, 1, 0, 0);
 		}
-		else if (eFS == EDebugVisualization::NO_FULLSCREEN)
-		{
-			cb.Offset = glm::vec4(-0.75, 0.75, 0, 0);
-			cb.Scale = glm::vec4(0.25, 0.25, 0, 0);
-		}
 		else
 		{
+			// Grid-thumbnail slot freed — same reason as the
+			// "temporal filtered specular" slot above.
 			return;
 		}
 
@@ -1500,10 +1481,24 @@ void Corona::LightingPass()
 		(!bMobileHybridDirectOnly && DiffuseGITemporalAux[GIBufferWriteIndex]) ?
 		DiffuseGITemporalAux[GIBufferWriteIndex].get() :
 		DefaultBlackTex.get();
+	// Diffuse GI source for LightingPS — same logic as specular below:
+	// the second-stage screen-space TemporalDenoisingPass reprojects
+	// with the surface motion vector, which smears prev-frame indirect
+	// onto disoccluded pixels during camera panning (the indirect
+	// bounce doesn't follow the surface). The SpatialHashGI cache is
+	// world-space, so its cell-level temporal already covers the
+	// "stable across frames" axis correctly. Prefer the per-pixel
+	// query result (DiffuseGIHashCached) directly when SpatialHash
+	// is the active mode; legacy RT-GI / screen-probe paths stay
+	// on the screen-space-denoised buffer.
 	Texture* lightingDiffuseTex =
+		(!bMobileHybridDirectOnly &&
+		 DiffuseGIMode == EDiffuseGIMode::SPATIAL_HASH &&
+		 DiffuseGIHashFiltered) ?
+			DiffuseGIHashFiltered.get() :
 		(!bMobileHybridDirectOnly && DiffuseGITemporal[GIBufferWriteIndex]) ?
-		DiffuseGITemporal[GIBufferWriteIndex].get() :
-		DefaultBlackTex.get();
+			DiffuseGITemporal[GIBufferWriteIndex].get() :
+			DefaultBlackTex.get();
 	if (!bMobileHybridDirectOnly && DiffuseGIMode == EDiffuseGIMode::SCREEN_PROBE && ScreenProbeGIResolved)
 		lightingDiffuseTex = ScreenProbeGIResolved.get();
 	// Specular GI source for LightingPS: prefer the ReSTIR-combined

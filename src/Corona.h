@@ -240,6 +240,14 @@ private:
 	shared_ptr<Texture> ReflectionReservoirB;
 	shared_ptr<Texture> ReflectionReservoirAPrev;
 	shared_ptr<Texture> ReflectionReservoirBPrev;
+	// SpatialHashGI Option A — screen-space per-pixel resolve layer
+	// (bilateral spatial filter + motion-reprojected temporal with
+	// depth+normal disocclusion gate). Mirrors what ScreenProbe does
+	// downstream of its world cache. `Filtered` = current frame
+	// output (LightingPS reads). `FilteredPrev` = end-of-frame
+	// snapshot for next frame's temporal blend.
+	shared_ptr<Texture> DiffuseGIHashFiltered;
+	shared_ptr<Texture> DiffuseGIHashFilteredPrev;
 	shared_ptr<Texture> ShadowBuffer;
 	// ReSTIR DI Phase 2 — previous-frame reservoir cache. Copied from
 	// ShadowBuffer at the end of RaytraceShadowPass so the next frame can
@@ -565,6 +573,10 @@ private:
 	shared_ptr<ComputePipelineStateObject> SpatialHashGIUpdatePSO;
 	shared_ptr<ComputePipelineStateObject> SpatialHashGIResolvePSO;
 	shared_ptr<ComputePipelineStateObject> SpatialHashGIQueryPSO;
+	// Option A — bilateral spatial + temporal disocclusion-gated
+	// resolve over the per-pixel SpatialHashQuery output. Mirrors
+	// the resolve stage from ScreenProbeGI.
+	shared_ptr<ComputePipelineStateObject> SpatialHashGIScreenResolvePSO;
 	std::shared_ptr<Buffer> SpatialHashGIActiveFlags;
 	std::shared_ptr<Buffer> SpatialHashGIActiveCellSlots;
 	std::shared_ptr<Buffer> SpatialHashGIActiveCounter;
