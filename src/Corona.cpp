@@ -2502,16 +2502,6 @@ void Corona::RecreateRenderResolutionResources()
 	ReflectionReservoirBPrev = createTexture2D(ETextureFormat::RGBA32Float, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
 	NAME_D3D12_OBJECT(ReflectionReservoirBPrev->resource);
 
-	// ReSTIR diffuse GI reservoir storage (Simple Trace path).
-	DiffuseGIReservoirA = createTexture2D(ETextureFormat::RGBA32Float, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
-	NAME_D3D12_OBJECT(DiffuseGIReservoirA->resource);
-	DiffuseGIReservoirB = createTexture2D(ETextureFormat::RGBA32Float, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
-	NAME_D3D12_OBJECT(DiffuseGIReservoirB->resource);
-	DiffuseGIReservoirAPrev = createTexture2D(ETextureFormat::RGBA32Float, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
-	NAME_D3D12_OBJECT(DiffuseGIReservoirAPrev->resource);
-	DiffuseGIReservoirBPrev = createTexture2D(ETextureFormat::RGBA32Float, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
-	NAME_D3D12_OBJECT(DiffuseGIReservoirBPrev->resource);
-
 	SpecularGITemporal[0] = createTexture2D(HybridFloat4UAVFormat, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
 	NAME_D3D12_OBJECT(SpecularGITemporal[0]->resource);
 
@@ -9753,16 +9743,6 @@ void Corona::LoadAssets()
 		NAME_D3D12_OBJECT(ReflectionReservoirAPrev->resource);
 		ReflectionReservoirBPrev = createTexture2D(ETextureFormat::RGBA32Float, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
 		NAME_D3D12_OBJECT(ReflectionReservoirBPrev->resource);
-
-		// ReSTIR diffuse GI reservoir storage (Simple Trace path).
-		DiffuseGIReservoirA = createTexture2D(ETextureFormat::RGBA32Float, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
-		NAME_D3D12_OBJECT(DiffuseGIReservoirA->resource);
-		DiffuseGIReservoirB = createTexture2D(ETextureFormat::RGBA32Float, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
-		NAME_D3D12_OBJECT(DiffuseGIReservoirB->resource);
-		DiffuseGIReservoirAPrev = createTexture2D(ETextureFormat::RGBA32Float, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
-		NAME_D3D12_OBJECT(DiffuseGIReservoirAPrev->resource);
-		DiffuseGIReservoirBPrev = createTexture2D(ETextureFormat::RGBA32Float, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
-		NAME_D3D12_OBJECT(DiffuseGIReservoirBPrev->resource);
 
 		SpecularGITemporal[0] = createTexture2D(HybridFloat4UAVFormat, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
 

@@ -240,17 +240,6 @@ private:
 	shared_ptr<Texture> ReflectionReservoirB;
 	shared_ptr<Texture> ReflectionReservoirAPrev;
 	shared_ptr<Texture> ReflectionReservoirBPrev;
-	// ReSTIR GI on Simple Trace diffuse path — analogous layout to the
-	// specular reservoirs above. `*A`.xyz = hit world position
-	// (sky misses encoded as WorldPos + dir·MAX_HIT_DIST so the
-	// reconstructed direction stays valid), `*A`.w = M. `*B`.xyz =
-	// the radiance leaving the hit toward the shading pixel (== the
-	// per-sample Irradiance value the legacy path wrote into
-	// `GIResultColor`), `*B`.w = W.
-	shared_ptr<Texture> DiffuseGIReservoirA;
-	shared_ptr<Texture> DiffuseGIReservoirB;
-	shared_ptr<Texture> DiffuseGIReservoirAPrev;
-	shared_ptr<Texture> DiffuseGIReservoirBPrev;
 	// SpatialHashGI Option A — screen-space per-pixel resolve layer
 	// (bilateral spatial filter + motion-reprojected temporal with
 	// depth+normal disocclusion gate). Mirrors what ScreenProbe does
@@ -749,12 +738,6 @@ private:
 		glm::mat4x4 InvViewMatrix;
 		glm::mat4x4 ProjMatrix;
 		glm::mat4x4 InvProjMatrix;
-		// Previous frame's view*proj for the ReSTIR diffuse-GI
-		// world-pos-reprojection disocclusion gate. Linear-depth
-		// compare without this fires globally on camera motion
-		// because the same world point has different linear depth
-		// each frame.
-		glm::mat4x4 PrevUnjitteredViewProjMatrix;
 		glm::vec4 ProjectionParams;
 		glm::vec4 LightDir;
 		glm::vec2 RandomOffset;
@@ -776,12 +759,6 @@ private:
 	shared_ptr<RTPipelineStateObject> PSO_RT_GI;
 	shared_ptr<RTPipelineStateObject> PSO_RT_GI_SER;
 	bool bRTDiffuseGISimpleSERInitFailed = false;
-	// True after the first RaytraceGIPass dispatch has cleared the
-	// Prev reservoirs to zeros. createTexture2D leaves RGBA32Float UAVs
-	// uninitialized; without this clear, the first frame reads garbage
-	// that passes the (M>0, W>0) guard and persists in the temporal
-	// loop as horizontal streak artefacts.
-	bool bDiffuseGIReservoirsCleared = false;
 
 	struct RTScreenProbeGIViewParamCB
 	{

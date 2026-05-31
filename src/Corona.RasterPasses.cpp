@@ -1477,35 +1477,21 @@ void Corona::LightingPass()
 	}
 
 	glm::normalize(Param.LightDir);
-	// Diffuse GI SH4 (aux) source for LightingPS. SIMPLE_RAYTRACE
-	// gets the raw ReSTIR output (DiffuseGIRawAux) for the same
-	// reason the color buffer does — see comment below.
-	const bool bUseSimpleTraceReSTIRDirect =
-		!bMobileHybridDirectOnly &&
-		DiffuseGIMode == EDiffuseGIMode::SIMPLE_RAYTRACE &&
-		DiffuseGIRaw && DiffuseGIRawAux;
 	Texture* lightingDiffuseAuxTex =
-		bUseSimpleTraceReSTIRDirect ?
-			DiffuseGIRawAux.get() :
 		(!bMobileHybridDirectOnly && DiffuseGITemporalAux[GIBufferWriteIndex]) ?
-			DiffuseGITemporalAux[GIBufferWriteIndex].get() :
-			DefaultBlackTex.get();
+		DiffuseGITemporalAux[GIBufferWriteIndex].get() :
+		DefaultBlackTex.get();
 	// Diffuse GI source for LightingPS — same logic as specular below:
 	// the second-stage screen-space TemporalDenoisingPass reprojects
 	// with the surface motion vector, which smears prev-frame indirect
 	// onto disoccluded pixels during camera panning (the indirect
 	// bounce doesn't follow the surface). The SpatialHashGI cache is
 	// world-space, so its cell-level temporal already covers the
-	// "stable across frames" axis correctly. SIMPLE_RAYTRACE now has
-	// its own per-pixel ReSTIR temporal in raygen (RaytracedGI.hlsl),
-	// which uses world-pos disocclusion + multi-tap prev gather; that
-	// converges cleaner than feeding a second pass of bilateral
-	// reprojection on top, and lets DLSS-RR / downstream temporal
-	// see a single coherent temporal signal instead of two stacked
-	// accumulators with different M caps.
+	// "stable across frames" axis correctly. Prefer the per-pixel
+	// query result (DiffuseGIHashCached) directly when SpatialHash
+	// is the active mode; legacy RT-GI / screen-probe paths stay
+	// on the screen-space-denoised buffer.
 	Texture* lightingDiffuseTex =
-		bUseSimpleTraceReSTIRDirect ?
-			DiffuseGIRaw.get() :
 		(!bMobileHybridDirectOnly &&
 		 DiffuseGIMode == EDiffuseGIMode::SPATIAL_HASH &&
 		 DiffuseGIHashFiltered) ?
