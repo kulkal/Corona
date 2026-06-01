@@ -12,6 +12,19 @@
 #include "stdafx.h"
 #include "Corona.h"
 
+namespace
+{
+	void HashCombineRtBinding(uint64_t& seed, uint64_t value)
+	{
+		seed ^= value + 0x9e3779b97f4a7c15ull + (seed << 6) + (seed >> 2);
+	}
+
+	void HashCombinePointer(uint64_t& seed, const void* value)
+	{
+		HashCombineRtBinding(seed, static_cast<uint64_t>(reinterpret_cast<uintptr_t>(value)));
+	}
+}
+
 Corona::RTPassBuilder::RTPassBuilder(Corona& owner, const shared_ptr<RTPipelineStateObject>& pso)
 	: Owner(owner)
 	, PSO(pso)
@@ -108,6 +121,16 @@ uint32_t Corona::RTPassBuilder::BindSceneHitPrograms(const RTSceneHitProgramDesc
 		BeginScene();
 
 	const auto phaseStart = Corona::CpuClock::now();
+	const bool bCanUseCache = !customBinder;
+	const uint32_t instanceCount = static_cast<uint32_t>(Owner.RayTracingInstances.size());
+	const uint64_t bindingSignature = bCanUseCache ? BuildHitProgramBindingSignature(desc) : 0;
+	if (bCanUseCache && PSO->IsHitProgramBindingCacheValid(instanceCount, bindingSignature))
+	{
+		Owner.AddRtRecordPhaseTiming(ERtRecordPhase::BindHitPrograms, phaseStart, Corona::CpuClock::now());
+		return instanceCount;
+	}
+
+	PSO->MarkHitProgramBindingCacheDirty();
 	uint32_t boundCount = 0;
 	uint32_t instanceIndex = 0;
 	for (const RTInstanceDesc& instance : Owner.RayTracingInstances)
@@ -142,6 +165,8 @@ uint32_t Corona::RTPassBuilder::BindSceneHitPrograms(const RTSceneHitProgramDesc
 		++instanceIndex;
 	}
 
+	if (bCanUseCache)
+		PSO->MarkHitProgramBindingCacheValid(instanceCount, bindingSignature);
 	Owner.AddRtRecordPhaseTiming(ERtRecordPhase::BindHitPrograms, phaseStart, Corona::CpuClock::now());
 	return boundCount;
 }
@@ -201,4 +226,38 @@ Material* Corona::RTPassBuilder::GetPrimaryMaterial(const Mesh& mesh) const
 	if (!mesh.Draws.empty() && mesh.Draws[0].mat)
 		return mesh.Draws[0].mat.get();
 	return mesh.Mat.get();
+}
+
+uint64_t Corona::RTPassBuilder::BuildHitProgramBindingSignature(const RTSceneHitProgramDesc& desc) const
+{
+	uint64_t signature = 1469598103934665603ull;
+	HashCombineRtBinding(signature, static_cast<uint64_t>(Owner.RayTracingInstances.size()));
+	HashCombineRtBinding(signature, desc.bBindSceneGeometry ? 1ull : 0ull);
+	HashCombineRtBinding(signature, desc.bBindDiffuseTexture ? 1ull : 0ull);
+	HashCombineRtBinding(signature, desc.bBindInstanceProperty ? 1ull : 0ull);
+	HashCombineRtBinding(signature, desc.bBindInstancePropertyBeforeDiffuse ? 1ull : 0ull);
+	if (desc.HitGroup)
+	{
+		for (const char* c = desc.HitGroup; *c; ++c)
+			HashCombineRtBinding(signature, static_cast<uint8_t>(*c));
+	}
+
+	HashCombinePointer(signature, Owner.InstancePropertyBuffer.get());
+	for (const RTInstanceDesc& instance : Owner.RayTracingInstances)
+	{
+		HashCombinePointer(signature, instance.BottomLevelAS.get());
+		Mesh* mesh = instance.BottomLevelAS ? instance.BottomLevelAS->MeshPtr : nullptr;
+		HashCombinePointer(signature, mesh);
+		if (!mesh)
+			continue;
+
+		if (desc.bBindSceneGeometry)
+		{
+			HashCombinePointer(signature, mesh->Vb.get());
+			HashCombinePointer(signature, mesh->Ib.get());
+		}
+		if (desc.bBindDiffuseTexture)
+			HashCombinePointer(signature, GetDiffuseTexture(*mesh));
+	}
+	return signature;
 }

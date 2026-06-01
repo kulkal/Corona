@@ -3999,6 +3999,7 @@ void D3D12RTPipelineStateObject::SetNumInstances(uint32_t numInstances)
 		ShaderTable.Reset();
 		ShaderTableEntrySize = 0;
 		ShaderTableSize = 0;
+		MarkHitProgramBindingCacheDirty();
 	}
 	NumInstance = numInstances;
 }
@@ -4147,6 +4148,41 @@ void D3D12RTPipelineStateObject::SetShaderLibraryTarget(const string& target)
 		ShaderLibraryTarget = target;
 }
 
+bool D3D12RTPipelineStateObject::IsHitProgramBindingCacheValid(uint32_t numInstances, uint64_t signature) const
+{
+	DX12Backend* owner = Owner;
+	if (!owner)
+		return false;
+	const uint32_t frameIndex = owner->CurrentFrameIndex;
+	return frameIndex < ShaderTableFrameValid.size() &&
+		frameIndex < ShaderTableFrameInstanceCount.size() &&
+		frameIndex < ShaderTableFrameSignature.size() &&
+		ShaderTableFrameValid[frameIndex] &&
+		ShaderTableFrameInstanceCount[frameIndex] == numInstances &&
+		ShaderTableFrameSignature[frameIndex] == signature;
+}
+
+void D3D12RTPipelineStateObject::MarkHitProgramBindingCacheDirty()
+{
+	HitProgramBindingPendingValid = false;
+	HitProgramBindingPendingInstanceCount = 0;
+	HitProgramBindingPendingSignature = 0;
+	DX12Backend* owner = Owner;
+	if (owner)
+	{
+		const uint32_t frameIndex = owner->CurrentFrameIndex;
+		if (frameIndex < ShaderTableFrameValid.size())
+			ShaderTableFrameValid[frameIndex] = 0;
+	}
+}
+
+void D3D12RTPipelineStateObject::MarkHitProgramBindingCacheValid(uint32_t numInstances, uint64_t signature)
+{
+	HitProgramBindingPendingValid = true;
+	HitProgramBindingPendingInstanceCount = numInstances;
+	HitProgramBindingPendingSignature = signature;
+}
+
 void D3D12RTPipelineStateObject::BeginShaderTable()
 {
 }
@@ -4168,6 +4204,21 @@ void D3D12RTPipelineStateObject::EndShaderTable()
 {
 	DX12Backend* owner = Owner;
 	assert(owner);
+	if (ShaderTableFrameValid.size() != owner->NumFrame)
+		ShaderTableFrameValid.assign(owner->NumFrame, 0);
+	if (ShaderTableFrameInstanceCount.size() != owner->NumFrame)
+		ShaderTableFrameInstanceCount.assign(owner->NumFrame, 0);
+	if (ShaderTableFrameSignature.size() != owner->NumFrame)
+		ShaderTableFrameSignature.assign(owner->NumFrame, 0);
+	const uint32_t frameIndex = owner->CurrentFrameIndex;
+	if (!HitProgramBindingPendingValid &&
+		ShaderTable != nullptr &&
+		frameIndex < ShaderTableFrameValid.size() &&
+		ShaderTableFrameValid[frameIndex])
+	{
+		return;
+	}
+
 	if (ShaderTable == nullptr)
 	{
 		// find biggiest binding size
@@ -4325,6 +4376,20 @@ void D3D12RTPipelineStateObject::EndShaderTable()
 
 
 	ShaderTable->Unmap(0, nullptr);
+	if (HitProgramBindingPendingValid &&
+		frameIndex < ShaderTableFrameValid.size() &&
+		frameIndex < ShaderTableFrameInstanceCount.size() &&
+		frameIndex < ShaderTableFrameSignature.size())
+	{
+		ShaderTableFrameValid[frameIndex] = 1;
+		ShaderTableFrameInstanceCount[frameIndex] = HitProgramBindingPendingInstanceCount;
+		ShaderTableFrameSignature[frameIndex] = HitProgramBindingPendingSignature;
+	}
+	else if (frameIndex < ShaderTableFrameValid.size())
+	{
+		ShaderTableFrameValid[frameIndex] = 0;
+	}
+	HitProgramBindingPendingValid = false;
 }
 
 void D3D12RTPipelineStateObject::SetUAVHandle(const string& shader, const string& bindingName, D3D12_GPU_DESCRIPTOR_HANDLE uavHandle, INT instanceIndex /*= -1*/)

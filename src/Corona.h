@@ -2203,6 +2203,7 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 
 	private:
 		Material* GetPrimaryMaterial(const Mesh& mesh) const;
+		uint64_t BuildHitProgramBindingSignature(const RTSceneHitProgramDesc& desc) const;
 
 		Corona& Owner;
 		shared_ptr<RTPipelineStateObject> PSO;

@@ -35,6 +35,9 @@ public:
 	virtual void BindCBV(const std::string& shader, const std::string& name, uint32_t baseRegister, uint32_t size, uint32_t numInstance) = 0;
 	virtual void SetShaderDefine(const std::string& name, const std::string& value) = 0;
 	virtual void SetShaderLibraryTarget(const std::string& target) = 0;
+	virtual bool IsHitProgramBindingCacheValid(uint32_t numInstances, uint64_t signature) const { return false; }
+	virtual void MarkHitProgramBindingCacheDirty() {}
+	virtual void MarkHitProgramBindingCacheValid(uint32_t numInstances, uint64_t signature) {}
 	virtual void BeginShaderTable() = 0;
 	virtual void EndShaderTable() = 0;
 	virtual void SetTextureUAV(const std::string& shader, const std::string& bindingName, Texture* texture, int instanceIndex = -1) = 0;

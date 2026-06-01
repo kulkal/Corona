@@ -279,6 +279,12 @@ public:
 	uint32_t ShaderTableEntrySize = 0;
 	UINT ShaderTableSize = 0;
 	ComPtr<ID3D12Resource> ShaderTable;
+	std::vector<uint8_t> ShaderTableFrameValid;
+	std::vector<uint32_t> ShaderTableFrameInstanceCount;
+	std::vector<uint64_t> ShaderTableFrameSignature;
+	bool HitProgramBindingPendingValid = false;
+	uint32_t HitProgramBindingPendingInstanceCount = 0;
+	uint64_t HitProgramBindingPendingSignature = 0;
 
 	UINT NumInstance = 0;
 
@@ -292,6 +298,9 @@ public:
 	void BindCBV(const std::string& shader, const std::string& name, uint32_t baseRegister, uint32_t size, uint32_t numInstance) override;
 	void SetShaderDefine(const std::string& name, const std::string& value) override;
 	void SetShaderLibraryTarget(const std::string& target) override;
+	bool IsHitProgramBindingCacheValid(uint32_t numInstances, uint64_t signature) const override;
+	void MarkHitProgramBindingCacheDirty() override;
+	void MarkHitProgramBindingCacheValid(uint32_t numInstances, uint64_t signature) override;
 	void BeginShaderTable() override;
 	void EndShaderTable() override;
 	void SetTextureUAV(const std::string& shader, const std::string& bindingName, Texture* texture, int instanceIndex = -1) override;
