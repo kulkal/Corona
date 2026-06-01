@@ -176,6 +176,26 @@ void Corona::InitGBufferPass()
 
 	GBufferGraphicsPipeline = renderBackend->CreateGraphicsPipeline(desc);
 
+	if (!CORONA_PLATFORM_MOBILE)
+	{
+		GraphicsPipelineDesc staticInstancedDesc = desc;
+		staticInstancedDesc.VertexEntryPoint = "StaticInstancedVSMain";
+		staticInstancedDesc.BufferBindings = {
+			{ "StaticInstanceTransforms", 12 },
+		};
+		try
+		{
+			StaticInstancedGBufferGraphicsPipeline = renderBackend->CreateGraphicsPipeline(staticInstancedDesc);
+		}
+		catch (const std::exception& ex)
+		{
+			AppendCpuRuntimeTrace(L"[InitGBufferPass] StaticInstanced pipeline create exception");
+			(void)ex;
+		}
+		if (!StaticInstancedGBufferGraphicsPipeline)
+			AppendCpuRuntimeTrace(L"[InitGBufferPass] failed to create Static Instanced GBuffer pipeline");
+	}
+
 	// Procedural grass PSO — no IA stream; the VS reads SV_VertexID +
 	// SV_InstanceID and the per-mesh params (PG_*) from b0. Sharing the
 	// GBuffer CB lets DrawScene's existing CB fill code populate the
@@ -1793,6 +1813,152 @@ void Corona::DispatchSpineSkinningForRenderWorld()
 	}
 }
 
+Buffer* Corona::AcquireStaticGBufferInstanceTransformBuffer(uint32_t instanceCount)
+{
+	if (!renderBackend || instanceCount == 0)
+		return nullptr;
+
+	const uint32_t drawSlot = StaticGBufferInstanceTransformDrawIndex++;
+	if (StaticGBufferInstanceTransformBuffers.size() <= drawSlot)
+		StaticGBufferInstanceTransformBuffers.resize(static_cast<size_t>(drawSlot) + 1u);
+
+	const uint32_t frameIndex = renderBackend->GetCurrentFrameIndex() % 4u;
+	auto& buffer = StaticGBufferInstanceTransformBuffers[drawSlot][frameIndex];
+	if (!buffer || buffer->NumElements < instanceCount || buffer->ElementSize != sizeof(StaticGBufferInstanceXform))
+	{
+		uint32_t capacity = 1u;
+		while (capacity < instanceCount)
+			capacity *= 2u;
+		buffer = renderBackend->CreateUploadStructuredBuffer(capacity, sizeof(StaticGBufferInstanceXform));
+	}
+	return buffer.get();
+}
+
+bool Corona::IsSceneEligibleForStaticGBufferInstancing(const std::shared_ptr<Scene>& scene) const
+{
+	if (!scene || !StaticInstancedGBufferGraphicsPipeline || scene->meshes.empty())
+		return false;
+
+	for (const std::shared_ptr<Mesh>& mesh : scene->meshes)
+	{
+		if (!mesh || !mesh->Vb || !mesh->Ib || mesh->Draws.empty())
+			return false;
+		if (mesh->bProceduralGrass || mesh->bGpuSpineSkinned || mesh->bSpineMesh || mesh->bSkeletalSkinned)
+			return false;
+		if (mesh->bTerrainMesh || mesh->bGrassMesh)
+			return false;
+		for (const Mesh::DrawCall& drawcall : mesh->Draws)
+		{
+			if (!drawcall.mat || drawcall.IndexCount == 0)
+				return false;
+		}
+	}
+	return true;
+}
+
+bool Corona::DrawStaticInstancedScene(
+	const std::shared_ptr<Scene>& scene,
+	const std::vector<const SceneObject*>& objects,
+	float roughness,
+	float metallic,
+	bool overrideRoughnessMetallic)
+{
+	if (!scene || objects.empty() || !StaticInstancedGBufferGraphicsPipeline)
+		return false;
+
+	GraphicsPipelineHandle* pso = StaticInstancedGBufferGraphicsPipeline.get();
+	const uint32_t instanceCount = static_cast<uint32_t>(objects.size());
+	StaticGBufferInstanceTransformScratch.resize(instanceCount);
+
+	auto packWorld = [](const glm::mat4x4& world, StaticGBufferInstanceXform& dst)
+	{
+		const glm::mat4x4 t = glm::transpose(world);
+		dst.r0[0] = t[0][0]; dst.r0[1] = t[0][1]; dst.r0[2] = t[0][2]; dst.r0[3] = t[0][3];
+		dst.r1[0] = t[1][0]; dst.r1[1] = t[1][1]; dst.r1[2] = t[1][2]; dst.r1[3] = t[1][3];
+		dst.r2[0] = t[2][0]; dst.r2[1] = t[2][1]; dst.r2[2] = t[2][2]; dst.r2[3] = t[2][3];
+	};
+
+	renderBackend->BindGraphicsPipeline(pso);
+	renderBackend->BindGraphicsPipelineSampler(pso, "samplerWrap", samplerWrap.get());
+
+	for (uint32_t i = 0; i < instanceCount; ++i)
+		packWorld(objects[i]->Transform, StaticGBufferInstanceTransformScratch[i]);
+
+	Buffer* instanceBuffer = AcquireStaticGBufferInstanceTransformBuffer(instanceCount);
+	if (!instanceBuffer)
+		return false;
+	renderBackend->UpdateUploadStructuredBuffer(
+		instanceBuffer,
+		StaticGBufferInstanceTransformScratch.data(),
+		instanceCount * static_cast<uint32_t>(sizeof(StaticGBufferInstanceXform)));
+	renderBackend->BindGraphicsPipelineBuffer(pso, "StaticInstanceTransforms", instanceBuffer);
+
+	for (const std::shared_ptr<Mesh>& mesh : scene->meshes)
+	{
+		if (!mesh || !mesh->Vb || !mesh->Ib)
+			return false;
+
+		renderBackend->BindMeshBuffers(mesh->Vb.get(), mesh->Ib.get());
+
+		for (const Mesh::DrawCall& drawcall : mesh->Draws)
+		{
+			GBufferConstantBuffer objCB = {};
+			objCB.ViewProjectionMatrix = glm::transpose(ViewProjMat);
+			objCB.PrevViewProjectionMatrix = glm::transpose(PrevViewProjMat);
+			objCB.WorldMatrix = glm::transpose(mesh->transform);
+			objCB.UnjitteredViewProjMat = glm::transpose(UnjitteredViewProjMat);
+			objCB.PrevUnjitteredViewProjMat = glm::transpose(PrevUnjitteredViewProjMat);
+			objCB.ViewDir.x = RenderFrameCameraLookDirection.x;
+			objCB.ViewDir.y = RenderFrameCameraLookDirection.y;
+			objCB.ViewDir.z = RenderFrameCameraLookDirection.z;
+			objCB.ViewDir.w = 0.0f;
+			objCB.BaseColorFactor = drawcall.mat ? drawcall.mat->BaseColorFactor : glm::vec4(1.0f);
+			objCB.RTSize.x = GetRenderWidth();
+			objCB.RTSize.y = GetRenderHeight();
+			objCB.RougnessMetalic.x = roughness;
+			objCB.RougnessMetalic.y = metallic;
+			objCB.bOverrideRougnessMetallic = overrideRoughnessMetallic ? 1u : 0u;
+			objCB.bTwoSidedLighting = 0u;
+			objCB.bUnlitMaterial = 0u;
+			objCB.SpineVertexBase = 0u;
+			objCB.SkeletalCharIndex = 0u;
+			objCB.SkeletalVertsPerChar = 0u;
+			objCB.SkeletalBoneCount = 0u;
+			objCB.MeshDeformParams = glm::vec4(RenderFrameWindTime, 0.0f, 0.0f, 0.0f);
+			objCB.GrassBendOrigin = RenderFrameGrassBendOrigin;
+			objCB.GrassBendParams = RenderFrameGrassBendParams;
+			objCB.bGrassMesh = mesh->bGrassMesh ? 1u : 0u;
+			objCB.bTerrainMesh = mesh->bTerrainMesh ? 1u : 0u;
+			objCB.bExcludeFromDeformSphere = mesh->bExcludeFromDeformSphere ? 1u : 0u;
+			objCB.WindParams = RenderFrameWindParams;
+			objCB.WindTuning = RenderFrameWindTuning;
+			objCB.TerrainDeformSphere = RenderFrameTerrainDeformSphere;
+			renderBackend->SetGraphicsPipelineConstantData(pso, 0, &objCB, sizeof(objCB));
+
+			Texture* albedo = drawcall.mat->Diffuse ? drawcall.mat->Diffuse.get() : DefaultWhiteTex.get();
+			Texture* normal = drawcall.mat->Normal ? drawcall.mat->Normal.get() : DefaultNormalTex.get();
+			Texture* rough = drawcall.mat->Roughness ? drawcall.mat->Roughness.get() : DefaultRougnessTex.get();
+			Texture* metal = drawcall.mat->Metallic ? drawcall.mat->Metallic.get() : DefaultBlackTex.get();
+			renderBackend->BindGraphicsPipelineTexture(pso, "AlbedoTex", albedo);
+			renderBackend->BindGraphicsPipelineTexture(pso, "NormalTex", normal);
+			renderBackend->BindGraphicsPipelineTexture(pso, "RoughnessTex", rough);
+			renderBackend->BindGraphicsPipelineTexture(pso, "MetallicTex", metal);
+
+			renderBackend->DrawIndexedInstanced(
+				drawcall.IndexCount,
+				instanceCount,
+				drawcall.IndexStart,
+				drawcall.VertexBase,
+				0);
+			++GBufferLastStaticInstancedDrawCount;
+		}
+	}
+
+	++GBufferLastStaticInstancedBatchCount;
+	GBufferLastStaticInstancedObjectCount += instanceCount;
+	return true;
+}
+
 void Corona::DrawScene(shared_ptr<Scene> scene, const glm::mat4x4& instanceTransform, float Roughness, float Metalic, bool bOverrideRoughnessMetallic)
 {
 	for (auto& mesh : scene->meshes)
@@ -2586,6 +2752,9 @@ void Corona::PrepareGBufferCulling(uint32_t sceneObjectCount)
 	GBufferLastVisibleObjectCount = 0;
 	GBufferLastFrustumCulledObjectCount = 0;
 	GBufferLastOcclusionCulledObjectCount = 0;
+	GBufferLastStaticInstancedBatchCount = 0;
+	GBufferLastStaticInstancedObjectCount = 0;
+	GBufferLastStaticInstancedDrawCount = 0;
 	GBufferOcclusionQueryCount = 0;
 	bGBufferOcclusionQueriesActive = false;
 
@@ -2765,6 +2934,7 @@ void Corona::GBufferPass()
 	renderBackend->BindGraphicsPipelineSampler(GBufferGraphicsPipeline.get(), "samplerWrap", samplerWrap.get());
 
 	PrepareGBufferCulling(static_cast<uint32_t>(RenderWorld.SceneObjects.size()));
+	StaticGBufferInstanceTransformDrawIndex = 0;
 
 	// Phase D (desktop only): if the cluster PSO is live AND we're in the
 	// VS-inline skinning mode, draw all skeletal characters with a single
@@ -2814,8 +2984,109 @@ void Corona::GBufferPass()
 			return false;
 		};
 
+		struct StaticBatchKey
+		{
+			const Scene* ScenePtr = nullptr;
+			float Roughness = 1.0f;
+			float Metallic = 0.0f;
+			bool OverrideRoughnessMetallic = false;
+
+			bool operator<(const StaticBatchKey& rhs) const
+			{
+				if (ScenePtr != rhs.ScenePtr) return ScenePtr < rhs.ScenePtr;
+				if (OverrideRoughnessMetallic != rhs.OverrideRoughnessMetallic) return OverrideRoughnessMetallic < rhs.OverrideRoughnessMetallic;
+				if (Roughness != rhs.Roughness) return Roughness < rhs.Roughness;
+				return Metallic < rhs.Metallic;
+			}
+		};
+		struct StaticBatch
+		{
+			std::shared_ptr<Scene> ScenePtr;
+			float Roughness = 1.0f;
+			float Metallic = 0.0f;
+			bool OverrideRoughnessMetallic = false;
+			struct ObjectEntry
+			{
+				const SceneObject* Object = nullptr;
+				bool HasBounds = false;
+				glm::vec3 BoundsCenter = glm::vec3(0.0f);
+				float BoundsRadius = 0.0f;
+			};
+			std::vector<ObjectEntry> Objects;
+		};
+		constexpr size_t kMinStaticGBufferInstanceCount = 32;
+		auto makeStaticBatchKey = [](const SceneObject& object)
+		{
+			StaticBatchKey key;
+			key.ScenePtr = object.ScenePtr.get();
+			key.Roughness = object.Roughness;
+			key.Metallic = object.Metallic;
+			key.OverrideRoughnessMetallic = object.bOverrideRoughnessMetallic;
+			return key;
+		};
+		auto markObjectDrawnWithoutOcclusionQuery =
+			[this](const SceneObject& object, bool hasBounds, const glm::vec3& boundsCenter, float boundsRadius)
+		{
+			if (!bGBufferOcclusionQueriesActive || object.Handle == InvalidSceneObjectHandle)
+				return;
+			SceneObjectCullingState& state = SceneObjectCullingStates[object.Handle];
+			state.LastVisible = true;
+			state.HasPendingOcclusionQuery = false;
+			state.LastTestFrame = FrameCounter;
+			if (hasBounds)
+			{
+				state.LastBoundsCenter = boundsCenter;
+				state.LastBoundsRadius = boundsRadius;
+				state.HasBounds = true;
+			}
+		};
+		std::map<const Scene*, bool> staticInstancingEligibilityCache;
+		auto isStaticInstancingEligibleCached = [this, &staticInstancingEligibilityCache](const std::shared_ptr<Scene>& scene)
+		{
+			if (!scene)
+				return false;
+			const Scene* key = scene.get();
+			auto it = staticInstancingEligibilityCache.find(key);
+			if (it != staticInstancingEligibilityCache.end())
+				return it->second;
+			const bool eligible = IsSceneEligibleForStaticGBufferInstancing(scene);
+			staticInstancingEligibilityCache[key] = eligible;
+			return eligible;
+		};
+		auto sceneHasProceduralGrass = [](const std::shared_ptr<Scene>& scene)
+		{
+			if (!scene)
+				return false;
+			for (const std::shared_ptr<Mesh>& sceneMesh : scene->meshes)
+			{
+				if (sceneMesh && sceneMesh->bProceduralGrass)
+					return true;
+			}
+			return false;
+		};
+		const std::shared_ptr<Scene> activeGrassScene = ActiveGrassScene.lock();
+		std::map<StaticBatchKey, uint32_t> staticInstancingCandidateCounts;
+		for (const SceneObject& object : RenderWorld.SceneObjects)
+		{
+			if (!object.bVisible || !object.ScenePtr)
+				continue;
+			if (sceneUsesSpineMesh(object.ScenePtr) || isSkeletalUnifiedObject(object.ScenePtr))
+				continue;
+			const bool bTerrainScene = ActiveTerrain && object.ScenePtr == ActiveTerrain->GetScene();
+			const bool bProceduralGrassScene = sceneHasProceduralGrass(object.ScenePtr);
+			const bool bLegacyGrassScene =
+				!bProceduralGrassScene && activeGrassScene && object.ScenePtr == activeGrassScene;
+			if (bTerrainScene || bProceduralGrassScene || bLegacyGrassScene)
+				continue;
+			if (!isStaticInstancingEligibleCached(object.ScenePtr))
+				continue;
+			++staticInstancingCandidateCounts[makeStaticBatchKey(object)];
+		}
+
 		for (int drawSpinePass = 0; drawSpinePass < 2; ++drawSpinePass)
 		{
+			std::map<StaticBatchKey, StaticBatch> staticBatches;
+			std::vector<const SceneObject*> staticBatchObjectPtrs;
 			for (const SceneObject& object : RenderWorld.SceneObjects)
 			{
 				if (!object.bVisible || !object.ScenePtr)
@@ -2834,7 +3105,8 @@ void Corona::GBufferPass()
 				glm::vec3 boundsMax(0.0f);
 				glm::vec3 boundsCenter(0.0f);
 				float boundsRadius = 0.0f;
-				if (GetSceneObjectWorldBounds(object, boundsMin, boundsMax, boundsCenter, boundsRadius))
+				const bool bHasBounds = GetSceneObjectWorldBounds(object, boundsMin, boundsMax, boundsCenter, boundsRadius);
+				if (bHasBounds)
 				{
 					if (!IsWorldAabbInViewFrustum(boundsMin, boundsMax))
 					{
@@ -2852,8 +3124,6 @@ void Corona::GBufferPass()
 						continue;
 				}
 
-				const uint32_t occlusionQueryIndex = BeginGBufferOcclusionQuery(object.Handle);
-				const std::shared_ptr<Scene> activeGrassScene = ActiveGrassScene.lock();
 				const bool bTerrainScene =
 					ActiveTerrain && object.ScenePtr == ActiveTerrain->GetScene();
 				// Procedural-grass scenes route through the vertex-pulling PSO
@@ -2863,17 +3133,35 @@ void Corona::GBufferPass()
 				// pointer. Legacy VB-backed grass keeps the original Grass
 				// bucket; procedural lands in its own bucket so the overlay
 				// can show their costs separately.
-				bool bProceduralGrassScene = false;
-				for (const std::shared_ptr<Mesh>& sceneMesh : object.ScenePtr->meshes)
-				{
-					if (sceneMesh && sceneMesh->bProceduralGrass)
-					{
-						bProceduralGrassScene = true;
-						break;
-					}
-				}
+				const bool bProceduralGrassScene = sceneHasProceduralGrass(object.ScenePtr);
 				const bool bLegacyGrassScene =
 					!bProceduralGrassScene && activeGrassScene && object.ScenePtr == activeGrassScene;
+				const StaticBatchKey staticBatchKey = makeStaticBatchKey(object);
+				const auto staticCandidateCountIt = staticInstancingCandidateCounts.find(staticBatchKey);
+				const uint32_t staticCandidateCount =
+					staticCandidateCountIt != staticInstancingCandidateCounts.end() ? staticCandidateCountIt->second : 0u;
+				const bool bStaticInstancingCandidate =
+					drawSpinePass == 0 &&
+					!bTerrainScene &&
+					!bProceduralGrassScene &&
+					!bLegacyGrassScene &&
+					staticCandidateCount >= kMinStaticGBufferInstanceCount &&
+					isStaticInstancingEligibleCached(object.ScenePtr);
+				if (bStaticInstancingCandidate)
+				{
+					StaticBatch& batch = staticBatches[staticBatchKey];
+					if (!batch.ScenePtr)
+					{
+						batch.ScenePtr = object.ScenePtr;
+						batch.Roughness = object.Roughness;
+						batch.Metallic = object.Metallic;
+						batch.OverrideRoughnessMetallic = object.bOverrideRoughnessMetallic;
+					}
+					batch.Objects.push_back({ &object, bHasBounds, boundsCenter, boundsRadius });
+					continue;
+				}
+
+				const uint32_t occlusionQueryIndex = BeginGBufferOcclusionQuery(object.Handle);
 				if (bTerrainScene)
 					BeginGpuPassTiming(EGpuPass::Terrain);
 				else if (bProceduralGrassScene)
@@ -2894,6 +3182,56 @@ void Corona::GBufferPass()
 					EndGpuPassTiming(EGpuPass::Grass);
 				EndGBufferOcclusionQuery(object.Handle, occlusionQueryIndex);
 				++GBufferLastVisibleObjectCount;
+			}
+
+			for (auto& batchPair : staticBatches)
+			{
+				StaticBatch& batch = batchPair.second;
+				if (!batch.ScenePtr || batch.Objects.empty())
+					continue;
+				staticBatchObjectPtrs.clear();
+				staticBatchObjectPtrs.reserve(batch.Objects.size());
+				for (const StaticBatch::ObjectEntry& entry : batch.Objects)
+				{
+					if (entry.Object)
+						staticBatchObjectPtrs.push_back(entry.Object);
+				}
+				if (staticBatchObjectPtrs.size() >= kMinStaticGBufferInstanceCount &&
+					DrawStaticInstancedScene(
+						batch.ScenePtr,
+						staticBatchObjectPtrs,
+						batch.Roughness,
+						batch.Metallic,
+						batch.OverrideRoughnessMetallic))
+				{
+					for (const StaticBatch::ObjectEntry& entry : batch.Objects)
+					{
+						if (!entry.Object)
+							continue;
+						markObjectDrawnWithoutOcclusionQuery(
+							*entry.Object,
+							entry.HasBounds,
+							entry.BoundsCenter,
+							entry.BoundsRadius);
+						++GBufferLastVisibleObjectCount;
+					}
+					continue;
+				}
+				for (const StaticBatch::ObjectEntry& entry : batch.Objects)
+				{
+					const SceneObject* object = entry.Object;
+					if (!object)
+						continue;
+					const uint32_t occlusionQueryIndex = BeginGBufferOcclusionQuery(object->Handle);
+					DrawScene(
+						object->ScenePtr,
+						object->Transform,
+						object->Roughness,
+						object->Metallic,
+						object->bOverrideRoughnessMetallic);
+					EndGBufferOcclusionQuery(object->Handle, occlusionQueryIndex);
+					++GBufferLastVisibleObjectCount;
+				}
 			}
 		}
 	}
@@ -2950,6 +3288,9 @@ void Corona::GBufferPass()
 			L", frustum=" + std::to_wstring(GBufferLastFrustumCulledObjectCount) +
 			L", occlusion=" + std::to_wstring(GBufferLastOcclusionCulledObjectCount) +
 			L", queries=" + std::to_wstring(GBufferOcclusionQueryCount) +
+			L", staticBatches=" + std::to_wstring(GBufferLastStaticInstancedBatchCount) +
+			L", staticObjects=" + std::to_wstring(GBufferLastStaticInstancedObjectCount) +
+			L", staticDraws=" + std::to_wstring(GBufferLastStaticInstancedDrawCount) +
 			L", active=" + std::to_wstring(bGBufferOcclusionQueriesActive ? 1 : 0));
 	}
 	

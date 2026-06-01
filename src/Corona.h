@@ -404,6 +404,10 @@ private:
 	};
 
 	std::shared_ptr<GraphicsPipelineHandle> GBufferGraphicsPipeline;
+	// Desktop static-mesh instancing path. Draws repeated map-spawned
+	// SceneObjects that share the same Scene/material override as
+	// DrawIndexedInstanced, with per-instance world matrices in t12.
+	std::shared_ptr<GraphicsPipelineHandle> StaticInstancedGBufferGraphicsPipeline;
 	// Vertex-pulling procedural grass PSO. Empty IA (no VB/IB), reads
 	// SV_InstanceID / SV_VertexID, samples GBufferConstantBuffer (b0) for
 	// world matrix + wind/bend + PG_* fields.
@@ -1892,6 +1896,9 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	uint64_t GBufferLastVisibleObjectCount = 0;
 	uint64_t GBufferLastFrustumCulledObjectCount = 0;
 	uint64_t GBufferLastOcclusionCulledObjectCount = 0;
+	uint64_t GBufferLastStaticInstancedBatchCount = 0;
+	uint64_t GBufferLastStaticInstancedObjectCount = 0;
+	uint64_t GBufferLastStaticInstancedDrawCount = 0;
 	uint64_t MobileShadowLastTotalObjectCount = 0;
 	uint64_t MobileShadowLastCandidateObjectCount = 0;
 	uint64_t MobileShadowLastReceiverObjectCount = 0;
@@ -3003,6 +3010,18 @@ public:
 	void UpdateSkeletalUnifiedInstanceTransforms();
 	void CpuSkinSkeletalCharactersForRenderWorld();
 	void DumpSkeletalFrameStatsToTrace();
+	struct StaticGBufferInstanceXform { float r0[4]; float r1[4]; float r2[4]; };
+	std::vector<StaticGBufferInstanceXform> StaticGBufferInstanceTransformScratch;
+	std::vector<std::array<std::shared_ptr<Buffer>, 4>> StaticGBufferInstanceTransformBuffers;
+	uint32_t StaticGBufferInstanceTransformDrawIndex = 0;
+	Buffer* AcquireStaticGBufferInstanceTransformBuffer(uint32_t instanceCount);
+	bool IsSceneEligibleForStaticGBufferInstancing(const std::shared_ptr<Scene>& scene) const;
+	bool DrawStaticInstancedScene(
+		const std::shared_ptr<Scene>& scene,
+		const std::vector<const SceneObject*>& objects,
+		float roughness,
+		float metallic,
+		bool overrideRoughnessMetallic);
 	bool BuildMobileShadowViewProjection(glm::mat4x4& lightViewProj);
 	bool GetSceneObjectWorldBounds(const SceneObject& object, glm::vec3& boundsMin, glm::vec3& boundsMax, glm::vec3& center, float& radius) const;
 	bool IsWorldAabbInViewFrustum(const glm::vec3& boundsMin, const glm::vec3& boundsMax) const;

@@ -196,6 +196,12 @@ StructuredBuffer<SpineSkinInputVertex_t> SpineVsInlineInputVertices : register(t
 StructuredBuffer<SpineSkinInfluence_t>   SpineVsInlineInfluences    : register(t10);
 StructuredBuffer<SpineSkinBone_t>        SpineVsInlineBones         : register(t11);
 
+#ifdef GBUFFER_HAS_CLUSTER
+// Desktop-only static mesh instancing. Same compact mat3x4 layout as the
+// skeletal cluster transform buffer, indexed by SV_InstanceID.
+StructuredBuffer<SkinBone_t> StaticInstanceTransforms : register(t12);
+#endif // GBUFFER_HAS_CLUSTER
+
 struct PSInput
 {
     float4 position           : SV_POSITION;
@@ -428,6 +434,17 @@ VertexObjSpace LoadVertex_SkeletalCl(VSInput input, uint vertexId, uint instance
     v.worldMatrix    = worldMatrix;
     v.prevWorldMatrix = worldMatrix; // prev-frame per-instance world TBD
     v.instanceId     = charIndex;
+    return v;
+}
+
+VertexObjSpace LoadVertex_StaticInstanced(VSInput input, uint instanceId)
+{
+    VertexObjSpace v = LoadVertex_Static(input);
+    const float4x4 instanceWorldMatrix = BuildWorldMatrixFromMat3x4Cluster(StaticInstanceTransforms[instanceId]);
+    const float4x4 worldMatrix = mul(WorldMatrix, instanceWorldMatrix);
+    v.worldMatrix = worldMatrix;
+    v.prevWorldMatrix = worldMatrix;
+    v.instanceId = instanceId;
     return v;
 }
 #endif // GBUFFER_HAS_CLUSTER
@@ -745,6 +762,13 @@ PSInput SkeletalVsInlineVSMain(VSInput input, uint vertexId : SV_VertexID)
 }
 
 #ifdef GBUFFER_HAS_CLUSTER
+PSInput StaticInstancedVSMain(VSInput input, uint instanceId : SV_InstanceID)
+{
+    VertexObjSpace v = LoadVertex_StaticInstanced(input, instanceId);
+    v = ApplyVertexDeformations(v);
+    return BuildPSInput(v);
+}
+
 PSInput SkeletalVsInlineClusterVSMain(VSInput input, uint vertexId : SV_VertexID, uint instanceId : SV_InstanceID)
 {
     VertexObjSpace v = LoadVertex_SkeletalCl(input, vertexId, instanceId);
