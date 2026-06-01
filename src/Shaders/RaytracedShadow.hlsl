@@ -124,7 +124,7 @@ void rayGen()
 
     float3 traceNormal = CommonSafeNormalize(geoNormal + worldNormal * 0.25f, geoNormal);
     float3 baseLightDir = CommonSafeNormalize(LightDir.xyz, float3(0.0f, 1.0f, 0.0f));
-    float visibility = 0.0f;
+    float visibility = 1.0f;
     const uint kMaxShadowSamples = 16;
     uint sampleCount = min(max(ShadowSampleCount, 1), kMaxShadowSamples);
     // Bias scales with distance from camera so far-floor pixels in
@@ -138,35 +138,40 @@ void rayGen()
     float normalBias = max(0.5f,
         distanceToCamera * 0.003f + distanceToCamera * distanceToCamera * 5e-8f);
 
-    [loop]
-    for (uint sampleIndex = 0; sampleIndex < kMaxShadowSamples; ++sampleIndex)
+    const bool directionalCastsShadow = LightDir.w > 0.5f;
+    if (directionalCastsShadow)
     {
-        if (sampleIndex >= sampleCount)
-            break;
+        visibility = 0.0f;
+        [loop]
+        for (uint sampleIndex = 0; sampleIndex < kMaxShadowSamples; ++sampleIndex)
+        {
+            if (sampleIndex >= sampleCount)
+                break;
 
-        uint2 noisePixel = pixelPos + uint2(sampleIndex * 17u, sampleIndex * 31u);
-        uint noiseFrame = FrameCounter + sampleIndex * 13u;
-        float2 randUV = GenerateRaySample2D(RayNoiseBlueNoiseSource, noisePixel, noiseFrame, BlueNoiseOffsetStride, NoiseMode);
-        float3 rayDir = SampleDirectionalLightSphereCap(baseLightDir, ShadowLightRadius, randUV);
-        float3 rayBiasNormal = dot(traceNormal, rayDir) < 0.0f ? -traceNormal : traceNormal;
+            uint2 noisePixel = pixelPos + uint2(sampleIndex * 17u, sampleIndex * 31u);
+            uint noiseFrame = FrameCounter + sampleIndex * 13u;
+            float2 randUV = GenerateRaySample2D(RayNoiseBlueNoiseSource, noisePixel, noiseFrame, BlueNoiseOffsetStride, NoiseMode);
+            float3 rayDir = SampleDirectionalLightSphereCap(baseLightDir, ShadowLightRadius, randUV);
+            float3 rayBiasNormal = dot(traceNormal, rayDir) < 0.0f ? -traceNormal : traceNormal;
 
-        RayDesc ray;
-        ray.Origin = worldPos + rayBiasNormal * normalBias;
-        ray.Direction = rayDir;
-        ray.TMin = max(0.05f, normalBias * 0.25f);
-        ray.TMax = 100000;
+            RayDesc ray;
+            ray.Origin = worldPos + rayBiasNormal * normalBias;
+            ray.Direction = rayDir;
+            ray.TMin = max(0.05f, normalBias * 0.25f);
+            ray.TMax = 100000;
 
-        RayPayload payload;
-        payload.bHit = 1u;
-        payload._padding = 0.0f.xxx;
-        TraceRay(gRtScene,
-            RT_SHADOW_RAY_FLAGS,
-            0xFF, 0, 0, 0, ray, payload);
+            RayPayload payload;
+            payload.bHit = 1u;
+            payload._padding = 0.0f.xxx;
+            TraceRay(gRtScene,
+                RT_SHADOW_RAY_FLAGS,
+                0xFF, 0, 0, 0, ray, payload);
 
-        visibility += payload.bHit == 0u ? 1.0f : 0.0f;
+            visibility += payload.bHit == 0u ? 1.0f : 0.0f;
+        }
+
+        visibility /= sampleCount;
     }
-
-    visibility /= sampleCount;
 
     // Helper: cast a single occlusion ray to a world-space point light
     // position. Returns 1.0 if unoccluded, 0.0 if shadowed (skipping rays

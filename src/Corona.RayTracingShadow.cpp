@@ -111,7 +111,7 @@ void Corona::RaytraceShadowPass()
 	RTShadowViewParam.ProjMatrix = glm::transpose(UnjitteredProjMat);
 	RTShadowViewParam.InvProjMatrix = glm::transpose(UnjitteredInvProjMat);
 	RTShadowViewParam.ProjectionParams = FrameProjectionParams;
-	RTShadowViewParam.LightDir = glm::vec4(RenderFrameNormalizedLightDir, 0.0f);
+	RTShadowViewParam.LightDir = glm::vec4(RenderFrameNormalizedLightDir, RenderFrameDirectionalLightCastShadow ? 1.0f : 0.0f);
 	RTShadowViewParam.ShadowLightRadius = std::clamp(RTShadowViewParam.ShadowLightRadius, 0.0f, 0.03f);
 	RTShadowViewParam.ShadowSampleCount = std::clamp(RTShadowViewParam.ShadowSampleCount, 1u, 16u);
 	RTShadowViewParam.FrameCounter = RenderFrameIndex;
@@ -143,6 +143,9 @@ void Corona::RaytraceShadowPass()
 		return std::max(0.0f, luma) * std::max(0.0f, pl.Intensity);
 	};
 
+	std::vector<const PointLightState*> pointLightCandidates;
+	BuildPointLightRenderCandidates(pointLightCandidates);
+
 	uint32_t shadowedCount = 0;
 	if (bEnableReSTIRDirectShadow)
 	{
@@ -161,21 +164,18 @@ void Corona::RaytraceShadowPass()
 		//      (see RasterPasses.cpp:1430+). Adding it would shift
 		//      indices.
 		//   3. Sphere-frustum cull — also applied to LightingPS feed.
-		for (const PointLightState& pl : RenderWorld.PointLights)
+		for (const PointLightState* plPtr : pointLightCandidates)
 		{
 			if (shadowedCount >= MaxPointLights)
 				break;
-			if (!pl.bEnabled)
+			if (!plPtr)
 				continue;
+			const PointLightState& pl = *plPtr;
 			const float radius = std::max(pl.Radius, 0.01f);
-			const glm::vec3 sphereMin = pl.Position - glm::vec3(radius);
-			const glm::vec3 sphereMax = pl.Position + glm::vec3(radius);
-			if (!IsWorldAabbInViewFrustum(sphereMin, sphereMax))
-				continue;
 			RTShadowViewParam.ShadowedPointLights[shadowedCount] =
 				glm::vec4(pl.Position, radius);
 			RTShadowViewParam.ShadowedPointLightWeights[shadowedCount] =
-				glm::vec4(computeLuma(pl), 0.0f, 0.0f, 0.0f);
+				glm::vec4(pl.bCastShadow ? computeLuma(pl) : 0.0f, 0.0f, 0.0f, 0.0f);
 			++shadowedCount;
 		}
 	}
@@ -187,21 +187,16 @@ void Corona::RaytraceShadowPass()
 			float DistSq;
 		};
 		std::vector<Candidate> candidates;
-		candidates.reserve(RenderWorld.PointLights.size());
+		const uint32_t searchCount = std::min<uint32_t>(static_cast<uint32_t>(pointLightCandidates.size()), MaxPointLights);
+		candidates.reserve(searchCount);
 		const glm::vec3 camPos = RenderFrameCameraPosition;
-		for (uint32_t i = 0; i < RenderWorld.PointLights.size(); ++i)
+		for (uint32_t i = 0; i < searchCount; ++i)
 		{
-			const PointLightState& pl = RenderWorld.PointLights[i];
-			if (!pl.bEnabled || pl.Intensity <= 0.0f)
+			const PointLightState* plPtr = pointLightCandidates[i];
+			if (!plPtr)
 				continue;
-			const float radius = std::max(pl.Radius, 0.01f);
-			// Sphere-AABB frustum test approximated as point-AABB test
-			// against a slightly inflated bounding box of the light's
-			// reach. Cheap; lights right on the frustum boundary may flip
-			// in/out as the camera rotates but soft shadow / TAA hides it.
-			const glm::vec3 boundsMin = pl.Position - glm::vec3(radius);
-			const glm::vec3 boundsMax = pl.Position + glm::vec3(radius);
-			if (!IsWorldAabbInViewFrustum(boundsMin, boundsMax))
+			const PointLightState& pl = *plPtr;
+			if (!pl.bCastShadow)
 				continue;
 			const glm::vec3 toLight = pl.Position - camPos;
 			candidates.push_back({ i, glm::dot(toLight, toLight) });
@@ -211,7 +206,7 @@ void Corona::RaytraceShadowPass()
 		const uint32_t pick = std::min<uint32_t>(static_cast<uint32_t>(candidates.size()), 3u);
 		for (uint32_t k = 0; k < pick; ++k)
 		{
-			const PointLightState& pl = RenderWorld.PointLights[candidates[k].Index];
+			const PointLightState& pl = *pointLightCandidates[candidates[k].Index];
 			RTShadowViewParam.ShadowedPointLights[k] =
 				glm::vec4(pl.Position, std::max(pl.Radius, 0.01f));
 			RTShadowViewParam.ShadowedPointLightWeights[k] =

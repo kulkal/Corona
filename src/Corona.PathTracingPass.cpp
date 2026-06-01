@@ -130,6 +130,7 @@ void Corona::PathTracingPass()
 	glm::vec3 currentLightDir = RenderFrameNormalizedLightDir;
 	bool lightDirChanged = glm::length(currentLightDir - PrevPathTracingLightDir) > 0.0001f;
 	bool lightIntensityChanged = abs(LightIntensity - PrevPathTracingLightIntensity) > 0.0001f;
+	bool lightCastShadowChanged = RenderFrameDirectionalLightCastShadow != PrevPathTracingDirectionalLightCastShadow;
 	
 	// Check if sky color changed
 	bool skyColorChanged = glm::length(SkyColorTop - PrevSkyColorTop) > 0.0001f ||
@@ -140,16 +141,17 @@ void Corona::PathTracingPass()
 		bEnablePathTracingRRPrimaryRayStabilization &&
 		cameraChanged;
 	
-	if (cameraChanged || lightDirChanged || lightIntensityChanged || skyColorChanged)
+	if (cameraChanged || lightDirChanged || lightIntensityChanged || lightCastShadowChanged || skyColorChanged)
 	{
 		PathTracingAccumulatedFrames = 0;
 #if WITH_STREAMLINE
-		if (bWritePrimaryGBuffer && (lightDirChanged || lightIntensityChanged || skyColorChanged))
+		if (bWritePrimaryGBuffer && (lightDirChanged || lightIntensityChanged || lightCastShadowChanged || skyColorChanged))
 			bDLSSResetNeeded = true;
 #endif
 		PrevPathTracingViewMat = ViewMat;
 		PrevPathTracingLightDir = currentLightDir;
 		PrevPathTracingLightIntensity = LightIntensity;
+		PrevPathTracingDirectionalLightCastShadow = RenderFrameDirectionalLightCastShadow;
 		PrevSkyColorTop = SkyColorTop;
 		PrevSkyColorBottom = SkyColorBottom;
 		PrevSkyIntensity = SkyIntensity;
@@ -167,6 +169,7 @@ void Corona::PathTracingPass()
 	PathTracingViewParam.LightDirAndIntensity = glm::vec4(RenderFrameNormalizedLightDir, LightIntensity);
 	PathTracingViewParam.DirectLightAngularRadius = RTShadowViewParam.ShadowLightRadius;
 	PathTracingViewParam.DirectLightSampleCount = std::clamp(PathTracingViewParam.DirectLightSampleCount, 1u, 8u);
+	PathTracingViewParam.bDirectLightCastShadow = RenderFrameDirectionalLightCastShadow ? 1u : 0u;
 	PathTracingViewParam.RandomOffset = glm::vec2(RenderFrameShaderTime, RenderFrameShaderTime);
 	PathTracingViewParam.FrameCounter = PathTracingViewParam.DebugMode == 0 ? PathTracingAccumulatedFrames : 0u;
 	PathTracingViewParam.BlueNoiseOffsetStride = PathTracingViewParam.DebugMode == 0 ? RenderFrameIndex : 0u;

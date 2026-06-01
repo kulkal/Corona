@@ -2,6 +2,9 @@
 #include "Corona.h"
 
 #include <algorithm>
+#include <cmath>
+
+void AppendCpuRuntimeTrace(const std::wstring& line);
 
 namespace
 {
@@ -177,6 +180,31 @@ void Corona::UpdateMainCameraEntityFromSimpleCamera()
 		EntityWorld.SetActiveCamera(MainCameraEntity);
 }
 
+void Corona::UpdateSimpleCameraFromActiveCameraEntity()
+{
+	const CoronaECS::Entity activeCameraEntity = EntityWorld.GetActiveCameraEntity();
+	const CoronaECS::CameraComponent* cameraComponent = EntityWorld.GetCamera(activeCameraEntity);
+	const CoronaECS::TransformComponent* transformComponent = EntityWorld.GetTransform(activeCameraEntity);
+	if (!cameraComponent || !transformComponent)
+		return;
+
+	m_camera.m_position = transformComponent->GetPosition();
+	m_camera.m_lookDirection = NormalizeOrFallback(cameraComponent->LookDirection, glm::vec3(0.0f, 0.0f, 1.0f));
+	m_camera.m_upDirection = NormalizeOrFallback(cameraComponent->UpDirection, glm::vec3(0.0f, 1.0f, 0.0f));
+	m_camera.m_yaw = static_cast<float>(std::atan2(m_camera.m_lookDirection.x, m_camera.m_lookDirection.z));
+	m_camera.m_pitch = static_cast<float>(std::asin(std::clamp(m_camera.m_lookDirection.y, -1.0f, 1.0f)));
+	Fov = std::clamp(cameraComponent->Fov, 0.05f, glm::pi<float>() - 0.05f);
+	Near = std::max(0.001f, cameraComponent->NearPlane);
+	Far = std::max(Near + 1.0f, cameraComponent->FarPlane);
+
+	AppendCpuRuntimeTrace(
+		L"[Camera] synced simple camera from active entity=" +
+		std::to_wstring(activeCameraEntity.GetId()) +
+		L", position=(" + std::to_wstring(m_camera.m_position.x) +
+		L"," + std::to_wstring(m_camera.m_position.y) +
+		L"," + std::to_wstring(m_camera.m_position.z) + L")");
+}
+
 void Corona::InitializeMainDirectionalLightEntity()
 {
 	if (EntityWorld.IsAlive(MainDirectionalLightEntity) && EntityWorld.HasLight(MainDirectionalLightEntity))
@@ -262,11 +290,20 @@ void Corona::UpdatePointLightEntity(const PointLightState& pointLight)
 		transformComponent->SetPosition(pointLight.Position);
 
 	CoronaECS::LightComponent lightComponent;
-	lightComponent.Type = CoronaECS::LightType::Point;
+	lightComponent.Type = pointLight.Type == CoronaECS::LightType::Spot ?
+		CoronaECS::LightType::Spot :
+		CoronaECS::LightType::Point;
 	lightComponent.bEnabled = pointLight.bEnabled;
 	lightComponent.Color = glm::max(pointLight.Color, glm::vec3(0.0f));
 	lightComponent.Intensity = std::max(0.0f, pointLight.Intensity);
 	lightComponent.Radius = std::clamp(pointLight.Radius, 1.0f, 100000.0f);
+	lightComponent.bCastShadow = pointLight.bCastShadow;
+	lightComponent.Direction = glm::length(pointLight.Direction) > 0.0001f ?
+		glm::normalize(pointLight.Direction) :
+		glm::vec3(0.0f, 1.0f, 0.0f);
+	lightComponent.InnerConeAngle = std::clamp(pointLight.InnerConeAngle, 0.0f, glm::pi<float>() - 0.001f);
+	lightComponent.OuterConeAngle =
+		std::clamp(pointLight.OuterConeAngle, lightComponent.InnerConeAngle + 0.001f, glm::pi<float>());
 	lightComponent.RuntimeLightId = pointLight.Id;
 	EntityWorld.AddLight(pointLight.EntityHandle, lightComponent);
 }

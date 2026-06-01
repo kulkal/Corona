@@ -581,6 +581,9 @@ glm::vec3 Corona::ResolveCameraPhysicsMovement(
 	const glm::vec3& startPosition,
 	const glm::vec3& desiredPosition)
 {
+	if (!bEditorCameraCollisionEnabled)
+		return desiredPosition;
+
 	glm::vec3 currentPosition = startPosition;
 	glm::vec3 remainingMove = desiredPosition - startPosition;
 

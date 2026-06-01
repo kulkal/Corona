@@ -21,6 +21,7 @@ private:
 	void DrawBottomToggleButton();
 	void SpawnDirectionalLight();
 	void SpawnPointLight();
+	void SpawnSpotLight();
 	void SpawnBox();
 	void SpawnSphere();
 	void SpawnGrass();

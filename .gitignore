@@ -22,6 +22,7 @@ obj/
 
 # runtime-local state and generated diagnostics
 .claude/settings.local.json
+assets/
 config/
 logs/
 dumps/

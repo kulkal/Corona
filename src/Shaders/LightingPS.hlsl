@@ -41,6 +41,8 @@ struct PointLightParam
 {
     float4 PositionAndRadius;
     float4 ColorAndIntensity;
+    float4 DirectionAndType;   // xyz = spotlight direction, w = 0 point / 1 spot
+    float4 SpotConeAndFlags;   // x innerCos, y outerCos, z invCosDelta, w castShadow
 };
 
 cbuffer LightingParam : register(b0)
@@ -126,6 +128,17 @@ float3 SafeNormalize(float3 value, float3 fallback)
         return fallback;
 
     return value * rsqrt(lengthSq);
+}
+
+float EvaluateSpotAttenuation(PointLightParam light, float3 surfaceToLightDir)
+{
+    if (light.DirectionAndType.w < 0.5f)
+        return 1.0f;
+
+    float3 spotDir = SafeNormalize(light.DirectionAndType.xyz, float3(0.0f, 1.0f, 0.0f));
+    float cosTheta = dot(spotDir, -surfaceToLightDir);
+    float cone = saturate((cosTheta - light.SpotConeAndFlags.y) * light.SpotConeAndFlags.z);
+    return cone * cone;
 }
 
 float4 SanitizeFloat4(float4 value)
@@ -349,16 +362,20 @@ float4 PSMain(PSInput input) : SV_TARGET
             // ratio. Other point lights contribute nothing this pixel —
             // temporal accumulation across frames + neighboring pixels
             // covers the full lighting (each pixel rolls its own light).
+            // The selected light is used only for visibility correction; the
+            // loop below evaluates every point light deterministically to
+            // avoid direct-light brightness noise in dense imported scenes.
             float rawIdx = ShadowTex[uint2(screenUV * RTSize)].g;
             uint chosenIdx = (uint)(rawIdx + 0.5f);
             float ratio = ShadowTex[uint2(screenUV * RTSize)].b;
             float vis = saturate(ShadowTex[uint2(screenUV * RTSize)].a);
-            if (chosenIdx < activePointLightCount && ratio > 0.0f)
+            [loop]
+            for (uint lightIndex = 0; lightIndex < activePointLightCount; ++lightIndex)
             {
-                float3 pointPosition = PointLights[chosenIdx].PositionAndRadius.xyz;
-                float pointRadius = max(PointLights[chosenIdx].PositionAndRadius.w, 0.01f);
-                float3 pointColor = max(PointLights[chosenIdx].ColorAndIntensity.xyz, 0.0f.xxx);
-                float pointIntensity = max(PointLights[chosenIdx].ColorAndIntensity.w, 0.0f);
+                float3 pointPosition = PointLights[lightIndex].PositionAndRadius.xyz;
+                float pointRadius = max(PointLights[lightIndex].PositionAndRadius.w, 0.01f);
+                float3 pointColor = max(PointLights[lightIndex].ColorAndIntensity.xyz, 0.0f.xxx);
+                float pointIntensity = max(PointLights[lightIndex].ColorAndIntensity.w, 0.0f);
 
                 float3 toLight = pointPosition - WorldPosition;
                 float distanceSq = max(dot(toLight, toLight), 1.0e-4f);
@@ -367,14 +384,17 @@ float4 PSMain(PSInput input) : SV_TARGET
                 float rangeAttenuation = saturate(1.0f - distanceToLight / pointRadius);
                 rangeAttenuation *= rangeAttenuation;
                 float inverseSquareAttenuation = 1.0f / max(1.0f, distanceSq * 0.0001f);
-                float attenuation = rangeAttenuation * inverseSquareAttenuation;
+                float attenuation = rangeAttenuation * inverseSquareAttenuation *
+                    EvaluateSpotAttenuation(PointLights[lightIndex], pointLightDir);
                 float pointNdotL = saturate(dot(pointLightDir, WorldNormal));
-                float3 pointRadiance = pointColor * pointIntensity * attenuation * vis * ratio;
+                float3 pointRadiance = pointColor * pointIntensity * attenuation;
+                float shadowCorrection = (lightIndex == chosenIdx && ratio > 0.0f) ? ((vis - 1.0f) * ratio) : 0.0f;
+                float visibilityEstimate = max(1.0f + shadowCorrection, 0.0f);
 
                 if (bEnableDirectDiffuse)
-                    PointDiffuse += pointNdotL * pointRadiance * Albedo * (1.0f - Metallic);
+                    PointDiffuse += pointNdotL * pointRadiance * visibilityEstimate * Albedo * (1.0f - Metallic);
                 if (bEnableDirectSpecular)
-                    PointSpecular += EvaluateGGXSpecularBRDF(WorldNormal, V, pointLightDir, Roughness, F0) * pointNdotL * pointRadiance;
+                    PointSpecular += EvaluateGGXSpecularBRDF(WorldNormal, V, pointLightDir, Roughness, F0) * pointNdotL * pointRadiance * visibilityEstimate;
             }
         }
         else
@@ -400,7 +420,8 @@ float4 PSMain(PSInput input) : SV_TARGET
                 float rangeAttenuation = saturate(1.0f - distanceToLight / pointRadius);
                 rangeAttenuation *= rangeAttenuation;
                 float inverseSquareAttenuation = 1.0f / max(1.0f, distanceSq * 0.0001f);
-                float attenuation = rangeAttenuation * inverseSquareAttenuation;
+                float attenuation = rangeAttenuation * inverseSquareAttenuation *
+                    EvaluateSpotAttenuation(PointLights[lightIndex], pointLightDir);
                 float pointNdotL = saturate(dot(pointLightDir, WorldNormal));
                 uint shadowChan = ShadowChannelMap[lightIndex >> 2u][lightIndex & 3u];
                 float pointVisibility = shadowChan < 3u ? PointVis[shadowChan] : 1.0f;

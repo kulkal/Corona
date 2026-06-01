@@ -1383,7 +1383,7 @@ void Corona::LightingPass()
 		(!bMobileHybridDirectOnly && bShadowOutputValidThisFrame && ShadowBuffer);
 	Param.bEnableDirectionalShadow = bDirectionalShadowAvailable ? 1u : 0u;
 	Param.bUseShadowMap = bUseMobileShadowMap ? 1u : 0u;
-	Param.ShadowMode = bEnableReSTIRDirectShadow ? 1u : 0u;
+	Param.ShadowMode = (bEnableReSTIRDirectShadow && bDirectionalShadowAvailable) ? 1u : 0u;
 	static bool bLoggedMissingDesktopShadowOutput = false;
 	if (!bMobileHybridDirectOnly &&
 		ShadowBuffer &&
@@ -1404,37 +1404,42 @@ void Corona::LightingPass()
 		Param.AmbientGroundColorAndStrength = glm::vec4(glm::max(SkyColorBottom, glm::vec3(0.0f)), 0.0f);
 	}
 	Param.PointLightCount = 0;
-	// Stash original PointLights[] indices so we can map them to shadow
-	// channels later (the RT shadow pass picks the same top-3 in-frustum
-	// closest lights C++-side and writes their visibility into .gba).
-	uint32_t lightSrcGlobalIndex[MaxPointLights] = {};
-	for (uint32_t srcIdx = 0; srcIdx < RenderWorld.PointLights.size(); ++srcIdx)
+	std::vector<const PointLightState*> pointLightCandidates;
+	BuildPointLightRenderCandidates(pointLightCandidates);
+	for (const PointLightState* pointLightPtr : pointLightCandidates)
 	{
-		const PointLightState& pointLight = RenderWorld.PointLights[srcIdx];
-		if (!pointLight.bEnabled || Param.PointLightCount >= MaxPointLights)
+		if (!pointLightPtr || Param.PointLightCount >= MaxPointLights)
 			continue;
 
-		// Sphere-AABB frustum cull. A light whose influence sphere
-		// (centre = position, radius = falloff radius) doesn't touch
-		// the view frustum can't reach any visible pixel — the
-		// `rangeAtten = saturate(1 - dist/radius)` term goes to 0
-		// before any in-frustum surface is reached. Dropping it from
-		// the CB means ReSTIR's per-pixel candidate budget
-		// (`kFreshBudget = 8` in the raygen) only spends slots on
-		// reachable lights, which roughly halves variance on a
-		// scene where most lights illuminate off-screen geometry.
-		const float radius = std::max(pointLight.Radius, 0.01f);
-		const glm::vec3 sphereMin = pointLight.Position - glm::vec3(radius);
-		const glm::vec3 sphereMax = pointLight.Position + glm::vec3(radius);
-		if (!IsWorldAabbInViewFrustum(sphereMin, sphereMax))
-			continue;
-
+		const PointLightState& pointLight = *pointLightPtr;
 		const UINT32 pointLightIndex = Param.PointLightCount++;
-		Param.PointLights[pointLightIndex].PositionAndRadius =
-			glm::vec4(pointLight.Position, radius);
-		Param.PointLights[pointLightIndex].ColorAndIntensity =
-			glm::vec4(glm::max(pointLight.Color, glm::vec3(0.0f)), std::max(pointLight.Intensity, 0.0f));
-		lightSrcGlobalIndex[pointLightIndex] = srcIdx;
+		Param.PointLights[pointLightIndex] = BuildPointLightParam(pointLight);
+	}
+
+	{
+		static size_t sLastLoggedTotal = static_cast<size_t>(-1);
+		static size_t sLastLoggedCandidate = static_cast<size_t>(-1);
+		static UINT32 sLastLoggedSubmitted = 0xFFFFFFFFu;
+		static UINT32 sLastLoggedShadowMode = 0xFFFFFFFFu;
+		const size_t totalPointLights = RenderWorld.PointLights.size();
+		const size_t candidatePointLights = pointLightCandidates.size();
+		if (totalPointLights != sLastLoggedTotal ||
+			candidatePointLights != sLastLoggedCandidate ||
+			Param.PointLightCount != sLastLoggedSubmitted ||
+			Param.ShadowMode != sLastLoggedShadowMode)
+		{
+			sLastLoggedTotal = totalPointLights;
+			sLastLoggedCandidate = candidatePointLights;
+			sLastLoggedSubmitted = Param.PointLightCount;
+			sLastLoggedShadowMode = Param.ShadowMode;
+			AppendCpuRuntimeTrace(
+				L"[LightingPass][PointLights] total=" + std::to_wstring(totalPointLights) +
+				L", candidates=" + std::to_wstring(candidatePointLights) +
+				L", submitted=" + std::to_wstring(Param.PointLightCount) +
+				L", max=" + std::to_wstring(MaxPointLights) +
+				L", shadowMode=" + std::to_wstring(Param.ShadowMode) +
+				L", shadowValid=" + std::to_wstring(bDirectionalShadowAvailable ? 1 : 0));
+		}
 	}
 
 	// Initialize shadow channel map to "no shadow" sentinel for every
@@ -1456,12 +1461,13 @@ void Corona::LightingPass()
 		const glm::vec3 camPos = RenderFrameCameraPosition;
 		for (uint32_t i = 0; i < Param.PointLightCount; ++i)
 		{
-			const glm::vec3 pos = glm::vec3(Param.PointLights[i].PositionAndRadius);
-			const float radius = std::max(Param.PointLights[i].PositionAndRadius.w, 0.01f);
-			const glm::vec3 boundsMin = pos - glm::vec3(radius);
-			const glm::vec3 boundsMax = pos + glm::vec3(radius);
-			if (!IsWorldAabbInViewFrustum(boundsMin, boundsMax))
+			if (i >= pointLightCandidates.size() ||
+				!pointLightCandidates[i] ||
+				!pointLightCandidates[i]->bCastShadow)
+			{
 				continue;
+			}
+			const glm::vec3 pos = glm::vec3(Param.PointLights[i].PositionAndRadius);
 			const glm::vec3 toLight = pos - camPos;
 			cands.push_back({ i, glm::dot(toLight, toLight) });
 		}
@@ -1473,7 +1479,6 @@ void Corona::LightingPass()
 			const uint32_t lpsIdx = cands[k].LightingPSIndex;
 			Param.ShadowChannelMap[lpsIdx >> 2u][lpsIdx & 3u] = k;
 		}
-		(void)lightSrcGlobalIndex; // already correctly indexed via lpsIdx
 	}
 
 	glm::normalize(Param.LightDir);

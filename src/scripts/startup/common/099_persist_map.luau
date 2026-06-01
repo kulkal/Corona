@@ -10,6 +10,16 @@ if mode == nil or mode == "" then
     return
 end
 
+corona_script_mode_persist_state = corona_script_mode_persist_state or {}
+
+if mode == "editor" then
+    corona_script_mode_persist_state[mode] = {
+        has_map = false,
+        save_only = true,
+    }
+    return
+end
+
 -- Modes whose runtime state isn't restorable from the map yet (live
 -- spine, runtime corona_*_runtime globals, etc.). Saving is still useful
 -- as a snapshot for inspector / debugging but skipping load is required.
@@ -32,7 +42,6 @@ end
 -- Stash a flag so other scripts can tell whether map-based fast-load is
 -- supported for this mode. Currently sponza/terrain are the only modes
 -- with full round-trip support.
-corona_script_mode_persist_state = corona_script_mode_persist_state or {}
 corona_script_mode_persist_state[mode] = {
     has_map = corona.map_exists(mode),
     save_only = saveOnly[mode] == true,

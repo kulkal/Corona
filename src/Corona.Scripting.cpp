@@ -790,7 +790,10 @@ private:
 		if (lua_isnumber(L, -1))
 		{
 			const int value = static_cast<int>(lua_tointeger(L, -1));
-			type = value == 0 ? CoronaECS::LightType::Directional : CoronaECS::LightType::Point;
+			type =
+				value == 0 ? CoronaECS::LightType::Directional :
+				value == 2 ? CoronaECS::LightType::Spot :
+				CoronaECS::LightType::Point;
 			read = true;
 		}
 		else if (lua_isstring(L, -1))
@@ -804,6 +807,11 @@ private:
 			else if (name == "POINT")
 			{
 				type = CoronaECS::LightType::Point;
+				read = true;
+			}
+			else if (name == "SPOT" || name == "SPOTLIGHT")
+			{
+				type = CoronaECS::LightType::Spot;
 				read = true;
 			}
 		}
@@ -834,6 +842,32 @@ private:
 		float radius = component.Radius;
 		if (ReadNumberField(L, tableIndex, "radius", radius))
 			component.Radius = std::clamp(radius, 1.0f, 100000.0f);
+
+		bool castShadow = component.bCastShadow;
+		if (ReadBoolField(L, tableIndex, "cast_shadow", castShadow) ||
+			ReadBoolField(L, tableIndex, "castShadow", castShadow) ||
+			ReadBoolField(L, tableIndex, "casts_shadow", castShadow) ||
+			ReadBoolField(L, tableIndex, "castsShadow", castShadow))
+		{
+			component.bCastShadow = castShadow;
+		}
+
+		float innerConeAngle = component.InnerConeAngle;
+		if (ReadNumberField(L, tableIndex, "inner_cone_angle", innerConeAngle) ||
+			ReadNumberField(L, tableIndex, "innerConeAngle", innerConeAngle))
+		{
+			component.InnerConeAngle = std::clamp(innerConeAngle, 0.0f, glm::pi<float>() - 0.001f);
+		}
+
+		float outerConeAngle = component.OuterConeAngle;
+		if (ReadNumberField(L, tableIndex, "outer_cone_angle", outerConeAngle) ||
+			ReadNumberField(L, tableIndex, "outerConeAngle", outerConeAngle))
+		{
+			component.OuterConeAngle = std::clamp(outerConeAngle, 0.001f, glm::pi<float>());
+		}
+		component.InnerConeAngle = std::clamp(component.InnerConeAngle, 0.0f, glm::pi<float>() - 0.001f);
+		component.OuterConeAngle =
+			std::clamp(component.OuterConeAngle, component.InnerConeAngle + 0.001f, glm::pi<float>());
 
 		glm::vec3 direction = component.Direction;
 		if (ReadVec3Field(L, tableIndex, "direction", direction) ||
@@ -889,13 +923,20 @@ private:
 	void PushLightDesc(lua_State* L, const CoronaECS::LightComponent& component)
 	{
 		lua_newtable(L);
-		lua_pushstring(L, component.Type == CoronaECS::LightType::Directional ? "directional" : "point");
+		const char* typeName =
+			component.Type == CoronaECS::LightType::Directional ? "directional" :
+			component.Type == CoronaECS::LightType::Spot ? "spot" :
+			"point";
+		lua_pushstring(L, typeName);
 		lua_setfield(L, -2, "type");
 		PushBoolField(L, "enabled", component.bEnabled);
+		PushBoolField(L, "cast_shadow", component.bCastShadow);
 		PushVec3Field(L, "color", component.Color);
 		PushNumberField(L, "intensity", component.Intensity);
 		PushVec3Field(L, "direction", component.Direction);
 		PushNumberField(L, "radius", component.Radius);
+		PushNumberField(L, "inner_cone_angle", component.InnerConeAngle);
+		PushNumberField(L, "outer_cone_angle", component.OuterConeAngle);
 		PushIntegerField(L, "runtime_light_id", static_cast<lua_Integer>(component.RuntimeLightId));
 	}
 
@@ -5467,9 +5508,6 @@ CoronaECS::Entity Corona::SpawnPointLightEntityForScript(
 	float intensity,
 	bool bEnabled)
 {
-	if (PointLights.size() >= MaxPointLights)
-		return CoronaECS::Entity();
-
 	PointLightState pointLight;
 	pointLight.Id = NextPointLightId++;
 	pointLight.bEnabled = bEnabled;
@@ -5621,6 +5659,9 @@ bool Corona::SetEntityLightForScript(
 		lightComponent.Direction = glm::normalize(lightComponent.Direction);
 	else
 		lightComponent.Direction = glm::vec3(0.0f, 1.0f, 0.0f);
+	lightComponent.InnerConeAngle = std::clamp(lightComponent.InnerConeAngle, 0.0f, glm::pi<float>() - 0.001f);
+	lightComponent.OuterConeAngle =
+		std::clamp(lightComponent.OuterConeAngle, lightComponent.InnerConeAngle + 0.001f, glm::pi<float>());
 
 	auto vecNearlyEqual = [](const glm::vec3& a, const glm::vec3& b, float epsilon = 0.0001f)
 	{
@@ -5631,10 +5672,13 @@ bool Corona::SetEntityLightForScript(
 		return
 			a.Type == b.Type &&
 			a.bEnabled == b.bEnabled &&
+			a.bCastShadow == b.bCastShadow &&
 			vecNearlyEqual(a.Direction, b.Direction) &&
 			vecNearlyEqual(a.Color, b.Color) &&
 			std::abs(a.Intensity - b.Intensity) <= 0.0001f &&
-			std::abs(a.Radius - b.Radius) <= 0.0001f;
+			std::abs(a.Radius - b.Radius) <= 0.0001f &&
+			std::abs(a.InnerConeAngle - b.InnerConeAngle) <= 0.0001f &&
+			std::abs(a.OuterConeAngle - b.OuterConeAngle) <= 0.0001f;
 	};
 	CoronaECS::LightComponent previousComponent;
 	const bool bHadPreviousLight = GetEntityLightForScript(entity, previousComponent);
@@ -5677,9 +5721,6 @@ bool Corona::SetEntityLightForScript(
 	PointLightState* pointLight = FindPointLightByEntity(entity);
 	if (!pointLight)
 	{
-		if (PointLights.size() >= MaxPointLights)
-			return false;
-
 		PointLightState newPointLight;
 		newPointLight.Id = NextPointLightId++;
 		newPointLight.EntityHandle = entity;
@@ -5688,6 +5729,13 @@ bool Corona::SetEntityLightForScript(
 	}
 
 	pointLight->bEnabled = lightComponent.bEnabled;
+	pointLight->Type = lightComponent.Type == CoronaECS::LightType::Spot ?
+		CoronaECS::LightType::Spot :
+		CoronaECS::LightType::Point;
+	pointLight->bCastShadow = lightComponent.bCastShadow;
+	pointLight->Direction = lightComponent.Direction;
+	pointLight->InnerConeAngle = lightComponent.InnerConeAngle;
+	pointLight->OuterConeAngle = lightComponent.OuterConeAngle;
 	pointLight->Color = lightComponent.Color;
 	pointLight->Intensity = lightComponent.Intensity;
 	pointLight->Radius = lightComponent.Radius;
@@ -5696,7 +5744,7 @@ bool Corona::SetEntityLightForScript(
 	if (transformComponent)
 		pointLight->Position = transformComponent->GetPosition();
 
-	lightComponent.Type = CoronaECS::LightType::Point;
+	lightComponent.Type = pointLight->Type;
 	lightComponent.RuntimeLightId = pointLight->Id;
 	EntityWorld.AddLight(entity, lightComponent);
 	UpdatePointLightEntity(*pointLight);
@@ -5730,11 +5778,15 @@ bool Corona::GetEntityLightForScript(
 
 	if (const PointLightState* pointLight = FindPointLightByEntity(entity))
 	{
-		component.Type = CoronaECS::LightType::Point;
+		component.Type = pointLight->Type;
 		component.bEnabled = pointLight->bEnabled;
+		component.bCastShadow = pointLight->bCastShadow;
+		component.Direction = pointLight->Direction;
 		component.Color = pointLight->Color;
 		component.Intensity = pointLight->Intensity;
 		component.Radius = pointLight->Radius;
+		component.InnerConeAngle = pointLight->InnerConeAngle;
+		component.OuterConeAngle = pointLight->OuterConeAngle;
 		component.RuntimeLightId = pointLight->Id;
 		return true;
 	}
@@ -7309,6 +7361,215 @@ bool Corona::QueueScriptUiCheckboxForScript(const std::string& id, const std::st
 
 void Corona::RebuildFrameTimingOverlayTextIfStale()
 {
+	{
+		CachedFrameTimingOverlayTimestampSec = m_timer.GetTotalSeconds();
+
+		auto fmt = [](char* buf, size_t sz, const char* fmtStr, auto&&... args)
+		{
+			std::snprintf(buf, sz, fmtStr, std::forward<decltype(args)>(args)...);
+		};
+		std::string& out = CachedFrameTimingOverlayText;
+		out.clear();
+		out.reserve(4096);
+		char line[512];
+		auto appendLine = [&](const char* fmtStr, auto&&... args)
+		{
+			fmt(line, sizeof(line), fmtStr, std::forward<decltype(args)>(args)...);
+			out += line;
+			out += '\n';
+		};
+		auto hasTiming = [](float last, float avg) -> bool
+		{
+			return last > 0.001f || avg > 0.001f;
+		};
+		auto appendTimingPair = [&](const char* label, float last, float avg)
+		{
+			appendLine("  %-28s %7.3f / %7.3f", label ? label : "phase", last, avg);
+		};
+		auto passHasTiming = [&](UINT passIndex) -> bool
+		{
+			return hasTiming(GpuPassLastTimeMs[passIndex], GpuPassAverageTimeMs[passIndex]) ||
+				hasTiming(CpuPassLastTimeMs[passIndex], CpuPassAverageTimeMs[passIndex]);
+		};
+		auto appendPassTimingPair = [&](const char* indent, UINT passIndex)
+		{
+			const char* name = GetGpuPassName(static_cast<EGpuPass>(passIndex));
+			appendLine("%s%-26s %7.3f / %7.3f   %7.3f / %7.3f",
+				indent ? indent : "",
+				name ? name : "pass",
+				GpuPassLastTimeMs[passIndex],
+				GpuPassAverageTimeMs[passIndex],
+				CpuPassLastTimeMs[passIndex],
+				CpuPassAverageTimeMs[passIndex]);
+		};
+		auto isRenderPassPhasePass = [](EGpuPass pass) -> bool
+		{
+			switch (pass)
+			{
+			case EGpuPass::SkeletalSkinning:
+			case EGpuPass::GBuffer:
+			case EGpuPass::Terrain:
+			case EGpuPass::Grass:
+			case EGpuPass::ProceduralGrass:
+			case EGpuPass::Particles:
+			case EGpuPass::RaytraceShadow:
+			case EGpuPass::RaytraceAO:
+			case EGpuPass::RaytraceSkyLighting:
+			case EGpuPass::RaytraceReflection:
+			case EGpuPass::RaytraceGI:
+			case EGpuPass::ScreenProbeGI:
+			case EGpuPass::TemporalDenoise:
+			case EGpuPass::Lighting:
+			case EGpuPass::DLSSRR:
+			case EGpuPass::DLSSSR:
+			case EGpuPass::TemporalAA:
+			case EGpuPass::PathTracing:
+				return true;
+			default:
+				return false;
+			}
+		};
+		auto appendPassGroup = [&](const char* indent, auto&& predicate)
+		{
+			bool any = false;
+			for (UINT passIndex = 0; passIndex < GpuPassCount; ++passIndex)
+			{
+				if (!predicate(static_cast<EGpuPass>(passIndex)))
+					continue;
+				if (!passHasTiming(passIndex))
+					continue;
+				appendPassTimingPair(indent, passIndex);
+				any = true;
+			}
+			if (!any)
+				appendLine("%s(no pass samples yet)", indent ? indent : "");
+		};
+
+		const float frameAverage = FramePerfAverageFrameMs;
+		const float fps = frameAverage > 0.0f ? 1000.0f / frameAverage : 0.0f;
+		const UINT framePassIndex = static_cast<UINT>(EGpuPass::Frame);
+		float gpuFrameLast = GpuPassLastTimeMs[framePassIndex];
+		float gpuFrameAvg = GpuPassAverageTimeMs[framePassIndex];
+		if (!hasTiming(gpuFrameLast, gpuFrameAvg))
+		{
+			for (UINT i = 0; i < GpuPassCount; ++i)
+			{
+				if (i == framePassIndex)
+					continue;
+				gpuFrameLast += GpuPassLastTimeMs[i];
+				gpuFrameAvg += GpuPassAverageTimeMs[i];
+			}
+		}
+
+		appendLine("Frame    last %.3f ms  avg %.3f ms  avg %.1f fps",
+			FramePerfLastFrameMs, frameAverage, fps);
+		appendLine("Totals   GPU %.3f / %.3f   CPU update %.3f / %.3f   record %.3f / %.3f",
+			gpuFrameLast, gpuFrameAvg,
+			CpuUpdateLastTimeMs, CpuUpdateAverageTimeMs,
+			FramePerfLastRecordMs, FramePerfAverageRecordMs);
+		appendLine("Submit   begin %.3f / %.3f   execute %.3f / %.3f   end %.3f / %.3f   wait %.3f / %.3f",
+			FramePerfLastBeginFrameMs, FramePerfAverageBeginFrameMs,
+			FramePerfLastExecuteMs, FramePerfAverageExecuteMs,
+			FramePerfLastEndFrameMs, FramePerfAverageEndFrameMs,
+			FramePerfLastRenderWaitMs, FramePerfAverageRenderWaitMs);
+
+		out += "Render Pass Costs              gpu last/avg        cpu record last/avg\n";
+		for (UINT i = 0; i < GpuPassCount; ++i)
+		{
+			if (i == framePassIndex)
+				continue;
+			if (!passHasTiming(i))
+				continue;
+			appendPassTimingPair("  ", i);
+		}
+
+		float recordPhaseLastTotal = 0.0f, recordPhaseAvgTotal = 0.0f;
+		for (UINT i = 0; i < RenderCommandPhaseCount; ++i)
+		{
+			recordPhaseLastTotal += RenderCommandPhaseCompletedLastTimeMs[i];
+			recordPhaseAvgTotal += RenderCommandPhaseAverageTimeMs[i];
+		}
+		out += "Recording CPU                   last / avg\n";
+		appendTimingPair("begin frame", FramePerfLastBeginFrameMs, FramePerfAverageBeginFrameMs);
+		appendTimingPair("record commands", FramePerfLastRecordMs, FramePerfAverageRecordMs);
+		appendTimingPair("execute command list", FramePerfLastExecuteMs, FramePerfAverageExecuteMs);
+		appendTimingPair("end frame", FramePerfLastEndFrameMs, FramePerfAverageEndFrameMs);
+		appendTimingPair("render wait", FramePerfLastRenderWaitMs, FramePerfAverageRenderWaitMs);
+		appendLine("  %-28s %7.3f / %7.3f", "tracked phases", recordPhaseLastTotal, recordPhaseAvgTotal);
+		appendLine("  %-28s %7.3f / %7.3f",
+			"untracked record",
+			std::max(0.0f, FramePerfLastRecordMs - recordPhaseLastTotal),
+			std::max(0.0f, FramePerfAverageRecordMs - recordPhaseAvgTotal));
+		out += "  Phases\n";
+		for (UINT i = 0; i < RenderCommandPhaseCount; ++i)
+		{
+			const float phaseLast = RenderCommandPhaseCompletedLastTimeMs[i];
+			const float phaseAvg = RenderCommandPhaseAverageTimeMs[i];
+			if (!hasTiming(phaseLast, phaseAvg))
+				continue;
+			const char* phaseName = GetRenderCommandPhaseName(static_cast<ERenderCommandPhase>(i));
+			appendLine("    %-26s %7.3f / %7.3f",
+				phaseName ? phaseName : "phase",
+				phaseLast,
+				phaseAvg);
+			if (phaseName && std::strcmp(phaseName, "Scene Flush") == 0)
+			{
+				for (UINT j = 0; j < SceneFlushPhaseCount; ++j)
+				{
+					const float sfLast = SceneFlushPhaseCompletedLastTimeMs[j];
+					const float sfAvg = SceneFlushPhaseAverageTimeMs[j];
+					if (!hasTiming(sfLast, sfAvg))
+						continue;
+					const char* sfName = GetSceneFlushPhaseName(static_cast<ESceneFlushPhase>(j));
+					appendLine("      %-24s %7.3f / %7.3f",
+						sfName ? sfName : "scene flush",
+						sfLast,
+						sfAvg);
+				}
+			}
+			else if (phaseName && std::strcmp(phaseName, "Render Passes") == 0)
+			{
+				out += "      pass costs                 gpu last/avg        cpu record last/avg\n";
+				appendPassGroup("        ", [&](EGpuPass pass) { return isRenderPassPhasePass(pass); });
+			}
+			else if (phaseName && std::strcmp(phaseName, "Backbuffer / ToneMap") == 0)
+			{
+				out += "      pass costs                 gpu last/avg        cpu record last/avg\n";
+				appendPassGroup("        ", [](EGpuPass pass)
+				{
+					return pass == EGpuPass::ToneMap || pass == EGpuPass::Debug;
+				});
+			}
+			else if (phaseName && std::strcmp(phaseName, "Capture / UI") == 0)
+			{
+				out += "      pass costs                 gpu last/avg        cpu record last/avg\n";
+				appendPassGroup("        ", [](EGpuPass pass)
+				{
+					return pass == EGpuPass::ImGui;
+				});
+			}
+		}
+
+		out += "CPU Update                      last / avg\n";
+		appendTimingPair("total", CpuUpdateLastTimeMs, CpuUpdateAverageTimeMs);
+		for (UINT i = 0; i < CpuUpdatePhaseCount; ++i)
+		{
+			const float phaseLast = CpuUpdatePhaseLastTimeMs[i];
+			const float phaseAvg = CpuUpdatePhaseAverageTimeMs[i];
+			if (!hasTiming(phaseLast, phaseAvg))
+				continue;
+			const char* phaseName = GetCpuUpdatePhaseName(static_cast<ECpuUpdatePhase>(i));
+			appendLine("  %-28s %7.3f / %7.3f",
+				phaseName ? phaseName : "phase",
+				phaseLast,
+				phaseAvg);
+		}
+		return;
+	}
+}
+
+#if 0
+
 	// Per-user request, rebuild every frame so the screen overlay shows
 	// real-time numbers (no 250 ms staleness). The build is cheap — pure
 	// C++ string formatting, no cross-boundary lua calls; previously the
@@ -7330,8 +7591,6 @@ void Corona::RebuildFrameTimingOverlayTextIfStale()
 
 	const float frameAverage = FramePerfAverageFrameMs;
 	const float fps = frameAverage > 0.0f ? 1000.0f / frameAverage : 0.0f;
-	fmt(line, sizeof(line), "FPS : %d fps\n", static_cast<int>(m_timer.GetFramesPerSecond()));
-	out += line;
 	fmt(line, sizeof(line), "Frame wall: %.3f ms (avg %.3f ms, %.1f fps)\n",
 		FramePerfLastFrameMs, frameAverage, fps);
 	out += line;
@@ -7486,6 +7745,8 @@ void Corona::RebuildFrameTimingOverlayTextIfStale()
 	}
 }
 
+#endif
+
 void Corona::PushLuauUiStateForScript(lua_State* L, const std::string& mode, bool bWantPointLights)
 {
 	const bool bCompactMode = mode == "compact" || mode == "profile" || mode == "compact_no_profile";
@@ -7497,6 +7758,7 @@ void Corona::PushLuauUiStateForScript(lua_State* L, const std::string& mode, boo
 
 	PushIntegerField(L, "fps", static_cast<lua_Integer>(m_timer.GetFramesPerSecond()));
 	PushStringField(L, "backend", renderBackend ? renderBackend->GetBackendName() : "None");
+	PushBoolField(L, "show_frame_timing_overlay", bShowFrameTimingOverlay);
 	PushBoolField(L, "show_culling_overlay", bShowCullingTextOverlay);
 	PushBoolField(L, "final_screenshot_busy", bFinalScreenshotRequested || bFinalScreenshotCaptureInFlight);
 	PushWideStringField(L, "final_screenshot_status", LastFinalScreenshotStatus);
@@ -7529,7 +7791,10 @@ void Corona::PushLuauUiStateForScript(lua_State* L, const std::string& mode, boo
 	// overlay then iterated them again to build a 60-line text. Replaced
 	// by a single prebuilt string rebuilt at 4 Hz on the C++ side — Lua
 	// just calls ui.overlay_text(state.frame_timing_overlay_text, x, y).
-	RebuildFrameTimingOverlayTextIfStale();
+	if (bShowFrameTimingOverlay)
+		RebuildFrameTimingOverlayTextIfStale();
+	else
+		CachedFrameTimingOverlayText.clear();
 	lua_pushlstring(L, CachedFrameTimingOverlayText.data(),
 		CachedFrameTimingOverlayText.size());
 	lua_setfield(L, -2, "frame_timing_overlay_text");
@@ -7691,9 +7956,15 @@ void Corona::PushLuauUiStateForScript(lua_State* L, const std::string& mode, boo
 			PushIntegerField(L, "index", static_cast<lua_Integer>(pointLightIndex + 1));
 			PushScriptEntity(L, pointLight.EntityHandle);
 			lua_setfield(L, -2, "entity");
+			lua_pushstring(L, pointLight.Type == CoronaECS::LightType::Spot ? "spot" : "point");
+			lua_setfield(L, -2, "type");
 			PushBoolField(L, "enabled", pointLight.bEnabled);
+			PushBoolField(L, "cast_shadow", pointLight.bCastShadow);
 			PushVec3Field(L, "position", pointLight.Position);
+			PushVec3Field(L, "direction", pointLight.Direction);
 			PushNumberField(L, "radius", pointLight.Radius);
+			PushNumberField(L, "inner_cone_angle", pointLight.InnerConeAngle);
+			PushNumberField(L, "outer_cone_angle", pointLight.OuterConeAngle);
 			PushNumberField(L, "intensity", pointLight.Intensity);
 			PushVec3Field(L, "color", pointLight.Color);
 			lua_rawseti(L, -2, pointLightIndex + 1);
@@ -7932,20 +8203,7 @@ bool Corona::SetLuauUiValueForScript(const std::string& name, lua_State* L, int 
 	if (name == "gpu_timing_average_frames")
 	{
 		const UINT32 newValue = static_cast<UINT32>(std::clamp(readInt(), 1, 240));
-		if (GpuTimingAverageFrameCount == newValue)
-			return true;
-		GpuTimingAverageFrameCount = newValue;
-		for (UINT passIndex = 0; passIndex < GpuPassCount; ++passIndex)
-		{
-			auto& history = GpuPassHistoryMs[passIndex];
-			while (history.size() > GpuTimingAverageFrameCount)
-				history.pop_front();
-			float sumMs = 0.0f;
-			for (float sampleMs : history)
-				sumMs += sampleMs;
-			GpuPassAverageTimeMs[passIndex] = history.empty() ? 0.0f : (sumMs / static_cast<float>(history.size()));
-		}
-		TrimCpuUpdateTimingHistory();
+		SetGpuTimingAverageFrameCount(newValue);
 		return true;
 	}
 	if (name == "rendering_mode")
@@ -7973,8 +8231,7 @@ bool Corona::SetLuauUiValueForScript(const std::string& name, lua_State* L, int 
 			static_cast<EDiffuseGIMode>(std::clamp(readInt(), 0, static_cast<int>(EDiffuseGIMode::COUNT) - 1));
 		if (DiffuseGIMode == requestedMode)
 			return true;
-		DiffuseGIMode = requestedMode;
-		ResetAllAccumulationState(false);
+		ApplyDiffuseGIMode(requestedMode);
 		return true;
 	}
 	if (name == "ray_noise_mode")
@@ -8138,6 +8395,7 @@ bool Corona::SetLuauUiValueForScript(const std::string& name, lua_State* L, int 
 	if (setFloat("camera_turn_speed", m_turnSpeed)) return true;
 	if (setBool("visualize_buffers", bDebugDraw)) return true;
 	if (setBool("hide_game_ui", bScriptGameUiHidden)) return true;
+	if (setBool("show_frame_timing_overlay", bShowFrameTimingOverlay)) return true;
 	if (setBool("show_culling_overlay", bShowCullingTextOverlay)) return true;
 	if (setBool("draw_histogram", bDrawHistogram)) return true;
 	if (setBool("enable_direct_diffuse", bEnableDirectDiffuse, true)) return true;
@@ -8316,9 +8574,6 @@ bool Corona::RunLuauUiCommandForScript(const std::string& name, lua_State* L, in
 	}
 	if (name == "add_point_light")
 	{
-		if (PointLights.size() >= MaxPointLights)
-			return false;
-
 		PointLightState pointLight;
 		pointLight.Id = NextPointLightId++;
 		pointLight.bEnabled = true;
@@ -8399,7 +8654,7 @@ bool Corona::RunLuauUiCommandForScript(const std::string& name, lua_State* L, in
 		float countF = 0.0f;
 		if (!ReadNumberField(L, tableIdx, "count", countF) || countF <= 0.0f)
 			return false;
-		const uint32_t requestCount = static_cast<uint32_t>(std::min<float>(countF, static_cast<float>(MaxPointLights)));
+		const uint32_t requestCount = static_cast<uint32_t>(std::min<float>(countF, 4096.0f));
 
 		glm::vec3 areaMin(-300.0f, 50.0f, -300.0f), areaMax(300.0f, 600.0f, 300.0f);
 		ReadVec3Field(L, tableIdx, "area_min", areaMin);
@@ -8417,9 +8672,7 @@ bool Corona::RunLuauUiCommandForScript(const std::string& name, lua_State* L, in
 			return static_cast<float>((rng >> 8) & 0xFFFFFFu) / 16777216.0f;
 		};
 
-		const uint32_t available = (PointLights.size() < MaxPointLights)
-			? (MaxPointLights - static_cast<uint32_t>(PointLights.size())) : 0u;
-		const uint32_t toSpawn = std::min(requestCount, available);
+		const uint32_t toSpawn = requestCount;
 
 		std::vector<uint32_t> spawnedIds;
 		spawnedIds.reserve(toSpawn);
@@ -8652,6 +8905,7 @@ void Corona::RunStartupLuauScript(bool bShowLoadingProgress)
 	const std::filesystem::path startupDir = GetAssetFullPath(L"scripts\\startup");
 	std::wstring startupMode = StartupLuauMode.empty() ? L"platformer" : StartupLuauMode;
 	if (startupMode != L"dungeon" && startupMode != L"sandbox" &&
+		startupMode != L"editor" &&
 		startupMode != L"sponza" && startupMode != L"sponza_demo" &&
 		startupMode != L"spine_benchmark" && startupMode != L"grass_demo" &&
 		startupMode != L"terrain_demo" && startupMode != L"particle_demo")

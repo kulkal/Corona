@@ -25,6 +25,17 @@ namespace
 			snprintf(buf, sizeof(buf), "%s##e%u", name.c_str(), id);
 		return std::string(buf);
 	}
+
+	const char* LightTypeDisplayName(CoronaECS::LightType type)
+	{
+		switch (type)
+		{
+		case CoronaECS::LightType::Directional: return "Directional";
+		case CoronaECS::LightType::Spot: return "Spot";
+		case CoronaECS::LightType::Point:
+		default: return "Point";
+		}
+	}
 }
 
 CoronaSceneInspector::CoronaSceneInspector(Corona* host) : Host(host) {}
@@ -327,7 +338,12 @@ void CoronaSceneInspector::DrawEntityRow(CoronaECS::Entity entity)
 	// Component badges so the list communicates type without expanding.
 	std::string badges;
 	if (ecs.HasMesh(entity))     badges += "[M]";
-	if (ecs.HasLight(entity))    badges += "[L]";
+	if (const auto* light = ecs.GetLight(entity))
+	{
+		badges += "[L:";
+		badges += LightTypeDisplayName(light->Type);
+		badges += "]";
+	}
 	if (ecs.HasCamera(entity))   badges += "[C]";
 	if (ecs.HasPhysics(entity))  badges += "[P]";
 	if (ecs.HasScript(entity))   badges += "[S]";
@@ -757,15 +773,17 @@ void CoronaSceneInspector::DrawSelectedEntityDetails()
 
 	if (ecs.HasLight(SelectedEntity))
 	{
-		if (ImGui::CollapsingHeader("Light", ImGuiTreeNodeFlags_DefaultOpen))
+		CoronaECS::LightComponent comp;
+		Host->GetEntityLightForScript(SelectedEntity, comp);
+		char lightHeader[64];
+		snprintf(lightHeader, sizeof(lightHeader), "Light (%s)", LightTypeDisplayName(comp.Type));
+		if (ImGui::CollapsingHeader(lightHeader, ImGuiTreeNodeFlags_DefaultOpen))
 		{
-			CoronaECS::LightComponent comp;
-			Host->GetEntityLightForScript(SelectedEntity, comp);
 			bool changed = false;
-			const char* typeStr = (comp.Type == CoronaECS::LightType::Directional) ? "directional" : "point";
-			ImGui::Text("Type: %s", typeStr);
+			ImGui::Text("Type: %s", LightTypeDisplayName(comp.Type));
 			if (ImGui::Checkbox("Enabled##l", &comp.bEnabled)) changed = true;
-			if (ImGui::DragFloat("Intensity##l", &comp.Intensity, 0.05f, 0.0f, 100.0f)) changed = true;
+			if (ImGui::Checkbox("Cast Shadow##l", &comp.bCastShadow)) changed = true;
+			if (ImGui::DragFloat("Intensity##l", &comp.Intensity, 0.5f, 0.0f, 5000.0f)) changed = true;
 			if (comp.Type == CoronaECS::LightType::Directional)
 			{
 				// 3D rotation gizmo — same axis remap as the legacy debug
@@ -791,7 +809,24 @@ void CoronaSceneInspector::DrawSelectedEntityDetails()
 				comp.Color = glm::vec3(col[0], col[1], col[2]);
 				changed = true;
 			}
-			if (ImGui::DragFloat("Radius##l", &comp.Radius, 1.0f, 0.0f, 4000.0f)) changed = true;
+			if (ImGui::DragFloat("Radius##l", &comp.Radius, 5.0f, 0.0f, 20000.0f)) changed = true;
+			if (comp.Type == CoronaECS::LightType::Spot)
+			{
+				constexpr float RadToDeg = 57.2957795f;
+				constexpr float DegToRad = 0.0174532925f;
+				float innerDeg = comp.InnerConeAngle * RadToDeg;
+				float outerDeg = comp.OuterConeAngle * RadToDeg;
+				if (ImGui::DragFloat("Inner Cone##l", &innerDeg, 0.25f, 0.0f, 179.0f))
+				{
+					comp.InnerConeAngle = innerDeg * DegToRad;
+					changed = true;
+				}
+				if (ImGui::DragFloat("Outer Cone##l", &outerDeg, 0.25f, 0.1f, 180.0f))
+				{
+					comp.OuterConeAngle = outerDeg * DegToRad;
+					changed = true;
+				}
+			}
 			if (changed)
 				Host->SetEntityLightForScript(SelectedEntity, comp, /*persist*/ false);
 		}

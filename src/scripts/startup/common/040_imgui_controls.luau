@@ -353,8 +353,13 @@ local function draw_capture_controls(state)
         ui.text("Screenshot: " .. state.final_screenshot_status)
     end
 
-    slider_int_state(state, "gpu_timing_average_frames", "GPU Timing Average Frames", "script.gpu.average_frames", 1, 240)
-    gpu.showOverlay = ui.checkbox("Show Frame Timings On Screen", "script.gpu.show_overlay", gpu.showOverlay)
+    slider_int_state(state, "gpu_timing_average_frames", "Timing Average Frames", "script.gpu.average_frames", 1, 240)
+    local show_frame_timing_overlay =
+        checkbox_state(state, "show_frame_timing_overlay", "Frame Timing Overlay (CPU / GPU / Recording)", "script.gpu.show_overlay")
+    if show_frame_timing_overlay == nil then
+        show_frame_timing_overlay = ui.checkbox("Frame Timing Overlay (CPU / GPU / Recording)", "script.gpu.show_overlay", gpu.showOverlay)
+    end
+    gpu.showOverlay = show_frame_timing_overlay == true
     local show_culling_overlay = checkbox_state(state, "show_culling_overlay", "Show Culling Text Overlay", "script.gpu.show_culling_overlay")
     if show_culling_overlay == nil then
         show_culling_overlay = state.show_culling_overlay or false
@@ -362,7 +367,7 @@ local function draw_capture_controls(state)
 
     section("Script Profile")
     gpu.showScriptProfile = ui.checkbox("Show Script Profile", "script.profile.show", gpu.showScriptProfile)
-    local hide_game_ui = gpu.showOverlay or show_culling_overlay
+    local hide_game_ui = show_frame_timing_overlay or show_culling_overlay
     if gpu.lastGameUiHidden ~= hide_game_ui then
         corona.set_ui_value("hide_game_ui", hide_game_ui)
         gpu.lastGameUiHidden = hide_game_ui
@@ -407,6 +412,12 @@ local function draw_capture_controls(state)
 end
 
 local function draw_gpu_timing_overlay(state)
+    -- The C++ runtime overlay now owns this when the engine exposes the
+    -- flag, so it remains visible after the main Config window is hidden.
+    if state.show_frame_timing_overlay ~= nil then
+        return
+    end
+
     local gpu = ensure_gpu_controls()
     if not gpu.showOverlay then
         return
@@ -769,7 +780,14 @@ local function draw_lighting_controls(state)
 
     if state.rendering_mode == 0 then
         slider_int_state(state, "hybrid_shadow_samples", "Hybrid Shadow Samples", "script.lighting.shadow_samples", 1, 16)
-        checkbox_state(state, "enable_restir_direct_shadow", "ReSTIR DI Shadow (else 4-channel)", "script.lighting.restir_direct_shadow")
+        local direct_shadow_mode = state.enable_restir_direct_shadow and 1 or 0
+        local new_direct_shadow_mode = ui.combo("Direct Shadow Mode", "script.lighting.direct_shadow_mode", direct_shadow_mode + 1, {
+            "4-channel (top 3 local lights)",
+            "ReSTIR DI",
+        }) - 1
+        if new_direct_shadow_mode ~= direct_shadow_mode then
+            corona.set_ui_value("enable_restir_direct_shadow", new_direct_shadow_mode == 1)
+        end
         checkbox_state(state, "enable_rtao", "Enable RTAO", "script.lighting.rtao.enable")
         if state.enable_rtao then
             slider_int_state(state, "rtao_samples", "RTAO Samples", "script.lighting.rtao.samples", 1, 16)
@@ -1035,8 +1053,8 @@ local function draw_point_lights_window(windows, state)
     end
 
     local lights = state.point_lights or {}
-    local max_count = state.point_light_max_count or 0
-    ui.text(string.format("Point Lights: %d / %d", #lights, max_count))
+    local render_max_count = state.point_light_max_count or 0
+    ui.text(string.format("Point Lights: %d (render top %d visible)", #lights, render_max_count))
     windows.pointLightAxesVisible = ui.checkbox(
         "Show World Axes",
         "script.point_lights.show_world_axes",
@@ -1077,7 +1095,7 @@ local function draw_point_lights_window(windows, state)
         end
 
         local radius = light.radius or 1.0
-        local new_radius = ui.slider_float("Radius", prefix .. ".radius", radius, 1.0, 2000.0)
+        local new_radius = ui.slider_float("Radius", prefix .. ".radius", radius, 1.0, 20000.0)
         if math.abs(new_radius - radius) > 0.001 then
             update_point_light(light, { radius = new_radius })
         end
@@ -1088,7 +1106,7 @@ local function draw_point_lights_window(windows, state)
         end
 
         local intensity = light.intensity or 0.0
-        local new_intensity = ui.slider_float("Intensity", prefix .. ".intensity", intensity, 0.0, 100.0)
+        local new_intensity = ui.slider_float("Intensity", prefix .. ".intensity", intensity, 0.0, 5000.0)
         if math.abs(new_intensity - intensity) > 0.001 then
             update_point_light(light, { intensity = new_intensity })
         end

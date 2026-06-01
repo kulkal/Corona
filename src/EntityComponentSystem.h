@@ -83,6 +83,7 @@ namespace CoronaECS
 	{
 		Directional = 0,
 		Point = 1,
+		Spot = 2,
 	};
 
 	struct LightComponent
@@ -93,6 +94,9 @@ namespace CoronaECS
 		float Intensity = 1.0f;
 		glm::vec3 Direction = glm::vec3(0.0f, 1.0f, 0.0f);
 		float Radius = 320.0f;
+		bool bCastShadow = true;
+		float InnerConeAngle = 0.0f;
+		float OuterConeAngle = 0.785398163f;
 		uint32_t RuntimeLightId = 0;
 	};
 

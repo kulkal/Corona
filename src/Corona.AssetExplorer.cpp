@@ -248,16 +248,13 @@ void CoronaAssetExplorer::HandleContextMenu(const Entry& entry)
 		}
 		if (IsMapFile(path))
 		{
-			if (ImGui::MenuItem("Load map"))
+			if (ImGui::MenuItem("Load map (replace scene)"))
 			{
 				// `.map` is the canonical extension; ResolveMapPath adds it
 				// when the name has no dot, so we pass just the stem.
 				const std::wstring name = path.stem().wstring();
-				std::wstring err;
-				if (!Host->LoadMapFromFile(name, &err))
-					PendingErrorMessage = "loadmap failed: " + PlatformWideToUtf8(err);
-				else
-					PendingErrorMessage.clear();
+				Host->QueueEditorMapLoad(name);
+				PendingErrorMessage = "loadmap queued: " + path.stem().string();
 			}
 		}
 		if (IsImageFile(path))

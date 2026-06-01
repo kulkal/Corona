@@ -24,6 +24,7 @@
 #include <cstring>
 #include <cstdlib>
 #include <iomanip>
+#include <memory>
 #include <mutex>
 #include <set>
 #include <sstream>
@@ -769,7 +770,17 @@ void DX12Backend::InitializeOcclusionQueries(uint32_t queryCount)
 	D3D12_QUERY_HEAP_DESC queryHeapDesc = {};
 	queryHeapDesc.Count = queryCount;
 	queryHeapDesc.Type = D3D12_QUERY_HEAP_TYPE_OCCLUSION;
-	ThrowIfFailed(Device->CreateQueryHeap(&queryHeapDesc, IID_PPV_ARGS(&OcclusionQueryHeap)));
+	HRESULT hr = Device->CreateQueryHeap(&queryHeapDesc, IID_PPV_ARGS(&OcclusionQueryHeap));
+	if (FAILED(hr))
+	{
+		AppendCpuRuntimeTrace(
+			L"[DX12Backend::InitializeOcclusionQueries] CreateQueryHeap failed hr=" +
+			FormatHexHRESULT(hr) +
+			L", queryCount=" + std::to_wstring(queryCount));
+		AppendD3D12InfoQueueMessages(Device.Get(), L"InitializeOcclusionQueries CreateQueryHeap");
+		ShutdownOcclusionQueries();
+		return;
+	}
 
 	const UINT64 readbackSize = sizeof(UINT64) * queryCount;
 	D3D12_HEAP_PROPERTIES heapProps = {};
@@ -789,16 +800,38 @@ void DX12Backend::InitializeOcclusionQueries(uint32_t queryCount)
 	bufferDesc.SampleDesc.Count = 1;
 	bufferDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
 
-	ThrowIfFailed(Device->CreateCommittedResource(
+	hr = Device->CreateCommittedResource(
 		&heapProps,
 		D3D12_HEAP_FLAG_NONE,
 		&bufferDesc,
 		D3D12_RESOURCE_STATE_COPY_DEST,
 		nullptr,
-		IID_PPV_ARGS(&OcclusionReadbackBuffer)));
+		IID_PPV_ARGS(&OcclusionReadbackBuffer));
+	if (FAILED(hr))
+	{
+		AppendCpuRuntimeTrace(
+			L"[DX12Backend::InitializeOcclusionQueries] readback buffer allocation failed hr=" +
+			FormatHexHRESULT(hr) +
+			L", queryCount=" + std::to_wstring(queryCount) +
+			L", bytes=" + std::to_wstring(readbackSize));
+		AppendD3D12InfoQueueMessages(Device.Get(), L"InitializeOcclusionQueries ReadbackBuffer");
+		ShutdownOcclusionQueries();
+		return;
+	}
 
 	CD3DX12_RANGE readRange(0, static_cast<SIZE_T>(readbackSize));
-	ThrowIfFailed(OcclusionReadbackBuffer->Map(0, &readRange, reinterpret_cast<void**>(&OcclusionReadbackMapped)));
+	hr = OcclusionReadbackBuffer->Map(0, &readRange, reinterpret_cast<void**>(&OcclusionReadbackMapped));
+	if (FAILED(hr) || !OcclusionReadbackMapped)
+	{
+		AppendCpuRuntimeTrace(
+			L"[DX12Backend::InitializeOcclusionQueries] readback map failed hr=" +
+			FormatHexHRESULT(hr) +
+			L", queryCount=" + std::to_wstring(queryCount) +
+			L", bytes=" + std::to_wstring(readbackSize));
+		AppendD3D12InfoQueueMessages(Device.Get(), L"InitializeOcclusionQueries Map");
+		ShutdownOcclusionQueries();
+		return;
+	}
 	std::fill_n(OcclusionReadbackMapped, queryCount, 1ull);
 	OcclusionQueryCount = queryCount;
 }
@@ -2631,35 +2664,72 @@ void Texture::UploadSRCData3D(D3D12_SUBRESOURCE_DATA* SrcData)
 
 std::shared_ptr<Texture> DX12Backend::CreateTextureFromFile(const std::wstring& fileName, bool nonSRGB)
 {
+	const auto totalStart = std::chrono::steady_clock::now();
+	std::error_code fileSizeError;
+	const uint64_t fileSize = std::filesystem::exists(fileName, fileSizeError) ?
+		static_cast<uint64_t>(std::filesystem::file_size(fileName, fileSizeError)) : 0ull;
 
 	if (FileExists(fileName.c_str()) == false)
+	{
+		AppendCpuRuntimeTrace(L"[StartupProfile][TextureLoad] missing file=\"" + fileName + L"\"");
 		return nullptr;
-
-	CommandList* cmd = CmdQ->AllocCmdList();
-
-
-	Texture* tex = new Texture;
-	tex->Owner = this;
+	}
 
 	DirectX::ScratchImage image;
 
 	const std::wstring extension = GetFileExtension(fileName.c_str());
+	const bool bIsDds = extension == L"DDS" || extension == L"dds";
+	const bool bIsTga = extension == L"TGA" || extension == L"tga";
+	HRESULT loadHr = S_OK;
+	HRESULT mipHr = S_OK;
+	double imageLoadMs = 0.0;
+	double mipGenMs = 0.0;
 
-	if (extension == L"DDS" || extension == L"dds")
+	if (bIsDds)
 	{
-		DirectX::LoadFromDDSFile(fileName.c_str(), DirectX::DDS_FLAGS_NONE, nullptr, image);
+		const auto imageLoadStart = std::chrono::steady_clock::now();
+		loadHr = DirectX::LoadFromDDSFile(fileName.c_str(), DirectX::DDS_FLAGS_NONE, nullptr, image);
+		imageLoadMs = ElapsedDx12InitMilliseconds(imageLoadStart, std::chrono::steady_clock::now());
 	}
-	else if (extension == L"TGA" || extension == L"tga")
+	else if (bIsTga)
 	{
 		DirectX::ScratchImage tempImage;
-		DirectX::LoadFromTGAFile(fileName.c_str(), nullptr, tempImage);
-		DirectX::GenerateMipMaps(*tempImage.GetImage(0, 0, 0), DirectX::TEX_FILTER_DEFAULT, 0, image, false);
+		const auto imageLoadStart = std::chrono::steady_clock::now();
+		loadHr = DirectX::LoadFromTGAFile(fileName.c_str(), nullptr, tempImage);
+		imageLoadMs = ElapsedDx12InitMilliseconds(imageLoadStart, std::chrono::steady_clock::now());
+		if (SUCCEEDED(loadHr) && tempImage.GetImage(0, 0, 0))
+		{
+			const auto mipStart = std::chrono::steady_clock::now();
+			mipHr = DirectX::GenerateMipMaps(*tempImage.GetImage(0, 0, 0), DirectX::TEX_FILTER_DEFAULT, 0, image, false);
+			mipGenMs = ElapsedDx12InitMilliseconds(mipStart, std::chrono::steady_clock::now());
+		}
 	}
 	else
 	{
 		DirectX::ScratchImage tempImage;
-		DirectX::LoadFromWICFile(fileName.c_str(), DirectX::WIC_FLAGS_NONE, nullptr, tempImage);
-		DirectX::GenerateMipMaps(*tempImage.GetImage(0, 0, 0), DirectX::TEX_FILTER_DEFAULT, 0, image, false);
+		const auto imageLoadStart = std::chrono::steady_clock::now();
+		loadHr = DirectX::LoadFromWICFile(fileName.c_str(), DirectX::WIC_FLAGS_NONE, nullptr, tempImage);
+		imageLoadMs = ElapsedDx12InitMilliseconds(imageLoadStart, std::chrono::steady_clock::now());
+		if (SUCCEEDED(loadHr) && tempImage.GetImage(0, 0, 0))
+		{
+			const auto mipStart = std::chrono::steady_clock::now();
+			mipHr = DirectX::GenerateMipMaps(*tempImage.GetImage(0, 0, 0), DirectX::TEX_FILTER_DEFAULT, 0, image, false);
+			mipGenMs = ElapsedDx12InitMilliseconds(mipStart, std::chrono::steady_clock::now());
+		}
+	}
+
+	if (FAILED(loadHr) || FAILED(mipHr) || image.GetImageCount() == 0)
+	{
+		AppendCpuRuntimeTrace(
+			L"[StartupProfile][TextureLoad] failed file=\"" + fileName +
+			L"\", ext=\"" + extension +
+			L"\", bytes=" + std::to_wstring(fileSize) +
+			L", loadHr=" + FormatHexHRESULT(loadHr) +
+			L", mipHr=" + FormatHexHRESULT(mipHr) +
+			L", imageLoadMs=" + FormatDx12InitMilliseconds(imageLoadMs) +
+			L", mipGenMs=" + FormatDx12InitMilliseconds(mipGenMs) +
+			L", totalMs=" + FormatDx12InitMilliseconds(ElapsedDx12InitMilliseconds(totalStart, std::chrono::steady_clock::now())));
+		return nullptr;
 	}
 
 	const DirectX::TexMetadata& metaData = image.GetMetadata();
@@ -2683,6 +2753,17 @@ std::shared_ptr<Texture> DX12Backend::CreateTextureFromFile(const std::wstring& 
 	textureDesc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
 	textureDesc.Alignment = 0;
 
+	std::unique_ptr<Texture> tex(new Texture);
+	tex->Owner = this;
+	double defaultResourceCreateMs = 0.0;
+	double uploadHeapCreateMs = 0.0;
+	double footprintMs = 0.0;
+	double cpuCopyMs = 0.0;
+	double commandRecordMs = 0.0;
+	double executeMs = 0.0;
+	double waitGpuMs = 0.0;
+	double srvMs = 0.0;
+
 	D3D12_HEAP_PROPERTIES heapProp;
 	heapProp.Type = D3D12_HEAP_TYPE_DEFAULT;
 	heapProp.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
@@ -2692,8 +2773,18 @@ std::shared_ptr<Texture> DX12Backend::CreateTextureFromFile(const std::wstring& 
 
 	tex->textureDesc = textureDesc;
 
-	Device->CreateCommittedResource(&heapProp, D3D12_HEAP_FLAG_NONE, &textureDesc,
+	const auto defaultResourceCreateStart = std::chrono::steady_clock::now();
+	HRESULT resourceHr = Device->CreateCommittedResource(&heapProp, D3D12_HEAP_FLAG_NONE, &textureDesc,
 		D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&tex->resource));
+	defaultResourceCreateMs = ElapsedDx12InitMilliseconds(defaultResourceCreateStart, std::chrono::steady_clock::now());
+	if (FAILED(resourceHr) || !tex->resource)
+	{
+		AppendCpuRuntimeTrace(
+			L"[StartupProfile][TextureLoad] failed resource file=\"" + fileName +
+			L"\", hr=" + FormatHexHRESULT(resourceHr) +
+			L", totalMs=" + FormatDx12InitMilliseconds(ElapsedDx12InitMilliseconds(totalStart, std::chrono::steady_clock::now())));
+		return nullptr;
+	}
 	tex->resource->SetName(fileName.c_str());
 
 	D3D12_HEAP_PROPERTIES heapPropUpload;
@@ -2724,8 +2815,18 @@ std::shared_ptr<Texture> DX12Backend::CreateTextureFromFile(const std::wstring& 
 	ss << "CreateTextureFromFile : " << uploadBufferSize << "\n";
 	OutputDebugStringA(ss.str().c_str());*/
 
-	Device->CreateCommittedResource(&heapPropUpload, D3D12_HEAP_FLAG_NONE, &resDesc,
+	const auto uploadHeapCreateStart = std::chrono::steady_clock::now();
+	HRESULT uploadHr = Device->CreateCommittedResource(&heapPropUpload, D3D12_HEAP_FLAG_NONE, &resDesc,
 		D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&uploadHeap));
+	uploadHeapCreateMs = ElapsedDx12InitMilliseconds(uploadHeapCreateStart, std::chrono::steady_clock::now());
+	if (FAILED(uploadHr) || !uploadHeap)
+	{
+		AppendCpuRuntimeTrace(
+			L"[StartupProfile][TextureLoad] failed uploadHeap file=\"" + fileName +
+			L"\", hr=" + FormatHexHRESULT(uploadHr) +
+			L", totalMs=" + FormatDx12InitMilliseconds(ElapsedDx12InitMilliseconds(totalStart, std::chrono::steady_clock::now())));
+		return nullptr;
+	}
 	uploadHeap->SetName(L"TexUploadingHeap");
 
 	const UINT64 numSubResources = metaData.mipLevels * metaData.arraySize;
@@ -2733,11 +2834,14 @@ std::shared_ptr<Texture> DX12Backend::CreateTextureFromFile(const std::wstring& 
 	UINT32* numRows = (UINT32*)_alloca(sizeof(UINT32) * numSubResources);
 	UINT64* rowSizes = (UINT64*)_alloca(sizeof(UINT64) * numSubResources);
 
+	const auto footprintStart = std::chrono::steady_clock::now();
 	UINT64 textureMemSize = 0;
 	Device->GetCopyableFootprints(&textureDesc, 0, UINT32(numSubResources), 0, layouts, numRows, rowSizes, &textureMemSize);
+	footprintMs = ElapsedDx12InitMilliseconds(footprintStart, std::chrono::steady_clock::now());
 
 	UINT8* uploadMem = nullptr;
 
+	const auto cpuCopyStart = std::chrono::steady_clock::now();
 	D3D12_RANGE readRange = { };
 	uploadHeap->Map(0, &readRange, reinterpret_cast<void**>(&uploadMem));
 	for (UINT64 arrayIdx = 0; arrayIdx < metaData.arraySize; ++arrayIdx)
@@ -2760,7 +2864,8 @@ std::shared_ptr<Texture> DX12Backend::CreateTextureFromFile(const std::wstring& 
 
 				for (UINT64 y = 0; y < subResourceHeight; ++y)
 				{
-					memcpy(dstSubResourceMem, srcSubResourceMem, glm::min<float>(subResourcePitch, subImage->rowPitch));
+					const size_t bytesToCopy = static_cast<size_t>(std::min<UINT64>(subResourcePitch, static_cast<UINT64>(subImage->rowPitch)));
+					memcpy(dstSubResourceMem, srcSubResourceMem, bytesToCopy);
 					dstSubResourceMem += subResourcePitch;
 					srcSubResourceMem += subImage->rowPitch;
 				}
@@ -2768,7 +2873,10 @@ std::shared_ptr<Texture> DX12Backend::CreateTextureFromFile(const std::wstring& 
 		}
 	}
 	uploadHeap->Unmap(0, nullptr);
+	cpuCopyMs = ElapsedDx12InitMilliseconds(cpuCopyStart, std::chrono::steady_clock::now());
 
+	CommandList* cmd = CmdQ->AllocCmdList();
+	const auto commandRecordStart = std::chrono::steady_clock::now();
 	for (UINT64 subResourceIdx = 0; subResourceIdx < numSubResources; ++subResourceIdx)
 	{
 		D3D12_TEXTURE_COPY_LOCATION dst = { };
@@ -2793,13 +2901,45 @@ std::shared_ptr<Texture> DX12Backend::CreateTextureFromFile(const std::wstring& 
 	BarrierDesc.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
 	BarrierDesc.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
 	cmd->CmdList->ResourceBarrier(1, &BarrierDesc);
+	commandRecordMs = ElapsedDx12InitMilliseconds(commandRecordStart, std::chrono::steady_clock::now());
 
+	const auto executeStart = std::chrono::steady_clock::now();
 	CmdQ->ExecuteCommandList(cmd);
+	executeMs = ElapsedDx12InitMilliseconds(executeStart, std::chrono::steady_clock::now());
+	const auto waitStart = std::chrono::steady_clock::now();
 	CmdQ->WaitGPU();
+	waitGpuMs = ElapsedDx12InitMilliseconds(waitStart, std::chrono::steady_clock::now());
 
+	const auto srvStart = std::chrono::steady_clock::now();
 	tex->MakeStaticSRV();
+	srvMs = ElapsedDx12InitMilliseconds(srvStart, std::chrono::steady_clock::now());
 
-	return shared_ptr<Texture>(tex);
+	AppendCpuRuntimeTrace(
+		L"[StartupProfile][TextureLoad] file=\"" + fileName +
+		L"\", ext=\"" + extension +
+		L"\", bytes=" + std::to_wstring(fileSize) +
+		L", width=" + std::to_wstring(static_cast<uint64_t>(metaData.width)) +
+		L", height=" + std::to_wstring(static_cast<uint64_t>(metaData.height)) +
+		L", mips=" + std::to_wstring(static_cast<uint64_t>(metaData.mipLevels)) +
+		L", arraySize=" + std::to_wstring(static_cast<uint64_t>(metaData.arraySize)) +
+		L", uploadBytes=" + std::to_wstring(uploadBufferSize) +
+		L", textureMemBytes=" + std::to_wstring(textureMemSize) +
+		L", format=" + std::to_wstring(static_cast<int>(format)) +
+		L", sourceFormat=" + std::to_wstring(static_cast<int>(metaData.format)) +
+		L", nonSRGB=" + std::to_wstring(nonSRGB ? 1 : 0) +
+		L", imageLoadMs=" + FormatDx12InitMilliseconds(imageLoadMs) +
+		L", mipGenMs=" + FormatDx12InitMilliseconds(mipGenMs) +
+		L", defaultResourceCreateMs=" + FormatDx12InitMilliseconds(defaultResourceCreateMs) +
+		L", uploadHeapCreateMs=" + FormatDx12InitMilliseconds(uploadHeapCreateMs) +
+		L", footprintMs=" + FormatDx12InitMilliseconds(footprintMs) +
+		L", cpuCopyMs=" + FormatDx12InitMilliseconds(cpuCopyMs) +
+		L", commandRecordMs=" + FormatDx12InitMilliseconds(commandRecordMs) +
+		L", executeMs=" + FormatDx12InitMilliseconds(executeMs) +
+		L", waitGpuMs=" + FormatDx12InitMilliseconds(waitGpuMs) +
+		L", srvMs=" + FormatDx12InitMilliseconds(srvMs) +
+		L", totalMs=" + FormatDx12InitMilliseconds(ElapsedDx12InitMilliseconds(totalStart, std::chrono::steady_clock::now())));
+
+	return shared_ptr<Texture>(tex.release());
 }
 static const D3D12_HEAP_PROPERTIES kDefaultHeapProps =
 {
@@ -2822,8 +2962,30 @@ static const D3D12_HEAP_PROPERTIES kUploadHeapProps =
 std::shared_ptr<RTAS> DX12Backend::CreateBLASForSkeletalMesh(Mesh* mesh)
 {
 	assert(mesh);
-	if (!mesh->bSkeletalSkinned || !mesh->SkeletalOutputVb || !mesh->Ib)
+	const bool bHasOutputVb = mesh && mesh->SkeletalOutputVb;
+	const bool bHasIb = mesh && mesh->Ib;
+	const bool bHasOutputResource = bHasOutputVb && mesh->SkeletalOutputVb->resource.Get();
+	const bool bHasIndexResource = bHasIb && mesh->Ib->resource.Get();
+	if (!mesh ||
+		!mesh->bSkeletalSkinned ||
+		!bHasOutputResource ||
+		!bHasIndexResource ||
+		mesh->VertexStride == 0 ||
+		mesh->SkeletalVertexCount == 0 ||
+		mesh->Ib->numIndices < 3)
+	{
+		AppendCpuRuntimeTrace(
+			L"[DX12RTAS] CreateBLASForSkeletalMesh skipped invalid mesh"
+			L", mesh=" + FormatDx12Hex(reinterpret_cast<uint64_t>(mesh)) +
+			L", hasOutputVb=" + std::to_wstring(bHasOutputVb ? 1 : 0) +
+			L", hasIb=" + std::to_wstring(bHasIb ? 1 : 0) +
+			L", hasOutputResource=" + std::to_wstring(bHasOutputResource ? 1 : 0) +
+			L", hasIndexResource=" + std::to_wstring(bHasIndexResource ? 1 : 0) +
+			L", vertexStride=" + std::to_wstring(mesh ? mesh->VertexStride : 0) +
+			L", skeletalVertices=" + std::to_wstring(mesh ? mesh->SkeletalVertexCount : 0) +
+			L", indices=" + std::to_wstring(bHasIb ? mesh->Ib->numIndices : 0));
 		return nullptr;
+	}
 
 	DX12Backend* owner = this;
 	D3D12RTAS* as = new D3D12RTAS;
@@ -2867,6 +3029,15 @@ std::shared_ptr<RTAS> DX12Backend::CreateBLASForSkeletalMesh(Mesh* mesh)
 
 	D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO info = {};
 	owner->Device->GetRaytracingAccelerationStructurePrebuildInfo(&inputs, &info);
+	if (info.ResultDataMaxSizeInBytes == 0 || info.ScratchDataSizeInBytes == 0)
+	{
+		AppendCpuRuntimeTrace(
+			L"[DX12RTAS] CreateBLASForSkeletalMesh skipped empty prebuild info"
+			L", resultBytes=" + std::to_wstring(info.ResultDataMaxSizeInBytes) +
+			L", scratchBytes=" + std::to_wstring(info.ScratchDataSizeInBytes));
+		delete as;
+		return nullptr;
+	}
 
 	// scratch needs the larger of the initial-build and update-build sizes.
 	const UINT64 scratchSize = (std::max)(info.ScratchDataSizeInBytes, info.UpdateScratchDataSizeInBytes);
@@ -2884,6 +3055,17 @@ std::shared_ptr<RTAS> DX12Backend::CreateBLASForSkeletalMesh(Mesh* mesh)
 			D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE, nullptr, IID_PPV_ARGS(&as->Result));
 		if (as->Result)
 			as->Result->SetName(L"Corona Skeletal BLAS Result");
+	}
+	if (!as->Scratch || !as->Result)
+	{
+		AppendCpuRuntimeTrace(
+			L"[DX12RTAS] CreateBLASForSkeletalMesh resource allocation failed"
+			L", hasScratch=" + std::to_wstring(as->Scratch ? 1 : 0) +
+			L", hasResult=" + std::to_wstring(as->Result ? 1 : 0) +
+			L", resultBytes=" + std::to_wstring(info.ResultDataMaxSizeInBytes) +
+			L", scratchBytes=" + std::to_wstring(scratchSize));
+		delete as;
+		return nullptr;
 	}
 
 	CommandList* cmd = owner->CmdQ->AllocCmdList();
@@ -3003,6 +3185,30 @@ void DX12Backend::RefitBLAS(RTAS* rtas, Mesh* mesh)
 std::shared_ptr<RTAS> DX12Backend::CreateBLASForMesh(Mesh* mesh)
 {
 	assert(mesh);
+	const bool bHasVb = mesh && mesh->Vb;
+	const bool bHasIb = mesh && mesh->Ib;
+	const bool bHasVbResource = bHasVb && mesh->Vb->resource.Get();
+	const bool bHasIbResource = bHasIb && mesh->Ib->resource.Get();
+	if (!mesh ||
+		!bHasVbResource ||
+		!bHasIbResource ||
+		mesh->VertexStride == 0 ||
+		mesh->Vb->numVertices <= 0 ||
+		mesh->Ib->numIndices < 3)
+	{
+		AppendCpuRuntimeTrace(
+			L"[DX12RTAS] CreateBLASForMesh skipped invalid mesh"
+			L", mesh=" + FormatDx12Hex(reinterpret_cast<uint64_t>(mesh)) +
+			L", hasVb=" + std::to_wstring(bHasVb ? 1 : 0) +
+			L", hasIb=" + std::to_wstring(bHasIb ? 1 : 0) +
+			L", hasVbResource=" + std::to_wstring(bHasVbResource ? 1 : 0) +
+			L", hasIbResource=" + std::to_wstring(bHasIbResource ? 1 : 0) +
+			L", vertexStride=" + std::to_wstring(mesh ? mesh->VertexStride : 0) +
+			L", vertices=" + std::to_wstring(bHasVb ? mesh->Vb->numVertices : 0) +
+			L", indices=" + std::to_wstring(bHasIb ? mesh->Ib->numIndices : 0));
+		return nullptr;
+	}
+
 	DX12Backend* owner = this;
 	D3D12RTAS* as = new D3D12RTAS;
 
@@ -3034,6 +3240,15 @@ std::shared_ptr<RTAS> DX12Backend::CreateBLASForMesh(Mesh* mesh)
 
 	D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO info = {};
 	owner->Device->GetRaytracingAccelerationStructurePrebuildInfo(&inputs, &info);
+	if (info.ResultDataMaxSizeInBytes == 0 || info.ScratchDataSizeInBytes == 0)
+	{
+		AppendCpuRuntimeTrace(
+			L"[DX12RTAS] CreateBLASForMesh skipped empty prebuild info"
+			L", resultBytes=" + std::to_wstring(info.ResultDataMaxSizeInBytes) +
+			L", scratchBytes=" + std::to_wstring(info.ScratchDataSizeInBytes));
+		delete as;
+		return nullptr;
+	}
 
 	{
 		D3D12_RESOURCE_DESC bufDesc = {};
@@ -3080,6 +3295,17 @@ std::shared_ptr<RTAS> DX12Backend::CreateBLASForMesh(Mesh* mesh)
 		owner->Device->CreateCommittedResource(&kDefaultHeapProps, D3D12_HEAP_FLAG_NONE, &bufDesc, D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE, nullptr, IID_PPV_ARGS(&as->Result));
 		if (as->Result)
 			as->Result->SetName(L"Corona BLAS Result");
+	}
+	if (!as->Scratch || !as->Result)
+	{
+		AppendCpuRuntimeTrace(
+			L"[DX12RTAS] CreateBLASForMesh resource allocation failed"
+			L", hasScratch=" + std::to_wstring(as->Scratch ? 1 : 0) +
+			L", hasResult=" + std::to_wstring(as->Result ? 1 : 0) +
+			L", resultBytes=" + std::to_wstring(info.ResultDataMaxSizeInBytes) +
+			L", scratchBytes=" + std::to_wstring(info.ScratchDataSizeInBytes));
+		delete as;
+		return nullptr;
 	}
 
 	CommandList* cmd = owner->CmdQ->AllocCmdList();

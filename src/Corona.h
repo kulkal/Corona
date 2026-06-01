@@ -829,7 +829,7 @@ private:
 	bool bRTDiffuseGISpatialHashSERInitFailed = false;
 
 	// Raised from 8 → 128 so ReSTIR DI demos with many lights are
-	// meaningful. CB cost: 128 * 32 B = 4 KB per occurrence (LightingParam
+	// meaningful. CB cost: 128 * 64 B = 8 KB per occurrence (LightingParam
 	// + RTShadowViewParamCB), well under the 64 KB cbuffer limit. Keep the
 	// shader-side MAX_POINT_LIGHTS macros in lock-step with this value.
 	static constexpr UINT32 MaxPointLights = 128;
@@ -840,6 +840,8 @@ private:
 	{
 		glm::vec4 PositionAndRadius = glm::vec4(0.0f);
 		glm::vec4 ColorAndIntensity = glm::vec4(1.0f);
+		glm::vec4 DirectionAndType = glm::vec4(0.0f, 1.0f, 0.0f, 0.0f);
+		glm::vec4 SpotConeAndFlags = glm::vec4(1.0f, 0.70710677f, 3.4142137f, 1.0f);
 	};
 	
 	// Path Tracing
@@ -866,7 +868,8 @@ private:
 		glm::vec4 LightDirAndIntensity;
 		float DirectLightAngularRadius = 0.001f;
 		UINT32 DirectLightSampleCount = 1;
-		glm::vec2 _directLightPadding = glm::vec2(0.0f);
+		UINT32 bDirectLightCastShadow = 1;
+		float _directLightPadding = 0.0f;
 		glm::vec2 RandomOffset;
 		UINT32 FrameCounter;
 		UINT32 BlueNoiseOffsetStride = 1;
@@ -911,6 +914,7 @@ private:
 	glm::mat4x4 PrevPathTracingViewMat = glm::mat4x4(0.0f);
 	glm::vec3 PrevPathTracingLightDir;
 	float PrevPathTracingLightIntensity = 0.0f;
+	bool PrevPathTracingDirectionalLightCastShadow = true;
 	glm::vec3 PrevSkyColorTop = glm::vec3(0.0f);
 	glm::vec3 PrevSkyColorBottom = glm::vec3(0.0f);
 	float PrevSkyIntensity = 0.0f;
@@ -1159,7 +1163,7 @@ public:
 
 private:
 
-	EAntiAliasingMode AntiAliasingMode = EAntiAliasingMode::DLSS_RR;
+	EAntiAliasingMode AntiAliasingMode = EAntiAliasingMode::TAA;
 	EDLSSQualityMode DLSSQualityMode = EDLSSQualityMode::QUALITY;
 	ERayNoiseMode RayNoiseMode = ERayNoiseMode::R2_LOW_DISCREPANCY;
 	EDiffuseGIMode DiffuseGIMode = EDiffuseGIMode::SPATIAL_HASH;
@@ -1235,13 +1239,13 @@ private:
 	UINT32 MobileGBufferDumpPhase = 0;
 	std::wstring AutoAADumpDir;
 	std::wstring MobileGBufferDumpDir;
-	EAntiAliasingMode StartupSelectedAAMode = EAntiAliasingMode::DLSS_RR;
+	EAntiAliasingMode StartupSelectedAAMode = EAntiAliasingMode::TAA;
 	ERenderingMode StartupRenderingMode = ERenderingMode::HYBRID;
 	ERenderBackendAPI StartupRenderBackendAPI = ERenderBackendAPI::D3D12;
 	bool bCommandLineAutoDumpOverrideSet = false;
 	bool bCommandLineAutoDumpEnabled = false;
 	bool bCommandLineAAOverrideSet = false;
-	EAntiAliasingMode CommandLineSelectedAAMode = EAntiAliasingMode::DLSS_RR;
+	EAntiAliasingMode CommandLineSelectedAAMode = EAntiAliasingMode::TAA;
 	bool bCommandLineRenderModeOverrideSet = false;
 	ERenderingMode CommandLineRenderingMode = ERenderingMode::HYBRID;
 	bool bCommandLineRenderBackendOverrideSet = false;
@@ -1282,6 +1286,9 @@ private:
 	UINT32 CommandLineExitAfterFrames = 0;
 	bool bCommandLineExitAfterFramesTriggered = false;
 	std::wstring CommandLineCameraPathFile;
+	std::wstring CommandLineLoadMapFile;
+	UINT32 CommandLineScreenshotFrame = 0;
+	bool bCommandLineScreenshotTriggered = false;
 
 	std::shared_ptr<GraphicsPipelineHandle> TemporalAAGraphicsPipeline;
 	bool bTemporalAAHistoryValid = false;
@@ -1428,6 +1435,8 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	CoronaECS::Entity MainCameraEntity;
 	bool bRayTracingSceneDirty = false;
 	bool bRayTracingTransformDirty = false;
+	bool bRayTracingBLASCacheResetPending = false;
+	bool bRayTracingBLASBuildSuspended = false;
 
 	// Recipe = how the Scene was created, so SaveMap can serialize the
 	// procedural params (seed/blade_count/...) or the asset path without
@@ -1685,6 +1694,11 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 		float Radius = 320.0f;
 		glm::vec3 Color = glm::vec3(1.0f);
 		float Intensity = 10.0f;
+		CoronaECS::LightType Type = CoronaECS::LightType::Point;
+		bool bCastShadow = true;
+		glm::vec3 Direction = glm::vec3(0.0f, 1.0f, 0.0f);
+		float InnerConeAngle = 0.0f;
+		float OuterConeAngle = 0.785398163f;
 		UINT32 RenderDirtyBits = 0;
 	};
 	std::vector<PointLightState> PointLights;
@@ -1770,6 +1784,7 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 		UINT32 DLSSJitterPhaseCountOverride = 0;
 		glm::vec3 LightDir = glm::vec3(0.0f, 1.0f, 0.0f);
 		float LightIntensity = 0.4f;
+		bool bDirectionalLightCastShadow = true;
 		glm::vec3 SkyColorTop = glm::vec3(1.0f);
 		glm::vec3 SkyColorBottom = glm::vec3(0.8f);
 		float SkyIntensity = 3.0f;
@@ -1912,6 +1927,7 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	glm::vec3 RenderFrameCameraLookDirection = glm::vec3(0.0f, 0.0f, 1.0f);
 	glm::vec3 RenderFrameNormalizedLightDir = glm::vec3(0.0f, 1.0f, 0.0f);
 	glm::vec3 RenderFrameLightColor = glm::vec3(1.0f);
+	bool RenderFrameDirectionalLightCastShadow = true;
 	float RenderFrameShaderTime = 0.0f;
 	// Unscaled real time (seconds since startup) for shader effects that
 	// need true wall-clock rate — currently the wind sway. RT noise paths
@@ -1990,6 +2006,16 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	bool bRecompileShaders = false;
 	bool bShowImgui = true;
 	bool bShowGpuTimingWindow = false;
+	bool bShowFrameTimingOverlay = false;
+	bool bEditorConfigWindowOpen = false;
+	bool bEditorCameraCollisionEnabled = true;
+	float EditorCameraMoveSpeed = 200.0f;
+	bool bEditorMapLoadQueued = false;
+	bool bEditorMapLoadInProgress = false;
+	uint32_t EditorMapLoadEntityIndex = 0;
+	uint32_t EditorMapLoadEntityCount = 0;
+	std::wstring PendingEditorMapLoadName;
+	std::wstring LastEditorMapLoadStatus;
 	bool bFinalScreenshotRequested = false;
 	bool bFinalScreenshotCaptureInFlight = false;
 	UINT32 FinalScreenshotCounter = 0;
@@ -2085,6 +2111,7 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	void AddCpuUpdatePhaseTiming(ECpuUpdatePhase phase, const CpuClock::time_point& begin, const CpuClock::time_point& end);
 	void FinishCpuUpdateTiming(const CpuClock::time_point& begin, const CpuClock::time_point& end);
 	void TrimCpuUpdateTimingHistory();
+	void SetGpuTimingAverageFrameCount(UINT32 frameCount);
 	std::wstring BuildFinalScreenshotPath();
 	void RequestFinalBackbufferScreenshot();
 	void ConsumeFinalBackbufferScreenshotResult();
@@ -2240,6 +2267,7 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	void UpdateSceneObjectEntity(const SceneObject& object);
 	void InitializeMainCameraEntity();
 	void UpdateMainCameraEntityFromSimpleCamera();
+	void UpdateSimpleCameraFromActiveCameraEntity();
 	void InitializeMainDirectionalLightEntity();
 	void UpdateMainDirectionalLightEntityFromState();
 	void ApplyDirectionalLightEntityToState();
@@ -2780,6 +2808,9 @@ public:
 	// spawn block when a cached map is already on disk.
 	bool SaveMapToFile(const std::wstring& name, std::wstring* outError = nullptr);
 	bool LoadMapFromFile(const std::wstring& name, std::wstring* outError = nullptr);
+	void QueueEditorMapLoad(const std::wstring& name);
+	bool IsEditorMapLoadQueued() const { return bEditorMapLoadQueued; }
+	const std::wstring& GetLastEditorMapLoadStatus() const { return LastEditorMapLoadStatus; }
 
 	// Serialize a single entity (mesh / light / camera) as a standalone
 	// asset to `assets/scene_assets/<assetName>.asset.lua`. Returns false +
@@ -2829,6 +2860,9 @@ public:
 	void InitImgui();
 	void DrawMobileVirtualControls();
 	void DrawMobilePerformanceOverlay();
+	void DrawRuntimeFrameOverlay();
+	void DrawEditorMainWindowControls();
+	void DrawEditorCameraOverlay();
 	void UpdateMobileVirtualMoveFromTouch(const PlatformTouchState& touchState);
 	bool LoadCameraState();
 	void SaveCameraState();
@@ -3040,6 +3074,7 @@ public:
 	void GenMipSpecularGIPass();
 	EAntiAliasingMode NormalizeAntiAliasingMode(ERenderingMode renderingMode, EAntiAliasingMode requestedMode) const;
 	void ApplyRenderingAndAAMode(ERenderingMode requestedRenderingMode, EAntiAliasingMode requestedAAMode);
+	void ApplyDiffuseGIMode(EDiffuseGIMode requestedMode);
 	bool RenderResolutionResourcesMatchCurrentState() const;
 	void ResetAllAccumulationState(bool forceUpscaleReload);
 	void ResetTemporalHistoryBuffers();
@@ -3066,6 +3101,7 @@ public:
 #if WITH_STREAMLINE
 	void InitStreamline();
 	void ShutdownStreamline();
+	void HandleStreamlineFeatureFailure(sl::Feature feature, sl::Result result, const wchar_t* operation);
 	bool BeginStreamlineFrame();
 	bool EnsureStreamlineConstants();
 	bool DLSSPass();
@@ -3081,6 +3117,8 @@ public:
 	void UpdateMobileTouchCameraInput(float elapsedSeconds);
 
 	void OnRender();
+	bool IsEditorStartupMode() const { return bEnableStartupLuauScript && StartupLuauMode == L"editor"; }
+	void DrawEditorModeOverlay();
 
 	void StartGameThread();
 	void StopGameThread();
@@ -3122,6 +3160,7 @@ private:
 	std::wstring GetAssetFullPath(LPCWSTR assetName) const;
 	void SetCustomWindowText(LPCWSTR text);
 	void PumpStartupWindowMessages();
+	void ProcessPendingEditorMapLoad();
 	void InitRenderSyncChannels();
 	void MarkSceneObjectRenderDirty(SceneObjectHandle handle, UINT32 dirtyBits);
 	void MarkSceneObjectRenderRemoved(SceneObjectHandle handle);
@@ -3134,6 +3173,7 @@ private:
 	void ApplyPendingRenderFrameDeltas();
 	RenderFrameSourceState CaptureRenderFrameSourceState() const;
 	void ApplyRenderFrameSourceState(const RenderFrameSourceState& state);
+	void SyncCurrentLightingSettingsToFrameSourceState();
 	void CollectFrameSourceRenderSync(RenderFrameDelta& delta);
 	void ApplyFrameSourceRenderSync(const RenderFrameDelta& delta);
 	void CollectSceneObjectRenderSync(RenderFrameDelta& delta);
@@ -3141,6 +3181,8 @@ private:
 	void CollectPointLightRenderSync(RenderFrameDelta& delta);
 	void ApplyPointLightRenderSync(const RenderFrameDelta& delta);
 	void BuildRenderFrameDerivedState(const RenderFrameSourceState* sourceState);
+	void BuildPointLightRenderCandidates(std::vector<const PointLightState*>& outCandidates) const;
+	PointLightParam BuildPointLightParam(const PointLightState& pointLight) const;
 	void ApplyRenderPointLightsToFrameParams();
 
 	UINT m_width = 0;
@@ -3153,11 +3195,14 @@ private:
 	std::string m_imguiLogPath;
 	float StartupLoadingProgress = 0.0f;
 	std::wstring StartupLoadingStatus;
+	std::wstring StartupLoadingTitle;
 	CpuClock::time_point StartupLoadingTimingStart = {};
 	CpuClock::time_point StartupLoadingTimingLast = {};
+	CpuClock::time_point StartupLoadingLastDrawTime = {};
 	std::wstring StartupLoadingTimingLastStatus;
 	bool bStartupLoadingTimingStarted = false;
 	bool bStartupLoadingScreenActive = false;
+	bool bStartupLoadingCompactWindow = false;
 	std::mutex GameRenderStateMutex;
 	std::mutex GameThreadMutex;
 	std::condition_variable GameThreadCv;

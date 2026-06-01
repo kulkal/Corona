@@ -19,6 +19,7 @@
 #include <iomanip>
 #include <iterator>
 #include <map>
+#include <set>
 #include <sstream>
 
 void AppendCpuRuntimeTrace(const std::wstring& line);
@@ -48,6 +49,60 @@ namespace
 		return std::chrono::duration<double, std::milli>(end - begin).count();
 	}
 
+	bool IsMeshRayTracingBuildable(const Mesh& mesh)
+	{
+		if (mesh.bProceduralGrass)
+			return false;
+
+		if (mesh.bSkeletalSkinned)
+		{
+			return mesh.SkeletalOutputVb &&
+				mesh.Ib &&
+				mesh.VertexStride > 0 &&
+				mesh.SkeletalVertexCount > 0 &&
+				mesh.Ib->numIndices >= 3;
+		}
+
+		return mesh.Vb &&
+			mesh.Ib &&
+			mesh.VertexStride > 0 &&
+			mesh.Vb->numVertices > 0 &&
+			mesh.Ib->numIndices >= 3;
+	}
+
+	size_t CountBuildableRayTracingMeshes(const shared_ptr<Scene>& scene)
+	{
+		if (!scene)
+			return 0;
+
+		size_t count = 0;
+		for (const shared_ptr<Mesh>& mesh : scene->meshes)
+		{
+			if (mesh && IsMeshRayTracingBuildable(*mesh))
+				++count;
+		}
+		return count;
+	}
+
+	void TraceSkippedRayTracingMesh(const Mesh& mesh)
+	{
+		static std::set<const Mesh*> loggedMeshes;
+		if (!loggedMeshes.insert(&mesh).second)
+			return;
+
+		AppendCpuRuntimeTrace(
+			L"[RTAS] skip non-buildable mesh"
+			L", proceduralGrass=" + std::to_wstring(mesh.bProceduralGrass ? 1 : 0) +
+			L", skeletal=" + std::to_wstring(mesh.bSkeletalSkinned ? 1 : 0) +
+			L", hasVb=" + std::to_wstring(mesh.Vb ? 1 : 0) +
+			L", hasIb=" + std::to_wstring(mesh.Ib ? 1 : 0) +
+			L", hasSkeletalOutputVb=" + std::to_wstring(mesh.SkeletalOutputVb ? 1 : 0) +
+			L", vertexStride=" + std::to_wstring(mesh.VertexStride) +
+			L", vertices=" + std::to_wstring(mesh.Vb ? mesh.Vb->numVertices : 0) +
+			L", skeletalVertices=" + std::to_wstring(mesh.SkeletalVertexCount) +
+			L", indices=" + std::to_wstring(mesh.Ib ? mesh.Ib->numIndices : 0));
+	}
+
 	void AddMeshesToRayTracingInstances(
 		vector<RTInstanceDesc>& instances,
 		map<Mesh*, shared_ptr<RTAS>>& blasCache,
@@ -55,27 +110,53 @@ namespace
 		const glm::mat4x4& instanceTransform,
 		float roughness,
 		float metallic,
-		bool bOverrideRoughnessMetallic)
+		bool bOverrideRoughnessMetallic,
+		bool& bBuildSuspended)
 	{
-		if (!scene)
+		if (!scene || bBuildSuspended)
 			return;
 
 		for (auto& mesh : scene->meshes)
 		{
+			if (bBuildSuspended)
+				return;
 			if (!mesh)
 				continue;
+			if (!IsMeshRayTracingBuildable(*mesh))
+			{
+				TraceSkippedRayTracingMesh(*mesh);
+				continue;
+			}
 
 			shared_ptr<RTAS> blas;
 			const auto cacheIt = blasCache.find(mesh.get());
 			if (cacheIt != blasCache.end())
 			{
 				blas = cacheIt->second;
+				if (!blas)
+				{
+					bBuildSuspended = true;
+					AppendCpuRuntimeTrace(
+						L"[RTAS] suspended BLAS build after cached failure for mesh=" +
+						FormatRTHex(reinterpret_cast<uint64_t>(mesh.get())));
+					return;
+				}
 			}
 			else
 			{
 				blas = mesh->CreateBLAS();
-				if (blas)
-					blasCache[mesh.get()] = blas;
+				// Cache null results too. A failed BLAS allocation should not be
+				// retried every frame for the same scene; the cache is cleared on
+				// scene/map rebuilds when bRayTracingBLASCacheResetPending is set.
+				blasCache[mesh.get()] = blas;
+				if (!blas)
+				{
+					bBuildSuspended = true;
+					AppendCpuRuntimeTrace(
+						L"[RTAS] cached failed BLAS build and suspended RTAS rebuild for mesh=" +
+						FormatRTHex(reinterpret_cast<uint64_t>(mesh.get())));
+					return;
+				}
 			}
 
 			if (blas == nullptr)
@@ -356,7 +437,7 @@ void Corona::UpdateRayTracingInstanceTransforms()
 	for (const SceneObject& object : RenderWorld.SceneObjects)
 	{
 		if (ShouldIncludeSceneObjectInRayTracingAS(object))
-			meshCount += object.ScenePtr->meshes.size();
+			meshCount += CountBuildableRayTracingMeshes(object.ScenePtr);
 	}
 	updatedInstances.reserve(meshCount);
 	for (const SceneObject& object : RenderWorld.SceneObjects)
@@ -369,9 +450,23 @@ void Corona::UpdateRayTracingInstanceTransforms()
 				object.Transform,
 				object.Roughness,
 				object.Metallic,
-				object.bOverrideRoughnessMetallic);
+				object.bOverrideRoughnessMetallic,
+				bRayTracingBLASBuildSuspended);
 	}
 	AddSceneFlushPhaseTiming(ESceneFlushPhase::UpdateGatherInstances, phaseStart, CpuClock::now());
+
+	if (bRayTracingBLASBuildSuspended)
+	{
+		AppendCpuRuntimeTrace(
+			L"[RTAS] transform update skipped after BLAS build suspension; falling back to raster for current scene"
+			L", requestedBuildableMeshes=" + std::to_wstring(meshCount) +
+			L", builtInstancesBeforeSuspend=" + std::to_wstring(updatedInstances.size()));
+		RayTracingInstances.clear();
+		TLAS = nullptr;
+		bRayTracingSceneDirty = false;
+		bRayTracingTransformDirty = false;
+		return;
+	}
 
 	if (updatedInstances.empty())
 	{
@@ -455,15 +550,48 @@ void Corona::UpdateInstancePropertyBuffer()
 		instanceProperties[i].RoughnessMetallic = glm::vec2(RayTracingInstances[i].Roughness, RayTracingInstances[i].Metallic);
 	}
 
+	auto ClearFailedD3D12FrameResources = [&](const wchar_t* reason)
+	{
+		AppendCpuRuntimeTrace(
+			L"[RTAS] InstancePropertyBuffer unavailable: " + std::wstring(reason ? reason : L"unknown") +
+			L", capacity=" + std::to_wstring(instanceCapacity) +
+			L", instances=" + std::to_wstring(RayTracingInstances.size()));
+		InstancePropertyBuffer = nullptr;
+		TLAS = nullptr;
+		std::fill(TLASFrameResources.begin(), TLASFrameResources.end(), std::shared_ptr<RTAS>());
+		std::fill(TLASFrameInstanceCounts.begin(), TLASFrameInstanceCounts.end(), 0u);
+		std::fill(InstancePropertyFrameBuffers.begin(), InstancePropertyFrameBuffers.end(), std::shared_ptr<Buffer>());
+	};
+
 	if (renderBackend && renderBackend->GetAPI() == ERenderBackendAPI::Vulkan)
 	{
-		InstancePropertyBuffer = renderBackend->CreateBuffer({
-			instanceCapacity,
-			sizeof(InstanceProperty),
-			EInitialResourceState::ShaderRead,
-			false,
-			instanceProperties.data()
-		});
+		try
+		{
+			InstancePropertyBuffer = renderBackend->CreateBuffer({
+				instanceCapacity,
+				sizeof(InstanceProperty),
+				EInitialResourceState::ShaderRead,
+				false,
+				instanceProperties.data()
+			});
+		}
+		catch (...)
+		{
+			AppendCpuRuntimeTrace(
+				L"[RTAS] Vulkan InstancePropertyBuffer CreateBuffer threw"
+				L", capacity=" + std::to_wstring(instanceCapacity) +
+				L", instances=" + std::to_wstring(RayTracingInstances.size()));
+			InstancePropertyBuffer = nullptr;
+			return;
+		}
+		if (!InstancePropertyBuffer)
+		{
+			AppendCpuRuntimeTrace(
+				L"[RTAS] Vulkan InstancePropertyBuffer CreateBuffer returned null"
+				L", capacity=" + std::to_wstring(instanceCapacity) +
+				L", instances=" + std::to_wstring(RayTracingInstances.size()));
+			return;
+		}
 		InstancePropertyBuffer->MakeByteAddressBufferSRV();
 		NAME_D3D12_OBJECT(InstancePropertyBuffer->resource);
 		return;
@@ -474,9 +602,27 @@ void Corona::UpdateInstancePropertyBuffer()
 	std::shared_ptr<Buffer>& frameInstancePropertyBuffer = InstancePropertyFrameBuffers[frameIndex];
 	if (!frameInstancePropertyBuffer || frameInstancePropertyBuffer->NumElements < instanceCapacity)
 	{
-		frameInstancePropertyBuffer = renderBackend->CreateBuffer({ instanceCapacity, sizeof(InstanceProperty), EInitialResourceState::GenericRead, false, nullptr });
+		try
+		{
+			frameInstancePropertyBuffer = renderBackend->CreateBuffer({ instanceCapacity, sizeof(InstanceProperty), EInitialResourceState::GenericRead, false, nullptr });
+		}
+		catch (...)
+		{
+			ClearFailedD3D12FrameResources(L"DX12 CreateBuffer threw");
+			return;
+		}
+		if (!frameInstancePropertyBuffer || !frameInstancePropertyBuffer->resource)
+		{
+			ClearFailedD3D12FrameResources(L"DX12 CreateBuffer returned null");
+			return;
+		}
 		frameInstancePropertyBuffer->MakeByteAddressBufferSRV();
 		NAME_D3D12_OBJECT(frameInstancePropertyBuffer->resource);
+	}
+	if (!frameInstancePropertyBuffer || !frameInstancePropertyBuffer->resource)
+	{
+		ClearFailedD3D12FrameResources(L"DX12 frame buffer missing resource");
+		return;
 	}
 	InstancePropertyBuffer = frameInstancePropertyBuffer;
 
@@ -511,6 +657,18 @@ void Corona::RebuildAccelerationStructures()
 	std::fill(TLASFrameResources.begin(), TLASFrameResources.end(), std::shared_ptr<RTAS>());
 	std::fill(TLASFrameInstanceCounts.begin(), TLASFrameInstanceCounts.end(), 0u);
 	std::fill(InstancePropertyFrameBuffers.begin(), InstancePropertyFrameBuffers.end(), std::shared_ptr<Buffer>());
+	if (bRayTracingBLASCacheResetPending)
+	{
+		if (!RayTracingBLASCache.empty())
+		{
+			AppendCpuRuntimeTrace(
+				L"[RTAS] cleared BLAS cache before scene rebuild, count=" +
+				std::to_wstring(RayTracingBLASCache.size()));
+		}
+		RayTracingBLASCache.clear();
+		bRayTracingBLASCacheResetPending = false;
+		bRayTracingBLASBuildSuspended = false;
+	}
 
 	phaseStart = CpuClock::now();
 	RayTracingInstances.clear();
@@ -528,7 +686,7 @@ void Corona::RebuildAccelerationStructures()
 		}
 
 		if (ShouldIncludeSceneObjectInRayTracingAS(object))
-			meshCount += object.ScenePtr->meshes.size();
+			meshCount += CountBuildableRayTracingMeshes(object.ScenePtr);
 	}
 	RayTracingInstances.reserve(meshCount);
 	for (const SceneObject& object : RenderWorld.SceneObjects)
@@ -541,7 +699,17 @@ void Corona::RebuildAccelerationStructures()
 				object.Transform,
 				object.Roughness,
 				object.Metallic,
-				object.bOverrideRoughnessMetallic);
+				object.bOverrideRoughnessMetallic,
+				bRayTracingBLASBuildSuspended);
+	}
+
+	if (bRayTracingBLASBuildSuspended)
+	{
+		AppendCpuRuntimeTrace(
+			L"[RTAS] BLAS build suspended; falling back to raster for current scene"
+			L", requestedBuildableMeshes=" + std::to_wstring(meshCount) +
+			L", builtInstancesBeforeSuspend=" + std::to_wstring(RayTracingInstances.size()));
+		RayTracingInstances.clear();
 	}
 
 	for (auto it = RayTracingBLASCache.begin(); it != RayTracingBLASCache.end();)
@@ -597,7 +765,7 @@ void Corona::InitRaytracingData()
 	for (const SceneObject& object : RenderWorld.SceneObjects)
 	{
 		if (ShouldIncludeSceneObjectInRayTracingAS(object))
-			NumTotalMesh += object.ScenePtr->meshes.size();
+			NumTotalMesh += CountBuildableRayTracingMeshes(object.ScenePtr);
 	}
 	RayTracingInstances.reserve(NumTotalMesh);
 

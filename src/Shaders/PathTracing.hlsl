@@ -28,6 +28,8 @@ struct PointLightParam
 {
     float4 PositionAndRadius;
     float4 ColorAndIntensity;
+    float4 DirectionAndType;
+    float4 SpotConeAndFlags;
 };
 
 cbuffer ViewParameter : register(b0)
@@ -42,7 +44,8 @@ cbuffer ViewParameter : register(b0)
     float4 LightDirAndIntensity;
     float DirectLightAngularRadius;
     uint DirectLightSampleCount;
-    float2 _directLightPadding;
+    uint bDirectLightCastShadow;
+    float _directLightPadding;
     float2 RandomOffset;
     uint FrameCounter;
     uint BlueNoiseOffsetStride;
@@ -74,6 +77,17 @@ SamplerState sampleWrap : register(s0);
 
 static const float INV_PI = 1.0 / PI;
 static const float PATH_TRACING_RAY_BIAS = 0.5f;
+
+float EvaluateSpotAttenuation(PointLightParam light, float3 surfaceToLightDir)
+{
+    if (light.DirectionAndType.w < 0.5f)
+        return 1.0f;
+
+    float3 spotDir = GGXSafeNormalize(light.DirectionAndType.xyz, float3(0.0f, 1.0f, 0.0f));
+    float cosTheta = dot(spotDir, -surfaceToLightDir);
+    float cone = saturate((cosTheta - light.SpotConeAndFlags.y) * light.SpotConeAndFlags.z);
+    return cone * cone;
+}
 
 struct PathTracingPayload
 {
@@ -659,23 +673,27 @@ void PathTracingClosestHit(inout PathTracingPayload payload, in BuiltInTriangleI
         float2 lightUV = float2(random_float(payload.seed), random_float(payload.seed));
         float3 lightDir = SampleDirectionalLightSphereCap(baseLightDir, DirectLightAngularRadius, lightUV);
 
-        // Shadow ray
-        RayDesc shadowRay;
-        shadowRay.Origin = hitPos;
-        shadowRay.Direction = lightDir;
-        shadowRay.TMin = 0.01;
-        shadowRay.TMax = 100000;
+        bool directVisible = true;
+        if (bDirectLightCastShadow != 0)
+        {
+            RayDesc shadowRay;
+            shadowRay.Origin = hitPos;
+            shadowRay.Direction = lightDir;
+            shadowRay.TMin = 0.01;
+            shadowRay.TMax = 100000;
 
-        ShadowRayPayload shadowPayload;
-        shadowPayload.bHit = true;
-        TraceRay(gRtScene,
-                 RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH |
-                 RAY_FLAG_SKIP_CLOSEST_HIT_SHADER |
-                 RAY_FLAG_FORCE_OPAQUE |
-                 RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES,
-                 0xFF, 0, 0, 1, shadowRay, shadowPayload);
+            ShadowRayPayload shadowPayload;
+            shadowPayload.bHit = true;
+            TraceRay(gRtScene,
+                     RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH |
+                     RAY_FLAG_SKIP_CLOSEST_HIT_SHADER |
+                     RAY_FLAG_FORCE_OPAQUE |
+                     RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES,
+                     0xFF, 0, 0, 1, shadowRay, shadowPayload);
+            directVisible = !shadowPayload.bHit;
+        }
 
-        if (!shadowPayload.bHit)
+        if (directVisible)
         {
             float NdotL = max(0, dot(N, lightDir));
 
@@ -715,34 +733,40 @@ void PathTracingClosestHit(inout PathTracingPayload payload, in BuiltInTriangleI
         float rangeAttenuation = saturate(1.0f - distanceToLight / pointRadius);
         rangeAttenuation *= rangeAttenuation;
         float inverseSquareAttenuation = 1.0f / max(1.0f, distanceSq * 0.0001f);
-        float attenuation = rangeAttenuation * inverseSquareAttenuation;
+        float attenuation = rangeAttenuation * inverseSquareAttenuation *
+            EvaluateSpotAttenuation(PointLights[pointLightIndex], pointLightDir);
         float pointNdotL = max(0.0f, dot(N, pointLightDir));
 
         if (pointNdotL <= 0.0f || attenuation <= 0.0f || pointIntensity <= 0.0f)
             continue;
 
-        RayDesc pointShadowRay;
-        pointShadowRay.Origin = hitPos;
-        pointShadowRay.Direction = pointLightDir;
-        pointShadowRay.TMin = 0.01f;
-        pointShadowRay.TMax = max(distanceToLight - 0.02f, 0.01f);
-
-        ShadowRayPayload pointShadowPayload;
-        pointShadowPayload.bHit = true;
-        TraceRay(gRtScene,
-                 RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH |
-                 RAY_FLAG_SKIP_CLOSEST_HIT_SHADER |
-                 RAY_FLAG_FORCE_OPAQUE |
-                 RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES,
-                 0xFF, 0, 0, 1, pointShadowRay, pointShadowPayload);
-
-        if (!pointShadowPayload.bHit)
+        bool pointVisible = true;
+        if (PointLights[pointLightIndex].SpotConeAndFlags.w > 0.5f)
         {
-            float3 pointRadiance = pointColor * pointIntensity * attenuation;
-            float3 pointDiffuse = bEnableDirectDiffuse ? (albedo * (1.0 - metallic)) : float3(0, 0, 0);
-            float3 pointSpecular = bEnableDirectSpecular ? EvaluateGGXSpecularBRDF(N, V, pointLightDir, roughness, directF0) : float3(0, 0, 0);
-            directLight += (pointDiffuse + pointSpecular) * pointNdotL * pointRadiance;
+            RayDesc pointShadowRay;
+            pointShadowRay.Origin = hitPos;
+            pointShadowRay.Direction = pointLightDir;
+            pointShadowRay.TMin = 0.01f;
+            pointShadowRay.TMax = max(distanceToLight - 0.02f, 0.01f);
+
+            ShadowRayPayload pointShadowPayload;
+            pointShadowPayload.bHit = true;
+            TraceRay(gRtScene,
+                     RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH |
+                     RAY_FLAG_SKIP_CLOSEST_HIT_SHADER |
+                     RAY_FLAG_FORCE_OPAQUE |
+                     RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES,
+                     0xFF, 0, 0, 1, pointShadowRay, pointShadowPayload);
+            pointVisible = !pointShadowPayload.bHit;
         }
+
+        if (!pointVisible)
+            continue;
+
+        float3 pointRadiance = pointColor * pointIntensity * attenuation;
+        float3 pointDiffuse = bEnableDirectDiffuse ? (albedo * (1.0 - metallic)) : float3(0, 0, 0);
+        float3 pointSpecular = bEnableDirectSpecular ? EvaluateGGXSpecularBRDF(N, V, pointLightDir, roughness, directF0) : float3(0, 0, 0);
+        directLight += (pointDiffuse + pointSpecular) * pointNdotL * pointRadiance;
     }
     
     // Set direct lighting contribution

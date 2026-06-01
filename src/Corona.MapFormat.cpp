@@ -6,6 +6,8 @@
 #include "stdafx.h"
 #include "Corona.h"
 
+#include <algorithm>
+#include <cctype>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -352,12 +354,16 @@ bool Corona::SaveMapToFile(const std::wstring& name, std::wstring* outError)
 			out << "      },\n";
 		}
 		out << "      light = {\n";
-		out << "        type      = " << EscapeLuaString(light->Type == CoronaECS::LightType::Directional ? "directional" : "point") << ",\n";
+		const char* typeName =
+			light->Type == CoronaECS::LightType::Directional ? "directional" :
+			light->Type == CoronaECS::LightType::Spot ? "spot" :
+			"point";
+		out << "        type      = " << EscapeLuaString(typeName) << ",\n";
 		// Position only matters for point lights (directional sun is shared
 		// by the whole world). Persisting it makes inspector position edits
 		// survive map reload — without this the runtime PointLight.Position
 		// got reset to the entity-creation default on every load.
-		if (light->Type == CoronaECS::LightType::Point)
+		if (light->Type != CoronaECS::LightType::Directional)
 		{
 			if (const auto* trans = ecs.GetTransform(entity))
 				out << "        position  = " << Vec3Lua(trans->GetPosition()) << ",\n";
@@ -366,6 +372,12 @@ bool Corona::SaveMapToFile(const std::wstring& name, std::wstring* outError)
 		out << "        color     = " << Vec3Lua(light->Color) << ",\n";
 		out << "        intensity = " << light->Intensity << ",\n";
 		out << "        radius    = " << light->Radius << ",\n";
+		out << "        cast_shadow = " << (light->bCastShadow ? "true" : "false") << ",\n";
+		if (light->Type == CoronaECS::LightType::Spot)
+		{
+			out << "        inner_cone_angle = " << light->InnerConeAngle << ",\n";
+			out << "        outer_cone_angle = " << light->OuterConeAngle << ",\n";
+		}
 		out << "        enabled   = " << (light->bEnabled ? "true" : "false") << ",\n";
 		out << "      },\n";
 		out << "    },\n";
@@ -757,6 +769,14 @@ bool Corona::LoadMapFromFile(const std::wstring& name, std::wstring* outError)
 	{
 		const int entitiesIdx = lua_gettop(L);
 		const int n = static_cast<int>(lua_objlen(L, entitiesIdx));
+		if (bStartupLoadingScreenActive)
+		{
+			EditorMapLoadEntityIndex = 0;
+			EditorMapLoadEntityCount = static_cast<uint32_t>(std::max(n, 0));
+			UpdateStartupLoadingProgress(
+				0.05f,
+				L"Reading map entities: " + std::to_wstring(EditorMapLoadEntityCount));
+		}
 		for (int i = 1; i <= n; ++i)
 		{
 			lua_rawgeti(L, entitiesIdx, i);
@@ -765,6 +785,18 @@ bool Corona::LoadMapFromFile(const std::wstring& name, std::wstring* outError)
 
 			std::string entityName;
 			LuaGetString(L, eIdx, "name", entityName);
+			if (bStartupLoadingScreenActive)
+			{
+				EditorMapLoadEntityIndex = static_cast<uint32_t>(i);
+				const float entityProgress =
+					0.05f + 0.88f *
+					(static_cast<float>(i - 1) / static_cast<float>(std::max(n, 1)));
+				UpdateStartupLoadingProgress(
+					entityProgress,
+					L"Loading entity " + std::to_wstring(i) +
+					L"/" + std::to_wstring(std::max(n, 0)) +
+					(entityName.empty() ? std::wstring() : (L": " + PlatformUtf8ToWide(entityName))));
+			}
 
 			// Track the entity created by this entry so the `scripts`
 			// block at the end can re-attach controllers. Mesh / light /
@@ -835,6 +867,29 @@ bool Corona::LoadMapFromFile(const std::wstring& name, std::wstring* outError)
 					LuaGetNumber(L, paramsIdx, "seed", seed);
 					sceneHandle = CreateProceduralBlockCharacterSceneForScript(static_cast<UINT32>(seed));
 				}
+				else if (primitive == "BOX" || primitive == "CUBE" || primitive == "PLANE" || primitive == "QUAD")
+				{
+					glm::vec3 color(0.72f, 0.72f, 0.72f);
+					bool brickTexture = false;
+					bool frontOnly = (primitive == "PLANE" || primitive == "QUAD");
+					double uvRepeat = 1.0;
+					double uvRepeatY = -1.0;
+					std::string textureKind;
+					if (!LuaGetVec3(L, mIdx, "color", color))
+						LuaGetVec3(L, mIdx, "base_color", color);
+					LuaGetBool(L, mIdx, "brick_texture", brickTexture);
+					LuaGetBool(L, mIdx, "front_only", frontOnly);
+					LuaGetNumber(L, mIdx, "uv_repeat", uvRepeat);
+					LuaGetNumber(L, mIdx, "uv_repeat_y", uvRepeatY);
+					LuaGetString(L, mIdx, "texture_kind", textureKind);
+					sceneHandle = CreateProceduralBoxSceneForScript(
+						color,
+						brickTexture,
+						static_cast<float>(uvRepeat),
+						PlatformUtf8ToWide(textureKind),
+						static_cast<float>(uvRepeatY),
+						frontOnly);
+				}
 				lua_pop(L, 1); // params
 
 				if (sceneHandle == InvalidScriptSceneHandle && primitive == "asset")
@@ -898,19 +953,38 @@ bool Corona::LoadMapFromFile(const std::wstring& name, std::wstring* outError)
 				CoronaECS::LightComponent comp;
 				std::string typeStr;
 				if (LuaGetString(L, lIdx, "type", typeStr))
-					comp.Type = (typeStr == "directional") ? CoronaECS::LightType::Directional : CoronaECS::LightType::Point;
+				{
+					std::transform(typeStr.begin(), typeStr.end(), typeStr.begin(),
+						[](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+					comp.Type =
+						typeStr == "directional" || typeStr == "sun" ? CoronaECS::LightType::Directional :
+						typeStr == "spot" || typeStr == "spotlight" ? CoronaECS::LightType::Spot :
+						CoronaECS::LightType::Point;
+				}
 				LuaGetVec3(L, lIdx, "direction", comp.Direction);
 				LuaGetVec3(L, lIdx, "color", comp.Color);
 				double intensity = 1.0, radius = 320.0;
 				if (LuaGetNumber(L, lIdx, "intensity", intensity)) comp.Intensity = static_cast<float>(intensity);
 				if (LuaGetNumber(L, lIdx, "radius", radius))       comp.Radius = static_cast<float>(radius);
+				double innerConeAngle = comp.InnerConeAngle;
+				double outerConeAngle = comp.OuterConeAngle;
+				if (LuaGetNumber(L, lIdx, "inner_cone_angle", innerConeAngle) ||
+					LuaGetNumber(L, lIdx, "innerConeAngle", innerConeAngle))
+					comp.InnerConeAngle = std::clamp(static_cast<float>(innerConeAngle), 0.0f, glm::pi<float>() - 0.001f);
+				if (LuaGetNumber(L, lIdx, "outer_cone_angle", outerConeAngle) ||
+					LuaGetNumber(L, lIdx, "outerConeAngle", outerConeAngle))
+					comp.OuterConeAngle = std::clamp(static_cast<float>(outerConeAngle), 0.001f, glm::pi<float>());
+				comp.InnerConeAngle = std::clamp(comp.InnerConeAngle, 0.0f, glm::pi<float>() - 0.001f);
+				comp.OuterConeAngle = std::clamp(comp.OuterConeAngle, comp.InnerConeAngle + 0.001f, glm::pi<float>());
+				if (!LuaGetBool(L, lIdx, "cast_shadow", comp.bCastShadow))
+					LuaGetBool(L, lIdx, "castShadow", comp.bCastShadow);
 				LuaGetBool(L, lIdx, "enabled", comp.bEnabled);
 				// Point light position — restored before AddLight so the
 				// TransformComponent created downstream has the saved value
 				// instead of the entity-default origin.
 				glm::vec3 pointLightPosition(0.0f);
 				const bool bHasPointLightPosition =
-					(comp.Type == CoronaECS::LightType::Point) &&
+					(comp.Type != CoronaECS::LightType::Directional) &&
 					LuaGetVec3(L, lIdx, "position", pointLightPosition);
 
 				// Directional lights are an engine singleton — the very first
@@ -1044,6 +1118,8 @@ bool Corona::LoadMapFromFile(const std::wstring& name, std::wstring* outError)
 	lua_pop(L, 1); // entities
 
 	// --- Globals ---
+	if (bStartupLoadingScreenActive)
+		UpdateStartupLoadingProgress(0.93f, L"Applying map globals");
 	lua_getfield(L, rootIdx, "globals");
 	if (lua_istable(L, -1))
 	{
@@ -1075,7 +1151,15 @@ bool Corona::LoadMapFromFile(const std::wstring& name, std::wstring* outError)
 	lua_pop(L, 1); // globals
 
 	lua_pop(L, 1); // root
+	UpdateSimpleCameraFromActiveCameraEntity();
 	AppendCpuRuntimeTrace(L"[Map] loaded " + path.wstring());
 	CurrentMapName = name;
+	MarkAllSceneObjectsForRenderSync();
+	MarkAllPointLightsForRenderSync();
+	MarkCpuPhysicsSceneDirty();
+	MarkRayTracingSceneDirty();
+	bRayTracingBLASCacheResetPending = true;
+	ResetAllAccumulationState(false);
+	AppendCpuRuntimeTrace(L"[Map] requested full render sync after load " + path.wstring());
 	return true;
 }

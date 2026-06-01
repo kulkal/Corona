@@ -41,6 +41,7 @@
 #include <stdexcept>
 #include <variant>
 #include <codecvt>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <cmath>
@@ -59,6 +60,7 @@
 #include "sl_core_types.h"
 #include "sl_dlss.h"
 #include "sl_dlss_d.h"
+#include "sl_helpers.h"
 #endif
 
 
@@ -990,6 +992,78 @@ namespace
 	constexpr uint32_t kCoronaMeshMaxMaterials = 4096u;
 	constexpr uint32_t kCoronaMeshMaxMeshes = 65536u;
 
+	struct MeshLoadProfileTotals
+	{
+		uint64_t ModelCount = 0;
+		uint64_t MeshCount = 0;
+		uint64_t MaterialCount = 0;
+		uint64_t VertexCount = 0;
+		uint64_t TriangleCount = 0;
+		uint64_t TextureRequests = 0;
+		uint64_t TextureLoads = 0;
+		uint64_t TextureCacheHits = 0;
+		uint64_t TextureLocalCacheHits = 0;
+		uint64_t TextureGlobalCacheHits = 0;
+		uint64_t TextureDdsSubstitutions = 0;
+		uint64_t TextureFallbacks = 0;
+		uint64_t TextureBytes = 0;
+		double TotalMs = 0.0;
+		double OpenHeaderMs = 0.0;
+		double MaterialReadMs = 0.0;
+		double TextureLoadMs = 0.0;
+		double MeshHeaderReadMs = 0.0;
+		double MeshDataReadMs = 0.0;
+		double GpuBufferCreateMs = 0.0;
+		double CpuCopyMs = 0.0;
+		double MaxModelMs = 0.0;
+		double MaxTextureMs = 0.0;
+		std::wstring MaxModelPath;
+		std::wstring MaxTexturePath;
+	};
+
+	MeshLoadProfileTotals gMeshLoadProfileTotals;
+	std::map<std::wstring, std::weak_ptr<Texture>> gMeshTextureCache;
+	std::mutex gMeshTextureCacheMutex;
+
+	void ResetMeshLoadProfileTotals()
+	{
+		gMeshLoadProfileTotals = MeshLoadProfileTotals{};
+	}
+
+	void AppendMeshLoadProfileSummary(const wchar_t* reason)
+	{
+		if (gMeshLoadProfileTotals.ModelCount == 0)
+			return;
+
+		AppendCpuRuntimeTrace(
+			L"[StartupProfile][MeshLoadSummary] reason=\"" + std::wstring(reason ? reason : L"unknown") +
+			L"\", models=" + std::to_wstring(gMeshLoadProfileTotals.ModelCount) +
+			L", meshes=" + std::to_wstring(gMeshLoadProfileTotals.MeshCount) +
+			L", materials=" + std::to_wstring(gMeshLoadProfileTotals.MaterialCount) +
+			L", vertices=" + std::to_wstring(gMeshLoadProfileTotals.VertexCount) +
+			L", triangles=" + std::to_wstring(gMeshLoadProfileTotals.TriangleCount) +
+			L", textureRequests=" + std::to_wstring(gMeshLoadProfileTotals.TextureRequests) +
+			L", textureLoads=" + std::to_wstring(gMeshLoadProfileTotals.TextureLoads) +
+			L", textureCacheHits=" + std::to_wstring(gMeshLoadProfileTotals.TextureCacheHits) +
+			L", textureLocalCacheHits=" + std::to_wstring(gMeshLoadProfileTotals.TextureLocalCacheHits) +
+			L", textureGlobalCacheHits=" + std::to_wstring(gMeshLoadProfileTotals.TextureGlobalCacheHits) +
+			L", textureDdsSubstitutions=" + std::to_wstring(gMeshLoadProfileTotals.TextureDdsSubstitutions) +
+			L", textureFallbacks=" + std::to_wstring(gMeshLoadProfileTotals.TextureFallbacks) +
+			L", textureBytes=" + std::to_wstring(gMeshLoadProfileTotals.TextureBytes) +
+			L", totalMs=" + FormatMilliseconds(gMeshLoadProfileTotals.TotalMs) +
+			L", openHeaderMs=" + FormatMilliseconds(gMeshLoadProfileTotals.OpenHeaderMs) +
+			L", materialReadMs=" + FormatMilliseconds(gMeshLoadProfileTotals.MaterialReadMs) +
+			L", textureLoadMs=" + FormatMilliseconds(gMeshLoadProfileTotals.TextureLoadMs) +
+			L", meshHeaderReadMs=" + FormatMilliseconds(gMeshLoadProfileTotals.MeshHeaderReadMs) +
+			L", meshDataReadMs=" + FormatMilliseconds(gMeshLoadProfileTotals.MeshDataReadMs) +
+			L", gpuBufferCreateMs=" + FormatMilliseconds(gMeshLoadProfileTotals.GpuBufferCreateMs) +
+			L", cpuCopyMs=" + FormatMilliseconds(gMeshLoadProfileTotals.CpuCopyMs) +
+			L", maxModelMs=" + FormatMilliseconds(gMeshLoadProfileTotals.MaxModelMs) +
+			L", maxModel=\"" + gMeshLoadProfileTotals.MaxModelPath +
+			L"\", maxTextureMs=" + FormatMilliseconds(gMeshLoadProfileTotals.MaxTextureMs) +
+			L", maxTexture=\"" + gMeshLoadProfileTotals.MaxTexturePath + L"\"");
+	}
+
 	struct CoronaMeshFileHeader
 	{
 		char Magic[8];
@@ -1801,6 +1875,33 @@ void Corona::TrimCpuUpdateTimingHistory()
 	}
 }
 
+void Corona::SetGpuTimingAverageFrameCount(UINT32 frameCount)
+{
+	GpuTimingAverageFrameCount = std::clamp<UINT32>(frameCount, 1u, 240u);
+
+	auto trimAndAverage = [this](std::deque<float>& history) -> float
+	{
+		while (history.size() > GpuTimingAverageFrameCount)
+			history.pop_front();
+
+		float sumMs = 0.0f;
+		for (float sampleMs : history)
+			sumMs += sampleMs;
+		return history.empty() ? 0.0f : (sumMs / static_cast<float>(history.size()));
+	};
+
+	for (UINT passIndex = 0; passIndex < GpuPassCount; ++passIndex)
+	{
+		GpuPassAverageTimeMs[passIndex] = trimAndAverage(GpuPassHistoryMs[passIndex]);
+		CpuPassAverageTimeMs[passIndex] = trimAndAverage(CpuPassHistoryMs[passIndex]);
+	}
+	for (UINT phaseIndex = 0; phaseIndex < RenderCommandPhaseCount; ++phaseIndex)
+		RenderCommandPhaseAverageTimeMs[phaseIndex] = trimAndAverage(RenderCommandPhaseHistoryMs[phaseIndex]);
+	for (UINT phaseIndex = 0; phaseIndex < SceneFlushPhaseCount; ++phaseIndex)
+		SceneFlushPhaseAverageTimeMs[phaseIndex] = trimAndAverage(SceneFlushPhaseHistoryMs[phaseIndex]);
+	TrimCpuUpdateTimingHistory();
+}
+
 #if WITH_STREAMLINE
 void Corona::InitStreamline()
 {
@@ -1809,10 +1910,22 @@ void Corona::InitStreamline()
 
 	sl::Feature features[] = { sl::kFeatureDLSS, sl::kFeatureDLSS_RR };
 	static const std::wstring streamlineLogDirectoryString = RuntimePaths::LogDirectory().wstring();
+	static const std::wstring streamlinePluginDirectoryString = (RuntimePaths::RootDirectory() / L"bin").wstring();
+	const wchar_t* streamlinePluginPaths[] = { streamlinePluginDirectoryString.c_str() };
 	std::filesystem::create_directories(std::filesystem::path(streamlineLogDirectoryString));
 	sl::Preferences pref{};
-	pref.showConsole = true;
+	pref.showConsole = false;
+	if (const auto consoleEnv = GetPlatformEnvironmentVariable(L"CORONA_STREAMLINE_CONSOLE");
+		consoleEnv && !consoleEnv->empty())
+	{
+		std::wstring value = *consoleEnv;
+		for (wchar_t& ch : value)
+			ch = static_cast<wchar_t>(towlower(ch));
+		pref.showConsole = value == L"1" || value == L"true" || value == L"yes" || value == L"on";
+	}
 	pref.logLevel = sl::LogLevel::eDefault;
+	pref.pathsToPlugins = streamlinePluginPaths;
+	pref.numPathsToPlugins = _countof(streamlinePluginPaths);
 	pref.pathToLogsAndData = streamlineLogDirectoryString.c_str();
 	pref.featuresToLoad = features;
 	pref.numFeaturesToLoad = _countof(features);
@@ -1821,7 +1934,13 @@ void Corona::InitStreamline()
 	pref.projectId = "a0f57b54-1daf-4934-90ae-c4035c19df04";
 	pref.renderAPI = sl::RenderAPI::eD3D12;
 	pref.flags = sl::PreferenceFlags::eDisableCLStateTracking | sl::PreferenceFlags::eUseFrameBasedResourceTagging;
-	bStreamlineInitialized = slInit(pref) == sl::Result::eOk;
+	const sl::Result initResult = slInit(pref);
+	bStreamlineInitialized = initResult == sl::Result::eOk;
+	AppendCpuRuntimeTrace(
+		L"[Streamline] init result=" + PlatformUtf8ToWide(sl::getResultAsStr(initResult)) +
+		L", initialized=" + std::to_wstring(bStreamlineInitialized ? 1 : 0) +
+		L", pluginPath=\"" + streamlinePluginDirectoryString + L"\"" +
+		L", console=" + std::to_wstring(pref.showConsole ? 1 : 0));
 }
 
 void Corona::ShutdownStreamline()
@@ -1829,11 +1948,65 @@ void Corona::ShutdownStreamline()
 	if (!bStreamlineInitialized)
 		return;
 
+	if (bDLSSAvailable || bDLSSRRAvailable)
+	{
+		slFreeResources(sl::kFeatureDLSS, sl::ViewportHandle(0));
+		slFreeResources(sl::kFeatureDLSS_RR, sl::ViewportHandle(0));
+	}
+	AppendCpuRuntimeTrace(L"[Streamline] shutdown begin");
 	slShutdown();
+	AppendCpuRuntimeTrace(L"[Streamline] shutdown end");
 	bStreamlineInitialized = false;
 	StreamlineFrameToken = nullptr;
 	StreamlineFrameIndex = 0;
 	bStreamlineConstantsSetThisFrame = false;
+	bDLSSAvailable = false;
+	bDLSSRRAvailable = false;
+	bDLSSRROutputValidThisFrame = false;
+	if (IsDLSSMode(AntiAliasingMode))
+		AntiAliasingMode = RenderingMode == ERenderingMode::PATHTRACING ? EAntiAliasingMode::OFF : EAntiAliasingMode::TAA;
+}
+
+void Corona::HandleStreamlineFeatureFailure(sl::Feature feature, sl::Result result, const wchar_t* operation)
+{
+	const bool bIsRR = feature == sl::kFeatureDLSS_RR;
+	const bool bIsSR = feature == sl::kFeatureDLSS;
+	if (!bIsRR && !bIsSR)
+		return;
+
+	AppendCpuRuntimeTrace(
+		L"[Streamline] disabling " +
+		std::wstring(bIsRR ? L"DLSS_RR" : L"DLSS_SR") +
+		L" after " + (operation ? operation : L"operation") +
+		L" failed result=" + PlatformUtf8ToWide(sl::getResultAsStr(result)));
+
+	if (bIsRR)
+	{
+		bDLSSRRAvailable = false;
+		bDLSSRROutputValidThisFrame = false;
+	}
+	if (bIsSR)
+	{
+		bDLSSAvailable = false;
+		bDLSSRROutputValidThisFrame = false;
+	}
+
+	if (IsDLSSMode(AntiAliasingMode))
+	{
+		const EAntiAliasingMode fallbackMode =
+			RenderingMode == ERenderingMode::PATHTRACING ? EAntiAliasingMode::OFF :
+			(bDLSSAvailable ? EAntiAliasingMode::DLSS_SR : EAntiAliasingMode::TAA);
+		if (AntiAliasingMode != fallbackMode)
+		{
+			const EAntiAliasingMode previousAAMode = AntiAliasingMode;
+			AntiAliasingMode = fallbackMode;
+			ResetAllAccumulationState(true);
+			AppendCpuRuntimeTrace(
+				L"[Streamline] AA fallback " +
+				std::wstring(GetAntiAliasingModeName(previousAAMode)) +
+				L"->" + std::wstring(GetAntiAliasingModeName(AntiAliasingMode)));
+		}
+	}
 }
 
 bool Corona::BeginStreamlineFrame()
@@ -1846,8 +2019,17 @@ bool Corona::BeginStreamlineFrame()
 
 	uint32_t frameIndex = FrameCounter;
 	StreamlineFrameToken = nullptr;
-	if (slGetNewFrameToken(StreamlineFrameToken, &frameIndex) != sl::Result::eOk || StreamlineFrameToken == nullptr)
+	const sl::Result tokenResult = slGetNewFrameToken(StreamlineFrameToken, &frameIndex);
+	if (tokenResult != sl::Result::eOk || StreamlineFrameToken == nullptr)
 	{
+		static sl::Result sLastTokenResult = sl::Result::eOk;
+		if (tokenResult != sLastTokenResult)
+		{
+			sLastTokenResult = tokenResult;
+			AppendCpuRuntimeTrace(
+				L"[Streamline] slGetNewFrameToken failed result=" +
+				PlatformUtf8ToWide(sl::getResultAsStr(tokenResult)));
+		}
 		StreamlineFrameToken = nullptr;
 		return false;
 	}
@@ -1881,8 +2063,19 @@ bool Corona::EnsureStreamlineConstants()
 		static_cast<float>(m_width) / static_cast<float>(m_height),
 		bStreamlineCameraMotionIncluded,
 		bDLSSResetNeeded);
-	if (slSetConstants(consts, *StreamlineFrameToken, vp) != sl::Result::eOk)
+	const sl::Result setConstantsResult = slSetConstants(consts, *StreamlineFrameToken, vp);
+	if (setConstantsResult != sl::Result::eOk)
+	{
+		static sl::Result sLastSetConstantsResult = sl::Result::eOk;
+		if (setConstantsResult != sLastSetConstantsResult)
+		{
+			sLastSetConstantsResult = setConstantsResult;
+			AppendCpuRuntimeTrace(
+				L"[Streamline] slSetConstants failed result=" +
+				PlatformUtf8ToWide(sl::getResultAsStr(setConstantsResult)));
+		}
 		return false;
+	}
 
 	bStreamlineConstantsSetThisFrame = true;
 	return true;
@@ -1902,7 +2095,12 @@ bool Corona::DLSSPass()
 	opts.outputHeight = m_height;
 	opts.colorBuffersHDR = sl::Boolean::eTrue;
 	opts.useAutoExposure = sl::Boolean::eFalse;
-	slDLSSSetOptions(sl::ViewportHandle(0), opts);
+	const sl::Result setOptionsResult = slDLSSSetOptions(sl::ViewportHandle(0), opts);
+	if (setOptionsResult != sl::Result::eOk)
+	{
+		HandleStreamlineFeatureFailure(sl::kFeatureDLSS, setOptionsResult, L"slDLSSSetOptions");
+		return false;
+	}
 
 	Texture* inputColor = (bDLSSRROutputValidThisFrame && DLSSRRBuffer) ? DLSSRRBuffer.get() : LightingBuffer.get();
 	Texture* outputTarget = ColorBuffers[ColorBufferWriteIndex].get();
@@ -1928,7 +2126,13 @@ bool Corona::DLSSPass()
 		motionTag,
 		outputTag,
 	};
-	slSetTagForFrame(*StreamlineFrameToken, vp, tags, _countof(tags), dx12_rhi->GetGraphicsCommandList());
+	const sl::Result setTagResult = slSetTagForFrame(*StreamlineFrameToken, vp, tags, _countof(tags), dx12_rhi->GetGraphicsCommandList());
+	if (setTagResult != sl::Result::eOk)
+	{
+		renderBackend->TransitionTexture(outputTarget, EResourceState::UnorderedAccess, EResourceState::ShaderRead);
+		HandleStreamlineFeatureFailure(sl::kFeatureDLSS, setTagResult, L"slSetTagForFrame(DLSS)");
+		return false;
+	}
 
 	const sl::BaseStructure* inputs[] = {
 		static_cast<const sl::BaseStructure*>(&vp),
@@ -1946,6 +2150,7 @@ bool Corona::DLSSPass()
 	}
 
 	bUseLightingBufferFallbackForToneMap = true;
+	HandleStreamlineFeatureFailure(sl::kFeatureDLSS, evalResult, L"slEvaluateFeature(DLSS)");
 	return false;
 }
 
@@ -1967,7 +2172,12 @@ bool Corona::DLSSRRPass()
 	opts.normalRoughnessMode = sl::DLSSDNormalRoughnessMode::eUnpacked;
 	opts.worldToCameraView = ToSLMatrix(ViewMat);
 	opts.cameraViewToWorld = ToSLMatrix(InvViewMat);
-	slDLSSDSetOptions(sl::ViewportHandle(0), opts);
+	const sl::Result setOptionsResult = slDLSSDSetOptions(sl::ViewportHandle(0), opts);
+	if (setOptionsResult != sl::Result::eOk)
+	{
+		HandleStreamlineFeatureFailure(sl::kFeatureDLSS_RR, setOptionsResult, L"slDLSSDSetOptions");
+		return false;
+	}
 
 	Texture* inputColor = IsPathTracingDLSSRREnabled() ? PathTracingAccumBuffer[PathTracingWriteIndex].get() : LightingBuffer.get();
 	Texture* outputTarget = DLSSRRBuffer.get();
@@ -2032,7 +2242,13 @@ bool Corona::DLSSRRPass()
 		tags.push_back(specularHitDistanceTag);
 	}
 	tags.push_back(outputTag);
-	slSetTagForFrame(*StreamlineFrameToken, vp, tags.data(), static_cast<uint32_t>(tags.size()), dx12_rhi->GetGraphicsCommandList());
+	const sl::Result setTagResult = slSetTagForFrame(*StreamlineFrameToken, vp, tags.data(), static_cast<uint32_t>(tags.size()), dx12_rhi->GetGraphicsCommandList());
+	if (setTagResult != sl::Result::eOk)
+	{
+		renderBackend->TransitionTexture(outputTarget, EResourceState::UnorderedAccess, EResourceState::ShaderRead);
+		HandleStreamlineFeatureFailure(sl::kFeatureDLSS_RR, setTagResult, L"slSetTagForFrame(DLSS_RR)");
+		return false;
+	}
 
 	std::vector<const sl::BaseStructure*> inputs = {
 		static_cast<const sl::BaseStructure*>(&vp),
@@ -2059,6 +2275,7 @@ bool Corona::DLSSRRPass()
 
 	bDLSSRROutputValidThisFrame = false;
 	bUseLightingBufferFallbackForToneMap = true;
+	HandleStreamlineFeatureFailure(sl::kFeatureDLSS_RR, evalResult, L"slEvaluateFeature(DLSS_RR)");
 	return false;
 }
 #endif
@@ -2211,6 +2428,38 @@ void Corona::ApplyRenderingAndAAMode(ERenderingMode requestedRenderingMode, EAnt
 		L", aa " + std::wstring(GetAntiAliasingModeName(previousAAMode)) +
 		L"->" + std::wstring(GetAntiAliasingModeName(AntiAliasingMode)) +
 		L", forceReload=" + std::to_wstring(bForceResourceReload ? 1 : 0));
+}
+
+void Corona::ApplyDiffuseGIMode(EDiffuseGIMode requestedMode)
+{
+	const int requestedIndex = std::clamp(
+		static_cast<int>(requestedMode),
+		0,
+		static_cast<int>(EDiffuseGIMode::COUNT) - 1);
+	requestedMode = static_cast<EDiffuseGIMode>(requestedIndex);
+
+	const EDiffuseGIMode previousMode = DiffuseGIMode;
+	if (previousMode == requestedMode)
+		return;
+
+	DiffuseGIMode = requestedMode;
+	if (RenderWorld.bHasFrameSourceState)
+		RenderWorld.FrameSourceState.DiffuseGIMode = DiffuseGIMode;
+	{
+		std::lock_guard<std::mutex> pendingDeltaLock(RenderFrameDeltaMutex);
+		for (RenderFrameDelta& pendingDelta : PendingRenderFrameDeltas)
+		{
+			if (!pendingDelta.bHasFrameSourceState)
+				continue;
+			pendingDelta.FrameSourceState.DiffuseGIMode = DiffuseGIMode;
+		}
+	}
+
+	ResetAllAccumulationState(false);
+	AppendCpuRuntimeTrace(
+		L"[ApplyDiffuseGIMode] diffuseGI " +
+		std::wstring(GetDiffuseGIModeNameW(previousMode)) +
+		L"->" + std::wstring(GetDiffuseGIModeNameW(DiffuseGIMode)));
 }
 
 bool Corona::RenderResolutionResourcesMatchCurrentState() const
@@ -2853,6 +3102,34 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 
 		return L"";
 	};
+	auto ParseRawValueArg = [&](const std::wstring& currentLower, const wchar_t* longName, const wchar_t* shortName, int& index) -> std::wstring
+	{
+		if (currentLower == longName || currentLower == shortName)
+		{
+			if (index + 1 < argc)
+				return argv[++index];
+			return L"";
+		}
+
+		const std::wstring longPrefix = std::wstring(longName) + L"=";
+		const std::wstring shortPrefix = std::wstring(shortName) + L"=";
+		if (currentLower.rfind(longPrefix, 0) == 0)
+			return std::wstring(argv[index]).substr(longPrefix.size());
+		if (currentLower.rfind(shortPrefix, 0) == 0)
+			return std::wstring(argv[index]).substr(shortPrefix.size());
+
+		return L"";
+	};
+	auto StripOuterQuotes = [](std::wstring value)
+	{
+		if (value.size() >= 2 &&
+			((value.front() == L'"' && value.back() == L'"') ||
+			 (value.front() == L'\'' && value.back() == L'\'')))
+		{
+			value = value.substr(1, value.size() - 2);
+		}
+		return value;
+	};
 	if (argc <= 1)
 	{
 		bCommandLineRenderBackendOverrideSet = true;
@@ -2860,7 +3137,7 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 		bCommandLineRenderModeOverrideSet = true;
 		CommandLineRenderingMode = ERenderingMode::HYBRID;
 		bCommandLineAAOverrideSet = true;
-		CommandLineSelectedAAMode = EAntiAliasingMode::DLSS_RR;
+		CommandLineSelectedAAMode = EAntiAliasingMode::TAA;
 		bCommandLineAutoDumpOverrideSet = true;
 		bCommandLineAutoDumpEnabled = false;
 		bStartupSponzaFlyMode = true;
@@ -2876,7 +3153,7 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 		// hardcoded LoadModel("Sponza.fbx") path).
 		bEnableStartupLuauScript = true;
 		StartupLuauMode = L"sponza_demo";
-		AppendStartupTrace(L"[ParseCommandLineArgs] no args: default dx12, hybrid, dlss-rr, sponza_demo, user-mode");
+		AppendStartupTrace(L"[ParseCommandLineArgs] no args: default dx12, hybrid, taa, sponza_demo, user-mode");
 	}
 
 	for (int i = 1; i < argc; ++i)
@@ -3160,6 +3437,20 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 			StartupLuauMode = L"sandbox";
 			continue;
 		}
+		if (arg == L"--editor" || arg == L"--editor-mode" || arg == L"--empty-editor")
+		{
+			bStartupSponzaFlyMode = false;
+			bEnableStartupLuauScript = true;
+			bCommandLineDungeonCharacterMode = false;
+			StartupLuauMode = L"editor";
+			bShowImgui = false;
+			if (!bCommandLineAAOverrideSet)
+			{
+				bCommandLineAAOverrideSet = true;
+				CommandLineSelectedAAMode = EAntiAliasingMode::TAA;
+			}
+			continue;
+		}
 		std::wstring startupModeValue = ParseValueArg(arg, L"--startup-mode", L"-startup-mode", i);
 		if (!startupModeValue.empty())
 		{
@@ -3183,6 +3474,19 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 				bEnableStartupLuauScript = true;
 				bCommandLineDungeonCharacterMode = false;
 				StartupLuauMode = L"sandbox";
+			}
+			else if (startupModeValue == L"editor" || startupModeValue == L"empty-editor" || startupModeValue == L"empty_editor")
+			{
+				bStartupSponzaFlyMode = false;
+				bEnableStartupLuauScript = true;
+				bCommandLineDungeonCharacterMode = false;
+				StartupLuauMode = L"editor";
+				bShowImgui = false;
+				if (!bCommandLineAAOverrideSet)
+				{
+					bCommandLineAAOverrideSet = true;
+					CommandLineSelectedAAMode = EAntiAliasingMode::TAA;
+				}
 			}
 			continue;
 		}
@@ -3490,6 +3794,38 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 				std::wstring loweredCameraPath = ToLower(rawCameraPath);
 				if (loweredCameraPath != L"latest")
 					CommandLineCameraPathFile = rawCameraPath;
+			}
+			continue;
+		}
+		std::wstring loadMapValue = ParseRawValueArg(arg, L"--load-map", L"-map", i);
+		if (loadMapValue.empty())
+			loadMapValue = ParseRawValueArg(arg, L"--map", L"-loadmap", i);
+		if (!loadMapValue.empty())
+		{
+			CommandLineLoadMapFile = StripOuterQuotes(loadMapValue);
+			bEnableStartupLuauScript = true;
+			StartupLuauMode = L"editor";
+			bStartupSponzaFlyMode = false;
+			bShowImgui = false;
+			if (!bCommandLineAAOverrideSet)
+			{
+				bCommandLineAAOverrideSet = true;
+				CommandLineSelectedAAMode = EAntiAliasingMode::TAA;
+			}
+			continue;
+		}
+		std::wstring screenshotFrameValue = ParseValueArg(arg, L"--screenshot-frame", L"-screenshot-frame", i);
+		if (screenshotFrameValue.empty())
+			screenshotFrameValue = ParseValueArg(arg, L"--capture-frame", L"-capture-frame", i);
+		if (!screenshotFrameValue.empty())
+		{
+			try
+			{
+				const unsigned long value = std::stoul(screenshotFrameValue);
+				CommandLineScreenshotFrame = static_cast<UINT32>(std::clamp<unsigned long>(value, 1ul, 100000ul));
+			}
+			catch (...)
+			{
 			}
 			continue;
 		}
@@ -3979,6 +4315,8 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 		L", platformerSpineBenchmarkCount=" + std::to_wstring(CommandLinePlatformerSpineBenchmarkCount) +
 		L", cameraPathDump=" + std::to_wstring(bCommandLineCameraPathDump ? 1 : 0) +
 		L", cameraPathDiagnostics=" + std::to_wstring(bCommandLineCameraPathDiagnostics ? 1 : 0) +
+		L", loadMap=\"" + CommandLineLoadMapFile + L"\"" +
+		L", screenshotFrame=" + std::to_wstring(CommandLineScreenshotFrame) +
 		L", ptDLSSRR=" + std::to_wstring(bEnablePathTracingDLSSRR ? 1 : 0) +
 		L", ptSPP=" + std::to_wstring(PathTracingViewParam.SamplesPerPixel) +
 		L", ptRRSpecularMV=" + std::to_wstring(bEnablePathTracingRRSpecularMotionVectors ? 1 : 0) +
@@ -4025,7 +4363,9 @@ void Corona::PromptStartupModeSelection()
 		return EAntiAliasingMode::TAA;
 	};
 
-	StartupSelectedAAMode = SelectDefaultAAMode();
+	// Keep implicit launches on TAA; DLSS SR/RR remain available through
+	// explicit command-line/env overrides and the runtime Config UI.
+	StartupSelectedAAMode = EAntiAliasingMode::TAA;
 	StartupRenderingMode = ERenderingMode::HYBRID;
 	StartupRenderBackendAPI = ERenderBackendAPI::D3D12;
 	RenderingMode = StartupRenderingMode;
@@ -6840,11 +7180,13 @@ Corona::RenderFrameSourceState Corona::CaptureRenderFrameSourceState() const
 	{
 		state.LightDir = normalizeOrFallback(directionalLight->Direction, glm::vec3(0.0f, 1.0f, 0.0f));
 		state.LightIntensity = directionalLight->bEnabled ? directionalLight->Intensity : 0.0f;
+		state.bDirectionalLightCastShadow = directionalLight->bCastShadow;
 	}
 	else
 	{
 		state.LightDir = normalizeOrFallback(LightDir, glm::vec3(0.0f, 1.0f, 0.0f));
 		state.LightIntensity = LightIntensity;
+		state.bDirectionalLightCastShadow = true;
 	}
 	state.SkyColorTop = SkyColorTop;
 	state.SkyColorBottom = SkyColorBottom;
@@ -6949,6 +7291,7 @@ void Corona::ApplyRenderFrameSourceState(const RenderFrameSourceState& state)
 		LightDir = glm::length(state.LightDir) > 0.0001f ? glm::normalize(state.LightDir) : glm::vec3(0.0f, 1.0f, 0.0f);
 		LightIntensity = state.LightIntensity;
 	}
+	RenderFrameDirectionalLightCastShadow = state.bDirectionalLightCastShadow;
 	SkyColorTop = state.SkyColorTop;
 	SkyColorBottom = state.SkyColorBottom;
 	SkyIntensity = state.SkyIntensity;
@@ -6996,6 +7339,83 @@ void Corona::ApplyRenderFrameSourceState(const RenderFrameSourceState& state)
 	PathTracingViewParam.DebugMode = state.PathTracingDebugMode;
 	if (RenderingMode != previousRenderingMode)
 		MarkRayTracingSceneDirty();
+}
+
+void Corona::SyncCurrentLightingSettingsToFrameSourceState()
+{
+	auto applyLightingState = [&](RenderFrameSourceState& state)
+	{
+		state.RayNoiseMode = RayNoiseMode;
+		state.DiffuseGIMode = DiffuseGIMode;
+		state.bEnableDiffuseGI = bEnableDiffuseGI;
+		state.bEnableRTDiffuseGISER = bEnableRTDiffuseGISER;
+		state.bEnableRTReflectionSER = bEnableRTReflectionSER;
+		state.bEnableSpecularGI = bEnableSpecularGI;
+		state.bEnableDirectDiffuse = bEnableDirectDiffuse;
+		state.bEnableDirectSpecular = bEnableDirectSpecular;
+		state.bEnableRTAO = bEnableRTAO;
+		state.bEnableSkyLighting = bEnableSkyLighting;
+		state.bEnableRayTracedSkyLighting = bEnableRayTracedSkyLighting;
+		state.RTAOIndirectStrength = RTAOIndirectStrength;
+		state.RTAOIndirectFloor = RTAOIndirectFloor;
+		state.SurfaceBounceStrength = SurfaceBounceStrength;
+		state.SurfaceBounceSaturation = SurfaceBounceSaturation;
+		state.SkyLightingStrength = SkyLightingStrength;
+		state.SkyColorTop = SkyColorTop;
+		state.SkyColorBottom = SkyColorBottom;
+		state.SkyIntensity = SkyIntensity;
+		state.bEnablePrefilteredEnvSpecular = bEnablePrefilteredEnvSpecular;
+		state.PrefilteredEnvRoughnessThreshold = PrefilteredEnvRoughnessThreshold;
+		state.PrefilteredEnvRoughnessFade = PrefilteredEnvRoughnessFade;
+		state.ShadowLightRadius = RTShadowViewParam.ShadowLightRadius;
+		state.ShadowSampleCount = RTShadowViewParam.ShadowSampleCount;
+		state.RTAORadius = RTAOViewParam.Radius;
+		state.RTAOPower = RTAOViewParam.Power;
+		state.RTAONormalBias = RTAOViewParam.NormalBias;
+		state.RTAOSampleCount = RTAOViewParam.SampleCount;
+		state.SkyLightingRayLength = RTSkyLightingViewParam.RayLength;
+		state.SkyLightingNormalBias = RTSkyLightingViewParam.NormalBias;
+		state.SkyLightingSampleCount = RTSkyLightingViewParam.SampleCount;
+		state.SkyLightingUpBias = RTSkyLightingViewParam.SkyUpBias;
+		state.SkyLightingDirectionPower = RTSkyLightingViewParam.SkyDirectionPower;
+		state.SkyLightingMinWorldY = RTSkyLightingViewParam.SkyMinWorldY;
+		state.SkyLightingMaxSampleAttempts = RTSkyLightingViewParam.SkyMaxSampleAttempts;
+		state.ScreenProbeSpacing = ScreenProbeGICB.ProbeSpacing;
+		state.ScreenProbeGatherRadius = ScreenProbeGICB.GatherRadius;
+		state.ScreenProbeRaysPerProbe = RTScreenProbeGIViewParam.RaysPerProbe;
+		state.ScreenProbeSHCoefficientCount = ScreenProbeGICB.SHCoefficientCount;
+		state.ScreenProbeRawBlend = ScreenProbeGICB.RawBlend;
+		state.ScreenProbeMinResolveWeight = ScreenProbeGICB.MinResolveWeight;
+		state.ScreenProbeDepthWeight = ScreenProbeGICB.ProbeDepthWeight;
+		state.ScreenProbeNormalWeight = ScreenProbeGICB.ProbeNormalWeight;
+		state.ScreenProbeResolveDepthWeight = ScreenProbeGICB.ResolveDepthWeight;
+		state.ScreenProbeResolveNormalWeight = ScreenProbeGICB.ResolveNormalWeight;
+		state.ScreenProbeTemporalAlpha = ScreenProbeGICB.TemporalAlpha;
+		state.ScreenProbeHistoryDepthWeight = ScreenProbeGICB.HistoryDepthWeight;
+		state.ScreenProbeHistoryNormalWeight = ScreenProbeGICB.HistoryNormalWeight;
+		state.ScreenProbeEdgeDepthWeight = ScreenProbeGICB.EdgeDepthWeight;
+		state.ScreenProbeEdgeNormalWeight = ScreenProbeGICB.EdgeNormalWeight;
+		state.ScreenProbeEdgeSampleCount = ScreenProbeGICB.EdgeSampleCount;
+		state.SpatialHashCellSize = SpatialHashGICB.CellSize;
+		state.SpatialHashTemporalAlpha = SpatialHashGICB.TemporalAlpha;
+		state.SpatialHashSmoothingStrength = SpatialHashGICB.SmoothingStrength;
+		state.SpatialHashInterpolationStrength = SpatialHashGICB.InterpolationStrength;
+		state.SpatialHashRaysPerCell = RTSpatialHashGIViewParam.RaysPerCell;
+		state.SpatialHashMaxBounces = RTSpatialHashGIViewParam.MaxBounces;
+		state.PathTracingDirectLightSampleCount = PathTracingViewParam.DirectLightSampleCount;
+	};
+
+	if (RenderWorld.bHasFrameSourceState)
+		applyLightingState(RenderWorld.FrameSourceState);
+	{
+		std::lock_guard<std::mutex> pendingDeltaLock(RenderFrameDeltaMutex);
+		for (RenderFrameDelta& pendingDelta : PendingRenderFrameDeltas)
+		{
+			if (!pendingDelta.bHasFrameSourceState)
+				continue;
+			applyLightingState(pendingDelta.FrameSourceState);
+		}
+	}
 }
 
 void Corona::CollectFrameSourceRenderSync(RenderFrameDelta& delta)
@@ -7171,6 +7591,7 @@ void Corona::ApplySceneObjectRenderSync(const RenderFrameDelta& delta)
 		RenderWorld.SceneObjects.clear();
 		bRayTracingSceneDirty = true;
 		bRayTracingTransformDirty = false;
+		bRayTracingBLASCacheResetPending = true;
 		PrevPathTracingViewMat = glm::mat4x4(0.0f);
 	}
 
@@ -7190,6 +7611,7 @@ void Corona::ApplySceneObjectRenderSync(const RenderFrameDelta& delta)
 			if (it != RenderWorld.SceneObjects.end())
 			{
 				RenderWorld.SceneObjects.erase(it);
+				bRayTracingBLASCacheResetPending = true;
 				MarkRayTracingSceneDirty();
 			}
 			continue;
@@ -7216,7 +7638,10 @@ void Corona::ApplySceneObjectRenderSync(const RenderFrameDelta& delta)
 
 		*it = std::move(object);
 		if (bRayTracingSceneRelevant)
+		{
+			bRayTracingBLASCacheResetPending = true;
 			MarkRayTracingSceneDirty();
+		}
 		else if (bRayTracingInstanceRelevant && ShouldIncludeSceneObjectInRayTracingAS(*it))
 			MarkRayTracingTransformsDirty();
 	}
@@ -7368,19 +7793,170 @@ void Corona::ApplyPendingRenderFrameDeltas()
 	}
 }
 
+void Corona::BuildPointLightRenderCandidates(std::vector<const PointLightState*>& outCandidates) const
+{
+	struct Candidate
+	{
+		const PointLightState* Light = nullptr;
+		float Score = 0.0f;
+		float DistanceSq = 0.0f;
+	};
+
+	std::vector<Candidate> candidates;
+	candidates.reserve(RenderWorld.PointLights.size());
+	for (const PointLightState& pointLight : RenderWorld.PointLights)
+	{
+		if (!pointLight.bEnabled || pointLight.Intensity <= 0.0f)
+			continue;
+
+		const float radius = std::max(pointLight.Radius, 0.01f);
+		const glm::vec3 toLight = pointLight.Position - RenderFrameCameraPosition;
+		const float distanceSq = std::max(glm::dot(toLight, toLight), 1.0f);
+		const float luma =
+			std::max(0.0f, 0.2126f * pointLight.Color.r + 0.7152f * pointLight.Color.g + 0.0722f * pointLight.Color.b) *
+			std::max(0.0f, pointLight.Intensity);
+		float score = luma * radius * radius / distanceSq;
+		if (!std::isfinite(score) || score <= 0.0f)
+			score = luma;
+		candidates.push_back({ &pointLight, score, distanceSq });
+	}
+
+	std::stable_sort(candidates.begin(), candidates.end(), [](const Candidate& a, const Candidate& b)
+	{
+		if (a.Score != b.Score)
+			return a.Score > b.Score;
+		if (a.DistanceSq != b.DistanceSq)
+			return a.DistanceSq < b.DistanceSq;
+		const UINT32 aId = a.Light ? a.Light->Id : 0;
+		const UINT32 bId = b.Light ? b.Light->Id : 0;
+		return aId < bId;
+	});
+
+	outCandidates.clear();
+	outCandidates.reserve(candidates.size());
+	for (const Candidate& candidate : candidates)
+	{
+		if (candidate.Light)
+			outCandidates.push_back(candidate.Light);
+	}
+}
+
+Corona::PointLightParam Corona::BuildPointLightParam(const PointLightState& pointLight) const
+{
+	PointLightParam param;
+	param.PositionAndRadius =
+		glm::vec4(pointLight.Position, std::max(pointLight.Radius, 0.01f));
+	param.ColorAndIntensity =
+		glm::vec4(glm::max(pointLight.Color, glm::vec3(0.0f)), std::max(pointLight.Intensity, 0.0f));
+
+	glm::vec3 direction = pointLight.Direction;
+	if (!IsFiniteVec3(direction) || glm::length(direction) <= 0.0001f)
+		direction = glm::vec3(0.0f, 1.0f, 0.0f);
+	else
+		direction = glm::normalize(direction);
+
+	const bool bSpot = pointLight.Type == CoronaECS::LightType::Spot;
+	const float innerAngle = std::clamp(pointLight.InnerConeAngle, 0.0f, glm::pi<float>() - 0.001f);
+	float outerAngle = std::clamp(pointLight.OuterConeAngle, innerAngle + 0.001f, glm::pi<float>());
+	if (!std::isfinite(outerAngle))
+		outerAngle = std::clamp(innerAngle + 0.001f, 0.001f, glm::pi<float>());
+	const float innerCos = std::cos(innerAngle);
+	const float outerCos = std::cos(outerAngle);
+	const float invConeDelta = 1.0f / std::max(innerCos - outerCos, 0.001f);
+
+	param.DirectionAndType = glm::vec4(direction, bSpot ? 1.0f : 0.0f);
+	param.SpotConeAndFlags =
+		glm::vec4(innerCos, outerCos, invConeDelta, pointLight.bCastShadow ? 1.0f : 0.0f);
+	return param;
+}
+
+void Corona::QueueEditorMapLoad(const std::wstring& name)
+{
+	if (name.empty())
+		return;
+
+	PendingEditorMapLoadName = name;
+	bEditorMapLoadQueued = true;
+	LastEditorMapLoadStatus = L"Queued map load: " + name;
+	AppendCpuRuntimeTrace(L"[EditorMapLoad] queued " + name);
+}
+
+void Corona::ProcessPendingEditorMapLoad()
+{
+	if (!bEditorMapLoadQueued || bEditorMapLoadInProgress)
+		return;
+
+	const std::wstring mapName = PendingEditorMapLoadName;
+	PendingEditorMapLoadName.clear();
+	bEditorMapLoadQueued = false;
+	bEditorMapLoadInProgress = true;
+	EditorMapLoadEntityIndex = 0;
+	EditorMapLoadEntityCount = 0;
+	LastEditorMapLoadStatus = L"Loading map: " + mapName;
+	AppendCpuRuntimeTrace(L"[EditorMapLoad] begin " + mapName);
+
+	ResetMeshLoadProfileTotals();
+	StartupLoadingProgress = 0.0f;
+	StartupLoadingStatus.clear();
+	StartupLoadingTitle = L"Loading map: " + mapName;
+	StartupLoadingTimingLastStatus.clear();
+	bStartupLoadingTimingStarted = false;
+	bStartupLoadingCompactWindow = true;
+	StartupLoadingLastDrawTime = {};
+	UpdateStartupLoadingProgress(0.02f, L"Preparing map load");
+
+	const auto loadStart = CpuClock::now();
+	std::wstring loadError;
+	const bool bLoaded = LoadMapFromFile(mapName, &loadError);
+	const double loadMs = ElapsedMilliseconds(loadStart, CpuClock::now());
+
+	if (bLoaded)
+	{
+		bPendingTemporalHistoryClear = true;
+		ResetAllAccumulationState(false);
+		UpdateStartupLoadingProgress(0.96f, L"Syncing render scene");
+		CollectRenderFrameDeltas();
+		LastEditorMapLoadStatus =
+			L"Loaded map: " + mapName + L" (" + FormatMilliseconds(loadMs) + L" ms)";
+		AppendCpuRuntimeTrace(
+			L"[EditorMapLoad] loaded " + mapName +
+			L", elapsedMs=" + FormatMilliseconds(loadMs) +
+			L", sceneObjects=" + std::to_wstring(SceneObjects.size()) +
+			L", renderWorldSceneObjects(beforeApply)=" + std::to_wstring(RenderWorld.SceneObjects.size()) +
+			L", pointLights=" + std::to_wstring(PointLights.size()) +
+			L", renderWorldPointLights(beforeApply)=" + std::to_wstring(RenderWorld.PointLights.size()));
+		UpdateStartupLoadingProgress(1.0f, L"Ready");
+	}
+	else
+	{
+		LastEditorMapLoadStatus = L"Load map failed: " + loadError;
+		AppendCpuRuntimeTrace(
+			L"[EditorMapLoad] failed " + mapName +
+			L", error=\"" + loadError +
+			L"\", elapsedMs=" + FormatMilliseconds(loadMs));
+		UpdateStartupLoadingProgress(1.0f, L"Load map failed");
+	}
+
+	bStartupLoadingScreenActive = false;
+	bStartupLoadingCompactWindow = false;
+	EditorMapLoadEntityIndex = 0;
+	EditorMapLoadEntityCount = 0;
+	bEditorMapLoadInProgress = false;
+}
+
 void Corona::ApplyRenderPointLightsToFrameParams()
 {
 	PathTracingViewParam.PointLightCount = 0;
-	for (const PointLightState& pointLight : RenderWorld.PointLights)
+	std::vector<const PointLightState*> pointLightCandidates;
+	BuildPointLightRenderCandidates(pointLightCandidates);
+	for (const PointLightState* pointLightPtr : pointLightCandidates)
 	{
-		if (!pointLight.bEnabled || PathTracingViewParam.PointLightCount >= MaxPointLights)
+		if (!pointLightPtr || PathTracingViewParam.PointLightCount >= MaxPointLights)
 			continue;
 
+		const PointLightState& pointLight = *pointLightPtr;
 		const UINT32 pointLightIndex = PathTracingViewParam.PointLightCount++;
-		PathTracingViewParam.PointLights[pointLightIndex].PositionAndRadius =
-			glm::vec4(pointLight.Position, std::max(pointLight.Radius, 0.01f));
-		PathTracingViewParam.PointLights[pointLightIndex].ColorAndIntensity =
-			glm::vec4(glm::max(pointLight.Color, glm::vec3(0.0f)), std::max(pointLight.Intensity, 0.0f));
+		PathTracingViewParam.PointLights[pointLightIndex] = BuildPointLightParam(pointLight);
 	}
 }
 
@@ -7426,6 +8002,64 @@ void Corona::DrawStartupLoadingScreen()
 		const float progress = std::clamp(StartupLoadingProgress, 0.0f, 1.0f);
 
 		drawList->AddRectFilled(ImVec2(0.0f, 0.0f), displaySize, IM_COL32(6, 9, 13, 255));
+
+		if (bStartupLoadingCompactWindow)
+		{
+			const std::string title = WideToUtf8(StartupLoadingTitle.empty() ? L"Loading" : StartupLoadingTitle);
+			const std::string status = WideToUtf8(StartupLoadingStatus.empty() ? L"Loading map" : StartupLoadingStatus);
+			const std::string percentText = std::to_string(static_cast<int>(std::round(progress * 100.0f))) + "%";
+			std::string statsText;
+			if (gMeshLoadProfileTotals.ModelCount > 0)
+			{
+				statsText =
+					"Models " + std::to_string(gMeshLoadProfileTotals.ModelCount) +
+					" | Meshes " + std::to_string(gMeshLoadProfileTotals.MeshCount) +
+					" | Textures " + std::to_string(gMeshLoadProfileTotals.TextureLoads) +
+					"/" + std::to_string(gMeshLoadProfileTotals.TextureRequests);
+			}
+
+			const float panelWidth = std::max(260.0f, std::min(width - 48.0f, 560.0f));
+			const float panelHeight = statsText.empty() ? 142.0f : 166.0f;
+			ImGui::SetNextWindowPos(ImVec2(width * 0.5f, height * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+			ImGui::SetNextWindowSize(ImVec2(panelWidth, panelHeight), ImGuiCond_Always);
+			const ImGuiWindowFlags flags =
+				ImGuiWindowFlags_NoDecoration |
+				ImGuiWindowFlags_NoMove |
+				ImGuiWindowFlags_NoResize |
+				ImGuiWindowFlags_NoSavedSettings |
+				ImGuiWindowFlags_NoNav;
+			ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 8.0f);
+			ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(18.0f, 16.0f));
+			ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.045f, 0.060f, 0.075f, 0.96f));
+			ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.28f, 0.38f, 0.45f, 0.95f));
+			ImGui::PushStyleColor(ImGuiCol_PlotHistogram, ImVec4(0.28f, 0.77f, 1.0f, 1.0f));
+			if (ImGui::Begin("##EditorMapLoadingProgress", nullptr, flags))
+			{
+				ImGui::TextUnformatted(title.c_str());
+				ImGui::Spacing();
+				ImGui::ProgressBar(progress, ImVec2(-1.0f, 10.0f), percentText.c_str());
+				ImGui::Spacing();
+				ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + panelWidth - 36.0f);
+				ImGui::TextWrapped("%s", status.c_str());
+				ImGui::PopTextWrapPos();
+				if (!statsText.empty())
+				{
+					ImGui::Spacing();
+					ImGui::TextDisabled("%s", statsText.c_str());
+				}
+			}
+			ImGui::End();
+			ImGui::PopStyleColor(3);
+			ImGui::PopStyleVar(2);
+
+			ImGui::Render();
+			renderBackend->RenderImGuiDrawData(ImGui::GetDrawData());
+			renderBackend->FinalizeWindowRenderTarget(backbuffer);
+			renderBackend->ExecuteCurrentCommandList();
+			renderBackend->EndFrame();
+			return;
+		}
+
 		drawList->AddCircle(center, 58.0f, IM_COL32(25, 53, 78, 210), 96, 13.0f);
 		drawList->AddCircle(center, 49.0f, IM_COL32(79, 197, 255, 245), 96, 4.0f);
 		drawList->PathArcTo(center, 38.0f, 0.15f, 4.95f, 72);
@@ -7499,14 +8133,32 @@ void Corona::UpdateStartupLoadingProgress(float progress, const std::wstring& st
 	bStartupLoadingScreenActive = true;
 	StartupLoadingProgress = std::clamp(progress, StartupLoadingProgress, 1.0f);
 	StartupLoadingStatus = status;
-	PumpStartupWindowMessages();
-	DrawStartupLoadingScreen();
+	if (bStartupLoadingCompactWindow)
+	{
+		const bool bNeverDrawn = StartupLoadingLastDrawTime.time_since_epoch().count() == 0;
+		const bool bProgressJumped = (StartupLoadingProgress - previousProgress) >= 0.015f;
+		const bool bDrawIntervalElapsed =
+			!bNeverDrawn &&
+			ElapsedMilliseconds(StartupLoadingLastDrawTime, now) >= 150.0;
+		const bool bForceDraw = status == L"Ready" || status == L"Load map failed";
+		if (bNeverDrawn || bProgressJumped || bDrawIntervalElapsed || bForceDraw)
+		{
+			DrawStartupLoadingScreen();
+			StartupLoadingLastDrawTime = CpuClock::now();
+		}
+	}
+	else
+	{
+		PumpStartupWindowMessages();
+		DrawStartupLoadingScreen();
+	}
 
 	if (status == L"Ready")
 	{
 		AppendCpuRuntimeTrace(
 			L"[StartupTiming] complete totalMs=" +
 			FormatMilliseconds(ElapsedMilliseconds(StartupLoadingTimingStart, CpuClock::now())));
+		AppendMeshLoadProfileSummary(L"ready");
 	}
 }
 
@@ -7515,6 +8167,7 @@ void Corona::OnInit()
 	//_CrtSetBreakAlloc(4207117);
 
 	InitializePlatformRuntime();
+	ResetMeshLoadProfileTotals();
 	AppendCpuRuntimeTrace(L"[OnInit] begin");
 	UpdateStartupLoadingProgress(0.02f, L"Starting Corona");
 
@@ -7560,6 +8213,7 @@ void Corona::OnInit()
 			bCommandLineDungeonCharacterMode = false;
 		}
 		if (StartupLuauMode != L"dungeon" && StartupLuauMode != L"sandbox" &&
+			StartupLuauMode != L"editor" &&
 			StartupLuauMode != L"sponza" && StartupLuauMode != L"sponza_demo" &&
 			StartupLuauMode != L"spine_benchmark" && StartupLuauMode != L"grass_demo" &&
 			StartupLuauMode != L"terrain_demo" && StartupLuauMode != L"particle_demo")
@@ -7718,6 +8372,49 @@ void Corona::OnInit()
 	UpdateStartupLoadingProgress(0.95f, L"Running startup scripts");
 	RunStartupLuauScript();
 	AppendCpuRuntimeTrace(L"[OnInit] after RunStartupLuauScript");
+	auto ClearStartupSceneObjectSync = [&]()
+	{
+		bSceneObjectFullSyncPending = false;
+		DirtySceneObjectHandles.clear();
+		RemovedSceneObjectHandles.clear();
+		bRayTracingBLASCacheResetPending = false;
+		AppendCpuRuntimeTrace(L"[OnInit] consumed startup scene-object sync during InitRaytracingData");
+	};
+	if (CommandLineLoadMapFile.empty() &&
+		bEnableStartupLuauScript &&
+		StartupLuauMode == L"editor")
+	{
+		std::wstring loadMapError;
+		const std::wstring editorEmptyMap = L"editor_empty";
+		const bool bLoadedEditorEmptyMap = LoadMapFromFile(editorEmptyMap, &loadMapError);
+		AppendCpuRuntimeTrace(
+			L"[OnInit] editor default map loaded=" + std::to_wstring(bLoadedEditorEmptyMap ? 1 : 0) +
+			L", path=\"" + editorEmptyMap + L"\"" +
+			(loadMapError.empty() ? std::wstring() : (L", error=\"" + loadMapError + L"\"")));
+		if (bLoadedEditorEmptyMap)
+		{
+			bPendingTemporalHistoryClear = true;
+			ResetAllAccumulationState(false);
+			InitRaytracingData();
+			ClearStartupSceneObjectSync();
+		}
+	}
+	if (!CommandLineLoadMapFile.empty())
+	{
+		std::wstring loadMapError;
+		const bool bLoadedCommandLineMap = LoadMapFromFile(CommandLineLoadMapFile, &loadMapError);
+		AppendCpuRuntimeTrace(
+			L"[OnInit] command line load-map loaded=" + std::to_wstring(bLoadedCommandLineMap ? 1 : 0) +
+			L", path=\"" + CommandLineLoadMapFile + L"\"" +
+			(loadMapError.empty() ? std::wstring() : (L", error=\"" + loadMapError + L"\"")));
+		if (bLoadedCommandLineMap)
+		{
+			bPendingTemporalHistoryClear = true;
+			ResetAllAccumulationState(false);
+			InitRaytracingData();
+			ClearStartupSceneObjectSync();
+		}
+	}
 	bPendingTemporalHistoryClear = true;
 	UpdateStartupLoadingProgress(0.98f, L"Preparing first frame");
 	InitializeAutoAADump();
@@ -9922,11 +10619,14 @@ void Corona::LoadAssets()
 	if (bVulkanHybridStartup)
 		AppendCpuRuntimeTrace(L"[LoadAssets] after default textures");
 
+	const bool bCommandLineMapStartup = !CommandLineLoadMapFile.empty();
 	const bool bGameplayStartupMode =
 		bEnableStartupLuauScript &&
 		(StartupLuauMode.empty() ||
 		 StartupLuauMode == L"platformer" ||
 		 StartupLuauMode == L"dungeon" ||
+		 StartupLuauMode == L"sandbox" ||
+		 StartupLuauMode == L"editor" ||
 		 StartupLuauMode == L"spine_benchmark" ||
 		 StartupLuauMode == L"grass_demo" ||
 		 StartupLuauMode == L"terrain_demo" ||
@@ -9934,7 +10634,7 @@ void Corona::LoadAssets()
 		 StartupLuauMode == L"sponza_demo" ||
 		 bCommandLineDungeonCharacterMode);
 
-	if (!bMobileDungeonOnlyStartup && !bGameplayStartupMode && !bCommandLineSkeletalBenchMode)
+	if (!bMobileDungeonOnlyStartup && !bGameplayStartupMode && !bCommandLineSkeletalBenchMode && !bCommandLineMapStartup)
 	{
 		UpdateStartupLoadingProgress(0.72f, L"Loading Sponza scene");
 		if (!Sponza) Sponza = LoadModel(WideToUtf8(GetAssetFullPath(L"assets\\Sponza\\Sponza.fbx")));
@@ -9957,7 +10657,7 @@ void Corona::LoadAssets()
 		AppendCpuRuntimeTrace(L"[LoadAssets] startup gameplay mode: skipped Sponza load");
 	}
 
-	const bool bLoadStandaloneDemoObjects = !bMobileDungeonOnlyStartup && !bEnableStartupLuauScript && !bStartupSponzaFlyMode;
+	const bool bLoadStandaloneDemoObjects = !bMobileDungeonOnlyStartup && !bEnableStartupLuauScript && !bStartupSponzaFlyMode && !bCommandLineMapStartup;
 	if (bLoadStandaloneDemoObjects && !Buddha)
 	{
 		Buddha = LoadModel(WideToUtf8(GetAssetFullPath(L"assets\\buddha\\buddha.obj")));
@@ -10091,11 +10791,26 @@ void Corona::LoadAssets()
 shared_ptr<Scene> Corona::LoadBinaryMeshModel(const std::wstring& binaryFileName, const std::wstring& sourceFileName)
 {
 	if (bStartupLoadingScreenActive)
+	{
+		float loadingProgress = std::max(StartupLoadingProgress, 0.72f);
+		std::wstring loadingStatus = L"Loading mesh cache: " + GetFileName(binaryFileName.c_str());
+		if (bEditorMapLoadInProgress && EditorMapLoadEntityCount > 0)
+		{
+			const float entityFraction =
+				static_cast<float>(std::min(EditorMapLoadEntityIndex, EditorMapLoadEntityCount)) /
+				static_cast<float>(std::max(EditorMapLoadEntityCount, 1u));
+			loadingProgress = std::max(StartupLoadingProgress, 0.06f + 0.86f * entityFraction);
+			loadingStatus +=
+				L" (" + std::to_wstring(EditorMapLoadEntityIndex) +
+				L"/" + std::to_wstring(EditorMapLoadEntityCount) + L")";
+		}
 		UpdateStartupLoadingProgress(
-			std::max(StartupLoadingProgress, 0.72f),
-			L"Loading mesh cache: " + GetFileName(binaryFileName.c_str()));
+			loadingProgress,
+			loadingStatus);
+	}
 
 	const auto loadStart = CpuClock::now();
+	const auto openHeaderStart = CpuClock::now();
 	std::ifstream file(std::filesystem::path(binaryFileName), std::ios::binary);
 	if (!file)
 	{
@@ -10114,33 +10829,124 @@ shared_ptr<Scene> Corona::LoadBinaryMeshModel(const std::wstring& binaryFileName
 		AppendCpuRuntimeTrace(L"[LoadBinaryMeshModel] invalid header: " + binaryFileName);
 		return nullptr;
 	}
+	const double openHeaderMs = ElapsedMilliseconds(openHeaderStart, CpuClock::now());
+
+	double materialReadMs = 0.0;
+	double textureLoadMs = 0.0;
+	double meshHeaderReadMs = 0.0;
+	double meshDataReadMs = 0.0;
+	double gpuBufferCreateMs = 0.0;
+	double cpuCopyMs = 0.0;
+	double maxTextureLoadMs = 0.0;
+	uint64_t textureBytes = 0;
+	uint32_t textureRequests = 0;
+	uint32_t textureLoads = 0;
+	uint32_t textureCacheHits = 0;
+	uint32_t textureLocalCacheHits = 0;
+	uint32_t textureGlobalCacheHits = 0;
+	uint32_t textureDdsSubstitutions = 0;
+	uint32_t textureFallbacks = 0;
+	std::wstring maxTexturePath;
 
 	const std::wstring textureDir = GetDirectoryFromFilePath(sourceFileName.empty() ? binaryFileName.c_str() : sourceFileName.c_str());
 	std::map<std::wstring, shared_ptr<Texture>> textureCache;
-	auto loadTextureOrDefault = [&](const std::string& storedPath, bool nonSRGB, const shared_ptr<Texture>& fallback) -> shared_ptr<Texture>
+	auto loadTextureOrDefault = [&](const wchar_t* slotName, const std::string& storedPath, bool nonSRGB, const shared_ptr<Texture>& fallback) -> shared_ptr<Texture>
 	{
 		if (storedPath.empty())
 			return fallback;
 
+		++textureRequests;
 		std::wstring textureName = GetFileName(Utf8ToWide(storedPath).c_str());
 		if (textureName.empty())
+		{
+			++textureFallbacks;
 			return fallback;
+		}
 
 		try
 		{
-			const std::wstring texturePath = textureDir + textureName;
-			const std::wstring textureCacheKey = (nonSRGB ? L"linear|" : L"srgb|") + texturePath;
+			std::wstring texturePath = textureDir + textureName;
+			const std::wstring requestedTexturePath = texturePath;
+			const std::wstring requestedExtension = GetFileExtension(texturePath.c_str());
+			if (requestedExtension != L"dds" && requestedExtension != L"DDS")
+			{
+				std::filesystem::path ddsPath(texturePath);
+				ddsPath.replace_extension(L".dds");
+				std::error_code ddsExistsError;
+				if (std::filesystem::exists(ddsPath, ddsExistsError))
+				{
+					texturePath = ddsPath.wstring();
+					++textureDdsSubstitutions;
+				}
+			}
+			const std::wstring textureCacheKey =
+				std::to_wstring(reinterpret_cast<uintptr_t>(renderBackend.get())) +
+				(nonSRGB ? L"|linear|" : L"|srgb|") +
+				texturePath;
 			auto cachedTexture = textureCache.find(textureCacheKey);
 			if (cachedTexture != textureCache.end())
+			{
+				++textureCacheHits;
+				++textureLocalCacheHits;
 				return cachedTexture->second ? cachedTexture->second : fallback;
+			}
 
+			{
+				std::lock_guard<std::mutex> cacheLock(gMeshTextureCacheMutex);
+				auto globalCachedTexture = gMeshTextureCache.find(textureCacheKey);
+				if (globalCachedTexture != gMeshTextureCache.end())
+				{
+					shared_ptr<Texture> texture = globalCachedTexture->second.lock();
+					if (texture)
+					{
+						textureCache[textureCacheKey] = texture;
+						++textureCacheHits;
+						++textureGlobalCacheHits;
+						return texture;
+					}
+					gMeshTextureCache.erase(globalCachedTexture);
+				}
+			}
+
+			std::error_code textureSizeError;
+			const uint64_t fileSize = std::filesystem::exists(texturePath, textureSizeError) ?
+				static_cast<uint64_t>(std::filesystem::file_size(texturePath, textureSizeError)) : 0ull;
+			const auto textureLoadStart = CpuClock::now();
 			shared_ptr<Texture> texture = renderBackend->CreateTextureFromFile(texturePath, nonSRGB);
+			const double elapsedTextureMs = ElapsedMilliseconds(textureLoadStart, CpuClock::now());
+			textureLoadMs += elapsedTextureMs;
+			++textureLoads;
+			textureBytes += fileSize;
+			if (elapsedTextureMs > maxTextureLoadMs)
+			{
+				maxTextureLoadMs = elapsedTextureMs;
+				maxTexturePath = texturePath;
+			}
 			if (texture)
+			{
 				textureCache[textureCacheKey] = texture;
+				std::lock_guard<std::mutex> cacheLock(gMeshTextureCacheMutex);
+				gMeshTextureCache[textureCacheKey] = texture;
+			}
+			else
+				++textureFallbacks;
+
+			if (elapsedTextureMs >= 250.0)
+			{
+				AppendCpuRuntimeTrace(
+					L"[StartupProfile][MeshTextureSlow] mesh=\"" + binaryFileName +
+					L"\", slot=\"" + std::wstring(slotName ? slotName : L"unknown") +
+					L"\", texture=\"" + texturePath +
+					(requestedTexturePath == texturePath ? std::wstring() : (L"\", requestedTexture=\"" + requestedTexturePath)) +
+					L"\", bytes=" + std::to_wstring(fileSize) +
+					L", nonSRGB=" + std::to_wstring(nonSRGB ? 1 : 0) +
+					L", elapsedMs=" + FormatMilliseconds(elapsedTextureMs));
+			}
 			return texture ? texture : fallback;
 		}
 		catch (const std::exception& e)
 		{
+			++textureFallbacks;
 			AppendCpuRuntimeTrace(L"[LoadBinaryMeshModel] texture fallback: " + Utf8ToWide(storedPath) + L" error=" + AnsiToWString(e.what()));
 			return fallback;
 		}
@@ -10155,6 +10961,7 @@ shared_ptr<Scene> Corona::LoadBinaryMeshModel(const std::wstring& binaryFileName
 	for (uint32_t materialIndex = 0; materialIndex < header.MaterialCount; ++materialIndex)
 	{
 		CoronaMeshDiskMaterial diskMaterial = {};
+		const auto materialReadStart = CpuClock::now();
 		if (!ReadBinaryValue(file, diskMaterial.Flags) ||
 			!ReadBinaryString(file, diskMaterial.Diffuse) ||
 			!ReadBinaryString(file, diskMaterial.Normal) ||
@@ -10164,13 +10971,14 @@ shared_ptr<Scene> Corona::LoadBinaryMeshModel(const std::wstring& binaryFileName
 			AppendCpuRuntimeTrace(L"[LoadBinaryMeshModel] material read failed: " + binaryFileName);
 			return nullptr;
 		}
+		materialReadMs += ElapsedMilliseconds(materialReadStart, CpuClock::now());
 
 		auto material = std::make_shared<Material>();
 		material->bHasAlpha = (diskMaterial.Flags & kCoronaMeshMaterialHasAlpha) != 0;
-		material->Diffuse = loadTextureOrDefault(diskMaterial.Diffuse, false, DefaultWhiteTex);
-		material->Normal = loadTextureOrDefault(diskMaterial.Normal, true, DefaultNormalTex);
-		material->Roughness = loadTextureOrDefault(diskMaterial.Roughness, true, DefaultRougnessTex);
-		material->Metallic = loadTextureOrDefault(diskMaterial.Metallic, true, DefaultBlackTex);
+		material->Diffuse = loadTextureOrDefault(L"diffuse", diskMaterial.Diffuse, false, DefaultWhiteTex);
+		material->Normal = loadTextureOrDefault(L"normal", diskMaterial.Normal, true, DefaultNormalTex);
+		material->Roughness = loadTextureOrDefault(L"roughness", diskMaterial.Roughness, true, DefaultRougnessTex);
+		material->Metallic = loadTextureOrDefault(L"metallic", diskMaterial.Metallic, true, DefaultBlackTex);
 		if (!material->Diffuse) material->Diffuse = DefaultWhiteTex;
 		if (!material->Normal) material->Normal = DefaultNormalTex;
 		if (!material->Roughness) material->Roughness = DefaultRougnessTex;
@@ -10197,6 +11005,7 @@ shared_ptr<Scene> Corona::LoadBinaryMeshModel(const std::wstring& binaryFileName
 		uint32_t vertexCount = 0;
 		uint32_t indexCount = 0;
 		uint32_t reserved = 0;
+		const auto meshHeaderStart = CpuClock::now();
 		if (!ReadBinaryValue(file, materialIndex) ||
 			!ReadBinaryValue(file, vertexCount) ||
 			!ReadBinaryValue(file, indexCount) ||
@@ -10208,15 +11017,18 @@ shared_ptr<Scene> Corona::LoadBinaryMeshModel(const std::wstring& binaryFileName
 			AppendCpuRuntimeTrace(L"[LoadBinaryMeshModel] mesh header read failed: " + binaryFileName);
 			return nullptr;
 		}
+		meshHeaderReadMs += ElapsedMilliseconds(meshHeaderStart, CpuClock::now());
 
 		std::vector<CoronaMeshDiskVertex> vertices(vertexCount);
 		std::vector<UINT32> indices(indexCount);
+		const auto meshDataReadStart = CpuClock::now();
 		if (!ReadBinaryBytes(file, vertices.data(), vertices.size() * sizeof(CoronaMeshDiskVertex)) ||
 			!ReadBinaryBytes(file, indices.data(), indices.size() * sizeof(UINT32)))
 		{
 			AppendCpuRuntimeTrace(L"[LoadBinaryMeshModel] mesh data read failed: " + binaryFileName);
 			return nullptr;
 		}
+		meshDataReadMs += ElapsedMilliseconds(meshDataReadStart, CpuClock::now());
 
 		auto mesh = std::make_shared<Mesh>(renderBackend.get());
 		mesh->transform = glm::mat4x4(1.0f);
@@ -10224,12 +11036,16 @@ shared_ptr<Scene> Corona::LoadBinaryMeshModel(const std::wstring& binaryFileName
 		mesh->NumIndices = indexCount;
 		mesh->VertexStride = sizeof(CoronaMeshDiskVertex);
 		mesh->IndexFormat = EIndexFormat::U32;
+		const auto gpuBufferCreateStart = CpuClock::now();
 		mesh->Vb = renderBackend->CreateVertexBuffer(static_cast<UINT>(vertices.size() * sizeof(CoronaMeshDiskVertex)), sizeof(CoronaMeshDiskVertex), vertices.data());
 		mesh->Ib = renderBackend->CreateIndexBuffer(mesh->IndexFormat, static_cast<UINT>(indices.size() * sizeof(UINT32)), indices.data());
+		gpuBufferCreateMs += ElapsedMilliseconds(gpuBufferCreateStart, CpuClock::now());
+		const auto cpuCopyStart = CpuClock::now();
 		mesh->CpuPositions.reserve(vertices.size());
 		for (const CoronaMeshDiskVertex& vertex : vertices)
 			mesh->CpuPositions.push_back(vertex.Position);
 		mesh->CpuIndices = indices;
+		cpuCopyMs += ElapsedMilliseconds(cpuCopyStart, CpuClock::now());
 
 		const uint32_t safeMaterialIndex = materialIndex < scene->Materials.size() ? materialIndex : 0;
 		Mesh::DrawCall dc = {};
@@ -10247,12 +11063,65 @@ shared_ptr<Scene> Corona::LoadBinaryMeshModel(const std::wstring& binaryFileName
 		totalIndices += indexCount;
 	}
 
+	const double totalMs = ElapsedMilliseconds(loadStart, CpuClock::now());
+	gMeshLoadProfileTotals.ModelCount += 1;
+	gMeshLoadProfileTotals.MeshCount += header.MeshCount;
+	gMeshLoadProfileTotals.MaterialCount += header.MaterialCount;
+	gMeshLoadProfileTotals.VertexCount += totalVertices;
+	gMeshLoadProfileTotals.TriangleCount += totalIndices / 3;
+	gMeshLoadProfileTotals.TextureRequests += textureRequests;
+	gMeshLoadProfileTotals.TextureLoads += textureLoads;
+	gMeshLoadProfileTotals.TextureCacheHits += textureCacheHits;
+	gMeshLoadProfileTotals.TextureLocalCacheHits += textureLocalCacheHits;
+	gMeshLoadProfileTotals.TextureGlobalCacheHits += textureGlobalCacheHits;
+	gMeshLoadProfileTotals.TextureDdsSubstitutions += textureDdsSubstitutions;
+	gMeshLoadProfileTotals.TextureFallbacks += textureFallbacks;
+	gMeshLoadProfileTotals.TextureBytes += textureBytes;
+	gMeshLoadProfileTotals.TotalMs += totalMs;
+	gMeshLoadProfileTotals.OpenHeaderMs += openHeaderMs;
+	gMeshLoadProfileTotals.MaterialReadMs += materialReadMs;
+	gMeshLoadProfileTotals.TextureLoadMs += textureLoadMs;
+	gMeshLoadProfileTotals.MeshHeaderReadMs += meshHeaderReadMs;
+	gMeshLoadProfileTotals.MeshDataReadMs += meshDataReadMs;
+	gMeshLoadProfileTotals.GpuBufferCreateMs += gpuBufferCreateMs;
+	gMeshLoadProfileTotals.CpuCopyMs += cpuCopyMs;
+	if (totalMs > gMeshLoadProfileTotals.MaxModelMs)
+	{
+		gMeshLoadProfileTotals.MaxModelMs = totalMs;
+		gMeshLoadProfileTotals.MaxModelPath = binaryFileName;
+	}
+	if (maxTextureLoadMs > gMeshLoadProfileTotals.MaxTextureMs)
+	{
+		gMeshLoadProfileTotals.MaxTextureMs = maxTextureLoadMs;
+		gMeshLoadProfileTotals.MaxTexturePath = maxTexturePath;
+	}
+
 	AppendCpuRuntimeTrace(
 		L"[LoadBinaryMeshModel] loaded: " + binaryFileName +
 		L", meshes=" + std::to_wstring(header.MeshCount) +
 		L", vertices=" + std::to_wstring(totalVertices) +
 		L", triangles=" + std::to_wstring(totalIndices / 3) +
-		L", elapsedMs=" + std::to_wstring(ElapsedMilliseconds(loadStart, CpuClock::now())));
+		L", textureRequests=" + std::to_wstring(textureRequests) +
+		L", textureLoads=" + std::to_wstring(textureLoads) +
+		L", textureCacheHits=" + std::to_wstring(textureCacheHits) +
+		L", textureLocalCacheHits=" + std::to_wstring(textureLocalCacheHits) +
+		L", textureGlobalCacheHits=" + std::to_wstring(textureGlobalCacheHits) +
+		L", textureDdsSubstitutions=" + std::to_wstring(textureDdsSubstitutions) +
+		L", textureFallbacks=" + std::to_wstring(textureFallbacks) +
+		L", textureBytes=" + std::to_wstring(textureBytes) +
+		L", elapsedMs=" + FormatMilliseconds(totalMs) +
+		L", openHeaderMs=" + FormatMilliseconds(openHeaderMs) +
+		L", materialReadMs=" + FormatMilliseconds(materialReadMs) +
+		L", textureLoadMs=" + FormatMilliseconds(textureLoadMs) +
+		L", meshHeaderReadMs=" + FormatMilliseconds(meshHeaderReadMs) +
+		L", meshDataReadMs=" + FormatMilliseconds(meshDataReadMs) +
+		L", gpuBufferCreateMs=" + FormatMilliseconds(gpuBufferCreateMs) +
+		L", cpuCopyMs=" + FormatMilliseconds(cpuCopyMs) +
+		L", maxTextureMs=" + FormatMilliseconds(maxTextureLoadMs) +
+		L", maxTexture=\"" + maxTexturePath + L"\"");
+
+	if ((gMeshLoadProfileTotals.ModelCount % 25) == 0)
+		AppendMeshLoadProfileSummary(L"periodic");
 
 	scene->SourceFilePath = sourceFileName;
 	return scene;
@@ -10315,9 +11184,23 @@ shared_ptr<Scene> Corona::LoadModel(string fileName)
 	std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> converter;
 	wstring wide = converter.from_bytes(fileName);
 	if (bStartupLoadingScreenActive)
+	{
+		float loadingProgress = std::max(StartupLoadingProgress, 0.72f);
+		std::wstring loadingStatus = L"Loading model: " + GetFileName(wide.c_str());
+		if (bEditorMapLoadInProgress && EditorMapLoadEntityCount > 0)
+		{
+			const float entityFraction =
+				static_cast<float>(std::min(EditorMapLoadEntityIndex, EditorMapLoadEntityCount)) /
+				static_cast<float>(std::max(EditorMapLoadEntityCount, 1u));
+			loadingProgress = std::max(StartupLoadingProgress, 0.06f + 0.86f * entityFraction);
+			loadingStatus +=
+				L" (" + std::to_wstring(EditorMapLoadEntityIndex) +
+				L"/" + std::to_wstring(EditorMapLoadEntityCount) + L")";
+		}
 		UpdateStartupLoadingProgress(
-			std::max(StartupLoadingProgress, 0.72f),
-			L"Loading model: " + GetFileName(wide.c_str()));
+			loadingProgress,
+			loadingStatus);
+	}
 	const std::filesystem::path binaryMeshPath = GetCoronaMeshCachePath(wide);
 	if (IsCoronaMeshCacheUsable(binaryMeshPath, std::filesystem::path(wide)))
 	{
@@ -10997,6 +11880,42 @@ void Corona::DrawMobilePerformanceOverlay()
 #endif
 }
 
+void Corona::DrawRuntimeFrameOverlay()
+{
+	ImGuiIO& io = ImGui::GetIO();
+	const ImVec2 displaySize = io.DisplaySize;
+	if (displaySize.x <= 1.0f || displaySize.y <= 1.0f)
+		return;
+
+	ImDrawList* drawList = ImGui::GetForegroundDrawList();
+	char fpsText[64];
+	std::snprintf(fpsText, sizeof(fpsText), "FPS : %u fps", m_timer.GetFramesPerSecond());
+	const ImVec2 fpsTextPos(10.0f, 8.0f);
+	drawList->AddText(ImVec2(fpsTextPos.x + 1.0f, fpsTextPos.y + 1.0f), IM_COL32(0, 0, 0, 180), fpsText);
+	drawList->AddText(fpsTextPos, IM_COL32(255, 255, 255, 235), fpsText);
+
+	if (!bShowFrameTimingOverlay)
+		return;
+
+	RebuildFrameTimingOverlayTextIfStale();
+	if (CachedFrameTimingOverlayText.empty())
+		return;
+
+	const ImVec2 timingTextPos(10.0f, 30.0f);
+	const char* timingText = CachedFrameTimingOverlayText.c_str();
+	const char* timingTextEnd = timingText + CachedFrameTimingOverlayText.size();
+	const ImVec2 textSize = ImGui::CalcTextSize(timingText, timingTextEnd, false);
+	const float padding = 8.0f;
+	const ImVec2 panelMin(timingTextPos.x - padding, timingTextPos.y - padding);
+	const ImVec2 panelMax(
+		std::min(displaySize.x - 8.0f, timingTextPos.x + textSize.x + padding),
+		std::min(displaySize.y - 8.0f, timingTextPos.y + textSize.y + padding));
+	drawList->AddRectFilled(panelMin, panelMax, IM_COL32(5, 7, 9, 178), 4.0f);
+	drawList->AddRect(panelMin, panelMax, IM_COL32(210, 235, 245, 70), 4.0f, 0, 1.0f);
+	drawList->AddText(ImVec2(timingTextPos.x + 1.0f, timingTextPos.y + 1.0f), IM_COL32(0, 0, 0, 180), timingText, timingTextEnd);
+	drawList->AddText(timingTextPos, IM_COL32(190, 235, 255, 235), timingText, timingTextEnd);
+}
+
 void Corona::InitBlueNoiseTexture()
 {
 	const std::filesystem::path path = GetAssetFullPath(L"assets\\bluenoise\\64_64_64\\HDR_RGBA.raw");
@@ -11223,6 +12142,8 @@ void Corona::OnUpdate()
 	const bool bCameraPathDrivesCamera = bCameraPathPlaying || bCameraPathDumping;
 	if (!bScriptCameraControlEnabled && !bCameraPathDrivesCamera)
 	{
+		if (IsEditorStartupMode())
+			m_camera.SetMoveSpeed(EditorCameraMoveSpeed);
 		m_camera.SetTurnSpeed(m_turnSpeed);
 		UpdateMobileTouchCameraInput(elapsedSeconds);
 		m_camera.Update(elapsedSeconds);
@@ -11466,6 +12387,15 @@ void Corona::BuildRenderFrameDerivedState(const RenderFrameSourceState* sourceSt
 	RenderFrameShaderTime = realTime * 0.01f;
 	RenderFrameWindTime   = realTime;
 	RenderFrameNormalizedLightDir = glm::length(LightDir) > 0.0001f ? glm::normalize(LightDir) : glm::vec3(0.0f, 1.0f, 0.0f);
+	if (sourceState)
+	{
+		RenderFrameDirectionalLightCastShadow = sourceState->bDirectionalLightCastShadow;
+	}
+	else if (const CoronaECS::LightComponent* directionalLight = EntityWorld.GetLight(MainDirectionalLightEntity);
+		directionalLight && directionalLight->Type == CoronaECS::LightType::Directional)
+	{
+		RenderFrameDirectionalLightCastShadow = directionalLight->bCastShadow;
+	}
 	const float lightDirT = 0.5f * (RenderFrameNormalizedLightDir.y + 1.0f);
 	RenderFrameLightColor = glm::mix(SkyColorBottom, SkyColorTop, lightDirT);
 	RenderFrameRayNoiseMode = static_cast<UINT32>(RayNoiseMode);
@@ -11528,10 +12458,488 @@ void Corona::BuildRenderFrameDerivedState(const RenderFrameSourceState* sourceSt
 	}
 }
 
+void Corona::DrawEditorMainWindowControls()
+{
+	if (!IsEditorStartupMode())
+		return;
+
+	if (ImGui::CollapsingHeader("Editor Camera", ImGuiTreeNodeFlags_DefaultOpen))
+	{
+		if (ImGui::Checkbox("Collision", &bEditorCameraCollisionEnabled))
+			AppendCpuRuntimeTrace(L"[editor-ui] camera collision=" + std::to_wstring(bEditorCameraCollisionEnabled ? 1 : 0));
+		if (ImGui::SliderFloat("Move speed", &EditorCameraMoveSpeed, 10.0f, 1500.0f, "%.0f"))
+			m_camera.SetMoveSpeed(EditorCameraMoveSpeed);
+		ImGui::SliderFloat("Turn speed", &m_turnSpeed, 0.05f, glm::half_pi<float>() * 2.0f, "%.2f");
+		ImGui::Text("Position %.1f, %.1f, %.1f", m_camera.m_position.x, m_camera.m_position.y, m_camera.m_position.z);
+	}
+	ImGui::Separator();
+}
+
+void Corona::DrawEditorCameraOverlay()
+{
+	if (!IsEditorStartupMode())
+		return;
+
+	const ImGuiViewport* vp = ImGui::GetMainViewport();
+	if (!vp)
+		return;
+
+	const ImVec2 workPos = vp->WorkPos;
+	const ImVec2 workSize = vp->WorkSize;
+	const float margin = 10.0f;
+	const float panelWidth = 300.0f;
+	const ImVec2 panelPos(workPos.x + workSize.x - margin, workPos.y + margin);
+
+	ImGui::SetNextWindowPos(panelPos, ImGuiCond_Always, ImVec2(1.0f, 0.0f));
+	ImGui::SetNextWindowSize(ImVec2(panelWidth, 0.0f), ImGuiCond_Always);
+	ImGui::SetNextWindowBgAlpha(0.88f);
+	const ImGuiWindowFlags flags =
+		ImGuiWindowFlags_NoMove |
+		ImGuiWindowFlags_NoResize |
+		ImGuiWindowFlags_NoCollapse |
+		ImGuiWindowFlags_NoSavedSettings |
+		ImGuiWindowFlags_AlwaysAutoResize;
+
+	if (ImGui::Begin("Editor Camera", nullptr, flags))
+	{
+		if (ImGui::Checkbox("Collision", &bEditorCameraCollisionEnabled))
+			AppendCpuRuntimeTrace(L"[editor-ui] camera collision=" + std::to_wstring(bEditorCameraCollisionEnabled ? 1 : 0));
+
+		ImGui::SetNextItemWidth(-1.0f);
+		if (ImGui::SliderFloat("Move Speed", &EditorCameraMoveSpeed, 10.0f, 1500.0f, "%.0f"))
+			m_camera.SetMoveSpeed(EditorCameraMoveSpeed);
+
+		ImGui::SetNextItemWidth(-1.0f);
+		ImGui::SliderFloat("Turn Speed", &m_turnSpeed, 0.05f, glm::half_pi<float>() * 2.0f, "%.2f");
+
+		ImGui::Text(
+			"Pos %.1f, %.1f, %.1f",
+			m_camera.m_position.x,
+			m_camera.m_position.y,
+			m_camera.m_position.z);
+	}
+	ImGui::End();
+}
+
+void Corona::DrawEditorModeOverlay()
+{
+	if (!IsEditorStartupMode())
+		return;
+
+	const ImGuiViewport* vp = ImGui::GetMainViewport();
+	if (!vp)
+		return;
+
+	const ImVec2 workPos = vp->WorkPos;
+	const ImVec2 workSize = vp->WorkSize;
+	const float margin = 10.0f;
+
+	const float configButtonWidth = 96.0f;
+	const float configButtonHeight = 30.0f;
+	const ImVec2 configButtonPos(
+		workPos.x + workSize.x - configButtonWidth - margin,
+		workPos.y + workSize.y - configButtonHeight - margin);
+	ImGui::SetNextWindowPos(configButtonPos, ImGuiCond_Always);
+	ImGui::SetNextWindowSize(ImVec2(configButtonWidth, configButtonHeight), ImGuiCond_Always);
+	ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(2.0f, 2.0f));
+	ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 4.0f);
+	const ImGuiWindowFlags buttonFlags =
+		ImGuiWindowFlags_NoTitleBar |
+		ImGuiWindowFlags_NoResize |
+		ImGuiWindowFlags_NoMove |
+		ImGuiWindowFlags_NoCollapse |
+		ImGuiWindowFlags_NoSavedSettings |
+		ImGuiWindowFlags_NoScrollbar;
+	ImGui::Begin("##editor_config_toggle", nullptr, buttonFlags);
+	if (ImGui::Button(bEditorConfigWindowOpen ? "Config *" : "Config", ImVec2(-1.0f, -1.0f)))
+		bEditorConfigWindowOpen = !bEditorConfigWindowOpen;
+	ImGui::End();
+	ImGui::PopStyleVar(2);
+
+	if (!bEditorConfigWindowOpen)
+		return;
+
+	const float configPanelWidth = 360.0f;
+	const float configPanelHeightEstimate = 420.0f;
+	const float configPanelX = std::max(workPos.x + margin, workPos.x + workSize.x - configPanelWidth - margin);
+	const float configPanelY = std::max(
+		workPos.y + margin,
+		workPos.y + workSize.y - configPanelHeightEstimate - configButtonHeight - margin * 2.0f);
+	ImGui::SetNextWindowPos(ImVec2(configPanelX, configPanelY), ImGuiCond_FirstUseEver);
+	ImGui::SetNextWindowSize(ImVec2(configPanelWidth, 0.0f), ImGuiCond_FirstUseEver);
+	ImGui::SetNextWindowBgAlpha(0.92f);
+	if (ImGui::Begin("Editor Config", &bEditorConfigWindowOpen, ImGuiWindowFlags_NoSavedSettings))
+	{
+		if (renderBackend)
+			ImGui::Text("Backend: %s", renderBackend->GetBackendName());
+
+		if (ImGui::CollapsingHeader("Top", ImGuiTreeNodeFlags_DefaultOpen))
+		{
+			ImGui::Checkbox("Frame Timing Overlay (CPU / GPU / Recording)", &bShowFrameTimingOverlay);
+			int averageFrameCountUI = static_cast<int>(GpuTimingAverageFrameCount);
+			if (ImGui::SliderInt("Timing Average Frames", &averageFrameCountUI, 1, 240))
+				SetGpuTimingAverageFrameCount(static_cast<UINT32>(averageFrameCountUI));
+			ImGui::Checkbox("Full Render Controls Window", &bShowImgui);
+			ImGui::Checkbox("Culling Overlay", &bShowCullingTextOverlay);
+			if (ImGui::Button("Open Lighting & GI Controls", ImVec2(-1.0f, 0.0f)))
+				bShowImgui = true;
+			if (ImGui::Button("Open Debug / Capture Controls", ImVec2(-1.0f, 0.0f)))
+				bShowImgui = true;
+		}
+
+		if (ImGui::CollapsingHeader("Top / Render & AA", ImGuiTreeNodeFlags_DefaultOpen))
+		{
+#if CORONA_PLATFORM_MOBILE
+		const char* renderingModeItems[] = {
+			"HYBRID",
+		};
+#else
+		const char* renderingModeItems[] = {
+			"HYBRID (Raster + RT)",
+			"PATH TRACING",
+		};
+#endif
+		int renderingModeIndex = static_cast<int>(RenderingMode);
+		renderingModeIndex = std::clamp(renderingModeIndex, 0, static_cast<int>(IM_ARRAYSIZE(renderingModeItems)) - 1);
+		if (ImGui::Combo("Rendering Mode", &renderingModeIndex, renderingModeItems, IM_ARRAYSIZE(renderingModeItems)))
+			ApplyRenderingAndAAMode(static_cast<ERenderingMode>(renderingModeIndex), AntiAliasingMode);
+
+		struct EditorAAModeOption
+		{
+			const char* Label;
+			EAntiAliasingMode Mode;
+			bool bAvailable;
+		};
+		const bool bEditorD3D12Backend =
+			renderBackend &&
+			renderBackend->GetAPI() == ERenderBackendAPI::D3D12;
+#if WITH_STREAMLINE
+		const bool bEditorDLSSSRAvailable =
+			RenderingMode == ERenderingMode::HYBRID &&
+			bEditorD3D12Backend &&
+			bDLSSAvailable;
+		const bool bEditorDLSSRRAvailable =
+			bEditorD3D12Backend &&
+			((RenderingMode == ERenderingMode::HYBRID && bDLSSAvailable && bDLSSRRAvailable) ||
+			 (RenderingMode == ERenderingMode::PATHTRACING && bDLSSRRAvailable && bEnablePathTracingDLSSRR));
+#else
+		const bool bEditorDLSSSRAvailable = false;
+		const bool bEditorDLSSRRAvailable = false;
+#endif
+		const EditorAAModeOption aaOptions[] = {
+			{ "Off", EAntiAliasingMode::OFF, true },
+			{ "TAA", EAntiAliasingMode::TAA, RenderingMode == ERenderingMode::HYBRID },
+			{ "DLSS SR", EAntiAliasingMode::DLSS_SR, bEditorDLSSSRAvailable },
+			{ "DLSS RR", EAntiAliasingMode::DLSS_RR, bEditorDLSSRRAvailable },
+		};
+		int currentAAOption = 0;
+		for (int optionIndex = 0; optionIndex < static_cast<int>(IM_ARRAYSIZE(aaOptions)); ++optionIndex)
+		{
+			if (aaOptions[optionIndex].Mode == AntiAliasingMode)
+			{
+				currentAAOption = optionIndex;
+				break;
+			}
+		}
+		if (ImGui::BeginCombo("Anti-Aliasing##editor_config_aa", aaOptions[currentAAOption].Label))
+		{
+			for (int optionIndex = 0; optionIndex < static_cast<int>(IM_ARRAYSIZE(aaOptions)); ++optionIndex)
+			{
+				const EditorAAModeOption& option = aaOptions[optionIndex];
+				const bool bSelected = option.Mode == AntiAliasingMode;
+				if (!option.bAvailable)
+					ImGui::BeginDisabled();
+				if (ImGui::Selectable(option.Label, bSelected) && option.bAvailable)
+					ApplyRenderingAndAAMode(RenderingMode, option.Mode);
+				if (!option.bAvailable)
+					ImGui::EndDisabled();
+				if (bSelected)
+					ImGui::SetItemDefaultFocus();
+			}
+			ImGui::EndCombo();
+		}
+		if (!bEditorDLSSSRAvailable && !bEditorDLSSRRAvailable)
+		{
+			if (bCommandLineDisableStreamline)
+				ImGui::TextDisabled("DLSS modes are unavailable because Streamline is disabled for this run.");
+			else if (!bEditorD3D12Backend)
+				ImGui::TextDisabled("DLSS modes require the DX12 backend.");
+			else
+				ImGui::TextDisabled("DLSS modes are unavailable on this session.");
+		}
+		}
+
+		if (ImGui::CollapsingHeader("Top / Lighting & GI", ImGuiTreeNodeFlags_DefaultOpen))
+		{
+			if (RenderingMode == ERenderingMode::HYBRID || RenderingMode == ERenderingMode::PATHTRACING)
+			{
+				bool bLightingChanged = false;
+				if (ImGui::TreeNodeEx("Direct Lighting", ImGuiTreeNodeFlags_DefaultOpen))
+				{
+					if (ImGui::Checkbox("Enable Direct Diffuse", &bEnableDirectDiffuse)) bLightingChanged = true;
+					if (ImGui::Checkbox("Enable Direct Specular", &bEnableDirectSpecular)) bLightingChanged = true;
+					if (ImGui::SliderFloat("Sun Angular Radius", &RTShadowViewParam.ShadowLightRadius, 0.0f, 0.03f, "%.4f rad"))
+						bLightingChanged = true;
+					if (RenderingMode == ERenderingMode::HYBRID)
+					{
+						int shadowSamples = static_cast<int>(RTShadowViewParam.ShadowSampleCount);
+						if (ImGui::SliderInt("Hybrid Shadow Samples", &shadowSamples, 1, 16))
+						{
+							RTShadowViewParam.ShadowSampleCount = static_cast<UINT32>(shadowSamples);
+							bLightingChanged = true;
+						}
+						const char* directShadowModeItems[] = {
+							"4-channel (top 3 local lights)",
+							"ReSTIR DI",
+						};
+						int directShadowMode = bEnableReSTIRDirectShadow ? 1 : 0;
+						if (ImGui::Combo("Direct Shadow Mode##editor_config", &directShadowMode, directShadowModeItems, IM_ARRAYSIZE(directShadowModeItems)))
+						{
+							bEnableReSTIRDirectShadow = directShadowMode == 1;
+							bLightingChanged = true;
+						}
+					}
+					else
+					{
+						int directLightSamples = static_cast<int>(PathTracingViewParam.DirectLightSampleCount);
+						if (ImGui::SliderInt("Path Tracing Sun Samples", &directLightSamples, 1, 8))
+						{
+							PathTracingViewParam.DirectLightSampleCount = static_cast<UINT32>(directLightSamples);
+							bLightingChanged = true;
+						}
+					}
+					ImGui::TreePop();
+				}
+
+				if (ImGui::TreeNodeEx("Specular GI / Reflections", ImGuiTreeNodeFlags_DefaultOpen))
+				{
+					if (ImGui::Checkbox("Enable Indirect Specular (GI)", &bEnableSpecularGI)) bLightingChanged = true;
+					const bool bRTReflectionSERAvailable =
+						renderBackend &&
+						renderBackend->SupportsShaderExecutionReordering();
+					if (!bRTReflectionSERAvailable)
+						ImGui::BeginDisabled();
+					if (ImGui::Checkbox("RT Reflection SER", &bEnableRTReflectionSER))
+						bLightingChanged = true;
+					if (!bRTReflectionSERAvailable)
+						ImGui::EndDisabled();
+					ImGui::TreePop();
+				}
+
+				if (RenderingMode == ERenderingMode::HYBRID && ImGui::TreeNodeEx("Sky Lighting", ImGuiTreeNodeFlags_DefaultOpen))
+				{
+					if (ImGui::Checkbox("Enable Sky Lighting", &bEnableSkyLighting))
+						bLightingChanged = true;
+					if (bEnableSkyLighting)
+					{
+						if (ImGui::SliderFloat("Sky Lighting Strength", &SkyLightingStrength, 0.0f, 1.0f, "%.2f"))
+							bLightingChanged = true;
+						if (ImGui::Checkbox("Ray Traced Sky Pass", &bEnableRayTracedSkyLighting))
+							bLightingChanged = true;
+						if (bEnableRayTracedSkyLighting)
+						{
+							int skySamples = static_cast<int>(RTSkyLightingViewParam.SampleCount);
+							if (ImGui::SliderInt("Sky Lighting Samples", &skySamples, 1, 32))
+							{
+								RTSkyLightingViewParam.SampleCount = static_cast<UINT32>(skySamples);
+								bLightingChanged = true;
+							}
+							if (ImGui::SliderFloat("Sky Lighting Ray Length", &RTSkyLightingViewParam.RayLength, 16.0f, 10000.0f, "%.1f"))
+								bLightingChanged = true;
+							if (ImGui::SliderFloat("Sky Lighting Normal Bias", &RTSkyLightingViewParam.NormalBias, 0.01f, 4.0f, "%.2f"))
+								bLightingChanged = true;
+							if (ImGui::SliderFloat("Sky Lighting Up Bias", &RTSkyLightingViewParam.SkyUpBias, 0.0f, 1.0f, "%.2f"))
+								bLightingChanged = true;
+							if (ImGui::SliderFloat("Sky Lighting Direction Power", &RTSkyLightingViewParam.SkyDirectionPower, 0.25f, 8.0f, "%.2f"))
+								bLightingChanged = true;
+							if (ImGui::SliderFloat("Sky Lighting Min World Y", &RTSkyLightingViewParam.SkyMinWorldY, -0.25f, 0.75f, "%.2f"))
+								bLightingChanged = true;
+						}
+					}
+					ImGui::TreePop();
+				}
+
+				if (ImGui::TreeNodeEx("Diffuse GI", ImGuiTreeNodeFlags_DefaultOpen))
+				{
+					if (ImGui::Checkbox("Enable Diffuse GI", &bEnableDiffuseGI)) bLightingChanged = true;
+					const bool bRTDiffuseGISERAvailable =
+						renderBackend &&
+						renderBackend->SupportsShaderExecutionReordering();
+					if (!bRTDiffuseGISERAvailable)
+						ImGui::BeginDisabled();
+					if (ImGui::Checkbox("RT Diffuse GI SER", &bEnableRTDiffuseGISER))
+						bLightingChanged = true;
+					if (!bRTDiffuseGISERAvailable)
+						ImGui::EndDisabled();
+
+					static const char* DiffuseGIModes[] = { "Simple Raytrace", "Spatial Hash", "Screen Probe" };
+					int DiffuseGIModeIndex = static_cast<int>(DiffuseGIMode);
+					if (RenderingMode != ERenderingMode::HYBRID)
+						ImGui::BeginDisabled();
+					if (ImGui::Combo("Method##editor_config_diffuse_gi", &DiffuseGIModeIndex, DiffuseGIModes, IM_ARRAYSIZE(DiffuseGIModes)))
+					{
+						ApplyDiffuseGIMode(static_cast<EDiffuseGIMode>(DiffuseGIModeIndex));
+						bLightingChanged = true;
+					}
+					if (RenderingMode != ERenderingMode::HYBRID)
+						ImGui::EndDisabled();
+					if (RenderingMode == ERenderingMode::HYBRID && DiffuseGIMode == EDiffuseGIMode::SCREEN_PROBE)
+					{
+						int probeSpacing = static_cast<int>(ScreenProbeGICB.ProbeSpacing);
+						if (ImGui::SliderInt("Screen Probe Spacing", &probeSpacing, 4, 64))
+						{
+							ScreenProbeGICB.ProbeSpacing = static_cast<UINT32>(probeSpacing);
+							bLightingChanged = true;
+						}
+						int raysPerProbe = static_cast<int>(RTScreenProbeGIViewParam.RaysPerProbe);
+						if (ImGui::SliderInt("Screen Probe Rays / Probe", &raysPerProbe, 1, 4))
+						{
+							RTScreenProbeGIViewParam.RaysPerProbe = static_cast<UINT32>(raysPerProbe);
+							bLightingChanged = true;
+						}
+						if (ImGui::SliderFloat("Screen Probe Raw Blend", &ScreenProbeGICB.RawBlend, 0.0f, 0.35f, "%.3f"))
+							bLightingChanged = true;
+					}
+					else if (RenderingMode == ERenderingMode::HYBRID && DiffuseGIMode == EDiffuseGIMode::SPATIAL_HASH)
+					{
+						if (ImGui::SliderFloat("Spatial Hash Cell Size", &SpatialHashGICB.CellSize, 4.0f, 256.0f))
+							bLightingChanged = true;
+						int raysPerCell = static_cast<int>(RTSpatialHashGIViewParam.RaysPerCell);
+						if (ImGui::SliderInt("Spatial Hash Rays / Cell", &raysPerCell, 1, 8))
+						{
+							RTSpatialHashGIViewParam.RaysPerCell = static_cast<UINT32>(raysPerCell);
+							bLightingChanged = true;
+						}
+						int maxBounces = static_cast<int>(RTSpatialHashGIViewParam.MaxBounces);
+						if (ImGui::SliderInt("Spatial Hash Max Bounces", &maxBounces, 1, 8))
+						{
+							RTSpatialHashGIViewParam.MaxBounces = static_cast<UINT32>(maxBounces);
+							bLightingChanged = true;
+						}
+					}
+					ImGui::TreePop();
+				}
+
+				if (RenderingMode == ERenderingMode::HYBRID)
+				{
+					if (ImGui::Checkbox("Enable RTAO##editor_config", &bEnableRTAO))
+						bLightingChanged = true;
+					if (bEnableRTAO && ImGui::TreeNodeEx("RTAO Details", ImGuiTreeNodeFlags_DefaultOpen))
+					{
+						int rtaoSamples = static_cast<int>(RTAOViewParam.SampleCount);
+						if (ImGui::SliderInt("RTAO Samples", &rtaoSamples, 1, 16))
+						{
+							RTAOViewParam.SampleCount = static_cast<UINT32>(rtaoSamples);
+							bLightingChanged = true;
+						}
+						if (ImGui::SliderFloat("RTAO Radius", &RTAOViewParam.Radius, 2.0f, 256.0f, "%.1f"))
+							bLightingChanged = true;
+						if (ImGui::SliderFloat("RTAO Power", &RTAOViewParam.Power, 0.25f, 4.0f, "%.2f"))
+							bLightingChanged = true;
+						if (ImGui::SliderFloat("RTAO Normal Bias", &RTAOViewParam.NormalBias, 0.01f, 2.0f, "%.2f"))
+							bLightingChanged = true;
+						ImGui::TreePop();
+					}
+				}
+
+				if (ImGui::TreeNodeEx("Sky / Environment"))
+				{
+					if (ImGui::ColorEdit3("Sky Color Top", &SkyColorTop.x)) bLightingChanged = true;
+					if (ImGui::ColorEdit3("Sky Color Bottom", &SkyColorBottom.x)) bLightingChanged = true;
+					if (ImGui::SliderFloat("Sky Intensity", &SkyIntensity, 0.0f, 10.0f)) bLightingChanged = true;
+					if (ImGui::Checkbox("Prefiltered Env Specular", &bEnablePrefilteredEnvSpecular))
+						bLightingChanged = true;
+					if (ImGui::SliderFloat("Prefiltered Env Roughness Threshold", &PrefilteredEnvRoughnessThreshold, 0.02f, 1.0f))
+						bLightingChanged = true;
+					if (ImGui::SliderFloat("Prefiltered Env Roughness Fade", &PrefilteredEnvRoughnessFade, 0.0f, 0.5f))
+						bLightingChanged = true;
+					ImGui::TreePop();
+				}
+
+				if (bLightingChanged)
+				{
+					SyncCurrentLightingSettingsToFrameSourceState();
+					ResetAllAccumulationState(false);
+				}
+			}
+		}
+
+		if (ImGui::CollapsingHeader("Top / Debug & Capture"))
+		{
+		const bool bDebugVisualizationAvailable = renderBackend && BufferVisualizeGraphicsPipeline;
+		if (!bDebugVisualizationAvailable)
+			ImGui::BeginDisabled();
+		ImGui::Checkbox("Visualize Buffers", &bDebugDraw);
+		static const char* debugVisualizationItems[] = {
+			"SHADOW",
+			"WORLD_NORMAL",
+			"GEO_NORMAL",
+			"DEPTH",
+			"RAW_DIFFUSE_GI",
+			"RAW_DIFFUSE_GI_AUX",
+			"SCREEN_PROBE_DIFFUSE_GI",
+			"SCREEN_PROBE_PROBES",
+			"SCREEN_PROBE_HISTORY_LENGTH",
+			"SCREEN_PROBE_ATLAS_HISTORY_LENGTH",
+			"TEMPORAL_FILTERED_DIFFUSE_GI",
+			"RESOLVED_DIFFUSE_GI",
+			"FINAL_DIFFUSE_GI",
+			"ALBEDO",
+			"VELOCITY",
+			"ROUGNESS_METALLIC",
+			"SPECULAR_RAW",
+			"TEMPORAL_FILTERED_SPECULAR",
+			"BLOOM",
+			"SPEC_HISTORY_LENGTH",
+			"RTAO",
+			"NO_FULLSCREEN",
+		};
+		int debugVisualizationIndex = std::clamp(
+			static_cast<int>(FullscreenDebugBuffer),
+			0,
+			static_cast<int>(IM_ARRAYSIZE(debugVisualizationItems)) - 1);
+		if (ImGui::Combo("Full Screen Buffer", &debugVisualizationIndex, debugVisualizationItems, IM_ARRAYSIZE(debugVisualizationItems)))
+			FullscreenDebugBuffer = static_cast<EDebugVisualization>(debugVisualizationIndex);
+		if (!bDebugVisualizationAvailable)
+		{
+			ImGui::EndDisabled();
+			bDebugDraw = false;
+			ImGui::TextDisabled("Buffer visualization is available on the DX12 debug path.");
+		}
+
+		ImGui::Separator();
+		ImGui::Checkbox("Culling overlay", &bShowCullingTextOverlay);
+		ImGui::Checkbox("Frame timing overlay (CPU / GPU / Recording)", &bShowFrameTimingOverlay);
+		int averageFrameCountUI = static_cast<int>(GpuTimingAverageFrameCount);
+		if (ImGui::SliderInt("Timing Average Frames", &averageFrameCountUI, 1, 240))
+			SetGpuTimingAverageFrameCount(static_cast<UINT32>(averageFrameCountUI));
+		if (ImGui::Button("Recompile all shaders", ImVec2(-1.0f, 0.0f)))
+			bRecompileShaders = true;
+
+		if (bFinalScreenshotRequested || bFinalScreenshotCaptureInFlight)
+			ImGui::BeginDisabled();
+		if (ImGui::Button("Capture Final Backbuffer", ImVec2(-1.0f, 0.0f)))
+		{
+			bFinalScreenshotRequested = true;
+			LastFinalScreenshotStatus = L"Screenshot will be captured on the next frame without ImGui.";
+		}
+		if (bFinalScreenshotRequested || bFinalScreenshotCaptureInFlight)
+			ImGui::EndDisabled();
+		if (!LastFinalScreenshotStatus.empty())
+		{
+			const std::string statusText = WideToUtf8(LastFinalScreenshotStatus);
+			ImGui::TextWrapped("Screenshot: %s", statusText.c_str());
+		}
+		}
+	}
+	ImGui::End();
+}
+
 // Render the scene.
 void Corona::OnRender()
 {
 	std::unique_lock<std::mutex> stateLock(GameRenderStateMutex);
+	ProcessPendingEditorMapLoad();
 	ProcessRenderThreadRequests();
 	ApplyPendingRenderFrameDeltas();
 	RenderFrameSourceState singleThreadFrameSourceState;
@@ -11953,6 +13361,18 @@ void Corona::OnRender()
 			LastCameraPathStatus = L"Camera path dumping is not available while a Vulkan stage preview is active.";
 		}
 	}
+	if (CommandLineScreenshotFrame > 0 &&
+		!bCommandLineScreenshotTriggered &&
+		FrameCounter >= CommandLineScreenshotFrame)
+	{
+		bCommandLineScreenshotTriggered = true;
+		bFinalScreenshotRequested = true;
+		LastFinalScreenshotStatus = L"Command-line screenshot will be captured on the next frame without ImGui.";
+		AppendCpuRuntimeTrace(
+			L"[OnRender] command line screenshot requested frame=" +
+			std::to_wstring(FrameCounter) +
+			L", target=" + std::to_wstring(CommandLineScreenshotFrame));
+	}
 
 	if (!bSuppressImguiForCapture && bFinalScreenshotRequested)
 	{
@@ -11979,12 +13399,11 @@ void Corona::OnRender()
 	double tNewFrame = 0.0, tConsole = 0.0, tSceneInsp = 0.0, tAssetExp = 0.0, tToolbox = 0.0;
 	double tLegacyHud = 0.0, tImguiRender = 0.0, tRenderDraw = 0.0;
 	double tLuauQueued = 0.0, tLuauImgui = 0.0;
-	// Outer gate: always run imgui frame when initialized so the FPS
-	// overlay below can be drawn even when bShowImgui is off. Sub-
-	// windows (Console / SceneInspector / AssetExplorer / Toolbox /
+	const bool bEditorStartupMode = IsEditorStartupMode();
+	// Outer gate: always run the ImGui frame when initialized so the FPS
+	// overlay and editor Config toggle remain alive even when bShowImgui is off.
 	// Luau imgui) are gated by `bShowImgui` further below — pressing
-	// 'I' to hide UI now only skips those heavy windows, not the
-	// imgui frame setup or the FPS text overlay.
+	// Main Luau/inspector windows stay gated by bShowImgui further below.
 	if (!bSuppressImguiForCapture && bImguiInitialized)
 	{
 		const auto imguiStageStart = CpuClock::now();
@@ -12001,7 +13420,31 @@ void Corona::OnRender()
 		auto imguiStageToolbox = imguiStageNewFrame;
 		bool bUseLuauImguiControls = false;
 
-		// Inner gate: heavy sub-windows only when UI visible.
+		if (bEditorStartupMode)
+		{
+			// Keep editor quick toggles alive even while the full render/debug
+			// UI is hidden behind the Config button.
+			if (!SceneInspector)
+				SceneInspector = std::make_unique<CoronaSceneInspector>(this);
+			SceneInspector->RenderImGui();
+			const auto imguiStageSceneInsp = CpuClock::now();
+			tSceneInsp = ElapsedMilliseconds(imguiStageNewFrame, imguiStageSceneInsp);
+
+			if (!AssetExplorer)
+				AssetExplorer = std::make_unique<CoronaAssetExplorer>(this);
+			AssetExplorer->RenderImGui();
+			const auto imguiStageAssetExp = CpuClock::now();
+			tAssetExp = ElapsedMilliseconds(imguiStageSceneInsp, imguiStageAssetExp);
+
+			if (!Toolbox)
+				Toolbox = std::make_unique<CoronaToolbox>(this);
+			Toolbox->RenderImGui();
+			imguiStageToolbox = CpuClock::now();
+			tToolbox = ElapsedMilliseconds(imguiStageAssetExp, imguiStageToolbox);
+		}
+
+		// Inner gate: heavy sub-windows only when UI is visible. Editor mode
+		// keeps a small Config toggle alive through DrawEditorModeOverlay().
 		if (bShowImgui || CORONA_PLATFORM_MOBILE)
 		{
 
@@ -12018,6 +13461,8 @@ void Corona::OnRender()
 		tConsole = ElapsedMilliseconds(imguiStageNewFrame, imguiStageConsole);
 
 		// Scene inspector — left-anchored entity list + bottom toggle button.
+		if (!bEditorStartupMode)
+		{
 		if (!SceneInspector)
 			SceneInspector = std::make_unique<CoronaSceneInspector>(this);
 		SceneInspector->RenderImGui();
@@ -12037,6 +13482,7 @@ void Corona::OnRender()
 		Toolbox->RenderImGui();
 		imguiStageToolbox = CpuClock::now();
 		tToolbox = ElapsedMilliseconds(imguiStageAssetExp, imguiStageToolbox);
+		}
 
 #if CORONA_PLATFORM_MOBILE
 		DrawMobileVirtualControls();
@@ -12057,18 +13503,17 @@ void Corona::OnRender()
 
 		} // end inner gate (bShowImgui || MOBILE)
 
-		// FPS overlay — always drawn while imgui frame is active so
-		// pressing 'I' to hide debug panels doesn't kill the
-		// performance readout. Uses ForegroundDrawList so it doesn't
-		// require an open window.
-		{
-			char fpsText[64];
-			sprintf(fpsText, "FPS : %u fps", m_timer.GetFramesPerSecond());
-			const ImVec2 fpsTextPos(10.0f, 8.0f);
-			ImDrawList* foregroundDrawList = ImGui::GetForegroundDrawList();
-			foregroundDrawList->AddText(ImVec2(fpsTextPos.x + 1.0f, fpsTextPos.y + 1.0f), IM_COL32(0, 0, 0, 180), fpsText);
-			foregroundDrawList->AddText(fpsTextPos, IM_COL32(255, 255, 255, 235), fpsText);
-		}
+		// FPS is always drawn while imgui is active. Detailed frame timing
+		// stays opt-in and is rendered below the FPS line.
+#if !CORONA_PLATFORM_MOBILE
+		DrawRuntimeFrameOverlay();
+#endif
+
+		if (bEditorStartupMode)
+			DrawEditorCameraOverlay();
+
+		if (bEditorStartupMode)
+			DrawEditorModeOverlay();
 
 		if (bShowImgui)
 		{
@@ -12150,6 +13595,7 @@ void Corona::OnRender()
 		if (bUseLuauImguiControls)
 		{
 			ImGui::Begin("Hi, Let's traceray!");
+			DrawEditorMainWindowControls();
 #if CORONA_PLATFORM_MOBILE
 			RenderQueuedLuauUi(true, false);
 #else
@@ -12167,6 +13613,7 @@ void Corona::OnRender()
 			char debugText[64];
 
 		ImGui::Begin("Hi, Let's traceray!");
+		DrawEditorMainWindowControls();
 		if (renderBackend)
 		{
 			ImGui::Text("Render Backend: %s", renderBackend->GetBackendName());
@@ -12277,11 +13724,10 @@ void Corona::OnRender()
 
 		if (ImGui::CollapsingHeader("Capture & Profiling", ImGuiTreeNodeFlags_DefaultOpen))
 		{
-			if (ImGui::Button("GPU Pass Timings"))
-			{
-				bShowGpuTimingWindow = true;
-			}
-			ImGui::SameLine();
+			ImGui::Checkbox("Frame Timing Overlay (CPU / GPU / Recording)", &bShowFrameTimingOverlay);
+			int averageFrameCountUI = static_cast<int>(GpuTimingAverageFrameCount);
+			if (ImGui::SliderInt("Timing Average Frames", &averageFrameCountUI, 1, 240))
+				SetGpuTimingAverageFrameCount(static_cast<UINT32>(averageFrameCountUI));
 			if (ImGui::Button("Recompile all shaders"))
 				bRecompileShaders = true;
 
@@ -12484,37 +13930,7 @@ void Corona::OnRender()
 			ImGui::Text("GPU Pass Timings (ms)");
 			int averageFrameCountUI = static_cast<int>(GpuTimingAverageFrameCount);
 			if (ImGui::SliderInt("Average Frames", &averageFrameCountUI, 1, 240))
-			{
-				GpuTimingAverageFrameCount = static_cast<UINT32>(averageFrameCountUI);
-				for (UINT passIndex = 0; passIndex < GpuPassCount; ++passIndex)
-				{
-					auto& history = GpuPassHistoryMs[passIndex];
-					while (history.size() > GpuTimingAverageFrameCount)
-					{
-						history.pop_front();
-					}
-
-					float sumMs = 0.0f;
-					for (float sampleMs : history)
-					{
-						sumMs += sampleMs;
-					}
-					GpuPassAverageTimeMs[passIndex] = history.empty() ? 0.0f : (sumMs / static_cast<float>(history.size()));
-
-					auto& cpuHistory = CpuPassHistoryMs[passIndex];
-					while (cpuHistory.size() > GpuTimingAverageFrameCount)
-					{
-						cpuHistory.pop_front();
-					}
-					float cpuSumMs = 0.0f;
-					for (float sampleMs : cpuHistory)
-					{
-						cpuSumMs += sampleMs;
-					}
-					CpuPassAverageTimeMs[passIndex] = cpuHistory.empty() ? 0.0f : (cpuSumMs / static_cast<float>(cpuHistory.size()));
-				}
-				TrimCpuUpdateTimingHistory();
-			}
+				SetGpuTimingAverageFrameCount(static_cast<UINT32>(averageFrameCountUI));
 			ImGui::Separator();
 			ImGui::Text(
 				"CPU Update: %.3f ms (avg %uF %.3f ms)",
@@ -12747,18 +14163,6 @@ void Corona::OnRender()
 			{
 				if (ImGui::Checkbox("Enable Direct Diffuse", &bEnableDirectDiffuse)) bLightingChanged = true;
 				if (ImGui::Checkbox("Enable Direct Specular", &bEnableDirectSpecular)) bLightingChanged = true;
-				if (ImGui::Checkbox("Enable Indirect Specular (GI)", &bEnableSpecularGI)) bLightingChanged = true;
-				const bool bRTReflectionSERAvailable =
-					renderBackend &&
-					renderBackend->SupportsShaderExecutionReordering();
-				if (!bRTReflectionSERAvailable)
-					ImGui::BeginDisabled();
-				if (ImGui::Checkbox("RT Reflection SER", &bEnableRTReflectionSER))
-					bLightingChanged = true;
-				if (!bRTReflectionSERAvailable)
-					ImGui::EndDisabled();
-				if (!bRTReflectionSERAvailable && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-					ImGui::SetTooltip("Requires backend shader execution reordering support.");
 				if (ImGui::SliderFloat("Sun Angular Radius", &RTShadowViewParam.ShadowLightRadius, 0.0f, 0.03f, "%.4f rad"))
 					bLightingChanged = true;
 				if (RenderingMode == ERenderingMode::HYBRID)
@@ -12767,6 +14171,16 @@ void Corona::OnRender()
 					if (ImGui::SliderInt("Hybrid Shadow Samples", &shadowSamples, 1, 16))
 					{
 						RTShadowViewParam.ShadowSampleCount = static_cast<UINT32>(shadowSamples);
+						bLightingChanged = true;
+					}
+					const char* directShadowModeItems[] = {
+						"4-channel (top 3 local lights)",
+						"ReSTIR DI",
+					};
+					int directShadowMode = bEnableReSTIRDirectShadow ? 1 : 0;
+					if (ImGui::Combo("Direct Shadow Mode##render_controls", &directShadowMode, directShadowModeItems, IM_ARRAYSIZE(directShadowModeItems)))
+					{
+						bEnableReSTIRDirectShadow = directShadowMode == 1;
 						bLightingChanged = true;
 					}
 				}
@@ -12782,27 +14196,41 @@ void Corona::OnRender()
 				ImGui::TreePop();
 			}
 
+			if (ImGui::TreeNodeEx("Specular GI / Reflections", ImGuiTreeNodeFlags_DefaultOpen))
+			{
+				if (ImGui::Checkbox("Enable Indirect Specular (GI)", &bEnableSpecularGI)) bLightingChanged = true;
+				const bool bRTReflectionSERAvailable =
+					renderBackend &&
+					renderBackend->SupportsShaderExecutionReordering();
+				if (!bRTReflectionSERAvailable)
+					ImGui::BeginDisabled();
+				if (ImGui::Checkbox("RT Reflection SER", &bEnableRTReflectionSER))
+					bLightingChanged = true;
+				if (!bRTReflectionSERAvailable)
+					ImGui::EndDisabled();
+				if (!bRTReflectionSERAvailable && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+					ImGui::SetTooltip("Requires backend shader execution reordering support.");
+				ImGui::TreePop();
+			}
+
 			if (RenderingMode == ERenderingMode::HYBRID)
 			{
-				if (ImGui::TreeNodeEx("RTAO"))
+				if (ImGui::Checkbox("Enable RTAO##render_controls", &bEnableRTAO))
+					bLightingChanged = true;
+				if (bEnableRTAO && ImGui::TreeNodeEx("RTAO Details", ImGuiTreeNodeFlags_DefaultOpen))
 				{
-					if (ImGui::Checkbox("Enable RTAO", &bEnableRTAO))
-						bLightingChanged = true;
-					if (bEnableRTAO)
+					int rtaoSamples = static_cast<int>(RTAOViewParam.SampleCount);
+					if (ImGui::SliderInt("RTAO Samples", &rtaoSamples, 1, 16))
 					{
-						int rtaoSamples = static_cast<int>(RTAOViewParam.SampleCount);
-						if (ImGui::SliderInt("RTAO Samples", &rtaoSamples, 1, 16))
-						{
-							RTAOViewParam.SampleCount = static_cast<UINT32>(rtaoSamples);
-							bLightingChanged = true;
-						}
-						if (ImGui::SliderFloat("RTAO Radius", &RTAOViewParam.Radius, 2.0f, 256.0f, "%.1f"))
-							bLightingChanged = true;
-						if (ImGui::SliderFloat("RTAO Power", &RTAOViewParam.Power, 0.25f, 4.0f, "%.2f"))
-							bLightingChanged = true;
-						if (ImGui::SliderFloat("RTAO Normal Bias", &RTAOViewParam.NormalBias, 0.01f, 2.0f, "%.2f"))
-							bLightingChanged = true;
+						RTAOViewParam.SampleCount = static_cast<UINT32>(rtaoSamples);
+						bLightingChanged = true;
 					}
+					if (ImGui::SliderFloat("RTAO Radius", &RTAOViewParam.Radius, 2.0f, 256.0f, "%.1f"))
+						bLightingChanged = true;
+					if (ImGui::SliderFloat("RTAO Power", &RTAOViewParam.Power, 0.25f, 4.0f, "%.2f"))
+						bLightingChanged = true;
+					if (ImGui::SliderFloat("RTAO Normal Bias", &RTAOViewParam.NormalBias, 0.01f, 2.0f, "%.2f"))
+						bLightingChanged = true;
 					ImGui::TreePop();
 				}
 
@@ -12878,7 +14306,7 @@ void Corona::OnRender()
 				ImGui::SetNextItemWidth(220.0f);
 				if (ImGui::Combo("Method##DiffuseGI", &DiffuseGIModeIndex, DiffuseGIModes, IM_ARRAYSIZE(DiffuseGIModes)))
 				{
-					DiffuseGIMode = static_cast<EDiffuseGIMode>(DiffuseGIModeIndex);
+					ApplyDiffuseGIMode(static_cast<EDiffuseGIMode>(DiffuseGIModeIndex));
 					bLightingChanged = true;
 				}
 				if (!bDiffuseGIMethodAvailable)
@@ -12974,6 +14402,7 @@ void Corona::OnRender()
 			// DLSS/RR resource reallocation or render-resolution changes.
 			if (bLightingChanged)
 			{
+				SyncCurrentLightingSettingsToFrameSourceState();
 				ResetAllAccumulationState(false);
 			}
 			}
@@ -13475,10 +14904,7 @@ void Corona::OnDestroy()
 	renderBackend->ShutdownGpuTimestampQueries();
 
 #if WITH_STREAMLINE
-	// Streamline can spend a long time in plugin shutdown after automated captures
-	// and frame-count smoke tests. In those paths, let process teardown handle it.
-	if (!bAutoAADumpEnabled && !bCommandLineExitAfterFramesTriggered)
-		ShutdownStreamline();
+	ShutdownStreamline();
 #endif
 	if (bImguiInitialized)
 	{

@@ -45,7 +45,8 @@ void CoronaToolbox::RenderImGui()
 
 	const ImGuiViewport* vp = ImGui::GetMainViewport();
 	const ImVec2 size(260.0f, 220.0f);
-	ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x + vp->WorkSize.x - size.x - 8.0f, vp->WorkPos.y + 40.0f),
+	const float topOffset = Host && Host->IsEditorStartupMode() ? 180.0f : 40.0f;
+	ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x + vp->WorkSize.x - size.x - 8.0f, vp->WorkPos.y + topOffset),
 		ImGuiCond_FirstUseEver);
 	ImGui::SetNextWindowSize(size, ImGuiCond_FirstUseEver);
 
@@ -56,6 +57,7 @@ void CoronaToolbox::RenderImGui()
 		ImGui::Separator();
 		if (ImGui::Button("Directional Light", ImVec2(-1, 0))) SpawnDirectionalLight();
 		if (ImGui::Button("Point Light",       ImVec2(-1, 0))) SpawnPointLight();
+		if (ImGui::Button("Spot Light",        ImVec2(-1, 0))) SpawnSpotLight();
 		if (ImGui::Button("Box",               ImVec2(-1, 0))) SpawnBox();
 		if (ImGui::Button("Sphere",            ImVec2(-1, 0))) SpawnSphere();
 		if (ImGui::Button("Grass (procedural)",ImVec2(-1, 0))) SpawnGrass();
@@ -89,6 +91,25 @@ void CoronaToolbox::SpawnPointLight()
 	comp.Color = glm::vec3(1.0f, 0.85f, 0.4f);
 	comp.Intensity = 10.0f;
 	comp.Radius = 20.0f;
+	Host->SetEntityLightForScript(e, comp, /*persist*/ false);
+}
+
+void CoronaToolbox::SpawnSpotLight()
+{
+	const std::string name = NextName("Light_Spot", NextSpawnId);
+	const CoronaECS::Entity e = Host->CreateEntity(name);
+	const glm::vec3 pos = SpawnPosInFront(Host, /*dist*/ 4.0f, /*snap*/ true) + glm::vec3(0, 1.5f, 0);
+	Host->SetEntityTransformForScript(e, pos, glm::vec3(0.0f), glm::vec3(1.0f));
+	CoronaECS::LightComponent comp;
+	comp.Type = CoronaECS::LightType::Spot;
+	comp.bEnabled = true;
+	comp.bCastShadow = true;
+	comp.Direction = glm::normalize(glm::vec3(0.0f, -0.35f, 1.0f));
+	comp.Color = glm::vec3(1.0f, 0.9f, 0.65f);
+	comp.Intensity = 18.0f;
+	comp.Radius = 28.0f;
+	comp.InnerConeAngle = 0.34906585f;
+	comp.OuterConeAngle = 0.78539816f;
 	Host->SetEntityLightForScript(e, comp, /*persist*/ false);
 }
 

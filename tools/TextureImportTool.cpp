@@ -2,6 +2,7 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <cstdint>
 #include <cwctype>
 #include <filesystem>
 #include <iostream>
@@ -36,6 +37,20 @@ namespace
 		return DXGI_FORMAT_UNKNOWN;
 	}
 
+	int ParseChannel(const std::wstring& value)
+	{
+		const std::wstring lower = ToLower(value);
+		if (lower == L"r" || lower == L"red" || lower == L"0")
+			return 0;
+		if (lower == L"g" || lower == L"green" || lower == L"1")
+			return 1;
+		if (lower == L"b" || lower == L"blue" || lower == L"2")
+			return 2;
+		if (lower == L"a" || lower == L"alpha" || lower == L"3")
+			return 3;
+		return -1;
+	}
+
 	bool IsBlockCompressed(DXGI_FORMAT format)
 	{
 		return DirectX::IsCompressed(format);
@@ -51,7 +66,32 @@ namespace
 		return DirectX::LoadFromWICFile(inputPath.c_str(), DirectX::WIC_FLAGS_FORCE_RGB, nullptr, image);
 	}
 
-	bool ConvertTexture(const std::wstring& inputPath, const std::wstring& outputPath, DXGI_FORMAT outputFormat, bool force)
+	HRESULT ExtractChannelImage(const DirectX::ScratchImage& rgbaImage, int channel, DirectX::ScratchImage& channelImage)
+	{
+		const DirectX::TexMetadata metadata = rgbaImage.GetMetadata();
+		const DirectX::Image* sourceImage = rgbaImage.GetImage(0, 0, 0);
+		if (!sourceImage || sourceImage->format != DXGI_FORMAT_R8G8B8A8_UNORM || channel < 0 || channel > 3)
+			return E_INVALIDARG;
+
+		HRESULT hr = channelImage.Initialize2D(DXGI_FORMAT_R8_UNORM, metadata.width, metadata.height, 1, 1);
+		if (FAILED(hr))
+			return hr;
+
+		const DirectX::Image* targetImage = channelImage.GetImage(0, 0, 0);
+		if (!targetImage)
+			return E_FAIL;
+
+		for (size_t y = 0; y < metadata.height; ++y)
+		{
+			const uint8_t* sourceRow = sourceImage->pixels + y * sourceImage->rowPitch;
+			uint8_t* targetRow = targetImage->pixels + y * targetImage->rowPitch;
+			for (size_t x = 0; x < metadata.width; ++x)
+				targetRow[x] = sourceRow[x * 4 + static_cast<size_t>(channel)];
+		}
+		return S_OK;
+	}
+
+	bool ConvertTexture(const std::wstring& inputPath, const std::wstring& outputPath, DXGI_FORMAT outputFormat, bool force, int extractChannel)
 	{
 		std::error_code ec;
 		if (!std::filesystem::exists(inputPath, ec))
@@ -108,8 +148,21 @@ namespace
 			}
 		}
 
+		const DirectX::ScratchImage* mipSource = &working;
+		DirectX::ScratchImage channelImage;
+		if (extractChannel >= 0)
+		{
+			hr = ExtractChannelImage(working, extractChannel, channelImage);
+			if (FAILED(hr))
+			{
+				std::wcerr << L"channel extraction failed: " << inputPath << L" hr=" << HrToString(hr) << L"\n";
+				return false;
+			}
+			mipSource = &channelImage;
+		}
+
 		DirectX::ScratchImage mipChain;
-		hr = DirectX::GenerateMipMaps(working.GetImages(), working.GetImageCount(), working.GetMetadata(), DirectX::TEX_FILTER_DEFAULT, 0, mipChain);
+		hr = DirectX::GenerateMipMaps(mipSource->GetImages(), mipSource->GetImageCount(), mipSource->GetMetadata(), DirectX::TEX_FILTER_DEFAULT, 0, mipChain);
 		if (FAILED(hr))
 		{
 			std::wcerr << L"mip generation failed: " << inputPath << L" hr=" << HrToString(hr) << L"\n";
@@ -155,7 +208,7 @@ namespace
 
 	void PrintUsage()
 	{
-		std::wcout << L"Usage: CoronaTextureImport.exe --input <path> --output <path> --format <bc7|bc5|bc4|rgba8> [--force]\n";
+		std::wcout << L"Usage: CoronaTextureImport.exe --input <path> --output <path> --format <bc7|bc5|bc4|rgba8> [--extract-channel <r|g|b|a>] [--force]\n";
 	}
 }
 
@@ -167,6 +220,7 @@ int wmain(int argc, wchar_t** argv)
 	std::wstring inputPath;
 	std::wstring outputPath;
 	std::wstring formatName = L"bc7";
+	int extractChannel = -1;
 	bool force = false;
 
 	for (int i = 1; i < argc; ++i)
@@ -178,6 +232,16 @@ int wmain(int argc, wchar_t** argv)
 			outputPath = argv[++i];
 		else if (arg == L"--format" && i + 1 < argc)
 			formatName = argv[++i];
+		else if (arg == L"--extract-channel" && i + 1 < argc)
+		{
+			extractChannel = ParseChannel(argv[++i]);
+			if (extractChannel < 0)
+			{
+				std::wcerr << L"invalid channel: " << argv[i] << L"\n";
+				PrintUsage();
+				return 2;
+			}
+		}
 		else if (arg == L"--force")
 			force = true;
 		else if (arg == L"--help" || arg == L"-h")
@@ -200,7 +264,7 @@ int wmain(int argc, wchar_t** argv)
 		return 2;
 	}
 
-	const bool succeeded = ConvertTexture(inputPath, outputPath, outputFormat, force);
+	const bool succeeded = ConvertTexture(inputPath, outputPath, outputFormat, force, extractChannel);
 	if (coInitialized)
 		CoUninitialize();
 	return succeeded ? 0 : 1;
