@@ -397,6 +397,15 @@ void DescriptorHeap::AllocDescriptors(D3D12_CPU_DESCRIPTOR_HANDLE& cpuHandle, D3
 	NumAllocated += num;
 }
 
+void DX12Backend::InvalidateGraphicsCommandStateCache()
+{
+	BoundGraphicsPipeline = nullptr;
+	BoundGraphicsPipelineForDiag = nullptr;
+	BoundVertexBuffer = nullptr;
+	BoundIndexBuffer = nullptr;
+	BoundPrimitiveTopology = D3D_PRIMITIVE_TOPOLOGY_UNDEFINED;
+}
+
 void DX12Backend::BeginFrame()
 {
 	CurrentFrameIndex = m_swapChain->GetCurrentBackBufferIndex();
@@ -409,6 +418,7 @@ void DX12Backend::BeginFrame()
 	
 	GlobalCmdList = CmdQ->AllocCmdList();
 	GlobalCmdList->Fence = CmdQ->CurrentFenceValue;
+	InvalidateGraphicsCommandStateCache();
 
 	ID3D12DescriptorHeap* ppHeaps[] = { SRVCBVDescriptorHeapShaderVisible->DH.Get(), SamplerDescriptorHeapShaderVisible->DH.Get() };
 	GlobalCmdList->CmdList->SetDescriptorHeaps(_countof(ppHeaps), ppHeaps);
@@ -967,8 +977,17 @@ void DX12Backend::DrawFullscreenQuad(VertexBuffer* vertexBuffer)
 	if (!vertexBuffer)
 		return;
 
-	GlobalCmdList->CmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
-	GlobalCmdList->CmdList->IASetVertexBuffers(0, 1, &vertexBuffer->view);
+	if (BoundPrimitiveTopology != D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP)
+	{
+		GlobalCmdList->CmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+		BoundPrimitiveTopology = D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP;
+	}
+	if (BoundVertexBuffer != vertexBuffer)
+	{
+		GlobalCmdList->CmdList->IASetVertexBuffers(0, 1, &vertexBuffer->view);
+		BoundVertexBuffer = vertexBuffer;
+	}
+	BoundIndexBuffer = nullptr;
 	GlobalCmdList->CmdList->DrawInstanced(4, 1, 0, 0);
 }
 
@@ -1023,10 +1042,25 @@ void DX12Backend::BindMeshBuffers(VertexBuffer* vertexBuffer, IndexBuffer* index
 		}
 	}
 
-	GlobalCmdList->CmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-	GlobalCmdList->CmdList->IASetIndexBuffer(&indexBuffer->view);
-	if (vertexBuffer)
+	if (BoundPrimitiveTopology != D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST)
+	{
+		GlobalCmdList->CmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+		BoundPrimitiveTopology = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
+	}
+	if (BoundIndexBuffer != indexBuffer)
+	{
+		GlobalCmdList->CmdList->IASetIndexBuffer(&indexBuffer->view);
+		BoundIndexBuffer = indexBuffer;
+	}
+	if (vertexBuffer && BoundVertexBuffer != vertexBuffer)
+	{
 		GlobalCmdList->CmdList->IASetVertexBuffers(0, 1, &vertexBuffer->view);
+		BoundVertexBuffer = vertexBuffer;
+	}
+	else if (!vertexBuffer)
+	{
+		BoundVertexBuffer = nullptr;
+	}
 }
 
 void DX12Backend::DrawIndexed(uint32_t indexCount, uint32_t startIndexLocation, int32_t baseVertexLocation)
@@ -1041,6 +1075,7 @@ void DX12Backend::DrawIndexedInstanced(uint32_t indexCountPerInstance, uint32_t 
 
 void DX12Backend::Dispatch(uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ)
 {
+	InvalidateGraphicsCommandStateCache();
 	GlobalCmdList->CmdList->Dispatch(groupCountX, groupCountY, groupCountZ);
 }
 
@@ -1064,6 +1099,7 @@ void DX12Backend::ExecuteCurrentCommandList()
 		return;
 
 	CmdQ->ExecuteCommandList(GlobalCmdList);
+	InvalidateGraphicsCommandStateCache();
 }
 
 void DX12Backend::BeginGpuMarker(uint64_t color, const char* label)
@@ -1968,22 +2004,10 @@ void PipelineStateObject::SetCBVValue(string name, void* pData, ID3D12GraphicsCo
 
 	CopyConstantBufferData(pMapped, binding.cbSize, pData, binding.sourceSize);
 
-	D3D12_CPU_DESCRIPTOR_HANDLE CpuHandle;
-	D3D12_GPU_DESCRIPTOR_HANDLE GpuHandle;
-
-	// ring is advanced at the begining of frame. so descriptors from multiple frame is not overlapped.
-	owner->GlobalDHRing->AllocDescriptor(CpuHandle, GpuHandle);
-
-	D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc = {};
-	cbvDesc.BufferLocation = GPUAddr;
-	cbvDesc.SizeInBytes = binding.cbSize;
-
-	owner->Device->CreateConstantBufferView(&cbvDesc, CpuHandle);
-
 	if (IsCompute)
-		CommandList->SetComputeRootDescriptorTable(binding.rootParamIndex, GpuHandle);
+		CommandList->SetComputeRootConstantBufferView(binding.rootParamIndex, GPUAddr);
 	else
-		CommandList->SetGraphicsRootDescriptorTable(binding.rootParamIndex, GpuHandle);
+		CommandList->SetGraphicsRootConstantBufferView(binding.rootParamIndex, GPUAddr);
 }
 
 void PipelineStateObject::SetRootConstant(string name, UINT value, ID3D12GraphicsCommandList* CommandList)
@@ -2057,22 +2081,16 @@ bool PipelineStateObject::Init()
 		}
 	}
 
-	vector<CD3DX12_DESCRIPTOR_RANGE1> CBRanges;
 	if (constantBufferBinding.size() != 0)
 	{
-
-		CBRanges.resize(constantBufferBinding.size());
-		int i = 0;
 		for (auto& bindingPair : constantBufferBinding)
 		{
 			PipelineStateObject::BindingData& bindingData = bindingPair.second;
 
 			CD3DX12_ROOT_PARAMETER1 CBParam;
-			CBRanges[i].Init(D3D12_DESCRIPTOR_RANGE_TYPE_CBV, bindingData.numDescriptors, bindingData.baseRegister, 0, D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE);
-			CBParam.InitAsDescriptorTable(1, &CBRanges[i], D3D12_SHADER_VISIBILITY_ALL);
+			CBParam.InitAsConstantBufferView(bindingData.baseRegister, 0, D3D12_ROOT_DESCRIPTOR_FLAG_NONE, D3D12_SHADER_VISIBILITY_ALL);
 
 			rootParamVec.push_back(CBParam);
-			i++;
 			bindingData.rootParamIndex = RootParamIndex++;
 		}
 	}
@@ -2164,6 +2182,8 @@ void PipelineStateObject::Apply(ID3D12GraphicsCommandList* CommandList)
 	assert(CommandList);
 	if (IsCompute)
 	{
+		if (Owner)
+			Owner->InvalidateGraphicsCommandStateCache();
 		CommandList->SetComputeRootSignature(RS.Get());
 		CommandList->SetPipelineState(PSO.Get());
 	}
@@ -4907,6 +4927,7 @@ void D3D12RTPipelineStateObject::Apply(uint32_t width, uint32_t height)
 	raytraceDesc.HitGroupTable.SizeInBytes = ShaderTableEntrySize * VecHitGroup.size() *NumInstance;
 
 	// Bind the empty root signature
+	owner->InvalidateGraphicsCommandStateCache();
 	CommandList->CmdList->SetComputeRootSignature(GlobalRS.Get());
 
 	UINT RPI = 0;
@@ -5444,8 +5465,19 @@ void DX12Backend::BindGraphicsPipeline(GraphicsPipelineHandle* pipeline)
 {
 	auto* dxPipeline = dynamic_cast<DX12GraphicsPipelineHandle*>(pipeline);
 	if (dxPipeline && dxPipeline->PSO)
-		dxPipeline->PSO->Apply();
-	BoundGraphicsPipelineForDiag = dxPipeline;
+	{
+		if (BoundGraphicsPipeline != dxPipeline)
+		{
+			dxPipeline->PSO->Apply();
+			BoundGraphicsPipeline = dxPipeline;
+		}
+		BoundGraphicsPipelineForDiag = dxPipeline;
+	}
+	else
+	{
+		BoundGraphicsPipeline = nullptr;
+		BoundGraphicsPipelineForDiag = nullptr;
+	}
 }
 
 void DX12Backend::SetGraphicsPipelineConstantData(GraphicsPipelineHandle* pipeline, uint32_t slot, const void* data, uint32_t size)
@@ -5459,9 +5491,19 @@ void DX12Backend::SetGraphicsPipelineConstantData(GraphicsPipelineHandle* pipeli
 	if (bindingIt == dxPipeline->PSO->constantBufferBinding.end())
 		return;
 
-	std::vector<uint8_t> sourceData(bindingIt->second.sourceSize, 0);
-	const uint32_t copySize = (std::min)(size, bindingIt->second.sourceSize);
-	std::memcpy(sourceData.data(), data, copySize);
+	const uint32_t sourceSize = bindingIt->second.sourceSize;
+	if (sourceSize == 0)
+		return;
+
+	if (size >= sourceSize)
+	{
+		dxPipeline->PSO->SetCBVValue("__CB0", const_cast<void*>(data));
+		return;
+	}
+
+	thread_local std::vector<uint8_t> sourceData;
+	sourceData.assign(sourceSize, 0);
+	std::memcpy(sourceData.data(), data, size);
 	dxPipeline->PSO->SetCBVValue("__CB0", sourceData.data());
 }
 

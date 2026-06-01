@@ -644,7 +644,12 @@ public:
 	// render correctly), but a mismatch indicates the same code will
 	// silently break on Vulkan. Non-owning — caller owns the handle.
 	GraphicsPipelineHandle* BoundGraphicsPipelineForDiag = nullptr;
+	GraphicsPipelineHandle* BoundGraphicsPipeline = nullptr;
+	VertexBuffer* BoundVertexBuffer = nullptr;
+	IndexBuffer* BoundIndexBuffer = nullptr;
+	D3D12_PRIMITIVE_TOPOLOGY BoundPrimitiveTopology = D3D_PRIMITIVE_TOPOLOGY_UNDEFINED;
 
+	void InvalidateGraphicsCommandStateCache();
 	void PresentBarrier(Texture* rt);
 	void ResourceBarrier(ID3D12Resource* Resource, D3D12_RESOURCE_STATES StateBefore, D3D12_RESOURCE_STATES StateAfter);
 
