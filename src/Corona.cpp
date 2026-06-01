@@ -129,6 +129,38 @@ namespace
 		return IsFiniteFloat(value.x) && IsFiniteFloat(value.y) && IsFiniteFloat(value.z);
 	}
 
+	void SyncImGuiDisplaySizeToBackbuffer(Texture* backbuffer)
+	{
+		if (!backbuffer || backbuffer->Width == 0 || backbuffer->Height == 0)
+			return;
+
+		const ImVec2 backbufferSize(
+			static_cast<float>(backbuffer->Width),
+			static_cast<float>(backbuffer->Height));
+		ImGuiIO& io = ImGui::GetIO();
+		const bool bMismatch =
+			std::fabs(io.DisplaySize.x - backbufferSize.x) > 0.5f ||
+			std::fabs(io.DisplaySize.y - backbufferSize.y) > 0.5f;
+		if (bMismatch)
+		{
+			static bool sLoggedDisplayMismatch = false;
+			if (!sLoggedDisplayMismatch)
+			{
+				AppendCpuRuntimeTrace(
+					L"[ImGui] Win32 display size " +
+					std::to_wstring(static_cast<int>(std::round(io.DisplaySize.x))) + L"x" +
+					std::to_wstring(static_cast<int>(std::round(io.DisplaySize.y))) +
+					L" adjusted to backbuffer " +
+					std::to_wstring(backbuffer->Width) + L"x" +
+					std::to_wstring(backbuffer->Height));
+				sLoggedDisplayMismatch = true;
+			}
+		}
+
+		io.DisplaySize = backbufferSize;
+		io.DisplayFramebufferScale = ImVec2(1.0f, 1.0f);
+	}
+
 	bool IsReasonableWorldPosition(const glm::vec3& value)
 	{
 		constexpr float kMaxReasonableWorldCoordinate = 1000000.0f;
@@ -8030,10 +8062,13 @@ void Corona::DrawStartupLoadingScreen()
 			renderBackend->PrepareWindowRenderTarget(backbuffer);
 		renderBackend->ClearRenderTarget(backbuffer, clearColor);
 		renderBackend->SetRenderTarget(backbuffer);
-		renderBackend->SetViewportAndScissor(m_width, m_height);
+		const UINT windowWidth = (backbuffer && backbuffer->Width > 0) ? backbuffer->Width : m_width;
+		const UINT windowHeight = (backbuffer && backbuffer->Height > 0) ? backbuffer->Height : m_height;
+		renderBackend->SetViewportAndScissor(windowWidth, windowHeight);
 
 		renderBackend->NewImGuiFrame();
 		NewPlatformImGuiFrame();
+		SyncImGuiDisplaySizeToBackbuffer(backbuffer);
 		ImGui::NewFrame();
 
 		ImGuiIO& io = ImGui::GetIO();
@@ -13453,6 +13488,7 @@ void Corona::OnRender()
 
 		renderBackend->NewImGuiFrame();
 		NewPlatformImGuiFrame();
+		SyncImGuiDisplaySizeToBackbuffer(backbuffer);
 		ImGui::NewFrame();
 		const auto imguiStageNewFrame = CpuClock::now();
 		tNewFrame = ElapsedMilliseconds(imguiStageStart, imguiStageNewFrame);

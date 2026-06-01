@@ -17,6 +17,7 @@
 #include "Corona.h"
 #include "Win32Application.h"
 #include "Utils.h"
+#include "imgui_impl_win32.h"
 #include <DbgHelp.h>
 #if CORONA_HAS_D3D12
 #include <dxgidebug.h>
@@ -320,6 +321,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow)
 {
 	SetUnhandledExceptionFilter(HandleUnhandledException);
 	std::set_terminate(HandleTerminate);
+
+	ImGui_ImplWin32_EnableDpiAwareness();
 
 	const wchar_t* commandLine = GetCommandLineW();
 	if (!HasCommandLineSwitch(commandLine, L"--enable-crash-dialog"))

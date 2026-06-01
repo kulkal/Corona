@@ -850,7 +850,10 @@ void Corona::ToneMapPass()
 	renderBackend->BindGraphicsPipelineTexture(ToneMapGraphicsPipeline.get(), "SrcTex", ResolveTarget);
 	renderBackend->BindGraphicsPipelineSampler(ToneMapGraphicsPipeline.get(), "sampleWrap", samplerWrap.get());
 	renderBackend->SetGraphicsPipelineConstantData(ToneMapGraphicsPipeline.get(), 0, &ToneMapCB, sizeof(ToneMapCB));
-	renderBackend->SetViewportAndScissor(m_width, m_height);
+	Texture* backbuffer = renderBackend->GetCurrentWindowRenderTarget();
+	const UINT outputWidth = (backbuffer && backbuffer->Width > 0) ? backbuffer->Width : m_width;
+	const UINT outputHeight = (backbuffer && backbuffer->Height > 0) ? backbuffer->Height : m_height;
+	renderBackend->SetViewportAndScissor(outputWidth, outputHeight);
 	renderBackend->DrawFullscreenQuad(FullScreenVB.get());
 }
 
