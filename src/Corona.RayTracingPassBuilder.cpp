@@ -28,58 +28,74 @@ Corona::RTPassBuilder& Corona::RTPassBuilder::BeginScene()
 	if (!PSO)
 		return *this;
 
+	const auto phaseStart = Corona::CpuClock::now();
 	PSO->SetNumInstances(static_cast<uint32_t>(Owner.RayTracingInstances.size()));
 	PSO->BeginShaderTable();
 	bBegan = true;
+	Owner.AddRtRecordPhaseTiming(ERtRecordPhase::BeginScene, phaseStart, Corona::CpuClock::now());
 	return *this;
 }
 
 Corona::RTPassBuilder& Corona::RTPassBuilder::SetTextureUAV(const char* shader, const char* bindingName, Texture* texture)
 {
+	const auto phaseStart = Corona::CpuClock::now();
 	if (PSO && texture)
 		PSO->SetTextureUAV(shader, bindingName, texture);
+	Owner.AddRtRecordPhaseTiming(ERtRecordPhase::BindResources, phaseStart, Corona::CpuClock::now());
 	return *this;
 }
 
 Corona::RTPassBuilder& Corona::RTPassBuilder::SetBufferUAV(const char* shader, const char* bindingName, Buffer* buffer)
 {
+	const auto phaseStart = Corona::CpuClock::now();
 	if (PSO && buffer)
 		PSO->SetBufferUAV(shader, bindingName, buffer);
+	Owner.AddRtRecordPhaseTiming(ERtRecordPhase::BindResources, phaseStart, Corona::CpuClock::now());
 	return *this;
 }
 
 Corona::RTPassBuilder& Corona::RTPassBuilder::SetTextureSRV(const char* shader, const char* bindingName, Texture* texture)
 {
+	const auto phaseStart = Corona::CpuClock::now();
 	if (PSO && texture)
 		PSO->SetTextureSRV(shader, bindingName, texture);
+	Owner.AddRtRecordPhaseTiming(ERtRecordPhase::BindResources, phaseStart, Corona::CpuClock::now());
 	return *this;
 }
 
 Corona::RTPassBuilder& Corona::RTPassBuilder::SetBufferSRV(const char* shader, const char* bindingName, Buffer* buffer)
 {
+	const auto phaseStart = Corona::CpuClock::now();
 	if (PSO && buffer)
 		PSO->SetBufferSRV(shader, bindingName, buffer);
+	Owner.AddRtRecordPhaseTiming(ERtRecordPhase::BindResources, phaseStart, Corona::CpuClock::now());
 	return *this;
 }
 
 Corona::RTPassBuilder& Corona::RTPassBuilder::SetAccelerationStructure(const char* shader, const char* bindingName, const shared_ptr<RTAS>& rtas)
 {
+	const auto phaseStart = Corona::CpuClock::now();
 	if (PSO && rtas)
 		PSO->SetAccelerationStructure(shader, bindingName, rtas);
+	Owner.AddRtRecordPhaseTiming(ERtRecordPhase::BindResources, phaseStart, Corona::CpuClock::now());
 	return *this;
 }
 
 Corona::RTPassBuilder& Corona::RTPassBuilder::SetSampler(const char* shader, const char* bindingName, Sampler* sampler)
 {
+	const auto phaseStart = Corona::CpuClock::now();
 	if (PSO && sampler)
 		PSO->SetSampler(shader, bindingName, sampler);
+	Owner.AddRtRecordPhaseTiming(ERtRecordPhase::BindResources, phaseStart, Corona::CpuClock::now());
 	return *this;
 }
 
 Corona::RTPassBuilder& Corona::RTPassBuilder::SetCBVValue(const char* shader, const char* bindingName, void* data)
 {
+	const auto phaseStart = Corona::CpuClock::now();
 	if (PSO && data)
 		PSO->SetCBVValue(shader, bindingName, data);
+	Owner.AddRtRecordPhaseTiming(ERtRecordPhase::BindResources, phaseStart, Corona::CpuClock::now());
 	return *this;
 }
 
@@ -91,6 +107,7 @@ uint32_t Corona::RTPassBuilder::BindSceneHitPrograms(const RTSceneHitProgramDesc
 	if (!bBegan)
 		BeginScene();
 
+	const auto phaseStart = Corona::CpuClock::now();
 	uint32_t boundCount = 0;
 	uint32_t instanceIndex = 0;
 	for (const RTInstanceDesc& instance : Owner.RayTracingInstances)
@@ -125,6 +142,7 @@ uint32_t Corona::RTPassBuilder::BindSceneHitPrograms(const RTSceneHitProgramDesc
 		++instanceIndex;
 	}
 
+	Owner.AddRtRecordPhaseTiming(ERtRecordPhase::BindHitPrograms, phaseStart, Corona::CpuClock::now());
 	return boundCount;
 }
 
@@ -136,8 +154,13 @@ void Corona::RTPassBuilder::Dispatch(uint32_t width, uint32_t height)
 	if (!bBegan)
 		BeginScene();
 
+	const auto endShaderTableStart = Corona::CpuClock::now();
 	PSO->EndShaderTable();
+	Owner.AddRtRecordPhaseTiming(ERtRecordPhase::EndShaderTable, endShaderTableStart, Corona::CpuClock::now());
+
+	const auto applyStart = Corona::CpuClock::now();
 	PSO->Apply(width, height);
+	Owner.AddRtRecordPhaseTiming(ERtRecordPhase::ApplyDispatch, applyStart, Corona::CpuClock::now());
 	bBegan = false;
 }
 

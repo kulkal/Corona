@@ -198,10 +198,21 @@ private:
 		Count
 	};
 
+	enum class ERtRecordPhase : UINT32
+	{
+		BeginScene = 0,
+		BindResources,
+		BindHitPrograms,
+		EndShaderTable,
+		ApplyDispatch,
+		Count
+	};
+
 	static constexpr UINT32 GpuPassCount = static_cast<UINT32>(EGpuPass::Count);
 	static constexpr UINT32 CpuUpdatePhaseCount = static_cast<UINT32>(ECpuUpdatePhase::Count);
 	static constexpr UINT32 RenderCommandPhaseCount = static_cast<UINT32>(ERenderCommandPhase::Count);
 	static constexpr UINT32 SceneFlushPhaseCount = static_cast<UINT32>(ESceneFlushPhase::Count);
+	static constexpr UINT32 RtRecordPhaseCount = static_cast<UINT32>(ERtRecordPhase::Count);
 	static constexpr UINT32 GpuQueriesPerPass = 2;
 	static constexpr UINT32 MobileShadowMapResolution = 512;
 	static constexpr UINT32 MobileShadowNearbyCasterCount = 10;
@@ -2058,6 +2069,10 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	std::array<float, SceneFlushPhaseCount> SceneFlushPhaseCompletedLastTimeMs = {};
 	std::array<float, SceneFlushPhaseCount> SceneFlushPhaseAverageTimeMs = {};
 	std::array<std::deque<float>, SceneFlushPhaseCount> SceneFlushPhaseHistoryMs = {};
+	std::array<float, RtRecordPhaseCount> RtRecordPhaseLastTimeMs = {};
+	std::array<float, RtRecordPhaseCount> RtRecordPhaseCompletedLastTimeMs = {};
+	std::array<float, RtRecordPhaseCount> RtRecordPhaseAverageTimeMs = {};
+	std::array<std::deque<float>, RtRecordPhaseCount> RtRecordPhaseHistoryMs = {};
 	bool bFramePerfLogInitialized = false;
 	UINT64 FramePerfLogTotalFrameCount = 0;
 	UINT32 FramePerfLogSampleFrameCount = 0;
@@ -2068,6 +2083,7 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	std::array<double, CpuUpdatePhaseCount> FramePerfLogAccumCpuUpdatePhaseMs = {};
 	std::array<double, RenderCommandPhaseCount> FramePerfLogAccumRenderCommandPhaseMs = {};
 	std::array<double, SceneFlushPhaseCount> FramePerfLogAccumSceneFlushPhaseMs = {};
+	std::array<double, RtRecordPhaseCount> FramePerfLogAccumRtRecordPhaseMs = {};
 	double FramePerfLogAccumBeginFrameMs = 0.0;
 	double FramePerfLogAccumRecordMs = 0.0;
 	double FramePerfLogAccumExecuteMs = 0.0;
@@ -2108,6 +2124,7 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	const char* GetSceneFlushPhaseName(ESceneFlushPhase phase) const;
 	void AddRenderCommandPhaseTiming(ERenderCommandPhase phase, const CpuClock::time_point& begin, const CpuClock::time_point& end);
 	void AddSceneFlushPhaseTiming(ESceneFlushPhase phase, const CpuClock::time_point& begin, const CpuClock::time_point& end);
+	void AddRtRecordPhaseTiming(ERtRecordPhase phase, const CpuClock::time_point& begin, const CpuClock::time_point& end);
 	void AddCpuUpdatePhaseTiming(ECpuUpdatePhase phase, const CpuClock::time_point& begin, const CpuClock::time_point& end);
 	void FinishCpuUpdateTiming(const CpuClock::time_point& begin, const CpuClock::time_point& end);
 	void TrimCpuUpdateTimingHistory();

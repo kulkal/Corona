@@ -963,6 +963,14 @@ namespace
 		"rebuild_pso_refresh",
 	};
 
+	constexpr std::array<const char*, 5> kRtRecordPhaseLogColumnNames = {
+		"begin_scene",
+		"bind_resources",
+		"bind_hit_programs",
+		"end_shader_table",
+		"apply_dispatch",
+	};
+
 	std::filesystem::path GetFramePerfLogPath()
 	{
 		return RuntimePaths::LogFile(L"fps_perf.log");
@@ -1476,6 +1484,10 @@ void Corona::BeginFramePerfLogging()
 			{
 				logFile << ",avg_scene_flush_" << kSceneFlushPhaseLogColumnNames[phaseIndex] << "_ms";
 			}
+			for (UINT phaseIndex = 0; phaseIndex < RtRecordPhaseCount; ++phaseIndex)
+			{
+				logFile << ",avg_rt_record_" << kRtRecordPhaseLogColumnNames[phaseIndex] << "_ms";
+			}
 			for (UINT phaseIndex = 0; phaseIndex < CpuUpdatePhaseCount; ++phaseIndex)
 			{
 				logFile << ",avg_update_" << kCpuUpdatePhaseLogColumnNames[phaseIndex] << "_ms";
@@ -1497,6 +1509,7 @@ void Corona::BeginFramePerfLogging()
 	CpuPassActiveMask.fill(0);
 	RenderCommandPhaseLastTimeMs.fill(0.0f);
 	SceneFlushPhaseLastTimeMs.fill(0.0f);
+	RtRecordPhaseLastTimeMs.fill(0.0f);
 }
 
 void Corona::FinishFramePerfLogging(double beginFrameMs, double executeMs, double endFrameMs, double renderWaitMs)
@@ -1547,6 +1560,22 @@ void Corona::FinishFramePerfLogging(double beginFrameMs, double executeMs, doubl
 		for (float sampleMs : history)
 			sumMs += sampleMs;
 		SceneFlushPhaseAverageTimeMs[phaseIndex] = history.empty() ? 0.0f : (sumMs / static_cast<float>(history.size()));
+	}
+	for (UINT phaseIndex = 0; phaseIndex < RtRecordPhaseCount; ++phaseIndex)
+	{
+		const float phaseMs = RtRecordPhaseLastTimeMs[phaseIndex];
+		RtRecordPhaseCompletedLastTimeMs[phaseIndex] = phaseMs;
+		FramePerfLogAccumRtRecordPhaseMs[phaseIndex] += phaseMs;
+		auto& history = RtRecordPhaseHistoryMs[phaseIndex];
+		history.push_back(phaseMs);
+		while (history.size() > GpuTimingAverageFrameCount)
+			history.pop_front();
+
+		float sumMs = 0.0f;
+		for (float sampleMs : history)
+			sumMs += sampleMs;
+		RtRecordPhaseAverageTimeMs[phaseIndex] =
+			history.empty() ? 0.0f : (sumMs / static_cast<float>(history.size()));
 	}
 	FramePerfLogAccumBeginFrameMs += beginFrameMs;
 	FramePerfLogAccumRecordMs += recordMs;
@@ -1610,6 +1639,10 @@ void Corona::FinishFramePerfLogging(double beginFrameMs, double executeMs, doubl
 		{
 			logFile << "," << (FramePerfLogAccumSceneFlushPhaseMs[phaseIndex] / sampleFrameCount);
 		}
+		for (UINT phaseIndex = 0; phaseIndex < RtRecordPhaseCount; ++phaseIndex)
+		{
+			logFile << "," << (FramePerfLogAccumRtRecordPhaseMs[phaseIndex] / sampleFrameCount);
+		}
 		for (UINT phaseIndex = 0; phaseIndex < CpuUpdatePhaseCount; ++phaseIndex)
 		{
 			logFile << "," << (FramePerfLogAccumCpuUpdatePhaseMs[phaseIndex] / sampleFrameCount);
@@ -1657,6 +1690,7 @@ void Corona::FinishFramePerfLogging(double beginFrameMs, double executeMs, doubl
 	FramePerfLogAccumCpuUpdatePhaseMs.fill(0.0);
 	FramePerfLogAccumRenderCommandPhaseMs.fill(0.0);
 	FramePerfLogAccumSceneFlushPhaseMs.fill(0.0);
+	FramePerfLogAccumRtRecordPhaseMs.fill(0.0);
 	FramePerfLogAccumBeginFrameMs = 0.0;
 	FramePerfLogAccumRecordMs = 0.0;
 	FramePerfLogAccumExecuteMs = 0.0;
@@ -1827,6 +1861,15 @@ void Corona::AddSceneFlushPhaseTiming(
 {
 	const UINT phaseIndex = static_cast<UINT>(phase);
 	SceneFlushPhaseLastTimeMs[phaseIndex] += static_cast<float>(ElapsedMilliseconds(begin, end));
+}
+
+void Corona::AddRtRecordPhaseTiming(
+	ERtRecordPhase phase,
+	const CpuClock::time_point& begin,
+	const CpuClock::time_point& end)
+{
+	const UINT phaseIndex = static_cast<UINT>(phase);
+	RtRecordPhaseLastTimeMs[phaseIndex] += static_cast<float>(ElapsedMilliseconds(begin, end));
 }
 
 void Corona::AddCpuUpdatePhaseTiming(
