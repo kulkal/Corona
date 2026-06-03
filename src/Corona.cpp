@@ -13060,12 +13060,15 @@ void Corona::DrawEditorModeOverlay()
 
 				if (bLightingChanged)
 				{
+					// Apply the new lighting values only. Do NOT reset temporal /
+					// DLSS accumulation on a light-property change: forcing an
+					// upscaler reload (DLSS-RR) here recreated render-resolution
+					// RTVs mid-frame and crashed the NV driver (stale RTV in
+					// OMSetRenderTargets). The temporal history converges on its
+					// own as the lighting changes.
 					SyncCurrentLightingSettingsToFrameSourceState();
-					const bool bForceUpscaleReload = IsDLSSMode(AntiAliasingMode);
-					ResetAllAccumulationState(bForceUpscaleReload);
 					AppendCpuRuntimeTrace(
-						L"[LightingControls] changed, forceUpscaleReload=" + std::to_wstring(bForceUpscaleReload ? 1 : 0) +
-						L", diffuseGI=" + std::to_wstring(bEnableDiffuseGI ? 1 : 0) +
+						L"[LightingControls] changed (no temporal reset), diffuseGI=" + std::to_wstring(bEnableDiffuseGI ? 1 : 0) +
 						L", specularGI=" + std::to_wstring(bEnableSpecularGI ? 1 : 0));
 				}
 			}
@@ -13238,12 +13241,15 @@ void Corona::DrawEditorModeOverlay()
 
 				if (bLightingChanged)
 				{
+					// Apply the new lighting values only. Do NOT reset temporal /
+					// DLSS accumulation on a light-property change: forcing an
+					// upscaler reload (DLSS-RR) here recreated render-resolution
+					// RTVs mid-frame and crashed the NV driver (stale RTV in
+					// OMSetRenderTargets). The temporal history converges on its
+					// own as the lighting changes.
 					SyncCurrentLightingSettingsToFrameSourceState();
-					const bool bForceUpscaleReload = IsDLSSMode(AntiAliasingMode);
-					ResetAllAccumulationState(bForceUpscaleReload);
 					AppendCpuRuntimeTrace(
-						L"[LightingControls] changed, forceUpscaleReload=" + std::to_wstring(bForceUpscaleReload ? 1 : 0) +
-						L", diffuseGI=" + std::to_wstring(bEnableDiffuseGI ? 1 : 0) +
+						L"[LightingControls] changed (no temporal reset), diffuseGI=" + std::to_wstring(bEnableDiffuseGI ? 1 : 0) +
 						L", specularGI=" + std::to_wstring(bEnableSpecularGI ? 1 : 0));
 				}
 			}
