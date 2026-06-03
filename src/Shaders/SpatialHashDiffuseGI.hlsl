@@ -387,15 +387,63 @@ int ComputePlaneBin(float3 worldPos, float3 normal)
     return int(floor((dot(worldPos, normal) / safeCellSize) * 2.0f + 0.5f));
 }
 
-uint HashCellKeyFromCell(int3 cell, float3 normal, int planeBin)
+uint HashCellKeyFromBits(int3 cell, uint normalBits, int planeBin)
 {
     uint h = uint(cell.x) * 73856093u;
     h ^= uint(cell.y) * 19349663u;
     h ^= uint(cell.z) * 83492791u;
-    h ^= EncodeNormalBits(normal) * 2654435761u;
+    h ^= normalBits * 2654435761u;
     h ^= uint(planeBin) * 1597334677u;
     h = HashUInt(h);
     return h == 0u ? 1u : h;
+}
+
+uint HashCellKeyFromCell(int3 cell, float3 normal, int planeBin)
+{
+    return HashCellKeyFromBits(cell, EncodeNormalBits(normal), planeBin);
+}
+
+// Normal-bin blending (curved/slanted surfaces). EncodeNormalBits quantizes the
+// normal to 8 levels/axis, so a smoothly-curving surface crosses bin boundaries
+// and adjacent pixels hash to different cells -> visible comb/banding. When the
+// query normal sits near a bin boundary, return the adjacent bin's encoded bits
+// and a blend weight so the query can mix both cells' SH and dissolve the seam.
+// Only the axis nearest a boundary is considered (one extra lookup, gated to
+// near-boundary pixels), keeping the per-pixel cost bounded.
+#ifndef SPATIAL_HASH_NORMAL_BIN_BLEND
+#define SPATIAL_HASH_NORMAL_BIN_BLEND 1
+#endif
+// Blend only when within this fraction of a bin boundary (|frac| in (0,0.5]);
+// larger => blend kicks in closer to the boundary (cheaper, sharper).
+#ifndef SPATIAL_HASH_NORMAL_BLEND_MIN_FRAC
+#define SPATIAL_HASH_NORMAL_BLEND_MIN_FRAC 0.28f
+#endif
+
+bool ComputeNormalBinNeighbor(float3 normal, out uint neighborBits, out float blendWeight)
+{
+    neighborBits = 0u;
+    blendWeight = 0.0f;
+    normal = SafeNormalize(normal, float3(0.0f, 1.0f, 0.0f));
+    float3 e = saturate(normal * 0.5f + 0.5f) * 7.0f; // encoded float, matches EncodeNormalBits
+    int3 bin = int3(e + 0.5f);
+    float3 fr = e - float3(bin);                       // (-0.5, 0.5)
+    float3 af = abs(fr);
+    int axis = (af.x >= af.y && af.x >= af.z) ? 0 : (af.y >= af.z ? 1 : 2);
+    float fa = (axis == 0) ? fr.x : ((axis == 1) ? fr.y : fr.z);
+    float aaf = abs(fa);
+    if (aaf < SPATIAL_HASH_NORMAL_BLEND_MIN_FRAC)
+        return false; // well inside the bin — no seam, skip the extra lookup
+    int cur = (axis == 0) ? bin.x : ((axis == 1) ? bin.y : bin.z);
+    int nb = clamp(cur + (fa > 0.0f ? 1 : -1), 0, 7);
+    if (nb == cur)
+        return false; // at the hemisphere edge, no neighbour bin
+    int3 nbin = bin;
+    if (axis == 0) nbin.x = nb; else if (axis == 1) nbin.y = nb; else nbin.z = nb;
+    neighborBits = (uint(nbin.x) & 7u) | ((uint(nbin.y) & 7u) << 3u) | ((uint(nbin.z) & 7u) << 6u);
+    // Ramp 0..0.5 from the threshold to the boundary for a seamless transition.
+    blendWeight = saturate((aaf - SPATIAL_HASH_NORMAL_BLEND_MIN_FRAC) /
+                           max(0.5f - SPATIAL_HASH_NORMAL_BLEND_MIN_FRAC, 1e-3f)) * 0.5f;
+    return true;
 }
 
 uint HashCellKey(float3 worldPos, float3 normal)
@@ -645,6 +693,36 @@ bool LoadCachedSHForCell(int3 cell, float3 normal, float3 queryWorldPos,
 
     if (bestScore <= 1e-5f)
         return false;
+
+#if SPATIAL_HASH_NORMAL_BIN_BLEND
+    // Crossfade with the adjacent normal bin when the query normal is near a
+    // bin boundary, dissolving the comb seam on curved/slanted surfaces. One
+    // extra lookup, only near boundaries; ComputeSurfaceLobeWeight rejects any
+    // mismatched surface so this can't leak across orientations.
+    uint neighborBits;
+    float nblend;
+    if (ComputeNormalBinNeighbor(normal, neighborBits, nblend))
+    {
+        uint nslot = 0u;
+        uint nkey = HashCellKeyFromBits(cell, neighborBits, basePlaneBin);
+        if (FindSlotForRead(nkey, nslot))
+        {
+            float nw = ComputeSurfaceLobeWeight(nslot, queryWorldPos, normal);
+            if (nw > 1e-4f)
+            {
+                float nhist = 0.0f;
+                SH4RGB nsh = LoadResolvedSH(nslot, nhist);
+                if (nhist > 0.0f && SHAbsEnergy(nsh) > 1e-7f)
+                {
+                    float t = saturate(nblend);
+                    bestSH = LerpSH(bestSH, nsh, t);
+                    bestHistoryFrames = lerp(bestHistoryFrames, nhist, t);
+                    bestWeight = max(bestWeight, nw);
+                }
+            }
+        }
+    }
+#endif
 
     sh = bestSH;
     historyFrames = bestHistoryFrames;
