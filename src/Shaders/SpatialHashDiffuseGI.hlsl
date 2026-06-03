@@ -430,6 +430,54 @@ bool FindSlotForWrite(uint key, out uint slot, out bool inserted)
         }
     }
 
+    // Probe window is full of other cells. Rather than fail (which left a
+    // newly-visible cell black for many seconds until its window aged out),
+    // evict the LEAST-recently-seen slot in the window (LRU) so the new cell is
+    // allocated THIS frame. Key-REPLACEMENT (the slot stays non-zero) keeps the
+    // linear-probe chain intact: reads for the evicted key correctly miss, and
+    // reads for other keys still probe past this slot. We zero the victim's
+    // ResolvedSH0 (history lives in .w) so the resolve treats it as fresh and
+    // does not blend the evicted cell's radiance into the new one.
+    // Inlined frame stamp (GetActiveFrameStamp is defined later in the file).
+    uint curStamp = (FrameIndex & 0x7fffffffu) + 1u;
+    if (curStamp == SPATIAL_HASH_ACTIVE_INIT)
+        curStamp = 1u;
+    uint victim = 0u;
+    uint victimKey = 0u;
+    uint oldestAge = 0u;
+    [loop]
+    for (uint p = 0u; p < 16u; ++p)
+    {
+        if (p >= probeCount)
+            break;
+        uint candidate = (startSlot + p) & HashEntryMask;
+        uint stamp = ActiveFlagsOut[candidate];
+        // Skip slots being set up (mid-init / not yet stamped) and slots already
+        // marked active this frame — evicting those would thrash live cells.
+        if (stamp == SPATIAL_HASH_ACTIVE_INIT || stamp == 0u || stamp == curStamp)
+            continue;
+        uint a = curStamp - stamp; // larger = older / least-recently-seen
+        if (a >= oldestAge)
+        {
+            oldestAge = a;
+            victim = candidate;
+            victimKey = ResolvedKeysOut[candidate];
+        }
+    }
+
+    if (victimKey != 0u)
+    {
+        uint prevKey = 0u;
+        InterlockedCompareExchange(ResolvedKeysOut[victim], victimKey, key, prevKey);
+        if (prevKey == victimKey || prevKey == key)
+        {
+            ResolvedSH0Out[victim] = 0.0f.xxxx; // history = 0 => resolve replaces
+            slot = victim;
+            inserted = true;
+            return true;
+        }
+    }
+
     slot = 0u;
     inserted = false;
     return false;

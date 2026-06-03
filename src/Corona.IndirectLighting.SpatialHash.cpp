@@ -333,6 +333,9 @@ void Corona::SpatialHashGIPass()
 	SpatialHashGIUpdatePSO->SetBufferUAV("CellScoreOut", SpatialHashGICellScore.get());
 	SpatialHashGIUpdatePSO->SetBufferUAV("CellLightMaskOut", SpatialHashGICellLightMask.get());
 	SpatialHashGIUpdatePSO->SetBufferUAV("ResolvedKeysOut", SpatialHashGIResolvedKeys[cacheIndex].get());
+	// Bound so FindSlotForWrite's LRU eviction can reset the victim slot's
+	// history (.w of SH0) to 0, marking it fresh for the resolve pass.
+	SpatialHashGIUpdatePSO->SetBufferUAV("ResolvedSH0Out", SpatialHashGIResolvedSH[cacheIndex][0].get());
 	SpatialHashGIUpdatePSO->SetBufferUAV("ActiveCellSlotsOut", SpatialHashGIActiveCellSlots.get());
 	SpatialHashGIUpdatePSO->SetBufferUAV("ActiveCounterOut", SpatialHashGIActiveCounter.get());
 	SpatialHashGIUpdatePSO->SetCBVValue("SpatialHashGIConstant", &SpatialHashGICB);
