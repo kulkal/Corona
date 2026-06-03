@@ -826,6 +826,10 @@ local function draw_lighting_controls(state)
         slider_float_state(state, "screen_probe_edge_normal", "Screen Probe Edge Normal", "script.screen_probe.edge_normal", 1.0, 96.0)
         slider_int_state(state, "screen_probe_edge_samples", "Screen Probe Edge Samples", "script.screen_probe.edge_samples", 1, 4)
     elseif state.diffuse_gi_mode == 1 and state.rendering_mode == 0 then
+        combo_state_zero_based(state, "spatial_hash_gi_mode", "Spatial Hash GI Variant", "script.spatial_hash.gi_mode", {
+            "SH4 (legacy)",
+            "Octahedral DDGI",
+        })
         slider_float_state(state, "spatial_hash_cell_size", "Spatial Hash Cell Size", "script.spatial_hash.cell_size", 4.0, 256.0)
         slider_int_state(state, "spatial_hash_rays_per_cell", "Spatial Hash Rays / Cell", "script.spatial_hash.rays_per_cell", 1, 8)
         slider_int_state(state, "spatial_hash_max_bounces", "Spatial Hash Max Bounces", "script.spatial_hash.max_bounces", 1, 8)

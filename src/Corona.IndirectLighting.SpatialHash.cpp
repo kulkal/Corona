@@ -77,6 +77,12 @@ void Corona::InitSpatialHashGIPass()
 		pso->BindUAV("ActiveCellSlotsOut", 11);
 		pso->BindUAV("ActiveCounterOut", 12);
 		pso->BindUAV("CellLightMaskOut", 14);
+		// Octahedral DDGI (GIMode==1): per-ray scratch + irradiance/depth atlas.
+		pso->BindSRV("OctRayDataIn", 27, 1);
+		pso->BindSRV("OctIrradianceIn", 28, 1);
+		pso->BindSRV("OctDepthIn", 29, 1);
+		pso->BindUAV("OctIrradianceOut", 15);
+		pso->BindUAV("OctDepthOut", 16);
 		pso->BindCBV("SpatialHashGIConstant", 0, sizeof(SpatialHashGIConstant));
 
 		if (!pso->InitCS(GetAssetFullPath(L"Shaders\\SpatialHashDiffuseGI.hlsl"), entryPoint))
@@ -90,6 +96,8 @@ void Corona::InitSpatialHashGIPass()
 	SpatialHashGIResolvePSO = createSpatialHashPSO("SpatialHashResolve");
 	SpatialHashGIQueryPSO = createSpatialHashPSO("SpatialHashQuery");
 	SpatialHashGIScreenResolvePSO = createSpatialHashPSO("SpatialHashScreenResolve");
+	SpatialHashGIOctBlendPSO = createSpatialHashPSO("SpatialHashOctBlend");
+	SpatialHashGIOctDepthBlendPSO = createSpatialHashPSO("SpatialHashOctDepthBlend");
 }
 
 shared_ptr<RTPipelineStateObject> Corona::CreateRaytracingSpatialHashGIPSO(bool bUseSER)
@@ -112,6 +120,7 @@ shared_ptr<RTPipelineStateObject> Corona::CreateRaytracingSpatialHashGIPSO(bool 
 		tempPSO->BindUAV("global", "TraceSH1", 1);
 		tempPSO->BindUAV("global", "TraceSH2", 2);
 		tempPSO->BindUAV("global", "TraceSH3", 3);
+		tempPSO->BindUAV("global", "OctRayData", 4);
 		tempPSO->BindSRV("global", "gRtScene", 0);
 		tempPSO->BindSRV("global", "CellKeys", 1);
 		tempPSO->BindSRV("global", "CellPosition", 2);
@@ -199,6 +208,9 @@ void Corona::SpatialHashGIPass()
 
 	const UINT32 cacheIndex = 0u;
 	const UINT32 spatialHashTraceCellBudget = std::min(SpatialHashGITraceCellBudget, SpatialHashGIActiveCellCapacity);
+	const bool bOctMode = (SpatialHashGICB.GIMode == 1u);
+	const bool bHasOctBuffers = SpatialHashGIOctRayData && SpatialHashGIOctIrradiance[0] && SpatialHashGIOctBlendPSO;
+	const bool bUseOct = bOctMode && bHasOctBuffers;
 
 	SpatialHashGICB.HashEntryCount = SpatialHashGIEntryCount;
 	SpatialHashGICB.HashEntryMask = SpatialHashGIEntryCount - 1u;
@@ -255,6 +267,10 @@ void Corona::SpatialHashGIPass()
 	RTSpatialHashGIViewParam.bIncludeSkyLighting = RenderFrameDiffuseGISkyLightingEnabled;
 	RTSpatialHashGIViewParam.HashEntryMask = SpatialHashGIEntryCount - 1u;
 	RTSpatialHashGIViewParam.MaxProbeSteps = SpatialHashGICB.MaxProbeSteps;
+	RTSpatialHashGIViewParam.GIMode = SpatialHashGICB.GIMode;
+	RTSpatialHashGIViewParam.OctCellCapacity = SpatialHashGIOctCellCapacity;
+	RTSpatialHashGIViewParam.OctRaysPerCell = SpatialHashGIOctRaysPerCell;
+	RTSpatialHashGIViewParam.CameraPosition = glm::vec4(glm::vec3(InvViewMat[3]), 0.0f);
 	FillPointLightParams(
 		RTSpatialHashGIViewParam.PointLights,
 		RTSpatialHashGIViewParam.PointLightCount,
@@ -351,12 +367,18 @@ void Corona::SpatialHashGIPass()
 	renderBackend->TransitionBuffer(SpatialHashGICellLightMask.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
 	renderBackend->TransitionBuffer(SpatialHashGIResolvedKeys[cacheIndex].get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
 
+	// OctRayData is bound as a UAV on the RT PSO in both modes (written only in
+	// oct mode), so keep it in UnorderedAccess for the dispatch regardless.
+	if (SpatialHashGIOctRayData)
+		renderBackend->TransitionBuffer(SpatialHashGIOctRayData.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
+
 	RTPassBuilder pass(*this, rtPSO);
 	pass.BeginScene()
 		.SetBufferUAV("global", "TraceSH0", SpatialHashGITraceSH[0].get())
 		.SetBufferUAV("global", "TraceSH1", SpatialHashGITraceSH[1].get())
 		.SetBufferUAV("global", "TraceSH2", SpatialHashGITraceSH[2].get())
 		.SetBufferUAV("global", "TraceSH3", SpatialHashGITraceSH[3].get())
+		.SetBufferUAV("global", "OctRayData", SpatialHashGIOctRayData.get())
 		.SetAccelerationStructure("global", "gRtScene", TLAS)
 		.SetBufferSRV("global", "CellKeys", SpatialHashGIResolvedKeys[cacheIndex].get())
 		.SetBufferSRV("global", "CellPosition", SpatialHashGICellPosition.get())
@@ -368,7 +390,12 @@ void Corona::SpatialHashGIPass()
 		.SetCBVValue("global", "ViewParameter", &RTSpatialHashGIViewParam)
 		.SetSampler("global", "sampleWrap", samplerWrap.get());
 	pass.BindSceneHitPrograms();
-	pass.Dispatch(spatialHashTraceCellBudget, 1u);
+	// Oct mode dispatches one ray per (probe, ray); SH mode one thread per cell.
+	const UINT32 octRayDispatch = SpatialHashGIOctCellCapacity * SpatialHashGIOctRaysPerCell;
+	pass.Dispatch(bUseOct ? octRayDispatch : spatialHashTraceCellBudget, 1u);
+
+	if (SpatialHashGIOctRayData)
+		renderBackend->TransitionBuffer(SpatialHashGIOctRayData.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
 
 	for (UINT coefficientIndex = 0; coefficientIndex < SpatialHashGISHCoefficientCount; ++coefficientIndex)
 		renderBackend->TransitionBuffer(SpatialHashGITraceSH[coefficientIndex].get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
@@ -394,6 +421,43 @@ void Corona::SpatialHashGIPass()
 	for (UINT coefficientIndex = 0; coefficientIndex < SpatialHashGISHCoefficientCount; ++coefficientIndex)
 		renderBackend->TransitionBuffer(SpatialHashGIResolvedSH[cacheIndex][coefficientIndex].get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
 
+	// Octahedral DDGI blend: convolve this frame's per-ray radiance (OctRayData)
+	// into each probe's octahedral irradiance map with temporal hysteresis. Runs
+	// in addition to the (now inert) SH resolve so all SH state transitions stay
+	// intact; the query reads the oct atlas instead of the SH when GIMode==1.
+	if (bUseOct)
+	{
+		renderBackend->TransitionBuffer(SpatialHashGIOctIrradiance[0].get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
+		SpatialHashGIOctBlendPSO->SetBufferSRV("ActiveCellSlotsIn", SpatialHashGIActiveCellSlots.get());
+		SpatialHashGIOctBlendPSO->SetBufferSRV("ActiveCounterIn", SpatialHashGIActiveCounter.get());
+		SpatialHashGIOctBlendPSO->SetBufferSRV("ResolvedKeysIn", SpatialHashGIResolvedKeys[cacheIndex].get());
+		SpatialHashGIOctBlendPSO->SetBufferSRV("CellPositionIn", SpatialHashGICellPosition.get());
+		SpatialHashGIOctBlendPSO->SetBufferSRV("OctRayDataIn", SpatialHashGIOctRayData.get());
+		SpatialHashGIOctBlendPSO->SetBufferUAV("OctIrradianceOut", SpatialHashGIOctIrradiance[0].get());
+		SpatialHashGIOctBlendPSO->SetCBVValue("SpatialHashGIConstant", &SpatialHashGICB);
+		SpatialHashGIOctBlendPSO->Apply();
+		const UINT32 octBlendThreads = SpatialHashGIOctCellCapacity * SpatialHashGIOctIrradianceTexels;
+		renderBackend->Dispatch((octBlendThreads + 63u) / 64u, 1u, 1u);
+		renderBackend->TransitionBuffer(SpatialHashGIOctIrradiance[0].get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
+
+		// Octahedral depth/visibility blend: build the per-probe octahedral depth
+		// map (mean, mean^2 of hit distances) consumed by Chebyshev at query time.
+		if (SpatialHashGIOctDepthBlendPSO && SpatialHashGIOctDepth[0])
+		{
+			renderBackend->TransitionBuffer(SpatialHashGIOctDepth[0].get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
+			SpatialHashGIOctDepthBlendPSO->SetBufferSRV("ActiveCellSlotsIn", SpatialHashGIActiveCellSlots.get());
+			SpatialHashGIOctDepthBlendPSO->SetBufferSRV("ActiveCounterIn", SpatialHashGIActiveCounter.get());
+			SpatialHashGIOctDepthBlendPSO->SetBufferSRV("ResolvedKeysIn", SpatialHashGIResolvedKeys[cacheIndex].get());
+			SpatialHashGIOctDepthBlendPSO->SetBufferSRV("OctRayDataIn", SpatialHashGIOctRayData.get());
+			SpatialHashGIOctDepthBlendPSO->SetBufferUAV("OctDepthOut", SpatialHashGIOctDepth[0].get());
+			SpatialHashGIOctDepthBlendPSO->SetCBVValue("SpatialHashGIConstant", &SpatialHashGICB);
+			SpatialHashGIOctDepthBlendPSO->Apply();
+			const UINT32 octDepthThreads = SpatialHashGIOctCellCapacity * SpatialHashGIOctDepthTexels;
+			renderBackend->Dispatch((octDepthThreads + 63u) / 64u, 1u, 1u);
+			renderBackend->TransitionBuffer(SpatialHashGIOctDepth[0].get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
+		}
+	}
+
 	renderBackend->TransitionTexture(DiffuseGIHashCached.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
 	renderBackend->TransitionTexture(DiffuseGIHashCachedAux.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
 
@@ -413,6 +477,8 @@ void Corona::SpatialHashGIPass()
 	SpatialHashGIQueryPSO->SetBufferSRV("ResolvedSH1In", SpatialHashGIResolvedSH[cacheIndex][1].get());
 	SpatialHashGIQueryPSO->SetBufferSRV("ResolvedSH2In", SpatialHashGIResolvedSH[cacheIndex][2].get());
 	SpatialHashGIQueryPSO->SetBufferSRV("ResolvedSH3In", SpatialHashGIResolvedSH[cacheIndex][3].get());
+	SpatialHashGIQueryPSO->SetBufferSRV("OctIrradianceIn", SpatialHashGIOctIrradiance[0].get());
+	SpatialHashGIQueryPSO->SetBufferSRV("OctDepthIn", SpatialHashGIOctDepth[0].get());
 	SpatialHashGIQueryPSO->SetTextureUAV("OutGIHashColor", DiffuseGIHashCached.get());
 	SpatialHashGIQueryPSO->SetTextureUAV("OutGIHashSH", DiffuseGIHashCachedAux.get());
 	SpatialHashGIQueryPSO->SetCBVValue("SpatialHashGIConstant", &SpatialHashGICB);

@@ -86,7 +86,8 @@ cbuffer LightingParam : register(b0)
     uint4 ShadowChannelMap[MAX_POINT_LIGHTS / 4];
     PointLightParam PointLights[MAX_POINT_LIGHTS];
     uint PointLightCount;
-    float3 PointLightPadding;
+    float RTAODirectContactStrength; // RTAO contact term strength on direct diffuse
+    float2 PointLightPadding;
 };
 
 struct VSInput
@@ -445,10 +446,9 @@ float4 PSMain(PSInput input) : SV_TARGET
     // creases the direct shadow term misses, so enabling RTAO is visibly
     // reflected even without diffuse GI. Non-physical, gentle, tunable
     // (0 = physical/off, 1 = full AO). bEnableRTAO off => AmbientOcclusion = 1.
-#ifndef RTAO_DIRECT_CONTACT_STRENGTH
-#define RTAO_DIRECT_CONTACT_STRENGTH 0.5f
-#endif
-    DiffuseLighting *= lerp(1.0f, AmbientOcclusion, saturate(RTAO_DIRECT_CONTACT_STRENGTH));
+    // Strength is the CB value (RTAODirectContactStrength), set from the Editor
+    // Config RTAO Details slider and persisted via FrameSourceState.
+    DiffuseLighting *= lerp(1.0f, AmbientOcclusion, saturate(RTAODirectContactStrength));
     float3 DirectSpecular = max(DirectionalSpecular + PointSpecular, 0);
 
     float3 DirectLighting = max(DiffuseLighting + DirectSpecular, 0);

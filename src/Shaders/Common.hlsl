@@ -188,6 +188,29 @@ float3 SampleUniformSphere(float u, float v)
     return float3(r * cos(phi), r * sin(phi), z);
 }
 
+// --- Octahedral direction <-> 2D mapping (Cigolle et al. 2014) ----------------
+// Maps a unit direction to/from [0,1]^2 so a probe can store its full-sphere
+// radiance/irradiance and depth in a small square octahedral map. Used by the
+// DDGI-style spatial-hash probes.
+float2 DirectionToOctahedralUV(float3 dir)
+{
+    dir = dir / max(abs(dir.x) + abs(dir.y) + abs(dir.z), 1e-8f);
+    float2 oct = dir.xy;
+    if (dir.z < 0.0f)
+        oct = (1.0f - abs(float2(oct.y, oct.x))) * float2(oct.x >= 0.0f ? 1.0f : -1.0f, oct.y >= 0.0f ? 1.0f : -1.0f);
+    return oct * 0.5f + 0.5f; // [0,1]
+}
+
+float3 OctahedralUVToDirection(float2 uv)
+{
+    float2 e = uv * 2.0f - 1.0f;
+    float3 v = float3(e.x, e.y, 1.0f - abs(e.x) - abs(e.y));
+    float t = saturate(-v.z);
+    v.x += (v.x >= 0.0f) ? -t : t;
+    v.y += (v.y >= 0.0f) ? -t : t;
+    return normalize(v);
+}
+
 float3 SampleDirectionalLightSphereCap(float3 direction, float angularRadius, float2 u)
 {
     float3 center = direction;
@@ -322,6 +345,43 @@ uint HashUInt(uint x)
 float HashToUnitFloat(uint x)
 {
     return (HashUInt(x) >> 8) * (1.0f / 16777216.0f);
+}
+
+// --- DDGI probe ray direction set ---------------------------------------------
+// Shared by the octahedral trace (writes per-ray radiance) and the octahedral
+// blend (reconstructs the same ray directions to convolve them into the probe
+// map). Both MUST produce identical directions for a given (rayIndex, frame).
+
+// Low-discrepancy direction on the unit sphere (spherical Fibonacci).
+float3 SphericalFibonacciDir(uint i, uint n)
+{
+    const float goldenRatio = 1.6180339887498949f;
+    float phi = 2.0f * PI * frac((float)i * (goldenRatio - 1.0f));
+    float cosTheta = 1.0f - (2.0f * (float)i + 1.0f) / (float)max(n, 1u);
+    float sinTheta = sqrt(saturate(1.0f - cosTheta * cosTheta));
+    return float3(cos(phi) * sinTheta, sin(phi) * sinTheta, cosTheta);
+}
+
+// Uniform random rotation quaternion (Shoemake) seeded per frame so the
+// Fibonacci direction set rotates each frame for temporal supersampling.
+float4 PerFrameRotationQuaternion(uint frame)
+{
+    uint h0 = HashUInt(frame * 747796405u + 2891336453u);
+    uint h1 = HashUInt(h0 ^ 0x9e3779b9u);
+    uint h2 = HashUInt(h1 ^ 0x85ebca6bu);
+    float u1 = (float)(h0 & 0x00ffffffu) / 16777215.0f;
+    float u2 = (float)(h1 & 0x00ffffffu) / 16777215.0f;
+    float u3 = (float)(h2 & 0x00ffffffu) / 16777215.0f;
+    float s1 = sqrt(1.0f - u1);
+    float s2 = sqrt(u1);
+    float t1 = 2.0f * PI * u2;
+    float t2 = 2.0f * PI * u3;
+    return float4(s1 * sin(t1), s1 * cos(t1), s2 * sin(t2), s2 * cos(t2)); // (x,y,z,w)
+}
+
+float3 RotateVectorByQuaternion(float3 v, float4 q)
+{
+    return v + 2.0f * cross(q.xyz, cross(q.xyz, v) + q.w * v);
 }
 
 float2 LoadStableHashNoise2(uint2 launchIndex)

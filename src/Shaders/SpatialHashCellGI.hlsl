@@ -54,13 +54,19 @@ cbuffer ViewParameter : register(b0)
     uint bIncludeSkyLighting;
     uint HashEntryMask;
     uint MaxProbeSteps;
-    uint _padding6;
-    uint _padding7;
-    uint _padding8;
+    uint GIMode;            // 0 = SH trace, 1 = octahedral per-ray trace
+    uint OctCellCapacity;   // probe slots backed by octahedral atlas storage
+    uint OctRaysPerCell;    // rays per probe per frame (octahedral mode)
     PointLightParam PointLights[RT_DIFFUSE_GI_MAX_POINT_LIGHTS];
     uint PointLightCount;
     float3 PointLightPadding;
+    float4 CameraPosition; // world-space camera (oct origin camera-bias)
 };
+
+// Per-ray output for octahedral DDGI (GIMode==1): rgb radiance + hit distance.
+// Indexed by probeSlot * OctRaysPerCell + rayIndex. Consumed by the octahedral
+// blend pass in SpatialHashDiffuseGI.hlsl.
+RWStructuredBuffer<float4> OctRayData : register(u4);
 
 static const float INV_PI = 1.0f / PI;
 static const float MAX_HIT_DIST = 10000.0f;
@@ -260,17 +266,21 @@ int ComputePlaneBin(float3 worldPos, float3 normal)
     return int(floor((dot(worldPos, normal) / safeCellSize) * 2.0f + 0.5f));
 }
 
-// One SH per spatial cell: the key depends on the cell coordinate ONLY. The
-// normal/plane arguments are kept for call-site compatibility but no longer
-// split the cell — directionality comes from evaluating the cell's full-sphere
-// SH with each surface's own normal at query time. This removes the per-bin
-// comb on curved/slanted surfaces. MUST stay identical to the diffuse shader's
-// copy so insert (update) and this light-mask lookup agree.
+// Cell key. GIMode==1 (octahedral DDGI): one probe per cell -> key depends on
+// the cell coordinate ONLY; directionality comes from the octahedral map. Else
+// (SH4 normal-bin mode): split the cell by 3-axis normal bin + plane bin so each
+// surface orientation gets its own hemisphere SH (faster convergence). MUST stay
+// identical to the diffuse shader's copy so insert and lookup agree.
 uint HashCellKeyFromCell(int3 cell, float3 normal, int planeBin)
 {
     uint h = uint(cell.x) * 73856093u;
     h ^= uint(cell.y) * 19349663u;
     h ^= uint(cell.z) * 83492791u;
+    if (GIMode != 1u)
+    {
+        h ^= EncodeNormalBits(normal) * 2654435761u;
+        h ^= uint(planeBin) * 1597334677u;
+    }
     h = HashUInt(h);
     return h == 0u ? 1u : h;
 }
@@ -495,13 +505,14 @@ float3 EvaluateDirectSurfaceRadiance(float3 worldPos, float3 normal, float3 albe
     return radiance;
 }
 
-float3 TraceDiffusePath(float3 origin, float3 direction, uint2 noiseCoord, uint sampleIndex)
+float3 TraceDiffusePath(float3 origin, float3 direction, uint2 noiseCoord, uint sampleIndex, out float firstHitDistance)
 {
     float3 radiance = 0.0f.xxx;
     float3 throughput = 1.0f.xxx;
     float3 rayOrigin = origin;
     float3 rayDirection = SafeNormalize(direction, float3(0.0f, 1.0f, 0.0f));
     uint bounceCount = clamp(MaxBounces, 1u, 8u);
+    firstHitDistance = MAX_HIT_DIST;
 
     [loop]
     for (uint bounceIndex = 0u; bounceIndex < 8u; ++bounceIndex)
@@ -532,6 +543,9 @@ float3 TraceDiffusePath(float3 origin, float3 direction, uint2 noiseCoord, uint 
             break;
         }
 
+        if (bounceIndex == 0u)
+            firstHitDistance = length(payload.position - origin);
+
         float3 hitNormal = SafeNormalize(payload.normal, float3(0.0f, 1.0f, 0.0f));
         float3 hitAlbedo = max(SanitizeFloat3(payload.color), 0.0f.xxx);
         uint hitLightMask = LoadSurfaceLightMask(payload.position, hitNormal);
@@ -561,9 +575,71 @@ float3 TraceDiffusePath(float3 origin, float3 direction, uint2 noiseCoord, uint 
     return max(SanitizeFloat3(radiance), 0.0f.xxx);
 }
 
+// Octahedral DDGI trace (GIMode==1): one dispatched thread per (probe, ray).
+// Each thread traces a single full-sphere path from the probe's open-space
+// origin and records (radiance, hitDistance) to OctRayData. A later compute
+// pass convolves these rays into the per-probe octahedral irradiance/depth map.
+void RayGenOctahedral()
+{
+    uint globalRay = DispatchRaysIndex().x;
+    uint raysPerProbe = max(OctRaysPerCell, 1u);
+    uint probeIndex = globalRay / raysPerProbe;
+    uint rayIndex = globalRay % raysPerProbe;
+
+    uint activeCount = min(ActiveCounter[0], ActiveCellCapacity);
+    uint octProbeCount = min(activeCount, OctCellCapacity);
+    if (probeIndex >= octProbeCount)
+        return;
+
+    uint slot = ActiveCellSlots[probeIndex];
+    uint key = CellKeys[slot];
+    float4 cellPosition = CellPosition[slot];
+    float4 cellNormal = CellNormal[slot];
+    if (key == 0u || cellPosition.w <= 0.0f || cellNormal.w <= 0.0f)
+    {
+        OctRayData[globalRay] = float4(0.0f, 0.0f, 0.0f, MAX_HIT_DIST);
+        return;
+    }
+
+    float3 worldNormal = SafeNormalize(cellNormal.xyz, float3(0.0f, 1.0f, 0.0f));
+    float3 worldPos = cellPosition.xyz;
+#ifndef SPATIAL_HASH_PROBE_OFFSET
+#define SPATIAL_HASH_PROBE_OFFSET 0.5f
+#endif
+    // Probe origin: lift slightly off the surface along its normal, then push
+    // toward the CAMERA. The representative surface is the cell's camera-closest
+    // hit, so the segment from it toward the camera is unobstructed (visible) —
+    // biasing along it keeps the sample center in open space rather than buried
+    // in the opposite wall/geometry, without needing a relocation ray.
+    float3 toCamera = CameraPosition.xyz - worldPos;
+    float camLen = length(toCamera);
+    float3 viewDir = (camLen > 1e-4f) ? (toCamera / camLen) : worldNormal;
+    float camPush = min(CellSize * SPATIAL_HASH_PROBE_OFFSET, camLen * 0.5f);
+    float3 origin = worldPos + worldNormal * RayBias + viewDir * camPush;
+
+    float4 rotation = PerFrameRotationQuaternion(FrameCounter);
+    float3 sampleDir = RotateVectorByQuaternion(SphericalFibonacciDir(rayIndex, raysPerProbe), rotation);
+    sampleDir = SafeNormalize(sampleDir, worldNormal);
+
+    uint noiseSeed = slot ^ (rayIndex * 1664525u);
+    uint2 noiseCoord = uint2(noiseSeed & 1023u, noiseSeed >> 10u);
+
+    float firstHitDistance = MAX_HIT_DIST;
+    float3 radiance = TraceDiffusePath(origin, sampleDir, noiseCoord, rayIndex, firstHitDistance);
+    radiance = max(SanitizeFloat3(radiance), 0.0f.xxx);
+
+    OctRayData[globalRay] = float4(radiance, firstHitDistance);
+}
+
 [shader("raygeneration")]
 void rayGen()
 {
+    if (GIMode == 1u)
+    {
+        RayGenOctahedral();
+        return;
+    }
+
     uint traceIndex = DispatchRaysIndex().x;
     uint activeCount = min(ActiveCounter[0], ActiveCellCapacity);
     uint traceCount = min(activeCount, HashEntryCount);
@@ -601,15 +677,10 @@ void rayGen()
 
     float3 worldNormal = SafeNormalize(cellNormal.xyz, float3(0.0f, 1.0f, 0.0f));
     float3 worldPos = cellPosition.xyz;
-    // Open-space probe origin: push off the surface along its normal (the update
-    // orients the stored normal toward the camera/open side) so the full-sphere
-    // gather is not buried in geometry and self-occluded. A single SH per cell
-    // then captures incoming radiance from every direction, which surfaces of
-    // any orientation in the cell evaluate with their own normal.
-#ifndef SPATIAL_HASH_PROBE_OFFSET
-#define SPATIAL_HASH_PROBE_OFFSET 0.5f
-#endif
-    float3 origin = worldPos + worldNormal * max(RayBias, CellSize * SPATIAL_HASH_PROBE_OFFSET);
+    // SH4 normal-bin mode: the cell is split per normal bin, so each slot's
+    // stored surface faces one way. Trace a cosine/uniform HEMISPHERE around that
+    // normal from just off the surface (faster convergence than a full sphere).
+    float3 origin = worldPos + worldNormal * RayBias;
     uint rayCount = clamp(RaysPerCell, 1u, 8u);
     uint noiseSeed = slot ^ (traceIndex * 1664525u);
     uint2 baseNoiseCoord = uint2(noiseSeed & 1023u, noiseSeed >> 10u);
@@ -629,11 +700,13 @@ void rayGen()
             BlueNoiseOffsetStride,
             NoiseMode);
 
-        // Full-sphere gather (probe-style) so one cell serves all orientations.
-        float3 sampleDirWorld = SampleUniformSphere(randomUV.x, randomUV.y);
-        float samplePdf = 1.0f / (4.0f * PI);
+        // Hemisphere gather around the cell's stored normal (normal-bin SH).
+        float3 sampleDirLocal = SampleUniformHemisphere(randomUV.x, randomUV.y);
+        float3 sampleDirWorld = SafeNormalize(mul(sampleDirLocal, BuildTBN(worldNormal)), worldNormal);
+        float samplePdf = 1.0f / (2.0f * PI);
         float invPdf = rcp(max(samplePdf, 1e-4f));
-        float3 sampleRadiance = TraceDiffusePath(origin, sampleDirWorld, noiseCoord, sampleIndex);
+        float ignoredHitDistance;
+        float3 sampleRadiance = TraceDiffusePath(origin, sampleDirWorld, noiseCoord, sampleIndex, ignoredHitDistance);
         AccumulateSH4RGB(sh, ProjectRadianceToSH4RGB(sampleRadiance, sampleDirWorld, invPdf), 1.0f);
     }
 

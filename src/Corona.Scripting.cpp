@@ -7913,6 +7913,7 @@ void Corona::PushLuauUiStateForScript(lua_State* L, const std::string& mode, boo
 	PushNumberField(L, "screen_probe_edge_normal", ScreenProbeGICB.EdgeNormalWeight);
 	PushIntegerField(L, "screen_probe_edge_samples", static_cast<lua_Integer>(ScreenProbeGICB.EdgeSampleCount));
 	PushNumberField(L, "spatial_hash_cell_size", SpatialHashGICB.CellSize);
+	PushIntegerField(L, "spatial_hash_gi_mode", static_cast<lua_Integer>(SpatialHashGICB.GIMode));
 	PushIntegerField(L, "spatial_hash_rays_per_cell", static_cast<lua_Integer>(RTSpatialHashGIViewParam.RaysPerCell));
 	PushIntegerField(L, "spatial_hash_max_bounces", static_cast<lua_Integer>(RTSpatialHashGIViewParam.MaxBounces));
 	PushNumberField(L, "spatial_hash_interpolation", SpatialHashGICB.InterpolationStrength);
@@ -8443,6 +8444,7 @@ bool Corona::SetLuauUiValueForScript(const std::string& name, lua_State* L, int 
 	if (setFloat("screen_probe_edge_normal", ScreenProbeGICB.EdgeNormalWeight, true)) return true;
 	if (setUInt("screen_probe_edge_samples", ScreenProbeGICB.EdgeSampleCount, 1, 4, true)) return true;
 	if (setFloat("spatial_hash_cell_size", SpatialHashGICB.CellSize, true)) return true;
+	if (setUInt("spatial_hash_gi_mode", SpatialHashGICB.GIMode, 0, 1, true)) return true;
 	if (setUInt("spatial_hash_rays_per_cell", RTSpatialHashGIViewParam.RaysPerCell, 1, 8, true)) return true;
 	if (setUInt("spatial_hash_max_bounces", RTSpatialHashGIViewParam.MaxBounces, 1, 8, true)) return true;
 	if (setFloat("spatial_hash_interpolation", SpatialHashGICB.InterpolationStrength, true)) return true;

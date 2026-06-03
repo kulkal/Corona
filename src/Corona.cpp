@@ -4554,9 +4554,10 @@ void Corona::PromptStartupModeSelection()
 		return EAntiAliasingMode::TAA;
 	};
 
-	// Keep implicit launches on TAA; DLSS SR/RR remain available through
-	// explicit command-line/env overrides and the runtime Config UI.
-	StartupSelectedAAMode = EAntiAliasingMode::TAA;
+	// Default implicit launches to the user's last UI-selected AA mode (persisted
+	// in editor_render_state.cfg), else TAA. Command-line/env overrides below
+	// still take precedence; availability normalization further down clamps it.
+	StartupSelectedAAMode = bHasSavedEditorAAMode ? SavedEditorAAMode : EAntiAliasingMode::TAA;
 	StartupRenderingMode = ERenderingMode::HYBRID;
 	StartupRenderBackendAPI = ERenderBackendAPI::D3D12;
 	RenderingMode = StartupRenderingMode;
@@ -7024,6 +7025,51 @@ void Corona::SaveCameraState()
 	file << "light_intensity " << LightIntensity << '\n';
 }
 
+std::wstring Corona::GetEditorRenderStatePath()
+{
+	return RuntimePaths::ConfigFile(L"editor_render_state.cfg").wstring();
+}
+
+bool Corona::LoadEditorRenderState()
+{
+	std::ifstream file{ std::filesystem::path(GetEditorRenderStatePath()) };
+	if (!file.is_open())
+		return false;
+
+	std::string versionTag;
+	int version = 0;
+	if (!(file >> versionTag >> version) || versionTag != "version" || version != 1)
+		return false;
+
+	std::string aaTag;
+	int aaModeInt = -1;
+	if (!(file >> aaTag >> aaModeInt) || aaTag != "aa_mode")
+		return false;
+	if (aaModeInt < 0 || aaModeInt >= static_cast<int>(EAntiAliasingMode::COUNT))
+		return false;
+
+	SavedEditorAAMode = static_cast<EAntiAliasingMode>(aaModeInt);
+	bHasSavedEditorAAMode = true;
+	AppendCpuRuntimeTrace(L"[EditorRenderState] loaded aa_mode=" +
+		std::wstring(GetAntiAliasingModeName(SavedEditorAAMode)));
+	return true;
+}
+
+void Corona::SaveEditorRenderState()
+{
+	const std::filesystem::path path = std::filesystem::path(GetEditorRenderStatePath());
+	std::filesystem::create_directories(path.parent_path());
+	std::ofstream file{ path, std::ios::trunc };
+	if (!file.is_open())
+		return;
+	file << "version 1\n";
+	file << "aa_mode " << static_cast<int>(AntiAliasingMode) << '\n';
+	// Mirror into the in-memory saved state so a subsequent reload in this run
+	// (e.g. mode reconfigure) keeps the user's choice.
+	SavedEditorAAMode = AntiAliasingMode;
+	bHasSavedEditorAAMode = true;
+}
+
 std::wstring Corona::GetSceneStatePath()
 {
 	return RuntimePaths::ConfigFile(L"scene_state.cfg").wstring();
@@ -7365,6 +7411,7 @@ Corona::RenderFrameSourceState Corona::CaptureRenderFrameSourceState() const
 	state.bEnableRayTracedSkyLighting = bEnableRayTracedSkyLighting;
 	state.RTAOIndirectStrength = RTAOIndirectStrength;
 	state.RTAOIndirectFloor = RTAOIndirectFloor;
+	state.RTAODirectContactStrength = RTAODirectContactStrength;
 	state.SurfaceBounceStrength = SurfaceBounceStrength;
 	state.SurfaceBounceSaturation = SurfaceBounceSaturation;
 	state.SkyLightingStrength = SkyLightingStrength;
@@ -7426,6 +7473,9 @@ Corona::RenderFrameSourceState Corona::CaptureRenderFrameSourceState() const
 	state.SpatialHashInterpolationStrength = SpatialHashGICB.InterpolationStrength;
 	state.SpatialHashRaysPerCell = RTSpatialHashGIViewParam.RaysPerCell;
 	state.SpatialHashMaxBounces = RTSpatialHashGIViewParam.MaxBounces;
+	state.SpatialHashGIStorageMode = SpatialHashGICB.GIMode;
+	state.SpatialHashOctNearConvergenceBias = SpatialHashGICB.OctNearConvergenceBias;
+	state.SpatialHashEvictDistanceWeight = SpatialHashGICB.EvictDistanceWeight;
 	state.PathTracingDirectLightSampleCount = PathTracingViewParam.DirectLightSampleCount;
 	state.PathTracingMaxBounces = PathTracingViewParam.MaxBounces;
 	state.PathTracingSamplesPerPixel = PathTracingViewParam.SamplesPerPixel;
@@ -7463,6 +7513,7 @@ void Corona::ApplyRenderFrameSourceState(const RenderFrameSourceState& state)
 	bEnableRayTracedSkyLighting = state.bEnableRayTracedSkyLighting;
 	RTAOIndirectStrength = state.RTAOIndirectStrength;
 	RTAOIndirectFloor = state.RTAOIndirectFloor;
+	RTAODirectContactStrength = state.RTAODirectContactStrength;
 	SurfaceBounceStrength = state.SurfaceBounceStrength;
 	SurfaceBounceSaturation = state.SurfaceBounceSaturation;
 	SkyLightingStrength = state.SkyLightingStrength;
@@ -7530,6 +7581,10 @@ void Corona::ApplyRenderFrameSourceState(const RenderFrameSourceState& state)
 	SpatialHashGICB.InterpolationStrength = state.SpatialHashInterpolationStrength;
 	RTSpatialHashGIViewParam.RaysPerCell = state.SpatialHashRaysPerCell;
 	RTSpatialHashGIViewParam.MaxBounces = state.SpatialHashMaxBounces;
+	SpatialHashGICB.GIMode = state.SpatialHashGIStorageMode;
+	RTSpatialHashGIViewParam.GIMode = state.SpatialHashGIStorageMode;
+	SpatialHashGICB.OctNearConvergenceBias = state.SpatialHashOctNearConvergenceBias;
+	SpatialHashGICB.EvictDistanceWeight = state.SpatialHashEvictDistanceWeight;
 	PathTracingViewParam.DirectLightSampleCount = state.PathTracingDirectLightSampleCount;
 	PathTracingViewParam.MaxBounces = state.PathTracingMaxBounces;
 	PathTracingViewParam.SamplesPerPixel = state.PathTracingSamplesPerPixel;
@@ -7555,6 +7610,7 @@ void Corona::SyncCurrentLightingSettingsToFrameSourceState()
 		state.bEnableRayTracedSkyLighting = bEnableRayTracedSkyLighting;
 		state.RTAOIndirectStrength = RTAOIndirectStrength;
 		state.RTAOIndirectFloor = RTAOIndirectFloor;
+		state.RTAODirectContactStrength = RTAODirectContactStrength;
 		state.SurfaceBounceStrength = SurfaceBounceStrength;
 		state.SurfaceBounceSaturation = SurfaceBounceSaturation;
 		state.SkyLightingStrength = SkyLightingStrength;
@@ -7599,6 +7655,9 @@ void Corona::SyncCurrentLightingSettingsToFrameSourceState()
 		state.SpatialHashInterpolationStrength = SpatialHashGICB.InterpolationStrength;
 		state.SpatialHashRaysPerCell = RTSpatialHashGIViewParam.RaysPerCell;
 		state.SpatialHashMaxBounces = RTSpatialHashGIViewParam.MaxBounces;
+		state.SpatialHashGIStorageMode = SpatialHashGICB.GIMode;
+		state.SpatialHashOctNearConvergenceBias = SpatialHashGICB.OctNearConvergenceBias;
+		state.SpatialHashEvictDistanceWeight = SpatialHashGICB.EvictDistanceWeight;
 		state.PathTracingDirectLightSampleCount = PathTracingViewParam.DirectLightSampleCount;
 	};
 
@@ -7666,6 +7725,7 @@ void Corona::ApplyFrameSourceRenderSync(const RenderFrameDelta& delta)
 		 oldState.SpatialHashMaxBounces != newState.SpatialHashMaxBounces ||
 		 floatChanged(oldState.RTAOIndirectStrength, newState.RTAOIndirectStrength) ||
 		 floatChanged(oldState.RTAOIndirectFloor, newState.RTAOIndirectFloor) ||
+		 floatChanged(oldState.RTAODirectContactStrength, newState.RTAODirectContactStrength) ||
 		 floatChanged(oldState.SurfaceBounceStrength, newState.SurfaceBounceStrength) ||
 		 floatChanged(oldState.SurfaceBounceSaturation, newState.SurfaceBounceSaturation) ||
 		 floatChanged(oldState.SkyLightingStrength, newState.SkyLightingStrength) ||
@@ -8386,6 +8446,7 @@ void Corona::OnInit()
 	InitializeWorldEntity();
 	InitializeLevelEntity();
 	LoadCameraState();
+	LoadEditorRenderState(); // read saved AA mode; applied in PromptStartupModeSelection
 	InitializeMainCameraEntity();
 	UpdateMainCameraEntityFromSimpleCamera();
 	InitializeMainDirectionalLightEntity();
@@ -10697,6 +10758,24 @@ void Corona::LoadAssets()
 		for (UINT coefficientIndex = 0; coefficientIndex < SpatialHashGISHCoefficientCount; ++coefficientIndex)
 			SpatialHashGIResolvedSH[0][coefficientIndex] = createStructuredBuffer(SpatialHashGIEntryCount, sizeof(float) * 4u, true);
 
+		// Octahedral DDGI atlases (GIMode==1). [0]=resolved history (in-place
+		// temporal blend), [1] reserved. irradiance: float4/texel; depth (mean,
+		// mean^2): float2/texel. Slot-major, indexed by hashSlot & (OctCellCapacity-1).
+		// Zero-init both so the first temporal blend / Chebyshev sees no stale data
+		// (depth mean==0 is the "no data yet -> fully visible" sentinel).
+		const UINT32 octIrradianceElements = SpatialHashGIOctCellCapacity * SpatialHashGIOctIrradianceTexels;
+		const UINT32 octDepthElements = SpatialHashGIOctCellCapacity * SpatialHashGIOctDepthTexels;
+		const size_t octZeroFloats = std::max(static_cast<size_t>(octIrradianceElements) * 4u,
+		                                      static_cast<size_t>(octDepthElements) * 2u);
+		std::vector<float> octZeroInit(octZeroFloats, 0.0f);
+		for (UINT atlasIndex = 0; atlasIndex < 2; ++atlasIndex)
+		{
+			SpatialHashGIOctIrradiance[atlasIndex] = createStructuredBuffer(octIrradianceElements, sizeof(float) * 4u, true, octZeroInit.data());
+			SpatialHashGIOctDepth[atlasIndex] = createStructuredBuffer(octDepthElements, sizeof(float) * 2u, true, octZeroInit.data());
+		}
+		const UINT32 octRayDataElements = SpatialHashGIOctCellCapacity * SpatialHashGIOctRaysPerCell;
+		SpatialHashGIOctRayData = createStructuredBuffer(octRayDataElements, sizeof(float) * 4u, true);
+
 		ScreenProbeGIResolved = createTexture2D(HybridFloat4UAVFormat, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
 
 		NAME_D3D12_OBJECT(ScreenProbeGIResolved->resource);
@@ -12783,8 +12862,8 @@ void Corona::DrawEditorModeOverlay()
 				SetGpuTimingAverageFrameCount(static_cast<UINT32>(averageFrameCountUI));
 			ImGui::Checkbox("Full Render Controls Window", &bShowImgui);
 			ImGui::Checkbox("Culling Overlay", &bShowCullingTextOverlay);
-			if (ImGui::Button("Open Lighting & GI Controls", ImVec2(-1.0f, 0.0f)))
-				bEditorLightingGIWindowOpen = true;
+			// Lighting / GI controls live only in this Editor Config window's
+			// "Top / Lighting & GI" section now; the separate popup is removed.
 			if (ImGui::Button("Open Debug / Capture Controls", ImVec2(-1.0f, 0.0f)))
 				bEditorDebugCaptureWindowOpen = true;
 		}
@@ -12852,7 +12931,10 @@ void Corona::DrawEditorModeOverlay()
 				if (!option.bAvailable)
 					ImGui::BeginDisabled();
 				if (ImGui::Selectable(option.Label, bSelected) && option.bAvailable)
+				{
 					ApplyRenderingAndAAMode(RenderingMode, option.Mode);
+					SaveEditorRenderState(); // persist so it applies on next launch
+				}
 				if (!option.bAvailable)
 					ImGui::EndDisabled();
 				if (bSelected)
@@ -13004,6 +13086,13 @@ void Corona::DrawEditorModeOverlay()
 					}
 					else if (RenderingMode == ERenderingMode::HYBRID && DiffuseGIMode == EDiffuseGIMode::SPATIAL_HASH)
 					{
+						int giVariant = static_cast<int>(SpatialHashGICB.GIMode);
+						const char* giVariants[] = { "SH4 (legacy)", "Octahedral DDGI" };
+						if (ImGui::Combo("Spatial Hash GI Variant", &giVariant, giVariants, IM_ARRAYSIZE(giVariants)))
+						{
+							SpatialHashGICB.GIMode = static_cast<UINT32>(giVariant);
+							bLightingChanged = true;
+						}
 						if (ImGui::SliderFloat("Spatial Hash Cell Size", &SpatialHashGICB.CellSize, 4.0f, 256.0f))
 							bLightingChanged = true;
 						int raysPerCell = static_cast<int>(RTSpatialHashGIViewParam.RaysPerCell);
@@ -13018,6 +13107,10 @@ void Corona::DrawEditorModeOverlay()
 							RTSpatialHashGIViewParam.MaxBounces = static_cast<UINT32>(maxBounces);
 							bLightingChanged = true;
 						}
+						if (ImGui::SliderFloat("Oct Near Convergence Bias", &SpatialHashGICB.OctNearConvergenceBias, 0.0f, 1.0f, "%.2f"))
+							bLightingChanged = true;
+						if (ImGui::SliderFloat("Cell Evict Distance Weight", &SpatialHashGICB.EvictDistanceWeight, 0.0f, 1.0f, "%.2f"))
+							bLightingChanged = true;
 					}
 					ImGui::TreePop();
 				}
@@ -13039,6 +13132,12 @@ void Corona::DrawEditorModeOverlay()
 						if (ImGui::SliderFloat("RTAO Power", &RTAOViewParam.Power, 0.25f, 4.0f, "%.2f"))
 							bLightingChanged = true;
 						if (ImGui::SliderFloat("RTAO Normal Bias", &RTAOViewParam.NormalBias, 0.01f, 2.0f, "%.2f"))
+							bLightingChanged = true;
+						if (ImGui::SliderFloat("RTAO Direct Contact", &RTAODirectContactStrength, 0.0f, 1.0f, "%.2f"))
+							bLightingChanged = true;
+						if (ImGui::SliderFloat("RTAO Indirect Strength", &RTAOIndirectStrength, 0.0f, 1.0f, "%.2f"))
+							bLightingChanged = true;
+						if (ImGui::SliderFloat("RTAO Indirect Floor", &RTAOIndirectFloor, 0.0f, 1.0f, "%.2f"))
 							bLightingChanged = true;
 						ImGui::TreePop();
 					}
@@ -13338,7 +13437,9 @@ void Corona::DrawEditorModeOverlay()
 			if (RenderingMode == ERenderingMode::HYBRID || RenderingMode == ERenderingMode::PATHTRACING)
 			{
 				bool bAdvancedLightingChanged = false;
-				if (ImGui::CollapsingHeader("Advanced Lighting / GI", ImGuiTreeNodeFlags_DefaultOpen))
+				// Lighting / GI controls consolidated into the Editor Config window;
+				// this duplicate section is hidden.
+				if (false && ImGui::CollapsingHeader("Advanced Lighting / GI", ImGuiTreeNodeFlags_DefaultOpen))
 				{
 					const bool bRTReflectionSERAvailable =
 						renderBackend &&
@@ -14767,7 +14868,8 @@ void Corona::OnRender()
 		// Lighting control options (both Hybrid and Path Tracing)
 		if (RenderingMode == ERenderingMode::HYBRID || RenderingMode == ERenderingMode::PATHTRACING)
 		{
-			if (ImGui::CollapsingHeader("Lighting & GI", ImGuiTreeNodeFlags_DefaultOpen))
+			// Consolidated into the Editor Config window; this duplicate section is hidden.
+			if (false && ImGui::CollapsingHeader("Lighting & GI", ImGuiTreeNodeFlags_DefaultOpen))
 			{
 			bool bLightingChanged = false;
 

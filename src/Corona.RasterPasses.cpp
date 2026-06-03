@@ -1406,6 +1406,7 @@ void Corona::LightingPass()
 	Param.bEnableSimpleSkyLighting = bEnableSkyLighting ? 1u : 0u;
 	Param.RTAOIndirectStrength = RTAOIndirectStrength;
 	Param.RTAOIndirectFloor = RTAOIndirectFloor;
+	Param.RTAODirectContactStrength = std::clamp(RTAODirectContactStrength, 0.0f, 1.0f);
 	Param.SurfaceBounceStrength = std::clamp(SurfaceBounceStrength, 0.0f, 1.0f);
 	Param.SurfaceBounceSaturation = std::clamp(SurfaceBounceSaturation, 0.0f, 1.0f);
 	Param.SkyLightingStrength = std::clamp(SkyLightingStrength, 0.0f, 1.0f);

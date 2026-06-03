@@ -46,6 +46,34 @@ RWStructuredBuffer<uint> ActiveCellSlotsOut : register(u11);
 RWStructuredBuffer<uint> ActiveCounterOut : register(u12);
 RWStructuredBuffer<uint> CellLightMaskOut : register(u14);
 
+// Octahedral DDGI (GIMode==1). RayData (per-frame per-ray radiance+dist) is
+// consumed by the blend kernel; OctIrradianceOut is the persistent resolved
+// atlas (in-place temporal blend); OctIrradianceIn is the same atlas as SRV for
+// the query. Indexed by (hashSlot & (OctCellCapacity-1)) * texels + texelIndex.
+StructuredBuffer<float4> OctRayDataIn : register(t27);
+StructuredBuffer<float4> OctIrradianceIn : register(t28);
+StructuredBuffer<float2> OctDepthIn : register(t29);
+RWStructuredBuffer<float4> OctIrradianceOut : register(u15);
+RWStructuredBuffer<float2> OctDepthOut : register(u16);
+
+// Must match Corona::SpatialHashGIOct* constants.
+#define OCT_IRRADIANCE_RES 8u
+#define OCT_RAYS_PER_CELL 64u
+#define OCT_IRRADIANCE_TEXELS (OCT_IRRADIANCE_RES * OCT_IRRADIANCE_RES)
+#define OCT_DEPTH_RES 16u
+#define OCT_DEPTH_TEXELS (OCT_DEPTH_RES * OCT_DEPTH_RES)
+static const float OCT_MAX_HISTORY_FRAMES = 256.0f;
+static const float OCT_NEW_CELL_RAMP_FRAMES = 6.0f;
+// Cosine exponent sharpening the per-texel depth weighting (DDGI uses a high
+// power so the visibility map is sharper than the irradiance map).
+static const float OCT_DEPTH_SHARPNESS = 12.0f;
+// Hit distances are clamped to this many cells so a single missed ray
+// (distance ~= MAX_HIT_DIST) can't blow up a wall texel's mean distance.
+static const float OCT_DEPTH_MAX_CELLS = 8.0f;
+// Per-ray luminance soft-knee for firefly suppression in the octahedral blend.
+// Values below the knee pass through; brighter rays are compressed toward it.
+static const float OCT_FIREFLY_LUMA_KNEE = 4.0f;
+
 #define RT_DIFFUSE_GI_MAX_POINT_LIGHTS 16
 
 struct PointLightParam
@@ -74,11 +102,14 @@ cbuffer SpatialHashGIConstant : register(b0)
     float InterpolationStrength;
     uint ActiveCellCapacity;
     uint TraceCellBudget;
-    uint _padding4;
-    uint _padding5;
+    uint GIMode;           // 0 = SH4, 1 = octahedral DDGI
+    uint OctCellCapacity;  // octahedral atlas slot count (power of two)
     PointLightParam PointLights[RT_DIFFUSE_GI_MAX_POINT_LIGHTS];
     uint PointLightCount;
-    float3 PointLightPadding;
+    // Repurposed former float3 padding (layout unchanged):
+    float OctNearConvergenceBias; // 0 = uniform, 1 = strong near-camera priority
+    float EvictDistanceWeight;    // LRU victim: 0 = age only, 1 = camera distance only
+    float _spatialHashPad;
     float4 DebugDiffuseGIOverride;
 };
 
@@ -387,19 +418,71 @@ int ComputePlaneBin(float3 worldPos, float3 normal)
     return int(floor((dot(worldPos, normal) / safeCellSize) * 2.0f + 0.5f));
 }
 
-// One SH per spatial cell: key depends on the cell coordinate ONLY (no normal
-// or plane bin). Directionality is recovered by evaluating the cell's
-// full-sphere SH with each surface's own normal at query time, which removes
-// the per-bin comb on curved/slanted surfaces. MUST stay identical to the cell
-// (trace) shader's copy so insert and lookup agree. normal/planeBin params are
-// kept for call-site compatibility and ignored.
-uint HashCellKeyFromCell(int3 cell, float3 normal, int planeBin)
+uint HashCellKeyFromBits(int3 cell, uint normalBits, int planeBin)
 {
     uint h = uint(cell.x) * 73856093u;
     h ^= uint(cell.y) * 19349663u;
     h ^= uint(cell.z) * 83492791u;
+    h ^= normalBits * 2654435761u;
+    h ^= uint(planeBin) * 1597334677u;
     h = HashUInt(h);
     return h == 0u ? 1u : h;
+}
+
+// Cell key. GIMode==1 (octahedral DDGI): one probe per cell -> key depends on
+// the cell coordinate ONLY. Else (SH4 normal-bin mode): split the cell by 3-axis
+// normal bin + plane bin. MUST stay identical to the cell (trace) shader's copy
+// so insert and lookup agree.
+uint HashCellKeyFromCell(int3 cell, float3 normal, int planeBin)
+{
+    if (GIMode == 1u)
+    {
+        uint h = uint(cell.x) * 73856093u;
+        h ^= uint(cell.y) * 19349663u;
+        h ^= uint(cell.z) * 83492791u;
+        h = HashUInt(h);
+        return h == 0u ? 1u : h;
+    }
+    return HashCellKeyFromBits(cell, EncodeNormalBits(normal), planeBin);
+}
+
+// Normal-bin blending (curved/slanted surfaces, SH4 mode). EncodeNormalBits
+// quantizes the normal to 8 levels/axis, so a smoothly-curving surface crosses
+// bin boundaries and adjacent pixels hash to different cells -> visible
+// comb/banding. When the query normal sits near a bin boundary, return the
+// adjacent bin's encoded bits and a blend weight so the query mixes both cells'
+// SH and dissolves the seam. Only the axis nearest a boundary is considered.
+#ifndef SPATIAL_HASH_NORMAL_BIN_BLEND
+#define SPATIAL_HASH_NORMAL_BIN_BLEND 1
+#endif
+#ifndef SPATIAL_HASH_NORMAL_BLEND_MIN_FRAC
+#define SPATIAL_HASH_NORMAL_BLEND_MIN_FRAC 0.28f
+#endif
+
+bool ComputeNormalBinNeighbor(float3 normal, out uint neighborBits, out float blendWeight)
+{
+    neighborBits = 0u;
+    blendWeight = 0.0f;
+    normal = SafeNormalize(normal, float3(0.0f, 1.0f, 0.0f));
+    float3 e = saturate(normal * 0.5f + 0.5f) * 7.0f; // encoded float, matches EncodeNormalBits
+    int3 bin = int3(e + 0.5f);
+    float3 fr = e - float3(bin);                       // (-0.5, 0.5)
+    float3 af = abs(fr);
+    int axis = (af.x >= af.y && af.x >= af.z) ? 0 : (af.y >= af.z ? 1 : 2);
+    float fa = (axis == 0) ? fr.x : ((axis == 1) ? fr.y : fr.z);
+    float aaf = abs(fa);
+    if (aaf < SPATIAL_HASH_NORMAL_BLEND_MIN_FRAC)
+        return false; // well inside the bin — no seam, skip the extra lookup
+    int cur = (axis == 0) ? bin.x : ((axis == 1) ? bin.y : bin.z);
+    int nb = clamp(cur + (fa > 0.0f ? 1 : -1), 0, 7);
+    if (nb == cur)
+        return false; // at the hemisphere edge, no neighbour bin
+    int3 nbin = bin;
+    if (axis == 0) nbin.x = nb; else if (axis == 1) nbin.y = nb; else nbin.z = nb;
+    neighborBits = (uint(nbin.x) & 7u) | ((uint(nbin.y) & 7u) << 3u) | ((uint(nbin.z) & 7u) << 6u);
+    blendWeight = saturate((aaf - SPATIAL_HASH_NORMAL_BLEND_MIN_FRAC) /
+                           max(0.5f - SPATIAL_HASH_NORMAL_BLEND_MIN_FRAC, 1e-3f)) * 0.5f;
+    return true;
 }
 
 uint HashCellKey(float3 worldPos, float3 normal)
@@ -446,9 +529,17 @@ bool FindSlotForWrite(uint key, out uint slot, out bool inserted)
     uint curStamp = (FrameIndex & 0x7fffffffu) + 1u;
     if (curStamp == SPATIAL_HASH_ACTIVE_INIT)
         curStamp = 1u;
+    // Victim = highest eviction score in the window. Score combines camera
+    // distance and staleness: evictScore = distNorm*EvictDistanceWeight +
+    // ageNorm*(1-EvictDistanceWeight). With EvictDistanceWeight high, a FAR cell
+    // (even recently seen) is evicted before a NEAR cell (even long-unseen) —
+    // near cells are the most valuable to keep cached.
+    float3 evCamPos = mul(float4(0.0f, 0.0f, 0.0f, 1.0f), InvViewMatrix).xyz;
+    float evFar = max(ProjectionParams.w, 1.0f);
+    float evDistW = saturate(EvictDistanceWeight);
     uint victim = 0u;
     uint victimKey = 0u;
-    uint oldestAge = 0u;
+    float bestEvictScore = -1.0f;
     [loop]
     for (uint p = 0u; p < 16u; ++p)
     {
@@ -460,10 +551,13 @@ bool FindSlotForWrite(uint key, out uint slot, out bool inserted)
         // marked active this frame — evicting those would thrash live cells.
         if (stamp == SPATIAL_HASH_ACTIVE_INIT || stamp == 0u || stamp == curStamp)
             continue;
-        uint a = curStamp - stamp; // larger = older / least-recently-seen
-        if (a >= oldestAge)
+        float ageNorm = saturate(float(curStamp - stamp) / float(SPATIAL_HASH_MAX_CELL_AGE_FRAMES));
+        float3 cpos = SanitizeFloat4(CellPositionOut[candidate]).xyz;
+        float distNorm = saturate(length(cpos - evCamPos) / evFar);
+        float evictScore = distNorm * evDistW + ageNorm * (1.0f - evDistW);
+        if (evictScore >= bestEvictScore)
         {
-            oldestAge = a;
+            bestEvictScore = evictScore;
             victim = candidate;
             victimKey = ResolvedKeysOut[candidate];
         }
@@ -580,17 +674,31 @@ bool FindPrevSlotForRead(uint key, out uint slot)
 float ComputeSurfaceLobeWeight(uint slot, float3 queryWorldPos, float3 queryNormal)
 {
     float4 storedPosition = SanitizeFloat4(CellPositionIn[slot]);
-    if (storedPosition.w <= 0.0f)
+    float4 storedNormal4 = SanitizeFloat4(CellNormalIn[slot]);
+    if (storedPosition.w <= 0.0f || storedNormal4.w <= 0.0f)
         return 0.0f;
 
-    // One full-sphere SH probe per cell serves every surface orientation, so we
-    // no longer reject by normal or plane (that per-bin matching was the comb
-    // source). Weight purely by distance from the probe's representative surface
-    // point: a far surface that happens to share the hash cell contributes less
-    // than the near one, and the trilinear/gather blend stays smooth.
+    queryNormal = SafeNormalize(queryNormal, float3(0.0f, 1.0f, 0.0f));
+    float3 storedNormal = SafeNormalize(storedNormal4.xyz, queryNormal);
+    float normalDot = saturate(dot(queryNormal, storedNormal));
+    if (normalDot < SPATIAL_HASH_MIN_SURFACE_NORMAL_DOT)
+        return 0.0f;
+
     float safeCellSize = max(CellSize, 1e-3f);
-    float dist = length(queryWorldPos - storedPosition.xyz);
-    return saturate(1.0f - dist / (safeCellSize * 1.5f));
+    float planeDelta = abs(dot(queryWorldPos - storedPosition.xyz, storedNormal));
+    float planeReject = safeCellSize * SPATIAL_HASH_PLANE_REJECT_CELL_SCALE;
+    if (planeDelta > planeReject)
+        return 0.0f;
+
+    float normalWeight = smoothstep(
+        SPATIAL_HASH_MIN_SURFACE_NORMAL_DOT,
+        SPATIAL_HASH_FULL_SURFACE_NORMAL_DOT,
+        normalDot);
+    float planeWeight = 1.0f - smoothstep(
+        safeCellSize * SPATIAL_HASH_PLANE_SOFT_CELL_SCALE,
+        planeReject,
+        planeDelta);
+    return saturate(normalWeight * planeWeight);
 }
 
 bool LoadCachedSHForCell(int3 cell, float3 normal, float3 queryWorldPos,
@@ -600,27 +708,73 @@ bool LoadCachedSHForCell(int3 cell, float3 normal, float3 queryWorldPos,
     sh = InitSH4RGB();
     historyFrames = 0.0f;
 
-    // One SH per spatial cell -> a single lookup (no plane-bin / normal-bin
-    // search). The cell's full-sphere SH is evaluated with the surface normal by
-    // the caller, so directionality is preserved without per-bin cells, and the
-    // comb is gone.
-    uint slot = 0u;
-    uint key = HashCellKeyFromCell(cell, normal, 0);
-    if (!FindSlotForRead(key, slot))
+    int basePlaneBin = ComputePlaneBin(queryWorldPos, normal);
+    float bestScore = 0.0f;
+    SH4RGB bestSH = InitSH4RGB();
+    float bestHistoryFrames = 0.0f;
+    float bestWeight = 0.0f;
+
+    [unroll]
+    for (int planeOffset = -1; planeOffset <= 1; ++planeOffset)
+    {
+        uint slot = 0u;
+        uint key = HashCellKeyFromCell(cell, normal, basePlaneBin + planeOffset);
+        if (!FindSlotForRead(key, slot))
+            continue;
+
+        float surfaceWeight = ComputeSurfaceLobeWeight(slot, queryWorldPos, normal);
+        if (surfaceWeight <= 1e-4f)
+            continue;
+
+        float candidateHistoryFrames = 0.0f;
+        SH4RGB candidateSH = LoadResolvedSH(slot, candidateHistoryFrames);
+        if (candidateHistoryFrames <= 0.0f || SHAbsEnergy(candidateSH) <= 1e-7f)
+            continue;
+
+        float candidateScore = surfaceWeight * lerp(0.25f, 1.0f, saturate(candidateHistoryFrames / 8.0f));
+        if (candidateScore > bestScore)
+        {
+            bestScore = candidateScore;
+            bestSH = candidateSH;
+            bestHistoryFrames = candidateHistoryFrames;
+            bestWeight = surfaceWeight;
+        }
+    }
+
+    if (bestScore <= 1e-5f)
         return false;
 
-    float surfaceWeight = ComputeSurfaceLobeWeight(slot, queryWorldPos, normal);
-    if (surfaceWeight <= 1e-4f)
-        return false;
+#if SPATIAL_HASH_NORMAL_BIN_BLEND
+    // Crossfade with the adjacent normal bin when the query normal is near a bin
+    // boundary, dissolving the comb seam on curved/slanted surfaces.
+    uint neighborBits;
+    float nblend;
+    if (ComputeNormalBinNeighbor(normal, neighborBits, nblend))
+    {
+        uint nslot = 0u;
+        uint nkey = HashCellKeyFromBits(cell, neighborBits, basePlaneBin);
+        if (FindSlotForRead(nkey, nslot))
+        {
+            float nw = ComputeSurfaceLobeWeight(nslot, queryWorldPos, normal);
+            if (nw > 1e-4f)
+            {
+                float nhist = 0.0f;
+                SH4RGB nsh = LoadResolvedSH(nslot, nhist);
+                if (nhist > 0.0f && SHAbsEnergy(nsh) > 1e-7f)
+                {
+                    float t = saturate(nblend);
+                    bestSH = LerpSH(bestSH, nsh, t);
+                    bestHistoryFrames = lerp(bestHistoryFrames, nhist, t);
+                    bestWeight = max(bestWeight, nw);
+                }
+            }
+        }
+    }
+#endif
 
-    float candidateHistoryFrames = 0.0f;
-    SH4RGB candidateSH = LoadResolvedSH(slot, candidateHistoryFrames);
-    if (candidateHistoryFrames <= 0.0f || SHAbsEnergy(candidateSH) <= 1e-7f)
-        return false;
-
-    sh = candidateSH;
-    historyFrames = candidateHistoryFrames;
-    bilateralWeight = surfaceWeight;
+    sh = bestSH;
+    historyFrames = bestHistoryFrames;
+    bilateralWeight = bestWeight;
     return true;
 }
 
@@ -793,36 +947,12 @@ void SpatialHashClear(uint3 DTid : SV_DispatchThreadID)
         return;
     }
 
-    // Steady state: age out long-unseen cells so the hash can't saturate (the
-    // cause of GI progressively vanishing after exploring a while). Off-screen
-    // cells survive up to SPATIAL_HASH_MAX_CELL_AGE_FRAMES. To keep linear-probe
-    // chains intact (reads stop at the first empty slot), only evict a slot that
-    // is the TAIL of its cluster — i.e. the next slot is already empty — so
-    // freeing it never orphans a key that probed past it. Each thread owns its
-    // own entry, so this is race-free.
-    uint key = ResolvedKeysOut[entryIndex];
-    if (key == 0u)
-        return;
-    uint lastSeen = ActiveFlagsOut[entryIndex];
-    if (lastSeen == 0u || lastSeen == SPATIAL_HASH_ACTIVE_INIT)
-        return;
-    uint curStamp = (FrameIndex & 0x7fffffffu) + 1u;
-    uint age = curStamp - lastSeen;
-    if (age <= SPATIAL_HASH_MAX_CELL_AGE_FRAMES)
-        return;
-    if (ResolvedKeysOut[(entryIndex + 1u) & HashEntryMask] != 0u)
-        return; // not the tail of a probe cluster — evicting would break reads
-
-    ActiveFlagsOut[entryIndex] = 0u;
-    CellScoreOut[entryIndex] = 0xffffffffu;
-    CellPositionOut[entryIndex] = 0.0f.xxxx;
-    CellNormalOut[entryIndex] = 0.0f.xxxx;
-    CellLightMaskOut[entryIndex] = 0u;
-    ResolvedKeysOut[entryIndex] = 0u;
-    ResolvedSH0Out[entryIndex] = 0.0f.xxxx;
-    ResolvedSH1Out[entryIndex] = 0.0f.xxxx;
-    ResolvedSH2Out[entryIndex] = 0.0f.xxxx;
-    ResolvedSH3Out[entryIndex] = 0.0f.xxxx;
+    // Steady state: NO unconditional time-based eviction. Cells persist (their
+    // cached GI stays valid for re-use) as long as there is room. Reclamation is
+    // on-demand only: when a newly-visible cell's probe window is full,
+    // FindSlotForWrite evicts the best victim (least useful = far + least-recently
+    // seen, weighted by EvictDistanceWeight). This keeps off-screen GI cached
+    // until space pressure actually forces a swap, per design.
 }
 
 [numthreads(8, 8, 1)]
@@ -847,15 +977,22 @@ void SpatialHashUpdate(uint3 DTid : SV_DispatchThreadID)
         return;
     MarkActiveSlot(slot);
 
-    // Pick the cell's representative surface point as the one CLOSEST TO THE
-    // CAMERA (smallest view distance wins the InterlockedMin). That surface
-    // faces the camera/open side, so the trace's open-space origin offset (along
-    // the stored normal) lands in free space rather than buried in geometry, and
-    // the probe captures distant incoming radiance without excessive occlusion.
-    float3 cameraPos = mul(float4(0.0f, 0.0f, 0.0f, 1.0f), InvViewMatrix).xyz;
-    float camDist = length(worldPos - cameraPos);
-    // Normalize against the far plane so the quantization spans the view range.
-    float normalizedDist = saturate(camDist / max(ProjectionParams.w, 1.0f));
+    // Pick the cell's representative surface point. Octahedral (GIMode==1): the
+    // surface CLOSEST TO THE CAMERA, so the open-space probe origin lands in free
+    // space. SH4 normal-bin: the surface nearest the cell centre (the slot is
+    // already orientation-split, so a centred representative is best).
+    float normalizedDist;
+    if (GIMode == 1u)
+    {
+        float3 cameraPos = mul(float4(0.0f, 0.0f, 0.0f, 1.0f), InvViewMatrix).xyz;
+        float camDist = length(worldPos - cameraPos);
+        normalizedDist = saturate(camDist / max(ProjectionParams.w, 1.0f));
+    }
+    else
+    {
+        float3 cellCenter = (float3(GetSpatialHashCell(worldPos)) + 0.5f.xxx) * max(CellSize, 1e-3f);
+        normalizedDist = saturate(length((worldPos - cellCenter) / max(CellSize, 1e-3f)) * 1.1547005f);
+    }
     uint score = min(uint(normalizedDist * 16777215.0f), 16777215u);
     score = (score << 8u) | (HashUInt(pixelPos.x * 1973u + pixelPos.y * 9277u + FrameIndex * 26699u) & 255u);
 
@@ -928,6 +1065,335 @@ void SpatialHashResolve(uint3 DTid : SV_DispatchThreadID)
     StoreResolvedSH(cacheSlot, resolvedSH, resolvedFrames);
 }
 
+// ---- Octahedral DDGI (GIMode==1) -------------------------------------------
+float4 LoadOctTexel(uint octIndex, int2 xy)
+{
+    xy = clamp(xy, int2(0, 0), int2((int)OCT_IRRADIANCE_RES - 1, (int)OCT_IRRADIANCE_RES - 1));
+    uint idx = octIndex * OCT_IRRADIANCE_TEXELS + (uint)xy.y * OCT_IRRADIANCE_RES + (uint)xy.x;
+    return SanitizeFloat4(OctIrradianceIn[idx]);
+}
+
+// Bilinear sample of the probe's octahedral irradiance map in a direction.
+// Stage A has no octahedral border, so we clamp at the edges (minor seam at the
+// octahedral fold — addressed in Stage C with a proper 1px border).
+float4 SampleOctIrradiance(uint octIndex, float3 dir)
+{
+    float2 uv = DirectionToOctahedralUV(SafeNormalize(dir, float3(0.0f, 1.0f, 0.0f)));
+    float2 t = uv * (float)OCT_IRRADIANCE_RES - 0.5f;
+    float2 base = floor(t);
+    float2 f = t - base;
+    int2 b = int2(base);
+    float4 c00 = LoadOctTexel(octIndex, b + int2(0, 0));
+    float4 c10 = LoadOctTexel(octIndex, b + int2(1, 0));
+    float4 c01 = LoadOctTexel(octIndex, b + int2(0, 1));
+    float4 c11 = LoadOctTexel(octIndex, b + int2(1, 1));
+    return lerp(lerp(c00, c10, f.x), lerp(c01, c11, f.x), f.y);
+}
+
+float2 LoadOctDepthTexel(uint octIndex, int2 xy)
+{
+    xy = clamp(xy, int2(0, 0), int2((int)OCT_DEPTH_RES - 1, (int)OCT_DEPTH_RES - 1));
+    uint idx = octIndex * OCT_DEPTH_TEXELS + (uint)xy.y * OCT_DEPTH_RES + (uint)xy.x;
+    return OctDepthIn[idx];
+}
+
+// Bilinear sample of the probe's octahedral depth map (mean, mean^2) in a dir.
+float2 SampleOctDepth(uint octIndex, float3 dir)
+{
+    float2 uv = DirectionToOctahedralUV(SafeNormalize(dir, float3(0.0f, 1.0f, 0.0f)));
+    float2 t = uv * (float)OCT_DEPTH_RES - 0.5f;
+    float2 base = floor(t);
+    float2 f = t - base;
+    int2 b = int2(base);
+    float2 c00 = LoadOctDepthTexel(octIndex, b + int2(0, 0));
+    float2 c10 = LoadOctDepthTexel(octIndex, b + int2(1, 0));
+    float2 c01 = LoadOctDepthTexel(octIndex, b + int2(0, 1));
+    float2 c11 = LoadOctDepthTexel(octIndex, b + int2(1, 1));
+    return lerp(lerp(c00, c10, f.x), lerp(c01, c11, f.x), f.y);
+}
+
+// DDGI Chebyshev visibility: probability the query point is visible from the
+// probe, from the probe's stored mean/mean^2 hit distance in the probe->query
+// direction. Returns 1 when the probe has no depth data yet (mean<=0) so GI is
+// not suppressed before the depth map converges. This is what kills the corner
+// light-leak: a probe occluded from the query (query beyond the mean occluder
+// distance) gets a low weight and is dropped from the blend.
+float OctChebyshevWeight(uint octIndex, float3 probePos, float3 queryPos)
+{
+    float3 probeToQuery = queryPos - probePos;
+    float distToQuery = length(probeToQuery);
+    if (distToQuery <= 1e-4f)
+        return 1.0f;
+    float2 moments = SampleOctDepth(octIndex, probeToQuery / distToQuery);
+    float meanDist = moments.x;
+    if (meanDist <= 0.0f)
+        return 1.0f;                 // no depth data yet
+    if (distToQuery <= meanDist)
+        return 1.0f;                 // in front of nearest occluder -> visible
+    float variance = max(moments.y - meanDist * meanDist, 1e-5f);
+    float d = distToQuery - meanDist;
+    float chebyshev = variance / (variance + d * d);
+    chebyshev = chebyshev * chebyshev * chebyshev; // sharpen (DDGI)
+    return saturate(chebyshev);
+}
+
+// Position/plane bilateral weight for an octahedral probe. The probe is
+// omnidirectional (the octahedral map covers all directions), so unlike the SH
+// normal-bin path we must NOT reject by stored normal. Instead reject probes
+// whose representative surface point sits well off the query surface's tangent
+// plane — i.e. the perpendicular wall/floor across a corner. Acts as a coarse
+// prior before the depth map converges; Chebyshev does the sharp cut after.
+float OctProbeSurfaceWeight(uint slot, float3 queryPos, float3 queryNormal)
+{
+    float4 storedPosition = SanitizeFloat4(CellPositionIn[slot]);
+    if (storedPosition.w <= 0.0f)
+        return 0.0f;
+    float safeCellSize = max(CellSize, 1e-3f);
+    queryNormal = SafeNormalize(queryNormal, float3(0.0f, 1.0f, 0.0f));
+    float planeDelta = abs(dot(queryPos - storedPosition.xyz, queryNormal));
+    return saturate(1.0f - smoothstep(safeCellSize * 0.25f, safeCellSize * 0.85f, planeDelta));
+}
+
+// 8-cell trilinear interpolation of octahedral irradiance (DDGI-style). Blends
+// the probe from each of the 8 grid cells surrounding the query position by its
+// trilinear * surface weight, sampling each probe in the pixel-normal direction.
+// Removes the per-cell flat-block look while suppressing corner leak. (Full
+// depth-based Chebyshev visibility weighting arrives in Stage B.)
+float3 SampleOctIrradianceInterpolated(float3 worldPos, float3 evalNormal, float3 cacheNormal)
+{
+    float safeCellSize = max(CellSize, 1e-3f);
+    float3 gridPos = worldPos / safeCellSize;
+    float3 baseF = floor(gridPos);
+    int3 baseCell = int3(baseF);
+    float3 frac3 = saturate(gridPos - baseF);
+
+    float3 sumRadiance = 0.0f.xxx;
+    float sumWeight = 0.0f;
+    // Fallback accumulation ignoring Chebyshev/surface rejection. Used only when
+    // EVERY probe got rejected (sumWeight ~= 0), so an over-occluded pixel falls
+    // back to plain trilinear instead of going fully black (the scattered dark
+    // cells). Normal pixels still use the visibility-weighted result.
+    float3 fallbackRadiance = 0.0f.xxx;
+    float fallbackWeight = 0.0f;
+    [unroll]
+    for (uint z = 0u; z < 2u; ++z)
+    {
+        float wz = (z == 0u) ? (1.0f - frac3.z) : frac3.z;
+        [unroll]
+        for (uint y = 0u; y < 2u; ++y)
+        {
+            float wy = (y == 0u) ? (1.0f - frac3.y) : frac3.y;
+            [unroll]
+            for (uint x = 0u; x < 2u; ++x)
+            {
+                float wx = (x == 0u) ? (1.0f - frac3.x) : frac3.x;
+                float trilinear = wx * wy * wz;
+                if (trilinear <= 1e-4f)
+                    continue;
+
+                int3 cell = baseCell + int3(x, y, z);
+                uint slot = 0u;
+                uint key = HashCellKeyFromCell(cell, cacheNormal, 0);
+                if (!FindSlotForRead(key, slot))
+                    continue;
+
+                uint octIndex = slot & (OctCellCapacity - 1u);
+                float4 probe = SampleOctIrradiance(octIndex, evalNormal);
+                if (probe.w <= 0.0f)
+                    continue;
+
+                fallbackRadiance += probe.xyz * trilinear;
+                fallbackWeight += trilinear;
+
+                float surfaceWeight = OctProbeSurfaceWeight(slot, worldPos, cacheNormal);
+                if (surfaceWeight <= 1e-4f)
+                    continue;
+
+                // Chebyshev visibility (DDGI): drop probes occluded from the
+                // query point. Bias the query a little off the surface so a probe
+                // doesn't self-occlude its own surface.
+                float3 probePos = SanitizeFloat4(CellPositionIn[slot]).xyz;
+                float3 biasedQuery = worldPos + cacheNormal * (safeCellSize * 0.1f);
+                float visibility = OctChebyshevWeight(octIndex, probePos, biasedQuery);
+
+                float w = trilinear * surfaceWeight * visibility;
+                if (w <= 1e-5f)
+                    continue;
+                sumRadiance += probe.xyz * w;
+                sumWeight += w;
+            }
+        }
+    }
+
+    if (sumWeight <= 1e-4f)
+    {
+        // All probes rejected by visibility — fall back to plain trilinear so the
+        // pixel shows the available (leaky) GI rather than a black cell.
+        if (fallbackWeight > 1e-4f)
+            return fallbackRadiance / fallbackWeight;
+        return float3(-1.0f, -1.0f, -1.0f); // sentinel: no valid probe at all
+    }
+    return sumRadiance / sumWeight;
+}
+
+// One thread per (probe, irradiance texel). Reconstructs the trace's ray
+// directions, convolves the per-ray radiance with this texel's cosine lobe to
+// form the directional irradiance E/pi, and temporally blends it into the
+// persistent atlas. Atlas is indexed by hashSlot & (OctCellCapacity-1) so the
+// history follows a cell (stable key->slot) rather than the transient probe
+// order; collisions only occur when active cells approach OctCellCapacity.
+[numthreads(64, 1, 1)]
+void SpatialHashOctBlend(uint3 DTid : SV_DispatchThreadID)
+{
+    uint gid = DTid.x;
+    uint probeIndex = gid / OCT_IRRADIANCE_TEXELS;
+    uint texelIndex = gid % OCT_IRRADIANCE_TEXELS;
+
+    uint activeCount = min(ActiveCounterIn[0], ActiveCellCapacity);
+    uint octProbeCount = min(activeCount, OctCellCapacity);
+    if (probeIndex >= octProbeCount)
+        return;
+
+    uint slot = ActiveCellSlotsIn[probeIndex];
+    if (slot >= HashEntryCount || ResolvedKeysIn[slot] == 0u)
+        return;
+    uint octIndex = slot & (OctCellCapacity - 1u);
+
+    uint tx = texelIndex % OCT_IRRADIANCE_RES;
+    uint ty = texelIndex / OCT_IRRADIANCE_RES;
+    float2 texelUV = (float2(tx, ty) + 0.5f) / (float)OCT_IRRADIANCE_RES;
+    float3 texelDir = OctahedralUVToDirection(texelUV);
+
+    float4 rotation = PerFrameRotationQuaternion(FrameIndex);
+    float3 sumRadiance = 0.0f.xxx;
+    float sumWeight = 0.0f;
+    [loop]
+    for (uint r = 0u; r < OCT_RAYS_PER_CELL; ++r)
+    {
+        float3 rayDir = RotateVectorByQuaternion(SphericalFibonacciDir(r, OCT_RAYS_PER_CELL), rotation);
+        float w = max(0.0f, dot(texelDir, rayDir));
+        if (w <= 0.0f)
+            continue;
+        float3 rad = SanitizeFloat3(OctRayDataIn[probeIndex * OCT_RAYS_PER_CELL + r].xyz);
+        // Firefly soft-clamp: octahedral stores radiance per direction, so a
+        // single ray hitting a very bright spot (direct light / emissive) makes
+        // ONE texel pop as a bright dot (SH spreads it across low-order bands, so
+        // SH doesn't show this). Soft-knee compress each ray's luminance above a
+        // knee, preserving normal GI (< knee) while taming outliers.
+        float radLuma = Luminance(rad);
+        if (radLuma > OCT_FIREFLY_LUMA_KNEE)
+        {
+            float clampedLuma = radLuma / (1.0f + (radLuma - OCT_FIREFLY_LUMA_KNEE) / OCT_FIREFLY_LUMA_KNEE);
+            rad *= clampedLuma / radLuma;
+        }
+        sumRadiance += rad * w;
+        sumWeight += w;
+    }
+    // Cosine-weighted mean radiance over the hemisphere == E/pi, matching the SH
+    // path's EvaluateSHDiffuse * (1/pi) output so the A/B brightness is equal.
+    float3 newIrradiance = sumWeight > 1e-4f ? (sumRadiance / sumWeight) : 0.0f.xxx;
+
+    uint outIdx = octIndex * OCT_IRRADIANCE_TEXELS + texelIndex;
+    float4 prev = SanitizeFloat4(OctIrradianceOut[outIdx]);
+    float prevFrames = max(prev.w, 0.0f);
+
+    // Near-camera cells adapt faster: cap their accumulated history shorter so
+    // they reach a stable value in fewer frames. Strength is OctNearConvergenceBias
+    // (0 = uniform/long cap everywhere, 1 = strong near priority). Far cells keep
+    // the long cap for low-noise steady state.
+    float3 probePos = SanitizeFloat4(CellPositionIn[slot]).xyz;
+    float3 camPos = mul(float4(0.0f, 0.0f, 0.0f, 1.0f), InvViewMatrix).xyz;
+    float proximity = saturate(1.0f - length(probePos - camPos) / max(ProjectionParams.w * 0.3f, 1.0f));
+    float maxFrames = lerp(OCT_MAX_HISTORY_FRAMES, 48.0f, proximity * saturate(OctNearConvergenceBias));
+
+    float3 blended;
+    float frames;
+    if (prevFrames <= 0.0f)
+    {
+        blended = newIrradiance;
+        frames = 1.0f;
+    }
+    else
+    {
+        float accepted = min(prevFrames + 1.0f, maxFrames);
+        float alpha = saturate(1.0f / max(accepted, 1.0f));
+        if (prevFrames < OCT_NEW_CELL_RAMP_FRAMES)
+        {
+            float boost = 1.0f - saturate(prevFrames / OCT_NEW_CELL_RAMP_FRAMES);
+            alpha = saturate(alpha + boost * (0.6f - alpha));
+        }
+        // Adaptive recovery: a probe locked DARK (stale history from slot reuse,
+        // or an early bad gather) barely updates at alpha=1/maxFrames. If the new
+        // sample is brighter, weight it more so the dark cell recovers in a few
+        // frames. GATED to dark probes (darkGate) so a normal probe getting a
+        // transient bright sample does NOT spike — that gating prevents the
+        // adaptive term from amplifying fireflies into bright dots.
+        float prevLuma = Luminance(prev.xyz);
+        float newLuma = Luminance(newIrradiance);
+        float brighten = saturate((newLuma - prevLuma) / max(newLuma, 1e-3f));
+        float darkGate = saturate(1.0f - prevLuma / 0.15f); // 1 when history is dark
+        alpha = max(alpha, brighten * darkGate * 0.5f);
+        blended = lerp(prev.xyz, newIrradiance, alpha);
+        frames = accepted;
+    }
+    OctIrradianceOut[outIdx] = float4(max(blended, 0.0f.xxx), frames);
+}
+
+// One thread per (probe, depth texel). Builds the octahedral visibility map:
+// for this texel's direction, the sharpened-cosine-weighted mean and mean^2 of
+// the per-ray hit distances. Consumed by OctChebyshevWeight at query time to
+// kill light leak. Texels that received no rays this frame keep their previous
+// value (no decay toward zero).
+[numthreads(64, 1, 1)]
+void SpatialHashOctDepthBlend(uint3 DTid : SV_DispatchThreadID)
+{
+    uint gid = DTid.x;
+    uint probeIndex = gid / OCT_DEPTH_TEXELS;
+    uint texelIndex = gid % OCT_DEPTH_TEXELS;
+
+    uint activeCount = min(ActiveCounterIn[0], ActiveCellCapacity);
+    uint octProbeCount = min(activeCount, OctCellCapacity);
+    if (probeIndex >= octProbeCount)
+        return;
+
+    uint slot = ActiveCellSlotsIn[probeIndex];
+    if (slot >= HashEntryCount || ResolvedKeysIn[slot] == 0u)
+        return;
+    uint octIndex = slot & (OctCellCapacity - 1u);
+
+    uint tx = texelIndex % OCT_DEPTH_RES;
+    uint ty = texelIndex / OCT_DEPTH_RES;
+    float2 texelUV = (float2(tx, ty) + 0.5f) / (float)OCT_DEPTH_RES;
+    float3 texelDir = OctahedralUVToDirection(texelUV);
+
+    float maxDist = max(CellSize, 1e-3f) * OCT_DEPTH_MAX_CELLS;
+    float4 rotation = PerFrameRotationQuaternion(FrameIndex);
+    float sumDist = 0.0f;
+    float sumDist2 = 0.0f;
+    float sumWeight = 0.0f;
+    [loop]
+    for (uint r = 0u; r < OCT_RAYS_PER_CELL; ++r)
+    {
+        float3 rayDir = RotateVectorByQuaternion(SphericalFibonacciDir(r, OCT_RAYS_PER_CELL), rotation);
+        float c = max(0.0f, dot(texelDir, rayDir));
+        if (c <= 0.0f)
+            continue;
+        float w = pow(c, OCT_DEPTH_SHARPNESS);
+        float dist = min(OctRayDataIn[probeIndex * OCT_RAYS_PER_CELL + r].w, maxDist);
+        sumDist += dist * w;
+        sumDist2 += dist * dist * w;
+        sumWeight += w;
+    }
+    if (sumWeight <= 1e-4f)
+        return; // no rays landed in this texel's lobe this frame — keep history
+
+    float2 newMoments = float2(sumDist / sumWeight, sumDist2 / sumWeight);
+    uint outIdx = octIndex * OCT_DEPTH_TEXELS + texelIndex;
+    float2 prev = OctDepthOut[outIdx];
+    float2 blended = (prev.x <= 0.0f) ? newMoments : lerp(prev, newMoments, 0.1f);
+    OctDepthOut[outIdx] = blended;
+}
+
 [numthreads(8, 8, 1)]
 void SpatialHashQuery(uint3 DTid : SV_DispatchThreadID)
 {
@@ -954,6 +1420,27 @@ void SpatialHashQuery(uint3 DTid : SV_DispatchThreadID)
     float3 worldPos = ReconstructWorldPosition(pixelPos);
     float3 pixelNormal = OrientNormalTowardView(LoadPixelNormal(pixelPos), worldPos);
     float3 cacheNormal = OrientNormalTowardView(LoadCacheNormal(pixelPos), worldPos);
+
+    // Octahedral DDGI query: look up the cell's probe (stable key->slot->octIndex)
+    // and bilinearly sample its octahedral irradiance map in the pixel normal
+    // direction. Output is E/pi, matching the SH path's scale.
+    if (GIMode == 1u)
+    {
+        float3 octRadiance = SampleOctIrradianceInterpolated(worldPos, pixelNormal, cacheNormal);
+        if (octRadiance.x >= 0.0f)
+        {
+            octRadiance = max(SanitizeFloat3(octRadiance), 0.0f.xxx);
+            OutGIHashColor[pixelPos] = float4(octRadiance, 1.0f);
+            OutGIHashSH[pixelPos] = float4(octRadiance, 1.0f);
+        }
+        else
+        {
+            OutGIHashColor[pixelPos] = 0.0f.xxxx;
+            OutGIHashSH[pixelPos] = 0.0f.xxxx;
+        }
+        return;
+    }
+
     SH4RGB cachedSH = InitSH4RGB();
     float historyFrames = 0.0f;
     const bool bHasCache = LoadSmoothedSH(worldPos, cacheNormal, cachedSH, historyFrames);

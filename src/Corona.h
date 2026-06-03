@@ -576,6 +576,20 @@ private:
 	static constexpr UINT32 SpatialHashGIActiveCellCapacity = 1u << 20;
 	static constexpr UINT32 SpatialHashGITraceCellBudget = SpatialHashGIActiveCellCapacity;
 	static constexpr UINT32 SpatialHashGISHCoefficientCount = 4u;
+	// --- Octahedral DDGI mode (alternative to SH; selected at runtime via
+	// SpatialHashGIConstant::GIMode). The first SpatialHashGIOctCellCapacity
+	// active cells get an octahedral irradiance + depth map; typical scenes
+	// never exceed this so it acts as a hard memory bound, not a real limit.
+	// Storage (per probe): irradiance 8x8 (6x6 interior + 1px border) float4,
+	// depth 16x16 (14x14 interior + 1px border) float2. "Balanced" regime:
+	// 64K probes x 64 rays/probe, ~0.4GB (trace+resolved x irradiance+depth).
+	static constexpr UINT32 SpatialHashGIOctCellCapacity = 1u << 16;     // 64K probes
+	static constexpr UINT32 SpatialHashGIOctRaysPerCell = 64u;           // full-sphere rays per probe/frame
+	static constexpr UINT32 SpatialHashGIOctIrradianceRes = 8u;          // incl 1px border (6x6 interior)
+	static constexpr UINT32 SpatialHashGIOctDepthRes = 16u;              // incl 1px border (14x14 interior)
+	static constexpr UINT32 SpatialHashGIOctIrradianceTexels = SpatialHashGIOctIrradianceRes * SpatialHashGIOctIrradianceRes;
+	static constexpr UINT32 SpatialHashGIOctDepthTexels = SpatialHashGIOctDepthRes * SpatialHashGIOctDepthRes;
+	enum class SpatialHashGIStorageMode : UINT32 { SH = 0u, Octahedral = 1u };
 	struct SpatialHashGIConstant
 	{
 		glm::mat4x4 InvViewMatrix;
@@ -594,11 +608,16 @@ private:
 		float InterpolationStrength = 1.0f;
 		UINT32 ActiveCellCapacity = SpatialHashGIActiveCellCapacity;
 		UINT32 TraceCellBudget = SpatialHashGITraceCellBudget;
-		UINT32 _padding4 = 0;
-		UINT32 _padding5 = 0;
+		// 0 = SH4 (legacy, kept for A/B comparison), 1 = octahedral DDGI.
+		UINT32 GIMode = 0;
+		// Slot capacity that has octahedral atlas storage backing it.
+		UINT32 OctCellCapacity = SpatialHashGIOctCellCapacity;
 		PointLightParam PointLights[MaxDiffuseGIPointLights];
 		UINT32 PointLightCount = 0;
-		glm::vec3 PointLightPadding = glm::vec3(0.0f);
+		// Repurposed former float3 padding (layout unchanged):
+		float OctNearConvergenceBias = 0.4f; // 0 = uniform, 1 = strong near priority
+		float EvictDistanceWeight = 0.7f;    // LRU victim: 0 = age only, 1 = distance only
+		float _spatialHashPad = 0.0f;
 		glm::vec4 DebugDiffuseGIOverride = glm::vec4(0.0f);
 	};
 
@@ -611,6 +630,10 @@ private:
 	// resolve over the per-pixel SpatialHashQuery output. Mirrors
 	// the resolve stage from ScreenProbeGI.
 	shared_ptr<ComputePipelineStateObject> SpatialHashGIScreenResolvePSO;
+	// Octahedral DDGI blend pass: convolves OctRayData into the irradiance atlas.
+	shared_ptr<ComputePipelineStateObject> SpatialHashGIOctBlendPSO;
+	// Octahedral DDGI depth blend: convolves hit distances into the depth atlas.
+	shared_ptr<ComputePipelineStateObject> SpatialHashGIOctDepthBlendPSO;
 	std::shared_ptr<Buffer> SpatialHashGIActiveFlags;
 	std::shared_ptr<Buffer> SpatialHashGIActiveCellSlots;
 	std::shared_ptr<Buffer> SpatialHashGIActiveCounter;
@@ -621,6 +644,19 @@ private:
 	std::shared_ptr<Buffer> SpatialHashGITraceSH[SpatialHashGISHCoefficientCount];
 	std::shared_ptr<Buffer> SpatialHashGIResolvedKeys[2];
 	std::shared_ptr<Buffer> SpatialHashGIResolvedSH[2][SpatialHashGISHCoefficientCount];
+	// Octahedral DDGI atlases (GIMode==1). Index [0] = trace (this frame's ray
+	// accumulation, rebuilt per frame), [1] = resolved (persistent history,
+	// temporal hysteresis blend done in-place during resolve). Layout is
+	// slot-major: texel t of probe slot s lives at index s*Texels + t.
+	//   OctIrradiance: float4 (rgb radiance sum, valid-sample weight in .w)
+	//   OctDepth:      float2 (mean hit distance, mean distance^2) for Chebyshev
+	std::shared_ptr<Buffer> SpatialHashGIOctIrradiance[2];
+	std::shared_ptr<Buffer> SpatialHashGIOctDepth[2];
+	// Per-ray scratch written by the RT trace (oct mode) and consumed by the
+	// octahedral blend pass: float4(radiance.rgb, hit distance). Indexed by
+	// probeSlot * OctRaysPerCell + rayIndex. Ray directions are regenerated
+	// from rayIndex via spherical-Fibonacci + a per-frame random rotation.
+	std::shared_ptr<Buffer> SpatialHashGIOctRayData;
 	UINT32 SpatialHashGIWriteIndex = 0;
 	
 	// RT shadow
@@ -858,12 +894,16 @@ private:
 		UINT32 bIncludeSkyLighting = 0;
 		UINT32 HashEntryMask = SpatialHashGIEntryCount - 1u;
 		UINT32 MaxProbeSteps = 8;
-		UINT32 _padding6 = 0;
-		UINT32 _padding7 = 0;
-		UINT32 _padding8 = 0;
+		// Octahedral DDGI: 0 = SH trace (legacy), 1 = per-ray trace to RayData.
+		UINT32 GIMode = 0;
+		UINT32 OctCellCapacity = SpatialHashGIOctCellCapacity;
+		UINT32 OctRaysPerCell = SpatialHashGIOctRaysPerCell;
 		PointLightParam PointLights[MaxDiffuseGIPointLights];
 		UINT32 PointLightCount = 0;
 		glm::vec3 PointLightPadding = glm::vec3(0.0f);
+		// World-space camera position (oct mode biases the probe origin toward the
+		// camera/visible side so the sample center isn't buried in geometry).
+		glm::vec4 CameraPosition = glm::vec4(0.0f);
 	};
 
 	RTSpatialHashGIViewParamCB RTSpatialHashGIViewParam;
@@ -1061,7 +1101,11 @@ private:
 		glm::uvec4 ShadowChannelMap[MaxPointLights / 4];
 		PointLightParam PointLights[MaxPointLights];
 		UINT32 PointLightCount = 0;
-		glm::vec3 PointLightPadding = glm::vec3(0.0f);
+		// Strength of the RTAO contact term multiplied into DIRECT diffuse light
+		// (0 = no contact darkening, 1 = full AO). Adjustable in the Editor Config
+		// RTAO Details UI. Repurposes former padding (layout unchanged).
+		float RTAODirectContactStrength = 0.5f;
+		glm::vec2 PointLightPadding = glm::vec2(0.0f);
 	};
 	
 	std::shared_ptr<GraphicsPipelineHandle> LightingGraphicsPipeline;
@@ -1225,8 +1269,10 @@ private:
 	bool bDebugForceDiffuseGIColor = false;
 	glm::vec3 DebugForceDiffuseGIColor = glm::vec3(1.0f, 0.0f, 1.0f);
 	UINT32 DiffuseGIPointLightLimit = MaxDiffuseGIPointLights;
-	float RTAOIndirectStrength = 0.25f;
+	float RTAOIndirectStrength = 1.0f;
 	float RTAOIndirectFloor = 0.55f;
+	// RTAO contact term multiplied into DIRECT diffuse light (0..1).
+	float RTAODirectContactStrength = 0.5f;
 	float SurfaceBounceStrength = 1.0f;
 	float SurfaceBounceSaturation = 1.0f;
 	float SkyLightingStrength = 0.35f;
@@ -1803,8 +1849,9 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 		bool bEnableRTAO = true;
 		bool bEnableSkyLighting = false;
 		bool bEnableRayTracedSkyLighting = true;
-		float RTAOIndirectStrength = 0.25f;
+		float RTAOIndirectStrength = 1.0f;
 		float RTAOIndirectFloor = 0.55f;
+		float RTAODirectContactStrength = 0.5f;
 		float SurfaceBounceStrength = 1.0f;
 		float SurfaceBounceSaturation = 1.0f;
 		float SkyLightingStrength = 0.35f;
@@ -1856,6 +1903,10 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 		float SpatialHashInterpolationStrength = 1.0f;
 		UINT32 SpatialHashRaysPerCell = 2;
 		UINT32 SpatialHashMaxBounces = 2;
+		// 0 = SH4 spatial-hash GI, 1 = octahedral DDGI (A/B comparison toggle).
+		UINT32 SpatialHashGIStorageMode = 0;
+		float SpatialHashOctNearConvergenceBias = 0.4f;
+		float SpatialHashEvictDistanceWeight = 0.7f;
 		UINT32 PathTracingDirectLightSampleCount = 1;
 		UINT32 PathTracingMaxBounces = 4;
 		UINT32 PathTracingSamplesPerPixel = 1;
@@ -2914,6 +2965,14 @@ public:
 	bool LoadCameraState();
 	void SaveCameraState();
 	std::wstring GetCameraStatePath();
+	// Editor render-state persistence (anti-aliasing mode). Saved when the UI AA
+	// combo changes; loaded at startup and used as the default startup AA mode so
+	// the user's choice carries over to the next run.
+	bool LoadEditorRenderState();
+	void SaveEditorRenderState();
+	std::wstring GetEditorRenderStatePath();
+	EAntiAliasingMode SavedEditorAAMode = EAntiAliasingMode::TAA;
+	bool bHasSavedEditorAAMode = false;
 	bool LoadSceneState();
 	void SaveSceneState();
 	std::wstring GetSceneStatePath();
