@@ -387,63 +387,19 @@ int ComputePlaneBin(float3 worldPos, float3 normal)
     return int(floor((dot(worldPos, normal) / safeCellSize) * 2.0f + 0.5f));
 }
 
-uint HashCellKeyFromBits(int3 cell, uint normalBits, int planeBin)
+// One SH per spatial cell: key depends on the cell coordinate ONLY (no normal
+// or plane bin). Directionality is recovered by evaluating the cell's
+// full-sphere SH with each surface's own normal at query time, which removes
+// the per-bin comb on curved/slanted surfaces. MUST stay identical to the cell
+// (trace) shader's copy so insert and lookup agree. normal/planeBin params are
+// kept for call-site compatibility and ignored.
+uint HashCellKeyFromCell(int3 cell, float3 normal, int planeBin)
 {
     uint h = uint(cell.x) * 73856093u;
     h ^= uint(cell.y) * 19349663u;
     h ^= uint(cell.z) * 83492791u;
-    h ^= normalBits * 2654435761u;
-    h ^= uint(planeBin) * 1597334677u;
     h = HashUInt(h);
     return h == 0u ? 1u : h;
-}
-
-uint HashCellKeyFromCell(int3 cell, float3 normal, int planeBin)
-{
-    return HashCellKeyFromBits(cell, EncodeNormalBits(normal), planeBin);
-}
-
-// Normal-bin blending (curved/slanted surfaces). EncodeNormalBits quantizes the
-// normal to 8 levels/axis, so a smoothly-curving surface crosses bin boundaries
-// and adjacent pixels hash to different cells -> visible comb/banding. When the
-// query normal sits near a bin boundary, return the adjacent bin's encoded bits
-// and a blend weight so the query can mix both cells' SH and dissolve the seam.
-// Only the axis nearest a boundary is considered (one extra lookup, gated to
-// near-boundary pixels), keeping the per-pixel cost bounded.
-#ifndef SPATIAL_HASH_NORMAL_BIN_BLEND
-#define SPATIAL_HASH_NORMAL_BIN_BLEND 1
-#endif
-// Blend only when within this fraction of a bin boundary (|frac| in (0,0.5]);
-// larger => blend kicks in closer to the boundary (cheaper, sharper).
-#ifndef SPATIAL_HASH_NORMAL_BLEND_MIN_FRAC
-#define SPATIAL_HASH_NORMAL_BLEND_MIN_FRAC 0.28f
-#endif
-
-bool ComputeNormalBinNeighbor(float3 normal, out uint neighborBits, out float blendWeight)
-{
-    neighborBits = 0u;
-    blendWeight = 0.0f;
-    normal = SafeNormalize(normal, float3(0.0f, 1.0f, 0.0f));
-    float3 e = saturate(normal * 0.5f + 0.5f) * 7.0f; // encoded float, matches EncodeNormalBits
-    int3 bin = int3(e + 0.5f);
-    float3 fr = e - float3(bin);                       // (-0.5, 0.5)
-    float3 af = abs(fr);
-    int axis = (af.x >= af.y && af.x >= af.z) ? 0 : (af.y >= af.z ? 1 : 2);
-    float fa = (axis == 0) ? fr.x : ((axis == 1) ? fr.y : fr.z);
-    float aaf = abs(fa);
-    if (aaf < SPATIAL_HASH_NORMAL_BLEND_MIN_FRAC)
-        return false; // well inside the bin — no seam, skip the extra lookup
-    int cur = (axis == 0) ? bin.x : ((axis == 1) ? bin.y : bin.z);
-    int nb = clamp(cur + (fa > 0.0f ? 1 : -1), 0, 7);
-    if (nb == cur)
-        return false; // at the hemisphere edge, no neighbour bin
-    int3 nbin = bin;
-    if (axis == 0) nbin.x = nb; else if (axis == 1) nbin.y = nb; else nbin.z = nb;
-    neighborBits = (uint(nbin.x) & 7u) | ((uint(nbin.y) & 7u) << 3u) | ((uint(nbin.z) & 7u) << 6u);
-    // Ramp 0..0.5 from the threshold to the boundary for a seamless transition.
-    blendWeight = saturate((aaf - SPATIAL_HASH_NORMAL_BLEND_MIN_FRAC) /
-                           max(0.5f - SPATIAL_HASH_NORMAL_BLEND_MIN_FRAC, 1e-3f)) * 0.5f;
-    return true;
 }
 
 uint HashCellKey(float3 worldPos, float3 normal)
@@ -624,31 +580,17 @@ bool FindPrevSlotForRead(uint key, out uint slot)
 float ComputeSurfaceLobeWeight(uint slot, float3 queryWorldPos, float3 queryNormal)
 {
     float4 storedPosition = SanitizeFloat4(CellPositionIn[slot]);
-    float4 storedNormal4 = SanitizeFloat4(CellNormalIn[slot]);
-    if (storedPosition.w <= 0.0f || storedNormal4.w <= 0.0f)
+    if (storedPosition.w <= 0.0f)
         return 0.0f;
 
-    queryNormal = SafeNormalize(queryNormal, float3(0.0f, 1.0f, 0.0f));
-    float3 storedNormal = SafeNormalize(storedNormal4.xyz, queryNormal);
-    float normalDot = saturate(dot(queryNormal, storedNormal));
-    if (normalDot < SPATIAL_HASH_MIN_SURFACE_NORMAL_DOT)
-        return 0.0f;
-
+    // One full-sphere SH probe per cell serves every surface orientation, so we
+    // no longer reject by normal or plane (that per-bin matching was the comb
+    // source). Weight purely by distance from the probe's representative surface
+    // point: a far surface that happens to share the hash cell contributes less
+    // than the near one, and the trilinear/gather blend stays smooth.
     float safeCellSize = max(CellSize, 1e-3f);
-    float planeDelta = abs(dot(queryWorldPos - storedPosition.xyz, storedNormal));
-    float planeReject = safeCellSize * SPATIAL_HASH_PLANE_REJECT_CELL_SCALE;
-    if (planeDelta > planeReject)
-        return 0.0f;
-
-    float normalWeight = smoothstep(
-        SPATIAL_HASH_MIN_SURFACE_NORMAL_DOT,
-        SPATIAL_HASH_FULL_SURFACE_NORMAL_DOT,
-        normalDot);
-    float planeWeight = 1.0f - smoothstep(
-        safeCellSize * SPATIAL_HASH_PLANE_SOFT_CELL_SCALE,
-        planeReject,
-        planeDelta);
-    return saturate(normalWeight * planeWeight);
+    float dist = length(queryWorldPos - storedPosition.xyz);
+    return saturate(1.0f - dist / (safeCellSize * 1.5f));
 }
 
 bool LoadCachedSHForCell(int3 cell, float3 normal, float3 queryWorldPos,
@@ -658,75 +600,27 @@ bool LoadCachedSHForCell(int3 cell, float3 normal, float3 queryWorldPos,
     sh = InitSH4RGB();
     historyFrames = 0.0f;
 
-    int basePlaneBin = ComputePlaneBin(queryWorldPos, normal);
-    float bestScore = 0.0f;
-    SH4RGB bestSH = InitSH4RGB();
-    float bestHistoryFrames = 0.0f;
-    float bestWeight = 0.0f;
-
-    [unroll]
-    for (int planeOffset = -1; planeOffset <= 1; ++planeOffset)
-    {
-        uint slot = 0u;
-        uint key = HashCellKeyFromCell(cell, normal, basePlaneBin + planeOffset);
-        if (!FindSlotForRead(key, slot))
-            continue;
-
-        float surfaceWeight = ComputeSurfaceLobeWeight(slot, queryWorldPos, normal);
-        if (surfaceWeight <= 1e-4f)
-            continue;
-
-        float candidateHistoryFrames = 0.0f;
-        SH4RGB candidateSH = LoadResolvedSH(slot, candidateHistoryFrames);
-        if (candidateHistoryFrames <= 0.0f || SHAbsEnergy(candidateSH) <= 1e-7f)
-            continue;
-
-        float candidateScore = surfaceWeight * lerp(0.25f, 1.0f, saturate(candidateHistoryFrames / 8.0f));
-        if (candidateScore > bestScore)
-        {
-            bestScore = candidateScore;
-            bestSH = candidateSH;
-            bestHistoryFrames = candidateHistoryFrames;
-            bestWeight = surfaceWeight;
-        }
-    }
-
-    if (bestScore <= 1e-5f)
+    // One SH per spatial cell -> a single lookup (no plane-bin / normal-bin
+    // search). The cell's full-sphere SH is evaluated with the surface normal by
+    // the caller, so directionality is preserved without per-bin cells, and the
+    // comb is gone.
+    uint slot = 0u;
+    uint key = HashCellKeyFromCell(cell, normal, 0);
+    if (!FindSlotForRead(key, slot))
         return false;
 
-#if SPATIAL_HASH_NORMAL_BIN_BLEND
-    // Crossfade with the adjacent normal bin when the query normal is near a
-    // bin boundary, dissolving the comb seam on curved/slanted surfaces. One
-    // extra lookup, only near boundaries; ComputeSurfaceLobeWeight rejects any
-    // mismatched surface so this can't leak across orientations.
-    uint neighborBits;
-    float nblend;
-    if (ComputeNormalBinNeighbor(normal, neighborBits, nblend))
-    {
-        uint nslot = 0u;
-        uint nkey = HashCellKeyFromBits(cell, neighborBits, basePlaneBin);
-        if (FindSlotForRead(nkey, nslot))
-        {
-            float nw = ComputeSurfaceLobeWeight(nslot, queryWorldPos, normal);
-            if (nw > 1e-4f)
-            {
-                float nhist = 0.0f;
-                SH4RGB nsh = LoadResolvedSH(nslot, nhist);
-                if (nhist > 0.0f && SHAbsEnergy(nsh) > 1e-7f)
-                {
-                    float t = saturate(nblend);
-                    bestSH = LerpSH(bestSH, nsh, t);
-                    bestHistoryFrames = lerp(bestHistoryFrames, nhist, t);
-                    bestWeight = max(bestWeight, nw);
-                }
-            }
-        }
-    }
-#endif
+    float surfaceWeight = ComputeSurfaceLobeWeight(slot, queryWorldPos, normal);
+    if (surfaceWeight <= 1e-4f)
+        return false;
 
-    sh = bestSH;
-    historyFrames = bestHistoryFrames;
-    bilateralWeight = bestWeight;
+    float candidateHistoryFrames = 0.0f;
+    SH4RGB candidateSH = LoadResolvedSH(slot, candidateHistoryFrames);
+    if (candidateHistoryFrames <= 0.0f || SHAbsEnergy(candidateSH) <= 1e-7f)
+        return false;
+
+    sh = candidateSH;
+    historyFrames = candidateHistoryFrames;
+    bilateralWeight = surfaceWeight;
     return true;
 }
 
@@ -953,8 +847,15 @@ void SpatialHashUpdate(uint3 DTid : SV_DispatchThreadID)
         return;
     MarkActiveSlot(slot);
 
-    float3 cellCenter = (float3(GetSpatialHashCell(worldPos)) + 0.5f.xxx) * max(CellSize, 1e-3f);
-    float normalizedDist = saturate(length((worldPos - cellCenter) / max(CellSize, 1e-3f)) * 1.1547005f);
+    // Pick the cell's representative surface point as the one CLOSEST TO THE
+    // CAMERA (smallest view distance wins the InterlockedMin). That surface
+    // faces the camera/open side, so the trace's open-space origin offset (along
+    // the stored normal) lands in free space rather than buried in geometry, and
+    // the probe captures distant incoming radiance without excessive occlusion.
+    float3 cameraPos = mul(float4(0.0f, 0.0f, 0.0f, 1.0f), InvViewMatrix).xyz;
+    float camDist = length(worldPos - cameraPos);
+    // Normalize against the far plane so the quantization spans the view range.
+    float normalizedDist = saturate(camDist / max(ProjectionParams.w, 1.0f));
     uint score = min(uint(normalizedDist * 16777215.0f), 16777215u);
     score = (score << 8u) | (HashUInt(pixelPos.x * 1973u + pixelPos.y * 9277u + FrameIndex * 26699u) & 255u);
 

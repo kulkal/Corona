@@ -177,6 +177,17 @@ float3 SampleUniformHemisphere(float u, float v)
     return p;
 }
 
+// Uniform direction on the full sphere (pdf = 1/4pi). Used by the spatial-hash
+// GI probe trace: an open-space cell origin gathers radiance from every
+// direction into an SH, which surfaces then evaluate with their own normal.
+float3 SampleUniformSphere(float u, float v)
+{
+    float z = 1.0f - 2.0f * u;                 // [-1, 1]
+    float r = sqrt(max(1.0f - z * z, 0.0f));
+    float phi = 2.0f * PI * v;
+    return float3(r * cos(phi), r * sin(phi), z);
+}
+
 float3 SampleDirectionalLightSphereCap(float3 direction, float angularRadius, float2 u)
 {
     float3 center = direction;

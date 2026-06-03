@@ -260,13 +260,17 @@ int ComputePlaneBin(float3 worldPos, float3 normal)
     return int(floor((dot(worldPos, normal) / safeCellSize) * 2.0f + 0.5f));
 }
 
+// One SH per spatial cell: the key depends on the cell coordinate ONLY. The
+// normal/plane arguments are kept for call-site compatibility but no longer
+// split the cell — directionality comes from evaluating the cell's full-sphere
+// SH with each surface's own normal at query time. This removes the per-bin
+// comb on curved/slanted surfaces. MUST stay identical to the diffuse shader's
+// copy so insert (update) and this light-mask lookup agree.
 uint HashCellKeyFromCell(int3 cell, float3 normal, int planeBin)
 {
     uint h = uint(cell.x) * 73856093u;
     h ^= uint(cell.y) * 19349663u;
     h ^= uint(cell.z) * 83492791u;
-    h ^= EncodeNormalBits(normal) * 2654435761u;
-    h ^= uint(planeBin) * 1597334677u;
     h = HashUInt(h);
     return h == 0u ? 1u : h;
 }
@@ -597,7 +601,15 @@ void rayGen()
 
     float3 worldNormal = SafeNormalize(cellNormal.xyz, float3(0.0f, 1.0f, 0.0f));
     float3 worldPos = cellPosition.xyz;
-    float3 origin = worldPos + worldNormal * RayBias;
+    // Open-space probe origin: push off the surface along its normal (the update
+    // orients the stored normal toward the camera/open side) so the full-sphere
+    // gather is not buried in geometry and self-occluded. A single SH per cell
+    // then captures incoming radiance from every direction, which surfaces of
+    // any orientation in the cell evaluate with their own normal.
+#ifndef SPATIAL_HASH_PROBE_OFFSET
+#define SPATIAL_HASH_PROBE_OFFSET 0.5f
+#endif
+    float3 origin = worldPos + worldNormal * max(RayBias, CellSize * SPATIAL_HASH_PROBE_OFFSET);
     uint rayCount = clamp(RaysPerCell, 1u, 8u);
     uint noiseSeed = slot ^ (traceIndex * 1664525u);
     uint2 baseNoiseCoord = uint2(noiseSeed & 1023u, noiseSeed >> 10u);
@@ -617,9 +629,9 @@ void rayGen()
             BlueNoiseOffsetStride,
             NoiseMode);
 
-        float3 sampleDirLocal = SampleUniformHemisphere(randomUV.x, randomUV.y);
-        float3 sampleDirWorld = SafeNormalize(mul(sampleDirLocal, BuildTBN(worldNormal)), worldNormal);
-        float samplePdf = 1.0f / (2.0f * PI);
+        // Full-sphere gather (probe-style) so one cell serves all orientations.
+        float3 sampleDirWorld = SampleUniformSphere(randomUV.x, randomUV.y);
+        float samplePdf = 1.0f / (4.0f * PI);
         float invPdf = rcp(max(samplePdf, 1e-4f));
         float3 sampleRadiance = TraceDiffusePath(origin, sampleDirWorld, noiseCoord, sampleIndex);
         AccumulateSH4RGB(sh, ProjectRadianceToSH4RGB(sampleRadiance, sampleDirWorld, invPdf), 1.0f);
