@@ -327,9 +327,13 @@ float4 PSMain(PSInput input) : SV_TARGET
     float3 IndirectDiffuse = 0.0f.xxx;
     float3 IndirectSpecular = 0.0f.xxx;
 
+    // RTAO read once (1.0 = unoccluded when RTAO is off/invalid). Used for the
+    // indirect ContactAO below AND for direct-diffuse contact occlusion applied
+    // to the composite, so RTAO is visible even when diffuse GI is disabled.
+    float AmbientOcclusion = bEnableRTAO != 0 ? saturate(SanitizeFloat3(AmbientOcclusionTex[PixelPos].xyz).x) : 1.0f;
+
     if (!bDirectOutput)
     {
-        float AmbientOcclusion = bEnableRTAO != 0 ? saturate(SanitizeFloat3(AmbientOcclusionTex[PixelPos].xyz).x) : 1.0f;
         float ContactAO = lerp(1.0f, max(AmbientOcclusion, saturate(RTAOIndirectFloor)), saturate(RTAOIndirectStrength));
         float3 SkyDiffuse = (bEnableSkyLighting != 0) ? SanitizeFloat3(SkyLightingTex[PixelPos].xyz) * Albedo * (1.0f - Metallic) * saturate(SkyLightingStrength) : float3(0, 0, 0);
         float3 SurfaceBounceGI = max(SanitizeFloat3(GIResultColorTex[PixelPos / GIBufferScale].xyz), 0.0f.xxx);
@@ -437,6 +441,14 @@ float4 PSMain(PSInput input) : SV_TARGET
 
     float3 SimpleSkyAmbient = (bMobileDirectOnly || bEnableSimpleSkyLighting != 0) ? EvaluateSimpleSkyAmbient(WorldNormal, Albedo, Metallic, DeviceDepth) : 0.0f.xxx;
     float3 DiffuseLighting = max(DirectionalDiffuse + PointDiffuse + SimpleSkyAmbient, 0);
+    // RTAO contact occlusion on direct diffuse: artist contact shadows in
+    // creases the direct shadow term misses, so enabling RTAO is visibly
+    // reflected even without diffuse GI. Non-physical, gentle, tunable
+    // (0 = physical/off, 1 = full AO). bEnableRTAO off => AmbientOcclusion = 1.
+#ifndef RTAO_DIRECT_CONTACT_STRENGTH
+#define RTAO_DIRECT_CONTACT_STRENGTH 0.5f
+#endif
+    DiffuseLighting *= lerp(1.0f, AmbientOcclusion, saturate(RTAO_DIRECT_CONTACT_STRENGTH));
     float3 DirectSpecular = max(DirectionalSpecular + PointSpecular, 0);
 
     float3 DirectLighting = max(DiffuseLighting + DirectSpecular, 0);

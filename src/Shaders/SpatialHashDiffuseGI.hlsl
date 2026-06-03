@@ -93,6 +93,13 @@ struct SH4RGB
 static const float MAX_SPATIAL_HASH_HISTORY_SAMPLES = 4096.0f;
 static const float SPATIAL_HASH_DIFFUSE_SCALE = 1.0f / PI;
 static const uint SPATIAL_HASH_ACTIVE_INIT = 0xffffffffu;
+// Cells unseen for this many frames are aged out by the clear pass so the
+// table can't saturate over a long session (saturation starves newly-visible
+// cells and makes GI progressively vanish). ~17 s @ 60 fps keeps off-screen
+// cells alive well past typical look-away, then reclaims them. Tunable.
+#ifndef SPATIAL_HASH_MAX_CELL_AGE_FRAMES
+#define SPATIAL_HASH_MAX_CELL_AGE_FRAMES 1024u
+#endif
 static const float SPATIAL_HASH_MIN_SURFACE_NORMAL_DOT = 0.72f;
 static const float SPATIAL_HASH_FULL_SURFACE_NORMAL_DOT = 0.92f;
 static const float SPATIAL_HASH_PLANE_REJECT_CELL_SCALE = 0.45f;
@@ -763,7 +770,39 @@ void SpatialHashClear(uint3 DTid : SV_DispatchThreadID)
         ResolvedSH1Out[entryIndex] = 0.0f.xxxx;
         ResolvedSH2Out[entryIndex] = 0.0f.xxxx;
         ResolvedSH3Out[entryIndex] = 0.0f.xxxx;
+        return;
     }
+
+    // Steady state: age out long-unseen cells so the hash can't saturate (the
+    // cause of GI progressively vanishing after exploring a while). Off-screen
+    // cells survive up to SPATIAL_HASH_MAX_CELL_AGE_FRAMES. To keep linear-probe
+    // chains intact (reads stop at the first empty slot), only evict a slot that
+    // is the TAIL of its cluster — i.e. the next slot is already empty — so
+    // freeing it never orphans a key that probed past it. Each thread owns its
+    // own entry, so this is race-free.
+    uint key = ResolvedKeysOut[entryIndex];
+    if (key == 0u)
+        return;
+    uint lastSeen = ActiveFlagsOut[entryIndex];
+    if (lastSeen == 0u || lastSeen == SPATIAL_HASH_ACTIVE_INIT)
+        return;
+    uint curStamp = (FrameIndex & 0x7fffffffu) + 1u;
+    uint age = curStamp - lastSeen;
+    if (age <= SPATIAL_HASH_MAX_CELL_AGE_FRAMES)
+        return;
+    if (ResolvedKeysOut[(entryIndex + 1u) & HashEntryMask] != 0u)
+        return; // not the tail of a probe cluster — evicting would break reads
+
+    ActiveFlagsOut[entryIndex] = 0u;
+    CellScoreOut[entryIndex] = 0xffffffffu;
+    CellPositionOut[entryIndex] = 0.0f.xxxx;
+    CellNormalOut[entryIndex] = 0.0f.xxxx;
+    CellLightMaskOut[entryIndex] = 0u;
+    ResolvedKeysOut[entryIndex] = 0u;
+    ResolvedSH0Out[entryIndex] = 0.0f.xxxx;
+    ResolvedSH1Out[entryIndex] = 0.0f.xxxx;
+    ResolvedSH2Out[entryIndex] = 0.0f.xxxx;
+    ResolvedSH3Out[entryIndex] = 0.0f.xxxx;
 }
 
 [numthreads(8, 8, 1)]

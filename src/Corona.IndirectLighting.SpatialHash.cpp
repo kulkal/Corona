@@ -306,8 +306,10 @@ void Corona::SpatialHashGIPass()
 	SpatialHashGIClearPSO->SetBufferUAV("ActiveCounterOut", SpatialHashGIActiveCounter.get());
 	SpatialHashGIClearPSO->SetCBVValue("SpatialHashGIConstant", &SpatialHashGICB);
 	SpatialHashGIClearPSO->Apply();
-	const UINT32 spatialHashClearEntryCount = bSpatialHashGIHistoryValid ? 1u : SpatialHashGIEntryCount;
-	renderBackend->Dispatch((spatialHashClearEntryCount + 255u) / 256u, 1u, 1u);
+	// Always dispatch over the whole table: on first frame (history invalid) it
+	// full-clears; in steady state it ages out long-unseen cells so the hash
+	// can't saturate over a long session (cheap ~8k groups of a trivial kernel).
+	renderBackend->Dispatch((SpatialHashGIEntryCount + 255u) / 256u, 1u, 1u);
 
 	renderBackend->TransitionBuffer(SpatialHashGIActiveFlags.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
 	renderBackend->TransitionBuffer(SpatialHashGICellScore.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
