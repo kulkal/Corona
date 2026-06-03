@@ -64,6 +64,10 @@ RWStructuredBuffer<float2> OctDepthOut : register(u16);
 // stopped being visible / was evicted) a colliding visible cell takes over.
 RWStructuredBuffer<uint> OctCellKeyOut : register(u17);
 #define OCT_OWNER_STALE_FRAMES 60u
+// Query rejects a probe whose owner stamp wasn't refreshed within this many
+// frames (its oct slot isn't being blended -> frozen/stale -> fall back to
+// neighbours). Small so stuck cells clear quickly.
+#define OCT_QUERY_STALE_FRAMES 4u
 
 // 16-bit non-zero ownership hash of a cell key (0 is reserved for "free").
 uint OctOwnerHash(uint key)
@@ -1214,11 +1218,18 @@ float3 SampleOctIrradianceInterpolated(float3 worldPos, float3 evalNormal, float
                     continue;
 
                 uint octIndex = slot & (OctCellCapacity - 1u);
-                // Ownership: skip probes whose oct slot belongs to a DIFFERENT
-                // (colliding) cell — their irradiance/depth isn't ours. The blend
-                // uses only correctly-owned neighbours, eliminating the corrupt
-                // bright/dark dots from octIndex aliasing in large scenes.
-                if (OctOwnerHash(key) != (OctCellKeyIn[octIndex] >> 16u))
+                // Ownership + freshness: use the probe only if its oct slot is
+                // owned by THIS cell AND its owner stamp was refreshed within the
+                // last few frames. A stale stamp means the slot isn't being blended
+                // (insert failed under window pressure / beyond the oct cap / a
+                // colliding owner) so its data is FROZEN, possibly from an earlier
+                // aliasing collision — skip it and fall back to fresh neighbours
+                // instead of showing the stuck corrupted value.
+                uint octPacked = OctCellKeyIn[octIndex];
+                if (OctOwnerHash(key) != (octPacked >> 16u))
+                    continue;
+                uint octAge = ((FrameIndex & 0xffffu) - (octPacked & 0xffffu)) & 0xffffu;
+                if (octAge > OCT_QUERY_STALE_FRAMES)
                     continue;
 
                 float4 probe = SampleOctIrradiance(octIndex, evalNormal);
