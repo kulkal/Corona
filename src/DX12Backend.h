@@ -500,6 +500,24 @@ public:
 	std::list<std::shared_ptr<Texture>> DynamicTextures;
 	std::list<std::shared_ptr<Buffer>> DynamicBuffers;
 
+	// Texture-streaming Stage 1: non-blocking uploads. CreateTextureFromFile no
+	// longer stalls (WaitGPU) per texture; the staging upload heap is parked
+	// here with the submission fence and freed once the GPU copy completes.
+	// Because every copy and every later sampling run on the same ordered queue,
+	// the copy is guaranteed to finish before the texture is ever read, so this
+	// is correct without per-texture synchronization. A byte budget caps how
+	// much staging memory can be in flight before we drain.
+	struct PendingTextureUpload
+	{
+		UINT64 FenceValue = 0;
+		UINT64 Bytes = 0;
+		Microsoft::WRL::ComPtr<ID3D12Resource> UploadHeap;
+	};
+	std::vector<PendingTextureUpload> PendingTextureUploads;
+	UINT64 PendingTextureUploadBytes = 0;
+	static constexpr UINT64 kMaxInFlightTextureUploadBytes = 256ull * 1024ull * 1024ull;
+	void RetireCompletedTextureUploads();
+
 
 	ComPtr<IDXGISwapChain3> m_swapChain;
 	bool bTearingSupported = false;

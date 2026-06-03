@@ -609,6 +609,9 @@ void DX12Backend::InvalidateGraphicsCommandStateCache()
 
 void DX12Backend::BeginFrame()
 {
+	// Reclaim texture-upload staging heaps whose GPU copy has finished.
+	RetireCompletedTextureUploads();
+
 	CurrentFrameIndex = m_swapChain->GetCurrentBackBufferIndex();
 
 	// wait until gpu processing for this frame resource is completed
@@ -3211,11 +3214,29 @@ std::shared_ptr<Texture> DX12Backend::CreateTextureFromFile(const std::wstring& 
 	cmd->CmdList->ResourceBarrier(1, &BarrierDesc);
 	commandRecordMs = ElapsedDx12InitMilliseconds(commandRecordStart, std::chrono::steady_clock::now());
 
+	// Free any staging heaps whose GPU copy already completed before queuing more.
+	RetireCompletedTextureUploads();
+
 	const auto executeStart = std::chrono::steady_clock::now();
 	CmdQ->ExecuteCommandList(cmd);
 	executeMs = ElapsedDx12InitMilliseconds(executeStart, std::chrono::steady_clock::now());
+
+	// Stage 1 streaming: do NOT stall on the copy. Park the staging heap with the
+	// submission fence; it is freed once the GPU finishes (the copy is ordered
+	// before any later render that samples this texture, so no read-before-write).
 	const auto waitStart = std::chrono::steady_clock::now();
-	CmdQ->WaitGPU();
+	PendingTextureUpload pending;
+	pending.FenceValue = cmd->Fence.value_or(CmdQ->CurrentFenceValue);
+	pending.Bytes = uploadBufferSize;
+	pending.UploadHeap = uploadHeap;
+	PendingTextureUploads.push_back(std::move(pending));
+	PendingTextureUploadBytes += uploadBufferSize;
+	// Bound in-flight staging memory: drain once over budget (rare; large maps).
+	if (PendingTextureUploadBytes > kMaxInFlightTextureUploadBytes)
+	{
+		CmdQ->WaitGPU();
+		RetireCompletedTextureUploads();
+	}
 	waitGpuMs = ElapsedDx12InitMilliseconds(waitStart, std::chrono::steady_clock::now());
 
 	const auto srvStart = std::chrono::steady_clock::now();
@@ -3249,6 +3270,28 @@ std::shared_ptr<Texture> DX12Backend::CreateTextureFromFile(const std::wstring& 
 
 	return shared_ptr<Texture>(tex.release());
 }
+
+void DX12Backend::RetireCompletedTextureUploads()
+{
+	if (PendingTextureUploads.empty() || !CmdQ || !CmdQ->m_fence)
+		return;
+	const UINT64 completed = CmdQ->m_fence->GetCompletedValue();
+	size_t kept = 0;
+	for (size_t i = 0; i < PendingTextureUploads.size(); ++i)
+	{
+		PendingTextureUpload& pending = PendingTextureUploads[i];
+		if (pending.FenceValue <= completed)
+		{
+			PendingTextureUploadBytes -= std::min(PendingTextureUploadBytes, pending.Bytes);
+			continue; // GPU done — drop the staging heap (ComPtr releases)
+		}
+		if (kept != i)
+			PendingTextureUploads[kept] = std::move(pending);
+		++kept;
+	}
+	PendingTextureUploads.resize(kept);
+}
+
 static const D3D12_HEAP_PROPERTIES kDefaultHeapProps =
 {
 	D3D12_HEAP_TYPE_DEFAULT,
