@@ -13,6 +13,17 @@ ByteAddressBuffer indices : register(t4);
 Texture2D AlbedoTex : register(t5);
 ByteAddressBuffer InstanceProperty : register(t6);
 
+// Must match Corona::MaxPointLights in Corona.h.
+#define MAX_POINT_LIGHTS 128
+#define RT_DIFFUSE_GI_MAX_POINT_LIGHTS 16
+
+struct PointLightParam
+{
+    float4 PositionAndRadius;
+    float4 ColorAndIntensity;
+    float4 DirectionAndType;
+    float4 SpotConeAndFlags;
+};
 
 cbuffer ViewParameter : register(b0)
 {
@@ -35,6 +46,9 @@ cbuffer ViewParameter : register(b0)
     float _padding;
     float3 LightColor;
     float _padding2;
+    PointLightParam PointLights[RT_DIFFUSE_GI_MAX_POINT_LIGHTS];
+    uint PointLightCount;
+    float3 PointLightPadding;
 };
 
 SamplerState sampleWrap : register(s0);
@@ -82,6 +96,77 @@ struct RT_DIFFUSE_GI_RAY_PAYLOAD ShadowRayPayload
 {
     bool bHit RT_DIFFUSE_GI_SHADOW_PAYLOAD_RW;
 };
+
+float EvaluateSpotAttenuation(PointLightParam light, float3 surfaceToLightDir)
+{
+    if (light.DirectionAndType.w < 0.5f)
+        return 1.0f;
+
+    float3 spotDir = CommonSafeNormalize(light.DirectionAndType.xyz, float3(0.0f, 1.0f, 0.0f));
+    float cosTheta = dot(spotDir, -surfaceToLightDir);
+    float cone = saturate((cosTheta - light.SpotConeAndFlags.y) * light.SpotConeAndFlags.z);
+    return cone * cone;
+}
+
+bool IsPointLightVisible(float3 worldPos, float3 normal, float3 lightDir, float lightDistance, PointLightParam light)
+{
+    if (light.SpotConeAndFlags.w <= 0.5f)
+        return true;
+
+    RayDesc shadowRay;
+    shadowRay.Origin = worldPos + normal * 0.5f;
+    shadowRay.Direction = lightDir;
+    shadowRay.TMin = 0.001f;
+    shadowRay.TMax = max(lightDistance - 0.05f, 0.001f);
+
+    ShadowRayPayload shadowPayload;
+    shadowPayload.bHit = true;
+    TraceRay(
+        gRtScene,
+        RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH |
+            RAY_FLAG_SKIP_CLOSEST_HIT_SHADER |
+            RAY_FLAG_FORCE_OPAQUE |
+            RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES,
+        0xFF,
+        0,
+        0,
+        1,
+        shadowRay,
+        shadowPayload);
+
+    return !shadowPayload.bHit;
+}
+
+float3 EvaluatePointLightBounce(float3 worldPos, float3 normal, float3 albedo)
+{
+    float3 radiance = 0.0f.xxx;
+    uint activeCount = min(PointLightCount, (uint)RT_DIFFUSE_GI_MAX_POINT_LIGHTS);
+    [loop]
+    for (uint lightIndex = 0u; lightIndex < RT_DIFFUSE_GI_MAX_POINT_LIGHTS; ++lightIndex)
+    {
+        if (lightIndex >= activeCount)
+            break;
+
+        PointLightParam light = PointLights[lightIndex];
+        float3 toLight = light.PositionAndRadius.xyz - worldPos;
+        float distanceSq = max(dot(toLight, toLight), 1.0e-4f);
+        float lightDistance = sqrt(distanceSq);
+        float3 lightDir = toLight / lightDistance;
+        float range = max(light.PositionAndRadius.w, 0.01f);
+        float rangeAttenuation = saturate(1.0f - lightDistance / range);
+        rangeAttenuation *= rangeAttenuation;
+        float inverseSquareAttenuation = 1.0f / max(1.0f, distanceSq * 0.0001f);
+        float attenuation = rangeAttenuation * inverseSquareAttenuation * EvaluateSpotAttenuation(light, lightDir);
+        float nDotL = saturate(dot(normal, lightDir));
+        if (attenuation <= 0.0f || nDotL <= 0.0f || !IsPointLightVisible(worldPos, normal, lightDir, lightDistance, light))
+            continue;
+
+        float3 lightColor = max(CommonSanitizeFloat3(light.ColorAndIntensity.xyz, 0.0f.xxx), 0.0f.xxx);
+        float lightIntensity = max(CommonSanitizeFloat(light.ColorAndIntensity.w, 0.0f), 0.0f);
+        radiance += nDotL * lightColor * lightIntensity * attenuation * max(albedo, 0.0f.xxx) * INV_PI;
+    }
+    return radiance;
+}
 
 void TraceDiffuseGIRay(RayDesc ray, inout RayPayload payload)
 {
@@ -268,6 +353,7 @@ void rayGen
             float NdotL = saturate(dot(LightDir, payload.normal));
             Irradiance += NdotL * LightIntensity * max(CommonSanitizeFloat3(LightColor, 1.0f.xxx), 0.0f.xxx) * Albedo * INV_PI;
         }
+        Irradiance += EvaluatePointLightBounce(payload.position, payload.normal, Albedo);
         sh_indirect = irradiance_to_SH(Irradiance, sampleDirWorld);
 
         GIResultSH[launchIndex.xy] = sh_indirect.shY;

@@ -17,6 +17,7 @@
 #include "glm/fwd.hpp"
 #include "Utils.h"
 #include <dxcapi.use.h>
+#include <d3dcompiler.h>
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -52,6 +53,206 @@ using namespace std;
 
 ComPtr<ID3DBlob> compileShaderDXC(DX12Backend* owner, const WCHAR* filename, const std::string& entryPoint, const WCHAR* targetString);
 void AppendCpuRuntimeTrace(const std::wstring& line);
+
+// ---------------------------------------------------------------------------
+// On-disk pipeline binary cache.
+//
+// Two layers, both keyed by a 64-bit FNV-1a content hash and stored under
+// bin/shadercache:
+//   * .dxil files — compiled DXC bytecode, so repeat launches skip the
+//                    (dominant) shader-compilation cost.
+//   * .pso  files — ID3D12PipelineState::GetCachedBlob output, fed back through
+//                    D3D12_CACHED_PIPELINE_STATE so the driver skips its own PSO
+//                    compilation. A stale blob (driver/HW change) is detected by
+//                    Create*PipelineState failing; we then recompile + rewrite.
+//
+// Keys fold in the resolved #include tree, entry point, target, defines, build
+// config and the dxcompiler.dll identity, so editing any shader (root or
+// header) or swapping the compiler invalidates the affected entries
+// automatically. Set CORONA_DISABLE_SHADER_CACHE=1 to bypass entirely.
+// ---------------------------------------------------------------------------
+namespace PipelineCache
+{
+	// Bump when the on-disk format or compile flags change in a way that would
+	// otherwise let a stale blob be reused.
+	constexpr uint32_t kDxilCacheVersion = 1;
+	constexpr uint32_t kPsoCacheVersion = 1;
+
+	constexpr uint64_t kFnvOffset = 1469598103934665603ull;
+	constexpr uint64_t kFnvPrime = 1099511628211ull;
+
+	// Identity (size ^ write-time) of the loaded dxcompiler.dll, folded into
+	// every DXIL key so a compiler upgrade invalidates the cache. Populated by
+	// InitializeDxcCompiler; 0 until then (still safe — the version constant
+	// differentiates formats regardless).
+	uint64_t gCompilerStamp = 0;
+
+	inline uint64_t HashBytes(const void* data, size_t size, uint64_t seed)
+	{
+		const uint8_t* bytes = static_cast<const uint8_t*>(data);
+		uint64_t hash = seed;
+		for (size_t i = 0; i < size; ++i)
+		{
+			hash ^= bytes[i];
+			hash *= kFnvPrime;
+		}
+		return hash;
+	}
+
+	bool Enabled()
+	{
+		static const bool enabled = []
+		{
+			const wchar_t* disable = _wgetenv(L"CORONA_DISABLE_SHADER_CACHE");
+			return !(disable && disable[0] != L'\0' && disable[0] != L'0');
+		}();
+		return enabled;
+	}
+
+	std::filesystem::path CacheDir()
+	{
+		return RuntimePaths::RootDirectory() / L"bin" / L"shadercache";
+	}
+
+	std::filesystem::path CachePath(uint64_t key, const wchar_t* extension)
+	{
+		std::wstringstream name;
+		name << std::hex << std::setw(16) << std::setfill(L'0') << key << extension;
+		return CacheDir() / name.str();
+	}
+
+	bool ReadFile(const std::filesystem::path& path, std::vector<uint8_t>& out)
+	{
+		std::error_code ec;
+		const auto size = std::filesystem::file_size(path, ec);
+		if (ec || size == 0)
+			return false;
+		std::ifstream file(path, std::ios::binary);
+		if (!file.good())
+			return false;
+		out.resize(static_cast<size_t>(size));
+		file.read(reinterpret_cast<char*>(out.data()), static_cast<std::streamsize>(size));
+		return static_cast<size_t>(file.gcount()) == out.size();
+	}
+
+	void WriteFile(const std::filesystem::path& path, const void* data, size_t size)
+	{
+		if (size == 0)
+			return;
+		std::error_code ec;
+		std::filesystem::create_directories(CacheDir(), ec);
+		// Write to a temp file then rename so a crash mid-write can't leave a
+		// truncated blob that a later run would treat as valid.
+		std::filesystem::path tmp = path;
+		tmp += L".tmp";
+		{
+			std::ofstream file(tmp, std::ios::binary | std::ios::trunc);
+			if (!file.good())
+				return;
+			file.write(static_cast<const char*>(data), static_cast<std::streamsize>(size));
+			if (!file.good())
+				return;
+		}
+		std::filesystem::rename(tmp, path, ec);
+		if (ec)
+			std::filesystem::remove(tmp, ec);
+	}
+
+	// Recursively hash a shader source file and every file it #includes so any
+	// edit to the translation unit (root or shared header) changes the key.
+	uint64_t HashSourceTree(const std::filesystem::path& file, std::set<std::filesystem::path>& visited, uint64_t seed)
+	{
+		const std::filesystem::path canonical = file.lexically_normal();
+		if (!visited.insert(canonical).second)
+			return seed;
+
+		std::ifstream stream(file, std::ios::binary);
+		if (!stream.good())
+			return seed; // missing file — let the real compile surface the error
+
+		std::stringstream buffer;
+		buffer << stream.rdbuf();
+		const std::string content = buffer.str();
+
+		uint64_t hash = HashBytes(content.data(), content.size(), seed);
+
+		// Follow #include "relative/path" directives (quoted form only, which is
+		// all Corona shaders use); angle-bracket system includes are skipped.
+		size_t pos = 0;
+		while ((pos = content.find("#include", pos)) != std::string::npos)
+		{
+			pos += 8;
+			const size_t open = content.find('"', pos);
+			if (open == std::string::npos)
+				break;
+			const size_t newline = content.find('\n', pos);
+			if (newline != std::string::npos && open > newline)
+			{
+				pos = newline; // no quoted path on this line (e.g. #include <...>)
+				continue;
+			}
+			const size_t close = content.find('"', open + 1);
+			if (close == std::string::npos)
+				break;
+			const std::string relative = content.substr(open + 1, close - (open + 1));
+			pos = close + 1;
+			if (!relative.empty())
+				hash = HashSourceTree(file.parent_path() / std::filesystem::path(relative), visited, hash);
+		}
+		return hash;
+	}
+
+	uint64_t ShaderKey(
+		const wchar_t* filename,
+		const std::string& entryPoint,
+		const wchar_t* target,
+		const std::vector<std::pair<std::string, std::string>>& defines)
+	{
+		uint64_t key = kFnvOffset;
+		key = HashBytes(&kDxilCacheVersion, sizeof(kDxilCacheVersion), key);
+		key = HashBytes(&gCompilerStamp, sizeof(gCompilerStamp), key);
+		{
+			std::set<std::filesystem::path> visited;
+			key = HashSourceTree(std::filesystem::path(filename), visited, key);
+		}
+		key = HashBytes(entryPoint.data(), entryPoint.size(), key);
+		key = HashBytes(target, wcslen(target) * sizeof(wchar_t), key);
+		for (const auto& define : defines)
+		{
+			key = HashBytes(define.first.data(), define.first.size(), key);
+			key = HashBytes(define.second.data(), define.second.size(), key);
+		}
+		// Debug and Release builds pass different optimization flags to DXC.
+#if defined(_DEBUG)
+		const char config = 'D';
+#else
+		const char config = 'R';
+#endif
+		key = HashBytes(&config, sizeof(config), key);
+		return key;
+	}
+
+	ComPtr<ID3DBlob> LoadDxil(uint64_t key)
+	{
+		if (!Enabled())
+			return nullptr;
+		std::vector<uint8_t> bytes;
+		if (!ReadFile(CachePath(key, L".dxil"), bytes) || bytes.empty())
+			return nullptr;
+		ComPtr<ID3DBlob> blob;
+		if (FAILED(D3DCreateBlob(bytes.size(), &blob)) || !blob)
+			return nullptr;
+		std::memcpy(blob->GetBufferPointer(), bytes.data(), bytes.size());
+		return blob;
+	}
+
+	void StoreDxil(uint64_t key, ID3DBlob* blob)
+	{
+		if (!Enabled() || !blob || blob->GetBufferSize() == 0)
+			return;
+		WriteFile(CachePath(key, L".dxil"), blob->GetBufferPointer(), blob->GetBufferSize());
+	}
+}
 
 namespace
 {
@@ -2151,14 +2352,88 @@ bool PipelineStateObject::Init()
 		? (IsCompute ? L"ComputeRootSignature" : L"GraphicsRootSignature")
 		: (L"RootSignature: " + DebugName);
 	SetName(RS.Get(), rootSignatureName.c_str());
+
+	// Build the driver-PSO cache key from everything that feeds the compiled
+	// pipeline: shader bytecode (which already encodes the source), the
+	// serialized root signature, the relevant fixed-function state and the
+	// adapter LUID (cached blobs are device-specific). A key match is not
+	// trusted blindly — if the blob is stale Create*PipelineState fails and we
+	// recompile, so the key only needs to be unique enough to avoid collisions.
+	uint64_t psoKey = PipelineCache::kFnvOffset;
+	psoKey = PipelineCache::HashBytes(&PipelineCache::kPsoCacheVersion, sizeof(PipelineCache::kPsoCacheVersion), psoKey);
+	{
+		const LUID adapterLuid = owner->Device->GetAdapterLuid();
+		psoKey = PipelineCache::HashBytes(&adapterLuid, sizeof(adapterLuid), psoKey);
+	}
+	if (signature)
+		psoKey = PipelineCache::HashBytes(signature->GetBufferPointer(), signature->GetBufferSize(), psoKey);
+	if (IsCompute)
+	{
+		psoKey = PipelineCache::HashBytes(cs.GetPointer(), cs.GetSize(), psoKey);
+	}
+	else
+	{
+		psoKey = PipelineCache::HashBytes(vs.GetPointer(), vs.GetSize(), psoKey);
+		psoKey = PipelineCache::HashBytes(ps.GetPointer(), ps.GetSize(), psoKey);
+		psoKey = PipelineCache::HashBytes(&graphicsPSODesc.BlendState, sizeof(graphicsPSODesc.BlendState), psoKey);
+		psoKey = PipelineCache::HashBytes(&graphicsPSODesc.RasterizerState, sizeof(graphicsPSODesc.RasterizerState), psoKey);
+		psoKey = PipelineCache::HashBytes(&graphicsPSODesc.DepthStencilState, sizeof(graphicsPSODesc.DepthStencilState), psoKey);
+		psoKey = PipelineCache::HashBytes(&graphicsPSODesc.SampleMask, sizeof(graphicsPSODesc.SampleMask), psoKey);
+		psoKey = PipelineCache::HashBytes(&graphicsPSODesc.PrimitiveTopologyType, sizeof(graphicsPSODesc.PrimitiveTopologyType), psoKey);
+		psoKey = PipelineCache::HashBytes(&graphicsPSODesc.NumRenderTargets, sizeof(graphicsPSODesc.NumRenderTargets), psoKey);
+		psoKey = PipelineCache::HashBytes(graphicsPSODesc.RTVFormats, sizeof(graphicsPSODesc.RTVFormats), psoKey);
+		psoKey = PipelineCache::HashBytes(&graphicsPSODesc.DSVFormat, sizeof(graphicsPSODesc.DSVFormat), psoKey);
+		psoKey = PipelineCache::HashBytes(&graphicsPSODesc.SampleDesc, sizeof(graphicsPSODesc.SampleDesc), psoKey);
+		for (UINT elementIndex = 0; elementIndex < graphicsPSODesc.InputLayout.NumElements; ++elementIndex)
+		{
+			const D3D12_INPUT_ELEMENT_DESC& element = graphicsPSODesc.InputLayout.pInputElementDescs[elementIndex];
+			if (element.SemanticName)
+				psoKey = PipelineCache::HashBytes(element.SemanticName, std::strlen(element.SemanticName), psoKey);
+			psoKey = PipelineCache::HashBytes(&element.SemanticIndex, sizeof(element.SemanticIndex), psoKey);
+			psoKey = PipelineCache::HashBytes(&element.Format, sizeof(element.Format), psoKey);
+			psoKey = PipelineCache::HashBytes(&element.AlignedByteOffset, sizeof(element.AlignedByteOffset), psoKey);
+		}
+	}
+
+	const bool cacheEnabled = PipelineCache::Enabled();
+	const std::filesystem::path psoCachePath = PipelineCache::CachePath(psoKey, L".pso");
+	// Holds the cached blob bytes; must outlive the Create*PipelineState call
+	// because D3D12_CACHED_PIPELINE_STATE only borrows the pointer.
+	std::vector<uint8_t> cachedPsoBlob;
+	if (cacheEnabled)
+		PipelineCache::ReadFile(psoCachePath, cachedPsoBlob);
+
+	const auto storePsoBlob = [&]()
+	{
+		if (!cacheEnabled || !PSO)
+			return;
+		ComPtr<ID3DBlob> blob;
+		if (SUCCEEDED(PSO->GetCachedBlob(&blob)) && blob)
+			PipelineCache::WriteFile(psoCachePath, blob->GetBufferPointer(), blob->GetBufferSize());
+	};
+
 	if (IsCompute)
 	{
 		computePSODesc.CS = CD3DX12_SHADER_BYTECODE(cs.GetPointer(), cs.GetSize());
 		computePSODesc.pRootSignature = RS.Get();
-		HRESULT hr;
-		ThrowIfFailed(hr = owner->Device->CreateComputePipelineState(&computePSODesc, IID_PPV_ARGS(&PSO)));
+		if (!cachedPsoBlob.empty())
+		{
+			computePSODesc.CachedPSO.pCachedBlob = cachedPsoBlob.data();
+			computePSODesc.CachedPSO.CachedBlobSizeInBytes = cachedPsoBlob.size();
+		}
+		HRESULT hr = owner->Device->CreateComputePipelineState(&computePSODesc, IID_PPV_ARGS(&PSO));
+		if (FAILED(hr) && !cachedPsoBlob.empty())
+		{
+			// Stale cached blob (driver/HW change). Discard it and recompile.
+			computePSODesc.CachedPSO = {};
+			cachedPsoBlob.clear();
+			hr = owner->Device->CreateComputePipelineState(&computePSODesc, IID_PPV_ARGS(&PSO));
+		}
+		ThrowIfFailed(hr);
 		const std::wstring psoName = DebugName.empty() ? L"ComputePSO" : DebugName;
 		SetName(PSO.Get(), psoName.c_str());
+		if (cachedPsoBlob.empty())
+			storePsoBlob();
 		return SUCCEEDED(hr);
 
 	}
@@ -2168,10 +2443,23 @@ bool PipelineStateObject::Init()
 		graphicsPSODesc.PS = CD3DX12_SHADER_BYTECODE(ps.GetPointer(), ps.GetSize());
 
 		graphicsPSODesc.pRootSignature = RS.Get();
-		HRESULT hr;
-		ThrowIfFailed(hr = owner->Device->CreateGraphicsPipelineState(&graphicsPSODesc, IID_PPV_ARGS(&PSO)));
+		if (!cachedPsoBlob.empty())
+		{
+			graphicsPSODesc.CachedPSO.pCachedBlob = cachedPsoBlob.data();
+			graphicsPSODesc.CachedPSO.CachedBlobSizeInBytes = cachedPsoBlob.size();
+		}
+		HRESULT hr = owner->Device->CreateGraphicsPipelineState(&graphicsPSODesc, IID_PPV_ARGS(&PSO));
+		if (FAILED(hr) && !cachedPsoBlob.empty())
+		{
+			graphicsPSODesc.CachedPSO = {};
+			cachedPsoBlob.clear();
+			hr = owner->Device->CreateGraphicsPipelineState(&graphicsPSODesc, IID_PPV_ARGS(&PSO));
+		}
+		ThrowIfFailed(hr);
 		const std::wstring psoName = DebugName.empty() ? L"GraphicsPSO" : DebugName;
 		SetName(PSO.Get(), psoName.c_str());
+		if (cachedPsoBlob.empty())
+			storePsoBlob();
 		return SUCCEEDED(hr);
 	}
 }
@@ -3674,6 +3962,18 @@ static HRESULT InitializeDxcCompiler(DX12Backend* owner)
 
 	if (SUCCEEDED(initResult))
 	{
+		// Fold the compiler binary's identity into the shader-cache key so a
+		// dxcompiler.dll upgrade invalidates previously cached DXIL.
+		std::error_code stampEc;
+		const std::filesystem::path compilerPath(loadedPath);
+		const auto compilerSize = std::filesystem::file_size(compilerPath, stampEc);
+		uint64_t stamp = stampEc ? 0 : static_cast<uint64_t>(compilerSize);
+		std::error_code timeEc;
+		const auto compilerTime = std::filesystem::last_write_time(compilerPath, timeEc);
+		if (!timeEc)
+			stamp ^= static_cast<uint64_t>(compilerTime.time_since_epoch().count()) * PipelineCache::kFnvPrime;
+		PipelineCache::gCompilerStamp = stamp;
+
 		AppendCpuRuntimeTrace(L"[DXC] loaded " + loadedPath);
 	}
 	else
@@ -3692,6 +3992,10 @@ ComPtr<ID3DBlob> compileShaderDXC(DX12Backend* owner, const WCHAR* filename, con
 {
 	if (FAILED(InitializeDxcCompiler(owner)))
 		return nullptr;
+
+	const uint64_t cacheKey = PipelineCache::ShaderKey(filename, entryPoint, targetString, {});
+	if (ComPtr<ID3DBlob> cached = PipelineCache::LoadDxil(cacheKey))
+		return cached;
 
 	ComPtr<IDxcCompiler> pCompiler;
 	ComPtr<IDxcLibrary> pLibrary;
@@ -3749,6 +4053,7 @@ ComPtr<ID3DBlob> compileShaderDXC(DX12Backend* owner, const WCHAR* filename, con
 
 	ID3DBlob* pBlob = nullptr;
 	pResult->GetResult((IDxcBlob**)&pBlob);
+	PipelineCache::StoreDxil(cacheKey, pBlob);
 	return ComPtr<ID3DBlob>(pBlob);
 }
 
@@ -3760,6 +4065,10 @@ ComPtr<ID3DBlob> compileShaderLibrary(
 {
 	if (FAILED(InitializeDxcCompiler(owner)))
 		return nullptr;
+
+	const uint64_t cacheKey = PipelineCache::ShaderKey(filename, std::string(), targetString, defines);
+	if (ComPtr<ID3DBlob> cached = PipelineCache::LoadDxil(cacheKey))
+		return cached;
 
 	ComPtr<IDxcCompiler> pCompiler;
 	ComPtr<IDxcLibrary> pLibrary;
@@ -3844,6 +4153,7 @@ ComPtr<ID3DBlob> compileShaderLibrary(
 
 	ID3DBlob* pBlob;
 	pResult->GetResult((IDxcBlob**)&pBlob);
+	PipelineCache::StoreDxil(cacheKey, pBlob);
 	return ComPtr<ID3DBlob>(pBlob);
 }
 struct DxilLibrary

@@ -124,6 +124,28 @@ void Corona::RaytraceGIPass()
 	RTGIViewParam.SkyIntensity = RenderFrameDiffuseGISkyIntensity;
 	RTGIViewParam.SkyColorBottom = SkyColorBottom;
 	RTGIViewParam.LightColor = RenderFrameLightColor;
+	FillPointLightParams(
+		RTGIViewParam.PointLights,
+		RTGIViewParam.PointLightCount,
+		std::min(MaxDiffuseGIPointLights, DiffuseGIPointLightLimit));
+	{
+		static float sLastLoggedLightIntensity = -1.0f;
+		static UINT32 sLastLoggedPointLightCount = 0xFFFFFFFFu;
+		if (std::abs(sLastLoggedLightIntensity - LightIntensity) > 0.0001f ||
+			sLastLoggedPointLightCount != RTGIViewParam.PointLightCount)
+		{
+			sLastLoggedLightIntensity = LightIntensity;
+			sLastLoggedPointLightCount = RTGIViewParam.PointLightCount;
+			AppendCpuRuntimeTrace(
+				L"[DiffuseGI][Simple] lightIntensity=" + std::to_wstring(LightIntensity) +
+				L", lightDir=" + std::to_wstring(RenderFrameNormalizedLightDir.x) + L"," +
+				std::to_wstring(RenderFrameNormalizedLightDir.y) + L"," +
+				std::to_wstring(RenderFrameNormalizedLightDir.z) +
+				L", pointLights=" + std::to_wstring(RTGIViewParam.PointLightCount) +
+				L", pointLightLimit=" + std::to_wstring(DiffuseGIPointLightLimit) +
+				L", sky=" + std::to_wstring(RenderFrameDiffuseGISkyLightingEnabled));
+		}
+	}
 
 	RTPassBuilder pass(*this, pso);
 	pass.BeginScene()

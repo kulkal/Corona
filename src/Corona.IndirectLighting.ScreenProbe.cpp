@@ -278,6 +278,25 @@ void Corona::ScreenProbeRaytraceGIPass()
 	RTScreenProbeGIViewParam.SkyIntensity = RenderFrameDiffuseGISkyIntensity;
 	RTScreenProbeGIViewParam.SkyColorBottom = SkyColorBottom;
 	RTScreenProbeGIViewParam.LightColor = RenderFrameLightColor;
+	FillPointLightParams(
+		RTScreenProbeGIViewParam.PointLights,
+		RTScreenProbeGIViewParam.PointLightCount,
+		std::min(MaxDiffuseGIPointLights, DiffuseGIPointLightLimit));
+	{
+		static float sLastLoggedLightIntensity = -1.0f;
+		static UINT32 sLastLoggedPointLightCount = 0xFFFFFFFFu;
+		if (std::abs(sLastLoggedLightIntensity - LightIntensity) > 0.0001f ||
+			sLastLoggedPointLightCount != RTScreenProbeGIViewParam.PointLightCount)
+		{
+			sLastLoggedLightIntensity = LightIntensity;
+			sLastLoggedPointLightCount = RTScreenProbeGIViewParam.PointLightCount;
+			AppendCpuRuntimeTrace(
+				L"[DiffuseGI][ScreenProbe] lightIntensity=" + std::to_wstring(LightIntensity) +
+				L", pointLights=" + std::to_wstring(RTScreenProbeGIViewParam.PointLightCount) +
+				L", pointLightLimit=" + std::to_wstring(DiffuseGIPointLightLimit) +
+				L", sky=" + std::to_wstring(RenderFrameDiffuseGISkyLightingEnabled));
+		}
+	}
 
 	renderBackend->TransitionTexture(ScreenProbeGIRadiance[writeIndex].get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
 	for (UINT coefficientIndex = 0; coefficientIndex < ScreenProbeSHCoefficientCount; ++coefficientIndex)

@@ -1045,6 +1045,8 @@ namespace
 		uint64_t TextureLocalCacheHits = 0;
 		uint64_t TextureGlobalCacheHits = 0;
 		uint64_t TextureDdsSubstitutions = 0;
+		uint64_t TextureDdsConversions = 0;
+		uint64_t TextureSourceDeletes = 0;
 		uint64_t TextureFallbacks = 0;
 		uint64_t TextureBytes = 0;
 		double TotalMs = 0.0;
@@ -1064,6 +1066,499 @@ namespace
 	MeshLoadProfileTotals gMeshLoadProfileTotals;
 	std::map<std::wstring, std::weak_ptr<Texture>> gMeshTextureCache;
 	std::mutex gMeshTextureCacheMutex;
+	std::map<std::wstring, bool> gMaterialSidecarPreconversionVisited;
+	std::map<std::wstring, bool> gTextureDirectoryPreconversionVisited;
+	std::mutex gMaterialSidecarPreconversionMutex;
+
+	struct MaterialTextureSidecar
+	{
+		std::wstring Diffuse;
+		std::wstring Normal;
+		std::wstring Roughness;
+		std::wstring Metallic;
+	};
+
+	bool HasExtensionI(const std::filesystem::path& path, const wchar_t* extension)
+	{
+		return _wcsicmp(path.extension().c_str(), extension) == 0;
+	}
+
+	bool IsRuntimeDdsConvertibleTexture(const std::filesystem::path& path)
+	{
+		return
+			HasExtensionI(path, L".png") ||
+			HasExtensionI(path, L".jpg") ||
+			HasExtensionI(path, L".jpeg") ||
+			HasExtensionI(path, L".tga") ||
+			HasExtensionI(path, L".bmp");
+	}
+
+	const wchar_t* DdsFormatForTextureSlot(const wchar_t* slotName)
+	{
+		if (!slotName)
+			return L"bc7";
+		if (_wcsicmp(slotName, L"normal") == 0)
+			return L"bc5";
+		if (_wcsicmp(slotName, L"roughness") == 0 || _wcsicmp(slotName, L"metallic") == 0)
+			return L"bc4";
+		return L"bc7";
+	}
+
+	std::wstring ToLowerWide(std::wstring value)
+	{
+		std::transform(value.begin(), value.end(), value.begin(), [](wchar_t ch)
+		{
+			return static_cast<wchar_t>(std::towlower(ch));
+		});
+		return value;
+	}
+
+	const wchar_t* InferTextureSlotFromPath(const std::filesystem::path& path)
+	{
+		const std::wstring stem = ToLowerWide(path.stem().wstring());
+		const std::wstring padded = L"_" + stem + L"_";
+		if (stem.find(L"normal") != std::wstring::npos || padded.find(L"_n_") != std::wstring::npos)
+			return L"normal";
+		if (stem.find(L"roughness") != std::wstring::npos || stem.find(L"rough") != std::wstring::npos || padded.find(L"_r_") != std::wstring::npos)
+			return L"roughness";
+		if (stem.find(L"metallic") != std::wstring::npos || stem.find(L"metalness") != std::wstring::npos || stem.find(L"metal") != std::wstring::npos || padded.find(L"_m_") != std::wstring::npos)
+			return L"metallic";
+		return L"diffuse";
+	}
+
+	std::wstring QuoteCommandLineArgument(const std::wstring& value)
+	{
+		std::wstring result = L"\"";
+		size_t backslashCount = 0;
+		for (wchar_t ch : value)
+		{
+			if (ch == L'\\')
+			{
+				++backslashCount;
+				continue;
+			}
+			if (ch == L'"')
+			{
+				result.append(backslashCount * 2 + 1, L'\\');
+				result.push_back(ch);
+				backslashCount = 0;
+				continue;
+			}
+			if (backslashCount > 0)
+			{
+				result.append(backslashCount, L'\\');
+				backslashCount = 0;
+			}
+			result.push_back(ch);
+		}
+		if (backslashCount > 0)
+			result.append(backslashCount * 2, L'\\');
+		result.push_back(L'"');
+		return result;
+	}
+
+	bool RunTextureDdsConversionTool(
+		const std::filesystem::path& sourcePath,
+		const std::filesystem::path& ddsPath,
+		const wchar_t* slotName)
+	{
+#if CORONA_PLATFORM_IS_WINDOWS
+		const std::filesystem::path textureTool = RuntimePaths::RootDirectory() / L"bin" / L"CoronaTextureImport.exe";
+		std::error_code ec;
+		if (!std::filesystem::exists(textureTool, ec))
+		{
+			AppendCpuRuntimeTrace(L"[TextureDDS] converter missing: " + textureTool.wstring());
+			return false;
+		}
+
+		const std::wstring commandLine =
+			QuoteCommandLineArgument(textureTool.wstring()) +
+			L" --input " + QuoteCommandLineArgument(sourcePath.wstring()) +
+			L" --output " + QuoteCommandLineArgument(ddsPath.wstring()) +
+			L" --format " + DdsFormatForTextureSlot(slotName);
+		std::wstring mutableCommandLine = commandLine;
+		const std::wstring workingDirectory = RuntimePaths::RootDirectory().wstring();
+
+		STARTUPINFOW startupInfo = {};
+		startupInfo.cb = sizeof(startupInfo);
+		startupInfo.dwFlags = STARTF_USESHOWWINDOW;
+		startupInfo.wShowWindow = SW_HIDE;
+		PROCESS_INFORMATION processInfo = {};
+		const auto start = std::chrono::steady_clock::now();
+		const BOOL created = CreateProcessW(
+			textureTool.c_str(),
+			mutableCommandLine.data(),
+			nullptr,
+			nullptr,
+			FALSE,
+			CREATE_NO_WINDOW,
+			nullptr,
+			workingDirectory.empty() ? nullptr : workingDirectory.c_str(),
+			&startupInfo,
+			&processInfo);
+		if (!created)
+		{
+			AppendCpuRuntimeTrace(
+				L"[TextureDDS] converter launch failed: " + sourcePath.wstring() +
+				L" error=" + std::to_wstring(GetLastError()));
+			return false;
+		}
+
+		WaitForSingleObject(processInfo.hProcess, INFINITE);
+		DWORD exitCode = 1;
+		GetExitCodeProcess(processInfo.hProcess, &exitCode);
+		CloseHandle(processInfo.hThread);
+		CloseHandle(processInfo.hProcess);
+
+		if (exitCode != 0 || !std::filesystem::exists(ddsPath, ec))
+		{
+			AppendCpuRuntimeTrace(
+				L"[TextureDDS] conversion failed: " + sourcePath.wstring() +
+				L" -> " + ddsPath.wstring() +
+				L" exitCode=" + std::to_wstring(static_cast<unsigned long long>(exitCode)));
+			return false;
+		}
+
+		AppendCpuRuntimeTrace(
+			L"[TextureDDS] converted: " + sourcePath.wstring() +
+			L" -> " + ddsPath.wstring() +
+			L", format=" + std::wstring(DdsFormatForTextureSlot(slotName)) +
+			L", elapsedMs=" + FormatMilliseconds(ElapsedMilliseconds(start, std::chrono::steady_clock::now())));
+		return true;
+#else
+		(void)sourcePath;
+		(void)ddsPath;
+		(void)slotName;
+		return false;
+#endif
+	}
+
+	std::filesystem::path ResolveTexturePathWithDdsSidecar(
+		const std::filesystem::path& requestedPath,
+		const wchar_t* slotName,
+		uint32_t* ddsSubstitutions,
+		uint32_t* ddsConversions,
+		uint32_t* sourceDeletes)
+	{
+		if (HasExtensionI(requestedPath, L".dds"))
+			return requestedPath;
+
+		std::error_code ec;
+		std::filesystem::path ddsPath = requestedPath;
+		ddsPath.replace_extension(L".dds");
+		if (std::filesystem::exists(ddsPath, ec))
+		{
+			if (ddsSubstitutions)
+				++(*ddsSubstitutions);
+			return ddsPath;
+		}
+
+		if (!IsRuntimeDdsConvertibleTexture(requestedPath) || !std::filesystem::exists(requestedPath, ec))
+			return requestedPath;
+
+		if (!RunTextureDdsConversionTool(requestedPath, ddsPath, slotName))
+			return requestedPath;
+
+		if (ddsConversions)
+			++(*ddsConversions);
+		if (ddsSubstitutions)
+			++(*ddsSubstitutions);
+
+		if (HasExtensionI(requestedPath, L".png"))
+		{
+			std::filesystem::remove(requestedPath, ec);
+			if (!ec)
+			{
+				if (sourceDeletes)
+					++(*sourceDeletes);
+				AppendCpuRuntimeTrace(L"[TextureDDS] deleted source PNG: " + requestedPath.wstring());
+			}
+			else
+			{
+				AppendCpuRuntimeTrace(
+					L"[TextureDDS] source PNG delete failed: " + requestedPath.wstring() +
+					L" error=" + AnsiToWString(ec.message().c_str()));
+			}
+		}
+		return ddsPath;
+	}
+
+	std::string ExtractJsonStringFieldValue(const std::string& objectText, const char* fieldName)
+	{
+		const std::string token = std::string("\"") + fieldName + "\"";
+		size_t pos = objectText.find(token);
+		if (pos == std::string::npos)
+			return {};
+		pos = objectText.find(':', pos + token.size());
+		if (pos == std::string::npos)
+			return {};
+		pos = objectText.find('"', pos + 1);
+		if (pos == std::string::npos)
+			return {};
+
+		std::string value;
+		bool escaped = false;
+		for (++pos; pos < objectText.size(); ++pos)
+		{
+			const char ch = objectText[pos];
+			if (escaped)
+			{
+				switch (ch)
+				{
+				case '"': value.push_back('"'); break;
+				case '\\': value.push_back('\\'); break;
+				case '/': value.push_back('/'); break;
+				case 'b': value.push_back('\b'); break;
+				case 'f': value.push_back('\f'); break;
+				case 'n': value.push_back('\n'); break;
+				case 'r': value.push_back('\r'); break;
+				case 't': value.push_back('\t'); break;
+				default: value.push_back(ch); break;
+				}
+				escaped = false;
+				continue;
+			}
+			if (ch == '\\')
+			{
+				escaped = true;
+				continue;
+			}
+			if (ch == '"')
+				break;
+			value.push_back(ch);
+		}
+		return value;
+	}
+
+	std::vector<std::string> ExtractJsonObjectsFromMaterialsArray(const std::string& text)
+	{
+		std::vector<std::string> objects;
+		size_t pos = text.find("\"materials\"");
+		if (pos == std::string::npos)
+			return objects;
+		pos = text.find('[', pos);
+		if (pos == std::string::npos)
+			return objects;
+
+		bool inString = false;
+		bool escaped = false;
+		int depth = 0;
+		size_t objectStart = std::string::npos;
+		for (++pos; pos < text.size(); ++pos)
+		{
+			const char ch = text[pos];
+			if (inString)
+			{
+				if (escaped)
+				{
+					escaped = false;
+					continue;
+				}
+				if (ch == '\\')
+				{
+					escaped = true;
+					continue;
+				}
+				if (ch == '"')
+					inString = false;
+				continue;
+			}
+
+			if (ch == '"')
+			{
+				inString = true;
+				continue;
+			}
+			if (ch == '[' || ch == ']')
+			{
+				if (ch == ']' && depth == 0)
+					break;
+				continue;
+			}
+			if (ch == '{')
+			{
+				if (depth == 0)
+					objectStart = pos;
+				++depth;
+				continue;
+			}
+			if (ch == '}' && depth > 0)
+			{
+				--depth;
+				if (depth == 0 && objectStart != std::string::npos)
+				{
+					objects.push_back(text.substr(objectStart, pos - objectStart + 1));
+					objectStart = std::string::npos;
+				}
+			}
+		}
+		return objects;
+	}
+
+	std::vector<std::filesystem::path> MaterialSidecarCandidatePaths(const std::filesystem::path& modelPath)
+	{
+		std::vector<std::filesystem::path> candidates;
+		candidates.push_back(std::filesystem::path(modelPath.wstring() + L".materials.json"));
+		std::filesystem::path extensionReplaced = modelPath;
+		extensionReplaced.replace_extension(L".materials.json");
+		if (extensionReplaced != candidates.front())
+			candidates.push_back(extensionReplaced);
+		return candidates;
+	}
+
+	std::vector<MaterialTextureSidecar> LoadMaterialTextureSidecar(const std::filesystem::path& modelPath)
+	{
+		for (const std::filesystem::path& sidecarPath : MaterialSidecarCandidatePaths(modelPath))
+		{
+			std::ifstream file(sidecarPath, std::ios::binary);
+			if (!file.is_open())
+				continue;
+
+			std::string text((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+			std::vector<MaterialTextureSidecar> materials;
+			for (const std::string& objectText : ExtractJsonObjectsFromMaterialsArray(text))
+			{
+				MaterialTextureSidecar material = {};
+				material.Diffuse = Utf8ToWide(ExtractJsonStringFieldValue(objectText, "diffuse"));
+				material.Normal = Utf8ToWide(ExtractJsonStringFieldValue(objectText, "normal"));
+				material.Roughness = Utf8ToWide(ExtractJsonStringFieldValue(objectText, "roughness"));
+				material.Metallic = Utf8ToWide(ExtractJsonStringFieldValue(objectText, "metallic"));
+				materials.push_back(std::move(material));
+			}
+			if (!materials.empty())
+				return materials;
+		}
+		return {};
+	}
+
+	void PreconvertMaterialSidecarTextures(
+		const std::filesystem::path& modelPath,
+		const std::vector<MaterialTextureSidecar>& materials)
+	{
+		if (materials.empty())
+			return;
+
+		const std::wstring visitKey = modelPath.wstring();
+		{
+			std::lock_guard<std::mutex> lock(gMaterialSidecarPreconversionMutex);
+			if (gMaterialSidecarPreconversionVisited[visitKey])
+				return;
+			gMaterialSidecarPreconversionVisited[visitKey] = true;
+		}
+
+		const std::filesystem::path sourceDir = modelPath.parent_path();
+		uint32_t ddsSubstitutions = 0;
+		uint32_t ddsConversions = 0;
+		uint32_t sourceDeletes = 0;
+		std::map<std::wstring, bool> processed;
+		auto processTexture = [&](const wchar_t* slotName, const std::wstring& textureName)
+		{
+			if (textureName.empty())
+				return;
+			const std::wstring baseName = GetFileName(textureName.c_str());
+			if (baseName.empty())
+				return;
+			const std::wstring key = std::wstring(slotName ? slotName : L"") + L"|" + baseName;
+			if (processed[key])
+				return;
+			processed[key] = true;
+			ResolveTexturePathWithDdsSidecar(
+				sourceDir / baseName,
+				slotName,
+				&ddsSubstitutions,
+				&ddsConversions,
+				&sourceDeletes);
+		};
+
+		for (const MaterialTextureSidecar& material : materials)
+		{
+			processTexture(L"diffuse", material.Diffuse);
+			processTexture(L"normal", material.Normal);
+			processTexture(L"roughness", material.Roughness);
+			processTexture(L"metallic", material.Metallic);
+		}
+
+		if (ddsSubstitutions > 0 || ddsConversions > 0 || sourceDeletes > 0)
+		{
+			AppendCpuRuntimeTrace(
+				L"[TextureDDS] sidecar preconversion: " + modelPath.wstring() +
+				L", textureDdsSubstitutions=" + std::to_wstring(ddsSubstitutions) +
+				L", textureDdsConversions=" + std::to_wstring(ddsConversions) +
+				L", textureSourceDeletes=" + std::to_wstring(sourceDeletes));
+		}
+	}
+
+	void PreconvertTextureDirectoryPngs(const std::filesystem::path& sourceDir)
+	{
+		if (sourceDir.empty())
+			return;
+
+		const std::wstring visitKey = sourceDir.wstring();
+		{
+			std::lock_guard<std::mutex> lock(gMaterialSidecarPreconversionMutex);
+			if (gTextureDirectoryPreconversionVisited[visitKey])
+				return;
+			gTextureDirectoryPreconversionVisited[visitKey] = true;
+		}
+
+		std::error_code ec;
+		if (!std::filesystem::is_directory(sourceDir, ec))
+			return;
+
+		// Skip the eager whole-directory pass for large shared export folders
+		// (e.g. assets/ue_export/meshes holds every scene's textures). Blindly
+		// transcoding hundreds of unrelated PNGs blocks the load for many
+		// minutes — and is wasteful, since the meshes actually being loaded
+		// resolve their own textures via the per-model sidecar preconversion
+		// and the lazy ResolveTexturePathWithDdsSidecar at material-load time.
+		// Small per-asset directories still get the eager batch convert.
+		constexpr uint32_t kMaxEagerDirectoryPngs = 96;
+		uint32_t pngCount = 0;
+		for (const std::filesystem::directory_entry& entry : std::filesystem::directory_iterator(sourceDir, ec))
+		{
+			if (ec)
+				break;
+			if (entry.is_regular_file(ec) && HasExtensionI(entry.path(), L".png") && ++pngCount > kMaxEagerDirectoryPngs)
+				break;
+		}
+		if (pngCount > kMaxEagerDirectoryPngs)
+		{
+			AppendCpuRuntimeTrace(
+				L"[TextureDDS] skipping eager directory preconversion (too many PNGs): " +
+				sourceDir.wstring() + L", pngCount>" + std::to_wstring(kMaxEagerDirectoryPngs) +
+				L" — relying on per-model sidecar + lazy conversion");
+			return;
+		}
+
+		uint32_t ddsSubstitutions = 0;
+		uint32_t ddsConversions = 0;
+		uint32_t sourceDeletes = 0;
+		uint32_t scannedPngs = 0;
+		for (const std::filesystem::directory_entry& entry : std::filesystem::directory_iterator(sourceDir, ec))
+		{
+			if (ec)
+				break;
+			if (!entry.is_regular_file(ec) || !HasExtensionI(entry.path(), L".png"))
+				continue;
+			++scannedPngs;
+			ResolveTexturePathWithDdsSidecar(
+				entry.path(),
+				InferTextureSlotFromPath(entry.path()),
+				&ddsSubstitutions,
+				&ddsConversions,
+				&sourceDeletes);
+		}
+
+		if (scannedPngs > 0 || ddsSubstitutions > 0 || ddsConversions > 0 || sourceDeletes > 0)
+		{
+			AppendCpuRuntimeTrace(
+				L"[TextureDDS] directory preconversion: " + sourceDir.wstring() +
+				L", scannedPngs=" + std::to_wstring(scannedPngs) +
+				L", textureDdsSubstitutions=" + std::to_wstring(ddsSubstitutions) +
+				L", textureDdsConversions=" + std::to_wstring(ddsConversions) +
+				L", textureSourceDeletes=" + std::to_wstring(sourceDeletes));
+		}
+	}
 
 	void ResetMeshLoadProfileTotals()
 	{
@@ -1088,6 +1583,8 @@ namespace
 			L", textureLocalCacheHits=" + std::to_wstring(gMeshLoadProfileTotals.TextureLocalCacheHits) +
 			L", textureGlobalCacheHits=" + std::to_wstring(gMeshLoadProfileTotals.TextureGlobalCacheHits) +
 			L", textureDdsSubstitutions=" + std::to_wstring(gMeshLoadProfileTotals.TextureDdsSubstitutions) +
+			L", textureDdsConversions=" + std::to_wstring(gMeshLoadProfileTotals.TextureDdsConversions) +
+			L", textureSourceDeletes=" + std::to_wstring(gMeshLoadProfileTotals.TextureSourceDeletes) +
 			L", textureFallbacks=" + std::to_wstring(gMeshLoadProfileTotals.TextureFallbacks) +
 			L", textureBytes=" + std::to_wstring(gMeshLoadProfileTotals.TextureBytes) +
 			L", totalMs=" + FormatMilliseconds(gMeshLoadProfileTotals.TotalMs) +
@@ -2177,10 +2674,41 @@ bool Corona::DLSSPass()
 		return false;
 	}
 
-	Texture* inputColor = (bDLSSRROutputValidThisFrame && DLSSRRBuffer) ? DLSSRRBuffer.get() : LightingBuffer.get();
+	const bool bUseRRInput = bDLSSRROutputValidThisFrame && DLSSRRBuffer;
+	Texture* inputColor = bUseRRInput ? DLSSRRBuffer.get() : LightingBuffer.get();
 	Texture* outputTarget = ColorBuffers[ColorBufferWriteIndex].get();
 	if (!inputColor || !outputTarget)
 		return false;
+	{
+		static int sLastAA = -1;
+		static bool sLastUseRRInput = false;
+		static UINT sLastRenderWidth = 0;
+		static UINT sLastRenderHeight = 0;
+		static UINT sLastOutputWidth = 0;
+		static UINT sLastOutputHeight = 0;
+		const int aaMode = static_cast<int>(AntiAliasingMode);
+		if (sLastAA != aaMode ||
+			sLastUseRRInput != bUseRRInput ||
+			sLastRenderWidth != GetRenderWidth() ||
+			sLastRenderHeight != GetRenderHeight() ||
+			sLastOutputWidth != m_width ||
+			sLastOutputHeight != m_height)
+		{
+			sLastAA = aaMode;
+			sLastUseRRInput = bUseRRInput;
+			sLastRenderWidth = GetRenderWidth();
+			sLastRenderHeight = GetRenderHeight();
+			sLastOutputWidth = m_width;
+			sLastOutputHeight = m_height;
+			AppendCpuRuntimeTrace(
+				L"[DLSSPass] input=" + std::wstring(bUseRRInput ? L"dlss_rr" : L"lighting") +
+				L", aa=" + std::to_wstring(aaMode) +
+				L", render=" + std::to_wstring(GetRenderWidth()) +
+				L"x" + std::to_wstring(GetRenderHeight()) +
+				L", output=" + std::to_wstring(m_width) +
+				L"x" + std::to_wstring(m_height));
+		}
+	}
 	renderBackend->TransitionTexture(outputTarget, EResourceState::ShaderRead, EResourceState::UnorderedAccess);
 
 	sl::ViewportHandle vp(0);
@@ -2258,10 +2786,10 @@ bool Corona::DLSSRRPass()
 	Texture* outputTarget = DLSSRRBuffer.get();
 	const bool bUseRRSpecularMotionVectors =
 		(IsPathTracingDLSSRREnabled() && bEnablePathTracingRRSpecularMotionVectors) ||
-		(RenderingMode == ERenderingMode::HYBRID && bEnableHybridRRSpecularMotionVectors);
+		(RenderingMode == ERenderingMode::HYBRID && bEnableSpecularGI && bEnableHybridRRSpecularMotionVectors);
 	const bool bUseRRSpecularHitDistance =
 		(IsPathTracingDLSSRREnabled() && bEnablePathTracingRRSpecularHitDistance) ||
-		(RenderingMode == ERenderingMode::HYBRID && bEnableHybridRRSpecularHitDistance);
+		(RenderingMode == ERenderingMode::HYBRID && bEnableSpecularGI && bEnableHybridRRSpecularHitDistance);
 	if (!inputColor ||
 		!outputTarget ||
 		!UnjitteredDepthBuffers[ColorBufferWriteIndex] ||
@@ -2382,6 +2910,8 @@ void Corona::ResetTemporalHistoryBuffers()
 	ClearTextureUAV(DiffuseGIRaw.get(), clear4);
 	ClearTextureUAV(DiffuseGIHashCachedAux.get(), clear4);
 	ClearTextureUAV(DiffuseGIHashCached.get(), clear4);
+	ClearTextureUAV(DiffuseGIHashFiltered.get(), clear4);
+	ClearTextureUAV(DiffuseGIHashFilteredPrev.get(), clear4);
 	ClearTextureUAV(ScreenProbeGIResolved.get(), clear4);
 	ClearTextureUAV(ScreenProbeGIProbeDebug.get(), clear4);
 	ClearTextureUAV(ScreenProbeGIRadiance[0].get(), clear4);
@@ -2399,6 +2929,66 @@ void Corona::ResetTemporalHistoryBuffers()
 	ClearTextureUAV(DiffuseGITemporalAux[1].get(), clear4);
 	ClearTextureUAV(DiffuseGITemporal[0].get(), clear4);
 	ClearTextureUAV(DiffuseGITemporal[1].get(), clear4);
+}
+
+void Corona::ClearDisabledGIOutputBuffers(bool clearDiffuseGI, bool clearSpecularGI)
+{
+	if (!renderBackend || (!clearDiffuseGI && !clearSpecularGI))
+		return;
+
+	const FLOAT clear4[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+	const FLOAT clear2[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+
+	auto ClearTextureUAV = [&](Texture* tex, const FLOAT* clearValue)
+	{
+		if (!tex)
+			return;
+
+		renderBackend->TransitionTexture(tex, EResourceState::ShaderRead, EResourceState::UnorderedAccess);
+		renderBackend->ClearTextureUAVFloat(tex, clearValue);
+		renderBackend->TransitionTexture(tex, EResourceState::UnorderedAccess, EResourceState::ShaderRead);
+	};
+
+	if (clearSpecularGI)
+	{
+		ClearTextureUAV(SpecularGIRaw.get(), clear4);
+		ClearTextureUAV(SpecularGITemporal[0].get(), clear4);
+		ClearTextureUAV(SpecularGITemporal[1].get(), clear4);
+		ClearTextureUAV(SpecularGIMoments[0].get(), clear2);
+		ClearTextureUAV(SpecularGIMoments[1].get(), clear2);
+	}
+
+	if (clearDiffuseGI)
+	{
+		ClearTextureUAV(DiffuseGIRawAux.get(), clear4);
+		ClearTextureUAV(DiffuseGIRaw.get(), clear4);
+		ClearTextureUAV(DiffuseGIHashCachedAux.get(), clear4);
+		ClearTextureUAV(DiffuseGIHashCached.get(), clear4);
+		ClearTextureUAV(DiffuseGIHashFiltered.get(), clear4);
+		ClearTextureUAV(DiffuseGIHashFilteredPrev.get(), clear4);
+		ClearTextureUAV(ScreenProbeGIResolved.get(), clear4);
+		ClearTextureUAV(ScreenProbeGIProbeDebug.get(), clear4);
+		ClearTextureUAV(ScreenProbeGIRadiance[0].get(), clear4);
+		ClearTextureUAV(ScreenProbeGIRadiance[1].get(), clear4);
+		for (UINT historyIndex = 0; historyIndex < 2; ++historyIndex)
+		{
+			for (UINT coefficientIndex = 0; coefficientIndex < ScreenProbeSHCoefficientCount; ++coefficientIndex)
+				ClearTextureUAV(ScreenProbeGISH[historyIndex][coefficientIndex].get(), clear4);
+		}
+		ClearTextureUAV(ScreenProbeGIMetadata[0].get(), clear4);
+		ClearTextureUAV(ScreenProbeGIMetadata[1].get(), clear4);
+		ClearTextureUAV(ScreenProbeGIHistory[0].get(), clear4);
+		ClearTextureUAV(ScreenProbeGIHistory[1].get(), clear4);
+		ClearTextureUAV(DiffuseGITemporalAux[0].get(), clear4);
+		ClearTextureUAV(DiffuseGITemporalAux[1].get(), clear4);
+		ClearTextureUAV(DiffuseGITemporal[0].get(), clear4);
+		ClearTextureUAV(DiffuseGITemporal[1].get(), clear4);
+
+		bScreenProbeGIAtlasHistoryValid = false;
+		bScreenProbeGIHistoryValid = false;
+		bScreenProbeLightingBootstrapPending = false;
+		bSpatialHashGIHistoryValid = false;
+	}
 }
 
 Corona::EAntiAliasingMode Corona::NormalizeAntiAliasingMode(ERenderingMode renderingMode, EAntiAliasingMode requestedMode) const
@@ -2990,7 +3580,7 @@ void Corona::ReloadRenderResolutionAssets()
 	PrevIndirectSkyColorBottom = SkyColorBottom;
 	PrevIndirectSkyIntensity = SkyIntensity;
 	PrevIndirectSkyLightingStrength = SkyLightingStrength;
-	PrevIndirectDiffuseGISkyLightingEnabled = !(bEnableSkyLighting && bEnableRayTracedSkyLighting);
+	PrevIndirectDiffuseGISkyLightingEnabled = false;
 	PrevIndirectPrefilteredEnvRoughnessThreshold = PrefilteredEnvRoughnessThreshold;
 	PrevIndirectPrefilteredEnvRoughnessFade = PrefilteredEnvRoughnessFade;
 	PrevIndirectPrefilteredEnvSpecularEnabled = bEnablePrefilteredEnvSpecular;
@@ -3215,20 +3805,17 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 		CommandLineSelectedAAMode = EAntiAliasingMode::TAA;
 		bCommandLineAutoDumpOverrideSet = true;
 		bCommandLineAutoDumpEnabled = false;
-		bStartupSponzaFlyMode = true;
-		// Mirror the --sponza arm completely: leaving StartupLuauMode at its
-		// "platformer" default makes bPlatformerHybridDirectOnly=true in
-		// OnRender and silently disables every hybrid RT pass (shadow/AO/GI
-		// /reflection). Likewise leaving bEnableStartupLuauScript=false
-		// suppresses common/040_imgui_controls.luau and the legacy monolithic
-		// "Hi, Let's traceray!" window shows up instead of the categorized
-		// Lighting/Sky/Point-Lights panels other modes ship with. Both flags
-		// must match --sponza for the no-arg launch to look identical to it.
-		// "sponza_demo" runs the Luau-driven map-based spawn (replaces the
-		// hardcoded LoadModel("Sponza.fbx") path).
+		// No-arg launch opens the editor (mirrors --editor) on the last map the
+		// user loaded, persisted across runs in assets/maps/.last_loaded_map.
+		// Falls back to the empty editor canvas when there's no valid prior map.
+		// This replaces the former Sponza default scene.
 		bEnableStartupLuauScript = true;
-		StartupLuauMode = L"sponza_demo";
-		AppendStartupTrace(L"[ParseCommandLineArgs] no args: default dx12, hybrid, taa, sponza_demo, user-mode");
+		StartupLuauMode = L"editor";
+		bShowImgui = false;
+		const std::wstring lastEditorMap = ReadPersistedLastEditorMapName();
+		if (!lastEditorMap.empty() && std::filesystem::exists(ResolveMapPath(lastEditorMap)))
+			CommandLineLoadMapFile = lastEditorMap;
+		AppendStartupTrace(L"[ParseCommandLineArgs] no args: editor mode, lastMap=\"" + lastEditorMap + L"\"");
 	}
 
 	for (int i = 1; i < argc; ++i)
@@ -3275,53 +3862,23 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 			bCommandLineNvFrapsBvhLiveTlas = true;
 			continue;
 		}
-		if (arg == L"--sponza-fly" || arg == L"--sponza" || arg == L"--scene-sponza" || arg == L"--fly-camera")
-		{
-			bStartupSponzaFlyMode = true;
-			// Enable scripting so the categorized imgui windows from
-			// common/040_imgui_controls.luau load. Mode-specific game
-			// scripts (platformer / dungeon) are skipped via the "sponza"
-			// startup-mode branch in RunStartupLuauScript.
-			bEnableStartupLuauScript = true;
-			// StartupLuauMode defaults to "platformer", which forces
-			// bPlatformerHybridDirectOnly=true in OnRender and disables every
-			// hybrid RT pass (shadow / AO / reflection / GI). sponza-fly is a
-			// generic free-flight scene, not the platformer mobile path, so
-			// override the mode here. Without this RT shadows/GI silently
-			// vanish even though render-mode=hybrid is selected.
-			// "sponza_demo" loads Sponza.fbx via the Luau map system instead
-			// of the legacy C++ LoadModel hardcoded path.
-			StartupLuauMode = L"sponza_demo";
-			bCommandLineAutoDumpOverrideSet = true;
-			bCommandLineAutoDumpEnabled = false;
-			continue;
-		}
 		if (arg == L"--startup-scripts")
 		{
-			bStartupSponzaFlyMode = false;
+			bStartupFreeFlyCamera = false;
 			bEnableStartupLuauScript = true;
 			continue;
 		}
 		if (arg == L"--platformer" || arg == L"--platformer-mode" || arg == L"--platformer-character")
 		{
-			bStartupSponzaFlyMode = false;
+			bStartupFreeFlyCamera = false;
 			bEnableStartupLuauScript = true;
 			StartupLuauMode = L"platformer";
 			bCommandLineDungeonCharacterMode = false;
-			continue;
-		}
-		if (arg == L"--platformer-spine-benchmark" || arg == L"--spine-benchmark")
-		{
-			bStartupSponzaFlyMode = false;
-			bEnableStartupLuauScript = true;
-			StartupLuauMode = L"platformer";
-			bCommandLineDungeonCharacterMode = false;
-			bCommandLinePlatformerSpineBenchmark = true;
 			continue;
 		}
 		if (arg == L"--grass-demo")
 		{
-			bStartupSponzaFlyMode = false;
+			bStartupFreeFlyCamera = false;
 			bEnableStartupLuauScript = true;
 			StartupLuauMode = L"grass_demo";
 			bCommandLineDungeonCharacterMode = false;
@@ -3329,7 +3886,7 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 		}
 		if (arg == L"--terrain-demo")
 		{
-			bStartupSponzaFlyMode = false;
+			bStartupFreeFlyCamera = false;
 			bEnableStartupLuauScript = true;
 			StartupLuauMode = L"terrain_demo";
 			bCommandLineDungeonCharacterMode = false;
@@ -3337,147 +3894,10 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 		}
 		if (arg == L"--particle-demo")
 		{
-			bStartupSponzaFlyMode = false;
+			bStartupFreeFlyCamera = false;
 			bEnableStartupLuauScript = true;
 			StartupLuauMode = L"particle_demo";
 			bCommandLineDungeonCharacterMode = false;
-			continue;
-		}
-		std::wstring spineBenchmarkCountValue = ParseValueArg(arg, L"--platformer-spine-benchmark-count", L"-platformer-spine-benchmark-count", i);
-		if (spineBenchmarkCountValue.empty())
-			spineBenchmarkCountValue = ParseValueArg(arg, L"--spine-benchmark-count", L"-spine-benchmark-count", i);
-		if (!spineBenchmarkCountValue.empty())
-		{
-			try
-			{
-				const unsigned long value = std::stoul(spineBenchmarkCountValue);
-				CommandLinePlatformerSpineBenchmarkCount = static_cast<UINT32>(std::clamp<unsigned long>(value, 1ul, 4000ul));
-				bCommandLinePlatformerSpineBenchmark = true;
-				bStartupSponzaFlyMode = false;
-				bEnableStartupLuauScript = true;
-				StartupLuauMode = L"platformer";
-				bCommandLineDungeonCharacterMode = false;
-			}
-			catch (...)
-			{
-			}
-			continue;
-		}
-		if (arg == L"--skeletal-test" || arg == L"--skeletal-skinning-test")
-		{
-			bCommandLineSpawnSkeletalTest = true;
-			continue;
-		}
-		// Skeletal-skinning standalone benchmark: skip Sponza and any
-		// platformer/dungeon content, spawn the procedural box characters
-		// at the world origin so the only thing on screen is the skinned
-		// crowd. Useful for measuring compute skinning + BLAS refit cost
-		// without the cathedral's overdraw / RT shadow load mixed in.
-		if (arg == L"--skeletal-benchmark" || arg == L"--skeletal-bench" || arg == L"--skeletal-only")
-		{
-			bCommandLineSkeletalBenchMode = true;
-			bCommandLineSpawnSkeletalTest = true;
-			bStartupSponzaFlyMode = false;
-			bEnableStartupLuauScript = true;
-			StartupLuauMode = L"sponza";
-			bCommandLineAutoDumpOverrideSet = true;
-			bCommandLineAutoDumpEnabled = false;
-			continue;
-		}
-		// Spine-style CPU skinning: skip the GPU compute pre-pass and
-		// skin every character on the CPU into a fresh UPLOAD VB each
-		// frame. Pairs with --skeletal-benchmark to compare paths.
-		if (arg == L"--skeletal-cpu-skinning" || arg == L"--skeletal-cpu")
-		{
-			bSkeletalUseCpuSkinning = true;
-			continue;
-		}
-		// Benchmark fairness flag: turn off per-character BLAS refit
-		// so the compute path's reported cost reflects skinning only,
-		// not RT-only bookkeeping. RT visuals freeze at the bind pose.
-		if (arg == L"--skeletal-skip-blas" || arg == L"--skeletal-no-blas")
-		{
-			bSkeletalSkipBlas = true;
-			continue;
-		}
-		// Path C — pure VS inline skinning. The GBuffer VS reads bind-pose
-		// vertices from IA and runs the four-bone weighted skin inline,
-		// using both curr and prev palette SBVs. No compute pre-pass, no
-		// CPU skinning, no skinned VB. Implies --skeletal-skip-blas
-		// (no skinned VB means no BLAS source).
-		if (arg == L"--skeletal-vs-inline" || arg == L"--skeletal-vs")
-		{
-			bSkeletalUseVsInlineSkinning = true;
-			bSkeletalSkipBlas = true;
-			continue;
-		}
-		// Spine VS-inline (desktop-only): skinning math executes in the
-		// vertex shader. Skips the compute pre-pass and bypasses the
-		// per-mesh GpuSpineSkinnedVertices SBV.
-		if (arg == L"--spine-vs-inline" || arg == L"--spine-vs")
-		{
-			bSpineUseVsInlineSkinning = true;
-			continue;
-		}
-		// Live Spine: bypass the snapshot cache. Each frame the bench
-		// script calls SpineComponent.update_live which re-runs
-		// spAnimation_apply + spSkeleton_updateWorldTransform +
-		// BuildSpineSampleMesh and memcpys the result into persistent
-		// UPLOAD-heap VBs. Matches the official Spine runtime model.
-		if (arg == L"--spine-live")
-		{
-			bCommandLineSpineBenchmarkLive = true;
-			continue;
-		}
-		std::wstring skeletalScreenshotValue = ParseValueArg(arg, L"--skeletal-test-screenshot", L"-skeletal-test-screenshot", i);
-		if (!skeletalScreenshotValue.empty())
-		{
-			try
-			{
-				const unsigned long value = std::stoul(skeletalScreenshotValue);
-				SkeletalTestScreenshotFrame = static_cast<UINT32>(std::clamp<unsigned long>(value, 1ul, 100000ul));
-				bCommandLineSkeletalTestScreenshot = true;
-				bCommandLineSpawnSkeletalTest = true;
-			}
-			catch (...)
-			{
-			}
-			continue;
-		}
-		if (arg == L"--skeletal-test-screenshot")
-		{
-			bCommandLineSkeletalTestScreenshot = true;
-			bCommandLineSpawnSkeletalTest = true;
-			continue;
-		}
-		std::wstring skeletalTestCountValue = ParseValueArg(arg, L"--skeletal-test-count", L"-skeletal-test-count", i);
-		if (skeletalTestCountValue.empty())
-			skeletalTestCountValue = ParseValueArg(arg, L"--skeletal-skinning-test-count", L"-skeletal-skinning-test-count", i);
-		if (!skeletalTestCountValue.empty())
-		{
-			try
-			{
-				const unsigned long value = std::stoul(skeletalTestCountValue);
-				CommandLineSkeletalTestCount = static_cast<UINT32>(std::clamp<unsigned long>(value, 1ul, 4096ul));
-				bCommandLineSpawnSkeletalTest = true;
-			}
-			catch (...)
-			{
-			}
-			continue;
-		}
-		if (arg == L"--spine-skinning-cpu" || arg == L"--cpu-spine-skinning" || arg == L"--disable-spine-compute-skinning")
-		{
-			bCommandLineSpineSkinningOverrideSet = true;
-			bCommandLineSpineGpuSkinningEnabled = false;
-			bEnableGpuSpineSkinning = false;
-			continue;
-		}
-		if (arg == L"--spine-skinning-compute" || arg == L"--gpu-spine-skinning" || arg == L"--enable-spine-compute-skinning")
-		{
-			bCommandLineSpineSkinningOverrideSet = true;
-			bCommandLineSpineGpuSkinningEnabled = true;
-			bEnableGpuSpineSkinning = true;
 			continue;
 		}
 		std::wstring spineSkinningValue = ParseValueArg(arg, L"--spine-skinning", L"-spine-skinning", i);
@@ -3498,7 +3918,7 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 		}
 		if (arg == L"--dungeon-character" || arg == L"--dungeon" || arg == L"--dungeon-mode")
 		{
-			bStartupSponzaFlyMode = false;
+			bStartupFreeFlyCamera = false;
 			bEnableStartupLuauScript = true;
 			bCommandLineDungeonCharacterMode = true;
 			StartupLuauMode = L"dungeon";
@@ -3506,7 +3926,7 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 		}
 		if (arg == L"--sandbox" || arg == L"--sandbox-mode" || arg == L"--sample-scripts")
 		{
-			bStartupSponzaFlyMode = false;
+			bStartupFreeFlyCamera = false;
 			bEnableStartupLuauScript = true;
 			bCommandLineDungeonCharacterMode = false;
 			StartupLuauMode = L"sandbox";
@@ -3514,7 +3934,7 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 		}
 		if (arg == L"--editor" || arg == L"--editor-mode" || arg == L"--empty-editor")
 		{
-			bStartupSponzaFlyMode = false;
+			bStartupFreeFlyCamera = false;
 			bEnableStartupLuauScript = true;
 			bCommandLineDungeonCharacterMode = false;
 			StartupLuauMode = L"editor";
@@ -3523,45 +3943,6 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 			{
 				bCommandLineAAOverrideSet = true;
 				CommandLineSelectedAAMode = EAntiAliasingMode::TAA;
-			}
-			continue;
-		}
-		std::wstring startupModeValue = ParseValueArg(arg, L"--startup-mode", L"-startup-mode", i);
-		if (!startupModeValue.empty())
-		{
-			if (startupModeValue == L"dungeon" || startupModeValue == L"procedural-dungeon" || startupModeValue == L"procedural_dungeon")
-			{
-				bStartupSponzaFlyMode = false;
-				bEnableStartupLuauScript = true;
-				bCommandLineDungeonCharacterMode = true;
-				StartupLuauMode = L"dungeon";
-			}
-			else if (startupModeValue == L"platformer" || startupModeValue == L"spine-platformer" || startupModeValue == L"spine_platformer")
-			{
-				bStartupSponzaFlyMode = false;
-				bEnableStartupLuauScript = true;
-				bCommandLineDungeonCharacterMode = false;
-				StartupLuauMode = L"platformer";
-			}
-			else if (startupModeValue == L"sandbox" || startupModeValue == L"samples" || startupModeValue == L"sample")
-			{
-				bStartupSponzaFlyMode = false;
-				bEnableStartupLuauScript = true;
-				bCommandLineDungeonCharacterMode = false;
-				StartupLuauMode = L"sandbox";
-			}
-			else if (startupModeValue == L"editor" || startupModeValue == L"empty-editor" || startupModeValue == L"empty_editor")
-			{
-				bStartupSponzaFlyMode = false;
-				bEnableStartupLuauScript = true;
-				bCommandLineDungeonCharacterMode = false;
-				StartupLuauMode = L"editor";
-				bShowImgui = false;
-				if (!bCommandLineAAOverrideSet)
-				{
-					bCommandLineAAOverrideSet = true;
-					CommandLineSelectedAAMode = EAntiAliasingMode::TAA;
-				}
 			}
 			continue;
 		}
@@ -3580,94 +3961,6 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 		if (arg == L"--no-pt-dlss-rr" || arg == L"--disable-pt-dlss-rr" || arg == L"--no-pt-rr-gbuffer")
 		{
 			bEnablePathTracingDLSSRR = false;
-			continue;
-		}
-		if (arg == L"--pt-rr-specular-mv" || arg == L"--enable-pt-rr-specular-mv")
-		{
-			bEnablePathTracingRRSpecularMotionVectors = true;
-			bEnablePathTracingRRSpecularHitDistance = false;
-			continue;
-		}
-		if (arg == L"--no-pt-rr-specular-mv" || arg == L"--disable-pt-rr-specular-mv")
-		{
-			bEnablePathTracingRRSpecularMotionVectors = false;
-			continue;
-		}
-		if (arg == L"--pt-rr-specular-hit-distance" || arg == L"--pt-rr-specular-hitdist")
-		{
-			bEnablePathTracingRRSpecularHitDistance = true;
-			bEnablePathTracingRRSpecularMotionVectors = false;
-			continue;
-		}
-		if (arg == L"--no-pt-rr-specular-hit-distance" || arg == L"--no-pt-rr-specular-hitdist")
-		{
-			bEnablePathTracingRRSpecularHitDistance = false;
-			continue;
-		}
-		if (arg == L"--pt-rr-stable-primary-rays" || arg == L"--pt-rr-primary-ray-stability")
-		{
-			bEnablePathTracingRRPrimaryRayStabilization = true;
-			continue;
-		}
-		if (arg == L"--no-pt-rr-stable-primary-rays" || arg == L"--no-pt-rr-primary-ray-stability")
-		{
-			bEnablePathTracingRRPrimaryRayStabilization = false;
-			continue;
-		}
-		if (arg == L"--hybrid-rr-specular-mv" || arg == L"--enable-hybrid-rr-specular-mv")
-		{
-			bEnableHybridRRSpecularMotionVectors = true;
-			continue;
-		}
-		if (arg == L"--no-hybrid-rr-specular-mv" || arg == L"--disable-hybrid-rr-specular-mv")
-		{
-			bEnableHybridRRSpecularMotionVectors = false;
-			continue;
-		}
-		if (arg == L"--hybrid-rr-specular-hit-distance" || arg == L"--hybrid-rr-specular-hitdist")
-		{
-			bEnableHybridRRSpecularHitDistance = true;
-			continue;
-		}
-		if (arg == L"--no-hybrid-rr-specular-hit-distance" || arg == L"--no-hybrid-rr-specular-hitdist")
-		{
-			bEnableHybridRRSpecularHitDistance = false;
-			continue;
-		}
-		if (arg == L"--hybrid-rr-specular-guide-ray")
-		{
-			bEnableHybridRRSpecularGuideRay = true;
-			continue;
-		}
-		if (arg == L"--no-hybrid-rr-specular-guide-ray")
-		{
-			bEnableHybridRRSpecularGuideRay = false;
-			continue;
-		}
-		std::wstring hybridSpecularMVScaleValue = ParseValueArg(arg, L"--hybrid-rr-specular-mv-scale", L"-hybrid-rr-specular-mv-scale", i);
-		if (!hybridSpecularMVScaleValue.empty())
-		{
-			try
-			{
-				HybridRRSpecularMotionVectorScale = std::clamp(std::stof(hybridSpecularMVScaleValue), -2.0f, 2.0f);
-				bEnableHybridRRSpecularMotionVectors = fabsf(HybridRRSpecularMotionVectorScale) > 1.0e-4f;
-			}
-			catch (...)
-			{
-			}
-			continue;
-		}
-		std::wstring specularMVScaleValue = ParseValueArg(arg, L"--pt-rr-specular-mv-scale", L"-pt-rr-specular-mv-scale", i);
-		if (!specularMVScaleValue.empty())
-		{
-			try
-			{
-				PathTracingRRSpecularMotionVectorScale = std::clamp(std::stof(specularMVScaleValue), -2.0f, 2.0f);
-				bEnablePathTracingRRSpecularMotionVectors = fabsf(PathTracingRRSpecularMotionVectorScale) > 1.0e-4f;
-			}
-			catch (...)
-			{
-			}
 			continue;
 		}
 		std::wstring ptSppValue = ParseValueArg(arg, L"--pt-spp", L"-pt-spp", i);
@@ -3703,6 +3996,26 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 		if (arg == L"--no-diffuse-gi" || arg == L"--disable-diffuse-gi")
 		{
 			bEnableDiffuseGI = false;
+			continue;
+		}
+		if (arg == L"--no-diffuse-gi-point-lights" || arg == L"--disable-diffuse-gi-point-lights")
+		{
+			DiffuseGIPointLightLimit = 0u;
+			continue;
+		}
+		std::wstring diffuseGIPointLightLimitValue = ParseValueArg(arg, L"--diffuse-gi-point-lights", L"-diffuse-gi-point-lights", i);
+		if (diffuseGIPointLightLimitValue.empty())
+			diffuseGIPointLightLimitValue = ParseValueArg(arg, L"--diffuse-gi-light-limit", L"-diffuse-gi-light-limit", i);
+		if (!diffuseGIPointLightLimitValue.empty())
+		{
+			try
+			{
+				const unsigned long value = std::stoul(diffuseGIPointLightLimitValue);
+				DiffuseGIPointLightLimit = static_cast<UINT32>(std::clamp<unsigned long>(value, 0ul, static_cast<unsigned long>(MaxDiffuseGIPointLights)));
+			}
+			catch (...)
+			{
+			}
 			continue;
 		}
 		if (arg == L"--rt-diffuse-gi-ser" || arg == L"--enable-rt-diffuse-gi-ser" || arg == L"--diffuse-gi-ser")
@@ -3836,6 +4149,20 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 			}
 			continue;
 		}
+		std::wstring surfaceBounceSaturationValue = ParseValueArg(arg, L"--surface-bounce-saturation", L"-surface-bounce-saturation", i);
+		if (surfaceBounceSaturationValue.empty())
+			surfaceBounceSaturationValue = ParseValueArg(arg, L"--diffuse-gi-saturation", L"-diffuse-gi-saturation", i);
+		if (!surfaceBounceSaturationValue.empty())
+		{
+			try
+			{
+				SurfaceBounceSaturation = std::clamp(std::stof(surfaceBounceSaturationValue), 0.0f, 1.0f);
+			}
+			catch (...)
+			{
+			}
+			continue;
+		}
 		std::wstring skyLightingStrengthValue = ParseValueArg(arg, L"--sky-lighting-strength", L"-sky-lighting-strength", i);
 		if (!skyLightingStrengthValue.empty())
 		{
@@ -3855,21 +4182,18 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 			bCommandLineAutoDumpEnabled = false;
 			continue;
 		}
-		if (arg == L"--camera-path-diagnostics" || arg == L"--pt-rr-camera-path-diagnostics")
+		if (arg == L"--camera-path" || arg == L"-camera-path" ||
+			arg.rfind(L"--camera-path=", 0) == 0 || arg.rfind(L"-camera-path=", 0) == 0)
 		{
-			bCommandLineCameraPathDiagnostics = true;
-			continue;
-		}
-		if (arg == L"--camera-path" || arg == L"-camera-path")
-		{
+			// Unified parsing for both "--camera-path <file>" and
+			// "--camera-path=<file>". A bare flag or the literal "latest"
+			// loads the most recent capture; an explicit path loads that
+			// file with case preserved (paths are case-sensitive on
+			// non-Windows mounts; ParseValueArg's lowercasing broke this).
 			bCommandLineLoadLatestCameraPath = true;
-			if (i + 1 < argc)
-			{
-				std::wstring rawCameraPath = argv[++i];
-				std::wstring loweredCameraPath = ToLower(rawCameraPath);
-				if (loweredCameraPath != L"latest")
-					CommandLineCameraPathFile = rawCameraPath;
-			}
+			std::wstring rawCameraPath = ParseRawValueArg(arg, L"--camera-path", L"-camera-path", i);
+			if (!rawCameraPath.empty() && ToLower(rawCameraPath) != L"latest")
+				CommandLineCameraPathFile = StripOuterQuotes(rawCameraPath);
 			continue;
 		}
 		std::wstring loadMapValue = ParseRawValueArg(arg, L"--load-map", L"-map", i);
@@ -3880,7 +4204,7 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 			CommandLineLoadMapFile = StripOuterQuotes(loadMapValue);
 			bEnableStartupLuauScript = true;
 			StartupLuauMode = L"editor";
-			bStartupSponzaFlyMode = false;
+			bStartupFreeFlyCamera = false;
 			bShowImgui = false;
 			if (!bCommandLineAAOverrideSet)
 			{
@@ -3904,15 +4228,6 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 			}
 			continue;
 		}
-		std::wstring cameraPathValue = ParseValueArg(arg, L"--camera-path", L"-camera-path", i);
-		if (!cameraPathValue.empty())
-		{
-			bCommandLineLoadLatestCameraPath = true;
-			if (cameraPathValue != L"latest")
-				CommandLineCameraPathFile = cameraPathValue;
-			continue;
-		}
-
 		std::wstring dumpModeValue = ParseValueArg(arg, L"--dump-mode", L"-dump-mode", i);
 		if (!dumpModeValue.empty())
 		{
@@ -3934,68 +4249,6 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 				bCommandLineAutoDumpEnabled = true;
 				bCommandLinePathTracingScreenshotDumpMode = true;
 			}
-			else if (dumpModeValue == L"lighting-compare" || dumpModeValue == L"lighting_compare" || dumpModeValue == L"gi-compare" || dumpModeValue == L"gi_compare" || dumpModeValue == L"indirect-compare" || dumpModeValue == L"indirect_compare")
-			{
-				bCommandLineAutoDumpOverrideSet = true;
-				bCommandLineAutoDumpEnabled = true;
-				bCommandLineLightingCompareDumpMode = true;
-			}
-			else if (dumpModeValue == L"mobile-gbuffer" || dumpModeValue == L"mobile_gbuffer" || dumpModeValue == L"mobile-debug" || dumpModeValue == L"mobile_debug")
-			{
-				bCommandLineMobileGBufferDumpMode = true;
-			}
-			else if (dumpModeValue == L"aa-switch" || dumpModeValue == L"aa_switch" || dumpModeValue == L"aaswitch" || dumpModeValue == L"aa-modes" || dumpModeValue == L"aa_modes")
-			{
-				bCommandLineAutoDumpOverrideSet = true;
-				bCommandLineAutoDumpEnabled = true;
-				bCommandLineAASwitchDumpMode = true;
-			}
-			else if (dumpModeValue == L"specular-sequence" || dumpModeValue == L"specular_sequence" || dumpModeValue == L"specular-noise" || dumpModeValue == L"specular_noise")
-			{
-				bCommandLineAutoDumpOverrideSet = true;
-				bCommandLineAutoDumpEnabled = true;
-				bCommandLineSpecularSequenceDumpMode = true;
-			}
-			continue;
-		}
-		if (arg == L"--readme-dump" || arg == L"--readme-screenshots")
-		{
-			bCommandLineAutoDumpOverrideSet = true;
-			bCommandLineAutoDumpEnabled = true;
-			bCommandLineReadmeScreenshotDumpMode = true;
-			continue;
-		}
-		if (arg == L"--path-tracing-dump" || arg == L"--pathtracing-dump" || arg == L"--pt-dump")
-		{
-			bCommandLineAutoDumpOverrideSet = true;
-			bCommandLineAutoDumpEnabled = true;
-			bCommandLinePathTracingScreenshotDumpMode = true;
-			continue;
-		}
-		if (arg == L"--lighting-compare-dump" || arg == L"--gi-compare-dump" || arg == L"--indirect-compare-dump")
-		{
-			bCommandLineAutoDumpOverrideSet = true;
-			bCommandLineAutoDumpEnabled = true;
-			bCommandLineLightingCompareDumpMode = true;
-			continue;
-		}
-		if (arg == L"--mobile-gbuffer-dump" || arg == L"--mobile-debug-dump")
-		{
-			bCommandLineMobileGBufferDumpMode = true;
-			continue;
-		}
-		if (arg == L"--aa-switch-dump" || arg == L"--aa-modes-dump")
-		{
-			bCommandLineAutoDumpOverrideSet = true;
-			bCommandLineAutoDumpEnabled = true;
-			bCommandLineAASwitchDumpMode = true;
-			continue;
-		}
-		if (arg == L"--specular-sequence-dump" || arg == L"--specular-noise-dump")
-		{
-			bCommandLineAutoDumpOverrideSet = true;
-			bCommandLineAutoDumpEnabled = true;
-			bCommandLineSpecularSequenceDumpMode = true;
 			continue;
 		}
 
@@ -4017,66 +4270,6 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 			try
 			{
 				SpatialHashGICB.CellSize = std::clamp(std::stof(spatialHashCellValue), 4.0f, 256.0f);
-			}
-			catch (...)
-			{
-			}
-			continue;
-		}
-
-		std::wstring spatialHashBlendValue = ParseValueArg(arg, L"--spatial-hash-raw-blend", L"-spatial-hash-raw-blend", i);
-		if (spatialHashBlendValue.empty())
-			spatialHashBlendValue = ParseValueArg(arg, L"--spatial-hash-smoothing", L"-spatial-hash-smoothing", i);
-		if (!spatialHashBlendValue.empty())
-		{
-			try
-			{
-				SpatialHashGICB.SmoothingStrength = std::clamp(std::stof(spatialHashBlendValue), 0.0f, 1.0f);
-			}
-			catch (...)
-			{
-			}
-			continue;
-		}
-
-		std::wstring spatialHashInterpValue = ParseValueArg(arg, L"--spatial-hash-interp", L"-spatial-hash-interp", i);
-		if (spatialHashInterpValue.empty())
-			spatialHashInterpValue = ParseValueArg(arg, L"--spatial-hash-interpolation", L"-spatial-hash-interpolation", i);
-		if (!spatialHashInterpValue.empty())
-		{
-			try
-			{
-				SpatialHashGICB.InterpolationStrength = std::clamp(std::stof(spatialHashInterpValue), 0.0f, 1.0f);
-			}
-			catch (...)
-			{
-			}
-			continue;
-		}
-
-		std::wstring spatialHashRaysValue = ParseValueArg(arg, L"--spatial-hash-rays", L"-spatial-hash-rays", i);
-		if (!spatialHashRaysValue.empty())
-		{
-			try
-			{
-				const unsigned long value = std::stoul(spatialHashRaysValue);
-				RTSpatialHashGIViewParam.RaysPerCell = static_cast<UINT32>(std::clamp<unsigned long>(value, 1ul, 8ul));
-			}
-			catch (...)
-			{
-			}
-			continue;
-		}
-
-		std::wstring spatialHashBouncesValue = ParseValueArg(arg, L"--spatial-hash-bounces", L"-spatial-hash-bounces", i);
-		if (spatialHashBouncesValue.empty())
-			spatialHashBouncesValue = ParseValueArg(arg, L"--spatial-hash-depth", L"-spatial-hash-depth", i);
-		if (!spatialHashBouncesValue.empty())
-		{
-			try
-			{
-				const unsigned long value = std::stoul(spatialHashBouncesValue);
-				RTSpatialHashGIViewParam.MaxBounces = static_cast<UINT32>(std::clamp<unsigned long>(value, 1ul, 8ul));
 			}
 			catch (...)
 			{
@@ -4219,32 +4412,6 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 			continue;
 		}
 
-		std::wstring screenProbeRawBlendValue = ParseValueArg(arg, L"--screen-probe-raw-blend", L"-screen-probe-raw-blend", i);
-		if (!screenProbeRawBlendValue.empty())
-		{
-			try
-			{
-				ScreenProbeGICB.RawBlend = std::clamp(std::stof(screenProbeRawBlendValue), 0.0f, 1.0f);
-			}
-			catch (...)
-			{
-			}
-			continue;
-		}
-
-		std::wstring screenProbeTemporalAlphaValue = ParseValueArg(arg, L"--screen-probe-temporal-alpha", L"-screen-probe-temporal-alpha", i);
-		if (!screenProbeTemporalAlphaValue.empty())
-		{
-			try
-			{
-				ScreenProbeGICB.TemporalAlpha = std::clamp(std::stof(screenProbeTemporalAlphaValue), 0.02f, 1.0f);
-			}
-			catch (...)
-			{
-			}
-			continue;
-		}
-
 		std::wstring screenProbeRaysValue = ParseValueArg(arg, L"--screen-probe-rays", L"-screen-probe-rays", i);
 		if (!screenProbeRaysValue.empty())
 		{
@@ -4252,60 +4419,6 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 			{
 				const unsigned long value = std::stoul(screenProbeRaysValue);
 				RTScreenProbeGIViewParam.RaysPerProbe = static_cast<UINT32>(std::clamp<unsigned long>(value, 1ul, 4ul));
-			}
-			catch (...)
-			{
-			}
-			continue;
-		}
-
-		std::wstring screenProbeSHValue = ParseValueArg(arg, L"--screen-probe-sh", L"-screen-probe-sh", i);
-		if (!screenProbeSHValue.empty())
-		{
-			try
-			{
-				const unsigned long value = std::stoul(screenProbeSHValue);
-				ScreenProbeGICB.SHCoefficientCount = value <= 4ul ? 4u : 9u;
-			}
-			catch (...)
-			{
-			}
-			continue;
-		}
-
-		std::wstring screenProbeEdgeDepthValue = ParseValueArg(arg, L"--screen-probe-edge-depth", L"-screen-probe-edge-depth", i);
-		if (!screenProbeEdgeDepthValue.empty())
-		{
-			try
-			{
-				ScreenProbeGICB.EdgeDepthWeight = std::clamp(std::stof(screenProbeEdgeDepthValue), 8.0f, 192.0f);
-			}
-			catch (...)
-			{
-			}
-			continue;
-		}
-
-		std::wstring screenProbeEdgeNormalValue = ParseValueArg(arg, L"--screen-probe-edge-normal", L"-screen-probe-edge-normal", i);
-		if (!screenProbeEdgeNormalValue.empty())
-		{
-			try
-			{
-				ScreenProbeGICB.EdgeNormalWeight = std::clamp(std::stof(screenProbeEdgeNormalValue), 1.0f, 96.0f);
-			}
-			catch (...)
-			{
-			}
-			continue;
-		}
-
-		std::wstring screenProbeEdgeSamplesValue = ParseValueArg(arg, L"--screen-probe-edge-samples", L"-screen-probe-edge-samples", i);
-		if (!screenProbeEdgeSamplesValue.empty())
-		{
-			try
-			{
-				const unsigned long value = std::stoul(screenProbeEdgeSamplesValue);
-				ScreenProbeGICB.EdgeSampleCount = static_cast<UINT32>(std::clamp<unsigned long>(value, 1ul, 4ul));
 			}
 			catch (...)
 			{
@@ -4344,7 +4457,7 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 	bCommandLineAutoDumpEnabled = false;
 	bCommandLinePathTracingScreenshotDumpMode = false;
 	bPathTracingScreenshotDumpMode = false;
-	bStartupSponzaFlyMode = false;
+	bStartupFreeFlyCamera = false;
 	bEnableStartupLuauScript = true;
 	bCommandLineDisableStreamline = true;
 	bEnableDiffuseGI = false;
@@ -4371,12 +4484,15 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 		L", rayNoise=" + std::wstring(GetRayNoiseModeNameW(RayNoiseMode)) +
 		L", diffuseGI=" + std::wstring(GetDiffuseGIModeNameW(DiffuseGIMode)) +
 		L", diffuseGIEnabled=" + std::to_wstring(bEnableDiffuseGI ? 1 : 0) +
+		L", diffuseGIPointLights=" + std::to_wstring(DiffuseGIPointLightLimit) +
 		L", specularGIEnabled=" + std::to_wstring(bEnableSpecularGI ? 1 : 0) +
 		L", directDiffuse=" + std::to_wstring(bEnableDirectDiffuse ? 1 : 0) +
 		L", directSpecular=" + std::to_wstring(bEnableDirectSpecular ? 1 : 0) +
 		L", skyLighting=" + std::to_wstring(bEnableSkyLighting ? 1 : 0) +
 		L", surfaceBounceStrength=" + std::to_wstring(SurfaceBounceStrength) +
+		L", surfaceBounceSaturation=" + std::to_wstring(SurfaceBounceSaturation) +
 		L", skyLightingStrength=" + std::to_wstring(SkyLightingStrength) +
+		L", forceDiffuseGIColor=" + std::to_wstring(bDebugForceDiffuseGIColor ? 1 : 0) +
 		L", diffuseGIDump=" + std::to_wstring(bCommandLineDiffuseGIAutoDumpMode ? 1 : 0) +
 		L", readmeDump=" + std::to_wstring(bCommandLineReadmeScreenshotDumpMode ? 1 : 0) +
 		L", pathTracingDump=" + std::to_wstring(bCommandLinePathTracingScreenshotDumpMode ? 1 : 0) +
@@ -4402,7 +4518,7 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 		L", hybridRRSpecularMVScale=" + std::to_wstring(HybridRRSpecularMotionVectorScale) +
 		L", hybridRRSpecularHitDistance=" + std::to_wstring(bEnableHybridRRSpecularHitDistance ? 1 : 0) +
 		L", hybridRRSpecularGuideRay=" + std::to_wstring(bEnableHybridRRSpecularGuideRay ? 1 : 0) +
-		L", sponzaFly=" + std::to_wstring(bStartupSponzaFlyMode ? 1 : 0) +
+		L", freeFlyCamera=" + std::to_wstring(bStartupFreeFlyCamera ? 1 : 0) +
 		L", startupScripts=" + std::to_wstring(bEnableStartupLuauScript ? 1 : 0) +
 		L", dlssJitterScale=" + std::to_wstring(DLSSJitterPhaseScale) +
 		L", dlssJitterOverride=" + std::to_wstring(DLSSJitterPhaseCountOverride) +
@@ -4581,7 +4697,7 @@ void Corona::PromptStartupModeSelection()
 	bAutoAADumpEnabled = false;
 	bPathTracingScreenshotDumpMode = false;
 	bCommandLinePathTracingScreenshotDumpMode = false;
-	bStartupSponzaFlyMode = false;
+	bStartupFreeFlyCamera = false;
 	bEnableStartupLuauScript = true;
 #endif
 
@@ -5525,12 +5641,18 @@ void Corona::AdvanceAutoAADump(Texture* backbuffer)
 				L", mode=" + std::wstring(GetDiffuseGIModeNameW(DiffuseGIMode)));
 			dumpResource(L"gi_diffuse_raw", DiffuseGIRaw.get(), true);
 			dumpResource(L"gi_diffuse_hash_cache", DiffuseGIHashCached.get(), true);
+			dumpResource(L"gi_diffuse_hash_filtered", DiffuseGIHashFiltered.get(), true);
+			dumpResource(L"gi_diffuse_hash_filtered_prev", DiffuseGIHashFilteredPrev.get(), true);
 			dumpResource(L"screen_probe_atlas", ScreenProbeGIRadiance[ScreenProbeGIAtlasWriteIndex].get(), true);
 			dumpResource(L"screen_probe_sh", ScreenProbeGISH[ScreenProbeGIAtlasWriteIndex][0].get(), false);
 			dumpResource(L"screen_probe_meta", ScreenProbeGIMetadata[ScreenProbeGIAtlasWriteIndex].get(), false);
 			dumpResource(L"screen_probe_gi", ScreenProbeGIResolved.get(), true);
 			dumpResource(L"screen_probe_probes", ScreenProbeGIProbeDebug.get(), true);
 			dumpResource(L"gi_diffuse_temporal", DiffuseGITemporal[GIBufferWriteIndex].get(), true);
+			dumpResource(L"lighting", LightingBuffer.get(), true);
+			dumpResource(L"direct_lighting", DirectLightingBuffer.get(), true);
+			dumpResource(L"gbuffer_albedo", AlbedoBuffer.get(), false);
+			dumpResource(L"gbuffer_roughness_metallic", RoughnessMetalicBuffer.get(), false);
 			if (!bCanCaptureTexture)
 				AppendAutoAADumpLog(std::wstring(L"[") + currentPhaseName + L"] texture capture skipped for non-DX12 backend");
 		}
@@ -7945,6 +8067,23 @@ Corona::PointLightParam Corona::BuildPointLightParam(const PointLightState& poin
 	return param;
 }
 
+void Corona::FillPointLightParams(PointLightParam* outPointLights, UINT32& outPointLightCount, UINT32 maxCount) const
+{
+	outPointLightCount = 0;
+	if (!outPointLights || maxCount == 0)
+		return;
+
+	std::vector<const PointLightState*> pointLightCandidates;
+	BuildPointLightRenderCandidates(pointLightCandidates);
+	for (const PointLightState* pointLightPtr : pointLightCandidates)
+	{
+		if (!pointLightPtr || outPointLightCount >= maxCount)
+			continue;
+
+		outPointLights[outPointLightCount++] = BuildPointLightParam(*pointLightPtr);
+	}
+}
+
 void Corona::QueueEditorMapLoad(const std::wstring& name)
 {
 	if (name.empty())
@@ -8021,18 +8160,7 @@ void Corona::ProcessPendingEditorMapLoad()
 
 void Corona::ApplyRenderPointLightsToFrameParams()
 {
-	PathTracingViewParam.PointLightCount = 0;
-	std::vector<const PointLightState*> pointLightCandidates;
-	BuildPointLightRenderCandidates(pointLightCandidates);
-	for (const PointLightState* pointLightPtr : pointLightCandidates)
-	{
-		if (!pointLightPtr || PathTracingViewParam.PointLightCount >= MaxPointLights)
-			continue;
-
-		const PointLightState& pointLight = *pointLightPtr;
-		const UINT32 pointLightIndex = PathTracingViewParam.PointLightCount++;
-		PathTracingViewParam.PointLights[pointLightIndex] = BuildPointLightParam(pointLight);
-	}
+	FillPointLightParams(PathTracingViewParam.PointLights, PathTracingViewParam.PointLightCount, MaxPointLights);
 }
 
 
@@ -8292,7 +8420,6 @@ void Corona::OnInit()
 		}
 		if (StartupLuauMode != L"dungeon" && StartupLuauMode != L"sandbox" &&
 			StartupLuauMode != L"editor" &&
-			StartupLuauMode != L"sponza" && StartupLuauMode != L"sponza_demo" &&
 			StartupLuauMode != L"spine_benchmark" && StartupLuauMode != L"grass_demo" &&
 			StartupLuauMode != L"terrain_demo" && StartupLuauMode != L"particle_demo")
 			StartupLuauMode = L"platformer";
@@ -8308,10 +8435,11 @@ void Corona::OnInit()
 			setScriptNumberOverride("spine_benchmark.characterCount", static_cast<float>(CommandLinePlatformerSpineBenchmarkCount));
 			setScriptBoolOverride("spine_benchmark.live", bCommandLineSpineBenchmarkLive);
 		}
-		// Don't unset sponza-fly: the sponza luau mode runs only the common
-		// imgui-controls script and leaves the C++ Sponza scene path intact.
-		if (StartupLuauMode != L"sponza")
-			bStartupSponzaFlyMode = false;
+		// The free-fly camera (mouse/WASD via SimpleCamera) is the editor's
+		// default navigation; gameplay modes drive the camera from their own
+		// scripts, so it is only armed for the editor. A map load later in
+		// OnInit overrides the preset with the map's saved camera when present.
+		bStartupFreeFlyCamera = (StartupLuauMode == L"editor");
 	}
 	UpdateMainDirectionalLightEntityFromState();
 	AppendCpuRuntimeTrace(L"[OnInit] after camera init");
@@ -8392,17 +8520,17 @@ void Corona::OnInit()
 	UpdateStartupLoadingProgress(0.20f, L"Preparing renderer assets");
 	LoadAssets();
 	AppendCpuRuntimeTrace(L"[OnInit] after LoadAssets");
-	// sponza_demo (Luau-driven Sponza spawn) still needs ApplySponzaFlyCamera
+	// sponza_demo (Luau-driven Sponza spawn) still needs ApplyDefaultFlyCamera
 	// so SimpleCamera (m_camera) is initialized with mouse/WASD-bindable
 	// state — without it the user can't fly around because the script's
 	// CameraComponent doesn't currently consume mouse delta. The script
 	// just provides the mesh + sun entities.
-	if (bStartupSponzaFlyMode)
+	if (bStartupFreeFlyCamera)
 	{
-		ApplySponzaFlyCamera();
+		ApplyDefaultFlyCamera();
 		UpdateMainCameraEntityFromSimpleCamera();
 		UpdateMainDirectionalLightEntityFromState();
-		AppendCpuRuntimeTrace(L"[OnInit] after ApplySponzaFlyCamera");
+		AppendCpuRuntimeTrace(L"[OnInit] after ApplyDefaultFlyCamera");
 	}
 	if (bCommandLineSpawnSkeletalTest)
 	{
@@ -10562,6 +10690,7 @@ void Corona::LoadAssets()
 		SpatialHashGICellPosition = createStructuredBuffer(SpatialHashGIEntryCount, sizeof(float) * 4u, true);
 		SpatialHashGICellNormal = createStructuredBuffer(SpatialHashGIEntryCount, sizeof(float) * 4u, true);
 		SpatialHashGICellScore = createStructuredBuffer(SpatialHashGIEntryCount, sizeof(UINT32), true);
+		SpatialHashGICellLightMask = createStructuredBuffer(SpatialHashGIEntryCount, sizeof(UINT32), true);
 		for (UINT coefficientIndex = 0; coefficientIndex < SpatialHashGISHCoefficientCount; ++coefficientIndex)
 			SpatialHashGITraceSH[coefficientIndex] = createStructuredBuffer(SpatialHashGIActiveCellCapacity, sizeof(float) * 4u, true);
 		SpatialHashGIResolvedKeys[0] = createStructuredBuffer(SpatialHashGIEntryCount, sizeof(UINT32), true);
@@ -10698,44 +10827,14 @@ void Corona::LoadAssets()
 		AppendCpuRuntimeTrace(L"[LoadAssets] after default textures");
 
 	const bool bCommandLineMapStartup = !CommandLineLoadMapFile.empty();
-	const bool bGameplayStartupMode =
-		bEnableStartupLuauScript &&
-		(StartupLuauMode.empty() ||
-		 StartupLuauMode == L"platformer" ||
-		 StartupLuauMode == L"dungeon" ||
-		 StartupLuauMode == L"sandbox" ||
-		 StartupLuauMode == L"editor" ||
-		 StartupLuauMode == L"spine_benchmark" ||
-		 StartupLuauMode == L"grass_demo" ||
-		 StartupLuauMode == L"terrain_demo" ||
-		 StartupLuauMode == L"particle_demo" ||
-		 StartupLuauMode == L"sponza_demo" ||
-		 bCommandLineDungeonCharacterMode);
+	(void)bCommandLineMapStartup;
 
-	if (!bMobileDungeonOnlyStartup && !bGameplayStartupMode && !bCommandLineSkeletalBenchMode && !bCommandLineMapStartup)
-	{
-		UpdateStartupLoadingProgress(0.72f, L"Loading Sponza scene");
-		if (!Sponza) Sponza = LoadModel(WideToUtf8(GetAssetFullPath(L"assets\\Sponza\\Sponza.fbx")));
-		if (Sponza && SponzaObject == InvalidSceneObjectHandle)
-		{
-			SceneObjectDesc desc;
-			desc.ScenePtr = Sponza;
-			desc.Transform = glm::mat4x4(1.0f);
-			desc.Roughness = 1.0f;
-			desc.Metallic = 0.0f;
-			desc.bOverrideRoughnessMetallic = false;
-			SponzaObject = AddSceneObject(desc);
-		}
-		if (bVulkanHybridStartup)
-			AppendCpuRuntimeTrace(L"[LoadAssets] after sponza load");
-	}
-	else
-	{
-		UpdateStartupLoadingProgress(0.72f, L"Preparing startup scene");
-		AppendCpuRuntimeTrace(L"[LoadAssets] startup gameplay mode: skipped Sponza load");
-	}
+	// The legacy hardcoded Sponza scene was removed; the editor (and any
+	// map-driven launch) builds its scene from a .map / Luau scripts instead.
+	UpdateStartupLoadingProgress(0.72f, L"Preparing startup scene");
+	AppendCpuRuntimeTrace(L"[LoadAssets] startup scene prepared (no default scene)");
 
-	const bool bLoadStandaloneDemoObjects = !bMobileDungeonOnlyStartup && !bEnableStartupLuauScript && !bStartupSponzaFlyMode && !bCommandLineMapStartup;
+	const bool bLoadStandaloneDemoObjects = !bMobileDungeonOnlyStartup && !bEnableStartupLuauScript && !bStartupFreeFlyCamera && !bCommandLineMapStartup;
 	if (bLoadStandaloneDemoObjects && !Buddha)
 	{
 		Buddha = LoadModel(WideToUtf8(GetAssetFullPath(L"assets\\buddha\\buddha.obj")));
@@ -10923,6 +11022,8 @@ shared_ptr<Scene> Corona::LoadBinaryMeshModel(const std::wstring& binaryFileName
 	uint32_t textureLocalCacheHits = 0;
 	uint32_t textureGlobalCacheHits = 0;
 	uint32_t textureDdsSubstitutions = 0;
+	uint32_t textureDdsConversions = 0;
+	uint32_t textureSourceDeletes = 0;
 	uint32_t textureFallbacks = 0;
 	std::wstring maxTexturePath;
 
@@ -10945,18 +11046,12 @@ shared_ptr<Scene> Corona::LoadBinaryMeshModel(const std::wstring& binaryFileName
 		{
 			std::wstring texturePath = textureDir + textureName;
 			const std::wstring requestedTexturePath = texturePath;
-			const std::wstring requestedExtension = GetFileExtension(texturePath.c_str());
-			if (requestedExtension != L"dds" && requestedExtension != L"DDS")
-			{
-				std::filesystem::path ddsPath(texturePath);
-				ddsPath.replace_extension(L".dds");
-				std::error_code ddsExistsError;
-				if (std::filesystem::exists(ddsPath, ddsExistsError))
-				{
-					texturePath = ddsPath.wstring();
-					++textureDdsSubstitutions;
-				}
-			}
+			texturePath = ResolveTexturePathWithDdsSidecar(
+				std::filesystem::path(texturePath),
+				slotName,
+				&textureDdsSubstitutions,
+				&textureDdsConversions,
+				&textureSourceDeletes).wstring();
 			const std::wstring textureCacheKey =
 				std::to_wstring(reinterpret_cast<uintptr_t>(renderBackend.get())) +
 				(nonSRGB ? L"|linear|" : L"|srgb|") +
@@ -11153,6 +11248,8 @@ shared_ptr<Scene> Corona::LoadBinaryMeshModel(const std::wstring& binaryFileName
 	gMeshLoadProfileTotals.TextureLocalCacheHits += textureLocalCacheHits;
 	gMeshLoadProfileTotals.TextureGlobalCacheHits += textureGlobalCacheHits;
 	gMeshLoadProfileTotals.TextureDdsSubstitutions += textureDdsSubstitutions;
+	gMeshLoadProfileTotals.TextureDdsConversions += textureDdsConversions;
+	gMeshLoadProfileTotals.TextureSourceDeletes += textureSourceDeletes;
 	gMeshLoadProfileTotals.TextureFallbacks += textureFallbacks;
 	gMeshLoadProfileTotals.TextureBytes += textureBytes;
 	gMeshLoadProfileTotals.TotalMs += totalMs;
@@ -11185,6 +11282,8 @@ shared_ptr<Scene> Corona::LoadBinaryMeshModel(const std::wstring& binaryFileName
 		L", textureLocalCacheHits=" + std::to_wstring(textureLocalCacheHits) +
 		L", textureGlobalCacheHits=" + std::to_wstring(textureGlobalCacheHits) +
 		L", textureDdsSubstitutions=" + std::to_wstring(textureDdsSubstitutions) +
+		L", textureDdsConversions=" + std::to_wstring(textureDdsConversions) +
+		L", textureSourceDeletes=" + std::to_wstring(textureSourceDeletes) +
 		L", textureFallbacks=" + std::to_wstring(textureFallbacks) +
 		L", textureBytes=" + std::to_wstring(textureBytes) +
 		L", elapsedMs=" + FormatMilliseconds(totalMs) +
@@ -11261,6 +11360,10 @@ shared_ptr<Scene> Corona::LoadModel(string fileName)
 
 	std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> converter;
 	wstring wide = converter.from_bytes(fileName);
+	const std::filesystem::path modelPath(wide);
+	PreconvertTextureDirectoryPngs(modelPath.parent_path());
+	const std::vector<MaterialTextureSidecar> materialSidecar = LoadMaterialTextureSidecar(modelPath);
+	PreconvertMaterialSidecarTextures(modelPath, materialSidecar);
 	if (bStartupLoadingScreenActive)
 	{
 		float loadingProgress = std::max(StartupLoadingProgress, 0.72f);
@@ -11280,7 +11383,7 @@ shared_ptr<Scene> Corona::LoadModel(string fileName)
 			loadingStatus);
 	}
 	const std::filesystem::path binaryMeshPath = GetCoronaMeshCachePath(wide);
-	if (IsCoronaMeshCacheUsable(binaryMeshPath, std::filesystem::path(wide)))
+	if (IsCoronaMeshCacheUsable(binaryMeshPath, modelPath))
 	{
 		if (shared_ptr<Scene> binaryScene = LoadBinaryMeshModel(binaryMeshPath.wstring(), wide))
 			return binaryScene;
@@ -11331,14 +11434,23 @@ shared_ptr<Scene> Corona::LoadModel(string fileName)
 		return nullptr;
 	}
 
+	uint32_t assimpTextureDdsSubstitutions = 0;
+	uint32_t assimpTextureDdsConversions = 0;
+	uint32_t assimpTextureSourceDeletes = 0;
 	std::map<std::wstring, shared_ptr<Texture>> textureCache;
-	auto loadTextureOrDefault = [&](const wstring& texturePath, bool nonSRGB, const shared_ptr<Texture>& fallback) -> shared_ptr<Texture>
+	auto loadTextureOrDefault = [&](const wchar_t* slotName, const wstring& requestedTexturePath, bool nonSRGB, const shared_ptr<Texture>& fallback) -> shared_ptr<Texture>
 	{
-		if (texturePath.empty())
+		if (requestedTexturePath.empty())
 			return fallback;
 
 		try
 		{
+			const std::wstring texturePath = ResolveTexturePathWithDdsSidecar(
+				std::filesystem::path(requestedTexturePath),
+				slotName,
+				&assimpTextureDdsSubstitutions,
+				&assimpTextureDdsConversions,
+				&assimpTextureSourceDeletes).wstring();
 			const std::wstring textureCacheKey = (nonSRGB ? L"linear|" : L"srgb|") + texturePath;
 			auto cachedTexture = textureCache.find(textureCacheKey);
 			if (cachedTexture != textureCache.end())
@@ -11351,7 +11463,7 @@ shared_ptr<Scene> Corona::LoadModel(string fileName)
 		}
 		catch (const std::exception& e)
 		{
-			AppendCpuRuntimeTrace(L"[LoadModel] texture fallback: " + texturePath + L" error=" + AnsiToWString(e.what()));
+			AppendCpuRuntimeTrace(L"[LoadModel] texture fallback: " + requestedTexturePath + L" error=" + AnsiToWString(e.what()));
 			return fallback;
 		}
 	};
@@ -11381,13 +11493,17 @@ shared_ptr<Scene> Corona::LoadModel(string fileName)
 		aiString normalMapPath;
 		aiString rougnessMapPath;
 		aiString metallicMapPath;
+		const MaterialTextureSidecar* sidecarMat =
+			i < static_cast<int>(materialSidecar.size()) ? &materialSidecar[static_cast<size_t>(i)] : nullptr;
 
 
 		if (aiMat.GetTexture(aiTextureType_DIFFUSE, 0, &diffuseTexPath) == aiReturn_SUCCESS)
 			wDiffuseTex = GetFileName(AnsiToWString(diffuseTexPath.C_Str()).c_str());
+		if (sidecarMat && !sidecarMat->Diffuse.empty())
+			wDiffuseTex = GetFileName(sidecarMat->Diffuse.c_str());
 		if (wDiffuseTex.length() != 0)
 		{
-			mat->Diffuse = loadTextureOrDefault(dir + wDiffuseTex, false, DefaultWhiteTex);
+			mat->Diffuse = loadTextureOrDefault(L"diffuse", dir + wDiffuseTex, false, DefaultWhiteTex);
 		}
 
 		if (!mat->Diffuse)
@@ -11396,10 +11512,12 @@ shared_ptr<Scene> Corona::LoadModel(string fileName)
 		if (aiMat.GetTexture(aiTextureType_NORMALS, 0, &normalMapPath) == aiReturn_SUCCESS
 			|| aiMat.GetTexture(aiTextureType_HEIGHT, 0, &normalMapPath) == aiReturn_SUCCESS)
 			wNormalTex = GetFileName(AnsiToWString(normalMapPath.C_Str()).c_str());
+		if (sidecarMat && !sidecarMat->Normal.empty())
+			wNormalTex = GetFileName(sidecarMat->Normal.c_str());
 
 		if (wNormalTex.length() != 0)
 		{
-			mat->Normal = loadTextureOrDefault(dir + wNormalTex, true, DefaultNormalTex);
+			mat->Normal = loadTextureOrDefault(L"normal", dir + wNormalTex, true, DefaultNormalTex);
 		}
 
 		if (!mat->Normal)
@@ -11411,22 +11529,30 @@ shared_ptr<Scene> Corona::LoadModel(string fileName)
 
 		if (aiMat.GetTexture(aiTextureType_AMBIENT, 0, &metallicMapPath) == aiReturn_SUCCESS)
 			wMetallicTex = GetFileName(AnsiToWString(metallicMapPath.C_Str()).c_str());
+		if (sidecarMat && !sidecarMat->Metallic.empty())
+			wMetallicTex = GetFileName(sidecarMat->Metallic.c_str());
 		if (wMetallicTex.length() != 0)
 		{
-			mat->Metallic = loadTextureOrDefault(dir + wMetallicTex, true, DefaultBlackTex);
+			mat->Metallic = loadTextureOrDefault(L"metallic", dir + wMetallicTex, true, DefaultBlackTex);
 		}
 
 		if (!mat->Metallic)
 			mat->Metallic = DefaultBlackTex;
 
-		if (wDiffuseTex.length() != 0)
+		if (sidecarMat && !sidecarMat->Roughness.empty())
+			wRoughnessTex = GetFileName(sidecarMat->Roughness.c_str());
+		if (wRoughnessTex.length() != 0)
+		{
+			mat->Roughness = loadTextureOrDefault(L"roughness", dir + wRoughnessTex, true, DefaultRougnessTex);
+		}
+		else if (wDiffuseTex.length() != 0)
 		{
 			wstring wNameStr = wstring(wDiffuseTex.substr(0, wDiffuseTex.length() - 4));
 			map<wstring, wstring> ::iterator it = SponzaRoughnessMap.find(wNameStr);
 			if (it != SponzaRoughnessMap.end())
 			{
 				wRoughnessTex = SponzaRoughnessMap[wNameStr] + L".png";
-				mat->Roughness = loadTextureOrDefault(dir + wRoughnessTex, true, DefaultRougnessTex);
+				mat->Roughness = loadTextureOrDefault(L"roughness", dir + wRoughnessTex, true, DefaultRougnessTex);
 			}
 		}
 
@@ -11580,6 +11706,9 @@ shared_ptr<Scene> Corona::LoadModel(string fileName)
 		L"[LoadModel] Assimp loaded: " + wide +
 		L", meshes=" + std::to_wstring(numMeshes) +
 		L", materials=" + std::to_wstring(numMaterials) +
+		L", textureDdsSubstitutions=" + std::to_wstring(assimpTextureDdsSubstitutions) +
+		L", textureDdsConversions=" + std::to_wstring(assimpTextureDdsConversions) +
+		L", textureSourceDeletes=" + std::to_wstring(assimpTextureSourceDeletes) +
 		L", elapsedMs=" + std::to_wstring(ElapsedMilliseconds(loadStart, CpuClock::now())) +
 		L", cacheHint=" + binaryMeshPath.wstring());
 
@@ -12091,19 +12220,16 @@ void Corona::ApplyHybridDefaultCamera()
 	UpdateMainCameraEntityFromSimpleCamera();
 }
 
-void Corona::ApplySponzaFlyCamera()
+void Corona::ApplyDefaultFlyCamera()
 {
 	// If we successfully loaded a camera state from disk, keep the user's
-	// last vantage point instead of snapping back to the sponza-fly preset.
+	// last vantage point instead of snapping back to the default preset.
 	// Light direction was also loaded from the same file in LoadCameraState
-	// so we skip the sponza-default light reset too — debugging shadow or
-	// lighting issues from a specific viewpoint stays reproducible across
-	// runs.
+	// so we skip the default light reset too — debugging shadow or lighting
+	// issues from a specific viewpoint stays reproducible across runs.
 	if (bCameraStateRestoredFromDisk)
 	{
 		bScriptCameraControlEnabled = false;
-		if (SponzaObject != InvalidSceneObjectHandle)
-			SetSceneObjectVisibility(SponzaObject, true);
 		FrameCounter = 0;
 		PathTracingAccumulatedFrames = 0;
 		PrevPathTracingViewMat = glm::mat4x4(0.0f);
@@ -12114,7 +12240,7 @@ void Corona::ApplySponzaFlyCamera()
 		bResetTemporalStateNextUpdate = true;
 		UpdateMainCameraEntityFromSimpleCamera();
 		AppendCpuRuntimeTrace(
-			L"[ApplySponzaFlyCamera] kept restored camera position=" +
+			L"[ApplyDefaultFlyCamera] kept restored camera position=" +
 			std::to_wstring(m_camera.m_position.x) + L"," +
 			std::to_wstring(m_camera.m_position.y) + L"," +
 			std::to_wstring(m_camera.m_position.z));
@@ -12140,8 +12266,6 @@ void Corona::ApplySponzaFlyCamera()
 	m_camera.m_lookDirection.z = r * cosf(m_camera.m_yaw);
 
 	bScriptCameraControlEnabled = false;
-	if (SponzaObject != InvalidSceneObjectHandle)
-		SetSceneObjectVisibility(SponzaObject, true);
 
 	// LoadCameraState() runs early in OnInit and may load a stale light
 	// direction from a previous platformer-mode session (which scripts the
@@ -12477,10 +12601,13 @@ void Corona::BuildRenderFrameDerivedState(const RenderFrameSourceState* sourceSt
 	const float lightDirT = 0.5f * (RenderFrameNormalizedLightDir.y + 1.0f);
 	RenderFrameLightColor = glm::mix(SkyColorBottom, SkyColorTop, lightDirT);
 	RenderFrameRayNoiseMode = static_cast<UINT32>(RayNoiseMode);
-	const bool bDiffuseGIUsesSkyLightingStrength = bEnableSkyLighting && !bEnableRayTracedSkyLighting;
-	const bool bDiffuseGIIncludesSkyLighting = !(bEnableSkyLighting && bEnableRayTracedSkyLighting);
-	RenderFrameDiffuseGISkyLightingEnabled = bDiffuseGIIncludesSkyLighting ? 1u : 0u;
-	RenderFrameDiffuseGISkyIntensity = bDiffuseGIUsesSkyLightingStrength ? SkyIntensity * std::clamp(SkyLightingStrength, 0.0f, 1.0f) : SkyIntensity;
+	// Keep the diffuse-GI buffer as surface-bounce lighting only. Sky/ambient
+	// lighting is composed separately in LightingPS; injecting sky on GI ray
+	// misses makes the diffuse GI input look like a nearly white constant and
+	// can double-count sky when simple sky ambient is enabled.
+	const bool bDiffuseGIIncludesSkyLighting = false;
+	RenderFrameDiffuseGISkyLightingEnabled = 0u;
+	RenderFrameDiffuseGISkyIntensity = 0.0f;
 	RenderFrameIndex = FrameCounter;
 
 	const bool indirectLightDirChanged = glm::length(RenderFrameNormalizedLightDir - PrevIndirectAccumLightDir) > 0.0001f;
@@ -12491,9 +12618,7 @@ void Corona::BuildRenderFrameDerivedState(const RenderFrameSourceState* sourceSt
 		abs(SkyIntensity - PrevIndirectSkyIntensity) > 0.0001f;
 	const bool indirectDiffuseGISkyLightingChanged =
 		bDiffuseGIIncludesSkyLighting != PrevIndirectDiffuseGISkyLightingEnabled;
-	const bool indirectSkyLightingStrengthChanged =
-		bDiffuseGIUsesSkyLightingStrength &&
-		abs(SkyLightingStrength - PrevIndirectSkyLightingStrength) > 0.0001f;
+	const bool indirectSkyLightingStrengthChanged = false;
 	const bool indirectPrefilteredEnvChanged =
 		abs(PrefilteredEnvRoughnessThreshold - PrevIndirectPrefilteredEnvRoughnessThreshold) > 0.0001f ||
 		abs(PrefilteredEnvRoughnessFade - PrevIndirectPrefilteredEnvRoughnessFade) > 0.0001f ||
@@ -12634,22 +12759,21 @@ void Corona::DrawEditorModeOverlay()
 	ImGui::End();
 	ImGui::PopStyleVar(2);
 
-	if (!bEditorConfigWindowOpen)
-		return;
-
-	const float configPanelWidth = 360.0f;
-	const float configPanelHeightEstimate = 420.0f;
-	const float configPanelX = std::max(workPos.x + margin, workPos.x + workSize.x - configPanelWidth - margin);
-	const float configPanelY = std::max(
-		workPos.y + margin,
-		workPos.y + workSize.y - configPanelHeightEstimate - configButtonHeight - margin * 2.0f);
-	ImGui::SetNextWindowPos(ImVec2(configPanelX, configPanelY), ImGuiCond_FirstUseEver);
-	ImGui::SetNextWindowSize(ImVec2(configPanelWidth, 0.0f), ImGuiCond_FirstUseEver);
-	ImGui::SetNextWindowBgAlpha(0.92f);
-	if (ImGui::Begin("Editor Config", &bEditorConfigWindowOpen, ImGuiWindowFlags_NoSavedSettings))
+	if (bEditorConfigWindowOpen)
 	{
-		if (renderBackend)
-			ImGui::Text("Backend: %s", renderBackend->GetBackendName());
+		const float configPanelWidth = 360.0f;
+		const float configPanelHeightEstimate = 420.0f;
+		const float configPanelX = std::max(workPos.x + margin, workPos.x + workSize.x - configPanelWidth - margin);
+		const float configPanelY = std::max(
+			workPos.y + margin,
+			workPos.y + workSize.y - configPanelHeightEstimate - configButtonHeight - margin * 2.0f);
+		ImGui::SetNextWindowPos(ImVec2(configPanelX, configPanelY), ImGuiCond_FirstUseEver);
+		ImGui::SetNextWindowSize(ImVec2(configPanelWidth, 0.0f), ImGuiCond_FirstUseEver);
+		ImGui::SetNextWindowBgAlpha(0.92f);
+		if (ImGui::Begin("Editor Config", &bEditorConfigWindowOpen, ImGuiWindowFlags_NoSavedSettings))
+		{
+			if (renderBackend)
+				ImGui::Text("Backend: %s", renderBackend->GetBackendName());
 
 		if (ImGui::CollapsingHeader("Top", ImGuiTreeNodeFlags_DefaultOpen))
 		{
@@ -12660,9 +12784,9 @@ void Corona::DrawEditorModeOverlay()
 			ImGui::Checkbox("Full Render Controls Window", &bShowImgui);
 			ImGui::Checkbox("Culling Overlay", &bShowCullingTextOverlay);
 			if (ImGui::Button("Open Lighting & GI Controls", ImVec2(-1.0f, 0.0f)))
-				bShowImgui = true;
+				bEditorLightingGIWindowOpen = true;
 			if (ImGui::Button("Open Debug / Capture Controls", ImVec2(-1.0f, 0.0f)))
-				bShowImgui = true;
+				bEditorDebugCaptureWindowOpen = true;
 		}
 
 		if (ImGui::CollapsingHeader("Top / Render & AA", ImGuiTreeNodeFlags_DefaultOpen))
@@ -12937,7 +13061,12 @@ void Corona::DrawEditorModeOverlay()
 				if (bLightingChanged)
 				{
 					SyncCurrentLightingSettingsToFrameSourceState();
-					ResetAllAccumulationState(false);
+					const bool bForceUpscaleReload = IsDLSSMode(AntiAliasingMode);
+					ResetAllAccumulationState(bForceUpscaleReload);
+					AppendCpuRuntimeTrace(
+						L"[LightingControls] changed, forceUpscaleReload=" + std::to_wstring(bForceUpscaleReload ? 1 : 0) +
+						L", diffuseGI=" + std::to_wstring(bEnableDiffuseGI ? 1 : 0) +
+						L", specularGI=" + std::to_wstring(bEnableSpecularGI ? 1 : 0));
 				}
 			}
 		}
@@ -13011,6 +13140,397 @@ void Corona::DrawEditorModeOverlay()
 		}
 	}
 	ImGui::End();
+	}
+
+	if (bEditorLightingGIWindowOpen)
+	{
+		ImGui::SetNextWindowSize(ImVec2(420.0f, 0.0f), ImGuiCond_FirstUseEver);
+		ImGui::SetNextWindowBgAlpha(0.94f);
+		if (ImGui::Begin("Lighting / GI Controls", &bEditorLightingGIWindowOpen, ImGuiWindowFlags_NoSavedSettings))
+		{
+			if (RenderingMode == ERenderingMode::HYBRID || RenderingMode == ERenderingMode::PATHTRACING)
+			{
+				bool bLightingChanged = false;
+
+				if (ImGui::CollapsingHeader("Main Lighting / GI", ImGuiTreeNodeFlags_DefaultOpen))
+				{
+					if (ImGui::Checkbox("Direct Diffuse", &bEnableDirectDiffuse)) bLightingChanged = true;
+					if (ImGui::Checkbox("Direct Specular", &bEnableDirectSpecular)) bLightingChanged = true;
+					if (ImGui::Checkbox("Specular GI", &bEnableSpecularGI)) bLightingChanged = true;
+					if (ImGui::Checkbox("Diffuse GI", &bEnableDiffuseGI)) bLightingChanged = true;
+
+					static const char* DiffuseGIModes[] = { "Simple Raytrace", "Spatial Hash", "Screen Probe" };
+					int DiffuseGIModeIndex = static_cast<int>(DiffuseGIMode);
+					const bool bDiffuseGIMethodAvailable = RenderingMode == ERenderingMode::HYBRID;
+					if (!bDiffuseGIMethodAvailable)
+						ImGui::BeginDisabled();
+					ImGui::SetNextItemWidth(-1.0f);
+					if (ImGui::Combo("Diffuse GI Method", &DiffuseGIModeIndex, DiffuseGIModes, IM_ARRAYSIZE(DiffuseGIModes)))
+					{
+						ApplyDiffuseGIMode(static_cast<EDiffuseGIMode>(DiffuseGIModeIndex));
+						bLightingChanged = true;
+					}
+					if (!bDiffuseGIMethodAvailable)
+					{
+						ImGui::EndDisabled();
+						ImGui::TextDisabled("Diffuse GI method selection is used by Hybrid rendering.");
+					}
+
+					if (RenderingMode == ERenderingMode::HYBRID)
+					{
+						if (ImGui::SliderFloat("Surface Bounce Strength", &SurfaceBounceStrength, 0.0f, 1.0f, "%.2f"))
+							bLightingChanged = true;
+						if (ImGui::SliderFloat("Surface Bounce Saturation", &SurfaceBounceSaturation, 0.0f, 1.0f, "%.2f"))
+							bLightingChanged = true;
+					}
+				}
+
+				if (ImGui::CollapsingHeader("Directional Light", ImGuiTreeNodeFlags_DefaultOpen))
+				{
+					const bool bCameraPathOwnsLightControls = bCameraPathPlaying || bCameraPathDumping;
+					if (bCameraPathOwnsLightControls)
+						ImGui::BeginDisabled();
+					const glm::vec3 prevLightDir = LightDir;
+					const float prevLightIntensity = LightIntensity;
+					glm::vec3 LD = glm::vec3(LightDir.z, -LightDir.y, -LightDir.x);
+					ImGui::gizmo3D("##editor_lighting_gizmo", LD, 200);
+					LightDir = glm::vec3(-LD.z, -LD.y, LD.x);
+					ImGui::SameLine();
+					ImGui::Text("Direction");
+					if (ImGui::SliderFloat("Light Brightness", &LightIntensity, 0.0f, 20.0f))
+						bLightingChanged = true;
+					if (ImGui::SliderFloat("Sun Angular Radius", &RTShadowViewParam.ShadowLightRadius, 0.0f, 0.03f, "%.4f rad"))
+						bLightingChanged = true;
+
+					const bool bUserChangedLight =
+						glm::length(prevLightDir - LightDir) > 1e-5f ||
+						std::abs(prevLightIntensity - LightIntensity) > 1e-5f;
+					if (bUserChangedLight)
+					{
+						bRenderThreadOwnsLightDirNextFrame = true;
+						UpdateMainDirectionalLightEntityFromState();
+					}
+					if (bCameraPathOwnsLightControls)
+					{
+						ImGui::EndDisabled();
+						ImGui::TextDisabled("Camera path playback is controlling the directional light.");
+					}
+				}
+
+				if (ImGui::CollapsingHeader("Sky Settings", ImGuiTreeNodeFlags_DefaultOpen))
+				{
+					if (ImGui::ColorEdit3("Sky Color Top", &SkyColorTop.x)) bLightingChanged = true;
+					if (ImGui::ColorEdit3("Sky Color Bottom", &SkyColorBottom.x)) bLightingChanged = true;
+					if (ImGui::SliderFloat("Sky Intensity", &SkyIntensity, 0.0f, 10.0f)) bLightingChanged = true;
+					if (RenderingMode == ERenderingMode::HYBRID)
+					{
+						if (ImGui::Checkbox("Sky Lighting", &bEnableSkyLighting))
+							bLightingChanged = true;
+						if (bEnableSkyLighting)
+						{
+							if (ImGui::SliderFloat("Sky Lighting Strength", &SkyLightingStrength, 0.0f, 1.0f, "%.2f"))
+								bLightingChanged = true;
+							if (ImGui::Checkbox("Ray Traced Sky Pass", &bEnableRayTracedSkyLighting))
+								bLightingChanged = true;
+						}
+					}
+				}
+
+				if (bLightingChanged)
+				{
+					SyncCurrentLightingSettingsToFrameSourceState();
+					const bool bForceUpscaleReload = IsDLSSMode(AntiAliasingMode);
+					ResetAllAccumulationState(bForceUpscaleReload);
+					AppendCpuRuntimeTrace(
+						L"[LightingControls] changed, forceUpscaleReload=" + std::to_wstring(bForceUpscaleReload ? 1 : 0) +
+						L", diffuseGI=" + std::to_wstring(bEnableDiffuseGI ? 1 : 0) +
+						L", specularGI=" + std::to_wstring(bEnableSpecularGI ? 1 : 0));
+				}
+			}
+			else
+			{
+				ImGui::TextDisabled("Lighting / GI controls are available in Hybrid and Path Tracing modes.");
+			}
+		}
+		ImGui::End();
+	}
+
+	if (bEditorDebugCaptureWindowOpen)
+	{
+		ImGui::SetNextWindowSize(ImVec2(460.0f, 0.0f), ImGuiCond_FirstUseEver);
+		ImGui::SetNextWindowBgAlpha(0.94f);
+		if (ImGui::Begin("Debug / Capture Controls", &bEditorDebugCaptureWindowOpen, ImGuiWindowFlags_NoSavedSettings))
+		{
+			if (ImGui::CollapsingHeader("Visualization / Capture", ImGuiTreeNodeFlags_DefaultOpen))
+			{
+				const bool bDebugVisualizationAvailable = renderBackend && BufferVisualizeGraphicsPipeline;
+				if (!bDebugVisualizationAvailable)
+					ImGui::BeginDisabled();
+				ImGui::Checkbox("Visualize Buffers", &bDebugDraw);
+				static const char* debugVisualizationItems[] = {
+					"SHADOW",
+					"WORLD_NORMAL",
+					"GEO_NORMAL",
+					"DEPTH",
+					"RAW_DIFFUSE_GI",
+					"RAW_DIFFUSE_GI_AUX",
+					"SCREEN_PROBE_DIFFUSE_GI",
+					"SCREEN_PROBE_PROBES",
+					"SCREEN_PROBE_HISTORY_LENGTH",
+					"SCREEN_PROBE_ATLAS_HISTORY_LENGTH",
+					"TEMPORAL_FILTERED_DIFFUSE_GI",
+					"RESOLVED_DIFFUSE_GI",
+					"FINAL_DIFFUSE_GI",
+					"ALBEDO",
+					"VELOCITY",
+					"ROUGNESS_METALLIC",
+					"SPECULAR_RAW",
+					"TEMPORAL_FILTERED_SPECULAR",
+					"BLOOM",
+					"SPEC_HISTORY_LENGTH",
+					"RTAO",
+					"NO_FULLSCREEN",
+				};
+				int debugVisualizationIndex = std::clamp(
+					static_cast<int>(FullscreenDebugBuffer),
+					0,
+					static_cast<int>(IM_ARRAYSIZE(debugVisualizationItems)) - 1);
+				if (ImGui::Combo("Full Screen Buffer", &debugVisualizationIndex, debugVisualizationItems, IM_ARRAYSIZE(debugVisualizationItems)))
+					FullscreenDebugBuffer = static_cast<EDebugVisualization>(debugVisualizationIndex);
+				if (!bDebugVisualizationAvailable)
+				{
+					ImGui::EndDisabled();
+					bDebugDraw = false;
+					ImGui::TextDisabled("Buffer visualization is available on the DX12 debug path.");
+				}
+
+				ImGui::Separator();
+				ImGui::Checkbox("Culling overlay", &bShowCullingTextOverlay);
+				ImGui::Checkbox("Frame timing overlay (CPU / GPU / Recording)", &bShowFrameTimingOverlay);
+				int averageFrameCountUI = static_cast<int>(GpuTimingAverageFrameCount);
+				if (ImGui::SliderInt("Timing Average Frames", &averageFrameCountUI, 1, 240))
+					SetGpuTimingAverageFrameCount(static_cast<UINT32>(averageFrameCountUI));
+				if (ImGui::Button("Recompile all shaders", ImVec2(-1.0f, 0.0f)))
+					bRecompileShaders = true;
+
+				if (bFinalScreenshotRequested || bFinalScreenshotCaptureInFlight)
+					ImGui::BeginDisabled();
+				if (ImGui::Button("Capture Final Backbuffer", ImVec2(-1.0f, 0.0f)))
+				{
+					bFinalScreenshotRequested = true;
+					LastFinalScreenshotStatus = L"Screenshot will be captured on the next frame without ImGui.";
+				}
+				if (bFinalScreenshotRequested || bFinalScreenshotCaptureInFlight)
+					ImGui::EndDisabled();
+				if (!LastFinalScreenshotStatus.empty())
+				{
+					const std::string statusText = WideToUtf8(LastFinalScreenshotStatus);
+					ImGui::TextWrapped("Screenshot: %s", statusText.c_str());
+				}
+			}
+
+			if (RenderingMode == ERenderingMode::HYBRID || RenderingMode == ERenderingMode::PATHTRACING)
+			{
+				bool bAdvancedLightingChanged = false;
+				if (ImGui::CollapsingHeader("Advanced Lighting / GI", ImGuiTreeNodeFlags_DefaultOpen))
+				{
+					const bool bRTReflectionSERAvailable =
+						renderBackend &&
+						renderBackend->SupportsShaderExecutionReordering();
+					if (!bRTReflectionSERAvailable)
+						ImGui::BeginDisabled();
+					if (ImGui::Checkbox("RT Reflection SER", &bEnableRTReflectionSER))
+						bAdvancedLightingChanged = true;
+					if (!bRTReflectionSERAvailable)
+						ImGui::EndDisabled();
+
+					const bool bRTDiffuseGISERAvailable =
+						renderBackend &&
+						renderBackend->SupportsShaderExecutionReordering();
+					if (!bRTDiffuseGISERAvailable)
+						ImGui::BeginDisabled();
+					if (ImGui::Checkbox("RT Diffuse GI SER", &bEnableRTDiffuseGISER))
+						bAdvancedLightingChanged = true;
+					if (!bRTDiffuseGISERAvailable)
+						ImGui::EndDisabled();
+
+					if (RenderingMode == ERenderingMode::HYBRID)
+					{
+						int shadowSamples = static_cast<int>(RTShadowViewParam.ShadowSampleCount);
+						if (ImGui::SliderInt("Hybrid Shadow Samples", &shadowSamples, 1, 16))
+						{
+							RTShadowViewParam.ShadowSampleCount = static_cast<UINT32>(shadowSamples);
+							bAdvancedLightingChanged = true;
+						}
+						const char* directShadowModeItems[] = {
+							"4-channel (top 3 local lights)",
+							"ReSTIR DI",
+						};
+						int directShadowMode = bEnableReSTIRDirectShadow ? 1 : 0;
+						if (ImGui::Combo("Direct Shadow Mode##debug_capture", &directShadowMode, directShadowModeItems, IM_ARRAYSIZE(directShadowModeItems)))
+						{
+							bEnableReSTIRDirectShadow = directShadowMode == 1;
+							bAdvancedLightingChanged = true;
+						}
+
+						if (ImGui::Checkbox("Enable RTAO##debug_capture", &bEnableRTAO))
+							bAdvancedLightingChanged = true;
+						if (bEnableRTAO && ImGui::TreeNodeEx("RTAO Details", ImGuiTreeNodeFlags_DefaultOpen))
+						{
+							int rtaoSamples = static_cast<int>(RTAOViewParam.SampleCount);
+							if (ImGui::SliderInt("RTAO Samples", &rtaoSamples, 1, 16))
+							{
+								RTAOViewParam.SampleCount = static_cast<UINT32>(rtaoSamples);
+								bAdvancedLightingChanged = true;
+							}
+							if (ImGui::SliderFloat("RTAO Radius", &RTAOViewParam.Radius, 2.0f, 256.0f, "%.1f"))
+								bAdvancedLightingChanged = true;
+							if (ImGui::SliderFloat("RTAO Power", &RTAOViewParam.Power, 0.25f, 4.0f, "%.2f"))
+								bAdvancedLightingChanged = true;
+							if (ImGui::SliderFloat("RTAO Normal Bias", &RTAOViewParam.NormalBias, 0.01f, 2.0f, "%.2f"))
+								bAdvancedLightingChanged = true;
+							ImGui::TreePop();
+						}
+
+						if (bEnableSkyLighting && bEnableRayTracedSkyLighting && ImGui::TreeNodeEx("Ray Traced Sky Details"))
+						{
+							int skySamples = static_cast<int>(RTSkyLightingViewParam.SampleCount);
+							if (ImGui::SliderInt("Sky Lighting Samples", &skySamples, 1, 32))
+							{
+								RTSkyLightingViewParam.SampleCount = static_cast<UINT32>(skySamples);
+								bAdvancedLightingChanged = true;
+							}
+							if (ImGui::SliderFloat("Sky Lighting Ray Length", &RTSkyLightingViewParam.RayLength, 16.0f, 10000.0f, "%.1f"))
+								bAdvancedLightingChanged = true;
+							if (ImGui::SliderFloat("Sky Lighting Normal Bias", &RTSkyLightingViewParam.NormalBias, 0.01f, 4.0f, "%.2f"))
+								bAdvancedLightingChanged = true;
+							if (ImGui::SliderFloat("Sky Lighting Up Bias", &RTSkyLightingViewParam.SkyUpBias, 0.0f, 1.0f, "%.2f"))
+								bAdvancedLightingChanged = true;
+							if (ImGui::SliderFloat("Sky Lighting Direction Power", &RTSkyLightingViewParam.SkyDirectionPower, 0.25f, 8.0f, "%.2f"))
+								bAdvancedLightingChanged = true;
+							if (ImGui::SliderFloat("Sky Lighting Min World Y", &RTSkyLightingViewParam.SkyMinWorldY, -0.25f, 0.75f, "%.2f"))
+								bAdvancedLightingChanged = true;
+							ImGui::TreePop();
+						}
+
+						if (ImGui::TreeNodeEx("Diffuse GI Internals", ImGuiTreeNodeFlags_DefaultOpen))
+						{
+							if (DiffuseGIMode == EDiffuseGIMode::SCREEN_PROBE)
+							{
+								int probeSpacing = static_cast<int>(ScreenProbeGICB.ProbeSpacing);
+								if (ImGui::SliderInt("Screen Probe Spacing", &probeSpacing, 4, 64))
+								{
+									ScreenProbeGICB.ProbeSpacing = static_cast<UINT32>(probeSpacing);
+									bAdvancedLightingChanged = true;
+								}
+								int gatherRadius = static_cast<int>(ScreenProbeGICB.GatherRadius);
+								if (ImGui::SliderInt("Screen Probe Gather Radius", &gatherRadius, 1, 3))
+								{
+									ScreenProbeGICB.GatherRadius = static_cast<UINT32>(gatherRadius);
+									bAdvancedLightingChanged = true;
+								}
+								int raysPerProbe = static_cast<int>(RTScreenProbeGIViewParam.RaysPerProbe);
+								if (ImGui::SliderInt("Screen Probe Rays / Probe", &raysPerProbe, 1, 4))
+								{
+									RTScreenProbeGIViewParam.RaysPerProbe = static_cast<UINT32>(raysPerProbe);
+									bAdvancedLightingChanged = true;
+								}
+								static const char* ScreenProbeSHModes[] = { "4 coeffs (L0 + L1)", "9 coeffs (L0 + L1 + L2)" };
+								int screenProbeSHMode = ScreenProbeGICB.SHCoefficientCount <= 4u ? 0 : 1;
+								if (ImGui::Combo("Screen Probe SH Coefficients", &screenProbeSHMode, ScreenProbeSHModes, IM_ARRAYSIZE(ScreenProbeSHModes)))
+								{
+									ScreenProbeGICB.SHCoefficientCount = screenProbeSHMode == 0 ? 4u : 9u;
+									bAdvancedLightingChanged = true;
+								}
+								if (ImGui::SliderFloat("Screen Probe Raw Blend", &ScreenProbeGICB.RawBlend, 0.0f, 0.35f, "%.3f"))
+									bAdvancedLightingChanged = true;
+								if (ImGui::SliderFloat("Screen Probe Resolve Depth", &ScreenProbeGICB.ResolveDepthWeight, 1.0f, 96.0f, "%.1f"))
+									bAdvancedLightingChanged = true;
+								if (ImGui::SliderFloat("Screen Probe Resolve Normal", &ScreenProbeGICB.ResolveNormalWeight, 1.0f, 96.0f, "%.1f"))
+									bAdvancedLightingChanged = true;
+								if (ImGui::SliderFloat("Screen Probe Edge Depth", &ScreenProbeGICB.EdgeDepthWeight, 8.0f, 192.0f, "%.1f"))
+									bAdvancedLightingChanged = true;
+								if (ImGui::SliderFloat("Screen Probe Edge Normal", &ScreenProbeGICB.EdgeNormalWeight, 1.0f, 96.0f, "%.1f"))
+									bAdvancedLightingChanged = true;
+								int edgeSamples = static_cast<int>(ScreenProbeGICB.EdgeSampleCount);
+								if (ImGui::SliderInt("Screen Probe Edge Samples", &edgeSamples, 1, 4))
+								{
+									ScreenProbeGICB.EdgeSampleCount = static_cast<UINT32>(edgeSamples);
+									bAdvancedLightingChanged = true;
+								}
+							}
+							else if (DiffuseGIMode == EDiffuseGIMode::SPATIAL_HASH)
+							{
+								if (ImGui::SliderFloat("Spatial Hash Cell Size", &SpatialHashGICB.CellSize, 4.0f, 256.0f))
+									bAdvancedLightingChanged = true;
+								int raysPerCell = static_cast<int>(RTSpatialHashGIViewParam.RaysPerCell);
+								if (ImGui::SliderInt("Spatial Hash Rays / Cell", &raysPerCell, 1, 8))
+								{
+									RTSpatialHashGIViewParam.RaysPerCell = static_cast<UINT32>(raysPerCell);
+									bAdvancedLightingChanged = true;
+								}
+								int maxBounces = static_cast<int>(RTSpatialHashGIViewParam.MaxBounces);
+								if (ImGui::SliderInt("Spatial Hash Max Bounces", &maxBounces, 1, 8))
+								{
+									RTSpatialHashGIViewParam.MaxBounces = static_cast<UINT32>(maxBounces);
+									bAdvancedLightingChanged = true;
+								}
+								if (ImGui::SliderFloat("Spatial Hash Interpolation", &SpatialHashGICB.InterpolationStrength, 0.0f, 1.0f))
+									bAdvancedLightingChanged = true;
+								if (ImGui::SliderFloat("Spatial Hash Smoothing", &SpatialHashGICB.SmoothingStrength, 0.0f, 1.0f))
+									bAdvancedLightingChanged = true;
+								if (ImGui::SliderFloat("Spatial Hash Temporal Alpha", &SpatialHashGICB.TemporalAlpha, 0.02f, 1.0f))
+									bAdvancedLightingChanged = true;
+							}
+							else
+							{
+								ImGui::TextDisabled("Simple Raytrace diffuse GI has no extra inspector controls.");
+							}
+							ImGui::TreePop();
+						}
+
+						if (ImGui::TreeNodeEx("Ray Sampling"))
+						{
+							static const char* RayNoiseModes[] = { "Blue Noise", "R2 Low Discrepancy", "Stable Hash" };
+							int RayNoiseModeIndex = static_cast<int>(RayNoiseMode);
+							if (ImGui::Combo("RT Noise", &RayNoiseModeIndex, RayNoiseModes, IM_ARRAYSIZE(RayNoiseModes)))
+							{
+								RayNoiseMode = static_cast<ERayNoiseMode>(RayNoiseModeIndex);
+								bAdvancedLightingChanged = true;
+							}
+							ImGui::TreePop();
+						}
+					}
+					else if (RenderingMode == ERenderingMode::PATHTRACING)
+					{
+						int directLightSamples = static_cast<int>(PathTracingViewParam.DirectLightSampleCount);
+						if (ImGui::SliderInt("Path Tracing Sun Samples", &directLightSamples, 1, 8))
+						{
+							PathTracingViewParam.DirectLightSampleCount = static_cast<UINT32>(directLightSamples);
+							bAdvancedLightingChanged = true;
+						}
+					}
+
+					if (ImGui::Checkbox("Prefiltered Env Specular", &bEnablePrefilteredEnvSpecular))
+						bAdvancedLightingChanged = true;
+					if (ImGui::SliderFloat("Prefiltered Env Roughness Threshold", &PrefilteredEnvRoughnessThreshold, 0.02f, 1.0f))
+						bAdvancedLightingChanged = true;
+					if (ImGui::SliderFloat("Prefiltered Env Roughness Fade", &PrefilteredEnvRoughnessFade, 0.0f, 0.5f))
+						bAdvancedLightingChanged = true;
+				}
+
+				if (bAdvancedLightingChanged)
+				{
+					SyncCurrentLightingSettingsToFrameSourceState();
+					const bool bForceUpscaleReload = IsDLSSMode(AntiAliasingMode);
+					ResetAllAccumulationState(bForceUpscaleReload);
+					AppendCpuRuntimeTrace(
+						L"[DebugCaptureLightingControls] changed, forceUpscaleReload=" + std::to_wstring(bForceUpscaleReload ? 1 : 0));
+				}
+			}
+		}
+		ImGui::End();
+	}
 }
 
 // Render the scene.
@@ -13134,9 +13654,9 @@ void Corona::OnRender()
 			MobileShadowMapGraphicsPipeline &&
 			ShadowBuffer;
 		const bool bRunRayTracedShadow = !bHybridDirectOnly && hybridStage >= 1;
-		const bool bRunReflection = !bHybridDirectOnly && hybridStage >= 3;
-		const bool bRunGI = !bHybridDirectOnly && hybridStage >= 4;
-		const bool bRunTemporalDenoise = !bHybridDirectOnly && hybridStage >= 5;
+		const bool bRunReflection = !bHybridDirectOnly && hybridStage >= 3 && (bEnableSpecularGI || bStageDump);
+		const bool bRunGI = !bHybridDirectOnly && hybridStage >= 4 && (bEnableDiffuseGI || bStageDump);
+		const bool bRunTemporalDenoise = !bHybridDirectOnly && hybridStage >= 5 && (bRunReflection || bRunGI || bStageDump);
 		const bool bRunLighting = hybridStage >= 7;
 		const bool bVulkanHybridBackend =
 			renderBackend &&
@@ -13172,6 +13692,13 @@ void Corona::OnRender()
 			BeginGpuPassTiming(EGpuPass::RaytraceSkyLighting);
 			RaytraceSkyLightingPass();
 			EndGpuPassTiming(EGpuPass::RaytraceSkyLighting);
+		}
+
+		if (!bHybridDirectOnly)
+		{
+			const bool bClearDisabledSpecularGI = hybridStage >= 3 && !bEnableSpecularGI;
+			const bool bClearDisabledDiffuseGI = hybridStage >= 4 && !bEnableDiffuseGI;
+			ClearDisabledGIOutputBuffers(bClearDisabledDiffuseGI, bClearDisabledSpecularGI);
 		}
 
 		if (bRunReflection)
@@ -14344,7 +14871,7 @@ void Corona::OnRender()
 						}
 						else
 						{
-							ImGui::TextDisabled("RT sky pass is skipped; Diffuse GI adds sky miss lighting.");
+							ImGui::TextDisabled("RT sky pass is skipped; simple sky ambient is composed separately.");
 						}
 					}
 					ImGui::TreePop();
@@ -14482,10 +15009,15 @@ void Corona::OnRender()
 			if (bLightingChanged)
 			{
 				SyncCurrentLightingSettingsToFrameSourceState();
-				ResetAllAccumulationState(false);
-			}
+				const bool bForceUpscaleReload = IsDLSSMode(AntiAliasingMode);
+				ResetAllAccumulationState(bForceUpscaleReload);
+				AppendCpuRuntimeTrace(
+					L"[LightingControls] changed, forceUpscaleReload=" + std::to_wstring(bForceUpscaleReload ? 1 : 0) +
+					L", diffuseGI=" + std::to_wstring(bEnableDiffuseGI ? 1 : 0) +
+					L", specularGI=" + std::to_wstring(bEnableSpecularGI ? 1 : 0));
 			}
 		}
+	}
 
 		// Path Tracing settings (only show when in path tracing mode)
 		if (RenderingMode == ERenderingMode::PATHTRACING)

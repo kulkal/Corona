@@ -76,6 +76,7 @@ void Corona::InitSpatialHashGIPass()
 		pso->BindUAV("OutGIHashSH", 10);
 		pso->BindUAV("ActiveCellSlotsOut", 11);
 		pso->BindUAV("ActiveCounterOut", 12);
+		pso->BindUAV("CellLightMaskOut", 14);
 		pso->BindCBV("SpatialHashGIConstant", 0, sizeof(SpatialHashGIConstant));
 
 		if (!pso->InitCS(GetAssetFullPath(L"Shaders\\SpatialHashDiffuseGI.hlsl"), entryPoint))
@@ -118,6 +119,7 @@ shared_ptr<RTPipelineStateObject> Corona::CreateRaytracingSpatialHashGIPSO(bool 
 		tempPSO->BindSRV("global", "RayNoiseBlueNoiseSource", 4);
 		tempPSO->BindSRV("global", "ActiveCellSlots", 9);
 		tempPSO->BindSRV("global", "ActiveCounter", 10);
+		tempPSO->BindSRV("global", "CellLightMask", 11);
 		tempPSO->BindCBV("global", "ViewParameter", 0, sizeof(RTSpatialHashGIViewParamCB), 1);
 		tempPSO->BindSampler("global", "sampleWrap", 0);
 
@@ -187,6 +189,7 @@ void Corona::SpatialHashGIPass()
 		!SpatialHashGIClearPSO || !SpatialHashGIUpdatePSO || !SpatialHashGIResolvePSO || !SpatialHashGIQueryPSO ||
 		!SpatialHashGIActiveFlags || !SpatialHashGIActiveCellSlots || !SpatialHashGIActiveCounter ||
 		!SpatialHashGICellPosition || !SpatialHashGICellNormal || !SpatialHashGICellScore ||
+		!SpatialHashGICellLightMask ||
 		!SpatialHashGIResolvedKeys[0] ||
 		!hasSpatialHashSHBuffers() ||
 		!DiffuseGIHashCached || !DiffuseGIHashCachedAux)
@@ -213,6 +216,27 @@ void Corona::SpatialHashGIPass()
 	SpatialHashGICB.SmoothingStrength = std::clamp(SpatialHashGICB.SmoothingStrength, 0.0f, 1.0f);
 	SpatialHashGICB.TemporalAlpha = std::clamp(SpatialHashGICB.TemporalAlpha, 0.02f, 1.0f);
 	SpatialHashGICB.InterpolationStrength = std::clamp(SpatialHashGICB.InterpolationStrength, 0.0f, 1.0f);
+	FillPointLightParams(
+		SpatialHashGICB.PointLights,
+		SpatialHashGICB.PointLightCount,
+		std::min(MaxDiffuseGIPointLights, DiffuseGIPointLightLimit));
+	SpatialHashGICB.DebugDiffuseGIOverride =
+		bDebugForceDiffuseGIColor ?
+		glm::vec4(glm::max(DebugForceDiffuseGIColor, glm::vec3(0.0f)), 1.0f) :
+		glm::vec4(0.0f);
+	if (bDebugForceDiffuseGIColor)
+	{
+		static bool sLoggedForcedDiffuseGIColor = false;
+		if (!sLoggedForcedDiffuseGIColor)
+		{
+			sLoggedForcedDiffuseGIColor = true;
+			AppendCpuRuntimeTrace(
+				L"[SpatialHashGI][Debug] forcing diffuse GI output color=" +
+				std::to_wstring(DebugForceDiffuseGIColor.x) + L"," +
+				std::to_wstring(DebugForceDiffuseGIColor.y) + L"," +
+				std::to_wstring(DebugForceDiffuseGIColor.z));
+		}
+	}
 	RTSpatialHashGIViewParam.LightDir = glm::vec4(RenderFrameNormalizedLightDir, LightIntensity);
 	RTSpatialHashGIViewParam.HashEntryCount = spatialHashTraceCellBudget;
 	RTSpatialHashGIViewParam.FrameCounter = RenderFrameIndex;
@@ -229,6 +253,30 @@ void Corona::SpatialHashGIPass()
 	RTSpatialHashGIViewParam.LightColor = RenderFrameLightColor;
 	RTSpatialHashGIViewParam.ActiveCellCapacity = SpatialHashGIActiveCellCapacity;
 	RTSpatialHashGIViewParam.bIncludeSkyLighting = RenderFrameDiffuseGISkyLightingEnabled;
+	RTSpatialHashGIViewParam.HashEntryMask = SpatialHashGIEntryCount - 1u;
+	RTSpatialHashGIViewParam.MaxProbeSteps = SpatialHashGICB.MaxProbeSteps;
+	FillPointLightParams(
+		RTSpatialHashGIViewParam.PointLights,
+		RTSpatialHashGIViewParam.PointLightCount,
+		std::min(MaxDiffuseGIPointLights, DiffuseGIPointLightLimit));
+	{
+		static float sLastLoggedLightIntensity = -1.0f;
+		static UINT32 sLastLoggedPointLightCount = 0xFFFFFFFFu;
+		if (std::abs(sLastLoggedLightIntensity - LightIntensity) > 0.0001f ||
+			sLastLoggedPointLightCount != RTSpatialHashGIViewParam.PointLightCount)
+		{
+			sLastLoggedLightIntensity = LightIntensity;
+			sLastLoggedPointLightCount = RTSpatialHashGIViewParam.PointLightCount;
+			AppendCpuRuntimeTrace(
+				L"[DiffuseGI][SpatialHash] lightIntensity=" + std::to_wstring(LightIntensity) +
+				L", lightDir=" + std::to_wstring(RenderFrameNormalizedLightDir.x) + L"," +
+				std::to_wstring(RenderFrameNormalizedLightDir.y) + L"," +
+				std::to_wstring(RenderFrameNormalizedLightDir.z) +
+				L", pointLights=" + std::to_wstring(RTSpatialHashGIViewParam.PointLightCount) +
+				L", pointLightLimit=" + std::to_wstring(DiffuseGIPointLightLimit) +
+				L", sky=" + std::to_wstring(RenderFrameDiffuseGISkyLightingEnabled));
+		}
+	}
 
 	renderBackend->TransitionBuffer(SpatialHashGIActiveFlags.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
 	renderBackend->TransitionBuffer(SpatialHashGIActiveCellSlots.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
@@ -236,6 +284,7 @@ void Corona::SpatialHashGIPass()
 	renderBackend->TransitionBuffer(SpatialHashGICellPosition.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
 	renderBackend->TransitionBuffer(SpatialHashGICellNormal.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
 	renderBackend->TransitionBuffer(SpatialHashGICellScore.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
+	renderBackend->TransitionBuffer(SpatialHashGICellLightMask.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
 	renderBackend->TransitionBuffer(SpatialHashGIResolvedKeys[cacheIndex].get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
 	for (UINT coefficientIndex = 0; coefficientIndex < SpatialHashGISHCoefficientCount; ++coefficientIndex)
 	{
@@ -247,6 +296,7 @@ void Corona::SpatialHashGIPass()
 	SpatialHashGIClearPSO->SetBufferUAV("CellPositionOut", SpatialHashGICellPosition.get());
 	SpatialHashGIClearPSO->SetBufferUAV("CellNormalOut", SpatialHashGICellNormal.get());
 	SpatialHashGIClearPSO->SetBufferUAV("CellScoreOut", SpatialHashGICellScore.get());
+	SpatialHashGIClearPSO->SetBufferUAV("CellLightMaskOut", SpatialHashGICellLightMask.get());
 	SpatialHashGIClearPSO->SetBufferUAV("ResolvedKeysOut", SpatialHashGIResolvedKeys[cacheIndex].get());
 	SpatialHashGIClearPSO->SetBufferUAV("ResolvedSH0Out", SpatialHashGIResolvedSH[cacheIndex][0].get());
 	SpatialHashGIClearPSO->SetBufferUAV("ResolvedSH1Out", SpatialHashGIResolvedSH[cacheIndex][1].get());
@@ -279,6 +329,7 @@ void Corona::SpatialHashGIPass()
 	SpatialHashGIUpdatePSO->SetBufferUAV("CellPositionOut", SpatialHashGICellPosition.get());
 	SpatialHashGIUpdatePSO->SetBufferUAV("CellNormalOut", SpatialHashGICellNormal.get());
 	SpatialHashGIUpdatePSO->SetBufferUAV("CellScoreOut", SpatialHashGICellScore.get());
+	SpatialHashGIUpdatePSO->SetBufferUAV("CellLightMaskOut", SpatialHashGICellLightMask.get());
 	SpatialHashGIUpdatePSO->SetBufferUAV("ResolvedKeysOut", SpatialHashGIResolvedKeys[cacheIndex].get());
 	SpatialHashGIUpdatePSO->SetBufferUAV("ActiveCellSlotsOut", SpatialHashGIActiveCellSlots.get());
 	SpatialHashGIUpdatePSO->SetBufferUAV("ActiveCounterOut", SpatialHashGIActiveCounter.get());
@@ -292,6 +343,7 @@ void Corona::SpatialHashGIPass()
 	renderBackend->TransitionBuffer(SpatialHashGICellPosition.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
 	renderBackend->TransitionBuffer(SpatialHashGICellNormal.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
 	renderBackend->TransitionBuffer(SpatialHashGICellScore.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
+	renderBackend->TransitionBuffer(SpatialHashGICellLightMask.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
 	renderBackend->TransitionBuffer(SpatialHashGIResolvedKeys[cacheIndex].get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
 
 	RTPassBuilder pass(*this, rtPSO);
@@ -307,6 +359,7 @@ void Corona::SpatialHashGIPass()
 		.SetTextureSRV("global", "RayNoiseBlueNoiseSource", BlueNoiseTex.get())
 		.SetBufferSRV("global", "ActiveCellSlots", SpatialHashGIActiveCellSlots.get())
 		.SetBufferSRV("global", "ActiveCounter", SpatialHashGIActiveCounter.get())
+		.SetBufferSRV("global", "CellLightMask", SpatialHashGICellLightMask.get())
 		.SetCBVValue("global", "ViewParameter", &RTSpatialHashGIViewParam)
 		.SetSampler("global", "sampleWrap", samplerWrap.get());
 	pass.BindSceneHitPrograms();
@@ -348,6 +401,8 @@ void Corona::SpatialHashGIPass()
 		UnjitteredDepthBuffers[1 - ColorBufferWriteIndex] ? UnjitteredDepthBuffers[1 - ColorBufferWriteIndex].get() : UnjitteredDepthBuffers[ColorBufferWriteIndex].get());
 	SpatialHashGIQueryPSO->SetTextureSRV("PrevNormalTex",
 		NormalBuffers[1 - ColorBufferWriteIndex] ? NormalBuffers[1 - ColorBufferWriteIndex].get() : NormalBuffers[ColorBufferWriteIndex].get());
+	SpatialHashGIQueryPSO->SetBufferSRV("CellPositionIn", SpatialHashGICellPosition.get());
+	SpatialHashGIQueryPSO->SetBufferSRV("CellNormalIn", SpatialHashGICellNormal.get());
 	SpatialHashGIQueryPSO->SetBufferSRV("ResolvedKeysIn", SpatialHashGIResolvedKeys[cacheIndex].get());
 	SpatialHashGIQueryPSO->SetBufferSRV("ResolvedSH0In", SpatialHashGIResolvedSH[cacheIndex][0].get());
 	SpatialHashGIQueryPSO->SetBufferSRV("ResolvedSH1In", SpatialHashGIResolvedSH[cacheIndex][1].get());

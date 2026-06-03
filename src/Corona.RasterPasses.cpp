@@ -889,6 +889,27 @@ void Corona::DebugPass()
 		renderBackend->DrawFullscreenQuad(FullScreenVB.get());
 	};
 
+	auto getLightingDiffuseSource = [&]() -> Texture*
+	{
+		if (DiffuseGIMode == EDiffuseGIMode::SPATIAL_HASH)
+		{
+			if (DiffuseGIHashCached)
+				return DiffuseGIHashCached.get();
+			if (DiffuseGIHashFiltered)
+				return DiffuseGIHashFiltered.get();
+		}
+		if (DiffuseGIMode == EDiffuseGIMode::SCREEN_PROBE && ScreenProbeGIResolved)
+			return ScreenProbeGIResolved.get();
+		return DiffuseGITemporal[GIBufferWriteIndex].get();
+	};
+
+	auto getLightingDiffuseAuxSource = [&]() -> Texture*
+	{
+		if (DiffuseGIMode == EDiffuseGIMode::SPATIAL_HASH && DiffuseGIHashCachedAux)
+			return DiffuseGIHashCachedAux.get();
+		return DiffuseGITemporalAux[GIBufferWriteIndex].get();
+	};
+
 
 
 	std::vector<std::function<void(EDebugVisualization eFS)>> functions;
@@ -1173,11 +1194,7 @@ void Corona::DebugPass()
 		}
 
 		cb.DebugMode = RAW_COPY;
-		Texture* resolvedDiffuse =
-			(DiffuseGIMode == EDiffuseGIMode::SCREEN_PROBE && ScreenProbeGIResolved) ?
-			ScreenProbeGIResolved.get() :
-			DiffuseGITemporal[GIBufferWriteIndex].get();
-		visualize(cb, resolvedDiffuse);
+		visualize(cb, getLightingDiffuseSource());
 	});
 	functions.push_back([&](EDebugVisualization eFS) {
 		// final diffuse gi
@@ -1200,12 +1217,8 @@ void Corona::DebugPass()
 			return;
 		}
 
-		cb.DebugMode = SH_LIGHTING;
-		Texture* resolvedDiffuse =
-			(DiffuseGIMode == EDiffuseGIMode::SCREEN_PROBE && ScreenProbeGIResolved) ?
-			ScreenProbeGIResolved.get() :
-			DiffuseGITemporal[GIBufferWriteIndex].get();
-		visualizeMulti(cb, resolvedDiffuse, DiffuseGITemporalAux[GIBufferWriteIndex].get(), NormalBuffers[ColorBufferWriteIndex].get());
+		cb.DebugMode = RAW_COPY;
+		visualizeMulti(cb, getLightingDiffuseSource(), getLightingDiffuseAuxSource(), NormalBuffers[ColorBufferWriteIndex].get());
 	});
 	functions.push_back([&](EDebugVisualization eFS) {
 		// albedo
@@ -1505,44 +1518,101 @@ void Corona::LightingPass()
 	}
 
 	glm::normalize(Param.LightDir);
-	Texture* lightingDiffuseAuxTex =
-		(!bMobileHybridDirectOnly && DiffuseGITemporalAux[GIBufferWriteIndex]) ?
-		DiffuseGITemporalAux[GIBufferWriteIndex].get() :
-		DefaultBlackTex.get();
+	const bool bDiffuseGIEnabledThisFrame = Param.bEnableDiffuseGI != 0;
+	const bool bSpecularGIEnabledThisFrame = Param.bEnableSpecularGI != 0;
+	const wchar_t* lightingDiffuseSource = L"black";
+	Texture* lightingDiffuseAuxTex = DefaultBlackTex.get();
+	if (!bMobileHybridDirectOnly && bDiffuseGIEnabledThisFrame && DiffuseGITemporalAux[GIBufferWriteIndex])
+		lightingDiffuseAuxTex = DiffuseGITemporalAux[GIBufferWriteIndex].get();
 	// Diffuse GI source for LightingPS — same logic as specular below:
 	// the second-stage screen-space TemporalDenoisingPass reprojects
 	// with the surface motion vector, which smears prev-frame indirect
 	// onto disoccluded pixels during camera panning (the indirect
 	// bounce doesn't follow the surface). The SpatialHashGI cache is
 	// world-space, so its cell-level temporal already covers the
-	// "stable across frames" axis correctly. Prefer the per-pixel
-	// query result (DiffuseGIHashCached) directly when SpatialHash
-	// is the active mode; legacy RT-GI / screen-probe paths stay
-	// on the screen-space-denoised buffer.
-	Texture* lightingDiffuseTex =
-		(!bMobileHybridDirectOnly &&
-		 DiffuseGIMode == EDiffuseGIMode::SPATIAL_HASH &&
-		 DiffuseGIHashFiltered) ?
-			DiffuseGIHashFiltered.get() :
-		(!bMobileHybridDirectOnly && DiffuseGITemporal[GIBufferWriteIndex]) ?
-			DiffuseGITemporal[GIBufferWriteIndex].get() :
-			DefaultBlackTex.get();
-	if (!bMobileHybridDirectOnly && DiffuseGIMode == EDiffuseGIMode::SCREEN_PROBE && ScreenProbeGIResolved)
+	// "stable across frames" axis correctly. Prefer the direct
+	// per-pixel query result (DiffuseGIHashCached) when SpatialHash
+	// is active; DiffuseGIHashFiltered remains a diagnostic/polish
+	// buffer, not the authoritative lighting input.
+	Texture* lightingDiffuseTex = DefaultBlackTex.get();
+	if (!bMobileHybridDirectOnly &&
+		bDiffuseGIEnabledThisFrame &&
+		DiffuseGIMode == EDiffuseGIMode::SPATIAL_HASH &&
+		DiffuseGIHashCached)
+	{
+		lightingDiffuseTex = DiffuseGIHashCached.get();
+		lightingDiffuseSource = L"spatial_hash_cached";
+	}
+	else if (!bMobileHybridDirectOnly && bDiffuseGIEnabledThisFrame && DiffuseGITemporal[GIBufferWriteIndex])
+	{
+		lightingDiffuseTex = DiffuseGITemporal[GIBufferWriteIndex].get();
+		lightingDiffuseSource = L"temporal";
+	}
+	if (!bMobileHybridDirectOnly &&
+		bDiffuseGIEnabledThisFrame &&
+		DiffuseGIMode == EDiffuseGIMode::SCREEN_PROBE &&
+		ScreenProbeGIResolved)
+	{
 		lightingDiffuseTex = ScreenProbeGIResolved.get();
-	// Specular GI source for LightingPS: prefer the ReSTIR-combined
-	// raw output over the legacy second-stage TemporalDenoisingPass
-	// result. The second-stage denoiser reprojects with the SURFACE
-	// motion vector, which is wrong for specular reflections (mirrors
-	// follow the reflected world, not the surface) and was the cause
-	// of the "noise flowing in random directions" artifact on
-	// low-roughness flat surfaces during camera translation. ReSTIR
-	// (in RaytracedReflection.hlsl) already does specular-correct
-	// temporal reuse via hit-position reprojection + GGX-D-aware
-	// target_pdf, so the redundant denoiser pass is bypassed.
-	Texture* lightingSpecularTex =
-		(!bMobileHybridDirectOnly && SpecularGIRaw) ?
-		SpecularGIRaw.get() :
-		DefaultBlackTex.get();
+		lightingDiffuseSource = L"screen_probe";
+	}
+	// Keep specular GI raw for the final lighting input. DLSS RR benefits
+	// from seeing the native stochastic specular signal rather than a
+	// surface-motion-vector temporal filter.
+	const wchar_t* lightingSpecularSource = L"black";
+	Texture* lightingSpecularTex = DefaultBlackTex.get();
+	if (!bMobileHybridDirectOnly && bSpecularGIEnabledThisFrame && SpecularGIRaw)
+	{
+		lightingSpecularTex = SpecularGIRaw.get();
+		lightingSpecularSource = L"raw";
+	}
+	{
+		static UINT32 sLastDiffuseEnabled = 0xFFFFFFFFu;
+		static UINT32 sLastSpecularEnabled = 0xFFFFFFFFu;
+		static UINT32 sLastLightingOutputMode = 0xFFFFFFFFu;
+		static int sLastDiffuseMode = -1;
+		static int sLastAA = -1;
+		static uintptr_t sLastDiffuseTex = 0;
+		static uintptr_t sLastSpecularTex = 0;
+		static float sLastSurfaceBounceStrength = -1.0f;
+		static float sLastSurfaceBounceSaturation = -1.0f;
+		const uintptr_t diffuseTexId = reinterpret_cast<uintptr_t>(lightingDiffuseTex);
+		const uintptr_t specularTexId = reinterpret_cast<uintptr_t>(lightingSpecularTex);
+		const int diffuseMode = static_cast<int>(DiffuseGIMode);
+		const int aaMode = static_cast<int>(AntiAliasingMode);
+		if (sLastDiffuseEnabled != Param.bEnableDiffuseGI ||
+			sLastSpecularEnabled != Param.bEnableSpecularGI ||
+			sLastLightingOutputMode != Param.LightingOutputMode ||
+			sLastDiffuseMode != diffuseMode ||
+			sLastAA != aaMode ||
+			sLastDiffuseTex != diffuseTexId ||
+			sLastSpecularTex != specularTexId ||
+			std::abs(sLastSurfaceBounceStrength - Param.SurfaceBounceStrength) > 0.0001f ||
+			std::abs(sLastSurfaceBounceSaturation - Param.SurfaceBounceSaturation) > 0.0001f)
+		{
+			sLastDiffuseEnabled = Param.bEnableDiffuseGI;
+			sLastSpecularEnabled = Param.bEnableSpecularGI;
+			sLastLightingOutputMode = Param.LightingOutputMode;
+			sLastDiffuseMode = diffuseMode;
+			sLastAA = aaMode;
+			sLastDiffuseTex = diffuseTexId;
+			sLastSpecularTex = specularTexId;
+			sLastSurfaceBounceStrength = Param.SurfaceBounceStrength;
+			sLastSurfaceBounceSaturation = Param.SurfaceBounceSaturation;
+			AppendCpuRuntimeTrace(
+				L"[LightingPass][GI] diffuseEnable=" + std::to_wstring(Param.bEnableDiffuseGI) +
+				L", diffuseSource=" + std::wstring(lightingDiffuseSource) +
+				L", specularEnable=" + std::to_wstring(Param.bEnableSpecularGI) +
+				L", specularSource=" + std::wstring(lightingSpecularSource) +
+				L", surfaceBounceStrength=" + std::to_wstring(Param.SurfaceBounceStrength) +
+				L", surfaceBounceSaturation=" + std::to_wstring(Param.SurfaceBounceSaturation) +
+				L", outputMode=" + std::to_wstring(Param.LightingOutputMode) +
+				L", diffuseMode=" + std::to_wstring(diffuseMode) +
+				L", aa=" + std::to_wstring(aaMode) +
+				L", render=" + std::to_wstring(Param.RTSize.x) +
+				L"x" + std::to_wstring(Param.RTSize.y));
+		}
+	}
 	Texture* shadowTex =
 		bDirectionalShadowAvailable ?
 		ShadowBuffer.get() :

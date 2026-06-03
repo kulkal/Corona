@@ -32,6 +32,10 @@ private:
 	Corona* Host;
 	bool bVisible = false;
 	CoronaECS::Entity SelectedEntity;
+	char EntitySearchNameBuf[128] = {};
+	bool bFilterMeshEntities = true;
+	bool bFilterLightEntities = true;
+	bool bFilterCameraEntities = true;
 
 	// Set by the per-row right-click context menu; processed after the
 	// entity-list loop so we never destroy an entity mid-iteration.

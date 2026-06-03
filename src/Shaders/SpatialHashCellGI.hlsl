@@ -16,8 +16,21 @@ Texture2D AlbedoTex : register(t7);
 ByteAddressBuffer InstanceProperty : register(t8);
 StructuredBuffer<uint> ActiveCellSlots : register(t9);
 StructuredBuffer<uint> ActiveCounter : register(t10);
+StructuredBuffer<uint> CellLightMask : register(t11);
 
 SamplerState sampleWrap : register(s0);
+
+// Must match Corona::MaxPointLights in Corona.h.
+#define MAX_POINT_LIGHTS 128
+#define RT_DIFFUSE_GI_MAX_POINT_LIGHTS 16
+
+struct PointLightParam
+{
+    float4 PositionAndRadius;
+    float4 ColorAndIntensity;
+    float4 DirectionAndType;
+    float4 SpotConeAndFlags;
+};
 
 cbuffer ViewParameter : register(b0)
 {
@@ -39,12 +52,22 @@ cbuffer ViewParameter : register(b0)
     float _padding2;
     uint ActiveCellCapacity;
     uint bIncludeSkyLighting;
-    uint _padding4;
-    uint _padding5;
+    uint HashEntryMask;
+    uint MaxProbeSteps;
+    uint _padding6;
+    uint _padding7;
+    uint _padding8;
+    PointLightParam PointLights[RT_DIFFUSE_GI_MAX_POINT_LIGHTS];
+    uint PointLightCount;
+    float3 PointLightPadding;
 };
 
 static const float INV_PI = 1.0f / PI;
 static const float MAX_HIT_DIST = 10000.0f;
+static const float SPATIAL_HASH_MIN_SURFACE_NORMAL_DOT = 0.72f;
+static const float SPATIAL_HASH_FULL_SURFACE_NORMAL_DOT = 0.92f;
+static const float SPATIAL_HASH_PLANE_REJECT_CELL_SCALE = 0.45f;
+static const float SPATIAL_HASH_PLANE_SOFT_CELL_SCALE = 0.25f;
 
 #define SPATIAL_HASH_GI_RAY_FLAGS (RAY_FLAG_FORCE_OPAQUE | RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES)
 
@@ -168,6 +191,176 @@ float3x3 BuildTBN(float3 normal)
     return float3x3(b1, b2, normal);
 }
 
+float ComputeLightLuma(float3 color)
+{
+    return dot(max(color, 0.0f.xxx), float3(0.2126f, 0.7152f, 0.0722f));
+}
+
+uint ComputeLocalLightMask(float3 worldPos, float3 normal)
+{
+    uint mask = 0u;
+    uint activeCount = min(PointLightCount, (uint)RT_DIFFUSE_GI_MAX_POINT_LIGHTS);
+    normal = SafeNormalize(normal, float3(0.0f, 1.0f, 0.0f));
+
+    [loop]
+    for (uint lightIndex = 0u; lightIndex < RT_DIFFUSE_GI_MAX_POINT_LIGHTS; ++lightIndex)
+    {
+        if (lightIndex >= activeCount)
+            break;
+
+        PointLightParam light = PointLights[lightIndex];
+        float3 toLight = light.PositionAndRadius.xyz - worldPos;
+        float distanceSq = max(dot(toLight, toLight), 1.0e-4f);
+        float lightDistance = sqrt(distanceSq);
+        float range = max(light.PositionAndRadius.w, 0.01f);
+        if (lightDistance > range)
+            continue;
+
+        float3 lightDir = toLight / lightDistance;
+        if (dot(normal, lightDir) <= 0.0f)
+            continue;
+
+        if (light.DirectionAndType.w >= 0.5f)
+        {
+            float3 spotDir = SafeNormalize(light.DirectionAndType.xyz, float3(0.0f, 1.0f, 0.0f));
+            float cosTheta = dot(spotDir, -lightDir);
+            if (cosTheta < light.SpotConeAndFlags.y - 0.05f)
+                continue;
+        }
+
+        float rangeAttenuation = saturate(1.0f - lightDistance / range);
+        rangeAttenuation *= rangeAttenuation;
+        float lightEnergy = ComputeLightLuma(light.ColorAndIntensity.xyz) * max(light.ColorAndIntensity.w, 0.0f) * rangeAttenuation;
+        if (lightEnergy <= 1.0e-5f)
+            continue;
+
+        mask |= (1u << lightIndex);
+    }
+
+    return mask;
+}
+
+int3 GetSpatialHashCell(float3 worldPos)
+{
+    float safeCellSize = max(CellSize, 1e-3f);
+    return int3(floor(worldPos / safeCellSize));
+}
+
+uint EncodeNormalBits(float3 normal)
+{
+    normal = SafeNormalize(normal, float3(0.0f, 1.0f, 0.0f));
+    uint3 normalBin = uint3(saturate(normal * 0.5f + 0.5f) * 7.0f + 0.5f);
+    return (normalBin.x & 7u) | ((normalBin.y & 7u) << 3u) | ((normalBin.z & 7u) << 6u);
+}
+
+int ComputePlaneBin(float3 worldPos, float3 normal)
+{
+    float safeCellSize = max(CellSize, 1e-3f);
+    normal = SafeNormalize(normal, float3(0.0f, 1.0f, 0.0f));
+    return int(floor((dot(worldPos, normal) / safeCellSize) * 2.0f + 0.5f));
+}
+
+uint HashCellKeyFromCell(int3 cell, float3 normal, int planeBin)
+{
+    uint h = uint(cell.x) * 73856093u;
+    h ^= uint(cell.y) * 19349663u;
+    h ^= uint(cell.z) * 83492791u;
+    h ^= EncodeNormalBits(normal) * 2654435761u;
+    h ^= uint(planeBin) * 1597334677u;
+    h = HashUInt(h);
+    return h == 0u ? 1u : h;
+}
+
+uint HashInitialSlot(uint key)
+{
+    return HashUInt(key ^ 0x9e3779b9u) & HashEntryMask;
+}
+
+bool FindSpatialHashSlot(uint key, out uint slot)
+{
+    uint startSlot = HashInitialSlot(key);
+    uint probeCount = clamp(MaxProbeSteps, 1u, 16u);
+
+    [loop]
+    for (uint probeIndex = 0u; probeIndex < 16u; ++probeIndex)
+    {
+        if (probeIndex >= probeCount)
+            break;
+
+        uint candidate = (startSlot + probeIndex) & HashEntryMask;
+        uint storedKey = CellKeys[candidate];
+        if (storedKey == key)
+        {
+            slot = candidate;
+            return true;
+        }
+        if (storedKey == 0u)
+            break;
+    }
+
+    slot = 0u;
+    return false;
+}
+
+float ComputeSurfaceHashMatchWeight(uint slot, float3 worldPos, float3 normal)
+{
+    float4 storedPosition = CellPosition[slot];
+    float4 storedNormal4 = CellNormal[slot];
+    if (storedPosition.w <= 0.0f || storedNormal4.w <= 0.0f)
+        return 0.0f;
+
+    normal = SafeNormalize(normal, float3(0.0f, 1.0f, 0.0f));
+    float3 storedNormal = SafeNormalize(storedNormal4.xyz, normal);
+    float normalDot = saturate(dot(normal, storedNormal));
+    if (normalDot < SPATIAL_HASH_MIN_SURFACE_NORMAL_DOT)
+        return 0.0f;
+
+    float safeCellSize = max(CellSize, 1e-3f);
+    float planeDelta = abs(dot(worldPos - storedPosition.xyz, storedNormal));
+    float planeReject = safeCellSize * SPATIAL_HASH_PLANE_REJECT_CELL_SCALE;
+    if (planeDelta > planeReject)
+        return 0.0f;
+
+    float normalWeight = smoothstep(
+        SPATIAL_HASH_MIN_SURFACE_NORMAL_DOT,
+        SPATIAL_HASH_FULL_SURFACE_NORMAL_DOT,
+        normalDot);
+    float planeWeight = 1.0f - smoothstep(
+        safeCellSize * SPATIAL_HASH_PLANE_SOFT_CELL_SCALE,
+        planeReject,
+        planeDelta);
+    return saturate(normalWeight * planeWeight);
+}
+
+uint LoadSurfaceLightMask(float3 worldPos, float3 normal)
+{
+    int3 cell = GetSpatialHashCell(worldPos);
+    int basePlaneBin = ComputePlaneBin(worldPos, normal);
+    uint bestMask = 0u;
+    float bestScore = 0.0f;
+
+    [unroll]
+    for (int planeOffset = -1; planeOffset <= 1; ++planeOffset)
+    {
+        uint slot = 0u;
+        uint key = HashCellKeyFromCell(cell, normal, basePlaneBin + planeOffset);
+        if (!FindSpatialHashSlot(key, slot))
+            continue;
+
+        float score = ComputeSurfaceHashMatchWeight(slot, worldPos, normal);
+        if (score > bestScore)
+        {
+            bestScore = score;
+            bestMask = CellLightMask[slot];
+        }
+    }
+
+    if (bestScore > 0.0f)
+        return bestMask;
+
+    return ComputeLocalLightMask(worldPos, normal);
+}
+
 float3 EvaluateSkyColor(float3 direction)
 {
     float t = 0.5f * (direction.y + 1.0f);
@@ -181,14 +374,27 @@ float3 EvaluateSkyDiffuseBounce(float3 normal)
     return max((averageSky + (2.0f / 3.0f) * skyGradient * normal.y) * SkyIntensity, 0.0f.xxx);
 }
 
+float EvaluateSpotAttenuation(PointLightParam light, float3 surfaceToLightDir)
+{
+    if (light.DirectionAndType.w < 0.5f)
+        return 1.0f;
+
+    float3 spotDir = SafeNormalize(light.DirectionAndType.xyz, float3(0.0f, 1.0f, 0.0f));
+    float cosTheta = dot(spotDir, -surfaceToLightDir);
+    float cone = saturate((cosTheta - light.SpotConeAndFlags.y) * light.SpotConeAndFlags.z);
+    return cone * cone;
+}
+
 bool IsDirectLightVisible(float3 worldPos, float3 normal)
 {
     float3 lightDir = normalize(LightDirAndIntensity.xyz);
+    if (dot(normal, lightDir) <= 0.0f)
+        return false;
 
     RayDesc shadowRay;
     shadowRay.Origin = worldPos + normal * RayBias;
     shadowRay.Direction = lightDir;
-    shadowRay.TMin = 0.0f;
+    shadowRay.TMin = 0.001f;
     shadowRay.TMax = MAX_HIT_DIST;
 
     ShadowRayPayload shadowPayload;
@@ -209,14 +415,80 @@ bool IsDirectLightVisible(float3 worldPos, float3 normal)
     return !shadowPayload.bHit;
 }
 
-float3 EvaluateDirectSurfaceRadiance(float3 worldPos, float3 normal, float3 albedo)
+bool IsPointLightVisible(float3 worldPos, float3 normal, float3 lightDir, float lightDistance, PointLightParam light)
 {
-    if (!IsDirectLightVisible(worldPos, normal))
-        return 0.0f.xxx;
+    if (light.SpotConeAndFlags.w <= 0.5f)
+        return true;
 
+    RayDesc shadowRay;
+    shadowRay.Origin = worldPos + normal * RayBias;
+    shadowRay.Direction = lightDir;
+    shadowRay.TMin = 0.001f;
+    shadowRay.TMax = max(lightDistance - 0.05f, 0.001f);
+
+    ShadowRayPayload shadowPayload;
+    shadowPayload.bHit = true;
+    TraceRay(
+        gRtScene,
+        RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH |
+            RAY_FLAG_SKIP_CLOSEST_HIT_SHADER |
+            RAY_FLAG_FORCE_OPAQUE |
+            RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES,
+        0xFF,
+        0,
+        0,
+        1,
+        shadowRay,
+        shadowPayload);
+
+    return !shadowPayload.bHit;
+}
+
+float3 EvaluatePointLightBounce(float3 worldPos, float3 normal, float3 albedo, uint lightMask)
+{
+    float3 radiance = 0.0f.xxx;
+    uint activeCount = min(PointLightCount, (uint)RT_DIFFUSE_GI_MAX_POINT_LIGHTS);
+    [loop]
+    for (uint lightIndex = 0u; lightIndex < RT_DIFFUSE_GI_MAX_POINT_LIGHTS; ++lightIndex)
+    {
+        if (lightIndex >= activeCount)
+            break;
+        if ((lightMask & (1u << lightIndex)) == 0u)
+            continue;
+
+        PointLightParam light = PointLights[lightIndex];
+        float3 toLight = light.PositionAndRadius.xyz - worldPos;
+        float distanceSq = max(dot(toLight, toLight), 1.0e-4f);
+        float lightDistance = sqrt(distanceSq);
+        float3 lightDir = toLight / lightDistance;
+        float range = max(light.PositionAndRadius.w, 0.01f);
+        float rangeAttenuation = saturate(1.0f - lightDistance / range);
+        rangeAttenuation *= rangeAttenuation;
+        float inverseSquareAttenuation = 1.0f / max(1.0f, distanceSq * 0.0001f);
+        float attenuation = rangeAttenuation * inverseSquareAttenuation * EvaluateSpotAttenuation(light, lightDir);
+        float nDotL = saturate(dot(normal, lightDir));
+        if (attenuation <= 0.0f || nDotL <= 0.0f || !IsPointLightVisible(worldPos, normal, lightDir, lightDistance, light))
+            continue;
+
+        float3 lightColor = max(CommonSanitizeFloat3(light.ColorAndIntensity.xyz, 0.0f.xxx), 0.0f.xxx);
+        float lightIntensity = max(CommonSanitizeFloat(light.ColorAndIntensity.w, 0.0f), 0.0f);
+        radiance += nDotL * lightColor * lightIntensity * attenuation * max(albedo, 0.0f.xxx) * INV_PI;
+    }
+    return radiance;
+}
+
+float3 EvaluateDirectSurfaceRadiance(float3 worldPos, float3 normal, float3 albedo, uint lightMask)
+{
+    float3 radiance = EvaluatePointLightBounce(worldPos, normal, albedo, lightMask);
     float3 lightDir = normalize(LightDirAndIntensity.xyz);
     float nDotL = saturate(dot(normal, lightDir));
-    return nDotL * LightDirAndIntensity.w * LightColor * max(albedo, 0.0f.xxx) * INV_PI;
+    if (nDotL <= 0.0f)
+        return radiance;
+    if (!IsDirectLightVisible(worldPos, normal))
+        return radiance;
+
+    radiance += nDotL * LightDirAndIntensity.w * LightColor * max(albedo, 0.0f.xxx) * INV_PI;
+    return radiance;
 }
 
 float3 TraceDiffusePath(float3 origin, float3 direction, uint2 noiseCoord, uint sampleIndex)
@@ -258,7 +530,8 @@ float3 TraceDiffusePath(float3 origin, float3 direction, uint2 noiseCoord, uint 
 
         float3 hitNormal = SafeNormalize(payload.normal, float3(0.0f, 1.0f, 0.0f));
         float3 hitAlbedo = max(SanitizeFloat3(payload.color), 0.0f.xxx);
-        radiance += throughput * EvaluateDirectSurfaceRadiance(payload.position, hitNormal, hitAlbedo);
+        uint hitLightMask = LoadSurfaceLightMask(payload.position, hitNormal);
+        radiance += throughput * EvaluateDirectSurfaceRadiance(payload.position, hitNormal, hitAlbedo, hitLightMask);
 
         if (bounceIndex + 1u >= bounceCount)
             break;
@@ -376,8 +649,11 @@ void chs(inout RayPayload payload, in BuiltInTriangleIntersectionAttributes attr
     uint instanceID = InstanceID();
     Vertex vertex = GetSurfaceVertexAttributes(instanceID, vertices, indices, InstanceProperty, triangleIndex, barycentrics);
 
-    payload.position = vertex.position;
-    payload.normal = SafeNormalize(vertex.normal, float3(0.0f, 1.0f, 0.0f));
+    payload.position = CommonSanitizeFloat3(vertex.position, WorldRayOrigin() + WorldRayDirection() * RayTCurrent());
+    float3 hitNormal = SafeNormalize(vertex.normal, -WorldRayDirection());
+    if (dot(hitNormal, -WorldRayDirection()) < 0.0f)
+        hitNormal = -hitNormal;
+    payload.normal = hitNormal;
 
     uint w, h;
     AlbedoTex.GetDimensions(w, h);

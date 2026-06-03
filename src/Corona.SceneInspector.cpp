@@ -6,6 +6,7 @@
 #include "imGuIZMO.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cstdio>
 #include <string>
 #include <vector>
@@ -35,6 +36,13 @@ namespace
 		case CoronaECS::LightType::Point:
 		default: return "Point";
 		}
+	}
+
+	std::string ToLowerAscii(std::string value)
+	{
+		for (char& ch : value)
+			ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+		return value;
 	}
 }
 
@@ -156,6 +164,13 @@ void CoronaSceneInspector::RenderImGui()
 	ImGui::Separator();
 
 	// Entity list — top 60% of the panel.
+	ImGui::InputTextWithHint("##scene_inspector_name_search", "Search name...", EntitySearchNameBuf, IM_ARRAYSIZE(EntitySearchNameBuf));
+	ImGui::Checkbox("Mesh##scene_filter", &bFilterMeshEntities);
+	ImGui::SameLine();
+	ImGui::Checkbox("Light##scene_filter", &bFilterLightEntities);
+	ImGui::SameLine();
+	ImGui::Checkbox("Camera##scene_filter", &bFilterCameraEntities);
+
 	const float listH = ImGui::GetContentRegionAvail().y * 0.60f;
 	ImGui::BeginChild("##entity_list", ImVec2(0, listH), true);
 
@@ -181,14 +196,44 @@ void CoronaSceneInspector::RenderImGui()
 		[](CoronaECS::Entity a, CoronaECS::Entity b) { return a.GetId() < b.GetId(); });
 	entities.erase(std::unique(entities.begin(), entities.end()), entities.end());
 
+	const std::string loweredQuery = ToLowerAscii(std::string(EntitySearchNameBuf));
+	auto entityDisplayName = [&](CoronaECS::Entity e)
+	{
+		if (const auto* n = ecs.GetName(e); n && !n->empty())
+			return *n;
+		char fallback[32];
+		snprintf(fallback, sizeof(fallback), "Entity#%u", e.GetId());
+		return std::string(fallback);
+	};
+	auto passesTypeFilter = [&](CoronaECS::Entity e)
+	{
+		return (bFilterMeshEntities && ecs.HasMesh(e)) ||
+			(bFilterLightEntities && ecs.HasLight(e)) ||
+			(bFilterCameraEntities && ecs.HasCamera(e));
+	};
+	auto passesNameFilter = [&](CoronaECS::Entity e)
+	{
+		if (loweredQuery.empty())
+			return true;
+		return ToLowerAscii(entityDisplayName(e)).find(loweredQuery) != std::string::npos;
+	};
+
 	if (entities.empty())
 	{
 		ImGui::TextDisabled("(scene is empty)");
 	}
 	else
 	{
+		int visibleCount = 0;
 		for (auto e : entities)
+		{
+			if (!passesTypeFilter(e) || !passesNameFilter(e))
+				continue;
 			DrawEntityRow(e);
+			++visibleCount;
+		}
+		if (visibleCount == 0)
+			ImGui::TextDisabled("(no matching entities)");
 	}
 
 	ImGui::EndChild();

@@ -40,8 +40,8 @@ if not corona.map_exists(mode) then
 end
 
 -- Stash a flag so other scripts can tell whether map-based fast-load is
--- supported for this mode. Currently sponza/terrain are the only modes
--- with full round-trip support.
+-- supported for this mode. Currently terrain is the only gameplay mode
+-- with full round-trip support (editor uses the save-only branch above).
 corona_script_mode_persist_state[mode] = {
     has_map = corona.map_exists(mode),
     save_only = saveOnly[mode] == true,

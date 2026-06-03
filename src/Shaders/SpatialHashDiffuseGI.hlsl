@@ -44,6 +44,17 @@ RWTexture2D<float4> OutGIHashColor : register(u9);
 RWTexture2D<float4> OutGIHashSH : register(u10);
 RWStructuredBuffer<uint> ActiveCellSlotsOut : register(u11);
 RWStructuredBuffer<uint> ActiveCounterOut : register(u12);
+RWStructuredBuffer<uint> CellLightMaskOut : register(u14);
+
+#define RT_DIFFUSE_GI_MAX_POINT_LIGHTS 16
+
+struct PointLightParam
+{
+    float4 PositionAndRadius;
+    float4 ColorAndIntensity;
+    float4 DirectionAndType;
+    float4 SpotConeAndFlags;
+};
 
 cbuffer SpatialHashGIConstant : register(b0)
 {
@@ -63,7 +74,12 @@ cbuffer SpatialHashGIConstant : register(b0)
     float InterpolationStrength;
     uint ActiveCellCapacity;
     uint TraceCellBudget;
-    uint2 SpatialHashPadding;
+    uint _padding4;
+    uint _padding5;
+    PointLightParam PointLights[RT_DIFFUSE_GI_MAX_POINT_LIGHTS];
+    uint PointLightCount;
+    float3 PointLightPadding;
+    float4 DebugDiffuseGIOverride;
 };
 
 struct SH4RGB
@@ -77,6 +93,10 @@ struct SH4RGB
 static const float MAX_SPATIAL_HASH_HISTORY_SAMPLES = 4096.0f;
 static const float SPATIAL_HASH_DIFFUSE_SCALE = 1.0f / PI;
 static const uint SPATIAL_HASH_ACTIVE_INIT = 0xffffffffu;
+static const float SPATIAL_HASH_MIN_SURFACE_NORMAL_DOT = 0.72f;
+static const float SPATIAL_HASH_FULL_SURFACE_NORMAL_DOT = 0.92f;
+static const float SPATIAL_HASH_PLANE_REJECT_CELL_SCALE = 0.45f;
+static const float SPATIAL_HASH_PLANE_SOFT_CELL_SCALE = 0.25f;
 
 float3 SanitizeFloat3(float3 value)
 {
@@ -99,6 +119,56 @@ float3 SafeNormalize(float3 value, float3 fallback)
     if (lenSq < 1e-8f)
         return fallback;
     return value * rsqrt(lenSq);
+}
+
+float ComputeLightLuma(float3 color)
+{
+    return dot(max(color, 0.0f.xxx), float3(0.2126f, 0.7152f, 0.0722f));
+}
+
+uint ComputeCellLightMask(float3 worldPos, float3 normal)
+{
+    uint mask = 0u;
+    uint activeCount = min(PointLightCount, (uint)RT_DIFFUSE_GI_MAX_POINT_LIGHTS);
+    float cellRadius = max(CellSize, 1e-3f) * 1.7320508f;
+    normal = SafeNormalize(normal, float3(0.0f, 1.0f, 0.0f));
+
+    [loop]
+    for (uint lightIndex = 0u; lightIndex < RT_DIFFUSE_GI_MAX_POINT_LIGHTS; ++lightIndex)
+    {
+        if (lightIndex >= activeCount)
+            break;
+
+        PointLightParam light = PointLights[lightIndex];
+        float3 toLight = light.PositionAndRadius.xyz - worldPos;
+        float distanceSq = max(dot(toLight, toLight), 1.0e-4f);
+        float lightDistance = sqrt(distanceSq);
+        float range = max(light.PositionAndRadius.w, 0.01f);
+        if (lightDistance > range + cellRadius)
+            continue;
+
+        float3 cellToLightDir = toLight / lightDistance;
+        if (dot(normal, cellToLightDir) <= 0.0f)
+            continue;
+
+        if (light.DirectionAndType.w >= 0.5f)
+        {
+            float3 spotDir = SafeNormalize(light.DirectionAndType.xyz, float3(0.0f, 1.0f, 0.0f));
+            float cosTheta = dot(spotDir, -cellToLightDir);
+            if (cosTheta < light.SpotConeAndFlags.y - 0.05f)
+                continue;
+        }
+
+        float rangeAttenuation = saturate(1.0f - lightDistance / range);
+        rangeAttenuation *= rangeAttenuation;
+        float lightEnergy = ComputeLightLuma(light.ColorAndIntensity.xyz) * max(light.ColorAndIntensity.w, 0.0f) * rangeAttenuation;
+        if (lightEnergy <= 1.0e-5f)
+            continue;
+
+        mask |= (1u << lightIndex);
+    }
+
+    return mask;
 }
 
 SH4RGB InitSH4RGB()
@@ -269,6 +339,14 @@ float3 LoadCacheNormal(uint2 pixelPos)
     return SafeNormalize(GeoNormalTex[pixelPos].xyz, pixelNormal);
 }
 
+float3 OrientNormalTowardView(float3 normal, float3 worldPos)
+{
+    float3 cameraPos = mul(float4(0.0f, 0.0f, 0.0f, 1.0f), InvViewMatrix).xyz;
+    float3 viewDir = SafeNormalize(cameraPos - worldPos, normal);
+    normal = SafeNormalize(normal, viewDir);
+    return dot(normal, viewDir) < 0.0f ? -normal : normal;
+}
+
 float3 ReconstructWorldPosition(uint2 pixelPos)
 {
     float deviceDepth = DepthTex[pixelPos].x;
@@ -285,22 +363,37 @@ int3 GetSpatialHashCell(float3 worldPos)
     return int3(floor(worldPos / safeCellSize));
 }
 
-uint HashCellKeyFromCell(int3 cell, float3 normal)
+uint EncodeNormalBits(float3 normal)
 {
+    normal = SafeNormalize(normal, float3(0.0f, 1.0f, 0.0f));
     uint3 normalBin = uint3(saturate(normal * 0.5f + 0.5f) * 7.0f + 0.5f);
-    uint normalBits = (normalBin.x & 7u) | ((normalBin.y & 7u) << 3u) | ((normalBin.z & 7u) << 6u);
+    return (normalBin.x & 7u) | ((normalBin.y & 7u) << 3u) | ((normalBin.z & 7u) << 6u);
+}
 
+int ComputePlaneBin(float3 worldPos, float3 normal)
+{
+    float safeCellSize = max(CellSize, 1e-3f);
+    normal = SafeNormalize(normal, float3(0.0f, 1.0f, 0.0f));
+    // Half-cell plane bins let one xyz cell keep separate representatives
+    // for parallel or near-parallel surfaces, while the lookup still checks
+    // +/- one bin so cache hits do not disappear at quantization boundaries.
+    return int(floor((dot(worldPos, normal) / safeCellSize) * 2.0f + 0.5f));
+}
+
+uint HashCellKeyFromCell(int3 cell, float3 normal, int planeBin)
+{
     uint h = uint(cell.x) * 73856093u;
     h ^= uint(cell.y) * 19349663u;
     h ^= uint(cell.z) * 83492791u;
-    h ^= normalBits * 2654435761u;
+    h ^= EncodeNormalBits(normal) * 2654435761u;
+    h ^= uint(planeBin) * 1597334677u;
     h = HashUInt(h);
     return h == 0u ? 1u : h;
 }
 
 uint HashCellKey(float3 worldPos, float3 normal)
 {
-    return HashCellKeyFromCell(GetSpatialHashCell(worldPos), normal);
+    return HashCellKeyFromCell(GetSpatialHashCell(worldPos), normal, ComputePlaneBin(worldPos, normal));
 }
 
 uint HashInitialSlot(uint key)
@@ -425,26 +518,83 @@ bool FindPrevSlotForRead(uint key, out uint slot)
     return false;
 }
 
+float ComputeSurfaceLobeWeight(uint slot, float3 queryWorldPos, float3 queryNormal)
+{
+    float4 storedPosition = SanitizeFloat4(CellPositionIn[slot]);
+    float4 storedNormal4 = SanitizeFloat4(CellNormalIn[slot]);
+    if (storedPosition.w <= 0.0f || storedNormal4.w <= 0.0f)
+        return 0.0f;
+
+    queryNormal = SafeNormalize(queryNormal, float3(0.0f, 1.0f, 0.0f));
+    float3 storedNormal = SafeNormalize(storedNormal4.xyz, queryNormal);
+    float normalDot = saturate(dot(queryNormal, storedNormal));
+    if (normalDot < SPATIAL_HASH_MIN_SURFACE_NORMAL_DOT)
+        return 0.0f;
+
+    float safeCellSize = max(CellSize, 1e-3f);
+    float planeDelta = abs(dot(queryWorldPos - storedPosition.xyz, storedNormal));
+    float planeReject = safeCellSize * SPATIAL_HASH_PLANE_REJECT_CELL_SCALE;
+    if (planeDelta > planeReject)
+        return 0.0f;
+
+    float normalWeight = smoothstep(
+        SPATIAL_HASH_MIN_SURFACE_NORMAL_DOT,
+        SPATIAL_HASH_FULL_SURFACE_NORMAL_DOT,
+        normalDot);
+    float planeWeight = 1.0f - smoothstep(
+        safeCellSize * SPATIAL_HASH_PLANE_SOFT_CELL_SCALE,
+        planeReject,
+        planeDelta);
+    return saturate(normalWeight * planeWeight);
+}
+
 bool LoadCachedSHForCell(int3 cell, float3 normal, float3 queryWorldPos,
                           out SH4RGB sh, out float historyFrames, out float bilateralWeight)
 {
     bilateralWeight = 0.0f;
-    uint slot = 0u;
-    uint key = HashCellKeyFromCell(cell, normal);
-    if (FindSlotForRead(key, slot))
-    {
-        // Hash bin alone for orientation; per-pixel bilateral
-        // filtering happens in the new SpatialHashScreenResolve
-        // pass downstream of the per-pixel SpatialHashQuery.
-        (void)queryWorldPos;
-        bilateralWeight = 1.0f;
-        sh = LoadResolvedSH(slot, historyFrames);
-        return historyFrames > 0.0f && SHAbsEnergy(sh) > 1e-7f;
-    }
-
     sh = InitSH4RGB();
     historyFrames = 0.0f;
-    return false;
+
+    int basePlaneBin = ComputePlaneBin(queryWorldPos, normal);
+    float bestScore = 0.0f;
+    SH4RGB bestSH = InitSH4RGB();
+    float bestHistoryFrames = 0.0f;
+    float bestWeight = 0.0f;
+
+    [unroll]
+    for (int planeOffset = -1; planeOffset <= 1; ++planeOffset)
+    {
+        uint slot = 0u;
+        uint key = HashCellKeyFromCell(cell, normal, basePlaneBin + planeOffset);
+        if (!FindSlotForRead(key, slot))
+            continue;
+
+        float surfaceWeight = ComputeSurfaceLobeWeight(slot, queryWorldPos, normal);
+        if (surfaceWeight <= 1e-4f)
+            continue;
+
+        float candidateHistoryFrames = 0.0f;
+        SH4RGB candidateSH = LoadResolvedSH(slot, candidateHistoryFrames);
+        if (candidateHistoryFrames <= 0.0f || SHAbsEnergy(candidateSH) <= 1e-7f)
+            continue;
+
+        float candidateScore = surfaceWeight * lerp(0.25f, 1.0f, saturate(candidateHistoryFrames / 8.0f));
+        if (candidateScore > bestScore)
+        {
+            bestScore = candidateScore;
+            bestSH = candidateSH;
+            bestHistoryFrames = candidateHistoryFrames;
+            bestWeight = surfaceWeight;
+        }
+    }
+
+    if (bestScore <= 1e-5f)
+        return false;
+
+    sh = bestSH;
+    historyFrames = bestHistoryFrames;
+    bilateralWeight = bestWeight;
+    return true;
 }
 
 bool LoadInterpolatedSH(float3 worldPos, float3 normal, out SH4RGB outSH, out float outHistoryFrames)
@@ -607,6 +757,7 @@ void SpatialHashClear(uint3 DTid : SV_DispatchThreadID)
         CellScoreOut[entryIndex] = 0xffffffffu;
         CellPositionOut[entryIndex] = 0.0f.xxxx;
         CellNormalOut[entryIndex] = 0.0f.xxxx;
+        CellLightMaskOut[entryIndex] = 0u;
         ResolvedKeysOut[entryIndex] = 0u;
         ResolvedSH0Out[entryIndex] = 0.0f.xxxx;
         ResolvedSH1Out[entryIndex] = 0.0f.xxxx;
@@ -627,8 +778,8 @@ void SpatialHashUpdate(uint3 DTid : SV_DispatchThreadID)
     if (deviceDepth >= 0.99999f)
         return;
 
-    float3 normal = LoadCacheNormal(pixelPos);
     float3 worldPos = ReconstructWorldPosition(pixelPos);
+    float3 normal = OrientNormalTowardView(LoadCacheNormal(pixelPos), worldPos);
     uint key = HashCellKey(worldPos, normal);
 
     uint slot = 0u;
@@ -648,6 +799,7 @@ void SpatialHashUpdate(uint3 DTid : SV_DispatchThreadID)
     {
         CellPositionOut[slot] = float4(worldPos, 1.0f);
         CellNormalOut[slot] = float4(normal, 1.0f);
+        CellLightMaskOut[slot] = ComputeCellLightMask(worldPos, normal);
     }
 }
 
@@ -726,9 +878,16 @@ void SpatialHashQuery(uint3 DTid : SV_DispatchThreadID)
         return;
     }
 
-    float3 pixelNormal = LoadPixelNormal(pixelPos);
-    float3 cacheNormal = LoadCacheNormal(pixelPos);
+    if (DebugDiffuseGIOverride.w > 0.5f)
+    {
+        OutGIHashColor[pixelPos] = float4(max(DebugDiffuseGIOverride.rgb, 0.0f.xxx), 1.0f);
+        OutGIHashSH[pixelPos] = float4(max(DebugDiffuseGIOverride.rgb, 0.0f.xxx), 1.0f);
+        return;
+    }
+
     float3 worldPos = ReconstructWorldPosition(pixelPos);
+    float3 pixelNormal = OrientNormalTowardView(LoadPixelNormal(pixelPos), worldPos);
+    float3 cacheNormal = OrientNormalTowardView(LoadCacheNormal(pixelPos), worldPos);
     SH4RGB cachedSH = InitSH4RGB();
     float historyFrames = 0.0f;
     const bool bHasCache = LoadSmoothedSH(worldPos, cacheNormal, cachedSH, historyFrames);
@@ -776,6 +935,12 @@ void SpatialHashScreenResolve(uint3 DTid : SV_DispatchThreadID)
     if (deviceDepth >= 0.99999f)
     {
         OutDiffuseGIFiltered[pixelPos] = 0.0f.xxxx;
+        return;
+    }
+
+    if (DebugDiffuseGIOverride.w > 0.5f)
+    {
+        OutDiffuseGIFiltered[pixelPos] = float4(max(DebugDiffuseGIOverride.rgb, 0.0f.xxx), 1.0f);
         return;
     }
 

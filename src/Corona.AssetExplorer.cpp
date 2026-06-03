@@ -60,6 +60,13 @@ namespace
 		return EndsWithCi(p.extension().string(), ".cmesh");
 	}
 
+	// Anything we can hand to LoadSceneForScript and spawn: source models plus
+	// the baked .cmesh cache (LoadModel resolves a .cmesh path to itself).
+	bool IsSpawnableMesh(const std::filesystem::path& p)
+	{
+		return IsModelFile(p) || IsMeshCacheFile(p);
+	}
+
 	// For a source model path "foo.fbx", return "foo.cmesh" (sibling).
 	std::filesystem::path MeshCachePathFor(const std::filesystem::path& sourcePath)
 	{
@@ -119,8 +126,10 @@ void CoronaAssetExplorer::RenderImGui()
 
 	const ImGuiViewport* vp = ImGui::GetMainViewport();
 	const float h = vp->WorkSize.y;
-	const float x = vp->WorkPos.x + kPanelWidth + 8.0f; // sit to the right of the scene inspector
-	ImGui::SetNextWindowPos(ImVec2(x, vp->WorkPos.y));
+	// Dock to the left edge, mirroring the scene inspector panel. The asset
+	// panel auto-closes after a load/spawn, so overlapping the inspector while
+	// open is fine.
+	ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x, vp->WorkPos.y));
 	ImGui::SetNextWindowSize(ImVec2(kPanelWidth + 40.0f, h - kBottomBarH - 4.0f));
 
 	const ImGuiWindowFlags flags =
@@ -157,6 +166,29 @@ void CoronaAssetExplorer::RenderImGui()
 	ImGui::End();
 	ImGui::PopStyleVar();
 	ImGui::PopStyleColor();
+
+	// Apply a queued double-click action now that we're done iterating the
+	// listing (these mutate CurrentListing / bVisible).
+	const PendingAction action = QueuedAction;
+	const std::filesystem::path actionPath = QueuedActionPath;
+	QueuedAction = PendingAction::None;
+	QueuedActionPath.clear();
+	switch (action)
+	{
+	case PendingAction::Navigate:
+		CurrentDir = actionPath;
+		CurrentListing.clear();
+		break;
+	case PendingAction::LoadMap:
+		LoadMapAsset(actionPath);
+		break;
+	case PendingAction::SpawnMesh:
+		SpawnMeshFromAsset(actionPath);
+		break;
+	case PendingAction::None:
+	default:
+		break;
+	}
 }
 
 void CoronaAssetExplorer::RenderEntry(const Entry& entry)
@@ -168,10 +200,24 @@ void CoronaAssetExplorer::RenderEntry(const Entry& entry)
 
 	if (ImGui::Selectable(label.c_str(), false, ImGuiSelectableFlags_AllowDoubleClick))
 	{
-		if (entry.bIsDirectory && ImGui::IsMouseDoubleClicked(0))
+		if (ImGui::IsMouseDoubleClicked(0))
 		{
-			CurrentDir = entry.Path;
-			CurrentListing.clear();
+			// Defer: navigating / loading mutates the listing we're iterating.
+			if (entry.bIsDirectory)
+			{
+				QueuedAction = PendingAction::Navigate;
+				QueuedActionPath = entry.Path;
+			}
+			else if (IsMapFile(entry.Path))
+			{
+				QueuedAction = PendingAction::LoadMap;
+				QueuedActionPath = entry.Path;
+			}
+			else if (IsSpawnableMesh(entry.Path))
+			{
+				QueuedAction = PendingAction::SpawnMesh;
+				QueuedActionPath = entry.Path;
+			}
 		}
 	}
 	if (ImGui::IsItemHovered() && ImGui::IsMouseClicked(1))
@@ -187,7 +233,6 @@ void CoronaAssetExplorer::HandleContextMenu(const Entry& entry)
 		return;
 
 	const std::filesystem::path path = entry.Path;
-	const std::string pathUtf8 = path.string();
 
 	if (entry.bIsDirectory)
 	{
@@ -222,40 +267,12 @@ void CoronaAssetExplorer::HandleContextMenu(const Entry& entry)
 				}
 			}
 			if (ImGui::MenuItem("Spawn model"))
-			{
-				const Corona::ScriptSceneHandle sh =
-					Host->LoadSceneForScript(path.wstring());
-				if (sh == Corona::InvalidScriptSceneHandle)
-				{
-					PendingErrorMessage = "LoadSceneForScript failed: " + pathUtf8;
-				}
-				else
-				{
-					const glm::vec3 camPos  = Host->GetCameraPositionForConsole();
-					const glm::vec3 camLook = Host->GetCameraLookDirForConsole();
-					const glm::vec3 spawnPos = camPos + camLook * 3.0f;
-					const std::string name = "Spawn_" + path.stem().string();
-					CoronaECS::Entity e = Host->CreateEntity(name);
-					Host->AddMeshComponentForScript(
-						e, sh, spawnPos, glm::vec3(0.0f),
-						/*targetExtent*/ 1.5f, glm::vec3(1.0f), /*useScale*/ false,
-						/*roughness*/ 0.6f, /*metallic*/ 0.0f,
-						/*overrideRM*/ true,
-						/*visible*/ true, /*rayTracing*/ true, /*physicsQuery*/ true);
-					PendingErrorMessage.clear();
-				}
-			}
+				SpawnMeshFromAsset(path);
 		}
 		if (IsMapFile(path))
 		{
 			if (ImGui::MenuItem("Load map (replace scene)"))
-			{
-				// `.map` is the canonical extension; ResolveMapPath adds it
-				// when the name has no dot, so we pass just the stem.
-				const std::wstring name = path.stem().wstring();
-				Host->QueueEditorMapLoad(name);
-				PendingErrorMessage = "loadmap queued: " + path.stem().string();
-			}
+				LoadMapAsset(path);
 		}
 		if (IsImageFile(path))
 		{
@@ -296,6 +313,58 @@ void CoronaAssetExplorer::HandleContextMenu(const Entry& entry)
 	}
 
 	ImGui::EndPopup();
+}
+
+void CoronaAssetExplorer::SpawnMeshFromAsset(const std::filesystem::path& path)
+{
+	const Corona::ScriptSceneHandle sh = Host->LoadSceneForScript(path.wstring());
+	if (sh == Corona::InvalidScriptSceneHandle)
+	{
+		PendingErrorMessage = "LoadSceneForScript failed: " + path.string();
+		return;
+	}
+
+	// Camera-forward raycast: spawn at the midpoint between the camera and the
+	// first world hit so the model lands on visible geometry. World units are
+	// centimetres (1 m = 100 units; camera near/far = 10 / 20000), so the
+	// no-hit fallback of 5 m ahead is 500 units.
+	constexpr float kMetersToWorld = 100.0f;
+	const glm::vec3 camPos = Host->GetCameraPositionForConsole();
+	glm::vec3 camLook = Host->GetCameraLookDirForConsole();
+	const float lookLen = glm::length(camLook);
+	camLook = (lookLen > 1.0e-6f) ? (camLook / lookLen) : glm::vec3(0.0f, 0.0f, 1.0f);
+
+	glm::vec3 spawnPos;
+	Corona::CpuPhysicsRaycastHit hit;
+	if (Host->CpuPhysicsRaycast(camPos, camLook, 200.0f * kMetersToWorld, hit))
+		spawnPos = (camPos + hit.Position) * 0.5f;
+	else
+		spawnPos = camPos + camLook * (5.0f * kMetersToWorld);
+
+	const std::string name = "Spawn_" + path.stem().string();
+	CoronaECS::Entity e = Host->CreateEntity(name);
+	// Natural mesh scale (useScale=true, scale=1): UE-exported assets are
+	// authored at world scale, so this shows them at their real size.
+	Host->AddMeshComponentForScript(
+		e, sh, spawnPos, glm::vec3(0.0f),
+		/*targetExtent*/ 1.0f, glm::vec3(1.0f), /*useScale*/ true,
+		/*roughness*/ 0.6f, /*metallic*/ 0.0f,
+		/*overrideRM*/ true,
+		/*visible*/ true, /*rayTracing*/ true, /*physicsQuery*/ true);
+
+	PendingErrorMessage.clear();
+	AppendCpuRuntimeTrace(L"[AssetExplorer] spawned " + path.filename().wstring());
+	bVisible = false; // close after spawning
+}
+
+void CoronaAssetExplorer::LoadMapAsset(const std::filesystem::path& path)
+{
+	// `.map` is the canonical extension; ResolveMapPath adds it when the name
+	// has no dot, so we pass just the stem.
+	Host->QueueEditorMapLoad(path.stem().wstring());
+	PendingErrorMessage.clear();
+	AppendCpuRuntimeTrace(L"[AssetExplorer] loadmap queued " + path.stem().wstring());
+	bVisible = false; // close after queueing the load
 }
 
 void CoronaAssetExplorer::DrawBottomToggleButton()

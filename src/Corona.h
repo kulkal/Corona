@@ -556,6 +556,21 @@ private:
 	ScreenProbeGIConstant ScreenProbeGICB;
 	shared_ptr<ComputePipelineStateObject> ScreenProbeGIPSO;
 
+	// Keep shader-side MAX_POINT_LIGHTS definitions in lock-step with this.
+	static constexpr UINT32 MaxPointLights = 128;
+	static constexpr UINT32 MaxPointLightsForShadowCB = 128;
+	static_assert(MaxPointLights == MaxPointLightsForShadowCB,
+		"MaxPointLights and MaxPointLightsForShadowCB must match; RT lighting CB layouts assume the same cap");
+
+	struct PointLightParam
+	{
+		glm::vec4 PositionAndRadius = glm::vec4(0.0f);
+		glm::vec4 ColorAndIntensity = glm::vec4(1.0f);
+		glm::vec4 DirectionAndType = glm::vec4(0.0f, 1.0f, 0.0f, 0.0f);
+		glm::vec4 SpotConeAndFlags = glm::vec4(1.0f, 0.70710677f, 3.4142137f, 1.0f);
+	};
+	static constexpr UINT32 MaxDiffuseGIPointLights = 16;
+
 	// SHaRC-style spatial hash diffuse GI cache
 	static constexpr UINT32 SpatialHashGIEntryCount = 1u << 21;
 	static constexpr UINT32 SpatialHashGIActiveCellCapacity = 1u << 20;
@@ -579,8 +594,12 @@ private:
 		float InterpolationStrength = 1.0f;
 		UINT32 ActiveCellCapacity = SpatialHashGIActiveCellCapacity;
 		UINT32 TraceCellBudget = SpatialHashGITraceCellBudget;
-		UINT32 Padding1 = 0;
-		UINT32 Padding2 = 0;
+		UINT32 _padding4 = 0;
+		UINT32 _padding5 = 0;
+		PointLightParam PointLights[MaxDiffuseGIPointLights];
+		UINT32 PointLightCount = 0;
+		glm::vec3 PointLightPadding = glm::vec3(0.0f);
+		glm::vec4 DebugDiffuseGIOverride = glm::vec4(0.0f);
 	};
 
 	SpatialHashGIConstant SpatialHashGICB;
@@ -598,15 +617,12 @@ private:
 	std::shared_ptr<Buffer> SpatialHashGICellPosition;
 	std::shared_ptr<Buffer> SpatialHashGICellNormal;
 	std::shared_ptr<Buffer> SpatialHashGICellScore;
+	std::shared_ptr<Buffer> SpatialHashGICellLightMask;
 	std::shared_ptr<Buffer> SpatialHashGITraceSH[SpatialHashGISHCoefficientCount];
 	std::shared_ptr<Buffer> SpatialHashGIResolvedKeys[2];
 	std::shared_ptr<Buffer> SpatialHashGIResolvedSH[2][SpatialHashGISHCoefficientCount];
 	UINT32 SpatialHashGIWriteIndex = 0;
 	
-	// Forward decl: the CB layout below indexes by MaxPointLights, but the
-	// canonical constant lives further down with the rest of the lighting
-	// state. Re-state it here so both struct definitions compile.
-	static constexpr UINT32 MaxPointLightsForShadowCB = 128;
 	// RT shadow
 	struct RTShadowViewParamCB
 	{
@@ -768,6 +784,9 @@ private:
 		float _padding;
 		glm::vec3 LightColor;
 		float _padding2;
+		PointLightParam PointLights[MaxDiffuseGIPointLights];
+		UINT32 PointLightCount = 0;
+		glm::vec3 PointLightPadding = glm::vec3(0.0f);
 	};
 
 	RTGIViewParamCB RTGIViewParam;
@@ -807,6 +826,9 @@ private:
 		UINT32 BootstrapRays = 100;
 		UINT32 SHCoefficientCount = 4;
 		UINT32 _padding3 = 0;
+		PointLightParam PointLights[MaxDiffuseGIPointLights];
+		UINT32 PointLightCount = 0;
+		glm::vec3 PointLightPadding = glm::vec3(0.0f);
 	};
 
 	RTScreenProbeGIViewParamCB RTScreenProbeGIViewParam;
@@ -834,8 +856,14 @@ private:
 		float _padding2 = 0.0f;
 		UINT32 ActiveCellCapacity = SpatialHashGIActiveCellCapacity;
 		UINT32 bIncludeSkyLighting = 0;
-		UINT32 _padding4 = 0;
-		UINT32 _padding5 = 0;
+		UINT32 HashEntryMask = SpatialHashGIEntryCount - 1u;
+		UINT32 MaxProbeSteps = 8;
+		UINT32 _padding6 = 0;
+		UINT32 _padding7 = 0;
+		UINT32 _padding8 = 0;
+		PointLightParam PointLights[MaxDiffuseGIPointLights];
+		UINT32 PointLightCount = 0;
+		glm::vec3 PointLightPadding = glm::vec3(0.0f);
 	};
 
 	RTSpatialHashGIViewParamCB RTSpatialHashGIViewParam;
@@ -843,22 +871,6 @@ private:
 	shared_ptr<RTPipelineStateObject> PSO_RT_SPATIAL_HASH_GI_SER;
 	bool bRTDiffuseGISpatialHashSERInitFailed = false;
 
-	// Raised from 8 → 128 so ReSTIR DI demos with many lights are
-	// meaningful. CB cost: 128 * 64 B = 8 KB per occurrence (LightingParam
-	// + RTShadowViewParamCB), well under the 64 KB cbuffer limit. Keep the
-	// shader-side MAX_POINT_LIGHTS macros in lock-step with this value.
-	static constexpr UINT32 MaxPointLights = 128;
-	static_assert(MaxPointLights == MaxPointLightsForShadowCB,
-		"MaxPointLights and MaxPointLightsForShadowCB must match — the RT shadow CB layout assumes the same cap");
-
-	struct PointLightParam
-	{
-		glm::vec4 PositionAndRadius = glm::vec4(0.0f);
-		glm::vec4 ColorAndIntensity = glm::vec4(1.0f);
-		glm::vec4 DirectionAndType = glm::vec4(0.0f, 1.0f, 0.0f, 0.0f);
-		glm::vec4 SpotConeAndFlags = glm::vec4(1.0f, 0.70710677f, 3.4142137f, 1.0f);
-	};
-	
 	// Path Tracing
 	enum class EPathTracingDebugMode
 	{
@@ -1210,10 +1222,13 @@ private:
 	bool bEnableShadowSpatialReuseCompute = false;
 	bool bEnableSkyLighting = false;
 	bool bEnableRayTracedSkyLighting = true;
+	bool bDebugForceDiffuseGIColor = false;
+	glm::vec3 DebugForceDiffuseGIColor = glm::vec3(1.0f, 0.0f, 1.0f);
+	UINT32 DiffuseGIPointLightLimit = MaxDiffuseGIPointLights;
 	float RTAOIndirectStrength = 0.25f;
 	float RTAOIndirectFloor = 0.55f;
-	float SurfaceBounceStrength = 0.35f;
-	float SurfaceBounceSaturation = 0.45f;
+	float SurfaceBounceStrength = 1.0f;
+	float SurfaceBounceSaturation = 1.0f;
 	float SkyLightingStrength = 0.35f;
 
 	UINT32 ClampMode = 2;
@@ -1287,7 +1302,7 @@ private:
 	bool bCommandLineBvhViewerOverrideSet = false;
 	bool bCommandLineBvhViewerEnabled = false;
 	bool bCommandLineNvFrapsBvhLiveTlas = false;
-	bool bStartupSponzaFlyMode = false;
+	bool bStartupFreeFlyCamera = false;
 	bool bCommandLineDiffuseGIAutoDumpMode = false;
 	bool bCommandLineReadmeScreenshotDumpMode = false;
 	bool bCommandLinePathTracingScreenshotDumpMode = false;
@@ -1697,8 +1712,8 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	bool bRenderThreadOwnsLightDirNextFrame = false;
 	// Set by LoadCameraState() on success so ApplySponzaFlyCamera can keep
 	// the restored camera position/rotation/light instead of snapping back
-	// to the sponza-fly preset — useful for resuming an inspection of the
-	// scene at the same vantage point across runs.
+	// to the default fly-camera preset — useful for resuming an inspection of
+	// the scene at the same vantage point across runs.
 	bool bCameraStateRestoredFromDisk = false;
 	struct PointLightState
 	{
@@ -1790,8 +1805,8 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 		bool bEnableRayTracedSkyLighting = true;
 		float RTAOIndirectStrength = 0.25f;
 		float RTAOIndirectFloor = 0.55f;
-		float SurfaceBounceStrength = 0.35f;
-		float SurfaceBounceSaturation = 0.45f;
+		float SurfaceBounceStrength = 1.0f;
+		float SurfaceBounceSaturation = 1.0f;
 		float SkyLightingStrength = 0.35f;
 		float JitterScale = 0.6f;
 		UINT32 TAASampleCount = 32;
@@ -2026,8 +2041,10 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	bool bShowGpuTimingWindow = false;
 	bool bShowFrameTimingOverlay = false;
 	bool bEditorConfigWindowOpen = false;
-	bool bEditorCameraCollisionEnabled = true;
-	float EditorCameraMoveSpeed = 200.0f;
+	bool bEditorLightingGIWindowOpen = false;
+	bool bEditorDebugCaptureWindowOpen = false;
+	bool bEditorCameraCollisionEnabled = false;
+	float EditorCameraMoveSpeed = 1000.0f;
 	bool bEditorMapLoadQueued = false;
 	bool bEditorMapLoadInProgress = false;
 	uint32_t EditorMapLoadEntityIndex = 0;
@@ -2844,6 +2861,11 @@ public:
 	bool SaveEntityAsAsset(CoronaECS::Entity entity, const std::string& assetName, std::wstring* outError = nullptr);
 	void ClearScriptSpawnedScene();
 	std::filesystem::path ResolveMapPath(const std::wstring& name) const;
+	// Cross-run "last loaded map" persistence. PersistLastEditorMapName writes
+	// the name to assets/maps/.last_loaded_map on a successful load_map so the
+	// no-arg launch (editor mode) can reopen it via ReadPersistedLastEditorMapName.
+	void PersistLastEditorMapName(const std::wstring& name) const;
+	std::wstring ReadPersistedLastEditorMapName() const;
 	// Last successful save_map / load_map name. Empty if no map has been
 	// touched this session. `savemap` (no args) overwrites this; the console
 	// reports "no current map" if nothing is loaded yet.
@@ -3056,7 +3078,7 @@ public:
 
 	void PathTracingPass();
 	void ApplyHybridDefaultCamera();
-	void ApplySponzaFlyCamera();
+	void ApplyDefaultFlyCamera();
 	void EnsureWindowFramebuffers();
 
 	void ToneMapPass();
@@ -3115,6 +3137,7 @@ public:
 	bool RenderResolutionResourcesMatchCurrentState() const;
 	void ResetAllAccumulationState(bool forceUpscaleReload);
 	void ResetTemporalHistoryBuffers();
+	void ClearDisabledGIOutputBuffers(bool clearDiffuseGI, bool clearSpecularGI);
 	void RecreateRenderResolutionResources();
 	void ReloadRenderResolutionAssets();
 	void RefreshUpscaleSettings(bool reloadAssets);
@@ -3220,6 +3243,7 @@ private:
 	void BuildRenderFrameDerivedState(const RenderFrameSourceState* sourceState);
 	void BuildPointLightRenderCandidates(std::vector<const PointLightState*>& outCandidates) const;
 	PointLightParam BuildPointLightParam(const PointLightState& pointLight) const;
+	void FillPointLightParams(PointLightParam* outPointLights, UINT32& outPointLightCount, UINT32 maxCount) const;
 	void ApplyRenderPointLightsToFrameParams();
 
 	UINT m_width = 0;

@@ -39,6 +39,18 @@ Texture2D GeoNormalTex : register(t22);
 SamplerState sampleWrap : register(s0);
 SamplerState historyClamp : register(s1);
 
+// Must match Corona::MaxPointLights in Corona.h.
+#define MAX_POINT_LIGHTS 128
+#define RT_DIFFUSE_GI_MAX_POINT_LIGHTS 16
+
+struct PointLightParam
+{
+    float4 PositionAndRadius;
+    float4 ColorAndIntensity;
+    float4 DirectionAndType;
+    float4 SpotConeAndFlags;
+};
+
 cbuffer ViewParameter : register(b0)
 {
     float4x4 ViewMatrix;
@@ -71,6 +83,9 @@ cbuffer ViewParameter : register(b0)
     uint BootstrapRays;
     uint SHCoefficientCount;
     uint _padding3;
+    PointLightParam PointLights[RT_DIFFUSE_GI_MAX_POINT_LIGHTS];
+    uint PointLightCount;
+    float3 PointLightPadding;
 };
 
 static const float INV_PI = 1.0f / PI;
@@ -436,6 +451,77 @@ float3 EvaluateSkyDiffuseBounce(float3 normal)
     return max((averageSky + (2.0f / 3.0f) * skyGradient * normal.y) * SkyIntensity, 0.0f.xxx);
 }
 
+float EvaluateSpotAttenuation(PointLightParam light, float3 surfaceToLightDir)
+{
+    if (light.DirectionAndType.w < 0.5f)
+        return 1.0f;
+
+    float3 spotDir = SafeNormalize(light.DirectionAndType.xyz, float3(0.0f, 1.0f, 0.0f));
+    float cosTheta = dot(spotDir, -surfaceToLightDir);
+    float cone = saturate((cosTheta - light.SpotConeAndFlags.y) * light.SpotConeAndFlags.z);
+    return cone * cone;
+}
+
+bool IsPointLightVisible(float3 worldPos, float3 normal, float3 lightDir, float lightDistance, PointLightParam light)
+{
+    if (light.SpotConeAndFlags.w <= 0.5f)
+        return true;
+
+    RayDesc shadowRay;
+    shadowRay.Origin = worldPos + normal * 0.5f;
+    shadowRay.Direction = lightDir;
+    shadowRay.TMin = 0.001f;
+    shadowRay.TMax = max(lightDistance - 0.05f, 0.001f);
+
+    ShadowRayPayload shadowPayload;
+    shadowPayload.bHit = true;
+    TraceRay(
+        gRtScene,
+        RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH |
+            RAY_FLAG_SKIP_CLOSEST_HIT_SHADER |
+            RAY_FLAG_FORCE_OPAQUE |
+            RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES,
+        0xFF,
+        0,
+        0,
+        1,
+        shadowRay,
+        shadowPayload);
+
+    return !shadowPayload.bHit;
+}
+
+float3 EvaluatePointLightBounce(float3 worldPos, float3 normal, float3 albedo)
+{
+    float3 radiance = 0.0f.xxx;
+    uint activeCount = min(PointLightCount, (uint)RT_DIFFUSE_GI_MAX_POINT_LIGHTS);
+    [loop]
+    for (uint lightIndex = 0u; lightIndex < RT_DIFFUSE_GI_MAX_POINT_LIGHTS; ++lightIndex)
+    {
+        if (lightIndex >= activeCount)
+            break;
+
+        PointLightParam light = PointLights[lightIndex];
+        float3 toLight = light.PositionAndRadius.xyz - worldPos;
+        float distanceSq = max(dot(toLight, toLight), 1.0e-4f);
+        float lightDistance = sqrt(distanceSq);
+        float3 lightDir = toLight / lightDistance;
+        float range = max(light.PositionAndRadius.w, 0.01f);
+        float rangeAttenuation = saturate(1.0f - lightDistance / range);
+        rangeAttenuation *= rangeAttenuation;
+        float inverseSquareAttenuation = 1.0f / max(1.0f, distanceSq * 0.0001f);
+        float attenuation = rangeAttenuation * inverseSquareAttenuation * EvaluateSpotAttenuation(light, lightDir);
+        float nDotL = saturate(dot(normal, lightDir));
+        if (attenuation <= 0.0f || nDotL <= 0.0f || !IsPointLightVisible(worldPos, normal, lightDir, lightDistance, light))
+            continue;
+
+        float3 lightColor = max(SanitizeFloat3(light.ColorAndIntensity.xyz), 0.0f.xxx);
+        float lightIntensity = max(CommonSanitizeFloat(light.ColorAndIntensity.w, 0.0f), 0.0f);
+        radiance += nDotL * lightColor * lightIntensity * attenuation * max(albedo, 0.0f.xxx) * INV_PI;
+    }
+    return radiance;
+}
+
 float3x3 BuildTBN(float3 normal)
 {
     static const float3 rvec1 = float3(0.847100675f, 0.207911700f, 0.489073813f);
@@ -514,6 +600,7 @@ float3 TraceDiffuseProbeRay(float3 worldPos, float3 worldNormal, uint2 probeCoor
         float nDotL = saturate(dot(lightDir, payload.normal));
         radiance += nDotL * LightDirAndIntensity.w * LightColor * payload.color * INV_PI;
     }
+    radiance += EvaluatePointLightBounce(payload.position, payload.normal, payload.color);
     return radiance;
 }
 
@@ -701,36 +788,6 @@ bool ApplyAdjacentAtlasFallback(float2 probePixelCenter, float3 currentNormal, i
     return true;
 }
 
-bool IsDirectSunVisible(float3 worldPos, float3 worldNormal)
-{
-    float3 lightDir = normalize(LightDirAndIntensity.xyz);
-    if (dot(lightDir, worldNormal) <= 0.02f)
-        return false;
-
-    RayDesc shadowRay;
-    shadowRay.Origin = worldPos + worldNormal * 0.5f;
-    shadowRay.Direction = lightDir;
-    shadowRay.TMin = 0.0f;
-    shadowRay.TMax = MAX_HIT_DIST;
-
-    ShadowRayPayload shadowPayload;
-    shadowPayload.bHit = true;
-    TraceRay(
-        gRtScene,
-        RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH |
-            RAY_FLAG_SKIP_CLOSEST_HIT_SHADER |
-            RAY_FLAG_FORCE_OPAQUE |
-            RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES,
-        0xFF,
-        0,
-        0,
-        1,
-        shadowRay,
-        shadowPayload);
-
-    return !shadowPayload.bHit;
-}
-
 [shader("raygeneration")]
 void rayGen()
 {
@@ -752,14 +809,6 @@ void rayGen()
     float3 radiance = 0.0f.xxx;
     SH3RGB sh = InitSH3RGB();
     bool lightingBootstrap = LightingBootstrap != 0u;
-    if (lightingBootstrap && !IsDirectSunVisible(worldPos, worldNormal))
-    {
-        float historyFrames = 1.0f;
-        ProbeRadiance[probeCoord] = float4(0.0f.xxx, historyFrames);
-        ProbeMeta[probeCoord] = float4(worldNormal, linearDepth);
-        StoreProbeSH(probeCoord, sh);
-        return;
-    }
 
     uint rayCount = lightingBootstrap ? clamp(BootstrapRays, 1u, 128u) : clamp(RaysPerProbe, 1u, 4u);
     [loop]
@@ -806,8 +855,11 @@ void chs(inout RayPayload payload, in BuiltInTriangleIntersectionAttributes attr
     uint instanceID = InstanceID();
     Vertex vertex = GetSurfaceVertexAttributes(instanceID, vertices, indices, InstanceProperty, triangleIndex, barycentrics);
 
-    payload.position = vertex.position;
-    payload.normal = SafeNormalize(vertex.normal, float3(0.0f, 1.0f, 0.0f));
+    payload.position = CommonSanitizeFloat3(vertex.position, WorldRayOrigin() + WorldRayDirection() * RayTCurrent());
+    float3 hitNormal = SafeNormalize(vertex.normal, -WorldRayDirection());
+    if (dot(hitNormal, -WorldRayDirection()) < 0.0f)
+        hitNormal = -hitNormal;
+    payload.normal = hitNormal;
 
     uint w, h;
     AlbedoTex.GetDimensions(w, h);
@@ -817,7 +869,7 @@ void chs(inout RayPayload payload, in BuiltInTriangleIntersectionAttributes attr
     float rayConeWidth = payload.spreadAngle * hitT + payload.coneWidth;
     float mipLevel = computeTextureLOD(1.0f, rayConeWidth, vertex.textureLODConstant);
 
-    payload.color = AlbedoTex.SampleLevel(sampleWrap, vertex.uv, mipLevel).xyz;
+    payload.color = max(CommonSanitizeFloat3(AlbedoTex.SampleLevel(sampleWrap, vertex.uv, mipLevel).xyz, 1.0f.xxx), 0.0f.xxx);
     payload.bHit = true;
 }
 

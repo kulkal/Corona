@@ -162,6 +162,33 @@ std::filesystem::path Corona::ResolveMapPath(const std::wstring& name) const
 	return mapsDir / fileName;
 }
 
+void Corona::PersistLastEditorMapName(const std::wstring& name) const
+{
+	// "editor_empty" is the internal blank-canvas default, not a user map —
+	// never let it overwrite the remembered last map.
+	if (name.empty() || name == L"editor_empty")
+		return;
+	const std::filesystem::path path = RuntimePaths::RootDirectory() / L"assets" / L"maps" / L".last_loaded_map";
+	std::error_code ec;
+	std::filesystem::create_directories(path.parent_path(), ec);
+	std::wofstream f(path, std::ios::trunc);
+	if (f.is_open())
+		f << name;
+}
+
+std::wstring Corona::ReadPersistedLastEditorMapName() const
+{
+	const std::filesystem::path path = RuntimePaths::RootDirectory() / L"assets" / L"maps" / L".last_loaded_map";
+	std::wifstream f(path);
+	if (!f.is_open())
+		return L"";
+	std::wstring name;
+	std::getline(f, name);
+	while (!name.empty() && (name.back() == L'\n' || name.back() == L'\r' || name.back() == L' ' || name.back() == L'\t'))
+		name.pop_back();
+	return name;
+}
+
 void Corona::ClearScriptSpawnedScene()
 {
 	// Remove every SceneObject that the script layer created. Each removal
@@ -994,6 +1021,20 @@ bool Corona::LoadMapFromFile(const std::wstring& name, std::wstring* outError)
 				// entities. Subsequent loads then heal the .map file on the
 				// next save by only writing the single survivor.
 				const bool bDirectional = (comp.Type == CoronaECS::LightType::Directional);
+				if (bDirectional)
+				{
+					const float directionLength = glm::length(comp.Direction);
+					comp.Direction = directionLength > 0.0001f ?
+						(comp.Direction / directionLength) :
+						glm::vec3(0.0f, 1.0f, 0.0f);
+					if (comp.Direction.y < -0.0001f)
+					{
+						comp.Direction = -comp.Direction;
+						AppendCpuRuntimeTrace(
+							L"[MapLoad][Light] flipped downward directional vector to Corona surface-to-light convention: " +
+							PlatformUtf8ToWide(entityName));
+					}
+				}
 				const bool bAlreadyHaveDirectional =
 					bDirectional &&
 					EntityWorld.IsAlive(MainDirectionalLightEntity) &&
@@ -1154,6 +1195,7 @@ bool Corona::LoadMapFromFile(const std::wstring& name, std::wstring* outError)
 	UpdateSimpleCameraFromActiveCameraEntity();
 	AppendCpuRuntimeTrace(L"[Map] loaded " + path.wstring());
 	CurrentMapName = name;
+	PersistLastEditorMapName(name);
 	MarkAllSceneObjectsForRenderSync();
 	MarkAllPointLightsForRenderSync();
 	MarkCpuPhysicsSceneDirty();
