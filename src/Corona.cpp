@@ -10781,6 +10781,8 @@ void Corona::LoadAssets()
 		SpatialHashGIOctRayData = createStructuredBuffer(octRayDataElements, sizeof(float) * 4u, true);
 		// Oct-slot ownership tags, zero-init (0 = free). octZeroInit is large enough.
 		SpatialHashGIOctCellKey = createStructuredBuffer(SpatialHashGIOctCellCapacity, sizeof(UINT32), true, octZeroInit.data());
+		// Camera ambient probe SH4 (4 float4), zero-init.
+		SpatialHashGICameraProbeSH = createStructuredBuffer(4u, sizeof(float) * 4u, true, octZeroInit.data());
 
 		ScreenProbeGIResolved = createTexture2D(HybridFloat4UAVFormat, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
 

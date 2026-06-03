@@ -623,6 +623,10 @@ private:
 		// (cells start growing beyond it), zw spare. Bounds the working set so far
 		// vistas don't exhaust the cache. Shared by SH and oct (hash-level feature).
 		glm::vec4 SpatialHashLevelParams = glm::vec4(0.0f, 600.0f, 0.0f, 0.0f);
+		// Sky-ambient fallback for cells with no cached GI (uncached / starved oct
+		// slots): rgb = pre-scaled ambient radiance (E/pi units), used instead of
+		// black. a unused. Computed from sky colour * intensity * strength.
+		glm::vec4 SpatialHashSkyAmbient = glm::vec4(0.0f);
 	};
 
 	SpatialHashGIConstant SpatialHashGICB;
@@ -660,6 +664,9 @@ private:
 	// owning cell writes a given oct slot; colliding cells (octIndex aliasing in
 	// large scenes) skip it and fall back to neighbour probes at query time.
 	std::shared_ptr<Buffer> SpatialHashGIOctCellKey;
+	// Single camera-anchored ambient SH4 (4 float4), traced from the camera each
+	// frame; the query uses it as the fallback for uncached cells.
+	std::shared_ptr<Buffer> SpatialHashGICameraProbeSH;
 	// Per-ray scratch written by the RT trace (oct mode) and consumed by the
 	// octahedral blend pass: float4(radiance.rgb, hit distance). Indexed by
 	// probeSlot * OctRaysPerCell + rayIndex. Ray directions are regenerated
@@ -1284,6 +1291,9 @@ private:
 	float RTAOIndirectFloor = 0.55f;
 	// RTAO contact term multiplied into DIRECT diffuse light (0..1).
 	float RTAODirectContactStrength = 0.5f;
+	// Sky-ambient fill strength for uncached spatial-hash GI cells (0 = black, as
+	// before; 1 = full open-sky ambient). Avoids black cells in starved oct slots.
+	float SpatialHashSkyFallbackStrength = 0.5f;
 	float SurfaceBounceStrength = 1.0f;
 	float SurfaceBounceSaturation = 1.0f;
 	float SkyLightingStrength = 0.35f;

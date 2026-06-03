@@ -90,6 +90,12 @@ int3 SpatialHashLevelOffset(uint level)
 // blend pass in SpatialHashDiffuseGI.hlsl.
 RWStructuredBuffer<float4> OctRayData : register(u4);
 
+// Single camera-anchored ambient SH4 (4 float4: c0..c3, c0.w = history count).
+// One extra dispatched thread traces a full-sphere SH from the camera each frame;
+// the query uses it as the fallback for uncached cells (adapts to indoor/outdoor,
+// unlike a fixed sky colour). Shared by SH and oct modes.
+RWStructuredBuffer<float4> CameraProbeSHOut : register(u5);
+
 static const float INV_PI = 1.0f / PI;
 static const float MAX_HIT_DIST = 10000.0f;
 static const float SPATIAL_HASH_MIN_SURFACE_NORMAL_DOT = 0.72f;
@@ -599,6 +605,8 @@ float3 TraceDiffusePath(float3 origin, float3 direction, uint2 noiseCoord, uint 
     return max(SanitizeFloat3(radiance), 0.0f.xxx);
 }
 
+void TraceCameraAmbientProbe(); // defined after RayGenOctahedral
+
 // Octahedral DDGI trace (GIMode==1): one dispatched thread per (probe, ray).
 // Each thread traces a single full-sphere path from the probe's open-space
 // origin and records (radiance, hitDistance) to OctRayData. A later compute
@@ -606,6 +614,13 @@ float3 TraceDiffusePath(float3 origin, float3 direction, uint2 noiseCoord, uint 
 void RayGenOctahedral()
 {
     uint globalRay = DispatchRaysIndex().x;
+    // Extra trailing thread (dispatch width = OctCellCapacity*OctRaysPerCell + 1)
+    // traces the camera ambient probe.
+    if (globalRay == OctCellCapacity * OctRaysPerCell)
+    {
+        TraceCameraAmbientProbe();
+        return;
+    }
     uint raysPerProbe = max(OctRaysPerCell, 1u);
     uint probeIndex = globalRay / raysPerProbe;
     uint rayIndex = globalRay % raysPerProbe;
@@ -655,6 +670,37 @@ void RayGenOctahedral()
     OctRayData[globalRay] = float4(radiance, firstHitDistance);
 }
 
+// One camera-anchored ambient probe: trace a full-sphere SH from the camera and
+// temporally blend it. The query evaluates this SH with the pixel normal as the
+// fallback for uncached cells — it tracks the local irradiance (indoor/outdoor),
+// matching the surrounding GI level far better than a fixed sky colour.
+void TraceCameraAmbientProbe()
+{
+    const uint kCameraProbeRays = 32u;
+    float3 origin = CameraPosition.xyz;
+    float4 rotation = PerFrameRotationQuaternion(FrameCounter);
+    SH4RGB sh = InitSH4RGB();
+    [loop]
+    for (uint r = 0u; r < kCameraProbeRays; ++r)
+    {
+        float3 dir = RotateVectorByQuaternion(SphericalFibonacciDir(r, kCameraProbeRays), rotation);
+        uint2 noiseCoord = uint2((r * 37u) & 1023u, (r * 53u) & 1023u);
+        float ignoredDist;
+        float3 rad = TraceDiffusePath(origin, dir, noiseCoord, r, ignoredDist);
+        AccumulateSH4RGB(sh, ProjectRadianceToSH4RGB(rad, dir, 4.0f * PI), 1.0f);
+    }
+    sh = ScaleSH4RGB(sh, rcp(float(kCameraProbeRays)));
+
+    float4 prev0 = CameraProbeSHOut[0];
+    float prevFrames = max(prev0.w, 0.0f);
+    float accepted = min(prevFrames + 1.0f, 64.0f);
+    float alpha = saturate(1.0f / max(accepted, 1.0f));
+    CameraProbeSHOut[0] = float4(lerp(prev0.xyz, sh.c0, alpha), accepted);
+    CameraProbeSHOut[1] = float4(lerp(CameraProbeSHOut[1].xyz, sh.c1, alpha), 0.0f);
+    CameraProbeSHOut[2] = float4(lerp(CameraProbeSHOut[2].xyz, sh.c2, alpha), 0.0f);
+    CameraProbeSHOut[3] = float4(lerp(CameraProbeSHOut[3].xyz, sh.c3, alpha), 0.0f);
+}
+
 [shader("raygeneration")]
 void rayGen()
 {
@@ -665,6 +711,13 @@ void rayGen()
     }
 
     uint traceIndex = DispatchRaysIndex().x;
+    // Extra trailing thread (dispatch width = HashEntryCount + 1) traces the
+    // camera ambient probe.
+    if (traceIndex == HashEntryCount)
+    {
+        TraceCameraAmbientProbe();
+        return;
+    }
     uint activeCount = min(ActiveCounter[0], ActiveCellCapacity);
     uint traceCount = min(activeCount, HashEntryCount);
     if (traceIndex >= traceCount)

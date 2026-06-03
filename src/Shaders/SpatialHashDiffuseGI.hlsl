@@ -54,6 +54,9 @@ StructuredBuffer<float4> OctRayDataIn : register(t27);
 StructuredBuffer<float4> OctIrradianceIn : register(t28);
 StructuredBuffer<float2> OctDepthIn : register(t29);
 StructuredBuffer<uint> OctCellKeyIn : register(t30);
+// Camera-anchored ambient SH4 (c0..c3), traced from the camera in the RT pass.
+// Used as the fallback for uncached cells (tracks local indoor/outdoor ambient).
+StructuredBuffer<float4> CameraProbeSHIn : register(t31);
 RWStructuredBuffer<float4> OctIrradianceOut : register(u15);
 RWStructuredBuffer<float2> OctDepthOut : register(u16);
 // Per-oct-slot ownership tag, packed (ownerHash16 << 16 | frameStamp16). Because
@@ -132,6 +135,7 @@ cbuffer SpatialHashGIConstant : register(b0)
     float _spatialHashPad;
     float4 DebugDiffuseGIOverride;
     float4 SpatialHashLevelParams; // x=enable, y=base distance (SHaRC cell levels)
+    float4 SpatialHashSkyAmbient;  // rgb = sky-ambient fill for uncached cells (E/pi)
 };
 
 struct SH4RGB
@@ -338,6 +342,28 @@ float3 EvaluateSHDiffuse(SH4RGB sh, float3 normal)
         (2.0f * PI / 3.0f) * (sh.c1 * b1 + sh.c2 * b2 + sh.c3 * b3);
 
     return max(SanitizeFloat3(irradiance), 0.0f.xxx);
+}
+
+// Fallback ambient for uncached cells: the camera-anchored SH (tracks local
+// indoor/outdoor irradiance) evaluated with the pixel normal, in the same E/pi
+// scale as cached GI. Falls back to the fixed sky ambient before the camera
+// probe has accumulated any history.
+float3 EvaluateUncachedAmbient(float3 normal)
+{
+    // SpatialHashSkyAmbient.a carries the fallback strength. The camera probe
+    // sits in open space so its ambient over-brightens occluded corners; scale it
+    // down (and let the user tune) so the fill blends with the surrounding GI.
+    float fallbackScale = SpatialHashSkyAmbient.a;
+    if (CameraProbeSHIn[0].w > 0.0f)
+    {
+        SH4RGB sh;
+        sh.c0 = SanitizeFloat3(CameraProbeSHIn[0].xyz);
+        sh.c1 = SanitizeFloat3(CameraProbeSHIn[1].xyz);
+        sh.c2 = SanitizeFloat3(CameraProbeSHIn[2].xyz);
+        sh.c3 = SanitizeFloat3(CameraProbeSHIn[3].xyz);
+        return max(EvaluateSHDiffuse(sh, normal) * SPATIAL_HASH_DIFFUSE_SCALE * fallbackScale, 0.0f.xxx);
+    }
+    return max(SpatialHashSkyAmbient.rgb, 0.0f.xxx);
 }
 
 SH4RGB LoadTraceSH(uint entryIndex)
@@ -1569,8 +1595,12 @@ void SpatialHashQuery(uint3 DTid : SV_DispatchThreadID)
         }
         else
         {
-            OutGIHashColor[pixelPos] = 0.0f.xxxx;
-            OutGIHashSH[pixelPos] = 0.0f.xxxx;
+            // No cached GI for this cell (uncached / starved oct slot) — fill with
+            // the camera ambient probe instead of black. frames=1 so the
+            // screen-resolve uses it.
+            float3 ambientFill = max(EvaluateUncachedAmbient(pixelNormal), 0.0f.xxx);
+            OutGIHashColor[pixelPos] = float4(ambientFill, 1.0f);
+            OutGIHashSH[pixelPos] = float4(ambientFill, 1.0f);
         }
         return;
     }
@@ -1586,8 +1616,10 @@ void SpatialHashQuery(uint3 DTid : SV_DispatchThreadID)
     }
     else
     {
-        OutGIHashColor[pixelPos] = float4(0.0f.xxx, 0.0f);
-        OutGIHashSH[pixelPos] = float4(0.0f.xxx, 0.0f);
+        // Uncached cell — camera-ambient fill instead of black.
+        float3 ambientFill = max(EvaluateUncachedAmbient(pixelNormal), 0.0f.xxx);
+        OutGIHashColor[pixelPos] = float4(ambientFill, 1.0f);
+        OutGIHashSH[pixelPos] = float4(ambientFill, 1.0f);
     }
 }
 
