@@ -619,6 +619,10 @@ private:
 		float EvictDistanceWeight = 0.7f;    // LRU victim: 0 = age only, 1 = distance only
 		float _spatialHashPad = 0.0f;
 		glm::vec4 DebugDiffuseGIOverride = glm::vec4(0.0f);
+		// SHaRC distance-based cell levels: x = enable (0/1), y = base distance
+		// (cells start growing beyond it), zw spare. Bounds the working set so far
+		// vistas don't exhaust the cache. Shared by SH and oct (hash-level feature).
+		glm::vec4 SpatialHashLevelParams = glm::vec4(0.0f, 600.0f, 0.0f, 0.0f);
 	};
 
 	SpatialHashGIConstant SpatialHashGICB;
@@ -908,6 +912,9 @@ private:
 		// World-space camera position (oct mode biases the probe origin toward the
 		// camera/visible side so the sample center isn't buried in geometry).
 		glm::vec4 CameraPosition = glm::vec4(0.0f);
+		// SHaRC distance-based cell levels (must match SpatialHashGIConstant): x =
+		// enable, y = base distance.
+		glm::vec4 SpatialHashLevelParams = glm::vec4(0.0f, 600.0f, 0.0f, 0.0f);
 	};
 
 	RTSpatialHashGIViewParamCB RTSpatialHashGIViewParam;
@@ -1911,6 +1918,8 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 		UINT32 SpatialHashGIStorageMode = 0;
 		float SpatialHashOctNearConvergenceBias = 0.4f;
 		float SpatialHashEvictDistanceWeight = 0.7f;
+		float SpatialHashLevelEnable = 0.0f;
+		float SpatialHashLevelBaseDistance = 600.0f;
 		UINT32 PathTracingDirectLightSampleCount = 1;
 		UINT32 PathTracingMaxBounces = 4;
 		UINT32 PathTracingSamplesPerPixel = 1;

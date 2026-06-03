@@ -131,6 +131,7 @@ cbuffer SpatialHashGIConstant : register(b0)
     float EvictDistanceWeight;    // LRU victim: 0 = age only, 1 = camera distance only
     float _spatialHashPad;
     float4 DebugDiffuseGIOverride;
+    float4 SpatialHashLevelParams; // x=enable, y=base distance (SHaRC cell levels)
 };
 
 struct SH4RGB
@@ -415,10 +416,32 @@ float3 ReconstructWorldPosition(uint2 pixelPos)
     return mul(float4(viewPosition, 1.0f), InvViewMatrix).xyz;
 }
 
+// SHaRC distance-based cell sizing (must match SpatialHashCellGI.hlsl's copy so
+// insert/query/light-mask keys agree). Disabled -> base CellSize, offset 0, so
+// behaviour is identical to the fixed-grid path when the toggle is off.
+float SpatialHashLeveledCellSize(float3 worldPos, out uint level)
+{
+    float cs = max(CellSize, 1e-3f);
+    level = 0u;
+    if (SpatialHashLevelParams.x < 0.5f)
+        return cs;
+    float3 camPos = mul(float4(0.0f, 0.0f, 0.0f, 1.0f), InvViewMatrix).xyz;
+    float dist = length(worldPos - camPos);
+    float fl = floor(max(log2(max(dist / max(SpatialHashLevelParams.y, 1e-3f), 1.0f)), 0.0f));
+    level = (uint)fl;
+    return cs * exp2(fl);
+}
+
+int3 SpatialHashLevelOffset(uint level)
+{
+    return int3(level, level, level) * int3(1737, 9277, 4513);
+}
+
 int3 GetSpatialHashCell(float3 worldPos)
 {
-    float safeCellSize = max(CellSize, 1e-3f);
-    return int3(floor(worldPos / safeCellSize));
+    uint level;
+    float cs = SpatialHashLeveledCellSize(worldPos, level);
+    return int3(floor(worldPos / cs)) + SpatialHashLevelOffset(level);
 }
 
 uint EncodeNormalBits(float3 normal)
@@ -430,12 +453,13 @@ uint EncodeNormalBits(float3 normal)
 
 int ComputePlaneBin(float3 worldPos, float3 normal)
 {
-    float safeCellSize = max(CellSize, 1e-3f);
+    uint level;
+    float cs = SpatialHashLeveledCellSize(worldPos, level);
     normal = SafeNormalize(normal, float3(0.0f, 1.0f, 0.0f));
     // Half-cell plane bins let one xyz cell keep separate representatives
     // for parallel or near-parallel surfaces, while the lookup still checks
     // +/- one bin so cache hits do not disappear at quantization boundaries.
-    return int(floor((dot(worldPos, normal) / safeCellSize) * 2.0f + 0.5f));
+    return int(floor((dot(worldPos, normal) / cs) * 2.0f + 0.5f));
 }
 
 uint HashCellKeyFromBits(int3 cell, uint normalBits, int planeBin)
@@ -704,7 +728,8 @@ float ComputeSurfaceLobeWeight(uint slot, float3 queryWorldPos, float3 queryNorm
     if (normalDot < SPATIAL_HASH_MIN_SURFACE_NORMAL_DOT)
         return 0.0f;
 
-    float safeCellSize = max(CellSize, 1e-3f);
+    uint hashLevel;
+    float safeCellSize = SpatialHashLeveledCellSize(queryWorldPos, hashLevel);
     float planeDelta = abs(dot(queryWorldPos - storedPosition.xyz, storedNormal));
     float planeReject = safeCellSize * SPATIAL_HASH_PLANE_REJECT_CELL_SCALE;
     if (planeDelta > planeReject)
@@ -800,10 +825,12 @@ bool LoadCachedSHForCell(int3 cell, float3 normal, float3 queryWorldPos,
 
 bool LoadInterpolatedSH(float3 worldPos, float3 normal, out SH4RGB outSH, out float outHistoryFrames)
 {
-    float safeCellSize = max(CellSize, 1e-3f);
+    uint hashLevel;
+    float safeCellSize = SpatialHashLeveledCellSize(worldPos, hashLevel);
+    int3 levelOffset = SpatialHashLevelOffset(hashLevel);
     float3 gridPos = worldPos / safeCellSize;
     float3 baseCellFloat = floor(gridPos);
-    int3 baseCell = int3(baseCellFloat);
+    int3 baseCell = int3(baseCellFloat) + levelOffset;
     float3 cellFrac = saturate(gridPos - baseCellFloat);
 
     SH4RGB weightedSH = InitSH4RGB();
@@ -880,7 +907,9 @@ bool LoadSmoothedSH(float3 worldPos, float3 normal, out SH4RGB outSH, out float 
         return hasBase;
     }
 
-    float safeCellSize = max(CellSize, 1e-3f);
+    uint hashLevel;
+    float safeCellSize = SpatialHashLeveledCellSize(worldPos, hashLevel);
+    int3 levelOffset = SpatialHashLevelOffset(hashLevel);
     float3 gridPos = worldPos / safeCellSize;
     int3 baseCell = int3(floor(gridPos));
 
@@ -897,14 +926,15 @@ bool LoadSmoothedSH(float3 worldPos, float3 normal, out SH4RGB outSH, out float 
             [unroll]
             for (int x = -1; x <= 1; ++x)
             {
-                int3 cell = baseCell + int3(x, y, z);
-                float3 cellCenter = float3(cell) + 0.5f.xxx;
+                int3 rawCell = baseCell + int3(x, y, z);
+                float3 cellCenter = float3(rawCell) + 0.5f.xxx;
                 float3 delta = gridPos - cellCenter;
                 float distSq = dot(delta, delta);
                 float weight = exp(-distSq * 1.35f);
                 if (weight <= 1e-4f)
                     continue;
 
+                int3 cell = rawCell + levelOffset; // key uses level-offset coords
                 SH4RGB cachedSH = InitSH4RGB();
                 float cachedFrames = 0.0f;
                 float bw = 0.0f;
@@ -1010,8 +1040,11 @@ void SpatialHashUpdate(uint3 DTid : SV_DispatchThreadID)
     }
     else
     {
-        float3 cellCenter = (float3(GetSpatialHashCell(worldPos)) + 0.5f.xxx) * max(CellSize, 1e-3f);
-        normalizedDist = saturate(length((worldPos - cellCenter) / max(CellSize, 1e-3f)) * 1.1547005f);
+        // Use the RAW (non-level-offset) leveled grid for the cell centre.
+        uint lvl;
+        float cs = SpatialHashLeveledCellSize(worldPos, lvl);
+        float3 cellCenter = (floor(worldPos / cs) + 0.5f.xxx) * cs;
+        normalizedDist = saturate(length((worldPos - cellCenter) / cs) * 1.1547005f);
     }
     uint score = min(uint(normalizedDist * 16777215.0f), 16777215u);
     score = (score << 8u) | (HashUInt(pixelPos.x * 1973u + pixelPos.y * 9277u + FrameIndex * 26699u) & 255u);
@@ -1168,7 +1201,8 @@ float OctProbeSurfaceWeight(uint slot, float3 queryPos, float3 queryNormal)
     float4 storedPosition = SanitizeFloat4(CellPositionIn[slot]);
     if (storedPosition.w <= 0.0f)
         return 0.0f;
-    float safeCellSize = max(CellSize, 1e-3f);
+    uint hashLevel;
+    float safeCellSize = SpatialHashLeveledCellSize(queryPos, hashLevel);
     queryNormal = SafeNormalize(queryNormal, float3(0.0f, 1.0f, 0.0f));
     float planeDelta = abs(dot(queryPos - storedPosition.xyz, queryNormal));
     return saturate(1.0f - smoothstep(safeCellSize * 0.25f, safeCellSize * 0.85f, planeDelta));
@@ -1179,12 +1213,13 @@ float OctProbeSurfaceWeight(uint slot, float3 queryPos, float3 queryNormal)
 // trilinear * surface weight, sampling each probe in the pixel-normal direction.
 // Removes the per-cell flat-block look while suppressing corner leak. (Full
 // depth-based Chebyshev visibility weighting arrives in Stage B.)
-float3 SampleOctIrradianceInterpolated(float3 worldPos, float3 evalNormal, float3 cacheNormal)
+float3 SampleOctIrradianceInterpolated(float3 worldPos, float3 evalNormal, float3 cacheNormal, uint hashLevel)
 {
-    float safeCellSize = max(CellSize, 1e-3f);
+    float safeCellSize = max(CellSize, 1e-3f) * exp2((float)hashLevel);
+    int3 levelOffset = SpatialHashLevelOffset(hashLevel);
     float3 gridPos = worldPos / safeCellSize;
     float3 baseF = floor(gridPos);
-    int3 baseCell = int3(baseF);
+    int3 baseCell = int3(baseF) + levelOffset;
     float3 frac3 = saturate(gridPos - baseF);
 
     float3 sumRadiance = 0.0f.xxx;
@@ -1502,7 +1537,30 @@ void SpatialHashQuery(uint3 DTid : SV_DispatchThreadID)
     // direction. Output is E/pi, matching the SH path's scale.
     if (GIMode == 1u)
     {
-        float3 octRadiance = SampleOctIrradianceInterpolated(worldPos, pixelNormal, cacheNormal);
+        // Stochastic lookup dither: jitter the query position within the tangent
+        // plane by a fraction of a cell, varying per pixel AND per frame. A pixel
+        // sitting on a deterministically-unpopulated cell (corner where a colliding
+        // cell starves the oct slot, or a level/cell seam) otherwise stays black
+        // while the camera is still; jitter makes it sample slightly different
+        // neighbour cells each frame and the screen-resolve temporal averages them,
+        // filling the gap. The cache (insert) is NOT jittered, so accumulation
+        // stays stable.
+        uint primaryLevel;
+        float octQueryCellSize = SpatialHashLeveledCellSize(worldPos, primaryLevel);
+        uint jitterSeed = pixelPos.x * 1973u + pixelPos.y * 9277u + FrameIndex * 26699u;
+        float2 jitter2 = float2(HashToUnitFloat(jitterSeed), HashToUnitFloat(jitterSeed ^ 0xb5297a4du)) - 0.5f;
+        float3 jt = SafeNormalize(cross(cacheNormal, abs(cacheNormal.y) < 0.9f ? float3(0.0f, 1.0f, 0.0f) : float3(1.0f, 0.0f, 0.0f)), float3(1.0f, 0.0f, 0.0f));
+        float3 jb = cross(cacheNormal, jt);
+        float3 octQueryPos = worldPos + (jt * jitter2.x + jb * jitter2.y) * (octQueryCellSize * 0.5f);
+        SpatialHashLeveledCellSize(octQueryPos, primaryLevel);
+        float3 octRadiance = SampleOctIrradianceInterpolated(octQueryPos, pixelNormal, cacheNormal, primaryLevel);
+        // At a level boundary the just-crossed primary-level cells may not be
+        // populated yet (transient black). Fall back to the coarser level, which
+        // far regions keep populated, then the finer level — bridging the gap.
+        if (octRadiance.x < 0.0f && SpatialHashLevelParams.x >= 0.5f)
+            octRadiance = SampleOctIrradianceInterpolated(octQueryPos, pixelNormal, cacheNormal, primaryLevel + 1u);
+        if (octRadiance.x < 0.0f && SpatialHashLevelParams.x >= 0.5f && primaryLevel > 0u)
+            octRadiance = SampleOctIrradianceInterpolated(octQueryPos, pixelNormal, cacheNormal, primaryLevel - 1u);
         if (octRadiance.x >= 0.0f)
         {
             octRadiance = max(SanitizeFloat3(octRadiance), 0.0f.xxx);
@@ -1623,6 +1681,12 @@ void SpatialHashScreenResolve(uint3 DTid : SV_DispatchThreadID)
             if (weight <= 1e-4f)
                 continue;
             float4 sample = OutGIHashColor[nPx];
+            // Skip no-data (sentinel/black) samples — frames<=0 means the cell
+            // query found nothing. Including them would darken the gather and
+            // spread the black; excluding them lets a black centre pixel be filled
+            // from its valid same-surface neighbours.
+            if (sample.w <= 0.0f)
+                continue;
             sumRgb    += sample.xyz * weight;
             sumFrames += sample.w  * weight;
             sumWeight += weight;

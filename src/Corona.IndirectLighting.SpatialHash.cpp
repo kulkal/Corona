@@ -273,6 +273,7 @@ void Corona::SpatialHashGIPass()
 	RTSpatialHashGIViewParam.OctCellCapacity = SpatialHashGIOctCellCapacity;
 	RTSpatialHashGIViewParam.OctRaysPerCell = SpatialHashGIOctRaysPerCell;
 	RTSpatialHashGIViewParam.CameraPosition = glm::vec4(glm::vec3(InvViewMat[3]), 0.0f);
+	RTSpatialHashGIViewParam.SpatialHashLevelParams = SpatialHashGICB.SpatialHashLevelParams;
 	FillPointLightParams(
 		RTSpatialHashGIViewParam.PointLights,
 		RTSpatialHashGIViewParam.PointLightCount,

@@ -7476,6 +7476,8 @@ Corona::RenderFrameSourceState Corona::CaptureRenderFrameSourceState() const
 	state.SpatialHashGIStorageMode = SpatialHashGICB.GIMode;
 	state.SpatialHashOctNearConvergenceBias = SpatialHashGICB.OctNearConvergenceBias;
 	state.SpatialHashEvictDistanceWeight = SpatialHashGICB.EvictDistanceWeight;
+	state.SpatialHashLevelEnable = SpatialHashGICB.SpatialHashLevelParams.x;
+	state.SpatialHashLevelBaseDistance = SpatialHashGICB.SpatialHashLevelParams.y;
 	state.PathTracingDirectLightSampleCount = PathTracingViewParam.DirectLightSampleCount;
 	state.PathTracingMaxBounces = PathTracingViewParam.MaxBounces;
 	state.PathTracingSamplesPerPixel = PathTracingViewParam.SamplesPerPixel;
@@ -7585,6 +7587,8 @@ void Corona::ApplyRenderFrameSourceState(const RenderFrameSourceState& state)
 	RTSpatialHashGIViewParam.GIMode = state.SpatialHashGIStorageMode;
 	SpatialHashGICB.OctNearConvergenceBias = state.SpatialHashOctNearConvergenceBias;
 	SpatialHashGICB.EvictDistanceWeight = state.SpatialHashEvictDistanceWeight;
+	SpatialHashGICB.SpatialHashLevelParams.x = state.SpatialHashLevelEnable;
+	SpatialHashGICB.SpatialHashLevelParams.y = state.SpatialHashLevelBaseDistance;
 	PathTracingViewParam.DirectLightSampleCount = state.PathTracingDirectLightSampleCount;
 	PathTracingViewParam.MaxBounces = state.PathTracingMaxBounces;
 	PathTracingViewParam.SamplesPerPixel = state.PathTracingSamplesPerPixel;
@@ -7658,6 +7662,8 @@ void Corona::SyncCurrentLightingSettingsToFrameSourceState()
 		state.SpatialHashGIStorageMode = SpatialHashGICB.GIMode;
 		state.SpatialHashOctNearConvergenceBias = SpatialHashGICB.OctNearConvergenceBias;
 		state.SpatialHashEvictDistanceWeight = SpatialHashGICB.EvictDistanceWeight;
+		state.SpatialHashLevelEnable = SpatialHashGICB.SpatialHashLevelParams.x;
+		state.SpatialHashLevelBaseDistance = SpatialHashGICB.SpatialHashLevelParams.y;
 		state.PathTracingDirectLightSampleCount = PathTracingViewParam.DirectLightSampleCount;
 	};
 
@@ -13110,6 +13116,14 @@ void Corona::DrawEditorModeOverlay()
 						if (ImGui::SliderFloat("Oct Near Convergence Bias", &SpatialHashGICB.OctNearConvergenceBias, 0.0f, 1.0f, "%.2f"))
 							bLightingChanged = true;
 						if (ImGui::SliderFloat("Cell Evict Distance Weight", &SpatialHashGICB.EvictDistanceWeight, 0.0f, 1.0f, "%.2f"))
+							bLightingChanged = true;
+						bool bDistanceLevels = SpatialHashGICB.SpatialHashLevelParams.x > 0.5f;
+						if (ImGui::Checkbox("Distance Cell Levels (SHaRC)", &bDistanceLevels))
+						{
+							SpatialHashGICB.SpatialHashLevelParams.x = bDistanceLevels ? 1.0f : 0.0f;
+							bLightingChanged = true;
+						}
+						if (ImGui::SliderFloat("Level Base Distance", &SpatialHashGICB.SpatialHashLevelParams.y, 100.0f, 3000.0f, "%.0f"))
 							bLightingChanged = true;
 					}
 					ImGui::TreePop();

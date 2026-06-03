@@ -61,7 +61,29 @@ cbuffer ViewParameter : register(b0)
     uint PointLightCount;
     float3 PointLightPadding;
     float4 CameraPosition; // world-space camera (oct origin camera-bias)
+    float4 SpatialHashLevelParams; // x=enable, y=base distance (SHaRC cell levels)
 };
+
+// SHaRC distance-based cell sizing: far cells are exponentially larger so far
+// vistas need few cells (bounded working set). Disabled -> base CellSize. MUST
+// match the diffuse shader's copy so insert/lookup/light-mask keys agree.
+float SpatialHashLeveledCellSize(float3 worldPos, out uint level)
+{
+    float cs = max(CellSize, 1e-3f);
+    level = 0u;
+    if (SpatialHashLevelParams.x < 0.5f)
+        return cs;
+    float dist = length(worldPos - CameraPosition.xyz);
+    float fl = floor(max(log2(max(dist / max(SpatialHashLevelParams.y, 1e-3f), 1.0f)), 0.0f));
+    level = (uint)fl;
+    return cs * exp2(fl);
+}
+
+// Per-level integer offset so cells at different levels never share a key.
+int3 SpatialHashLevelOffset(uint level)
+{
+    return int3(level, level, level) * int3(1737, 9277, 4513);
+}
 
 // Per-ray output for octahedral DDGI (GIMode==1): rgb radiance + hit distance.
 // Indexed by probeSlot * OctRaysPerCell + rayIndex. Consumed by the octahedral
@@ -248,8 +270,9 @@ uint ComputeLocalLightMask(float3 worldPos, float3 normal)
 
 int3 GetSpatialHashCell(float3 worldPos)
 {
-    float safeCellSize = max(CellSize, 1e-3f);
-    return int3(floor(worldPos / safeCellSize));
+    uint level;
+    float cs = SpatialHashLeveledCellSize(worldPos, level);
+    return int3(floor(worldPos / cs)) + SpatialHashLevelOffset(level);
 }
 
 uint EncodeNormalBits(float3 normal)
@@ -261,9 +284,10 @@ uint EncodeNormalBits(float3 normal)
 
 int ComputePlaneBin(float3 worldPos, float3 normal)
 {
-    float safeCellSize = max(CellSize, 1e-3f);
+    uint level;
+    float cs = SpatialHashLeveledCellSize(worldPos, level);
     normal = SafeNormalize(normal, float3(0.0f, 1.0f, 0.0f));
-    return int(floor((dot(worldPos, normal) / safeCellSize) * 2.0f + 0.5f));
+    return int(floor((dot(worldPos, normal) / cs) * 2.0f + 0.5f));
 }
 
 // Cell key. GIMode==1 (octahedral DDGI): one probe per cell -> key depends on
