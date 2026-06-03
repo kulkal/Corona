@@ -10768,13 +10768,13 @@ void Corona::LoadAssets()
 		const size_t octZeroFloats = std::max(static_cast<size_t>(octIrradianceElements) * 4u,
 		                                      static_cast<size_t>(octDepthElements) * 2u);
 		std::vector<float> octZeroInit(octZeroFloats, 0.0f);
-		for (UINT atlasIndex = 0; atlasIndex < 2; ++atlasIndex)
-		{
-			SpatialHashGIOctIrradiance[atlasIndex] = createStructuredBuffer(octIrradianceElements, sizeof(float) * 4u, true, octZeroInit.data());
-			SpatialHashGIOctDepth[atlasIndex] = createStructuredBuffer(octDepthElements, sizeof(float) * 2u, true, octZeroInit.data());
-		}
+		// Only index [0] is used (resolved history). [1] left null to save memory.
+		SpatialHashGIOctIrradiance[0] = createStructuredBuffer(octIrradianceElements, sizeof(float) * 4u, true, octZeroInit.data());
+		SpatialHashGIOctDepth[0] = createStructuredBuffer(octDepthElements, sizeof(float) * 2u, true, octZeroInit.data());
 		const UINT32 octRayDataElements = SpatialHashGIOctCellCapacity * SpatialHashGIOctRaysPerCell;
 		SpatialHashGIOctRayData = createStructuredBuffer(octRayDataElements, sizeof(float) * 4u, true);
+		// Oct-slot ownership tags, zero-init (0 = free). octZeroInit is large enough.
+		SpatialHashGIOctCellKey = createStructuredBuffer(SpatialHashGIOctCellCapacity, sizeof(UINT32), true, octZeroInit.data());
 
 		ScreenProbeGIResolved = createTexture2D(HybridFloat4UAVFormat, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
 

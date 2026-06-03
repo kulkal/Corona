@@ -53,14 +53,30 @@ RWStructuredBuffer<uint> CellLightMaskOut : register(u14);
 StructuredBuffer<float4> OctRayDataIn : register(t27);
 StructuredBuffer<float4> OctIrradianceIn : register(t28);
 StructuredBuffer<float2> OctDepthIn : register(t29);
+StructuredBuffer<uint> OctCellKeyIn : register(t30);
 RWStructuredBuffer<float4> OctIrradianceOut : register(u15);
 RWStructuredBuffer<float2> OctDepthOut : register(u16);
+// Per-oct-slot ownership tag, packed (ownerHash16 << 16 | frameStamp16). Because
+// octIndex = hashSlot & (OctCellCapacity-1) aliases unrelated cells in large
+// scenes, only ONE cell may own an oct slot at a time; colliding cells skip it
+// and fall back to neighbour probes (no corrupt bright/dark dots). Ownership is
+// self-cleaning: the owner re-stamps every frame; if its stamp goes stale (it
+// stopped being visible / was evicted) a colliding visible cell takes over.
+RWStructuredBuffer<uint> OctCellKeyOut : register(u17);
+#define OCT_OWNER_STALE_FRAMES 60u
+
+// 16-bit non-zero ownership hash of a cell key (0 is reserved for "free").
+uint OctOwnerHash(uint key)
+{
+    uint h = HashUInt(key) & 0xffffu;
+    return h == 0u ? 1u : h;
+}
 
 // Must match Corona::SpatialHashGIOct* constants.
 #define OCT_IRRADIANCE_RES 8u
 #define OCT_RAYS_PER_CELL 64u
 #define OCT_IRRADIANCE_TEXELS (OCT_IRRADIANCE_RES * OCT_IRRADIANCE_RES)
-#define OCT_DEPTH_RES 16u
+#define OCT_DEPTH_RES 8u
 #define OCT_DEPTH_TEXELS (OCT_DEPTH_RES * OCT_DEPTH_RES)
 static const float OCT_MAX_HISTORY_FRAMES = 256.0f;
 static const float OCT_NEW_CELL_RAMP_FRAMES = 6.0f;
@@ -1198,6 +1214,13 @@ float3 SampleOctIrradianceInterpolated(float3 worldPos, float3 evalNormal, float
                     continue;
 
                 uint octIndex = slot & (OctCellCapacity - 1u);
+                // Ownership: skip probes whose oct slot belongs to a DIFFERENT
+                // (colliding) cell — their irradiance/depth isn't ours. The blend
+                // uses only correctly-owned neighbours, eliminating the corrupt
+                // bright/dark dots from octIndex aliasing in large scenes.
+                if (OctOwnerHash(key) != (OctCellKeyIn[octIndex] >> 16u))
+                    continue;
+
                 float4 probe = SampleOctIrradiance(octIndex, evalNormal);
                 if (probe.w <= 0.0f)
                     continue;
@@ -1242,22 +1265,59 @@ float3 SampleOctIrradianceInterpolated(float3 worldPos, float3 evalNormal, float
 // persistent atlas. Atlas is indexed by hashSlot & (OctCellCapacity-1) so the
 // history follows a cell (stable key->slot) rather than the transient probe
 // order; collisions only occur when active cells approach OctCellCapacity.
+groupshared uint gOctOwned;  // 1 if this group's cell owns its oct slot this frame
+groupshared uint gOctFresh;  // 1 if it just took the slot over (reset history)
+
 [numthreads(64, 1, 1)]
-void SpatialHashOctBlend(uint3 DTid : SV_DispatchThreadID)
+void SpatialHashOctBlend(uint3 DTid : SV_DispatchThreadID, uint groupIndex : SV_GroupIndex)
 {
     uint gid = DTid.x;
     uint probeIndex = gid / OCT_IRRADIANCE_TEXELS;
     uint texelIndex = gid % OCT_IRRADIANCE_TEXELS;
 
+    // Group-uniform validity (one group == one probe == 64 texels), so every
+    // thread reaches the ownership barrier together.
     uint activeCount = min(ActiveCounterIn[0], ActiveCellCapacity);
     uint octProbeCount = min(activeCount, OctCellCapacity);
-    if (probeIndex >= octProbeCount)
-        return;
-
-    uint slot = ActiveCellSlotsIn[probeIndex];
-    if (slot >= HashEntryCount || ResolvedKeysIn[slot] == 0u)
-        return;
+    bool valid = (probeIndex < octProbeCount);
+    uint slot = valid ? ActiveCellSlotsIn[probeIndex] : 0u;
+    uint cellKey = valid ? ResolvedKeysIn[slot] : 0u;
+    valid = valid && (slot < HashEntryCount) && (cellKey != 0u);
     uint octIndex = slot & (OctCellCapacity - 1u);
+
+    // Claim oct-slot ownership (leader thread), broadcast to the group. Only the
+    // owning cell writes this slot; colliding cells skip it (the query then falls
+    // back to neighbour probes). Self-cleaning via a 16-bit frame stamp.
+    if (groupIndex == 0u)
+    {
+        gOctOwned = 0u;
+        gOctFresh = 0u;
+        if (valid)
+        {
+            uint myHash = OctOwnerHash(cellKey);
+            uint curStamp = FrameIndex & 0xffffu;
+            uint packed = OctCellKeyOut[octIndex];
+            uint ownerHash = packed >> 16u;
+            uint ownerStamp = packed & 0xffffu;
+            uint ageStamp = (curStamp - ownerStamp) & 0xffffu;
+            bool takeable = (ownerHash == 0u) || (ownerHash == myHash) || (ageStamp > OCT_OWNER_STALE_FRAMES);
+            if (takeable)
+            {
+                uint desired = (myHash << 16u) | curStamp;
+                uint prev = 0u;
+                InterlockedCompareExchange(OctCellKeyOut[octIndex], packed, desired, prev);
+                if (prev == packed)
+                {
+                    gOctOwned = 1u;
+                    gOctFresh = (ownerHash != myHash) ? 1u : 0u;
+                }
+            }
+        }
+    }
+    GroupMemoryBarrierWithGroupSync();
+    if (gOctOwned == 0u)
+        return; // a colliding cell owns this oct slot this frame — skip writing
+    bool octFresh = (gOctFresh != 0u);
 
     uint tx = texelIndex % OCT_IRRADIANCE_RES;
     uint ty = texelIndex / OCT_IRRADIANCE_RES;
@@ -1295,7 +1355,8 @@ void SpatialHashOctBlend(uint3 DTid : SV_DispatchThreadID)
 
     uint outIdx = octIndex * OCT_IRRADIANCE_TEXELS + texelIndex;
     float4 prev = SanitizeFloat4(OctIrradianceOut[outIdx]);
-    float prevFrames = max(prev.w, 0.0f);
+    // Fresh take-over of a (possibly stale) oct slot -> ignore inherited history.
+    float prevFrames = octFresh ? 0.0f : max(prev.w, 0.0f);
 
     // Near-camera cells adapt faster: cap their accumulated history shorter so
     // they reach a stable value in fewer frames. Strength is OctNearConvergenceBias
@@ -1360,6 +1421,10 @@ void SpatialHashOctDepthBlend(uint3 DTid : SV_DispatchThreadID)
     if (slot >= HashEntryCount || ResolvedKeysIn[slot] == 0u)
         return;
     uint octIndex = slot & (OctCellCapacity - 1u);
+    // Only the owning cell (set by the irradiance blend earlier this frame) writes
+    // this oct slot's depth; colliding cells skip so they don't corrupt it.
+    if (OctOwnerHash(ResolvedKeysIn[slot]) != (OctCellKeyOut[octIndex] >> 16u))
+        return;
 
     uint tx = texelIndex % OCT_DEPTH_RES;
     uint ty = texelIndex / OCT_DEPTH_RES;

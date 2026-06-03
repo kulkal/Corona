@@ -583,10 +583,10 @@ private:
 	// Storage (per probe): irradiance 8x8 (6x6 interior + 1px border) float4,
 	// depth 16x16 (14x14 interior + 1px border) float2. "Balanced" regime:
 	// 64K probes x 64 rays/probe, ~0.4GB (trace+resolved x irradiance+depth).
-	static constexpr UINT32 SpatialHashGIOctCellCapacity = 1u << 16;     // 64K probes
+	static constexpr UINT32 SpatialHashGIOctCellCapacity = 1u << 18;     // 256K probes (4x: fewer octIndex collisions)
 	static constexpr UINT32 SpatialHashGIOctRaysPerCell = 64u;           // full-sphere rays per probe/frame
-	static constexpr UINT32 SpatialHashGIOctIrradianceRes = 8u;          // incl 1px border (6x6 interior)
-	static constexpr UINT32 SpatialHashGIOctDepthRes = 16u;              // incl 1px border (14x14 interior)
+	static constexpr UINT32 SpatialHashGIOctIrradianceRes = 8u;          // 8x8 directions
+	static constexpr UINT32 SpatialHashGIOctDepthRes = 8u;               // 8x8 (smaller, to afford 4x capacity)
 	static constexpr UINT32 SpatialHashGIOctIrradianceTexels = SpatialHashGIOctIrradianceRes * SpatialHashGIOctIrradianceRes;
 	static constexpr UINT32 SpatialHashGIOctDepthTexels = SpatialHashGIOctDepthRes * SpatialHashGIOctDepthRes;
 	enum class SpatialHashGIStorageMode : UINT32 { SH = 0u, Octahedral = 1u };
@@ -652,6 +652,10 @@ private:
 	//   OctDepth:      float2 (mean hit distance, mean distance^2) for Chebyshev
 	std::shared_ptr<Buffer> SpatialHashGIOctIrradiance[2];
 	std::shared_ptr<Buffer> SpatialHashGIOctDepth[2];
+	// Per-oct-slot ownership tag (packed ownerHash16<<16 | frameStamp16). Only the
+	// owning cell writes a given oct slot; colliding cells (octIndex aliasing in
+	// large scenes) skip it and fall back to neighbour probes at query time.
+	std::shared_ptr<Buffer> SpatialHashGIOctCellKey;
 	// Per-ray scratch written by the RT trace (oct mode) and consumed by the
 	// octahedral blend pass: float4(radiance.rgb, hit distance). Indexed by
 	// probeSlot * OctRaysPerCell + rayIndex. Ray directions are regenerated

@@ -81,8 +81,10 @@ void Corona::InitSpatialHashGIPass()
 		pso->BindSRV("OctRayDataIn", 27, 1);
 		pso->BindSRV("OctIrradianceIn", 28, 1);
 		pso->BindSRV("OctDepthIn", 29, 1);
+		pso->BindSRV("OctCellKeyIn", 30, 1);
 		pso->BindUAV("OctIrradianceOut", 15);
 		pso->BindUAV("OctDepthOut", 16);
+		pso->BindUAV("OctCellKeyOut", 17);
 		pso->BindCBV("SpatialHashGIConstant", 0, sizeof(SpatialHashGIConstant));
 
 		if (!pso->InitCS(GetAssetFullPath(L"Shaders\\SpatialHashDiffuseGI.hlsl"), entryPoint))
@@ -428,12 +430,15 @@ void Corona::SpatialHashGIPass()
 	if (bUseOct)
 	{
 		renderBackend->TransitionBuffer(SpatialHashGIOctIrradiance[0].get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
+		if (SpatialHashGIOctCellKey)
+			renderBackend->TransitionBuffer(SpatialHashGIOctCellKey.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
 		SpatialHashGIOctBlendPSO->SetBufferSRV("ActiveCellSlotsIn", SpatialHashGIActiveCellSlots.get());
 		SpatialHashGIOctBlendPSO->SetBufferSRV("ActiveCounterIn", SpatialHashGIActiveCounter.get());
 		SpatialHashGIOctBlendPSO->SetBufferSRV("ResolvedKeysIn", SpatialHashGIResolvedKeys[cacheIndex].get());
 		SpatialHashGIOctBlendPSO->SetBufferSRV("CellPositionIn", SpatialHashGICellPosition.get());
 		SpatialHashGIOctBlendPSO->SetBufferSRV("OctRayDataIn", SpatialHashGIOctRayData.get());
 		SpatialHashGIOctBlendPSO->SetBufferUAV("OctIrradianceOut", SpatialHashGIOctIrradiance[0].get());
+		SpatialHashGIOctBlendPSO->SetBufferUAV("OctCellKeyOut", SpatialHashGIOctCellKey.get());
 		SpatialHashGIOctBlendPSO->SetCBVValue("SpatialHashGIConstant", &SpatialHashGICB);
 		SpatialHashGIOctBlendPSO->Apply();
 		const UINT32 octBlendThreads = SpatialHashGIOctCellCapacity * SpatialHashGIOctIrradianceTexels;
@@ -450,12 +455,15 @@ void Corona::SpatialHashGIPass()
 			SpatialHashGIOctDepthBlendPSO->SetBufferSRV("ResolvedKeysIn", SpatialHashGIResolvedKeys[cacheIndex].get());
 			SpatialHashGIOctDepthBlendPSO->SetBufferSRV("OctRayDataIn", SpatialHashGIOctRayData.get());
 			SpatialHashGIOctDepthBlendPSO->SetBufferUAV("OctDepthOut", SpatialHashGIOctDepth[0].get());
+			SpatialHashGIOctDepthBlendPSO->SetBufferUAV("OctCellKeyOut", SpatialHashGIOctCellKey.get());
 			SpatialHashGIOctDepthBlendPSO->SetCBVValue("SpatialHashGIConstant", &SpatialHashGICB);
 			SpatialHashGIOctDepthBlendPSO->Apply();
 			const UINT32 octDepthThreads = SpatialHashGIOctCellCapacity * SpatialHashGIOctDepthTexels;
 			renderBackend->Dispatch((octDepthThreads + 63u) / 64u, 1u, 1u);
 			renderBackend->TransitionBuffer(SpatialHashGIOctDepth[0].get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
 		}
+		if (SpatialHashGIOctCellKey)
+			renderBackend->TransitionBuffer(SpatialHashGIOctCellKey.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
 	}
 
 	renderBackend->TransitionTexture(DiffuseGIHashCached.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
@@ -479,6 +487,7 @@ void Corona::SpatialHashGIPass()
 	SpatialHashGIQueryPSO->SetBufferSRV("ResolvedSH3In", SpatialHashGIResolvedSH[cacheIndex][3].get());
 	SpatialHashGIQueryPSO->SetBufferSRV("OctIrradianceIn", SpatialHashGIOctIrradiance[0].get());
 	SpatialHashGIQueryPSO->SetBufferSRV("OctDepthIn", SpatialHashGIOctDepth[0].get());
+	SpatialHashGIQueryPSO->SetBufferSRV("OctCellKeyIn", SpatialHashGIOctCellKey.get());
 	SpatialHashGIQueryPSO->SetTextureUAV("OutGIHashColor", DiffuseGIHashCached.get());
 	SpatialHashGIQueryPSO->SetTextureUAV("OutGIHashSH", DiffuseGIHashCachedAux.get());
 	SpatialHashGIQueryPSO->SetCBVValue("SpatialHashGIConstant", &SpatialHashGICB);
