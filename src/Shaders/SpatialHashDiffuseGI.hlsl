@@ -548,36 +548,20 @@ float ComputeSurfaceLobeWeight(uint slot, float3 queryWorldPos, float3 queryNorm
     return saturate(normalWeight * planeWeight);
 }
 
-// Neighbor-cell fallback tuning (hot-reloadable). When a cell's own slot is
-// empty (newly visible, off-screen and not re-resolved, or sparse at distance),
-// pull radiance from adjacent cells. ComputeSurfaceLobeWeight already rejects
-// any candidate whose normal/plane doesn't match the query surface, so widening
-// the spatial search cannot leak light across walls or differently-oriented
-// surfaces. 1 = on. The neighbor pass only runs when the exact cell missed, so
-// the common (hit) case keeps its original cost.
-#ifndef SPATIAL_HASH_NEIGHBOR_FALLBACK
-#define SPATIAL_HASH_NEIGHBOR_FALLBACK 1
-#endif
-// Exact-cell score below which we expand to neighbors.
-#ifndef SPATIAL_HASH_NEIGHBOR_FALLBACK_THRESHOLD
-#define SPATIAL_HASH_NEIGHBOR_FALLBACK_THRESHOLD 0.10f
-#endif
-// Relative weight of a neighbor hit vs the exact cell (keeps the own cell
-// dominant when both are present).
-#ifndef SPATIAL_HASH_NEIGHBOR_FALLBACK_WEIGHT
-#define SPATIAL_HASH_NEIGHBOR_FALLBACK_WEIGHT 0.6f
-#endif
-
-// Scan one cell's plane bins for a leak-safe resolved-SH match and keep the
-// best-scoring candidate. spatialWeight biases own-cell over neighbor hits.
-void AccumulateCachedCellSH(
-    int3 cell, int basePlaneBin, float3 normal, float3 queryWorldPos, float spatialWeight,
-    inout float bestScore, inout SH4RGB bestSH, inout float bestHistoryFrames, inout float bestWeight)
+bool LoadCachedSHForCell(int3 cell, float3 normal, float3 queryWorldPos,
+                          out SH4RGB sh, out float historyFrames, out float bilateralWeight)
 {
-    // [loop] (not [unroll]): this helper is inlined at several call sites
-    // (own cell + neighbors); unrolling the plane-bin scan at each made the
-    // DXC compile explode. Rolling keeps the shader small and fast to compile.
-    [loop]
+    bilateralWeight = 0.0f;
+    sh = InitSH4RGB();
+    historyFrames = 0.0f;
+
+    int basePlaneBin = ComputePlaneBin(queryWorldPos, normal);
+    float bestScore = 0.0f;
+    SH4RGB bestSH = InitSH4RGB();
+    float bestHistoryFrames = 0.0f;
+    float bestWeight = 0.0f;
+
+    [unroll]
     for (int planeOffset = -1; planeOffset <= 1; ++planeOffset)
     {
         uint slot = 0u;
@@ -594,7 +578,7 @@ void AccumulateCachedCellSH(
         if (candidateHistoryFrames <= 0.0f || SHAbsEnergy(candidateSH) <= 1e-7f)
             continue;
 
-        float candidateScore = spatialWeight * surfaceWeight * lerp(0.25f, 1.0f, saturate(candidateHistoryFrames / 8.0f));
+        float candidateScore = surfaceWeight * lerp(0.25f, 1.0f, saturate(candidateHistoryFrames / 8.0f));
         if (candidateScore > bestScore)
         {
             bestScore = candidateScore;
@@ -603,45 +587,6 @@ void AccumulateCachedCellSH(
             bestWeight = surfaceWeight;
         }
     }
-}
-
-bool LoadCachedSHForCell(int3 cell, float3 normal, float3 queryWorldPos,
-                          out SH4RGB sh, out float historyFrames, out float bilateralWeight)
-{
-    bilateralWeight = 0.0f;
-    sh = InitSH4RGB();
-    historyFrames = 0.0f;
-
-    int basePlaneBin = ComputePlaneBin(queryWorldPos, normal);
-    float bestScore = 0.0f;
-    SH4RGB bestSH = InitSH4RGB();
-    float bestHistoryFrames = 0.0f;
-    float bestWeight = 0.0f;
-
-    // Own cell first (full weight).
-    AccumulateCachedCellSH(cell, basePlaneBin, normal, queryWorldPos, 1.0f,
-                           bestScore, bestSH, bestHistoryFrames, bestWeight);
-
-#if SPATIAL_HASH_NEIGHBOR_FALLBACK
-    // Fill empty/sparse cells from the 6 face-adjacent cells. Leak-safe via
-    // ComputeSurfaceLobeWeight inside AccumulateCachedCellSH.
-    if (bestScore <= SPATIAL_HASH_NEIGHBOR_FALLBACK_THRESHOLD)
-    {
-        [loop]
-        for (int axis = 0; axis < 3; ++axis)
-        {
-            [loop]
-            for (int step = 0; step < 2; ++step)
-            {
-                int3 offset = int3(0, 0, 0);
-                offset[axis] = (step == 0) ? -1 : 1;
-                AccumulateCachedCellSH(cell + offset, basePlaneBin, normal, queryWorldPos,
-                                       SPATIAL_HASH_NEIGHBOR_FALLBACK_WEIGHT,
-                                       bestScore, bestSH, bestHistoryFrames, bestWeight);
-            }
-        }
-    }
-#endif
 
     if (bestScore <= 1e-5f)
         return false;
