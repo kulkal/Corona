@@ -262,8 +262,11 @@ uint ComputeCellLightMask(float3 worldPos, float3 normal)
             continue;
 
         float3 cellToLightDir = toLight / lightDistance;
-        if (dot(normal, cellToLightDir) <= 0.0f)
-            continue;
+        // NOTE: no normal-facing cull here. The cell is cell-only (omnidirectional,
+        // shared by surfaces facing any way), so culling by the cell's single stored
+        // normal would wrongly drop lights for other-facing surfaces in the cell.
+        // The actual N.L at each bounce hit handles orientation; this mask is just a
+        // range/spot pre-cull of which lights to shadow-test.
 
         if (light.DirectionAndType.w >= 0.5f)
         {
