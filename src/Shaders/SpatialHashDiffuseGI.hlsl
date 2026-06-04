@@ -160,6 +160,12 @@ static const float SPATIAL_HASH_MIN_SURFACE_NORMAL_DOT = 0.72f;
 static const float SPATIAL_HASH_FULL_SURFACE_NORMAL_DOT = 0.92f;
 static const float SPATIAL_HASH_PLANE_REJECT_CELL_SCALE = 0.45f;
 static const float SPATIAL_HASH_PLANE_SOFT_CELL_SCALE = 0.25f;
+#ifndef SPATIAL_HASH_VIEW_FALLBACK_STEPS
+#define SPATIAL_HASH_VIEW_FALLBACK_STEPS 6u
+#endif
+static const float SPATIAL_HASH_VIEW_FALLBACK_START_CELL_SCALE = 0.20f;
+static const float SPATIAL_HASH_VIEW_FALLBACK_STEP_CELL_SCALE = 0.35f;
+static const float SPATIAL_HASH_VIEW_FALLBACK_MAX_CELL_SCALE = 2.25f;
 
 float3 SanitizeFloat3(float3 value)
 {
@@ -424,9 +430,14 @@ float3 LoadCacheNormal(uint2 pixelPos)
     return SafeNormalize(GeoNormalTex[pixelPos].xyz, pixelNormal);
 }
 
+float3 GetCameraPosition()
+{
+    return mul(float4(0.0f, 0.0f, 0.0f, 1.0f), InvViewMatrix).xyz;
+}
+
 float3 OrientNormalTowardView(float3 normal, float3 worldPos)
 {
-    float3 cameraPos = mul(float4(0.0f, 0.0f, 0.0f, 1.0f), InvViewMatrix).xyz;
+    float3 cameraPos = GetCameraPosition();
     float3 viewDir = SafeNormalize(cameraPos - worldPos, normal);
     normal = SafeNormalize(normal, viewDir);
     return dot(normal, viewDir) < 0.0f ? -normal : normal;
@@ -1234,16 +1245,16 @@ float OctProbeSurfaceWeight(uint slot, float3 queryPos, float3 queryNormal)
     return saturate(1.0f - smoothstep(safeCellSize * 0.25f, safeCellSize * 0.85f, planeDelta));
 }
 
-// 8-cell trilinear interpolation of octahedral irradiance (DDGI-style). Blends
-// the probe from each of the 8 grid cells surrounding the query position by its
-// trilinear * surface weight, sampling each probe in the pixel-normal direction.
-// Removes the per-cell flat-block look while suppressing corner leak. (Full
-// depth-based Chebyshev visibility weighting arrives in Stage B.)
-float3 SampleOctIrradianceInterpolated(float3 worldPos, float3 evalNormal, float3 cacheNormal, uint hashLevel)
+// 8-cell trilinear interpolation of octahedral irradiance (DDGI-style). The
+// index position selects which hash cells to try; the query position remains the
+// actual shaded surface used by surface/visibility checks. Keeping these
+// separate lets a miss probe a little toward the camera without pretending the
+// shaded point itself moved.
+float3 SampleOctIrradianceIndexed(float3 indexPos, float3 queryPos, float3 evalNormal, float3 cacheNormal, uint hashLevel)
 {
     float safeCellSize = max(CellSize, 1e-3f) * exp2((float)hashLevel);
     int3 levelOffset = SpatialHashLevelOffset(hashLevel);
-    float3 gridPos = worldPos / safeCellSize;
+    float3 gridPos = indexPos / safeCellSize;
     float3 baseF = floor(gridPos);
     int3 baseCell = int3(baseF) + levelOffset;
     float3 frac3 = saturate(gridPos - baseF);
@@ -1300,7 +1311,7 @@ float3 SampleOctIrradianceInterpolated(float3 worldPos, float3 evalNormal, float
                 fallbackRadiance += probe.xyz * trilinear;
                 fallbackWeight += trilinear;
 
-                float surfaceWeight = OctProbeSurfaceWeight(slot, worldPos, cacheNormal);
+                float surfaceWeight = OctProbeSurfaceWeight(slot, queryPos, cacheNormal);
                 if (surfaceWeight <= 1e-4f)
                     continue;
 
@@ -1308,7 +1319,7 @@ float3 SampleOctIrradianceInterpolated(float3 worldPos, float3 evalNormal, float
                 // query point. Bias the query a little off the surface so a probe
                 // doesn't self-occlude its own surface.
                 float3 probePos = SanitizeFloat4(CellPositionIn[slot]).xyz;
-                float3 biasedQuery = worldPos + cacheNormal * (safeCellSize * 0.1f);
+                float3 biasedQuery = queryPos + cacheNormal * (safeCellSize * 0.1f);
                 float visibility = OctChebyshevWeight(octIndex, probePos, biasedQuery);
 
                 float w = trilinear * surfaceWeight * visibility;
@@ -1329,6 +1340,57 @@ float3 SampleOctIrradianceInterpolated(float3 worldPos, float3 evalNormal, float
         return float3(-1.0f, -1.0f, -1.0f); // sentinel: no valid probe at all
     }
     return sumRadiance / sumWeight;
+}
+
+float3 SampleOctIrradianceInterpolated(float3 worldPos, float3 evalNormal, float3 cacheNormal, uint hashLevel)
+{
+    return SampleOctIrradianceIndexed(worldPos, worldPos, evalNormal, cacheNormal, hashLevel);
+}
+
+float3 SampleOctIrradianceViewRayFallback(float3 worldPos, float3 evalNormal, float3 cacheNormal)
+{
+    float3 cameraPos = GetCameraPosition();
+    float3 toCamera = cameraPos - worldPos;
+    float viewLen = length(toCamera);
+    if (viewLen <= 1e-3f)
+        return float3(-1.0f, -1.0f, -1.0f);
+
+    float3 viewDir = toCamera / viewLen;
+    uint baseLevel;
+    float baseCellSize = SpatialHashLeveledCellSize(worldPos, baseLevel);
+    float maxTravel = min(viewLen * 0.95f, baseCellSize * SPATIAL_HASH_VIEW_FALLBACK_MAX_CELL_SCALE);
+
+    [loop]
+    for (uint stepIndex = 0u; stepIndex < SPATIAL_HASH_VIEW_FALLBACK_STEPS; ++stepIndex)
+    {
+        float travel = baseCellSize *
+            (SPATIAL_HASH_VIEW_FALLBACK_START_CELL_SCALE + SPATIAL_HASH_VIEW_FALLBACK_STEP_CELL_SCALE * (float)stepIndex);
+        if (travel > maxTravel)
+            break;
+
+        float3 indexPos = worldPos + viewDir * travel;
+        uint indexLevel;
+        SpatialHashLeveledCellSize(indexPos, indexLevel);
+
+        float3 radiance = SampleOctIrradianceIndexed(indexPos, worldPos, evalNormal, cacheNormal, indexLevel);
+        if (radiance.x >= 0.0f)
+            return radiance;
+
+        if (SpatialHashLevelParams.x >= 0.5f)
+        {
+            radiance = SampleOctIrradianceIndexed(indexPos, worldPos, evalNormal, cacheNormal, indexLevel + 1u);
+            if (radiance.x >= 0.0f)
+                return radiance;
+            if (indexLevel > 0u)
+            {
+                radiance = SampleOctIrradianceIndexed(indexPos, worldPos, evalNormal, cacheNormal, indexLevel - 1u);
+                if (radiance.x >= 0.0f)
+                    return radiance;
+            }
+        }
+    }
+
+    return float3(-1.0f, -1.0f, -1.0f);
 }
 
 // One thread per (probe, irradiance texel). Reconstructs the trace's ray
@@ -1587,6 +1649,8 @@ void SpatialHashQuery(uint3 DTid : SV_DispatchThreadID)
             octRadiance = SampleOctIrradianceInterpolated(octQueryPos, pixelNormal, cacheNormal, primaryLevel + 1u);
         if (octRadiance.x < 0.0f && SpatialHashLevelParams.x >= 0.5f && primaryLevel > 0u)
             octRadiance = SampleOctIrradianceInterpolated(octQueryPos, pixelNormal, cacheNormal, primaryLevel - 1u);
+        if (octRadiance.x < 0.0f)
+            octRadiance = SampleOctIrradianceViewRayFallback(worldPos, pixelNormal, cacheNormal);
         if (octRadiance.x >= 0.0f)
         {
             octRadiance = max(SanitizeFloat3(octRadiance), 0.0f.xxx);
