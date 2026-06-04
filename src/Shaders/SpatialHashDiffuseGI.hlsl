@@ -140,7 +140,7 @@ cbuffer SpatialHashGIConstant : register(b0)
     float InterpolationStrength;
     uint ActiveCellCapacity;
     uint TraceCellBudget;
-    uint GIMode;           // 0 = SH4, 1 = octahedral DDGI
+    uint GIMode;           // 0 = SH4, 1 = octahedral DDGI, 2 = HL2 basis
     uint OctCellCapacity;  // octahedral atlas slot count (power of two)
     PointLightParam PointLights[RT_DIFFUSE_GI_MAX_POINT_LIGHTS];
     uint PointLightCount;
@@ -160,6 +160,10 @@ struct SH4RGB
     float3 c2;
     float3 c3;
 };
+
+static const float3 HL2_BASIS0 = float3(0.81649658f, 0.0f, 0.57735027f);
+static const float3 HL2_BASIS1 = float3(-0.40824829f, 0.70710678f, 0.57735027f);
+static const float3 HL2_BASIS2 = float3(-0.40824829f, -0.70710678f, 0.57735027f);
 
 static const float MAX_SPATIAL_HASH_HISTORY_SAMPLES = 4096.0f;
 static const float SPATIAL_HASH_DIFFUSE_SCALE = 1.0f / PI;
@@ -203,6 +207,24 @@ float3 SafeNormalize(float3 value, float3 fallback)
     if (lenSq < 1e-8f)
         return fallback;
     return value * rsqrt(lenSq);
+}
+
+float3x3 BuildTBN(float3 normal)
+{
+    normal = SafeNormalize(normal, float3(0.0f, 1.0f, 0.0f));
+    static const float3 rvec1 = float3(0.847100675f, 0.207911700f, 0.489073813f);
+    static const float3 rvec2 = float3(-0.639436305f, -0.390731126f, 0.662155867f);
+    float3 rvec = dot(rvec1, normal) > 0.95f ? rvec2 : rvec1;
+    float3 b1 = normalize(rvec - normal * dot(rvec, normal));
+    float3 b2 = cross(normal, b1);
+    return float3x3(b1, b2, normal);
+}
+
+float3 WorldToLocalTBN(float3 worldDir, float3 normal)
+{
+    float3x3 tbn = BuildTBN(normal);
+    worldDir = SafeNormalize(worldDir, normal);
+    return SafeNormalize(float3(dot(worldDir, tbn[0]), dot(worldDir, tbn[1]), dot(worldDir, tbn[2])), float3(0.0f, 0.0f, 1.0f));
 }
 
 float ComputeLightLuma(float3 color)
@@ -365,6 +387,24 @@ float3 EvaluateSHDiffuse(SH4RGB sh, float3 normal)
     return max(SanitizeFloat3(irradiance), 0.0f.xxx);
 }
 
+float3 ComputeHL2BasisWeights(float3 localDir)
+{
+    localDir = SafeNormalize(localDir, float3(0.0f, 0.0f, 1.0f));
+    return float3(
+        max(0.0f, dot(localDir, HL2_BASIS0)),
+        max(0.0f, dot(localDir, HL2_BASIS1)),
+        max(0.0f, dot(localDir, HL2_BASIS2)));
+}
+
+float3 EvaluateHL2Diffuse(SH4RGB hl2, float3 evalNormal, float3 cacheNormal)
+{
+    float3 localNormal = WorldToLocalTBN(evalNormal, cacheNormal);
+    float3 w = ComputeHL2BasisWeights(localNormal);
+    float sumW = max(w.x + w.y + w.z, 1e-4f);
+    float3 radiance = (hl2.c0 * w.x + hl2.c1 * w.y + hl2.c2 * w.z) / sumW;
+    return max(SanitizeFloat3(radiance), 0.0f.xxx);
+}
+
 // Fallback ambient for uncached cells. The previous camera-anchored SH fallback
 // is disabled here so missing oct cells are exposed to the view-ray lookup first
 // and only fall back to the fixed sky ambient.
@@ -489,6 +529,27 @@ uint EncodeNormalBits(float3 normal)
     return (normalBin.x & 7u) | ((normalBin.y & 7u) << 3u) | ((normalBin.z & 7u) << 6u);
 }
 
+// Stochastic normal dither for the normal-bin key (SH4 / HL2 modes). On curved
+// surfaces the 8-level normal quantization makes adjacent pixels fall in
+// different bins -> a hard comb. Jittering the BIN normal by ~half a bin per
+// pixel/frame makes boundary pixels straddle both bins across frames; the
+// screen-resolve temporal then averages them and the comb dissolves. The stored
+// normal and the evaluation normal stay exact — only the bin selection jitters.
+// (Same trick as the oct corner position dither.) Oct mode keys ignore the
+// normal, so this is only meaningful for GIMode 0/2.
+#ifndef SPATIAL_HASH_NORMAL_BIN_DITHER
+#define SPATIAL_HASH_NORMAL_BIN_DITHER 0.18f
+#endif
+float3 DitherBinNormal(float3 normal, uint2 pixelPos)
+{
+    normal = SafeNormalize(normal, float3(0.0f, 1.0f, 0.0f));
+    uint seed = pixelPos.x * 1973u + pixelPos.y * 9277u + FrameIndex * 26699u;
+    float2 j = float2(HashToUnitFloat(seed), HashToUnitFloat(seed ^ 0xb5297a4du)) - 0.5f;
+    float3 t = SafeNormalize(cross(normal, abs(normal.y) < 0.9f ? float3(0.0f, 1.0f, 0.0f) : float3(1.0f, 0.0f, 0.0f)), float3(1.0f, 0.0f, 0.0f));
+    float3 b = cross(normal, t);
+    return SafeNormalize(normal + (t * j.x + b * j.y) * SPATIAL_HASH_NORMAL_BIN_DITHER, normal);
+}
+
 int ComputePlaneBin(float3 worldPos, float3 normal)
 {
     uint level;
@@ -512,9 +573,9 @@ uint HashCellKeyFromBits(int3 cell, uint normalBits, int planeBin)
 }
 
 // Cell key. GIMode==1 (octahedral DDGI): one probe per cell -> key depends on
-// the cell coordinate ONLY. Else (SH4 normal-bin mode): split the cell by 3-axis
-// normal bin + plane bin. MUST stay identical to the cell (trace) shader's copy
-// so insert and lookup agree.
+// the cell coordinate ONLY. Else (SH4/HL2 normal-bin modes): split the cell by
+// 3-axis normal bin + plane bin. MUST stay identical to the cell (trace)
+// shader's copy so insert and lookup agree.
 uint HashCellKeyFromCell(int3 cell, float3 normal, int planeBin)
 {
     if (GIMode == 1u)
@@ -1057,7 +1118,10 @@ void SpatialHashUpdate(uint3 DTid : SV_DispatchThreadID)
 
     float3 worldPos = ReconstructWorldPosition(pixelPos);
     float3 normal = OrientNormalTowardView(LoadCacheNormal(pixelPos), worldPos);
-    uint key = HashCellKey(worldPos, normal);
+    // Key uses a per-pixel/frame dithered normal (SH4/HL2) to break the curved-
+    // surface comb; the stored cell normal below stays the exact normal.
+    float3 keyNormal = (GIMode != 1u) ? DitherBinNormal(normal, pixelPos) : normal;
+    uint key = HashCellKey(worldPos, keyNormal);
 
     uint slot = 0u;
     bool inserted = false;
@@ -1877,10 +1941,15 @@ void SpatialHashQuery(uint3 DTid : SV_DispatchThreadID)
 
     SH4RGB cachedSH = InitSH4RGB();
     float historyFrames = 0.0f;
-    const bool bHasCache = LoadSmoothedSH(worldPos, cacheNormal, cachedSH, historyFrames);
+    // Look up with the dithered bin normal (matches the insert) to break the
+    // curved-surface comb; evaluate with the exact pixel/cache normal.
+    float3 binNormal = DitherBinNormal(cacheNormal, pixelPos);
+    const bool bHasCache = LoadSmoothedSH(worldPos, binNormal, cachedSH, historyFrames);
     if (bHasCache)
     {
-        float3 radiance = EvaluateSHDiffuse(cachedSH, pixelNormal) * SPATIAL_HASH_DIFFUSE_SCALE;
+        float3 radiance = (GIMode == 2u)
+            ? EvaluateHL2Diffuse(cachedSH, pixelNormal, cacheNormal)
+            : EvaluateSHDiffuse(cachedSH, pixelNormal) * SPATIAL_HASH_DIFFUSE_SCALE;
         OutGIHashColor[pixelPos] = float4(radiance, historyFrames);
         OutGIHashSH[pixelPos] = float4(cachedSH.c0, historyFrames);
     }

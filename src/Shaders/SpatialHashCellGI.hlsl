@@ -54,7 +54,7 @@ cbuffer ViewParameter : register(b0)
     uint bIncludeSkyLighting;
     uint HashEntryMask;
     uint MaxProbeSteps;
-    uint GIMode;            // 0 = SH trace, 1 = octahedral per-ray trace
+    uint GIMode;            // 0 = SH4 trace, 1 = octahedral per-ray trace, 2 = HL2 basis
     uint OctCellCapacity;   // probe slots backed by octahedral atlas storage
     uint OctRaysPerCell;    // rays per probe per frame (octahedral mode)
     PointLightParam PointLights[RT_DIFFUSE_GI_MAX_POINT_LIGHTS];
@@ -155,6 +155,10 @@ struct SH4RGB
     float3 c3;
 };
 
+static const float3 HL2_BASIS0 = float3(0.81649658f, 0.0f, 0.57735027f);
+static const float3 HL2_BASIS1 = float3(-0.40824829f, 0.70710678f, 0.57735027f);
+static const float3 HL2_BASIS2 = float3(-0.40824829f, -0.70710678f, 0.57735027f);
+
 float3 SanitizeFloat3(float3 value)
 {
     if (any(isnan(value)) || any(isinf(value)))
@@ -213,6 +217,35 @@ SH4RGB ProjectRadianceToSH4RGB(float3 radiance, float3 direction, float sampleWe
     sh.c2 = radiance * (0.488603f * z);
     sh.c3 = radiance * (0.488603f * x);
     return sh;
+}
+
+float3 ComputeHL2BasisWeights(float3 localDir)
+{
+    localDir = SafeNormalize(localDir, float3(0.0f, 0.0f, 1.0f));
+    return float3(
+        max(0.0f, dot(localDir, HL2_BASIS0)),
+        max(0.0f, dot(localDir, HL2_BASIS1)),
+        max(0.0f, dot(localDir, HL2_BASIS2)));
+}
+
+void AccumulateHL2RGB(inout SH4RGB accum, inout float3 weightSum, float3 radiance, float3 localDir)
+{
+    radiance = max(SanitizeFloat3(radiance), 0.0f.xxx);
+    float3 w = ComputeHL2BasisWeights(localDir);
+    accum.c0 += radiance * w.x;
+    accum.c1 += radiance * w.y;
+    accum.c2 += radiance * w.z;
+    weightSum += w;
+}
+
+SH4RGB NormalizeHL2RGB(SH4RGB accum, float3 weightSum, float3 fallbackRadiance)
+{
+    fallbackRadiance = max(SanitizeFloat3(fallbackRadiance), 0.0f.xxx);
+    accum.c0 = weightSum.x > 1e-4f ? accum.c0 / weightSum.x : fallbackRadiance;
+    accum.c1 = weightSum.y > 1e-4f ? accum.c1 / weightSum.y : fallbackRadiance;
+    accum.c2 = weightSum.z > 1e-4f ? accum.c2 / weightSum.z : fallbackRadiance;
+    accum.c3 = 0.0f.xxx;
+    return accum;
 }
 
 float3x3 BuildTBN(float3 normal)
@@ -298,9 +331,9 @@ int ComputePlaneBin(float3 worldPos, float3 normal)
 
 // Cell key. GIMode==1 (octahedral DDGI): one probe per cell -> key depends on
 // the cell coordinate ONLY; directionality comes from the octahedral map. Else
-// (SH4 normal-bin mode): split the cell by 3-axis normal bin + plane bin so each
-// surface orientation gets its own hemisphere SH (faster convergence). MUST stay
-// identical to the diffuse shader's copy so insert and lookup agree.
+// (SH4/HL2 normal-bin modes): split the cell by 3-axis normal bin + plane bin so
+// each surface orientation gets its own hemisphere cache (faster convergence).
+// MUST stay identical to the diffuse shader's copy so insert and lookup agree.
 uint HashCellKeyFromCell(int3 cell, float3 normal, int planeBin)
 {
     uint h = uint(cell.x) * 73856093u;
@@ -752,15 +785,18 @@ void rayGen()
 
     float3 worldNormal = SafeNormalize(cellNormal.xyz, float3(0.0f, 1.0f, 0.0f));
     float3 worldPos = cellPosition.xyz;
-    // SH4 normal-bin mode: the cell is split per normal bin, so each slot's
-    // stored surface faces one way. Trace a cosine/uniform HEMISPHERE around that
-    // normal from just off the surface (faster convergence than a full sphere).
+    // SH4/HL2 normal-bin modes: the cell is split per normal bin, so each slot's
+    // stored surface faces one way. Trace a uniform hemisphere around that normal
+    // from just off the surface (faster convergence than a full sphere).
     float3 origin = worldPos + worldNormal * RayBias;
     uint rayCount = clamp(RaysPerCell, 1u, 8u);
     uint noiseSeed = slot ^ (traceIndex * 1664525u);
     uint2 baseNoiseCoord = uint2(noiseSeed & 1023u, noiseSeed >> 10u);
 
     SH4RGB sh = InitSH4RGB();
+    SH4RGB hl2 = InitSH4RGB();
+    float3 hl2WeightSum = 0.0f.xxx;
+    float3 hl2MeanRadiance = 0.0f.xxx;
     [loop]
     for (uint sampleIndex = 0u; sampleIndex < 8u; ++sampleIndex)
     {
@@ -782,14 +818,31 @@ void rayGen()
         float invPdf = rcp(max(samplePdf, 1e-4f));
         float ignoredHitDistance;
         float3 sampleRadiance = TraceDiffusePath(origin, sampleDirWorld, noiseCoord, sampleIndex, ignoredHitDistance);
-        AccumulateSH4RGB(sh, ProjectRadianceToSH4RGB(sampleRadiance, sampleDirWorld, invPdf), 1.0f);
+        if (GIMode == 2u)
+        {
+            AccumulateHL2RGB(hl2, hl2WeightSum, sampleRadiance, sampleDirLocal);
+            hl2MeanRadiance += max(SanitizeFloat3(sampleRadiance), 0.0f.xxx);
+        }
+        else
+            AccumulateSH4RGB(sh, ProjectRadianceToSH4RGB(sampleRadiance, sampleDirWorld, invPdf), 1.0f);
     }
 
-    sh = ScaleSH4RGB(sh, rcp(float(rayCount)));
-    TraceSH0[traceIndex] = float4(sh.c0, float(rayCount));
-    TraceSH1[traceIndex] = float4(sh.c1, 0.0f);
-    TraceSH2[traceIndex] = float4(sh.c2, 0.0f);
-    TraceSH3[traceIndex] = float4(sh.c3, 0.0f);
+    if (GIMode == 2u)
+    {
+        hl2 = NormalizeHL2RGB(hl2, hl2WeightSum, hl2MeanRadiance * rcp(float(rayCount)));
+        TraceSH0[traceIndex] = float4(hl2.c0, float(rayCount));
+        TraceSH1[traceIndex] = float4(hl2.c1, 0.0f);
+        TraceSH2[traceIndex] = float4(hl2.c2, 0.0f);
+        TraceSH3[traceIndex] = 0.0f.xxxx;
+    }
+    else
+    {
+        sh = ScaleSH4RGB(sh, rcp(float(rayCount)));
+        TraceSH0[traceIndex] = float4(sh.c0, float(rayCount));
+        TraceSH1[traceIndex] = float4(sh.c1, 0.0f);
+        TraceSH2[traceIndex] = float4(sh.c2, 0.0f);
+        TraceSH3[traceIndex] = float4(sh.c3, 0.0f);
+    }
 }
 
 [shader("miss")]

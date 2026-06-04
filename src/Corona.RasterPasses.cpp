@@ -1410,7 +1410,7 @@ void Corona::LightingPass()
 	Param.SurfaceBounceStrength = std::clamp(SurfaceBounceStrength, 0.0f, 1.0f);
 	Param.SurfaceBounceSaturation = std::clamp(SurfaceBounceSaturation, 0.0f, 1.0f);
 	Param.SkyLightingStrength = std::clamp(SkyLightingStrength, 0.0f, 1.0f);
-	Param.LightingOutputMode = bMobileHybridDirectOnly ? 2u : 0u;
+	Param.LightingOutputMode = bMobileHybridDirectOnly ? 2u : EditorLightingViewMode;
 	const bool bUseMobileShadowMap =
 		bMobileHybridDirectOnly &&
 		bMobileShadowMapValidThisFrame &&

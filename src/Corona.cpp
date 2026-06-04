@@ -12812,6 +12812,83 @@ void Corona::DrawEditorCameraOverlay()
 			m_camera.m_position.x,
 			m_camera.m_position.y,
 			m_camera.m_position.z);
+
+		// View mode: one dropdown driving two mechanisms. COMPOSITE modes change
+		// the LightingPS output (LightingOutputMode) — Lighting-only substitutes a
+		// white albedo, Direct/Indirect isolate the lighting terms. BUFFER modes
+		// use the DX12 fullscreen buffer visualization (DebugPass) for GBuffer /
+		// component inspection. "Total" is the normal composited image.
+		enum class ViewModeKind { Total, Composite, Buffer };
+		struct ViewModeEntry { const char* label; ViewModeKind kind; UINT32 lightMode; EDebugVisualization buffer; };
+		static const ViewModeEntry kViewModes[] = {
+			{ "Total",                 ViewModeKind::Total,     0u, EDebugVisualization::NO_FULLSCREEN },
+			{ "Lighting only (white)", ViewModeKind::Composite, 4u, EDebugVisualization::NO_FULLSCREEN },
+			{ "Lighting only (geo normal)", ViewModeKind::Composite, 5u, EDebugVisualization::NO_FULLSCREEN },
+			{ "Direct only",           ViewModeKind::Composite, 1u, EDebugVisualization::NO_FULLSCREEN },
+			{ "Indirect only (GI)",    ViewModeKind::Composite, 3u, EDebugVisualization::NO_FULLSCREEN },
+			{ "Albedo (GBuffer)",      ViewModeKind::Buffer,    0u, EDebugVisualization::ALBEDO },
+			{ "World Normal (GBuffer)",ViewModeKind::Buffer,    0u, EDebugVisualization::WORLD_NORMAL },
+			{ "Roughness/Metallic",    ViewModeKind::Buffer,    0u, EDebugVisualization::ROUGNESS_METALLIC },
+			{ "Depth (GBuffer)",       ViewModeKind::Buffer,    0u, EDebugVisualization::DEPTH },
+			{ "Diffuse GI buffer",     ViewModeKind::Buffer,    0u, EDebugVisualization::FINAL_DIFFUSE_GI },
+			{ "Specular buffer",       ViewModeKind::Buffer,    0u, EDebugVisualization::TEMPORAL_FILTERED_SPECULAR },
+			{ "Shadow (direct vis)",   ViewModeKind::Buffer,    0u, EDebugVisualization::SHADOW },
+			{ "RTAO",                  ViewModeKind::Buffer,    0u, EDebugVisualization::RTAO },
+		};
+		const bool bDebugVisualizationAvailable = renderBackend && BufferVisualizeGraphicsPipeline;
+		int currentViewMode = 0;
+		for (int i = 0; i < IM_ARRAYSIZE(kViewModes); ++i)
+		{
+			const ViewModeEntry& e = kViewModes[i];
+			bool active = false;
+			if (e.kind == ViewModeKind::Composite)
+				active = !bDebugDraw && (EditorLightingViewMode == e.lightMode);
+			else if (e.kind == ViewModeKind::Buffer)
+				active = bDebugDraw && (FullscreenDebugBuffer == e.buffer);
+			else // Total
+				active = !bDebugDraw && (EditorLightingViewMode == 0u);
+			if (active) { currentViewMode = i; break; }
+		}
+		ImGui::SetNextItemWidth(-1.0f);
+		if (ImGui::BeginCombo("View Mode", kViewModes[currentViewMode].label))
+		{
+			for (int i = 0; i < IM_ARRAYSIZE(kViewModes); ++i)
+			{
+				const ViewModeEntry& e = kViewModes[i];
+				const bool needsDebugPath = (e.kind == ViewModeKind::Buffer);
+				if (needsDebugPath && !bDebugVisualizationAvailable)
+					ImGui::BeginDisabled();
+				const bool selected = (i == currentViewMode);
+				if (ImGui::Selectable(e.label, selected))
+				{
+					switch (e.kind)
+					{
+					case ViewModeKind::Total:
+						bDebugDraw = false;
+						FullscreenDebugBuffer = EDebugVisualization::NO_FULLSCREEN;
+						EditorLightingViewMode = 0u;
+						break;
+					case ViewModeKind::Composite:
+						bDebugDraw = false;
+						FullscreenDebugBuffer = EDebugVisualization::NO_FULLSCREEN;
+						EditorLightingViewMode = e.lightMode;
+						break;
+					case ViewModeKind::Buffer:
+						EditorLightingViewMode = 0u;
+						FullscreenDebugBuffer = e.buffer;
+						bDebugDraw = true;
+						break;
+					}
+				}
+				if (selected)
+					ImGui::SetItemDefaultFocus();
+				if (needsDebugPath && !bDebugVisualizationAvailable)
+					ImGui::EndDisabled();
+			}
+			ImGui::EndCombo();
+		}
+		if (!bDebugVisualizationAvailable)
+			ImGui::TextDisabled("GBuffer modes need the DX12 debug path.");
 	}
 	ImGui::End();
 }
@@ -13100,7 +13177,7 @@ void Corona::DrawEditorModeOverlay()
 					else if (RenderingMode == ERenderingMode::HYBRID && DiffuseGIMode == EDiffuseGIMode::SPATIAL_HASH)
 					{
 						int giVariant = static_cast<int>(SpatialHashGICB.GIMode);
-						const char* giVariants[] = { "SH4 (legacy)", "Octahedral DDGI" };
+						const char* giVariants[] = { "SH4 (legacy)", "Octahedral DDGI", "HL2 basis" };
 						if (ImGui::Combo("Spatial Hash GI Variant", &giVariant, giVariants, IM_ARRAYSIZE(giVariants)))
 						{
 							SpatialHashGICB.GIMode = static_cast<UINT32>(giVariant);
@@ -15096,6 +15173,13 @@ void Corona::OnRender()
 				}
 				else if (DiffuseGIMode == EDiffuseGIMode::SPATIAL_HASH)
 				{
+					int giVariant = static_cast<int>(SpatialHashGICB.GIMode);
+					const char* giVariants[] = { "SH4 (legacy)", "Octahedral DDGI", "HL2 basis" };
+					if (ImGui::Combo("Spatial Hash GI Variant##DiffuseGI", &giVariant, giVariants, IM_ARRAYSIZE(giVariants)))
+					{
+						SpatialHashGICB.GIMode = static_cast<UINT32>(giVariant);
+						bLightingChanged = true;
+					}
 					if (ImGui::SliderFloat("Spatial Hash Cell Size", &SpatialHashGICB.CellSize, 4.0f, 256.0f))
 						bLightingChanged = true;
 					int raysPerCell = static_cast<int>(RTSpatialHashGIViewParam.RaysPerCell);

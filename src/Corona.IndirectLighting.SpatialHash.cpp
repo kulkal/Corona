@@ -248,6 +248,7 @@ void Corona::SpatialHashGIPass()
 	SpatialHashGICB.SmoothingStrength = std::clamp(SpatialHashGICB.SmoothingStrength, 0.0f, 1.0f);
 	SpatialHashGICB.TemporalAlpha = std::clamp(SpatialHashGICB.TemporalAlpha, 0.02f, 1.0f);
 	SpatialHashGICB.InterpolationStrength = std::clamp(SpatialHashGICB.InterpolationStrength, 0.0f, 1.0f);
+	SpatialHashGICB.GIMode = std::clamp(SpatialHashGICB.GIMode, 0u, 2u);
 	FillPointLightParams(
 		SpatialHashGICB.PointLights,
 		SpatialHashGICB.PointLightCount,

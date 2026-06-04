@@ -589,7 +589,7 @@ private:
 	static constexpr UINT32 SpatialHashGIOctDepthRes = 8u;               // 8x8 (smaller, to afford 4x capacity)
 	static constexpr UINT32 SpatialHashGIOctIrradianceTexels = SpatialHashGIOctIrradianceRes * SpatialHashGIOctIrradianceRes;
 	static constexpr UINT32 SpatialHashGIOctDepthTexels = SpatialHashGIOctDepthRes * SpatialHashGIOctDepthRes;
-	enum class SpatialHashGIStorageMode : UINT32 { SH = 0u, Octahedral = 1u };
+	enum class SpatialHashGIStorageMode : UINT32 { SH = 0u, Octahedral = 1u, HL2 = 2u };
 	struct SpatialHashGIConstant
 	{
 		glm::mat4x4 InvViewMatrix;
@@ -608,7 +608,7 @@ private:
 		float InterpolationStrength = 1.0f;
 		UINT32 ActiveCellCapacity = SpatialHashGIActiveCellCapacity;
 		UINT32 TraceCellBudget = SpatialHashGITraceCellBudget;
-		// 0 = SH4 (legacy, kept for A/B comparison), 1 = octahedral DDGI.
+		// 0 = SH4, 1 = octahedral DDGI, 2 = HL2 3-lobe basis.
 		UINT32 GIMode = 0;
 		// Slot capacity that has octahedral atlas storage backing it.
 		UINT32 OctCellCapacity = SpatialHashGIOctCellCapacity;
@@ -913,7 +913,7 @@ private:
 		UINT32 bIncludeSkyLighting = 0;
 		UINT32 HashEntryMask = SpatialHashGIEntryCount - 1u;
 		UINT32 MaxProbeSteps = 8;
-		// Octahedral DDGI: 0 = SH trace (legacy), 1 = per-ray trace to RayData.
+		// 0 = SH4 trace, 1 = octahedral per-ray trace, 2 = HL2 3-lobe trace.
 		UINT32 GIMode = 0;
 		UINT32 OctCellCapacity = SpatialHashGIOctCellCapacity;
 		UINT32 OctRaysPerCell = SpatialHashGIOctRaysPerCell;
@@ -1928,7 +1928,7 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 		float SpatialHashInterpolationStrength = 1.0f;
 		UINT32 SpatialHashRaysPerCell = 2;
 		UINT32 SpatialHashMaxBounces = 2;
-		// 0 = SH4 spatial-hash GI, 1 = octahedral DDGI (A/B comparison toggle).
+		// 0 = SH4 spatial-hash GI, 1 = octahedral DDGI, 2 = HL2 basis.
 		UINT32 SpatialHashGIStorageMode = 0;
 		float SpatialHashOctNearConvergenceBias = 0.4f;
 		float SpatialHashEvictDistanceWeight = 0.7f;
@@ -2123,6 +2123,10 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	bool bEditorDebugCaptureWindowOpen = false;
 	bool bEditorCameraCollisionEnabled = false;
 	float EditorCameraMoveSpeed = 1000.0f;
+	// Editor composite view mode -> LightingPS LightingOutputMode (0 = full,
+	// 1 = direct only, 3 = indirect only, 4 = lighting only / white albedo).
+	// Driven by the top-right View Mode dropdown; 2 (mobile) is set elsewhere.
+	UINT32 EditorLightingViewMode = 0;
 	bool bEditorMapLoadQueued = false;
 	bool bEditorMapLoadInProgress = false;
 	uint32_t EditorMapLoadEntityIndex = 0;

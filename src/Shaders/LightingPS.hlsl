@@ -265,12 +265,34 @@ float4 PSMain(PSInput input) : SV_TARGET
     float2 PixelPos = input.uv * RTSize;
 
 
-    bool bDirectOutput = LightingOutputMode != 0;
+    // LightingOutputMode: 0 = full composite, 1 = direct only, 2 = mobile direct
+    // only, 3 = indirect only (GI), 4 = lighting only (white albedo for signal
+    // inspection). Direct-only returns are gated to 1/2 so 3/4 fall through.
+    bool bDirectOutput = (LightingOutputMode == 1u || LightingOutputMode == 2u);
     bool bMobileDirectOnly = LightingOutputMode == 2;
     float3 Albedo = SanitizeFloat3(AlbedoTex[PixelPos].xyz);
+    // Lighting-only: replace albedo with white so the output is the raw lighting
+    // signal (no texture). Mode 4 keeps the normal-mapped world normal; mode 5
+    // additionally drops the normal map (geometric normal below), isolating the
+    // lighting signal from both albedo AND normal-map detail.
+    if (LightingOutputMode == 4u || LightingOutputMode == 5u)
+        Albedo = 1.0f.xxx;
     float3 NormalSample = SanitizeFloat3(NormalTex[PixelPos].xyz);
     float3 WorldNormal = SafeNormalize(bMobileDirectOnly ? (NormalSample * 2.0f - 1.0f) : NormalSample, float3(0.0f, 1.0f, 0.0f));
     float DeviceDepth = DepthTex[PixelPos].x;
+    // Mode 5 "Lighting only (geo normal)": derive a per-pixel geometric normal
+    // from the depth gradient (cross of screen-space world-position derivatives),
+    // discarding normal-map perturbation. The branch is uniform (cbuffer), so the
+    // ddx/ddy are well-defined. Garbage at depth silhouettes is acceptable here.
+    if (LightingOutputMode == 5u && DeviceDepth < 0.999999f)
+    {
+        float3 wp = ReconstructWorldPosition(screenUV, DeviceDepth);
+        float3 geoNormal = normalize(cross(ddx(wp), ddy(wp)));
+        float3 viewDir = ComputeSurfaceToViewDirection(screenUV);
+        if (dot(geoNormal, viewDir) < 0.0f)
+            geoNormal = -geoNormal;
+        WorldNormal = SafeNormalize(geoNormal, WorldNormal);
+    }
     float4 RoughnessMetallic = SanitizeFloat4(RoughnessMetalicTex[PixelPos]);
     float UnlitMaterial = saturate(RoughnessMetallic.z);
     // Spine sprites keep depth writes disabled so attachment draw order stays
@@ -456,6 +478,10 @@ float4 PSMain(PSInput input) : SV_TARGET
         return float4(SanitizeFloat3(DirectLighting), 1);
 
     float3 TotalSpecular = max(DirectSpecular + IndirectSpecular, 0);
+
+    // Indirect-only: just the GI (diffuse + specular indirect), no direct light.
+    if (LightingOutputMode == 3u)
+        return float4(SanitizeFloat3(max(IndirectDiffuse + IndirectSpecular, 0)), 1);
 
     float3 FinalColor = DiffuseLighting + TotalSpecular + IndirectDiffuse;
     return float4(SanitizeFloat3(FinalColor), 1);
