@@ -590,7 +590,10 @@ uint HashCellKeyFromBits(int3 cell, uint normalBits, int planeBin)
 // shader's copy so insert and lookup agree.
 uint HashCellKeyFromCell(int3 cell, float3 normal, int planeBin)
 {
-    if (GIMode == 1u)
+    // Cell-only key for SH4 (now full-sphere, GIMode 0) and oct (GIMode 1): one
+    // probe per spatial cell, no normal/plane split. (HL2, GIMode 2, still bins by
+    // normal+plane — its tangent-frame basis needs a per-orientation cell.)
+    if (GIMode != 2u)
     {
         uint h = uint(cell.x) * 73856093u;
         h ^= uint(cell.y) * 19349663u;
@@ -1001,6 +1004,74 @@ bool LoadInterpolatedSH(float3 worldPos, float3 normal, out SH4RGB outSH, out fl
 
     outSH = interpolatedSH;
     outHistoryFrames = interpolatedFrames * saturate(validWeight);
+    return true;
+}
+
+// Cell-only full-sphere SH4 lookup (GIMode 0). One SH4 per spatial cell (key
+// ignores normal/plane), 8-cell trilinear, NO normal rejection (the probe is
+// omnidirectional). A small per-pixel/frame POSITION jitter shifts the trilinear
+// neighbourhood so screen-resolve temporally averages adjacent cells (the
+// stochastic smoothing that the old normal-bin dither provided, moved to the
+// spatial axis now that there are no normal bins).
+#ifndef SPATIAL_HASH_CELL_POS_JITTER
+#define SPATIAL_HASH_CELL_POS_JITTER 0.35f
+#endif
+bool LoadCellOnlySH(float3 worldPos, uint2 pixelPos, out SH4RGB outSH, out float outHistoryFrames)
+{
+    outSH = InitSH4RGB();
+    outHistoryFrames = 0.0f;
+
+    uint hashLevel;
+    float cs = SpatialHashLeveledCellSize(worldPos, hashLevel);
+    // Position jitter (tangent to nothing — full 3D), magnitude ~a third of a cell.
+    uint seed = pixelPos.x * 1973u + pixelPos.y * 9277u + FrameIndex * 26699u;
+    float3 j = float3(HashToUnitFloat(seed), HashToUnitFloat(seed ^ 0x68bc21ebu),
+                      HashToUnitFloat(seed ^ 0xb5297a4du)) - 0.5f;
+    float3 jitterPos = worldPos + j * (cs * SPATIAL_HASH_CELL_POS_JITTER);
+
+    float jcs = SpatialHashLeveledCellSize(jitterPos, hashLevel);
+    int3 levelOffset = SpatialHashLevelOffset(hashLevel);
+    float3 gridPos = jitterPos / jcs;
+    float3 baseF = floor(gridPos);
+    int3 baseCell = int3(baseF) + levelOffset;
+    float3 frac = saturate(gridPos - baseF);
+
+    SH4RGB acc = InitSH4RGB();
+    float accFrames = 0.0f;
+    float wsum = 0.0f;
+    [unroll]
+    for (uint z = 0u; z < 2u; ++z)
+    {
+        float wz = (z == 0u) ? (1.0f - frac.z) : frac.z;
+        [unroll]
+        for (uint y = 0u; y < 2u; ++y)
+        {
+            float wy = (y == 0u) ? (1.0f - frac.y) : frac.y;
+            [unroll]
+            for (uint x = 0u; x < 2u; ++x)
+            {
+                float w = wz * wy * ((x == 0u) ? (1.0f - frac.x) : frac.x);
+                if (w <= 1e-4f)
+                    continue;
+                int3 cell = baseCell + int3(x, y, z);
+                uint slot = 0u;
+                uint key = HashCellKeyFromCell(cell, float3(0.0f, 1.0f, 0.0f), 0); // normal/plane ignored (cell-only)
+                if (!FindSlotForRead(key, slot))
+                    continue;
+                float f = 0.0f;
+                SH4RGB s = LoadResolvedSH(slot, f);
+                if (f <= 0.0f || SHAbsEnergy(s) <= 1e-7f)
+                    continue;
+                acc = AddSH(acc, ScaleSH(s, w));
+                accFrames += f * w;
+                wsum += w;
+            }
+        }
+    }
+    if (wsum <= 1e-4f)
+        return false;
+    outSH = ScaleSH(acc, 1.0f / wsum);
+    outHistoryFrames = accFrames / wsum;
     return true;
 }
 
@@ -1999,10 +2070,18 @@ void SpatialHashQuery(uint3 DTid : SV_DispatchThreadID)
 
     SH4RGB cachedSH = InitSH4RGB();
     float historyFrames = 0.0f;
-    // Look up with the dithered bin normal (matches the insert) to break the
-    // curved-surface comb; evaluate with the exact pixel/cache normal.
-    float3 binNormal = DitherBinNormal(cacheNormal, pixelPos);
-    const bool bHasCache = LoadSmoothedSH(worldPos, binNormal, cachedSH, historyFrames);
+    bool bHasCache;
+    if (GIMode == 2u)
+    {
+        // HL2: normal-binned hemisphere lookup with the dithered bin normal.
+        float3 binNormal = DitherBinNormal(cacheNormal, pixelPos);
+        bHasCache = LoadSmoothedSH(worldPos, binNormal, cachedSH, historyFrames);
+    }
+    else
+    {
+        // SH4: cell-only full-sphere lookup + position jitter (no normal bins).
+        bHasCache = LoadCellOnlySH(worldPos, pixelPos, cachedSH, historyFrames);
+    }
     if (bHasCache)
     {
         float3 radiance = (GIMode == 2u)

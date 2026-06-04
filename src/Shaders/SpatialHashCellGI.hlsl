@@ -769,11 +769,30 @@ void rayGen()
 
     float3 worldNormal = SafeNormalize(cellNormal.xyz, float3(0.0f, 1.0f, 0.0f));
     float3 worldPos = cellPosition.xyz;
-    // SH4/HL2 normal-bin modes: the cell is split per normal bin, so each slot's
-    // stored surface faces one way. Trace a uniform hemisphere around that normal
-    // from just off the surface (faster convergence than a full sphere).
-    float3 origin = worldPos + worldNormal * RayBias;
-    uint rayCount = clamp(RaysPerCell, 1u, 8u);
+    // SH4 (GIMode 0) is now a cell-only full-sphere probe (one SH4 per spatial
+    // cell, serves all orientations) — bias the origin toward the camera so the
+    // omnidirectional sample center sits in open space (matches oct). HL2 (GIMode
+    // 2) stays a normal-binned hemisphere probe (its tangent basis needs a normal).
+    float3 origin;
+    if (GIMode == 2u)
+    {
+        origin = worldPos + worldNormal * RayBias;
+    }
+    else
+    {
+        float3 toCamera = CameraPosition.xyz - worldPos;
+        float camLen = length(toCamera);
+        float3 viewDir = (camLen > 1e-4f) ? (toCamera / camLen) : worldNormal;
+        float camPush = min(CellSize * 0.5f, camLen * 0.5f);
+        origin = worldPos + worldNormal * RayBias + viewDir * camPush;
+    }
+    // HL2 keeps the UI ray count (hemisphere). SH4 is now full-sphere cell-only,
+    // so half the rays land below the surface and it has far fewer cells (cell-only
+    // key) -> huge perf headroom: spend it on extra rays to cut the full-sphere
+    // variance (low-frequency blotch) back down. RaysPerCell x 4, min 8, cap 32.
+    uint rayCount = (GIMode == 2u)
+        ? clamp(RaysPerCell, 1u, 8u)
+        : clamp(RaysPerCell * 4u, 8u, 32u);
     uint noiseSeed = slot ^ (traceIndex * 1664525u);
     uint2 baseNoiseCoord = uint2(noiseSeed & 1023u, noiseSeed >> 10u);
 
@@ -782,7 +801,7 @@ void rayGen()
     float3 hl2WeightSum = 0.0f.xxx;
     float3 hl2MeanRadiance = 0.0f.xxx;
     [loop]
-    for (uint sampleIndex = 0u; sampleIndex < 8u; ++sampleIndex)
+    for (uint sampleIndex = 0u; sampleIndex < 32u; ++sampleIndex)
     {
         if (sampleIndex >= rayCount)
             break;
@@ -795,11 +814,51 @@ void rayGen()
             BlueNoiseOffsetStride,
             NoiseMode);
 
-        // Hemisphere gather around the cell's stored normal (normal-bin SH).
-        float3 sampleDirLocal = SampleUniformHemisphere(randomUV.x, randomUV.y);
-        float3 sampleDirWorld = SafeNormalize(mul(sampleDirLocal, BuildTBN(worldNormal)), worldNormal);
-        float samplePdf = 1.0f / (2.0f * PI);
-        float invPdf = rcp(max(samplePdf, 1e-4f));
+        float3 sampleDirWorld;
+        float invPdf;
+        float3 sampleDirLocal = float3(0.0f, 0.0f, 1.0f); // HL2 only
+        if (GIMode == 2u)
+        {
+            // HL2: hemisphere gather around the cell's stored normal.
+            sampleDirLocal = SampleUniformHemisphere(randomUV.x, randomUV.y);
+            sampleDirWorld = SafeNormalize(mul(sampleDirLocal, BuildTBN(worldNormal)), worldNormal);
+            invPdf = 2.0f * PI; // 1 / (1/(2pi))
+        }
+        else
+        {
+            // SH4 cell-only full-sphere, but light mostly arrives from the stored
+            // normal's hemisphere -> importance-sample there to cut variance.
+            // MIS mixture: a fraction of rays are cosine-weighted around the normal
+            // (where the energy is), the rest uniform-sphere (so a cell shared by
+            // surfaces facing other ways still samples the lower hemisphere). The
+            // estimator divides by the MIXTURE pdf, so it stays unbiased full-sphere.
+            const float kCosineFraction = 0.85f;
+            bool useCosine = (float(sampleIndex) + 0.5f) < (kCosineFraction * float(rayCount));
+            if (useCosine)
+            {
+                // Malley cosine-weighted hemisphere (z-up local), then to world.
+                float r = sqrt(saturate(randomUV.x));
+                float phi = 2.0f * PI * randomUV.y;
+                float3 local = float3(r * cos(phi), r * sin(phi), sqrt(saturate(1.0f - randomUV.x)));
+                sampleDirWorld = SafeNormalize(mul(local, BuildTBN(worldNormal)), worldNormal);
+            }
+            else
+            {
+                float z = 1.0f - 2.0f * randomUV.x;
+                float rr = sqrt(saturate(1.0f - z * z));
+                float phi = 2.0f * PI * randomUV.y;
+                sampleDirWorld = float3(rr * cos(phi), rr * sin(phi), z);
+            }
+            // Mixture pdf at this direction (independent of which strategy drew it):
+            //   cosine-hemisphere pdf = max(dot(dir,N),0)/PI ; uniform-sphere = 1/(4PI)
+            float cosTerm = max(dot(sampleDirWorld, worldNormal), 0.0f);
+            float pdf = kCosineFraction * (cosTerm * (1.0f / PI)) +
+                        (1.0f - kCosineFraction) * (1.0f / (4.0f * PI));
+            // Cap the per-sample weight: grazing/lower-hemisphere directions have a
+            // tiny pdf -> huge invPdf -> fireflies/blotch. Bound it (small bias, big
+            // variance cut) — the dominant cosine-weighted upper hemisphere is fine.
+            invPdf = min(1.0f / max(pdf, 1e-4f), 8.0f * PI);
+        }
         float ignoredHitDistance;
         float3 sampleRadiance = TraceDiffusePath(origin, sampleDirWorld, noiseCoord, sampleIndex, ignoredHitDistance);
         if (GIMode == 2u)
@@ -808,7 +867,17 @@ void rayGen()
             hl2MeanRadiance += max(SanitizeFloat3(sampleRadiance), 0.0f.xxx);
         }
         else
-            AccumulateSH4RGB(sh, ProjectRadianceToSH4RGB(sampleRadiance, sampleDirWorld, invPdf), 1.0f);
+        {
+            // Firefly soft-clamp (SH4): a single ray hitting a very bright spot,
+            // amplified by invPdf, would blotch the low-order SH. Soft-knee compress
+            // luminance above a knee (keeps normal GI, tames outliers).
+            float3 rad = max(SanitizeFloat3(sampleRadiance), 0.0f.xxx);
+            float luma = dot(rad, float3(0.2126f, 0.7152f, 0.0722f));
+            const float kKnee = 6.0f;
+            if (luma > kKnee)
+                rad *= (luma / (1.0f + (luma - kKnee) / kKnee)) / luma;
+            AccumulateSH4RGB(sh, ProjectRadianceToSH4RGB(rad, sampleDirWorld, invPdf), 1.0f);
+        }
     }
 
     if (GIMode == 2u)
