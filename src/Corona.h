@@ -617,7 +617,9 @@ private:
 		// Repurposed former float3 padding (layout unchanged):
 		float OctNearConvergenceBias = 0.4f; // 0 = uniform, 1 = strong near priority
 		float EvictDistanceWeight = 0.7f;    // LRU victim: 0 = age only, 1 = distance only
-		float _spatialHashPad = 0.0f;
+		// P3b: >0.5 = lighting changed this frame -> oct cells re-trace full-rate and
+		// re-converge (overrides the convergence-adaptive trace throttle).
+		float LightingChangedFlag = 0.0f;
 		glm::vec4 DebugDiffuseGIOverride = glm::vec4(0.0f);
 		// SHaRC distance-based cell levels: x = enable (0/1), y = base distance
 		// (cells start growing beyond it), zw spare. Bounds the working set so far
@@ -668,6 +670,9 @@ private:
 	// sample per probe: direction+age and radiance+target luminance.
 	std::shared_ptr<Buffer> SpatialHashGIOctReservoirRay;
 	std::shared_ptr<Buffer> SpatialHashGIOctReservoirRadiance;
+	// P3b: hash of last frame's GI lighting state (point lights + directional +
+	// sky); a change forces oct cells back to full-rate trace + re-convergence.
+	UINT32 LastSpatialHashLightingHash = 0xFFFFFFFFu;
 	// Per-ray scratch written by the RT trace (oct mode) and consumed by the
 	// octahedral blend pass: float4(radiance.rgb, hit distance). Indexed by
 	// probeSlot * OctRaysPerCell + rayIndex. Ray directions are regenerated

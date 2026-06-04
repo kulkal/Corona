@@ -687,8 +687,10 @@ void RayGenOctahedral()
     // blend evaluates the same predicate and keeps the atlas untouched for skipped
     // cells (its ownership stamp is still refreshed so the query stays fresh).
     uint octIndex = slot & (OctCellCapacity - 1u);
+    // PointLightPadding.x (P3b) > 0.5 = lighting changed -> force a full-rate trace
+    // so converged cells re-trace and re-converge to the new lighting.
     float convergeFrames = OctIrradianceConverge[octIndex * OCT_IRRADIANCE_TEXELS].w;
-    if (!OctShouldTraceThisFrame(convergeFrames, octIndex, FrameCounter))
+    if (PointLightPadding.x <= 0.5f && !OctShouldTraceThisFrame(convergeFrames, octIndex, FrameCounter))
         return;
 
     float3 worldNormal = SafeNormalize(cellNormal.xyz, float3(0.0f, 1.0f, 0.0f));

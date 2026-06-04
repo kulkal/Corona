@@ -114,6 +114,9 @@ static const float OCT_RESERVOIR_MIN_TARGET = 1e-4f;
 // cells produced rays this frame; skipped cells keep their atlas untouched.
 #define OCT_BUDGET_FULL_FRAMES 96.0f
 #define OCT_BUDGET_REFRESH_PERIOD 4u
+// On a lighting change a converged cell's history is pulled down to this so the
+// temporal hysteresis re-opens (alpha ~ 1/frames) and it re-converges quickly.
+#define OCT_LIGHT_CHANGE_RESET_FRAMES 8.0f
 bool OctShouldTraceThisFrame(float frames, uint octIndex, uint frameIndex)
 {
     if (frames < OCT_BUDGET_FULL_FRAMES)
@@ -156,7 +159,7 @@ cbuffer SpatialHashGIConstant : register(b0)
     // Repurposed former float3 padding (layout unchanged):
     float OctNearConvergenceBias; // 0 = uniform, 1 = strong near-camera priority
     float EvictDistanceWeight;    // LRU victim: 0 = age only, 1 = camera distance only
-    float _spatialHashPad;
+    float LightingChangedFlag;    // P3b: >0.5 = lighting changed -> re-trace/converge
     float4 DebugDiffuseGIOverride;
     float4 SpatialHashLevelParams; // x=enable, y=base distance (SHaRC cell levels)
     float4 SpatialHashSkyAmbient;  // rgb = sky-ambient fill for uncached cells (E/pi)
@@ -1644,7 +1647,8 @@ void SpatialHashOctBlend(uint3 DTid : SV_DispatchThreadID, uint groupIndex : SV_
     if (groupIndex == 0u)
     {
         float convergeFrames = octFresh ? 0.0f : SanitizeFloat4(OctIrradianceOut[octIndex * OCT_IRRADIANCE_TEXELS]).w;
-        gOctRefresh = OctShouldTraceThisFrame(convergeFrames, octIndex, FrameIndex) ? 1u : 0u;
+        bool refresh = (LightingChangedFlag > 0.5f) || OctShouldTraceThisFrame(convergeFrames, octIndex, FrameIndex);
+        gOctRefresh = refresh ? 1u : 0u;
     }
     GroupMemoryBarrierWithGroupSync();
     if (gOctRefresh == 0u)
@@ -1790,6 +1794,10 @@ void SpatialHashOctBlend(uint3 DTid : SV_DispatchThreadID, uint groupIndex : SV_
     float4 prev = SanitizeFloat4(OctIrradianceOut[outIdx]);
     // Fresh take-over of a (possibly stale) oct slot -> ignore inherited history.
     float prevFrames = octFresh ? 0.0f : max(prev.w, 0.0f);
+    // P3b: on a lighting change, pull history down so the hysteresis re-opens and
+    // the cell re-converges to the new lighting instead of holding the old value.
+    if (LightingChangedFlag > 0.5f)
+        prevFrames = min(prevFrames, OCT_LIGHT_CHANGE_RESET_FRAMES);
 
     // Near-camera cells adapt faster: cap their accumulated history shorter so
     // they reach a stable value in fewer frames. Strength is OctNearConvergenceBias
@@ -1867,7 +1875,7 @@ void SpatialHashOctDepthBlend(uint3 DTid : SV_DispatchThreadID)
     // no rays this frame (trace skipped), so keep the depth map as-is. Predicate
     // is group-uniform (same frames/octIndex/frame), so all 64 threads agree.
     float convergeFrames = SanitizeFloat4(OctIrradianceIn[octIndex * OCT_IRRADIANCE_TEXELS]).w;
-    if (!OctShouldTraceThisFrame(convergeFrames, octIndex, FrameIndex))
+    if (LightingChangedFlag <= 0.5f && !OctShouldTraceThisFrame(convergeFrames, octIndex, FrameIndex))
         return;
 
     float maxDist = max(CellSize, 1e-3f) * OCT_DEPTH_MAX_CELLS;

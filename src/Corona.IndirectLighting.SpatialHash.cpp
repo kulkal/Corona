@@ -296,6 +296,34 @@ void Corona::SpatialHashGIPass()
 		RTSpatialHashGIViewParam.PointLights,
 		RTSpatialHashGIViewParam.PointLightCount,
 		std::min(MaxDiffuseGIPointLights, DiffuseGIPointLightLimit));
+
+	// P3b: detect a lighting change (point lights + directional + sky) by hashing
+	// the lit state and comparing to last frame. On a change, converged oct cells
+	// are forced back to full-rate tracing + re-convergence (the trace throttle
+	// alone would otherwise leave them on the stale lighting for a few frames /
+	// hysteresis). Static lighting -> no change -> full P3a throttle benefit.
+	{
+		UINT32 h = 2166136261u; // FNV-1a
+		auto mix = [&h](const void* data, size_t bytes)
+		{
+			const uint8_t* p = static_cast<const uint8_t*>(data);
+			for (size_t i = 0; i < bytes; ++i) { h ^= p[i]; h *= 16777619u; }
+		};
+		mix(&RTSpatialHashGIViewParam.PointLightCount, sizeof(UINT32));
+		mix(RTSpatialHashGIViewParam.PointLights,
+			sizeof(PointLightParam) * RTSpatialHashGIViewParam.PointLightCount);
+		mix(&RTSpatialHashGIViewParam.LightDir, sizeof(glm::vec4));
+		mix(&RTSpatialHashGIViewParam.LightColor, sizeof(glm::vec3));
+		mix(&RTSpatialHashGIViewParam.SkyColorTop, sizeof(glm::vec3));
+		mix(&RTSpatialHashGIViewParam.SkyColorBottom, sizeof(glm::vec3));
+		mix(&RTSpatialHashGIViewParam.SkyIntensity, sizeof(float));
+		mix(&RTSpatialHashGIViewParam.bIncludeSkyLighting, sizeof(UINT32));
+		const bool lightingChanged = (h != LastSpatialHashLightingHash);
+		LastSpatialHashLightingHash = h;
+		const float flag = lightingChanged ? 1.0f : 0.0f;
+		SpatialHashGICB.LightingChangedFlag = flag;        // blend / depth blend read
+		RTSpatialHashGIViewParam.PointLightPadding.x = flag; // trace reads .x
+	}
 	{
 		static float sLastLoggedLightIntensity = -1.0f;
 		static UINT32 sLastLoggedPointLightCount = 0xFFFFFFFFu;
