@@ -59,6 +59,8 @@ StructuredBuffer<uint> OctCellKeyIn : register(t30);
 StructuredBuffer<float4> CameraProbeSHIn : register(t31);
 RWStructuredBuffer<float4> OctIrradianceOut : register(u15);
 RWStructuredBuffer<float2> OctDepthOut : register(u16);
+RWStructuredBuffer<float4> OctReservoirRayOut : register(u18);
+RWStructuredBuffer<float4> OctReservoirRadianceOut : register(u19);
 // Per-oct-slot ownership tag, packed (ownerHash16 << 16 | frameStamp16). Because
 // octIndex = hashSlot & (OctCellCapacity-1) aliases unrelated cells in large
 // scenes, only ONE cell may own an oct slot at a time; colliding cells skip it
@@ -96,6 +98,19 @@ static const float OCT_DEPTH_MAX_CELLS = 8.0f;
 // Per-ray luminance soft-knee for firefly suppression in the octahedral blend.
 // Values below the knee pass through; brighter rays are compressed toward it.
 static const float OCT_FIREFLY_LUMA_KNEE = 4.0f;
+// Low-light oct texels can have high relative variance: most rays see little
+// energy, then a rare path finds a lit opening. Preserve more history only for
+// those noisy dark lobes so nearby stable probes still adapt quickly.
+static const float OCT_LOW_LIGHT_NOISE_LUMA = 0.35f;
+static const float OCT_LOW_LIGHT_VARIANCE_START = 0.35f;
+static const float OCT_LOW_LIGHT_VARIANCE_END = 2.50f;
+static const float OCT_LOW_LIGHT_ALPHA_SCALE = 0.35f;
+// ReSTIR-lite reused path sample per oct probe. This keeps rare useful diffuse
+// paths alive for several frames and injects them as a small virtual ray in the
+// octahedral convolution.
+static const float OCT_RESERVOIR_MAX_AGE = 24.0f;
+static const float OCT_RESERVOIR_VIRTUAL_WEIGHT = 3.0f;
+static const float OCT_RESERVOIR_MIN_TARGET = 1e-4f;
 
 #define RT_DIFFUSE_GI_MAX_POINT_LIGHTS 16
 
@@ -1485,6 +1500,8 @@ float3 SampleOctIrradianceNeighborhoodFallback(float3 worldPos, float3 evalNorma
 // order; collisions only occur when active cells approach OctCellCapacity.
 groupshared uint gOctOwned;  // 1 if this group's cell owns its oct slot this frame
 groupshared uint gOctFresh;  // 1 if it just took the slot over (reset history)
+groupshared float4 gOctReservoirRay;      // xyz = direction, w = age
+groupshared float4 gOctReservoirRadiance; // xyz = radiance, w = target luma
 
 [numthreads(64, 1, 1)]
 void SpatialHashOctBlend(uint3 DTid : SV_DispatchThreadID, uint groupIndex : SV_GroupIndex)
@@ -1534,16 +1551,88 @@ void SpatialHashOctBlend(uint3 DTid : SV_DispatchThreadID, uint groupIndex : SV_
     }
     GroupMemoryBarrierWithGroupSync();
     if (gOctOwned == 0u)
-        return; // a colliding cell owns this oct slot this frame — skip writing
+        return; // a colliding cell owns this oct slot this frame - skip writing
     bool octFresh = (gOctFresh != 0u);
+    float4 rotation = PerFrameRotationQuaternion(FrameIndex);
+
+    if (groupIndex == 0u)
+    {
+        gOctReservoirRay = 0.0f.xxxx;
+        gOctReservoirRadiance = 0.0f.xxxx;
+
+        float3 currentDir = 0.0f.xxx;
+        float3 currentRadiance = 0.0f.xxx;
+        float currentWeightSum = 0.0f;
+        uint reservoirSeed = HashUInt(cellKey ^ (FrameIndex * 747796405u) ^ (octIndex * 2891336453u));
+
+        [loop]
+        for (uint r = 0u; r < OCT_RAYS_PER_CELL; ++r)
+        {
+            float3 rayDir = RotateVectorByQuaternion(SphericalFibonacciDir(r, OCT_RAYS_PER_CELL), rotation);
+            float3 rad = SanitizeFloat3(OctRayDataIn[probeIndex * OCT_RAYS_PER_CELL + r].xyz);
+            float radLuma = Luminance(rad);
+            if (radLuma > OCT_FIREFLY_LUMA_KNEE)
+            {
+                float clampedLuma = radLuma / (1.0f + (radLuma - OCT_FIREFLY_LUMA_KNEE) / OCT_FIREFLY_LUMA_KNEE);
+                rad *= clampedLuma / radLuma;
+                radLuma = clampedLuma;
+            }
+            if (radLuma <= OCT_RESERVOIR_MIN_TARGET)
+                continue;
+
+            currentWeightSum += radLuma;
+            float u = HashToUnitFloat(reservoirSeed ^ (r * 0x9e3779b9u));
+            if (u * currentWeightSum <= radLuma)
+            {
+                currentDir = rayDir;
+                currentRadiance = rad;
+            }
+        }
+
+        float4 prevRay = octFresh ? 0.0f.xxxx : SanitizeFloat4(OctReservoirRayOut[octIndex]);
+        float4 prevRadiance = octFresh ? 0.0f.xxxx : SanitizeFloat4(OctReservoirRadianceOut[octIndex]);
+        float prevAge = min(max(prevRay.w, 0.0f) + 1.0f, OCT_RESERVOIR_MAX_AGE);
+        float prevTarget = max(prevRadiance.w, 0.0f);
+        bool prevValid = prevAge > 1.0f && prevAge < OCT_RESERVOIR_MAX_AGE && prevTarget > OCT_RESERVOIR_MIN_TARGET;
+        bool currentValid = currentWeightSum > OCT_RESERVOIR_MIN_TARGET;
+
+        float prevRetention = prevValid ? (1.0f - saturate((prevAge - 1.0f) / OCT_RESERVOIR_MAX_AGE)) : 0.0f;
+        float prevCombineTarget = prevTarget * prevRetention;
+        bool useCurrent = currentValid;
+        if (prevValid && currentValid)
+        {
+            float u = HashToUnitFloat(reservoirSeed ^ 0xa511e9b3u);
+            useCurrent = (u * (prevCombineTarget + currentWeightSum) <= currentWeightSum);
+        }
+        else if (prevValid)
+        {
+            useCurrent = false;
+        }
+
+        if (useCurrent)
+        {
+            gOctReservoirRay = float4(SafeNormalize(currentDir, float3(0.0f, 1.0f, 0.0f)), 1.0f);
+            gOctReservoirRadiance = float4(currentRadiance, max(currentWeightSum, OCT_RESERVOIR_MIN_TARGET));
+        }
+        else if (prevValid)
+        {
+            gOctReservoirRay = float4(SafeNormalize(prevRay.xyz, float3(0.0f, 1.0f, 0.0f)), prevAge);
+            gOctReservoirRadiance = float4(max(prevRadiance.xyz, 0.0f.xxx), prevTarget);
+        }
+
+        OctReservoirRayOut[octIndex] = gOctReservoirRay;
+        OctReservoirRadianceOut[octIndex] = gOctReservoirRadiance;
+    }
+    GroupMemoryBarrierWithGroupSync();
 
     uint tx = texelIndex % OCT_IRRADIANCE_RES;
     uint ty = texelIndex / OCT_IRRADIANCE_RES;
     float2 texelUV = (float2(tx, ty) + 0.5f) / (float)OCT_IRRADIANCE_RES;
     float3 texelDir = OctahedralUVToDirection(texelUV);
 
-    float4 rotation = PerFrameRotationQuaternion(FrameIndex);
     float3 sumRadiance = 0.0f.xxx;
+    float sumLuma = 0.0f;
+    float sumLuma2 = 0.0f;
     float sumWeight = 0.0f;
     [loop]
     for (uint r = 0u; r < OCT_RAYS_PER_CELL; ++r)
@@ -1563,13 +1652,40 @@ void SpatialHashOctBlend(uint3 DTid : SV_DispatchThreadID, uint groupIndex : SV_
         {
             float clampedLuma = radLuma / (1.0f + (radLuma - OCT_FIREFLY_LUMA_KNEE) / OCT_FIREFLY_LUMA_KNEE);
             rad *= clampedLuma / radLuma;
+            radLuma = clampedLuma;
         }
         sumRadiance += rad * w;
+        sumLuma += radLuma * w;
+        sumLuma2 += radLuma * radLuma * w;
         sumWeight += w;
+    }
+    float reservoirAge = max(gOctReservoirRay.w, 0.0f);
+    float reservoirTarget = max(gOctReservoirRadiance.w, 0.0f);
+    if (reservoirAge > 1.0f && reservoirTarget > OCT_RESERVOIR_MIN_TARGET)
+    {
+        float3 reservoirDir = SafeNormalize(gOctReservoirRay.xyz, float3(0.0f, 1.0f, 0.0f));
+        float reservoirWeight = max(0.0f, dot(texelDir, reservoirDir));
+        if (reservoirWeight > 0.0f)
+        {
+            float ageGate = saturate((reservoirAge - 1.0f) / 4.0f);
+            float decayGate = 1.0f - saturate((reservoirAge - 1.0f) / OCT_RESERVOIR_MAX_AGE);
+            reservoirWeight *= OCT_RESERVOIR_VIRTUAL_WEIGHT * ageGate * decayGate;
+            float3 reservoirRadiance = max(SanitizeFloat3(gOctReservoirRadiance.xyz), 0.0f.xxx);
+            float reservoirLuma = Luminance(reservoirRadiance);
+            sumRadiance += reservoirRadiance * reservoirWeight;
+            sumLuma += reservoirLuma * reservoirWeight;
+            sumLuma2 += reservoirLuma * reservoirLuma * reservoirWeight;
+            sumWeight += reservoirWeight;
+        }
     }
     // Cosine-weighted mean radiance over the hemisphere == E/pi, matching the SH
     // path's EvaluateSHDiffuse * (1/pi) output so the A/B brightness is equal.
     float3 newIrradiance = sumWeight > 1e-4f ? (sumRadiance / sumWeight) : 0.0f.xxx;
+    float meanLuma = sumWeight > 1e-4f ? (sumLuma / sumWeight) : 0.0f;
+    float lumaVariance = sumWeight > 1e-4f ? max(sumLuma2 / sumWeight - meanLuma * meanLuma, 0.0f) : 0.0f;
+    float relativeVariance = lumaVariance / max(meanLuma * meanLuma, 1e-4f);
+    float lowLightGate = 1.0f - smoothstep(OCT_LOW_LIGHT_NOISE_LUMA * 0.35f, OCT_LOW_LIGHT_NOISE_LUMA, meanLuma);
+    float noisyLowLight = lowLightGate * smoothstep(OCT_LOW_LIGHT_VARIANCE_START, OCT_LOW_LIGHT_VARIANCE_END, relativeVariance);
 
     uint outIdx = octIndex * OCT_IRRADIANCE_TEXELS + texelIndex;
     float4 prev = SanitizeFloat4(OctIrradianceOut[outIdx]);
@@ -1584,6 +1700,7 @@ void SpatialHashOctBlend(uint3 DTid : SV_DispatchThreadID, uint groupIndex : SV_
     float3 camPos = mul(float4(0.0f, 0.0f, 0.0f, 1.0f), InvViewMatrix).xyz;
     float proximity = saturate(1.0f - length(probePos - camPos) / max(ProjectionParams.w * 0.3f, 1.0f));
     float maxFrames = lerp(OCT_MAX_HISTORY_FRAMES, 48.0f, proximity * saturate(OctNearConvergenceBias));
+    maxFrames = lerp(maxFrames, OCT_MAX_HISTORY_FRAMES, noisyLowLight);
 
     float3 blended;
     float frames;
@@ -1596,6 +1713,8 @@ void SpatialHashOctBlend(uint3 DTid : SV_DispatchThreadID, uint groupIndex : SV_
     {
         float accepted = min(prevFrames + 1.0f, maxFrames);
         float alpha = saturate(1.0f / max(accepted, 1.0f));
+        if (prevFrames >= OCT_NEW_CELL_RAMP_FRAMES)
+            alpha *= lerp(1.0f, OCT_LOW_LIGHT_ALPHA_SCALE, noisyLowLight);
         if (prevFrames < OCT_NEW_CELL_RAMP_FRAMES)
         {
             float boost = 1.0f - saturate(prevFrames / OCT_NEW_CELL_RAMP_FRAMES);
@@ -1611,7 +1730,8 @@ void SpatialHashOctBlend(uint3 DTid : SV_DispatchThreadID, uint groupIndex : SV_
         float newLuma = Luminance(newIrradiance);
         float brighten = saturate((newLuma - prevLuma) / max(newLuma, 1e-3f));
         float darkGate = saturate(1.0f - prevLuma / 0.15f); // 1 when history is dark
-        alpha = max(alpha, brighten * darkGate * 0.5f);
+        float recoveryScale = lerp(1.0f, OCT_LOW_LIGHT_ALPHA_SCALE, noisyLowLight);
+        alpha = max(alpha, brighten * darkGate * 0.5f * recoveryScale);
         blended = lerp(prev.xyz, newIrradiance, alpha);
         frames = accepted;
     }

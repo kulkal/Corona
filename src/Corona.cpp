@@ -10781,6 +10781,11 @@ void Corona::LoadAssets()
 		SpatialHashGIOctRayData = createStructuredBuffer(octRayDataElements, sizeof(float) * 4u, true);
 		// Oct-slot ownership tags, zero-init (0 = free). octZeroInit is large enough.
 		SpatialHashGIOctCellKey = createStructuredBuffer(SpatialHashGIOctCellCapacity, sizeof(UINT32), true, octZeroInit.data());
+		// One ReSTIR-lite reused path sample per oct slot:
+		// ray.xyz = direction, ray.w = age; radiance.xyz = path radiance,
+		// radiance.w = target luminance. Zero-init means "no reservoir sample yet".
+		SpatialHashGIOctReservoirRay = createStructuredBuffer(SpatialHashGIOctCellCapacity, sizeof(float) * 4u, true, octZeroInit.data());
+		SpatialHashGIOctReservoirRadiance = createStructuredBuffer(SpatialHashGIOctCellCapacity, sizeof(float) * 4u, true, octZeroInit.data());
 		// Camera ambient probe SH4 (4 float4), zero-init.
 		SpatialHashGICameraProbeSH = createStructuredBuffer(4u, sizeof(float) * 4u, true, octZeroInit.data());
 

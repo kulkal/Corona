@@ -664,6 +664,10 @@ private:
 	// owning cell writes a given oct slot; colliding cells (octIndex aliasing in
 	// large scenes) skip it and fall back to neighbour probes at query time.
 	std::shared_ptr<Buffer> SpatialHashGIOctCellKey;
+	// Per-oct-slot ReSTIR-lite path reservoir. Stores one reused diffuse path
+	// sample per probe: direction+age and radiance+target luminance.
+	std::shared_ptr<Buffer> SpatialHashGIOctReservoirRay;
+	std::shared_ptr<Buffer> SpatialHashGIOctReservoirRadiance;
 	// Single camera-anchored ambient SH4 (4 float4), traced from the camera each
 	// frame; the query uses it as the fallback for uncached cells.
 	std::shared_ptr<Buffer> SpatialHashGICameraProbeSH;
