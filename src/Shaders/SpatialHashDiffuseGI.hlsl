@@ -1639,6 +1639,28 @@ float3 SampleOctIrradianceNeighborhoodFallback(float3 worldPos, float3 evalNorma
     return float3(-1.0f, -1.0f, -1.0f);
 }
 
+// Cell-only oct probe importance ray — MUST match SpatialHashCellGI.hlsl's copy
+// so the blend reconstructs the exact directions the trace shot, plus each ray's
+// generating density (used to keep the convolution unbiased under importance
+// sampling). See that file for the rationale.
+#define OCT_IMPORTANCE_COSINE_FRAC 0.75f
+float3 OctImportanceDir(uint r, uint rayCount, uint cosineCount, float3 n, float4 frameRot, uint frame, out float density)
+{
+    if (r < cosineCount)
+    {
+        float u = (float(r) + 0.5f) / float(max(cosineCount, 1u));
+        float z = sqrt(saturate(1.0f - u));
+        float rr = sqrt(saturate(u));
+        float phi = float(r) * 2.39996323f + float(frame & 1023u) * 0.0613592f;
+        float3 local = float3(rr * cos(phi), rr * sin(phi), z);
+        density = max(z, 0.05f) * (1.0f / PI);
+        return SafeNormalize(mul(local, BuildTBN(n)), n);
+    }
+    float3 d = RotateVectorByQuaternion(SphericalFibonacciDir(r - cosineCount, max(rayCount - cosineCount, 1u)), frameRot);
+    density = 1.0f / (4.0f * PI);
+    return SafeNormalize(d, n);
+}
+
 // One thread per (probe, irradiance texel). Reconstructs the trace's ray
 // directions, convolves the per-ray radiance with this texel's cosine lobe to
 // form the directional irradiance E/pi, and temporally blends it into the
@@ -1647,6 +1669,7 @@ float3 SampleOctIrradianceNeighborhoodFallback(float3 worldPos, float3 evalNorma
 // order; collisions only occur when active cells approach OctCellCapacity.
 groupshared uint gOctOwned;  // 1 if this group's cell owns its oct slot this frame
 groupshared uint gOctFresh;  // 1 if it just took the slot over (reset history)
+groupshared float gRayDensity[OCT_RAYS_PER_CELL]; // per-ray generating density (importance)
 groupshared uint gOctRefresh; // 1 if this probe traces/convolves this frame (P3a)
 groupshared float4 gOctReservoirRay;      // xyz = direction, w = age
 groupshared float4 gOctReservoirRadiance; // xyz = radiance, w = target luma
@@ -1738,7 +1761,14 @@ void SpatialHashOctBlend(uint3 DTid : SV_DispatchThreadID, uint groupIndex : SV_
             rad *= clampedLuma / radLuma;
         }
         gRayRadiance[groupIndex] = rad;
-        gRayDir[groupIndex] = RotateVectorByQuaternion(SphericalFibonacciDir(groupIndex, OCT_RAYS_PER_CELL), rotation);
+        // Reconstruct the trace's importance-sampled direction + its generating
+        // density (cell normal -> cosine/uniform mixture). Convolution divides by
+        // density to stay unbiased under the non-uniform sampling.
+        float3 cellNrm = SafeNormalize(SanitizeFloat4(CellNormalIn[slot]).xyz, float3(0.0f, 1.0f, 0.0f));
+        uint cosineCount = (uint)(float(OCT_RAYS_PER_CELL) * OCT_IMPORTANCE_COSINE_FRAC);
+        float dens;
+        gRayDir[groupIndex] = OctImportanceDir(groupIndex, OCT_RAYS_PER_CELL, cosineCount, cellNrm, rotation, FrameIndex, dens);
+        gRayDensity[groupIndex] = dens;
     }
     GroupMemoryBarrierWithGroupSync();
 
@@ -1819,7 +1849,10 @@ void SpatialHashOctBlend(uint3 DTid : SV_DispatchThreadID, uint groupIndex : SV_
     for (uint r = 0u; r < OCT_RAYS_PER_CELL; ++r)
     {
         float3 rayDir = gRayDir[r];
-        float w = max(0.0f, dot(texelDir, rayDir));
+        // Importance sampling: divide the cosine lobe weight by the ray's
+        // generating density so the non-uniform (normal-biased) ray set still
+        // estimates the unbiased cosine-weighted mean (E/pi).
+        float w = max(0.0f, dot(texelDir, rayDir)) / max(gRayDensity[r], 1e-4f);
         if (w <= 0.0f)
             continue;
         // Radiance was firefly soft-clamped once during LDS staging (octahedral
@@ -1955,7 +1988,11 @@ void SpatialHashOctDepthBlend(uint3 DTid : SV_DispatchThreadID)
     // Stage this probe's 64 ray (dir, clamped hit distance) into LDS once
     // (texelIndex == ray index here) so the per-texel loop reads from LDS instead
     // of re-fetching all 64 ray distances from global per depth texel.
-    gRayDir[texelIndex] = RotateVectorByQuaternion(SphericalFibonacciDir(texelIndex, OCT_RAYS_PER_CELL), rotation);
+    float3 cellNrmD = SafeNormalize(SanitizeFloat4(CellNormalIn[slot]).xyz, float3(0.0f, 1.0f, 0.0f));
+    uint cosineCountD = (uint)(float(OCT_RAYS_PER_CELL) * OCT_IMPORTANCE_COSINE_FRAC);
+    float densD;
+    gRayDir[texelIndex] = OctImportanceDir(texelIndex, OCT_RAYS_PER_CELL, cosineCountD, cellNrmD, rotation, FrameIndex, densD);
+    gRayDensity[texelIndex] = densD;
     gRayHitDist[texelIndex] = min(OctRayDataIn[probeIndex * OCT_RAYS_PER_CELL + texelIndex].w, maxDist);
     GroupMemoryBarrierWithGroupSync();
 
@@ -1974,7 +2011,7 @@ void SpatialHashOctDepthBlend(uint3 DTid : SV_DispatchThreadID)
         float c = max(0.0f, dot(texelDir, rayDir));
         if (c <= 0.0f)
             continue;
-        float w = pow(c, OCT_DEPTH_SHARPNESS);
+        float w = pow(c, OCT_DEPTH_SHARPNESS) / max(gRayDensity[r], 1e-4f); // density-aware (importance)
         float dist = gRayHitDist[r];
         sumDist += dist * w;
         sumDist2 += dist * dist * w;

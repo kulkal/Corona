@@ -494,6 +494,7 @@ void Corona::SpatialHashGIPass()
 		SpatialHashGIOctBlendPSO->SetBufferSRV("ActiveCounterIn", SpatialHashGIActiveCounter.get());
 		SpatialHashGIOctBlendPSO->SetBufferSRV("ResolvedKeysIn", SpatialHashGIResolvedKeys[cacheIndex].get());
 		SpatialHashGIOctBlendPSO->SetBufferSRV("CellPositionIn", SpatialHashGICellPosition.get());
+		SpatialHashGIOctBlendPSO->SetBufferSRV("CellNormalIn", SpatialHashGICellNormal.get());
 		SpatialHashGIOctBlendPSO->SetBufferSRV("OctRayDataIn", SpatialHashGIOctRayData.get());
 		SpatialHashGIOctBlendPSO->SetBufferUAV("OctIrradianceOut", SpatialHashGIOctIrradiance[0].get());
 		SpatialHashGIOctBlendPSO->SetBufferUAV("OctCellKeyOut", SpatialHashGIOctCellKey.get());
@@ -513,6 +514,7 @@ void Corona::SpatialHashGIPass()
 			SpatialHashGIOctDepthBlendPSO->SetBufferSRV("ActiveCellSlotsIn", SpatialHashGIActiveCellSlots.get());
 			SpatialHashGIOctDepthBlendPSO->SetBufferSRV("ActiveCounterIn", SpatialHashGIActiveCounter.get());
 			SpatialHashGIOctDepthBlendPSO->SetBufferSRV("ResolvedKeysIn", SpatialHashGIResolvedKeys[cacheIndex].get());
+			SpatialHashGIOctDepthBlendPSO->SetBufferSRV("CellNormalIn", SpatialHashGICellNormal.get());
 			SpatialHashGIOctDepthBlendPSO->SetBufferSRV("OctRayDataIn", SpatialHashGIOctRayData.get());
 			SpatialHashGIOctDepthBlendPSO->SetBufferUAV("OctDepthOut", SpatialHashGIOctDepth[0].get());
 			SpatialHashGIOctDepthBlendPSO->SetBufferUAV("OctCellKeyOut", SpatialHashGIOctCellKey.get());

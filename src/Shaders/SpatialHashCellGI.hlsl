@@ -656,10 +656,35 @@ float3 TraceDiffusePath(float3 origin, float3 direction, uint2 noiseCoord, uint 
     return max(SanitizeFloat3(radiance), 0.0f.xxx);
 }
 
+// Cell-only oct probe importance ray (must match the blend's copy in
+// SpatialHashDiffuseGI.hlsl). Light mostly arrives from the cell normal's
+// hemisphere, so the first `cosineCount` rays are cosine-weighted around `n`
+// (variance cut where it's queried), the rest uniform-sphere (keeps the
+// opposite-facing texels of a multi-orientation cell sampled). Deterministic:
+// the blend reconstructs the identical direction + its generating density and
+// convolves with weight/density, so the octahedral map stays unbiased.
+#define OCT_IMPORTANCE_COSINE_FRAC 0.75f
+float3 OctImportanceDir(uint r, uint rayCount, uint cosineCount, float3 n, float4 frameRot, uint frame, out float density)
+{
+    if (r < cosineCount)
+    {
+        float u = (float(r) + 0.5f) / float(max(cosineCount, 1u));
+        float z = sqrt(saturate(1.0f - u));        // cos(theta); cosine pdf = z/PI
+        float rr = sqrt(saturate(u));
+        float phi = float(r) * 2.39996323f + float(frame & 1023u) * 0.0613592f; // golden + per-frame
+        float3 local = float3(rr * cos(phi), rr * sin(phi), z);
+        density = max(z, 0.05f) * (1.0f / PI);      // capped to avoid horizon spikes
+        return SafeNormalize(mul(local, BuildTBN(n)), n);
+    }
+    float3 d = RotateVectorByQuaternion(SphericalFibonacciDir(r - cosineCount, max(rayCount - cosineCount, 1u)), frameRot);
+    density = 1.0f / (4.0f * PI);
+    return SafeNormalize(d, n);
+}
+
 // Octahedral DDGI trace (GIMode==1): one dispatched thread per (probe, ray).
-// Each thread traces a single full-sphere path from the probe's open-space
-// origin and records (radiance, hitDistance) to OctRayData. A later compute
-// pass convolves these rays into the per-probe octahedral irradiance/depth map.
+// Each thread traces a single path from the probe's open-space origin and records
+// (radiance, hitDistance) to OctRayData. A later compute pass convolves these
+// rays into the per-probe octahedral irradiance/depth map.
 void RayGenOctahedral()
 {
     uint globalRay = DispatchRaysIndex().x;
@@ -710,8 +735,9 @@ void RayGenOctahedral()
     float3 origin = worldPos + worldNormal * RayBias + viewDir * camPush;
 
     float4 rotation = PerFrameRotationQuaternion(FrameCounter);
-    float3 sampleDir = RotateVectorByQuaternion(SphericalFibonacciDir(rayIndex, raysPerProbe), rotation);
-    sampleDir = SafeNormalize(sampleDir, worldNormal);
+    uint cosineCount = (uint)(float(raysPerProbe) * OCT_IMPORTANCE_COSINE_FRAC);
+    float ignoredDensity;
+    float3 sampleDir = OctImportanceDir(rayIndex, raysPerProbe, cosineCount, worldNormal, rotation, FrameCounter, ignoredDensity);
 
     uint noiseSeed = slot ^ (rayIndex * 1664525u);
     uint2 noiseCoord = uint2(noiseSeed & 1023u, noiseSeed >> 10u);
