@@ -4264,21 +4264,15 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 			continue;
 		}
 
-		// Force the spatial-hash storage sub-mode (oct / SH4 / HL2) deterministically
+		// Force the spatial-hash storage sub-mode (SH4 spherical / oct) deterministically
 		// for headless A/B measurement. Sets the live CB GIMode (captured into the
 		// frame source state each frame, so it sticks) and selects the spatial-hash
-		// method. oct = 1, sh4 = 0, hl2 = 2.
+		// method. sh4 = 0, oct = 1.
 		std::wstring giStorageValue = ParseValueArg(arg, L"--gi-storage", L"-gi-storage", i);
 		if (!giStorageValue.empty())
 		{
 			DiffuseGIMode = EDiffuseGIMode::SPATIAL_HASH;
-			UINT32 storageMode = 0u;
-			if (giStorageValue == L"oct" || giStorageValue == L"octahedral" || giStorageValue == L"1")
-				storageMode = 1u;
-			else if (giStorageValue == L"hl2" || giStorageValue == L"2")
-				storageMode = 2u;
-			else
-				storageMode = 0u; // sh4
+			UINT32 storageMode = (giStorageValue == L"oct" || giStorageValue == L"octahedral" || giStorageValue == L"1") ? 1u : 0u;
 			SpatialHashGICB.GIMode = storageMode;
 			RTSpatialHashGIViewParam.GIMode = storageMode;
 			continue;
@@ -13195,7 +13189,7 @@ void Corona::DrawEditorModeOverlay()
 					else if (RenderingMode == ERenderingMode::HYBRID && DiffuseGIMode == EDiffuseGIMode::SPATIAL_HASH)
 					{
 						int giVariant = static_cast<int>(SpatialHashGICB.GIMode);
-						const char* giVariants[] = { "SH4 (legacy)", "Octahedral DDGI", "HL2 basis" };
+						const char* giVariants[] = { "SH4 (spherical)", "Octahedral DDGI" };
 						if (ImGui::Combo("Spatial Hash GI Variant", &giVariant, giVariants, IM_ARRAYSIZE(giVariants)))
 						{
 							SpatialHashGICB.GIMode = static_cast<UINT32>(giVariant);
@@ -15192,7 +15186,7 @@ void Corona::OnRender()
 				else if (DiffuseGIMode == EDiffuseGIMode::SPATIAL_HASH)
 				{
 					int giVariant = static_cast<int>(SpatialHashGICB.GIMode);
-					const char* giVariants[] = { "SH4 (legacy)", "Octahedral DDGI", "HL2 basis" };
+					const char* giVariants[] = { "SH4 (spherical)", "Octahedral DDGI" };
 					if (ImGui::Combo("Spatial Hash GI Variant##DiffuseGI", &giVariant, giVariants, IM_ARRAYSIZE(giVariants)))
 					{
 						SpatialHashGICB.GIMode = static_cast<UINT32>(giVariant);
