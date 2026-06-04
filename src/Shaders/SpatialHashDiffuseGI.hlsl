@@ -108,6 +108,18 @@ static const float OCT_LOW_LIGHT_ALPHA_SCALE = 0.35f;
 static const float OCT_RESERVOIR_MAX_AGE = 24.0f;
 static const float OCT_RESERVOIR_VIRTUAL_WEIGHT = 3.0f;
 static const float OCT_RESERVOIR_MIN_TARGET = 1e-4f;
+// Convergence-adaptive trace scheduling (P3a). MUST match SpatialHashCellGI.hlsl:
+// converged cells (frames >= FULL) trace once per REFRESH_PERIOD, phase-staggered
+// by octIndex. Trace + blend evaluate this identically so they agree on which
+// cells produced rays this frame; skipped cells keep their atlas untouched.
+#define OCT_BUDGET_FULL_FRAMES 96.0f
+#define OCT_BUDGET_REFRESH_PERIOD 4u
+bool OctShouldTraceThisFrame(float frames, uint octIndex, uint frameIndex)
+{
+    if (frames < OCT_BUDGET_FULL_FRAMES)
+        return true;
+    return (frameIndex % OCT_BUDGET_REFRESH_PERIOD) == (octIndex % OCT_BUDGET_REFRESH_PERIOD);
+}
 
 #define RT_DIFFUSE_GI_MAX_POINT_LIGHTS 16
 
@@ -1561,6 +1573,7 @@ float3 SampleOctIrradianceNeighborhoodFallback(float3 worldPos, float3 evalNorma
 // order; collisions only occur when active cells approach OctCellCapacity.
 groupshared uint gOctOwned;  // 1 if this group's cell owns its oct slot this frame
 groupshared uint gOctFresh;  // 1 if it just took the slot over (reset history)
+groupshared uint gOctRefresh; // 1 if this probe traces/convolves this frame (P3a)
 groupshared float4 gOctReservoirRay;      // xyz = direction, w = age
 groupshared float4 gOctReservoirRadiance; // xyz = radiance, w = target luma
 // Per-probe ray cache (one group == one probe == 64 texels == 64 rays). Each
@@ -1622,6 +1635,20 @@ void SpatialHashOctBlend(uint3 DTid : SV_DispatchThreadID, uint groupIndex : SV_
         return; // a colliding cell owns this oct slot this frame - skip writing
     bool octFresh = (gOctFresh != 0u);
     float4 rotation = PerFrameRotationQuaternion(FrameIndex);
+
+    // Convergence-adaptive scheduling (P3a): if this probe is converged and not
+    // due for a refresh this frame, skip the trace convolution entirely and keep
+    // the atlas as-is. Ownership was already (re)stamped above so the query stays
+    // fresh. Trace evaluated the same predicate, so OctRayData has no new rays for
+    // this probe — matching this skip. octFresh forces a refresh (just took over).
+    if (groupIndex == 0u)
+    {
+        float convergeFrames = octFresh ? 0.0f : SanitizeFloat4(OctIrradianceOut[octIndex * OCT_IRRADIANCE_TEXELS]).w;
+        gOctRefresh = OctShouldTraceThisFrame(convergeFrames, octIndex, FrameIndex) ? 1u : 0u;
+    }
+    GroupMemoryBarrierWithGroupSync();
+    if (gOctRefresh == 0u)
+        return;
 
     // Stage this probe's 64 rays into LDS once (groupIndex == ray index): the
     // reconstructed direction and the firefly-clamped radiance. Reservoir +
@@ -1834,6 +1861,13 @@ void SpatialHashOctDepthBlend(uint3 DTid : SV_DispatchThreadID)
     // Only the owning cell (set by the irradiance blend earlier this frame) writes
     // this oct slot's depth; colliding cells skip so they don't corrupt it.
     if (OctOwnerHash(ResolvedKeysIn[slot]) != (OctCellKeyOut[octIndex] >> 16u))
+        return;
+
+    // Convergence-adaptive scheduling (P3a): converged + not-due probes produced
+    // no rays this frame (trace skipped), so keep the depth map as-is. Predicate
+    // is group-uniform (same frames/octIndex/frame), so all 64 threads agree.
+    float convergeFrames = SanitizeFloat4(OctIrradianceIn[octIndex * OCT_IRRADIANCE_TEXELS]).w;
+    if (!OctShouldTraceThisFrame(convergeFrames, octIndex, FrameIndex))
         return;
 
     float maxDist = max(CellSize, 1e-3f) * OCT_DEPTH_MAX_CELLS;

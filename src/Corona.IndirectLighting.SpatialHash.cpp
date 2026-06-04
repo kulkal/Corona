@@ -133,6 +133,7 @@ shared_ptr<RTPipelineStateObject> Corona::CreateRaytracingSpatialHashGIPSO(bool 
 		tempPSO->BindSRV("global", "ActiveCellSlots", 9);
 		tempPSO->BindSRV("global", "ActiveCounter", 10);
 		tempPSO->BindSRV("global", "CellLightMask", 11);
+		tempPSO->BindSRV("global", "OctIrradianceConverge", 12);
 		tempPSO->BindCBV("global", "ViewParameter", 0, sizeof(RTSpatialHashGIViewParamCB), 1);
 		tempPSO->BindSampler("global", "sampleWrap", 0);
 
@@ -407,6 +408,7 @@ void Corona::SpatialHashGIPass()
 		.SetBufferSRV("global", "ActiveCellSlots", SpatialHashGIActiveCellSlots.get())
 		.SetBufferSRV("global", "ActiveCounter", SpatialHashGIActiveCounter.get())
 		.SetBufferSRV("global", "CellLightMask", SpatialHashGICellLightMask.get())
+		.SetBufferSRV("global", "OctIrradianceConverge", SpatialHashGIOctIrradiance[0].get())
 		.SetCBVValue("global", "ViewParameter", &RTSpatialHashGIViewParam)
 		.SetSampler("global", "sampleWrap", samplerWrap.get());
 	pass.BindSceneHitPrograms();

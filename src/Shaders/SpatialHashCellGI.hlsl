@@ -89,6 +89,30 @@ int3 SpatialHashLevelOffset(uint level)
 // Indexed by probeSlot * OctRaysPerCell + rayIndex. Consumed by the octahedral
 // blend pass in SpatialHashDiffuseGI.hlsl.
 RWStructuredBuffer<float4> OctRayData : register(u4);
+// Read-only view of the resolved octahedral irradiance atlas (previous frame),
+// used only to read per-probe convergence (texel 0's .w = accumulated frames) so
+// converged cells can be traced at a reduced rate. Bound to the same buffer the
+// blend writes; at trace time it is in ShaderRead state.
+StructuredBuffer<float4> OctIrradianceConverge : register(t12);
+
+// Convergence-adaptive trace scheduling (P3a). A spatial-hash diffuse-irradiance
+// cell barely changes once converged, so re-tracing it every frame is wasted
+// work. Young cells (frames < FULL) trace every frame; converged cells trace once
+// per REFRESH_PERIOD, phase-staggered by octIndex so the cost spreads across
+// frames. Trace and blend evaluate this identically (same atlas frames + frame
+// index), so they agree on which cells produce rays each frame.
+#define OCT_IRRADIANCE_TEXELS 64u
+// Full-rate until ~1.6s @60fps so cells trace every frame through the 1-2s
+// convergence window (no convergence-speed regression), then throttle. Near
+// cells cap their history below this so they stay full-rate (quality-critical).
+#define OCT_BUDGET_FULL_FRAMES 96.0f
+#define OCT_BUDGET_REFRESH_PERIOD 4u
+bool OctShouldTraceThisFrame(float frames, uint octIndex, uint frameIndex)
+{
+    if (frames < OCT_BUDGET_FULL_FRAMES)
+        return true;
+    return (frameIndex % OCT_BUDGET_REFRESH_PERIOD) == (octIndex % OCT_BUDGET_REFRESH_PERIOD);
+}
 
 static const float INV_PI = 1.0f / PI;
 static const float MAX_HIT_DIST = 10000.0f;
@@ -657,6 +681,15 @@ void RayGenOctahedral()
         OctRayData[globalRay] = float4(0.0f, 0.0f, 0.0f, MAX_HIT_DIST);
         return;
     }
+
+    // Convergence-adaptive scheduling: a converged cell (high accumulated frames)
+    // that is not due for a refresh this frame skips all of its ray work. The
+    // blend evaluates the same predicate and keeps the atlas untouched for skipped
+    // cells (its ownership stamp is still refreshed so the query stays fresh).
+    uint octIndex = slot & (OctCellCapacity - 1u);
+    float convergeFrames = OctIrradianceConverge[octIndex * OCT_IRRADIANCE_TEXELS].w;
+    if (!OctShouldTraceThisFrame(convergeFrames, octIndex, FrameCounter))
+        return;
 
     float3 worldNormal = SafeNormalize(cellNormal.xyz, float3(0.0f, 1.0f, 0.0f));
     float3 worldPos = cellPosition.xyz;
