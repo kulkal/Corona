@@ -614,11 +614,10 @@ void TraceCameraAmbientProbe(); // defined after RayGenOctahedral
 void RayGenOctahedral()
 {
     uint globalRay = DispatchRaysIndex().x;
-    // Extra trailing thread (dispatch width = OctCellCapacity*OctRaysPerCell + 1)
-    // traces the camera ambient probe.
+    // Extra trailing thread used to trace the camera ambient probe. Disabled for
+    // the oct miss-fallback test; query now relies on view-ray hash lookup first.
     if (globalRay == OctCellCapacity * OctRaysPerCell)
     {
-        TraceCameraAmbientProbe();
         return;
     }
     uint raysPerProbe = max(OctRaysPerCell, 1u);
@@ -711,11 +710,10 @@ void rayGen()
     }
 
     uint traceIndex = DispatchRaysIndex().x;
-    // Extra trailing thread (dispatch width = HashEntryCount + 1) traces the
-    // camera ambient probe.
+    // Extra trailing thread used to trace the camera ambient probe. Disabled for
+    // the oct miss-fallback test; SH mode keeps its normal cache path unchanged.
     if (traceIndex == HashEntryCount)
     {
-        TraceCameraAmbientProbe();
         return;
     }
     uint activeCount = min(ActiveCounter[0], ActiveCellCapacity);

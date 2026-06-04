@@ -350,25 +350,11 @@ float3 EvaluateSHDiffuse(SH4RGB sh, float3 normal)
     return max(SanitizeFloat3(irradiance), 0.0f.xxx);
 }
 
-// Fallback ambient for uncached cells: the camera-anchored SH (tracks local
-// indoor/outdoor irradiance) evaluated with the pixel normal, in the same E/pi
-// scale as cached GI. Falls back to the fixed sky ambient before the camera
-// probe has accumulated any history.
+// Fallback ambient for uncached cells. The previous camera-anchored SH fallback
+// is disabled here so missing oct cells are exposed to the view-ray lookup first
+// and only fall back to the fixed sky ambient.
 float3 EvaluateUncachedAmbient(float3 normal)
 {
-    // SpatialHashSkyAmbient.a carries the fallback strength. The camera probe
-    // sits in open space so its ambient over-brightens occluded corners; scale it
-    // down (and let the user tune) so the fill blends with the surrounding GI.
-    float fallbackScale = SpatialHashSkyAmbient.a;
-    if (CameraProbeSHIn[0].w > 0.0f)
-    {
-        SH4RGB sh;
-        sh.c0 = SanitizeFloat3(CameraProbeSHIn[0].xyz);
-        sh.c1 = SanitizeFloat3(CameraProbeSHIn[1].xyz);
-        sh.c2 = SanitizeFloat3(CameraProbeSHIn[2].xyz);
-        sh.c3 = SanitizeFloat3(CameraProbeSHIn[3].xyz);
-        return max(EvaluateSHDiffuse(sh, normal) * SPATIAL_HASH_DIFFUSE_SCALE * fallbackScale, 0.0f.xxx);
-    }
     return max(SpatialHashSkyAmbient.rgb, 0.0f.xxx);
 }
 
@@ -1393,6 +1379,104 @@ float3 SampleOctIrradianceViewRayFallback(float3 worldPos, float3 evalNormal, fl
     return float3(-1.0f, -1.0f, -1.0f);
 }
 
+float3 SampleOctIrradianceNeighborhoodFallbackAtLevel(float3 worldPos, float3 evalNormal, float3 cacheNormal, uint hashLevel)
+{
+    float safeCellSize = max(CellSize, 1e-3f) * exp2((float)hashLevel);
+    int3 levelOffset = SpatialHashLevelOffset(hashLevel);
+    float3 gridPos = worldPos / safeCellSize;
+    int3 baseCell = int3(floor(gridPos));
+
+    float3 sumRadiance = 0.0f.xxx;
+    float sumWeight = 0.0f;
+    float3 fallbackRadiance = 0.0f.xxx;
+    float fallbackWeight = 0.0f;
+
+    [unroll]
+    for (int z = -1; z <= 1; ++z)
+    {
+        [unroll]
+        for (int y = -1; y <= 1; ++y)
+        {
+            [unroll]
+            for (int x = -1; x <= 1; ++x)
+            {
+                int3 rawCell = baseCell + int3(x, y, z);
+                float3 cellCenter = (float3(rawCell) + 0.5f.xxx) * safeCellSize;
+                float3 delta = (worldPos - cellCenter) / safeCellSize;
+                float spatialWeight = exp(-dot(delta, delta) * 0.95f);
+                if (spatialWeight <= 1e-4f)
+                    continue;
+
+                int3 cell = rawCell + levelOffset;
+                uint slot = 0u;
+                uint key = HashCellKeyFromCell(cell, cacheNormal, 0);
+                if (!FindSlotForRead(key, slot))
+                    continue;
+
+                uint octIndex = slot & (OctCellCapacity - 1u);
+                uint octPacked = OctCellKeyIn[octIndex];
+                if (OctOwnerHash(key) != (octPacked >> 16u))
+                    continue;
+                uint octAge = ((FrameIndex & 0xffffu) - (octPacked & 0xffffu)) & 0xffffu;
+                if (octAge > OCT_QUERY_STALE_FRAMES)
+                    continue;
+
+                float4 probe = SampleOctIrradiance(octIndex, evalNormal);
+                if (probe.w <= 0.0f)
+                    continue;
+
+                fallbackRadiance += probe.xyz * spatialWeight;
+                fallbackWeight += spatialWeight;
+
+                float surfaceWeight = OctProbeSurfaceWeight(slot, worldPos, cacheNormal);
+                if (surfaceWeight <= 1e-4f)
+                    continue;
+
+                float3 probePos = SanitizeFloat4(CellPositionIn[slot]).xyz;
+                float3 biasedQuery = worldPos + cacheNormal * (safeCellSize * 0.1f);
+                float visibility = OctChebyshevWeight(octIndex, probePos, biasedQuery);
+                float weight = spatialWeight * surfaceWeight * visibility;
+                if (weight <= 1e-5f)
+                    continue;
+
+                sumRadiance += probe.xyz * weight;
+                sumWeight += weight;
+            }
+        }
+    }
+
+    if (sumWeight > 1e-4f)
+        return sumRadiance / sumWeight;
+    if (fallbackWeight > 1e-4f)
+        return fallbackRadiance / fallbackWeight;
+    return float3(-1.0f, -1.0f, -1.0f);
+}
+
+float3 SampleOctIrradianceNeighborhoodFallback(float3 worldPos, float3 evalNormal, float3 cacheNormal)
+{
+    uint primaryLevel;
+    SpatialHashLeveledCellSize(worldPos, primaryLevel);
+
+    float3 radiance = SampleOctIrradianceNeighborhoodFallbackAtLevel(worldPos, evalNormal, cacheNormal, primaryLevel);
+    if (radiance.x >= 0.0f)
+        return radiance;
+
+    if (SpatialHashLevelParams.x >= 0.5f)
+    {
+        radiance = SampleOctIrradianceNeighborhoodFallbackAtLevel(worldPos, evalNormal, cacheNormal, primaryLevel + 1u);
+        if (radiance.x >= 0.0f)
+            return radiance;
+        if (primaryLevel > 0u)
+        {
+            radiance = SampleOctIrradianceNeighborhoodFallbackAtLevel(worldPos, evalNormal, cacheNormal, primaryLevel - 1u);
+            if (radiance.x >= 0.0f)
+                return radiance;
+        }
+    }
+
+    return float3(-1.0f, -1.0f, -1.0f);
+}
+
 // One thread per (probe, irradiance texel). Reconstructs the trace's ray
 // directions, convolves the per-ray radiance with this texel's cosine lobe to
 // form the directional irradiance E/pi, and temporally blends it into the
@@ -1651,6 +1735,8 @@ void SpatialHashQuery(uint3 DTid : SV_DispatchThreadID)
             octRadiance = SampleOctIrradianceInterpolated(octQueryPos, pixelNormal, cacheNormal, primaryLevel - 1u);
         if (octRadiance.x < 0.0f)
             octRadiance = SampleOctIrradianceViewRayFallback(worldPos, pixelNormal, cacheNormal);
+        if (octRadiance.x < 0.0f)
+            octRadiance = SampleOctIrradianceNeighborhoodFallback(worldPos, pixelNormal, cacheNormal);
         if (octRadiance.x >= 0.0f)
         {
             octRadiance = max(SanitizeFloat3(octRadiance), 0.0f.xxx);
