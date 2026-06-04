@@ -10806,8 +10806,6 @@ void Corona::LoadAssets()
 		// radiance.w = target luminance. Zero-init means "no reservoir sample yet".
 		SpatialHashGIOctReservoirRay = createStructuredBuffer(SpatialHashGIOctCellCapacity, sizeof(float) * 4u, true, octZeroInit.data());
 		SpatialHashGIOctReservoirRadiance = createStructuredBuffer(SpatialHashGIOctCellCapacity, sizeof(float) * 4u, true, octZeroInit.data());
-		// Camera ambient probe SH4 (4 float4), zero-init.
-		SpatialHashGICameraProbeSH = createStructuredBuffer(4u, sizeof(float) * 4u, true, octZeroInit.data());
 
 		ScreenProbeGIResolved = createTexture2D(HybridFloat4UAVFormat, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
 

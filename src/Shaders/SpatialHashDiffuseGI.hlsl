@@ -54,9 +54,6 @@ StructuredBuffer<float4> OctRayDataIn : register(t27);
 StructuredBuffer<float4> OctIrradianceIn : register(t28);
 StructuredBuffer<float2> OctDepthIn : register(t29);
 StructuredBuffer<uint> OctCellKeyIn : register(t30);
-// Camera-anchored ambient SH4 (c0..c3), traced from the camera in the RT pass.
-// Used as the fallback for uncached cells (tracks local indoor/outdoor ambient).
-StructuredBuffer<float4> CameraProbeSHIn : register(t31);
 RWStructuredBuffer<float4> OctIrradianceOut : register(u15);
 RWStructuredBuffer<float2> OctDepthOut : register(u16);
 RWStructuredBuffer<float4> OctReservoirRayOut : register(u18);

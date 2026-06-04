@@ -668,9 +668,6 @@ private:
 	// sample per probe: direction+age and radiance+target luminance.
 	std::shared_ptr<Buffer> SpatialHashGIOctReservoirRay;
 	std::shared_ptr<Buffer> SpatialHashGIOctReservoirRadiance;
-	// Single camera-anchored ambient SH4 (4 float4), traced from the camera each
-	// frame; the query uses it as the fallback for uncached cells.
-	std::shared_ptr<Buffer> SpatialHashGICameraProbeSH;
 	// Per-ray scratch written by the RT trace (oct mode) and consumed by the
 	// octahedral blend pass: float4(radiance.rgb, hit distance). Indexed by
 	// probeSlot * OctRaysPerCell + rayIndex. Ray directions are regenerated
