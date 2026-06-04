@@ -422,20 +422,28 @@ void Corona::SpatialHashGIPass()
 
 	renderBackend->TransitionBuffer(SpatialHashGIResolvedKeys[cacheIndex].get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
 
-	SpatialHashGIResolvePSO->SetBufferSRV("ActiveCellSlotsIn", SpatialHashGIActiveCellSlots.get());
-	SpatialHashGIResolvePSO->SetBufferSRV("ActiveCounterIn", SpatialHashGIActiveCounter.get());
-	SpatialHashGIResolvePSO->SetBufferSRV("TraceSH0In", SpatialHashGITraceSH[0].get());
-	SpatialHashGIResolvePSO->SetBufferSRV("TraceSH1In", SpatialHashGITraceSH[1].get());
-	SpatialHashGIResolvePSO->SetBufferSRV("TraceSH2In", SpatialHashGITraceSH[2].get());
-	SpatialHashGIResolvePSO->SetBufferSRV("TraceSH3In", SpatialHashGITraceSH[3].get());
-	SpatialHashGIResolvePSO->SetBufferUAV("ResolvedKeysOut", SpatialHashGIResolvedKeys[cacheIndex].get());
-	SpatialHashGIResolvePSO->SetBufferUAV("ResolvedSH0Out", SpatialHashGIResolvedSH[cacheIndex][0].get());
-	SpatialHashGIResolvePSO->SetBufferUAV("ResolvedSH1Out", SpatialHashGIResolvedSH[cacheIndex][1].get());
-	SpatialHashGIResolvePSO->SetBufferUAV("ResolvedSH2Out", SpatialHashGIResolvedSH[cacheIndex][2].get());
-	SpatialHashGIResolvePSO->SetBufferUAV("ResolvedSH3Out", SpatialHashGIResolvedSH[cacheIndex][3].get());
-	SpatialHashGIResolvePSO->SetCBVValue("SpatialHashGIConstant", &SpatialHashGICB);
-	SpatialHashGIResolvePSO->Apply();
-	renderBackend->Dispatch((spatialHashTraceCellBudget + 255u) / 256u, 1u, 1u);
+	// The SH resolve temporally blends TraceSH -> ResolvedSH. In oct mode the
+	// query/blend read the octahedral atlas, never ResolvedSH, and the cell key
+	// table is maintained by the UPDATE pass (not resolve) — so the entire resolve
+	// dispatch is dead work in oct mode. Skip the dispatch (keep the surrounding
+	// state transitions so ResolvedSH/Keys end in the same state the query expects).
+	if (!bUseOct)
+	{
+		SpatialHashGIResolvePSO->SetBufferSRV("ActiveCellSlotsIn", SpatialHashGIActiveCellSlots.get());
+		SpatialHashGIResolvePSO->SetBufferSRV("ActiveCounterIn", SpatialHashGIActiveCounter.get());
+		SpatialHashGIResolvePSO->SetBufferSRV("TraceSH0In", SpatialHashGITraceSH[0].get());
+		SpatialHashGIResolvePSO->SetBufferSRV("TraceSH1In", SpatialHashGITraceSH[1].get());
+		SpatialHashGIResolvePSO->SetBufferSRV("TraceSH2In", SpatialHashGITraceSH[2].get());
+		SpatialHashGIResolvePSO->SetBufferSRV("TraceSH3In", SpatialHashGITraceSH[3].get());
+		SpatialHashGIResolvePSO->SetBufferUAV("ResolvedKeysOut", SpatialHashGIResolvedKeys[cacheIndex].get());
+		SpatialHashGIResolvePSO->SetBufferUAV("ResolvedSH0Out", SpatialHashGIResolvedSH[cacheIndex][0].get());
+		SpatialHashGIResolvePSO->SetBufferUAV("ResolvedSH1Out", SpatialHashGIResolvedSH[cacheIndex][1].get());
+		SpatialHashGIResolvePSO->SetBufferUAV("ResolvedSH2Out", SpatialHashGIResolvedSH[cacheIndex][2].get());
+		SpatialHashGIResolvePSO->SetBufferUAV("ResolvedSH3Out", SpatialHashGIResolvedSH[cacheIndex][3].get());
+		SpatialHashGIResolvePSO->SetCBVValue("SpatialHashGIConstant", &SpatialHashGICB);
+		SpatialHashGIResolvePSO->Apply();
+		renderBackend->Dispatch((spatialHashTraceCellBudget + 255u) / 256u, 1u, 1u);
+	}
 
 	renderBackend->TransitionBuffer(SpatialHashGIResolvedKeys[cacheIndex].get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
 	for (UINT coefficientIndex = 0; coefficientIndex < SpatialHashGISHCoefficientCount; ++coefficientIndex)
