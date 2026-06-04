@@ -4264,6 +4264,26 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 			continue;
 		}
 
+		// Force the spatial-hash storage sub-mode (oct / SH4 / HL2) deterministically
+		// for headless A/B measurement. Sets the live CB GIMode (captured into the
+		// frame source state each frame, so it sticks) and selects the spatial-hash
+		// method. oct = 1, sh4 = 0, hl2 = 2.
+		std::wstring giStorageValue = ParseValueArg(arg, L"--gi-storage", L"-gi-storage", i);
+		if (!giStorageValue.empty())
+		{
+			DiffuseGIMode = EDiffuseGIMode::SPATIAL_HASH;
+			UINT32 storageMode = 0u;
+			if (giStorageValue == L"oct" || giStorageValue == L"octahedral" || giStorageValue == L"1")
+				storageMode = 1u;
+			else if (giStorageValue == L"hl2" || giStorageValue == L"2")
+				storageMode = 2u;
+			else
+				storageMode = 0u; // sh4
+			SpatialHashGICB.GIMode = storageMode;
+			RTSpatialHashGIViewParam.GIMode = storageMode;
+			continue;
+		}
+
 		std::wstring spatialHashCellValue = ParseValueArg(arg, L"--spatial-hash-cell", L"-spatial-hash-cell", i);
 		if (!spatialHashCellValue.empty())
 		{

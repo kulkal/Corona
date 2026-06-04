@@ -1566,6 +1566,13 @@ groupshared uint gOctOwned;  // 1 if this group's cell owns its oct slot this fr
 groupshared uint gOctFresh;  // 1 if it just took the slot over (reset history)
 groupshared float4 gOctReservoirRay;      // xyz = direction, w = age
 groupshared float4 gOctReservoirRadiance; // xyz = radiance, w = target luma
+// Per-probe ray cache (one group == one probe == 64 texels == 64 rays). Each
+// thread stages its ray once (firefly-clamped) into LDS so the reservoir and the
+// per-texel convolution read rays from LDS instead of re-fetching all 64 rays
+// from global memory per texel (4096 -> 64 global reads per probe).
+groupshared float3 gRayRadiance[OCT_RAYS_PER_CELL]; // firefly-clamped radiance
+groupshared float3 gRayDir[OCT_RAYS_PER_CELL];      // reconstructed ray direction
+groupshared float gRayHitDist[OCT_RAYS_PER_CELL];   // clamped hit distance (depth blend)
 
 [numthreads(64, 1, 1)]
 void SpatialHashOctBlend(uint3 DTid : SV_DispatchThreadID, uint groupIndex : SV_GroupIndex)
@@ -1619,6 +1626,23 @@ void SpatialHashOctBlend(uint3 DTid : SV_DispatchThreadID, uint groupIndex : SV_
     bool octFresh = (gOctFresh != 0u);
     float4 rotation = PerFrameRotationQuaternion(FrameIndex);
 
+    // Stage this probe's 64 rays into LDS once (groupIndex == ray index): the
+    // reconstructed direction and the firefly-clamped radiance. Reservoir +
+    // convolution below then read from LDS, not global, and the clamp is applied
+    // once per ray instead of once per (texel, ray).
+    {
+        float3 rad = SanitizeFloat3(OctRayDataIn[probeIndex * OCT_RAYS_PER_CELL + groupIndex].xyz);
+        float radLuma = Luminance(rad);
+        if (radLuma > OCT_FIREFLY_LUMA_KNEE)
+        {
+            float clampedLuma = radLuma / (1.0f + (radLuma - OCT_FIREFLY_LUMA_KNEE) / OCT_FIREFLY_LUMA_KNEE);
+            rad *= clampedLuma / radLuma;
+        }
+        gRayRadiance[groupIndex] = rad;
+        gRayDir[groupIndex] = RotateVectorByQuaternion(SphericalFibonacciDir(groupIndex, OCT_RAYS_PER_CELL), rotation);
+    }
+    GroupMemoryBarrierWithGroupSync();
+
     if (groupIndex == 0u)
     {
         gOctReservoirRay = 0.0f.xxxx;
@@ -1632,15 +1656,9 @@ void SpatialHashOctBlend(uint3 DTid : SV_DispatchThreadID, uint groupIndex : SV_
         [loop]
         for (uint r = 0u; r < OCT_RAYS_PER_CELL; ++r)
         {
-            float3 rayDir = RotateVectorByQuaternion(SphericalFibonacciDir(r, OCT_RAYS_PER_CELL), rotation);
-            float3 rad = SanitizeFloat3(OctRayDataIn[probeIndex * OCT_RAYS_PER_CELL + r].xyz);
+            float3 rayDir = gRayDir[r];
+            float3 rad = gRayRadiance[r]; // already firefly-clamped during staging
             float radLuma = Luminance(rad);
-            if (radLuma > OCT_FIREFLY_LUMA_KNEE)
-            {
-                float clampedLuma = radLuma / (1.0f + (radLuma - OCT_FIREFLY_LUMA_KNEE) / OCT_FIREFLY_LUMA_KNEE);
-                rad *= clampedLuma / radLuma;
-                radLuma = clampedLuma;
-            }
             if (radLuma <= OCT_RESERVOIR_MIN_TARGET)
                 continue;
 
@@ -1701,23 +1719,16 @@ void SpatialHashOctBlend(uint3 DTid : SV_DispatchThreadID, uint groupIndex : SV_
     [loop]
     for (uint r = 0u; r < OCT_RAYS_PER_CELL; ++r)
     {
-        float3 rayDir = RotateVectorByQuaternion(SphericalFibonacciDir(r, OCT_RAYS_PER_CELL), rotation);
+        float3 rayDir = gRayDir[r];
         float w = max(0.0f, dot(texelDir, rayDir));
         if (w <= 0.0f)
             continue;
-        float3 rad = SanitizeFloat3(OctRayDataIn[probeIndex * OCT_RAYS_PER_CELL + r].xyz);
-        // Firefly soft-clamp: octahedral stores radiance per direction, so a
-        // single ray hitting a very bright spot (direct light / emissive) makes
-        // ONE texel pop as a bright dot (SH spreads it across low-order bands, so
-        // SH doesn't show this). Soft-knee compress each ray's luminance above a
-        // knee, preserving normal GI (< knee) while taming outliers.
+        // Radiance was firefly soft-clamped once during LDS staging (octahedral
+        // stores radiance per direction, so a single very bright ray would pop
+        // one texel as a bright dot; the knee tames outliers while preserving
+        // normal GI). Read the clamped value straight from LDS.
+        float3 rad = gRayRadiance[r];
         float radLuma = Luminance(rad);
-        if (radLuma > OCT_FIREFLY_LUMA_KNEE)
-        {
-            float clampedLuma = radLuma / (1.0f + (radLuma - OCT_FIREFLY_LUMA_KNEE) / OCT_FIREFLY_LUMA_KNEE);
-            rad *= clampedLuma / radLuma;
-            radLuma = clampedLuma;
-        }
         sumRadiance += rad * w;
         sumLuma += radLuma * w;
         sumLuma2 += radLuma * radLuma * w;
@@ -1828,25 +1839,33 @@ void SpatialHashOctDepthBlend(uint3 DTid : SV_DispatchThreadID)
     if (OctOwnerHash(ResolvedKeysIn[slot]) != (OctCellKeyOut[octIndex] >> 16u))
         return;
 
+    float maxDist = max(CellSize, 1e-3f) * OCT_DEPTH_MAX_CELLS;
+    float4 rotation = PerFrameRotationQuaternion(FrameIndex);
+
+    // Stage this probe's 64 ray (dir, clamped hit distance) into LDS once
+    // (texelIndex == ray index here) so the per-texel loop reads from LDS instead
+    // of re-fetching all 64 ray distances from global per depth texel.
+    gRayDir[texelIndex] = RotateVectorByQuaternion(SphericalFibonacciDir(texelIndex, OCT_RAYS_PER_CELL), rotation);
+    gRayHitDist[texelIndex] = min(OctRayDataIn[probeIndex * OCT_RAYS_PER_CELL + texelIndex].w, maxDist);
+    GroupMemoryBarrierWithGroupSync();
+
     uint tx = texelIndex % OCT_DEPTH_RES;
     uint ty = texelIndex / OCT_DEPTH_RES;
     float2 texelUV = (float2(tx, ty) + 0.5f) / (float)OCT_DEPTH_RES;
     float3 texelDir = OctahedralUVToDirection(texelUV);
 
-    float maxDist = max(CellSize, 1e-3f) * OCT_DEPTH_MAX_CELLS;
-    float4 rotation = PerFrameRotationQuaternion(FrameIndex);
     float sumDist = 0.0f;
     float sumDist2 = 0.0f;
     float sumWeight = 0.0f;
     [loop]
     for (uint r = 0u; r < OCT_RAYS_PER_CELL; ++r)
     {
-        float3 rayDir = RotateVectorByQuaternion(SphericalFibonacciDir(r, OCT_RAYS_PER_CELL), rotation);
+        float3 rayDir = gRayDir[r];
         float c = max(0.0f, dot(texelDir, rayDir));
         if (c <= 0.0f)
             continue;
         float w = pow(c, OCT_DEPTH_SHARPNESS);
-        float dist = min(OctRayDataIn[probeIndex * OCT_RAYS_PER_CELL + r].w, maxDist);
+        float dist = gRayHitDist[r];
         sumDist += dist * w;
         sumDist2 += dist * dist * w;
         sumWeight += w;
