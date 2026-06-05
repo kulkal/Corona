@@ -30,6 +30,8 @@ Texture2D ShadowReservoirMPrev : register(t11);
 // light keeps haunting the new pixel after motion → shadow ghosting.
 Texture2D DepthTexPrev : register(t12);
 Texture2D WorldNormalTexPrev : register(t13);
+StructuredBuffer<uint> SpatialLightCellKeys : register(t14);
+StructuredBuffer<uint> SpatialLightCellMask : register(t15);
 
 
 cbuffer ViewParameter : register(b0)
@@ -55,9 +57,14 @@ cbuffer ViewParameter : register(b0)
     // `const float kMaxM = 3.0f`. Set per-frame from the C++
     // `bEnableReSTIRDirectShadow`-mode UI control.
     float ShadowMaxM;
+    float SpatialLightCellSize;
+    uint SpatialLightHashEntryMask;
+    uint SpatialLightMaxProbeSteps;
+    uint bUseSpatialLightMask;
+    float4 SpatialHashLevelParams;
     // Must match Corona::MaxPointLights in Corona.h. Option A reads only
     // the first 3 entries; ReSTIR iterates all valid entries.
-    #define MAX_SHADOWED_PT_LIGHTS 128
+    #define MAX_SHADOWED_PT_LIGHTS 16
     float4 ShadowedPointLights[MAX_SHADOWED_PT_LIGHTS];
     // RIS weights for ReSTIR. x = candidate weight (luma * intensity).
     // y/z/w unused for now (room for distance hints, history flags).
@@ -86,6 +93,77 @@ static const uint RT_SHADOW_RAY_FLAGS =
     RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH |
     RAY_FLAG_SKIP_CLOSEST_HIT_SHADER |
     RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES;
+
+uint CandidateMaskForCount(uint count)
+{
+    count = min(count, (uint)MAX_SHADOWED_PT_LIGHTS);
+    return count >= 32u ? 0xffffffffu : ((1u << count) - 1u);
+}
+
+float SpatialHashLeveledCellSize(float3 worldPos, out uint level)
+{
+    float cs = max(SpatialLightCellSize, 1e-3f);
+    level = 0u;
+    if (SpatialHashLevelParams.x < 0.5f)
+        return cs;
+    float3 cameraPos = mul(float4(0.0f, 0.0f, 0.0f, 1.0f), InvViewMatrix).xyz;
+    float dist = length(worldPos - cameraPos);
+    float fl = floor(max(log2(max(dist / max(SpatialHashLevelParams.y, 1e-3f), 1.0f)), 0.0f));
+    level = (uint)fl;
+    return cs * exp2(fl);
+}
+
+int3 SpatialHashLevelOffset(uint level)
+{
+    return int3(level, level, level) * int3(1737, 9277, 4513);
+}
+
+uint SpatialLightCellKey(float3 worldPos)
+{
+    uint level = 0u;
+    float cs = SpatialHashLeveledCellSize(worldPos, level);
+    int3 cell = int3(floor(worldPos / cs)) + SpatialHashLevelOffset(level);
+    uint h = uint(cell.x) * 73856093u;
+    h ^= uint(cell.y) * 19349663u;
+    h ^= uint(cell.z) * 83492791u;
+    h = HashUInt(h);
+    return h == 0u ? 1u : h;
+}
+
+bool FindSpatialLightSlot(uint key, out uint slot)
+{
+    uint startSlot = HashUInt(key ^ 0x9e3779b9u) & SpatialLightHashEntryMask;
+    uint probeCount = clamp(SpatialLightMaxProbeSteps, 1u, 16u);
+    [loop]
+    for (uint probeIndex = 0u; probeIndex < 16u; ++probeIndex)
+    {
+        if (probeIndex >= probeCount)
+            break;
+        uint candidate = (startSlot + probeIndex) & SpatialLightHashEntryMask;
+        uint storedKey = SpatialLightCellKeys[candidate];
+        if (storedKey == key)
+        {
+            slot = candidate;
+            return true;
+        }
+        if (storedKey == 0u)
+            break;
+    }
+    slot = 0u;
+    return false;
+}
+
+uint LoadSpatialLightMask(float3 worldPos)
+{
+    uint allMask = CandidateMaskForCount(ShadowedPointLightCount);
+    if (bUseSpatialLightMask == 0u)
+        return allMask;
+
+    uint slot = 0u;
+    if (!FindSpatialLightSlot(SpatialLightCellKey(worldPos), slot))
+        return allMask;
+    return SpatialLightCellMask[slot] & allMask;
+}
 
 float3 offset_ray(float3 p, float3 n)
 {
@@ -245,20 +323,15 @@ void rayGen()
         uint chosenIdx = 0xFFFFFFFFu;
         float chosenWeight = 0.0f;
         float weightSum = 0.0f;
+        const uint spatialLightMask = LoadSpatialLightMask(worldPos);
 
-        // Canonical ReSTIR DI samples a small fresh-candidate budget per
-        // frame rather than streaming the full light set. Coverage of
-        // the full set is recovered via the per-frame offset (each
-        // frame visits a different slice) combined with temporal reuse.
-        const uint kFreshBudget = 8u;
         const uint candCount = min(ShadowedPointLightCount, (uint)MAX_SHADOWED_PT_LIGHTS);
-        const uint candStride = max(candCount / kFreshBudget, 1u);
-        const uint candOffsetFrame = (FrameCounter * 7919u + pixelPos.x * 1597u + pixelPos.y * 6151u) % max(candCount, 1u);
         [loop]
-        for (uint candStep = 0; candStep < kFreshBudget; ++candStep)
+        for (uint candIdx = 0; candIdx < (uint)MAX_SHADOWED_PT_LIGHTS; ++candIdx)
         {
-            const uint candIdx = (candOffsetFrame + candStep * candStride) % max(candCount, 1u);
-            if (candIdx >= ShadowedPointLightCount)
+            if (candIdx >= candCount)
+                break;
+            if ((spatialLightMask & (1u << candIdx)) == 0u)
                 continue;
             float3 candPos = ShadowedPointLights[candIdx].xyz;
             float candRadius = max(ShadowedPointLights[candIdx].w, 0.01f);
@@ -350,6 +423,8 @@ void rayGen()
             const float spM     = ShadowReservoirMPrev.Load(int3(spatialPx, 0)).x;
             if (spIdx >= ShadowedPointLightCount || spRatio <= 0.0f || spM <= 0.0f)
                 continue;
+            if ((spatialLightMask & (1u << spIdx)) == 0u)
+                continue;
             const float3 cPos = ShadowedPointLights[spIdx].xyz;
             const float  cRad = max(ShadowedPointLights[spIdx].w, 0.01f);
             const float  cLum = ShadowedPointLightWeights[spIdx].x;
@@ -399,7 +474,8 @@ void rayGen()
             const uint prevIdx = (uint)(prev.g + 0.5f);
             const float prevRatio = prev.b;
             const float prevM = ShadowReservoirMPrev.Load(int3(prevPx, 0)).x;
-            if (prevIdx < (uint)MAX_SHADOWED_PT_LIGHTS && prevIdx < ShadowedPointLightCount && prevRatio > 0.0f && prevM > 0.0f)
+            if (prevIdx < (uint)MAX_SHADOWED_PT_LIGHTS && prevIdx < ShadowedPointLightCount && prevRatio > 0.0f && prevM > 0.0f &&
+                (spatialLightMask & (1u << prevIdx)) != 0u)
             {
                 const float3 candPos = ShadowedPointLights[prevIdx].xyz;
                 const float candRadius = max(ShadowedPointLights[prevIdx].w, 0.01f);

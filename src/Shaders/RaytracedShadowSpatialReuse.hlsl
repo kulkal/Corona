@@ -37,8 +37,13 @@ cbuffer ViewParameter : register(b0)
     uint NoiseMode;
     uint ShadowMode;
     uint ShadowedPointLightCount;
-    uint _padding2;
-    #define MAX_SHADOWED_PT_LIGHTS 128
+    float ShadowMaxM;
+    float SpatialLightCellSize;
+    uint SpatialLightHashEntryMask;
+    uint SpatialLightMaxProbeSteps;
+    uint bUseSpatialLightMask;
+    float4 SpatialHashLevelParams;
+    #define MAX_SHADOWED_PT_LIGHTS 16
     float4 ShadowedPointLights[MAX_SHADOWED_PT_LIGHTS];
     float4 ShadowedPointLightWeights[MAX_SHADOWED_PT_LIGHTS];
 };

@@ -7412,6 +7412,7 @@ void Corona::RebuildFrameTimingOverlayTextIfStale()
 			case EGpuPass::Grass:
 			case EGpuPass::ProceduralGrass:
 			case EGpuPass::Particles:
+			case EGpuPass::SpatialLightMask:
 			case EGpuPass::RaytraceShadow:
 			case EGpuPass::RaytraceAO:
 			case EGpuPass::RaytraceSkyLighting:

@@ -858,7 +858,7 @@ namespace
 		return mode == Corona::EAntiAliasingMode::DLSS_SR || mode == Corona::EAntiAliasingMode::DLSS_RR;
 	}
 
-	constexpr std::array<const char*, 22> kGpuPassNames = {
+	constexpr std::array<const char*, 23> kGpuPassNames = {
 		"Frame Total",
 		"Skeletal Skinning",
 		"GBuffer",
@@ -866,6 +866,7 @@ namespace
 		"Grass",
 		"Grass (procedural)",
 		"Particles",
+		"Spatial Light Mask",
 		"RT Shadow",
 		"RT AO",
 		"RT Sky",
@@ -891,7 +892,7 @@ namespace
 		return 0xFF000000ull | (static_cast<uint64_t>(b) << 16) | (static_cast<uint64_t>(g) << 8) | static_cast<uint64_t>(r);
 	}
 
-	const std::array<UINT64, 17> kGpuPassPixColors = {
+	const std::array<UINT64, 18> kGpuPassPixColors = {
 		MakeGpuMarkerColor(210, 210, 210),
 		MakeGpuMarkerColor(86, 156, 214),
 		MakeGpuMarkerColor(214, 86, 86),
@@ -899,6 +900,7 @@ namespace
 		MakeGpuMarkerColor(156, 214, 86),
 		MakeGpuMarkerColor(214, 86, 189),
 		MakeGpuMarkerColor(86, 214, 169),
+		MakeGpuMarkerColor(160, 220, 120),
 		MakeGpuMarkerColor(86, 214, 214),
 		MakeGpuMarkerColor(181, 140, 255),
 		MakeGpuMarkerColor(245, 214, 86),
@@ -4038,6 +4040,18 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 			bEnableRTReflectionSER = false;
 			continue;
 		}
+		if (arg == L"--restir-direct-shadow" || arg == L"--enable-restir-direct-shadow" || arg == L"--restir-shadow")
+		{
+			bCommandLineRestirDirectShadowOverrideSet = true;
+			bEnableReSTIRDirectShadow = true;
+			continue;
+		}
+		if (arg == L"--no-restir-direct-shadow" || arg == L"--disable-restir-direct-shadow" || arg == L"--no-restir-shadow" || arg == L"--4ch-direct-shadow" || arg == L"--4-channel-direct-shadow")
+		{
+			bCommandLineRestirDirectShadowOverrideSet = true;
+			bEnableReSTIRDirectShadow = false;
+			continue;
+		}
 		if (arg == L"--specular-gi" || arg == L"--enable-specular-gi" || arg == L"--indirect-specular" || arg == L"--enable-indirect-specular")
 		{
 			bEnableSpecularGI = true;
@@ -4502,6 +4516,8 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 		L", specularGIEnabled=" + std::to_wstring(bEnableSpecularGI ? 1 : 0) +
 		L", directDiffuse=" + std::to_wstring(bEnableDirectDiffuse ? 1 : 0) +
 		L", directSpecular=" + std::to_wstring(bEnableDirectSpecular ? 1 : 0) +
+		L", restirDirectShadow=" + std::to_wstring(bEnableReSTIRDirectShadow ? 1 : 0) +
+		L", restirDirectShadowOverride=" + std::to_wstring(bCommandLineRestirDirectShadowOverrideSet ? 1 : 0) +
 		L", skyLighting=" + std::to_wstring(bEnableSkyLighting ? 1 : 0) +
 		L", surfaceBounceStrength=" + std::to_wstring(SurfaceBounceStrength) +
 		L", surfaceBounceSaturation=" + std::to_wstring(SurfaceBounceSaturation) +
@@ -13883,6 +13899,23 @@ void Corona::OnRender()
 		BeginGpuPassTiming(EGpuPass::GBuffer);
 		GBufferPass();
 		EndGpuPassTiming(EGpuPass::GBuffer);
+
+		const bool bNeedSpatialLightMaskForDirectShadow =
+			bRunRayTracedShadow &&
+			bEnableReSTIRDirectShadow &&
+			DiffuseGIMode == EDiffuseGIMode::SPATIAL_HASH;
+		const bool bNeedSpatialLightMaskForGI =
+			bRunGI &&
+			DiffuseGIMode == EDiffuseGIMode::SPATIAL_HASH;
+		const bool bBuildSharedSpatialLightMask =
+			!bHybridDirectOnly &&
+			(bNeedSpatialLightMaskForDirectShadow || bNeedSpatialLightMaskForGI);
+		if (bBuildSharedSpatialLightMask)
+		{
+			BeginGpuPassTiming(EGpuPass::SpatialLightMask);
+			SpatialHashLightMaskPass();
+			EndGpuPassTiming(EGpuPass::SpatialLightMask);
+		}
 
 		if (bRunShadowMap)
 		{

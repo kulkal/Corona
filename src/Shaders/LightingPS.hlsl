@@ -383,22 +383,28 @@ float4 PSMain(PSInput input) : SV_TARGET
 
         if (ShadowMode == 1u)
         {
-            // ReSTIR Phase 1: shadow buffer stores a single chosen light
-            // index, candidate weight ratio, and visibility for THIS pixel.
-            // Evaluate that one light at full BRDF weighted by the RIS
-            // ratio. Other point lights contribute nothing this pixel —
-            // temporal accumulation across frames + neighboring pixels
-            // covers the full lighting (each pixel rolls its own light).
-            // The selected light is used only for visibility correction; the
-            // loop below evaluates every point light deterministically to
-            // avoid direct-light brightness noise in dense imported scenes.
-            float rawIdx = ShadowTex[uint2(screenUV * RTSize)].g;
+            // ReSTIR DI for shadow-casting lights: shadow buffer stores a
+            // single chosen light index, candidate weight ratio, and
+            // visibility for THIS pixel. Evaluate that one chosen light
+            // at full BRDF weighted by the RIS ratio; temporal
+            // accumulation across frames and neighboring pixels covers
+            // the full shadow-casting light set.
+            // Shadow-casting lights that were not selected are skipped so
+            // large occluders do not leak unshadowed point-light energy.
+            // Non-shadow-casting lights remain deterministic because they
+            // are not ReSTIR candidates.
+            uint2 shadowPixel = uint2(screenUV * RTSize);
+            float rawIdx = ShadowTex[shadowPixel].g;
             uint chosenIdx = (uint)(rawIdx + 0.5f);
-            float ratio = ShadowTex[uint2(screenUV * RTSize)].b;
-            float vis = saturate(ShadowTex[uint2(screenUV * RTSize)].a);
+            float ratio = max(ShadowTex[shadowPixel].b, 0.0f);
+            float vis = saturate(ShadowTex[shadowPixel].a);
             [loop]
             for (uint lightIndex = 0; lightIndex < activePointLightCount; ++lightIndex)
             {
+                const bool castsShadow = PointLights[lightIndex].SpotConeAndFlags.w > 0.5f;
+                if (castsShadow && (lightIndex != chosenIdx || ratio <= 0.0f))
+                    continue;
+
                 float3 pointPosition = PointLights[lightIndex].PositionAndRadius.xyz;
                 float pointRadius = max(PointLights[lightIndex].PositionAndRadius.w, 0.01f);
                 float3 pointColor = max(PointLights[lightIndex].ColorAndIntensity.xyz, 0.0f.xxx);
@@ -415,13 +421,13 @@ float4 PSMain(PSInput input) : SV_TARGET
                     EvaluateSpotAttenuation(PointLights[lightIndex], pointLightDir);
                 float pointNdotL = saturate(dot(pointLightDir, WorldNormal));
                 float3 pointRadiance = pointColor * pointIntensity * attenuation;
-                float shadowCorrection = (lightIndex == chosenIdx && ratio > 0.0f) ? ((vis - 1.0f) * ratio) : 0.0f;
-                float visibilityEstimate = max(1.0f + shadowCorrection, 0.0f);
+                float restirWeight = castsShadow ? ratio : 1.0f;
+                float visibilityEstimate = castsShadow ? vis : 1.0f;
 
                 if (bEnableDirectDiffuse)
-                    PointDiffuse += pointNdotL * pointRadiance * visibilityEstimate * Albedo * (1.0f - Metallic);
+                    PointDiffuse += pointNdotL * pointRadiance * visibilityEstimate * restirWeight * Albedo * (1.0f - Metallic);
                 if (bEnableDirectSpecular)
-                    PointSpecular += EvaluateGGXSpecularBRDF(WorldNormal, V, pointLightDir, Roughness, F0) * pointNdotL * pointRadiance * visibilityEstimate;
+                    PointSpecular += EvaluateGGXSpecularBRDF(WorldNormal, V, pointLightDir, Roughness, F0) * pointNdotL * pointRadiance * visibilityEstimate * restirWeight;
             }
         }
         else

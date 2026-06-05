@@ -139,6 +139,7 @@ private:
 		Grass,
 		ProceduralGrass,
 		Particles,
+		SpatialLightMask,
 		RaytraceShadow,
 		RaytraceAO,
 		RaytraceSkyLighting,
@@ -558,9 +559,9 @@ private:
 
 	// Keep shader-side MAX_POINT_LIGHTS definitions in lock-step with this.
 	static constexpr UINT32 MaxPointLights = 128;
-	static constexpr UINT32 MaxPointLightsForShadowCB = 128;
-	static_assert(MaxPointLights == MaxPointLightsForShadowCB,
-		"MaxPointLights and MaxPointLightsForShadowCB must match; RT lighting CB layouts assume the same cap");
+	static constexpr UINT32 MaxDiffuseGIPointLights = 16;
+	static_assert(MaxDiffuseGIPointLights <= 32,
+		"Spatial light masks pack one bit per direct ReSTIR point-light candidate");
 
 	struct PointLightParam
 	{
@@ -569,8 +570,6 @@ private:
 		glm::vec4 DirectionAndType = glm::vec4(0.0f, 1.0f, 0.0f, 0.0f);
 		glm::vec4 SpotConeAndFlags = glm::vec4(1.0f, 0.70710677f, 3.4142137f, 1.0f);
 	};
-	static constexpr UINT32 MaxDiffuseGIPointLights = 16;
-
 	// SHaRC-style spatial hash diffuse GI cache
 	static constexpr UINT32 SpatialHashGIEntryCount = 1u << 21;
 	static constexpr UINT32 SpatialHashGIActiveCellCapacity = 1u << 20;
@@ -673,6 +672,9 @@ private:
 	// P3b: hash of last frame's GI lighting state (point lights + directional +
 	// sky); a change forces oct cells back to full-rate trace + re-convergence.
 	UINT32 LastSpatialHashLightingHash = 0xFFFFFFFFu;
+	UINT32 SpatialHashGIFrameParamFrameIndex = 0xFFFFFFFFu;
+	float SpatialHashGILightingChangedThisFrame = 1.0f;
+	UINT32 SpatialHashLightMaskFrameIndex = 0xFFFFFFFFu;
 	// Per-ray scratch written by the RT trace (oct mode) and consumed by the
 	// octahedral blend pass: float4(radiance.rgb, hit distance). Indexed by
 	// probeSlot * OctRaysPerCell + rayIndex. Ray directions are regenerated
@@ -710,15 +712,19 @@ private:
 		// user can sweep without recompile. Read by Phase 2 temporal
 		// writeback (`min(M_eff, ShadowMaxM)`).
 		float ShadowMaxM = 3.0f;
-		// Up to MaxPointLightsForShadowCB candidates. Option A reads only
-		// the first 3 (channel-pack hard cap); ReSTIR Phase 1 iterates
-		// all valid entries for per-pixel RIS. 128 * 32 B = 4 KB — fits
-		// the CB budget comfortably.
-		glm::vec4 ShadowedPointLights[MaxPointLightsForShadowCB] = {};
+		float SpatialLightCellSize = 48.0f;
+		UINT32 SpatialLightHashEntryMask = SpatialHashGIEntryCount - 1u;
+		UINT32 SpatialLightMaxProbeSteps = 8u;
+		UINT32 bUseSpatialLightMask = 0u;
+		glm::vec4 SpatialHashLevelParams = glm::vec4(0.0f, 600.0f, 0.0f, 0.0f);
+		// Up to MaxDiffuseGIPointLights candidates. Option A reads only
+		// the first 3 (channel-pack hard cap); ReSTIR uses the shared
+		// spatial hash light mask to evaluate the local candidate subset.
+		glm::vec4 ShadowedPointLights[MaxDiffuseGIPointLights] = {};
 		// Per-light intensity used as RIS candidate weight (color luma *
 		// intensity). Only ReSTIR mode reads these; Option A treats every
 		// shadowed light as equal-cost.
-		glm::vec4 ShadowedPointLightWeights[MaxPointLightsForShadowCB] = {};
+		glm::vec4 ShadowedPointLightWeights[MaxDiffuseGIPointLights] = {};
 	};
 
 	RTShadowViewParamCB RTShadowViewParam;
@@ -1386,6 +1392,7 @@ private:
 	bool bCommandLineCameraPathDump = false;
 	bool bCommandLineCameraPathDiagnostics = false;
 	bool bCommandLineLoadLatestCameraPath = false;
+	bool bCommandLineRestirDirectShadowOverrideSet = false;
 	UINT32 CommandLineExitAfterFrames = 0;
 	bool bCommandLineExitAfterFramesTriggered = false;
 	std::wstring CommandLineCameraPathFile;
@@ -2416,6 +2423,8 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	void InitRaytracingSpatialHashPass();
 	shared_ptr<RTPipelineStateObject> CreateRaytracingSpatialHashGIPSO(bool bUseSER);
 	bool InitRaytracingSpatialHashGISERPass();
+	void PrepareSpatialHashGIFrameParams(UINT32 spatialHashTraceCellBudget);
+	bool SpatialHashLightMaskPass();
 	
 public:
 

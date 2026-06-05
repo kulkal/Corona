@@ -1443,9 +1443,10 @@ void Corona::LightingPass()
 	Param.PointLightCount = 0;
 	std::vector<const PointLightState*> pointLightCandidates;
 	BuildPointLightRenderCandidates(pointLightCandidates);
+	const UINT32 maxLightingPointLights = bEnableReSTIRDirectShadow ? MaxDiffuseGIPointLights : MaxPointLights;
 	for (const PointLightState* pointLightPtr : pointLightCandidates)
 	{
-		if (!pointLightPtr || Param.PointLightCount >= MaxPointLights)
+		if (!pointLightPtr || Param.PointLightCount >= maxLightingPointLights)
 			continue;
 
 		const PointLightState& pointLight = *pointLightPtr;
@@ -1473,7 +1474,7 @@ void Corona::LightingPass()
 				L"[LightingPass][PointLights] total=" + std::to_wstring(totalPointLights) +
 				L", candidates=" + std::to_wstring(candidatePointLights) +
 				L", submitted=" + std::to_wstring(Param.PointLightCount) +
-				L", max=" + std::to_wstring(MaxPointLights) +
+				L", max=" + std::to_wstring(maxLightingPointLights) +
 				L", shadowMode=" + std::to_wstring(Param.ShadowMode) +
 				L", shadowValid=" + std::to_wstring(bDirectionalShadowAvailable ? 1 : 0));
 		}

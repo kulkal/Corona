@@ -52,6 +52,8 @@ void Corona::InitRaytracingShadowPass()
 		// shadow caster motion).
 		TEMP_PSO_RT_SHADOW->BindSRV("global", "DepthTexPrev", 12);
 		TEMP_PSO_RT_SHADOW->BindSRV("global", "WorldNormalTexPrev", 13);
+		TEMP_PSO_RT_SHADOW->BindSRV("global", "SpatialLightCellKeys", 14);
+		TEMP_PSO_RT_SHADOW->BindSRV("global", "SpatialLightCellMask", 15);
 
 		TEMP_PSO_RT_SHADOW->BindCBV("global", "ViewParameter", 0, sizeof(RTShadowViewParamCB), 1);
 		TEMP_PSO_RT_SHADOW->BindSampler("global", "sampleWrap", 0);
@@ -122,6 +124,17 @@ void Corona::RaytraceShadowPass()
 	// degenerate reservoir (M < 1 effectively disables temporal reuse;
 	// M > 64 makes the reservoir refuse to forget anything).
 	RTShadowViewParam.ShadowMaxM = std::clamp(ReSTIRShadowMaxM, 1.0f, 64.0f);
+	const bool bSpatialLightMaskReady =
+		bEnableReSTIRDirectShadow &&
+		DiffuseGIMode == EDiffuseGIMode::SPATIAL_HASH &&
+		SpatialHashLightMaskFrameIndex == RenderFrameIndex &&
+		SpatialHashGIResolvedKeys[0] &&
+		SpatialHashGICellLightMask;
+	RTShadowViewParam.SpatialLightCellSize = SpatialHashGICB.CellSize;
+	RTShadowViewParam.SpatialLightHashEntryMask = SpatialHashGIEntryCount - 1u;
+	RTShadowViewParam.SpatialLightMaxProbeSteps = SpatialHashGICB.MaxProbeSteps;
+	RTShadowViewParam.bUseSpatialLightMask = bSpatialLightMaskReady ? 1u : 0u;
+	RTShadowViewParam.SpatialHashLevelParams = SpatialHashGICB.SpatialHashLevelParams;
 
 	// Shadow mode handling:
 	//   Option A (default): first 3 enabled lights packed into ShadowBuffer
@@ -166,7 +179,7 @@ void Corona::RaytraceShadowPass()
 		//   3. Sphere-frustum cull — also applied to LightingPS feed.
 		for (const PointLightState* plPtr : pointLightCandidates)
 		{
-			if (shadowedCount >= MaxPointLights)
+			if (shadowedCount >= MaxDiffuseGIPointLights)
 				break;
 			if (!plPtr)
 				continue;
@@ -215,7 +228,7 @@ void Corona::RaytraceShadowPass()
 		shadowedCount = pick;
 	}
 
-	for (uint32_t i = shadowedCount; i < MaxPointLights; ++i)
+	for (uint32_t i = shadowedCount; i < MaxDiffuseGIPointLights; ++i)
 	{
 		RTShadowViewParam.ShadowedPointLights[i] = glm::vec4(0.0f);
 		RTShadowViewParam.ShadowedPointLightWeights[i] = glm::vec4(0.0f);
@@ -267,6 +280,8 @@ void Corona::RaytraceShadowPass()
 			UnjitteredDepthBuffers[1 - ColorBufferWriteIndex] ? UnjitteredDepthBuffers[1 - ColorBufferWriteIndex].get() : UnjitteredDepthBuffers[ColorBufferWriteIndex].get())
 		.SetTextureSRV("global", "WorldNormalTexPrev",
 			NormalBuffers[1 - ColorBufferWriteIndex] ? NormalBuffers[1 - ColorBufferWriteIndex].get() : NormalBuffers[ColorBufferWriteIndex].get())
+		.SetBufferSRV("global", "SpatialLightCellKeys", SpatialHashGIResolvedKeys[0].get())
+		.SetBufferSRV("global", "SpatialLightCellMask", SpatialHashGICellLightMask.get())
 		.SetTextureSRV("global", "VelocityTex", VelocityBuffer.get())
 		.SetCBVValue("global", "ViewParameter", &RTShadowViewParam)
 		.SetSampler("global", "sampleWrap", samplerWrap.get());

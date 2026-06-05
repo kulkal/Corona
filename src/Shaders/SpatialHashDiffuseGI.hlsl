@@ -272,7 +272,8 @@ uint ComputeCellLightMask(float3 worldPos, float3 normal)
         {
             float3 spotDir = SafeNormalize(light.DirectionAndType.xyz, float3(0.0f, 1.0f, 0.0f));
             float cosTheta = dot(spotDir, -cellToLightDir);
-            if (cosTheta < light.SpotConeAndFlags.y - 0.05f)
+            float coneRelax = saturate(cellRadius / max(lightDistance, 1e-3f));
+            if (cosTheta < light.SpotConeAndFlags.y - coneRelax - 0.05f)
                 continue;
         }
 
