@@ -10923,10 +10923,10 @@ void Corona::LoadAssets()
 	AppendCpuRuntimeTrace(L"[LoadAssets] after gbuffer textures");
 
 	UpdateStartupLoadingProgress(0.70f, L"Loading default textures");
-	if (!DefaultWhiteTex) DefaultWhiteTex = renderBackend->CreateTextureFromFile(GetAssetFullPath(L"assets\\default\\default_white.png"), false);
-	if (!DefaultBlackTex) DefaultBlackTex = renderBackend->CreateTextureFromFile(GetAssetFullPath(L"assets\\default\\default_black.png"), false);
-	if (!DefaultNormalTex) DefaultNormalTex = renderBackend->CreateTextureFromFile(GetAssetFullPath(L"assets\\default\\default_normal.png"), true);
-	if (!DefaultRougnessTex) DefaultRougnessTex = renderBackend->CreateTextureFromFile(GetAssetFullPath(L"assets\\default\\default_roughness.png"), true);
+	if (!DefaultWhiteTex) DefaultWhiteTex = renderBackend->CreateTextureFromFile(GetAssetFullPath(L"assets\\engine\\default\\default_white.png"), false);
+	if (!DefaultBlackTex) DefaultBlackTex = renderBackend->CreateTextureFromFile(GetAssetFullPath(L"assets\\engine\\default\\default_black.png"), false);
+	if (!DefaultNormalTex) DefaultNormalTex = renderBackend->CreateTextureFromFile(GetAssetFullPath(L"assets\\engine\\default\\default_normal.png"), true);
+	if (!DefaultRougnessTex) DefaultRougnessTex = renderBackend->CreateTextureFromFile(GetAssetFullPath(L"assets\\engine\\default\\default_roughness.png"), true);
 	if (bVulkanHybridStartup)
 		AppendCpuRuntimeTrace(L"[LoadAssets] after default textures");
 
@@ -12229,7 +12229,7 @@ void Corona::DrawRuntimeFrameOverlay()
 
 void Corona::InitBlueNoiseTexture()
 {
-	const std::filesystem::path path = GetAssetFullPath(L"assets\\bluenoise\\64_64_64\\HDR_RGBA.raw");
+	const std::filesystem::path path = GetAssetFullPath(L"assets\\engine\\bluenoise\\64_64_64\\HDR_RGBA.raw");
 	ifstream file(path, ios::in | ios::binary);
 	if (file.is_open())
 	{
