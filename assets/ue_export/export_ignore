@@ -1,0 +1,19 @@
+# Scenes removed from the local export cache.
+# reexport_ue_scenes.ps1 skips any MapName listed here.
+# Lines starting with # and blank lines are ignored.
+AbandonedApartment
+Bank
+ConcreteCorridor
+ConcreteCrypt
+ConcreteHouse
+Small_Concrete_Office
+Staircase
+SciFiHallway
+SummitSuite
+CyberpunkAlleyInterp
+# --- exported 2026-06-05 ---
+OrbitWukongRome
+ArcticBaseInterp
+AncientRuins
+MeadowEnvironmentSet
+CommandCenter
