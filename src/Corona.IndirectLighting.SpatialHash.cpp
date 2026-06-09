@@ -183,10 +183,16 @@ bool Corona::InitRaytracingSpatialHashGISERPass()
 
 void Corona::PrepareSpatialHashGIFrameParams(UINT32 spatialHashTraceCellBudget)
 {
+	const UINT32 giMode = std::clamp(SpatialHashGICB.GIMode, 0u, 1u);
+	const UINT32 octTraceCellBudget = std::min(
+		SpatialHashGIOctTraceCellBudget,
+		std::min(SpatialHashGIOctCellCapacity, SpatialHashGIActiveCellCapacity));
+	const UINT32 traceCellBudgetForMode = (giMode == 1u) ? octTraceCellBudget : spatialHashTraceCellBudget;
+
 	SpatialHashGICB.HashEntryCount = SpatialHashGIEntryCount;
 	SpatialHashGICB.HashEntryMask = SpatialHashGIEntryCount - 1u;
 	SpatialHashGICB.ActiveCellCapacity = SpatialHashGIActiveCellCapacity;
-	SpatialHashGICB.TraceCellBudget = spatialHashTraceCellBudget;
+	SpatialHashGICB.TraceCellBudget = traceCellBudgetForMode;
 	{
 		const float fallbackStrength = std::clamp(SpatialHashSkyFallbackStrength, 0.0f, 1.0f);
 		const glm::vec3 skyAvg = 0.5f * (SkyColorTop + SkyColorBottom) * RenderFrameDiffuseGISkyIntensity;
@@ -204,7 +210,7 @@ void Corona::PrepareSpatialHashGIFrameParams(UINT32 spatialHashTraceCellBudget)
 	SpatialHashGICB.SmoothingStrength = std::clamp(SpatialHashGICB.SmoothingStrength, 0.0f, 1.0f);
 	SpatialHashGICB.TemporalAlpha = std::clamp(SpatialHashGICB.TemporalAlpha, 0.02f, 1.0f);
 	SpatialHashGICB.InterpolationStrength = std::clamp(SpatialHashGICB.InterpolationStrength, 0.0f, 1.0f);
-	SpatialHashGICB.GIMode = std::clamp(SpatialHashGICB.GIMode, 0u, 1u);
+	SpatialHashGICB.GIMode = giMode;
 	FillPointLightParams(
 		SpatialHashGICB.PointLights,
 		SpatialHashGICB.PointLightCount,
@@ -228,7 +234,7 @@ void Corona::PrepareSpatialHashGIFrameParams(UINT32 spatialHashTraceCellBudget)
 	}
 
 	RTSpatialHashGIViewParam.LightDir = glm::vec4(RenderFrameNormalizedLightDir, LightIntensity);
-	RTSpatialHashGIViewParam.HashEntryCount = spatialHashTraceCellBudget;
+	RTSpatialHashGIViewParam.HashEntryCount = traceCellBudgetForMode;
 	RTSpatialHashGIViewParam.FrameCounter = RenderFrameIndex;
 	RTSpatialHashGIViewParam.BlueNoiseOffsetStride = RTGIViewParam.BlueNoiseOffsetStride;
 	RTSpatialHashGIViewParam.NoiseMode = RenderFrameRayNoiseMode;
@@ -470,7 +476,10 @@ void Corona::SpatialHashGIPass()
 		.SetSampler("global", "sampleWrap", samplerWrap.get());
 	pass.BindSceneHitPrograms();
 	// Oct mode dispatches one ray per (probe, ray); SH mode one thread per cell.
-	const UINT32 octRayDispatch = SpatialHashGIOctCellCapacity * SpatialHashGIOctRaysPerCell;
+	const UINT32 octTraceCellBudget = std::min(
+		SpatialHashGIOctTraceCellBudget,
+		std::min(SpatialHashGIOctCellCapacity, SpatialHashGIActiveCellCapacity));
+	const UINT32 octRayDispatch = octTraceCellBudget * SpatialHashGIOctRaysPerCell;
 	pass.Dispatch(bUseOct ? octRayDispatch : spatialHashTraceCellBudget, 1u);
 
 	if (SpatialHashGIOctRayData)
@@ -536,7 +545,7 @@ void Corona::SpatialHashGIPass()
 		SpatialHashGIOctBlendPSO->SetBufferUAV("OctReservoirRadianceOut", SpatialHashGIOctReservoirRadiance.get());
 		SpatialHashGIOctBlendPSO->SetCBVValue("SpatialHashGIConstant", &SpatialHashGICB);
 		SpatialHashGIOctBlendPSO->Apply();
-		const UINT32 octBlendThreads = SpatialHashGIOctCellCapacity * SpatialHashGIOctIrradianceTexels;
+		const UINT32 octBlendThreads = octTraceCellBudget * SpatialHashGIOctIrradianceTexels;
 		renderBackend->Dispatch((octBlendThreads + 63u) / 64u, 1u, 1u);
 		renderBackend->TransitionBuffer(SpatialHashGIOctIrradiance[0].get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
 
@@ -554,7 +563,7 @@ void Corona::SpatialHashGIPass()
 			SpatialHashGIOctDepthBlendPSO->SetBufferUAV("OctCellKeyOut", SpatialHashGIOctCellKey.get());
 			SpatialHashGIOctDepthBlendPSO->SetCBVValue("SpatialHashGIConstant", &SpatialHashGICB);
 			SpatialHashGIOctDepthBlendPSO->Apply();
-			const UINT32 octDepthThreads = SpatialHashGIOctCellCapacity * SpatialHashGIOctDepthTexels;
+			const UINT32 octDepthThreads = octTraceCellBudget * SpatialHashGIOctDepthTexels;
 			renderBackend->Dispatch((octDepthThreads + 63u) / 64u, 1u, 1u);
 			renderBackend->TransitionBuffer(SpatialHashGIOctDepth[0].get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
 		}

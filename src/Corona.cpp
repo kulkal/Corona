@@ -10807,7 +10807,7 @@ void Corona::LoadAssets()
 		// Only index [0] is used (resolved history). [1] left null to save memory.
 		SpatialHashGIOctIrradiance[0] = createStructuredBuffer(octIrradianceElements, sizeof(float) * 4u, true, octZeroInit.data());
 		SpatialHashGIOctDepth[0] = createStructuredBuffer(octDepthElements, sizeof(float) * 2u, true, octZeroInit.data());
-		const UINT32 octRayDataElements = SpatialHashGIOctCellCapacity * SpatialHashGIOctRaysPerCell;
+		const UINT32 octRayDataElements = SpatialHashGIOctTraceCellBudget * SpatialHashGIOctRaysPerCell;
 		SpatialHashGIOctRayData = createStructuredBuffer(octRayDataElements, sizeof(float) * 4u, true);
 		// Oct-slot ownership tags, zero-init (0 = free). octZeroInit is large enough.
 		SpatialHashGIOctCellKey = createStructuredBuffer(SpatialHashGIOctCellCapacity, sizeof(UINT32), true, octZeroInit.data());

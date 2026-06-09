@@ -583,6 +583,7 @@ private:
 	// depth 16x16 (14x14 interior + 1px border) float2. "Balanced" regime:
 	// 64K probes x 64 rays/probe, ~0.4GB (trace+resolved x irradiance+depth).
 	static constexpr UINT32 SpatialHashGIOctCellCapacity = 1u << 18;     // 256K probes (4x: fewer octIndex collisions)
+	static constexpr UINT32 SpatialHashGIOctTraceCellBudget = 1u << 16;  // 64K probes refreshed per frame; rotate through active cells
 	static constexpr UINT32 SpatialHashGIOctRaysPerCell = 64u;           // full-sphere rays per probe/frame
 	static constexpr UINT32 SpatialHashGIOctIrradianceRes = 8u;          // 8x8 directions
 	static constexpr UINT32 SpatialHashGIOctDepthRes = 8u;               // 8x8 (smaller, to afford 4x capacity)

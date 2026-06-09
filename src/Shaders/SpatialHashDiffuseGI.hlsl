@@ -1656,6 +1656,25 @@ groupshared float3 gRayRadiance[OCT_RAYS_PER_CELL]; // firefly-clamped radiance
 groupshared float3 gRayDir[OCT_RAYS_PER_CELL];      // reconstructed ray direction
 groupshared float gRayHitDist[OCT_RAYS_PER_CELL];   // clamped hit distance (depth blend)
 
+bool MapOctTraceProbeIndex(uint compactProbeIndex, uint activeCount, out uint activeIndex)
+{
+    uint octSourceCount = min(activeCount, OctCellCapacity);
+    uint traceProbeCount = min(octSourceCount, max(TraceCellBudget, 1u));
+    if (compactProbeIndex >= traceProbeCount)
+    {
+        activeIndex = 0u;
+        return false;
+    }
+
+    activeIndex = compactProbeIndex;
+    if (octSourceCount > traceProbeCount)
+    {
+        uint offset = (FrameIndex * traceProbeCount) % octSourceCount;
+        activeIndex = (compactProbeIndex + offset) % octSourceCount;
+    }
+    return true;
+}
+
 [numthreads(64, 1, 1)]
 void SpatialHashOctBlend(uint3 DTid : SV_DispatchThreadID, uint groupIndex : SV_GroupIndex)
 {
@@ -1666,9 +1685,9 @@ void SpatialHashOctBlend(uint3 DTid : SV_DispatchThreadID, uint groupIndex : SV_
     // Group-uniform validity (one group == one probe == 64 texels), so every
     // thread reaches the ownership barrier together.
     uint activeCount = min(ActiveCounterIn[0], ActiveCellCapacity);
-    uint octProbeCount = min(activeCount, OctCellCapacity);
-    bool valid = (probeIndex < octProbeCount);
-    uint slot = valid ? ActiveCellSlotsIn[probeIndex] : 0u;
+    uint activeIndex;
+    bool valid = MapOctTraceProbeIndex(probeIndex, activeCount, activeIndex);
+    uint slot = valid ? ActiveCellSlotsIn[activeIndex] : 0u;
     uint cellKey = valid ? ResolvedKeysIn[slot] : 0u;
     valid = valid && (slot < HashEntryCount) && (cellKey != 0u);
     uint octIndex = slot & (OctCellCapacity - 1u);
@@ -1937,11 +1956,11 @@ void SpatialHashOctDepthBlend(uint3 DTid : SV_DispatchThreadID)
     uint texelIndex = gid % OCT_DEPTH_TEXELS;
 
     uint activeCount = min(ActiveCounterIn[0], ActiveCellCapacity);
-    uint octProbeCount = min(activeCount, OctCellCapacity);
-    if (probeIndex >= octProbeCount)
+    uint activeIndex;
+    if (!MapOctTraceProbeIndex(probeIndex, activeCount, activeIndex))
         return;
 
-    uint slot = ActiveCellSlotsIn[probeIndex];
+    uint slot = ActiveCellSlotsIn[activeIndex];
     if (slot >= HashEntryCount || ResolvedKeysIn[slot] == 0u)
         return;
     uint octIndex = slot & (OctCellCapacity - 1u);

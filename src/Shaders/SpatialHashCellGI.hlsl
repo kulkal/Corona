@@ -652,7 +652,29 @@ float3 OctImportanceDir(uint r, uint rayCount, uint cosineCount, float3 n, float
     return SafeNormalize(d, n);
 }
 
-// Octahedral DDGI trace (GIMode==1): one dispatched thread per (probe, ray).
+bool MapOctTraceProbeIndex(uint compactProbeIndex, uint activeCount, out uint activeIndex)
+{
+    uint octSourceCount = min(activeCount, OctCellCapacity);
+    uint traceProbeCount = min(octSourceCount, max(HashEntryCount, 1u));
+    if (compactProbeIndex >= traceProbeCount)
+    {
+        activeIndex = 0u;
+        return false;
+    }
+
+    activeIndex = compactProbeIndex;
+    if (octSourceCount > traceProbeCount)
+    {
+        uint offset = (FrameCounter * traceProbeCount) % octSourceCount;
+        activeIndex = (compactProbeIndex + offset) % octSourceCount;
+    }
+    return true;
+}
+
+// Octahedral DDGI trace (GIMode==1): one dispatched thread per compacted
+// (probe-window, ray). The active-cell list is already compacted by the update
+// pass; this maps a bounded per-frame window over that list so dispatch width is
+// tied to useful refresh work instead of the full atlas capacity.
 // Each thread traces a single path from the probe's open-space origin and records
 // (radiance, hitDistance) to OctRayData. A later compute pass convolves these
 // rays into the per-probe octahedral irradiance/depth map.
@@ -664,11 +686,11 @@ void RayGenOctahedral()
     uint rayIndex = globalRay % raysPerProbe;
 
     uint activeCount = min(ActiveCounter[0], ActiveCellCapacity);
-    uint octProbeCount = min(activeCount, OctCellCapacity);
-    if (probeIndex >= octProbeCount)
+    uint activeIndex;
+    if (!MapOctTraceProbeIndex(probeIndex, activeCount, activeIndex))
         return;
 
-    uint slot = ActiveCellSlots[probeIndex];
+    uint slot = ActiveCellSlots[activeIndex];
     uint key = CellKeys[slot];
     float4 cellPosition = CellPosition[slot];
     float4 cellNormal = CellNormal[slot];
