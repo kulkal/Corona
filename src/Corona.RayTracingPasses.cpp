@@ -598,26 +598,35 @@ void Corona::UpdateInstancePropertyBuffer()
 	}
 
 	EnsureRayTracingFrameResourceSlots();
+	DX12Backend* dx12Backend = renderBackend->AsDX12Backend();
+	if (!dx12Backend)
+	{
+		ClearFailedD3D12FrameResources(L"DX12 backend unavailable");
+		return;
+	}
 	const UINT32 frameIndex = GetRayTracingFrameResourceIndex();
 	std::shared_ptr<Buffer>& frameInstancePropertyBuffer = InstancePropertyFrameBuffers[frameIndex];
 	if (!frameInstancePropertyBuffer || frameInstancePropertyBuffer->NumElements < instanceCapacity)
 	{
 		try
 		{
-			frameInstancePropertyBuffer = renderBackend->CreateBuffer({ instanceCapacity, sizeof(InstanceProperty), EInitialResourceState::GenericRead, false, nullptr });
+			frameInstancePropertyBuffer = dx12Backend->CreateDefaultByteAddressBuffer(instanceCapacity, sizeof(InstanceProperty), EInitialResourceState::ShaderRead);
 		}
 		catch (...)
 		{
-			ClearFailedD3D12FrameResources(L"DX12 CreateBuffer threw");
+			ClearFailedD3D12FrameResources(L"DX12 CreateDefaultByteAddressBuffer threw");
 			return;
 		}
 		if (!frameInstancePropertyBuffer || !frameInstancePropertyBuffer->resource)
 		{
-			ClearFailedD3D12FrameResources(L"DX12 CreateBuffer returned null");
+			ClearFailedD3D12FrameResources(L"DX12 CreateDefaultByteAddressBuffer returned null");
 			return;
 		}
-		frameInstancePropertyBuffer->MakeByteAddressBufferSRV();
 		NAME_D3D12_OBJECT(frameInstancePropertyBuffer->resource);
+		AppendCpuRuntimeTrace(
+			L"[RTAS] InstancePropertyBuffer DX12 heap=DEFAULT"
+			L", capacity=" + std::to_wstring(instanceCapacity) +
+			L", bytes=" + std::to_wstring(instanceCapacity * sizeof(InstanceProperty)));
 	}
 	if (!frameInstancePropertyBuffer || !frameInstancePropertyBuffer->resource)
 	{
@@ -626,19 +635,27 @@ void Corona::UpdateInstancePropertyBuffer()
 	}
 	InstancePropertyBuffer = frameInstancePropertyBuffer;
 
-	uint8_t* pData = nullptr;
-	const HRESULT mapResult = InstancePropertyBuffer->resource->Map(0, nullptr, reinterpret_cast<void**>(&pData));
-	if (FAILED(mapResult) || !pData)
+	const UINT instancePropertyBytes = static_cast<UINT>(instanceProperties.size() * sizeof(InstanceProperty));
+	bool bUploaded = false;
+	try
 	{
-		AppendCpuRuntimeTrace(
-			L"[RTAS] InstancePropertyBuffer Map failed hr=" + FormatRTHex(static_cast<uint32_t>(mapResult)) +
-			L", capacity=" + std::to_wstring(instanceCapacity) +
-			L", instances=" + std::to_wstring(RayTracingInstances.size()));
+		bUploaded = dx12Backend->UploadToDefaultBuffer(
+			InstancePropertyBuffer.get(),
+			instanceProperties.data(),
+			instancePropertyBytes,
+			EResourceState::ShaderRead,
+			EResourceState::ShaderRead);
+	}
+	catch (...)
+	{
+		ClearFailedD3D12FrameResources(L"DX12 UploadToDefaultBuffer threw");
 		return;
 	}
-
-	memcpy(pData, instanceProperties.data(), instanceProperties.size() * sizeof(InstanceProperty));
-	InstancePropertyBuffer->resource->Unmap(0, nullptr);
+	if (!bUploaded)
+	{
+		ClearFailedD3D12FrameResources(L"DX12 UploadToDefaultBuffer failed");
+		return;
+	}
 #endif // CORONA_HAS_D3D12 (UpdateInstancePropertyBuffer DX12 path)
 }
 

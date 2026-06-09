@@ -1482,6 +1482,100 @@ std::shared_ptr<Buffer> DX12Backend::CreateBuffer(UINT InNumElements, UINT InEle
 	return ptr;
 }
 
+shared_ptr<Buffer> DX12Backend::CreateDefaultByteAddressBuffer(UINT InNumElements, UINT InElementSize, EInitialResourceState initialState)
+{
+	if (InNumElements == 0 || InElementSize == 0)
+		return nullptr;
+
+	Buffer* buffer = new Buffer;
+	buffer->Owner = this;
+	buffer->NumElements = InNumElements;
+	buffer->ElementSize = InElementSize;
+
+	const UINT64 Size = static_cast<UINT64>(InNumElements) * static_cast<UINT64>(InElementSize);
+	D3D12_HEAP_PROPERTIES heapProp = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT);
+	D3D12_RESOURCE_DESC desc = CD3DX12_RESOURCE_DESC::Buffer(Size, D3D12_RESOURCE_FLAG_NONE);
+	ThrowIfFailed(Device->CreateCommittedResource(
+		&heapProp,
+		D3D12_HEAP_FLAG_NONE,
+		&desc,
+		ToD3D12ResourceState(initialState),
+		nullptr,
+		IID_PPV_ARGS(&buffer->resource)));
+
+	NAME_D3D12_OBJECT(buffer->resource);
+	buffer->MakeByteAddressBufferSRV();
+	return shared_ptr<Buffer>(buffer);
+}
+
+bool DX12Backend::UploadToDefaultBuffer(Buffer* buffer, const void* srcData, UINT sizeInBytes, EResourceState stateBefore, EResourceState stateAfter)
+{
+	if (!buffer || !buffer->resource || !srcData || sizeInBytes == 0)
+		return false;
+
+	const UINT64 capacityBytes = static_cast<UINT64>(buffer->NumElements) * static_cast<UINT64>(buffer->ElementSize);
+	if (static_cast<UINT64>(sizeInBytes) > capacityBytes)
+		return false;
+
+	if (!buffer->UploadResource || buffer->UploadMappedSizeInBytes < sizeInBytes)
+	{
+		buffer->UploadResource.Reset();
+		buffer->UploadMappedPtr = nullptr;
+		buffer->UploadMappedSizeInBytes = 0;
+
+		const D3D12_HEAP_PROPERTIES uploadHeapProps = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD);
+		const D3D12_RESOURCE_DESC uploadDesc = CD3DX12_RESOURCE_DESC::Buffer(capacityBytes);
+		HRESULT hr = Device->CreateCommittedResource(
+			&uploadHeapProps,
+			D3D12_HEAP_FLAG_NONE,
+			&uploadDesc,
+			D3D12_RESOURCE_STATE_GENERIC_READ,
+			nullptr,
+			IID_PPV_ARGS(&buffer->UploadResource));
+		if (FAILED(hr))
+		{
+			AppendCpuRuntimeTrace(L"[DX12Upload] persistent staging buffer allocation failed hr=" + FormatHexHRESULT(hr));
+			return false;
+		}
+		NAME_D3D12_OBJECT(buffer->UploadResource);
+
+		D3D12_RANGE readRange{ 0, 0 };
+		hr = buffer->UploadResource->Map(0, &readRange, &buffer->UploadMappedPtr);
+		if (FAILED(hr) || !buffer->UploadMappedPtr)
+		{
+			AppendCpuRuntimeTrace(L"[DX12Upload] persistent staging buffer Map failed hr=" + FormatHexHRESULT(hr));
+			buffer->UploadResource.Reset();
+			buffer->UploadMappedPtr = nullptr;
+			return false;
+		}
+		buffer->UploadMappedSizeInBytes = static_cast<UINT>(capacityBytes);
+	}
+	memcpy(buffer->UploadMappedPtr, srcData, sizeInBytes);
+
+	CommandList* cmd = CmdQ->AllocCmdList();
+	const D3D12_RESOURCE_STATES before = ToD3D12ResourceState(stateBefore);
+	const D3D12_RESOURCE_STATES after = ToD3D12ResourceState(stateAfter);
+	if (before != D3D12_RESOURCE_STATE_COPY_DEST)
+	{
+		cmd->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(
+			buffer->resource.Get(),
+			before,
+			D3D12_RESOURCE_STATE_COPY_DEST));
+	}
+	cmd->CmdList->CopyBufferRegion(buffer->resource.Get(), 0, buffer->UploadResource.Get(), 0, sizeInBytes);
+	if (after != D3D12_RESOURCE_STATE_COPY_DEST)
+	{
+		cmd->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(
+			buffer->resource.Get(),
+			D3D12_RESOURCE_STATE_COPY_DEST,
+			after));
+	}
+
+	CmdQ->ExecuteCommandList(cmd);
+
+	return true;
+}
+
 shared_ptr<IndexBuffer> DX12Backend::CreateIndexBuffer(EIndexFormat Format, UINT Size, void* SrcData)
 {
 	CommandList* cmd = CmdQ->AllocCmdList();

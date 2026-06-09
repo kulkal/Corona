@@ -647,6 +647,8 @@ public:
 
 	shared_ptr<Sampler> CreateSampler(D3D12_SAMPLER_DESC& InSamplerDesc);
 	shared_ptr<Buffer> CreateBuffer(UINT InNumElements, UINT InElementSize, D3D12_RESOURCE_STATES initResState, bool isUAV, void* SrcData = nullptr);
+	shared_ptr<Buffer> CreateDefaultByteAddressBuffer(UINT InNumElements, UINT InElementSize, EInitialResourceState initialState = EInitialResourceState::ShaderRead);
+	bool UploadToDefaultBuffer(Buffer* buffer, const void* srcData, UINT sizeInBytes, EResourceState stateBefore, EResourceState stateAfter);
 
 	std::vector<std::shared_ptr<Texture>> SwapChainRenderTargets;
 	std::vector<std::shared_ptr<Texture>> SwapChainWrappedTextures;
