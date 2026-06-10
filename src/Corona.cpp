@@ -8180,6 +8180,68 @@ void Corona::FillPointLightParams(PointLightParam* outPointLights, UINT32& outPo
 	}
 }
 
+void Corona::BuildReSTIRSharedPointLights(std::vector<const PointLightState*>& outLights) const
+{
+	// CAMERA-INDEPENDENT selection. The shared spatial light mask culls lights per
+	// world-space region, which must not change just because the camera moved — but
+	// the generic BuildPointLightRenderCandidates ranks by luma*radius²/distanceToCamera²,
+	// so its top-N set shuffles as the camera moves. That made the shadow buffer's
+	// chosen-light index (and thus the culling) change with camera distance. Rank the
+	// top-N here by camera-INDEPENDENT emitted power (luma * radius²) instead, then
+	// order the kept set by stable light Id so the bit/index meaning is fixed for the
+	// GI mask writer, the ReSTIR shadow candidates, and the ReSTIR lighting feed.
+	struct Ranked { const PointLightState* Light; float Power; };
+	std::vector<Ranked> ranked;
+	ranked.reserve(RenderWorld.PointLights.size());
+	for (const PointLightState& pl : RenderWorld.PointLights)
+	{
+		if (!pl.bEnabled || pl.Intensity <= 0.0f)
+			continue;
+		const float radius = std::max(pl.Radius, 0.01f);
+		const float colorLuma =
+			std::max(0.0f, 0.2126f * pl.Color.r + 0.7152f * pl.Color.g + 0.0722f * pl.Color.b);
+		const float power = colorLuma * std::max(0.0f, pl.Intensity) * radius * radius;
+		ranked.push_back({ &pl, power });
+	}
+	std::stable_sort(ranked.begin(), ranked.end(),
+		[](const Ranked& a, const Ranked& b)
+		{
+			if (a.Power != b.Power)
+				return a.Power > b.Power;
+			const UINT32 aId = a.Light ? a.Light->Id : 0u;
+			const UINT32 bId = b.Light ? b.Light->Id : 0u;
+			return aId < bId;
+		});
+	if (ranked.size() > MaxDiffuseGIPointLights)
+		ranked.resize(MaxDiffuseGIPointLights); // top-N by camera-independent power
+
+	outLights.clear();
+	outLights.reserve(ranked.size());
+	for (const Ranked& r : ranked)
+		outLights.push_back(r.Light);
+	// Stable Id order for a fixed bit/index across frames and across the GI->shadow
+	// frame boundary.
+	std::stable_sort(outLights.begin(), outLights.end(),
+		[](const PointLightState* a, const PointLightState* b)
+		{
+			return (a ? a->Id : 0u) < (b ? b->Id : 0u);
+		});
+}
+
+void Corona::FillPointLightParamsFromList(PointLightParam* outPointLights, UINT32& outPointLightCount,
+	const std::vector<const PointLightState*>& lights, UINT32 maxCount) const
+{
+	outPointLightCount = 0;
+	if (!outPointLights || maxCount == 0)
+		return;
+	for (const PointLightState* pointLightPtr : lights)
+	{
+		if (!pointLightPtr || outPointLightCount >= maxCount)
+			continue;
+		outPointLights[outPointLightCount++] = BuildPointLightParam(*pointLightPtr);
+	}
+}
+
 void Corona::QueueEditorMapLoad(const std::wstring& name)
 {
 	if (name.empty())

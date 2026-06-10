@@ -993,18 +993,26 @@ bool LoadInterpolatedSH(float3 worldPos, float3 normal, out SH4RGB outSH, out fl
 #ifndef SPATIAL_HASH_CELL_POS_JITTER
 #define SPATIAL_HASH_CELL_POS_JITTER 0.35f
 #endif
-bool LoadCellOnlySH(float3 worldPos, uint2 pixelPos, out SH4RGB outSH, out float outHistoryFrames)
+bool LoadCellOnlySH(float3 worldPos, float3 surfaceNormal, uint2 pixelPos, out SH4RGB outSH, out float outHistoryFrames)
 {
     outSH = InitSH4RGB();
     outHistoryFrames = 0.0f;
 
     uint hashLevel;
     float cs = SpatialHashLeveledCellSize(worldPos, hashLevel);
-    // Position jitter (tangent to nothing — full 3D), magnitude ~a third of a cell.
+    // Position jitter to dissolve the cell-boundary stair/comb — CONSTRAINED to the
+    // surface tangent plane. The old jitter was full 3D, so its normal-direction
+    // component pushed the sample off a flat surface into cells above (empty air) or
+    // below (solid) it; those cells are unpopulated, so each pixel ended up sampling
+    // a different valid-cell subset -> high-freq grain on flat surfaces. Jittering
+    // only in the tangent plane keeps every sample on the surface, so it dithers
+    // across same-surface cells (smooth) instead of off-surface empty ones.
     uint seed = pixelPos.x * 1973u + pixelPos.y * 9277u + FrameIndex * 26699u;
-    float3 j = float3(HashToUnitFloat(seed), HashToUnitFloat(seed ^ 0x68bc21ebu),
-                      HashToUnitFloat(seed ^ 0xb5297a4du)) - 0.5f;
-    float3 jitterPos = worldPos + j * (cs * SPATIAL_HASH_CELL_POS_JITTER);
+    float2 j2 = float2(HashToUnitFloat(seed), HashToUnitFloat(seed ^ 0xb5297a4du)) - 0.5f;
+    float3 nrm = SafeNormalize(surfaceNormal, float3(0.0f, 1.0f, 0.0f));
+    float3 jt = SafeNormalize(cross(nrm, abs(nrm.y) < 0.9f ? float3(0.0f, 1.0f, 0.0f) : float3(1.0f, 0.0f, 0.0f)), float3(1.0f, 0.0f, 0.0f));
+    float3 jb = cross(nrm, jt);
+    float3 jitterPos = worldPos + (jt * j2.x + jb * j2.y) * (cs * SPATIAL_HASH_CELL_POS_JITTER);
 
     float jcs = SpatialHashLeveledCellSize(jitterPos, hashLevel);
     int3 levelOffset = SpatialHashLevelOffset(hashLevel);
@@ -2102,7 +2110,7 @@ void SpatialHashQuery(uint3 DTid : SV_DispatchThreadID)
     SH4RGB cachedSH = InitSH4RGB();
     float historyFrames = 0.0f;
     // SH4 cell-only full-sphere lookup + position jitter (no normal bins).
-    bool bHasCache = LoadCellOnlySH(worldPos, pixelPos, cachedSH, historyFrames);
+    bool bHasCache = LoadCellOnlySH(worldPos, cacheNormal, pixelPos, cachedSH, historyFrames);
     if (bHasCache)
     {
         float3 radiance = EvaluateSHDiffuse(cachedSH, pixelNormal) * SPATIAL_HASH_DIFFUSE_SCALE;

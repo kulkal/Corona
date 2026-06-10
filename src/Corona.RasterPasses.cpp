@@ -1442,16 +1442,38 @@ void Corona::LightingPass()
 	}
 	Param.PointLightCount = 0;
 	std::vector<const PointLightState*> pointLightCandidates;
-	BuildPointLightRenderCandidates(pointLightCandidates);
+	// ReSTIR: use the shared stable-Id-ordered table so the chosen light index the
+	// shadow pass writes indexes the SAME light here (and matches the GI light mask).
+	// Option A keeps the full score-sorted candidate set (its channel map below sorts
+	// by distance and relies on that order).
+	if (bEnableReSTIRDirectShadow)
+		BuildReSTIRSharedPointLights(pointLightCandidates);
+	else
+		BuildPointLightRenderCandidates(pointLightCandidates);
 	const UINT32 maxLightingPointLights = bEnableReSTIRDirectShadow ? MaxDiffuseGIPointLights : MaxPointLights;
-	for (const PointLightState* pointLightPtr : pointLightCandidates)
+	if (bEnableReSTIRDirectShadow && bReSTIRMaskLightCacheValid && !ReSTIRMaskLightCache.empty())
 	{
-		if (!pointLightPtr || Param.PointLightCount >= maxLightingPointLights)
-			continue;
+		// Shade from the exact cached table the GI mask + ReSTIR shadow pass share, so
+		// the light index the shadow ray chose addresses the same light here (parity
+		// holds across the persistent mask even while the camera moves).
+		for (const PointLightParam& p : ReSTIRMaskLightCache)
+		{
+			if (Param.PointLightCount >= maxLightingPointLights)
+				break;
+			Param.PointLights[Param.PointLightCount++] = p;
+		}
+	}
+	else
+	{
+		for (const PointLightState* pointLightPtr : pointLightCandidates)
+		{
+			if (!pointLightPtr || Param.PointLightCount >= maxLightingPointLights)
+				continue;
 
-		const PointLightState& pointLight = *pointLightPtr;
-		const UINT32 pointLightIndex = Param.PointLightCount++;
-		Param.PointLights[pointLightIndex] = BuildPointLightParam(pointLight);
+			const PointLightState& pointLight = *pointLightPtr;
+			const UINT32 pointLightIndex = Param.PointLightCount++;
+			Param.PointLights[pointLightIndex] = BuildPointLightParam(pointLight);
+		}
 	}
 
 	{

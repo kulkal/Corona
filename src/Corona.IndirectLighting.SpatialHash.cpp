@@ -211,10 +211,28 @@ void Corona::PrepareSpatialHashGIFrameParams(UINT32 spatialHashTraceCellBudget)
 	SpatialHashGICB.TemporalAlpha = std::clamp(SpatialHashGICB.TemporalAlpha, 0.02f, 1.0f);
 	SpatialHashGICB.InterpolationStrength = std::clamp(SpatialHashGICB.InterpolationStrength, 0.0f, 1.0f);
 	SpatialHashGICB.GIMode = giMode;
-	FillPointLightParams(
-		SpatialHashGICB.PointLights,
-		SpatialHashGICB.PointLightCount,
-		std::min(MaxDiffuseGIPointLights, DiffuseGIPointLightLimit));
+	// Use the shared, stable-Id-ordered ReSTIR light table so the cell light mask
+	// this pass writes is bit-compatible with the ReSTIR shadow candidate list and
+	// the ReSTIR LightingPS feed (which use the same table). Cover the full
+	// MaxDiffuseGIPointLights set so the mask has a valid bit for every shadow
+	// candidate (a smaller DiffuseGIPointLightLimit would zero the high bits and the
+	// shadow pass would wrongly cull those lights).
+	{
+		std::vector<const PointLightState*> sharedReSTIRLights;
+		BuildReSTIRSharedPointLights(sharedReSTIRLights);
+		FillPointLightParamsFromList(
+			SpatialHashGICB.PointLights,
+			SpatialHashGICB.PointLightCount,
+			sharedReSTIRLights,
+			MaxDiffuseGIPointLights);
+		// Cache the exact table this pass's cell light mask is built from. The shadow
+		// pass (next frame, runs before this pass) and the ReSTIR LightingPS feed read
+		// this so their candidate index stays bit-aligned with the persistent mask.
+		ReSTIRMaskLightCache.assign(
+			SpatialHashGICB.PointLights,
+			SpatialHashGICB.PointLights + SpatialHashGICB.PointLightCount);
+		bReSTIRMaskLightCacheValid = SpatialHashGICB.PointLightCount > 0;
+	}
 	SpatialHashGICB.DebugDiffuseGIOverride =
 		bDebugForceDiffuseGIColor ?
 		glm::vec4(glm::max(DebugForceDiffuseGIColor, glm::vec3(0.0f)), 1.0f) :
