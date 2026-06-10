@@ -305,6 +305,8 @@ private:
 	shared_ptr<Texture> DiffuseGITemporal[2];
 	shared_ptr<Texture> DiffuseGIRawAux;
 	shared_ptr<Texture> DiffuseGIRaw;
+	shared_ptr<Texture> DiffuseGISpatialFiltered;     // spatial pre-filter output (DLSS-RR feed)
+	shared_ptr<Texture> DiffuseGISpatialFilteredAux;
 	shared_ptr<Texture> DiffuseGIHashCached;
 	shared_ptr<Texture> DiffuseGIHashCachedAux;
 	shared_ptr<Texture> ScreenProbeGIResolved;
@@ -527,6 +529,21 @@ private:
 	TemporalFilterConstant TemporalFilterCB;
 
 	shared_ptr<ComputePipelineStateObject> TemporalDenoisingFilterPSO;
+
+	// Spatial-only pre-filter of the SIMPLE_RAYTRACE diffuse GI for the DLSS-RR feed
+	// (no temporal reprojection -> no ghosting; cuts 1spp variance so RR stays stable
+	// on dolly motion). Toggleable from the editor GI panel.
+	struct DiffuseGISpatialFilterConstant
+	{
+		glm::vec2 RTSize;
+		glm::vec2 ProjectionParams;
+		int Radius = 3;
+		float DepthSigma = 0.05f;
+		float NormalPower = 32.0f;
+		float _pad = 0.0f;
+	};
+	DiffuseGISpatialFilterConstant DiffuseGISpatialFilterCB;
+	shared_ptr<ComputePipelineStateObject> DiffuseGISpatialFilterPSO;
 
 	// Screen-probe diffuse GI resolve
 	struct ScreenProbeGIConstant
@@ -841,7 +858,7 @@ private:
 		float ViewSpreadAngle;
 		UINT32 NoiseMode = 1;
 		UINT32 bIncludeSkyLighting = 0;
-		float _noisePadding = 0.0f;
+		UINT32 GISamplesPerPixel = 1; // diffuse GI rays per pixel per frame (was _noisePadding)
 		glm::vec3 SkyColorTop;
 		float SkyIntensity;
 		glm::vec3 SkyColorBottom;
@@ -1270,6 +1287,32 @@ private:
 	ERayNoiseMode RayNoiseMode = ERayNoiseMode::R2_LOW_DISCREPANCY;
 	EDiffuseGIMode DiffuseGIMode = EDiffuseGIMode::SPATIAL_HASH;
 	bool bEnableDiffuseGI = true;
+	// Spatial pre-filter for the SIMPLE_RAYTRACE diffuse GI DLSS-RR feed. DEFAULT OFF:
+	// pre-denoising fights RR (RR expects the raw noisy signal + guides and does its
+	// own reconstruction; a pre-blur degrades it, adding noise under camera rotation).
+	// Kept as a toggle for A/B only; raw is the correct RR feed. Reduce 1spp dolly
+	// variance at the SOURCE (sample count) instead.
+	bool bEnableSimpleGISpatialFilter = false;
+	// Feed the RAW (un-reprojected) simple-trace diffuse GI to DLSS-RR. DEFAULT OFF:
+	// the raw 1spp signal in dark scenes has such high per-frame variance that RR goes
+	// unstable and collapses the whole frame to black intermittently (NaN/firefly
+	// sanitize alone does not fix it — it is the variance, not outliers). The temporal
+	// feed (accumulated, low-variance) is stable; its only downside is pan ghosting,
+	// which is addressed by the disocclusion gate in the temporal pass. Toggle for A/B.
+	// Feed the RAW (un-reprojected) simple-trace diffuse GI to DLSS-RR. Now the default:
+	// once the ray-origin self-intersection flicker was fixed, the raw feed is stable and
+	// lets RR own temporal/disocclusion (no surface-motion reproject ghosting), exactly
+	// like the specular path. Toggle off to fall back to the screen-space temporal feed.
+	bool bFeedRawGIToRR = true;
+	// Post-temporal, variance-guided disocclusion filter for the SIMPLE_RAYTRACE diffuse
+	// GI under DLSS-RR. DEFAULT ON: cleans only the freshly-disoccluded (high-variance,
+	// no-history) pixels that RR's combined-mode spatial denoise leaves noisy on camera
+	// rotation, while leaving well-accumulated pixels untouched (detail preserved).
+	bool bEnableGIDisocclusionFilter = false;
+	// Diffuse GI rays per pixel per frame for SIMPLE_RAYTRACE. >1 cuts the 1spp
+	// variance at the source (RR-compatible: each sample is still raw) so DLSS-RR
+	// stays stable on dolly motion. Cost scales ~linearly with the count.
+	UINT32 SimpleGISamplesPerPixel = 4;
 	bool bEnableRTDiffuseGISER = false;
 	bool bEnableRTReflectionSER = false;
 	bool bD3D12ShaderModel69Supported = false;
@@ -2979,6 +3022,9 @@ public:
 	void InitRTPSO();
 
 	void InitTemporalDenoisingPass();
+	void InitDiffuseGISpatialFilterPass();
+	void DiffuseGISpatialFilterPass();
+	void DiffuseGIDisocclusionFilterPass();
 	void InitScreenProbeGIPass();
 	void InitSpatialHashGIPass();
 

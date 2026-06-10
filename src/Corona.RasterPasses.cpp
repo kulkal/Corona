@@ -1547,8 +1547,45 @@ void Corona::LightingPass()
 	}
 	else if (!bMobileHybridDirectOnly && bDiffuseGIEnabledThisFrame && DiffuseGITemporal[GIBufferWriteIndex])
 	{
-		lightingDiffuseTex = DiffuseGITemporal[GIBufferWriteIndex].get();
-		lightingDiffuseSource = L"temporal";
+		// Under DLSS Ray Reconstruction, feed the RAW (un-reprojected) diffuse GI and
+		// let RR own the temporal/disocclusion pass — exactly like the specular path
+		// below. The screen-space TemporalDenoisingPass reprojects with the surface
+		// motion vector, which smears prev-frame indirect onto disoccluded pixels
+		// (ghosting/trailing under camera motion); RR reconstructs motion and
+		// disocclusion natively from its guide buffers, so that pre-temporal stage only
+		// adds ghosting here. Non-RR paths (TAA/off) keep the temporal stage they rely on.
+		if (IsDLSSRREnabled() && bFeedRawGIToRR && DiffuseGIRaw)
+		{
+			if (bEnableSimpleGISpatialFilter && DiffuseGISpatialFiltered)
+			{
+				// Spatially pre-filtered (no temporal reproject) — RR-idiomatic: calms
+				// the 1spp variance (less dolly flicker) without any ghosting.
+				lightingDiffuseTex = DiffuseGISpatialFiltered.get();
+				lightingDiffuseSource = L"spatial_filtered_for_rr";
+				if (DiffuseGISpatialFilteredAux)
+					lightingDiffuseAuxTex = DiffuseGISpatialFilteredAux.get();
+			}
+			else
+			{
+				lightingDiffuseTex = DiffuseGIRaw.get();
+				lightingDiffuseSource = L"raw_for_rr";
+				if (DiffuseGIRawAux)
+					lightingDiffuseAuxTex = DiffuseGIRawAux.get();
+			}
+		}
+		else if (IsDLSSRREnabled() && bEnableGIDisocclusionFilter && DiffuseGISpatialFiltered)
+		{
+			// Temporally accumulated, then variance-guided disocclusion-cleaned for RR.
+			lightingDiffuseTex = DiffuseGISpatialFiltered.get();
+			lightingDiffuseSource = L"temporal_disoccl_filtered";
+			if (DiffuseGISpatialFilteredAux)
+				lightingDiffuseAuxTex = DiffuseGISpatialFilteredAux.get();
+		}
+		else
+		{
+			lightingDiffuseTex = DiffuseGITemporal[GIBufferWriteIndex].get();
+			lightingDiffuseSource = L"temporal";
+		}
 	}
 	if (!bMobileHybridDirectOnly &&
 		bDiffuseGIEnabledThisFrame &&

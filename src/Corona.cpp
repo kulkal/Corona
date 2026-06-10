@@ -3436,6 +3436,11 @@ void Corona::RecreateRenderResolutionResources()
 	DiffuseGIRaw = createTexture2D(HybridFloat4UAVFormat, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
 	NAME_D3D12_OBJECT(DiffuseGIRaw->resource);
 
+	DiffuseGISpatialFiltered = createTexture2D(HybridFloat4UAVFormat, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
+	NAME_D3D12_OBJECT(DiffuseGISpatialFiltered->resource);
+	DiffuseGISpatialFilteredAux = createTexture2D(HybridFloat4UAVFormat, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
+	NAME_D3D12_OBJECT(DiffuseGISpatialFilteredAux->resource);
+
 	DiffuseGIHashCachedAux = createTexture2D(HybridFloat4UAVFormat, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
 	NAME_D3D12_OBJECT(DiffuseGIHashCachedAux->resource);
 
@@ -10528,6 +10533,7 @@ void Corona::LoadAssets()
 		AppendCpuRuntimeTrace(L"[LoadAssets] before InitTemporalDenoisingPass");
 		UpdateStartupLoadingProgress(0.37f, L"Compiling temporal denoiser");
 		InitTemporalDenoisingPass();
+		InitDiffuseGISpatialFilterPass();
 		AppendCpuRuntimeTrace(L"[LoadAssets] after InitTemporalDenoisingPass");
 	}
 	if (bSupportsScreenProbeGI)
@@ -10769,6 +10775,11 @@ void Corona::LoadAssets()
 		DiffuseGIRaw = createTexture2D(HybridFloat4UAVFormat, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
 
 		NAME_D3D12_OBJECT(DiffuseGIRaw->resource);
+
+		DiffuseGISpatialFiltered = createTexture2D(HybridFloat4UAVFormat, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
+		NAME_D3D12_OBJECT(DiffuseGISpatialFiltered->resource);
+		DiffuseGISpatialFilteredAux = createTexture2D(HybridFloat4UAVFormat, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
+		NAME_D3D12_OBJECT(DiffuseGISpatialFilteredAux->resource);
 
 		DiffuseGIHashCachedAux = createTexture2D(HybridFloat4UAVFormat, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
 
@@ -13164,6 +13175,24 @@ void Corona::DrawEditorModeOverlay()
 				if (ImGui::TreeNodeEx("Diffuse GI", ImGuiTreeNodeFlags_DefaultOpen))
 				{
 					if (ImGui::Checkbox("Enable Diffuse GI", &bEnableDiffuseGI)) bLightingChanged = true;
+					{
+						int giSpp = (int)SimpleGISamplesPerPixel;
+						if (ImGui::SliderInt("Simple GI Samples/Pixel", &giSpp, 1, 8))
+						{
+							SimpleGISamplesPerPixel = (UINT32)giSpp;
+							bLightingChanged = true;
+						}
+					}
+					if (ImGui::Checkbox("GI Disocclusion Filter (DLSS-RR)", &bEnableGIDisocclusionFilter)) bLightingChanged = true;
+					if (bEnableGIDisocclusionFilter && !bFeedRawGIToRR)
+						ImGui::SliderInt("  Disoccl Filter Radius", &DiffuseGISpatialFilterCB.Radius, 1, 8);
+					if (ImGui::Checkbox("Feed RAW GI to DLSS-RR (unstable in dark scenes)", &bFeedRawGIToRR)) bLightingChanged = true;
+					if (bFeedRawGIToRR)
+					{
+						if (ImGui::Checkbox("  Simple GI Spatial Filter (DLSS-RR)", &bEnableSimpleGISpatialFilter)) bLightingChanged = true;
+						if (bEnableSimpleGISpatialFilter)
+							ImGui::SliderInt("    GI Spatial Filter Radius", &DiffuseGISpatialFilterCB.Radius, 1, 8);
+					}
 					const bool bRTDiffuseGISERAvailable =
 						renderBackend &&
 						renderBackend->SupportsShaderExecutionReordering();
@@ -13976,12 +14005,35 @@ void Corona::OnRender()
 			EndGpuPassTiming(EGpuPass::RaytraceGI);
 		}
 
+		// Spatial-only pre-filter for the DLSS-RR feed of the simple-trace diffuse GI
+		// (no temporal reprojection -> no ghosting; reduces 1spp variance so RR stays
+		// stable on dolly). Only meaningful when SIMPLE_RAYTRACE feeds RR raw.
+		if (bEnableDiffuseGI &&
+			DiffuseGIMode == EDiffuseGIMode::SIMPLE_RAYTRACE &&
+			IsDLSSRREnabled() &&
+			bEnableSimpleGISpatialFilter)
+		{
+			DiffuseGISpatialFilterPass();
+		}
+
 		// Simple GI denoising: edge-aware temporal accumulation.
 		if (bRunTemporalDenoise)
 		{
 			BeginGpuPassTiming(EGpuPass::TemporalDenoise);
 			TemporalDenoisingPass();
 			EndGpuPassTiming(EGpuPass::TemporalDenoise);
+
+			// Clean only the freshly-disoccluded (high-variance) diffuse pixels before the
+			// DLSS-RR combined feed — RR's combined-mode spatial denoise leaves those noisy
+			// on camera rotation. Accumulated pixels pass through (detail preserved).
+			if (bEnableDiffuseGI &&
+				DiffuseGIMode == EDiffuseGIMode::SIMPLE_RAYTRACE &&
+				IsDLSSRREnabled() &&
+				!bFeedRawGIToRR &&
+				bEnableGIDisocclusionFilter)
+			{
+				DiffuseGIDisocclusionFilterPass();
+			}
 		}
 		if (bRunGI && DiffuseGIMode == EDiffuseGIMode::SCREEN_PROBE)
 		{
@@ -15932,6 +15984,7 @@ void Corona::RecompileShaders()
 	InitRTPSO();
 	InitPathTracingPass();
 	InitTemporalDenoisingPass();
+	InitDiffuseGISpatialFilterPass();
 	InitSpatialHashGIPass();
 	InitGBufferPass();
 	InitToneMapPass();

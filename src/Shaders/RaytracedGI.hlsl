@@ -244,6 +244,7 @@ void rayGen
     uint3 launchDim = DispatchRaysDimensions();
 
 
+
     float2 crd = float2(launchIndex.xy);
 	//crd.y *= -1;
     float2 dims = float2(launchDim.xy);
@@ -294,10 +295,17 @@ void rayGen
     float cosTerm = 1;//dot(float3(0, 0, 1), sampleDirLocal)*2;
 
 	RayDesc ray;
-	ray.Origin = WorldPos + WorldNormal * 0.5; //    mul(float4(0, 0, 0, 1), InvViewMatrix).xyz;
+	// Self-intersection guard. A fixed 0.5u push-off does not clear the surface on deep /
+	// grazing geometry (tall building walls — the depth-reconstructed WorldPos error grows
+	// with view distance), so grazing hemisphere rays re-hit the origin surface and return
+	// a dark self-hit that toggles with the per-frame sample direction. Under DLSS-RR's
+	// raw diffuse feed that read as large flickering regions. Scaling the push-off and TMin
+	// with view depth keeps the origin clear of the surface at any distance.
+	float surfEps = max(0.5f, abs(LinearDepth) * 0.02f);
+	ray.Origin = WorldPos + WorldNormal * surfEps;
 	ray.Direction = sampleDirWorld;//reflect(ViewDir, WorldNormal);
 
-	ray.TMin = 0.001f;
+	ray.TMin = max(0.01f, surfEps * 0.5f);
     ray.TMax = MAX_HIT_DIST;
 
 	RayPayload payload;
@@ -311,6 +319,16 @@ void rayGen
     if(payload.bHit == false)
     {
         float3 Irradiance = (bIncludeSkyLighting != 0u) ? max(EvaluateSkyColor(sampleDirWorld), 0.0f.xxx) : 0.0f.xxx;
+
+        // Sanitize before it reaches DLSS-RR: NaN/Inf or extreme fireflies in the raw GI
+        // feed pollute the RR input color and make RR collapse the whole frame to black.
+        {
+            Irradiance = max(CommonSanitizeFloat3(Irradiance, 0.0f.xxx), 0.0f.xxx);
+            float giLuma = dot(Irradiance, float3(0.2126f, 0.7152f, 0.0722f));
+            const float kGIMaxLuma = 16.0f;
+            if (giLuma > kGIMaxLuma)
+                Irradiance *= kGIMaxLuma / giLuma;
+        }
 
         SH sh_indirect = init_SH();
         sh_indirect = irradiance_to_SH(Irradiance, sampleDirWorld);
@@ -354,6 +372,19 @@ void rayGen
             Irradiance += NdotL * LightIntensity * max(CommonSanitizeFloat3(LightColor, 1.0f.xxx), 0.0f.xxx) * Albedo * INV_PI;
         }
         Irradiance += EvaluatePointLightBounce(payload.position, payload.normal, Albedo);
+
+        // Sanitize before it reaches DLSS-RR: a point light close to a GI hit makes the
+        // 1/d^2 term blow up (Inf / huge firefly), which pollutes the RR input color and
+        // makes RR collapse the whole frame to black. NaN passes firefly luma compares
+        // (always false), so an explicit sanitize is required, then a luminance cap.
+        {
+            Irradiance = max(CommonSanitizeFloat3(Irradiance, 0.0f.xxx), 0.0f.xxx);
+            float giLuma = dot(Irradiance, float3(0.2126f, 0.7152f, 0.0722f));
+            const float kGIMaxLuma = 16.0f;
+            if (giLuma > kGIMaxLuma)
+                Irradiance *= kGIMaxLuma / giLuma;
+        }
+
         sh_indirect = irradiance_to_SH(Irradiance, sampleDirWorld);
 
         GIResultSH[launchIndex.xy] = sh_indirect.shY;

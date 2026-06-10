@@ -120,6 +120,7 @@ void Corona::RaytraceGIPass()
 	RTGIViewParam.ViewSpreadAngle = glm::tan(Fov * 0.5f) / (0.5f * GetRenderHeight());
 	RTGIViewParam.NoiseMode = RenderFrameRayNoiseMode;
 	RTGIViewParam.bIncludeSkyLighting = RenderFrameDiffuseGISkyLightingEnabled;
+	RTGIViewParam.GISamplesPerPixel = std::clamp(SimpleGISamplesPerPixel, 1u, 8u);
 	RTGIViewParam.SkyColorTop = SkyColorTop;
 	RTGIViewParam.SkyIntensity = RenderFrameDiffuseGISkyIntensity;
 	RTGIViewParam.SkyColorBottom = SkyColorBottom;

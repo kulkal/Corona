@@ -54,6 +54,83 @@ void Corona::InitTemporalDenoisingPass()
 		TemporalDenoisingFilterPSO = TEMP_TemporalDenoisingFilterPSO;
 }
 
+void Corona::InitDiffuseGISpatialFilterPass()
+{
+	shared_ptr<ComputePipelineStateObject> tempPSO = renderBackend->CreateComputePipelineStateObject();
+	if (!tempPSO)
+		return;
+	tempPSO->BindSRV("InGIColor", 0, 1);
+	tempPSO->BindSRV("InGIAux", 1, 1);
+	tempPSO->BindSRV("DepthTex", 2, 1);
+	tempPSO->BindSRV("NormalTex", 3, 1);
+	tempPSO->BindUAV("OutGIColor", 0);
+	tempPSO->BindUAV("OutGIAux", 1);
+	tempPSO->BindCBV("SpatialFilterConstant", 0, sizeof(DiffuseGISpatialFilterConstant));
+	if (tempPSO->InitCS(GetAssetFullPath(L"Shaders\\DiffuseGISpatialFilter.hlsl"), "DiffuseGISpatialFilter"))
+		DiffuseGISpatialFilterPSO = tempPSO;
+}
+
+void Corona::DiffuseGISpatialFilterPass()
+{
+	if (!DiffuseGISpatialFilterPSO ||
+		!DiffuseGIRaw || !DiffuseGIRawAux ||
+		!DiffuseGISpatialFiltered || !DiffuseGISpatialFilteredAux)
+		return;
+	renderBackend->EmitGpuCrashMarker("DiffuseGISpatialFilterPass");
+
+	renderBackend->TransitionTexture(DiffuseGISpatialFiltered.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
+	renderBackend->TransitionTexture(DiffuseGISpatialFilteredAux.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
+
+	DiffuseGISpatialFilterPSO->SetTextureSRV("InGIColor", DiffuseGIRaw.get());
+	DiffuseGISpatialFilterPSO->SetTextureSRV("InGIAux", DiffuseGIRawAux.get());
+	DiffuseGISpatialFilterPSO->SetTextureSRV("DepthTex", UnjitteredDepthBuffers[ColorBufferWriteIndex].get());
+	DiffuseGISpatialFilterPSO->SetTextureSRV("NormalTex", GeomNormalBuffers[ColorBufferWriteIndex].get());
+	DiffuseGISpatialFilterPSO->SetTextureUAV("OutGIColor", DiffuseGISpatialFiltered.get());
+	DiffuseGISpatialFilterPSO->SetTextureUAV("OutGIAux", DiffuseGISpatialFilteredAux.get());
+
+	DiffuseGISpatialFilterCB.RTSize = glm::vec2(GetRenderWidth(), GetRenderHeight());
+	DiffuseGISpatialFilterCB.ProjectionParams = glm::vec2(FrameProjectionParams.z, FrameProjectionParams.w);
+	DiffuseGISpatialFilterPSO->SetCBVValue("SpatialFilterConstant", &DiffuseGISpatialFilterCB);
+	DiffuseGISpatialFilterPSO->Apply();
+	renderBackend->Dispatch((GetRenderWidth() + 7) / 8, (GetRenderHeight() + 7) / 8, 1);
+
+	renderBackend->TransitionTexture(DiffuseGISpatialFiltered.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
+	renderBackend->TransitionTexture(DiffuseGISpatialFilteredAux.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
+}
+
+// Post-temporal, variance-guided disocclusion filter. Runs AFTER TemporalDenoisingPass:
+// reads the temporally-accumulated diffuse GI and cleans only the high-variance
+// (freshly-disoccluded, no-history) pixels before they reach the DLSS-RR combined feed.
+// Reuses the DiffuseGISpatialFilterPSO (same shader) but takes the temporal output as
+// input instead of the raw GI.
+void Corona::DiffuseGIDisocclusionFilterPass()
+{
+	if (!DiffuseGISpatialFilterPSO ||
+		!DiffuseGITemporal[GIBufferWriteIndex] || !DiffuseGITemporalAux[GIBufferWriteIndex] ||
+		!DiffuseGISpatialFiltered || !DiffuseGISpatialFilteredAux)
+		return;
+	renderBackend->EmitGpuCrashMarker("DiffuseGIDisocclusionFilterPass");
+
+	renderBackend->TransitionTexture(DiffuseGISpatialFiltered.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
+	renderBackend->TransitionTexture(DiffuseGISpatialFilteredAux.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
+
+	DiffuseGISpatialFilterPSO->SetTextureSRV("InGIColor", DiffuseGITemporal[GIBufferWriteIndex].get());
+	DiffuseGISpatialFilterPSO->SetTextureSRV("InGIAux", DiffuseGITemporalAux[GIBufferWriteIndex].get());
+	DiffuseGISpatialFilterPSO->SetTextureSRV("DepthTex", UnjitteredDepthBuffers[ColorBufferWriteIndex].get());
+	DiffuseGISpatialFilterPSO->SetTextureSRV("NormalTex", GeomNormalBuffers[ColorBufferWriteIndex].get());
+	DiffuseGISpatialFilterPSO->SetTextureUAV("OutGIColor", DiffuseGISpatialFiltered.get());
+	DiffuseGISpatialFilterPSO->SetTextureUAV("OutGIAux", DiffuseGISpatialFilteredAux.get());
+
+	DiffuseGISpatialFilterCB.RTSize = glm::vec2(GetRenderWidth(), GetRenderHeight());
+	DiffuseGISpatialFilterCB.ProjectionParams = glm::vec2(FrameProjectionParams.z, FrameProjectionParams.w);
+	DiffuseGISpatialFilterPSO->SetCBVValue("SpatialFilterConstant", &DiffuseGISpatialFilterCB);
+	DiffuseGISpatialFilterPSO->Apply();
+	renderBackend->Dispatch((GetRenderWidth() + 7) / 8, (GetRenderHeight() + 7) / 8, 1);
+
+	renderBackend->TransitionTexture(DiffuseGISpatialFiltered.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
+	renderBackend->TransitionTexture(DiffuseGISpatialFilteredAux.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
+}
+
 void Corona::TemporalDenoisingPass()
 {
 	if (!TemporalDenoisingFilterPSO)
