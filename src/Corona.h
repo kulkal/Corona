@@ -1320,12 +1320,26 @@ private:
 	bool bEnableDirectDiffuse = true;
 	bool bEnableDirectSpecular = true;
 	bool bEnableRTAO = true;
+	bool bEnableAsyncShadowAOOverlap = true;
+	bool bAsyncShadowAOOverlapRTAO = true;
+	bool bAsyncShadowAOOverlapShadow = true;
 	// Point-light shadow mode: false = 4-channel pack (sun + first 3 lights,
 	// hard-cap), true = ReSTIR Phase 1+2 reservoir (single-light per pixel,
 	// scales to MaxPointLights candidates, with previous-frame reproject).
 	// ReSTIR is now the default — it handles arbitrary light counts; the
 	// 4-channel path stays as a fallback for A/B comparison.
 	bool bEnableReSTIRDirectShadow = true;
+	// Cross-frame cache of the exact ordered point-light table the spatial-hash GI
+	// light mask was last built from. The GI pass runs AFTER the shadow pass, so the
+	// shadow pass reads the PREVIOUS frame's mask. To keep the mask's bit index in
+	// lockstep with the shadow candidate index even as the camera-dependent top-N
+	// selection changes during motion, the shadow pass and the ReSTIR LightingPS feed
+	// consume THIS cached table (the set the mask was actually built from) instead of
+	// re-selecting against the current frame. Without it, moving the camera changes
+	// the selected set between the mask-build frame and the shadow frame -> mis-indexed
+	// mask -> point-light shadows that fail to cull while the camera moves.
+	std::vector<PointLightParam> ReSTIRMaskLightCache;
+	bool bReSTIRMaskLightCacheValid = false;
 	// Runtime-tunable temporal M cap for the ReSTIR Phase 2 reservoir.
 	// Defaults to the empirical sweet spot tuned on Sponza + DLSS RR.
 	// Surfaced via the Sponza demo's imgui panel.
@@ -3390,8 +3404,16 @@ private:
 	void ApplyPointLightRenderSync(const RenderFrameDelta& delta);
 	void BuildRenderFrameDerivedState(const RenderFrameSourceState* sourceState);
 	void BuildPointLightRenderCandidates(std::vector<const PointLightState*>& outCandidates) const;
+	// Canonical ReSTIR point-light table shared by the spatial-hash GI light mask,
+	// the ReSTIR direct-shadow candidates, and the ReSTIR LightingPS feed. Selection
+	// is top-MaxDiffuseGIPointLights by score, but the FINAL order is by stable light
+	// Id so the bit/index meaning is camera-independent and identical across frames —
+	// required because the shared spatial light mask is a persistent structure that
+	// the shadow pass reads a frame after the GI pass wrote it.
+	void BuildReSTIRSharedPointLights(std::vector<const PointLightState*>& outLights) const;
 	PointLightParam BuildPointLightParam(const PointLightState& pointLight) const;
 	void FillPointLightParams(PointLightParam* outPointLights, UINT32& outPointLightCount, UINT32 maxCount) const;
+	void FillPointLightParamsFromList(PointLightParam* outPointLights, UINT32& outPointLightCount, const std::vector<const PointLightState*>& lights, UINT32 maxCount) const;
 	void ApplyRenderPointLightsToFrameParams();
 
 	UINT m_width = 0;

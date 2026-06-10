@@ -157,7 +157,13 @@ void Corona::RaytraceShadowPass()
 	};
 
 	std::vector<const PointLightState*> pointLightCandidates;
-	BuildPointLightRenderCandidates(pointLightCandidates);
+	// ReSTIR shares the spatial light mask with the GI pass, so it MUST use the same
+	// stable-Id-ordered table (BuildReSTIRSharedPointLights) for bit/index parity.
+	// Option A does its own distance sort over the full candidate set instead.
+	if (bEnableReSTIRDirectShadow)
+		BuildReSTIRSharedPointLights(pointLightCandidates);
+	else
+		BuildPointLightRenderCandidates(pointLightCandidates);
 
 	uint32_t shadowedCount = 0;
 	if (bEnableReSTIRDirectShadow)
@@ -177,19 +183,46 @@ void Corona::RaytraceShadowPass()
 		//      (see RasterPasses.cpp:1430+). Adding it would shift
 		//      indices.
 		//   3. Sphere-frustum cull — also applied to LightingPS feed.
-		for (const PointLightState* plPtr : pointLightCandidates)
+		//
+		// Consume the table the spatial-hash GI light mask was actually built from
+		// (cached by the GI pass last frame) so the shadow candidate index stays
+		// bit-aligned with the persistent mask even while the camera moves and the
+		// score-based top-N selection shifts. Fall back to the freshly built shared
+		// table on the first frame / when the cache is unavailable.
+		if (bReSTIRMaskLightCacheValid && !ReSTIRMaskLightCache.empty())
 		{
-			if (shadowedCount >= MaxDiffuseGIPointLights)
-				break;
-			if (!plPtr)
-				continue;
-			const PointLightState& pl = *plPtr;
-			const float radius = std::max(pl.Radius, 0.01f);
-			RTShadowViewParam.ShadowedPointLights[shadowedCount] =
-				glm::vec4(pl.Position, radius);
-			RTShadowViewParam.ShadowedPointLightWeights[shadowedCount] =
-				glm::vec4(pl.bCastShadow ? computeLuma(pl) : 0.0f, 0.0f, 0.0f, 0.0f);
-			++shadowedCount;
+			for (const PointLightParam& p : ReSTIRMaskLightCache)
+			{
+				if (shadowedCount >= MaxDiffuseGIPointLights)
+					break;
+				const float radius = std::max(p.PositionAndRadius.w, 0.01f);
+				const bool castsShadow = p.SpotConeAndFlags.w > 0.5f;
+				const float luma =
+					std::max(0.0f, 0.2126f * p.ColorAndIntensity.x + 0.7152f * p.ColorAndIntensity.y + 0.0722f * p.ColorAndIntensity.z) *
+					std::max(0.0f, p.ColorAndIntensity.w);
+				RTShadowViewParam.ShadowedPointLights[shadowedCount] =
+					glm::vec4(glm::vec3(p.PositionAndRadius), radius);
+				RTShadowViewParam.ShadowedPointLightWeights[shadowedCount] =
+					glm::vec4(castsShadow ? luma : 0.0f, 0.0f, 0.0f, 0.0f);
+				++shadowedCount;
+			}
+		}
+		else
+		{
+			for (const PointLightState* plPtr : pointLightCandidates)
+			{
+				if (shadowedCount >= MaxDiffuseGIPointLights)
+					break;
+				if (!plPtr)
+					continue;
+				const PointLightState& pl = *plPtr;
+				const float radius = std::max(pl.Radius, 0.01f);
+				RTShadowViewParam.ShadowedPointLights[shadowedCount] =
+					glm::vec4(pl.Position, radius);
+				RTShadowViewParam.ShadowedPointLightWeights[shadowedCount] =
+					glm::vec4(pl.bCastShadow ? computeLuma(pl) : 0.0f, 0.0f, 0.0f, 0.0f);
+				++shadowedCount;
+			}
 		}
 	}
 	else

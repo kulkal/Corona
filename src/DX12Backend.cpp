@@ -268,6 +268,18 @@ namespace
 		return stream.str();
 	}
 
+	const wchar_t* CommandListTypeName(D3D12_COMMAND_LIST_TYPE type)
+	{
+		switch (type)
+		{
+		case D3D12_COMMAND_LIST_TYPE_DIRECT: return L"direct";
+		case D3D12_COMMAND_LIST_TYPE_COMPUTE: return L"compute";
+		case D3D12_COMMAND_LIST_TYPE_COPY: return L"copy";
+		case D3D12_COMMAND_LIST_TYPE_BUNDLE: return L"bundle";
+		default: return L"unknown";
+		}
+	}
+
 	void RestoreCoronaDescriptorHeaps(DX12Backend* owner, ID3D12GraphicsCommandList* commandList)
 	{
 		if (!owner || !commandList || !owner->SRVCBVDescriptorHeapShaderVisible || !owner->SamplerDescriptorHeapShaderVisible)
@@ -619,13 +631,7 @@ void DX12Backend::BeginFrame()
 	
 	CmdQ->WaitFenceValue(ThisFrameFenceValue);
 
-	
-	GlobalCmdList = CmdQ->AllocCmdList();
-	GlobalCmdList->Fence = CmdQ->CurrentFenceValue;
-	InvalidateGraphicsCommandStateCache();
-
-	ID3D12DescriptorHeap* ppHeaps[] = { SRVCBVDescriptorHeapShaderVisible->DH.Get(), SamplerDescriptorHeapShaderVisible->DH.Get() };
-	GlobalCmdList->CmdList->SetDescriptorHeaps(_countof(ppHeaps), ppHeaps);
+	BeginNewGraphicsCommandList();
 	
 
 	GlobalDHRing->Advance();
@@ -1297,13 +1303,120 @@ void DX12Backend::ClearTextureUAVFloat(Texture* texture, const float clearColor[
 		nullptr);
 }
 
-void DX12Backend::ExecuteCurrentCommandList()
+void DX12Backend::BeginNewGraphicsCommandList()
 {
-	if (!GlobalCmdList)
+	if (!CmdQ)
 		return;
 
-	CmdQ->ExecuteCommandList(GlobalCmdList);
+	GlobalCmdList = CmdQ->AllocCmdList();
+	GlobalCmdList->Fence = CmdQ->CurrentFenceValue;
 	InvalidateGraphicsCommandStateCache();
+	RestoreCoronaDescriptorHeaps(this, GlobalCmdList->CmdList.Get());
+}
+
+UINT64 DX12Backend::SubmitCurrentCommandList()
+{
+	if (!GlobalCmdList)
+		return 0;
+	if (GlobalCmdList == ActiveAsyncRtCmdList)
+		return 0;
+
+	CommandList* submittedCmdList = GlobalCmdList;
+	const UINT64 submittedFenceValue = CmdQ->ExecuteCommandList(submittedCmdList);
+	GlobalCmdList = nullptr;
+	InvalidateGraphicsCommandStateCache();
+	return submittedFenceValue;
+}
+
+UINT64 DX12Backend::SubmitCurrentCommandListAndRestart()
+{
+	const UINT64 submittedFenceValue = SubmitCurrentCommandList();
+	BeginNewGraphicsCommandList();
+	return submittedFenceValue;
+}
+
+bool DX12Backend::BeginAsyncRtRecordingAfterGraphicsSubmit()
+{
+	if (!AsyncRtCmdQ || ActiveAsyncRtCmdList)
+		return false;
+
+	const UINT64 graphicsFenceValue = SubmitCurrentCommandList();
+	if (graphicsFenceValue != 0)
+		AsyncRtCmdQ->CmdQueue->Wait(CmdQ->m_fence.Get(), graphicsFenceValue);
+
+	ActiveAsyncRtCmdList = AsyncRtCmdQ->AllocCmdList();
+	ActiveAsyncRtCmdList->Fence = AsyncRtCmdQ->CurrentFenceValue;
+	GlobalCmdList = ActiveAsyncRtCmdList;
+	InvalidateGraphicsCommandStateCache();
+	RestoreCoronaDescriptorHeaps(this, ActiveAsyncRtCmdList->CmdList.Get());
+	static UINT sAsyncBeginTraceCount = 0;
+	if (sAsyncBeginTraceCount < 8)
+	{
+		AppendCpuRuntimeTrace(
+			L"[DX12AsyncRT] begin recording after graphics fence=" +
+			std::to_wstring(graphicsFenceValue) +
+			L", listType=" + CommandListTypeName(AsyncRtCmdQ->Type));
+		++sAsyncBeginTraceCount;
+	}
+	return true;
+}
+
+UINT64 DX12Backend::EndAsyncRtRecordingAndResumeGraphics()
+{
+	if (!AsyncRtCmdQ || !ActiveAsyncRtCmdList)
+	{
+		BeginNewGraphicsCommandList();
+		return 0;
+	}
+
+	CommandList* submittedCmdList = ActiveAsyncRtCmdList;
+	const UINT64 submittedFenceValue = AsyncRtCmdQ->ExecuteCommandList(submittedCmdList);
+	PendingAsyncRtFenceValue = submittedFenceValue;
+	ActiveAsyncRtCmdList = nullptr;
+	GlobalCmdList = nullptr;
+	static UINT sAsyncEndTraceCount = 0;
+	if (sAsyncEndTraceCount < 8)
+	{
+		AppendCpuRuntimeTrace(
+			L"[DX12AsyncRT] submitted async fence=" +
+			std::to_wstring(submittedFenceValue));
+		++sAsyncEndTraceCount;
+	}
+	BeginNewGraphicsCommandList();
+	return submittedFenceValue;
+}
+
+void DX12Backend::WaitForAsyncRtOnGraphicsQueue()
+{
+	if (!CmdQ || !AsyncRtCmdQ || PendingAsyncRtFenceValue == 0)
+		return;
+
+	static UINT sAsyncWaitTraceCount = 0;
+	if (sAsyncWaitTraceCount < 8)
+	{
+		AppendCpuRuntimeTrace(
+			L"[DX12AsyncRT] graphics queue wait async fence=" +
+			std::to_wstring(PendingAsyncRtFenceValue));
+		++sAsyncWaitTraceCount;
+	}
+	CmdQ->CmdQueue->Wait(AsyncRtCmdQ->m_fence.Get(), PendingAsyncRtFenceValue);
+	PendingAsyncRtFenceValue = 0;
+}
+
+void DX12Backend::SubmitGraphicsWorkAndWaitForAsyncRt()
+{
+	if (!HasPendingAsyncRtWork())
+		return;
+
+	SubmitCurrentCommandList();
+	WaitForAsyncRtOnGraphicsQueue();
+	BeginNewGraphicsCommandList();
+}
+
+void DX12Backend::ExecuteCurrentCommandList()
+{
+	WaitForAsyncRtOnGraphicsQueue();
+	SubmitCurrentCommandList();
 }
 
 void DX12Backend::BeginGpuMarker(uint64_t color, const char* label)
@@ -1987,11 +2100,23 @@ DX12Backend::DX12Backend(ComPtr<ID3D12Device5> InDevice)
 
 	CmdQ = unique_ptr<CommandQueue>(new CommandQueue(
 		this,
-		Device.Get()
+		Device.Get(),
+		D3D12_COMMAND_LIST_TYPE_DIRECT,
+		L"Corona Graphics Queue",
+		L"Corona Command Allocator",
+		L"Corona Command List"
 #if USE_AFTERMATH
 		, bAftermathEnabled
 #endif
 	));
+	AsyncRtCmdQ = unique_ptr<CommandQueue>(new CommandQueue(
+		this,
+		Device.Get(),
+		D3D12_COMMAND_LIST_TYPE_DIRECT,
+		L"Corona Async RT Queue",
+		L"Corona Async RT Command Allocator",
+		L"Corona Async RT Command List",
+		false));
 
 	{
 		RTVDescriptorHeap = std::make_unique<DescriptorHeap>();
@@ -5471,9 +5596,17 @@ void Scene::SetTransform(glm::mat4x4 inTransform)
 	}
 }
 
-CommandQueue::CommandQueue(DX12Backend* owner, ID3D12Device5* device, bool bEnableAftermathMarkers)
+CommandQueue::CommandQueue(
+	DX12Backend* owner,
+	ID3D12Device5* device,
+	D3D12_COMMAND_LIST_TYPE commandListType,
+	const wchar_t* queueDebugName,
+	const wchar_t* allocatorDebugName,
+	const wchar_t* listDebugName,
+	bool bEnableAftermathMarkers)
 {
 	Owner = owner;
+	Type = commandListType;
 #if USE_AFTERMATH
 	bAftermathMarkersEnabled = bEnableAftermathMarkers;
 #else
@@ -5486,21 +5619,21 @@ CommandQueue::CommandQueue(DX12Backend* owner, ID3D12Device5* device, bool bEnab
 
 	D3D12_COMMAND_QUEUE_DESC queueDesc = {};
 	queueDesc.Flags = D3D12_COMMAND_QUEUE_FLAG_NONE;
-	queueDesc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+	queueDesc.Type = commandListType;
 
 	ThrowIfFailed(device->CreateCommandQueue(&queueDesc, IID_PPV_ARGS(&CmdQueue)));
-	SetName(CmdQueue.Get(), L"Corona Graphics Queue");
+	SetName(CmdQueue.Get(), queueDebugName ? queueDebugName : L"Corona Command Queue");
 
 	CommandListPool.reserve(CommandListPoolSize);
 	for (int i = 0; i < CommandListPoolSize; i++)
 	{
 		CommandList * cmdList = new CommandList;
-		ThrowIfFailed(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&cmdList->CmdAllocator)));
-		SetNameIndexed(cmdList->CmdAllocator.Get(), L"Corona Command Allocator", i);
+		ThrowIfFailed(device->CreateCommandAllocator(commandListType, IID_PPV_ARGS(&cmdList->CmdAllocator)));
+		SetNameIndexed(cmdList->CmdAllocator.Get(), allocatorDebugName ? allocatorDebugName : L"Corona Command Allocator", i);
 
-		ThrowIfFailed(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, cmdList->CmdAllocator.Get(), nullptr, IID_PPV_ARGS(&cmdList->CmdList)));
+		ThrowIfFailed(device->CreateCommandList(0, commandListType, cmdList->CmdAllocator.Get(), nullptr, IID_PPV_ARGS(&cmdList->CmdList)));
 		cmdList->CmdList->Close();
-		SetNameIndexed(cmdList->CmdList.Get(), L"Corona Command List", i);
+		SetNameIndexed(cmdList->CmdList.Get(), listDebugName ? listDebugName : L"Corona Command List", i);
 
 		CommandListPool.emplace_back(shared_ptr<CommandList>(cmdList));
 	}
@@ -5551,7 +5684,7 @@ CommandList * CommandQueue::AllocCmdList()
 	return cmdList;
 }
 
-void CommandQueue::ExecuteCommandList(CommandList * cmd)
+UINT64 CommandQueue::ExecuteCommandList(CommandList * cmd)
 {
 	cmd->CmdList->Close();
 	ID3D12CommandList* ppCommandListsEnd[] = { cmd->CmdList.Get() };
@@ -5560,7 +5693,7 @@ void CommandQueue::ExecuteCommandList(CommandList * cmd)
 	bvhEclDesc.inCommandLists = ppCommandListsEnd;
 	bvhEclDesc.inNumCommandLists = _countof(ppCommandListsEnd);
 	bvhEclDesc.outSignalValue = uint64_t(~0);
-	if (Owner && Owner->BvhViewerD3D12)
+	if (Type == D3D12_COMMAND_LIST_TYPE_DIRECT && Owner && Owner->BvhViewerD3D12)
 		CoronaBvhViewerD3D12_OnExecuteCommandLists(Owner->BvhViewerD3D12, &bvhEclDesc);
 
 	CmdQueue->ExecuteCommandLists(_countof(ppCommandListsEnd), ppCommandListsEnd);
@@ -5576,6 +5709,7 @@ void CommandQueue::ExecuteCommandList(CommandList * cmd)
 	CmdQueue->Signal(m_fence.Get(), submittedFenceValue);
 	cmd->Fence = submittedFenceValue;
 	CurrentFenceValue++;
+	return submittedFenceValue;
 }
 
 void CommandQueue::WaitGPU()

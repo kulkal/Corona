@@ -3995,6 +3995,35 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 			bEnableRTAO = false;
 			continue;
 		}
+		if (arg == L"--async-shadow-ao" || arg == L"--async-rt-shadow-ao")
+		{
+			bEnableAsyncShadowAOOverlap = true;
+			bAsyncShadowAOOverlapRTAO = true;
+			bAsyncShadowAOOverlapShadow = true;
+			continue;
+		}
+		if (arg == L"--async-rtao-only" || arg == L"--async-ao-only" ||
+			arg == L"--async-shadow-ao-rtao-only")
+		{
+			bEnableAsyncShadowAOOverlap = true;
+			bAsyncShadowAOOverlapRTAO = true;
+			bAsyncShadowAOOverlapShadow = false;
+			continue;
+		}
+		if (arg == L"--async-shadow-only" || arg == L"--async-rt-shadow-only" ||
+			arg == L"--async-shadow-ao-shadow-only")
+		{
+			bEnableAsyncShadowAOOverlap = true;
+			bAsyncShadowAOOverlapRTAO = false;
+			bAsyncShadowAOOverlapShadow = true;
+			continue;
+		}
+		if (arg == L"--no-async-shadow-ao" || arg == L"--disable-async-shadow-ao" ||
+			arg == L"--no-async-rt-shadow-ao" || arg == L"--disable-async-rt-shadow-ao")
+		{
+			bEnableAsyncShadowAOOverlap = false;
+			continue;
+		}
 		if (arg == L"--diffuse-gi" || arg == L"--enable-diffuse-gi")
 		{
 			bEnableDiffuseGI = true;
@@ -4517,6 +4546,9 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 		L", rayNoise=" + std::wstring(GetRayNoiseModeNameW(RayNoiseMode)) +
 		L", diffuseGI=" + std::wstring(GetDiffuseGIModeNameW(DiffuseGIMode)) +
 		L", diffuseGIEnabled=" + std::to_wstring(bEnableDiffuseGI ? 1 : 0) +
+		L", asyncShadowAO=" + std::to_wstring(bEnableAsyncShadowAOOverlap ? 1 : 0) +
+		L", asyncRTAO=" + std::to_wstring(bAsyncShadowAOOverlapRTAO ? 1 : 0) +
+		L", asyncShadow=" + std::to_wstring(bAsyncShadowAOOverlapShadow ? 1 : 0) +
 		L", diffuseGIPointLights=" + std::to_wstring(DiffuseGIPointLightLimit) +
 		L", specularGIEnabled=" + std::to_wstring(bEnableSpecularGI ? 1 : 0) +
 		L", directDiffuse=" + std::to_wstring(bEnableDirectDiffuse ? 1 : 0) +
@@ -8181,6 +8213,68 @@ void Corona::FillPointLightParams(PointLightParam* outPointLights, UINT32& outPo
 		if (!pointLightPtr || outPointLightCount >= maxCount)
 			continue;
 
+		outPointLights[outPointLightCount++] = BuildPointLightParam(*pointLightPtr);
+	}
+}
+
+void Corona::BuildReSTIRSharedPointLights(std::vector<const PointLightState*>& outLights) const
+{
+	// CAMERA-INDEPENDENT selection. The shared spatial light mask culls lights per
+	// world-space region, which must not change just because the camera moved — but
+	// the generic BuildPointLightRenderCandidates ranks by luma*radius²/distanceToCamera²,
+	// so its top-N set shuffles as the camera moves. That made the shadow buffer's
+	// chosen-light index (and thus the culling) change with camera distance. Rank the
+	// top-N here by camera-INDEPENDENT emitted power (luma * radius²) instead, then
+	// order the kept set by stable light Id so the bit/index meaning is fixed for the
+	// GI mask writer, the ReSTIR shadow candidates, and the ReSTIR lighting feed.
+	struct Ranked { const PointLightState* Light; float Power; };
+	std::vector<Ranked> ranked;
+	ranked.reserve(RenderWorld.PointLights.size());
+	for (const PointLightState& pl : RenderWorld.PointLights)
+	{
+		if (!pl.bEnabled || pl.Intensity <= 0.0f)
+			continue;
+		const float radius = std::max(pl.Radius, 0.01f);
+		const float colorLuma =
+			std::max(0.0f, 0.2126f * pl.Color.r + 0.7152f * pl.Color.g + 0.0722f * pl.Color.b);
+		const float power = colorLuma * std::max(0.0f, pl.Intensity) * radius * radius;
+		ranked.push_back({ &pl, power });
+	}
+	std::stable_sort(ranked.begin(), ranked.end(),
+		[](const Ranked& a, const Ranked& b)
+		{
+			if (a.Power != b.Power)
+				return a.Power > b.Power;
+			const UINT32 aId = a.Light ? a.Light->Id : 0u;
+			const UINT32 bId = b.Light ? b.Light->Id : 0u;
+			return aId < bId;
+		});
+	if (ranked.size() > MaxDiffuseGIPointLights)
+		ranked.resize(MaxDiffuseGIPointLights); // top-N by camera-independent power
+
+	outLights.clear();
+	outLights.reserve(ranked.size());
+	for (const Ranked& r : ranked)
+		outLights.push_back(r.Light);
+	// Stable Id order for a fixed bit/index across frames and across the GI->shadow
+	// frame boundary.
+	std::stable_sort(outLights.begin(), outLights.end(),
+		[](const PointLightState* a, const PointLightState* b)
+		{
+			return (a ? a->Id : 0u) < (b ? b->Id : 0u);
+		});
+}
+
+void Corona::FillPointLightParamsFromList(PointLightParam* outPointLights, UINT32& outPointLightCount,
+	const std::vector<const PointLightState*>& lights, UINT32 maxCount) const
+{
+	outPointLightCount = 0;
+	if (!outPointLights || maxCount == 0)
+		return;
+	for (const PointLightState* pointLightPtr : lights)
+	{
+		if (!pointLightPtr || outPointLightCount >= maxCount)
+			continue;
 		outPointLights[outPointLightCount++] = BuildPointLightParam(*pointLightPtr);
 	}
 }
@@ -13272,6 +13366,28 @@ void Corona::DrawEditorModeOverlay()
 
 				if (RenderingMode == ERenderingMode::HYBRID)
 				{
+					const bool bAsyncShadowAOAvailable =
+						renderBackend &&
+						renderBackend->GetAPI() == ERenderBackendAPI::D3D12;
+					if (!bAsyncShadowAOAvailable)
+						ImGui::BeginDisabled();
+					ImGui::Checkbox("Async RT Shadow/RTAO with GI##editor_config", &bEnableAsyncShadowAOOverlap);
+					if (!bAsyncShadowAOAvailable)
+						ImGui::EndDisabled();
+					if (!bAsyncShadowAOAvailable && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+						ImGui::SetTooltip("D3D12 async RT queue experiment.");
+					const bool bAsyncShadowAOControlsAvailable =
+						bAsyncShadowAOAvailable &&
+						bEnableAsyncShadowAOOverlap;
+					if (!bAsyncShadowAOControlsAvailable)
+						ImGui::BeginDisabled();
+					ImGui::Indent();
+					ImGui::Checkbox("Async RTAO with GI##editor_config", &bAsyncShadowAOOverlapRTAO);
+					ImGui::Checkbox("Async RT Shadow with GI##editor_config", &bAsyncShadowAOOverlapShadow);
+					ImGui::Unindent();
+					if (!bAsyncShadowAOControlsAvailable)
+						ImGui::EndDisabled();
+
 					if (ImGui::Checkbox("Enable RTAO##editor_config", &bEnableRTAO))
 						bLightingChanged = true;
 					if (bEnableRTAO && ImGui::TreeNodeEx("RTAO Details", ImGuiTreeNodeFlags_DefaultOpen))
@@ -13918,8 +14034,12 @@ void Corona::OnRender()
 		const bool bRunRayTracedShadow = !bHybridDirectOnly && hybridStage >= 1;
 		const bool bRunReflection = !bHybridDirectOnly && hybridStage >= 3 && (bEnableSpecularGI || bStageDump);
 		const bool bRunGI = !bHybridDirectOnly && hybridStage >= 4 && (bEnableDiffuseGI || bStageDump);
-		const bool bRunTemporalDenoise = !bHybridDirectOnly && hybridStage >= 5 && (bRunReflection || bRunGI || bStageDump);
+		const bool bDiffuseGINeedsTemporalDenoise =
+			bRunGI &&
+			DiffuseGIMode == EDiffuseGIMode::SIMPLE_RAYTRACE;
+		const bool bRunTemporalDenoise = !bHybridDirectOnly && hybridStage >= 5 && (bDiffuseGINeedsTemporalDenoise || bStageDump);
 		const bool bRunLighting = hybridStage >= 7;
+		const bool bRunDesktopRTAO = !bHybridDirectOnly && bRunLighting && bEnableRTAO;
 		const bool bVulkanHybridBackend =
 			renderBackend &&
 			renderBackend->GetAPI() == ERenderBackendAPI::Vulkan;
@@ -13946,20 +14066,50 @@ void Corona::OnRender()
 			EndGpuPassTiming(EGpuPass::SpatialLightMask);
 		}
 
+		const bool bAsyncShadowAOOverlapAvailable =
+			bEnableAsyncShadowAOOverlap &&
+			dx12_rhi &&
+			bRunGI &&
+			DiffuseGIMode == EDiffuseGIMode::SPATIAL_HASH;
+		const bool bAsyncRTAORequested =
+			bAsyncShadowAOOverlapAvailable &&
+			bAsyncShadowAOOverlapRTAO &&
+			bRunDesktopRTAO;
+		const bool bAsyncShadowRequested =
+			bAsyncShadowAOOverlapAvailable &&
+			bAsyncShadowAOOverlapShadow &&
+			bRunRayTracedShadow;
+		const bool bTryAsyncShadowAOOverlap =
+			bAsyncRTAORequested ||
+			bAsyncShadowRequested;
+		bool bAsyncShadowAOOverlapActive = false;
+		if (bTryAsyncShadowAOOverlap)
+		{
+			static UINT sAsyncOverlapTraceCount = 0;
+			if (sAsyncOverlapTraceCount < 8)
+			{
+				AppendCpuRuntimeTrace(
+					L"[AsyncShadowAO] try overlap target=diffuse_gi_front frame=" + std::to_wstring(FrameCounter) +
+					L", shadow=" + std::to_wstring(bAsyncShadowRequested ? 1 : 0) +
+					L", rtao=" + std::to_wstring(bAsyncRTAORequested ? 1 : 0));
+				++sAsyncOverlapTraceCount;
+			}
+		}
+
 		if (bRunShadowMap)
 		{
 			BeginGpuPassTiming(EGpuPass::RaytraceShadow);
 			MobileShadowMapPass();
 			EndGpuPassTiming(EGpuPass::RaytraceShadow);
 		}
-		else if (bRunRayTracedShadow)
+		else if (!bAsyncShadowRequested && bRunRayTracedShadow)
 		{
 			BeginGpuPassTiming(EGpuPass::RaytraceShadow);
 			RaytraceShadowPass();
 			EndGpuPassTiming(EGpuPass::RaytraceShadow);
 		}
 
-		if (!bHybridDirectOnly && bRunLighting && bEnableRTAO)
+		if (!bAsyncRTAORequested && bRunDesktopRTAO)
 		{
 			BeginGpuPassTiming(EGpuPass::RaytraceAO);
 			RaytraceAOPass();
@@ -13985,6 +14135,42 @@ void Corona::OnRender()
 			BeginGpuPassTiming(EGpuPass::RaytraceReflection);
 			RaytraceReflectionPass();
 			EndGpuPassTiming(EGpuPass::RaytraceReflection);
+		}
+
+		if (bTryAsyncShadowAOOverlap)
+		{
+			if (dx12_rhi->BeginAsyncRtRecordingAfterGraphicsSubmit())
+			{
+				bAsyncShadowAOOverlapActive = true;
+				if (bAsyncRTAORequested)
+				{
+					BeginGpuPassMarker(renderBackend.get(), static_cast<UINT>(EGpuPass::RaytraceAO), "RaytraceAO async");
+					RaytraceAOPass();
+					EndGpuPassMarker(renderBackend.get());
+				}
+				if (bAsyncShadowRequested)
+				{
+					BeginGpuPassMarker(renderBackend.get(), static_cast<UINT>(EGpuPass::RaytraceShadow), "RaytraceShadow async");
+					RaytraceShadowPass();
+					EndGpuPassMarker(renderBackend.get());
+				}
+				dx12_rhi->EndAsyncRtRecordingAndResumeGraphics();
+			}
+			else
+			{
+				if (bAsyncShadowRequested)
+				{
+					BeginGpuPassTiming(EGpuPass::RaytraceShadow);
+					RaytraceShadowPass();
+					EndGpuPassTiming(EGpuPass::RaytraceShadow);
+				}
+				if (bAsyncRTAORequested)
+				{
+					BeginGpuPassTiming(EGpuPass::RaytraceAO);
+					RaytraceAOPass();
+					EndGpuPassTiming(EGpuPass::RaytraceAO);
+				}
+			}
 		}
 
 		if (bRunGI)
@@ -14045,6 +14231,8 @@ void Corona::OnRender()
 
 		if (bRunLighting)
 		{
+			if (bAsyncShadowAOOverlapActive && dx12_rhi && dx12_rhi->HasPendingAsyncRtWork())
+				dx12_rhi->SubmitGraphicsWorkAndWaitForAsyncRt();
 			BeginGpuPassTiming(EGpuPass::Lighting);
 			LightingPass();
 			EndGpuPassTiming(EGpuPass::Lighting);
