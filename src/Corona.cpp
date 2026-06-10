@@ -3990,6 +3990,35 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 			bEnableRTAO = false;
 			continue;
 		}
+		if (arg == L"--async-shadow-ao" || arg == L"--async-rt-shadow-ao")
+		{
+			bEnableAsyncShadowAOOverlap = true;
+			bAsyncShadowAOOverlapRTAO = true;
+			bAsyncShadowAOOverlapShadow = true;
+			continue;
+		}
+		if (arg == L"--async-rtao-only" || arg == L"--async-ao-only" ||
+			arg == L"--async-shadow-ao-rtao-only")
+		{
+			bEnableAsyncShadowAOOverlap = true;
+			bAsyncShadowAOOverlapRTAO = true;
+			bAsyncShadowAOOverlapShadow = false;
+			continue;
+		}
+		if (arg == L"--async-shadow-only" || arg == L"--async-rt-shadow-only" ||
+			arg == L"--async-shadow-ao-shadow-only")
+		{
+			bEnableAsyncShadowAOOverlap = true;
+			bAsyncShadowAOOverlapRTAO = false;
+			bAsyncShadowAOOverlapShadow = true;
+			continue;
+		}
+		if (arg == L"--no-async-shadow-ao" || arg == L"--disable-async-shadow-ao" ||
+			arg == L"--no-async-rt-shadow-ao" || arg == L"--disable-async-rt-shadow-ao")
+		{
+			bEnableAsyncShadowAOOverlap = false;
+			continue;
+		}
 		if (arg == L"--diffuse-gi" || arg == L"--enable-diffuse-gi")
 		{
 			bEnableDiffuseGI = true;
@@ -4512,6 +4541,9 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 		L", rayNoise=" + std::wstring(GetRayNoiseModeNameW(RayNoiseMode)) +
 		L", diffuseGI=" + std::wstring(GetDiffuseGIModeNameW(DiffuseGIMode)) +
 		L", diffuseGIEnabled=" + std::to_wstring(bEnableDiffuseGI ? 1 : 0) +
+		L", asyncShadowAO=" + std::to_wstring(bEnableAsyncShadowAOOverlap ? 1 : 0) +
+		L", asyncRTAO=" + std::to_wstring(bAsyncShadowAOOverlapRTAO ? 1 : 0) +
+		L", asyncShadow=" + std::to_wstring(bAsyncShadowAOOverlapShadow ? 1 : 0) +
 		L", diffuseGIPointLights=" + std::to_wstring(DiffuseGIPointLightLimit) +
 		L", specularGIEnabled=" + std::to_wstring(bEnableSpecularGI ? 1 : 0) +
 		L", directDiffuse=" + std::to_wstring(bEnableDirectDiffuse ? 1 : 0) +
@@ -13305,6 +13337,28 @@ void Corona::DrawEditorModeOverlay()
 
 				if (RenderingMode == ERenderingMode::HYBRID)
 				{
+					const bool bAsyncShadowAOAvailable =
+						renderBackend &&
+						renderBackend->GetAPI() == ERenderBackendAPI::D3D12;
+					if (!bAsyncShadowAOAvailable)
+						ImGui::BeginDisabled();
+					ImGui::Checkbox("Async RT Shadow/RTAO with GI##editor_config", &bEnableAsyncShadowAOOverlap);
+					if (!bAsyncShadowAOAvailable)
+						ImGui::EndDisabled();
+					if (!bAsyncShadowAOAvailable && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+						ImGui::SetTooltip("D3D12 async RT queue experiment.");
+					const bool bAsyncShadowAOControlsAvailable =
+						bAsyncShadowAOAvailable &&
+						bEnableAsyncShadowAOOverlap;
+					if (!bAsyncShadowAOControlsAvailable)
+						ImGui::BeginDisabled();
+					ImGui::Indent();
+					ImGui::Checkbox("Async RTAO with GI##editor_config", &bAsyncShadowAOOverlapRTAO);
+					ImGui::Checkbox("Async RT Shadow with GI##editor_config", &bAsyncShadowAOOverlapShadow);
+					ImGui::Unindent();
+					if (!bAsyncShadowAOControlsAvailable)
+						ImGui::EndDisabled();
+
 					if (ImGui::Checkbox("Enable RTAO##editor_config", &bEnableRTAO))
 						bLightingChanged = true;
 					if (bEnableRTAO && ImGui::TreeNodeEx("RTAO Details", ImGuiTreeNodeFlags_DefaultOpen))
@@ -13951,8 +14005,12 @@ void Corona::OnRender()
 		const bool bRunRayTracedShadow = !bHybridDirectOnly && hybridStage >= 1;
 		const bool bRunReflection = !bHybridDirectOnly && hybridStage >= 3 && (bEnableSpecularGI || bStageDump);
 		const bool bRunGI = !bHybridDirectOnly && hybridStage >= 4 && (bEnableDiffuseGI || bStageDump);
-		const bool bRunTemporalDenoise = !bHybridDirectOnly && hybridStage >= 5 && (bRunReflection || bRunGI || bStageDump);
+		const bool bDiffuseGINeedsTemporalDenoise =
+			bRunGI &&
+			DiffuseGIMode == EDiffuseGIMode::SIMPLE_RAYTRACE;
+		const bool bRunTemporalDenoise = !bHybridDirectOnly && hybridStage >= 5 && (bDiffuseGINeedsTemporalDenoise || bStageDump);
 		const bool bRunLighting = hybridStage >= 7;
+		const bool bRunDesktopRTAO = !bHybridDirectOnly && bRunLighting && bEnableRTAO;
 		const bool bVulkanHybridBackend =
 			renderBackend &&
 			renderBackend->GetAPI() == ERenderBackendAPI::Vulkan;
@@ -13979,20 +14037,50 @@ void Corona::OnRender()
 			EndGpuPassTiming(EGpuPass::SpatialLightMask);
 		}
 
+		const bool bAsyncShadowAOOverlapAvailable =
+			bEnableAsyncShadowAOOverlap &&
+			dx12_rhi &&
+			bRunGI &&
+			DiffuseGIMode == EDiffuseGIMode::SPATIAL_HASH;
+		const bool bAsyncRTAORequested =
+			bAsyncShadowAOOverlapAvailable &&
+			bAsyncShadowAOOverlapRTAO &&
+			bRunDesktopRTAO;
+		const bool bAsyncShadowRequested =
+			bAsyncShadowAOOverlapAvailable &&
+			bAsyncShadowAOOverlapShadow &&
+			bRunRayTracedShadow;
+		const bool bTryAsyncShadowAOOverlap =
+			bAsyncRTAORequested ||
+			bAsyncShadowRequested;
+		bool bAsyncShadowAOOverlapActive = false;
+		if (bTryAsyncShadowAOOverlap)
+		{
+			static UINT sAsyncOverlapTraceCount = 0;
+			if (sAsyncOverlapTraceCount < 8)
+			{
+				AppendCpuRuntimeTrace(
+					L"[AsyncShadowAO] try overlap target=diffuse_gi_front frame=" + std::to_wstring(FrameCounter) +
+					L", shadow=" + std::to_wstring(bAsyncShadowRequested ? 1 : 0) +
+					L", rtao=" + std::to_wstring(bAsyncRTAORequested ? 1 : 0));
+				++sAsyncOverlapTraceCount;
+			}
+		}
+
 		if (bRunShadowMap)
 		{
 			BeginGpuPassTiming(EGpuPass::RaytraceShadow);
 			MobileShadowMapPass();
 			EndGpuPassTiming(EGpuPass::RaytraceShadow);
 		}
-		else if (bRunRayTracedShadow)
+		else if (!bAsyncShadowRequested && bRunRayTracedShadow)
 		{
 			BeginGpuPassTiming(EGpuPass::RaytraceShadow);
 			RaytraceShadowPass();
 			EndGpuPassTiming(EGpuPass::RaytraceShadow);
 		}
 
-		if (!bHybridDirectOnly && bRunLighting && bEnableRTAO)
+		if (!bAsyncRTAORequested && bRunDesktopRTAO)
 		{
 			BeginGpuPassTiming(EGpuPass::RaytraceAO);
 			RaytraceAOPass();
@@ -14018,6 +14106,42 @@ void Corona::OnRender()
 			BeginGpuPassTiming(EGpuPass::RaytraceReflection);
 			RaytraceReflectionPass();
 			EndGpuPassTiming(EGpuPass::RaytraceReflection);
+		}
+
+		if (bTryAsyncShadowAOOverlap)
+		{
+			if (dx12_rhi->BeginAsyncRtRecordingAfterGraphicsSubmit())
+			{
+				bAsyncShadowAOOverlapActive = true;
+				if (bAsyncRTAORequested)
+				{
+					BeginGpuPassMarker(renderBackend.get(), static_cast<UINT>(EGpuPass::RaytraceAO), "RaytraceAO async");
+					RaytraceAOPass();
+					EndGpuPassMarker(renderBackend.get());
+				}
+				if (bAsyncShadowRequested)
+				{
+					BeginGpuPassMarker(renderBackend.get(), static_cast<UINT>(EGpuPass::RaytraceShadow), "RaytraceShadow async");
+					RaytraceShadowPass();
+					EndGpuPassMarker(renderBackend.get());
+				}
+				dx12_rhi->EndAsyncRtRecordingAndResumeGraphics();
+			}
+			else
+			{
+				if (bAsyncShadowRequested)
+				{
+					BeginGpuPassTiming(EGpuPass::RaytraceShadow);
+					RaytraceShadowPass();
+					EndGpuPassTiming(EGpuPass::RaytraceShadow);
+				}
+				if (bAsyncRTAORequested)
+				{
+					BeginGpuPassTiming(EGpuPass::RaytraceAO);
+					RaytraceAOPass();
+					EndGpuPassTiming(EGpuPass::RaytraceAO);
+				}
+			}
 		}
 
 		if (bRunGI)
@@ -14055,6 +14179,8 @@ void Corona::OnRender()
 
 		if (bRunLighting)
 		{
+			if (bAsyncShadowAOOverlapActive && dx12_rhi && dx12_rhi->HasPendingAsyncRtWork())
+				dx12_rhi->SubmitGraphicsWorkAndWaitForAsyncRt();
 			BeginGpuPassTiming(EGpuPass::Lighting);
 			LightingPass();
 			EndGpuPassTiming(EGpuPass::Lighting);

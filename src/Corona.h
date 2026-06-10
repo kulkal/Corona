@@ -1277,6 +1277,9 @@ private:
 	bool bEnableDirectDiffuse = true;
 	bool bEnableDirectSpecular = true;
 	bool bEnableRTAO = true;
+	bool bEnableAsyncShadowAOOverlap = true;
+	bool bAsyncShadowAOOverlapRTAO = true;
+	bool bAsyncShadowAOOverlapShadow = true;
 	// Point-light shadow mode: false = 4-channel pack (sun + first 3 lights,
 	// hard-cap), true = ReSTIR Phase 1+2 reservoir (single-light per pixel,
 	// scales to MaxPointLights candidates, with previous-frame reproject).

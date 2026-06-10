@@ -64,6 +64,7 @@ public:
 
 	DX12Backend* Owner = nullptr;
 	ComPtr<ID3D12CommandQueue> CmdQueue;
+	D3D12_COMMAND_LIST_TYPE Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
 
 	std::vector<shared_ptr<CommandList>> CommandListPool;
 	UINT32 CurrentIndex = 0;
@@ -77,12 +78,19 @@ public:
 	bool bAftermathMarkersEnabled = false;
 #endif
 public:
-	CommandQueue(DX12Backend* owner, ID3D12Device5* device, bool bEnableAftermathMarkers = false);
+	CommandQueue(
+		DX12Backend* owner,
+		ID3D12Device5* device,
+		D3D12_COMMAND_LIST_TYPE commandListType = D3D12_COMMAND_LIST_TYPE_DIRECT,
+		const wchar_t* queueDebugName = L"Corona Graphics Queue",
+		const wchar_t* allocatorDebugName = L"Corona Command Allocator",
+		const wchar_t* listDebugName = L"Corona Command List",
+		bool bEnableAftermathMarkers = false);
 	virtual ~CommandQueue();
 
 	CommandList* AllocCmdList();
 
-	void ExecuteCommandList(CommandList* cmd);
+	UINT64 ExecuteCommandList(CommandList* cmd);
 
 	void WaitGPU();
 	
@@ -449,7 +457,10 @@ public:
 	ComPtr<ID3D12Device5> Device;
 
 	unique_ptr<CommandQueue> CmdQ;
+	unique_ptr<CommandQueue> AsyncRtCmdQ;
 	CommandList* GlobalCmdList = nullptr;
+	CommandList* ActiveAsyncRtCmdList = nullptr;
+	UINT64 PendingAsyncRtFenceValue = 0;
 
 	vector<UINT32> FrameFenceValueVec;
 
@@ -620,6 +631,14 @@ public:
 	void Dispatch(uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ) override;
 	void ClearTextureUAVFloat(Texture* texture, const float clearColor[4]) override;
 	void ExecuteCurrentCommandList() override;
+	void BeginNewGraphicsCommandList();
+	UINT64 SubmitCurrentCommandList();
+	UINT64 SubmitCurrentCommandListAndRestart();
+	bool BeginAsyncRtRecordingAfterGraphicsSubmit();
+	UINT64 EndAsyncRtRecordingAndResumeGraphics();
+	bool HasPendingAsyncRtWork() const { return PendingAsyncRtFenceValue != 0; }
+	void SubmitGraphicsWorkAndWaitForAsyncRt();
+	void WaitForAsyncRtOnGraphicsQueue();
 	void BeginGpuMarker(uint64_t color, const char* label) override;
 	void EndGpuMarker() override;
 	ID3D12GraphicsCommandList* GetGraphicsCommandList() { return GlobalCmdList ? GlobalCmdList->CmdList.Get() : nullptr; }
