@@ -106,6 +106,25 @@ static nri::TextureUsageBits ToNRITextureUsage(ETextureUsageFlags u)
 	return bits;
 }
 
+// Corona EResourceState -> NRI AccessStage (for CmdBarrier on buffers).
+static nri::AccessStage ToAccessStage(EResourceState s)
+{
+	nri::AccessStage a = {};
+	switch (s)
+	{
+	case EResourceState::ShaderRead:      a.access = nri::AccessBits::SHADER_RESOURCE;         a.stages = nri::StageBits::ALL;  break;
+	case EResourceState::UnorderedAccess: a.access = nri::AccessBits::SHADER_RESOURCE_STORAGE; a.stages = nri::StageBits::ALL;  break;
+	case EResourceState::CopySource:      a.access = nri::AccessBits::COPY_SOURCE;             a.stages = nri::StageBits::COPY; break;
+	case EResourceState::CopyDest:        a.access = nri::AccessBits::COPY_DESTINATION;        a.stages = nri::StageBits::COPY; break;
+	case EResourceState::VertexBuffer:    a.access = nri::AccessBits::VERTEX_BUFFER;           a.stages = nri::StageBits::ALL;  break;
+	case EResourceState::RenderTarget:    a.access = nri::AccessBits::COLOR_ATTACHMENT;        a.stages = nri::StageBits::ALL;  break;
+	case EResourceState::DepthWrite:      a.access = nri::AccessBits::DEPTH_STENCIL_ATTACHMENT_WRITE; a.stages = nri::StageBits::ALL; break;
+	case EResourceState::Present:         a.access = nri::AccessBits::NONE;                    a.stages = nri::StageBits::ALL;  break;
+	default:                              a.access = nri::AccessBits::NONE;                    a.stages = nri::StageBits::ALL;  break;
+	}
+	return a;
+}
+
 // ---------------------------------------------------------------------------
 // PIMPL: all NRI state lives here so the header stays NRI-free.
 // ---------------------------------------------------------------------------
@@ -630,12 +649,65 @@ NRIBackend::NRIBackend() : m(std::make_unique<Impl>())
 		psoInitOk = pso.InitCS(path, "main") && pso.GetPipeline() != nullptr;
 	}
 
-	char info[800];
+	// Full frame path: BeginFrame -> TransitionBuffer -> PSO Apply -> Dispatch ->
+	// TransitionBuffer -> copy -> EndFrame, driving the public renderer interface
+	// (the shader writes 1u into a UAV structured buffer). Verifies that the frame
+	// command-buffer lifecycle + the by-name ComputePSO actually run on the GPU.
+	std::string framePsoResult = "skipped";
+	if (m->GraphicsQueue && m->CmdBuffer && psoInitOk)
+	{
+		const uint32_t N = 4;
+		const uint64_t bufSize = N * sizeof(uint32_t);
+		BufferCreateDesc bcd = {};
+		bcd.NumElements = N; bcd.ElementSize = sizeof(uint32_t);
+		bcd.bAllowUnorderedAccess = true; bcd.Shape = EBufferShape::Structured;
+		std::shared_ptr<Buffer> outWrap = CreateBuffer(bcd);
+
+		nri::Buffer* rb = nullptr; std::vector<nri::Memory*> rbMem;
+		m->CreateBoundBuffer(bufSize, 0, nri::BufferUsageBits::NONE, nri::MemoryLocation::HOST_READBACK, rb, rbMem);
+
+		std::shared_ptr<ComputePipelineStateObject> pso = CreateComputePipelineStateObject();
+		pso->BindUAV("OutBuf", 0);
+		if (outWrap && rb && pso->InitCS(L"nri_pso_smoke.hlsl", "main"))
+		{
+			pso->SetBufferUAV("OutBuf", outWrap.get());
+			BeginFrame();
+			TransitionBuffer(outWrap.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
+			pso->Apply();
+			Dispatch(N, 1, 1);
+			TransitionBuffer(outWrap.get(), EResourceState::UnorderedAccess, EResourceState::CopySource);
+			auto oit = m->Buffers.find(outWrap.get());
+			if (m->ActiveCmd && oit != m->Buffers.end() && oit->second.buffer)
+				m->Core.CmdCopyBuffer(*m->ActiveCmd, *rb, 0, *oit->second.buffer, 0, bufSize);
+			EndFrame();
+
+			uint32_t* mp = (uint32_t*)m->Core.MapBuffer(*rb, 0, bufSize);
+			uint32_t v0 = mp ? mp[0] : 0u;
+			uint32_t vN = mp ? mp[N - 1] : 0u;
+			m->Core.UnmapBuffer(*rb);
+			char b[48];
+			const bool ok = mp && v0 == 1u && vN == 1u;
+			_snprintf_s(b, _TRUNCATE, ok ? "PASS(%u)" : "FAIL(%u)", v0);
+			framePsoResult = b;
+		}
+		else
+		{
+			framePsoResult = "FAIL(init)";
+		}
+		m->FreeBuffer(rb, rbMem);
+		if (outWrap)
+		{
+			auto oit = m->Buffers.find(outWrap.get());
+			if (oit != m->Buffers.end()) { m->FreeBuffer(oit->second.buffer, oit->second.memory); m->Buffers.erase(oit); }
+		}
+	}
+
+	char info[896];
 	_snprintf_s(info, _TRUNCATE,
-		"device ok [%s], rtTier=%u sm=%u queue=%s bufferSmoke=%s texSmoke=%s cmd=%s submitSmoke=%s shaderDXIL=%zuB compute=%s psoInit=%s",
+		"device ok [%s], rtTier=%u sm=%u queue=%s bufferSmoke=%s texSmoke=%s cmd=%s submitSmoke=%s shaderDXIL=%zuB compute=%s psoInit=%s framePSO=%s",
 		dd.adapterDesc.name, (unsigned)dd.tiers.rayTracing, (unsigned)dd.shaderModel,
 		m->GraphicsQueue ? "ok" : "null", bufferSmokeOk ? "PASS" : "FAIL", texSmokeOk ? "PASS" : "FAIL",
-		m->CmdBuffer ? "ok" : "null", submitSmokeOk ? "PASS" : "FAIL", shaderBytes, computeResult.c_str(), psoInitOk ? "PASS" : "FAIL");
+		m->CmdBuffer ? "ok" : "null", submitSmokeOk ? "PASS" : "FAIL", shaderBytes, computeResult.c_str(), psoInitOk ? "PASS" : "FAIL", framePsoResult.c_str());
 	ErrorString = info;          // diagnostic status (not an error); logged by bootstrap
 	OutputDebugStringA("[NRI] ");
 	OutputDebugStringA(info);
@@ -688,8 +760,29 @@ bool NRIBackend::SupportsRayTracing() const { return m->RayTracingTier >= 1; }
 bool NRIBackend::SupportsShaderExecutionReordering() const { return m->RayTracingTier >= 3; }
 
 // === Frame lifecycle / diagnostics =======================================
-void NRIBackend::BeginFrame() { NRI_TODO(); }
-void NRIBackend::EndFrame() { NRI_TODO(); }
+void NRIBackend::BeginFrame()
+{
+	if (!m->Device || !m->CmdAllocator || !m->CmdBuffer || m->ActiveCmd)
+		return;
+	m->Core.ResetCommandAllocator(*m->CmdAllocator);
+	if (m->Core.BeginCommandBuffer(*m->CmdBuffer, nullptr) == nri::Result::SUCCESS)
+		m->ActiveCmd = m->CmdBuffer;
+}
+void NRIBackend::EndFrame()
+{
+	if (!m->ActiveCmd)
+		return;
+	m->Core.EndCommandBuffer(*m->ActiveCmd);
+	nri::FenceSubmitDesc sf = {};
+	sf.fence = m->Fence; sf.value = ++m->FenceValue; sf.stages = nri::StageBits::ALL;
+	nri::CommandBuffer* cbs[1] = { m->ActiveCmd };
+	nri::QueueSubmitDesc qs = {};
+	qs.commandBuffers = cbs; qs.commandBufferNum = 1;
+	qs.signalFences = &sf; qs.signalFenceNum = 1;
+	m->Core.QueueSubmit(*m->GraphicsQueue, qs);
+	m->Core.Wait(*m->Fence, m->FenceValue);   // synchronous frame for bring-up
+	m->ActiveCmd = nullptr;
+}
 void NRIBackend::WaitForGpu() { NRI_TODO(); }
 void NRIBackend::EmitGpuCrashMarker(const char*) { NRI_TODO(); }
 const std::string& NRIBackend::GetErrorString() const { return ErrorString; }
@@ -917,7 +1010,21 @@ void NRIBackend::ExecuteCurrentCommandList() { NRI_TODO(); }
 void NRIBackend::BeginGpuMarker(uint64_t, const char*) { NRI_TODO(); }
 void NRIBackend::EndGpuMarker() { NRI_TODO(); }
 void NRIBackend::TransitionTexture(Texture*, EResourceState, EResourceState) { NRI_TODO(); }
-void NRIBackend::TransitionBuffer(Buffer*, EResourceState, EResourceState) { NRI_TODO(); }
+void NRIBackend::TransitionBuffer(Buffer* buffer, EResourceState stateBefore, EResourceState stateAfter)
+{
+	if (!m->ActiveCmd || !buffer)
+		return;
+	auto it = m->Buffers.find(buffer);
+	if (it == m->Buffers.end() || !it->second.buffer)
+		return;
+	nri::BufferBarrierDesc bb = {};
+	bb.buffer = it->second.buffer;
+	bb.before = ToAccessStage(stateBefore);
+	bb.after = ToAccessStage(stateAfter);
+	nri::BarrierDesc bd = {};
+	bd.buffers = &bb; bd.bufferNum = 1;
+	m->Core.CmdBarrier(*m->ActiveCmd, bd);
+}
 void NRIBackend::TransitionVertexBuffer(VertexBuffer*, EResourceState, EResourceState) { NRI_TODO(); }
 
 // === Graphics pipelines (by-name binding) =================================
