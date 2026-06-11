@@ -26,8 +26,12 @@ struct NRIBackend::Impl
 	nri::CoreInterface Core{};
 	nri::HelperInterface Helper{};
 	nri::Queue* GraphicsQueue = nullptr;
-	// Future milestones add: RayTracingInterface, SwapChainInterface, command
-	// buffers, descriptor pools, plus side tables for Texture*/VertexBuffer*.
+	nri::CommandAllocator* CmdAllocator = nullptr;
+	nri::CommandBuffer* CmdBuffer = nullptr;
+	nri::Fence* Fence = nullptr;
+	uint64_t FenceValue = 0;
+	// Future milestones add: RayTracingInterface, SwapChainInterface, descriptor
+	// pools, plus side tables for Texture*/VertexBuffer*.
 
 	// Backend-owned GPU allocation behind a Corona Buffer wrapper (VulkanBackend
 	// keeps native handles in a side table keyed by the wrapper pointer; same here).
@@ -147,11 +151,44 @@ NRIBackend::NRIBackend() : m(std::make_unique<Impl>())
 			if (mem) m->Core.FreeMemory(mem);
 	}
 
-	char info[640];
+	// Command + sync objects, plus an empty submit cycle that validates the
+	// command-buffer / queue-submit / host-fence-wait path end-to-end.
+	bool submitSmokeOk = false;
+	if (m->GraphicsQueue &&
+		m->Core.CreateCommandAllocator(*m->GraphicsQueue, m->CmdAllocator) == nri::Result::SUCCESS &&
+		m->Core.CreateCommandBuffer(*m->CmdAllocator, m->CmdBuffer) == nri::Result::SUCCESS &&
+		m->Core.CreateFence(*m->Device, 0, m->Fence) == nri::Result::SUCCESS)
+	{
+		if (m->Core.BeginCommandBuffer(*m->CmdBuffer, nullptr) == nri::Result::SUCCESS &&
+			m->Core.EndCommandBuffer(*m->CmdBuffer) == nri::Result::SUCCESS)
+		{
+			nri::FenceSubmitDesc signalFence = {};
+			signalFence.fence = m->Fence;
+			signalFence.value = 1;
+			signalFence.stages = nri::StageBits::ALL;
+
+			nri::CommandBuffer* cbs[1] = { m->CmdBuffer };
+			nri::QueueSubmitDesc submit = {};
+			submit.commandBuffers = cbs;
+			submit.commandBufferNum = 1;
+			submit.signalFences = &signalFence;
+			submit.signalFenceNum = 1;
+
+			if (m->Core.QueueSubmit(*m->GraphicsQueue, submit) == nri::Result::SUCCESS)
+			{
+				m->Core.Wait(*m->Fence, 1);
+				m->FenceValue = 1;
+				submitSmokeOk = (m->Core.GetFenceValue(*m->Fence) >= 1);
+			}
+		}
+	}
+
+	char info[768];
 	_snprintf_s(info, _TRUNCATE,
-		"device ok [%s], rtTier=%u sm=%u queue=%s bufferSmoke=%s",
+		"device ok [%s], rtTier=%u sm=%u queue=%s bufferSmoke=%s cmd=%s submitSmoke=%s",
 		dd.adapterDesc.name, (unsigned)dd.tiers.rayTracing, (unsigned)dd.shaderModel,
-		m->GraphicsQueue ? "ok" : "null", bufferSmokeOk ? "PASS" : "FAIL");
+		m->GraphicsQueue ? "ok" : "null", bufferSmokeOk ? "PASS" : "FAIL",
+		m->CmdBuffer ? "ok" : "null", submitSmokeOk ? "PASS" : "FAIL");
 	ErrorString = info;          // diagnostic status (not an error); logged by bootstrap
 	OutputDebugStringA("[NRI] ");
 	OutputDebugStringA(info);
@@ -172,6 +209,10 @@ NRIBackend::~NRIBackend()
 				if (mem) m->Core.FreeMemory(mem);
 		}
 		m->Buffers.clear();
+
+		if (m->Fence) { m->Core.DestroyFence(m->Fence); m->Fence = nullptr; }
+		if (m->CmdBuffer) { m->Core.DestroyCommandBuffer(m->CmdBuffer); m->CmdBuffer = nullptr; }
+		if (m->CmdAllocator) { m->Core.DestroyCommandAllocator(m->CmdAllocator); m->CmdAllocator = nullptr; }
 
 		nri::nriDestroyDevice(m->Device);
 		m->Device = nullptr;
