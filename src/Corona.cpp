@@ -8941,11 +8941,13 @@ void Corona::LoadPipeline()
 			throw std::runtime_error("Failed to create NRI render backend.");
 		}
 		const char* nriName = renderBackend->GetBackendName();
+		const std::string& nriStatus = renderBackend->GetErrorString();
 		AppendCpuRuntimeTrace(
 			L"[LoadPipeline] after CreateRenderBackend NRI api=" + std::to_wstring(static_cast<int>(renderBackend->GetAPI())) +
 			L", name=" + std::wstring(nriName, nriName + std::strlen(nriName)) +
 			L", rayTracing=" + std::to_wstring(renderBackend->SupportsRayTracing() ? 1 : 0) +
-			L", ser=" + std::to_wstring(renderBackend->SupportsShaderExecutionReordering() ? 1 : 0));
+			L", ser=" + std::to_wstring(renderBackend->SupportsShaderExecutionReordering() ? 1 : 0) +
+			L", status=" + std::wstring(nriStatus.begin(), nriStatus.end()));
 		renderBackend->CreateSwapChainForWindow(
 			GetMainPlatformWindowHandle(),
 			m_width,

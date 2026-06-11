@@ -7,6 +7,8 @@
 #if CORONA_HAS_NRI
 
 #include <cstdio>
+#include <unordered_map>
+#include <vector>
 
 #include "NRI.h"
 #include "Extensions/NRIDeviceCreation.h"
@@ -22,13 +24,58 @@ struct NRIBackend::Impl
 {
 	nri::Device* Device = nullptr;
 	nri::CoreInterface Core{};
-	// Future milestones add: HelperInterface, RayTracingInterface,
-	// SwapChainInterface, queues, command buffers, descriptor pools, and the
-	// side tables keyed by Texture*/Buffer*/VertexBuffer* (VulkanBackend pattern).
+	nri::HelperInterface Helper{};
+	nri::Queue* GraphicsQueue = nullptr;
+	// Future milestones add: RayTracingInterface, SwapChainInterface, command
+	// buffers, descriptor pools, plus side tables for Texture*/VertexBuffer*.
+
+	// Backend-owned GPU allocation behind a Corona Buffer wrapper (VulkanBackend
+	// keeps native handles in a side table keyed by the wrapper pointer; same here).
+	struct BufferAlloc
+	{
+		nri::Buffer* buffer = nullptr;
+		std::vector<nri::Memory*> memory;
+	};
+	std::unordered_map<Buffer*, BufferAlloc> Buffers;
 
 	std::string BackendName = "NRI (uninitialized)";
 	uint8_t RayTracingTier = 0;   // 0=none, 1=DXR1.0, 2=DXR1.1, 3=DXR1.2 (SER)
 	uint32_t FrameIndex = 0;
+
+	// Create an NRI buffer and allocate+bind backing memory for it. Shared by
+	// CreateBuffer and the bring-up smoke test.
+	bool CreateBoundBuffer(uint64_t size, uint32_t structureStride, nri::BufferUsageBits usage,
+		nri::MemoryLocation location, nri::Buffer*& outBuffer, std::vector<nri::Memory*>& outMemory)
+	{
+		outBuffer = nullptr;
+		outMemory.clear();
+		if (!Device)
+			return false;
+
+		nri::BufferDesc bd = {};
+		bd.size = size;
+		bd.structureStride = structureStride;
+		bd.usage = usage;
+		if (Core.CreateBuffer(*Device, bd, outBuffer) != nri::Result::SUCCESS || outBuffer == nullptr)
+			return false;
+
+		nri::Buffer* bufferList[1] = { outBuffer };
+		nri::ResourceGroupDesc rg = {};
+		rg.memoryLocation = location;
+		rg.buffers = bufferList;
+		rg.bufferNum = 1;
+
+		const uint32_t allocNum = Helper.CalculateAllocationNumber(*Device, rg);
+		outMemory.resize(allocNum, nullptr);
+		if (Helper.AllocateAndBindMemory(*Device, rg, outMemory.data()) != nri::Result::SUCCESS)
+		{
+			Core.DestroyBuffer(outBuffer);
+			outBuffer = nullptr;
+			outMemory.clear();
+			return false;
+		}
+		return true;
+	}
 };
 
 // NRI routes validation / driver messages here. Surface them to the debugger
@@ -44,6 +91,7 @@ static void NRI_CALL NRIMessageCallback(nri::Message messageType, const char* fi
 NRIBackend::NRIBackend() : m(std::make_unique<Impl>())
 {
 	using nri::CoreInterface;
+	using nri::HelperInterface;
 
 	nri::DeviceCreationDesc desc = {};
 	desc.graphicsAPI = nri::GraphicsAPI::D3D12;
@@ -68,20 +116,63 @@ NRIBackend::NRIBackend() : m(std::make_unique<Impl>())
 		return;
 	}
 
+	r = nri::nriGetInterface(*m->Device, NRI_INTERFACE(HelperInterface), &m->Helper);
+	if (r != nri::Result::SUCCESS)
+	{
+		ErrorString = "nriGetInterface(HelperInterface) failed";
+		nri::nriDestroyDevice(m->Device);
+		m->Device = nullptr;
+		return;
+	}
+	m->Core.GetQueue(*m->Device, nri::QueueType::GRAPHICS, 0, m->GraphicsQueue);
+
 	const nri::DeviceDesc& dd = m->Core.GetDeviceDesc(*m->Device);
 	m->RayTracingTier = dd.tiers.rayTracing;
 	m->BackendName = std::string("NRI [D3D12] ") + dd.adapterDesc.name;
 
-	char info[512];
-	_snprintf_s(info, _TRUNCATE, "[NRI] device created: %s, rayTracing tier=%u, shaderModel=%u\n",
-		dd.adapterDesc.name, (unsigned)dd.tiers.rayTracing, (unsigned)dd.shaderModel);
+	// Bring-up smoke test: exercise the resource + memory path end-to-end
+	// (Core.CreateBuffer + Helper.AllocateAndBindMemory + Core.DestroyBuffer/
+	// FreeMemory). Result is surfaced via GetErrorString() so the bootstrap can
+	// log it to the runtime trace.
+	bool bufferSmokeOk = false;
+	{
+		nri::Buffer* smokeBuf = nullptr;
+		std::vector<nri::Memory*> smokeMem;
+		bufferSmokeOk = m->CreateBoundBuffer(
+			256, 0, nri::BufferUsageBits::SHADER_RESOURCE | nri::BufferUsageBits::SHADER_RESOURCE_STORAGE,
+			nri::MemoryLocation::DEVICE, smokeBuf, smokeMem);
+		if (smokeBuf)
+			m->Core.DestroyBuffer(smokeBuf);
+		for (nri::Memory* mem : smokeMem)
+			if (mem) m->Core.FreeMemory(mem);
+	}
+
+	char info[640];
+	_snprintf_s(info, _TRUNCATE,
+		"device ok [%s], rtTier=%u sm=%u queue=%s bufferSmoke=%s",
+		dd.adapterDesc.name, (unsigned)dd.tiers.rayTracing, (unsigned)dd.shaderModel,
+		m->GraphicsQueue ? "ok" : "null", bufferSmokeOk ? "PASS" : "FAIL");
+	ErrorString = info;          // diagnostic status (not an error); logged by bootstrap
+	OutputDebugStringA("[NRI] ");
 	OutputDebugStringA(info);
+	OutputDebugStringA("\n");
 }
 
 NRIBackend::~NRIBackend()
 {
-	if (m && m->Device)
+	if (!m)
+		return;
+	if (m->Device)
 	{
+		for (auto& kv : m->Buffers)
+		{
+			if (kv.second.buffer)
+				m->Core.DestroyBuffer(kv.second.buffer);
+			for (nri::Memory* mem : kv.second.memory)
+				if (mem) m->Core.FreeMemory(mem);
+		}
+		m->Buffers.clear();
+
 		nri::nriDestroyDevice(m->Device);
 		m->Device = nullptr;
 		nri::nriReportLiveObjects();
@@ -113,7 +204,48 @@ DX12Backend* NRIBackend::AsDX12Backend() { return nullptr; }
 
 // === Resource creation ====================================================
 std::shared_ptr<Texture> NRIBackend::CreateTexture2D(const TextureCreateDesc&) { NRI_TODO(); return nullptr; }
-std::shared_ptr<Buffer> NRIBackend::CreateBuffer(const BufferCreateDesc&) { NRI_TODO(); return nullptr; }
+std::shared_ptr<Buffer> NRIBackend::CreateBuffer(const BufferCreateDesc& desc)
+{
+	if (!m->Device)
+		return nullptr;
+	const uint64_t size = static_cast<uint64_t>(desc.NumElements) * desc.ElementSize;
+	if (size == 0)
+		return nullptr;
+
+	nri::BufferUsageBits usage = nri::BufferUsageBits::SHADER_RESOURCE;
+	if (desc.bAllowUnorderedAccess)
+		usage = usage | nri::BufferUsageBits::SHADER_RESOURCE_STORAGE;
+	const uint32_t stride = (desc.Shape == EBufferShape::Structured) ? desc.ElementSize : 0;
+
+	nri::Buffer* nbuf = nullptr;
+	std::vector<nri::Memory*> nmem;
+	if (!m->CreateBoundBuffer(size, stride, usage, nri::MemoryLocation::DEVICE, nbuf, nmem))
+	{
+		ErrorString = "CreateBuffer: CreateBoundBuffer failed";
+		return nullptr;
+	}
+
+	if (desc.InitialData && m->GraphicsQueue)
+	{
+		nri::BufferUploadDesc up = {};
+		up.buffer = nbuf;
+		up.data = desc.InitialData;
+		up.after.access = nri::AccessBits::SHADER_RESOURCE;
+		up.after.stages = nri::StageBits::ALL;
+		m->Helper.UploadData(*m->GraphicsQueue, nullptr, 0, &up, 1);
+	}
+
+	auto wrapper = std::make_shared<Buffer>();
+	wrapper->Type = (desc.Shape == EBufferShape::Structured) ? Buffer::STRUCTURED : Buffer::BYTE_ADDRESS;
+	wrapper->NumElements = desc.NumElements;
+	wrapper->ElementSize = desc.ElementSize;
+
+	Impl::BufferAlloc alloc;
+	alloc.buffer = nbuf;
+	alloc.memory = std::move(nmem);
+	m->Buffers[wrapper.get()] = std::move(alloc);
+	return wrapper;
+}
 std::shared_ptr<Sampler> NRIBackend::CreateSampler(const SamplerCreateDesc&) { NRI_TODO(); return nullptr; }
 std::shared_ptr<Texture> NRIBackend::CreateTextureFromFile(const std::wstring&, bool) { NRI_TODO(); return nullptr; }
 std::shared_ptr<Texture> NRIBackend::CreateTexture3D(ETextureFormat, ETextureUsageFlags, EInitialResourceState, int, int, int, int) { NRI_TODO(); return nullptr; }
