@@ -9,6 +9,12 @@
 #include <cstdio>
 #include <unordered_map>
 #include <vector>
+#include <string>
+#include <fstream>
+#include <sstream>
+
+#include <wrl/client.h>
+#include <dxcapi.use.h>
 
 #include "NRI.h"
 #include "Extensions/NRIDeviceCreation.h"
@@ -16,6 +22,63 @@
 #include "Extensions/NRISwapChain.h"
 #include "Extensions/NRIRayTracing.h"
 #include "Extensions/NRIWrapperD3D12.h"
+
+// ---------------------------------------------------------------------------
+// Shader compilation: HLSL -> DXIL via dxcompiler.dll. NRI consumes bytecode;
+// when NRI runs on D3D12 it wants DXIL (when on Vulkan it would want SPIR-V,
+// handled later). Self-contained DXC instance so we don't couple to the DX12
+// backend's compiler.
+// ---------------------------------------------------------------------------
+static dxc::DxcDllSupport gNriDxc;
+
+static std::vector<uint8_t> CompileHLSLToDXIL(
+	const void* source, size_t sourceSize, const wchar_t* sourceName,
+	const wchar_t* entryPoint, const wchar_t* target, std::string& outError)
+{
+	using Microsoft::WRL::ComPtr;
+	if (FAILED(gNriDxc.Initialize()))
+	{
+		outError = "DXC: failed to load dxcompiler.dll";
+		return {};
+	}
+	ComPtr<IDxcCompiler> compiler;
+	ComPtr<IDxcLibrary> library;
+	if (FAILED(gNriDxc.CreateInstance(CLSID_DxcCompiler, __uuidof(IDxcCompiler), &compiler)) ||
+		FAILED(gNriDxc.CreateInstance(CLSID_DxcLibrary, __uuidof(IDxcLibrary), &library)))
+	{
+		outError = "DXC: CreateInstance failed";
+		return {};
+	}
+
+	ComPtr<IDxcBlobEncoding> textBlob;
+	library->CreateBlobWithEncodingFromPinned((LPBYTE)source, (uint32_t)sourceSize, 0, &textBlob);
+
+	ComPtr<IDxcOperationResult> result;
+	HRESULT hr = compiler->Compile(textBlob.Get(), sourceName, entryPoint, target, nullptr, 0, nullptr, 0, nullptr, &result);
+	if (FAILED(hr) || !result)
+	{
+		outError = "DXC: Compile call failed";
+		return {};
+	}
+	HRESULT status = E_FAIL;
+	result->GetStatus(&status);
+	if (FAILED(status))
+	{
+		ComPtr<IDxcBlobEncoding> errBlob;
+		result->GetErrorBuffer(&errBlob);
+		outError = errBlob ? std::string((const char*)errBlob->GetBufferPointer(), errBlob->GetBufferSize()) : "DXC: compile error";
+		return {};
+	}
+	ComPtr<IDxcBlob> blob;
+	result->GetResult(&blob);
+	if (!blob || blob->GetBufferSize() == 0)
+	{
+		outError = "DXC: empty result";
+		return {};
+	}
+	const uint8_t* p = (const uint8_t*)blob->GetBufferPointer();
+	return std::vector<uint8_t>(p, p + blob->GetBufferSize());
+}
 
 // ---------------------------------------------------------------------------
 // PIMPL: all NRI state lives here so the header stays NRI-free.
@@ -183,12 +246,24 @@ NRIBackend::NRIBackend() : m(std::make_unique<Impl>())
 		}
 	}
 
+	// Shader smoke: compile a trivial compute shader HLSL -> DXIL via DXC, to
+	// validate the bytecode path that the compute pipeline will consume.
+	size_t shaderBytes = 0;
+	{
+		static const char* kCS =
+			"RWStructuredBuffer<uint> OutBuf : register(u0);\n"
+			"[numthreads(1,1,1)] void main(uint3 id : SV_DispatchThreadID) { OutBuf[id.x] = 0xCAFEu; }\n";
+		std::string err;
+		std::vector<uint8_t> dxil = CompileHLSLToDXIL(kCS, strlen(kCS), L"nri_smoke.cs", L"main", L"cs_6_5", err);
+		shaderBytes = dxil.size();
+	}
+
 	char info[768];
 	_snprintf_s(info, _TRUNCATE,
-		"device ok [%s], rtTier=%u sm=%u queue=%s bufferSmoke=%s cmd=%s submitSmoke=%s",
+		"device ok [%s], rtTier=%u sm=%u queue=%s bufferSmoke=%s cmd=%s submitSmoke=%s shaderDXIL=%zuB",
 		dd.adapterDesc.name, (unsigned)dd.tiers.rayTracing, (unsigned)dd.shaderModel,
 		m->GraphicsQueue ? "ok" : "null", bufferSmokeOk ? "PASS" : "FAIL",
-		m->CmdBuffer ? "ok" : "null", submitSmokeOk ? "PASS" : "FAIL");
+		m->CmdBuffer ? "ok" : "null", submitSmokeOk ? "PASS" : "FAIL", shaderBytes);
 	ErrorString = info;          // diagnostic status (not an error); logged by bootstrap
 	OutputDebugStringA("[NRI] ");
 	OutputDebugStringA(info);
@@ -311,7 +386,26 @@ bool NRIBackend::UpdateTLAS(const std::shared_ptr<RTAS>&, const std::vector<RTIn
 // === Pipelines / shaders ==================================================
 std::shared_ptr<RTPipelineStateObject> NRIBackend::CreateRTPipelineStateObject() { NRI_TODO(); return nullptr; }
 std::shared_ptr<ComputePipelineStateObject> NRIBackend::CreateComputePipelineStateObject() { NRI_TODO(); return nullptr; }
-ShaderBytecode NRIBackend::CreateShader(const std::wstring&, const std::string&, const std::string&) { NRI_TODO(); return {}; }
+ShaderBytecode NRIBackend::CreateShader(const std::wstring& fileName, const std::string& entryPoint, const std::string& target)
+{
+	ShaderBytecode out;
+	std::ifstream f(fileName, std::ios::binary);
+	if (!f.good())
+	{
+		ErrorString = "CreateShader: cannot open shader file";
+		return out;
+	}
+	std::stringstream ss;
+	ss << f.rdbuf();
+	const std::string src = ss.str();
+	const std::wstring entryW(entryPoint.begin(), entryPoint.end());
+	const std::wstring targetW(target.begin(), target.end());
+	std::string err;
+	out.Data = CompileHLSLToDXIL(src.data(), src.size(), fileName.c_str(), entryW.c_str(), targetW.c_str(), err);
+	if (out.Data.empty())
+		ErrorString = "CreateShader: " + err;
+	return out;
+}
 void NRIBackend::ResetDynamicResources() { NRI_TODO(); }
 
 // === Swapchain / present ==================================================
