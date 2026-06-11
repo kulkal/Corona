@@ -28,8 +28,8 @@ Texture2D NormalTex : register(t6);
 Texture2D RoughnessTex : register(t7);
 Texture2D MetallicTex : register(t8);
 
-// Must match Corona::MaxPointLights in Corona.h.
-#define MAX_POINT_LIGHTS 128
+// Must match Corona::MaxPathTracingPointLights in Corona.h.
+#define MAX_POINT_LIGHTS 16
 
 struct PointLightParam
 {
@@ -38,6 +38,8 @@ struct PointLightParam
     float4 DirectionAndType;
     float4 SpotConeAndFlags;
 };
+
+StructuredBuffer<PointLightParam> PointLightBuffer : register(t4);
 
 cbuffer ViewParameter : register(b0)
 {
@@ -52,7 +54,7 @@ cbuffer ViewParameter : register(b0)
     float DirectLightAngularRadius;
     uint DirectLightSampleCount;
     uint bDirectLightCastShadow;
-    float _directLightPadding;
+    uint PointLightSampleCount;
     float2 RandomOffset;
     uint FrameCounter;
     uint BlueNoiseOffsetStride;
@@ -75,8 +77,7 @@ cbuffer ViewParameter : register(b0)
     float SpecularMotionVectorScale;
     uint bStabilizePrimaryRaySamples;
     uint _rtaoPadding;
-    uint3 _pointLightArrayPadding;
-    PointLightParam PointLights[MAX_POINT_LIGHTS];
+    uint _pointLightPadding0;
     uint PointLightCount;
     float3 PointLightPadding;
 };
@@ -903,18 +904,23 @@ void PathTracingClosestHit(inout PathTracingPayload payload, in BuiltInTriangleI
     directLight /= float(directLightSampleCount);
 
     uint activePointLightCount = min(PointLightCount, MAX_POINT_LIGHTS);
+    bool samplePointLights = PointLightSampleCount > 0u && PointLightSampleCount < activePointLightCount;
+    uint pointLightLoopCount = samplePointLights ? min(PointLightSampleCount, activePointLightCount) : activePointLightCount;
+    float pointLightSampleWeight = samplePointLights ? (float(activePointLightCount) / float(max(pointLightLoopCount, 1u))) : 1.0f;
+
     [loop]
-    for (uint pointLightIndex = 0u; pointLightIndex < MAX_POINT_LIGHTS; ++pointLightIndex)
+    for (uint pointLightSampleIndex = 0u; pointLightSampleIndex < MAX_POINT_LIGHTS; ++pointLightSampleIndex)
     {
-        if (pointLightIndex >= activePointLightCount)
+        if (pointLightSampleIndex >= pointLightLoopCount)
             break;
 
-        // Load the whole light record once into registers. PointLights lives in
-        // the UPLOAD-heap view CBV; dynamically indexing it compiles to per-access
-        // L1TEX loads against system memory (shows up as SysL2 traffic). Caching
-        // the record collapses ~6 per-iteration loads into one, cutting SysL2
-        // request volume without changing results.
-        PointLightParam pl = PointLights[pointLightIndex];
+        uint pointLightIndex = pointLightSampleIndex;
+        if (samplePointLights)
+        {
+            pointLightIndex = min((uint)(random_float(payload.seed) * float(activePointLightCount)), activePointLightCount - 1u);
+        }
+
+        PointLightParam pl = PointLightBuffer[pointLightIndex];
 
         float3 pointPosition = pl.PositionAndRadius.xyz;
         float pointRadius = max(pl.PositionAndRadius.w, 0.01f);
@@ -961,7 +967,7 @@ void PathTracingClosestHit(inout PathTracingPayload payload, in BuiltInTriangleI
         float3 pointRadiance = pointColor * pointIntensity * attenuation;
         float3 pointDiffuse = bEnableDirectDiffuse ? (albedo * (1.0 - metallic)) : float3(0, 0, 0);
         float3 pointSpecular = bEnableDirectSpecular ? EvaluateGGXSpecularBRDF(N, V, pointLightDir, roughness, directF0) : float3(0, 0, 0);
-        directLight += (pointDiffuse + pointSpecular) * pointNdotL * pointRadiance;
+        directLight += (pointDiffuse + pointSpecular) * pointNdotL * pointRadiance * pointLightSampleWeight;
     }
     
     // Set direct lighting contribution

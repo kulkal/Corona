@@ -8,16 +8,6 @@ RWStructuredBuffer<float4> PathRadiance : register(u3);
 RWTexture2D<float4> OutputColor : register(u4);
 RWByteAddressBuffer IndirectArgs : register(u5);
 
-#define MAX_POINT_LIGHTS 128
-
-struct PointLightParam
-{
-    float4 PositionAndRadius;
-    float4 ColorAndIntensity;
-    float4 DirectionAndType;
-    float4 SpotConeAndFlags;
-};
-
 cbuffer ViewParameter : register(b0)
 {
     float4x4 ViewMatrix;
@@ -31,7 +21,7 @@ cbuffer ViewParameter : register(b0)
     float DirectLightAngularRadius;
     uint DirectLightSampleCount;
     uint bDirectLightCastShadow;
-    float _directLightPadding;
+    uint PointLightSampleCount;
     float2 RandomOffset;
     uint FrameCounter;
     uint BlueNoiseOffsetStride;
@@ -54,8 +44,7 @@ cbuffer ViewParameter : register(b0)
     float SpecularMotionVectorScale;
     uint bStabilizePrimaryRaySamples;
     uint _rtaoPadding;
-    uint3 _pointLightArrayPadding;
-    PointLightParam PointLights[MAX_POINT_LIGHTS];
+    uint _pointLightPadding0;
     uint PointLightCount;
     float3 PointLightPadding;
 };

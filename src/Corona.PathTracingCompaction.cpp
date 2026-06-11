@@ -74,6 +74,7 @@ void Corona::InitPathTracingCompactionPass()
 	tracePso->BindUAV("global", "PathCompactionCounters", 14);
 	tracePso->BindUAV("global", "PathCompactionRadiance", 15);
 	tracePso->BindSRV("global", "gRtScene", 0);
+	tracePso->BindSRV("global", "PointLightBuffer", 4);
 	tracePso->BindCBV("global", "ViewParameter", 0, sizeof(PathTracingViewParam), 1);
 	tracePso->BindCBV("global", "PathCompaction", 1, sizeof(PathTracingCompactionParamCB), 1);
 	tracePso->BindSampler("global", "sampleWrap", 0);
@@ -373,6 +374,7 @@ bool Corona::PathTracingCompactionPass(Texture* outputColor, const PathTracingVi
 			.SetBufferUAV("global", "PathCompactionCounters", PathTracingCompactionCounter.get())
 			.SetBufferUAV("global", "PathCompactionRadiance", PathTracingCompactionRadiance.get())
 			.SetAccelerationStructure("global", "gRtScene", TLAS)
+			.SetBufferSRV("global", "PointLightBuffer", PathTracingPointLightBuffer.get())
 			.SetCBVValue("global", "ViewParameter", const_cast<PathTracingViewParamCB*>(&dispatchViewParam))
 			.SetCBVValue("global", "PathCompaction", &compactionParam)
 			.SetSampler("global", "sampleWrap", samplerWrap.get());

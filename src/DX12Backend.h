@@ -671,7 +671,7 @@ public:
 	shared_ptr<Texture> CreateTexture3D(DXGI_FORMAT format, D3D12_RESOURCE_FLAGS resFlags, D3D12_RESOURCE_STATES initResState, int width, int height, int depth, int mipLevels);
 
 	shared_ptr<Sampler> CreateSampler(D3D12_SAMPLER_DESC& InSamplerDesc);
-	shared_ptr<Buffer> CreateBuffer(UINT InNumElements, UINT InElementSize, D3D12_RESOURCE_STATES initResState, bool isUAV, void* SrcData = nullptr);
+	shared_ptr<Buffer> CreateBuffer(UINT InNumElements, UINT InElementSize, D3D12_RESOURCE_STATES initResState, bool isUAV, void* SrcData = nullptr, bool forceDefaultHeap = false);
 	shared_ptr<Buffer> CreateDefaultByteAddressBuffer(UINT InNumElements, UINT InElementSize, EInitialResourceState initialState = EInitialResourceState::ShaderRead);
 	bool UploadToDefaultBuffer(Buffer* buffer, const void* srcData, UINT sizeInBytes, EResourceState stateBefore, EResourceState stateAfter);
 

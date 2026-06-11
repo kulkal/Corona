@@ -8017,6 +8017,7 @@ void Corona::PushLuauUiStateForScript(lua_State* L, const std::string& mode, boo
 	PushIntegerField(L, "path_max_bounces", static_cast<lua_Integer>(PathTracingViewParam.MaxBounces));
 	PushIntegerField(L, "path_samples_per_pixel", static_cast<lua_Integer>(PathTracingViewParam.SamplesPerPixel));
 	PushIntegerField(L, "path_direct_light_samples", static_cast<lua_Integer>(PathTracingViewParam.DirectLightSampleCount));
+	PushIntegerField(L, "path_point_light_samples", static_cast<lua_Integer>(PathTracingViewParam.PointLightSampleCount));
 	PushIntegerField(L, "path_debug_mode", static_cast<lua_Integer>(PathTracingViewParam.DebugMode));
 	PushBoolField(L, "path_compaction", bEnablePathTracingCompaction);
 	PushIntegerField(L, "frame_counter", static_cast<lua_Integer>(FrameCounter));
@@ -8581,6 +8582,7 @@ bool Corona::SetLuauUiValueForScript(const std::string& name, lua_State* L, int 
 	if (setUInt("path_max_bounces", PathTracingViewParam.MaxBounces, 1, 8)) { if (lastSetterChanged) resetPathTracing(); return true; }
 	if (setUInt("path_samples_per_pixel", PathTracingViewParam.SamplesPerPixel, 1, 16)) { if (lastSetterChanged) resetPathTracing(); return true; }
 	if (setUInt("path_direct_light_samples", PathTracingViewParam.DirectLightSampleCount, 1, 8)) { if (lastSetterChanged) resetPathTracing(); return true; }
+	if (setUInt("path_point_light_samples", PathTracingViewParam.PointLightSampleCount, 0, MaxPathTracingPointLights)) { if (lastSetterChanged) resetPathTracing(); return true; }
 	if (setFloat("tonemap_whitepoint_hejl", ToneMapCB.WhitePoint_Hejl)) return true;
 	if (setFloat("tonemap_shoulder_strength", ToneMapCB.ShoulderStrength)) return true;
 	if (setFloat("tonemap_linear_strength", ToneMapCB.LinearStrength)) return true;

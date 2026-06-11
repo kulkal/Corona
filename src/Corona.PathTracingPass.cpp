@@ -19,6 +19,36 @@
 
 void AppendCpuRuntimeTrace(const std::wstring& line);
 
+bool Corona::EnsurePathTracingPointLightBuffer(UINT32 pointLightStateHash)
+{
+	if (PathTracingPointLightBuffer && PathTracingPointLightBufferHash == pointLightStateHash)
+		return true;
+
+	std::array<PointLightParam, MaxPathTracingPointLights> uploadData = PathTracingPointLights;
+
+	BufferCreateDesc desc = {};
+	desc.NumElements = MaxPathTracingPointLights;
+	desc.ElementSize = sizeof(PointLightParam);
+	desc.InitialState = EInitialResourceState::ShaderRead;
+	desc.InitialData = uploadData.data();
+	desc.Shape = EBufferShape::Structured;
+	desc.bUseDefaultHeap = true;
+
+	PathTracingPointLightBuffer = renderBackend->CreateBuffer(desc);
+	if (!PathTracingPointLightBuffer)
+	{
+		PathTracingPointLightBufferHash = 0xFFFFFFFFu;
+		AppendCpuRuntimeTrace(L"[PathTracing] failed to create DEFAULT point light SRV buffer");
+		return false;
+	}
+
+	PathTracingPointLightBufferHash = pointLightStateHash;
+	AppendCpuRuntimeTrace(
+		L"[PathTracing] point light buffer uploaded to DEFAULT structured SRV, count=" +
+		std::to_wstring(PathTracingPointLightCount));
+	return true;
+}
+
 void Corona::InitPathTracingPass()
 {
 	shared_ptr<RTPipelineStateObject> TEMP_PSO_PATH_TRACING = renderBackend->CreateRTPipelineStateObject();
@@ -41,6 +71,7 @@ void Corona::InitPathTracingPass()
 	TEMP_PSO_PATH_TRACING->BindUAV("global", "OutSpecularHitDistance", 8);
 	TEMP_PSO_PATH_TRACING->BindUAV("global", "OutSpecularMotionVector", 9);
 	TEMP_PSO_PATH_TRACING->BindSRV("global", "gRtScene", 0);
+	TEMP_PSO_PATH_TRACING->BindSRV("global", "PointLightBuffer", 4);
 	TEMP_PSO_PATH_TRACING->BindCBV("global", "ViewParameter", 0, sizeof(PathTracingViewParam), 1);
 	TEMP_PSO_PATH_TRACING->BindSampler("global", "sampleWrap", 0);
 
@@ -101,6 +132,11 @@ void Corona::PathTracingPass()
 			return;
 	}
 
+	ApplyRenderPointLightsToFrameParams();
+	const UINT32 currentPointLightStateHash = ComputePathTracingPointLightStateHash();
+	if (!EnsurePathTracingPointLightBuffer(currentPointLightStateHash))
+		return;
+
 	// Transition output buffer to UAV
 	renderBackend->TransitionTexture(outputColor, EResourceState::ShaderRead, EResourceState::UnorderedAccess);
 	if (bWritePrimaryGBuffer)
@@ -132,9 +168,6 @@ void Corona::PathTracingPass()
 			renderBackend->TransitionTexture(PathTracingSpecularMotionVectorBuffer.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
 		}
 	};
-
-	ApplyRenderPointLightsToFrameParams();
-	const UINT32 currentPointLightStateHash = ComputePathTracingPointLightStateHash();
 
 	// Check if camera or light changed and reset accumulation
 	bool cameraChanged = false;
@@ -200,6 +233,7 @@ void Corona::PathTracingPass()
 	PathTracingViewParam.LightDirAndIntensity = glm::vec4(RenderFrameNormalizedLightDir, LightIntensity);
 	PathTracingViewParam.DirectLightAngularRadius = RTShadowViewParam.ShadowLightRadius;
 	PathTracingViewParam.DirectLightSampleCount = std::clamp(PathTracingViewParam.DirectLightSampleCount, 1u, 8u);
+	PathTracingViewParam.PointLightSampleCount = std::clamp(PathTracingViewParam.PointLightSampleCount, 0u, MaxPathTracingPointLights);
 	PathTracingViewParam.bDirectLightCastShadow = RenderFrameDirectionalLightCastShadow ? 1u : 0u;
 	PathTracingViewParam.RandomOffset = glm::vec2(RenderFrameShaderTime, RenderFrameShaderTime);
 	PathTracingViewParam.FrameCounter = PathTracingViewParam.DebugMode == 0 ? PathTracingAccumulatedFrames : 0u;
@@ -276,6 +310,7 @@ void Corona::PathTracingPass()
 		.SetTextureUAV("global", "OutSpecularHitDistance", PathTracingSpecularHitDistanceBuffer.get())
 		.SetTextureUAV("global", "OutSpecularMotionVector", PathTracingSpecularMotionVectorBuffer.get())
 		.SetAccelerationStructure("global", "gRtScene", TLAS)
+		.SetBufferSRV("global", "PointLightBuffer", PathTracingPointLightBuffer.get())
 		.SetCBVValue("global", "ViewParameter", &dispatchViewParam)
 		.SetSampler("global", "sampleWrap", samplerWrap.get());
 

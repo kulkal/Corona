@@ -999,7 +999,7 @@ private:
 		float DirectLightAngularRadius = 0.001f;
 		UINT32 DirectLightSampleCount = 1;
 		UINT32 bDirectLightCastShadow = 1;
-		float _directLightPadding = 0.0f;
+		UINT32 PointLightSampleCount = 1;
 		glm::vec2 RandomOffset;
 		UINT32 FrameCounter;
 		UINT32 BlueNoiseOffsetStride = 1;
@@ -1022,13 +1022,10 @@ private:
 		float SpecularMotionVectorScale = 1.0f;
 		UINT32 bStabilizePrimaryRaySamples = 0;
 		UINT32 _rtaoPadding = 0;
-		UINT32 _pointLightArrayPadding[3] = {};
-		PointLightParam PointLights[MaxPointLights];
+		UINT32 _pointLightPadding0 = 0;
 		UINT32 PointLightCount = 0;
 		glm::vec3 PointLightPadding = glm::vec3(0.0f);
 	};
-	static_assert(offsetof(PathTracingViewParamCB, PointLights) % 16 == 0,
-		"PathTracing point-light array must match HLSL cbuffer packing");
 
 	PathTracingViewParamCB PathTracingViewParam;
 	shared_ptr<RTPipelineStateObject> PSO_PATH_TRACING;
@@ -1042,6 +1039,10 @@ private:
 	std::shared_ptr<Buffer> PathTracingCompactionCounter;
 	std::shared_ptr<Buffer> PathTracingCompactionRadiance;
 	std::shared_ptr<Buffer> PathTracingCompactionIndirectArgs;
+	std::array<PointLightParam, MaxPathTracingPointLights> PathTracingPointLights = {};
+	UINT32 PathTracingPointLightCount = 0;
+	std::shared_ptr<Buffer> PathTracingPointLightBuffer;
+	UINT32 PathTracingPointLightBufferHash = 0xFFFFFFFFu;
 	UINT PathTracingWriteIndex = 0;
 	UINT32 PathTracingAccumulatedFrames = 0;
 	UINT32 PathTracingLastDispatchSamplesPerPixel = 1;
@@ -2037,6 +2038,7 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 		float SpatialHashLevelEnable = 0.0f;
 		float SpatialHashLevelBaseDistance = 600.0f;
 		UINT32 PathTracingDirectLightSampleCount = 1;
+		UINT32 PathTracingPointLightSampleCount = 1;
 		UINT32 PathTracingMaxBounces = 4;
 		UINT32 PathTracingSamplesPerPixel = 1;
 		UINT32 PathTracingDebugMode = 0;
@@ -3505,6 +3507,7 @@ private:
 	void FillPointLightParamsFromList(PointLightParam* outPointLights, UINT32& outPointLightCount, const std::vector<const PointLightState*>& lights, UINT32 maxCount) const;
 	void ApplyRenderPointLightsToFrameParams();
 	UINT32 ComputePathTracingPointLightStateHash() const;
+	bool EnsurePathTracingPointLightBuffer(UINT32 pointLightStateHash);
 
 	UINT m_width = 0;
 	UINT m_height = 0;

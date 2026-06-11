@@ -187,6 +187,7 @@ local function draw_direct_lighting(state)
 		end
 	else
 		slider_int("Path Tracing Sun Samples", "path_direct_light_samples", state.path_direct_light_samples, 1, 8)
+		slider_int("Path Tracing Point Light Samples (0=All)", "path_point_light_samples", state.path_point_light_samples, 0, 16)
 	end
 
 	imgui.tree_pop()

@@ -148,6 +148,7 @@ struct BufferCreateDesc
 	bool bAllowUnorderedAccess = false;
 	void* InitialData = nullptr;
 	EBufferShape Shape = EBufferShape::ByteAddress;
+	bool bUseDefaultHeap = false;
 };
 
 enum class ESamplerFilter

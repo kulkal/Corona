@@ -4005,6 +4005,21 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 			}
 			continue;
 		}
+		std::wstring ptPointLightSamplesValue = ParseValueArg(arg, L"--pt-point-light-samples", L"-pt-point-light-samples", i);
+		if (ptPointLightSamplesValue.empty())
+			ptPointLightSamplesValue = ParseValueArg(arg, L"--pt-local-light-samples", L"-pt-local-light-samples", i);
+		if (!ptPointLightSamplesValue.empty())
+		{
+			try
+			{
+				const unsigned long value = std::stoul(ptPointLightSamplesValue);
+				PathTracingViewParam.PointLightSampleCount = static_cast<UINT32>(std::clamp<unsigned long>(value, 0ul, MaxPathTracingPointLights));
+			}
+			catch (...)
+			{
+			}
+			continue;
+		}
 		if (arg == L"--rtao")
 		{
 			bEnableRTAO = true;
@@ -4632,6 +4647,7 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 		L", ptDLSSRR=" + std::to_wstring(bEnablePathTracingDLSSRR ? 1 : 0) +
 		L", ptCompaction=" + std::to_wstring(bEnablePathTracingCompaction ? 1 : 0) +
 		L", ptSPP=" + std::to_wstring(PathTracingViewParam.SamplesPerPixel) +
+		L", ptPointLightSamples=" + std::to_wstring(PathTracingViewParam.PointLightSampleCount) +
 		L", ptRRSpecularMV=" + std::to_wstring(bEnablePathTracingRRSpecularMotionVectors ? 1 : 0) +
 		L", ptRRSpecularMVScale=" + std::to_wstring(PathTracingRRSpecularMotionVectorScale) +
 		L", ptRRSpecularHitDistance=" + std::to_wstring(bEnablePathTracingRRSpecularHitDistance ? 1 : 0) +
@@ -7601,6 +7617,7 @@ Corona::RenderFrameSourceState Corona::CaptureRenderFrameSourceState() const
 	state.SpatialHashLevelEnable = SpatialHashGICB.SpatialHashLevelParams.x;
 	state.SpatialHashLevelBaseDistance = SpatialHashGICB.SpatialHashLevelParams.y;
 	state.PathTracingDirectLightSampleCount = PathTracingViewParam.DirectLightSampleCount;
+	state.PathTracingPointLightSampleCount = PathTracingViewParam.PointLightSampleCount;
 	state.PathTracingMaxBounces = PathTracingViewParam.MaxBounces;
 	state.PathTracingSamplesPerPixel = PathTracingViewParam.SamplesPerPixel;
 	state.PathTracingDebugMode = PathTracingViewParam.DebugMode;
@@ -7713,6 +7730,7 @@ void Corona::ApplyRenderFrameSourceState(const RenderFrameSourceState& state)
 	SpatialHashGICB.SpatialHashLevelParams.x = state.SpatialHashLevelEnable;
 	SpatialHashGICB.SpatialHashLevelParams.y = state.SpatialHashLevelBaseDistance;
 	PathTracingViewParam.DirectLightSampleCount = state.PathTracingDirectLightSampleCount;
+	PathTracingViewParam.PointLightSampleCount = state.PathTracingPointLightSampleCount;
 	PathTracingViewParam.MaxBounces = state.PathTracingMaxBounces;
 	PathTracingViewParam.SamplesPerPixel = state.PathTracingSamplesPerPixel;
 	PathTracingViewParam.DebugMode = state.PathTracingDebugMode;
@@ -7789,6 +7807,7 @@ void Corona::SyncCurrentLightingSettingsToFrameSourceState()
 		state.SpatialHashLevelEnable = SpatialHashGICB.SpatialHashLevelParams.x;
 		state.SpatialHashLevelBaseDistance = SpatialHashGICB.SpatialHashLevelParams.y;
 		state.PathTracingDirectLightSampleCount = PathTracingViewParam.DirectLightSampleCount;
+		state.PathTracingPointLightSampleCount = PathTracingViewParam.PointLightSampleCount;
 	};
 
 	if (RenderWorld.bHasFrameSourceState)
@@ -7883,6 +7902,7 @@ void Corona::ApplyFrameSourceRenderSync(const RenderFrameDelta& delta)
 	const bool bPathTracingSettingsChanged =
 		bHadFrameSourceState &&
 		(oldState.PathTracingDirectLightSampleCount != newState.PathTracingDirectLightSampleCount ||
+		 oldState.PathTracingPointLightSampleCount != newState.PathTracingPointLightSampleCount ||
 		 oldState.PathTracingMaxBounces != newState.PathTracingMaxBounces ||
 		 oldState.PathTracingSamplesPerPixel != newState.PathTracingSamplesPerPixel ||
 		 oldState.PathTracingDebugMode != newState.PathTracingDebugMode ||
@@ -8444,7 +8464,9 @@ void Corona::ProcessPendingEditorMapLoad()
 
 void Corona::ApplyRenderPointLightsToFrameParams()
 {
-	FillPointLightParams(PathTracingViewParam.PointLights, PathTracingViewParam.PointLightCount, MaxPathTracingPointLights);
+	PathTracingPointLights.fill(PointLightParam{});
+	FillPointLightParams(PathTracingPointLights.data(), PathTracingPointLightCount, MaxPathTracingPointLights);
+	PathTracingViewParam.PointLightCount = PathTracingPointLightCount;
 }
 
 UINT32 Corona::ComputePathTracingPointLightStateHash() const
@@ -8460,10 +8482,10 @@ UINT32 Corona::ComputePathTracingPointLightStateHash() const
 		}
 	};
 
-	const UINT32 activeCount = std::min(PathTracingViewParam.PointLightCount, MaxPointLights);
+	const UINT32 activeCount = std::min(PathTracingPointLightCount, MaxPathTracingPointLights);
 	mixBytes(&activeCount, sizeof(activeCount));
 	for (UINT32 i = 0; i < activeCount; ++i)
-		mixBytes(&PathTracingViewParam.PointLights[i], sizeof(PointLightParam));
+		mixBytes(&PathTracingPointLights[i], sizeof(PointLightParam));
 	return hash;
 }
 
@@ -15661,6 +15683,15 @@ void Corona::OnRender()
 		ImGui::Text("Path Tracing Settings");
 		ImGui::SliderInt("Max Bounces", (int*)&PathTracingViewParam.MaxBounces, 1, 8);
 		ImGui::SliderInt("Samples Per Pixel", (int*)&PathTracingViewParam.SamplesPerPixel, 1, 16);
+		int pointLightSamples = static_cast<int>(PathTracingViewParam.PointLightSampleCount);
+		if (ImGui::SliderInt("Point Light Samples (0=All)", &pointLightSamples, 0, static_cast<int>(MaxPathTracingPointLights)))
+		{
+			PathTracingViewParam.PointLightSampleCount = static_cast<UINT32>(pointLightSamples);
+			FrameCounter = 0;
+			PathTracingAccumulatedFrames = 0;
+			PrevPathTracingViewMat = glm::mat4x4(0.0f);
+			PrevPathTracingPointLightStateHash = 0xFFFFFFFFu;
+		}
 #if WITH_STREAMLINE
 		if (ImGui::Checkbox("Primary-hit GBuffer for DLSS RR", &bEnablePathTracingDLSSRR))
 		{

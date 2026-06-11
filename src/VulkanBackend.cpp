@@ -3188,7 +3188,7 @@ std::shared_ptr<Buffer> VulkanBackend::CreateBuffer(const BufferCreateDesc& desc
 			VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
 			VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
 	}
-	const bool bUseDeviceLocalMemory = (desc.bAllowUnorderedAccess || desc.InitialData != nullptr) && allocation.SizeInBytes > 0;
+	const bool bUseDeviceLocalMemory = (desc.bAllowUnorderedAccess || desc.bUseDefaultHeap || desc.InitialData != nullptr) && allocation.SizeInBytes > 0;
 	const bool bCreatedBuffer = bUseDeviceLocalMemory
 		? CreateDeviceLocalBufferWithUpload(
 			allocation.SizeInBytes,

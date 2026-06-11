@@ -1509,7 +1509,8 @@ std::shared_ptr<Buffer> DX12Backend::CreateBuffer(const BufferCreateDesc& desc)
 		desc.ElementSize,
 		ToD3D12ResourceState(desc.InitialState),
 		desc.bAllowUnorderedAccess,
-		desc.InitialData);
+		desc.InitialData,
+		desc.bUseDefaultHeap);
 	if (buffer)
 	{
 		if (desc.Shape == EBufferShape::Structured)
@@ -1520,7 +1521,7 @@ std::shared_ptr<Buffer> DX12Backend::CreateBuffer(const BufferCreateDesc& desc)
 	return buffer;
 }
 
-std::shared_ptr<Buffer> DX12Backend::CreateBuffer(UINT InNumElements, UINT InElementSize, D3D12_RESOURCE_STATES initResState, bool isUAV, void* SrcData)
+std::shared_ptr<Buffer> DX12Backend::CreateBuffer(UINT InNumElements, UINT InElementSize, D3D12_RESOURCE_STATES initResState, bool isUAV, void* SrcData, bool forceDefaultHeap)
 {
 	Buffer * buffer = new Buffer;
 	buffer->Owner = this;
@@ -1548,7 +1549,7 @@ std::shared_ptr<Buffer> DX12Backend::CreateBuffer(UINT InNumElements, UINT InEle
 	heapProp.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
 	heapProp.CreationNodeMask = 1;
 	heapProp.VisibleNodeMask = 1;
-	if (isUAV)
+	if (isUAV || forceDefaultHeap)
 		heapProp.Type = D3D12_HEAP_TYPE_DEFAULT;
 	else
 		heapProp.Type = D3D12_HEAP_TYPE_UPLOAD;
