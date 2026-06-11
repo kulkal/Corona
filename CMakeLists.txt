@@ -617,6 +617,26 @@ if(CORONA_WITH_NRI)
     if(NOT EXISTS "${CORONA_SRC_DIR}/external/nri/CMakeLists.txt")
         message(FATAL_ERROR "CORONA_WITH_NRI=ON but src/external/nri/CMakeLists.txt is missing. Clone NVIDIA-RTX/NRI into src/external/nri.")
     endif()
+    # Lean first integration: D3D12 only (we wrap Corona's existing ID3D12Device),
+    # validation on, vendor/optional SDKs off. VK is enabled in a later milestone.
+    # Corona owns its own Agility SDK, so disable NRI's copy to avoid conflicts.
+    set(NRI_STATIC_LIBRARY ON CACHE BOOL "" FORCE)
+    set(NRI_ENABLE_D3D12_SUPPORT ON CACHE BOOL "" FORCE)
+    set(NRI_ENABLE_D3D11_SUPPORT OFF CACHE BOOL "" FORCE)
+    set(NRI_ENABLE_VK_SUPPORT OFF CACHE BOOL "" FORCE)
+    set(NRI_ENABLE_NONE_SUPPORT ON CACHE BOOL "" FORCE)
+    set(NRI_ENABLE_VALIDATION_SUPPORT ON CACHE BOOL "" FORCE)
+    set(NRI_ENABLE_AMDAGS OFF CACHE BOOL "" FORCE)
+    set(NRI_ENABLE_NVAPI OFF CACHE BOOL "" FORCE)
+    set(NRI_ENABLE_NVTX_SUPPORT OFF CACHE BOOL "" FORCE)
+    # Must stay ON: with a recent Windows SDK (10.0.26100) the system d3d12.h
+    # already declares the OMM raytracing structs, which collide with NRI's own
+    # definitions unless NRI uses its bundled Agility SDK headers. NRI pins
+    # Agility 619 — the same major version Corona already uses — so no conflict.
+    set(NRI_ENABLE_AGILITY_SDK_SUPPORT ON CACHE BOOL "" FORCE)
+    set(NRI_ENABLE_NGX_SDK OFF CACHE BOOL "" FORCE)
+    set(NRI_ENABLE_NIS_SDK OFF CACHE BOOL "" FORCE)
+    set(NRI_ENABLE_IMGUI_EXTENSION OFF CACHE BOOL "" FORCE)
     add_subdirectory("${CORONA_SRC_DIR}/external/nri" "${CMAKE_CURRENT_BINARY_DIR}/nri" EXCLUDE_FROM_ALL)
     target_include_directories(Corona PRIVATE "${CORONA_SRC_DIR}/external/nri/Include")
     target_link_libraries(Corona PRIVATE NRI)
