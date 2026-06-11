@@ -143,6 +143,136 @@ struct NRIBackend::Impl
 		}
 		return true;
 	}
+
+	void FreeBuffer(nri::Buffer* b, std::vector<nri::Memory*>& mem)
+	{
+		if (b) Core.DestroyBuffer(b);
+		for (nri::Memory* m : mem) if (m) Core.FreeMemory(m);
+		mem.clear();
+	}
+
+	// End-to-end compute: compile a trivial cs_6_5 kernel that writes a sentinel
+	// into a RWStructuredBuffer (root UAV), dispatch it, copy the result to a
+	// readback buffer, map it and verify. Returns a short human-readable result.
+	std::string RunComputeSmoke()
+	{
+		using nri::Result;
+		const uint32_t N = 4;
+		const uint64_t bufSize = N * sizeof(uint32_t);
+		const uint32_t sentinel = 0xCAFEu;
+
+		static const char* kCS =
+			"RWStructuredBuffer<uint> OutBuf : register(u0);\n"
+			"[numthreads(1,1,1)] void main(uint3 id : SV_DispatchThreadID) { OutBuf[id.x] = 0xCAFEu; }\n";
+		std::string err;
+		std::vector<uint8_t> dxil = CompileHLSLToDXIL(kCS, strlen(kCS), L"nri_compute.cs", L"main", L"cs_6_5", err);
+		if (dxil.empty())
+			return "FAIL(shader)";
+
+		nri::Buffer* outBuf = nullptr; std::vector<nri::Memory*> outMem;
+		nri::Buffer* rbBuf = nullptr;  std::vector<nri::Memory*> rbMem;
+		nri::Descriptor* outView = nullptr;
+		nri::PipelineLayout* layout = nullptr;
+		nri::Pipeline* pipeline = nullptr;
+		std::string result = "FAIL";
+
+		do
+		{
+			if (!CreateBoundBuffer(bufSize, sizeof(uint32_t), nri::BufferUsageBits::SHADER_RESOURCE_STORAGE, nri::MemoryLocation::DEVICE, outBuf, outMem))
+				{ result = "FAIL(outBuf)"; break; }
+			if (!CreateBoundBuffer(bufSize, 0, nri::BufferUsageBits::NONE, nri::MemoryLocation::HOST_READBACK, rbBuf, rbMem))
+				{ result = "FAIL(rbBuf)"; break; }
+
+			nri::BufferViewDesc bvd = {};
+			bvd.buffer = outBuf;
+			bvd.type = nri::BufferView::STORAGE_STRUCTURED_BUFFER;
+			bvd.offset = 0;
+			bvd.size = bufSize;
+			bvd.structureStride = sizeof(uint32_t);
+			if (Core.CreateBufferView(bvd, outView) != Result::SUCCESS)
+				{ result = "FAIL(view)"; break; }
+
+			nri::RootDescriptorDesc rd = {};
+			rd.registerIndex = 0;
+			rd.descriptorType = nri::DescriptorType::STORAGE_STRUCTURED_BUFFER;
+			rd.shaderStages = nri::StageBits::COMPUTE_SHADER;
+			nri::PipelineLayoutDesc pld = {};
+			pld.rootRegisterSpace = 0;
+			pld.rootDescriptors = &rd;
+			pld.rootDescriptorNum = 1;
+			pld.shaderStages = nri::StageBits::COMPUTE_SHADER;
+			if (Core.CreatePipelineLayout(*Device, pld, layout) != Result::SUCCESS)
+				{ result = "FAIL(layout)"; break; }
+
+			nri::ComputePipelineDesc cpd = {};
+			cpd.pipelineLayout = layout;
+			cpd.shader.stage = nri::StageBits::COMPUTE_SHADER;
+			cpd.shader.bytecode = dxil.data();
+			cpd.shader.size = dxil.size();
+			cpd.shader.entryPointName = "main";
+			if (Core.CreateComputePipeline(*Device, cpd, pipeline) != Result::SUCCESS)
+				{ result = "FAIL(pipeline)"; break; }
+
+			Core.ResetCommandAllocator(*CmdAllocator);
+			Core.BeginCommandBuffer(*CmdBuffer, nullptr);
+
+			nri::BufferBarrierDesc toUav = {};
+			toUav.buffer = outBuf;
+			toUav.before.access = nri::AccessBits::NONE; toUav.before.stages = nri::StageBits::ALL;
+			toUav.after.access = nri::AccessBits::SHADER_RESOURCE_STORAGE; toUav.after.stages = nri::StageBits::COMPUTE_SHADER;
+			nri::BarrierDesc bar1 = {}; bar1.buffers = &toUav; bar1.bufferNum = 1;
+			Core.CmdBarrier(*CmdBuffer, bar1);
+
+			Core.CmdSetPipelineLayout(*CmdBuffer, nri::BindPoint::COMPUTE, *layout);
+			nri::SetRootDescriptorDesc srd = {};
+			srd.rootDescriptorIndex = 0;
+			srd.descriptor = outView;
+			srd.offset = 0;
+			srd.bindPoint = nri::BindPoint::COMPUTE;
+			Core.CmdSetRootDescriptor(*CmdBuffer, srd);
+			Core.CmdSetPipeline(*CmdBuffer, *pipeline);
+			nri::DispatchDesc disp = { N, 1, 1 };
+			Core.CmdDispatch(*CmdBuffer, disp);
+
+			nri::BufferBarrierDesc toCopy = {};
+			toCopy.buffer = outBuf;
+			toCopy.before.access = nri::AccessBits::SHADER_RESOURCE_STORAGE; toCopy.before.stages = nri::StageBits::COMPUTE_SHADER;
+			toCopy.after.access = nri::AccessBits::COPY_SOURCE; toCopy.after.stages = nri::StageBits::COPY;
+			nri::BarrierDesc bar2 = {}; bar2.buffers = &toCopy; bar2.bufferNum = 1;
+			Core.CmdBarrier(*CmdBuffer, bar2);
+			Core.CmdCopyBuffer(*CmdBuffer, *rbBuf, 0, *outBuf, 0, bufSize);
+
+			if (Core.EndCommandBuffer(*CmdBuffer) != Result::SUCCESS)
+				{ result = "FAIL(record)"; break; }
+
+			nri::FenceSubmitDesc sf = {};
+			sf.fence = Fence; sf.value = ++FenceValue; sf.stages = nri::StageBits::ALL;
+			nri::CommandBuffer* cbs[1] = { CmdBuffer };
+			nri::QueueSubmitDesc qs = {};
+			qs.commandBuffers = cbs; qs.commandBufferNum = 1;
+			qs.signalFences = &sf; qs.signalFenceNum = 1;
+			if (Core.QueueSubmit(*GraphicsQueue, qs) != Result::SUCCESS)
+				{ result = "FAIL(submit)"; break; }
+			Core.Wait(*Fence, FenceValue);
+
+			uint32_t* mapped = (uint32_t*)Core.MapBuffer(*rbBuf, 0, bufSize);
+			uint32_t v0 = mapped ? mapped[0] : 0u;
+			uint32_t vN = mapped ? mapped[N - 1] : 0u;
+			Core.UnmapBuffer(*rbBuf);
+
+			char buf[64];
+			const bool ok = mapped && v0 == sentinel && vN == sentinel;
+			_snprintf_s(buf, _TRUNCATE, ok ? "PASS(0x%X)" : "FAIL(val=0x%X)", v0);
+			result = buf;
+		} while (false);
+
+		if (pipeline) Core.DestroyPipeline(pipeline);
+		if (layout) Core.DestroyPipelineLayout(layout);
+		if (outView) Core.DestroyDescriptor(outView);
+		FreeBuffer(outBuf, outMem);
+		FreeBuffer(rbBuf, rbMem);
+		return result;
+	}
 };
 
 // NRI routes validation / driver messages here. Surface them to the debugger
@@ -258,12 +388,16 @@ NRIBackend::NRIBackend() : m(std::make_unique<Impl>())
 		shaderBytes = dxil.size();
 	}
 
+	// End-to-end compute dispatch (pipeline layout + compute pipeline + dispatch
+	// + copy + readback verify).
+	std::string computeResult = (m->CmdBuffer && m->GraphicsQueue) ? m->RunComputeSmoke() : std::string("skipped");
+
 	char info[768];
 	_snprintf_s(info, _TRUNCATE,
-		"device ok [%s], rtTier=%u sm=%u queue=%s bufferSmoke=%s cmd=%s submitSmoke=%s shaderDXIL=%zuB",
+		"device ok [%s], rtTier=%u sm=%u queue=%s bufferSmoke=%s cmd=%s submitSmoke=%s shaderDXIL=%zuB compute=%s",
 		dd.adapterDesc.name, (unsigned)dd.tiers.rayTracing, (unsigned)dd.shaderModel,
 		m->GraphicsQueue ? "ok" : "null", bufferSmokeOk ? "PASS" : "FAIL",
-		m->CmdBuffer ? "ok" : "null", submitSmokeOk ? "PASS" : "FAIL", shaderBytes);
+		m->CmdBuffer ? "ok" : "null", submitSmokeOk ? "PASS" : "FAIL", shaderBytes, computeResult.c_str());
 	ErrorString = info;          // diagnostic status (not an error); logged by bootstrap
 	OutputDebugStringA("[NRI] ");
 	OutputDebugStringA(info);
