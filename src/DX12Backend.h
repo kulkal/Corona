@@ -287,6 +287,7 @@ public:
 	uint32_t ShaderTableEntrySize = 0;
 	UINT ShaderTableSize = 0;
 	ComPtr<ID3D12Resource> ShaderTable;
+	ComPtr<ID3D12CommandSignature> DispatchRaysCommandSignature;
 	std::vector<uint8_t> ShaderTableFrameValid;
 	std::vector<uint32_t> ShaderTableFrameInstanceCount;
 	std::vector<uint64_t> ShaderTableFrameSignature;
@@ -325,11 +326,15 @@ public:
 	void AddSceneGeometrySRVsToHitProgram(const std::string& hitGroup, VertexBuffer* sceneVertexBuffer, IndexBuffer* sceneIndexBuffer, uint32_t instanceIndex) override;
 	bool InitRS(const std::string& shaderFile) override;
 	void Apply(uint32_t width, uint32_t height) override;
+	bool GetDispatchRaysIndirectTemplate(uint32_t width, uint32_t height, RtDispatchRaysIndirectTemplate& outTemplate) const override;
+	bool ApplyIndirect(Buffer* indirectArgumentBuffer, uint64_t byteOffset) override;
 
 	void SetGlobalBinding(CommandList* CommandList = nullptr);
 	void SetUAVHandle(const std::string& shader, const std::string& bindingName, D3D12_GPU_DESCRIPTOR_HANDLE uavHandle, INT instanceIndex = -1);
 	void SetSRVHandle(const std::string& shader, const std::string& bindingName, D3D12_GPU_DESCRIPTOR_HANDLE srvHandle, INT instanceIndex = -1);
 	void AddDescriptor2HitProgram(const std::string& hitGroup, D3D12_GPU_DESCRIPTOR_HANDLE srvHandle, UINT instanceIndex);
+	bool BuildDispatchRaysDesc(uint32_t width, uint32_t height, D3D12_DISPATCH_RAYS_DESC& outDesc) const;
+	bool EnsureDispatchRaysCommandSignature();
 };
 
 // Buffer / IndexBuffer / VertexBuffer / Sampler / Texture are defined in

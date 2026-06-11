@@ -547,6 +547,8 @@ namespace
 			return D3D12_RESOURCE_STATE_COPY_SOURCE;
 		case EResourceState::VertexBuffer:
 			return D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+		case EResourceState::IndirectArgument:
+			return D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT;
 		case EResourceState::ShaderRead:
 		default:
 			return D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
@@ -5486,6 +5488,43 @@ bool D3D12RTPipelineStateObject::InitRS(const string& ShaderFile)
 	return true;
 }
 
+bool D3D12RTPipelineStateObject::BuildDispatchRaysDesc(uint32_t width, uint32_t height, D3D12_DISPATCH_RAYS_DESC& outDesc) const
+{
+	DX12Backend* owner = Owner;
+	if (!owner || !ShaderTable || ShaderTableSize == 0 || ShaderTableEntrySize == 0)
+		return false;
+
+	outDesc = {};
+	outDesc.Width = width;
+	outDesc.Height = height;
+	outDesc.Depth = 1;
+
+	D3D12_GPU_VIRTUAL_ADDRESS StartAddress = ShaderTable->GetGPUVirtualAddress() + ShaderTableSize * owner->CurrentFrameIndex;
+
+	outDesc.RayGenerationShaderRecord.StartAddress = StartAddress;
+	outDesc.RayGenerationShaderRecord.SizeInBytes = ShaderTableEntrySize;
+
+	// Miss is the second entry in the shader-table
+	UINT NumMissShader = 0;
+	for (const auto& sb : ShaderBinding)
+	{
+		if (sb.second.Type == MISS)
+			NumMissShader++;
+	}
+	size_t missOffset = ShaderTableEntrySize * 1;
+	outDesc.MissShaderTable.StartAddress = StartAddress + missOffset;
+	outDesc.MissShaderTable.StrideInBytes = ShaderTableEntrySize;
+	outDesc.MissShaderTable.SizeInBytes = ShaderTableEntrySize * NumMissShader;
+
+	
+	 // Hit is the third entry in the shader-table
+	size_t hitOffset = missOffset + NumMissShader * ShaderTableEntrySize;
+	outDesc.HitGroupTable.StartAddress = StartAddress + hitOffset;
+	outDesc.HitGroupTable.StrideInBytes = ShaderTableEntrySize;
+	outDesc.HitGroupTable.SizeInBytes = ShaderTableEntrySize * VecHitGroup.size() * NumInstance;
+	return true;
+}
+
 void D3D12RTPipelineStateObject::Apply(uint32_t width, uint32_t height)
 {
 	DX12Backend* owner = Owner;
@@ -5494,33 +5533,8 @@ void D3D12RTPipelineStateObject::Apply(uint32_t width, uint32_t height)
 	CommandList = ResolveCommandList(owner, CommandList);
 	assert(CommandList);
 	D3D12_DISPATCH_RAYS_DESC raytraceDesc = {};
-	raytraceDesc.Width = width;
-	raytraceDesc.Height = height;
-	raytraceDesc.Depth = 1;
-
-	D3D12_GPU_VIRTUAL_ADDRESS StartAddress = ShaderTable->GetGPUVirtualAddress() + ShaderTableSize * owner->CurrentFrameIndex;
-
-	raytraceDesc.RayGenerationShaderRecord.StartAddress = StartAddress ;
-	raytraceDesc.RayGenerationShaderRecord.SizeInBytes = ShaderTableEntrySize;
-
-	// Miss is the second entry in the shader-table
-	UINT NumMissShader = 0;
-	for (auto& sb : ShaderBinding)
-	{
-		if (sb.second.Type == MISS)
-			NumMissShader++;
-	}
-	size_t missOffset = ShaderTableEntrySize * 1;
-	raytraceDesc.MissShaderTable.StartAddress = StartAddress + missOffset;
-	raytraceDesc.MissShaderTable.StrideInBytes = ShaderTableEntrySize;
-	raytraceDesc.MissShaderTable.SizeInBytes = ShaderTableEntrySize * NumMissShader;
-
-	
-	 // Hit is the third entry in the shader-table
-	size_t hitOffset = missOffset + NumMissShader * ShaderTableEntrySize;
-	raytraceDesc.HitGroupTable.StartAddress = StartAddress + hitOffset;
-	raytraceDesc.HitGroupTable.StrideInBytes = ShaderTableEntrySize;
-	raytraceDesc.HitGroupTable.SizeInBytes = ShaderTableEntrySize * VecHitGroup.size() *NumInstance;
+	if (!BuildDispatchRaysDesc(width, height, raytraceDesc))
+		return;
 
 	// Bind the empty root signature
 	owner->InvalidateGraphicsCommandStateCache();
@@ -5535,6 +5549,92 @@ void D3D12RTPipelineStateObject::Apply(uint32_t width, uint32_t height)
 	CommandList->CmdList->SetPipelineState1(RTPipelineState.Get());
 	
 	CommandList->CmdList->DispatchRays(&raytraceDesc);
+}
+
+bool D3D12RTPipelineStateObject::GetDispatchRaysIndirectTemplate(uint32_t width, uint32_t height, RtDispatchRaysIndirectTemplate& outTemplate) const
+{
+	D3D12_DISPATCH_RAYS_DESC desc = {};
+	if (!BuildDispatchRaysDesc(width, height, desc))
+		return false;
+
+	outTemplate = {};
+	outTemplate.RayGenerationStartAddress = desc.RayGenerationShaderRecord.StartAddress;
+	outTemplate.RayGenerationSizeInBytes = desc.RayGenerationShaderRecord.SizeInBytes;
+	outTemplate.MissStartAddress = desc.MissShaderTable.StartAddress;
+	outTemplate.MissSizeInBytes = desc.MissShaderTable.SizeInBytes;
+	outTemplate.MissStrideInBytes = desc.MissShaderTable.StrideInBytes;
+	outTemplate.HitGroupStartAddress = desc.HitGroupTable.StartAddress;
+	outTemplate.HitGroupSizeInBytes = desc.HitGroupTable.SizeInBytes;
+	outTemplate.HitGroupStrideInBytes = desc.HitGroupTable.StrideInBytes;
+	outTemplate.CallableStartAddress = desc.CallableShaderTable.StartAddress;
+	outTemplate.CallableSizeInBytes = desc.CallableShaderTable.SizeInBytes;
+	outTemplate.CallableStrideInBytes = desc.CallableShaderTable.StrideInBytes;
+	outTemplate.Width = desc.Width;
+	outTemplate.Height = desc.Height;
+	outTemplate.Depth = desc.Depth;
+	return true;
+}
+
+bool D3D12RTPipelineStateObject::EnsureDispatchRaysCommandSignature()
+{
+	if (DispatchRaysCommandSignature)
+		return true;
+
+	DX12Backend* owner = Owner;
+	if (!owner || !owner->Device)
+		return false;
+
+	D3D12_INDIRECT_ARGUMENT_DESC argumentDesc = {};
+	argumentDesc.Type = D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH_RAYS;
+
+	D3D12_COMMAND_SIGNATURE_DESC commandSignatureDesc = {};
+	commandSignatureDesc.ByteStride = sizeof(D3D12_DISPATCH_RAYS_DESC);
+	commandSignatureDesc.NumArgumentDescs = 1;
+	commandSignatureDesc.pArgumentDescs = &argumentDesc;
+
+	HRESULT hr = owner->Device->CreateCommandSignature(
+		&commandSignatureDesc,
+		nullptr,
+		IID_PPV_ARGS(&DispatchRaysCommandSignature));
+	if (FAILED(hr))
+	{
+		AppendCpuRuntimeTrace(L"[DX12RT] Create DISPATCH_RAYS command signature failed hr=" + FormatHexHRESULT(hr));
+		return false;
+	}
+
+	SetName(DispatchRaysCommandSignature.Get(), L"Corona DispatchRaysIndirect CommandSignature");
+	return true;
+}
+
+bool D3D12RTPipelineStateObject::ApplyIndirect(Buffer* indirectArgumentBuffer, uint64_t byteOffset)
+{
+	DX12Backend* owner = Owner;
+	assert(owner);
+	if (!indirectArgumentBuffer || !indirectArgumentBuffer->resource || !EnsureDispatchRaysCommandSignature())
+		return false;
+
+	CommandList* CommandList = nullptr;
+	CommandList = ResolveCommandList(owner, CommandList);
+	assert(CommandList);
+
+	owner->InvalidateGraphicsCommandStateCache();
+	CommandList->CmdList->SetComputeRootSignature(GlobalRS.Get());
+
+	UINT RPI = 0;
+	for (auto& bi : GlobalBinding)
+	{
+		CommandList->CmdList.Get()->SetComputeRootDescriptorTable(RPI++, bi.GPUHandle);
+	}
+
+	CommandList->CmdList->SetPipelineState1(RTPipelineState.Get());
+	CommandList->CmdList->ExecuteIndirect(
+		DispatchRaysCommandSignature.Get(),
+		1,
+		indirectArgumentBuffer->resource.Get(),
+		byteOffset,
+		nullptr,
+		0);
+	return true;
 }
 
 void D3D12RTPipelineStateObject::SetTextureUAV(const string& shader, const string& bindingName, Texture* texture, int instanceIndex)

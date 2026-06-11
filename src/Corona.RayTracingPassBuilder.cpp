@@ -45,6 +45,7 @@ Corona::RTPassBuilder& Corona::RTPassBuilder::BeginScene()
 	PSO->SetNumInstances(static_cast<uint32_t>(Owner.RayTracingInstances.size()));
 	PSO->BeginShaderTable();
 	bBegan = true;
+	bShaderTableFinalized = false;
 	Owner.AddRtRecordPhaseTiming(ERtRecordPhase::BeginScene, phaseStart, Corona::CpuClock::now());
 	return *this;
 }
@@ -171,22 +172,67 @@ uint32_t Corona::RTPassBuilder::BindSceneHitPrograms(const RTSceneHitProgramDesc
 	return boundCount;
 }
 
+bool Corona::RTPassBuilder::FinalizeShaderTable()
+{
+	if (!PSO)
+		return false;
+
+	if (!bBegan)
+		BeginScene();
+
+	if (bShaderTableFinalized)
+		return true;
+
+	const auto endShaderTableStart = Corona::CpuClock::now();
+	PSO->EndShaderTable();
+	Owner.AddRtRecordPhaseTiming(ERtRecordPhase::EndShaderTable, endShaderTableStart, Corona::CpuClock::now());
+	bShaderTableFinalized = true;
+	return true;
+}
+
+bool Corona::RTPassBuilder::GetDispatchRaysIndirectTemplate(uint32_t width, uint32_t height, RtDispatchRaysIndirectTemplate& outTemplate)
+{
+	if (!PSO)
+		return false;
+
+	if (!FinalizeShaderTable())
+		return false;
+
+	return PSO->GetDispatchRaysIndirectTemplate(width, height, outTemplate);
+}
+
 void Corona::RTPassBuilder::Dispatch(uint32_t width, uint32_t height)
 {
 	if (!PSO)
 		return;
 
-	if (!bBegan)
-		BeginScene();
-
-	const auto endShaderTableStart = Corona::CpuClock::now();
-	PSO->EndShaderTable();
-	Owner.AddRtRecordPhaseTiming(ERtRecordPhase::EndShaderTable, endShaderTableStart, Corona::CpuClock::now());
+	if (!FinalizeShaderTable())
+		return;
 
 	const auto applyStart = Corona::CpuClock::now();
 	PSO->Apply(width, height);
 	Owner.AddRtRecordPhaseTiming(ERtRecordPhase::ApplyDispatch, applyStart, Corona::CpuClock::now());
 	bBegan = false;
+	bShaderTableFinalized = false;
+}
+
+bool Corona::RTPassBuilder::DispatchIndirect(Buffer* indirectArgumentBuffer, uint64_t byteOffset)
+{
+	if (!PSO)
+		return false;
+
+	if (!FinalizeShaderTable())
+		return false;
+
+	const auto applyStart = Corona::CpuClock::now();
+	const bool bDispatched = PSO->ApplyIndirect(indirectArgumentBuffer, byteOffset);
+	Owner.AddRtRecordPhaseTiming(ERtRecordPhase::ApplyDispatch, applyStart, Corona::CpuClock::now());
+	if (bDispatched)
+	{
+		bBegan = false;
+		bShaderTableFinalized = false;
+	}
+	return bDispatched;
 }
 
 Texture* Corona::RTPassBuilder::GetDiffuseTexture(const Mesh& mesh) const

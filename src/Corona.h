@@ -1034,12 +1034,14 @@ private:
 	shared_ptr<RTPipelineStateObject> PSO_PATH_TRACING;
 	shared_ptr<RTPipelineStateObject> PSO_PATH_TRACING_COMPACTION_TRACE;
 	shared_ptr<ComputePipelineStateObject> PSO_PATH_TRACING_COMPACTION_SEED;
+	shared_ptr<ComputePipelineStateObject> PSO_PATH_TRACING_COMPACTION_INDIRECT_ARGS;
 	shared_ptr<ComputePipelineStateObject> PSO_PATH_TRACING_COMPACTION_RESOLVE;
 	shared_ptr<Texture> PathTracingAccumBuffer[2];
 	std::shared_ptr<Buffer> PathTracingCompactionState[2];
 	std::shared_ptr<Buffer> PathTracingCompactionActiveList[2];
 	std::shared_ptr<Buffer> PathTracingCompactionCounter;
 	std::shared_ptr<Buffer> PathTracingCompactionRadiance;
+	std::shared_ptr<Buffer> PathTracingCompactionIndirectArgs;
 	UINT PathTracingWriteIndex = 0;
 	UINT32 PathTracingAccumulatedFrames = 0;
 	UINT32 PathTracingLastDispatchSamplesPerPixel = 1;
@@ -2049,6 +2051,38 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 		UINT32 BounceIndex = 0;
 	};
 
+	struct PathTracingCompactionIndirectParamCB
+	{
+		UINT32 RayGenStartLo = 0;
+		UINT32 RayGenStartHi = 0;
+		UINT32 RayGenSizeLo = 0;
+		UINT32 RayGenSizeHi = 0;
+		UINT32 MissStartLo = 0;
+		UINT32 MissStartHi = 0;
+		UINT32 MissSizeLo = 0;
+		UINT32 MissSizeHi = 0;
+		UINT32 MissStrideLo = 0;
+		UINT32 MissStrideHi = 0;
+		UINT32 HitStartLo = 0;
+		UINT32 HitStartHi = 0;
+		UINT32 HitSizeLo = 0;
+		UINT32 HitSizeHi = 0;
+		UINT32 HitStrideLo = 0;
+		UINT32 HitStrideHi = 0;
+		UINT32 CallableStartLo = 0;
+		UINT32 CallableStartHi = 0;
+		UINT32 CallableSizeLo = 0;
+		UINT32 CallableSizeHi = 0;
+		UINT32 CallableStrideLo = 0;
+		UINT32 CallableStrideHi = 0;
+		UINT32 MaxDispatchWidth = 0;
+		UINT32 CounterIndex = 0;
+		UINT32 DispatchHeight = 1;
+		UINT32 DispatchDepth = 1;
+		UINT32 _padding0 = 0;
+		UINT32 _padding1 = 0;
+	};
+
 	struct RenderFrameDelta
 	{
 		uint64_t FrameId = 0;
@@ -2410,7 +2444,10 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 		RTPassBuilder& SetSampler(const char* shader, const char* bindingName, Sampler* sampler);
 		RTPassBuilder& SetCBVValue(const char* shader, const char* bindingName, void* data);
 		uint32_t BindSceneHitPrograms(const RTSceneHitProgramDesc& desc = RTSceneHitProgramDesc(), const HitProgramBinder& customBinder = HitProgramBinder());
+		bool FinalizeShaderTable();
+		bool GetDispatchRaysIndirectTemplate(uint32_t width, uint32_t height, RtDispatchRaysIndirectTemplate& outTemplate);
 		void Dispatch(uint32_t width, uint32_t height);
+		bool DispatchIndirect(Buffer* indirectArgumentBuffer, uint64_t byteOffset = 0);
 
 		Texture* GetDiffuseTexture(const Mesh& mesh) const;
 		Texture* GetNormalTexture(const Mesh& mesh) const;
@@ -2424,6 +2461,7 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 		Corona& Owner;
 		shared_ptr<RTPipelineStateObject> PSO;
 		bool bBegan = false;
+		bool bShaderTableFinalized = false;
 	};
 	
 	// Raytracing helper functions

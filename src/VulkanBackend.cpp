@@ -799,6 +799,7 @@ namespace
 		case EResourceState::CopyDest: return VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
 		case EResourceState::CopySource: return VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
 		case EResourceState::UnorderedAccess: return VK_IMAGE_LAYOUT_GENERAL;
+		case EResourceState::IndirectArgument: return VK_IMAGE_LAYOUT_GENERAL;
 		case EResourceState::Present: return VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
 		default: return VK_IMAGE_LAYOUT_GENERAL;
 		}
@@ -816,6 +817,8 @@ namespace
 			return VK_ACCESS_TRANSFER_WRITE_BIT;
 		case EResourceState::CopySource:
 			return VK_ACCESS_TRANSFER_READ_BIT;
+		case EResourceState::IndirectArgument:
+			return VK_ACCESS_INDIRECT_COMMAND_READ_BIT;
 		default:
 			return VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
 		}
@@ -1992,6 +1995,21 @@ void VulkanRTPipelineStateObject::Apply(uint32_t width, uint32_t height)
 	AppendVulkanRuntimeTraceBackend(L"[VulkanRTPipelineStateObject::Apply] before vkCmdTraceRaysKHR");
 	Owner->vkCmdTraceRaysKHRFn(Owner->ActiveCommandBuffer, &RaygenRegion, &MissRegion, &HitRegion, &CallableRegion, width, height, 1);
 	AppendVulkanRuntimeTraceBackend(L"[VulkanRTPipelineStateObject::Apply] after vkCmdTraceRaysKHR");
+}
+
+bool VulkanRTPipelineStateObject::GetDispatchRaysIndirectTemplate(uint32_t width, uint32_t height, RtDispatchRaysIndirectTemplate& outTemplate) const
+{
+	(void)width;
+	(void)height;
+	outTemplate = {};
+	return false;
+}
+
+bool VulkanRTPipelineStateObject::ApplyIndirect(Buffer* indirectArgumentBuffer, uint64_t byteOffset)
+{
+	(void)indirectArgumentBuffer;
+	(void)byteOffset;
+	return false;
 }
 #endif
 

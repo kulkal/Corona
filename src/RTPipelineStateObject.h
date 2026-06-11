@@ -11,6 +11,24 @@ class RTAS;
 class VertexBuffer;
 class IndexBuffer;
 
+struct RtDispatchRaysIndirectTemplate
+{
+	uint64_t RayGenerationStartAddress = 0;
+	uint64_t RayGenerationSizeInBytes = 0;
+	uint64_t MissStartAddress = 0;
+	uint64_t MissSizeInBytes = 0;
+	uint64_t MissStrideInBytes = 0;
+	uint64_t HitGroupStartAddress = 0;
+	uint64_t HitGroupSizeInBytes = 0;
+	uint64_t HitGroupStrideInBytes = 0;
+	uint64_t CallableStartAddress = 0;
+	uint64_t CallableSizeInBytes = 0;
+	uint64_t CallableStrideInBytes = 0;
+	uint32_t Width = 0;
+	uint32_t Height = 0;
+	uint32_t Depth = 1;
+};
+
 class RTPipelineStateObject
 {
 public:
@@ -55,4 +73,6 @@ public:
 	virtual void AddSceneGeometrySRVsToHitProgram(const std::string& hitGroup, VertexBuffer* sceneVertexBuffer, IndexBuffer* sceneIndexBuffer, uint32_t instanceIndex) = 0;
 	virtual bool InitRS(const std::string& shaderFile) = 0;
 	virtual void Apply(uint32_t width, uint32_t height) = 0;
+	virtual bool GetDispatchRaysIndirectTemplate(uint32_t width, uint32_t height, RtDispatchRaysIndirectTemplate& outTemplate) const = 0;
+	virtual bool ApplyIndirect(Buffer* indirectArgumentBuffer, uint64_t byteOffset) = 0;
 };

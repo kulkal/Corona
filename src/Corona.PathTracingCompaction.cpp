@@ -21,14 +21,22 @@ namespace
 {
 	static constexpr UINT32 PathTracingCompactionStateStrideBytes = 64u;
 	static constexpr UINT32 PathTracingCompactionCounterCount = 16u;
+	static constexpr UINT32 PathTracingCompactionIndirectArgsBytes = 128u;
+
+	void SplitUint64(UINT64 value, UINT32& lo, UINT32& hi)
+	{
+		lo = static_cast<UINT32>(value & 0xffffffffull);
+		hi = static_cast<UINT32>(value >> 32u);
+	}
 }
 
 void Corona::InitPathTracingCompactionPass()
 {
 	auto seedPso = renderBackend->CreateComputePipelineStateObject();
+	auto indirectArgsPso = renderBackend->CreateComputePipelineStateObject();
 	auto resolvePso = renderBackend->CreateComputePipelineStateObject();
 	auto tracePso = renderBackend->CreateRTPipelineStateObject();
-	if (!seedPso || !resolvePso || !tracePso)
+	if (!seedPso || !indirectArgsPso || !resolvePso || !tracePso)
 		return;
 
 	seedPso->BindUAV("StateOut", 0);
@@ -37,6 +45,10 @@ void Corona::InitPathTracingCompactionPass()
 	seedPso->BindUAV("PathRadiance", 3);
 	seedPso->BindCBV("ViewParameter", 0, sizeof(PathTracingViewParamCB));
 	seedPso->BindCBV("PathCompaction", 1, sizeof(PathTracingCompactionParamCB));
+
+	indirectArgsPso->BindUAV("Counters", 2);
+	indirectArgsPso->BindUAV("IndirectArgs", 5);
+	indirectArgsPso->BindCBV("PathCompactionIndirect", 2, sizeof(PathTracingCompactionIndirectParamCB));
 
 	resolvePso->BindUAV("PathRadiance", 3);
 	resolvePso->BindUAV("OutputColor", 4);
@@ -90,18 +102,20 @@ void Corona::InitPathTracingCompactionPass()
 
 	const std::wstring computeShader = GetAssetFullPath(L"Shaders\\PathTracingCompactionCompute.hlsl");
 	const bool bSeedOk = seedPso->InitCS(computeShader, "PathTracingCompactionSeedCS");
+	const bool bIndirectArgsOk = indirectArgsPso->InitCS(computeShader, "PathTracingCompactionIndirectArgsCS");
 	const bool bResolveOk = resolvePso->InitCS(computeShader, "PathTracingCompactionResolveCS");
 	const bool bTraceOk = tracePso->InitRS("Shaders\\PathTracing.hlsl");
-	if (!bSeedOk || !bResolveOk || !bTraceOk)
+	if (!bSeedOk || !bIndirectArgsOk || !bResolveOk || !bTraceOk)
 	{
 		AppendCpuRuntimeTrace(L"[PathTracingCompaction] PSO init failed; using mega-kernel fallback");
 		return;
 	}
 
 	PSO_PATH_TRACING_COMPACTION_SEED = seedPso;
+	PSO_PATH_TRACING_COMPACTION_INDIRECT_ARGS = indirectArgsPso;
 	PSO_PATH_TRACING_COMPACTION_RESOLVE = resolvePso;
 	PSO_PATH_TRACING_COMPACTION_TRACE = tracePso;
-	AppendCpuRuntimeTrace(L"[PathTracingCompaction] seed/trace/resolve PSOs ready");
+	AppendCpuRuntimeTrace(L"[PathTracingCompaction] seed/indirect/trace/resolve PSOs ready");
 }
 
 bool Corona::EnsurePathTracingCompactionResources(UINT32 width, UINT32 height)
@@ -120,7 +134,8 @@ bool Corona::EnsurePathTracingCompactionResources(UINT32 width, UINT32 height)
 		PathTracingCompactionActiveList[0] &&
 		PathTracingCompactionActiveList[1] &&
 		PathTracingCompactionCounter &&
-		PathTracingCompactionRadiance)
+		PathTracingCompactionRadiance &&
+		PathTracingCompactionIndirectArgs)
 	{
 		return true;
 	}
@@ -132,6 +147,7 @@ bool Corona::EnsurePathTracingCompactionResources(UINT32 width, UINT32 height)
 	PathTracingCompactionActiveList[1].reset();
 	PathTracingCompactionCounter.reset();
 	PathTracingCompactionRadiance.reset();
+	PathTracingCompactionIndirectArgs.reset();
 
 	BufferCreateDesc stateDesc = {};
 	stateDesc.NumElements = requestedCapacity;
@@ -161,19 +177,28 @@ bool Corona::EnsurePathTracingCompactionResources(UINT32 width, UINT32 height)
 	radianceDesc.bAllowUnorderedAccess = true;
 	radianceDesc.InitialState = EInitialResourceState::ShaderRead;
 
+	BufferCreateDesc indirectArgsDesc = {};
+	indirectArgsDesc.NumElements = PathTracingCompactionIndirectArgsBytes / sizeof(UINT32);
+	indirectArgsDesc.ElementSize = sizeof(UINT32);
+	indirectArgsDesc.Shape = EBufferShape::ByteAddress;
+	indirectArgsDesc.bAllowUnorderedAccess = true;
+	indirectArgsDesc.InitialState = EInitialResourceState::ShaderRead;
+
 	PathTracingCompactionState[0] = renderBackend->CreateBuffer(stateDesc);
 	PathTracingCompactionState[1] = renderBackend->CreateBuffer(stateDesc);
 	PathTracingCompactionActiveList[0] = renderBackend->CreateBuffer(listDesc);
 	PathTracingCompactionActiveList[1] = renderBackend->CreateBuffer(listDesc);
 	PathTracingCompactionCounter = renderBackend->CreateBuffer(counterDesc);
 	PathTracingCompactionRadiance = renderBackend->CreateBuffer(radianceDesc);
+	PathTracingCompactionIndirectArgs = renderBackend->CreateBuffer(indirectArgsDesc);
 
 	if (!PathTracingCompactionState[0] ||
 		!PathTracingCompactionState[1] ||
 		!PathTracingCompactionActiveList[0] ||
 		!PathTracingCompactionActiveList[1] ||
 		!PathTracingCompactionCounter ||
-		!PathTracingCompactionRadiance)
+		!PathTracingCompactionRadiance ||
+		!PathTracingCompactionIndirectArgs)
 	{
 		PathTracingCompactionState[0].reset();
 		PathTracingCompactionState[1].reset();
@@ -181,6 +206,7 @@ bool Corona::EnsurePathTracingCompactionResources(UINT32 width, UINT32 height)
 		PathTracingCompactionActiveList[1].reset();
 		PathTracingCompactionCounter.reset();
 		PathTracingCompactionRadiance.reset();
+		PathTracingCompactionIndirectArgs.reset();
 		return false;
 	}
 
@@ -230,6 +256,7 @@ bool Corona::PathTracingCompactionPass(Texture* outputColor, const PathTracingVi
 
 	if (!PSO_PATH_TRACING_COMPACTION_TRACE ||
 		!PSO_PATH_TRACING_COMPACTION_SEED ||
+		!PSO_PATH_TRACING_COMPACTION_INDIRECT_ARGS ||
 		!PSO_PATH_TRACING_COMPACTION_RESOLVE)
 	{
 		InitPathTracingCompactionPass();
@@ -237,6 +264,7 @@ bool Corona::PathTracingCompactionPass(Texture* outputColor, const PathTracingVi
 
 	if (!PSO_PATH_TRACING_COMPACTION_TRACE ||
 		!PSO_PATH_TRACING_COMPACTION_SEED ||
+		!PSO_PATH_TRACING_COMPACTION_INDIRECT_ARGS ||
 		!PSO_PATH_TRACING_COMPACTION_RESOLVE)
 	{
 		if (!bPathTracingCompactionFallbackLogged)
@@ -251,7 +279,7 @@ bool Corona::PathTracingCompactionPass(Texture* outputColor, const PathTracingVi
 	if (!bPathTracingCompactionDispatchLogged)
 	{
 		AppendCpuRuntimeTrace(
-			L"[PathTracingCompaction] dispatching fixed-capacity seed/trace/resolve, capacity=" +
+			L"[PathTracingCompaction] dispatching indirect seed/trace/resolve, capacity=" +
 			std::to_wstring(PathTracingCompactionCapacity) +
 			L", maxBounces=" + std::to_wstring(dispatchViewParam.MaxBounces) +
 			L", rrGBuffer=" + std::to_wstring(bWritePrimaryGBuffer ? 1 : 0));
@@ -279,6 +307,7 @@ bool Corona::PathTracingCompactionPass(Texture* outputColor, const PathTracingVi
 	};
 
 	transitionCompactionBuffers(EResourceState::ShaderRead, EResourceState::UnorderedAccess);
+	renderBackend->TransitionBuffer(PathTracingCompactionIndirectArgs.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
 
 	PathTracingCompactionParamCB compactionParam = {};
 	compactionParam.RenderWidth = m_width;
@@ -298,6 +327,27 @@ bool Corona::PathTracingCompactionPass(Texture* outputColor, const PathTracingVi
 	renderBackend->EndGpuMarker();
 	barrierCompactionBuffers();
 
+	auto makeIndirectParam = [this](const RtDispatchRaysIndirectTemplate& dispatchTemplate, UINT32 bounceIndex)
+	{
+		PathTracingCompactionIndirectParamCB param = {};
+		SplitUint64(dispatchTemplate.RayGenerationStartAddress, param.RayGenStartLo, param.RayGenStartHi);
+		SplitUint64(dispatchTemplate.RayGenerationSizeInBytes, param.RayGenSizeLo, param.RayGenSizeHi);
+		SplitUint64(dispatchTemplate.MissStartAddress, param.MissStartLo, param.MissStartHi);
+		SplitUint64(dispatchTemplate.MissSizeInBytes, param.MissSizeLo, param.MissSizeHi);
+		SplitUint64(dispatchTemplate.MissStrideInBytes, param.MissStrideLo, param.MissStrideHi);
+		SplitUint64(dispatchTemplate.HitGroupStartAddress, param.HitStartLo, param.HitStartHi);
+		SplitUint64(dispatchTemplate.HitGroupSizeInBytes, param.HitSizeLo, param.HitSizeHi);
+		SplitUint64(dispatchTemplate.HitGroupStrideInBytes, param.HitStrideLo, param.HitStrideHi);
+		SplitUint64(dispatchTemplate.CallableStartAddress, param.CallableStartLo, param.CallableStartHi);
+		SplitUint64(dispatchTemplate.CallableSizeInBytes, param.CallableSizeLo, param.CallableSizeHi);
+		SplitUint64(dispatchTemplate.CallableStrideInBytes, param.CallableStrideLo, param.CallableStrideHi);
+		param.MaxDispatchWidth = PathTracingCompactionCapacity;
+		param.CounterIndex = std::min(bounceIndex, PathTracingCompactionCounterCount - 1u);
+		param.DispatchHeight = 1u;
+		param.DispatchDepth = 1u;
+		return param;
+	};
+
 	const UINT32 bounceCount = std::min(std::max(dispatchViewParam.MaxBounces, 1u), PathTracingCompactionCounterCount - 1u);
 	for (UINT32 bounceIndex = 0; bounceIndex < bounceCount; ++bounceIndex)
 	{
@@ -305,7 +355,6 @@ bool Corona::PathTracingCompactionPass(Texture* outputColor, const PathTracingVi
 		const UINT32 writeIndex = 1u - readIndex;
 		compactionParam.BounceIndex = bounceIndex;
 
-		renderBackend->BeginGpuMarker(0xff66cc99u, "PathTracingCompactionTrace");
 		RTPassBuilder pass(*this, PSO_PATH_TRACING_COMPACTION_TRACE);
 		pass.BeginScene()
 			.SetTextureUAV("global", "OutAlbedo", AlbedoBuffer.get())
@@ -338,8 +387,38 @@ bool Corona::PathTracingCompactionPass(Texture* outputColor, const PathTracingVi
 			pso.AddTextureSRVToHitProgram(desc.HitGroup, pass.GetRoughnessTexture(mesh), instanceIndex);
 			pso.AddTextureSRVToHitProgram(desc.HitGroup, pass.GetMetallicTexture(mesh), instanceIndex);
 		});
-		pass.Dispatch(m_width, m_height);
-		renderBackend->EndGpuMarker();
+
+		RtDispatchRaysIndirectTemplate dispatchTemplate = {};
+		const bool bCanDispatchIndirect =
+			pass.GetDispatchRaysIndirectTemplate(PathTracingCompactionCapacity, 1u, dispatchTemplate) &&
+			PathTracingCompactionIndirectArgs;
+
+		bool bTraceDispatched = false;
+		if (bCanDispatchIndirect)
+		{
+			PathTracingCompactionIndirectParamCB indirectParam = makeIndirectParam(dispatchTemplate, bounceIndex);
+			renderBackend->BeginGpuMarker(0xff44aaffu, "PathTracingCompactionIndirectArgs");
+			PSO_PATH_TRACING_COMPACTION_INDIRECT_ARGS->SetBufferUAV("Counters", PathTracingCompactionCounter.get());
+			PSO_PATH_TRACING_COMPACTION_INDIRECT_ARGS->SetBufferUAV("IndirectArgs", PathTracingCompactionIndirectArgs.get());
+			PSO_PATH_TRACING_COMPACTION_INDIRECT_ARGS->SetCBVValue("PathCompactionIndirect", &indirectParam);
+			PSO_PATH_TRACING_COMPACTION_INDIRECT_ARGS->Apply();
+			renderBackend->Dispatch(1u, 1u, 1u);
+			renderBackend->EndGpuMarker();
+			renderBackend->UAVBarrier(PathTracingCompactionIndirectArgs.get());
+
+			renderBackend->TransitionBuffer(PathTracingCompactionIndirectArgs.get(), EResourceState::UnorderedAccess, EResourceState::IndirectArgument);
+			renderBackend->BeginGpuMarker(0xff66cc99u, "PathTracingCompactionTrace");
+			bTraceDispatched = pass.DispatchIndirect(PathTracingCompactionIndirectArgs.get(), 0);
+			renderBackend->EndGpuMarker();
+			renderBackend->TransitionBuffer(PathTracingCompactionIndirectArgs.get(), EResourceState::IndirectArgument, EResourceState::UnorderedAccess);
+		}
+
+		if (!bTraceDispatched)
+		{
+			renderBackend->BeginGpuMarker(0xff66cc99u, "PathTracingCompactionTrace");
+			pass.Dispatch(m_width, m_height);
+			renderBackend->EndGpuMarker();
+		}
 		barrierCompactionBuffers();
 	}
 
@@ -354,6 +433,7 @@ bool Corona::PathTracingCompactionPass(Texture* outputColor, const PathTracingVi
 	renderBackend->EndGpuMarker();
 	renderBackend->UAVBarrier(PathTracingCompactionRadiance.get());
 
+	renderBackend->TransitionBuffer(PathTracingCompactionIndirectArgs.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
 	transitionCompactionBuffers(EResourceState::UnorderedAccess, EResourceState::ShaderRead);
 	(void)bWritePrimaryGBuffer;
 	return true;

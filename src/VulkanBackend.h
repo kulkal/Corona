@@ -173,6 +173,8 @@ struct VulkanRTPipelineStateObject : RTPipelineStateObject
 	void AddSceneGeometrySRVsToHitProgram(const std::string& hitGroup, VertexBuffer* sceneVertexBuffer, IndexBuffer* sceneIndexBuffer, uint32_t instanceIndex) override;
 	bool InitRS(const std::string& shaderFile) override;
 	void Apply(uint32_t width, uint32_t height) override;
+	bool GetDispatchRaysIndirectTemplate(uint32_t width, uint32_t height, RtDispatchRaysIndirectTemplate& outTemplate) const override;
+	bool ApplyIndirect(Buffer* indirectArgumentBuffer, uint64_t byteOffset) override;
 };
 
 struct VulkanComputePipelineStateObject : ComputePipelineStateObject

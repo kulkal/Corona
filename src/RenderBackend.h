@@ -100,6 +100,7 @@ enum class EResourceState
 	CopyDest,
 	CopySource,
 	VertexBuffer,
+	IndirectArgument,
 };
 
 enum ETextureUsageFlags : uint32_t

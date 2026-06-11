@@ -6,6 +6,7 @@ RWStructuredBuffer<uint> ActiveListOut : register(u1);
 RWStructuredBuffer<uint> Counters : register(u2);
 RWStructuredBuffer<float4> PathRadiance : register(u3);
 RWTexture2D<float4> OutputColor : register(u4);
+RWByteAddressBuffer IndirectArgs : register(u5);
 
 #define MAX_POINT_LIGHTS 128
 
@@ -67,6 +68,38 @@ cbuffer PathCompaction : register(b1)
     uint PathCompactionBounceIndex;
 };
 
+cbuffer PathCompactionIndirect : register(b2)
+{
+    uint PathCompactionRayGenStartLo;
+    uint PathCompactionRayGenStartHi;
+    uint PathCompactionRayGenSizeLo;
+    uint PathCompactionRayGenSizeHi;
+    uint PathCompactionMissStartLo;
+    uint PathCompactionMissStartHi;
+    uint PathCompactionMissSizeLo;
+    uint PathCompactionMissSizeHi;
+    uint PathCompactionMissStrideLo;
+    uint PathCompactionMissStrideHi;
+    uint PathCompactionHitStartLo;
+    uint PathCompactionHitStartHi;
+    uint PathCompactionHitSizeLo;
+    uint PathCompactionHitSizeHi;
+    uint PathCompactionHitStrideLo;
+    uint PathCompactionHitStrideHi;
+    uint PathCompactionCallableStartLo;
+    uint PathCompactionCallableStartHi;
+    uint PathCompactionCallableSizeLo;
+    uint PathCompactionCallableSizeHi;
+    uint PathCompactionCallableStrideLo;
+    uint PathCompactionCallableStrideHi;
+    uint PathCompactionMaxDispatchWidth;
+    uint PathCompactionCounterIndex;
+    uint PathCompactionDispatchHeight;
+    uint PathCompactionDispatchDepth;
+    uint PathCompactionIndirectPadding0;
+    uint PathCompactionIndirectPadding1;
+};
+
 uint pcg_hash(uint input)
 {
     uint state = input * 747796405u + 2891336453u;
@@ -99,6 +132,43 @@ float3 clamp_firefly(float3 radiance)
     if (maxChannel > kMaxRadiance)
         radiance *= kMaxRadiance / maxChannel;
     return radiance;
+}
+
+void store_u64(uint byteOffset, uint lo, uint hi)
+{
+    IndirectArgs.Store2(byteOffset, uint2(lo, hi));
+}
+
+[numthreads(1, 1, 1)]
+void PathTracingCompactionIndirectArgsCS(uint3 dispatchThreadID : SV_DispatchThreadID)
+{
+    uint activeCount = 0u;
+    if (PathCompactionCounterIndex < 16u)
+        activeCount = Counters[PathCompactionCounterIndex];
+
+    uint dispatchWidth = min(activeCount, PathCompactionMaxDispatchWidth);
+    dispatchWidth = max(dispatchWidth, 1u);
+    uint dispatchHeight = max(PathCompactionDispatchHeight, 1u);
+    uint dispatchDepth = max(PathCompactionDispatchDepth, 1u);
+
+    // D3D12_DISPATCH_RAYS_DESC:
+    // 0: RayGenerationShaderRecord, 16: MissShaderTable, 40: HitGroupTable,
+    // 64: CallableShaderTable, 88: Width/Height/Depth.
+    store_u64(0u, PathCompactionRayGenStartLo, PathCompactionRayGenStartHi);
+    store_u64(8u, PathCompactionRayGenSizeLo, PathCompactionRayGenSizeHi);
+    store_u64(16u, PathCompactionMissStartLo, PathCompactionMissStartHi);
+    store_u64(24u, PathCompactionMissSizeLo, PathCompactionMissSizeHi);
+    store_u64(32u, PathCompactionMissStrideLo, PathCompactionMissStrideHi);
+    store_u64(40u, PathCompactionHitStartLo, PathCompactionHitStartHi);
+    store_u64(48u, PathCompactionHitSizeLo, PathCompactionHitSizeHi);
+    store_u64(56u, PathCompactionHitStrideLo, PathCompactionHitStrideHi);
+    store_u64(64u, PathCompactionCallableStartLo, PathCompactionCallableStartHi);
+    store_u64(72u, PathCompactionCallableSizeLo, PathCompactionCallableSizeHi);
+    store_u64(80u, PathCompactionCallableStrideLo, PathCompactionCallableStrideHi);
+    IndirectArgs.Store(88u, dispatchWidth);
+    IndirectArgs.Store(92u, dispatchHeight);
+    IndirectArgs.Store(96u, dispatchDepth);
+    IndirectArgs.Store(100u, 0u);
 }
 
 [numthreads(8, 8, 1)]
