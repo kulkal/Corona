@@ -4616,8 +4616,10 @@ void D3D12RTPipelineStateObject::SetNumInstances(uint32_t numInstances)
 	if (NumInstance != numInstances)
 	{
 		ShaderTable.Reset();
+		ShaderTableUpload.Reset();
 		ShaderTableEntrySize = 0;
 		ShaderTableSize = 0;
+		ShaderTableState = D3D12_RESOURCE_STATE_COPY_DEST;
 		MarkHitProgramBindingCacheDirty();
 	}
 	NumInstance = numInstances;
@@ -4872,7 +4874,9 @@ void D3D12RTPipelineStateObject::EndShaderTable()
 
 		ShaderTableSize = ShaderTableEntrySize * NumShaderTableEntry;
 
-		// allocate shader table
+		// Allocate the shader table in DEFAULT memory. The CPU writes records
+		// into a staging upload buffer, then copies the current frame segment
+		// before DispatchRays so per-hit shader-record fetches do not hit sysmem.
 		{
 			D3D12_RESOURCE_DESC bufDesc = {};
 			bufDesc.Alignment = 0;
@@ -4887,6 +4891,14 @@ void D3D12RTPipelineStateObject::EndShaderTable()
 			bufDesc.SampleDesc.Quality = 0;
 			bufDesc.Width = ShaderTableSize * owner->NumFrame;
 
+			const D3D12_HEAP_PROPERTIES kDefaultHeapProps =
+			{
+				D3D12_HEAP_TYPE_DEFAULT,
+				D3D12_CPU_PAGE_PROPERTY_UNKNOWN,
+				D3D12_MEMORY_POOL_UNKNOWN,
+				0,
+				0,
+			};
 			const D3D12_HEAP_PROPERTIES kUploadHeapProps =
 			{
 				D3D12_HEAP_TYPE_UPLOAD,
@@ -4896,8 +4908,24 @@ void D3D12RTPipelineStateObject::EndShaderTable()
 				0,
 			};
 
-			owner->Device->CreateCommittedResource(&kUploadHeapProps, D3D12_HEAP_FLAG_NONE, &bufDesc, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&ShaderTable));
+			const HRESULT defaultHr = owner->Device->CreateCommittedResource(&kDefaultHeapProps, D3D12_HEAP_FLAG_NONE, &bufDesc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&ShaderTable));
+			const HRESULT uploadHr = owner->Device->CreateCommittedResource(&kUploadHeapProps, D3D12_HEAP_FLAG_NONE, &bufDesc, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&ShaderTableUpload));
+			if (FAILED(defaultHr) || FAILED(uploadHr) || !ShaderTable || !ShaderTableUpload)
+			{
+				AppendCpuRuntimeTrace(
+					L"[DX12RT] shader table allocation failed defaultHr=" + FormatHexHRESULT(defaultHr) +
+					L", uploadHr=" + FormatHexHRESULT(uploadHr));
+				ShaderTable.Reset();
+				ShaderTableUpload.Reset();
+				return;
+			}
+			ShaderTableState = D3D12_RESOURCE_STATE_COPY_DEST;
 			NAME_D3D12_OBJECT(ShaderTable);
+			NAME_D3D12_OBJECT(ShaderTableUpload);
+			AppendCpuRuntimeTrace(
+				L"[DX12RT] shader table heap=DEFAULT, staging=UPLOAD, frameBytes=" +
+				std::to_wstring(ShaderTableSize) +
+				L", totalBytes=" + std::to_wstring(static_cast<UINT64>(bufDesc.Width)));
 		}
 	}
 	
@@ -4905,28 +4933,19 @@ void D3D12RTPipelineStateObject::EndShaderTable()
 	// raygen : simple, it is just the begin of table
 	// miss : raygen + miss index * EntrySize
 	// hit : raygen + miss(N) + instanceIndex
-	uint8_t* pData;
-	HRESULT hr = ShaderTable->Map(0, nullptr, (void**)&pData);
+	uint8_t* pData = nullptr;
+	HRESULT hr = ShaderTableUpload->Map(0, nullptr, (void**)&pData);
+	if (FAILED(hr) || !pData)
+	{
+		AppendCpuRuntimeTrace(L"[DX12RT] shader table upload Map failed hr=" + FormatHexHRESULT(hr));
+		return;
+	}
 
-	pData += ShaderTableSize * owner->CurrentFrameIndex;;
-
-	D3D12_GPU_VIRTUAL_ADDRESS va = ShaderTable->GetGPUVirtualAddress();
+	pData += ShaderTableSize * owner->CurrentFrameIndex;
 
 	ComPtr<ID3D12StateObjectProperties> RtsoProps;
 	RTPipelineState->QueryInterface(IID_PPV_ARGS(&RtsoProps));
 
-	if (FAILED(hr))
-	{
-		HRESULT hrRemoved = owner->Device->GetDeviceRemovedReason();
-		if (FAILED(hrRemoved))
-		{
-			for (auto& sb : ShaderBinding)
-			{
-				BindingInfo& bindingInfo = sb.second;
-			}
-		}
-		
-	}
 	uint8_t* pDataThis = pData;
 
 	// calculate shader table offset for each shader
@@ -4994,7 +5013,36 @@ void D3D12RTPipelineStateObject::EndShaderTable()
 	}
 
 
-	ShaderTable->Unmap(0, nullptr);
+	ShaderTableUpload->Unmap(0, nullptr);
+	CommandList* commandList = ResolveCommandList(owner, nullptr);
+	if (commandList && ShaderTable && ShaderTableUpload)
+	{
+		if (ShaderTableState != D3D12_RESOURCE_STATE_COPY_DEST)
+		{
+			commandList->CmdList->ResourceBarrier(
+				1,
+				&CD3DX12_RESOURCE_BARRIER::Transition(
+					ShaderTable.Get(),
+					ShaderTableState,
+					D3D12_RESOURCE_STATE_COPY_DEST));
+			ShaderTableState = D3D12_RESOURCE_STATE_COPY_DEST;
+		}
+
+		const UINT64 frameOffset = static_cast<UINT64>(ShaderTableSize) * owner->CurrentFrameIndex;
+		commandList->CmdList->CopyBufferRegion(
+			ShaderTable.Get(),
+			frameOffset,
+			ShaderTableUpload.Get(),
+			frameOffset,
+			ShaderTableSize);
+		commandList->CmdList->ResourceBarrier(
+			1,
+			&CD3DX12_RESOURCE_BARRIER::Transition(
+				ShaderTable.Get(),
+				D3D12_RESOURCE_STATE_COPY_DEST,
+				D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE));
+		ShaderTableState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+	}
 	if (HitProgramBindingPendingValid &&
 		frameIndex < ShaderTableFrameValid.size() &&
 		frameIndex < ShaderTableFrameInstanceCount.size() &&

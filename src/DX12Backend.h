@@ -287,6 +287,8 @@ public:
 	uint32_t ShaderTableEntrySize = 0;
 	UINT ShaderTableSize = 0;
 	ComPtr<ID3D12Resource> ShaderTable;
+	ComPtr<ID3D12Resource> ShaderTableUpload;
+	D3D12_RESOURCE_STATES ShaderTableState = D3D12_RESOURCE_STATE_COPY_DEST;
 	ComPtr<ID3D12CommandSignature> DispatchRaysCommandSignature;
 	std::vector<uint8_t> ShaderTableFrameValid;
 	std::vector<uint32_t> ShaderTableFrameInstanceCount;
