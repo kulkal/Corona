@@ -17,10 +17,14 @@
 #include <wrl/client.h>
 #include <dxcapi.use.h>
 
+#include "imgui.h"
+
 #include "NRI.h"
 #include "Extensions/NRIDeviceCreation.h"
 #include "Extensions/NRIHelper.h"
 #include "Extensions/NRISwapChain.h"
+#include "Extensions/NRIStreamer.h"
+#include "Extensions/NRIImgui.h"
 #include "Extensions/NRIRayTracing.h"
 #include "Extensions/NRIWrapperD3D12.h"
 
@@ -153,7 +157,36 @@ struct NRIBackend::Impl
 	uint64_t SwapFrameIndex = 0;
 	uint32_t CurrentBackBuffer = 0;
 	nri::Format SwapFormat = nri::Format::RGBA8_UNORM;
+	nri::Fence* CurAcquire = nullptr;
+	bool FrameHasBackbuffer = false;
+	nri::Layout BBLayout = nri::Layout::UNDEFINED; // current backbuffer layout this frame
+
+	// ImGui (NRIImgui + Streamer)
+	nri::StreamerInterface StreamerI{};
+	nri::Streamer* Streamer = nullptr;
+	nri::ImguiInterface ImguiI{};
+	nri::Imgui* Imgui = nullptr;
+	float PendingClear[4] = { 0, 0, 0, 1 };
+	bool HasPendingClear = false;
+	Texture* CurrentWindowRT = nullptr;
 	// Future milestones add: RayTracingInterface, descriptor pools.
+
+	// Transition the current backbuffer to a target access/layout, recording on ActiveCmd.
+	void TransitionBackbuffer(nri::AccessBits access, nri::Layout layout, nri::StageBits stages)
+	{
+		if (!ActiveCmd || !FrameHasBackbuffer || CurrentBackBuffer >= BackBuffers.size())
+			return;
+		nri::TextureBarrierDesc tb = {};
+		tb.texture = BackBuffers[CurrentBackBuffer];
+		tb.before.access = (BBLayout == nri::Layout::UNDEFINED) ? nri::AccessBits::NONE : (BBLayout == nri::Layout::COLOR_ATTACHMENT ? nri::AccessBits::COLOR_ATTACHMENT : nri::AccessBits::NONE);
+		tb.before.layout = BBLayout;
+		tb.before.stages = nri::StageBits::ALL;
+		tb.after.access = access; tb.after.layout = layout; tb.after.stages = stages;
+		tb.mipNum = 1; tb.layerNum = 1;
+		nri::BarrierDesc bd = {}; bd.textures = &tb; bd.textureNum = 1;
+		Core.CmdBarrier(*ActiveCmd, bd);
+		BBLayout = layout;
+	}
 
 	// Backend-owned GPU allocation behind a Corona Buffer wrapper (VulkanBackend
 	// keeps native handles in a side table keyed by the wrapper pointer; same here).
@@ -638,6 +671,11 @@ static void NRI_CALL NRIMessageCallback(nri::Message messageType, const char* fi
 	OutputDebugStringA(buffer);
 }
 
+// Provided so NRI does NOT DebugBreak/abort on validation errors during bring-up:
+// a failing resource (e.g. an unsupported binding shape) is reported and the
+// creation call returns an error, letting the editor skip that pass and proceed.
+static void NRI_CALL NRIAbortCallback(void* /*userArg*/) { /* no-op: do not break */ }
+
 NRIBackend::NRIBackend() : m(std::make_unique<Impl>())
 {
 	using nri::CoreInterface;
@@ -649,6 +687,7 @@ NRIBackend::NRIBackend() : m(std::make_unique<Impl>())
 	desc.enableNRIValidation = true;            // embedded NRI-specific validation
 	desc.enableGraphicsAPIValidation = false;   // D3D12 debug layer (opt-in later)
 	desc.callbackInterface.MessageCallback = NRIMessageCallback;
+	desc.callbackInterface.AbortExecution = NRIAbortCallback;
 
 	nri::Result r = nri::nriCreateDevice(desc, m->Device);
 	if (r != nri::Result::SUCCESS || m->Device == nullptr)
@@ -677,6 +716,12 @@ NRIBackend::NRIBackend() : m(std::make_unique<Impl>())
 	}
 	m->Core.GetQueue(*m->Device, nri::QueueType::GRAPHICS, 0, m->GraphicsQueue);
 	nri::nriGetInterface(*m->Device, NRI_INTERFACE(SwapChainInterface), &m->SwapChainI); // non-fatal
+	{
+		using nri::StreamerInterface;
+		using nri::ImguiInterface;
+		nri::nriGetInterface(*m->Device, NRI_INTERFACE(StreamerInterface), &m->StreamerI);
+		nri::nriGetInterface(*m->Device, NRI_INTERFACE(ImguiInterface), &m->ImguiI);
+	}
 
 	const nri::DeviceDesc& dd = m->Core.GetDeviceDesc(*m->Device);
 	m->RayTracingTier = dd.tiers.rayTracing;
@@ -917,6 +962,8 @@ NRIBackend::~NRIBackend()
 		}
 		m->Textures.clear();
 
+		if (m->Imgui) { m->ImguiI.DestroyImgui(m->Imgui); m->Imgui = nullptr; }
+		if (m->Streamer) { m->StreamerI.DestroyStreamer(m->Streamer); m->Streamer = nullptr; }
 		for (nri::Descriptor* v : m->BackBufferViews) if (v) m->Core.DestroyDescriptor(v);
 		for (nri::Fence* fc : m->AcquireSem) if (fc) m->Core.DestroyFence(fc);
 		for (nri::Fence* fc : m->ReleaseSem) if (fc) m->Core.DestroyFence(fc);
@@ -951,23 +998,71 @@ void NRIBackend::BeginFrame()
 {
 	if (!m->Device || !m->CmdAllocator || !m->CmdBuffer || m->ActiveCmd)
 		return;
+	m->FrameHasBackbuffer = false;
+	m->HasPendingClear = false;
+	m->BBLayout = nri::Layout::UNDEFINED;
+	m->CurrentWindowRT = nullptr;
+
 	m->Core.ResetCommandAllocator(*m->CmdAllocator);
-	if (m->Core.BeginCommandBuffer(*m->CmdBuffer, nullptr) == nri::Result::SUCCESS)
-		m->ActiveCmd = m->CmdBuffer;
+	if (m->Core.BeginCommandBuffer(*m->CmdBuffer, nullptr) != nri::Result::SUCCESS)
+		return;
+	m->ActiveCmd = m->CmdBuffer;
+
+	if (m->SwapChain && !m->BackBuffers.empty())
+	{
+		const uint32_t n = (uint32_t)m->BackBuffers.size();
+		nri::Fence* acq = m->AcquireSem[m->SwapFrameIndex % n];
+		uint32_t idx = 0;
+		if (m->SwapChainI.AcquireNextTexture(*m->SwapChain, *acq, idx) == nri::Result::SUCCESS && idx < n)
+		{
+			m->CurrentBackBuffer = idx;
+			m->CurAcquire = acq;
+			m->FrameHasBackbuffer = true;
+		}
+	}
 }
 void NRIBackend::EndFrame()
 {
 	if (!m->ActiveCmd)
 		return;
-	m->Core.EndCommandBuffer(*m->ActiveCmd);
-	nri::FenceSubmitDesc sf = {};
-	sf.fence = m->Fence; sf.value = ++m->FenceValue; sf.stages = nri::StageBits::ALL;
-	nri::CommandBuffer* cbs[1] = { m->ActiveCmd };
-	nri::QueueSubmitDesc qs = {};
-	qs.commandBuffers = cbs; qs.commandBufferNum = 1;
-	qs.signalFences = &sf; qs.signalFenceNum = 1;
-	m->Core.QueueSubmit(*m->GraphicsQueue, qs);
-	m->Core.Wait(*m->Fence, m->FenceValue);   // synchronous frame for bring-up
+	if (m->Streamer)
+		m->StreamerI.EndStreamerFrame(*m->Streamer);
+
+	if (m->FrameHasBackbuffer)
+	{
+		// Make sure the backbuffer ends in PRESENT layout even if nothing drew to it.
+		if (m->BBLayout != nri::Layout::PRESENT)
+			m->TransitionBackbuffer(nri::AccessBits::NONE, nri::Layout::PRESENT, nri::StageBits::NONE);
+
+		m->Core.EndCommandBuffer(*m->ActiveCmd);
+
+		nri::Fence* release = m->ReleaseSem[m->CurrentBackBuffer];
+		nri::FenceSubmitDesc waitAcq = {}; waitAcq.fence = m->CurAcquire; waitAcq.stages = nri::StageBits::ALL;
+		nri::FenceSubmitDesc sigRel = {}; sigRel.fence = release;
+		nri::FenceSubmitDesc sigFrame = {}; sigFrame.fence = m->FrameFence; sigFrame.value = 1 + m->SwapFrameIndex;
+		nri::FenceSubmitDesc signals[2] = { sigRel, sigFrame };
+		nri::CommandBuffer* cbs[1] = { m->ActiveCmd };
+		nri::QueueSubmitDesc qs = {};
+		qs.waitFences = &waitAcq; qs.waitFenceNum = 1;
+		qs.commandBuffers = cbs; qs.commandBufferNum = 1;
+		qs.signalFences = signals; qs.signalFenceNum = 2;
+		m->Core.QueueSubmit(*m->GraphicsQueue, qs);
+		m->SwapChainI.QueuePresent(*m->SwapChain, *release);
+		m->SwapFrameIndex++;
+		m->Core.Wait(*m->FrameFence, m->SwapFrameIndex); // synchronous pacing
+	}
+	else
+	{
+		m->Core.EndCommandBuffer(*m->ActiveCmd);
+		nri::FenceSubmitDesc sf = {};
+		sf.fence = m->Fence; sf.value = ++m->FenceValue; sf.stages = nri::StageBits::ALL;
+		nri::CommandBuffer* cbs[1] = { m->ActiveCmd };
+		nri::QueueSubmitDesc qs = {};
+		qs.commandBuffers = cbs; qs.commandBufferNum = 1;
+		qs.signalFences = &sf; qs.signalFenceNum = 1;
+		m->Core.QueueSubmit(*m->GraphicsQueue, qs);
+		m->Core.Wait(*m->Fence, m->FenceValue);
+	}
 	m->ActiveCmd = nullptr;
 }
 void NRIBackend::WaitForGpu() { NRI_TODO(); }
@@ -1199,14 +1294,8 @@ void NRIBackend::CreateSwapChainForWindow(WindowHandle window, uint32_t width, u
 	if (!m->FrameFence)
 		m->Core.CreateFence(*m->Device, 0, m->FrameFence);
 
-	// Present smoke: clear the window to a recognizable colour through NRI to
-	// prove the swap-chain + render-pass + present path end to end.
-	int presented = 0;
-	for (int f = 0; f < 3; ++f)
-		if (m->PresentClear(0.10f, 0.02f, 0.20f, 1.0f)) ++presented;
-
 	char info[256];
-	_snprintf_s(info, _TRUNCATE, "swapchain ok: backbuffers=%u presented=%d/3", num, presented);
+	_snprintf_s(info, _TRUNCATE, "swapchain ok: backbuffers=%u format=%d", num, (int)m->SwapFormat);
 	ErrorString = info;
 	OutputDebugStringA("[NRI] ");
 	OutputDebugStringA(info);
@@ -1219,17 +1308,97 @@ std::shared_ptr<Texture> NRIBackend::GetSwapChainTexture(uint32_t bufferIndex)
 	return nullptr;
 }
 bool NRIBackend::CaptureTexture(Texture*, CapturedImage&, EResourceState) { NRI_TODO(); return false; }
-Texture* NRIBackend::GetCurrentWindowRenderTarget() { NRI_TODO(); return nullptr; }
-void NRIBackend::PrepareWindowRenderTarget(Texture*) { NRI_TODO(); }
-void NRIBackend::FinalizeWindowRenderTarget(Texture*) { NRI_TODO(); }
+Texture* NRIBackend::GetCurrentWindowRenderTarget()
+{
+	if (m->FrameHasBackbuffer && m->CurrentBackBuffer < m->BackBufferWrappers.size())
+		return m->BackBufferWrappers[m->CurrentBackBuffer].get();
+	return nullptr;
+}
+void NRIBackend::PrepareWindowRenderTarget(Texture* renderTarget) { m->CurrentWindowRT = renderTarget; }
+void NRIBackend::FinalizeWindowRenderTarget(Texture*)
+{
+	// Leave the backbuffer in PRESENT layout for the present in EndFrame.
+	if (m->FrameHasBackbuffer && m->BBLayout != nri::Layout::PRESENT)
+		m->TransitionBackbuffer(nri::AccessBits::NONE, nri::Layout::PRESENT, nri::StageBits::NONE);
+}
 void NRIBackend::RequestWindowCapture(const std::wstring&) { NRI_TODO(); }
 bool NRIBackend::ConsumeWindowCaptureResult(std::wstring*, bool*, std::wstring*) { NRI_TODO(); return false; }
 
 // === ImGui ================================================================
-void NRIBackend::InitializeImGuiBackend(WindowHandle, ETextureFormat) { NRI_TODO(); }
-void NRIBackend::NewImGuiFrame() { NRI_TODO(); }
-void NRIBackend::RenderImGuiDrawData(ImDrawData*) { NRI_TODO(); }
-void NRIBackend::ShutdownImGuiBackend() { NRI_TODO(); }
+void NRIBackend::InitializeImGuiBackend(WindowHandle, ETextureFormat)
+{
+	if (!m->Device || !m->ImguiI.CreateImgui || !m->StreamerI.CreateStreamer)
+	{
+		ErrorString = "ImGui: NRI Imgui/Streamer interface unavailable";
+		return;
+	}
+	ImGuiIO& io = ImGui::GetIO();
+	io.BackendRendererName = "Corona_NRI";
+	io.BackendFlags |= ImGuiBackendFlags_RendererHasTextures; // dynamic-font textures managed by NRIImgui
+
+	nri::StreamerDesc sd = {};
+	sd.constantBufferMemoryLocation = nri::MemoryLocation::HOST_UPLOAD;
+	sd.constantBufferSize = 1u << 16;
+	sd.dynamicBufferMemoryLocation = nri::MemoryLocation::HOST_UPLOAD;
+	sd.dynamicBufferDesc.usage = nri::BufferUsageBits::VERTEX_BUFFER | nri::BufferUsageBits::INDEX_BUFFER;
+	sd.queuedFrameNum = 2;
+	if (m->StreamerI.CreateStreamer(*m->Device, sd, m->Streamer) != nri::Result::SUCCESS)
+	{
+		ErrorString = "ImGui: CreateStreamer failed";
+		return;
+	}
+	nri::ImguiDesc id = {};
+	id.descriptorPoolSize = 128;
+	if (m->ImguiI.CreateImgui(*m->Device, id, m->Imgui) != nri::Result::SUCCESS)
+		ErrorString = "ImGui: CreateImgui failed";
+}
+void NRIBackend::NewImGuiFrame() { /* ImGui::NewFrame() is driven by Corona; nothing NRI-specific here */ }
+void NRIBackend::RenderImGuiDrawData(ImDrawData* drawData)
+{
+	if (!m->ActiveCmd || !m->Imgui || !m->Streamer || !m->FrameHasBackbuffer || !drawData)
+		return;
+	const uint32_t idx = m->CurrentBackBuffer;
+
+	// 1) Stream + copy ImGui vertex/index/texture data (outside a render pass).
+	nri::CopyImguiDataDesc copy = {};
+	copy.drawLists = drawData->CmdLists.Data;
+	copy.drawListNum = (uint32_t)drawData->CmdLists.Size;
+	copy.textures = drawData->Textures ? drawData->Textures->Data : nullptr;
+	copy.textureNum = drawData->Textures ? (uint32_t)drawData->Textures->Size : 0;
+	m->ImguiI.CmdCopyImguiData(*m->ActiveCmd, *m->Streamer, *m->Imgui, copy);
+	m->StreamerI.CmdCopyStreamedData(*m->ActiveCmd, *m->Streamer);
+
+	// 2) Render pass on the backbuffer (clear if a ClearRenderTarget is pending).
+	m->TransitionBackbuffer(nri::AccessBits::COLOR_ATTACHMENT, nri::Layout::COLOR_ATTACHMENT, nri::StageBits::ALL);
+	nri::AttachmentDesc colorAtt = {};
+	colorAtt.descriptor = m->BackBufferViews[idx];
+	colorAtt.loadOp = m->HasPendingClear ? nri::LoadOp::CLEAR : nri::LoadOp::LOAD;
+	colorAtt.storeOp = nri::StoreOp::STORE;
+	if (m->HasPendingClear)
+		colorAtt.clearValue.color.f = nri::Color32f{ m->PendingClear[0], m->PendingClear[1], m->PendingClear[2], m->PendingClear[3] };
+	nri::RenderingDesc rd = {};
+	rd.colors = &colorAtt; rd.colorNum = 1;
+	m->Core.CmdBeginRendering(*m->ActiveCmd, rd);
+
+	nri::DrawImguiDesc draw = {};
+	draw.drawLists = copy.drawLists;
+	draw.drawListNum = copy.drawListNum;
+	draw.displaySize = { (nri::Dim_t)drawData->DisplaySize.x, (nri::Dim_t)drawData->DisplaySize.y };
+	draw.hdrScale = 1.0f;
+	draw.attachmentFormat = m->SwapFormat;
+	draw.linearColor = false;
+	m->ImguiI.CmdDrawImgui(*m->ActiveCmd, *m->Imgui, draw);
+
+	m->Core.CmdEndRendering(*m->ActiveCmd);
+	m->HasPendingClear = false;
+}
+void NRIBackend::ShutdownImGuiBackend()
+{
+	if (!m || !m->Device)
+		return;
+	if (m->Imgui) { m->ImguiI.DestroyImgui(m->Imgui); m->Imgui = nullptr; }
+	if (m->Streamer) { m->StreamerI.DestroyStreamer(m->Streamer); m->Streamer = nullptr; }
+}
 
 // === Queries ==============================================================
 void NRIBackend::InitializeGpuTimestampQueries(uint32_t) { NRI_TODO(); }
@@ -1245,9 +1414,14 @@ void NRIBackend::ResolveOcclusionQueryRange(uint32_t, uint32_t) { NRI_TODO(); }
 uint64_t NRIBackend::ReadOcclusionQueryValue(uint32_t) const { return 0; }
 
 // === Command recording ====================================================
-void NRIBackend::SetRenderTarget(Texture*, Texture*) { NRI_TODO(); }
-void NRIBackend::SetRenderTargets(Texture* const*, uint32_t, Texture*) { NRI_TODO(); }
-void NRIBackend::ClearRenderTarget(Texture*, const float[4]) { NRI_TODO(); }
+void NRIBackend::SetRenderTarget(Texture* colorTarget, Texture*) { m->CurrentWindowRT = colorTarget; }
+void NRIBackend::SetRenderTargets(Texture* const* colorTargets, uint32_t count, Texture*) { m->CurrentWindowRT = (count > 0 && colorTargets) ? colorTargets[0] : nullptr; }
+void NRIBackend::ClearRenderTarget(Texture*, const float clearColor[4])
+{
+	m->PendingClear[0] = clearColor[0]; m->PendingClear[1] = clearColor[1];
+	m->PendingClear[2] = clearColor[2]; m->PendingClear[3] = clearColor[3];
+	m->HasPendingClear = true;
+}
 void NRIBackend::ClearDepth(Texture*, float) { NRI_TODO(); }
 void NRIBackend::BindDefaultDescriptorHeaps() { NRI_TODO(); }
 void NRIBackend::SetViewportAndScissor(uint32_t, uint32_t) { NRI_TODO(); }
