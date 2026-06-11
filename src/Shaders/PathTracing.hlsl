@@ -1,5 +1,6 @@
 #include "Common.hlsl"
 #include "GGX.hlsli"
+#include "PathTracingWavefront.hlsli"
 
 RWTexture2D<float4> OutputColor : register(u0);
 RWTexture2D<float4> OutAlbedo : register(u1);
@@ -11,6 +12,12 @@ RWTexture2D<float4> OutRoughnessMetallic : register(u6);
 RWTexture2D<float> OutDepth : register(u7);
 RWTexture2D<float> OutSpecularHitDistance : register(u8);
 RWTexture2D<float2> OutSpecularMotionVector : register(u9);
+RWStructuredBuffer<PathTracingWavefrontState> PathCompactionStateIn : register(u10);
+RWStructuredBuffer<PathTracingWavefrontState> PathCompactionStateOut : register(u11);
+RWStructuredBuffer<uint> PathCompactionActiveListIn : register(u12);
+RWStructuredBuffer<uint> PathCompactionActiveListOut : register(u13);
+RWStructuredBuffer<uint> PathCompactionCounters : register(u14);
+RWStructuredBuffer<float4> PathCompactionRadiance : register(u15);
 
 RaytracingAccelerationStructure gRtScene : register(t0);
 ByteAddressBuffer vertices : register(t1);
@@ -72,6 +79,14 @@ cbuffer ViewParameter : register(b0)
     PointLightParam PointLights[MAX_POINT_LIGHTS];
     uint PointLightCount;
     float3 PointLightPadding;
+};
+
+cbuffer PathCompaction : register(b1)
+{
+    uint PathCompactionRenderWidth;
+    uint PathCompactionRenderHeight;
+    uint PathCompactionCapacity;
+    uint PathCompactionBounceIndex;
 };
 
 SamplerState sampleWrap : register(s0);
@@ -608,6 +623,158 @@ void PathTracingRayGen()
     OutputColor[launchIndex.xy] = float4(finalColor, 1.0);
 }
 
+[shader("raygeneration")]
+void PathTracingCompactionRayGen()
+{
+    uint3 launchIndex = DispatchRaysIndex();
+    uint3 launchDim = DispatchRaysDimensions();
+    uint laneIndex = launchIndex.x + launchIndex.y * launchDim.x;
+    uint bounce = PathCompactionBounceIndex;
+    uint activeCount = PathCompactionCounters[bounce];
+    if (laneIndex >= activeCount || laneIndex >= PathCompactionCapacity)
+        return;
+
+    uint pathId = PathCompactionActiveListIn[laneIndex];
+    if (pathId >= PathCompactionCapacity)
+        return;
+
+    PathTracingWavefrontState state = PathCompactionStateIn[pathId];
+    if ((state.Flags & PATH_TRACING_WAVEFRONT_FLAG_ACTIVE) == 0u)
+        return;
+
+    uint2 pixel = uint2(pathId % PathCompactionRenderWidth, pathId / PathCompactionRenderWidth);
+    if (pixel.x >= PathCompactionRenderWidth || pixel.y >= PathCompactionRenderHeight)
+        return;
+
+    RayDesc ray;
+    ray.Origin = state.Origin;
+    ray.Direction = state.Direction;
+    if (state.Bounce == 0u)
+    {
+        float3 viewRayDir = mul(float4(state.Direction, 0.0f), ViewMatrix).xyz;
+        float primaryRayTScale = rcp(max(-viewRayDir.z, 1.0e-4f));
+        ray.TMin = max(0.0001f, ProjectionParams.z * primaryRayTScale);
+        ray.TMax = max(ray.TMin + 0.0001f, ProjectionParams.w * primaryRayTScale);
+    }
+    else
+    {
+        ray.TMin = 0.0001f;
+        ray.TMax = 100000.0f;
+    }
+
+    PathTracingPayload payload = MakePathTracingPayload(
+        state.Origin,
+        state.Direction,
+        state.Bounce,
+        state.Seed,
+        state.Throughput,
+        0u);
+    TraceRay(gRtScene, RAY_FLAG_NONE, 0xFF, 0, 0, 0, ray, payload);
+
+    uint seed = payload.seed;
+    float3 radiance = state.Radiance + payload.radiance * state.Throughput;
+
+    if (bWritePrimaryGBuffer != 0 && state.Bounce == 0u)
+    {
+        float specularHitDistance = ProjectionParams.w;
+        float2 specularMotionVector = float2(0.0f, 0.0f);
+        bool primaryHit = payload.hit != 0u;
+        if (primaryHit)
+        {
+            float roughness = clamp(payload.debugRoughness, 0.02f, 1.0f);
+            float3 specularAlbedo = lerp(0.04f.xxx, saturate(payload.debugAlbedo), saturate(payload.debugMetallic));
+            float specularEnergy = max(specularAlbedo.x, max(specularAlbedo.y, specularAlbedo.z));
+            float smoothGuide = saturate((0.38f - roughness) / 0.18f);
+            float metalGuide = saturate(payload.debugMetallic) * saturate((0.55f - roughness) / 0.25f);
+            float specularGuideWeight = specularEnergy * max(smoothGuide, metalGuide);
+
+            if (specularGuideWeight > 0.025f)
+            {
+                float3 guideNormal = GGXSafeNormalize(payload.debugGeomNormal, float3(0.0f, 1.0f, 0.0f));
+                float3 guideDir = GGXSafeNormalize(reflect(ray.Direction, guideNormal), guideNormal);
+
+                if (dot(guideDir, guideNormal) > 1.0e-4f)
+                {
+                    RayDesc guideRay;
+                    guideRay.Origin = payload.debugWorldPos + guideNormal * PATH_TRACING_RAY_BIAS;
+                    guideRay.Direction = guideDir;
+                    guideRay.TMin = 0.01f;
+                    guideRay.TMax = ProjectionParams.w;
+
+                    PathTracingPayload guidePayload = MakePathTracingPayload(guideRay.Origin, guideRay.Direction, 0u, seed, float3(0, 0, 0), 1u);
+                    guidePayload.done = true;
+                    TraceRay(gRtScene,
+                             RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH |
+                             RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES,
+                             0xFF, 0, 0, 0, guideRay, guidePayload);
+                    if (guidePayload.hit != 0u)
+                    {
+                        specularHitDistance = guidePayload.hitDistance;
+                        float2 specCurrentUV;
+                        float2 specPrevUV;
+                        if (ProjectToScreenUVChecked(guidePayload.debugWorldPos, UnjitteredViewProjMatrix, specCurrentUV) &&
+                            ProjectToScreenUVChecked(guidePayload.debugWorldPos, PrevUnjitteredViewProjMatrix, specPrevUV))
+                        {
+                            float2 candidateMotionVector = (specPrevUV - specCurrentUV) *
+                                float2(PathCompactionRenderWidth, PathCompactionRenderHeight) *
+                                SpecularMotionVectorScale;
+                            if (all(abs(candidateMotionVector) <= float2(PathCompactionRenderWidth, PathCompactionRenderHeight)))
+                                specularMotionVector = candidateMotionVector;
+                        }
+                    }
+                }
+            }
+        }
+        WritePrimaryHitGBuffer(pixel, payload, primaryHit, specularHitDistance, specularMotionVector);
+    }
+
+    bool alive = !payload.done && ((state.Bounce + 1u) < MaxBounces);
+    float3 nextThroughput = payload.throughput;
+    if (any(isnan(nextThroughput)) || any(isinf(nextThroughput)) || all(nextThroughput <= 0.0f))
+        alive = false;
+
+    if (alive && state.Bounce > 2u)
+    {
+        float p = max(nextThroughput.x, max(nextThroughput.y, nextThroughput.z));
+        if (p < 0.001f || random_float(seed) > p)
+        {
+            alive = false;
+        }
+        else
+        {
+            nextThroughput /= max(p, 0.001f);
+        }
+    }
+
+    if (any(isnan(radiance)) || any(isinf(radiance)))
+        radiance = float3(0, 0, 0);
+    radiance = clamp_firefly(max(radiance, 0.0f.xxx));
+    PathCompactionRadiance[pathId] = float4(radiance, 1.0f);
+
+    PathTracingWavefrontState nextState = state;
+    nextState.Seed = seed;
+    nextState.Radiance = radiance;
+    nextState.Bounce = state.Bounce + 1u;
+    nextState.Origin = payload.origin;
+    nextState.Direction = payload.direction;
+    nextState.Throughput = nextThroughput;
+
+    if (alive)
+    {
+        nextState.Flags = PATH_TRACING_WAVEFRONT_FLAG_ACTIVE;
+        PathCompactionStateOut[pathId] = nextState;
+        uint outIndex;
+        InterlockedAdd(PathCompactionCounters[bounce + 1u], 1u, outIndex);
+        if (outIndex < PathCompactionCapacity)
+            PathCompactionActiveListOut[outIndex] = pathId;
+    }
+    else
+    {
+        nextState.Flags = 0u;
+        PathCompactionStateOut[pathId] = nextState;
+    }
+}
+
 [shader("closesthit")]
 void PathTracingClosestHit(inout PathTracingPayload payload, in BuiltInTriangleIntersectionAttributes attribs)
 {
@@ -742,10 +909,17 @@ void PathTracingClosestHit(inout PathTracingPayload payload, in BuiltInTriangleI
         if (pointLightIndex >= activePointLightCount)
             break;
 
-        float3 pointPosition = PointLights[pointLightIndex].PositionAndRadius.xyz;
-        float pointRadius = max(PointLights[pointLightIndex].PositionAndRadius.w, 0.01f);
-        float3 pointColor = max(PointLights[pointLightIndex].ColorAndIntensity.xyz, 0.0f.xxx);
-        float pointIntensity = max(PointLights[pointLightIndex].ColorAndIntensity.w, 0.0f);
+        // Load the whole light record once into registers. PointLights lives in
+        // the UPLOAD-heap view CBV; dynamically indexing it compiles to per-access
+        // L1TEX loads against system memory (shows up as SysL2 traffic). Caching
+        // the record collapses ~6 per-iteration loads into one, cutting SysL2
+        // request volume without changing results.
+        PointLightParam pl = PointLights[pointLightIndex];
+
+        float3 pointPosition = pl.PositionAndRadius.xyz;
+        float pointRadius = max(pl.PositionAndRadius.w, 0.01f);
+        float3 pointColor = max(pl.ColorAndIntensity.xyz, 0.0f.xxx);
+        float pointIntensity = max(pl.ColorAndIntensity.w, 0.0f);
 
         float3 toLight = pointPosition - hitPos;
         float distanceSq = max(dot(toLight, toLight), 1.0e-4f);
@@ -755,14 +929,14 @@ void PathTracingClosestHit(inout PathTracingPayload payload, in BuiltInTriangleI
         rangeAttenuation *= rangeAttenuation;
         float inverseSquareAttenuation = 1.0f / max(1.0f, distanceSq * 0.0001f);
         float attenuation = rangeAttenuation * inverseSquareAttenuation *
-            EvaluateSpotAttenuation(PointLights[pointLightIndex], pointLightDir);
+            EvaluateSpotAttenuation(pl, pointLightDir);
         float pointNdotL = max(0.0f, dot(N, pointLightDir));
 
         if (pointNdotL <= 0.0f || attenuation <= 0.0f || pointIntensity <= 0.0f)
             continue;
 
         bool pointVisible = true;
-        if (PointLights[pointLightIndex].SpotConeAndFlags.w > 0.5f)
+        if (pl.SpotConeAndFlags.w > 0.5f)
         {
             RayDesc pointShadowRay;
             pointShadowRay.Origin = hitPos;

@@ -91,6 +91,7 @@ void Corona::PathTracingPass()
 	Texture* outputColor = PathTracingAccumBuffer[PathTracingWriteIndex].get();
 	if (!TLAS || !outputColor)
 		return;
+
 	renderBackend->EmitGpuCrashMarker("PathTracingPass");
 
 	if (!PSO_PATH_TRACING)
@@ -114,6 +115,23 @@ void Corona::PathTracingPass()
 		renderBackend->TransitionTexture(PathTracingSpecularHitDistanceBuffer.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
 		renderBackend->TransitionTexture(PathTracingSpecularMotionVectorBuffer.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
 	}
+
+	auto transitionPathTracingOutputsToShaderRead = [&]()
+	{
+		renderBackend->TransitionTexture(outputColor, EResourceState::UnorderedAccess, EResourceState::ShaderRead);
+		if (bWritePrimaryGBuffer)
+		{
+			renderBackend->TransitionTexture(AlbedoBuffer.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
+			renderBackend->TransitionTexture(SpecularAlbedoBuffer.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
+			renderBackend->TransitionTexture(NormalBuffers[ColorBufferWriteIndex].get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
+			renderBackend->TransitionTexture(GeomNormalBuffers[ColorBufferWriteIndex].get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
+			renderBackend->TransitionTexture(VelocityBuffer.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
+			renderBackend->TransitionTexture(RoughnessMetalicBuffer.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
+			renderBackend->TransitionTexture(UnjitteredDepthBuffers[ColorBufferWriteIndex].get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
+			renderBackend->TransitionTexture(PathTracingSpecularHitDistanceBuffer.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
+			renderBackend->TransitionTexture(PathTracingSpecularMotionVectorBuffer.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
+		}
+	};
 
 	ApplyRenderPointLightsToFrameParams();
 	const UINT32 currentPointLightStateHash = ComputePathTracingPointLightStateHash();
@@ -230,6 +248,21 @@ void Corona::PathTracingPass()
 	PathTracingViewParamCB dispatchViewParam = PathTracingViewParam;
 	dispatchViewParam.SamplesPerPixel = dispatchSamplesPerPixel;
 
+	if (bEnablePathTracingCompaction)
+	{
+		if (PathTracingCompactionPass(outputColor, dispatchViewParam, bWritePrimaryGBuffer))
+		{
+			if (PathTracingViewParam.DebugMode == 0)
+				PathTracingAccumulatedFrames++;
+			transitionPathTracingOutputsToShaderRead();
+			return;
+		}
+	}
+	else
+	{
+		bPathTracingCompactionFallbackLogged = false;
+	}
+
 	RTPassBuilder pass(*this, PSO_PATH_TRACING);
 	pass.BeginScene()
 		.SetTextureUAV("global", "OutputColor", outputColor)
@@ -264,17 +297,5 @@ void Corona::PathTracingPass()
 	}
 
 	// Transition output buffer back to SRV
-	renderBackend->TransitionTexture(outputColor, EResourceState::UnorderedAccess, EResourceState::ShaderRead);
-	if (bWritePrimaryGBuffer)
-	{
-		renderBackend->TransitionTexture(AlbedoBuffer.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
-		renderBackend->TransitionTexture(SpecularAlbedoBuffer.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
-		renderBackend->TransitionTexture(NormalBuffers[ColorBufferWriteIndex].get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
-		renderBackend->TransitionTexture(GeomNormalBuffers[ColorBufferWriteIndex].get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
-		renderBackend->TransitionTexture(VelocityBuffer.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
-		renderBackend->TransitionTexture(RoughnessMetalicBuffer.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
-		renderBackend->TransitionTexture(UnjitteredDepthBuffers[ColorBufferWriteIndex].get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
-		renderBackend->TransitionTexture(PathTracingSpecularHitDistanceBuffer.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
-		renderBackend->TransitionTexture(PathTracingSpecularMotionVectorBuffer.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
-	}
+	transitionPathTracingOutputsToShaderRead();
 }

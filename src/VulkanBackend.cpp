@@ -5633,6 +5633,31 @@ void VulkanBackend::TransitionVertexBuffer(VertexBuffer* vertexBuffer, EResource
 	(void)vertexBuffer; (void)stateBefore; (void)stateAfter;
 }
 
+void VulkanBackend::UAVBarrier(Buffer* buffer)
+{
+#if !CORONA_HAS_VULKAN
+	(void)buffer; ThrowNotImplemented(__FUNCTION__);
+#else
+	(void)buffer;
+	if (ActiveCommandBuffer == VK_NULL_HANDLE)
+		return;
+
+	VkMemoryBarrier barrier{};
+	barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+	barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+	barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+
+	vkCmdPipelineBarrier(
+		ActiveCommandBuffer,
+		VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+		VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+		0,
+		1, &barrier,
+		0, nullptr,
+		0, nullptr);
+#endif
+}
+
 Texture* VulkanBackend::GetCurrentWindowRenderTarget() { return nullptr; }
 void VulkanBackend::PrepareWindowRenderTarget(Texture* renderTarget) { (void)renderTarget; }
 void VulkanBackend::FinalizeWindowRenderTarget(Texture* renderTarget) { (void)renderTarget; }

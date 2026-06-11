@@ -1032,10 +1032,22 @@ private:
 
 	PathTracingViewParamCB PathTracingViewParam;
 	shared_ptr<RTPipelineStateObject> PSO_PATH_TRACING;
+	shared_ptr<RTPipelineStateObject> PSO_PATH_TRACING_COMPACTION_TRACE;
+	shared_ptr<ComputePipelineStateObject> PSO_PATH_TRACING_COMPACTION_SEED;
+	shared_ptr<ComputePipelineStateObject> PSO_PATH_TRACING_COMPACTION_RESOLVE;
 	shared_ptr<Texture> PathTracingAccumBuffer[2];
+	std::shared_ptr<Buffer> PathTracingCompactionState[2];
+	std::shared_ptr<Buffer> PathTracingCompactionActiveList[2];
+	std::shared_ptr<Buffer> PathTracingCompactionCounter;
+	std::shared_ptr<Buffer> PathTracingCompactionRadiance;
 	UINT PathTracingWriteIndex = 0;
 	UINT32 PathTracingAccumulatedFrames = 0;
 	UINT32 PathTracingLastDispatchSamplesPerPixel = 1;
+	UINT32 PathTracingCompactionCapacity = 0;
+	bool bEnablePathTracingCompaction = false;
+	bool bPathTracingCompactionFallbackLogged = false;
+	bool bPathTracingCompactionResourcesNeedDescriptorRefresh = false;
+	bool bPathTracingCompactionDispatchLogged = false;
 	float PathTracingRRSpecularMotionVectorScale = 1.0f;
 	bool bEnablePathTracingRRSpecularMotionVectors = true;
 	bool bEnablePathTracingRRSpecularHitDistance = false;
@@ -2026,6 +2038,15 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 		UINT32 PathTracingMaxBounces = 4;
 		UINT32 PathTracingSamplesPerPixel = 1;
 		UINT32 PathTracingDebugMode = 0;
+		bool bEnablePathTracingCompaction = false;
+	};
+
+	struct PathTracingCompactionParamCB
+	{
+		UINT32 RenderWidth = 0;
+		UINT32 RenderHeight = 0;
+		UINT32 Capacity = 0;
+		UINT32 BounceIndex = 0;
 	};
 
 	struct RenderFrameDelta
@@ -3264,8 +3285,11 @@ public:
 	void BloomPass();
 
 	void InitPathTracingPass();
+	void InitPathTracingCompactionPass();
+	bool EnsurePathTracingCompactionResources(UINT32 width, UINT32 height);
 
 	void PathTracingPass();
+	bool PathTracingCompactionPass(Texture* outputColor, const PathTracingViewParamCB& dispatchViewParam, bool bWritePrimaryGBuffer);
 	void ApplyHybridDefaultCamera();
 	void ApplyDefaultFlyCamera();
 	void EnsureWindowFramebuffers();

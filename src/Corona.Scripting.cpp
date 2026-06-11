@@ -8018,6 +8018,7 @@ void Corona::PushLuauUiStateForScript(lua_State* L, const std::string& mode, boo
 	PushIntegerField(L, "path_samples_per_pixel", static_cast<lua_Integer>(PathTracingViewParam.SamplesPerPixel));
 	PushIntegerField(L, "path_direct_light_samples", static_cast<lua_Integer>(PathTracingViewParam.DirectLightSampleCount));
 	PushIntegerField(L, "path_debug_mode", static_cast<lua_Integer>(PathTracingViewParam.DebugMode));
+	PushBoolField(L, "path_compaction", bEnablePathTracingCompaction);
 	PushIntegerField(L, "frame_counter", static_cast<lua_Integer>(FrameCounter));
 
 	PushIntegerField(L, "tone_map_mode", static_cast<lua_Integer>(ToneMapMode));
@@ -8576,9 +8577,10 @@ bool Corona::SetLuauUiValueForScript(const std::string& name, lua_State* L, int 
 	if (setFloat("spatial_hash_level_base_distance", SpatialHashGICB.SpatialHashLevelParams.y, true)) return true;
 	if (setBool("shc_primary_deep_seed", bEnableSpatialHashPrimaryDeepSeed, true)) return true;
 	if (setUInt("shc_primary_deep_stride", SpatialHashPrimaryDeepSeedPixelStride, 1, 16, true)) return true;
+	if (setBool("path_compaction", bEnablePathTracingCompaction)) { if (lastSetterChanged) { resetPathTracing(); bPathTracingCompactionFallbackLogged = false; bPathTracingCompactionDispatchLogged = false; } return true; }
 	if (setUInt("path_max_bounces", PathTracingViewParam.MaxBounces, 1, 8)) { if (lastSetterChanged) resetPathTracing(); return true; }
 	if (setUInt("path_samples_per_pixel", PathTracingViewParam.SamplesPerPixel, 1, 16)) { if (lastSetterChanged) resetPathTracing(); return true; }
-	if (setUInt("path_direct_light_samples", PathTracingViewParam.DirectLightSampleCount, 1, 8, true)) return true;
+	if (setUInt("path_direct_light_samples", PathTracingViewParam.DirectLightSampleCount, 1, 8)) { if (lastSetterChanged) resetPathTracing(); return true; }
 	if (setFloat("tonemap_whitepoint_hejl", ToneMapCB.WhitePoint_Hejl)) return true;
 	if (setFloat("tonemap_shoulder_strength", ToneMapCB.ShoulderStrength)) return true;
 	if (setFloat("tonemap_linear_strength", ToneMapCB.LinearStrength)) return true;
