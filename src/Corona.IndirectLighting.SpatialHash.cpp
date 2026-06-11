@@ -150,6 +150,41 @@ shared_ptr<RTPipelineStateObject> Corona::CreateRaytracingSpatialHashGIPSO(bool 
 		return tempPSO->InitRS("Shaders\\SpatialHashCellGI.hlsl") ? tempPSO : nullptr;
 }
 
+shared_ptr<RTPipelineStateObject> Corona::CreateRaytracingSpatialHashPrimaryDeepSeedPSO()
+{
+	shared_ptr<RTPipelineStateObject> tempPSO = renderBackend->CreateRTPipelineStateObject();
+	if (!tempPSO)
+		return nullptr;
+
+	tempPSO->SetNumInstances(static_cast<uint32_t>(RayTracingInstances.size()));
+	tempPSO->AddHitGroup("HitGroup", "chs", "");
+	tempPSO->AddShader("rayGen", RTPipelineStateObject::RAYGEN);
+
+	tempPSO->BindSRV("global", "gRtScene", 0);
+	tempPSO->BindSRV("global", "DepthTex", 1);
+	tempPSO->BindUAV("global", "ActiveFlagsOut", 0);
+	tempPSO->BindUAV("global", "CellPositionOut", 1);
+	tempPSO->BindUAV("global", "CellNormalOut", 2);
+	tempPSO->BindUAV("global", "CellScoreOut", 3);
+	tempPSO->BindUAV("global", "ResolvedKeysOut", 4);
+	tempPSO->BindUAV("global", "ResolvedSH0Out", 5);
+	tempPSO->BindUAV("global", "ActiveCellSlotsOut", 6);
+	tempPSO->BindUAV("global", "ActiveCounterOut", 7);
+	tempPSO->BindUAV("global", "CellLightMaskOut", 8);
+	tempPSO->BindCBV("global", "SpatialHashGIConstant", 0, sizeof(SpatialHashGIConstant), 1);
+	tempPSO->BindCBV("global", "PrimaryDeepSeedConstant", 1, sizeof(RTSpatialHashPrimaryDeepSeedParamCB), 1);
+
+	tempPSO->AddShader("miss", RTPipelineStateObject::MISS);
+
+	tempPSO->AddShader("chs", RTPipelineStateObject::HIT);
+	tempPSO->BindSRV("chs", "vertices", 2);
+	tempPSO->BindSRV("chs", "indices", 3);
+	tempPSO->BindSRV("chs", "InstanceProperty", 4);
+	tempPSO->Configure(1, sizeof(float) * 8, sizeof(float) * 2);
+
+	return tempPSO->InitRS("Shaders\\SpatialHashPrimaryDeepSeed.hlsl") ? tempPSO : nullptr;
+}
+
 void Corona::InitRaytracingSpatialHashPass()
 {
 	PSO_RT_SPATIAL_HASH_GI = CreateRaytracingSpatialHashGIPSO(false);
@@ -179,6 +214,73 @@ bool Corona::InitRaytracingSpatialHashGISERPass()
 		AppendCpuRuntimeTrace(L"[RTDiffuseGI][SER] Spatial Hash SER PSO creation failed");
 	}
 	return PSO_RT_SPATIAL_HASH_GI_SER != nullptr;
+}
+
+bool Corona::InitRaytracingSpatialHashPrimaryDeepSeedPass()
+{
+	if (PSO_RT_SPATIAL_HASH_PRIMARY_DEEP_SEED)
+		return true;
+	if (bRTSpatialHashPrimaryDeepSeedInitFailed)
+		return false;
+	if (!renderBackend)
+		return false;
+
+	PSO_RT_SPATIAL_HASH_PRIMARY_DEEP_SEED = CreateRaytracingSpatialHashPrimaryDeepSeedPSO();
+	if (!PSO_RT_SPATIAL_HASH_PRIMARY_DEEP_SEED)
+	{
+		bRTSpatialHashPrimaryDeepSeedInitFailed = true;
+		AppendCpuRuntimeTrace(L"[SpatialHashGI][PrimaryDeepSeed] PSO creation failed");
+	}
+	return PSO_RT_SPATIAL_HASH_PRIMARY_DEEP_SEED != nullptr;
+}
+
+bool Corona::SpatialHashPrimaryDeepSeedPass()
+{
+	if (!bEnableSpatialHashPrimaryDeepSeed)
+		return true;
+	if (!TLAS || !UnjitteredDepthBuffers[ColorBufferWriteIndex])
+		return false;
+	if (!InitRaytracingSpatialHashPrimaryDeepSeedPass())
+		return false;
+
+	RTSpatialHashPrimaryDeepSeedParam.PixelStride =
+		std::clamp(SpatialHashPrimaryDeepSeedPixelStride, 1u, 16u);
+	RTSpatialHashPrimaryDeepSeedParam.FrameIndex = RenderFrameIndex;
+
+	static UINT sTraceLogCount = 0;
+	if (sTraceLogCount < 8)
+	{
+		AppendCpuRuntimeTrace(
+			L"[SpatialHashGI][PrimaryDeepSeed] enabled stride=" +
+			std::to_wstring(RTSpatialHashPrimaryDeepSeedParam.PixelStride) +
+			L", approxPixelFraction=1/" +
+			std::to_wstring(RTSpatialHashPrimaryDeepSeedParam.PixelStride * RTSpatialHashPrimaryDeepSeedParam.PixelStride));
+		++sTraceLogCount;
+	}
+
+	renderBackend->EmitGpuCrashMarker("SpatialHashPrimaryDeepSeedPass");
+
+	RTPassBuilder pass(*this, PSO_RT_SPATIAL_HASH_PRIMARY_DEEP_SEED);
+	pass.BeginScene()
+		.SetAccelerationStructure("global", "gRtScene", TLAS)
+		.SetTextureSRV("global", "DepthTex", UnjitteredDepthBuffers[ColorBufferWriteIndex].get())
+		.SetBufferUAV("global", "ActiveFlagsOut", SpatialHashGIActiveFlags.get())
+		.SetBufferUAV("global", "CellPositionOut", SpatialHashGICellPosition.get())
+		.SetBufferUAV("global", "CellNormalOut", SpatialHashGICellNormal.get())
+		.SetBufferUAV("global", "CellScoreOut", SpatialHashGICellScore.get())
+		.SetBufferUAV("global", "ResolvedKeysOut", SpatialHashGIResolvedKeys[0].get())
+		.SetBufferUAV("global", "ResolvedSH0Out", SpatialHashGIResolvedSH[0][0].get())
+		.SetBufferUAV("global", "ActiveCellSlotsOut", SpatialHashGIActiveCellSlots.get())
+		.SetBufferUAV("global", "ActiveCounterOut", SpatialHashGIActiveCounter.get())
+		.SetBufferUAV("global", "CellLightMaskOut", SpatialHashGICellLightMask.get())
+		.SetCBVValue("global", "SpatialHashGIConstant", &SpatialHashGICB)
+		.SetCBVValue("global", "PrimaryDeepSeedConstant", &RTSpatialHashPrimaryDeepSeedParam);
+
+	RTSceneHitProgramDesc hitProgramDesc;
+	hitProgramDesc.bBindDiffuseTexture = false;
+	pass.BindSceneHitPrograms(hitProgramDesc);
+	pass.Dispatch(GetRenderWidth(), GetRenderHeight());
+	return true;
 }
 
 void Corona::PrepareSpatialHashGIFrameParams(UINT32 spatialHashTraceCellBudget)
@@ -407,6 +509,41 @@ bool Corona::SpatialHashLightMaskPass()
 	SpatialHashGIUpdatePSO->SetCBVValue("SpatialHashGIConstant", &SpatialHashGICB);
 	SpatialHashGIUpdatePSO->Apply();
 	renderBackend->Dispatch((GetRenderWidth() + 7u) / 8u, (GetRenderHeight() + 7u) / 8u, 1u);
+
+	if (bEnableSpatialHashPrimaryDeepSeed)
+	{
+		renderBackend->TransitionBuffer(SpatialHashGIActiveFlags.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
+		renderBackend->TransitionBuffer(SpatialHashGIActiveCellSlots.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
+		renderBackend->TransitionBuffer(SpatialHashGIActiveCounter.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
+		renderBackend->TransitionBuffer(SpatialHashGICellPosition.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
+		renderBackend->TransitionBuffer(SpatialHashGICellNormal.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
+		renderBackend->TransitionBuffer(SpatialHashGICellScore.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
+		renderBackend->TransitionBuffer(SpatialHashGICellLightMask.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
+		renderBackend->TransitionBuffer(SpatialHashGIResolvedKeys[cacheIndex].get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
+		renderBackend->TransitionBuffer(SpatialHashGIResolvedSH[cacheIndex][0].get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
+		renderBackend->TransitionBuffer(SpatialHashGIActiveFlags.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
+		renderBackend->TransitionBuffer(SpatialHashGIActiveCellSlots.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
+		renderBackend->TransitionBuffer(SpatialHashGIActiveCounter.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
+		renderBackend->TransitionBuffer(SpatialHashGICellPosition.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
+		renderBackend->TransitionBuffer(SpatialHashGICellNormal.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
+		renderBackend->TransitionBuffer(SpatialHashGICellScore.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
+		renderBackend->TransitionBuffer(SpatialHashGICellLightMask.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
+		renderBackend->TransitionBuffer(SpatialHashGIResolvedKeys[cacheIndex].get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
+		renderBackend->TransitionBuffer(SpatialHashGIResolvedSH[cacheIndex][0].get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
+
+		BeginGpuPassTiming(EGpuPass::SpatialHashDeepSeed);
+		const bool bDeepSeedOk = SpatialHashPrimaryDeepSeedPass();
+		EndGpuPassTiming(EGpuPass::SpatialHashDeepSeed);
+		if (!bDeepSeedOk)
+		{
+			static bool sLoggedDeepSeedFailure = false;
+			if (!sLoggedDeepSeedFailure)
+			{
+				sLoggedDeepSeedFailure = true;
+				AppendCpuRuntimeTrace(L"[SpatialHashGI][PrimaryDeepSeed] skipped: pass prerequisites missing");
+			}
+		}
+	}
 
 	renderBackend->TransitionBuffer(SpatialHashGIActiveFlags.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
 	renderBackend->TransitionBuffer(SpatialHashGIActiveCellSlots.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
