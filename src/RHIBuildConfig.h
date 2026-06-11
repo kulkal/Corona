@@ -106,6 +106,15 @@ using LPCWSTR = const wchar_t*;
 #  define CORONA_HAS_AFTERMATH 0
 #endif
 
+// Experimental NVIDIA NRI (NVIDIA Render Interface) RHI backend. A single
+// IRenderBackend implementation that targets D3D12 or Vulkan through NRI, with
+// the goal of eventually unifying the two hand-written backends. Enabled by the
+// CMake option CORONA_WITH_NRI (default OFF) which defines CORONA_HAS_NRI=1 and
+// links the vendored NRI library. Default OFF keeps the stock build untouched.
+#ifndef CORONA_HAS_NRI
+#  define CORONA_HAS_NRI 0
+#endif
+
 // NVIDIA Streamline (DLSS RR/SR) is DX12-only. The CMake build also exposes
 // WITH_STREAMLINE; force it off when the D3D12 backend itself isn't compiled,
 // to keep mobile / Vulkan-only builds from pulling in DX12-specific

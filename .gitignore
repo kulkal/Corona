@@ -70,3 +70,9 @@ src/MyToyDX12Renderer.pdb
 src/MyToyDX12Renderer.ilk
 src/MyToyDX12Renderer.exe
 src/MyToyDX12Renderer.pdb
+
+# Vendored NVIDIA NRI (experimental backend); formalize as submodule before merge
+src/external/nri/
+_nri_clone.log
+_configure.log
+_build.log

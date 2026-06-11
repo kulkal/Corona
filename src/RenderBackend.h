@@ -27,6 +27,9 @@ enum class ERenderBackendAPI
 {
 	D3D12,
 	Vulkan,
+	// Experimental: a single backend over NVIDIA NRI that itself targets D3D12
+	// or Vulkan. Selected only when built with CORONA_WITH_NRI (CORONA_HAS_NRI).
+	NRI,
 };
 
 enum class ETextureFormat

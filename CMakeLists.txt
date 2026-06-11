@@ -608,6 +608,22 @@ if(MSVC)
     target_link_options(Corona PRIVATE $<$<CONFIG:Release>:/DEBUG:FULL>)
 endif()
 
+# --- Experimental NVIDIA NRI RHI backend ----------------------------------
+# OFF by default: NRIBackend.cpp is #if CORONA_HAS_NRI-guarded, so the stock
+# build compiles it to an empty TU and links no NRI. Turn ON to link the
+# vendored src/external/nri and select ERenderBackendAPI::NRI at runtime.
+option(CORONA_WITH_NRI "Build the experimental NRI RHI backend (links src/external/nri)" OFF)
+if(CORONA_WITH_NRI)
+    if(NOT EXISTS "${CORONA_SRC_DIR}/external/nri/CMakeLists.txt")
+        message(FATAL_ERROR "CORONA_WITH_NRI=ON but src/external/nri/CMakeLists.txt is missing. Clone NVIDIA-RTX/NRI into src/external/nri.")
+    endif()
+    add_subdirectory("${CORONA_SRC_DIR}/external/nri" "${CMAKE_CURRENT_BINARY_DIR}/nri" EXCLUDE_FROM_ALL)
+    target_include_directories(Corona PRIVATE "${CORONA_SRC_DIR}/external/nri/Include")
+    target_link_libraries(Corona PRIVATE NRI)
+    target_compile_definitions(Corona PRIVATE CORONA_HAS_NRI=1)
+    message(STATUS "Corona: experimental NRI backend ENABLED (CORONA_WITH_NRI)")
+endif()
+
 set_target_properties(Corona PROPERTIES
     VS_DEBUGGER_WORKING_DIRECTORY "${CORONA_OUT_DIR}"
     RUNTIME_OUTPUT_DIRECTORY "${CORONA_OUT_DIR}"
