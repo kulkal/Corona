@@ -3980,6 +3980,16 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 			bEnablePathTracingDLSSRR = false;
 			continue;
 		}
+		if (arg == L"--pt-compaction" || arg == L"--pathtracing-compaction")
+		{
+			bEnablePathTracingCompaction = true;
+			continue;
+		}
+		if (arg == L"--no-pt-compaction" || arg == L"--disable-pt-compaction" || arg == L"--no-pathtracing-compaction")
+		{
+			bEnablePathTracingCompaction = false;
+			continue;
+		}
 		std::wstring ptSppValue = ParseValueArg(arg, L"--pt-spp", L"-pt-spp", i);
 		if (ptSppValue.empty())
 			ptSppValue = ParseValueArg(arg, L"--spp", L"-spp", i);
@@ -4620,6 +4630,7 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 		L", loadMap=\"" + CommandLineLoadMapFile + L"\"" +
 		L", screenshotFrame=" + std::to_wstring(CommandLineScreenshotFrame) +
 		L", ptDLSSRR=" + std::to_wstring(bEnablePathTracingDLSSRR ? 1 : 0) +
+		L", ptCompaction=" + std::to_wstring(bEnablePathTracingCompaction ? 1 : 0) +
 		L", ptSPP=" + std::to_wstring(PathTracingViewParam.SamplesPerPixel) +
 		L", ptRRSpecularMV=" + std::to_wstring(bEnablePathTracingRRSpecularMotionVectors ? 1 : 0) +
 		L", ptRRSpecularMVScale=" + std::to_wstring(PathTracingRRSpecularMotionVectorScale) +
@@ -7593,6 +7604,7 @@ Corona::RenderFrameSourceState Corona::CaptureRenderFrameSourceState() const
 	state.PathTracingMaxBounces = PathTracingViewParam.MaxBounces;
 	state.PathTracingSamplesPerPixel = PathTracingViewParam.SamplesPerPixel;
 	state.PathTracingDebugMode = PathTracingViewParam.DebugMode;
+	state.bEnablePathTracingCompaction = bEnablePathTracingCompaction;
 	return state;
 }
 
@@ -7704,6 +7716,7 @@ void Corona::ApplyRenderFrameSourceState(const RenderFrameSourceState& state)
 	PathTracingViewParam.MaxBounces = state.PathTracingMaxBounces;
 	PathTracingViewParam.SamplesPerPixel = state.PathTracingSamplesPerPixel;
 	PathTracingViewParam.DebugMode = state.PathTracingDebugMode;
+	bEnablePathTracingCompaction = state.bEnablePathTracingCompaction;
 	if (RenderingMode != previousRenderingMode)
 		MarkRayTracingSceneDirty();
 }
@@ -7867,6 +7880,27 @@ void Corona::ApplyFrameSourceRenderSync(const RenderFrameDelta& delta)
 		 floatChanged(oldState.SpatialHashTemporalAlpha, newState.SpatialHashTemporalAlpha) ||
 		 floatChanged(oldState.SpatialHashSmoothingStrength, newState.SpatialHashSmoothingStrength) ||
 		 floatChanged(oldState.SpatialHashInterpolationStrength, newState.SpatialHashInterpolationStrength));
+	const bool bPathTracingSettingsChanged =
+		bHadFrameSourceState &&
+		(oldState.PathTracingDirectLightSampleCount != newState.PathTracingDirectLightSampleCount ||
+		 oldState.PathTracingMaxBounces != newState.PathTracingMaxBounces ||
+		 oldState.PathTracingSamplesPerPixel != newState.PathTracingSamplesPerPixel ||
+		 oldState.PathTracingDebugMode != newState.PathTracingDebugMode ||
+		 oldState.bEnablePathTracingCompaction != newState.bEnablePathTracingCompaction);
+	const bool bPathTracingCompactionChanged =
+		bHadFrameSourceState &&
+		oldState.bEnablePathTracingCompaction != newState.bEnablePathTracingCompaction;
+
+	auto resetPathTracingAccumulation = [&]()
+	{
+		FrameCounter = 0;
+		PathTracingAccumulatedFrames = 0;
+		PrevPathTracingViewMat = glm::mat4x4(0.0f);
+		PrevPathTracingLightDir = glm::vec3(0.0f);
+		PrevPathTracingLightIntensity = 0.0f;
+		PrevPathTracingDirectionalLightCastShadow = false;
+		PrevPathTracingPointLightStateHash = 0xFFFFFFFFu;
+	};
 
 	if (bModeOrAAModeChanged)
 	{
@@ -7901,6 +7935,20 @@ void Corona::ApplyFrameSourceRenderSync(const RenderFrameDelta& delta)
 		// carlo samples when needed.
 #if WITH_STREAMLINE
 		bDLSSResetNeeded = true;
+#endif
+	}
+
+	if (bPathTracingSettingsChanged)
+	{
+		resetPathTracingAccumulation();
+		if (bPathTracingCompactionChanged)
+		{
+			bPathTracingCompactionFallbackLogged = false;
+			bPathTracingCompactionDispatchLogged = false;
+		}
+#if WITH_STREAMLINE
+		if (RenderingMode == ERenderingMode::PATHTRACING)
+			bDLSSResetNeeded = true;
 #endif
 	}
 }
@@ -15620,6 +15668,19 @@ void Corona::OnRender()
 		}
 		ImGui::Checkbox("Stabilize moving primary rays for RR", &bEnablePathTracingRRPrimaryRayStabilization);
 #endif
+		if (ImGui::Checkbox("Path Compaction (experimental)", &bEnablePathTracingCompaction))
+		{
+			FrameCounter = 0;
+			PathTracingAccumulatedFrames = 0;
+			PrevPathTracingViewMat = glm::mat4x4(0.0f);
+			PrevPathTracingLightDir = glm::vec3(0.0f);
+			PrevPathTracingLightIntensity = 0.0f;
+			PrevPathTracingPointLightStateHash = 0xFFFFFFFFu;
+			bPathTracingCompactionFallbackLogged = false;
+			bPathTracingCompactionDispatchLogged = false;
+		}
+		if (bEnablePathTracingCompaction && !PSO_PATH_TRACING_COMPACTION_TRACE)
+			ImGui::TextDisabled("Wavefront PSO initializes on first eligible 1spp frame.");
 	ImGui::Text("Accumulated Frames: %u", PathTracingAccumulatedFrames);
 	ImGui::Text("Dispatch SPP: %u", PathTracingLastDispatchSamplesPerPixel);
 if (ImGui::Button("Reset Accumulation"))

@@ -1478,6 +1478,18 @@ void DX12Backend::TransitionVertexBuffer(VertexBuffer* vertexBuffer, EResourceSt
 	GlobalCmdList->CmdList->ResourceBarrier(1, &barrierDesc);
 }
 
+void DX12Backend::UAVBarrier(Buffer* buffer)
+{
+	if (!GlobalCmdList)
+		return;
+
+	D3D12_RESOURCE_BARRIER barrierDesc = {};
+	barrierDesc.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+	barrierDesc.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+	barrierDesc.UAV.pResource = buffer ? buffer->resource.Get() : nullptr;
+	GlobalCmdList->CmdList->ResourceBarrier(1, &barrierDesc);
+}
+
 shared_ptr<Sampler> DX12Backend::CreateSampler(D3D12_SAMPLER_DESC& InSamplerDesc)
 {
 	Sampler* sampler = new Sampler;
@@ -3316,6 +3328,15 @@ std::shared_ptr<Texture> DX12Backend::CreateTextureFromFile(const std::wstring& 
 		return nullptr;
 	}
 	tex->resource->SetName(fileName.c_str());
+	D3D12_HEAP_PROPERTIES textureHeapProps = {};
+	D3D12_HEAP_FLAGS textureHeapFlags = D3D12_HEAP_FLAG_NONE;
+	if (SUCCEEDED(tex->resource->GetHeapProperties(&textureHeapProps, &textureHeapFlags)) &&
+		textureHeapProps.Type != D3D12_HEAP_TYPE_DEFAULT)
+	{
+		AppendCpuRuntimeTrace(
+			L"[TextureLoad] unexpected sampled texture heap file=\"" + fileName +
+			L"\", heapType=" + std::to_wstring(static_cast<int>(textureHeapProps.Type)));
+	}
 
 	D3D12_HEAP_PROPERTIES heapPropUpload;
 	heapPropUpload.Type = D3D12_HEAP_TYPE_UPLOAD;
@@ -3357,7 +3378,8 @@ std::shared_ptr<Texture> DX12Backend::CreateTextureFromFile(const std::wstring& 
 			L", totalMs=" + FormatDx12InitMilliseconds(ElapsedDx12InitMilliseconds(totalStart, std::chrono::steady_clock::now())));
 		return nullptr;
 	}
-	uploadHeap->SetName(L"TexUploadingHeap");
+	const std::wstring uploadHeapName = L"TextureUploadStaging:" + fileName;
+	uploadHeap->SetName(uploadHeapName.c_str());
 
 	const UINT64 numSubResources = metaData.mipLevels * metaData.arraySize;
 	D3D12_PLACED_SUBRESOURCE_FOOTPRINT* layouts = (D3D12_PLACED_SUBRESOURCE_FOOTPRINT*)_alloca(sizeof(D3D12_PLACED_SUBRESOURCE_FOOTPRINT) * numSubResources);
@@ -3429,7 +3451,9 @@ std::shared_ptr<Texture> DX12Backend::CreateTextureFromFile(const std::wstring& 
 	BarrierDesc.Transition.pResource = tex->resource.Get();
 	BarrierDesc.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
 	BarrierDesc.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
-	BarrierDesc.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+	BarrierDesc.Transition.StateAfter =
+		D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE |
+		D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
 	cmd->CmdList->ResourceBarrier(1, &BarrierDesc);
 	commandRecordMs = ElapsedDx12InitMilliseconds(commandRecordStart, std::chrono::steady_clock::now());
 
