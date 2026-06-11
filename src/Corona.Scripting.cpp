@@ -978,6 +978,7 @@ private:
 			script.ShutdownRef != LUA_REFNIL ||
 			script.ImGuiRef != LUA_REFNIL ||
 			script.UiRef != LUA_REFNIL ||
+			script.EditorConfigRef != LUA_REFNIL ||
 			!script.NativeScriptName.empty();
 	}
 
@@ -1000,6 +1001,7 @@ private:
 		UnrefLuaRef(L, script.ShutdownRef);
 		UnrefLuaRef(L, script.ImGuiRef);
 		UnrefLuaRef(L, script.UiRef);
+		UnrefLuaRef(L, script.EditorConfigRef);
 	}
 
 	int LuaCoronaLog(lua_State* L)
@@ -2241,6 +2243,7 @@ private:
 		int shutdownRef = LUA_REFNIL;
 		int imguiRef = LUA_REFNIL;
 		int uiRef = LUA_REFNIL;
+		int editorConfigRef = LUA_REFNIL;
 
 		if (lua_isfunction(L, 2))
 		{
@@ -2254,6 +2257,7 @@ private:
 			shutdownRef = RefTableFunction(L, tableIndex, "shutdown");
 			imguiRef = RefTableFunction(L, tableIndex, "imgui");
 			uiRef = RefTableFunction(L, tableIndex, "ui");
+			editorConfigRef = RefTableFunction(L, tableIndex, "editor_config");
 		}
 		else
 		{
@@ -2261,20 +2265,21 @@ private:
 			return 0;
 		}
 
-		if (updateRef == LUA_REFNIL && shutdownRef == LUA_REFNIL && imguiRef == LUA_REFNIL && uiRef == LUA_REFNIL)
+		if (updateRef == LUA_REFNIL && shutdownRef == LUA_REFNIL && imguiRef == LUA_REFNIL && uiRef == LUA_REFNIL && editorConfigRef == LUA_REFNIL)
 		{
 			lua_pushboolean(L, 0);
 			return 1;
 		}
 
 		const std::wstring sourceName = L"entity_script:" + std::to_wstring(entity.GetId());
-		if (!host->AttachEntityScriptForScript(entity, updateRef, shutdownRef, imguiRef, uiRef, sourceName))
+		if (!host->AttachEntityScriptForScript(entity, updateRef, shutdownRef, imguiRef, uiRef, editorConfigRef, sourceName))
 		{
 			lua_State* state = L;
 			UnrefLuaRef(state, updateRef);
 			UnrefLuaRef(state, shutdownRef);
 			UnrefLuaRef(state, imguiRef);
 			UnrefLuaRef(state, uiRef);
+			UnrefLuaRef(state, editorConfigRef);
 			lua_pushboolean(L, 0);
 			return 1;
 		}
@@ -3239,6 +3244,39 @@ private:
 		return 0;
 	}
 
+	int LuaImGuiCollapsingHeader(lua_State* L)
+	{
+		if (!RequireImGuiFrame(L))
+			return 0;
+
+		const char* label = luaL_checkstring(L, 1);
+		const bool defaultOpen = lua_gettop(L) >= 2 && lua_toboolean(L, 2) != 0;
+		const ImGuiTreeNodeFlags flags = defaultOpen ? ImGuiTreeNodeFlags_DefaultOpen : 0;
+		lua_pushboolean(L, ImGui::CollapsingHeader(label, flags) ? 1 : 0);
+		return 1;
+	}
+
+	int LuaImGuiTreeNode(lua_State* L)
+	{
+		if (!RequireImGuiFrame(L))
+			return 0;
+
+		const char* label = luaL_checkstring(L, 1);
+		const bool defaultOpen = lua_gettop(L) >= 2 && lua_toboolean(L, 2) != 0;
+		const ImGuiTreeNodeFlags flags = defaultOpen ? ImGuiTreeNodeFlags_DefaultOpen : 0;
+		lua_pushboolean(L, ImGui::TreeNodeEx(label, flags) ? 1 : 0);
+		return 1;
+	}
+
+	int LuaImGuiTreePop(lua_State* L)
+	{
+		if (!RequireImGuiFrame(L))
+			return 0;
+
+		ImGui::TreePop();
+		return 0;
+	}
+
 	int LuaImGuiSameLine(lua_State* L)
 	{
 		if (!RequireImGuiFrame(L))
@@ -4154,6 +4192,12 @@ private:
 		lua_setfield(L, -2, "text_disabled");
 		lua_pushcfunction(L, LuaImGuiSeparator, "imgui.separator");
 		lua_setfield(L, -2, "separator");
+		lua_pushcfunction(L, LuaImGuiCollapsingHeader, "imgui.collapsing_header");
+		lua_setfield(L, -2, "collapsing_header");
+		lua_pushcfunction(L, LuaImGuiTreeNode, "imgui.tree_node");
+		lua_setfield(L, -2, "tree_node");
+		lua_pushcfunction(L, LuaImGuiTreePop, "imgui.tree_pop");
+		lua_setfield(L, -2, "tree_pop");
 		lua_pushcfunction(L, LuaImGuiSameLine, "imgui.same_line");
 		lua_setfield(L, -2, "same_line");
 		lua_pushcfunction(L, LuaImGuiSetNextItemWidth, "imgui.set_next_item_width");
@@ -6005,6 +6049,7 @@ bool Corona::AttachEntityScriptForScript(
 	int shutdownRef,
 	int imguiRef,
 	int uiRef,
+	int editorConfigRef,
 	const std::wstring& sourceName,
 	bool bPassEntityToCallbacks)
 {
@@ -6027,6 +6072,7 @@ bool Corona::AttachEntityScriptForScript(
 	scriptInstance.ShutdownRef = shutdownRef;
 	scriptInstance.ImGuiRef = imguiRef;
 	scriptInstance.UiRef = uiRef;
+	scriptInstance.EditorConfigRef = editorConfigRef;
 	scriptInstance.SourceName = sourceName;
 	scriptInstance.bPassEntityToCallbacks = bPassEntityToCallbacks;
 	scriptComponent->Instances.push_back(scriptInstance);
@@ -6092,6 +6138,11 @@ bool Corona::AttachEntityScriptFileForScript(
 	CoronaECS::ScriptInstance loadedScript;
 	loadedScript.SourceName = path.wstring();
 	loadedScript.bPassEntityToCallbacks = true;
+	loadedScript.UpdateRef = LUA_REFNIL;
+	loadedScript.ShutdownRef = LUA_REFNIL;
+	loadedScript.ImGuiRef = LUA_REFNIL;
+	loadedScript.UiRef = LUA_REFNIL;
+	loadedScript.EditorConfigRef = LUA_REFNIL;
 
 	if (lua_istable(L, -1))
 	{
@@ -6100,10 +6151,11 @@ bool Corona::AttachEntityScriptFileForScript(
 		loadedScript.ShutdownRef = RefTableFunction(L, tableIndex, "shutdown");
 		loadedScript.ImGuiRef = RefTableFunction(L, tableIndex, "imgui");
 		loadedScript.UiRef = RefTableFunction(L, tableIndex, "ui");
+		loadedScript.EditorConfigRef = RefTableFunction(L, tableIndex, "editor_config");
 	}
 	lua_pop(L, 1);
 
-	if (loadedScript.UpdateRef == LUA_REFNIL && loadedScript.ShutdownRef == LUA_REFNIL && loadedScript.ImGuiRef == LUA_REFNIL && loadedScript.UiRef == LUA_REFNIL)
+	if (loadedScript.UpdateRef == LUA_REFNIL && loadedScript.ShutdownRef == LUA_REFNIL && loadedScript.ImGuiRef == LUA_REFNIL && loadedScript.UiRef == LUA_REFNIL && loadedScript.EditorConfigRef == LUA_REFNIL)
 	{
 		loadedScript.UpdateRef = RefGlobalFunctionAndClear(L, "update");
 		loadedScript.ShutdownRef = RefGlobalFunctionAndClear(L, "shutdown");
@@ -6123,12 +6175,14 @@ bool Corona::AttachEntityScriptFileForScript(
 	const bool hasShutdown = loadedScript.ShutdownRef != LUA_REFNIL;
 	const bool hasImGui = loadedScript.ImGuiRef != LUA_REFNIL;
 	const bool hasUi = loadedScript.UiRef != LUA_REFNIL;
+	const bool hasEditorConfig = loadedScript.EditorConfigRef != LUA_REFNIL;
 	if (!AttachEntityScriptForScript(
 		entity,
 		loadedScript.UpdateRef,
 		loadedScript.ShutdownRef,
 		loadedScript.ImGuiRef,
 		loadedScript.UiRef,
+		loadedScript.EditorConfigRef,
 		loadedScript.SourceName,
 		loadedScript.bPassEntityToCallbacks))
 	{
@@ -6136,6 +6190,7 @@ bool Corona::AttachEntityScriptFileForScript(
 		UnrefLuaRef(L, loadedScript.ShutdownRef);
 		UnrefLuaRef(L, loadedScript.ImGuiRef);
 		UnrefLuaRef(L, loadedScript.UiRef);
+		UnrefLuaRef(L, loadedScript.EditorConfigRef);
 		return false;
 	}
 
@@ -6145,6 +6200,7 @@ bool Corona::AttachEntityScriptFileForScript(
 		L", shutdown=" + std::to_wstring(hasShutdown ? 1 : 0) +
 		L", imgui=" + std::to_wstring(hasImGui ? 1 : 0) +
 		L", ui=" + std::to_wstring(hasUi ? 1 : 0) +
+		L", editor_config=" + std::to_wstring(hasEditorConfig ? 1 : 0) +
 		L", path=" + path.wstring());
 	return true;
 }
@@ -7853,6 +7909,9 @@ void Corona::PushLuauUiStateForScript(lua_State* L, const std::string& mode, boo
 	PushIntegerField(L, "dlss_quality", static_cast<lua_Integer>(DLSSQualityMode));
 	PushBoolField(L, "dlss_available", bDLSSAvailable);
 	PushBoolField(L, "dlss_rr_available", bDLSSRRAvailable);
+	PushBoolField(L, "streamline_disabled", bCommandLineDisableStreamline);
+	PushStringField(L, "backend_name", renderBackend ? renderBackend->GetBackendName() : "");
+	PushBoolField(L, "backend_d3d12", renderBackend && renderBackend->GetAPI() == ERenderBackendAPI::D3D12);
 	PushIntegerField(L, "render_width", static_cast<lua_Integer>(RenderWidth));
 	PushIntegerField(L, "render_height", static_cast<lua_Integer>(RenderHeight));
 	{
@@ -7869,6 +7928,10 @@ void Corona::PushLuauUiStateForScript(lua_State* L, const std::string& mode, boo
 	PushIntegerField(L, "dlss_jitter_phase_override", static_cast<lua_Integer>(DLSSJitterPhaseCountOverride));
 	PushNumberField(L, "dlss_jitter_phase_scale", DLSSJitterPhaseScale);
 	PushNumberField(L, "camera_turn_speed", m_turnSpeed);
+	PushBoolField(L, "show_imgui", bShowImgui);
+	PushBoolField(L, "show_frame_timing_overlay", bShowFrameTimingOverlay);
+	PushBoolField(L, "show_culling_overlay", bShowCullingTextOverlay);
+	PushIntegerField(L, "gpu_timing_average_frames", static_cast<lua_Integer>(GpuTimingAverageFrameCount));
 	PushBoolField(L, "debug_visualization_available",
 		renderBackend && BufferVisualizeGraphicsPipeline);
 	PushBoolField(L, "visualize_buffers", bDebugDraw);
@@ -7888,12 +7951,19 @@ void Corona::PushLuauUiStateForScript(lua_State* L, const std::string& mode, boo
 	PushBoolField(L, "enable_restir_direct_shadow", bEnableReSTIRDirectShadow);
 	PushBoolField(L, "enable_sky_lighting", bEnableSkyLighting);
 	PushBoolField(L, "enable_ray_traced_sky_lighting", bEnableRayTracedSkyLighting);
+	PushBoolField(L, "async_shadow_ao_available", renderBackend && renderBackend->GetAPI() == ERenderBackendAPI::D3D12);
+	PushBoolField(L, "enable_async_shadow_ao_overlap", bEnableAsyncShadowAOOverlap);
+	PushBoolField(L, "async_shadow_ao_overlap_rtao", bAsyncShadowAOOverlapRTAO);
+	PushBoolField(L, "async_shadow_ao_overlap_shadow", bAsyncShadowAOOverlapShadow);
 	PushNumberField(L, "sun_angular_radius", RTShadowViewParam.ShadowLightRadius);
 	PushIntegerField(L, "hybrid_shadow_samples", static_cast<lua_Integer>(RTShadowViewParam.ShadowSampleCount));
 	PushIntegerField(L, "rtao_samples", static_cast<lua_Integer>(RTAOViewParam.SampleCount));
 	PushNumberField(L, "rtao_radius", RTAOViewParam.Radius);
 	PushNumberField(L, "rtao_power", RTAOViewParam.Power);
 	PushNumberField(L, "rtao_normal_bias", RTAOViewParam.NormalBias);
+	PushNumberField(L, "rtao_direct_contact", RTAODirectContactStrength);
+	PushNumberField(L, "rtao_indirect_strength", RTAOIndirectStrength);
+	PushNumberField(L, "rtao_indirect_floor", RTAOIndirectFloor);
 	PushIntegerField(L, "sky_lighting_samples", static_cast<lua_Integer>(RTSkyLightingViewParam.SampleCount));
 	PushNumberField(L, "sky_lighting_ray_length", RTSkyLightingViewParam.RayLength);
 	PushNumberField(L, "sky_lighting_strength", SkyLightingStrength);
@@ -7903,6 +7973,11 @@ void Corona::PushLuauUiStateForScript(lua_State* L, const std::string& mode, boo
 	PushNumberField(L, "sky_lighting_min_world_y", RTSkyLightingViewParam.SkyMinWorldY);
 	PushNumberField(L, "surface_bounce_strength", SurfaceBounceStrength);
 	PushNumberField(L, "surface_bounce_saturation", SurfaceBounceSaturation);
+	PushIntegerField(L, "simple_gi_samples_per_pixel", static_cast<lua_Integer>(SimpleGISamplesPerPixel));
+	PushBoolField(L, "enable_gi_disocclusion_filter", bEnableGIDisocclusionFilter);
+	PushIntegerField(L, "diffuse_gi_spatial_filter_radius", static_cast<lua_Integer>(DiffuseGISpatialFilterCB.Radius));
+	PushBoolField(L, "feed_raw_gi_to_rr", bFeedRawGIToRR);
+	PushBoolField(L, "enable_simple_gi_spatial_filter", bEnableSimpleGISpatialFilter);
 	PushIntegerField(L, "diffuse_gi_mode", static_cast<lua_Integer>(DiffuseGIMode));
 	PushIntegerField(L, "screen_probe_spacing", static_cast<lua_Integer>(ScreenProbeGICB.ProbeSpacing));
 	PushIntegerField(L, "screen_probe_gather_radius", static_cast<lua_Integer>(ScreenProbeGICB.GatherRadius));
@@ -7921,6 +7996,12 @@ void Corona::PushLuauUiStateForScript(lua_State* L, const std::string& mode, boo
 	PushNumberField(L, "spatial_hash_interpolation", SpatialHashGICB.InterpolationStrength);
 	PushNumberField(L, "spatial_hash_smoothing", SpatialHashGICB.SmoothingStrength);
 	PushNumberField(L, "spatial_hash_temporal_alpha", SpatialHashGICB.TemporalAlpha);
+	PushNumberField(L, "spatial_hash_oct_near_convergence_bias", SpatialHashGICB.OctNearConvergenceBias);
+	PushNumberField(L, "spatial_hash_evict_distance_weight", SpatialHashGICB.EvictDistanceWeight);
+	PushBoolField(L, "spatial_hash_distance_cell_levels", SpatialHashGICB.SpatialHashLevelParams.x > 0.5f);
+	PushNumberField(L, "spatial_hash_level_base_distance", SpatialHashGICB.SpatialHashLevelParams.y);
+	PushBoolField(L, "shc_primary_deep_seed", bEnableSpatialHashPrimaryDeepSeed);
+	PushIntegerField(L, "shc_primary_deep_stride", static_cast<lua_Integer>(SpatialHashPrimaryDeepSeedPixelStride));
 	PushIntegerField(L, "ray_noise_mode", static_cast<lua_Integer>(RayNoiseMode));
 
 	PushIntegerField(L, "path_max_bounces", static_cast<lua_Integer>(PathTracingViewParam.MaxBounces));
@@ -8275,6 +8356,7 @@ bool Corona::SetLuauUiValueForScript(const std::string& name, lua_State* L, int 
 			if (!vecNearlyEqual(LightDir, normalized))
 			{
 				LightDir = normalized;
+				bRenderThreadOwnsLightDirNextFrame = true;
 				UpdateMainDirectionalLightEntityFromState();
 			}
 		}
@@ -8397,6 +8479,7 @@ bool Corona::SetLuauUiValueForScript(const std::string& name, lua_State* L, int 
 
 	if (setFloat("camera_turn_speed", m_turnSpeed)) return true;
 	if (setBool("visualize_buffers", bDebugDraw)) return true;
+	if (setBool("show_imgui", bShowImgui)) return true;
 	if (setBool("hide_game_ui", bScriptGameUiHidden)) return true;
 	if (setBool("show_frame_timing_overlay", bShowFrameTimingOverlay)) return true;
 	if (setBool("show_culling_overlay", bShowCullingTextOverlay)) return true;
@@ -8410,6 +8493,9 @@ bool Corona::SetLuauUiValueForScript(const std::string& name, lua_State* L, int 
 	if (setBool("enable_rtao", bEnableRTAO, true)) return true;
 	if (setBool("enable_restir_direct_shadow", bEnableReSTIRDirectShadow)) return true;
 	if (setFloat("restir_shadow_max_m", ReSTIRShadowMaxM)) return true;
+	if (setBool("enable_async_shadow_ao_overlap", bEnableAsyncShadowAOOverlap)) return true;
+	if (setBool("async_shadow_ao_overlap_rtao", bAsyncShadowAOOverlapRTAO)) return true;
+	if (setBool("async_shadow_ao_overlap_shadow", bAsyncShadowAOOverlapShadow)) return true;
 	if (setBool("enable_sky_lighting", bEnableSkyLighting, true)) return true;
 	if (setBool("enable_ray_traced_sky_lighting", bEnableRayTracedSkyLighting, true)) return true;
 	if (setFloat("sun_angular_radius", RTShadowViewParam.ShadowLightRadius, true)) return true;
@@ -8418,6 +8504,9 @@ bool Corona::SetLuauUiValueForScript(const std::string& name, lua_State* L, int 
 	if (setFloat("rtao_radius", RTAOViewParam.Radius, true)) return true;
 	if (setFloat("rtao_power", RTAOViewParam.Power, true)) return true;
 	if (setFloat("rtao_normal_bias", RTAOViewParam.NormalBias, true)) return true;
+	if (setFloat("rtao_direct_contact", RTAODirectContactStrength, true)) return true;
+	if (setFloat("rtao_indirect_strength", RTAOIndirectStrength, true)) return true;
+	if (setFloat("rtao_indirect_floor", RTAOIndirectFloor, true)) return true;
 	if (setUInt("sky_lighting_samples", RTSkyLightingViewParam.SampleCount, 1, 32, true)) return true;
 	if (setFloat("sky_lighting_ray_length", RTSkyLightingViewParam.RayLength, true)) return true;
 	if (setFloat("sky_lighting_strength", SkyLightingStrength, true)) return true;
@@ -8427,6 +8516,18 @@ bool Corona::SetLuauUiValueForScript(const std::string& name, lua_State* L, int 
 	if (setFloat("sky_lighting_min_world_y", RTSkyLightingViewParam.SkyMinWorldY, true)) return true;
 	if (setFloat("surface_bounce_strength", SurfaceBounceStrength, true)) return true;
 	if (setFloat("surface_bounce_saturation", SurfaceBounceSaturation, true)) return true;
+	if (setUInt("simple_gi_samples_per_pixel", SimpleGISamplesPerPixel, 1, 8, true)) return true;
+	if (setBool("enable_gi_disocclusion_filter", bEnableGIDisocclusionFilter, true)) return true;
+	if (name == "diffuse_gi_spatial_filter_radius")
+	{
+		const int newValue = std::clamp(readInt(), 1, 8);
+		if (DiffuseGISpatialFilterCB.Radius == newValue)
+			return true;
+		DiffuseGISpatialFilterCB.Radius = newValue;
+		return true;
+	}
+	if (setBool("feed_raw_gi_to_rr", bFeedRawGIToRR, true)) return true;
+	if (setBool("enable_simple_gi_spatial_filter", bEnableSimpleGISpatialFilter, true)) return true;
 	if (setUInt("screen_probe_spacing", ScreenProbeGICB.ProbeSpacing, 4, 64, true)) return true;
 	if (setUInt("screen_probe_gather_radius", ScreenProbeGICB.GatherRadius, 1, 3, true)) return true;
 	if (setUInt("screen_probe_rays_per_probe", RTScreenProbeGIViewParam.RaysPerProbe, 1, 4, true)) return true;
@@ -8452,6 +8553,19 @@ bool Corona::SetLuauUiValueForScript(const std::string& name, lua_State* L, int 
 	if (setFloat("spatial_hash_interpolation", SpatialHashGICB.InterpolationStrength, true)) return true;
 	if (setFloat("spatial_hash_smoothing", SpatialHashGICB.SmoothingStrength, true)) return true;
 	if (setFloat("spatial_hash_temporal_alpha", SpatialHashGICB.TemporalAlpha, true)) return true;
+	if (setFloat("spatial_hash_oct_near_convergence_bias", SpatialHashGICB.OctNearConvergenceBias, true)) return true;
+	if (setFloat("spatial_hash_evict_distance_weight", SpatialHashGICB.EvictDistanceWeight, true)) return true;
+	if (name == "spatial_hash_distance_cell_levels")
+	{
+		const float newValue = readBool() ? 1.0f : 0.0f;
+		if (nearlyEqual(SpatialHashGICB.SpatialHashLevelParams.x, newValue))
+			return true;
+		SpatialHashGICB.SpatialHashLevelParams.x = newValue;
+		return true;
+	}
+	if (setFloat("spatial_hash_level_base_distance", SpatialHashGICB.SpatialHashLevelParams.y, true)) return true;
+	if (setBool("shc_primary_deep_seed", bEnableSpatialHashPrimaryDeepSeed, true)) return true;
+	if (setUInt("shc_primary_deep_stride", SpatialHashPrimaryDeepSeedPixelStride, 1, 16, true)) return true;
 	if (setUInt("path_max_bounces", PathTracingViewParam.MaxBounces, 1, 8)) { if (lastSetterChanged) resetPathTracing(); return true; }
 	if (setUInt("path_samples_per_pixel", PathTracingViewParam.SamplesPerPixel, 1, 16)) { if (lastSetterChanged) resetPathTracing(); return true; }
 	if (setUInt("path_direct_light_samples", PathTracingViewParam.DirectLightSampleCount, 1, 8, true)) return true;
@@ -9001,6 +9115,7 @@ bool Corona::LoadLuauScriptFile(const std::filesystem::path& scriptPath)
 	loadedScript.ShutdownRef = LUA_REFNIL;
 	loadedScript.ImGuiRef = LUA_REFNIL;
 	loadedScript.UiRef = LUA_REFNIL;
+	loadedScript.EditorConfigRef = LUA_REFNIL;
 
 	if (lua_istable(L, -1))
 	{
@@ -9009,10 +9124,11 @@ bool Corona::LoadLuauScriptFile(const std::filesystem::path& scriptPath)
 		loadedScript.ShutdownRef = RefTableFunction(L, tableIndex, "shutdown");
 		loadedScript.ImGuiRef = RefTableFunction(L, tableIndex, "imgui");
 		loadedScript.UiRef = RefTableFunction(L, tableIndex, "ui");
+		loadedScript.EditorConfigRef = RefTableFunction(L, tableIndex, "editor_config");
 	}
 	lua_pop(L, 1);
 
-	if (loadedScript.UpdateRef == LUA_REFNIL && loadedScript.ShutdownRef == LUA_REFNIL && loadedScript.ImGuiRef == LUA_REFNIL && loadedScript.UiRef == LUA_REFNIL)
+	if (loadedScript.UpdateRef == LUA_REFNIL && loadedScript.ShutdownRef == LUA_REFNIL && loadedScript.ImGuiRef == LUA_REFNIL && loadedScript.UiRef == LUA_REFNIL && loadedScript.EditorConfigRef == LUA_REFNIL)
 	{
 		loadedScript.UpdateRef = RefGlobalFunctionAndClear(L, "update");
 		loadedScript.ShutdownRef = RefGlobalFunctionAndClear(L, "shutdown");
@@ -9028,12 +9144,14 @@ bool Corona::LoadLuauScriptFile(const std::filesystem::path& scriptPath)
 		const bool hasShutdown = loadedScript.ShutdownRef != LUA_REFNIL;
 		const bool hasImGui = loadedScript.ImGuiRef != LUA_REFNIL;
 		const bool hasUi = loadedScript.UiRef != LUA_REFNIL;
+		const bool hasEditorConfig = loadedScript.EditorConfigRef != LUA_REFNIL;
 		if (AttachEntityScriptForScript(
 			GetWorldEntityForScript(),
 			loadedScript.UpdateRef,
 			loadedScript.ShutdownRef,
 			loadedScript.ImGuiRef,
 			loadedScript.UiRef,
+			loadedScript.EditorConfigRef,
 			loadedScript.SourceName,
 			loadedScript.bPassEntityToCallbacks))
 		{
@@ -9042,6 +9160,7 @@ bool Corona::LoadLuauScriptFile(const std::filesystem::path& scriptPath)
 				L", shutdown=" + std::to_wstring(hasShutdown ? 1 : 0) +
 				L", imgui=" + std::to_wstring(hasImGui ? 1 : 0) +
 				L", ui=" + std::to_wstring(hasUi ? 1 : 0) +
+				L", editor_config=" + std::to_wstring(hasEditorConfig ? 1 : 0) +
 				L", path=" + scriptPath.wstring());
 		}
 		else
@@ -9884,6 +10003,67 @@ void Corona::DrawLuauImGui()
 	DrawEntityScriptImGui();
 
 	bLuauImGuiFrameActive = previousFrameActive;
+}
+
+bool Corona::DrawEditorConfigScriptImGui()
+{
+	if (!ScriptState || !ScriptState->L ||
+		EntityWorld.GetScriptComponentCount() == 0)
+		return false;
+
+	lua_State* L = ScriptState->L;
+	bool bDrewAnyEditorConfig = false;
+	const bool previousFrameActive = bLuauImGuiFrameActive;
+	bLuauImGuiFrameActive = true;
+
+	const std::vector<CoronaECS::Entity> scriptEntities = EntityWorld.GetEntitiesWithScript();
+	for (CoronaECS::Entity entity : scriptEntities)
+	{
+		CoronaECS::ScriptComponent* scriptComponent = EntityWorld.GetScript(entity);
+		if (!scriptComponent || !scriptComponent->bEnabled)
+			continue;
+
+		std::vector<uint32_t> instanceIds;
+		instanceIds.reserve(scriptComponent->Instances.size());
+		for (const CoronaECS::ScriptInstance& script : scriptComponent->Instances)
+			instanceIds.push_back(script.InstanceId);
+
+		for (uint32_t instanceId : instanceIds)
+		{
+			scriptComponent = EntityWorld.GetScript(entity);
+			CoronaECS::ScriptInstance* script = FindScriptInstance(scriptComponent, instanceId);
+			if (!script || !script->bEnabled || script->EditorConfigRef == LUA_REFNIL)
+				continue;
+
+			const int editorConfigRef = script->EditorConfigRef;
+			const std::wstring sourceName = script->SourceName;
+			lua_getref(L, editorConfigRef);
+			const auto callStart = CpuClock::now();
+			int result = LUA_OK;
+			{
+				ScopedLuauScriptProfileExecution profileExecution(this);
+				result = lua_pcall(L, 0, 0, 0);
+			}
+			RecordScriptFunctionProfile(sourceName, "editor_config", ElapsedMilliseconds(callStart, CpuClock::now()), false);
+			if (result != 0)
+			{
+				AppendCpuRuntimeTrace(L"[Luau] editor_config error in " + sourceName + L": " + Utf8ToWideLocal(LuaToString(L, -1)));
+				lua_pop(L, 1);
+				scriptComponent = EntityWorld.GetScript(entity);
+				if (CoronaECS::ScriptInstance* currentScript = FindScriptInstance(scriptComponent, instanceId))
+				{
+					if (currentScript->EditorConfigRef == editorConfigRef)
+						UnrefLuaRef(L, currentScript->EditorConfigRef);
+				}
+				continue;
+			}
+
+			bDrewAnyEditorConfig = true;
+		}
+	}
+
+	bLuauImGuiFrameActive = previousFrameActive;
+	return bDrewAnyEditorConfig;
 }
 
 void Corona::DrawEntityScriptImGui()

@@ -17,6 +17,8 @@
 #include <cstdlib>
 #include <iterator>
 
+void AppendCpuRuntimeTrace(const std::wstring& line);
+
 void Corona::InitPathTracingPass()
 {
 	shared_ptr<RTPipelineStateObject> TEMP_PSO_PATH_TRACING = renderBackend->CreateRTPipelineStateObject();
@@ -113,6 +115,9 @@ void Corona::PathTracingPass()
 		renderBackend->TransitionTexture(PathTracingSpecularMotionVectorBuffer.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
 	}
 
+	ApplyRenderPointLightsToFrameParams();
+	const UINT32 currentPointLightStateHash = ComputePathTracingPointLightStateHash();
+
 	// Check if camera or light changed and reset accumulation
 	bool cameraChanged = false;
 	for (int i = 0; i < 4 && !cameraChanged; i++)
@@ -131,6 +136,7 @@ void Corona::PathTracingPass()
 	bool lightDirChanged = glm::length(currentLightDir - PrevPathTracingLightDir) > 0.0001f;
 	bool lightIntensityChanged = abs(LightIntensity - PrevPathTracingLightIntensity) > 0.0001f;
 	bool lightCastShadowChanged = RenderFrameDirectionalLightCastShadow != PrevPathTracingDirectionalLightCastShadow;
+	bool pointLightsChanged = currentPointLightStateHash != PrevPathTracingPointLightStateHash;
 	
 	// Check if sky color changed
 	bool skyColorChanged = glm::length(SkyColorTop - PrevSkyColorTop) > 0.0001f ||
@@ -141,17 +147,24 @@ void Corona::PathTracingPass()
 		bEnablePathTracingRRPrimaryRayStabilization &&
 		cameraChanged;
 	
-	if (cameraChanged || lightDirChanged || lightIntensityChanged || lightCastShadowChanged || skyColorChanged)
+	if (cameraChanged || lightDirChanged || lightIntensityChanged || lightCastShadowChanged || pointLightsChanged || skyColorChanged)
 	{
 		PathTracingAccumulatedFrames = 0;
 #if WITH_STREAMLINE
-		if (bWritePrimaryGBuffer && (lightDirChanged || lightIntensityChanged || lightCastShadowChanged || skyColorChanged))
+		if (bWritePrimaryGBuffer && (lightDirChanged || lightIntensityChanged || lightCastShadowChanged || pointLightsChanged || skyColorChanged))
 			bDLSSResetNeeded = true;
 #endif
+		if (pointLightsChanged)
+		{
+			AppendCpuRuntimeTrace(
+				L"[PathTracing] point light state changed, count=" +
+				std::to_wstring(PathTracingViewParam.PointLightCount));
+		}
 		PrevPathTracingViewMat = ViewMat;
 		PrevPathTracingLightDir = currentLightDir;
 		PrevPathTracingLightIntensity = LightIntensity;
 		PrevPathTracingDirectionalLightCastShadow = RenderFrameDirectionalLightCastShadow;
+		PrevPathTracingPointLightStateHash = currentPointLightStateHash;
 		PrevSkyColorTop = SkyColorTop;
 		PrevSkyColorBottom = SkyColorBottom;
 		PrevSkyIntensity = SkyIntensity;
@@ -186,7 +199,6 @@ void Corona::PathTracingPass()
 	PathTracingViewParam.bWritePrimaryGBuffer = bWritePrimaryGBuffer ? 1u : 0u;
 	PathTracingViewParam.SpecularMotionVectorScale = PathTracingRRSpecularMotionVectorScale;
 	PathTracingViewParam.bStabilizePrimaryRaySamples = bStabilizePrimaryRaySamples ? 1u : 0u;
-	ApplyRenderPointLightsToFrameParams();
 	const UINT32 targetSamplesPerPixel = std::clamp(PathTracingViewParam.SamplesPerPixel, 1u, 16u);
 	UINT32 dispatchSamplesPerPixel = targetSamplesPerPixel;
 	if (PathTracingViewParam.DebugMode == 0 && targetSamplesPerPixel > 1u && !bWritePrimaryGBuffer)
@@ -195,6 +207,23 @@ void Corona::PathTracingPass()
 			dispatchSamplesPerPixel = 1u;
 		else if (PathTracingAccumulatedFrames < 8u)
 			dispatchSamplesPerPixel = std::min(targetSamplesPerPixel, 2u);
+	}
+	else if (PathTracingViewParam.DebugMode == 0 && bWritePrimaryGBuffer && targetSamplesPerPixel > 1u &&
+		!cameraChanged && !lightDirChanged && !lightIntensityChanged &&
+		!lightCastShadowChanged && !pointLightsChanged && !skyColorChanged)
+	{
+		// RR keeps history when the camera is still. If the user asks for more
+		// than 1 spp, ramp toward that target only after the history is stable;
+		// sample 0 still owns the primary-hit GBuffer writes.
+		dispatchSamplesPerPixel = 1u;
+		if (PathTracingAccumulatedFrames >= 8u)
+			dispatchSamplesPerPixel = targetSamplesPerPixel;
+		else if (PathTracingAccumulatedFrames >= 2u)
+			dispatchSamplesPerPixel = std::min(targetSamplesPerPixel, 2u);
+	}
+	else if (PathTracingViewParam.DebugMode == 0 && bWritePrimaryGBuffer && targetSamplesPerPixel > 1u)
+	{
+		dispatchSamplesPerPixel = 1u;
 	}
 	PathTracingLastDispatchSamplesPerPixel = dispatchSamplesPerPixel;
 

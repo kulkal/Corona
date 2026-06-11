@@ -119,6 +119,7 @@ namespace CoronaECS
 		int ShutdownRef = InvalidRef;
 		int ImGuiRef = InvalidRef;
 		int UiRef = InvalidRef;
+		int EditorConfigRef = InvalidRef;
 		bool bEnabled = true;
 		bool bPassEntityToCallbacks = true;
 		std::wstring SourceName;

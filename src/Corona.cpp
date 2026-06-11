@@ -2625,8 +2625,9 @@ bool Corona::EnsureStreamlineConstants()
 	sl::ViewportHandle vp(0);
 	const glm::vec2 streamlineJitter =
 		RenderingMode == ERenderingMode::PATHTRACING ? glm::vec2(0.0f) : CurrentJitter;
-	const bool bStreamlineCameraMotionIncluded =
-		!(RenderingMode == ERenderingMode::PATHTRACING && IsPathTracingDLSSRREnabled());
+	// PT primary GBuffer writes camera motion directly, matching the raster
+	// velocity contract. Keep Streamline out of its depth-derived mvec path.
+	const bool bStreamlineCameraMotionIncluded = true;
 	sl::Constants consts = BuildStreamlineConstants(
 		UnjitteredProjMat,
 		PrevViewMat,
@@ -3214,6 +3215,7 @@ void Corona::ResetAllAccumulationState(bool forceUpscaleReload)
 	PrevPathTracingViewMat = glm::mat4x4(0.0f);
 	PrevPathTracingLightDir = glm::vec3(0.0f);
 	PrevPathTracingLightIntensity = 0.0f;
+	PrevPathTracingPointLightStateHash = 0xFFFFFFFFu;
 	PrevSkyColorTop = glm::vec3(0.0f);
 	PrevSkyColorBottom = glm::vec3(0.0f);
 	PrevSkyIntensity = 0.0f;
@@ -4256,6 +4258,11 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 			bCommandLineCameraPathDump = true;
 			bCommandLineAutoDumpOverrideSet = true;
 			bCommandLineAutoDumpEnabled = false;
+			continue;
+		}
+		if (arg == L"--camera-path-diagnostics" || arg == L"--camera-diagnostics")
+		{
+			bCommandLineCameraPathDiagnostics = true;
 			continue;
 		}
 		if (arg == L"--camera-path" || arg == L"-camera-path" ||
@@ -8159,7 +8166,6 @@ void Corona::BuildPointLightRenderCandidates(std::vector<const PointLightState*>
 	{
 		const PointLightState* Light = nullptr;
 		float Score = 0.0f;
-		float DistanceSq = 0.0f;
 	};
 
 	std::vector<Candidate> candidates;
@@ -8169,24 +8175,22 @@ void Corona::BuildPointLightRenderCandidates(std::vector<const PointLightState*>
 		if (!pointLight.bEnabled || pointLight.Intensity <= 0.0f)
 			continue;
 
+		// Keep path-tracing light selection stable under camera motion so RR
+		// history is not reset by camera-dependent point-light ordering.
 		const float radius = std::max(pointLight.Radius, 0.01f);
-		const glm::vec3 toLight = pointLight.Position - RenderFrameCameraPosition;
-		const float distanceSq = std::max(glm::dot(toLight, toLight), 1.0f);
 		const float luma =
 			std::max(0.0f, 0.2126f * pointLight.Color.r + 0.7152f * pointLight.Color.g + 0.0722f * pointLight.Color.b) *
 			std::max(0.0f, pointLight.Intensity);
-		float score = luma * radius * radius / distanceSq;
+		float score = luma * radius * radius;
 		if (!std::isfinite(score) || score <= 0.0f)
 			score = luma;
-		candidates.push_back({ &pointLight, score, distanceSq });
+		candidates.push_back({ &pointLight, score });
 	}
 
 	std::stable_sort(candidates.begin(), candidates.end(), [](const Candidate& a, const Candidate& b)
 	{
 		if (a.Score != b.Score)
 			return a.Score > b.Score;
-		if (a.DistanceSq != b.DistanceSq)
-			return a.DistanceSq < b.DistanceSq;
 		const UINT32 aId = a.Light ? a.Light->Id : 0;
 		const UINT32 bId = b.Light ? b.Light->Id : 0;
 		return aId < bId;
@@ -8385,7 +8389,27 @@ void Corona::ProcessPendingEditorMapLoad()
 
 void Corona::ApplyRenderPointLightsToFrameParams()
 {
-	FillPointLightParams(PathTracingViewParam.PointLights, PathTracingViewParam.PointLightCount, MaxPointLights);
+	FillPointLightParams(PathTracingViewParam.PointLights, PathTracingViewParam.PointLightCount, MaxPathTracingPointLights);
+}
+
+UINT32 Corona::ComputePathTracingPointLightStateHash() const
+{
+	UINT32 hash = 2166136261u;
+	auto mixBytes = [&hash](const void* data, size_t size)
+	{
+		const auto* bytes = static_cast<const uint8_t*>(data);
+		for (size_t i = 0; i < size; ++i)
+		{
+			hash ^= static_cast<UINT32>(bytes[i]);
+			hash *= 16777619u;
+		}
+	};
+
+	const UINT32 activeCount = std::min(PathTracingViewParam.PointLightCount, MaxPointLights);
+	mixBytes(&activeCount, sizeof(activeCount));
+	for (UINT32 i = 0; i < activeCount; ++i)
+		mixBytes(&PathTracingViewParam.PointLights[i], sizeof(PointLightParam));
+	return hash;
 }
 
 
@@ -12490,6 +12514,7 @@ void Corona::ApplyDefaultFlyCamera()
 		PrevPathTracingViewMat = glm::mat4x4(0.0f);
 		PrevPathTracingLightDir = glm::vec3(0.0f);
 		PrevPathTracingLightIntensity = 0.0f;
+		PrevPathTracingPointLightStateHash = 0xFFFFFFFFu;
 		bTemporalAAHistoryValid = false;
 		bTemporalDenoiserHistoryValid = false;
 		bResetTemporalStateNextUpdate = true;
@@ -12537,6 +12562,7 @@ void Corona::ApplyDefaultFlyCamera()
 	PrevPathTracingViewMat = glm::mat4x4(0.0f);
 	PrevPathTracingLightDir = glm::vec3(0.0f);
 	PrevPathTracingLightIntensity = 0.0f;
+	PrevPathTracingPointLightStateHash = 0xFFFFFFFFu;
 	bTemporalAAHistoryValid = false;
 	bTemporalDenoiserHistoryValid = false;
 	bResetTemporalStateNextUpdate = true;
@@ -13071,8 +13097,13 @@ void Corona::DrawEditorModeOverlay()
 
 	const float configButtonWidth = 96.0f;
 	const float configButtonHeight = 30.0f;
+	const float configPanelDefaultWidth = 480.0f;
+	const float configPanelMinWidth = 420.0f;
+	const float configButtonX = bEditorConfigWindowOpen ?
+		std::max(workPos.x + margin, workPos.x + workSize.x - configPanelDefaultWidth - configButtonWidth - margin) :
+		workPos.x + workSize.x - configButtonWidth - margin;
 	const ImVec2 configButtonPos(
-		workPos.x + workSize.x - configButtonWidth - margin,
+		configButtonX,
 		workPos.y + workSize.y - configButtonHeight - margin);
 	ImGui::SetNextWindowPos(configButtonPos, ImGuiCond_Always);
 	ImGui::SetNextWindowSize(ImVec2(configButtonWidth, configButtonHeight), ImGuiCond_Always);
@@ -13093,17 +13124,21 @@ void Corona::DrawEditorModeOverlay()
 
 	if (bEditorConfigWindowOpen)
 	{
-		const float configPanelWidth = 360.0f;
-		const float configPanelHeightEstimate = 420.0f;
-		const float configPanelX = std::max(workPos.x + margin, workPos.x + workSize.x - configPanelWidth - margin);
-		const float configPanelY = std::max(
-			workPos.y + margin,
-			workPos.y + workSize.y - configPanelHeightEstimate - configButtonHeight - margin * 2.0f);
-		ImGui::SetNextWindowPos(ImVec2(configPanelX, configPanelY), ImGuiCond_FirstUseEver);
-		ImGui::SetNextWindowSize(ImVec2(configPanelWidth, 0.0f), ImGuiCond_FirstUseEver);
+		const float configPanelX = std::max(workPos.x, workPos.x + workSize.x - configPanelDefaultWidth);
+		ImGui::SetNextWindowPos(ImVec2(configPanelX, workPos.y), ImGuiCond_Appearing);
+		ImGui::SetNextWindowSize(ImVec2(configPanelDefaultWidth, workSize.y), ImGuiCond_Appearing);
+		ImGui::SetNextWindowSizeConstraints(
+			ImVec2(configPanelMinWidth, 240.0f),
+			ImVec2(std::max(configPanelMinWidth, workSize.x), workSize.y));
 		ImGui::SetNextWindowBgAlpha(0.92f);
-		if (ImGui::Begin("Editor Config", &bEditorConfigWindowOpen, ImGuiWindowFlags_NoSavedSettings))
+		const ImGuiWindowFlags configFlags =
+			ImGuiWindowFlags_NoCollapse |
+			ImGuiWindowFlags_NoSavedSettings;
+		if (ImGui::Begin("Editor Config", &bEditorConfigWindowOpen, configFlags))
 		{
+			const bool bEditorConfigScriptHandled = DrawEditorConfigScriptImGui();
+			if (!bEditorConfigScriptHandled)
+			{
 			if (renderBackend)
 				ImGui::Text("Backend: %s", renderBackend->GetBackendName());
 
@@ -13115,10 +13150,50 @@ void Corona::DrawEditorModeOverlay()
 				SetGpuTimingAverageFrameCount(static_cast<UINT32>(averageFrameCountUI));
 			ImGui::Checkbox("Full Render Controls Window", &bShowImgui);
 			ImGui::Checkbox("Culling Overlay", &bShowCullingTextOverlay);
-			// Lighting / GI controls live only in this Editor Config window's
-			// "Top / Lighting & GI" section now; the separate popup is removed.
-			if (ImGui::Button("Open Debug / Capture Controls", ImVec2(-1.0f, 0.0f)))
-				bEditorDebugCaptureWindowOpen = true;
+			ImGui::Separator();
+			ImGui::TextUnformatted("Visualization");
+			const bool bDebugVisualizationAvailable = renderBackend && BufferVisualizeGraphicsPipeline;
+			if (!bDebugVisualizationAvailable)
+				ImGui::BeginDisabled();
+			ImGui::Checkbox("Visualize Buffers", &bDebugDraw);
+			static const char* debugVisualizationItems[] = {
+				"SHADOW",
+				"WORLD_NORMAL",
+				"GEO_NORMAL",
+				"DEPTH",
+				"RAW_DIFFUSE_GI",
+				"RAW_DIFFUSE_GI_AUX",
+				"SCREEN_PROBE_DIFFUSE_GI",
+				"SCREEN_PROBE_PROBES",
+				"SCREEN_PROBE_HISTORY_LENGTH",
+				"SCREEN_PROBE_ATLAS_HISTORY_LENGTH",
+				"TEMPORAL_FILTERED_DIFFUSE_GI",
+				"RESOLVED_DIFFUSE_GI",
+				"FINAL_DIFFUSE_GI",
+				"ALBEDO",
+				"VELOCITY",
+				"ROUGNESS_METALLIC",
+				"SPECULAR_RAW",
+				"TEMPORAL_FILTERED_SPECULAR",
+				"BLOOM",
+				"SPEC_HISTORY_LENGTH",
+				"RTAO",
+				"NO_FULLSCREEN",
+			};
+			int debugVisualizationIndex = std::clamp(
+				static_cast<int>(FullscreenDebugBuffer),
+				0,
+				static_cast<int>(IM_ARRAYSIZE(debugVisualizationItems)) - 1);
+			if (ImGui::Combo("Full Screen Buffer", &debugVisualizationIndex, debugVisualizationItems, IM_ARRAYSIZE(debugVisualizationItems)))
+				FullscreenDebugBuffer = static_cast<EDebugVisualization>(debugVisualizationIndex);
+			if (!bDebugVisualizationAvailable)
+			{
+				ImGui::EndDisabled();
+				bDebugDraw = false;
+				ImGui::TextDisabled("Buffer visualization is available on the DX12 debug path.");
+			}
+			if (ImGui::Button("Recompile all shaders", ImVec2(-1.0f, 0.0f)))
+				bRecompileShaders = true;
 		}
 
 		if (ImGui::CollapsingHeader("Top / Render & AA", ImGuiTreeNodeFlags_DefaultOpen))
@@ -13215,8 +13290,36 @@ void Corona::DrawEditorModeOverlay()
 				{
 					if (ImGui::Checkbox("Enable Direct Diffuse", &bEnableDirectDiffuse)) bLightingChanged = true;
 					if (ImGui::Checkbox("Enable Direct Specular", &bEnableDirectSpecular)) bLightingChanged = true;
+
+					const bool bCameraPathOwnsLightControls = bCameraPathPlaying || bCameraPathDumping;
+					if (bCameraPathOwnsLightControls)
+						ImGui::BeginDisabled();
+					const glm::vec3 prevLightDir = LightDir;
+					const float prevLightIntensity = LightIntensity;
+					glm::vec3 editorLightDir = glm::vec3(LightDir.z, -LightDir.y, -LightDir.x);
+					ImGui::gizmo3D("##editor_config_directional_light_gizmo", editorLightDir, 180);
+					LightDir = glm::vec3(-editorLightDir.z, -editorLightDir.y, editorLightDir.x);
+					ImGui::SameLine();
+					ImGui::TextUnformatted("Direction");
+					if (ImGui::SliderFloat("Light Brightness", &LightIntensity, 0.0f, 20.0f))
+						bLightingChanged = true;
 					if (ImGui::SliderFloat("Sun Angular Radius", &RTShadowViewParam.ShadowLightRadius, 0.0f, 0.03f, "%.4f rad"))
 						bLightingChanged = true;
+					const bool bUserChangedLight =
+						glm::length(prevLightDir - LightDir) > 1e-5f ||
+						std::abs(prevLightIntensity - LightIntensity) > 1e-5f;
+					if (bUserChangedLight)
+					{
+						bRenderThreadOwnsLightDirNextFrame = true;
+						UpdateMainDirectionalLightEntityFromState();
+						bLightingChanged = true;
+					}
+					if (bCameraPathOwnsLightControls)
+					{
+						ImGui::EndDisabled();
+						ImGui::TextDisabled("Camera path playback is controlling the directional light.");
+					}
+
 					if (RenderingMode == ERenderingMode::HYBRID)
 					{
 						int shadowSamples = static_cast<int>(RTShadowViewParam.ShadowSampleCount);
@@ -13486,73 +13589,7 @@ void Corona::DrawEditorModeOverlay()
 			}
 		}
 
-		if (ImGui::CollapsingHeader("Top / Debug & Capture"))
-		{
-		const bool bDebugVisualizationAvailable = renderBackend && BufferVisualizeGraphicsPipeline;
-		if (!bDebugVisualizationAvailable)
-			ImGui::BeginDisabled();
-		ImGui::Checkbox("Visualize Buffers", &bDebugDraw);
-		static const char* debugVisualizationItems[] = {
-			"SHADOW",
-			"WORLD_NORMAL",
-			"GEO_NORMAL",
-			"DEPTH",
-			"RAW_DIFFUSE_GI",
-			"RAW_DIFFUSE_GI_AUX",
-			"SCREEN_PROBE_DIFFUSE_GI",
-			"SCREEN_PROBE_PROBES",
-			"SCREEN_PROBE_HISTORY_LENGTH",
-			"SCREEN_PROBE_ATLAS_HISTORY_LENGTH",
-			"TEMPORAL_FILTERED_DIFFUSE_GI",
-			"RESOLVED_DIFFUSE_GI",
-			"FINAL_DIFFUSE_GI",
-			"ALBEDO",
-			"VELOCITY",
-			"ROUGNESS_METALLIC",
-			"SPECULAR_RAW",
-			"TEMPORAL_FILTERED_SPECULAR",
-			"BLOOM",
-			"SPEC_HISTORY_LENGTH",
-			"RTAO",
-			"NO_FULLSCREEN",
-		};
-		int debugVisualizationIndex = std::clamp(
-			static_cast<int>(FullscreenDebugBuffer),
-			0,
-			static_cast<int>(IM_ARRAYSIZE(debugVisualizationItems)) - 1);
-		if (ImGui::Combo("Full Screen Buffer", &debugVisualizationIndex, debugVisualizationItems, IM_ARRAYSIZE(debugVisualizationItems)))
-			FullscreenDebugBuffer = static_cast<EDebugVisualization>(debugVisualizationIndex);
-		if (!bDebugVisualizationAvailable)
-		{
-			ImGui::EndDisabled();
-			bDebugDraw = false;
-			ImGui::TextDisabled("Buffer visualization is available on the DX12 debug path.");
-		}
-
-		ImGui::Separator();
-		ImGui::Checkbox("Culling overlay", &bShowCullingTextOverlay);
-		ImGui::Checkbox("Frame timing overlay (CPU / GPU / Recording)", &bShowFrameTimingOverlay);
-		int averageFrameCountUI = static_cast<int>(GpuTimingAverageFrameCount);
-		if (ImGui::SliderInt("Timing Average Frames", &averageFrameCountUI, 1, 240))
-			SetGpuTimingAverageFrameCount(static_cast<UINT32>(averageFrameCountUI));
-		if (ImGui::Button("Recompile all shaders", ImVec2(-1.0f, 0.0f)))
-			bRecompileShaders = true;
-
-		if (bFinalScreenshotRequested || bFinalScreenshotCaptureInFlight)
-			ImGui::BeginDisabled();
-		if (ImGui::Button("Capture Final Backbuffer", ImVec2(-1.0f, 0.0f)))
-		{
-			bFinalScreenshotRequested = true;
-			LastFinalScreenshotStatus = L"Screenshot will be captured on the next frame without ImGui.";
-		}
-		if (bFinalScreenshotRequested || bFinalScreenshotCaptureInFlight)
-			ImGui::EndDisabled();
-		if (!LastFinalScreenshotStatus.empty())
-		{
-			const std::string statusText = WideToUtf8(LastFinalScreenshotStatus);
-			ImGui::TextWrapped("Screenshot: %s", statusText.c_str());
-		}
-		}
+			}
 	}
 	ImGui::End();
 	}
@@ -15582,6 +15619,7 @@ if (ImGui::Button("Reset Accumulation"))
 	PrevPathTracingViewMat = glm::mat4x4(0.0f);
 	PrevPathTracingLightDir = glm::vec3(0.0f);
 	PrevPathTracingLightIntensity = 0.0f;
+	PrevPathTracingPointLightStateHash = 0xFFFFFFFFu;
 }
 
 		ImGui::Separator();

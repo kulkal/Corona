@@ -68,6 +68,7 @@ cbuffer ViewParameter : register(b0)
     float SpecularMotionVectorScale;
     uint bStabilizePrimaryRaySamples;
     uint _rtaoPadding;
+    uint3 _pointLightArrayPadding;
     PointLightParam PointLights[MAX_POINT_LIGHTS];
     uint PointLightCount;
     float3 PointLightPadding;
@@ -291,6 +292,19 @@ float2 ProjectToScreenUV(float3 worldPos, float4x4 viewProj)
     return (any(isnan(uv)) || any(isinf(uv))) ? float2(0.0f, 0.0f) : uv;
 }
 
+bool ProjectToScreenUVFinite(float3 worldPos, float4x4 viewProj, out float2 uv)
+{
+    float4 clip = mul(float4(worldPos, 1.0f), viewProj);
+    if (abs(clip.w) <= 1.0e-6f)
+    {
+        uv = float2(0.0f, 0.0f);
+        return false;
+    }
+
+    uv = (clip.xy * rcp(clip.w)) * float2(0.5f, -0.5f) + 0.5f;
+    return !any(isnan(uv)) && !any(isinf(uv));
+}
+
 bool ProjectToScreenUVChecked(float3 worldPos, float4x4 viewProj, out float2 uv)
 {
     float4 clip = mul(float4(worldPos, 1.0f), viewProj);
@@ -337,8 +351,15 @@ void WritePrimaryHitGBuffer(uint2 pixel, PathTracingPayload payload, bool bHit, 
     OutSpecularAlbedo[pixel] = float4(ComputeDLSSRRSpecularAlbedo(albedo, metallic, roughness, normal, surfaceToView), 1.0f);
     OutNormal[pixel] = float4(normal, 0.0f);
     OutGeomNormal[pixel] = float4(geomNormal, 0.0f);
-    // PT+RR asks Streamline to rebuild camera motion from depth and clipToPrevClip.
-    OutVelocity[pixel] = float2(0.0f, 0.0f);
+    float2 currentUV;
+    float2 prevUV;
+    float2 velocity = float2(0.0f, 0.0f);
+    if (ProjectToScreenUVFinite(payload.debugWorldPos, UnjitteredViewProjMatrix, currentUV) &&
+        ProjectToScreenUVFinite(payload.debugWorldPos, PrevUnjitteredViewProjMatrix, prevUV))
+    {
+        velocity = currentUV - prevUV;
+    }
+    OutVelocity[pixel] = velocity;
     OutRoughnessMetallic[pixel] = float4(roughness, metallic, 0.0f, 0.0f);
     OutDepth[pixel] = ProjectToDeviceDepth(payload.debugWorldPos, UnjitteredViewProjMatrix);
     OutSpecularHitDistance[pixel] = clamp(specularHitDistance, 0.0f, ProjectionParams.w);

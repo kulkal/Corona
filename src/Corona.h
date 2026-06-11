@@ -15,6 +15,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstddef>
 #include <deque>
 #include <filesystem>
 #include <functional>
@@ -578,8 +579,11 @@ private:
 	// Keep shader-side MAX_POINT_LIGHTS definitions in lock-step with this.
 	static constexpr UINT32 MaxPointLights = 128;
 	static constexpr UINT32 MaxDiffuseGIPointLights = 16;
+	static constexpr UINT32 MaxPathTracingPointLights = MaxDiffuseGIPointLights;
 	static_assert(MaxDiffuseGIPointLights <= 32,
 		"Spatial light masks pack one bit per direct ReSTIR point-light candidate");
+	static_assert(MaxPathTracingPointLights <= MaxPointLights,
+		"Path tracing point-light limit must fit the path tracing constant buffer");
 
 	struct PointLightParam
 	{
@@ -1018,10 +1022,13 @@ private:
 		float SpecularMotionVectorScale = 1.0f;
 		UINT32 bStabilizePrimaryRaySamples = 0;
 		UINT32 _rtaoPadding = 0;
+		UINT32 _pointLightArrayPadding[3] = {};
 		PointLightParam PointLights[MaxPointLights];
 		UINT32 PointLightCount = 0;
 		glm::vec3 PointLightPadding = glm::vec3(0.0f);
 	};
+	static_assert(offsetof(PathTracingViewParamCB, PointLights) % 16 == 0,
+		"PathTracing point-light array must match HLSL cbuffer packing");
 
 	PathTracingViewParamCB PathTracingViewParam;
 	shared_ptr<RTPipelineStateObject> PSO_PATH_TRACING;
@@ -1041,6 +1048,7 @@ private:
 	glm::vec3 PrevPathTracingLightDir;
 	float PrevPathTracingLightIntensity = 0.0f;
 	bool PrevPathTracingDirectionalLightCastShadow = true;
+	UINT32 PrevPathTracingPointLightStateHash = 0xFFFFFFFFu;
 	glm::vec3 PrevSkyColorTop = glm::vec3(0.0f);
 	glm::vec3 PrevSkyColorBottom = glm::vec3(0.0f);
 	float PrevSkyIntensity = 0.0f;
@@ -2790,6 +2798,7 @@ public:
 		int shutdownRef,
 		int imguiRef,
 		int uiRef,
+		int editorConfigRef,
 		const std::wstring& sourceName,
 		bool bPassEntityToCallbacks = true);
 	bool AttachEntityScriptFileForScript(
@@ -2872,6 +2881,7 @@ public:
 	void RenderQueuedLuauUi(bool bRenderToolUi = true, bool bRenderGameUi = true);
 	void DrawLuauImGui();
 	void DrawEntityScriptImGui();
+	bool DrawEditorConfigScriptImGui();
 	void ShutdownLuauScripting();
 	void StartLuauScriptProfileSampler(lua_State* L);
 	void StopLuauScriptProfileSampler();
@@ -3431,6 +3441,7 @@ private:
 	void FillPointLightParams(PointLightParam* outPointLights, UINT32& outPointLightCount, UINT32 maxCount) const;
 	void FillPointLightParamsFromList(PointLightParam* outPointLights, UINT32& outPointLightCount, const std::vector<const PointLightState*>& lights, UINT32 maxCount) const;
 	void ApplyRenderPointLightsToFrameParams();
+	UINT32 ComputePathTracingPointLightStateHash() const;
 
 	UINT m_width = 0;
 	UINT m_height = 0;
