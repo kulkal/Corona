@@ -80,6 +80,32 @@ static std::vector<uint8_t> CompileHLSLToDXIL(
 	return std::vector<uint8_t>(p, p + blob->GetBufferSize());
 }
 
+// ETextureFormat / ETextureUsageFlags -> NRI.
+static nri::Format ToNRIFormat(ETextureFormat f)
+{
+	switch (f)
+	{
+	case ETextureFormat::RGBA16Float: return nri::Format::RGBA16_SFLOAT;
+	case ETextureFormat::RGBA32Float: return nri::Format::RGBA32_SFLOAT;
+	case ETextureFormat::RG16Float:   return nri::Format::RG16_SFLOAT;
+	case ETextureFormat::RGBA8Unorm:  return nri::Format::RGBA8_UNORM;
+	case ETextureFormat::BGRA8Unorm:  return nri::Format::BGRA8_UNORM;
+	case ETextureFormat::D32Float:    return nri::Format::D32_SFLOAT;
+	case ETextureFormat::R32Float:    return nri::Format::R32_SFLOAT;
+	case ETextureFormat::R8Uint:      return nri::Format::R8_UINT;
+	}
+	return nri::Format::RGBA8_UNORM;
+}
+
+static nri::TextureUsageBits ToNRITextureUsage(ETextureUsageFlags u)
+{
+	nri::TextureUsageBits bits = nri::TextureUsageBits::SHADER_RESOURCE;
+	if (HasTextureUsage(u, TextureUsage_RenderTarget))    bits = bits | nri::TextureUsageBits::COLOR_ATTACHMENT;
+	if (HasTextureUsage(u, TextureUsage_UnorderedAccess)) bits = bits | nri::TextureUsageBits::SHADER_RESOURCE_STORAGE;
+	if (HasTextureUsage(u, TextureUsage_DepthStencil))    bits = bits | nri::TextureUsageBits::DEPTH_STENCIL_ATTACHMENT;
+	return bits;
+}
+
 // ---------------------------------------------------------------------------
 // PIMPL: all NRI state lives here so the header stays NRI-free.
 // ---------------------------------------------------------------------------
@@ -104,6 +130,13 @@ struct NRIBackend::Impl
 		std::vector<nri::Memory*> memory;
 	};
 	std::unordered_map<Buffer*, BufferAlloc> Buffers;
+
+	struct TextureAlloc
+	{
+		nri::Texture* texture = nullptr;
+		std::vector<nri::Memory*> memory;
+	};
+	std::unordered_map<Texture*, TextureAlloc> Textures;
 
 	std::string BackendName = "NRI (uninitialized)";
 	uint8_t RayTracingTier = 0;   // 0=none, 1=DXR1.0, 2=DXR1.1, 3=DXR1.2 (SER)
@@ -147,6 +180,40 @@ struct NRIBackend::Impl
 	void FreeBuffer(nri::Buffer* b, std::vector<nri::Memory*>& mem)
 	{
 		if (b) Core.DestroyBuffer(b);
+		for (nri::Memory* m : mem) if (m) Core.FreeMemory(m);
+		mem.clear();
+	}
+
+	bool CreateBoundTexture(const nri::TextureDesc& td, nri::Texture*& outTex, std::vector<nri::Memory*>& outMem)
+	{
+		outTex = nullptr;
+		outMem.clear();
+		if (!Device)
+			return false;
+		if (Core.CreateTexture(*Device, td, outTex) != nri::Result::SUCCESS || outTex == nullptr)
+			return false;
+
+		nri::Texture* texList[1] = { outTex };
+		nri::ResourceGroupDesc rg = {};
+		rg.memoryLocation = nri::MemoryLocation::DEVICE;
+		rg.textures = texList;
+		rg.textureNum = 1;
+
+		const uint32_t allocNum = Helper.CalculateAllocationNumber(*Device, rg);
+		outMem.resize(allocNum, nullptr);
+		if (Helper.AllocateAndBindMemory(*Device, rg, outMem.data()) != nri::Result::SUCCESS)
+		{
+			Core.DestroyTexture(outTex);
+			outTex = nullptr;
+			outMem.clear();
+			return false;
+		}
+		return true;
+	}
+
+	void FreeTexture(nri::Texture* t, std::vector<nri::Memory*>& mem)
+	{
+		if (t) Core.DestroyTexture(t);
 		for (nri::Memory* m : mem) if (m) Core.FreeMemory(m);
 		mem.clear();
 	}
@@ -388,15 +455,28 @@ NRIBackend::NRIBackend() : m(std::make_unique<Impl>())
 		shaderBytes = dxil.size();
 	}
 
+	// Texture smoke: create + bind + free a 64x64 RGBA16F UAV texture.
+	bool texSmokeOk = false;
+	{
+		nri::TextureDesc td = {};
+		td.type = nri::TextureType::TEXTURE_2D;
+		td.usage = nri::TextureUsageBits::SHADER_RESOURCE | nri::TextureUsageBits::SHADER_RESOURCE_STORAGE;
+		td.format = nri::Format::RGBA16_SFLOAT;
+		td.width = 64; td.height = 64; td.depth = 1; td.mipNum = 1; td.layerNum = 1; td.sampleNum = 1;
+		nri::Texture* t = nullptr; std::vector<nri::Memory*> tm;
+		texSmokeOk = m->CreateBoundTexture(td, t, tm);
+		m->FreeTexture(t, tm);
+	}
+
 	// End-to-end compute dispatch (pipeline layout + compute pipeline + dispatch
 	// + copy + readback verify).
 	std::string computeResult = (m->CmdBuffer && m->GraphicsQueue) ? m->RunComputeSmoke() : std::string("skipped");
 
 	char info[768];
 	_snprintf_s(info, _TRUNCATE,
-		"device ok [%s], rtTier=%u sm=%u queue=%s bufferSmoke=%s cmd=%s submitSmoke=%s shaderDXIL=%zuB compute=%s",
+		"device ok [%s], rtTier=%u sm=%u queue=%s bufferSmoke=%s texSmoke=%s cmd=%s submitSmoke=%s shaderDXIL=%zuB compute=%s",
 		dd.adapterDesc.name, (unsigned)dd.tiers.rayTracing, (unsigned)dd.shaderModel,
-		m->GraphicsQueue ? "ok" : "null", bufferSmokeOk ? "PASS" : "FAIL",
+		m->GraphicsQueue ? "ok" : "null", bufferSmokeOk ? "PASS" : "FAIL", texSmokeOk ? "PASS" : "FAIL",
 		m->CmdBuffer ? "ok" : "null", submitSmokeOk ? "PASS" : "FAIL", shaderBytes, computeResult.c_str());
 	ErrorString = info;          // diagnostic status (not an error); logged by bootstrap
 	OutputDebugStringA("[NRI] ");
@@ -418,6 +498,15 @@ NRIBackend::~NRIBackend()
 				if (mem) m->Core.FreeMemory(mem);
 		}
 		m->Buffers.clear();
+
+		for (auto& kv : m->Textures)
+		{
+			if (kv.second.texture)
+				m->Core.DestroyTexture(kv.second.texture);
+			for (nri::Memory* mem : kv.second.memory)
+				if (mem) m->Core.FreeMemory(mem);
+		}
+		m->Textures.clear();
 
 		if (m->Fence) { m->Core.DestroyFence(m->Fence); m->Fence = nullptr; }
 		if (m->CmdBuffer) { m->Core.DestroyCommandBuffer(m->CmdBuffer); m->CmdBuffer = nullptr; }
@@ -453,7 +542,42 @@ uint32_t NRIBackend::GetCurrentFrameIndex() const { return m->FrameIndex; }
 DX12Backend* NRIBackend::AsDX12Backend() { return nullptr; }
 
 // === Resource creation ====================================================
-std::shared_ptr<Texture> NRIBackend::CreateTexture2D(const TextureCreateDesc&) { NRI_TODO(); return nullptr; }
+std::shared_ptr<Texture> NRIBackend::CreateTexture2D(const TextureCreateDesc& desc)
+{
+	if (!m->Device)
+		return nullptr;
+	nri::TextureDesc td = {};
+	td.type = nri::TextureType::TEXTURE_2D;
+	td.usage = ToNRITextureUsage(desc.Usage);
+	td.format = ToNRIFormat(desc.Format);
+	td.width = static_cast<nri::Dim_t>(desc.Width);
+	td.height = static_cast<nri::Dim_t>(desc.Height);
+	td.depth = 1;
+	td.mipNum = static_cast<nri::Dim_t>(desc.MipLevels > 0 ? desc.MipLevels : 1);
+	td.layerNum = 1;
+	td.sampleNum = 1;
+
+	nri::Texture* tex = nullptr;
+	std::vector<nri::Memory*> mem;
+	if (!m->CreateBoundTexture(td, tex, mem))
+	{
+		ErrorString = "CreateTexture2D: CreateBoundTexture failed";
+		return nullptr;
+	}
+
+	auto wrapper = std::make_shared<Texture>();
+	wrapper->Width = desc.Width;
+	wrapper->Height = desc.Height;
+	wrapper->MipLevels = td.mipNum;
+	wrapper->Format = desc.Format;
+	wrapper->Usage = desc.Usage;
+
+	Impl::TextureAlloc alloc;
+	alloc.texture = tex;
+	alloc.memory = std::move(mem);
+	m->Textures[wrapper.get()] = std::move(alloc);
+	return wrapper;
+}
 std::shared_ptr<Buffer> NRIBackend::CreateBuffer(const BufferCreateDesc& desc)
 {
 	if (!m->Device)
@@ -498,7 +622,44 @@ std::shared_ptr<Buffer> NRIBackend::CreateBuffer(const BufferCreateDesc& desc)
 }
 std::shared_ptr<Sampler> NRIBackend::CreateSampler(const SamplerCreateDesc&) { NRI_TODO(); return nullptr; }
 std::shared_ptr<Texture> NRIBackend::CreateTextureFromFile(const std::wstring&, bool) { NRI_TODO(); return nullptr; }
-std::shared_ptr<Texture> NRIBackend::CreateTexture3D(ETextureFormat, ETextureUsageFlags, EInitialResourceState, int, int, int, int) { NRI_TODO(); return nullptr; }
+std::shared_ptr<Texture> NRIBackend::CreateTexture3D(
+	ETextureFormat format, ETextureUsageFlags usage, EInitialResourceState /*initialState*/,
+	int width, int height, int depth, int mipLevels)
+{
+	if (!m->Device)
+		return nullptr;
+	nri::TextureDesc td = {};
+	td.type = nri::TextureType::TEXTURE_3D;
+	td.usage = ToNRITextureUsage(usage);
+	td.format = ToNRIFormat(format);
+	td.width = static_cast<nri::Dim_t>(width);
+	td.height = static_cast<nri::Dim_t>(height);
+	td.depth = static_cast<nri::Dim_t>(depth);
+	td.mipNum = static_cast<nri::Dim_t>(mipLevels > 0 ? mipLevels : 1);
+	td.layerNum = 1;
+	td.sampleNum = 1;
+
+	nri::Texture* tex = nullptr;
+	std::vector<nri::Memory*> mem;
+	if (!m->CreateBoundTexture(td, tex, mem))
+	{
+		ErrorString = "CreateTexture3D: CreateBoundTexture failed";
+		return nullptr;
+	}
+
+	auto wrapper = std::make_shared<Texture>();
+	wrapper->Width = static_cast<uint32_t>(width);
+	wrapper->Height = static_cast<uint32_t>(height);
+	wrapper->MipLevels = td.mipNum;
+	wrapper->Format = format;
+	wrapper->Usage = usage;
+
+	Impl::TextureAlloc alloc;
+	alloc.texture = tex;
+	alloc.memory = std::move(mem);
+	m->Textures[wrapper.get()] = std::move(alloc);
+	return wrapper;
+}
 void NRIBackend::UploadTexture3D(Texture*, const void*, uint64_t, uint64_t) { NRI_TODO(); }
 std::shared_ptr<VertexBuffer> NRIBackend::CreateVertexBuffer(uint32_t, uint32_t, void*) { NRI_TODO(); return nullptr; }
 std::shared_ptr<IndexBuffer> NRIBackend::CreateIndexBuffer(EIndexFormat, uint32_t, void*) { NRI_TODO(); return nullptr; }
