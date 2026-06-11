@@ -131,8 +131,12 @@ public:
 	void BindGraphicsPipelineVertexBufferSRV(GraphicsPipelineHandle* pipeline, const std::string& bindingName, VertexBuffer* vb) override;
 	void BindGraphicsPipelineSampler(GraphicsPipelineHandle* pipeline, const std::string& bindingName, Sampler* sampler) override;
 
-private:
+public:
+	// Opaque to the rest of the engine; defined in NRIBackend.cpp. Public so the
+	// file-local by-name binding adapter (NRIComputePSO) can reference the type.
 	struct Impl;
+
+private:
 	std::unique_ptr<Impl> m;
 	std::string ErrorString;
 };

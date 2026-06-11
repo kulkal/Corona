@@ -117,6 +117,7 @@ struct NRIBackend::Impl
 	nri::Queue* GraphicsQueue = nullptr;
 	nri::CommandAllocator* CmdAllocator = nullptr;
 	nri::CommandBuffer* CmdBuffer = nullptr;
+	nri::CommandBuffer* ActiveCmd = nullptr; // command buffer currently open for recording (set by the frame lifecycle / smokes)
 	nri::Fence* Fence = nullptr;
 	uint64_t FenceValue = 0;
 	// Future milestones add: RayTracingInterface, SwapChainInterface, descriptor
@@ -342,6 +343,149 @@ struct NRIBackend::Impl
 	}
 };
 
+// ---------------------------------------------------------------------------
+// By-name binding adapter: maps Corona's ComputePipelineStateObject (resources
+// bound by string name + HLSL register) onto an NRI pipeline layout + compute
+// pipeline. This milestone supports buffer bindings via NRI root descriptors
+// (UAV -> STORAGE_STRUCTURED_BUFFER, SRV -> STRUCTURED_BUFFER); texture / CBV /
+// sampler bindings (descriptor sets) come next.
+// ---------------------------------------------------------------------------
+class NRIComputePSO : public ComputePipelineStateObject
+{
+public:
+	explicit NRIComputePSO(NRIBackend::Impl* impl) : m(impl) {}
+	~NRIComputePSO() override
+	{
+		if (m && m->Device)
+		{
+			if (Pipeline) m->Core.DestroyPipeline(Pipeline);
+			if (Layout) m->Core.DestroyPipelineLayout(Layout);
+			for (auto& kv : Views) if (kv.second) m->Core.DestroyDescriptor(kv.second);
+		}
+	}
+
+	enum class Kind { UAV_Buffer, SRV_Buffer, CBV, Sampler, Texture_SRV, Texture_UAV };
+	struct Decl { std::string name; Kind kind; uint32_t reg; };
+
+	void BindSRV(const std::string& name, uint32_t baseRegister, uint32_t /*numDescriptors*/) override { Decls.push_back({ name, Kind::SRV_Buffer, baseRegister }); }
+	void BindUAV(const std::string& name, uint32_t baseRegister) override { Decls.push_back({ name, Kind::UAV_Buffer, baseRegister }); }
+	void BindCBV(const std::string& name, uint32_t baseRegister, uint32_t /*size*/) override { Decls.push_back({ name, Kind::CBV, baseRegister }); }
+	void BindSampler(const std::string& name, uint32_t baseRegister) override { Decls.push_back({ name, Kind::Sampler, baseRegister }); }
+
+	bool InitCS(const std::wstring& shaderFile, const std::string& entryPoint) override
+	{
+		if (!m->Device)
+			return false;
+
+		std::ifstream f(shaderFile, std::ios::binary);
+		if (!f.good())
+			return false;
+		std::stringstream ss; ss << f.rdbuf();
+		const std::string src = ss.str();
+		const std::wstring entryW(entryPoint.begin(), entryPoint.end());
+		std::string err;
+		Dxil = CompileHLSLToDXIL(src.data(), src.size(), shaderFile.c_str(), entryW.c_str(), L"cs_6_5", err);
+		if (Dxil.empty())
+			return false;
+
+		// Root descriptors for buffer bindings, ordered as declared.
+		RootDescs.clear();
+		RootDescIndexByName.clear();
+		for (const Decl& d : Decls)
+		{
+			if (d.kind != Kind::UAV_Buffer && d.kind != Kind::SRV_Buffer)
+				continue;
+			nri::RootDescriptorDesc rd = {};
+			rd.registerIndex = d.reg;
+			rd.descriptorType = (d.kind == Kind::UAV_Buffer) ? nri::DescriptorType::STORAGE_STRUCTURED_BUFFER : nri::DescriptorType::STRUCTURED_BUFFER;
+			rd.shaderStages = nri::StageBits::COMPUTE_SHADER;
+			RootDescIndexByName[d.name] = (uint32_t)RootDescs.size();
+			RootDescs.push_back(rd);
+		}
+
+		nri::PipelineLayoutDesc pld = {};
+		pld.rootRegisterSpace = 0;
+		pld.rootDescriptors = RootDescs.empty() ? nullptr : RootDescs.data();
+		pld.rootDescriptorNum = (uint32_t)RootDescs.size();
+		pld.shaderStages = nri::StageBits::COMPUTE_SHADER;
+		if (m->Core.CreatePipelineLayout(*m->Device, pld, Layout) != nri::Result::SUCCESS)
+			return false;
+
+		nri::ComputePipelineDesc cpd = {};
+		cpd.pipelineLayout = Layout;
+		cpd.shader.stage = nri::StageBits::COMPUTE_SHADER;
+		cpd.shader.bytecode = Dxil.data();
+		cpd.shader.size = Dxil.size();
+		cpd.shader.entryPointName = entryPoint.c_str();
+		if (m->Core.CreateComputePipeline(*m->Device, cpd, Pipeline) != nri::Result::SUCCESS)
+			return false;
+		return true;
+	}
+
+	void SetBufferUAV(const std::string& name, Buffer* buffer) override { BindBufferView(name, buffer, nri::BufferView::STORAGE_STRUCTURED_BUFFER); }
+	void SetBufferSRV(const std::string& name, Buffer* buffer) override { BindBufferView(name, buffer, nri::BufferView::STRUCTURED_BUFFER); }
+	void SetTextureSRV(const std::string&, Texture*) override {}     // descriptor-set path: next milestone
+	void SetTextureUAV(const std::string&, Texture*) override {}
+	void SetVertexBufferUAV(const std::string&, VertexBuffer*) override {}
+	void SetSampler(const std::string&, Sampler*) override {}
+	void SetCBVValue(const std::string&, void*) override {}
+
+	// Record pipeline layout + root descriptors + pipeline into the backend's
+	// active command buffer. The backend's Dispatch() then issues CmdDispatch.
+	void Apply() override
+	{
+		if (!Pipeline || !m->ActiveCmd)
+			return;
+		m->Core.CmdSetPipelineLayout(*m->ActiveCmd, nri::BindPoint::COMPUTE, *Layout);
+		for (const auto& kv : Views)
+		{
+			auto it = RootDescIndexByName.find(kv.first);
+			if (it == RootDescIndexByName.end() || !kv.second)
+				continue;
+			nri::SetRootDescriptorDesc srd = {};
+			srd.rootDescriptorIndex = it->second;
+			srd.descriptor = kv.second;
+			srd.offset = 0;
+			srd.bindPoint = nri::BindPoint::COMPUTE;
+			m->Core.CmdSetRootDescriptor(*m->ActiveCmd, srd);
+		}
+		m->Core.CmdSetPipeline(*m->ActiveCmd, *Pipeline);
+	}
+
+	nri::Pipeline* GetPipeline() const { return Pipeline; }
+
+private:
+	void BindBufferView(const std::string& name, Buffer* buffer, nri::BufferView viewType)
+	{
+		if (!buffer)
+			return;
+		auto bit = m->Buffers.find(buffer);
+		if (bit == m->Buffers.end() || !bit->second.buffer)
+			return;
+		nri::BufferViewDesc bvd = {};
+		bvd.buffer = bit->second.buffer;
+		bvd.type = viewType;
+		bvd.offset = 0;
+		bvd.size = static_cast<uint64_t>(buffer->NumElements) * buffer->ElementSize;
+		bvd.structureStride = buffer->ElementSize ? buffer->ElementSize : 4;
+		nri::Descriptor* view = nullptr;
+		if (m->Core.CreateBufferView(bvd, view) == nri::Result::SUCCESS)
+		{
+			if (Views[name]) m->Core.DestroyDescriptor(Views[name]);
+			Views[name] = view;
+		}
+	}
+
+	NRIBackend::Impl* m = nullptr;
+	std::vector<Decl> Decls;
+	std::vector<nri::RootDescriptorDesc> RootDescs;
+	std::unordered_map<std::string, uint32_t> RootDescIndexByName;
+	std::unordered_map<std::string, nri::Descriptor*> Views;
+	std::vector<uint8_t> Dxil;
+	nri::PipelineLayout* Layout = nullptr;
+	nri::Pipeline* Pipeline = nullptr;
+};
+
 // NRI routes validation / driver messages here. Surface them to the debugger
 // output so problems during bring-up are visible.
 static void NRI_CALL NRIMessageCallback(nri::Message messageType, const char* file, uint32_t line, const char* message, void* /*userArg*/)
@@ -472,12 +616,26 @@ NRIBackend::NRIBackend() : m(std::make_unique<Impl>())
 	// + copy + readback verify).
 	std::string computeResult = (m->CmdBuffer && m->GraphicsQueue) ? m->RunComputeSmoke() : std::string("skipped");
 
-	char info[768];
+	// By-name binding adapter: drive the public ComputePipelineStateObject
+	// interface (BindUAV + InitCS) and confirm it builds an NRI compute pipeline.
+	bool psoInitOk = false;
+	{
+		static const char* kPsoCS =
+			"RWStructuredBuffer<uint> OutBuf : register(u0);\n"
+			"[numthreads(1,1,1)] void main(uint3 id : SV_DispatchThreadID) { OutBuf[id.x] = 1u; }\n";
+		const std::wstring path = L"nri_pso_smoke.hlsl";
+		{ std::ofstream of(path, std::ios::binary); of.write(kPsoCS, (std::streamsize)strlen(kPsoCS)); }
+		NRIComputePSO pso(m.get());
+		pso.BindUAV("OutBuf", 0);
+		psoInitOk = pso.InitCS(path, "main") && pso.GetPipeline() != nullptr;
+	}
+
+	char info[800];
 	_snprintf_s(info, _TRUNCATE,
-		"device ok [%s], rtTier=%u sm=%u queue=%s bufferSmoke=%s texSmoke=%s cmd=%s submitSmoke=%s shaderDXIL=%zuB compute=%s",
+		"device ok [%s], rtTier=%u sm=%u queue=%s bufferSmoke=%s texSmoke=%s cmd=%s submitSmoke=%s shaderDXIL=%zuB compute=%s psoInit=%s",
 		dd.adapterDesc.name, (unsigned)dd.tiers.rayTracing, (unsigned)dd.shaderModel,
 		m->GraphicsQueue ? "ok" : "null", bufferSmokeOk ? "PASS" : "FAIL", texSmokeOk ? "PASS" : "FAIL",
-		m->CmdBuffer ? "ok" : "null", submitSmokeOk ? "PASS" : "FAIL", shaderBytes, computeResult.c_str());
+		m->CmdBuffer ? "ok" : "null", submitSmokeOk ? "PASS" : "FAIL", shaderBytes, computeResult.c_str(), psoInitOk ? "PASS" : "FAIL");
 	ErrorString = info;          // diagnostic status (not an error); logged by bootstrap
 	OutputDebugStringA("[NRI] ");
 	OutputDebugStringA(info);
@@ -680,7 +838,10 @@ bool NRIBackend::UpdateTLAS(const std::shared_ptr<RTAS>&, const std::vector<RTIn
 
 // === Pipelines / shaders ==================================================
 std::shared_ptr<RTPipelineStateObject> NRIBackend::CreateRTPipelineStateObject() { NRI_TODO(); return nullptr; }
-std::shared_ptr<ComputePipelineStateObject> NRIBackend::CreateComputePipelineStateObject() { NRI_TODO(); return nullptr; }
+std::shared_ptr<ComputePipelineStateObject> NRIBackend::CreateComputePipelineStateObject()
+{
+	return std::make_shared<NRIComputePSO>(m.get());
+}
 ShaderBytecode NRIBackend::CreateShader(const std::wstring& fileName, const std::string& entryPoint, const std::string& target)
 {
 	ShaderBytecode out;
@@ -743,7 +904,14 @@ void NRIBackend::DrawFullscreenQuad(VertexBuffer*) { NRI_TODO(); }
 void NRIBackend::BindMeshBuffers(VertexBuffer*, IndexBuffer*) { NRI_TODO(); }
 void NRIBackend::DrawIndexed(uint32_t, uint32_t, int32_t) { NRI_TODO(); }
 void NRIBackend::DrawIndexedInstanced(uint32_t, uint32_t, uint32_t, int32_t, uint32_t) { NRI_TODO(); }
-void NRIBackend::Dispatch(uint32_t, uint32_t, uint32_t) { NRI_TODO(); }
+void NRIBackend::Dispatch(uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ)
+{
+	if (m->ActiveCmd)
+	{
+		nri::DispatchDesc d = { groupCountX, groupCountY, groupCountZ };
+		m->Core.CmdDispatch(*m->ActiveCmd, d);
+	}
+}
 void NRIBackend::ClearTextureUAVFloat(Texture*, const float[4]) { NRI_TODO(); }
 void NRIBackend::ExecuteCurrentCommandList() { NRI_TODO(); }
 void NRIBackend::BeginGpuMarker(uint64_t, const char*) { NRI_TODO(); }
