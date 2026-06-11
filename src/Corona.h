@@ -140,6 +140,7 @@ private:
 		ProceduralGrass,
 		Particles,
 		SpatialLightMask,
+		SpatialHashDeepSeed,
 		RaytraceShadow,
 		RaytraceAO,
 		RaytraceSkyLighting,
@@ -955,9 +956,19 @@ private:
 	};
 
 	RTSpatialHashGIViewParamCB RTSpatialHashGIViewParam;
+	struct RTSpatialHashPrimaryDeepSeedParamCB
+	{
+		UINT32 PixelStride = 4;
+		UINT32 FrameIndex = 0;
+		UINT32 _padding0 = 0;
+		UINT32 _padding1 = 0;
+	};
+	RTSpatialHashPrimaryDeepSeedParamCB RTSpatialHashPrimaryDeepSeedParam;
 	shared_ptr<RTPipelineStateObject> PSO_RT_SPATIAL_HASH_GI;
 	shared_ptr<RTPipelineStateObject> PSO_RT_SPATIAL_HASH_GI_SER;
+	shared_ptr<RTPipelineStateObject> PSO_RT_SPATIAL_HASH_PRIMARY_DEEP_SEED;
 	bool bRTDiffuseGISpatialHashSERInitFailed = false;
+	bool bRTSpatialHashPrimaryDeepSeedInitFailed = false;
 
 	// Path Tracing
 	enum class EPathTracingDebugMode
@@ -1323,6 +1334,8 @@ private:
 	bool bEnableAsyncShadowAOOverlap = true;
 	bool bAsyncShadowAOOverlapRTAO = true;
 	bool bAsyncShadowAOOverlapShadow = true;
+	bool bEnableSpatialHashPrimaryDeepSeed = false;
+	UINT32 SpatialHashPrimaryDeepSeedPixelStride = 4;
 	// Point-light shadow mode: false = 4-channel pack (sun + first 3 lights,
 	// hard-cap), true = ReSTIR Phase 1+2 reservoir (single-light per pixel,
 	// scales to MaxPointLights candidates, with previous-frame reproject).
@@ -2480,9 +2493,12 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	bool InitRaytracingScreenProbeGISERPass();
 	void InitRaytracingSpatialHashPass();
 	shared_ptr<RTPipelineStateObject> CreateRaytracingSpatialHashGIPSO(bool bUseSER);
+	shared_ptr<RTPipelineStateObject> CreateRaytracingSpatialHashPrimaryDeepSeedPSO();
 	bool InitRaytracingSpatialHashGISERPass();
+	bool InitRaytracingSpatialHashPrimaryDeepSeedPass();
 	void PrepareSpatialHashGIFrameParams(UINT32 spatialHashTraceCellBudget);
 	bool SpatialHashLightMaskPass();
+	bool SpatialHashPrimaryDeepSeedPass();
 	
 public:
 

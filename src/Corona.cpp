@@ -858,7 +858,7 @@ namespace
 		return mode == Corona::EAntiAliasingMode::DLSS_SR || mode == Corona::EAntiAliasingMode::DLSS_RR;
 	}
 
-	constexpr std::array<const char*, 23> kGpuPassNames = {
+	constexpr std::array<const char*, 24> kGpuPassNames = {
 		"Frame Total",
 		"Skeletal Skinning",
 		"GBuffer",
@@ -867,6 +867,7 @@ namespace
 		"Grass (procedural)",
 		"Particles",
 		"Spatial Light Mask",
+		"SHC Primary Deep Seed",
 		"RT Shadow",
 		"RT AO",
 		"RT Sky",
@@ -4024,6 +4025,33 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 			bEnableAsyncShadowAOOverlap = false;
 			continue;
 		}
+		if (arg == L"--shc-primary-deep-seed" || arg == L"--enable-shc-primary-deep-seed" ||
+			arg == L"--spatial-hash-primary-deep-seed" || arg == L"--shc-deep-seed")
+		{
+			bEnableSpatialHashPrimaryDeepSeed = true;
+			continue;
+		}
+		if (arg == L"--no-shc-primary-deep-seed" || arg == L"--disable-shc-primary-deep-seed" ||
+			arg == L"--no-spatial-hash-primary-deep-seed" || arg == L"--no-shc-deep-seed")
+		{
+			bEnableSpatialHashPrimaryDeepSeed = false;
+			continue;
+		}
+		std::wstring shcPrimaryDeepStrideValue = ParseValueArg(arg, L"--shc-primary-deep-stride", L"-shc-primary-deep-stride", i);
+		if (shcPrimaryDeepStrideValue.empty())
+			shcPrimaryDeepStrideValue = ParseValueArg(arg, L"--spatial-hash-primary-deep-stride", L"-spatial-hash-primary-deep-stride", i);
+		if (!shcPrimaryDeepStrideValue.empty())
+		{
+			try
+			{
+				const unsigned long value = std::stoul(shcPrimaryDeepStrideValue);
+				SpatialHashPrimaryDeepSeedPixelStride = static_cast<UINT32>(std::clamp<unsigned long>(value, 1ul, 16ul));
+			}
+			catch (...)
+			{
+			}
+			continue;
+		}
 		if (arg == L"--diffuse-gi" || arg == L"--enable-diffuse-gi")
 		{
 			bEnableDiffuseGI = true;
@@ -4549,6 +4577,8 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 		L", asyncShadowAO=" + std::to_wstring(bEnableAsyncShadowAOOverlap ? 1 : 0) +
 		L", asyncRTAO=" + std::to_wstring(bAsyncShadowAOOverlapRTAO ? 1 : 0) +
 		L", asyncShadow=" + std::to_wstring(bAsyncShadowAOOverlapShadow ? 1 : 0) +
+		L", shcPrimaryDeepSeed=" + std::to_wstring(bEnableSpatialHashPrimaryDeepSeed ? 1 : 0) +
+		L", shcPrimaryDeepStride=" + std::to_wstring(SpatialHashPrimaryDeepSeedPixelStride) +
 		L", diffuseGIPointLights=" + std::to_wstring(DiffuseGIPointLightLimit) +
 		L", specularGIEnabled=" + std::to_wstring(bEnableSpecularGI ? 1 : 0) +
 		L", directDiffuse=" + std::to_wstring(bEnableDirectDiffuse ? 1 : 0) +
@@ -13360,6 +13390,18 @@ void Corona::DrawEditorModeOverlay()
 						}
 						if (ImGui::SliderFloat("Level Base Distance", &SpatialHashGICB.SpatialHashLevelParams.y, 100.0f, 3000.0f, "%.0f"))
 							bLightingChanged = true;
+						if (ImGui::Checkbox("SHC Primary Deep Ray Seed", &bEnableSpatialHashPrimaryDeepSeed))
+							bLightingChanged = true;
+						int primaryDeepStride = static_cast<int>(SpatialHashPrimaryDeepSeedPixelStride);
+						if (!bEnableSpatialHashPrimaryDeepSeed)
+							ImGui::BeginDisabled();
+						if (ImGui::SliderInt("SHC Deep Seed Stride", &primaryDeepStride, 1, 8))
+						{
+							SpatialHashPrimaryDeepSeedPixelStride = static_cast<UINT32>(std::clamp(primaryDeepStride, 1, 16));
+							bLightingChanged = true;
+						}
+						if (!bEnableSpatialHashPrimaryDeepSeed)
+							ImGui::EndDisabled();
 					}
 					ImGui::TreePop();
 				}
