@@ -4531,7 +4531,12 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 		if (!backendValue.empty())
 		{
 			bCommandLineRenderBackendOverrideSet = true;
-			CommandLineRenderBackendAPI = (backendValue == L"vulkan" || backendValue == L"vk") ? ERenderBackendAPI::Vulkan : ERenderBackendAPI::D3D12;
+			if (backendValue == L"vulkan" || backendValue == L"vk")
+				CommandLineRenderBackendAPI = ERenderBackendAPI::Vulkan;
+			else if (backendValue == L"nri")
+				CommandLineRenderBackendAPI = ERenderBackendAPI::NRI;
+			else
+				CommandLineRenderBackendAPI = ERenderBackendAPI::D3D12;
 			continue;
 		}
 	}
@@ -8919,6 +8924,37 @@ void Corona::LoadPipeline()
 		AppendCpuRuntimeTrace(L"[LoadPipeline] after CreateSwapChainForWindow Vulkan");
 		return;
 	}
+
+#if CORONA_HAS_NRI
+	// Experimental NRI backend, selected with "--backend nri" — a first-class peer
+	// of the D3D12 / Vulkan paths. Constructed through the API-neutral factory
+	// (NRIBackend creates its own device). Resource/command methods are still being
+	// built out, so the editor will not render through it yet, but backend selection
+	// and device creation run at the same level as the other two backends.
+	if (bCommandLineRenderBackendOverrideSet && CommandLineRenderBackendAPI == ERenderBackendAPI::NRI)
+	{
+		AppendCpuRuntimeTrace(L"[LoadPipeline] begin NRI path");
+		renderBackend = CreateRenderBackend(ERenderBackendAPI::NRI);
+		dx12_rhi = nullptr;
+		if (!renderBackend)
+		{
+			throw std::runtime_error("Failed to create NRI render backend.");
+		}
+		const char* nriName = renderBackend->GetBackendName();
+		AppendCpuRuntimeTrace(
+			L"[LoadPipeline] after CreateRenderBackend NRI api=" + std::to_wstring(static_cast<int>(renderBackend->GetAPI())) +
+			L", name=" + std::wstring(nriName, nriName + std::strlen(nriName)) +
+			L", rayTracing=" + std::to_wstring(renderBackend->SupportsRayTracing() ? 1 : 0) +
+			L", ser=" + std::to_wstring(renderBackend->SupportsShaderExecutionReordering() ? 1 : 0));
+		renderBackend->CreateSwapChainForWindow(
+			GetMainPlatformWindowHandle(),
+			m_width,
+			m_height,
+			ETextureFormat::RGBA8Unorm);
+		AppendCpuRuntimeTrace(L"[LoadPipeline] after CreateSwapChainForWindow NRI");
+		return;
+	}
+#endif
 
 #if !CORONA_HAS_D3D12
 	// Builds without the D3D12 backend must request the Vulkan one explicitly

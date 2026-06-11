@@ -6,6 +6,8 @@
 // stock D3D12 / Vulkan build is byte-for-byte unaffected.
 #if CORONA_HAS_NRI
 
+#include <cstdio>
+
 #include "NRI.h"
 #include "Extensions/NRIDeviceCreation.h"
 #include "Extensions/NRIHelper.h"
@@ -18,19 +20,73 @@
 // ---------------------------------------------------------------------------
 struct NRIBackend::Impl
 {
-	// Filled in by the device-creation milestone:
-	//   nri::Device*            Device = nullptr;
-	//   nri::CoreInterface      NRICore{};
-	//   nri::HelperInterface    NRIHelper{};
-	//   nri::RayTracingInterface NRIRayTracing{};
-	//   nri::SwapChainInterface NRISwapChain{};
-	//   ...command buffers, queues, descriptor pools, side tables keyed by
-	//     Texture*/Buffer*/VertexBuffer* (mirrors VulkanBackend's pattern).
+	nri::Device* Device = nullptr;
+	nri::CoreInterface Core{};
+	// Future milestones add: HelperInterface, RayTracingInterface,
+	// SwapChainInterface, queues, command buffers, descriptor pools, and the
+	// side tables keyed by Texture*/Buffer*/VertexBuffer* (VulkanBackend pattern).
+
+	std::string BackendName = "NRI (uninitialized)";
+	uint8_t RayTracingTier = 0;   // 0=none, 1=DXR1.0, 2=DXR1.1, 3=DXR1.2 (SER)
 	uint32_t FrameIndex = 0;
 };
 
-NRIBackend::NRIBackend() : m(std::make_unique<Impl>()) {}
-NRIBackend::~NRIBackend() = default;
+// NRI routes validation / driver messages here. Surface them to the debugger
+// output so problems during bring-up are visible.
+static void NRI_CALL NRIMessageCallback(nri::Message messageType, const char* file, uint32_t line, const char* message, void* /*userArg*/)
+{
+	char buffer[2048];
+	const char* sev = (messageType == nri::Message::ERROR) ? "ERROR" : (messageType == nri::Message::WARNING) ? "WARN" : "INFO";
+	_snprintf_s(buffer, _TRUNCATE, "[NRI][%s] %s (%s:%u)\n", sev, message ? message : "", file ? file : "?", line);
+	OutputDebugStringA(buffer);
+}
+
+NRIBackend::NRIBackend() : m(std::make_unique<Impl>())
+{
+	using nri::CoreInterface;
+
+	nri::DeviceCreationDesc desc = {};
+	desc.graphicsAPI = nri::GraphicsAPI::D3D12;
+	desc.enableNRIValidation = true;            // embedded NRI-specific validation
+	desc.enableGraphicsAPIValidation = false;   // D3D12 debug layer (opt-in later)
+	desc.callbackInterface.MessageCallback = NRIMessageCallback;
+
+	nri::Result r = nri::nriCreateDevice(desc, m->Device);
+	if (r != nri::Result::SUCCESS || m->Device == nullptr)
+	{
+		ErrorString = "nriCreateDevice(D3D12) failed";
+		OutputDebugStringA("[NRI] nriCreateDevice(D3D12) failed\n");
+		return;
+	}
+
+	r = nri::nriGetInterface(*m->Device, NRI_INTERFACE(CoreInterface), &m->Core);
+	if (r != nri::Result::SUCCESS)
+	{
+		ErrorString = "nriGetInterface(CoreInterface) failed";
+		nri::nriDestroyDevice(m->Device);
+		m->Device = nullptr;
+		return;
+	}
+
+	const nri::DeviceDesc& dd = m->Core.GetDeviceDesc(*m->Device);
+	m->RayTracingTier = dd.tiers.rayTracing;
+	m->BackendName = std::string("NRI [D3D12] ") + dd.adapterDesc.name;
+
+	char info[512];
+	_snprintf_s(info, _TRUNCATE, "[NRI] device created: %s, rayTracing tier=%u, shaderModel=%u\n",
+		dd.adapterDesc.name, (unsigned)dd.tiers.rayTracing, (unsigned)dd.shaderModel);
+	OutputDebugStringA(info);
+}
+
+NRIBackend::~NRIBackend()
+{
+	if (m && m->Device)
+	{
+		nri::nriDestroyDevice(m->Device);
+		m->Device = nullptr;
+		nri::nriReportLiveObjects();
+	}
+}
 
 // Marks a method that is declared/wired but whose NRI implementation is still
 // pending. Keeps the backend compiling/linking while it is built out incrementally.
@@ -38,10 +94,10 @@ NRIBackend::~NRIBackend() = default;
 
 // === Capabilities / identity =============================================
 ERenderBackendAPI NRIBackend::GetAPI() const { return ERenderBackendAPI::NRI; }
-const char* NRIBackend::GetBackendName() const { return "NRI"; }
+const char* NRIBackend::GetBackendName() const { return m->BackendName.c_str(); }
 uint32_t NRIBackend::GetMaxSupportedHybridStage() const { return 0; }
-bool NRIBackend::SupportsRayTracing() const { return false; }
-bool NRIBackend::SupportsShaderExecutionReordering() const { return false; }
+bool NRIBackend::SupportsRayTracing() const { return m->RayTracingTier >= 1; }
+bool NRIBackend::SupportsShaderExecutionReordering() const { return m->RayTracingTier >= 3; }
 
 // === Frame lifecycle / diagnostics =======================================
 void NRIBackend::BeginFrame() { NRI_TODO(); }

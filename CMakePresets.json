@@ -15,6 +15,15 @@
       "cacheVariables": {
         "CMAKE_SYSTEM_VERSION": "10.0.18362.0"
       }
+    },
+    {
+      "name": "nri-x64",
+      "displayName": "VS2022 x64 (experimental NRI backend)",
+      "inherits": "vs2022-x64",
+      "binaryDir": "${sourceDir}/out/build/nri-x64",
+      "cacheVariables": {
+        "CORONA_WITH_NRI": "ON"
+      }
     }
   ],
   "buildPresets": [
@@ -26,6 +35,11 @@
     {
       "name": "release",
       "configurePreset": "vs2022-x64",
+      "configuration": "Release"
+    },
+    {
+      "name": "nri-release",
+      "configurePreset": "nri-x64",
       "configuration": "Release"
     }
   ]
