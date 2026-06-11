@@ -3829,10 +3829,13 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 		bEnableStartupLuauScript = true;
 		StartupLuauMode = L"editor";
 		bShowImgui = false;
+		bEnablePathTracingCompaction = false;
+		bPathTracingCompactionFallbackLogged = false;
+		bPathTracingCompactionDispatchLogged = false;
 		const std::wstring lastEditorMap = ReadPersistedLastEditorMapName();
 		if (!lastEditorMap.empty() && std::filesystem::exists(ResolveMapPath(lastEditorMap)))
 			CommandLineLoadMapFile = lastEditorMap;
-		AppendStartupTrace(L"[ParseCommandLineArgs] no args: editor mode, lastMap=\"" + lastEditorMap + L"\"");
+		AppendStartupTrace(L"[ParseCommandLineArgs] no args: editor mode, path tracing mega-kernel, lastMap=\"" + lastEditorMap + L"\"");
 	}
 
 	for (int i = 1; i < argc; ++i)
