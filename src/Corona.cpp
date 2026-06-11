@@ -2276,16 +2276,23 @@ void Corona::UpdateGpuTimingReadback()
 	const UINT frameIndex = renderBackend->GetCurrentFrameIndex();
 	const auto& activeMask = GpuPassActiveMaskPerFrame[frameIndex];
 	const UINT queryBase = frameIndex * GpuPassCount * GpuQueriesPerPass;
+	GpuPassLastActiveMask = activeMask;
 
 	for (UINT passIndex = 0; passIndex < GpuPassCount; ++passIndex)
 	{
 		if (!activeMask[passIndex])
+		{
+			GpuPassLastTimeMs[passIndex] = 0.0f;
 			continue;
+		}
 
 		const UINT64 startTimestamp = renderBackend->ReadGpuTimestampValue(queryBase + passIndex * GpuQueriesPerPass + 0);
 		const UINT64 endTimestamp = renderBackend->ReadGpuTimestampValue(queryBase + passIndex * GpuQueriesPerPass + 1);
 		if (endTimestamp <= startTimestamp)
+		{
+			GpuPassLastTimeMs[passIndex] = 0.0f;
 			continue;
+		}
 
 		const float durationMs = static_cast<float>(double(endTimestamp - startTimestamp) * 1000.0 / double(GpuTimestampFrequency));
 		GpuPassLastTimeMs[passIndex] = durationMs;
@@ -15124,7 +15131,10 @@ void Corona::OnRender()
 			ImGui::Separator();
 			for (UINT passIndex = 0; passIndex < GpuPassCount; ++passIndex)
 			{
-				if (GpuPassAverageTimeMs[passIndex] <= 0.0f && CpuPassLastTimeMs[passIndex] <= 0.0f)
+				if (!GpuPassLastActiveMask[passIndex] && !CpuPassActiveMask[passIndex])
+					continue;
+				if (GpuPassLastTimeMs[passIndex] <= 0.0f && GpuPassAverageTimeMs[passIndex] <= 0.0f &&
+					CpuPassLastTimeMs[passIndex] <= 0.0f && CpuPassAverageTimeMs[passIndex] <= 0.0f)
 					continue;
 
 				ImGui::Text(

@@ -7442,8 +7442,14 @@ void Corona::RebuildFrameTimingOverlayTextIfStale()
 		{
 			appendLine("  %-28s %7.3f / %7.3f", label ? label : "phase", last, avg);
 		};
+		auto passRanForTimingDisplay = [&](UINT passIndex) -> bool
+		{
+			return GpuPassLastActiveMask[passIndex] != 0 || CpuPassActiveMask[passIndex] != 0;
+		};
 		auto passHasTiming = [&](UINT passIndex) -> bool
 		{
+			if (!passRanForTimingDisplay(passIndex))
+				return false;
 			return hasTiming(GpuPassLastTimeMs[passIndex], GpuPassAverageTimeMs[passIndex]) ||
 				hasTiming(CpuPassLastTimeMs[passIndex], CpuPassAverageTimeMs[passIndex]);
 		};
@@ -7513,6 +7519,8 @@ void Corona::RebuildFrameTimingOverlayTextIfStale()
 			for (UINT i = 0; i < GpuPassCount; ++i)
 			{
 				if (i == framePassIndex)
+					continue;
+				if (!passRanForTimingDisplay(i))
 					continue;
 				gpuFrameLast += GpuPassLastTimeMs[i];
 				gpuFrameAvg += GpuPassAverageTimeMs[i];
@@ -7883,6 +7891,8 @@ void Corona::PushLuauUiStateForScript(lua_State* L, const std::string& mode, boo
 	int pushedPassIndex = 1;
 	for (UINT passIndex = 0; passIndex < GpuPassCount; ++passIndex)
 	{
+		if (!GpuPassLastActiveMask[passIndex] && !CpuPassActiveMask[passIndex])
+			continue;
 		if (GpuPassLastTimeMs[passIndex] <= 0.0f && GpuPassAverageTimeMs[passIndex] <= 0.0f &&
 			CpuPassLastTimeMs[passIndex] <= 0.0f && CpuPassAverageTimeMs[passIndex] <= 0.0f)
 			continue;

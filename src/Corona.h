@@ -2246,6 +2246,7 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	void RebuildFrameTimingOverlayTextIfStale();
 	UINT64 GpuTimestampFrequency = 0;
 	std::array<std::array<uint8_t, GpuPassCount>, 3> GpuPassActiveMaskPerFrame = {};
+	std::array<uint8_t, GpuPassCount> GpuPassLastActiveMask = {};
 	std::array<float, GpuPassCount> GpuPassLastTimeMs = {};
 	std::array<float, GpuPassCount> GpuPassAverageTimeMs = {};
 	std::array<std::deque<float>, GpuPassCount> GpuPassHistoryMs = {};
