@@ -7,6 +7,7 @@
 #if CORONA_HAS_NRI
 
 #include <cstdio>
+#include <cstring>
 #include <unordered_map>
 #include <vector>
 #include <string>
@@ -380,6 +381,7 @@ public:
 			if (Pipeline) m->Core.DestroyPipeline(Pipeline);
 			if (Layout) m->Core.DestroyPipelineLayout(Layout);
 			for (auto& kv : Views) if (kv.second) m->Core.DestroyDescriptor(kv.second);
+			for (auto& kv : CbvBuffers) m->FreeBuffer(kv.second.buffer, kv.second.memory);
 		}
 	}
 
@@ -388,7 +390,7 @@ public:
 
 	void BindSRV(const std::string& name, uint32_t baseRegister, uint32_t /*numDescriptors*/) override { Decls.push_back({ name, Kind::SRV_Buffer, baseRegister }); }
 	void BindUAV(const std::string& name, uint32_t baseRegister) override { Decls.push_back({ name, Kind::UAV_Buffer, baseRegister }); }
-	void BindCBV(const std::string& name, uint32_t baseRegister, uint32_t /*size*/) override { Decls.push_back({ name, Kind::CBV, baseRegister }); }
+	void BindCBV(const std::string& name, uint32_t baseRegister, uint32_t size) override { Decls.push_back({ name, Kind::CBV, baseRegister }); CbvSizeByName[name] = size; }
 	void BindSampler(const std::string& name, uint32_t baseRegister) override { Decls.push_back({ name, Kind::Sampler, baseRegister }); }
 
 	bool InitCS(const std::wstring& shaderFile, const std::string& entryPoint) override
@@ -412,11 +414,14 @@ public:
 		RootDescIndexByName.clear();
 		for (const Decl& d : Decls)
 		{
-			if (d.kind != Kind::UAV_Buffer && d.kind != Kind::SRV_Buffer)
-				continue;
+			nri::DescriptorType dt;
+			if (d.kind == Kind::UAV_Buffer)      dt = nri::DescriptorType::STORAGE_STRUCTURED_BUFFER;
+			else if (d.kind == Kind::SRV_Buffer) dt = nri::DescriptorType::STRUCTURED_BUFFER;
+			else if (d.kind == Kind::CBV)        dt = nri::DescriptorType::CONSTANT_BUFFER;
+			else continue; // textures / samplers use descriptor sets (next milestone)
 			nri::RootDescriptorDesc rd = {};
 			rd.registerIndex = d.reg;
-			rd.descriptorType = (d.kind == Kind::UAV_Buffer) ? nri::DescriptorType::STORAGE_STRUCTURED_BUFFER : nri::DescriptorType::STRUCTURED_BUFFER;
+			rd.descriptorType = dt;
 			rd.shaderStages = nri::StageBits::COMPUTE_SHADER;
 			RootDescIndexByName[d.name] = (uint32_t)RootDescs.size();
 			RootDescs.push_back(rd);
@@ -447,7 +452,44 @@ public:
 	void SetTextureUAV(const std::string&, Texture*) override {}
 	void SetVertexBufferUAV(const std::string&, VertexBuffer*) override {}
 	void SetSampler(const std::string&, Sampler*) override {}
-	void SetCBVValue(const std::string&, void*) override {}
+	void SetCBVValue(const std::string& name, void* data) override
+	{
+		if (!m->Device || !data)
+			return;
+		auto sit = CbvSizeByName.find(name);
+		const uint32_t size = (sit != CbvSizeByName.end()) ? sit->second : 0u;
+		if (size == 0)
+			return;
+		// D3D12 constant buffers must be 256-byte aligned in size.
+		const uint32_t alignedSize = (size + 255u) & ~255u;
+		CbvBuf& cb = CbvBuffers[name];
+		if (!cb.buffer)
+		{
+			if (!m->CreateBoundBuffer(alignedSize, 0, nri::BufferUsageBits::CONSTANT_BUFFER, nri::MemoryLocation::HOST_UPLOAD, cb.buffer, cb.memory))
+			{
+				CbvBuffers.erase(name);
+				return;
+			}
+			cb.size = alignedSize;
+			nri::BufferViewDesc bvd = {};
+			bvd.buffer = cb.buffer;
+			bvd.type = nri::BufferView::CONSTANT_BUFFER;
+			bvd.offset = 0;
+			bvd.size = alignedSize;
+			nri::Descriptor* view = nullptr;
+			if (m->Core.CreateBufferView(bvd, view) == nri::Result::SUCCESS)
+			{
+				if (Views[name]) m->Core.DestroyDescriptor(Views[name]);
+				Views[name] = view;
+			}
+		}
+		void* mapped = m->Core.MapBuffer(*cb.buffer, 0, size);
+		if (mapped)
+		{
+			memcpy(mapped, data, size);
+			m->Core.UnmapBuffer(*cb.buffer);
+		}
+	}
 
 	// Record pipeline layout + root descriptors + pipeline into the backend's
 	// active command buffer. The backend's Dispatch() then issues CmdDispatch.
@@ -495,10 +537,14 @@ private:
 		}
 	}
 
+	struct CbvBuf { nri::Buffer* buffer = nullptr; std::vector<nri::Memory*> memory; uint32_t size = 0; };
+
 	NRIBackend::Impl* m = nullptr;
 	std::vector<Decl> Decls;
 	std::vector<nri::RootDescriptorDesc> RootDescs;
 	std::unordered_map<std::string, uint32_t> RootDescIndexByName;
+	std::unordered_map<std::string, uint32_t> CbvSizeByName;
+	std::unordered_map<std::string, CbvBuf> CbvBuffers;
 	std::unordered_map<std::string, nri::Descriptor*> Views;
 	std::vector<uint8_t> Dxil;
 	nri::PipelineLayout* Layout = nullptr;
@@ -702,12 +748,66 @@ NRIBackend::NRIBackend() : m(std::make_unique<Impl>())
 		}
 	}
 
-	char info[896];
+	// CBV path: a compute PSO with a constant buffer (root CBV) + UAV output.
+	// The kernel writes cbuffer.mul * 7; with mul=6 the result must be 42.
+	std::string cbvResult = "skipped";
+	if (m->GraphicsQueue && m->CmdBuffer)
+	{
+		static const char* kCbvCS =
+			"cbuffer C : register(b0) { uint mul; };\n"
+			"RWStructuredBuffer<uint> O : register(u0);\n"
+			"[numthreads(1,1,1)] void main(uint3 id : SV_DispatchThreadID) { O[id.x] = mul * 7u; }\n";
+		const std::wstring path = L"nri_cbv_smoke.hlsl";
+		{ std::ofstream of(path, std::ios::binary); of.write(kCbvCS, (std::streamsize)strlen(kCbvCS)); }
+
+		const uint32_t N = 4;
+		const uint64_t bufSize = N * sizeof(uint32_t);
+		BufferCreateDesc bcd = {};
+		bcd.NumElements = N; bcd.ElementSize = sizeof(uint32_t);
+		bcd.bAllowUnorderedAccess = true; bcd.Shape = EBufferShape::Structured;
+		std::shared_ptr<Buffer> outWrap = CreateBuffer(bcd);
+		nri::Buffer* rb = nullptr; std::vector<nri::Memory*> rbMem;
+		m->CreateBoundBuffer(bufSize, 0, nri::BufferUsageBits::NONE, nri::MemoryLocation::HOST_READBACK, rb, rbMem);
+
+		std::shared_ptr<ComputePipelineStateObject> pso = CreateComputePipelineStateObject();
+		pso->BindCBV("C", 0, 16);
+		pso->BindUAV("O", 0);
+		if (outWrap && rb && pso->InitCS(path, "main"))
+		{
+			uint32_t cbData[4] = { 6u, 0u, 0u, 0u };
+			pso->SetCBVValue("C", cbData);
+			pso->SetBufferUAV("O", outWrap.get());
+			BeginFrame();
+			TransitionBuffer(outWrap.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
+			pso->Apply();
+			Dispatch(N, 1, 1);
+			TransitionBuffer(outWrap.get(), EResourceState::UnorderedAccess, EResourceState::CopySource);
+			auto oit = m->Buffers.find(outWrap.get());
+			if (m->ActiveCmd && oit != m->Buffers.end() && oit->second.buffer)
+				m->Core.CmdCopyBuffer(*m->ActiveCmd, *rb, 0, *oit->second.buffer, 0, bufSize);
+			EndFrame();
+			uint32_t* mp = (uint32_t*)m->Core.MapBuffer(*rb, 0, bufSize);
+			uint32_t v0 = mp ? mp[0] : 0u;
+			m->Core.UnmapBuffer(*rb);
+			char b[48];
+			_snprintf_s(b, _TRUNCATE, (v0 == 42u) ? "PASS(%u)" : "FAIL(%u)", v0);
+			cbvResult = b;
+		}
+		else cbvResult = "FAIL(init)";
+		m->FreeBuffer(rb, rbMem);
+		if (outWrap)
+		{
+			auto oit = m->Buffers.find(outWrap.get());
+			if (oit != m->Buffers.end()) { m->FreeBuffer(oit->second.buffer, oit->second.memory); m->Buffers.erase(oit); }
+		}
+	}
+
+	char info[960];
 	_snprintf_s(info, _TRUNCATE,
-		"device ok [%s], rtTier=%u sm=%u queue=%s bufferSmoke=%s texSmoke=%s cmd=%s submitSmoke=%s shaderDXIL=%zuB compute=%s psoInit=%s framePSO=%s",
+		"device ok [%s], rtTier=%u sm=%u queue=%s bufferSmoke=%s texSmoke=%s cmd=%s submitSmoke=%s shaderDXIL=%zuB compute=%s psoInit=%s framePSO=%s cbv=%s",
 		dd.adapterDesc.name, (unsigned)dd.tiers.rayTracing, (unsigned)dd.shaderModel,
 		m->GraphicsQueue ? "ok" : "null", bufferSmokeOk ? "PASS" : "FAIL", texSmokeOk ? "PASS" : "FAIL",
-		m->CmdBuffer ? "ok" : "null", submitSmokeOk ? "PASS" : "FAIL", shaderBytes, computeResult.c_str(), psoInitOk ? "PASS" : "FAIL", framePsoResult.c_str());
+		m->CmdBuffer ? "ok" : "null", submitSmokeOk ? "PASS" : "FAIL", shaderBytes, computeResult.c_str(), psoInitOk ? "PASS" : "FAIL", framePsoResult.c_str(), cbvResult.c_str());
 	ErrorString = info;          // diagnostic status (not an error); logged by bootstrap
 	OutputDebugStringA("[NRI] ");
 	OutputDebugStringA(info);
