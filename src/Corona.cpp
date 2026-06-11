@@ -8953,7 +8953,10 @@ void Corona::LoadPipeline()
 			m_width,
 			m_height,
 			ETextureFormat::RGBA8Unorm);
-		AppendCpuRuntimeTrace(L"[LoadPipeline] after CreateSwapChainForWindow NRI");
+		{
+			const std::string& nriSwap = renderBackend->GetErrorString();
+			AppendCpuRuntimeTrace(L"[LoadPipeline] after CreateSwapChainForWindow NRI: " + std::wstring(nriSwap.begin(), nriSwap.end()));
+		}
 		return;
 	}
 #endif

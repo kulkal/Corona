@@ -140,8 +140,20 @@ struct NRIBackend::Impl
 	nri::CommandBuffer* ActiveCmd = nullptr; // command buffer currently open for recording (set by the frame lifecycle / smokes)
 	nri::Fence* Fence = nullptr;
 	uint64_t FenceValue = 0;
-	// Future milestones add: RayTracingInterface, SwapChainInterface, descriptor
-	// pools, plus side tables for Texture*/VertexBuffer*.
+
+	// Swap chain
+	nri::SwapChainInterface SwapChainI{};
+	nri::SwapChain* SwapChain = nullptr;
+	std::vector<nri::Texture*> BackBuffers;          // NRI backbuffer textures
+	std::vector<nri::Descriptor*> BackBufferViews;   // COLOR_ATTACHMENT views
+	std::vector<std::shared_ptr<Texture>> BackBufferWrappers; // Corona wrappers for GetSwapChainTexture
+	std::vector<nri::Fence*> AcquireSem;
+	std::vector<nri::Fence*> ReleaseSem;
+	nri::Fence* FrameFence = nullptr;
+	uint64_t SwapFrameIndex = 0;
+	uint32_t CurrentBackBuffer = 0;
+	nri::Format SwapFormat = nri::Format::RGBA8_UNORM;
+	// Future milestones add: RayTracingInterface, descriptor pools.
 
 	// Backend-owned GPU allocation behind a Corona Buffer wrapper (VulkanBackend
 	// keeps native handles in a side table keyed by the wrapper pointer; same here).
@@ -361,6 +373,71 @@ struct NRIBackend::Impl
 		FreeBuffer(rbBuf, rbMem);
 		return result;
 	}
+
+	// Acquire a backbuffer, clear it to a color via a render pass, and present.
+	bool PresentClear(float r, float g, float b, float a)
+	{
+		if (!SwapChain || BackBuffers.empty() || !CmdBuffer || !FrameFence)
+			return false;
+		const uint32_t n = (uint32_t)BackBuffers.size();
+		nri::Fence* acquire = AcquireSem[SwapFrameIndex % n];
+		uint32_t idx = 0;
+		if (SwapChainI.AcquireNextTexture(*SwapChain, *acquire, idx) != nri::Result::SUCCESS || idx >= n)
+			return false;
+		CurrentBackBuffer = idx;
+
+		Core.ResetCommandAllocator(*CmdAllocator);
+		if (Core.BeginCommandBuffer(*CmdBuffer, nullptr) != nri::Result::SUCCESS)
+			return false;
+
+		nri::TextureBarrierDesc toRT = {};
+		toRT.texture = BackBuffers[idx];
+		toRT.before.access = nri::AccessBits::NONE;             toRT.before.layout = nri::Layout::UNDEFINED;        toRT.before.stages = nri::StageBits::ALL;
+		toRT.after.access  = nri::AccessBits::COLOR_ATTACHMENT; toRT.after.layout  = nri::Layout::COLOR_ATTACHMENT; toRT.after.stages  = nri::StageBits::ALL;
+		toRT.mipNum = 1; toRT.layerNum = 1;
+		nri::BarrierDesc b1 = {}; b1.textures = &toRT; b1.textureNum = 1;
+		Core.CmdBarrier(*CmdBuffer, b1);
+
+		nri::AttachmentDesc colorAtt = {};
+		colorAtt.descriptor = BackBufferViews[idx];
+		colorAtt.clearValue.color.f = nri::Color32f{ r, g, b, a };
+		colorAtt.loadOp = nri::LoadOp::CLEAR;
+		colorAtt.storeOp = nri::StoreOp::STORE;
+		nri::RenderingDesc rd = {};
+		rd.colors = &colorAtt; rd.colorNum = 1;
+		Core.CmdBeginRendering(*CmdBuffer, rd);
+		Core.CmdEndRendering(*CmdBuffer);
+
+		nri::TextureBarrierDesc toPresent = {};
+		toPresent.texture = BackBuffers[idx];
+		toPresent.before.access = nri::AccessBits::COLOR_ATTACHMENT; toPresent.before.layout = nri::Layout::COLOR_ATTACHMENT; toPresent.before.stages = nri::StageBits::ALL;
+		toPresent.after.access  = nri::AccessBits::NONE;             toPresent.after.layout  = nri::Layout::PRESENT;          toPresent.after.stages  = nri::StageBits::NONE;
+		toPresent.mipNum = 1; toPresent.layerNum = 1;
+		nri::BarrierDesc b2 = {}; b2.textures = &toPresent; b2.textureNum = 1;
+		Core.CmdBarrier(*CmdBuffer, b2);
+
+		if (Core.EndCommandBuffer(*CmdBuffer) != nri::Result::SUCCESS)
+			return false;
+
+		nri::Fence* release = ReleaseSem[idx];
+		nri::FenceSubmitDesc waitAcq = {}; waitAcq.fence = acquire; waitAcq.stages = nri::StageBits::ALL;
+		nri::FenceSubmitDesc sigRel = {}; sigRel.fence = release;
+		nri::FenceSubmitDesc sigFrame = {}; sigFrame.fence = FrameFence; sigFrame.value = 1 + SwapFrameIndex;
+		nri::FenceSubmitDesc signals[2] = { sigRel, sigFrame };
+		nri::CommandBuffer* cbs[1] = { CmdBuffer };
+		nri::QueueSubmitDesc qs = {};
+		qs.waitFences = &waitAcq; qs.waitFenceNum = 1;
+		qs.commandBuffers = cbs; qs.commandBufferNum = 1;
+		qs.signalFences = signals; qs.signalFenceNum = 2;
+		if (Core.QueueSubmit(*GraphicsQueue, qs) != nri::Result::SUCCESS)
+			return false;
+		if (SwapChainI.QueuePresent(*SwapChain, *release) != nri::Result::SUCCESS)
+			return false;
+
+		SwapFrameIndex++;
+		Core.Wait(*FrameFence, SwapFrameIndex); // synchronous pacing for bring-up
+		return true;
+	}
 };
 
 // ---------------------------------------------------------------------------
@@ -565,6 +642,7 @@ NRIBackend::NRIBackend() : m(std::make_unique<Impl>())
 {
 	using nri::CoreInterface;
 	using nri::HelperInterface;
+	using nri::SwapChainInterface;
 
 	nri::DeviceCreationDesc desc = {};
 	desc.graphicsAPI = nri::GraphicsAPI::D3D12;
@@ -598,6 +676,7 @@ NRIBackend::NRIBackend() : m(std::make_unique<Impl>())
 		return;
 	}
 	m->Core.GetQueue(*m->Device, nri::QueueType::GRAPHICS, 0, m->GraphicsQueue);
+	nri::nriGetInterface(*m->Device, NRI_INTERFACE(SwapChainInterface), &m->SwapChainI); // non-fatal
 
 	const nri::DeviceDesc& dd = m->Core.GetDeviceDesc(*m->Device);
 	m->RayTracingTier = dd.tiers.rayTracing;
@@ -838,6 +917,14 @@ NRIBackend::~NRIBackend()
 		}
 		m->Textures.clear();
 
+		for (nri::Descriptor* v : m->BackBufferViews) if (v) m->Core.DestroyDescriptor(v);
+		for (nri::Fence* fc : m->AcquireSem) if (fc) m->Core.DestroyFence(fc);
+		for (nri::Fence* fc : m->ReleaseSem) if (fc) m->Core.DestroyFence(fc);
+		m->BackBufferViews.clear(); m->AcquireSem.clear(); m->ReleaseSem.clear();
+		m->BackBufferWrappers.clear(); m->BackBuffers.clear();
+		if (m->FrameFence) { m->Core.DestroyFence(m->FrameFence); m->FrameFence = nullptr; }
+		if (m->SwapChain && m->SwapChainI.DestroySwapChain) { m->SwapChainI.DestroySwapChain(m->SwapChain); m->SwapChain = nullptr; }
+
 		if (m->Fence) { m->Core.DestroyFence(m->Fence); m->Fence = nullptr; }
 		if (m->CmdBuffer) { m->Core.DestroyCommandBuffer(m->CmdBuffer); m->CmdBuffer = nullptr; }
 		if (m->CmdAllocator) { m->Core.DestroyCommandAllocator(m->CmdAllocator); m->CmdAllocator = nullptr; }
@@ -889,7 +976,7 @@ const std::string& NRIBackend::GetErrorString() const { return ErrorString; }
 void NRIBackend::ClearErrorString() { ErrorString.clear(); }
 uint64_t NRIBackend::GetTimestampFrequency() const { return 0; }
 uint32_t NRIBackend::GetFrameCount() const { return 0; }
-uint32_t NRIBackend::GetCurrentFrameIndex() const { return m->FrameIndex; }
+uint32_t NRIBackend::GetCurrentFrameIndex() const { return m->CurrentBackBuffer; }
 DX12Backend* NRIBackend::AsDX12Backend() { return nullptr; }
 
 // === Resource creation ====================================================
@@ -1058,8 +1145,79 @@ ShaderBytecode NRIBackend::CreateShader(const std::wstring& fileName, const std:
 void NRIBackend::ResetDynamicResources() { NRI_TODO(); }
 
 // === Swapchain / present ==================================================
-void NRIBackend::CreateSwapChainForWindow(WindowHandle, uint32_t, uint32_t, ETextureFormat) { NRI_TODO(); }
-std::shared_ptr<Texture> NRIBackend::GetSwapChainTexture(uint32_t) { NRI_TODO(); return nullptr; }
+void NRIBackend::CreateSwapChainForWindow(WindowHandle window, uint32_t width, uint32_t height, ETextureFormat /*format*/)
+{
+	if (!m->Device || !m->GraphicsQueue || !m->SwapChainI.CreateSwapChain || !window.PlatformHandle)
+	{
+		ErrorString = "CreateSwapChain: prerequisites missing";
+		return;
+	}
+
+	nri::SwapChainDesc scd = {};
+	scd.window.windows.hwnd = window.PlatformHandle;
+	scd.queue = m->GraphicsQueue;
+	scd.width = static_cast<nri::Dim_t>(width);
+	scd.height = static_cast<nri::Dim_t>(height);
+	scd.textureNum = 3;
+	scd.format = nri::SwapChainFormat::BT709_G22_8BIT;
+	if (m->SwapChainI.CreateSwapChain(*m->Device, scd, m->SwapChain) != nri::Result::SUCCESS || !m->SwapChain)
+	{
+		ErrorString = "CreateSwapChain failed";
+		return;
+	}
+
+	uint32_t num = 0;
+	nri::Texture* const* texs = m->SwapChainI.GetSwapChainTextures(*m->SwapChain, num);
+	for (uint32_t i = 0; i < num; ++i)
+	{
+		m->BackBuffers.push_back(texs[i]);
+		const nri::TextureDesc& tdsc = m->Core.GetTextureDesc(*texs[i]);
+		m->SwapFormat = tdsc.format;
+
+		nri::TextureViewDesc tvd = {};
+		tvd.texture = texs[i];
+		tvd.type = nri::TextureView::COLOR_ATTACHMENT;
+		tvd.format = tdsc.format;
+		tvd.mipNum = 1;
+		tvd.layerNum = 1;
+		nri::Descriptor* view = nullptr;
+		m->Core.CreateTextureView(tvd, view);
+		m->BackBufferViews.push_back(view);
+
+		nri::Fence* acq = nullptr; nri::Fence* rel = nullptr;
+		m->Core.CreateFence(*m->Device, nri::SWAPCHAIN_SEMAPHORE, acq);
+		m->Core.CreateFence(*m->Device, nri::SWAPCHAIN_SEMAPHORE, rel);
+		m->AcquireSem.push_back(acq);
+		m->ReleaseSem.push_back(rel);
+
+		auto w = std::make_shared<Texture>();
+		w->Width = width; w->Height = height;
+		w->Format = ETextureFormat::BGRA8Unorm;
+		w->Usage = TextureUsage_RenderTarget;
+		m->BackBufferWrappers.push_back(w);
+	}
+	if (!m->FrameFence)
+		m->Core.CreateFence(*m->Device, 0, m->FrameFence);
+
+	// Present smoke: clear the window to a recognizable colour through NRI to
+	// prove the swap-chain + render-pass + present path end to end.
+	int presented = 0;
+	for (int f = 0; f < 3; ++f)
+		if (m->PresentClear(0.10f, 0.02f, 0.20f, 1.0f)) ++presented;
+
+	char info[256];
+	_snprintf_s(info, _TRUNCATE, "swapchain ok: backbuffers=%u presented=%d/3", num, presented);
+	ErrorString = info;
+	OutputDebugStringA("[NRI] ");
+	OutputDebugStringA(info);
+	OutputDebugStringA("\n");
+}
+std::shared_ptr<Texture> NRIBackend::GetSwapChainTexture(uint32_t bufferIndex)
+{
+	if (bufferIndex < m->BackBufferWrappers.size())
+		return m->BackBufferWrappers[bufferIndex];
+	return nullptr;
+}
 bool NRIBackend::CaptureTexture(Texture*, CapturedImage&, EResourceState) { NRI_TODO(); return false; }
 Texture* NRIBackend::GetCurrentWindowRenderTarget() { NRI_TODO(); return nullptr; }
 void NRIBackend::PrepareWindowRenderTarget(Texture*) { NRI_TODO(); }
