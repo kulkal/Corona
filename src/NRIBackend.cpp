@@ -1690,15 +1690,14 @@ void NRIBackend::UploadTexture3D(Texture*, const void*, uint64_t, uint64_t) { NR
 std::shared_ptr<VertexBuffer> NRIBackend::CreateVertexBuffer(uint32_t size, uint32_t stride, void* srcData)
 {
 	if (!m->RasterEnabled || !m->Device || size == 0) return nullptr;
+	// HOST_UPLOAD + mapped memcpy — avoids a per-mesh Helper.UploadData queue submit
+	// (which serialized loading to a crawl with thousands of meshes).
 	nri::Buffer* nb = nullptr; std::vector<nri::Memory*> mem;
-	if (!m->CreateBoundBuffer(size, 0, nri::BufferUsageBits::VERTEX_BUFFER, nri::MemoryLocation::DEVICE, nb, mem)) return nullptr;
-	if (srcData && m->GraphicsQueue)
-	{
-		nri::BufferUploadDesc up = {}; up.buffer = nb; up.data = srcData; up.after.access = nri::AccessBits::VERTEX_BUFFER; up.after.stages = nri::StageBits::ALL;
-		m->Helper.UploadData(*m->GraphicsQueue, nullptr, 0, &up, 1);
-	}
+	if (!m->CreateBoundBuffer(size, 0, nri::BufferUsageBits::VERTEX_BUFFER, nri::MemoryLocation::HOST_UPLOAD, nb, mem)) return nullptr;
+	void* mapped = m->Core.MapBuffer(*nb, 0, size);
+	if (mapped && srcData) memcpy(mapped, srcData, size);
 	auto w = std::make_shared<VertexBuffer>(); w->numVertices = stride ? (int)(size / stride) : 0;
-	Impl::GpuBuf gb; gb.buffer = nb; gb.memory = std::move(mem); gb.stride = stride; gb.capacity = size;
+	Impl::GpuBuf gb; gb.buffer = nb; gb.memory = std::move(mem); gb.stride = stride; gb.mapped = mapped; gb.capacity = size;
 	m->VBs[w.get()] = std::move(gb);
 	return w;
 }
@@ -1706,15 +1705,12 @@ std::shared_ptr<IndexBuffer> NRIBackend::CreateIndexBuffer(EIndexFormat format, 
 {
 	if (!m->RasterEnabled || !m->Device || size == 0) return nullptr;
 	nri::Buffer* nb = nullptr; std::vector<nri::Memory*> mem;
-	if (!m->CreateBoundBuffer(size, 0, nri::BufferUsageBits::INDEX_BUFFER, nri::MemoryLocation::DEVICE, nb, mem)) return nullptr;
-	if (srcData && m->GraphicsQueue)
-	{
-		nri::BufferUploadDesc up = {}; up.buffer = nb; up.data = srcData; up.after.access = nri::AccessBits::INDEX_BUFFER; up.after.stages = nri::StageBits::ALL;
-		m->Helper.UploadData(*m->GraphicsQueue, nullptr, 0, &up, 1);
-	}
+	if (!m->CreateBoundBuffer(size, 0, nri::BufferUsageBits::INDEX_BUFFER, nri::MemoryLocation::HOST_UPLOAD, nb, mem)) return nullptr;
+	void* mapped = m->Core.MapBuffer(*nb, 0, size);
+	if (mapped && srcData) memcpy(mapped, srcData, size);
 	const uint32_t idxSize = (format == EIndexFormat::U16) ? 2u : 4u;
 	auto w = std::make_shared<IndexBuffer>(); w->numIndices = (int)(size / idxSize);
-	Impl::GpuBuf gb; gb.buffer = nb; gb.memory = std::move(mem); gb.indexType = (format == EIndexFormat::U16) ? nri::IndexType::UINT16 : nri::IndexType::UINT32; gb.capacity = size;
+	Impl::GpuBuf gb; gb.buffer = nb; gb.memory = std::move(mem); gb.indexType = (format == EIndexFormat::U16) ? nri::IndexType::UINT16 : nri::IndexType::UINT32; gb.mapped = mapped; gb.capacity = size;
 	m->IBs[w.get()] = std::move(gb);
 	return w;
 }
