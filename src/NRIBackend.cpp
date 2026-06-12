@@ -8,6 +8,7 @@
 
 #include <cstdio>
 #include <cstring>
+#include <algorithm>
 #include <unordered_map>
 #include <vector>
 #include <string>
@@ -203,6 +204,7 @@ struct NRIBackend::Impl
 		std::vector<nri::Memory*> memory;
 	};
 	std::unordered_map<Texture*, TextureAlloc> Textures;
+	std::unordered_map<Sampler*, nri::Descriptor*> Samplers;
 
 	std::string BackendName = "NRI (uninitialized)";
 	uint8_t RayTracingTier = 0;   // 0=none, 1=DXR1.0, 2=DXR1.1, 3=DXR1.2 (SER)
@@ -486,139 +488,115 @@ public:
 	explicit NRIComputePSO(NRIBackend::Impl* impl) : m(impl) {}
 	~NRIComputePSO() override
 	{
-		if (m && m->Device)
-		{
-			if (Pipeline) m->Core.DestroyPipeline(Pipeline);
-			if (Layout) m->Core.DestroyPipelineLayout(Layout);
-			for (auto& kv : Views) if (kv.second) m->Core.DestroyDescriptor(kv.second);
-			for (auto& kv : CbvBuffers) m->FreeBuffer(kv.second.buffer, kv.second.memory);
-		}
+		if (!m || !m->Device) return;
+		if (Pipeline) m->Core.DestroyPipeline(Pipeline);
+		if (Layout) m->Core.DestroyPipelineLayout(Layout);
+		if (Pool) m->Core.DestroyDescriptorPool(Pool);
+		for (auto& b : Bindings) if (b.ownsDesc && b.desc) m->Core.DestroyDescriptor(b.desc);
+		for (auto& kv : CbvBuffers) m->FreeBuffer(kv.second.buffer, kv.second.memory);
 	}
 
-	enum class Kind { UAV_Buffer, SRV_Buffer, CBV, Sampler, Texture_SRV, Texture_UAV };
-	struct Decl { std::string name; Kind kind; uint32_t reg; };
+	enum class RegClass { SRV, UAV, CBV, Sampler };
+	enum class ResKind { None, TexSRV, TexUAV, BufSRV, BufUAV, CBV, Sampler };
+	struct Binding
+	{
+		std::string name;
+		uint32_t reg = 0;
+		RegClass regClass = RegClass::SRV;
+		ResKind kind = ResKind::None;
+		Texture* tex = nullptr;
+		Buffer* buf = nullptr;
+		Sampler* samp = nullptr;
+		nri::Descriptor* desc = nullptr;
+		bool ownsDesc = false;           // desc created by us (texture/buffer view) vs borrowed (cbv/sampler)
+		void* lastResource = nullptr;    // resource the current desc was built for (dirty check)
+		uint32_t setIndex = 0;
+		uint32_t rangeIndex = 0;
+	};
 
-	void BindSRV(const std::string& name, uint32_t baseRegister, uint32_t /*numDescriptors*/) override { Decls.push_back({ name, Kind::SRV_Buffer, baseRegister }); }
-	void BindUAV(const std::string& name, uint32_t baseRegister) override { Decls.push_back({ name, Kind::UAV_Buffer, baseRegister }); }
-	void BindCBV(const std::string& name, uint32_t baseRegister, uint32_t size) override { Decls.push_back({ name, Kind::CBV, baseRegister }); CbvSizeByName[name] = size; }
-	void BindSampler(const std::string& name, uint32_t baseRegister) override { Decls.push_back({ name, Kind::Sampler, baseRegister }); }
+	void BindSRV(const std::string& name, uint32_t baseRegister, uint32_t) override { AddBinding(name, baseRegister, RegClass::SRV); }
+	void BindUAV(const std::string& name, uint32_t baseRegister) override { AddBinding(name, baseRegister, RegClass::UAV); }
+	void BindCBV(const std::string& name, uint32_t baseRegister, uint32_t size) override { AddBinding(name, baseRegister, RegClass::CBV); CbvSizeByName[name] = size; }
+	void BindSampler(const std::string& name, uint32_t baseRegister) override { AddBinding(name, baseRegister, RegClass::Sampler); }
 
+	// Defer pipeline/layout creation to the first Apply: by then the Set* calls
+	// have revealed each binding's resource type (texture vs buffer), which the
+	// by-name Bind* calls don't carry.
 	bool InitCS(const std::wstring& shaderFile, const std::string& entryPoint) override
 	{
-		if (!m->Device)
-			return false;
-
+		if (!m->Device) return false;
 		std::ifstream f(shaderFile, std::ios::binary);
-		if (!f.good())
-			return false;
+		if (!f.good()) return false;
 		std::stringstream ss; ss << f.rdbuf();
 		const std::string src = ss.str();
 		const std::wstring entryW(entryPoint.begin(), entryPoint.end());
 		std::string err;
 		Dxil = CompileHLSLToDXIL(src.data(), src.size(), shaderFile.c_str(), entryW.c_str(), L"cs_6_5", err);
-		if (Dxil.empty())
-			return false;
-
-		// Root descriptors for buffer bindings, ordered as declared.
-		RootDescs.clear();
-		RootDescIndexByName.clear();
-		for (const Decl& d : Decls)
-		{
-			nri::DescriptorType dt;
-			if (d.kind == Kind::UAV_Buffer)      dt = nri::DescriptorType::STORAGE_STRUCTURED_BUFFER;
-			else if (d.kind == Kind::SRV_Buffer) dt = nri::DescriptorType::STRUCTURED_BUFFER;
-			else if (d.kind == Kind::CBV)        dt = nri::DescriptorType::CONSTANT_BUFFER;
-			else continue; // textures / samplers use descriptor sets (next milestone)
-			nri::RootDescriptorDesc rd = {};
-			rd.registerIndex = d.reg;
-			rd.descriptorType = dt;
-			rd.shaderStages = nri::StageBits::COMPUTE_SHADER;
-			RootDescIndexByName[d.name] = (uint32_t)RootDescs.size();
-			RootDescs.push_back(rd);
-		}
-
-		nri::PipelineLayoutDesc pld = {};
-		pld.rootRegisterSpace = 0;
-		pld.rootDescriptors = RootDescs.empty() ? nullptr : RootDescs.data();
-		pld.rootDescriptorNum = (uint32_t)RootDescs.size();
-		pld.shaderStages = nri::StageBits::COMPUTE_SHADER;
-		if (m->Core.CreatePipelineLayout(*m->Device, pld, Layout) != nri::Result::SUCCESS)
-			return false;
-
-		nri::ComputePipelineDesc cpd = {};
-		cpd.pipelineLayout = Layout;
-		cpd.shader.stage = nri::StageBits::COMPUTE_SHADER;
-		cpd.shader.bytecode = Dxil.data();
-		cpd.shader.size = Dxil.size();
-		cpd.shader.entryPointName = entryPoint.c_str();
-		if (m->Core.CreateComputePipeline(*m->Device, cpd, Pipeline) != nri::Result::SUCCESS)
-			return false;
-		return true;
+		EntryPoint = entryPoint;
+		return !Dxil.empty();
 	}
 
-	void SetBufferUAV(const std::string& name, Buffer* buffer) override { BindBufferView(name, buffer, nri::BufferView::STORAGE_STRUCTURED_BUFFER); }
-	void SetBufferSRV(const std::string& name, Buffer* buffer) override { BindBufferView(name, buffer, nri::BufferView::STRUCTURED_BUFFER); }
-	void SetTextureSRV(const std::string&, Texture*) override {}     // descriptor-set path: next milestone
-	void SetTextureUAV(const std::string&, Texture*) override {}
-	void SetVertexBufferUAV(const std::string&, VertexBuffer*) override {}
-	void SetSampler(const std::string&, Sampler*) override {}
+	void SetTextureSRV(const std::string& name, Texture* t) override { SetRes(name, ResKind::TexSRV, t, nullptr, nullptr); }
+	void SetTextureUAV(const std::string& name, Texture* t) override { SetRes(name, ResKind::TexUAV, t, nullptr, nullptr); }
+	void SetBufferSRV(const std::string& name, Buffer* b) override { SetRes(name, ResKind::BufSRV, nullptr, b, nullptr); }
+	void SetBufferUAV(const std::string& name, Buffer* b) override { SetRes(name, ResKind::BufUAV, nullptr, b, nullptr); }
+	void SetVertexBufferUAV(const std::string&, VertexBuffer*) override {} // skinning output: later
+	void SetSampler(const std::string& name, Sampler* s) override { SetRes(name, ResKind::Sampler, nullptr, nullptr, s); }
 	void SetCBVValue(const std::string& name, void* data) override
 	{
-		if (!m->Device || !data)
-			return;
+		if (!m->Device || !data) return;
 		auto sit = CbvSizeByName.find(name);
 		const uint32_t size = (sit != CbvSizeByName.end()) ? sit->second : 0u;
-		if (size == 0)
-			return;
-		// D3D12 constant buffers must be 256-byte aligned in size.
-		const uint32_t alignedSize = (size + 255u) & ~255u;
+		if (size == 0) return;
+		const uint32_t alignedSize = (size + 255u) & ~255u; // D3D12 CB alignment
 		CbvBuf& cb = CbvBuffers[name];
 		if (!cb.buffer)
 		{
 			if (!m->CreateBoundBuffer(alignedSize, 0, nri::BufferUsageBits::CONSTANT_BUFFER, nri::MemoryLocation::HOST_UPLOAD, cb.buffer, cb.memory))
-			{
-				CbvBuffers.erase(name);
-				return;
-			}
+			{ CbvBuffers.erase(name); return; }
 			cb.size = alignedSize;
 			nri::BufferViewDesc bvd = {};
-			bvd.buffer = cb.buffer;
-			bvd.type = nri::BufferView::CONSTANT_BUFFER;
-			bvd.offset = 0;
-			bvd.size = alignedSize;
-			nri::Descriptor* view = nullptr;
-			if (m->Core.CreateBufferView(bvd, view) == nri::Result::SUCCESS)
-			{
-				if (Views[name]) m->Core.DestroyDescriptor(Views[name]);
-				Views[name] = view;
-			}
+			bvd.buffer = cb.buffer; bvd.type = nri::BufferView::CONSTANT_BUFFER; bvd.offset = 0; bvd.size = alignedSize;
+			m->Core.CreateBufferView(bvd, cb.view);
 		}
+		if (Binding* b = Find(name)) { b->kind = ResKind::CBV; b->desc = cb.view; b->ownsDesc = false; }
 		void* mapped = m->Core.MapBuffer(*cb.buffer, 0, size);
-		if (mapped)
-		{
-			memcpy(mapped, data, size);
-			m->Core.UnmapBuffer(*cb.buffer);
-		}
+		if (mapped) { memcpy(mapped, data, size); m->Core.UnmapBuffer(*cb.buffer); }
 	}
 
-	// Record pipeline layout + root descriptors + pipeline into the backend's
-	// active command buffer. The backend's Dispatch() then issues CmdDispatch.
 	void Apply() override
 	{
-		if (!Pipeline || !m->ActiveCmd)
-			return;
-		m->Core.CmdSetPipelineLayout(*m->ActiveCmd, nri::BindPoint::COMPUTE, *Layout);
-		for (const auto& kv : Views)
+		if (!m->ActiveCmd) return;
+		if (!EnsureInit()) return;
+
+		for (Binding& b : Bindings)
+			RefreshDescriptor(b);
+
+		// Write descriptors into the sets.
+		for (Binding& b : Bindings)
 		{
-			auto it = RootDescIndexByName.find(kv.first);
-			if (it == RootDescIndexByName.end() || !kv.second)
+			if (b.kind == ResKind::None || !b.desc || b.setIndex >= Sets.size() || !Sets[b.setIndex])
 				continue;
-			nri::SetRootDescriptorDesc srd = {};
-			srd.rootDescriptorIndex = it->second;
-			srd.descriptor = kv.second;
-			srd.offset = 0;
-			srd.bindPoint = nri::BindPoint::COMPUTE;
-			m->Core.CmdSetRootDescriptor(*m->ActiveCmd, srd);
+			nri::Descriptor* d = b.desc;
+			nri::UpdateDescriptorRangeDesc upd = {};
+			upd.descriptorSet = Sets[b.setIndex];
+			upd.rangeIndex = b.rangeIndex;
+			upd.baseDescriptor = 0;
+			upd.descriptors = &d;
+			upd.descriptorNum = 1;
+			m->Core.UpdateDescriptorRanges(&upd, 1);
+		}
+
+		if (Pool) m->Core.CmdSetDescriptorPool(*m->ActiveCmd, *Pool);
+		m->Core.CmdSetPipelineLayout(*m->ActiveCmd, nri::BindPoint::COMPUTE, *Layout);
+		for (uint32_t s = 0; s < Sets.size(); ++s)
+		{
+			if (!Sets[s]) continue;
+			nri::SetDescriptorSetDesc sd = {};
+			sd.setIndex = s;
+			sd.descriptorSet = Sets[s];
+			sd.bindPoint = nri::BindPoint::COMPUTE;
+			m->Core.CmdSetDescriptorSet(*m->ActiveCmd, sd);
 		}
 		m->Core.CmdSetPipeline(*m->ActiveCmd, *Pipeline);
 	}
@@ -626,39 +604,166 @@ public:
 	nri::Pipeline* GetPipeline() const { return Pipeline; }
 
 private:
-	void BindBufferView(const std::string& name, Buffer* buffer, nri::BufferView viewType)
+	struct CbvBuf { nri::Buffer* buffer = nullptr; std::vector<nri::Memory*> memory; uint32_t size = 0; nri::Descriptor* view = nullptr; };
+
+	void AddBinding(const std::string& name, uint32_t reg, RegClass rc)
 	{
-		if (!buffer)
-			return;
-		auto bit = m->Buffers.find(buffer);
-		if (bit == m->Buffers.end() || !bit->second.buffer)
-			return;
-		nri::BufferViewDesc bvd = {};
-		bvd.buffer = bit->second.buffer;
-		bvd.type = viewType;
-		bvd.offset = 0;
-		bvd.size = static_cast<uint64_t>(buffer->NumElements) * buffer->ElementSize;
-		bvd.structureStride = buffer->ElementSize ? buffer->ElementSize : 4;
-		nri::Descriptor* view = nullptr;
-		if (m->Core.CreateBufferView(bvd, view) == nri::Result::SUCCESS)
+		if (Find(name)) return;
+		Binding b; b.name = name; b.reg = reg; b.regClass = rc;
+		Bindings.push_back(b);
+	}
+	Binding* Find(const std::string& name)
+	{
+		for (Binding& b : Bindings) if (b.name == name) return &b;
+		return nullptr;
+	}
+	void SetRes(const std::string& name, ResKind k, Texture* t, Buffer* bufp, Sampler* s)
+	{
+		Binding* b = Find(name);
+		if (!b) { AddBinding(name, 0, k == ResKind::Sampler ? RegClass::Sampler : (k == ResKind::TexUAV || k == ResKind::BufUAV) ? RegClass::UAV : RegClass::SRV); b = Find(name); }
+		if (!b) return;
+		b->kind = k; b->tex = t; b->buf = bufp; b->samp = s;
+	}
+	static nri::DescriptorType ToDescriptorType(ResKind k)
+	{
+		switch (k)
 		{
-			if (Views[name]) m->Core.DestroyDescriptor(Views[name]);
-			Views[name] = view;
+		case ResKind::TexSRV: return nri::DescriptorType::TEXTURE;
+		case ResKind::TexUAV: return nri::DescriptorType::STORAGE_TEXTURE;
+		case ResKind::BufSRV: return nri::DescriptorType::STRUCTURED_BUFFER;
+		case ResKind::BufUAV: return nri::DescriptorType::STORAGE_STRUCTURED_BUFFER;
+		case ResKind::CBV:    return nri::DescriptorType::CONSTANT_BUFFER;
+		case ResKind::Sampler:return nri::DescriptorType::SAMPLER;
+		default:              return nri::DescriptorType::TEXTURE;
 		}
 	}
 
-	struct CbvBuf { nri::Buffer* buffer = nullptr; std::vector<nri::Memory*> memory; uint32_t size = 0; };
+	bool EnsureInit()
+	{
+		if (InitAttempted) return Pipeline != nullptr;
+		InitAttempted = true;
+		if (Dxil.empty() || !m->Device) return false;
+
+		std::vector<nri::DescriptorRangeDesc> resRanges, sampRanges;
+		const bool haveSamplers = [&] { for (auto& b : Bindings) if (b.kind == ResKind::Sampler) return true; return false; }();
+		const uint32_t resSetIndex = 0;
+		const uint32_t sampSetIndex = haveSamplers ? 1u : 0u;
+
+		uint32_t texN = 0, storTexN = 0, sbufN = 0, storSbufN = 0, cbvN = 0, sampN = 0;
+		for (Binding& b : Bindings)
+		{
+			if (b.kind == ResKind::None) continue;
+			nri::DescriptorRangeDesc r = {};
+			r.baseRegisterIndex = b.reg;
+			r.descriptorNum = 1;
+			r.descriptorType = ToDescriptorType(b.kind);
+			r.shaderStages = nri::StageBits::COMPUTE_SHADER;
+			if (b.kind == ResKind::Sampler) { b.setIndex = sampSetIndex; b.rangeIndex = (uint32_t)sampRanges.size(); sampRanges.push_back(r); ++sampN; }
+			else
+			{
+				b.setIndex = resSetIndex; b.rangeIndex = (uint32_t)resRanges.size(); resRanges.push_back(r);
+				switch (b.kind)
+				{
+				case ResKind::TexSRV: ++texN; break;
+				case ResKind::TexUAV: ++storTexN; break;
+				case ResKind::BufSRV: ++sbufN; break;
+				case ResKind::BufUAV: ++storSbufN; break;
+				case ResKind::CBV:    ++cbvN; break;
+				default: break;
+				}
+			}
+		}
+
+		std::vector<nri::DescriptorSetDesc> sets;
+		if (!resRanges.empty()) { nri::DescriptorSetDesc s = {}; s.registerSpace = 0; s.ranges = resRanges.data(); s.rangeNum = (uint32_t)resRanges.size(); sets.push_back(s); }
+		if (!sampRanges.empty()) { nri::DescriptorSetDesc s = {}; s.registerSpace = 0; s.ranges = sampRanges.data(); s.rangeNum = (uint32_t)sampRanges.size(); sets.push_back(s); }
+
+		nri::PipelineLayoutDesc pld = {};
+		pld.rootRegisterSpace = 0;
+		pld.descriptorSets = sets.empty() ? nullptr : sets.data();
+		pld.descriptorSetNum = (uint32_t)sets.size();
+		pld.shaderStages = nri::StageBits::COMPUTE_SHADER;
+		if (m->Core.CreatePipelineLayout(*m->Device, pld, Layout) != nri::Result::SUCCESS)
+			return false;
+
+		if (!sets.empty())
+		{
+			nri::DescriptorPoolDesc pd = {};
+			pd.descriptorSetMaxNum = (uint32_t)sets.size();
+			pd.textureMaxNum = texN; pd.storageTextureMaxNum = storTexN;
+			pd.structuredBufferMaxNum = sbufN; pd.storageStructuredBufferMaxNum = storSbufN;
+			pd.constantBufferMaxNum = cbvN; pd.samplerMaxNum = sampN;
+			if (m->Core.CreateDescriptorPool(*m->Device, pd, Pool) != nri::Result::SUCCESS)
+				return false;
+			Sets.resize(sets.size(), nullptr);
+			for (uint32_t s = 0; s < sets.size(); ++s)
+				m->Core.AllocateDescriptorSets(*Pool, *Layout, s, &Sets[s], 1, 0);
+		}
+
+		nri::ComputePipelineDesc cpd = {};
+		cpd.pipelineLayout = Layout;
+		cpd.shader.stage = nri::StageBits::COMPUTE_SHADER;
+		cpd.shader.bytecode = Dxil.data();
+		cpd.shader.size = Dxil.size();
+		cpd.shader.entryPointName = EntryPoint.c_str();
+		return m->Core.CreateComputePipeline(*m->Device, cpd, Pipeline) == nri::Result::SUCCESS;
+	}
+
+	void RefreshDescriptor(Binding& b)
+	{
+		if (b.kind == ResKind::None) return;
+		if (b.kind == ResKind::CBV) return;       // CBV view set in SetCBVValue
+		if (b.kind == ResKind::Sampler)
+		{
+			if (b.samp) { auto it = m->Samplers.find(b.samp); b.desc = (it != m->Samplers.end()) ? it->second : nullptr; b.ownsDesc = false; }
+			return;
+		}
+		void* res = b.tex ? (void*)b.tex : (void*)b.buf;
+		if (res == b.lastResource && b.desc) return; // unchanged
+		if (b.ownsDesc && b.desc) { m->Core.DestroyDescriptor(b.desc); b.desc = nullptr; }
+		b.lastResource = res;
+
+		if (b.kind == ResKind::TexSRV || b.kind == ResKind::TexUAV)
+		{
+			if (!b.tex) return;
+			auto it = m->Textures.find(b.tex);
+			if (it == m->Textures.end() || !it->second.texture) return;
+			const nri::TextureDesc& td = m->Core.GetTextureDesc(*it->second.texture);
+			nri::TextureViewDesc tvd = {};
+			tvd.texture = it->second.texture;
+			tvd.type = (b.kind == ResKind::TexUAV) ? nri::TextureView::STORAGE_TEXTURE : nri::TextureView::TEXTURE;
+			tvd.format = td.format;
+			tvd.mipNum = nri::REMAINING; tvd.layerNum = nri::REMAINING;
+			nri::Descriptor* d = nullptr;
+			if (m->Core.CreateTextureView(tvd, d) == nri::Result::SUCCESS) { b.desc = d; b.ownsDesc = true; }
+		}
+		else // BufSRV / BufUAV
+		{
+			if (!b.buf) return;
+			auto it = m->Buffers.find(b.buf);
+			if (it == m->Buffers.end() || !it->second.buffer) return;
+			nri::BufferViewDesc bvd = {};
+			bvd.buffer = it->second.buffer;
+			bvd.type = (b.kind == ResKind::BufUAV) ? nri::BufferView::STORAGE_STRUCTURED_BUFFER : nri::BufferView::STRUCTURED_BUFFER;
+			bvd.offset = 0;
+			bvd.size = static_cast<uint64_t>(b.buf->NumElements) * b.buf->ElementSize;
+			bvd.structureStride = b.buf->ElementSize ? b.buf->ElementSize : 4;
+			nri::Descriptor* d = nullptr;
+			if (m->Core.CreateBufferView(bvd, d) == nri::Result::SUCCESS) { b.desc = d; b.ownsDesc = true; }
+		}
+	}
 
 	NRIBackend::Impl* m = nullptr;
-	std::vector<Decl> Decls;
-	std::vector<nri::RootDescriptorDesc> RootDescs;
-	std::unordered_map<std::string, uint32_t> RootDescIndexByName;
+	std::vector<Binding> Bindings;
 	std::unordered_map<std::string, uint32_t> CbvSizeByName;
 	std::unordered_map<std::string, CbvBuf> CbvBuffers;
-	std::unordered_map<std::string, nri::Descriptor*> Views;
 	std::vector<uint8_t> Dxil;
+	std::string EntryPoint;
 	nri::PipelineLayout* Layout = nullptr;
 	nri::Pipeline* Pipeline = nullptr;
+	nri::DescriptorPool* Pool = nullptr;
+	std::vector<nri::DescriptorSet*> Sets;
+	bool InitAttempted = false;
 };
 
 // NRI routes validation / driver messages here. Surface them to the debugger
@@ -816,7 +921,7 @@ NRIBackend::NRIBackend() : m(std::make_unique<Impl>())
 		{ std::ofstream of(path, std::ios::binary); of.write(kPsoCS, (std::streamsize)strlen(kPsoCS)); }
 		NRIComputePSO pso(m.get());
 		pso.BindUAV("OutBuf", 0);
-		psoInitOk = pso.InitCS(path, "main") && pso.GetPipeline() != nullptr;
+		psoInitOk = pso.InitCS(path, "main"); // pipeline is created lazily on first Apply
 	}
 
 	// Full frame path: BeginFrame -> TransitionBuffer -> PSO Apply -> Dispatch ->
@@ -961,6 +1066,9 @@ NRIBackend::~NRIBackend()
 				if (mem) m->Core.FreeMemory(mem);
 		}
 		m->Textures.clear();
+
+		for (auto& kv : m->Samplers) if (kv.second) m->Core.DestroyDescriptor(kv.second);
+		m->Samplers.clear();
 
 		if (m->Imgui) { m->ImguiI.DestroyImgui(m->Imgui); m->Imgui = nullptr; }
 		if (m->Streamer) { m->StreamerI.DestroyStreamer(m->Streamer); m->Streamer = nullptr; }
@@ -1153,7 +1261,34 @@ std::shared_ptr<Buffer> NRIBackend::CreateBuffer(const BufferCreateDesc& desc)
 	m->Buffers[wrapper.get()] = std::move(alloc);
 	return wrapper;
 }
-std::shared_ptr<Sampler> NRIBackend::CreateSampler(const SamplerCreateDesc&) { NRI_TODO(); return nullptr; }
+std::shared_ptr<Sampler> NRIBackend::CreateSampler(const SamplerCreateDesc& desc)
+{
+	if (!m->Device)
+		return nullptr;
+	const nri::Filter f = (desc.Filter == ESamplerFilter::Anisotropic || desc.Filter == ESamplerFilter::Linear) ? nri::Filter::LINEAR : nri::Filter::NEAREST;
+	auto addr = [](ESamplerAddressMode a) { return a == ESamplerAddressMode::Clamp ? nri::AddressMode::CLAMP_TO_EDGE : nri::AddressMode::REPEAT; };
+
+	nri::SamplerDesc sd = {};
+	sd.filters.min = f; sd.filters.mag = f; sd.filters.mip = f;
+	sd.anisotropy = (desc.Filter == ESamplerFilter::Anisotropic) ? (uint8_t)std::max(1u, desc.MaxAnisotropy) : (uint8_t)1;
+	sd.mipBias = desc.MipLODBias;
+	sd.mipMin = desc.MinLOD;
+	sd.mipMax = desc.MaxLOD;
+	sd.addressModes.u = addr(desc.AddressU);
+	sd.addressModes.v = addr(desc.AddressV);
+	sd.addressModes.w = addr(desc.AddressW);
+	sd.compareOp = nri::CompareOp::NONE;
+
+	nri::Descriptor* samplerDesc = nullptr;
+	if (m->Core.CreateSampler(*m->Device, sd, samplerDesc) != nri::Result::SUCCESS || !samplerDesc)
+	{
+		ErrorString = "CreateSampler failed";
+		return nullptr;
+	}
+	auto wrapper = std::make_shared<Sampler>();
+	m->Samplers[wrapper.get()] = samplerDesc;
+	return wrapper;
+}
 std::shared_ptr<Texture> NRIBackend::CreateTextureFromFile(const std::wstring&, bool) { NRI_TODO(); return nullptr; }
 std::shared_ptr<Texture> NRIBackend::CreateTexture3D(
 	ETextureFormat format, ETextureUsageFlags usage, EInitialResourceState /*initialState*/,
