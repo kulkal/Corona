@@ -17,6 +17,8 @@
 
 #include <wrl/client.h>
 #include <dxcapi.use.h>
+#include <filesystem>
+#include "DirectXTex.h"
 
 #include "imgui.h"
 
@@ -59,8 +61,31 @@ static std::vector<uint8_t> CompileHLSLToDXIL(
 	ComPtr<IDxcBlobEncoding> textBlob;
 	library->CreateBlobWithEncodingFromPinned((LPBYTE)source, (uint32_t)sourceSize, 0, &textBlob);
 
+	// Include handler + include search path so `#include "Common.hlsl"` etc.
+	// resolve. Includes are relative to the shader's own directory; the process
+	// cwd is bin/, so an explicit -I<shaderDir> is required.
+	ComPtr<IDxcIncludeHandler> includeHandler;
+	library->CreateIncludeHandler(&includeHandler);
+	std::wstring shaderDir;
+	if (sourceName)
+	{
+		std::wstring sp(sourceName);
+		const size_t slash = sp.find_last_of(L"/\\");
+		if (slash != std::wstring::npos)
+			shaderDir = sp.substr(0, slash);
+	}
+	std::vector<const wchar_t*> args;
+	std::wstring includeArg;
+	if (!shaderDir.empty())
+	{
+		includeArg = L"-I" + shaderDir;
+		args.push_back(includeArg.c_str());
+	}
+
 	ComPtr<IDxcOperationResult> result;
-	HRESULT hr = compiler->Compile(textBlob.Get(), sourceName, entryPoint, target, nullptr, 0, nullptr, 0, nullptr, &result);
+	HRESULT hr = compiler->Compile(textBlob.Get(), sourceName, entryPoint, target,
+		args.empty() ? nullptr : args.data(), (uint32_t)args.size(),
+		nullptr, 0, includeHandler.Get(), &result);
 	if (FAILED(hr) || !result)
 	{
 		outError = "DXC: Compile call failed";
@@ -219,7 +244,17 @@ struct NRIBackend::Impl
 	bool RTHasClear = false;
 	float RTDepthClear = 1.0f;
 	bool RTHasDepthClear = false;
+	// Per-target deferred clears. Corona issues ClearRenderTarget/ClearDepth per
+	// texture (and may do so before SetRenderTargets), but NRI clears happen as
+	// the render pass LoadOp. Track each target's clear so OpenRP can apply the
+	// right color/value per attachment and SetRenderTargets doesn't wipe them.
+	struct ClearColor { float v[4]; };
+	std::unordered_map<Texture*, ClearColor> PendingColorClears;
+	std::unordered_map<Texture*, float> PendingDepthClears;
 	uint32_t VpW = 0, VpH = 0;
+	// Per-frame diagnostics (Stage 2 bring-up): counts reset each BeginFrame.
+	uint32_t DbgRPOpens = 0, DbgGfxBindOk = 0, DbgGfxBindFail = 0;
+	uint32_t DbgDraws = 0, DbgDrawsSkipped = 0, DbgImguiDraws = 0, DbgClears = 0;
 	// Future milestones add: RayTracingInterface, descriptor pools.
 
 	nri::Texture* NriTex(Texture* t)
@@ -277,8 +312,15 @@ struct NRIBackend::Impl
 		{
 			TransitionTex(t, nri::AccessBits::COLOR_ATTACHMENT, nri::Layout::COLOR_ATTACHMENT, nri::StageBits::ALL);
 			nri::AttachmentDesc a = {}; a.descriptor = ColorView(t);
-			a.loadOp = RTHasClear ? nri::LoadOp::CLEAR : nri::LoadOp::LOAD; a.storeOp = nri::StoreOp::STORE;
-			if (RTHasClear) a.clearValue.color.f = nri::Color32f{ RTClear[0], RTClear[1], RTClear[2], RTClear[3] };
+			auto cit = PendingColorClears.find(t);
+			if (cit != PendingColorClears.end())
+			{
+				a.loadOp = nri::LoadOp::CLEAR;
+				a.clearValue.color.f = nri::Color32f{ cit->second.v[0], cit->second.v[1], cit->second.v[2], cit->second.v[3] };
+				PendingColorClears.erase(cit);
+			}
+			else { a.loadOp = nri::LoadOp::LOAD; }
+			a.storeOp = nri::StoreOp::STORE;
 			colors.push_back(a);
 		}
 		nri::AttachmentDesc depthAtt = {};
@@ -287,8 +329,15 @@ struct NRIBackend::Impl
 		{
 			TransitionTex(RTDepth, nri::AccessBits::DEPTH_STENCIL_ATTACHMENT_WRITE, nri::Layout::DEPTH_STENCIL_ATTACHMENT, nri::StageBits::ALL);
 			depthAtt.descriptor = DepthView(RTDepth);
-			depthAtt.loadOp = RTHasDepthClear ? nri::LoadOp::CLEAR : nri::LoadOp::LOAD; depthAtt.storeOp = nri::StoreOp::STORE;
-			if (RTHasDepthClear) depthAtt.clearValue.depthStencil.depth = RTDepthClear;
+			auto dit = PendingDepthClears.find(RTDepth);
+			if (dit != PendingDepthClears.end())
+			{
+				depthAtt.loadOp = nri::LoadOp::CLEAR;
+				depthAtt.clearValue.depthStencil.depth = dit->second;
+				PendingDepthClears.erase(dit);
+			}
+			else { depthAtt.loadOp = nri::LoadOp::LOAD; }
+			depthAtt.storeOp = nri::StoreOp::STORE;
 			haveDepth = depthAtt.descriptor != nullptr;
 		}
 		nri::RenderingDesc rd = {};
@@ -343,6 +392,7 @@ struct NRIBackend::Impl
 	{
 		nri::Buffer* buffer = nullptr;
 		std::vector<nri::Memory*> memory;
+		void* mapped = nullptr; // non-null for persistently-mapped HOST_UPLOAD buffers
 	};
 	std::unordered_map<Buffer*, BufferAlloc> Buffers;
 
@@ -930,6 +980,7 @@ public:
 		if (Pool) m->Core.DestroyDescriptorPool(Pool);
 		for (auto& b : Bindings) if (b.ownsDesc && b.desc) m->Core.DestroyDescriptor(b.desc);
 		if (Cbv.buffer) m->FreeBuffer(Cbv.buffer, Cbv.memory);
+		for (auto& cb : CbRing) { if (cb.view) m->Core.DestroyDescriptor(cb.view); if (cb.buffer) m->FreeBuffer(cb.buffer, cb.memory); }
 	}
 
 	bool IsValid() const { return Pipeline != nullptr; }
@@ -945,35 +996,82 @@ public:
 	void SetSampler(const std::string& name, Sampler* s) { if (Binding* b = Find(name)) { b->samp = s; } }
 	void SetConstant(const void* data, uint32_t size)
 	{
-		if (!Cbv.buffer || !data || size == 0) return;
-		void* mapped = m->Core.MapBuffer(*Cbv.buffer, 0, size > Cbv.size ? Cbv.size : size);
-		if (mapped) { memcpy(mapped, data, size > Cbv.size ? Cbv.size : size); m->Core.UnmapBuffer(*Cbv.buffer); }
+		// Stash for the next draw — the actual upload lands in a per-draw ring
+		// slot in ApplyForDraw so each draw gets its own constants (no aliasing).
+		if (!data || size == 0) return;
+		const uint32_t n = size > Cbv.size ? Cbv.size : size;
+		PendingCB.assign((const uint8_t*)data, (const uint8_t*)data + n);
+		PendingCBSize = n;
 	}
 
-	// Record layout + descriptor sets + pipeline onto the active command buffer
-	// (the caller must already be inside a render pass with matching attachments).
+	// Bind pipeline + layout + pool. Descriptor sets are bound per-draw in
+	// ApplyForDraw (textures/CB are set AFTER BindGraphicsPipeline by the caller,
+	// and each draw needs its own set to avoid D3D12 execute-time aliasing).
 	void Bind()
 	{
 		if (!Pipeline || !m->ActiveCmd) return;
-		for (Binding& b : Bindings) RefreshDescriptor(b);
+		if (Pool) m->Core.CmdSetDescriptorPool(*m->ActiveCmd, *Pool);
+		m->Core.CmdSetPipelineLayout(*m->ActiveCmd, nri::BindPoint::GRAPHICS, *Layout);
+		m->Core.CmdSetPipeline(*m->ActiveCmd, *Pipeline);
+	}
+
+	// Called by the backend immediately before each Cmd*Draw. Grabs a fresh
+	// per-draw descriptor set + constant-buffer slot from the per-frame ring,
+	// uploads the pending constants, writes all current descriptors, and binds.
+	void ApplyForDraw()
+	{
+		if (!Pipeline || !m->ActiveCmd || !HasResources || !Pool) return;
+
+		// Reset the ring at the start of each frame (EndFrame waits on the GPU,
+		// so previous-frame ring entries are safe to overwrite).
+		if (RingFrame != m->SwapFrameIndex) { RingFrame = m->SwapFrameIndex; RingIdx = 0; }
+		const uint32_t slot = RingIdx < kRing ? RingIdx : (kRing - 1);
+		++RingIdx;
+
+		// Lazily allocate this ring slot's descriptor set + CB buffer/view.
+		if (SetRing.size() <= slot) { SetRing.resize(slot + 1, nullptr); CbRing.resize(slot + 1); }
+		if (!SetRing[slot])
+			m->Core.AllocateDescriptorSets(*Pool, *Layout, 0, &SetRing[slot], 1, 0);
+		nri::DescriptorSet* set = SetRing[slot];
+		if (!set) return;
+
+		// Per-draw constant buffer slot.
+		nri::Descriptor* cbView = nullptr;
+		if (Cbv.size > 0)
+		{
+			CbvState& cb = CbRing[slot];
+			if (!cb.buffer)
+			{
+				if (m->CreateBoundBuffer(Cbv.size, 0, nri::BufferUsageBits::CONSTANT_BUFFER, nri::MemoryLocation::HOST_UPLOAD, cb.buffer, cb.memory))
+				{
+					cb.size = Cbv.size;
+					nri::BufferViewDesc bvd = {}; bvd.buffer = cb.buffer; bvd.type = nri::BufferView::CONSTANT_BUFFER; bvd.offset = 0; bvd.size = Cbv.size;
+					m->Core.CreateBufferView(bvd, cb.view);
+				}
+			}
+			if (cb.buffer && PendingCBSize > 0)
+			{
+				void* mapped = m->Core.MapBuffer(*cb.buffer, 0, PendingCBSize);
+				if (mapped) { memcpy(mapped, PendingCB.data(), PendingCBSize); m->Core.UnmapBuffer(*cb.buffer); }
+			}
+			cbView = cb.view;
+		}
+
+		// Write every binding's current descriptor into this ring set.
 		for (Binding& b : Bindings)
 		{
-			if (!b.desc || b.setIndex >= Sets.size() || !Sets[b.setIndex]) continue;
+			if (b.kind == Kind::CBV) { b.desc = cbView; b.ownsDesc = false; }
+			else RefreshDescriptor(b);
+			if (!b.desc) continue;
 			nri::Descriptor* d = b.desc;
 			nri::UpdateDescriptorRangeDesc upd = {};
-			upd.descriptorSet = Sets[b.setIndex]; upd.rangeIndex = b.rangeIndex; upd.baseDescriptor = 0;
+			upd.descriptorSet = set; upd.rangeIndex = b.rangeIndex; upd.baseDescriptor = 0;
 			upd.descriptors = &d; upd.descriptorNum = 1;
 			m->Core.UpdateDescriptorRanges(&upd, 1);
 		}
-		if (Pool) m->Core.CmdSetDescriptorPool(*m->ActiveCmd, *Pool);
-		m->Core.CmdSetPipelineLayout(*m->ActiveCmd, nri::BindPoint::GRAPHICS, *Layout);
-		for (uint32_t s = 0; s < Sets.size(); ++s)
-		{
-			if (!Sets[s]) continue;
-			nri::SetDescriptorSetDesc sd = {}; sd.setIndex = s; sd.descriptorSet = Sets[s]; sd.bindPoint = nri::BindPoint::GRAPHICS;
-			m->Core.CmdSetDescriptorSet(*m->ActiveCmd, sd);
-		}
-		m->Core.CmdSetPipeline(*m->ActiveCmd, *Pipeline);
+
+		nri::SetDescriptorSetDesc sd = {}; sd.setIndex = 0; sd.descriptorSet = set; sd.bindPoint = nri::BindPoint::GRAPHICS;
+		m->Core.CmdSetDescriptorSet(*m->ActiveCmd, sd);
 	}
 
 private:
@@ -1007,16 +1105,27 @@ private:
 
 	void Build(const GraphicsPipelineDesc& desc)
 	{
-		if (!m->Device) return;
+		auto plog = [&](const char* what) {
+			std::ofstream l("nri_pso.log", std::ios::app);
+			if (l) { std::string sp(desc.ShaderPath.begin(), desc.ShaderPath.end());
+				l << "GFXPSO FAIL [" << what << "] shader=" << sp << " vs=" << desc.VertexEntryPoint << " ps=" << desc.PixelEntryPoint << "\n"; }
+		};
+		if (!m->Device) { plog("no device"); return; }
 		std::string verr, perr;
 		const std::wstring vsW(desc.VertexEntryPoint.begin(), desc.VertexEntryPoint.end());
 		const std::wstring psW(desc.PixelEntryPoint.begin(), desc.PixelEntryPoint.end());
 		std::ifstream f(desc.ShaderPath, std::ios::binary);
-		if (!f.good()) return;
+		if (!f.good()) { plog("shader file not found"); return; }
 		std::stringstream ss; ss << f.rdbuf(); const std::string src = ss.str();
 		VsDxil = CompileHLSLToDXIL(src.data(), src.size(), desc.ShaderPath.c_str(), vsW.c_str(), L"vs_6_5", verr);
 		PsDxil = CompileHLSLToDXIL(src.data(), src.size(), desc.ShaderPath.c_str(), psW.c_str(), L"ps_6_5", perr);
-		if (VsDxil.empty() || PsDxil.empty()) return;
+		if (VsDxil.empty() || PsDxil.empty()) {
+			std::ofstream l("nri_pso.log", std::ios::app);
+			if (l) { std::string sp(desc.ShaderPath.begin(), desc.ShaderPath.end());
+				l << "GFXPSO FAIL [shader compile] shader=" << sp << " vsEmpty=" << VsDxil.empty() << " psEmpty=" << PsDxil.empty()
+				  << " vsErr=" << verr << " psErr=" << perr << "\n"; }
+			return;
+		}
 		VsEntry = desc.VertexEntryPoint; PsEntry = desc.PixelEntryPoint;
 
 		// Bindings -> descriptor set ranges (resource set + sampler set).
@@ -1024,7 +1133,7 @@ private:
 		const nri::StageBits gfxStages = nri::StageBits::VERTEX_SHADER | nri::StageBits::FRAGMENT_SHADER;
 		auto addRes = [&](const std::string& name, uint32_t reg, Kind k, nri::DescriptorType dt) {
 			Binding b; b.name = name; b.reg = reg; b.kind = k; b.setIndex = 0; b.rangeIndex = (uint32_t)resR.size(); Bindings.push_back(b);
-			nri::DescriptorRangeDesc r = {}; r.baseRegisterIndex = reg; r.descriptorNum = 1; r.descriptorType = dt; r.shaderStages = gfxStages; resR.push_back(r);
+			nri::DescriptorRangeDesc r = {}; r.baseRegisterIndex = reg; r.descriptorNum = 1; r.descriptorType = dt; r.shaderStages = gfxStages; r.flags = nri::DescriptorRangeBits::PARTIALLY_BOUND; resR.push_back(r);
 		};
 		for (const auto& t : desc.TextureBindings) addRes(t.Name, t.Slot, Kind::TexSRV, nri::DescriptorType::TEXTURE);
 		for (const auto& bb : desc.BufferBindings) addRes(bb.Name, bb.Slot, Kind::BufSRV, nri::DescriptorType::STRUCTURED_BUFFER);
@@ -1043,7 +1152,7 @@ private:
 		for (const auto& s : desc.SamplerBindings)
 		{
 			Binding b; b.name = s.Name; b.reg = s.Slot; b.kind = Kind::Sampler; b.setIndex = 0; b.rangeIndex = (uint32_t)resR.size(); Bindings.push_back(b);
-			nri::DescriptorRangeDesc r = {}; r.baseRegisterIndex = s.Slot; r.descriptorNum = 1; r.descriptorType = nri::DescriptorType::SAMPLER; r.shaderStages = gfxStages; resR.push_back(r);
+			nri::DescriptorRangeDesc r = {}; r.baseRegisterIndex = s.Slot; r.descriptorNum = 1; r.descriptorType = nri::DescriptorType::SAMPLER; r.shaderStages = gfxStages; r.flags = nri::DescriptorRangeBits::PARTIALLY_BOUND; resR.push_back(r);
 		}
 
 		// Single descriptor set (registerSpace 0) for all ranges (resources + samplers).
@@ -1051,16 +1160,21 @@ private:
 		if (!resR.empty()) { nri::DescriptorSetDesc d = {}; d.registerSpace = 0; d.ranges = resR.data(); d.rangeNum = (uint32_t)resR.size(); sets.push_back(d); }
 
 		nri::PipelineLayoutDesc pld = {}; pld.rootRegisterSpace = 0; pld.descriptorSets = sets.empty() ? nullptr : sets.data(); pld.descriptorSetNum = (uint32_t)sets.size(); pld.shaderStages = gfxStages;
-		if (m->Core.CreatePipelineLayout(*m->Device, pld, Layout) != nri::Result::SUCCESS) return;
+		if (m->Core.CreatePipelineLayout(*m->Device, pld, Layout) != nri::Result::SUCCESS) { plog("CreatePipelineLayout"); return; }
 
 		if (!sets.empty())
 		{
-			nri::DescriptorPoolDesc pd = {}; pd.descriptorSetMaxNum = (uint32_t)sets.size();
-			pd.textureMaxNum = (uint32_t)desc.TextureBindings.size(); pd.structuredBufferMaxNum = (uint32_t)desc.BufferBindings.size();
-			pd.constantBufferMaxNum = desc.ConstantBufferSize > 0 ? 1u : 0u; pd.samplerMaxNum = (uint32_t)desc.SamplerBindings.size();
-			if (m->Core.CreateDescriptorPool(*m->Device, pd, Pool) != nri::Result::SUCCESS) return;
-			Sets.resize(sets.size(), nullptr);
-			for (uint32_t s = 0; s < sets.size(); ++s) m->Core.AllocateDescriptorSets(*Pool, *Layout, s, &Sets[s], 1, 0);
+			// A single descriptor set reused across draws would alias in D3D12
+			// (descriptors resolve at GPU-execute time, so every draw in the
+			// command list would see the LAST set contents). Size the pool for a
+			// RING of sets and hand out a fresh one per draw (ApplyForDraw).
+			HasResources = true;
+			nri::DescriptorPoolDesc pd = {}; pd.descriptorSetMaxNum = kRing;
+			pd.textureMaxNum = (uint32_t)desc.TextureBindings.size() * kRing;
+			pd.structuredBufferMaxNum = (uint32_t)desc.BufferBindings.size() * kRing;
+			pd.constantBufferMaxNum = (desc.ConstantBufferSize > 0 ? 1u : 0u) * kRing;
+			pd.samplerMaxNum = (uint32_t)desc.SamplerBindings.size() * kRing;
+			if (m->Core.CreateDescriptorPool(*m->Device, pd, Pool) != nri::Result::SUCCESS) { plog("CreateDescriptorPool"); return; }
 		}
 
 		// Vertex input
@@ -1100,18 +1214,34 @@ private:
 		gpd.rasterization = rast;
 		gpd.outputMerger = om;
 		gpd.shaders = shaders; gpd.shaderNum = 2;
-		m->Core.CreateGraphicsPipeline(*m->Device, gpd, Pipeline);
+		nri::Result gr = m->Core.CreateGraphicsPipeline(*m->Device, gpd, Pipeline);
+		if (gr != nri::Result::SUCCESS || !Pipeline) {
+			std::ofstream l("nri_pso.log", std::ios::app);
+			if (l) { std::string sp(desc.ShaderPath.begin(), desc.ShaderPath.end());
+				l << "GFXPSO FAIL [CreateGraphicsPipeline] result=" << (int)gr << " shader=" << sp
+				  << " colorNum=" << om.colorNum << " hasDepth=" << desc.DepthFormat.has_value()
+				  << " attrs=" << attrs.size() << "\n"; }
+		}
 	}
 
 	NRIBackend::Impl* m = nullptr;
 	std::vector<Binding> Bindings;
-	CbvState Cbv;
+	CbvState Cbv;                       // size template for the per-draw CB ring
 	std::vector<uint8_t> VsDxil, PsDxil;
 	std::string VsEntry, PsEntry;
 	nri::PipelineLayout* Layout = nullptr;
 	nri::Pipeline* Pipeline = nullptr;
 	nri::DescriptorPool* Pool = nullptr;
 	std::vector<nri::DescriptorSet*> Sets;
+	bool HasResources = false;
+	// Per-draw ring: one descriptor set + one CB slot per draw, reused each frame.
+	static constexpr uint32_t kRing = 1024;
+	std::vector<nri::DescriptorSet*> SetRing;
+	std::vector<CbvState> CbRing;
+	uint32_t RingIdx = 0;
+	uint64_t RingFrame = ~0ull;
+	std::vector<uint8_t> PendingCB;
+	uint32_t PendingCBSize = 0;
 };
 
 // NRI routes validation / driver messages here. Surface them to the debugger
@@ -1647,7 +1777,70 @@ std::shared_ptr<Sampler> NRIBackend::CreateSampler(const SamplerCreateDesc& desc
 	m->Samplers[wrapper.get()] = samplerDesc;
 	return wrapper;
 }
-std::shared_ptr<Texture> NRIBackend::CreateTextureFromFile(const std::wstring&, bool) { NRI_TODO(); return nullptr; }
+std::shared_ptr<Texture> NRIBackend::CreateTextureFromFile(const std::wstring& fileName, bool nonSRGB)
+{
+	if (!m->Device || !m->GraphicsQueue) return nullptr;
+	std::error_code ec;
+	if (!std::filesystem::exists(fileName, ec)) return nullptr;
+
+	// Load via DirectXTex (DDS / TGA / WIC), then flatten to a single RGBA8
+	// mip-0 image so the upload path stays simple. Material textures lose mips
+	// for now; that only costs minification quality, not correctness.
+	DirectX::ScratchImage loaded;
+	const size_t dot = fileName.find_last_of(L'.');
+	std::wstring ext = (dot != std::wstring::npos) ? fileName.substr(dot + 1) : L"";
+	for (auto& c : ext) c = (wchar_t)towlower(c);
+	HRESULT hr;
+	if (ext == L"dds")      hr = DirectX::LoadFromDDSFile(fileName.c_str(), DirectX::DDS_FLAGS_NONE, nullptr, loaded);
+	else if (ext == L"tga") hr = DirectX::LoadFromTGAFile(fileName.c_str(), nullptr, loaded);
+	else                    hr = DirectX::LoadFromWICFile(fileName.c_str(), DirectX::WIC_FLAGS_NONE, nullptr, loaded);
+	if (FAILED(hr)) { ErrorString = "CreateTextureFromFile: decode failed"; return nullptr; }
+
+	const DXGI_FORMAT target = DXGI_FORMAT_R8G8B8A8_UNORM;
+	DirectX::ScratchImage converted;
+	const DirectX::TexMetadata& md = loaded.GetMetadata();
+	if (DirectX::IsCompressed(md.format))
+		hr = DirectX::Decompress(loaded.GetImages(), loaded.GetImageCount(), md, target, converted);
+	else if (md.format != target)
+		hr = DirectX::Convert(loaded.GetImages(), loaded.GetImageCount(), md, target, DirectX::TEX_FILTER_DEFAULT, 0.0f, converted);
+	if (FAILED(hr)) { ErrorString = "CreateTextureFromFile: convert failed"; return nullptr; }
+	const DirectX::ScratchImage& src = (DirectX::IsCompressed(md.format) || md.format != target) ? converted : loaded;
+
+	const DirectX::Image* img = src.GetImage(0, 0, 0);
+	if (!img || !img->pixels) return nullptr;
+
+	// Color/albedo textures are sRGB-encoded on disk and must be sampled with an
+	// sRGB view so the GPU linearizes them; normal/roughness/data maps stay UNORM.
+	const nri::Format texFormat = nonSRGB ? nri::Format::RGBA8_UNORM : nri::Format::RGBA8_SRGB;
+	nri::TextureDesc td = {};
+	td.type = nri::TextureType::TEXTURE_2D;
+	td.usage = nri::TextureUsageBits::SHADER_RESOURCE;
+	td.format = texFormat;
+	td.width = static_cast<nri::Dim_t>(img->width);
+	td.height = static_cast<nri::Dim_t>(img->height);
+	td.depth = 1; td.mipNum = 1; td.layerNum = 1; td.sampleNum = 1;
+
+	nri::Texture* tex = nullptr; std::vector<nri::Memory*> mem;
+	if (!m->CreateBoundTexture(td, tex, mem)) { ErrorString = "CreateTextureFromFile: CreateBoundTexture failed"; return nullptr; }
+
+	nri::TextureSubresourceUploadDesc sub = {};
+	sub.slices = img->pixels; sub.sliceNum = 1;
+	sub.rowPitch = static_cast<uint32_t>(img->rowPitch);
+	sub.slicePitch = static_cast<uint32_t>(img->slicePitch);
+	nri::TextureUploadDesc up = {};
+	up.subresources = &sub; up.texture = tex; up.planes = nri::PlaneBits::ALL;
+	up.after.access = nri::AccessBits::SHADER_RESOURCE; up.after.layout = nri::Layout::SHADER_RESOURCE; up.after.stages = nri::StageBits::ALL;
+	m->Helper.UploadData(*m->GraphicsQueue, &up, 1, nullptr, 0);
+
+	auto wrapper = std::make_shared<Texture>();
+	wrapper->Width = static_cast<uint32_t>(img->width);
+	wrapper->Height = static_cast<uint32_t>(img->height);
+	wrapper->MipLevels = 1; wrapper->Format = ETextureFormat::RGBA8Unorm;
+	Impl::TextureAlloc alloc; alloc.texture = tex; alloc.memory = std::move(mem);
+	m->Textures[wrapper.get()] = std::move(alloc);
+	m->TexLayout[wrapper.get()] = nri::Layout::SHADER_RESOURCE;
+	return wrapper;
+}
 std::shared_ptr<Texture> NRIBackend::CreateTexture3D(
 	ETextureFormat format, ETextureUsageFlags usage, EInitialResourceState /*initialState*/,
 	int width, int height, int depth, int mipLevels)
@@ -1759,8 +1952,29 @@ std::shared_ptr<VertexBuffer> NRIBackend::CreateRWVertexBuffer(uint32_t size, ui
 	m->VBs[w.get()] = std::move(gb);
 	return w;
 }
-std::shared_ptr<Buffer> NRIBackend::CreateUploadStructuredBuffer(uint32_t, uint32_t) { NRI_TODO(); return nullptr; }
-void NRIBackend::UpdateUploadStructuredBuffer(Buffer*, const void*, uint32_t) { NRI_TODO(); }
+std::shared_ptr<Buffer> NRIBackend::CreateUploadStructuredBuffer(uint32_t numElements, uint32_t elementSize)
+{
+	if (!m->Device || numElements == 0 || elementSize == 0) return nullptr;
+	const uint64_t size = static_cast<uint64_t>(numElements) * elementSize;
+	nri::Buffer* nb = nullptr; std::vector<nri::Memory*> mem;
+	if (!m->CreateBoundBuffer(size, elementSize, nri::BufferUsageBits::SHADER_RESOURCE, nri::MemoryLocation::HOST_UPLOAD, nb, mem))
+	{
+		ErrorString = "CreateUploadStructuredBuffer: CreateBoundBuffer failed";
+		return nullptr;
+	}
+	void* mapped = m->Core.MapBuffer(*nb, 0, size); // persistent map (HOST_UPLOAD)
+	auto w = std::make_shared<Buffer>();
+	w->Type = Buffer::STRUCTURED; w->NumElements = numElements; w->ElementSize = elementSize;
+	Impl::BufferAlloc alloc; alloc.buffer = nb; alloc.memory = std::move(mem); alloc.mapped = mapped;
+	m->Buffers[w.get()] = std::move(alloc);
+	return w;
+}
+void NRIBackend::UpdateUploadStructuredBuffer(Buffer* buffer, const void* srcData, uint32_t sizeInBytes)
+{
+	auto it = m->Buffers.find(buffer);
+	if (it != m->Buffers.end() && it->second.mapped && srcData)
+		memcpy(it->second.mapped, srcData, sizeInBytes);
+}
 
 // === Ray tracing ==========================================================
 std::shared_ptr<RTAS> NRIBackend::CreateBLASForMesh(Mesh*) { NRI_TODO(); return nullptr; }
@@ -1915,6 +2129,7 @@ void NRIBackend::RenderImGuiDrawData(ImDrawData* drawData)
 {
 	if (!m->ActiveCmd || !m->Imgui || !m->Streamer || !m->FrameHasBackbuffer || !drawData)
 		return;
+	++m->DbgImguiDraws;
 	const uint32_t idx = m->CurrentBackBuffer;
 
 	// Close any scene render pass first; the copy must be OUTSIDE a render pass.
@@ -1991,13 +2206,14 @@ void NRIBackend::SetRenderTargets(Texture* const* colorTargets, uint32_t count, 
 	m->RTHasClear = false; m->RTHasDepthClear = false;
 	m->CurrentWindowRT = (count > 0 && colorTargets) ? colorTargets[0] : nullptr;
 }
-void NRIBackend::ClearRenderTarget(Texture*, const float clearColor[4])
+void NRIBackend::ClearRenderTarget(Texture* target, const float clearColor[4])
 {
-	m->RTClear[0] = clearColor[0]; m->RTClear[1] = clearColor[1];
-	m->RTClear[2] = clearColor[2]; m->RTClear[3] = clearColor[3];
-	m->RTHasClear = true;
+	if (!target) return;
+	Impl::ClearColor c; c.v[0] = clearColor[0]; c.v[1] = clearColor[1]; c.v[2] = clearColor[2]; c.v[3] = clearColor[3];
+	m->PendingColorClears[target] = c;
+	++m->DbgClears;
 }
-void NRIBackend::ClearDepth(Texture*, float depthValue) { m->RTDepthClear = depthValue; m->RTHasDepthClear = true; }
+void NRIBackend::ClearDepth(Texture* target, float depthValue) { if (target) m->PendingDepthClears[target] = depthValue; }
 void NRIBackend::BindDefaultDescriptorHeaps() { NRI_TODO(); }
 void NRIBackend::SetViewportAndScissor(uint32_t width, uint32_t height)
 {
@@ -2012,8 +2228,9 @@ void NRIBackend::SetViewportAndScissor(uint32_t width, uint32_t height)
 }
 void NRIBackend::DrawFullscreenQuad(VertexBuffer* vertexBuffer)
 {
-	if (!m->ActiveCmd || !m->RasterEnabled || !m->HasBoundGfx) return;
+	if (!m->ActiveCmd || !m->RasterEnabled || !m->HasBoundGfx) { ++m->DbgDrawsSkipped; return; }
 	m->OpenRP();
+	if (m->CurrentGfx) static_cast<NRIGraphicsPipeline*>(m->CurrentGfx)->ApplyForDraw();
 	auto it = m->VBs.find(vertexBuffer);
 	if (it != m->VBs.end() && it->second.buffer)
 	{
@@ -2021,7 +2238,9 @@ void NRIBackend::DrawFullscreenQuad(VertexBuffer* vertexBuffer)
 		m->Core.CmdSetVertexBuffers(*m->ActiveCmd, 0, &vbd, 1);
 		nri::DrawDesc dd = {}; dd.vertexNum = (uint32_t)(vertexBuffer ? vertexBuffer->numVertices : 3); dd.instanceNum = 1;
 		m->Core.CmdDraw(*m->ActiveCmd, dd);
+		++m->DbgDraws;
 	}
+	else { ++m->DbgDrawsSkipped; }
 }
 void NRIBackend::BindMeshBuffers(VertexBuffer* vertexBuffer, IndexBuffer* indexBuffer)
 {
@@ -2039,17 +2258,21 @@ void NRIBackend::BindMeshBuffers(VertexBuffer* vertexBuffer, IndexBuffer* indexB
 }
 void NRIBackend::DrawIndexed(uint32_t indexCount, uint32_t startIndexLocation, int32_t baseVertexLocation)
 {
-	if (!m->ActiveCmd || !m->RasterEnabled || !m->HasBoundGfx) return;
+	if (!m->ActiveCmd || !m->RasterEnabled || !m->HasBoundGfx) { ++m->DbgDrawsSkipped; return; }
 	m->OpenRP();
+	if (m->CurrentGfx) static_cast<NRIGraphicsPipeline*>(m->CurrentGfx)->ApplyForDraw();
 	nri::DrawIndexedDesc dd = {}; dd.indexNum = indexCount; dd.instanceNum = 1; dd.baseIndex = startIndexLocation; dd.baseVertex = baseVertexLocation;
 	m->Core.CmdDrawIndexed(*m->ActiveCmd, dd);
+	++m->DbgDraws;
 }
 void NRIBackend::DrawIndexedInstanced(uint32_t indexCountPerInstance, uint32_t instanceCount, uint32_t startIndexLocation, int32_t baseVertexLocation, uint32_t startInstanceLocation)
 {
-	if (!m->ActiveCmd || !m->RasterEnabled || !m->HasBoundGfx) return;
+	if (!m->ActiveCmd || !m->RasterEnabled || !m->HasBoundGfx) { ++m->DbgDrawsSkipped; return; }
 	m->OpenRP();
+	if (m->CurrentGfx) static_cast<NRIGraphicsPipeline*>(m->CurrentGfx)->ApplyForDraw();
 	nri::DrawIndexedDesc dd = {}; dd.indexNum = indexCountPerInstance; dd.instanceNum = instanceCount; dd.baseIndex = startIndexLocation; dd.baseVertex = baseVertexLocation; dd.baseInstance = startInstanceLocation;
 	m->Core.CmdDrawIndexed(*m->ActiveCmd, dd);
+	++m->DbgDraws;
 }
 void NRIBackend::Dispatch(uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ)
 {
@@ -2110,10 +2333,11 @@ void NRIBackend::BindGraphicsPipeline(GraphicsPipelineHandle* pipeline)
 	m->HasBoundGfx = false;
 	if (!m->ActiveCmd || !pipeline || !m->RasterEnabled) return;
 	auto* p = static_cast<NRIGraphicsPipeline*>(pipeline);
-	if (!p->GetPipeline()) return;  // PSO failed to create — don't issue draws with no pipeline
+	if (!p->GetPipeline()) { ++m->DbgGfxBindFail; return; }  // PSO failed to create — don't issue draws with no pipeline
 	m->OpenRP();
 	p->Bind();
 	m->HasBoundGfx = true;
+	++m->DbgGfxBindOk;
 }
 void NRIBackend::SetGraphicsPipelineConstantData(GraphicsPipelineHandle* pipeline, uint32_t, const void* data, uint32_t size) { if (auto* p = static_cast<NRIGraphicsPipeline*>(pipeline)) p->SetConstant(data, size); }
 void NRIBackend::BindGraphicsPipelineTexture(GraphicsPipelineHandle* pipeline, const std::string& bindingName, Texture* texture) { if (auto* p = static_cast<NRIGraphicsPipeline*>(pipeline)) p->SetTexture(bindingName, texture); }

@@ -14096,7 +14096,14 @@ void Corona::OnRender()
 #else
 		const bool bPlatformerHybridDirectOnly = StartupLuauMode == L"platformer";
 #endif
-		const bool bHybridDirectOnly = bMobileHybridDirectOnly || bPlatformerHybridDirectOnly;
+		// Backends without ray tracing support (e.g. the NRI backend while its RT
+		// path is unimplemented) cannot run the RT shadow/reflection/GI stages, so
+		// drive the GBuffer + direct-lighting + tonemap path directly instead of
+		// stalling at stage_00 with no visible composite.
+		const bool bDesktopRasterDirectOnly =
+			renderBackend && renderBackend->GetMaxSupportedHybridStage() < 7u;
+		const bool bHybridDirectOnly =
+			bMobileHybridDirectOnly || bPlatformerHybridDirectOnly || bDesktopRasterDirectOnly;
 		const bool bStageDump = !bHybridDirectOnly && IsHybridStageAutoDumpPhase();
 		const uint32_t maxSupportedHybridStage =
 			bHybridDirectOnly ? 7u :

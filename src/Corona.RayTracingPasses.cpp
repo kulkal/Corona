@@ -457,10 +457,16 @@ void Corona::UpdateRayTracingInstanceTransforms()
 
 	if (bRayTracingBLASBuildSuspended)
 	{
-		AppendCpuRuntimeTrace(
-			L"[RTAS] transform update skipped after BLAS build suspension; falling back to raster for current scene"
-			L", requestedBuildableMeshes=" + std::to_wstring(meshCount) +
-			L", builtInstancesBeforeSuspend=" + std::to_wstring(updatedInstances.size()));
+		static bool bLoggedTransformSuspend = false;
+		if (!bLoggedTransformSuspend)
+		{
+			bLoggedTransformSuspend = true;
+			AppendCpuRuntimeTrace(
+				L"[RTAS] transform update skipped after BLAS build suspension; falling back to raster for current scene"
+				L", requestedBuildableMeshes=" + std::to_wstring(meshCount) +
+				L", builtInstancesBeforeSuspend=" + std::to_wstring(updatedInstances.size()) +
+				L" (further occurrences suppressed)");
+		}
 		RayTracingInstances.clear();
 		TLAS = nullptr;
 		bRayTracingSceneDirty = false;
@@ -794,13 +800,21 @@ void Corona::InitRTPSO()
 {
 	const auto totalStart = std::chrono::steady_clock::now();
 	const uint32_t maxSupportedHybridStage = renderBackend ? renderBackend->GetMaxSupportedHybridStage() : 7u;
+	// A backend reporting max hybrid stage 0 has no ray tracing support at all
+	// (e.g. the NRI backend while its RT path is unimplemented). Creating RT
+	// pipelines on such a backend stalls startup, so skip every RT pass init and
+	// rely on the GBuffer + direct-lighting path instead.
+	const bool bBackendSupportsRT = maxSupportedHybridStage >= 1u;
 	const bool bInitReflectionRT =
+		bBackendSupportsRT &&
 		(!renderBackend || renderBackend->GetAPI() != ERenderBackendAPI::Vulkan || maxSupportedHybridStage >= 3u);
 	const bool bInitGIRT =
+		bBackendSupportsRT &&
 		(!renderBackend || renderBackend->GetAPI() != ERenderBackendAPI::Vulkan || maxSupportedHybridStage >= 4u);
 
 	AppendCpuRuntimeTrace(
 		L"[StartupTiming][RTPSO] begin maxSupportedHybridStage=" + std::to_wstring(maxSupportedHybridStage) +
+		L", backendSupportsRT=" + std::to_wstring(bBackendSupportsRT ? 1 : 0) +
 		L", initReflection=" + std::to_wstring(bInitReflectionRT ? 1 : 0) +
 		L", initGI=" + std::to_wstring(bInitGIRT ? 1 : 0));
 
@@ -814,6 +828,13 @@ void Corona::InitRTPSO()
 			L"[StartupTiming][RTPSO] pass=\"" + std::wstring(name) +
 			L"\", elapsedMs=" + FormatRTInitMilliseconds(elapsedMs));
 	};
+
+	if (!bBackendSupportsRT)
+	{
+		AppendCpuRuntimeTrace(L"[StartupTiming][RTPSO] skip all passes (backend has no ray tracing support)");
+		AppendCpuRuntimeTrace(L"[StartupTiming][RTPSO] complete totalMs=0");
+		return;
+	}
 
 	timePass(L"RaytracingShadow", [&]() { InitRaytracingShadowPass(); });
 	timePass(L"ShadowSpatialReuse", [&]() { InitShadowSpatialReusePass(); });
