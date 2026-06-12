@@ -123,6 +123,26 @@ static nri::TextureUsageBits ToNRITextureUsage(ETextureUsageFlags u)
 	return bits;
 }
 
+// D3D12 enhanced barriers require AccessBefore to be consistent with LayoutBefore
+// (NONE access is only valid with UNDEFINED layout / NONE stages). Derive the access.
+static nri::AccessBits AccessForLayout(nri::Layout layout)
+{
+	switch (layout)
+	{
+	case nri::Layout::COLOR_ATTACHMENT:         return nri::AccessBits::COLOR_ATTACHMENT;
+	case nri::Layout::DEPTH_STENCIL_ATTACHMENT: return nri::AccessBits::DEPTH_STENCIL_ATTACHMENT_WRITE;
+	case nri::Layout::SHADER_RESOURCE:          return nri::AccessBits::SHADER_RESOURCE;
+	case nri::Layout::SHADER_RESOURCE_STORAGE:  return nri::AccessBits::SHADER_RESOURCE_STORAGE;
+	case nri::Layout::COPY_SOURCE:              return nri::AccessBits::COPY_SOURCE;
+	case nri::Layout::COPY_DESTINATION:         return nri::AccessBits::COPY_DESTINATION;
+	default:                                    return nri::AccessBits::NONE; // UNDEFINED / PRESENT
+	}
+}
+static nri::StageBits StagesForLayout(nri::Layout layout)
+{
+	return (layout == nri::Layout::UNDEFINED || layout == nri::Layout::PRESENT) ? nri::StageBits::NONE : nri::StageBits::ALL;
+}
+
 // Corona EResourceState -> NRI AccessStage (for CmdBarrier on buffers).
 static nri::AccessStage ToAccessStage(EResourceState s)
 {
@@ -191,7 +211,8 @@ struct NRIBackend::Impl
 	std::unordered_map<Texture*, nri::Descriptor*> TexColorView;
 	std::unordered_map<Texture*, nri::Descriptor*> TexDepthView;
 	bool RPOpen = false;
-	bool RasterEnabled = false; // gate scene graphics-pass recording during bring-up (ImGui path unaffected)
+	bool RasterEnabled = true; // scene graphics-pass recording (ImGui path is separate)
+	bool HasBoundGfx = false;  // a valid graphics pipeline is bound in the current pass
 	std::vector<Texture*> RTColors;
 	Texture* RTDepth = nullptr;
 	float RTClear[4] = { 0, 0, 0, 1 };
@@ -241,7 +262,7 @@ struct NRIBackend::Impl
 		nri::Layout before = TexLayout.count(t) ? TexLayout[t] : nri::Layout::UNDEFINED;
 		nri::TextureBarrierDesc tb = {};
 		tb.texture = nt;
-		tb.before.access = nri::AccessBits::NONE; tb.before.layout = before; tb.before.stages = nri::StageBits::ALL;
+		tb.before.access = AccessForLayout(before); tb.before.layout = before; tb.before.stages = StagesForLayout(before);
 		tb.after.access = access; tb.after.layout = layout; tb.after.stages = stages;
 		tb.mipNum = 1; tb.layerNum = 1;
 		nri::BarrierDesc bd = {}; bd.textures = &tb; bd.textureNum = 1;
@@ -286,6 +307,7 @@ struct NRIBackend::Impl
 	}
 	void EndRP()
 	{
+		HasBoundGfx = false;
 		if (!RPOpen || !ActiveCmd) return;
 		Core.CmdEndRendering(*ActiveCmd);
 		RPOpen = false;
@@ -305,9 +327,9 @@ struct NRIBackend::Impl
 			return;
 		nri::TextureBarrierDesc tb = {};
 		tb.texture = BackBuffers[CurrentBackBuffer];
-		tb.before.access = (BBLayout == nri::Layout::UNDEFINED) ? nri::AccessBits::NONE : (BBLayout == nri::Layout::COLOR_ATTACHMENT ? nri::AccessBits::COLOR_ATTACHMENT : nri::AccessBits::NONE);
+		tb.before.access = AccessForLayout(BBLayout);
 		tb.before.layout = BBLayout;
-		tb.before.stages = nri::StageBits::ALL;
+		tb.before.stages = StagesForLayout(BBLayout);
 		tb.after.access = access; tb.after.layout = layout; tb.after.stages = stages;
 		tb.mipNum = 1; tb.layerNum = 1;
 		nri::BarrierDesc bd = {}; bd.textures = &tb; bd.textureNum = 1;
@@ -770,11 +792,9 @@ private:
 		InitAttempted = true;
 		if (Dxil.empty() || !m->Device) return false;
 
-		std::vector<nri::DescriptorRangeDesc> resRanges, sampRanges;
-		const bool haveSamplers = [&] { for (auto& b : Bindings) if (b.kind == ResKind::Sampler) return true; return false; }();
-		const uint32_t resSetIndex = 0;
-		const uint32_t sampSetIndex = haveSamplers ? 1u : 0u;
-
+		// One descriptor set (registerSpace 0) holding all ranges — resources and
+		// samplers share HLSL space0, and NRI requires a unique registerSpace per set.
+		std::vector<nri::DescriptorRangeDesc> allRanges;
 		uint32_t texN = 0, storTexN = 0, sbufN = 0, storSbufN = 0, cbvN = 0, sampN = 0;
 		for (Binding& b : Bindings)
 		{
@@ -784,25 +804,21 @@ private:
 			r.descriptorNum = 1;
 			r.descriptorType = ToDescriptorType(b.kind);
 			r.shaderStages = nri::StageBits::COMPUTE_SHADER;
-			if (b.kind == ResKind::Sampler) { b.setIndex = sampSetIndex; b.rangeIndex = (uint32_t)sampRanges.size(); sampRanges.push_back(r); ++sampN; }
-			else
+			b.setIndex = 0; b.rangeIndex = (uint32_t)allRanges.size(); allRanges.push_back(r);
+			switch (b.kind)
 			{
-				b.setIndex = resSetIndex; b.rangeIndex = (uint32_t)resRanges.size(); resRanges.push_back(r);
-				switch (b.kind)
-				{
-				case ResKind::TexSRV: ++texN; break;
-				case ResKind::TexUAV: ++storTexN; break;
-				case ResKind::BufSRV: ++sbufN; break;
-				case ResKind::BufUAV: ++storSbufN; break;
-				case ResKind::CBV:    ++cbvN; break;
-				default: break;
-				}
+			case ResKind::TexSRV: ++texN; break;
+			case ResKind::TexUAV: ++storTexN; break;
+			case ResKind::BufSRV: ++sbufN; break;
+			case ResKind::BufUAV: ++storSbufN; break;
+			case ResKind::CBV:    ++cbvN; break;
+			case ResKind::Sampler:++sampN; break;
+			default: break;
 			}
 		}
 
 		std::vector<nri::DescriptorSetDesc> sets;
-		if (!resRanges.empty()) { nri::DescriptorSetDesc s = {}; s.registerSpace = 0; s.ranges = resRanges.data(); s.rangeNum = (uint32_t)resRanges.size(); sets.push_back(s); }
-		if (!sampRanges.empty()) { nri::DescriptorSetDesc s = {}; s.registerSpace = 0; s.ranges = sampRanges.data(); s.rangeNum = (uint32_t)sampRanges.size(); sets.push_back(s); }
+		if (!allRanges.empty()) { nri::DescriptorSetDesc s = {}; s.registerSpace = 0; s.ranges = allRanges.data(); s.rangeNum = (uint32_t)allRanges.size(); sets.push_back(s); }
 
 		nri::PipelineLayoutDesc pld = {};
 		pld.rootRegisterSpace = 0;
@@ -1004,7 +1020,7 @@ private:
 		VsEntry = desc.VertexEntryPoint; PsEntry = desc.PixelEntryPoint;
 
 		// Bindings -> descriptor set ranges (resource set + sampler set).
-		std::vector<nri::DescriptorRangeDesc> resR, sampR;
+		std::vector<nri::DescriptorRangeDesc> resR;
 		const nri::StageBits gfxStages = nri::StageBits::VERTEX_SHADER | nri::StageBits::FRAGMENT_SHADER;
 		auto addRes = [&](const std::string& name, uint32_t reg, Kind k, nri::DescriptorType dt) {
 			Binding b; b.name = name; b.reg = reg; b.kind = k; b.setIndex = 0; b.rangeIndex = (uint32_t)resR.size(); Bindings.push_back(b);
@@ -1024,18 +1040,15 @@ private:
 				if (Binding* cb = Find("$Globals")) { cb->desc = Cbv.view; }
 			}
 		}
-		const uint32_t samplerSetIndex = 1;
 		for (const auto& s : desc.SamplerBindings)
 		{
-			Binding b; b.name = s.Name; b.reg = s.Slot; b.kind = Kind::Sampler; b.setIndex = samplerSetIndex; b.rangeIndex = (uint32_t)sampR.size(); Bindings.push_back(b);
-			nri::DescriptorRangeDesc r = {}; r.baseRegisterIndex = s.Slot; r.descriptorNum = 1; r.descriptorType = nri::DescriptorType::SAMPLER; r.shaderStages = gfxStages; sampR.push_back(r);
+			Binding b; b.name = s.Name; b.reg = s.Slot; b.kind = Kind::Sampler; b.setIndex = 0; b.rangeIndex = (uint32_t)resR.size(); Bindings.push_back(b);
+			nri::DescriptorRangeDesc r = {}; r.baseRegisterIndex = s.Slot; r.descriptorNum = 1; r.descriptorType = nri::DescriptorType::SAMPLER; r.shaderStages = gfxStages; resR.push_back(r);
 		}
 
+		// Single descriptor set (registerSpace 0) for all ranges (resources + samplers).
 		std::vector<nri::DescriptorSetDesc> sets;
 		if (!resR.empty()) { nri::DescriptorSetDesc d = {}; d.registerSpace = 0; d.ranges = resR.data(); d.rangeNum = (uint32_t)resR.size(); sets.push_back(d); }
-		if (!sampR.empty()) { nri::DescriptorSetDesc d = {}; d.registerSpace = 0; d.ranges = sampR.data(); d.rangeNum = (uint32_t)sampR.size(); sets.push_back(d); }
-		// fix sampler set index if there is no resource set
-		if (resR.empty()) for (Binding& b : Bindings) if (b.kind == Kind::Sampler) b.setIndex = 0;
 
 		nri::PipelineLayoutDesc pld = {}; pld.rootRegisterSpace = 0; pld.descriptorSets = sets.empty() ? nullptr : sets.data(); pld.descriptorSetNum = (uint32_t)sets.size(); pld.shaderStages = gfxStages;
 		if (m->Core.CreatePipelineLayout(*m->Device, pld, Layout) != nri::Result::SUCCESS) return;
@@ -1109,6 +1122,8 @@ static void NRI_CALL NRIMessageCallback(nri::Message messageType, const char* fi
 	const char* sev = (messageType == nri::Message::ERROR) ? "ERROR" : (messageType == nri::Message::WARNING) ? "WARN" : "INFO";
 	_snprintf_s(buffer, _TRUNCATE, "[NRI][%s] %s (%s:%u)\n", sev, message ? message : "", file ? file : "?", line);
 	OutputDebugStringA(buffer);
+	std::ofstream log("nri_messages.log", std::ios::app);
+	if (log.is_open()) log << buffer;
 }
 
 // Provided so NRI does NOT DebugBreak/abort on validation errors during bring-up:
@@ -1124,8 +1139,8 @@ NRIBackend::NRIBackend() : m(std::make_unique<Impl>())
 
 	nri::DeviceCreationDesc desc = {};
 	desc.graphicsAPI = nri::GraphicsAPI::D3D12;
-	desc.enableNRIValidation = true;            // embedded NRI-specific validation
-	desc.enableGraphicsAPIValidation = false;   // D3D12 debug layer (opt-in later)
+	desc.enableNRIValidation = true;            // embedded NRI validation -> message log (fast)
+	desc.enableGraphicsAPIValidation = false;   // D3D12 debug layer is very slow + breaks on error; enable only for deep debugging
 	desc.callbackInterface.MessageCallback = NRIMessageCallback;
 	desc.callbackInterface.AbortExecution = NRIAbortCallback;
 
@@ -2001,7 +2016,7 @@ void NRIBackend::SetViewportAndScissor(uint32_t width, uint32_t height)
 }
 void NRIBackend::DrawFullscreenQuad(VertexBuffer* vertexBuffer)
 {
-	if (!m->ActiveCmd || !m->RasterEnabled) return;
+	if (!m->ActiveCmd || !m->RasterEnabled || !m->HasBoundGfx) return;
 	m->OpenRP();
 	auto it = m->VBs.find(vertexBuffer);
 	if (it != m->VBs.end() && it->second.buffer)
@@ -2028,14 +2043,14 @@ void NRIBackend::BindMeshBuffers(VertexBuffer* vertexBuffer, IndexBuffer* indexB
 }
 void NRIBackend::DrawIndexed(uint32_t indexCount, uint32_t startIndexLocation, int32_t baseVertexLocation)
 {
-	if (!m->ActiveCmd || !m->RasterEnabled) return;
+	if (!m->ActiveCmd || !m->RasterEnabled || !m->HasBoundGfx) return;
 	m->OpenRP();
 	nri::DrawIndexedDesc dd = {}; dd.indexNum = indexCount; dd.instanceNum = 1; dd.baseIndex = startIndexLocation; dd.baseVertex = baseVertexLocation;
 	m->Core.CmdDrawIndexed(*m->ActiveCmd, dd);
 }
 void NRIBackend::DrawIndexedInstanced(uint32_t indexCountPerInstance, uint32_t instanceCount, uint32_t startIndexLocation, int32_t baseVertexLocation, uint32_t startInstanceLocation)
 {
-	if (!m->ActiveCmd || !m->RasterEnabled) return;
+	if (!m->ActiveCmd || !m->RasterEnabled || !m->HasBoundGfx) return;
 	m->OpenRP();
 	nri::DrawIndexedDesc dd = {}; dd.indexNum = indexCountPerInstance; dd.instanceNum = instanceCount; dd.baseIndex = startIndexLocation; dd.baseVertex = baseVertexLocation; dd.baseInstance = startInstanceLocation;
 	m->Core.CmdDrawIndexed(*m->ActiveCmd, dd);
@@ -2096,9 +2111,13 @@ std::shared_ptr<GraphicsPipelineHandle> NRIBackend::CreateGraphicsPipeline(const
 void NRIBackend::BindGraphicsPipeline(GraphicsPipelineHandle* pipeline)
 {
 	m->CurrentGfx = pipeline;
+	m->HasBoundGfx = false;
 	if (!m->ActiveCmd || !pipeline || !m->RasterEnabled) return;
+	auto* p = static_cast<NRIGraphicsPipeline*>(pipeline);
+	if (!p->GetPipeline()) return;  // PSO failed to create — don't issue draws with no pipeline
 	m->OpenRP();
-	static_cast<NRIGraphicsPipeline*>(pipeline)->Bind();
+	p->Bind();
+	m->HasBoundGfx = true;
 }
 void NRIBackend::SetGraphicsPipelineConstantData(GraphicsPipelineHandle* pipeline, uint32_t, const void* data, uint32_t size) { if (auto* p = static_cast<NRIGraphicsPipeline*>(pipeline)) p->SetConstant(data, size); }
 void NRIBackend::BindGraphicsPipelineTexture(GraphicsPipelineHandle* pipeline, const std::string& bindingName, Texture* texture) { if (auto* p = static_cast<NRIGraphicsPipeline*>(pipeline)) p->SetTexture(bindingName, texture); }
