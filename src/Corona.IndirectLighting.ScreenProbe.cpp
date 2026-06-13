@@ -155,11 +155,6 @@ shared_ptr<RTPipelineStateObject> Corona::CreateRaytracingScreenProbeGIPSO(bool 
 		tempPSO->AddShader("missShadow", RTPipelineStateObject::MISS);
 
 		tempPSO->AddShader("chs", RTPipelineStateObject::HIT);
-		tempPSO->BindSRV("chs", MakeRHIBufferSRV("vertices", 3, closestHitStage, RHIBufferViewKind::Raw));
-		tempPSO->BindSRV("chs", MakeRHIBufferSRV("indices", 4, closestHitStage, RHIBufferViewKind::Raw));
-		if (!UsesRTBindlessMaterials())
-			tempPSO->BindSRV("chs", MakeRHITextureSRV("AlbedoTex", 5, closestHitStage));
-		tempPSO->BindSRV("chs", MakeRHIBufferSRV("InstanceProperty", 6, closestHitStage, RHIBufferViewKind::Raw));
 		tempPSO->Configure(1, sizeof(float) * 12, sizeof(float) * 2);
 		traceStep(L"Bind hit program resources");
 
@@ -224,9 +219,8 @@ void Corona::ScreenProbeRaytraceGIPass()
 		return;
 	renderBackend->EmitGpuCrashMarker("ScreenProbeRaytraceGIPass");
 
-	const bool bUseBindlessMaterials = UsesRTBindlessMaterials();
-	if (bUseBindlessMaterials && !EnsureRTMaterialRecordBuffer())
-		return;
+	if (!EnsureRTMaterialRecordBuffer())
+	return;
 
 	ScreenProbeGIAtlasWriteIndex = 1 - ScreenProbeGIAtlasWriteIndex;
 	const UINT writeIndex = ScreenProbeGIAtlasWriteIndex;
@@ -335,14 +329,10 @@ void Corona::ScreenProbeRaytraceGIPass()
 	pass.SetCBVValue("global", "ViewParameter", &RTScreenProbeGIViewParam);
 	pass.SetSampler("global", "sampleWrap", samplerWrap.get());
 	pass.SetSampler("global", "historyClamp", samplerBilinearWrap.get());
-	if (bUseBindlessMaterials)
-	{
-		pass.SetBindlessTextureTable("global", "MaterialTextures")
-			.SetBufferSRV("global", "RtMaterials", RTMaterialRecordBuffer.get());
-	}
+	pass.SetBindlessTextureTable("global", "MaterialTextures")
+		.SetBufferSRV("global", "RtMaterials", RTMaterialRecordBuffer.get());
 
 	RTSceneHitProgramDesc hitProgramDesc;
-	hitProgramDesc.bBindDiffuseTexture = !bUseBindlessMaterials;
 	pass.BindSceneHitPrograms(hitProgramDesc);
 	pass.Dispatch(probeGridWidth, probeGridHeight);
 

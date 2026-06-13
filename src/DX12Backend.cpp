@@ -5308,16 +5308,6 @@ void D3D12RTPipelineStateObject::BindUAV(const string& shader, const RHIBindingD
 
 void D3D12RTPipelineStateObject::BindSRV(const string& shader, const string& name, uint32_t baseRegister)
 {
-	if (shader != "global" &&
-		(name == "vertices" || name == "indices" || name == "InstanceProperty") &&
-		std::any_of(ShaderDefines.begin(), ShaderDefines.end(), [](const auto& define)
-		{
-			return define.first == "CORONA_BINDLESS_GEOMETRY" && define.second != "0";
-		}))
-	{
-		return;
-	}
-
 	if (shader == "global")
 	{
 		BindingData binding;
@@ -5346,16 +5336,6 @@ void D3D12RTPipelineStateObject::BindSRV(const string& shader, const string& nam
 
 void D3D12RTPipelineStateObject::BindSRV(const string& shader, const RHIBindingDesc& binding)
 {
-	if (shader != "global" &&
-		(binding.Name == "vertices" || binding.Name == "indices" || binding.Name == "InstanceProperty") &&
-		std::any_of(ShaderDefines.begin(), ShaderDefines.end(), [](const auto& define)
-		{
-			return define.first == "CORONA_BINDLESS_GEOMETRY" && define.second != "0";
-		}))
-	{
-		return;
-	}
-
 	BindSRV(shader, binding.Name, binding.RegisterIndex);
 	if (shader == "global")
 		GlobalBinding.back().Schema = binding;
@@ -5833,18 +5813,6 @@ void D3D12RTPipelineStateObject::StartHitProgram(const string& HitGroup, uint32_
 	}
 	//(*HitProgram)[instanceIndex].HitGroupName = StringToWString(HitGroup);
 	(*HitProgram)[instanceIndex].VecData.clear();
-}
-
-void D3D12RTPipelineStateObject::AddDescriptor2HitProgram(const string& HitGroup, D3D12_GPU_DESCRIPTOR_HANDLE srvHandle, UINT instanceIndex)
-{
-	map<UINT, HitProgramData>* HitProgram = nullptr;
-	for (auto& HG : VecHitGroup)
-	{
-		if (HG.name == StringToWString(HitGroup))
-			HitProgram = &HG.HitProgramBinding;
-	}
-
-	(*HitProgram)[instanceIndex].VecData.push_back(srvHandle);
 }
 
 void D3D12RTPipelineStateObject::SetSampler(const string& shader, const string& bindingName, Sampler* sampler, INT instanceIndex /*= -1*/)
@@ -6418,26 +6386,6 @@ void D3D12RTPipelineStateObject::SetAccelerationStructure(const string& shader, 
 	D3D12RTAS* dx12RTAS = dynamic_cast<D3D12RTAS*>(rtas.get());
 	assert(dx12RTAS);
 	SetSRVHandle(shader, bindingName, dx12RTAS->GPUHandle, instanceIndex);
-}
-
-void D3D12RTPipelineStateObject::AddTextureSRVToHitProgram(const string& hitGroup, Texture* texture, uint32_t instanceIndex)
-{
-	assert(texture);
-	AddDescriptor2HitProgram(hitGroup, texture->GpuHandleSRV, instanceIndex);
-}
-
-void D3D12RTPipelineStateObject::AddBufferSRVToHitProgram(const string& hitGroup, Buffer* buffer, uint32_t instanceIndex)
-{
-	assert(buffer);
-	AddDescriptor2HitProgram(hitGroup, buffer->GpuHandleSRV, instanceIndex);
-}
-
-void D3D12RTPipelineStateObject::AddSceneGeometrySRVsToHitProgram(const string& hitGroup, VertexBuffer* sceneVertexBuffer, IndexBuffer* sceneIndexBuffer, uint32_t instanceIndex)
-{
-	assert(sceneVertexBuffer);
-	assert(sceneIndexBuffer);
-	AddDescriptor2HitProgram(hitGroup, sceneVertexBuffer->GpuHandleSRV, instanceIndex);
-	AddDescriptor2HitProgram(hitGroup, sceneIndexBuffer->GpuHandleSRV, instanceIndex);
 }
 
 void DescriptorHeapRing::Init(DescriptorHeap* InDHHeap, UINT InNumDescriptors, UINT InNumFrame)

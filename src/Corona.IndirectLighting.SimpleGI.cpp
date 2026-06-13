@@ -55,11 +55,6 @@ shared_ptr<RTPipelineStateObject> Corona::CreateRaytracingSimpleGIPSO(bool bUseS
 
 
 		TEMP_PSO_RT_GI->AddShader("chs", RTPipelineStateObject::HIT);
-		TEMP_PSO_RT_GI->BindSRV("chs", MakeRHIBufferSRV("vertices", 3, closestHitStage, RHIBufferViewKind::Raw));
-		TEMP_PSO_RT_GI->BindSRV("chs", MakeRHIBufferSRV("indices", 4, closestHitStage, RHIBufferViewKind::Raw));
-		if (!UsesRTBindlessMaterials())
-			TEMP_PSO_RT_GI->BindSRV("chs", MakeRHITextureSRV("AlbedoTex", 5, closestHitStage));
-		TEMP_PSO_RT_GI->BindSRV("chs", MakeRHIBufferSRV("InstanceProperty", 6, closestHitStage, RHIBufferViewKind::Raw));
 		TEMP_PSO_RT_GI->Configure(1, sizeof(float) * 12, sizeof(float) * 2);
 
 		const bool bSuccess = TEMP_PSO_RT_GI->InitRS("Shaders\\RaytracedGI.hlsl");
@@ -108,9 +103,8 @@ void Corona::RaytraceGIPass()
 		return;
 	renderBackend->EmitGpuCrashMarker("RaytraceGIPass");
 
-	const bool bUseBindlessMaterials = UsesRTBindlessMaterials();
-	if (bUseBindlessMaterials && !EnsureRTMaterialRecordBuffer())
-		return;
+	if (!EnsureRTMaterialRecordBuffer())
+	return;
 
 	renderBackend->TransitionTexture(DiffuseGIRawAux.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
 	renderBackend->TransitionTexture(DiffuseGIRaw.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
@@ -167,17 +161,12 @@ void Corona::RaytraceGIPass()
 		.SetTextureSRV("global", "RayNoiseBlueNoiseSource", BlueNoiseTex.get())
 		.SetCBVValue("global", "ViewParameter", &RTGIViewParam)
 		.SetSampler("global", "sampleWrap", samplerWrap.get());
-	if (bUseBindlessMaterials)
-	{
-		pass.SetBindlessTextureTable("global", "MaterialTextures")
-			.SetBufferSRV("global", "RtMaterials", RTMaterialRecordBuffer.get());
-	}
+	pass.SetBindlessTextureTable("global", "MaterialTextures")
+		.SetBufferSRV("global", "RtMaterials", RTMaterialRecordBuffer.get());
 	RTSceneHitProgramDesc hitProgramDesc;
-	hitProgramDesc.bBindDiffuseTexture = !bUseBindlessMaterials;
 	pass.BindSceneHitPrograms(hitProgramDesc);
 	pass.Dispatch(GetRenderWidth(), GetRenderHeight());
 
 	renderBackend->TransitionTexture(DiffuseGIRawAux.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
 	renderBackend->TransitionTexture(DiffuseGIRaw.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
 }
-

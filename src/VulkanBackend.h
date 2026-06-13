@@ -176,9 +176,6 @@ struct VulkanRTPipelineStateObject : RTPipelineStateObject
 	void SetCBVValue(const std::string& shader, const std::string& bindingName, void* pData, int instanceIndex = -1) override;
 	void ResetHitProgram(uint32_t instanceIndex) override;
 	void StartHitProgram(const std::string& hitGroup, uint32_t instanceIndex) override;
-	void AddTextureSRVToHitProgram(const std::string& hitGroup, Texture* texture, uint32_t instanceIndex) override;
-	void AddBufferSRVToHitProgram(const std::string& hitGroup, Buffer* buffer, uint32_t instanceIndex) override;
-	void AddSceneGeometrySRVsToHitProgram(const std::string& hitGroup, VertexBuffer* sceneVertexBuffer, IndexBuffer* sceneIndexBuffer, uint32_t instanceIndex) override;
 	bool InitRS(const std::string& shaderFile) override;
 	void Apply(uint32_t width, uint32_t height) override;
 	bool GetDispatchRaysIndirectTemplate(uint32_t width, uint32_t height, RtDispatchRaysIndirectTemplate& outTemplate) const override;

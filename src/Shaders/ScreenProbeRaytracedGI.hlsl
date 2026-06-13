@@ -16,16 +16,6 @@ RWTexture2D<float4> ProbeSH8 : register(u10);
 RaytracingAccelerationStructure gRtScene : register(t0);
 Texture2D DepthTex : register(t1);
 Texture2D WorldNormalTex : register(t2);
-#if !defined(CORONA_BINDLESS_GEOMETRY) || !CORONA_BINDLESS_GEOMETRY
-ByteAddressBuffer vertices : register(t3);
-ByteAddressBuffer indices : register(t4);
-#endif
-#if !defined(CORONA_BINDLESS_MATERIALS) || !CORONA_BINDLESS_MATERIALS
-Texture2D AlbedoTex : register(t5);
-#endif
-#if !defined(CORONA_BINDLESS_GEOMETRY) || !CORONA_BINDLESS_GEOMETRY
-ByteAddressBuffer InstanceProperty : register(t6);
-#endif
 Texture3D RayNoiseBlueNoiseSource : register(t7);
 Texture2D PrevProbeRadianceTex : register(t8);
 Texture2D PrevProbeMetaTex : register(t9);
@@ -868,26 +858,18 @@ void chs(inout RayPayload payload, in BuiltInTriangleIntersectionAttributes attr
         hitNormal = -hitNormal;
     payload.normal = hitNormal;
 
-#if defined(CORONA_BINDLESS_MATERIALS) && CORONA_BINDLESS_MATERIALS
     RTMaterialRecord material = RtMaterials[instanceID];
-#endif
     uint w, h;
-#if defined(CORONA_BINDLESS_MATERIALS) && CORONA_BINDLESS_MATERIALS
     MaterialTextures[NonUniformResourceIndex(material.AlbedoTextureIndex)].GetDimensions(w, h);
-#else
-    AlbedoTex.GetDimensions(w, h);
-#endif
+
     float halfLog2NumTexPixels = 0.5f * log2(w * h);
     vertex.textureLODConstant += halfLog2NumTexPixels;
     float hitT = RayTCurrent();
     float rayConeWidth = payload.spreadAngle * hitT + payload.coneWidth;
     float mipLevel = computeTextureLOD(1.0f, rayConeWidth, vertex.textureLODConstant);
 
-#if defined(CORONA_BINDLESS_MATERIALS) && CORONA_BINDLESS_MATERIALS
     payload.color = max(CommonSanitizeFloat3(MaterialTextures[NonUniformResourceIndex(material.AlbedoTextureIndex)].SampleLevel(sampleWrap, vertex.uv, mipLevel).xyz, 1.0f.xxx), 0.0f.xxx);
-#else
-    payload.color = max(CommonSanitizeFloat3(AlbedoTex.SampleLevel(sampleWrap, vertex.uv, mipLevel).xyz, 1.0f.xxx), 0.0f.xxx);
-#endif
+
     payload.bHit = true;
 }
 

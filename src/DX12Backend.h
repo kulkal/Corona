@@ -335,9 +335,6 @@ public:
 	void SetCBVValue(const std::string& shader, const std::string& bindingName, void* pData, int instanceIndex = -1) override;
 	void ResetHitProgram(uint32_t instanceIndex) override;
 	void StartHitProgram(const std::string& hitGroup, uint32_t instanceIndex) override;
-	void AddTextureSRVToHitProgram(const std::string& hitGroup, Texture* texture, uint32_t instanceIndex) override;
-	void AddBufferSRVToHitProgram(const std::string& hitGroup, Buffer* buffer, uint32_t instanceIndex) override;
-	void AddSceneGeometrySRVsToHitProgram(const std::string& hitGroup, VertexBuffer* sceneVertexBuffer, IndexBuffer* sceneIndexBuffer, uint32_t instanceIndex) override;
 	bool InitRS(const std::string& shaderFile) override;
 	void Apply(uint32_t width, uint32_t height) override;
 	bool GetDispatchRaysIndirectTemplate(uint32_t width, uint32_t height, RtDispatchRaysIndirectTemplate& outTemplate) const override;
@@ -346,7 +343,6 @@ public:
 	void SetGlobalBinding(CommandList* CommandList = nullptr);
 	void SetUAVHandle(const std::string& shader, const std::string& bindingName, D3D12_GPU_DESCRIPTOR_HANDLE uavHandle, INT instanceIndex = -1);
 	void SetSRVHandle(const std::string& shader, const std::string& bindingName, D3D12_GPU_DESCRIPTOR_HANDLE srvHandle, INT instanceIndex = -1);
-	void AddDescriptor2HitProgram(const std::string& hitGroup, D3D12_GPU_DESCRIPTOR_HANDLE srvHandle, UINT instanceIndex);
 	bool BuildDispatchRaysDesc(uint32_t width, uint32_t height, D3D12_DISPATCH_RAYS_DESC& outDesc) const;
 	bool EnsureDispatchRaysCommandSignature();
 };

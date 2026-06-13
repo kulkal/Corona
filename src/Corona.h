@@ -2435,25 +2435,15 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	{
 		RTSceneHitProgramDesc()
 			: HitGroup("HitGroup")
-			, bBindSceneGeometry(true)
-			, bBindDiffuseTexture(true)
-			, bBindInstanceProperty(true)
-			, bBindInstancePropertyBeforeDiffuse(false)
 		{
 		}
 
 		const char* HitGroup;
-		bool bBindSceneGeometry;
-		bool bBindDiffuseTexture;
-		bool bBindInstanceProperty;
-		bool bBindInstancePropertyBeforeDiffuse;
 	};
 
 	class RTPassBuilder
 	{
 	public:
-		using HitProgramBinder = std::function<void(RTPipelineStateObject& pso, const RTSceneHitProgramDesc& desc, Mesh& mesh, uint32_t instanceIndex)>;
-
 		RTPassBuilder(Corona& owner, const shared_ptr<RTPipelineStateObject>& pso);
 
 		bool IsValid() const;
@@ -2467,19 +2457,13 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 		RTPassBuilder& SetAccelerationStructure(const char* shader, const char* bindingName, const shared_ptr<RTAS>& rtas);
 		RTPassBuilder& SetSampler(const char* shader, const char* bindingName, Sampler* sampler);
 		RTPassBuilder& SetCBVValue(const char* shader, const char* bindingName, void* data);
-		uint32_t BindSceneHitPrograms(const RTSceneHitProgramDesc& desc = RTSceneHitProgramDesc(), const HitProgramBinder& customBinder = HitProgramBinder());
+		uint32_t BindSceneHitPrograms(const RTSceneHitProgramDesc& desc = RTSceneHitProgramDesc());
 		bool FinalizeShaderTable();
 		bool GetDispatchRaysIndirectTemplate(uint32_t width, uint32_t height, RtDispatchRaysIndirectTemplate& outTemplate);
 		void Dispatch(uint32_t width, uint32_t height);
 		bool DispatchIndirect(Buffer* indirectArgumentBuffer, uint64_t byteOffset = 0);
 
-		Texture* GetDiffuseTexture(const Mesh& mesh) const;
-		Texture* GetNormalTexture(const Mesh& mesh) const;
-		Texture* GetRoughnessTexture(const Mesh& mesh) const;
-		Texture* GetMetallicTexture(const Mesh& mesh) const;
-
 	private:
-		Material* GetPrimaryMaterial(const Mesh& mesh) const;
 		uint64_t BuildHitProgramBindingSignature(const RTSceneHitProgramDesc& desc) const;
 
 		Corona& Owner;

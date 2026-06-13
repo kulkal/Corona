@@ -3,11 +3,6 @@
 
 RaytracingAccelerationStructure gRtScene : register(t0);
 Texture2D DepthTex : register(t1);
-#if !defined(CORONA_BINDLESS_GEOMETRY) || !CORONA_BINDLESS_GEOMETRY
-ByteAddressBuffer vertices : register(t2);
-ByteAddressBuffer indices : register(t3);
-ByteAddressBuffer InstanceProperty : register(t4);
-#endif
 
 RWStructuredBuffer<uint> ActiveFlagsOut : register(u0);
 RWStructuredBuffer<float4> CellPositionOut : register(u1);

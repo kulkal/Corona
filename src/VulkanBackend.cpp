@@ -1293,31 +1293,6 @@ void VulkanRTPipelineStateObject::StartHitProgram(const std::string& hitGroup, u
 	(void)hitGroup;
 	HitProgramBindingValues[instanceIndex].clear();
 }
-void VulkanRTPipelineStateObject::AddTextureSRVToHitProgram(const std::string& hitGroup, Texture* texture, uint32_t instanceIndex)
-{
-	(void)hitGroup;
-	ResourceBindingValue value{};
-	value.TextureValue = texture;
-	HitProgramBindingValues[instanceIndex].push_back(value);
-}
-void VulkanRTPipelineStateObject::AddBufferSRVToHitProgram(const std::string& hitGroup, Buffer* buffer, uint32_t instanceIndex)
-{
-	(void)hitGroup;
-	ResourceBindingValue value{};
-	value.BufferValue = buffer;
-	HitProgramBindingValues[instanceIndex].push_back(value);
-}
-void VulkanRTPipelineStateObject::AddSceneGeometrySRVsToHitProgram(const std::string& hitGroup, VertexBuffer* sceneVertexBuffer, IndexBuffer* sceneIndexBuffer, uint32_t instanceIndex)
-{
-	(void)hitGroup;
-	ResourceBindingValue value{};
-	value.VertexBufferValue = sceneVertexBuffer;
-	HitProgramBindingValues[instanceIndex].push_back(value);
-
-	value = {};
-	value.IndexBufferValue = sceneIndexBuffer;
-	HitProgramBindingValues[instanceIndex].push_back(value);
-}
 
 bool VulkanRTPipelineStateObject::InitRS(const std::string& shaderFile)
 {

@@ -20,16 +20,6 @@ Texture2D GeoNormalTex : register(t2);
 Texture2D RougnessMetallicTex : register(t6);
 Texture3D RayNoiseBlueNoiseSource : register(t7);
 Texture2D WorldNormalTex : register(t8);
-#if !defined(CORONA_BINDLESS_GEOMETRY) || !CORONA_BINDLESS_GEOMETRY
-ByteAddressBuffer vertices : register(t3);
-ByteAddressBuffer indices : register(t4);
-#endif
-#if !defined(CORONA_BINDLESS_MATERIALS) || !CORONA_BINDLESS_MATERIALS
-Texture2D AlbedoTex : register(t5);
-#endif
-#if !defined(CORONA_BINDLESS_GEOMETRY) || !CORONA_BINDLESS_GEOMETRY
-ByteAddressBuffer InstanceProperty : register(t9);
-#endif
 Texture2D ReflReservoirAPrev : register(t10);
 Texture2D ReflReservoirBPrev : register(t11);
 Texture2D ReflVelocityTex    : register(t12);
@@ -774,15 +764,10 @@ void chs(inout RayPayload payload, in BuiltInTriangleIntersectionAttributes attr
     payload.position = SpecSanitizeFloat3(vertex.position, WorldRayOrigin() + WorldRayDirection() * hitT);
     payload.normal = SpecSafeNormalize(vertex.normal, -WorldRayDirection());
 
-#if defined(CORONA_BINDLESS_MATERIALS) && CORONA_BINDLESS_MATERIALS
     RTMaterialRecord material = RtMaterials[instanceID];
-#endif
     uint w, h;
-#if defined(CORONA_BINDLESS_MATERIALS) && CORONA_BINDLESS_MATERIALS
     MaterialTextures[NonUniformResourceIndex(material.AlbedoTextureIndex)].GetDimensions(w, h);
-#else
-    AlbedoTex.GetDimensions(w, h);
-#endif
+
     float halfLog2NumTexPixels = 0.5 * log2(max(float(w) * float(h), 1.0f));
 
     vertex.textureLODConstant += halfLog2NumTexPixels;
@@ -790,11 +775,8 @@ void chs(inout RayPayload payload, in BuiltInTriangleIntersectionAttributes attr
 
     float NoV = 1;//dot(V, vertex.normal);
     float mipLevel = computeTextureLOD(NoV, rayConeWidth, vertex.textureLODConstant);
-#if defined(CORONA_BINDLESS_MATERIALS) && CORONA_BINDLESS_MATERIALS
     payload.color = max(SpecSanitizeFloat3(MaterialTextures[NonUniformResourceIndex(material.AlbedoTextureIndex)].SampleLevel(sampleWrap, vertex.uv, mipLevel).xyz, 1.0f.xxx), 0.0f.xxx);
-#else
-    payload.color = max(SpecSanitizeFloat3(AlbedoTex.SampleLevel(sampleWrap, vertex.uv, mipLevel).xyz, 1.0f.xxx), 0.0f.xxx);
-#endif
+
     payload.bHit = true;
     payload.hitDist = hitT;
 }

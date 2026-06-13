@@ -10,8 +10,6 @@ class Texture;
 class Buffer;
 class Sampler;
 class RTAS;
-class VertexBuffer;
-class IndexBuffer;
 
 struct RtDispatchRaysIndirectTemplate
 {
@@ -97,10 +95,6 @@ public:
 	virtual void SetCBVValue(const std::string& shader, const std::string& bindingName, void* pData, int instanceIndex = -1) = 0;
 	virtual void ResetHitProgram(uint32_t instanceIndex) = 0;
 	virtual void StartHitProgram(const std::string& hitGroup, uint32_t instanceIndex) = 0;
-	virtual void AddTextureSRVToHitProgram(const std::string& hitGroup, Texture* texture, uint32_t instanceIndex) = 0;
-	virtual void AddBufferSRVToHitProgram(const std::string& hitGroup, Buffer* buffer, uint32_t instanceIndex) = 0;
-	// Hit shaders use scene-global geometry; InstanceProperty carries the per-instance offsets.
-	virtual void AddSceneGeometrySRVsToHitProgram(const std::string& hitGroup, VertexBuffer* sceneVertexBuffer, IndexBuffer* sceneIndexBuffer, uint32_t instanceIndex) = 0;
 	virtual bool InitRS(const std::string& shaderFile) = 0;
 	virtual void Apply(uint32_t width, uint32_t height) = 0;
 	virtual bool GetDispatchRaysIndirectTemplate(uint32_t width, uint32_t height, RtDispatchRaysIndirectTemplate& outTemplate) const = 0;

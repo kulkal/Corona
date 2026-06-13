@@ -67,11 +67,6 @@ void Corona::InitRaytracingShadowPass()
 		TEMP_PSO_RT_SHADOW->AddShader("miss", RTPipelineStateObject::MISS);
 		
 		TEMP_PSO_RT_SHADOW->AddShader("anyhit", RTPipelineStateObject::ANYHIT);
-		TEMP_PSO_RT_SHADOW->BindSRV("anyhit", MakeRHIBufferSRV("vertices", 3, anyHitStage, RHIBufferViewKind::Raw));
-		TEMP_PSO_RT_SHADOW->BindSRV("anyhit", MakeRHIBufferSRV("indices", 4, anyHitStage, RHIBufferViewKind::Raw));
-		if (!UsesRTBindlessMaterials())
-			TEMP_PSO_RT_SHADOW->BindSRV("anyhit", MakeRHITextureSRV("AlbedoTex", 5, anyHitStage));
-		TEMP_PSO_RT_SHADOW->BindSRV("anyhit", MakeRHIBufferSRV("InstanceProperty", 6, anyHitStage, RHIBufferViewKind::Raw));
 		TEMP_PSO_RT_SHADOW->Configure(1, sizeof(float) * 4, sizeof(float) * 2);
 
 		bool bSuccess = TEMP_PSO_RT_SHADOW->InitRS("Shaders\\RaytracedShadow.hlsl");
@@ -114,9 +109,8 @@ void Corona::RaytraceShadowPass()
 		return;
 	renderBackend->EmitGpuCrashMarker("RaytraceShadowPass");
 
-	const bool bUseBindlessMaterials = UsesRTBindlessMaterials();
-	if (bUseBindlessMaterials && !EnsureRTMaterialRecordBuffer())
-		return;
+	if (!EnsureRTMaterialRecordBuffer())
+	return;
 
 	RTShadowViewParam.ViewMatrix = glm::transpose(ViewMat);
 	RTShadowViewParam.InvViewMatrix = glm::transpose(InvViewMat);
@@ -328,13 +322,9 @@ void Corona::RaytraceShadowPass()
 		.SetTextureSRV("global", "VelocityTex", VelocityBuffer.get())
 		.SetCBVValue("global", "ViewParameter", &RTShadowViewParam)
 		.SetSampler("global", "sampleWrap", samplerWrap.get());
-	if (bUseBindlessMaterials)
-	{
-		pass.SetBindlessTextureTable("global", "MaterialTextures")
-			.SetBufferSRV("global", "RtMaterials", RTMaterialRecordBuffer.get());
-	}
+	pass.SetBindlessTextureTable("global", "MaterialTextures")
+		.SetBufferSRV("global", "RtMaterials", RTMaterialRecordBuffer.get());
 	RTSceneHitProgramDesc hitProgramDesc;
-	hitProgramDesc.bBindDiffuseTexture = !bUseBindlessMaterials;
 	pass.BindSceneHitPrograms(hitProgramDesc);
 	pass.Dispatch(GetRenderWidth(), GetRenderHeight());
 

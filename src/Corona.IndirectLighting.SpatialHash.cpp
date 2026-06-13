@@ -146,11 +146,6 @@ shared_ptr<RTPipelineStateObject> Corona::CreateRaytracingSpatialHashGIPSO(bool 
 		tempPSO->AddShader("missShadow", RTPipelineStateObject::MISS);
 
 		tempPSO->AddShader("chs", RTPipelineStateObject::HIT);
-		tempPSO->BindSRV("chs", MakeRHIBufferSRV("vertices", 5, closestHitStage, RHIBufferViewKind::Raw));
-		tempPSO->BindSRV("chs", MakeRHIBufferSRV("indices", 6, closestHitStage, RHIBufferViewKind::Raw));
-		if (!UsesRTBindlessMaterials())
-			tempPSO->BindSRV("chs", MakeRHITextureSRV("AlbedoTex", 7, closestHitStage));
-		tempPSO->BindSRV("chs", MakeRHIBufferSRV("InstanceProperty", 8, closestHitStage, RHIBufferViewKind::Raw));
 		tempPSO->Configure(1, sizeof(float) * 12, sizeof(float) * 2);
 
 		return tempPSO->InitRS("Shaders\\SpatialHashCellGI.hlsl") ? tempPSO : nullptr;
@@ -186,9 +181,6 @@ shared_ptr<RTPipelineStateObject> Corona::CreateRaytracingSpatialHashPrimaryDeep
 	tempPSO->AddShader("miss", RTPipelineStateObject::MISS);
 
 	tempPSO->AddShader("chs", RTPipelineStateObject::HIT);
-	tempPSO->BindSRV("chs", MakeRHIBufferSRV("vertices", 2, closestHitStage, RHIBufferViewKind::Raw));
-	tempPSO->BindSRV("chs", MakeRHIBufferSRV("indices", 3, closestHitStage, RHIBufferViewKind::Raw));
-	tempPSO->BindSRV("chs", MakeRHIBufferSRV("InstanceProperty", 4, closestHitStage, RHIBufferViewKind::Raw));
 	tempPSO->Configure(1, sizeof(float) * 8, sizeof(float) * 2);
 
 	return tempPSO->InitRS("Shaders\\SpatialHashPrimaryDeepSeed.hlsl") ? tempPSO : nullptr;
@@ -286,7 +278,6 @@ bool Corona::SpatialHashPrimaryDeepSeedPass()
 		.SetCBVValue("global", "PrimaryDeepSeedConstant", &RTSpatialHashPrimaryDeepSeedParam);
 
 	RTSceneHitProgramDesc hitProgramDesc;
-	hitProgramDesc.bBindDiffuseTexture = false;
 	pass.BindSceneHitPrograms(hitProgramDesc);
 	pass.Dispatch(GetRenderWidth(), GetRenderHeight());
 	return true;
@@ -602,9 +593,8 @@ void Corona::SpatialHashGIPass()
 	const UINT32 spatialHashTraceCellBudget = std::min(SpatialHashGITraceCellBudget, SpatialHashGIActiveCellCapacity);
 	if (!SpatialHashLightMaskPass())
 		return;
-	const bool bUseBindlessMaterials = UsesRTBindlessMaterials();
-	if (bUseBindlessMaterials && !EnsureRTMaterialRecordBuffer())
-		return;
+	if (!EnsureRTMaterialRecordBuffer())
+	return;
 
 	const bool bOctMode = (SpatialHashGICB.GIMode == 1u);
 	const bool bHasOctBuffers =
@@ -641,13 +631,9 @@ void Corona::SpatialHashGIPass()
 		.SetBufferSRV("global", "OctIrradianceConverge", SpatialHashGIOctIrradiance[0].get())
 		.SetCBVValue("global", "ViewParameter", &RTSpatialHashGIViewParam)
 		.SetSampler("global", "sampleWrap", samplerWrap.get());
-	if (bUseBindlessMaterials)
-	{
-		pass.SetBindlessTextureTable("global", "MaterialTextures")
-			.SetBufferSRV("global", "RtMaterials", RTMaterialRecordBuffer.get());
-	}
+	pass.SetBindlessTextureTable("global", "MaterialTextures")
+		.SetBufferSRV("global", "RtMaterials", RTMaterialRecordBuffer.get());
 	RTSceneHitProgramDesc hitProgramDesc;
-	hitProgramDesc.bBindDiffuseTexture = !bUseBindlessMaterials;
 	pass.BindSceneHitPrograms(hitProgramDesc);
 	// Oct mode dispatches one ray per (probe, ray); SH mode one thread per cell.
 	const UINT32 octTraceCellBudget = std::min(

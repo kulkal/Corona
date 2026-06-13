@@ -44,17 +44,7 @@ void Corona::InitRaytracingAOPass()
 	tempPSO->AddShader("miss", RTPipelineStateObject::MISS);
 
 	tempPSO->AddShader("closesthit", RTPipelineStateObject::HIT);
-	tempPSO->BindSRV("closesthit", MakeRHIBufferSRV("vertices", 4, closestHitStage, RHIBufferViewKind::Raw));
-	tempPSO->BindSRV("closesthit", MakeRHIBufferSRV("indices", 5, closestHitStage, RHIBufferViewKind::Raw));
-	if (!UsesRTBindlessMaterials())
-		tempPSO->BindSRV("closesthit", MakeRHITextureSRV("AlbedoTex", 6, closestHitStage));
-	tempPSO->BindSRV("closesthit", MakeRHIBufferSRV("InstanceProperty", 7, closestHitStage, RHIBufferViewKind::Raw));
 	tempPSO->AddShader("anyhit", RTPipelineStateObject::ANYHIT);
-	tempPSO->BindSRV("anyhit", MakeRHIBufferSRV("vertices", 4, anyHitStage, RHIBufferViewKind::Raw));
-	tempPSO->BindSRV("anyhit", MakeRHIBufferSRV("indices", 5, anyHitStage, RHIBufferViewKind::Raw));
-	if (!UsesRTBindlessMaterials())
-		tempPSO->BindSRV("anyhit", MakeRHITextureSRV("AlbedoTex", 6, anyHitStage));
-	tempPSO->BindSRV("anyhit", MakeRHIBufferSRV("InstanceProperty", 7, anyHitStage, RHIBufferViewKind::Raw));
 	tempPSO->Configure(1, sizeof(float) * 4, sizeof(float) * 2);
 
 	if (tempPSO->InitRS("Shaders\\RaytracedAO.hlsl"))
@@ -70,9 +60,8 @@ void Corona::RaytraceAOPass()
 
 	renderBackend->EmitGpuCrashMarker("RaytraceAOPass");
 
-	const bool bUseBindlessMaterials = UsesRTBindlessMaterials();
-	if (bUseBindlessMaterials && !EnsureRTMaterialRecordBuffer())
-		return;
+	if (!EnsureRTMaterialRecordBuffer())
+	return;
 
 	renderBackend->TransitionTexture(AmbientOcclusionBuffer.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
 	const FLOAT clearAO[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
@@ -102,13 +91,9 @@ void Corona::RaytraceAOPass()
 		.SetTextureSRV("global", "GeoNormalTex", GeomNormalBuffers[ColorBufferWriteIndex].get())
 		.SetCBVValue("global", "ViewParameter", &RTAOViewParam)
 		.SetSampler("global", "sampleWrap", samplerWrap.get());
-	if (bUseBindlessMaterials)
-	{
-		pass.SetBindlessTextureTable("global", "MaterialTextures")
-			.SetBufferSRV("global", "RtMaterials", RTMaterialRecordBuffer.get());
-	}
+	pass.SetBindlessTextureTable("global", "MaterialTextures")
+		.SetBufferSRV("global", "RtMaterials", RTMaterialRecordBuffer.get());
 	RTSceneHitProgramDesc hitProgramDesc;
-	hitProgramDesc.bBindDiffuseTexture = !bUseBindlessMaterials;
 	pass.BindSceneHitPrograms(hitProgramDesc);
 	pass.Dispatch(GetRenderWidth(), GetRenderHeight());
 

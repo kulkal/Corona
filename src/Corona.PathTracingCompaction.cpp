@@ -89,28 +89,8 @@ void Corona::InitPathTracingCompactionPass()
 	tracePso->AddShader("ShadowMiss", RTPipelineStateObject::MISS);
 
 	tracePso->AddShader("PathTracingClosestHit", RTPipelineStateObject::HIT);
-	tracePso->BindSRV("PathTracingClosestHit", MakeRHIBufferSRV("vertices", 1, closestHitStage, RHIBufferViewKind::Raw));
-	tracePso->BindSRV("PathTracingClosestHit", MakeRHIBufferSRV("indices", 2, closestHitStage, RHIBufferViewKind::Raw));
-	tracePso->BindSRV("PathTracingClosestHit", MakeRHIBufferSRV("InstanceProperty", 3, closestHitStage, RHIBufferViewKind::Raw));
-	if (!UsesRTBindlessMaterials())
-	{
-		tracePso->BindSRV("PathTracingClosestHit", MakeRHITextureSRV("AlbedoTex", 5, closestHitStage));
-		tracePso->BindSRV("PathTracingClosestHit", MakeRHITextureSRV("NormalTex", 6, closestHitStage));
-		tracePso->BindSRV("PathTracingClosestHit", MakeRHITextureSRV("RoughnessTex", 7, closestHitStage));
-		tracePso->BindSRV("PathTracingClosestHit", MakeRHITextureSRV("MetallicTex", 8, closestHitStage));
-	}
 
 	tracePso->AddShader("PathTracingAnyHit", RTPipelineStateObject::ANYHIT);
-	tracePso->BindSRV("PathTracingAnyHit", MakeRHIBufferSRV("vertices", 1, anyHitStage, RHIBufferViewKind::Raw));
-	tracePso->BindSRV("PathTracingAnyHit", MakeRHIBufferSRV("indices", 2, anyHitStage, RHIBufferViewKind::Raw));
-	tracePso->BindSRV("PathTracingAnyHit", MakeRHIBufferSRV("InstanceProperty", 3, anyHitStage, RHIBufferViewKind::Raw));
-	if (!UsesRTBindlessMaterials())
-	{
-		tracePso->BindSRV("PathTracingAnyHit", MakeRHITextureSRV("AlbedoTex", 5, anyHitStage));
-		tracePso->BindSRV("PathTracingAnyHit", MakeRHITextureSRV("NormalTex", 6, anyHitStage));
-		tracePso->BindSRV("PathTracingAnyHit", MakeRHITextureSRV("RoughnessTex", 7, anyHitStage));
-		tracePso->BindSRV("PathTracingAnyHit", MakeRHITextureSRV("MetallicTex", 8, anyHitStage));
-	}
 	tracePso->Configure(8, 256, sizeof(float) * 2);
 
 	const std::wstring computeShader = GetAssetFullPath(L"Shaders\\PathTracingCompactionCompute.hlsl");
@@ -236,8 +216,7 @@ bool Corona::PathTracingCompactionPass(Texture* outputColor, const PathTracingVi
 	if (!TLAS || !outputColor)
 		return false;
 
-	const bool bUseBindlessMaterials = UsesRTBindlessMaterials();
-	if (bUseBindlessMaterials && !EnsureRTMaterialRecordBuffer())
+	if (!EnsureRTMaterialRecordBuffer())
 		return false;
 
 	if (dispatchViewParam.DebugMode != 0 || dispatchViewParam.SamplesPerPixel != 1u)
@@ -394,29 +373,11 @@ bool Corona::PathTracingCompactionPass(Texture* outputColor, const PathTracingVi
 			.SetCBVValue("global", "ViewParameter", const_cast<PathTracingViewParamCB*>(&dispatchViewParam))
 			.SetCBVValue("global", "PathCompaction", &compactionParam)
 			.SetSampler("global", "sampleWrap", samplerWrap.get());
-		if (bUseBindlessMaterials)
-		{
-			pass.SetBindlessTextureTable("global", "MaterialTextures")
-				.SetBufferSRV("global", "RtMaterials", RTMaterialRecordBuffer.get());
-		}
+		pass.SetBindlessTextureTable("global", "MaterialTextures")
+			.SetBufferSRV("global", "RtMaterials", RTMaterialRecordBuffer.get());
 
 		RTSceneHitProgramDesc hitProgramDesc;
-		hitProgramDesc.bBindDiffuseTexture = false;
-		hitProgramDesc.bBindInstancePropertyBeforeDiffuse = true;
-		if (bUseBindlessMaterials)
-		{
-			pass.BindSceneHitPrograms(hitProgramDesc);
-		}
-		else
-		{
-			pass.BindSceneHitPrograms(hitProgramDesc, [&pass](RTPipelineStateObject& pso, const RTSceneHitProgramDesc& desc, Mesh& mesh, uint32_t instanceIndex)
-			{
-				pso.AddTextureSRVToHitProgram(desc.HitGroup, pass.GetDiffuseTexture(mesh), instanceIndex);
-				pso.AddTextureSRVToHitProgram(desc.HitGroup, pass.GetNormalTexture(mesh), instanceIndex);
-				pso.AddTextureSRVToHitProgram(desc.HitGroup, pass.GetRoughnessTexture(mesh), instanceIndex);
-				pso.AddTextureSRVToHitProgram(desc.HitGroup, pass.GetMetallicTexture(mesh), instanceIndex);
-			});
-		}
+		pass.BindSceneHitPrograms(hitProgramDesc);
 
 		RtDispatchRaysIndirectTemplate dispatchTemplate = {};
 		const bool bCanDispatchIndirect =

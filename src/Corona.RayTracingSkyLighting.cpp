@@ -43,11 +43,6 @@ void Corona::InitRaytracingSkyLightingPass()
 	tempPSO->AddShader("miss", RTPipelineStateObject::MISS);
 
 	tempPSO->AddShader("anyhit", RTPipelineStateObject::ANYHIT);
-	tempPSO->BindSRV("anyhit", MakeRHIBufferSRV("vertices", 4, anyHitStage, RHIBufferViewKind::Raw));
-	tempPSO->BindSRV("anyhit", MakeRHIBufferSRV("indices", 5, anyHitStage, RHIBufferViewKind::Raw));
-	if (!UsesRTBindlessMaterials())
-		tempPSO->BindSRV("anyhit", MakeRHITextureSRV("AlbedoTex", 6, anyHitStage));
-	tempPSO->BindSRV("anyhit", MakeRHIBufferSRV("InstanceProperty", 7, anyHitStage, RHIBufferViewKind::Raw));
 	tempPSO->Configure(1, sizeof(float) * 4, sizeof(float) * 2);
 
 	if (tempPSO->InitRS("Shaders\\RaytracedSkyLighting.hlsl"))
@@ -63,9 +58,8 @@ void Corona::RaytraceSkyLightingPass()
 
 	renderBackend->EmitGpuCrashMarker("RaytraceSkyLightingPass");
 
-	const bool bUseBindlessMaterials = UsesRTBindlessMaterials();
-	if (bUseBindlessMaterials && !EnsureRTMaterialRecordBuffer())
-		return;
+	if (!EnsureRTMaterialRecordBuffer())
+	return;
 
 	RTSkyLightingViewParam.ViewMatrix = glm::transpose(ViewMat);
 	RTSkyLightingViewParam.InvViewMatrix = glm::transpose(InvViewMat);
@@ -101,13 +95,9 @@ void Corona::RaytraceSkyLightingPass()
 		.SetTextureSRV("global", "GeoNormalTex", GeomNormalBuffers[ColorBufferWriteIndex].get())
 		.SetCBVValue("global", "ViewParameter", &RTSkyLightingViewParam)
 		.SetSampler("global", "sampleWrap", samplerWrap.get());
-	if (bUseBindlessMaterials)
-	{
-		pass.SetBindlessTextureTable("global", "MaterialTextures")
-			.SetBufferSRV("global", "RtMaterials", RTMaterialRecordBuffer.get());
-	}
+	pass.SetBindlessTextureTable("global", "MaterialTextures")
+		.SetBufferSRV("global", "RtMaterials", RTMaterialRecordBuffer.get());
 	RTSceneHitProgramDesc hitProgramDesc;
-	hitProgramDesc.bBindDiffuseTexture = !bUseBindlessMaterials;
 	pass.BindSceneHitPrograms(hitProgramDesc);
 	pass.Dispatch(GetRenderWidth(), GetRenderHeight());
 
