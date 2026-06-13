@@ -511,6 +511,176 @@ namespace
 		return true;
 	}
 
+#if CORONA_HAS_VULKAN
+	struct VulkanTextureFileUpload
+	{
+		VkFormat Format = VK_FORMAT_UNDEFINED;
+		uint32_t SourceFormat = 0;
+		uint32_t Width = 0;
+		uint32_t Height = 0;
+		uint32_t MipLevels = 1;
+		std::vector<uint8_t> Bytes;
+		std::vector<VkBufferImageCopy> Regions;
+		bool bDirectDDS = false;
+	};
+#endif
+
+#if CORONA_HAS_DIRECTXTEX && CORONA_HAS_VULKAN
+	VkFormat ToVulkanDDSFormat(DXGI_FORMAT format)
+	{
+		switch (format)
+		{
+		case DXGI_FORMAT_R8G8B8A8_UNORM: return VK_FORMAT_R8G8B8A8_UNORM;
+		case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB: return VK_FORMAT_R8G8B8A8_SRGB;
+		case DXGI_FORMAT_B8G8R8A8_UNORM: return VK_FORMAT_B8G8R8A8_UNORM;
+		case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB: return VK_FORMAT_B8G8R8A8_SRGB;
+		case DXGI_FORMAT_B8G8R8X8_UNORM: return VK_FORMAT_B8G8R8A8_UNORM;
+		case DXGI_FORMAT_B8G8R8X8_UNORM_SRGB: return VK_FORMAT_B8G8R8A8_SRGB;
+		case DXGI_FORMAT_R16G16B16A16_FLOAT: return VK_FORMAT_R16G16B16A16_SFLOAT;
+		case DXGI_FORMAT_R32G32B32A32_FLOAT: return VK_FORMAT_R32G32B32A32_SFLOAT;
+		case DXGI_FORMAT_R16G16_FLOAT: return VK_FORMAT_R16G16_SFLOAT;
+		case DXGI_FORMAT_R32_FLOAT: return VK_FORMAT_R32_SFLOAT;
+		case DXGI_FORMAT_R8_UNORM: return VK_FORMAT_R8_UNORM;
+		case DXGI_FORMAT_R8_UINT: return VK_FORMAT_R8_UINT;
+		case DXGI_FORMAT_BC1_UNORM: return VK_FORMAT_BC1_RGBA_UNORM_BLOCK;
+		case DXGI_FORMAT_BC1_UNORM_SRGB: return VK_FORMAT_BC1_RGBA_SRGB_BLOCK;
+		case DXGI_FORMAT_BC2_UNORM: return VK_FORMAT_BC2_UNORM_BLOCK;
+		case DXGI_FORMAT_BC2_UNORM_SRGB: return VK_FORMAT_BC2_SRGB_BLOCK;
+		case DXGI_FORMAT_BC3_UNORM: return VK_FORMAT_BC3_UNORM_BLOCK;
+		case DXGI_FORMAT_BC3_UNORM_SRGB: return VK_FORMAT_BC3_SRGB_BLOCK;
+		case DXGI_FORMAT_BC4_UNORM: return VK_FORMAT_BC4_UNORM_BLOCK;
+		case DXGI_FORMAT_BC4_SNORM: return VK_FORMAT_BC4_SNORM_BLOCK;
+		case DXGI_FORMAT_BC5_UNORM: return VK_FORMAT_BC5_UNORM_BLOCK;
+		case DXGI_FORMAT_BC5_SNORM: return VK_FORMAT_BC5_SNORM_BLOCK;
+		case DXGI_FORMAT_BC6H_UF16: return VK_FORMAT_BC6H_UFLOAT_BLOCK;
+		case DXGI_FORMAT_BC6H_SF16: return VK_FORMAT_BC6H_SFLOAT_BLOCK;
+		case DXGI_FORMAT_BC7_UNORM: return VK_FORMAT_BC7_UNORM_BLOCK;
+		case DXGI_FORMAT_BC7_UNORM_SRGB: return VK_FORMAT_BC7_SRGB_BLOCK;
+		default: return VK_FORMAT_UNDEFINED;
+		}
+	}
+
+	DXGI_FORMAT SelectVulkanDDSDXGIFormat(DXGI_FORMAT sourceFormat, bool nonSRGB)
+	{
+		if (!nonSRGB)
+		{
+			const DXGI_FORMAT srgbFormat = DirectX::MakeSRGB(sourceFormat);
+			if (srgbFormat != DXGI_FORMAT_UNKNOWN)
+				return srgbFormat;
+		}
+		else
+		{
+			const DXGI_FORMAT unormFormat = DirectX::MakeTypelessUNORM(sourceFormat);
+			if (unormFormat != DXGI_FORMAT_UNKNOWN)
+				return unormFormat;
+		}
+		return sourceFormat;
+	}
+
+	bool IsVulkanSampledTransferDstFormatSupported(VkPhysicalDevice physicalDevice, VkFormat format)
+	{
+		if (physicalDevice == VK_NULL_HANDLE || format == VK_FORMAT_UNDEFINED)
+			return false;
+
+		VkFormatProperties properties{};
+		vkGetPhysicalDeviceFormatProperties(physicalDevice, format, &properties);
+		const VkFormatFeatureFlags required =
+			VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
+			VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
+		return (properties.optimalTilingFeatures & required) == required;
+	}
+
+	bool LoadVulkanDirectDDSTexture(
+		const std::wstring& filePath,
+		bool nonSRGB,
+		VkPhysicalDevice physicalDevice,
+		VulkanTextureFileUpload& outUpload,
+		std::wstring* errorMessage)
+	{
+		outUpload = {};
+		if (!HasExtensionI(filePath, L".dds"))
+			return false;
+
+		DirectX::TexMetadata metadata{};
+		DirectX::ScratchImage sourceImage;
+		HRESULT hr = DirectX::LoadFromDDSFile(filePath.c_str(), DirectX::DDS_FLAGS_NONE, &metadata, sourceImage);
+		if (FAILED(hr) || sourceImage.GetImageCount() == 0)
+		{
+			if (errorMessage) *errorMessage = L"Failed to load DDS texture file.";
+			return false;
+		}
+
+		if (metadata.dimension != DirectX::TEX_DIMENSION_TEXTURE2D || metadata.arraySize != 1 || metadata.width == 0 || metadata.height == 0)
+		{
+			if (errorMessage) *errorMessage = L"DDS texture is not a single 2D image.";
+			return false;
+		}
+
+		const DXGI_FORMAT uploadFormat = SelectVulkanDDSDXGIFormat(metadata.format, nonSRGB);
+		const VkFormat vkFormat = ToVulkanDDSFormat(uploadFormat);
+		if (!IsVulkanSampledTransferDstFormatSupported(physicalDevice, vkFormat))
+		{
+			if (errorMessage) *errorMessage = L"DDS format is not supported by this Vulkan device.";
+			return false;
+		}
+
+		const uint32_t mipLevels = static_cast<uint32_t>(std::max<size_t>(metadata.mipLevels, 1));
+		outUpload.Format = vkFormat;
+		outUpload.SourceFormat = static_cast<uint32_t>(metadata.format);
+		outUpload.Width = static_cast<uint32_t>(metadata.width);
+		outUpload.Height = static_cast<uint32_t>(metadata.height);
+		outUpload.MipLevels = mipLevels;
+		outUpload.bDirectDDS = true;
+		outUpload.Regions.reserve(mipLevels);
+
+		for (uint32_t mip = 0; mip < mipLevels; ++mip)
+		{
+			const DirectX::Image* image = sourceImage.GetImage(mip, 0, 0);
+			if (!image || !image->pixels || image->width == 0 || image->height == 0)
+			{
+				if (errorMessage) *errorMessage = L"DDS texture has invalid mip data.";
+				outUpload = {};
+				return false;
+			}
+
+			size_t tightRowPitch = 0;
+			size_t tightSlicePitch = 0;
+			DirectX::ComputePitch(uploadFormat, image->width, image->height, tightRowPitch, tightSlicePitch);
+			const size_t rowCount = DirectX::ComputeScanlines(uploadFormat, image->height);
+			if (tightRowPitch == 0 || tightSlicePitch == 0 || rowCount == 0 || image->rowPitch < tightRowPitch)
+			{
+				if (errorMessage) *errorMessage = L"DDS texture row pitch is not compatible with Vulkan upload.";
+				outUpload = {};
+				return false;
+			}
+
+			const VkDeviceSize alignedOffset = AlignVkDeviceSize(static_cast<VkDeviceSize>(outUpload.Bytes.size()), 4);
+			if (alignedOffset > outUpload.Bytes.size())
+				outUpload.Bytes.resize(static_cast<size_t>(alignedOffset));
+			const size_t dstOffset = outUpload.Bytes.size();
+			outUpload.Bytes.resize(dstOffset + tightSlicePitch);
+			for (size_t row = 0; row < rowCount; ++row)
+			{
+				const uint8_t* srcRow = image->pixels + row * image->rowPitch;
+				uint8_t* dstRow = outUpload.Bytes.data() + dstOffset + row * tightRowPitch;
+				std::memcpy(dstRow, srcRow, tightRowPitch);
+			}
+
+			VkBufferImageCopy& region = outUpload.Regions.emplace_back();
+			region.bufferOffset = static_cast<VkDeviceSize>(dstOffset);
+			region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+			region.imageSubresource.mipLevel = mip;
+			region.imageSubresource.baseArrayLayer = 0;
+			region.imageSubresource.layerCount = 1;
+			region.imageExtent.width = static_cast<uint32_t>(image->width);
+			region.imageExtent.height = static_cast<uint32_t>(image->height);
+			region.imageExtent.depth = 1;
+		}
+
+		return !outUpload.Bytes.empty() && !outUpload.Regions.empty();
+	}
+#endif
+
 	std::vector<uint32_t> LoadSpirvFile(const std::filesystem::path& filePath)
 	{
 		std::ifstream file(filePath, std::ios::binary | std::ios::ate);
@@ -2980,6 +3150,7 @@ void VulkanBackend::ReleaseTextureAllocation(Texture* texture)
 
 	if (Device != VK_NULL_HANDLE)
 	{
+		RetirePersistentStructuredBufferUploads(true);
 		if (it->second.bOwnsImageView && it->second.ImageView != VK_NULL_HANDLE)
 			vkDestroyImageView(Device, it->second.ImageView, nullptr);
 		if (it->second.bOwnsImage && it->second.Image != VK_NULL_HANDLE)
@@ -3148,8 +3319,11 @@ bool VulkanBackend::CreateDeviceLocalBufferWithUpload(
 	if (!srcData)
 		return true;
 
+	RetirePersistentStructuredBufferUploads(false);
+
 	VkBuffer stagingBuffer = VK_NULL_HANDLE;
 	VkDeviceMemory stagingMemory = VK_NULL_HANDLE;
+	VkFence uploadFence = VK_NULL_HANDLE;
 	auto cleanupDestination = [&]()
 	{
 		if (outBuffer != VK_NULL_HANDLE)
@@ -3165,8 +3339,11 @@ bool VulkanBackend::CreateDeviceLocalBufferWithUpload(
 			vkDestroyBuffer(Device, stagingBuffer, nullptr);
 		if (stagingMemory != VK_NULL_HANDLE)
 			vkFreeMemory(Device, stagingMemory, nullptr);
+		if (uploadFence != VK_NULL_HANDLE)
+			vkDestroyFence(Device, uploadFence, nullptr);
 		stagingBuffer = VK_NULL_HANDLE;
 		stagingMemory = VK_NULL_HANDLE;
+		uploadFence = VK_NULL_HANDLE;
 	};
 
 	if (!CreateBufferWithMemory(
@@ -3219,7 +3396,53 @@ bool VulkanBackend::CreateDeviceLocalBufferWithUpload(
 	copyRegion.size = size;
 	vkCmdCopyBuffer(commandBuffer, stagingBuffer, outBuffer, 1, &copyRegion);
 
+	VkAccessFlags dstAccessMask = 0;
+	if (usage & VK_BUFFER_USAGE_VERTEX_BUFFER_BIT)
+		dstAccessMask |= VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT;
+	if (usage & VK_BUFFER_USAGE_INDEX_BUFFER_BIT)
+		dstAccessMask |= VK_ACCESS_INDEX_READ_BIT;
+	if (usage & VK_BUFFER_USAGE_TRANSFER_SRC_BIT)
+		dstAccessMask |= VK_ACCESS_TRANSFER_READ_BIT;
+	if (usage & VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT)
+		dstAccessMask |= VK_ACCESS_UNIFORM_READ_BIT;
+	if (usage & VK_BUFFER_USAGE_STORAGE_BUFFER_BIT)
+		dstAccessMask |= VK_ACCESS_SHADER_READ_BIT;
+	if (usage & VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT)
+		dstAccessMask |= VK_ACCESS_INDIRECT_COMMAND_READ_BIT;
+	if (usage & VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR)
+		dstAccessMask |= VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
+	if (dstAccessMask == 0)
+		dstAccessMask = VK_ACCESS_MEMORY_READ_BIT;
+
+	VkBufferMemoryBarrier barrier{};
+	barrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+	barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+	barrier.dstAccessMask = dstAccessMask;
+	barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	barrier.buffer = outBuffer;
+	barrier.offset = 0;
+	barrier.size = size;
+	vkCmdPipelineBarrier(
+		commandBuffer,
+		VK_PIPELINE_STAGE_TRANSFER_BIT,
+		VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+		0,
+		0, nullptr,
+		1, &barrier,
+		0, nullptr);
+
 	if (vkEndCommandBuffer(commandBuffer) != VK_SUCCESS)
+	{
+		vkFreeCommandBuffers(Device, CommandPool, 1, &commandBuffer);
+		cleanupStaging();
+		cleanupDestination();
+		return false;
+	}
+
+	VkFenceCreateInfo fenceInfo{};
+	fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+	if (vkCreateFence(Device, &fenceInfo, nullptr, &uploadFence) != VK_SUCCESS)
 	{
 		vkFreeCommandBuffers(Device, CommandPool, 1, &commandBuffer);
 		cleanupStaging();
@@ -3231,17 +3454,30 @@ bool VulkanBackend::CreateDeviceLocalBufferWithUpload(
 	submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
 	submitInfo.commandBufferCount = 1;
 	submitInfo.pCommandBuffers = &commandBuffer;
-	if (vkQueueSubmit(GraphicsQueue, 1, &submitInfo, VK_NULL_HANDLE) != VK_SUCCESS)
+	if (vkQueueSubmit(GraphicsQueue, 1, &submitInfo, uploadFence) != VK_SUCCESS)
 	{
 		vkFreeCommandBuffers(Device, CommandPool, 1, &commandBuffer);
 		cleanupStaging();
 		cleanupDestination();
 		return false;
 	}
-	vkQueueWaitIdle(GraphicsQueue);
 
-	vkFreeCommandBuffers(Device, CommandPool, 1, &commandBuffer);
-	cleanupStaging();
+	PendingPersistentStructuredBufferUploads.push_back({
+		uploadFence,
+		commandBuffer,
+		stagingBuffer,
+		stagingMemory,
+		size
+	});
+	PendingPersistentStructuredBufferUploadBytes += static_cast<uint64_t>(size);
+	uploadFence = VK_NULL_HANDLE;
+	commandBuffer = VK_NULL_HANDLE;
+	stagingBuffer = VK_NULL_HANDLE;
+	stagingMemory = VK_NULL_HANDLE;
+
+	if (PendingPersistentStructuredBufferUploadBytes > kMaxInFlightPersistentStructuredBufferUploadBytes)
+		RetirePersistentStructuredBufferUploads(true);
+
 	return true;
 }
 
@@ -4410,42 +4646,155 @@ std::shared_ptr<Texture> VulkanBackend::CreateTextureFromFile(const std::wstring
 	(void)nonSRGB;
 	ThrowNotImplemented(__FUNCTION__);
 #else
-	(void)nonSRGB;
-	std::vector<uint8_t> pixels;
-	uint32_t width = 0;
-	uint32_t height = 0;
 	std::wstring errorMessage;
-	if (!LoadRGBA8TextureFromFile(fileName, pixels, width, height, &errorMessage))
+	VulkanTextureFileUpload upload{};
+
+#if CORONA_HAS_DIRECTXTEX
+	std::wstring directDdsError;
+	LoadVulkanDirectDDSTexture(fileName, nonSRGB, PhysicalDevice, upload, &directDdsError);
+#endif
+
+	if (upload.Bytes.empty())
 	{
-		std::string message = "Failed to load Vulkan texture file: " + std::filesystem::path(fileName).string();
-		if (!errorMessage.empty())
-			message += " (" + PlatformWideToUtf8(errorMessage) + ")";
-		throw std::runtime_error(message);
+		std::vector<uint8_t> pixels;
+		uint32_t width = 0;
+		uint32_t height = 0;
+		if (!LoadRGBA8TextureFromFile(fileName, pixels, width, height, &errorMessage))
+		{
+			std::string message = "Failed to load Vulkan texture file: " + std::filesystem::path(fileName).string();
+			if (!errorMessage.empty())
+				message += " (" + PlatformWideToUtf8(errorMessage) + ")";
+			throw std::runtime_error(message);
+		}
+
+		upload.Format = nonSRGB ? VK_FORMAT_R8G8B8A8_UNORM : VK_FORMAT_R8G8B8A8_SRGB;
+		upload.Width = width;
+		upload.Height = height;
+		upload.MipLevels = 1;
+		upload.Bytes = std::move(pixels);
+		VkBufferImageCopy& region = upload.Regions.emplace_back();
+		region.bufferOffset = 0;
+		region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+		region.imageSubresource.layerCount = 1;
+		region.imageExtent.width = width;
+		region.imageExtent.height = height;
+		region.imageExtent.depth = 1;
 	}
 
-	TextureCreateDesc desc{};
-	desc.Format = ETextureFormat::RGBA8Unorm;
-	desc.Usage = TextureUsage_None;
-	desc.InitialState = EInitialResourceState::CopyDest;
-	desc.Width = static_cast<int>(width);
-	desc.Height = static_cast<int>(height);
-	desc.MipLevels = 1;
-	auto texture = CreateTexture2D(desc);
+	if (upload.Format == VK_FORMAT_UNDEFINED || upload.Width == 0 || upload.Height == 0 || upload.Bytes.empty() || upload.Regions.empty())
+		throw std::runtime_error("Failed to prepare Vulkan texture upload data.");
 
-	auto textureIt = TextureAllocations.find(texture.get());
-	if (textureIt == TextureAllocations.end())
-		throw std::runtime_error("Vulkan texture allocation missing.");
+	auto texture = CreateTrackedTextureHandle();
+	texture->Width = upload.Width;
+	texture->Height = upload.Height;
+	texture->MipLevels = std::max<uint32_t>(upload.MipLevels, 1);
+	texture->Format = FromVkFormat(upload.Format);
+	texture->Usage = TextureUsage_None;
+
+	VulkanTextureAllocation allocation{};
+	allocation.Format = upload.Format;
+	allocation.Width = upload.Width;
+	allocation.Height = upload.Height;
+	allocation.Depth = 1;
+	allocation.Usage = TextureUsage_None;
+	allocation.CurrentLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+	auto cleanupAllocation = [&]()
+	{
+		if (allocation.ImageView != VK_NULL_HANDLE)
+			vkDestroyImageView(Device, allocation.ImageView, nullptr);
+		if (allocation.Image != VK_NULL_HANDLE)
+			vkDestroyImage(Device, allocation.Image, nullptr);
+		if (allocation.Memory != VK_NULL_HANDLE)
+			vkFreeMemory(Device, allocation.Memory, nullptr);
+		allocation.ImageView = VK_NULL_HANDLE;
+		allocation.Image = VK_NULL_HANDLE;
+		allocation.Memory = VK_NULL_HANDLE;
+	};
+
+	VkImageCreateInfo imageInfo{};
+	imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+	imageInfo.imageType = VK_IMAGE_TYPE_2D;
+	imageInfo.format = allocation.Format;
+	imageInfo.extent.width = allocation.Width;
+	imageInfo.extent.height = allocation.Height;
+	imageInfo.extent.depth = 1;
+	imageInfo.mipLevels = texture->MipLevels;
+	imageInfo.arrayLayers = 1;
+	imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+	imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+	imageInfo.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+	imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+	imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	if (vkCreateImage(Device, &imageInfo, nullptr, &allocation.Image) != VK_SUCCESS)
+		throw std::runtime_error("Failed to create Vulkan file texture image.");
+
+	VkMemoryRequirements imageMemoryRequirements{};
+	vkGetImageMemoryRequirements(Device, allocation.Image, &imageMemoryRequirements);
+	VkMemoryAllocateInfo imageAllocateInfo{};
+	imageAllocateInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+	imageAllocateInfo.allocationSize = imageMemoryRequirements.size;
+	imageAllocateInfo.memoryTypeIndex = FindMemoryTypeIndex(
+		PhysicalDevice,
+		imageMemoryRequirements.memoryTypeBits,
+		VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+	if (vkAllocateMemory(Device, &imageAllocateInfo, nullptr, &allocation.Memory) != VK_SUCCESS)
+	{
+		cleanupAllocation();
+		throw std::runtime_error("Failed to allocate Vulkan file texture memory.");
+	}
+	if (vkBindImageMemory(Device, allocation.Image, allocation.Memory, 0) != VK_SUCCESS)
+	{
+		cleanupAllocation();
+		throw std::runtime_error("Failed to bind Vulkan file texture memory.");
+	}
+
+	VkImageViewCreateInfo imageViewInfo{};
+	imageViewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+	imageViewInfo.image = allocation.Image;
+	imageViewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+	imageViewInfo.format = allocation.Format;
+	imageViewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+	imageViewInfo.subresourceRange.levelCount = texture->MipLevels;
+	imageViewInfo.subresourceRange.layerCount = 1;
+	if (vkCreateImageView(Device, &imageViewInfo, nullptr, &allocation.ImageView) != VK_SUCCESS)
+	{
+		cleanupAllocation();
+		throw std::runtime_error("Failed to create Vulkan file texture view.");
+	}
 
 	VkBuffer stagingBuffer = VK_NULL_HANDLE;
 	VkDeviceMemory stagingMemory = VK_NULL_HANDLE;
+	VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
+	VkFence uploadFence = VK_NULL_HANDLE;
+	auto cleanupUpload = [&]()
+	{
+		if (commandBuffer != VK_NULL_HANDLE)
+			vkFreeCommandBuffers(Device, CommandPool, 1, &commandBuffer);
+		if (stagingBuffer != VK_NULL_HANDLE)
+			vkDestroyBuffer(Device, stagingBuffer, nullptr);
+		if (stagingMemory != VK_NULL_HANDLE)
+			vkFreeMemory(Device, stagingMemory, nullptr);
+		if (uploadFence != VK_NULL_HANDLE)
+			vkDestroyFence(Device, uploadFence, nullptr);
+		commandBuffer = VK_NULL_HANDLE;
+		stagingBuffer = VK_NULL_HANDLE;
+		stagingMemory = VK_NULL_HANDLE;
+		uploadFence = VK_NULL_HANDLE;
+	};
+
+	RetirePersistentStructuredBufferUploads(false);
 
 	VkBufferCreateInfo bufferInfo{};
 	bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-	bufferInfo.size = pixels.size();
+	bufferInfo.size = static_cast<VkDeviceSize>(upload.Bytes.size());
 	bufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
 	bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 	if (vkCreateBuffer(Device, &bufferInfo, nullptr, &stagingBuffer) != VK_SUCCESS)
+	{
+		cleanupAllocation();
 		throw std::runtime_error("Failed to create Vulkan staging buffer.");
+	}
 
 	VkMemoryRequirements memoryRequirements{};
 	vkGetBufferMemoryRequirements(Device, stagingBuffer, &memoryRequirements);
@@ -4457,14 +4806,26 @@ std::shared_ptr<Texture> VulkanBackend::CreateTextureFromFile(const std::wstring
 		memoryRequirements.memoryTypeBits,
 		VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
 	if (vkAllocateMemory(Device, &allocateInfo, nullptr, &stagingMemory) != VK_SUCCESS)
+	{
+		cleanupUpload();
+		cleanupAllocation();
 		throw std::runtime_error("Failed to allocate Vulkan staging memory.");
+	}
 	if (vkBindBufferMemory(Device, stagingBuffer, stagingMemory, 0) != VK_SUCCESS)
+	{
+		cleanupUpload();
+		cleanupAllocation();
 		throw std::runtime_error("Failed to bind Vulkan staging memory.");
+	}
 
 	void* mappedData = nullptr;
-	if (vkMapMemory(Device, stagingMemory, 0, pixels.size(), 0, &mappedData) != VK_SUCCESS)
+	if (vkMapMemory(Device, stagingMemory, 0, upload.Bytes.size(), 0, &mappedData) != VK_SUCCESS)
+	{
+		cleanupUpload();
+		cleanupAllocation();
 		throw std::runtime_error("Failed to map Vulkan staging memory.");
-	std::memcpy(mappedData, pixels.data(), pixels.size());
+	}
+	std::memcpy(mappedData, upload.Bytes.data(), upload.Bytes.size());
 	vkUnmapMemory(Device, stagingMemory);
 
 	VkCommandBufferAllocateInfo commandBufferAllocInfo{};
@@ -4472,42 +4833,122 @@ std::shared_ptr<Texture> VulkanBackend::CreateTextureFromFile(const std::wstring
 	commandBufferAllocInfo.commandPool = CommandPool;
 	commandBufferAllocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
 	commandBufferAllocInfo.commandBufferCount = 1;
-	VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
 	if (vkAllocateCommandBuffers(Device, &commandBufferAllocInfo, &commandBuffer) != VK_SUCCESS)
+	{
+		cleanupUpload();
+		cleanupAllocation();
 		throw std::runtime_error("Failed to allocate Vulkan upload command buffer.");
+	}
 
 	VkCommandBufferBeginInfo beginInfo{};
 	beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
 	beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-	vkBeginCommandBuffer(commandBuffer, &beginInfo);
+	if (vkBeginCommandBuffer(commandBuffer, &beginInfo) != VK_SUCCESS)
+	{
+		cleanupUpload();
+		cleanupAllocation();
+		throw std::runtime_error("Failed to begin Vulkan texture upload command buffer.");
+	}
 
-	TransitionImageLayout(commandBuffer, textureIt->second.Image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+	auto transitionWholeTexture = [&](VkImageLayout oldLayout, VkImageLayout newLayout, VkAccessFlags srcAccess, VkAccessFlags dstAccess, VkPipelineStageFlags srcStage, VkPipelineStageFlags dstStage)
+	{
+		VkImageMemoryBarrier barrier{};
+		barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+		barrier.oldLayout = oldLayout;
+		barrier.newLayout = newLayout;
+		barrier.srcAccessMask = srcAccess;
+		barrier.dstAccessMask = dstAccess;
+		barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		barrier.image = allocation.Image;
+		barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+		barrier.subresourceRange.levelCount = texture->MipLevels;
+		barrier.subresourceRange.layerCount = 1;
+		vkCmdPipelineBarrier(
+			commandBuffer,
+			srcStage,
+			dstStage,
+			0,
+			0, nullptr,
+			0, nullptr,
+			1, &barrier);
+	};
 
-	VkBufferImageCopy copyRegion{};
-	copyRegion.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-	copyRegion.imageSubresource.layerCount = 1;
-	copyRegion.imageExtent.width = width;
-	copyRegion.imageExtent.height = height;
-	copyRegion.imageExtent.depth = 1;
-	vkCmdCopyBufferToImage(commandBuffer, stagingBuffer, textureIt->second.Image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copyRegion);
+	transitionWholeTexture(
+		VK_IMAGE_LAYOUT_UNDEFINED,
+		VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+		0,
+		VK_ACCESS_TRANSFER_WRITE_BIT,
+		VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+		VK_PIPELINE_STAGE_TRANSFER_BIT);
 
-	TransitionImageLayout(commandBuffer, textureIt->second.Image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-	textureIt->second.CurrentLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+	vkCmdCopyBufferToImage(
+		commandBuffer,
+		stagingBuffer,
+		allocation.Image,
+		VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+		static_cast<uint32_t>(upload.Regions.size()),
+		upload.Regions.data());
 
-	vkEndCommandBuffer(commandBuffer);
+	VkPipelineStageFlags shaderReadStages =
+		VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
+		VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+	if (bRayTracingEnabled)
+		shaderReadStages |= VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR;
+
+	transitionWholeTexture(
+		VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+		VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+		VK_ACCESS_TRANSFER_WRITE_BIT,
+		VK_ACCESS_SHADER_READ_BIT,
+		VK_PIPELINE_STAGE_TRANSFER_BIT,
+		shaderReadStages);
+	allocation.CurrentLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+	if (vkEndCommandBuffer(commandBuffer) != VK_SUCCESS)
+	{
+		cleanupUpload();
+		cleanupAllocation();
+		throw std::runtime_error("Failed to record Vulkan texture upload command buffer.");
+	}
+
+	VkFenceCreateInfo fenceInfo{};
+	fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+	if (vkCreateFence(Device, &fenceInfo, nullptr, &uploadFence) != VK_SUCCESS)
+	{
+		cleanupUpload();
+		cleanupAllocation();
+		throw std::runtime_error("Failed to create Vulkan texture upload fence.");
+	}
 
 	VkSubmitInfo submitInfo{};
 	submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
 	submitInfo.commandBufferCount = 1;
 	submitInfo.pCommandBuffers = &commandBuffer;
-	if (vkQueueSubmit(GraphicsQueue, 1, &submitInfo, VK_NULL_HANDLE) != VK_SUCCESS)
+	if (vkQueueSubmit(GraphicsQueue, 1, &submitInfo, uploadFence) != VK_SUCCESS)
+	{
+		cleanupUpload();
+		cleanupAllocation();
 		throw std::runtime_error("Failed to submit Vulkan texture upload.");
-	vkQueueWaitIdle(GraphicsQueue);
+	}
 
-	vkFreeCommandBuffers(Device, CommandPool, 1, &commandBuffer);
-	vkDestroyBuffer(Device, stagingBuffer, nullptr);
-	vkFreeMemory(Device, stagingMemory, nullptr);
+	PendingPersistentStructuredBufferUploads.push_back({
+		uploadFence,
+		commandBuffer,
+		stagingBuffer,
+		stagingMemory,
+		static_cast<VkDeviceSize>(upload.Bytes.size())
+	});
+	PendingPersistentStructuredBufferUploadBytes += static_cast<uint64_t>(upload.Bytes.size());
+	uploadFence = VK_NULL_HANDLE;
+	commandBuffer = VK_NULL_HANDLE;
+	stagingBuffer = VK_NULL_HANDLE;
+	stagingMemory = VK_NULL_HANDLE;
 
+	if (PendingPersistentStructuredBufferUploadBytes > kMaxInFlightPersistentStructuredBufferUploadBytes)
+		RetirePersistentStructuredBufferUploads(true);
+
+	TextureAllocations[texture.get()] = allocation;
 	return texture;
 #endif
 }
