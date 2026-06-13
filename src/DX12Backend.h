@@ -613,6 +613,8 @@ public:
 		capabilities.MaxBindlessBufferCount = kMaxDX12BindlessBufferSlots;
 		return capabilities;
 	}
+	bool GetStreamlineTextureResource(Texture* texture, EResourceState state, StreamlineTextureResourceDesc& outDesc) const override;
+	void* GetStreamlineCommandBuffer() override;
 	uint32_t GetMaxSupportedHybridStage() const override { return 7; }
 	bool SupportsRayTracing() const override;
 	bool SupportsShaderExecutionReordering() const override;

@@ -61,6 +61,7 @@
 #include "sl_dlss.h"
 #include "sl_dlss_d.h"
 #include "sl_helpers.h"
+#include "sl_helpers_vk.h"
 #endif
 
 
@@ -846,6 +847,34 @@ namespace
 		consts.motionVectorsDilated = sl::Boolean::eFalse;
 		consts.motionVectorsJittered = sl::Boolean::eFalse;
 		return consts;
+	}
+
+	sl::Resource MakeSLResource(const StreamlineTextureResourceDesc& desc)
+	{
+		sl::Resource resource(sl::ResourceType::eTex2d, desc.Native, desc.Memory, desc.View, desc.State);
+		resource.width = desc.Width;
+		resource.height = desc.Height;
+		resource.nativeFormat = desc.NativeFormat;
+		resource.mipLevels = desc.MipLevels;
+		resource.arrayLayers = desc.ArrayLayers;
+		resource.flags = desc.Flags;
+		resource.usage = desc.Usage;
+		return resource;
+	}
+
+	std::optional<sl::Resource> MakeStreamlineTextureResource(
+		IRenderBackend* backend,
+		Texture* texture,
+		EResourceState state)
+	{
+		if (!backend || !texture)
+			return std::nullopt;
+
+		StreamlineTextureResourceDesc desc{};
+		if (!backend->GetStreamlineTextureResource(texture, state, desc) || !desc.Native)
+			return std::nullopt;
+
+		return MakeSLResource(desc);
 	}
 
 }
@@ -2514,13 +2543,17 @@ void Corona::InitStreamline()
 	pref.engine = sl::EngineType::eCustom;
 	pref.engineVersion = "1.0.0";
 	pref.projectId = "a0f57b54-1daf-4934-90ae-c4035c19df04";
-	pref.renderAPI = sl::RenderAPI::eD3D12;
+	const bool bStreamlineVulkan =
+		bCommandLineRenderBackendOverrideSet &&
+		CommandLineRenderBackendAPI == ERenderBackendAPI::Vulkan;
+	pref.renderAPI = bStreamlineVulkan ? sl::RenderAPI::eVulkan : sl::RenderAPI::eD3D12;
 	pref.flags = sl::PreferenceFlags::eDisableCLStateTracking | sl::PreferenceFlags::eUseFrameBasedResourceTagging;
 	const sl::Result initResult = slInit(pref);
 	bStreamlineInitialized = initResult == sl::Result::eOk;
 	AppendCpuRuntimeTrace(
 		L"[Streamline] init result=" + PlatformUtf8ToWide(sl::getResultAsStr(initResult)) +
 		L", initialized=" + std::to_wstring(bStreamlineInitialized ? 1 : 0) +
+		L", renderAPI=" + std::wstring(bStreamlineVulkan ? L"vulkan" : L"d3d12") +
 		L", pluginPath=\"" + streamlinePluginDirectoryString + L"\"" +
 		L", console=" + std::to_wstring(pref.showConsole ? 1 : 0));
 }
@@ -2725,22 +2758,28 @@ bool Corona::DLSSPass()
 	sl::ViewportHandle vp(0);
 	sl::Extent renderExtent{ 0, 0, GetRenderWidth(), GetRenderHeight() };
 	sl::Extent outputExtent{ 0, 0, m_width, m_height };
-	sl::Resource colorRes(sl::ResourceType::eTex2d, inputColor->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-	sl::Resource depthRes(sl::ResourceType::eTex2d, UnjitteredDepthBuffers[ColorBufferWriteIndex]->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-	sl::Resource motionRes(sl::ResourceType::eTex2d, VelocityBuffer->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-	sl::Resource outputRes(sl::ResourceType::eTex2d, outputTarget->resource.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+	sl::CommandBuffer* streamlineCommandBuffer = reinterpret_cast<sl::CommandBuffer*>(renderBackend->GetStreamlineCommandBuffer());
+	auto colorRes = MakeStreamlineTextureResource(renderBackend.get(), inputColor, EResourceState::ShaderRead);
+	auto depthRes = MakeStreamlineTextureResource(renderBackend.get(), UnjitteredDepthBuffers[ColorBufferWriteIndex].get(), EResourceState::ShaderRead);
+	auto motionRes = MakeStreamlineTextureResource(renderBackend.get(), VelocityBuffer.get(), EResourceState::ShaderRead);
+	auto outputRes = MakeStreamlineTextureResource(renderBackend.get(), outputTarget, EResourceState::UnorderedAccess);
+	if (!streamlineCommandBuffer || !colorRes || !depthRes || !motionRes || !outputRes)
+	{
+		renderBackend->TransitionTexture(outputTarget, EResourceState::UnorderedAccess, EResourceState::ShaderRead);
+		return false;
+	}
 
-	sl::ResourceTag colorTag(&colorRes, sl::kBufferTypeScalingInputColor, sl::ResourceLifecycle::eOnlyValidNow, &renderExtent);
-	sl::ResourceTag depthTag(&depthRes, sl::kBufferTypeDepth, sl::ResourceLifecycle::eOnlyValidNow, &renderExtent);
-	sl::ResourceTag motionTag(&motionRes, sl::kBufferTypeMotionVectors, sl::ResourceLifecycle::eOnlyValidNow, &renderExtent);
-	sl::ResourceTag outputTag(&outputRes, sl::kBufferTypeScalingOutputColor, sl::ResourceLifecycle::eOnlyValidNow, &outputExtent);
+	sl::ResourceTag colorTag(&*colorRes, sl::kBufferTypeScalingInputColor, sl::ResourceLifecycle::eOnlyValidNow, &renderExtent);
+	sl::ResourceTag depthTag(&*depthRes, sl::kBufferTypeDepth, sl::ResourceLifecycle::eOnlyValidNow, &renderExtent);
+	sl::ResourceTag motionTag(&*motionRes, sl::kBufferTypeMotionVectors, sl::ResourceLifecycle::eOnlyValidNow, &renderExtent);
+	sl::ResourceTag outputTag(&*outputRes, sl::kBufferTypeScalingOutputColor, sl::ResourceLifecycle::eOnlyValidNow, &outputExtent);
 	sl::ResourceTag tags[] = {
 		colorTag,
 		depthTag,
 		motionTag,
 		outputTag,
 	};
-	const sl::Result setTagResult = slSetTagForFrame(*StreamlineFrameToken, vp, tags, _countof(tags), dx12_rhi->GetGraphicsCommandList());
+	const sl::Result setTagResult = slSetTagForFrame(*StreamlineFrameToken, vp, tags, _countof(tags), streamlineCommandBuffer);
 	if (setTagResult != sl::Result::eOk)
 	{
 		renderBackend->TransitionTexture(outputTarget, EResourceState::UnorderedAccess, EResourceState::ShaderRead);
@@ -2752,7 +2791,7 @@ bool Corona::DLSSPass()
 		static_cast<const sl::BaseStructure*>(&vp),
 		static_cast<const sl::BaseStructure*>(&depthTag),
 	};
-	const sl::Result evalResult = slEvaluateFeature(sl::kFeatureDLSS, *StreamlineFrameToken, inputs, _countof(inputs), dx12_rhi->GetGraphicsCommandList());
+	const sl::Result evalResult = slEvaluateFeature(sl::kFeatureDLSS, *StreamlineFrameToken, inputs, _countof(inputs), streamlineCommandBuffer);
 	bDLSSResetNeeded = false;
 
 	renderBackend->TransitionTexture(outputTarget, EResourceState::UnorderedAccess, EResourceState::ShaderRead);
@@ -2817,27 +2856,51 @@ bool Corona::DLSSRRPass()
 	sl::ViewportHandle vp(0);
 	sl::Extent renderExtent{ 0, 0, GetRenderWidth(), GetRenderHeight() };
 	sl::Extent outputExtent{ 0, 0, GetRenderWidth(), GetRenderHeight() };
-	sl::Resource colorRes(sl::ResourceType::eTex2d, inputColor->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-	sl::Resource depthRes(sl::ResourceType::eTex2d, UnjitteredDepthBuffers[ColorBufferWriteIndex]->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-	sl::Resource motionRes(sl::ResourceType::eTex2d, VelocityBuffer->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-	sl::Resource normalRes(sl::ResourceType::eTex2d, NormalBuffers[ColorBufferWriteIndex]->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-	sl::Resource roughnessRes(sl::ResourceType::eTex2d, RoughnessMetalicBuffer->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-	sl::Resource albedoRes(sl::ResourceType::eTex2d, AlbedoBuffer->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-	sl::Resource specularAlbedoRes(sl::ResourceType::eTex2d, SpecularAlbedoBuffer->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-	sl::Resource specularHitDistanceRes(sl::ResourceType::eTex2d, PathTracingSpecularHitDistanceBuffer ? PathTracingSpecularHitDistanceBuffer->resource.Get() : nullptr, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-	sl::Resource specularMotionVectorRes(sl::ResourceType::eTex2d, PathTracingSpecularMotionVectorBuffer ? PathTracingSpecularMotionVectorBuffer->resource.Get() : nullptr, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-	sl::Resource outputRes(sl::ResourceType::eTex2d, outputTarget->resource.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+	sl::CommandBuffer* streamlineCommandBuffer = reinterpret_cast<sl::CommandBuffer*>(renderBackend->GetStreamlineCommandBuffer());
+	auto colorRes = MakeStreamlineTextureResource(renderBackend.get(), inputColor, EResourceState::ShaderRead);
+	auto depthRes = MakeStreamlineTextureResource(renderBackend.get(), UnjitteredDepthBuffers[ColorBufferWriteIndex].get(), EResourceState::ShaderRead);
+	auto motionRes = MakeStreamlineTextureResource(renderBackend.get(), VelocityBuffer.get(), EResourceState::ShaderRead);
+	auto normalRes = MakeStreamlineTextureResource(renderBackend.get(), NormalBuffers[ColorBufferWriteIndex].get(), EResourceState::ShaderRead);
+	auto roughnessRes = MakeStreamlineTextureResource(renderBackend.get(), RoughnessMetalicBuffer.get(), EResourceState::ShaderRead);
+	auto albedoRes = MakeStreamlineTextureResource(renderBackend.get(), AlbedoBuffer.get(), EResourceState::ShaderRead);
+	auto specularAlbedoRes = MakeStreamlineTextureResource(renderBackend.get(), SpecularAlbedoBuffer.get(), EResourceState::ShaderRead);
+	auto outputRes = MakeStreamlineTextureResource(renderBackend.get(), outputTarget, EResourceState::UnorderedAccess);
+	std::optional<sl::Resource> specularHitDistanceRes;
+	std::optional<sl::Resource> specularMotionVectorRes;
+	if (bUseRRSpecularHitDistance)
+		specularHitDistanceRes = MakeStreamlineTextureResource(renderBackend.get(), PathTracingSpecularHitDistanceBuffer.get(), EResourceState::ShaderRead);
+	if (bUseRRSpecularMotionVectors)
+		specularMotionVectorRes = MakeStreamlineTextureResource(renderBackend.get(), PathTracingSpecularMotionVectorBuffer.get(), EResourceState::ShaderRead);
+	if (!streamlineCommandBuffer ||
+		!colorRes ||
+		!depthRes ||
+		!motionRes ||
+		!normalRes ||
+		!roughnessRes ||
+		!albedoRes ||
+		!specularAlbedoRes ||
+		!outputRes ||
+		(bUseRRSpecularHitDistance && !specularHitDistanceRes) ||
+		(bUseRRSpecularMotionVectors && !specularMotionVectorRes))
+	{
+		renderBackend->TransitionTexture(outputTarget, EResourceState::UnorderedAccess, EResourceState::ShaderRead);
+		return false;
+	}
 
-	sl::ResourceTag colorTag(&colorRes, sl::kBufferTypeScalingInputColor, sl::ResourceLifecycle::eOnlyValidNow, &renderExtent);
-	sl::ResourceTag depthTag(&depthRes, sl::kBufferTypeDepth, sl::ResourceLifecycle::eOnlyValidNow, &renderExtent);
-	sl::ResourceTag motionTag(&motionRes, sl::kBufferTypeMotionVectors, sl::ResourceLifecycle::eOnlyValidNow, &renderExtent);
-	sl::ResourceTag normalTag(&normalRes, sl::kBufferTypeNormals, sl::ResourceLifecycle::eOnlyValidNow, &renderExtent);
-	sl::ResourceTag roughnessTag(&roughnessRes, sl::kBufferTypeRoughness, sl::ResourceLifecycle::eOnlyValidNow, &renderExtent);
-	sl::ResourceTag albedoTag(&albedoRes, sl::kBufferTypeAlbedo, sl::ResourceLifecycle::eOnlyValidNow, &renderExtent);
-	sl::ResourceTag specularAlbedoTag(&specularAlbedoRes, sl::kBufferTypeSpecularAlbedo, sl::ResourceLifecycle::eOnlyValidNow, &renderExtent);
-	sl::ResourceTag specularHitDistanceTag(&specularHitDistanceRes, sl::kBufferTypeSpecularHitDistance, sl::ResourceLifecycle::eOnlyValidNow, &renderExtent);
-	sl::ResourceTag specularMotionVectorTag(&specularMotionVectorRes, sl::kBufferTypeSpecularMotionVectors, sl::ResourceLifecycle::eOnlyValidNow, &renderExtent);
-	sl::ResourceTag outputTag(&outputRes, sl::kBufferTypeScalingOutputColor, sl::ResourceLifecycle::eOnlyValidNow, &outputExtent);
+	sl::ResourceTag colorTag(&*colorRes, sl::kBufferTypeScalingInputColor, sl::ResourceLifecycle::eOnlyValidNow, &renderExtent);
+	sl::ResourceTag depthTag(&*depthRes, sl::kBufferTypeDepth, sl::ResourceLifecycle::eOnlyValidNow, &renderExtent);
+	sl::ResourceTag motionTag(&*motionRes, sl::kBufferTypeMotionVectors, sl::ResourceLifecycle::eOnlyValidNow, &renderExtent);
+	sl::ResourceTag normalTag(&*normalRes, sl::kBufferTypeNormals, sl::ResourceLifecycle::eOnlyValidNow, &renderExtent);
+	sl::ResourceTag roughnessTag(&*roughnessRes, sl::kBufferTypeRoughness, sl::ResourceLifecycle::eOnlyValidNow, &renderExtent);
+	sl::ResourceTag albedoTag(&*albedoRes, sl::kBufferTypeAlbedo, sl::ResourceLifecycle::eOnlyValidNow, &renderExtent);
+	sl::ResourceTag specularAlbedoTag(&*specularAlbedoRes, sl::kBufferTypeSpecularAlbedo, sl::ResourceLifecycle::eOnlyValidNow, &renderExtent);
+	std::optional<sl::ResourceTag> specularHitDistanceTag;
+	std::optional<sl::ResourceTag> specularMotionVectorTag;
+	if (bUseRRSpecularHitDistance)
+		specularHitDistanceTag.emplace(&*specularHitDistanceRes, sl::kBufferTypeSpecularHitDistance, sl::ResourceLifecycle::eOnlyValidNow, &renderExtent);
+	if (bUseRRSpecularMotionVectors)
+		specularMotionVectorTag.emplace(&*specularMotionVectorRes, sl::kBufferTypeSpecularMotionVectors, sl::ResourceLifecycle::eOnlyValidNow, &renderExtent);
+	sl::ResourceTag outputTag(&*outputRes, sl::kBufferTypeScalingOutputColor, sl::ResourceLifecycle::eOnlyValidNow, &outputExtent);
 	std::vector<sl::ResourceTag> tags = {
 		colorTag,
 		depthTag,
@@ -2849,14 +2912,14 @@ bool Corona::DLSSRRPass()
 	};
 	if (bUseRRSpecularMotionVectors)
 	{
-		tags.push_back(specularMotionVectorTag);
+		tags.push_back(*specularMotionVectorTag);
 	}
 	if (bUseRRSpecularHitDistance)
 	{
-		tags.push_back(specularHitDistanceTag);
+		tags.push_back(*specularHitDistanceTag);
 	}
 	tags.push_back(outputTag);
-	const sl::Result setTagResult = slSetTagForFrame(*StreamlineFrameToken, vp, tags.data(), static_cast<uint32_t>(tags.size()), dx12_rhi->GetGraphicsCommandList());
+	const sl::Result setTagResult = slSetTagForFrame(*StreamlineFrameToken, vp, tags.data(), static_cast<uint32_t>(tags.size()), streamlineCommandBuffer);
 	if (setTagResult != sl::Result::eOk)
 	{
 		renderBackend->TransitionTexture(outputTarget, EResourceState::UnorderedAccess, EResourceState::ShaderRead);
@@ -2874,10 +2937,10 @@ bool Corona::DLSSRRPass()
 		static_cast<const sl::BaseStructure*>(&motionTag),
 	};
 	if (bUseRRSpecularMotionVectors)
-		inputs.push_back(static_cast<const sl::BaseStructure*>(&specularMotionVectorTag));
+		inputs.push_back(static_cast<const sl::BaseStructure*>(&*specularMotionVectorTag));
 	if (bUseRRSpecularHitDistance)
-		inputs.push_back(static_cast<const sl::BaseStructure*>(&specularHitDistanceTag));
-	const sl::Result evalResult = slEvaluateFeature(sl::kFeatureDLSS_RR, *StreamlineFrameToken, inputs.data(), static_cast<uint32_t>(inputs.size()), dx12_rhi->GetGraphicsCommandList());
+		inputs.push_back(static_cast<const sl::BaseStructure*>(&*specularHitDistanceTag));
+	const sl::Result evalResult = slEvaluateFeature(sl::kFeatureDLSS_RR, *StreamlineFrameToken, inputs.data(), static_cast<uint32_t>(inputs.size()), streamlineCommandBuffer);
 	bDLSSResetNeeded = false;
 
 	renderBackend->TransitionTexture(outputTarget, EResourceState::UnorderedAccess, EResourceState::ShaderRead);
@@ -3011,12 +3074,8 @@ Corona::EAntiAliasingMode Corona::NormalizeAntiAliasingMode(ERenderingMode rende
 	return EAntiAliasingMode::TAA;
 #endif
 
-	const bool bD3D12Backend =
-		renderBackend &&
-		renderBackend->GetAPI() == ERenderBackendAPI::D3D12;
-
 #if WITH_STREAMLINE
-	if (!bD3D12Backend && IsDLSSMode(requestedMode))
+	if (!bStreamlineInitialized && IsDLSSMode(requestedMode))
 		return renderingMode == ERenderingMode::PATHTRACING ? EAntiAliasingMode::OFF : EAntiAliasingMode::TAA;
 #else
 	if (IsDLSSMode(requestedMode))
@@ -4824,11 +4883,6 @@ void Corona::PromptStartupModeSelection()
 	if (StartupSelectedAAMode == EAntiAliasingMode::DLSS_SR || StartupSelectedAAMode == EAntiAliasingMode::DLSS_RR)
 		StartupSelectedAAMode = EAntiAliasingMode::TAA;
 #endif
-
-	if (StartupRenderBackendAPI == ERenderBackendAPI::Vulkan && IsDLSSMode(StartupSelectedAAMode))
-	{
-		StartupSelectedAAMode = EAntiAliasingMode::TAA;
-	}
 
 #if CORONA_PLATFORM_MOBILE
 	StartupRenderBackendAPI = ERenderBackendAPI::Vulkan;
@@ -8780,10 +8834,7 @@ void Corona::OnInit()
 	AppendCpuRuntimeTrace(L"[OnInit] after render size init");
 	UpdateStartupLoadingProgress(0.08f, L"Preparing render size");
 #if WITH_STREAMLINE
-	const bool bStartupRequestsVulkan =
-		bCommandLineRenderBackendOverrideSet &&
-		CommandLineRenderBackendAPI == ERenderBackendAPI::Vulkan;
-	if (!bStartupRequestsVulkan && !bCommandLineDisableStreamline)
+	if (!bCommandLineDisableStreamline)
 	{
 		UpdateStartupLoadingProgress(0.10f, L"Initializing Streamline");
 		InitStreamline();
@@ -8791,10 +8842,7 @@ void Corona::OnInit()
 	}
 	else
 	{
-		AppendCpuRuntimeTrace(
-			bCommandLineDisableStreamline ?
-			L"[OnInit] skip InitStreamline by command line" :
-			L"[OnInit] skip InitStreamline for Vulkan startup");
+		AppendCpuRuntimeTrace(L"[OnInit] skip InitStreamline by command line");
 	}
 #endif
 	UpdateStartupLoadingProgress(0.12f, L"Creating render backend");
@@ -9021,6 +9069,33 @@ void Corona::LoadPipeline()
 			m_height,
 			ETextureFormat::RGBA8Unorm);
 		AppendCpuRuntimeTrace(L"[LoadPipeline] after CreateSwapChainForWindow Vulkan");
+#if WITH_STREAMLINE
+		if (bStreamlineInitialized)
+		{
+			StreamlineVulkanDeviceInfo vkDeviceInfo{};
+			if (renderBackend->GetStreamlineVulkanDeviceInfo(vkDeviceInfo))
+			{
+				sl::AdapterInfo adapterInfo{};
+				adapterInfo.vkPhysicalDevice = vkDeviceInfo.PhysicalDevice;
+				if (vkDeviceInfo.DeviceLUIDSizeInBytes > 0)
+				{
+					adapterInfo.deviceLUID = const_cast<uint8_t*>(vkDeviceInfo.DeviceLUID.data());
+					adapterInfo.deviceLUIDSizeInBytes = vkDeviceInfo.DeviceLUIDSizeInBytes;
+				}
+				bDLSSAvailable = slIsFeatureSupported(sl::kFeatureDLSS, adapterInfo) == sl::Result::eOk;
+				bDLSSRRAvailable = slIsFeatureSupported(sl::kFeatureDLSS_RR, adapterInfo) == sl::Result::eOk;
+				AppendCpuRuntimeTrace(
+					L"[Streamline] Vulkan support query dlssAvailable=" + std::to_wstring(bDLSSAvailable ? 1 : 0) +
+					L", dlssRRAvailable=" + std::to_wstring(bDLSSRRAvailable ? 1 : 0));
+			}
+			else
+			{
+				AppendCpuRuntimeTrace(L"[Streamline] Vulkan device info unavailable; DLSS disabled for Vulkan backend");
+				bDLSSAvailable = false;
+				bDLSSRRAvailable = false;
+			}
+		}
+#endif
 		return;
 	}
 
@@ -13299,19 +13374,20 @@ void Corona::DrawEditorModeOverlay()
 			EAntiAliasingMode Mode;
 			bool bAvailable;
 		};
-		const bool bEditorD3D12Backend =
-			renderBackend &&
-			renderBackend->GetAPI() == ERenderBackendAPI::D3D12;
 #if WITH_STREAMLINE
+		const bool bEditorStreamlineBackend =
+			renderBackend &&
+			bStreamlineInitialized;
 		const bool bEditorDLSSSRAvailable =
 			RenderingMode == ERenderingMode::HYBRID &&
-			bEditorD3D12Backend &&
+			bEditorStreamlineBackend &&
 			bDLSSAvailable;
 		const bool bEditorDLSSRRAvailable =
-			bEditorD3D12Backend &&
+			bEditorStreamlineBackend &&
 			((RenderingMode == ERenderingMode::HYBRID && bDLSSAvailable && bDLSSRRAvailable) ||
 			 (RenderingMode == ERenderingMode::PATHTRACING && bDLSSRRAvailable && bEnablePathTracingDLSSRR));
 #else
+		const bool bEditorStreamlineBackend = false;
 		const bool bEditorDLSSSRAvailable = false;
 		const bool bEditorDLSSRRAvailable = false;
 #endif
@@ -13354,8 +13430,8 @@ void Corona::DrawEditorModeOverlay()
 		{
 			if (bCommandLineDisableStreamline)
 				ImGui::TextDisabled("DLSS modes are unavailable because Streamline is disabled for this run.");
-			else if (!bEditorD3D12Backend)
-				ImGui::TextDisabled("DLSS modes require the DX12 backend.");
+			else if (!bEditorStreamlineBackend)
+				ImGui::TextDisabled("DLSS modes require a Streamline-capable backend.");
 			else
 				ImGui::TextDisabled("DLSS modes are unavailable on this session.");
 		}

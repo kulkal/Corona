@@ -3502,6 +3502,55 @@ Texture::~Texture()
 		Owner->UnregisterBindlessTexture(this);
 }
 
+namespace
+{
+	uint32_t ToD3D12StreamlineState(EResourceState state)
+	{
+		switch (state)
+		{
+		case EResourceState::ShaderRead:
+			return D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+		case EResourceState::UnorderedAccess:
+			return D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+		case EResourceState::RenderTarget:
+			return D3D12_RESOURCE_STATE_RENDER_TARGET;
+		case EResourceState::DepthWrite:
+			return D3D12_RESOURCE_STATE_DEPTH_WRITE;
+		case EResourceState::CopyDest:
+			return D3D12_RESOURCE_STATE_COPY_DEST;
+		case EResourceState::CopySource:
+			return D3D12_RESOURCE_STATE_COPY_SOURCE;
+		case EResourceState::Present:
+			return D3D12_RESOURCE_STATE_PRESENT;
+		default:
+			return D3D12_RESOURCE_STATE_COMMON;
+		}
+	}
+}
+
+bool DX12Backend::GetStreamlineTextureResource(Texture* texture, EResourceState state, StreamlineTextureResourceDesc& outDesc) const
+{
+	if (!texture || !texture->resource)
+		return false;
+
+	const D3D12_RESOURCE_DESC desc = texture->resource->GetDesc();
+	outDesc = {};
+	outDesc.Native = texture->resource.Get();
+	outDesc.State = ToD3D12StreamlineState(state);
+	outDesc.Width = static_cast<uint32_t>(desc.Width);
+	outDesc.Height = desc.Height;
+	outDesc.NativeFormat = static_cast<uint32_t>(desc.Format);
+	outDesc.MipLevels = desc.MipLevels;
+	outDesc.ArrayLayers = desc.DepthOrArraySize;
+	outDesc.Flags = static_cast<uint32_t>(desc.Flags);
+	return outDesc.Native != nullptr;
+}
+
+void* DX12Backend::GetStreamlineCommandBuffer()
+{
+	return GetGraphicsCommandList();
+}
+
 void Texture::MakeStaticSRV()
 {
 	DX12Backend* owner = Owner;

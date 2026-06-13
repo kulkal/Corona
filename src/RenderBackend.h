@@ -1,7 +1,9 @@
 #pragma once
 
 #include <cfloat>
+#include <array>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
@@ -268,6 +270,39 @@ struct RenderBackendCapabilities
 	uint32_t MaxBindlessBufferCount = 0;
 };
 
+struct StreamlineTextureResourceDesc
+{
+	void* Native = nullptr;
+	void* Memory = nullptr;
+	void* View = nullptr;
+	uint32_t State = (std::numeric_limits<uint32_t>::max)();
+	uint32_t Width = 0;
+	uint32_t Height = 0;
+	uint32_t NativeFormat = 0;
+	uint32_t MipLevels = 1;
+	uint32_t ArrayLayers = 1;
+	uint32_t Flags = 0;
+	uint32_t Usage = 0;
+};
+
+struct StreamlineVulkanDeviceInfo
+{
+	void* Device = nullptr;
+	void* Instance = nullptr;
+	void* PhysicalDevice = nullptr;
+	std::array<uint8_t, 8> DeviceLUID{};
+	uint32_t DeviceLUIDSizeInBytes = 0;
+	uint32_t ComputeQueueIndex = 0;
+	uint32_t ComputeQueueFamily = 0;
+	uint32_t GraphicsQueueIndex = 0;
+	uint32_t GraphicsQueueFamily = 0;
+	uint32_t OpticalFlowQueueIndex = 0;
+	uint32_t OpticalFlowQueueFamily = 0;
+	uint32_t ComputeQueueCreateFlags = 0;
+	uint32_t GraphicsQueueCreateFlags = 0;
+	uint32_t OpticalFlowQueueCreateFlags = 0;
+};
+
 class IRenderBackend
 {
 public:
@@ -276,6 +311,19 @@ public:
 	virtual ERenderBackendAPI GetAPI() const = 0;
 	virtual const char* GetBackendName() const = 0;
 	virtual RenderBackendCapabilities GetCapabilities() const { return {}; }
+	virtual bool GetStreamlineTextureResource(Texture* texture, EResourceState state, StreamlineTextureResourceDesc& outDesc) const
+	{
+		(void)texture;
+		(void)state;
+		(void)outDesc;
+		return false;
+	}
+	virtual void* GetStreamlineCommandBuffer() { return nullptr; }
+	virtual bool GetStreamlineVulkanDeviceInfo(StreamlineVulkanDeviceInfo& outInfo) const
+	{
+		(void)outInfo;
+		return false;
+	}
 	virtual uint32_t GetMaxSupportedHybridStage() const = 0;
 	virtual bool SupportsRayTracing() const = 0;
 	virtual bool SupportsShaderExecutionReordering() const = 0;
