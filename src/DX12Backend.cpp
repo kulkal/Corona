@@ -575,6 +575,27 @@ namespace
 		}
 	}
 
+	D3D12_SHADER_RESOURCE_VIEW_DESC MakeTextureSRVDesc(const Texture& texture)
+	{
+		D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+		srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+		srvDesc.Format = (texture.textureDesc.Flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL)
+			? DXGI_FORMAT_R32_FLOAT
+			: texture.textureDesc.Format;
+
+		if (texture.textureDesc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D)
+		{
+			srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE3D;
+			srvDesc.Texture3D.MipLevels = texture.textureDesc.MipLevels;
+		}
+		else
+		{
+			srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+			srvDesc.Texture2D.MipLevels = texture.textureDesc.MipLevels;
+		}
+		return srvDesc;
+	}
+
 }
 void DescriptorHeap::Init(ID3D12Device5* InDevice, D3D12_DESCRIPTOR_HEAP_DESC& InHeapDesc)
 {
@@ -2169,6 +2190,12 @@ DX12Backend::DX12Backend(ComPtr<ID3D12Device5> InDevice)
 		SRVCBVDescriptorHeapShaderVisible->Init(Device.Get(), HeapDesc);
 
 		NAME_D3D12_OBJECT(SRVCBVDescriptorHeapShaderVisible->DH);
+
+		SRVCBVDescriptorHeapShaderVisible->AllocDescriptors(
+			BindlessTextureTableCpuBase,
+			BindlessTextureTableGpuBase,
+			kMaxDX12BindlessTextureSlots);
+		bBindlessTextureTableAllocated = true;
 	}
 
 	// non shader visible(storage) CBV_SRV_UAV
@@ -2294,6 +2321,98 @@ void DX12Backend::HideBvhViewerD3D12Window()
 		CoronaBvhViewerD3D12_SetWindowVisible(BvhViewerD3D12, false);
 }
 
+RHITextureHandle DX12Backend::RegisterBindlessTexture(Texture* texture)
+{
+	if (!texture || !Device || !SRVCBVDescriptorHeapShaderVisible || !bBindlessTextureTableAllocated)
+		return {};
+
+	{
+		std::lock_guard<std::mutex> lock(BindlessTextureMutex);
+		const RHITextureHandle existing = texture->BindlessHandle;
+		if (existing.IsValid() &&
+			existing.Index < BindlessTextureSlots.size() &&
+			BindlessTextureSlots[existing.Index].Occupied &&
+			BindlessTextureSlots[existing.Index].Generation == existing.Generation)
+		{
+			return existing;
+		}
+
+		uint32_t slotIndex = RHI_INVALID_BINDLESS_INDEX;
+		if (!BindlessTextureFreeList.empty())
+		{
+			slotIndex = BindlessTextureFreeList.back();
+			BindlessTextureFreeList.pop_back();
+		}
+		else
+		{
+			if (BindlessTextureSlots.size() >= kMaxDX12BindlessTextureSlots)
+				return {};
+			slotIndex = static_cast<uint32_t>(BindlessTextureSlots.size());
+			BindlessTextureSlots.emplace_back();
+			DX12BindlessTextureSlot& newSlot = BindlessTextureSlots.back();
+			const SIZE_T slotOffset = static_cast<SIZE_T>(slotIndex) * SRVCBVDescriptorHeapShaderVisible->DescriptorSize;
+			newSlot.CpuHandleSRV.ptr = BindlessTextureTableCpuBase.ptr + slotOffset;
+			newSlot.GpuHandleSRV.ptr = BindlessTextureTableGpuBase.ptr + slotOffset;
+		}
+
+		DX12BindlessTextureSlot& slot = BindlessTextureSlots[slotIndex];
+		if (slot.Generation == 0)
+			slot.Generation = 1;
+		slot.TexturePtr = texture;
+		slot.Occupied = true;
+		texture->BindlessHandle = { slotIndex, slot.Generation };
+		texture->CpuHandleBindlessSRV = slot.CpuHandleSRV;
+		texture->GpuHandleBindlessSRV = slot.GpuHandleSRV;
+	}
+
+	if (!UpdateBindlessTexture(texture))
+		return {};
+	return texture->BindlessHandle;
+}
+
+bool DX12Backend::UpdateBindlessTexture(Texture* texture)
+{
+	if (!texture || !Device || !texture->resource)
+		return false;
+
+	std::lock_guard<std::mutex> lock(BindlessTextureMutex);
+	const RHITextureHandle handle = texture->BindlessHandle;
+	if (!handle.IsValid() ||
+		handle.Index >= BindlessTextureSlots.size() ||
+		!BindlessTextureSlots[handle.Index].Occupied ||
+		BindlessTextureSlots[handle.Index].Generation != handle.Generation)
+	{
+		return false;
+	}
+
+	DX12BindlessTextureSlot& slot = BindlessTextureSlots[handle.Index];
+	slot.TexturePtr = texture;
+	texture->CpuHandleBindlessSRV = slot.CpuHandleSRV;
+	texture->GpuHandleBindlessSRV = slot.GpuHandleSRV;
+
+	const D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = MakeTextureSRVDesc(*texture);
+	Device->CreateShaderResourceView(texture->resource.Get(), &srvDesc, slot.CpuHandleSRV);
+	return true;
+}
+
+RHITextureHandle DX12Backend::GetBindlessTextureHandle(const Texture* texture) const
+{
+	if (!texture)
+		return {};
+
+	std::lock_guard<std::mutex> lock(BindlessTextureMutex);
+	const RHITextureHandle handle = texture->BindlessHandle;
+	if (!handle.IsValid() ||
+		handle.Index >= BindlessTextureSlots.size() ||
+		!BindlessTextureSlots[handle.Index].Occupied ||
+		BindlessTextureSlots[handle.Index].Generation != handle.Generation ||
+		BindlessTextureSlots[handle.Index].TexturePtr != texture)
+	{
+		return {};
+	}
+	return handle;
+}
+
 DX12Backend::~DX12Backend()
 {
 	CmdQ->WaitGPU();
@@ -2307,12 +2426,67 @@ DX12Backend::~DX12Backend()
 	ShutdownGpuTimestampQueries();
 }
 
+static RHIBindingDesc MakeLegacyRHIBindingDesc(
+	const string& name,
+	RHIDescriptorKind descriptorKind,
+	RHIResourceKind resourceKind,
+	uint32_t baseRegister,
+	uint32_t descriptorCount,
+	uint32_t sizeInBytes = 0)
+{
+	RHIBindingDesc binding{};
+	binding.Name = name;
+	binding.DescriptorKind = descriptorKind;
+	binding.ResourceKind = resourceKind;
+	binding.Access = descriptorKind == RHIDescriptorKind::UAV ? RHIDescriptorAccess::ReadWrite : RHIDescriptorAccess::ReadOnly;
+	binding.RegisterIndex = baseRegister;
+	binding.DescriptorCount = descriptorCount;
+	binding.SizeInBytes = sizeInBytes;
+	return binding;
+}
+
+static UINT ToD3D12DescriptorCount(const RHIBindingDesc& binding)
+{
+	if (binding.RuntimeArray || binding.DescriptorCount == RHI_BINDLESS_ARRAY)
+		return UINT_MAX;
+	return binding.DescriptorCount == 0 ? 1 : binding.DescriptorCount;
+}
+
+static UINT ToD3D12RegisterSpace(const RHIBindingDesc& binding)
+{
+	return binding.RegisterSpace;
+}
+
+static D3D12_SHADER_VISIBILITY ToD3D12GraphicsShaderVisibility(const RHIBindingDesc& binding)
+{
+	const RHIShaderStageMask vertexStage = ToRHIShaderStageMask(RHIShaderStage::Vertex);
+	const RHIShaderStageMask pixelStage = ToRHIShaderStageMask(RHIShaderStage::Pixel);
+	const RHIShaderStageMask graphicsStages = vertexStage | pixelStage;
+	const RHIShaderStageMask stages = binding.Stages;
+
+	if ((stages & ~graphicsStages) != 0)
+		return D3D12_SHADER_VISIBILITY_ALL;
+	if ((stages & vertexStage) != 0 && (stages & pixelStage) == 0)
+		return D3D12_SHADER_VISIBILITY_VERTEX;
+	if ((stages & pixelStage) != 0 && (stages & vertexStage) == 0)
+		return D3D12_SHADER_VISIBILITY_PIXEL;
+	return D3D12_SHADER_VISIBILITY_ALL;
+}
+
+static D3D12_SHADER_VISIBILITY ToD3D12ShaderVisibilityForPipeline(const RHIBindingDesc& binding, bool isCompute)
+{
+	if (isCompute)
+		return D3D12_SHADER_VISIBILITY_ALL;
+	return ToD3D12GraphicsShaderVisibility(binding);
+}
+
 void PipelineStateObject::BindUAV(string name, int baseRegister)
 {
 	BindingData binding;
 	binding.name = name;
 	binding.baseRegister = baseRegister;
 	binding.numDescriptors = 1;
+	binding.Schema = MakeLegacyRHIBindingDesc(name, RHIDescriptorKind::UAV, RHIResourceKind::Unknown, static_cast<uint32_t>(std::max(baseRegister, 0)), 1);
 	uavBinding.insert(pair<string, BindingData>(name, binding));
 }
 
@@ -2322,6 +2496,7 @@ void PipelineStateObject::BindSRV(string name, int baseRegister, int num)
 	binding.name = name;
 	binding.baseRegister = baseRegister;
 	binding.numDescriptors = num;
+	binding.Schema = MakeLegacyRHIBindingDesc(name, RHIDescriptorKind::SRV, RHIResourceKind::Unknown, static_cast<uint32_t>(std::max(baseRegister, 0)), static_cast<uint32_t>(std::max(num, 0)));
 	textureBinding.insert(pair<string, BindingData>(name, binding));
 }
 
@@ -2333,6 +2508,7 @@ void PipelineStateObject::BindCBV(string name, int baseRegister, int size)
 	binding.numDescriptors = 1;
 	binding.sourceSize = static_cast<UINT>(std::max(size, 0));
 	binding.cbSize = AlignConstantBufferSize(binding.sourceSize);
+	binding.Schema = MakeLegacyRHIBindingDesc(name, RHIDescriptorKind::CBV, RHIResourceKind::ConstantBuffer, static_cast<uint32_t>(std::max(baseRegister, 0)), 1, binding.sourceSize);
 
 	constantBufferBinding.insert(pair<string, BindingData>(name, binding));
 }
@@ -2343,6 +2519,7 @@ void PipelineStateObject::BindRootConstant(string name, int baseRegister)
 	binding.name = name;
 	binding.baseRegister = baseRegister;
 	binding.numDescriptors = 1;
+	binding.Schema = MakeLegacyRHIBindingDesc(name, RHIDescriptorKind::CBV, RHIResourceKind::ConstantBuffer, static_cast<uint32_t>(std::max(baseRegister, 0)), 1);
 
 	rootBinding.insert(pair<string, BindingData>(name, binding));
 }
@@ -2353,6 +2530,7 @@ void PipelineStateObject::BindSampler(string name, int baseRegister)
 	binding.name = name;
 	binding.baseRegister = baseRegister;
 	binding.numDescriptors = 1;
+	binding.Schema = MakeLegacyRHIBindingDesc(name, RHIDescriptorKind::Sampler, RHIResourceKind::Sampler, static_cast<uint32_t>(std::max(baseRegister, 0)), 1);
 
 	samplerBinding.insert(pair<string, BindingData>(name, binding));
 }
@@ -2477,8 +2655,16 @@ bool PipelineStateObject::Init()
 			PipelineStateObject::BindingData& bindingData = bindingPair.second;
 
 			CD3DX12_ROOT_PARAMETER1 TextureParam;
-			TextureRanges[i].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, bindingData.numDescriptors, bindingData.baseRegister, 0, D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE);
-			TextureParam.InitAsDescriptorTable(1, &TextureRanges[i], D3D12_SHADER_VISIBILITY_ALL);
+			TextureRanges[i].Init(
+				D3D12_DESCRIPTOR_RANGE_TYPE_SRV,
+				ToD3D12DescriptorCount(bindingData.Schema),
+				bindingData.baseRegister,
+				ToD3D12RegisterSpace(bindingData.Schema),
+				D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE);
+			TextureParam.InitAsDescriptorTable(
+				1,
+				&TextureRanges[i],
+				ToD3D12ShaderVisibilityForPipeline(bindingData.Schema, IsCompute));
 			rootParamVec.push_back(TextureParam);
 			i++;
 			bindingData.rootParamIndex = RootParamIndex++;
@@ -2495,8 +2681,15 @@ bool PipelineStateObject::Init()
 			PipelineStateObject::BindingData& bindingData = bindingPair.second;
 
 			CD3DX12_ROOT_PARAMETER1 SamplerParam;
-			SamplerRanges[i].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER, bindingData.numDescriptors, bindingData.baseRegister);
-			SamplerParam.InitAsDescriptorTable(1, &SamplerRanges[i], D3D12_SHADER_VISIBILITY_ALL);
+			SamplerRanges[i].Init(
+				D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER,
+				ToD3D12DescriptorCount(bindingData.Schema),
+				bindingData.baseRegister,
+				ToD3D12RegisterSpace(bindingData.Schema));
+			SamplerParam.InitAsDescriptorTable(
+				1,
+				&SamplerRanges[i],
+				ToD3D12ShaderVisibilityForPipeline(bindingData.Schema, IsCompute));
 			rootParamVec.push_back(SamplerParam);
 			i++;
 			bindingData.rootParamIndex = RootParamIndex++;
@@ -2512,7 +2705,11 @@ bool PipelineStateObject::Init()
 			PipelineStateObject::BindingData& bindingData = bindingPair.second;
 
 			CD3DX12_ROOT_PARAMETER1 ConstantParam;
-			ConstantParam.InitAsConstants(bindingData.numDescriptors, bindingData.baseRegister, 0, D3D12_SHADER_VISIBILITY_ALL);
+			ConstantParam.InitAsConstants(
+				bindingData.numDescriptors,
+				bindingData.baseRegister,
+				ToD3D12RegisterSpace(bindingData.Schema),
+				ToD3D12ShaderVisibilityForPipeline(bindingData.Schema, IsCompute));
 			rootParamVec.push_back(ConstantParam);
 			i++;
 			bindingData.rootParamIndex = RootParamIndex++;
@@ -2526,7 +2723,11 @@ bool PipelineStateObject::Init()
 			PipelineStateObject::BindingData& bindingData = bindingPair.second;
 
 			CD3DX12_ROOT_PARAMETER1 CBParam;
-			CBParam.InitAsConstantBufferView(bindingData.baseRegister, 0, D3D12_ROOT_DESCRIPTOR_FLAG_NONE, D3D12_SHADER_VISIBILITY_ALL);
+			CBParam.InitAsConstantBufferView(
+				bindingData.baseRegister,
+				ToD3D12RegisterSpace(bindingData.Schema),
+				D3D12_ROOT_DESCRIPTOR_FLAG_NONE,
+				ToD3D12ShaderVisibilityForPipeline(bindingData.Schema, IsCompute));
 
 			rootParamVec.push_back(CBParam);
 			bindingData.rootParamIndex = RootParamIndex++;
@@ -2542,8 +2743,16 @@ bool PipelineStateObject::Init()
 		{
 			PipelineStateObject::BindingData& bindingData = bindingPair.second;
 			CD3DX12_ROOT_PARAMETER1 TextureParam;
-			UAVRanges[i].Init(D3D12_DESCRIPTOR_RANGE_TYPE_UAV, bindingData.numDescriptors, bindingData.baseRegister, 0, D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE);
-			TextureParam.InitAsDescriptorTable(1, &UAVRanges[i], D3D12_SHADER_VISIBILITY_ALL);
+			UAVRanges[i].Init(
+				D3D12_DESCRIPTOR_RANGE_TYPE_UAV,
+				ToD3D12DescriptorCount(bindingData.Schema),
+				bindingData.baseRegister,
+				ToD3D12RegisterSpace(bindingData.Schema),
+				D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE);
+			TextureParam.InitAsDescriptorTable(
+				1,
+				&UAVRanges[i],
+				ToD3D12ShaderVisibilityForPipeline(bindingData.Schema, IsCompute));
 			rootParamVec.push_back(TextureParam);
 			i++;
 			bindingData.rootParamIndex = RootParamIndex++;
@@ -2726,11 +2935,33 @@ void D3D12ComputePipelineStateObject::BindSRV(const std::string& name, uint32_t 
 	PSO->BindSRV(name, static_cast<int>(baseRegister), static_cast<int>(numDescriptors));
 }
 
+void D3D12ComputePipelineStateObject::BindSRV(const RHIBindingDesc& binding)
+{
+	BindSRV(binding.Name, binding.RegisterIndex, RHILegacyDescriptorCount(binding));
+	if (PSO)
+	{
+		auto it = PSO->textureBinding.find(binding.Name);
+		if (it != PSO->textureBinding.end())
+			it->second.Schema = binding;
+	}
+}
+
 void D3D12ComputePipelineStateObject::BindUAV(const std::string& name, uint32_t baseRegister)
 {
 	if (!PSO)
 		PSO = std::make_shared<PipelineStateObject>();
 	PSO->BindUAV(name, static_cast<int>(baseRegister));
+}
+
+void D3D12ComputePipelineStateObject::BindUAV(const RHIBindingDesc& binding)
+{
+	BindUAV(binding.Name, binding.RegisterIndex);
+	if (PSO)
+	{
+		auto it = PSO->uavBinding.find(binding.Name);
+		if (it != PSO->uavBinding.end())
+			it->second.Schema = binding;
+	}
 }
 
 void D3D12ComputePipelineStateObject::BindCBV(const std::string& name, uint32_t baseRegister, uint32_t size)
@@ -2740,11 +2971,33 @@ void D3D12ComputePipelineStateObject::BindCBV(const std::string& name, uint32_t 
 	PSO->BindCBV(name, static_cast<int>(baseRegister), static_cast<int>(size));
 }
 
+void D3D12ComputePipelineStateObject::BindCBV(const RHIBindingDesc& binding)
+{
+	BindCBV(binding.Name, binding.RegisterIndex, binding.SizeInBytes);
+	if (PSO)
+	{
+		auto it = PSO->constantBufferBinding.find(binding.Name);
+		if (it != PSO->constantBufferBinding.end())
+			it->second.Schema = binding;
+	}
+}
+
 void D3D12ComputePipelineStateObject::BindSampler(const std::string& name, uint32_t baseRegister)
 {
 	if (!PSO)
 		PSO = std::make_shared<PipelineStateObject>();
 	PSO->BindSampler(name, static_cast<int>(baseRegister));
+}
+
+void D3D12ComputePipelineStateObject::BindSampler(const RHIBindingDesc& binding)
+{
+	BindSampler(binding.Name, binding.RegisterIndex);
+	if (PSO)
+	{
+		auto it = PSO->samplerBinding.find(binding.Name);
+		if (it != PSO->samplerBinding.end())
+			it->second.Schema = binding;
+	}
 }
 
 bool D3D12ComputePipelineStateObject::InitCS(const std::wstring& shaderFile, const std::string& entryPoint)
@@ -2882,16 +3135,9 @@ void Texture::MakeStaticSRV()
 		return;
 	owner->TextureDHRing->AllocDescriptor(CpuHandleSRV, GpuHandleSRV);
 
-	D3D12_SHADER_RESOURCE_VIEW_DESC SrvDesc = {};
-	SrvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-	SrvDesc.Format = textureDesc.Format;
-
-	if(textureDesc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D)
-		SrvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE3D;
-	else 
-		SrvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-	SrvDesc.Texture2D.MipLevels = textureDesc.MipLevels;
+	D3D12_SHADER_RESOURCE_VIEW_DESC SrvDesc = MakeTextureSRVDesc(*this);
 	owner->Device->CreateShaderResourceView(resource.Get(), &SrvDesc, CpuHandleSRV);
+	owner->RegisterBindlessTexture(this);
 }
 
 void Texture::MakeRTV(bool isBackBuffer)
@@ -2958,6 +3204,7 @@ std::shared_ptr<Texture> DX12Backend::CreateTexture2D(const TextureCreateDesc& d
 			texture->MakeRTV();
 		if (HasTextureUsage(desc.Usage, TextureUsage_DepthStencil))
 			texture->MakeDSV();
+		RegisterBindlessTexture(texture.get());
 	}
 	return texture;
 }
@@ -4657,6 +4904,7 @@ void D3D12RTPipelineStateObject::BindUAV(const string& shader, const string& nam
 		binding.Type = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
 
 		binding.BaseRegister = baseRegister;
+		binding.Schema = MakeLegacyRHIBindingDesc(name, RHIDescriptorKind::UAV, RHIResourceKind::Unknown, baseRegister, 1);
 
 		GlobalBinding.push_back(binding);
 	}
@@ -4669,9 +4917,19 @@ void D3D12RTPipelineStateObject::BindUAV(const string& shader, const string& nam
 		binding.Type = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
 
 		binding.BaseRegister = baseRegister;
+		binding.Schema = MakeLegacyRHIBindingDesc(name, RHIDescriptorKind::UAV, RHIResourceKind::Unknown, baseRegister, 1);
 
 		bindingInfo.Binding.push_back(binding);
 	}
+}
+
+void D3D12RTPipelineStateObject::BindUAV(const string& shader, const RHIBindingDesc& binding)
+{
+	BindUAV(shader, binding.Name, binding.RegisterIndex);
+	if (shader == "global")
+		GlobalBinding.back().Schema = binding;
+	else
+		ShaderBinding[shader].Binding.back().Schema = binding;
 }
 
 void D3D12RTPipelineStateObject::BindSRV(const string& shader, const string& name, uint32_t baseRegister)
@@ -4683,6 +4941,7 @@ void D3D12RTPipelineStateObject::BindSRV(const string& shader, const string& nam
 		binding.Type = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
 
 		binding.BaseRegister = baseRegister;
+		binding.Schema = MakeLegacyRHIBindingDesc(name, RHIDescriptorKind::SRV, RHIResourceKind::Unknown, baseRegister, 1);
 
 		GlobalBinding.push_back(binding);
 	}
@@ -4695,9 +4954,19 @@ void D3D12RTPipelineStateObject::BindSRV(const string& shader, const string& nam
 		binding.Type = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
 
 		binding.BaseRegister = baseRegister;
+		binding.Schema = MakeLegacyRHIBindingDesc(name, RHIDescriptorKind::SRV, RHIResourceKind::Unknown, baseRegister, 1);
 
 		bindingInfo.Binding.push_back(binding);
 	}
+}
+
+void D3D12RTPipelineStateObject::BindSRV(const string& shader, const RHIBindingDesc& binding)
+{
+	BindSRV(shader, binding.Name, binding.RegisterIndex);
+	if (shader == "global")
+		GlobalBinding.back().Schema = binding;
+	else
+		ShaderBinding[shader].Binding.back().Schema = binding;
 }
 
 
@@ -4711,6 +4980,7 @@ void D3D12RTPipelineStateObject::BindSampler(const string& shader, const string&
 		binding.Type = D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER;
 
 		binding.BaseRegister = baseRegister;
+		binding.Schema = MakeLegacyRHIBindingDesc(name, RHIDescriptorKind::Sampler, RHIResourceKind::Sampler, baseRegister, 1);
 
 		GlobalBinding.push_back(binding);
 	}
@@ -4723,9 +4993,19 @@ void D3D12RTPipelineStateObject::BindSampler(const string& shader, const string&
 		binding.Type = D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER;
 
 		binding.BaseRegister = baseRegister;
+		binding.Schema = MakeLegacyRHIBindingDesc(name, RHIDescriptorKind::Sampler, RHIResourceKind::Sampler, baseRegister, 1);
 
 		bindingInfo.Binding.push_back(binding);
 	}
+}
+
+void D3D12RTPipelineStateObject::BindSampler(const string& shader, const RHIBindingDesc& binding)
+{
+	BindSampler(shader, binding.Name, binding.RegisterIndex);
+	if (shader == "global")
+		GlobalBinding.back().Schema = binding;
+	else
+		ShaderBinding[shader].Binding.back().Schema = binding;
 }
 
 void D3D12RTPipelineStateObject::BindCBV(const string& shader, const string& name, uint32_t baseRegister, uint32_t size, uint32_t numInstance)
@@ -4739,6 +5019,7 @@ void D3D12RTPipelineStateObject::BindCBV(const string& shader, const string& nam
 		binding.BaseRegister = baseRegister;
 		binding.sourceSize = size;
 		binding.cbSize = AlignConstantBufferSize(binding.sourceSize);
+		binding.Schema = MakeLegacyRHIBindingDesc(name, RHIDescriptorKind::CBV, RHIResourceKind::ConstantBuffer, baseRegister, 1, size);
 
 		GlobalBinding.push_back(binding);
 	}
@@ -4753,9 +5034,19 @@ void D3D12RTPipelineStateObject::BindCBV(const string& shader, const string& nam
 		binding.BaseRegister = baseRegister;
 		binding.sourceSize = size;
 		binding.cbSize = AlignConstantBufferSize(binding.sourceSize);
+		binding.Schema = MakeLegacyRHIBindingDesc(name, RHIDescriptorKind::CBV, RHIResourceKind::ConstantBuffer, baseRegister, 1, size);
 
 		bindingInfo.Binding.push_back(binding);
 	}
+}
+
+void D3D12RTPipelineStateObject::BindCBV(const string& shader, const RHIBindingDesc& binding)
+{
+	BindCBV(shader, binding.Name, binding.RegisterIndex, binding.SizeInBytes, binding.NumInstances);
+	if (shader == "global")
+		GlobalBinding.back().Schema = binding;
+	else
+		ShaderBinding[shader].Binding.back().Schema = binding;
 }
 
 void D3D12RTPipelineStateObject::SetShaderDefine(const string& name, const string& value)
@@ -5385,8 +5676,8 @@ bool D3D12RTPipelineStateObject::InitRS(const string& ShaderFile)
 				D3D12_DESCRIPTOR_RANGE& Range = Ranges[i++];;
 				Range.RangeType = bindingData.Type;
 				Range.BaseShaderRegister = bindingData.BaseRegister;
-				Range.NumDescriptors = 1;
-				Range.RegisterSpace = 0;
+				Range.NumDescriptors = ToD3D12DescriptorCount(bindingData.Schema);
+				Range.RegisterSpace = ToD3D12RegisterSpace(bindingData.Schema);
 				Range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
 				//Ranges.push_back(Range);
 
@@ -5474,8 +5765,8 @@ bool D3D12RTPipelineStateObject::InitRS(const string& ShaderFile)
 		D3D12_DESCRIPTOR_RANGE& Range = Ranges[i++];;
 		Range.RangeType = bindingData.Type;
 		Range.BaseShaderRegister = bindingData.BaseRegister;
-		Range.NumDescriptors = 1;
-		Range.RegisterSpace = 0;
+		Range.NumDescriptors = ToD3D12DescriptorCount(bindingData.Schema);
+		Range.RegisterSpace = ToD3D12RegisterSpace(bindingData.Schema);
 		Range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
 		//Ranges.push_back(Range);
 
@@ -5708,6 +5999,15 @@ void D3D12RTPipelineStateObject::SetBufferSRV(const string& shader, const string
 {
 	assert(buffer);
 	SetSRVHandle(shader, bindingName, buffer->GpuHandleSRV, instanceIndex);
+}
+
+bool D3D12RTPipelineStateObject::SetBindlessTextureTable(const string& shader, const string& bindingName)
+{
+	if (!Owner || !Owner->IsBindlessTextureTableReady())
+		return false;
+
+	SetSRVHandle(shader, bindingName, Owner->GetBindlessTextureTableGpuHandle(), -1);
+	return true;
 }
 
 void D3D12RTPipelineStateObject::SetAccelerationStructure(const string& shader, const string& bindingName, const std::shared_ptr<RTAS>& rtas, int instanceIndex)
@@ -6197,14 +6497,50 @@ std::shared_ptr<GraphicsPipelineHandle> DX12Backend::CreateGraphicsPipeline(cons
 		desc.VertexEntryPoint,
 		desc.PixelEntryPoint);
 	pso->graphicsPSODesc = psoDesc;
-	if (desc.ConstantBufferSize > 0)
-		pso->BindCBV("__CB0", desc.ConstantBufferBinding, desc.ConstantBufferSize);
-	for (const auto& binding : desc.TextureBindings)
-		pso->BindSRV(binding.Name, binding.Slot, 1);
-	for (const auto& binding : desc.BufferBindings)
-		pso->BindSRV(binding.Name, binding.Slot, 1);
-	for (const auto& binding : desc.SamplerBindings)
-		pso->BindSampler(binding.Name, binding.Slot);
+	if (!desc.PipelineLayout.Bindings.empty())
+	{
+		for (const RHIBindingDesc& binding : desc.PipelineLayout.Bindings)
+		{
+			switch (binding.DescriptorKind)
+			{
+			case RHIDescriptorKind::SRV:
+			case RHIDescriptorKind::AccelerationStructure:
+				pso->BindSRV(binding.Name, binding.RegisterIndex, RHILegacyDescriptorCount(binding));
+				if (auto it = pso->textureBinding.find(binding.Name); it != pso->textureBinding.end())
+					it->second.Schema = binding;
+				break;
+			case RHIDescriptorKind::UAV:
+				pso->BindUAV(binding.Name, binding.RegisterIndex);
+				if (auto it = pso->uavBinding.find(binding.Name); it != pso->uavBinding.end())
+					it->second.Schema = binding;
+				break;
+			case RHIDescriptorKind::CBV:
+			{
+				const uint32_t sizeInBytes = binding.SizeInBytes > 0 ? binding.SizeInBytes : desc.ConstantBufferSize;
+				pso->BindCBV(binding.Name, binding.RegisterIndex, sizeInBytes);
+				if (auto it = pso->constantBufferBinding.find(binding.Name); it != pso->constantBufferBinding.end())
+					it->second.Schema = binding;
+				break;
+			}
+			case RHIDescriptorKind::Sampler:
+				pso->BindSampler(binding.Name, binding.RegisterIndex);
+				if (auto it = pso->samplerBinding.find(binding.Name); it != pso->samplerBinding.end())
+					it->second.Schema = binding;
+				break;
+			}
+		}
+	}
+	else
+	{
+		if (desc.ConstantBufferSize > 0)
+			pso->BindCBV("__CB0", desc.ConstantBufferBinding, desc.ConstantBufferSize);
+		for (const auto& binding : desc.TextureBindings)
+			pso->BindSRV(binding.Name, binding.Slot, 1);
+		for (const auto& binding : desc.BufferBindings)
+			pso->BindSRV(binding.Name, binding.Slot, 1);
+		for (const auto& binding : desc.SamplerBindings)
+			pso->BindSampler(binding.Name, binding.Slot);
+	}
 	if (!pso->Init())
 		return nullptr;
 

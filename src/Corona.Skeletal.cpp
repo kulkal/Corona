@@ -423,10 +423,11 @@ void Corona::InitSkeletalSkinningPSO()
 		AppendCpuRuntimeTrace(L"[SkeletalSkinningPSO] CreateComputePipelineStateObject failed");
 		return;
 	}
-	pso->BindSRV("Inputs", 0, 1);
-	pso->BindSRV("Bones", 1, 1);
-	pso->BindUAV("Output", 0);
-	pso->BindCBV("Constants", 0, sizeof(SkeletalSkinningConstant));
+	const RHIShaderStageMask computeStage = ToRHIShaderStageMask(RHIShaderStage::Compute);
+	pso->BindSRV(MakeRHIBufferSRV("Inputs", 0, computeStage));
+	pso->BindSRV(MakeRHIBufferSRV("Bones", 1, computeStage));
+	pso->BindUAV(MakeRHIBufferUAV("Output", 0, computeStage, RHIBufferViewKind::Raw));
+	pso->BindCBV(MakeRHICBV("Constants", 0, sizeof(SkeletalSkinningConstant), computeStage));
 	if (pso->InitCS(GetAssetFullPath(L"Shaders\\SkeletalSkinningCS.hlsl"), "SkinMain"))
 	{
 		SkeletalSkinningPSO = pso;

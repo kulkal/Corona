@@ -85,6 +85,78 @@ namespace
 		return kVulkanConstantBufferBindingBase + registerIndex;
 	}
 
+	RHIBindingDesc MakeLegacyVulkanRHIBindingDesc(
+		const std::string& name,
+		RHIDescriptorKind descriptorKind,
+		RHIResourceKind resourceKind,
+		uint32_t baseRegister,
+		uint32_t descriptorCount,
+		uint32_t sizeInBytes = 0)
+	{
+		RHIBindingDesc binding{};
+		binding.Name = name;
+		binding.DescriptorKind = descriptorKind;
+		binding.ResourceKind = resourceKind;
+		binding.Access = descriptorKind == RHIDescriptorKind::UAV ? RHIDescriptorAccess::ReadWrite : RHIDescriptorAccess::ReadOnly;
+		binding.RegisterIndex = baseRegister;
+		binding.DescriptorCount = descriptorCount;
+		binding.SizeInBytes = sizeInBytes;
+		return binding;
+	}
+
+	VkDescriptorType ToVulkanDescriptorType(const RHIBindingDesc& binding, VkDescriptorType fallback)
+	{
+		switch (binding.DescriptorKind)
+		{
+		case RHIDescriptorKind::CBV:
+			return VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+		case RHIDescriptorKind::Sampler:
+			return VK_DESCRIPTOR_TYPE_SAMPLER;
+		case RHIDescriptorKind::AccelerationStructure:
+			return VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
+		case RHIDescriptorKind::UAV:
+			if (binding.ResourceKind == RHIResourceKind::Buffer)
+				return VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+			if (binding.ResourceKind == RHIResourceKind::Texture)
+				return VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+			return fallback;
+		case RHIDescriptorKind::SRV:
+			if (binding.ResourceKind == RHIResourceKind::AccelerationStructure)
+				return VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
+			if (binding.ResourceKind == RHIResourceKind::Buffer)
+				return VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+			if (binding.ResourceKind == RHIResourceKind::Texture)
+				return VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+			return fallback;
+		default:
+			return fallback;
+		}
+	}
+
+	VkShaderStageFlags ToVulkanShaderStageFlags(RHIShaderStageMask stages, VkShaderStageFlags fallback)
+	{
+		VkShaderStageFlags flags = 0;
+		if (stages & ToRHIShaderStageMask(RHIShaderStage::Vertex))
+			flags |= VK_SHADER_STAGE_VERTEX_BIT;
+		if (stages & ToRHIShaderStageMask(RHIShaderStage::Pixel))
+			flags |= VK_SHADER_STAGE_FRAGMENT_BIT;
+		if (stages & ToRHIShaderStageMask(RHIShaderStage::Compute))
+			flags |= VK_SHADER_STAGE_COMPUTE_BIT;
+		if (stages & ToRHIShaderStageMask(RHIShaderStage::RayGeneration))
+			flags |= VK_SHADER_STAGE_RAYGEN_BIT_KHR;
+		if (stages & ToRHIShaderStageMask(RHIShaderStage::Miss))
+			flags |= VK_SHADER_STAGE_MISS_BIT_KHR;
+		if (stages & ToRHIShaderStageMask(RHIShaderStage::ClosestHit))
+			flags |= VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
+		if (stages & ToRHIShaderStageMask(RHIShaderStage::AnyHit))
+			flags |= VK_SHADER_STAGE_ANY_HIT_BIT_KHR;
+		if (stages & ToRHIShaderStageMask(RHIShaderStage::Intersection))
+			flags |= VK_SHADER_STAGE_INTERSECTION_BIT_KHR;
+		if (stages & ToRHIShaderStageMask(RHIShaderStage::Callable))
+			flags |= VK_SHADER_STAGE_CALLABLE_BIT_KHR;
+		return flags != 0 ? flags : fallback;
+	}
+
 	VulkanRTPipelineStateObject::BindingDesc MakeRTBindingDesc(const std::string& shader, const std::string& name, uint32_t baseRegister, uint32_t descriptorBinding, uint32_t dataSize = 0)
 	{
 		VulkanRTPipelineStateObject::BindingDesc binding{};
@@ -1092,22 +1164,50 @@ void VulkanRTPipelineStateObject::AddShader(const std::string& shader, ShaderTyp
 void VulkanRTPipelineStateObject::BindUAV(const std::string& shader, const std::string& name, uint32_t baseRegister)
 {
 	UAVBindings.push_back(MakeRTBindingDesc(shader, name, baseRegister, ToVulkanUavBinding(baseRegister)));
+	UAVBindings.back().Schema = MakeLegacyVulkanRHIBindingDesc(name, RHIDescriptorKind::UAV, RHIResourceKind::Unknown, baseRegister, 1);
+}
+
+void VulkanRTPipelineStateObject::BindUAV(const std::string& shader, const RHIBindingDesc& binding)
+{
+	BindUAV(shader, binding.Name, binding.RegisterIndex);
+	UAVBindings.back().Schema = binding;
 }
 
 void VulkanRTPipelineStateObject::BindSRV(const std::string& shader, const std::string& name, uint32_t baseRegister)
 {
 	SRVBindings.push_back(MakeRTBindingDesc(shader, name, baseRegister, ToVulkanTextureBinding(baseRegister)));
+	SRVBindings.back().Schema = MakeLegacyVulkanRHIBindingDesc(name, RHIDescriptorKind::SRV, RHIResourceKind::Unknown, baseRegister, 1);
+}
+
+void VulkanRTPipelineStateObject::BindSRV(const std::string& shader, const RHIBindingDesc& binding)
+{
+	BindSRV(shader, binding.Name, binding.RegisterIndex);
+	SRVBindings.back().Schema = binding;
 }
 
 void VulkanRTPipelineStateObject::BindSampler(const std::string& shader, const std::string& name, uint32_t baseRegister)
 {
 	SamplerBindings.push_back(MakeRTBindingDesc(shader, name, baseRegister, ToVulkanSamplerBinding(baseRegister)));
+	SamplerBindings.back().Schema = MakeLegacyVulkanRHIBindingDesc(name, RHIDescriptorKind::Sampler, RHIResourceKind::Sampler, baseRegister, 1);
+}
+
+void VulkanRTPipelineStateObject::BindSampler(const std::string& shader, const RHIBindingDesc& binding)
+{
+	BindSampler(shader, binding.Name, binding.RegisterIndex);
+	SamplerBindings.back().Schema = binding;
 }
 
 void VulkanRTPipelineStateObject::BindCBV(const std::string& shader, const std::string& name, uint32_t baseRegister, uint32_t size, uint32_t numInstance)
 {
 	(void)numInstance;
 	CBVBindings.push_back(MakeRTBindingDesc(shader, name, baseRegister, ToVulkanConstantBufferBinding(baseRegister), size));
+	CBVBindings.back().Schema = MakeLegacyVulkanRHIBindingDesc(name, RHIDescriptorKind::CBV, RHIResourceKind::ConstantBuffer, baseRegister, 1, size);
+}
+
+void VulkanRTPipelineStateObject::BindCBV(const std::string& shader, const RHIBindingDesc& binding)
+{
+	BindCBV(shader, binding.Name, binding.RegisterIndex, binding.SizeInBytes, binding.NumInstances);
+	CBVBindings.back().Schema = binding;
 }
 
 void VulkanRTPipelineStateObject::SetShaderDefine(const std::string& name, const std::string& value)
@@ -1146,6 +1246,12 @@ void VulkanRTPipelineStateObject::SetBufferSRV(const std::string& shader, const 
 	(void)shader;
 	(void)instanceIndex;
 	GlobalBindingValues[bindingName].BufferValue = buffer;
+}
+bool VulkanRTPipelineStateObject::SetBindlessTextureTable(const std::string& shader, const std::string& bindingName)
+{
+	(void)shader;
+	(void)bindingName;
+	return false;
 }
 void VulkanRTPipelineStateObject::SetAccelerationStructure(const std::string& shader, const std::string& bindingName, const std::shared_ptr<RTAS>& rtas, int instanceIndex)
 {
@@ -2071,21 +2177,53 @@ VulkanComputePipelineStateObject::~VulkanComputePipelineStateObject()
 void VulkanComputePipelineStateObject::BindSRV(const std::string& name, uint32_t baseRegister, uint32_t numDescriptors)
 {
 	SRVBindings.push_back(MakeComputeBindingDesc(name, baseRegister, ToVulkanTextureBinding(baseRegister), numDescriptors, 0, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE));
+	SRVBindings.back().Schema = MakeLegacyVulkanRHIBindingDesc(name, RHIDescriptorKind::SRV, RHIResourceKind::Unknown, baseRegister, numDescriptors);
+}
+
+void VulkanComputePipelineStateObject::BindSRV(const RHIBindingDesc& binding)
+{
+	BindSRV(binding.Name, binding.RegisterIndex, RHILegacyDescriptorCount(binding));
+	SRVBindings.back().Schema = binding;
+	SRVBindings.back().DescriptorType = ToVulkanDescriptorType(binding, SRVBindings.back().DescriptorType);
 }
 
 void VulkanComputePipelineStateObject::BindUAV(const std::string& name, uint32_t baseRegister)
 {
 	UAVBindings.push_back(MakeComputeBindingDesc(name, baseRegister, ToVulkanUavBinding(baseRegister), 1, 0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE));
+	UAVBindings.back().Schema = MakeLegacyVulkanRHIBindingDesc(name, RHIDescriptorKind::UAV, RHIResourceKind::Unknown, baseRegister, 1);
+}
+
+void VulkanComputePipelineStateObject::BindUAV(const RHIBindingDesc& binding)
+{
+	BindUAV(binding.Name, binding.RegisterIndex);
+	UAVBindings.back().Schema = binding;
+	UAVBindings.back().DescriptorType = ToVulkanDescriptorType(binding, UAVBindings.back().DescriptorType);
 }
 
 void VulkanComputePipelineStateObject::BindCBV(const std::string& name, uint32_t baseRegister, uint32_t size)
 {
 	CBVBindings.push_back(MakeComputeBindingDesc(name, baseRegister, ToVulkanConstantBufferBinding(baseRegister), 1, size, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER));
+	CBVBindings.back().Schema = MakeLegacyVulkanRHIBindingDesc(name, RHIDescriptorKind::CBV, RHIResourceKind::ConstantBuffer, baseRegister, 1, size);
+}
+
+void VulkanComputePipelineStateObject::BindCBV(const RHIBindingDesc& binding)
+{
+	BindCBV(binding.Name, binding.RegisterIndex, binding.SizeInBytes);
+	CBVBindings.back().Schema = binding;
+	CBVBindings.back().DescriptorType = ToVulkanDescriptorType(binding, CBVBindings.back().DescriptorType);
 }
 
 void VulkanComputePipelineStateObject::BindSampler(const std::string& name, uint32_t baseRegister)
 {
 	SamplerBindings.push_back(MakeComputeBindingDesc(name, baseRegister, ToVulkanSamplerBinding(baseRegister), 1, 0, VK_DESCRIPTOR_TYPE_SAMPLER));
+	SamplerBindings.back().Schema = MakeLegacyVulkanRHIBindingDesc(name, RHIDescriptorKind::Sampler, RHIResourceKind::Sampler, baseRegister, 1);
+}
+
+void VulkanComputePipelineStateObject::BindSampler(const RHIBindingDesc& binding)
+{
+	BindSampler(binding.Name, binding.RegisterIndex);
+	SamplerBindings.back().Schema = binding;
+	SamplerBindings.back().DescriptorType = ToVulkanDescriptorType(binding, SamplerBindings.back().DescriptorType);
 }
 
 bool VulkanComputePipelineStateObject::InitCS(const std::wstring& shaderFile, const std::string& entryPoint)
@@ -5013,7 +5151,7 @@ void VulkanBackend::BindGraphicsPipelineForDraw(VulkanGraphicsPipelineHandle* pi
 		VkWriteDescriptorSet& writeDescriptor = descriptorWrites.emplace_back();
 		writeDescriptor.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
 		writeDescriptor.dstSet = descriptorSet;
-		writeDescriptor.dstBinding = ToVulkanConstantBufferBinding(pipeline->Desc.ConstantBufferBinding);
+		writeDescriptor.dstBinding = pipeline->ConstantBufferDescriptorBinding;
 		writeDescriptor.descriptorCount = 1;
 		writeDescriptor.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
 		writeDescriptor.pBufferInfo = &bufferInfo;
@@ -6363,12 +6501,71 @@ std::shared_ptr<GraphicsPipelineHandle> VulkanBackend::CreateGraphicsPipeline(co
 	handle->Owner = this;
 	handle->Desc = desc;
 	GraphicsPipelines.push_back(handle);
-	for (const auto& binding : desc.TextureBindings)
-		handle->TextureBindingSlots[binding.Name] = ToVulkanTextureBinding(binding.Slot);
-	for (const auto& binding : desc.BufferBindings)
-		handle->BufferBindingSlots[binding.Name] = ToVulkanTextureBinding(binding.Slot);
-	for (const auto& binding : desc.SamplerBindings)
-		handle->SamplerBindingSlots[binding.Name] = ToVulkanSamplerBinding(binding.Slot);
+	auto getGraphicsDescriptorBinding = [](const RHIBindingDesc& binding)
+	{
+		switch (binding.DescriptorKind)
+		{
+		case RHIDescriptorKind::UAV:
+			return ToVulkanUavBinding(binding.RegisterIndex);
+		case RHIDescriptorKind::Sampler:
+			return ToVulkanSamplerBinding(binding.RegisterIndex);
+		case RHIDescriptorKind::CBV:
+			return ToVulkanConstantBufferBinding(binding.RegisterIndex);
+		case RHIDescriptorKind::SRV:
+		case RHIDescriptorKind::AccelerationStructure:
+		default:
+			return ToVulkanTextureBinding(binding.RegisterIndex);
+		}
+	};
+	if (!desc.PipelineLayout.Bindings.empty())
+	{
+		for (const RHIBindingDesc& binding : desc.PipelineLayout.Bindings)
+		{
+			const uint32_t descriptorBinding = getGraphicsDescriptorBinding(binding);
+			switch (binding.DescriptorKind)
+			{
+			case RHIDescriptorKind::SRV:
+				if (binding.ResourceKind == RHIResourceKind::Buffer)
+					handle->BufferBindingSlots[binding.Name] = descriptorBinding;
+				else
+					handle->TextureBindingSlots[binding.Name] = descriptorBinding;
+				break;
+			case RHIDescriptorKind::UAV:
+				if (binding.ResourceKind == RHIResourceKind::Buffer)
+					handle->BufferBindingSlots[binding.Name] = descriptorBinding;
+				else
+					handle->TextureBindingSlots[binding.Name] = descriptorBinding;
+				break;
+			case RHIDescriptorKind::Sampler:
+				handle->SamplerBindingSlots[binding.Name] = descriptorBinding;
+				break;
+			case RHIDescriptorKind::CBV:
+				if (!handle->bHasConstantBufferDescriptorBinding)
+				{
+					handle->bHasConstantBufferDescriptorBinding = true;
+					handle->ConstantBufferDescriptorBinding = descriptorBinding;
+				}
+				break;
+			case RHIDescriptorKind::AccelerationStructure:
+				handle->TextureBindingSlots[binding.Name] = descriptorBinding;
+				break;
+			}
+		}
+	}
+	else
+	{
+		for (const auto& binding : desc.TextureBindings)
+			handle->TextureBindingSlots[binding.Name] = ToVulkanTextureBinding(binding.Slot);
+		for (const auto& binding : desc.BufferBindings)
+			handle->BufferBindingSlots[binding.Name] = ToVulkanTextureBinding(binding.Slot);
+		for (const auto& binding : desc.SamplerBindings)
+			handle->SamplerBindingSlots[binding.Name] = ToVulkanSamplerBinding(binding.Slot);
+	}
+	if (desc.ConstantBufferSize > 0 && !handle->bHasConstantBufferDescriptorBinding)
+	{
+		handle->bHasConstantBufferDescriptorBinding = true;
+		handle->ConstantBufferDescriptorBinding = ToVulkanConstantBufferBinding(desc.ConstantBufferBinding);
+	}
 
 	const std::wstring stem = NormalizeShaderPath(desc.ShaderPath).stem().wstring();
 	const std::vector<uint32_t> vertexSpirv = LoadSpirvFile(ResolveVulkanGraphicsVertexSpirvPath(stem, desc.VertexEntryPoint));
@@ -6387,61 +6584,95 @@ std::shared_ptr<GraphicsPipelineHandle> VulkanBackend::CreateGraphicsPipeline(co
 
 	std::vector<VkDescriptorSetLayoutBinding> descriptorBindings;
 	std::vector<VkDescriptorPoolSize> descriptorPoolSizes;
-	auto addPoolSize = [&](VkDescriptorType type)
+	auto addPoolSize = [&](VkDescriptorType type, uint32_t descriptorCount = 1)
 	{
 		for (auto& poolSize : descriptorPoolSizes)
 		{
 			if (poolSize.type == type)
 			{
-				++poolSize.descriptorCount;
+				poolSize.descriptorCount += descriptorCount;
 				return;
 			}
 		}
 		VkDescriptorPoolSize poolSize{};
 		poolSize.type = type;
-		poolSize.descriptorCount = 1;
+		poolSize.descriptorCount = descriptorCount;
 		descriptorPoolSizes.push_back(poolSize);
 	};
+	auto appendDescriptorLayoutBinding = [&](uint32_t descriptorBindingIndex, VkDescriptorType descriptorType, uint32_t descriptorCount, VkShaderStageFlags stageFlags)
+	{
+		VkDescriptorSetLayoutBinding descriptorBinding{};
+		descriptorBinding.binding = descriptorBindingIndex;
+		descriptorBinding.descriptorType = descriptorType;
+		descriptorBinding.descriptorCount = descriptorCount;
+		descriptorBinding.stageFlags = stageFlags;
+		descriptorBindings.push_back(descriptorBinding);
+		addPoolSize(descriptorType, descriptorCount);
+	};
 
-	if (desc.ConstantBufferSize > 0)
+	if (!desc.PipelineLayout.Bindings.empty())
 	{
-		VkDescriptorSetLayoutBinding descriptorBinding{};
-		descriptorBinding.binding = ToVulkanConstantBufferBinding(desc.ConstantBufferBinding);
-		descriptorBinding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-		descriptorBinding.descriptorCount = 1;
-		descriptorBinding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
-		descriptorBindings.push_back(descriptorBinding);
-		addPoolSize(VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
+		for (const RHIBindingDesc& binding : desc.PipelineLayout.Bindings)
+		{
+			const VkDescriptorType descriptorType = ToVulkanDescriptorType(binding, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE);
+			const uint32_t descriptorCount = RHILegacyDescriptorCount(binding);
+			const RHIShaderStageMask graphicsStages =
+				binding.Stages & ToRHIShaderStageMask(RHIShaderStage::AllGraphics);
+			const VkShaderStageFlags stageFlags = ToVulkanShaderStageFlags(
+				graphicsStages,
+				VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT);
+			appendDescriptorLayoutBinding(getGraphicsDescriptorBinding(binding), descriptorType, descriptorCount, stageFlags);
+		}
+		const bool hasTypedConstantBuffer = std::any_of(
+			desc.PipelineLayout.Bindings.begin(),
+			desc.PipelineLayout.Bindings.end(),
+			[](const RHIBindingDesc& binding)
+			{
+				return binding.DescriptorKind == RHIDescriptorKind::CBV;
+			});
+		if (desc.ConstantBufferSize > 0 && !hasTypedConstantBuffer)
+		{
+			appendDescriptorLayoutBinding(
+				handle->ConstantBufferDescriptorBinding,
+				VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+				1,
+				VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT);
+		}
 	}
-	for (const auto& binding : desc.TextureBindings)
+	else
 	{
-		VkDescriptorSetLayoutBinding descriptorBinding{};
-		descriptorBinding.binding = ToVulkanTextureBinding(binding.Slot);
-		descriptorBinding.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
-		descriptorBinding.descriptorCount = 1;
-		descriptorBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-		descriptorBindings.push_back(descriptorBinding);
-		addPoolSize(VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE);
-	}
-	for (const auto& binding : desc.BufferBindings)
-	{
-		VkDescriptorSetLayoutBinding descriptorBinding{};
-		descriptorBinding.binding = ToVulkanTextureBinding(binding.Slot);
-		descriptorBinding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-		descriptorBinding.descriptorCount = 1;
-		descriptorBinding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
-		descriptorBindings.push_back(descriptorBinding);
-		addPoolSize(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
-	}
-	for (const auto& binding : desc.SamplerBindings)
-	{
-		VkDescriptorSetLayoutBinding descriptorBinding{};
-		descriptorBinding.binding = ToVulkanSamplerBinding(binding.Slot);
-		descriptorBinding.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
-		descriptorBinding.descriptorCount = 1;
-		descriptorBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-		descriptorBindings.push_back(descriptorBinding);
-		addPoolSize(VK_DESCRIPTOR_TYPE_SAMPLER);
+		if (desc.ConstantBufferSize > 0)
+		{
+			appendDescriptorLayoutBinding(
+				ToVulkanConstantBufferBinding(desc.ConstantBufferBinding),
+				VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+				1,
+				VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT);
+		}
+		for (const auto& binding : desc.TextureBindings)
+		{
+			appendDescriptorLayoutBinding(
+				ToVulkanTextureBinding(binding.Slot),
+				VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
+				1,
+				VK_SHADER_STAGE_FRAGMENT_BIT);
+		}
+		for (const auto& binding : desc.BufferBindings)
+		{
+			appendDescriptorLayoutBinding(
+				ToVulkanTextureBinding(binding.Slot),
+				VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+				1,
+				VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT);
+		}
+		for (const auto& binding : desc.SamplerBindings)
+		{
+			appendDescriptorLayoutBinding(
+				ToVulkanSamplerBinding(binding.Slot),
+				VK_DESCRIPTOR_TYPE_SAMPLER,
+				1,
+				VK_SHADER_STAGE_FRAGMENT_BIT);
+		}
 	}
 
 	if (!descriptorBindings.empty())

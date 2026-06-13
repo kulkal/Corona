@@ -1,6 +1,9 @@
 #include "Common.hlsl"
 #include "GGX.hlsli"
 #include "PathTracingWavefront.hlsli"
+#if defined(CORONA_BINDLESS_MATERIALS) && CORONA_BINDLESS_MATERIALS
+#include "BindlessResources.hlsli"
+#endif
 
 RWTexture2D<float4> OutputColor : register(u0);
 RWTexture2D<float4> OutAlbedo : register(u1);
@@ -94,6 +97,36 @@ SamplerState sampleWrap : register(s0);
 
 static const float INV_PI = 1.0 / PI;
 static const float PATH_TRACING_RAY_BIAS = 0.5f;
+
+#if defined(CORONA_BINDLESS_MATERIALS) && CORONA_BINDLESS_MATERIALS
+float4 SamplePathTracingAlbedo(RTMaterialRecord material, float2 uv, float mipLevel)
+{
+    if (IsValidBindlessTextureIndex(material.AlbedoTextureIndex))
+        return MaterialTextures[NonUniformResourceIndex(material.AlbedoTextureIndex)].SampleLevel(sampleWrap, uv, mipLevel);
+    return AlbedoTex.SampleLevel(sampleWrap, uv, mipLevel);
+}
+
+float3 SamplePathTracingNormal(RTMaterialRecord material, float2 uv, float mipLevel)
+{
+    if (IsValidBindlessTextureIndex(material.NormalTextureIndex))
+        return MaterialTextures[NonUniformResourceIndex(material.NormalTextureIndex)].SampleLevel(sampleWrap, uv, mipLevel).xyz;
+    return NormalTex.SampleLevel(sampleWrap, uv, mipLevel).xyz;
+}
+
+float SamplePathTracingRoughness(RTMaterialRecord material, float2 uv, float mipLevel)
+{
+    if (IsValidBindlessTextureIndex(material.RoughnessTextureIndex))
+        return MaterialTextures[NonUniformResourceIndex(material.RoughnessTextureIndex)].SampleLevel(sampleWrap, uv, mipLevel).x;
+    return RoughnessTex.SampleLevel(sampleWrap, uv, mipLevel).x;
+}
+
+float SamplePathTracingMetallic(RTMaterialRecord material, float2 uv, float mipLevel)
+{
+    if (IsValidBindlessTextureIndex(material.MetallicTextureIndex))
+        return MaterialTextures[NonUniformResourceIndex(material.MetallicTextureIndex)].SampleLevel(sampleWrap, uv, mipLevel).x;
+    return MetallicTex.SampleLevel(sampleWrap, uv, mipLevel).x;
+}
+#endif
 
 float EvaluateSpotAttenuation(PointLightParam light, float3 surfaceToLightDir)
 {
@@ -255,7 +288,15 @@ float ComputePathTracingTextureMipLevel(uint instanceID, Vertex vertex, float3 v
 {
     uint textureWidth = 1;
     uint textureHeight = 1;
+#if defined(CORONA_BINDLESS_MATERIALS) && CORONA_BINDLESS_MATERIALS
+    RTMaterialRecord material = RtMaterials[instanceID];
+    if (IsValidBindlessTextureIndex(material.AlbedoTextureIndex))
+        MaterialTextures[NonUniformResourceIndex(material.AlbedoTextureIndex)].GetDimensions(textureWidth, textureHeight);
+    else
+        AlbedoTex.GetDimensions(textureWidth, textureHeight);
+#else
     AlbedoTex.GetDimensions(textureWidth, textureHeight);
+#endif
 
     float halfLog2NumTexPixels = 0.5f * log2(max(float(textureWidth) * float(textureHeight), 1.0f));
     float triangleLodConstant = vertex.textureLODConstant + halfLog2NumTexPixels;
@@ -284,7 +325,12 @@ float3 ApplyPathTracingNormalMap(float3 vertexNormal, float3 vertexTangent, floa
     if (dot(B, B) < 1e-8f)
         return N;
 
+#if defined(CORONA_BINDLESS_MATERIALS) && CORONA_BINDLESS_MATERIALS
+    RTMaterialRecord material = RtMaterials[instanceID];
+    float3 normalMap = SamplePathTracingNormal(material, uv, mipLevel);
+#else
     float3 normalMap = NormalTex.SampleLevel(sampleWrap, uv, mipLevel).xyz;
+#endif
     if (any(isnan(normalMap)) || any(isinf(normalMap)))
         return N;
     normalMap = normalMap * 2.0f - 1.0f;
@@ -801,9 +847,16 @@ void PathTracingClosestHit(inout PathTracingPayload payload, in BuiltInTriangleI
     payload.hitDistance = hitDistance;
     
     // Get material properties
+#if defined(CORONA_BINDLESS_MATERIALS) && CORONA_BINDLESS_MATERIALS
+    RTMaterialRecord material = RtMaterials[instanceID];
+    float3 albedo = SamplePathTracingAlbedo(material, vertex.uv, textureMipLevel).xyz;
+    float roughness = clamp(SamplePathTracingRoughness(material, vertex.uv, textureMipLevel), 0.02f, 1.0f);
+    float metallic = saturate(SamplePathTracingMetallic(material, vertex.uv, textureMipLevel));
+#else
     float3 albedo = AlbedoTex.SampleLevel(sampleWrap, vertex.uv, textureMipLevel).xyz;
     float roughness = clamp(RoughnessTex.SampleLevel(sampleWrap, vertex.uv, textureMipLevel).x, 0.02f, 1.0f);
     float metallic = saturate(MetallicTex.SampleLevel(sampleWrap, vertex.uv, textureMipLevel).x);
+#endif
     ApplyInstanceRoughnessMetallic(instanceID, InstanceProperty, roughness, metallic);
     
     // Store debug information for primary hit (depth == 0)
@@ -1071,7 +1124,12 @@ void PathTracingAnyHit(inout PathTracingPayload payload, in BuiltInTriangleInter
     float textureMipLevel = ComputePathTracingTextureMipLevel(instanceID, vertex, payload.direction, RayTCurrent());
     
     // Sample albedo alpha channel
+#if defined(CORONA_BINDLESS_MATERIALS) && CORONA_BINDLESS_MATERIALS
+    RTMaterialRecord material = RtMaterials[instanceID];
+    float alpha = SamplePathTracingAlbedo(material, vertex.uv, textureMipLevel).w;
+#else
     float alpha = AlbedoTex.SampleLevel(sampleWrap, vertex.uv, textureMipLevel).w;
+#endif
     
     // If alpha is too low, ignore this hit and continue ray traversal
     if (alpha < 0.1)

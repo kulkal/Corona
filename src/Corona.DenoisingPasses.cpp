@@ -22,33 +22,34 @@ void Corona::InitTemporalDenoisingPass()
 	shared_ptr<ComputePipelineStateObject> TEMP_TemporalDenoisingFilterPSO = renderBackend->CreateComputePipelineStateObject();
 	if (!TEMP_TemporalDenoisingFilterPSO)
 		return;
-	TEMP_TemporalDenoisingFilterPSO->BindSRV("DepthTex", 0, 1);
-	TEMP_TemporalDenoisingFilterPSO->BindSRV("NormalTex", 1, 1);
-	TEMP_TemporalDenoisingFilterPSO->BindSRV("InGIResultSHTex", 2, 1);
-	TEMP_TemporalDenoisingFilterPSO->BindSRV("InGIResultColorTex", 3, 1);
-	TEMP_TemporalDenoisingFilterPSO->BindSRV("InGIResultSHTexPrev", 4, 1);
-	TEMP_TemporalDenoisingFilterPSO->BindSRV("InGIResultColorTexPrev", 5, 1);
-	TEMP_TemporalDenoisingFilterPSO->BindSRV("VelocityTex", 6, 1);
-	TEMP_TemporalDenoisingFilterPSO->BindSRV("InSpecularGITex", 7, 1);
-	TEMP_TemporalDenoisingFilterPSO->BindSRV("InSpecularGITexPrev", 8, 1);
-	TEMP_TemporalDenoisingFilterPSO->BindSRV("RougnessMetalicTex", 9, 1);
-	TEMP_TemporalDenoisingFilterPSO->BindSRV("PrevDepthTex", 10, 1);
-	TEMP_TemporalDenoisingFilterPSO->BindSRV("PrevNormalTex", 11, 1);
-	TEMP_TemporalDenoisingFilterPSO->BindSRV("PrevMomentsTex", 12, 1);
+	const RHIShaderStageMask computeStage = ToRHIShaderStageMask(RHIShaderStage::Compute);
+	TEMP_TemporalDenoisingFilterPSO->BindSRV(MakeRHITextureSRV("DepthTex", 0, computeStage));
+	TEMP_TemporalDenoisingFilterPSO->BindSRV(MakeRHITextureSRV("NormalTex", 1, computeStage));
+	TEMP_TemporalDenoisingFilterPSO->BindSRV(MakeRHITextureSRV("InGIResultSHTex", 2, computeStage));
+	TEMP_TemporalDenoisingFilterPSO->BindSRV(MakeRHITextureSRV("InGIResultColorTex", 3, computeStage));
+	TEMP_TemporalDenoisingFilterPSO->BindSRV(MakeRHITextureSRV("InGIResultSHTexPrev", 4, computeStage));
+	TEMP_TemporalDenoisingFilterPSO->BindSRV(MakeRHITextureSRV("InGIResultColorTexPrev", 5, computeStage));
+	TEMP_TemporalDenoisingFilterPSO->BindSRV(MakeRHITextureSRV("VelocityTex", 6, computeStage));
+	TEMP_TemporalDenoisingFilterPSO->BindSRV(MakeRHITextureSRV("InSpecularGITex", 7, computeStage));
+	TEMP_TemporalDenoisingFilterPSO->BindSRV(MakeRHITextureSRV("InSpecularGITexPrev", 8, computeStage));
+	TEMP_TemporalDenoisingFilterPSO->BindSRV(MakeRHITextureSRV("RougnessMetalicTex", 9, computeStage));
+	TEMP_TemporalDenoisingFilterPSO->BindSRV(MakeRHITextureSRV("PrevDepthTex", 10, computeStage));
+	TEMP_TemporalDenoisingFilterPSO->BindSRV(MakeRHITextureSRV("PrevNormalTex", 11, computeStage));
+	TEMP_TemporalDenoisingFilterPSO->BindSRV(MakeRHITextureSRV("PrevMomentsTex", 12, computeStage));
 
 
 
 
 
-	TEMP_TemporalDenoisingFilterPSO->BindUAV("OutGIResultSH", 0);
-	TEMP_TemporalDenoisingFilterPSO->BindUAV("OutGIResultColor", 1);
-	TEMP_TemporalDenoisingFilterPSO->BindUAV("OutSpecularGI", 2);
-	TEMP_TemporalDenoisingFilterPSO->BindUAV("OutMoments", 3);
+	TEMP_TemporalDenoisingFilterPSO->BindUAV(MakeRHITextureUAV("OutGIResultSH", 0, computeStage));
+	TEMP_TemporalDenoisingFilterPSO->BindUAV(MakeRHITextureUAV("OutGIResultColor", 1, computeStage));
+	TEMP_TemporalDenoisingFilterPSO->BindUAV(MakeRHITextureUAV("OutSpecularGI", 2, computeStage));
+	TEMP_TemporalDenoisingFilterPSO->BindUAV(MakeRHITextureUAV("OutMoments", 3, computeStage));
 
-	TEMP_TemporalDenoisingFilterPSO->BindSampler("BilinearClamp", 0);
+	TEMP_TemporalDenoisingFilterPSO->BindSampler(MakeRHISampler("BilinearClamp", 0, computeStage));
 
 
-	TEMP_TemporalDenoisingFilterPSO->BindCBV("TemporalFilterConstant", 0, sizeof(TemporalFilterConstant));
+	TEMP_TemporalDenoisingFilterPSO->BindCBV(MakeRHICBV("TemporalFilterConstant", 0, sizeof(TemporalFilterConstant), computeStage));
 	bool bSuccess = TEMP_TemporalDenoisingFilterPSO->InitCS(GetAssetFullPath(L"Shaders\\TemporalDenoising.hlsl"), "TemporalFilter");
 	if (bSuccess)
 		TemporalDenoisingFilterPSO = TEMP_TemporalDenoisingFilterPSO;
@@ -59,13 +60,14 @@ void Corona::InitDiffuseGISpatialFilterPass()
 	shared_ptr<ComputePipelineStateObject> tempPSO = renderBackend->CreateComputePipelineStateObject();
 	if (!tempPSO)
 		return;
-	tempPSO->BindSRV("InGIColor", 0, 1);
-	tempPSO->BindSRV("InGIAux", 1, 1);
-	tempPSO->BindSRV("DepthTex", 2, 1);
-	tempPSO->BindSRV("NormalTex", 3, 1);
-	tempPSO->BindUAV("OutGIColor", 0);
-	tempPSO->BindUAV("OutGIAux", 1);
-	tempPSO->BindCBV("SpatialFilterConstant", 0, sizeof(DiffuseGISpatialFilterConstant));
+	const RHIShaderStageMask computeStage = ToRHIShaderStageMask(RHIShaderStage::Compute);
+	tempPSO->BindSRV(MakeRHITextureSRV("InGIColor", 0, computeStage));
+	tempPSO->BindSRV(MakeRHITextureSRV("InGIAux", 1, computeStage));
+	tempPSO->BindSRV(MakeRHITextureSRV("DepthTex", 2, computeStage));
+	tempPSO->BindSRV(MakeRHITextureSRV("NormalTex", 3, computeStage));
+	tempPSO->BindUAV(MakeRHITextureUAV("OutGIColor", 0, computeStage));
+	tempPSO->BindUAV(MakeRHITextureUAV("OutGIAux", 1, computeStage));
+	tempPSO->BindCBV(MakeRHICBV("SpatialFilterConstant", 0, sizeof(DiffuseGISpatialFilterConstant), computeStage));
 	if (tempPSO->InitCS(GetAssetFullPath(L"Shaders\\DiffuseGISpatialFilter.hlsl"), "DiffuseGISpatialFilter"))
 		DiffuseGISpatialFilterPSO = tempPSO;
 }

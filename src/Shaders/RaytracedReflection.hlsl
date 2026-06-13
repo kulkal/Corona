@@ -1,5 +1,8 @@
 #include "Common.hlsl"
 #include "GGX.hlsli"
+#if defined(CORONA_BINDLESS_MATERIALS) && CORONA_BINDLESS_MATERIALS
+#include "BindlessResources.hlsli"
+#endif
 
 RWTexture2D<float4> ReflectionResult : register(u0);
 RWTexture2D<float> SpecularHitDistanceResult : register(u1);
@@ -767,8 +770,18 @@ void chs(inout RayPayload payload, in BuiltInTriangleIntersectionAttributes attr
     payload.position = SpecSanitizeFloat3(vertex.position, WorldRayOrigin() + WorldRayDirection() * hitT);
     payload.normal = SpecSafeNormalize(vertex.normal, -WorldRayDirection());
 
+#if defined(CORONA_BINDLESS_MATERIALS) && CORONA_BINDLESS_MATERIALS
+    RTMaterialRecord material = RtMaterials[instanceID];
+#endif
     uint w, h;
+#if defined(CORONA_BINDLESS_MATERIALS) && CORONA_BINDLESS_MATERIALS
+    if (IsValidBindlessTextureIndex(material.AlbedoTextureIndex))
+        MaterialTextures[NonUniformResourceIndex(material.AlbedoTextureIndex)].GetDimensions(w, h);
+    else
+        AlbedoTex.GetDimensions(w, h);
+#else
     AlbedoTex.GetDimensions(w, h);
+#endif
     float halfLog2NumTexPixels = 0.5 * log2(max(float(w) * float(h), 1.0f));
 
     vertex.textureLODConstant += halfLog2NumTexPixels;
@@ -776,7 +789,14 @@ void chs(inout RayPayload payload, in BuiltInTriangleIntersectionAttributes attr
 
     float NoV = 1;//dot(V, vertex.normal);
     float mipLevel = computeTextureLOD(NoV, rayConeWidth, vertex.textureLODConstant);
+#if defined(CORONA_BINDLESS_MATERIALS) && CORONA_BINDLESS_MATERIALS
+    if (IsValidBindlessTextureIndex(material.AlbedoTextureIndex))
+        payload.color = max(SpecSanitizeFloat3(MaterialTextures[NonUniformResourceIndex(material.AlbedoTextureIndex)].SampleLevel(sampleWrap, vertex.uv, mipLevel).xyz, 1.0f.xxx), 0.0f.xxx);
+    else
+        payload.color = max(SpecSanitizeFloat3(AlbedoTex.SampleLevel(sampleWrap, vertex.uv, mipLevel).xyz, 1.0f.xxx), 0.0f.xxx);
+#else
     payload.color = max(SpecSanitizeFloat3(AlbedoTex.SampleLevel(sampleWrap, vertex.uv, mipLevel).xyz, 1.0f.xxx), 0.0f.xxx);
+#endif
     payload.bHit = true;
     payload.hitDist = hitT;
 }

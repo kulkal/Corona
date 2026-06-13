@@ -31,42 +31,45 @@ void Corona::InitRaytracingShadowPass()
 		TEMP_PSO_RT_SHADOW->AddHitGroup("HitGroup", "", "anyhit");
 		TEMP_PSO_RT_SHADOW->AddShader("rayGen", RTPipelineStateObject::RAYGEN);
 
-		TEMP_PSO_RT_SHADOW->BindUAV("global", "ShadowResult", 0);
-		TEMP_PSO_RT_SHADOW->BindSRV("global", "gRtScene", 0);
-		TEMP_PSO_RT_SHADOW->BindSRV("global", "DepthTex", 1);
-		TEMP_PSO_RT_SHADOW->BindSRV("global", "WorldNormalTex", 2);
-		TEMP_PSO_RT_SHADOW->BindSRV("global", "GeoNormalTex", 7);
-		TEMP_PSO_RT_SHADOW->BindSRV("global", "RayNoiseBlueNoiseSource", 8);
+		const RHIShaderStageMask rayGenStage = ToRHIShaderStageMask(RHIShaderStage::RayGeneration);
+		const RHIShaderStageMask anyHitStage = ToRHIShaderStageMask(RHIShaderStage::AnyHit);
+		TEMP_PSO_RT_SHADOW->BindUAV("global", MakeRHITextureUAV("ShadowResult", 0, rayGenStage));
+		TEMP_PSO_RT_SHADOW->BindSRV("global", MakeRHIAccelerationStructureSRV("gRtScene", 0, rayGenStage));
+		TEMP_PSO_RT_SHADOW->BindSRV("global", MakeRHITextureSRV("DepthTex", 1, rayGenStage));
+		TEMP_PSO_RT_SHADOW->BindSRV("global", MakeRHITextureSRV("WorldNormalTex", 2, rayGenStage));
+		TEMP_PSO_RT_SHADOW->BindSRV("global", MakeRHITextureSRV("GeoNormalTex", 7, rayGenStage));
+		TEMP_PSO_RT_SHADOW->BindSRV("global", MakeRHITextureSRV("RayNoiseBlueNoiseSource", 8, rayGenStage));
 		// ReSTIR Phase 2 temporal reuse — bound even in Option A mode so
 		// the root signature stays uniform across mode toggles; the
 		// shader only reads from these when ShadowMode == 1.
-		TEMP_PSO_RT_SHADOW->BindSRV("global", "ShadowReservoirPrev", 9);
-		TEMP_PSO_RT_SHADOW->BindSRV("global", "VelocityTex", 10);
+		TEMP_PSO_RT_SHADOW->BindSRV("global", MakeRHITextureSRV("ShadowReservoirPrev", 9, rayGenStage));
+		TEMP_PSO_RT_SHADOW->BindSRV("global", MakeRHITextureSRV("VelocityTex", 10, rayGenStage));
 		// Phase 2b — per-pixel M tracking. Separate single-channel buffer.
-		TEMP_PSO_RT_SHADOW->BindUAV("global", "ShadowReservoirM", 1);
-		TEMP_PSO_RT_SHADOW->BindSRV("global", "ShadowReservoirMPrev", 11);
+		TEMP_PSO_RT_SHADOW->BindUAV("global", MakeRHITextureUAV("ShadowReservoirM", 1, rayGenStage));
+		TEMP_PSO_RT_SHADOW->BindSRV("global", MakeRHITextureSRV("ShadowReservoirMPrev", 11, rayGenStage));
 		// Disocclusion test inputs for Option C (temporal/spatial reuse
 		// rejection). Previous-frame depth + normal so Phase 2 can
 		// reject the temporal sample when the reprojected surface
 		// differs from current (motion-vector lag, dynamic geometry,
 		// shadow caster motion).
-		TEMP_PSO_RT_SHADOW->BindSRV("global", "DepthTexPrev", 12);
-		TEMP_PSO_RT_SHADOW->BindSRV("global", "WorldNormalTexPrev", 13);
-		TEMP_PSO_RT_SHADOW->BindSRV("global", "SpatialLightCellKeys", 14);
-		TEMP_PSO_RT_SHADOW->BindSRV("global", "SpatialLightCellMask", 15);
+		TEMP_PSO_RT_SHADOW->BindSRV("global", MakeRHITextureSRV("DepthTexPrev", 12, rayGenStage));
+		TEMP_PSO_RT_SHADOW->BindSRV("global", MakeRHITextureSRV("WorldNormalTexPrev", 13, rayGenStage));
+		TEMP_PSO_RT_SHADOW->BindSRV("global", MakeRHIBufferSRV("SpatialLightCellKeys", 14, rayGenStage, RHIBufferViewKind::Raw));
+		TEMP_PSO_RT_SHADOW->BindSRV("global", MakeRHIBufferSRV("SpatialLightCellMask", 15, rayGenStage, RHIBufferViewKind::Raw));
 
-		TEMP_PSO_RT_SHADOW->BindCBV("global", "ViewParameter", 0, sizeof(RTShadowViewParamCB), 1);
-		TEMP_PSO_RT_SHADOW->BindSampler("global", "sampleWrap", 0);
+		TEMP_PSO_RT_SHADOW->BindCBV("global", MakeRHICBV("ViewParameter", 0, sizeof(RTShadowViewParamCB), rayGenStage));
+		TEMP_PSO_RT_SHADOW->BindSampler("global", MakeRHISampler("sampleWrap", 0, rayGenStage | anyHitStage));
+		BindRTBindlessMaterialSchema(*TEMP_PSO_RT_SHADOW, anyHitStage);
 
 
 
 		TEMP_PSO_RT_SHADOW->AddShader("miss", RTPipelineStateObject::MISS);
 		
 		TEMP_PSO_RT_SHADOW->AddShader("anyhit", RTPipelineStateObject::ANYHIT);
-		TEMP_PSO_RT_SHADOW->BindSRV("anyhit", "vertices", 3);
-		TEMP_PSO_RT_SHADOW->BindSRV("anyhit", "indices", 4);
-		TEMP_PSO_RT_SHADOW->BindSRV("anyhit", "AlbedoTex", 5);
-		TEMP_PSO_RT_SHADOW->BindSRV("anyhit", "InstanceProperty", 6);
+		TEMP_PSO_RT_SHADOW->BindSRV("anyhit", MakeRHIBufferSRV("vertices", 3, anyHitStage, RHIBufferViewKind::Raw));
+		TEMP_PSO_RT_SHADOW->BindSRV("anyhit", MakeRHIBufferSRV("indices", 4, anyHitStage, RHIBufferViewKind::Raw));
+		TEMP_PSO_RT_SHADOW->BindSRV("anyhit", MakeRHITextureSRV("AlbedoTex", 5, anyHitStage));
+		TEMP_PSO_RT_SHADOW->BindSRV("anyhit", MakeRHIBufferSRV("InstanceProperty", 6, anyHitStage, RHIBufferViewKind::Raw));
 		TEMP_PSO_RT_SHADOW->Configure(1, sizeof(float) * 4, sizeof(float) * 2);
 
 		bool bSuccess = TEMP_PSO_RT_SHADOW->InitRS("Shaders\\RaytracedShadow.hlsl");
@@ -85,16 +88,17 @@ void Corona::InitShadowSpatialReusePass()
 	shared_ptr<ComputePipelineStateObject> tempPSO = renderBackend->CreateComputePipelineStateObject();
 	if (!tempPSO)
 		return;
-	tempPSO->BindSRV("PreSpatialReservoir", 0, 1);
-	tempPSO->BindSRV("PreSpatialM",         1, 1);
-	tempPSO->BindSRV("DepthTex",            2, 1);
-	tempPSO->BindSRV("WorldNormalTex",      3, 1);
-	tempPSO->BindSRV("GeoNormalTex",        4, 1);
-	tempPSO->BindSRV("gRtScene",            5, 1);
-	tempPSO->BindUAV("ShadowResult",        0);
-	tempPSO->BindUAV("ShadowReservoirM",    1);
-	tempPSO->BindCBV("ViewParameter",       0, sizeof(RTShadowViewParamCB));
-	tempPSO->BindSampler("sampleWrap",      0);
+	const RHIShaderStageMask computeStage = ToRHIShaderStageMask(RHIShaderStage::Compute);
+	tempPSO->BindSRV(MakeRHITextureSRV("PreSpatialReservoir", 0, computeStage));
+	tempPSO->BindSRV(MakeRHITextureSRV("PreSpatialM",         1, computeStage));
+	tempPSO->BindSRV(MakeRHITextureSRV("DepthTex",            2, computeStage));
+	tempPSO->BindSRV(MakeRHITextureSRV("WorldNormalTex",      3, computeStage));
+	tempPSO->BindSRV(MakeRHITextureSRV("GeoNormalTex",        4, computeStage));
+	tempPSO->BindSRV(MakeRHIAccelerationStructureSRV("gRtScene", 5, computeStage));
+	tempPSO->BindUAV(MakeRHITextureUAV("ShadowResult",        0, computeStage));
+	tempPSO->BindUAV(MakeRHITextureUAV("ShadowReservoirM",    1, computeStage));
+	tempPSO->BindCBV(MakeRHICBV("ViewParameter",       0, sizeof(RTShadowViewParamCB), computeStage));
+	tempPSO->BindSampler(MakeRHISampler("sampleWrap",      0, computeStage));
 	const bool ok = tempPSO->InitCSWithInlineRT(
 		GetAssetFullPath(L"Shaders\\RaytracedShadowSpatialReuse.hlsl"),
 		"main");
@@ -107,6 +111,10 @@ void Corona::RaytraceShadowPass()
 	if (!ShadowBuffer || !BlueNoiseTex || !TLAS || !PSO_RT_SHADOW || !UnjitteredDepthBuffers[ColorBufferWriteIndex] || !NormalBuffers[ColorBufferWriteIndex] || !GeomNormalBuffers[ColorBufferWriteIndex])
 		return;
 	renderBackend->EmitGpuCrashMarker("RaytraceShadowPass");
+
+	const bool bUseBindlessMaterials = UsesRTBindlessMaterials();
+	if (bUseBindlessMaterials && !EnsureRTMaterialRecordBuffer())
+		return;
 
 	RTShadowViewParam.ViewMatrix = glm::transpose(ViewMat);
 	RTShadowViewParam.InvViewMatrix = glm::transpose(InvViewMat);
@@ -318,6 +326,11 @@ void Corona::RaytraceShadowPass()
 		.SetTextureSRV("global", "VelocityTex", VelocityBuffer.get())
 		.SetCBVValue("global", "ViewParameter", &RTShadowViewParam)
 		.SetSampler("global", "sampleWrap", samplerWrap.get());
+	if (bUseBindlessMaterials)
+	{
+		pass.SetBindlessTextureTable("global", "MaterialTextures")
+			.SetBufferSRV("global", "RtMaterials", RTMaterialRecordBuffer.get());
+	}
 	pass.BindSceneHitPrograms();
 	pass.Dispatch(GetRenderWidth(), GetRenderHeight());
 

@@ -4,6 +4,8 @@
 #include <memory>
 #include <string>
 
+#include "RHIBinding.h"
+
 class Texture;
 class Buffer;
 class Sampler;
@@ -47,6 +49,22 @@ public:
 	virtual void Configure(uint32_t maxRecursion, uint32_t maxPayloadSizeInBytes, uint32_t maxAttributeSizeInBytes) = 0;
 	virtual void AddHitGroup(const std::string& name, const std::string& chs, const std::string& ahs) = 0;
 	virtual void AddShader(const std::string& shader, ShaderType shaderType) = 0;
+	virtual void BindUAV(const std::string& shader, const RHIBindingDesc& binding)
+	{
+		BindUAV(shader, binding.Name, binding.RegisterIndex);
+	}
+	virtual void BindSRV(const std::string& shader, const RHIBindingDesc& binding)
+	{
+		BindSRV(shader, binding.Name, binding.RegisterIndex);
+	}
+	virtual void BindSampler(const std::string& shader, const RHIBindingDesc& binding)
+	{
+		BindSampler(shader, binding.Name, binding.RegisterIndex);
+	}
+	virtual void BindCBV(const std::string& shader, const RHIBindingDesc& binding)
+	{
+		BindCBV(shader, binding.Name, binding.RegisterIndex, binding.SizeInBytes, binding.NumInstances);
+	}
 	virtual void BindUAV(const std::string& shader, const std::string& name, uint32_t baseRegister) = 0;
 	virtual void BindSRV(const std::string& shader, const std::string& name, uint32_t baseRegister) = 0;
 	virtual void BindSampler(const std::string& shader, const std::string& name, uint32_t baseRegister) = 0;
@@ -62,6 +80,12 @@ public:
 	virtual void SetBufferUAV(const std::string& shader, const std::string& bindingName, Buffer* buffer, int instanceIndex = -1) = 0;
 	virtual void SetTextureSRV(const std::string& shader, const std::string& bindingName, Texture* texture, int instanceIndex = -1) = 0;
 	virtual void SetBufferSRV(const std::string& shader, const std::string& bindingName, Buffer* buffer, int instanceIndex = -1) = 0;
+	virtual bool SetBindlessTextureTable(const std::string& shader, const std::string& bindingName)
+	{
+		(void)shader;
+		(void)bindingName;
+		return false;
+	}
 	virtual void SetAccelerationStructure(const std::string& shader, const std::string& bindingName, const std::shared_ptr<RTAS>& rtas, int instanceIndex = -1) = 0;
 	virtual void SetSampler(const std::string& shader, const std::string& bindingName, Sampler* sampler, int instanceIndex = -1) = 0;
 	virtual void SetCBVValue(const std::string& shader, const std::string& bindingName, void* pData, int instanceIndex = -1) = 0;

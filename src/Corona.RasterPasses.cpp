@@ -30,63 +30,83 @@ void AppendCpuRuntimeTrace(const std::wstring& line);
 void Corona::InitBloomPass()
 {
 	auto createPSO = [&](const wchar_t* shaderFile, const std::string& entryPoint,
-		std::initializer_list<std::tuple<const char*, uint32_t, uint32_t>> srvBindings,
-		std::initializer_list<std::tuple<const char*, uint32_t>> uavBindings,
-		std::initializer_list<std::tuple<const char*, uint32_t>> samplerBindings,
-		std::initializer_list<std::tuple<const char*, uint32_t, uint32_t>> cbvBindings)
+		std::initializer_list<RHIBindingDesc> bindings)
 		-> std::shared_ptr<ComputePipelineStateObject>
 	{
 		auto pso = renderBackend->CreateComputePipelineStateObject();
 		if (!pso) return nullptr;
-		for (const auto& b : srvBindings) pso->BindSRV(std::get<0>(b), std::get<1>(b), std::get<2>(b));
-		for (const auto& b : uavBindings) pso->BindUAV(std::get<0>(b), std::get<1>(b));
-		for (const auto& b : samplerBindings) pso->BindSampler(std::get<0>(b), std::get<1>(b));
-		for (const auto& b : cbvBindings) pso->BindCBV(std::get<0>(b), std::get<1>(b), std::get<2>(b));
+		for (const RHIBindingDesc& binding : bindings)
+		{
+			switch (binding.DescriptorKind)
+			{
+			case RHIDescriptorKind::SRV:
+			case RHIDescriptorKind::AccelerationStructure:
+				pso->BindSRV(binding);
+				break;
+			case RHIDescriptorKind::UAV:
+				pso->BindUAV(binding);
+				break;
+			case RHIDescriptorKind::CBV:
+				pso->BindCBV(binding);
+				break;
+			case RHIDescriptorKind::Sampler:
+				pso->BindSampler(binding);
+				break;
+			}
+		}
 		if (!pso->InitCS(GetAssetFullPath(shaderFile), entryPoint))
 			return nullptr;
 		return pso;
 	};
+	const RHIShaderStageMask computeStage = ToRHIShaderStageMask(RHIShaderStage::Compute);
 
 	if (auto pso = createPSO(L"Shaders\\BloomBlur.hlsl", "BloomExtract",
-		{ {"SrcTex", 0, 1}, {"Exposure", 1, 1} },
-		{ {"DstTex", 0}, {"LumaResult", 1} },
-		{ {"samplerWrap", 0} },
-		{ {"BloomCB", 0, sizeof(BloomCB)} }))
+		{
+			MakeRHITextureSRV("SrcTex", 0, computeStage),
+			MakeRHIBufferSRV("Exposure", 1, computeStage),
+			MakeRHITextureUAV("DstTex", 0, computeStage),
+			MakeRHITextureUAV("LumaResult", 1, computeStage),
+			MakeRHISampler("samplerWrap", 0, computeStage),
+			MakeRHICBV("BloomCB", 0, sizeof(BloomCB), computeStage),
+		}))
 		BloomExtractPSO = pso;
 
 	if (auto pso = createPSO(L"Shaders\\BloomBlur.hlsl", "BloomBlur",
-		{ {"SrcTex", 0, 1} },
-		{ {"DstTex", 0} },
-		{ {"samplerWrap", 0} },
-		{ {"BloomCB", 0, sizeof(BloomCB)} }))
+		{
+			MakeRHITextureSRV("SrcTex", 0, computeStage),
+			MakeRHITextureUAV("DstTex", 0, computeStage),
+			MakeRHISampler("samplerWrap", 0, computeStage),
+			MakeRHICBV("BloomCB", 0, sizeof(BloomCB), computeStage),
+		}))
 		BloomBlurPSO = pso;
 
 	if (auto pso = createPSO(L"Shaders\\Histogram.hlsl", "GenerateHistogram",
-		{ {"LumaTex", 0, 1} },
-		{ {"Histogram", 0} },
-		{},
-		{}))
+		{
+			MakeRHITextureSRV("LumaTex", 0, computeStage),
+			MakeRHIBufferUAV("Histogram", 0, computeStage, RHIBufferViewKind::Raw),
+		}))
 		HistogramPSO = pso;
 
 	if (auto pso = createPSO(L"Shaders\\DrawHistogram.hlsl", "DrawHistogram",
-		{ {"Histogram", 0, 1}, {"Exposure", 1, 1} },
-		{ {"ColorBuffer", 0} },
-		{},
-		{}))
+		{
+			MakeRHIBufferSRV("Histogram", 0, computeStage, RHIBufferViewKind::Raw),
+			MakeRHIBufferSRV("Exposure", 1, computeStage),
+			MakeRHITextureUAV("ColorBuffer", 0, computeStage),
+		}))
 		DrawHistogramPSO = pso;
 
 	if (auto pso = createPSO(L"Shaders\\Histogram.hlsl", "ClearHistogram",
-		{},
-		{ {"Histogram", 0} },
-		{},
-		{}))
+		{
+			MakeRHIBufferUAV("Histogram", 0, computeStage, RHIBufferViewKind::Raw),
+		}))
 		ClearHistogramPSO = pso;
 
 	if (auto pso = createPSO(L"Shaders\\AdaptExposureCS.hlsl", "AdaptExposure",
-		{ {"Histogram", 0, 1} },
-		{ {"Exposure", 0} },
-		{},
-		{ {"AdaptExposureCB", 0, sizeof(AdaptExposureCB)} }))
+		{
+			MakeRHIBufferSRV("Histogram", 0, computeStage, RHIBufferViewKind::Raw),
+			MakeRHIBufferUAV("Exposure", 0, computeStage),
+			MakeRHICBV("AdaptExposureCB", 0, sizeof(AdaptExposureCB), computeStage),
+		}))
 		AdapteExposurePSO = pso;
 
 	BloomBlurPingPong[0] = renderBackend->CreateTexture2D({ ETextureFormat::RGBA16Float, TextureUsage_UnorderedAccess, EInitialResourceState::ShaderRead, (int)BloomBufferWidth, (int)BloomBufferHeight, 1, std::nullopt });
@@ -137,15 +157,6 @@ void Corona::InitGBufferPass()
 		{ "TEXCOORD", 0, EVertexAttributeFormat::Float2, 24 },
 		{ "TANGENT",  0, EVertexAttributeFormat::Float3, 32 },
 	};
-	desc.TextureBindings = {
-		{ "AlbedoTex", 0 },
-		{ "NormalTex", 1 },
-		{ "RoughnessTex", 2 },
-		{ "MetallicTex", 3 },
-	};
-	desc.SamplerBindings = {
-		{ "samplerWrap", 0 },
-	};
 	desc.VertexStride = 44;
 	if (CORONA_PLATFORM_MOBILE)
 	{
@@ -173,6 +184,25 @@ void Corona::InitGBufferPass()
 	desc.bCullBackFaces = false;
 	desc.ConstantBufferSize = sizeof(GBufferConstantBuffer);
 	desc.ConstantBufferBinding = 0;
+	const RHIShaderStageMask gbufferVertexStage = ToRHIShaderStageMask(RHIShaderStage::Vertex);
+	const RHIShaderStageMask gbufferPixelStage = ToRHIShaderStageMask(RHIShaderStage::Pixel);
+	const RHIShaderStageMask gbufferGraphicsStages = RHIShaderStage::Vertex | RHIShaderStage::Pixel;
+	auto setBaseGBufferLayout = [&](GraphicsPipelineDesc& pipelineDesc)
+	{
+		pipelineDesc.PipelineLayout.Bindings = {
+			MakeRHICBV("__CB0", 0, sizeof(GBufferConstantBuffer), gbufferGraphicsStages),
+			MakeRHITextureSRV("AlbedoTex", 0, gbufferPixelStage),
+			MakeRHITextureSRV("NormalTex", 1, gbufferPixelStage),
+			MakeRHITextureSRV("RoughnessTex", 2, gbufferPixelStage),
+			MakeRHITextureSRV("MetallicTex", 3, gbufferPixelStage),
+			MakeRHISampler("samplerWrap", 0, gbufferPixelStage),
+		};
+	};
+	auto appendGBufferSRV = [&](GraphicsPipelineDesc& pipelineDesc, const char* name, uint32_t slot)
+	{
+		pipelineDesc.PipelineLayout.Bindings.push_back(MakeRHIBufferSRV(name, slot, gbufferVertexStage));
+	};
+	setBaseGBufferLayout(desc);
 
 	GBufferGraphicsPipeline = renderBackend->CreateGraphicsPipeline(desc);
 
@@ -180,9 +210,7 @@ void Corona::InitGBufferPass()
 	{
 		GraphicsPipelineDesc staticInstancedDesc = desc;
 		staticInstancedDesc.VertexEntryPoint = "StaticInstancedVSMain";
-		staticInstancedDesc.BufferBindings = {
-			{ "StaticInstanceTransforms", 12 },
-		};
+		appendGBufferSRV(staticInstancedDesc, "StaticInstanceTransforms", 12);
 		try
 		{
 			StaticInstancedGBufferGraphicsPipeline = renderBackend->CreateGraphicsPipeline(staticInstancedDesc);
@@ -207,12 +235,11 @@ void Corona::InitGBufferPass()
 		pgDesc.PixelEntryPoint  = "PSMain";
 		pgDesc.VertexElements.clear();
 		pgDesc.VertexStride = 0;
-		pgDesc.TextureBindings.clear();
-		pgDesc.SamplerBindings.clear();
 		// TerrainHeights at t4 (matches binding slot used by SpineVertices
 		// in legacy GBuffer; safe to reuse since procedural has no Spine).
-		pgDesc.BufferBindings = {
-			{ "TerrainHeights", 4 },
+		pgDesc.PipelineLayout.Bindings = {
+			MakeRHICBV("__CB0", 0, sizeof(GBufferConstantBuffer), gbufferGraphicsStages),
+			MakeRHIBufferSRV("TerrainHeights", 4, gbufferVertexStage),
 		};
 		ProceduralGrassGraphicsPipeline = renderBackend->CreateGraphicsPipeline(pgDesc);
 		if (!ProceduralGrassGraphicsPipeline)
@@ -258,9 +285,7 @@ void Corona::InitGBufferPass()
 	spineDesc.VertexElements.clear();
 	spineDesc.VertexStride = 0;
 	spineDesc.bDepthWriteEnable = false;
-	spineDesc.BufferBindings = {
-		{ "SpineVertices", 4 },
-	};
+	appendGBufferSRV(spineDesc, "SpineVertices", 4);
 	SpineGBufferGraphicsPipeline = renderBackend->CreateGraphicsPipeline(spineDesc);
 	if (!SpineGBufferGraphicsPipeline)
 		AppendCpuRuntimeTrace(L"[InitGBufferPass] failed to create Spine GBuffer pipeline");
@@ -275,11 +300,10 @@ void Corona::InitGBufferPass()
 	{
 		GraphicsPipelineDesc spineVsInlineDesc = spineDesc;
 		spineVsInlineDesc.VertexEntryPoint = "SpineVsInlineVSMain";
-		spineVsInlineDesc.BufferBindings = {
-			{ "SpineVsInlineInputVertices", 9 },
-			{ "SpineVsInlineInfluences", 10 },
-			{ "SpineVsInlineBones", 11 },
-		};
+		setBaseGBufferLayout(spineVsInlineDesc);
+		appendGBufferSRV(spineVsInlineDesc, "SpineVsInlineInputVertices", 9);
+		appendGBufferSRV(spineVsInlineDesc, "SpineVsInlineInfluences", 10);
+		appendGBufferSRV(spineVsInlineDesc, "SpineVsInlineBones", 11);
 		try
 		{
 			SpineVsInlineGBufferGraphicsPipeline = renderBackend->CreateGraphicsPipeline(spineVsInlineDesc);
@@ -302,10 +326,8 @@ void Corona::InitGBufferPass()
 	//   t6 = SkeletalPrevBones (previous frame's mat3x4 per bone)
 	GraphicsPipelineDesc skeletalDesc = desc;
 	skeletalDesc.VertexEntryPoint = "SkeletalVSMain";
-	skeletalDesc.BufferBindings = {
-		{ "SkeletalInputs", 5 },
-		{ "SkeletalPrevBones", 6 },
-	};
+	appendGBufferSRV(skeletalDesc, "SkeletalInputs", 5);
+	appendGBufferSRV(skeletalDesc, "SkeletalPrevBones", 6);
 	// Skeletal output / bind-pose VBs use the StandardVertex layout
 	// (POSITION float4 @ 0, TEXCOORD @ 16, NORMAL @ 24, TANGENT @ 36,
 	// stride 48), not the standard 44-byte sponza layout. Vulkan reads
@@ -337,11 +359,9 @@ void Corona::InitGBufferPass()
 	// adds one SBV for the current-frame bone palette.
 	GraphicsPipelineDesc vsInlineDesc = desc;
 	vsInlineDesc.VertexEntryPoint = "SkeletalVsInlineVSMain";
-	vsInlineDesc.BufferBindings = {
-		{ "SkeletalInputs", 5 },
-		{ "SkeletalPrevBones", 6 },
-		{ "SkeletalCurrBones", 7 },
-	};
+	appendGBufferSRV(vsInlineDesc, "SkeletalInputs", 5);
+	appendGBufferSRV(vsInlineDesc, "SkeletalPrevBones", 6);
+	appendGBufferSRV(vsInlineDesc, "SkeletalCurrBones", 7);
 	// Same StandardVertex IA layout as skeletalDesc (48 B stride).
 	vsInlineDesc.VertexStride = 48;
 	vsInlineDesc.VertexElements = skeletalDesc.VertexElements;
@@ -368,12 +388,10 @@ void Corona::InitGBufferPass()
 	{
 		GraphicsPipelineDesc vsClusterDesc = desc;
 		vsClusterDesc.VertexEntryPoint = "SkeletalVsInlineClusterVSMain";
-		vsClusterDesc.BufferBindings = {
-			{ "SkeletalInputs", 5 },
-			{ "SkeletalPrevBones", 6 },
-			{ "SkeletalCurrBones", 7 },
-			{ "SkeletalInstanceTransforms", 8 },
-		};
+		appendGBufferSRV(vsClusterDesc, "SkeletalInputs", 5);
+		appendGBufferSRV(vsClusterDesc, "SkeletalPrevBones", 6);
+		appendGBufferSRV(vsClusterDesc, "SkeletalCurrBones", 7);
+		appendGBufferSRV(vsClusterDesc, "SkeletalInstanceTransforms", 8);
 		vsClusterDesc.VertexStride = 48;
 		vsClusterDesc.VertexElements = skeletalDesc.VertexElements;
 		try
@@ -392,11 +410,12 @@ void Corona::InitGBufferPass()
 	auto spineSkinningPSO = renderBackend->CreateComputePipelineStateObject();
 	if (spineSkinningPSO)
 	{
-		spineSkinningPSO->BindSRV("InputVertices", 0, 1);
-		spineSkinningPSO->BindSRV("Influences", 1, 1);
-		spineSkinningPSO->BindSRV("Bones", 2, 1);
-		spineSkinningPSO->BindUAV("OutputVertices", 0);
-		spineSkinningPSO->BindCBV("SpineSkinningConstant", 0, sizeof(SpineSkinningConstant));
+		const RHIShaderStageMask computeStage = ToRHIShaderStageMask(RHIShaderStage::Compute);
+		spineSkinningPSO->BindSRV(MakeRHIBufferSRV("InputVertices", 0, computeStage));
+		spineSkinningPSO->BindSRV(MakeRHIBufferSRV("Influences", 1, computeStage));
+		spineSkinningPSO->BindSRV(MakeRHIBufferSRV("Bones", 2, computeStage));
+		spineSkinningPSO->BindUAV(MakeRHIBufferUAV("OutputVertices", 0, computeStage));
+		spineSkinningPSO->BindCBV(MakeRHICBV("SpineSkinningConstant", 0, sizeof(SpineSkinningConstant), computeStage));
 		if (spineSkinningPSO->InitCS(GetAssetFullPath(L"Shaders\\SpineSkinningCS.hlsl"), "SkinMain"))
 			SpineSkinningPSO = spineSkinningPSO;
 		else
@@ -443,11 +462,12 @@ void Corona::InitToneMapPass()
 		{ "POSITION", 0, EVertexAttributeFormat::Float4, 0 },
 		{ "TEXCOORD", 0, EVertexAttributeFormat::Float2, 16 }
 	};
-	desc.TextureBindings = {
-		{ "SrcTex", 0 }
-	};
-	desc.SamplerBindings = {
-		{ "sampleWrap", 0 }
+	const RHIShaderStageMask toneMapPixelStage = ToRHIShaderStageMask(RHIShaderStage::Pixel);
+	const RHIShaderStageMask toneMapGraphicsStages = RHIShaderStage::Vertex | RHIShaderStage::Pixel;
+	desc.PipelineLayout.Bindings = {
+		MakeRHICBV("__CB0", 0, sizeof(ToneMapCB), toneMapGraphicsStages),
+		MakeRHITextureSRV("SrcTex", 0, toneMapPixelStage),
+		MakeRHISampler("sampleWrap", 0, toneMapPixelStage),
 	};
 
 	ToneMapGraphicsPipeline = renderBackend->CreateGraphicsPipeline(desc);
@@ -471,12 +491,6 @@ void Corona::InitParticlePass()
 		{ "TEXCOORD", 0, EVertexAttributeFormat::Float2, 12 },
 		{ "COLOR",    0, EVertexAttributeFormat::Float4, 20 },
 	};
-	desc.TextureBindings = {
-		{ "ParticleTex", 0 },
-	};
-	desc.SamplerBindings = {
-		{ "samplerClamp", 0 },
-	};
 	// Single-RT pass: draws into the post-light HDR LightingBuffer
 	// (RGBA16Float). Depth-tested against the GBuffer DepthBuffer but never
 	// writes to it. Additive blend by default for M1 (sparks); M3 adds an
@@ -489,6 +503,13 @@ void Corona::InitParticlePass()
 	desc.BlendMode = EBlendMode::Additive;
 	desc.ConstantBufferSize = sizeof(ParticleCB);
 	desc.ConstantBufferBinding = 0;
+	const RHIShaderStageMask particlePixelStage = ToRHIShaderStageMask(RHIShaderStage::Pixel);
+	const RHIShaderStageMask particleGraphicsStages = RHIShaderStage::Vertex | RHIShaderStage::Pixel;
+	desc.PipelineLayout.Bindings = {
+		MakeRHICBV("__CB0", 0, sizeof(ParticleCB), particleGraphicsStages),
+		MakeRHITextureSRV("ParticleTex", 0, particlePixelStage),
+		MakeRHISampler("samplerClamp", 0, particlePixelStage),
+	};
 
 	ParticleGraphicsPipeline = renderBackend->CreateGraphicsPipeline(desc);
 	if (!ParticleGraphicsPipeline)
@@ -653,13 +674,14 @@ void Corona::InitDebugPass()
 		{ "POSITION", 0, EVertexAttributeFormat::Float4, 0 },
 		{ "TEXCOORD", 0, EVertexAttributeFormat::Float2, 16 }
 	};
-	desc.TextureBindings = {
-		{ "SrcTex", 0 },
-		{ "SrcTexSH", 1 },
-		{ "SrcTexNormal", 2 }
-	};
-	desc.SamplerBindings = {
-		{ "samplerWrap", 0 }
+	const RHIShaderStageMask debugPixelStage = ToRHIShaderStageMask(RHIShaderStage::Pixel);
+	const RHIShaderStageMask debugGraphicsStages = RHIShaderStage::Vertex | RHIShaderStage::Pixel;
+	desc.PipelineLayout.Bindings = {
+		MakeRHICBV("__CB0", 0, sizeof(DebugPassCB), debugGraphicsStages),
+		MakeRHITextureSRV("SrcTex", 0, debugPixelStage),
+		MakeRHITextureSRV("SrcTexSH", 1, debugPixelStage),
+		MakeRHITextureSRV("SrcTexNormal", 2, debugPixelStage),
+		MakeRHISampler("samplerWrap", 0, debugPixelStage),
 	};
 
 	BufferVisualizeGraphicsPipeline = renderBackend->CreateGraphicsPipeline(desc);
@@ -698,21 +720,22 @@ void Corona::InitLightingPass()
 		{ "POSITION", 0, EVertexAttributeFormat::Float4, 0 },
 		{ "TEXCOORD", 0, EVertexAttributeFormat::Float2, 16 }
 	};
-	desc.TextureBindings = {
-		{ "AlbedoTex", 0 },
-		{ "NormalTex", 1 },
-		{ "ShadowTex", 2 },
-		{ "VelocityTex", 3 },
-		{ "DepthTex", 4 },
-		{ "GIResultSHTex", 5 },
-		{ "GIResultColorTex", 6 },
-		{ "SpecularGITex", 7 },
-		{ "RoughnessMetalicTex", 8 },
-		{ "AmbientOcclusionTex", 14 },
-		{ "SkyLightingTex", 15 }
-	};
-	desc.SamplerBindings = {
-		{ "sampleWrap", 0 }
+	const RHIShaderStageMask lightingPixelStage = ToRHIShaderStageMask(RHIShaderStage::Pixel);
+	const RHIShaderStageMask lightingGraphicsStages = RHIShaderStage::Vertex | RHIShaderStage::Pixel;
+	desc.PipelineLayout.Bindings = {
+		MakeRHICBV("__CB0", 0, sizeof(LightingParam), lightingGraphicsStages),
+		MakeRHITextureSRV("AlbedoTex", 0, lightingPixelStage),
+		MakeRHITextureSRV("NormalTex", 1, lightingPixelStage),
+		MakeRHITextureSRV("ShadowTex", 2, lightingPixelStage),
+		MakeRHITextureSRV("VelocityTex", 3, lightingPixelStage),
+		MakeRHITextureSRV("DepthTex", 4, lightingPixelStage),
+		MakeRHITextureSRV("GIResultSHTex", 5, lightingPixelStage),
+		MakeRHITextureSRV("GIResultColorTex", 6, lightingPixelStage),
+		MakeRHITextureSRV("SpecularGITex", 7, lightingPixelStage),
+		MakeRHITextureSRV("RoughnessMetalicTex", 8, lightingPixelStage),
+		MakeRHITextureSRV("AmbientOcclusionTex", 14, lightingPixelStage),
+		MakeRHITextureSRV("SkyLightingTex", 15, lightingPixelStage),
+		MakeRHISampler("sampleWrap", 0, lightingPixelStage),
 	};
 
 	LightingGraphicsPipeline = renderBackend->CreateGraphicsPipeline(desc);
@@ -747,8 +770,11 @@ void Corona::InitMobileShadowMapPass()
 		{ "TEXCOORD", 0, EVertexAttributeFormat::Float2, 24 },
 		{ "TANGENT",  0, EVertexAttributeFormat::Float3, 32 }
 	};
-	desc.TextureBindings.clear();
-	desc.SamplerBindings.clear();
+	const RHIShaderStageMask shadowVertexStage = ToRHIShaderStageMask(RHIShaderStage::Vertex);
+	const RHIShaderStageMask shadowGraphicsStages = RHIShaderStage::Vertex | RHIShaderStage::Pixel;
+	desc.PipelineLayout.Bindings = {
+		MakeRHICBV("__CB0", 0, sizeof(ShadowMapConstantBuffer), shadowGraphicsStages),
+	};
 
 	MobileShadowMapGraphicsPipeline = renderBackend->CreateGraphicsPipeline(desc);
 	if (!MobileShadowMapGraphicsPipeline)
@@ -770,9 +796,7 @@ void Corona::InitMobileShadowMapPass()
 	spineDesc.VertexEntryPoint = "SpineVSMain";
 	spineDesc.VertexElements.clear();
 	spineDesc.VertexStride = 0;
-	spineDesc.BufferBindings = {
-		{ "SpineVertices", 4 },
-	};
+	spineDesc.PipelineLayout.Bindings.push_back(MakeRHIBufferSRV("SpineVertices", 4, shadowVertexStage));
 	SpineMobileShadowMapGraphicsPipeline = renderBackend->CreateGraphicsPipeline(spineDesc);
 	if (!SpineMobileShadowMapGraphicsPipeline)
 		AppendCpuRuntimeTrace(L"[InitMobileShadowMapPass] failed to create Spine mobile shadow map pipeline");
@@ -811,18 +835,17 @@ void Corona::InitTemporalAAPass()
 		{ "POSITION", 0, EVertexAttributeFormat::Float4, 0 },
 		{ "TEXCOORD", 0, EVertexAttributeFormat::Float2, 16 }
 	};
-	desc.TextureBindings = {
-		{ "CurrentColorTex", 0 },
-		{ "PrevColorTex", 1 },
-		{ "VelocityTex", 2 },
-		{ "DepthTex", 3 },
-		{ "BloomTex", 4 }
-	};
-	desc.BufferBindings = {
-		{ "Exposure", 5 }
-	};
-	desc.SamplerBindings = {
-		{ "sampleWrap", 0 }
+	const RHIShaderStageMask taaPixelStage = ToRHIShaderStageMask(RHIShaderStage::Pixel);
+	const RHIShaderStageMask taaGraphicsStages = RHIShaderStage::Vertex | RHIShaderStage::Pixel;
+	desc.PipelineLayout.Bindings = {
+		MakeRHICBV("__CB0", 0, sizeof(TemporalAAParam), taaGraphicsStages),
+		MakeRHITextureSRV("CurrentColorTex", 0, taaPixelStage),
+		MakeRHITextureSRV("PrevColorTex", 1, taaPixelStage),
+		MakeRHITextureSRV("VelocityTex", 2, taaPixelStage),
+		MakeRHITextureSRV("DepthTex", 3, taaPixelStage),
+		MakeRHITextureSRV("BloomTex", 4, taaPixelStage),
+		MakeRHIBufferSRV("Exposure", 5, taaPixelStage),
+		MakeRHISampler("sampleWrap", 0, taaPixelStage),
 	};
 
 	TemporalAAGraphicsPipeline = renderBackend->CreateGraphicsPipeline(desc);

@@ -9,6 +9,7 @@
 #include "glm/mat4x4.hpp"
 #include "glm/vec4.hpp"
 #include "ComputePipelineStateObject.h"
+#include "RHIBinding.h"
 #include "RTAS.h"
 #include "RTPipelineStateObject.h"
 
@@ -218,6 +219,7 @@ struct GraphicsPipelineDesc
 	std::wstring ShaderPath;
 	std::string VertexEntryPoint;
 	std::string PixelEntryPoint;
+	RHIPipelineLayoutDesc PipelineLayout;
 	std::vector<GraphicsVertexElementDesc> VertexElements;
 	std::vector<GraphicsTextureBindingDesc> TextureBindings;
 	std::vector<GraphicsBufferBindingDesc> BufferBindings;
@@ -254,6 +256,18 @@ struct RTInstanceDesc
 	uint32_t Flags = 0;
 };
 
+struct RenderBackendCapabilities
+{
+	bool SupportsTypedBindingSchema = false;
+	bool SupportsBindlessTextures = false;
+	bool SupportsBindlessBuffers = false;
+	bool SupportsRuntimeDescriptorArrays = false;
+	bool SupportsPartiallyBoundDescriptors = false;
+	bool SupportsUpdateAfterBind = false;
+	uint32_t MaxBindlessTextureCount = 0;
+	uint32_t MaxBindlessBufferCount = 0;
+};
+
 class IRenderBackend
 {
 public:
@@ -261,6 +275,7 @@ public:
 
 	virtual ERenderBackendAPI GetAPI() const = 0;
 	virtual const char* GetBackendName() const = 0;
+	virtual RenderBackendCapabilities GetCapabilities() const { return {}; }
 	virtual uint32_t GetMaxSupportedHybridStage() const = 0;
 	virtual bool SupportsRayTracing() const = 0;
 	virtual bool SupportsShaderExecutionReordering() const = 0;
@@ -278,6 +293,14 @@ public:
 	virtual std::shared_ptr<Buffer> CreateBuffer(const BufferCreateDesc& desc) = 0;
 	virtual std::shared_ptr<Sampler> CreateSampler(const SamplerCreateDesc& desc) = 0;
 	virtual std::shared_ptr<Texture> CreateTextureFromFile(const std::wstring& fileName, bool nonSRGB) = 0;
+	virtual RHITextureHandle RegisterBindlessTexture(Texture* texture) { (void)texture; return {}; }
+	virtual bool UpdateBindlessTexture(Texture* texture) { (void)texture; return false; }
+	virtual RHITextureHandle GetBindlessTextureHandle(const Texture* texture) const { (void)texture; return {}; }
+	virtual uint32_t GetBindlessTextureIndex(const Texture* texture) const
+	{
+		const RHITextureHandle handle = GetBindlessTextureHandle(texture);
+		return handle.IsValid() ? handle.Index : RHI_INVALID_BINDLESS_INDEX;
+	}
 	virtual std::shared_ptr<Texture> CreateTexture3D(
 		ETextureFormat format,
 		ETextureUsageFlags usage,

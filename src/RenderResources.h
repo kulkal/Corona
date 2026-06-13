@@ -125,6 +125,7 @@ public:
 	uint32_t MipLevels = 1;
 	ETextureFormat Format = ETextureFormat::RGBA8Unorm;
 	ETextureUsageFlags Usage = TextureUsage_None;
+	RHITextureHandle BindlessHandle{};
 
 #if CORONA_HAS_D3D12
 	DX12Backend* Owner = nullptr;
@@ -139,6 +140,8 @@ public:
 	D3D12_GPU_DESCRIPTOR_HANDLE GpuHandleDSV{};
 	D3D12_CPU_DESCRIPTOR_HANDLE CpuHandleSRV{};
 	D3D12_GPU_DESCRIPTOR_HANDLE GpuHandleSRV{};
+	D3D12_CPU_DESCRIPTOR_HANDLE CpuHandleBindlessSRV{};
+	D3D12_GPU_DESCRIPTOR_HANDLE GpuHandleBindlessSRV{};
 
 	void MakeStaticSRV();
 	void MakeRTV(bool isBackBuffer = false);

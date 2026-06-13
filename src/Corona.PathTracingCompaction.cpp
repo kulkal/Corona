@@ -39,66 +39,71 @@ void Corona::InitPathTracingCompactionPass()
 	if (!seedPso || !indirectArgsPso || !resolvePso || !tracePso)
 		return;
 
-	seedPso->BindUAV("StateOut", 0);
-	seedPso->BindUAV("ActiveListOut", 1);
-	seedPso->BindUAV("Counters", 2);
-	seedPso->BindUAV("PathRadiance", 3);
-	seedPso->BindCBV("ViewParameter", 0, sizeof(PathTracingViewParamCB));
-	seedPso->BindCBV("PathCompaction", 1, sizeof(PathTracingCompactionParamCB));
+	const RHIShaderStageMask computeStage = ToRHIShaderStageMask(RHIShaderStage::Compute);
+	seedPso->BindUAV(MakeRHIBufferUAV("StateOut", 0, computeStage));
+	seedPso->BindUAV(MakeRHIBufferUAV("ActiveListOut", 1, computeStage));
+	seedPso->BindUAV(MakeRHIBufferUAV("Counters", 2, computeStage));
+	seedPso->BindUAV(MakeRHIBufferUAV("PathRadiance", 3, computeStage));
+	seedPso->BindCBV(MakeRHICBV("ViewParameter", 0, sizeof(PathTracingViewParamCB), computeStage));
+	seedPso->BindCBV(MakeRHICBV("PathCompaction", 1, sizeof(PathTracingCompactionParamCB), computeStage));
 
-	indirectArgsPso->BindUAV("Counters", 2);
-	indirectArgsPso->BindUAV("IndirectArgs", 5);
-	indirectArgsPso->BindCBV("PathCompactionIndirect", 2, sizeof(PathTracingCompactionIndirectParamCB));
+	indirectArgsPso->BindUAV(MakeRHIBufferUAV("Counters", 2, computeStage));
+	indirectArgsPso->BindUAV(MakeRHIBufferUAV("IndirectArgs", 5, computeStage, RHIBufferViewKind::Raw));
+	indirectArgsPso->BindCBV(MakeRHICBV("PathCompactionIndirect", 2, sizeof(PathTracingCompactionIndirectParamCB), computeStage));
 
-	resolvePso->BindUAV("PathRadiance", 3);
-	resolvePso->BindUAV("OutputColor", 4);
-	resolvePso->BindCBV("ViewParameter", 0, sizeof(PathTracingViewParamCB));
-	resolvePso->BindCBV("PathCompaction", 1, sizeof(PathTracingCompactionParamCB));
+	resolvePso->BindUAV(MakeRHIBufferUAV("PathRadiance", 3, computeStage));
+	resolvePso->BindUAV(MakeRHITextureUAV("OutputColor", 4, computeStage));
+	resolvePso->BindCBV(MakeRHICBV("ViewParameter", 0, sizeof(PathTracingViewParamCB), computeStage));
+	resolvePso->BindCBV(MakeRHICBV("PathCompaction", 1, sizeof(PathTracingCompactionParamCB), computeStage));
 
 	tracePso->SetNumInstances(static_cast<uint32_t>(RayTracingInstances.size()));
 	tracePso->AddHitGroup("HitGroup", "PathTracingClosestHit", "PathTracingAnyHit");
 	tracePso->AddShader("PathTracingCompactionRayGen", RTPipelineStateObject::RAYGEN);
-	tracePso->BindUAV("global", "OutAlbedo", 1);
-	tracePso->BindUAV("global", "OutSpecularAlbedo", 2);
-	tracePso->BindUAV("global", "OutNormal", 3);
-	tracePso->BindUAV("global", "OutGeomNormal", 4);
-	tracePso->BindUAV("global", "OutVelocity", 5);
-	tracePso->BindUAV("global", "OutRoughnessMetallic", 6);
-	tracePso->BindUAV("global", "OutDepth", 7);
-	tracePso->BindUAV("global", "OutSpecularHitDistance", 8);
-	tracePso->BindUAV("global", "OutSpecularMotionVector", 9);
-	tracePso->BindUAV("global", "PathCompactionStateIn", 10);
-	tracePso->BindUAV("global", "PathCompactionStateOut", 11);
-	tracePso->BindUAV("global", "PathCompactionActiveListIn", 12);
-	tracePso->BindUAV("global", "PathCompactionActiveListOut", 13);
-	tracePso->BindUAV("global", "PathCompactionCounters", 14);
-	tracePso->BindUAV("global", "PathCompactionRadiance", 15);
-	tracePso->BindSRV("global", "gRtScene", 0);
-	tracePso->BindSRV("global", "PointLightBuffer", 4);
-	tracePso->BindCBV("global", "ViewParameter", 0, sizeof(PathTracingViewParam), 1);
-	tracePso->BindCBV("global", "PathCompaction", 1, sizeof(PathTracingCompactionParamCB), 1);
-	tracePso->BindSampler("global", "sampleWrap", 0);
+	const RHIShaderStageMask rayGenStage = ToRHIShaderStageMask(RHIShaderStage::RayGeneration);
+	const RHIShaderStageMask closestHitStage = ToRHIShaderStageMask(RHIShaderStage::ClosestHit);
+	const RHIShaderStageMask anyHitStage = ToRHIShaderStageMask(RHIShaderStage::AnyHit);
+	BindRTBindlessMaterialSchema(*tracePso, closestHitStage | anyHitStage);
+	tracePso->BindUAV("global", MakeRHITextureUAV("OutAlbedo", 1, rayGenStage));
+	tracePso->BindUAV("global", MakeRHITextureUAV("OutSpecularAlbedo", 2, rayGenStage));
+	tracePso->BindUAV("global", MakeRHITextureUAV("OutNormal", 3, rayGenStage));
+	tracePso->BindUAV("global", MakeRHITextureUAV("OutGeomNormal", 4, rayGenStage));
+	tracePso->BindUAV("global", MakeRHITextureUAV("OutVelocity", 5, rayGenStage));
+	tracePso->BindUAV("global", MakeRHITextureUAV("OutRoughnessMetallic", 6, rayGenStage));
+	tracePso->BindUAV("global", MakeRHITextureUAV("OutDepth", 7, rayGenStage));
+	tracePso->BindUAV("global", MakeRHITextureUAV("OutSpecularHitDistance", 8, rayGenStage));
+	tracePso->BindUAV("global", MakeRHITextureUAV("OutSpecularMotionVector", 9, rayGenStage));
+	tracePso->BindUAV("global", MakeRHIBufferUAV("PathCompactionStateIn", 10, rayGenStage));
+	tracePso->BindUAV("global", MakeRHIBufferUAV("PathCompactionStateOut", 11, rayGenStage));
+	tracePso->BindUAV("global", MakeRHIBufferUAV("PathCompactionActiveListIn", 12, rayGenStage));
+	tracePso->BindUAV("global", MakeRHIBufferUAV("PathCompactionActiveListOut", 13, rayGenStage));
+	tracePso->BindUAV("global", MakeRHIBufferUAV("PathCompactionCounters", 14, rayGenStage));
+	tracePso->BindUAV("global", MakeRHIBufferUAV("PathCompactionRadiance", 15, rayGenStage));
+	tracePso->BindSRV("global", MakeRHIAccelerationStructureSRV("gRtScene", 0, rayGenStage));
+	tracePso->BindSRV("global", MakeRHIBufferSRV("PointLightBuffer", 4, rayGenStage));
+	tracePso->BindCBV("global", MakeRHICBV("ViewParameter", 0, sizeof(PathTracingViewParam), rayGenStage));
+	tracePso->BindCBV("global", MakeRHICBV("PathCompaction", 1, sizeof(PathTracingCompactionParamCB), rayGenStage));
+	tracePso->BindSampler("global", MakeRHISampler("sampleWrap", 0, rayGenStage | closestHitStage | anyHitStage));
 
 	tracePso->AddShader("PathTracingMiss", RTPipelineStateObject::MISS);
 	tracePso->AddShader("ShadowMiss", RTPipelineStateObject::MISS);
 
 	tracePso->AddShader("PathTracingClosestHit", RTPipelineStateObject::HIT);
-	tracePso->BindSRV("PathTracingClosestHit", "vertices", 1);
-	tracePso->BindSRV("PathTracingClosestHit", "indices", 2);
-	tracePso->BindSRV("PathTracingClosestHit", "InstanceProperty", 3);
-	tracePso->BindSRV("PathTracingClosestHit", "AlbedoTex", 5);
-	tracePso->BindSRV("PathTracingClosestHit", "NormalTex", 6);
-	tracePso->BindSRV("PathTracingClosestHit", "RoughnessTex", 7);
-	tracePso->BindSRV("PathTracingClosestHit", "MetallicTex", 8);
+	tracePso->BindSRV("PathTracingClosestHit", MakeRHIBufferSRV("vertices", 1, closestHitStage, RHIBufferViewKind::Raw));
+	tracePso->BindSRV("PathTracingClosestHit", MakeRHIBufferSRV("indices", 2, closestHitStage, RHIBufferViewKind::Raw));
+	tracePso->BindSRV("PathTracingClosestHit", MakeRHIBufferSRV("InstanceProperty", 3, closestHitStage, RHIBufferViewKind::Raw));
+	tracePso->BindSRV("PathTracingClosestHit", MakeRHITextureSRV("AlbedoTex", 5, closestHitStage));
+	tracePso->BindSRV("PathTracingClosestHit", MakeRHITextureSRV("NormalTex", 6, closestHitStage));
+	tracePso->BindSRV("PathTracingClosestHit", MakeRHITextureSRV("RoughnessTex", 7, closestHitStage));
+	tracePso->BindSRV("PathTracingClosestHit", MakeRHITextureSRV("MetallicTex", 8, closestHitStage));
 
 	tracePso->AddShader("PathTracingAnyHit", RTPipelineStateObject::ANYHIT);
-	tracePso->BindSRV("PathTracingAnyHit", "vertices", 1);
-	tracePso->BindSRV("PathTracingAnyHit", "indices", 2);
-	tracePso->BindSRV("PathTracingAnyHit", "InstanceProperty", 3);
-	tracePso->BindSRV("PathTracingAnyHit", "AlbedoTex", 5);
-	tracePso->BindSRV("PathTracingAnyHit", "NormalTex", 6);
-	tracePso->BindSRV("PathTracingAnyHit", "RoughnessTex", 7);
-	tracePso->BindSRV("PathTracingAnyHit", "MetallicTex", 8);
+	tracePso->BindSRV("PathTracingAnyHit", MakeRHIBufferSRV("vertices", 1, anyHitStage, RHIBufferViewKind::Raw));
+	tracePso->BindSRV("PathTracingAnyHit", MakeRHIBufferSRV("indices", 2, anyHitStage, RHIBufferViewKind::Raw));
+	tracePso->BindSRV("PathTracingAnyHit", MakeRHIBufferSRV("InstanceProperty", 3, anyHitStage, RHIBufferViewKind::Raw));
+	tracePso->BindSRV("PathTracingAnyHit", MakeRHITextureSRV("AlbedoTex", 5, anyHitStage));
+	tracePso->BindSRV("PathTracingAnyHit", MakeRHITextureSRV("NormalTex", 6, anyHitStage));
+	tracePso->BindSRV("PathTracingAnyHit", MakeRHITextureSRV("RoughnessTex", 7, anyHitStage));
+	tracePso->BindSRV("PathTracingAnyHit", MakeRHITextureSRV("MetallicTex", 8, anyHitStage));
 	tracePso->Configure(8, 256, sizeof(float) * 2);
 
 	const std::wstring computeShader = GetAssetFullPath(L"Shaders\\PathTracingCompactionCompute.hlsl");
@@ -222,6 +227,10 @@ bool Corona::EnsurePathTracingCompactionResources(UINT32 width, UINT32 height)
 bool Corona::PathTracingCompactionPass(Texture* outputColor, const PathTracingViewParamCB& dispatchViewParam, bool bWritePrimaryGBuffer)
 {
 	if (!TLAS || !outputColor)
+		return false;
+
+	const bool bUseBindlessMaterials = UsesRTBindlessMaterials();
+	if (bUseBindlessMaterials && !EnsureRTMaterialRecordBuffer())
 		return false;
 
 	if (dispatchViewParam.DebugMode != 0 || dispatchViewParam.SamplesPerPixel != 1u)
@@ -378,6 +387,11 @@ bool Corona::PathTracingCompactionPass(Texture* outputColor, const PathTracingVi
 			.SetCBVValue("global", "ViewParameter", const_cast<PathTracingViewParamCB*>(&dispatchViewParam))
 			.SetCBVValue("global", "PathCompaction", &compactionParam)
 			.SetSampler("global", "sampleWrap", samplerWrap.get());
+		if (bUseBindlessMaterials)
+		{
+			pass.SetBindlessTextureTable("global", "MaterialTextures")
+				.SetBufferSRV("global", "RtMaterials", RTMaterialRecordBuffer.get());
+		}
 
 		RTSceneHitProgramDesc hitProgramDesc;
 		hitProgramDesc.bBindDiffuseTexture = false;

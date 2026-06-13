@@ -41,37 +41,40 @@ shared_ptr<RTPipelineStateObject> Corona::CreateRaytracingReflectionPSO(bool bUs
 
 	tempPSO->AddShader("rayGen", RTPipelineStateObject::RAYGEN);
 	
-	tempPSO->BindUAV("global", "ReflectionResult", 0);
-	tempPSO->BindUAV("global", "SpecularHitDistanceResult", 1);
-	tempPSO->BindUAV("global", "SpecularMotionVectorResult", 2);
+	const RHIShaderStageMask rayGenStage = ToRHIShaderStageMask(RHIShaderStage::RayGeneration);
+	const RHIShaderStageMask closestHitStage = ToRHIShaderStageMask(RHIShaderStage::ClosestHit);
+	tempPSO->BindUAV("global", MakeRHITextureUAV("ReflectionResult", 0, rayGenStage));
+	tempPSO->BindUAV("global", MakeRHITextureUAV("SpecularHitDistanceResult", 1, rayGenStage));
+	tempPSO->BindUAV("global", MakeRHITextureUAV("SpecularMotionVectorResult", 2, rayGenStage));
 	// ReSTIR specular GI reservoir UAVs (current frame).
-	tempPSO->BindUAV("global", "ReflReservoirA", 3);
-	tempPSO->BindUAV("global", "ReflReservoirB", 4);
-	tempPSO->BindSRV("global", "gRtScene", 0);
-	tempPSO->BindSRV("global", "DepthTex", 1);
-	tempPSO->BindSRV("global", "GeoNormalTex", 2);
-	tempPSO->BindSRV("global", "RougnessMetallicTex", 6);
-	tempPSO->BindSRV("global", "RayNoiseBlueNoiseSource", 7);
-	tempPSO->BindSRV("global", "WorldNormalTex", 8);
+	tempPSO->BindUAV("global", MakeRHITextureUAV("ReflReservoirA", 3, rayGenStage));
+	tempPSO->BindUAV("global", MakeRHITextureUAV("ReflReservoirB", 4, rayGenStage));
+	tempPSO->BindSRV("global", MakeRHIAccelerationStructureSRV("gRtScene", 0, rayGenStage));
+	tempPSO->BindSRV("global", MakeRHITextureSRV("DepthTex", 1, rayGenStage));
+	tempPSO->BindSRV("global", MakeRHITextureSRV("GeoNormalTex", 2, rayGenStage));
+	tempPSO->BindSRV("global", MakeRHITextureSRV("RougnessMetallicTex", 6, rayGenStage));
+	tempPSO->BindSRV("global", MakeRHITextureSRV("RayNoiseBlueNoiseSource", 7, rayGenStage));
+	tempPSO->BindSRV("global", MakeRHITextureSRV("WorldNormalTex", 8, rayGenStage));
 	// ReSTIR specular GI reservoir SRVs (previous frame) + velocity
 	// for motion reprojection. Bound unconditionally to keep the
 	// root signature stable; the raygen only reads them after the
 	// first frame has produced data.
-	tempPSO->BindSRV("global", "ReflReservoirAPrev", 10);
-	tempPSO->BindSRV("global", "ReflReservoirBPrev", 11);
-	tempPSO->BindSRV("global", "ReflVelocityTex",   12);
+	tempPSO->BindSRV("global", MakeRHITextureSRV("ReflReservoirAPrev", 10, rayGenStage));
+	tempPSO->BindSRV("global", MakeRHITextureSRV("ReflReservoirBPrev", 11, rayGenStage));
+	tempPSO->BindSRV("global", MakeRHITextureSRV("ReflVelocityTex",   12, rayGenStage));
 
-	tempPSO->BindCBV("global", "ViewParameter", 0, sizeof(RTReflectionViewParam), 1);
-	tempPSO->BindSampler("global", "sampleWrap", 0);
+	tempPSO->BindCBV("global", MakeRHICBV("ViewParameter", 0, sizeof(RTReflectionViewParam), rayGenStage));
+	tempPSO->BindSampler("global", MakeRHISampler("sampleWrap", 0, rayGenStage | closestHitStage));
+	BindRTBindlessMaterialSchema(*tempPSO, closestHitStage);
 
 	tempPSO->AddShader("miss", RTPipelineStateObject::MISS);
 	tempPSO->AddShader("missShadow", RTPipelineStateObject::MISS);
 
 	tempPSO->AddShader("chs", RTPipelineStateObject::HIT);
-	tempPSO->BindSRV("chs", "vertices", 3);
-	tempPSO->BindSRV("chs", "indices", 4);
-	tempPSO->BindSRV("chs", "AlbedoTex", 5);
-	tempPSO->BindSRV("chs", "InstanceProperty", 9);
+	tempPSO->BindSRV("chs", MakeRHIBufferSRV("vertices", 3, closestHitStage, RHIBufferViewKind::Raw));
+	tempPSO->BindSRV("chs", MakeRHIBufferSRV("indices", 4, closestHitStage, RHIBufferViewKind::Raw));
+	tempPSO->BindSRV("chs", MakeRHITextureSRV("AlbedoTex", 5, closestHitStage));
+	tempPSO->BindSRV("chs", MakeRHIBufferSRV("InstanceProperty", 9, closestHitStage, RHIBufferViewKind::Raw));
 	tempPSO->Configure(1, sizeof(float) * 13, sizeof(float) * 2);
 
 	return tempPSO->InitRS("Shaders\\RaytracedReflection.hlsl") ? tempPSO : nullptr;
@@ -116,6 +119,10 @@ void Corona::RaytraceReflectionPass()
 	shared_ptr<RTPipelineStateObject> pso = PSO_RT_REFLECTION;
 	if (bEnableRTReflectionSER && renderBackend && renderBackend->SupportsShaderExecutionReordering() && InitRaytracingReflectionSERPass())
 		pso = PSO_RT_REFLECTION_SER;
+
+	const bool bUseBindlessMaterials = UsesRTBindlessMaterials();
+	if (bUseBindlessMaterials && !EnsureRTMaterialRecordBuffer())
+		return;
 
 	renderBackend->TransitionTexture(SpecularGIRaw.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
 	renderBackend->TransitionTexture(PathTracingSpecularHitDistanceBuffer.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
@@ -182,6 +189,11 @@ void Corona::RaytraceReflectionPass()
 			VelocityBuffer ? VelocityBuffer.get() : NormalBuffers[ColorBufferWriteIndex].get())
 		.SetCBVValue("global", "ViewParameter", &RTReflectionViewParam)
 		.SetSampler("global", "sampleWrap", samplerWrap.get());
+	if (bUseBindlessMaterials)
+	{
+		pass.SetBindlessTextureTable("global", "MaterialTextures")
+			.SetBufferSRV("global", "RtMaterials", RTMaterialRecordBuffer.get());
+	}
 	pass.BindSceneHitPrograms();
 	pass.Dispatch(GetRenderWidth(), GetRenderHeight());
 

@@ -1,4 +1,7 @@
 #include "Common.hlsl"
+#if defined(CORONA_BINDLESS_MATERIALS) && CORONA_BINDLESS_MATERIALS
+#include "BindlessResources.hlsli"
+#endif
 
 RWTexture2D<float4> SkyLightingResult : register(u0);
 
@@ -221,7 +224,16 @@ void anyhit(inout SkyPayload payload, in BuiltInTriangleIntersectionAttributes a
         return;
 
     Vertex vertex = GetVertexAttributes(instanceID, vertices, indices, InstanceProperty, triangleIndex, barycentrics);
-    float opacity = AlbedoTex.SampleLevel(sampleWrap, vertex.uv, 5).w;
+    float opacity = 1.0f;
+#if defined(CORONA_BINDLESS_MATERIALS) && CORONA_BINDLESS_MATERIALS
+    RTMaterialRecord material = RtMaterials[instanceID];
+    if (IsValidBindlessTextureIndex(material.AlbedoTextureIndex))
+        opacity = MaterialTextures[NonUniformResourceIndex(material.AlbedoTextureIndex)].SampleLevel(sampleWrap, vertex.uv, 5).w;
+    else
+        opacity = AlbedoTex.SampleLevel(sampleWrap, vertex.uv, 5).w;
+#else
+    opacity = AlbedoTex.SampleLevel(sampleWrap, vertex.uv, 5).w;
+#endif
     if (opacity > 0.10f)
         return;
 

@@ -1027,6 +1027,14 @@ private:
 		glm::vec3 PointLightPadding = glm::vec3(0.0f);
 	};
 
+	struct RTMaterialRecord
+	{
+		UINT32 AlbedoTextureIndex = RHI_INVALID_BINDLESS_INDEX;
+		UINT32 NormalTextureIndex = RHI_INVALID_BINDLESS_INDEX;
+		UINT32 RoughnessTextureIndex = RHI_INVALID_BINDLESS_INDEX;
+		UINT32 MetallicTextureIndex = RHI_INVALID_BINDLESS_INDEX;
+	};
+
 	PathTracingViewParamCB PathTracingViewParam;
 	shared_ptr<RTPipelineStateObject> PSO_PATH_TRACING;
 	shared_ptr<RTPipelineStateObject> PSO_PATH_TRACING_COMPACTION_TRACE;
@@ -1043,6 +1051,8 @@ private:
 	UINT32 PathTracingPointLightCount = 0;
 	std::shared_ptr<Buffer> PathTracingPointLightBuffer;
 	UINT32 PathTracingPointLightBufferHash = 0xFFFFFFFFu;
+	std::shared_ptr<Buffer> RTMaterialRecordBuffer;
+	uint64_t RTMaterialRecordHash = 0;
 	UINT PathTracingWriteIndex = 0;
 	UINT32 PathTracingAccumulatedFrames = 0;
 	UINT32 PathTracingLastDispatchSamplesPerPixel = 1;
@@ -2442,6 +2452,7 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 		RTPassBuilder& SetBufferUAV(const char* shader, const char* bindingName, Buffer* buffer);
 		RTPassBuilder& SetTextureSRV(const char* shader, const char* bindingName, Texture* texture);
 		RTPassBuilder& SetBufferSRV(const char* shader, const char* bindingName, Buffer* buffer);
+		RTPassBuilder& SetBindlessTextureTable(const char* shader, const char* bindingName);
 		RTPassBuilder& SetAccelerationStructure(const char* shader, const char* bindingName, const shared_ptr<RTAS>& rtas);
 		RTPassBuilder& SetSampler(const char* shader, const char* bindingName, Sampler* sampler);
 		RTPassBuilder& SetCBVValue(const char* shader, const char* bindingName, void* data);
@@ -3508,6 +3519,9 @@ private:
 	void ApplyRenderPointLightsToFrameParams();
 	UINT32 ComputePathTracingPointLightStateHash() const;
 	bool EnsurePathTracingPointLightBuffer(UINT32 pointLightStateHash);
+	bool UsesRTBindlessMaterials() const;
+	void BindRTBindlessMaterialSchema(RTPipelineStateObject& pso, RHIShaderStageMask materialStages);
+	bool EnsureRTMaterialRecordBuffer();
 
 	UINT m_width = 0;
 	UINT m_height = 0;

@@ -37,24 +37,27 @@ shared_ptr<RTPipelineStateObject> Corona::CreateRaytracingSimpleGIPSO(bool bUseS
 
 		TEMP_PSO_RT_GI->AddShader("rayGen", RTPipelineStateObject::RAYGEN);
 		
-		TEMP_PSO_RT_GI->BindUAV("global", "GIResultSH", 0);
-		TEMP_PSO_RT_GI->BindUAV("global", "GIResultColor", 1);
-		TEMP_PSO_RT_GI->BindSRV("global", "gRtScene", 0);
-		TEMP_PSO_RT_GI->BindSRV("global", "DepthTex", 1);
-		TEMP_PSO_RT_GI->BindSRV("global", "WorldNormalTex", 2);
-		TEMP_PSO_RT_GI->BindCBV("global", "ViewParameter", 0, sizeof(RTGIViewParam), 1);
-		TEMP_PSO_RT_GI->BindSampler("global", "sampleWrap", 0);
-		TEMP_PSO_RT_GI->BindSRV("global", "RayNoiseBlueNoiseSource", 7);
+		const RHIShaderStageMask rayGenStage = ToRHIShaderStageMask(RHIShaderStage::RayGeneration);
+		const RHIShaderStageMask closestHitStage = ToRHIShaderStageMask(RHIShaderStage::ClosestHit);
+		TEMP_PSO_RT_GI->BindUAV("global", MakeRHITextureUAV("GIResultSH", 0, rayGenStage));
+		TEMP_PSO_RT_GI->BindUAV("global", MakeRHITextureUAV("GIResultColor", 1, rayGenStage));
+		TEMP_PSO_RT_GI->BindSRV("global", MakeRHIAccelerationStructureSRV("gRtScene", 0, rayGenStage));
+		TEMP_PSO_RT_GI->BindSRV("global", MakeRHITextureSRV("DepthTex", 1, rayGenStage));
+		TEMP_PSO_RT_GI->BindSRV("global", MakeRHITextureSRV("WorldNormalTex", 2, rayGenStage));
+		TEMP_PSO_RT_GI->BindCBV("global", MakeRHICBV("ViewParameter", 0, sizeof(RTGIViewParam), rayGenStage));
+		TEMP_PSO_RT_GI->BindSampler("global", MakeRHISampler("sampleWrap", 0, rayGenStage | closestHitStage));
+		TEMP_PSO_RT_GI->BindSRV("global", MakeRHITextureSRV("RayNoiseBlueNoiseSource", 7, rayGenStage));
+		BindRTBindlessMaterialSchema(*TEMP_PSO_RT_GI, closestHitStage);
 
 		TEMP_PSO_RT_GI->AddShader("miss", RTPipelineStateObject::MISS);
 		TEMP_PSO_RT_GI->AddShader("missShadow", RTPipelineStateObject::MISS);
 
 
 		TEMP_PSO_RT_GI->AddShader("chs", RTPipelineStateObject::HIT);
-		TEMP_PSO_RT_GI->BindSRV("chs", "vertices", 3);
-		TEMP_PSO_RT_GI->BindSRV("chs", "indices", 4);
-		TEMP_PSO_RT_GI->BindSRV("chs", "AlbedoTex", 5);
-		TEMP_PSO_RT_GI->BindSRV("chs", "InstanceProperty", 6);
+		TEMP_PSO_RT_GI->BindSRV("chs", MakeRHIBufferSRV("vertices", 3, closestHitStage, RHIBufferViewKind::Raw));
+		TEMP_PSO_RT_GI->BindSRV("chs", MakeRHIBufferSRV("indices", 4, closestHitStage, RHIBufferViewKind::Raw));
+		TEMP_PSO_RT_GI->BindSRV("chs", MakeRHITextureSRV("AlbedoTex", 5, closestHitStage));
+		TEMP_PSO_RT_GI->BindSRV("chs", MakeRHIBufferSRV("InstanceProperty", 6, closestHitStage, RHIBufferViewKind::Raw));
 		TEMP_PSO_RT_GI->Configure(1, sizeof(float) * 12, sizeof(float) * 2);
 
 		const bool bSuccess = TEMP_PSO_RT_GI->InitRS("Shaders\\RaytracedGI.hlsl");
@@ -102,6 +105,10 @@ void Corona::RaytraceGIPass()
 	if (!TLAS || !pso)
 		return;
 	renderBackend->EmitGpuCrashMarker("RaytraceGIPass");
+
+	const bool bUseBindlessMaterials = UsesRTBindlessMaterials();
+	if (bUseBindlessMaterials && !EnsureRTMaterialRecordBuffer())
+		return;
 
 	renderBackend->TransitionTexture(DiffuseGIRawAux.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
 	renderBackend->TransitionTexture(DiffuseGIRaw.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
@@ -158,6 +165,11 @@ void Corona::RaytraceGIPass()
 		.SetTextureSRV("global", "RayNoiseBlueNoiseSource", BlueNoiseTex.get())
 		.SetCBVValue("global", "ViewParameter", &RTGIViewParam)
 		.SetSampler("global", "sampleWrap", samplerWrap.get());
+	if (bUseBindlessMaterials)
+	{
+		pass.SetBindlessTextureTable("global", "MaterialTextures")
+			.SetBufferSRV("global", "RtMaterials", RTMaterialRecordBuffer.get());
+	}
 	pass.BindSceneHitPrograms();
 	pass.Dispatch(GetRenderWidth(), GetRenderHeight());
 

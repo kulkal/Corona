@@ -64,6 +64,8 @@ struct VulkanGraphicsPipelineHandle : GraphicsPipelineHandle
 	std::unordered_map<std::string, Texture*> BoundTextures;
 	std::unordered_map<std::string, Buffer*> BoundBuffers;
 	std::unordered_map<std::string, Sampler*> BoundSamplers;
+	bool bHasConstantBufferDescriptorBinding = false;
+	uint32_t ConstantBufferDescriptorBinding = 0;
 
 	void Release();
 	~VulkanGraphicsPipelineHandle() override;
@@ -80,6 +82,7 @@ struct VulkanRTPipelineStateObject : RTPipelineStateObject
 		uint32_t BaseRegister = 0;
 		uint32_t DescriptorBinding = 0;
 		uint32_t DataSize = 0;
+		RHIBindingDesc Schema;
 	};
 
 	struct ShaderDesc
@@ -151,6 +154,10 @@ struct VulkanRTPipelineStateObject : RTPipelineStateObject
 	void Configure(uint32_t maxRecursion, uint32_t maxPayloadSizeInBytes, uint32_t maxAttributeSizeInBytes) override;
 	void AddHitGroup(const std::string& name, const std::string& chs, const std::string& ahs) override;
 	void AddShader(const std::string& shader, ShaderType shaderType) override;
+	void BindUAV(const std::string& shader, const RHIBindingDesc& binding) override;
+	void BindSRV(const std::string& shader, const RHIBindingDesc& binding) override;
+	void BindSampler(const std::string& shader, const RHIBindingDesc& binding) override;
+	void BindCBV(const std::string& shader, const RHIBindingDesc& binding) override;
 	void BindUAV(const std::string& shader, const std::string& name, uint32_t baseRegister) override;
 	void BindSRV(const std::string& shader, const std::string& name, uint32_t baseRegister) override;
 	void BindSampler(const std::string& shader, const std::string& name, uint32_t baseRegister) override;
@@ -163,6 +170,7 @@ struct VulkanRTPipelineStateObject : RTPipelineStateObject
 	void SetBufferUAV(const std::string& shader, const std::string& bindingName, Buffer* buffer, int instanceIndex = -1) override;
 	void SetTextureSRV(const std::string& shader, const std::string& bindingName, Texture* texture, int instanceIndex = -1) override;
 	void SetBufferSRV(const std::string& shader, const std::string& bindingName, Buffer* buffer, int instanceIndex = -1) override;
+	bool SetBindlessTextureTable(const std::string& shader, const std::string& bindingName) override;
 	void SetAccelerationStructure(const std::string& shader, const std::string& bindingName, const std::shared_ptr<RTAS>& rtas, int instanceIndex = -1) override;
 	void SetSampler(const std::string& shader, const std::string& bindingName, Sampler* sampler, int instanceIndex = -1) override;
 	void SetCBVValue(const std::string& shader, const std::string& bindingName, void* pData, int instanceIndex = -1) override;
@@ -189,6 +197,7 @@ struct VulkanComputePipelineStateObject : ComputePipelineStateObject
 		uint32_t DescriptorCount = 1;
 		uint32_t DataSize = 0;
 		VkDescriptorType DescriptorType = VK_DESCRIPTOR_TYPE_MAX_ENUM;
+		RHIBindingDesc Schema;
 	};
 
 	struct ResourceBindingValue
@@ -216,6 +225,10 @@ struct VulkanComputePipelineStateObject : ComputePipelineStateObject
 	VkPipelineLayout PipelineLayout = VK_NULL_HANDLE;
 	VkPipeline Pipeline = VK_NULL_HANDLE;
 
+	void BindSRV(const RHIBindingDesc& binding) override;
+	void BindUAV(const RHIBindingDesc& binding) override;
+	void BindCBV(const RHIBindingDesc& binding) override;
+	void BindSampler(const RHIBindingDesc& binding) override;
 	void Release();
 	~VulkanComputePipelineStateObject() override;
 	void ReleaseTempUniformBuffers();
@@ -253,6 +266,12 @@ public:
 
 	ERenderBackendAPI GetAPI() const override { return ERenderBackendAPI::Vulkan; }
 	const char* GetBackendName() const override { return "Vulkan"; }
+	RenderBackendCapabilities GetCapabilities() const override
+	{
+		RenderBackendCapabilities capabilities{};
+		capabilities.SupportsTypedBindingSchema = true;
+		return capabilities;
+	}
 	uint32_t GetMaxSupportedHybridStage() const override { return SupportsRayTracing() ? 7u : 0u; }
 	bool SupportsRayTracing() const override;
 	bool SupportsShaderExecutionReordering() const override { return false; }

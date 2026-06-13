@@ -86,6 +86,15 @@ Corona::RTPassBuilder& Corona::RTPassBuilder::SetBufferSRV(const char* shader, c
 	return *this;
 }
 
+Corona::RTPassBuilder& Corona::RTPassBuilder::SetBindlessTextureTable(const char* shader, const char* bindingName)
+{
+	const auto phaseStart = Corona::CpuClock::now();
+	if (PSO)
+		PSO->SetBindlessTextureTable(shader, bindingName);
+	Owner.AddRtRecordPhaseTiming(ERtRecordPhase::BindResources, phaseStart, Corona::CpuClock::now());
+	return *this;
+}
+
 Corona::RTPassBuilder& Corona::RTPassBuilder::SetAccelerationStructure(const char* shader, const char* bindingName, const shared_ptr<RTAS>& rtas)
 {
 	const auto phaseStart = Corona::CpuClock::now();

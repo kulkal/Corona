@@ -1,4 +1,7 @@
 #include "Common.hlsl"
+#if defined(CORONA_BINDLESS_MATERIALS) && CORONA_BINDLESS_MATERIALS
+#include "BindlessResources.hlsli"
+#endif
 
 RWStructuredBuffer<float4> TraceSH0 : register(u0);
 RWStructuredBuffer<float4> TraceSH1 : register(u1);
@@ -898,15 +901,32 @@ void chs(inout RayPayload payload, in BuiltInTriangleIntersectionAttributes attr
         hitNormal = -hitNormal;
     payload.normal = hitNormal;
 
+#if defined(CORONA_BINDLESS_MATERIALS) && CORONA_BINDLESS_MATERIALS
+    RTMaterialRecord material = RtMaterials[instanceID];
+#endif
     uint w, h;
+#if defined(CORONA_BINDLESS_MATERIALS) && CORONA_BINDLESS_MATERIALS
+    if (IsValidBindlessTextureIndex(material.AlbedoTextureIndex))
+        MaterialTextures[NonUniformResourceIndex(material.AlbedoTextureIndex)].GetDimensions(w, h);
+    else
+        AlbedoTex.GetDimensions(w, h);
+#else
     AlbedoTex.GetDimensions(w, h);
+#endif
     float halfLog2NumTexPixels = 0.5f * log2(w * h);
     vertex.textureLODConstant += halfLog2NumTexPixels;
     float hitT = RayTCurrent();
     float rayConeWidth = payload.spreadAngle * hitT + payload.coneWidth;
     float mipLevel = computeTextureLOD(1.0f, rayConeWidth, vertex.textureLODConstant);
 
+#if defined(CORONA_BINDLESS_MATERIALS) && CORONA_BINDLESS_MATERIALS
+    if (IsValidBindlessTextureIndex(material.AlbedoTextureIndex))
+        payload.color = MaterialTextures[NonUniformResourceIndex(material.AlbedoTextureIndex)].SampleLevel(sampleWrap, vertex.uv, mipLevel).xyz;
+    else
+        payload.color = AlbedoTex.SampleLevel(sampleWrap, vertex.uv, mipLevel).xyz;
+#else
     payload.color = AlbedoTex.SampleLevel(sampleWrap, vertex.uv, mipLevel).xyz;
+#endif
     payload.bHit = true;
 }
 
