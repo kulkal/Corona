@@ -613,6 +613,8 @@ public:
 		capabilities.MaxBindlessBufferCount = kMaxDX12BindlessBufferSlots;
 		return capabilities;
 	}
+	bool GetStreamlineTextureResource(Texture* texture, EResourceState state, StreamlineTextureResourceDesc& outDesc) const override;
+	void* GetStreamlineCommandBuffer() override;
 	uint32_t GetMaxSupportedHybridStage() const override { return 7; }
 	bool SupportsRayTracing() const override;
 	bool SupportsShaderExecutionReordering() const override;
@@ -729,12 +731,9 @@ public:
 	void RequestWindowCapture(const std::wstring& outputPath) override;
 	bool ConsumeWindowCaptureResult(std::wstring* outputPath, bool* success, std::wstring* errorMessage) override;
 	std::shared_ptr<GraphicsPipelineHandle> CreateGraphicsPipeline(const GraphicsPipelineDesc& desc) override;
+	std::shared_ptr<GraphicsBindGroupHandle> CreateGraphicsBindGroup(const GraphicsBindGroupDesc& desc) override;
 	void BindGraphicsPipeline(GraphicsPipelineHandle* pipeline) override;
-	void SetGraphicsPipelineConstantData(GraphicsPipelineHandle* pipeline, uint32_t slot, const void* data, uint32_t size) override;
-	void BindGraphicsPipelineTexture(GraphicsPipelineHandle* pipeline, const std::string& bindingName, Texture* texture) override;
-	void BindGraphicsPipelineBuffer(GraphicsPipelineHandle* pipeline, const std::string& bindingName, Buffer* buffer) override;
-	void BindGraphicsPipelineVertexBufferSRV(GraphicsPipelineHandle* pipeline, const std::string& bindingName, VertexBuffer* vb) override;
-	void BindGraphicsPipelineSampler(GraphicsPipelineHandle* pipeline, const std::string& bindingName, Sampler* sampler) override;
+	void BindGraphicsBindGroup(GraphicsPipelineHandle* pipeline, const std::shared_ptr<GraphicsBindGroupHandle>& bindGroup) override;
 	void DrawTriangleList(VertexBuffer* vertexBuffer, uint32_t vertexCount);
 	void RenderWindowTriangleFrame(uint32_t width, uint32_t height, float timeSeconds);
 
@@ -743,7 +742,7 @@ public:
 	shared_ptr<Texture> CreateTexture3D(DXGI_FORMAT format, D3D12_RESOURCE_FLAGS resFlags, D3D12_RESOURCE_STATES initResState, int width, int height, int depth, int mipLevels);
 
 	shared_ptr<Sampler> CreateSampler(D3D12_SAMPLER_DESC& InSamplerDesc);
-	shared_ptr<Buffer> CreateBuffer(UINT InNumElements, UINT InElementSize, D3D12_RESOURCE_STATES initResState, bool isUAV, void* SrcData = nullptr, bool forceDefaultHeap = false);
+	shared_ptr<Buffer> CreateBuffer(UINT InNumElements, UINT InElementSize, D3D12_RESOURCE_STATES initResState, bool isUAV, void* SrcData = nullptr, EBufferAccess access = EBufferAccess::GpuOnly);
 	shared_ptr<Buffer> CreateDefaultByteAddressBuffer(UINT InNumElements, UINT InElementSize, EInitialResourceState initialState = EInitialResourceState::ShaderRead);
 	bool UploadToDefaultBuffer(Buffer* buffer, const void* srcData, UINT sizeInBytes, EResourceState stateBefore, EResourceState stateAfter);
 

@@ -409,6 +409,24 @@ namespace
 		std::wstring ShaderPathForDiag;
 	};
 
+	struct DX12GraphicsBindGroupEntry
+	{
+		EGraphicsBindGroupEntryType Type = EGraphicsBindGroupEntryType::TextureSRV;
+		std::string BindingName;
+		uint32_t Slot = 0;
+		Texture* TextureValue = nullptr;
+		Buffer* BufferValue = nullptr;
+		VertexBuffer* VertexBufferValue = nullptr;
+		Sampler* SamplerValue = nullptr;
+		std::vector<uint8_t> ConstantData;
+	};
+
+	struct DX12GraphicsBindGroupHandle final : GraphicsBindGroupHandle
+	{
+		DX12GraphicsPipelineHandle* Pipeline = nullptr;
+		std::vector<DX12GraphicsBindGroupEntry> Entries;
+	};
+
 	void ForceOpaqueAlpha(const DirectX::Image* image)
 	{
 		if (!image || !image->pixels)
@@ -1525,13 +1543,16 @@ shared_ptr<Sampler> DX12Backend::CreateSampler(D3D12_SAMPLER_DESC& InSamplerDesc
 
 std::shared_ptr<Buffer> DX12Backend::CreateBuffer(const BufferCreateDesc& desc)
 {
+	if (desc.NumElements == 0 || desc.ElementSize == 0)
+		return nullptr;
+
 	std::shared_ptr<Buffer> buffer = CreateBuffer(
 		desc.NumElements,
 		desc.ElementSize,
 		ToD3D12ResourceState(desc.InitialState),
 		desc.bAllowUnorderedAccess,
 		desc.InitialData,
-		desc.bUseDefaultHeap);
+		desc.Access);
 	if (buffer)
 	{
 		if (desc.Shape == EBufferShape::Structured)
@@ -1542,7 +1563,7 @@ std::shared_ptr<Buffer> DX12Backend::CreateBuffer(const BufferCreateDesc& desc)
 	return buffer;
 }
 
-std::shared_ptr<Buffer> DX12Backend::CreateBuffer(UINT InNumElements, UINT InElementSize, D3D12_RESOURCE_STATES initResState, bool isUAV, void* SrcData, bool forceDefaultHeap)
+std::shared_ptr<Buffer> DX12Backend::CreateBuffer(UINT InNumElements, UINT InElementSize, D3D12_RESOURCE_STATES initResState, bool isUAV, void* SrcData, EBufferAccess access)
 {
 	Buffer * buffer = new Buffer;
 	buffer->Owner = this;
@@ -1564,49 +1585,76 @@ std::shared_ptr<Buffer> DX12Backend::CreateBuffer(UINT InNumElements, UINT InEle
 	buffer->NumElements = InNumElements;
 	buffer->ElementSize = InElementSize;
 
-	D3D12_HEAP_PROPERTIES heapProp;
-	heapProp.Type = D3D12_HEAP_TYPE_DEFAULT;
-	heapProp.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
-	heapProp.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
-	heapProp.CreationNodeMask = 1;
-	heapProp.VisibleNodeMask = 1;
-	if (isUAV || forceDefaultHeap)
-		heapProp.Type = D3D12_HEAP_TYPE_DEFAULT;
-	else
-		heapProp.Type = D3D12_HEAP_TYPE_UPLOAD;
+	D3D12_HEAP_TYPE heapType = D3D12_HEAP_TYPE_DEFAULT;
+	if (!isUAV)
+	{
+		switch (access)
+		{
+		case EBufferAccess::Upload:
+		case EBufferAccess::Stream:
+			heapType = D3D12_HEAP_TYPE_UPLOAD;
+			break;
+		case EBufferAccess::Readback:
+			heapType = D3D12_HEAP_TYPE_READBACK;
+			break;
+		case EBufferAccess::GpuOnly:
+		default:
+			heapType = D3D12_HEAP_TYPE_DEFAULT;
+			break;
+		}
+	}
 
+	D3D12_RESOURCE_STATES createState = initResState;
+	if (heapType == D3D12_HEAP_TYPE_UPLOAD)
+		createState = D3D12_RESOURCE_STATE_GENERIC_READ;
+	else if (heapType == D3D12_HEAP_TYPE_READBACK)
+		createState = D3D12_RESOURCE_STATE_COPY_DEST;
+
+	D3D12_HEAP_PROPERTIES heapProp = CD3DX12_HEAP_PROPERTIES(heapType);
 	ThrowIfFailed(Device->CreateCommittedResource(&heapProp, D3D12_HEAP_FLAG_NONE, &bufDesc,
-		initResState, nullptr, IID_PPV_ARGS(&buffer->resource)));
+		createState, nullptr, IID_PPV_ARGS(&buffer->resource)));
 
 	if (SrcData)
 	{
-		CommandList* cmd = CmdQ->AllocCmdList();
-
-		cmd->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(buffer->resource.Get(), initResState, D3D12_RESOURCE_STATE_COPY_DEST));
-
 		UINT Size = buffer->NumElements * buffer->ElementSize;
 
-		ComPtr<ID3D12Resource> UploadHeap;
+		if (heapType == D3D12_HEAP_TYPE_UPLOAD)
+		{
+			D3D12_RANGE readRange{ 0, 0 };
+			ThrowIfFailed(buffer->resource->Map(0, &readRange, &buffer->MappedPtr));
+			buffer->MappedSizeInBytes = Size;
+			memcpy(buffer->MappedPtr, SrcData, Size);
+		}
+		else if (heapType == D3D12_HEAP_TYPE_DEFAULT)
+		{
+			CommandList* cmd = CmdQ->AllocCmdList();
 
-		ThrowIfFailed(Device->CreateCommittedResource(
-			&CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD),
-			D3D12_HEAP_FLAG_NONE,
-			&CD3DX12_RESOURCE_DESC::Buffer(Size),
-			D3D12_RESOURCE_STATE_GENERIC_READ,
-			nullptr,
-			IID_PPV_ARGS(&UploadHeap)));
+			if (initResState != D3D12_RESOURCE_STATE_COPY_DEST)
+				cmd->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(buffer->resource.Get(), initResState, D3D12_RESOURCE_STATE_COPY_DEST));
 
-		UINT8* pData = nullptr;
-		UploadHeap->Map(0, nullptr, reinterpret_cast<void**>(&pData));
-		memcpy(reinterpret_cast<void*>(pData), SrcData, Size);
-		UploadHeap->Unmap(0, nullptr);
+			ComPtr<ID3D12Resource> UploadHeap;
 
-		cmd->CmdList->CopyBufferRegion(buffer->resource.Get(), 0, UploadHeap.Get(), 0, Size);
-		cmd->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(buffer->resource.Get(), D3D12_RESOURCE_STATE_COPY_DEST, initResState));
+			ThrowIfFailed(Device->CreateCommittedResource(
+				&CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD),
+				D3D12_HEAP_FLAG_NONE,
+				&CD3DX12_RESOURCE_DESC::Buffer(Size),
+				D3D12_RESOURCE_STATE_GENERIC_READ,
+				nullptr,
+				IID_PPV_ARGS(&UploadHeap)));
+
+			UINT8* pData = nullptr;
+			UploadHeap->Map(0, nullptr, reinterpret_cast<void**>(&pData));
+			memcpy(reinterpret_cast<void*>(pData), SrcData, Size);
+			UploadHeap->Unmap(0, nullptr);
+
+			cmd->CmdList->CopyBufferRegion(buffer->resource.Get(), 0, UploadHeap.Get(), 0, Size);
+			if (initResState != D3D12_RESOURCE_STATE_COPY_DEST)
+				cmd->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(buffer->resource.Get(), D3D12_RESOURCE_STATE_COPY_DEST, initResState));
 
 
-		CmdQ->ExecuteCommandList(cmd);
-		CmdQ->WaitGPU();
+			CmdQ->ExecuteCommandList(cmd);
+			CmdQ->WaitGPU();
+		}
 	}
 
 	//// create shader resource view
@@ -3500,6 +3548,55 @@ Texture::~Texture()
 {
 	if (Owner)
 		Owner->UnregisterBindlessTexture(this);
+}
+
+namespace
+{
+	uint32_t ToD3D12StreamlineState(EResourceState state)
+	{
+		switch (state)
+		{
+		case EResourceState::ShaderRead:
+			return D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+		case EResourceState::UnorderedAccess:
+			return D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+		case EResourceState::RenderTarget:
+			return D3D12_RESOURCE_STATE_RENDER_TARGET;
+		case EResourceState::DepthWrite:
+			return D3D12_RESOURCE_STATE_DEPTH_WRITE;
+		case EResourceState::CopyDest:
+			return D3D12_RESOURCE_STATE_COPY_DEST;
+		case EResourceState::CopySource:
+			return D3D12_RESOURCE_STATE_COPY_SOURCE;
+		case EResourceState::Present:
+			return D3D12_RESOURCE_STATE_PRESENT;
+		default:
+			return D3D12_RESOURCE_STATE_COMMON;
+		}
+	}
+}
+
+bool DX12Backend::GetStreamlineTextureResource(Texture* texture, EResourceState state, StreamlineTextureResourceDesc& outDesc) const
+{
+	if (!texture || !texture->resource)
+		return false;
+
+	const D3D12_RESOURCE_DESC desc = texture->resource->GetDesc();
+	outDesc = {};
+	outDesc.Native = texture->resource.Get();
+	outDesc.State = ToD3D12StreamlineState(state);
+	outDesc.Width = static_cast<uint32_t>(desc.Width);
+	outDesc.Height = desc.Height;
+	outDesc.NativeFormat = static_cast<uint32_t>(desc.Format);
+	outDesc.MipLevels = desc.MipLevels;
+	outDesc.ArrayLayers = desc.DepthOrArraySize;
+	outDesc.Flags = static_cast<uint32_t>(desc.Flags);
+	return outDesc.Native != nullptr;
+}
+
+void* DX12Backend::GetStreamlineCommandBuffer()
+{
+	return GetGraphicsCommandList();
 }
 
 void Texture::MakeStaticSRV()
@@ -6902,6 +6999,37 @@ std::shared_ptr<GraphicsPipelineHandle> DX12Backend::CreateGraphicsPipeline(cons
 	return handle;
 }
 
+std::shared_ptr<GraphicsBindGroupHandle> DX12Backend::CreateGraphicsBindGroup(const GraphicsBindGroupDesc& desc)
+{
+	auto* dxPipeline = dynamic_cast<DX12GraphicsPipelineHandle*>(desc.Pipeline);
+	if (!dxPipeline || !dxPipeline->PSO)
+		return nullptr;
+
+	auto handle = std::make_shared<DX12GraphicsBindGroupHandle>();
+	handle->Pipeline = dxPipeline;
+	handle->Entries.reserve(desc.Entries.size());
+
+	for (const GraphicsBindGroupEntry& src : desc.Entries)
+	{
+		DX12GraphicsBindGroupEntry dst{};
+		dst.Type = src.Type;
+		dst.BindingName = src.BindingName;
+		dst.Slot = src.Slot;
+		dst.TextureValue = src.TextureValue;
+		dst.BufferValue = src.BufferValue;
+		dst.VertexBufferValue = src.VertexBufferValue;
+		dst.SamplerValue = src.SamplerValue;
+		if (src.Type == EGraphicsBindGroupEntryType::ConstantData && src.ConstantData && src.ConstantDataSize > 0)
+		{
+			const auto* bytes = static_cast<const uint8_t*>(src.ConstantData);
+			dst.ConstantData.assign(bytes, bytes + src.ConstantDataSize);
+		}
+		handle->Entries.push_back(std::move(dst));
+	}
+
+	return handle;
+}
+
 void DX12Backend::BindGraphicsPipeline(GraphicsPipelineHandle* pipeline)
 {
 	auto* dxPipeline = dynamic_cast<DX12GraphicsPipelineHandle*>(pipeline);
@@ -6921,65 +7049,56 @@ void DX12Backend::BindGraphicsPipeline(GraphicsPipelineHandle* pipeline)
 	}
 }
 
-void DX12Backend::SetGraphicsPipelineConstantData(GraphicsPipelineHandle* pipeline, uint32_t slot, const void* data, uint32_t size)
+void DX12Backend::BindGraphicsBindGroup(GraphicsPipelineHandle* pipeline, const std::shared_ptr<GraphicsBindGroupHandle>& bindGroup)
 {
-	(void)slot;
 	auto* dxPipeline = dynamic_cast<DX12GraphicsPipelineHandle*>(pipeline);
-	if (!dxPipeline || !dxPipeline->PSO || !data || size == 0 || dxPipeline->ConstantBufferSize == 0)
+	auto* dxBindGroup = dynamic_cast<DX12GraphicsBindGroupHandle*>(bindGroup.get());
+	if (!dxPipeline || !dxPipeline->PSO || !dxBindGroup || dxBindGroup->Pipeline != dxPipeline)
 		return;
 
-	const auto bindingIt = dxPipeline->PSO->constantBufferBinding.find("__CB0");
-	if (bindingIt == dxPipeline->PSO->constantBufferBinding.end())
-		return;
-
-	const uint32_t sourceSize = bindingIt->second.sourceSize;
-	if (sourceSize == 0)
-		return;
-
-	if (size >= sourceSize)
+	for (const DX12GraphicsBindGroupEntry& entry : dxBindGroup->Entries)
 	{
-		dxPipeline->PSO->SetCBVValue("__CB0", const_cast<void*>(data));
-		return;
+		switch (entry.Type)
+		{
+		case EGraphicsBindGroupEntryType::TextureSRV:
+			if (entry.TextureValue)
+				dxPipeline->PSO->SetSRV(entry.BindingName, entry.TextureValue->GpuHandleSRV);
+			break;
+		case EGraphicsBindGroupEntryType::BufferSRV:
+			if (entry.BufferValue)
+				dxPipeline->PSO->SetSRV(entry.BindingName, entry.BufferValue->GpuHandleSRV);
+			break;
+		case EGraphicsBindGroupEntryType::VertexBufferSRV:
+			if (entry.VertexBufferValue)
+				dxPipeline->PSO->SetSRV(entry.BindingName, entry.VertexBufferValue->GpuHandleSRV);
+			break;
+		case EGraphicsBindGroupEntryType::Sampler:
+			if (entry.SamplerValue)
+				dxPipeline->PSO->SetSampler(entry.BindingName, entry.SamplerValue);
+			break;
+		case EGraphicsBindGroupEntryType::ConstantData:
+			if (!entry.ConstantData.empty() && entry.Slot == 0 && dxPipeline->ConstantBufferSize > 0)
+			{
+				const auto bindingIt = dxPipeline->PSO->constantBufferBinding.find("__CB0");
+				if (bindingIt == dxPipeline->PSO->constantBufferBinding.end())
+					break;
+
+				const uint32_t sourceSize = bindingIt->second.sourceSize;
+				if (sourceSize == 0)
+					break;
+
+				if (entry.ConstantData.size() >= sourceSize)
+				{
+					dxPipeline->PSO->SetCBVValue("__CB0", const_cast<uint8_t*>(entry.ConstantData.data()));
+					break;
+				}
+
+				thread_local std::vector<uint8_t> sourceData;
+				sourceData.assign(sourceSize, 0);
+				std::memcpy(sourceData.data(), entry.ConstantData.data(), entry.ConstantData.size());
+				dxPipeline->PSO->SetCBVValue("__CB0", sourceData.data());
+			}
+			break;
+		}
 	}
-
-	thread_local std::vector<uint8_t> sourceData;
-	sourceData.assign(sourceSize, 0);
-	std::memcpy(sourceData.data(), data, size);
-	dxPipeline->PSO->SetCBVValue("__CB0", sourceData.data());
-}
-
-void DX12Backend::BindGraphicsPipelineTexture(GraphicsPipelineHandle* pipeline, const std::string& bindingName, Texture* texture)
-{
-	auto* dxPipeline = dynamic_cast<DX12GraphicsPipelineHandle*>(pipeline);
-	if (!dxPipeline || !dxPipeline->PSO || !texture)
-		return;
-
-	dxPipeline->PSO->SetSRV(bindingName, texture->GpuHandleSRV);
-}
-
-void DX12Backend::BindGraphicsPipelineBuffer(GraphicsPipelineHandle* pipeline, const std::string& bindingName, Buffer* buffer)
-{
-	auto* dxPipeline = dynamic_cast<DX12GraphicsPipelineHandle*>(pipeline);
-	if (!dxPipeline || !dxPipeline->PSO || !buffer)
-		return;
-
-	dxPipeline->PSO->SetSRV(bindingName, buffer->GpuHandleSRV);
-}
-
-void DX12Backend::BindGraphicsPipelineVertexBufferSRV(GraphicsPipelineHandle* pipeline, const std::string& bindingName, VertexBuffer* vb)
-{
-	auto* dxPipeline = dynamic_cast<DX12GraphicsPipelineHandle*>(pipeline);
-	if (!dxPipeline || !dxPipeline->PSO || !vb)
-		return;
-
-	dxPipeline->PSO->SetSRV(bindingName, vb->GpuHandleSRV);
-}
-
-void DX12Backend::BindGraphicsPipelineSampler(GraphicsPipelineHandle* pipeline, const std::string& bindingName, Sampler* sampler)
-{
-	auto* dxPipeline = dynamic_cast<DX12GraphicsPipelineHandle*>(pipeline);
-	if (!dxPipeline || !dxPipeline->PSO || !sampler)
-		return;
-
-	dxPipeline->PSO->SetSampler(bindingName, sampler);
 }

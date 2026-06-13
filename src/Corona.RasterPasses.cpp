@@ -599,8 +599,6 @@ void Corona::ParticlePass()
 	// DX12 SetGraphicsRootSignature (inside BindGraphicsPipeline) invalidates
 	// root-table writes that came before it — bind first, then descriptors.
 	renderBackend->BindGraphicsPipeline(ParticleGraphicsPipeline.get());
-	renderBackend->BindGraphicsPipelineSampler(
-		ParticleGraphicsPipeline.get(), "samplerClamp", samplerBilinearWrap.get());
 
 	uint32_t totalActive = 0;
 	for (auto& sys : ActiveParticleSystems)
@@ -617,10 +615,12 @@ void Corona::ParticlePass()
 		if (!tex || !vb || !ib)
 			continue;
 
-		renderBackend->BindGraphicsPipelineTexture(
-			ParticleGraphicsPipeline.get(), "ParticleTex", tex.get());
-		renderBackend->SetGraphicsPipelineConstantData(
-			ParticleGraphicsPipeline.get(), 0, &cb, sizeof(cb));
+		CreateAndBindGraphicsBindGroup(renderBackend.get(), ParticleGraphicsPipeline.get(),
+			{
+				GraphicsBindGroupEntry::SamplerBinding("samplerClamp", samplerBilinearWrap.get()),
+				GraphicsBindGroupEntry::TextureSRV("ParticleTex", tex.get()),
+				GraphicsBindGroupEntry::Constant(0, &cb, sizeof(cb)),
+			});
 		renderBackend->BindMeshBuffers(vb.get(), ib.get());
 		renderBackend->DrawIndexed(indexCount, 0, 0);
 		totalActive += sys->GetActiveCount();
@@ -870,9 +870,12 @@ void Corona::ToneMapPass()
 	// is called inside BindGraphicsPipeline. Bind the pipeline first so
 	// subsequent texture/sampler/CB writes land on the right root sig.
 	renderBackend->BindGraphicsPipeline(ToneMapGraphicsPipeline.get());
-	renderBackend->BindGraphicsPipelineTexture(ToneMapGraphicsPipeline.get(), "SrcTex", ResolveTarget);
-	renderBackend->BindGraphicsPipelineSampler(ToneMapGraphicsPipeline.get(), "sampleWrap", samplerWrap.get());
-	renderBackend->SetGraphicsPipelineConstantData(ToneMapGraphicsPipeline.get(), 0, &ToneMapCB, sizeof(ToneMapCB));
+	CreateAndBindGraphicsBindGroup(renderBackend.get(), ToneMapGraphicsPipeline.get(),
+		{
+			GraphicsBindGroupEntry::TextureSRV("SrcTex", ResolveTarget),
+			GraphicsBindGroupEntry::SamplerBinding("sampleWrap", samplerWrap.get()),
+			GraphicsBindGroupEntry::Constant(0, &ToneMapCB, sizeof(ToneMapCB)),
+		});
 	Texture* backbuffer = renderBackend->GetCurrentWindowRenderTarget();
 	const UINT outputWidth = (backbuffer && backbuffer->Width > 0) ? backbuffer->Width : m_width;
 	const UINT outputHeight = (backbuffer && backbuffer->Height > 0) ? backbuffer->Height : m_height;
@@ -896,19 +899,25 @@ void Corona::DebugPass()
 	auto visualize = [&](const DebugPassCB& cb, Texture* tex) {
 		if (!tex) return;
 		renderBackend->BindGraphicsPipeline(BufferVisualizeGraphicsPipeline.get());
-		renderBackend->BindGraphicsPipelineSampler(BufferVisualizeGraphicsPipeline.get(), "samplerWrap", samplerWrap.get());
-		renderBackend->BindGraphicsPipelineTexture(BufferVisualizeGraphicsPipeline.get(), "SrcTex", tex);
-		renderBackend->SetGraphicsPipelineConstantData(BufferVisualizeGraphicsPipeline.get(), 0, &cb, sizeof(cb));
+		CreateAndBindGraphicsBindGroup(renderBackend.get(), BufferVisualizeGraphicsPipeline.get(),
+			{
+				GraphicsBindGroupEntry::SamplerBinding("samplerWrap", samplerWrap.get()),
+				GraphicsBindGroupEntry::TextureSRV("SrcTex", tex),
+				GraphicsBindGroupEntry::Constant(0, &cb, sizeof(cb)),
+			});
 		renderBackend->DrawFullscreenQuad(FullScreenVB.get());
 	};
 	auto visualizeMulti = [&](const DebugPassCB& cb, Texture* tex, Texture* texSH, Texture* texNormal) {
 		if (!tex || !texSH || !texNormal) return;
 		renderBackend->BindGraphicsPipeline(BufferVisualizeGraphicsPipeline.get());
-		renderBackend->BindGraphicsPipelineSampler(BufferVisualizeGraphicsPipeline.get(), "samplerWrap", samplerWrap.get());
-		renderBackend->BindGraphicsPipelineTexture(BufferVisualizeGraphicsPipeline.get(), "SrcTex", tex);
-		renderBackend->BindGraphicsPipelineTexture(BufferVisualizeGraphicsPipeline.get(), "SrcTexSH", texSH);
-		renderBackend->BindGraphicsPipelineTexture(BufferVisualizeGraphicsPipeline.get(), "SrcTexNormal", texNormal);
-		renderBackend->SetGraphicsPipelineConstantData(BufferVisualizeGraphicsPipeline.get(), 0, &cb, sizeof(cb));
+		CreateAndBindGraphicsBindGroup(renderBackend.get(), BufferVisualizeGraphicsPipeline.get(),
+			{
+				GraphicsBindGroupEntry::SamplerBinding("samplerWrap", samplerWrap.get()),
+				GraphicsBindGroupEntry::TextureSRV("SrcTex", tex),
+				GraphicsBindGroupEntry::TextureSRV("SrcTexSH", texSH),
+				GraphicsBindGroupEntry::TextureSRV("SrcTexNormal", texNormal),
+				GraphicsBindGroupEntry::Constant(0, &cb, sizeof(cb)),
+			});
 		renderBackend->DrawFullscreenQuad(FullScreenVB.get());
 	};
 
@@ -1719,19 +1728,26 @@ void Corona::LightingPass()
 	Texture* lightingTarget = LightingBuffer.get();
 	renderBackend->SetRenderTargets(&lightingTarget, 1, nullptr);
 	renderBackend->BindGraphicsPipeline(LightingGraphicsPipeline.get());
-	renderBackend->BindGraphicsPipelineTexture(LightingGraphicsPipeline.get(), "AlbedoTex", AlbedoBuffer.get());
-	renderBackend->BindGraphicsPipelineTexture(LightingGraphicsPipeline.get(), "NormalTex", NormalBuffers[ColorBufferWriteIndex].get());
-	renderBackend->BindGraphicsPipelineTexture(LightingGraphicsPipeline.get(), "ShadowTex", shadowTex);
-	renderBackend->BindGraphicsPipelineTexture(LightingGraphicsPipeline.get(), "VelocityTex", VelocityBuffer.get());
-	renderBackend->BindGraphicsPipelineTexture(LightingGraphicsPipeline.get(), "DepthTex", DepthBuffer.get());
-	renderBackend->BindGraphicsPipelineTexture(LightingGraphicsPipeline.get(), "GIResultSHTex", lightingDiffuseAuxTex);
-	renderBackend->BindGraphicsPipelineTexture(LightingGraphicsPipeline.get(), "GIResultColorTex", lightingDiffuseTex);
-	renderBackend->BindGraphicsPipelineTexture(LightingGraphicsPipeline.get(), "SpecularGITex", lightingSpecularTex);
-	renderBackend->BindGraphicsPipelineTexture(LightingGraphicsPipeline.get(), "RoughnessMetalicTex", RoughnessMetalicBuffer.get());
-	renderBackend->BindGraphicsPipelineTexture(LightingGraphicsPipeline.get(), "AmbientOcclusionTex", ambientOcclusionTex);
-	renderBackend->BindGraphicsPipelineTexture(LightingGraphicsPipeline.get(), "SkyLightingTex", skyLightingTex);
-	renderBackend->BindGraphicsPipelineSampler(LightingGraphicsPipeline.get(), "sampleWrap", samplerWrap.get());
-	renderBackend->SetGraphicsPipelineConstantData(LightingGraphicsPipeline.get(), 0, &Param, sizeof(Param));
+	auto bindLightingGroup = [&]()
+	{
+		CreateAndBindGraphicsBindGroup(renderBackend.get(), LightingGraphicsPipeline.get(),
+			{
+				GraphicsBindGroupEntry::TextureSRV("AlbedoTex", AlbedoBuffer.get()),
+				GraphicsBindGroupEntry::TextureSRV("NormalTex", NormalBuffers[ColorBufferWriteIndex].get()),
+				GraphicsBindGroupEntry::TextureSRV("ShadowTex", shadowTex),
+				GraphicsBindGroupEntry::TextureSRV("VelocityTex", VelocityBuffer.get()),
+				GraphicsBindGroupEntry::TextureSRV("DepthTex", DepthBuffer.get()),
+				GraphicsBindGroupEntry::TextureSRV("GIResultSHTex", lightingDiffuseAuxTex),
+				GraphicsBindGroupEntry::TextureSRV("GIResultColorTex", lightingDiffuseTex),
+				GraphicsBindGroupEntry::TextureSRV("SpecularGITex", lightingSpecularTex),
+				GraphicsBindGroupEntry::TextureSRV("RoughnessMetalicTex", RoughnessMetalicBuffer.get()),
+				GraphicsBindGroupEntry::TextureSRV("AmbientOcclusionTex", ambientOcclusionTex),
+				GraphicsBindGroupEntry::TextureSRV("SkyLightingTex", skyLightingTex),
+				GraphicsBindGroupEntry::SamplerBinding("sampleWrap", samplerWrap.get()),
+				GraphicsBindGroupEntry::Constant(0, &Param, sizeof(Param)),
+			});
+	};
+	bindLightingGroup();
 	renderBackend->SetViewportAndScissor(GetRenderWidth(), GetRenderHeight());
 	renderBackend->DrawFullscreenQuad(FullScreenVB.get());
 	renderBackend->TransitionTexture(LightingBuffer.get(), EResourceState::RenderTarget, EResourceState::ShaderRead);
@@ -1744,11 +1760,12 @@ void Corona::LightingPass()
 		renderBackend->SetRenderTargets(&directLightingTarget, 1, nullptr);
 		// Re-bind pipeline before re-writing CB — same DX12 root-table invalidation rule.
 		renderBackend->BindGraphicsPipeline(LightingGraphicsPipeline.get());
-		renderBackend->SetGraphicsPipelineConstantData(LightingGraphicsPipeline.get(), 0, &Param, sizeof(Param));
+		bindLightingGroup();
 		renderBackend->SetViewportAndScissor(GetRenderWidth(), GetRenderHeight());
 		renderBackend->DrawFullscreenQuad(FullScreenVB.get());
 		renderBackend->TransitionTexture(DirectLightingBuffer.get(), EResourceState::RenderTarget, EResourceState::ShaderRead);
 	}
+	renderBackend->BindGraphicsBindGroup(LightingGraphicsPipeline.get(), nullptr);
 }
 
 void Corona::TemporalAAPass()
@@ -1788,14 +1805,17 @@ void Corona::TemporalAAPass()
 	Texture* temporalTarget = ResolveTarget;
 	renderBackend->SetRenderTargets(&temporalTarget, 1, nullptr);
 	renderBackend->BindGraphicsPipeline(TemporalAAGraphicsPipeline.get());
-	renderBackend->BindGraphicsPipelineTexture(TemporalAAGraphicsPipeline.get(), "CurrentColorTex", LightingBuffer.get());
-	renderBackend->BindGraphicsPipelineTexture(TemporalAAGraphicsPipeline.get(), "PrevColorTex", PrevColorBuffer);
-	renderBackend->BindGraphicsPipelineTexture(TemporalAAGraphicsPipeline.get(), "VelocityTex", VelocityBuffer.get());
-	renderBackend->BindGraphicsPipelineTexture(TemporalAAGraphicsPipeline.get(), "DepthTex", DepthBuffer.get());
-	renderBackend->BindGraphicsPipelineTexture(TemporalAAGraphicsPipeline.get(), "BloomTex", BloomTexture);
-	renderBackend->BindGraphicsPipelineBuffer(TemporalAAGraphicsPipeline.get(), "Exposure", ExposureData.get());
-	renderBackend->BindGraphicsPipelineSampler(TemporalAAGraphicsPipeline.get(), "sampleWrap", samplerBilinearWrap ? samplerBilinearWrap.get() : samplerWrap.get());
-	renderBackend->SetGraphicsPipelineConstantData(TemporalAAGraphicsPipeline.get(), 0, &Param, sizeof(Param));
+	CreateAndBindGraphicsBindGroup(renderBackend.get(), TemporalAAGraphicsPipeline.get(),
+		{
+			GraphicsBindGroupEntry::TextureSRV("CurrentColorTex", LightingBuffer.get()),
+			GraphicsBindGroupEntry::TextureSRV("PrevColorTex", PrevColorBuffer),
+			GraphicsBindGroupEntry::TextureSRV("VelocityTex", VelocityBuffer.get()),
+			GraphicsBindGroupEntry::TextureSRV("DepthTex", DepthBuffer.get()),
+			GraphicsBindGroupEntry::TextureSRV("BloomTex", BloomTexture),
+			GraphicsBindGroupEntry::BufferSRV("Exposure", ExposureData.get()),
+			GraphicsBindGroupEntry::SamplerBinding("sampleWrap", samplerBilinearWrap ? samplerBilinearWrap.get() : samplerWrap.get()),
+			GraphicsBindGroupEntry::Constant(0, &Param, sizeof(Param)),
+		});
 	renderBackend->SetViewportAndScissor(GetRenderWidth(), GetRenderHeight());
 	renderBackend->DrawFullscreenQuad(FullScreenVB.get());
 	renderBackend->TransitionTexture(ResolveTarget, EResourceState::RenderTarget, EResourceState::ShaderRead);
@@ -2036,7 +2056,6 @@ bool Corona::DrawStaticInstancedScene(
 	};
 
 	renderBackend->BindGraphicsPipeline(pso);
-	renderBackend->BindGraphicsPipelineSampler(pso, "samplerWrap", samplerWrap.get());
 
 	for (uint32_t i = 0; i < instanceCount; ++i)
 		packWorld(objects[i]->Transform, StaticGBufferInstanceTransformScratch[i]);
@@ -2048,7 +2067,6 @@ bool Corona::DrawStaticInstancedScene(
 		instanceBuffer,
 		StaticGBufferInstanceTransformScratch.data(),
 		instanceCount * static_cast<uint32_t>(sizeof(StaticGBufferInstanceXform)));
-	renderBackend->BindGraphicsPipelineBuffer(pso, "StaticInstanceTransforms", instanceBuffer);
 
 	for (const std::shared_ptr<Mesh>& mesh : scene->meshes)
 	{
@@ -2090,16 +2108,21 @@ bool Corona::DrawStaticInstancedScene(
 			objCB.WindParams = RenderFrameWindParams;
 			objCB.WindTuning = RenderFrameWindTuning;
 			objCB.TerrainDeformSphere = RenderFrameTerrainDeformSphere;
-			renderBackend->SetGraphicsPipelineConstantData(pso, 0, &objCB, sizeof(objCB));
 
 			Texture* albedo = drawcall.mat->Diffuse ? drawcall.mat->Diffuse.get() : DefaultWhiteTex.get();
 			Texture* normal = drawcall.mat->Normal ? drawcall.mat->Normal.get() : DefaultNormalTex.get();
 			Texture* rough = drawcall.mat->Roughness ? drawcall.mat->Roughness.get() : DefaultRougnessTex.get();
 			Texture* metal = drawcall.mat->Metallic ? drawcall.mat->Metallic.get() : DefaultBlackTex.get();
-			renderBackend->BindGraphicsPipelineTexture(pso, "AlbedoTex", albedo);
-			renderBackend->BindGraphicsPipelineTexture(pso, "NormalTex", normal);
-			renderBackend->BindGraphicsPipelineTexture(pso, "RoughnessTex", rough);
-			renderBackend->BindGraphicsPipelineTexture(pso, "MetallicTex", metal);
+			CreateAndBindGraphicsBindGroup(renderBackend.get(), pso,
+				{
+					GraphicsBindGroupEntry::SamplerBinding("samplerWrap", samplerWrap.get()),
+					GraphicsBindGroupEntry::BufferSRV("StaticInstanceTransforms", instanceBuffer),
+					GraphicsBindGroupEntry::Constant(0, &objCB, sizeof(objCB)),
+					GraphicsBindGroupEntry::TextureSRV("AlbedoTex", albedo),
+					GraphicsBindGroupEntry::TextureSRV("NormalTex", normal),
+					GraphicsBindGroupEntry::TextureSRV("RoughnessTex", rough),
+					GraphicsBindGroupEntry::TextureSRV("MetallicTex", metal),
+				});
 
 			renderBackend->DrawIndexedInstanced(
 				drawcall.IndexCount,
@@ -2180,23 +2203,25 @@ void Corona::DrawScene(shared_ptr<Scene> scene, const glm::mat4x4& instanceTrans
 			(bUseSpineVertexFetch ? SpineGBufferGraphicsPipeline.get() :
 			(bUseCpuSpinePipeline ? CpuSpineGBufferGraphicsPipeline.get() : GBufferGraphicsPipeline.get())))));
 		renderBackend->BindGraphicsPipeline(activeGBufferPipeline);
-		renderBackend->BindGraphicsPipelineSampler(activeGBufferPipeline, "samplerWrap", samplerWrap.get());
+		std::vector<GraphicsBindGroupEntry> meshBindEntries;
+		meshBindEntries.reserve(8);
+		meshBindEntries.push_back(GraphicsBindGroupEntry::SamplerBinding("samplerWrap", samplerWrap.get()));
 		if (bUseSpineVertexFetch)
-			renderBackend->BindGraphicsPipelineBuffer(activeGBufferPipeline, "SpineVertices", mesh->GpuSpineSkinnedVertices.get());
+			meshBindEntries.push_back(GraphicsBindGroupEntry::BufferSRV("SpineVertices", mesh->GpuSpineSkinnedVertices.get()));
 		if (bUseSpineVsInline)
 		{
-			renderBackend->BindGraphicsPipelineBuffer(activeGBufferPipeline, "SpineVsInlineInputVertices", mesh->GpuSpineInputVertices.get());
-			renderBackend->BindGraphicsPipelineBuffer(activeGBufferPipeline, "SpineVsInlineInfluences", mesh->GpuSpineInfluences.get());
-			renderBackend->BindGraphicsPipelineBuffer(activeGBufferPipeline, "SpineVsInlineBones", mesh->GpuSpineBones.get());
+			meshBindEntries.push_back(GraphicsBindGroupEntry::BufferSRV("SpineVsInlineInputVertices", mesh->GpuSpineInputVertices.get()));
+			meshBindEntries.push_back(GraphicsBindGroupEntry::BufferSRV("SpineVsInlineInfluences", mesh->GpuSpineInfluences.get()));
+			meshBindEntries.push_back(GraphicsBindGroupEntry::BufferSRV("SpineVsInlineBones", mesh->GpuSpineBones.get()));
 		}
 		if (bUseSkeletalSkinned || bUseSkeletalVsInline)
 		{
-			renderBackend->BindGraphicsPipelineBuffer(activeGBufferPipeline, "SkeletalInputs", mesh->SkeletalInputVertices.get());
-			renderBackend->BindGraphicsPipelineBuffer(activeGBufferPipeline, "SkeletalPrevBones", mesh->SkeletalPrevBoneMatrices.get());
+			meshBindEntries.push_back(GraphicsBindGroupEntry::BufferSRV("SkeletalInputs", mesh->SkeletalInputVertices.get()));
+			meshBindEntries.push_back(GraphicsBindGroupEntry::BufferSRV("SkeletalPrevBones", mesh->SkeletalPrevBoneMatrices.get()));
 		}
 		if (bUseSkeletalVsInline)
 		{
-			renderBackend->BindGraphicsPipelineBuffer(activeGBufferPipeline, "SkeletalCurrBones", SkeletalUnifiedBoneMatrices.get());
+			meshBindEntries.push_back(GraphicsBindGroupEntry::BufferSRV("SkeletalCurrBones", SkeletalUnifiedBoneMatrices.get()));
 		}
 
 		// 3D skeletal skinning: swap the bind-pose VB for the compute-skinned
@@ -2296,17 +2321,27 @@ void Corona::DrawScene(shared_ptr<Scene> scene, const glm::mat4x4& instanceTrans
 				objCB.PG_BladeTipWidthScale = std::clamp(GrassProceduralBladeTipWidthScale, 0.0f, 1.0f);
 			}
 
-			renderBackend->SetGraphicsPipelineConstantData(activeGBufferPipeline, 0, &objCB, sizeof(objCB));
-
 			Texture* AlbedoTex = drawcall.mat->Diffuse ? drawcall.mat->Diffuse.get() : DefaultWhiteTex.get();
 			Texture* NormalTex = drawcall.mat->Normal ? drawcall.mat->Normal.get() : DefaultNormalTex.get();
 			Texture* RoughnessTex = drawcall.mat->Roughness ? drawcall.mat->Roughness.get() : DefaultRougnessTex.get();
 			Texture* MetallicTex = drawcall.mat->Metallic ? drawcall.mat->Metallic.get() : DefaultBlackTex.get();
 
-			renderBackend->BindGraphicsPipelineTexture(activeGBufferPipeline, "AlbedoTex", AlbedoTex);
-			renderBackend->BindGraphicsPipelineTexture(activeGBufferPipeline, "NormalTex", NormalTex);
-			renderBackend->BindGraphicsPipelineTexture(activeGBufferPipeline, "RoughnessTex", RoughnessTex);
-			renderBackend->BindGraphicsPipelineTexture(activeGBufferPipeline, "MetallicTex", MetallicTex);
+			std::vector<GraphicsBindGroupEntry> drawBindEntries = meshBindEntries;
+			drawBindEntries.reserve(meshBindEntries.size() + 6);
+			drawBindEntries.push_back(GraphicsBindGroupEntry::Constant(0, &objCB, sizeof(objCB)));
+			if (bUseProceduralGrass)
+			{
+				if (ActiveTerrain && ActiveTerrain->GetHeightBuffer())
+					drawBindEntries.push_back(GraphicsBindGroupEntry::BufferSRV("TerrainHeights", ActiveTerrain->GetHeightBuffer().get()));
+			}
+			else
+			{
+				drawBindEntries.push_back(GraphicsBindGroupEntry::TextureSRV("AlbedoTex", AlbedoTex));
+				drawBindEntries.push_back(GraphicsBindGroupEntry::TextureSRV("NormalTex", NormalTex));
+				drawBindEntries.push_back(GraphicsBindGroupEntry::TextureSRV("RoughnessTex", RoughnessTex));
+				drawBindEntries.push_back(GraphicsBindGroupEntry::TextureSRV("MetallicTex", MetallicTex));
+			}
+			CreateAndBindGraphicsBindGroup(renderBackend.get(), activeGBufferPipeline, drawBindEntries);
 
 			static bool bLoggedFirstGBufferDraw = false;
 			if (!bLoggedFirstGBufferDraw && !mesh->CpuPositions.empty() && !mesh->CpuIndices.empty() && drawcall.IndexCount >= 3)
@@ -2383,12 +2418,6 @@ void Corona::DrawScene(shared_ptr<Scene> scene, const glm::mat4x4& instanceTrans
 				const uint32_t vertsPerBlade = mesh->Procedural.BladeSegments * 6u;
 				if (ProceduralGrassSequentialIb)
 				{
-					if (ActiveTerrain && ActiveTerrain->GetHeightBuffer())
-					{
-						renderBackend->BindGraphicsPipelineBuffer(
-							activeGBufferPipeline, "TerrainHeights",
-							ActiveTerrain->GetHeightBuffer().get());
-					}
 					// Instance count = cells_in_grid × bladesPerCell, clamped
 					// to the recipe's BladeCount as a hard upper bound.
 					constexpr float kCellSize = 30.0f;
@@ -2444,8 +2473,10 @@ void Corona::DrawSceneShadowMap(shared_ptr<Scene> scene, const glm::mat4x4& inst
 			(bUseSkeletalShadow ? SkeletalMobileShadowMapGraphicsPipeline.get() :
 			MobileShadowMapGraphicsPipeline.get());
 		renderBackend->BindGraphicsPipeline(activeShadowPipeline);
+		std::vector<GraphicsBindGroupEntry> shadowMeshBindEntries;
+		shadowMeshBindEntries.reserve(2);
 		if (bUseSpineVertexFetch)
-			renderBackend->BindGraphicsPipelineBuffer(activeShadowPipeline, "SpineVertices", mesh->GpuSpineSkinnedVertices.get());
+			shadowMeshBindEntries.push_back(GraphicsBindGroupEntry::BufferSRV("SpineVertices", mesh->GpuSpineSkinnedVertices.get()));
 
 		// Skeletal meshes share a single-copy bind-pose VB; using
 		// drawcall.VertexBase against that buffer reads past the end for
@@ -2482,7 +2513,9 @@ void Corona::DrawSceneShadowMap(shared_ptr<Scene> scene, const glm::mat4x4& inst
 			objCB.BaseColorFactor = glm::vec4(1.0f);
 			objCB.SpineVertexBase = bUseSpineVertexFetch ? drawcall.VertexBase : 0u;
 
-			renderBackend->SetGraphicsPipelineConstantData(activeShadowPipeline, 0, &objCB, sizeof(objCB));
+			std::vector<GraphicsBindGroupEntry> shadowDrawBindEntries = shadowMeshBindEntries;
+			shadowDrawBindEntries.push_back(GraphicsBindGroupEntry::Constant(0, &objCB, sizeof(objCB)));
+			CreateAndBindGraphicsBindGroup(renderBackend.get(), activeShadowPipeline, shadowDrawBindEntries);
 
 			renderBackend->DrawIndexed(
 				drawcall.IndexCount,
@@ -3088,7 +3121,6 @@ void Corona::GBufferPass()
 	}
 
 	renderBackend->BindGraphicsPipeline(GBufferGraphicsPipeline.get());
-	renderBackend->BindGraphicsPipelineSampler(GBufferGraphicsPipeline.get(), "samplerWrap", samplerWrap.get());
 
 	PrepareGBufferCulling(static_cast<uint32_t>(RenderWorld.SceneObjects.size()));
 	StaticGBufferInstanceTransformDrawIndex = 0;
@@ -3112,7 +3144,6 @@ void Corona::GBufferPass()
 			// Fall back to per-mesh path this frame if the draw bailed.
 		}
 		renderBackend->BindGraphicsPipeline(GBufferGraphicsPipeline.get());
-		renderBackend->BindGraphicsPipelineSampler(GBufferGraphicsPipeline.get(), "samplerWrap", samplerWrap.get());
 	}
 
 	auto isSkeletalUnifiedObject = [bClusterDrawActive](const std::shared_ptr<Scene>& scene)

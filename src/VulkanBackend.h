@@ -19,6 +19,7 @@
 #  endif
 #endif
 #include <array>
+#include <mutex>
 #include <unordered_map>
 #include <utility>
 #include <vulkan/vulkan.h>
@@ -27,6 +28,8 @@
 class VulkanBackend;
 
 #if CORONA_HAS_VULKAN
+struct VulkanGraphicsPipelineHandle;
+
 struct VulkanRTAS : RTAS
 {
 	VulkanBackend* Owner = nullptr;
@@ -38,9 +41,44 @@ struct VulkanRTAS : RTAS
 	VkBuffer InstanceBuffer = VK_NULL_HANDLE;
 	VkDeviceMemory InstanceMemory = VK_NULL_HANDLE;
 	VkDeviceAddress DeviceAddress = 0;
+	uint32_t PrimitiveCount = 0;
+	uint32_t NumInstances = 0;
+	bool bAllowUpdate = false;
+	bool bIsTopLevel = false;
 
 	void Release();
 	~VulkanRTAS() override;
+};
+
+struct VulkanGraphicsBindGroupHandle : GraphicsBindGroupHandle
+{
+	struct TextureBinding
+	{
+		uint32_t Binding = 0;
+		Texture* TextureValue = nullptr;
+	};
+
+	struct BufferBinding
+	{
+		uint32_t Binding = 0;
+		Buffer* BufferValue = nullptr;
+		VertexBuffer* VertexBufferValue = nullptr;
+	};
+
+	struct SamplerBinding
+	{
+		uint32_t Binding = 0;
+		Sampler* SamplerValue = nullptr;
+	};
+
+	VulkanGraphicsPipelineHandle* Pipeline = nullptr;
+	std::vector<TextureBinding> Textures;
+	std::vector<BufferBinding> Buffers;
+	std::vector<SamplerBinding> Samplers;
+	std::vector<uint8_t> ConstantData;
+	bool bHasConstantData = false;
+	uint32_t ConstantDataBinding = 0;
+	uint32_t ConstantDataSize = 0;
 };
 
 struct VulkanGraphicsPipelineHandle : GraphicsPipelineHandle
@@ -54,16 +92,13 @@ struct VulkanGraphicsPipelineHandle : GraphicsPipelineHandle
 	VkBuffer UniformBuffer = VK_NULL_HANDLE;
 	VkDeviceMemory UniformBufferMemory = VK_NULL_HANDLE;
 	void* UniformBufferMapped = nullptr;
-	std::vector<uint8_t> ConstantData;
 	VkShaderModule VertexShaderModule = VK_NULL_HANDLE;
 	VkShaderModule FragmentShaderModule = VK_NULL_HANDLE;
 	VulkanBackend* Owner = nullptr;
 	std::unordered_map<std::string, uint32_t> TextureBindingSlots;
 	std::unordered_map<std::string, uint32_t> BufferBindingSlots;
 	std::unordered_map<std::string, uint32_t> SamplerBindingSlots;
-	std::unordered_map<std::string, Texture*> BoundTextures;
-	std::unordered_map<std::string, Buffer*> BoundBuffers;
-	std::unordered_map<std::string, Sampler*> BoundSamplers;
+	std::shared_ptr<VulkanGraphicsBindGroupHandle> BoundBindGroup;
 	bool bHasConstantBufferDescriptorBinding = false;
 	uint32_t ConstantBufferDescriptorBinding = 0;
 
@@ -79,6 +114,7 @@ struct VulkanRTPipelineStateObject : RTPipelineStateObject
 	{
 		std::string Shader;
 		std::string Name;
+		uint32_t DescriptorSet = 0;
 		uint32_t BaseRegister = 0;
 		uint32_t DescriptorBinding = 0;
 		uint32_t DataSize = 0;
@@ -114,6 +150,10 @@ struct VulkanRTPipelineStateObject : RTPipelineStateObject
 	uint32_t MaxPayloadSizeInBytes = 0;
 	uint32_t MaxAttributeSizeInBytes = 0;
 	std::string ShaderFile;
+	std::vector<std::pair<std::string, std::string>> ShaderDefines;
+	std::string ShaderLibraryTarget;
+	bool bShaderTableOpen = false;
+	bool bShaderTableFinalized = false;
 
 	std::vector<ShaderDesc> Shaders;
 	std::vector<HitGroupDesc> HitGroups;
@@ -141,6 +181,10 @@ struct VulkanRTPipelineStateObject : RTPipelineStateObject
 	VkDescriptorSetLayout DescriptorSetLayout = VK_NULL_HANDLE;
 	VkPipelineLayout PipelineLayout = VK_NULL_HANDLE;
 	VkDescriptorPool DescriptorPool = VK_NULL_HANDLE;
+	std::vector<VkDescriptorSetLayout> DescriptorSetLayouts;
+	std::vector<bool> DescriptorSetLayoutOwned;
+	std::vector<uint32_t> LocalDescriptorSetNumbers;
+	std::vector<VkDescriptorSet> ActiveDescriptorSets;
 	std::unordered_map<std::string, ResourceBindingValue> GlobalBindingValues;
 	std::unordered_map<uint32_t, std::vector<ResourceBindingValue>> HitProgramBindingValues;
 	std::vector<VkBuffer> TempUniformBuffers;
@@ -171,6 +215,7 @@ struct VulkanRTPipelineStateObject : RTPipelineStateObject
 	void SetTextureSRV(const std::string& shader, const std::string& bindingName, Texture* texture, int instanceIndex = -1) override;
 	void SetBufferSRV(const std::string& shader, const std::string& bindingName, Buffer* buffer, int instanceIndex = -1) override;
 	bool SetBindlessTextureTable(const std::string& shader, const std::string& bindingName) override;
+	bool SetBindlessBufferTable(const std::string& shader, const std::string& bindingName) override;
 	void SetAccelerationStructure(const std::string& shader, const std::string& bindingName, const std::shared_ptr<RTAS>& rtas, int instanceIndex = -1) override;
 	void SetSampler(const std::string& shader, const std::string& bindingName, Sampler* sampler, int instanceIndex = -1) override;
 	void SetCBVValue(const std::string& shader, const std::string& bindingName, void* pData, int instanceIndex = -1) override;
@@ -201,6 +246,7 @@ struct VulkanComputePipelineStateObject : ComputePipelineStateObject
 	{
 		Texture* TextureValue = nullptr;
 		Buffer* BufferValue = nullptr;
+		VertexBuffer* VertexBufferValue = nullptr;
 		Sampler* SamplerValue = nullptr;
 		std::vector<uint8_t> ConstantData;
 	};
@@ -267,8 +313,20 @@ public:
 	{
 		RenderBackendCapabilities capabilities{};
 		capabilities.SupportsTypedBindingSchema = true;
+#if CORONA_HAS_VULKAN
+		capabilities.SupportsBindlessTextures = bBindlessTextureTableReady;
+		capabilities.SupportsBindlessBuffers = bBindlessBufferTableReady;
+		capabilities.SupportsRuntimeDescriptorArrays = bDescriptorIndexingEnabled;
+		capabilities.SupportsPartiallyBoundDescriptors = bDescriptorIndexingEnabled;
+		capabilities.SupportsUpdateAfterBind = bDescriptorIndexingEnabled;
+		capabilities.MaxBindlessTextureCount = MaxVulkanBindlessTextureSlots;
+		capabilities.MaxBindlessBufferCount = MaxVulkanBindlessBufferSlots;
+#endif
 		return capabilities;
 	}
+	bool GetStreamlineTextureResource(Texture* texture, EResourceState state, StreamlineTextureResourceDesc& outDesc) const override;
+	void* GetStreamlineCommandBuffer() override;
+	bool GetStreamlineVulkanDeviceInfo(StreamlineVulkanDeviceInfo& outInfo) const override;
 	uint32_t GetMaxSupportedHybridStage() const override { return SupportsRayTracing() ? 7u : 0u; }
 	bool SupportsRayTracing() const override;
 	bool SupportsShaderExecutionReordering() const override { return false; }
@@ -287,6 +345,19 @@ public:
 	std::shared_ptr<Buffer> CreateBuffer(const BufferCreateDesc& desc) override;
 	std::shared_ptr<Sampler> CreateSampler(const SamplerCreateDesc& desc) override;
 	std::shared_ptr<Texture> CreateTextureFromFile(const std::wstring& fileName, bool nonSRGB) override;
+	RHITextureHandle RegisterBindlessTexture(Texture* texture) override;
+	bool UpdateBindlessTexture(Texture* texture) override;
+	void UnregisterBindlessTexture(Texture* texture) override;
+	RHITextureHandle GetBindlessTextureHandle(const Texture* texture) const override;
+	RHIBufferHandle RegisterBindlessBuffer(Buffer* buffer) override;
+	RHIBufferHandle RegisterBindlessVertexBuffer(VertexBuffer* buffer) override;
+	RHIBufferHandle RegisterBindlessIndexBuffer(IndexBuffer* buffer) override;
+	void UnregisterBindlessBuffer(Buffer* buffer) override;
+	void UnregisterBindlessVertexBuffer(VertexBuffer* buffer) override;
+	void UnregisterBindlessIndexBuffer(IndexBuffer* buffer) override;
+	RHIBufferHandle GetBindlessBufferHandle(const Buffer* buffer) const override;
+	RHIBufferHandle GetBindlessVertexBufferHandle(const VertexBuffer* buffer) const override;
+	RHIBufferHandle GetBindlessIndexBufferHandle(const IndexBuffer* buffer) const override;
 	std::shared_ptr<Texture> CreateTexture3D(ETextureFormat format, ETextureUsageFlags usage, EInitialResourceState initialState, int width, int height, int depth, int mipLevels) override;
 	void UploadTexture3D(Texture* texture, const void* data, uint64_t rowPitch, uint64_t slicePitch) override;
 	std::shared_ptr<VertexBuffer> CreateVertexBuffer(uint32_t size, uint32_t stride, void* srcData) override;
@@ -350,12 +421,9 @@ public:
 	void RequestWindowCapture(const std::wstring& outputPath) override;
 	bool ConsumeWindowCaptureResult(std::wstring* outputPath, bool* success, std::wstring* errorMessage) override;
 	std::shared_ptr<GraphicsPipelineHandle> CreateGraphicsPipeline(const GraphicsPipelineDesc& desc) override;
+	std::shared_ptr<GraphicsBindGroupHandle> CreateGraphicsBindGroup(const GraphicsBindGroupDesc& desc) override;
 	void BindGraphicsPipeline(GraphicsPipelineHandle* pipeline) override;
-	void SetGraphicsPipelineConstantData(GraphicsPipelineHandle* pipeline, uint32_t slot, const void* data, uint32_t size) override;
-	void BindGraphicsPipelineTexture(GraphicsPipelineHandle* pipeline, const std::string& bindingName, Texture* texture) override;
-	void BindGraphicsPipelineBuffer(GraphicsPipelineHandle* pipeline, const std::string& bindingName, Buffer* buffer) override;
-	void BindGraphicsPipelineVertexBufferSRV(GraphicsPipelineHandle* pipeline, const std::string& bindingName, VertexBuffer* vb) override;
-	void BindGraphicsPipelineSampler(GraphicsPipelineHandle* pipeline, const std::string& bindingName, Sampler* sampler) override;
+	void BindGraphicsBindGroup(GraphicsPipelineHandle* pipeline, const std::shared_ptr<GraphicsBindGroupHandle>& bindGroup) override;
 	void PreviewTextureOnWindow(Texture* texture);
 	void DrawWindowTestTriangle();
 	void DrawActiveRenderPassTestTriangle();
@@ -390,10 +458,15 @@ private:
 		std::vector<VkBuffer>& fallbackBuffers,
 		std::vector<VkDeviceMemory>& fallbackMemories);
 	void LoadRayTracingFunctionPointers();
+	bool InitializeBindlessDescriptorTables();
+	void DestroyBindlessDescriptorTables();
 	void BindGraphicsPipelineForDraw(VulkanGraphicsPipelineHandle* pipeline);
 	void DestroyWindowContext();
 	void DestroyFrameContexts();
 	void TrackFrameDescriptorSet(VkDescriptorPool descriptorPool, VkDescriptorSet descriptorSet);
+	VkDescriptorPool CreateGraphicsTransientDescriptorPool();
+	VkDescriptorSet AllocateGraphicsDescriptorSet(VkDescriptorSetLayout descriptorSetLayout);
+	bool WriteVulkanTLASInstanceDescs(VulkanRTAS* rtas, const std::vector<RTInstanceDesc>& instances);
 	VkPipeline CreateTestTrianglePipeline(VkRenderPass compatibleRenderPass, uint32_t colorAttachmentCount);
 	void CreateWindowTrianglePipeline(VkFormat swapchainFormat);
 	void RecreateSwapchain(uint32_t width, uint32_t height);
@@ -448,12 +521,31 @@ private:
 		uint32_t Depth = 1;
 		ETextureUsageFlags Usage = TextureUsage_None;
 		VkImageLayout CurrentLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+		bool bOwnsImage = true;
+		bool bOwnsMemory = true;
+		bool bOwnsImageView = true;
 	};
 
 	struct VulkanSamplerAllocation
 	{
 		VkSampler SamplerHandle = VK_NULL_HANDLE;
 	};
+
+	std::shared_ptr<Texture> CreateTrackedTextureHandle();
+	std::shared_ptr<Buffer> CreateTrackedBufferHandle();
+	std::shared_ptr<VertexBuffer> CreateTrackedVertexBufferHandle();
+	std::shared_ptr<IndexBuffer> CreateTrackedIndexBufferHandle();
+	std::shared_ptr<Sampler> CreateTrackedSamplerHandle();
+	struct VulkanTrackedResourceOwner
+	{
+		VulkanBackend* Backend = nullptr;
+	};
+	std::weak_ptr<VulkanTrackedResourceOwner> GetTrackedResourceOwner();
+	void ReleaseTextureAllocation(Texture* texture);
+	void ReleaseBufferAllocation(Buffer* buffer);
+	void ReleaseVertexBufferAllocation(VertexBuffer* vertexBuffer);
+	void ReleaseIndexBufferAllocation(IndexBuffer* indexBuffer);
+	void ReleaseSamplerAllocation(Sampler* sampler);
 
 	struct VulkanFrameContext
 	{
@@ -462,6 +554,8 @@ private:
 		VkSemaphore RenderFinishedSemaphore = VK_NULL_HANDLE;
 		VkFence InFlightFence = VK_NULL_HANDLE;
 		std::vector<std::pair<VkDescriptorPool, VkDescriptorSet>> DescriptorSetsToFree;
+		std::vector<VkDescriptorPool> GraphicsDescriptorPools;
+		uint32_t ActiveGraphicsDescriptorPoolIndex = 0;
 		std::vector<VkFramebuffer> FramebuffersToDestroy;
 	};
 
@@ -485,6 +579,7 @@ private:
 	std::vector<VkImage> SwapchainImages;
 	std::vector<VkImageView> SwapchainImageViews;
 	std::vector<VkFramebuffer> SwapchainFramebuffers;
+	std::vector<std::shared_ptr<Texture>> SwapchainWrappedTextures;
 	std::vector<VulkanFrameContext> FrameContexts;
 	uint32_t ActiveFrameContextIndex = 0;
 	uint32_t NextFrameContextIndex = 0;
@@ -513,14 +608,17 @@ private:
 	uint32_t PendingViewportWidth = 0;
 	uint32_t PendingViewportHeight = 0;
 	VkQueryPool TimestampQueryPool = VK_NULL_HANDLE;
+	VkQueryPool OcclusionQueryPool = VK_NULL_HANDLE;
 	VkRenderPass ActiveGraphicsRenderPass = VK_NULL_HANDLE;
 	uint32_t ActiveColorAttachmentCount = 0;
 	std::unordered_map<VkRenderPass, VkPipeline> TestTrianglePipelines;
 	uint32_t TimestampQueryCount = 0;
+	uint32_t OcclusionQueryCount = 0;
 	uint32_t TimestampQueriesPerFrame = 0;
 	uint32_t TimestampValidBits = 0;
 	float TimestampPeriodNs = 0.0f;
 	bool bTimestampQueriesResetForCurrentFrame = false;
+	bool bOcclusionQueriesResetForCurrentFrame = false;
 	VkBuffer TransientUniformBuffer = VK_NULL_HANDLE;
 	VkDeviceMemory TransientUniformMemory = VK_NULL_HANDLE;
 	void* TransientUniformMapped = nullptr;
@@ -555,6 +653,7 @@ private:
 	std::unordered_map<IndexBuffer*, VulkanBufferAllocation> IndexBufferAllocations;
 	std::unordered_map<Texture*, VulkanTextureAllocation> TextureAllocations;
 	std::unordered_map<Sampler*, VulkanSamplerAllocation> SamplerAllocations;
+	std::shared_ptr<VulkanTrackedResourceOwner> TrackedResourceOwner;
 	std::vector<std::shared_ptr<VulkanGraphicsPipelineHandle>> GraphicsPipelines;
 	std::vector<std::shared_ptr<VulkanRTPipelineStateObject>> RayTracingPipelines;
 	std::vector<std::shared_ptr<VulkanComputePipelineStateObject>> ComputePipelines;
@@ -564,6 +663,38 @@ private:
 	bool bRayTracingExtensionSupport = false;
 	bool bRayTracingFeatureSupport = false;
 	bool bRayTracingEnabled = false;
+	bool bRayTracingIndirectEnabled = false;
+	bool bDescriptorIndexingEnabled = false;
+	bool bBindlessTextureTableReady = false;
+	bool bBindlessBufferTableReady = false;
+	uint32_t MaxVulkanBindlessTextureSlots = 0;
+	uint32_t MaxVulkanBindlessBufferSlots = 0;
+	VkDescriptorSetLayout EmptyDescriptorSetLayout = VK_NULL_HANDLE;
+	VkDescriptorSetLayout BindlessTextureDescriptorSetLayout = VK_NULL_HANDLE;
+	VkDescriptorPool BindlessTextureDescriptorPool = VK_NULL_HANDLE;
+	VkDescriptorSet BindlessTextureDescriptorSet = VK_NULL_HANDLE;
+	VkDescriptorSetLayout BindlessBufferDescriptorSetLayout = VK_NULL_HANDLE;
+	VkDescriptorPool BindlessBufferDescriptorPool = VK_NULL_HANDLE;
+	VkDescriptorSet BindlessBufferDescriptorSet = VK_NULL_HANDLE;
+	struct VulkanBindlessTextureSlot
+	{
+		Texture* TexturePtr = nullptr;
+		uint32_t Generation = 0;
+		bool Occupied = false;
+	};
+	struct VulkanBindlessBufferSlot
+	{
+		const void* BufferPtr = nullptr;
+		uint8_t ResourceType = 0;
+		uint32_t Generation = 0;
+		bool Occupied = false;
+	};
+	std::vector<VulkanBindlessTextureSlot> BindlessTextureSlots;
+	std::vector<uint32_t> BindlessTextureFreeList;
+	mutable std::mutex BindlessTextureMutex;
+	std::vector<VulkanBindlessBufferSlot> BindlessBufferSlots;
+	std::vector<uint32_t> BindlessBufferFreeList;
+	mutable std::mutex BindlessBufferMutex;
 	PFN_vkCreateAccelerationStructureKHR vkCreateAccelerationStructureKHRFn = nullptr;
 	PFN_vkDestroyAccelerationStructureKHR vkDestroyAccelerationStructureKHRFn = nullptr;
 	PFN_vkGetAccelerationStructureBuildSizesKHR vkGetAccelerationStructureBuildSizesKHRFn = nullptr;
@@ -574,7 +705,10 @@ private:
 	PFN_vkGetRayTracingShaderGroupStackSizeKHR vkGetRayTracingShaderGroupStackSizeKHRFn = nullptr;
 	PFN_vkCmdSetRayTracingPipelineStackSizeKHR vkCmdSetRayTracingPipelineStackSizeKHRFn = nullptr;
 	PFN_vkCmdTraceRaysKHR vkCmdTraceRaysKHRFn = nullptr;
+	PFN_vkCmdTraceRaysIndirectKHR vkCmdTraceRaysIndirectKHRFn = nullptr;
 	PFN_vkGetBufferDeviceAddressKHR vkGetBufferDeviceAddressKHRFn = nullptr;
 	PFN_vkCmdInsertDebugUtilsLabelEXT vkCmdInsertDebugUtilsLabelEXTFn = nullptr;
+	PFN_vkCmdBeginDebugUtilsLabelEXT vkCmdBeginDebugUtilsLabelEXTFn = nullptr;
+	PFN_vkCmdEndDebugUtilsLabelEXT vkCmdEndDebugUtilsLabelEXTFn = nullptr;
 #endif
 };

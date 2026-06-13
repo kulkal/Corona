@@ -1449,11 +1449,6 @@ bool Corona::DrawSkeletalVsInlineClusterDesktop()
 	}
 
 	renderBackend->BindGraphicsPipeline(pso);
-	renderBackend->BindGraphicsPipelineSampler(pso, "samplerWrap", samplerWrap.get());
-	renderBackend->BindGraphicsPipelineBuffer(pso, "SkeletalInputs", SkeletalUnifiedInputVertices.get());
-	renderBackend->BindGraphicsPipelineBuffer(pso, "SkeletalPrevBones", SkeletalUnifiedPrevBoneMatrices.get());
-	renderBackend->BindGraphicsPipelineBuffer(pso, "SkeletalCurrBones", SkeletalUnifiedBoneMatrices.get());
-	renderBackend->BindGraphicsPipelineBuffer(pso, "SkeletalInstanceTransforms", SkeletalUnifiedInstanceTransforms.get());
 
 	renderBackend->BindMeshBuffers(SkeletalUnifiedBindVb.get(), SkeletalUnifiedIb.get());
 
@@ -1482,16 +1477,24 @@ bool Corona::DrawSkeletalVsInlineClusterDesktop()
 	objCB.SkeletalCharIndex = 0u;
 	objCB.SkeletalVertsPerChar = SkeletalUnifiedVertsPerChar;
 	objCB.SkeletalBoneCount = SkeletalUnifiedBoneCount;
-	renderBackend->SetGraphicsPipelineConstantData(pso, 0, &objCB, sizeof(objCB));
 
 	Texture* albedo = SkeletalUnifiedMaterial->Diffuse ? SkeletalUnifiedMaterial->Diffuse.get() : DefaultWhiteTex.get();
 	Texture* normal = SkeletalUnifiedMaterial->Normal ? SkeletalUnifiedMaterial->Normal.get() : DefaultNormalTex.get();
 	Texture* rough  = SkeletalUnifiedMaterial->Roughness ? SkeletalUnifiedMaterial->Roughness.get() : DefaultRougnessTex.get();
 	Texture* metal  = SkeletalUnifiedMaterial->Metallic ? SkeletalUnifiedMaterial->Metallic.get() : DefaultBlackTex.get();
-	renderBackend->BindGraphicsPipelineTexture(pso, "AlbedoTex", albedo);
-	renderBackend->BindGraphicsPipelineTexture(pso, "NormalTex", normal);
-	renderBackend->BindGraphicsPipelineTexture(pso, "RoughnessTex", rough);
-	renderBackend->BindGraphicsPipelineTexture(pso, "MetallicTex", metal);
+	CreateAndBindGraphicsBindGroup(renderBackend.get(), pso,
+		{
+			GraphicsBindGroupEntry::SamplerBinding("samplerWrap", samplerWrap.get()),
+			GraphicsBindGroupEntry::BufferSRV("SkeletalInputs", SkeletalUnifiedInputVertices.get()),
+			GraphicsBindGroupEntry::BufferSRV("SkeletalPrevBones", SkeletalUnifiedPrevBoneMatrices.get()),
+			GraphicsBindGroupEntry::BufferSRV("SkeletalCurrBones", SkeletalUnifiedBoneMatrices.get()),
+			GraphicsBindGroupEntry::BufferSRV("SkeletalInstanceTransforms", SkeletalUnifiedInstanceTransforms.get()),
+			GraphicsBindGroupEntry::Constant(0, &objCB, sizeof(objCB)),
+			GraphicsBindGroupEntry::TextureSRV("AlbedoTex", albedo),
+			GraphicsBindGroupEntry::TextureSRV("NormalTex", normal),
+			GraphicsBindGroupEntry::TextureSRV("RoughnessTex", rough),
+			GraphicsBindGroupEntry::TextureSRV("MetallicTex", metal),
+		});
 
 	renderBackend->DrawIndexedInstanced(
 		SkeletalUnifiedIndexCount,
