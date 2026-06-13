@@ -3,10 +3,12 @@
 #include <cfloat>
 #include <array>
 #include <cstdint>
+#include <initializer_list>
 #include <limits>
 #include <memory>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 #include "glm/mat4x4.hpp"
 #include "glm/vec4.hpp"
@@ -143,6 +145,30 @@ enum class EBufferShape
 	Structured,
 };
 
+enum class EBufferAccess
+{
+	// GPU-resident default. InitialData is uploaded through staging.
+	GpuOnly,
+	// CPU-visible upload memory. Shader-visible use must opt in explicitly.
+	Upload,
+	// CPU-written, GPU-read streaming data. Backends may use an upload ring/pool.
+	Stream,
+	// CPU-readable transfer destination.
+	Readback,
+};
+
+enum class EBufferLifetime
+{
+	Persistent,
+	PerFrame,
+};
+
+enum class EBufferAllocationPolicy
+{
+	Dedicated,
+	Suballocated,
+};
+
 struct BufferCreateDesc
 {
 	uint32_t NumElements = 0;
@@ -151,7 +177,9 @@ struct BufferCreateDesc
 	bool bAllowUnorderedAccess = false;
 	void* InitialData = nullptr;
 	EBufferShape Shape = EBufferShape::ByteAddress;
-	bool bUseDefaultHeap = false;
+	EBufferAccess Access = EBufferAccess::GpuOnly;
+	EBufferLifetime Lifetime = EBufferLifetime::Persistent;
+	EBufferAllocationPolicy AllocationPolicy = EBufferAllocationPolicy::Dedicated;
 };
 
 enum class ESamplerFilter
@@ -248,6 +276,93 @@ public:
 	virtual ~GraphicsPipelineHandle() = default;
 };
 
+enum class EGraphicsBindGroupEntryType : uint8_t
+{
+	TextureSRV,
+	BufferSRV,
+	VertexBufferSRV,
+	Sampler,
+	ConstantData,
+};
+
+struct GraphicsBindGroupEntry
+{
+	EGraphicsBindGroupEntryType Type = EGraphicsBindGroupEntryType::TextureSRV;
+	std::string BindingName;
+	uint32_t Slot = 0;
+	Texture* TextureValue = nullptr;
+	Buffer* BufferValue = nullptr;
+	VertexBuffer* VertexBufferValue = nullptr;
+	Sampler* SamplerValue = nullptr;
+	const void* ConstantData = nullptr;
+	uint32_t ConstantDataSize = 0;
+
+	static GraphicsBindGroupEntry TextureSRV(std::string bindingName, Texture* texture)
+	{
+		GraphicsBindGroupEntry entry{};
+		entry.Type = EGraphicsBindGroupEntryType::TextureSRV;
+		entry.BindingName = std::move(bindingName);
+		entry.TextureValue = texture;
+		return entry;
+	}
+
+	static GraphicsBindGroupEntry BufferSRV(std::string bindingName, Buffer* buffer)
+	{
+		GraphicsBindGroupEntry entry{};
+		entry.Type = EGraphicsBindGroupEntryType::BufferSRV;
+		entry.BindingName = std::move(bindingName);
+		entry.BufferValue = buffer;
+		return entry;
+	}
+
+	static GraphicsBindGroupEntry VertexBufferSRV(std::string bindingName, VertexBuffer* vertexBuffer)
+	{
+		GraphicsBindGroupEntry entry{};
+		entry.Type = EGraphicsBindGroupEntryType::VertexBufferSRV;
+		entry.BindingName = std::move(bindingName);
+		entry.VertexBufferValue = vertexBuffer;
+		return entry;
+	}
+
+	static GraphicsBindGroupEntry SamplerBinding(std::string bindingName, Sampler* sampler)
+	{
+		GraphicsBindGroupEntry entry{};
+		entry.Type = EGraphicsBindGroupEntryType::Sampler;
+		entry.BindingName = std::move(bindingName);
+		entry.SamplerValue = sampler;
+		return entry;
+	}
+
+	static GraphicsBindGroupEntry Constant(uint32_t slot, const void* data, uint32_t size)
+	{
+		GraphicsBindGroupEntry entry{};
+		entry.Type = EGraphicsBindGroupEntryType::ConstantData;
+		entry.Slot = slot;
+		entry.ConstantData = data;
+		entry.ConstantDataSize = size;
+		return entry;
+	}
+};
+
+struct GraphicsBindGroupDesc
+{
+	GraphicsPipelineHandle* Pipeline = nullptr;
+	uint32_t Slot = 0;
+	std::vector<GraphicsBindGroupEntry> Entries;
+};
+
+inline constexpr uint32_t kMaxGraphicsBindGroupSlots = 4;
+inline constexpr uint32_t kGraphicsBindGroupSlot_All = 0;
+inline constexpr uint32_t kGraphicsBindGroupSlot_Frame = 0;
+inline constexpr uint32_t kGraphicsBindGroupSlot_Material = 1;
+inline constexpr uint32_t kGraphicsBindGroupSlot_Draw = 2;
+
+class GraphicsBindGroupHandle
+{
+public:
+	virtual ~GraphicsBindGroupHandle() = default;
+};
+
 struct RTInstanceDesc
 {
 	std::shared_ptr<RTAS> BottomLevelAS;
@@ -268,6 +383,27 @@ struct RenderBackendCapabilities
 	bool SupportsUpdateAfterBind = false;
 	uint32_t MaxBindlessTextureCount = 0;
 	uint32_t MaxBindlessBufferCount = 0;
+};
+
+struct RenderBackendAllocatorStats
+{
+	uint32_t PersistentStructuredBlockCount = 0;
+	uint64_t PersistentStructuredReservedBytes = 0;
+	uint64_t PersistentStructuredCommittedBytes = 0;
+	uint64_t PersistentStructuredReusableBytes = 0;
+	uint64_t PersistentStructuredPendingFreeBytes = 0;
+	uint64_t PersistentStructuredPendingUploadBytes = 0;
+	uint64_t PersistentStructuredBytesIssued = 0;
+
+	uint32_t TransientStructuredBlockCount = 0;
+	uint64_t TransientStructuredReservedBytes = 0;
+	uint64_t TransientStructuredCurrentFrameBytes = 0;
+	uint64_t TransientStructuredBytesIssued = 0;
+
+	uint32_t BindlessTextureSlotsUsed = 0;
+	uint32_t BindlessTextureSlotsCapacity = 0;
+	uint32_t BindlessBufferSlotsUsed = 0;
+	uint32_t BindlessBufferSlotsCapacity = 0;
 };
 
 struct StreamlineTextureResourceDesc
@@ -311,6 +447,7 @@ public:
 	virtual ERenderBackendAPI GetAPI() const = 0;
 	virtual const char* GetBackendName() const = 0;
 	virtual RenderBackendCapabilities GetCapabilities() const { return {}; }
+	virtual RenderBackendAllocatorStats GetAllocatorStats() const { return {}; }
 	virtual bool GetStreamlineTextureResource(Texture* texture, EResourceState state, StreamlineTextureResourceDesc& outDesc) const
 	{
 		(void)texture;
@@ -412,6 +549,11 @@ public:
 	// frames; call UpdateUploadStructuredBuffer to refresh contents.
 	virtual std::shared_ptr<Buffer> CreateUploadStructuredBuffer(uint32_t numElements, uint32_t elementSize) = 0;
 	virtual void UpdateUploadStructuredBuffer(Buffer* buffer, const void* srcData, uint32_t sizeInBytes) = 0;
+	// Frame-transient structured buffer backed by a backend-owned suballocated
+	// upload pool. The returned Buffer handle is kept alive by the backend
+	// until the frame's fence is retired, so callers can bind it immediately
+	// without maintaining their own per-draw cache.
+	virtual std::shared_ptr<Buffer> AllocateTransientUploadStructuredBuffer(uint32_t numElements, uint32_t elementSize, const void* srcData) = 0;
 	virtual std::shared_ptr<RTAS> CreateBLASForMesh(Mesh* mesh) = 0;
 	// Build a BLAS from the skeletal-skinning output VB (SkeletalOutputVb)
 	// with the ALLOW_UPDATE flag so RefitBLAS can refresh it cheaply each
@@ -474,17 +616,57 @@ public:
 	virtual void RequestWindowCapture(const std::wstring& outputPath) = 0;
 	virtual bool ConsumeWindowCaptureResult(std::wstring* outputPath, bool* success, std::wstring* errorMessage) = 0;
 	virtual std::shared_ptr<GraphicsPipelineHandle> CreateGraphicsPipeline(const GraphicsPipelineDesc& desc) = 0;
+	virtual std::shared_ptr<GraphicsBindGroupHandle> CreateGraphicsBindGroup(const GraphicsBindGroupDesc& desc) = 0;
 	virtual void BindGraphicsPipeline(GraphicsPipelineHandle* pipeline) = 0;
-	virtual void SetGraphicsPipelineConstantData(GraphicsPipelineHandle* pipeline, uint32_t slot, const void* data, uint32_t size) = 0;
-	virtual void BindGraphicsPipelineTexture(GraphicsPipelineHandle* pipeline, const std::string& bindingName, Texture* texture) = 0;
-	virtual void BindGraphicsPipelineBuffer(GraphicsPipelineHandle* pipeline, const std::string& bindingName, Buffer* buffer) = 0;
-	// Phase 11: bind a VertexBuffer's raw-byte SRV (registered by
-	// CreateRWVertexBuffer) to a named SBV slot on a graphics PSO. Used by
-	// the skeletal GBuffer VS to sample the previous frame's compute-skinned
-	// vertex output for motion vectors.
-	virtual void BindGraphicsPipelineVertexBufferSRV(GraphicsPipelineHandle* pipeline, const std::string& bindingName, VertexBuffer* vb) = 0;
-	virtual void BindGraphicsPipelineSampler(GraphicsPipelineHandle* pipeline, const std::string& bindingName, Sampler* sampler) = 0;
+	virtual void BindGraphicsBindGroup(GraphicsPipelineHandle* pipeline, uint32_t slot, const std::shared_ptr<GraphicsBindGroupHandle>& bindGroup) = 0;
 };
+
+inline std::shared_ptr<GraphicsBindGroupHandle> CreateAndBindGraphicsBindGroup(
+	IRenderBackend* backend,
+	GraphicsPipelineHandle* pipeline,
+	uint32_t slot,
+	const std::vector<GraphicsBindGroupEntry>& entries)
+{
+	if (!backend || !pipeline)
+		return nullptr;
+
+	GraphicsBindGroupDesc desc{};
+	desc.Pipeline = pipeline;
+	desc.Slot = slot;
+	desc.Entries = entries;
+	auto bindGroup = backend->CreateGraphicsBindGroup(desc);
+	backend->BindGraphicsBindGroup(pipeline, slot, bindGroup);
+	return bindGroup;
+}
+
+inline std::shared_ptr<GraphicsBindGroupHandle> CreateAndBindGraphicsBindGroup(
+	IRenderBackend* backend,
+	GraphicsPipelineHandle* pipeline,
+	const std::vector<GraphicsBindGroupEntry>& entries)
+{
+	return CreateAndBindGraphicsBindGroup(backend, pipeline, kGraphicsBindGroupSlot_All, entries);
+}
+
+inline std::shared_ptr<GraphicsBindGroupHandle> CreateAndBindGraphicsBindGroup(
+	IRenderBackend* backend,
+	GraphicsPipelineHandle* pipeline,
+	uint32_t slot,
+	std::initializer_list<GraphicsBindGroupEntry> entries)
+{
+	return CreateAndBindGraphicsBindGroup(
+		backend,
+		pipeline,
+		slot,
+		std::vector<GraphicsBindGroupEntry>(entries.begin(), entries.end()));
+}
+
+inline std::shared_ptr<GraphicsBindGroupHandle> CreateAndBindGraphicsBindGroup(
+	IRenderBackend* backend,
+	GraphicsPipelineHandle* pipeline,
+	std::initializer_list<GraphicsBindGroupEntry> entries)
+{
+	return CreateAndBindGraphicsBindGroup(backend, pipeline, kGraphicsBindGroupSlot_All, entries);
+}
 
 // API-neutral factory. DX12 path requires a pre-created device so the bootstrap
 // constructs DX12Backend directly via #include "DX12Backend.h"; this factory

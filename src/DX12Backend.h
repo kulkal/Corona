@@ -520,6 +520,87 @@ public:
 	};
 	UploadAllocation AllocateUploadBytes(UINT64 size, UINT64 alignment);
 
+	struct TransientUploadStructuredBlock
+	{
+		ComPtr<ID3D12Resource> resource;
+		uint8_t* mappedBase = nullptr;
+		UINT64 gpuVA = 0;
+		UINT64 capacity = 0;
+		UINT64 cursor = 0;
+	};
+	struct TransientUploadStructuredAllocation
+	{
+		ComPtr<ID3D12Resource> resource;
+		UINT64 offset = 0;
+		void* cpu = nullptr;
+		UINT64 gpuVA = 0;
+	};
+	std::vector<std::vector<std::shared_ptr<TransientUploadStructuredBlock>>> TransientUploadStructuredBlocks;
+	std::vector<std::vector<std::shared_ptr<Buffer>>> TransientUploadStructuredKeepAlive;
+	UINT64 TransientUploadStructuredBlockDefaultSize = 4ull * 1024ull * 1024ull;
+	UINT32 TransientUploadStructuredBlockCount = 0;
+	UINT32 TransientUploadStructuredAllocationCount = 0;
+	UINT64 TransientUploadStructuredBytesIssued = 0;
+	UINT64 TransientUploadStructuredBytesReserved = 0;
+	void ResetTransientUploadStructuredFrame(uint32_t frameIndex);
+	TransientUploadStructuredAllocation AllocateTransientUploadStructuredBytes(UINT64 size, UINT64 alignment);
+
+	struct PersistentStructuredBufferBlock
+	{
+		ComPtr<ID3D12Resource> resource;
+		UINT64 capacity = 0;
+		UINT64 cursor = 0;
+		D3D12_RESOURCE_STATES state = D3D12_RESOURCE_STATE_COPY_DEST;
+		struct FreeRange
+		{
+			UINT64 offset = 0;
+			UINT64 size = 0;
+		};
+		std::vector<FreeRange> freeRanges;
+	};
+	struct PersistentStructuredBufferAllocation
+	{
+		ComPtr<ID3D12Resource> resource;
+		std::shared_ptr<PersistentStructuredBufferBlock> block;
+		UINT64 offset = 0;
+		UINT64 size = 0;
+	};
+	struct PendingPersistentStructuredBufferFree
+	{
+		std::shared_ptr<PersistentStructuredBufferBlock> block;
+		UINT64 offset = 0;
+		UINT64 size = 0;
+		UINT64 fenceValue = 0;
+	};
+	std::vector<std::shared_ptr<PersistentStructuredBufferBlock>> PersistentStructuredBufferBlocks;
+	std::vector<PendingPersistentStructuredBufferFree> PendingPersistentStructuredBufferFrees;
+	UINT64 PersistentStructuredBufferBlockDefaultSize = 16ull * 1024ull * 1024ull;
+	UINT32 PersistentStructuredBufferBlockCount = 0;
+	UINT32 PersistentStructuredBufferAllocationCount = 0;
+	UINT64 PersistentStructuredBufferBytesIssued = 0;
+	UINT64 PersistentStructuredBufferBytesReserved = 0;
+	struct PendingPersistentStructuredBufferUpload
+	{
+		UINT64 FenceValue = 0;
+		UINT64 Bytes = 0;
+		ComPtr<ID3D12Resource> UploadHeap;
+	};
+	std::vector<PendingPersistentStructuredBufferUpload> PendingPersistentStructuredBufferUploads;
+	UINT64 PendingPersistentStructuredBufferUploadBytes = 0;
+	static constexpr UINT64 kMaxInFlightPersistentStructuredBufferUploadBytes = 128ull * 1024ull * 1024ull;
+	PersistentStructuredBufferAllocation AllocatePersistentStructuredBufferBytes(UINT64 size, UINT64 alignment);
+	void ReleasePersistentStructuredBufferBytes(
+		const std::shared_ptr<PersistentStructuredBufferBlock>& block,
+		UINT64 offset,
+		UINT64 size);
+	void RetireCompletedPersistentStructuredBufferFrees();
+	void RetireCompletedPersistentStructuredBufferUploads();
+	void AddPersistentStructuredBufferFreeRange(
+		const std::shared_ptr<PersistentStructuredBufferBlock>& block,
+		UINT64 offset,
+		UINT64 size);
+	std::shared_ptr<Buffer> CreateSuballocatedStructuredBuffer(const BufferCreateDesc& desc);
+
 	std::unique_ptr<ConstantBufferRingBuffer> GlobalCBRing;
 
 	std::vector<std::shared_ptr<Texture>> renderTargetTextures;
@@ -613,6 +694,7 @@ public:
 		capabilities.MaxBindlessBufferCount = kMaxDX12BindlessBufferSlots;
 		return capabilities;
 	}
+	RenderBackendAllocatorStats GetAllocatorStats() const override;
 	bool GetStreamlineTextureResource(Texture* texture, EResourceState state, StreamlineTextureResourceDesc& outDesc) const override;
 	void* GetStreamlineCommandBuffer() override;
 	uint32_t GetMaxSupportedHybridStage() const override { return 7; }
@@ -667,6 +749,7 @@ public:
 	std::shared_ptr<VertexBuffer> CreateRWVertexBuffer(uint32_t size, uint32_t stride) override;
 	std::shared_ptr<Buffer> CreateUploadStructuredBuffer(uint32_t numElements, uint32_t elementSize) override;
 	void UpdateUploadStructuredBuffer(Buffer* buffer, const void* srcData, uint32_t sizeInBytes) override;
+	std::shared_ptr<Buffer> AllocateTransientUploadStructuredBuffer(uint32_t numElements, uint32_t elementSize, const void* srcData) override;
 	std::shared_ptr<RTAS> CreateBLASForMesh(Mesh* mesh) override;
 	std::shared_ptr<RTAS> CreateBLASForSkeletalMesh(Mesh* mesh) override;
 	void RefitBLAS(RTAS* rtas, Mesh* mesh) override;
@@ -731,12 +814,9 @@ public:
 	void RequestWindowCapture(const std::wstring& outputPath) override;
 	bool ConsumeWindowCaptureResult(std::wstring* outputPath, bool* success, std::wstring* errorMessage) override;
 	std::shared_ptr<GraphicsPipelineHandle> CreateGraphicsPipeline(const GraphicsPipelineDesc& desc) override;
+	std::shared_ptr<GraphicsBindGroupHandle> CreateGraphicsBindGroup(const GraphicsBindGroupDesc& desc) override;
 	void BindGraphicsPipeline(GraphicsPipelineHandle* pipeline) override;
-	void SetGraphicsPipelineConstantData(GraphicsPipelineHandle* pipeline, uint32_t slot, const void* data, uint32_t size) override;
-	void BindGraphicsPipelineTexture(GraphicsPipelineHandle* pipeline, const std::string& bindingName, Texture* texture) override;
-	void BindGraphicsPipelineBuffer(GraphicsPipelineHandle* pipeline, const std::string& bindingName, Buffer* buffer) override;
-	void BindGraphicsPipelineVertexBufferSRV(GraphicsPipelineHandle* pipeline, const std::string& bindingName, VertexBuffer* vb) override;
-	void BindGraphicsPipelineSampler(GraphicsPipelineHandle* pipeline, const std::string& bindingName, Sampler* sampler) override;
+	void BindGraphicsBindGroup(GraphicsPipelineHandle* pipeline, uint32_t slot, const std::shared_ptr<GraphicsBindGroupHandle>& bindGroup) override;
 	void DrawTriangleList(VertexBuffer* vertexBuffer, uint32_t vertexCount);
 	void RenderWindowTriangleFrame(uint32_t width, uint32_t height, float timeSeconds);
 
@@ -745,7 +825,7 @@ public:
 	shared_ptr<Texture> CreateTexture3D(DXGI_FORMAT format, D3D12_RESOURCE_FLAGS resFlags, D3D12_RESOURCE_STATES initResState, int width, int height, int depth, int mipLevels);
 
 	shared_ptr<Sampler> CreateSampler(D3D12_SAMPLER_DESC& InSamplerDesc);
-	shared_ptr<Buffer> CreateBuffer(UINT InNumElements, UINT InElementSize, D3D12_RESOURCE_STATES initResState, bool isUAV, void* SrcData = nullptr, bool forceDefaultHeap = false);
+	shared_ptr<Buffer> CreateBuffer(UINT InNumElements, UINT InElementSize, D3D12_RESOURCE_STATES initResState, bool isUAV, void* SrcData = nullptr, EBufferAccess access = EBufferAccess::GpuOnly);
 	shared_ptr<Buffer> CreateDefaultByteAddressBuffer(UINT InNumElements, UINT InElementSize, EInitialResourceState initialState = EInitialResourceState::ShaderRead);
 	bool UploadToDefaultBuffer(Buffer* buffer, const void* srcData, UINT sizeInBytes, EResourceState stateBefore, EResourceState stateAfter);
 

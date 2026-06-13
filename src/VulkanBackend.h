@@ -28,6 +28,8 @@
 class VulkanBackend;
 
 #if CORONA_HAS_VULKAN
+struct VulkanGraphicsPipelineHandle;
+
 struct VulkanRTAS : RTAS
 {
 	VulkanBackend* Owner = nullptr;
@@ -48,6 +50,38 @@ struct VulkanRTAS : RTAS
 	~VulkanRTAS() override;
 };
 
+struct VulkanGraphicsBindGroupHandle : GraphicsBindGroupHandle
+{
+	struct TextureBinding
+	{
+		uint32_t Binding = 0;
+		Texture* TextureValue = nullptr;
+	};
+
+	struct BufferBinding
+	{
+		uint32_t Binding = 0;
+		Buffer* BufferValue = nullptr;
+		VertexBuffer* VertexBufferValue = nullptr;
+	};
+
+	struct SamplerBinding
+	{
+		uint32_t Binding = 0;
+		Sampler* SamplerValue = nullptr;
+	};
+
+	VulkanGraphicsPipelineHandle* Pipeline = nullptr;
+	std::vector<TextureBinding> Textures;
+	std::vector<BufferBinding> Buffers;
+	std::vector<SamplerBinding> Samplers;
+	std::vector<uint8_t> ConstantData;
+	bool bHasConstantData = false;
+	uint32_t ConstantDataBinding = 0;
+	uint32_t ConstantDataSize = 0;
+	uint32_t Slot = 0;
+};
+
 struct VulkanGraphicsPipelineHandle : GraphicsPipelineHandle
 {
 	GraphicsPipelineDesc Desc;
@@ -59,17 +93,13 @@ struct VulkanGraphicsPipelineHandle : GraphicsPipelineHandle
 	VkBuffer UniformBuffer = VK_NULL_HANDLE;
 	VkDeviceMemory UniformBufferMemory = VK_NULL_HANDLE;
 	void* UniformBufferMapped = nullptr;
-	std::vector<uint8_t> ConstantData;
 	VkShaderModule VertexShaderModule = VK_NULL_HANDLE;
 	VkShaderModule FragmentShaderModule = VK_NULL_HANDLE;
 	VulkanBackend* Owner = nullptr;
 	std::unordered_map<std::string, uint32_t> TextureBindingSlots;
 	std::unordered_map<std::string, uint32_t> BufferBindingSlots;
 	std::unordered_map<std::string, uint32_t> SamplerBindingSlots;
-	std::unordered_map<std::string, Texture*> BoundTextures;
-	std::unordered_map<std::string, Buffer*> BoundBuffers;
-	std::unordered_map<std::string, VertexBuffer*> BoundVertexBuffers;
-	std::unordered_map<std::string, Sampler*> BoundSamplers;
+	std::array<std::shared_ptr<VulkanGraphicsBindGroupHandle>, kMaxGraphicsBindGroupSlots> BoundBindGroups;
 	bool bHasConstantBufferDescriptorBinding = false;
 	uint32_t ConstantBufferDescriptorBinding = 0;
 
@@ -295,6 +325,7 @@ public:
 #endif
 		return capabilities;
 	}
+	RenderBackendAllocatorStats GetAllocatorStats() const override;
 	bool GetStreamlineTextureResource(Texture* texture, EResourceState state, StreamlineTextureResourceDesc& outDesc) const override;
 	void* GetStreamlineCommandBuffer() override;
 	bool GetStreamlineVulkanDeviceInfo(StreamlineVulkanDeviceInfo& outInfo) const override;
@@ -340,6 +371,7 @@ public:
 	std::shared_ptr<VertexBuffer> CreateRWVertexBuffer(uint32_t size, uint32_t stride) override;
 	std::shared_ptr<Buffer> CreateUploadStructuredBuffer(uint32_t numElements, uint32_t elementSize) override;
 	void UpdateUploadStructuredBuffer(Buffer* buffer, const void* srcData, uint32_t sizeInBytes) override;
+	std::shared_ptr<Buffer> AllocateTransientUploadStructuredBuffer(uint32_t numElements, uint32_t elementSize, const void* srcData) override;
 	std::shared_ptr<RTAS> CreateBLASForMesh(Mesh* mesh) override;
 	std::shared_ptr<RTAS> CreateBLASForSkeletalMesh(Mesh* mesh) override;
 	void RefitBLAS(RTAS* rtas, Mesh* mesh) override;
@@ -392,12 +424,9 @@ public:
 	void RequestWindowCapture(const std::wstring& outputPath) override;
 	bool ConsumeWindowCaptureResult(std::wstring* outputPath, bool* success, std::wstring* errorMessage) override;
 	std::shared_ptr<GraphicsPipelineHandle> CreateGraphicsPipeline(const GraphicsPipelineDesc& desc) override;
+	std::shared_ptr<GraphicsBindGroupHandle> CreateGraphicsBindGroup(const GraphicsBindGroupDesc& desc) override;
 	void BindGraphicsPipeline(GraphicsPipelineHandle* pipeline) override;
-	void SetGraphicsPipelineConstantData(GraphicsPipelineHandle* pipeline, uint32_t slot, const void* data, uint32_t size) override;
-	void BindGraphicsPipelineTexture(GraphicsPipelineHandle* pipeline, const std::string& bindingName, Texture* texture) override;
-	void BindGraphicsPipelineBuffer(GraphicsPipelineHandle* pipeline, const std::string& bindingName, Buffer* buffer) override;
-	void BindGraphicsPipelineVertexBufferSRV(GraphicsPipelineHandle* pipeline, const std::string& bindingName, VertexBuffer* vb) override;
-	void BindGraphicsPipelineSampler(GraphicsPipelineHandle* pipeline, const std::string& bindingName, Sampler* sampler) override;
+	void BindGraphicsBindGroup(GraphicsPipelineHandle* pipeline, uint32_t slot, const std::shared_ptr<GraphicsBindGroupHandle>& bindGroup) override;
 	void PreviewTextureOnWindow(Texture* texture);
 	void DrawWindowTestTriangle();
 	void DrawActiveRenderPassTestTriangle();
@@ -469,6 +498,8 @@ private:
 		~VulkanUploadHeapBlock();
 	};
 
+	struct VulkanPersistentBufferBlock;
+
 	struct VulkanBufferAllocation
 	{
 		VkBuffer Buffer = VK_NULL_HANDLE;
@@ -482,6 +513,23 @@ private:
 		// has been released — Buffer/Memory above are non-owning views
 		// into that block in this case.
 		std::shared_ptr<VulkanUploadHeapBlock> PoolBlock;
+		std::shared_ptr<VulkanPersistentBufferBlock> PersistentPoolBlock;
+	};
+
+	struct VulkanPersistentBufferBlock
+	{
+		VkDevice OwningDevice = VK_NULL_HANDLE;
+		VkBuffer Buffer = VK_NULL_HANDLE;
+		VkDeviceMemory Memory = VK_NULL_HANDLE;
+		VkDeviceSize Capacity = 0;
+		VkDeviceSize Cursor = 0;
+		struct FreeRange
+		{
+			VkDeviceSize Offset = 0;
+			VkDeviceSize Size = 0;
+		};
+		std::vector<FreeRange> FreeRanges;
+		~VulkanPersistentBufferBlock();
 	};
 
 	struct VulkanTextureAllocation
@@ -600,6 +648,7 @@ private:
 	VkDeviceSize TransientUniformFrameOffset = 0;
 	uint32_t TransientUniformFrameCount = 0;
 	VkDeviceSize UniformBufferAlignment = 256;
+	VkDeviceSize StorageBufferAlignment = 16;
 	VkDeviceSize MaxUniformBufferRange = 0;
 
 	// Phase 3.5 (Vulkan) — UPLOAD-heap-style sub-allocator that mirrors the
@@ -611,6 +660,63 @@ private:
 		VkDeviceSize alignment,
 		const void* srcData,
 		VulkanBufferAllocation& outAllocation);
+
+	struct VulkanTransientUploadStructuredFrame
+	{
+		std::vector<std::shared_ptr<VulkanUploadHeapBlock>> Blocks;
+		std::vector<std::shared_ptr<Buffer>> KeepAlive;
+	};
+	std::vector<VulkanTransientUploadStructuredFrame> TransientUploadStructuredFrames;
+	VkDeviceSize TransientUploadStructuredBlockDefaultSize = 4ull * 1024ull * 1024ull;
+	uint32_t TransientUploadStructuredBlockCount = 0;
+	uint32_t TransientUploadStructuredAllocationCount = 0;
+	uint64_t TransientUploadStructuredBytesIssued = 0;
+	uint64_t TransientUploadStructuredBytesReserved = 0;
+	void ResetTransientUploadStructuredFrame(uint32_t frameIndex);
+	bool AllocateTransientUploadStructuredRange(
+		uint32_t frameIndex,
+		VkDeviceSize size,
+		VkDeviceSize alignment,
+		const void* srcData,
+		VulkanBufferAllocation& outAllocation);
+
+	std::vector<std::shared_ptr<VulkanPersistentBufferBlock>> PersistentStructuredBufferBlocks;
+	struct PendingPersistentStructuredBufferFree
+	{
+		std::shared_ptr<VulkanPersistentBufferBlock> Block;
+		VkDeviceSize Offset = 0;
+		VkDeviceSize Size = 0;
+	};
+	std::vector<std::vector<PendingPersistentStructuredBufferFree>> PendingPersistentStructuredBufferFrees;
+	VkDeviceSize PersistentStructuredBufferBlockDefaultSize = 16ull * 1024ull * 1024ull;
+	uint32_t PersistentStructuredBufferBlockCount = 0;
+	uint32_t PersistentStructuredBufferAllocationCount = 0;
+	uint64_t PersistentStructuredBufferBytesIssued = 0;
+	uint64_t PersistentStructuredBufferBytesReserved = 0;
+	struct PendingPersistentStructuredBufferUpload
+	{
+		VkFence Fence = VK_NULL_HANDLE;
+		VkCommandBuffer CommandBuffer = VK_NULL_HANDLE;
+		VkBuffer StagingBuffer = VK_NULL_HANDLE;
+		VkDeviceMemory StagingMemory = VK_NULL_HANDLE;
+		VkDeviceSize Bytes = 0;
+	};
+	std::vector<PendingPersistentStructuredBufferUpload> PendingPersistentStructuredBufferUploads;
+	uint64_t PendingPersistentStructuredBufferUploadBytes = 0;
+	static constexpr uint64_t kMaxInFlightPersistentStructuredBufferUploadBytes = 128ull * 1024ull * 1024ull;
+	bool AllocatePersistentStructuredBufferRange(
+		VkDeviceSize size,
+		VkDeviceSize alignment,
+		const void* srcData,
+		VulkanBufferAllocation& outAllocation);
+	void AddPersistentStructuredBufferFreeRange(
+		const std::shared_ptr<VulkanPersistentBufferBlock>& block,
+		VkDeviceSize offset,
+		VkDeviceSize size);
+	void ReleasePersistentStructuredBufferRange(const VulkanBufferAllocation& allocation);
+	void RetirePersistentStructuredBufferFrees(uint32_t frameIndex);
+	void RetirePersistentStructuredBufferUploads(bool waitForAll = false);
+	std::shared_ptr<Buffer> CreateSuballocatedStructuredBuffer(const BufferCreateDesc& desc);
 
 	// Phase 3.5 (Vulkan) upload pool state. ActiveUploadBlock is the
 	// current bump-target; retired blocks stay alive via outstanding

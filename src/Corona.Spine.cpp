@@ -169,7 +169,7 @@ namespace
 	// Persistent UPLOAD-heap VB/IB are sized at spawn so the CPU-skin
 	// path can memcpy in place each frame. The VS-inline path uses the
 	// static input/influence SBVs (built at spawn) + a small bones SBV
-	// re-uploaded each frame via UpdateUploadStructuredBuffer.
+	// uploaded from the render thread through the transient structured pool.
 	struct SpineLiveState
 	{
 		std::unique_ptr<spSkeleton, SpineSkeletonDeleter> Skeleton;
@@ -184,6 +184,8 @@ namespace
 		uint32_t MaxVertexBytes = 0;
 		uint32_t MaxIndexBytes = 0;
 		uint32_t BoneCount = 0;
+		std::shared_ptr<Buffer> BonesFallback;
+		std::vector<SpineSkinBone> BonesForRender;
 	};
 	std::unordered_map<Corona::ScriptSceneHandle, std::unique_ptr<SpineLiveState>> GSpineLiveStates;
 
@@ -1095,23 +1097,32 @@ Corona::ScriptSceneHandle Corona::CreateSpineSceneForScript(
 			static_cast<uint32_t>(sampleMesh.SkinVertices.size()),
 			static_cast<uint32_t>(sizeof(SpineSkinInputVertex)),
 			EInitialResourceState::ShaderRead,
-			true,
+			false,
 			sampleMesh.SkinVertices.data(),
-			EBufferShape::Structured });
+			EBufferShape::Structured,
+			EBufferAccess::GpuOnly,
+			EBufferLifetime::Persistent,
+			EBufferAllocationPolicy::Suballocated });
 		mesh->GpuSpineInfluences = renderBackend->CreateBuffer({
 			static_cast<uint32_t>(sampleMesh.SkinInfluences.size()),
 			static_cast<uint32_t>(sizeof(SpineSkinInfluence)),
 			EInitialResourceState::ShaderRead,
-			true,
+			false,
 			sampleMesh.SkinInfluences.data(),
-			EBufferShape::Structured });
+			EBufferShape::Structured,
+			EBufferAccess::GpuOnly,
+			EBufferLifetime::Persistent,
+			EBufferAllocationPolicy::Suballocated });
 		mesh->GpuSpineBones = renderBackend->CreateBuffer({
 			static_cast<uint32_t>(sampleMesh.SkinBones.size()),
 			static_cast<uint32_t>(sizeof(SpineSkinBone)),
 			EInitialResourceState::ShaderRead,
-			true,
+			false,
 			sampleMesh.SkinBones.data(),
-			EBufferShape::Structured });
+			EBufferShape::Structured,
+			EBufferAccess::GpuOnly,
+			EBufferLifetime::Persistent,
+			EBufferAllocationPolicy::Suballocated });
 #if !CORONA_PLATFORM_MOBILE
 		mesh->GpuSpineSkinnedVertices = renderBackend->CreateBuffer({
 			static_cast<uint32_t>(sampleMesh.Vertices.size()),
@@ -1331,16 +1342,22 @@ Corona::ScriptSceneHandle Corona::CreateLiveSpineForScript(
 			static_cast<uint32_t>(sampleMesh.SkinVertices.size()),
 			static_cast<uint32_t>(sizeof(SpineSkinInputVertex)),
 			EInitialResourceState::ShaderRead,
-			true,
+			false,
 			sampleMesh.SkinVertices.data(),
-			EBufferShape::Structured });
+			EBufferShape::Structured,
+			EBufferAccess::GpuOnly,
+			EBufferLifetime::Persistent,
+			EBufferAllocationPolicy::Suballocated });
 		mesh->GpuSpineInfluences = renderBackend->CreateBuffer({
 			static_cast<uint32_t>(sampleMesh.SkinInfluences.size()),
 			static_cast<uint32_t>(sizeof(SpineSkinInfluence)),
 			EInitialResourceState::ShaderRead,
-			true,
+			false,
 			sampleMesh.SkinInfluences.data(),
-			EBufferShape::Structured });
+			EBufferShape::Structured,
+			EBufferAccess::GpuOnly,
+			EBufferLifetime::Persistent,
+			EBufferAllocationPolicy::Suballocated });
 		// Bones SBV is dynamic: persistent UPLOAD-heap so we can refresh
 		// per frame without a CreateBuffer call.
 		mesh->GpuSpineBones = renderBackend->CreateUploadStructuredBuffer(
@@ -1362,6 +1379,8 @@ Corona::ScriptSceneHandle Corona::CreateLiveSpineForScript(
 		mesh->GpuSpineSkinningVertexCount = mesh->bGpuSpineSkinned ? mesh->NumVertices : 0;
 		mesh->GpuSpineSkinningSourceScale = safeSourceScale;
 		liveState->BoneCount = static_cast<uint32_t>(sampleMesh.SkinBones.size());
+		liveState->BonesFallback = mesh->GpuSpineBones;
+		liveState->BonesForRender = sampleMesh.SkinBones;
 	}
 
 	Mesh::DrawCall drawCall = {};
@@ -1446,9 +1465,7 @@ bool Corona::UpdateLiveSpineForScript(ScriptSceneHandle handle, float deltaSecon
 		const uint32_t live_bones_size = static_cast<uint32_t>(sizeof(SpineSkinBone) * live.BoneCount);
 		if (needed > live_bones_size && live.BoneCount > 0)
 			bones.resize(live.BoneCount); // clamp; topology grew unexpectedly
-		renderBackend->UpdateUploadStructuredBuffer(live.MeshPtr->GpuSpineBones.get(),
-			bones.data(),
-			static_cast<uint32_t>(sizeof(SpineSkinBone) * bones.size()));
+		live.BonesForRender = std::move(bones);
 		return true;
 	}
 
@@ -1475,6 +1492,41 @@ bool Corona::UpdateLiveSpineForScript(ScriptSceneHandle handle, float deltaSecon
 		live.MeshPtr->Draws[0].VertexCount = static_cast<UINT>(sampleMesh.Vertices.size());
 	}
 	return true;
+}
+
+void Corona::UploadLiveSpineTransientBonesForRender()
+{
+	if (!renderBackend)
+		return;
+
+	for (auto& entry : GSpineLiveStates)
+	{
+		SpineLiveState* live = entry.second.get();
+		if (!live ||
+			!live->MeshPtr ||
+			!live->MeshPtr->bGpuSpineSkinned ||
+			live->BonesForRender.empty())
+		{
+			continue;
+		}
+
+		std::shared_ptr<Buffer> bones = renderBackend->AllocateTransientUploadStructuredBuffer(
+			static_cast<uint32_t>(live->BonesForRender.size()),
+			static_cast<uint32_t>(sizeof(SpineSkinBone)),
+			live->BonesForRender.data());
+		if (bones)
+		{
+			live->MeshPtr->GpuSpineBones = bones;
+		}
+		else if (live->BonesFallback)
+		{
+			renderBackend->UpdateUploadStructuredBuffer(
+				live->BonesFallback.get(),
+				live->BonesForRender.data(),
+				static_cast<uint32_t>(live->BonesForRender.size() * sizeof(SpineSkinBone)));
+			live->MeshPtr->GpuSpineBones = live->BonesFallback;
+		}
+	}
 }
 
 bool Corona::DestroyLiveSpineForScript(ScriptSceneHandle handle)

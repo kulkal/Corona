@@ -17,6 +17,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <map>
 #include <optional>
 #include <sstream>
@@ -67,7 +68,7 @@ namespace
 	{
 		if (alignment <= 1)
 			return value;
-		return (value + alignment - 1) & ~(alignment - 1);
+		return ((value + alignment - 1) / alignment) * alignment;
 	}
 
 	uint32_t ToVulkanTextureBinding(uint32_t registerIndex)
@@ -509,6 +510,176 @@ namespace
 
 		return true;
 	}
+
+#if CORONA_HAS_VULKAN
+	struct VulkanTextureFileUpload
+	{
+		VkFormat Format = VK_FORMAT_UNDEFINED;
+		uint32_t SourceFormat = 0;
+		uint32_t Width = 0;
+		uint32_t Height = 0;
+		uint32_t MipLevels = 1;
+		std::vector<uint8_t> Bytes;
+		std::vector<VkBufferImageCopy> Regions;
+		bool bDirectDDS = false;
+	};
+#endif
+
+#if CORONA_HAS_DIRECTXTEX && CORONA_HAS_VULKAN
+	VkFormat ToVulkanDDSFormat(DXGI_FORMAT format)
+	{
+		switch (format)
+		{
+		case DXGI_FORMAT_R8G8B8A8_UNORM: return VK_FORMAT_R8G8B8A8_UNORM;
+		case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB: return VK_FORMAT_R8G8B8A8_SRGB;
+		case DXGI_FORMAT_B8G8R8A8_UNORM: return VK_FORMAT_B8G8R8A8_UNORM;
+		case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB: return VK_FORMAT_B8G8R8A8_SRGB;
+		case DXGI_FORMAT_B8G8R8X8_UNORM: return VK_FORMAT_B8G8R8A8_UNORM;
+		case DXGI_FORMAT_B8G8R8X8_UNORM_SRGB: return VK_FORMAT_B8G8R8A8_SRGB;
+		case DXGI_FORMAT_R16G16B16A16_FLOAT: return VK_FORMAT_R16G16B16A16_SFLOAT;
+		case DXGI_FORMAT_R32G32B32A32_FLOAT: return VK_FORMAT_R32G32B32A32_SFLOAT;
+		case DXGI_FORMAT_R16G16_FLOAT: return VK_FORMAT_R16G16_SFLOAT;
+		case DXGI_FORMAT_R32_FLOAT: return VK_FORMAT_R32_SFLOAT;
+		case DXGI_FORMAT_R8_UNORM: return VK_FORMAT_R8_UNORM;
+		case DXGI_FORMAT_R8_UINT: return VK_FORMAT_R8_UINT;
+		case DXGI_FORMAT_BC1_UNORM: return VK_FORMAT_BC1_RGBA_UNORM_BLOCK;
+		case DXGI_FORMAT_BC1_UNORM_SRGB: return VK_FORMAT_BC1_RGBA_SRGB_BLOCK;
+		case DXGI_FORMAT_BC2_UNORM: return VK_FORMAT_BC2_UNORM_BLOCK;
+		case DXGI_FORMAT_BC2_UNORM_SRGB: return VK_FORMAT_BC2_SRGB_BLOCK;
+		case DXGI_FORMAT_BC3_UNORM: return VK_FORMAT_BC3_UNORM_BLOCK;
+		case DXGI_FORMAT_BC3_UNORM_SRGB: return VK_FORMAT_BC3_SRGB_BLOCK;
+		case DXGI_FORMAT_BC4_UNORM: return VK_FORMAT_BC4_UNORM_BLOCK;
+		case DXGI_FORMAT_BC4_SNORM: return VK_FORMAT_BC4_SNORM_BLOCK;
+		case DXGI_FORMAT_BC5_UNORM: return VK_FORMAT_BC5_UNORM_BLOCK;
+		case DXGI_FORMAT_BC5_SNORM: return VK_FORMAT_BC5_SNORM_BLOCK;
+		case DXGI_FORMAT_BC6H_UF16: return VK_FORMAT_BC6H_UFLOAT_BLOCK;
+		case DXGI_FORMAT_BC6H_SF16: return VK_FORMAT_BC6H_SFLOAT_BLOCK;
+		case DXGI_FORMAT_BC7_UNORM: return VK_FORMAT_BC7_UNORM_BLOCK;
+		case DXGI_FORMAT_BC7_UNORM_SRGB: return VK_FORMAT_BC7_SRGB_BLOCK;
+		default: return VK_FORMAT_UNDEFINED;
+		}
+	}
+
+	DXGI_FORMAT SelectVulkanDDSDXGIFormat(DXGI_FORMAT sourceFormat, bool nonSRGB)
+	{
+		if (!nonSRGB)
+		{
+			const DXGI_FORMAT srgbFormat = DirectX::MakeSRGB(sourceFormat);
+			if (srgbFormat != DXGI_FORMAT_UNKNOWN)
+				return srgbFormat;
+		}
+		else
+		{
+			const DXGI_FORMAT unormFormat = DirectX::MakeTypelessUNORM(sourceFormat);
+			if (unormFormat != DXGI_FORMAT_UNKNOWN)
+				return unormFormat;
+		}
+		return sourceFormat;
+	}
+
+	bool IsVulkanSampledTransferDstFormatSupported(VkPhysicalDevice physicalDevice, VkFormat format)
+	{
+		if (physicalDevice == VK_NULL_HANDLE || format == VK_FORMAT_UNDEFINED)
+			return false;
+
+		VkFormatProperties properties{};
+		vkGetPhysicalDeviceFormatProperties(physicalDevice, format, &properties);
+		const VkFormatFeatureFlags required =
+			VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
+			VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
+		return (properties.optimalTilingFeatures & required) == required;
+	}
+
+	bool LoadVulkanDirectDDSTexture(
+		const std::wstring& filePath,
+		bool nonSRGB,
+		VkPhysicalDevice physicalDevice,
+		VulkanTextureFileUpload& outUpload,
+		std::wstring* errorMessage)
+	{
+		outUpload = {};
+		if (!HasExtensionI(filePath, L".dds"))
+			return false;
+
+		DirectX::TexMetadata metadata{};
+		DirectX::ScratchImage sourceImage;
+		HRESULT hr = DirectX::LoadFromDDSFile(filePath.c_str(), DirectX::DDS_FLAGS_NONE, &metadata, sourceImage);
+		if (FAILED(hr) || sourceImage.GetImageCount() == 0)
+		{
+			if (errorMessage) *errorMessage = L"Failed to load DDS texture file.";
+			return false;
+		}
+
+		if (metadata.dimension != DirectX::TEX_DIMENSION_TEXTURE2D || metadata.arraySize != 1 || metadata.width == 0 || metadata.height == 0)
+		{
+			if (errorMessage) *errorMessage = L"DDS texture is not a single 2D image.";
+			return false;
+		}
+
+		const DXGI_FORMAT uploadFormat = SelectVulkanDDSDXGIFormat(metadata.format, nonSRGB);
+		const VkFormat vkFormat = ToVulkanDDSFormat(uploadFormat);
+		if (!IsVulkanSampledTransferDstFormatSupported(physicalDevice, vkFormat))
+		{
+			if (errorMessage) *errorMessage = L"DDS format is not supported by this Vulkan device.";
+			return false;
+		}
+
+		const uint32_t mipLevels = static_cast<uint32_t>(std::max<size_t>(metadata.mipLevels, 1));
+		outUpload.Format = vkFormat;
+		outUpload.SourceFormat = static_cast<uint32_t>(metadata.format);
+		outUpload.Width = static_cast<uint32_t>(metadata.width);
+		outUpload.Height = static_cast<uint32_t>(metadata.height);
+		outUpload.MipLevels = mipLevels;
+		outUpload.bDirectDDS = true;
+		outUpload.Regions.reserve(mipLevels);
+
+		for (uint32_t mip = 0; mip < mipLevels; ++mip)
+		{
+			const DirectX::Image* image = sourceImage.GetImage(mip, 0, 0);
+			if (!image || !image->pixels || image->width == 0 || image->height == 0)
+			{
+				if (errorMessage) *errorMessage = L"DDS texture has invalid mip data.";
+				outUpload = {};
+				return false;
+			}
+
+			size_t tightRowPitch = 0;
+			size_t tightSlicePitch = 0;
+			DirectX::ComputePitch(uploadFormat, image->width, image->height, tightRowPitch, tightSlicePitch);
+			const size_t rowCount = DirectX::ComputeScanlines(uploadFormat, image->height);
+			if (tightRowPitch == 0 || tightSlicePitch == 0 || rowCount == 0 || image->rowPitch < tightRowPitch)
+			{
+				if (errorMessage) *errorMessage = L"DDS texture row pitch is not compatible with Vulkan upload.";
+				outUpload = {};
+				return false;
+			}
+
+			const VkDeviceSize alignedOffset = AlignVkDeviceSize(static_cast<VkDeviceSize>(outUpload.Bytes.size()), 4);
+			if (alignedOffset > outUpload.Bytes.size())
+				outUpload.Bytes.resize(static_cast<size_t>(alignedOffset));
+			const size_t dstOffset = outUpload.Bytes.size();
+			outUpload.Bytes.resize(dstOffset + tightSlicePitch);
+			for (size_t row = 0; row < rowCount; ++row)
+			{
+				const uint8_t* srcRow = image->pixels + row * image->rowPitch;
+				uint8_t* dstRow = outUpload.Bytes.data() + dstOffset + row * tightRowPitch;
+				std::memcpy(dstRow, srcRow, tightRowPitch);
+			}
+
+			VkBufferImageCopy& region = outUpload.Regions.emplace_back();
+			region.bufferOffset = static_cast<VkDeviceSize>(dstOffset);
+			region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+			region.imageSubresource.mipLevel = mip;
+			region.imageSubresource.baseArrayLayer = 0;
+			region.imageSubresource.layerCount = 1;
+			region.imageExtent.width = static_cast<uint32_t>(image->width);
+			region.imageExtent.height = static_cast<uint32_t>(image->height);
+			region.imageExtent.depth = 1;
+		}
+
+		return !outUpload.Bytes.empty() && !outUpload.Regions.empty();
+	}
+#endif
 
 	std::vector<uint32_t> LoadSpirvFile(const std::filesystem::path& filePath)
 	{
@@ -1145,7 +1316,6 @@ void VulkanGraphicsPipelineHandle::Release()
 	UniformBuffer = VK_NULL_HANDLE;
 	UniformBufferMemory = VK_NULL_HANDLE;
 	UniformBufferMapped = nullptr;
-	ConstantData.clear();
 	DescriptorPool = VK_NULL_HANDLE;
 	DescriptorSetLayout = VK_NULL_HANDLE;
 	Pipeline = VK_NULL_HANDLE;
@@ -1153,10 +1323,8 @@ void VulkanGraphicsPipelineHandle::Release()
 	Layout = VK_NULL_HANDLE;
 	VertexShaderModule = VK_NULL_HANDLE;
 	FragmentShaderModule = VK_NULL_HANDLE;
-	BoundTextures.clear();
-	BoundBuffers.clear();
-	BoundVertexBuffers.clear();
-	BoundSamplers.clear();
+	for (auto& bindGroup : BoundBindGroups)
+		bindGroup.reset();
 	Owner = nullptr;
 }
 
@@ -2982,6 +3150,7 @@ void VulkanBackend::ReleaseTextureAllocation(Texture* texture)
 
 	if (Device != VK_NULL_HANDLE)
 	{
+		RetirePersistentStructuredBufferUploads(true);
 		if (it->second.bOwnsImageView && it->second.ImageView != VK_NULL_HANDLE)
 			vkDestroyImageView(Device, it->second.ImageView, nullptr);
 		if (it->second.bOwnsImage && it->second.Image != VK_NULL_HANDLE)
@@ -3002,12 +3171,17 @@ void VulkanBackend::ReleaseBufferAllocation(Buffer* buffer)
 	if (it == BufferAllocations.end())
 		return;
 
-	if (!it->second.PoolBlock && Device != VK_NULL_HANDLE)
+	const VulkanBufferAllocation allocation = it->second;
+	if (allocation.PersistentPoolBlock)
 	{
-		if (it->second.Buffer != VK_NULL_HANDLE)
-			vkDestroyBuffer(Device, it->second.Buffer, nullptr);
-		if (it->second.Memory != VK_NULL_HANDLE)
-			vkFreeMemory(Device, it->second.Memory, nullptr);
+		ReleasePersistentStructuredBufferRange(allocation);
+	}
+	else if (!allocation.PoolBlock && Device != VK_NULL_HANDLE)
+	{
+		if (allocation.Buffer != VK_NULL_HANDLE)
+			vkDestroyBuffer(Device, allocation.Buffer, nullptr);
+		if (allocation.Memory != VK_NULL_HANDLE)
+			vkFreeMemory(Device, allocation.Memory, nullptr);
 	}
 	BufferAllocations.erase(it);
 }
@@ -3145,8 +3319,11 @@ bool VulkanBackend::CreateDeviceLocalBufferWithUpload(
 	if (!srcData)
 		return true;
 
+	RetirePersistentStructuredBufferUploads(false);
+
 	VkBuffer stagingBuffer = VK_NULL_HANDLE;
 	VkDeviceMemory stagingMemory = VK_NULL_HANDLE;
+	VkFence uploadFence = VK_NULL_HANDLE;
 	auto cleanupDestination = [&]()
 	{
 		if (outBuffer != VK_NULL_HANDLE)
@@ -3162,8 +3339,11 @@ bool VulkanBackend::CreateDeviceLocalBufferWithUpload(
 			vkDestroyBuffer(Device, stagingBuffer, nullptr);
 		if (stagingMemory != VK_NULL_HANDLE)
 			vkFreeMemory(Device, stagingMemory, nullptr);
+		if (uploadFence != VK_NULL_HANDLE)
+			vkDestroyFence(Device, uploadFence, nullptr);
 		stagingBuffer = VK_NULL_HANDLE;
 		stagingMemory = VK_NULL_HANDLE;
+		uploadFence = VK_NULL_HANDLE;
 	};
 
 	if (!CreateBufferWithMemory(
@@ -3216,7 +3396,53 @@ bool VulkanBackend::CreateDeviceLocalBufferWithUpload(
 	copyRegion.size = size;
 	vkCmdCopyBuffer(commandBuffer, stagingBuffer, outBuffer, 1, &copyRegion);
 
+	VkAccessFlags dstAccessMask = 0;
+	if (usage & VK_BUFFER_USAGE_VERTEX_BUFFER_BIT)
+		dstAccessMask |= VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT;
+	if (usage & VK_BUFFER_USAGE_INDEX_BUFFER_BIT)
+		dstAccessMask |= VK_ACCESS_INDEX_READ_BIT;
+	if (usage & VK_BUFFER_USAGE_TRANSFER_SRC_BIT)
+		dstAccessMask |= VK_ACCESS_TRANSFER_READ_BIT;
+	if (usage & VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT)
+		dstAccessMask |= VK_ACCESS_UNIFORM_READ_BIT;
+	if (usage & VK_BUFFER_USAGE_STORAGE_BUFFER_BIT)
+		dstAccessMask |= VK_ACCESS_SHADER_READ_BIT;
+	if (usage & VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT)
+		dstAccessMask |= VK_ACCESS_INDIRECT_COMMAND_READ_BIT;
+	if (usage & VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR)
+		dstAccessMask |= VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
+	if (dstAccessMask == 0)
+		dstAccessMask = VK_ACCESS_MEMORY_READ_BIT;
+
+	VkBufferMemoryBarrier barrier{};
+	barrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+	barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+	barrier.dstAccessMask = dstAccessMask;
+	barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	barrier.buffer = outBuffer;
+	barrier.offset = 0;
+	barrier.size = size;
+	vkCmdPipelineBarrier(
+		commandBuffer,
+		VK_PIPELINE_STAGE_TRANSFER_BIT,
+		VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+		0,
+		0, nullptr,
+		1, &barrier,
+		0, nullptr);
+
 	if (vkEndCommandBuffer(commandBuffer) != VK_SUCCESS)
+	{
+		vkFreeCommandBuffers(Device, CommandPool, 1, &commandBuffer);
+		cleanupStaging();
+		cleanupDestination();
+		return false;
+	}
+
+	VkFenceCreateInfo fenceInfo{};
+	fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+	if (vkCreateFence(Device, &fenceInfo, nullptr, &uploadFence) != VK_SUCCESS)
 	{
 		vkFreeCommandBuffers(Device, CommandPool, 1, &commandBuffer);
 		cleanupStaging();
@@ -3228,17 +3454,30 @@ bool VulkanBackend::CreateDeviceLocalBufferWithUpload(
 	submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
 	submitInfo.commandBufferCount = 1;
 	submitInfo.pCommandBuffers = &commandBuffer;
-	if (vkQueueSubmit(GraphicsQueue, 1, &submitInfo, VK_NULL_HANDLE) != VK_SUCCESS)
+	if (vkQueueSubmit(GraphicsQueue, 1, &submitInfo, uploadFence) != VK_SUCCESS)
 	{
 		vkFreeCommandBuffers(Device, CommandPool, 1, &commandBuffer);
 		cleanupStaging();
 		cleanupDestination();
 		return false;
 	}
-	vkQueueWaitIdle(GraphicsQueue);
 
-	vkFreeCommandBuffers(Device, CommandPool, 1, &commandBuffer);
-	cleanupStaging();
+	PendingPersistentStructuredBufferUploads.push_back({
+		uploadFence,
+		commandBuffer,
+		stagingBuffer,
+		stagingMemory,
+		size
+	});
+	PendingPersistentStructuredBufferUploadBytes += static_cast<uint64_t>(size);
+	uploadFence = VK_NULL_HANDLE;
+	commandBuffer = VK_NULL_HANDLE;
+	stagingBuffer = VK_NULL_HANDLE;
+	stagingMemory = VK_NULL_HANDLE;
+
+	if (PendingPersistentStructuredBufferUploadBytes > kMaxInFlightPersistentStructuredBufferUploadBytes)
+		RetirePersistentStructuredBufferUploads(true);
+
 	return true;
 }
 
@@ -3754,6 +3993,10 @@ void VulkanBackend::BeginFrame()
 	}
 	AppendVulkanRuntimeTraceBackend(L"[VulkanBackend::BeginFrame] after vkWaitForFences");
 
+	RetirePersistentStructuredBufferUploads(false);
+	RetirePersistentStructuredBufferFrees(frameContextIndex);
+	ResetTransientUploadStructuredFrame(frameContextIndex);
+
 	for (const auto& descriptorSet : frame.DescriptorSetsToFree)
 	{
 		if (descriptorSet.first != VK_NULL_HANDLE && descriptorSet.second != VK_NULL_HANDLE)
@@ -4016,6 +4259,66 @@ uint32_t VulkanBackend::GetFrameCount() const
 #endif
 }
 uint32_t VulkanBackend::GetCurrentFrameIndex() const { return CurrentFrameIndex; }
+RenderBackendAllocatorStats VulkanBackend::GetAllocatorStats() const
+{
+	RenderBackendAllocatorStats stats{};
+#if CORONA_HAS_VULKAN
+	stats.PersistentStructuredBlockCount = static_cast<uint32_t>(PersistentStructuredBufferBlocks.size());
+	stats.PersistentStructuredBytesIssued = PersistentStructuredBufferBytesIssued;
+	stats.PersistentStructuredPendingUploadBytes = PendingPersistentStructuredBufferUploadBytes;
+	for (const std::shared_ptr<VulkanPersistentBufferBlock>& block : PersistentStructuredBufferBlocks)
+	{
+		if (!block)
+			continue;
+		stats.PersistentStructuredReservedBytes += block->Capacity;
+		stats.PersistentStructuredCommittedBytes += block->Cursor;
+		for (const VulkanPersistentBufferBlock::FreeRange& range : block->FreeRanges)
+		{
+			stats.PersistentStructuredReusableBytes += range.Size;
+		}
+	}
+	for (const std::vector<PendingPersistentStructuredBufferFree>& pendingFrame : PendingPersistentStructuredBufferFrees)
+	{
+		for (const PendingPersistentStructuredBufferFree& pending : pendingFrame)
+		{
+			stats.PersistentStructuredPendingFreeBytes += pending.Size;
+		}
+	}
+
+	stats.TransientStructuredBlockCount = TransientUploadStructuredBlockCount;
+	stats.TransientStructuredBytesIssued = TransientUploadStructuredBytesIssued;
+	stats.TransientStructuredReservedBytes = TransientUploadStructuredBytesReserved;
+	const uint32_t frameIndex = CurrentFrameIndex < TransientUploadStructuredFrames.size() ? CurrentFrameIndex : 0u;
+	if (frameIndex < TransientUploadStructuredFrames.size())
+	{
+		for (const std::shared_ptr<VulkanUploadHeapBlock>& block : TransientUploadStructuredFrames[frameIndex].Blocks)
+		{
+			if (block)
+				stats.TransientStructuredCurrentFrameBytes += block->Cursor;
+		}
+	}
+
+	{
+		std::lock_guard<std::mutex> lock(BindlessTextureMutex);
+		stats.BindlessTextureSlotsCapacity = static_cast<uint32_t>(BindlessTextureSlots.size());
+		for (const VulkanBindlessTextureSlot& slot : BindlessTextureSlots)
+		{
+			if (slot.Occupied)
+				++stats.BindlessTextureSlotsUsed;
+		}
+	}
+	{
+		std::lock_guard<std::mutex> lock(BindlessBufferMutex);
+		stats.BindlessBufferSlotsCapacity = static_cast<uint32_t>(BindlessBufferSlots.size());
+		for (const VulkanBindlessBufferSlot& slot : BindlessBufferSlots)
+		{
+			if (slot.Occupied)
+				++stats.BindlessBufferSlotsUsed;
+		}
+	}
+#endif
+	return stats;
+}
 bool VulkanBackend::SupportsRayTracing() const
 {
 #if CORONA_HAS_VULKAN
@@ -4225,6 +4528,19 @@ std::shared_ptr<Buffer> VulkanBackend::CreateBuffer(const BufferCreateDesc& desc
 	(void)desc;
 	ThrowNotImplemented(__FUNCTION__);
 #else
+	if (desc.NumElements == 0 || desc.ElementSize == 0)
+		return nullptr;
+
+	if (desc.AllocationPolicy == EBufferAllocationPolicy::Suballocated &&
+		desc.Lifetime == EBufferLifetime::Persistent &&
+		desc.Shape == EBufferShape::Structured &&
+		desc.Access == EBufferAccess::GpuOnly &&
+		!desc.bAllowUnorderedAccess &&
+		desc.InitialData)
+	{
+		return CreateSuballocatedStructuredBuffer(desc);
+	}
+
 	auto buffer = CreateTrackedBufferHandle();
 	buffer->NumElements = desc.NumElements;
 	buffer->ElementSize = desc.ElementSize;
@@ -4232,7 +4548,8 @@ std::shared_ptr<Buffer> VulkanBackend::CreateBuffer(const BufferCreateDesc& desc
 
 	VulkanBufferAllocation allocation{};
 	allocation.Stride = desc.ElementSize;
-	allocation.SizeInBytes = desc.NumElements * desc.ElementSize;
+	allocation.SizeInBytes =
+		static_cast<uint32_t>(static_cast<uint64_t>(desc.NumElements) * static_cast<uint64_t>(desc.ElementSize));
 
 	VkBufferUsageFlags bufferUsage =
 		VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
@@ -4245,22 +4562,45 @@ std::shared_ptr<Buffer> VulkanBackend::CreateBuffer(const BufferCreateDesc& desc
 			VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
 			VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
 	}
-	const bool bUseDeviceLocalMemory = (desc.bAllowUnorderedAccess || desc.bUseDefaultHeap || desc.InitialData != nullptr) && allocation.SizeInBytes > 0;
-	const bool bCreatedBuffer = bUseDeviceLocalMemory
-		? CreateDeviceLocalBufferWithUpload(
+
+	const bool bUseDeviceLocalMemory =
+		desc.bAllowUnorderedAccess ||
+		desc.Access == EBufferAccess::GpuOnly;
+	bool bCreatedBuffer = false;
+	if (bUseDeviceLocalMemory)
+	{
+		bCreatedBuffer = CreateDeviceLocalBufferWithUpload(
 			allocation.SizeInBytes,
 			bufferUsage,
 			bRayTracingEnabled,
 			desc.InitialData,
 			allocation.Buffer,
-			allocation.Memory)
-		: CreateBufferWithMemory(
+			allocation.Memory);
+	}
+	else
+	{
+		VkMemoryPropertyFlags memoryProperties =
+			VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+		bCreatedBuffer = CreateBufferWithMemory(
 			allocation.SizeInBytes,
 			bufferUsage,
-			VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+			memoryProperties,
 			bRayTracingEnabled,
 			allocation.Buffer,
 			allocation.Memory);
+		if (bCreatedBuffer && desc.InitialData)
+		{
+			void* mappedData = nullptr;
+			if (vkMapMemory(Device, allocation.Memory, 0, allocation.SizeInBytes, 0, &mappedData) != VK_SUCCESS)
+			{
+				vkDestroyBuffer(Device, allocation.Buffer, nullptr);
+				vkFreeMemory(Device, allocation.Memory, nullptr);
+				throw std::runtime_error("Failed to map Vulkan upload buffer.");
+			}
+			std::memcpy(mappedData, desc.InitialData, allocation.SizeInBytes);
+			vkUnmapMemory(Device, allocation.Memory);
+		}
+	}
 	if (!bCreatedBuffer)
 	{
 		throw std::runtime_error("Failed to create Vulkan buffer.");
@@ -4306,42 +4646,155 @@ std::shared_ptr<Texture> VulkanBackend::CreateTextureFromFile(const std::wstring
 	(void)nonSRGB;
 	ThrowNotImplemented(__FUNCTION__);
 #else
-	(void)nonSRGB;
-	std::vector<uint8_t> pixels;
-	uint32_t width = 0;
-	uint32_t height = 0;
 	std::wstring errorMessage;
-	if (!LoadRGBA8TextureFromFile(fileName, pixels, width, height, &errorMessage))
+	VulkanTextureFileUpload upload{};
+
+#if CORONA_HAS_DIRECTXTEX
+	std::wstring directDdsError;
+	LoadVulkanDirectDDSTexture(fileName, nonSRGB, PhysicalDevice, upload, &directDdsError);
+#endif
+
+	if (upload.Bytes.empty())
 	{
-		std::string message = "Failed to load Vulkan texture file: " + std::filesystem::path(fileName).string();
-		if (!errorMessage.empty())
-			message += " (" + PlatformWideToUtf8(errorMessage) + ")";
-		throw std::runtime_error(message);
+		std::vector<uint8_t> pixels;
+		uint32_t width = 0;
+		uint32_t height = 0;
+		if (!LoadRGBA8TextureFromFile(fileName, pixels, width, height, &errorMessage))
+		{
+			std::string message = "Failed to load Vulkan texture file: " + std::filesystem::path(fileName).string();
+			if (!errorMessage.empty())
+				message += " (" + PlatformWideToUtf8(errorMessage) + ")";
+			throw std::runtime_error(message);
+		}
+
+		upload.Format = nonSRGB ? VK_FORMAT_R8G8B8A8_UNORM : VK_FORMAT_R8G8B8A8_SRGB;
+		upload.Width = width;
+		upload.Height = height;
+		upload.MipLevels = 1;
+		upload.Bytes = std::move(pixels);
+		VkBufferImageCopy& region = upload.Regions.emplace_back();
+		region.bufferOffset = 0;
+		region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+		region.imageSubresource.layerCount = 1;
+		region.imageExtent.width = width;
+		region.imageExtent.height = height;
+		region.imageExtent.depth = 1;
 	}
 
-	TextureCreateDesc desc{};
-	desc.Format = ETextureFormat::RGBA8Unorm;
-	desc.Usage = TextureUsage_None;
-	desc.InitialState = EInitialResourceState::CopyDest;
-	desc.Width = static_cast<int>(width);
-	desc.Height = static_cast<int>(height);
-	desc.MipLevels = 1;
-	auto texture = CreateTexture2D(desc);
+	if (upload.Format == VK_FORMAT_UNDEFINED || upload.Width == 0 || upload.Height == 0 || upload.Bytes.empty() || upload.Regions.empty())
+		throw std::runtime_error("Failed to prepare Vulkan texture upload data.");
 
-	auto textureIt = TextureAllocations.find(texture.get());
-	if (textureIt == TextureAllocations.end())
-		throw std::runtime_error("Vulkan texture allocation missing.");
+	auto texture = CreateTrackedTextureHandle();
+	texture->Width = upload.Width;
+	texture->Height = upload.Height;
+	texture->MipLevels = std::max<uint32_t>(upload.MipLevels, 1);
+	texture->Format = FromVkFormat(upload.Format);
+	texture->Usage = TextureUsage_None;
+
+	VulkanTextureAllocation allocation{};
+	allocation.Format = upload.Format;
+	allocation.Width = upload.Width;
+	allocation.Height = upload.Height;
+	allocation.Depth = 1;
+	allocation.Usage = TextureUsage_None;
+	allocation.CurrentLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+	auto cleanupAllocation = [&]()
+	{
+		if (allocation.ImageView != VK_NULL_HANDLE)
+			vkDestroyImageView(Device, allocation.ImageView, nullptr);
+		if (allocation.Image != VK_NULL_HANDLE)
+			vkDestroyImage(Device, allocation.Image, nullptr);
+		if (allocation.Memory != VK_NULL_HANDLE)
+			vkFreeMemory(Device, allocation.Memory, nullptr);
+		allocation.ImageView = VK_NULL_HANDLE;
+		allocation.Image = VK_NULL_HANDLE;
+		allocation.Memory = VK_NULL_HANDLE;
+	};
+
+	VkImageCreateInfo imageInfo{};
+	imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+	imageInfo.imageType = VK_IMAGE_TYPE_2D;
+	imageInfo.format = allocation.Format;
+	imageInfo.extent.width = allocation.Width;
+	imageInfo.extent.height = allocation.Height;
+	imageInfo.extent.depth = 1;
+	imageInfo.mipLevels = texture->MipLevels;
+	imageInfo.arrayLayers = 1;
+	imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+	imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+	imageInfo.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+	imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+	imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	if (vkCreateImage(Device, &imageInfo, nullptr, &allocation.Image) != VK_SUCCESS)
+		throw std::runtime_error("Failed to create Vulkan file texture image.");
+
+	VkMemoryRequirements imageMemoryRequirements{};
+	vkGetImageMemoryRequirements(Device, allocation.Image, &imageMemoryRequirements);
+	VkMemoryAllocateInfo imageAllocateInfo{};
+	imageAllocateInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+	imageAllocateInfo.allocationSize = imageMemoryRequirements.size;
+	imageAllocateInfo.memoryTypeIndex = FindMemoryTypeIndex(
+		PhysicalDevice,
+		imageMemoryRequirements.memoryTypeBits,
+		VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+	if (vkAllocateMemory(Device, &imageAllocateInfo, nullptr, &allocation.Memory) != VK_SUCCESS)
+	{
+		cleanupAllocation();
+		throw std::runtime_error("Failed to allocate Vulkan file texture memory.");
+	}
+	if (vkBindImageMemory(Device, allocation.Image, allocation.Memory, 0) != VK_SUCCESS)
+	{
+		cleanupAllocation();
+		throw std::runtime_error("Failed to bind Vulkan file texture memory.");
+	}
+
+	VkImageViewCreateInfo imageViewInfo{};
+	imageViewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+	imageViewInfo.image = allocation.Image;
+	imageViewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+	imageViewInfo.format = allocation.Format;
+	imageViewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+	imageViewInfo.subresourceRange.levelCount = texture->MipLevels;
+	imageViewInfo.subresourceRange.layerCount = 1;
+	if (vkCreateImageView(Device, &imageViewInfo, nullptr, &allocation.ImageView) != VK_SUCCESS)
+	{
+		cleanupAllocation();
+		throw std::runtime_error("Failed to create Vulkan file texture view.");
+	}
 
 	VkBuffer stagingBuffer = VK_NULL_HANDLE;
 	VkDeviceMemory stagingMemory = VK_NULL_HANDLE;
+	VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
+	VkFence uploadFence = VK_NULL_HANDLE;
+	auto cleanupUpload = [&]()
+	{
+		if (commandBuffer != VK_NULL_HANDLE)
+			vkFreeCommandBuffers(Device, CommandPool, 1, &commandBuffer);
+		if (stagingBuffer != VK_NULL_HANDLE)
+			vkDestroyBuffer(Device, stagingBuffer, nullptr);
+		if (stagingMemory != VK_NULL_HANDLE)
+			vkFreeMemory(Device, stagingMemory, nullptr);
+		if (uploadFence != VK_NULL_HANDLE)
+			vkDestroyFence(Device, uploadFence, nullptr);
+		commandBuffer = VK_NULL_HANDLE;
+		stagingBuffer = VK_NULL_HANDLE;
+		stagingMemory = VK_NULL_HANDLE;
+		uploadFence = VK_NULL_HANDLE;
+	};
+
+	RetirePersistentStructuredBufferUploads(false);
 
 	VkBufferCreateInfo bufferInfo{};
 	bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-	bufferInfo.size = pixels.size();
+	bufferInfo.size = static_cast<VkDeviceSize>(upload.Bytes.size());
 	bufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
 	bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 	if (vkCreateBuffer(Device, &bufferInfo, nullptr, &stagingBuffer) != VK_SUCCESS)
+	{
+		cleanupAllocation();
 		throw std::runtime_error("Failed to create Vulkan staging buffer.");
+	}
 
 	VkMemoryRequirements memoryRequirements{};
 	vkGetBufferMemoryRequirements(Device, stagingBuffer, &memoryRequirements);
@@ -4353,14 +4806,26 @@ std::shared_ptr<Texture> VulkanBackend::CreateTextureFromFile(const std::wstring
 		memoryRequirements.memoryTypeBits,
 		VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
 	if (vkAllocateMemory(Device, &allocateInfo, nullptr, &stagingMemory) != VK_SUCCESS)
+	{
+		cleanupUpload();
+		cleanupAllocation();
 		throw std::runtime_error("Failed to allocate Vulkan staging memory.");
+	}
 	if (vkBindBufferMemory(Device, stagingBuffer, stagingMemory, 0) != VK_SUCCESS)
+	{
+		cleanupUpload();
+		cleanupAllocation();
 		throw std::runtime_error("Failed to bind Vulkan staging memory.");
+	}
 
 	void* mappedData = nullptr;
-	if (vkMapMemory(Device, stagingMemory, 0, pixels.size(), 0, &mappedData) != VK_SUCCESS)
+	if (vkMapMemory(Device, stagingMemory, 0, upload.Bytes.size(), 0, &mappedData) != VK_SUCCESS)
+	{
+		cleanupUpload();
+		cleanupAllocation();
 		throw std::runtime_error("Failed to map Vulkan staging memory.");
-	std::memcpy(mappedData, pixels.data(), pixels.size());
+	}
+	std::memcpy(mappedData, upload.Bytes.data(), upload.Bytes.size());
 	vkUnmapMemory(Device, stagingMemory);
 
 	VkCommandBufferAllocateInfo commandBufferAllocInfo{};
@@ -4368,42 +4833,122 @@ std::shared_ptr<Texture> VulkanBackend::CreateTextureFromFile(const std::wstring
 	commandBufferAllocInfo.commandPool = CommandPool;
 	commandBufferAllocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
 	commandBufferAllocInfo.commandBufferCount = 1;
-	VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
 	if (vkAllocateCommandBuffers(Device, &commandBufferAllocInfo, &commandBuffer) != VK_SUCCESS)
+	{
+		cleanupUpload();
+		cleanupAllocation();
 		throw std::runtime_error("Failed to allocate Vulkan upload command buffer.");
+	}
 
 	VkCommandBufferBeginInfo beginInfo{};
 	beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
 	beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-	vkBeginCommandBuffer(commandBuffer, &beginInfo);
+	if (vkBeginCommandBuffer(commandBuffer, &beginInfo) != VK_SUCCESS)
+	{
+		cleanupUpload();
+		cleanupAllocation();
+		throw std::runtime_error("Failed to begin Vulkan texture upload command buffer.");
+	}
 
-	TransitionImageLayout(commandBuffer, textureIt->second.Image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+	auto transitionWholeTexture = [&](VkImageLayout oldLayout, VkImageLayout newLayout, VkAccessFlags srcAccess, VkAccessFlags dstAccess, VkPipelineStageFlags srcStage, VkPipelineStageFlags dstStage)
+	{
+		VkImageMemoryBarrier barrier{};
+		barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+		barrier.oldLayout = oldLayout;
+		barrier.newLayout = newLayout;
+		barrier.srcAccessMask = srcAccess;
+		barrier.dstAccessMask = dstAccess;
+		barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		barrier.image = allocation.Image;
+		barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+		barrier.subresourceRange.levelCount = texture->MipLevels;
+		barrier.subresourceRange.layerCount = 1;
+		vkCmdPipelineBarrier(
+			commandBuffer,
+			srcStage,
+			dstStage,
+			0,
+			0, nullptr,
+			0, nullptr,
+			1, &barrier);
+	};
 
-	VkBufferImageCopy copyRegion{};
-	copyRegion.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-	copyRegion.imageSubresource.layerCount = 1;
-	copyRegion.imageExtent.width = width;
-	copyRegion.imageExtent.height = height;
-	copyRegion.imageExtent.depth = 1;
-	vkCmdCopyBufferToImage(commandBuffer, stagingBuffer, textureIt->second.Image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copyRegion);
+	transitionWholeTexture(
+		VK_IMAGE_LAYOUT_UNDEFINED,
+		VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+		0,
+		VK_ACCESS_TRANSFER_WRITE_BIT,
+		VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+		VK_PIPELINE_STAGE_TRANSFER_BIT);
 
-	TransitionImageLayout(commandBuffer, textureIt->second.Image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-	textureIt->second.CurrentLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+	vkCmdCopyBufferToImage(
+		commandBuffer,
+		stagingBuffer,
+		allocation.Image,
+		VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+		static_cast<uint32_t>(upload.Regions.size()),
+		upload.Regions.data());
 
-	vkEndCommandBuffer(commandBuffer);
+	VkPipelineStageFlags shaderReadStages =
+		VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
+		VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+	if (bRayTracingEnabled)
+		shaderReadStages |= VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR;
+
+	transitionWholeTexture(
+		VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+		VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+		VK_ACCESS_TRANSFER_WRITE_BIT,
+		VK_ACCESS_SHADER_READ_BIT,
+		VK_PIPELINE_STAGE_TRANSFER_BIT,
+		shaderReadStages);
+	allocation.CurrentLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+	if (vkEndCommandBuffer(commandBuffer) != VK_SUCCESS)
+	{
+		cleanupUpload();
+		cleanupAllocation();
+		throw std::runtime_error("Failed to record Vulkan texture upload command buffer.");
+	}
+
+	VkFenceCreateInfo fenceInfo{};
+	fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+	if (vkCreateFence(Device, &fenceInfo, nullptr, &uploadFence) != VK_SUCCESS)
+	{
+		cleanupUpload();
+		cleanupAllocation();
+		throw std::runtime_error("Failed to create Vulkan texture upload fence.");
+	}
 
 	VkSubmitInfo submitInfo{};
 	submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
 	submitInfo.commandBufferCount = 1;
 	submitInfo.pCommandBuffers = &commandBuffer;
-	if (vkQueueSubmit(GraphicsQueue, 1, &submitInfo, VK_NULL_HANDLE) != VK_SUCCESS)
+	if (vkQueueSubmit(GraphicsQueue, 1, &submitInfo, uploadFence) != VK_SUCCESS)
+	{
+		cleanupUpload();
+		cleanupAllocation();
 		throw std::runtime_error("Failed to submit Vulkan texture upload.");
-	vkQueueWaitIdle(GraphicsQueue);
+	}
 
-	vkFreeCommandBuffers(Device, CommandPool, 1, &commandBuffer);
-	vkDestroyBuffer(Device, stagingBuffer, nullptr);
-	vkFreeMemory(Device, stagingMemory, nullptr);
+	PendingPersistentStructuredBufferUploads.push_back({
+		uploadFence,
+		commandBuffer,
+		stagingBuffer,
+		stagingMemory,
+		static_cast<VkDeviceSize>(upload.Bytes.size())
+	});
+	PendingPersistentStructuredBufferUploadBytes += static_cast<uint64_t>(upload.Bytes.size());
+	uploadFence = VK_NULL_HANDLE;
+	commandBuffer = VK_NULL_HANDLE;
+	stagingBuffer = VK_NULL_HANDLE;
+	stagingMemory = VK_NULL_HANDLE;
 
+	if (PendingPersistentStructuredBufferUploadBytes > kMaxInFlightPersistentStructuredBufferUploadBytes)
+		RetirePersistentStructuredBufferUploads(true);
+
+	TextureAllocations[texture.get()] = allocation;
 	return texture;
 #endif
 }
@@ -5207,6 +5752,500 @@ VulkanBackend::VulkanUploadHeapBlock::~VulkanUploadHeapBlock()
 #endif
 }
 
+VulkanBackend::VulkanPersistentBufferBlock::~VulkanPersistentBufferBlock()
+{
+#if CORONA_HAS_VULKAN
+	if (OwningDevice == VK_NULL_HANDLE)
+		return;
+	if (Buffer != VK_NULL_HANDLE)
+		vkDestroyBuffer(OwningDevice, Buffer, nullptr);
+	if (Memory != VK_NULL_HANDLE)
+		vkFreeMemory(OwningDevice, Memory, nullptr);
+	OwningDevice = VK_NULL_HANDLE;
+	Buffer = VK_NULL_HANDLE;
+	Memory = VK_NULL_HANDLE;
+	Capacity = 0;
+	Cursor = 0;
+#endif
+}
+
+void VulkanBackend::AddPersistentStructuredBufferFreeRange(
+	const std::shared_ptr<VulkanPersistentBufferBlock>& block,
+	VkDeviceSize offset,
+	VkDeviceSize size)
+{
+#if CORONA_HAS_VULKAN
+	if (!block || size == 0)
+		return;
+
+	VulkanPersistentBufferBlock::FreeRange newRange{ offset, size };
+	auto& ranges = block->FreeRanges;
+	auto insertIt = ranges.begin();
+	while (insertIt != ranges.end() && insertIt->Offset < newRange.Offset)
+		++insertIt;
+	insertIt = ranges.insert(insertIt, newRange);
+
+	if (insertIt != ranges.begin())
+	{
+		auto prevIt = std::prev(insertIt);
+		const VkDeviceSize prevEnd = prevIt->Offset + prevIt->Size;
+		if (prevEnd >= insertIt->Offset)
+		{
+			prevIt->Size = std::max(prevEnd, insertIt->Offset + insertIt->Size) - prevIt->Offset;
+			insertIt = ranges.erase(insertIt);
+			insertIt = prevIt;
+		}
+	}
+
+	auto nextIt = std::next(insertIt);
+	while (nextIt != ranges.end())
+	{
+		const VkDeviceSize rangeEnd = insertIt->Offset + insertIt->Size;
+		if (rangeEnd < nextIt->Offset)
+			break;
+		insertIt->Size = std::max(rangeEnd, nextIt->Offset + nextIt->Size) - insertIt->Offset;
+		nextIt = ranges.erase(nextIt);
+	}
+#else
+	(void)block; (void)offset; (void)size;
+#endif
+}
+
+void VulkanBackend::ReleasePersistentStructuredBufferRange(const VulkanBufferAllocation& allocation)
+{
+#if CORONA_HAS_VULKAN
+	if (!allocation.PersistentPoolBlock || allocation.SizeInBytes == 0)
+		return;
+
+	if (FrameContexts.empty())
+	{
+		AddPersistentStructuredBufferFreeRange(
+			allocation.PersistentPoolBlock,
+			allocation.Offset,
+			static_cast<VkDeviceSize>(allocation.SizeInBytes));
+		return;
+	}
+
+	if (PendingPersistentStructuredBufferFrees.size() < FrameContexts.size())
+		PendingPersistentStructuredBufferFrees.resize(FrameContexts.size());
+
+	const uint32_t frameIndex =
+		CurrentFrameIndex < PendingPersistentStructuredBufferFrees.size()
+			? CurrentFrameIndex
+			: 0u;
+	PendingPersistentStructuredBufferFrees[frameIndex].push_back({
+		allocation.PersistentPoolBlock,
+		allocation.Offset,
+		static_cast<VkDeviceSize>(allocation.SizeInBytes)
+	});
+#else
+	(void)allocation;
+#endif
+}
+
+void VulkanBackend::RetirePersistentStructuredBufferFrees(uint32_t frameIndex)
+{
+#if CORONA_HAS_VULKAN
+	if (frameIndex >= PendingPersistentStructuredBufferFrees.size())
+		return;
+
+	std::vector<PendingPersistentStructuredBufferFree>& pending =
+		PendingPersistentStructuredBufferFrees[frameIndex];
+	for (const PendingPersistentStructuredBufferFree& freeRange : pending)
+	{
+		AddPersistentStructuredBufferFreeRange(freeRange.Block, freeRange.Offset, freeRange.Size);
+	}
+	pending.clear();
+#else
+	(void)frameIndex;
+#endif
+}
+
+void VulkanBackend::RetirePersistentStructuredBufferUploads(bool waitForAll)
+{
+#if CORONA_HAS_VULKAN
+	if (Device == VK_NULL_HANDLE || PendingPersistentStructuredBufferUploads.empty())
+		return;
+
+	size_t kept = 0;
+	for (size_t i = 0; i < PendingPersistentStructuredBufferUploads.size(); ++i)
+	{
+		PendingPersistentStructuredBufferUpload& pending = PendingPersistentStructuredBufferUploads[i];
+		bool completed = true;
+		if (pending.Fence != VK_NULL_HANDLE)
+		{
+			if (waitForAll)
+			{
+				vkWaitForFences(Device, 1, &pending.Fence, VK_TRUE, UINT64_MAX);
+			}
+			else
+			{
+				const VkResult fenceStatus = vkGetFenceStatus(Device, pending.Fence);
+				completed = fenceStatus == VK_SUCCESS;
+				if (fenceStatus != VK_SUCCESS && fenceStatus != VK_NOT_READY)
+					completed = true;
+			}
+		}
+
+		if (completed)
+		{
+			if (pending.CommandBuffer != VK_NULL_HANDLE && CommandPool != VK_NULL_HANDLE)
+				vkFreeCommandBuffers(Device, CommandPool, 1, &pending.CommandBuffer);
+			if (pending.StagingBuffer != VK_NULL_HANDLE)
+				vkDestroyBuffer(Device, pending.StagingBuffer, nullptr);
+			if (pending.StagingMemory != VK_NULL_HANDLE)
+				vkFreeMemory(Device, pending.StagingMemory, nullptr);
+			if (pending.Fence != VK_NULL_HANDLE)
+				vkDestroyFence(Device, pending.Fence, nullptr);
+			PendingPersistentStructuredBufferUploadBytes -=
+				std::min<uint64_t>(
+					PendingPersistentStructuredBufferUploadBytes,
+					static_cast<uint64_t>(pending.Bytes));
+			continue;
+		}
+
+		if (kept != i)
+			PendingPersistentStructuredBufferUploads[kept] = pending;
+		++kept;
+	}
+	PendingPersistentStructuredBufferUploads.resize(kept);
+#else
+	(void)waitForAll;
+#endif
+}
+
+bool VulkanBackend::AllocatePersistentStructuredBufferRange(
+	VkDeviceSize size,
+	VkDeviceSize alignment,
+	const void* srcData,
+	VulkanBufferAllocation& outAllocation)
+{
+	outAllocation = {};
+#if !CORONA_HAS_VULKAN
+	(void)size; (void)alignment; (void)srcData;
+	return false;
+#else
+	if (size == 0 || !srcData)
+		return false;
+
+	const VkDeviceSize align = std::max<VkDeviceSize>(alignment > 0 ? alignment : 4, StorageBufferAlignment);
+	auto allocateFromBlock = [&](const std::shared_ptr<VulkanPersistentBufferBlock>& block) -> bool
+	{
+		if (!block || block->Buffer == VK_NULL_HANDLE)
+			return false;
+
+		for (size_t rangeIndex = 0; rangeIndex < block->FreeRanges.size(); ++rangeIndex)
+		{
+			VulkanPersistentBufferBlock::FreeRange range = block->FreeRanges[rangeIndex];
+			const VkDeviceSize alignedOffset = AlignVkDeviceSize(range.Offset, align);
+			const VkDeviceSize rangeEnd = range.Offset + range.Size;
+			if (alignedOffset > rangeEnd || alignedOffset + size > rangeEnd)
+				continue;
+
+			auto insertIt = block->FreeRanges.erase(block->FreeRanges.begin() + rangeIndex);
+			if (alignedOffset > range.Offset)
+			{
+				insertIt = block->FreeRanges.insert(insertIt, { range.Offset, alignedOffset - range.Offset });
+				++insertIt;
+			}
+			const VkDeviceSize allocEnd = alignedOffset + size;
+			if (allocEnd < rangeEnd)
+			{
+				block->FreeRanges.insert(insertIt, { allocEnd, rangeEnd - allocEnd });
+			}
+
+			outAllocation.Buffer = block->Buffer;
+			outAllocation.Memory = block->Memory;
+			outAllocation.Offset = alignedOffset;
+			outAllocation.SizeInBytes = static_cast<uint32_t>(size);
+			outAllocation.PersistentPoolBlock = block;
+			++PersistentStructuredBufferAllocationCount;
+			PersistentStructuredBufferBytesIssued += size;
+			return true;
+		}
+
+		const VkDeviceSize alignedCursor = AlignVkDeviceSize(block->Cursor, align);
+		if (alignedCursor + size > block->Capacity)
+			return false;
+		outAllocation.Buffer = block->Buffer;
+		outAllocation.Memory = block->Memory;
+		outAllocation.Offset = alignedCursor;
+		outAllocation.SizeInBytes = static_cast<uint32_t>(size);
+		outAllocation.PersistentPoolBlock = block;
+		block->Cursor = alignedCursor + size;
+		++PersistentStructuredBufferAllocationCount;
+		PersistentStructuredBufferBytesIssued += size;
+		return true;
+	};
+
+	for (const std::shared_ptr<VulkanPersistentBufferBlock>& block : PersistentStructuredBufferBlocks)
+	{
+		if (allocateFromBlock(block))
+			goto upload;
+	}
+
+	{
+		const VkDeviceSize requestedSize = size + align;
+		const VkDeviceSize blockSize = std::max<VkDeviceSize>(PersistentStructuredBufferBlockDefaultSize, requestedSize);
+		auto block = std::make_shared<VulkanPersistentBufferBlock>();
+		block->OwningDevice = Device;
+		block->Capacity = blockSize;
+
+		VkBufferCreateInfo bufferInfo{};
+		bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+		bufferInfo.size = blockSize;
+		bufferInfo.usage =
+			VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+			VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+			VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT;
+		if (bRayTracingEnabled)
+		{
+			bufferInfo.usage |= VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+		}
+		bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+		if (vkCreateBuffer(Device, &bufferInfo, nullptr, &block->Buffer) != VK_SUCCESS)
+			return false;
+
+		VkMemoryRequirements memReq{};
+		vkGetBufferMemoryRequirements(Device, block->Buffer, &memReq);
+
+		uint32_t memoryTypeIndex = UINT32_MAX;
+		VkPhysicalDeviceMemoryProperties memProps{};
+		vkGetPhysicalDeviceMemoryProperties(PhysicalDevice, &memProps);
+		for (uint32_t i = 0; i < memProps.memoryTypeCount; ++i)
+		{
+			if (!(memReq.memoryTypeBits & (1u << i)))
+				continue;
+			if (memProps.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
+			{
+				memoryTypeIndex = i;
+				break;
+			}
+		}
+		if (memoryTypeIndex == UINT32_MAX)
+		{
+			vkDestroyBuffer(Device, block->Buffer, nullptr);
+			block->Buffer = VK_NULL_HANDLE;
+			return false;
+		}
+
+		VkMemoryAllocateFlagsInfo allocFlags{};
+		allocFlags.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO;
+		if (bRayTracingEnabled)
+			allocFlags.flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT;
+
+		VkMemoryAllocateInfo allocInfo{};
+		allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+		allocInfo.pNext = bRayTracingEnabled ? &allocFlags : nullptr;
+		allocInfo.allocationSize = memReq.size;
+		allocInfo.memoryTypeIndex = memoryTypeIndex;
+		if (vkAllocateMemory(Device, &allocInfo, nullptr, &block->Memory) != VK_SUCCESS)
+		{
+			vkDestroyBuffer(Device, block->Buffer, nullptr);
+			block->Buffer = VK_NULL_HANDLE;
+			return false;
+		}
+		if (vkBindBufferMemory(Device, block->Buffer, block->Memory, 0) != VK_SUCCESS)
+		{
+			vkFreeMemory(Device, block->Memory, nullptr);
+			vkDestroyBuffer(Device, block->Buffer, nullptr);
+			block->Memory = VK_NULL_HANDLE;
+			block->Buffer = VK_NULL_HANDLE;
+			return false;
+		}
+
+		PersistentStructuredBufferBlocks.push_back(block);
+		++PersistentStructuredBufferBlockCount;
+		PersistentStructuredBufferBytesReserved += blockSize;
+		if (!allocateFromBlock(block))
+			return false;
+	}
+
+upload:
+	if (outAllocation.Buffer == VK_NULL_HANDLE || outAllocation.SizeInBytes == 0)
+		return false;
+
+	RetirePersistentStructuredBufferUploads(false);
+
+	auto releaseReservedRange = [&]()
+	{
+		if (outAllocation.PersistentPoolBlock && outAllocation.SizeInBytes != 0)
+		{
+			AddPersistentStructuredBufferFreeRange(
+				outAllocation.PersistentPoolBlock,
+				outAllocation.Offset,
+				static_cast<VkDeviceSize>(outAllocation.SizeInBytes));
+		}
+		outAllocation = {};
+	};
+
+	VkBuffer stagingBuffer = VK_NULL_HANDLE;
+	VkDeviceMemory stagingMemory = VK_NULL_HANDLE;
+	VkFence uploadFence = VK_NULL_HANDLE;
+	auto cleanupStaging = [&]()
+	{
+		if (stagingBuffer != VK_NULL_HANDLE)
+			vkDestroyBuffer(Device, stagingBuffer, nullptr);
+		if (stagingMemory != VK_NULL_HANDLE)
+			vkFreeMemory(Device, stagingMemory, nullptr);
+		if (uploadFence != VK_NULL_HANDLE)
+			vkDestroyFence(Device, uploadFence, nullptr);
+	};
+
+	if (!CreateBufferWithMemory(
+		size,
+		VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+		VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+		false,
+		stagingBuffer,
+		stagingMemory))
+	{
+		releaseReservedRange();
+		return false;
+	}
+
+	void* mappedData = nullptr;
+	if (vkMapMemory(Device, stagingMemory, 0, size, 0, &mappedData) != VK_SUCCESS)
+	{
+		cleanupStaging();
+		releaseReservedRange();
+		return false;
+	}
+	std::memcpy(mappedData, srcData, static_cast<size_t>(size));
+	vkUnmapMemory(Device, stagingMemory);
+
+	VkCommandBufferAllocateInfo commandBufferAllocInfo{};
+	commandBufferAllocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+	commandBufferAllocInfo.commandPool = CommandPool;
+	commandBufferAllocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+	commandBufferAllocInfo.commandBufferCount = 1;
+	VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
+	if (vkAllocateCommandBuffers(Device, &commandBufferAllocInfo, &commandBuffer) != VK_SUCCESS)
+	{
+		cleanupStaging();
+		releaseReservedRange();
+		return false;
+	}
+
+	VkCommandBufferBeginInfo beginInfo{};
+	beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+	beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+	if (vkBeginCommandBuffer(commandBuffer, &beginInfo) != VK_SUCCESS)
+	{
+		vkFreeCommandBuffers(Device, CommandPool, 1, &commandBuffer);
+		cleanupStaging();
+		releaseReservedRange();
+		return false;
+	}
+
+	VkBufferCopy copyRegion{};
+	copyRegion.srcOffset = 0;
+	copyRegion.dstOffset = outAllocation.Offset;
+	copyRegion.size = size;
+	vkCmdCopyBuffer(commandBuffer, stagingBuffer, outAllocation.Buffer, 1, &copyRegion);
+
+	VkBufferMemoryBarrier barrier{};
+	barrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+	barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+	barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+	barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	barrier.buffer = outAllocation.Buffer;
+	barrier.offset = outAllocation.Offset;
+	barrier.size = size;
+	vkCmdPipelineBarrier(
+		commandBuffer,
+		VK_PIPELINE_STAGE_TRANSFER_BIT,
+		VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+		0,
+		0, nullptr,
+		1, &barrier,
+		0, nullptr);
+
+	if (vkEndCommandBuffer(commandBuffer) != VK_SUCCESS)
+	{
+		vkFreeCommandBuffers(Device, CommandPool, 1, &commandBuffer);
+		cleanupStaging();
+		releaseReservedRange();
+		return false;
+	}
+
+	VkFenceCreateInfo fenceInfo{};
+	fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+	if (vkCreateFence(Device, &fenceInfo, nullptr, &uploadFence) != VK_SUCCESS)
+	{
+		vkFreeCommandBuffers(Device, CommandPool, 1, &commandBuffer);
+		cleanupStaging();
+		releaseReservedRange();
+		return false;
+	}
+
+	VkSubmitInfo submitInfo{};
+	submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+	submitInfo.commandBufferCount = 1;
+	submitInfo.pCommandBuffers = &commandBuffer;
+	if (vkQueueSubmit(GraphicsQueue, 1, &submitInfo, uploadFence) != VK_SUCCESS)
+	{
+		vkFreeCommandBuffers(Device, CommandPool, 1, &commandBuffer);
+		cleanupStaging();
+		releaseReservedRange();
+		return false;
+	}
+
+	PendingPersistentStructuredBufferUploads.push_back({
+		uploadFence,
+		commandBuffer,
+		stagingBuffer,
+		stagingMemory,
+		size
+	});
+	PendingPersistentStructuredBufferUploadBytes += static_cast<uint64_t>(size);
+	uploadFence = VK_NULL_HANDLE;
+	stagingBuffer = VK_NULL_HANDLE;
+	stagingMemory = VK_NULL_HANDLE;
+	commandBuffer = VK_NULL_HANDLE;
+
+	if (PendingPersistentStructuredBufferUploadBytes > kMaxInFlightPersistentStructuredBufferUploadBytes)
+		RetirePersistentStructuredBufferUploads(true);
+
+	return true;
+#endif
+}
+
+std::shared_ptr<Buffer> VulkanBackend::CreateSuballocatedStructuredBuffer(const BufferCreateDesc& desc)
+{
+#if !CORONA_HAS_VULKAN
+	(void)desc;
+	return nullptr;
+#else
+	if (desc.NumElements == 0 || desc.ElementSize == 0 || !desc.InitialData)
+		return nullptr;
+
+	const uint64_t sizeInBytes64 =
+		static_cast<uint64_t>(desc.NumElements) * static_cast<uint64_t>(desc.ElementSize);
+	if (sizeInBytes64 > UINT32_MAX)
+		return nullptr;
+
+	VulkanBufferAllocation allocation{};
+	if (!AllocatePersistentStructuredBufferRange(
+		static_cast<VkDeviceSize>(sizeInBytes64),
+		static_cast<VkDeviceSize>(desc.ElementSize),
+		desc.InitialData,
+		allocation))
+	{
+		return nullptr;
+	}
+	allocation.Stride = desc.ElementSize;
+
+	auto buffer = CreateTrackedBufferHandle();
+	buffer->NumElements = desc.NumElements;
+	buffer->ElementSize = desc.ElementSize;
+	buffer->Type = Buffer::STRUCTURED;
+	BufferAllocations[buffer.get()] = allocation;
+	return buffer;
+#endif
+}
+
 bool VulkanBackend::AllocateUploadBufferRange(
 	VkDeviceSize size,
 	VkDeviceSize alignment,
@@ -5228,7 +6267,7 @@ bool VulkanBackend::AllocateUploadBufferRange(
 		if (!ActiveUploadBlock)
 			return false;
 		VulkanUploadHeapBlock& block = *ActiveUploadBlock;
-		const VkDeviceSize alignedCursor = (block.Cursor + alignment - 1) & ~(alignment - 1);
+		const VkDeviceSize alignedCursor = AlignVkDeviceSize(block.Cursor, alignment);
 		if (alignedCursor + size > block.Capacity)
 			return false;
 		outAllocation.Buffer = block.Buffer;
@@ -5336,6 +6375,147 @@ bool VulkanBackend::AllocateUploadBufferRange(
 	return tryAllocateFromActive();
 #endif
 }
+
+#if CORONA_HAS_VULKAN
+void VulkanBackend::ResetTransientUploadStructuredFrame(uint32_t frameIndex)
+{
+	const size_t frameCount = std::max<size_t>(FrameContexts.size(), 1u);
+	if (TransientUploadStructuredFrames.size() < frameCount)
+		TransientUploadStructuredFrames.resize(frameCount);
+	if (frameIndex >= TransientUploadStructuredFrames.size())
+		return;
+
+	VulkanTransientUploadStructuredFrame& frame = TransientUploadStructuredFrames[frameIndex];
+	frame.KeepAlive.clear();
+	for (const std::shared_ptr<VulkanUploadHeapBlock>& block : frame.Blocks)
+	{
+		if (block)
+			block->Cursor = 0;
+	}
+}
+
+bool VulkanBackend::AllocateTransientUploadStructuredRange(
+	uint32_t frameIndex,
+	VkDeviceSize size,
+	VkDeviceSize alignment,
+	const void* srcData,
+	VulkanBufferAllocation& outAllocation)
+{
+	outAllocation = {};
+	if (size == 0)
+		return false;
+
+	const size_t frameCount = std::max<size_t>(FrameContexts.size(), 1u);
+	if (TransientUploadStructuredFrames.size() < frameCount)
+		TransientUploadStructuredFrames.resize(frameCount);
+	if (frameIndex >= TransientUploadStructuredFrames.size())
+		frameIndex = 0;
+
+	VulkanTransientUploadStructuredFrame& frame = TransientUploadStructuredFrames[frameIndex];
+	const VkDeviceSize align = std::max<VkDeviceSize>(alignment > 0 ? alignment : 4, StorageBufferAlignment);
+
+	auto allocateFromBlock = [&](const std::shared_ptr<VulkanUploadHeapBlock>& block) -> bool
+	{
+		if (!block || block->Buffer == VK_NULL_HANDLE || !block->MappedBase)
+			return false;
+		const VkDeviceSize alignedCursor = AlignVkDeviceSize(block->Cursor, align);
+		if (alignedCursor + size > block->Capacity)
+			return false;
+		outAllocation.Buffer = block->Buffer;
+		outAllocation.Memory = block->Memory;
+		outAllocation.Offset = alignedCursor;
+		outAllocation.SizeInBytes = static_cast<uint32_t>(size);
+		outAllocation.PoolBlock = block;
+		if (srcData)
+			std::memcpy(block->MappedBase + alignedCursor, srcData, static_cast<size_t>(size));
+		block->Cursor = alignedCursor + size;
+		++TransientUploadStructuredAllocationCount;
+		TransientUploadStructuredBytesIssued += size;
+		return true;
+	};
+
+	for (const std::shared_ptr<VulkanUploadHeapBlock>& block : frame.Blocks)
+	{
+		if (allocateFromBlock(block))
+			return true;
+	}
+
+	const VkDeviceSize requestedSize = size + align;
+	const VkDeviceSize blockSize = std::max<VkDeviceSize>(TransientUploadStructuredBlockDefaultSize, requestedSize);
+	auto block = std::make_shared<VulkanUploadHeapBlock>();
+	block->OwningDevice = Device;
+	block->Capacity = blockSize;
+
+	VkBufferCreateInfo bufferInfo{};
+	bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+	bufferInfo.size = blockSize;
+	bufferInfo.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+	bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+	if (vkCreateBuffer(Device, &bufferInfo, nullptr, &block->Buffer) != VK_SUCCESS)
+		return false;
+
+	VkMemoryRequirements memReq{};
+	vkGetBufferMemoryRequirements(Device, block->Buffer, &memReq);
+
+	uint32_t memoryTypeIndex = UINT32_MAX;
+	VkPhysicalDeviceMemoryProperties memProps{};
+	vkGetPhysicalDeviceMemoryProperties(PhysicalDevice, &memProps);
+	const VkMemoryPropertyFlags wantProps =
+		VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+	for (uint32_t i = 0; i < memProps.memoryTypeCount; ++i)
+	{
+		if (!(memReq.memoryTypeBits & (1u << i)))
+			continue;
+		if ((memProps.memoryTypes[i].propertyFlags & wantProps) == wantProps)
+		{
+			memoryTypeIndex = i;
+			break;
+		}
+	}
+	if (memoryTypeIndex == UINT32_MAX)
+	{
+		vkDestroyBuffer(Device, block->Buffer, nullptr);
+		block->Buffer = VK_NULL_HANDLE;
+		return false;
+	}
+
+	VkMemoryAllocateInfo allocInfo{};
+	allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+	allocInfo.allocationSize = memReq.size;
+	allocInfo.memoryTypeIndex = memoryTypeIndex;
+	if (vkAllocateMemory(Device, &allocInfo, nullptr, &block->Memory) != VK_SUCCESS)
+	{
+		vkDestroyBuffer(Device, block->Buffer, nullptr);
+		block->Buffer = VK_NULL_HANDLE;
+		return false;
+	}
+	if (vkBindBufferMemory(Device, block->Buffer, block->Memory, 0) != VK_SUCCESS)
+	{
+		vkFreeMemory(Device, block->Memory, nullptr);
+		vkDestroyBuffer(Device, block->Buffer, nullptr);
+		block->Memory = VK_NULL_HANDLE;
+		block->Buffer = VK_NULL_HANDLE;
+		return false;
+	}
+
+	void* mapped = nullptr;
+	if (vkMapMemory(Device, block->Memory, 0, VK_WHOLE_SIZE, 0, &mapped) != VK_SUCCESS)
+	{
+		vkFreeMemory(Device, block->Memory, nullptr);
+		vkDestroyBuffer(Device, block->Buffer, nullptr);
+		block->Memory = VK_NULL_HANDLE;
+		block->Buffer = VK_NULL_HANDLE;
+		return false;
+	}
+	block->MappedBase = static_cast<uint8_t*>(mapped);
+	block->Cursor = 0;
+	frame.Blocks.push_back(block);
+	++TransientUploadStructuredBlockCount;
+	TransientUploadStructuredBytesReserved += blockSize;
+
+	return allocateFromBlock(block);
+}
+#endif
 
 std::shared_ptr<VertexBuffer> VulkanBackend::CreateRWVertexBuffer(uint32_t size, uint32_t stride)
 {
@@ -5455,6 +6635,45 @@ void VulkanBackend::UpdateUploadStructuredBuffer(Buffer* buffer, const void* src
 		return;
 	const uint32_t copyBytes = std::min<uint32_t>(sizeInBytes, alloc.SizeInBytes);
 	std::memcpy(alloc.PoolBlock->MappedBase + alloc.Offset, srcData, copyBytes);
+#endif
+}
+
+std::shared_ptr<Buffer> VulkanBackend::AllocateTransientUploadStructuredBuffer(uint32_t numElements, uint32_t elementSize, const void* srcData)
+{
+	if (numElements == 0 || elementSize == 0)
+		return nullptr;
+#if !CORONA_HAS_VULKAN
+	(void)srcData;
+	return nullptr;
+#else
+	const uint64_t sizeInBytes64 = static_cast<uint64_t>(numElements) * static_cast<uint64_t>(elementSize);
+	if (sizeInBytes64 > UINT32_MAX)
+		return nullptr;
+
+	VulkanBufferAllocation allocation{};
+	if (!AllocateTransientUploadStructuredRange(
+		CurrentFrameIndex,
+		static_cast<VkDeviceSize>(sizeInBytes64),
+		static_cast<VkDeviceSize>(elementSize),
+		srcData,
+		allocation))
+	{
+		return nullptr;
+	}
+	allocation.Stride = elementSize;
+
+	auto buf = CreateTrackedBufferHandle();
+	buf->Type = Buffer::STRUCTURED;
+	buf->NumElements = numElements;
+	buf->ElementSize = elementSize;
+	BufferAllocations[buf.get()] = allocation;
+
+	const size_t frameCount = std::max<size_t>(FrameContexts.size(), 1u);
+	if (TransientUploadStructuredFrames.size() < frameCount)
+		TransientUploadStructuredFrames.resize(frameCount);
+	const uint32_t frameIndex = CurrentFrameIndex < TransientUploadStructuredFrames.size() ? CurrentFrameIndex : 0u;
+	TransientUploadStructuredFrames[frameIndex].KeepAlive.push_back(buf);
+	return buf;
 #endif
 }
 
@@ -6544,6 +7763,7 @@ void VulkanBackend::CreateSwapChainForWindow(WindowHandle window, uint32_t width
 	vkGetPhysicalDeviceProperties(PhysicalDevice, &physicalDeviceProperties);
 	TimestampPeriodNs = physicalDeviceProperties.limits.timestampPeriod;
 	UniformBufferAlignment = std::max<VkDeviceSize>(256, physicalDeviceProperties.limits.minUniformBufferOffsetAlignment);
+	StorageBufferAlignment = std::max<VkDeviceSize>(4, physicalDeviceProperties.limits.minStorageBufferOffsetAlignment);
 	MaxUniformBufferRange = physicalDeviceProperties.limits.maxUniformBufferRange;
 	bDescriptorIndexingEnabled = false;
 	bBindlessTextureTableReady = false;
@@ -7398,23 +8618,43 @@ void VulkanBackend::BindGraphicsPipelineForDraw(VulkanGraphicsPipelineHandle* pi
 	if (descriptorSet == VK_NULL_HANDLE)
 		return;
 
+	std::array<const VulkanGraphicsBindGroupHandle*, kMaxGraphicsBindGroupSlots> bindGroups{};
+	size_t bindGroupTextureCount = 0;
+	size_t bindGroupBufferCount = 0;
+	size_t bindGroupSamplerCount = 0;
+	const VulkanGraphicsBindGroupHandle* constantBindGroup = nullptr;
+	for (uint32_t slot = 0; slot < kMaxGraphicsBindGroupSlots; ++slot)
+	{
+		const VulkanGraphicsBindGroupHandle* bindGroup =
+			(pipeline->BoundBindGroups[slot] && pipeline->BoundBindGroups[slot]->Pipeline == pipeline) ?
+			pipeline->BoundBindGroups[slot].get() :
+			nullptr;
+		bindGroups[slot] = bindGroup;
+		if (!bindGroup)
+			continue;
+		bindGroupTextureCount += bindGroup->Textures.size();
+		bindGroupBufferCount += bindGroup->Buffers.size();
+		bindGroupSamplerCount += bindGroup->Samplers.size();
+		if (bindGroup->bHasConstantData)
+			constantBindGroup = bindGroup;
+	}
+
 	std::vector<VkDescriptorImageInfo> imageInfos;
 	std::vector<VkDescriptorBufferInfo> bufferInfos;
 	std::vector<VkWriteDescriptorSet> descriptorWrites;
-	imageInfos.reserve(pipeline->TextureBindingSlots.size() + pipeline->SamplerBindingSlots.size());
+	imageInfos.reserve(bindGroupTextureCount + bindGroupSamplerCount);
 	bufferInfos.reserve(
 		(pipeline->Desc.ConstantBufferSize > 0 ? 1 : 0) +
-		pipeline->BufferBindingSlots.size() +
-		pipeline->BoundVertexBuffers.size());
+		bindGroupBufferCount);
 	descriptorWrites.reserve(
 		(pipeline->Desc.ConstantBufferSize > 0 ? 1 : 0) +
-		pipeline->TextureBindingSlots.size() +
-		pipeline->BufferBindingSlots.size() +
-		pipeline->SamplerBindingSlots.size());
+		bindGroupTextureCount +
+		bindGroupBufferCount +
+		bindGroupSamplerCount);
 
 	if (pipeline->Desc.ConstantBufferSize > 0)
 	{
-		if (pipeline->ConstantData.empty())
+		if (!constantBindGroup || constantBindGroup->ConstantData.empty())
 			return;
 
 		VkBuffer uniformBuffer = VK_NULL_HANDLE;
@@ -7422,7 +8662,8 @@ void VulkanBackend::BindGraphicsPipelineForDraw(VulkanGraphicsPipelineHandle* pi
 		void* mappedData = nullptr;
 		if (!AllocateTransientUniform(pipeline->Desc.ConstantBufferSize, uniformBuffer, uniformOffset, &mappedData))
 			return;
-		std::memcpy(mappedData, pipeline->ConstantData.data(), pipeline->ConstantData.size());
+		const size_t copySize = (std::min)(constantBindGroup->ConstantData.size(), static_cast<size_t>(pipeline->Desc.ConstantBufferSize));
+		std::memcpy(mappedData, constantBindGroup->ConstantData.data(), copySize);
 
 		VkDescriptorBufferInfo& bufferInfo = bufferInfos.emplace_back();
 		bufferInfo.buffer = uniformBuffer;
@@ -7432,20 +8673,19 @@ void VulkanBackend::BindGraphicsPipelineForDraw(VulkanGraphicsPipelineHandle* pi
 		VkWriteDescriptorSet& writeDescriptor = descriptorWrites.emplace_back();
 		writeDescriptor.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
 		writeDescriptor.dstSet = descriptorSet;
-		writeDescriptor.dstBinding = pipeline->ConstantBufferDescriptorBinding;
+		writeDescriptor.dstBinding = constantBindGroup->ConstantDataBinding;
 		writeDescriptor.descriptorCount = 1;
 		writeDescriptor.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
 		writeDescriptor.pBufferInfo = &bufferInfo;
 	}
 
-	for (const auto& bindingPair : pipeline->TextureBindingSlots)
+	auto writeTextureDescriptor = [&](uint32_t descriptorBinding, Texture* texture)
 	{
-		auto textureBindingIt = pipeline->BoundTextures.find(bindingPair.first);
-		if (textureBindingIt == pipeline->BoundTextures.end() || textureBindingIt->second == nullptr)
-			continue;
-		auto textureIt = TextureAllocations.find(textureBindingIt->second);
+		if (!texture)
+			return;
+		auto textureIt = TextureAllocations.find(texture);
 		if (textureIt == TextureAllocations.end())
-			continue;
+			return;
 
 		VkDescriptorImageInfo& imageInfo = imageInfos.emplace_back();
 		imageInfo.sampler = VK_NULL_HANDLE;
@@ -7455,40 +8695,38 @@ void VulkanBackend::BindGraphicsPipelineForDraw(VulkanGraphicsPipelineHandle* pi
 		VkWriteDescriptorSet& writeDescriptor = descriptorWrites.emplace_back();
 		writeDescriptor.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
 		writeDescriptor.dstSet = descriptorSet;
-		writeDescriptor.dstBinding = bindingPair.second;
+		writeDescriptor.dstBinding = descriptorBinding;
 		writeDescriptor.descriptorCount = 1;
 		writeDescriptor.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
 		writeDescriptor.pImageInfo = &imageInfo;
-	}
+	};
 
-	for (const auto& bindingPair : pipeline->BufferBindingSlots)
+	auto writeBufferDescriptor = [&](uint32_t descriptorBinding, Buffer* buffer, VertexBuffer* vertexBuffer)
 	{
-		auto bufferBindingIt = pipeline->BoundBuffers.find(bindingPair.first);
-		auto vertexBufferBindingIt = pipeline->BoundVertexBuffers.find(bindingPair.first);
 		VkBuffer descriptorBuffer = VK_NULL_HANDLE;
 		VkDeviceSize descriptorOffset = 0;
 		VkDeviceSize descriptorRange = 0;
-		if (bufferBindingIt != pipeline->BoundBuffers.end() && bufferBindingIt->second != nullptr)
+		if (buffer)
 		{
-			auto bufferIt = BufferAllocations.find(bufferBindingIt->second);
+			auto bufferIt = BufferAllocations.find(buffer);
 			if (bufferIt == BufferAllocations.end())
-				continue;
+				return;
 			descriptorBuffer = bufferIt->second.Buffer;
 			descriptorOffset = bufferIt->second.Offset;
 			descriptorRange = bufferIt->second.SizeInBytes;
 		}
-		else if (vertexBufferBindingIt != pipeline->BoundVertexBuffers.end() && vertexBufferBindingIt->second != nullptr)
+		else if (vertexBuffer)
 		{
-			auto vertexBufferIt = VertexBufferAllocations.find(vertexBufferBindingIt->second);
+			auto vertexBufferIt = VertexBufferAllocations.find(vertexBuffer);
 			if (vertexBufferIt == VertexBufferAllocations.end())
-				continue;
+				return;
 			descriptorBuffer = vertexBufferIt->second.Buffer;
 			descriptorOffset = vertexBufferIt->second.Offset;
 			descriptorRange = vertexBufferIt->second.SizeInBytes;
 		}
 		else
 		{
-			continue;
+			return;
 		}
 
 		VkDescriptorBufferInfo& bufferInfo = bufferInfos.emplace_back();
@@ -7499,20 +8737,19 @@ void VulkanBackend::BindGraphicsPipelineForDraw(VulkanGraphicsPipelineHandle* pi
 		VkWriteDescriptorSet& writeDescriptor = descriptorWrites.emplace_back();
 		writeDescriptor.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
 		writeDescriptor.dstSet = descriptorSet;
-		writeDescriptor.dstBinding = bindingPair.second;
+		writeDescriptor.dstBinding = descriptorBinding;
 		writeDescriptor.descriptorCount = 1;
 		writeDescriptor.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
 		writeDescriptor.pBufferInfo = &bufferInfo;
-	}
+	};
 
-	for (const auto& bindingPair : pipeline->SamplerBindingSlots)
+	auto writeSamplerDescriptor = [&](uint32_t descriptorBinding, Sampler* sampler)
 	{
-		auto samplerBindingIt = pipeline->BoundSamplers.find(bindingPair.first);
-		if (samplerBindingIt == pipeline->BoundSamplers.end() || samplerBindingIt->second == nullptr)
-			continue;
-		auto samplerIt = SamplerAllocations.find(samplerBindingIt->second);
+		if (!sampler)
+			return;
+		auto samplerIt = SamplerAllocations.find(sampler);
 		if (samplerIt == SamplerAllocations.end())
-			continue;
+			return;
 
 		VkDescriptorImageInfo& imageInfo = imageInfos.emplace_back();
 		imageInfo.sampler = samplerIt->second.SamplerHandle;
@@ -7522,10 +8759,22 @@ void VulkanBackend::BindGraphicsPipelineForDraw(VulkanGraphicsPipelineHandle* pi
 		VkWriteDescriptorSet& writeDescriptor = descriptorWrites.emplace_back();
 		writeDescriptor.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
 		writeDescriptor.dstSet = descriptorSet;
-		writeDescriptor.dstBinding = bindingPair.second;
+		writeDescriptor.dstBinding = descriptorBinding;
 		writeDescriptor.descriptorCount = 1;
 		writeDescriptor.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
 		writeDescriptor.pImageInfo = &imageInfo;
+	};
+
+	for (const VulkanGraphicsBindGroupHandle* bindGroup : bindGroups)
+	{
+		if (!bindGroup)
+			continue;
+		for (const auto& binding : bindGroup->Textures)
+			writeTextureDescriptor(binding.Binding, binding.TextureValue);
+		for (const auto& binding : bindGroup->Buffers)
+			writeBufferDescriptor(binding.Binding, binding.BufferValue, binding.VertexBufferValue);
+		for (const auto& binding : bindGroup->Samplers)
+			writeSamplerDescriptor(binding.Binding, binding.SamplerValue);
 	}
 
 	if (!descriptorWrites.empty())
@@ -8278,6 +9527,7 @@ void VulkanBackend::DestroyWindowContext()
 		AppendVulkanRuntimeTraceBackend(L"[VulkanBackend::DestroyWindowContext] before vkDeviceWaitIdle");
 		vkDeviceWaitIdle(Device);
 		AppendVulkanRuntimeTraceBackend(L"[VulkanBackend::DestroyWindowContext] after vkDeviceWaitIdle");
+		RetirePersistentStructuredBufferUploads(true);
 	}
 
 	for (VkFramebuffer framebuffer : SwapchainFramebuffers)
@@ -8382,6 +9632,8 @@ void VulkanBackend::DestroyWindowContext()
 	ActiveUploadBlock.reset();
 	for (auto& entry : BufferAllocations)
 	{
+		if (entry.second.PoolBlock || entry.second.PersistentPoolBlock)
+			continue;
 		if (entry.second.Buffer != VK_NULL_HANDLE)
 			vkDestroyBuffer(Device, entry.second.Buffer, nullptr);
 		if (entry.second.Memory != VK_NULL_HANDLE)
@@ -8413,6 +9665,10 @@ void VulkanBackend::DestroyWindowContext()
 	VertexBufferAllocations.clear();
 	IndexBufferAllocations.clear();
 	BufferAllocations.clear();
+	PendingPersistentStructuredBufferUploads.clear();
+	PendingPersistentStructuredBufferFrees.clear();
+	TransientUploadStructuredFrames.clear();
+	PersistentStructuredBufferBlocks.clear();
 	TextureAllocations.clear();
 	SamplerAllocations.clear();
 	RayTracingPipelines.clear();
@@ -9111,9 +10367,6 @@ std::shared_ptr<GraphicsPipelineHandle> VulkanBackend::CreateGraphicsPipeline(co
 			throw std::runtime_error("Failed to create Vulkan graphics descriptor set layout.");
 	}
 
-	if (desc.ConstantBufferSize > 0)
-		handle->ConstantData.resize(desc.ConstantBufferSize);
-
 	VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
 	pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
 	if (handle->DescriptorSetLayout != VK_NULL_HANDLE)
@@ -9330,6 +10583,82 @@ std::shared_ptr<GraphicsPipelineHandle> VulkanBackend::CreateGraphicsPipeline(co
 #endif
 }
 
+std::shared_ptr<GraphicsBindGroupHandle> VulkanBackend::CreateGraphicsBindGroup(const GraphicsBindGroupDesc& desc)
+{
+#if !CORONA_HAS_VULKAN
+	(void)desc;
+	ThrowNotImplemented(__FUNCTION__);
+#else
+	auto* vkPipeline = dynamic_cast<VulkanGraphicsPipelineHandle*>(desc.Pipeline);
+	if (!vkPipeline || vkPipeline->Pipeline == VK_NULL_HANDLE || desc.Slot >= kMaxGraphicsBindGroupSlots)
+		return nullptr;
+
+	auto handle = std::make_shared<VulkanGraphicsBindGroupHandle>();
+	handle->Pipeline = vkPipeline;
+	handle->Slot = desc.Slot;
+	handle->Textures.reserve(desc.Entries.size());
+	handle->Buffers.reserve(desc.Entries.size());
+	handle->Samplers.reserve(desc.Entries.size());
+
+	for (const GraphicsBindGroupEntry& entry : desc.Entries)
+	{
+		switch (entry.Type)
+		{
+		case EGraphicsBindGroupEntryType::TextureSRV:
+		{
+			if (!entry.TextureValue)
+				break;
+			const auto bindingIt = vkPipeline->TextureBindingSlots.find(entry.BindingName);
+			if (bindingIt != vkPipeline->TextureBindingSlots.end())
+				handle->Textures.push_back({ bindingIt->second, entry.TextureValue });
+			break;
+		}
+		case EGraphicsBindGroupEntryType::BufferSRV:
+		{
+			if (!entry.BufferValue)
+				break;
+			const auto bindingIt = vkPipeline->BufferBindingSlots.find(entry.BindingName);
+			if (bindingIt != vkPipeline->BufferBindingSlots.end())
+				handle->Buffers.push_back({ bindingIt->second, entry.BufferValue, nullptr });
+			break;
+		}
+		case EGraphicsBindGroupEntryType::VertexBufferSRV:
+		{
+			if (!entry.VertexBufferValue)
+				break;
+			const auto bindingIt = vkPipeline->BufferBindingSlots.find(entry.BindingName);
+			if (bindingIt != vkPipeline->BufferBindingSlots.end())
+				handle->Buffers.push_back({ bindingIt->second, nullptr, entry.VertexBufferValue });
+			break;
+		}
+		case EGraphicsBindGroupEntryType::Sampler:
+		{
+			if (!entry.SamplerValue)
+				break;
+			const auto bindingIt = vkPipeline->SamplerBindingSlots.find(entry.BindingName);
+			if (bindingIt != vkPipeline->SamplerBindingSlots.end())
+				handle->Samplers.push_back({ bindingIt->second, entry.SamplerValue });
+			break;
+		}
+		case EGraphicsBindGroupEntryType::ConstantData:
+		{
+			if (!entry.ConstantData || entry.ConstantDataSize == 0 || entry.Slot != 0 || vkPipeline->Desc.ConstantBufferSize == 0)
+				break;
+			handle->bHasConstantData = true;
+			handle->ConstantDataBinding = vkPipeline->ConstantBufferDescriptorBinding;
+			handle->ConstantDataSize = vkPipeline->Desc.ConstantBufferSize;
+			handle->ConstantData.assign(vkPipeline->Desc.ConstantBufferSize, 0);
+			const uint32_t copySize = (std::min)(entry.ConstantDataSize, vkPipeline->Desc.ConstantBufferSize);
+			std::memcpy(handle->ConstantData.data(), entry.ConstantData, copySize);
+			break;
+		}
+		}
+	}
+
+	return handle;
+#endif
+}
+
 void VulkanBackend::BindGraphicsPipeline(GraphicsPipelineHandle* pipeline)
 {
 	BoundGraphicsPipeline = pipeline;
@@ -9422,75 +10751,25 @@ void VulkanBackend::BindGraphicsPipeline(GraphicsPipelineHandle* pipeline)
 #endif
 }
 
-void VulkanBackend::SetGraphicsPipelineConstantData(GraphicsPipelineHandle* pipeline, uint32_t slot, const void* data, uint32_t size)
+void VulkanBackend::BindGraphicsBindGroup(GraphicsPipelineHandle* pipeline, uint32_t slot, const std::shared_ptr<GraphicsBindGroupHandle>& bindGroup)
 {
 #if CORONA_HAS_VULKAN
 	auto* vkPipeline = dynamic_cast<VulkanGraphicsPipelineHandle*>(pipeline);
-	if (!vkPipeline || !data || size == 0 || slot != 0 || vkPipeline->Desc.ConstantBufferSize == 0)
+	if (!vkPipeline || slot >= kMaxGraphicsBindGroupSlots)
 		return;
-	vkPipeline->ConstantData.assign(vkPipeline->Desc.ConstantBufferSize, 0);
-	const uint32_t copySize = (std::min)(size, vkPipeline->Desc.ConstantBufferSize);
-	std::memcpy(vkPipeline->ConstantData.data(), data, copySize);
-#else
-	(void)pipeline; (void)slot; (void)data; (void)size;
-#endif
-}
-
-void VulkanBackend::BindGraphicsPipelineTexture(GraphicsPipelineHandle* pipeline, const std::string& bindingName, Texture* texture)
-{
-#if CORONA_HAS_VULKAN
-	auto* vkPipeline = dynamic_cast<VulkanGraphicsPipelineHandle*>(pipeline);
-	if (!vkPipeline || !texture)
+	if (!bindGroup)
+	{
+		vkPipeline->BoundBindGroups[slot].reset();
 		return;
-	vkPipeline->BoundTextures[bindingName] = texture;
+	}
+	auto vkBindGroup = std::dynamic_pointer_cast<VulkanGraphicsBindGroupHandle>(bindGroup);
+	if (!vkBindGroup || vkBindGroup->Pipeline != vkPipeline || vkBindGroup->Slot != slot)
+		return;
+	vkPipeline->BoundBindGroups[slot] = vkBindGroup;
 #else
 	(void)pipeline;
-	(void)bindingName;
-	(void)texture;
-#endif
-}
-
-void VulkanBackend::BindGraphicsPipelineBuffer(GraphicsPipelineHandle* pipeline, const std::string& bindingName, Buffer* buffer)
-{
-#if CORONA_HAS_VULKAN
-	auto* vkPipeline = dynamic_cast<VulkanGraphicsPipelineHandle*>(pipeline);
-	if (!vkPipeline || !buffer)
-		return;
-	vkPipeline->BoundBuffers[bindingName] = buffer;
-	vkPipeline->BoundVertexBuffers.erase(bindingName);
-#else
-	(void)pipeline;
-	(void)bindingName;
-	(void)buffer;
-#endif
-}
-
-void VulkanBackend::BindGraphicsPipelineVertexBufferSRV(GraphicsPipelineHandle* pipeline, const std::string& bindingName, VertexBuffer* vb)
-{
-#if CORONA_HAS_VULKAN
-	auto* vkPipeline = dynamic_cast<VulkanGraphicsPipelineHandle*>(pipeline);
-	if (!vkPipeline || !vb)
-		return;
-	vkPipeline->BoundVertexBuffers[bindingName] = vb;
-	vkPipeline->BoundBuffers.erase(bindingName);
-#else
-	(void)pipeline;
-	(void)bindingName;
-	(void)vb;
-#endif
-}
-
-void VulkanBackend::BindGraphicsPipelineSampler(GraphicsPipelineHandle* pipeline, const std::string& bindingName, Sampler* sampler)
-{
-#if CORONA_HAS_VULKAN
-	auto* vkPipeline = dynamic_cast<VulkanGraphicsPipelineHandle*>(pipeline);
-	if (!vkPipeline || !sampler)
-		return;
-	vkPipeline->BoundSamplers[bindingName] = sampler;
-#else
-	(void)pipeline;
-	(void)bindingName;
-	(void)sampler;
+	(void)slot;
+	(void)bindGroup;
 #endif
 }
 

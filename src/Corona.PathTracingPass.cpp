@@ -196,7 +196,8 @@ bool Corona::EnsureRTMaterialRecordBuffer()
 	desc.InitialState = EInitialResourceState::ShaderRead;
 	desc.InitialData = records.data();
 	desc.Shape = EBufferShape::Structured;
-	desc.bUseDefaultHeap = true;
+	desc.Access = EBufferAccess::GpuOnly;
+	desc.AllocationPolicy = EBufferAllocationPolicy::Suballocated;
 
 	RTMaterialRecordBuffer = renderBackend->CreateBuffer(desc);
 	if (!RTMaterialRecordBuffer)
@@ -290,7 +291,8 @@ bool Corona::EnsureRTGeometryRecordBuffer()
 	desc.InitialState = EInitialResourceState::ShaderRead;
 	desc.InitialData = records.data();
 	desc.Shape = EBufferShape::Structured;
-	desc.bUseDefaultHeap = true;
+	desc.Access = EBufferAccess::GpuOnly;
+	desc.AllocationPolicy = EBufferAllocationPolicy::Suballocated;
 
 	RTGeometryRecordBuffer = renderBackend->CreateBuffer(desc);
 	if (!RTGeometryRecordBuffer)
@@ -320,7 +322,8 @@ bool Corona::EnsurePathTracingPointLightBuffer(UINT32 pointLightStateHash)
 	desc.InitialState = EInitialResourceState::ShaderRead;
 	desc.InitialData = uploadData.data();
 	desc.Shape = EBufferShape::Structured;
-	desc.bUseDefaultHeap = true;
+	desc.Access = EBufferAccess::GpuOnly;
+	desc.AllocationPolicy = EBufferAllocationPolicy::Suballocated;
 
 	PathTracingPointLightBuffer = renderBackend->CreateBuffer(desc);
 	if (!PathTracingPointLightBuffer)

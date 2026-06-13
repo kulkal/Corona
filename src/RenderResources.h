@@ -58,6 +58,7 @@ public:
 	// CreateUploadStructuredBuffer. Null for DEFAULT-heap buffers.
 	void* MappedPtr = nullptr;
 	uint32_t MappedSizeInBytes = 0;
+	uint64_t SuballocationOffsetBytes = 0;
 	// Persistent staging resource for dynamic updates into DEFAULT-heap buffers.
 	Microsoft::WRL::ComPtr<ID3D12Resource> UploadResource;
 	void* UploadMappedPtr = nullptr;
@@ -180,7 +181,67 @@ public:
 	std::shared_ptr<Texture> Normal;
 	std::shared_ptr<Texture> Roughness;
 	std::shared_ptr<Texture> Metallic;
+
+	GraphicsPipelineHandle* CachedGraphicsMaterialPipeline = nullptr;
+	Sampler* CachedGraphicsMaterialSampler = nullptr;
+	Texture* CachedGraphicsMaterialAlbedo = nullptr;
+	Texture* CachedGraphicsMaterialNormal = nullptr;
+	Texture* CachedGraphicsMaterialRoughness = nullptr;
+	Texture* CachedGraphicsMaterialMetallic = nullptr;
+	std::shared_ptr<GraphicsBindGroupHandle> CachedGraphicsMaterialBindGroup;
 };
+
+inline std::shared_ptr<GraphicsBindGroupHandle> CreateOrBindGraphicsMaterialBindGroup(
+	IRenderBackend* backend,
+	GraphicsPipelineHandle* pipeline,
+	Material* material,
+	Sampler* sampler,
+	Texture* albedo,
+	Texture* normal,
+	Texture* roughness,
+	Texture* metallic)
+{
+	if (!backend || !pipeline)
+		return nullptr;
+
+	if (material &&
+		material->CachedGraphicsMaterialBindGroup &&
+		material->CachedGraphicsMaterialPipeline == pipeline &&
+		material->CachedGraphicsMaterialSampler == sampler &&
+		material->CachedGraphicsMaterialAlbedo == albedo &&
+		material->CachedGraphicsMaterialNormal == normal &&
+		material->CachedGraphicsMaterialRoughness == roughness &&
+		material->CachedGraphicsMaterialMetallic == metallic)
+	{
+		backend->BindGraphicsBindGroup(pipeline, kGraphicsBindGroupSlot_Material, material->CachedGraphicsMaterialBindGroup);
+		return material->CachedGraphicsMaterialBindGroup;
+	}
+
+	GraphicsBindGroupDesc desc{};
+	desc.Pipeline = pipeline;
+	desc.Slot = kGraphicsBindGroupSlot_Material;
+	desc.Entries = {
+		GraphicsBindGroupEntry::SamplerBinding("samplerWrap", sampler),
+		GraphicsBindGroupEntry::TextureSRV("AlbedoTex", albedo),
+		GraphicsBindGroupEntry::TextureSRV("NormalTex", normal),
+		GraphicsBindGroupEntry::TextureSRV("RoughnessTex", roughness),
+		GraphicsBindGroupEntry::TextureSRV("MetallicTex", metallic),
+	};
+	std::shared_ptr<GraphicsBindGroupHandle> bindGroup = backend->CreateGraphicsBindGroup(desc);
+	backend->BindGraphicsBindGroup(pipeline, kGraphicsBindGroupSlot_Material, bindGroup);
+
+	if (material)
+	{
+		material->CachedGraphicsMaterialPipeline = pipeline;
+		material->CachedGraphicsMaterialSampler = sampler;
+		material->CachedGraphicsMaterialAlbedo = albedo;
+		material->CachedGraphicsMaterialNormal = normal;
+		material->CachedGraphicsMaterialRoughness = roughness;
+		material->CachedGraphicsMaterialMetallic = metallic;
+		material->CachedGraphicsMaterialBindGroup = bindGroup;
+	}
+	return bindGroup;
+}
 
 class Mesh
 {

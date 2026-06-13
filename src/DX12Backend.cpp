@@ -25,6 +25,8 @@
 #include <cstring>
 #include <cstdlib>
 #include <iomanip>
+#include <iterator>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <set>
@@ -382,6 +384,13 @@ namespace
 		return (size + 255u) & ~255u;
 	}
 
+	UINT64 AlignUploadOffset(UINT64 value, UINT64 alignment)
+	{
+		if (alignment <= 1)
+			return value;
+		return ((value + alignment - 1) / alignment) * alignment;
+	}
+
 	void CopyConstantBufferData(UINT8* destination, UINT destinationSize, const void* source, UINT sourceSize)
 	{
 		if (!destination || destinationSize == 0)
@@ -407,6 +416,24 @@ namespace
 		// dev cycle.
 		uint32_t VertexStride = 0;
 		std::wstring ShaderPathForDiag;
+	};
+
+	struct DX12GraphicsBindGroupEntry
+	{
+		EGraphicsBindGroupEntryType Type = EGraphicsBindGroupEntryType::TextureSRV;
+		std::string BindingName;
+		uint32_t Slot = 0;
+		Texture* TextureValue = nullptr;
+		Buffer* BufferValue = nullptr;
+		VertexBuffer* VertexBufferValue = nullptr;
+		Sampler* SamplerValue = nullptr;
+		std::vector<uint8_t> ConstantData;
+	};
+
+	struct DX12GraphicsBindGroupHandle final : GraphicsBindGroupHandle
+	{
+		DX12GraphicsPipelineHandle* Pipeline = nullptr;
+		std::vector<DX12GraphicsBindGroupEntry> Entries;
 	};
 
 	void ForceOpaqueAlpha(const DirectX::Image* image)
@@ -653,6 +680,9 @@ void DX12Backend::BeginFrame()
 	UINT64 ThisFrameFenceValue = FrameFenceValueVec[CurrentFrameIndex];
 	
 	CmdQ->WaitFenceValue(ThisFrameFenceValue);
+	RetireCompletedPersistentStructuredBufferUploads();
+	RetireCompletedPersistentStructuredBufferFrees();
+	ResetTransientUploadStructuredFrame(CurrentFrameIndex);
 
 	BeginNewGraphicsCommandList();
 	
@@ -1525,13 +1555,26 @@ shared_ptr<Sampler> DX12Backend::CreateSampler(D3D12_SAMPLER_DESC& InSamplerDesc
 
 std::shared_ptr<Buffer> DX12Backend::CreateBuffer(const BufferCreateDesc& desc)
 {
+	if (desc.NumElements == 0 || desc.ElementSize == 0)
+		return nullptr;
+
+	if (desc.AllocationPolicy == EBufferAllocationPolicy::Suballocated &&
+		desc.Lifetime == EBufferLifetime::Persistent &&
+		desc.Shape == EBufferShape::Structured &&
+		desc.Access == EBufferAccess::GpuOnly &&
+		!desc.bAllowUnorderedAccess &&
+		desc.InitialData)
+	{
+		return CreateSuballocatedStructuredBuffer(desc);
+	}
+
 	std::shared_ptr<Buffer> buffer = CreateBuffer(
 		desc.NumElements,
 		desc.ElementSize,
 		ToD3D12ResourceState(desc.InitialState),
 		desc.bAllowUnorderedAccess,
 		desc.InitialData,
-		desc.bUseDefaultHeap);
+		desc.Access);
 	if (buffer)
 	{
 		if (desc.Shape == EBufferShape::Structured)
@@ -1542,7 +1585,7 @@ std::shared_ptr<Buffer> DX12Backend::CreateBuffer(const BufferCreateDesc& desc)
 	return buffer;
 }
 
-std::shared_ptr<Buffer> DX12Backend::CreateBuffer(UINT InNumElements, UINT InElementSize, D3D12_RESOURCE_STATES initResState, bool isUAV, void* SrcData, bool forceDefaultHeap)
+std::shared_ptr<Buffer> DX12Backend::CreateBuffer(UINT InNumElements, UINT InElementSize, D3D12_RESOURCE_STATES initResState, bool isUAV, void* SrcData, EBufferAccess access)
 {
 	Buffer * buffer = new Buffer;
 	buffer->Owner = this;
@@ -1564,49 +1607,76 @@ std::shared_ptr<Buffer> DX12Backend::CreateBuffer(UINT InNumElements, UINT InEle
 	buffer->NumElements = InNumElements;
 	buffer->ElementSize = InElementSize;
 
-	D3D12_HEAP_PROPERTIES heapProp;
-	heapProp.Type = D3D12_HEAP_TYPE_DEFAULT;
-	heapProp.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
-	heapProp.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
-	heapProp.CreationNodeMask = 1;
-	heapProp.VisibleNodeMask = 1;
-	if (isUAV || forceDefaultHeap)
-		heapProp.Type = D3D12_HEAP_TYPE_DEFAULT;
-	else
-		heapProp.Type = D3D12_HEAP_TYPE_UPLOAD;
+	D3D12_HEAP_TYPE heapType = D3D12_HEAP_TYPE_DEFAULT;
+	if (!isUAV)
+	{
+		switch (access)
+		{
+		case EBufferAccess::Upload:
+		case EBufferAccess::Stream:
+			heapType = D3D12_HEAP_TYPE_UPLOAD;
+			break;
+		case EBufferAccess::Readback:
+			heapType = D3D12_HEAP_TYPE_READBACK;
+			break;
+		case EBufferAccess::GpuOnly:
+		default:
+			heapType = D3D12_HEAP_TYPE_DEFAULT;
+			break;
+		}
+	}
 
+	D3D12_RESOURCE_STATES createState = initResState;
+	if (heapType == D3D12_HEAP_TYPE_UPLOAD)
+		createState = D3D12_RESOURCE_STATE_GENERIC_READ;
+	else if (heapType == D3D12_HEAP_TYPE_READBACK)
+		createState = D3D12_RESOURCE_STATE_COPY_DEST;
+
+	D3D12_HEAP_PROPERTIES heapProp = CD3DX12_HEAP_PROPERTIES(heapType);
 	ThrowIfFailed(Device->CreateCommittedResource(&heapProp, D3D12_HEAP_FLAG_NONE, &bufDesc,
-		initResState, nullptr, IID_PPV_ARGS(&buffer->resource)));
+		createState, nullptr, IID_PPV_ARGS(&buffer->resource)));
 
 	if (SrcData)
 	{
-		CommandList* cmd = CmdQ->AllocCmdList();
-
-		cmd->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(buffer->resource.Get(), initResState, D3D12_RESOURCE_STATE_COPY_DEST));
-
 		UINT Size = buffer->NumElements * buffer->ElementSize;
 
-		ComPtr<ID3D12Resource> UploadHeap;
+		if (heapType == D3D12_HEAP_TYPE_UPLOAD)
+		{
+			D3D12_RANGE readRange{ 0, 0 };
+			ThrowIfFailed(buffer->resource->Map(0, &readRange, &buffer->MappedPtr));
+			buffer->MappedSizeInBytes = Size;
+			memcpy(buffer->MappedPtr, SrcData, Size);
+		}
+		else if (heapType == D3D12_HEAP_TYPE_DEFAULT)
+		{
+			CommandList* cmd = CmdQ->AllocCmdList();
 
-		ThrowIfFailed(Device->CreateCommittedResource(
-			&CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD),
-			D3D12_HEAP_FLAG_NONE,
-			&CD3DX12_RESOURCE_DESC::Buffer(Size),
-			D3D12_RESOURCE_STATE_GENERIC_READ,
-			nullptr,
-			IID_PPV_ARGS(&UploadHeap)));
+			if (initResState != D3D12_RESOURCE_STATE_COPY_DEST)
+				cmd->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(buffer->resource.Get(), initResState, D3D12_RESOURCE_STATE_COPY_DEST));
 
-		UINT8* pData = nullptr;
-		UploadHeap->Map(0, nullptr, reinterpret_cast<void**>(&pData));
-		memcpy(reinterpret_cast<void*>(pData), SrcData, Size);
-		UploadHeap->Unmap(0, nullptr);
+			ComPtr<ID3D12Resource> UploadHeap;
 
-		cmd->CmdList->CopyBufferRegion(buffer->resource.Get(), 0, UploadHeap.Get(), 0, Size);
-		cmd->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(buffer->resource.Get(), D3D12_RESOURCE_STATE_COPY_DEST, initResState));
+			ThrowIfFailed(Device->CreateCommittedResource(
+				&CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD),
+				D3D12_HEAP_FLAG_NONE,
+				&CD3DX12_RESOURCE_DESC::Buffer(Size),
+				D3D12_RESOURCE_STATE_GENERIC_READ,
+				nullptr,
+				IID_PPV_ARGS(&UploadHeap)));
+
+			UINT8* pData = nullptr;
+			UploadHeap->Map(0, nullptr, reinterpret_cast<void**>(&pData));
+			memcpy(reinterpret_cast<void*>(pData), SrcData, Size);
+			UploadHeap->Unmap(0, nullptr);
+
+			cmd->CmdList->CopyBufferRegion(buffer->resource.Get(), 0, UploadHeap.Get(), 0, Size);
+			if (initResState != D3D12_RESOURCE_STATE_COPY_DEST)
+				cmd->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(buffer->resource.Get(), D3D12_RESOURCE_STATE_COPY_DEST, initResState));
 
 
-		CmdQ->ExecuteCommandList(cmd);
-		CmdQ->WaitGPU();
+			CmdQ->ExecuteCommandList(cmd);
+			CmdQ->WaitGPU();
+		}
 	}
 
 	//// create shader resource view
@@ -1906,6 +1976,49 @@ void DX12Backend::UpdateUploadStructuredBuffer(Buffer* buffer, const void* srcDa
 	memcpy(buffer->MappedPtr, srcData, sizeInBytes);
 }
 
+shared_ptr<Buffer> DX12Backend::AllocateTransientUploadStructuredBuffer(uint32_t NumElements, uint32_t ElementSize, const void* srcData)
+{
+	if (NumElements == 0 || ElementSize == 0 || !Device || !GlobalDHRing)
+		return nullptr;
+
+	const UINT64 sizeInBytes64 = static_cast<UINT64>(NumElements) * static_cast<UINT64>(ElementSize);
+	if (sizeInBytes64 > static_cast<UINT64>(std::numeric_limits<uint32_t>::max()))
+		return nullptr;
+
+	TransientUploadStructuredAllocation alloc = AllocateTransientUploadStructuredBytes(sizeInBytes64, ElementSize);
+	if (!alloc.resource || !alloc.cpu)
+		return nullptr;
+	if (srcData)
+		memcpy(alloc.cpu, srcData, static_cast<size_t>(sizeInBytes64));
+
+	auto buffer = std::shared_ptr<Buffer>(new Buffer);
+	buffer->Owner = this;
+	buffer->resource = alloc.resource;
+	buffer->NumElements = NumElements;
+	buffer->ElementSize = ElementSize;
+	buffer->MappedPtr = alloc.cpu;
+	buffer->MappedSizeInBytes = static_cast<uint32_t>(sizeInBytes64);
+	buffer->SuballocationOffsetBytes = alloc.offset;
+
+	D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+	srvDesc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+	srvDesc.Format = DXGI_FORMAT_UNKNOWN;
+	srvDesc.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_NONE;
+	srvDesc.Buffer.StructureByteStride = ElementSize;
+	srvDesc.Buffer.FirstElement = static_cast<UINT>(alloc.offset / ElementSize);
+	srvDesc.Buffer.NumElements = NumElements;
+	srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+	GlobalDHRing->AllocDescriptor(buffer->CpuHandleSRV, buffer->GpuHandleSRV);
+	Device->CreateShaderResourceView(buffer->resource.Get(), &srvDesc, buffer->CpuHandleSRV);
+	buffer->Type = Buffer::STRUCTURED;
+
+	if (TransientUploadStructuredKeepAlive.size() < NumFrame)
+		TransientUploadStructuredKeepAlive.resize(NumFrame);
+	const uint32_t frameIndex = CurrentFrameIndex < NumFrame ? CurrentFrameIndex : 0u;
+	TransientUploadStructuredKeepAlive[frameIndex].push_back(buffer);
+	return buffer;
+}
+
 shared_ptr<VertexBuffer> DX12Backend::CreateRWVertexBuffer(uint32_t Size, uint32_t Stride)
 {
 	if (Size == 0 || Stride == 0)
@@ -1983,7 +2096,7 @@ DX12Backend::UploadAllocation DX12Backend::AllocateUploadBytes(UINT64 size, UINT
 	auto allocateFromActive = [&]() -> UploadAllocation
 	{
 		UploadHeapBlock* block = ActiveUploadBlock.get();
-		const UINT64 alignedCursor = (block->cursor + align - 1) & ~(align - 1);
+		const UINT64 alignedCursor = AlignUploadOffset(block->cursor, align);
 		if (alignedCursor + size > block->capacity)
 			return {};
 		const UINT64 offset = alignedCursor;
@@ -2034,6 +2147,362 @@ DX12Backend::UploadAllocation DX12Backend::AllocateUploadBytes(UINT64 size, UINT
 
 	UploadAllocation alloc = allocateFromActive();
 	return alloc;
+}
+
+void DX12Backend::ResetTransientUploadStructuredFrame(uint32_t frameIndex)
+{
+	if (TransientUploadStructuredBlocks.size() < NumFrame)
+		TransientUploadStructuredBlocks.resize(NumFrame);
+	if (TransientUploadStructuredKeepAlive.size() < NumFrame)
+		TransientUploadStructuredKeepAlive.resize(NumFrame);
+	if (frameIndex >= TransientUploadStructuredBlocks.size())
+		return;
+
+	TransientUploadStructuredKeepAlive[frameIndex].clear();
+	for (const std::shared_ptr<TransientUploadStructuredBlock>& block : TransientUploadStructuredBlocks[frameIndex])
+	{
+		if (block)
+			block->cursor = 0;
+	}
+}
+
+DX12Backend::TransientUploadStructuredAllocation DX12Backend::AllocateTransientUploadStructuredBytes(UINT64 size, UINT64 alignment)
+{
+	if (size == 0)
+		return {};
+	if (TransientUploadStructuredBlocks.size() < NumFrame)
+		TransientUploadStructuredBlocks.resize(NumFrame);
+	if (TransientUploadStructuredKeepAlive.size() < NumFrame)
+		TransientUploadStructuredKeepAlive.resize(NumFrame);
+
+	const uint32_t frameIndex = CurrentFrameIndex < NumFrame ? CurrentFrameIndex : 0u;
+	std::vector<std::shared_ptr<TransientUploadStructuredBlock>>& blocks = TransientUploadStructuredBlocks[frameIndex];
+	const UINT64 align = alignment > 0 ? alignment : 4u;
+
+	auto allocateFromBlock = [&](const std::shared_ptr<TransientUploadStructuredBlock>& block) -> TransientUploadStructuredAllocation
+	{
+		if (!block || !block->resource)
+			return {};
+		const UINT64 alignedCursor = AlignUploadOffset(block->cursor, align);
+		if (alignedCursor + size > block->capacity)
+			return {};
+		block->cursor = alignedCursor + size;
+
+		TransientUploadStructuredAllocation alloc;
+		alloc.resource = block->resource;
+		alloc.offset = alignedCursor;
+		alloc.cpu = block->mappedBase + alignedCursor;
+		alloc.gpuVA = block->gpuVA + alignedCursor;
+		++TransientUploadStructuredAllocationCount;
+		TransientUploadStructuredBytesIssued += size;
+		return alloc;
+	};
+
+	for (const std::shared_ptr<TransientUploadStructuredBlock>& block : blocks)
+	{
+		TransientUploadStructuredAllocation alloc = allocateFromBlock(block);
+		if (alloc.resource)
+			return alloc;
+	}
+
+	const UINT64 requestedSize = size + align;
+	const UINT64 blockSize = std::max<UINT64>(TransientUploadStructuredBlockDefaultSize, requestedSize);
+	auto block = std::make_shared<TransientUploadStructuredBlock>();
+	ThrowIfFailed(Device->CreateCommittedResource(
+		&CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD),
+		D3D12_HEAP_FLAG_NONE,
+		&CD3DX12_RESOURCE_DESC::Buffer(blockSize),
+		D3D12_RESOURCE_STATE_GENERIC_READ,
+		nullptr,
+		IID_PPV_ARGS(&block->resource)));
+	NAME_D3D12_OBJECT(block->resource);
+
+	void* mapped = nullptr;
+	D3D12_RANGE readRange{ 0, 0 };
+	ThrowIfFailed(block->resource->Map(0, &readRange, &mapped));
+	block->mappedBase = static_cast<uint8_t*>(mapped);
+	block->gpuVA = block->resource->GetGPUVirtualAddress();
+	block->capacity = blockSize;
+	block->cursor = 0;
+	blocks.push_back(block);
+	++TransientUploadStructuredBlockCount;
+	TransientUploadStructuredBytesReserved += blockSize;
+
+	return allocateFromBlock(block);
+}
+
+DX12Backend::PersistentStructuredBufferAllocation DX12Backend::AllocatePersistentStructuredBufferBytes(UINT64 size, UINT64 alignment)
+{
+	if (size == 0)
+		return {};
+	const UINT64 align = alignment > 0 ? alignment : 4u;
+
+	auto allocateFromBlock = [&](const std::shared_ptr<PersistentStructuredBufferBlock>& block) -> PersistentStructuredBufferAllocation
+	{
+		if (!block || !block->resource)
+			return {};
+
+		for (size_t rangeIndex = 0; rangeIndex < block->freeRanges.size(); ++rangeIndex)
+		{
+			PersistentStructuredBufferBlock::FreeRange range = block->freeRanges[rangeIndex];
+			const UINT64 alignedOffset = AlignUploadOffset(range.offset, align);
+			const UINT64 rangeEnd = range.offset + range.size;
+			if (alignedOffset > rangeEnd || alignedOffset + size > rangeEnd)
+				continue;
+
+			auto insertIt = block->freeRanges.erase(block->freeRanges.begin() + rangeIndex);
+			if (alignedOffset > range.offset)
+			{
+				insertIt = block->freeRanges.insert(insertIt, { range.offset, alignedOffset - range.offset });
+				++insertIt;
+			}
+			const UINT64 allocEnd = alignedOffset + size;
+			if (allocEnd < rangeEnd)
+			{
+				block->freeRanges.insert(insertIt, { allocEnd, rangeEnd - allocEnd });
+			}
+
+			PersistentStructuredBufferAllocation alloc;
+			alloc.resource = block->resource;
+			alloc.block = block;
+			alloc.offset = alignedOffset;
+			alloc.size = size;
+			++PersistentStructuredBufferAllocationCount;
+			PersistentStructuredBufferBytesIssued += size;
+			return alloc;
+		}
+
+		const UINT64 alignedCursor = AlignUploadOffset(block->cursor, align);
+		if (alignedCursor + size > block->capacity)
+			return {};
+		block->cursor = alignedCursor + size;
+
+		PersistentStructuredBufferAllocation alloc;
+		alloc.resource = block->resource;
+		alloc.block = block;
+		alloc.offset = alignedCursor;
+		alloc.size = size;
+		++PersistentStructuredBufferAllocationCount;
+		PersistentStructuredBufferBytesIssued += size;
+		return alloc;
+	};
+
+	for (const std::shared_ptr<PersistentStructuredBufferBlock>& block : PersistentStructuredBufferBlocks)
+	{
+		PersistentStructuredBufferAllocation alloc = allocateFromBlock(block);
+		if (alloc.resource)
+			return alloc;
+	}
+
+	const UINT64 requestedSize = size + align;
+	const UINT64 blockSize = std::max<UINT64>(PersistentStructuredBufferBlockDefaultSize, requestedSize);
+	auto block = std::make_shared<PersistentStructuredBufferBlock>();
+	ThrowIfFailed(Device->CreateCommittedResource(
+		&CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT),
+		D3D12_HEAP_FLAG_NONE,
+		&CD3DX12_RESOURCE_DESC::Buffer(blockSize),
+		D3D12_RESOURCE_STATE_COPY_DEST,
+		nullptr,
+		IID_PPV_ARGS(&block->resource)));
+	NAME_D3D12_OBJECT(block->resource);
+	block->capacity = blockSize;
+	block->cursor = 0;
+	block->state = D3D12_RESOURCE_STATE_COPY_DEST;
+	PersistentStructuredBufferBlocks.push_back(block);
+	++PersistentStructuredBufferBlockCount;
+	PersistentStructuredBufferBytesReserved += blockSize;
+	return allocateFromBlock(block);
+}
+
+void DX12Backend::AddPersistentStructuredBufferFreeRange(
+	const std::shared_ptr<PersistentStructuredBufferBlock>& block,
+	UINT64 offset,
+	UINT64 size)
+{
+	if (!block || size == 0)
+		return;
+
+	PersistentStructuredBufferBlock::FreeRange newRange{ offset, size };
+	auto& ranges = block->freeRanges;
+	auto insertIt = ranges.begin();
+	while (insertIt != ranges.end() && insertIt->offset < newRange.offset)
+		++insertIt;
+	insertIt = ranges.insert(insertIt, newRange);
+
+	if (insertIt != ranges.begin())
+	{
+		auto prevIt = std::prev(insertIt);
+		const UINT64 prevEnd = prevIt->offset + prevIt->size;
+		if (prevEnd >= insertIt->offset)
+		{
+			prevIt->size = std::max(prevEnd, insertIt->offset + insertIt->size) - prevIt->offset;
+			insertIt = ranges.erase(insertIt);
+			insertIt = prevIt;
+		}
+	}
+
+	auto nextIt = std::next(insertIt);
+	while (nextIt != ranges.end())
+	{
+		const UINT64 rangeEnd = insertIt->offset + insertIt->size;
+		if (rangeEnd < nextIt->offset)
+			break;
+		insertIt->size = std::max(rangeEnd, nextIt->offset + nextIt->size) - insertIt->offset;
+		nextIt = ranges.erase(nextIt);
+	}
+}
+
+void DX12Backend::ReleasePersistentStructuredBufferBytes(
+	const std::shared_ptr<PersistentStructuredBufferBlock>& block,
+	UINT64 offset,
+	UINT64 size)
+{
+	if (!block || size == 0)
+		return;
+
+	if (!CmdQ || !CmdQ->m_fence)
+	{
+		AddPersistentStructuredBufferFreeRange(block, offset, size);
+		return;
+	}
+
+	PendingPersistentStructuredBufferFrees.push_back({
+		block,
+		offset,
+		size,
+		CmdQ->CurrentFenceValue
+	});
+}
+
+void DX12Backend::RetireCompletedPersistentStructuredBufferFrees()
+{
+	if (!CmdQ || !CmdQ->m_fence || PendingPersistentStructuredBufferFrees.empty())
+		return;
+
+	const UINT64 completedFenceValue = CmdQ->m_fence->GetCompletedValue();
+	PendingPersistentStructuredBufferFrees.erase(
+		std::remove_if(
+			PendingPersistentStructuredBufferFrees.begin(),
+			PendingPersistentStructuredBufferFrees.end(),
+			[&](const PendingPersistentStructuredBufferFree& pending)
+			{
+				if (pending.fenceValue > completedFenceValue)
+					return false;
+				AddPersistentStructuredBufferFreeRange(pending.block, pending.offset, pending.size);
+				return true;
+			}),
+		PendingPersistentStructuredBufferFrees.end());
+}
+
+void DX12Backend::RetireCompletedPersistentStructuredBufferUploads()
+{
+	if (!CmdQ || !CmdQ->m_fence || PendingPersistentStructuredBufferUploads.empty())
+		return;
+
+	const UINT64 completedFenceValue = CmdQ->m_fence->GetCompletedValue();
+	size_t kept = 0;
+	for (size_t i = 0; i < PendingPersistentStructuredBufferUploads.size(); ++i)
+	{
+		PendingPersistentStructuredBufferUpload& pending = PendingPersistentStructuredBufferUploads[i];
+		if (pending.FenceValue <= completedFenceValue)
+		{
+			PendingPersistentStructuredBufferUploadBytes -=
+				std::min(PendingPersistentStructuredBufferUploadBytes, pending.Bytes);
+			continue;
+		}
+		if (kept != i)
+			PendingPersistentStructuredBufferUploads[kept] = std::move(pending);
+		++kept;
+	}
+	PendingPersistentStructuredBufferUploads.resize(kept);
+}
+
+std::shared_ptr<Buffer> DX12Backend::CreateSuballocatedStructuredBuffer(const BufferCreateDesc& desc)
+{
+	if (!Device || !TextureDHRing || desc.NumElements == 0 || desc.ElementSize == 0 || !desc.InitialData)
+		return nullptr;
+
+	const UINT64 sizeInBytes64 = static_cast<UINT64>(desc.NumElements) * static_cast<UINT64>(desc.ElementSize);
+	if (sizeInBytes64 > static_cast<UINT64>(std::numeric_limits<uint32_t>::max()))
+		return nullptr;
+
+	PersistentStructuredBufferAllocation alloc = AllocatePersistentStructuredBufferBytes(sizeInBytes64, desc.ElementSize);
+	if (!alloc.resource)
+		return nullptr;
+
+	std::shared_ptr<PersistentStructuredBufferBlock> ownerBlock = alloc.block;
+	if (!ownerBlock)
+		return nullptr;
+
+	const D3D12_RESOURCE_STATES targetState = ToD3D12ResourceState(desc.InitialState);
+	RetireCompletedPersistentStructuredBufferUploads();
+	WaitForAsyncRtOnGraphicsQueue();
+
+	CommandList* cmd = CmdQ->AllocCmdList();
+	if (ownerBlock->state != D3D12_RESOURCE_STATE_COPY_DEST)
+	{
+		cmd->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(
+			ownerBlock->resource.Get(),
+			ownerBlock->state,
+			D3D12_RESOURCE_STATE_COPY_DEST));
+		ownerBlock->state = D3D12_RESOURCE_STATE_COPY_DEST;
+	}
+
+	ComPtr<ID3D12Resource> uploadHeap;
+	ThrowIfFailed(Device->CreateCommittedResource(
+		&CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD),
+		D3D12_HEAP_FLAG_NONE,
+		&CD3DX12_RESOURCE_DESC::Buffer(sizeInBytes64),
+		D3D12_RESOURCE_STATE_GENERIC_READ,
+		nullptr,
+		IID_PPV_ARGS(&uploadHeap)));
+	NAME_D3D12_OBJECT(uploadHeap);
+
+	void* mapped = nullptr;
+	D3D12_RANGE readRange{ 0, 0 };
+	ThrowIfFailed(uploadHeap->Map(0, &readRange, &mapped));
+	memcpy(mapped, desc.InitialData, static_cast<size_t>(sizeInBytes64));
+	uploadHeap->Unmap(0, nullptr);
+	cmd->CmdList->CopyBufferRegion(ownerBlock->resource.Get(), alloc.offset, uploadHeap.Get(), 0, sizeInBytes64);
+
+	if (targetState != D3D12_RESOURCE_STATE_COPY_DEST)
+	{
+		cmd->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(
+			ownerBlock->resource.Get(),
+			D3D12_RESOURCE_STATE_COPY_DEST,
+			targetState));
+		ownerBlock->state = targetState;
+	}
+
+	CmdQ->ExecuteCommandList(cmd);
+
+	PendingPersistentStructuredBufferUpload pendingUpload;
+	pendingUpload.FenceValue = cmd->Fence.value_or(CmdQ->CurrentFenceValue);
+	pendingUpload.Bytes = sizeInBytes64;
+	pendingUpload.UploadHeap = uploadHeap;
+	PendingPersistentStructuredBufferUploads.push_back(std::move(pendingUpload));
+	PendingPersistentStructuredBufferUploadBytes += sizeInBytes64;
+	if (PendingPersistentStructuredBufferUploadBytes > kMaxInFlightPersistentStructuredBufferUploadBytes)
+	{
+		CmdQ->WaitGPU();
+		RetireCompletedPersistentStructuredBufferUploads();
+		RetireCompletedPersistentStructuredBufferFrees();
+	}
+
+	auto buffer = std::shared_ptr<Buffer>(
+		new Buffer,
+		[this, ownerBlock, offset = alloc.offset, size = alloc.size](Buffer* rawBuffer)
+		{
+			delete rawBuffer;
+			ReleasePersistentStructuredBufferBytes(ownerBlock, offset, size);
+		});
+	buffer->Owner = this;
+	buffer->resource = alloc.resource;
+	buffer->NumElements = desc.NumElements;
+	buffer->ElementSize = desc.ElementSize;
+	buffer->SuballocationOffsetBytes = alloc.offset;
+	buffer->MakeStructuredBufferSRV();
+	return buffer;
 }
 
 shared_ptr<VertexBuffer> DX12Backend::CreateUploadVertexBuffer(UINT size, UINT stride, const void* srcData)
@@ -2710,9 +3179,67 @@ RHIBufferHandle DX12Backend::GetBindlessIndexBufferHandle(const IndexBuffer* buf
 	return GetDX12BindlessBufferDescriptorHandle(*this, buffer, buffer->BindlessHandle);
 }
 
+RenderBackendAllocatorStats DX12Backend::GetAllocatorStats() const
+{
+	RenderBackendAllocatorStats stats{};
+	stats.PersistentStructuredBlockCount = static_cast<uint32_t>(PersistentStructuredBufferBlocks.size());
+	stats.PersistentStructuredBytesIssued = PersistentStructuredBufferBytesIssued;
+	stats.PersistentStructuredPendingUploadBytes = PendingPersistentStructuredBufferUploadBytes;
+	for (const std::shared_ptr<PersistentStructuredBufferBlock>& block : PersistentStructuredBufferBlocks)
+	{
+		if (!block)
+			continue;
+		stats.PersistentStructuredReservedBytes += block->capacity;
+		stats.PersistentStructuredCommittedBytes += block->cursor;
+		for (const PersistentStructuredBufferBlock::FreeRange& range : block->freeRanges)
+		{
+			stats.PersistentStructuredReusableBytes += range.size;
+		}
+	}
+	for (const PendingPersistentStructuredBufferFree& pending : PendingPersistentStructuredBufferFrees)
+	{
+		stats.PersistentStructuredPendingFreeBytes += pending.size;
+	}
+
+	stats.TransientStructuredBlockCount = TransientUploadStructuredBlockCount;
+	stats.TransientStructuredBytesIssued = TransientUploadStructuredBytesIssued;
+	stats.TransientStructuredReservedBytes = TransientUploadStructuredBytesReserved;
+	const uint32_t frameIndex = CurrentFrameIndex < TransientUploadStructuredBlocks.size() ? CurrentFrameIndex : 0u;
+	if (frameIndex < TransientUploadStructuredBlocks.size())
+	{
+		for (const std::shared_ptr<TransientUploadStructuredBlock>& block : TransientUploadStructuredBlocks[frameIndex])
+		{
+			if (block)
+				stats.TransientStructuredCurrentFrameBytes += block->cursor;
+		}
+	}
+
+	{
+		std::lock_guard<std::mutex> lock(BindlessTextureMutex);
+		stats.BindlessTextureSlotsCapacity = static_cast<uint32_t>(BindlessTextureSlots.size());
+		for (const DX12BindlessTextureSlot& slot : BindlessTextureSlots)
+		{
+			if (slot.Occupied)
+				++stats.BindlessTextureSlotsUsed;
+		}
+	}
+	{
+		std::lock_guard<std::mutex> lock(BindlessBufferMutex);
+		stats.BindlessBufferSlotsCapacity = static_cast<uint32_t>(BindlessBufferSlots.size());
+		for (const DX12BindlessBufferSlot& slot : BindlessBufferSlots)
+		{
+			if (slot.Occupied)
+				++stats.BindlessBufferSlotsUsed;
+		}
+	}
+	return stats;
+}
+
 DX12Backend::~DX12Backend()
 {
 	CmdQ->WaitGPU();
+	RetireCompletedPersistentStructuredBufferUploads();
+	RetireCompletedPersistentStructuredBufferFrees();
 	{
 		std::lock_guard<std::mutex> lock(BindlessTextureMutex);
 		for (DX12BindlessTextureSlot& slot : BindlessTextureSlots)
@@ -6709,7 +7236,7 @@ void Buffer::MakeStructuredBufferSRV()
 	bufferSRVDesc.Format = DXGI_FORMAT_UNKNOWN;
 	bufferSRVDesc.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_NONE;
 	bufferSRVDesc.Buffer.StructureByteStride = ElementSize;
-	bufferSRVDesc.Buffer.FirstElement = 0;
+	bufferSRVDesc.Buffer.FirstElement = ElementSize > 0 ? static_cast<UINT>(SuballocationOffsetBytes / ElementSize) : 0;
 	bufferSRVDesc.Buffer.NumElements = NumElements;
 	bufferSRVDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
 
@@ -6951,6 +7478,37 @@ std::shared_ptr<GraphicsPipelineHandle> DX12Backend::CreateGraphicsPipeline(cons
 	return handle;
 }
 
+std::shared_ptr<GraphicsBindGroupHandle> DX12Backend::CreateGraphicsBindGroup(const GraphicsBindGroupDesc& desc)
+{
+	auto* dxPipeline = dynamic_cast<DX12GraphicsPipelineHandle*>(desc.Pipeline);
+	if (!dxPipeline || !dxPipeline->PSO)
+		return nullptr;
+
+	auto handle = std::make_shared<DX12GraphicsBindGroupHandle>();
+	handle->Pipeline = dxPipeline;
+	handle->Entries.reserve(desc.Entries.size());
+
+	for (const GraphicsBindGroupEntry& src : desc.Entries)
+	{
+		DX12GraphicsBindGroupEntry dst{};
+		dst.Type = src.Type;
+		dst.BindingName = src.BindingName;
+		dst.Slot = src.Slot;
+		dst.TextureValue = src.TextureValue;
+		dst.BufferValue = src.BufferValue;
+		dst.VertexBufferValue = src.VertexBufferValue;
+		dst.SamplerValue = src.SamplerValue;
+		if (src.Type == EGraphicsBindGroupEntryType::ConstantData && src.ConstantData && src.ConstantDataSize > 0)
+		{
+			const auto* bytes = static_cast<const uint8_t*>(src.ConstantData);
+			dst.ConstantData.assign(bytes, bytes + src.ConstantDataSize);
+		}
+		handle->Entries.push_back(std::move(dst));
+	}
+
+	return handle;
+}
+
 void DX12Backend::BindGraphicsPipeline(GraphicsPipelineHandle* pipeline)
 {
 	auto* dxPipeline = dynamic_cast<DX12GraphicsPipelineHandle*>(pipeline);
@@ -6970,65 +7528,57 @@ void DX12Backend::BindGraphicsPipeline(GraphicsPipelineHandle* pipeline)
 	}
 }
 
-void DX12Backend::SetGraphicsPipelineConstantData(GraphicsPipelineHandle* pipeline, uint32_t slot, const void* data, uint32_t size)
+void DX12Backend::BindGraphicsBindGroup(GraphicsPipelineHandle* pipeline, uint32_t slot, const std::shared_ptr<GraphicsBindGroupHandle>& bindGroup)
 {
 	(void)slot;
 	auto* dxPipeline = dynamic_cast<DX12GraphicsPipelineHandle*>(pipeline);
-	if (!dxPipeline || !dxPipeline->PSO || !data || size == 0 || dxPipeline->ConstantBufferSize == 0)
+	auto* dxBindGroup = dynamic_cast<DX12GraphicsBindGroupHandle*>(bindGroup.get());
+	if (!dxPipeline || !dxPipeline->PSO || !dxBindGroup || dxBindGroup->Pipeline != dxPipeline)
 		return;
 
-	const auto bindingIt = dxPipeline->PSO->constantBufferBinding.find("__CB0");
-	if (bindingIt == dxPipeline->PSO->constantBufferBinding.end())
-		return;
-
-	const uint32_t sourceSize = bindingIt->second.sourceSize;
-	if (sourceSize == 0)
-		return;
-
-	if (size >= sourceSize)
+	for (const DX12GraphicsBindGroupEntry& entry : dxBindGroup->Entries)
 	{
-		dxPipeline->PSO->SetCBVValue("__CB0", const_cast<void*>(data));
-		return;
+		switch (entry.Type)
+		{
+		case EGraphicsBindGroupEntryType::TextureSRV:
+			if (entry.TextureValue)
+				dxPipeline->PSO->SetSRV(entry.BindingName, entry.TextureValue->GpuHandleSRV);
+			break;
+		case EGraphicsBindGroupEntryType::BufferSRV:
+			if (entry.BufferValue)
+				dxPipeline->PSO->SetSRV(entry.BindingName, entry.BufferValue->GpuHandleSRV);
+			break;
+		case EGraphicsBindGroupEntryType::VertexBufferSRV:
+			if (entry.VertexBufferValue)
+				dxPipeline->PSO->SetSRV(entry.BindingName, entry.VertexBufferValue->GpuHandleSRV);
+			break;
+		case EGraphicsBindGroupEntryType::Sampler:
+			if (entry.SamplerValue)
+				dxPipeline->PSO->SetSampler(entry.BindingName, entry.SamplerValue);
+			break;
+		case EGraphicsBindGroupEntryType::ConstantData:
+			if (!entry.ConstantData.empty() && entry.Slot == 0 && dxPipeline->ConstantBufferSize > 0)
+			{
+				const auto bindingIt = dxPipeline->PSO->constantBufferBinding.find("__CB0");
+				if (bindingIt == dxPipeline->PSO->constantBufferBinding.end())
+					break;
+
+				const uint32_t sourceSize = bindingIt->second.sourceSize;
+				if (sourceSize == 0)
+					break;
+
+				if (entry.ConstantData.size() >= sourceSize)
+				{
+					dxPipeline->PSO->SetCBVValue("__CB0", const_cast<uint8_t*>(entry.ConstantData.data()));
+					break;
+				}
+
+				thread_local std::vector<uint8_t> sourceData;
+				sourceData.assign(sourceSize, 0);
+				std::memcpy(sourceData.data(), entry.ConstantData.data(), entry.ConstantData.size());
+				dxPipeline->PSO->SetCBVValue("__CB0", sourceData.data());
+			}
+			break;
+		}
 	}
-
-	thread_local std::vector<uint8_t> sourceData;
-	sourceData.assign(sourceSize, 0);
-	std::memcpy(sourceData.data(), data, size);
-	dxPipeline->PSO->SetCBVValue("__CB0", sourceData.data());
-}
-
-void DX12Backend::BindGraphicsPipelineTexture(GraphicsPipelineHandle* pipeline, const std::string& bindingName, Texture* texture)
-{
-	auto* dxPipeline = dynamic_cast<DX12GraphicsPipelineHandle*>(pipeline);
-	if (!dxPipeline || !dxPipeline->PSO || !texture)
-		return;
-
-	dxPipeline->PSO->SetSRV(bindingName, texture->GpuHandleSRV);
-}
-
-void DX12Backend::BindGraphicsPipelineBuffer(GraphicsPipelineHandle* pipeline, const std::string& bindingName, Buffer* buffer)
-{
-	auto* dxPipeline = dynamic_cast<DX12GraphicsPipelineHandle*>(pipeline);
-	if (!dxPipeline || !dxPipeline->PSO || !buffer)
-		return;
-
-	dxPipeline->PSO->SetSRV(bindingName, buffer->GpuHandleSRV);
-}
-
-void DX12Backend::BindGraphicsPipelineVertexBufferSRV(GraphicsPipelineHandle* pipeline, const std::string& bindingName, VertexBuffer* vb)
-{
-	auto* dxPipeline = dynamic_cast<DX12GraphicsPipelineHandle*>(pipeline);
-	if (!dxPipeline || !dxPipeline->PSO || !vb)
-		return;
-
-	dxPipeline->PSO->SetSRV(bindingName, vb->GpuHandleSRV);
-}
-
-void DX12Backend::BindGraphicsPipelineSampler(GraphicsPipelineHandle* pipeline, const std::string& bindingName, Sampler* sampler)
-{
-	auto* dxPipeline = dynamic_cast<DX12GraphicsPipelineHandle*>(pipeline);
-	if (!dxPipeline || !dxPipeline->PSO || !sampler)
-		return;
-
-	dxPipeline->PSO->SetSampler(bindingName, sampler);
 }
