@@ -17,6 +17,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <map>
 #include <optional>
 #include <sstream>
@@ -67,7 +68,7 @@ namespace
 	{
 		if (alignment <= 1)
 			return value;
-		return (value + alignment - 1) & ~(alignment - 1);
+		return ((value + alignment - 1) / alignment) * alignment;
 	}
 
 	uint32_t ToVulkanTextureBinding(uint32_t registerIndex)
@@ -2999,12 +3000,17 @@ void VulkanBackend::ReleaseBufferAllocation(Buffer* buffer)
 	if (it == BufferAllocations.end())
 		return;
 
-	if (!it->second.PoolBlock && Device != VK_NULL_HANDLE)
+	const VulkanBufferAllocation allocation = it->second;
+	if (allocation.PersistentPoolBlock)
 	{
-		if (it->second.Buffer != VK_NULL_HANDLE)
-			vkDestroyBuffer(Device, it->second.Buffer, nullptr);
-		if (it->second.Memory != VK_NULL_HANDLE)
-			vkFreeMemory(Device, it->second.Memory, nullptr);
+		ReleasePersistentStructuredBufferRange(allocation);
+	}
+	else if (!allocation.PoolBlock && Device != VK_NULL_HANDLE)
+	{
+		if (allocation.Buffer != VK_NULL_HANDLE)
+			vkDestroyBuffer(Device, allocation.Buffer, nullptr);
+		if (allocation.Memory != VK_NULL_HANDLE)
+			vkFreeMemory(Device, allocation.Memory, nullptr);
 	}
 	BufferAllocations.erase(it);
 }
@@ -3751,6 +3757,9 @@ void VulkanBackend::BeginFrame()
 	}
 	AppendVulkanRuntimeTraceBackend(L"[VulkanBackend::BeginFrame] after vkWaitForFences");
 
+	RetirePersistentStructuredBufferFrees(frameContextIndex);
+	ResetTransientUploadStructuredFrame(frameContextIndex);
+
 	for (const auto& descriptorSet : frame.DescriptorSetsToFree)
 	{
 		if (descriptorSet.first != VK_NULL_HANDLE && descriptorSet.second != VK_NULL_HANDLE)
@@ -4224,6 +4233,16 @@ std::shared_ptr<Buffer> VulkanBackend::CreateBuffer(const BufferCreateDesc& desc
 #else
 	if (desc.NumElements == 0 || desc.ElementSize == 0)
 		return nullptr;
+
+	if (desc.AllocationPolicy == EBufferAllocationPolicy::Suballocated &&
+		desc.Lifetime == EBufferLifetime::Persistent &&
+		desc.Shape == EBufferShape::Structured &&
+		desc.Access == EBufferAccess::GpuOnly &&
+		!desc.bAllowUnorderedAccess &&
+		desc.InitialData)
+	{
+		return CreateSuballocatedStructuredBuffer(desc);
+	}
 
 	auto buffer = CreateTrackedBufferHandle();
 	buffer->NumElements = desc.NumElements;
@@ -5231,6 +5250,418 @@ VulkanBackend::VulkanUploadHeapBlock::~VulkanUploadHeapBlock()
 #endif
 }
 
+VulkanBackend::VulkanPersistentBufferBlock::~VulkanPersistentBufferBlock()
+{
+#if CORONA_HAS_VULKAN
+	if (OwningDevice == VK_NULL_HANDLE)
+		return;
+	if (Buffer != VK_NULL_HANDLE)
+		vkDestroyBuffer(OwningDevice, Buffer, nullptr);
+	if (Memory != VK_NULL_HANDLE)
+		vkFreeMemory(OwningDevice, Memory, nullptr);
+	OwningDevice = VK_NULL_HANDLE;
+	Buffer = VK_NULL_HANDLE;
+	Memory = VK_NULL_HANDLE;
+	Capacity = 0;
+	Cursor = 0;
+#endif
+}
+
+void VulkanBackend::AddPersistentStructuredBufferFreeRange(
+	const std::shared_ptr<VulkanPersistentBufferBlock>& block,
+	VkDeviceSize offset,
+	VkDeviceSize size)
+{
+#if CORONA_HAS_VULKAN
+	if (!block || size == 0)
+		return;
+
+	VulkanPersistentBufferBlock::FreeRange newRange{ offset, size };
+	auto& ranges = block->FreeRanges;
+	auto insertIt = ranges.begin();
+	while (insertIt != ranges.end() && insertIt->Offset < newRange.Offset)
+		++insertIt;
+	insertIt = ranges.insert(insertIt, newRange);
+
+	if (insertIt != ranges.begin())
+	{
+		auto prevIt = std::prev(insertIt);
+		const VkDeviceSize prevEnd = prevIt->Offset + prevIt->Size;
+		if (prevEnd >= insertIt->Offset)
+		{
+			prevIt->Size = std::max(prevEnd, insertIt->Offset + insertIt->Size) - prevIt->Offset;
+			insertIt = ranges.erase(insertIt);
+			insertIt = prevIt;
+		}
+	}
+
+	auto nextIt = std::next(insertIt);
+	while (nextIt != ranges.end())
+	{
+		const VkDeviceSize rangeEnd = insertIt->Offset + insertIt->Size;
+		if (rangeEnd < nextIt->Offset)
+			break;
+		insertIt->Size = std::max(rangeEnd, nextIt->Offset + nextIt->Size) - insertIt->Offset;
+		nextIt = ranges.erase(nextIt);
+	}
+#else
+	(void)block; (void)offset; (void)size;
+#endif
+}
+
+void VulkanBackend::ReleasePersistentStructuredBufferRange(const VulkanBufferAllocation& allocation)
+{
+#if CORONA_HAS_VULKAN
+	if (!allocation.PersistentPoolBlock || allocation.SizeInBytes == 0)
+		return;
+
+	if (FrameContexts.empty())
+	{
+		AddPersistentStructuredBufferFreeRange(
+			allocation.PersistentPoolBlock,
+			allocation.Offset,
+			static_cast<VkDeviceSize>(allocation.SizeInBytes));
+		return;
+	}
+
+	if (PendingPersistentStructuredBufferFrees.size() < FrameContexts.size())
+		PendingPersistentStructuredBufferFrees.resize(FrameContexts.size());
+
+	const uint32_t frameIndex =
+		CurrentFrameIndex < PendingPersistentStructuredBufferFrees.size()
+			? CurrentFrameIndex
+			: 0u;
+	PendingPersistentStructuredBufferFrees[frameIndex].push_back({
+		allocation.PersistentPoolBlock,
+		allocation.Offset,
+		static_cast<VkDeviceSize>(allocation.SizeInBytes)
+	});
+#else
+	(void)allocation;
+#endif
+}
+
+void VulkanBackend::RetirePersistentStructuredBufferFrees(uint32_t frameIndex)
+{
+#if CORONA_HAS_VULKAN
+	if (frameIndex >= PendingPersistentStructuredBufferFrees.size())
+		return;
+
+	std::vector<PendingPersistentStructuredBufferFree>& pending =
+		PendingPersistentStructuredBufferFrees[frameIndex];
+	for (const PendingPersistentStructuredBufferFree& freeRange : pending)
+	{
+		AddPersistentStructuredBufferFreeRange(freeRange.Block, freeRange.Offset, freeRange.Size);
+	}
+	pending.clear();
+#else
+	(void)frameIndex;
+#endif
+}
+
+bool VulkanBackend::AllocatePersistentStructuredBufferRange(
+	VkDeviceSize size,
+	VkDeviceSize alignment,
+	const void* srcData,
+	VulkanBufferAllocation& outAllocation)
+{
+	outAllocation = {};
+#if !CORONA_HAS_VULKAN
+	(void)size; (void)alignment; (void)srcData;
+	return false;
+#else
+	if (size == 0 || !srcData)
+		return false;
+
+	const VkDeviceSize align = std::max<VkDeviceSize>(alignment > 0 ? alignment : 4, StorageBufferAlignment);
+	auto allocateFromBlock = [&](const std::shared_ptr<VulkanPersistentBufferBlock>& block) -> bool
+	{
+		if (!block || block->Buffer == VK_NULL_HANDLE)
+			return false;
+
+		for (size_t rangeIndex = 0; rangeIndex < block->FreeRanges.size(); ++rangeIndex)
+		{
+			VulkanPersistentBufferBlock::FreeRange range = block->FreeRanges[rangeIndex];
+			const VkDeviceSize alignedOffset = AlignVkDeviceSize(range.Offset, align);
+			const VkDeviceSize rangeEnd = range.Offset + range.Size;
+			if (alignedOffset > rangeEnd || alignedOffset + size > rangeEnd)
+				continue;
+
+			auto insertIt = block->FreeRanges.erase(block->FreeRanges.begin() + rangeIndex);
+			if (alignedOffset > range.Offset)
+			{
+				insertIt = block->FreeRanges.insert(insertIt, { range.Offset, alignedOffset - range.Offset });
+				++insertIt;
+			}
+			const VkDeviceSize allocEnd = alignedOffset + size;
+			if (allocEnd < rangeEnd)
+			{
+				block->FreeRanges.insert(insertIt, { allocEnd, rangeEnd - allocEnd });
+			}
+
+			outAllocation.Buffer = block->Buffer;
+			outAllocation.Memory = block->Memory;
+			outAllocation.Offset = alignedOffset;
+			outAllocation.SizeInBytes = static_cast<uint32_t>(size);
+			outAllocation.PersistentPoolBlock = block;
+			++PersistentStructuredBufferAllocationCount;
+			PersistentStructuredBufferBytesIssued += size;
+			return true;
+		}
+
+		const VkDeviceSize alignedCursor = AlignVkDeviceSize(block->Cursor, align);
+		if (alignedCursor + size > block->Capacity)
+			return false;
+		outAllocation.Buffer = block->Buffer;
+		outAllocation.Memory = block->Memory;
+		outAllocation.Offset = alignedCursor;
+		outAllocation.SizeInBytes = static_cast<uint32_t>(size);
+		outAllocation.PersistentPoolBlock = block;
+		block->Cursor = alignedCursor + size;
+		++PersistentStructuredBufferAllocationCount;
+		PersistentStructuredBufferBytesIssued += size;
+		return true;
+	};
+
+	for (const std::shared_ptr<VulkanPersistentBufferBlock>& block : PersistentStructuredBufferBlocks)
+	{
+		if (allocateFromBlock(block))
+			goto upload;
+	}
+
+	{
+		const VkDeviceSize requestedSize = size + align;
+		const VkDeviceSize blockSize = std::max<VkDeviceSize>(PersistentStructuredBufferBlockDefaultSize, requestedSize);
+		auto block = std::make_shared<VulkanPersistentBufferBlock>();
+		block->OwningDevice = Device;
+		block->Capacity = blockSize;
+
+		VkBufferCreateInfo bufferInfo{};
+		bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+		bufferInfo.size = blockSize;
+		bufferInfo.usage =
+			VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+			VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+			VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT;
+		if (bRayTracingEnabled)
+		{
+			bufferInfo.usage |= VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+		}
+		bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+		if (vkCreateBuffer(Device, &bufferInfo, nullptr, &block->Buffer) != VK_SUCCESS)
+			return false;
+
+		VkMemoryRequirements memReq{};
+		vkGetBufferMemoryRequirements(Device, block->Buffer, &memReq);
+
+		uint32_t memoryTypeIndex = UINT32_MAX;
+		VkPhysicalDeviceMemoryProperties memProps{};
+		vkGetPhysicalDeviceMemoryProperties(PhysicalDevice, &memProps);
+		for (uint32_t i = 0; i < memProps.memoryTypeCount; ++i)
+		{
+			if (!(memReq.memoryTypeBits & (1u << i)))
+				continue;
+			if (memProps.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
+			{
+				memoryTypeIndex = i;
+				break;
+			}
+		}
+		if (memoryTypeIndex == UINT32_MAX)
+		{
+			vkDestroyBuffer(Device, block->Buffer, nullptr);
+			block->Buffer = VK_NULL_HANDLE;
+			return false;
+		}
+
+		VkMemoryAllocateFlagsInfo allocFlags{};
+		allocFlags.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO;
+		if (bRayTracingEnabled)
+			allocFlags.flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT;
+
+		VkMemoryAllocateInfo allocInfo{};
+		allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+		allocInfo.pNext = bRayTracingEnabled ? &allocFlags : nullptr;
+		allocInfo.allocationSize = memReq.size;
+		allocInfo.memoryTypeIndex = memoryTypeIndex;
+		if (vkAllocateMemory(Device, &allocInfo, nullptr, &block->Memory) != VK_SUCCESS)
+		{
+			vkDestroyBuffer(Device, block->Buffer, nullptr);
+			block->Buffer = VK_NULL_HANDLE;
+			return false;
+		}
+		if (vkBindBufferMemory(Device, block->Buffer, block->Memory, 0) != VK_SUCCESS)
+		{
+			vkFreeMemory(Device, block->Memory, nullptr);
+			vkDestroyBuffer(Device, block->Buffer, nullptr);
+			block->Memory = VK_NULL_HANDLE;
+			block->Buffer = VK_NULL_HANDLE;
+			return false;
+		}
+
+		PersistentStructuredBufferBlocks.push_back(block);
+		++PersistentStructuredBufferBlockCount;
+		PersistentStructuredBufferBytesReserved += blockSize;
+		if (!allocateFromBlock(block))
+			return false;
+	}
+
+upload:
+	if (outAllocation.Buffer == VK_NULL_HANDLE || outAllocation.SizeInBytes == 0)
+		return false;
+
+	auto releaseReservedRange = [&]()
+	{
+		if (outAllocation.PersistentPoolBlock && outAllocation.SizeInBytes != 0)
+		{
+			AddPersistentStructuredBufferFreeRange(
+				outAllocation.PersistentPoolBlock,
+				outAllocation.Offset,
+				static_cast<VkDeviceSize>(outAllocation.SizeInBytes));
+		}
+		outAllocation = {};
+	};
+
+	VkBuffer stagingBuffer = VK_NULL_HANDLE;
+	VkDeviceMemory stagingMemory = VK_NULL_HANDLE;
+	auto cleanupStaging = [&]()
+	{
+		if (stagingBuffer != VK_NULL_HANDLE)
+			vkDestroyBuffer(Device, stagingBuffer, nullptr);
+		if (stagingMemory != VK_NULL_HANDLE)
+			vkFreeMemory(Device, stagingMemory, nullptr);
+	};
+
+	if (!CreateBufferWithMemory(
+		size,
+		VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+		VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+		false,
+		stagingBuffer,
+		stagingMemory))
+	{
+		releaseReservedRange();
+		return false;
+	}
+
+	void* mappedData = nullptr;
+	if (vkMapMemory(Device, stagingMemory, 0, size, 0, &mappedData) != VK_SUCCESS)
+	{
+		cleanupStaging();
+		releaseReservedRange();
+		return false;
+	}
+	std::memcpy(mappedData, srcData, static_cast<size_t>(size));
+	vkUnmapMemory(Device, stagingMemory);
+
+	VkCommandBufferAllocateInfo commandBufferAllocInfo{};
+	commandBufferAllocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+	commandBufferAllocInfo.commandPool = CommandPool;
+	commandBufferAllocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+	commandBufferAllocInfo.commandBufferCount = 1;
+	VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
+	if (vkAllocateCommandBuffers(Device, &commandBufferAllocInfo, &commandBuffer) != VK_SUCCESS)
+	{
+		cleanupStaging();
+		releaseReservedRange();
+		return false;
+	}
+
+	VkCommandBufferBeginInfo beginInfo{};
+	beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+	beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+	if (vkBeginCommandBuffer(commandBuffer, &beginInfo) != VK_SUCCESS)
+	{
+		vkFreeCommandBuffers(Device, CommandPool, 1, &commandBuffer);
+		cleanupStaging();
+		releaseReservedRange();
+		return false;
+	}
+
+	VkBufferCopy copyRegion{};
+	copyRegion.srcOffset = 0;
+	copyRegion.dstOffset = outAllocation.Offset;
+	copyRegion.size = size;
+	vkCmdCopyBuffer(commandBuffer, stagingBuffer, outAllocation.Buffer, 1, &copyRegion);
+
+	VkBufferMemoryBarrier barrier{};
+	barrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+	barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+	barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+	barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	barrier.buffer = outAllocation.Buffer;
+	barrier.offset = outAllocation.Offset;
+	barrier.size = size;
+	vkCmdPipelineBarrier(
+		commandBuffer,
+		VK_PIPELINE_STAGE_TRANSFER_BIT,
+		VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+		0,
+		0, nullptr,
+		1, &barrier,
+		0, nullptr);
+
+	if (vkEndCommandBuffer(commandBuffer) != VK_SUCCESS)
+	{
+		vkFreeCommandBuffers(Device, CommandPool, 1, &commandBuffer);
+		cleanupStaging();
+		releaseReservedRange();
+		return false;
+	}
+
+	VkSubmitInfo submitInfo{};
+	submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+	submitInfo.commandBufferCount = 1;
+	submitInfo.pCommandBuffers = &commandBuffer;
+	if (vkQueueSubmit(GraphicsQueue, 1, &submitInfo, VK_NULL_HANDLE) != VK_SUCCESS)
+	{
+		vkFreeCommandBuffers(Device, CommandPool, 1, &commandBuffer);
+		cleanupStaging();
+		releaseReservedRange();
+		return false;
+	}
+	vkQueueWaitIdle(GraphicsQueue);
+	vkFreeCommandBuffers(Device, CommandPool, 1, &commandBuffer);
+	cleanupStaging();
+	return true;
+#endif
+}
+
+std::shared_ptr<Buffer> VulkanBackend::CreateSuballocatedStructuredBuffer(const BufferCreateDesc& desc)
+{
+#if !CORONA_HAS_VULKAN
+	(void)desc;
+	return nullptr;
+#else
+	if (desc.NumElements == 0 || desc.ElementSize == 0 || !desc.InitialData)
+		return nullptr;
+
+	const uint64_t sizeInBytes64 =
+		static_cast<uint64_t>(desc.NumElements) * static_cast<uint64_t>(desc.ElementSize);
+	if (sizeInBytes64 > UINT32_MAX)
+		return nullptr;
+
+	VulkanBufferAllocation allocation{};
+	if (!AllocatePersistentStructuredBufferRange(
+		static_cast<VkDeviceSize>(sizeInBytes64),
+		static_cast<VkDeviceSize>(desc.ElementSize),
+		desc.InitialData,
+		allocation))
+	{
+		return nullptr;
+	}
+	allocation.Stride = desc.ElementSize;
+
+	auto buffer = CreateTrackedBufferHandle();
+	buffer->NumElements = desc.NumElements;
+	buffer->ElementSize = desc.ElementSize;
+	buffer->Type = Buffer::STRUCTURED;
+	BufferAllocations[buffer.get()] = allocation;
+	return buffer;
+#endif
+}
+
 bool VulkanBackend::AllocateUploadBufferRange(
 	VkDeviceSize size,
 	VkDeviceSize alignment,
@@ -5252,7 +5683,7 @@ bool VulkanBackend::AllocateUploadBufferRange(
 		if (!ActiveUploadBlock)
 			return false;
 		VulkanUploadHeapBlock& block = *ActiveUploadBlock;
-		const VkDeviceSize alignedCursor = (block.Cursor + alignment - 1) & ~(alignment - 1);
+		const VkDeviceSize alignedCursor = AlignVkDeviceSize(block.Cursor, alignment);
 		if (alignedCursor + size > block.Capacity)
 			return false;
 		outAllocation.Buffer = block.Buffer;
@@ -5360,6 +5791,147 @@ bool VulkanBackend::AllocateUploadBufferRange(
 	return tryAllocateFromActive();
 #endif
 }
+
+#if CORONA_HAS_VULKAN
+void VulkanBackend::ResetTransientUploadStructuredFrame(uint32_t frameIndex)
+{
+	const size_t frameCount = std::max<size_t>(FrameContexts.size(), 1u);
+	if (TransientUploadStructuredFrames.size() < frameCount)
+		TransientUploadStructuredFrames.resize(frameCount);
+	if (frameIndex >= TransientUploadStructuredFrames.size())
+		return;
+
+	VulkanTransientUploadStructuredFrame& frame = TransientUploadStructuredFrames[frameIndex];
+	frame.KeepAlive.clear();
+	for (const std::shared_ptr<VulkanUploadHeapBlock>& block : frame.Blocks)
+	{
+		if (block)
+			block->Cursor = 0;
+	}
+}
+
+bool VulkanBackend::AllocateTransientUploadStructuredRange(
+	uint32_t frameIndex,
+	VkDeviceSize size,
+	VkDeviceSize alignment,
+	const void* srcData,
+	VulkanBufferAllocation& outAllocation)
+{
+	outAllocation = {};
+	if (size == 0)
+		return false;
+
+	const size_t frameCount = std::max<size_t>(FrameContexts.size(), 1u);
+	if (TransientUploadStructuredFrames.size() < frameCount)
+		TransientUploadStructuredFrames.resize(frameCount);
+	if (frameIndex >= TransientUploadStructuredFrames.size())
+		frameIndex = 0;
+
+	VulkanTransientUploadStructuredFrame& frame = TransientUploadStructuredFrames[frameIndex];
+	const VkDeviceSize align = std::max<VkDeviceSize>(alignment > 0 ? alignment : 4, StorageBufferAlignment);
+
+	auto allocateFromBlock = [&](const std::shared_ptr<VulkanUploadHeapBlock>& block) -> bool
+	{
+		if (!block || block->Buffer == VK_NULL_HANDLE || !block->MappedBase)
+			return false;
+		const VkDeviceSize alignedCursor = AlignVkDeviceSize(block->Cursor, align);
+		if (alignedCursor + size > block->Capacity)
+			return false;
+		outAllocation.Buffer = block->Buffer;
+		outAllocation.Memory = block->Memory;
+		outAllocation.Offset = alignedCursor;
+		outAllocation.SizeInBytes = static_cast<uint32_t>(size);
+		outAllocation.PoolBlock = block;
+		if (srcData)
+			std::memcpy(block->MappedBase + alignedCursor, srcData, static_cast<size_t>(size));
+		block->Cursor = alignedCursor + size;
+		++TransientUploadStructuredAllocationCount;
+		TransientUploadStructuredBytesIssued += size;
+		return true;
+	};
+
+	for (const std::shared_ptr<VulkanUploadHeapBlock>& block : frame.Blocks)
+	{
+		if (allocateFromBlock(block))
+			return true;
+	}
+
+	const VkDeviceSize requestedSize = size + align;
+	const VkDeviceSize blockSize = std::max<VkDeviceSize>(TransientUploadStructuredBlockDefaultSize, requestedSize);
+	auto block = std::make_shared<VulkanUploadHeapBlock>();
+	block->OwningDevice = Device;
+	block->Capacity = blockSize;
+
+	VkBufferCreateInfo bufferInfo{};
+	bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+	bufferInfo.size = blockSize;
+	bufferInfo.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+	bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+	if (vkCreateBuffer(Device, &bufferInfo, nullptr, &block->Buffer) != VK_SUCCESS)
+		return false;
+
+	VkMemoryRequirements memReq{};
+	vkGetBufferMemoryRequirements(Device, block->Buffer, &memReq);
+
+	uint32_t memoryTypeIndex = UINT32_MAX;
+	VkPhysicalDeviceMemoryProperties memProps{};
+	vkGetPhysicalDeviceMemoryProperties(PhysicalDevice, &memProps);
+	const VkMemoryPropertyFlags wantProps =
+		VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+	for (uint32_t i = 0; i < memProps.memoryTypeCount; ++i)
+	{
+		if (!(memReq.memoryTypeBits & (1u << i)))
+			continue;
+		if ((memProps.memoryTypes[i].propertyFlags & wantProps) == wantProps)
+		{
+			memoryTypeIndex = i;
+			break;
+		}
+	}
+	if (memoryTypeIndex == UINT32_MAX)
+	{
+		vkDestroyBuffer(Device, block->Buffer, nullptr);
+		block->Buffer = VK_NULL_HANDLE;
+		return false;
+	}
+
+	VkMemoryAllocateInfo allocInfo{};
+	allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+	allocInfo.allocationSize = memReq.size;
+	allocInfo.memoryTypeIndex = memoryTypeIndex;
+	if (vkAllocateMemory(Device, &allocInfo, nullptr, &block->Memory) != VK_SUCCESS)
+	{
+		vkDestroyBuffer(Device, block->Buffer, nullptr);
+		block->Buffer = VK_NULL_HANDLE;
+		return false;
+	}
+	if (vkBindBufferMemory(Device, block->Buffer, block->Memory, 0) != VK_SUCCESS)
+	{
+		vkFreeMemory(Device, block->Memory, nullptr);
+		vkDestroyBuffer(Device, block->Buffer, nullptr);
+		block->Memory = VK_NULL_HANDLE;
+		block->Buffer = VK_NULL_HANDLE;
+		return false;
+	}
+
+	void* mapped = nullptr;
+	if (vkMapMemory(Device, block->Memory, 0, VK_WHOLE_SIZE, 0, &mapped) != VK_SUCCESS)
+	{
+		vkFreeMemory(Device, block->Memory, nullptr);
+		vkDestroyBuffer(Device, block->Buffer, nullptr);
+		block->Memory = VK_NULL_HANDLE;
+		block->Buffer = VK_NULL_HANDLE;
+		return false;
+	}
+	block->MappedBase = static_cast<uint8_t*>(mapped);
+	block->Cursor = 0;
+	frame.Blocks.push_back(block);
+	++TransientUploadStructuredBlockCount;
+	TransientUploadStructuredBytesReserved += blockSize;
+
+	return allocateFromBlock(block);
+}
+#endif
 
 std::shared_ptr<VertexBuffer> VulkanBackend::CreateRWVertexBuffer(uint32_t size, uint32_t stride)
 {
@@ -5479,6 +6051,45 @@ void VulkanBackend::UpdateUploadStructuredBuffer(Buffer* buffer, const void* src
 		return;
 	const uint32_t copyBytes = std::min<uint32_t>(sizeInBytes, alloc.SizeInBytes);
 	std::memcpy(alloc.PoolBlock->MappedBase + alloc.Offset, srcData, copyBytes);
+#endif
+}
+
+std::shared_ptr<Buffer> VulkanBackend::AllocateTransientUploadStructuredBuffer(uint32_t numElements, uint32_t elementSize, const void* srcData)
+{
+	if (numElements == 0 || elementSize == 0)
+		return nullptr;
+#if !CORONA_HAS_VULKAN
+	(void)srcData;
+	return nullptr;
+#else
+	const uint64_t sizeInBytes64 = static_cast<uint64_t>(numElements) * static_cast<uint64_t>(elementSize);
+	if (sizeInBytes64 > UINT32_MAX)
+		return nullptr;
+
+	VulkanBufferAllocation allocation{};
+	if (!AllocateTransientUploadStructuredRange(
+		CurrentFrameIndex,
+		static_cast<VkDeviceSize>(sizeInBytes64),
+		static_cast<VkDeviceSize>(elementSize),
+		srcData,
+		allocation))
+	{
+		return nullptr;
+	}
+	allocation.Stride = elementSize;
+
+	auto buf = CreateTrackedBufferHandle();
+	buf->Type = Buffer::STRUCTURED;
+	buf->NumElements = numElements;
+	buf->ElementSize = elementSize;
+	BufferAllocations[buf.get()] = allocation;
+
+	const size_t frameCount = std::max<size_t>(FrameContexts.size(), 1u);
+	if (TransientUploadStructuredFrames.size() < frameCount)
+		TransientUploadStructuredFrames.resize(frameCount);
+	const uint32_t frameIndex = CurrentFrameIndex < TransientUploadStructuredFrames.size() ? CurrentFrameIndex : 0u;
+	TransientUploadStructuredFrames[frameIndex].KeepAlive.push_back(buf);
+	return buf;
 #endif
 }
 
@@ -6568,6 +7179,7 @@ void VulkanBackend::CreateSwapChainForWindow(WindowHandle window, uint32_t width
 	vkGetPhysicalDeviceProperties(PhysicalDevice, &physicalDeviceProperties);
 	TimestampPeriodNs = physicalDeviceProperties.limits.timestampPeriod;
 	UniformBufferAlignment = std::max<VkDeviceSize>(256, physicalDeviceProperties.limits.minUniformBufferOffsetAlignment);
+	StorageBufferAlignment = std::max<VkDeviceSize>(4, physicalDeviceProperties.limits.minStorageBufferOffsetAlignment);
 	MaxUniformBufferRange = physicalDeviceProperties.limits.maxUniformBufferRange;
 	bDescriptorIndexingEnabled = false;
 	bBindlessTextureTableReady = false;
@@ -8435,6 +9047,8 @@ void VulkanBackend::DestroyWindowContext()
 	ActiveUploadBlock.reset();
 	for (auto& entry : BufferAllocations)
 	{
+		if (entry.second.PoolBlock || entry.second.PersistentPoolBlock)
+			continue;
 		if (entry.second.Buffer != VK_NULL_HANDLE)
 			vkDestroyBuffer(Device, entry.second.Buffer, nullptr);
 		if (entry.second.Memory != VK_NULL_HANDLE)
@@ -8466,6 +9080,9 @@ void VulkanBackend::DestroyWindowContext()
 	VertexBufferAllocations.clear();
 	IndexBufferAllocations.clear();
 	BufferAllocations.clear();
+	PendingPersistentStructuredBufferFrees.clear();
+	TransientUploadStructuredFrames.clear();
+	PersistentStructuredBufferBlocks.clear();
 	TextureAllocations.clear();
 	SamplerAllocations.clear();
 	RayTracingPipelines.clear();

@@ -3181,6 +3181,7 @@ public:
 	void DispatchSpineSkinningForMesh(Mesh* mesh);
 	void DispatchSpineSkinningForScene(const shared_ptr<Scene>& scene);
 	void DispatchSpineSkinningForRenderWorld();
+	void UploadLiveSpineTransientBonesForRender();
 
 	// 3D skeletal skinning entry points (implemented in Corona.Skeletal.cpp).
 	// Spawn helpers create procedural box characters for Sponza-mode testing.
@@ -3188,6 +3189,7 @@ public:
 	void DispatchSkeletalSkinningForRenderWorld();
 	void SpawnSkeletalTestCharacters();
 	void UpdateSkeletalTestCharacters(float timeSeconds);
+	void UploadSkeletalUnifiedTransientBuffersForRender();
 
 	// LLM-driven motion playback path (Corona.SmplCharacter.cpp +
 	// Corona.MotionPlayback.h). The console hands a loaded BVH clip to
@@ -3225,6 +3227,8 @@ public:
 	std::shared_ptr<Buffer> SkeletalUnifiedInputVertices;
 	std::shared_ptr<Buffer> SkeletalUnifiedBoneMatrices;
 	std::shared_ptr<Buffer> SkeletalUnifiedPrevBoneMatrices;
+	std::shared_ptr<Buffer> SkeletalUnifiedBoneMatricesFallback;
+	std::shared_ptr<Buffer> SkeletalUnifiedPrevBoneMatricesFallback;
 	std::shared_ptr<VertexBuffer> SkeletalUnifiedOutputVb;
 	std::shared_ptr<VertexBuffer> SkeletalUnifiedBindVb;
 	std::shared_ptr<IndexBuffer>  SkeletalUnifiedIb;
@@ -3235,6 +3239,7 @@ public:
 	// RenderWorld.SceneObjects. Mobile (GBufferMobile.hlsl) doesn't have
 	// the cluster shader entry so this SBV isn't bound there.
 	std::shared_ptr<Buffer> SkeletalUnifiedInstanceTransforms;
+	std::shared_ptr<Buffer> SkeletalUnifiedInstanceTransformsFallback;
 	std::shared_ptr<Material> SkeletalUnifiedMaterial;
 	uint32_t SkeletalUnifiedIndexCount = 0;
 	uint32_t SkeletalUnifiedCharCount = 0;
@@ -3290,9 +3295,6 @@ public:
 	void DumpSkeletalFrameStatsToTrace();
 	struct StaticGBufferInstanceXform { float r0[4]; float r1[4]; float r2[4]; };
 	std::vector<StaticGBufferInstanceXform> StaticGBufferInstanceTransformScratch;
-	std::vector<std::array<std::shared_ptr<Buffer>, 4>> StaticGBufferInstanceTransformBuffers;
-	uint32_t StaticGBufferInstanceTransformDrawIndex = 0;
-	Buffer* AcquireStaticGBufferInstanceTransformBuffer(uint32_t instanceCount);
 	bool IsSceneEligibleForStaticGBufferInstancing(const std::shared_ptr<Scene>& scene) const;
 	bool DrawStaticInstancedScene(
 		const std::shared_ptr<Scene>& scene,

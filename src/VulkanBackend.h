@@ -370,6 +370,7 @@ public:
 	std::shared_ptr<VertexBuffer> CreateRWVertexBuffer(uint32_t size, uint32_t stride) override;
 	std::shared_ptr<Buffer> CreateUploadStructuredBuffer(uint32_t numElements, uint32_t elementSize) override;
 	void UpdateUploadStructuredBuffer(Buffer* buffer, const void* srcData, uint32_t sizeInBytes) override;
+	std::shared_ptr<Buffer> AllocateTransientUploadStructuredBuffer(uint32_t numElements, uint32_t elementSize, const void* srcData) override;
 	std::shared_ptr<RTAS> CreateBLASForMesh(Mesh* mesh) override;
 	std::shared_ptr<RTAS> CreateBLASForSkeletalMesh(Mesh* mesh) override;
 	void RefitBLAS(RTAS* rtas, Mesh* mesh) override;
@@ -496,6 +497,8 @@ private:
 		~VulkanUploadHeapBlock();
 	};
 
+	struct VulkanPersistentBufferBlock;
+
 	struct VulkanBufferAllocation
 	{
 		VkBuffer Buffer = VK_NULL_HANDLE;
@@ -509,6 +512,23 @@ private:
 		// has been released — Buffer/Memory above are non-owning views
 		// into that block in this case.
 		std::shared_ptr<VulkanUploadHeapBlock> PoolBlock;
+		std::shared_ptr<VulkanPersistentBufferBlock> PersistentPoolBlock;
+	};
+
+	struct VulkanPersistentBufferBlock
+	{
+		VkDevice OwningDevice = VK_NULL_HANDLE;
+		VkBuffer Buffer = VK_NULL_HANDLE;
+		VkDeviceMemory Memory = VK_NULL_HANDLE;
+		VkDeviceSize Capacity = 0;
+		VkDeviceSize Cursor = 0;
+		struct FreeRange
+		{
+			VkDeviceSize Offset = 0;
+			VkDeviceSize Size = 0;
+		};
+		std::vector<FreeRange> FreeRanges;
+		~VulkanPersistentBufferBlock();
 	};
 
 	struct VulkanTextureAllocation
@@ -627,6 +647,7 @@ private:
 	VkDeviceSize TransientUniformFrameOffset = 0;
 	uint32_t TransientUniformFrameCount = 0;
 	VkDeviceSize UniformBufferAlignment = 256;
+	VkDeviceSize StorageBufferAlignment = 16;
 	VkDeviceSize MaxUniformBufferRange = 0;
 
 	// Phase 3.5 (Vulkan) — UPLOAD-heap-style sub-allocator that mirrors the
@@ -638,6 +659,51 @@ private:
 		VkDeviceSize alignment,
 		const void* srcData,
 		VulkanBufferAllocation& outAllocation);
+
+	struct VulkanTransientUploadStructuredFrame
+	{
+		std::vector<std::shared_ptr<VulkanUploadHeapBlock>> Blocks;
+		std::vector<std::shared_ptr<Buffer>> KeepAlive;
+	};
+	std::vector<VulkanTransientUploadStructuredFrame> TransientUploadStructuredFrames;
+	VkDeviceSize TransientUploadStructuredBlockDefaultSize = 4ull * 1024ull * 1024ull;
+	uint32_t TransientUploadStructuredBlockCount = 0;
+	uint32_t TransientUploadStructuredAllocationCount = 0;
+	uint64_t TransientUploadStructuredBytesIssued = 0;
+	uint64_t TransientUploadStructuredBytesReserved = 0;
+	void ResetTransientUploadStructuredFrame(uint32_t frameIndex);
+	bool AllocateTransientUploadStructuredRange(
+		uint32_t frameIndex,
+		VkDeviceSize size,
+		VkDeviceSize alignment,
+		const void* srcData,
+		VulkanBufferAllocation& outAllocation);
+
+	std::vector<std::shared_ptr<VulkanPersistentBufferBlock>> PersistentStructuredBufferBlocks;
+	struct PendingPersistentStructuredBufferFree
+	{
+		std::shared_ptr<VulkanPersistentBufferBlock> Block;
+		VkDeviceSize Offset = 0;
+		VkDeviceSize Size = 0;
+	};
+	std::vector<std::vector<PendingPersistentStructuredBufferFree>> PendingPersistentStructuredBufferFrees;
+	VkDeviceSize PersistentStructuredBufferBlockDefaultSize = 16ull * 1024ull * 1024ull;
+	uint32_t PersistentStructuredBufferBlockCount = 0;
+	uint32_t PersistentStructuredBufferAllocationCount = 0;
+	uint64_t PersistentStructuredBufferBytesIssued = 0;
+	uint64_t PersistentStructuredBufferBytesReserved = 0;
+	bool AllocatePersistentStructuredBufferRange(
+		VkDeviceSize size,
+		VkDeviceSize alignment,
+		const void* srcData,
+		VulkanBufferAllocation& outAllocation);
+	void AddPersistentStructuredBufferFreeRange(
+		const std::shared_ptr<VulkanPersistentBufferBlock>& block,
+		VkDeviceSize offset,
+		VkDeviceSize size);
+	void ReleasePersistentStructuredBufferRange(const VulkanBufferAllocation& allocation);
+	void RetirePersistentStructuredBufferFrees(uint32_t frameIndex);
+	std::shared_ptr<Buffer> CreateSuballocatedStructuredBuffer(const BufferCreateDesc& desc);
 
 	// Phase 3.5 (Vulkan) upload pool state. ActiveUploadBlock is the
 	// current bump-target; retired blocks stay alive via outstanding

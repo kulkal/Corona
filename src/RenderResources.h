@@ -58,6 +58,7 @@ public:
 	// CreateUploadStructuredBuffer. Null for DEFAULT-heap buffers.
 	void* MappedPtr = nullptr;
 	uint32_t MappedSizeInBytes = 0;
+	uint64_t SuballocationOffsetBytes = 0;
 	// Persistent staging resource for dynamic updates into DEFAULT-heap buffers.
 	Microsoft::WRL::ComPtr<ID3D12Resource> UploadResource;
 	void* UploadMappedPtr = nullptr;

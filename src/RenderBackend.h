@@ -163,6 +163,12 @@ enum class EBufferLifetime
 	PerFrame,
 };
 
+enum class EBufferAllocationPolicy
+{
+	Dedicated,
+	Suballocated,
+};
+
 struct BufferCreateDesc
 {
 	uint32_t NumElements = 0;
@@ -173,6 +179,7 @@ struct BufferCreateDesc
 	EBufferShape Shape = EBufferShape::ByteAddress;
 	EBufferAccess Access = EBufferAccess::GpuOnly;
 	EBufferLifetime Lifetime = EBufferLifetime::Persistent;
+	EBufferAllocationPolicy AllocationPolicy = EBufferAllocationPolicy::Dedicated;
 };
 
 enum class ESamplerFilter
@@ -520,6 +527,11 @@ public:
 	// frames; call UpdateUploadStructuredBuffer to refresh contents.
 	virtual std::shared_ptr<Buffer> CreateUploadStructuredBuffer(uint32_t numElements, uint32_t elementSize) = 0;
 	virtual void UpdateUploadStructuredBuffer(Buffer* buffer, const void* srcData, uint32_t sizeInBytes) = 0;
+	// Frame-transient structured buffer backed by a backend-owned suballocated
+	// upload pool. The returned Buffer handle is kept alive by the backend
+	// until the frame's fence is retired, so callers can bind it immediately
+	// without maintaining their own per-draw cache.
+	virtual std::shared_ptr<Buffer> AllocateTransientUploadStructuredBuffer(uint32_t numElements, uint32_t elementSize, const void* srcData) = 0;
 	virtual std::shared_ptr<RTAS> CreateBLASForMesh(Mesh* mesh) = 0;
 	// Build a BLAS from the skeletal-skinning output VB (SkeletalOutputVb)
 	// with the ALLOW_UPDATE flag so RefitBLAS can refresh it cheaply each

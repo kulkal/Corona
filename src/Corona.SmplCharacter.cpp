@@ -302,9 +302,10 @@ bool Corona::SpawnSmplMotionCharacter(const glm::vec3& worldOrigin, float unifor
 		desc.NumElements          = vertexCount;
 		desc.ElementSize          = sizeof(SmplSkinInputVertex);
 		desc.InitialState         = EInitialResourceState::ShaderRead;
-		desc.bAllowUnorderedAccess = true;
+		desc.bAllowUnorderedAccess = false;
 		desc.InitialData          = skin.data();
 		desc.Shape                = EBufferShape::Structured;
+		desc.AllocationPolicy     = EBufferAllocationPolicy::Suballocated;
 		res->InputVertices        = renderBackend->CreateBuffer(desc);
 	}
 	if (!res->InputVertices) return false;
@@ -322,6 +323,8 @@ bool Corona::SpawnSmplMotionCharacter(const glm::vec3& worldOrigin, float unifor
 		static_cast<UINT32>(identityPalette.size()),
 		static_cast<UINT32>(sizeof(BoneMatrix3x4)));
 	if (!res->BoneMatrices || !res->PrevBoneMatrices) return false;
+	res->BoneMatricesFallback = res->BoneMatrices;
+	res->PrevBoneMatricesFallback = res->PrevBoneMatrices;
 	renderBackend->UpdateUploadStructuredBuffer(
 		res->BoneMatrices.get(),
 		identityPalette.data(),
@@ -485,12 +488,44 @@ void Corona::UpdateSmplMotionCharacterPalette()
 	// stable; the visible cost is no streaking on fast motion which is fine
 	// for the bring-up phase.
 
-	renderBackend->UpdateUploadStructuredBuffer(
-		SmplMotionCharacter->PrevBoneMatrices.get(),
-		prev.data(),
-		static_cast<UINT32>(prev.size() * sizeof(BoneMatrix3x4)));
-	renderBackend->UpdateUploadStructuredBuffer(
-		SmplMotionCharacter->BoneMatrices.get(),
-		palette.data(),
-		static_cast<UINT32>(palette.size() * sizeof(BoneMatrix3x4)));
+	std::shared_ptr<Buffer> prevBuffer = renderBackend->AllocateTransientUploadStructuredBuffer(
+		static_cast<UINT32>(prev.size()),
+		static_cast<UINT32>(sizeof(BoneMatrix3x4)),
+		prev.data());
+	std::shared_ptr<Buffer> currentBuffer = renderBackend->AllocateTransientUploadStructuredBuffer(
+		static_cast<UINT32>(palette.size()),
+		static_cast<UINT32>(sizeof(BoneMatrix3x4)),
+		palette.data());
+
+	if (prevBuffer)
+	{
+		SmplMotionCharacter->PrevBoneMatrices = prevBuffer;
+	}
+	else if (SmplMotionCharacter->PrevBoneMatricesFallback)
+	{
+		renderBackend->UpdateUploadStructuredBuffer(
+			SmplMotionCharacter->PrevBoneMatricesFallback.get(),
+			prev.data(),
+			static_cast<UINT32>(prev.size() * sizeof(BoneMatrix3x4)));
+		SmplMotionCharacter->PrevBoneMatrices = SmplMotionCharacter->PrevBoneMatricesFallback;
+	}
+
+	if (currentBuffer)
+	{
+		SmplMotionCharacter->BoneMatrices = currentBuffer;
+	}
+	else if (SmplMotionCharacter->BoneMatricesFallback)
+	{
+		renderBackend->UpdateUploadStructuredBuffer(
+			SmplMotionCharacter->BoneMatricesFallback.get(),
+			palette.data(),
+			static_cast<UINT32>(palette.size() * sizeof(BoneMatrix3x4)));
+		SmplMotionCharacter->BoneMatrices = SmplMotionCharacter->BoneMatricesFallback;
+	}
+
+	if (SmplMotionCharacter->MeshPtr)
+	{
+		SmplMotionCharacter->MeshPtr->SkeletalPrevBoneMatrices = SmplMotionCharacter->PrevBoneMatrices;
+		SmplMotionCharacter->MeshPtr->SkeletalBoneMatrices = SmplMotionCharacter->BoneMatrices;
+	}
 }

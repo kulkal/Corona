@@ -449,6 +449,7 @@ void Corona::DispatchSkeletalSkinningForRenderWorld()
 	// runs. The SMPL mesh has bSkeletalSkinned=true, so it gets picked up
 	// by the same gathering loop below without any path-specific glue.
 	UpdateSmplMotionCharacterPalette();
+	UploadSkeletalUnifiedTransientBuffersForRender();
 
 	// Path C: VS inline skinning. No compute, no CPU skin pass, no
 	// upload VB — the GBuffer VS does all the skinning math itself.
@@ -738,9 +739,10 @@ void Corona::SpawnSkeletalTestCharacters()
 		inputDesc.NumElements = static_cast<UINT32>(skin.size());
 		inputDesc.ElementSize = sizeof(SkinInputVertex);
 		inputDesc.InitialState = EInitialResourceState::ShaderRead;
-		inputDesc.bAllowUnorderedAccess = true;
+		inputDesc.bAllowUnorderedAccess = false;
 		inputDesc.InitialData = skin.data();
 		inputDesc.Shape = EBufferShape::Structured;
+		inputDesc.AllocationPolicy = EBufferAllocationPolicy::Suballocated;
 		SkeletalUnifiedInputVertices = renderBackend->CreateBuffer(inputDesc);
 
 		// CPU-side mirror of the bind pose for the CPU-skinning benchmark
@@ -783,6 +785,7 @@ void Corona::SpawnSkeletalTestCharacters()
 			static_cast<UINT32>(identityBones.size()), sizeof(InitialBoneMatrix));
 		if (SkeletalUnifiedBoneMatrices)
 		{
+			SkeletalUnifiedBoneMatricesFallback = SkeletalUnifiedBoneMatrices;
 			renderBackend->UpdateUploadStructuredBuffer(
 				SkeletalUnifiedBoneMatrices.get(),
 				identityBones.data(),
@@ -792,6 +795,7 @@ void Corona::SpawnSkeletalTestCharacters()
 			static_cast<UINT32>(identityBones.size()), sizeof(InitialBoneMatrix));
 		if (SkeletalUnifiedPrevBoneMatrices)
 		{
+			SkeletalUnifiedPrevBoneMatricesFallback = SkeletalUnifiedPrevBoneMatrices;
 			renderBackend->UpdateUploadStructuredBuffer(
 				SkeletalUnifiedPrevBoneMatrices.get(),
 				identityBones.data(),
@@ -829,6 +833,7 @@ void Corona::SpawnSkeletalTestCharacters()
 			static_cast<UINT32>(sizeof(InitialBoneMatrix)));
 		if (SkeletalUnifiedInstanceTransforms)
 		{
+			SkeletalUnifiedInstanceTransformsFallback = SkeletalUnifiedInstanceTransforms;
 			renderBackend->UpdateUploadStructuredBuffer(
 				SkeletalUnifiedInstanceTransforms.get(),
 				identityTransforms.data(),
@@ -1222,26 +1227,9 @@ void Corona::UpdateSkeletalTestCharacters(float timeSeconds)
 	// visible in the overlay for comparison with the pre-fusion baseline.
 	AddCpuUpdatePhaseTiming(ECpuUpdatePhase::SkeletalPack, computeEnd, computeEnd);
 
-	// Single contiguous upload covers all characters at once. The unified
-	// buffer is persistent-mapped UPLOAD heap, so this is one memcpy.
-	if (SkeletalUnifiedBoneMatrices && !packed.empty())
-	{
-		renderBackend->UpdateUploadStructuredBuffer(
-			SkeletalUnifiedBoneMatrices.get(),
-			packed.data(),
-			static_cast<UINT32>(packed.size() * sizeof(SkinBoneRow)));
-	}
-	if (SkeletalUnifiedPrevBoneMatrices && !packedPrev.empty())
-	{
-		renderBackend->UpdateUploadStructuredBuffer(
-			SkeletalUnifiedPrevBoneMatrices.get(),
-			packedPrev.data(),
-			static_cast<UINT32>(packedPrev.size() * sizeof(SkinBoneRow)));
-	}
-
 	// Mirror the packed palettes onto the Corona class so the CPU-skinning
-	// benchmark path can read them on the render thread without a GPU
-	// readback. Same layout as the SBV slots.
+	// benchmark path and render-thread transient upload can read them
+	// without re-running animation math. Same layout as the SBV slots.
 	static_assert(sizeof(SkinBoneRow) == sizeof(SkinBoneRowCpu),
 		"SkinBoneRow layout must match SkinBoneRowCpu");
 	SkeletalUnifiedPaletteCpu.assign(
@@ -1254,6 +1242,68 @@ void Corona::UpdateSkeletalTestCharacters(float timeSeconds)
 
 	SkeletalPrevUpdateTimeSeconds = timeSeconds;
 	bSkeletalPrevUpdateTimeValid = true;
+}
+
+void Corona::UploadSkeletalUnifiedTransientBuffersForRender()
+{
+	if (!renderBackend ||
+		SkeletalUnifiedCharCount == 0 ||
+		SkeletalUnifiedBoneCount == 0 ||
+		SkeletalUnifiedPaletteCpu.empty() ||
+		SkeletalUnifiedPalettePrevCpu.empty())
+	{
+		return;
+	}
+
+	const uint32_t currentCount = static_cast<uint32_t>(SkeletalUnifiedPaletteCpu.size());
+	const uint32_t previousCount = static_cast<uint32_t>(SkeletalUnifiedPalettePrevCpu.size());
+	std::shared_ptr<Buffer> current = renderBackend->AllocateTransientUploadStructuredBuffer(
+		currentCount,
+		static_cast<uint32_t>(sizeof(SkinBoneRowCpu)),
+		SkeletalUnifiedPaletteCpu.data());
+	std::shared_ptr<Buffer> previous = renderBackend->AllocateTransientUploadStructuredBuffer(
+		previousCount,
+		static_cast<uint32_t>(sizeof(SkinBoneRowCpu)),
+		SkeletalUnifiedPalettePrevCpu.data());
+
+	if (current)
+	{
+		SkeletalUnifiedBoneMatrices = current;
+	}
+	else if (SkeletalUnifiedBoneMatricesFallback)
+	{
+		renderBackend->UpdateUploadStructuredBuffer(
+			SkeletalUnifiedBoneMatricesFallback.get(),
+			SkeletalUnifiedPaletteCpu.data(),
+			currentCount * static_cast<uint32_t>(sizeof(SkinBoneRowCpu)));
+		SkeletalUnifiedBoneMatrices = SkeletalUnifiedBoneMatricesFallback;
+	}
+
+	if (previous)
+	{
+		SkeletalUnifiedPrevBoneMatrices = previous;
+	}
+	else if (SkeletalUnifiedPrevBoneMatricesFallback)
+	{
+		renderBackend->UpdateUploadStructuredBuffer(
+			SkeletalUnifiedPrevBoneMatricesFallback.get(),
+			SkeletalUnifiedPalettePrevCpu.data(),
+			previousCount * static_cast<uint32_t>(sizeof(SkinBoneRowCpu)));
+		SkeletalUnifiedPrevBoneMatrices = SkeletalUnifiedPrevBoneMatricesFallback;
+	}
+
+	for (SceneObject& object : RenderWorld.SceneObjects)
+	{
+		if (!object.ScenePtr)
+			continue;
+		for (const std::shared_ptr<Mesh>& mesh : object.ScenePtr->meshes)
+		{
+			if (!mesh || !mesh->bSkeletalSkinned || mesh->SkeletalOutputVb != SkeletalUnifiedOutputVb)
+				continue;
+			mesh->SkeletalBoneMatrices = SkeletalUnifiedBoneMatrices;
+			mesh->SkeletalPrevBoneMatrices = SkeletalUnifiedPrevBoneMatrices;
+		}
+	}
 }
 
 void Corona::CpuSkinSkeletalCharactersForRenderWorld()
@@ -1418,10 +1468,22 @@ void Corona::UpdateSkeletalUnifiedInstanceTransforms()
 			dst.r2[0] = t[2][0]; dst.r2[1] = t[2][1]; dst.r2[2] = t[2][2]; dst.r2[3] = t[2][3];
 		}
 	}
-	renderBackend->UpdateUploadStructuredBuffer(
-		SkeletalUnifiedInstanceTransforms.get(),
-		transforms.data(),
-		static_cast<UINT32>(transforms.size() * sizeof(InstanceXform)));
+	std::shared_ptr<Buffer> transientTransforms = renderBackend->AllocateTransientUploadStructuredBuffer(
+		static_cast<uint32_t>(transforms.size()),
+		static_cast<uint32_t>(sizeof(InstanceXform)),
+		transforms.data());
+	if (transientTransforms)
+	{
+		SkeletalUnifiedInstanceTransforms = transientTransforms;
+	}
+	else if (SkeletalUnifiedInstanceTransformsFallback)
+	{
+		renderBackend->UpdateUploadStructuredBuffer(
+			SkeletalUnifiedInstanceTransformsFallback.get(),
+			transforms.data(),
+			static_cast<UINT32>(transforms.size() * sizeof(InstanceXform)));
+		SkeletalUnifiedInstanceTransforms = SkeletalUnifiedInstanceTransformsFallback;
+	}
 }
 
 bool Corona::DrawSkeletalVsInlineClusterDesktop()

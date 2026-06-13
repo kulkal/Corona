@@ -1979,7 +1979,11 @@ void Corona::DispatchSpineSkinningForScene(const shared_ptr<Scene>& scene)
 
 void Corona::DispatchSpineSkinningForRenderWorld()
 {
-	if (!renderBackend || !bEnableGpuSpineSkinning || !SpineSkinningPSO)
+	if (!renderBackend || !bEnableGpuSpineSkinning)
+		return;
+
+	UploadLiveSpineTransientBonesForRender();
+	if (!SpineSkinningPSO && !bSpineUseVsInlineSkinning)
 		return;
 
 	for (const SceneObject& object : RenderWorld.SceneObjects)
@@ -1988,27 +1992,6 @@ void Corona::DispatchSpineSkinningForRenderWorld()
 			continue;
 		DispatchSpineSkinningForScene(object.ScenePtr);
 	}
-}
-
-Buffer* Corona::AcquireStaticGBufferInstanceTransformBuffer(uint32_t instanceCount)
-{
-	if (!renderBackend || instanceCount == 0)
-		return nullptr;
-
-	const uint32_t drawSlot = StaticGBufferInstanceTransformDrawIndex++;
-	if (StaticGBufferInstanceTransformBuffers.size() <= drawSlot)
-		StaticGBufferInstanceTransformBuffers.resize(static_cast<size_t>(drawSlot) + 1u);
-
-	const uint32_t frameIndex = renderBackend->GetCurrentFrameIndex() % 4u;
-	auto& buffer = StaticGBufferInstanceTransformBuffers[drawSlot][frameIndex];
-	if (!buffer || buffer->NumElements < instanceCount || buffer->ElementSize != sizeof(StaticGBufferInstanceXform))
-	{
-		uint32_t capacity = 1u;
-		while (capacity < instanceCount)
-			capacity *= 2u;
-		buffer = renderBackend->CreateUploadStructuredBuffer(capacity, sizeof(StaticGBufferInstanceXform));
-	}
-	return buffer.get();
 }
 
 bool Corona::IsSceneEligibleForStaticGBufferInstancing(const std::shared_ptr<Scene>& scene) const
@@ -2060,13 +2043,12 @@ bool Corona::DrawStaticInstancedScene(
 	for (uint32_t i = 0; i < instanceCount; ++i)
 		packWorld(objects[i]->Transform, StaticGBufferInstanceTransformScratch[i]);
 
-	Buffer* instanceBuffer = AcquireStaticGBufferInstanceTransformBuffer(instanceCount);
+	std::shared_ptr<Buffer> instanceBuffer = renderBackend->AllocateTransientUploadStructuredBuffer(
+		instanceCount,
+		static_cast<uint32_t>(sizeof(StaticGBufferInstanceXform)),
+		StaticGBufferInstanceTransformScratch.data());
 	if (!instanceBuffer)
 		return false;
-	renderBackend->UpdateUploadStructuredBuffer(
-		instanceBuffer,
-		StaticGBufferInstanceTransformScratch.data(),
-		instanceCount * static_cast<uint32_t>(sizeof(StaticGBufferInstanceXform)));
 
 	for (const std::shared_ptr<Mesh>& mesh : scene->meshes)
 	{
@@ -2124,7 +2106,7 @@ bool Corona::DrawStaticInstancedScene(
 				metal);
 			CreateAndBindGraphicsBindGroup(renderBackend.get(), pso, kGraphicsBindGroupSlot_Draw,
 				{
-					GraphicsBindGroupEntry::BufferSRV("StaticInstanceTransforms", instanceBuffer),
+					GraphicsBindGroupEntry::BufferSRV("StaticInstanceTransforms", instanceBuffer.get()),
 					GraphicsBindGroupEntry::Constant(0, &objCB, sizeof(objCB)),
 				});
 
@@ -3131,7 +3113,6 @@ void Corona::GBufferPass()
 	renderBackend->BindGraphicsPipeline(GBufferGraphicsPipeline.get());
 
 	PrepareGBufferCulling(static_cast<uint32_t>(RenderWorld.SceneObjects.size()));
-	StaticGBufferInstanceTransformDrawIndex = 0;
 
 	// Phase D (desktop only): if the cluster PSO is live AND we're in the
 	// VS-inline skinning mode, draw all skeletal characters with a single

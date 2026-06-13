@@ -25,6 +25,8 @@
 #include <cstring>
 #include <cstdlib>
 #include <iomanip>
+#include <iterator>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <set>
@@ -382,6 +384,13 @@ namespace
 		return (size + 255u) & ~255u;
 	}
 
+	UINT64 AlignUploadOffset(UINT64 value, UINT64 alignment)
+	{
+		if (alignment <= 1)
+			return value;
+		return ((value + alignment - 1) / alignment) * alignment;
+	}
+
 	void CopyConstantBufferData(UINT8* destination, UINT destinationSize, const void* source, UINT sourceSize)
 	{
 		if (!destination || destinationSize == 0)
@@ -671,6 +680,8 @@ void DX12Backend::BeginFrame()
 	UINT64 ThisFrameFenceValue = FrameFenceValueVec[CurrentFrameIndex];
 	
 	CmdQ->WaitFenceValue(ThisFrameFenceValue);
+	RetireCompletedPersistentStructuredBufferFrees();
+	ResetTransientUploadStructuredFrame(CurrentFrameIndex);
 
 	BeginNewGraphicsCommandList();
 	
@@ -1546,6 +1557,16 @@ std::shared_ptr<Buffer> DX12Backend::CreateBuffer(const BufferCreateDesc& desc)
 	if (desc.NumElements == 0 || desc.ElementSize == 0)
 		return nullptr;
 
+	if (desc.AllocationPolicy == EBufferAllocationPolicy::Suballocated &&
+		desc.Lifetime == EBufferLifetime::Persistent &&
+		desc.Shape == EBufferShape::Structured &&
+		desc.Access == EBufferAccess::GpuOnly &&
+		!desc.bAllowUnorderedAccess &&
+		desc.InitialData)
+	{
+		return CreateSuballocatedStructuredBuffer(desc);
+	}
+
 	std::shared_ptr<Buffer> buffer = CreateBuffer(
 		desc.NumElements,
 		desc.ElementSize,
@@ -1954,6 +1975,49 @@ void DX12Backend::UpdateUploadStructuredBuffer(Buffer* buffer, const void* srcDa
 	memcpy(buffer->MappedPtr, srcData, sizeInBytes);
 }
 
+shared_ptr<Buffer> DX12Backend::AllocateTransientUploadStructuredBuffer(uint32_t NumElements, uint32_t ElementSize, const void* srcData)
+{
+	if (NumElements == 0 || ElementSize == 0 || !Device || !GlobalDHRing)
+		return nullptr;
+
+	const UINT64 sizeInBytes64 = static_cast<UINT64>(NumElements) * static_cast<UINT64>(ElementSize);
+	if (sizeInBytes64 > static_cast<UINT64>(std::numeric_limits<uint32_t>::max()))
+		return nullptr;
+
+	TransientUploadStructuredAllocation alloc = AllocateTransientUploadStructuredBytes(sizeInBytes64, ElementSize);
+	if (!alloc.resource || !alloc.cpu)
+		return nullptr;
+	if (srcData)
+		memcpy(alloc.cpu, srcData, static_cast<size_t>(sizeInBytes64));
+
+	auto buffer = std::shared_ptr<Buffer>(new Buffer);
+	buffer->Owner = this;
+	buffer->resource = alloc.resource;
+	buffer->NumElements = NumElements;
+	buffer->ElementSize = ElementSize;
+	buffer->MappedPtr = alloc.cpu;
+	buffer->MappedSizeInBytes = static_cast<uint32_t>(sizeInBytes64);
+	buffer->SuballocationOffsetBytes = alloc.offset;
+
+	D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+	srvDesc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+	srvDesc.Format = DXGI_FORMAT_UNKNOWN;
+	srvDesc.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_NONE;
+	srvDesc.Buffer.StructureByteStride = ElementSize;
+	srvDesc.Buffer.FirstElement = static_cast<UINT>(alloc.offset / ElementSize);
+	srvDesc.Buffer.NumElements = NumElements;
+	srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+	GlobalDHRing->AllocDescriptor(buffer->CpuHandleSRV, buffer->GpuHandleSRV);
+	Device->CreateShaderResourceView(buffer->resource.Get(), &srvDesc, buffer->CpuHandleSRV);
+	buffer->Type = Buffer::STRUCTURED;
+
+	if (TransientUploadStructuredKeepAlive.size() < NumFrame)
+		TransientUploadStructuredKeepAlive.resize(NumFrame);
+	const uint32_t frameIndex = CurrentFrameIndex < NumFrame ? CurrentFrameIndex : 0u;
+	TransientUploadStructuredKeepAlive[frameIndex].push_back(buffer);
+	return buffer;
+}
+
 shared_ptr<VertexBuffer> DX12Backend::CreateRWVertexBuffer(uint32_t Size, uint32_t Stride)
 {
 	if (Size == 0 || Stride == 0)
@@ -2031,7 +2095,7 @@ DX12Backend::UploadAllocation DX12Backend::AllocateUploadBytes(UINT64 size, UINT
 	auto allocateFromActive = [&]() -> UploadAllocation
 	{
 		UploadHeapBlock* block = ActiveUploadBlock.get();
-		const UINT64 alignedCursor = (block->cursor + align - 1) & ~(align - 1);
+		const UINT64 alignedCursor = AlignUploadOffset(block->cursor, align);
 		if (alignedCursor + size > block->capacity)
 			return {};
 		const UINT64 offset = alignedCursor;
@@ -2082,6 +2146,327 @@ DX12Backend::UploadAllocation DX12Backend::AllocateUploadBytes(UINT64 size, UINT
 
 	UploadAllocation alloc = allocateFromActive();
 	return alloc;
+}
+
+void DX12Backend::ResetTransientUploadStructuredFrame(uint32_t frameIndex)
+{
+	if (TransientUploadStructuredBlocks.size() < NumFrame)
+		TransientUploadStructuredBlocks.resize(NumFrame);
+	if (TransientUploadStructuredKeepAlive.size() < NumFrame)
+		TransientUploadStructuredKeepAlive.resize(NumFrame);
+	if (frameIndex >= TransientUploadStructuredBlocks.size())
+		return;
+
+	TransientUploadStructuredKeepAlive[frameIndex].clear();
+	for (const std::shared_ptr<TransientUploadStructuredBlock>& block : TransientUploadStructuredBlocks[frameIndex])
+	{
+		if (block)
+			block->cursor = 0;
+	}
+}
+
+DX12Backend::TransientUploadStructuredAllocation DX12Backend::AllocateTransientUploadStructuredBytes(UINT64 size, UINT64 alignment)
+{
+	if (size == 0)
+		return {};
+	if (TransientUploadStructuredBlocks.size() < NumFrame)
+		TransientUploadStructuredBlocks.resize(NumFrame);
+	if (TransientUploadStructuredKeepAlive.size() < NumFrame)
+		TransientUploadStructuredKeepAlive.resize(NumFrame);
+
+	const uint32_t frameIndex = CurrentFrameIndex < NumFrame ? CurrentFrameIndex : 0u;
+	std::vector<std::shared_ptr<TransientUploadStructuredBlock>>& blocks = TransientUploadStructuredBlocks[frameIndex];
+	const UINT64 align = alignment > 0 ? alignment : 4u;
+
+	auto allocateFromBlock = [&](const std::shared_ptr<TransientUploadStructuredBlock>& block) -> TransientUploadStructuredAllocation
+	{
+		if (!block || !block->resource)
+			return {};
+		const UINT64 alignedCursor = AlignUploadOffset(block->cursor, align);
+		if (alignedCursor + size > block->capacity)
+			return {};
+		block->cursor = alignedCursor + size;
+
+		TransientUploadStructuredAllocation alloc;
+		alloc.resource = block->resource;
+		alloc.offset = alignedCursor;
+		alloc.cpu = block->mappedBase + alignedCursor;
+		alloc.gpuVA = block->gpuVA + alignedCursor;
+		++TransientUploadStructuredAllocationCount;
+		TransientUploadStructuredBytesIssued += size;
+		return alloc;
+	};
+
+	for (const std::shared_ptr<TransientUploadStructuredBlock>& block : blocks)
+	{
+		TransientUploadStructuredAllocation alloc = allocateFromBlock(block);
+		if (alloc.resource)
+			return alloc;
+	}
+
+	const UINT64 requestedSize = size + align;
+	const UINT64 blockSize = std::max<UINT64>(TransientUploadStructuredBlockDefaultSize, requestedSize);
+	auto block = std::make_shared<TransientUploadStructuredBlock>();
+	ThrowIfFailed(Device->CreateCommittedResource(
+		&CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD),
+		D3D12_HEAP_FLAG_NONE,
+		&CD3DX12_RESOURCE_DESC::Buffer(blockSize),
+		D3D12_RESOURCE_STATE_GENERIC_READ,
+		nullptr,
+		IID_PPV_ARGS(&block->resource)));
+	NAME_D3D12_OBJECT(block->resource);
+
+	void* mapped = nullptr;
+	D3D12_RANGE readRange{ 0, 0 };
+	ThrowIfFailed(block->resource->Map(0, &readRange, &mapped));
+	block->mappedBase = static_cast<uint8_t*>(mapped);
+	block->gpuVA = block->resource->GetGPUVirtualAddress();
+	block->capacity = blockSize;
+	block->cursor = 0;
+	blocks.push_back(block);
+	++TransientUploadStructuredBlockCount;
+	TransientUploadStructuredBytesReserved += blockSize;
+
+	return allocateFromBlock(block);
+}
+
+DX12Backend::PersistentStructuredBufferAllocation DX12Backend::AllocatePersistentStructuredBufferBytes(UINT64 size, UINT64 alignment)
+{
+	if (size == 0)
+		return {};
+	const UINT64 align = alignment > 0 ? alignment : 4u;
+
+	auto allocateFromBlock = [&](const std::shared_ptr<PersistentStructuredBufferBlock>& block) -> PersistentStructuredBufferAllocation
+	{
+		if (!block || !block->resource)
+			return {};
+
+		for (size_t rangeIndex = 0; rangeIndex < block->freeRanges.size(); ++rangeIndex)
+		{
+			PersistentStructuredBufferBlock::FreeRange range = block->freeRanges[rangeIndex];
+			const UINT64 alignedOffset = AlignUploadOffset(range.offset, align);
+			const UINT64 rangeEnd = range.offset + range.size;
+			if (alignedOffset > rangeEnd || alignedOffset + size > rangeEnd)
+				continue;
+
+			auto insertIt = block->freeRanges.erase(block->freeRanges.begin() + rangeIndex);
+			if (alignedOffset > range.offset)
+			{
+				insertIt = block->freeRanges.insert(insertIt, { range.offset, alignedOffset - range.offset });
+				++insertIt;
+			}
+			const UINT64 allocEnd = alignedOffset + size;
+			if (allocEnd < rangeEnd)
+			{
+				block->freeRanges.insert(insertIt, { allocEnd, rangeEnd - allocEnd });
+			}
+
+			PersistentStructuredBufferAllocation alloc;
+			alloc.resource = block->resource;
+			alloc.block = block;
+			alloc.offset = alignedOffset;
+			alloc.size = size;
+			++PersistentStructuredBufferAllocationCount;
+			PersistentStructuredBufferBytesIssued += size;
+			return alloc;
+		}
+
+		const UINT64 alignedCursor = AlignUploadOffset(block->cursor, align);
+		if (alignedCursor + size > block->capacity)
+			return {};
+		block->cursor = alignedCursor + size;
+
+		PersistentStructuredBufferAllocation alloc;
+		alloc.resource = block->resource;
+		alloc.block = block;
+		alloc.offset = alignedCursor;
+		alloc.size = size;
+		++PersistentStructuredBufferAllocationCount;
+		PersistentStructuredBufferBytesIssued += size;
+		return alloc;
+	};
+
+	for (const std::shared_ptr<PersistentStructuredBufferBlock>& block : PersistentStructuredBufferBlocks)
+	{
+		PersistentStructuredBufferAllocation alloc = allocateFromBlock(block);
+		if (alloc.resource)
+			return alloc;
+	}
+
+	const UINT64 requestedSize = size + align;
+	const UINT64 blockSize = std::max<UINT64>(PersistentStructuredBufferBlockDefaultSize, requestedSize);
+	auto block = std::make_shared<PersistentStructuredBufferBlock>();
+	ThrowIfFailed(Device->CreateCommittedResource(
+		&CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT),
+		D3D12_HEAP_FLAG_NONE,
+		&CD3DX12_RESOURCE_DESC::Buffer(blockSize),
+		D3D12_RESOURCE_STATE_COPY_DEST,
+		nullptr,
+		IID_PPV_ARGS(&block->resource)));
+	NAME_D3D12_OBJECT(block->resource);
+	block->capacity = blockSize;
+	block->cursor = 0;
+	block->state = D3D12_RESOURCE_STATE_COPY_DEST;
+	PersistentStructuredBufferBlocks.push_back(block);
+	++PersistentStructuredBufferBlockCount;
+	PersistentStructuredBufferBytesReserved += blockSize;
+	return allocateFromBlock(block);
+}
+
+void DX12Backend::AddPersistentStructuredBufferFreeRange(
+	const std::shared_ptr<PersistentStructuredBufferBlock>& block,
+	UINT64 offset,
+	UINT64 size)
+{
+	if (!block || size == 0)
+		return;
+
+	PersistentStructuredBufferBlock::FreeRange newRange{ offset, size };
+	auto& ranges = block->freeRanges;
+	auto insertIt = ranges.begin();
+	while (insertIt != ranges.end() && insertIt->offset < newRange.offset)
+		++insertIt;
+	insertIt = ranges.insert(insertIt, newRange);
+
+	if (insertIt != ranges.begin())
+	{
+		auto prevIt = std::prev(insertIt);
+		const UINT64 prevEnd = prevIt->offset + prevIt->size;
+		if (prevEnd >= insertIt->offset)
+		{
+			prevIt->size = std::max(prevEnd, insertIt->offset + insertIt->size) - prevIt->offset;
+			insertIt = ranges.erase(insertIt);
+			insertIt = prevIt;
+		}
+	}
+
+	auto nextIt = std::next(insertIt);
+	while (nextIt != ranges.end())
+	{
+		const UINT64 rangeEnd = insertIt->offset + insertIt->size;
+		if (rangeEnd < nextIt->offset)
+			break;
+		insertIt->size = std::max(rangeEnd, nextIt->offset + nextIt->size) - insertIt->offset;
+		nextIt = ranges.erase(nextIt);
+	}
+}
+
+void DX12Backend::ReleasePersistentStructuredBufferBytes(
+	const std::shared_ptr<PersistentStructuredBufferBlock>& block,
+	UINT64 offset,
+	UINT64 size)
+{
+	if (!block || size == 0)
+		return;
+
+	if (!CmdQ || !CmdQ->m_fence)
+	{
+		AddPersistentStructuredBufferFreeRange(block, offset, size);
+		return;
+	}
+
+	PendingPersistentStructuredBufferFrees.push_back({
+		block,
+		offset,
+		size,
+		CmdQ->CurrentFenceValue
+	});
+}
+
+void DX12Backend::RetireCompletedPersistentStructuredBufferFrees()
+{
+	if (!CmdQ || !CmdQ->m_fence || PendingPersistentStructuredBufferFrees.empty())
+		return;
+
+	const UINT64 completedFenceValue = CmdQ->m_fence->GetCompletedValue();
+	PendingPersistentStructuredBufferFrees.erase(
+		std::remove_if(
+			PendingPersistentStructuredBufferFrees.begin(),
+			PendingPersistentStructuredBufferFrees.end(),
+			[&](const PendingPersistentStructuredBufferFree& pending)
+			{
+				if (pending.fenceValue > completedFenceValue)
+					return false;
+				AddPersistentStructuredBufferFreeRange(pending.block, pending.offset, pending.size);
+				return true;
+			}),
+		PendingPersistentStructuredBufferFrees.end());
+}
+
+std::shared_ptr<Buffer> DX12Backend::CreateSuballocatedStructuredBuffer(const BufferCreateDesc& desc)
+{
+	if (!Device || !TextureDHRing || desc.NumElements == 0 || desc.ElementSize == 0 || !desc.InitialData)
+		return nullptr;
+
+	const UINT64 sizeInBytes64 = static_cast<UINT64>(desc.NumElements) * static_cast<UINT64>(desc.ElementSize);
+	if (sizeInBytes64 > static_cast<UINT64>(std::numeric_limits<uint32_t>::max()))
+		return nullptr;
+
+	PersistentStructuredBufferAllocation alloc = AllocatePersistentStructuredBufferBytes(sizeInBytes64, desc.ElementSize);
+	if (!alloc.resource)
+		return nullptr;
+
+	std::shared_ptr<PersistentStructuredBufferBlock> ownerBlock = alloc.block;
+	if (!ownerBlock)
+		return nullptr;
+
+	const D3D12_RESOURCE_STATES targetState = ToD3D12ResourceState(desc.InitialState);
+	if (ownerBlock->state != D3D12_RESOURCE_STATE_COPY_DEST && ownerBlock->cursor > sizeInBytes64)
+		CmdQ->WaitGPU();
+
+	CommandList* cmd = CmdQ->AllocCmdList();
+	if (ownerBlock->state != D3D12_RESOURCE_STATE_COPY_DEST)
+	{
+		cmd->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(
+			ownerBlock->resource.Get(),
+			ownerBlock->state,
+			D3D12_RESOURCE_STATE_COPY_DEST));
+		ownerBlock->state = D3D12_RESOURCE_STATE_COPY_DEST;
+	}
+
+	ComPtr<ID3D12Resource> uploadHeap;
+	ThrowIfFailed(Device->CreateCommittedResource(
+		&CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD),
+		D3D12_HEAP_FLAG_NONE,
+		&CD3DX12_RESOURCE_DESC::Buffer(sizeInBytes64),
+		D3D12_RESOURCE_STATE_GENERIC_READ,
+		nullptr,
+		IID_PPV_ARGS(&uploadHeap)));
+	NAME_D3D12_OBJECT(uploadHeap);
+
+	void* mapped = nullptr;
+	D3D12_RANGE readRange{ 0, 0 };
+	ThrowIfFailed(uploadHeap->Map(0, &readRange, &mapped));
+	memcpy(mapped, desc.InitialData, static_cast<size_t>(sizeInBytes64));
+	uploadHeap->Unmap(0, nullptr);
+	cmd->CmdList->CopyBufferRegion(ownerBlock->resource.Get(), alloc.offset, uploadHeap.Get(), 0, sizeInBytes64);
+
+	if (targetState != D3D12_RESOURCE_STATE_COPY_DEST)
+	{
+		cmd->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(
+			ownerBlock->resource.Get(),
+			D3D12_RESOURCE_STATE_COPY_DEST,
+			targetState));
+		ownerBlock->state = targetState;
+	}
+
+	CmdQ->ExecuteCommandList(cmd);
+	CmdQ->WaitGPU();
+
+	auto buffer = std::shared_ptr<Buffer>(
+		new Buffer,
+		[this, ownerBlock, offset = alloc.offset, size = alloc.size](Buffer* rawBuffer)
+		{
+			delete rawBuffer;
+			ReleasePersistentStructuredBufferBytes(ownerBlock, offset, size);
+		});
+	buffer->Owner = this;
+	buffer->resource = alloc.resource;
+	buffer->NumElements = desc.NumElements;
+	buffer->ElementSize = desc.ElementSize;
+	buffer->SuballocationOffsetBytes = alloc.offset;
+	buffer->MakeStructuredBufferSRV();
+	return buffer;
 }
 
 shared_ptr<VertexBuffer> DX12Backend::CreateUploadVertexBuffer(UINT size, UINT stride, const void* srcData)
@@ -2761,6 +3146,7 @@ RHIBufferHandle DX12Backend::GetBindlessIndexBufferHandle(const IndexBuffer* buf
 DX12Backend::~DX12Backend()
 {
 	CmdQ->WaitGPU();
+	RetireCompletedPersistentStructuredBufferFrees();
 	{
 		std::lock_guard<std::mutex> lock(BindlessTextureMutex);
 		for (DX12BindlessTextureSlot& slot : BindlessTextureSlots)
@@ -6757,7 +7143,7 @@ void Buffer::MakeStructuredBufferSRV()
 	bufferSRVDesc.Format = DXGI_FORMAT_UNKNOWN;
 	bufferSRVDesc.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_NONE;
 	bufferSRVDesc.Buffer.StructureByteStride = ElementSize;
-	bufferSRVDesc.Buffer.FirstElement = 0;
+	bufferSRVDesc.Buffer.FirstElement = ElementSize > 0 ? static_cast<UINT>(SuballocationOffsetBytes / ElementSize) : 0;
 	bufferSRVDesc.Buffer.NumElements = NumElements;
 	bufferSRVDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
 
