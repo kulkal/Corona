@@ -595,10 +595,6 @@ public:
 		UINT64 size);
 	void RetireCompletedPersistentStructuredBufferFrees();
 	void RetireCompletedPersistentStructuredBufferUploads();
-	bool UploadPersistentStructuredBufferBytes(
-		const PersistentStructuredBufferAllocation& alloc,
-		const void* srcData,
-		D3D12_RESOURCE_STATES targetState);
 	void AddPersistentStructuredBufferFreeRange(
 		const std::shared_ptr<PersistentStructuredBufferBlock>& block,
 		UINT64 offset,

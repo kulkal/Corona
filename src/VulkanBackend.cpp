@@ -3025,17 +3025,12 @@ void VulkanBackend::ReleaseVertexBufferAllocation(VertexBuffer* vertexBuffer)
 	if (it == VertexBufferAllocations.end())
 		return;
 
-	const VulkanBufferAllocation allocation = it->second;
-	if (allocation.PersistentPoolBlock)
+	if (!it->second.PoolBlock && Device != VK_NULL_HANDLE)
 	{
-		ReleasePersistentStructuredBufferRange(allocation);
-	}
-	else if (!allocation.PoolBlock && Device != VK_NULL_HANDLE)
-	{
-		if (allocation.Buffer != VK_NULL_HANDLE)
-			vkDestroyBuffer(Device, allocation.Buffer, nullptr);
-		if (allocation.Memory != VK_NULL_HANDLE)
-			vkFreeMemory(Device, allocation.Memory, nullptr);
+		if (it->second.Buffer != VK_NULL_HANDLE)
+			vkDestroyBuffer(Device, it->second.Buffer, nullptr);
+		if (it->second.Memory != VK_NULL_HANDLE)
+			vkFreeMemory(Device, it->second.Memory, nullptr);
 	}
 	VertexBufferAllocations.erase(it);
 }
@@ -3050,17 +3045,12 @@ void VulkanBackend::ReleaseIndexBufferAllocation(IndexBuffer* indexBuffer)
 	if (it == IndexBufferAllocations.end())
 		return;
 
-	const VulkanBufferAllocation allocation = it->second;
-	if (allocation.PersistentPoolBlock)
+	if (!it->second.PoolBlock && Device != VK_NULL_HANDLE)
 	{
-		ReleasePersistentStructuredBufferRange(allocation);
-	}
-	else if (!allocation.PoolBlock && Device != VK_NULL_HANDLE)
-	{
-		if (allocation.Buffer != VK_NULL_HANDLE)
-			vkDestroyBuffer(Device, allocation.Buffer, nullptr);
-		if (allocation.Memory != VK_NULL_HANDLE)
-			vkFreeMemory(Device, allocation.Memory, nullptr);
+		if (it->second.Buffer != VK_NULL_HANDLE)
+			vkDestroyBuffer(Device, it->second.Buffer, nullptr);
+		if (it->second.Memory != VK_NULL_HANDLE)
+			vkFreeMemory(Device, it->second.Memory, nullptr);
 	}
 	IndexBufferAllocations.erase(it);
 }
@@ -5224,24 +5214,12 @@ std::shared_ptr<VertexBuffer> VulkanBackend::CreateVertexBuffer(uint32_t size, u
 #if !CORONA_HAS_VULKAN
 	(void)size; (void)stride; (void)srcData; ThrowNotImplemented(__FUNCTION__);
 #else
-	if (size == 0 || stride == 0)
-		return nullptr;
 	auto vertexBuffer = CreateTrackedVertexBufferHandle();
 	vertexBuffer->numVertices = stride > 0 ? static_cast<int>(size / stride) : 0;
 
 	VulkanBufferAllocation allocation{};
 	allocation.Stride = stride;
 	allocation.SizeInBytes = size;
-	if (srcData && AllocatePersistentStructuredBufferRange(
-		static_cast<VkDeviceSize>(size),
-		std::max<VkDeviceSize>(static_cast<VkDeviceSize>(stride), 4),
-		srcData,
-		allocation))
-	{
-		allocation.Stride = stride;
-		VertexBufferAllocations[vertexBuffer.get()] = allocation;
-		return vertexBuffer;
-	}
 
 	VkBufferUsageFlags bufferUsage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
 	if (bRayTracingEnabled)
@@ -5271,24 +5249,12 @@ std::shared_ptr<IndexBuffer> VulkanBackend::CreateIndexBuffer(EIndexFormat forma
 #if !CORONA_HAS_VULKAN
 	(void)format; (void)size; (void)srcData; ThrowNotImplemented(__FUNCTION__);
 #else
-	if (size == 0)
-		return nullptr;
 	auto indexBuffer = CreateTrackedIndexBufferHandle();
 	indexBuffer->numIndices = format == EIndexFormat::U16 ? static_cast<int>(size / 2) : static_cast<int>(size / 4);
 
 	VulkanBufferAllocation allocation{};
 	allocation.Stride = format == EIndexFormat::U16 ? 2u : 4u;
 	allocation.SizeInBytes = size;
-	if (srcData && AllocatePersistentStructuredBufferRange(
-		static_cast<VkDeviceSize>(size),
-		std::max<VkDeviceSize>(static_cast<VkDeviceSize>(allocation.Stride), 4),
-		srcData,
-		allocation))
-	{
-		allocation.Stride = format == EIndexFormat::U16 ? 2u : 4u;
-		IndexBufferAllocations[indexBuffer.get()] = allocation;
-		return indexBuffer;
-	}
 
 	VkBufferUsageFlags bufferUsage = VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
 	if (bRayTracingEnabled)
@@ -5589,8 +5555,6 @@ bool VulkanBackend::AllocatePersistentStructuredBufferRange(
 		bufferInfo.size = blockSize;
 		bufferInfo.usage =
 			VK_BUFFER_USAGE_TRANSFER_DST_BIT |
-			VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
-			VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
 			VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
 			VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT;
 		if (bRayTracingEnabled)
@@ -6664,11 +6628,11 @@ std::shared_ptr<RTAS> VulkanBackend::CreateBLASForMesh(Mesh* mesh)
 	VkAccelerationStructureGeometryTrianglesDataKHR triangles{};
 	triangles.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR;
 	triangles.vertexFormat = VK_FORMAT_R32G32B32_SFLOAT;
-	triangles.vertexData.deviceAddress = GetBufferDeviceAddress(vbIt->second.Buffer) + vbIt->second.Offset;
+	triangles.vertexData.deviceAddress = GetBufferDeviceAddress(vbIt->second.Buffer);
 	triangles.vertexStride = mesh->VertexStride;
 	triangles.maxVertex = static_cast<uint32_t>(mesh->Vb->numVertices);
 	triangles.indexType = mesh->IndexFormat == EIndexFormat::U16 ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32;
-	triangles.indexData.deviceAddress = GetBufferDeviceAddress(ibIt->second.Buffer) + ibIt->second.Offset;
+	triangles.indexData.deviceAddress = GetBufferDeviceAddress(ibIt->second.Buffer);
 
 	VkAccelerationStructureGeometryKHR geometry{};
 	geometry.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
