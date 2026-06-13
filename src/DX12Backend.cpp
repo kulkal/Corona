@@ -7049,8 +7049,9 @@ void DX12Backend::BindGraphicsPipeline(GraphicsPipelineHandle* pipeline)
 	}
 }
 
-void DX12Backend::BindGraphicsBindGroup(GraphicsPipelineHandle* pipeline, const std::shared_ptr<GraphicsBindGroupHandle>& bindGroup)
+void DX12Backend::BindGraphicsBindGroup(GraphicsPipelineHandle* pipeline, uint32_t slot, const std::shared_ptr<GraphicsBindGroupHandle>& bindGroup)
 {
+	(void)slot;
 	auto* dxPipeline = dynamic_cast<DX12GraphicsPipelineHandle*>(pipeline);
 	auto* dxBindGroup = dynamic_cast<DX12GraphicsBindGroupHandle*>(bindGroup.get());
 	if (!dxPipeline || !dxPipeline->PSO || !dxBindGroup || dxBindGroup->Pipeline != dxPipeline)

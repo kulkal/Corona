@@ -79,6 +79,7 @@ struct VulkanGraphicsBindGroupHandle : GraphicsBindGroupHandle
 	bool bHasConstantData = false;
 	uint32_t ConstantDataBinding = 0;
 	uint32_t ConstantDataSize = 0;
+	uint32_t Slot = 0;
 };
 
 struct VulkanGraphicsPipelineHandle : GraphicsPipelineHandle
@@ -98,7 +99,7 @@ struct VulkanGraphicsPipelineHandle : GraphicsPipelineHandle
 	std::unordered_map<std::string, uint32_t> TextureBindingSlots;
 	std::unordered_map<std::string, uint32_t> BufferBindingSlots;
 	std::unordered_map<std::string, uint32_t> SamplerBindingSlots;
-	std::shared_ptr<VulkanGraphicsBindGroupHandle> BoundBindGroup;
+	std::array<std::shared_ptr<VulkanGraphicsBindGroupHandle>, kMaxGraphicsBindGroupSlots> BoundBindGroups;
 	bool bHasConstantBufferDescriptorBinding = false;
 	uint32_t ConstantBufferDescriptorBinding = 0;
 
@@ -423,7 +424,7 @@ public:
 	std::shared_ptr<GraphicsPipelineHandle> CreateGraphicsPipeline(const GraphicsPipelineDesc& desc) override;
 	std::shared_ptr<GraphicsBindGroupHandle> CreateGraphicsBindGroup(const GraphicsBindGroupDesc& desc) override;
 	void BindGraphicsPipeline(GraphicsPipelineHandle* pipeline) override;
-	void BindGraphicsBindGroup(GraphicsPipelineHandle* pipeline, const std::shared_ptr<GraphicsBindGroupHandle>& bindGroup) override;
+	void BindGraphicsBindGroup(GraphicsPipelineHandle* pipeline, uint32_t slot, const std::shared_ptr<GraphicsBindGroupHandle>& bindGroup) override;
 	void PreviewTextureOnWindow(Texture* texture);
 	void DrawWindowTestTriangle();
 	void DrawActiveRenderPassTestTriangle();

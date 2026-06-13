@@ -733,7 +733,7 @@ public:
 	std::shared_ptr<GraphicsPipelineHandle> CreateGraphicsPipeline(const GraphicsPipelineDesc& desc) override;
 	std::shared_ptr<GraphicsBindGroupHandle> CreateGraphicsBindGroup(const GraphicsBindGroupDesc& desc) override;
 	void BindGraphicsPipeline(GraphicsPipelineHandle* pipeline) override;
-	void BindGraphicsBindGroup(GraphicsPipelineHandle* pipeline, const std::shared_ptr<GraphicsBindGroupHandle>& bindGroup) override;
+	void BindGraphicsBindGroup(GraphicsPipelineHandle* pipeline, uint32_t slot, const std::shared_ptr<GraphicsBindGroupHandle>& bindGroup) override;
 	void DrawTriangleList(VertexBuffer* vertexBuffer, uint32_t vertexCount);
 	void RenderWindowTriangleFrame(uint32_t width, uint32_t height, float timeSeconds);
 

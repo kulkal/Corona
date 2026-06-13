@@ -1482,18 +1482,22 @@ bool Corona::DrawSkeletalVsInlineClusterDesktop()
 	Texture* normal = SkeletalUnifiedMaterial->Normal ? SkeletalUnifiedMaterial->Normal.get() : DefaultNormalTex.get();
 	Texture* rough  = SkeletalUnifiedMaterial->Roughness ? SkeletalUnifiedMaterial->Roughness.get() : DefaultRougnessTex.get();
 	Texture* metal  = SkeletalUnifiedMaterial->Metallic ? SkeletalUnifiedMaterial->Metallic.get() : DefaultBlackTex.get();
-	CreateAndBindGraphicsBindGroup(renderBackend.get(), pso,
+	CreateOrBindGraphicsMaterialBindGroup(
+		renderBackend.get(),
+		pso,
+		SkeletalUnifiedMaterial.get(),
+		samplerWrap.get(),
+		albedo,
+		normal,
+		rough,
+		metal);
+	CreateAndBindGraphicsBindGroup(renderBackend.get(), pso, kGraphicsBindGroupSlot_Draw,
 		{
-			GraphicsBindGroupEntry::SamplerBinding("samplerWrap", samplerWrap.get()),
 			GraphicsBindGroupEntry::BufferSRV("SkeletalInputs", SkeletalUnifiedInputVertices.get()),
 			GraphicsBindGroupEntry::BufferSRV("SkeletalPrevBones", SkeletalUnifiedPrevBoneMatrices.get()),
 			GraphicsBindGroupEntry::BufferSRV("SkeletalCurrBones", SkeletalUnifiedBoneMatrices.get()),
 			GraphicsBindGroupEntry::BufferSRV("SkeletalInstanceTransforms", SkeletalUnifiedInstanceTransforms.get()),
 			GraphicsBindGroupEntry::Constant(0, &objCB, sizeof(objCB)),
-			GraphicsBindGroupEntry::TextureSRV("AlbedoTex", albedo),
-			GraphicsBindGroupEntry::TextureSRV("NormalTex", normal),
-			GraphicsBindGroupEntry::TextureSRV("RoughnessTex", rough),
-			GraphicsBindGroupEntry::TextureSRV("MetallicTex", metal),
 		});
 
 	renderBackend->DrawIndexedInstanced(

@@ -1152,7 +1152,8 @@ void VulkanGraphicsPipelineHandle::Release()
 	Layout = VK_NULL_HANDLE;
 	VertexShaderModule = VK_NULL_HANDLE;
 	FragmentShaderModule = VK_NULL_HANDLE;
-	BoundBindGroup.reset();
+	for (auto& bindGroup : BoundBindGroups)
+		bindGroup.reset();
 	Owner = nullptr;
 }
 
@@ -7421,17 +7422,30 @@ void VulkanBackend::BindGraphicsPipelineForDraw(VulkanGraphicsPipelineHandle* pi
 	if (descriptorSet == VK_NULL_HANDLE)
 		return;
 
-	const VulkanGraphicsBindGroupHandle* bindGroup =
-		(pipeline->BoundBindGroup && pipeline->BoundBindGroup->Pipeline == pipeline) ?
-		pipeline->BoundBindGroup.get() :
-		nullptr;
+	std::array<const VulkanGraphicsBindGroupHandle*, kMaxGraphicsBindGroupSlots> bindGroups{};
+	size_t bindGroupTextureCount = 0;
+	size_t bindGroupBufferCount = 0;
+	size_t bindGroupSamplerCount = 0;
+	const VulkanGraphicsBindGroupHandle* constantBindGroup = nullptr;
+	for (uint32_t slot = 0; slot < kMaxGraphicsBindGroupSlots; ++slot)
+	{
+		const VulkanGraphicsBindGroupHandle* bindGroup =
+			(pipeline->BoundBindGroups[slot] && pipeline->BoundBindGroups[slot]->Pipeline == pipeline) ?
+			pipeline->BoundBindGroups[slot].get() :
+			nullptr;
+		bindGroups[slot] = bindGroup;
+		if (!bindGroup)
+			continue;
+		bindGroupTextureCount += bindGroup->Textures.size();
+		bindGroupBufferCount += bindGroup->Buffers.size();
+		bindGroupSamplerCount += bindGroup->Samplers.size();
+		if (bindGroup->bHasConstantData)
+			constantBindGroup = bindGroup;
+	}
 
 	std::vector<VkDescriptorImageInfo> imageInfos;
 	std::vector<VkDescriptorBufferInfo> bufferInfos;
 	std::vector<VkWriteDescriptorSet> descriptorWrites;
-	const size_t bindGroupTextureCount = bindGroup ? bindGroup->Textures.size() : 0;
-	const size_t bindGroupBufferCount = bindGroup ? bindGroup->Buffers.size() : 0;
-	const size_t bindGroupSamplerCount = bindGroup ? bindGroup->Samplers.size() : 0;
 	imageInfos.reserve(bindGroupTextureCount + bindGroupSamplerCount);
 	bufferInfos.reserve(
 		(pipeline->Desc.ConstantBufferSize > 0 ? 1 : 0) +
@@ -7444,7 +7458,7 @@ void VulkanBackend::BindGraphicsPipelineForDraw(VulkanGraphicsPipelineHandle* pi
 
 	if (pipeline->Desc.ConstantBufferSize > 0)
 	{
-		if (!bindGroup || !bindGroup->bHasConstantData || bindGroup->ConstantData.empty())
+		if (!constantBindGroup || constantBindGroup->ConstantData.empty())
 			return;
 
 		VkBuffer uniformBuffer = VK_NULL_HANDLE;
@@ -7452,8 +7466,8 @@ void VulkanBackend::BindGraphicsPipelineForDraw(VulkanGraphicsPipelineHandle* pi
 		void* mappedData = nullptr;
 		if (!AllocateTransientUniform(pipeline->Desc.ConstantBufferSize, uniformBuffer, uniformOffset, &mappedData))
 			return;
-		const size_t copySize = (std::min)(bindGroup->ConstantData.size(), static_cast<size_t>(pipeline->Desc.ConstantBufferSize));
-		std::memcpy(mappedData, bindGroup->ConstantData.data(), copySize);
+		const size_t copySize = (std::min)(constantBindGroup->ConstantData.size(), static_cast<size_t>(pipeline->Desc.ConstantBufferSize));
+		std::memcpy(mappedData, constantBindGroup->ConstantData.data(), copySize);
 
 		VkDescriptorBufferInfo& bufferInfo = bufferInfos.emplace_back();
 		bufferInfo.buffer = uniformBuffer;
@@ -7463,7 +7477,7 @@ void VulkanBackend::BindGraphicsPipelineForDraw(VulkanGraphicsPipelineHandle* pi
 		VkWriteDescriptorSet& writeDescriptor = descriptorWrites.emplace_back();
 		writeDescriptor.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
 		writeDescriptor.dstSet = descriptorSet;
-		writeDescriptor.dstBinding = bindGroup->ConstantDataBinding;
+		writeDescriptor.dstBinding = constantBindGroup->ConstantDataBinding;
 		writeDescriptor.descriptorCount = 1;
 		writeDescriptor.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
 		writeDescriptor.pBufferInfo = &bufferInfo;
@@ -7555,8 +7569,10 @@ void VulkanBackend::BindGraphicsPipelineForDraw(VulkanGraphicsPipelineHandle* pi
 		writeDescriptor.pImageInfo = &imageInfo;
 	};
 
-	if (bindGroup)
+	for (const VulkanGraphicsBindGroupHandle* bindGroup : bindGroups)
 	{
+		if (!bindGroup)
+			continue;
 		for (const auto& binding : bindGroup->Textures)
 			writeTextureDescriptor(binding.Binding, binding.TextureValue);
 		for (const auto& binding : bindGroup->Buffers)
@@ -9371,11 +9387,12 @@ std::shared_ptr<GraphicsBindGroupHandle> VulkanBackend::CreateGraphicsBindGroup(
 	ThrowNotImplemented(__FUNCTION__);
 #else
 	auto* vkPipeline = dynamic_cast<VulkanGraphicsPipelineHandle*>(desc.Pipeline);
-	if (!vkPipeline || vkPipeline->Pipeline == VK_NULL_HANDLE)
+	if (!vkPipeline || vkPipeline->Pipeline == VK_NULL_HANDLE || desc.Slot >= kMaxGraphicsBindGroupSlots)
 		return nullptr;
 
 	auto handle = std::make_shared<VulkanGraphicsBindGroupHandle>();
 	handle->Pipeline = vkPipeline;
+	handle->Slot = desc.Slot;
 	handle->Textures.reserve(desc.Entries.size());
 	handle->Buffers.reserve(desc.Entries.size());
 	handle->Samplers.reserve(desc.Entries.size());
@@ -9531,23 +9548,24 @@ void VulkanBackend::BindGraphicsPipeline(GraphicsPipelineHandle* pipeline)
 #endif
 }
 
-void VulkanBackend::BindGraphicsBindGroup(GraphicsPipelineHandle* pipeline, const std::shared_ptr<GraphicsBindGroupHandle>& bindGroup)
+void VulkanBackend::BindGraphicsBindGroup(GraphicsPipelineHandle* pipeline, uint32_t slot, const std::shared_ptr<GraphicsBindGroupHandle>& bindGroup)
 {
 #if CORONA_HAS_VULKAN
 	auto* vkPipeline = dynamic_cast<VulkanGraphicsPipelineHandle*>(pipeline);
-	if (!vkPipeline)
+	if (!vkPipeline || slot >= kMaxGraphicsBindGroupSlots)
 		return;
 	if (!bindGroup)
 	{
-		vkPipeline->BoundBindGroup.reset();
+		vkPipeline->BoundBindGroups[slot].reset();
 		return;
 	}
 	auto vkBindGroup = std::dynamic_pointer_cast<VulkanGraphicsBindGroupHandle>(bindGroup);
-	if (!vkBindGroup || vkBindGroup->Pipeline != vkPipeline)
+	if (!vkBindGroup || vkBindGroup->Pipeline != vkPipeline || vkBindGroup->Slot != slot)
 		return;
-	vkPipeline->BoundBindGroup = vkBindGroup;
+	vkPipeline->BoundBindGroups[slot] = vkBindGroup;
 #else
 	(void)pipeline;
+	(void)slot;
 	(void)bindGroup;
 #endif
 }

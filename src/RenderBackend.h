@@ -340,8 +340,15 @@ struct GraphicsBindGroupEntry
 struct GraphicsBindGroupDesc
 {
 	GraphicsPipelineHandle* Pipeline = nullptr;
+	uint32_t Slot = 0;
 	std::vector<GraphicsBindGroupEntry> Entries;
 };
+
+inline constexpr uint32_t kMaxGraphicsBindGroupSlots = 4;
+inline constexpr uint32_t kGraphicsBindGroupSlot_All = 0;
+inline constexpr uint32_t kGraphicsBindGroupSlot_Frame = 0;
+inline constexpr uint32_t kGraphicsBindGroupSlot_Material = 1;
+inline constexpr uint32_t kGraphicsBindGroupSlot_Draw = 2;
 
 class GraphicsBindGroupHandle
 {
@@ -577,12 +584,13 @@ public:
 	virtual std::shared_ptr<GraphicsPipelineHandle> CreateGraphicsPipeline(const GraphicsPipelineDesc& desc) = 0;
 	virtual std::shared_ptr<GraphicsBindGroupHandle> CreateGraphicsBindGroup(const GraphicsBindGroupDesc& desc) = 0;
 	virtual void BindGraphicsPipeline(GraphicsPipelineHandle* pipeline) = 0;
-	virtual void BindGraphicsBindGroup(GraphicsPipelineHandle* pipeline, const std::shared_ptr<GraphicsBindGroupHandle>& bindGroup) = 0;
+	virtual void BindGraphicsBindGroup(GraphicsPipelineHandle* pipeline, uint32_t slot, const std::shared_ptr<GraphicsBindGroupHandle>& bindGroup) = 0;
 };
 
 inline std::shared_ptr<GraphicsBindGroupHandle> CreateAndBindGraphicsBindGroup(
 	IRenderBackend* backend,
 	GraphicsPipelineHandle* pipeline,
+	uint32_t slot,
 	const std::vector<GraphicsBindGroupEntry>& entries)
 {
 	if (!backend || !pipeline)
@@ -590,10 +598,32 @@ inline std::shared_ptr<GraphicsBindGroupHandle> CreateAndBindGraphicsBindGroup(
 
 	GraphicsBindGroupDesc desc{};
 	desc.Pipeline = pipeline;
+	desc.Slot = slot;
 	desc.Entries = entries;
 	auto bindGroup = backend->CreateGraphicsBindGroup(desc);
-	backend->BindGraphicsBindGroup(pipeline, bindGroup);
+	backend->BindGraphicsBindGroup(pipeline, slot, bindGroup);
 	return bindGroup;
+}
+
+inline std::shared_ptr<GraphicsBindGroupHandle> CreateAndBindGraphicsBindGroup(
+	IRenderBackend* backend,
+	GraphicsPipelineHandle* pipeline,
+	const std::vector<GraphicsBindGroupEntry>& entries)
+{
+	return CreateAndBindGraphicsBindGroup(backend, pipeline, kGraphicsBindGroupSlot_All, entries);
+}
+
+inline std::shared_ptr<GraphicsBindGroupHandle> CreateAndBindGraphicsBindGroup(
+	IRenderBackend* backend,
+	GraphicsPipelineHandle* pipeline,
+	uint32_t slot,
+	std::initializer_list<GraphicsBindGroupEntry> entries)
+{
+	return CreateAndBindGraphicsBindGroup(
+		backend,
+		pipeline,
+		slot,
+		std::vector<GraphicsBindGroupEntry>(entries.begin(), entries.end()));
 }
 
 inline std::shared_ptr<GraphicsBindGroupHandle> CreateAndBindGraphicsBindGroup(
@@ -601,10 +631,7 @@ inline std::shared_ptr<GraphicsBindGroupHandle> CreateAndBindGraphicsBindGroup(
 	GraphicsPipelineHandle* pipeline,
 	std::initializer_list<GraphicsBindGroupEntry> entries)
 {
-	return CreateAndBindGraphicsBindGroup(
-		backend,
-		pipeline,
-		std::vector<GraphicsBindGroupEntry>(entries.begin(), entries.end()));
+	return CreateAndBindGraphicsBindGroup(backend, pipeline, kGraphicsBindGroupSlot_All, entries);
 }
 
 // API-neutral factory. DX12 path requires a pre-created device so the bootstrap

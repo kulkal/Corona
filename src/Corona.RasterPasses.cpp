@@ -1765,7 +1765,7 @@ void Corona::LightingPass()
 		renderBackend->DrawFullscreenQuad(FullScreenVB.get());
 		renderBackend->TransitionTexture(DirectLightingBuffer.get(), EResourceState::RenderTarget, EResourceState::ShaderRead);
 	}
-	renderBackend->BindGraphicsBindGroup(LightingGraphicsPipeline.get(), nullptr);
+	renderBackend->BindGraphicsBindGroup(LightingGraphicsPipeline.get(), kGraphicsBindGroupSlot_All, nullptr);
 }
 
 void Corona::TemporalAAPass()
@@ -2113,15 +2113,19 @@ bool Corona::DrawStaticInstancedScene(
 			Texture* normal = drawcall.mat->Normal ? drawcall.mat->Normal.get() : DefaultNormalTex.get();
 			Texture* rough = drawcall.mat->Roughness ? drawcall.mat->Roughness.get() : DefaultRougnessTex.get();
 			Texture* metal = drawcall.mat->Metallic ? drawcall.mat->Metallic.get() : DefaultBlackTex.get();
-			CreateAndBindGraphicsBindGroup(renderBackend.get(), pso,
+			CreateOrBindGraphicsMaterialBindGroup(
+				renderBackend.get(),
+				pso,
+				drawcall.mat.get(),
+				samplerWrap.get(),
+				albedo,
+				normal,
+				rough,
+				metal);
+			CreateAndBindGraphicsBindGroup(renderBackend.get(), pso, kGraphicsBindGroupSlot_Draw,
 				{
-					GraphicsBindGroupEntry::SamplerBinding("samplerWrap", samplerWrap.get()),
 					GraphicsBindGroupEntry::BufferSRV("StaticInstanceTransforms", instanceBuffer),
 					GraphicsBindGroupEntry::Constant(0, &objCB, sizeof(objCB)),
-					GraphicsBindGroupEntry::TextureSRV("AlbedoTex", albedo),
-					GraphicsBindGroupEntry::TextureSRV("NormalTex", normal),
-					GraphicsBindGroupEntry::TextureSRV("RoughnessTex", rough),
-					GraphicsBindGroupEntry::TextureSRV("MetallicTex", metal),
 				});
 
 			renderBackend->DrawIndexedInstanced(
@@ -2205,7 +2209,6 @@ void Corona::DrawScene(shared_ptr<Scene> scene, const glm::mat4x4& instanceTrans
 		renderBackend->BindGraphicsPipeline(activeGBufferPipeline);
 		std::vector<GraphicsBindGroupEntry> meshBindEntries;
 		meshBindEntries.reserve(8);
-		meshBindEntries.push_back(GraphicsBindGroupEntry::SamplerBinding("samplerWrap", samplerWrap.get()));
 		if (bUseSpineVertexFetch)
 			meshBindEntries.push_back(GraphicsBindGroupEntry::BufferSRV("SpineVertices", mesh->GpuSpineSkinnedVertices.get()));
 		if (bUseSpineVsInline)
@@ -2336,12 +2339,17 @@ void Corona::DrawScene(shared_ptr<Scene> scene, const glm::mat4x4& instanceTrans
 			}
 			else
 			{
-				drawBindEntries.push_back(GraphicsBindGroupEntry::TextureSRV("AlbedoTex", AlbedoTex));
-				drawBindEntries.push_back(GraphicsBindGroupEntry::TextureSRV("NormalTex", NormalTex));
-				drawBindEntries.push_back(GraphicsBindGroupEntry::TextureSRV("RoughnessTex", RoughnessTex));
-				drawBindEntries.push_back(GraphicsBindGroupEntry::TextureSRV("MetallicTex", MetallicTex));
+				CreateOrBindGraphicsMaterialBindGroup(
+					renderBackend.get(),
+					activeGBufferPipeline,
+					drawcall.mat.get(),
+					samplerWrap.get(),
+					AlbedoTex,
+					NormalTex,
+					RoughnessTex,
+					MetallicTex);
 			}
-			CreateAndBindGraphicsBindGroup(renderBackend.get(), activeGBufferPipeline, drawBindEntries);
+			CreateAndBindGraphicsBindGroup(renderBackend.get(), activeGBufferPipeline, kGraphicsBindGroupSlot_Draw, drawBindEntries);
 
 			static bool bLoggedFirstGBufferDraw = false;
 			if (!bLoggedFirstGBufferDraw && !mesh->CpuPositions.empty() && !mesh->CpuIndices.empty() && drawcall.IndexCount >= 3)
@@ -2515,7 +2523,7 @@ void Corona::DrawSceneShadowMap(shared_ptr<Scene> scene, const glm::mat4x4& inst
 
 			std::vector<GraphicsBindGroupEntry> shadowDrawBindEntries = shadowMeshBindEntries;
 			shadowDrawBindEntries.push_back(GraphicsBindGroupEntry::Constant(0, &objCB, sizeof(objCB)));
-			CreateAndBindGraphicsBindGroup(renderBackend.get(), activeShadowPipeline, shadowDrawBindEntries);
+			CreateAndBindGraphicsBindGroup(renderBackend.get(), activeShadowPipeline, kGraphicsBindGroupSlot_Draw, shadowDrawBindEntries);
 
 			renderBackend->DrawIndexed(
 				drawcall.IndexCount,
