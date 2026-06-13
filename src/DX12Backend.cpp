@@ -1797,6 +1797,52 @@ bool DX12Backend::UploadToDefaultBuffer(Buffer* buffer, const void* srcData, UIN
 
 shared_ptr<IndexBuffer> DX12Backend::CreateIndexBuffer(EIndexFormat Format, UINT Size, void* SrcData)
 {
+	if (Size == 0)
+		return nullptr;
+	if (SrcData)
+	{
+		const UINT64 sizeInBytes64 = static_cast<UINT64>(Size);
+		PersistentStructuredBufferAllocation alloc = AllocatePersistentStructuredBufferBytes(
+			sizeInBytes64,
+			4u);
+		if (!alloc.resource)
+			return nullptr;
+		const D3D12_RESOURCE_STATES targetState =
+			D3D12_RESOURCE_STATE_INDEX_BUFFER |
+			D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+		if (!UploadPersistentStructuredBufferBytes(alloc, SrcData, targetState))
+		{
+			ReleasePersistentStructuredBufferBytes(alloc.block, alloc.offset, alloc.size);
+			return nullptr;
+		}
+
+		auto ib = std::shared_ptr<IndexBuffer>(
+			new IndexBuffer,
+			[this, ownerBlock = alloc.block, offset = alloc.offset, size = alloc.size](IndexBuffer* rawBuffer)
+			{
+				delete rawBuffer;
+				ReleasePersistentStructuredBufferBytes(ownerBlock, offset, size);
+			});
+		ib->Owner = this;
+		ib->resource = alloc.resource;
+		ib->view.BufferLocation = ib->resource->GetGPUVirtualAddress() + alloc.offset;
+		ib->view.Format = ToDXGIFormat(Format);
+		ib->view.SizeInBytes = Size;
+		ib->numIndices = Format == EIndexFormat::U32 ? (Size / 4) : (Size / 2);
+
+		D3D12_SHADER_RESOURCE_VIEW_DESC indexSRVDesc = {};
+		indexSRVDesc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+		indexSRVDesc.Format = DXGI_FORMAT_R32_TYPELESS;
+		indexSRVDesc.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
+		indexSRVDesc.Buffer.StructureByteStride = 0;
+		indexSRVDesc.Buffer.FirstElement = static_cast<UINT>(alloc.offset / sizeof(UINT32));
+		indexSRVDesc.Buffer.NumElements = Size / sizeof(UINT32);
+		indexSRVDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+		GeomtryDHRing->AllocDescriptor(ib->CpuHandleSRV, ib->GpuHandleSRV);
+		Device->CreateShaderResourceView(ib->resource.Get(), &indexSRVDesc, ib->CpuHandleSRV);
+		return ib;
+	}
+
 	CommandList* cmd = CmdQ->AllocCmdList();
 
 	IndexBuffer* ib = new IndexBuffer;
@@ -1866,6 +1912,52 @@ shared_ptr<IndexBuffer> DX12Backend::CreateIndexBuffer(EIndexFormat Format, UINT
 
 shared_ptr<VertexBuffer> DX12Backend::CreateVertexBuffer(UINT Size, UINT Stride, void* SrcData)
 {
+	if (Size == 0 || Stride == 0)
+		return nullptr;
+	if (SrcData)
+	{
+		const UINT64 sizeInBytes64 = static_cast<UINT64>(Size);
+		PersistentStructuredBufferAllocation alloc = AllocatePersistentStructuredBufferBytes(
+			sizeInBytes64,
+			4u);
+		if (!alloc.resource)
+			return nullptr;
+		const D3D12_RESOURCE_STATES targetState =
+			D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER |
+			D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+		if (!UploadPersistentStructuredBufferBytes(alloc, SrcData, targetState))
+		{
+			ReleasePersistentStructuredBufferBytes(alloc.block, alloc.offset, alloc.size);
+			return nullptr;
+		}
+
+		auto vb = std::shared_ptr<VertexBuffer>(
+			new VertexBuffer,
+			[this, ownerBlock = alloc.block, offset = alloc.offset, size = alloc.size](VertexBuffer* rawBuffer)
+			{
+				delete rawBuffer;
+				ReleasePersistentStructuredBufferBytes(ownerBlock, offset, size);
+			});
+		vb->Owner = this;
+		vb->resource = alloc.resource;
+		vb->view.BufferLocation = vb->resource->GetGPUVirtualAddress() + alloc.offset;
+		vb->view.StrideInBytes = Stride;
+		vb->view.SizeInBytes = Size;
+		vb->numVertices = Size / Stride;
+
+		D3D12_SHADER_RESOURCE_VIEW_DESC vertexSRVDesc = {};
+		vertexSRVDesc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+		vertexSRVDesc.Format = DXGI_FORMAT_R32_TYPELESS;
+		vertexSRVDesc.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
+		vertexSRVDesc.Buffer.StructureByteStride = 0;
+		vertexSRVDesc.Buffer.FirstElement = static_cast<UINT>(alloc.offset / sizeof(UINT32));
+		vertexSRVDesc.Buffer.NumElements = Size / sizeof(UINT32);
+		vertexSRVDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+		GeomtryDHRing->AllocDescriptor(vb->CpuHandleSRV, vb->GpuHandleSRV);
+		Device->CreateShaderResourceView(vb->resource.Get(), &vertexSRVDesc, vb->CpuHandleSRV);
+		return vb;
+	}
+
 	CommandList* cmd = CmdQ->AllocCmdList();
 
 	VertexBuffer* vb = new VertexBuffer;
@@ -2417,24 +2509,23 @@ void DX12Backend::RetireCompletedPersistentStructuredBufferUploads()
 	PendingPersistentStructuredBufferUploads.resize(kept);
 }
 
-std::shared_ptr<Buffer> DX12Backend::CreateSuballocatedStructuredBuffer(const BufferCreateDesc& desc)
+bool DX12Backend::UploadPersistentStructuredBufferBytes(
+	const PersistentStructuredBufferAllocation& alloc,
+	const void* srcData,
+	D3D12_RESOURCE_STATES targetState)
 {
-	if (!Device || !TextureDHRing || desc.NumElements == 0 || desc.ElementSize == 0 || !desc.InitialData)
-		return nullptr;
-
-	const UINT64 sizeInBytes64 = static_cast<UINT64>(desc.NumElements) * static_cast<UINT64>(desc.ElementSize);
-	if (sizeInBytes64 > static_cast<UINT64>(std::numeric_limits<uint32_t>::max()))
-		return nullptr;
-
-	PersistentStructuredBufferAllocation alloc = AllocatePersistentStructuredBufferBytes(sizeInBytes64, desc.ElementSize);
-	if (!alloc.resource)
-		return nullptr;
-
 	std::shared_ptr<PersistentStructuredBufferBlock> ownerBlock = alloc.block;
-	if (!ownerBlock)
-		return nullptr;
+	if (!Device || !CmdQ || !ownerBlock || !ownerBlock->resource || !alloc.resource || !srcData || alloc.size == 0)
+		return false;
+	const D3D12_RESOURCE_STATES pooledReadState =
+		targetState == D3D12_RESOURCE_STATE_COPY_DEST
+			? D3D12_RESOURCE_STATE_COPY_DEST
+			: (targetState |
+				D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER |
+				D3D12_RESOURCE_STATE_INDEX_BUFFER |
+				D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE |
+				D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
 
-	const D3D12_RESOURCE_STATES targetState = ToD3D12ResourceState(desc.InitialState);
 	RetireCompletedPersistentStructuredBufferUploads();
 	WaitForAsyncRtOnGraphicsQueue();
 
@@ -2452,7 +2543,7 @@ std::shared_ptr<Buffer> DX12Backend::CreateSuballocatedStructuredBuffer(const Bu
 	ThrowIfFailed(Device->CreateCommittedResource(
 		&CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD),
 		D3D12_HEAP_FLAG_NONE,
-		&CD3DX12_RESOURCE_DESC::Buffer(sizeInBytes64),
+		&CD3DX12_RESOURCE_DESC::Buffer(alloc.size),
 		D3D12_RESOURCE_STATE_GENERIC_READ,
 		nullptr,
 		IID_PPV_ARGS(&uploadHeap)));
@@ -2461,32 +2552,57 @@ std::shared_ptr<Buffer> DX12Backend::CreateSuballocatedStructuredBuffer(const Bu
 	void* mapped = nullptr;
 	D3D12_RANGE readRange{ 0, 0 };
 	ThrowIfFailed(uploadHeap->Map(0, &readRange, &mapped));
-	memcpy(mapped, desc.InitialData, static_cast<size_t>(sizeInBytes64));
+	memcpy(mapped, srcData, static_cast<size_t>(alloc.size));
 	uploadHeap->Unmap(0, nullptr);
-	cmd->CmdList->CopyBufferRegion(ownerBlock->resource.Get(), alloc.offset, uploadHeap.Get(), 0, sizeInBytes64);
+	cmd->CmdList->CopyBufferRegion(ownerBlock->resource.Get(), alloc.offset, uploadHeap.Get(), 0, alloc.size);
 
-	if (targetState != D3D12_RESOURCE_STATE_COPY_DEST)
+	if (pooledReadState != D3D12_RESOURCE_STATE_COPY_DEST)
 	{
 		cmd->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(
 			ownerBlock->resource.Get(),
 			D3D12_RESOURCE_STATE_COPY_DEST,
-			targetState));
-		ownerBlock->state = targetState;
+			pooledReadState));
+		ownerBlock->state = pooledReadState;
 	}
 
 	CmdQ->ExecuteCommandList(cmd);
 
 	PendingPersistentStructuredBufferUpload pendingUpload;
 	pendingUpload.FenceValue = cmd->Fence.value_or(CmdQ->CurrentFenceValue);
-	pendingUpload.Bytes = sizeInBytes64;
+	pendingUpload.Bytes = alloc.size;
 	pendingUpload.UploadHeap = uploadHeap;
 	PendingPersistentStructuredBufferUploads.push_back(std::move(pendingUpload));
-	PendingPersistentStructuredBufferUploadBytes += sizeInBytes64;
+	PendingPersistentStructuredBufferUploadBytes += alloc.size;
 	if (PendingPersistentStructuredBufferUploadBytes > kMaxInFlightPersistentStructuredBufferUploadBytes)
 	{
 		CmdQ->WaitGPU();
 		RetireCompletedPersistentStructuredBufferUploads();
 		RetireCompletedPersistentStructuredBufferFrees();
+	}
+	return true;
+}
+
+std::shared_ptr<Buffer> DX12Backend::CreateSuballocatedStructuredBuffer(const BufferCreateDesc& desc)
+{
+	if (!Device || !TextureDHRing || desc.NumElements == 0 || desc.ElementSize == 0 || !desc.InitialData)
+		return nullptr;
+
+	const UINT64 sizeInBytes64 = static_cast<UINT64>(desc.NumElements) * static_cast<UINT64>(desc.ElementSize);
+	if (sizeInBytes64 > static_cast<UINT64>(std::numeric_limits<uint32_t>::max()))
+		return nullptr;
+
+	PersistentStructuredBufferAllocation alloc = AllocatePersistentStructuredBufferBytes(sizeInBytes64, desc.ElementSize);
+	if (!alloc.resource)
+		return nullptr;
+
+	std::shared_ptr<PersistentStructuredBufferBlock> ownerBlock = alloc.block;
+	if (!ownerBlock)
+		return nullptr;
+
+	if (!UploadPersistentStructuredBufferBytes(alloc, desc.InitialData, ToD3D12ResourceState(desc.InitialState)))
+	{
+		ReleasePersistentStructuredBufferBytes(ownerBlock, alloc.offset, alloc.size);
+		return nullptr;
 	}
 
 	auto buffer = std::shared_ptr<Buffer>(
@@ -4797,11 +4913,11 @@ std::shared_ptr<RTAS> DX12Backend::CreateBLASForSkeletalMesh(Mesh* mesh)
 	D3D12_RAYTRACING_GEOMETRY_DESC geomDesc = {};
 	geomDesc.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
 	geomDesc.Triangles.VertexBuffer.StartAddress =
-		mesh->SkeletalOutputVb->resource->GetGPUVirtualAddress() + vertexByteOffset;
+		mesh->SkeletalOutputVb->view.BufferLocation + vertexByteOffset;
 	geomDesc.Triangles.VertexBuffer.StrideInBytes = mesh->VertexStride;
 	geomDesc.Triangles.VertexFormat = DXGI_FORMAT_R32G32B32_FLOAT;
 	geomDesc.Triangles.VertexCount = mesh->SkeletalVertexCount;
-	geomDesc.Triangles.IndexBuffer = mesh->Ib->resource->GetGPUVirtualAddress();
+	geomDesc.Triangles.IndexBuffer = mesh->Ib->view.BufferLocation;
 	geomDesc.Triangles.IndexFormat = ToDXGIFormat(mesh->IndexFormat);
 	geomDesc.Triangles.IndexCount = mesh->Ib->numIndices;
 	geomDesc.Triangles.Transform3x4 = 0;
@@ -4926,11 +5042,11 @@ void DX12Backend::RefitBLAS(RTAS* rtas, Mesh* mesh)
 	D3D12_RAYTRACING_GEOMETRY_DESC geomDesc = {};
 	geomDesc.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
 	geomDesc.Triangles.VertexBuffer.StartAddress =
-		mesh->SkeletalOutputVb->resource->GetGPUVirtualAddress() + vertexByteOffset;
+		mesh->SkeletalOutputVb->view.BufferLocation + vertexByteOffset;
 	geomDesc.Triangles.VertexBuffer.StrideInBytes = mesh->VertexStride;
 	geomDesc.Triangles.VertexFormat = DXGI_FORMAT_R32G32B32_FLOAT;
 	geomDesc.Triangles.VertexCount = mesh->SkeletalVertexCount;
-	geomDesc.Triangles.IndexBuffer = mesh->Ib->resource->GetGPUVirtualAddress();
+	geomDesc.Triangles.IndexBuffer = mesh->Ib->view.BufferLocation;
 	geomDesc.Triangles.IndexFormat = ToDXGIFormat(mesh->IndexFormat);
 	geomDesc.Triangles.IndexCount = mesh->Ib->numIndices;
 	geomDesc.Triangles.Transform3x4 = 0;
@@ -5009,11 +5125,11 @@ std::shared_ptr<RTAS> DX12Backend::CreateBLASForMesh(Mesh* mesh)
 
 	D3D12_RAYTRACING_GEOMETRY_DESC geomDesc = {};
 	geomDesc.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
-	geomDesc.Triangles.VertexBuffer.StartAddress = mesh->Vb->resource->GetGPUVirtualAddress();
+	geomDesc.Triangles.VertexBuffer.StartAddress = mesh->Vb->view.BufferLocation;
 	geomDesc.Triangles.VertexBuffer.StrideInBytes = mesh->VertexStride;
 	geomDesc.Triangles.VertexFormat = DXGI_FORMAT_R32G32B32_FLOAT;
 	geomDesc.Triangles.VertexCount = mesh->Vb->numVertices;
-	geomDesc.Triangles.IndexBuffer = mesh->Ib->resource->GetGPUVirtualAddress();
+	geomDesc.Triangles.IndexBuffer = mesh->Ib->view.BufferLocation;
 	geomDesc.Triangles.IndexFormat = ToDXGIFormat(mesh->IndexFormat);
 	geomDesc.Triangles.IndexCount = mesh->Ib->numIndices;
 	geomDesc.Triangles.Transform3x4 = 0;

@@ -13305,7 +13305,7 @@ void Corona::DrawEditorModeOverlay()
 						return static_cast<double>(bytes) / (1024.0 * 1024.0);
 					};
 					ImGui::Text(
-						"Persistent structured: blocks=%u reserved=%.2f MiB committed=%.2f MiB reusable=%.2f MiB",
+						"Persistent pool: blocks=%u reserved=%.2f MiB committed=%.2f MiB reusable=%.2f MiB",
 						allocatorStats.PersistentStructuredBlockCount,
 						bytesToMiB(allocatorStats.PersistentStructuredReservedBytes),
 						bytesToMiB(allocatorStats.PersistentStructuredCommittedBytes),
