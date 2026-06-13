@@ -680,6 +680,7 @@ void DX12Backend::BeginFrame()
 	UINT64 ThisFrameFenceValue = FrameFenceValueVec[CurrentFrameIndex];
 	
 	CmdQ->WaitFenceValue(ThisFrameFenceValue);
+	RetireCompletedPersistentStructuredBufferUploads();
 	RetireCompletedPersistentStructuredBufferFrees();
 	ResetTransientUploadStructuredFrame(CurrentFrameIndex);
 
@@ -2393,6 +2394,29 @@ void DX12Backend::RetireCompletedPersistentStructuredBufferFrees()
 		PendingPersistentStructuredBufferFrees.end());
 }
 
+void DX12Backend::RetireCompletedPersistentStructuredBufferUploads()
+{
+	if (!CmdQ || !CmdQ->m_fence || PendingPersistentStructuredBufferUploads.empty())
+		return;
+
+	const UINT64 completedFenceValue = CmdQ->m_fence->GetCompletedValue();
+	size_t kept = 0;
+	for (size_t i = 0; i < PendingPersistentStructuredBufferUploads.size(); ++i)
+	{
+		PendingPersistentStructuredBufferUpload& pending = PendingPersistentStructuredBufferUploads[i];
+		if (pending.FenceValue <= completedFenceValue)
+		{
+			PendingPersistentStructuredBufferUploadBytes -=
+				std::min(PendingPersistentStructuredBufferUploadBytes, pending.Bytes);
+			continue;
+		}
+		if (kept != i)
+			PendingPersistentStructuredBufferUploads[kept] = std::move(pending);
+		++kept;
+	}
+	PendingPersistentStructuredBufferUploads.resize(kept);
+}
+
 std::shared_ptr<Buffer> DX12Backend::CreateSuballocatedStructuredBuffer(const BufferCreateDesc& desc)
 {
 	if (!Device || !TextureDHRing || desc.NumElements == 0 || desc.ElementSize == 0 || !desc.InitialData)
@@ -2411,8 +2435,8 @@ std::shared_ptr<Buffer> DX12Backend::CreateSuballocatedStructuredBuffer(const Bu
 		return nullptr;
 
 	const D3D12_RESOURCE_STATES targetState = ToD3D12ResourceState(desc.InitialState);
-	if (ownerBlock->state != D3D12_RESOURCE_STATE_COPY_DEST && ownerBlock->cursor > sizeInBytes64)
-		CmdQ->WaitGPU();
+	RetireCompletedPersistentStructuredBufferUploads();
+	WaitForAsyncRtOnGraphicsQueue();
 
 	CommandList* cmd = CmdQ->AllocCmdList();
 	if (ownerBlock->state != D3D12_RESOURCE_STATE_COPY_DEST)
@@ -2451,7 +2475,19 @@ std::shared_ptr<Buffer> DX12Backend::CreateSuballocatedStructuredBuffer(const Bu
 	}
 
 	CmdQ->ExecuteCommandList(cmd);
-	CmdQ->WaitGPU();
+
+	PendingPersistentStructuredBufferUpload pendingUpload;
+	pendingUpload.FenceValue = cmd->Fence.value_or(CmdQ->CurrentFenceValue);
+	pendingUpload.Bytes = sizeInBytes64;
+	pendingUpload.UploadHeap = uploadHeap;
+	PendingPersistentStructuredBufferUploads.push_back(std::move(pendingUpload));
+	PendingPersistentStructuredBufferUploadBytes += sizeInBytes64;
+	if (PendingPersistentStructuredBufferUploadBytes > kMaxInFlightPersistentStructuredBufferUploadBytes)
+	{
+		CmdQ->WaitGPU();
+		RetireCompletedPersistentStructuredBufferUploads();
+		RetireCompletedPersistentStructuredBufferFrees();
+	}
 
 	auto buffer = std::shared_ptr<Buffer>(
 		new Buffer,
@@ -3143,9 +3179,66 @@ RHIBufferHandle DX12Backend::GetBindlessIndexBufferHandle(const IndexBuffer* buf
 	return GetDX12BindlessBufferDescriptorHandle(*this, buffer, buffer->BindlessHandle);
 }
 
+RenderBackendAllocatorStats DX12Backend::GetAllocatorStats() const
+{
+	RenderBackendAllocatorStats stats{};
+	stats.PersistentStructuredBlockCount = static_cast<uint32_t>(PersistentStructuredBufferBlocks.size());
+	stats.PersistentStructuredBytesIssued = PersistentStructuredBufferBytesIssued;
+	stats.PersistentStructuredPendingUploadBytes = PendingPersistentStructuredBufferUploadBytes;
+	for (const std::shared_ptr<PersistentStructuredBufferBlock>& block : PersistentStructuredBufferBlocks)
+	{
+		if (!block)
+			continue;
+		stats.PersistentStructuredReservedBytes += block->capacity;
+		stats.PersistentStructuredCommittedBytes += block->cursor;
+		for (const PersistentStructuredBufferBlock::FreeRange& range : block->freeRanges)
+		{
+			stats.PersistentStructuredReusableBytes += range.size;
+		}
+	}
+	for (const PendingPersistentStructuredBufferFree& pending : PendingPersistentStructuredBufferFrees)
+	{
+		stats.PersistentStructuredPendingFreeBytes += pending.size;
+	}
+
+	stats.TransientStructuredBlockCount = TransientUploadStructuredBlockCount;
+	stats.TransientStructuredBytesIssued = TransientUploadStructuredBytesIssued;
+	stats.TransientStructuredReservedBytes = TransientUploadStructuredBytesReserved;
+	const uint32_t frameIndex = CurrentFrameIndex < TransientUploadStructuredBlocks.size() ? CurrentFrameIndex : 0u;
+	if (frameIndex < TransientUploadStructuredBlocks.size())
+	{
+		for (const std::shared_ptr<TransientUploadStructuredBlock>& block : TransientUploadStructuredBlocks[frameIndex])
+		{
+			if (block)
+				stats.TransientStructuredCurrentFrameBytes += block->cursor;
+		}
+	}
+
+	{
+		std::lock_guard<std::mutex> lock(BindlessTextureMutex);
+		stats.BindlessTextureSlotsCapacity = static_cast<uint32_t>(BindlessTextureSlots.size());
+		for (const DX12BindlessTextureSlot& slot : BindlessTextureSlots)
+		{
+			if (slot.Occupied)
+				++stats.BindlessTextureSlotsUsed;
+		}
+	}
+	{
+		std::lock_guard<std::mutex> lock(BindlessBufferMutex);
+		stats.BindlessBufferSlotsCapacity = static_cast<uint32_t>(BindlessBufferSlots.size());
+		for (const DX12BindlessBufferSlot& slot : BindlessBufferSlots)
+		{
+			if (slot.Occupied)
+				++stats.BindlessBufferSlotsUsed;
+		}
+	}
+	return stats;
+}
+
 DX12Backend::~DX12Backend()
 {
 	CmdQ->WaitGPU();
+	RetireCompletedPersistentStructuredBufferUploads();
 	RetireCompletedPersistentStructuredBufferFrees();
 	{
 		std::lock_guard<std::mutex> lock(BindlessTextureMutex);

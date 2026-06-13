@@ -13295,7 +13295,40 @@ void Corona::DrawEditorModeOverlay()
 			if (!bEditorConfigScriptHandled)
 			{
 			if (renderBackend)
+			{
 				ImGui::Text("Backend: %s", renderBackend->GetBackendName());
+				if (ImGui::CollapsingHeader("RHI Allocator"))
+				{
+					const RenderBackendAllocatorStats allocatorStats = renderBackend->GetAllocatorStats();
+					const auto bytesToMiB = [](uint64_t bytes) -> double
+					{
+						return static_cast<double>(bytes) / (1024.0 * 1024.0);
+					};
+					ImGui::Text(
+						"Persistent structured: blocks=%u reserved=%.2f MiB committed=%.2f MiB reusable=%.2f MiB",
+						allocatorStats.PersistentStructuredBlockCount,
+						bytesToMiB(allocatorStats.PersistentStructuredReservedBytes),
+						bytesToMiB(allocatorStats.PersistentStructuredCommittedBytes),
+						bytesToMiB(allocatorStats.PersistentStructuredReusableBytes));
+					ImGui::Text(
+						"Persistent pending: free=%.2f MiB upload=%.2f MiB issued=%.2f MiB",
+						bytesToMiB(allocatorStats.PersistentStructuredPendingFreeBytes),
+						bytesToMiB(allocatorStats.PersistentStructuredPendingUploadBytes),
+						bytesToMiB(allocatorStats.PersistentStructuredBytesIssued));
+					ImGui::Text(
+						"Transient structured: blocks=%u reserved=%.2f MiB frame=%.2f MiB issued=%.2f MiB",
+						allocatorStats.TransientStructuredBlockCount,
+						bytesToMiB(allocatorStats.TransientStructuredReservedBytes),
+						bytesToMiB(allocatorStats.TransientStructuredCurrentFrameBytes),
+						bytesToMiB(allocatorStats.TransientStructuredBytesIssued));
+					ImGui::Text(
+						"Bindless: textures=%u/%u buffers=%u/%u",
+						allocatorStats.BindlessTextureSlotsUsed,
+						allocatorStats.BindlessTextureSlotsCapacity,
+						allocatorStats.BindlessBufferSlotsUsed,
+						allocatorStats.BindlessBufferSlotsCapacity);
+				}
+			}
 
 		if (ImGui::CollapsingHeader("Top", ImGuiTreeNodeFlags_DefaultOpen))
 		{

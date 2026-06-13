@@ -579,12 +579,22 @@ public:
 	UINT32 PersistentStructuredBufferAllocationCount = 0;
 	UINT64 PersistentStructuredBufferBytesIssued = 0;
 	UINT64 PersistentStructuredBufferBytesReserved = 0;
+	struct PendingPersistentStructuredBufferUpload
+	{
+		UINT64 FenceValue = 0;
+		UINT64 Bytes = 0;
+		ComPtr<ID3D12Resource> UploadHeap;
+	};
+	std::vector<PendingPersistentStructuredBufferUpload> PendingPersistentStructuredBufferUploads;
+	UINT64 PendingPersistentStructuredBufferUploadBytes = 0;
+	static constexpr UINT64 kMaxInFlightPersistentStructuredBufferUploadBytes = 128ull * 1024ull * 1024ull;
 	PersistentStructuredBufferAllocation AllocatePersistentStructuredBufferBytes(UINT64 size, UINT64 alignment);
 	void ReleasePersistentStructuredBufferBytes(
 		const std::shared_ptr<PersistentStructuredBufferBlock>& block,
 		UINT64 offset,
 		UINT64 size);
 	void RetireCompletedPersistentStructuredBufferFrees();
+	void RetireCompletedPersistentStructuredBufferUploads();
 	void AddPersistentStructuredBufferFreeRange(
 		const std::shared_ptr<PersistentStructuredBufferBlock>& block,
 		UINT64 offset,
@@ -684,6 +694,7 @@ public:
 		capabilities.MaxBindlessBufferCount = kMaxDX12BindlessBufferSlots;
 		return capabilities;
 	}
+	RenderBackendAllocatorStats GetAllocatorStats() const override;
 	bool GetStreamlineTextureResource(Texture* texture, EResourceState state, StreamlineTextureResourceDesc& outDesc) const override;
 	void* GetStreamlineCommandBuffer() override;
 	uint32_t GetMaxSupportedHybridStage() const override { return 7; }

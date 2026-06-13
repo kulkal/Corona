@@ -385,6 +385,27 @@ struct RenderBackendCapabilities
 	uint32_t MaxBindlessBufferCount = 0;
 };
 
+struct RenderBackendAllocatorStats
+{
+	uint32_t PersistentStructuredBlockCount = 0;
+	uint64_t PersistentStructuredReservedBytes = 0;
+	uint64_t PersistentStructuredCommittedBytes = 0;
+	uint64_t PersistentStructuredReusableBytes = 0;
+	uint64_t PersistentStructuredPendingFreeBytes = 0;
+	uint64_t PersistentStructuredPendingUploadBytes = 0;
+	uint64_t PersistentStructuredBytesIssued = 0;
+
+	uint32_t TransientStructuredBlockCount = 0;
+	uint64_t TransientStructuredReservedBytes = 0;
+	uint64_t TransientStructuredCurrentFrameBytes = 0;
+	uint64_t TransientStructuredBytesIssued = 0;
+
+	uint32_t BindlessTextureSlotsUsed = 0;
+	uint32_t BindlessTextureSlotsCapacity = 0;
+	uint32_t BindlessBufferSlotsUsed = 0;
+	uint32_t BindlessBufferSlotsCapacity = 0;
+};
+
 struct StreamlineTextureResourceDesc
 {
 	void* Native = nullptr;
@@ -426,6 +447,7 @@ public:
 	virtual ERenderBackendAPI GetAPI() const = 0;
 	virtual const char* GetBackendName() const = 0;
 	virtual RenderBackendCapabilities GetCapabilities() const { return {}; }
+	virtual RenderBackendAllocatorStats GetAllocatorStats() const { return {}; }
 	virtual bool GetStreamlineTextureResource(Texture* texture, EResourceState state, StreamlineTextureResourceDesc& outDesc) const
 	{
 		(void)texture;

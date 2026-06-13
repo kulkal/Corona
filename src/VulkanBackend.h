@@ -325,6 +325,7 @@ public:
 #endif
 		return capabilities;
 	}
+	RenderBackendAllocatorStats GetAllocatorStats() const override;
 	bool GetStreamlineTextureResource(Texture* texture, EResourceState state, StreamlineTextureResourceDesc& outDesc) const override;
 	void* GetStreamlineCommandBuffer() override;
 	bool GetStreamlineVulkanDeviceInfo(StreamlineVulkanDeviceInfo& outInfo) const override;
@@ -692,6 +693,17 @@ private:
 	uint32_t PersistentStructuredBufferAllocationCount = 0;
 	uint64_t PersistentStructuredBufferBytesIssued = 0;
 	uint64_t PersistentStructuredBufferBytesReserved = 0;
+	struct PendingPersistentStructuredBufferUpload
+	{
+		VkFence Fence = VK_NULL_HANDLE;
+		VkCommandBuffer CommandBuffer = VK_NULL_HANDLE;
+		VkBuffer StagingBuffer = VK_NULL_HANDLE;
+		VkDeviceMemory StagingMemory = VK_NULL_HANDLE;
+		VkDeviceSize Bytes = 0;
+	};
+	std::vector<PendingPersistentStructuredBufferUpload> PendingPersistentStructuredBufferUploads;
+	uint64_t PendingPersistentStructuredBufferUploadBytes = 0;
+	static constexpr uint64_t kMaxInFlightPersistentStructuredBufferUploadBytes = 128ull * 1024ull * 1024ull;
 	bool AllocatePersistentStructuredBufferRange(
 		VkDeviceSize size,
 		VkDeviceSize alignment,
@@ -703,6 +715,7 @@ private:
 		VkDeviceSize size);
 	void ReleasePersistentStructuredBufferRange(const VulkanBufferAllocation& allocation);
 	void RetirePersistentStructuredBufferFrees(uint32_t frameIndex);
+	void RetirePersistentStructuredBufferUploads(bool waitForAll = false);
 	std::shared_ptr<Buffer> CreateSuballocatedStructuredBuffer(const BufferCreateDesc& desc);
 
 	// Phase 3.5 (Vulkan) upload pool state. ActiveUploadBlock is the

@@ -3757,6 +3757,7 @@ void VulkanBackend::BeginFrame()
 	}
 	AppendVulkanRuntimeTraceBackend(L"[VulkanBackend::BeginFrame] after vkWaitForFences");
 
+	RetirePersistentStructuredBufferUploads(false);
 	RetirePersistentStructuredBufferFrees(frameContextIndex);
 	ResetTransientUploadStructuredFrame(frameContextIndex);
 
@@ -4022,6 +4023,66 @@ uint32_t VulkanBackend::GetFrameCount() const
 #endif
 }
 uint32_t VulkanBackend::GetCurrentFrameIndex() const { return CurrentFrameIndex; }
+RenderBackendAllocatorStats VulkanBackend::GetAllocatorStats() const
+{
+	RenderBackendAllocatorStats stats{};
+#if CORONA_HAS_VULKAN
+	stats.PersistentStructuredBlockCount = static_cast<uint32_t>(PersistentStructuredBufferBlocks.size());
+	stats.PersistentStructuredBytesIssued = PersistentStructuredBufferBytesIssued;
+	stats.PersistentStructuredPendingUploadBytes = PendingPersistentStructuredBufferUploadBytes;
+	for (const std::shared_ptr<VulkanPersistentBufferBlock>& block : PersistentStructuredBufferBlocks)
+	{
+		if (!block)
+			continue;
+		stats.PersistentStructuredReservedBytes += block->Capacity;
+		stats.PersistentStructuredCommittedBytes += block->Cursor;
+		for (const VulkanPersistentBufferBlock::FreeRange& range : block->FreeRanges)
+		{
+			stats.PersistentStructuredReusableBytes += range.Size;
+		}
+	}
+	for (const std::vector<PendingPersistentStructuredBufferFree>& pendingFrame : PendingPersistentStructuredBufferFrees)
+	{
+		for (const PendingPersistentStructuredBufferFree& pending : pendingFrame)
+		{
+			stats.PersistentStructuredPendingFreeBytes += pending.Size;
+		}
+	}
+
+	stats.TransientStructuredBlockCount = TransientUploadStructuredBlockCount;
+	stats.TransientStructuredBytesIssued = TransientUploadStructuredBytesIssued;
+	stats.TransientStructuredReservedBytes = TransientUploadStructuredBytesReserved;
+	const uint32_t frameIndex = CurrentFrameIndex < TransientUploadStructuredFrames.size() ? CurrentFrameIndex : 0u;
+	if (frameIndex < TransientUploadStructuredFrames.size())
+	{
+		for (const std::shared_ptr<VulkanUploadHeapBlock>& block : TransientUploadStructuredFrames[frameIndex].Blocks)
+		{
+			if (block)
+				stats.TransientStructuredCurrentFrameBytes += block->Cursor;
+		}
+	}
+
+	{
+		std::lock_guard<std::mutex> lock(BindlessTextureMutex);
+		stats.BindlessTextureSlotsCapacity = static_cast<uint32_t>(BindlessTextureSlots.size());
+		for (const VulkanBindlessTextureSlot& slot : BindlessTextureSlots)
+		{
+			if (slot.Occupied)
+				++stats.BindlessTextureSlotsUsed;
+		}
+	}
+	{
+		std::lock_guard<std::mutex> lock(BindlessBufferMutex);
+		stats.BindlessBufferSlotsCapacity = static_cast<uint32_t>(BindlessBufferSlots.size());
+		for (const VulkanBindlessBufferSlot& slot : BindlessBufferSlots)
+		{
+			if (slot.Occupied)
+				++stats.BindlessBufferSlotsUsed;
+		}
+	}
+#endif
+	return stats;
+}
 bool VulkanBackend::SupportsRayTracing() const
 {
 #if CORONA_HAS_VULKAN
@@ -5359,6 +5420,59 @@ void VulkanBackend::RetirePersistentStructuredBufferFrees(uint32_t frameIndex)
 #endif
 }
 
+void VulkanBackend::RetirePersistentStructuredBufferUploads(bool waitForAll)
+{
+#if CORONA_HAS_VULKAN
+	if (Device == VK_NULL_HANDLE || PendingPersistentStructuredBufferUploads.empty())
+		return;
+
+	size_t kept = 0;
+	for (size_t i = 0; i < PendingPersistentStructuredBufferUploads.size(); ++i)
+	{
+		PendingPersistentStructuredBufferUpload& pending = PendingPersistentStructuredBufferUploads[i];
+		bool completed = true;
+		if (pending.Fence != VK_NULL_HANDLE)
+		{
+			if (waitForAll)
+			{
+				vkWaitForFences(Device, 1, &pending.Fence, VK_TRUE, UINT64_MAX);
+			}
+			else
+			{
+				const VkResult fenceStatus = vkGetFenceStatus(Device, pending.Fence);
+				completed = fenceStatus == VK_SUCCESS;
+				if (fenceStatus != VK_SUCCESS && fenceStatus != VK_NOT_READY)
+					completed = true;
+			}
+		}
+
+		if (completed)
+		{
+			if (pending.CommandBuffer != VK_NULL_HANDLE && CommandPool != VK_NULL_HANDLE)
+				vkFreeCommandBuffers(Device, CommandPool, 1, &pending.CommandBuffer);
+			if (pending.StagingBuffer != VK_NULL_HANDLE)
+				vkDestroyBuffer(Device, pending.StagingBuffer, nullptr);
+			if (pending.StagingMemory != VK_NULL_HANDLE)
+				vkFreeMemory(Device, pending.StagingMemory, nullptr);
+			if (pending.Fence != VK_NULL_HANDLE)
+				vkDestroyFence(Device, pending.Fence, nullptr);
+			PendingPersistentStructuredBufferUploadBytes -=
+				std::min<uint64_t>(
+					PendingPersistentStructuredBufferUploadBytes,
+					static_cast<uint64_t>(pending.Bytes));
+			continue;
+		}
+
+		if (kept != i)
+			PendingPersistentStructuredBufferUploads[kept] = pending;
+		++kept;
+	}
+	PendingPersistentStructuredBufferUploads.resize(kept);
+#else
+	(void)waitForAll;
+#endif
+}
+
 bool VulkanBackend::AllocatePersistentStructuredBufferRange(
 	VkDeviceSize size,
 	VkDeviceSize alignment,
@@ -5510,6 +5624,8 @@ upload:
 	if (outAllocation.Buffer == VK_NULL_HANDLE || outAllocation.SizeInBytes == 0)
 		return false;
 
+	RetirePersistentStructuredBufferUploads(false);
+
 	auto releaseReservedRange = [&]()
 	{
 		if (outAllocation.PersistentPoolBlock && outAllocation.SizeInBytes != 0)
@@ -5524,12 +5640,15 @@ upload:
 
 	VkBuffer stagingBuffer = VK_NULL_HANDLE;
 	VkDeviceMemory stagingMemory = VK_NULL_HANDLE;
+	VkFence uploadFence = VK_NULL_HANDLE;
 	auto cleanupStaging = [&]()
 	{
 		if (stagingBuffer != VK_NULL_HANDLE)
 			vkDestroyBuffer(Device, stagingBuffer, nullptr);
 		if (stagingMemory != VK_NULL_HANDLE)
 			vkFreeMemory(Device, stagingMemory, nullptr);
+		if (uploadFence != VK_NULL_HANDLE)
+			vkDestroyFence(Device, uploadFence, nullptr);
 	};
 
 	if (!CreateBufferWithMemory(
@@ -5610,20 +5729,44 @@ upload:
 		return false;
 	}
 
-	VkSubmitInfo submitInfo{};
-	submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-	submitInfo.commandBufferCount = 1;
-	submitInfo.pCommandBuffers = &commandBuffer;
-	if (vkQueueSubmit(GraphicsQueue, 1, &submitInfo, VK_NULL_HANDLE) != VK_SUCCESS)
+	VkFenceCreateInfo fenceInfo{};
+	fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+	if (vkCreateFence(Device, &fenceInfo, nullptr, &uploadFence) != VK_SUCCESS)
 	{
 		vkFreeCommandBuffers(Device, CommandPool, 1, &commandBuffer);
 		cleanupStaging();
 		releaseReservedRange();
 		return false;
 	}
-	vkQueueWaitIdle(GraphicsQueue);
-	vkFreeCommandBuffers(Device, CommandPool, 1, &commandBuffer);
-	cleanupStaging();
+
+	VkSubmitInfo submitInfo{};
+	submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+	submitInfo.commandBufferCount = 1;
+	submitInfo.pCommandBuffers = &commandBuffer;
+	if (vkQueueSubmit(GraphicsQueue, 1, &submitInfo, uploadFence) != VK_SUCCESS)
+	{
+		vkFreeCommandBuffers(Device, CommandPool, 1, &commandBuffer);
+		cleanupStaging();
+		releaseReservedRange();
+		return false;
+	}
+
+	PendingPersistentStructuredBufferUploads.push_back({
+		uploadFence,
+		commandBuffer,
+		stagingBuffer,
+		stagingMemory,
+		size
+	});
+	PendingPersistentStructuredBufferUploadBytes += static_cast<uint64_t>(size);
+	uploadFence = VK_NULL_HANDLE;
+	stagingBuffer = VK_NULL_HANDLE;
+	stagingMemory = VK_NULL_HANDLE;
+	commandBuffer = VK_NULL_HANDLE;
+
+	if (PendingPersistentStructuredBufferUploadBytes > kMaxInFlightPersistentStructuredBufferUploadBytes)
+		RetirePersistentStructuredBufferUploads(true);
+
 	return true;
 #endif
 }
@@ -8943,6 +9086,7 @@ void VulkanBackend::DestroyWindowContext()
 		AppendVulkanRuntimeTraceBackend(L"[VulkanBackend::DestroyWindowContext] before vkDeviceWaitIdle");
 		vkDeviceWaitIdle(Device);
 		AppendVulkanRuntimeTraceBackend(L"[VulkanBackend::DestroyWindowContext] after vkDeviceWaitIdle");
+		RetirePersistentStructuredBufferUploads(true);
 	}
 
 	for (VkFramebuffer framebuffer : SwapchainFramebuffers)
@@ -9080,6 +9224,7 @@ void VulkanBackend::DestroyWindowContext()
 	VertexBufferAllocations.clear();
 	IndexBufferAllocations.clear();
 	BufferAllocations.clear();
+	PendingPersistentStructuredBufferUploads.clear();
 	PendingPersistentStructuredBufferFrees.clear();
 	TransientUploadStructuredFrames.clear();
 	PersistentStructuredBufferBlocks.clear();
