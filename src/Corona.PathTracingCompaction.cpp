@@ -63,6 +63,7 @@ void Corona::InitPathTracingCompactionPass()
 	const RHIShaderStageMask closestHitStage = ToRHIShaderStageMask(RHIShaderStage::ClosestHit);
 	const RHIShaderStageMask anyHitStage = ToRHIShaderStageMask(RHIShaderStage::AnyHit);
 	BindRTBindlessMaterialSchema(*tracePso, closestHitStage | anyHitStage);
+	BindRTBindlessGeometrySchema(*tracePso, closestHitStage | anyHitStage);
 	tracePso->BindUAV("global", MakeRHITextureUAV("OutAlbedo", 1, rayGenStage));
 	tracePso->BindUAV("global", MakeRHITextureUAV("OutSpecularAlbedo", 2, rayGenStage));
 	tracePso->BindUAV("global", MakeRHITextureUAV("OutNormal", 3, rayGenStage));

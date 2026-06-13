@@ -1,7 +1,5 @@
 #include "Common.hlsl"
-#if defined(CORONA_BINDLESS_MATERIALS) && CORONA_BINDLESS_MATERIALS
 #include "BindlessResources.hlsli"
-#endif
 
 RWStructuredBuffer<float4> TraceSH0 : register(u0);
 RWStructuredBuffer<float4> TraceSH1 : register(u1);
@@ -13,12 +11,16 @@ StructuredBuffer<uint> CellKeys : register(t1);
 StructuredBuffer<float4> CellPosition : register(t2);
 StructuredBuffer<float4> CellNormal : register(t3);
 Texture3D RayNoiseBlueNoiseSource : register(t4);
+#if !defined(CORONA_BINDLESS_GEOMETRY) || !CORONA_BINDLESS_GEOMETRY
 ByteAddressBuffer vertices : register(t5);
 ByteAddressBuffer indices : register(t6);
+#endif
 #if !defined(CORONA_BINDLESS_MATERIALS) || !CORONA_BINDLESS_MATERIALS
 Texture2D AlbedoTex : register(t7);
 #endif
+#if !defined(CORONA_BINDLESS_GEOMETRY) || !CORONA_BINDLESS_GEOMETRY
 ByteAddressBuffer InstanceProperty : register(t8);
+#endif
 StructuredBuffer<uint> ActiveCellSlots : register(t9);
 StructuredBuffer<uint> ActiveCounter : register(t10);
 StructuredBuffer<uint> CellLightMask : register(t11);
@@ -895,7 +897,7 @@ void chs(inout RayPayload payload, in BuiltInTriangleIntersectionAttributes attr
     float3 barycentrics = float3(1.0f - attribs.barycentrics.x - attribs.barycentrics.y, attribs.barycentrics.x, attribs.barycentrics.y);
     uint triangleIndex = PrimitiveIndex();
     uint instanceID = InstanceID();
-    Vertex vertex = GetSurfaceVertexAttributes(instanceID, vertices, indices, InstanceProperty, triangleIndex, barycentrics);
+    Vertex vertex = CORONA_GET_SURFACE_VERTEX_ATTRIBUTES(instanceID, triangleIndex, barycentrics);
 
     payload.position = CommonSanitizeFloat3(vertex.position, WorldRayOrigin() + WorldRayDirection() * RayTCurrent());
     float3 hitNormal = SafeNormalize(vertex.normal, -WorldRayDirection());

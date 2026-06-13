@@ -44,6 +44,21 @@ Corona::RTPassBuilder& Corona::RTPassBuilder::BeginScene()
 	const auto phaseStart = Corona::CpuClock::now();
 	PSO->SetNumInstances(static_cast<uint32_t>(Owner.RayTracingInstances.size()));
 	PSO->BeginShaderTable();
+	if (Owner.UsesRTBindlessGeometry())
+	{
+		const size_t expectedRecordCount = std::max<size_t>(Owner.RayTracingInstances.size(), 1);
+		const bool bGeometryRecordsReady =
+			Owner.RTGeometryRecordBuffer &&
+			Owner.RTGeometryRecordHash != 0 &&
+			Owner.RTGeometryRecordBuffer->NumElements == expectedRecordCount &&
+			Owner.InstancePropertyBuffer;
+		if (bGeometryRecordsReady || Owner.EnsureRTGeometryRecordBuffer())
+		{
+			PSO->SetBindlessBufferTable("global", "GeometryBuffers");
+			PSO->SetBufferSRV("global", "RtGeometries", Owner.RTGeometryRecordBuffer.get());
+			PSO->SetBufferSRV("global", "RtInstanceProperties", Owner.InstancePropertyBuffer.get());
+		}
+	}
 	bBegan = true;
 	bShaderTableFinalized = false;
 	Owner.AddRtRecordPhaseTiming(ERtRecordPhase::BeginScene, phaseStart, Corona::CpuClock::now());
@@ -95,6 +110,15 @@ Corona::RTPassBuilder& Corona::RTPassBuilder::SetBindlessTextureTable(const char
 	return *this;
 }
 
+Corona::RTPassBuilder& Corona::RTPassBuilder::SetBindlessBufferTable(const char* shader, const char* bindingName)
+{
+	const auto phaseStart = Corona::CpuClock::now();
+	if (PSO)
+		PSO->SetBindlessBufferTable(shader, bindingName);
+	Owner.AddRtRecordPhaseTiming(ERtRecordPhase::BindResources, phaseStart, Corona::CpuClock::now());
+	return *this;
+}
+
 Corona::RTPassBuilder& Corona::RTPassBuilder::SetAccelerationStructure(const char* shader, const char* bindingName, const shared_ptr<RTAS>& rtas)
 {
 	const auto phaseStart = Corona::CpuClock::now();
@@ -141,6 +165,11 @@ uint32_t Corona::RTPassBuilder::BindSceneHitPrograms(const RTSceneHitProgramDesc
 	}
 
 	PSO->MarkHitProgramBindingCacheDirty();
+	const bool bUseBindlessGeometry =
+		Owner.UsesRTBindlessGeometry() &&
+		Owner.RTGeometryRecordBuffer &&
+		Owner.RTGeometryRecordHash != 0 &&
+		Owner.InstancePropertyBuffer;
 	uint32_t boundCount = 0;
 	uint32_t instanceIndex = 0;
 	for (const RTInstanceDesc& instance : Owner.RayTracingInstances)
@@ -156,16 +185,16 @@ uint32_t Corona::RTPassBuilder::BindSceneHitPrograms(const RTSceneHitProgramDesc
 
 		PSO->StartHitProgram(desc.HitGroup, instanceIndex);
 
-		if (desc.bBindSceneGeometry && mesh->Vb && mesh->Ib)
+		if (!bUseBindlessGeometry && desc.bBindSceneGeometry && mesh->Vb && mesh->Ib)
 			PSO->AddSceneGeometrySRVsToHitProgram(desc.HitGroup, mesh->Vb.get(), mesh->Ib.get(), instanceIndex);
 
-		if (desc.bBindInstancePropertyBeforeDiffuse && desc.bBindInstanceProperty && Owner.InstancePropertyBuffer)
+		if (!bUseBindlessGeometry && desc.bBindInstancePropertyBeforeDiffuse && desc.bBindInstanceProperty && Owner.InstancePropertyBuffer)
 			PSO->AddBufferSRVToHitProgram(desc.HitGroup, Owner.InstancePropertyBuffer.get(), instanceIndex);
 
 		if (desc.bBindDiffuseTexture)
 			PSO->AddTextureSRVToHitProgram(desc.HitGroup, GetDiffuseTexture(*mesh), instanceIndex);
 
-		if (!desc.bBindInstancePropertyBeforeDiffuse && desc.bBindInstanceProperty && Owner.InstancePropertyBuffer)
+		if (!bUseBindlessGeometry && !desc.bBindInstancePropertyBeforeDiffuse && desc.bBindInstanceProperty && Owner.InstancePropertyBuffer)
 			PSO->AddBufferSRVToHitProgram(desc.HitGroup, Owner.InstancePropertyBuffer.get(), instanceIndex);
 
 		if (customBinder)
@@ -291,13 +320,20 @@ uint64_t Corona::RTPassBuilder::BuildHitProgramBindingSignature(const RTSceneHit
 	HashCombineRtBinding(signature, desc.bBindDiffuseTexture ? 1ull : 0ull);
 	HashCombineRtBinding(signature, desc.bBindInstanceProperty ? 1ull : 0ull);
 	HashCombineRtBinding(signature, desc.bBindInstancePropertyBeforeDiffuse ? 1ull : 0ull);
+	const bool bUseBindlessGeometry =
+		Owner.UsesRTBindlessGeometry() &&
+		Owner.RTGeometryRecordBuffer &&
+		Owner.RTGeometryRecordHash != 0 &&
+		Owner.InstancePropertyBuffer;
+	HashCombineRtBinding(signature, bUseBindlessGeometry ? 1ull : 0ull);
 	if (desc.HitGroup)
 	{
 		for (const char* c = desc.HitGroup; *c; ++c)
 			HashCombineRtBinding(signature, static_cast<uint8_t>(*c));
 	}
 
-	HashCombinePointer(signature, Owner.InstancePropertyBuffer.get());
+	if (!bUseBindlessGeometry)
+		HashCombinePointer(signature, Owner.InstancePropertyBuffer.get());
 	for (const RTInstanceDesc& instance : Owner.RayTracingInstances)
 	{
 		HashCombinePointer(signature, instance.BottomLevelAS.get());
@@ -306,7 +342,7 @@ uint64_t Corona::RTPassBuilder::BuildHitProgramBindingSignature(const RTSceneHit
 		if (!mesh)
 			continue;
 
-		if (desc.bBindSceneGeometry)
+		if (!bUseBindlessGeometry && desc.bBindSceneGeometry)
 		{
 			HashCombinePointer(signature, mesh->Vb.get());
 			HashCombinePointer(signature, mesh->Ib.get());

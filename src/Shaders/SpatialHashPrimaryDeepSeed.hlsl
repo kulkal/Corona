@@ -1,10 +1,13 @@
 #include "Common.hlsl"
+#include "BindlessResources.hlsli"
 
 RaytracingAccelerationStructure gRtScene : register(t0);
 Texture2D DepthTex : register(t1);
+#if !defined(CORONA_BINDLESS_GEOMETRY) || !CORONA_BINDLESS_GEOMETRY
 ByteAddressBuffer vertices : register(t2);
 ByteAddressBuffer indices : register(t3);
 ByteAddressBuffer InstanceProperty : register(t4);
+#endif
 
 RWStructuredBuffer<uint> ActiveFlagsOut : register(u0);
 RWStructuredBuffer<float4> CellPositionOut : register(u1);
@@ -439,13 +442,7 @@ void chs(inout DeepSeedPayload payload, in BuiltInTriangleIntersectionAttributes
         1.0f - attribs.barycentrics.x - attribs.barycentrics.y,
         attribs.barycentrics.x,
         attribs.barycentrics.y);
-    Vertex vertex = GetSurfaceVertexAttributes(
-        InstanceID(),
-        vertices,
-        indices,
-        InstanceProperty,
-        PrimitiveIndex(),
-        barycentrics);
+    Vertex vertex = CORONA_GET_SURFACE_VERTEX_ATTRIBUTES(InstanceID(), PrimitiveIndex(), barycentrics);
 
     payload.position = CommonSanitizeFloat3(vertex.position, WorldRayOrigin() + WorldRayDirection() * RayTCurrent());
     float3 hitNormal = SafeNormalize(vertex.normal, -WorldRayDirection());

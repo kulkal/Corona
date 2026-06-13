@@ -302,6 +302,30 @@ public:
 		const RHITextureHandle handle = GetBindlessTextureHandle(texture);
 		return handle.IsValid() ? handle.Index : RHI_INVALID_BINDLESS_INDEX;
 	}
+	virtual RHIBufferHandle RegisterBindlessBuffer(Buffer* buffer) { (void)buffer; return {}; }
+	virtual RHIBufferHandle RegisterBindlessVertexBuffer(VertexBuffer* buffer) { (void)buffer; return {}; }
+	virtual RHIBufferHandle RegisterBindlessIndexBuffer(IndexBuffer* buffer) { (void)buffer; return {}; }
+	virtual void UnregisterBindlessBuffer(Buffer* buffer) { (void)buffer; }
+	virtual void UnregisterBindlessVertexBuffer(VertexBuffer* buffer) { (void)buffer; }
+	virtual void UnregisterBindlessIndexBuffer(IndexBuffer* buffer) { (void)buffer; }
+	virtual RHIBufferHandle GetBindlessBufferHandle(const Buffer* buffer) const { (void)buffer; return {}; }
+	virtual RHIBufferHandle GetBindlessVertexBufferHandle(const VertexBuffer* buffer) const { (void)buffer; return {}; }
+	virtual RHIBufferHandle GetBindlessIndexBufferHandle(const IndexBuffer* buffer) const { (void)buffer; return {}; }
+	virtual uint32_t GetBindlessBufferIndex(const Buffer* buffer) const
+	{
+		const RHIBufferHandle handle = GetBindlessBufferHandle(buffer);
+		return handle.IsValid() ? handle.Index : RHI_INVALID_BINDLESS_INDEX;
+	}
+	virtual uint32_t GetBindlessVertexBufferIndex(const VertexBuffer* buffer) const
+	{
+		const RHIBufferHandle handle = GetBindlessVertexBufferHandle(buffer);
+		return handle.IsValid() ? handle.Index : RHI_INVALID_BINDLESS_INDEX;
+	}
+	virtual uint32_t GetBindlessIndexBufferIndex(const IndexBuffer* buffer) const
+	{
+		const RHIBufferHandle handle = GetBindlessIndexBufferHandle(buffer);
+		return handle.IsValid() ? handle.Index : RHI_INVALID_BINDLESS_INDEX;
+	}
 	virtual std::shared_ptr<Texture> CreateTexture3D(
 		ETextureFormat format,
 		ETextureUsageFlags usage,

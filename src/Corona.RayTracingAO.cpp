@@ -39,6 +39,7 @@ void Corona::InitRaytracingAOPass()
 	tempPSO->BindCBV("global", MakeRHICBV("ViewParameter", 0, sizeof(RTAOViewParam), rayGenStage));
 	tempPSO->BindSampler("global", MakeRHISampler("sampleWrap", 0, rayGenStage | closestHitStage | anyHitStage));
 	BindRTBindlessMaterialSchema(*tempPSO, anyHitStage);
+	BindRTBindlessGeometrySchema(*tempPSO, closestHitStage | anyHitStage);
 
 	tempPSO->AddShader("miss", RTPipelineStateObject::MISS);
 

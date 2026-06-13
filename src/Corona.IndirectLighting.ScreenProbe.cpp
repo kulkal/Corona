@@ -148,6 +148,7 @@ shared_ptr<RTPipelineStateObject> Corona::CreateRaytracingScreenProbeGIPSO(bool 
 		tempPSO->BindSampler("global", MakeRHISampler("sampleWrap", 0, rayGenStage | closestHitStage));
 		tempPSO->BindSampler("global", MakeRHISampler("historyClamp", 1, rayGenStage));
 		BindRTBindlessMaterialSchema(*tempPSO, closestHitStage);
+		BindRTBindlessGeometrySchema(*tempPSO, closestHitStage);
 		traceStep(L"Bind global resources");
 
 		tempPSO->AddShader("miss", RTPipelineStateObject::MISS);

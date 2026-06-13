@@ -66,6 +66,7 @@ shared_ptr<RTPipelineStateObject> Corona::CreateRaytracingReflectionPSO(bool bUs
 	tempPSO->BindCBV("global", MakeRHICBV("ViewParameter", 0, sizeof(RTReflectionViewParam), rayGenStage));
 	tempPSO->BindSampler("global", MakeRHISampler("sampleWrap", 0, rayGenStage | closestHitStage));
 	BindRTBindlessMaterialSchema(*tempPSO, closestHitStage);
+	BindRTBindlessGeometrySchema(*tempPSO, closestHitStage);
 
 	tempPSO->AddShader("miss", RTPipelineStateObject::MISS);
 	tempPSO->AddShader("missShadow", RTPipelineStateObject::MISS);

@@ -36,17 +36,22 @@ class RTAS;
 class Buffer
 {
 public:
+	~Buffer();
+
 	// API-neutral
 	enum BufferType { BYTE_ADDRESS, STRUCTURED, UNKNOWN };
 	BufferType Type = UNKNOWN;
 	uint32_t NumElements = 0;
 	uint32_t ElementSize = 0;
+	RHIBufferHandle BindlessHandle{};
 
 #if CORONA_HAS_D3D12
 	DX12Backend* Owner = nullptr;
 	Microsoft::WRL::ComPtr<ID3D12Resource> resource;
 	D3D12_CPU_DESCRIPTOR_HANDLE CpuHandleSRV{};
 	D3D12_GPU_DESCRIPTOR_HANDLE GpuHandleSRV{};
+	D3D12_CPU_DESCRIPTOR_HANDLE CpuHandleBindlessSRV{};
+	D3D12_GPU_DESCRIPTOR_HANDLE GpuHandleBindlessSRV{};
 	D3D12_CPU_DESCRIPTOR_HANDLE CpuHandleUAV{};
 	D3D12_GPU_DESCRIPTOR_HANDLE GpuHandleUAV{};
 	// Persistent CPU pointer for UPLOAD-heap buffers — set by
@@ -66,25 +71,34 @@ public:
 class IndexBuffer
 {
 public:
+	~IndexBuffer();
+
 	// API-neutral
 	int numIndices = 0;
+	RHIBufferHandle BindlessHandle{};
 	// Same in-place update path as VertexBuffer::MappedCpu.
 	void* MappedCpu = nullptr;
 	uint32_t MappedCapacityBytes = 0;
 
 #if CORONA_HAS_D3D12
+	DX12Backend* Owner = nullptr;
 	Microsoft::WRL::ComPtr<ID3D12Resource> resource;
 	D3D12_INDEX_BUFFER_VIEW view{};
 	D3D12_CPU_DESCRIPTOR_HANDLE CpuHandleSRV{};
 	D3D12_GPU_DESCRIPTOR_HANDLE GpuHandleSRV{};
+	D3D12_CPU_DESCRIPTOR_HANDLE CpuHandleBindlessSRV{};
+	D3D12_GPU_DESCRIPTOR_HANDLE GpuHandleBindlessSRV{};
 #endif
 };
 
 class VertexBuffer
 {
 public:
+	~VertexBuffer();
+
 	// API-neutral
 	int numVertices = 0;
+	RHIBufferHandle BindlessHandle{};
 	// Live-Spine fast path: for UPLOAD-heap VBs created via
 	// CreateUploadVertexBuffer, holds the persistent CPU-mapped pointer +
 	// capacity so UpdateUploadVertexBuffer can memcpy in place each frame
@@ -94,10 +108,13 @@ public:
 	uint32_t MappedCapacityBytes = 0;
 
 #if CORONA_HAS_D3D12
+	DX12Backend* Owner = nullptr;
 	Microsoft::WRL::ComPtr<ID3D12Resource> resource;
 	D3D12_VERTEX_BUFFER_VIEW view{};
 	D3D12_CPU_DESCRIPTOR_HANDLE CpuHandleSRV{};
 	D3D12_GPU_DESCRIPTOR_HANDLE GpuHandleSRV{};
+	D3D12_CPU_DESCRIPTOR_HANDLE CpuHandleBindlessSRV{};
+	D3D12_GPU_DESCRIPTOR_HANDLE GpuHandleBindlessSRV{};
 	// Optional UAV view — populated by CreateRWVertexBuffer for compute
 	// skinning outputs. Zero-initialized for the read-only paths.
 	D3D12_CPU_DESCRIPTOR_HANDLE CpuHandleUAV{};

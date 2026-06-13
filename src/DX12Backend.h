@@ -329,6 +329,7 @@ public:
 	void SetTextureSRV(const std::string& shader, const std::string& bindingName, Texture* texture, int instanceIndex = -1) override;
 	void SetBufferSRV(const std::string& shader, const std::string& bindingName, Buffer* buffer, int instanceIndex = -1) override;
 	bool SetBindlessTextureTable(const std::string& shader, const std::string& bindingName) override;
+	bool SetBindlessBufferTable(const std::string& shader, const std::string& bindingName) override;
 	void SetAccelerationStructure(const std::string& shader, const std::string& bindingName, const std::shared_ptr<RTAS>& rtas, int instanceIndex = -1) override;
 	void SetSampler(const std::string& shader, const std::string& bindingName, Sampler* sampler, int instanceIndex = -1) override;
 	void SetCBVValue(const std::string& shader, const std::string& bindingName, void* pData, int instanceIndex = -1) override;
@@ -581,6 +582,23 @@ public:
 	std::vector<uint32_t> BindlessTextureFreeList;
 	mutable std::mutex BindlessTextureMutex;
 
+	static constexpr uint32_t kMaxDX12BindlessBufferSlots = 65536;
+	struct DX12BindlessBufferSlot
+	{
+		const void* BufferPtr = nullptr;
+		uint8_t ResourceType = 0;
+		uint32_t Generation = 1;
+		bool Occupied = false;
+		D3D12_CPU_DESCRIPTOR_HANDLE CpuHandleSRV{};
+		D3D12_GPU_DESCRIPTOR_HANDLE GpuHandleSRV{};
+	};
+	D3D12_CPU_DESCRIPTOR_HANDLE BindlessBufferTableCpuBase{};
+	D3D12_GPU_DESCRIPTOR_HANDLE BindlessBufferTableGpuBase{};
+	bool bBindlessBufferTableAllocated = false;
+	std::vector<DX12BindlessBufferSlot> BindlessBufferSlots;
+	std::vector<uint32_t> BindlessBufferFreeList;
+	mutable std::mutex BindlessBufferMutex;
+
 #if USE_AFTERMATH
 	bool bAftermathEnabled = false;
 #endif
@@ -592,9 +610,11 @@ public:
 		RenderBackendCapabilities capabilities{};
 		capabilities.SupportsTypedBindingSchema = true;
 		capabilities.SupportsBindlessTextures = true;
+		capabilities.SupportsBindlessBuffers = true;
 		capabilities.SupportsRuntimeDescriptorArrays = true;
 		capabilities.SupportsPartiallyBoundDescriptors = true;
 		capabilities.MaxBindlessTextureCount = kMaxDX12BindlessTextureSlots;
+		capabilities.MaxBindlessBufferCount = kMaxDX12BindlessBufferSlots;
 		return capabilities;
 	}
 	uint32_t GetMaxSupportedHybridStage() const override { return 7; }
@@ -626,6 +646,17 @@ public:
 	RHITextureHandle GetBindlessTextureHandle(const Texture* texture) const override;
 	bool IsBindlessTextureTableReady() const { return bBindlessTextureTableAllocated; }
 	D3D12_GPU_DESCRIPTOR_HANDLE GetBindlessTextureTableGpuHandle() const { return BindlessTextureTableGpuBase; }
+	RHIBufferHandle RegisterBindlessBuffer(Buffer* buffer) override;
+	RHIBufferHandle RegisterBindlessVertexBuffer(VertexBuffer* buffer) override;
+	RHIBufferHandle RegisterBindlessIndexBuffer(IndexBuffer* buffer) override;
+	void UnregisterBindlessBuffer(Buffer* buffer) override;
+	void UnregisterBindlessVertexBuffer(VertexBuffer* buffer) override;
+	void UnregisterBindlessIndexBuffer(IndexBuffer* buffer) override;
+	RHIBufferHandle GetBindlessBufferHandle(const Buffer* buffer) const override;
+	RHIBufferHandle GetBindlessVertexBufferHandle(const VertexBuffer* buffer) const override;
+	RHIBufferHandle GetBindlessIndexBufferHandle(const IndexBuffer* buffer) const override;
+	bool IsBindlessBufferTableReady() const { return bBindlessBufferTableAllocated; }
+	D3D12_GPU_DESCRIPTOR_HANDLE GetBindlessBufferTableGpuHandle() const { return BindlessBufferTableGpuBase; }
 	std::shared_ptr<Texture> WrapNativeTexture(const Microsoft::WRL::ComPtr<ID3D12Resource>& resource);
 	std::shared_ptr<Texture> CreateTexture3D(ETextureFormat format, ETextureUsageFlags usage, EInitialResourceState initialState, int width, int height, int depth, int mipLevels) override;
 	void UploadTexture3D(Texture* texture, const void* data, uint64_t rowPitch, uint64_t slicePitch) override;

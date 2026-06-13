@@ -1035,6 +1035,14 @@ private:
 		UINT32 MetallicTextureIndex = RHI_INVALID_BINDLESS_INDEX;
 	};
 
+	struct RTGeometryRecord
+	{
+		UINT32 VertexBufferIndex = RHI_INVALID_BINDLESS_INDEX;
+		UINT32 IndexBufferIndex = RHI_INVALID_BINDLESS_INDEX;
+		UINT32 Padding0 = 0;
+		UINT32 Padding1 = 0;
+	};
+
 	PathTracingViewParamCB PathTracingViewParam;
 	shared_ptr<RTPipelineStateObject> PSO_PATH_TRACING;
 	shared_ptr<RTPipelineStateObject> PSO_PATH_TRACING_COMPACTION_TRACE;
@@ -1053,6 +1061,8 @@ private:
 	UINT32 PathTracingPointLightBufferHash = 0xFFFFFFFFu;
 	std::shared_ptr<Buffer> RTMaterialRecordBuffer;
 	uint64_t RTMaterialRecordHash = 0;
+	std::shared_ptr<Buffer> RTGeometryRecordBuffer;
+	uint64_t RTGeometryRecordHash = 0;
 	UINT PathTracingWriteIndex = 0;
 	UINT32 PathTracingAccumulatedFrames = 0;
 	UINT32 PathTracingLastDispatchSamplesPerPixel = 1;
@@ -2453,6 +2463,7 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 		RTPassBuilder& SetTextureSRV(const char* shader, const char* bindingName, Texture* texture);
 		RTPassBuilder& SetBufferSRV(const char* shader, const char* bindingName, Buffer* buffer);
 		RTPassBuilder& SetBindlessTextureTable(const char* shader, const char* bindingName);
+		RTPassBuilder& SetBindlessBufferTable(const char* shader, const char* bindingName);
 		RTPassBuilder& SetAccelerationStructure(const char* shader, const char* bindingName, const shared_ptr<RTAS>& rtas);
 		RTPassBuilder& SetSampler(const char* shader, const char* bindingName, Sampler* sampler);
 		RTPassBuilder& SetCBVValue(const char* shader, const char* bindingName, void* data);
@@ -3520,8 +3531,11 @@ private:
 	UINT32 ComputePathTracingPointLightStateHash() const;
 	bool EnsurePathTracingPointLightBuffer(UINT32 pointLightStateHash);
 	bool UsesRTBindlessMaterials() const;
+	bool UsesRTBindlessGeometry() const;
 	void BindRTBindlessMaterialSchema(RTPipelineStateObject& pso, RHIShaderStageMask materialStages);
+	void BindRTBindlessGeometrySchema(RTPipelineStateObject& pso, RHIShaderStageMask geometryStages);
 	bool EnsureRTMaterialRecordBuffer();
+	bool EnsureRTGeometryRecordBuffer();
 
 	UINT m_width = 0;
 	UINT m_height = 0;

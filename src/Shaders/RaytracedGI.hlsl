@@ -1,7 +1,5 @@
 #include "Common.hlsl"
-#if defined(CORONA_BINDLESS_MATERIALS) && CORONA_BINDLESS_MATERIALS
 #include "BindlessResources.hlsli"
-#endif
 
 RWTexture2D<float4> GIResultSH : register(u0);
 RWTexture2D<float4> GIResultColor : register(u1);
@@ -11,12 +9,16 @@ RaytracingAccelerationStructure gRtScene : register(t0);
 Texture2D DepthTex : register(t1);
 Texture2D WorldNormalTex : register(t2);
 Texture3D RayNoiseBlueNoiseSource : register(t7);
+#if !defined(CORONA_BINDLESS_GEOMETRY) || !CORONA_BINDLESS_GEOMETRY
 ByteAddressBuffer vertices : register(t3);
 ByteAddressBuffer indices : register(t4);
+#endif
 #if !defined(CORONA_BINDLESS_MATERIALS) || !CORONA_BINDLESS_MATERIALS
 Texture2D AlbedoTex : register(t5);
 #endif
+#if !defined(CORONA_BINDLESS_GEOMETRY) || !CORONA_BINDLESS_GEOMETRY
 ByteAddressBuffer InstanceProperty : register(t6);
+#endif
 
 // Must match Corona::MaxPointLights in Corona.h.
 #define MAX_POINT_LIGHTS 128
@@ -414,7 +416,7 @@ void chs(inout RayPayload payload, in BuiltInTriangleIntersectionAttributes attr
     float3 barycentrics = float3(1.0 - attribs.barycentrics.x - attribs.barycentrics.y, attribs.barycentrics.x, attribs.barycentrics.y);
     uint triangleIndex = PrimitiveIndex();
     uint instanceID = InstanceID();
-    Vertex vertex = GetSurfaceVertexAttributes(instanceID, vertices, indices, InstanceProperty, triangleIndex, barycentrics);
+    Vertex vertex = CORONA_GET_SURFACE_VERTEX_ATTRIBUTES(instanceID, triangleIndex, barycentrics);
 
     payload.position = CommonSanitizeFloat3(vertex.position, WorldRayOrigin() + WorldRayDirection() * RayTCurrent());
     float3 hitNormal = CommonSafeNormalize(vertex.normal, -WorldRayDirection());

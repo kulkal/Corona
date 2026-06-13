@@ -60,6 +60,7 @@ void Corona::InitRaytracingShadowPass()
 		TEMP_PSO_RT_SHADOW->BindCBV("global", MakeRHICBV("ViewParameter", 0, sizeof(RTShadowViewParamCB), rayGenStage));
 		TEMP_PSO_RT_SHADOW->BindSampler("global", MakeRHISampler("sampleWrap", 0, rayGenStage | anyHitStage));
 		BindRTBindlessMaterialSchema(*TEMP_PSO_RT_SHADOW, anyHitStage);
+		BindRTBindlessGeometrySchema(*TEMP_PSO_RT_SHADOW, anyHitStage);
 
 
 

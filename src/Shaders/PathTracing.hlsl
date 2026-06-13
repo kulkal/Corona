@@ -1,9 +1,7 @@
 #include "Common.hlsl"
 #include "GGX.hlsli"
 #include "PathTracingWavefront.hlsli"
-#if defined(CORONA_BINDLESS_MATERIALS) && CORONA_BINDLESS_MATERIALS
 #include "BindlessResources.hlsli"
-#endif
 
 RWTexture2D<float4> OutputColor : register(u0);
 RWTexture2D<float4> OutAlbedo : register(u1);
@@ -23,9 +21,11 @@ RWStructuredBuffer<uint> PathCompactionCounters : register(u14);
 RWStructuredBuffer<float4> PathCompactionRadiance : register(u15);
 
 RaytracingAccelerationStructure gRtScene : register(t0);
+#if !defined(CORONA_BINDLESS_GEOMETRY) || !CORONA_BINDLESS_GEOMETRY
 ByteAddressBuffer vertices : register(t1);
 ByteAddressBuffer indices : register(t2);
 ByteAddressBuffer InstanceProperty : register(t3);
+#endif
 #if !defined(CORONA_BINDLESS_MATERIALS) || !CORONA_BINDLESS_MATERIALS
 Texture2D AlbedoTex : register(t5);
 Texture2D NormalTex : register(t6);
@@ -831,7 +831,7 @@ void PathTracingClosestHit(inout PathTracingPayload payload, in BuiltInTriangleI
     
     uint triangleIndex = PrimitiveIndex();
     uint instanceID = InstanceID();
-    Vertex vertex = GetVertexAttributes(instanceID, vertices, indices, InstanceProperty, triangleIndex, barycentrics);
+    Vertex vertex = CORONA_GET_VERTEX_ATTRIBUTES(instanceID, triangleIndex, barycentrics);
     float hitDistance = RayTCurrent();
     float textureMipLevel = ComputePathTracingTextureMipLevel(instanceID, vertex, payload.direction, hitDistance);
     payload.hit = 1u;
@@ -848,7 +848,7 @@ void PathTracingClosestHit(inout PathTracingPayload payload, in BuiltInTriangleI
     float roughness = clamp(RoughnessTex.SampleLevel(sampleWrap, vertex.uv, textureMipLevel).x, 0.02f, 1.0f);
     float metallic = saturate(MetallicTex.SampleLevel(sampleWrap, vertex.uv, textureMipLevel).x);
 #endif
-    ApplyInstanceRoughnessMetallic(instanceID, InstanceProperty, roughness, metallic);
+    ApplyInstanceRoughnessMetallic(instanceID, CORONA_INSTANCE_PROPERTY, roughness, metallic);
     
     // Store debug information for primary hit (depth == 0)
     if (payload.depth == 0)
@@ -1108,10 +1108,10 @@ void PathTracingAnyHit(inout PathTracingPayload payload, in BuiltInTriangleInter
     uint triangleIndex = PrimitiveIndex();
     uint instanceID = InstanceID();
 
-    if (!IsAlphaTestedInstance(instanceID, InstanceProperty))
+    if (!IsAlphaTestedInstance(instanceID, CORONA_INSTANCE_PROPERTY))
         return;
 
-    Vertex vertex = GetVertexAttributes(instanceID, vertices, indices, InstanceProperty, triangleIndex, barycentrics);
+    Vertex vertex = CORONA_GET_VERTEX_ATTRIBUTES(instanceID, triangleIndex, barycentrics);
     float textureMipLevel = ComputePathTracingTextureMipLevel(instanceID, vertex, payload.direction, RayTCurrent());
     
     // Sample albedo alpha channel

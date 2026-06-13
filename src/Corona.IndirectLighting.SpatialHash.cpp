@@ -140,6 +140,7 @@ shared_ptr<RTPipelineStateObject> Corona::CreateRaytracingSpatialHashGIPSO(bool 
 		tempPSO->BindCBV("global", MakeRHICBV("ViewParameter", 0, sizeof(RTSpatialHashGIViewParamCB), rayGenStage));
 		tempPSO->BindSampler("global", MakeRHISampler("sampleWrap", 0, rayGenStage | closestHitStage));
 		BindRTBindlessMaterialSchema(*tempPSO, closestHitStage);
+		BindRTBindlessGeometrySchema(*tempPSO, closestHitStage);
 
 		tempPSO->AddShader("miss", RTPipelineStateObject::MISS);
 		tempPSO->AddShader("missShadow", RTPipelineStateObject::MISS);
@@ -180,6 +181,7 @@ shared_ptr<RTPipelineStateObject> Corona::CreateRaytracingSpatialHashPrimaryDeep
 	tempPSO->BindUAV("global", MakeRHIBufferUAV("CellLightMaskOut", 8, rayGenStage));
 	tempPSO->BindCBV("global", MakeRHICBV("SpatialHashGIConstant", 0, sizeof(SpatialHashGIConstant), rayGenStage));
 	tempPSO->BindCBV("global", MakeRHICBV("PrimaryDeepSeedConstant", 1, sizeof(RTSpatialHashPrimaryDeepSeedParamCB), rayGenStage));
+	BindRTBindlessGeometrySchema(*tempPSO, closestHitStage);
 
 	tempPSO->AddShader("miss", RTPipelineStateObject::MISS);
 

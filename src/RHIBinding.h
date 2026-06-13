@@ -203,6 +203,21 @@ inline RHIBindingDesc MakeRHIBufferSRV(
 	return binding;
 }
 
+inline RHIBindingDesc MakeRHIBindlessBufferSRV(
+	const std::string& name,
+	uint32_t registerIndex,
+	uint32_t registerSpace,
+	RHIShaderStageMask stages,
+	RHIBufferViewKind bufferView = RHIBufferViewKind::Raw)
+{
+	RHIBindingDesc binding = MakeRHIBufferSRV(name, registerIndex, stages, bufferView, RHI_BINDLESS_ARRAY, registerSpace);
+	binding.RuntimeArray = true;
+	binding.PartiallyBound = true;
+	binding.UpdateAfterBind = true;
+	binding.Bindless = true;
+	return binding;
+}
+
 inline RHIBindingDesc MakeRHIBufferUAV(
 	const std::string& name,
 	uint32_t registerIndex,

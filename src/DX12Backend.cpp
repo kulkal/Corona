@@ -1730,6 +1730,7 @@ shared_ptr<IndexBuffer> DX12Backend::CreateIndexBuffer(EIndexFormat Format, UINT
 	CommandList* cmd = CmdQ->AllocCmdList();
 
 	IndexBuffer* ib = new IndexBuffer;
+	ib->Owner = this;
 
 	/*stringstream ss;
 	ss << "CreateIndexBuffer : " << Size << "\n";
@@ -1798,6 +1799,7 @@ shared_ptr<VertexBuffer> DX12Backend::CreateVertexBuffer(UINT Size, UINT Stride,
 	CommandList* cmd = CmdQ->AllocCmdList();
 
 	VertexBuffer* vb = new VertexBuffer;
+	vb->Owner = this;
 	
 	/*stringstream ss;
 	ss << "CreateVertexBuffer : " << Size << "\n";
@@ -1910,6 +1912,7 @@ shared_ptr<VertexBuffer> DX12Backend::CreateRWVertexBuffer(uint32_t Size, uint32
 		return nullptr;
 
 	VertexBuffer* vb = new VertexBuffer;
+	vb->Owner = this;
 
 	D3D12_RESOURCE_DESC desc = CD3DX12_RESOURCE_DESC::Buffer(Size, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
 
@@ -2047,6 +2050,7 @@ shared_ptr<VertexBuffer> DX12Backend::CreateUploadVertexBuffer(UINT size, UINT s
 		memcpy(alloc.cpu, srcData, size);
 
 	auto* vb = new VertexBuffer;
+	vb->Owner = this;
 	vb->resource = alloc.resource; // shared with the block; block stays alive while VB lives
 	vb->view.BufferLocation = alloc.gpuVA;
 	vb->view.StrideInBytes = stride;
@@ -2071,6 +2075,7 @@ shared_ptr<IndexBuffer> DX12Backend::CreateUploadIndexBuffer(EIndexFormat format
 		memcpy(alloc.cpu, srcData, size);
 
 	auto* ib = new IndexBuffer;
+	ib->Owner = this;
 	ib->resource = alloc.resource; // shared with the block
 	ib->view.BufferLocation = alloc.gpuVA;
 	ib->view.Format = ToDXGIFormat(format);
@@ -2196,6 +2201,12 @@ DX12Backend::DX12Backend(ComPtr<ID3D12Device5> InDevice)
 			BindlessTextureTableGpuBase,
 			kMaxDX12BindlessTextureSlots);
 		bBindlessTextureTableAllocated = true;
+
+		SRVCBVDescriptorHeapShaderVisible->AllocDescriptors(
+			BindlessBufferTableCpuBase,
+			BindlessBufferTableGpuBase,
+			kMaxDX12BindlessBufferSlots);
+		bBindlessBufferTableAllocated = true;
 	}
 
 	// non shader visible(storage) CBV_SRV_UAV
@@ -2453,6 +2464,252 @@ RHITextureHandle DX12Backend::GetBindlessTextureHandle(const Texture* texture) c
 	return handle;
 }
 
+namespace
+{
+	bool IsValidCpuDescriptor(D3D12_CPU_DESCRIPTOR_HANDLE handle)
+	{
+		return handle.ptr != 0;
+	}
+
+	void WriteNullRawBufferSRV(ID3D12Device5* device, D3D12_CPU_DESCRIPTOR_HANDLE destination)
+	{
+		if (!device || !IsValidCpuDescriptor(destination))
+			return;
+
+		D3D12_SHADER_RESOURCE_VIEW_DESC nullSrvDesc = {};
+		nullSrvDesc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+		nullSrvDesc.Format = DXGI_FORMAT_R32_TYPELESS;
+		nullSrvDesc.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
+		nullSrvDesc.Buffer.StructureByteStride = 0;
+		nullSrvDesc.Buffer.FirstElement = 0;
+		nullSrvDesc.Buffer.NumElements = 1;
+		nullSrvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+		device->CreateShaderResourceView(nullptr, &nullSrvDesc, destination);
+	}
+
+	RHIBufferHandle RegisterDX12BindlessBufferDescriptor(
+		DX12Backend& owner,
+		const void* bufferPtr,
+		uint8_t resourceType,
+		RHIBufferHandle& bindlessHandle,
+		D3D12_CPU_DESCRIPTOR_HANDLE sourceCpuHandle,
+		D3D12_CPU_DESCRIPTOR_HANDLE& bindlessCpuHandle,
+		D3D12_GPU_DESCRIPTOR_HANDLE& bindlessGpuHandle)
+	{
+		if (!bufferPtr || !owner.Device || !owner.SRVCBVDescriptorHeapShaderVisible ||
+			!owner.bBindlessBufferTableAllocated || !IsValidCpuDescriptor(sourceCpuHandle))
+		{
+			return {};
+		}
+
+		{
+			std::lock_guard<std::mutex> lock(owner.BindlessBufferMutex);
+			const RHIBufferHandle existing = bindlessHandle;
+			if (existing.IsValid() &&
+				existing.Index < owner.BindlessBufferSlots.size() &&
+				owner.BindlessBufferSlots[existing.Index].Occupied &&
+				owner.BindlessBufferSlots[existing.Index].Generation == existing.Generation &&
+				owner.BindlessBufferSlots[existing.Index].BufferPtr == bufferPtr)
+			{
+				return existing;
+			}
+
+			uint32_t slotIndex = RHI_INVALID_BINDLESS_INDEX;
+			if (!owner.BindlessBufferFreeList.empty())
+			{
+				slotIndex = owner.BindlessBufferFreeList.back();
+				owner.BindlessBufferFreeList.pop_back();
+			}
+			else
+			{
+				if (owner.BindlessBufferSlots.size() >= DX12Backend::kMaxDX12BindlessBufferSlots)
+					return {};
+				slotIndex = static_cast<uint32_t>(owner.BindlessBufferSlots.size());
+				owner.BindlessBufferSlots.emplace_back();
+				DX12Backend::DX12BindlessBufferSlot& newSlot = owner.BindlessBufferSlots.back();
+				const SIZE_T slotOffset = static_cast<SIZE_T>(slotIndex) * owner.SRVCBVDescriptorHeapShaderVisible->DescriptorSize;
+				newSlot.CpuHandleSRV.ptr = owner.BindlessBufferTableCpuBase.ptr + slotOffset;
+				newSlot.GpuHandleSRV.ptr = owner.BindlessBufferTableGpuBase.ptr + slotOffset;
+			}
+
+			DX12Backend::DX12BindlessBufferSlot& slot = owner.BindlessBufferSlots[slotIndex];
+			if (slot.Generation == 0)
+				slot.Generation = 1;
+			slot.BufferPtr = bufferPtr;
+			slot.ResourceType = resourceType;
+			slot.Occupied = true;
+			bindlessHandle = { slotIndex, slot.Generation };
+			bindlessCpuHandle = slot.CpuHandleSRV;
+			bindlessGpuHandle = slot.GpuHandleSRV;
+			owner.Device->CopyDescriptorsSimple(
+				1,
+				slot.CpuHandleSRV,
+				sourceCpuHandle,
+				D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+		}
+
+		return bindlessHandle;
+	}
+
+	void UnregisterDX12BindlessBufferDescriptor(
+		DX12Backend& owner,
+		const void* bufferPtr,
+		RHIBufferHandle& bindlessHandle,
+		D3D12_CPU_DESCRIPTOR_HANDLE& bindlessCpuHandle,
+		D3D12_GPU_DESCRIPTOR_HANDLE& bindlessGpuHandle)
+	{
+		std::lock_guard<std::mutex> lock(owner.BindlessBufferMutex);
+		const RHIBufferHandle handle = bindlessHandle;
+		if (handle.IsValid() &&
+			handle.Index < owner.BindlessBufferSlots.size())
+		{
+			DX12Backend::DX12BindlessBufferSlot& slot = owner.BindlessBufferSlots[handle.Index];
+			if (slot.Occupied &&
+				slot.Generation == handle.Generation &&
+				slot.BufferPtr == bufferPtr)
+			{
+				WriteNullRawBufferSRV(owner.Device.Get(), slot.CpuHandleSRV);
+				slot.BufferPtr = nullptr;
+				slot.ResourceType = 0;
+				slot.Occupied = false;
+				++slot.Generation;
+				if (slot.Generation == 0)
+					slot.Generation = 1;
+				owner.BindlessBufferFreeList.push_back(handle.Index);
+			}
+		}
+
+		bindlessHandle = {};
+		bindlessCpuHandle = {};
+		bindlessGpuHandle = {};
+	}
+
+	RHIBufferHandle GetDX12BindlessBufferDescriptorHandle(
+		const DX12Backend& owner,
+		const void* bufferPtr,
+		const RHIBufferHandle& bindlessHandle)
+	{
+		if (!bufferPtr)
+			return {};
+
+		std::lock_guard<std::mutex> lock(owner.BindlessBufferMutex);
+		if (!bindlessHandle.IsValid() ||
+			bindlessHandle.Index >= owner.BindlessBufferSlots.size() ||
+			!owner.BindlessBufferSlots[bindlessHandle.Index].Occupied ||
+			owner.BindlessBufferSlots[bindlessHandle.Index].Generation != bindlessHandle.Generation ||
+			owner.BindlessBufferSlots[bindlessHandle.Index].BufferPtr != bufferPtr)
+		{
+			return {};
+		}
+		return bindlessHandle;
+	}
+}
+
+RHIBufferHandle DX12Backend::RegisterBindlessBuffer(Buffer* buffer)
+{
+	if (!buffer)
+		return {};
+	buffer->Owner = this;
+	return RegisterDX12BindlessBufferDescriptor(
+		*this,
+		buffer,
+		1,
+		buffer->BindlessHandle,
+		buffer->CpuHandleSRV,
+		buffer->CpuHandleBindlessSRV,
+		buffer->GpuHandleBindlessSRV);
+}
+
+RHIBufferHandle DX12Backend::RegisterBindlessVertexBuffer(VertexBuffer* buffer)
+{
+	if (!buffer)
+		return {};
+	buffer->Owner = this;
+	return RegisterDX12BindlessBufferDescriptor(
+		*this,
+		buffer,
+		2,
+		buffer->BindlessHandle,
+		buffer->CpuHandleSRV,
+		buffer->CpuHandleBindlessSRV,
+		buffer->GpuHandleBindlessSRV);
+}
+
+RHIBufferHandle DX12Backend::RegisterBindlessIndexBuffer(IndexBuffer* buffer)
+{
+	if (!buffer)
+		return {};
+	buffer->Owner = this;
+	return RegisterDX12BindlessBufferDescriptor(
+		*this,
+		buffer,
+		3,
+		buffer->BindlessHandle,
+		buffer->CpuHandleSRV,
+		buffer->CpuHandleBindlessSRV,
+		buffer->GpuHandleBindlessSRV);
+}
+
+void DX12Backend::UnregisterBindlessBuffer(Buffer* buffer)
+{
+	if (!buffer)
+		return;
+	UnregisterDX12BindlessBufferDescriptor(
+		*this,
+		buffer,
+		buffer->BindlessHandle,
+		buffer->CpuHandleBindlessSRV,
+		buffer->GpuHandleBindlessSRV);
+	buffer->Owner = nullptr;
+}
+
+void DX12Backend::UnregisterBindlessVertexBuffer(VertexBuffer* buffer)
+{
+	if (!buffer)
+		return;
+	UnregisterDX12BindlessBufferDescriptor(
+		*this,
+		buffer,
+		buffer->BindlessHandle,
+		buffer->CpuHandleBindlessSRV,
+		buffer->GpuHandleBindlessSRV);
+	buffer->Owner = nullptr;
+}
+
+void DX12Backend::UnregisterBindlessIndexBuffer(IndexBuffer* buffer)
+{
+	if (!buffer)
+		return;
+	UnregisterDX12BindlessBufferDescriptor(
+		*this,
+		buffer,
+		buffer->BindlessHandle,
+		buffer->CpuHandleBindlessSRV,
+		buffer->GpuHandleBindlessSRV);
+	buffer->Owner = nullptr;
+}
+
+RHIBufferHandle DX12Backend::GetBindlessBufferHandle(const Buffer* buffer) const
+{
+	if (!buffer)
+		return {};
+	return GetDX12BindlessBufferDescriptorHandle(*this, buffer, buffer->BindlessHandle);
+}
+
+RHIBufferHandle DX12Backend::GetBindlessVertexBufferHandle(const VertexBuffer* buffer) const
+{
+	if (!buffer)
+		return {};
+	return GetDX12BindlessBufferDescriptorHandle(*this, buffer, buffer->BindlessHandle);
+}
+
+RHIBufferHandle DX12Backend::GetBindlessIndexBufferHandle(const IndexBuffer* buffer) const
+{
+	if (!buffer)
+		return {};
+	return GetDX12BindlessBufferDescriptorHandle(*this, buffer, buffer->BindlessHandle);
+}
+
 DX12Backend::~DX12Backend()
 {
 	CmdQ->WaitGPU();
@@ -2471,6 +2728,43 @@ DX12Backend::~DX12Backend()
 			slot.Occupied = false;
 		}
 		BindlessTextureFreeList.clear();
+	}
+	{
+		std::lock_guard<std::mutex> lock(BindlessBufferMutex);
+		for (DX12BindlessBufferSlot& slot : BindlessBufferSlots)
+		{
+			if (slot.BufferPtr)
+			{
+				if (slot.ResourceType == 1)
+				{
+					Buffer* buffer = const_cast<Buffer*>(static_cast<const Buffer*>(slot.BufferPtr));
+					buffer->BindlessHandle = {};
+					buffer->CpuHandleBindlessSRV = {};
+					buffer->GpuHandleBindlessSRV = {};
+					buffer->Owner = nullptr;
+				}
+				else if (slot.ResourceType == 2)
+				{
+					VertexBuffer* buffer = const_cast<VertexBuffer*>(static_cast<const VertexBuffer*>(slot.BufferPtr));
+					buffer->BindlessHandle = {};
+					buffer->CpuHandleBindlessSRV = {};
+					buffer->GpuHandleBindlessSRV = {};
+					buffer->Owner = nullptr;
+				}
+				else if (slot.ResourceType == 3)
+				{
+					IndexBuffer* buffer = const_cast<IndexBuffer*>(static_cast<const IndexBuffer*>(slot.BufferPtr));
+					buffer->BindlessHandle = {};
+					buffer->CpuHandleBindlessSRV = {};
+					buffer->GpuHandleBindlessSRV = {};
+					buffer->Owner = nullptr;
+				}
+			}
+			slot.BufferPtr = nullptr;
+			slot.ResourceType = 0;
+			slot.Occupied = false;
+		}
+		BindlessBufferFreeList.clear();
 	}
 	if (BvhViewerD3D12)
 	{
@@ -3182,6 +3476,24 @@ void D3D12ComputePipelineStateObject::SetCBVValue(const std::string& name, void*
 	std::vector<uint8_t>& data = PendingCBVs[name];
 	data.resize(bindingIt->second.cbSize);
 	CopyConstantBufferData(data.data(), static_cast<UINT>(data.size()), pData, bindingIt->second.sourceSize);
+}
+
+Buffer::~Buffer()
+{
+	if (Owner && BindlessHandle.IsValid())
+		Owner->UnregisterBindlessBuffer(this);
+}
+
+VertexBuffer::~VertexBuffer()
+{
+	if (Owner && BindlessHandle.IsValid())
+		Owner->UnregisterBindlessVertexBuffer(this);
+}
+
+IndexBuffer::~IndexBuffer()
+{
+	if (Owner && BindlessHandle.IsValid())
+		Owner->UnregisterBindlessIndexBuffer(this);
 }
 
 Texture::~Texture()
@@ -4996,6 +5308,16 @@ void D3D12RTPipelineStateObject::BindUAV(const string& shader, const RHIBindingD
 
 void D3D12RTPipelineStateObject::BindSRV(const string& shader, const string& name, uint32_t baseRegister)
 {
+	if (shader != "global" &&
+		(name == "vertices" || name == "indices" || name == "InstanceProperty") &&
+		std::any_of(ShaderDefines.begin(), ShaderDefines.end(), [](const auto& define)
+		{
+			return define.first == "CORONA_BINDLESS_GEOMETRY" && define.second != "0";
+		}))
+	{
+		return;
+	}
+
 	if (shader == "global")
 	{
 		BindingData binding;
@@ -5024,6 +5346,16 @@ void D3D12RTPipelineStateObject::BindSRV(const string& shader, const string& nam
 
 void D3D12RTPipelineStateObject::BindSRV(const string& shader, const RHIBindingDesc& binding)
 {
+	if (shader != "global" &&
+		(binding.Name == "vertices" || binding.Name == "indices" || binding.Name == "InstanceProperty") &&
+		std::any_of(ShaderDefines.begin(), ShaderDefines.end(), [](const auto& define)
+		{
+			return define.first == "CORONA_BINDLESS_GEOMETRY" && define.second != "0";
+		}))
+	{
+		return;
+	}
+
 	BindSRV(shader, binding.Name, binding.RegisterIndex);
 	if (shader == "global")
 		GlobalBinding.back().Schema = binding;
@@ -6069,6 +6401,15 @@ bool D3D12RTPipelineStateObject::SetBindlessTextureTable(const string& shader, c
 		return false;
 
 	SetSRVHandle(shader, bindingName, Owner->GetBindlessTextureTableGpuHandle(), -1);
+	return true;
+}
+
+bool D3D12RTPipelineStateObject::SetBindlessBufferTable(const string& shader, const string& bindingName)
+{
+	if (!Owner || !Owner->IsBindlessBufferTableReady())
+		return false;
+
+	SetSRVHandle(shader, bindingName, Owner->GetBindlessBufferTableGpuHandle(), -1);
 	return true;
 }
 

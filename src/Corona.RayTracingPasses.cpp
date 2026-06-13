@@ -349,6 +349,8 @@ void Corona::FlushSceneObjectChanges()
 	if (bMobileHybridDirectOnly || bPlatformerHybridDirectOnly || !renderBackend->SupportsRayTracing())
 	{
 		RayTracingInstances.clear();
+		RTGeometryRecordHash = 0;
+		RTGeometryRecordBuffer.reset();
 		TLAS = nullptr;
 		InstancePropertyBuffer = nullptr;
 		TLASFrameResources.clear();
@@ -462,6 +464,8 @@ void Corona::UpdateRayTracingInstanceTransforms()
 			L", requestedBuildableMeshes=" + std::to_wstring(meshCount) +
 			L", builtInstancesBeforeSuspend=" + std::to_wstring(updatedInstances.size()));
 		RayTracingInstances.clear();
+		RTGeometryRecordHash = 0;
+		RTGeometryRecordBuffer.reset();
 		TLAS = nullptr;
 		bRayTracingSceneDirty = false;
 		bRayTracingTransformDirty = false;
@@ -471,6 +475,8 @@ void Corona::UpdateRayTracingInstanceTransforms()
 	if (updatedInstances.empty())
 	{
 		RayTracingInstances.clear();
+		RTGeometryRecordHash = 0;
+		RTGeometryRecordBuffer.reset();
 		TLAS = nullptr;
 		bRayTracingTransformDirty = false;
 		return;
@@ -689,6 +695,8 @@ void Corona::RebuildAccelerationStructures()
 
 	phaseStart = CpuClock::now();
 	RayTracingInstances.clear();
+	RTGeometryRecordHash = 0;
+	RTGeometryRecordBuffer.reset();
 	size_t meshCount = 0;
 	vector<Mesh*> retainedMeshes;
 	for (const SceneObject& object : RenderWorld.SceneObjects)
@@ -727,6 +735,8 @@ void Corona::RebuildAccelerationStructures()
 			L", requestedBuildableMeshes=" + std::to_wstring(meshCount) +
 			L", builtInstancesBeforeSuspend=" + std::to_wstring(RayTracingInstances.size()));
 		RayTracingInstances.clear();
+		RTGeometryRecordHash = 0;
+		RTGeometryRecordBuffer.reset();
 	}
 
 	for (auto it = RayTracingBLASCache.begin(); it != RayTracingBLASCache.end();)

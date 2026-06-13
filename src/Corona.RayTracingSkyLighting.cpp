@@ -38,6 +38,7 @@ void Corona::InitRaytracingSkyLightingPass()
 	tempPSO->BindCBV("global", MakeRHICBV("ViewParameter", 0, sizeof(RTSkyLightingViewParam), rayGenStage));
 	tempPSO->BindSampler("global", MakeRHISampler("sampleWrap", 0, rayGenStage | anyHitStage));
 	BindRTBindlessMaterialSchema(*tempPSO, anyHitStage);
+	BindRTBindlessGeometrySchema(*tempPSO, anyHitStage);
 
 	tempPSO->AddShader("miss", RTPipelineStateObject::MISS);
 

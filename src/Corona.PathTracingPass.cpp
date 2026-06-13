@@ -23,6 +23,9 @@ namespace
 {
 	constexpr uint32_t kPathTracingBindlessTextureRegisterSpace = 10;
 	constexpr uint32_t kPathTracingMaterialBufferRegisterSpace = 11;
+	constexpr uint32_t kRTBindlessGeometryBufferRegisterSpace = 12;
+	constexpr uint32_t kRTGeometryRecordBufferRegisterSpace = 13;
+	constexpr uint32_t kRTInstancePropertyBufferRegisterSpace = 14;
 
 	void HashCombinePathTracingMaterial(uint64_t& seed, uint64_t value)
 	{
@@ -37,6 +40,15 @@ bool Corona::UsesRTBindlessMaterials() const
 
 	const RenderBackendCapabilities capabilities = renderBackend->GetCapabilities();
 	return capabilities.SupportsBindlessTextures && capabilities.SupportsRuntimeDescriptorArrays;
+}
+
+bool Corona::UsesRTBindlessGeometry() const
+{
+	if (!renderBackend)
+		return false;
+
+	const RenderBackendCapabilities capabilities = renderBackend->GetCapabilities();
+	return capabilities.SupportsBindlessBuffers && capabilities.SupportsRuntimeDescriptorArrays;
 }
 
 void Corona::BindRTBindlessMaterialSchema(RTPipelineStateObject& pso, RHIShaderStageMask materialStages)
@@ -61,6 +73,40 @@ void Corona::BindRTBindlessMaterialSchema(RTPipelineStateObject& pso, RHIShaderS
 			RHIBufferViewKind::Structured,
 			1,
 			kPathTracingMaterialBufferRegisterSpace));
+}
+
+void Corona::BindRTBindlessGeometrySchema(RTPipelineStateObject& pso, RHIShaderStageMask geometryStages)
+{
+	if (!UsesRTBindlessGeometry())
+		return;
+
+	pso.SetShaderDefine("CORONA_BINDLESS_GEOMETRY", "1");
+	pso.BindSRV(
+		"global",
+		MakeRHIBindlessBufferSRV(
+			"GeometryBuffers",
+			0,
+			kRTBindlessGeometryBufferRegisterSpace,
+			geometryStages,
+			RHIBufferViewKind::Raw));
+	pso.BindSRV(
+		"global",
+		MakeRHIBufferSRV(
+			"RtGeometries",
+			0,
+			geometryStages,
+			RHIBufferViewKind::Structured,
+			1,
+			kRTGeometryRecordBufferRegisterSpace));
+	pso.BindSRV(
+		"global",
+		MakeRHIBufferSRV(
+			"RtInstanceProperties",
+			0,
+			geometryStages,
+			RHIBufferViewKind::Raw,
+			1,
+			kRTInstancePropertyBufferRegisterSpace));
 }
 
 bool Corona::EnsureRTMaterialRecordBuffer()
@@ -169,6 +215,100 @@ bool Corona::EnsureRTMaterialRecordBuffer()
 	return true;
 }
 
+bool Corona::EnsureRTGeometryRecordBuffer()
+{
+	if (!UsesRTBindlessGeometry())
+		return false;
+
+	if (!InstancePropertyBuffer)
+	{
+		RTGeometryRecordHash = 0;
+		AppendCpuRuntimeTrace(L"[RTGeometry] bindless geometry requires InstancePropertyBuffer");
+		return false;
+	}
+
+	const size_t recordCount = std::max<size_t>(RayTracingInstances.size(), 1);
+	std::vector<RTGeometryRecord> records(recordCount);
+	bool bAllBuffersRegistered = true;
+
+	auto getBindlessVertexBufferIndex = [&](VertexBuffer* buffer) -> UINT32
+	{
+		if (!buffer)
+			return RHI_INVALID_BINDLESS_INDEX;
+
+		RHIBufferHandle handle = renderBackend->RegisterBindlessVertexBuffer(buffer);
+		if (!handle.IsValid())
+			handle = renderBackend->GetBindlessVertexBufferHandle(buffer);
+		return handle.IsValid() ? handle.Index : RHI_INVALID_BINDLESS_INDEX;
+	};
+
+	auto getBindlessIndexBufferIndex = [&](IndexBuffer* buffer) -> UINT32
+	{
+		if (!buffer)
+			return RHI_INVALID_BINDLESS_INDEX;
+
+		RHIBufferHandle handle = renderBackend->RegisterBindlessIndexBuffer(buffer);
+		if (!handle.IsValid())
+			handle = renderBackend->GetBindlessIndexBufferHandle(buffer);
+		return handle.IsValid() ? handle.Index : RHI_INVALID_BINDLESS_INDEX;
+	};
+
+	for (size_t instanceIndex = 0; instanceIndex < RayTracingInstances.size(); ++instanceIndex)
+	{
+		const RTInstanceDesc& instance = RayTracingInstances[instanceIndex];
+		Mesh* mesh = instance.BottomLevelAS ? instance.BottomLevelAS->MeshPtr : nullptr;
+		if (!mesh)
+			continue;
+
+		RTGeometryRecord& record = records[instanceIndex];
+		record.VertexBufferIndex = getBindlessVertexBufferIndex(mesh->Vb.get());
+		record.IndexBufferIndex = getBindlessIndexBufferIndex(mesh->Ib.get());
+		bAllBuffersRegistered = bAllBuffersRegistered &&
+			record.VertexBufferIndex != RHI_INVALID_BINDLESS_INDEX &&
+			record.IndexBufferIndex != RHI_INVALID_BINDLESS_INDEX;
+	}
+
+	uint64_t geometryHash = 1469598103934665603ull;
+	HashCombinePathTracingMaterial(geometryHash, static_cast<uint64_t>(RayTracingInstances.size()));
+	for (const RTGeometryRecord& record : records)
+	{
+		HashCombinePathTracingMaterial(geometryHash, record.VertexBufferIndex);
+		HashCombinePathTracingMaterial(geometryHash, record.IndexBufferIndex);
+	}
+
+	if (RTGeometryRecordBuffer && RTGeometryRecordHash == geometryHash)
+		return true;
+
+	if (!bAllBuffersRegistered)
+	{
+		RTGeometryRecordHash = 0;
+		AppendCpuRuntimeTrace(L"[RTGeometry] bindless geometry buffer registration failed");
+		return false;
+	}
+
+	BufferCreateDesc desc = {};
+	desc.NumElements = static_cast<uint32_t>(records.size());
+	desc.ElementSize = sizeof(RTGeometryRecord);
+	desc.InitialState = EInitialResourceState::ShaderRead;
+	desc.InitialData = records.data();
+	desc.Shape = EBufferShape::Structured;
+	desc.bUseDefaultHeap = true;
+
+	RTGeometryRecordBuffer = renderBackend->CreateBuffer(desc);
+	if (!RTGeometryRecordBuffer)
+	{
+		RTGeometryRecordHash = 0;
+		AppendCpuRuntimeTrace(L"[RTGeometry] failed to create bindless geometry record buffer");
+		return false;
+	}
+
+	RTGeometryRecordHash = geometryHash;
+	AppendCpuRuntimeTrace(
+		L"[RTGeometry] bindless geometry records uploaded, count=" +
+		std::to_wstring(records.size()));
+	return true;
+}
+
 bool Corona::EnsurePathTracingPointLightBuffer(UINT32 pointLightStateHash)
 {
 	if (PathTracingPointLightBuffer && PathTracingPointLightBufferHash == pointLightStateHash)
@@ -215,6 +355,7 @@ void Corona::InitPathTracingPass()
 	const RHIShaderStageMask anyHitStage = ToRHIShaderStageMask(RHIShaderStage::AnyHit);
 	const RHIShaderStageMask materialStage = closestHitStage | anyHitStage;
 	BindRTBindlessMaterialSchema(*TEMP_PSO_PATH_TRACING, materialStage);
+	BindRTBindlessGeometrySchema(*TEMP_PSO_PATH_TRACING, materialStage);
 	TEMP_PSO_PATH_TRACING->BindUAV("global", MakeRHITextureUAV("OutputColor", 0, rayGenStage));
 	TEMP_PSO_PATH_TRACING->BindUAV("global", MakeRHITextureUAV("OutAlbedo", 1, rayGenStage));
 	TEMP_PSO_PATH_TRACING->BindUAV("global", MakeRHITextureUAV("OutSpecularAlbedo", 2, rayGenStage));

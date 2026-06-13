@@ -48,6 +48,7 @@ shared_ptr<RTPipelineStateObject> Corona::CreateRaytracingSimpleGIPSO(bool bUseS
 		TEMP_PSO_RT_GI->BindSampler("global", MakeRHISampler("sampleWrap", 0, rayGenStage | closestHitStage));
 		TEMP_PSO_RT_GI->BindSRV("global", MakeRHITextureSRV("RayNoiseBlueNoiseSource", 7, rayGenStage));
 		BindRTBindlessMaterialSchema(*TEMP_PSO_RT_GI, closestHitStage);
+		BindRTBindlessGeometrySchema(*TEMP_PSO_RT_GI, closestHitStage);
 
 		TEMP_PSO_RT_GI->AddShader("miss", RTPipelineStateObject::MISS);
 		TEMP_PSO_RT_GI->AddShader("missShadow", RTPipelineStateObject::MISS);

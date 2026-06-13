@@ -86,6 +86,12 @@ public:
 		(void)bindingName;
 		return false;
 	}
+	virtual bool SetBindlessBufferTable(const std::string& shader, const std::string& bindingName)
+	{
+		(void)shader;
+		(void)bindingName;
+		return false;
+	}
 	virtual void SetAccelerationStructure(const std::string& shader, const std::string& bindingName, const std::shared_ptr<RTAS>& rtas, int instanceIndex = -1) = 0;
 	virtual void SetSampler(const std::string& shader, const std::string& bindingName, Sampler* sampler, int instanceIndex = -1) = 0;
 	virtual void SetCBVValue(const std::string& shader, const std::string& bindingName, void* pData, int instanceIndex = -1) = 0;

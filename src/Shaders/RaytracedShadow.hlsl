@@ -1,7 +1,5 @@
 #include "Common.hlsl"
-#if defined(CORONA_BINDLESS_MATERIALS) && CORONA_BINDLESS_MATERIALS
 #include "BindlessResources.hlsli"
-#endif
 
 
 RWTexture2D<float4> ShadowResult : register(u0);
@@ -13,12 +11,16 @@ RWTexture2D<float> ShadowReservoirM : register(u1);
 RaytracingAccelerationStructure gRtScene : register(t0);
 Texture2D DepthTex : register(t1);
 Texture2D WorldNormalTex : register(t2);
+#if !defined(CORONA_BINDLESS_GEOMETRY) || !CORONA_BINDLESS_GEOMETRY
 ByteAddressBuffer vertices : register(t3);
 ByteAddressBuffer indices : register(t4);
+#endif
 #if !defined(CORONA_BINDLESS_MATERIALS) || !CORONA_BINDLESS_MATERIALS
 Texture2D AlbedoTex : register(t5);
 #endif
+#if !defined(CORONA_BINDLESS_GEOMETRY) || !CORONA_BINDLESS_GEOMETRY
 ByteAddressBuffer InstanceProperty : register(t6);
+#endif
 Texture2D GeoNormalTex : register(t7);
 Texture3D RayNoiseBlueNoiseSource : register(t8);
 // ReSTIR Phase 2 — previous-frame reservoir cache. .gba carries
@@ -575,13 +577,13 @@ void anyhit(inout RayPayload payload, in BuiltInTriangleIntersectionAttributes a
     uint triangleIndex = PrimitiveIndex();
     uint instanceID = InstanceID();
 
-    if (!IsAlphaTestedInstance(instanceID, InstanceProperty))
+    if (!IsAlphaTestedInstance(instanceID, CORONA_INSTANCE_PROPERTY))
     {
         AcceptHitAndEndSearch();
         return;
     }
 
-    Vertex vertex = GetVertexAttributes(instanceID, vertices, indices, InstanceProperty, triangleIndex, barycentrics);
+    Vertex vertex = CORONA_GET_VERTEX_ATTRIBUTES(instanceID, triangleIndex, barycentrics);
     float opacity = 1.0f;
 #if defined(CORONA_BINDLESS_MATERIALS) && CORONA_BINDLESS_MATERIALS
     RTMaterialRecord material = RtMaterials[instanceID];
