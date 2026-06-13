@@ -44,7 +44,8 @@ void Corona::InitRaytracingSkyLightingPass()
 	tempPSO->AddShader("anyhit", RTPipelineStateObject::ANYHIT);
 	tempPSO->BindSRV("anyhit", MakeRHIBufferSRV("vertices", 4, anyHitStage, RHIBufferViewKind::Raw));
 	tempPSO->BindSRV("anyhit", MakeRHIBufferSRV("indices", 5, anyHitStage, RHIBufferViewKind::Raw));
-	tempPSO->BindSRV("anyhit", MakeRHITextureSRV("AlbedoTex", 6, anyHitStage));
+	if (!UsesRTBindlessMaterials())
+		tempPSO->BindSRV("anyhit", MakeRHITextureSRV("AlbedoTex", 6, anyHitStage));
 	tempPSO->BindSRV("anyhit", MakeRHIBufferSRV("InstanceProperty", 7, anyHitStage, RHIBufferViewKind::Raw));
 	tempPSO->Configure(1, sizeof(float) * 4, sizeof(float) * 2);
 
@@ -104,7 +105,9 @@ void Corona::RaytraceSkyLightingPass()
 		pass.SetBindlessTextureTable("global", "MaterialTextures")
 			.SetBufferSRV("global", "RtMaterials", RTMaterialRecordBuffer.get());
 	}
-	pass.BindSceneHitPrograms();
+	RTSceneHitProgramDesc hitProgramDesc;
+	hitProgramDesc.bBindDiffuseTexture = !bUseBindlessMaterials;
+	pass.BindSceneHitPrograms(hitProgramDesc);
 	pass.Dispatch(GetRenderWidth(), GetRenderHeight());
 
 	renderBackend->TransitionTexture(SkyLightingBuffer.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);

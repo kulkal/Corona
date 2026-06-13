@@ -56,7 +56,8 @@ shared_ptr<RTPipelineStateObject> Corona::CreateRaytracingSimpleGIPSO(bool bUseS
 		TEMP_PSO_RT_GI->AddShader("chs", RTPipelineStateObject::HIT);
 		TEMP_PSO_RT_GI->BindSRV("chs", MakeRHIBufferSRV("vertices", 3, closestHitStage, RHIBufferViewKind::Raw));
 		TEMP_PSO_RT_GI->BindSRV("chs", MakeRHIBufferSRV("indices", 4, closestHitStage, RHIBufferViewKind::Raw));
-		TEMP_PSO_RT_GI->BindSRV("chs", MakeRHITextureSRV("AlbedoTex", 5, closestHitStage));
+		if (!UsesRTBindlessMaterials())
+			TEMP_PSO_RT_GI->BindSRV("chs", MakeRHITextureSRV("AlbedoTex", 5, closestHitStage));
 		TEMP_PSO_RT_GI->BindSRV("chs", MakeRHIBufferSRV("InstanceProperty", 6, closestHitStage, RHIBufferViewKind::Raw));
 		TEMP_PSO_RT_GI->Configure(1, sizeof(float) * 12, sizeof(float) * 2);
 
@@ -170,7 +171,9 @@ void Corona::RaytraceGIPass()
 		pass.SetBindlessTextureTable("global", "MaterialTextures")
 			.SetBufferSRV("global", "RtMaterials", RTMaterialRecordBuffer.get());
 	}
-	pass.BindSceneHitPrograms();
+	RTSceneHitProgramDesc hitProgramDesc;
+	hitProgramDesc.bBindDiffuseTexture = !bUseBindlessMaterials;
+	pass.BindSceneHitPrograms(hitProgramDesc);
 	pass.Dispatch(GetRenderWidth(), GetRenderHeight());
 
 	renderBackend->TransitionTexture(DiffuseGIRawAux.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);

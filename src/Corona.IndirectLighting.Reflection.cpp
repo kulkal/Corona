@@ -73,7 +73,8 @@ shared_ptr<RTPipelineStateObject> Corona::CreateRaytracingReflectionPSO(bool bUs
 	tempPSO->AddShader("chs", RTPipelineStateObject::HIT);
 	tempPSO->BindSRV("chs", MakeRHIBufferSRV("vertices", 3, closestHitStage, RHIBufferViewKind::Raw));
 	tempPSO->BindSRV("chs", MakeRHIBufferSRV("indices", 4, closestHitStage, RHIBufferViewKind::Raw));
-	tempPSO->BindSRV("chs", MakeRHITextureSRV("AlbedoTex", 5, closestHitStage));
+	if (!UsesRTBindlessMaterials())
+		tempPSO->BindSRV("chs", MakeRHITextureSRV("AlbedoTex", 5, closestHitStage));
 	tempPSO->BindSRV("chs", MakeRHIBufferSRV("InstanceProperty", 9, closestHitStage, RHIBufferViewKind::Raw));
 	tempPSO->Configure(1, sizeof(float) * 13, sizeof(float) * 2);
 
@@ -194,7 +195,9 @@ void Corona::RaytraceReflectionPass()
 		pass.SetBindlessTextureTable("global", "MaterialTextures")
 			.SetBufferSRV("global", "RtMaterials", RTMaterialRecordBuffer.get());
 	}
-	pass.BindSceneHitPrograms();
+	RTSceneHitProgramDesc hitProgramDesc;
+	hitProgramDesc.bBindDiffuseTexture = !bUseBindlessMaterials;
+	pass.BindSceneHitPrograms(hitProgramDesc);
 	pass.Dispatch(GetRenderWidth(), GetRenderHeight());
 
 	renderBackend->TransitionTexture(SpecularGIRaw.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);

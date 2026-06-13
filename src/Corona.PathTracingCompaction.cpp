@@ -91,19 +91,25 @@ void Corona::InitPathTracingCompactionPass()
 	tracePso->BindSRV("PathTracingClosestHit", MakeRHIBufferSRV("vertices", 1, closestHitStage, RHIBufferViewKind::Raw));
 	tracePso->BindSRV("PathTracingClosestHit", MakeRHIBufferSRV("indices", 2, closestHitStage, RHIBufferViewKind::Raw));
 	tracePso->BindSRV("PathTracingClosestHit", MakeRHIBufferSRV("InstanceProperty", 3, closestHitStage, RHIBufferViewKind::Raw));
-	tracePso->BindSRV("PathTracingClosestHit", MakeRHITextureSRV("AlbedoTex", 5, closestHitStage));
-	tracePso->BindSRV("PathTracingClosestHit", MakeRHITextureSRV("NormalTex", 6, closestHitStage));
-	tracePso->BindSRV("PathTracingClosestHit", MakeRHITextureSRV("RoughnessTex", 7, closestHitStage));
-	tracePso->BindSRV("PathTracingClosestHit", MakeRHITextureSRV("MetallicTex", 8, closestHitStage));
+	if (!UsesRTBindlessMaterials())
+	{
+		tracePso->BindSRV("PathTracingClosestHit", MakeRHITextureSRV("AlbedoTex", 5, closestHitStage));
+		tracePso->BindSRV("PathTracingClosestHit", MakeRHITextureSRV("NormalTex", 6, closestHitStage));
+		tracePso->BindSRV("PathTracingClosestHit", MakeRHITextureSRV("RoughnessTex", 7, closestHitStage));
+		tracePso->BindSRV("PathTracingClosestHit", MakeRHITextureSRV("MetallicTex", 8, closestHitStage));
+	}
 
 	tracePso->AddShader("PathTracingAnyHit", RTPipelineStateObject::ANYHIT);
 	tracePso->BindSRV("PathTracingAnyHit", MakeRHIBufferSRV("vertices", 1, anyHitStage, RHIBufferViewKind::Raw));
 	tracePso->BindSRV("PathTracingAnyHit", MakeRHIBufferSRV("indices", 2, anyHitStage, RHIBufferViewKind::Raw));
 	tracePso->BindSRV("PathTracingAnyHit", MakeRHIBufferSRV("InstanceProperty", 3, anyHitStage, RHIBufferViewKind::Raw));
-	tracePso->BindSRV("PathTracingAnyHit", MakeRHITextureSRV("AlbedoTex", 5, anyHitStage));
-	tracePso->BindSRV("PathTracingAnyHit", MakeRHITextureSRV("NormalTex", 6, anyHitStage));
-	tracePso->BindSRV("PathTracingAnyHit", MakeRHITextureSRV("RoughnessTex", 7, anyHitStage));
-	tracePso->BindSRV("PathTracingAnyHit", MakeRHITextureSRV("MetallicTex", 8, anyHitStage));
+	if (!UsesRTBindlessMaterials())
+	{
+		tracePso->BindSRV("PathTracingAnyHit", MakeRHITextureSRV("AlbedoTex", 5, anyHitStage));
+		tracePso->BindSRV("PathTracingAnyHit", MakeRHITextureSRV("NormalTex", 6, anyHitStage));
+		tracePso->BindSRV("PathTracingAnyHit", MakeRHITextureSRV("RoughnessTex", 7, anyHitStage));
+		tracePso->BindSRV("PathTracingAnyHit", MakeRHITextureSRV("MetallicTex", 8, anyHitStage));
+	}
 	tracePso->Configure(8, 256, sizeof(float) * 2);
 
 	const std::wstring computeShader = GetAssetFullPath(L"Shaders\\PathTracingCompactionCompute.hlsl");
@@ -396,13 +402,20 @@ bool Corona::PathTracingCompactionPass(Texture* outputColor, const PathTracingVi
 		RTSceneHitProgramDesc hitProgramDesc;
 		hitProgramDesc.bBindDiffuseTexture = false;
 		hitProgramDesc.bBindInstancePropertyBeforeDiffuse = true;
-		pass.BindSceneHitPrograms(hitProgramDesc, [&pass](RTPipelineStateObject& pso, const RTSceneHitProgramDesc& desc, Mesh& mesh, uint32_t instanceIndex)
+		if (bUseBindlessMaterials)
 		{
-			pso.AddTextureSRVToHitProgram(desc.HitGroup, pass.GetDiffuseTexture(mesh), instanceIndex);
-			pso.AddTextureSRVToHitProgram(desc.HitGroup, pass.GetNormalTexture(mesh), instanceIndex);
-			pso.AddTextureSRVToHitProgram(desc.HitGroup, pass.GetRoughnessTexture(mesh), instanceIndex);
-			pso.AddTextureSRVToHitProgram(desc.HitGroup, pass.GetMetallicTexture(mesh), instanceIndex);
-		});
+			pass.BindSceneHitPrograms(hitProgramDesc);
+		}
+		else
+		{
+			pass.BindSceneHitPrograms(hitProgramDesc, [&pass](RTPipelineStateObject& pso, const RTSceneHitProgramDesc& desc, Mesh& mesh, uint32_t instanceIndex)
+			{
+				pso.AddTextureSRVToHitProgram(desc.HitGroup, pass.GetDiffuseTexture(mesh), instanceIndex);
+				pso.AddTextureSRVToHitProgram(desc.HitGroup, pass.GetNormalTexture(mesh), instanceIndex);
+				pso.AddTextureSRVToHitProgram(desc.HitGroup, pass.GetRoughnessTexture(mesh), instanceIndex);
+				pso.AddTextureSRVToHitProgram(desc.HitGroup, pass.GetMetallicTexture(mesh), instanceIndex);
+			});
+		}
 
 		RtDispatchRaysIndirectTemplate dispatchTemplate = {};
 		const bool bCanDispatchIndirect =

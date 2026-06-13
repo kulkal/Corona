@@ -26,10 +26,12 @@ RaytracingAccelerationStructure gRtScene : register(t0);
 ByteAddressBuffer vertices : register(t1);
 ByteAddressBuffer indices : register(t2);
 ByteAddressBuffer InstanceProperty : register(t3);
+#if !defined(CORONA_BINDLESS_MATERIALS) || !CORONA_BINDLESS_MATERIALS
 Texture2D AlbedoTex : register(t5);
 Texture2D NormalTex : register(t6);
 Texture2D RoughnessTex : register(t7);
 Texture2D MetallicTex : register(t8);
+#endif
 
 // Must match Corona::MaxPathTracingPointLights in Corona.h.
 #define MAX_POINT_LIGHTS 16
@@ -101,30 +103,22 @@ static const float PATH_TRACING_RAY_BIAS = 0.5f;
 #if defined(CORONA_BINDLESS_MATERIALS) && CORONA_BINDLESS_MATERIALS
 float4 SamplePathTracingAlbedo(RTMaterialRecord material, float2 uv, float mipLevel)
 {
-    if (IsValidBindlessTextureIndex(material.AlbedoTextureIndex))
-        return MaterialTextures[NonUniformResourceIndex(material.AlbedoTextureIndex)].SampleLevel(sampleWrap, uv, mipLevel);
-    return AlbedoTex.SampleLevel(sampleWrap, uv, mipLevel);
+    return MaterialTextures[NonUniformResourceIndex(material.AlbedoTextureIndex)].SampleLevel(sampleWrap, uv, mipLevel);
 }
 
 float3 SamplePathTracingNormal(RTMaterialRecord material, float2 uv, float mipLevel)
 {
-    if (IsValidBindlessTextureIndex(material.NormalTextureIndex))
-        return MaterialTextures[NonUniformResourceIndex(material.NormalTextureIndex)].SampleLevel(sampleWrap, uv, mipLevel).xyz;
-    return NormalTex.SampleLevel(sampleWrap, uv, mipLevel).xyz;
+    return MaterialTextures[NonUniformResourceIndex(material.NormalTextureIndex)].SampleLevel(sampleWrap, uv, mipLevel).xyz;
 }
 
 float SamplePathTracingRoughness(RTMaterialRecord material, float2 uv, float mipLevel)
 {
-    if (IsValidBindlessTextureIndex(material.RoughnessTextureIndex))
-        return MaterialTextures[NonUniformResourceIndex(material.RoughnessTextureIndex)].SampleLevel(sampleWrap, uv, mipLevel).x;
-    return RoughnessTex.SampleLevel(sampleWrap, uv, mipLevel).x;
+    return MaterialTextures[NonUniformResourceIndex(material.RoughnessTextureIndex)].SampleLevel(sampleWrap, uv, mipLevel).x;
 }
 
 float SamplePathTracingMetallic(RTMaterialRecord material, float2 uv, float mipLevel)
 {
-    if (IsValidBindlessTextureIndex(material.MetallicTextureIndex))
-        return MaterialTextures[NonUniformResourceIndex(material.MetallicTextureIndex)].SampleLevel(sampleWrap, uv, mipLevel).x;
-    return MetallicTex.SampleLevel(sampleWrap, uv, mipLevel).x;
+    return MaterialTextures[NonUniformResourceIndex(material.MetallicTextureIndex)].SampleLevel(sampleWrap, uv, mipLevel).x;
 }
 #endif
 
@@ -290,10 +284,7 @@ float ComputePathTracingTextureMipLevel(uint instanceID, Vertex vertex, float3 v
     uint textureHeight = 1;
 #if defined(CORONA_BINDLESS_MATERIALS) && CORONA_BINDLESS_MATERIALS
     RTMaterialRecord material = RtMaterials[instanceID];
-    if (IsValidBindlessTextureIndex(material.AlbedoTextureIndex))
-        MaterialTextures[NonUniformResourceIndex(material.AlbedoTextureIndex)].GetDimensions(textureWidth, textureHeight);
-    else
-        AlbedoTex.GetDimensions(textureWidth, textureHeight);
+    MaterialTextures[NonUniformResourceIndex(material.AlbedoTextureIndex)].GetDimensions(textureWidth, textureHeight);
 #else
     AlbedoTex.GetDimensions(textureWidth, textureHeight);
 #endif

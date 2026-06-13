@@ -622,6 +622,7 @@ public:
 	std::shared_ptr<Texture> CreateTextureFromFile(const std::wstring& fileName, bool nonSRGB) override;
 	RHITextureHandle RegisterBindlessTexture(Texture* texture) override;
 	bool UpdateBindlessTexture(Texture* texture) override;
+	void UnregisterBindlessTexture(Texture* texture) override;
 	RHITextureHandle GetBindlessTextureHandle(const Texture* texture) const override;
 	bool IsBindlessTextureTableReady() const { return bBindlessTextureTableAllocated; }
 	D3D12_GPU_DESCRIPTOR_HANDLE GetBindlessTextureTableGpuHandle() const { return BindlessTextureTableGpuBase; }

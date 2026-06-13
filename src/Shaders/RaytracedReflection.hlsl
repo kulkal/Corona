@@ -24,7 +24,9 @@ Texture3D RayNoiseBlueNoiseSource : register(t7);
 Texture2D WorldNormalTex : register(t8);
 ByteAddressBuffer vertices : register(t3);
 ByteAddressBuffer indices : register(t4);
+#if !defined(CORONA_BINDLESS_MATERIALS) || !CORONA_BINDLESS_MATERIALS
 Texture2D AlbedoTex : register(t5);
+#endif
 ByteAddressBuffer InstanceProperty : register(t9);
 Texture2D ReflReservoirAPrev : register(t10);
 Texture2D ReflReservoirBPrev : register(t11);
@@ -775,10 +777,7 @@ void chs(inout RayPayload payload, in BuiltInTriangleIntersectionAttributes attr
 #endif
     uint w, h;
 #if defined(CORONA_BINDLESS_MATERIALS) && CORONA_BINDLESS_MATERIALS
-    if (IsValidBindlessTextureIndex(material.AlbedoTextureIndex))
-        MaterialTextures[NonUniformResourceIndex(material.AlbedoTextureIndex)].GetDimensions(w, h);
-    else
-        AlbedoTex.GetDimensions(w, h);
+    MaterialTextures[NonUniformResourceIndex(material.AlbedoTextureIndex)].GetDimensions(w, h);
 #else
     AlbedoTex.GetDimensions(w, h);
 #endif
@@ -790,10 +789,7 @@ void chs(inout RayPayload payload, in BuiltInTriangleIntersectionAttributes attr
     float NoV = 1;//dot(V, vertex.normal);
     float mipLevel = computeTextureLOD(NoV, rayConeWidth, vertex.textureLODConstant);
 #if defined(CORONA_BINDLESS_MATERIALS) && CORONA_BINDLESS_MATERIALS
-    if (IsValidBindlessTextureIndex(material.AlbedoTextureIndex))
-        payload.color = max(SpecSanitizeFloat3(MaterialTextures[NonUniformResourceIndex(material.AlbedoTextureIndex)].SampleLevel(sampleWrap, vertex.uv, mipLevel).xyz, 1.0f.xxx), 0.0f.xxx);
-    else
-        payload.color = max(SpecSanitizeFloat3(AlbedoTex.SampleLevel(sampleWrap, vertex.uv, mipLevel).xyz, 1.0f.xxx), 0.0f.xxx);
+    payload.color = max(SpecSanitizeFloat3(MaterialTextures[NonUniformResourceIndex(material.AlbedoTextureIndex)].SampleLevel(sampleWrap, vertex.uv, mipLevel).xyz, 1.0f.xxx), 0.0f.xxx);
 #else
     payload.color = max(SpecSanitizeFloat3(AlbedoTex.SampleLevel(sampleWrap, vertex.uv, mipLevel).xyz, 1.0f.xxx), 0.0f.xxx);
 #endif

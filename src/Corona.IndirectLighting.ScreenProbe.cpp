@@ -156,7 +156,8 @@ shared_ptr<RTPipelineStateObject> Corona::CreateRaytracingScreenProbeGIPSO(bool 
 		tempPSO->AddShader("chs", RTPipelineStateObject::HIT);
 		tempPSO->BindSRV("chs", MakeRHIBufferSRV("vertices", 3, closestHitStage, RHIBufferViewKind::Raw));
 		tempPSO->BindSRV("chs", MakeRHIBufferSRV("indices", 4, closestHitStage, RHIBufferViewKind::Raw));
-		tempPSO->BindSRV("chs", MakeRHITextureSRV("AlbedoTex", 5, closestHitStage));
+		if (!UsesRTBindlessMaterials())
+			tempPSO->BindSRV("chs", MakeRHITextureSRV("AlbedoTex", 5, closestHitStage));
 		tempPSO->BindSRV("chs", MakeRHIBufferSRV("InstanceProperty", 6, closestHitStage, RHIBufferViewKind::Raw));
 		tempPSO->Configure(1, sizeof(float) * 12, sizeof(float) * 2);
 		traceStep(L"Bind hit program resources");
@@ -339,7 +340,9 @@ void Corona::ScreenProbeRaytraceGIPass()
 			.SetBufferSRV("global", "RtMaterials", RTMaterialRecordBuffer.get());
 	}
 
-	pass.BindSceneHitPrograms();
+	RTSceneHitProgramDesc hitProgramDesc;
+	hitProgramDesc.bBindDiffuseTexture = !bUseBindlessMaterials;
+	pass.BindSceneHitPrograms(hitProgramDesc);
 	pass.Dispatch(probeGridWidth, probeGridHeight);
 
 	renderBackend->TransitionTexture(ScreenProbeGIRadiance[writeIndex].get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);

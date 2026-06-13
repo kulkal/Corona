@@ -11,7 +11,9 @@ Texture2D WorldNormalTex : register(t2);
 Texture3D RayNoiseBlueNoiseSource : register(t3);
 ByteAddressBuffer vertices : register(t4);
 ByteAddressBuffer indices : register(t5);
+#if !defined(CORONA_BINDLESS_MATERIALS) || !CORONA_BINDLESS_MATERIALS
 Texture2D AlbedoTex : register(t6);
+#endif
 ByteAddressBuffer InstanceProperty : register(t7);
 Texture2D GeoNormalTex : register(t8);
 
@@ -227,10 +229,7 @@ void anyhit(inout SkyPayload payload, in BuiltInTriangleIntersectionAttributes a
     float opacity = 1.0f;
 #if defined(CORONA_BINDLESS_MATERIALS) && CORONA_BINDLESS_MATERIALS
     RTMaterialRecord material = RtMaterials[instanceID];
-    if (IsValidBindlessTextureIndex(material.AlbedoTextureIndex))
-        opacity = MaterialTextures[NonUniformResourceIndex(material.AlbedoTextureIndex)].SampleLevel(sampleWrap, vertex.uv, 5).w;
-    else
-        opacity = AlbedoTex.SampleLevel(sampleWrap, vertex.uv, 5).w;
+    opacity = MaterialTextures[NonUniformResourceIndex(material.AlbedoTextureIndex)].SampleLevel(sampleWrap, vertex.uv, 5).w;
 #else
     opacity = AlbedoTex.SampleLevel(sampleWrap, vertex.uv, 5).w;
 #endif

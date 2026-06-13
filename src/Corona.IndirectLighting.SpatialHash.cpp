@@ -147,7 +147,8 @@ shared_ptr<RTPipelineStateObject> Corona::CreateRaytracingSpatialHashGIPSO(bool 
 		tempPSO->AddShader("chs", RTPipelineStateObject::HIT);
 		tempPSO->BindSRV("chs", MakeRHIBufferSRV("vertices", 5, closestHitStage, RHIBufferViewKind::Raw));
 		tempPSO->BindSRV("chs", MakeRHIBufferSRV("indices", 6, closestHitStage, RHIBufferViewKind::Raw));
-		tempPSO->BindSRV("chs", MakeRHITextureSRV("AlbedoTex", 7, closestHitStage));
+		if (!UsesRTBindlessMaterials())
+			tempPSO->BindSRV("chs", MakeRHITextureSRV("AlbedoTex", 7, closestHitStage));
 		tempPSO->BindSRV("chs", MakeRHIBufferSRV("InstanceProperty", 8, closestHitStage, RHIBufferViewKind::Raw));
 		tempPSO->Configure(1, sizeof(float) * 12, sizeof(float) * 2);
 
@@ -643,7 +644,9 @@ void Corona::SpatialHashGIPass()
 		pass.SetBindlessTextureTable("global", "MaterialTextures")
 			.SetBufferSRV("global", "RtMaterials", RTMaterialRecordBuffer.get());
 	}
-	pass.BindSceneHitPrograms();
+	RTSceneHitProgramDesc hitProgramDesc;
+	hitProgramDesc.bBindDiffuseTexture = !bUseBindlessMaterials;
+	pass.BindSceneHitPrograms(hitProgramDesc);
 	// Oct mode dispatches one ray per (probe, ray); SH mode one thread per cell.
 	const UINT32 octTraceCellBudget = std::min(
 		SpatialHashGIOctTraceCellBudget,

@@ -2332,7 +2332,8 @@ RHITextureHandle DX12Backend::RegisterBindlessTexture(Texture* texture)
 		if (existing.IsValid() &&
 			existing.Index < BindlessTextureSlots.size() &&
 			BindlessTextureSlots[existing.Index].Occupied &&
-			BindlessTextureSlots[existing.Index].Generation == existing.Generation)
+			BindlessTextureSlots[existing.Index].Generation == existing.Generation &&
+			BindlessTextureSlots[existing.Index].TexturePtr == texture)
 		{
 			return existing;
 		}
@@ -2395,6 +2396,45 @@ bool DX12Backend::UpdateBindlessTexture(Texture* texture)
 	return true;
 }
 
+void DX12Backend::UnregisterBindlessTexture(Texture* texture)
+{
+	if (!texture)
+		return;
+
+	std::lock_guard<std::mutex> lock(BindlessTextureMutex);
+	const RHITextureHandle handle = texture->BindlessHandle;
+	if (handle.IsValid() &&
+		handle.Index < BindlessTextureSlots.size())
+	{
+		DX12BindlessTextureSlot& slot = BindlessTextureSlots[handle.Index];
+		if (slot.Occupied &&
+			slot.Generation == handle.Generation &&
+			slot.TexturePtr == texture)
+		{
+			if (Device)
+			{
+				D3D12_SHADER_RESOURCE_VIEW_DESC nullSrvDesc = {};
+				nullSrvDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+				nullSrvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+				nullSrvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+				nullSrvDesc.Texture2D.MipLevels = 1;
+				Device->CreateShaderResourceView(nullptr, &nullSrvDesc, slot.CpuHandleSRV);
+			}
+			slot.TexturePtr = nullptr;
+			slot.Occupied = false;
+			++slot.Generation;
+			if (slot.Generation == 0)
+				slot.Generation = 1;
+			BindlessTextureFreeList.push_back(handle.Index);
+		}
+	}
+
+	texture->BindlessHandle = {};
+	texture->CpuHandleBindlessSRV = {};
+	texture->GpuHandleBindlessSRV = {};
+	texture->Owner = nullptr;
+}
+
 RHITextureHandle DX12Backend::GetBindlessTextureHandle(const Texture* texture) const
 {
 	if (!texture)
@@ -2416,6 +2456,22 @@ RHITextureHandle DX12Backend::GetBindlessTextureHandle(const Texture* texture) c
 DX12Backend::~DX12Backend()
 {
 	CmdQ->WaitGPU();
+	{
+		std::lock_guard<std::mutex> lock(BindlessTextureMutex);
+		for (DX12BindlessTextureSlot& slot : BindlessTextureSlots)
+		{
+			if (slot.TexturePtr)
+			{
+				slot.TexturePtr->BindlessHandle = {};
+				slot.TexturePtr->CpuHandleBindlessSRV = {};
+				slot.TexturePtr->GpuHandleBindlessSRV = {};
+				slot.TexturePtr->Owner = nullptr;
+			}
+			slot.TexturePtr = nullptr;
+			slot.Occupied = false;
+		}
+		BindlessTextureFreeList.clear();
+	}
 	if (BvhViewerD3D12)
 	{
 		CoronaBvhViewerD3D12_Shutdown(BvhViewerD3D12);
@@ -3126,6 +3182,12 @@ void D3D12ComputePipelineStateObject::SetCBVValue(const std::string& name, void*
 	std::vector<uint8_t>& data = PendingCBVs[name];
 	data.resize(bindingIt->second.cbSize);
 	CopyConstantBufferData(data.data(), static_cast<UINT>(data.size()), pData, bindingIt->second.sourceSize);
+}
+
+Texture::~Texture()
+{
+	if (Owner)
+		Owner->UnregisterBindlessTexture(this);
 }
 
 void Texture::MakeStaticSRV()

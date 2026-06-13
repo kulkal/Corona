@@ -295,6 +295,7 @@ public:
 	virtual std::shared_ptr<Texture> CreateTextureFromFile(const std::wstring& fileName, bool nonSRGB) = 0;
 	virtual RHITextureHandle RegisterBindlessTexture(Texture* texture) { (void)texture; return {}; }
 	virtual bool UpdateBindlessTexture(Texture* texture) { (void)texture; return false; }
+	virtual void UnregisterBindlessTexture(Texture* texture) { (void)texture; }
 	virtual RHITextureHandle GetBindlessTextureHandle(const Texture* texture) const { (void)texture; return {}; }
 	virtual uint32_t GetBindlessTextureIndex(const Texture* texture) const
 	{

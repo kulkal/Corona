@@ -68,7 +68,8 @@ void Corona::InitRaytracingShadowPass()
 		TEMP_PSO_RT_SHADOW->AddShader("anyhit", RTPipelineStateObject::ANYHIT);
 		TEMP_PSO_RT_SHADOW->BindSRV("anyhit", MakeRHIBufferSRV("vertices", 3, anyHitStage, RHIBufferViewKind::Raw));
 		TEMP_PSO_RT_SHADOW->BindSRV("anyhit", MakeRHIBufferSRV("indices", 4, anyHitStage, RHIBufferViewKind::Raw));
-		TEMP_PSO_RT_SHADOW->BindSRV("anyhit", MakeRHITextureSRV("AlbedoTex", 5, anyHitStage));
+		if (!UsesRTBindlessMaterials())
+			TEMP_PSO_RT_SHADOW->BindSRV("anyhit", MakeRHITextureSRV("AlbedoTex", 5, anyHitStage));
 		TEMP_PSO_RT_SHADOW->BindSRV("anyhit", MakeRHIBufferSRV("InstanceProperty", 6, anyHitStage, RHIBufferViewKind::Raw));
 		TEMP_PSO_RT_SHADOW->Configure(1, sizeof(float) * 4, sizeof(float) * 2);
 
@@ -331,7 +332,9 @@ void Corona::RaytraceShadowPass()
 		pass.SetBindlessTextureTable("global", "MaterialTextures")
 			.SetBufferSRV("global", "RtMaterials", RTMaterialRecordBuffer.get());
 	}
-	pass.BindSceneHitPrograms();
+	RTSceneHitProgramDesc hitProgramDesc;
+	hitProgramDesc.bBindDiffuseTexture = !bUseBindlessMaterials;
+	pass.BindSceneHitPrograms(hitProgramDesc);
 	pass.Dispatch(GetRenderWidth(), GetRenderHeight());
 
 	renderBackend->TransitionTexture(raygenShadowTarget, EResourceState::UnorderedAccess, EResourceState::ShaderRead);

@@ -139,6 +139,13 @@ bool Corona::EnsureRTMaterialRecordBuffer()
 	if (RTMaterialRecordBuffer && RTMaterialRecordHash == materialHash)
 		return true;
 
+	if (!bAllTexturesRegistered)
+	{
+		RTMaterialRecordHash = 0;
+		AppendCpuRuntimeTrace(L"[RTMaterial] bindless material texture registration failed");
+		return false;
+	}
+
 	BufferCreateDesc desc = {};
 	desc.NumElements = static_cast<uint32_t>(records.size());
 	desc.ElementSize = sizeof(RTMaterialRecord);
@@ -158,8 +165,7 @@ bool Corona::EnsureRTMaterialRecordBuffer()
 	RTMaterialRecordHash = materialHash;
 	AppendCpuRuntimeTrace(
 		L"[RTMaterial] bindless material records uploaded, count=" +
-		std::to_wstring(records.size()) +
-		(bAllTexturesRegistered ? L"" : L" fallback-local-textures=true"));
+		std::to_wstring(records.size()));
 	return true;
 }
 
@@ -231,19 +237,25 @@ void Corona::InitPathTracingPass()
 	TEMP_PSO_PATH_TRACING->BindSRV("PathTracingClosestHit", MakeRHIBufferSRV("vertices", 1, closestHitStage, RHIBufferViewKind::Raw));
 	TEMP_PSO_PATH_TRACING->BindSRV("PathTracingClosestHit", MakeRHIBufferSRV("indices", 2, closestHitStage, RHIBufferViewKind::Raw));
 	TEMP_PSO_PATH_TRACING->BindSRV("PathTracingClosestHit", MakeRHIBufferSRV("InstanceProperty", 3, closestHitStage, RHIBufferViewKind::Raw));
-	TEMP_PSO_PATH_TRACING->BindSRV("PathTracingClosestHit", MakeRHITextureSRV("AlbedoTex", 5, closestHitStage));
-	TEMP_PSO_PATH_TRACING->BindSRV("PathTracingClosestHit", MakeRHITextureSRV("NormalTex", 6, closestHitStage));
-	TEMP_PSO_PATH_TRACING->BindSRV("PathTracingClosestHit", MakeRHITextureSRV("RoughnessTex", 7, closestHitStage));
-	TEMP_PSO_PATH_TRACING->BindSRV("PathTracingClosestHit", MakeRHITextureSRV("MetallicTex", 8, closestHitStage));
+	if (!UsesRTBindlessMaterials())
+	{
+		TEMP_PSO_PATH_TRACING->BindSRV("PathTracingClosestHit", MakeRHITextureSRV("AlbedoTex", 5, closestHitStage));
+		TEMP_PSO_PATH_TRACING->BindSRV("PathTracingClosestHit", MakeRHITextureSRV("NormalTex", 6, closestHitStage));
+		TEMP_PSO_PATH_TRACING->BindSRV("PathTracingClosestHit", MakeRHITextureSRV("RoughnessTex", 7, closestHitStage));
+		TEMP_PSO_PATH_TRACING->BindSRV("PathTracingClosestHit", MakeRHITextureSRV("MetallicTex", 8, closestHitStage));
+	}
 
 	TEMP_PSO_PATH_TRACING->AddShader("PathTracingAnyHit", RTPipelineStateObject::ANYHIT);
 	TEMP_PSO_PATH_TRACING->BindSRV("PathTracingAnyHit", MakeRHIBufferSRV("vertices", 1, anyHitStage, RHIBufferViewKind::Raw));
 	TEMP_PSO_PATH_TRACING->BindSRV("PathTracingAnyHit", MakeRHIBufferSRV("indices", 2, anyHitStage, RHIBufferViewKind::Raw));
 	TEMP_PSO_PATH_TRACING->BindSRV("PathTracingAnyHit", MakeRHIBufferSRV("InstanceProperty", 3, anyHitStage, RHIBufferViewKind::Raw));
-	TEMP_PSO_PATH_TRACING->BindSRV("PathTracingAnyHit", MakeRHITextureSRV("AlbedoTex", 5, anyHitStage));
-	TEMP_PSO_PATH_TRACING->BindSRV("PathTracingAnyHit", MakeRHITextureSRV("NormalTex", 6, anyHitStage));
-	TEMP_PSO_PATH_TRACING->BindSRV("PathTracingAnyHit", MakeRHITextureSRV("RoughnessTex", 7, anyHitStage));
-	TEMP_PSO_PATH_TRACING->BindSRV("PathTracingAnyHit", MakeRHITextureSRV("MetallicTex", 8, anyHitStage));
+	if (!UsesRTBindlessMaterials())
+	{
+		TEMP_PSO_PATH_TRACING->BindSRV("PathTracingAnyHit", MakeRHITextureSRV("AlbedoTex", 5, anyHitStage));
+		TEMP_PSO_PATH_TRACING->BindSRV("PathTracingAnyHit", MakeRHITextureSRV("NormalTex", 6, anyHitStage));
+		TEMP_PSO_PATH_TRACING->BindSRV("PathTracingAnyHit", MakeRHITextureSRV("RoughnessTex", 7, anyHitStage));
+		TEMP_PSO_PATH_TRACING->BindSRV("PathTracingAnyHit", MakeRHITextureSRV("MetallicTex", 8, anyHitStage));
+	}
 	TEMP_PSO_PATH_TRACING->Configure(8, 256, sizeof(float) * 2);
 
 	bool bSuccess = TEMP_PSO_PATH_TRACING->InitRS("Shaders\\PathTracing.hlsl");
@@ -475,13 +487,20 @@ void Corona::PathTracingPass()
 	RTSceneHitProgramDesc hitProgramDesc;
 	hitProgramDesc.bBindDiffuseTexture = false;
 	hitProgramDesc.bBindInstancePropertyBeforeDiffuse = true;
-	pass.BindSceneHitPrograms(hitProgramDesc, [&pass](RTPipelineStateObject& pso, const RTSceneHitProgramDesc& desc, Mesh& mesh, uint32_t instanceIndex)
+	if (bUseBindlessMaterials)
 	{
-		pso.AddTextureSRVToHitProgram(desc.HitGroup, pass.GetDiffuseTexture(mesh), instanceIndex);
-		pso.AddTextureSRVToHitProgram(desc.HitGroup, pass.GetNormalTexture(mesh), instanceIndex);
-		pso.AddTextureSRVToHitProgram(desc.HitGroup, pass.GetRoughnessTexture(mesh), instanceIndex);
-		pso.AddTextureSRVToHitProgram(desc.HitGroup, pass.GetMetallicTexture(mesh), instanceIndex);
-	});
+		pass.BindSceneHitPrograms(hitProgramDesc);
+	}
+	else
+	{
+		pass.BindSceneHitPrograms(hitProgramDesc, [&pass](RTPipelineStateObject& pso, const RTSceneHitProgramDesc& desc, Mesh& mesh, uint32_t instanceIndex)
+		{
+			pso.AddTextureSRVToHitProgram(desc.HitGroup, pass.GetDiffuseTexture(mesh), instanceIndex);
+			pso.AddTextureSRVToHitProgram(desc.HitGroup, pass.GetNormalTexture(mesh), instanceIndex);
+			pso.AddTextureSRVToHitProgram(desc.HitGroup, pass.GetRoughnessTexture(mesh), instanceIndex);
+			pso.AddTextureSRVToHitProgram(desc.HitGroup, pass.GetMetallicTexture(mesh), instanceIndex);
+		});
+	}
 	pass.Dispatch(m_width, m_height);
 
 	if (PathTracingViewParam.DebugMode == 0)
