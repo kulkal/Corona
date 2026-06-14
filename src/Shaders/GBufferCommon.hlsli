@@ -30,10 +30,26 @@
 // those flags without also rewriting these bindings.
 // =====================================================================
 
-Texture2D AlbedoTex    : register(t0);
-Texture2D NormalTex    : register(t1);
-Texture2D RoughnessTex : register(t2);
-Texture2D MetallicTex  : register(t3);
+struct GBufferMaterialRecord
+{
+    uint AlbedoTextureIndex;
+    uint NormalTextureIndex;
+    uint RoughnessTextureIndex;
+    uint MetallicTextureIndex;
+};
+
+struct GBufferGeometryRecord
+{
+    uint VertexBufferIndex;
+    uint IndexBufferIndex;
+    uint VertexStride;
+    uint IndexStride;
+};
+
+Texture2D MaterialTextures[] : register(t0, space10);
+StructuredBuffer<GBufferMaterialRecord> GBufferMaterials : register(t13);
+ByteAddressBuffer GeometryBuffers[] : register(t0, space12);
+StructuredBuffer<GBufferGeometryRecord> GBufferGeometries : register(t14);
 
 SamplerState sampleWrap : register(s0);
 
@@ -80,7 +96,11 @@ cbuffer GBufferConstantBuffer : register(b0)
     // Per-mesh opt-out for the global deform sphere — set on the player
     // mesh so the shockwave doesn't carve the actor at its own center.
     uint     bExcludeFromDeformSphere;
-    uint     _GBufferCBPad;
+    uint     GBufferMaterialIndex;
+    uint     GBufferGeometryIndex;
+    uint     GBufferIndexStart;
+    int      GBufferVertexBase;
+    uint     bGBufferBindlessGeometry;
     // Wind sway. .xyz = wind direction normalized in XZ (Y typically 0),
     // .w = strength (0 disables). Composes additively with grass bend.
     float4   WindParams;
@@ -111,6 +131,63 @@ cbuffer GBufferConstantBuffer : register(b0)
     float    PG_GrassPad1;
     float    PG_GrassPad2;
 };
+
+GBufferMaterialRecord GetGBufferMaterialRecord()
+{
+    return GBufferMaterials[GBufferMaterialIndex];
+}
+
+uint ResolveGBufferTextureIndex(uint textureIndex)
+{
+    return textureIndex == 0xffffffffu ? 0u : textureIndex;
+}
+
+float4 SampleGBufferAlbedo(GBufferMaterialRecord material, float2 uv)
+{
+    return MaterialTextures[NonUniformResourceIndex(ResolveGBufferTextureIndex(material.AlbedoTextureIndex))].Sample(sampleWrap, uv);
+}
+
+float3 SampleGBufferNormal(GBufferMaterialRecord material, float2 uv)
+{
+    return MaterialTextures[NonUniformResourceIndex(ResolveGBufferTextureIndex(material.NormalTextureIndex))].Sample(sampleWrap, uv).xyz;
+}
+
+float SampleGBufferRoughness(GBufferMaterialRecord material, float2 uv)
+{
+    return MaterialTextures[NonUniformResourceIndex(ResolveGBufferTextureIndex(material.RoughnessTextureIndex))].Sample(sampleWrap, uv).x;
+}
+
+float SampleGBufferMetallic(GBufferMaterialRecord material, float2 uv)
+{
+    return MaterialTextures[NonUniformResourceIndex(ResolveGBufferTextureIndex(material.MetallicTextureIndex))].Sample(sampleWrap, uv).x;
+}
+
+uint ResolveGBufferBufferIndex(uint bufferIndex)
+{
+    return bufferIndex == 0xffffffffu ? 0u : bufferIndex;
+}
+
+uint LoadGBufferBindlessIndex(GBufferGeometryRecord geometry, uint vertexId)
+{
+    ByteAddressBuffer indexBuffer = GeometryBuffers[NonUniformResourceIndex(ResolveGBufferBufferIndex(geometry.IndexBufferIndex))];
+    uint byteOffset = (GBufferIndexStart + vertexId) * geometry.IndexStride;
+    if (geometry.IndexStride == 2u)
+    {
+        uint packed = indexBuffer.Load(byteOffset & ~3u);
+        return ((byteOffset & 2u) != 0u) ? ((packed >> 16u) & 0xffffu) : (packed & 0xffffu);
+    }
+    return indexBuffer.Load(byteOffset);
+}
+
+float3 LoadGBufferFloat3(ByteAddressBuffer buffer, uint byteOffset)
+{
+    return asfloat(buffer.Load3(byteOffset));
+}
+
+float2 LoadGBufferFloat2(ByteAddressBuffer buffer, uint byteOffset)
+{
+    return asfloat(buffer.Load2(byteOffset));
+}
 
 struct VSInput
 {
@@ -247,6 +324,26 @@ VertexObjSpace LoadVertex_Static(VSInput input)
     v.currObjTangent = input.tangent;
     v.prevObjPos     = input.position; // no per-vertex animation
     v.uv             = input.uv;
+    v.worldMatrix    = WorldMatrix;
+    v.prevWorldMatrix = WorldMatrix;
+    v.instanceId     = 0;
+    return v;
+}
+
+VertexObjSpace LoadVertex_StaticBindless(uint vertexId)
+{
+    GBufferGeometryRecord geometry = GBufferGeometries[GBufferGeometryIndex];
+    uint indexValue = LoadGBufferBindlessIndex(geometry, vertexId);
+    uint vertexIndex = uint(int(indexValue) + GBufferVertexBase);
+    ByteAddressBuffer vertexBuffer = GeometryBuffers[NonUniformResourceIndex(ResolveGBufferBufferIndex(geometry.VertexBufferIndex))];
+    uint vertexByteOffset = vertexIndex * geometry.VertexStride;
+
+    VertexObjSpace v;
+    v.currObjPos     = LoadGBufferFloat3(vertexBuffer, vertexByteOffset + 0u);
+    v.currObjNormal  = LoadGBufferFloat3(vertexBuffer, vertexByteOffset + 12u);
+    v.uv             = LoadGBufferFloat2(vertexBuffer, vertexByteOffset + 24u);
+    v.currObjTangent = LoadGBufferFloat3(vertexBuffer, vertexByteOffset + 32u);
+    v.prevObjPos     = v.currObjPos;
     v.worldMatrix    = WorldMatrix;
     v.prevWorldMatrix = WorldMatrix;
     v.instanceId     = 0;
@@ -440,6 +537,17 @@ VertexObjSpace LoadVertex_SkeletalCl(VSInput input, uint vertexId, uint instance
 VertexObjSpace LoadVertex_StaticInstanced(VSInput input, uint instanceId)
 {
     VertexObjSpace v = LoadVertex_Static(input);
+    const float4x4 instanceWorldMatrix = BuildWorldMatrixFromMat3x4Cluster(StaticInstanceTransforms[instanceId]);
+    const float4x4 worldMatrix = mul(WorldMatrix, instanceWorldMatrix);
+    v.worldMatrix = worldMatrix;
+    v.prevWorldMatrix = worldMatrix;
+    v.instanceId = instanceId;
+    return v;
+}
+
+VertexObjSpace LoadVertex_StaticInstancedBindless(uint vertexId, uint instanceId)
+{
+    VertexObjSpace v = LoadVertex_StaticBindless(vertexId);
     const float4x4 instanceWorldMatrix = BuildWorldMatrixFromMat3x4Cluster(StaticInstanceTransforms[instanceId]);
     const float4x4 worldMatrix = mul(WorldMatrix, instanceWorldMatrix);
     v.worldMatrix = worldMatrix;
@@ -733,6 +841,13 @@ PSInput VSMain(VSInput input)
     return BuildPSInput(v);
 }
 
+PSInput VSMainBindless(uint vertexId : SV_VertexID)
+{
+    VertexObjSpace v = LoadVertex_StaticBindless(vertexId);
+    v = ApplyVertexDeformations(v);
+    return BuildPSInput(v);
+}
+
 PSInput SpineVSMain(uint vertexId : SV_VertexID)
 {
     VertexObjSpace v = LoadVertex_SpineCached(vertexId);
@@ -765,6 +880,13 @@ PSInput SkeletalVsInlineVSMain(VSInput input, uint vertexId : SV_VertexID)
 PSInput StaticInstancedVSMain(VSInput input, uint instanceId : SV_InstanceID)
 {
     VertexObjSpace v = LoadVertex_StaticInstanced(input, instanceId);
+    v = ApplyVertexDeformations(v);
+    return BuildPSInput(v);
+}
+
+PSInput StaticInstancedVSMainBindless(uint vertexId : SV_VertexID, uint instanceId : SV_InstanceID)
+{
+    VertexObjSpace v = LoadVertex_StaticInstancedBindless(vertexId, instanceId);
     v = ApplyVertexDeformations(v);
     return BuildPSInput(v);
 }

@@ -1318,11 +1318,14 @@ void VulkanGraphicsPipelineHandle::Release()
 	UniformBufferMapped = nullptr;
 	DescriptorPool = VK_NULL_HANDLE;
 	DescriptorSetLayout = VK_NULL_HANDLE;
+	DescriptorSetLayouts.clear();
 	Pipeline = VK_NULL_HANDLE;
 	CompatibleRenderPass = VK_NULL_HANDLE;
 	Layout = VK_NULL_HANDLE;
 	VertexShaderModule = VK_NULL_HANDLE;
 	FragmentShaderModule = VK_NULL_HANDLE;
+	bUsesBindlessTextureTable = false;
+	bUsesBindlessBufferTable = false;
 	for (auto& bindGroup : BoundBindGroups)
 		bindGroup.reset();
 	Owner = nullptr;
@@ -3178,10 +3181,18 @@ void VulkanBackend::ReleaseBufferAllocation(Buffer* buffer)
 	}
 	else if (!allocation.PoolBlock && Device != VK_NULL_HANDLE)
 	{
-		if (allocation.Buffer != VK_NULL_HANDLE)
-			vkDestroyBuffer(Device, allocation.Buffer, nullptr);
-		if (allocation.Memory != VK_NULL_HANDLE)
-			vkFreeMemory(Device, allocation.Memory, nullptr);
+		if (!FrameContexts.empty())
+		{
+			const uint32_t frameIndex = ActiveFrameContextIndex < FrameContexts.size() ? ActiveFrameContextIndex : 0u;
+			FrameContexts[frameIndex].BuffersToDestroy.push_back({ allocation.Buffer, allocation.Memory });
+		}
+		else
+		{
+			if (allocation.Buffer != VK_NULL_HANDLE)
+				vkDestroyBuffer(Device, allocation.Buffer, nullptr);
+			if (allocation.Memory != VK_NULL_HANDLE)
+				vkFreeMemory(Device, allocation.Memory, nullptr);
+		}
 	}
 	BufferAllocations.erase(it);
 }
@@ -3198,10 +3209,18 @@ void VulkanBackend::ReleaseVertexBufferAllocation(VertexBuffer* vertexBuffer)
 
 	if (!it->second.PoolBlock && Device != VK_NULL_HANDLE)
 	{
-		if (it->second.Buffer != VK_NULL_HANDLE)
-			vkDestroyBuffer(Device, it->second.Buffer, nullptr);
-		if (it->second.Memory != VK_NULL_HANDLE)
-			vkFreeMemory(Device, it->second.Memory, nullptr);
+		if (!FrameContexts.empty())
+		{
+			const uint32_t frameIndex = ActiveFrameContextIndex < FrameContexts.size() ? ActiveFrameContextIndex : 0u;
+			FrameContexts[frameIndex].BuffersToDestroy.push_back({ it->second.Buffer, it->second.Memory });
+		}
+		else
+		{
+			if (it->second.Buffer != VK_NULL_HANDLE)
+				vkDestroyBuffer(Device, it->second.Buffer, nullptr);
+			if (it->second.Memory != VK_NULL_HANDLE)
+				vkFreeMemory(Device, it->second.Memory, nullptr);
+		}
 	}
 	VertexBufferAllocations.erase(it);
 }
@@ -3218,10 +3237,18 @@ void VulkanBackend::ReleaseIndexBufferAllocation(IndexBuffer* indexBuffer)
 
 	if (!it->second.PoolBlock && Device != VK_NULL_HANDLE)
 	{
-		if (it->second.Buffer != VK_NULL_HANDLE)
-			vkDestroyBuffer(Device, it->second.Buffer, nullptr);
-		if (it->second.Memory != VK_NULL_HANDLE)
-			vkFreeMemory(Device, it->second.Memory, nullptr);
+		if (!FrameContexts.empty())
+		{
+			const uint32_t frameIndex = ActiveFrameContextIndex < FrameContexts.size() ? ActiveFrameContextIndex : 0u;
+			FrameContexts[frameIndex].BuffersToDestroy.push_back({ it->second.Buffer, it->second.Memory });
+		}
+		else
+		{
+			if (it->second.Buffer != VK_NULL_HANDLE)
+				vkDestroyBuffer(Device, it->second.Buffer, nullptr);
+			if (it->second.Memory != VK_NULL_HANDLE)
+				vkFreeMemory(Device, it->second.Memory, nullptr);
+		}
 	}
 	IndexBufferAllocations.erase(it);
 }
@@ -3675,6 +3702,15 @@ void VulkanBackend::DestroyFrameContexts()
 		}
 		frame.FramebuffersToDestroy.clear();
 
+		for (const VulkanFrameContext::DeferredBufferDestroy& bufferDestroy : frame.BuffersToDestroy)
+		{
+			if (bufferDestroy.Buffer != VK_NULL_HANDLE)
+				vkDestroyBuffer(Device, bufferDestroy.Buffer, nullptr);
+			if (bufferDestroy.Memory != VK_NULL_HANDLE)
+				vkFreeMemory(Device, bufferDestroy.Memory, nullptr);
+		}
+		frame.BuffersToDestroy.clear();
+
 		if (frame.CommandBuffer != VK_NULL_HANDLE && CommandPool != VK_NULL_HANDLE)
 			vkFreeCommandBuffers(Device, CommandPool, 1, &frame.CommandBuffer);
 		if (frame.ImageAvailableSemaphore != VK_NULL_HANDLE)
@@ -3885,11 +3921,16 @@ bool VulkanBackend::InitializeBindlessDescriptorTables()
 		VK_SHADER_STAGE_MISS_BIT_KHR |
 		VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR |
 		VK_SHADER_STAGE_ANY_HIT_BIT_KHR;
+	const VkShaderStageFlags bindlessStageFlags =
+		rtStageFlags |
+		VK_SHADER_STAGE_VERTEX_BIT |
+		VK_SHADER_STAGE_FRAGMENT_BIT |
+		VK_SHADER_STAGE_COMPUTE_BIT;
 
 	bBindlessTextureTableReady = createRuntimeArraySet(
 		VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
 		MaxVulkanBindlessTextureSlots,
-		rtStageFlags,
+		bindlessStageFlags,
 		BindlessTextureDescriptorSetLayout,
 		BindlessTextureDescriptorPool,
 		BindlessTextureDescriptorSet);
@@ -3897,7 +3938,7 @@ bool VulkanBackend::InitializeBindlessDescriptorTables()
 	bBindlessBufferTableReady = createRuntimeArraySet(
 		VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
 		MaxVulkanBindlessBufferSlots,
-		rtStageFlags,
+		bindlessStageFlags,
 		BindlessBufferDescriptorSetLayout,
 		BindlessBufferDescriptorPool,
 		BindlessBufferDescriptorSet);
@@ -4030,6 +4071,15 @@ void VulkanBackend::BeginFrame()
 			vkDestroyFramebuffer(Device, framebuffer, nullptr);
 	}
 	frame.FramebuffersToDestroy.clear();
+
+	for (const VulkanFrameContext::DeferredBufferDestroy& bufferDestroy : frame.BuffersToDestroy)
+	{
+		if (bufferDestroy.Buffer != VK_NULL_HANDLE)
+			vkDestroyBuffer(Device, bufferDestroy.Buffer, nullptr);
+		if (bufferDestroy.Memory != VK_NULL_HANDLE)
+			vkFreeMemory(Device, bufferDestroy.Memory, nullptr);
+	}
+	frame.BuffersToDestroy.clear();
 
 	uint32_t imageIndex = 0;
 	AppendVulkanRuntimeTraceBackend(L"[VulkanBackend::BeginFrame] before vkAcquireNextImageKHR");
@@ -6235,6 +6285,7 @@ std::shared_ptr<Buffer> VulkanBackend::CreateSuballocatedStructuredBuffer(const 
 	{
 		return nullptr;
 	}
+	RetirePersistentStructuredBufferUploads(true);
 	allocation.Stride = desc.ElementSize;
 
 	auto buffer = CreateTrackedBufferHandle();
@@ -6686,7 +6737,7 @@ std::shared_ptr<VertexBuffer> VulkanBackend::CreateUploadVertexBuffer(uint32_t s
 	return nullptr;
 #else
 	VulkanBufferAllocation allocation{};
-	const VkDeviceSize align = stride > 0 ? stride : 4;
+	const VkDeviceSize align = std::max<VkDeviceSize>(stride > 0 ? stride : 4, StorageBufferAlignment);
 	if (!AllocateUploadBufferRange(size, align, srcData, allocation))
 		return nullptr;
 
@@ -6713,7 +6764,7 @@ std::shared_ptr<IndexBuffer> VulkanBackend::CreateUploadIndexBuffer(EIndexFormat
 	return nullptr;
 #else
 	VulkanBufferAllocation allocation{};
-	const VkDeviceSize align = format == EIndexFormat::U16 ? 2u : 4u;
+	const VkDeviceSize align = std::max<VkDeviceSize>(format == EIndexFormat::U16 ? 2u : 4u, StorageBufferAlignment);
 	if (!AllocateUploadBufferRange(size, align, srcData, allocation))
 		return nullptr;
 
@@ -8789,6 +8840,31 @@ void VulkanBackend::BindGraphicsPipelineForDraw(VulkanGraphicsPipelineHandle* pi
 		&descriptorSet,
 		0,
 		nullptr);
+
+	if (pipeline->bUsesBindlessTextureTable && BindlessTextureDescriptorSet != VK_NULL_HANDLE)
+	{
+		vkCmdBindDescriptorSets(
+			ActiveCommandBuffer,
+			VK_PIPELINE_BIND_POINT_GRAPHICS,
+			pipeline->Layout,
+			kVulkanBindlessTextureDescriptorSet,
+			1,
+			&BindlessTextureDescriptorSet,
+			0,
+			nullptr);
+	}
+	if (pipeline->bUsesBindlessBufferTable && BindlessBufferDescriptorSet != VK_NULL_HANDLE)
+	{
+		vkCmdBindDescriptorSets(
+			ActiveCommandBuffer,
+			VK_PIPELINE_BIND_POINT_GRAPHICS,
+			pipeline->Layout,
+			kVulkanBindlessBufferDescriptorSet,
+			1,
+			&BindlessBufferDescriptorSet,
+			0,
+			nullptr);
+	}
 }
 #endif
 void VulkanBackend::DrawFullscreenQuad(VertexBuffer* vertexBuffer)
@@ -9062,14 +9138,20 @@ void VulkanBackend::BindMeshBuffers(VertexBuffer* vertexBuffer, IndexBuffer* ind
 		BoundVertexBuffer = vbIt->second.Buffer;
 		vkCmdBindVertexBuffers(ActiveCommandBuffer, 0, 1, &BoundVertexBuffer, vbOffsets);
 	}
+	else
+	{
+		BoundVertexBuffer = VK_NULL_HANDLE;
+	}
 	static bool bLoggedFirstMeshBufferBind = false;
 	if (!bLoggedFirstMeshBufferBind)
 	{
+		const uint32_t vbSize = vertexBuffer ? vbIt->second.SizeInBytes : 0u;
+		const uint32_t vbStride = vertexBuffer ? vbIt->second.Stride : 0u;
 		AppendVulkanRuntimeTraceBackend(
 			L"[VulkanBackend::BindMeshBuffers] first bind vbSize=" +
-			std::to_wstring(vbIt->second.SizeInBytes) +
+			std::to_wstring(vbSize) +
 			L", vbStride=" +
-			std::to_wstring(vbIt->second.Stride) +
+			std::to_wstring(vbStride) +
 			L", ibSize=" +
 			std::to_wstring(ibIt->second.SizeInBytes) +
 			L", ibStride=" +
@@ -10296,6 +10378,15 @@ std::shared_ptr<GraphicsPipelineHandle> VulkanBackend::CreateGraphicsPipeline(co
 	{
 		for (const RHIBindingDesc& binding : desc.PipelineLayout.Bindings)
 		{
+			if (binding.Bindless)
+			{
+				if (binding.ResourceKind == RHIResourceKind::Texture)
+					handle->bUsesBindlessTextureTable = true;
+				else if (binding.ResourceKind == RHIResourceKind::Buffer)
+					handle->bUsesBindlessBufferTable = true;
+				continue;
+			}
+
 			const VkDescriptorType descriptorType = ToVulkanDescriptorType(binding, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE);
 			const uint32_t descriptorCount = RHILegacyDescriptorCount(binding);
 			const RHIShaderStageMask graphicsStages =
@@ -10369,7 +10460,36 @@ std::shared_ptr<GraphicsPipelineHandle> VulkanBackend::CreateGraphicsPipeline(co
 
 	VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
 	pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-	if (handle->DescriptorSetLayout != VK_NULL_HANDLE)
+	if (handle->bUsesBindlessTextureTable || handle->bUsesBindlessBufferTable)
+	{
+		uint32_t maxDescriptorSet = 0;
+		if (handle->bUsesBindlessTextureTable)
+		{
+			if (!bBindlessTextureTableReady || BindlessTextureDescriptorSetLayout == VK_NULL_HANDLE)
+				throw std::runtime_error("Vulkan graphics bindless texture table is not initialized.");
+			maxDescriptorSet = (std::max)(maxDescriptorSet, kVulkanBindlessTextureDescriptorSet);
+		}
+		if (handle->bUsesBindlessBufferTable)
+		{
+			if (!bBindlessBufferTableReady || BindlessBufferDescriptorSetLayout == VK_NULL_HANDLE)
+				throw std::runtime_error("Vulkan graphics bindless buffer table is not initialized.");
+			maxDescriptorSet = (std::max)(maxDescriptorSet, kVulkanBindlessBufferDescriptorSet);
+		}
+		if (maxDescriptorSet > 0 && EmptyDescriptorSetLayout == VK_NULL_HANDLE)
+			throw std::runtime_error("Vulkan graphics bindless pipeline requires empty descriptor set layout.");
+
+		handle->DescriptorSetLayouts.assign(static_cast<size_t>(maxDescriptorSet) + 1, EmptyDescriptorSetLayout);
+		if (handle->DescriptorSetLayout != VK_NULL_HANDLE)
+			handle->DescriptorSetLayouts[0] = handle->DescriptorSetLayout;
+		if (handle->bUsesBindlessTextureTable)
+			handle->DescriptorSetLayouts[kVulkanBindlessTextureDescriptorSet] = BindlessTextureDescriptorSetLayout;
+		if (handle->bUsesBindlessBufferTable)
+			handle->DescriptorSetLayouts[kVulkanBindlessBufferDescriptorSet] = BindlessBufferDescriptorSetLayout;
+
+		pipelineLayoutInfo.setLayoutCount = static_cast<uint32_t>(handle->DescriptorSetLayouts.size());
+		pipelineLayoutInfo.pSetLayouts = handle->DescriptorSetLayouts.data();
+	}
+	else if (handle->DescriptorSetLayout != VK_NULL_HANDLE)
 	{
 		pipelineLayoutInfo.setLayoutCount = 1;
 		pipelineLayoutInfo.pSetLayouts = &handle->DescriptorSetLayout;

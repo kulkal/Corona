@@ -261,6 +261,7 @@ public:
 		uint32_t IndexCount = 0;
 		uint32_t VertexBase = 0;
 		uint32_t VertexCount = 0;
+		uint32_t GBufferMaterialIndex = 0;
 	};
 
 	bool bTransparent = false;
@@ -269,6 +270,7 @@ public:
 	uint32_t NumVertices = 0;
 
 	uint32_t VertexStride = 0;
+	uint32_t GBufferGeometryIndex = 0;
 
 	EIndexFormat IndexFormat = EIndexFormat::U32;
 
@@ -369,4 +371,32 @@ public:
 	// "Re-import" action that invalidates the on-disk cmesh cache.
 	// Empty for procedural meshes (boxes, spheres, grass).
 	std::wstring SourceFilePath;
+
+	uint64_t GBufferMaterialRecordHash = 0;
+	uint64_t GBufferMaterialDefaultsHash = 0;
+	uint64_t GBufferMaterialRecordTopologyHash = 0;
+	uint32_t GBufferMaterialRecordMeshCount = 0;
+	uint32_t GBufferMaterialRecordDrawCount = 0;
+	const IRenderBackend* GBufferMaterialRecordBackend = nullptr;
+	bool bGBufferMaterialRecordCacheValid = false;
+	std::shared_ptr<Buffer> GBufferMaterialRecordBuffer;
+	uint64_t GBufferGeometryRecordHash = 0;
+	uint64_t GBufferGeometryRecordTopologyHash = 0;
+	uint32_t GBufferGeometryRecordMeshCount = 0;
+	uint32_t GBufferGeometryRecordDrawCount = 0;
+	const IRenderBackend* GBufferGeometryRecordBackend = nullptr;
+	bool bGBufferGeometryRecordCacheValid = false;
+	bool bGBufferMaxDrawIndexCountValid = false;
+	uint32_t GBufferMaxDrawIndexCount = 0;
+	std::shared_ptr<Buffer> GBufferGeometryRecordBuffer;
+
+	struct GBufferResourceBindGroupCacheEntry
+	{
+		GraphicsPipelineHandle* Pipeline = nullptr;
+		Sampler* Sampler = nullptr;
+		Buffer* MaterialBuffer = nullptr;
+		Buffer* GeometryBuffer = nullptr;
+		std::shared_ptr<GraphicsBindGroupHandle> BindGroup;
+	};
+	std::vector<GBufferResourceBindGroupCacheEntry> CachedGBufferResourceBindGroups;
 };

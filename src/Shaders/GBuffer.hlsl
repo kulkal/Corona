@@ -10,7 +10,7 @@
 #define GBUFFER_HAS_CLUSTER
 #include "GBufferCommon.hlsli"
 
-float3 CalcPerPixelNormal(float2 vTexcoord, float3 vVertNormal, float3 vVertTangent)
+float3 CalcPerPixelNormal(GBufferMaterialRecord material, float2 vTexcoord, float3 vVertNormal, float3 vVertTangent)
 {
     float normalLengthSq = dot(vVertNormal, vVertNormal);
     if (normalLengthSq < 1e-8f)
@@ -33,7 +33,7 @@ float3 CalcPerPixelNormal(float2 vTexcoord, float3 vVertNormal, float3 vVertTang
     float3x3 TBN = (float3x3(vVertTangent, vVertBinormal, vVertNormal));
 
     // Compute per-pixel normal. Reconstruct Z from XY so BC5 normal maps work.
-    float3 normalSample = (float3) NormalTex.Sample(sampleWrap, vTexcoord);
+    float3 normalSample = SampleGBufferNormal(material, vTexcoord);
     float2 normalXY = 2.0f * normalSample.xy - 1.0f;
     float3 vBumpNormal = float3(normalXY, sqrt(saturate(1.0f - dot(normalXY, normalXY))));
 
@@ -72,14 +72,15 @@ PS_OUTPUT PSMain(PSInput input)
 
     velocity.xy /= RTSize.xy;
 
-    float4 Albedo    = AlbedoTex.Sample(sampleWrap, input.uv) * BaseColorFactor;
-    float  Roughness = RoughnessTex.Sample(sampleWrap, input.uv).x;
-    float  Metallic  = MetallicTex.Sample(sampleWrap, input.uv).x;
+    GBufferMaterialRecord material = GetGBufferMaterialRecord();
+    float4 Albedo    = SampleGBufferAlbedo(material, input.uv) * BaseColorFactor;
+    float  Roughness = SampleGBufferRoughness(material, input.uv);
+    float  Metallic  = SampleGBufferMetallic(material, input.uv);
 
     if (Albedo.w < 0.1)
         discard;
 
-    float3 WorldNormal = CalcPerPixelNormal(input.uv, input.normal, input.tangent);
+    float3 WorldNormal = CalcPerPixelNormal(material, input.uv, input.normal, input.tangent);
     float3 GeomNormal  = CommonSafeNormalize(input.normal, float3(0.0f, 1.0f, 0.0f));
     if (bTwoSidedLighting != 0)
     {

@@ -372,7 +372,11 @@ private:
 		// Set to 1 on meshes you don't want to be carved by the shockwave
 		// — e.g. the player avatar that sits at the sphere center.
 		UINT32 bExcludeFromDeformSphere = 0;
-		UINT32 _GBufferCBPad = 0;
+		UINT32 GBufferMaterialIndex = 0;
+		UINT32 GBufferGeometryIndex = 0;
+		UINT32 GBufferIndexStart = 0;
+		INT32 GBufferVertexBase = 0;
+		UINT32 bGBufferBindlessGeometry = 0;
 		// WindParams: .xyz = wind direction normalized in XZ (Y typically 0),
 		// .w = strength (0 disables wind sway).
 		glm::vec4 WindParams = glm::vec4(0.0f);
@@ -409,10 +413,12 @@ private:
 	};
 
 	std::shared_ptr<GraphicsPipelineHandle> GBufferGraphicsPipeline;
+	std::shared_ptr<GraphicsPipelineHandle> GBufferBindlessGeometryGraphicsPipeline;
 	// Desktop static-mesh instancing path. Draws repeated map-spawned
 	// SceneObjects that share the same Scene/material override as
 	// DrawIndexedInstanced, with per-instance world matrices in t12.
 	std::shared_ptr<GraphicsPipelineHandle> StaticInstancedGBufferGraphicsPipeline;
+	std::shared_ptr<GraphicsPipelineHandle> StaticInstancedBindlessGBufferGraphicsPipeline;
 	// Vertex-pulling procedural grass PSO. Empty IA (no VB/IB), reads
 	// SV_InstanceID / SV_VertexID, samples GBufferConstantBuffer (b0) for
 	// world matrix + wind/bend + PG_* fields.
@@ -421,6 +427,8 @@ private:
 	// the backend doesn't expose non-indexed instanced draw, so we bind
 	// this trivial IB and let SV_VertexID equal the index value.
 	std::shared_ptr<IndexBuffer> ProceduralGrassSequentialIb;
+	std::shared_ptr<IndexBuffer> GBufferSequentialIb;
+	uint32_t GBufferSequentialIbCapacity = 0;
 	std::shared_ptr<GraphicsPipelineHandle> CpuSpineGBufferGraphicsPipeline;
 	std::shared_ptr<GraphicsPipelineHandle> SpineGBufferGraphicsPipeline;
 	// Spine VS-inline path: skinning math executes in the vertex shader,

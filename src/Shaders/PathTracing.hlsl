@@ -502,8 +502,9 @@ void PathTracingRayGen()
                                 if (ProjectToScreenUVChecked(guidePayload.debugWorldPos, UnjitteredViewProjMatrix, specCurrentUV) &&
                                     ProjectToScreenUVChecked(guidePayload.debugWorldPos, PrevUnjitteredViewProjMatrix, specPrevUV))
                                 {
-                                    float2 candidateMotionVector = (specPrevUV - specCurrentUV) * float2(launchDim.xy) * SpecularMotionVectorScale;
-                                    if (all(abs(candidateMotionVector) <= float2(launchDim.xy)))
+                                    float2 candidateMotionVector = (specPrevUV - specCurrentUV) * SpecularMotionVectorScale;
+                                    float maxNormalizedMotion = max(1.0f, abs(SpecularMotionVectorScale));
+                                    if (all(abs(candidateMotionVector) <= float2(maxNormalizedMotion, maxNormalizedMotion)))
                                         specularMotionVector = candidateMotionVector;
                                 }
                             }
@@ -735,9 +736,9 @@ void PathTracingCompactionRayGen()
                             ProjectToScreenUVChecked(guidePayload.debugWorldPos, PrevUnjitteredViewProjMatrix, specPrevUV))
                         {
                             float2 candidateMotionVector = (specPrevUV - specCurrentUV) *
-                                float2(PathCompactionRenderWidth, PathCompactionRenderHeight) *
                                 SpecularMotionVectorScale;
-                            if (all(abs(candidateMotionVector) <= float2(PathCompactionRenderWidth, PathCompactionRenderHeight)))
+                            float maxNormalizedMotion = max(1.0f, abs(SpecularMotionVectorScale));
+                            if (all(abs(candidateMotionVector) <= float2(maxNormalizedMotion, maxNormalizedMotion)))
                                 specularMotionVector = candidateMotionVector;
                         }
                     }

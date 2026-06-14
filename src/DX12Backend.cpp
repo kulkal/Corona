@@ -327,6 +327,67 @@ namespace
 		}
 	}
 
+	std::wstring DredName(const wchar_t* value)
+	{
+		return value && value[0] ? std::wstring(value) : L"<unnamed>";
+	}
+
+	void AppendD3D12DredAllocationList(const D3D12_DRED_ALLOCATION_NODE* head, const wchar_t* label)
+	{
+		UINT logged = 0;
+		for (const D3D12_DRED_ALLOCATION_NODE* node = head; node && logged < 8; node = node->pNext, ++logged)
+		{
+			AppendCpuRuntimeTrace(
+				L"[D3D12DRED] " + std::wstring(label) +
+				L" type=" + std::to_wstring(static_cast<UINT>(node->AllocationType)) +
+				L", name=\"" + DredName(node->ObjectNameW) + L"\"");
+		}
+	}
+
+	void AppendD3D12DeviceRemovedData(ID3D12Device* device, const std::wstring& context)
+	{
+		if (!device)
+			return;
+
+		ComPtr<ID3D12DeviceRemovedExtendedData> dred;
+		if (FAILED(device->QueryInterface(IID_PPV_ARGS(&dred))) || !dred)
+			return;
+
+		AppendCpuRuntimeTrace(L"[D3D12DRED] context=\"" + context + L"\"");
+
+		D3D12_DRED_AUTO_BREADCRUMBS_OUTPUT breadcrumbs{};
+		if (SUCCEEDED(dred->GetAutoBreadcrumbsOutput(&breadcrumbs)))
+		{
+			UINT logged = 0;
+			for (const D3D12_AUTO_BREADCRUMB_NODE* node = breadcrumbs.pHeadAutoBreadcrumbNode;
+				node && logged < 8;
+				node = node->pNext, ++logged)
+			{
+				const UINT last = node->pLastBreadcrumbValue ? *node->pLastBreadcrumbValue : 0;
+				const UINT lastOp =
+					(node->pCommandHistory && node->BreadcrumbCount > 0 && last < node->BreadcrumbCount) ?
+					static_cast<UINT>(node->pCommandHistory[last]) :
+					0;
+				AppendCpuRuntimeTrace(
+					L"[D3D12DRED] breadcrumb cmdList=\"" + DredName(node->pCommandListDebugNameW) +
+					L"\", queue=\"" + DredName(node->pCommandQueueDebugNameW) +
+					L"\", count=" + std::to_wstring(node->BreadcrumbCount) +
+					L", last=" + std::to_wstring(last) +
+					L", lastOp=" + std::to_wstring(lastOp));
+			}
+		}
+
+		D3D12_DRED_PAGE_FAULT_OUTPUT pageFault{};
+		if (SUCCEEDED(dred->GetPageFaultAllocationOutput(&pageFault)))
+		{
+			std::wstringstream stream;
+			stream << L"[D3D12DRED] pageFaultVA=0x" << std::hex << std::uppercase << pageFault.PageFaultVA;
+			AppendCpuRuntimeTrace(stream.str());
+			AppendD3D12DredAllocationList(pageFault.pHeadExistingAllocationNode, L"existingAllocation");
+			AppendD3D12DredAllocationList(pageFault.pHeadRecentFreedAllocationNode, L"recentFreedAllocation");
+		}
+	}
+
 	std::wstring ShaderDebugStem(const std::wstring& shaderPath)
 	{
 		if (shaderPath.empty())
@@ -767,6 +828,7 @@ void DX12Backend::EndFrame()
 			L"[DX12Backend][Present] failed hr=" + FormatHexHRESULT(presentHr) +
 			L", deviceRemovedReason=" + FormatHexHRESULT(deviceRemovedReason));
 		AppendD3D12InfoQueueMessages(Device.Get(), L"DX12Backend::EndFrame Present");
+		AppendD3D12DeviceRemovedData(Device.Get(), L"DX12Backend::EndFrame Present");
 	}
 #if USE_AFTERMATH
 	ThrowIfFailed(presentHr, activeAftermathContext ? &activeAftermathContext : nullptr);
@@ -3802,6 +3864,39 @@ void PipelineStateObject::Apply(ID3D12GraphicsCommandList* CommandList)
 	{
 		CommandList->SetGraphicsRootSignature(RS.Get());
 		CommandList->SetPipelineState(PSO.Get());
+	}
+
+	if (!Owner)
+		return;
+
+	for (const auto& bindingPair : textureBinding)
+	{
+		const BindingData& bindingData = bindingPair.second;
+		if (!bindingData.Schema.Bindless)
+			continue;
+
+		D3D12_GPU_DESCRIPTOR_HANDLE tableHandle{};
+		if (bindingData.Schema.ResourceKind == RHIResourceKind::Texture)
+		{
+			if (!Owner->IsBindlessTextureTableReady())
+				continue;
+			tableHandle = Owner->GetBindlessTextureTableGpuHandle();
+		}
+		else if (bindingData.Schema.ResourceKind == RHIResourceKind::Buffer)
+		{
+			if (!Owner->IsBindlessBufferTableReady())
+				continue;
+			tableHandle = Owner->GetBindlessBufferTableGpuHandle();
+		}
+		else
+		{
+			continue;
+		}
+
+		if (IsCompute)
+			CommandList->SetComputeRootDescriptorTable(bindingData.rootParamIndex, tableHandle);
+		else
+			CommandList->SetGraphicsRootDescriptorTable(bindingData.rootParamIndex, tableHandle);
 	}
 }
 

@@ -27,6 +27,645 @@
 
 void AppendCpuRuntimeTrace(const std::wstring& line);
 
+namespace
+{
+	constexpr uint32_t kGBufferBindlessTextureRegisterSpace = 10;
+	constexpr uint32_t kGBufferMaterialRecordRegister = 13;
+
+	struct GBufferMaterialRecord
+	{
+		UINT32 AlbedoTextureIndex = RHI_INVALID_BINDLESS_INDEX;
+		UINT32 NormalTextureIndex = RHI_INVALID_BINDLESS_INDEX;
+		UINT32 RoughnessTextureIndex = RHI_INVALID_BINDLESS_INDEX;
+		UINT32 MetallicTextureIndex = RHI_INVALID_BINDLESS_INDEX;
+	};
+
+	struct GBufferMaterialKey
+	{
+		Texture* Albedo = nullptr;
+		Texture* Normal = nullptr;
+		Texture* Roughness = nullptr;
+		Texture* Metallic = nullptr;
+
+		bool operator==(const GBufferMaterialKey& other) const
+		{
+			return Albedo == other.Albedo &&
+				Normal == other.Normal &&
+				Roughness == other.Roughness &&
+				Metallic == other.Metallic;
+		}
+	};
+
+	struct GBufferMaterialTable
+	{
+		std::vector<GBufferMaterialKey> Keys;
+		std::vector<GBufferMaterialRecord> Records;
+		std::shared_ptr<Buffer> Buffer;
+	};
+
+	struct GBufferGeometryRecord
+	{
+		UINT32 VertexBufferIndex = RHI_INVALID_BINDLESS_INDEX;
+		UINT32 IndexBufferIndex = RHI_INVALID_BINDLESS_INDEX;
+		UINT32 VertexStride = 0;
+		UINT32 IndexStride = 0;
+	};
+
+	struct GBufferGeometryKey
+	{
+		VertexBuffer* Vertex = nullptr;
+		IndexBuffer* Index = nullptr;
+		UINT32 VertexStride = 0;
+		UINT32 IndexStride = 0;
+
+		bool operator==(const GBufferGeometryKey& other) const
+		{
+			return Vertex == other.Vertex &&
+				Index == other.Index &&
+				VertexStride == other.VertexStride &&
+				IndexStride == other.IndexStride;
+		}
+	};
+
+	struct GBufferGeometryTable
+	{
+		std::vector<GBufferGeometryKey> Keys;
+		std::vector<GBufferGeometryRecord> Records;
+		std::shared_ptr<Buffer> Buffer;
+	};
+
+	void HashCombineGBufferMaterial(uint64_t& seed, uint64_t value)
+	{
+		seed ^= value + 0x9e3779b97f4a7c15ull + (seed << 6) + (seed >> 2);
+	}
+
+	struct GBufferSceneTopologyCounts
+	{
+		uint64_t Hash = 1469598103934665603ull;
+		uint32_t MeshCount = 0;
+		uint32_t DrawCount = 0;
+	};
+
+	GBufferSceneTopologyCounts CountGBufferSceneTopology(const Scene* scene)
+	{
+		GBufferSceneTopologyCounts counts{};
+		if (!scene)
+			return counts;
+		counts.MeshCount = static_cast<uint32_t>(scene->meshes.size());
+		HashCombineGBufferMaterial(counts.Hash, counts.MeshCount);
+		for (const std::shared_ptr<Mesh>& mesh : scene->meshes)
+		{
+			HashCombineGBufferMaterial(counts.Hash, reinterpret_cast<uintptr_t>(mesh.get()));
+			if (!mesh)
+				continue;
+			const uint32_t meshDrawCount = static_cast<uint32_t>(mesh->Draws.size());
+			counts.DrawCount += meshDrawCount;
+			HashCombineGBufferMaterial(counts.Hash, meshDrawCount);
+			HashCombineGBufferMaterial(counts.Hash, reinterpret_cast<uintptr_t>(mesh->Draws.data()));
+			HashCombineGBufferMaterial(counts.Hash, reinterpret_cast<uintptr_t>(mesh->Vb.get()));
+			HashCombineGBufferMaterial(counts.Hash, reinterpret_cast<uintptr_t>(mesh->Ib.get()));
+			HashCombineGBufferMaterial(counts.Hash, mesh->VertexStride);
+			HashCombineGBufferMaterial(counts.Hash, static_cast<uint32_t>(mesh->IndexFormat));
+		}
+		return counts;
+	}
+
+	bool SupportsGBufferBindlessMaterials(IRenderBackend* backend)
+	{
+		if (!backend)
+			return false;
+		const RenderBackendCapabilities capabilities = backend->GetCapabilities();
+		return capabilities.SupportsBindlessTextures && capabilities.SupportsRuntimeDescriptorArrays;
+	}
+
+	bool SupportsGBufferBindlessGeometry(IRenderBackend* backend)
+	{
+		if (!backend)
+			return false;
+		const RenderBackendCapabilities capabilities = backend->GetCapabilities();
+		return capabilities.SupportsBindlessBuffers && capabilities.SupportsRuntimeDescriptorArrays;
+	}
+
+	GBufferMaterialKey ResolveGBufferMaterialKey(
+		Material* material,
+		Texture* defaultWhite,
+		Texture* defaultNormal,
+		Texture* defaultRoughness,
+		Texture* defaultBlack)
+	{
+		GBufferMaterialKey key{};
+		key.Albedo = (material && material->Diffuse) ? material->Diffuse.get() : defaultWhite;
+		key.Normal = (material && material->Normal) ? material->Normal.get() : defaultNormal;
+		key.Roughness = (material && material->Roughness) ? material->Roughness.get() : defaultRoughness;
+		key.Metallic = (material && material->Metallic) ? material->Metallic.get() : defaultBlack;
+		return key;
+	}
+
+	UINT32 RegisterGBufferBindlessTexture(IRenderBackend* backend, Texture* texture)
+	{
+		if (!backend || !texture)
+			return RHI_INVALID_BINDLESS_INDEX;
+
+		RHITextureHandle handle = backend->RegisterBindlessTexture(texture);
+		if (!handle.IsValid())
+			handle = backend->GetBindlessTextureHandle(texture);
+		return handle.IsValid() ? handle.Index : RHI_INVALID_BINDLESS_INDEX;
+	}
+
+	GBufferMaterialRecord MakeGBufferMaterialRecord(IRenderBackend* backend, const GBufferMaterialKey& key)
+	{
+		GBufferMaterialRecord record{};
+		record.AlbedoTextureIndex = RegisterGBufferBindlessTexture(backend, key.Albedo);
+		record.NormalTextureIndex = RegisterGBufferBindlessTexture(backend, key.Normal);
+		record.RoughnessTextureIndex = RegisterGBufferBindlessTexture(backend, key.Roughness);
+		record.MetallicTextureIndex = RegisterGBufferBindlessTexture(backend, key.Metallic);
+		return record;
+	}
+
+	bool IsValidGBufferMaterialRecord(const GBufferMaterialRecord& record)
+	{
+		return record.AlbedoTextureIndex != RHI_INVALID_BINDLESS_INDEX &&
+			record.NormalTextureIndex != RHI_INVALID_BINDLESS_INDEX &&
+			record.RoughnessTextureIndex != RHI_INVALID_BINDLESS_INDEX &&
+			record.MetallicTextureIndex != RHI_INVALID_BINDLESS_INDEX;
+	}
+
+	uint64_t ComputeGBufferMaterialDefaultsHash(
+		Texture* defaultWhite,
+		Texture* defaultNormal,
+		Texture* defaultRoughness,
+		Texture* defaultBlack)
+	{
+		uint64_t hash = 1469598103934665603ull;
+		HashCombineGBufferMaterial(hash, reinterpret_cast<uintptr_t>(defaultWhite));
+		HashCombineGBufferMaterial(hash, reinterpret_cast<uintptr_t>(defaultNormal));
+		HashCombineGBufferMaterial(hash, reinterpret_cast<uintptr_t>(defaultRoughness));
+		HashCombineGBufferMaterial(hash, reinterpret_cast<uintptr_t>(defaultBlack));
+		return hash;
+	}
+
+	void ResetGBufferSceneResourceBindGroup(Scene* scene)
+	{
+		if (!scene)
+			return;
+		scene->CachedGBufferResourceBindGroups.clear();
+	}
+
+	std::shared_ptr<GraphicsBindGroupHandle> BindGBufferSceneResourceBindGroup(
+		IRenderBackend* backend,
+		GraphicsPipelineHandle* pipeline,
+		Scene* scene,
+		Sampler* sampler,
+		Buffer* materialBuffer,
+		Buffer* geometryBuffer)
+	{
+		if (!backend || !pipeline || !scene || !sampler || !materialBuffer)
+			return nullptr;
+
+		for (const Scene::GBufferResourceBindGroupCacheEntry& cached : scene->CachedGBufferResourceBindGroups)
+		{
+			if (cached.BindGroup &&
+				cached.Pipeline == pipeline &&
+				cached.Sampler == sampler &&
+				cached.MaterialBuffer == materialBuffer &&
+				cached.GeometryBuffer == geometryBuffer)
+			{
+				backend->BindGraphicsBindGroup(
+					pipeline,
+					kGraphicsBindGroupSlot_Material,
+					cached.BindGroup);
+				return cached.BindGroup;
+			}
+		}
+
+		GraphicsBindGroupDesc desc{};
+		desc.Pipeline = pipeline;
+		desc.Slot = kGraphicsBindGroupSlot_Material;
+		desc.Entries.reserve(3);
+		desc.Entries.push_back(GraphicsBindGroupEntry::BufferSRV("GBufferMaterials", materialBuffer));
+		if (geometryBuffer)
+			desc.Entries.push_back(GraphicsBindGroupEntry::BufferSRV("GBufferGeometries", geometryBuffer));
+		desc.Entries.push_back(GraphicsBindGroupEntry::SamplerBinding("samplerWrap", sampler));
+
+		std::shared_ptr<GraphicsBindGroupHandle> bindGroup = backend->CreateGraphicsBindGroup(desc);
+		backend->BindGraphicsBindGroup(pipeline, kGraphicsBindGroupSlot_Material, bindGroup);
+
+		Scene::GBufferResourceBindGroupCacheEntry cacheEntry;
+		cacheEntry.Pipeline = pipeline;
+		cacheEntry.Sampler = sampler;
+		cacheEntry.MaterialBuffer = materialBuffer;
+		cacheEntry.GeometryBuffer = geometryBuffer;
+		cacheEntry.BindGroup = bindGroup;
+		scene->CachedGBufferResourceBindGroups.push_back(std::move(cacheEntry));
+		return bindGroup;
+	}
+
+	uint32_t GetGBufferIndexStride(EIndexFormat format)
+	{
+		return format == EIndexFormat::U16 ? 2u : 4u;
+	}
+
+	UINT32 RegisterGBufferBindlessVertexBuffer(IRenderBackend* backend, VertexBuffer* buffer)
+	{
+		if (!backend || !buffer)
+			return RHI_INVALID_BINDLESS_INDEX;
+
+		RHIBufferHandle handle = backend->RegisterBindlessVertexBuffer(buffer);
+		if (!handle.IsValid())
+			handle = backend->GetBindlessVertexBufferHandle(buffer);
+		return handle.IsValid() ? handle.Index : RHI_INVALID_BINDLESS_INDEX;
+	}
+
+	UINT32 RegisterGBufferBindlessIndexBuffer(IRenderBackend* backend, IndexBuffer* buffer)
+	{
+		if (!backend || !buffer)
+			return RHI_INVALID_BINDLESS_INDEX;
+
+		RHIBufferHandle handle = backend->RegisterBindlessIndexBuffer(buffer);
+		if (!handle.IsValid())
+			handle = backend->GetBindlessIndexBufferHandle(buffer);
+		return handle.IsValid() ? handle.Index : RHI_INVALID_BINDLESS_INDEX;
+	}
+
+	bool IsValidGBufferGeometryRecord(const GBufferGeometryRecord& record)
+	{
+		return record.VertexBufferIndex != RHI_INVALID_BINDLESS_INDEX &&
+			record.IndexBufferIndex != RHI_INVALID_BINDLESS_INDEX &&
+			record.VertexStride > 0 &&
+			(record.IndexStride == 2u || record.IndexStride == 4u);
+	}
+
+	GBufferGeometryRecord MakeGBufferGeometryRecord(IRenderBackend* backend, const GBufferGeometryKey& key)
+	{
+		GBufferGeometryRecord record{};
+		record.VertexBufferIndex = RegisterGBufferBindlessVertexBuffer(backend, key.Vertex);
+		record.IndexBufferIndex = RegisterGBufferBindlessIndexBuffer(backend, key.Index);
+		record.VertexStride = key.VertexStride;
+		record.IndexStride = key.IndexStride;
+		return record;
+	}
+
+	GBufferMaterialTable BuildGBufferMaterialTable(
+		IRenderBackend* backend,
+		Scene* scene,
+		Texture* defaultWhite,
+		Texture* defaultNormal,
+		Texture* defaultRoughness,
+		Texture* defaultBlack)
+	{
+		GBufferMaterialTable table{};
+		if (!SupportsGBufferBindlessMaterials(backend) || !scene)
+			return table;
+
+		const uint64_t defaultsHash = ComputeGBufferMaterialDefaultsHash(
+			defaultWhite,
+			defaultNormal,
+			defaultRoughness,
+			defaultBlack);
+		const GBufferSceneTopologyCounts topologyCounts = CountGBufferSceneTopology(scene);
+		if (scene->bGBufferMaterialRecordCacheValid &&
+			scene->GBufferMaterialRecordBuffer &&
+			scene->GBufferMaterialRecordBackend == backend &&
+			scene->GBufferMaterialDefaultsHash == defaultsHash &&
+			scene->GBufferMaterialRecordTopologyHash == topologyCounts.Hash &&
+			scene->GBufferMaterialRecordMeshCount == topologyCounts.MeshCount &&
+			scene->GBufferMaterialRecordDrawCount == topologyCounts.DrawCount)
+		{
+			table.Buffer = scene->GBufferMaterialRecordBuffer;
+			return table;
+		}
+
+		auto findOrAddUniqueKey = [&](const GBufferMaterialKey& key) -> uint32_t
+		{
+			for (uint32_t i = 0; i < table.Keys.size(); ++i)
+			{
+				if (table.Keys[i] == key)
+					return i;
+			}
+			table.Keys.push_back(key);
+			return static_cast<uint32_t>(table.Keys.size() - 1);
+		};
+
+		for (std::shared_ptr<Mesh>& mesh : scene->meshes)
+		{
+			if (!mesh)
+				continue;
+			for (Mesh::DrawCall& drawcall : mesh->Draws)
+			{
+				Material* material = drawcall.mat ? drawcall.mat.get() : mesh->Mat.get();
+				const GBufferMaterialKey key = ResolveGBufferMaterialKey(
+					material,
+					defaultWhite,
+					defaultNormal,
+					defaultRoughness,
+					defaultBlack);
+				drawcall.GBufferMaterialIndex = findOrAddUniqueKey(key);
+			}
+		}
+
+		if (table.Keys.empty())
+		{
+			const GBufferMaterialKey defaultKey = ResolveGBufferMaterialKey(
+				nullptr,
+				defaultWhite,
+				defaultNormal,
+				defaultRoughness,
+				defaultBlack);
+			findOrAddUniqueKey(defaultKey);
+		}
+
+		uint64_t materialHash = 1469598103934665603ull;
+		HashCombineGBufferMaterial(materialHash, static_cast<uint64_t>(table.Keys.size()));
+		for (const GBufferMaterialKey& key : table.Keys)
+		{
+			HashCombineGBufferMaterial(materialHash, reinterpret_cast<uintptr_t>(key.Albedo));
+			HashCombineGBufferMaterial(materialHash, reinterpret_cast<uintptr_t>(key.Normal));
+			HashCombineGBufferMaterial(materialHash, reinterpret_cast<uintptr_t>(key.Roughness));
+			HashCombineGBufferMaterial(materialHash, reinterpret_cast<uintptr_t>(key.Metallic));
+		}
+
+		if (scene->GBufferMaterialRecordBuffer &&
+			scene->GBufferMaterialRecordHash == materialHash &&
+			scene->GBufferMaterialRecordBackend == backend &&
+			scene->GBufferMaterialDefaultsHash == defaultsHash &&
+			scene->GBufferMaterialRecordTopologyHash == topologyCounts.Hash &&
+			scene->GBufferMaterialRecordMeshCount == topologyCounts.MeshCount &&
+			scene->GBufferMaterialRecordDrawCount == topologyCounts.DrawCount)
+		{
+			table.Buffer = scene->GBufferMaterialRecordBuffer;
+			scene->bGBufferMaterialRecordCacheValid = true;
+			return table;
+		}
+
+		bool allTexturesRegistered = true;
+		table.Records.reserve(table.Keys.size());
+		for (const GBufferMaterialKey& key : table.Keys)
+		{
+			GBufferMaterialRecord record = MakeGBufferMaterialRecord(backend, key);
+			allTexturesRegistered = allTexturesRegistered && IsValidGBufferMaterialRecord(record);
+			table.Records.push_back(record);
+		}
+
+		if (!allTexturesRegistered)
+		{
+			static bool bLoggedFailure = false;
+			if (!bLoggedFailure)
+			{
+				AppendCpuRuntimeTrace(L"[GBufferMaterial] bindless texture registration failed");
+				bLoggedFailure = true;
+			}
+			scene->GBufferMaterialRecordHash = 0;
+			scene->GBufferMaterialDefaultsHash = 0;
+			scene->GBufferMaterialRecordTopologyHash = 0;
+			scene->GBufferMaterialRecordMeshCount = 0;
+			scene->GBufferMaterialRecordDrawCount = 0;
+			scene->GBufferMaterialRecordBackend = nullptr;
+			scene->bGBufferMaterialRecordCacheValid = false;
+			scene->GBufferMaterialRecordBuffer.reset();
+			ResetGBufferSceneResourceBindGroup(scene);
+			table.Keys.clear();
+			table.Records.clear();
+			return table;
+		}
+
+		BufferCreateDesc desc = {};
+		desc.NumElements = static_cast<uint32_t>(table.Records.size());
+		desc.ElementSize = sizeof(GBufferMaterialRecord);
+		desc.InitialState = EInitialResourceState::ShaderRead;
+		desc.InitialData = table.Records.data();
+		desc.Shape = EBufferShape::Structured;
+		desc.Access = EBufferAccess::GpuOnly;
+		desc.AllocationPolicy = EBufferAllocationPolicy::Suballocated;
+
+		table.Buffer = backend->CreateBuffer(desc);
+		if (!table.Buffer)
+		{
+			static bool bLoggedBufferFailure = false;
+			if (!bLoggedBufferFailure)
+			{
+				AppendCpuRuntimeTrace(L"[GBufferMaterial] failed to allocate material record buffer");
+				bLoggedBufferFailure = true;
+			}
+			scene->GBufferMaterialRecordHash = 0;
+			scene->GBufferMaterialDefaultsHash = 0;
+			scene->GBufferMaterialRecordTopologyHash = 0;
+			scene->GBufferMaterialRecordMeshCount = 0;
+			scene->GBufferMaterialRecordDrawCount = 0;
+			scene->GBufferMaterialRecordBackend = nullptr;
+			scene->bGBufferMaterialRecordCacheValid = false;
+			scene->GBufferMaterialRecordBuffer.reset();
+			ResetGBufferSceneResourceBindGroup(scene);
+			table.Keys.clear();
+			table.Records.clear();
+			return table;
+		}
+		scene->GBufferMaterialRecordHash = materialHash;
+		scene->GBufferMaterialDefaultsHash = defaultsHash;
+		scene->GBufferMaterialRecordTopologyHash = topologyCounts.Hash;
+		scene->GBufferMaterialRecordMeshCount = topologyCounts.MeshCount;
+		scene->GBufferMaterialRecordDrawCount = topologyCounts.DrawCount;
+		scene->GBufferMaterialRecordBackend = backend;
+		scene->bGBufferMaterialRecordCacheValid = true;
+		scene->GBufferMaterialRecordBuffer = table.Buffer;
+		ResetGBufferSceneResourceBindGroup(scene);
+		return table;
+	}
+
+	GBufferGeometryTable BuildGBufferGeometryTable(IRenderBackend* backend, Scene* scene)
+	{
+		GBufferGeometryTable table{};
+		if (!SupportsGBufferBindlessGeometry(backend) || !scene)
+			return table;
+
+		const GBufferSceneTopologyCounts topologyCounts = CountGBufferSceneTopology(scene);
+		if (scene->bGBufferGeometryRecordCacheValid &&
+			scene->GBufferGeometryRecordBuffer &&
+			scene->GBufferGeometryRecordBackend == backend &&
+			scene->GBufferGeometryRecordTopologyHash == topologyCounts.Hash &&
+			scene->GBufferGeometryRecordMeshCount == topologyCounts.MeshCount &&
+			scene->GBufferGeometryRecordDrawCount == topologyCounts.DrawCount)
+		{
+			table.Buffer = scene->GBufferGeometryRecordBuffer;
+			return table;
+		}
+
+		auto findOrAddUniqueKey = [&](const GBufferGeometryKey& key) -> uint32_t
+		{
+			if (!key.Vertex || !key.Index || key.VertexStride == 0 || key.IndexStride == 0)
+				return 0;
+			for (uint32_t i = 0; i < table.Keys.size(); ++i)
+			{
+				if (table.Keys[i] == key)
+					return i;
+			}
+			table.Keys.push_back(key);
+			return static_cast<uint32_t>(table.Keys.size() - 1);
+		};
+
+		uint32_t maxDrawIndexCount = 0;
+		for (std::shared_ptr<Mesh>& mesh : scene->meshes)
+		{
+			if (!mesh)
+				continue;
+			for (const Mesh::DrawCall& drawcall : mesh->Draws)
+				maxDrawIndexCount = (std::max)(maxDrawIndexCount, drawcall.IndexCount);
+			if (mesh->Vb && mesh->Ib)
+			{
+				mesh->GBufferGeometryIndex = findOrAddUniqueKey({
+					mesh->Vb.get(),
+					mesh->Ib.get(),
+					mesh->VertexStride,
+					GetGBufferIndexStride(mesh->IndexFormat)
+				});
+			}
+		}
+		scene->GBufferMaxDrawIndexCount = maxDrawIndexCount;
+		scene->bGBufferMaxDrawIndexCountValid = true;
+
+		if (table.Keys.empty())
+			return table;
+
+		uint64_t geometryHash = 1469598103934665603ull;
+		HashCombineGBufferMaterial(geometryHash, static_cast<uint64_t>(table.Keys.size()));
+		for (const GBufferGeometryKey& key : table.Keys)
+		{
+			HashCombineGBufferMaterial(geometryHash, reinterpret_cast<uintptr_t>(key.Vertex));
+			HashCombineGBufferMaterial(geometryHash, reinterpret_cast<uintptr_t>(key.Index));
+			HashCombineGBufferMaterial(geometryHash, key.VertexStride);
+			HashCombineGBufferMaterial(geometryHash, key.IndexStride);
+		}
+
+		if (scene->GBufferGeometryRecordBuffer &&
+			scene->GBufferGeometryRecordHash == geometryHash &&
+			scene->GBufferGeometryRecordBackend == backend &&
+			scene->GBufferGeometryRecordTopologyHash == topologyCounts.Hash &&
+			scene->GBufferGeometryRecordMeshCount == topologyCounts.MeshCount &&
+			scene->GBufferGeometryRecordDrawCount == topologyCounts.DrawCount)
+		{
+			table.Buffer = scene->GBufferGeometryRecordBuffer;
+			scene->bGBufferGeometryRecordCacheValid = true;
+			return table;
+		}
+
+		bool allBuffersRegistered = true;
+		table.Records.reserve(table.Keys.size());
+		for (const GBufferGeometryKey& key : table.Keys)
+		{
+			GBufferGeometryRecord record = MakeGBufferGeometryRecord(backend, key);
+			allBuffersRegistered = allBuffersRegistered && IsValidGBufferGeometryRecord(record);
+			table.Records.push_back(record);
+		}
+
+		if (!allBuffersRegistered)
+		{
+			static bool bLoggedFailure = false;
+			if (!bLoggedFailure)
+			{
+				AppendCpuRuntimeTrace(L"[GBufferGeometry] bindless VB/IB registration failed");
+				bLoggedFailure = true;
+			}
+			scene->GBufferGeometryRecordHash = 0;
+			scene->GBufferGeometryRecordTopologyHash = 0;
+			scene->GBufferGeometryRecordMeshCount = 0;
+			scene->GBufferGeometryRecordDrawCount = 0;
+			scene->GBufferGeometryRecordBackend = nullptr;
+			scene->bGBufferGeometryRecordCacheValid = false;
+			scene->GBufferGeometryRecordBuffer.reset();
+			ResetGBufferSceneResourceBindGroup(scene);
+			table.Keys.clear();
+			table.Records.clear();
+			return table;
+		}
+
+		BufferCreateDesc desc = {};
+		desc.NumElements = static_cast<uint32_t>(table.Records.size());
+		desc.ElementSize = sizeof(GBufferGeometryRecord);
+		desc.InitialState = EInitialResourceState::ShaderRead;
+		desc.InitialData = table.Records.data();
+		desc.Shape = EBufferShape::Structured;
+		desc.Access = EBufferAccess::GpuOnly;
+		desc.AllocationPolicy = EBufferAllocationPolicy::Suballocated;
+
+		table.Buffer = backend->CreateBuffer(desc);
+		if (!table.Buffer)
+		{
+			static bool bLoggedBufferFailure = false;
+			if (!bLoggedBufferFailure)
+			{
+				AppendCpuRuntimeTrace(L"[GBufferGeometry] failed to allocate geometry record buffer");
+				bLoggedBufferFailure = true;
+			}
+			scene->GBufferGeometryRecordHash = 0;
+			scene->GBufferGeometryRecordTopologyHash = 0;
+			scene->GBufferGeometryRecordMeshCount = 0;
+			scene->GBufferGeometryRecordDrawCount = 0;
+			scene->GBufferGeometryRecordBackend = nullptr;
+			scene->bGBufferGeometryRecordCacheValid = false;
+			scene->GBufferGeometryRecordBuffer.reset();
+			ResetGBufferSceneResourceBindGroup(scene);
+			table.Keys.clear();
+			table.Records.clear();
+			return table;
+		}
+
+		scene->GBufferGeometryRecordHash = geometryHash;
+		scene->GBufferGeometryRecordTopologyHash = topologyCounts.Hash;
+		scene->GBufferGeometryRecordMeshCount = topologyCounts.MeshCount;
+		scene->GBufferGeometryRecordDrawCount = topologyCounts.DrawCount;
+		scene->GBufferGeometryRecordBackend = backend;
+		scene->bGBufferGeometryRecordCacheValid = true;
+		scene->GBufferGeometryRecordBuffer = table.Buffer;
+		ResetGBufferSceneResourceBindGroup(scene);
+		return table;
+	}
+
+	uint32_t GetMaxGBufferDrawIndexCount(Scene* scene)
+	{
+		uint32_t maxIndexCount = 0;
+		if (!scene)
+			return maxIndexCount;
+		if (scene->bGBufferMaxDrawIndexCountValid)
+			return scene->GBufferMaxDrawIndexCount;
+		for (const std::shared_ptr<Mesh>& mesh : scene->meshes)
+		{
+			if (!mesh)
+				continue;
+			for (const Mesh::DrawCall& drawcall : mesh->Draws)
+				maxIndexCount = (std::max)(maxIndexCount, drawcall.IndexCount);
+		}
+		scene->GBufferMaxDrawIndexCount = maxIndexCount;
+		scene->bGBufferMaxDrawIndexCountValid = true;
+		return maxIndexCount;
+	}
+
+	bool EnsureSequentialIndexBuffer(
+		IRenderBackend* backend,
+		std::shared_ptr<IndexBuffer>& buffer,
+		uint32_t& capacity,
+		uint32_t requiredIndexCount)
+	{
+		if (!backend || requiredIndexCount == 0)
+			return false;
+		if (buffer && capacity >= requiredIndexCount)
+			return true;
+
+		std::vector<uint32_t> indices(requiredIndexCount);
+		for (uint32_t i = 0; i < requiredIndexCount; ++i)
+			indices[i] = i;
+		buffer = backend->CreateIndexBuffer(
+			EIndexFormat::U32,
+			static_cast<uint32_t>(indices.size() * sizeof(uint32_t)),
+			indices.data());
+		if (!buffer)
+		{
+			capacity = 0;
+			return false;
+		}
+		capacity = requiredIndexCount;
+		return true;
+	}
+}
+
 void Corona::InitBloomPass()
 {
 	auto createPSO = [&](const wchar_t* shaderFile, const std::string& entryPoint,
@@ -191,10 +830,8 @@ void Corona::InitGBufferPass()
 	{
 		pipelineDesc.PipelineLayout.Bindings = {
 			MakeRHICBV("__CB0", 0, sizeof(GBufferConstantBuffer), gbufferGraphicsStages),
-			MakeRHITextureSRV("AlbedoTex", 0, gbufferPixelStage),
-			MakeRHITextureSRV("NormalTex", 1, gbufferPixelStage),
-			MakeRHITextureSRV("RoughnessTex", 2, gbufferPixelStage),
-			MakeRHITextureSRV("MetallicTex", 3, gbufferPixelStage),
+			MakeRHIBindlessTextureSRV("MaterialTextures", 0, kGBufferBindlessTextureRegisterSpace, gbufferPixelStage),
+			MakeRHIBufferSRV("GBufferMaterials", kGBufferMaterialRecordRegister, gbufferPixelStage),
 			MakeRHISampler("samplerWrap", 0, gbufferPixelStage),
 		};
 	};
@@ -202,9 +839,40 @@ void Corona::InitGBufferPass()
 	{
 		pipelineDesc.PipelineLayout.Bindings.push_back(MakeRHIBufferSRV(name, slot, gbufferVertexStage));
 	};
+	auto appendGBufferBindlessGeometryLayout = [&](GraphicsPipelineDesc& pipelineDesc)
+	{
+		pipelineDesc.PipelineLayout.Bindings.push_back(MakeRHIBindlessBufferSRV(
+			"GeometryBuffers",
+			0,
+			12,
+			gbufferVertexStage,
+			RHIBufferViewKind::Raw));
+		pipelineDesc.PipelineLayout.Bindings.push_back(MakeRHIBufferSRV(
+			"GBufferGeometries",
+			14,
+			gbufferVertexStage,
+			RHIBufferViewKind::Structured));
+	};
 	setBaseGBufferLayout(desc);
 
 	GBufferGraphicsPipeline = renderBackend->CreateGraphicsPipeline(desc);
+	{
+		GraphicsPipelineDesc bindlessGeometryDesc = desc;
+		bindlessGeometryDesc.VertexEntryPoint = "VSMainBindless";
+		bindlessGeometryDesc.VertexElements.clear();
+		bindlessGeometryDesc.VertexStride = 0;
+		appendGBufferBindlessGeometryLayout(bindlessGeometryDesc);
+		try
+		{
+			GBufferBindlessGeometryGraphicsPipeline = renderBackend->CreateGraphicsPipeline(bindlessGeometryDesc);
+		}
+		catch (const std::exception&)
+		{
+			AppendCpuRuntimeTrace(L"[InitGBufferPass] Bindless static geometry pipeline create exception");
+		}
+		if (!GBufferBindlessGeometryGraphicsPipeline)
+			AppendCpuRuntimeTrace(L"[InitGBufferPass] failed to create Bindless Static GBuffer pipeline");
+	}
 
 	if (!CORONA_PLATFORM_MOBILE)
 	{
@@ -222,6 +890,23 @@ void Corona::InitGBufferPass()
 		}
 		if (!StaticInstancedGBufferGraphicsPipeline)
 			AppendCpuRuntimeTrace(L"[InitGBufferPass] failed to create Static Instanced GBuffer pipeline");
+
+		GraphicsPipelineDesc staticInstancedBindlessDesc = desc;
+		staticInstancedBindlessDesc.VertexEntryPoint = "StaticInstancedVSMainBindless";
+		staticInstancedBindlessDesc.VertexElements.clear();
+		staticInstancedBindlessDesc.VertexStride = 0;
+		appendGBufferBindlessGeometryLayout(staticInstancedBindlessDesc);
+		appendGBufferSRV(staticInstancedBindlessDesc, "StaticInstanceTransforms", 12);
+		try
+		{
+			StaticInstancedBindlessGBufferGraphicsPipeline = renderBackend->CreateGraphicsPipeline(staticInstancedBindlessDesc);
+		}
+		catch (const std::exception&)
+		{
+			AppendCpuRuntimeTrace(L"[InitGBufferPass] StaticInstanced bindless pipeline create exception");
+		}
+		if (!StaticInstancedBindlessGBufferGraphicsPipeline)
+			AppendCpuRuntimeTrace(L"[InitGBufferPass] failed to create Static Instanced Bindless GBuffer pipeline");
 	}
 
 	// Procedural grass PSO — no IA stream; the VS reads SV_VertexID +
@@ -2075,9 +2760,22 @@ bool Corona::DrawStaticInstancedScene(
 	if (!scene || objects.empty() || !StaticInstancedGBufferGraphicsPipeline)
 		return false;
 
-	GraphicsPipelineHandle* pso = StaticInstancedGBufferGraphicsPipeline.get();
 	const uint32_t instanceCount = static_cast<uint32_t>(objects.size());
 	StaticGBufferInstanceTransformScratch.resize(instanceCount);
+
+	GBufferGeometryTable geometryTable = BuildGBufferGeometryTable(renderBackend.get(), scene.get());
+	const uint32_t maxDrawIndexCount = GetMaxGBufferDrawIndexCount(scene.get());
+	bool bUseBindlessGeometry =
+		StaticInstancedBindlessGBufferGraphicsPipeline &&
+		geometryTable.Buffer &&
+		EnsureSequentialIndexBuffer(
+			renderBackend.get(),
+			GBufferSequentialIb,
+			GBufferSequentialIbCapacity,
+			maxDrawIndexCount);
+	GraphicsPipelineHandle* pso = bUseBindlessGeometry ?
+		StaticInstancedBindlessGBufferGraphicsPipeline.get() :
+		StaticInstancedGBufferGraphicsPipeline.get();
 
 	auto packWorld = [](const glm::mat4x4& world, StaticGBufferInstanceXform& dst)
 	{
@@ -2099,12 +2797,33 @@ bool Corona::DrawStaticInstancedScene(
 	if (!instanceBuffer)
 		return false;
 
+	GBufferMaterialTable materialTable = BuildGBufferMaterialTable(
+		renderBackend.get(),
+		scene.get(),
+		DefaultWhiteTex.get(),
+		DefaultNormalTex.get(),
+		DefaultRougnessTex.get(),
+		DefaultBlackTex.get());
+	if (!materialTable.Buffer)
+		return false;
+
+	BindGBufferSceneResourceBindGroup(
+		renderBackend.get(),
+		pso,
+		scene.get(),
+		samplerWrap.get(),
+		materialTable.Buffer.get(),
+		bUseBindlessGeometry ? geometryTable.Buffer.get() : nullptr);
+
 	for (const std::shared_ptr<Mesh>& mesh : scene->meshes)
 	{
 		if (!mesh || !mesh->Vb || !mesh->Ib)
 			return false;
 
-		renderBackend->BindMeshBuffers(mesh->Vb.get(), mesh->Ib.get());
+		if (bUseBindlessGeometry)
+			renderBackend->BindMeshBuffers(nullptr, GBufferSequentialIb.get());
+		else
+			renderBackend->BindMeshBuffers(mesh->Vb.get(), mesh->Ib.get());
 
 		for (const Mesh::DrawCall& drawcall : mesh->Draws)
 		{
@@ -2139,20 +2858,14 @@ bool Corona::DrawStaticInstancedScene(
 			objCB.WindParams = RenderFrameWindParams;
 			objCB.WindTuning = RenderFrameWindTuning;
 			objCB.TerrainDeformSphere = RenderFrameTerrainDeformSphere;
-
-			Texture* albedo = drawcall.mat->Diffuse ? drawcall.mat->Diffuse.get() : DefaultWhiteTex.get();
-			Texture* normal = drawcall.mat->Normal ? drawcall.mat->Normal.get() : DefaultNormalTex.get();
-			Texture* rough = drawcall.mat->Roughness ? drawcall.mat->Roughness.get() : DefaultRougnessTex.get();
-			Texture* metal = drawcall.mat->Metallic ? drawcall.mat->Metallic.get() : DefaultBlackTex.get();
-			CreateOrBindGraphicsMaterialBindGroup(
-				renderBackend.get(),
-				pso,
-				drawcall.mat.get(),
-				samplerWrap.get(),
-				albedo,
-				normal,
-				rough,
-				metal);
+			if (bUseBindlessGeometry)
+			{
+				objCB.GBufferGeometryIndex = mesh->GBufferGeometryIndex;
+				objCB.GBufferIndexStart = drawcall.IndexStart;
+				objCB.GBufferVertexBase = drawcall.VertexBase;
+				objCB.bGBufferBindlessGeometry = 1u;
+			}
+			objCB.GBufferMaterialIndex = drawcall.GBufferMaterialIndex;
 			CreateAndBindGraphicsBindGroup(renderBackend.get(), pso, kGraphicsBindGroupSlot_Draw,
 				{
 					GraphicsBindGroupEntry::BufferSRV("StaticInstanceTransforms", instanceBuffer.get()),
@@ -2162,8 +2875,8 @@ bool Corona::DrawStaticInstancedScene(
 			renderBackend->DrawIndexedInstanced(
 				drawcall.IndexCount,
 				instanceCount,
-				drawcall.IndexStart,
-				drawcall.VertexBase,
+				bUseBindlessGeometry ? 0u : drawcall.IndexStart,
+				bUseBindlessGeometry ? 0 : drawcall.VertexBase,
 				0);
 			++GBufferLastStaticInstancedDrawCount;
 		}
@@ -2176,6 +2889,27 @@ bool Corona::DrawStaticInstancedScene(
 
 void Corona::DrawScene(shared_ptr<Scene> scene, const glm::mat4x4& instanceTransform, float Roughness, float Metalic, bool bOverrideRoughnessMetallic)
 {
+	if (!scene)
+		return;
+
+	GBufferMaterialTable materialTable = BuildGBufferMaterialTable(
+		renderBackend.get(),
+		scene.get(),
+		DefaultWhiteTex.get(),
+		DefaultNormalTex.get(),
+		DefaultRougnessTex.get(),
+		DefaultBlackTex.get());
+	GBufferGeometryTable geometryTable = BuildGBufferGeometryTable(renderBackend.get(), scene.get());
+	const uint32_t maxDrawIndexCount = GetMaxGBufferDrawIndexCount(scene.get());
+	bool bUseSceneBindlessGeometry =
+		GBufferBindlessGeometryGraphicsPipeline &&
+		geometryTable.Buffer &&
+		EnsureSequentialIndexBuffer(
+			renderBackend.get(),
+			GBufferSequentialIb,
+			GBufferSequentialIbCapacity,
+			maxDrawIndexCount);
+
 	for (auto& mesh : scene->meshes)
 	{
 		if (!mesh)
@@ -2230,14 +2964,35 @@ void Corona::DrawScene(shared_ptr<Scene> scene, const glm::mat4x4& instanceTrans
 			mesh->SkeletalOutputVb &&
 			SkeletalGBufferGraphicsPipeline;
 		const bool bUseProceduralGrass = mesh->bProceduralGrass && ProceduralGrassGraphicsPipeline;
+		const bool bUseStaticBindlessGeometry =
+			bUseSceneBindlessGeometry &&
+			!bUseProceduralGrass &&
+			!bUseSkeletalVsInline &&
+			!bUseSkeletalSkinned &&
+			!bUseSpineVsInline &&
+			!bUseSpineVertexFetch &&
+			!bUseCpuSpinePipeline &&
+			mesh->Vb &&
+			mesh->Ib;
 		GraphicsPipelineHandle* activeGBufferPipeline =
 			bUseProceduralGrass ? ProceduralGrassGraphicsPipeline.get() :
 			(bUseSkeletalVsInline ? SkeletalVsInlineGraphicsPipeline.get() :
 			(bUseSkeletalSkinned ? SkeletalGBufferGraphicsPipeline.get() :
 			(bUseSpineVsInline ? SpineVsInlineGBufferGraphicsPipeline.get() :
 			(bUseSpineVertexFetch ? SpineGBufferGraphicsPipeline.get() :
-			(bUseCpuSpinePipeline ? CpuSpineGBufferGraphicsPipeline.get() : GBufferGraphicsPipeline.get())))));
+			(bUseCpuSpinePipeline ? CpuSpineGBufferGraphicsPipeline.get() :
+			(bUseStaticBindlessGeometry ? GBufferBindlessGeometryGraphicsPipeline.get() : GBufferGraphicsPipeline.get()))))));
 		renderBackend->BindGraphicsPipeline(activeGBufferPipeline);
+		if (!bUseProceduralGrass && materialTable.Buffer)
+		{
+			BindGBufferSceneResourceBindGroup(
+				renderBackend.get(),
+				activeGBufferPipeline,
+				scene.get(),
+				samplerWrap.get(),
+				materialTable.Buffer.get(),
+				bUseStaticBindlessGeometry ? geometryTable.Buffer.get() : nullptr);
+		}
 		std::vector<GraphicsBindGroupEntry> meshBindEntries;
 		meshBindEntries.reserve(8);
 		if (bUseSpineVertexFetch)
@@ -2277,7 +3032,12 @@ void Corona::DrawScene(shared_ptr<Scene> scene, const glm::mat4x4& instanceTrans
 		// Procedural grass has no VB/IB — the VS synthesizes geometry. The
 		// existing IA bindings are harmless if we skip BindMeshBuffers.
 		if (!bUseProceduralGrass)
-			renderBackend->BindMeshBuffers(drawVb, mesh->Ib.get());
+		{
+			if (bUseStaticBindlessGeometry)
+				renderBackend->BindMeshBuffers(nullptr, GBufferSequentialIb.get());
+			else
+				renderBackend->BindMeshBuffers(drawVb, mesh->Ib.get());
+		}
 
 		for (int i = 0; i < mesh->Draws.size(); i++)
 		{
@@ -2334,6 +3094,13 @@ void Corona::DrawScene(shared_ptr<Scene> scene, const glm::mat4x4& instanceTrans
 			objCB.WindParams = RenderFrameWindParams;
 			objCB.WindTuning = RenderFrameWindTuning;
 			objCB.TerrainDeformSphere = RenderFrameTerrainDeformSphere;
+			if (bUseStaticBindlessGeometry)
+			{
+				objCB.GBufferGeometryIndex = mesh->GBufferGeometryIndex;
+				objCB.GBufferIndexStart = drawcall.IndexStart;
+				objCB.GBufferVertexBase = drawcall.VertexBase;
+				objCB.bGBufferBindlessGeometry = 1u;
+			}
 			if (bUseProceduralGrass)
 			{
 				objCB.PG_BladeCount    = mesh->Procedural.BladeCount;
@@ -2355,13 +3122,10 @@ void Corona::DrawScene(shared_ptr<Scene> scene, const glm::mat4x4& instanceTrans
 				objCB.PG_BladeTipWidthScale = std::clamp(GrassProceduralBladeTipWidthScale, 0.0f, 1.0f);
 			}
 
-			Texture* AlbedoTex = drawcall.mat->Diffuse ? drawcall.mat->Diffuse.get() : DefaultWhiteTex.get();
-			Texture* NormalTex = drawcall.mat->Normal ? drawcall.mat->Normal.get() : DefaultNormalTex.get();
-			Texture* RoughnessTex = drawcall.mat->Roughness ? drawcall.mat->Roughness.get() : DefaultRougnessTex.get();
-			Texture* MetallicTex = drawcall.mat->Metallic ? drawcall.mat->Metallic.get() : DefaultBlackTex.get();
+			objCB.GBufferMaterialIndex = drawcall.GBufferMaterialIndex;
 
 			std::vector<GraphicsBindGroupEntry> drawBindEntries = meshBindEntries;
-			drawBindEntries.reserve(meshBindEntries.size() + 6);
+			drawBindEntries.reserve(meshBindEntries.size() + 8);
 			drawBindEntries.push_back(GraphicsBindGroupEntry::Constant(0, &objCB, sizeof(objCB)));
 			if (bUseProceduralGrass)
 			{
@@ -2370,15 +3134,8 @@ void Corona::DrawScene(shared_ptr<Scene> scene, const glm::mat4x4& instanceTrans
 			}
 			else
 			{
-				CreateOrBindGraphicsMaterialBindGroup(
-					renderBackend.get(),
-					activeGBufferPipeline,
-					drawcall.mat.get(),
-					samplerWrap.get(),
-					AlbedoTex,
-					NormalTex,
-					RoughnessTex,
-					MetallicTex);
+				if (!materialTable.Buffer)
+					continue;
 			}
 			CreateAndBindGraphicsBindGroup(renderBackend.get(), activeGBufferPipeline, kGraphicsBindGroupSlot_Draw, drawBindEntries);
 
@@ -2478,8 +3235,8 @@ void Corona::DrawScene(shared_ptr<Scene> scene, const glm::mat4x4& instanceTrans
 			{
 				renderBackend->DrawIndexed(
 					drawcall.IndexCount,
-					drawcall.IndexStart,
-					bUseSpineVertexFetch ? 0 : drawcall.VertexBase);
+					bUseStaticBindlessGeometry ? 0u : drawcall.IndexStart,
+					(bUseSpineVertexFetch || bUseStaticBindlessGeometry) ? 0 : drawcall.VertexBase);
 			}
 		}
 	}

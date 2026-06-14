@@ -2777,8 +2777,8 @@ bool Corona::DLSSPass()
 		return false;
 	}
 
-	const bool bUseRRInput = bDLSSRROutputValidThisFrame && DLSSRRBuffer;
-	Texture* inputColor = bUseRRInput ? DLSSRRBuffer.get() : LightingBuffer.get();
+	const bool bUseRRInput = false;
+	Texture* inputColor = LightingBuffer.get();
 	Texture* outputTarget = ColorBuffers[ColorBufferWriteIndex].get();
 	if (!inputColor || !outputTarget)
 		return false;
@@ -2876,8 +2876,8 @@ bool Corona::DLSSRRPass()
 
 	sl::DLSSDOptions opts{};
 	opts.mode = ToSLDLSSMode(DLSSQualityMode);
-	opts.outputWidth = GetRenderWidth();
-	opts.outputHeight = GetRenderHeight();
+	opts.outputWidth = m_width;
+	opts.outputHeight = m_height;
 	opts.colorBuffersHDR = sl::Boolean::eTrue;
 	opts.preExposure = 1.0f;
 	opts.exposureScale = 1.0f;
@@ -2892,13 +2892,26 @@ bool Corona::DLSSRRPass()
 	}
 
 	Texture* inputColor = IsPathTracingDLSSRREnabled() ? PathTracingAccumBuffer[PathTracingWriteIndex].get() : LightingBuffer.get();
-	Texture* outputTarget = DLSSRRBuffer.get();
-	const bool bUseRRSpecularMotionVectors =
+	Texture* outputTarget = ColorBuffers[ColorBufferWriteIndex].get();
+	const bool bRRSpecularMotionVectorsRequested =
 		(IsPathTracingDLSSRREnabled() && bEnablePathTracingRRSpecularMotionVectors) ||
 		(RenderingMode == ERenderingMode::HYBRID && bEnableSpecularGI && bEnableHybridRRSpecularMotionVectors);
-	const bool bUseRRSpecularHitDistance =
+	const bool bRRSpecularHitDistanceRequested =
 		(IsPathTracingDLSSRREnabled() && bEnablePathTracingRRSpecularHitDistance) ||
 		(RenderingMode == ERenderingMode::HYBRID && bEnableSpecularGI && bEnableHybridRRSpecularHitDistance);
+	const bool bUseRRSpecularMotionVectors = bRRSpecularMotionVectorsRequested;
+	const bool bUseRRSpecularHitDistance = !bUseRRSpecularMotionVectors && bRRSpecularHitDistanceRequested;
+	static bool sLoggedRRSpecularGuidePolicy = false;
+	if (!sLoggedRRSpecularGuidePolicy)
+	{
+		sLoggedRRSpecularGuidePolicy = true;
+		AppendCpuRuntimeTrace(
+			L"[DLSSRRPass] specularGuidePolicy requestedMV=" + std::to_wstring(bRRSpecularMotionVectorsRequested ? 1 : 0) +
+			L", requestedHitDistance=" + std::to_wstring(bRRSpecularHitDistanceRequested ? 1 : 0) +
+			L", tagMV=" + std::to_wstring(bUseRRSpecularMotionVectors ? 1 : 0) +
+			L", tagHitDistance=" + std::to_wstring(bUseRRSpecularHitDistance ? 1 : 0) +
+			L", hitDistanceSuppressedByMV=" + std::to_wstring((bRRSpecularHitDistanceRequested && bUseRRSpecularMotionVectors) ? 1 : 0));
+	}
 	if (!inputColor ||
 		!outputTarget ||
 		!UnjitteredDepthBuffers[ColorBufferWriteIndex] ||
@@ -2914,7 +2927,7 @@ bool Corona::DLSSRRPass()
 
 	sl::ViewportHandle vp(0);
 	sl::Extent renderExtent{ 0, 0, GetRenderWidth(), GetRenderHeight() };
-	sl::Extent outputExtent{ 0, 0, GetRenderWidth(), GetRenderHeight() };
+	sl::Extent outputExtent{ 0, 0, m_width, m_height };
 	sl::CommandBuffer* streamlineCommandBuffer = reinterpret_cast<sl::CommandBuffer*>(renderBackend->GetStreamlineCommandBuffer());
 	auto colorRes = MakeStreamlineTextureResource(renderBackend.get(), inputColor, EResourceState::ShaderRead);
 	auto depthRes = MakeStreamlineTextureResource(renderBackend.get(), UnjitteredDepthBuffers[ColorBufferWriteIndex].get(), EResourceState::ShaderRead);
@@ -2946,19 +2959,20 @@ bool Corona::DLSSRRPass()
 		return false;
 	}
 
-	sl::ResourceTag colorTag(&*colorRes, sl::kBufferTypeScalingInputColor, sl::ResourceLifecycle::eOnlyValidNow, &renderExtent);
-	sl::ResourceTag depthTag(&*depthRes, sl::kBufferTypeDepth, sl::ResourceLifecycle::eOnlyValidNow, &renderExtent);
-	sl::ResourceTag motionTag(&*motionRes, sl::kBufferTypeMotionVectors, sl::ResourceLifecycle::eOnlyValidNow, &renderExtent);
-	sl::ResourceTag normalTag(&*normalRes, sl::kBufferTypeNormals, sl::ResourceLifecycle::eOnlyValidNow, &renderExtent);
-	sl::ResourceTag roughnessTag(&*roughnessRes, sl::kBufferTypeRoughness, sl::ResourceLifecycle::eOnlyValidNow, &renderExtent);
-	sl::ResourceTag albedoTag(&*albedoRes, sl::kBufferTypeAlbedo, sl::ResourceLifecycle::eOnlyValidNow, &renderExtent);
-	sl::ResourceTag specularAlbedoTag(&*specularAlbedoRes, sl::kBufferTypeSpecularAlbedo, sl::ResourceLifecycle::eOnlyValidNow, &renderExtent);
+	constexpr sl::ResourceLifecycle rrFrameInputLifetime = sl::ResourceLifecycle::eValidUntilPresent;
+	sl::ResourceTag colorTag(&*colorRes, sl::kBufferTypeScalingInputColor, rrFrameInputLifetime, &renderExtent);
+	sl::ResourceTag depthTag(&*depthRes, sl::kBufferTypeDepth, rrFrameInputLifetime, &renderExtent);
+	sl::ResourceTag motionTag(&*motionRes, sl::kBufferTypeMotionVectors, rrFrameInputLifetime, &renderExtent);
+	sl::ResourceTag normalTag(&*normalRes, sl::kBufferTypeNormals, rrFrameInputLifetime, &renderExtent);
+	sl::ResourceTag roughnessTag(&*roughnessRes, sl::kBufferTypeRoughness, rrFrameInputLifetime, &renderExtent);
+	sl::ResourceTag albedoTag(&*albedoRes, sl::kBufferTypeAlbedo, rrFrameInputLifetime, &renderExtent);
+	sl::ResourceTag specularAlbedoTag(&*specularAlbedoRes, sl::kBufferTypeSpecularAlbedo, rrFrameInputLifetime, &renderExtent);
 	std::optional<sl::ResourceTag> specularHitDistanceTag;
 	std::optional<sl::ResourceTag> specularMotionVectorTag;
 	if (bUseRRSpecularHitDistance)
-		specularHitDistanceTag.emplace(&*specularHitDistanceRes, sl::kBufferTypeSpecularHitDistance, sl::ResourceLifecycle::eOnlyValidNow, &renderExtent);
+		specularHitDistanceTag.emplace(&*specularHitDistanceRes, sl::kBufferTypeSpecularHitDistance, rrFrameInputLifetime, &renderExtent);
 	if (bUseRRSpecularMotionVectors)
-		specularMotionVectorTag.emplace(&*specularMotionVectorRes, sl::kBufferTypeSpecularMotionVectors, sl::ResourceLifecycle::eOnlyValidNow, &renderExtent);
+		specularMotionVectorTag.emplace(&*specularMotionVectorRes, sl::kBufferTypeSpecularMotionVectors, rrFrameInputLifetime, &renderExtent);
 	sl::ResourceTag outputTag(&*outputRes, sl::kBufferTypeScalingOutputColor, sl::ResourceLifecycle::eOnlyValidNow, &outputExtent);
 	std::vector<sl::ResourceTag> tags = {
 		colorTag,
@@ -3005,7 +3019,9 @@ bool Corona::DLSSRRPass()
 	renderBackend->TransitionTexture(outputTarget, EResourceState::UnorderedAccess, EResourceState::ShaderRead);
 	if (evalResult == sl::Result::eOk)
 	{
+		ResolvedColorBufferIndex = ColorBufferWriteIndex;
 		bDLSSRROutputValidThisFrame = true;
+		bUseLightingBufferFallbackForToneMap = false;
 		return true;
 	}
 
@@ -3840,16 +3856,14 @@ Texture* Corona::GetCurrentResolveSource() const
 	{
 		if (IsPathTracingDLSSRREnabled())
 		{
-			if (bDLSSRROutputValidThisFrame && DLSSRRBuffer)
-				return DLSSRRBuffer.get();
+			if (bDLSSRROutputValidThisFrame && ColorBuffers[ResolvedColorBufferIndex])
+				return ColorBuffers[ResolvedColorBufferIndex].get();
 		}
 		return PathTracingAccumBuffer[PathTracingWriteIndex].get();
 	}
 
 	if (bUseLightingBufferFallbackForToneMap && LightingBuffer)
 	{
-		if (bDLSSRROutputValidThisFrame && DLSSRRBuffer)
-			return DLSSRRBuffer.get();
 		return LightingBuffer.get();
 	}
 
@@ -7074,7 +7088,10 @@ void Corona::DumpCameraPathDiagnosticFrame()
 	};
 
 	dumpTexture(L"pt_input", PathTracingAccumBuffer[PathTracingWriteIndex].get(), true);
-	dumpTexture(L"rr_output", DLSSRRBuffer.get(), true);
+	Texture* rrOutput = (bDLSSRROutputValidThisFrame && ColorBuffers[ResolvedColorBufferIndex]) ?
+		ColorBuffers[ResolvedColorBufferIndex].get() :
+		nullptr;
+	dumpTexture(L"rr_output", rrOutput, true);
 	dumpTexture(L"depth", UnjitteredDepthBuffers[ColorBufferWriteIndex].get(), true, ERawFloatDumpFormat::R32Float, 1);
 	dumpTexture(L"motion", VelocityBuffer.get(), true, ERawFloatDumpFormat::R32G32Float, 2);
 	dumpTexture(L"specular_hit_distance", PathTracingSpecularHitDistanceBuffer.get(), true, ERawFloatDumpFormat::R32Float, 1);
@@ -14699,17 +14716,7 @@ void Corona::OnRender()
 			BeginGpuPassTiming(EGpuPass::DLSSRR);
 			const bool bRRPassed = DLSSRRPass();
 			EndGpuPassTiming(EGpuPass::DLSSRR);
-			if (bRRPassed)
-			{
-				BeginGpuPassTiming(EGpuPass::DLSSSR);
-				const bool bDLSSPassed = DLSSPass();
-				EndGpuPassTiming(EGpuPass::DLSSSR);
-				bNeedTemporalAA = !bDLSSPassed;
-			}
-			else
-			{
-				bNeedTemporalAA = true;
-			}
+			bNeedTemporalAA = !bRRPassed;
 
 			if (bNeedTemporalAA)
 			{
@@ -16329,11 +16336,11 @@ if (ImGui::Button("Reset Accumulation"))
 		// DLSS RR output (post-reconstruction, pre-tonemap). When the user
 		// reports "ReSTIR + DLSS RR shows noise after camera-still N
 		// frames", this is the buffer to inspect — if LightingBuffer is
-		// noise-free but DLSSRRBuffer has the noise, the reconstruction
+		// noise-free but _dlssrr has the noise, the reconstruction
 		// network is the culprit; if both are noisy, ReSTIR didn't
 		// converge.
-		if (DLSSRRBuffer)
-			DumpTexturePNG(DLSSRRBuffer.get(), base + L"_dlssrr.png", EResourceState::ShaderRead);
+		if (bDLSSRROutputValidThisFrame && ColorBuffers[ResolvedColorBufferIndex])
+			DumpTexturePNG(ColorBuffers[ResolvedColorBufferIndex].get(), base + L"_dlssrr.png", EResourceState::ShaderRead);
 		return;
 	}
 	if (false && bCommandLineSkeletalTestScreenshot && !bSkeletalTestScreenshotDone &&

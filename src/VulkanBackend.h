@@ -89,6 +89,7 @@ struct VulkanGraphicsPipelineHandle : GraphicsPipelineHandle
 	VkPipeline Pipeline = VK_NULL_HANDLE;
 	VkRenderPass CompatibleRenderPass = VK_NULL_HANDLE;
 	VkDescriptorSetLayout DescriptorSetLayout = VK_NULL_HANDLE;
+	std::vector<VkDescriptorSetLayout> DescriptorSetLayouts;
 	VkDescriptorPool DescriptorPool = VK_NULL_HANDLE;
 	VkBuffer UniformBuffer = VK_NULL_HANDLE;
 	VkDeviceMemory UniformBufferMemory = VK_NULL_HANDLE;
@@ -102,6 +103,8 @@ struct VulkanGraphicsPipelineHandle : GraphicsPipelineHandle
 	std::array<std::shared_ptr<VulkanGraphicsBindGroupHandle>, kMaxGraphicsBindGroupSlots> BoundBindGroups;
 	bool bHasConstantBufferDescriptorBinding = false;
 	uint32_t ConstantBufferDescriptorBinding = 0;
+	bool bUsesBindlessTextureTable = false;
+	bool bUsesBindlessBufferTable = false;
 
 	void Release();
 	~VulkanGraphicsPipelineHandle() override;
@@ -575,10 +578,16 @@ private:
 		VkSemaphore ImageAvailableSemaphore = VK_NULL_HANDLE;
 		VkSemaphore RenderFinishedSemaphore = VK_NULL_HANDLE;
 		VkFence InFlightFence = VK_NULL_HANDLE;
+		struct DeferredBufferDestroy
+		{
+			VkBuffer Buffer = VK_NULL_HANDLE;
+			VkDeviceMemory Memory = VK_NULL_HANDLE;
+		};
 		std::vector<std::pair<VkDescriptorPool, VkDescriptorSet>> DescriptorSetsToFree;
 		std::vector<VkDescriptorPool> GraphicsDescriptorPools;
 		uint32_t ActiveGraphicsDescriptorPoolIndex = 0;
 		std::vector<VkFramebuffer> FramebuffersToDestroy;
+		std::vector<DeferredBufferDestroy> BuffersToDestroy;
 	};
 
 	VkInstance Instance = VK_NULL_HANDLE;

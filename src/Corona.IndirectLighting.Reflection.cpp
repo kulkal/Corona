@@ -150,11 +150,13 @@ void Corona::RaytraceReflectionPass()
 	RTReflectionViewParam.PrefilteredEnvRoughnessFade = PrefilteredEnvRoughnessFade;
 	RTReflectionViewParam.bEnablePrefilteredEnvSpecular = bEnablePrefilteredEnvSpecular ? 1u : 0u;
 	RTReflectionViewParam.SpecularMotionVectorScale = HybridRRSpecularMotionVectorScale;
-	RTReflectionViewParam.bWriteRRSpecularMotionVectors =
-		(IsDLSSRREnabled() && bEnableHybridRRSpecularMotionVectors) ? 1u : 0u;
-	RTReflectionViewParam.bWriteRRSpecularHitDistance =
-		(IsDLSSRREnabled() && bEnableHybridRRSpecularHitDistance) ? 1u : 0u;
-	RTReflectionViewParam.bUseRRSpecularGuideRay = bEnableHybridRRSpecularGuideRay ? 1u : 0u;
+	const bool bWriteRRSpecularMotionVectors = IsDLSSRREnabled() && bEnableHybridRRSpecularMotionVectors;
+	const bool bWriteRRSpecularHitDistance =
+		IsDLSSRREnabled() && !bWriteRRSpecularMotionVectors && bEnableHybridRRSpecularHitDistance;
+	RTReflectionViewParam.bWriteRRSpecularMotionVectors = bWriteRRSpecularMotionVectors ? 1u : 0u;
+	RTReflectionViewParam.bWriteRRSpecularHitDistance = bWriteRRSpecularHitDistance ? 1u : 0u;
+	RTReflectionViewParam.bUseRRSpecularGuideRay =
+		(bEnableHybridRRSpecularGuideRay && (bWriteRRSpecularMotionVectors || bWriteRRSpecularHitDistance)) ? 1u : 0u;
 
 	// ReSTIR specular GI: transition reservoir UAVs.
 	if (ReflectionReservoirA)

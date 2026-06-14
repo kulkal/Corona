@@ -330,6 +330,13 @@ struct NRIBackend::Impl
 	struct GpuBuf { nri::Buffer* buffer = nullptr; std::vector<nri::Memory*> memory; uint32_t stride = 0; nri::IndexType indexType = nri::IndexType::UINT32; void* mapped = nullptr; uint32_t capacity = 0; };
 	std::unordered_map<VertexBuffer*, GpuBuf> VBs;
 	std::unordered_map<IndexBuffer*, GpuBuf> IBs;
+	// Last-bound mesh buffers (for per-draw OOB diagnosis; see DrawIndexed).
+	VertexBuffer* LastVB = nullptr; IndexBuffer* LastIB = nullptr;
+	uint32_t LastVBVerts = 0, LastVBStride = 0, LastIBIndices = 0, LastIBCapacity = 0;
+	nri::IndexType LastIBType = nri::IndexType::UINT32;
+	bool DrawLog = false;          // CORONA_NRI_DRAWLOG: flush a line per GBuffer draw
+	uint32_t DbgOOBDraws = 0;      // draws skipped because index range exceeds IB capacity
+	uint32_t DbgBadXform = 0;      // draws skipped because the per-draw transform was non-finite/huge
 	std::unordered_map<Texture*, nri::Layout> TexLayout;       // tracked per-texture layout
 	std::unordered_map<Texture*, nri::Descriptor*> TexColorView;
 	std::unordered_map<Texture*, nri::Descriptor*> TexDepthView;
@@ -3081,8 +3088,21 @@ public:
 		// Reset the ring at the start of each frame (EndFrame waits on the GPU,
 		// so previous-frame ring entries are safe to overwrite).
 		if (RingFrame != m->SwapFrameIndex) { RingFrame = m->SwapFrameIndex; RingIdx = 0; }
-		const uint32_t slot = RingIdx < kRing ? RingIdx : (kRing - 1);
-		++RingIdx;
+		// Each draw needs its OWN descriptor set + CB slot for the frame; the GPU
+		// consumes them in order and EndFrame waits before the ring resets. The old
+		// code CLAMPED slot to kRing-1 once draws exceeded kRing, so every overflow
+		// draw shared one descriptor set that later draws kept overwriting WHILE the
+		// GPU was still executing earlier ones — descriptor aliasing that made a draw
+		// read a wrong/out-of-range resource and HANG the GPU (DEVICE_HUNG), which is
+		// the wide-view (>1024 draws) camera-move freeze. Use a unique slot per draw;
+		// on genuine overflow skip the draw (visible gap) instead of aliasing.
+		const uint32_t slot = RingIdx++;
+		if (slot >= kRing)
+		{
+			static bool s_ringWarned = false;
+			if (!s_ringWarned) { s_ringWarned = true; AppendCpuRuntimeTrace(L"[NRI] per-draw descriptor ring overflow (>kRing draws/frame) — raise kRing"); }
+			return;
+		}
 
 		// Lazily allocate this ring slot's descriptor set + CB buffer/view.
 		if (SetRing.size() <= slot) { SetRing.resize(slot + 1, nullptr); CbRing.resize(slot + 1); }
@@ -3142,6 +3162,26 @@ public:
 
 		nri::SetDescriptorSetDesc sd = {}; sd.setIndex = 0; sd.descriptorSet = set; sd.bindPoint = nri::BindPoint::GRAPHICS;
 		m->Core.CmdSetDescriptorSet(*m->ActiveCmd, sd);
+	}
+
+	// Sanity-check the per-draw transform the GPU will consume. The GBuffer/shadow CB
+	// layout begins with ViewProjectionMatrix (offset 0) and has WorldMatrix (offset
+	// 128); a non-finite or astronomically large component yields a degenerate/giant
+	// triangle that overruns the rasterizer and trips the 2 s TDR (DEVICE_HUNG draw
+	// timeout). Returns false → the draw should be skipped. Outputs the worst value
+	// for logging. Only meaningful for CBs >= 192 B (transform CBs); others pass.
+	bool DebugTransformSane(float& worstOut) const
+	{
+		worstOut = 0.0f;
+		if (PendingCBSize < 192) return true;
+		auto chk = [&](uint32_t off) -> bool {
+			const float* mtx = reinterpret_cast<const float*>(PendingCB.data() + off);
+			bool ok = true;
+			for (int i = 0; i < 16; ++i) { float v = mtx[i]; float a = std::fabs(v); if (a > worstOut) worstOut = a; if (!std::isfinite(v) || a > 1e7f) ok = false; }
+			return ok;
+		};
+		bool a = chk(0), b = chk(128);
+		return a && b;
 	}
 
 private:
@@ -3263,7 +3303,7 @@ private:
 			pd.structuredBufferMaxNum = bufN * kRing;
 			pd.storageStructuredBufferMaxNum = storBufN * kRing;
 			pd.constantBufferMaxNum = cbvN * kRing;
-			pd.samplerMaxNum = sampN * kRing;
+			pd.samplerMaxNum = std::min(sampN * kRing, 2048u); // D3D12 shader-visible sampler heap cap
 			if (m->Core.CreateDescriptorPool(*m->Device, pd, Pool) != nri::Result::SUCCESS) { plog("CreateDescriptorPool"); return; }
 		}
 
@@ -3325,7 +3365,12 @@ private:
 	std::vector<nri::DescriptorSet*> Sets;
 	bool HasResources = false;
 	// Per-draw ring: one descriptor set + one CB slot per draw, reused each frame.
-	static constexpr uint32_t kRing = 1024;
+	// Must exceed the max draws in a single frame (wide views hit ~1.5k); overflow
+	// now skips the draw rather than aliasing (see ApplyForDraw). Capped at 2048
+	// because the per-draw set holds a sampler and the D3D12 shader-visible sampler
+	// heap maxes at 2048 (samplerMaxNum = sampN*kRing). Larger needs samplers split
+	// out of the ring into a static set.
+	static constexpr uint32_t kRing = 2048;
 	std::vector<nri::DescriptorSet*> SetRing;
 	std::vector<CbvState> CbRing;
 	uint32_t RingIdx = 0;
@@ -3367,8 +3412,25 @@ NRIBackend::NRIBackend() : m(std::make_unique<Impl>())
 	// opt in via CORONA_NRI_VALIDATION=1 when debugging binding/descriptor issues.
 	desc.enableNRIValidation = std::getenv("CORONA_NRI_VALIDATION") != nullptr;
 	desc.enableGraphicsAPIValidation = false;
+	m->DrawLog = std::getenv("CORONA_NRI_DRAWLOG") != nullptr;
 	desc.callbackInterface.MessageCallback = NRIMessageCallback;
 	desc.callbackInterface.AbortExecution = NRIAbortCallback;
+
+	// Enable D3D12 DRED (Device Removed Extended Data) BEFORE device creation so a
+	// GPU fault / TDR (the camera-move freeze: Submit -> DXGI_ERROR_DEVICE_REMOVED)
+	// can be diagnosed — auto-breadcrumbs identify the last GPU command executed and
+	// page-fault output gives the offending VA + allocation. Must be set before the
+	// device NRI creates. Gated on CORONA_NRI_DRED to avoid the (small) always-on cost.
+	if (std::getenv("CORONA_NRI_DRED") != nullptr)
+	{
+		Microsoft::WRL::ComPtr<ID3D12DeviceRemovedExtendedDataSettings1> dred;
+		if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&dred))) && dred)
+		{
+			dred->SetAutoBreadcrumbsEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+			dred->SetPageFaultEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+			AppendCpuRuntimeTrace(L"[NRIDRED] DRED auto-breadcrumbs + page-fault enabled");
+		}
+	}
 
 	nri::Result r = nri::nriCreateDevice(desc, m->Device);
 	if (r != nri::Result::SUCCESS || m->Device == nullptr)
@@ -3813,10 +3875,33 @@ RenderBackendCapabilities NRIBackend::GetCapabilities() const
 }
 
 // === Frame lifecycle / diagnostics =======================================
+static void LogD3D12DeviceRemoved(ID3D12Device* dev, const wchar_t* where); // defined below
+
 void NRIBackend::BeginFrame()
 {
 	if (!m->Device || !m->CmdAllocator || !m->CmdBuffer || m->ActiveCmd)
 		return;
+	// Frame-start GPU-fault check: if the device was removed (the camera-move
+	// freeze), dump DRED once. More reliable than hooking a specific submit — once
+	// removed, every later frame's GetDeviceRemovedReason reports it.
+	{
+		static bool s_dredDumped = false;
+		static const bool s_dred = std::getenv("CORONA_NRI_DRED") != nullptr;
+		if (s_dred && !s_dredDumped)
+		{
+			auto* dev = reinterpret_cast<ID3D12Device*>(m->Core.GetDeviceNativeObject(m->Device));
+			if (dev && dev->GetDeviceRemovedReason() != S_OK)
+			{
+				LogD3D12DeviceRemoved(dev, L"BeginFrame check");
+				s_dredDumped = true;
+			}
+		}
+	}
+	if (m->DrawLog)
+	{
+		std::ofstream l("nri_drawlog.log", std::ios::app);
+		if (l) l << "=== FRAME " << m->SwapFrameIndex << " (draws=" << m->DbgDraws << " skipped=" << m->DbgDrawsSkipped << " oob=" << m->DbgOOBDraws << " badXform=" << m->DbgBadXform << ") ===" << std::endl;
+	}
 	m->FrameHasBackbuffer = false;
 	m->HasPendingClear = false;
 	m->BBLayout = nri::Layout::UNDEFINED;
@@ -3841,6 +3926,89 @@ void NRIBackend::BeginFrame()
 		}
 	}
 }
+// DRED dump on device removal: GetDeviceRemovedReason + the in-flight GPU command
+// (auto-breadcrumb at the last completed value) + page-fault VA / recently-freed
+// allocations. Distinguishes a HANG (dispatch timeout) from a page fault (bad/
+// freed resource access). Enabled only when CORONA_NRI_DRED set at startup.
+static void LogD3D12DeviceRemoved(ID3D12Device* dev, const wchar_t* where)
+{
+	if (!dev)
+		return;
+	const HRESULT reason = dev->GetDeviceRemovedReason();
+	const wchar_t* name =
+		reason == DXGI_ERROR_DEVICE_HUNG ? L"DEVICE_HUNG(dispatch/draw timeout)" :
+		reason == DXGI_ERROR_DEVICE_REMOVED ? L"DEVICE_REMOVED" :
+		reason == DXGI_ERROR_DEVICE_RESET ? L"DEVICE_RESET" :
+		reason == DXGI_ERROR_DRIVER_INTERNAL_ERROR ? L"DRIVER_INTERNAL_ERROR" :
+		reason == S_OK ? L"S_OK(not removed)" : L"other";
+	wchar_t buf[160];
+	swprintf_s(buf, L"[NRIDRED] removed at %s reason=0x%08X %s", where, (unsigned)reason, name);
+	AppendCpuRuntimeTrace(buf);
+
+	Microsoft::WRL::ComPtr<ID3D12DeviceRemovedExtendedData1> dred;
+	if (FAILED(dev->QueryInterface(IID_PPV_ARGS(&dred))) || !dred)
+	{
+		AppendCpuRuntimeTrace(L"[NRIDRED] no DRED data (set CORONA_NRI_DRED before launch)");
+		return;
+	}
+	D3D12_DRED_AUTO_BREADCRUMBS_OUTPUT1 bc = {};
+	if (SUCCEEDED(dred->GetAutoBreadcrumbsOutput1(&bc)))
+	{
+		auto opName = [](UINT o) -> const wchar_t*
+		{
+			switch (o)
+			{
+			case D3D12_AUTO_BREADCRUMB_OP_DRAWINSTANCED: return L"DRAW";
+			case D3D12_AUTO_BREADCRUMB_OP_DRAWINDEXEDINSTANCED: return L"DRAWINDEXED";
+			case D3D12_AUTO_BREADCRUMB_OP_DISPATCH: return L"DISPATCH";
+			case D3D12_AUTO_BREADCRUMB_OP_EXECUTEINDIRECT: return L"EXECUTEINDIRECT";
+			case D3D12_AUTO_BREADCRUMB_OP_DISPATCHRAYS: return L"DISPATCHRAYS";
+			case D3D12_AUTO_BREADCRUMB_OP_BUILDRAYTRACINGACCELERATIONSTRUCTURE: return L"BUILD_AS";
+			case D3D12_AUTO_BREADCRUMB_OP_COPYBUFFERREGION: return L"COPYBUFFER";
+			case D3D12_AUTO_BREADCRUMB_OP_COPYTEXTUREREGION: return L"COPYTEX";
+			case D3D12_AUTO_BREADCRUMB_OP_RESOLVESUBRESOURCE: return L"RESOLVE";
+			case D3D12_AUTO_BREADCRUMB_OP_CLEARRENDERTARGETVIEW: return L"CLEARRTV";
+			case D3D12_AUTO_BREADCRUMB_OP_CLEARUNORDEREDACCESSVIEW: return L"CLEARUAV";
+			case D3D12_AUTO_BREADCRUMB_OP_SETMARKER: return L"MARKER";
+			case D3D12_AUTO_BREADCRUMB_OP_BEGINEVENT: return L"BEGINEVENT";
+			case D3D12_AUTO_BREADCRUMB_OP_ENDEVENT: return L"ENDEVENT";
+			default: return L"op";
+			}
+		};
+		for (const D3D12_AUTO_BREADCRUMB_NODE1* n = bc.pHeadAutoBreadcrumbNode; n; n = n->pNext)
+		{
+			const UINT done = n->pLastBreadcrumbValue ? *n->pLastBreadcrumbValue : 0;
+			const UINT total = n->BreadcrumbCount;
+			if (done >= total || !n->pCommandHistory)
+				continue; // this list finished — not the faulting one
+			wchar_t b2[256];
+			swprintf_s(b2, L"[NRIDRED] in-flight cmdlist=\"%s\" completedOps=%u/%u faultingOp=%u(%s)",
+				n->pCommandListDebugNameW ? n->pCommandListDebugNameW : L"?", done, total,
+				(UINT)n->pCommandHistory[done], opName(n->pCommandHistory[done]));
+			AppendCpuRuntimeTrace(b2);
+			// Op-type window leading up to the hang: a run of DRAWINDEXED => GBuffer;
+			// DISPATCH/DISPATCHRAYS just before => an RT/compute pass; a lone DRAW after
+			// dispatches => a fullscreen lighting/tonemap/imgui pass.
+			const UINT lo = done > 8 ? done - 8 : 0;
+			std::wstring seq;
+			for (UINT i = lo; i <= done && i < total; ++i)
+			{
+				seq += std::to_wstring(i); seq += L":"; seq += opName(n->pCommandHistory[i]); seq += L" ";
+			}
+			AppendCpuRuntimeTrace(L"[NRIDRED] ops " + seq);
+		}
+	}
+	D3D12_DRED_PAGE_FAULT_OUTPUT1 pf = {};
+	if (SUCCEEDED(dred->GetPageFaultAllocationOutput1(&pf)) && pf.PageFaultVA != 0)
+	{
+		wchar_t b3[128];
+		swprintf_s(b3, L"[NRIDRED] PAGE FAULT VA=0x%llX (bad/freed resource access)", (unsigned long long)pf.PageFaultVA);
+		AppendCpuRuntimeTrace(b3);
+		for (const D3D12_DRED_ALLOCATION_NODE1* a = pf.pHeadRecentFreedAllocationNode; a; a = a->pNext)
+			AppendCpuRuntimeTrace(std::wstring(L"[NRIDRED]   recently-freed near VA: ") + (a->ObjectNameW ? a->ObjectNameW : L"?"));
+	}
+}
+
 void NRIBackend::EndFrame()
 {
 	if (!m->ActiveCmd)
@@ -3880,7 +4048,8 @@ void NRIBackend::EndFrame()
 		qs.waitFences = &waitAcq; qs.waitFenceNum = 1;
 		qs.commandBuffers = cbs; qs.commandBufferNum = 1;
 		qs.signalFences = signals; qs.signalFenceNum = 2;
-		m->Core.QueueSubmit(*m->GraphicsQueue, qs);
+		if (m->Core.QueueSubmit(*m->GraphicsQueue, qs) != nri::Result::SUCCESS)
+			LogD3D12DeviceRemoved(reinterpret_cast<ID3D12Device*>(m->Core.GetDeviceNativeObject(m->Device)), L"EndFrame QueueSubmit");
 		m->SwapChainI.QueuePresent(*m->SwapChain, *release);
 		m->SwapFrameIndex++;
 		m->Core.Wait(*m->FrameFence, m->SwapFrameIndex); // synchronous pacing
@@ -5092,16 +5261,52 @@ void NRIBackend::BindMeshBuffers(VertexBuffer* vertexBuffer, IndexBuffer* indexB
 	{
 		nri::VertexBufferDesc vbd = {}; vbd.buffer = vit->second.buffer; vbd.offset = 0; vbd.stride = vit->second.stride;
 		m->Core.CmdSetVertexBuffers(*m->ActiveCmd, 0, &vbd, 1);
+		m->LastVB = vertexBuffer; m->LastVBVerts = (uint32_t)std::max(0, vertexBuffer->numVertices); m->LastVBStride = vit->second.stride;
 	}
+	else { m->LastVB = nullptr; m->LastVBVerts = 0; m->LastVBStride = 0; }
 	auto iit = m->IBs.find(indexBuffer);
 	if (iit != m->IBs.end() && iit->second.buffer)
+	{
 		m->Core.CmdSetIndexBuffer(*m->ActiveCmd, *iit->second.buffer, 0, iit->second.indexType);
+		m->LastIB = indexBuffer; m->LastIBIndices = indexBuffer ? (uint32_t)std::max(0, indexBuffer->numIndices) : 0;
+		m->LastIBCapacity = iit->second.capacity; m->LastIBType = iit->second.indexType;
+	}
+	else { m->LastIB = nullptr; m->LastIBIndices = 0; m->LastIBCapacity = 0; }
 }
 void NRIBackend::DrawIndexed(uint32_t indexCount, uint32_t startIndexLocation, int32_t baseVertexLocation)
 {
 	if (!m->ActiveCmd || !m->RasterEnabled || !m->HasBoundGfx) { ++m->DbgDrawsSkipped; return; }
 	m->OpenRP();
-	if (m->CurrentGfx) static_cast<NRIGraphicsPipeline*>(m->CurrentGfx)->ApplyForDraw();
+	// Index-range OOB guard. A draw whose (baseIndex+indexCount) exceeds the bound
+	// IB's index capacity fetches out-of-bounds — a classic GPU DEVICE_HUNG cause that
+	// only fires once the camera brings the offending mesh into the cull set. Skip such
+	// draws (visible gap, no crash) and count them; CORONA_NRI_DRAWLOG flushes a line
+	// per draw so the LAST line before a freeze names the culprit mesh's params.
+	const uint32_t idxSize = m->LastIBType == nri::IndexType::UINT16 ? 2u : 4u;
+	const uint32_t ibCapIdx = m->LastIBCapacity / idxSize;
+	const bool oob = (m->LastIB != nullptr) &&
+		((uint64_t)startIndexLocation + indexCount > (ibCapIdx ? ibCapIdx : m->LastIBIndices));
+	if (m->DrawLog)
+	{
+		std::ofstream l("nri_drawlog.log", std::ios::app);
+		if (l) l << "DRAWIDX vb=" << (void*)m->LastVB << " verts=" << m->LastVBVerts << " stride=" << m->LastVBStride
+			<< " ib=" << (void*)m->LastIB << " idxCap=" << ibCapIdx << " numIdx=" << m->LastIBIndices
+			<< " baseIdx=" << startIndexLocation << " idxCount=" << indexCount << " baseVtx=" << baseVertexLocation
+			<< (oob ? "  <<<OOB-SKIP" : "") << std::endl;
+	}
+	if (oob) { ++m->DbgOOBDraws; ++m->DbgDrawsSkipped; return; }
+	if (m->CurrentGfx)
+	{
+		auto* gp = static_cast<NRIGraphicsPipeline*>(m->CurrentGfx);
+		float worst = 0.0f;
+		if (!gp->DebugTransformSane(worst))
+		{
+			++m->DbgBadXform; ++m->DbgDrawsSkipped;
+			if (m->DrawLog) { std::ofstream l("nri_drawlog.log", std::ios::app); if (l) l << "DRAWIDX vb=" << (void*)m->LastVB << " verts=" << m->LastVBVerts << " idxCount=" << indexCount << " worstXform=" << worst << "  <<<BAD-XFORM-SKIP" << std::endl; }
+			return;
+		}
+		gp->ApplyForDraw();
+	}
 	nri::DrawIndexedDesc dd = {}; dd.indexNum = indexCount; dd.instanceNum = 1; dd.baseIndex = startIndexLocation; dd.baseVertex = baseVertexLocation;
 	m->Core.CmdDrawIndexed(*m->ActiveCmd, dd);
 	++m->DbgDraws;
@@ -5110,7 +5315,38 @@ void NRIBackend::DrawIndexedInstanced(uint32_t indexCountPerInstance, uint32_t i
 {
 	if (!m->ActiveCmd || !m->RasterEnabled || !m->HasBoundGfx) { ++m->DbgDrawsSkipped; return; }
 	m->OpenRP();
-	if (m->CurrentGfx) static_cast<NRIGraphicsPipeline*>(m->CurrentGfx)->ApplyForDraw();
+	const uint32_t idxSize = m->LastIBType == nri::IndexType::UINT16 ? 2u : 4u;
+	const uint32_t ibCapIdx = m->LastIBCapacity / idxSize;
+	const bool idxOob = (m->LastIB != nullptr) &&
+		((uint64_t)startIndexLocation + indexCountPerInstance > (ibCapIdx ? ibCapIdx : m->LastIBIndices));
+	// A pathological instanceCount (stale/garbage per-frame count that grows with the
+	// camera-driven cull/grid extent) makes the GPU process billions of primitives and
+	// blows past the 2 s TDR — a DEVICE_HUNG that only fires on certain wide views. Cap
+	// it; the cap is far above any legitimate per-draw instance count for this engine.
+	const uint32_t kMaxInstances = 1u << 20; // 1,048,576
+	const bool instOob = instanceCount > kMaxInstances;
+	if (m->DrawLog)
+	{
+		std::ofstream l("nri_drawlog.log", std::ios::app);
+		if (l) l << "DRAWIDXINST vb=" << (void*)m->LastVB << " verts=" << m->LastVBVerts << " stride=" << m->LastVBStride
+			<< " ib=" << (void*)m->LastIB << " idxCap=" << ibCapIdx << " numIdx=" << m->LastIBIndices
+			<< " baseIdx=" << startIndexLocation << " idxPerInst=" << indexCountPerInstance
+			<< " instCount=" << instanceCount << " baseVtx=" << baseVertexLocation
+			<< (idxOob ? "  <<<IDX-OOB-SKIP" : "") << (instOob ? "  <<<INST-OOB-SKIP" : "") << std::endl;
+	}
+	if (idxOob || instOob) { ++m->DbgOOBDraws; ++m->DbgDrawsSkipped; return; }
+	if (m->CurrentGfx)
+	{
+		auto* gp = static_cast<NRIGraphicsPipeline*>(m->CurrentGfx);
+		float worst = 0.0f;
+		if (!gp->DebugTransformSane(worst))
+		{
+			++m->DbgBadXform; ++m->DbgDrawsSkipped;
+			if (m->DrawLog) { std::ofstream l("nri_drawlog.log", std::ios::app); if (l) l << "DRAWIDXINST vb=" << (void*)m->LastVB << " instCount=" << instanceCount << " worstXform=" << worst << "  <<<BAD-XFORM-SKIP" << std::endl; }
+			return;
+		}
+		gp->ApplyForDraw();
+	}
 	nri::DrawIndexedDesc dd = {}; dd.indexNum = indexCountPerInstance; dd.instanceNum = instanceCount; dd.baseIndex = startIndexLocation; dd.baseVertex = baseVertexLocation; dd.baseInstance = startInstanceLocation;
 	m->Core.CmdDrawIndexed(*m->ActiveCmd, dd);
 	++m->DbgDraws;

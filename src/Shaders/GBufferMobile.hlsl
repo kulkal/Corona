@@ -40,7 +40,8 @@ PS_OUTPUT PSMain(PSInput input)
     positionSS *= RTSize.xy;
     float2 velocity = (positionSS - prevPositionSS) / RTSize.xy;
 
-    float4 Albedo = AlbedoTex.Sample(sampleWrap, input.uv) * BaseColorFactor;
+    GBufferMaterialRecord material = GetGBufferMaterialRecord();
+    float4 Albedo = SampleGBufferAlbedo(material, input.uv) * BaseColorFactor;
 
     if (Albedo.w < 0.1f)
         discard;
