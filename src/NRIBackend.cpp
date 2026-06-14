@@ -1866,6 +1866,58 @@ public:
 	void BindSRV(const std::string& shader, const std::string& name, uint32_t baseRegister) override { AddBinding(shader, name, baseRegister, RegClass::SRV, 0); }
 	void BindSampler(const std::string& shader, const std::string& name, uint32_t baseRegister) override { AddBinding(shader, name, baseRegister, RegClass::Sampler, 0); }
 	void BindCBV(const std::string& shader, const std::string& name, uint32_t baseRegister, uint32_t size, uint32_t) override { AddBinding(shader, name, baseRegister, RegClass::CBV, size); }
+
+	// Typed binding schema (bindless RHI). The base default forwards to the
+	// by-name overloads and drops RegisterSpace/RuntimeArray/Bindless, which the
+	// RT bindless tables (space10/12 runtime arrays) need — capture them here.
+	void BindSRV(const std::string& shader, const RHIBindingDesc& d) override
+	{
+		AddBinding(shader, d.Name, d.RegisterIndex, RegClass::SRV, 0);
+		ApplyBindingSchema(shader, d, false);
+	}
+	void BindUAV(const std::string& shader, const RHIBindingDesc& d) override
+	{
+		AddBinding(shader, d.Name, d.RegisterIndex, RegClass::UAV, 0);
+		ApplyBindingSchema(shader, d, true);
+	}
+	void ApplyBindingSchema(const std::string& shader, const RHIBindingDesc& d, bool isUAV)
+	{
+		Binding* b = Find(shader, d.Name);
+		if (!b) return;
+		b->registerSpace = d.RegisterSpace;
+		const bool isBuf = (d.ResourceKind == RHIResourceKind::Buffer);
+		if (isUAV) { b->kind = isBuf ? ResKind::BufUAV : ResKind::TexUAV; b->descriptorType = isBuf ? nri::DescriptorType::STORAGE_STRUCTURED_BUFFER : nri::DescriptorType::STORAGE_TEXTURE; }
+		else       { b->kind = isBuf ? ResKind::BufSRV : ResKind::TexSRV; b->descriptorType = isBuf ? nri::DescriptorType::STRUCTURED_BUFFER : nri::DescriptorType::TEXTURE; }
+		if (d.RuntimeArray || d.DescriptorCount == RHI_BINDLESS_ARRAY)
+		{
+			b->descriptorNum = kRtBindlessCapacity;
+			b->bindless = true;
+			b->bindlessSrc = isBuf ? 2 : 1;
+		}
+		else if (d.DescriptorCount > 1)
+			b->descriptorNum = d.DescriptorCount;
+	}
+	// Global bindless tables: create the binding at the BindlessResources.hlsli
+	// convention space (textures=10, byte-address buffers=12) and fill it from the
+	// backend registry at Apply.
+	bool SetBindlessTextureTable(const std::string& shader, const std::string& bindingName) override
+	{
+		AddBinding(shader, bindingName, 0, RegClass::SRV, 0);
+		Binding* b = Find(shader, bindingName);
+		if (!b) return false;
+		b->registerSpace = 10; b->kind = ResKind::TexSRV; b->descriptorType = nri::DescriptorType::TEXTURE;
+		b->descriptorNum = kRtBindlessCapacity; b->bindless = true; b->bindlessSrc = 1;
+		return true;
+	}
+	bool SetBindlessBufferTable(const std::string& shader, const std::string& bindingName) override
+	{
+		AddBinding(shader, bindingName, 0, RegClass::SRV, 0);
+		Binding* b = Find(shader, bindingName);
+		if (!b) return false;
+		b->registerSpace = 12; b->kind = ResKind::BufSRV; b->descriptorType = nri::DescriptorType::STRUCTURED_BUFFER;
+		b->descriptorNum = kRtBindlessCapacity; b->bindless = true; b->bindlessSrc = 2;
+		return true;
+	}
 	void SetShaderDefine(const std::string& name, const std::string& value) override
 	{
 		if (!name.empty())
@@ -1893,7 +1945,24 @@ public:
 	}
 	void SetBufferSRV(const std::string& shader, const std::string& bindingName, Buffer* buffer, int = -1) override
 	{
-		if (Binding* b = Find(shader, bindingName)) { b->kind = ResKind::BufSRV; b->buf = buffer; }
+		Binding* b = Find(shader, bindingName);
+		if (!b)
+		{
+			// The bindless-RHI record buffers are referenced by reflection on DX12
+			// but never explicitly BindSRV'd; auto-declare them at the
+			// BindlessResources.hlsli convention space so the NRI root signature
+			// matches the hit shaders (single structured/byte-address SRVs).
+			uint32_t space = UINT32_MAX;
+			if (bindingName == "RtMaterials") space = 11;
+			else if (bindingName == "RtGeometries") space = 13;
+			else if (bindingName == "RtInstanceProperties") space = 14;
+			if (space == UINT32_MAX) return;
+			AddBinding(shader, bindingName, 0, RegClass::SRV, 0);
+			b = Find(shader, bindingName);
+			if (!b) return;
+			b->registerSpace = space;
+		}
+		b->kind = ResKind::BufSRV; b->buf = buffer; b->descriptorType = nri::DescriptorType::STRUCTURED_BUFFER;
 	}
 	void SetAccelerationStructure(const std::string& shader, const std::string& bindingName, const std::shared_ptr<RTAS>& rtas, int = -1) override
 	{
@@ -2107,6 +2176,8 @@ public:
 
 		for (Binding& b : Bindings)
 		{
+			if (b.bindless)
+				continue; // filled from the global registry below
 			if (b.descriptorNum > 1)
 				RefreshDescriptorArray(b);
 			else
@@ -2115,8 +2186,30 @@ public:
 
 		if (!Sets.empty())
 		{
+			// Bindless tables: write the backend's global registry descriptors
+			// (material textures / geometry buffers) into the bindless ranges.
+			// PARTIALLY_BOUND covers slots past the registered count.
 			for (Binding& b : Bindings)
 			{
+				if (!b.bindless || b.rangeIndex == UINT32_MAX || b.setIndex >= Sets.size() || !Sets[b.setIndex])
+					continue;
+				std::vector<nri::Descriptor*>& regDescs = (b.bindlessSrc == 2) ? m->BindlessBufDescs : m->BindlessTexDescs;
+				uint32_t count = std::min<uint32_t>((uint32_t)regDescs.size(), b.descriptorNum);
+				while (count > 0 && !regDescs[count - 1]) --count; // trailing freed slots
+				if (count == 0)
+					continue;
+				nri::UpdateDescriptorRangeDesc upd = {};
+				upd.descriptorSet = Sets[b.setIndex];
+				upd.rangeIndex = b.rangeIndex;
+				upd.baseDescriptor = 0;
+				upd.descriptors = regDescs.data();
+				upd.descriptorNum = count;
+				m->Core.UpdateDescriptorRanges(&upd, 1);
+			}
+			for (Binding& b : Bindings)
+			{
+				if (b.bindless)
+					continue;
 				if (b.rangeIndex == UINT32_MAX || b.setIndex >= Sets.size() || !Sets[b.setIndex])
 					continue;
 				nri::UpdateDescriptorRangeDesc upd = {};
@@ -2221,7 +2314,12 @@ private:
 		std::vector<Texture*> texArray;
 		std::vector<Buffer*> bufArray;
 		std::shared_ptr<RTAS> rtas;
+		// Bindless global table (homecoming RHI): filled from the backend registry
+		// (m->BindlessTexDescs / BindlessBufDescs) at Apply, not per-instance.
+		bool bindless = false;
+		int bindlessSrc = 0; // 1 = texture registry (space10), 2 = buffer registry (space12)
 	};
+	static constexpr uint32_t kRtBindlessCapacity = 4096;
 
 	void AddBinding(const std::string& shader, const std::string& name, uint32_t reg, RegClass regClass, uint32_t cbSize)
 	{
