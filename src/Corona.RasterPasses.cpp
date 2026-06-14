@@ -1605,13 +1605,28 @@ void Corona::LightingPass()
 	Texture* lightingDiffuseTex = DefaultBlackTex.get();
 	if (!bMobileHybridDirectOnly &&
 		bDiffuseGIEnabledThisFrame &&
-		bNriSimpleGIBringup &&
-		DiffuseGIRaw)
+		bNriSimpleGIBringup)
 	{
-		lightingDiffuseTex = DiffuseGIRaw.get();
-		lightingDiffuseSource = L"raw_nri_simple";
-		if (DiffuseGIRawAux)
-			lightingDiffuseAuxTex = DiffuseGIRawAux.get();
+		// NRI simple-GI bring-up. The GI pass always runs SIMPLE_RAYTRACE (see
+		// effectiveDiffuseGIMode), so this must NOT fall through to the SPATIAL_HASH
+		// branch below (DiffuseGIMode is the unmodified user setting and may be
+		// SPATIAL_HASH, whose cache is never written here -> black GI). Keep it
+		// self-contained: use the DENOISED DiffuseGITemporal once the screen-space
+		// TemporalDenoisingPass runs (stage >= 5), else the raw 1-spp buffer.
+		if (backendMaxSupportedHybridStage >= 5u && DiffuseGITemporal[GIBufferWriteIndex])
+		{
+			lightingDiffuseTex = DiffuseGITemporal[GIBufferWriteIndex].get();
+			lightingDiffuseSource = L"temporal_nri_simple";
+			if (DiffuseGITemporalAux[GIBufferWriteIndex])
+				lightingDiffuseAuxTex = DiffuseGITemporalAux[GIBufferWriteIndex].get();
+		}
+		else if (DiffuseGIRaw)
+		{
+			lightingDiffuseTex = DiffuseGIRaw.get();
+			lightingDiffuseSource = L"raw_nri_simple";
+			if (DiffuseGIRawAux)
+				lightingDiffuseAuxTex = DiffuseGIRawAux.get();
+		}
 	}
 	else if (!bMobileHybridDirectOnly &&
 		bDiffuseGIEnabledThisFrame &&
@@ -1676,7 +1691,16 @@ void Corona::LightingPass()
 	// surface-motion-vector temporal filter.
 	const wchar_t* lightingSpecularSource = L"black";
 	Texture* lightingSpecularTex = DefaultBlackTex.get();
-	if (!bMobileHybridDirectOnly && bSpecularGIEnabledThisFrame && SpecularGIRaw)
+	if (!bMobileHybridDirectOnly && bSpecularGIEnabledThisFrame &&
+		bNriSimpleGIBringup && backendMaxSupportedHybridStage >= 5u &&
+		SpecularGITemporal[GIBufferWriteIndex])
+	{
+		// NRI bring-up has no DLSS-RR, so consume the screen-space TemporalDenoising
+		// denoised specular instead of the raw 1-spp reflections.
+		lightingSpecularTex = SpecularGITemporal[GIBufferWriteIndex].get();
+		lightingSpecularSource = L"temporal_nri";
+	}
+	else if (!bMobileHybridDirectOnly && bSpecularGIEnabledThisFrame && SpecularGIRaw)
 	{
 		lightingSpecularTex = SpecularGIRaw.get();
 		lightingSpecularSource = L"raw";

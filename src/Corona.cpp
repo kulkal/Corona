@@ -16206,6 +16206,7 @@ if (ImGui::Button("Reset Accumulation"))
 		{
 			AppendCpuRuntimeTrace(L"[NRIDump] dumping buffers at frame " + std::to_wstring(FrameCounter));
 			if (DiffuseGIRaw) AppendCpuRuntimeTrace(L"[NRIDump] gi=" + std::to_wstring(DumpTexturePNG(DiffuseGIRaw.get(), L"C:\\dev\\Corona_nri\\nri_dump_gi.png", EResourceState::ShaderRead) ? 1 : 0));
+			if (DiffuseGITemporal[GIBufferWriteIndex]) AppendCpuRuntimeTrace(L"[NRIDump] gidenoised=" + std::to_wstring(DumpTexturePNG(DiffuseGITemporal[GIBufferWriteIndex].get(), L"C:\\dev\\Corona_nri\\nri_dump_gidenoised.png", EResourceState::ShaderRead) ? 1 : 0));
 			if (SpecularGIRaw) AppendCpuRuntimeTrace(L"[NRIDump] specgi=" + std::to_wstring(DumpTexturePNG(SpecularGIRaw.get(), L"C:\\dev\\Corona_nri\\nri_dump_specgi.png", EResourceState::ShaderRead) ? 1 : 0));
 			if (AmbientOcclusionBuffer) AppendCpuRuntimeTrace(L"[NRIDump] rtao=" + std::to_wstring(DumpTexturePNG(AmbientOcclusionBuffer.get(), L"C:\\dev\\Corona_nri\\nri_dump_rtao.png", EResourceState::ShaderRead) ? 1 : 0));
 			if (ShadowBuffer) AppendCpuRuntimeTrace(L"[NRIDump] shadow=" + std::to_wstring(DumpTexturePNG(ShadowBuffer.get(), L"C:\\dev\\Corona_nri\\nri_dump_shadow.png", EResourceState::ShaderRead) ? 1 : 0));
