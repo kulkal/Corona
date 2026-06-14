@@ -2902,31 +2902,51 @@ private:
 		}
 		VsEntry = desc.VertexEntryPoint; PsEntry = desc.PixelEntryPoint;
 
-		// Bindings -> descriptor set ranges (resource set + sampler set).
+		// Build descriptor ranges from the typed pipeline-layout schema (bindless
+		// RHI contract). Each RHIBindingDesc fully describes kind/register/space/
+		// count, so the root signature matches the shader with no late inference.
+		// NOTE: assumes register space 0 for all graphics bindings (true for the
+		// raster passes today); non-zero spaces (bindless material/geometry tables)
+		// will need one NRI descriptor set per space.
 		std::vector<nri::DescriptorRangeDesc> resR;
 		const nri::StageBits gfxStages = nri::StageBits::VERTEX_SHADER | nri::StageBits::FRAGMENT_SHADER;
-		auto addRes = [&](const std::string& name, uint32_t reg, Kind k, nri::DescriptorType dt) {
-			Binding b; b.name = name; b.reg = reg; b.kind = k; b.setIndex = 0; b.rangeIndex = (uint32_t)resR.size(); Bindings.push_back(b);
-			nri::DescriptorRangeDesc r = {}; r.baseRegisterIndex = reg; r.descriptorNum = 1; r.descriptorType = dt; r.shaderStages = gfxStages; r.flags = nri::DescriptorRangeBits::PARTIALLY_BOUND; resR.push_back(r);
-		};
-		for (const auto& t : desc.TextureBindings) addRes(t.Name, t.Slot, Kind::TexSRV, nri::DescriptorType::TEXTURE);
-		for (const auto& bb : desc.BufferBindings) addRes(bb.Name, bb.Slot, Kind::BufSRV, nri::DescriptorType::STRUCTURED_BUFFER);
-		if (desc.ConstantBufferSize > 0)
+		uint32_t texN = 0, bufN = 0, cbvN = 0, sampN = 0, storTexN = 0, storBufN = 0;
+		for (const RHIBindingDesc& bd : desc.PipelineLayout.Bindings)
 		{
-			addRes("$Globals", desc.ConstantBufferBinding, Kind::CBV, nri::DescriptorType::CONSTANT_BUFFER);
-			const uint32_t aligned = (desc.ConstantBufferSize + 255u) & ~255u;
-			if (m->CreateBoundBuffer(aligned, 0, nri::BufferUsageBits::CONSTANT_BUFFER, nri::MemoryLocation::HOST_UPLOAD, Cbv.buffer, Cbv.memory))
+			Kind k = Kind::TexSRV; nri::DescriptorType dt = nri::DescriptorType::TEXTURE;
+			switch (bd.DescriptorKind)
 			{
-				Cbv.size = aligned;
-				nri::BufferViewDesc bvd = {}; bvd.buffer = Cbv.buffer; bvd.type = nri::BufferView::CONSTANT_BUFFER; bvd.offset = 0; bvd.size = aligned;
-				m->Core.CreateBufferView(bvd, Cbv.view);
-				if (Binding* cb = Find("$Globals")) { cb->desc = Cbv.view; }
+			case RHIDescriptorKind::CBV:     k = Kind::CBV;     dt = nri::DescriptorType::CONSTANT_BUFFER; ++cbvN; break;
+			case RHIDescriptorKind::Sampler: k = Kind::Sampler; dt = nri::DescriptorType::SAMPLER; ++sampN; break;
+			case RHIDescriptorKind::UAV:
+				if (bd.ResourceKind == RHIResourceKind::Buffer) { k = Kind::BufSRV; dt = nri::DescriptorType::STORAGE_STRUCTURED_BUFFER; ++storBufN; }
+				else { k = Kind::TexSRV; dt = nri::DescriptorType::STORAGE_TEXTURE; ++storTexN; }
+				break;
+			case RHIDescriptorKind::SRV:
+			default:
+				if (bd.ResourceKind == RHIResourceKind::Buffer) { k = Kind::BufSRV; dt = nri::DescriptorType::STRUCTURED_BUFFER; ++bufN; }
+				else { k = Kind::TexSRV; dt = nri::DescriptorType::TEXTURE; ++texN; }
+				break;
 			}
-		}
-		for (const auto& s : desc.SamplerBindings)
-		{
-			Binding b; b.name = s.Name; b.reg = s.Slot; b.kind = Kind::Sampler; b.setIndex = 0; b.rangeIndex = (uint32_t)resR.size(); Bindings.push_back(b);
-			nri::DescriptorRangeDesc r = {}; r.baseRegisterIndex = s.Slot; r.descriptorNum = 1; r.descriptorType = nri::DescriptorType::SAMPLER; r.shaderStages = gfxStages; r.flags = nri::DescriptorRangeBits::PARTIALLY_BOUND; resR.push_back(r);
+			Binding b; b.name = bd.Name; b.reg = bd.RegisterIndex; b.kind = k; b.setIndex = 0; b.rangeIndex = (uint32_t)resR.size(); Bindings.push_back(b);
+			nri::DescriptorRangeDesc r = {};
+			r.baseRegisterIndex = bd.RegisterIndex;
+			r.descriptorNum = (bd.RuntimeArray || bd.DescriptorCount == RHI_BINDLESS_ARRAY) ? 4096u : (bd.DescriptorCount ? bd.DescriptorCount : 1u);
+			r.descriptorType = dt;
+			r.shaderStages = gfxStages;
+			r.flags = nri::DescriptorRangeBits::PARTIALLY_BOUND;
+			resR.push_back(r);
+			if (bd.DescriptorKind == RHIDescriptorKind::CBV && !Cbv.buffer)
+			{
+				const uint32_t aligned = ((bd.SizeInBytes ? bd.SizeInBytes : 256u) + 255u) & ~255u;
+				if (m->CreateBoundBuffer(aligned, 0, nri::BufferUsageBits::CONSTANT_BUFFER, nri::MemoryLocation::HOST_UPLOAD, Cbv.buffer, Cbv.memory))
+				{
+					Cbv.size = aligned;
+					nri::BufferViewDesc bvd = {}; bvd.buffer = Cbv.buffer; bvd.type = nri::BufferView::CONSTANT_BUFFER; bvd.offset = 0; bvd.size = aligned;
+					m->Core.CreateBufferView(bvd, Cbv.view);
+					if (Binding* cb = Find(bd.Name)) cb->desc = Cbv.view;
+				}
+			}
 		}
 
 		// Single descriptor set (registerSpace 0) for all ranges (resources + samplers).
@@ -2938,16 +2958,16 @@ private:
 
 		if (!sets.empty())
 		{
-			// A single descriptor set reused across draws would alias in D3D12
-			// (descriptors resolve at GPU-execute time, so every draw in the
-			// command list would see the LAST set contents). Size the pool for a
-			// RING of sets and hand out a fresh one per draw (ApplyForDraw).
+			// A single descriptor set reused across draws would alias in D3D12, so
+			// size the pool for a RING and hand out a fresh set per draw (ApplyForDraw).
 			HasResources = true;
 			nri::DescriptorPoolDesc pd = {}; pd.descriptorSetMaxNum = kRing;
-			pd.textureMaxNum = (uint32_t)desc.TextureBindings.size() * kRing;
-			pd.structuredBufferMaxNum = (uint32_t)desc.BufferBindings.size() * kRing;
-			pd.constantBufferMaxNum = (desc.ConstantBufferSize > 0 ? 1u : 0u) * kRing;
-			pd.samplerMaxNum = (uint32_t)desc.SamplerBindings.size() * kRing;
+			pd.textureMaxNum = texN * kRing;
+			pd.storageTextureMaxNum = storTexN * kRing;
+			pd.structuredBufferMaxNum = bufN * kRing;
+			pd.storageStructuredBufferMaxNum = storBufN * kRing;
+			pd.constantBufferMaxNum = cbvN * kRing;
+			pd.samplerMaxNum = sampN * kRing;
 			if (m->Core.CreateDescriptorPool(*m->Device, pd, Pool) != nri::Result::SUCCESS) { plog("CreateDescriptorPool"); return; }
 		}
 
@@ -3045,7 +3065,7 @@ NRIBackend::NRIBackend() : m(std::make_unique<Impl>())
 	nri::DeviceCreationDesc desc = {};
 	desc.graphicsAPI = nri::GraphicsAPI::D3D12;
 	desc.enableNRIValidation = true;            // embedded NRI validation -> message log (fast)
-	desc.enableGraphicsAPIValidation = false;   // D3D12 debug layer is very slow + breaks on error; enable only for deep debugging
+	desc.enableGraphicsAPIValidation = false;
 	desc.callbackInterface.MessageCallback = NRIMessageCallback;
 	desc.callbackInterface.AbortExecution = NRIAbortCallback;
 
@@ -3460,7 +3480,10 @@ NRIBackend::~NRIBackend()
 // === Capabilities / identity =============================================
 ERenderBackendAPI NRIBackend::GetAPI() const { return ERenderBackendAPI::NRI; }
 const char* NRIBackend::GetBackendName() const { return m->BackendName.c_str(); }
-uint32_t NRIBackend::GetMaxSupportedHybridStage() const { return (m->RayTracingTier >= 1 && m->HasRayTracing) ? 4u : 0u; }
+// RT is disabled (return 0) until the NRI RT pipeline is ported to the bindless
+// contract (hit shaders read bindless material/geometry tables at space10+). With
+// 0, OnRender takes the GBuffer + direct-lighting raster path (bDesktopRasterDirectOnly).
+uint32_t NRIBackend::GetMaxSupportedHybridStage() const { return 0u; }
 bool NRIBackend::SupportsRayTracing() const { return GetMaxSupportedHybridStage() >= 1 && m->RayTracingTier >= 1 && m->HasRayTracing; }
 bool NRIBackend::SupportsShaderExecutionReordering() const { return m->RayTracingTier >= 3; }
 
