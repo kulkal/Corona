@@ -425,12 +425,9 @@ private:
 	// SV_InstanceID / SV_VertexID, samples GBufferConstantBuffer (b0) for
 	// world matrix + wind/bend + PG_* fields.
 	std::shared_ptr<GraphicsPipelineHandle> ProceduralGrassGraphicsPipeline;
-	// Shared sequential IB (0,1,2,…) used by the procedural grass path —
-	// the backend doesn't expose non-indexed instanced draw, so we bind
-	// this trivial IB and let SV_VertexID equal the index value.
+	// Shared sequential IB (0,1,2,...) used by the procedural grass path.
+	// GBuffer bindless geometry uses non-indexed draw and does not share it.
 	std::shared_ptr<IndexBuffer> ProceduralGrassSequentialIb;
-	std::shared_ptr<IndexBuffer> GBufferSequentialIb;
-	uint32_t GBufferSequentialIbCapacity = 0;
 	std::shared_ptr<GraphicsPipelineHandle> CpuSpineGBufferGraphicsPipeline;
 	std::shared_ptr<GraphicsPipelineHandle> SpineGBufferGraphicsPipeline;
 	// Spine VS-inline path: skinning math executes in the vertex shader,

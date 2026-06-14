@@ -386,8 +386,6 @@ public:
 	uint32_t GBufferGeometryRecordDrawCount = 0;
 	const IRenderBackend* GBufferGeometryRecordBackend = nullptr;
 	bool bGBufferGeometryRecordCacheValid = false;
-	bool bGBufferMaxDrawIndexCountValid = false;
-	uint32_t GBufferMaxDrawIndexCount = 0;
 	std::shared_ptr<Buffer> GBufferGeometryRecordBuffer;
 
 	struct GBufferResourceBindGroupCacheEntry

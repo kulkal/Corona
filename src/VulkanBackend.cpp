@@ -9206,6 +9206,27 @@ void VulkanBackend::DrawIndexed(uint32_t indexCount, uint32_t startIndexLocation
 	vkCmdDrawIndexed(ActiveCommandBuffer, indexCount, 1, startIndexLocation, baseVertexLocation, 0);
 #endif
 }
+
+void VulkanBackend::DrawInstanced(uint32_t vertexCountPerInstance, uint32_t instanceCount, uint32_t startVertexLocation, uint32_t startInstanceLocation)
+{
+#if !CORONA_HAS_VULKAN
+	(void)vertexCountPerInstance; (void)instanceCount; (void)startVertexLocation; (void)startInstanceLocation; ThrowNotImplemented(__FUNCTION__);
+#else
+	if (!bRenderPassActive)
+		return;
+	auto* pipeline = dynamic_cast<VulkanGraphicsPipelineHandle*>(BoundGraphicsPipeline);
+	if (pipeline)
+		BindGraphicsPipelineForDraw(pipeline);
+	else
+		return;
+	if (!bViewportBound)
+		SetViewportAndScissor(
+			PendingViewportWidth > 0 ? PendingViewportWidth : SwapchainExtent.width,
+			PendingViewportHeight > 0 ? PendingViewportHeight : SwapchainExtent.height);
+	vkCmdDraw(ActiveCommandBuffer, vertexCountPerInstance, instanceCount, startVertexLocation, startInstanceLocation);
+#endif
+}
+
 void VulkanBackend::DrawIndexedInstanced(uint32_t indexCountPerInstance, uint32_t instanceCount, uint32_t startIndexLocation, int32_t baseVertexLocation, uint32_t startInstanceLocation)
 {
 #if !CORONA_HAS_VULKAN
@@ -9225,6 +9246,66 @@ void VulkanBackend::DrawIndexedInstanced(uint32_t indexCountPerInstance, uint32_
 	vkCmdDrawIndexed(ActiveCommandBuffer, indexCountPerInstance, instanceCount, startIndexLocation, baseVertexLocation, startInstanceLocation);
 #endif
 }
+
+bool VulkanBackend::DrawIndirect(Buffer* indirectArgumentBuffer, uint64_t byteOffset, uint32_t drawCount)
+{
+#if !CORONA_HAS_VULKAN
+	(void)indirectArgumentBuffer; (void)byteOffset; (void)drawCount; ThrowNotImplemented(__FUNCTION__);
+#else
+	static_assert(sizeof(DrawIndirectArguments) == sizeof(VkDrawIndirectCommand), "Draw indirect argument layout must match Vulkan.");
+	if (drawCount == 0)
+		return true;
+	if (!bRenderPassActive || !indirectArgumentBuffer || !bDrawIndexedIndirectEnabled)
+		return false;
+	if (!bDrawIndirectFirstInstanceEnabled)
+		return false;
+
+	auto bufferIt = BufferAllocations.find(indirectArgumentBuffer);
+	if (bufferIt == BufferAllocations.end() || bufferIt->second.Buffer == VK_NULL_HANDLE)
+		return false;
+
+	auto* pipeline = dynamic_cast<VulkanGraphicsPipelineHandle*>(BoundGraphicsPipeline);
+	if (pipeline)
+		BindGraphicsPipelineForDraw(pipeline);
+	else
+		return false;
+	if (!bViewportBound)
+		SetViewportAndScissor(
+			PendingViewportWidth > 0 ? PendingViewportWidth : SwapchainExtent.width,
+			PendingViewportHeight > 0 ? PendingViewportHeight : SwapchainExtent.height);
+
+	const VkDeviceSize drawOffset = bufferIt->second.Offset + static_cast<VkDeviceSize>(byteOffset);
+	const VkDeviceSize argsBytes =
+		static_cast<VkDeviceSize>(drawCount) * static_cast<VkDeviceSize>(sizeof(DrawIndirectArguments));
+	if (drawOffset + argsBytes > bufferIt->second.Offset + bufferIt->second.SizeInBytes)
+		return false;
+
+	if (drawCount > 1 && !bMultiDrawIndirectEnabled)
+	{
+		const VkDeviceSize stride = sizeof(DrawIndirectArguments);
+		for (uint32_t i = 0; i < drawCount; ++i)
+		{
+			vkCmdDrawIndirect(
+				ActiveCommandBuffer,
+				bufferIt->second.Buffer,
+				drawOffset + static_cast<VkDeviceSize>(i) * stride,
+				1,
+				stride);
+		}
+	}
+	else
+	{
+		vkCmdDrawIndirect(
+			ActiveCommandBuffer,
+			bufferIt->second.Buffer,
+			drawOffset,
+			drawCount,
+			sizeof(DrawIndirectArguments));
+	}
+	return true;
+#endif
+}
+
 bool VulkanBackend::DrawIndexedIndirect(Buffer* indirectArgumentBuffer, uint64_t byteOffset, uint32_t drawCount)
 {
 #if !CORONA_HAS_VULKAN

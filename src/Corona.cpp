@@ -9282,6 +9282,21 @@ void Corona::LoadPipeline()
 		}
 	}
 
+	if (_wgetenv(L"CORONA_NRI_DRED") != nullptr || _wgetenv(L"CORONA_DX12_DRED") != nullptr)
+	{
+		ComPtr<ID3D12DeviceRemovedExtendedDataSettings1> dred;
+		if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&dred))) && dred)
+		{
+			dred->SetAutoBreadcrumbsEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+			dred->SetPageFaultEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+			AppendCpuRuntimeTrace(L"[D3D12DRED] DRED auto-breadcrumbs + page-fault enabled");
+		}
+		else
+		{
+			AppendCpuRuntimeTrace(L"[D3D12DRED] failed to acquire DRED settings interface");
+		}
+	}
+
 	ComPtr<IDXGIFactory4> factory;
 	ThrowIfFailed(CreateDXGIFactory2(dxgiFactoryFlags, IID_PPV_ARGS(&factory)));
 

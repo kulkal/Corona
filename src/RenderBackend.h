@@ -194,6 +194,14 @@ struct DrawIndexedIndirectArguments
 	uint32_t StartInstanceLocation = 0;
 };
 
+struct DrawIndirectArguments
+{
+	uint32_t VertexCountPerInstance = 0;
+	uint32_t InstanceCount = 0;
+	uint32_t StartVertexLocation = 0;
+	uint32_t StartInstanceLocation = 0;
+};
+
 enum class ESamplerFilter
 {
 	Anisotropic,
@@ -394,6 +402,7 @@ struct RenderBackendCapabilities
 	bool SupportsPartiallyBoundDescriptors = false;
 	bool SupportsUpdateAfterBind = false;
 	bool SupportsDrawIndexedIndirect = false;
+	bool SupportsDrawIndirect = false;
 	bool SupportsMultiDrawIndirect = false;
 	bool SupportsDrawIndirectFirstInstance = false;
 	uint32_t MaxBindlessTextureCount = 0;
@@ -618,8 +627,10 @@ public:
 	virtual void SetViewportAndScissor(uint32_t width, uint32_t height) = 0;
 	virtual void DrawFullscreenQuad(VertexBuffer* vertexBuffer) = 0;
 	virtual void BindMeshBuffers(VertexBuffer* vertexBuffer, IndexBuffer* indexBuffer) = 0;
+	virtual void DrawInstanced(uint32_t vertexCountPerInstance, uint32_t instanceCount, uint32_t startVertexLocation, uint32_t startInstanceLocation) = 0;
 	virtual void DrawIndexed(uint32_t indexCount, uint32_t startIndexLocation, int32_t baseVertexLocation) = 0;
 	virtual void DrawIndexedInstanced(uint32_t indexCountPerInstance, uint32_t instanceCount, uint32_t startIndexLocation, int32_t baseVertexLocation, uint32_t startInstanceLocation) = 0;
+	virtual bool DrawIndirect(Buffer* indirectArgumentBuffer, uint64_t byteOffset, uint32_t drawCount) = 0;
 	virtual bool DrawIndexedIndirect(Buffer* indirectArgumentBuffer, uint64_t byteOffset, uint32_t drawCount) = 0;
 	virtual void Dispatch(uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ) = 0;
 	virtual void ClearTextureUAVFloat(Texture* texture, const float clearColor[4]) = 0;

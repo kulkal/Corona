@@ -564,15 +564,20 @@ void Corona::UpdateInstancePropertyBuffer()
 
 	auto ClearFailedD3D12FrameResources = [&](const wchar_t* reason)
 	{
+		const UINT32 failedFrameIndex = GetRayTracingFrameResourceIndex();
 		AppendCpuRuntimeTrace(
 			L"[RTAS] InstancePropertyBuffer unavailable: " + std::wstring(reason ? reason : L"unknown") +
 			L", capacity=" + std::to_wstring(instanceCapacity) +
-			L", instances=" + std::to_wstring(RayTracingInstances.size()));
+			L", instances=" + std::to_wstring(RayTracingInstances.size()) +
+			L", frameIndex=" + std::to_wstring(failedFrameIndex));
 		InstancePropertyBuffer = nullptr;
 		TLAS = nullptr;
-		std::fill(TLASFrameResources.begin(), TLASFrameResources.end(), std::shared_ptr<RTAS>());
-		std::fill(TLASFrameInstanceCounts.begin(), TLASFrameInstanceCounts.end(), 0u);
-		std::fill(InstancePropertyFrameBuffers.begin(), InstancePropertyFrameBuffers.end(), std::shared_ptr<Buffer>());
+		if (failedFrameIndex < TLASFrameResources.size())
+			TLASFrameResources[failedFrameIndex].reset();
+		if (failedFrameIndex < TLASFrameInstanceCounts.size())
+			TLASFrameInstanceCounts[failedFrameIndex] = 0u;
+		if (failedFrameIndex < InstancePropertyFrameBuffers.size())
+			InstancePropertyFrameBuffers[failedFrameIndex].reset();
 	};
 
 	if (renderBackend &&

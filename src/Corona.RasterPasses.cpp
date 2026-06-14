@@ -32,6 +32,7 @@ namespace
 	constexpr uint32_t kGBufferBindlessTextureRegisterSpace = 10;
 	constexpr uint32_t kGBufferMaterialRecordRegister = 13;
 	constexpr uint32_t kGBufferDrawRecordRegister = 15;
+	constexpr uint32_t kGBufferLegacyStaticVertexStride = 44;
 
 	struct GBufferMaterialRecord
 	{
@@ -164,8 +165,86 @@ namespace
 	{
 		if (!backend)
 			return false;
+		static const bool bDisableGBufferBindlessGeometry =
+			std::getenv("CORONA_DISABLE_GBUFFER_BINDLESS_GEOMETRY") != nullptr;
+		static bool bLoggedDisableGBufferBindlessGeometry = false;
+		if (bDisableGBufferBindlessGeometry)
+		{
+			if (!bLoggedDisableGBufferBindlessGeometry)
+			{
+				AppendCpuRuntimeTrace(L"[GBufferBindless] bindless geometry disabled by CORONA_DISABLE_GBUFFER_BINDLESS_GEOMETRY");
+				bLoggedDisableGBufferBindlessGeometry = true;
+			}
+			return false;
+		}
 		const RenderBackendCapabilities capabilities = backend->GetCapabilities();
 		return capabilities.SupportsBindlessBuffers && capabilities.SupportsRuntimeDescriptorArrays;
+	}
+
+	bool IsGBufferStaticBindlessGeometryEligible(const Mesh& mesh, std::wstring* reason = nullptr)
+	{
+		auto fail = [&](const wchar_t* message) -> bool
+		{
+			if (reason)
+				*reason = message;
+			return false;
+		};
+
+		if (!mesh.Vb || !mesh.Ib)
+			return fail(L"missing VB/IB");
+		if (mesh.bProceduralGrass || mesh.bGpuSpineSkinned || mesh.bSpineMesh || mesh.bSkeletalSkinned)
+			return fail(L"non-static mesh path");
+		if (mesh.VertexStride != kGBufferLegacyStaticVertexStride)
+			return fail(L"unsupported vertex stride");
+
+		const uint32_t vertexCount =
+			(mesh.Vb && mesh.Vb->numVertices > 0) ?
+			static_cast<uint32_t>(mesh.Vb->numVertices) :
+			mesh.NumVertices;
+		const uint32_t indexCount =
+			(mesh.Ib && mesh.Ib->numIndices > 0) ?
+			static_cast<uint32_t>(mesh.Ib->numIndices) :
+			mesh.NumIndices;
+		if (vertexCount == 0 || indexCount == 0)
+			return fail(L"empty VB/IB");
+
+		for (const Mesh::DrawCall& drawcall : mesh.Draws)
+		{
+			if (drawcall.IndexCount == 0)
+				continue;
+			if (drawcall.IndexStart > indexCount ||
+				drawcall.IndexCount > indexCount - drawcall.IndexStart)
+			{
+				return fail(L"index range outside IB");
+			}
+			if (drawcall.VertexBase > vertexCount)
+				return fail(L"vertex base outside VB");
+			if (drawcall.VertexCount > 0 &&
+				(drawcall.VertexCount > vertexCount ||
+				 drawcall.VertexBase > vertexCount - drawcall.VertexCount))
+			{
+				return fail(L"vertex range outside VB");
+			}
+		}
+		return true;
+	}
+
+	bool IsGBufferSceneStaticBindlessGeometryEligible(const Scene* scene, std::wstring* reason = nullptr)
+	{
+		if (!scene)
+		{
+			if (reason)
+				*reason = L"missing scene";
+			return false;
+		}
+		for (const std::shared_ptr<Mesh>& mesh : scene->meshes)
+		{
+			if (!mesh)
+				continue;
+			if (!IsGBufferStaticBindlessGeometryEligible(*mesh, reason))
+				return false;
+		}
+		return true;
 	}
 
 	GBufferMaterialKey ResolveGBufferMaterialKey(
@@ -535,13 +614,10 @@ namespace
 			return static_cast<uint32_t>(table.Keys.size() - 1);
 		};
 
-		uint32_t maxDrawIndexCount = 0;
 		for (std::shared_ptr<Mesh>& mesh : scene->meshes)
 		{
 			if (!mesh)
 				continue;
-			for (const Mesh::DrawCall& drawcall : mesh->Draws)
-				maxDrawIndexCount = (std::max)(maxDrawIndexCount, drawcall.IndexCount);
 			if (mesh->Vb && mesh->Ib)
 			{
 				mesh->GBufferGeometryIndex = findOrAddUniqueKey({
@@ -552,8 +628,6 @@ namespace
 				});
 			}
 		}
-		scene->GBufferMaxDrawIndexCount = maxDrawIndexCount;
-		scene->bGBufferMaxDrawIndexCountValid = true;
 
 		if (table.Keys.empty())
 			return table;
@@ -652,51 +726,6 @@ namespace
 		return table;
 	}
 
-	uint32_t GetMaxGBufferDrawIndexCount(Scene* scene)
-	{
-		uint32_t maxIndexCount = 0;
-		if (!scene)
-			return maxIndexCount;
-		if (scene->bGBufferMaxDrawIndexCountValid)
-			return scene->GBufferMaxDrawIndexCount;
-		for (const std::shared_ptr<Mesh>& mesh : scene->meshes)
-		{
-			if (!mesh)
-				continue;
-			for (const Mesh::DrawCall& drawcall : mesh->Draws)
-				maxIndexCount = (std::max)(maxIndexCount, drawcall.IndexCount);
-		}
-		scene->GBufferMaxDrawIndexCount = maxIndexCount;
-		scene->bGBufferMaxDrawIndexCountValid = true;
-		return maxIndexCount;
-	}
-
-	bool EnsureSequentialIndexBuffer(
-		IRenderBackend* backend,
-		std::shared_ptr<IndexBuffer>& buffer,
-		uint32_t& capacity,
-		uint32_t requiredIndexCount)
-	{
-		if (!backend || requiredIndexCount == 0)
-			return false;
-		if (buffer && capacity >= requiredIndexCount)
-			return true;
-
-		std::vector<uint32_t> indices(requiredIndexCount);
-		for (uint32_t i = 0; i < requiredIndexCount; ++i)
-			indices[i] = i;
-		buffer = backend->CreateIndexBuffer(
-			EIndexFormat::U32,
-			static_cast<uint32_t>(indices.size() * sizeof(uint32_t)),
-			indices.data());
-		if (!buffer)
-		{
-			capacity = 0;
-			return false;
-		}
-		capacity = requiredIndexCount;
-		return true;
-	}
 }
 
 void Corona::InitBloomPass()
@@ -2829,15 +2858,10 @@ bool Corona::DrawStaticInstancedScene(
 	StaticGBufferInstanceTransformScratch.resize(instanceCount);
 
 	GBufferGeometryTable geometryTable = BuildGBufferGeometryTable(renderBackend.get(), scene.get());
-	const uint32_t maxDrawIndexCount = GetMaxGBufferDrawIndexCount(scene.get());
 	bool bUseBindlessGeometry =
 		StaticInstancedBindlessGBufferGraphicsPipeline &&
 		geometryTable.Buffer &&
-		EnsureSequentialIndexBuffer(
-			renderBackend.get(),
-			GBufferSequentialIb,
-			GBufferSequentialIbCapacity,
-			maxDrawIndexCount);
+		IsGBufferSceneStaticBindlessGeometryEligible(scene.get());
 	GraphicsPipelineHandle* pso = bUseBindlessGeometry ?
 		StaticInstancedBindlessGBufferGraphicsPipeline.get() :
 		StaticInstancedGBufferGraphicsPipeline.get();
@@ -2886,9 +2910,7 @@ bool Corona::DrawStaticInstancedScene(
 		if (!mesh || !mesh->Vb || !mesh->Ib)
 			return false;
 
-		if (bUseBindlessGeometry)
-			renderBackend->BindMeshBuffers(nullptr, GBufferSequentialIb.get());
-		else
+		if (!bUseBindlessGeometry)
 			renderBackend->BindMeshBuffers(mesh->Vb.get(), mesh->Ib.get());
 
 		for (const Mesh::DrawCall& drawcall : mesh->Draws)
@@ -2938,12 +2960,19 @@ bool Corona::DrawStaticInstancedScene(
 					GraphicsBindGroupEntry::Constant(0, &objCB, sizeof(objCB)),
 				});
 
-			renderBackend->DrawIndexedInstanced(
-				drawcall.IndexCount,
-				instanceCount,
-				bUseBindlessGeometry ? 0u : drawcall.IndexStart,
-				bUseBindlessGeometry ? 0 : drawcall.VertexBase,
-				0);
+			if (bUseBindlessGeometry)
+			{
+				renderBackend->DrawInstanced(drawcall.IndexCount, instanceCount, 0, 0);
+			}
+			else
+			{
+				renderBackend->DrawIndexedInstanced(
+					drawcall.IndexCount,
+					instanceCount,
+					drawcall.IndexStart,
+					drawcall.VertexBase,
+					0);
+			}
 			++GBufferLastStaticInstancedDrawCount;
 		}
 	}
@@ -2966,29 +2995,35 @@ void Corona::DrawScene(shared_ptr<Scene> scene, const glm::mat4x4& instanceTrans
 		DefaultRougnessTex.get(),
 		DefaultBlackTex.get());
 	GBufferGeometryTable geometryTable = BuildGBufferGeometryTable(renderBackend.get(), scene.get());
-	const uint32_t maxDrawIndexCount = GetMaxGBufferDrawIndexCount(scene.get());
 	bool bUseSceneBindlessGeometry =
 		GBufferBindlessGeometryGraphicsPipeline &&
-		geometryTable.Buffer &&
-		EnsureSequentialIndexBuffer(
-			renderBackend.get(),
-			GBufferSequentialIb,
-			GBufferSequentialIbCapacity,
-			maxDrawIndexCount);
+		geometryTable.Buffer;
 
 	auto tryDrawSceneBindlessIndirect = [&]() -> bool
 	{
+		static const bool bDisableGBufferBindlessIndirect =
+			std::getenv("CORONA_DISABLE_GBUFFER_BINDLESS_INDIRECT") != nullptr;
+		static bool bLoggedDisableGBufferBindlessIndirect = false;
+		if (bDisableGBufferBindlessIndirect)
+		{
+			if (!bLoggedDisableGBufferBindlessIndirect)
+			{
+				AppendCpuRuntimeTrace(L"[GBufferIndirect] disabled by CORONA_DISABLE_GBUFFER_BINDLESS_INDIRECT");
+				bLoggedDisableGBufferBindlessIndirect = true;
+			}
+			return false;
+		}
+
 		if (!GBufferBindlessIndirectGraphicsPipeline ||
 			!bUseSceneBindlessGeometry ||
 			!materialTable.Buffer ||
 			!geometryTable.Buffer ||
-			!samplerWrap ||
-			!GBufferSequentialIb)
+			!samplerWrap)
 		{
 			return false;
 		}
 		const RenderBackendCapabilities backendCapabilities = renderBackend->GetCapabilities();
-		if (!backendCapabilities.SupportsDrawIndexedIndirect ||
+		if (!backendCapabilities.SupportsDrawIndirect ||
 			!backendCapabilities.SupportsDrawIndirectFirstInstance)
 		{
 			return false;
@@ -3003,10 +3038,7 @@ void Corona::DrawScene(shared_ptr<Scene> scene, const glm::mat4x4& instanceTrans
 				continue;
 			if (!mesh->Vb || !mesh->Ib)
 				return false;
-			if (mesh->bProceduralGrass ||
-				mesh->bGpuSpineSkinned ||
-				mesh->bSpineMesh ||
-				mesh->bSkeletalSkinned)
+			if (!IsGBufferStaticBindlessGeometryEligible(*mesh))
 			{
 				return false;
 			}
@@ -3024,7 +3056,7 @@ void Corona::DrawScene(shared_ptr<Scene> scene, const glm::mat4x4& instanceTrans
 			return true;
 
 		std::vector<GBufferDrawRecord> drawRecords;
-		std::vector<DrawIndexedIndirectArguments> indirectArgs;
+		std::vector<DrawIndirectArguments> indirectArgs;
 		drawRecords.reserve(drawCount);
 		indirectArgs.reserve(drawCount);
 
@@ -3057,11 +3089,10 @@ void Corona::DrawScene(shared_ptr<Scene> scene, const glm::mat4x4& instanceTrans
 				drawRecord.GBufferIndexStart = drawcall.IndexStart;
 				drawRecord.GBufferVertexBase = drawcall.VertexBase;
 
-				DrawIndexedIndirectArguments arg{};
-				arg.IndexCountPerInstance = drawcall.IndexCount;
+				DrawIndirectArguments arg{};
+				arg.VertexCountPerInstance = drawcall.IndexCount;
 				arg.InstanceCount = 1;
-				arg.StartIndexLocation = 0;
-				arg.BaseVertexLocation = 0;
+				arg.StartVertexLocation = 0;
 				arg.StartInstanceLocation = static_cast<uint32_t>(drawRecords.size());
 
 				drawRecords.push_back(drawRecord);
@@ -3075,7 +3106,7 @@ void Corona::DrawScene(shared_ptr<Scene> scene, const glm::mat4x4& instanceTrans
 			drawRecords.data());
 		std::shared_ptr<Buffer> indirectArgsBuffer = renderBackend->AllocateTransientUploadStructuredBuffer(
 			static_cast<uint32_t>(indirectArgs.size()),
-			static_cast<uint32_t>(sizeof(DrawIndexedIndirectArguments)),
+			static_cast<uint32_t>(sizeof(DrawIndirectArguments)),
 			indirectArgs.data());
 		if (!drawRecordBuffer || !indirectArgsBuffer)
 			return false;
@@ -3124,8 +3155,7 @@ void Corona::DrawScene(shared_ptr<Scene> scene, const glm::mat4x4& instanceTrans
 		if (!CreateAndBindGraphicsBindGroup(renderBackend.get(), pso, kGraphicsBindGroupSlot_Draw, drawBindEntries))
 			return false;
 
-		renderBackend->BindMeshBuffers(nullptr, GBufferSequentialIb.get());
-		const bool bDrawSubmitted = renderBackend->DrawIndexedIndirect(
+		const bool bDrawSubmitted = renderBackend->DrawIndirect(
 			indirectArgsBuffer.get(),
 			0,
 			static_cast<uint32_t>(indirectArgs.size()));
@@ -3207,7 +3237,8 @@ void Corona::DrawScene(shared_ptr<Scene> scene, const glm::mat4x4& instanceTrans
 			!bUseSpineVertexFetch &&
 			!bUseCpuSpinePipeline &&
 			mesh->Vb &&
-			mesh->Ib;
+			mesh->Ib &&
+			IsGBufferStaticBindlessGeometryEligible(*mesh);
 		GraphicsPipelineHandle* activeGBufferPipeline =
 			bUseProceduralGrass ? ProceduralGrassGraphicsPipeline.get() :
 			(bUseSkeletalVsInline ? SkeletalVsInlineGraphicsPipeline.get() :
@@ -3268,9 +3299,7 @@ void Corona::DrawScene(shared_ptr<Scene> scene, const glm::mat4x4& instanceTrans
 		// existing IA bindings are harmless if we skip BindMeshBuffers.
 		if (!bUseProceduralGrass)
 		{
-			if (bUseStaticBindlessGeometry)
-				renderBackend->BindMeshBuffers(nullptr, GBufferSequentialIb.get());
-			else
+			if (!bUseStaticBindlessGeometry)
 				renderBackend->BindMeshBuffers(drawVb, mesh->Ib.get());
 		}
 
@@ -3468,10 +3497,17 @@ void Corona::DrawScene(shared_ptr<Scene> scene, const glm::mat4x4& instanceTrans
 			}
 			else
 			{
-				renderBackend->DrawIndexed(
-					drawcall.IndexCount,
-					bUseStaticBindlessGeometry ? 0u : drawcall.IndexStart,
-					(bUseSpineVertexFetch || bUseStaticBindlessGeometry) ? 0 : drawcall.VertexBase);
+				if (bUseStaticBindlessGeometry)
+				{
+					renderBackend->DrawInstanced(drawcall.IndexCount, 1, 0, 0);
+				}
+				else
+				{
+					renderBackend->DrawIndexed(
+						drawcall.IndexCount,
+						drawcall.IndexStart,
+						bUseSpineVertexFetch ? 0 : drawcall.VertexBase);
+				}
 			}
 		}
 	}

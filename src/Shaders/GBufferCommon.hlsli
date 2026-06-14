@@ -162,11 +162,11 @@ bool HasGBufferDrawRecord(uint drawRecordIndex)
 
 float4x4 BuildGBufferDrawRecordWorldMatrix(GBufferDrawRecord drawRecord)
 {
-    return float4x4(
+    return transpose(float4x4(
         drawRecord.WorldMatrixRow0,
         drawRecord.WorldMatrixRow1,
         drawRecord.WorldMatrixRow2,
-        drawRecord.WorldMatrixRow3);
+        drawRecord.WorldMatrixRow3));
 }
 
 GBufferMaterialRecord GetGBufferMaterialRecord(uint drawRecordIndex)

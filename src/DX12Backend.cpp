@@ -332,10 +332,53 @@ namespace
 		return value && value[0] ? std::wstring(value) : L"<unnamed>";
 	}
 
+	const wchar_t* DredOpName(D3D12_AUTO_BREADCRUMB_OP op)
+	{
+		switch (op)
+		{
+		case D3D12_AUTO_BREADCRUMB_OP_SETMARKER: return L"MARKER";
+		case D3D12_AUTO_BREADCRUMB_OP_BEGINEVENT: return L"BEGINEVENT";
+		case D3D12_AUTO_BREADCRUMB_OP_ENDEVENT: return L"ENDEVENT";
+		case D3D12_AUTO_BREADCRUMB_OP_DRAWINSTANCED: return L"DRAW";
+		case D3D12_AUTO_BREADCRUMB_OP_DRAWINDEXEDINSTANCED: return L"DRAWINDEXED";
+		case D3D12_AUTO_BREADCRUMB_OP_EXECUTEINDIRECT: return L"EXECUTEINDIRECT";
+		case D3D12_AUTO_BREADCRUMB_OP_DISPATCH: return L"DISPATCH";
+		case D3D12_AUTO_BREADCRUMB_OP_COPYBUFFERREGION: return L"COPYBUFFER";
+		case D3D12_AUTO_BREADCRUMB_OP_COPYTEXTUREREGION: return L"COPYTEX";
+		case D3D12_AUTO_BREADCRUMB_OP_COPYRESOURCE: return L"COPYRESOURCE";
+		case D3D12_AUTO_BREADCRUMB_OP_COPYTILES: return L"COPYTILES";
+		case D3D12_AUTO_BREADCRUMB_OP_RESOLVESUBRESOURCE: return L"RESOLVE";
+		case D3D12_AUTO_BREADCRUMB_OP_CLEARRENDERTARGETVIEW: return L"CLEARRTV";
+		case D3D12_AUTO_BREADCRUMB_OP_CLEARUNORDEREDACCESSVIEW: return L"CLEARUAV";
+		case D3D12_AUTO_BREADCRUMB_OP_CLEARDEPTHSTENCILVIEW: return L"CLEARDSV";
+		case D3D12_AUTO_BREADCRUMB_OP_RESOURCEBARRIER: return L"BARRIER";
+		case D3D12_AUTO_BREADCRUMB_OP_PRESENT: return L"PRESENT";
+		case D3D12_AUTO_BREADCRUMB_OP_RESOLVEQUERYDATA: return L"RESOLVEQUERY";
+		case D3D12_AUTO_BREADCRUMB_OP_DISPATCHRAYS: return L"DISPATCHRAYS";
+		case D3D12_AUTO_BREADCRUMB_OP_BUILDRAYTRACINGACCELERATIONSTRUCTURE: return L"BUILD_AS";
+		case D3D12_AUTO_BREADCRUMB_OP_EMITRAYTRACINGACCELERATIONSTRUCTUREPOSTBUILDINFO: return L"AS_POSTBUILD";
+		case D3D12_AUTO_BREADCRUMB_OP_COPYRAYTRACINGACCELERATIONSTRUCTURE: return L"COPY_AS";
+		case D3D12_AUTO_BREADCRUMB_OP_SETPIPELINESTATE1: return L"SETPSO1";
+		default: return L"op";
+		}
+	}
+
 	void AppendD3D12DredAllocationList(const D3D12_DRED_ALLOCATION_NODE* head, const wchar_t* label)
 	{
 		UINT logged = 0;
 		for (const D3D12_DRED_ALLOCATION_NODE* node = head; node && logged < 8; node = node->pNext, ++logged)
+		{
+			AppendCpuRuntimeTrace(
+				L"[D3D12DRED] " + std::wstring(label) +
+				L" type=" + std::to_wstring(static_cast<UINT>(node->AllocationType)) +
+				L", name=\"" + DredName(node->ObjectNameW) + L"\"");
+		}
+	}
+
+	void AppendD3D12DredAllocationList1(const D3D12_DRED_ALLOCATION_NODE1* head, const wchar_t* label)
+	{
+		UINT logged = 0;
+		for (const D3D12_DRED_ALLOCATION_NODE1* node = head; node && logged < 8; node = node->pNext, ++logged)
 		{
 			AppendCpuRuntimeTrace(
 				L"[D3D12DRED] " + std::wstring(label) +
@@ -349,11 +392,68 @@ namespace
 		if (!device)
 			return;
 
+		const HRESULT reason = device->GetDeviceRemovedReason();
 		ComPtr<ID3D12DeviceRemovedExtendedData> dred;
 		if (FAILED(device->QueryInterface(IID_PPV_ARGS(&dred))) || !dred)
 			return;
 
-		AppendCpuRuntimeTrace(L"[D3D12DRED] context=\"" + context + L"\"");
+		AppendCpuRuntimeTrace(
+			L"[D3D12DRED] context=\"" + context +
+			L"\", reason=" + FormatHexHRESULT(reason));
+
+		ComPtr<ID3D12DeviceRemovedExtendedData1> dred1;
+		if (SUCCEEDED(device->QueryInterface(IID_PPV_ARGS(&dred1))) && dred1)
+		{
+			D3D12_DRED_AUTO_BREADCRUMBS_OUTPUT1 breadcrumbs1{};
+			if (SUCCEEDED(dred1->GetAutoBreadcrumbsOutput1(&breadcrumbs1)))
+			{
+				UINT logged = 0;
+				for (const D3D12_AUTO_BREADCRUMB_NODE1* node = breadcrumbs1.pHeadAutoBreadcrumbNode;
+					node && logged < 8;
+					node = node->pNext, ++logged)
+				{
+					const UINT done = node->pLastBreadcrumbValue ? *node->pLastBreadcrumbValue : 0;
+					const UINT total = node->BreadcrumbCount;
+					const UINT faultIndex = done < total ? done : (total > 0 ? total - 1 : 0);
+					const D3D12_AUTO_BREADCRUMB_OP faultOp =
+						(node->pCommandHistory && total > 0) ?
+						node->pCommandHistory[faultIndex] :
+						static_cast<D3D12_AUTO_BREADCRUMB_OP>(0);
+					AppendCpuRuntimeTrace(
+						L"[D3D12DRED] breadcrumb1 cmdList=\"" + DredName(node->pCommandListDebugNameW) +
+						L"\", queue=\"" + DredName(node->pCommandQueueDebugNameW) +
+						L"\", count=" + std::to_wstring(total) +
+						L", completed=" + std::to_wstring(done) +
+						L", op=" + std::to_wstring(static_cast<UINT>(faultOp)) +
+						L"(" + DredOpName(faultOp) + L")");
+
+					if (node->pCommandHistory && total > 0)
+					{
+						const UINT lo = faultIndex > 8 ? faultIndex - 8 : 0;
+						std::wstring seq;
+						for (UINT i = lo; i <= faultIndex && i < total; ++i)
+						{
+							seq += std::to_wstring(i);
+							seq += L":";
+							seq += DredOpName(node->pCommandHistory[i]);
+							seq += L" ";
+						}
+						AppendCpuRuntimeTrace(L"[D3D12DRED] ops " + seq);
+					}
+				}
+			}
+
+			D3D12_DRED_PAGE_FAULT_OUTPUT1 pageFault1{};
+			if (SUCCEEDED(dred1->GetPageFaultAllocationOutput1(&pageFault1)))
+			{
+				std::wstringstream stream;
+				stream << L"[D3D12DRED] pageFault1VA=0x" << std::hex << std::uppercase << pageFault1.PageFaultVA;
+				AppendCpuRuntimeTrace(stream.str());
+				AppendD3D12DredAllocationList1(pageFault1.pHeadExistingAllocationNode, L"existingAllocation1");
+				AppendD3D12DredAllocationList1(pageFault1.pHeadRecentFreedAllocationNode, L"recentFreedAllocation1");
+			}
+			return;
+		}
 
 		D3D12_DRED_AUTO_BREADCRUMBS_OUTPUT breadcrumbs{};
 		if (SUCCEEDED(dred->GetAutoBreadcrumbsOutput(&breadcrumbs)))
@@ -1393,9 +1493,85 @@ void DX12Backend::DrawIndexed(uint32_t indexCount, uint32_t startIndexLocation, 
 	GlobalCmdList->CmdList->DrawIndexedInstanced(indexCount, 1, startIndexLocation, baseVertexLocation, 0);
 }
 
+void DX12Backend::DrawInstanced(uint32_t vertexCountPerInstance, uint32_t instanceCount, uint32_t startVertexLocation, uint32_t startInstanceLocation)
+{
+	if (BoundPrimitiveTopology != D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST)
+	{
+		GlobalCmdList->CmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+		BoundPrimitiveTopology = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
+	}
+	if (BoundIndexBuffer)
+	{
+		GlobalCmdList->CmdList->IASetIndexBuffer(nullptr);
+		BoundIndexBuffer = nullptr;
+	}
+	GlobalCmdList->CmdList->DrawInstanced(vertexCountPerInstance, instanceCount, startVertexLocation, startInstanceLocation);
+}
+
 void DX12Backend::DrawIndexedInstanced(uint32_t indexCountPerInstance, uint32_t instanceCount, uint32_t startIndexLocation, int32_t baseVertexLocation, uint32_t startInstanceLocation)
 {
 	GlobalCmdList->CmdList->DrawIndexedInstanced(indexCountPerInstance, instanceCount, startIndexLocation, baseVertexLocation, startInstanceLocation);
+}
+
+bool DX12Backend::DrawIndirect(Buffer* indirectArgumentBuffer, uint64_t byteOffset, uint32_t drawCount)
+{
+	static_assert(sizeof(DrawIndirectArguments) == sizeof(D3D12_DRAW_ARGUMENTS), "Draw indirect argument layout must match D3D12.");
+	if (drawCount == 0)
+		return true;
+	if (!GlobalCmdList || !GlobalCmdList->CmdList || !indirectArgumentBuffer || !indirectArgumentBuffer->resource)
+		return false;
+	const uint64_t argsBytes = static_cast<uint64_t>(drawCount) * static_cast<uint64_t>(sizeof(DrawIndirectArguments));
+	if (byteOffset > std::numeric_limits<uint64_t>::max() - indirectArgumentBuffer->SuballocationOffsetBytes)
+		return false;
+	if (indirectArgumentBuffer->MappedSizeInBytes > 0 &&
+		(byteOffset > indirectArgumentBuffer->MappedSizeInBytes ||
+		 argsBytes > static_cast<uint64_t>(indirectArgumentBuffer->MappedSizeInBytes) - byteOffset))
+	{
+		return false;
+	}
+	const uint64_t resourceByteOffset = indirectArgumentBuffer->SuballocationOffsetBytes + byteOffset;
+
+	if (BoundPrimitiveTopology != D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST)
+	{
+		GlobalCmdList->CmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+		BoundPrimitiveTopology = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
+	}
+	if (BoundIndexBuffer)
+	{
+		GlobalCmdList->CmdList->IASetIndexBuffer(nullptr);
+		BoundIndexBuffer = nullptr;
+	}
+
+	if (!DrawIndirectCommandSignature)
+	{
+		D3D12_INDIRECT_ARGUMENT_DESC argumentDesc = {};
+		argumentDesc.Type = D3D12_INDIRECT_ARGUMENT_TYPE_DRAW;
+
+		D3D12_COMMAND_SIGNATURE_DESC signatureDesc = {};
+		signatureDesc.ByteStride = sizeof(DrawIndirectArguments);
+		signatureDesc.NumArgumentDescs = 1;
+		signatureDesc.pArgumentDescs = &argumentDesc;
+
+		HRESULT hr = Device->CreateCommandSignature(
+			&signatureDesc,
+			nullptr,
+			IID_PPV_ARGS(&DrawIndirectCommandSignature));
+		if (FAILED(hr))
+		{
+			AppendCpuRuntimeTrace(L"[DX12Backend] Create DRAW indirect command signature failed hr=" + FormatHexHRESULT(hr));
+			return false;
+		}
+		SetName(DrawIndirectCommandSignature.Get(), L"Corona DrawIndirect CommandSignature");
+	}
+
+	GlobalCmdList->CmdList->ExecuteIndirect(
+		DrawIndirectCommandSignature.Get(),
+		drawCount,
+		indirectArgumentBuffer->resource.Get(),
+		resourceByteOffset,
+		nullptr,
+		0);
+	return true;
 }
 
 bool DX12Backend::DrawIndexedIndirect(Buffer* indirectArgumentBuffer, uint64_t byteOffset, uint32_t drawCount)
@@ -1405,6 +1581,16 @@ bool DX12Backend::DrawIndexedIndirect(Buffer* indirectArgumentBuffer, uint64_t b
 		return true;
 	if (!GlobalCmdList || !GlobalCmdList->CmdList || !indirectArgumentBuffer || !indirectArgumentBuffer->resource)
 		return false;
+	const uint64_t argsBytes = static_cast<uint64_t>(drawCount) * static_cast<uint64_t>(sizeof(DrawIndexedIndirectArguments));
+	if (byteOffset > std::numeric_limits<uint64_t>::max() - indirectArgumentBuffer->SuballocationOffsetBytes)
+		return false;
+	if (indirectArgumentBuffer->MappedSizeInBytes > 0 &&
+		(byteOffset > indirectArgumentBuffer->MappedSizeInBytes ||
+		 argsBytes > static_cast<uint64_t>(indirectArgumentBuffer->MappedSizeInBytes) - byteOffset))
+	{
+		return false;
+	}
+	const uint64_t resourceByteOffset = indirectArgumentBuffer->SuballocationOffsetBytes + byteOffset;
 
 	if (!DrawIndexedIndirectCommandSignature)
 	{
@@ -1432,7 +1618,7 @@ bool DX12Backend::DrawIndexedIndirect(Buffer* indirectArgumentBuffer, uint64_t b
 		DrawIndexedIndirectCommandSignature.Get(),
 		drawCount,
 		indirectArgumentBuffer->resource.Get(),
-		byteOffset,
+		resourceByteOffset,
 		nullptr,
 		0);
 	return true;
@@ -1816,13 +2002,26 @@ shared_ptr<Buffer> DX12Backend::CreateDefaultByteAddressBuffer(UINT InNumElement
 	const UINT64 Size = static_cast<UINT64>(InNumElements) * static_cast<UINT64>(InElementSize);
 	D3D12_HEAP_PROPERTIES heapProp = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT);
 	D3D12_RESOURCE_DESC desc = CD3DX12_RESOURCE_DESC::Buffer(Size, D3D12_RESOURCE_FLAG_NONE);
-	ThrowIfFailed(Device->CreateCommittedResource(
+	const HRESULT hr = Device->CreateCommittedResource(
 		&heapProp,
 		D3D12_HEAP_FLAG_NONE,
 		&desc,
 		ToD3D12ResourceState(initialState),
 		nullptr,
-		IID_PPV_ARGS(&buffer->resource)));
+		IID_PPV_ARGS(&buffer->resource));
+	if (FAILED(hr))
+	{
+		const HRESULT deviceRemovedReason = Device ? Device->GetDeviceRemovedReason() : S_OK;
+		AppendCpuRuntimeTrace(
+			L"[DX12Buffer] CreateDefaultByteAddressBuffer failed hr=" + FormatHexHRESULT(hr) +
+			L", deviceRemovedReason=" + FormatHexHRESULT(deviceRemovedReason) +
+			L", elements=" + std::to_wstring(InNumElements) +
+			L", elementSize=" + std::to_wstring(InElementSize) +
+			L", bytes=" + std::to_wstring(Size));
+		AppendD3D12DeviceRemovedData(Device.Get(), L"DX12Backend::CreateDefaultByteAddressBuffer");
+		delete buffer;
+		return nullptr;
+	}
 
 	NAME_D3D12_OBJECT(buffer->resource);
 	buffer->MakeByteAddressBufferSRV();
@@ -1903,6 +2102,7 @@ shared_ptr<IndexBuffer> DX12Backend::CreateIndexBuffer(EIndexFormat Format, UINT
 
 	IndexBuffer* ib = new IndexBuffer;
 	ib->Owner = this;
+	const UINT rawSrvSize = (Size + 3u) & ~3u;
 
 	/*stringstream ss;
 	ss << "CreateIndexBuffer : " << Size << "\n";
@@ -1911,7 +2111,7 @@ shared_ptr<IndexBuffer> DX12Backend::CreateIndexBuffer(EIndexFormat Format, UINT
 	ThrowIfFailed(Device->CreateCommittedResource(
 		&CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT),
 		D3D12_HEAP_FLAG_NONE,
-		&CD3DX12_RESOURCE_DESC::Buffer(Size),
+		&CD3DX12_RESOURCE_DESC::Buffer(rawSrvSize),
 		D3D12_RESOURCE_STATE_COPY_DEST,
 		nullptr,
 		IID_PPV_ARGS(&ib->resource)));
@@ -1927,22 +2127,24 @@ shared_ptr<IndexBuffer> DX12Backend::CreateIndexBuffer(EIndexFormat Format, UINT
 
 	if (SrcData)
 	{
-		D3D12_SUBRESOURCE_DATA indexData = {};
-		indexData.pData = SrcData;
-		indexData.RowPitch = Size;
-		indexData.SlicePitch = indexData.RowPitch;
-
 		ComPtr<ID3D12Resource> UploadHeap;
 
 		ThrowIfFailed(Device->CreateCommittedResource(
 			&CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD),
 			D3D12_HEAP_FLAG_NONE,
-			&CD3DX12_RESOURCE_DESC::Buffer(Size),
+			&CD3DX12_RESOURCE_DESC::Buffer(rawSrvSize),
 			D3D12_RESOURCE_STATE_GENERIC_READ,
 			nullptr,
 			IID_PPV_ARGS(&UploadHeap)));
 
-		UpdateSubresources<1>(cmd->CmdList.Get(), ib->resource.Get(), UploadHeap.Get(), 0, 0, 1, &indexData);
+		UINT8* mappedData = nullptr;
+		D3D12_RANGE readRange{ 0, 0 };
+		ThrowIfFailed(UploadHeap->Map(0, &readRange, reinterpret_cast<void**>(&mappedData)));
+		std::memset(mappedData, 0, rawSrvSize);
+		std::memcpy(mappedData, SrcData, Size);
+		UploadHeap->Unmap(0, nullptr);
+
+		cmd->CmdList->CopyBufferRegion(ib->resource.Get(), 0, UploadHeap.Get(), 0, rawSrvSize);
 		cmd->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(ib->resource.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_INDEX_BUFFER | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE));
 
 		// create shader resource view
@@ -1952,7 +2154,7 @@ shared_ptr<IndexBuffer> DX12Backend::CreateIndexBuffer(EIndexFormat Format, UINT
 		vertexSRVDesc.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
 		vertexSRVDesc.Buffer.StructureByteStride = 0;
 		vertexSRVDesc.Buffer.FirstElement = 0;
-		vertexSRVDesc.Buffer.NumElements = static_cast<UINT>(Size) / sizeof(float); // byte address buffer
+		vertexSRVDesc.Buffer.NumElements = rawSrvSize / sizeof(uint32_t); // byte address buffer
 		vertexSRVDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
 
 		GeomtryDHRing->AllocDescriptor(ib->CpuHandleSRV, ib->GpuHandleSRV);
@@ -3429,6 +3631,24 @@ static UINT ToD3D12DescriptorCount(const RHIBindingDesc& binding)
 	if (binding.RuntimeArray || binding.DescriptorCount == RHI_BINDLESS_ARRAY)
 		return UINT_MAX;
 	return binding.DescriptorCount == 0 ? 1 : binding.DescriptorCount;
+}
+
+static bool RequiresDX12VertexBindlessBufferShaderModel66(const GraphicsPipelineDesc& desc)
+{
+	const RHIShaderStageMask vertexStage = ToRHIShaderStageMask(RHIShaderStage::Vertex);
+	for (const RHIBindingDesc& binding : desc.PipelineLayout.Bindings)
+	{
+		if ((binding.Stages & vertexStage) == 0)
+			continue;
+		if (binding.DescriptorKind != RHIDescriptorKind::SRV ||
+			binding.ResourceKind != RHIResourceKind::Buffer)
+		{
+			continue;
+		}
+		if (binding.RuntimeArray || binding.DescriptorCount == RHI_BINDLESS_ARRAY)
+			return true;
+	}
+	return false;
 }
 
 static UINT ToD3D12RegisterSpace(const RHIBindingDesc& binding)
@@ -7474,7 +7694,17 @@ std::shared_ptr<GraphicsPipelineHandle> DX12Backend::CreateGraphicsPipeline(cons
 {
 	auto handle = std::make_shared<DX12GraphicsPipelineHandle>();
 
-	ShaderBytecode vs = CreateShader(desc.ShaderPath, desc.VertexEntryPoint, "vs_6_0");
+	const bool bRequiresVertexBindlessBufferSM66 = RequiresDX12VertexBindlessBufferShaderModel66(desc);
+	const std::string vertexShaderTarget = bRequiresVertexBindlessBufferSM66 ? "vs_6_6" : "vs_6_0";
+	if (bRequiresVertexBindlessBufferSM66)
+	{
+		AppendCpuRuntimeTrace(
+			L"[DX12GraphicsPipeline] using " + ToWide(vertexShaderTarget) +
+			L" for vertex bindless buffer pipeline shader=\"" + desc.ShaderPath +
+			L"\", entry=\"" + ToWide(desc.VertexEntryPoint) + L"\"");
+	}
+
+	ShaderBytecode vs = CreateShader(desc.ShaderPath, desc.VertexEntryPoint, vertexShaderTarget);
 	ShaderBytecode ps = CreateShader(desc.ShaderPath, desc.PixelEntryPoint, "ps_6_0");
 	if (!vs.IsValid() || !ps.IsValid())
 		return nullptr;

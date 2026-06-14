@@ -3870,6 +3870,7 @@ RenderBackendCapabilities NRIBackend::GetCapabilities() const
 	capabilities.SupportsRuntimeDescriptorArrays = true;
 	capabilities.SupportsPartiallyBoundDescriptors = true;
 	capabilities.SupportsDrawIndexedIndirect = false;
+	capabilities.SupportsDrawIndirect = false;
 	capabilities.SupportsMultiDrawIndirect = false;
 	capabilities.SupportsDrawIndirectFirstInstance = false;
 	capabilities.MaxBindlessTextureCount = 4096;
@@ -5314,6 +5315,32 @@ void NRIBackend::DrawIndexed(uint32_t indexCount, uint32_t startIndexLocation, i
 	m->Core.CmdDrawIndexed(*m->ActiveCmd, dd);
 	++m->DbgDraws;
 }
+
+void NRIBackend::DrawInstanced(uint32_t vertexCountPerInstance, uint32_t instanceCount, uint32_t startVertexLocation, uint32_t startInstanceLocation)
+{
+	if (!m->ActiveCmd || !m->RasterEnabled || !m->HasBoundGfx) { ++m->DbgDrawsSkipped; return; }
+	m->OpenRP();
+	if (m->CurrentGfx)
+	{
+		auto* gp = static_cast<NRIGraphicsPipeline*>(m->CurrentGfx);
+		float worst = 0.0f;
+		if (!gp->DebugTransformSane(worst))
+		{
+			++m->DbgBadXform; ++m->DbgDrawsSkipped;
+			if (m->DrawLog) { std::ofstream l("nri_drawlog.log", std::ios::app); if (l) l << "DRAW vb=" << (void*)m->LastVB << " vertexCount=" << vertexCountPerInstance << " worstXform=" << worst << "  <<<BAD-XFORM-SKIP" << std::endl; }
+			return;
+		}
+		gp->ApplyForDraw();
+	}
+	nri::DrawDesc dd = {};
+	dd.vertexNum = vertexCountPerInstance;
+	dd.instanceNum = instanceCount;
+	dd.baseVertex = startVertexLocation;
+	dd.baseInstance = startInstanceLocation;
+	m->Core.CmdDraw(*m->ActiveCmd, dd);
+	++m->DbgDraws;
+}
+
 void NRIBackend::DrawIndexedInstanced(uint32_t indexCountPerInstance, uint32_t instanceCount, uint32_t startIndexLocation, int32_t baseVertexLocation, uint32_t startInstanceLocation)
 {
 	if (!m->ActiveCmd || !m->RasterEnabled || !m->HasBoundGfx) { ++m->DbgDrawsSkipped; return; }
@@ -5358,6 +5385,12 @@ bool NRIBackend::DrawIndexedIndirect(Buffer* /*indirectArgumentBuffer*/, uint64_
 {
 	return false;
 }
+
+bool NRIBackend::DrawIndirect(Buffer* /*indirectArgumentBuffer*/, uint64_t /*byteOffset*/, uint32_t /*drawCount*/)
+{
+	return false;
+}
+
 void NRIBackend::Dispatch(uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ)
 {
 	if (m->ActiveCmd)
