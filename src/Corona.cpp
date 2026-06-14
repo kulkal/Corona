@@ -14473,10 +14473,11 @@ void Corona::OnRender()
 		const bool bDiffuseGINeedsTemporalDenoise =
 			bRunGI &&
 			(effectiveDiffuseGIMode == EDiffuseGIMode::SIMPLE_RAYTRACE ||
-			 // NRI bring-up has no DLSS-RR, so the screen-space TemporalDenoisingPass is
+			 // NRI bring-up without DLSS-RR: the screen-space TemporalDenoisingPass is
 			 // what denoises both the spatial-hash diffuse (via bUseSpatialHashDiffuseInput)
-			 // and the specular reflections before LightingPass.
-			 (bNriSimpleGIBringup && effectiveDiffuseGIMode == EDiffuseGIMode::SPATIAL_HASH));
+			 // and the specular reflections before LightingPass. Under DLSS-RR it's
+			 // skipped — RR owns denoising from the raw cached query + raw specular.
+			 (bNriSimpleGIBringup && effectiveDiffuseGIMode == EDiffuseGIMode::SPATIAL_HASH && !IsDLSSRREnabled()));
 		const bool bRunTemporalDenoise = !bHybridDirectOnly && backendMaxSupportedHybridStage >= 5u && hybridStage >= 5 && (bDiffuseGINeedsTemporalDenoise || bStageDump);
 		const bool bRunLighting = bPartialHybridLighting || hybridStage >= 7;
 		const bool bRunDesktopRTAO = !bHybridDirectOnly && backendMaxSupportedHybridStage >= 2u && bRunLighting && bEnableRTAO;

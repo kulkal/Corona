@@ -1605,14 +1605,15 @@ void Corona::LightingPass()
 	Texture* lightingDiffuseTex = DefaultBlackTex.get();
 	if (!bMobileHybridDirectOnly &&
 		bDiffuseGIEnabledThisFrame &&
-		bNriSimpleGIBringup)
+		bNriSimpleGIBringup &&
+		!IsDLSSRREnabled())
 	{
-		// NRI simple-GI bring-up. The GI pass always runs SIMPLE_RAYTRACE (see
-		// effectiveDiffuseGIMode), so this must NOT fall through to the SPATIAL_HASH
-		// branch below (DiffuseGIMode is the unmodified user setting and may be
-		// SPATIAL_HASH, whose cache is never written here -> black GI). Keep it
-		// self-contained: use the DENOISED DiffuseGITemporal once the screen-space
-		// TemporalDenoisingPass runs (stage >= 5), else the raw 1-spp buffer.
+		// NRI bring-up, NON-RR path: feed the screen-space TemporalDenoisingPass
+		// output (DiffuseGITemporal — fed by the spatial-hash query, see
+		// bUseSpatialHashDiffuseInput) so the composite is denoised without DLSS-RR.
+		// Under DLSS-RR this branch is skipped so the flow falls through to the
+		// SPATIAL_HASH branch below and RR owns denoising from the raw cached query
+		// (RR denoises best from un-temporally-filtered input).
 		if (backendMaxSupportedHybridStage >= 5u && DiffuseGITemporal[GIBufferWriteIndex])
 		{
 			lightingDiffuseTex = DiffuseGITemporal[GIBufferWriteIndex].get();
@@ -1693,10 +1694,12 @@ void Corona::LightingPass()
 	Texture* lightingSpecularTex = DefaultBlackTex.get();
 	if (!bMobileHybridDirectOnly && bSpecularGIEnabledThisFrame &&
 		bNriSimpleGIBringup && backendMaxSupportedHybridStage >= 5u &&
+		!IsDLSSRREnabled() &&
 		SpecularGITemporal[GIBufferWriteIndex])
 	{
-		// NRI bring-up has no DLSS-RR, so consume the screen-space TemporalDenoising
-		// denoised specular instead of the raw 1-spp reflections.
+		// NRI bring-up NON-RR: consume the screen-space TemporalDenoising denoised
+		// specular instead of the raw 1-spp reflections. Under DLSS-RR fall through
+		// to raw so RR owns specular denoising.
 		lightingSpecularTex = SpecularGITemporal[GIBufferWriteIndex].get();
 		lightingSpecularSource = L"temporal_nri";
 	}
