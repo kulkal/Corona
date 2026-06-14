@@ -10,7 +10,11 @@ Texture2D WorldNormalTex : register(t2);
 Texture3D RayNoiseBlueNoiseSource : register(t7);
 ByteAddressBuffer vertices : register(t3);
 ByteAddressBuffer indices : register(t4);
+#if defined(CORONA_NRI_RT_HIT_RESOURCE_ARRAYS)
+Texture2D AlbedoTex[] : register(t5, space1);
+#else
 Texture2D AlbedoTex : register(t5);
+#endif
 ByteAddressBuffer InstanceProperty : register(t6);
 
 // Must match Corona::MaxPointLights in Corona.h.
@@ -294,6 +298,24 @@ void rayGen
     // https://computergraphics.stackexchange.com/questions/8578/how-to-set-equivalent-pdfs-for-cosine-weighted-and-uniform-sampled-hemispheres
     float cosTerm = 1;//dot(float3(0, 0, 1), sampleDirLocal)*2;
 
+#if defined(CORONA_NRI_RT_SAFE_GI_FALLBACK)
+    float3 LightDir = CommonSafeNormalize(LightDirAndIntensity.xyz, float3(0.0f, 1.0f, 0.0f));
+    float3 Irradiance =
+        saturate(dot(WorldNormal, LightDir)) *
+        LightIntensity *
+        max(CommonSanitizeFloat3(LightColor, 1.0f.xxx), 0.0f.xxx) *
+        0.65f.xxx *
+        INV_PI;
+    if (bIncludeSkyLighting != 0u)
+        Irradiance += max(EvaluateSkyColor(WorldNormal), 0.0f.xxx) * 0.15f;
+
+    Irradiance = max(CommonSanitizeFloat3(Irradiance, 0.0f.xxx), 0.0f.xxx);
+    SH sh_indirect = irradiance_to_SH(Irradiance, WorldNormal);
+    GIResultSH[launchIndex.xy] = sh_indirect.shY;
+    GIResultColor[launchIndex.xy] = float4(Irradiance, 1.0f);
+    return;
+#endif
+
 	RayDesc ray;
 	// Self-intersection guard. A fixed 0.5u push-off does not clear the surface on deep /
 	// grazing geometry (tall building walls — the depth-reconstructed WorldPos error grows
@@ -407,8 +429,20 @@ void miss(inout RayPayload payload)
 void chs(inout RayPayload payload, in BuiltInTriangleIntersectionAttributes attribs)
 {
     float3 barycentrics = float3(1.0 - attribs.barycentrics.x - attribs.barycentrics.y, attribs.barycentrics.x, attribs.barycentrics.y);
-    uint triangleIndex = PrimitiveIndex();
     uint instanceID = InstanceID();
+#if defined(CORONA_NRI_RT_SAFE_GI_FALLBACK)
+    payload.position = WorldRayOrigin() + WorldRayDirection() * RayTCurrent();
+    payload.normal = -WorldRayDirection();
+
+    payload.color = 0.65f.xxx;
+#elif defined(CORONA_NRI_RT_HIT_RESOURCE_ARRAYS)
+    payload.position = WorldRayOrigin() + WorldRayDirection() * RayTCurrent();
+    payload.normal = -WorldRayDirection();
+
+    float2 fallbackUv = saturate(float2(attribs.barycentrics.x, attribs.barycentrics.y));
+    payload.color = max(CommonSanitizeFloat3(AlbedoTex[NonUniformResourceIndex(instanceID)].SampleLevel(sampleWrap, fallbackUv, 0.0f).xyz, 1.0f.xxx), 0.0f.xxx);
+#else
+    uint triangleIndex = PrimitiveIndex();
     Vertex vertex = GetSurfaceVertexAttributes(instanceID, vertices, indices, InstanceProperty, triangleIndex, barycentrics);
 
     payload.position = CommonSanitizeFloat3(vertex.position, WorldRayOrigin() + WorldRayDirection() * RayTCurrent());
@@ -418,7 +452,11 @@ void chs(inout RayPayload payload, in BuiltInTriangleIntersectionAttributes attr
     payload.normal = hitNormal;
 
     uint w, h;
+#if defined(CORONA_NRI_RT_HIT_RESOURCE_ARRAYS)
+    AlbedoTex[NonUniformResourceIndex(instanceID)].GetDimensions(w, h);
+#else
     AlbedoTex.GetDimensions(w, h);
+#endif
     float halfLog2NumTexPixels = 0.5 * log2(w * h);
 
     vertex.textureLODConstant += halfLog2NumTexPixels;
@@ -429,6 +467,7 @@ void chs(inout RayPayload payload, in BuiltInTriangleIntersectionAttributes attr
     float mipLevel = computeTextureLOD(NoV, rayConeWidth, vertex.textureLODConstant);
 
     payload.color = max(CommonSanitizeFloat3(AlbedoTex.SampleLevel(sampleWrap, vertex.uv, mipLevel).xyz, 1.0f.xxx), 0.0f.xxx);
+#endif
 
     payload.bHit = true;
 }

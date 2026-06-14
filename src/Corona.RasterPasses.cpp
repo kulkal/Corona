@@ -1395,14 +1395,26 @@ void Corona::LightingPass()
 	const bool bMobileHybridDirectOnly =
 		CORONA_PLATFORM_MOBILE &&
 		RenderingMode == ERenderingMode::HYBRID;
+	const uint32_t backendMaxSupportedHybridStage =
+		(renderBackend && RenderingMode == ERenderingMode::HYBRID) ?
+		renderBackend->GetMaxSupportedHybridStage() : 7u;
+	const bool bNriSimpleGIBringup =
+		renderBackend &&
+		renderBackend->GetAPI() == ERenderBackendAPI::NRI &&
+		backendMaxSupportedHybridStage >= 4u &&
+		backendMaxSupportedHybridStage < 7u;
+	const bool bBackendSupportsSpecularGI = backendMaxSupportedHybridStage >= 3u && !bNriSimpleGIBringup;
+	const bool bBackendSupportsDiffuseGI = backendMaxSupportedHybridStage >= 4u;
+	const bool bBackendSupportsRTAO = backendMaxSupportedHybridStage >= 2u && !bNriSimpleGIBringup;
+	const bool bBackendSupportsRayTracedSkyLighting = backendMaxSupportedHybridStage >= 7u;
 	Param.GIBufferScale = GIBufferScale;
 	Param.LightColor = lightColor;
-	Param.bEnableDiffuseGI = (!bMobileHybridDirectOnly && bEnableDiffuseGI) ? 1 : 0;
-	Param.bEnableSpecularGI = (!bMobileHybridDirectOnly && bEnableSpecularGI) ? 1 : 0;
+	Param.bEnableDiffuseGI = (!bMobileHybridDirectOnly && bBackendSupportsDiffuseGI && bEnableDiffuseGI) ? 1 : 0;
+	Param.bEnableSpecularGI = (!bMobileHybridDirectOnly && bBackendSupportsSpecularGI && bEnableSpecularGI) ? 1 : 0;
 	Param.bEnableDirectDiffuse = bEnableDirectDiffuse ? 1 : 0;
 	Param.bEnableDirectSpecular = bEnableDirectSpecular ? 1 : 0;
-	Param.bEnableRTAO = (!bMobileHybridDirectOnly && bEnableRTAO && bRTAOOutputValidThisFrame && AmbientOcclusionBuffer) ? 1 : 0;
-	Param.bEnableSkyLighting = (!bMobileHybridDirectOnly && bEnableSkyLighting && bEnableRayTracedSkyLighting && bSkyLightingOutputValidThisFrame && SkyLightingBuffer) ? 1 : 0;
+	Param.bEnableRTAO = (!bMobileHybridDirectOnly && bBackendSupportsRTAO && bEnableRTAO && bRTAOOutputValidThisFrame && AmbientOcclusionBuffer) ? 1 : 0;
+	Param.bEnableSkyLighting = (!bMobileHybridDirectOnly && bBackendSupportsRayTracedSkyLighting && bEnableSkyLighting && bEnableRayTracedSkyLighting && bSkyLightingOutputValidThisFrame && SkyLightingBuffer) ? 1 : 0;
 	Param.bEnableSimpleSkyLighting = bEnableSkyLighting ? 1u : 0u;
 	Param.RTAOIndirectStrength = RTAOIndirectStrength;
 	Param.RTAOIndirectFloor = RTAOIndirectFloor;
@@ -1560,6 +1572,16 @@ void Corona::LightingPass()
 	// buffer, not the authoritative lighting input.
 	Texture* lightingDiffuseTex = DefaultBlackTex.get();
 	if (!bMobileHybridDirectOnly &&
+		bDiffuseGIEnabledThisFrame &&
+		bNriSimpleGIBringup &&
+		DiffuseGIRaw)
+	{
+		lightingDiffuseTex = DiffuseGIRaw.get();
+		lightingDiffuseSource = L"raw_nri_simple";
+		if (DiffuseGIRawAux)
+			lightingDiffuseAuxTex = DiffuseGIRawAux.get();
+	}
+	else if (!bMobileHybridDirectOnly &&
 		bDiffuseGIEnabledThisFrame &&
 		DiffuseGIMode == EDiffuseGIMode::SPATIAL_HASH &&
 		DiffuseGIHashCached)

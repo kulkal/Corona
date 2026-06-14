@@ -1969,6 +1969,65 @@ Corona::~Corona()
 	StopGameThread();
 	ShutdownLuauScripting();
 	ShutdownCpuPhysics();
+
+	if (renderBackend)
+		renderBackend->WaitForGpu();
+
+	// Pipeline objects own backend-native state but are declared before
+	// renderBackend in Corona.h, so member destruction would otherwise destroy
+	// the backend first and leave these wrappers with dangling backend pointers.
+	GBufferGraphicsPipeline.reset();
+	StaticInstancedGBufferGraphicsPipeline.reset();
+	ProceduralGrassGraphicsPipeline.reset();
+	CpuSpineGBufferGraphicsPipeline.reset();
+	SpineGBufferGraphicsPipeline.reset();
+	SpineVsInlineGBufferGraphicsPipeline.reset();
+	SkeletalGBufferGraphicsPipeline.reset();
+	ToneMapGraphicsPipeline.reset();
+	ParticleGraphicsPipeline.reset();
+	BufferVisualizeGraphicsPipeline.reset();
+	LightingGraphicsPipeline.reset();
+	MobileShadowMapGraphicsPipeline.reset();
+	SkeletalMobileShadowMapGraphicsPipeline.reset();
+	SpineMobileShadowMapGraphicsPipeline.reset();
+	TemporalAAGraphicsPipeline.reset();
+	SkeletalVsInlineGraphicsPipeline.reset();
+	SkeletalVsInlineClusterGraphicsPipeline.reset();
+
+	SpineSkinningPSO.reset();
+	SkeletalSkinningPSO.reset();
+	TemporalDenoisingFilterPSO.reset();
+	DiffuseGISpatialFilterPSO.reset();
+	ScreenProbeGIPSO.reset();
+	SpatialHashGIClearPSO.reset();
+	SpatialHashGIUpdatePSO.reset();
+	SpatialHashGIResolvePSO.reset();
+	SpatialHashGIQueryPSO.reset();
+	SpatialHashGIScreenResolvePSO.reset();
+	SpatialHashGIOctBlendPSO.reset();
+	SpatialHashGIOctDepthBlendPSO.reset();
+	PSO_SHADOW_SPATIAL_REUSE.reset();
+	BloomBlurPSO.reset();
+	BloomExtractPSO.reset();
+	HistogramPSO.reset();
+	ClearHistogramPSO.reset();
+	DrawHistogramPSO.reset();
+	AdapteExposurePSO.reset();
+
+	PSO_RT_SHADOW.reset();
+	PSO_RT_AO.reset();
+	PSO_RT_SKY_LIGHTING.reset();
+	PSO_RT_REFLECTION.reset();
+	PSO_RT_REFLECTION_SER.reset();
+	PSO_RT_GI.reset();
+	PSO_RT_GI_SER.reset();
+	PSO_NRI_SIMPLE_GI_FALLBACK.reset();
+	PSO_RT_SCREEN_PROBE_GI.reset();
+	PSO_RT_SCREEN_PROBE_GI_SER.reset();
+	PSO_RT_SPATIAL_HASH_GI.reset();
+	PSO_RT_SPATIAL_HASH_GI_SER.reset();
+	PSO_RT_SPATIAL_HASH_PRIMARY_DEEP_SEED.reset();
+	PSO_PATH_TRACING.reset();
 }
 
 std::wstring Corona::GetAssetFullPath(LPCWSTR assetName) const
@@ -5306,7 +5365,11 @@ bool Corona::DumpTextureHDR(Texture* source, const std::wstring& filePath, EReso
 	CapturedImage captured;
 	if (!renderBackend->CaptureTexture(source, captured, beforeState))
 	{
-		AppendAutoAADumpLog(L"[capture] hdr failed");
+		std::wstring error;
+		const std::string& backendError = renderBackend->GetErrorString();
+		if (!backendError.empty())
+			error = L": " + std::wstring(backendError.begin(), backendError.end());
+		AppendAutoAADumpLog(L"[capture] hdr failed" + error);
 		return false;
 	}
 
@@ -5328,7 +5391,11 @@ bool Corona::DumpTexturePNG(Texture* source, const std::wstring& filePath, EReso
 	CapturedImage captured;
 	if (!renderBackend->CaptureTexture(source, captured, beforeState))
 	{
-		AppendAutoAADumpLog(L"[capture] png failed");
+		std::wstring error;
+		const std::string& backendError = renderBackend->GetErrorString();
+		if (!backendError.empty())
+			error = L": " + std::wstring(backendError.begin(), backendError.end());
+		AppendAutoAADumpLog(L"[capture] png failed" + error);
 		return false;
 	}
 
@@ -5719,9 +5786,10 @@ void Corona::AdvanceAutoAADump(Texture* backbuffer)
 		if (AutoAADumpFramesInPhase == kDiffuseGIDumpFrames - 1)
 		{
 			const std::wstring base = AutoAADumpDir + L"\\" + currentPhaseName;
+			const ERenderBackendAPI backendAPI = renderBackend ? renderBackend->GetAPI() : ERenderBackendAPI::D3D12;
 			const bool bCanCaptureTexture =
 				renderBackend &&
-				renderBackend->GetAPI() == ERenderBackendAPI::D3D12;
+				(backendAPI == ERenderBackendAPI::D3D12 || backendAPI == ERenderBackendAPI::NRI);
 
 			auto dumpResource = [&](const wchar_t* suffix, Texture* texture, bool dumpHdr)
 			{
@@ -5757,7 +5825,7 @@ void Corona::AdvanceAutoAADump(Texture* backbuffer)
 			dumpResource(L"gbuffer_albedo", AlbedoBuffer.get(), false);
 			dumpResource(L"gbuffer_roughness_metallic", RoughnessMetalicBuffer.get(), false);
 			if (!bCanCaptureTexture)
-				AppendAutoAADumpLog(std::wstring(L"[") + currentPhaseName + L"] texture capture skipped for non-DX12 backend");
+				AppendAutoAADumpLog(std::wstring(L"[") + currentPhaseName + L"] texture capture skipped for this backend");
 		}
 
 		++AutoAADumpFramesInPhase;
@@ -10572,28 +10640,37 @@ void Corona::LoadAssets()
 		CORONA_PLATFORM_MOBILE &&
 		StartupRenderingMode == ERenderingMode::HYBRID;
 	const bool bMobileDungeonOnlyStartup = CORONA_PLATFORM_MOBILE;
+	const bool bHybridStartup = StartupRenderingMode == ERenderingMode::HYBRID;
 	const uint32_t maxSupportedHybridStage =
-		(renderBackend && StartupRenderingMode == ERenderingMode::HYBRID) ?
+		(renderBackend && bHybridStartup) ?
 		renderBackend->GetMaxSupportedHybridStage() : 7u;
+	const bool bBackendHybridStageAware =
+		!bMobileHybridDirectOnlyStartup &&
+		bHybridStartup &&
+		renderBackend &&
+		maxSupportedHybridStage < 7u;
 	const bool bVulkanHybridBootstrap =
 		!bMobileHybridDirectOnlyStartup &&
 		bVulkanHybridStartup &&
 		maxSupportedHybridStage == 0u;
 	const bool bSupportsHybridRaytracing =
 		!bMobileHybridDirectOnlyStartup &&
-		(!bVulkanHybridStartup || maxSupportedHybridStage >= 1u);
+		(!bBackendHybridStageAware || maxSupportedHybridStage >= 1u);
 	const bool bSupportsScreenProbeGI =
 		!bMobileHybridDirectOnlyStartup &&
-		(!bVulkanHybridStartup || maxSupportedHybridStage >= 4u);
+		(!bBackendHybridStageAware || maxSupportedHybridStage >= 6u);
+	const bool bSupportsSpatialHashGI =
+		!bMobileHybridDirectOnlyStartup &&
+		(!bBackendHybridStageAware || maxSupportedHybridStage >= 6u);
 	const bool bSupportsTemporalDenoise =
 		!bMobileHybridDirectOnlyStartup &&
-		(!bVulkanHybridStartup || maxSupportedHybridStage >= 5u);
+		(!bBackendHybridStageAware || maxSupportedHybridStage >= 5u);
 	const bool bSupportsFullHybridPresentation =
 		bMobileHybridDirectOnlyStartup ||
 		(!bVulkanHybridStartup || maxSupportedHybridStage >= 7u);
 	const bool bAllowBlueNoiseInit =
 		!bMobileHybridDirectOnlyStartup &&
-		(!bVulkanHybridStartup || maxSupportedHybridStage >= 1u);
+		(!bBackendHybridStageAware || maxSupportedHybridStage >= 1u);
 	const bool bAllowMobileVirtualControls =
 		CORONA_PLATFORM_MOBILE &&
 		!bCommandLineDisableImgui;
@@ -10609,6 +10686,8 @@ void Corona::LoadAssets()
 		AppendCpuRuntimeTrace(L"[LoadAssets] begin mobile hybrid direct-light-only init");
 	else if (bVulkanHybridStartup)
 		AppendCpuRuntimeTrace(L"[LoadAssets] begin Vulkan hybrid stage-aware init stage=" + std::to_wstring(maxSupportedHybridStage));
+	else if (bBackendHybridStageAware)
+		AppendCpuRuntimeTrace(L"[LoadAssets] begin hybrid stage-aware init stage=" + std::to_wstring(maxSupportedHybridStage));
 	UpdateStartupLoadingProgress(0.22f, L"Preparing render resources");
 
 	if (bAllowBlueNoiseInit && !bBlueNoiseInitialized)
@@ -10708,7 +10787,7 @@ void Corona::LoadAssets()
 		InitScreenProbeGIPass();
 		AppendCpuRuntimeTrace(L"[LoadAssets] after InitScreenProbeGIPass");
 	}
-	if (bSupportsTemporalDenoise)
+	if (bSupportsSpatialHashGI)
 	{
 		AppendCpuRuntimeTrace(L"[LoadAssets] before InitSpatialHashGIPass");
 		UpdateStartupLoadingProgress(0.41f, L"Compiling spatial hash GI");
@@ -14100,14 +14179,26 @@ void Corona::OnRender()
 		// path is unimplemented) cannot run the RT shadow/reflection/GI stages, so
 		// drive the GBuffer + direct-lighting + tonemap path directly instead of
 		// stalling at stage_00 with no visible composite.
+		const uint32_t backendMaxSupportedHybridStage =
+			renderBackend ? renderBackend->GetMaxSupportedHybridStage() : 7u;
 		const bool bDesktopRasterDirectOnly =
-			renderBackend && renderBackend->GetMaxSupportedHybridStage() < 7u;
+			renderBackend && backendMaxSupportedHybridStage == 0u;
 		const bool bHybridDirectOnly =
 			bMobileHybridDirectOnly || bPlatformerHybridDirectOnly || bDesktopRasterDirectOnly;
+		const bool bPartialHybridLighting =
+			!bHybridDirectOnly &&
+			backendMaxSupportedHybridStage > 0u &&
+			backendMaxSupportedHybridStage < 7u;
+		const bool bNriSimpleGIBringup =
+			renderBackend &&
+			renderBackend->GetAPI() == ERenderBackendAPI::NRI &&
+			backendMaxSupportedHybridStage >= 4u &&
+			backendMaxSupportedHybridStage < 7u;
+		const EDiffuseGIMode effectiveDiffuseGIMode =
+			bNriSimpleGIBringup ? EDiffuseGIMode::SIMPLE_RAYTRACE : DiffuseGIMode;
 		const bool bStageDump = !bHybridDirectOnly && IsHybridStageAutoDumpPhase();
 		const uint32_t maxSupportedHybridStage =
-			bHybridDirectOnly ? 7u :
-			(renderBackend ? renderBackend->GetMaxSupportedHybridStage() : 7u);
+			(bHybridDirectOnly || bPartialHybridLighting) ? 7u : backendMaxSupportedHybridStage;
 		const uint32_t requestedHybridStage = bStageDump ? AutoAADumpPhase : 7u;
 		const uint32_t hybridStage = std::min(requestedHybridStage, maxSupportedHybridStage);
 		if (!bLoggedHybridStageLimit && requestedHybridStage > hybridStage)
@@ -14121,15 +14212,15 @@ void Corona::OnRender()
 			bMobileHybridDirectOnly &&
 			MobileShadowMapGraphicsPipeline &&
 			ShadowBuffer;
-		const bool bRunRayTracedShadow = !bHybridDirectOnly && hybridStage >= 1;
-		const bool bRunReflection = !bHybridDirectOnly && hybridStage >= 3 && (bEnableSpecularGI || bStageDump);
-		const bool bRunGI = !bHybridDirectOnly && hybridStage >= 4 && (bEnableDiffuseGI || bStageDump);
+		const bool bRunRayTracedShadow = !bHybridDirectOnly && backendMaxSupportedHybridStage >= 1u && hybridStage >= 1;
+		const bool bRunReflection = !bHybridDirectOnly && !bNriSimpleGIBringup && backendMaxSupportedHybridStage >= 3u && hybridStage >= 3 && (bEnableSpecularGI || bStageDump);
+		const bool bRunGI = !bHybridDirectOnly && backendMaxSupportedHybridStage >= 4u && hybridStage >= 4 && (bEnableDiffuseGI || bStageDump);
 		const bool bDiffuseGINeedsTemporalDenoise =
 			bRunGI &&
-			DiffuseGIMode == EDiffuseGIMode::SIMPLE_RAYTRACE;
-		const bool bRunTemporalDenoise = !bHybridDirectOnly && hybridStage >= 5 && (bDiffuseGINeedsTemporalDenoise || bStageDump);
-		const bool bRunLighting = hybridStage >= 7;
-		const bool bRunDesktopRTAO = !bHybridDirectOnly && bRunLighting && bEnableRTAO;
+			effectiveDiffuseGIMode == EDiffuseGIMode::SIMPLE_RAYTRACE;
+		const bool bRunTemporalDenoise = !bHybridDirectOnly && backendMaxSupportedHybridStage >= 5u && hybridStage >= 5 && (bDiffuseGINeedsTemporalDenoise || bStageDump);
+		const bool bRunLighting = bPartialHybridLighting || hybridStage >= 7;
+		const bool bRunDesktopRTAO = !bHybridDirectOnly && !bNriSimpleGIBringup && backendMaxSupportedHybridStage >= 2u && bRunLighting && bEnableRTAO;
 		const bool bVulkanHybridBackend =
 			renderBackend &&
 			renderBackend->GetAPI() == ERenderBackendAPI::Vulkan;
@@ -14142,12 +14233,13 @@ void Corona::OnRender()
 		const bool bNeedSpatialLightMaskForDirectShadow =
 			bRunRayTracedShadow &&
 			bEnableReSTIRDirectShadow &&
-			DiffuseGIMode == EDiffuseGIMode::SPATIAL_HASH;
+			effectiveDiffuseGIMode == EDiffuseGIMode::SPATIAL_HASH;
 		const bool bNeedSpatialLightMaskForGI =
 			bRunGI &&
-			DiffuseGIMode == EDiffuseGIMode::SPATIAL_HASH;
+			effectiveDiffuseGIMode == EDiffuseGIMode::SPATIAL_HASH;
 		const bool bBuildSharedSpatialLightMask =
 			!bHybridDirectOnly &&
+			backendMaxSupportedHybridStage >= 4u &&
 			(bNeedSpatialLightMaskForDirectShadow || bNeedSpatialLightMaskForGI);
 		if (bBuildSharedSpatialLightMask)
 		{
@@ -14160,7 +14252,7 @@ void Corona::OnRender()
 			bEnableAsyncShadowAOOverlap &&
 			dx12_rhi &&
 			bRunGI &&
-			DiffuseGIMode == EDiffuseGIMode::SPATIAL_HASH;
+			effectiveDiffuseGIMode == EDiffuseGIMode::SPATIAL_HASH;
 		const bool bAsyncRTAORequested =
 			bAsyncShadowAOOverlapAvailable &&
 			bAsyncShadowAOOverlapRTAO &&
@@ -14206,7 +14298,11 @@ void Corona::OnRender()
 			EndGpuPassTiming(EGpuPass::RaytraceAO);
 		}
 
-		if (!bHybridDirectOnly && bRunLighting && bEnableSkyLighting && bEnableRayTracedSkyLighting)
+		if (!bHybridDirectOnly &&
+			backendMaxSupportedHybridStage >= 7u &&
+			bRunLighting &&
+			bEnableSkyLighting &&
+			bEnableRayTracedSkyLighting)
 		{
 			BeginGpuPassTiming(EGpuPass::RaytraceSkyLighting);
 			RaytraceSkyLightingPass();
@@ -14266,11 +14362,11 @@ void Corona::OnRender()
 		if (bRunGI)
 		{
 			BeginGpuPassTiming(EGpuPass::RaytraceGI);
-			if (DiffuseGIMode == EDiffuseGIMode::SCREEN_PROBE)
+			if (effectiveDiffuseGIMode == EDiffuseGIMode::SCREEN_PROBE)
 			{
 				ScreenProbeRaytraceGIPass();
 			}
-			else if (DiffuseGIMode == EDiffuseGIMode::SPATIAL_HASH)
+			else if (effectiveDiffuseGIMode == EDiffuseGIMode::SPATIAL_HASH)
 			{
 				SpatialHashGIPass();
 			}
@@ -14285,7 +14381,7 @@ void Corona::OnRender()
 		// (no temporal reprojection -> no ghosting; reduces 1spp variance so RR stays
 		// stable on dolly). Only meaningful when SIMPLE_RAYTRACE feeds RR raw.
 		if (bEnableDiffuseGI &&
-			DiffuseGIMode == EDiffuseGIMode::SIMPLE_RAYTRACE &&
+			effectiveDiffuseGIMode == EDiffuseGIMode::SIMPLE_RAYTRACE &&
 			IsDLSSRREnabled() &&
 			bEnableSimpleGISpatialFilter)
 		{
@@ -14303,7 +14399,7 @@ void Corona::OnRender()
 			// DLSS-RR combined feed — RR's combined-mode spatial denoise leaves those noisy
 			// on camera rotation. Accumulated pixels pass through (detail preserved).
 			if (bEnableDiffuseGI &&
-				DiffuseGIMode == EDiffuseGIMode::SIMPLE_RAYTRACE &&
+				effectiveDiffuseGIMode == EDiffuseGIMode::SIMPLE_RAYTRACE &&
 				IsDLSSRREnabled() &&
 				!bFeedRawGIToRR &&
 				bEnableGIDisocclusionFilter)
@@ -14311,7 +14407,7 @@ void Corona::OnRender()
 				DiffuseGIDisocclusionFilterPass();
 			}
 		}
-		if (bRunGI && DiffuseGIMode == EDiffuseGIMode::SCREEN_PROBE)
+		if (bRunGI && effectiveDiffuseGIMode == EDiffuseGIMode::SCREEN_PROBE)
 		{
 			BeginGpuPassTiming(EGpuPass::ScreenProbeGI);
 			ScreenProbeGIPass();
@@ -16259,11 +16355,18 @@ void Corona::RecompileShaders()
 	InitTemporalAAPass();
 	return;
 #else
+	const uint32_t maxSupportedHybridStage =
+		(renderBackend && RenderingMode == ERenderingMode::HYBRID) ?
+		renderBackend->GetMaxSupportedHybridStage() : 7u;
 	InitRTPSO();
 	InitPathTracingPass();
-	InitTemporalDenoisingPass();
-	InitDiffuseGISpatialFilterPass();
-	InitSpatialHashGIPass();
+	if (maxSupportedHybridStage >= 5u)
+	{
+		InitTemporalDenoisingPass();
+		InitDiffuseGISpatialFilterPass();
+	}
+	if (maxSupportedHybridStage >= 6u)
+		InitSpatialHashGIPass();
 	InitGBufferPass();
 	InitToneMapPass();
 	InitLightingPass();

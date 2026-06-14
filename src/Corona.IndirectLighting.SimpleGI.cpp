@@ -30,6 +30,8 @@ shared_ptr<RTPipelineStateObject> Corona::CreateRaytracingSimpleGIPSO(bool bUseS
 			TEMP_PSO_RT_GI->SetShaderDefine("RT_DIFFUSE_GI_SER_MATERIAL_HINT_BITS", "8");
 			TEMP_PSO_RT_GI->SetShaderLibraryTarget("lib_6_9");
 		}
+		if (renderBackend && renderBackend->GetAPI() == ERenderBackendAPI::NRI)
+			TEMP_PSO_RT_GI->SetShaderDefine("CORONA_NRI_RT_SAFE_GI_FALLBACK", "1");
 		TEMP_PSO_RT_GI->SetNumInstances(static_cast<uint32_t>(RayTracingInstances.size()));
 
 		TEMP_PSO_RT_GI->AddHitGroup("HitGroup", "chs", "");
@@ -64,9 +66,42 @@ shared_ptr<RTPipelineStateObject> Corona::CreateRaytracingSimpleGIPSO(bool bUseS
 
 void Corona::InitRaytracingSimpleGIPass()
 {
+	if (renderBackend && renderBackend->GetAPI() == ERenderBackendAPI::NRI)
+	{
+		PSO_RT_GI = nullptr;
+		PSO_RT_GI_SER = nullptr;
+		InitNRISimpleGIFallbackPass();
+		return;
+	}
+
 	PSO_RT_GI = CreateRaytracingSimpleGIPSO(false);
 	if (bEnableRTDiffuseGISER && renderBackend && renderBackend->SupportsShaderExecutionReordering())
 		InitRaytracingSimpleGISERPass();
+}
+
+void Corona::InitNRISimpleGIFallbackPass()
+{
+	if (!renderBackend || PSO_NRI_SIMPLE_GI_FALLBACK)
+		return;
+
+	shared_ptr<ComputePipelineStateObject> pso = renderBackend->CreateComputePipelineStateObject();
+	if (!pso)
+		return;
+
+	pso->BindSRV("DepthTex", 0, 1);
+	pso->BindSRV("WorldNormalTex", 1, 1);
+	pso->BindUAV("GIResultColor", 0);
+	pso->BindCBV("ViewParameter", 0, sizeof(RTGIViewParam));
+
+	if (pso->InitCS(GetAssetFullPath(L"Shaders\\NRISimpleGIFallback.hlsl"), "NRISimpleGIFallback"))
+	{
+		PSO_NRI_SIMPLE_GI_FALLBACK = pso;
+		AppendCpuRuntimeTrace(L"[DiffuseGI][NRI fallback] compute PSO initialized");
+	}
+	else
+	{
+		AppendCpuRuntimeTrace(L"[DiffuseGI][NRI fallback] compute PSO initialization failed");
+	}
 }
 
 bool Corona::InitRaytracingSimpleGISERPass()
@@ -99,6 +134,56 @@ void Corona::RaytraceGIPass()
 	if (bEnableRTDiffuseGISER && renderBackend && renderBackend->SupportsShaderExecutionReordering() && InitRaytracingSimpleGISERPass())
 		pso = PSO_RT_GI_SER;
 
+	auto fillViewParam = [&]()
+	{
+		RTGIViewParam.ViewMatrix = glm::transpose(ViewMat);
+		RTGIViewParam.InvViewMatrix = glm::transpose(InvViewMat);
+		RTGIViewParam.ProjMatrix = glm::transpose(UnjitteredProjMat);
+		RTGIViewParam.InvProjMatrix = glm::transpose(UnjitteredInvProjMat);
+		RTGIViewParam.ProjectionParams = FrameProjectionParams;
+		RTGIViewParam.LightDir = glm::vec4(RenderFrameNormalizedLightDir, LightIntensity);
+		RTGIViewParam.RandomOffset = glm::vec2(RenderFrameShaderTime, RenderFrameShaderTime);
+		RTGIViewParam.FrameCounter = RenderFrameIndex;
+		RTGIViewParam.ViewSpreadAngle = glm::tan(Fov * 0.5f) / (0.5f * GetRenderHeight());
+		RTGIViewParam.NoiseMode = RenderFrameRayNoiseMode;
+		RTGIViewParam.bIncludeSkyLighting = RenderFrameDiffuseGISkyLightingEnabled;
+		RTGIViewParam.GISamplesPerPixel = std::clamp(SimpleGISamplesPerPixel, 1u, 8u);
+		RTGIViewParam.SkyColorTop = SkyColorTop;
+		RTGIViewParam.SkyIntensity = RenderFrameDiffuseGISkyIntensity;
+		RTGIViewParam.SkyColorBottom = SkyColorBottom;
+		RTGIViewParam.LightColor = RenderFrameLightColor;
+		FillPointLightParams(
+			RTGIViewParam.PointLights,
+			RTGIViewParam.PointLightCount,
+			std::min(MaxDiffuseGIPointLights, DiffuseGIPointLightLimit));
+		{
+			static float sLastLoggedLightIntensity = -1.0f;
+			static UINT32 sLastLoggedPointLightCount = 0xFFFFFFFFu;
+			if (std::abs(sLastLoggedLightIntensity - LightIntensity) > 0.0001f ||
+				sLastLoggedPointLightCount != RTGIViewParam.PointLightCount)
+			{
+				sLastLoggedLightIntensity = LightIntensity;
+				sLastLoggedPointLightCount = RTGIViewParam.PointLightCount;
+				AppendCpuRuntimeTrace(
+					L"[DiffuseGI][Simple] lightIntensity=" + std::to_wstring(LightIntensity) +
+					L", lightDir=" + std::to_wstring(RenderFrameNormalizedLightDir.x) + L"," +
+					std::to_wstring(RenderFrameNormalizedLightDir.y) + L"," +
+					std::to_wstring(RenderFrameNormalizedLightDir.z) +
+					L", pointLights=" + std::to_wstring(RTGIViewParam.PointLightCount) +
+					L", pointLightLimit=" + std::to_wstring(DiffuseGIPointLightLimit) +
+					L", sky=" + std::to_wstring(RenderFrameDiffuseGISkyLightingEnabled));
+			}
+		}
+	};
+
+	fillViewParam();
+
+	if (renderBackend && renderBackend->GetAPI() == ERenderBackendAPI::NRI)
+	{
+		NRISimpleGIFallbackPass();
+		return;
+	}
+
 	if (!TLAS || !pso)
 		return;
 	renderBackend->EmitGpuCrashMarker("RaytraceGIPass");
@@ -108,45 +193,6 @@ void Corona::RaytraceGIPass()
 	const FLOAT clearGI[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
 	renderBackend->ClearTextureUAVFloat(DiffuseGIRawAux.get(), clearGI);
 	renderBackend->ClearTextureUAVFloat(DiffuseGIRaw.get(), clearGI);
-
-	RTGIViewParam.ViewMatrix = glm::transpose(ViewMat);
-	RTGIViewParam.InvViewMatrix = glm::transpose(InvViewMat);
-	RTGIViewParam.ProjMatrix = glm::transpose(UnjitteredProjMat);
-	RTGIViewParam.InvProjMatrix = glm::transpose(UnjitteredInvProjMat);
-	RTGIViewParam.ProjectionParams = FrameProjectionParams;
-	RTGIViewParam.LightDir = glm::vec4(RenderFrameNormalizedLightDir, LightIntensity);
-	RTGIViewParam.RandomOffset = glm::vec2(RenderFrameShaderTime, RenderFrameShaderTime);
-	RTGIViewParam.FrameCounter = RenderFrameIndex;
-	RTGIViewParam.ViewSpreadAngle = glm::tan(Fov * 0.5f) / (0.5f * GetRenderHeight());
-	RTGIViewParam.NoiseMode = RenderFrameRayNoiseMode;
-	RTGIViewParam.bIncludeSkyLighting = RenderFrameDiffuseGISkyLightingEnabled;
-	RTGIViewParam.GISamplesPerPixel = std::clamp(SimpleGISamplesPerPixel, 1u, 8u);
-	RTGIViewParam.SkyColorTop = SkyColorTop;
-	RTGIViewParam.SkyIntensity = RenderFrameDiffuseGISkyIntensity;
-	RTGIViewParam.SkyColorBottom = SkyColorBottom;
-	RTGIViewParam.LightColor = RenderFrameLightColor;
-	FillPointLightParams(
-		RTGIViewParam.PointLights,
-		RTGIViewParam.PointLightCount,
-		std::min(MaxDiffuseGIPointLights, DiffuseGIPointLightLimit));
-	{
-		static float sLastLoggedLightIntensity = -1.0f;
-		static UINT32 sLastLoggedPointLightCount = 0xFFFFFFFFu;
-		if (std::abs(sLastLoggedLightIntensity - LightIntensity) > 0.0001f ||
-			sLastLoggedPointLightCount != RTGIViewParam.PointLightCount)
-		{
-			sLastLoggedLightIntensity = LightIntensity;
-			sLastLoggedPointLightCount = RTGIViewParam.PointLightCount;
-			AppendCpuRuntimeTrace(
-				L"[DiffuseGI][Simple] lightIntensity=" + std::to_wstring(LightIntensity) +
-				L", lightDir=" + std::to_wstring(RenderFrameNormalizedLightDir.x) + L"," +
-				std::to_wstring(RenderFrameNormalizedLightDir.y) + L"," +
-				std::to_wstring(RenderFrameNormalizedLightDir.z) +
-				L", pointLights=" + std::to_wstring(RTGIViewParam.PointLightCount) +
-				L", pointLightLimit=" + std::to_wstring(DiffuseGIPointLightLimit) +
-				L", sky=" + std::to_wstring(RenderFrameDiffuseGISkyLightingEnabled));
-		}
-	}
 
 	RTPassBuilder pass(*this, pso);
 	pass.BeginScene()
@@ -163,5 +209,30 @@ void Corona::RaytraceGIPass()
 
 	renderBackend->TransitionTexture(DiffuseGIRawAux.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
 	renderBackend->TransitionTexture(DiffuseGIRaw.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
+}
+
+bool Corona::NRISimpleGIFallbackPass()
+{
+	if (!renderBackend || !DiffuseGIRaw)
+		return false;
+	if (!PSO_NRI_SIMPLE_GI_FALLBACK)
+		InitNRISimpleGIFallbackPass();
+	if (!PSO_NRI_SIMPLE_GI_FALLBACK)
+		return false;
+
+	renderBackend->EmitGpuCrashMarker("NRISimpleGIFallbackPass");
+
+	renderBackend->TransitionTexture(DiffuseGIRaw.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
+
+	PSO_NRI_SIMPLE_GI_FALLBACK->SetTextureSRV("DepthTex", UnjitteredDepthBuffers[ColorBufferWriteIndex].get());
+	PSO_NRI_SIMPLE_GI_FALLBACK->SetTextureSRV("WorldNormalTex", NormalBuffers[ColorBufferWriteIndex].get());
+	PSO_NRI_SIMPLE_GI_FALLBACK->SetTextureUAV("GIResultColor", DiffuseGIRaw.get());
+	PSO_NRI_SIMPLE_GI_FALLBACK->SetCBVValue("ViewParameter", &RTGIViewParam);
+	PSO_NRI_SIMPLE_GI_FALLBACK->Apply();
+
+	renderBackend->Dispatch((GetRenderWidth() + 7u) / 8u, (GetRenderHeight() + 7u) / 8u, 1u);
+
+	renderBackend->TransitionTexture(DiffuseGIRaw.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
+	return true;
 }
 

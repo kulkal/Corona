@@ -569,7 +569,9 @@ void Corona::UpdateInstancePropertyBuffer()
 		std::fill(InstancePropertyFrameBuffers.begin(), InstancePropertyFrameBuffers.end(), std::shared_ptr<Buffer>());
 	};
 
-	if (renderBackend && renderBackend->GetAPI() == ERenderBackendAPI::Vulkan)
+	if (renderBackend &&
+		(renderBackend->GetAPI() == ERenderBackendAPI::Vulkan ||
+		 renderBackend->GetAPI() == ERenderBackendAPI::NRI))
 	{
 		try
 		{
@@ -598,8 +600,11 @@ void Corona::UpdateInstancePropertyBuffer()
 				L", instances=" + std::to_wstring(RayTracingInstances.size()));
 			return;
 		}
-		InstancePropertyBuffer->MakeByteAddressBufferSRV();
-		NAME_D3D12_OBJECT(InstancePropertyBuffer->resource);
+		if (renderBackend->GetAPI() == ERenderBackendAPI::Vulkan)
+		{
+			InstancePropertyBuffer->MakeByteAddressBufferSRV();
+			NAME_D3D12_OBJECT(InstancePropertyBuffer->resource);
+		}
 		return;
 	}
 
@@ -800,17 +805,17 @@ void Corona::InitRTPSO()
 {
 	const auto totalStart = std::chrono::steady_clock::now();
 	const uint32_t maxSupportedHybridStage = renderBackend ? renderBackend->GetMaxSupportedHybridStage() : 7u;
-	// A backend reporting max hybrid stage 0 has no ray tracing support at all
-	// (e.g. the NRI backend while its RT path is unimplemented). Creating RT
-	// pipelines on such a backend stalls startup, so skip every RT pass init and
-	// rely on the GBuffer + direct-lighting path instead.
+	// Hybrid stages are cumulative. Stage 1 only brings up ray-traced direct
+	// shadows, so keep later reflection/GI pipelines disabled until the backend
+	// explicitly advertises the resources those passes require.
 	const bool bBackendSupportsRT = maxSupportedHybridStage >= 1u;
-	const bool bInitReflectionRT =
-		bBackendSupportsRT &&
-		(!renderBackend || renderBackend->GetAPI() != ERenderBackendAPI::Vulkan || maxSupportedHybridStage >= 3u);
-	const bool bInitGIRT =
-		bBackendSupportsRT &&
-		(!renderBackend || renderBackend->GetAPI() != ERenderBackendAPI::Vulkan || maxSupportedHybridStage >= 4u);
+	const bool bNriSimpleGIBringup =
+		renderBackend &&
+		renderBackend->GetAPI() == ERenderBackendAPI::NRI &&
+		maxSupportedHybridStage >= 4u &&
+		maxSupportedHybridStage < 7u;
+	const bool bInitReflectionRT = bBackendSupportsRT && maxSupportedHybridStage >= 3u && !bNriSimpleGIBringup;
+	const bool bInitGIRT = bBackendSupportsRT && maxSupportedHybridStage >= 4u;
 
 	AppendCpuRuntimeTrace(
 		L"[StartupTiming][RTPSO] begin maxSupportedHybridStage=" + std::to_wstring(maxSupportedHybridStage) +
@@ -837,9 +842,20 @@ void Corona::InitRTPSO()
 	}
 
 	timePass(L"RaytracingShadow", [&]() { InitRaytracingShadowPass(); });
-	timePass(L"ShadowSpatialReuse", [&]() { InitShadowSpatialReusePass(); });
-	timePass(L"RaytracingAO", [&]() { InitRaytracingAOPass(); });
-	timePass(L"RaytracingSkyLighting", [&]() { InitRaytracingSkyLightingPass(); });
+	if (maxSupportedHybridStage >= 2u && !bNriSimpleGIBringup)
+	{
+		timePass(L"ShadowSpatialReuse", [&]() { InitShadowSpatialReusePass(); });
+		timePass(L"RaytracingAO", [&]() { InitRaytracingAOPass(); });
+	}
+	else
+	{
+		AppendCpuRuntimeTrace(L"[StartupTiming][RTPSO] skip pass=\"ShadowSpatialReuse\"");
+		AppendCpuRuntimeTrace(L"[StartupTiming][RTPSO] skip pass=\"RaytracingAO\"");
+	}
+	if (maxSupportedHybridStage >= 7u)
+		timePass(L"RaytracingSkyLighting", [&]() { InitRaytracingSkyLightingPass(); });
+	else
+		AppendCpuRuntimeTrace(L"[StartupTiming][RTPSO] skip pass=\"RaytracingSkyLighting\"");
 	if (bInitReflectionRT)
 		timePass(L"RaytracingReflection", [&]() { InitRaytracingReflectionPass(); });
 	else
@@ -847,8 +863,16 @@ void Corona::InitRTPSO()
 	if (bInitGIRT)
 	{
 		timePass(L"RaytracingSimpleGI", [&]() { InitRaytracingSimpleGIPass(); });
-		timePass(L"RaytracingScreenProbeGI", [&]() { InitRaytracingScreenProbePass(); });
-		timePass(L"RaytracingSpatialHashGI", [&]() { InitRaytracingSpatialHashPass(); });
+		if (bNriSimpleGIBringup)
+		{
+			AppendCpuRuntimeTrace(L"[StartupTiming][RTPSO] skip pass=\"RaytracingScreenProbeGI\"");
+			AppendCpuRuntimeTrace(L"[StartupTiming][RTPSO] skip pass=\"RaytracingSpatialHashGI\"");
+		}
+		else
+		{
+			timePass(L"RaytracingScreenProbeGI", [&]() { InitRaytracingScreenProbePass(); });
+			timePass(L"RaytracingSpatialHashGI", [&]() { InitRaytracingSpatialHashPass(); });
+		}
 	}
 	else
 	{

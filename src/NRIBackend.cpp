@@ -8,12 +8,16 @@
 
 #include <cstdio>
 #include <cstring>
+#include <cctype>
 #include <algorithm>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
+#include <memory>
 #include <string>
 #include <fstream>
 #include <sstream>
+#include <utility>
 
 #include <wrl/client.h>
 #include <dxcapi.use.h>
@@ -21,6 +25,7 @@
 #include "DirectXTex.h"
 
 #include "imgui.h"
+#include "Utils.h"
 
 #include "NRI.h"
 #include "Extensions/NRIDeviceCreation.h"
@@ -30,6 +35,8 @@
 #include "Extensions/NRIImgui.h"
 #include "Extensions/NRIRayTracing.h"
 #include "Extensions/NRIWrapperD3D12.h"
+
+void AppendCpuRuntimeTrace(const std::wstring& line);
 
 // ---------------------------------------------------------------------------
 // Shader compilation: HLSL -> DXIL via dxcompiler.dll. NRI consumes bytecode;
@@ -128,6 +135,63 @@ static nri::Format ToNRIFormat(ETextureFormat f)
 	return nri::Format::RGBA8_UNORM;
 }
 
+static DXGI_FORMAT MakeLinearDXGIFormat(DXGI_FORMAT f)
+{
+	switch (f)
+	{
+	case DXGI_FORMAT_R8G8B8A8_TYPELESS:
+	case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB: return DXGI_FORMAT_R8G8B8A8_UNORM;
+	case DXGI_FORMAT_B8G8R8A8_TYPELESS:
+	case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB: return DXGI_FORMAT_B8G8R8A8_UNORM;
+	case DXGI_FORMAT_BC1_TYPELESS:
+	case DXGI_FORMAT_BC1_UNORM_SRGB: return DXGI_FORMAT_BC1_UNORM;
+	case DXGI_FORMAT_BC2_TYPELESS:
+	case DXGI_FORMAT_BC2_UNORM_SRGB: return DXGI_FORMAT_BC2_UNORM;
+	case DXGI_FORMAT_BC3_TYPELESS:
+	case DXGI_FORMAT_BC3_UNORM_SRGB: return DXGI_FORMAT_BC3_UNORM;
+	case DXGI_FORMAT_BC4_TYPELESS: return DXGI_FORMAT_BC4_UNORM;
+	case DXGI_FORMAT_BC5_TYPELESS: return DXGI_FORMAT_BC5_UNORM;
+	case DXGI_FORMAT_BC6H_TYPELESS: return DXGI_FORMAT_BC6H_UF16;
+	case DXGI_FORMAT_BC7_TYPELESS:
+	case DXGI_FORMAT_BC7_UNORM_SRGB: return DXGI_FORMAT_BC7_UNORM;
+	default: return f;
+	}
+}
+
+static DXGI_FORMAT ResolveSampledDXGIFormat(DXGI_FORMAT f, bool nonSRGB)
+{
+	const DXGI_FORMAT linear = MakeLinearDXGIFormat(f);
+	return nonSRGB ? linear : DirectX::MakeSRGB(linear);
+}
+
+static nri::Format ToNRISampledTextureFormat(DXGI_FORMAT f)
+{
+	switch (f)
+	{
+	case DXGI_FORMAT_R8_UNORM: return nri::Format::R8_UNORM;
+	case DXGI_FORMAT_R8G8_UNORM: return nri::Format::RG8_UNORM;
+	case DXGI_FORMAT_R8G8B8A8_UNORM: return nri::Format::RGBA8_UNORM;
+	case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB: return nri::Format::RGBA8_SRGB;
+	case DXGI_FORMAT_B8G8R8A8_UNORM: return nri::Format::BGRA8_UNORM;
+	case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB: return nri::Format::BGRA8_SRGB;
+	case DXGI_FORMAT_BC1_UNORM: return nri::Format::BC1_RGBA_UNORM;
+	case DXGI_FORMAT_BC1_UNORM_SRGB: return nri::Format::BC1_RGBA_SRGB;
+	case DXGI_FORMAT_BC2_UNORM: return nri::Format::BC2_RGBA_UNORM;
+	case DXGI_FORMAT_BC2_UNORM_SRGB: return nri::Format::BC2_RGBA_SRGB;
+	case DXGI_FORMAT_BC3_UNORM: return nri::Format::BC3_RGBA_UNORM;
+	case DXGI_FORMAT_BC3_UNORM_SRGB: return nri::Format::BC3_RGBA_SRGB;
+	case DXGI_FORMAT_BC4_UNORM: return nri::Format::BC4_R_UNORM;
+	case DXGI_FORMAT_BC4_SNORM: return nri::Format::BC4_R_SNORM;
+	case DXGI_FORMAT_BC5_UNORM: return nri::Format::BC5_RG_UNORM;
+	case DXGI_FORMAT_BC5_SNORM: return nri::Format::BC5_RG_SNORM;
+	case DXGI_FORMAT_BC6H_UF16: return nri::Format::BC6H_RGB_UFLOAT;
+	case DXGI_FORMAT_BC6H_SF16: return nri::Format::BC6H_RGB_SFLOAT;
+	case DXGI_FORMAT_BC7_UNORM: return nri::Format::BC7_RGBA_UNORM;
+	case DXGI_FORMAT_BC7_UNORM_SRGB: return nri::Format::BC7_RGBA_SRGB;
+	default: return nri::Format::UNKNOWN;
+	}
+}
+
 static nri::Format ToNRIVertexFormat(EVertexAttributeFormat f)
 {
 	switch (f)
@@ -137,6 +201,34 @@ static nri::Format ToNRIVertexFormat(EVertexAttributeFormat f)
 	case EVertexAttributeFormat::Float4: return nri::Format::RGBA32_SFLOAT;
 	}
 	return nri::Format::RGBA32_SFLOAT;
+}
+
+static uint32_t CaptureBytesPerPixel(ETextureFormat format)
+{
+	switch (format)
+	{
+	case ETextureFormat::RGBA16Float: return 8;
+	case ETextureFormat::RGBA32Float: return 16;
+	case ETextureFormat::RG16Float:   return 4;
+	case ETextureFormat::RGBA8Unorm:  return 4;
+	case ETextureFormat::BGRA8Unorm:  return 4;
+	case ETextureFormat::D32Float:    return 4;
+	case ETextureFormat::R32Float:    return 4;
+	case ETextureFormat::R8Uint:      return 1;
+	default:                          return 0;
+	}
+}
+
+static nri::PlaneBits CapturePlaneBits(ETextureFormat format)
+{
+	return format == ETextureFormat::D32Float ? nri::PlaneBits::DEPTH : nri::PlaneBits::COLOR;
+}
+
+static uint64_t AlignUpU64(uint64_t value, uint64_t alignment)
+{
+	if (alignment <= 1)
+		return value;
+	return (value + alignment - 1) & ~(alignment - 1);
 }
 
 static nri::TextureUsageBits ToNRITextureUsage(ETextureUsageFlags u)
@@ -190,11 +282,15 @@ static nri::AccessStage ToAccessStage(EResourceState s)
 // ---------------------------------------------------------------------------
 // PIMPL: all NRI state lives here so the header stays NRI-free.
 // ---------------------------------------------------------------------------
+struct NRIRTAS;
+
 struct NRIBackend::Impl
 {
 	nri::Device* Device = nullptr;
 	nri::CoreInterface Core{};
 	nri::HelperInterface Helper{};
+	nri::RayTracingInterface RT{};
+	bool HasRayTracing = false;
 	nri::Queue* GraphicsQueue = nullptr;
 	nri::CommandAllocator* CmdAllocator = nullptr;
 	nri::CommandBuffer* CmdBuffer = nullptr;
@@ -255,7 +351,7 @@ struct NRIBackend::Impl
 	// Per-frame diagnostics (Stage 2 bring-up): counts reset each BeginFrame.
 	uint32_t DbgRPOpens = 0, DbgGfxBindOk = 0, DbgGfxBindFail = 0;
 	uint32_t DbgDraws = 0, DbgDrawsSkipped = 0, DbgImguiDraws = 0, DbgClears = 0;
-	// Future milestones add: RayTracingInterface, descriptor pools.
+	std::vector<std::weak_ptr<NRIRTAS>> RayTracingAS;
 
 	nri::Texture* NriTex(Texture* t)
 	{
@@ -671,7 +767,695 @@ struct NRIBackend::Impl
 		Core.Wait(*FrameFence, SwapFrameIndex); // synchronous pacing for bring-up
 		return true;
 	}
+
+	void BarrierAccelerationStructure(nri::CommandBuffer& commandBuffer, nri::AccelerationStructure* accelerationStructure)
+	{
+		if (!accelerationStructure || !RT.GetAccelerationStructureBuffer)
+			return;
+
+		nri::Buffer* buffer = RT.GetAccelerationStructureBuffer(*accelerationStructure);
+		if (!buffer)
+			return;
+
+		nri::BufferBarrierDesc barrier = {};
+		barrier.buffer = buffer;
+		barrier.before.access = nri::AccessBits::ACCELERATION_STRUCTURE_WRITE;
+		barrier.before.stages = nri::StageBits::ACCELERATION_STRUCTURE;
+		barrier.after.access = nri::AccessBits::ACCELERATION_STRUCTURE_READ;
+		barrier.after.stages = nri::StageBits::ACCELERATION_STRUCTURE | nri::StageBits::RAY_TRACING_SHADERS | nri::StageBits::COMPUTE_SHADER;
+
+		nri::BarrierDesc barriers = {};
+		barriers.buffers = &barrier;
+		barriers.bufferNum = 1;
+		Core.CmdBarrier(commandBuffer, barriers);
+	}
+
+	template <typename RecordFn>
+	bool SubmitImmediate(const char* label, RecordFn record)
+	{
+		if (!Device || !GraphicsQueue || !CmdAllocator || !CmdBuffer || !Fence || ActiveCmd)
+		{
+			if (label)
+				OutputDebugStringA(label);
+			return false;
+		}
+
+		Core.ResetCommandAllocator(*CmdAllocator);
+		if (Core.BeginCommandBuffer(*CmdBuffer, nullptr) != nri::Result::SUCCESS)
+			return false;
+
+		record(*CmdBuffer);
+
+		if (Core.EndCommandBuffer(*CmdBuffer) != nri::Result::SUCCESS)
+			return false;
+
+		nri::FenceSubmitDesc signalFence = {};
+		signalFence.fence = Fence;
+		signalFence.value = ++FenceValue;
+		signalFence.stages = nri::StageBits::ALL;
+
+		nri::CommandBuffer* commandBuffers[1] = { CmdBuffer };
+		nri::QueueSubmitDesc submit = {};
+		submit.commandBuffers = commandBuffers;
+		submit.commandBufferNum = 1;
+		submit.signalFences = &signalFence;
+		submit.signalFenceNum = 1;
+
+		if (Core.QueueSubmit(*GraphicsQueue, submit) != nri::Result::SUCCESS)
+			return false;
+		Core.Wait(*Fence, FenceValue);
+		return Core.GetFenceValue(*Fence) >= FenceValue;
+	}
+
+	std::string RunRayTracingASSmoke()
+	{
+		if (!HasRayTracing || RayTracingTier < 1)
+			return "skipped";
+		if (!CmdBuffer || !GraphicsQueue || !Fence)
+			return "skipped";
+
+		struct SmokeVertex { float x, y, z; };
+		const SmokeVertex vertices[3] = {
+			{ 0.0f, 0.0f, 0.0f },
+			{ 1.0f, 0.0f, 0.0f },
+			{ 0.0f, 1.0f, 0.0f }
+		};
+		const uint32_t indices[3] = { 0u, 1u, 2u };
+
+		nri::Buffer* vertexBuffer = nullptr;
+		nri::Buffer* indexBuffer = nullptr;
+		nri::Buffer* blasScratch = nullptr;
+		nri::Buffer* tlasScratch = nullptr;
+		nri::Buffer* instanceBuffer = nullptr;
+		std::vector<nri::Memory*> vertexMemory;
+		std::vector<nri::Memory*> indexMemory;
+		std::vector<nri::Memory*> blasScratchMemory;
+		std::vector<nri::Memory*> tlasScratchMemory;
+		std::vector<nri::Memory*> instanceMemory;
+		nri::AccelerationStructure* blas = nullptr;
+		nri::AccelerationStructure* tlas = nullptr;
+		nri::Descriptor* tlasDescriptor = nullptr;
+		std::string result = "FAIL";
+
+		auto UploadToHostBuffer = [&](nri::Buffer* buffer, const void* data, uint64_t size) -> bool
+		{
+			void* mapped = Core.MapBuffer(*buffer, 0, size);
+			if (!mapped)
+				return false;
+			memcpy(mapped, data, static_cast<size_t>(size));
+			Core.UnmapBuffer(*buffer);
+			return true;
+		};
+
+		auto SubmitSmoke = [&](auto record, const char*& failure) -> bool
+		{
+			nri::CommandAllocator* allocator = nullptr;
+			nri::CommandBuffer* commandBuffer = nullptr;
+			nri::Fence* fence = nullptr;
+			uint64_t fenceValue = 1;
+
+			auto Cleanup = [&]()
+			{
+				if (fence)
+					Core.DestroyFence(fence);
+				if (commandBuffer)
+					Core.DestroyCommandBuffer(commandBuffer);
+				if (allocator)
+					Core.DestroyCommandAllocator(allocator);
+			};
+
+			if (Core.CreateCommandAllocator(*GraphicsQueue, allocator) != nri::Result::SUCCESS || !allocator)
+			{
+				failure = "Alloc";
+				Cleanup();
+				return false;
+			}
+			if (Core.CreateCommandBuffer(*allocator, commandBuffer) != nri::Result::SUCCESS || !commandBuffer)
+			{
+				failure = "Cmd";
+				Cleanup();
+				return false;
+			}
+			if (Core.CreateFence(*Device, 0, fence) != nri::Result::SUCCESS || !fence)
+			{
+				failure = "Fence";
+				Cleanup();
+				return false;
+			}
+			if (Core.BeginCommandBuffer(*commandBuffer, nullptr) != nri::Result::SUCCESS)
+			{
+				failure = "Begin";
+				Cleanup();
+				return false;
+			}
+
+			record(*commandBuffer);
+
+			if (Core.EndCommandBuffer(*commandBuffer) != nri::Result::SUCCESS)
+			{
+				failure = "End";
+				Cleanup();
+				return false;
+			}
+
+			nri::FenceSubmitDesc signalFence = {};
+			signalFence.fence = fence;
+			signalFence.value = fenceValue;
+			signalFence.stages = nri::StageBits::ALL;
+
+			nri::CommandBuffer* commandBuffers[1] = { commandBuffer };
+			nri::QueueSubmitDesc submit = {};
+			submit.commandBuffers = commandBuffers;
+			submit.commandBufferNum = 1;
+			submit.signalFences = &signalFence;
+			submit.signalFenceNum = 1;
+
+			if (Core.QueueSubmit(*GraphicsQueue, submit) != nri::Result::SUCCESS)
+			{
+				failure = "Submit";
+				Cleanup();
+				return false;
+			}
+			Core.Wait(*fence, fenceValue);
+			const bool done = Core.GetFenceValue(*fence) >= fenceValue;
+			Cleanup();
+			if (!done)
+				failure = "Wait";
+			return done;
+		};
+
+		do
+		{
+			if (!CreateBoundBuffer(sizeof(vertices), 0, nri::BufferUsageBits::SHADER_RESOURCE | nri::BufferUsageBits::ACCELERATION_STRUCTURE_BUILD_INPUT,
+				nri::MemoryLocation::HOST_UPLOAD, vertexBuffer, vertexMemory))
+			{
+				result = "FAIL(vb)";
+				break;
+			}
+			if (!UploadToHostBuffer(vertexBuffer, vertices, sizeof(vertices)))
+			{
+				result = "FAIL(vbUpload)";
+				break;
+			}
+			if (!CreateBoundBuffer(sizeof(indices), 0, nri::BufferUsageBits::SHADER_RESOURCE | nri::BufferUsageBits::ACCELERATION_STRUCTURE_BUILD_INPUT,
+				nri::MemoryLocation::HOST_UPLOAD, indexBuffer, indexMemory))
+			{
+				result = "FAIL(ib)";
+				break;
+			}
+			if (!UploadToHostBuffer(indexBuffer, indices, sizeof(indices)))
+			{
+				result = "FAIL(ibUpload)";
+				break;
+			}
+
+			nri::BottomLevelGeometryDesc geometry = {};
+			geometry.flags = nri::BottomLevelGeometryBits::OPAQUE_GEOMETRY;
+			geometry.type = nri::BottomLevelGeometryType::TRIANGLES;
+			geometry.triangles.vertexBuffer = vertexBuffer;
+			geometry.triangles.vertexNum = 3;
+			geometry.triangles.vertexStride = sizeof(SmokeVertex);
+			geometry.triangles.vertexFormat = nri::Format::RGB32_SFLOAT;
+			geometry.triangles.indexBuffer = indexBuffer;
+			geometry.triangles.indexNum = 3;
+			geometry.triangles.indexType = nri::IndexType::UINT32;
+
+			nri::AccelerationStructureDesc blasDesc = {};
+			blasDesc.geometries = &geometry;
+			blasDesc.geometryOrInstanceNum = 1;
+			blasDesc.flags = nri::AccelerationStructureBits::PREFER_FAST_TRACE;
+			blasDesc.type = nri::AccelerationStructureType::BOTTOM_LEVEL;
+			if (RT.CreateCommittedAccelerationStructure(*Device, nri::MemoryLocation::DEVICE, 0.0f, blasDesc, blas) != nri::Result::SUCCESS || !blas)
+			{
+				result = "FAIL(blas)";
+				break;
+			}
+
+			const uint64_t blasScratchSize = RT.GetAccelerationStructureBuildScratchBufferSize(*blas);
+			if (blasScratchSize == 0 ||
+				!CreateBoundBuffer(blasScratchSize, 0, nri::BufferUsageBits::SCRATCH_BUFFER, nri::MemoryLocation::DEVICE, blasScratch, blasScratchMemory))
+			{
+				result = "FAIL(blasScratch)";
+				break;
+			}
+
+			nri::BuildBottomLevelAccelerationStructureDesc blasBuild = {};
+			blasBuild.dst = blas;
+			blasBuild.geometries = &geometry;
+			blasBuild.geometryNum = 1;
+			blasBuild.scratchBuffer = blasScratch;
+
+			const char* submitFailure = "";
+			const bool blasSubmitted = SubmitSmoke([&](nri::CommandBuffer& cmd)
+			{
+				RT.CmdBuildBottomLevelAccelerationStructures(cmd, &blasBuild, 1);
+				BarrierAccelerationStructure(cmd, blas);
+			}, submitFailure);
+			if (!blasSubmitted)
+			{
+				result = std::string("FAIL(blas") + submitFailure + ")";
+				break;
+			}
+
+			const uint64_t blasHandle = RT.GetAccelerationStructureHandle(*blas);
+			if (blasHandle == 0)
+			{
+				result = "FAIL(blasHandle)";
+				break;
+			}
+
+			nri::AccelerationStructureDesc tlasDesc = {};
+			tlasDesc.geometryOrInstanceNum = 1;
+			tlasDesc.flags = nri::AccelerationStructureBits::PREFER_FAST_TRACE;
+			tlasDesc.type = nri::AccelerationStructureType::TOP_LEVEL;
+			if (RT.CreateCommittedAccelerationStructure(*Device, nri::MemoryLocation::DEVICE, 0.0f, tlasDesc, tlas) != nri::Result::SUCCESS || !tlas)
+			{
+				result = "FAIL(tlas)";
+				break;
+			}
+
+			const uint64_t tlasScratchSize = RT.GetAccelerationStructureBuildScratchBufferSize(*tlas);
+			if (tlasScratchSize == 0 ||
+				!CreateBoundBuffer(tlasScratchSize, 0, nri::BufferUsageBits::SCRATCH_BUFFER, nri::MemoryLocation::DEVICE, tlasScratch, tlasScratchMemory))
+			{
+				result = "FAIL(tlasScratch)";
+				break;
+			}
+
+			nri::TopLevelInstance instance = {};
+			instance.transform[0][0] = 1.0f;
+			instance.transform[1][1] = 1.0f;
+			instance.transform[2][2] = 1.0f;
+			instance.instanceId = 0;
+			instance.mask = 0xFF;
+			instance.shaderBindingTableLocalOffset = 0;
+			instance.flags = nri::TopLevelInstanceBits::NONE;
+			instance.accelerationStructureHandle = blasHandle;
+
+			if (!CreateBoundBuffer(sizeof(instance), 0, nri::BufferUsageBits::ACCELERATION_STRUCTURE_BUILD_INPUT,
+				nri::MemoryLocation::HOST_UPLOAD, instanceBuffer, instanceMemory))
+			{
+				result = "FAIL(instBuf)";
+				break;
+			}
+			if (!UploadToHostBuffer(instanceBuffer, &instance, sizeof(instance)))
+			{
+				result = "FAIL(instUpload)";
+				break;
+			}
+
+			nri::BuildTopLevelAccelerationStructureDesc tlasBuild = {};
+			tlasBuild.dst = tlas;
+			tlasBuild.instanceNum = 1;
+			tlasBuild.instanceBuffer = instanceBuffer;
+			tlasBuild.scratchBuffer = tlasScratch;
+
+			submitFailure = "";
+			const bool tlasSubmitted = SubmitSmoke([&](nri::CommandBuffer& cmd)
+			{
+				RT.CmdBuildTopLevelAccelerationStructures(cmd, &tlasBuild, 1);
+				BarrierAccelerationStructure(cmd, tlas);
+			}, submitFailure);
+			if (!tlasSubmitted)
+			{
+				result = std::string("FAIL(tlas") + submitFailure + ")";
+				break;
+			}
+			if (RT.GetAccelerationStructureHandle(*tlas) == 0)
+			{
+				result = "FAIL(tlasHandle)";
+				break;
+			}
+			if (RT.CreateAccelerationStructureDescriptor(*tlas, tlasDescriptor) != nri::Result::SUCCESS || !tlasDescriptor)
+			{
+				result = "FAIL(tlasDesc)";
+				break;
+			}
+
+			result = "PASS";
+		} while (false);
+
+		if (tlasDescriptor)
+			Core.DestroyDescriptor(tlasDescriptor);
+		if (tlas)
+			RT.DestroyAccelerationStructure(tlas);
+		if (blas)
+			RT.DestroyAccelerationStructure(blas);
+		FreeBuffer(instanceBuffer, instanceMemory);
+		FreeBuffer(tlasScratch, tlasScratchMemory);
+		FreeBuffer(blasScratch, blasScratchMemory);
+		FreeBuffer(indexBuffer, indexMemory);
+		FreeBuffer(vertexBuffer, vertexMemory);
+		return result;
+	}
+
+	std::string RunRayTracingPipelineSmoke()
+	{
+		if (!HasRayTracing || RayTracingTier < 1 || !CmdBuffer || !GraphicsQueue || !Fence)
+			return "skipped";
+
+		static const char* kRayGen =
+			"[shader(\"raygeneration\")] void RayGen() {}\n";
+		static const char* kMiss =
+			"struct Payload { uint value; };\n"
+			"[shader(\"miss\")] void Miss(inout Payload payload) { payload.value = 0; }\n";
+
+		std::string rayGenErr, missErr;
+		std::vector<uint8_t> rayGenDxil = CompileHLSLToDXIL(kRayGen, strlen(kRayGen), L"nri_rt_smoke_raygen.hlsl", nullptr, L"lib_6_3", rayGenErr);
+		std::vector<uint8_t> missDxil = CompileHLSLToDXIL(kMiss, strlen(kMiss), L"nri_rt_smoke_miss.hlsl", nullptr, L"lib_6_3", missErr);
+		if (rayGenDxil.empty() || missDxil.empty())
+			return "FAIL(dxc)";
+
+		nri::PipelineLayout* layout = nullptr;
+		nri::Pipeline* pipeline = nullptr;
+		nri::Buffer* sbt = nullptr;
+		std::vector<nri::Memory*> sbtMemory;
+
+		auto Cleanup = [&]()
+		{
+			if (pipeline) Core.DestroyPipeline(pipeline);
+			if (layout) Core.DestroyPipelineLayout(layout);
+			FreeBuffer(sbt, sbtMemory);
+		};
+
+		nri::PipelineLayoutDesc pld = {};
+		pld.shaderStages = nri::StageBits::RAY_TRACING_SHADERS;
+		if (Core.CreatePipelineLayout(*Device, pld, layout) != nri::Result::SUCCESS || !layout)
+		{
+			Cleanup();
+			return "FAIL(layout)";
+		}
+
+		nri::ShaderDesc shaders[2] = {};
+		shaders[0].stage = nri::StageBits::RAYGEN_SHADER;
+		shaders[0].bytecode = rayGenDxil.data();
+		shaders[0].size = rayGenDxil.size();
+		shaders[0].entryPointName = "RayGen";
+		shaders[1].stage = nri::StageBits::MISS_SHADER;
+		shaders[1].bytecode = missDxil.data();
+		shaders[1].size = missDxil.size();
+		shaders[1].entryPointName = "Miss";
+
+		nri::ShaderLibraryDesc library = {};
+		library.shaders = shaders;
+		library.shaderNum = 2;
+
+		nri::ShaderGroupDesc groups[2] = {};
+		groups[0].shaderIndices[0] = 1;
+		groups[1].shaderIndices[0] = 2;
+
+		nri::RayTracingPipelineDesc rtd = {};
+		rtd.pipelineLayout = layout;
+		rtd.shaderLibrary = &library;
+		rtd.shaderGroups = groups;
+		rtd.shaderGroupNum = 2;
+		rtd.recursionMaxDepth = 1;
+		rtd.rayPayloadMaxSize = 4;
+		rtd.rayHitAttributeMaxSize = 8;
+		if (RT.CreateRayTracingPipeline(*Device, rtd, pipeline) != nri::Result::SUCCESS || !pipeline)
+		{
+			Cleanup();
+			return "FAIL(pipeline)";
+		}
+
+		const nri::DeviceDesc& deviceDesc = Core.GetDeviceDesc(*Device);
+		const uint32_t idSize = deviceDesc.shaderStage.rayTracing.shaderGroupIdentifierSize;
+		const uint64_t sbtAlignment = std::max<uint32_t>(1u, deviceDesc.memoryAlignment.shaderBindingTable);
+		const uint64_t sbtRecordSize = AlignUpU64(idSize, sbtAlignment);
+		const uint64_t raygenOffset = 0;
+		const uint64_t missOffset = AlignUpU64(raygenOffset + sbtRecordSize, sbtAlignment);
+		const uint64_t sbtSize = missOffset + sbtRecordSize;
+		if (idSize == 0 || !CreateBoundBuffer(sbtSize, 0, nri::BufferUsageBits::SHADER_BINDING_TABLE, nri::MemoryLocation::HOST_UPLOAD, sbt, sbtMemory))
+		{
+			Cleanup();
+			return "FAIL(sbt)";
+		}
+
+		void* mapped = Core.MapBuffer(*sbt, 0, sbtSize);
+		if (!mapped)
+		{
+			Cleanup();
+			return "FAIL(map)";
+		}
+		uint8_t* mappedBytes = static_cast<uint8_t*>(mapped);
+		nri::Result writeResult = RT.WriteShaderGroupIdentifiers(*pipeline, 0, 1, mappedBytes + raygenOffset);
+		if (writeResult == nri::Result::SUCCESS)
+			writeResult = RT.WriteShaderGroupIdentifiers(*pipeline, 1, 1, mappedBytes + missOffset);
+		Core.UnmapBuffer(*sbt);
+		if (writeResult != nri::Result::SUCCESS)
+		{
+			Cleanup();
+			return "FAIL(sbtIds)";
+		}
+
+		const bool submitted = SubmitImmediate("[NRIRT] DispatchRays smoke immediate submit failed\n", [&](nri::CommandBuffer& cmd)
+		{
+			Core.CmdSetPipelineLayout(cmd, nri::BindPoint::RAY_TRACING, *layout);
+			Core.CmdSetPipeline(cmd, *pipeline);
+
+			nri::DispatchRaysDesc dispatch = {};
+			dispatch.raygenShader.buffer = sbt;
+			dispatch.raygenShader.offset = raygenOffset;
+			dispatch.raygenShader.size = sbtRecordSize;
+			dispatch.raygenShader.stride = sbtRecordSize;
+			dispatch.missShaders.buffer = sbt;
+			dispatch.missShaders.offset = missOffset;
+			dispatch.missShaders.size = sbtRecordSize;
+			dispatch.missShaders.stride = sbtRecordSize;
+			dispatch.x = 1;
+			dispatch.y = 1;
+			dispatch.z = 1;
+			RT.CmdDispatchRays(cmd, dispatch);
+		});
+
+		Cleanup();
+		return submitted ? "PASS" : "FAIL(dispatch)";
+	}
 };
+
+struct NRIRTAS : RTAS
+{
+	NRIBackend::Impl* Owner = nullptr;
+	nri::AccelerationStructure* AccelerationStructure = nullptr;
+	nri::Descriptor* Descriptor = nullptr;
+	nri::BottomLevelGeometryDesc BottomGeometry = {};
+	nri::Buffer* ScratchBuffer = nullptr;
+	std::vector<nri::Memory*> ScratchMemory;
+	nri::Buffer* InstanceBuffer = nullptr;
+	std::vector<nri::Memory*> InstanceMemory;
+	void* InstanceMapped = nullptr;
+	uint32_t InstanceCount = 0;
+	bool IsTopLevel = false;
+	bool AllowUpdate = false;
+	bool BuildPending = false;
+
+	~NRIRTAS() override { Destroy(); }
+
+	void Destroy()
+	{
+		if (!Owner || !Owner->Device)
+		{
+			Owner = nullptr;
+			return;
+		}
+
+		if (Descriptor)
+		{
+			Owner->Core.DestroyDescriptor(Descriptor);
+			Descriptor = nullptr;
+		}
+		if (ScratchBuffer)
+		{
+			Owner->FreeBuffer(ScratchBuffer, ScratchMemory);
+			ScratchBuffer = nullptr;
+		}
+		if (InstanceBuffer)
+		{
+			Owner->FreeBuffer(InstanceBuffer, InstanceMemory);
+			InstanceBuffer = nullptr;
+			InstanceMapped = nullptr;
+		}
+		if (AccelerationStructure)
+		{
+			Owner->RT.DestroyAccelerationStructure(AccelerationStructure);
+			AccelerationStructure = nullptr;
+		}
+		Owner = nullptr;
+	}
+};
+
+static std::wstring FormatNRIHex(uint64_t value)
+{
+	std::wstringstream stream;
+	stream << L"0x" << std::hex << std::uppercase << value;
+	return stream.str();
+}
+
+static nri::IndexType ToNRIIndexType(EIndexFormat format)
+{
+	return format == EIndexFormat::U16 ? nri::IndexType::UINT16 : nri::IndexType::UINT32;
+}
+
+static bool FillNRIBottomGeometry(
+	NRIBackend::Impl* m,
+	Mesh* mesh,
+	bool skeletal,
+	nri::BottomLevelGeometryDesc& geometry,
+	uint32_t& vertexCount,
+	uint32_t& indexCount)
+{
+	if (!m || !mesh || !mesh->Ib || mesh->VertexStride == 0)
+		return false;
+
+	VertexBuffer* vb = skeletal ? mesh->SkeletalOutputVb.get() : mesh->Vb.get();
+	if (!vb)
+		return false;
+
+	auto vbIt = m->VBs.find(vb);
+	auto ibIt = m->IBs.find(mesh->Ib.get());
+	if (vbIt == m->VBs.end() || !vbIt->second.buffer ||
+		ibIt == m->IBs.end() || !ibIt->second.buffer)
+		return false;
+
+	vertexCount = skeletal ? mesh->SkeletalVertexCount : static_cast<uint32_t>(std::max(0, vb->numVertices));
+	indexCount = static_cast<uint32_t>(std::max(0, mesh->Ib->numIndices));
+	if (vertexCount == 0 || indexCount < 3)
+		return false;
+
+	const uint64_t vertexOffset = skeletal
+		? static_cast<uint64_t>(mesh->SkeletalCharIndex) *
+			static_cast<uint64_t>(mesh->SkeletalVertexCount) *
+			static_cast<uint64_t>(mesh->VertexStride)
+		: 0ull;
+
+	geometry = {};
+	geometry.flags = mesh->bTransparent
+		? nri::BottomLevelGeometryBits::NONE
+		: nri::BottomLevelGeometryBits::OPAQUE_GEOMETRY;
+	geometry.type = nri::BottomLevelGeometryType::TRIANGLES;
+	geometry.triangles.vertexBuffer = vbIt->second.buffer;
+	geometry.triangles.vertexOffset = vertexOffset;
+	geometry.triangles.vertexNum = vertexCount;
+	geometry.triangles.vertexStride = static_cast<uint16_t>(mesh->VertexStride);
+	geometry.triangles.vertexFormat = nri::Format::RGB32_SFLOAT;
+	geometry.triangles.indexBuffer = ibIt->second.buffer;
+	geometry.triangles.indexOffset = 0;
+	geometry.triangles.indexNum = indexCount;
+	geometry.triangles.indexType = ToNRIIndexType(mesh->IndexFormat);
+	return true;
+}
+
+static bool WriteNRITLASInstances(NRIRTAS* as, const std::vector<RTInstanceDesc>& instances)
+{
+	if (!as || !as->Owner || !as->InstanceMapped || instances.size() > static_cast<size_t>(UINT32_MAX))
+		return false;
+
+	nri::TopLevelInstance* dst = static_cast<nri::TopLevelInstance*>(as->InstanceMapped);
+	memset(dst, 0, sizeof(nri::TopLevelInstance) * instances.size());
+
+	for (uint32_t i = 0; i < static_cast<uint32_t>(instances.size()); ++i)
+	{
+		NRIRTAS* blas = dynamic_cast<NRIRTAS*>(instances[i].BottomLevelAS.get());
+		if (!blas || !blas->AccelerationStructure || !blas->Owner)
+			return false;
+
+		const glm::mat4x4 mat = glm::transpose(instances[i].Transform);
+		memcpy(dst[i].transform, &mat, sizeof(dst[i].transform));
+		dst[i].instanceId = i;
+		dst[i].mask = 0xFF;
+		// The NRI RT PSO currently emits one shared hit-group record. InstanceID()
+		// still carries the scene instance index used by InstanceProperty.
+		dst[i].shaderBindingTableLocalOffset = 0;
+		dst[i].flags = nri::TopLevelInstanceBits::NONE;
+		dst[i].accelerationStructureHandle = as->Owner->RT.GetAccelerationStructureHandle(*blas->AccelerationStructure);
+		if (dst[i].accelerationStructureHandle == 0)
+			return false;
+	}
+
+	return true;
+}
+
+static std::shared_ptr<RTAS> CreateNRIBLASForMeshInternal(NRIBackend::Impl* m, Mesh* mesh, bool skeletal, bool allowUpdate)
+{
+	if (!m || !m->Device || !m->HasRayTracing || !mesh)
+		return nullptr;
+
+	uint32_t vertexCount = 0;
+	uint32_t indexCount = 0;
+	nri::BottomLevelGeometryDesc geometry = {};
+	if (!FillNRIBottomGeometry(m, mesh, skeletal, geometry, vertexCount, indexCount))
+	{
+		AppendCpuRuntimeTrace(
+			L"[NRIRTAS] CreateBLAS skipped invalid mesh"
+			L", skeletal=" + std::to_wstring(skeletal ? 1 : 0) +
+			L", mesh=" + FormatNRIHex(reinterpret_cast<uint64_t>(mesh)) +
+			L", hasVb=" + std::to_wstring(mesh->Vb ? 1 : 0) +
+			L", hasSkeletalOutputVb=" + std::to_wstring(mesh->SkeletalOutputVb ? 1 : 0) +
+			L", hasIb=" + std::to_wstring(mesh->Ib ? 1 : 0) +
+			L", vertexStride=" + std::to_wstring(mesh->VertexStride));
+		return nullptr;
+	}
+
+	nri::AccelerationStructureDesc desc = {};
+	desc.geometries = &geometry;
+	desc.geometryOrInstanceNum = 1;
+	desc.flags = nri::AccelerationStructureBits::PREFER_FAST_TRACE;
+	if (allowUpdate)
+		desc.flags |= nri::AccelerationStructureBits::ALLOW_UPDATE;
+	desc.type = nri::AccelerationStructureType::BOTTOM_LEVEL;
+
+	auto as = std::make_shared<NRIRTAS>();
+	as->Owner = m;
+	as->MeshPtr = mesh;
+	as->BottomGeometry = geometry;
+	as->AllowUpdate = allowUpdate;
+
+	if (m->RT.CreateCommittedAccelerationStructure(*m->Device, nri::MemoryLocation::DEVICE, 0.0f, desc, as->AccelerationStructure) != nri::Result::SUCCESS ||
+		!as->AccelerationStructure)
+	{
+		AppendCpuRuntimeTrace(L"[NRIRTAS] CreateCommittedAccelerationStructure BLAS failed");
+		return nullptr;
+	}
+
+	uint64_t scratchSize = m->RT.GetAccelerationStructureBuildScratchBufferSize(*as->AccelerationStructure);
+	if (allowUpdate && m->RT.GetAccelerationStructureUpdateScratchBufferSize)
+		scratchSize = std::max<uint64_t>(scratchSize, m->RT.GetAccelerationStructureUpdateScratchBufferSize(*as->AccelerationStructure));
+	if (scratchSize == 0 ||
+		!m->CreateBoundBuffer(scratchSize, 0, nri::BufferUsageBits::SCRATCH_BUFFER, nri::MemoryLocation::DEVICE, as->ScratchBuffer, as->ScratchMemory))
+	{
+		AppendCpuRuntimeTrace(L"[NRIRTAS] BLAS scratch allocation failed size=" + std::to_wstring(scratchSize));
+		return nullptr;
+	}
+
+	as->BuildPending = true;
+	m->RT.CreateAccelerationStructureDescriptor(*as->AccelerationStructure, as->Descriptor);
+	m->RayTracingAS.push_back(as);
+	return as;
+}
+
+static void CollectPendingNRIBLASBuilds(
+	const std::vector<RTInstanceDesc>& instances,
+	std::vector<std::shared_ptr<NRIRTAS>>& pendingAS,
+	std::vector<nri::BuildBottomLevelAccelerationStructureDesc>& builds)
+{
+	std::unordered_set<NRIRTAS*> seen;
+	for (const RTInstanceDesc& instance : instances)
+	{
+		std::shared_ptr<NRIRTAS> blas = std::dynamic_pointer_cast<NRIRTAS>(instance.BottomLevelAS);
+		if (!blas || !blas->BuildPending || !blas->AccelerationStructure || !blas->ScratchBuffer)
+			continue;
+		if (!seen.insert(blas.get()).second)
+			continue;
+
+		nri::BuildBottomLevelAccelerationStructureDesc build = {};
+		build.dst = blas->AccelerationStructure;
+		build.geometries = &blas->BottomGeometry;
+		build.geometryNum = 1;
+		build.scratchBuffer = blas->ScratchBuffer;
+		pendingAS.push_back(blas);
+		builds.push_back(build);
+	}
+}
 
 // ---------------------------------------------------------------------------
 // By-name binding adapter: maps Corona's ComputePipelineStateObject (resources
@@ -706,6 +1490,7 @@ public:
 		Buffer* buf = nullptr;
 		Sampler* samp = nullptr;
 		nri::Descriptor* desc = nullptr;
+		nri::Descriptor* descSingle[1] = {};
 		bool ownsDesc = false;           // desc created by us (texture/buffer view) vs borrowed (cbv/sampler)
 		void* lastResource = nullptr;    // resource the current desc was built for (dirty check)
 		uint32_t setIndex = 0;
@@ -765,6 +1550,7 @@ public:
 	void Apply() override
 	{
 		if (!m->ActiveCmd) return;
+		m->EndRP();
 		if (!EnsureInit()) return;
 
 		for (Binding& b : Bindings)
@@ -775,12 +1561,12 @@ public:
 		{
 			if (b.kind == ResKind::None || !b.desc || b.setIndex >= Sets.size() || !Sets[b.setIndex])
 				continue;
-			nri::Descriptor* d = b.desc;
 			nri::UpdateDescriptorRangeDesc upd = {};
+			b.descSingle[0] = b.desc;
 			upd.descriptorSet = Sets[b.setIndex];
 			upd.rangeIndex = b.rangeIndex;
 			upd.baseDescriptor = 0;
-			upd.descriptors = &d;
+			upd.descriptors = b.descSingle;
 			upd.descriptorNum = 1;
 			m->Core.UpdateDescriptorRanges(&upd, 1);
 		}
@@ -925,7 +1711,8 @@ private:
 			tvd.texture = it->second.texture;
 			tvd.type = (b.kind == ResKind::TexUAV) ? nri::TextureView::STORAGE_TEXTURE : nri::TextureView::TEXTURE;
 			tvd.format = td.format;
-			tvd.mipNum = nri::REMAINING; tvd.layerNum = nri::REMAINING;
+			tvd.mipNum = 1;
+			tvd.layerNum = 1;
 			nri::Descriptor* d = nullptr;
 			if (m->Core.CreateTextureView(tvd, d) == nri::Result::SUCCESS) { b.desc = d; b.ownsDesc = true; }
 		}
@@ -959,6 +1746,976 @@ private:
 };
 
 // ---------------------------------------------------------------------------
+// Ray tracing pipeline (by-name binding). NRI exposes a Vulkan-like global
+// descriptor-set model for RT; it does not mirror the DX12 backend's local-root
+// SBT records. This initial adapter is intentionally conservative: it supports
+// the shadow pass' global TLAS/UAV/SRV/CBV/sampler bindings and scene-global
+// hit resources, enough to bring up opaque direct-light shadows.
+// ---------------------------------------------------------------------------
+class NRIRTPipelineStateObject : public RTPipelineStateObject
+{
+public:
+	explicit NRIRTPipelineStateObject(NRIBackend::Impl* impl) : m(impl) {}
+	~NRIRTPipelineStateObject() override
+	{
+		if (!m || !m->Device) return;
+		if (Pipeline) m->Core.DestroyPipeline(Pipeline);
+		if (Layout) m->Core.DestroyPipelineLayout(Layout);
+		if (Pool) m->Core.DestroyDescriptorPool(Pool);
+		for (Binding& b : Bindings)
+		{
+			if (b.ownsDesc && b.desc)
+				m->Core.DestroyDescriptor(b.desc);
+			for (nri::Descriptor* desc : b.descArray)
+			{
+				if (desc)
+					m->Core.DestroyDescriptor(desc);
+			}
+		}
+		for (auto& kv : CbvBuffers)
+		{
+			if (kv.second.view)
+				m->Core.DestroyDescriptor(kv.second.view);
+			m->FreeBuffer(kv.second.buffer, kv.second.memory);
+		}
+		m->FreeBuffer(SbtBuffer, SbtMemory);
+	}
+
+	void SetNumInstances(uint32_t numInstances) override { NumInstances = std::max(1u, numInstances); }
+	void Configure(uint32_t maxRecursion, uint32_t maxPayloadSizeInBytes, uint32_t maxAttributeSizeInBytes) override
+	{
+		MaxRecursion = maxRecursion;
+		MaxPayloadSize = maxPayloadSizeInBytes;
+		MaxAttributeSize = maxAttributeSizeInBytes;
+	}
+	void AddHitGroup(const std::string& name, const std::string& chs, const std::string& ahs) override
+	{
+		HitGroups.push_back({ name, chs, ahs });
+	}
+	void AddShader(const std::string& shader, RTPipelineStateObject::ShaderType shaderType) override
+	{
+		Shaders.push_back({ shader, shaderType });
+	}
+	void BindUAV(const std::string& shader, const std::string& name, uint32_t baseRegister) override { AddBinding(shader, name, baseRegister, RegClass::UAV, 0); }
+	void BindSRV(const std::string& shader, const std::string& name, uint32_t baseRegister) override { AddBinding(shader, name, baseRegister, RegClass::SRV, 0); }
+	void BindSampler(const std::string& shader, const std::string& name, uint32_t baseRegister) override { AddBinding(shader, name, baseRegister, RegClass::Sampler, 0); }
+	void BindCBV(const std::string& shader, const std::string& name, uint32_t baseRegister, uint32_t size, uint32_t) override { AddBinding(shader, name, baseRegister, RegClass::CBV, size); }
+	void SetShaderDefine(const std::string& name, const std::string& value) override
+	{
+		if (!name.empty())
+		{
+			ShaderDefines.push_back({ name, value.empty() ? "1" : value });
+			if (name == "CORONA_NRI_RT_HIT_RESOURCE_ARRAYS")
+				UseHitResourceArrays = true;
+		}
+	}
+	void SetShaderLibraryTarget(const std::string& target) override { if (!target.empty()) ShaderLibraryTarget = target; }
+	void BeginShaderTable() override {}
+	void EndShaderTable() override {}
+
+	void SetTextureUAV(const std::string& shader, const std::string& bindingName, Texture* texture, int = -1) override
+	{
+		if (Binding* b = Find(shader, bindingName)) { b->kind = ResKind::TexUAV; b->tex = texture; }
+	}
+	void SetBufferUAV(const std::string& shader, const std::string& bindingName, Buffer* buffer, int = -1) override
+	{
+		if (Binding* b = Find(shader, bindingName)) { b->kind = ResKind::BufUAV; b->buf = buffer; }
+	}
+	void SetTextureSRV(const std::string& shader, const std::string& bindingName, Texture* texture, int = -1) override
+	{
+		if (Binding* b = Find(shader, bindingName)) { b->kind = ResKind::TexSRV; b->tex = texture; }
+	}
+	void SetBufferSRV(const std::string& shader, const std::string& bindingName, Buffer* buffer, int = -1) override
+	{
+		if (Binding* b = Find(shader, bindingName)) { b->kind = ResKind::BufSRV; b->buf = buffer; }
+	}
+	void SetAccelerationStructure(const std::string& shader, const std::string& bindingName, const std::shared_ptr<RTAS>& rtas, int = -1) override
+	{
+		if (Binding* b = Find(shader, bindingName)) { b->kind = ResKind::Accel; b->rtas = rtas; }
+	}
+	void SetSampler(const std::string& shader, const std::string& bindingName, Sampler* sampler, int = -1) override
+	{
+		if (Binding* b = Find(shader, bindingName)) { b->kind = ResKind::Sampler; b->samp = sampler; }
+	}
+	void SetCBVValue(const std::string& shader, const std::string& bindingName, void* pData, int = -1) override
+	{
+		if (!m || !m->Device || !pData)
+			return;
+		Binding* b = Find(shader, bindingName);
+		if (!b || b->cbSize == 0)
+			return;
+
+		const uint32_t alignedSize = (b->cbSize + 255u) & ~255u;
+		CbvBuf& cb = CbvBuffers[bindingName];
+		if (!cb.buffer)
+		{
+			if (!m->CreateBoundBuffer(alignedSize, 0, nri::BufferUsageBits::CONSTANT_BUFFER, nri::MemoryLocation::HOST_UPLOAD, cb.buffer, cb.memory))
+				return;
+			nri::BufferViewDesc bvd = {};
+			bvd.buffer = cb.buffer;
+			bvd.type = nri::BufferView::CONSTANT_BUFFER;
+			bvd.offset = 0;
+			bvd.size = alignedSize;
+			if (m->Core.CreateBufferView(bvd, cb.view) != nri::Result::SUCCESS)
+				return;
+		}
+		void* mapped = m->Core.MapBuffer(*cb.buffer, 0, b->cbSize);
+		if (mapped)
+		{
+			memcpy(mapped, pData, b->cbSize);
+			m->Core.UnmapBuffer(*cb.buffer);
+		}
+		b->kind = ResKind::CBV;
+		b->desc = cb.view;
+		b->ownsDesc = false;
+	}
+
+	void ResetHitProgram(uint32_t) override { HitBindSlot = 0; }
+	void StartHitProgram(const std::string&, uint32_t) override { HitBindSlot = 0; }
+	void AddTextureSRVToHitProgram(const std::string&, Texture* texture, uint32_t instanceIndex) override
+	{
+		if (Binding* b = FindHitBindingAtSlot(HitBindSlot))
+		{
+			b->kind = ResKind::TexSRV;
+			if (UsesHitDescriptorArray(*b))
+			{
+				EnsureHitArraySize(*b);
+				if (instanceIndex < b->texArray.size())
+					b->texArray[instanceIndex] = texture;
+			}
+			else if (!b->tex)
+			{
+				b->tex = texture;
+			}
+		}
+		++HitBindSlot;
+	}
+	void AddBufferSRVToHitProgram(const std::string&, Buffer* buffer, uint32_t instanceIndex) override
+	{
+		if (Binding* b = FindHitBindingAtSlot(HitBindSlot))
+		{
+			b->kind = ResKind::BufSRV;
+			if (UsesHitDescriptorArray(*b))
+			{
+				EnsureHitArraySize(*b);
+				if (instanceIndex < b->bufArray.size())
+					b->bufArray[instanceIndex] = buffer;
+			}
+			else
+			{
+				b->buf = buffer;
+			}
+		}
+		++HitBindSlot;
+	}
+	void AddSceneGeometrySRVsToHitProgram(const std::string&, VertexBuffer* sceneVertexBuffer, IndexBuffer* sceneIndexBuffer, uint32_t) override
+	{
+		if (Binding* b = FindHitBindingAtSlot(HitBindSlot))
+		{
+			if (!b->vb)
+			{
+				b->kind = ResKind::VertexSRV;
+				b->vb = sceneVertexBuffer;
+			}
+		}
+		if (Binding* b = FindHitBindingAtSlot(HitBindSlot + 1))
+		{
+			if (!b->ib)
+			{
+				b->kind = ResKind::IndexSRV;
+				b->ib = sceneIndexBuffer;
+			}
+		}
+		HitBindSlot += 2;
+	}
+
+	bool InitRS(const std::string& shaderFile) override
+	{
+		if (!m || !m->Device || !m->HasRayTracing)
+			return false;
+
+		std::filesystem::path shaderPath(shaderFile);
+		if (shaderPath.is_relative())
+			shaderPath = RuntimePaths::SourceDirectory() / shaderPath;
+		std::ifstream file(shaderPath, std::ios::binary);
+		if (!file.good())
+		{
+			AppendCpuRuntimeTrace(L"[NRIRTPSO] shader file not found: " + shaderPath.wstring());
+			return false;
+		}
+		std::stringstream ss;
+		ss << file.rdbuf();
+		const std::string source = BuildShaderDefinePrefix() + ss.str();
+
+		if (!BuildLayout())
+			return false;
+
+		std::vector<nri::ShaderDesc> shaderDescs;
+		shaderDescs.reserve(Shaders.size());
+		for (ShaderEntry& shader : Shaders)
+		{
+			const std::string entrySource = KeepOnlyShaderEntry(source, shader.name);
+			std::string error;
+			const std::wstring sourceName = shaderPath.wstring();
+			const std::wstring entryName(shader.name.begin(), shader.name.end());
+			const std::wstring target(ShaderLibraryTarget.begin(), ShaderLibraryTarget.end());
+			shader.dxil = CompileHLSLToDXIL(entrySource.data(), entrySource.size(), sourceName.c_str(), entryName.c_str(), target.c_str(), error);
+			if (shader.dxil.empty())
+			{
+				AppendCpuRuntimeTrace(L"[NRIRTPSO] DXIL compile failed shader=\"" + sourceName + L"\" entry=\"" + entryName + L"\" target=\"" + target + L"\"");
+				if (!error.empty())
+					AppendCpuRuntimeTrace(L"[NRIRTPSO] DXIL error: " + std::wstring(error.begin(), error.end()));
+				return false;
+			}
+
+			nri::ShaderDesc desc = {};
+			desc.stage = ToStage(shader.type);
+			desc.bytecode = shader.dxil.data();
+			desc.size = shader.dxil.size();
+			desc.entryPointName = shader.name.c_str();
+			shaderDescs.push_back(desc);
+		}
+
+		nri::ShaderLibraryDesc library = {};
+		library.shaders = shaderDescs.data();
+		library.shaderNum = static_cast<uint32_t>(shaderDescs.size());
+
+		std::vector<nri::ShaderGroupDesc> groups;
+		RaygenGroupCount = MissGroupCount = HitGroupCount = 0;
+		for (uint32_t i = 0; i < static_cast<uint32_t>(Shaders.size()); ++i)
+		{
+			const ShaderEntry& shader = Shaders[i];
+			if (shader.type != RTPipelineStateObject::RAYGEN && shader.type != RTPipelineStateObject::MISS)
+				continue;
+			nri::ShaderGroupDesc group = {};
+			group.shaderIndices[0] = i + 1;
+			groups.push_back(group);
+			if (shader.type == RTPipelineStateObject::RAYGEN)
+				++RaygenGroupCount;
+			else
+				++MissGroupCount;
+		}
+		HitGroupStart = static_cast<uint32_t>(groups.size());
+		for (const HitGroupEntry& hitGroup : HitGroups)
+		{
+			nri::ShaderGroupDesc group = {};
+			uint32_t outIndex = 0;
+			if (!hitGroup.chs.empty())
+				group.shaderIndices[outIndex++] = FindShaderIndex(hitGroup.chs);
+			if (!hitGroup.ahs.empty())
+				group.shaderIndices[outIndex++] = FindShaderIndex(hitGroup.ahs);
+			if (outIndex == 0)
+				continue;
+			groups.push_back(group);
+			++HitGroupCount;
+		}
+		if (RaygenGroupCount == 0 || MissGroupCount == 0 || groups.empty())
+			return false;
+
+		nri::RayTracingPipelineDesc rtd = {};
+		rtd.pipelineLayout = Layout;
+		rtd.shaderLibrary = &library;
+		rtd.shaderGroups = groups.data();
+		rtd.shaderGroupNum = static_cast<uint32_t>(groups.size());
+		rtd.recursionMaxDepth = MaxRecursion;
+		rtd.rayPayloadMaxSize = MaxPayloadSize;
+		rtd.rayHitAttributeMaxSize = MaxAttributeSize;
+		if (m->RT.CreateRayTracingPipeline(*m->Device, rtd, Pipeline) != nri::Result::SUCCESS || !Pipeline)
+		{
+			AppendCpuRuntimeTrace(L"[NRIRTPSO] CreateRayTracingPipeline failed shader=\"" + shaderPath.wstring() + L"\"");
+			return false;
+		}
+
+		return BuildShaderBindingTable(static_cast<uint32_t>(groups.size()));
+	}
+
+	void Apply(uint32_t width, uint32_t height) override
+	{
+		if (!m || !m->ActiveCmd || !Pipeline || !Layout || !SbtBuffer)
+			return;
+		m->EndRP();
+
+		for (Binding& b : Bindings)
+		{
+			if (b.descriptorNum > 1)
+				RefreshDescriptorArray(b);
+			else
+				RefreshDescriptor(b);
+		}
+
+		if (!Sets.empty())
+		{
+			for (Binding& b : Bindings)
+			{
+				if (b.rangeIndex == UINT32_MAX || b.setIndex >= Sets.size() || !Sets[b.setIndex])
+					continue;
+				nri::UpdateDescriptorRangeDesc upd = {};
+				upd.descriptorSet = Sets[b.setIndex];
+				upd.rangeIndex = b.rangeIndex;
+				upd.baseDescriptor = 0;
+				if (b.descriptorNum > 1)
+				{
+					if (b.descArray.size() < b.descriptorNum)
+						continue;
+					bool allDescriptorsValid = true;
+					for (uint32_t i = 0; i < b.descriptorNum; ++i)
+					{
+						if (!b.descArray[i])
+						{
+							allDescriptorsValid = false;
+							break;
+						}
+					}
+					if (!allDescriptorsValid)
+						continue;
+					upd.descriptors = b.descArray.data();
+					upd.descriptorNum = b.descriptorNum;
+				}
+				else
+				{
+					if (!b.desc)
+						continue;
+					b.descSingle[0] = b.desc;
+					upd.descriptors = b.descSingle;
+					upd.descriptorNum = 1;
+				}
+				m->Core.UpdateDescriptorRanges(&upd, 1);
+			}
+			m->Core.CmdSetDescriptorPool(*m->ActiveCmd, *Pool);
+		}
+		m->Core.CmdSetPipelineLayout(*m->ActiveCmd, nri::BindPoint::RAY_TRACING, *Layout);
+		for (uint32_t setIndex = 0; setIndex < Sets.size(); ++setIndex)
+		{
+			if (!Sets[setIndex])
+				continue;
+			nri::SetDescriptorSetDesc sd = {};
+			sd.setIndex = setIndex;
+			sd.descriptorSet = Sets[setIndex];
+			sd.bindPoint = nri::BindPoint::RAY_TRACING;
+			m->Core.CmdSetDescriptorSet(*m->ActiveCmd, sd);
+		}
+		m->Core.CmdSetPipeline(*m->ActiveCmd, *Pipeline);
+
+		nri::DispatchRaysDesc dispatch = {};
+		dispatch.raygenShader.buffer = SbtBuffer;
+		dispatch.raygenShader.offset = RaygenOffset;
+		dispatch.raygenShader.size = SbtEntrySize;
+		dispatch.raygenShader.stride = SbtEntrySize;
+		dispatch.missShaders.buffer = SbtBuffer;
+		dispatch.missShaders.offset = MissOffset;
+		dispatch.missShaders.size = SbtEntrySize * std::max(1u, MissGroupCount);
+		dispatch.missShaders.stride = SbtEntrySize;
+		if (HitGroupCount > 0)
+		{
+			dispatch.hitShaderGroups.buffer = SbtBuffer;
+			dispatch.hitShaderGroups.offset = HitOffset;
+			dispatch.hitShaderGroups.size = SbtEntrySize * HitGroupCount;
+			dispatch.hitShaderGroups.stride = SbtEntrySize;
+		}
+		dispatch.x = width;
+		dispatch.y = height;
+		dispatch.z = 1;
+		m->RT.CmdDispatchRays(*m->ActiveCmd, dispatch);
+	}
+
+private:
+	enum class RegClass { SRV, UAV, CBV, Sampler };
+	enum class ResKind { None, TexSRV, TexUAV, BufSRV, BufUAV, CBV, Sampler, Accel, VertexSRV, IndexSRV };
+	struct ShaderEntry { std::string name; RTPipelineStateObject::ShaderType type = RTPipelineStateObject::GLOBAL; std::vector<uint8_t> dxil; };
+	struct HitGroupEntry { std::string name; std::string chs; std::string ahs; };
+	struct CbvBuf { nri::Buffer* buffer = nullptr; std::vector<nri::Memory*> memory; nri::Descriptor* view = nullptr; };
+	struct Binding
+	{
+		std::string shader;
+		std::string name;
+		uint32_t reg = 0;
+		uint32_t registerSpace = 0;
+		uint32_t setIndex = UINT32_MAX;
+		uint32_t cbSize = 0;
+		uint32_t rangeIndex = UINT32_MAX;
+		uint32_t descriptorNum = 1;
+		RegClass regClass = RegClass::SRV;
+		ResKind kind = ResKind::None;
+		nri::DescriptorType descriptorType = nri::DescriptorType::TEXTURE;
+		nri::Descriptor* desc = nullptr;
+		nri::Descriptor* descSingle[1] = {};
+		bool ownsDesc = false;
+		void* last = nullptr;
+		std::vector<nri::Descriptor*> descArray;
+		std::vector<void*> lastArray;
+		Texture* tex = nullptr;
+		Buffer* buf = nullptr;
+		Sampler* samp = nullptr;
+		VertexBuffer* vb = nullptr;
+		IndexBuffer* ib = nullptr;
+		std::vector<Texture*> texArray;
+		std::vector<Buffer*> bufArray;
+		std::shared_ptr<RTAS> rtas;
+	};
+
+	void AddBinding(const std::string& shader, const std::string& name, uint32_t reg, RegClass regClass, uint32_t cbSize)
+	{
+		if (Find(shader, name))
+			return;
+		Binding b;
+		b.shader = shader;
+		b.name = name;
+		b.reg = reg;
+		if (UseHitResourceArrays && shader != "global" && regClass == RegClass::SRV && !IsSharedHitBindingName(name))
+			b.registerSpace = 1;
+		b.regClass = regClass;
+		b.cbSize = cbSize;
+		b.descriptorType = InferDescriptorType(b);
+		Bindings.push_back(b);
+	}
+
+	Binding* Find(const std::string& shader, const std::string& name)
+	{
+		for (Binding& b : Bindings)
+			if (b.shader == shader && b.name == name)
+				return &b;
+		for (Binding& b : Bindings)
+			if (b.name == name)
+				return &b;
+		return nullptr;
+	}
+	Binding* FindHitBinding(const std::string& name)
+	{
+		for (Binding& b : Bindings)
+			if (b.shader != "global" && b.name == name)
+				return &b;
+		return Find("global", name);
+	}
+	Binding* FindHitBindingAtSlot(uint32_t slot)
+	{
+		uint32_t current = 0;
+		for (Binding& b : Bindings)
+		{
+			if (b.shader == "global" || b.regClass != RegClass::SRV)
+				continue;
+			if (current == slot)
+				return &b;
+			++current;
+		}
+		return nullptr;
+	}
+
+	static bool IsSharedHitBindingName(const std::string& name)
+	{
+		return name == "vertices" || name == "indices" || name == "InstanceProperty";
+	}
+
+	bool UsesHitDescriptorArray(const Binding& b) const
+	{
+		return UseHitResourceArrays && b.shader != "global" && b.regClass == RegClass::SRV && !IsSharedHitBindingName(b.name) && NumInstances > 1;
+	}
+
+	uint32_t BindingDescriptorCount(const Binding& b) const
+	{
+		return UsesHitDescriptorArray(b) ? std::max(1u, NumInstances) : 1u;
+	}
+
+	void EnsureHitArraySize(Binding& b)
+	{
+		const uint32_t count = std::max(std::max(1u, NumInstances), b.descriptorNum);
+		if (b.texArray.size() < count)
+			b.texArray.resize(count, nullptr);
+		if (b.bufArray.size() < count)
+			b.bufArray.resize(count, nullptr);
+	}
+
+	static nri::StageBits ToStage(RTPipelineStateObject::ShaderType type)
+	{
+		switch (type)
+		{
+		case RTPipelineStateObject::RAYGEN: return nri::StageBits::RAYGEN_SHADER;
+		case RTPipelineStateObject::MISS: return nri::StageBits::MISS_SHADER;
+		case RTPipelineStateObject::HIT: return nri::StageBits::CLOSEST_HIT_SHADER;
+		case RTPipelineStateObject::ANYHIT: return nri::StageBits::ANY_HIT_SHADER;
+		default: return nri::StageBits::RAY_TRACING_SHADERS;
+		}
+	}
+
+	nri::DescriptorType InferDescriptorType(const Binding& b) const
+	{
+		if (b.regClass == RegClass::UAV)
+			return (b.name.find("Buffer") != std::string::npos) ? nri::DescriptorType::STORAGE_STRUCTURED_BUFFER : nri::DescriptorType::STORAGE_TEXTURE;
+		if (b.regClass == RegClass::CBV)
+			return nri::DescriptorType::CONSTANT_BUFFER;
+		if (b.regClass == RegClass::Sampler)
+			return nri::DescriptorType::SAMPLER;
+		if (b.name == "gRtScene")
+			return nri::DescriptorType::ACCELERATION_STRUCTURE;
+		if (b.name == "vertices" || b.name == "indices" || b.name == "InstanceProperty" ||
+			b.name.find("Cell") != std::string::npos || b.name.find("Keys") != std::string::npos || b.name.find("Mask") != std::string::npos)
+		{
+			return nri::DescriptorType::STRUCTURED_BUFFER;
+		}
+		return nri::DescriptorType::TEXTURE;
+	}
+
+	bool BuildLayout()
+	{
+		struct SetBuild
+		{
+			uint32_t registerSpace = 0;
+			std::vector<nri::DescriptorRangeDesc> ranges;
+		};
+
+		std::vector<SetBuild> setBuilds;
+		uint32_t textureNum = 0, storageTextureNum = 0, structuredBufferNum = 0, storageStructuredBufferNum = 0;
+		uint32_t cbvNum = 0, samplerNum = 0, accelNum = 0;
+
+		for (Binding& b : Bindings)
+		{
+			uint32_t setIndex = UINT32_MAX;
+			for (uint32_t i = 0; i < setBuilds.size(); ++i)
+			{
+				if (setBuilds[i].registerSpace == b.registerSpace)
+				{
+					setIndex = i;
+					break;
+				}
+			}
+			if (setIndex == UINT32_MAX)
+			{
+				setIndex = static_cast<uint32_t>(setBuilds.size());
+				SetBuild setBuild;
+				setBuild.registerSpace = b.registerSpace;
+				setBuild.ranges.reserve(Bindings.size());
+				setBuilds.push_back(std::move(setBuild));
+			}
+
+			const uint32_t descriptorCount = BindingDescriptorCount(b);
+			nri::DescriptorRangeDesc range = {};
+			range.baseRegisterIndex = b.reg;
+			range.descriptorNum = descriptorCount;
+			range.descriptorType = b.descriptorType;
+			range.shaderStages = nri::StageBits::RAY_TRACING_SHADERS;
+			range.flags = nri::DescriptorRangeBits::PARTIALLY_BOUND;
+			if (descriptorCount > 1)
+				range.flags |= nri::DescriptorRangeBits::ARRAY;
+			b.setIndex = setIndex;
+			b.rangeIndex = static_cast<uint32_t>(setBuilds[setIndex].ranges.size());
+			b.descriptorNum = descriptorCount;
+			setBuilds[setIndex].ranges.push_back(range);
+
+			switch (b.descriptorType)
+			{
+			case nri::DescriptorType::TEXTURE: textureNum += descriptorCount; break;
+			case nri::DescriptorType::STORAGE_TEXTURE: storageTextureNum += descriptorCount; break;
+			case nri::DescriptorType::STRUCTURED_BUFFER: structuredBufferNum += descriptorCount; break;
+			case nri::DescriptorType::STORAGE_STRUCTURED_BUFFER: storageStructuredBufferNum += descriptorCount; break;
+			case nri::DescriptorType::CONSTANT_BUFFER: cbvNum += descriptorCount; break;
+			case nri::DescriptorType::SAMPLER: samplerNum += descriptorCount; break;
+			case nri::DescriptorType::ACCELERATION_STRUCTURE: accelNum += descriptorCount; break;
+			default: break;
+			}
+		}
+
+		std::vector<nri::DescriptorSetDesc> sets;
+		sets.reserve(setBuilds.size());
+		for (const SetBuild& setBuild : setBuilds)
+		{
+			nri::DescriptorSetDesc set = {};
+			set.registerSpace = setBuild.registerSpace;
+			set.ranges = setBuild.ranges.data();
+			set.rangeNum = static_cast<uint32_t>(setBuild.ranges.size());
+			sets.push_back(set);
+		}
+
+		nri::PipelineLayoutDesc pld = {};
+		pld.rootRegisterSpace = 0;
+		pld.descriptorSets = sets.empty() ? nullptr : sets.data();
+		pld.descriptorSetNum = static_cast<uint32_t>(sets.size());
+		pld.shaderStages = nri::StageBits::RAY_TRACING_SHADERS;
+		if (m->Core.CreatePipelineLayout(*m->Device, pld, Layout) != nri::Result::SUCCESS || !Layout)
+			return false;
+
+		if (!sets.empty())
+		{
+			nri::DescriptorPoolDesc pd = {};
+			pd.descriptorSetMaxNum = static_cast<uint32_t>(sets.size());
+			pd.textureMaxNum = textureNum;
+			pd.storageTextureMaxNum = storageTextureNum;
+			pd.structuredBufferMaxNum = structuredBufferNum;
+			pd.storageStructuredBufferMaxNum = storageStructuredBufferNum;
+			pd.constantBufferMaxNum = cbvNum;
+			pd.samplerMaxNum = samplerNum;
+			pd.accelerationStructureMaxNum = accelNum;
+			if (m->Core.CreateDescriptorPool(*m->Device, pd, Pool) != nri::Result::SUCCESS || !Pool)
+				return false;
+			Sets.resize(sets.size(), nullptr);
+			for (uint32_t setIndex = 0; setIndex < Sets.size(); ++setIndex)
+			{
+				if (m->Core.AllocateDescriptorSets(*Pool, *Layout, setIndex, &Sets[setIndex], 1, 0) != nri::Result::SUCCESS || !Sets[setIndex])
+					return false;
+			}
+		}
+		return true;
+	}
+
+	uint32_t FindShaderIndex(const std::string& name) const
+	{
+		for (uint32_t i = 0; i < static_cast<uint32_t>(Shaders.size()); ++i)
+			if (Shaders[i].name == name)
+				return i + 1;
+		return 0;
+	}
+
+	static size_t FindFunctionEnd(const std::string& source, size_t functionNamePos)
+	{
+		const size_t open = source.find('{', functionNamePos);
+		if (open == std::string::npos)
+			return std::string::npos;
+		int depth = 0;
+		for (size_t i = open; i < source.size(); ++i)
+		{
+			if (source[i] == '{')
+				++depth;
+			else if (source[i] == '}')
+			{
+				--depth;
+				if (depth == 0)
+					return i + 1;
+			}
+		}
+		return std::string::npos;
+	}
+
+	static std::string ShaderFunctionNameAt(const std::string& source, size_t marker)
+	{
+		const size_t voidPos = source.find("void", marker);
+		if (voidPos == std::string::npos)
+			return {};
+		size_t namePos = voidPos + 4;
+		while (namePos < source.size() && isspace(static_cast<unsigned char>(source[namePos])))
+			++namePos;
+		size_t nameEnd = namePos;
+		while (nameEnd < source.size() && (isalnum(static_cast<unsigned char>(source[nameEnd])) || source[nameEnd] == '_'))
+			++nameEnd;
+		return source.substr(namePos, nameEnd - namePos);
+	}
+
+	static std::string KeepOnlyShaderEntry(const std::string& source, const std::string& entryName)
+	{
+		std::string out;
+		size_t pos = 0;
+		for (;;)
+		{
+			const size_t marker = source.find("[shader(", pos);
+			if (marker == std::string::npos)
+			{
+				out.append(source, pos, std::string::npos);
+				break;
+			}
+			const std::string fn = ShaderFunctionNameAt(source, marker);
+			const size_t fnPos = source.find("void", marker);
+			const size_t end = FindFunctionEnd(source, fnPos == std::string::npos ? marker : fnPos);
+			if (end == std::string::npos)
+			{
+				out.append(source, pos, std::string::npos);
+				break;
+			}
+			if (fn == entryName)
+				out.append(source, pos, end - pos);
+			else
+				out.append(source, pos, marker - pos);
+			pos = end;
+		}
+		return out;
+	}
+
+	std::string BuildShaderDefinePrefix() const
+	{
+		std::string prefix;
+		for (const auto& define : ShaderDefines)
+		{
+			prefix += "#ifndef ";
+			prefix += define.first;
+			prefix += "\n#define ";
+			prefix += define.first;
+			prefix += " ";
+			prefix += define.second.empty() ? "1" : define.second;
+			prefix += "\n#endif\n";
+		}
+		if (!prefix.empty())
+			prefix += "\n";
+		return prefix;
+	}
+
+	bool BuildShaderBindingTable(uint32_t groupCount)
+	{
+		const nri::DeviceDesc& dd = m->Core.GetDeviceDesc(*m->Device);
+		const uint32_t idSize = dd.shaderStage.rayTracing.shaderGroupIdentifierSize;
+		const uint64_t alignment = std::max<uint32_t>(1u, dd.memoryAlignment.shaderBindingTable);
+		SbtEntrySize = AlignUpU64(idSize, alignment);
+		RaygenOffset = 0;
+		MissOffset = AlignUpU64(RaygenOffset + SbtEntrySize * std::max(1u, RaygenGroupCount), alignment);
+		HitOffset = AlignUpU64(MissOffset + SbtEntrySize * std::max(1u, MissGroupCount), alignment);
+		const uint64_t sbtSize = HitOffset + SbtEntrySize * std::max(1u, HitGroupCount);
+		if (idSize == 0 || !m->CreateBoundBuffer(sbtSize, 0, nri::BufferUsageBits::SHADER_BINDING_TABLE, nri::MemoryLocation::HOST_UPLOAD, SbtBuffer, SbtMemory))
+			return false;
+
+		uint8_t* mapped = static_cast<uint8_t*>(m->Core.MapBuffer(*SbtBuffer, 0, sbtSize));
+		if (!mapped)
+			return false;
+		memset(mapped, 0, static_cast<size_t>(sbtSize));
+		auto writeGroups = [&](uint32_t groupIndex, uint32_t groupNum, uint64_t offset)
+		{
+			return groupNum == 0 ||
+				(groupIndex < groupCount && groupIndex + groupNum <= groupCount &&
+					m->RT.WriteShaderGroupIdentifiers(*Pipeline, groupIndex, groupNum, mapped + offset) == nri::Result::SUCCESS);
+		};
+		bool ok = writeGroups(0, RaygenGroupCount, RaygenOffset);
+		ok = writeGroups(RaygenGroupCount, MissGroupCount, MissOffset) && ok;
+		if (HitGroupCount > 0)
+			ok = writeGroups(HitGroupStart, HitGroupCount, HitOffset) && ok;
+		m->Core.UnmapBuffer(*SbtBuffer);
+		return ok;
+	}
+
+	void ResetOwnedDescriptor(Binding& b)
+	{
+		if (b.ownsDesc && b.desc)
+			m->Core.DestroyDescriptor(b.desc);
+		b.desc = nullptr;
+		b.ownsDesc = false;
+	}
+
+	void ResetOwnedDescriptorArraySlot(Binding& b, uint32_t index)
+	{
+		if (index < b.descArray.size() && b.descArray[index])
+		{
+			m->Core.DestroyDescriptor(b.descArray[index]);
+			b.descArray[index] = nullptr;
+		}
+	}
+
+	Texture* FirstTextureArrayValue(const Binding& b) const
+	{
+		for (Texture* texture : b.texArray)
+			if (texture)
+				return texture;
+		return b.tex;
+	}
+
+	Buffer* FirstBufferArrayValue(const Binding& b) const
+	{
+		for (Buffer* buffer : b.bufArray)
+			if (buffer)
+				return buffer;
+		return b.buf;
+	}
+
+	void RefreshDescriptorArray(Binding& b)
+	{
+		if (b.kind == ResKind::None || b.descriptorNum <= 1)
+			return;
+
+		EnsureHitArraySize(b);
+		if (b.descArray.size() < b.descriptorNum)
+			b.descArray.resize(b.descriptorNum, nullptr);
+		if (b.lastArray.size() < b.descriptorNum)
+			b.lastArray.resize(b.descriptorNum, nullptr);
+
+		Texture* fallbackTexture = FirstTextureArrayValue(b);
+		Buffer* fallbackBuffer = FirstBufferArrayValue(b);
+		for (uint32_t i = 0; i < b.descriptorNum; ++i)
+		{
+			void* current = nullptr;
+			Texture* texture = nullptr;
+			Buffer* buffer = nullptr;
+
+			if (b.kind == ResKind::TexSRV || b.kind == ResKind::TexUAV)
+			{
+				texture = (i < b.texArray.size() && b.texArray[i]) ? b.texArray[i] : fallbackTexture;
+				current = texture;
+			}
+			else if (b.kind == ResKind::BufSRV || b.kind == ResKind::BufUAV)
+			{
+				buffer = (i < b.bufArray.size() && b.bufArray[i]) ? b.bufArray[i] : fallbackBuffer;
+				current = buffer;
+			}
+			if (!current || (b.lastArray[i] == current && b.descArray[i]))
+				continue;
+
+			ResetOwnedDescriptorArraySlot(b, i);
+			b.lastArray[i] = current;
+
+			if (texture)
+			{
+				auto it = m->Textures.find(texture);
+				if (it == m->Textures.end() || !it->second.texture)
+					continue;
+				const nri::TextureDesc& td = m->Core.GetTextureDesc(*it->second.texture);
+				nri::TextureViewDesc tvd = {};
+				tvd.texture = it->second.texture;
+				tvd.type = (b.kind == ResKind::TexUAV) ? nri::TextureView::STORAGE_TEXTURE : nri::TextureView::TEXTURE;
+				tvd.format = td.format;
+				tvd.mipNum = nri::REMAINING;
+				tvd.layerNum = nri::REMAINING;
+				nri::Descriptor* d = nullptr;
+				if (m->Core.CreateTextureView(tvd, d) == nri::Result::SUCCESS)
+					b.descArray[i] = d;
+				continue;
+			}
+
+			if (buffer)
+			{
+				auto it = m->Buffers.find(buffer);
+				if (it == m->Buffers.end() || !it->second.buffer)
+					continue;
+				nri::BufferViewDesc bvd = {};
+				bvd.buffer = it->second.buffer;
+				bvd.offset = 0;
+				bvd.size = static_cast<uint64_t>(buffer->NumElements) * buffer->ElementSize;
+				if (buffer->Type == Buffer::BYTE_ADDRESS)
+					bvd.type = (b.kind == ResKind::BufUAV) ? nri::BufferView::STORAGE_BYTE_ADDRESS_BUFFER : nri::BufferView::BYTE_ADDRESS_BUFFER;
+				else
+				{
+					bvd.type = (b.kind == ResKind::BufUAV) ? nri::BufferView::STORAGE_STRUCTURED_BUFFER : nri::BufferView::STRUCTURED_BUFFER;
+					bvd.structureStride = buffer->ElementSize ? buffer->ElementSize : 4;
+				}
+				nri::Descriptor* d = nullptr;
+				if (bvd.size > 0 && m->Core.CreateBufferView(bvd, d) == nri::Result::SUCCESS)
+					b.descArray[i] = d;
+			}
+		}
+	}
+
+	void RefreshDescriptor(Binding& b)
+	{
+		if (b.kind == ResKind::None)
+			return;
+		if (b.kind == ResKind::CBV || b.kind == ResKind::Sampler || b.kind == ResKind::Accel)
+		{
+			if (b.kind == ResKind::Sampler && b.samp)
+			{
+				auto it = m->Samplers.find(b.samp);
+				b.desc = (it != m->Samplers.end()) ? it->second : nullptr;
+				b.ownsDesc = false;
+			}
+			else if (b.kind == ResKind::Accel)
+			{
+				std::shared_ptr<NRIRTAS> as = std::dynamic_pointer_cast<NRIRTAS>(b.rtas);
+				b.desc = as ? as->Descriptor : nullptr;
+				b.ownsDesc = false;
+			}
+			return;
+		}
+
+		void* current = nullptr;
+		if (b.tex) current = b.tex;
+		else if (b.buf) current = b.buf;
+		else if (b.vb) current = b.vb;
+		else if (b.ib) current = b.ib;
+		if (!current)
+			return;
+		if (b.last == current && b.desc)
+			return;
+		ResetOwnedDescriptor(b);
+		b.last = current;
+
+		if (b.kind == ResKind::TexSRV || b.kind == ResKind::TexUAV)
+		{
+			auto it = m->Textures.find(b.tex);
+			if (it == m->Textures.end() || !it->second.texture)
+				return;
+			const nri::TextureDesc& td = m->Core.GetTextureDesc(*it->second.texture);
+			nri::TextureViewDesc tvd = {};
+			tvd.texture = it->second.texture;
+			tvd.type = (b.kind == ResKind::TexUAV) ? nri::TextureView::STORAGE_TEXTURE : nri::TextureView::TEXTURE;
+			tvd.format = td.format;
+			tvd.mipNum = nri::REMAINING;
+			tvd.layerNum = nri::REMAINING;
+			nri::Descriptor* d = nullptr;
+			if (m->Core.CreateTextureView(tvd, d) == nri::Result::SUCCESS)
+			{
+				b.desc = d;
+				b.ownsDesc = true;
+			}
+			return;
+		}
+
+		nri::BufferViewDesc bvd = {};
+		if (b.kind == ResKind::BufSRV || b.kind == ResKind::BufUAV)
+		{
+			auto it = m->Buffers.find(b.buf);
+			if (it == m->Buffers.end() || !it->second.buffer || !b.buf)
+				return;
+			bvd.buffer = it->second.buffer;
+			bvd.offset = 0;
+			bvd.size = static_cast<uint64_t>(b.buf->NumElements) * b.buf->ElementSize;
+			if (b.buf->Type == Buffer::BYTE_ADDRESS)
+				bvd.type = (b.kind == ResKind::BufUAV) ? nri::BufferView::STORAGE_BYTE_ADDRESS_BUFFER : nri::BufferView::BYTE_ADDRESS_BUFFER;
+			else
+			{
+				bvd.type = (b.kind == ResKind::BufUAV) ? nri::BufferView::STORAGE_STRUCTURED_BUFFER : nri::BufferView::STRUCTURED_BUFFER;
+				bvd.structureStride = b.buf->ElementSize ? b.buf->ElementSize : 4;
+			}
+		}
+		else if (b.kind == ResKind::VertexSRV)
+		{
+			auto it = m->VBs.find(b.vb);
+			if (it == m->VBs.end() || !it->second.buffer)
+				return;
+			bvd.buffer = it->second.buffer;
+			bvd.type = nri::BufferView::BYTE_ADDRESS_BUFFER;
+			bvd.offset = 0;
+			bvd.size = it->second.capacity;
+		}
+		else if (b.kind == ResKind::IndexSRV)
+		{
+			auto it = m->IBs.find(b.ib);
+			if (it == m->IBs.end() || !it->second.buffer)
+				return;
+			bvd.buffer = it->second.buffer;
+			bvd.type = nri::BufferView::BYTE_ADDRESS_BUFFER;
+			bvd.offset = 0;
+			const uint32_t indexSize = it->second.indexType == nri::IndexType::UINT16 ? 2u : 4u;
+			bvd.size = static_cast<uint64_t>(b.ib ? b.ib->numIndices : 0) * indexSize;
+		}
+		if (!bvd.buffer || bvd.size == 0)
+			return;
+		nri::Descriptor* d = nullptr;
+		if (m->Core.CreateBufferView(bvd, d) == nri::Result::SUCCESS)
+		{
+			b.desc = d;
+			b.ownsDesc = true;
+		}
+	}
+
+	NRIBackend::Impl* m = nullptr;
+	std::vector<ShaderEntry> Shaders;
+	std::vector<HitGroupEntry> HitGroups;
+	std::vector<Binding> Bindings;
+	std::vector<std::pair<std::string, std::string>> ShaderDefines;
+	std::unordered_map<std::string, CbvBuf> CbvBuffers;
+	std::string ShaderLibraryTarget = "lib_6_3";
+	bool UseHitResourceArrays = false;
+	uint32_t NumInstances = 1;
+	uint32_t MaxRecursion = 1;
+	uint32_t MaxPayloadSize = 0;
+	uint32_t MaxAttributeSize = 0;
+	uint32_t HitBindSlot = 0;
+	nri::PipelineLayout* Layout = nullptr;
+	nri::Pipeline* Pipeline = nullptr;
+	nri::DescriptorPool* Pool = nullptr;
+	std::vector<nri::DescriptorSet*> Sets;
+	nri::Buffer* SbtBuffer = nullptr;
+	std::vector<nri::Memory*> SbtMemory;
+	uint64_t SbtEntrySize = 0;
+	uint64_t RaygenOffset = 0;
+	uint64_t MissOffset = 0;
+	uint64_t HitOffset = 0;
+	uint32_t RaygenGroupCount = 0;
+	uint32_t MissGroupCount = 0;
+	uint32_t HitGroupStart = 0;
+	uint32_t HitGroupCount = 0;
+};
+
+// ---------------------------------------------------------------------------
 // Graphics pipeline (by-name binding). Bindings are known up-front from the
 // GraphicsPipelineDesc lists (texture SRV / buffer SRV / sampler / constant
 // buffer), so no deferral is needed. This milestone builds the NRI graphics
@@ -988,7 +2745,7 @@ public:
 	nri::PipelineLayout* GetLayout() const { return Layout; }
 
 	enum class Kind { TexSRV, BufSRV, Sampler, CBV };
-	struct Binding { std::string name; uint32_t reg; Kind kind; nri::Descriptor* desc = nullptr; bool ownsDesc = false; void* last = nullptr; Texture* tex = nullptr; Buffer* buf = nullptr; Sampler* samp = nullptr; uint32_t setIndex = 0; uint32_t rangeIndex = 0; };
+	struct Binding { std::string name; uint32_t reg; Kind kind; nri::Descriptor* desc = nullptr; nri::Descriptor* descSingle[1] = {}; bool ownsDesc = false; void* last = nullptr; Texture* tex = nullptr; Buffer* buf = nullptr; Sampler* samp = nullptr; uint32_t setIndex = 0; uint32_t rangeIndex = 0; };
 	struct CbvState { nri::Buffer* buffer = nullptr; std::vector<nri::Memory*> memory; nri::Descriptor* view = nullptr; uint32_t size = 0; };
 
 	void SetTexture(const std::string& name, Texture* t) { if (Binding* b = Find(name)) { b->tex = t; } }
@@ -1063,10 +2820,10 @@ public:
 			if (b.kind == Kind::CBV) { b.desc = cbView; b.ownsDesc = false; }
 			else RefreshDescriptor(b);
 			if (!b.desc) continue;
-			nri::Descriptor* d = b.desc;
+			b.descSingle[0] = b.desc;
 			nri::UpdateDescriptorRangeDesc upd = {};
 			upd.descriptorSet = set; upd.rangeIndex = b.rangeIndex; upd.baseDescriptor = 0;
-			upd.descriptors = &d; upd.descriptorNum = 1;
+			upd.descriptors = b.descSingle; upd.descriptorNum = 1;
 			m->Core.UpdateDescriptorRanges(&upd, 1);
 		}
 
@@ -1265,6 +3022,7 @@ NRIBackend::NRIBackend() : m(std::make_unique<Impl>())
 {
 	using nri::CoreInterface;
 	using nri::HelperInterface;
+	using nri::RayTracingInterface;
 	using nri::SwapChainInterface;
 
 	nri::DeviceCreationDesc desc = {};
@@ -1300,6 +3058,20 @@ NRIBackend::NRIBackend() : m(std::make_unique<Impl>())
 		return;
 	}
 	m->Core.GetQueue(*m->Device, nri::QueueType::GRAPHICS, 0, m->GraphicsQueue);
+	m->HasRayTracing =
+		nri::nriGetInterface(*m->Device, NRI_INTERFACE(RayTracingInterface), &m->RT) == nri::Result::SUCCESS &&
+		m->RT.CreateAccelerationStructureDescriptor &&
+		m->RT.GetAccelerationStructureHandle &&
+		m->RT.GetAccelerationStructureBuildScratchBufferSize &&
+		m->RT.GetAccelerationStructureBuffer &&
+		m->RT.DestroyAccelerationStructure &&
+		m->RT.CreateCommittedAccelerationStructure &&
+		m->RT.CreateAccelerationStructure &&
+		m->RT.CmdBuildBottomLevelAccelerationStructures &&
+		m->RT.CmdBuildTopLevelAccelerationStructures &&
+		m->RT.CreateRayTracingPipeline &&
+		m->RT.WriteShaderGroupIdentifiers &&
+		m->RT.CmdDispatchRays;
 	nri::nriGetInterface(*m->Device, NRI_INTERFACE(SwapChainInterface), &m->SwapChainI); // non-fatal
 	{
 		using nri::StreamerInterface;
@@ -1389,6 +3161,8 @@ NRIBackend::NRIBackend() : m(std::make_unique<Impl>())
 	// End-to-end compute dispatch (pipeline layout + compute pipeline + dispatch
 	// + copy + readback verify).
 	std::string computeResult = (m->CmdBuffer && m->GraphicsQueue) ? m->RunComputeSmoke() : std::string("skipped");
+	std::string rtASResult = (m->CmdBuffer && m->GraphicsQueue) ? m->RunRayTracingASSmoke() : std::string("skipped");
+	std::string rtPipeResult = (m->CmdBuffer && m->GraphicsQueue) ? m->RunRayTracingPipelineSmoke() : std::string("skipped");
 
 	// By-name binding adapter: drive the public ComputePipelineStateObject
 	// interface (BindUAV + InitCS) and confirm it builds an NRI compute pipeline.
@@ -1511,12 +3285,91 @@ NRIBackend::NRIBackend() : m(std::make_unique<Impl>())
 		}
 	}
 
-	char info[960];
+	// Texture UAV path: public ComputePSO writes RGBA16F to a Texture2D UAV,
+	// then the backend captures the texture through the native D3D12 queue.
+	std::string texPsoResult = "skipped";
+	if (m->GraphicsQueue && m->CmdBuffer)
+	{
+		static const char* kTexCS =
+			"RWTexture2D<float4> OutTex : register(u0);\n"
+			"[numthreads(8,8,1)] void main(uint3 id : SV_DispatchThreadID) { OutTex[id.xy] = float4(0.25f, 0.5f, 0.75f, 1.0f); }\n";
+		const std::wstring path = L"nri_texture_pso_smoke.hlsl";
+		{ std::ofstream of(path, std::ios::binary); of.write(kTexCS, (std::streamsize)strlen(kTexCS)); }
+
+		TextureCreateDesc tcd = {};
+		tcd.Width = 16;
+		tcd.Height = 16;
+		tcd.MipLevels = 1;
+		tcd.Format = ETextureFormat::RGBA16Float;
+		tcd.Usage = TextureUsage_UnorderedAccess;
+		std::shared_ptr<Texture> outTex = CreateTexture2D(tcd);
+		std::shared_ptr<ComputePipelineStateObject> pso = CreateComputePipelineStateObject();
+		nri::Buffer* rb = nullptr;
+		std::vector<nri::Memory*> rbMem;
+		const uint32_t rowSize = 16u * 8u;
+		const uint32_t rowAlign = std::max(1u, dd.memoryAlignment.uploadBufferTextureRow);
+		const uint32_t rowPitch = static_cast<uint32_t>(AlignUpU64(rowSize, rowAlign));
+		const uint32_t slicePitch = rowPitch * 16u;
+		const bool rbOk = m->CreateBoundBuffer(slicePitch, 0, nri::BufferUsageBits::NONE, nri::MemoryLocation::HOST_READBACK, rb, rbMem);
+		pso->BindUAV("OutTex", 0);
+		if (outTex && rbOk && pso->InitCS(path, "main"))
+		{
+			pso->SetTextureUAV("OutTex", outTex.get());
+			BeginFrame();
+			TransitionTexture(outTex.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
+			pso->Apply();
+			Dispatch(2, 2, 1);
+			TransitionTexture(outTex.get(), EResourceState::UnorderedAccess, EResourceState::CopySource);
+			auto tit = m->Textures.find(outTex.get());
+			if (m->ActiveCmd && tit != m->Textures.end() && tit->second.texture && rb)
+			{
+				nri::TextureRegionDesc region = {};
+				region.width = 16;
+				region.height = 16;
+				region.depth = 1;
+				region.planes = nri::PlaneBits::COLOR;
+				nri::TextureDataLayoutDesc layout = {};
+				layout.offset = 0;
+				layout.rowPitch = rowPitch;
+				layout.slicePitch = slicePitch;
+				m->Core.CmdReadbackTextureToBuffer(*m->ActiveCmd, *rb, layout, *tit->second.texture, region);
+			}
+			EndFrame();
+
+			const uint16_t* p = static_cast<const uint16_t*>(m->Core.MapBuffer(*rb, 0, slicePitch));
+			if (p)
+			{
+				const bool ok = p[0] == 0x3400u && p[1] == 0x3800u && p[2] == 0x3A00u && p[3] == 0x3C00u;
+				char b[96];
+				_snprintf_s(b, _TRUNCATE, ok ? "PASS(%04X,%04X,%04X,%04X)" : "FAIL(%04X,%04X,%04X,%04X)",
+					p[0], p[1], p[2], p[3]);
+				texPsoResult = b;
+				m->Core.UnmapBuffer(*rb);
+			}
+			else
+			{
+				texPsoResult = "FAIL(map)";
+			}
+		}
+		else
+		{
+			texPsoResult = rbOk ? "FAIL(init)" : "FAIL(readback)";
+		}
+
+		m->FreeBuffer(rb, rbMem);
+		if (outTex)
+		{
+			auto oit = m->Textures.find(outTex.get());
+			if (oit != m->Textures.end()) { m->FreeTexture(oit->second.texture, oit->second.memory); m->Textures.erase(oit); }
+		}
+	}
+
+	char info[1120];
 	_snprintf_s(info, _TRUNCATE,
-		"device ok [%s], rtTier=%u sm=%u queue=%s bufferSmoke=%s texSmoke=%s cmd=%s submitSmoke=%s shaderDXIL=%zuB compute=%s psoInit=%s framePSO=%s cbv=%s",
-		dd.adapterDesc.name, (unsigned)dd.tiers.rayTracing, (unsigned)dd.shaderModel,
+		"device ok [%s], rtTier=%u rtI=%s rtAS=%s rtPipe=%s sm=%u queue=%s bufferSmoke=%s texSmoke=%s cmd=%s submitSmoke=%s shaderDXIL=%zuB compute=%s psoInit=%s framePSO=%s cbv=%s texPSO=%s",
+		dd.adapterDesc.name, (unsigned)dd.tiers.rayTracing, m->HasRayTracing ? "ok" : "null", rtASResult.c_str(), rtPipeResult.c_str(), (unsigned)dd.shaderModel,
 		m->GraphicsQueue ? "ok" : "null", bufferSmokeOk ? "PASS" : "FAIL", texSmokeOk ? "PASS" : "FAIL",
-		m->CmdBuffer ? "ok" : "null", submitSmokeOk ? "PASS" : "FAIL", shaderBytes, computeResult.c_str(), psoInitOk ? "PASS" : "FAIL", framePsoResult.c_str(), cbvResult.c_str());
+		m->CmdBuffer ? "ok" : "null", submitSmokeOk ? "PASS" : "FAIL", shaderBytes, computeResult.c_str(), psoInitOk ? "PASS" : "FAIL", framePsoResult.c_str(), cbvResult.c_str(), texPsoResult.c_str());
 	ErrorString = info;          // diagnostic status (not an error); logged by bootstrap
 	OutputDebugStringA("[NRI] ");
 	OutputDebugStringA(info);
@@ -1529,6 +3382,13 @@ NRIBackend::~NRIBackend()
 		return;
 	if (m->Device)
 	{
+		for (std::weak_ptr<NRIRTAS>& weakAS : m->RayTracingAS)
+		{
+			if (std::shared_ptr<NRIRTAS> as = weakAS.lock())
+				as->Destroy();
+		}
+		m->RayTracingAS.clear();
+
 		for (auto& kv : m->Buffers)
 		{
 			if (kv.second.buffer)
@@ -1583,8 +3443,8 @@ NRIBackend::~NRIBackend()
 // === Capabilities / identity =============================================
 ERenderBackendAPI NRIBackend::GetAPI() const { return ERenderBackendAPI::NRI; }
 const char* NRIBackend::GetBackendName() const { return m->BackendName.c_str(); }
-uint32_t NRIBackend::GetMaxSupportedHybridStage() const { return 0; }
-bool NRIBackend::SupportsRayTracing() const { return m->RayTracingTier >= 1; }
+uint32_t NRIBackend::GetMaxSupportedHybridStage() const { return (m->RayTracingTier >= 1 && m->HasRayTracing) ? 4u : 0u; }
+bool NRIBackend::SupportsRayTracing() const { return GetMaxSupportedHybridStage() >= 1 && m->RayTracingTier >= 1 && m->HasRayTracing; }
 bool NRIBackend::SupportsShaderExecutionReordering() const { return m->RayTracingTier >= 3; }
 
 // === Frame lifecycle / diagnostics =======================================
@@ -1783,9 +3643,6 @@ std::shared_ptr<Texture> NRIBackend::CreateTextureFromFile(const std::wstring& f
 	std::error_code ec;
 	if (!std::filesystem::exists(fileName, ec)) return nullptr;
 
-	// Load via DirectXTex (DDS / TGA / WIC), then flatten to a single RGBA8
-	// mip-0 image so the upload path stays simple. Material textures lose mips
-	// for now; that only costs minification quality, not correctness.
 	DirectX::ScratchImage loaded;
 	const size_t dot = fileName.find_last_of(L'.');
 	std::wstring ext = (dot != std::wstring::npos) ? fileName.substr(dot + 1) : L"";
@@ -1796,9 +3653,83 @@ std::shared_ptr<Texture> NRIBackend::CreateTextureFromFile(const std::wstring& f
 	else                    hr = DirectX::LoadFromWICFile(fileName.c_str(), DirectX::WIC_FLAGS_NONE, nullptr, loaded);
 	if (FAILED(hr)) { ErrorString = "CreateTextureFromFile: decode failed"; return nullptr; }
 
+	const DirectX::TexMetadata& md = loaded.GetMetadata();
+	if (ext == L"dds" && md.dimension == DirectX::TEX_DIMENSION_TEXTURE2D &&
+		md.width > 0 && md.height > 0 && md.arraySize > 0 && md.mipLevels > 0)
+	{
+		const DXGI_FORMAT sampledFormat = ResolveSampledDXGIFormat(md.format, nonSRGB);
+		const nri::Format nriFormat = ToNRISampledTextureFormat(sampledFormat);
+		if (nriFormat != nri::Format::UNKNOWN)
+		{
+			nri::TextureDesc td = {};
+			td.type = nri::TextureType::TEXTURE_2D;
+			td.usage = nri::TextureUsageBits::SHADER_RESOURCE;
+			td.format = nriFormat;
+			td.width = static_cast<nri::Dim_t>(md.width);
+			td.height = static_cast<nri::Dim_t>(md.height);
+			td.depth = 1;
+			td.mipNum = static_cast<nri::Dim_t>(md.mipLevels);
+			td.layerNum = static_cast<nri::Dim_t>(md.arraySize);
+			td.sampleNum = 1;
+
+			nri::Texture* tex = nullptr;
+			std::vector<nri::Memory*> mem;
+			if (m->CreateBoundTexture(td, tex, mem))
+			{
+				std::vector<nri::TextureSubresourceUploadDesc> subs(md.arraySize * md.mipLevels);
+				bool subresourcesOk = true;
+				for (size_t arrayIdx = 0; arrayIdx < md.arraySize && subresourcesOk; ++arrayIdx)
+				{
+					for (size_t mipIdx = 0; mipIdx < md.mipLevels; ++mipIdx)
+					{
+						const DirectX::Image* img = loaded.GetImage(mipIdx, arrayIdx, 0);
+						if (!img || !img->pixels)
+						{
+							subresourcesOk = false;
+							break;
+						}
+						nri::TextureSubresourceUploadDesc& sub = subs[arrayIdx * md.mipLevels + mipIdx];
+						sub.slices = img->pixels;
+						sub.sliceNum = 1;
+						sub.rowPitch = static_cast<uint32_t>(img->rowPitch);
+						sub.slicePitch = static_cast<uint32_t>(img->slicePitch);
+					}
+				}
+
+				nri::TextureUploadDesc up = {};
+				up.subresources = subs.data();
+				up.texture = tex;
+				up.planes = nri::PlaneBits::ALL;
+				up.after.access = nri::AccessBits::SHADER_RESOURCE;
+				up.after.layout = nri::Layout::SHADER_RESOURCE;
+				up.after.stages = nri::StageBits::ALL;
+				if (subresourcesOk && m->Helper.UploadData(*m->GraphicsQueue, &up, 1, nullptr, 0) == nri::Result::SUCCESS)
+				{
+					auto wrapper = std::make_shared<Texture>();
+					wrapper->Width = static_cast<uint32_t>(md.width);
+					wrapper->Height = static_cast<uint32_t>(md.height);
+					wrapper->MipLevels = static_cast<uint32_t>(md.mipLevels);
+					wrapper->Format =
+						(sampledFormat == DXGI_FORMAT_B8G8R8A8_UNORM || sampledFormat == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB)
+						? ETextureFormat::BGRA8Unorm : ETextureFormat::RGBA8Unorm;
+					Impl::TextureAlloc alloc;
+					alloc.texture = tex;
+					alloc.memory = std::move(mem);
+					m->Textures[wrapper.get()] = std::move(alloc);
+					m->TexLayout[wrapper.get()] = nri::Layout::SHADER_RESOURCE;
+					return wrapper;
+				}
+
+				m->FreeTexture(tex, mem);
+			}
+		}
+	}
+
+	// Fallback for non-DDS and NRI-unsupported DDS formats: flatten to RGBA8
+	// mip-0. This keeps old behavior for uncommon inputs while common BC DDS
+	// textures stay compressed in the fast path above.
 	const DXGI_FORMAT target = DXGI_FORMAT_R8G8B8A8_UNORM;
 	DirectX::ScratchImage converted;
-	const DirectX::TexMetadata& md = loaded.GetMetadata();
 	if (DirectX::IsCompressed(md.format))
 		hr = DirectX::Decompress(loaded.GetImages(), loaded.GetImageCount(), md, target, converted);
 	else if (md.format != target)
@@ -1886,7 +3817,9 @@ std::shared_ptr<VertexBuffer> NRIBackend::CreateVertexBuffer(uint32_t size, uint
 	// HOST_UPLOAD + mapped memcpy — avoids a per-mesh Helper.UploadData queue submit
 	// (which serialized loading to a crawl with thousands of meshes).
 	nri::Buffer* nb = nullptr; std::vector<nri::Memory*> mem;
-	if (!m->CreateBoundBuffer(size, 0, nri::BufferUsageBits::VERTEX_BUFFER, nri::MemoryLocation::HOST_UPLOAD, nb, mem)) return nullptr;
+	if (!m->CreateBoundBuffer(size, 0,
+		nri::BufferUsageBits::VERTEX_BUFFER | nri::BufferUsageBits::SHADER_RESOURCE | nri::BufferUsageBits::ACCELERATION_STRUCTURE_BUILD_INPUT,
+		nri::MemoryLocation::HOST_UPLOAD, nb, mem)) return nullptr;
 	void* mapped = m->Core.MapBuffer(*nb, 0, size);
 	if (mapped && srcData) memcpy(mapped, srcData, size);
 	auto w = std::make_shared<VertexBuffer>(); w->numVertices = stride ? (int)(size / stride) : 0;
@@ -1898,7 +3831,9 @@ std::shared_ptr<IndexBuffer> NRIBackend::CreateIndexBuffer(EIndexFormat format, 
 {
 	if (!m->RasterEnabled || !m->Device || size == 0) return nullptr;
 	nri::Buffer* nb = nullptr; std::vector<nri::Memory*> mem;
-	if (!m->CreateBoundBuffer(size, 0, nri::BufferUsageBits::INDEX_BUFFER, nri::MemoryLocation::HOST_UPLOAD, nb, mem)) return nullptr;
+	if (!m->CreateBoundBuffer(size, 0,
+		nri::BufferUsageBits::INDEX_BUFFER | nri::BufferUsageBits::SHADER_RESOURCE | nri::BufferUsageBits::ACCELERATION_STRUCTURE_BUILD_INPUT,
+		nri::MemoryLocation::HOST_UPLOAD, nb, mem)) return nullptr;
 	void* mapped = m->Core.MapBuffer(*nb, 0, size);
 	if (mapped && srcData) memcpy(mapped, srcData, size);
 	const uint32_t idxSize = (format == EIndexFormat::U16) ? 2u : 4u;
@@ -1911,7 +3846,9 @@ std::shared_ptr<VertexBuffer> NRIBackend::CreateUploadVertexBuffer(uint32_t size
 {
 	if (!m->RasterEnabled || !m->Device || size == 0) return nullptr;
 	nri::Buffer* nb = nullptr; std::vector<nri::Memory*> mem;
-	if (!m->CreateBoundBuffer(size, 0, nri::BufferUsageBits::VERTEX_BUFFER, nri::MemoryLocation::HOST_UPLOAD, nb, mem)) return nullptr;
+	if (!m->CreateBoundBuffer(size, 0,
+		nri::BufferUsageBits::VERTEX_BUFFER | nri::BufferUsageBits::SHADER_RESOURCE | nri::BufferUsageBits::ACCELERATION_STRUCTURE_BUILD_INPUT,
+		nri::MemoryLocation::HOST_UPLOAD, nb, mem)) return nullptr;
 	void* mapped = m->Core.MapBuffer(*nb, 0, size);
 	if (mapped && srcData) memcpy(mapped, srcData, size);
 	auto w = std::make_shared<VertexBuffer>(); w->numVertices = stride ? (int)(size / stride) : 0; w->MappedCpu = mapped; w->MappedCapacityBytes = size;
@@ -1923,7 +3860,9 @@ std::shared_ptr<IndexBuffer> NRIBackend::CreateUploadIndexBuffer(EIndexFormat fo
 {
 	if (!m->RasterEnabled || !m->Device || size == 0) return nullptr;
 	nri::Buffer* nb = nullptr; std::vector<nri::Memory*> mem;
-	if (!m->CreateBoundBuffer(size, 0, nri::BufferUsageBits::INDEX_BUFFER, nri::MemoryLocation::HOST_UPLOAD, nb, mem)) return nullptr;
+	if (!m->CreateBoundBuffer(size, 0,
+		nri::BufferUsageBits::INDEX_BUFFER | nri::BufferUsageBits::SHADER_RESOURCE | nri::BufferUsageBits::ACCELERATION_STRUCTURE_BUILD_INPUT,
+		nri::MemoryLocation::HOST_UPLOAD, nb, mem)) return nullptr;
 	void* mapped = m->Core.MapBuffer(*nb, 0, size);
 	if (mapped && srcData) memcpy(mapped, srcData, size);
 	const uint32_t idxSize = (format == EIndexFormat::U16) ? 2u : 4u;
@@ -1946,7 +3885,9 @@ std::shared_ptr<VertexBuffer> NRIBackend::CreateRWVertexBuffer(uint32_t size, ui
 {
 	if (!m->RasterEnabled || !m->Device || size == 0) return nullptr;
 	nri::Buffer* nb = nullptr; std::vector<nri::Memory*> mem;
-	if (!m->CreateBoundBuffer(size, 0, nri::BufferUsageBits::VERTEX_BUFFER | nri::BufferUsageBits::SHADER_RESOURCE_STORAGE, nri::MemoryLocation::DEVICE, nb, mem)) return nullptr;
+	if (!m->CreateBoundBuffer(size, 0,
+		nri::BufferUsageBits::VERTEX_BUFFER | nri::BufferUsageBits::SHADER_RESOURCE | nri::BufferUsageBits::SHADER_RESOURCE_STORAGE | nri::BufferUsageBits::ACCELERATION_STRUCTURE_BUILD_INPUT,
+		nri::MemoryLocation::DEVICE, nb, mem)) return nullptr;
 	auto w = std::make_shared<VertexBuffer>(); w->numVertices = stride ? (int)(size / stride) : 0;
 	Impl::GpuBuf gb; gb.buffer = nb; gb.memory = std::move(mem); gb.stride = stride; gb.capacity = size;
 	m->VBs[w.get()] = std::move(gb);
@@ -1977,14 +3918,182 @@ void NRIBackend::UpdateUploadStructuredBuffer(Buffer* buffer, const void* srcDat
 }
 
 // === Ray tracing ==========================================================
-std::shared_ptr<RTAS> NRIBackend::CreateBLASForMesh(Mesh*) { NRI_TODO(); return nullptr; }
-std::shared_ptr<RTAS> NRIBackend::CreateBLASForSkeletalMesh(Mesh*) { NRI_TODO(); return nullptr; }
-void NRIBackend::RefitBLAS(RTAS*, Mesh*) { NRI_TODO(); }
-std::shared_ptr<RTAS> NRIBackend::CreateTLAS(const std::vector<RTInstanceDesc>&) { NRI_TODO(); return nullptr; }
-bool NRIBackend::UpdateTLAS(const std::shared_ptr<RTAS>&, const std::vector<RTInstanceDesc>&) { NRI_TODO(); return false; }
+std::shared_ptr<RTAS> NRIBackend::CreateBLASForMesh(Mesh* mesh)
+{
+	return CreateNRIBLASForMeshInternal(m.get(), mesh, false, false);
+}
+
+std::shared_ptr<RTAS> NRIBackend::CreateBLASForSkeletalMesh(Mesh* mesh)
+{
+	return CreateNRIBLASForMeshInternal(m.get(), mesh, true, true);
+}
+
+void NRIBackend::RefitBLAS(RTAS* rtas, Mesh* mesh)
+{
+	NRIRTAS* as = dynamic_cast<NRIRTAS*>(rtas);
+	if (!as || !as->Owner || !as->AllowUpdate || !as->AccelerationStructure || !as->ScratchBuffer || !mesh)
+		return;
+
+	uint32_t vertexCount = 0;
+	uint32_t indexCount = 0;
+	if (!FillNRIBottomGeometry(m.get(), mesh, true, as->BottomGeometry, vertexCount, indexCount))
+		return;
+
+	nri::BuildBottomLevelAccelerationStructureDesc build = {};
+	build.dst = as->AccelerationStructure;
+	build.src = as->AccelerationStructure;
+	build.geometries = &as->BottomGeometry;
+	build.geometryNum = 1;
+	build.scratchBuffer = as->ScratchBuffer;
+
+	m->SubmitImmediate("[NRIRTAS] RefitBLAS immediate submit failed\n", [&](nri::CommandBuffer& cmd)
+	{
+		m->RT.CmdBuildBottomLevelAccelerationStructures(cmd, &build, 1);
+		m->BarrierAccelerationStructure(cmd, as->AccelerationStructure);
+	});
+}
+
+std::shared_ptr<RTAS> NRIBackend::CreateTLAS(const std::vector<RTInstanceDesc>& instances)
+{
+	if (!m->Device || !m->HasRayTracing || instances.empty() || instances.size() > static_cast<size_t>(UINT32_MAX))
+		return nullptr;
+
+	auto as = std::make_shared<NRIRTAS>();
+	as->Owner = m.get();
+	as->IsTopLevel = true;
+	as->AllowUpdate = true;
+	as->InstanceCount = static_cast<uint32_t>(instances.size());
+
+	nri::AccelerationStructureDesc desc = {};
+	desc.geometryOrInstanceNum = as->InstanceCount;
+	desc.flags = nri::AccelerationStructureBits::ALLOW_UPDATE | nri::AccelerationStructureBits::PREFER_FAST_TRACE;
+	desc.type = nri::AccelerationStructureType::TOP_LEVEL;
+
+	if (m->RT.CreateCommittedAccelerationStructure(*m->Device, nri::MemoryLocation::DEVICE, 0.0f, desc, as->AccelerationStructure) != nri::Result::SUCCESS ||
+		!as->AccelerationStructure)
+	{
+		AppendCpuRuntimeTrace(L"[NRIRTAS] CreateCommittedAccelerationStructure TLAS failed");
+		return nullptr;
+	}
+
+	uint64_t scratchSize = m->RT.GetAccelerationStructureBuildScratchBufferSize(*as->AccelerationStructure);
+	if (m->RT.GetAccelerationStructureUpdateScratchBufferSize)
+		scratchSize = std::max<uint64_t>(scratchSize, m->RT.GetAccelerationStructureUpdateScratchBufferSize(*as->AccelerationStructure));
+	if (scratchSize == 0 ||
+		!m->CreateBoundBuffer(scratchSize, 0, nri::BufferUsageBits::SCRATCH_BUFFER, nri::MemoryLocation::DEVICE, as->ScratchBuffer, as->ScratchMemory))
+	{
+		AppendCpuRuntimeTrace(L"[NRIRTAS] TLAS scratch allocation failed size=" + std::to_wstring(scratchSize));
+		return nullptr;
+	}
+
+	const uint64_t instanceBytes = sizeof(nri::TopLevelInstance) * static_cast<uint64_t>(instances.size());
+	if (!m->CreateBoundBuffer(instanceBytes, 0, nri::BufferUsageBits::ACCELERATION_STRUCTURE_BUILD_INPUT,
+		nri::MemoryLocation::HOST_UPLOAD, as->InstanceBuffer, as->InstanceMemory))
+	{
+		AppendCpuRuntimeTrace(L"[NRIRTAS] TLAS instance allocation failed bytes=" + std::to_wstring(instanceBytes));
+		return nullptr;
+	}
+	as->InstanceMapped = m->Core.MapBuffer(*as->InstanceBuffer, 0, instanceBytes);
+	if (!as->InstanceMapped || !WriteNRITLASInstances(as.get(), instances))
+	{
+		AppendCpuRuntimeTrace(L"[NRIRTAS] TLAS instance write failed instances=" + std::to_wstring(instances.size()));
+		return nullptr;
+	}
+
+	nri::BuildTopLevelAccelerationStructureDesc build = {};
+	build.dst = as->AccelerationStructure;
+	build.instanceNum = as->InstanceCount;
+	build.instanceBuffer = as->InstanceBuffer;
+	build.scratchBuffer = as->ScratchBuffer;
+
+	std::vector<std::shared_ptr<NRIRTAS>> pendingBLAS;
+	std::vector<nri::BuildBottomLevelAccelerationStructureDesc> pendingBLASBuilds;
+	CollectPendingNRIBLASBuilds(instances, pendingBLAS, pendingBLASBuilds);
+
+	const bool submitted = m->SubmitImmediate("[NRIRTAS] BuildTLAS immediate submit failed\n", [&](nri::CommandBuffer& cmd)
+	{
+		if (!pendingBLASBuilds.empty())
+		{
+			for (size_t i = 0; i < pendingBLASBuilds.size(); ++i)
+			{
+				m->RT.CmdBuildBottomLevelAccelerationStructures(cmd, &pendingBLASBuilds[i], 1);
+				m->BarrierAccelerationStructure(cmd, pendingBLAS[i]->AccelerationStructure);
+			}
+		}
+		m->RT.CmdBuildTopLevelAccelerationStructures(cmd, &build, 1);
+		m->BarrierAccelerationStructure(cmd, as->AccelerationStructure);
+	});
+	if (!submitted)
+	{
+		AppendCpuRuntimeTrace(L"[NRIRTAS] BuildTLAS submit failed");
+		return nullptr;
+	}
+	for (const std::shared_ptr<NRIRTAS>& blas : pendingBLAS)
+		blas->BuildPending = false;
+	if (!pendingBLAS.empty())
+		AppendCpuRuntimeTrace(L"[NRIRTAS] BuildBLAS batch submitted count=" + std::to_wstring(pendingBLAS.size()));
+
+	if (m->RT.CreateAccelerationStructureDescriptor(*as->AccelerationStructure, as->Descriptor) != nri::Result::SUCCESS)
+		AppendCpuRuntimeTrace(L"[NRIRTAS] TLAS descriptor creation failed");
+
+	m->RayTracingAS.push_back(as);
+	AppendCpuRuntimeTrace(L"[NRIRTAS] BuildTLAS submitted instances=" + std::to_wstring(instances.size()));
+	return as;
+}
+
+bool NRIBackend::UpdateTLAS(const std::shared_ptr<RTAS>& topLevelAS, const std::vector<RTInstanceDesc>& instances)
+{
+	std::shared_ptr<NRIRTAS> as = std::dynamic_pointer_cast<NRIRTAS>(topLevelAS);
+	if (!as || !as->Owner || !as->IsTopLevel || !as->AllowUpdate ||
+		!as->AccelerationStructure || !as->ScratchBuffer || !as->InstanceBuffer ||
+		instances.empty() || instances.size() != as->InstanceCount)
+	{
+		return false;
+	}
+	if (!WriteNRITLASInstances(as.get(), instances))
+		return false;
+
+	nri::BuildTopLevelAccelerationStructureDesc build = {};
+	build.dst = as->AccelerationStructure;
+	build.src = as->AccelerationStructure;
+	build.instanceNum = as->InstanceCount;
+	build.instanceBuffer = as->InstanceBuffer;
+	build.scratchBuffer = as->ScratchBuffer;
+
+	std::vector<std::shared_ptr<NRIRTAS>> pendingBLAS;
+	std::vector<nri::BuildBottomLevelAccelerationStructureDesc> pendingBLASBuilds;
+	CollectPendingNRIBLASBuilds(instances, pendingBLAS, pendingBLASBuilds);
+
+	const bool submitted = m->SubmitImmediate("[NRIRTAS] UpdateTLAS immediate submit failed\n", [&](nri::CommandBuffer& cmd)
+	{
+		if (!pendingBLASBuilds.empty())
+		{
+			for (size_t i = 0; i < pendingBLASBuilds.size(); ++i)
+			{
+				m->RT.CmdBuildBottomLevelAccelerationStructures(cmd, &pendingBLASBuilds[i], 1);
+				m->BarrierAccelerationStructure(cmd, pendingBLAS[i]->AccelerationStructure);
+			}
+		}
+		m->RT.CmdBuildTopLevelAccelerationStructures(cmd, &build, 1);
+		m->BarrierAccelerationStructure(cmd, as->AccelerationStructure);
+	});
+	if (submitted)
+	{
+		for (const std::shared_ptr<NRIRTAS>& blas : pendingBLAS)
+			blas->BuildPending = false;
+		if (!pendingBLAS.empty())
+			AppendCpuRuntimeTrace(L"[NRIRTAS] BuildBLAS batch submitted count=" + std::to_wstring(pendingBLAS.size()));
+	}
+	return submitted;
+}
 
 // === Pipelines / shaders ==================================================
-std::shared_ptr<RTPipelineStateObject> NRIBackend::CreateRTPipelineStateObject() { NRI_TODO(); return nullptr; }
+std::shared_ptr<RTPipelineStateObject> NRIBackend::CreateRTPipelineStateObject()
+{
+	if (!m->Device || !m->HasRayTracing)
+		return nullptr;
+	return std::make_shared<NRIRTPipelineStateObject>(m.get());
+}
 std::shared_ptr<ComputePipelineStateObject> NRIBackend::CreateComputePipelineStateObject()
 {
 	return std::make_shared<NRIComputePSO>(m.get());
@@ -2079,7 +4188,190 @@ std::shared_ptr<Texture> NRIBackend::GetSwapChainTexture(uint32_t bufferIndex)
 		return m->BackBufferWrappers[bufferIndex];
 	return nullptr;
 }
-bool NRIBackend::CaptureTexture(Texture*, CapturedImage&, EResourceState) { NRI_TODO(); return false; }
+bool NRIBackend::CaptureTexture(Texture* source, CapturedImage& captured, EResourceState beforeState)
+{
+	captured = {};
+	ErrorString.clear();
+	if (!m || !source || !m->GraphicsQueue || !m->Device || !m->Fence)
+	{
+		ErrorString = "NRI CaptureTexture invalid source or queue";
+		return false;
+	}
+
+	nri::Texture* texture = m->NriTex(source);
+	uint32_t backBufferIndex = 0;
+	if (!texture && m->IsBackbuffer(source, backBufferIndex) && backBufferIndex < m->BackBuffers.size())
+		texture = m->BackBuffers[backBufferIndex];
+	if (!texture)
+	{
+		ErrorString = "NRI CaptureTexture texture not found";
+		return false;
+	}
+
+	const uint32_t bytesPerPixel = CaptureBytesPerPixel(source->Format);
+	if (source->Width == 0 || source->Height == 0 || bytesPerPixel == 0)
+	{
+		ErrorString = "NRI CaptureTexture unsupported source format";
+		return false;
+	}
+
+	const uint64_t rowSize64 = static_cast<uint64_t>(source->Width) * bytesPerPixel;
+	if (rowSize64 > UINT32_MAX)
+	{
+		ErrorString = "NRI CaptureTexture row too large";
+		return false;
+	}
+	const nri::DeviceDesc& dd = m->Core.GetDeviceDesc(*m->Device);
+	const uint32_t rowAlign = std::max(1u, dd.memoryAlignment.uploadBufferTextureRow);
+	const uint32_t sliceAlign = std::max(1u, dd.memoryAlignment.uploadBufferTextureSlice);
+	const uint32_t rowPitch = static_cast<uint32_t>(AlignUpU64(rowSize64, rowAlign));
+	const uint64_t slicePitch64 = AlignUpU64(static_cast<uint64_t>(rowPitch) * source->Height, sliceAlign);
+
+	nri::Buffer* readback = nullptr;
+	std::vector<nri::Memory*> readbackMemory;
+	if (slicePitch64 == 0 || slicePitch64 > SIZE_MAX ||
+		!m->CreateBoundBuffer(slicePitch64, 0, nri::BufferUsageBits::NONE, nri::MemoryLocation::HOST_READBACK, readback, readbackMemory))
+	{
+		ErrorString = "NRI CaptureTexture readback allocation failed";
+		return false;
+	}
+
+	auto cleanupReadback = [&]()
+	{
+		m->FreeBuffer(readback, readbackMemory);
+	};
+
+	bool restartedActiveCmd = false;
+	bool submitted = false;
+	if (m->ActiveCmd)
+	{
+		m->EndRP();
+		TransitionTexture(source, beforeState, EResourceState::CopySource);
+
+		nri::TextureRegionDesc region = {};
+		region.width = static_cast<nri::Dim_t>(source->Width);
+		region.height = static_cast<nri::Dim_t>(source->Height);
+		region.depth = 1;
+		region.planes = CapturePlaneBits(source->Format);
+		nri::TextureDataLayoutDesc layout = {};
+		layout.offset = 0;
+		layout.rowPitch = rowPitch;
+		layout.slicePitch = static_cast<uint32_t>(slicePitch64);
+		m->Core.CmdReadbackTextureToBuffer(*m->ActiveCmd, *readback, layout, *texture, region);
+
+		TransitionTexture(source, EResourceState::CopySource, beforeState);
+
+		if (m->Core.EndCommandBuffer(*m->ActiveCmd) == nri::Result::SUCCESS)
+		{
+			nri::FenceSubmitDesc signalFence = {};
+			signalFence.fence = m->Fence;
+			signalFence.value = ++m->FenceValue;
+			signalFence.stages = nri::StageBits::ALL;
+			nri::CommandBuffer* commandBuffers[1] = { m->ActiveCmd };
+			nri::QueueSubmitDesc submit = {};
+			submit.commandBuffers = commandBuffers;
+			submit.commandBufferNum = 1;
+			submit.signalFences = &signalFence;
+			submit.signalFenceNum = 1;
+			if (m->Core.QueueSubmit(*m->GraphicsQueue, submit) == nri::Result::SUCCESS)
+			{
+				m->Core.Wait(*m->Fence, m->FenceValue);
+				submitted = m->Core.GetFenceValue(*m->Fence) >= m->FenceValue;
+			}
+		}
+
+		m->ActiveCmd = nullptr;
+		if (m->CmdAllocator && m->CmdBuffer)
+		{
+			m->Core.ResetCommandAllocator(*m->CmdAllocator);
+			if (m->Core.BeginCommandBuffer(*m->CmdBuffer, nullptr) == nri::Result::SUCCESS)
+			{
+				m->ActiveCmd = m->CmdBuffer;
+				restartedActiveCmd = true;
+			}
+		}
+	}
+	else
+	{
+		submitted = m->SubmitImmediate("[NRI] CaptureTexture immediate submit failed\n", [&](nri::CommandBuffer& cmd)
+		{
+			const nri::Layout beforeLayout = m->TexLayout.count(source) ? m->TexLayout[source] : nri::Layout::UNDEFINED;
+			nri::TextureBarrierDesc toCopy = {};
+			toCopy.texture = texture;
+			toCopy.before.access = AccessForLayout(beforeLayout);
+			toCopy.before.layout = beforeLayout;
+			toCopy.before.stages = StagesForLayout(beforeLayout);
+			toCopy.after.access = nri::AccessBits::COPY_SOURCE;
+			toCopy.after.layout = nri::Layout::COPY_SOURCE;
+			toCopy.after.stages = nri::StageBits::COPY;
+			toCopy.mipNum = 1;
+			toCopy.layerNum = 1;
+			nri::BarrierDesc toCopyBarrier = {};
+			toCopyBarrier.textures = &toCopy;
+			toCopyBarrier.textureNum = 1;
+			m->Core.CmdBarrier(cmd, toCopyBarrier);
+
+			nri::TextureRegionDesc region = {};
+			region.width = static_cast<nri::Dim_t>(source->Width);
+			region.height = static_cast<nri::Dim_t>(source->Height);
+			region.depth = 1;
+			region.planes = CapturePlaneBits(source->Format);
+			nri::TextureDataLayoutDesc layout = {};
+			layout.offset = 0;
+			layout.rowPitch = rowPitch;
+			layout.slicePitch = static_cast<uint32_t>(slicePitch64);
+			m->Core.CmdReadbackTextureToBuffer(cmd, *readback, layout, *texture, region);
+
+			nri::TextureBarrierDesc toRead = {};
+			toRead.texture = texture;
+			toRead.before.access = nri::AccessBits::COPY_SOURCE;
+			toRead.before.layout = nri::Layout::COPY_SOURCE;
+			toRead.before.stages = nri::StageBits::COPY;
+			toRead.after.access = AccessForLayout(beforeLayout);
+			toRead.after.layout = beforeLayout;
+			toRead.after.stages = StagesForLayout(beforeLayout);
+			toRead.mipNum = 1;
+			toRead.layerNum = 1;
+			nri::BarrierDesc toReadBarrier = {};
+			toReadBarrier.textures = &toRead;
+			toReadBarrier.textureNum = 1;
+			m->Core.CmdBarrier(cmd, toReadBarrier);
+		});
+	}
+
+	if (!submitted)
+	{
+		ErrorString = restartedActiveCmd ?
+			"NRI CaptureTexture command submit failed" :
+			"NRI CaptureTexture command submit/restart failed";
+		cleanupReadback();
+		return false;
+	}
+
+	const uint8_t* mapped = static_cast<const uint8_t*>(m->Core.MapBuffer(*readback, 0, slicePitch64));
+	if (!mapped)
+	{
+		ErrorString = "NRI CaptureTexture readback map failed";
+		cleanupReadback();
+		return false;
+	}
+
+	captured.Format = source->Format;
+	captured.Width = source->Width;
+	captured.Height = source->Height;
+	captured.RowPitch = static_cast<uint32_t>(rowSize64);
+	captured.Pixels.resize(static_cast<size_t>(rowSize64) * source->Height);
+	for (uint32_t y = 0; y < source->Height; ++y)
+	{
+		std::memcpy(
+			captured.Pixels.data() + static_cast<size_t>(y) * captured.RowPitch,
+			mapped + static_cast<size_t>(y) * rowPitch,
+			static_cast<size_t>(rowSize64));
+	}
+	m->Core.UnmapBuffer(*readback);
+	cleanupReadback();
+	return true;
+}
 Texture* NRIBackend::GetCurrentWindowRenderTarget()
 {
 	if (m->FrameHasBackbuffer && m->CurrentBackBuffer < m->BackBufferWrappers.size())
@@ -2278,6 +4570,7 @@ void NRIBackend::Dispatch(uint32_t groupCountX, uint32_t groupCountY, uint32_t g
 {
 	if (m->ActiveCmd)
 	{
+		m->EndRP();
 		nri::DispatchDesc d = { groupCountX, groupCountY, groupCountZ };
 		m->Core.CmdDispatch(*m->ActiveCmd, d);
 	}
@@ -2289,6 +4582,7 @@ void NRIBackend::EndGpuMarker() { NRI_TODO(); }
 void NRIBackend::TransitionTexture(Texture* texture, EResourceState, EResourceState stateAfter)
 {
 	if (!m->ActiveCmd || !texture) return;
+	m->EndRP();
 	nri::AccessBits acc = nri::AccessBits::SHADER_RESOURCE;
 	nri::Layout lay = nri::Layout::SHADER_RESOURCE;
 	nri::StageBits st = nri::StageBits::ALL;

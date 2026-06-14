@@ -874,6 +874,7 @@ private:
 	RTGIViewParamCB RTGIViewParam;
 	shared_ptr<RTPipelineStateObject> PSO_RT_GI;
 	shared_ptr<RTPipelineStateObject> PSO_RT_GI_SER;
+	shared_ptr<ComputePipelineStateObject> PSO_NRI_SIMPLE_GI_FALLBACK;
 	bool bRTDiffuseGISimpleSERInitFailed = false;
 
 	struct RTScreenProbeGIViewParamCB
@@ -2488,6 +2489,8 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	void InitRaytracingSimpleGIPass();
 	shared_ptr<RTPipelineStateObject> CreateRaytracingSimpleGIPSO(bool bUseSER);
 	bool InitRaytracingSimpleGISERPass();
+	void InitNRISimpleGIFallbackPass();
+	bool NRISimpleGIFallbackPass();
 	void InitRaytracingScreenProbePass();
 	shared_ptr<RTPipelineStateObject> CreateRaytracingScreenProbeGIPSO(bool bUseSER);
 	bool InitRaytracingScreenProbeGISERPass();
