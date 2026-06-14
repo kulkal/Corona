@@ -3480,11 +3480,16 @@ NRIBackend::~NRIBackend()
 // === Capabilities / identity =============================================
 ERenderBackendAPI NRIBackend::GetAPI() const { return ERenderBackendAPI::NRI; }
 const char* NRIBackend::GetBackendName() const { return m->BackendName.c_str(); }
-// RT is disabled (return 0) until the NRI RT pipeline is ported to the bindless
-// contract (hit shaders read bindless material/geometry tables at space10+). With
-// 0, OnRender takes the GBuffer + direct-lighting raster path (bDesktopRasterDirectOnly).
-uint32_t NRIBackend::GetMaxSupportedHybridStage() const { return 0u; }
-bool NRIBackend::SupportsRayTracing() const { return GetMaxSupportedHybridStage() >= 1 && m->RayTracingTier >= 1 && m->HasRayTracing; }
+// Stage 4 enables the NRI "SimpleGI bringup": GBuffer + direct lighting + a
+// COMPUTE-based diffuse-GI fallback (NRISimpleGIFallbackPass), with RT shadows/
+// reflection/AO and all RT pipeline state objects skipped. Real RT (bindless hit
+// shaders) is a later step; SupportsRayTracing() stays false so the BLAS/TLAS
+// build (InitRaytracingData) is skipped — the compute GI fallback needs no TLAS.
+uint32_t NRIBackend::GetMaxSupportedHybridStage() const { return 4u; }
+// False during the SimpleGI bringup: the compute GI fallback needs no acceleration
+// structures, so InitRaytracingData() skips the (heavy, not-yet-verified) BLAS/TLAS
+// build. Flip to (RayTracingTier>=1 && HasRayTracing) when real RT lands.
+bool NRIBackend::SupportsRayTracing() const { return false; }
 bool NRIBackend::SupportsShaderExecutionReordering() const { return m->RayTracingTier >= 3; }
 
 // === Frame lifecycle / diagnostics =======================================

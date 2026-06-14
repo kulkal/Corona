@@ -851,9 +851,14 @@ void Corona::InitRTPSO()
 			L"\", elapsedMs=" + FormatRTInitMilliseconds(elapsedMs));
 	};
 
-	if (!bBackendSupportsRT)
+	if (!bBackendSupportsRT || bNriSimpleGIBringup)
 	{
-		AppendCpuRuntimeTrace(L"[StartupTiming][RTPSO] skip all passes (backend has no ray tracing support)");
+		// NRI SimpleGI bringup uses a compute-based diffuse-GI fallback
+		// (NRISimpleGIFallbackPass / InitNRISimpleGIFallbackPass), so no
+		// ray-tracing pipeline state objects are needed — building them would
+		// fail (hit shaders reference bindless material tables not yet in the RT
+		// global root signature).
+		AppendCpuRuntimeTrace(L"[StartupTiming][RTPSO] skip all passes (no RT support or NRI SimpleGI bringup)");
 		AppendCpuRuntimeTrace(L"[StartupTiming][RTPSO] complete totalMs=0");
 		return;
 	}
