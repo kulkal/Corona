@@ -459,6 +459,10 @@ public:
 		return false;
 	}
 	virtual void* GetStreamlineCommandBuffer() { return nullptr; }
+	// Native graphics device for Streamline (slSetD3DDevice / adapter LUID query).
+	// DX12 owns its device in Corona directly; the NRI backend creates its own, so
+	// it exposes the native ID3D12Device* here. Returns null when not applicable.
+	virtual void* GetStreamlineNativeDevice() const { return nullptr; }
 	virtual bool GetStreamlineVulkanDeviceInfo(StreamlineVulkanDeviceInfo& outInfo) const
 	{
 		(void)outInfo;

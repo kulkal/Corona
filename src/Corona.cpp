@@ -9204,6 +9204,29 @@ void Corona::LoadPipeline()
 			const std::string& nriSwap = renderBackend->GetErrorString();
 			AppendCpuRuntimeTrace(L"[LoadPipeline] after CreateSwapChainForWindow NRI: " + std::wstring(nriSwap.begin(), nriSwap.end()));
 		}
+#if WITH_STREAMLINE
+		// Register the NRI backend's native D3D12 device with Streamline and probe
+		// DLSS / DLSS-RR support, mirroring the DX12 path. NRI creates its own device,
+		// so the native ID3D12Device* comes from the backend's interop accessor.
+		if (bStreamlineInitialized)
+		{
+			void* nativeDevice = renderBackend->GetStreamlineNativeDevice();
+			if (nativeDevice)
+			{
+				slSetD3DDevice(static_cast<ID3D12Device*>(nativeDevice));
+				const LUID luid = static_cast<ID3D12Device*>(nativeDevice)->GetAdapterLuid();
+				sl::AdapterInfo adapterInfo{};
+				adapterInfo.deviceLUID = reinterpret_cast<uint8_t*>(const_cast<LUID*>(&luid));
+				adapterInfo.deviceLUIDSizeInBytes = sizeof(LUID);
+				bDLSSAvailable = slIsFeatureSupported(sl::kFeatureDLSS, adapterInfo) == sl::Result::eOk;
+				bDLSSRRAvailable = slIsFeatureSupported(sl::kFeatureDLSS_RR, adapterInfo) == sl::Result::eOk;
+			}
+			AppendCpuRuntimeTrace(
+				L"[LoadPipeline] NRI Streamline: device=" + std::to_wstring(nativeDevice ? 1 : 0) +
+				L", dlss=" + std::to_wstring(bDLSSAvailable ? 1 : 0) +
+				L", dlssRR=" + std::to_wstring(bDLSSRRAvailable ? 1 : 0));
+		}
+#endif
 		return;
 	}
 #endif

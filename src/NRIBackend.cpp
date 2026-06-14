@@ -21,6 +21,7 @@
 
 #include <wrl/client.h>
 #include <dxcapi.use.h>
+#include <d3d12.h> // Streamline (DLSS-RR) interop needs native ID3D12Resource/state enums
 #include <filesystem>
 #include "DirectXTex.h"
 
@@ -4554,6 +4555,66 @@ std::shared_ptr<Texture> NRIBackend::GetSwapChainTexture(uint32_t bufferIndex)
 		return m->BackBufferWrappers[bufferIndex];
 	return nullptr;
 }
+// === Streamline (DLSS-RR) native D3D12 interop ===========================
+// DLSS Ray Reconstruction runs through Streamline, which needs the native
+// ID3D12Device / ID3D12Resource / ID3D12GraphicsCommandList behind the NRI
+// objects. NRI's CoreInterface exposes those via Get*NativeObject.
+namespace
+{
+	uint32_t NRIToD3D12StreamlineState(EResourceState state)
+	{
+		switch (state)
+		{
+		case EResourceState::ShaderRead:
+			return D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+		case EResourceState::UnorderedAccess: return D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+		case EResourceState::RenderTarget:    return D3D12_RESOURCE_STATE_RENDER_TARGET;
+		case EResourceState::DepthWrite:      return D3D12_RESOURCE_STATE_DEPTH_WRITE;
+		case EResourceState::CopyDest:        return D3D12_RESOURCE_STATE_COPY_DEST;
+		case EResourceState::CopySource:      return D3D12_RESOURCE_STATE_COPY_SOURCE;
+		case EResourceState::Present:         return D3D12_RESOURCE_STATE_PRESENT;
+		default:                              return D3D12_RESOURCE_STATE_COMMON;
+		}
+	}
+}
+
+bool NRIBackend::GetStreamlineTextureResource(Texture* texture, EResourceState state, StreamlineTextureResourceDesc& outDesc) const
+{
+	if (!m || !texture)
+		return false;
+	nri::Texture* nt = m->NriTex(texture);
+	if (!nt)
+		return false;
+	auto* res = reinterpret_cast<ID3D12Resource*>(static_cast<uintptr_t>(m->Core.GetTextureNativeObject(nt)));
+	if (!res)
+		return false;
+	const D3D12_RESOURCE_DESC d = res->GetDesc();
+	outDesc = {};
+	outDesc.Native = res;
+	outDesc.State = NRIToD3D12StreamlineState(state);
+	outDesc.Width = static_cast<uint32_t>(d.Width);
+	outDesc.Height = d.Height;
+	outDesc.NativeFormat = static_cast<uint32_t>(d.Format);
+	outDesc.MipLevels = d.MipLevels;
+	outDesc.ArrayLayers = d.DepthOrArraySize;
+	outDesc.Flags = static_cast<uint32_t>(d.Flags);
+	return true;
+}
+
+void* NRIBackend::GetStreamlineCommandBuffer()
+{
+	if (!m || !m->ActiveCmd)
+		return nullptr;
+	return m->Core.GetCommandBufferNativeObject(m->ActiveCmd);
+}
+
+void* NRIBackend::GetStreamlineNativeDevice() const
+{
+	if (!m || !m->Device)
+		return nullptr;
+	return m->Core.GetDeviceNativeObject(m->Device);
+}
+
 bool NRIBackend::CaptureTexture(Texture* source, CapturedImage& captured, EResourceState beforeState)
 {
 	captured = {};

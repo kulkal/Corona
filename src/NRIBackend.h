@@ -94,6 +94,9 @@ public:
 	void CreateSwapChainForWindow(WindowHandle window, uint32_t width, uint32_t height, ETextureFormat format) override;
 	std::shared_ptr<Texture> GetSwapChainTexture(uint32_t bufferIndex) override;
 	bool CaptureTexture(Texture* source, CapturedImage& captured, EResourceState beforeState) override;
+	bool GetStreamlineTextureResource(Texture* texture, EResourceState state, StreamlineTextureResourceDesc& outDesc) const override;
+	void* GetStreamlineCommandBuffer() override;
+	void* GetStreamlineNativeDevice() const override;
 	Texture* GetCurrentWindowRenderTarget() override;
 	void PrepareWindowRenderTarget(Texture* renderTarget) override;
 	void FinalizeWindowRenderTarget(Texture* renderTarget) override;
