@@ -68,9 +68,16 @@ void Corona::InitRaytracingSimpleGIPass()
 {
 	if (renderBackend && renderBackend->GetAPI() == ERenderBackendAPI::NRI)
 	{
-		PSO_RT_GI = nullptr;
+		// Bring up real RT diffuse GI on NRI. Build the RT PSO; keep the compute
+		// fallback PSO around as a safety net so RaytraceGIPass can degrade if the
+		// RT PSO failed to build (deferred build can still fail at first Apply).
 		PSO_RT_GI_SER = nullptr;
+		PSO_RT_GI = CreateRaytracingSimpleGIPSO(false);
 		InitNRISimpleGIFallbackPass();
+		if (PSO_RT_GI)
+			AppendCpuRuntimeTrace(L"[DiffuseGI][NRI] real RT GI PSO created");
+		else
+			AppendCpuRuntimeTrace(L"[DiffuseGI][NRI] RT GI PSO creation failed; using compute fallback");
 		return;
 	}
 
@@ -178,10 +185,15 @@ void Corona::RaytraceGIPass()
 
 	fillViewParam();
 
+	// NRI: prefer the real RT GI path; fall back to the compute approximation only
+	// when the RT PSO or the TLAS is not yet available this frame.
 	if (renderBackend && renderBackend->GetAPI() == ERenderBackendAPI::NRI)
 	{
-		NRISimpleGIFallbackPass();
-		return;
+		if (!pso || !TLAS)
+		{
+			NRISimpleGIFallbackPass();
+			return;
+		}
 	}
 
 	if (!TLAS || !pso)

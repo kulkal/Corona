@@ -1885,6 +1885,16 @@ public:
 		Binding* b = Find(shader, d.Name);
 		if (!b) return;
 		b->registerSpace = d.RegisterSpace;
+		// Acceleration structures (gRtScene) must be typed ACCELERATION_STRUCTURE, not
+		// TEXTURE — otherwise the descriptor range type won't match the bound TLAS
+		// descriptor and UpdateDescriptorRanges validation rejects the write.
+		if (d.ResourceKind == RHIResourceKind::AccelerationStructure ||
+			d.DescriptorKind == RHIDescriptorKind::AccelerationStructure)
+		{
+			b->kind = ResKind::Accel;
+			b->descriptorType = nri::DescriptorType::ACCELERATION_STRUCTURE;
+			return;
+		}
 		const bool isBuf = (d.ResourceKind == RHIResourceKind::Buffer);
 		if (isUAV) { b->kind = isBuf ? ResKind::BufUAV : ResKind::TexUAV; b->descriptorType = isBuf ? nri::DescriptorType::STORAGE_STRUCTURED_BUFFER : nri::DescriptorType::STORAGE_TEXTURE; }
 		else       { b->kind = isBuf ? ResKind::BufSRV : ResKind::TexSRV; b->descriptorType = isBuf ? nri::DescriptorType::STRUCTURED_BUFFER : nri::DescriptorType::TEXTURE; }
@@ -1966,7 +1976,7 @@ public:
 	}
 	void SetAccelerationStructure(const std::string& shader, const std::string& bindingName, const std::shared_ptr<RTAS>& rtas, int = -1) override
 	{
-		if (Binding* b = Find(shader, bindingName)) { b->kind = ResKind::Accel; b->rtas = rtas; }
+		if (Binding* b = Find(shader, bindingName)) { b->kind = ResKind::Accel; b->descriptorType = nri::DescriptorType::ACCELERATION_STRUCTURE; b->rtas = rtas; }
 	}
 	void SetSampler(const std::string& shader, const std::string& bindingName, Sampler* sampler, int = -1) override
 	{
@@ -2183,7 +2193,19 @@ public:
 			return false;
 		}
 
-		return BuildShaderBindingTable(static_cast<uint32_t>(groups.size()));
+		const bool sbtOk = BuildShaderBindingTable(static_cast<uint32_t>(groups.size()));
+		AppendCpuRuntimeTrace(
+			L"[NRIRTPSO][SBT] shader=\"" + shaderPath.filename().wstring() +
+			L"\" shaders=" + std::to_wstring(Shaders.size()) +
+			L" groups=" + std::to_wstring(groups.size()) +
+			L" raygen=" + std::to_wstring(RaygenGroupCount) +
+			L" miss=" + std::to_wstring(MissGroupCount) +
+			L" hit=" + std::to_wstring(HitGroupCount) +
+			L" entrySize=" + std::to_wstring(SbtEntrySize) +
+			L" missOff=" + std::to_wstring(MissOffset) +
+			L" hitOff=" + std::to_wstring(HitOffset) +
+			L" ok=" + std::to_wstring(sbtOk ? 1 : 0));
+		return sbtOk;
 	}
 
 	void Apply(uint32_t width, uint32_t height) override
@@ -2401,6 +2423,13 @@ private:
 
 	uint32_t BindingDescriptorCount(const Binding& b) const
 	{
+		// Bindless runtime arrays (MaterialTextures space10, GeometryBuffers space12,
+		// and any typed RuntimeArray SRV) declare their full capacity in descriptorNum
+		// — must be honored so the descriptor range is sized for the registry, not 1.
+		// Without this the range is built with descriptorNum=1 and UpdateDescriptorRanges
+		// rejects the bindless writes (validation: count > range size).
+		if (b.bindless || b.descriptorNum > 1)
+			return b.descriptorNum;
 		return UsesHitDescriptorArray(b) ? std::max(1u, NumInstances) : 1u;
 	}
 
@@ -2650,11 +2679,24 @@ private:
 		if (!mapped)
 			return false;
 		memset(mapped, 0, static_cast<size_t>(sbtSize));
+		// WriteShaderGroupIdentifiers packs identifiers at shaderGroupIdentifierSize
+		// stride, but the shader binding table addresses records at SbtEntrySize
+		// stride (>= idSize, aligned). Writing a multi-group run in one call would
+		// place the 2nd+ identifiers at idSize spacing — wrong for any region with
+		// more than one group (e.g. GI's two miss shaders). Write each group at its
+		// own strided record offset instead.
 		auto writeGroups = [&](uint32_t groupIndex, uint32_t groupNum, uint64_t offset)
 		{
-			return groupNum == 0 ||
-				(groupIndex < groupCount && groupIndex + groupNum <= groupCount &&
-					m->RT.WriteShaderGroupIdentifiers(*Pipeline, groupIndex, groupNum, mapped + offset) == nri::Result::SUCCESS);
+			if (groupNum == 0)
+				return true;
+			if (groupIndex >= groupCount || groupIndex + groupNum > groupCount)
+				return false;
+			for (uint32_t i = 0; i < groupNum; ++i)
+			{
+				if (m->RT.WriteShaderGroupIdentifiers(*Pipeline, groupIndex + i, 1, mapped + offset + static_cast<uint64_t>(i) * SbtEntrySize) != nri::Result::SUCCESS)
+					return false;
+			}
+			return true;
 		};
 		bool ok = writeGroups(0, RaygenGroupCount, RaygenOffset);
 		ok = writeGroups(RaygenGroupCount, MissGroupCount, MissOffset) && ok;
