@@ -16195,6 +16195,23 @@ if (ImGui::Button("Reset Accumulation"))
 	renderBackend->EndFrame();
 	endFrameMs = ElapsedMilliseconds(endFrameStart, CpuClock::now());
 
+	// One-shot buffer dump for headless verification (set env CORONA_NRI_DUMP).
+	// Runs after EndFrame (ActiveCmd null) so CaptureTexture records its own cmd.
+	{
+		static const bool s_nriDumpEnabled = std::getenv("CORONA_NRI_DUMP") != nullptr;
+		static int s_nriDumpFrame = -1;
+		if (s_nriDumpEnabled && s_nriDumpFrame < 0 && renderBackend && renderBackend->GetAPI() == ERenderBackendAPI::NRI)
+			s_nriDumpFrame = (int)FrameCounter + 150;
+		if (s_nriDumpFrame >= 0 && (int)FrameCounter == s_nriDumpFrame)
+		{
+			AppendCpuRuntimeTrace(L"[NRIDump] dumping buffers at frame " + std::to_wstring(FrameCounter));
+			if (DiffuseGIRaw) AppendCpuRuntimeTrace(L"[NRIDump] gi=" + std::to_wstring(DumpTexturePNG(DiffuseGIRaw.get(), L"C:\\dev\\Corona_nri\\nri_dump_gi.png", EResourceState::ShaderRead) ? 1 : 0));
+			if (AlbedoBuffer) AppendCpuRuntimeTrace(L"[NRIDump] albedo=" + std::to_wstring(DumpTexturePNG(AlbedoBuffer.get(), L"C:\\dev\\Corona_nri\\nri_dump_albedo.png", EResourceState::ShaderRead) ? 1 : 0));
+			Texture* finalColor = GetCurrentResolveSource();
+			if (finalColor) AppendCpuRuntimeTrace(L"[NRIDump] final=" + std::to_wstring(DumpTexturePNG(finalColor, L"C:\\dev\\Corona_nri\\nri_dump_final.png", EResourceState::ShaderRead) ? 1 : 0));
+		}
+	}
+
 	if (!stateLock.owns_lock())
 	{
 		const auto waitStart = CpuClock::now();
