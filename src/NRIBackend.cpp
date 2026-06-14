@@ -551,6 +551,13 @@ struct NRIBackend::Impl
 				FreeBuffer(a.buffer, a.memory);
 		BufferReusePool.clear();
 	}
+
+	// TEMP perf instrumentation (CORONA_NRI_STATS): per-frame counts of the hot
+	// recording ops to find the remaining CPU bottleneck without guessing.
+	uint64_t StatAlloc = 0;   // CreateBoundBuffer (committed GPU heap allocations)
+	uint64_t StatUDR = 0;     // UpdateDescriptorRanges calls
+	uint64_t StatMap = 0;     // MapBuffer calls
+	uint32_t StatFrames = 0;
 	// Transient per-frame upload buffers (AllocateTransientUploadStructuredBuffer).
 	// Kept alive until the next BeginFrame; EndFrame waits synchronously so the
 	// previous frame's transients are safe to free then.
@@ -662,6 +669,7 @@ struct NRIBackend::Impl
 			outMemory.clear();
 			return false;
 		}
+		++StatAlloc;
 		return true;
 	}
 
@@ -1694,7 +1702,7 @@ public:
 			upd.baseDescriptor = 0;
 			upd.descriptors = b.descSingle;
 			upd.descriptorNum = 1;
-			m->Core.UpdateDescriptorRanges(&upd, 1);
+			++m->StatUDR; m->Core.UpdateDescriptorRanges(&upd, 1);
 		}
 
 		if (Pool) m->Core.CmdSetDescriptorPool(*m->ActiveCmd, *Pool);
@@ -2307,7 +2315,7 @@ public:
 				upd.baseDescriptor = 0;
 				upd.descriptors = regDescs.data();
 				upd.descriptorNum = count;
-				m->Core.UpdateDescriptorRanges(&upd, 1);
+				++m->StatUDR; m->Core.UpdateDescriptorRanges(&upd, 1);
 			}
 			for (Binding& b : Bindings)
 			{
@@ -2345,7 +2353,7 @@ public:
 					upd.descriptors = b.descSingle;
 					upd.descriptorNum = 1;
 				}
-				m->Core.UpdateDescriptorRanges(&upd, 1);
+				++m->StatUDR; m->Core.UpdateDescriptorRanges(&upd, 1);
 			}
 			m->Core.CmdSetDescriptorPool(*m->ActiveCmd, *Pool);
 		}
@@ -3037,7 +3045,7 @@ public:
 
 	enum class Kind { TexSRV, BufSRV, Sampler, CBV };
 	struct Binding { std::string name; uint32_t reg; Kind kind; nri::Descriptor* desc = nullptr; nri::Descriptor* descSingle[1] = {}; bool ownsDesc = false; void* last = nullptr; Texture* tex = nullptr; Buffer* buf = nullptr; Sampler* samp = nullptr; uint32_t setIndex = 0; uint32_t rangeIndex = 0; };
-	struct CbvState { nri::Buffer* buffer = nullptr; std::vector<nri::Memory*> memory; nri::Descriptor* view = nullptr; uint32_t size = 0; };
+	struct CbvState { nri::Buffer* buffer = nullptr; std::vector<nri::Memory*> memory; nri::Descriptor* view = nullptr; uint32_t size = 0; void* mapped = nullptr; };
 
 	void SetTexture(const std::string& name, Texture* t) { if (Binding* b = Find(name)) { b->tex = t; } }
 	void SetBuffer(const std::string& name, Buffer* bb) { if (Binding* b = Find(name)) { b->buf = bb; } }
@@ -3095,17 +3103,26 @@ public:
 					cb.size = Cbv.size;
 					nri::BufferViewDesc bvd = {}; bvd.buffer = cb.buffer; bvd.type = nri::BufferView::CONSTANT_BUFFER; bvd.offset = 0; bvd.size = Cbv.size;
 					m->Core.CreateBufferView(bvd, cb.view);
+					// Map once for the slot's lifetime (HOST_UPLOAD). Per-draw Map/Unmap
+					// was a driver call pair on every single draw — at a wide view that's
+					// thousands/frame. Keep it mapped and just memcpy below.
+					cb.mapped = m->Core.MapBuffer(*cb.buffer, 0, cb.size);
 				}
 			}
-			if (cb.buffer && PendingCBSize > 0)
-			{
-				void* mapped = m->Core.MapBuffer(*cb.buffer, 0, PendingCBSize);
-				if (mapped) { memcpy(mapped, PendingCB.data(), PendingCBSize); m->Core.UnmapBuffer(*cb.buffer); }
-			}
+			if (cb.mapped && PendingCBSize > 0)
+				memcpy(cb.mapped, PendingCB.data(), PendingCBSize);
 			cbView = cb.view;
 		}
 
-		// Write every binding's current descriptor into this ring set.
+		// Write every binding's current descriptor into this ring set in a SINGLE
+		// UpdateDescriptorRanges call (one range per binding) rather than one driver
+		// call per binding. Per-draw descriptor updates are the dominant NRI CPU
+		// recording cost (it scales with draw count); batching cuts the call count
+		// from ~5/draw to 1/draw. Scratch is static (single render thread) so no
+		// per-draw allocation. NOTE: descriptors must stay alive until the call, so
+		// each binding keeps its own descSingle slot (referenced by the desc array).
+		static std::vector<nri::UpdateDescriptorRangeDesc> updScratch;
+		updScratch.clear();
 		for (Binding& b : Bindings)
 		{
 			if (b.kind == Kind::CBV) { b.desc = cbView; b.ownsDesc = false; }
@@ -3115,7 +3132,12 @@ public:
 			nri::UpdateDescriptorRangeDesc upd = {};
 			upd.descriptorSet = set; upd.rangeIndex = b.rangeIndex; upd.baseDescriptor = 0;
 			upd.descriptors = b.descSingle; upd.descriptorNum = 1;
-			m->Core.UpdateDescriptorRanges(&upd, 1);
+			updScratch.push_back(upd);
+		}
+		if (!updScratch.empty())
+		{
+			++m->StatUDR;
+			m->Core.UpdateDescriptorRanges(updScratch.data(), static_cast<uint32_t>(updScratch.size()));
 		}
 
 		nri::SetDescriptorSetDesc sd = {}; sd.setIndex = 0; sd.descriptorSet = set; sd.bindPoint = nri::BindPoint::GRAPHICS;
@@ -3823,6 +3845,18 @@ void NRIBackend::EndFrame()
 {
 	if (!m->ActiveCmd)
 		return;
+	// TEMP perf instrumentation: per-120-frame hot-op counts (CORONA_NRI_STATS).
+	{
+		static const bool s_stats = std::getenv("CORONA_NRI_STATS") != nullptr;
+		if (s_stats && ++m->StatFrames >= 120)
+		{
+			AppendCpuRuntimeTrace(
+				L"[NRIStat] per120frames committedBufAllocs=" + std::to_wstring(m->StatAlloc) +
+				L", updateDescriptorRanges=" + std::to_wstring(m->StatUDR) +
+				L", mapBuffer=" + std::to_wstring(m->StatMap));
+			m->StatAlloc = 0; m->StatUDR = 0; m->StatMap = 0; m->StatFrames = 0;
+		}
+	}
 	m->EndRP();
 	m->RTColors.clear(); m->RTDepth = nullptr;
 	if (m->Streamer)
