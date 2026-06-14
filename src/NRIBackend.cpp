@@ -7,6 +7,7 @@
 #if CORONA_HAS_NRI
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <cctype>
 #include <algorithm>
@@ -485,13 +486,71 @@ struct NRIBackend::Impl
 
 	// Backend-owned GPU allocation behind a Corona Buffer wrapper (VulkanBackend
 	// keeps native handles in a side table keyed by the wrapper pointer; same here).
+	// Spec that makes two buffer allocations interchangeable for reuse pooling.
+	struct BufKey
+	{
+		uint64_t size = 0;
+		uint32_t stride = 0;
+		uint32_t usage = 0;     // nri::BufferUsageBits
+		uint32_t location = 0;  // nri::MemoryLocation
+		bool operator==(const BufKey& o) const
+		{
+			return size == o.size && stride == o.stride && usage == o.usage && location == o.location;
+		}
+	};
+	struct BufKeyHash
+	{
+		size_t operator()(const BufKey& k) const
+		{
+			size_t h = std::hash<uint64_t>()(k.size);
+			h ^= (size_t)k.stride * 0x9E3779B1u + (h << 6) + (h >> 2);
+			h ^= (size_t)k.usage * 0x85EBCA6Bu + (h << 6) + (h >> 2);
+			h ^= (size_t)k.location * 0xC2B2AE35u + (h << 6) + (h >> 2);
+			return h;
+		}
+	};
 	struct BufferAlloc
 	{
 		nri::Buffer* buffer = nullptr;
 		std::vector<nri::Memory*> memory;
 		void* mapped = nullptr; // non-null for persistently-mapped HOST_UPLOAD buffers
+		BufKey key{};           // spec for the reuse pool
 	};
 	std::unordered_map<Buffer*, BufferAlloc> Buffers;
+
+	// Buffer reuse pool. NRI buffers were never freed when their wrapper died (no
+	// NRI free callback on ~Buffer — Owner is DX12-only), so per-frame buffers
+	// (InstancePropertyBuffer, transients) LEAKED a committed GPU heap every frame
+	// -> VRAM growth -> CreateHeap DEVICE_REMOVED (the freeze) -> and the per-frame
+	// committed allocation is also the dominant CPU recording cost. The pool both
+	// fixes the leak and recycles allocations by spec so AllocateAndBindMemory is
+	// amortized. Reuse across frames is safe because EndFrame waits on the GPU.
+	std::unordered_map<BufKey, std::vector<BufferAlloc>, BufKeyHash> BufferReusePool;
+	static constexpr size_t kMaxPooledPerKey = 8;
+	bool TryReuseBuffer(const BufKey& key, BufferAlloc& out)
+	{
+		auto it = BufferReusePool.find(key);
+		if (it == BufferReusePool.end() || it->second.empty())
+			return false;
+		out = std::move(it->second.back());
+		it->second.pop_back();
+		return true;
+	}
+	void RecycleBuffer(BufferAlloc&& a)
+	{
+		auto& v = BufferReusePool[a.key];
+		if (v.size() < kMaxPooledPerKey)
+			v.push_back(std::move(a));
+		else
+			FreeBuffer(a.buffer, a.memory); // pool full -> actually free (mapped freed with memory)
+	}
+	void FlushBufferReusePool()
+	{
+		for (auto& kv : BufferReusePool)
+			for (auto& a : kv.second)
+				FreeBuffer(a.buffer, a.memory);
+		BufferReusePool.clear();
+	}
 	// Transient per-frame upload buffers (AllocateTransientUploadStructuredBuffer).
 	// Kept alive until the next BeginFrame; EndFrame waits synchronously so the
 	// previous frame's transients are safe to free then.
@@ -3279,7 +3338,12 @@ NRIBackend::NRIBackend() : m(std::make_unique<Impl>())
 
 	nri::DeviceCreationDesc desc = {};
 	desc.graphicsAPI = nri::GraphicsAPI::D3D12;
-	desc.enableNRIValidation = true;            // embedded NRI validation -> message log (fast)
+	// NRI's DeviceVal layer validates EVERY command (state tracking, per-descriptor
+	// type checks + scratch allocation on UpdateDescriptorRanges, etc.). With the RT
+	// bindless write loop pushing thousands of descriptors per dispatch it dominates
+	// CPU recording (tens of x slower than DX12/Vulkan). Default OFF for performance;
+	// opt in via CORONA_NRI_VALIDATION=1 when debugging binding/descriptor issues.
+	desc.enableNRIValidation = std::getenv("CORONA_NRI_VALIDATION") != nullptr;
 	desc.enableGraphicsAPIValidation = false;
 	desc.callbackInterface.MessageCallback = NRIMessageCallback;
 	desc.callbackInterface.AbortExecution = NRIAbortCallback;
@@ -3649,6 +3713,7 @@ NRIBackend::~NRIBackend()
 				if (mem) m->Core.FreeMemory(mem);
 		}
 		m->Buffers.clear();
+		m->FlushBufferReusePool(); // destroy recycled-but-idle buffers
 
 		for (auto& kv : m->Textures)
 		{
@@ -3859,32 +3924,55 @@ std::shared_ptr<Buffer> NRIBackend::CreateBuffer(const BufferCreateDesc& desc)
 		usage = usage | nri::BufferUsageBits::SHADER_RESOURCE_STORAGE;
 	const uint32_t stride = (desc.Shape == EBufferShape::Structured) ? desc.ElementSize : 0;
 
-	nri::Buffer* nbuf = nullptr;
-	std::vector<nri::Memory*> nmem;
-	if (!m->CreateBoundBuffer(size, stride, usage, nri::MemoryLocation::DEVICE, nbuf, nmem))
+	const Impl::BufKey key{ size, stride, static_cast<uint32_t>(usage), static_cast<uint32_t>(nri::MemoryLocation::DEVICE) };
+
+	// Reuse a pooled allocation of the same spec if available (no committed GPU
+	// heap allocation), else allocate. Either way the wrapper's deleter recycles
+	// it back to the pool on destruction so per-frame buffers don't leak/realloc.
+	Impl::BufferAlloc alloc;
+	if (!m->TryReuseBuffer(key, alloc))
 	{
-		ErrorString = "CreateBuffer: CreateBoundBuffer failed";
-		return nullptr;
+		nri::Buffer* nbuf = nullptr;
+		std::vector<nri::Memory*> nmem;
+		if (!m->CreateBoundBuffer(size, stride, usage, nri::MemoryLocation::DEVICE, nbuf, nmem))
+		{
+			ErrorString = "CreateBuffer: CreateBoundBuffer failed";
+			return nullptr;
+		}
+		alloc.buffer = nbuf;
+		alloc.memory = std::move(nmem);
+		alloc.mapped = nullptr;
 	}
+	alloc.key = key;
 
 	if (desc.InitialData && m->GraphicsQueue)
 	{
 		nri::BufferUploadDesc up = {};
-		up.buffer = nbuf;
+		up.buffer = alloc.buffer;
 		up.data = desc.InitialData;
 		up.after.access = nri::AccessBits::SHADER_RESOURCE;
 		up.after.stages = nri::StageBits::ALL;
 		m->Helper.UploadData(*m->GraphicsQueue, nullptr, 0, &up, 1);
 	}
 
-	auto wrapper = std::make_shared<Buffer>();
+	// Custom deleter: when the last reference dies, recycle the NRI allocation
+	// into the reuse pool and drop the side-table entry. Without this, NRI buffers
+	// leaked their GPU memory every frame (no NRI free hook on ~Buffer).
+	Impl* impl = m.get();
+	std::shared_ptr<Buffer> wrapper(new Buffer(), [impl](Buffer* b)
+	{
+		auto it = impl->Buffers.find(b);
+		if (it != impl->Buffers.end())
+		{
+			impl->RecycleBuffer(std::move(it->second));
+			impl->Buffers.erase(it);
+		}
+		delete b;
+	});
 	wrapper->Type = (desc.Shape == EBufferShape::Structured) ? Buffer::STRUCTURED : Buffer::BYTE_ADDRESS;
 	wrapper->NumElements = desc.NumElements;
 	wrapper->ElementSize = desc.ElementSize;
 
-	Impl::BufferAlloc alloc;
-	alloc.buffer = nbuf;
-	alloc.memory = std::move(nmem);
 	m->Buffers[wrapper.get()] = std::move(alloc);
 	return wrapper;
 }
