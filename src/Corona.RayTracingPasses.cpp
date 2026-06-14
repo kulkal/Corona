@@ -851,17 +851,16 @@ void Corona::InitRTPSO()
 			L"\", elapsedMs=" + FormatRTInitMilliseconds(elapsedMs));
 	};
 
-	if (!bBackendSupportsRT || bNriSimpleGIBringup)
+	if (!bBackendSupportsRT)
 	{
-		// NRI SimpleGI bringup uses a compute-based diffuse-GI fallback
-		// (NRISimpleGIFallbackPass / InitNRISimpleGIFallbackPass), so no
-		// ray-tracing pipeline state objects are needed — building them would
-		// fail (hit shaders reference bindless material tables not yet in the RT
-		// global root signature).
-		AppendCpuRuntimeTrace(L"[StartupTiming][RTPSO] skip all passes (no RT support or NRI SimpleGI bringup)");
+		AppendCpuRuntimeTrace(L"[StartupTiming][RTPSO] skip all passes (backend has no ray tracing support)");
 		AppendCpuRuntimeTrace(L"[StartupTiming][RTPSO] complete totalMs=0");
 		return;
 	}
+	// NRI SimpleGI bringup: RT pipelines are deferred-built at first Apply, and
+	// only the RT shadow pass is dispatched (GI uses the compute fallback,
+	// reflection/AO are gated off). So set up the shadow pass and let the rest be
+	// declared but never built.
 
 	timePass(L"RaytracingShadow", [&]() { InitRaytracingShadowPass(); });
 	if (maxSupportedHybridStage >= 2u && !bNriSimpleGIBringup)

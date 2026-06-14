@@ -2068,7 +2068,25 @@ public:
 	bool ApplyIndirect(Buffer* /*indirectArgumentBuffer*/, uint64_t /*byteOffset*/) override { return false; }
 	bool GetDispatchRaysIndirectTemplate(uint32_t /*width*/, uint32_t /*height*/, RtDispatchRaysIndirectTemplate& /*outTemplate*/) const override { return false; }
 
+	// Defer the actual pipeline build to the first Apply: the renderer declares
+	// the bindless tables (SetBindlessTextureTable / record buffers) at dispatch
+	// time, AFTER InitRS, so building the root signature here would miss them.
 	bool InitRS(const std::string& shaderFile) override
+	{
+		PendingShaderFile = shaderFile;
+		return m && m->Device && m->HasRayTracing;
+	}
+	bool EnsureBuilt()
+	{
+		if (Pipeline) return true;
+		if (bBuildAttempted) return false;
+		bBuildAttempted = true;
+		return BuildPipelineFromShader(PendingShaderFile);
+	}
+	std::string PendingShaderFile;
+	bool bBuildAttempted = false;
+
+	bool BuildPipelineFromShader(const std::string& shaderFile)
 	{
 		if (!m || !m->Device || !m->HasRayTracing)
 			return false;
@@ -2170,7 +2188,10 @@ public:
 
 	void Apply(uint32_t width, uint32_t height) override
 	{
-		if (!m || !m->ActiveCmd || !Pipeline || !Layout || !SbtBuffer)
+		if (!m || !m->ActiveCmd)
+			return;
+		EnsureBuilt(); // lazily build the pipeline now that all bindings are declared
+		if (!Pipeline || !Layout || !SbtBuffer)
 			return;
 		m->EndRP();
 
@@ -3637,11 +3658,30 @@ const char* NRIBackend::GetBackendName() const { return m->BackendName.c_str(); 
 // shaders) is a later step; SupportsRayTracing() stays false so the BLAS/TLAS
 // build (InitRaytracingData) is skipped — the compute GI fallback needs no TLAS.
 uint32_t NRIBackend::GetMaxSupportedHybridStage() const { return 4u; }
-// False during the SimpleGI bringup: the compute GI fallback needs no acceleration
-// structures, so InitRaytracingData() skips the (heavy, not-yet-verified) BLAS/TLAS
-// build. Flip to (RayTracingTier>=1 && HasRayTracing) when real RT lands.
-bool NRIBackend::SupportsRayTracing() const { return false; }
+// True now that the RT shadow path is being brought up: InitRaytracingData builds
+// BLAS/TLAS and the RT shadow pipeline (deferred-built at first Apply with the
+// bindless tables declared). GI still uses the compute fallback.
+bool NRIBackend::SupportsRayTracing() const { return m->RayTracingTier >= 1 && m->HasRayTracing; }
 bool NRIBackend::SupportsShaderExecutionReordering() const { return m->RayTracingTier >= 3; }
+
+// The NRI backend implements the typed binding schema and a bindless registry
+// (RegisterBindlessTexture/Buffer) backed by PARTIALLY_BOUND/ARRAY descriptor
+// ranges (= D3D12 DESCRIPTORS_VOLATILE). Reporting these capabilities is what
+// gates the engine's RT bindless material/geometry paths (UsesRTBindlessMaterials
+// / UsesRTBindlessGeometry) — without it EnsureRTMaterialRecordBuffer bails and
+// the RT shadow pass early-returns.
+RenderBackendCapabilities NRIBackend::GetCapabilities() const
+{
+	RenderBackendCapabilities capabilities{};
+	capabilities.SupportsTypedBindingSchema = true;
+	capabilities.SupportsBindlessTextures = true;
+	capabilities.SupportsBindlessBuffers = true;
+	capabilities.SupportsRuntimeDescriptorArrays = true;
+	capabilities.SupportsPartiallyBoundDescriptors = true;
+	capabilities.MaxBindlessTextureCount = 4096;
+	capabilities.MaxBindlessBufferCount = 4096;
+	return capabilities;
+}
 
 // === Frame lifecycle / diagnostics =======================================
 void NRIBackend::BeginFrame()

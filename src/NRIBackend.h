@@ -24,6 +24,7 @@ public:
 	ERenderBackendAPI GetAPI() const override;
 	const char* GetBackendName() const override;
 	uint32_t GetMaxSupportedHybridStage() const override;
+	RenderBackendCapabilities GetCapabilities() const override;
 	bool SupportsRayTracing() const override;
 	bool SupportsShaderExecutionReordering() const override;
 
