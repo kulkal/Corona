@@ -14420,8 +14420,14 @@ void Corona::OnRender()
 			renderBackend->GetAPI() == ERenderBackendAPI::NRI &&
 			backendMaxSupportedHybridStage >= 4u &&
 			backendMaxSupportedHybridStage < 7u;
+		// NRI bring-up now runs the spatial-hash diffuse GI (the engine default) — the
+		// screen-space TemporalDenoisingPass already accepts spatial-hash input
+		// (bUseSpatialHashDiffuseInput) and writes the denoised DiffuseGITemporal that
+		// LightingPass consumes. Screen-probe GI is still not brought up on NRI.
 		const EDiffuseGIMode effectiveDiffuseGIMode =
-			bNriSimpleGIBringup ? EDiffuseGIMode::SIMPLE_RAYTRACE : DiffuseGIMode;
+			bNriSimpleGIBringup
+				? (DiffuseGIMode == EDiffuseGIMode::SCREEN_PROBE ? EDiffuseGIMode::SPATIAL_HASH : DiffuseGIMode)
+				: DiffuseGIMode;
 		const bool bStageDump = !bHybridDirectOnly && IsHybridStageAutoDumpPhase();
 		const uint32_t maxSupportedHybridStage =
 			(bHybridDirectOnly || bPartialHybridLighting) ? 7u : backendMaxSupportedHybridStage;
@@ -14443,7 +14449,11 @@ void Corona::OnRender()
 		const bool bRunGI = !bHybridDirectOnly && backendMaxSupportedHybridStage >= 4u && hybridStage >= 4 && (bEnableDiffuseGI || bStageDump);
 		const bool bDiffuseGINeedsTemporalDenoise =
 			bRunGI &&
-			effectiveDiffuseGIMode == EDiffuseGIMode::SIMPLE_RAYTRACE;
+			(effectiveDiffuseGIMode == EDiffuseGIMode::SIMPLE_RAYTRACE ||
+			 // NRI bring-up has no DLSS-RR, so the screen-space TemporalDenoisingPass is
+			 // what denoises both the spatial-hash diffuse (via bUseSpatialHashDiffuseInput)
+			 // and the specular reflections before LightingPass.
+			 (bNriSimpleGIBringup && effectiveDiffuseGIMode == EDiffuseGIMode::SPATIAL_HASH));
 		const bool bRunTemporalDenoise = !bHybridDirectOnly && backendMaxSupportedHybridStage >= 5u && hybridStage >= 5 && (bDiffuseGINeedsTemporalDenoise || bStageDump);
 		const bool bRunLighting = bPartialHybridLighting || hybridStage >= 7;
 		const bool bRunDesktopRTAO = !bHybridDirectOnly && backendMaxSupportedHybridStage >= 2u && bRunLighting && bEnableRTAO;
@@ -16207,6 +16217,7 @@ if (ImGui::Button("Reset Accumulation"))
 			AppendCpuRuntimeTrace(L"[NRIDump] dumping buffers at frame " + std::to_wstring(FrameCounter));
 			if (DiffuseGIRaw) AppendCpuRuntimeTrace(L"[NRIDump] gi=" + std::to_wstring(DumpTexturePNG(DiffuseGIRaw.get(), L"C:\\dev\\Corona_nri\\nri_dump_gi.png", EResourceState::ShaderRead) ? 1 : 0));
 			if (DiffuseGITemporal[GIBufferWriteIndex]) AppendCpuRuntimeTrace(L"[NRIDump] gidenoised=" + std::to_wstring(DumpTexturePNG(DiffuseGITemporal[GIBufferWriteIndex].get(), L"C:\\dev\\Corona_nri\\nri_dump_gidenoised.png", EResourceState::ShaderRead) ? 1 : 0));
+			if (DiffuseGIHashCached) AppendCpuRuntimeTrace(L"[NRIDump] gihash=" + std::to_wstring(DumpTexturePNG(DiffuseGIHashCached.get(), L"C:\\dev\\Corona_nri\\nri_dump_gihash.png", EResourceState::ShaderRead) ? 1 : 0));
 			if (SpecularGIRaw) AppendCpuRuntimeTrace(L"[NRIDump] specgi=" + std::to_wstring(DumpTexturePNG(SpecularGIRaw.get(), L"C:\\dev\\Corona_nri\\nri_dump_specgi.png", EResourceState::ShaderRead) ? 1 : 0));
 			if (AmbientOcclusionBuffer) AppendCpuRuntimeTrace(L"[NRIDump] rtao=" + std::to_wstring(DumpTexturePNG(AmbientOcclusionBuffer.get(), L"C:\\dev\\Corona_nri\\nri_dump_rtao.png", EResourceState::ShaderRead) ? 1 : 0));
 			if (ShadowBuffer) AppendCpuRuntimeTrace(L"[NRIDump] shadow=" + std::to_wstring(DumpTexturePNG(ShadowBuffer.get(), L"C:\\dev\\Corona_nri\\nri_dump_shadow.png", EResourceState::ShaderRead) ? 1 : 0));

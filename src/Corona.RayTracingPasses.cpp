@@ -887,10 +887,13 @@ void Corona::InitRTPSO()
 	if (bInitGIRT)
 	{
 		timePass(L"RaytracingSimpleGI", [&]() { InitRaytracingSimpleGIPass(); });
+		// Spatial-hash GI is now brought up on NRI too (its RT cell-trace PSO uses
+		// the same bindless RT path as simple GI; the rest are compute passes).
+		// Screen-probe GI stays off during the NRI bring-up.
 		if (bNriSimpleGIBringup)
 		{
 			AppendCpuRuntimeTrace(L"[StartupTiming][RTPSO] skip pass=\"RaytracingScreenProbeGI\"");
-			AppendCpuRuntimeTrace(L"[StartupTiming][RTPSO] skip pass=\"RaytracingSpatialHashGI\"");
+			timePass(L"RaytracingSpatialHashGI", [&]() { InitRaytracingSpatialHashPass(); });
 		}
 		else
 		{
