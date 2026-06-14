@@ -831,7 +831,10 @@ void Corona::InitRTPSO()
 		renderBackend->GetAPI() == ERenderBackendAPI::NRI &&
 		maxSupportedHybridStage >= 4u &&
 		maxSupportedHybridStage < 7u;
-	const bool bInitReflectionRT = bBackendSupportsRT && maxSupportedHybridStage >= 3u && !bNriSimpleGIBringup;
+	// AO/reflections are decoupled from the NRI "simple GI" flag now that the RT
+	// pipeline (bindless tables + SBT + accel descriptors) is solid — bringup only
+	// still selects simple GI over screen-probe / spatial-hash GI below.
+	const bool bInitReflectionRT = bBackendSupportsRT && maxSupportedHybridStage >= 3u;
 	const bool bInitGIRT = bBackendSupportsRT && maxSupportedHybridStage >= 4u;
 
 	AppendCpuRuntimeTrace(
@@ -863,7 +866,7 @@ void Corona::InitRTPSO()
 	// declared but never built.
 
 	timePass(L"RaytracingShadow", [&]() { InitRaytracingShadowPass(); });
-	if (maxSupportedHybridStage >= 2u && !bNriSimpleGIBringup)
+	if (maxSupportedHybridStage >= 2u)
 	{
 		timePass(L"ShadowSpatialReuse", [&]() { InitShadowSpatialReusePass(); });
 		timePass(L"RaytracingAO", [&]() { InitRaytracingAOPass(); });

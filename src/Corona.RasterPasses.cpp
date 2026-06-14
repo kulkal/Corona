@@ -1435,9 +1435,9 @@ void Corona::LightingPass()
 		renderBackend->GetAPI() == ERenderBackendAPI::NRI &&
 		backendMaxSupportedHybridStage >= 4u &&
 		backendMaxSupportedHybridStage < 7u;
-	const bool bBackendSupportsSpecularGI = backendMaxSupportedHybridStage >= 3u && !bNriSimpleGIBringup;
+	const bool bBackendSupportsSpecularGI = backendMaxSupportedHybridStage >= 3u;
 	const bool bBackendSupportsDiffuseGI = backendMaxSupportedHybridStage >= 4u;
-	const bool bBackendSupportsRTAO = backendMaxSupportedHybridStage >= 2u && !bNriSimpleGIBringup;
+	const bool bBackendSupportsRTAO = backendMaxSupportedHybridStage >= 2u;
 	const bool bBackendSupportsRayTracedSkyLighting = backendMaxSupportedHybridStage >= 7u;
 	Param.GIBufferScale = GIBufferScale;
 	Param.LightColor = lightColor;

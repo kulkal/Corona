@@ -14439,14 +14439,14 @@ void Corona::OnRender()
 			MobileShadowMapGraphicsPipeline &&
 			ShadowBuffer;
 		const bool bRunRayTracedShadow = !bHybridDirectOnly && backendMaxSupportedHybridStage >= 1u && hybridStage >= 1;
-		const bool bRunReflection = !bHybridDirectOnly && !bNriSimpleGIBringup && backendMaxSupportedHybridStage >= 3u && hybridStage >= 3 && (bEnableSpecularGI || bStageDump);
+		const bool bRunReflection = !bHybridDirectOnly && backendMaxSupportedHybridStage >= 3u && hybridStage >= 3 && (bEnableSpecularGI || bStageDump);
 		const bool bRunGI = !bHybridDirectOnly && backendMaxSupportedHybridStage >= 4u && hybridStage >= 4 && (bEnableDiffuseGI || bStageDump);
 		const bool bDiffuseGINeedsTemporalDenoise =
 			bRunGI &&
 			effectiveDiffuseGIMode == EDiffuseGIMode::SIMPLE_RAYTRACE;
 		const bool bRunTemporalDenoise = !bHybridDirectOnly && backendMaxSupportedHybridStage >= 5u && hybridStage >= 5 && (bDiffuseGINeedsTemporalDenoise || bStageDump);
 		const bool bRunLighting = bPartialHybridLighting || hybridStage >= 7;
-		const bool bRunDesktopRTAO = !bHybridDirectOnly && !bNriSimpleGIBringup && backendMaxSupportedHybridStage >= 2u && bRunLighting && bEnableRTAO;
+		const bool bRunDesktopRTAO = !bHybridDirectOnly && backendMaxSupportedHybridStage >= 2u && bRunLighting && bEnableRTAO;
 		const bool bVulkanHybridBackend =
 			renderBackend &&
 			renderBackend->GetAPI() == ERenderBackendAPI::Vulkan;
@@ -16206,6 +16206,9 @@ if (ImGui::Button("Reset Accumulation"))
 		{
 			AppendCpuRuntimeTrace(L"[NRIDump] dumping buffers at frame " + std::to_wstring(FrameCounter));
 			if (DiffuseGIRaw) AppendCpuRuntimeTrace(L"[NRIDump] gi=" + std::to_wstring(DumpTexturePNG(DiffuseGIRaw.get(), L"C:\\dev\\Corona_nri\\nri_dump_gi.png", EResourceState::ShaderRead) ? 1 : 0));
+			if (SpecularGIRaw) AppendCpuRuntimeTrace(L"[NRIDump] specgi=" + std::to_wstring(DumpTexturePNG(SpecularGIRaw.get(), L"C:\\dev\\Corona_nri\\nri_dump_specgi.png", EResourceState::ShaderRead) ? 1 : 0));
+			if (AmbientOcclusionBuffer) AppendCpuRuntimeTrace(L"[NRIDump] rtao=" + std::to_wstring(DumpTexturePNG(AmbientOcclusionBuffer.get(), L"C:\\dev\\Corona_nri\\nri_dump_rtao.png", EResourceState::ShaderRead) ? 1 : 0));
+			if (ShadowBuffer) AppendCpuRuntimeTrace(L"[NRIDump] shadow=" + std::to_wstring(DumpTexturePNG(ShadowBuffer.get(), L"C:\\dev\\Corona_nri\\nri_dump_shadow.png", EResourceState::ShaderRead) ? 1 : 0));
 			if (AlbedoBuffer) AppendCpuRuntimeTrace(L"[NRIDump] albedo=" + std::to_wstring(DumpTexturePNG(AlbedoBuffer.get(), L"C:\\dev\\Corona_nri\\nri_dump_albedo.png", EResourceState::ShaderRead) ? 1 : 0));
 			Texture* finalColor = GetCurrentResolveSource();
 			if (finalColor) AppendCpuRuntimeTrace(L"[NRIDump] final=" + std::to_wstring(DumpTexturePNG(finalColor, L"C:\\dev\\Corona_nri\\nri_dump_final.png", EResourceState::ShaderRead) ? 1 : 0));

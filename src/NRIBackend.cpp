@@ -3694,12 +3694,11 @@ NRIBackend::~NRIBackend()
 // === Capabilities / identity =============================================
 ERenderBackendAPI NRIBackend::GetAPI() const { return ERenderBackendAPI::NRI; }
 const char* NRIBackend::GetBackendName() const { return m->BackendName.c_str(); }
-// Stage 4 enables the NRI "SimpleGI bringup": GBuffer + direct lighting + a
-// COMPUTE-based diffuse-GI fallback (NRISimpleGIFallbackPass), with RT shadows/
-// reflection/AO and all RT pipeline state objects skipped. Real RT (bindless hit
-// shaders) is a later step; SupportsRayTracing() stays false so the BLAS/TLAS
-// build (InitRaytracingData) is skipped — the compute GI fallback needs no TLAS.
-uint32_t NRIBackend::GetMaxSupportedHybridStage() const { return 4u; }
+// Stage 6: GBuffer + direct lighting + RT shadows + RT diffuse GI + RT AO + RT
+// reflections (all real, bindless). Stays < 7 so the renderer keeps the "simple"
+// diffuse-GI path (RaytracedGI.hlsl) instead of the screen-probe / spatial-hash
+// GI and the ray-traced sky lighting, which are not brought up on NRI yet.
+uint32_t NRIBackend::GetMaxSupportedHybridStage() const { return 6u; }
 // True now that the RT shadow path is being brought up: InitRaytracingData builds
 // BLAS/TLAS and the RT shadow pipeline (deferred-built at first Apply with the
 // bindless tables declared). GI still uses the compute fallback.
