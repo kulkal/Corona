@@ -37,6 +37,8 @@ namespace CoronaSmpl
 		std::shared_ptr<Buffer>       InputVertices;
 		std::shared_ptr<Buffer>       BoneMatrices;
 		std::shared_ptr<Buffer>       PrevBoneMatrices;
+		std::shared_ptr<Buffer>       BoneMatricesFallback;
+		std::shared_ptr<Buffer>       PrevBoneMatricesFallback;
 		std::shared_ptr<VertexBuffer> OutputVb;
 		std::shared_ptr<VertexBuffer> BindVb;
 		std::shared_ptr<IndexBuffer>  Ib;

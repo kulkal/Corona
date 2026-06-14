@@ -1,4 +1,5 @@
 #include "Common.hlsl"
+#include "BindlessResources.hlsli"
 
 RWTexture2D<float4> SkyLightingResult : register(u0);
 
@@ -6,10 +7,6 @@ RaytracingAccelerationStructure gRtScene : register(t0);
 Texture2D DepthTex : register(t1);
 Texture2D WorldNormalTex : register(t2);
 Texture3D RayNoiseBlueNoiseSource : register(t3);
-ByteAddressBuffer vertices : register(t4);
-ByteAddressBuffer indices : register(t5);
-Texture2D AlbedoTex : register(t6);
-ByteAddressBuffer InstanceProperty : register(t7);
 Texture2D GeoNormalTex : register(t8);
 
 cbuffer ViewParameter : register(b0)
@@ -217,11 +214,14 @@ void anyhit(inout SkyPayload payload, in BuiltInTriangleIntersectionAttributes a
     uint triangleIndex = PrimitiveIndex();
     uint instanceID = InstanceID();
 
-    if (!IsAlphaTestedInstance(instanceID, InstanceProperty))
+    if (!IsAlphaTestedInstance(instanceID, CORONA_INSTANCE_PROPERTY))
         return;
 
-    Vertex vertex = GetVertexAttributes(instanceID, vertices, indices, InstanceProperty, triangleIndex, barycentrics);
-    float opacity = AlbedoTex.SampleLevel(sampleWrap, vertex.uv, 5).w;
+    Vertex vertex = CORONA_GET_VERTEX_ATTRIBUTES(instanceID, triangleIndex, barycentrics);
+    float opacity = 1.0f;
+    RTMaterialRecord material = RtMaterials[instanceID];
+    opacity = MaterialTextures[NonUniformResourceIndex(material.AlbedoTextureIndex)].SampleLevel(sampleWrap, vertex.uv, 5).w;
+
     if (opacity > 0.10f)
         return;
 

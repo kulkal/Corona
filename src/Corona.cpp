@@ -61,6 +61,7 @@
 #include "sl_dlss.h"
 #include "sl_dlss_d.h"
 #include "sl_helpers.h"
+#include "sl_helpers_vk.h"
 #endif
 
 
@@ -846,6 +847,34 @@ namespace
 		consts.motionVectorsDilated = sl::Boolean::eFalse;
 		consts.motionVectorsJittered = sl::Boolean::eFalse;
 		return consts;
+	}
+
+	sl::Resource MakeSLResource(const StreamlineTextureResourceDesc& desc)
+	{
+		sl::Resource resource(sl::ResourceType::eTex2d, desc.Native, desc.Memory, desc.View, desc.State);
+		resource.width = desc.Width;
+		resource.height = desc.Height;
+		resource.nativeFormat = desc.NativeFormat;
+		resource.mipLevels = desc.MipLevels;
+		resource.arrayLayers = desc.ArrayLayers;
+		resource.flags = desc.Flags;
+		resource.usage = desc.Usage;
+		return resource;
+	}
+
+	std::optional<sl::Resource> MakeStreamlineTextureResource(
+		IRenderBackend* backend,
+		Texture* texture,
+		EResourceState state)
+	{
+		if (!backend || !texture)
+			return std::nullopt;
+
+		StreamlineTextureResourceDesc desc{};
+		if (!backend->GetStreamlineTextureResource(texture, state, desc) || !desc.Native)
+			return std::nullopt;
+
+		return MakeSLResource(desc);
 	}
 
 }
@@ -2335,16 +2364,23 @@ void Corona::UpdateGpuTimingReadback()
 	const UINT frameIndex = renderBackend->GetCurrentFrameIndex();
 	const auto& activeMask = GpuPassActiveMaskPerFrame[frameIndex];
 	const UINT queryBase = frameIndex * GpuPassCount * GpuQueriesPerPass;
+	GpuPassLastActiveMask = activeMask;
 
 	for (UINT passIndex = 0; passIndex < GpuPassCount; ++passIndex)
 	{
 		if (!activeMask[passIndex])
+		{
+			GpuPassLastTimeMs[passIndex] = 0.0f;
 			continue;
+		}
 
 		const UINT64 startTimestamp = renderBackend->ReadGpuTimestampValue(queryBase + passIndex * GpuQueriesPerPass + 0);
 		const UINT64 endTimestamp = renderBackend->ReadGpuTimestampValue(queryBase + passIndex * GpuQueriesPerPass + 1);
 		if (endTimestamp <= startTimestamp)
+		{
+			GpuPassLastTimeMs[passIndex] = 0.0f;
 			continue;
+		}
 
 		const float durationMs = static_cast<float>(double(endTimestamp - startTimestamp) * 1000.0 / double(GpuTimestampFrequency));
 		GpuPassLastTimeMs[passIndex] = durationMs;
@@ -2566,13 +2602,17 @@ void Corona::InitStreamline()
 	pref.engine = sl::EngineType::eCustom;
 	pref.engineVersion = "1.0.0";
 	pref.projectId = "a0f57b54-1daf-4934-90ae-c4035c19df04";
-	pref.renderAPI = sl::RenderAPI::eD3D12;
+	const bool bStreamlineVulkan =
+		bCommandLineRenderBackendOverrideSet &&
+		CommandLineRenderBackendAPI == ERenderBackendAPI::Vulkan;
+	pref.renderAPI = bStreamlineVulkan ? sl::RenderAPI::eVulkan : sl::RenderAPI::eD3D12;
 	pref.flags = sl::PreferenceFlags::eDisableCLStateTracking | sl::PreferenceFlags::eUseFrameBasedResourceTagging;
 	const sl::Result initResult = slInit(pref);
 	bStreamlineInitialized = initResult == sl::Result::eOk;
 	AppendCpuRuntimeTrace(
 		L"[Streamline] init result=" + PlatformUtf8ToWide(sl::getResultAsStr(initResult)) +
 		L", initialized=" + std::to_wstring(bStreamlineInitialized ? 1 : 0) +
+		L", renderAPI=" + std::wstring(bStreamlineVulkan ? L"vulkan" : L"d3d12") +
 		L", pluginPath=\"" + streamlinePluginDirectoryString + L"\"" +
 		L", console=" + std::to_wstring(pref.showConsole ? 1 : 0));
 }
@@ -2684,8 +2724,9 @@ bool Corona::EnsureStreamlineConstants()
 	sl::ViewportHandle vp(0);
 	const glm::vec2 streamlineJitter =
 		RenderingMode == ERenderingMode::PATHTRACING ? glm::vec2(0.0f) : CurrentJitter;
-	const bool bStreamlineCameraMotionIncluded =
-		!(RenderingMode == ERenderingMode::PATHTRACING && IsPathTracingDLSSRREnabled());
+	// PT primary GBuffer writes camera motion directly, matching the raster
+	// velocity contract. Keep Streamline out of its depth-derived mvec path.
+	const bool bStreamlineCameraMotionIncluded = true;
 	sl::Constants consts = BuildStreamlineConstants(
 		UnjitteredProjMat,
 		PrevViewMat,
@@ -2776,22 +2817,28 @@ bool Corona::DLSSPass()
 	sl::ViewportHandle vp(0);
 	sl::Extent renderExtent{ 0, 0, GetRenderWidth(), GetRenderHeight() };
 	sl::Extent outputExtent{ 0, 0, m_width, m_height };
-	sl::Resource colorRes(sl::ResourceType::eTex2d, inputColor->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-	sl::Resource depthRes(sl::ResourceType::eTex2d, UnjitteredDepthBuffers[ColorBufferWriteIndex]->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-	sl::Resource motionRes(sl::ResourceType::eTex2d, VelocityBuffer->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-	sl::Resource outputRes(sl::ResourceType::eTex2d, outputTarget->resource.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+	sl::CommandBuffer* streamlineCommandBuffer = reinterpret_cast<sl::CommandBuffer*>(renderBackend->GetStreamlineCommandBuffer());
+	auto colorRes = MakeStreamlineTextureResource(renderBackend.get(), inputColor, EResourceState::ShaderRead);
+	auto depthRes = MakeStreamlineTextureResource(renderBackend.get(), UnjitteredDepthBuffers[ColorBufferWriteIndex].get(), EResourceState::ShaderRead);
+	auto motionRes = MakeStreamlineTextureResource(renderBackend.get(), VelocityBuffer.get(), EResourceState::ShaderRead);
+	auto outputRes = MakeStreamlineTextureResource(renderBackend.get(), outputTarget, EResourceState::UnorderedAccess);
+	if (!streamlineCommandBuffer || !colorRes || !depthRes || !motionRes || !outputRes)
+	{
+		renderBackend->TransitionTexture(outputTarget, EResourceState::UnorderedAccess, EResourceState::ShaderRead);
+		return false;
+	}
 
-	sl::ResourceTag colorTag(&colorRes, sl::kBufferTypeScalingInputColor, sl::ResourceLifecycle::eOnlyValidNow, &renderExtent);
-	sl::ResourceTag depthTag(&depthRes, sl::kBufferTypeDepth, sl::ResourceLifecycle::eOnlyValidNow, &renderExtent);
-	sl::ResourceTag motionTag(&motionRes, sl::kBufferTypeMotionVectors, sl::ResourceLifecycle::eOnlyValidNow, &renderExtent);
-	sl::ResourceTag outputTag(&outputRes, sl::kBufferTypeScalingOutputColor, sl::ResourceLifecycle::eOnlyValidNow, &outputExtent);
+	sl::ResourceTag colorTag(&*colorRes, sl::kBufferTypeScalingInputColor, sl::ResourceLifecycle::eOnlyValidNow, &renderExtent);
+	sl::ResourceTag depthTag(&*depthRes, sl::kBufferTypeDepth, sl::ResourceLifecycle::eOnlyValidNow, &renderExtent);
+	sl::ResourceTag motionTag(&*motionRes, sl::kBufferTypeMotionVectors, sl::ResourceLifecycle::eOnlyValidNow, &renderExtent);
+	sl::ResourceTag outputTag(&*outputRes, sl::kBufferTypeScalingOutputColor, sl::ResourceLifecycle::eOnlyValidNow, &outputExtent);
 	sl::ResourceTag tags[] = {
 		colorTag,
 		depthTag,
 		motionTag,
 		outputTag,
 	};
-	const sl::Result setTagResult = slSetTagForFrame(*StreamlineFrameToken, vp, tags, _countof(tags), dx12_rhi->GetGraphicsCommandList());
+	const sl::Result setTagResult = slSetTagForFrame(*StreamlineFrameToken, vp, tags, _countof(tags), streamlineCommandBuffer);
 	if (setTagResult != sl::Result::eOk)
 	{
 		renderBackend->TransitionTexture(outputTarget, EResourceState::UnorderedAccess, EResourceState::ShaderRead);
@@ -2803,7 +2850,7 @@ bool Corona::DLSSPass()
 		static_cast<const sl::BaseStructure*>(&vp),
 		static_cast<const sl::BaseStructure*>(&depthTag),
 	};
-	const sl::Result evalResult = slEvaluateFeature(sl::kFeatureDLSS, *StreamlineFrameToken, inputs, _countof(inputs), dx12_rhi->GetGraphicsCommandList());
+	const sl::Result evalResult = slEvaluateFeature(sl::kFeatureDLSS, *StreamlineFrameToken, inputs, _countof(inputs), streamlineCommandBuffer);
 	bDLSSResetNeeded = false;
 
 	renderBackend->TransitionTexture(outputTarget, EResourceState::UnorderedAccess, EResourceState::ShaderRead);
@@ -2868,27 +2915,51 @@ bool Corona::DLSSRRPass()
 	sl::ViewportHandle vp(0);
 	sl::Extent renderExtent{ 0, 0, GetRenderWidth(), GetRenderHeight() };
 	sl::Extent outputExtent{ 0, 0, GetRenderWidth(), GetRenderHeight() };
-	sl::Resource colorRes(sl::ResourceType::eTex2d, inputColor->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-	sl::Resource depthRes(sl::ResourceType::eTex2d, UnjitteredDepthBuffers[ColorBufferWriteIndex]->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-	sl::Resource motionRes(sl::ResourceType::eTex2d, VelocityBuffer->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-	sl::Resource normalRes(sl::ResourceType::eTex2d, NormalBuffers[ColorBufferWriteIndex]->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-	sl::Resource roughnessRes(sl::ResourceType::eTex2d, RoughnessMetalicBuffer->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-	sl::Resource albedoRes(sl::ResourceType::eTex2d, AlbedoBuffer->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-	sl::Resource specularAlbedoRes(sl::ResourceType::eTex2d, SpecularAlbedoBuffer->resource.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-	sl::Resource specularHitDistanceRes(sl::ResourceType::eTex2d, PathTracingSpecularHitDistanceBuffer ? PathTracingSpecularHitDistanceBuffer->resource.Get() : nullptr, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-	sl::Resource specularMotionVectorRes(sl::ResourceType::eTex2d, PathTracingSpecularMotionVectorBuffer ? PathTracingSpecularMotionVectorBuffer->resource.Get() : nullptr, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-	sl::Resource outputRes(sl::ResourceType::eTex2d, outputTarget->resource.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+	sl::CommandBuffer* streamlineCommandBuffer = reinterpret_cast<sl::CommandBuffer*>(renderBackend->GetStreamlineCommandBuffer());
+	auto colorRes = MakeStreamlineTextureResource(renderBackend.get(), inputColor, EResourceState::ShaderRead);
+	auto depthRes = MakeStreamlineTextureResource(renderBackend.get(), UnjitteredDepthBuffers[ColorBufferWriteIndex].get(), EResourceState::ShaderRead);
+	auto motionRes = MakeStreamlineTextureResource(renderBackend.get(), VelocityBuffer.get(), EResourceState::ShaderRead);
+	auto normalRes = MakeStreamlineTextureResource(renderBackend.get(), NormalBuffers[ColorBufferWriteIndex].get(), EResourceState::ShaderRead);
+	auto roughnessRes = MakeStreamlineTextureResource(renderBackend.get(), RoughnessMetalicBuffer.get(), EResourceState::ShaderRead);
+	auto albedoRes = MakeStreamlineTextureResource(renderBackend.get(), AlbedoBuffer.get(), EResourceState::ShaderRead);
+	auto specularAlbedoRes = MakeStreamlineTextureResource(renderBackend.get(), SpecularAlbedoBuffer.get(), EResourceState::ShaderRead);
+	auto outputRes = MakeStreamlineTextureResource(renderBackend.get(), outputTarget, EResourceState::UnorderedAccess);
+	std::optional<sl::Resource> specularHitDistanceRes;
+	std::optional<sl::Resource> specularMotionVectorRes;
+	if (bUseRRSpecularHitDistance)
+		specularHitDistanceRes = MakeStreamlineTextureResource(renderBackend.get(), PathTracingSpecularHitDistanceBuffer.get(), EResourceState::ShaderRead);
+	if (bUseRRSpecularMotionVectors)
+		specularMotionVectorRes = MakeStreamlineTextureResource(renderBackend.get(), PathTracingSpecularMotionVectorBuffer.get(), EResourceState::ShaderRead);
+	if (!streamlineCommandBuffer ||
+		!colorRes ||
+		!depthRes ||
+		!motionRes ||
+		!normalRes ||
+		!roughnessRes ||
+		!albedoRes ||
+		!specularAlbedoRes ||
+		!outputRes ||
+		(bUseRRSpecularHitDistance && !specularHitDistanceRes) ||
+		(bUseRRSpecularMotionVectors && !specularMotionVectorRes))
+	{
+		renderBackend->TransitionTexture(outputTarget, EResourceState::UnorderedAccess, EResourceState::ShaderRead);
+		return false;
+	}
 
-	sl::ResourceTag colorTag(&colorRes, sl::kBufferTypeScalingInputColor, sl::ResourceLifecycle::eOnlyValidNow, &renderExtent);
-	sl::ResourceTag depthTag(&depthRes, sl::kBufferTypeDepth, sl::ResourceLifecycle::eOnlyValidNow, &renderExtent);
-	sl::ResourceTag motionTag(&motionRes, sl::kBufferTypeMotionVectors, sl::ResourceLifecycle::eOnlyValidNow, &renderExtent);
-	sl::ResourceTag normalTag(&normalRes, sl::kBufferTypeNormals, sl::ResourceLifecycle::eOnlyValidNow, &renderExtent);
-	sl::ResourceTag roughnessTag(&roughnessRes, sl::kBufferTypeRoughness, sl::ResourceLifecycle::eOnlyValidNow, &renderExtent);
-	sl::ResourceTag albedoTag(&albedoRes, sl::kBufferTypeAlbedo, sl::ResourceLifecycle::eOnlyValidNow, &renderExtent);
-	sl::ResourceTag specularAlbedoTag(&specularAlbedoRes, sl::kBufferTypeSpecularAlbedo, sl::ResourceLifecycle::eOnlyValidNow, &renderExtent);
-	sl::ResourceTag specularHitDistanceTag(&specularHitDistanceRes, sl::kBufferTypeSpecularHitDistance, sl::ResourceLifecycle::eOnlyValidNow, &renderExtent);
-	sl::ResourceTag specularMotionVectorTag(&specularMotionVectorRes, sl::kBufferTypeSpecularMotionVectors, sl::ResourceLifecycle::eOnlyValidNow, &renderExtent);
-	sl::ResourceTag outputTag(&outputRes, sl::kBufferTypeScalingOutputColor, sl::ResourceLifecycle::eOnlyValidNow, &outputExtent);
+	sl::ResourceTag colorTag(&*colorRes, sl::kBufferTypeScalingInputColor, sl::ResourceLifecycle::eOnlyValidNow, &renderExtent);
+	sl::ResourceTag depthTag(&*depthRes, sl::kBufferTypeDepth, sl::ResourceLifecycle::eOnlyValidNow, &renderExtent);
+	sl::ResourceTag motionTag(&*motionRes, sl::kBufferTypeMotionVectors, sl::ResourceLifecycle::eOnlyValidNow, &renderExtent);
+	sl::ResourceTag normalTag(&*normalRes, sl::kBufferTypeNormals, sl::ResourceLifecycle::eOnlyValidNow, &renderExtent);
+	sl::ResourceTag roughnessTag(&*roughnessRes, sl::kBufferTypeRoughness, sl::ResourceLifecycle::eOnlyValidNow, &renderExtent);
+	sl::ResourceTag albedoTag(&*albedoRes, sl::kBufferTypeAlbedo, sl::ResourceLifecycle::eOnlyValidNow, &renderExtent);
+	sl::ResourceTag specularAlbedoTag(&*specularAlbedoRes, sl::kBufferTypeSpecularAlbedo, sl::ResourceLifecycle::eOnlyValidNow, &renderExtent);
+	std::optional<sl::ResourceTag> specularHitDistanceTag;
+	std::optional<sl::ResourceTag> specularMotionVectorTag;
+	if (bUseRRSpecularHitDistance)
+		specularHitDistanceTag.emplace(&*specularHitDistanceRes, sl::kBufferTypeSpecularHitDistance, sl::ResourceLifecycle::eOnlyValidNow, &renderExtent);
+	if (bUseRRSpecularMotionVectors)
+		specularMotionVectorTag.emplace(&*specularMotionVectorRes, sl::kBufferTypeSpecularMotionVectors, sl::ResourceLifecycle::eOnlyValidNow, &renderExtent);
+	sl::ResourceTag outputTag(&*outputRes, sl::kBufferTypeScalingOutputColor, sl::ResourceLifecycle::eOnlyValidNow, &outputExtent);
 	std::vector<sl::ResourceTag> tags = {
 		colorTag,
 		depthTag,
@@ -2900,14 +2971,14 @@ bool Corona::DLSSRRPass()
 	};
 	if (bUseRRSpecularMotionVectors)
 	{
-		tags.push_back(specularMotionVectorTag);
+		tags.push_back(*specularMotionVectorTag);
 	}
 	if (bUseRRSpecularHitDistance)
 	{
-		tags.push_back(specularHitDistanceTag);
+		tags.push_back(*specularHitDistanceTag);
 	}
 	tags.push_back(outputTag);
-	const sl::Result setTagResult = slSetTagForFrame(*StreamlineFrameToken, vp, tags.data(), static_cast<uint32_t>(tags.size()), dx12_rhi->GetGraphicsCommandList());
+	const sl::Result setTagResult = slSetTagForFrame(*StreamlineFrameToken, vp, tags.data(), static_cast<uint32_t>(tags.size()), streamlineCommandBuffer);
 	if (setTagResult != sl::Result::eOk)
 	{
 		renderBackend->TransitionTexture(outputTarget, EResourceState::UnorderedAccess, EResourceState::ShaderRead);
@@ -2925,10 +2996,10 @@ bool Corona::DLSSRRPass()
 		static_cast<const sl::BaseStructure*>(&motionTag),
 	};
 	if (bUseRRSpecularMotionVectors)
-		inputs.push_back(static_cast<const sl::BaseStructure*>(&specularMotionVectorTag));
+		inputs.push_back(static_cast<const sl::BaseStructure*>(&*specularMotionVectorTag));
 	if (bUseRRSpecularHitDistance)
-		inputs.push_back(static_cast<const sl::BaseStructure*>(&specularHitDistanceTag));
-	const sl::Result evalResult = slEvaluateFeature(sl::kFeatureDLSS_RR, *StreamlineFrameToken, inputs.data(), static_cast<uint32_t>(inputs.size()), dx12_rhi->GetGraphicsCommandList());
+		inputs.push_back(static_cast<const sl::BaseStructure*>(&*specularHitDistanceTag));
+	const sl::Result evalResult = slEvaluateFeature(sl::kFeatureDLSS_RR, *StreamlineFrameToken, inputs.data(), static_cast<uint32_t>(inputs.size()), streamlineCommandBuffer);
 	bDLSSResetNeeded = false;
 
 	renderBackend->TransitionTexture(outputTarget, EResourceState::UnorderedAccess, EResourceState::ShaderRead);
@@ -3062,12 +3133,8 @@ Corona::EAntiAliasingMode Corona::NormalizeAntiAliasingMode(ERenderingMode rende
 	return EAntiAliasingMode::TAA;
 #endif
 
-	const bool bD3D12Backend =
-		renderBackend &&
-		renderBackend->GetAPI() == ERenderBackendAPI::D3D12;
-
 #if WITH_STREAMLINE
-	if (!bD3D12Backend && IsDLSSMode(requestedMode))
+	if (!bStreamlineInitialized && IsDLSSMode(requestedMode))
 		return renderingMode == ERenderingMode::PATHTRACING ? EAntiAliasingMode::OFF : EAntiAliasingMode::TAA;
 #else
 	if (IsDLSSMode(requestedMode))
@@ -3273,6 +3340,7 @@ void Corona::ResetAllAccumulationState(bool forceUpscaleReload)
 	PrevPathTracingViewMat = glm::mat4x4(0.0f);
 	PrevPathTracingLightDir = glm::vec3(0.0f);
 	PrevPathTracingLightIntensity = 0.0f;
+	PrevPathTracingPointLightStateHash = 0xFFFFFFFFu;
 	PrevSkyColorTop = glm::vec3(0.0f);
 	PrevSkyColorBottom = glm::vec3(0.0f);
 	PrevSkyIntensity = 0.0f;
@@ -3879,10 +3947,13 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 		bEnableStartupLuauScript = true;
 		StartupLuauMode = L"editor";
 		bShowImgui = false;
+		bEnablePathTracingCompaction = false;
+		bPathTracingCompactionFallbackLogged = false;
+		bPathTracingCompactionDispatchLogged = false;
 		const std::wstring lastEditorMap = ReadPersistedLastEditorMapName();
 		if (!lastEditorMap.empty() && std::filesystem::exists(ResolveMapPath(lastEditorMap)))
 			CommandLineLoadMapFile = lastEditorMap;
-		AppendStartupTrace(L"[ParseCommandLineArgs] no args: editor mode, lastMap=\"" + lastEditorMap + L"\"");
+		AppendStartupTrace(L"[ParseCommandLineArgs] no args: editor mode, path tracing mega-kernel, lastMap=\"" + lastEditorMap + L"\"");
 	}
 
 	for (int i = 1; i < argc; ++i)
@@ -4030,6 +4101,16 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 			bEnablePathTracingDLSSRR = false;
 			continue;
 		}
+		if (arg == L"--pt-compaction" || arg == L"--pathtracing-compaction")
+		{
+			bEnablePathTracingCompaction = true;
+			continue;
+		}
+		if (arg == L"--no-pt-compaction" || arg == L"--disable-pt-compaction" || arg == L"--no-pathtracing-compaction")
+		{
+			bEnablePathTracingCompaction = false;
+			continue;
+		}
 		std::wstring ptSppValue = ParseValueArg(arg, L"--pt-spp", L"-pt-spp", i);
 		if (ptSppValue.empty())
 			ptSppValue = ParseValueArg(arg, L"--spp", L"-spp", i);
@@ -4039,6 +4120,21 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 			{
 				const unsigned long value = std::stoul(ptSppValue);
 				PathTracingViewParam.SamplesPerPixel = static_cast<UINT32>(std::clamp<unsigned long>(value, 1ul, 16ul));
+			}
+			catch (...)
+			{
+			}
+			continue;
+		}
+		std::wstring ptPointLightSamplesValue = ParseValueArg(arg, L"--pt-point-light-samples", L"-pt-point-light-samples", i);
+		if (ptPointLightSamplesValue.empty())
+			ptPointLightSamplesValue = ParseValueArg(arg, L"--pt-local-light-samples", L"-pt-local-light-samples", i);
+		if (!ptPointLightSamplesValue.empty())
+		{
+			try
+			{
+				const unsigned long value = std::stoul(ptPointLightSamplesValue);
+				PathTracingViewParam.PointLightSampleCount = static_cast<UINT32>(std::clamp<unsigned long>(value, 0ul, MaxPathTracingPointLights));
 			}
 			catch (...)
 			{
@@ -4315,6 +4411,11 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 			bCommandLineCameraPathDump = true;
 			bCommandLineAutoDumpOverrideSet = true;
 			bCommandLineAutoDumpEnabled = false;
+			continue;
+		}
+		if (arg == L"--camera-path-diagnostics" || arg == L"--camera-diagnostics")
+		{
+			bCommandLineCameraPathDiagnostics = true;
 			continue;
 		}
 		if (arg == L"--camera-path" || arg == L"-camera-path" ||
@@ -4670,7 +4771,9 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 		L", loadMap=\"" + CommandLineLoadMapFile + L"\"" +
 		L", screenshotFrame=" + std::to_wstring(CommandLineScreenshotFrame) +
 		L", ptDLSSRR=" + std::to_wstring(bEnablePathTracingDLSSRR ? 1 : 0) +
+		L", ptCompaction=" + std::to_wstring(bEnablePathTracingCompaction ? 1 : 0) +
 		L", ptSPP=" + std::to_wstring(PathTracingViewParam.SamplesPerPixel) +
+		L", ptPointLightSamples=" + std::to_wstring(PathTracingViewParam.PointLightSampleCount) +
 		L", ptRRSpecularMV=" + std::to_wstring(bEnablePathTracingRRSpecularMotionVectors ? 1 : 0) +
 		L", ptRRSpecularMVScale=" + std::to_wstring(PathTracingRRSpecularMotionVectorScale) +
 		L", ptRRSpecularHitDistance=" + std::to_wstring(bEnablePathTracingRRSpecularHitDistance ? 1 : 0) +
@@ -4844,11 +4947,6 @@ void Corona::PromptStartupModeSelection()
 	if (StartupSelectedAAMode == EAntiAliasingMode::DLSS_SR || StartupSelectedAAMode == EAntiAliasingMode::DLSS_RR)
 		StartupSelectedAAMode = EAntiAliasingMode::TAA;
 #endif
-
-	if (StartupRenderBackendAPI == ERenderBackendAPI::Vulkan && IsDLSSMode(StartupSelectedAAMode))
-	{
-		StartupSelectedAAMode = EAntiAliasingMode::TAA;
-	}
 
 #if CORONA_PLATFORM_MOBILE
 	StartupRenderBackendAPI = ERenderBackendAPI::Vulkan;
@@ -7649,9 +7747,11 @@ Corona::RenderFrameSourceState Corona::CaptureRenderFrameSourceState() const
 	state.SpatialHashLevelEnable = SpatialHashGICB.SpatialHashLevelParams.x;
 	state.SpatialHashLevelBaseDistance = SpatialHashGICB.SpatialHashLevelParams.y;
 	state.PathTracingDirectLightSampleCount = PathTracingViewParam.DirectLightSampleCount;
+	state.PathTracingPointLightSampleCount = PathTracingViewParam.PointLightSampleCount;
 	state.PathTracingMaxBounces = PathTracingViewParam.MaxBounces;
 	state.PathTracingSamplesPerPixel = PathTracingViewParam.SamplesPerPixel;
 	state.PathTracingDebugMode = PathTracingViewParam.DebugMode;
+	state.bEnablePathTracingCompaction = bEnablePathTracingCompaction;
 	return state;
 }
 
@@ -7760,9 +7860,11 @@ void Corona::ApplyRenderFrameSourceState(const RenderFrameSourceState& state)
 	SpatialHashGICB.SpatialHashLevelParams.x = state.SpatialHashLevelEnable;
 	SpatialHashGICB.SpatialHashLevelParams.y = state.SpatialHashLevelBaseDistance;
 	PathTracingViewParam.DirectLightSampleCount = state.PathTracingDirectLightSampleCount;
+	PathTracingViewParam.PointLightSampleCount = state.PathTracingPointLightSampleCount;
 	PathTracingViewParam.MaxBounces = state.PathTracingMaxBounces;
 	PathTracingViewParam.SamplesPerPixel = state.PathTracingSamplesPerPixel;
 	PathTracingViewParam.DebugMode = state.PathTracingDebugMode;
+	bEnablePathTracingCompaction = state.bEnablePathTracingCompaction;
 	if (RenderingMode != previousRenderingMode)
 		MarkRayTracingSceneDirty();
 }
@@ -7835,6 +7937,7 @@ void Corona::SyncCurrentLightingSettingsToFrameSourceState()
 		state.SpatialHashLevelEnable = SpatialHashGICB.SpatialHashLevelParams.x;
 		state.SpatialHashLevelBaseDistance = SpatialHashGICB.SpatialHashLevelParams.y;
 		state.PathTracingDirectLightSampleCount = PathTracingViewParam.DirectLightSampleCount;
+		state.PathTracingPointLightSampleCount = PathTracingViewParam.PointLightSampleCount;
 	};
 
 	if (RenderWorld.bHasFrameSourceState)
@@ -7926,6 +8029,28 @@ void Corona::ApplyFrameSourceRenderSync(const RenderFrameDelta& delta)
 		 floatChanged(oldState.SpatialHashTemporalAlpha, newState.SpatialHashTemporalAlpha) ||
 		 floatChanged(oldState.SpatialHashSmoothingStrength, newState.SpatialHashSmoothingStrength) ||
 		 floatChanged(oldState.SpatialHashInterpolationStrength, newState.SpatialHashInterpolationStrength));
+	const bool bPathTracingSettingsChanged =
+		bHadFrameSourceState &&
+		(oldState.PathTracingDirectLightSampleCount != newState.PathTracingDirectLightSampleCount ||
+		 oldState.PathTracingPointLightSampleCount != newState.PathTracingPointLightSampleCount ||
+		 oldState.PathTracingMaxBounces != newState.PathTracingMaxBounces ||
+		 oldState.PathTracingSamplesPerPixel != newState.PathTracingSamplesPerPixel ||
+		 oldState.PathTracingDebugMode != newState.PathTracingDebugMode ||
+		 oldState.bEnablePathTracingCompaction != newState.bEnablePathTracingCompaction);
+	const bool bPathTracingCompactionChanged =
+		bHadFrameSourceState &&
+		oldState.bEnablePathTracingCompaction != newState.bEnablePathTracingCompaction;
+
+	auto resetPathTracingAccumulation = [&]()
+	{
+		FrameCounter = 0;
+		PathTracingAccumulatedFrames = 0;
+		PrevPathTracingViewMat = glm::mat4x4(0.0f);
+		PrevPathTracingLightDir = glm::vec3(0.0f);
+		PrevPathTracingLightIntensity = 0.0f;
+		PrevPathTracingDirectionalLightCastShadow = false;
+		PrevPathTracingPointLightStateHash = 0xFFFFFFFFu;
+	};
 
 	if (bModeOrAAModeChanged)
 	{
@@ -7960,6 +8085,20 @@ void Corona::ApplyFrameSourceRenderSync(const RenderFrameDelta& delta)
 		// carlo samples when needed.
 #if WITH_STREAMLINE
 		bDLSSResetNeeded = true;
+#endif
+	}
+
+	if (bPathTracingSettingsChanged)
+	{
+		resetPathTracingAccumulation();
+		if (bPathTracingCompactionChanged)
+		{
+			bPathTracingCompactionFallbackLogged = false;
+			bPathTracingCompactionDispatchLogged = false;
+		}
+#if WITH_STREAMLINE
+		if (RenderingMode == ERenderingMode::PATHTRACING)
+			bDLSSResetNeeded = true;
 #endif
 	}
 }
@@ -8232,7 +8371,6 @@ void Corona::BuildPointLightRenderCandidates(std::vector<const PointLightState*>
 	{
 		const PointLightState* Light = nullptr;
 		float Score = 0.0f;
-		float DistanceSq = 0.0f;
 	};
 
 	std::vector<Candidate> candidates;
@@ -8242,24 +8380,22 @@ void Corona::BuildPointLightRenderCandidates(std::vector<const PointLightState*>
 		if (!pointLight.bEnabled || pointLight.Intensity <= 0.0f)
 			continue;
 
+		// Keep path-tracing light selection stable under camera motion so RR
+		// history is not reset by camera-dependent point-light ordering.
 		const float radius = std::max(pointLight.Radius, 0.01f);
-		const glm::vec3 toLight = pointLight.Position - RenderFrameCameraPosition;
-		const float distanceSq = std::max(glm::dot(toLight, toLight), 1.0f);
 		const float luma =
 			std::max(0.0f, 0.2126f * pointLight.Color.r + 0.7152f * pointLight.Color.g + 0.0722f * pointLight.Color.b) *
 			std::max(0.0f, pointLight.Intensity);
-		float score = luma * radius * radius / distanceSq;
+		float score = luma * radius * radius;
 		if (!std::isfinite(score) || score <= 0.0f)
 			score = luma;
-		candidates.push_back({ &pointLight, score, distanceSq });
+		candidates.push_back({ &pointLight, score });
 	}
 
 	std::stable_sort(candidates.begin(), candidates.end(), [](const Candidate& a, const Candidate& b)
 	{
 		if (a.Score != b.Score)
 			return a.Score > b.Score;
-		if (a.DistanceSq != b.DistanceSq)
-			return a.DistanceSq < b.DistanceSq;
 		const UINT32 aId = a.Light ? a.Light->Id : 0;
 		const UINT32 bId = b.Light ? b.Light->Id : 0;
 		return aId < bId;
@@ -8458,7 +8594,29 @@ void Corona::ProcessPendingEditorMapLoad()
 
 void Corona::ApplyRenderPointLightsToFrameParams()
 {
-	FillPointLightParams(PathTracingViewParam.PointLights, PathTracingViewParam.PointLightCount, MaxPointLights);
+	PathTracingPointLights.fill(PointLightParam{});
+	FillPointLightParams(PathTracingPointLights.data(), PathTracingPointLightCount, MaxPathTracingPointLights);
+	PathTracingViewParam.PointLightCount = PathTracingPointLightCount;
+}
+
+UINT32 Corona::ComputePathTracingPointLightStateHash() const
+{
+	UINT32 hash = 2166136261u;
+	auto mixBytes = [&hash](const void* data, size_t size)
+	{
+		const auto* bytes = static_cast<const uint8_t*>(data);
+		for (size_t i = 0; i < size; ++i)
+		{
+			hash ^= static_cast<UINT32>(bytes[i]);
+			hash *= 16777619u;
+		}
+	};
+
+	const UINT32 activeCount = std::min(PathTracingPointLightCount, MaxPathTracingPointLights);
+	mixBytes(&activeCount, sizeof(activeCount));
+	for (UINT32 i = 0; i < activeCount; ++i)
+		mixBytes(&PathTracingPointLights[i], sizeof(PointLightParam));
+	return hash;
 }
 
 
@@ -8749,10 +8907,7 @@ void Corona::OnInit()
 	AppendCpuRuntimeTrace(L"[OnInit] after render size init");
 	UpdateStartupLoadingProgress(0.08f, L"Preparing render size");
 #if WITH_STREAMLINE
-	const bool bStartupRequestsVulkan =
-		bCommandLineRenderBackendOverrideSet &&
-		CommandLineRenderBackendAPI == ERenderBackendAPI::Vulkan;
-	if (!bStartupRequestsVulkan && !bCommandLineDisableStreamline)
+	if (!bCommandLineDisableStreamline)
 	{
 		UpdateStartupLoadingProgress(0.10f, L"Initializing Streamline");
 		InitStreamline();
@@ -8760,10 +8915,7 @@ void Corona::OnInit()
 	}
 	else
 	{
-		AppendCpuRuntimeTrace(
-			bCommandLineDisableStreamline ?
-			L"[OnInit] skip InitStreamline by command line" :
-			L"[OnInit] skip InitStreamline for Vulkan startup");
+		AppendCpuRuntimeTrace(L"[OnInit] skip InitStreamline by command line");
 	}
 #endif
 	UpdateStartupLoadingProgress(0.12f, L"Creating render backend");
@@ -8990,6 +9142,33 @@ void Corona::LoadPipeline()
 			m_height,
 			ETextureFormat::RGBA8Unorm);
 		AppendCpuRuntimeTrace(L"[LoadPipeline] after CreateSwapChainForWindow Vulkan");
+#if WITH_STREAMLINE
+		if (bStreamlineInitialized)
+		{
+			StreamlineVulkanDeviceInfo vkDeviceInfo{};
+			if (renderBackend->GetStreamlineVulkanDeviceInfo(vkDeviceInfo))
+			{
+				sl::AdapterInfo adapterInfo{};
+				adapterInfo.vkPhysicalDevice = vkDeviceInfo.PhysicalDevice;
+				if (vkDeviceInfo.DeviceLUIDSizeInBytes > 0)
+				{
+					adapterInfo.deviceLUID = const_cast<uint8_t*>(vkDeviceInfo.DeviceLUID.data());
+					adapterInfo.deviceLUIDSizeInBytes = vkDeviceInfo.DeviceLUIDSizeInBytes;
+				}
+				bDLSSAvailable = slIsFeatureSupported(sl::kFeatureDLSS, adapterInfo) == sl::Result::eOk;
+				bDLSSRRAvailable = slIsFeatureSupported(sl::kFeatureDLSS_RR, adapterInfo) == sl::Result::eOk;
+				AppendCpuRuntimeTrace(
+					L"[Streamline] Vulkan support query dlssAvailable=" + std::to_wstring(bDLSSAvailable ? 1 : 0) +
+					L", dlssRRAvailable=" + std::to_wstring(bDLSSRRAvailable ? 1 : 0));
+			}
+			else
+			{
+				AppendCpuRuntimeTrace(L"[Streamline] Vulkan device info unavailable; DLSS disabled for Vulkan backend");
+				bDLSSAvailable = false;
+				bDLSSRRAvailable = false;
+			}
+		}
+#endif
 		return;
 	}
 
@@ -12610,6 +12789,7 @@ void Corona::ApplyDefaultFlyCamera()
 		PrevPathTracingViewMat = glm::mat4x4(0.0f);
 		PrevPathTracingLightDir = glm::vec3(0.0f);
 		PrevPathTracingLightIntensity = 0.0f;
+		PrevPathTracingPointLightStateHash = 0xFFFFFFFFu;
 		bTemporalAAHistoryValid = false;
 		bTemporalDenoiserHistoryValid = false;
 		bResetTemporalStateNextUpdate = true;
@@ -12657,6 +12837,7 @@ void Corona::ApplyDefaultFlyCamera()
 	PrevPathTracingViewMat = glm::mat4x4(0.0f);
 	PrevPathTracingLightDir = glm::vec3(0.0f);
 	PrevPathTracingLightIntensity = 0.0f;
+	PrevPathTracingPointLightStateHash = 0xFFFFFFFFu;
 	bTemporalAAHistoryValid = false;
 	bTemporalDenoiserHistoryValid = false;
 	bResetTemporalStateNextUpdate = true;
@@ -13191,8 +13372,13 @@ void Corona::DrawEditorModeOverlay()
 
 	const float configButtonWidth = 96.0f;
 	const float configButtonHeight = 30.0f;
+	const float configPanelDefaultWidth = 480.0f;
+	const float configPanelMinWidth = 420.0f;
+	const float configButtonX = bEditorConfigWindowOpen ?
+		std::max(workPos.x + margin, workPos.x + workSize.x - configPanelDefaultWidth - configButtonWidth - margin) :
+		workPos.x + workSize.x - configButtonWidth - margin;
 	const ImVec2 configButtonPos(
-		workPos.x + workSize.x - configButtonWidth - margin,
+		configButtonX,
 		workPos.y + workSize.y - configButtonHeight - margin);
 	ImGui::SetNextWindowPos(configButtonPos, ImGuiCond_Always);
 	ImGui::SetNextWindowSize(ImVec2(configButtonWidth, configButtonHeight), ImGuiCond_Always);
@@ -13213,19 +13399,56 @@ void Corona::DrawEditorModeOverlay()
 
 	if (bEditorConfigWindowOpen)
 	{
-		const float configPanelWidth = 360.0f;
-		const float configPanelHeightEstimate = 420.0f;
-		const float configPanelX = std::max(workPos.x + margin, workPos.x + workSize.x - configPanelWidth - margin);
-		const float configPanelY = std::max(
-			workPos.y + margin,
-			workPos.y + workSize.y - configPanelHeightEstimate - configButtonHeight - margin * 2.0f);
-		ImGui::SetNextWindowPos(ImVec2(configPanelX, configPanelY), ImGuiCond_FirstUseEver);
-		ImGui::SetNextWindowSize(ImVec2(configPanelWidth, 0.0f), ImGuiCond_FirstUseEver);
+		const float configPanelX = std::max(workPos.x, workPos.x + workSize.x - configPanelDefaultWidth);
+		ImGui::SetNextWindowPos(ImVec2(configPanelX, workPos.y), ImGuiCond_Appearing);
+		ImGui::SetNextWindowSize(ImVec2(configPanelDefaultWidth, workSize.y), ImGuiCond_Appearing);
+		ImGui::SetNextWindowSizeConstraints(
+			ImVec2(configPanelMinWidth, 240.0f),
+			ImVec2(std::max(configPanelMinWidth, workSize.x), workSize.y));
 		ImGui::SetNextWindowBgAlpha(0.92f);
-		if (ImGui::Begin("Editor Config", &bEditorConfigWindowOpen, ImGuiWindowFlags_NoSavedSettings))
+		const ImGuiWindowFlags configFlags =
+			ImGuiWindowFlags_NoCollapse |
+			ImGuiWindowFlags_NoSavedSettings;
+		if (ImGui::Begin("Editor Config", &bEditorConfigWindowOpen, configFlags))
 		{
+			const bool bEditorConfigScriptHandled = DrawEditorConfigScriptImGui();
+			if (!bEditorConfigScriptHandled)
+			{
 			if (renderBackend)
+			{
 				ImGui::Text("Backend: %s", renderBackend->GetBackendName());
+				if (ImGui::CollapsingHeader("RHI Allocator"))
+				{
+					const RenderBackendAllocatorStats allocatorStats = renderBackend->GetAllocatorStats();
+					const auto bytesToMiB = [](uint64_t bytes) -> double
+					{
+						return static_cast<double>(bytes) / (1024.0 * 1024.0);
+					};
+					ImGui::Text(
+						"Persistent structured: blocks=%u reserved=%.2f MiB committed=%.2f MiB reusable=%.2f MiB",
+						allocatorStats.PersistentStructuredBlockCount,
+						bytesToMiB(allocatorStats.PersistentStructuredReservedBytes),
+						bytesToMiB(allocatorStats.PersistentStructuredCommittedBytes),
+						bytesToMiB(allocatorStats.PersistentStructuredReusableBytes));
+					ImGui::Text(
+						"Persistent pending: free=%.2f MiB upload=%.2f MiB issued=%.2f MiB",
+						bytesToMiB(allocatorStats.PersistentStructuredPendingFreeBytes),
+						bytesToMiB(allocatorStats.PersistentStructuredPendingUploadBytes),
+						bytesToMiB(allocatorStats.PersistentStructuredBytesIssued));
+					ImGui::Text(
+						"Transient structured: blocks=%u reserved=%.2f MiB frame=%.2f MiB issued=%.2f MiB",
+						allocatorStats.TransientStructuredBlockCount,
+						bytesToMiB(allocatorStats.TransientStructuredReservedBytes),
+						bytesToMiB(allocatorStats.TransientStructuredCurrentFrameBytes),
+						bytesToMiB(allocatorStats.TransientStructuredBytesIssued));
+					ImGui::Text(
+						"Bindless: textures=%u/%u buffers=%u/%u",
+						allocatorStats.BindlessTextureSlotsUsed,
+						allocatorStats.BindlessTextureSlotsCapacity,
+						allocatorStats.BindlessBufferSlotsUsed,
+						allocatorStats.BindlessBufferSlotsCapacity);
+				}
+			}
 
 		if (ImGui::CollapsingHeader("Top", ImGuiTreeNodeFlags_DefaultOpen))
 		{
@@ -13235,10 +13458,50 @@ void Corona::DrawEditorModeOverlay()
 				SetGpuTimingAverageFrameCount(static_cast<UINT32>(averageFrameCountUI));
 			ImGui::Checkbox("Full Render Controls Window", &bShowImgui);
 			ImGui::Checkbox("Culling Overlay", &bShowCullingTextOverlay);
-			// Lighting / GI controls live only in this Editor Config window's
-			// "Top / Lighting & GI" section now; the separate popup is removed.
-			if (ImGui::Button("Open Debug / Capture Controls", ImVec2(-1.0f, 0.0f)))
-				bEditorDebugCaptureWindowOpen = true;
+			ImGui::Separator();
+			ImGui::TextUnformatted("Visualization");
+			const bool bDebugVisualizationAvailable = renderBackend && BufferVisualizeGraphicsPipeline;
+			if (!bDebugVisualizationAvailable)
+				ImGui::BeginDisabled();
+			ImGui::Checkbox("Visualize Buffers", &bDebugDraw);
+			static const char* debugVisualizationItems[] = {
+				"SHADOW",
+				"WORLD_NORMAL",
+				"GEO_NORMAL",
+				"DEPTH",
+				"RAW_DIFFUSE_GI",
+				"RAW_DIFFUSE_GI_AUX",
+				"SCREEN_PROBE_DIFFUSE_GI",
+				"SCREEN_PROBE_PROBES",
+				"SCREEN_PROBE_HISTORY_LENGTH",
+				"SCREEN_PROBE_ATLAS_HISTORY_LENGTH",
+				"TEMPORAL_FILTERED_DIFFUSE_GI",
+				"RESOLVED_DIFFUSE_GI",
+				"FINAL_DIFFUSE_GI",
+				"ALBEDO",
+				"VELOCITY",
+				"ROUGNESS_METALLIC",
+				"SPECULAR_RAW",
+				"TEMPORAL_FILTERED_SPECULAR",
+				"BLOOM",
+				"SPEC_HISTORY_LENGTH",
+				"RTAO",
+				"NO_FULLSCREEN",
+			};
+			int debugVisualizationIndex = std::clamp(
+				static_cast<int>(FullscreenDebugBuffer),
+				0,
+				static_cast<int>(IM_ARRAYSIZE(debugVisualizationItems)) - 1);
+			if (ImGui::Combo("Full Screen Buffer", &debugVisualizationIndex, debugVisualizationItems, IM_ARRAYSIZE(debugVisualizationItems)))
+				FullscreenDebugBuffer = static_cast<EDebugVisualization>(debugVisualizationIndex);
+			if (!bDebugVisualizationAvailable)
+			{
+				ImGui::EndDisabled();
+				bDebugDraw = false;
+				ImGui::TextDisabled("Buffer visualization is available on the DX12 debug path.");
+			}
+			if (ImGui::Button("Recompile all shaders", ImVec2(-1.0f, 0.0f)))
+				bRecompileShaders = true;
 		}
 
 		if (ImGui::CollapsingHeader("Top / Render & AA", ImGuiTreeNodeFlags_DefaultOpen))
@@ -13264,19 +13527,20 @@ void Corona::DrawEditorModeOverlay()
 			EAntiAliasingMode Mode;
 			bool bAvailable;
 		};
-		const bool bEditorD3D12Backend =
-			renderBackend &&
-			renderBackend->GetAPI() == ERenderBackendAPI::D3D12;
 #if WITH_STREAMLINE
+		const bool bEditorStreamlineBackend =
+			renderBackend &&
+			bStreamlineInitialized;
 		const bool bEditorDLSSSRAvailable =
 			RenderingMode == ERenderingMode::HYBRID &&
-			bEditorD3D12Backend &&
+			bEditorStreamlineBackend &&
 			bDLSSAvailable;
 		const bool bEditorDLSSRRAvailable =
-			bEditorD3D12Backend &&
+			bEditorStreamlineBackend &&
 			((RenderingMode == ERenderingMode::HYBRID && bDLSSAvailable && bDLSSRRAvailable) ||
 			 (RenderingMode == ERenderingMode::PATHTRACING && bDLSSRRAvailable && bEnablePathTracingDLSSRR));
 #else
+		const bool bEditorStreamlineBackend = false;
 		const bool bEditorDLSSSRAvailable = false;
 		const bool bEditorDLSSRRAvailable = false;
 #endif
@@ -13319,8 +13583,8 @@ void Corona::DrawEditorModeOverlay()
 		{
 			if (bCommandLineDisableStreamline)
 				ImGui::TextDisabled("DLSS modes are unavailable because Streamline is disabled for this run.");
-			else if (!bEditorD3D12Backend)
-				ImGui::TextDisabled("DLSS modes require the DX12 backend.");
+			else if (!bEditorStreamlineBackend)
+				ImGui::TextDisabled("DLSS modes require a Streamline-capable backend.");
 			else
 				ImGui::TextDisabled("DLSS modes are unavailable on this session.");
 		}
@@ -13335,8 +13599,36 @@ void Corona::DrawEditorModeOverlay()
 				{
 					if (ImGui::Checkbox("Enable Direct Diffuse", &bEnableDirectDiffuse)) bLightingChanged = true;
 					if (ImGui::Checkbox("Enable Direct Specular", &bEnableDirectSpecular)) bLightingChanged = true;
+
+					const bool bCameraPathOwnsLightControls = bCameraPathPlaying || bCameraPathDumping;
+					if (bCameraPathOwnsLightControls)
+						ImGui::BeginDisabled();
+					const glm::vec3 prevLightDir = LightDir;
+					const float prevLightIntensity = LightIntensity;
+					glm::vec3 editorLightDir = glm::vec3(LightDir.z, -LightDir.y, -LightDir.x);
+					ImGui::gizmo3D("##editor_config_directional_light_gizmo", editorLightDir, 180);
+					LightDir = glm::vec3(-editorLightDir.z, -editorLightDir.y, editorLightDir.x);
+					ImGui::SameLine();
+					ImGui::TextUnformatted("Direction");
+					if (ImGui::SliderFloat("Light Brightness", &LightIntensity, 0.0f, 20.0f))
+						bLightingChanged = true;
 					if (ImGui::SliderFloat("Sun Angular Radius", &RTShadowViewParam.ShadowLightRadius, 0.0f, 0.03f, "%.4f rad"))
 						bLightingChanged = true;
+					const bool bUserChangedLight =
+						glm::length(prevLightDir - LightDir) > 1e-5f ||
+						std::abs(prevLightIntensity - LightIntensity) > 1e-5f;
+					if (bUserChangedLight)
+					{
+						bRenderThreadOwnsLightDirNextFrame = true;
+						UpdateMainDirectionalLightEntityFromState();
+						bLightingChanged = true;
+					}
+					if (bCameraPathOwnsLightControls)
+					{
+						ImGui::EndDisabled();
+						ImGui::TextDisabled("Camera path playback is controlling the directional light.");
+					}
+
 					if (RenderingMode == ERenderingMode::HYBRID)
 					{
 						int shadowSamples = static_cast<int>(RTShadowViewParam.ShadowSampleCount);
@@ -13606,73 +13898,7 @@ void Corona::DrawEditorModeOverlay()
 			}
 		}
 
-		if (ImGui::CollapsingHeader("Top / Debug & Capture"))
-		{
-		const bool bDebugVisualizationAvailable = renderBackend && BufferVisualizeGraphicsPipeline;
-		if (!bDebugVisualizationAvailable)
-			ImGui::BeginDisabled();
-		ImGui::Checkbox("Visualize Buffers", &bDebugDraw);
-		static const char* debugVisualizationItems[] = {
-			"SHADOW",
-			"WORLD_NORMAL",
-			"GEO_NORMAL",
-			"DEPTH",
-			"RAW_DIFFUSE_GI",
-			"RAW_DIFFUSE_GI_AUX",
-			"SCREEN_PROBE_DIFFUSE_GI",
-			"SCREEN_PROBE_PROBES",
-			"SCREEN_PROBE_HISTORY_LENGTH",
-			"SCREEN_PROBE_ATLAS_HISTORY_LENGTH",
-			"TEMPORAL_FILTERED_DIFFUSE_GI",
-			"RESOLVED_DIFFUSE_GI",
-			"FINAL_DIFFUSE_GI",
-			"ALBEDO",
-			"VELOCITY",
-			"ROUGNESS_METALLIC",
-			"SPECULAR_RAW",
-			"TEMPORAL_FILTERED_SPECULAR",
-			"BLOOM",
-			"SPEC_HISTORY_LENGTH",
-			"RTAO",
-			"NO_FULLSCREEN",
-		};
-		int debugVisualizationIndex = std::clamp(
-			static_cast<int>(FullscreenDebugBuffer),
-			0,
-			static_cast<int>(IM_ARRAYSIZE(debugVisualizationItems)) - 1);
-		if (ImGui::Combo("Full Screen Buffer", &debugVisualizationIndex, debugVisualizationItems, IM_ARRAYSIZE(debugVisualizationItems)))
-			FullscreenDebugBuffer = static_cast<EDebugVisualization>(debugVisualizationIndex);
-		if (!bDebugVisualizationAvailable)
-		{
-			ImGui::EndDisabled();
-			bDebugDraw = false;
-			ImGui::TextDisabled("Buffer visualization is available on the DX12 debug path.");
-		}
-
-		ImGui::Separator();
-		ImGui::Checkbox("Culling overlay", &bShowCullingTextOverlay);
-		ImGui::Checkbox("Frame timing overlay (CPU / GPU / Recording)", &bShowFrameTimingOverlay);
-		int averageFrameCountUI = static_cast<int>(GpuTimingAverageFrameCount);
-		if (ImGui::SliderInt("Timing Average Frames", &averageFrameCountUI, 1, 240))
-			SetGpuTimingAverageFrameCount(static_cast<UINT32>(averageFrameCountUI));
-		if (ImGui::Button("Recompile all shaders", ImVec2(-1.0f, 0.0f)))
-			bRecompileShaders = true;
-
-		if (bFinalScreenshotRequested || bFinalScreenshotCaptureInFlight)
-			ImGui::BeginDisabled();
-		if (ImGui::Button("Capture Final Backbuffer", ImVec2(-1.0f, 0.0f)))
-		{
-			bFinalScreenshotRequested = true;
-			LastFinalScreenshotStatus = L"Screenshot will be captured on the next frame without ImGui.";
-		}
-		if (bFinalScreenshotRequested || bFinalScreenshotCaptureInFlight)
-			ImGui::EndDisabled();
-		if (!LastFinalScreenshotStatus.empty())
-		{
-			const std::string statusText = WideToUtf8(LastFinalScreenshotStatus);
-			ImGui::TextWrapped("Screenshot: %s", statusText.c_str());
-		}
-		}
+			}
 	}
 	ImGui::End();
 	}
@@ -15231,7 +15457,10 @@ void Corona::OnRender()
 			ImGui::Separator();
 			for (UINT passIndex = 0; passIndex < GpuPassCount; ++passIndex)
 			{
-				if (GpuPassAverageTimeMs[passIndex] <= 0.0f && CpuPassLastTimeMs[passIndex] <= 0.0f)
+				if (!GpuPassLastActiveMask[passIndex] && !CpuPassActiveMask[passIndex])
+					continue;
+				if (GpuPassLastTimeMs[passIndex] <= 0.0f && GpuPassAverageTimeMs[passIndex] <= 0.0f &&
+					CpuPassLastTimeMs[passIndex] <= 0.0f && CpuPassAverageTimeMs[passIndex] <= 0.0f)
 					continue;
 
 				ImGui::Text(
@@ -15710,6 +15939,15 @@ void Corona::OnRender()
 		ImGui::Text("Path Tracing Settings");
 		ImGui::SliderInt("Max Bounces", (int*)&PathTracingViewParam.MaxBounces, 1, 8);
 		ImGui::SliderInt("Samples Per Pixel", (int*)&PathTracingViewParam.SamplesPerPixel, 1, 16);
+		int pointLightSamples = static_cast<int>(PathTracingViewParam.PointLightSampleCount);
+		if (ImGui::SliderInt("Point Light Samples (0=All)", &pointLightSamples, 0, static_cast<int>(MaxPathTracingPointLights)))
+		{
+			PathTracingViewParam.PointLightSampleCount = static_cast<UINT32>(pointLightSamples);
+			FrameCounter = 0;
+			PathTracingAccumulatedFrames = 0;
+			PrevPathTracingViewMat = glm::mat4x4(0.0f);
+			PrevPathTracingPointLightStateHash = 0xFFFFFFFFu;
+		}
 #if WITH_STREAMLINE
 		if (ImGui::Checkbox("Primary-hit GBuffer for DLSS RR", &bEnablePathTracingDLSSRR))
 		{
@@ -15717,6 +15955,19 @@ void Corona::OnRender()
 		}
 		ImGui::Checkbox("Stabilize moving primary rays for RR", &bEnablePathTracingRRPrimaryRayStabilization);
 #endif
+		if (ImGui::Checkbox("Path Compaction (experimental)", &bEnablePathTracingCompaction))
+		{
+			FrameCounter = 0;
+			PathTracingAccumulatedFrames = 0;
+			PrevPathTracingViewMat = glm::mat4x4(0.0f);
+			PrevPathTracingLightDir = glm::vec3(0.0f);
+			PrevPathTracingLightIntensity = 0.0f;
+			PrevPathTracingPointLightStateHash = 0xFFFFFFFFu;
+			bPathTracingCompactionFallbackLogged = false;
+			bPathTracingCompactionDispatchLogged = false;
+		}
+		if (bEnablePathTracingCompaction && !PSO_PATH_TRACING_COMPACTION_TRACE)
+			ImGui::TextDisabled("Wavefront PSO initializes on first eligible 1spp frame.");
 	ImGui::Text("Accumulated Frames: %u", PathTracingAccumulatedFrames);
 	ImGui::Text("Dispatch SPP: %u", PathTracingLastDispatchSamplesPerPixel);
 if (ImGui::Button("Reset Accumulation"))
@@ -15726,6 +15977,7 @@ if (ImGui::Button("Reset Accumulation"))
 	PrevPathTracingViewMat = glm::mat4x4(0.0f);
 	PrevPathTracingLightDir = glm::vec3(0.0f);
 	PrevPathTracingLightIntensity = 0.0f;
+	PrevPathTracingPointLightStateHash = 0xFFFFFFFFu;
 }
 
 		ImGui::Separator();

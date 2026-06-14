@@ -747,6 +747,8 @@ local function draw_path_tracing_controls(state)
     slider_int_state(state, "path_max_bounces", "Max Bounces", "script.path.max_bounces", 1, 8)
     slider_int_state(state, "path_samples_per_pixel", "Samples Per Pixel", "script.path.samples_per_pixel", 1, 16)
     slider_int_state(state, "path_direct_light_samples", "Sun Samples", "script.path.direct_light_samples", 1, 8)
+    slider_int_state(state, "path_point_light_samples", "Point Light Samples (0=All)", "script.path.point_light_samples", 0, 16)
+    checkbox_state(state, "path_compaction", "Path Compaction (experimental)", "script.path.compaction")
     ui.text(string.format("Accumulated Frames: %d", state.frame_counter or 0))
     if ui.button("Reset Accumulation", "script.path.reset_accumulation") then
         corona.run_ui_command("reset_accumulation")

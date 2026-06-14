@@ -30,64 +30,65 @@ void Corona::InitSpatialHashGIPass()
 		if (!pso)
 			return shared_ptr<ComputePipelineStateObject>();
 
-		pso->BindSRV("DepthTex", 0, 1);
-		pso->BindSRV("WorldNormalTex", 1, 1);
-		pso->BindSRV("GeoNormalTex", 2, 1);
-		pso->BindSRV("ActiveCellSlotsIn", 5, 1);
-		pso->BindSRV("CellPositionIn", 6, 1);
-		pso->BindSRV("CellNormalIn", 7, 1);
-		pso->BindSRV("TraceSH0In", 8, 1);
-		pso->BindSRV("TraceSH1In", 9, 1);
-		pso->BindSRV("TraceSH2In", 10, 1);
-		pso->BindSRV("TraceSH3In", 11, 1);
-		pso->BindSRV("PrevResolvedKeys", 12, 1);
-		pso->BindSRV("PrevResolvedSH0", 13, 1);
-		pso->BindSRV("PrevResolvedSH1", 14, 1);
-		pso->BindSRV("PrevResolvedSH2", 15, 1);
-		pso->BindSRV("PrevResolvedSH3", 16, 1);
-		pso->BindSRV("ResolvedKeysIn", 17, 1);
-		pso->BindSRV("ResolvedSH0In", 18, 1);
-		pso->BindSRV("ResolvedSH1In", 19, 1);
-		pso->BindSRV("ResolvedSH2In", 20, 1);
-		pso->BindSRV("ResolvedSH3In", 21, 1);
-		pso->BindSRV("ActiveCounterIn", 22, 1);
+		const RHIShaderStageMask computeStage = ToRHIShaderStageMask(RHIShaderStage::Compute);
+		pso->BindSRV(MakeRHITextureSRV("DepthTex", 0, computeStage));
+		pso->BindSRV(MakeRHITextureSRV("WorldNormalTex", 1, computeStage));
+		pso->BindSRV(MakeRHITextureSRV("GeoNormalTex", 2, computeStage));
+		pso->BindSRV(MakeRHIBufferSRV("ActiveCellSlotsIn", 5, computeStage));
+		pso->BindSRV(MakeRHIBufferSRV("CellPositionIn", 6, computeStage));
+		pso->BindSRV(MakeRHIBufferSRV("CellNormalIn", 7, computeStage));
+		pso->BindSRV(MakeRHIBufferSRV("TraceSH0In", 8, computeStage));
+		pso->BindSRV(MakeRHIBufferSRV("TraceSH1In", 9, computeStage));
+		pso->BindSRV(MakeRHIBufferSRV("TraceSH2In", 10, computeStage));
+		pso->BindSRV(MakeRHIBufferSRV("TraceSH3In", 11, computeStage));
+		pso->BindSRV(MakeRHIBufferSRV("PrevResolvedKeys", 12, computeStage));
+		pso->BindSRV(MakeRHIBufferSRV("PrevResolvedSH0", 13, computeStage));
+		pso->BindSRV(MakeRHIBufferSRV("PrevResolvedSH1", 14, computeStage));
+		pso->BindSRV(MakeRHIBufferSRV("PrevResolvedSH2", 15, computeStage));
+		pso->BindSRV(MakeRHIBufferSRV("PrevResolvedSH3", 16, computeStage));
+		pso->BindSRV(MakeRHIBufferSRV("ResolvedKeysIn", 17, computeStage));
+		pso->BindSRV(MakeRHIBufferSRV("ResolvedSH0In", 18, computeStage));
+		pso->BindSRV(MakeRHIBufferSRV("ResolvedSH1In", 19, computeStage));
+		pso->BindSRV(MakeRHIBufferSRV("ResolvedSH2In", 20, computeStage));
+		pso->BindSRV(MakeRHIBufferSRV("ResolvedSH3In", 21, computeStage));
+		pso->BindSRV(MakeRHIBufferSRV("ActiveCounterIn", 22, computeStage));
 		// Disocclusion detection inputs for SpatialHashQuery: prev
 		// frame depth+normal (sampled via motion-reprojected pixel)
 		// + velocity. Used to reset history toward the ambient
 		// fallback on newly revealed pixels so previously-cached
 		// neighbours can't leak into the disoccluded surface.
-		pso->BindSRV("VelocityTex", 23, 1);
-		pso->BindSRV("PrevDepthTex", 24, 1);
-		pso->BindSRV("PrevNormalTex", 25, 1);
+		pso->BindSRV(MakeRHITextureSRV("VelocityTex", 23, computeStage));
+		pso->BindSRV(MakeRHITextureSRV("PrevDepthTex", 24, computeStage));
+		pso->BindSRV(MakeRHITextureSRV("PrevNormalTex", 25, computeStage));
 		// Option A screen-resolve — prev filtered output for temporal.
-		pso->BindSRV("InDiffuseGIFilteredPrev", 26, 1);
+		pso->BindSRV(MakeRHITextureSRV("InDiffuseGIFilteredPrev", 26, computeStage));
 		// And the resolve's output UAV.
-		pso->BindUAV("OutDiffuseGIFiltered", 13);
-		pso->BindUAV("ActiveFlagsOut", 0);
-		pso->BindUAV("CellPositionOut", 1);
-		pso->BindUAV("CellNormalOut", 2);
-		pso->BindUAV("CellScoreOut", 3);
-		pso->BindUAV("ResolvedKeysOut", 4);
-		pso->BindUAV("ResolvedSH0Out", 5);
-		pso->BindUAV("ResolvedSH1Out", 6);
-		pso->BindUAV("ResolvedSH2Out", 7);
-		pso->BindUAV("ResolvedSH3Out", 8);
-		pso->BindUAV("OutGIHashColor", 9);
-		pso->BindUAV("OutGIHashSH", 10);
-		pso->BindUAV("ActiveCellSlotsOut", 11);
-		pso->BindUAV("ActiveCounterOut", 12);
-		pso->BindUAV("CellLightMaskOut", 14);
+		pso->BindUAV(MakeRHITextureUAV("OutDiffuseGIFiltered", 13, computeStage));
+		pso->BindUAV(MakeRHIBufferUAV("ActiveFlagsOut", 0, computeStage));
+		pso->BindUAV(MakeRHIBufferUAV("CellPositionOut", 1, computeStage));
+		pso->BindUAV(MakeRHIBufferUAV("CellNormalOut", 2, computeStage));
+		pso->BindUAV(MakeRHIBufferUAV("CellScoreOut", 3, computeStage));
+		pso->BindUAV(MakeRHIBufferUAV("ResolvedKeysOut", 4, computeStage));
+		pso->BindUAV(MakeRHIBufferUAV("ResolvedSH0Out", 5, computeStage));
+		pso->BindUAV(MakeRHIBufferUAV("ResolvedSH1Out", 6, computeStage));
+		pso->BindUAV(MakeRHIBufferUAV("ResolvedSH2Out", 7, computeStage));
+		pso->BindUAV(MakeRHIBufferUAV("ResolvedSH3Out", 8, computeStage));
+		pso->BindUAV(MakeRHITextureUAV("OutGIHashColor", 9, computeStage));
+		pso->BindUAV(MakeRHITextureUAV("OutGIHashSH", 10, computeStage));
+		pso->BindUAV(MakeRHIBufferUAV("ActiveCellSlotsOut", 11, computeStage));
+		pso->BindUAV(MakeRHIBufferUAV("ActiveCounterOut", 12, computeStage));
+		pso->BindUAV(MakeRHIBufferUAV("CellLightMaskOut", 14, computeStage));
 		// Octahedral DDGI (GIMode==1): per-ray scratch + irradiance/depth atlas.
-		pso->BindSRV("OctRayDataIn", 27, 1);
-		pso->BindSRV("OctIrradianceIn", 28, 1);
-		pso->BindSRV("OctDepthIn", 29, 1);
-		pso->BindSRV("OctCellKeyIn", 30, 1);
-		pso->BindUAV("OctIrradianceOut", 15);
-		pso->BindUAV("OctDepthOut", 16);
-		pso->BindUAV("OctCellKeyOut", 17);
-		pso->BindUAV("OctReservoirRayOut", 18);
-		pso->BindUAV("OctReservoirRadianceOut", 19);
-		pso->BindCBV("SpatialHashGIConstant", 0, sizeof(SpatialHashGIConstant));
+		pso->BindSRV(MakeRHIBufferSRV("OctRayDataIn", 27, computeStage));
+		pso->BindSRV(MakeRHIBufferSRV("OctIrradianceIn", 28, computeStage));
+		pso->BindSRV(MakeRHIBufferSRV("OctDepthIn", 29, computeStage));
+		pso->BindSRV(MakeRHIBufferSRV("OctCellKeyIn", 30, computeStage));
+		pso->BindUAV(MakeRHIBufferUAV("OctIrradianceOut", 15, computeStage));
+		pso->BindUAV(MakeRHIBufferUAV("OctDepthOut", 16, computeStage));
+		pso->BindUAV(MakeRHIBufferUAV("OctCellKeyOut", 17, computeStage));
+		pso->BindUAV(MakeRHIBufferUAV("OctReservoirRayOut", 18, computeStage));
+		pso->BindUAV(MakeRHIBufferUAV("OctReservoirRadianceOut", 19, computeStage));
+		pso->BindCBV(MakeRHICBV("SpatialHashGIConstant", 0, sizeof(SpatialHashGIConstant), computeStage));
 
 		if (!pso->InitCS(GetAssetFullPath(L"Shaders\\SpatialHashDiffuseGI.hlsl"), entryPoint))
 			return shared_ptr<ComputePipelineStateObject>();
@@ -120,31 +121,31 @@ shared_ptr<RTPipelineStateObject> Corona::CreateRaytracingSpatialHashGIPSO(bool 
 		tempPSO->AddHitGroup("HitGroup", "chs", "");
 		tempPSO->AddShader("rayGen", RTPipelineStateObject::RAYGEN);
 
-		tempPSO->BindUAV("global", "TraceSH0", 0);
-		tempPSO->BindUAV("global", "TraceSH1", 1);
-		tempPSO->BindUAV("global", "TraceSH2", 2);
-		tempPSO->BindUAV("global", "TraceSH3", 3);
-		tempPSO->BindUAV("global", "OctRayData", 4);
-		tempPSO->BindSRV("global", "gRtScene", 0);
-		tempPSO->BindSRV("global", "CellKeys", 1);
-		tempPSO->BindSRV("global", "CellPosition", 2);
-		tempPSO->BindSRV("global", "CellNormal", 3);
-		tempPSO->BindSRV("global", "RayNoiseBlueNoiseSource", 4);
-		tempPSO->BindSRV("global", "ActiveCellSlots", 9);
-		tempPSO->BindSRV("global", "ActiveCounter", 10);
-		tempPSO->BindSRV("global", "CellLightMask", 11);
-		tempPSO->BindSRV("global", "OctIrradianceConverge", 12);
-		tempPSO->BindCBV("global", "ViewParameter", 0, sizeof(RTSpatialHashGIViewParamCB), 1);
-		tempPSO->BindSampler("global", "sampleWrap", 0);
+		const RHIShaderStageMask rayGenStage = ToRHIShaderStageMask(RHIShaderStage::RayGeneration);
+		const RHIShaderStageMask closestHitStage = ToRHIShaderStageMask(RHIShaderStage::ClosestHit);
+		tempPSO->BindUAV("global", MakeRHIBufferUAV("TraceSH0", 0, rayGenStage));
+		tempPSO->BindUAV("global", MakeRHIBufferUAV("TraceSH1", 1, rayGenStage));
+		tempPSO->BindUAV("global", MakeRHIBufferUAV("TraceSH2", 2, rayGenStage));
+		tempPSO->BindUAV("global", MakeRHIBufferUAV("TraceSH3", 3, rayGenStage));
+		tempPSO->BindUAV("global", MakeRHIBufferUAV("OctRayData", 4, rayGenStage));
+		tempPSO->BindSRV("global", MakeRHIAccelerationStructureSRV("gRtScene", 0, rayGenStage));
+		tempPSO->BindSRV("global", MakeRHIBufferSRV("CellKeys", 1, rayGenStage));
+		tempPSO->BindSRV("global", MakeRHIBufferSRV("CellPosition", 2, rayGenStage));
+		tempPSO->BindSRV("global", MakeRHIBufferSRV("CellNormal", 3, rayGenStage));
+		tempPSO->BindSRV("global", MakeRHITextureSRV("RayNoiseBlueNoiseSource", 4, rayGenStage));
+		tempPSO->BindSRV("global", MakeRHIBufferSRV("ActiveCellSlots", 9, rayGenStage));
+		tempPSO->BindSRV("global", MakeRHIBufferSRV("ActiveCounter", 10, rayGenStage));
+		tempPSO->BindSRV("global", MakeRHIBufferSRV("CellLightMask", 11, rayGenStage));
+		tempPSO->BindSRV("global", MakeRHIBufferSRV("OctIrradianceConverge", 12, rayGenStage));
+		tempPSO->BindCBV("global", MakeRHICBV("ViewParameter", 0, sizeof(RTSpatialHashGIViewParamCB), rayGenStage));
+		tempPSO->BindSampler("global", MakeRHISampler("sampleWrap", 0, rayGenStage | closestHitStage));
+		BindRTBindlessMaterialSchema(*tempPSO, closestHitStage);
+		BindRTBindlessGeometrySchema(*tempPSO, closestHitStage);
 
 		tempPSO->AddShader("miss", RTPipelineStateObject::MISS);
 		tempPSO->AddShader("missShadow", RTPipelineStateObject::MISS);
 
 		tempPSO->AddShader("chs", RTPipelineStateObject::HIT);
-		tempPSO->BindSRV("chs", "vertices", 5);
-		tempPSO->BindSRV("chs", "indices", 6);
-		tempPSO->BindSRV("chs", "AlbedoTex", 7);
-		tempPSO->BindSRV("chs", "InstanceProperty", 8);
 		tempPSO->Configure(1, sizeof(float) * 12, sizeof(float) * 2);
 
 		return tempPSO->InitRS("Shaders\\SpatialHashCellGI.hlsl") ? tempPSO : nullptr;
@@ -160,26 +161,26 @@ shared_ptr<RTPipelineStateObject> Corona::CreateRaytracingSpatialHashPrimaryDeep
 	tempPSO->AddHitGroup("HitGroup", "chs", "");
 	tempPSO->AddShader("rayGen", RTPipelineStateObject::RAYGEN);
 
-	tempPSO->BindSRV("global", "gRtScene", 0);
-	tempPSO->BindSRV("global", "DepthTex", 1);
-	tempPSO->BindUAV("global", "ActiveFlagsOut", 0);
-	tempPSO->BindUAV("global", "CellPositionOut", 1);
-	tempPSO->BindUAV("global", "CellNormalOut", 2);
-	tempPSO->BindUAV("global", "CellScoreOut", 3);
-	tempPSO->BindUAV("global", "ResolvedKeysOut", 4);
-	tempPSO->BindUAV("global", "ResolvedSH0Out", 5);
-	tempPSO->BindUAV("global", "ActiveCellSlotsOut", 6);
-	tempPSO->BindUAV("global", "ActiveCounterOut", 7);
-	tempPSO->BindUAV("global", "CellLightMaskOut", 8);
-	tempPSO->BindCBV("global", "SpatialHashGIConstant", 0, sizeof(SpatialHashGIConstant), 1);
-	tempPSO->BindCBV("global", "PrimaryDeepSeedConstant", 1, sizeof(RTSpatialHashPrimaryDeepSeedParamCB), 1);
+	const RHIShaderStageMask rayGenStage = ToRHIShaderStageMask(RHIShaderStage::RayGeneration);
+	const RHIShaderStageMask closestHitStage = ToRHIShaderStageMask(RHIShaderStage::ClosestHit);
+	tempPSO->BindSRV("global", MakeRHIAccelerationStructureSRV("gRtScene", 0, rayGenStage));
+	tempPSO->BindSRV("global", MakeRHITextureSRV("DepthTex", 1, rayGenStage));
+	tempPSO->BindUAV("global", MakeRHIBufferUAV("ActiveFlagsOut", 0, rayGenStage));
+	tempPSO->BindUAV("global", MakeRHIBufferUAV("CellPositionOut", 1, rayGenStage));
+	tempPSO->BindUAV("global", MakeRHIBufferUAV("CellNormalOut", 2, rayGenStage));
+	tempPSO->BindUAV("global", MakeRHIBufferUAV("CellScoreOut", 3, rayGenStage));
+	tempPSO->BindUAV("global", MakeRHIBufferUAV("ResolvedKeysOut", 4, rayGenStage));
+	tempPSO->BindUAV("global", MakeRHIBufferUAV("ResolvedSH0Out", 5, rayGenStage));
+	tempPSO->BindUAV("global", MakeRHIBufferUAV("ActiveCellSlotsOut", 6, rayGenStage));
+	tempPSO->BindUAV("global", MakeRHIBufferUAV("ActiveCounterOut", 7, rayGenStage));
+	tempPSO->BindUAV("global", MakeRHIBufferUAV("CellLightMaskOut", 8, rayGenStage));
+	tempPSO->BindCBV("global", MakeRHICBV("SpatialHashGIConstant", 0, sizeof(SpatialHashGIConstant), rayGenStage));
+	tempPSO->BindCBV("global", MakeRHICBV("PrimaryDeepSeedConstant", 1, sizeof(RTSpatialHashPrimaryDeepSeedParamCB), rayGenStage));
+	BindRTBindlessGeometrySchema(*tempPSO, closestHitStage);
 
 	tempPSO->AddShader("miss", RTPipelineStateObject::MISS);
 
 	tempPSO->AddShader("chs", RTPipelineStateObject::HIT);
-	tempPSO->BindSRV("chs", "vertices", 2);
-	tempPSO->BindSRV("chs", "indices", 3);
-	tempPSO->BindSRV("chs", "InstanceProperty", 4);
 	tempPSO->Configure(1, sizeof(float) * 8, sizeof(float) * 2);
 
 	return tempPSO->InitRS("Shaders\\SpatialHashPrimaryDeepSeed.hlsl") ? tempPSO : nullptr;
@@ -277,7 +278,6 @@ bool Corona::SpatialHashPrimaryDeepSeedPass()
 		.SetCBVValue("global", "PrimaryDeepSeedConstant", &RTSpatialHashPrimaryDeepSeedParam);
 
 	RTSceneHitProgramDesc hitProgramDesc;
-	hitProgramDesc.bBindDiffuseTexture = false;
 	pass.BindSceneHitPrograms(hitProgramDesc);
 	pass.Dispatch(GetRenderWidth(), GetRenderHeight());
 	return true;
@@ -593,6 +593,8 @@ void Corona::SpatialHashGIPass()
 	const UINT32 spatialHashTraceCellBudget = std::min(SpatialHashGITraceCellBudget, SpatialHashGIActiveCellCapacity);
 	if (!SpatialHashLightMaskPass())
 		return;
+	if (!EnsureRTMaterialRecordBuffer())
+	return;
 
 	const bool bOctMode = (SpatialHashGICB.GIMode == 1u);
 	const bool bHasOctBuffers =
@@ -629,7 +631,10 @@ void Corona::SpatialHashGIPass()
 		.SetBufferSRV("global", "OctIrradianceConverge", SpatialHashGIOctIrradiance[0].get())
 		.SetCBVValue("global", "ViewParameter", &RTSpatialHashGIViewParam)
 		.SetSampler("global", "sampleWrap", samplerWrap.get());
-	pass.BindSceneHitPrograms();
+	pass.SetBindlessTextureTable("global", "MaterialTextures")
+		.SetBufferSRV("global", "RtMaterials", RTMaterialRecordBuffer.get());
+	RTSceneHitProgramDesc hitProgramDesc;
+	pass.BindSceneHitPrograms(hitProgramDesc);
 	// Oct mode dispatches one ray per (probe, ray); SH mode one thread per cell.
 	const UINT32 octTraceCellBudget = std::min(
 		SpatialHashGIOctTraceCellBudget,

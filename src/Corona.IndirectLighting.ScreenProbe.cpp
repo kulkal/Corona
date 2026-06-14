@@ -45,29 +45,30 @@ void Corona::InitScreenProbeGIPass()
 	if (!tempPSO)
 		return;
 
-	tempPSO->BindSRV("DepthTex", 0, 1);
-	tempPSO->BindSRV("WorldNormalTex", 1, 1);
-	tempPSO->BindSRV("GeoNormalTex", 2, 1);
-	tempPSO->BindSRV("ScreenProbeRadianceTex", 3, 1);
-	tempPSO->BindSRV("ScreenProbeMetaTex", 4, 1);
-	tempPSO->BindSRV("PrevScreenProbeGITex", 5, 1);
-	tempPSO->BindSRV("VelocityTex", 6, 1);
-	tempPSO->BindSRV("PrevDepthTex", 7, 1);
-	tempPSO->BindSRV("PrevNormalTex", 8, 1);
-	tempPSO->BindSRV("ScreenProbeSH0Tex", 9, 1);
-	tempPSO->BindSRV("ScreenProbeSH1Tex", 10, 1);
-	tempPSO->BindSRV("ScreenProbeSH2Tex", 11, 1);
-	tempPSO->BindSRV("ScreenProbeSH3Tex", 12, 1);
-	tempPSO->BindSRV("ScreenProbeSH4Tex", 13, 1);
-	tempPSO->BindSRV("ScreenProbeSH5Tex", 14, 1);
-	tempPSO->BindSRV("ScreenProbeSH6Tex", 15, 1);
-	tempPSO->BindSRV("ScreenProbeSH7Tex", 16, 1);
-	tempPSO->BindSRV("ScreenProbeSH8Tex", 17, 1);
-	tempPSO->BindUAV("OutScreenProbeGI", 0);
-	tempPSO->BindUAV("OutScreenProbeDebug", 1);
-	tempPSO->BindUAV("OutScreenProbeHistory", 2);
-	tempPSO->BindSampler("BilinearClamp", 0);
-	tempPSO->BindCBV("ScreenProbeGIConstant", 0, sizeof(ScreenProbeGIConstant));
+	const RHIShaderStageMask computeStage = ToRHIShaderStageMask(RHIShaderStage::Compute);
+	tempPSO->BindSRV(MakeRHITextureSRV("DepthTex", 0, computeStage));
+	tempPSO->BindSRV(MakeRHITextureSRV("WorldNormalTex", 1, computeStage));
+	tempPSO->BindSRV(MakeRHITextureSRV("GeoNormalTex", 2, computeStage));
+	tempPSO->BindSRV(MakeRHITextureSRV("ScreenProbeRadianceTex", 3, computeStage));
+	tempPSO->BindSRV(MakeRHITextureSRV("ScreenProbeMetaTex", 4, computeStage));
+	tempPSO->BindSRV(MakeRHITextureSRV("PrevScreenProbeGITex", 5, computeStage));
+	tempPSO->BindSRV(MakeRHITextureSRV("VelocityTex", 6, computeStage));
+	tempPSO->BindSRV(MakeRHITextureSRV("PrevDepthTex", 7, computeStage));
+	tempPSO->BindSRV(MakeRHITextureSRV("PrevNormalTex", 8, computeStage));
+	tempPSO->BindSRV(MakeRHITextureSRV("ScreenProbeSH0Tex", 9, computeStage));
+	tempPSO->BindSRV(MakeRHITextureSRV("ScreenProbeSH1Tex", 10, computeStage));
+	tempPSO->BindSRV(MakeRHITextureSRV("ScreenProbeSH2Tex", 11, computeStage));
+	tempPSO->BindSRV(MakeRHITextureSRV("ScreenProbeSH3Tex", 12, computeStage));
+	tempPSO->BindSRV(MakeRHITextureSRV("ScreenProbeSH4Tex", 13, computeStage));
+	tempPSO->BindSRV(MakeRHITextureSRV("ScreenProbeSH5Tex", 14, computeStage));
+	tempPSO->BindSRV(MakeRHITextureSRV("ScreenProbeSH6Tex", 15, computeStage));
+	tempPSO->BindSRV(MakeRHITextureSRV("ScreenProbeSH7Tex", 16, computeStage));
+	tempPSO->BindSRV(MakeRHITextureSRV("ScreenProbeSH8Tex", 17, computeStage));
+	tempPSO->BindUAV(MakeRHITextureUAV("OutScreenProbeGI", 0, computeStage));
+	tempPSO->BindUAV(MakeRHITextureUAV("OutScreenProbeDebug", 1, computeStage));
+	tempPSO->BindUAV(MakeRHITextureUAV("OutScreenProbeHistory", 2, computeStage));
+	tempPSO->BindSampler(MakeRHISampler("BilinearClamp", 0, computeStage));
+	tempPSO->BindCBV(MakeRHICBV("ScreenProbeGIConstant", 0, sizeof(ScreenProbeGIConstant), computeStage));
 
 	if (tempPSO->InitCS(GetAssetFullPath(L"Shaders\\ScreenProbeGI.hlsl"), "ScreenProbeGI"))
 		ScreenProbeGIPSO = tempPSO;
@@ -111,49 +112,49 @@ shared_ptr<RTPipelineStateObject> Corona::CreateRaytracingScreenProbeGIPSO(bool 
 		tempPSO->AddHitGroup("HitGroup", "chs", "");
 		tempPSO->AddShader("rayGen", RTPipelineStateObject::RAYGEN);
 
-		tempPSO->BindUAV("global", "ProbeRadiance", 0);
-		tempPSO->BindUAV("global", "ProbeMeta", 1);
-		tempPSO->BindUAV("global", "ProbeSH0", 2);
-		tempPSO->BindUAV("global", "ProbeSH1", 3);
-		tempPSO->BindUAV("global", "ProbeSH2", 4);
-		tempPSO->BindUAV("global", "ProbeSH3", 5);
-		tempPSO->BindUAV("global", "ProbeSH4", 6);
-		tempPSO->BindUAV("global", "ProbeSH5", 7);
-		tempPSO->BindUAV("global", "ProbeSH6", 8);
-		tempPSO->BindUAV("global", "ProbeSH7", 9);
-		tempPSO->BindUAV("global", "ProbeSH8", 10);
-		tempPSO->BindSRV("global", "gRtScene", 0);
-		tempPSO->BindSRV("global", "DepthTex", 1);
-		tempPSO->BindSRV("global", "WorldNormalTex", 2);
-		tempPSO->BindSRV("global", "RayNoiseBlueNoiseSource", 7);
-		tempPSO->BindSRV("global", "PrevProbeRadianceTex", 8);
-		tempPSO->BindSRV("global", "PrevProbeMetaTex", 9);
-		tempPSO->BindSRV("global", "VelocityTex", 10);
-		tempPSO->BindSRV("global", "PrevDepthTex", 11);
-		tempPSO->BindSRV("global", "PrevNormalTex", 12);
-		tempPSO->BindSRV("global", "PrevProbeSH0Tex", 13);
-		tempPSO->BindSRV("global", "PrevProbeSH1Tex", 14);
-		tempPSO->BindSRV("global", "PrevProbeSH2Tex", 15);
-		tempPSO->BindSRV("global", "PrevProbeSH3Tex", 16);
-		tempPSO->BindSRV("global", "PrevProbeSH4Tex", 17);
-		tempPSO->BindSRV("global", "PrevProbeSH5Tex", 18);
-		tempPSO->BindSRV("global", "PrevProbeSH6Tex", 19);
-		tempPSO->BindSRV("global", "PrevProbeSH7Tex", 20);
-		tempPSO->BindSRV("global", "PrevProbeSH8Tex", 21);
-		tempPSO->BindSRV("global", "GeoNormalTex", 22);
-		tempPSO->BindCBV("global", "ViewParameter", 0, sizeof(RTScreenProbeGIViewParamCB), 1);
-		tempPSO->BindSampler("global", "sampleWrap", 0);
-		tempPSO->BindSampler("global", "historyClamp", 1);
+		const RHIShaderStageMask rayGenStage = ToRHIShaderStageMask(RHIShaderStage::RayGeneration);
+		const RHIShaderStageMask closestHitStage = ToRHIShaderStageMask(RHIShaderStage::ClosestHit);
+		tempPSO->BindUAV("global", MakeRHITextureUAV("ProbeRadiance", 0, rayGenStage));
+		tempPSO->BindUAV("global", MakeRHITextureUAV("ProbeMeta", 1, rayGenStage));
+		tempPSO->BindUAV("global", MakeRHITextureUAV("ProbeSH0", 2, rayGenStage));
+		tempPSO->BindUAV("global", MakeRHITextureUAV("ProbeSH1", 3, rayGenStage));
+		tempPSO->BindUAV("global", MakeRHITextureUAV("ProbeSH2", 4, rayGenStage));
+		tempPSO->BindUAV("global", MakeRHITextureUAV("ProbeSH3", 5, rayGenStage));
+		tempPSO->BindUAV("global", MakeRHITextureUAV("ProbeSH4", 6, rayGenStage));
+		tempPSO->BindUAV("global", MakeRHITextureUAV("ProbeSH5", 7, rayGenStage));
+		tempPSO->BindUAV("global", MakeRHITextureUAV("ProbeSH6", 8, rayGenStage));
+		tempPSO->BindUAV("global", MakeRHITextureUAV("ProbeSH7", 9, rayGenStage));
+		tempPSO->BindUAV("global", MakeRHITextureUAV("ProbeSH8", 10, rayGenStage));
+		tempPSO->BindSRV("global", MakeRHIAccelerationStructureSRV("gRtScene", 0, rayGenStage));
+		tempPSO->BindSRV("global", MakeRHITextureSRV("DepthTex", 1, rayGenStage));
+		tempPSO->BindSRV("global", MakeRHITextureSRV("WorldNormalTex", 2, rayGenStage));
+		tempPSO->BindSRV("global", MakeRHITextureSRV("RayNoiseBlueNoiseSource", 7, rayGenStage));
+		tempPSO->BindSRV("global", MakeRHITextureSRV("PrevProbeRadianceTex", 8, rayGenStage));
+		tempPSO->BindSRV("global", MakeRHITextureSRV("PrevProbeMetaTex", 9, rayGenStage));
+		tempPSO->BindSRV("global", MakeRHITextureSRV("VelocityTex", 10, rayGenStage));
+		tempPSO->BindSRV("global", MakeRHITextureSRV("PrevDepthTex", 11, rayGenStage));
+		tempPSO->BindSRV("global", MakeRHITextureSRV("PrevNormalTex", 12, rayGenStage));
+		tempPSO->BindSRV("global", MakeRHITextureSRV("PrevProbeSH0Tex", 13, rayGenStage));
+		tempPSO->BindSRV("global", MakeRHITextureSRV("PrevProbeSH1Tex", 14, rayGenStage));
+		tempPSO->BindSRV("global", MakeRHITextureSRV("PrevProbeSH2Tex", 15, rayGenStage));
+		tempPSO->BindSRV("global", MakeRHITextureSRV("PrevProbeSH3Tex", 16, rayGenStage));
+		tempPSO->BindSRV("global", MakeRHITextureSRV("PrevProbeSH4Tex", 17, rayGenStage));
+		tempPSO->BindSRV("global", MakeRHITextureSRV("PrevProbeSH5Tex", 18, rayGenStage));
+		tempPSO->BindSRV("global", MakeRHITextureSRV("PrevProbeSH6Tex", 19, rayGenStage));
+		tempPSO->BindSRV("global", MakeRHITextureSRV("PrevProbeSH7Tex", 20, rayGenStage));
+		tempPSO->BindSRV("global", MakeRHITextureSRV("PrevProbeSH8Tex", 21, rayGenStage));
+		tempPSO->BindSRV("global", MakeRHITextureSRV("GeoNormalTex", 22, rayGenStage));
+		tempPSO->BindCBV("global", MakeRHICBV("ViewParameter", 0, sizeof(RTScreenProbeGIViewParamCB), rayGenStage));
+		tempPSO->BindSampler("global", MakeRHISampler("sampleWrap", 0, rayGenStage | closestHitStage));
+		tempPSO->BindSampler("global", MakeRHISampler("historyClamp", 1, rayGenStage));
+		BindRTBindlessMaterialSchema(*tempPSO, closestHitStage);
+		BindRTBindlessGeometrySchema(*tempPSO, closestHitStage);
 		traceStep(L"Bind global resources");
 
 		tempPSO->AddShader("miss", RTPipelineStateObject::MISS);
 		tempPSO->AddShader("missShadow", RTPipelineStateObject::MISS);
 
 		tempPSO->AddShader("chs", RTPipelineStateObject::HIT);
-		tempPSO->BindSRV("chs", "vertices", 3);
-		tempPSO->BindSRV("chs", "indices", 4);
-		tempPSO->BindSRV("chs", "AlbedoTex", 5);
-		tempPSO->BindSRV("chs", "InstanceProperty", 6);
 		tempPSO->Configure(1, sizeof(float) * 12, sizeof(float) * 2);
 		traceStep(L"Bind hit program resources");
 
@@ -217,6 +218,9 @@ void Corona::ScreenProbeRaytraceGIPass()
 	if (!TLAS || !pso || !ScreenProbeGIRadiance[0] || !ScreenProbeGIRadiance[1] || !hasScreenProbeSHSet(0) || !hasScreenProbeSHSet(1) || !ScreenProbeGIMetadata[0] || !ScreenProbeGIMetadata[1])
 		return;
 	renderBackend->EmitGpuCrashMarker("ScreenProbeRaytraceGIPass");
+
+	if (!EnsureRTMaterialRecordBuffer())
+	return;
 
 	ScreenProbeGIAtlasWriteIndex = 1 - ScreenProbeGIAtlasWriteIndex;
 	const UINT writeIndex = ScreenProbeGIAtlasWriteIndex;
@@ -325,8 +329,11 @@ void Corona::ScreenProbeRaytraceGIPass()
 	pass.SetCBVValue("global", "ViewParameter", &RTScreenProbeGIViewParam);
 	pass.SetSampler("global", "sampleWrap", samplerWrap.get());
 	pass.SetSampler("global", "historyClamp", samplerBilinearWrap.get());
+	pass.SetBindlessTextureTable("global", "MaterialTextures")
+		.SetBufferSRV("global", "RtMaterials", RTMaterialRecordBuffer.get());
 
-	pass.BindSceneHitPrograms();
+	RTSceneHitProgramDesc hitProgramDesc;
+	pass.BindSceneHitPrograms(hitProgramDesc);
 	pass.Dispatch(probeGridWidth, probeGridHeight);
 
 	renderBackend->TransitionTexture(ScreenProbeGIRadiance[writeIndex].get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);

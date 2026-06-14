@@ -1,5 +1,6 @@
 #include "Common.hlsl"
 #include "GGX.hlsli"
+#include "BindlessResources.hlsli"
 
 RWTexture2D<float4> ReflectionResult : register(u0);
 RWTexture2D<float> SpecularHitDistanceResult : register(u1);
@@ -19,10 +20,6 @@ Texture2D GeoNormalTex : register(t2);
 Texture2D RougnessMetallicTex : register(t6);
 Texture3D RayNoiseBlueNoiseSource : register(t7);
 Texture2D WorldNormalTex : register(t8);
-ByteAddressBuffer vertices : register(t3);
-ByteAddressBuffer indices : register(t4);
-Texture2D AlbedoTex : register(t5);
-ByteAddressBuffer InstanceProperty : register(t9);
 Texture2D ReflReservoirAPrev : register(t10);
 Texture2D ReflReservoirBPrev : register(t11);
 Texture2D ReflVelocityTex    : register(t12);
@@ -761,14 +758,16 @@ void chs(inout RayPayload payload, in BuiltInTriangleIntersectionAttributes attr
     float3 barycentrics = float3(1.0 - attribs.barycentrics.x - attribs.barycentrics.y, attribs.barycentrics.x, attribs.barycentrics.y);
     uint triangleIndex = PrimitiveIndex();
     uint instanceID = InstanceID();
-    Vertex vertex = GetSurfaceVertexAttributes(instanceID, vertices, indices, InstanceProperty, triangleIndex, barycentrics);
+    Vertex vertex = CORONA_GET_SURFACE_VERTEX_ATTRIBUTES(instanceID, triangleIndex, barycentrics);
 
     float hitT = max(SpecSanitizeFloat(RayTCurrent(), MAX_HIT_DIST), 0.0f);
     payload.position = SpecSanitizeFloat3(vertex.position, WorldRayOrigin() + WorldRayDirection() * hitT);
     payload.normal = SpecSafeNormalize(vertex.normal, -WorldRayDirection());
 
+    RTMaterialRecord material = RtMaterials[instanceID];
     uint w, h;
-    AlbedoTex.GetDimensions(w, h);
+    MaterialTextures[NonUniformResourceIndex(material.AlbedoTextureIndex)].GetDimensions(w, h);
+
     float halfLog2NumTexPixels = 0.5 * log2(max(float(w) * float(h), 1.0f));
 
     vertex.textureLODConstant += halfLog2NumTexPixels;
@@ -776,7 +775,8 @@ void chs(inout RayPayload payload, in BuiltInTriangleIntersectionAttributes attr
 
     float NoV = 1;//dot(V, vertex.normal);
     float mipLevel = computeTextureLOD(NoV, rayConeWidth, vertex.textureLODConstant);
-    payload.color = max(SpecSanitizeFloat3(AlbedoTex.SampleLevel(sampleWrap, vertex.uv, mipLevel).xyz, 1.0f.xxx), 0.0f.xxx);
+    payload.color = max(SpecSanitizeFloat3(MaterialTextures[NonUniformResourceIndex(material.AlbedoTextureIndex)].SampleLevel(sampleWrap, vertex.uv, mipLevel).xyz, 1.0f.xxx), 0.0f.xxx);
+
     payload.bHit = true;
     payload.hitDist = hitT;
 }

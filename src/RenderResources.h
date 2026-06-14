@@ -36,23 +36,29 @@ class RTAS;
 class Buffer
 {
 public:
+	~Buffer();
+
 	// API-neutral
 	enum BufferType { BYTE_ADDRESS, STRUCTURED, UNKNOWN };
 	BufferType Type = UNKNOWN;
 	uint32_t NumElements = 0;
 	uint32_t ElementSize = 0;
+	RHIBufferHandle BindlessHandle{};
 
 #if CORONA_HAS_D3D12
 	DX12Backend* Owner = nullptr;
 	Microsoft::WRL::ComPtr<ID3D12Resource> resource;
 	D3D12_CPU_DESCRIPTOR_HANDLE CpuHandleSRV{};
 	D3D12_GPU_DESCRIPTOR_HANDLE GpuHandleSRV{};
+	D3D12_CPU_DESCRIPTOR_HANDLE CpuHandleBindlessSRV{};
+	D3D12_GPU_DESCRIPTOR_HANDLE GpuHandleBindlessSRV{};
 	D3D12_CPU_DESCRIPTOR_HANDLE CpuHandleUAV{};
 	D3D12_GPU_DESCRIPTOR_HANDLE GpuHandleUAV{};
 	// Persistent CPU pointer for UPLOAD-heap buffers — set by
 	// CreateUploadStructuredBuffer. Null for DEFAULT-heap buffers.
 	void* MappedPtr = nullptr;
 	uint32_t MappedSizeInBytes = 0;
+	uint64_t SuballocationOffsetBytes = 0;
 	// Persistent staging resource for dynamic updates into DEFAULT-heap buffers.
 	Microsoft::WRL::ComPtr<ID3D12Resource> UploadResource;
 	void* UploadMappedPtr = nullptr;
@@ -66,25 +72,34 @@ public:
 class IndexBuffer
 {
 public:
+	~IndexBuffer();
+
 	// API-neutral
 	int numIndices = 0;
+	RHIBufferHandle BindlessHandle{};
 	// Same in-place update path as VertexBuffer::MappedCpu.
 	void* MappedCpu = nullptr;
 	uint32_t MappedCapacityBytes = 0;
 
 #if CORONA_HAS_D3D12
+	DX12Backend* Owner = nullptr;
 	Microsoft::WRL::ComPtr<ID3D12Resource> resource;
 	D3D12_INDEX_BUFFER_VIEW view{};
 	D3D12_CPU_DESCRIPTOR_HANDLE CpuHandleSRV{};
 	D3D12_GPU_DESCRIPTOR_HANDLE GpuHandleSRV{};
+	D3D12_CPU_DESCRIPTOR_HANDLE CpuHandleBindlessSRV{};
+	D3D12_GPU_DESCRIPTOR_HANDLE GpuHandleBindlessSRV{};
 #endif
 };
 
 class VertexBuffer
 {
 public:
+	~VertexBuffer();
+
 	// API-neutral
 	int numVertices = 0;
+	RHIBufferHandle BindlessHandle{};
 	// Live-Spine fast path: for UPLOAD-heap VBs created via
 	// CreateUploadVertexBuffer, holds the persistent CPU-mapped pointer +
 	// capacity so UpdateUploadVertexBuffer can memcpy in place each frame
@@ -94,10 +109,13 @@ public:
 	uint32_t MappedCapacityBytes = 0;
 
 #if CORONA_HAS_D3D12
+	DX12Backend* Owner = nullptr;
 	Microsoft::WRL::ComPtr<ID3D12Resource> resource;
 	D3D12_VERTEX_BUFFER_VIEW view{};
 	D3D12_CPU_DESCRIPTOR_HANDLE CpuHandleSRV{};
 	D3D12_GPU_DESCRIPTOR_HANDLE GpuHandleSRV{};
+	D3D12_CPU_DESCRIPTOR_HANDLE CpuHandleBindlessSRV{};
+	D3D12_GPU_DESCRIPTOR_HANDLE GpuHandleBindlessSRV{};
 	// Optional UAV view — populated by CreateRWVertexBuffer for compute
 	// skinning outputs. Zero-initialized for the read-only paths.
 	D3D12_CPU_DESCRIPTOR_HANDLE CpuHandleUAV{};
@@ -119,12 +137,15 @@ public:
 class Texture
 {
 public:
+	~Texture();
+
 	// API-neutral
 	uint32_t Width = 0;
 	uint32_t Height = 0;
 	uint32_t MipLevels = 1;
 	ETextureFormat Format = ETextureFormat::RGBA8Unorm;
 	ETextureUsageFlags Usage = TextureUsage_None;
+	RHITextureHandle BindlessHandle{};
 
 #if CORONA_HAS_D3D12
 	DX12Backend* Owner = nullptr;
@@ -139,6 +160,8 @@ public:
 	D3D12_GPU_DESCRIPTOR_HANDLE GpuHandleDSV{};
 	D3D12_CPU_DESCRIPTOR_HANDLE CpuHandleSRV{};
 	D3D12_GPU_DESCRIPTOR_HANDLE GpuHandleSRV{};
+	D3D12_CPU_DESCRIPTOR_HANDLE CpuHandleBindlessSRV{};
+	D3D12_GPU_DESCRIPTOR_HANDLE GpuHandleBindlessSRV{};
 
 	void MakeStaticSRV();
 	void MakeRTV(bool isBackBuffer = false);
@@ -158,7 +181,67 @@ public:
 	std::shared_ptr<Texture> Normal;
 	std::shared_ptr<Texture> Roughness;
 	std::shared_ptr<Texture> Metallic;
+
+	GraphicsPipelineHandle* CachedGraphicsMaterialPipeline = nullptr;
+	Sampler* CachedGraphicsMaterialSampler = nullptr;
+	Texture* CachedGraphicsMaterialAlbedo = nullptr;
+	Texture* CachedGraphicsMaterialNormal = nullptr;
+	Texture* CachedGraphicsMaterialRoughness = nullptr;
+	Texture* CachedGraphicsMaterialMetallic = nullptr;
+	std::shared_ptr<GraphicsBindGroupHandle> CachedGraphicsMaterialBindGroup;
 };
+
+inline std::shared_ptr<GraphicsBindGroupHandle> CreateOrBindGraphicsMaterialBindGroup(
+	IRenderBackend* backend,
+	GraphicsPipelineHandle* pipeline,
+	Material* material,
+	Sampler* sampler,
+	Texture* albedo,
+	Texture* normal,
+	Texture* roughness,
+	Texture* metallic)
+{
+	if (!backend || !pipeline)
+		return nullptr;
+
+	if (material &&
+		material->CachedGraphicsMaterialBindGroup &&
+		material->CachedGraphicsMaterialPipeline == pipeline &&
+		material->CachedGraphicsMaterialSampler == sampler &&
+		material->CachedGraphicsMaterialAlbedo == albedo &&
+		material->CachedGraphicsMaterialNormal == normal &&
+		material->CachedGraphicsMaterialRoughness == roughness &&
+		material->CachedGraphicsMaterialMetallic == metallic)
+	{
+		backend->BindGraphicsBindGroup(pipeline, kGraphicsBindGroupSlot_Material, material->CachedGraphicsMaterialBindGroup);
+		return material->CachedGraphicsMaterialBindGroup;
+	}
+
+	GraphicsBindGroupDesc desc{};
+	desc.Pipeline = pipeline;
+	desc.Slot = kGraphicsBindGroupSlot_Material;
+	desc.Entries = {
+		GraphicsBindGroupEntry::SamplerBinding("samplerWrap", sampler),
+		GraphicsBindGroupEntry::TextureSRV("AlbedoTex", albedo),
+		GraphicsBindGroupEntry::TextureSRV("NormalTex", normal),
+		GraphicsBindGroupEntry::TextureSRV("RoughnessTex", roughness),
+		GraphicsBindGroupEntry::TextureSRV("MetallicTex", metallic),
+	};
+	std::shared_ptr<GraphicsBindGroupHandle> bindGroup = backend->CreateGraphicsBindGroup(desc);
+	backend->BindGraphicsBindGroup(pipeline, kGraphicsBindGroupSlot_Material, bindGroup);
+
+	if (material)
+	{
+		material->CachedGraphicsMaterialPipeline = pipeline;
+		material->CachedGraphicsMaterialSampler = sampler;
+		material->CachedGraphicsMaterialAlbedo = albedo;
+		material->CachedGraphicsMaterialNormal = normal;
+		material->CachedGraphicsMaterialRoughness = roughness;
+		material->CachedGraphicsMaterialMetallic = metallic;
+		material->CachedGraphicsMaterialBindGroup = bindGroup;
+	}
+	return bindGroup;
+}
 
 class Mesh
 {

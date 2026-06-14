@@ -25,6 +25,8 @@
 #include <cstring>
 #include <cstdlib>
 #include <iomanip>
+#include <iterator>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <set>
@@ -382,6 +384,13 @@ namespace
 		return (size + 255u) & ~255u;
 	}
 
+	UINT64 AlignUploadOffset(UINT64 value, UINT64 alignment)
+	{
+		if (alignment <= 1)
+			return value;
+		return ((value + alignment - 1) / alignment) * alignment;
+	}
+
 	void CopyConstantBufferData(UINT8* destination, UINT destinationSize, const void* source, UINT sourceSize)
 	{
 		if (!destination || destinationSize == 0)
@@ -407,6 +416,24 @@ namespace
 		// dev cycle.
 		uint32_t VertexStride = 0;
 		std::wstring ShaderPathForDiag;
+	};
+
+	struct DX12GraphicsBindGroupEntry
+	{
+		EGraphicsBindGroupEntryType Type = EGraphicsBindGroupEntryType::TextureSRV;
+		std::string BindingName;
+		uint32_t Slot = 0;
+		Texture* TextureValue = nullptr;
+		Buffer* BufferValue = nullptr;
+		VertexBuffer* VertexBufferValue = nullptr;
+		Sampler* SamplerValue = nullptr;
+		std::vector<uint8_t> ConstantData;
+	};
+
+	struct DX12GraphicsBindGroupHandle final : GraphicsBindGroupHandle
+	{
+		DX12GraphicsPipelineHandle* Pipeline = nullptr;
+		std::vector<DX12GraphicsBindGroupEntry> Entries;
 	};
 
 	void ForceOpaqueAlpha(const DirectX::Image* image)
@@ -547,6 +574,8 @@ namespace
 			return D3D12_RESOURCE_STATE_COPY_SOURCE;
 		case EResourceState::VertexBuffer:
 			return D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+		case EResourceState::IndirectArgument:
+			return D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT;
 		case EResourceState::ShaderRead:
 		default:
 			return D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
@@ -571,6 +600,27 @@ namespace
 		case ESamplerFilter::Linear:
 		default: return D3D12_FILTER_MIN_MAG_MIP_LINEAR;
 		}
+	}
+
+	D3D12_SHADER_RESOURCE_VIEW_DESC MakeTextureSRVDesc(const Texture& texture)
+	{
+		D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+		srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+		srvDesc.Format = (texture.textureDesc.Flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL)
+			? DXGI_FORMAT_R32_FLOAT
+			: texture.textureDesc.Format;
+
+		if (texture.textureDesc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D)
+		{
+			srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE3D;
+			srvDesc.Texture3D.MipLevels = texture.textureDesc.MipLevels;
+		}
+		else
+		{
+			srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+			srvDesc.Texture2D.MipLevels = texture.textureDesc.MipLevels;
+		}
+		return srvDesc;
 	}
 
 }
@@ -630,6 +680,9 @@ void DX12Backend::BeginFrame()
 	UINT64 ThisFrameFenceValue = FrameFenceValueVec[CurrentFrameIndex];
 	
 	CmdQ->WaitFenceValue(ThisFrameFenceValue);
+	RetireCompletedPersistentStructuredBufferUploads();
+	RetireCompletedPersistentStructuredBufferFrees();
+	ResetTransientUploadStructuredFrame(CurrentFrameIndex);
 
 	BeginNewGraphicsCommandList();
 	
@@ -1478,6 +1531,18 @@ void DX12Backend::TransitionVertexBuffer(VertexBuffer* vertexBuffer, EResourceSt
 	GlobalCmdList->CmdList->ResourceBarrier(1, &barrierDesc);
 }
 
+void DX12Backend::UAVBarrier(Buffer* buffer)
+{
+	if (!GlobalCmdList)
+		return;
+
+	D3D12_RESOURCE_BARRIER barrierDesc = {};
+	barrierDesc.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+	barrierDesc.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+	barrierDesc.UAV.pResource = buffer ? buffer->resource.Get() : nullptr;
+	GlobalCmdList->CmdList->ResourceBarrier(1, &barrierDesc);
+}
+
 shared_ptr<Sampler> DX12Backend::CreateSampler(D3D12_SAMPLER_DESC& InSamplerDesc)
 {
 	Sampler* sampler = new Sampler;
@@ -1490,12 +1555,26 @@ shared_ptr<Sampler> DX12Backend::CreateSampler(D3D12_SAMPLER_DESC& InSamplerDesc
 
 std::shared_ptr<Buffer> DX12Backend::CreateBuffer(const BufferCreateDesc& desc)
 {
+	if (desc.NumElements == 0 || desc.ElementSize == 0)
+		return nullptr;
+
+	if (desc.AllocationPolicy == EBufferAllocationPolicy::Suballocated &&
+		desc.Lifetime == EBufferLifetime::Persistent &&
+		desc.Shape == EBufferShape::Structured &&
+		desc.Access == EBufferAccess::GpuOnly &&
+		!desc.bAllowUnorderedAccess &&
+		desc.InitialData)
+	{
+		return CreateSuballocatedStructuredBuffer(desc);
+	}
+
 	std::shared_ptr<Buffer> buffer = CreateBuffer(
 		desc.NumElements,
 		desc.ElementSize,
 		ToD3D12ResourceState(desc.InitialState),
 		desc.bAllowUnorderedAccess,
-		desc.InitialData);
+		desc.InitialData,
+		desc.Access);
 	if (buffer)
 	{
 		if (desc.Shape == EBufferShape::Structured)
@@ -1506,7 +1585,7 @@ std::shared_ptr<Buffer> DX12Backend::CreateBuffer(const BufferCreateDesc& desc)
 	return buffer;
 }
 
-std::shared_ptr<Buffer> DX12Backend::CreateBuffer(UINT InNumElements, UINT InElementSize, D3D12_RESOURCE_STATES initResState, bool isUAV, void* SrcData)
+std::shared_ptr<Buffer> DX12Backend::CreateBuffer(UINT InNumElements, UINT InElementSize, D3D12_RESOURCE_STATES initResState, bool isUAV, void* SrcData, EBufferAccess access)
 {
 	Buffer * buffer = new Buffer;
 	buffer->Owner = this;
@@ -1528,49 +1607,76 @@ std::shared_ptr<Buffer> DX12Backend::CreateBuffer(UINT InNumElements, UINT InEle
 	buffer->NumElements = InNumElements;
 	buffer->ElementSize = InElementSize;
 
-	D3D12_HEAP_PROPERTIES heapProp;
-	heapProp.Type = D3D12_HEAP_TYPE_DEFAULT;
-	heapProp.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
-	heapProp.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
-	heapProp.CreationNodeMask = 1;
-	heapProp.VisibleNodeMask = 1;
-	if (isUAV)
-		heapProp.Type = D3D12_HEAP_TYPE_DEFAULT;
-	else
-		heapProp.Type = D3D12_HEAP_TYPE_UPLOAD;
+	D3D12_HEAP_TYPE heapType = D3D12_HEAP_TYPE_DEFAULT;
+	if (!isUAV)
+	{
+		switch (access)
+		{
+		case EBufferAccess::Upload:
+		case EBufferAccess::Stream:
+			heapType = D3D12_HEAP_TYPE_UPLOAD;
+			break;
+		case EBufferAccess::Readback:
+			heapType = D3D12_HEAP_TYPE_READBACK;
+			break;
+		case EBufferAccess::GpuOnly:
+		default:
+			heapType = D3D12_HEAP_TYPE_DEFAULT;
+			break;
+		}
+	}
 
+	D3D12_RESOURCE_STATES createState = initResState;
+	if (heapType == D3D12_HEAP_TYPE_UPLOAD)
+		createState = D3D12_RESOURCE_STATE_GENERIC_READ;
+	else if (heapType == D3D12_HEAP_TYPE_READBACK)
+		createState = D3D12_RESOURCE_STATE_COPY_DEST;
+
+	D3D12_HEAP_PROPERTIES heapProp = CD3DX12_HEAP_PROPERTIES(heapType);
 	ThrowIfFailed(Device->CreateCommittedResource(&heapProp, D3D12_HEAP_FLAG_NONE, &bufDesc,
-		initResState, nullptr, IID_PPV_ARGS(&buffer->resource)));
+		createState, nullptr, IID_PPV_ARGS(&buffer->resource)));
 
 	if (SrcData)
 	{
-		CommandList* cmd = CmdQ->AllocCmdList();
-
-		cmd->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(buffer->resource.Get(), initResState, D3D12_RESOURCE_STATE_COPY_DEST));
-
 		UINT Size = buffer->NumElements * buffer->ElementSize;
 
-		ComPtr<ID3D12Resource> UploadHeap;
+		if (heapType == D3D12_HEAP_TYPE_UPLOAD)
+		{
+			D3D12_RANGE readRange{ 0, 0 };
+			ThrowIfFailed(buffer->resource->Map(0, &readRange, &buffer->MappedPtr));
+			buffer->MappedSizeInBytes = Size;
+			memcpy(buffer->MappedPtr, SrcData, Size);
+		}
+		else if (heapType == D3D12_HEAP_TYPE_DEFAULT)
+		{
+			CommandList* cmd = CmdQ->AllocCmdList();
 
-		ThrowIfFailed(Device->CreateCommittedResource(
-			&CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD),
-			D3D12_HEAP_FLAG_NONE,
-			&CD3DX12_RESOURCE_DESC::Buffer(Size),
-			D3D12_RESOURCE_STATE_GENERIC_READ,
-			nullptr,
-			IID_PPV_ARGS(&UploadHeap)));
+			if (initResState != D3D12_RESOURCE_STATE_COPY_DEST)
+				cmd->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(buffer->resource.Get(), initResState, D3D12_RESOURCE_STATE_COPY_DEST));
 
-		UINT8* pData = nullptr;
-		UploadHeap->Map(0, nullptr, reinterpret_cast<void**>(&pData));
-		memcpy(reinterpret_cast<void*>(pData), SrcData, Size);
-		UploadHeap->Unmap(0, nullptr);
+			ComPtr<ID3D12Resource> UploadHeap;
 
-		cmd->CmdList->CopyBufferRegion(buffer->resource.Get(), 0, UploadHeap.Get(), 0, Size);
-		cmd->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(buffer->resource.Get(), D3D12_RESOURCE_STATE_COPY_DEST, initResState));
+			ThrowIfFailed(Device->CreateCommittedResource(
+				&CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD),
+				D3D12_HEAP_FLAG_NONE,
+				&CD3DX12_RESOURCE_DESC::Buffer(Size),
+				D3D12_RESOURCE_STATE_GENERIC_READ,
+				nullptr,
+				IID_PPV_ARGS(&UploadHeap)));
+
+			UINT8* pData = nullptr;
+			UploadHeap->Map(0, nullptr, reinterpret_cast<void**>(&pData));
+			memcpy(reinterpret_cast<void*>(pData), SrcData, Size);
+			UploadHeap->Unmap(0, nullptr);
+
+			cmd->CmdList->CopyBufferRegion(buffer->resource.Get(), 0, UploadHeap.Get(), 0, Size);
+			if (initResState != D3D12_RESOURCE_STATE_COPY_DEST)
+				cmd->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(buffer->resource.Get(), D3D12_RESOURCE_STATE_COPY_DEST, initResState));
 
 
-		CmdQ->ExecuteCommandList(cmd);
-		CmdQ->WaitGPU();
+			CmdQ->ExecuteCommandList(cmd);
+			CmdQ->WaitGPU();
+		}
 	}
 
 	//// create shader resource view
@@ -1694,6 +1800,7 @@ shared_ptr<IndexBuffer> DX12Backend::CreateIndexBuffer(EIndexFormat Format, UINT
 	CommandList* cmd = CmdQ->AllocCmdList();
 
 	IndexBuffer* ib = new IndexBuffer;
+	ib->Owner = this;
 
 	/*stringstream ss;
 	ss << "CreateIndexBuffer : " << Size << "\n";
@@ -1762,6 +1869,7 @@ shared_ptr<VertexBuffer> DX12Backend::CreateVertexBuffer(UINT Size, UINT Stride,
 	CommandList* cmd = CmdQ->AllocCmdList();
 
 	VertexBuffer* vb = new VertexBuffer;
+	vb->Owner = this;
 	
 	/*stringstream ss;
 	ss << "CreateVertexBuffer : " << Size << "\n";
@@ -1868,12 +1976,56 @@ void DX12Backend::UpdateUploadStructuredBuffer(Buffer* buffer, const void* srcDa
 	memcpy(buffer->MappedPtr, srcData, sizeInBytes);
 }
 
+shared_ptr<Buffer> DX12Backend::AllocateTransientUploadStructuredBuffer(uint32_t NumElements, uint32_t ElementSize, const void* srcData)
+{
+	if (NumElements == 0 || ElementSize == 0 || !Device || !GlobalDHRing)
+		return nullptr;
+
+	const UINT64 sizeInBytes64 = static_cast<UINT64>(NumElements) * static_cast<UINT64>(ElementSize);
+	if (sizeInBytes64 > static_cast<UINT64>(std::numeric_limits<uint32_t>::max()))
+		return nullptr;
+
+	TransientUploadStructuredAllocation alloc = AllocateTransientUploadStructuredBytes(sizeInBytes64, ElementSize);
+	if (!alloc.resource || !alloc.cpu)
+		return nullptr;
+	if (srcData)
+		memcpy(alloc.cpu, srcData, static_cast<size_t>(sizeInBytes64));
+
+	auto buffer = std::shared_ptr<Buffer>(new Buffer);
+	buffer->Owner = this;
+	buffer->resource = alloc.resource;
+	buffer->NumElements = NumElements;
+	buffer->ElementSize = ElementSize;
+	buffer->MappedPtr = alloc.cpu;
+	buffer->MappedSizeInBytes = static_cast<uint32_t>(sizeInBytes64);
+	buffer->SuballocationOffsetBytes = alloc.offset;
+
+	D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+	srvDesc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+	srvDesc.Format = DXGI_FORMAT_UNKNOWN;
+	srvDesc.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_NONE;
+	srvDesc.Buffer.StructureByteStride = ElementSize;
+	srvDesc.Buffer.FirstElement = static_cast<UINT>(alloc.offset / ElementSize);
+	srvDesc.Buffer.NumElements = NumElements;
+	srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+	GlobalDHRing->AllocDescriptor(buffer->CpuHandleSRV, buffer->GpuHandleSRV);
+	Device->CreateShaderResourceView(buffer->resource.Get(), &srvDesc, buffer->CpuHandleSRV);
+	buffer->Type = Buffer::STRUCTURED;
+
+	if (TransientUploadStructuredKeepAlive.size() < NumFrame)
+		TransientUploadStructuredKeepAlive.resize(NumFrame);
+	const uint32_t frameIndex = CurrentFrameIndex < NumFrame ? CurrentFrameIndex : 0u;
+	TransientUploadStructuredKeepAlive[frameIndex].push_back(buffer);
+	return buffer;
+}
+
 shared_ptr<VertexBuffer> DX12Backend::CreateRWVertexBuffer(uint32_t Size, uint32_t Stride)
 {
 	if (Size == 0 || Stride == 0)
 		return nullptr;
 
 	VertexBuffer* vb = new VertexBuffer;
+	vb->Owner = this;
 
 	D3D12_RESOURCE_DESC desc = CD3DX12_RESOURCE_DESC::Buffer(Size, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
 
@@ -1944,7 +2096,7 @@ DX12Backend::UploadAllocation DX12Backend::AllocateUploadBytes(UINT64 size, UINT
 	auto allocateFromActive = [&]() -> UploadAllocation
 	{
 		UploadHeapBlock* block = ActiveUploadBlock.get();
-		const UINT64 alignedCursor = (block->cursor + align - 1) & ~(align - 1);
+		const UINT64 alignedCursor = AlignUploadOffset(block->cursor, align);
 		if (alignedCursor + size > block->capacity)
 			return {};
 		const UINT64 offset = alignedCursor;
@@ -1997,6 +2149,362 @@ DX12Backend::UploadAllocation DX12Backend::AllocateUploadBytes(UINT64 size, UINT
 	return alloc;
 }
 
+void DX12Backend::ResetTransientUploadStructuredFrame(uint32_t frameIndex)
+{
+	if (TransientUploadStructuredBlocks.size() < NumFrame)
+		TransientUploadStructuredBlocks.resize(NumFrame);
+	if (TransientUploadStructuredKeepAlive.size() < NumFrame)
+		TransientUploadStructuredKeepAlive.resize(NumFrame);
+	if (frameIndex >= TransientUploadStructuredBlocks.size())
+		return;
+
+	TransientUploadStructuredKeepAlive[frameIndex].clear();
+	for (const std::shared_ptr<TransientUploadStructuredBlock>& block : TransientUploadStructuredBlocks[frameIndex])
+	{
+		if (block)
+			block->cursor = 0;
+	}
+}
+
+DX12Backend::TransientUploadStructuredAllocation DX12Backend::AllocateTransientUploadStructuredBytes(UINT64 size, UINT64 alignment)
+{
+	if (size == 0)
+		return {};
+	if (TransientUploadStructuredBlocks.size() < NumFrame)
+		TransientUploadStructuredBlocks.resize(NumFrame);
+	if (TransientUploadStructuredKeepAlive.size() < NumFrame)
+		TransientUploadStructuredKeepAlive.resize(NumFrame);
+
+	const uint32_t frameIndex = CurrentFrameIndex < NumFrame ? CurrentFrameIndex : 0u;
+	std::vector<std::shared_ptr<TransientUploadStructuredBlock>>& blocks = TransientUploadStructuredBlocks[frameIndex];
+	const UINT64 align = alignment > 0 ? alignment : 4u;
+
+	auto allocateFromBlock = [&](const std::shared_ptr<TransientUploadStructuredBlock>& block) -> TransientUploadStructuredAllocation
+	{
+		if (!block || !block->resource)
+			return {};
+		const UINT64 alignedCursor = AlignUploadOffset(block->cursor, align);
+		if (alignedCursor + size > block->capacity)
+			return {};
+		block->cursor = alignedCursor + size;
+
+		TransientUploadStructuredAllocation alloc;
+		alloc.resource = block->resource;
+		alloc.offset = alignedCursor;
+		alloc.cpu = block->mappedBase + alignedCursor;
+		alloc.gpuVA = block->gpuVA + alignedCursor;
+		++TransientUploadStructuredAllocationCount;
+		TransientUploadStructuredBytesIssued += size;
+		return alloc;
+	};
+
+	for (const std::shared_ptr<TransientUploadStructuredBlock>& block : blocks)
+	{
+		TransientUploadStructuredAllocation alloc = allocateFromBlock(block);
+		if (alloc.resource)
+			return alloc;
+	}
+
+	const UINT64 requestedSize = size + align;
+	const UINT64 blockSize = std::max<UINT64>(TransientUploadStructuredBlockDefaultSize, requestedSize);
+	auto block = std::make_shared<TransientUploadStructuredBlock>();
+	ThrowIfFailed(Device->CreateCommittedResource(
+		&CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD),
+		D3D12_HEAP_FLAG_NONE,
+		&CD3DX12_RESOURCE_DESC::Buffer(blockSize),
+		D3D12_RESOURCE_STATE_GENERIC_READ,
+		nullptr,
+		IID_PPV_ARGS(&block->resource)));
+	NAME_D3D12_OBJECT(block->resource);
+
+	void* mapped = nullptr;
+	D3D12_RANGE readRange{ 0, 0 };
+	ThrowIfFailed(block->resource->Map(0, &readRange, &mapped));
+	block->mappedBase = static_cast<uint8_t*>(mapped);
+	block->gpuVA = block->resource->GetGPUVirtualAddress();
+	block->capacity = blockSize;
+	block->cursor = 0;
+	blocks.push_back(block);
+	++TransientUploadStructuredBlockCount;
+	TransientUploadStructuredBytesReserved += blockSize;
+
+	return allocateFromBlock(block);
+}
+
+DX12Backend::PersistentStructuredBufferAllocation DX12Backend::AllocatePersistentStructuredBufferBytes(UINT64 size, UINT64 alignment)
+{
+	if (size == 0)
+		return {};
+	const UINT64 align = alignment > 0 ? alignment : 4u;
+
+	auto allocateFromBlock = [&](const std::shared_ptr<PersistentStructuredBufferBlock>& block) -> PersistentStructuredBufferAllocation
+	{
+		if (!block || !block->resource)
+			return {};
+
+		for (size_t rangeIndex = 0; rangeIndex < block->freeRanges.size(); ++rangeIndex)
+		{
+			PersistentStructuredBufferBlock::FreeRange range = block->freeRanges[rangeIndex];
+			const UINT64 alignedOffset = AlignUploadOffset(range.offset, align);
+			const UINT64 rangeEnd = range.offset + range.size;
+			if (alignedOffset > rangeEnd || alignedOffset + size > rangeEnd)
+				continue;
+
+			auto insertIt = block->freeRanges.erase(block->freeRanges.begin() + rangeIndex);
+			if (alignedOffset > range.offset)
+			{
+				insertIt = block->freeRanges.insert(insertIt, { range.offset, alignedOffset - range.offset });
+				++insertIt;
+			}
+			const UINT64 allocEnd = alignedOffset + size;
+			if (allocEnd < rangeEnd)
+			{
+				block->freeRanges.insert(insertIt, { allocEnd, rangeEnd - allocEnd });
+			}
+
+			PersistentStructuredBufferAllocation alloc;
+			alloc.resource = block->resource;
+			alloc.block = block;
+			alloc.offset = alignedOffset;
+			alloc.size = size;
+			++PersistentStructuredBufferAllocationCount;
+			PersistentStructuredBufferBytesIssued += size;
+			return alloc;
+		}
+
+		const UINT64 alignedCursor = AlignUploadOffset(block->cursor, align);
+		if (alignedCursor + size > block->capacity)
+			return {};
+		block->cursor = alignedCursor + size;
+
+		PersistentStructuredBufferAllocation alloc;
+		alloc.resource = block->resource;
+		alloc.block = block;
+		alloc.offset = alignedCursor;
+		alloc.size = size;
+		++PersistentStructuredBufferAllocationCount;
+		PersistentStructuredBufferBytesIssued += size;
+		return alloc;
+	};
+
+	for (const std::shared_ptr<PersistentStructuredBufferBlock>& block : PersistentStructuredBufferBlocks)
+	{
+		PersistentStructuredBufferAllocation alloc = allocateFromBlock(block);
+		if (alloc.resource)
+			return alloc;
+	}
+
+	const UINT64 requestedSize = size + align;
+	const UINT64 blockSize = std::max<UINT64>(PersistentStructuredBufferBlockDefaultSize, requestedSize);
+	auto block = std::make_shared<PersistentStructuredBufferBlock>();
+	ThrowIfFailed(Device->CreateCommittedResource(
+		&CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT),
+		D3D12_HEAP_FLAG_NONE,
+		&CD3DX12_RESOURCE_DESC::Buffer(blockSize),
+		D3D12_RESOURCE_STATE_COPY_DEST,
+		nullptr,
+		IID_PPV_ARGS(&block->resource)));
+	NAME_D3D12_OBJECT(block->resource);
+	block->capacity = blockSize;
+	block->cursor = 0;
+	block->state = D3D12_RESOURCE_STATE_COPY_DEST;
+	PersistentStructuredBufferBlocks.push_back(block);
+	++PersistentStructuredBufferBlockCount;
+	PersistentStructuredBufferBytesReserved += blockSize;
+	return allocateFromBlock(block);
+}
+
+void DX12Backend::AddPersistentStructuredBufferFreeRange(
+	const std::shared_ptr<PersistentStructuredBufferBlock>& block,
+	UINT64 offset,
+	UINT64 size)
+{
+	if (!block || size == 0)
+		return;
+
+	PersistentStructuredBufferBlock::FreeRange newRange{ offset, size };
+	auto& ranges = block->freeRanges;
+	auto insertIt = ranges.begin();
+	while (insertIt != ranges.end() && insertIt->offset < newRange.offset)
+		++insertIt;
+	insertIt = ranges.insert(insertIt, newRange);
+
+	if (insertIt != ranges.begin())
+	{
+		auto prevIt = std::prev(insertIt);
+		const UINT64 prevEnd = prevIt->offset + prevIt->size;
+		if (prevEnd >= insertIt->offset)
+		{
+			prevIt->size = std::max(prevEnd, insertIt->offset + insertIt->size) - prevIt->offset;
+			insertIt = ranges.erase(insertIt);
+			insertIt = prevIt;
+		}
+	}
+
+	auto nextIt = std::next(insertIt);
+	while (nextIt != ranges.end())
+	{
+		const UINT64 rangeEnd = insertIt->offset + insertIt->size;
+		if (rangeEnd < nextIt->offset)
+			break;
+		insertIt->size = std::max(rangeEnd, nextIt->offset + nextIt->size) - insertIt->offset;
+		nextIt = ranges.erase(nextIt);
+	}
+}
+
+void DX12Backend::ReleasePersistentStructuredBufferBytes(
+	const std::shared_ptr<PersistentStructuredBufferBlock>& block,
+	UINT64 offset,
+	UINT64 size)
+{
+	if (!block || size == 0)
+		return;
+
+	if (!CmdQ || !CmdQ->m_fence)
+	{
+		AddPersistentStructuredBufferFreeRange(block, offset, size);
+		return;
+	}
+
+	PendingPersistentStructuredBufferFrees.push_back({
+		block,
+		offset,
+		size,
+		CmdQ->CurrentFenceValue
+	});
+}
+
+void DX12Backend::RetireCompletedPersistentStructuredBufferFrees()
+{
+	if (!CmdQ || !CmdQ->m_fence || PendingPersistentStructuredBufferFrees.empty())
+		return;
+
+	const UINT64 completedFenceValue = CmdQ->m_fence->GetCompletedValue();
+	PendingPersistentStructuredBufferFrees.erase(
+		std::remove_if(
+			PendingPersistentStructuredBufferFrees.begin(),
+			PendingPersistentStructuredBufferFrees.end(),
+			[&](const PendingPersistentStructuredBufferFree& pending)
+			{
+				if (pending.fenceValue > completedFenceValue)
+					return false;
+				AddPersistentStructuredBufferFreeRange(pending.block, pending.offset, pending.size);
+				return true;
+			}),
+		PendingPersistentStructuredBufferFrees.end());
+}
+
+void DX12Backend::RetireCompletedPersistentStructuredBufferUploads()
+{
+	if (!CmdQ || !CmdQ->m_fence || PendingPersistentStructuredBufferUploads.empty())
+		return;
+
+	const UINT64 completedFenceValue = CmdQ->m_fence->GetCompletedValue();
+	size_t kept = 0;
+	for (size_t i = 0; i < PendingPersistentStructuredBufferUploads.size(); ++i)
+	{
+		PendingPersistentStructuredBufferUpload& pending = PendingPersistentStructuredBufferUploads[i];
+		if (pending.FenceValue <= completedFenceValue)
+		{
+			PendingPersistentStructuredBufferUploadBytes -=
+				std::min(PendingPersistentStructuredBufferUploadBytes, pending.Bytes);
+			continue;
+		}
+		if (kept != i)
+			PendingPersistentStructuredBufferUploads[kept] = std::move(pending);
+		++kept;
+	}
+	PendingPersistentStructuredBufferUploads.resize(kept);
+}
+
+std::shared_ptr<Buffer> DX12Backend::CreateSuballocatedStructuredBuffer(const BufferCreateDesc& desc)
+{
+	if (!Device || !TextureDHRing || desc.NumElements == 0 || desc.ElementSize == 0 || !desc.InitialData)
+		return nullptr;
+
+	const UINT64 sizeInBytes64 = static_cast<UINT64>(desc.NumElements) * static_cast<UINT64>(desc.ElementSize);
+	if (sizeInBytes64 > static_cast<UINT64>(std::numeric_limits<uint32_t>::max()))
+		return nullptr;
+
+	PersistentStructuredBufferAllocation alloc = AllocatePersistentStructuredBufferBytes(sizeInBytes64, desc.ElementSize);
+	if (!alloc.resource)
+		return nullptr;
+
+	std::shared_ptr<PersistentStructuredBufferBlock> ownerBlock = alloc.block;
+	if (!ownerBlock)
+		return nullptr;
+
+	const D3D12_RESOURCE_STATES targetState = ToD3D12ResourceState(desc.InitialState);
+	RetireCompletedPersistentStructuredBufferUploads();
+	WaitForAsyncRtOnGraphicsQueue();
+
+	CommandList* cmd = CmdQ->AllocCmdList();
+	if (ownerBlock->state != D3D12_RESOURCE_STATE_COPY_DEST)
+	{
+		cmd->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(
+			ownerBlock->resource.Get(),
+			ownerBlock->state,
+			D3D12_RESOURCE_STATE_COPY_DEST));
+		ownerBlock->state = D3D12_RESOURCE_STATE_COPY_DEST;
+	}
+
+	ComPtr<ID3D12Resource> uploadHeap;
+	ThrowIfFailed(Device->CreateCommittedResource(
+		&CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD),
+		D3D12_HEAP_FLAG_NONE,
+		&CD3DX12_RESOURCE_DESC::Buffer(sizeInBytes64),
+		D3D12_RESOURCE_STATE_GENERIC_READ,
+		nullptr,
+		IID_PPV_ARGS(&uploadHeap)));
+	NAME_D3D12_OBJECT(uploadHeap);
+
+	void* mapped = nullptr;
+	D3D12_RANGE readRange{ 0, 0 };
+	ThrowIfFailed(uploadHeap->Map(0, &readRange, &mapped));
+	memcpy(mapped, desc.InitialData, static_cast<size_t>(sizeInBytes64));
+	uploadHeap->Unmap(0, nullptr);
+	cmd->CmdList->CopyBufferRegion(ownerBlock->resource.Get(), alloc.offset, uploadHeap.Get(), 0, sizeInBytes64);
+
+	if (targetState != D3D12_RESOURCE_STATE_COPY_DEST)
+	{
+		cmd->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(
+			ownerBlock->resource.Get(),
+			D3D12_RESOURCE_STATE_COPY_DEST,
+			targetState));
+		ownerBlock->state = targetState;
+	}
+
+	CmdQ->ExecuteCommandList(cmd);
+
+	PendingPersistentStructuredBufferUpload pendingUpload;
+	pendingUpload.FenceValue = cmd->Fence.value_or(CmdQ->CurrentFenceValue);
+	pendingUpload.Bytes = sizeInBytes64;
+	pendingUpload.UploadHeap = uploadHeap;
+	PendingPersistentStructuredBufferUploads.push_back(std::move(pendingUpload));
+	PendingPersistentStructuredBufferUploadBytes += sizeInBytes64;
+	if (PendingPersistentStructuredBufferUploadBytes > kMaxInFlightPersistentStructuredBufferUploadBytes)
+	{
+		CmdQ->WaitGPU();
+		RetireCompletedPersistentStructuredBufferUploads();
+		RetireCompletedPersistentStructuredBufferFrees();
+	}
+
+	auto buffer = std::shared_ptr<Buffer>(
+		new Buffer,
+		[this, ownerBlock, offset = alloc.offset, size = alloc.size](Buffer* rawBuffer)
+		{
+			delete rawBuffer;
+			ReleasePersistentStructuredBufferBytes(ownerBlock, offset, size);
+		});
+	buffer->Owner = this;
+	buffer->resource = alloc.resource;
+	buffer->NumElements = desc.NumElements;
+	buffer->ElementSize = desc.ElementSize;
+	buffer->SuballocationOffsetBytes = alloc.offset;
+	buffer->MakeStructuredBufferSRV();
+	return buffer;
+}
+
 shared_ptr<VertexBuffer> DX12Backend::CreateUploadVertexBuffer(UINT size, UINT stride, const void* srcData)
 {
 	if (size == 0)
@@ -2011,6 +2519,7 @@ shared_ptr<VertexBuffer> DX12Backend::CreateUploadVertexBuffer(UINT size, UINT s
 		memcpy(alloc.cpu, srcData, size);
 
 	auto* vb = new VertexBuffer;
+	vb->Owner = this;
 	vb->resource = alloc.resource; // shared with the block; block stays alive while VB lives
 	vb->view.BufferLocation = alloc.gpuVA;
 	vb->view.StrideInBytes = stride;
@@ -2035,6 +2544,7 @@ shared_ptr<IndexBuffer> DX12Backend::CreateUploadIndexBuffer(EIndexFormat format
 		memcpy(alloc.cpu, srcData, size);
 
 	auto* ib = new IndexBuffer;
+	ib->Owner = this;
 	ib->resource = alloc.resource; // shared with the block
 	ib->view.BufferLocation = alloc.gpuVA;
 	ib->view.Format = ToDXGIFormat(format);
@@ -2154,6 +2664,18 @@ DX12Backend::DX12Backend(ComPtr<ID3D12Device5> InDevice)
 		SRVCBVDescriptorHeapShaderVisible->Init(Device.Get(), HeapDesc);
 
 		NAME_D3D12_OBJECT(SRVCBVDescriptorHeapShaderVisible->DH);
+
+		SRVCBVDescriptorHeapShaderVisible->AllocDescriptors(
+			BindlessTextureTableCpuBase,
+			BindlessTextureTableGpuBase,
+			kMaxDX12BindlessTextureSlots);
+		bBindlessTextureTableAllocated = true;
+
+		SRVCBVDescriptorHeapShaderVisible->AllocDescriptors(
+			BindlessBufferTableCpuBase,
+			BindlessBufferTableGpuBase,
+			kMaxDX12BindlessBufferSlots);
+		bBindlessBufferTableAllocated = true;
 	}
 
 	// non shader visible(storage) CBV_SRV_UAV
@@ -2279,9 +2801,498 @@ void DX12Backend::HideBvhViewerD3D12Window()
 		CoronaBvhViewerD3D12_SetWindowVisible(BvhViewerD3D12, false);
 }
 
+RHITextureHandle DX12Backend::RegisterBindlessTexture(Texture* texture)
+{
+	if (!texture || !Device || !SRVCBVDescriptorHeapShaderVisible || !bBindlessTextureTableAllocated)
+		return {};
+
+	{
+		std::lock_guard<std::mutex> lock(BindlessTextureMutex);
+		const RHITextureHandle existing = texture->BindlessHandle;
+		if (existing.IsValid() &&
+			existing.Index < BindlessTextureSlots.size() &&
+			BindlessTextureSlots[existing.Index].Occupied &&
+			BindlessTextureSlots[existing.Index].Generation == existing.Generation &&
+			BindlessTextureSlots[existing.Index].TexturePtr == texture)
+		{
+			return existing;
+		}
+
+		uint32_t slotIndex = RHI_INVALID_BINDLESS_INDEX;
+		if (!BindlessTextureFreeList.empty())
+		{
+			slotIndex = BindlessTextureFreeList.back();
+			BindlessTextureFreeList.pop_back();
+		}
+		else
+		{
+			if (BindlessTextureSlots.size() >= kMaxDX12BindlessTextureSlots)
+				return {};
+			slotIndex = static_cast<uint32_t>(BindlessTextureSlots.size());
+			BindlessTextureSlots.emplace_back();
+			DX12BindlessTextureSlot& newSlot = BindlessTextureSlots.back();
+			const SIZE_T slotOffset = static_cast<SIZE_T>(slotIndex) * SRVCBVDescriptorHeapShaderVisible->DescriptorSize;
+			newSlot.CpuHandleSRV.ptr = BindlessTextureTableCpuBase.ptr + slotOffset;
+			newSlot.GpuHandleSRV.ptr = BindlessTextureTableGpuBase.ptr + slotOffset;
+		}
+
+		DX12BindlessTextureSlot& slot = BindlessTextureSlots[slotIndex];
+		if (slot.Generation == 0)
+			slot.Generation = 1;
+		slot.TexturePtr = texture;
+		slot.Occupied = true;
+		texture->BindlessHandle = { slotIndex, slot.Generation };
+		texture->CpuHandleBindlessSRV = slot.CpuHandleSRV;
+		texture->GpuHandleBindlessSRV = slot.GpuHandleSRV;
+	}
+
+	if (!UpdateBindlessTexture(texture))
+		return {};
+	return texture->BindlessHandle;
+}
+
+bool DX12Backend::UpdateBindlessTexture(Texture* texture)
+{
+	if (!texture || !Device || !texture->resource)
+		return false;
+
+	std::lock_guard<std::mutex> lock(BindlessTextureMutex);
+	const RHITextureHandle handle = texture->BindlessHandle;
+	if (!handle.IsValid() ||
+		handle.Index >= BindlessTextureSlots.size() ||
+		!BindlessTextureSlots[handle.Index].Occupied ||
+		BindlessTextureSlots[handle.Index].Generation != handle.Generation)
+	{
+		return false;
+	}
+
+	DX12BindlessTextureSlot& slot = BindlessTextureSlots[handle.Index];
+	slot.TexturePtr = texture;
+	texture->CpuHandleBindlessSRV = slot.CpuHandleSRV;
+	texture->GpuHandleBindlessSRV = slot.GpuHandleSRV;
+
+	const D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = MakeTextureSRVDesc(*texture);
+	Device->CreateShaderResourceView(texture->resource.Get(), &srvDesc, slot.CpuHandleSRV);
+	return true;
+}
+
+void DX12Backend::UnregisterBindlessTexture(Texture* texture)
+{
+	if (!texture)
+		return;
+
+	std::lock_guard<std::mutex> lock(BindlessTextureMutex);
+	const RHITextureHandle handle = texture->BindlessHandle;
+	if (handle.IsValid() &&
+		handle.Index < BindlessTextureSlots.size())
+	{
+		DX12BindlessTextureSlot& slot = BindlessTextureSlots[handle.Index];
+		if (slot.Occupied &&
+			slot.Generation == handle.Generation &&
+			slot.TexturePtr == texture)
+		{
+			if (Device)
+			{
+				D3D12_SHADER_RESOURCE_VIEW_DESC nullSrvDesc = {};
+				nullSrvDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+				nullSrvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+				nullSrvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+				nullSrvDesc.Texture2D.MipLevels = 1;
+				Device->CreateShaderResourceView(nullptr, &nullSrvDesc, slot.CpuHandleSRV);
+			}
+			slot.TexturePtr = nullptr;
+			slot.Occupied = false;
+			++slot.Generation;
+			if (slot.Generation == 0)
+				slot.Generation = 1;
+			BindlessTextureFreeList.push_back(handle.Index);
+		}
+	}
+
+	texture->BindlessHandle = {};
+	texture->CpuHandleBindlessSRV = {};
+	texture->GpuHandleBindlessSRV = {};
+	texture->Owner = nullptr;
+}
+
+RHITextureHandle DX12Backend::GetBindlessTextureHandle(const Texture* texture) const
+{
+	if (!texture)
+		return {};
+
+	std::lock_guard<std::mutex> lock(BindlessTextureMutex);
+	const RHITextureHandle handle = texture->BindlessHandle;
+	if (!handle.IsValid() ||
+		handle.Index >= BindlessTextureSlots.size() ||
+		!BindlessTextureSlots[handle.Index].Occupied ||
+		BindlessTextureSlots[handle.Index].Generation != handle.Generation ||
+		BindlessTextureSlots[handle.Index].TexturePtr != texture)
+	{
+		return {};
+	}
+	return handle;
+}
+
+namespace
+{
+	bool IsValidCpuDescriptor(D3D12_CPU_DESCRIPTOR_HANDLE handle)
+	{
+		return handle.ptr != 0;
+	}
+
+	void WriteNullRawBufferSRV(ID3D12Device5* device, D3D12_CPU_DESCRIPTOR_HANDLE destination)
+	{
+		if (!device || !IsValidCpuDescriptor(destination))
+			return;
+
+		D3D12_SHADER_RESOURCE_VIEW_DESC nullSrvDesc = {};
+		nullSrvDesc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+		nullSrvDesc.Format = DXGI_FORMAT_R32_TYPELESS;
+		nullSrvDesc.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
+		nullSrvDesc.Buffer.StructureByteStride = 0;
+		nullSrvDesc.Buffer.FirstElement = 0;
+		nullSrvDesc.Buffer.NumElements = 1;
+		nullSrvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+		device->CreateShaderResourceView(nullptr, &nullSrvDesc, destination);
+	}
+
+	RHIBufferHandle RegisterDX12BindlessBufferDescriptor(
+		DX12Backend& owner,
+		const void* bufferPtr,
+		uint8_t resourceType,
+		RHIBufferHandle& bindlessHandle,
+		D3D12_CPU_DESCRIPTOR_HANDLE sourceCpuHandle,
+		D3D12_CPU_DESCRIPTOR_HANDLE& bindlessCpuHandle,
+		D3D12_GPU_DESCRIPTOR_HANDLE& bindlessGpuHandle)
+	{
+		if (!bufferPtr || !owner.Device || !owner.SRVCBVDescriptorHeapShaderVisible ||
+			!owner.bBindlessBufferTableAllocated || !IsValidCpuDescriptor(sourceCpuHandle))
+		{
+			return {};
+		}
+
+		{
+			std::lock_guard<std::mutex> lock(owner.BindlessBufferMutex);
+			const RHIBufferHandle existing = bindlessHandle;
+			if (existing.IsValid() &&
+				existing.Index < owner.BindlessBufferSlots.size() &&
+				owner.BindlessBufferSlots[existing.Index].Occupied &&
+				owner.BindlessBufferSlots[existing.Index].Generation == existing.Generation &&
+				owner.BindlessBufferSlots[existing.Index].BufferPtr == bufferPtr)
+			{
+				return existing;
+			}
+
+			uint32_t slotIndex = RHI_INVALID_BINDLESS_INDEX;
+			if (!owner.BindlessBufferFreeList.empty())
+			{
+				slotIndex = owner.BindlessBufferFreeList.back();
+				owner.BindlessBufferFreeList.pop_back();
+			}
+			else
+			{
+				if (owner.BindlessBufferSlots.size() >= DX12Backend::kMaxDX12BindlessBufferSlots)
+					return {};
+				slotIndex = static_cast<uint32_t>(owner.BindlessBufferSlots.size());
+				owner.BindlessBufferSlots.emplace_back();
+				DX12Backend::DX12BindlessBufferSlot& newSlot = owner.BindlessBufferSlots.back();
+				const SIZE_T slotOffset = static_cast<SIZE_T>(slotIndex) * owner.SRVCBVDescriptorHeapShaderVisible->DescriptorSize;
+				newSlot.CpuHandleSRV.ptr = owner.BindlessBufferTableCpuBase.ptr + slotOffset;
+				newSlot.GpuHandleSRV.ptr = owner.BindlessBufferTableGpuBase.ptr + slotOffset;
+			}
+
+			DX12Backend::DX12BindlessBufferSlot& slot = owner.BindlessBufferSlots[slotIndex];
+			if (slot.Generation == 0)
+				slot.Generation = 1;
+			slot.BufferPtr = bufferPtr;
+			slot.ResourceType = resourceType;
+			slot.Occupied = true;
+			bindlessHandle = { slotIndex, slot.Generation };
+			bindlessCpuHandle = slot.CpuHandleSRV;
+			bindlessGpuHandle = slot.GpuHandleSRV;
+			owner.Device->CopyDescriptorsSimple(
+				1,
+				slot.CpuHandleSRV,
+				sourceCpuHandle,
+				D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+		}
+
+		return bindlessHandle;
+	}
+
+	void UnregisterDX12BindlessBufferDescriptor(
+		DX12Backend& owner,
+		const void* bufferPtr,
+		RHIBufferHandle& bindlessHandle,
+		D3D12_CPU_DESCRIPTOR_HANDLE& bindlessCpuHandle,
+		D3D12_GPU_DESCRIPTOR_HANDLE& bindlessGpuHandle)
+	{
+		std::lock_guard<std::mutex> lock(owner.BindlessBufferMutex);
+		const RHIBufferHandle handle = bindlessHandle;
+		if (handle.IsValid() &&
+			handle.Index < owner.BindlessBufferSlots.size())
+		{
+			DX12Backend::DX12BindlessBufferSlot& slot = owner.BindlessBufferSlots[handle.Index];
+			if (slot.Occupied &&
+				slot.Generation == handle.Generation &&
+				slot.BufferPtr == bufferPtr)
+			{
+				WriteNullRawBufferSRV(owner.Device.Get(), slot.CpuHandleSRV);
+				slot.BufferPtr = nullptr;
+				slot.ResourceType = 0;
+				slot.Occupied = false;
+				++slot.Generation;
+				if (slot.Generation == 0)
+					slot.Generation = 1;
+				owner.BindlessBufferFreeList.push_back(handle.Index);
+			}
+		}
+
+		bindlessHandle = {};
+		bindlessCpuHandle = {};
+		bindlessGpuHandle = {};
+	}
+
+	RHIBufferHandle GetDX12BindlessBufferDescriptorHandle(
+		const DX12Backend& owner,
+		const void* bufferPtr,
+		const RHIBufferHandle& bindlessHandle)
+	{
+		if (!bufferPtr)
+			return {};
+
+		std::lock_guard<std::mutex> lock(owner.BindlessBufferMutex);
+		if (!bindlessHandle.IsValid() ||
+			bindlessHandle.Index >= owner.BindlessBufferSlots.size() ||
+			!owner.BindlessBufferSlots[bindlessHandle.Index].Occupied ||
+			owner.BindlessBufferSlots[bindlessHandle.Index].Generation != bindlessHandle.Generation ||
+			owner.BindlessBufferSlots[bindlessHandle.Index].BufferPtr != bufferPtr)
+		{
+			return {};
+		}
+		return bindlessHandle;
+	}
+}
+
+RHIBufferHandle DX12Backend::RegisterBindlessBuffer(Buffer* buffer)
+{
+	if (!buffer)
+		return {};
+	buffer->Owner = this;
+	return RegisterDX12BindlessBufferDescriptor(
+		*this,
+		buffer,
+		1,
+		buffer->BindlessHandle,
+		buffer->CpuHandleSRV,
+		buffer->CpuHandleBindlessSRV,
+		buffer->GpuHandleBindlessSRV);
+}
+
+RHIBufferHandle DX12Backend::RegisterBindlessVertexBuffer(VertexBuffer* buffer)
+{
+	if (!buffer)
+		return {};
+	buffer->Owner = this;
+	return RegisterDX12BindlessBufferDescriptor(
+		*this,
+		buffer,
+		2,
+		buffer->BindlessHandle,
+		buffer->CpuHandleSRV,
+		buffer->CpuHandleBindlessSRV,
+		buffer->GpuHandleBindlessSRV);
+}
+
+RHIBufferHandle DX12Backend::RegisterBindlessIndexBuffer(IndexBuffer* buffer)
+{
+	if (!buffer)
+		return {};
+	buffer->Owner = this;
+	return RegisterDX12BindlessBufferDescriptor(
+		*this,
+		buffer,
+		3,
+		buffer->BindlessHandle,
+		buffer->CpuHandleSRV,
+		buffer->CpuHandleBindlessSRV,
+		buffer->GpuHandleBindlessSRV);
+}
+
+void DX12Backend::UnregisterBindlessBuffer(Buffer* buffer)
+{
+	if (!buffer)
+		return;
+	UnregisterDX12BindlessBufferDescriptor(
+		*this,
+		buffer,
+		buffer->BindlessHandle,
+		buffer->CpuHandleBindlessSRV,
+		buffer->GpuHandleBindlessSRV);
+	buffer->Owner = nullptr;
+}
+
+void DX12Backend::UnregisterBindlessVertexBuffer(VertexBuffer* buffer)
+{
+	if (!buffer)
+		return;
+	UnregisterDX12BindlessBufferDescriptor(
+		*this,
+		buffer,
+		buffer->BindlessHandle,
+		buffer->CpuHandleBindlessSRV,
+		buffer->GpuHandleBindlessSRV);
+	buffer->Owner = nullptr;
+}
+
+void DX12Backend::UnregisterBindlessIndexBuffer(IndexBuffer* buffer)
+{
+	if (!buffer)
+		return;
+	UnregisterDX12BindlessBufferDescriptor(
+		*this,
+		buffer,
+		buffer->BindlessHandle,
+		buffer->CpuHandleBindlessSRV,
+		buffer->GpuHandleBindlessSRV);
+	buffer->Owner = nullptr;
+}
+
+RHIBufferHandle DX12Backend::GetBindlessBufferHandle(const Buffer* buffer) const
+{
+	if (!buffer)
+		return {};
+	return GetDX12BindlessBufferDescriptorHandle(*this, buffer, buffer->BindlessHandle);
+}
+
+RHIBufferHandle DX12Backend::GetBindlessVertexBufferHandle(const VertexBuffer* buffer) const
+{
+	if (!buffer)
+		return {};
+	return GetDX12BindlessBufferDescriptorHandle(*this, buffer, buffer->BindlessHandle);
+}
+
+RHIBufferHandle DX12Backend::GetBindlessIndexBufferHandle(const IndexBuffer* buffer) const
+{
+	if (!buffer)
+		return {};
+	return GetDX12BindlessBufferDescriptorHandle(*this, buffer, buffer->BindlessHandle);
+}
+
+RenderBackendAllocatorStats DX12Backend::GetAllocatorStats() const
+{
+	RenderBackendAllocatorStats stats{};
+	stats.PersistentStructuredBlockCount = static_cast<uint32_t>(PersistentStructuredBufferBlocks.size());
+	stats.PersistentStructuredBytesIssued = PersistentStructuredBufferBytesIssued;
+	stats.PersistentStructuredPendingUploadBytes = PendingPersistentStructuredBufferUploadBytes;
+	for (const std::shared_ptr<PersistentStructuredBufferBlock>& block : PersistentStructuredBufferBlocks)
+	{
+		if (!block)
+			continue;
+		stats.PersistentStructuredReservedBytes += block->capacity;
+		stats.PersistentStructuredCommittedBytes += block->cursor;
+		for (const PersistentStructuredBufferBlock::FreeRange& range : block->freeRanges)
+		{
+			stats.PersistentStructuredReusableBytes += range.size;
+		}
+	}
+	for (const PendingPersistentStructuredBufferFree& pending : PendingPersistentStructuredBufferFrees)
+	{
+		stats.PersistentStructuredPendingFreeBytes += pending.size;
+	}
+
+	stats.TransientStructuredBlockCount = TransientUploadStructuredBlockCount;
+	stats.TransientStructuredBytesIssued = TransientUploadStructuredBytesIssued;
+	stats.TransientStructuredReservedBytes = TransientUploadStructuredBytesReserved;
+	const uint32_t frameIndex = CurrentFrameIndex < TransientUploadStructuredBlocks.size() ? CurrentFrameIndex : 0u;
+	if (frameIndex < TransientUploadStructuredBlocks.size())
+	{
+		for (const std::shared_ptr<TransientUploadStructuredBlock>& block : TransientUploadStructuredBlocks[frameIndex])
+		{
+			if (block)
+				stats.TransientStructuredCurrentFrameBytes += block->cursor;
+		}
+	}
+
+	{
+		std::lock_guard<std::mutex> lock(BindlessTextureMutex);
+		stats.BindlessTextureSlotsCapacity = static_cast<uint32_t>(BindlessTextureSlots.size());
+		for (const DX12BindlessTextureSlot& slot : BindlessTextureSlots)
+		{
+			if (slot.Occupied)
+				++stats.BindlessTextureSlotsUsed;
+		}
+	}
+	{
+		std::lock_guard<std::mutex> lock(BindlessBufferMutex);
+		stats.BindlessBufferSlotsCapacity = static_cast<uint32_t>(BindlessBufferSlots.size());
+		for (const DX12BindlessBufferSlot& slot : BindlessBufferSlots)
+		{
+			if (slot.Occupied)
+				++stats.BindlessBufferSlotsUsed;
+		}
+	}
+	return stats;
+}
+
 DX12Backend::~DX12Backend()
 {
 	CmdQ->WaitGPU();
+	RetireCompletedPersistentStructuredBufferUploads();
+	RetireCompletedPersistentStructuredBufferFrees();
+	{
+		std::lock_guard<std::mutex> lock(BindlessTextureMutex);
+		for (DX12BindlessTextureSlot& slot : BindlessTextureSlots)
+		{
+			if (slot.TexturePtr)
+			{
+				slot.TexturePtr->BindlessHandle = {};
+				slot.TexturePtr->CpuHandleBindlessSRV = {};
+				slot.TexturePtr->GpuHandleBindlessSRV = {};
+				slot.TexturePtr->Owner = nullptr;
+			}
+			slot.TexturePtr = nullptr;
+			slot.Occupied = false;
+		}
+		BindlessTextureFreeList.clear();
+	}
+	{
+		std::lock_guard<std::mutex> lock(BindlessBufferMutex);
+		for (DX12BindlessBufferSlot& slot : BindlessBufferSlots)
+		{
+			if (slot.BufferPtr)
+			{
+				if (slot.ResourceType == 1)
+				{
+					Buffer* buffer = const_cast<Buffer*>(static_cast<const Buffer*>(slot.BufferPtr));
+					buffer->BindlessHandle = {};
+					buffer->CpuHandleBindlessSRV = {};
+					buffer->GpuHandleBindlessSRV = {};
+					buffer->Owner = nullptr;
+				}
+				else if (slot.ResourceType == 2)
+				{
+					VertexBuffer* buffer = const_cast<VertexBuffer*>(static_cast<const VertexBuffer*>(slot.BufferPtr));
+					buffer->BindlessHandle = {};
+					buffer->CpuHandleBindlessSRV = {};
+					buffer->GpuHandleBindlessSRV = {};
+					buffer->Owner = nullptr;
+				}
+				else if (slot.ResourceType == 3)
+				{
+					IndexBuffer* buffer = const_cast<IndexBuffer*>(static_cast<const IndexBuffer*>(slot.BufferPtr));
+					buffer->BindlessHandle = {};
+					buffer->CpuHandleBindlessSRV = {};
+					buffer->GpuHandleBindlessSRV = {};
+					buffer->Owner = nullptr;
+				}
+			}
+			slot.BufferPtr = nullptr;
+			slot.ResourceType = 0;
+			slot.Occupied = false;
+		}
+		BindlessBufferFreeList.clear();
+	}
 	if (BvhViewerD3D12)
 	{
 		CoronaBvhViewerD3D12_Shutdown(BvhViewerD3D12);
@@ -2292,12 +3303,67 @@ DX12Backend::~DX12Backend()
 	ShutdownGpuTimestampQueries();
 }
 
+static RHIBindingDesc MakeLegacyRHIBindingDesc(
+	const string& name,
+	RHIDescriptorKind descriptorKind,
+	RHIResourceKind resourceKind,
+	uint32_t baseRegister,
+	uint32_t descriptorCount,
+	uint32_t sizeInBytes = 0)
+{
+	RHIBindingDesc binding{};
+	binding.Name = name;
+	binding.DescriptorKind = descriptorKind;
+	binding.ResourceKind = resourceKind;
+	binding.Access = descriptorKind == RHIDescriptorKind::UAV ? RHIDescriptorAccess::ReadWrite : RHIDescriptorAccess::ReadOnly;
+	binding.RegisterIndex = baseRegister;
+	binding.DescriptorCount = descriptorCount;
+	binding.SizeInBytes = sizeInBytes;
+	return binding;
+}
+
+static UINT ToD3D12DescriptorCount(const RHIBindingDesc& binding)
+{
+	if (binding.RuntimeArray || binding.DescriptorCount == RHI_BINDLESS_ARRAY)
+		return UINT_MAX;
+	return binding.DescriptorCount == 0 ? 1 : binding.DescriptorCount;
+}
+
+static UINT ToD3D12RegisterSpace(const RHIBindingDesc& binding)
+{
+	return binding.RegisterSpace;
+}
+
+static D3D12_SHADER_VISIBILITY ToD3D12GraphicsShaderVisibility(const RHIBindingDesc& binding)
+{
+	const RHIShaderStageMask vertexStage = ToRHIShaderStageMask(RHIShaderStage::Vertex);
+	const RHIShaderStageMask pixelStage = ToRHIShaderStageMask(RHIShaderStage::Pixel);
+	const RHIShaderStageMask graphicsStages = vertexStage | pixelStage;
+	const RHIShaderStageMask stages = binding.Stages;
+
+	if ((stages & ~graphicsStages) != 0)
+		return D3D12_SHADER_VISIBILITY_ALL;
+	if ((stages & vertexStage) != 0 && (stages & pixelStage) == 0)
+		return D3D12_SHADER_VISIBILITY_VERTEX;
+	if ((stages & pixelStage) != 0 && (stages & vertexStage) == 0)
+		return D3D12_SHADER_VISIBILITY_PIXEL;
+	return D3D12_SHADER_VISIBILITY_ALL;
+}
+
+static D3D12_SHADER_VISIBILITY ToD3D12ShaderVisibilityForPipeline(const RHIBindingDesc& binding, bool isCompute)
+{
+	if (isCompute)
+		return D3D12_SHADER_VISIBILITY_ALL;
+	return ToD3D12GraphicsShaderVisibility(binding);
+}
+
 void PipelineStateObject::BindUAV(string name, int baseRegister)
 {
 	BindingData binding;
 	binding.name = name;
 	binding.baseRegister = baseRegister;
 	binding.numDescriptors = 1;
+	binding.Schema = MakeLegacyRHIBindingDesc(name, RHIDescriptorKind::UAV, RHIResourceKind::Unknown, static_cast<uint32_t>(std::max(baseRegister, 0)), 1);
 	uavBinding.insert(pair<string, BindingData>(name, binding));
 }
 
@@ -2307,6 +3373,7 @@ void PipelineStateObject::BindSRV(string name, int baseRegister, int num)
 	binding.name = name;
 	binding.baseRegister = baseRegister;
 	binding.numDescriptors = num;
+	binding.Schema = MakeLegacyRHIBindingDesc(name, RHIDescriptorKind::SRV, RHIResourceKind::Unknown, static_cast<uint32_t>(std::max(baseRegister, 0)), static_cast<uint32_t>(std::max(num, 0)));
 	textureBinding.insert(pair<string, BindingData>(name, binding));
 }
 
@@ -2318,6 +3385,7 @@ void PipelineStateObject::BindCBV(string name, int baseRegister, int size)
 	binding.numDescriptors = 1;
 	binding.sourceSize = static_cast<UINT>(std::max(size, 0));
 	binding.cbSize = AlignConstantBufferSize(binding.sourceSize);
+	binding.Schema = MakeLegacyRHIBindingDesc(name, RHIDescriptorKind::CBV, RHIResourceKind::ConstantBuffer, static_cast<uint32_t>(std::max(baseRegister, 0)), 1, binding.sourceSize);
 
 	constantBufferBinding.insert(pair<string, BindingData>(name, binding));
 }
@@ -2328,6 +3396,7 @@ void PipelineStateObject::BindRootConstant(string name, int baseRegister)
 	binding.name = name;
 	binding.baseRegister = baseRegister;
 	binding.numDescriptors = 1;
+	binding.Schema = MakeLegacyRHIBindingDesc(name, RHIDescriptorKind::CBV, RHIResourceKind::ConstantBuffer, static_cast<uint32_t>(std::max(baseRegister, 0)), 1);
 
 	rootBinding.insert(pair<string, BindingData>(name, binding));
 }
@@ -2338,6 +3407,7 @@ void PipelineStateObject::BindSampler(string name, int baseRegister)
 	binding.name = name;
 	binding.baseRegister = baseRegister;
 	binding.numDescriptors = 1;
+	binding.Schema = MakeLegacyRHIBindingDesc(name, RHIDescriptorKind::Sampler, RHIResourceKind::Sampler, static_cast<uint32_t>(std::max(baseRegister, 0)), 1);
 
 	samplerBinding.insert(pair<string, BindingData>(name, binding));
 }
@@ -2462,8 +3532,16 @@ bool PipelineStateObject::Init()
 			PipelineStateObject::BindingData& bindingData = bindingPair.second;
 
 			CD3DX12_ROOT_PARAMETER1 TextureParam;
-			TextureRanges[i].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, bindingData.numDescriptors, bindingData.baseRegister, 0, D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE);
-			TextureParam.InitAsDescriptorTable(1, &TextureRanges[i], D3D12_SHADER_VISIBILITY_ALL);
+			TextureRanges[i].Init(
+				D3D12_DESCRIPTOR_RANGE_TYPE_SRV,
+				ToD3D12DescriptorCount(bindingData.Schema),
+				bindingData.baseRegister,
+				ToD3D12RegisterSpace(bindingData.Schema),
+				D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE);
+			TextureParam.InitAsDescriptorTable(
+				1,
+				&TextureRanges[i],
+				ToD3D12ShaderVisibilityForPipeline(bindingData.Schema, IsCompute));
 			rootParamVec.push_back(TextureParam);
 			i++;
 			bindingData.rootParamIndex = RootParamIndex++;
@@ -2480,8 +3558,15 @@ bool PipelineStateObject::Init()
 			PipelineStateObject::BindingData& bindingData = bindingPair.second;
 
 			CD3DX12_ROOT_PARAMETER1 SamplerParam;
-			SamplerRanges[i].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER, bindingData.numDescriptors, bindingData.baseRegister);
-			SamplerParam.InitAsDescriptorTable(1, &SamplerRanges[i], D3D12_SHADER_VISIBILITY_ALL);
+			SamplerRanges[i].Init(
+				D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER,
+				ToD3D12DescriptorCount(bindingData.Schema),
+				bindingData.baseRegister,
+				ToD3D12RegisterSpace(bindingData.Schema));
+			SamplerParam.InitAsDescriptorTable(
+				1,
+				&SamplerRanges[i],
+				ToD3D12ShaderVisibilityForPipeline(bindingData.Schema, IsCompute));
 			rootParamVec.push_back(SamplerParam);
 			i++;
 			bindingData.rootParamIndex = RootParamIndex++;
@@ -2497,7 +3582,11 @@ bool PipelineStateObject::Init()
 			PipelineStateObject::BindingData& bindingData = bindingPair.second;
 
 			CD3DX12_ROOT_PARAMETER1 ConstantParam;
-			ConstantParam.InitAsConstants(bindingData.numDescriptors, bindingData.baseRegister, 0, D3D12_SHADER_VISIBILITY_ALL);
+			ConstantParam.InitAsConstants(
+				bindingData.numDescriptors,
+				bindingData.baseRegister,
+				ToD3D12RegisterSpace(bindingData.Schema),
+				ToD3D12ShaderVisibilityForPipeline(bindingData.Schema, IsCompute));
 			rootParamVec.push_back(ConstantParam);
 			i++;
 			bindingData.rootParamIndex = RootParamIndex++;
@@ -2511,7 +3600,11 @@ bool PipelineStateObject::Init()
 			PipelineStateObject::BindingData& bindingData = bindingPair.second;
 
 			CD3DX12_ROOT_PARAMETER1 CBParam;
-			CBParam.InitAsConstantBufferView(bindingData.baseRegister, 0, D3D12_ROOT_DESCRIPTOR_FLAG_NONE, D3D12_SHADER_VISIBILITY_ALL);
+			CBParam.InitAsConstantBufferView(
+				bindingData.baseRegister,
+				ToD3D12RegisterSpace(bindingData.Schema),
+				D3D12_ROOT_DESCRIPTOR_FLAG_NONE,
+				ToD3D12ShaderVisibilityForPipeline(bindingData.Schema, IsCompute));
 
 			rootParamVec.push_back(CBParam);
 			bindingData.rootParamIndex = RootParamIndex++;
@@ -2527,8 +3620,16 @@ bool PipelineStateObject::Init()
 		{
 			PipelineStateObject::BindingData& bindingData = bindingPair.second;
 			CD3DX12_ROOT_PARAMETER1 TextureParam;
-			UAVRanges[i].Init(D3D12_DESCRIPTOR_RANGE_TYPE_UAV, bindingData.numDescriptors, bindingData.baseRegister, 0, D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE);
-			TextureParam.InitAsDescriptorTable(1, &UAVRanges[i], D3D12_SHADER_VISIBILITY_ALL);
+			UAVRanges[i].Init(
+				D3D12_DESCRIPTOR_RANGE_TYPE_UAV,
+				ToD3D12DescriptorCount(bindingData.Schema),
+				bindingData.baseRegister,
+				ToD3D12RegisterSpace(bindingData.Schema),
+				D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE);
+			TextureParam.InitAsDescriptorTable(
+				1,
+				&UAVRanges[i],
+				ToD3D12ShaderVisibilityForPipeline(bindingData.Schema, IsCompute));
 			rootParamVec.push_back(TextureParam);
 			i++;
 			bindingData.rootParamIndex = RootParamIndex++;
@@ -2711,11 +3812,33 @@ void D3D12ComputePipelineStateObject::BindSRV(const std::string& name, uint32_t 
 	PSO->BindSRV(name, static_cast<int>(baseRegister), static_cast<int>(numDescriptors));
 }
 
+void D3D12ComputePipelineStateObject::BindSRV(const RHIBindingDesc& binding)
+{
+	BindSRV(binding.Name, binding.RegisterIndex, RHILegacyDescriptorCount(binding));
+	if (PSO)
+	{
+		auto it = PSO->textureBinding.find(binding.Name);
+		if (it != PSO->textureBinding.end())
+			it->second.Schema = binding;
+	}
+}
+
 void D3D12ComputePipelineStateObject::BindUAV(const std::string& name, uint32_t baseRegister)
 {
 	if (!PSO)
 		PSO = std::make_shared<PipelineStateObject>();
 	PSO->BindUAV(name, static_cast<int>(baseRegister));
+}
+
+void D3D12ComputePipelineStateObject::BindUAV(const RHIBindingDesc& binding)
+{
+	BindUAV(binding.Name, binding.RegisterIndex);
+	if (PSO)
+	{
+		auto it = PSO->uavBinding.find(binding.Name);
+		if (it != PSO->uavBinding.end())
+			it->second.Schema = binding;
+	}
 }
 
 void D3D12ComputePipelineStateObject::BindCBV(const std::string& name, uint32_t baseRegister, uint32_t size)
@@ -2725,11 +3848,33 @@ void D3D12ComputePipelineStateObject::BindCBV(const std::string& name, uint32_t 
 	PSO->BindCBV(name, static_cast<int>(baseRegister), static_cast<int>(size));
 }
 
+void D3D12ComputePipelineStateObject::BindCBV(const RHIBindingDesc& binding)
+{
+	BindCBV(binding.Name, binding.RegisterIndex, binding.SizeInBytes);
+	if (PSO)
+	{
+		auto it = PSO->constantBufferBinding.find(binding.Name);
+		if (it != PSO->constantBufferBinding.end())
+			it->second.Schema = binding;
+	}
+}
+
 void D3D12ComputePipelineStateObject::BindSampler(const std::string& name, uint32_t baseRegister)
 {
 	if (!PSO)
 		PSO = std::make_shared<PipelineStateObject>();
 	PSO->BindSampler(name, static_cast<int>(baseRegister));
+}
+
+void D3D12ComputePipelineStateObject::BindSampler(const RHIBindingDesc& binding)
+{
+	BindSampler(binding.Name, binding.RegisterIndex);
+	if (PSO)
+	{
+		auto it = PSO->samplerBinding.find(binding.Name);
+		if (it != PSO->samplerBinding.end())
+			it->second.Schema = binding;
+	}
 }
 
 bool D3D12ComputePipelineStateObject::InitCS(const std::wstring& shaderFile, const std::string& entryPoint)
@@ -2860,6 +4005,79 @@ void D3D12ComputePipelineStateObject::SetCBVValue(const std::string& name, void*
 	CopyConstantBufferData(data.data(), static_cast<UINT>(data.size()), pData, bindingIt->second.sourceSize);
 }
 
+Buffer::~Buffer()
+{
+	if (Owner && BindlessHandle.IsValid())
+		Owner->UnregisterBindlessBuffer(this);
+}
+
+VertexBuffer::~VertexBuffer()
+{
+	if (Owner && BindlessHandle.IsValid())
+		Owner->UnregisterBindlessVertexBuffer(this);
+}
+
+IndexBuffer::~IndexBuffer()
+{
+	if (Owner && BindlessHandle.IsValid())
+		Owner->UnregisterBindlessIndexBuffer(this);
+}
+
+Texture::~Texture()
+{
+	if (Owner)
+		Owner->UnregisterBindlessTexture(this);
+}
+
+namespace
+{
+	uint32_t ToD3D12StreamlineState(EResourceState state)
+	{
+		switch (state)
+		{
+		case EResourceState::ShaderRead:
+			return D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+		case EResourceState::UnorderedAccess:
+			return D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+		case EResourceState::RenderTarget:
+			return D3D12_RESOURCE_STATE_RENDER_TARGET;
+		case EResourceState::DepthWrite:
+			return D3D12_RESOURCE_STATE_DEPTH_WRITE;
+		case EResourceState::CopyDest:
+			return D3D12_RESOURCE_STATE_COPY_DEST;
+		case EResourceState::CopySource:
+			return D3D12_RESOURCE_STATE_COPY_SOURCE;
+		case EResourceState::Present:
+			return D3D12_RESOURCE_STATE_PRESENT;
+		default:
+			return D3D12_RESOURCE_STATE_COMMON;
+		}
+	}
+}
+
+bool DX12Backend::GetStreamlineTextureResource(Texture* texture, EResourceState state, StreamlineTextureResourceDesc& outDesc) const
+{
+	if (!texture || !texture->resource)
+		return false;
+
+	const D3D12_RESOURCE_DESC desc = texture->resource->GetDesc();
+	outDesc = {};
+	outDesc.Native = texture->resource.Get();
+	outDesc.State = ToD3D12StreamlineState(state);
+	outDesc.Width = static_cast<uint32_t>(desc.Width);
+	outDesc.Height = desc.Height;
+	outDesc.NativeFormat = static_cast<uint32_t>(desc.Format);
+	outDesc.MipLevels = desc.MipLevels;
+	outDesc.ArrayLayers = desc.DepthOrArraySize;
+	outDesc.Flags = static_cast<uint32_t>(desc.Flags);
+	return outDesc.Native != nullptr;
+}
+
+void* DX12Backend::GetStreamlineCommandBuffer()
+{
+	return GetGraphicsCommandList();
+}
+
 void Texture::MakeStaticSRV()
 {
 	DX12Backend* owner = Owner;
@@ -2867,16 +4085,9 @@ void Texture::MakeStaticSRV()
 		return;
 	owner->TextureDHRing->AllocDescriptor(CpuHandleSRV, GpuHandleSRV);
 
-	D3D12_SHADER_RESOURCE_VIEW_DESC SrvDesc = {};
-	SrvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-	SrvDesc.Format = textureDesc.Format;
-
-	if(textureDesc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D)
-		SrvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE3D;
-	else 
-		SrvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-	SrvDesc.Texture2D.MipLevels = textureDesc.MipLevels;
+	D3D12_SHADER_RESOURCE_VIEW_DESC SrvDesc = MakeTextureSRVDesc(*this);
 	owner->Device->CreateShaderResourceView(resource.Get(), &SrvDesc, CpuHandleSRV);
+	owner->RegisterBindlessTexture(this);
 }
 
 void Texture::MakeRTV(bool isBackBuffer)
@@ -2943,6 +4154,7 @@ std::shared_ptr<Texture> DX12Backend::CreateTexture2D(const TextureCreateDesc& d
 			texture->MakeRTV();
 		if (HasTextureUsage(desc.Usage, TextureUsage_DepthStencil))
 			texture->MakeDSV();
+		RegisterBindlessTexture(texture.get());
 	}
 	return texture;
 }
@@ -3316,6 +4528,15 @@ std::shared_ptr<Texture> DX12Backend::CreateTextureFromFile(const std::wstring& 
 		return nullptr;
 	}
 	tex->resource->SetName(fileName.c_str());
+	D3D12_HEAP_PROPERTIES textureHeapProps = {};
+	D3D12_HEAP_FLAGS textureHeapFlags = D3D12_HEAP_FLAG_NONE;
+	if (SUCCEEDED(tex->resource->GetHeapProperties(&textureHeapProps, &textureHeapFlags)) &&
+		textureHeapProps.Type != D3D12_HEAP_TYPE_DEFAULT)
+	{
+		AppendCpuRuntimeTrace(
+			L"[TextureLoad] unexpected sampled texture heap file=\"" + fileName +
+			L"\", heapType=" + std::to_wstring(static_cast<int>(textureHeapProps.Type)));
+	}
 
 	D3D12_HEAP_PROPERTIES heapPropUpload;
 	heapPropUpload.Type = D3D12_HEAP_TYPE_UPLOAD;
@@ -3357,7 +4578,8 @@ std::shared_ptr<Texture> DX12Backend::CreateTextureFromFile(const std::wstring& 
 			L", totalMs=" + FormatDx12InitMilliseconds(ElapsedDx12InitMilliseconds(totalStart, std::chrono::steady_clock::now())));
 		return nullptr;
 	}
-	uploadHeap->SetName(L"TexUploadingHeap");
+	const std::wstring uploadHeapName = L"TextureUploadStaging:" + fileName;
+	uploadHeap->SetName(uploadHeapName.c_str());
 
 	const UINT64 numSubResources = metaData.mipLevels * metaData.arraySize;
 	D3D12_PLACED_SUBRESOURCE_FOOTPRINT* layouts = (D3D12_PLACED_SUBRESOURCE_FOOTPRINT*)_alloca(sizeof(D3D12_PLACED_SUBRESOURCE_FOOTPRINT) * numSubResources);
@@ -3429,7 +4651,9 @@ std::shared_ptr<Texture> DX12Backend::CreateTextureFromFile(const std::wstring& 
 	BarrierDesc.Transition.pResource = tex->resource.Get();
 	BarrierDesc.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
 	BarrierDesc.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
-	BarrierDesc.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+	BarrierDesc.Transition.StateAfter =
+		D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE |
+		D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
 	cmd->CmdList->ResourceBarrier(1, &BarrierDesc);
 	commandRecordMs = ElapsedDx12InitMilliseconds(commandRecordStart, std::chrono::steady_clock::now());
 
@@ -4589,8 +5813,10 @@ void D3D12RTPipelineStateObject::SetNumInstances(uint32_t numInstances)
 	if (NumInstance != numInstances)
 	{
 		ShaderTable.Reset();
+		ShaderTableUpload.Reset();
 		ShaderTableEntrySize = 0;
 		ShaderTableSize = 0;
+		ShaderTableState = D3D12_RESOURCE_STATE_COPY_DEST;
 		MarkHitProgramBindingCacheDirty();
 	}
 	NumInstance = numInstances;
@@ -4628,6 +5854,7 @@ void D3D12RTPipelineStateObject::BindUAV(const string& shader, const string& nam
 		binding.Type = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
 
 		binding.BaseRegister = baseRegister;
+		binding.Schema = MakeLegacyRHIBindingDesc(name, RHIDescriptorKind::UAV, RHIResourceKind::Unknown, baseRegister, 1);
 
 		GlobalBinding.push_back(binding);
 	}
@@ -4640,9 +5867,19 @@ void D3D12RTPipelineStateObject::BindUAV(const string& shader, const string& nam
 		binding.Type = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
 
 		binding.BaseRegister = baseRegister;
+		binding.Schema = MakeLegacyRHIBindingDesc(name, RHIDescriptorKind::UAV, RHIResourceKind::Unknown, baseRegister, 1);
 
 		bindingInfo.Binding.push_back(binding);
 	}
+}
+
+void D3D12RTPipelineStateObject::BindUAV(const string& shader, const RHIBindingDesc& binding)
+{
+	BindUAV(shader, binding.Name, binding.RegisterIndex);
+	if (shader == "global")
+		GlobalBinding.back().Schema = binding;
+	else
+		ShaderBinding[shader].Binding.back().Schema = binding;
 }
 
 void D3D12RTPipelineStateObject::BindSRV(const string& shader, const string& name, uint32_t baseRegister)
@@ -4654,6 +5891,7 @@ void D3D12RTPipelineStateObject::BindSRV(const string& shader, const string& nam
 		binding.Type = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
 
 		binding.BaseRegister = baseRegister;
+		binding.Schema = MakeLegacyRHIBindingDesc(name, RHIDescriptorKind::SRV, RHIResourceKind::Unknown, baseRegister, 1);
 
 		GlobalBinding.push_back(binding);
 	}
@@ -4666,9 +5904,19 @@ void D3D12RTPipelineStateObject::BindSRV(const string& shader, const string& nam
 		binding.Type = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
 
 		binding.BaseRegister = baseRegister;
+		binding.Schema = MakeLegacyRHIBindingDesc(name, RHIDescriptorKind::SRV, RHIResourceKind::Unknown, baseRegister, 1);
 
 		bindingInfo.Binding.push_back(binding);
 	}
+}
+
+void D3D12RTPipelineStateObject::BindSRV(const string& shader, const RHIBindingDesc& binding)
+{
+	BindSRV(shader, binding.Name, binding.RegisterIndex);
+	if (shader == "global")
+		GlobalBinding.back().Schema = binding;
+	else
+		ShaderBinding[shader].Binding.back().Schema = binding;
 }
 
 
@@ -4682,6 +5930,7 @@ void D3D12RTPipelineStateObject::BindSampler(const string& shader, const string&
 		binding.Type = D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER;
 
 		binding.BaseRegister = baseRegister;
+		binding.Schema = MakeLegacyRHIBindingDesc(name, RHIDescriptorKind::Sampler, RHIResourceKind::Sampler, baseRegister, 1);
 
 		GlobalBinding.push_back(binding);
 	}
@@ -4694,9 +5943,19 @@ void D3D12RTPipelineStateObject::BindSampler(const string& shader, const string&
 		binding.Type = D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER;
 
 		binding.BaseRegister = baseRegister;
+		binding.Schema = MakeLegacyRHIBindingDesc(name, RHIDescriptorKind::Sampler, RHIResourceKind::Sampler, baseRegister, 1);
 
 		bindingInfo.Binding.push_back(binding);
 	}
+}
+
+void D3D12RTPipelineStateObject::BindSampler(const string& shader, const RHIBindingDesc& binding)
+{
+	BindSampler(shader, binding.Name, binding.RegisterIndex);
+	if (shader == "global")
+		GlobalBinding.back().Schema = binding;
+	else
+		ShaderBinding[shader].Binding.back().Schema = binding;
 }
 
 void D3D12RTPipelineStateObject::BindCBV(const string& shader, const string& name, uint32_t baseRegister, uint32_t size, uint32_t numInstance)
@@ -4710,6 +5969,7 @@ void D3D12RTPipelineStateObject::BindCBV(const string& shader, const string& nam
 		binding.BaseRegister = baseRegister;
 		binding.sourceSize = size;
 		binding.cbSize = AlignConstantBufferSize(binding.sourceSize);
+		binding.Schema = MakeLegacyRHIBindingDesc(name, RHIDescriptorKind::CBV, RHIResourceKind::ConstantBuffer, baseRegister, 1, size);
 
 		GlobalBinding.push_back(binding);
 	}
@@ -4724,9 +5984,19 @@ void D3D12RTPipelineStateObject::BindCBV(const string& shader, const string& nam
 		binding.BaseRegister = baseRegister;
 		binding.sourceSize = size;
 		binding.cbSize = AlignConstantBufferSize(binding.sourceSize);
+		binding.Schema = MakeLegacyRHIBindingDesc(name, RHIDescriptorKind::CBV, RHIResourceKind::ConstantBuffer, baseRegister, 1, size);
 
 		bindingInfo.Binding.push_back(binding);
 	}
+}
+
+void D3D12RTPipelineStateObject::BindCBV(const string& shader, const RHIBindingDesc& binding)
+{
+	BindCBV(shader, binding.Name, binding.RegisterIndex, binding.SizeInBytes, binding.NumInstances);
+	if (shader == "global")
+		GlobalBinding.back().Schema = binding;
+	else
+		ShaderBinding[shader].Binding.back().Schema = binding;
 }
 
 void D3D12RTPipelineStateObject::SetShaderDefine(const string& name, const string& value)
@@ -4845,7 +6115,9 @@ void D3D12RTPipelineStateObject::EndShaderTable()
 
 		ShaderTableSize = ShaderTableEntrySize * NumShaderTableEntry;
 
-		// allocate shader table
+		// Allocate the shader table in DEFAULT memory. The CPU writes records
+		// into a staging upload buffer, then copies the current frame segment
+		// before DispatchRays so per-hit shader-record fetches do not hit sysmem.
 		{
 			D3D12_RESOURCE_DESC bufDesc = {};
 			bufDesc.Alignment = 0;
@@ -4860,6 +6132,14 @@ void D3D12RTPipelineStateObject::EndShaderTable()
 			bufDesc.SampleDesc.Quality = 0;
 			bufDesc.Width = ShaderTableSize * owner->NumFrame;
 
+			const D3D12_HEAP_PROPERTIES kDefaultHeapProps =
+			{
+				D3D12_HEAP_TYPE_DEFAULT,
+				D3D12_CPU_PAGE_PROPERTY_UNKNOWN,
+				D3D12_MEMORY_POOL_UNKNOWN,
+				0,
+				0,
+			};
 			const D3D12_HEAP_PROPERTIES kUploadHeapProps =
 			{
 				D3D12_HEAP_TYPE_UPLOAD,
@@ -4869,8 +6149,24 @@ void D3D12RTPipelineStateObject::EndShaderTable()
 				0,
 			};
 
-			owner->Device->CreateCommittedResource(&kUploadHeapProps, D3D12_HEAP_FLAG_NONE, &bufDesc, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&ShaderTable));
+			const HRESULT defaultHr = owner->Device->CreateCommittedResource(&kDefaultHeapProps, D3D12_HEAP_FLAG_NONE, &bufDesc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&ShaderTable));
+			const HRESULT uploadHr = owner->Device->CreateCommittedResource(&kUploadHeapProps, D3D12_HEAP_FLAG_NONE, &bufDesc, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&ShaderTableUpload));
+			if (FAILED(defaultHr) || FAILED(uploadHr) || !ShaderTable || !ShaderTableUpload)
+			{
+				AppendCpuRuntimeTrace(
+					L"[DX12RT] shader table allocation failed defaultHr=" + FormatHexHRESULT(defaultHr) +
+					L", uploadHr=" + FormatHexHRESULT(uploadHr));
+				ShaderTable.Reset();
+				ShaderTableUpload.Reset();
+				return;
+			}
+			ShaderTableState = D3D12_RESOURCE_STATE_COPY_DEST;
 			NAME_D3D12_OBJECT(ShaderTable);
+			NAME_D3D12_OBJECT(ShaderTableUpload);
+			AppendCpuRuntimeTrace(
+				L"[DX12RT] shader table heap=DEFAULT, staging=UPLOAD, frameBytes=" +
+				std::to_wstring(ShaderTableSize) +
+				L", totalBytes=" + std::to_wstring(static_cast<UINT64>(bufDesc.Width)));
 		}
 	}
 	
@@ -4878,28 +6174,19 @@ void D3D12RTPipelineStateObject::EndShaderTable()
 	// raygen : simple, it is just the begin of table
 	// miss : raygen + miss index * EntrySize
 	// hit : raygen + miss(N) + instanceIndex
-	uint8_t* pData;
-	HRESULT hr = ShaderTable->Map(0, nullptr, (void**)&pData);
+	uint8_t* pData = nullptr;
+	HRESULT hr = ShaderTableUpload->Map(0, nullptr, (void**)&pData);
+	if (FAILED(hr) || !pData)
+	{
+		AppendCpuRuntimeTrace(L"[DX12RT] shader table upload Map failed hr=" + FormatHexHRESULT(hr));
+		return;
+	}
 
-	pData += ShaderTableSize * owner->CurrentFrameIndex;;
-
-	D3D12_GPU_VIRTUAL_ADDRESS va = ShaderTable->GetGPUVirtualAddress();
+	pData += ShaderTableSize * owner->CurrentFrameIndex;
 
 	ComPtr<ID3D12StateObjectProperties> RtsoProps;
 	RTPipelineState->QueryInterface(IID_PPV_ARGS(&RtsoProps));
 
-	if (FAILED(hr))
-	{
-		HRESULT hrRemoved = owner->Device->GetDeviceRemovedReason();
-		if (FAILED(hrRemoved))
-		{
-			for (auto& sb : ShaderBinding)
-			{
-				BindingInfo& bindingInfo = sb.second;
-			}
-		}
-		
-	}
 	uint8_t* pDataThis = pData;
 
 	// calculate shader table offset for each shader
@@ -4967,7 +6254,36 @@ void D3D12RTPipelineStateObject::EndShaderTable()
 	}
 
 
-	ShaderTable->Unmap(0, nullptr);
+	ShaderTableUpload->Unmap(0, nullptr);
+	CommandList* commandList = ResolveCommandList(owner, nullptr);
+	if (commandList && ShaderTable && ShaderTableUpload)
+	{
+		if (ShaderTableState != D3D12_RESOURCE_STATE_COPY_DEST)
+		{
+			commandList->CmdList->ResourceBarrier(
+				1,
+				&CD3DX12_RESOURCE_BARRIER::Transition(
+					ShaderTable.Get(),
+					ShaderTableState,
+					D3D12_RESOURCE_STATE_COPY_DEST));
+			ShaderTableState = D3D12_RESOURCE_STATE_COPY_DEST;
+		}
+
+		const UINT64 frameOffset = static_cast<UINT64>(ShaderTableSize) * owner->CurrentFrameIndex;
+		commandList->CmdList->CopyBufferRegion(
+			ShaderTable.Get(),
+			frameOffset,
+			ShaderTableUpload.Get(),
+			frameOffset,
+			ShaderTableSize);
+		commandList->CmdList->ResourceBarrier(
+			1,
+			&CD3DX12_RESOURCE_BARRIER::Transition(
+				ShaderTable.Get(),
+				D3D12_RESOURCE_STATE_COPY_DEST,
+				D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE));
+		ShaderTableState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+	}
 	if (HitProgramBindingPendingValid &&
 		frameIndex < ShaderTableFrameValid.size() &&
 		frameIndex < ShaderTableFrameInstanceCount.size() &&
@@ -5073,18 +6389,6 @@ void D3D12RTPipelineStateObject::StartHitProgram(const string& HitGroup, uint32_
 	}
 	//(*HitProgram)[instanceIndex].HitGroupName = StringToWString(HitGroup);
 	(*HitProgram)[instanceIndex].VecData.clear();
-}
-
-void D3D12RTPipelineStateObject::AddDescriptor2HitProgram(const string& HitGroup, D3D12_GPU_DESCRIPTOR_HANDLE srvHandle, UINT instanceIndex)
-{
-	map<UINT, HitProgramData>* HitProgram = nullptr;
-	for (auto& HG : VecHitGroup)
-	{
-		if (HG.name == StringToWString(HitGroup))
-			HitProgram = &HG.HitProgramBinding;
-	}
-
-	(*HitProgram)[instanceIndex].VecData.push_back(srvHandle);
 }
 
 void D3D12RTPipelineStateObject::SetSampler(const string& shader, const string& bindingName, Sampler* sampler, INT instanceIndex /*= -1*/)
@@ -5310,8 +6614,8 @@ bool D3D12RTPipelineStateObject::InitRS(const string& ShaderFile)
 				D3D12_DESCRIPTOR_RANGE& Range = Ranges[i++];;
 				Range.RangeType = bindingData.Type;
 				Range.BaseShaderRegister = bindingData.BaseRegister;
-				Range.NumDescriptors = 1;
-				Range.RegisterSpace = 0;
+				Range.NumDescriptors = ToD3D12DescriptorCount(bindingData.Schema);
+				Range.RegisterSpace = ToD3D12RegisterSpace(bindingData.Schema);
 				Range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
 				//Ranges.push_back(Range);
 
@@ -5399,8 +6703,8 @@ bool D3D12RTPipelineStateObject::InitRS(const string& ShaderFile)
 		D3D12_DESCRIPTOR_RANGE& Range = Ranges[i++];;
 		Range.RangeType = bindingData.Type;
 		Range.BaseShaderRegister = bindingData.BaseRegister;
-		Range.NumDescriptors = 1;
-		Range.RegisterSpace = 0;
+		Range.NumDescriptors = ToD3D12DescriptorCount(bindingData.Schema);
+		Range.RegisterSpace = ToD3D12RegisterSpace(bindingData.Schema);
 		Range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
 		//Ranges.push_back(Range);
 
@@ -5462,6 +6766,43 @@ bool D3D12RTPipelineStateObject::InitRS(const string& ShaderFile)
 	return true;
 }
 
+bool D3D12RTPipelineStateObject::BuildDispatchRaysDesc(uint32_t width, uint32_t height, D3D12_DISPATCH_RAYS_DESC& outDesc) const
+{
+	DX12Backend* owner = Owner;
+	if (!owner || !ShaderTable || ShaderTableSize == 0 || ShaderTableEntrySize == 0)
+		return false;
+
+	outDesc = {};
+	outDesc.Width = width;
+	outDesc.Height = height;
+	outDesc.Depth = 1;
+
+	D3D12_GPU_VIRTUAL_ADDRESS StartAddress = ShaderTable->GetGPUVirtualAddress() + ShaderTableSize * owner->CurrentFrameIndex;
+
+	outDesc.RayGenerationShaderRecord.StartAddress = StartAddress;
+	outDesc.RayGenerationShaderRecord.SizeInBytes = ShaderTableEntrySize;
+
+	// Miss is the second entry in the shader-table
+	UINT NumMissShader = 0;
+	for (const auto& sb : ShaderBinding)
+	{
+		if (sb.second.Type == MISS)
+			NumMissShader++;
+	}
+	size_t missOffset = ShaderTableEntrySize * 1;
+	outDesc.MissShaderTable.StartAddress = StartAddress + missOffset;
+	outDesc.MissShaderTable.StrideInBytes = ShaderTableEntrySize;
+	outDesc.MissShaderTable.SizeInBytes = ShaderTableEntrySize * NumMissShader;
+
+	
+	 // Hit is the third entry in the shader-table
+	size_t hitOffset = missOffset + NumMissShader * ShaderTableEntrySize;
+	outDesc.HitGroupTable.StartAddress = StartAddress + hitOffset;
+	outDesc.HitGroupTable.StrideInBytes = ShaderTableEntrySize;
+	outDesc.HitGroupTable.SizeInBytes = ShaderTableEntrySize * VecHitGroup.size() * NumInstance;
+	return true;
+}
+
 void D3D12RTPipelineStateObject::Apply(uint32_t width, uint32_t height)
 {
 	DX12Backend* owner = Owner;
@@ -5470,33 +6811,8 @@ void D3D12RTPipelineStateObject::Apply(uint32_t width, uint32_t height)
 	CommandList = ResolveCommandList(owner, CommandList);
 	assert(CommandList);
 	D3D12_DISPATCH_RAYS_DESC raytraceDesc = {};
-	raytraceDesc.Width = width;
-	raytraceDesc.Height = height;
-	raytraceDesc.Depth = 1;
-
-	D3D12_GPU_VIRTUAL_ADDRESS StartAddress = ShaderTable->GetGPUVirtualAddress() + ShaderTableSize * owner->CurrentFrameIndex;
-
-	raytraceDesc.RayGenerationShaderRecord.StartAddress = StartAddress ;
-	raytraceDesc.RayGenerationShaderRecord.SizeInBytes = ShaderTableEntrySize;
-
-	// Miss is the second entry in the shader-table
-	UINT NumMissShader = 0;
-	for (auto& sb : ShaderBinding)
-	{
-		if (sb.second.Type == MISS)
-			NumMissShader++;
-	}
-	size_t missOffset = ShaderTableEntrySize * 1;
-	raytraceDesc.MissShaderTable.StartAddress = StartAddress + missOffset;
-	raytraceDesc.MissShaderTable.StrideInBytes = ShaderTableEntrySize;
-	raytraceDesc.MissShaderTable.SizeInBytes = ShaderTableEntrySize * NumMissShader;
-
-	
-	 // Hit is the third entry in the shader-table
-	size_t hitOffset = missOffset + NumMissShader * ShaderTableEntrySize;
-	raytraceDesc.HitGroupTable.StartAddress = StartAddress + hitOffset;
-	raytraceDesc.HitGroupTable.StrideInBytes = ShaderTableEntrySize;
-	raytraceDesc.HitGroupTable.SizeInBytes = ShaderTableEntrySize * VecHitGroup.size() *NumInstance;
+	if (!BuildDispatchRaysDesc(width, height, raytraceDesc))
+		return;
 
 	// Bind the empty root signature
 	owner->InvalidateGraphicsCommandStateCache();
@@ -5511,6 +6827,92 @@ void D3D12RTPipelineStateObject::Apply(uint32_t width, uint32_t height)
 	CommandList->CmdList->SetPipelineState1(RTPipelineState.Get());
 	
 	CommandList->CmdList->DispatchRays(&raytraceDesc);
+}
+
+bool D3D12RTPipelineStateObject::GetDispatchRaysIndirectTemplate(uint32_t width, uint32_t height, RtDispatchRaysIndirectTemplate& outTemplate) const
+{
+	D3D12_DISPATCH_RAYS_DESC desc = {};
+	if (!BuildDispatchRaysDesc(width, height, desc))
+		return false;
+
+	outTemplate = {};
+	outTemplate.RayGenerationStartAddress = desc.RayGenerationShaderRecord.StartAddress;
+	outTemplate.RayGenerationSizeInBytes = desc.RayGenerationShaderRecord.SizeInBytes;
+	outTemplate.MissStartAddress = desc.MissShaderTable.StartAddress;
+	outTemplate.MissSizeInBytes = desc.MissShaderTable.SizeInBytes;
+	outTemplate.MissStrideInBytes = desc.MissShaderTable.StrideInBytes;
+	outTemplate.HitGroupStartAddress = desc.HitGroupTable.StartAddress;
+	outTemplate.HitGroupSizeInBytes = desc.HitGroupTable.SizeInBytes;
+	outTemplate.HitGroupStrideInBytes = desc.HitGroupTable.StrideInBytes;
+	outTemplate.CallableStartAddress = desc.CallableShaderTable.StartAddress;
+	outTemplate.CallableSizeInBytes = desc.CallableShaderTable.SizeInBytes;
+	outTemplate.CallableStrideInBytes = desc.CallableShaderTable.StrideInBytes;
+	outTemplate.Width = desc.Width;
+	outTemplate.Height = desc.Height;
+	outTemplate.Depth = desc.Depth;
+	return true;
+}
+
+bool D3D12RTPipelineStateObject::EnsureDispatchRaysCommandSignature()
+{
+	if (DispatchRaysCommandSignature)
+		return true;
+
+	DX12Backend* owner = Owner;
+	if (!owner || !owner->Device)
+		return false;
+
+	D3D12_INDIRECT_ARGUMENT_DESC argumentDesc = {};
+	argumentDesc.Type = D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH_RAYS;
+
+	D3D12_COMMAND_SIGNATURE_DESC commandSignatureDesc = {};
+	commandSignatureDesc.ByteStride = sizeof(D3D12_DISPATCH_RAYS_DESC);
+	commandSignatureDesc.NumArgumentDescs = 1;
+	commandSignatureDesc.pArgumentDescs = &argumentDesc;
+
+	HRESULT hr = owner->Device->CreateCommandSignature(
+		&commandSignatureDesc,
+		nullptr,
+		IID_PPV_ARGS(&DispatchRaysCommandSignature));
+	if (FAILED(hr))
+	{
+		AppendCpuRuntimeTrace(L"[DX12RT] Create DISPATCH_RAYS command signature failed hr=" + FormatHexHRESULT(hr));
+		return false;
+	}
+
+	SetName(DispatchRaysCommandSignature.Get(), L"Corona DispatchRaysIndirect CommandSignature");
+	return true;
+}
+
+bool D3D12RTPipelineStateObject::ApplyIndirect(Buffer* indirectArgumentBuffer, uint64_t byteOffset)
+{
+	DX12Backend* owner = Owner;
+	assert(owner);
+	if (!indirectArgumentBuffer || !indirectArgumentBuffer->resource || !EnsureDispatchRaysCommandSignature())
+		return false;
+
+	CommandList* CommandList = nullptr;
+	CommandList = ResolveCommandList(owner, CommandList);
+	assert(CommandList);
+
+	owner->InvalidateGraphicsCommandStateCache();
+	CommandList->CmdList->SetComputeRootSignature(GlobalRS.Get());
+
+	UINT RPI = 0;
+	for (auto& bi : GlobalBinding)
+	{
+		CommandList->CmdList.Get()->SetComputeRootDescriptorTable(RPI++, bi.GPUHandle);
+	}
+
+	CommandList->CmdList->SetPipelineState1(RTPipelineState.Get());
+	CommandList->CmdList->ExecuteIndirect(
+		DispatchRaysCommandSignature.Get(),
+		1,
+		indirectArgumentBuffer->resource.Get(),
+		byteOffset,
+		nullptr,
+		0);
+	return true;
 }
 
 void D3D12RTPipelineStateObject::SetTextureUAV(const string& shader, const string& bindingName, Texture* texture, int instanceIndex)
@@ -5537,31 +6939,29 @@ void D3D12RTPipelineStateObject::SetBufferSRV(const string& shader, const string
 	SetSRVHandle(shader, bindingName, buffer->GpuHandleSRV, instanceIndex);
 }
 
+bool D3D12RTPipelineStateObject::SetBindlessTextureTable(const string& shader, const string& bindingName)
+{
+	if (!Owner || !Owner->IsBindlessTextureTableReady())
+		return false;
+
+	SetSRVHandle(shader, bindingName, Owner->GetBindlessTextureTableGpuHandle(), -1);
+	return true;
+}
+
+bool D3D12RTPipelineStateObject::SetBindlessBufferTable(const string& shader, const string& bindingName)
+{
+	if (!Owner || !Owner->IsBindlessBufferTableReady())
+		return false;
+
+	SetSRVHandle(shader, bindingName, Owner->GetBindlessBufferTableGpuHandle(), -1);
+	return true;
+}
+
 void D3D12RTPipelineStateObject::SetAccelerationStructure(const string& shader, const string& bindingName, const std::shared_ptr<RTAS>& rtas, int instanceIndex)
 {
 	D3D12RTAS* dx12RTAS = dynamic_cast<D3D12RTAS*>(rtas.get());
 	assert(dx12RTAS);
 	SetSRVHandle(shader, bindingName, dx12RTAS->GPUHandle, instanceIndex);
-}
-
-void D3D12RTPipelineStateObject::AddTextureSRVToHitProgram(const string& hitGroup, Texture* texture, uint32_t instanceIndex)
-{
-	assert(texture);
-	AddDescriptor2HitProgram(hitGroup, texture->GpuHandleSRV, instanceIndex);
-}
-
-void D3D12RTPipelineStateObject::AddBufferSRVToHitProgram(const string& hitGroup, Buffer* buffer, uint32_t instanceIndex)
-{
-	assert(buffer);
-	AddDescriptor2HitProgram(hitGroup, buffer->GpuHandleSRV, instanceIndex);
-}
-
-void D3D12RTPipelineStateObject::AddSceneGeometrySRVsToHitProgram(const string& hitGroup, VertexBuffer* sceneVertexBuffer, IndexBuffer* sceneIndexBuffer, uint32_t instanceIndex)
-{
-	assert(sceneVertexBuffer);
-	assert(sceneIndexBuffer);
-	AddDescriptor2HitProgram(hitGroup, sceneVertexBuffer->GpuHandleSRV, instanceIndex);
-	AddDescriptor2HitProgram(hitGroup, sceneIndexBuffer->GpuHandleSRV, instanceIndex);
 }
 
 void DescriptorHeapRing::Init(DescriptorHeap* InDHHeap, UINT InNumDescriptors, UINT InNumFrame)
@@ -5836,7 +7236,7 @@ void Buffer::MakeStructuredBufferSRV()
 	bufferSRVDesc.Format = DXGI_FORMAT_UNKNOWN;
 	bufferSRVDesc.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_NONE;
 	bufferSRVDesc.Buffer.StructureByteStride = ElementSize;
-	bufferSRVDesc.Buffer.FirstElement = 0;
+	bufferSRVDesc.Buffer.FirstElement = ElementSize > 0 ? static_cast<UINT>(SuballocationOffsetBytes / ElementSize) : 0;
 	bufferSRVDesc.Buffer.NumElements = NumElements;
 	bufferSRVDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
 
@@ -6024,14 +7424,50 @@ std::shared_ptr<GraphicsPipelineHandle> DX12Backend::CreateGraphicsPipeline(cons
 		desc.VertexEntryPoint,
 		desc.PixelEntryPoint);
 	pso->graphicsPSODesc = psoDesc;
-	if (desc.ConstantBufferSize > 0)
-		pso->BindCBV("__CB0", desc.ConstantBufferBinding, desc.ConstantBufferSize);
-	for (const auto& binding : desc.TextureBindings)
-		pso->BindSRV(binding.Name, binding.Slot, 1);
-	for (const auto& binding : desc.BufferBindings)
-		pso->BindSRV(binding.Name, binding.Slot, 1);
-	for (const auto& binding : desc.SamplerBindings)
-		pso->BindSampler(binding.Name, binding.Slot);
+	if (!desc.PipelineLayout.Bindings.empty())
+	{
+		for (const RHIBindingDesc& binding : desc.PipelineLayout.Bindings)
+		{
+			switch (binding.DescriptorKind)
+			{
+			case RHIDescriptorKind::SRV:
+			case RHIDescriptorKind::AccelerationStructure:
+				pso->BindSRV(binding.Name, binding.RegisterIndex, RHILegacyDescriptorCount(binding));
+				if (auto it = pso->textureBinding.find(binding.Name); it != pso->textureBinding.end())
+					it->second.Schema = binding;
+				break;
+			case RHIDescriptorKind::UAV:
+				pso->BindUAV(binding.Name, binding.RegisterIndex);
+				if (auto it = pso->uavBinding.find(binding.Name); it != pso->uavBinding.end())
+					it->second.Schema = binding;
+				break;
+			case RHIDescriptorKind::CBV:
+			{
+				const uint32_t sizeInBytes = binding.SizeInBytes > 0 ? binding.SizeInBytes : desc.ConstantBufferSize;
+				pso->BindCBV(binding.Name, binding.RegisterIndex, sizeInBytes);
+				if (auto it = pso->constantBufferBinding.find(binding.Name); it != pso->constantBufferBinding.end())
+					it->second.Schema = binding;
+				break;
+			}
+			case RHIDescriptorKind::Sampler:
+				pso->BindSampler(binding.Name, binding.RegisterIndex);
+				if (auto it = pso->samplerBinding.find(binding.Name); it != pso->samplerBinding.end())
+					it->second.Schema = binding;
+				break;
+			}
+		}
+	}
+	else
+	{
+		if (desc.ConstantBufferSize > 0)
+			pso->BindCBV("__CB0", desc.ConstantBufferBinding, desc.ConstantBufferSize);
+		for (const auto& binding : desc.TextureBindings)
+			pso->BindSRV(binding.Name, binding.Slot, 1);
+		for (const auto& binding : desc.BufferBindings)
+			pso->BindSRV(binding.Name, binding.Slot, 1);
+		for (const auto& binding : desc.SamplerBindings)
+			pso->BindSampler(binding.Name, binding.Slot);
+	}
 	if (!pso->Init())
 		return nullptr;
 
@@ -6039,6 +7475,37 @@ std::shared_ptr<GraphicsPipelineHandle> DX12Backend::CreateGraphicsPipeline(cons
 	handle->ConstantBufferSize = desc.ConstantBufferSize;
 	handle->VertexStride = desc.VertexStride;
 	handle->ShaderPathForDiag = desc.ShaderPath;
+	return handle;
+}
+
+std::shared_ptr<GraphicsBindGroupHandle> DX12Backend::CreateGraphicsBindGroup(const GraphicsBindGroupDesc& desc)
+{
+	auto* dxPipeline = dynamic_cast<DX12GraphicsPipelineHandle*>(desc.Pipeline);
+	if (!dxPipeline || !dxPipeline->PSO)
+		return nullptr;
+
+	auto handle = std::make_shared<DX12GraphicsBindGroupHandle>();
+	handle->Pipeline = dxPipeline;
+	handle->Entries.reserve(desc.Entries.size());
+
+	for (const GraphicsBindGroupEntry& src : desc.Entries)
+	{
+		DX12GraphicsBindGroupEntry dst{};
+		dst.Type = src.Type;
+		dst.BindingName = src.BindingName;
+		dst.Slot = src.Slot;
+		dst.TextureValue = src.TextureValue;
+		dst.BufferValue = src.BufferValue;
+		dst.VertexBufferValue = src.VertexBufferValue;
+		dst.SamplerValue = src.SamplerValue;
+		if (src.Type == EGraphicsBindGroupEntryType::ConstantData && src.ConstantData && src.ConstantDataSize > 0)
+		{
+			const auto* bytes = static_cast<const uint8_t*>(src.ConstantData);
+			dst.ConstantData.assign(bytes, bytes + src.ConstantDataSize);
+		}
+		handle->Entries.push_back(std::move(dst));
+	}
+
 	return handle;
 }
 
@@ -6061,65 +7528,57 @@ void DX12Backend::BindGraphicsPipeline(GraphicsPipelineHandle* pipeline)
 	}
 }
 
-void DX12Backend::SetGraphicsPipelineConstantData(GraphicsPipelineHandle* pipeline, uint32_t slot, const void* data, uint32_t size)
+void DX12Backend::BindGraphicsBindGroup(GraphicsPipelineHandle* pipeline, uint32_t slot, const std::shared_ptr<GraphicsBindGroupHandle>& bindGroup)
 {
 	(void)slot;
 	auto* dxPipeline = dynamic_cast<DX12GraphicsPipelineHandle*>(pipeline);
-	if (!dxPipeline || !dxPipeline->PSO || !data || size == 0 || dxPipeline->ConstantBufferSize == 0)
+	auto* dxBindGroup = dynamic_cast<DX12GraphicsBindGroupHandle*>(bindGroup.get());
+	if (!dxPipeline || !dxPipeline->PSO || !dxBindGroup || dxBindGroup->Pipeline != dxPipeline)
 		return;
 
-	const auto bindingIt = dxPipeline->PSO->constantBufferBinding.find("__CB0");
-	if (bindingIt == dxPipeline->PSO->constantBufferBinding.end())
-		return;
-
-	const uint32_t sourceSize = bindingIt->second.sourceSize;
-	if (sourceSize == 0)
-		return;
-
-	if (size >= sourceSize)
+	for (const DX12GraphicsBindGroupEntry& entry : dxBindGroup->Entries)
 	{
-		dxPipeline->PSO->SetCBVValue("__CB0", const_cast<void*>(data));
-		return;
+		switch (entry.Type)
+		{
+		case EGraphicsBindGroupEntryType::TextureSRV:
+			if (entry.TextureValue)
+				dxPipeline->PSO->SetSRV(entry.BindingName, entry.TextureValue->GpuHandleSRV);
+			break;
+		case EGraphicsBindGroupEntryType::BufferSRV:
+			if (entry.BufferValue)
+				dxPipeline->PSO->SetSRV(entry.BindingName, entry.BufferValue->GpuHandleSRV);
+			break;
+		case EGraphicsBindGroupEntryType::VertexBufferSRV:
+			if (entry.VertexBufferValue)
+				dxPipeline->PSO->SetSRV(entry.BindingName, entry.VertexBufferValue->GpuHandleSRV);
+			break;
+		case EGraphicsBindGroupEntryType::Sampler:
+			if (entry.SamplerValue)
+				dxPipeline->PSO->SetSampler(entry.BindingName, entry.SamplerValue);
+			break;
+		case EGraphicsBindGroupEntryType::ConstantData:
+			if (!entry.ConstantData.empty() && entry.Slot == 0 && dxPipeline->ConstantBufferSize > 0)
+			{
+				const auto bindingIt = dxPipeline->PSO->constantBufferBinding.find("__CB0");
+				if (bindingIt == dxPipeline->PSO->constantBufferBinding.end())
+					break;
+
+				const uint32_t sourceSize = bindingIt->second.sourceSize;
+				if (sourceSize == 0)
+					break;
+
+				if (entry.ConstantData.size() >= sourceSize)
+				{
+					dxPipeline->PSO->SetCBVValue("__CB0", const_cast<uint8_t*>(entry.ConstantData.data()));
+					break;
+				}
+
+				thread_local std::vector<uint8_t> sourceData;
+				sourceData.assign(sourceSize, 0);
+				std::memcpy(sourceData.data(), entry.ConstantData.data(), entry.ConstantData.size());
+				dxPipeline->PSO->SetCBVValue("__CB0", sourceData.data());
+			}
+			break;
+		}
 	}
-
-	thread_local std::vector<uint8_t> sourceData;
-	sourceData.assign(sourceSize, 0);
-	std::memcpy(sourceData.data(), data, size);
-	dxPipeline->PSO->SetCBVValue("__CB0", sourceData.data());
-}
-
-void DX12Backend::BindGraphicsPipelineTexture(GraphicsPipelineHandle* pipeline, const std::string& bindingName, Texture* texture)
-{
-	auto* dxPipeline = dynamic_cast<DX12GraphicsPipelineHandle*>(pipeline);
-	if (!dxPipeline || !dxPipeline->PSO || !texture)
-		return;
-
-	dxPipeline->PSO->SetSRV(bindingName, texture->GpuHandleSRV);
-}
-
-void DX12Backend::BindGraphicsPipelineBuffer(GraphicsPipelineHandle* pipeline, const std::string& bindingName, Buffer* buffer)
-{
-	auto* dxPipeline = dynamic_cast<DX12GraphicsPipelineHandle*>(pipeline);
-	if (!dxPipeline || !dxPipeline->PSO || !buffer)
-		return;
-
-	dxPipeline->PSO->SetSRV(bindingName, buffer->GpuHandleSRV);
-}
-
-void DX12Backend::BindGraphicsPipelineVertexBufferSRV(GraphicsPipelineHandle* pipeline, const std::string& bindingName, VertexBuffer* vb)
-{
-	auto* dxPipeline = dynamic_cast<DX12GraphicsPipelineHandle*>(pipeline);
-	if (!dxPipeline || !dxPipeline->PSO || !vb)
-		return;
-
-	dxPipeline->PSO->SetSRV(bindingName, vb->GpuHandleSRV);
-}
-
-void DX12Backend::BindGraphicsPipelineSampler(GraphicsPipelineHandle* pipeline, const std::string& bindingName, Sampler* sampler)
-{
-	auto* dxPipeline = dynamic_cast<DX12GraphicsPipelineHandle*>(pipeline);
-	if (!dxPipeline || !dxPipeline->PSO || !sampler)
-		return;
-
-	dxPipeline->PSO->SetSampler(bindingName, sampler);
 }

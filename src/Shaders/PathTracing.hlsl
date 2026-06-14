@@ -1,5 +1,7 @@
 #include "Common.hlsl"
 #include "GGX.hlsli"
+#include "PathTracingWavefront.hlsli"
+#include "BindlessResources.hlsli"
 
 RWTexture2D<float4> OutputColor : register(u0);
 RWTexture2D<float4> OutAlbedo : register(u1);
@@ -11,18 +13,17 @@ RWTexture2D<float4> OutRoughnessMetallic : register(u6);
 RWTexture2D<float> OutDepth : register(u7);
 RWTexture2D<float> OutSpecularHitDistance : register(u8);
 RWTexture2D<float2> OutSpecularMotionVector : register(u9);
+RWStructuredBuffer<PathTracingWavefrontState> PathCompactionStateIn : register(u10);
+RWStructuredBuffer<PathTracingWavefrontState> PathCompactionStateOut : register(u11);
+RWStructuredBuffer<uint> PathCompactionActiveListIn : register(u12);
+RWStructuredBuffer<uint> PathCompactionActiveListOut : register(u13);
+RWStructuredBuffer<uint> PathCompactionCounters : register(u14);
+RWStructuredBuffer<float4> PathCompactionRadiance : register(u15);
 
 RaytracingAccelerationStructure gRtScene : register(t0);
-ByteAddressBuffer vertices : register(t1);
-ByteAddressBuffer indices : register(t2);
-ByteAddressBuffer InstanceProperty : register(t3);
-Texture2D AlbedoTex : register(t5);
-Texture2D NormalTex : register(t6);
-Texture2D RoughnessTex : register(t7);
-Texture2D MetallicTex : register(t8);
 
-// Must match Corona::MaxPointLights in Corona.h.
-#define MAX_POINT_LIGHTS 128
+// Must match Corona::MaxPathTracingPointLights in Corona.h.
+#define MAX_POINT_LIGHTS 16
 
 struct PointLightParam
 {
@@ -31,6 +32,8 @@ struct PointLightParam
     float4 DirectionAndType;
     float4 SpotConeAndFlags;
 };
+
+StructuredBuffer<PointLightParam> PointLightBuffer : register(t4);
 
 cbuffer ViewParameter : register(b0)
 {
@@ -45,7 +48,7 @@ cbuffer ViewParameter : register(b0)
     float DirectLightAngularRadius;
     uint DirectLightSampleCount;
     uint bDirectLightCastShadow;
-    float _directLightPadding;
+    uint PointLightSampleCount;
     float2 RandomOffset;
     uint FrameCounter;
     uint BlueNoiseOffsetStride;
@@ -68,15 +71,43 @@ cbuffer ViewParameter : register(b0)
     float SpecularMotionVectorScale;
     uint bStabilizePrimaryRaySamples;
     uint _rtaoPadding;
-    PointLightParam PointLights[MAX_POINT_LIGHTS];
+    uint _pointLightPadding0;
     uint PointLightCount;
     float3 PointLightPadding;
+};
+
+cbuffer PathCompaction : register(b1)
+{
+    uint PathCompactionRenderWidth;
+    uint PathCompactionRenderHeight;
+    uint PathCompactionCapacity;
+    uint PathCompactionBounceIndex;
 };
 
 SamplerState sampleWrap : register(s0);
 
 static const float INV_PI = 1.0 / PI;
 static const float PATH_TRACING_RAY_BIAS = 0.5f;
+
+float4 SamplePathTracingAlbedo(RTMaterialRecord material, float2 uv, float mipLevel)
+{
+    return MaterialTextures[NonUniformResourceIndex(material.AlbedoTextureIndex)].SampleLevel(sampleWrap, uv, mipLevel);
+}
+
+float3 SamplePathTracingNormal(RTMaterialRecord material, float2 uv, float mipLevel)
+{
+    return MaterialTextures[NonUniformResourceIndex(material.NormalTextureIndex)].SampleLevel(sampleWrap, uv, mipLevel).xyz;
+}
+
+float SamplePathTracingRoughness(RTMaterialRecord material, float2 uv, float mipLevel)
+{
+    return MaterialTextures[NonUniformResourceIndex(material.RoughnessTextureIndex)].SampleLevel(sampleWrap, uv, mipLevel).x;
+}
+
+float SamplePathTracingMetallic(RTMaterialRecord material, float2 uv, float mipLevel)
+{
+    return MaterialTextures[NonUniformResourceIndex(material.MetallicTextureIndex)].SampleLevel(sampleWrap, uv, mipLevel).x;
+}
 
 float EvaluateSpotAttenuation(PointLightParam light, float3 surfaceToLightDir)
 {
@@ -238,7 +269,9 @@ float ComputePathTracingTextureMipLevel(uint instanceID, Vertex vertex, float3 v
 {
     uint textureWidth = 1;
     uint textureHeight = 1;
-    AlbedoTex.GetDimensions(textureWidth, textureHeight);
+    RTMaterialRecord material = RtMaterials[instanceID];
+    MaterialTextures[NonUniformResourceIndex(material.AlbedoTextureIndex)].GetDimensions(textureWidth, textureHeight);
+
 
     float halfLog2NumTexPixels = 0.5f * log2(max(float(textureWidth) * float(textureHeight), 1.0f));
     float triangleLodConstant = vertex.textureLODConstant + halfLog2NumTexPixels;
@@ -267,7 +300,9 @@ float3 ApplyPathTracingNormalMap(float3 vertexNormal, float3 vertexTangent, floa
     if (dot(B, B) < 1e-8f)
         return N;
 
-    float3 normalMap = NormalTex.SampleLevel(sampleWrap, uv, mipLevel).xyz;
+    RTMaterialRecord material = RtMaterials[instanceID];
+    float3 normalMap = SamplePathTracingNormal(material, uv, mipLevel);
+
     if (any(isnan(normalMap)) || any(isinf(normalMap)))
         return N;
     normalMap = normalMap * 2.0f - 1.0f;
@@ -289,6 +324,19 @@ float2 ProjectToScreenUV(float3 worldPos, float4x4 viewProj)
     float invW = abs(clip.w) > 1.0e-6f ? rcp(clip.w) : 0.0f;
     float2 uv = (clip.xy * invW) * float2(0.5f, -0.5f) + 0.5f;
     return (any(isnan(uv)) || any(isinf(uv))) ? float2(0.0f, 0.0f) : uv;
+}
+
+bool ProjectToScreenUVFinite(float3 worldPos, float4x4 viewProj, out float2 uv)
+{
+    float4 clip = mul(float4(worldPos, 1.0f), viewProj);
+    if (abs(clip.w) <= 1.0e-6f)
+    {
+        uv = float2(0.0f, 0.0f);
+        return false;
+    }
+
+    uv = (clip.xy * rcp(clip.w)) * float2(0.5f, -0.5f) + 0.5f;
+    return !any(isnan(uv)) && !any(isinf(uv));
 }
 
 bool ProjectToScreenUVChecked(float3 worldPos, float4x4 viewProj, out float2 uv)
@@ -337,8 +385,15 @@ void WritePrimaryHitGBuffer(uint2 pixel, PathTracingPayload payload, bool bHit, 
     OutSpecularAlbedo[pixel] = float4(ComputeDLSSRRSpecularAlbedo(albedo, metallic, roughness, normal, surfaceToView), 1.0f);
     OutNormal[pixel] = float4(normal, 0.0f);
     OutGeomNormal[pixel] = float4(geomNormal, 0.0f);
-    // PT+RR asks Streamline to rebuild camera motion from depth and clipToPrevClip.
-    OutVelocity[pixel] = float2(0.0f, 0.0f);
+    float2 currentUV;
+    float2 prevUV;
+    float2 velocity = float2(0.0f, 0.0f);
+    if (ProjectToScreenUVFinite(payload.debugWorldPos, UnjitteredViewProjMatrix, currentUV) &&
+        ProjectToScreenUVFinite(payload.debugWorldPos, PrevUnjitteredViewProjMatrix, prevUV))
+    {
+        velocity = currentUV - prevUV;
+    }
+    OutVelocity[pixel] = velocity;
     OutRoughnessMetallic[pixel] = float4(roughness, metallic, 0.0f, 0.0f);
     OutDepth[pixel] = ProjectToDeviceDepth(payload.debugWorldPos, UnjitteredViewProjMatrix);
     OutSpecularHitDistance[pixel] = clamp(specularHitDistance, 0.0f, ProjectionParams.w);
@@ -587,6 +642,158 @@ void PathTracingRayGen()
     OutputColor[launchIndex.xy] = float4(finalColor, 1.0);
 }
 
+[shader("raygeneration")]
+void PathTracingCompactionRayGen()
+{
+    uint3 launchIndex = DispatchRaysIndex();
+    uint3 launchDim = DispatchRaysDimensions();
+    uint laneIndex = launchIndex.x + launchIndex.y * launchDim.x;
+    uint bounce = PathCompactionBounceIndex;
+    uint activeCount = PathCompactionCounters[bounce];
+    if (laneIndex >= activeCount || laneIndex >= PathCompactionCapacity)
+        return;
+
+    uint pathId = PathCompactionActiveListIn[laneIndex];
+    if (pathId >= PathCompactionCapacity)
+        return;
+
+    PathTracingWavefrontState state = PathCompactionStateIn[pathId];
+    if ((state.Flags & PATH_TRACING_WAVEFRONT_FLAG_ACTIVE) == 0u)
+        return;
+
+    uint2 pixel = uint2(pathId % PathCompactionRenderWidth, pathId / PathCompactionRenderWidth);
+    if (pixel.x >= PathCompactionRenderWidth || pixel.y >= PathCompactionRenderHeight)
+        return;
+
+    RayDesc ray;
+    ray.Origin = state.Origin;
+    ray.Direction = state.Direction;
+    if (state.Bounce == 0u)
+    {
+        float3 viewRayDir = mul(float4(state.Direction, 0.0f), ViewMatrix).xyz;
+        float primaryRayTScale = rcp(max(-viewRayDir.z, 1.0e-4f));
+        ray.TMin = max(0.0001f, ProjectionParams.z * primaryRayTScale);
+        ray.TMax = max(ray.TMin + 0.0001f, ProjectionParams.w * primaryRayTScale);
+    }
+    else
+    {
+        ray.TMin = 0.0001f;
+        ray.TMax = 100000.0f;
+    }
+
+    PathTracingPayload payload = MakePathTracingPayload(
+        state.Origin,
+        state.Direction,
+        state.Bounce,
+        state.Seed,
+        state.Throughput,
+        0u);
+    TraceRay(gRtScene, RAY_FLAG_NONE, 0xFF, 0, 0, 0, ray, payload);
+
+    uint seed = payload.seed;
+    float3 radiance = state.Radiance + payload.radiance * state.Throughput;
+
+    if (bWritePrimaryGBuffer != 0 && state.Bounce == 0u)
+    {
+        float specularHitDistance = ProjectionParams.w;
+        float2 specularMotionVector = float2(0.0f, 0.0f);
+        bool primaryHit = payload.hit != 0u;
+        if (primaryHit)
+        {
+            float roughness = clamp(payload.debugRoughness, 0.02f, 1.0f);
+            float3 specularAlbedo = lerp(0.04f.xxx, saturate(payload.debugAlbedo), saturate(payload.debugMetallic));
+            float specularEnergy = max(specularAlbedo.x, max(specularAlbedo.y, specularAlbedo.z));
+            float smoothGuide = saturate((0.38f - roughness) / 0.18f);
+            float metalGuide = saturate(payload.debugMetallic) * saturate((0.55f - roughness) / 0.25f);
+            float specularGuideWeight = specularEnergy * max(smoothGuide, metalGuide);
+
+            if (specularGuideWeight > 0.025f)
+            {
+                float3 guideNormal = GGXSafeNormalize(payload.debugGeomNormal, float3(0.0f, 1.0f, 0.0f));
+                float3 guideDir = GGXSafeNormalize(reflect(ray.Direction, guideNormal), guideNormal);
+
+                if (dot(guideDir, guideNormal) > 1.0e-4f)
+                {
+                    RayDesc guideRay;
+                    guideRay.Origin = payload.debugWorldPos + guideNormal * PATH_TRACING_RAY_BIAS;
+                    guideRay.Direction = guideDir;
+                    guideRay.TMin = 0.01f;
+                    guideRay.TMax = ProjectionParams.w;
+
+                    PathTracingPayload guidePayload = MakePathTracingPayload(guideRay.Origin, guideRay.Direction, 0u, seed, float3(0, 0, 0), 1u);
+                    guidePayload.done = true;
+                    TraceRay(gRtScene,
+                             RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH |
+                             RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES,
+                             0xFF, 0, 0, 0, guideRay, guidePayload);
+                    if (guidePayload.hit != 0u)
+                    {
+                        specularHitDistance = guidePayload.hitDistance;
+                        float2 specCurrentUV;
+                        float2 specPrevUV;
+                        if (ProjectToScreenUVChecked(guidePayload.debugWorldPos, UnjitteredViewProjMatrix, specCurrentUV) &&
+                            ProjectToScreenUVChecked(guidePayload.debugWorldPos, PrevUnjitteredViewProjMatrix, specPrevUV))
+                        {
+                            float2 candidateMotionVector = (specPrevUV - specCurrentUV) *
+                                float2(PathCompactionRenderWidth, PathCompactionRenderHeight) *
+                                SpecularMotionVectorScale;
+                            if (all(abs(candidateMotionVector) <= float2(PathCompactionRenderWidth, PathCompactionRenderHeight)))
+                                specularMotionVector = candidateMotionVector;
+                        }
+                    }
+                }
+            }
+        }
+        WritePrimaryHitGBuffer(pixel, payload, primaryHit, specularHitDistance, specularMotionVector);
+    }
+
+    bool alive = !payload.done && ((state.Bounce + 1u) < MaxBounces);
+    float3 nextThroughput = payload.throughput;
+    if (any(isnan(nextThroughput)) || any(isinf(nextThroughput)) || all(nextThroughput <= 0.0f))
+        alive = false;
+
+    if (alive && state.Bounce > 2u)
+    {
+        float p = max(nextThroughput.x, max(nextThroughput.y, nextThroughput.z));
+        if (p < 0.001f || random_float(seed) > p)
+        {
+            alive = false;
+        }
+        else
+        {
+            nextThroughput /= max(p, 0.001f);
+        }
+    }
+
+    if (any(isnan(radiance)) || any(isinf(radiance)))
+        radiance = float3(0, 0, 0);
+    radiance = clamp_firefly(max(radiance, 0.0f.xxx));
+    PathCompactionRadiance[pathId] = float4(radiance, 1.0f);
+
+    PathTracingWavefrontState nextState = state;
+    nextState.Seed = seed;
+    nextState.Radiance = radiance;
+    nextState.Bounce = state.Bounce + 1u;
+    nextState.Origin = payload.origin;
+    nextState.Direction = payload.direction;
+    nextState.Throughput = nextThroughput;
+
+    if (alive)
+    {
+        nextState.Flags = PATH_TRACING_WAVEFRONT_FLAG_ACTIVE;
+        PathCompactionStateOut[pathId] = nextState;
+        uint outIndex;
+        InterlockedAdd(PathCompactionCounters[bounce + 1u], 1u, outIndex);
+        if (outIndex < PathCompactionCapacity)
+            PathCompactionActiveListOut[outIndex] = pathId;
+    }
+    else
+    {
+        nextState.Flags = 0u;
+        PathCompactionStateOut[pathId] = nextState;
+    }
+}
+
 [shader("closesthit")]
 void PathTracingClosestHit(inout PathTracingPayload payload, in BuiltInTriangleIntersectionAttributes attribs)
 {
@@ -605,17 +812,19 @@ void PathTracingClosestHit(inout PathTracingPayload payload, in BuiltInTriangleI
     
     uint triangleIndex = PrimitiveIndex();
     uint instanceID = InstanceID();
-    Vertex vertex = GetVertexAttributes(instanceID, vertices, indices, InstanceProperty, triangleIndex, barycentrics);
+    Vertex vertex = CORONA_GET_VERTEX_ATTRIBUTES(instanceID, triangleIndex, barycentrics);
     float hitDistance = RayTCurrent();
     float textureMipLevel = ComputePathTracingTextureMipLevel(instanceID, vertex, payload.direction, hitDistance);
     payload.hit = 1u;
     payload.hitDistance = hitDistance;
     
     // Get material properties
-    float3 albedo = AlbedoTex.SampleLevel(sampleWrap, vertex.uv, textureMipLevel).xyz;
-    float roughness = clamp(RoughnessTex.SampleLevel(sampleWrap, vertex.uv, textureMipLevel).x, 0.02f, 1.0f);
-    float metallic = saturate(MetallicTex.SampleLevel(sampleWrap, vertex.uv, textureMipLevel).x);
-    ApplyInstanceRoughnessMetallic(instanceID, InstanceProperty, roughness, metallic);
+    RTMaterialRecord material = RtMaterials[instanceID];
+    float3 albedo = SamplePathTracingAlbedo(material, vertex.uv, textureMipLevel).xyz;
+    float roughness = clamp(SamplePathTracingRoughness(material, vertex.uv, textureMipLevel), 0.02f, 1.0f);
+    float metallic = saturate(SamplePathTracingMetallic(material, vertex.uv, textureMipLevel));
+
+    ApplyInstanceRoughnessMetallic(instanceID, CORONA_INSTANCE_PROPERTY, roughness, metallic);
     
     // Store debug information for primary hit (depth == 0)
     if (payload.depth == 0)
@@ -715,16 +924,28 @@ void PathTracingClosestHit(inout PathTracingPayload payload, in BuiltInTriangleI
     directLight /= float(directLightSampleCount);
 
     uint activePointLightCount = min(PointLightCount, MAX_POINT_LIGHTS);
+    bool samplePointLights = PointLightSampleCount > 0u && PointLightSampleCount < activePointLightCount;
+    uint pointLightLoopCount = samplePointLights ? min(PointLightSampleCount, activePointLightCount) : activePointLightCount;
+    float pointLightSampleWeight = samplePointLights ? (float(activePointLightCount) / float(max(pointLightLoopCount, 1u))) : 1.0f;
+
     [loop]
-    for (uint pointLightIndex = 0u; pointLightIndex < MAX_POINT_LIGHTS; ++pointLightIndex)
+    for (uint pointLightSampleIndex = 0u; pointLightSampleIndex < MAX_POINT_LIGHTS; ++pointLightSampleIndex)
     {
-        if (pointLightIndex >= activePointLightCount)
+        if (pointLightSampleIndex >= pointLightLoopCount)
             break;
 
-        float3 pointPosition = PointLights[pointLightIndex].PositionAndRadius.xyz;
-        float pointRadius = max(PointLights[pointLightIndex].PositionAndRadius.w, 0.01f);
-        float3 pointColor = max(PointLights[pointLightIndex].ColorAndIntensity.xyz, 0.0f.xxx);
-        float pointIntensity = max(PointLights[pointLightIndex].ColorAndIntensity.w, 0.0f);
+        uint pointLightIndex = pointLightSampleIndex;
+        if (samplePointLights)
+        {
+            pointLightIndex = min((uint)(random_float(payload.seed) * float(activePointLightCount)), activePointLightCount - 1u);
+        }
+
+        PointLightParam pl = PointLightBuffer[pointLightIndex];
+
+        float3 pointPosition = pl.PositionAndRadius.xyz;
+        float pointRadius = max(pl.PositionAndRadius.w, 0.01f);
+        float3 pointColor = max(pl.ColorAndIntensity.xyz, 0.0f.xxx);
+        float pointIntensity = max(pl.ColorAndIntensity.w, 0.0f);
 
         float3 toLight = pointPosition - hitPos;
         float distanceSq = max(dot(toLight, toLight), 1.0e-4f);
@@ -734,14 +955,14 @@ void PathTracingClosestHit(inout PathTracingPayload payload, in BuiltInTriangleI
         rangeAttenuation *= rangeAttenuation;
         float inverseSquareAttenuation = 1.0f / max(1.0f, distanceSq * 0.0001f);
         float attenuation = rangeAttenuation * inverseSquareAttenuation *
-            EvaluateSpotAttenuation(PointLights[pointLightIndex], pointLightDir);
+            EvaluateSpotAttenuation(pl, pointLightDir);
         float pointNdotL = max(0.0f, dot(N, pointLightDir));
 
         if (pointNdotL <= 0.0f || attenuation <= 0.0f || pointIntensity <= 0.0f)
             continue;
 
         bool pointVisible = true;
-        if (PointLights[pointLightIndex].SpotConeAndFlags.w > 0.5f)
+        if (pl.SpotConeAndFlags.w > 0.5f)
         {
             RayDesc pointShadowRay;
             pointShadowRay.Origin = hitPos;
@@ -766,7 +987,7 @@ void PathTracingClosestHit(inout PathTracingPayload payload, in BuiltInTriangleI
         float3 pointRadiance = pointColor * pointIntensity * attenuation;
         float3 pointDiffuse = bEnableDirectDiffuse ? (albedo * (1.0 - metallic)) : float3(0, 0, 0);
         float3 pointSpecular = bEnableDirectSpecular ? EvaluateGGXSpecularBRDF(N, V, pointLightDir, roughness, directF0) : float3(0, 0, 0);
-        directLight += (pointDiffuse + pointSpecular) * pointNdotL * pointRadiance;
+        directLight += (pointDiffuse + pointSpecular) * pointNdotL * pointRadiance * pointLightSampleWeight;
     }
     
     // Set direct lighting contribution
@@ -863,14 +1084,16 @@ void PathTracingAnyHit(inout PathTracingPayload payload, in BuiltInTriangleInter
     uint triangleIndex = PrimitiveIndex();
     uint instanceID = InstanceID();
 
-    if (!IsAlphaTestedInstance(instanceID, InstanceProperty))
+    if (!IsAlphaTestedInstance(instanceID, CORONA_INSTANCE_PROPERTY))
         return;
 
-    Vertex vertex = GetVertexAttributes(instanceID, vertices, indices, InstanceProperty, triangleIndex, barycentrics);
+    Vertex vertex = CORONA_GET_VERTEX_ATTRIBUTES(instanceID, triangleIndex, barycentrics);
     float textureMipLevel = ComputePathTracingTextureMipLevel(instanceID, vertex, payload.direction, RayTCurrent());
     
     // Sample albedo alpha channel
-    float alpha = AlbedoTex.SampleLevel(sampleWrap, vertex.uv, textureMipLevel).w;
+    RTMaterialRecord material = RtMaterials[instanceID];
+    float alpha = SamplePathTracingAlbedo(material, vertex.uv, textureMipLevel).w;
+
     
     // If alpha is too low, ignore this hit and continue ray traversal
     if (alpha < 0.1)

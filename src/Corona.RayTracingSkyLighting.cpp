@@ -27,22 +27,22 @@ void Corona::InitRaytracingSkyLightingPass()
 	tempPSO->AddHitGroup("HitGroup", "", "anyhit");
 	tempPSO->AddShader("rayGen", RTPipelineStateObject::RAYGEN);
 
-	tempPSO->BindUAV("global", "SkyLightingResult", 0);
-	tempPSO->BindSRV("global", "gRtScene", 0);
-	tempPSO->BindSRV("global", "DepthTex", 1);
-	tempPSO->BindSRV("global", "WorldNormalTex", 2);
-	tempPSO->BindSRV("global", "RayNoiseBlueNoiseSource", 3);
-	tempPSO->BindSRV("global", "GeoNormalTex", 8);
-	tempPSO->BindCBV("global", "ViewParameter", 0, sizeof(RTSkyLightingViewParam), 1);
-	tempPSO->BindSampler("global", "sampleWrap", 0);
+	const RHIShaderStageMask rayGenStage = ToRHIShaderStageMask(RHIShaderStage::RayGeneration);
+	const RHIShaderStageMask anyHitStage = ToRHIShaderStageMask(RHIShaderStage::AnyHit);
+	tempPSO->BindUAV("global", MakeRHITextureUAV("SkyLightingResult", 0, rayGenStage));
+	tempPSO->BindSRV("global", MakeRHIAccelerationStructureSRV("gRtScene", 0, rayGenStage));
+	tempPSO->BindSRV("global", MakeRHITextureSRV("DepthTex", 1, rayGenStage));
+	tempPSO->BindSRV("global", MakeRHITextureSRV("WorldNormalTex", 2, rayGenStage));
+	tempPSO->BindSRV("global", MakeRHITextureSRV("RayNoiseBlueNoiseSource", 3, rayGenStage));
+	tempPSO->BindSRV("global", MakeRHITextureSRV("GeoNormalTex", 8, rayGenStage));
+	tempPSO->BindCBV("global", MakeRHICBV("ViewParameter", 0, sizeof(RTSkyLightingViewParam), rayGenStage));
+	tempPSO->BindSampler("global", MakeRHISampler("sampleWrap", 0, rayGenStage | anyHitStage));
+	BindRTBindlessMaterialSchema(*tempPSO, anyHitStage);
+	BindRTBindlessGeometrySchema(*tempPSO, anyHitStage);
 
 	tempPSO->AddShader("miss", RTPipelineStateObject::MISS);
 
 	tempPSO->AddShader("anyhit", RTPipelineStateObject::ANYHIT);
-	tempPSO->BindSRV("anyhit", "vertices", 4);
-	tempPSO->BindSRV("anyhit", "indices", 5);
-	tempPSO->BindSRV("anyhit", "AlbedoTex", 6);
-	tempPSO->BindSRV("anyhit", "InstanceProperty", 7);
 	tempPSO->Configure(1, sizeof(float) * 4, sizeof(float) * 2);
 
 	if (tempPSO->InitRS("Shaders\\RaytracedSkyLighting.hlsl"))
@@ -57,6 +57,9 @@ void Corona::RaytraceSkyLightingPass()
 		return;
 
 	renderBackend->EmitGpuCrashMarker("RaytraceSkyLightingPass");
+
+	if (!EnsureRTMaterialRecordBuffer())
+	return;
 
 	RTSkyLightingViewParam.ViewMatrix = glm::transpose(ViewMat);
 	RTSkyLightingViewParam.InvViewMatrix = glm::transpose(InvViewMat);
@@ -92,7 +95,10 @@ void Corona::RaytraceSkyLightingPass()
 		.SetTextureSRV("global", "GeoNormalTex", GeomNormalBuffers[ColorBufferWriteIndex].get())
 		.SetCBVValue("global", "ViewParameter", &RTSkyLightingViewParam)
 		.SetSampler("global", "sampleWrap", samplerWrap.get());
-	pass.BindSceneHitPrograms();
+	pass.SetBindlessTextureTable("global", "MaterialTextures")
+		.SetBufferSRV("global", "RtMaterials", RTMaterialRecordBuffer.get());
+	RTSceneHitProgramDesc hitProgramDesc;
+	pass.BindSceneHitPrograms(hitProgramDesc);
 	pass.Dispatch(GetRenderWidth(), GetRenderHeight());
 
 	renderBackend->TransitionTexture(SkyLightingBuffer.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);

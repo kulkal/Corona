@@ -126,6 +126,7 @@ public:
 		Sampler* sampler;
 
 		UINT rootConst;
+		RHIBindingDesc Schema;
 	};
 
 
@@ -185,6 +186,10 @@ public:
 	std::map<std::string, Sampler*> PendingSamplers;
 	std::map<std::string, std::vector<uint8_t>> PendingCBVs;
 
+	void BindSRV(const RHIBindingDesc& binding) override;
+	void BindUAV(const RHIBindingDesc& binding) override;
+	void BindCBV(const RHIBindingDesc& binding) override;
+	void BindSampler(const RHIBindingDesc& binding) override;
 	void BindSRV(const std::string& name, uint32_t baseRegister, uint32_t numDescriptors) override;
 	void BindUAV(const std::string& name, uint32_t baseRegister) override;
 	void BindCBV(const std::string& name, uint32_t baseRegister, uint32_t size) override;
@@ -220,6 +225,7 @@ private:
 		UINT BaseRegister;
 		D3D12_CPU_DESCRIPTOR_HANDLE CPUHandle; // for multiple instances
 		D3D12_GPU_DESCRIPTOR_HANDLE GPUHandle; // for multiple instances
+		RHIBindingDesc Schema;
 	};
 	vector<BindingData> RaygenBinding;
 
@@ -287,6 +293,9 @@ public:
 	uint32_t ShaderTableEntrySize = 0;
 	UINT ShaderTableSize = 0;
 	ComPtr<ID3D12Resource> ShaderTable;
+	ComPtr<ID3D12Resource> ShaderTableUpload;
+	D3D12_RESOURCE_STATES ShaderTableState = D3D12_RESOURCE_STATE_COPY_DEST;
+	ComPtr<ID3D12CommandSignature> DispatchRaysCommandSignature;
 	std::vector<uint8_t> ShaderTableFrameValid;
 	std::vector<uint32_t> ShaderTableFrameInstanceCount;
 	std::vector<uint64_t> ShaderTableFrameSignature;
@@ -300,6 +309,10 @@ public:
 	void Configure(uint32_t maxRecursion, uint32_t maxPayloadSizeInBytes, uint32_t maxAttributeSizeInBytes) override;
 	void AddHitGroup(const std::string& name, const std::string& chs, const std::string& ahs) override;
 	void AddShader(const std::string& shader, RTPipelineStateObject::ShaderType shaderType) override;
+	void BindUAV(const std::string& shader, const RHIBindingDesc& binding) override;
+	void BindSRV(const std::string& shader, const RHIBindingDesc& binding) override;
+	void BindSampler(const std::string& shader, const RHIBindingDesc& binding) override;
+	void BindCBV(const std::string& shader, const RHIBindingDesc& binding) override;
 	void BindUAV(const std::string& shader, const std::string& name, uint32_t baseRegister) override;
 	void BindSRV(const std::string& shader, const std::string& name, uint32_t baseRegister) override;
 	void BindSampler(const std::string& shader, const std::string& name, uint32_t baseRegister) override;
@@ -315,21 +328,23 @@ public:
 	void SetBufferUAV(const std::string& shader, const std::string& bindingName, Buffer* buffer, int instanceIndex = -1) override;
 	void SetTextureSRV(const std::string& shader, const std::string& bindingName, Texture* texture, int instanceIndex = -1) override;
 	void SetBufferSRV(const std::string& shader, const std::string& bindingName, Buffer* buffer, int instanceIndex = -1) override;
+	bool SetBindlessTextureTable(const std::string& shader, const std::string& bindingName) override;
+	bool SetBindlessBufferTable(const std::string& shader, const std::string& bindingName) override;
 	void SetAccelerationStructure(const std::string& shader, const std::string& bindingName, const std::shared_ptr<RTAS>& rtas, int instanceIndex = -1) override;
 	void SetSampler(const std::string& shader, const std::string& bindingName, Sampler* sampler, int instanceIndex = -1) override;
 	void SetCBVValue(const std::string& shader, const std::string& bindingName, void* pData, int instanceIndex = -1) override;
 	void ResetHitProgram(uint32_t instanceIndex) override;
 	void StartHitProgram(const std::string& hitGroup, uint32_t instanceIndex) override;
-	void AddTextureSRVToHitProgram(const std::string& hitGroup, Texture* texture, uint32_t instanceIndex) override;
-	void AddBufferSRVToHitProgram(const std::string& hitGroup, Buffer* buffer, uint32_t instanceIndex) override;
-	void AddSceneGeometrySRVsToHitProgram(const std::string& hitGroup, VertexBuffer* sceneVertexBuffer, IndexBuffer* sceneIndexBuffer, uint32_t instanceIndex) override;
 	bool InitRS(const std::string& shaderFile) override;
 	void Apply(uint32_t width, uint32_t height) override;
+	bool GetDispatchRaysIndirectTemplate(uint32_t width, uint32_t height, RtDispatchRaysIndirectTemplate& outTemplate) const override;
+	bool ApplyIndirect(Buffer* indirectArgumentBuffer, uint64_t byteOffset) override;
 
 	void SetGlobalBinding(CommandList* CommandList = nullptr);
 	void SetUAVHandle(const std::string& shader, const std::string& bindingName, D3D12_GPU_DESCRIPTOR_HANDLE uavHandle, INT instanceIndex = -1);
 	void SetSRVHandle(const std::string& shader, const std::string& bindingName, D3D12_GPU_DESCRIPTOR_HANDLE srvHandle, INT instanceIndex = -1);
-	void AddDescriptor2HitProgram(const std::string& hitGroup, D3D12_GPU_DESCRIPTOR_HANDLE srvHandle, UINT instanceIndex);
+	bool BuildDispatchRaysDesc(uint32_t width, uint32_t height, D3D12_DISPATCH_RAYS_DESC& outDesc) const;
+	bool EnsureDispatchRaysCommandSignature();
 };
 
 // Buffer / IndexBuffer / VertexBuffer / Sampler / Texture are defined in
@@ -505,6 +520,87 @@ public:
 	};
 	UploadAllocation AllocateUploadBytes(UINT64 size, UINT64 alignment);
 
+	struct TransientUploadStructuredBlock
+	{
+		ComPtr<ID3D12Resource> resource;
+		uint8_t* mappedBase = nullptr;
+		UINT64 gpuVA = 0;
+		UINT64 capacity = 0;
+		UINT64 cursor = 0;
+	};
+	struct TransientUploadStructuredAllocation
+	{
+		ComPtr<ID3D12Resource> resource;
+		UINT64 offset = 0;
+		void* cpu = nullptr;
+		UINT64 gpuVA = 0;
+	};
+	std::vector<std::vector<std::shared_ptr<TransientUploadStructuredBlock>>> TransientUploadStructuredBlocks;
+	std::vector<std::vector<std::shared_ptr<Buffer>>> TransientUploadStructuredKeepAlive;
+	UINT64 TransientUploadStructuredBlockDefaultSize = 4ull * 1024ull * 1024ull;
+	UINT32 TransientUploadStructuredBlockCount = 0;
+	UINT32 TransientUploadStructuredAllocationCount = 0;
+	UINT64 TransientUploadStructuredBytesIssued = 0;
+	UINT64 TransientUploadStructuredBytesReserved = 0;
+	void ResetTransientUploadStructuredFrame(uint32_t frameIndex);
+	TransientUploadStructuredAllocation AllocateTransientUploadStructuredBytes(UINT64 size, UINT64 alignment);
+
+	struct PersistentStructuredBufferBlock
+	{
+		ComPtr<ID3D12Resource> resource;
+		UINT64 capacity = 0;
+		UINT64 cursor = 0;
+		D3D12_RESOURCE_STATES state = D3D12_RESOURCE_STATE_COPY_DEST;
+		struct FreeRange
+		{
+			UINT64 offset = 0;
+			UINT64 size = 0;
+		};
+		std::vector<FreeRange> freeRanges;
+	};
+	struct PersistentStructuredBufferAllocation
+	{
+		ComPtr<ID3D12Resource> resource;
+		std::shared_ptr<PersistentStructuredBufferBlock> block;
+		UINT64 offset = 0;
+		UINT64 size = 0;
+	};
+	struct PendingPersistentStructuredBufferFree
+	{
+		std::shared_ptr<PersistentStructuredBufferBlock> block;
+		UINT64 offset = 0;
+		UINT64 size = 0;
+		UINT64 fenceValue = 0;
+	};
+	std::vector<std::shared_ptr<PersistentStructuredBufferBlock>> PersistentStructuredBufferBlocks;
+	std::vector<PendingPersistentStructuredBufferFree> PendingPersistentStructuredBufferFrees;
+	UINT64 PersistentStructuredBufferBlockDefaultSize = 16ull * 1024ull * 1024ull;
+	UINT32 PersistentStructuredBufferBlockCount = 0;
+	UINT32 PersistentStructuredBufferAllocationCount = 0;
+	UINT64 PersistentStructuredBufferBytesIssued = 0;
+	UINT64 PersistentStructuredBufferBytesReserved = 0;
+	struct PendingPersistentStructuredBufferUpload
+	{
+		UINT64 FenceValue = 0;
+		UINT64 Bytes = 0;
+		ComPtr<ID3D12Resource> UploadHeap;
+	};
+	std::vector<PendingPersistentStructuredBufferUpload> PendingPersistentStructuredBufferUploads;
+	UINT64 PendingPersistentStructuredBufferUploadBytes = 0;
+	static constexpr UINT64 kMaxInFlightPersistentStructuredBufferUploadBytes = 128ull * 1024ull * 1024ull;
+	PersistentStructuredBufferAllocation AllocatePersistentStructuredBufferBytes(UINT64 size, UINT64 alignment);
+	void ReleasePersistentStructuredBufferBytes(
+		const std::shared_ptr<PersistentStructuredBufferBlock>& block,
+		UINT64 offset,
+		UINT64 size);
+	void RetireCompletedPersistentStructuredBufferFrees();
+	void RetireCompletedPersistentStructuredBufferUploads();
+	void AddPersistentStructuredBufferFreeRange(
+		const std::shared_ptr<PersistentStructuredBufferBlock>& block,
+		UINT64 offset,
+		UINT64 size);
+	std::shared_ptr<Buffer> CreateSuballocatedStructuredBuffer(const BufferCreateDesc& desc);
+
 	std::unique_ptr<ConstantBufferRingBuffer> GlobalCBRing;
 
 	std::vector<std::shared_ptr<Texture>> renderTargetTextures;
@@ -547,12 +643,60 @@ public:
 	CoronaBvhViewerD3D12Handle* BvhViewerD3D12 = nullptr;
 	bool bBvhViewerD3D12Allowed = true;
 
+	static constexpr uint32_t kMaxDX12BindlessTextureSlots = 65536;
+	struct DX12BindlessTextureSlot
+	{
+		Texture* TexturePtr = nullptr;
+		uint32_t Generation = 1;
+		bool Occupied = false;
+		D3D12_CPU_DESCRIPTOR_HANDLE CpuHandleSRV{};
+		D3D12_GPU_DESCRIPTOR_HANDLE GpuHandleSRV{};
+	};
+	D3D12_CPU_DESCRIPTOR_HANDLE BindlessTextureTableCpuBase{};
+	D3D12_GPU_DESCRIPTOR_HANDLE BindlessTextureTableGpuBase{};
+	bool bBindlessTextureTableAllocated = false;
+	std::vector<DX12BindlessTextureSlot> BindlessTextureSlots;
+	std::vector<uint32_t> BindlessTextureFreeList;
+	mutable std::mutex BindlessTextureMutex;
+
+	static constexpr uint32_t kMaxDX12BindlessBufferSlots = 65536;
+	struct DX12BindlessBufferSlot
+	{
+		const void* BufferPtr = nullptr;
+		uint8_t ResourceType = 0;
+		uint32_t Generation = 1;
+		bool Occupied = false;
+		D3D12_CPU_DESCRIPTOR_HANDLE CpuHandleSRV{};
+		D3D12_GPU_DESCRIPTOR_HANDLE GpuHandleSRV{};
+	};
+	D3D12_CPU_DESCRIPTOR_HANDLE BindlessBufferTableCpuBase{};
+	D3D12_GPU_DESCRIPTOR_HANDLE BindlessBufferTableGpuBase{};
+	bool bBindlessBufferTableAllocated = false;
+	std::vector<DX12BindlessBufferSlot> BindlessBufferSlots;
+	std::vector<uint32_t> BindlessBufferFreeList;
+	mutable std::mutex BindlessBufferMutex;
+
 #if USE_AFTERMATH
 	bool bAftermathEnabled = false;
 #endif
 public:
 	ERenderBackendAPI GetAPI() const override { return ERenderBackendAPI::D3D12; }
 	const char* GetBackendName() const override { return "Direct3D 12"; }
+	RenderBackendCapabilities GetCapabilities() const override
+	{
+		RenderBackendCapabilities capabilities{};
+		capabilities.SupportsTypedBindingSchema = true;
+		capabilities.SupportsBindlessTextures = true;
+		capabilities.SupportsBindlessBuffers = true;
+		capabilities.SupportsRuntimeDescriptorArrays = true;
+		capabilities.SupportsPartiallyBoundDescriptors = true;
+		capabilities.MaxBindlessTextureCount = kMaxDX12BindlessTextureSlots;
+		capabilities.MaxBindlessBufferCount = kMaxDX12BindlessBufferSlots;
+		return capabilities;
+	}
+	RenderBackendAllocatorStats GetAllocatorStats() const override;
+	bool GetStreamlineTextureResource(Texture* texture, EResourceState state, StreamlineTextureResourceDesc& outDesc) const override;
+	void* GetStreamlineCommandBuffer() override;
 	uint32_t GetMaxSupportedHybridStage() const override { return 7; }
 	bool SupportsRayTracing() const override;
 	bool SupportsShaderExecutionReordering() const override;
@@ -576,6 +720,23 @@ public:
 	std::shared_ptr<Buffer> CreateBuffer(const BufferCreateDesc& desc) override;
 	std::shared_ptr<Sampler> CreateSampler(const SamplerCreateDesc& desc) override;
 	std::shared_ptr<Texture> CreateTextureFromFile(const std::wstring& fileName, bool nonSRGB) override;
+	RHITextureHandle RegisterBindlessTexture(Texture* texture) override;
+	bool UpdateBindlessTexture(Texture* texture) override;
+	void UnregisterBindlessTexture(Texture* texture) override;
+	RHITextureHandle GetBindlessTextureHandle(const Texture* texture) const override;
+	bool IsBindlessTextureTableReady() const { return bBindlessTextureTableAllocated; }
+	D3D12_GPU_DESCRIPTOR_HANDLE GetBindlessTextureTableGpuHandle() const { return BindlessTextureTableGpuBase; }
+	RHIBufferHandle RegisterBindlessBuffer(Buffer* buffer) override;
+	RHIBufferHandle RegisterBindlessVertexBuffer(VertexBuffer* buffer) override;
+	RHIBufferHandle RegisterBindlessIndexBuffer(IndexBuffer* buffer) override;
+	void UnregisterBindlessBuffer(Buffer* buffer) override;
+	void UnregisterBindlessVertexBuffer(VertexBuffer* buffer) override;
+	void UnregisterBindlessIndexBuffer(IndexBuffer* buffer) override;
+	RHIBufferHandle GetBindlessBufferHandle(const Buffer* buffer) const override;
+	RHIBufferHandle GetBindlessVertexBufferHandle(const VertexBuffer* buffer) const override;
+	RHIBufferHandle GetBindlessIndexBufferHandle(const IndexBuffer* buffer) const override;
+	bool IsBindlessBufferTableReady() const { return bBindlessBufferTableAllocated; }
+	D3D12_GPU_DESCRIPTOR_HANDLE GetBindlessBufferTableGpuHandle() const { return BindlessBufferTableGpuBase; }
 	std::shared_ptr<Texture> WrapNativeTexture(const Microsoft::WRL::ComPtr<ID3D12Resource>& resource);
 	std::shared_ptr<Texture> CreateTexture3D(ETextureFormat format, ETextureUsageFlags usage, EInitialResourceState initialState, int width, int height, int depth, int mipLevels) override;
 	void UploadTexture3D(Texture* texture, const void* data, uint64_t rowPitch, uint64_t slicePitch) override;
@@ -588,6 +749,7 @@ public:
 	std::shared_ptr<VertexBuffer> CreateRWVertexBuffer(uint32_t size, uint32_t stride) override;
 	std::shared_ptr<Buffer> CreateUploadStructuredBuffer(uint32_t numElements, uint32_t elementSize) override;
 	void UpdateUploadStructuredBuffer(Buffer* buffer, const void* srcData, uint32_t sizeInBytes) override;
+	std::shared_ptr<Buffer> AllocateTransientUploadStructuredBuffer(uint32_t numElements, uint32_t elementSize, const void* srcData) override;
 	std::shared_ptr<RTAS> CreateBLASForMesh(Mesh* mesh) override;
 	std::shared_ptr<RTAS> CreateBLASForSkeletalMesh(Mesh* mesh) override;
 	void RefitBLAS(RTAS* rtas, Mesh* mesh) override;
@@ -645,18 +807,16 @@ public:
 	void TransitionTexture(Texture* texture, EResourceState stateBefore, EResourceState stateAfter) override;
 	void TransitionBuffer(Buffer* buffer, EResourceState stateBefore, EResourceState stateAfter) override;
 	void TransitionVertexBuffer(VertexBuffer* vertexBuffer, EResourceState stateBefore, EResourceState stateAfter) override;
+	void UAVBarrier(Buffer* buffer) override;
 	Texture* GetCurrentWindowRenderTarget() override;
 	void PrepareWindowRenderTarget(Texture* renderTarget) override;
 	void FinalizeWindowRenderTarget(Texture* renderTarget) override;
 	void RequestWindowCapture(const std::wstring& outputPath) override;
 	bool ConsumeWindowCaptureResult(std::wstring* outputPath, bool* success, std::wstring* errorMessage) override;
 	std::shared_ptr<GraphicsPipelineHandle> CreateGraphicsPipeline(const GraphicsPipelineDesc& desc) override;
+	std::shared_ptr<GraphicsBindGroupHandle> CreateGraphicsBindGroup(const GraphicsBindGroupDesc& desc) override;
 	void BindGraphicsPipeline(GraphicsPipelineHandle* pipeline) override;
-	void SetGraphicsPipelineConstantData(GraphicsPipelineHandle* pipeline, uint32_t slot, const void* data, uint32_t size) override;
-	void BindGraphicsPipelineTexture(GraphicsPipelineHandle* pipeline, const std::string& bindingName, Texture* texture) override;
-	void BindGraphicsPipelineBuffer(GraphicsPipelineHandle* pipeline, const std::string& bindingName, Buffer* buffer) override;
-	void BindGraphicsPipelineVertexBufferSRV(GraphicsPipelineHandle* pipeline, const std::string& bindingName, VertexBuffer* vb) override;
-	void BindGraphicsPipelineSampler(GraphicsPipelineHandle* pipeline, const std::string& bindingName, Sampler* sampler) override;
+	void BindGraphicsBindGroup(GraphicsPipelineHandle* pipeline, uint32_t slot, const std::shared_ptr<GraphicsBindGroupHandle>& bindGroup) override;
 	void DrawTriangleList(VertexBuffer* vertexBuffer, uint32_t vertexCount);
 	void RenderWindowTriangleFrame(uint32_t width, uint32_t height, float timeSeconds);
 
@@ -665,7 +825,7 @@ public:
 	shared_ptr<Texture> CreateTexture3D(DXGI_FORMAT format, D3D12_RESOURCE_FLAGS resFlags, D3D12_RESOURCE_STATES initResState, int width, int height, int depth, int mipLevels);
 
 	shared_ptr<Sampler> CreateSampler(D3D12_SAMPLER_DESC& InSamplerDesc);
-	shared_ptr<Buffer> CreateBuffer(UINT InNumElements, UINT InElementSize, D3D12_RESOURCE_STATES initResState, bool isUAV, void* SrcData = nullptr);
+	shared_ptr<Buffer> CreateBuffer(UINT InNumElements, UINT InElementSize, D3D12_RESOURCE_STATES initResState, bool isUAV, void* SrcData = nullptr, EBufferAccess access = EBufferAccess::GpuOnly);
 	shared_ptr<Buffer> CreateDefaultByteAddressBuffer(UINT InNumElements, UINT InElementSize, EInitialResourceState initialState = EInitialResourceState::ShaderRead);
 	bool UploadToDefaultBuffer(Buffer* buffer, const void* srcData, UINT sizeInBytes, EResourceState stateBefore, EResourceState stateAfter);
 

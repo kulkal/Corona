@@ -27,27 +27,24 @@ void Corona::InitRaytracingAOPass()
 	tempPSO->AddHitGroup("HitGroup", "closesthit", "anyhit");
 	tempPSO->AddShader("rayGen", RTPipelineStateObject::RAYGEN);
 
-	tempPSO->BindUAV("global", "AmbientOcclusionResult", 0);
-	tempPSO->BindSRV("global", "gRtScene", 0);
-	tempPSO->BindSRV("global", "DepthTex", 1);
-	tempPSO->BindSRV("global", "WorldNormalTex", 2);
-	tempPSO->BindSRV("global", "RayNoiseBlueNoiseSource", 3);
-	tempPSO->BindSRV("global", "GeoNormalTex", 8);
-	tempPSO->BindCBV("global", "ViewParameter", 0, sizeof(RTAOViewParam), 1);
-	tempPSO->BindSampler("global", "sampleWrap", 0);
+	const RHIShaderStageMask rayGenStage = ToRHIShaderStageMask(RHIShaderStage::RayGeneration);
+	const RHIShaderStageMask closestHitStage = ToRHIShaderStageMask(RHIShaderStage::ClosestHit);
+	const RHIShaderStageMask anyHitStage = ToRHIShaderStageMask(RHIShaderStage::AnyHit);
+	tempPSO->BindUAV("global", MakeRHITextureUAV("AmbientOcclusionResult", 0, rayGenStage));
+	tempPSO->BindSRV("global", MakeRHIAccelerationStructureSRV("gRtScene", 0, rayGenStage));
+	tempPSO->BindSRV("global", MakeRHITextureSRV("DepthTex", 1, rayGenStage));
+	tempPSO->BindSRV("global", MakeRHITextureSRV("WorldNormalTex", 2, rayGenStage));
+	tempPSO->BindSRV("global", MakeRHITextureSRV("RayNoiseBlueNoiseSource", 3, rayGenStage));
+	tempPSO->BindSRV("global", MakeRHITextureSRV("GeoNormalTex", 8, rayGenStage));
+	tempPSO->BindCBV("global", MakeRHICBV("ViewParameter", 0, sizeof(RTAOViewParam), rayGenStage));
+	tempPSO->BindSampler("global", MakeRHISampler("sampleWrap", 0, rayGenStage | closestHitStage | anyHitStage));
+	BindRTBindlessMaterialSchema(*tempPSO, anyHitStage);
+	BindRTBindlessGeometrySchema(*tempPSO, closestHitStage | anyHitStage);
 
 	tempPSO->AddShader("miss", RTPipelineStateObject::MISS);
 
 	tempPSO->AddShader("closesthit", RTPipelineStateObject::HIT);
-	tempPSO->BindSRV("closesthit", "vertices", 4);
-	tempPSO->BindSRV("closesthit", "indices", 5);
-	tempPSO->BindSRV("closesthit", "AlbedoTex", 6);
-	tempPSO->BindSRV("closesthit", "InstanceProperty", 7);
 	tempPSO->AddShader("anyhit", RTPipelineStateObject::ANYHIT);
-	tempPSO->BindSRV("anyhit", "vertices", 4);
-	tempPSO->BindSRV("anyhit", "indices", 5);
-	tempPSO->BindSRV("anyhit", "AlbedoTex", 6);
-	tempPSO->BindSRV("anyhit", "InstanceProperty", 7);
 	tempPSO->Configure(1, sizeof(float) * 4, sizeof(float) * 2);
 
 	if (tempPSO->InitRS("Shaders\\RaytracedAO.hlsl"))
@@ -62,6 +59,9 @@ void Corona::RaytraceAOPass()
 		return;
 
 	renderBackend->EmitGpuCrashMarker("RaytraceAOPass");
+
+	if (!EnsureRTMaterialRecordBuffer())
+	return;
 
 	renderBackend->TransitionTexture(AmbientOcclusionBuffer.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
 	const FLOAT clearAO[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
@@ -91,7 +91,10 @@ void Corona::RaytraceAOPass()
 		.SetTextureSRV("global", "GeoNormalTex", GeomNormalBuffers[ColorBufferWriteIndex].get())
 		.SetCBVValue("global", "ViewParameter", &RTAOViewParam)
 		.SetSampler("global", "sampleWrap", samplerWrap.get());
-	pass.BindSceneHitPrograms();
+	pass.SetBindlessTextureTable("global", "MaterialTextures")
+		.SetBufferSRV("global", "RtMaterials", RTMaterialRecordBuffer.get());
+	RTSceneHitProgramDesc hitProgramDesc;
+	pass.BindSceneHitPrograms(hitProgramDesc);
 	pass.Dispatch(GetRenderWidth(), GetRenderHeight());
 
 	renderBackend->TransitionTexture(AmbientOcclusionBuffer.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);

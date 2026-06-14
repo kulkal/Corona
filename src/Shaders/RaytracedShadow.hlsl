@@ -1,4 +1,5 @@
 #include "Common.hlsl"
+#include "BindlessResources.hlsli"
 
 
 RWTexture2D<float4> ShadowResult : register(u0);
@@ -10,10 +11,6 @@ RWTexture2D<float> ShadowReservoirM : register(u1);
 RaytracingAccelerationStructure gRtScene : register(t0);
 Texture2D DepthTex : register(t1);
 Texture2D WorldNormalTex : register(t2);
-ByteAddressBuffer vertices : register(t3);
-ByteAddressBuffer indices : register(t4);
-Texture2D AlbedoTex : register(t5);
-ByteAddressBuffer InstanceProperty : register(t6);
 Texture2D GeoNormalTex : register(t7);
 Texture3D RayNoiseBlueNoiseSource : register(t8);
 // ReSTIR Phase 2 — previous-frame reservoir cache. .gba carries
@@ -570,14 +567,17 @@ void anyhit(inout RayPayload payload, in BuiltInTriangleIntersectionAttributes a
     uint triangleIndex = PrimitiveIndex();
     uint instanceID = InstanceID();
 
-    if (!IsAlphaTestedInstance(instanceID, InstanceProperty))
+    if (!IsAlphaTestedInstance(instanceID, CORONA_INSTANCE_PROPERTY))
     {
         AcceptHitAndEndSearch();
         return;
     }
 
-    Vertex vertex = GetVertexAttributes(instanceID, vertices, indices, InstanceProperty, triangleIndex, barycentrics);
-    float opacity = AlbedoTex.SampleLevel(sampleWrap, vertex.uv, 5).w;
+    Vertex vertex = CORONA_GET_VERTEX_ATTRIBUTES(instanceID, triangleIndex, barycentrics);
+    float opacity = 1.0f;
+    RTMaterialRecord material = RtMaterials[instanceID];
+    opacity = MaterialTextures[NonUniformResourceIndex(material.AlbedoTextureIndex)].SampleLevel(sampleWrap, vertex.uv, 5).w;
+
 
         // payload.bHit = false;
 

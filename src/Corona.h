@@ -15,6 +15,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstddef>
 #include <deque>
 #include <filesystem>
 #include <functional>
@@ -578,8 +579,11 @@ private:
 	// Keep shader-side MAX_POINT_LIGHTS definitions in lock-step with this.
 	static constexpr UINT32 MaxPointLights = 128;
 	static constexpr UINT32 MaxDiffuseGIPointLights = 16;
+	static constexpr UINT32 MaxPathTracingPointLights = MaxDiffuseGIPointLights;
 	static_assert(MaxDiffuseGIPointLights <= 32,
 		"Spatial light masks pack one bit per direct ReSTIR point-light candidate");
+	static_assert(MaxPathTracingPointLights <= MaxPointLights,
+		"Path tracing point-light limit must fit the path tracing constant buffer");
 
 	struct PointLightParam
 	{
@@ -996,7 +1000,7 @@ private:
 		float DirectLightAngularRadius = 0.001f;
 		UINT32 DirectLightSampleCount = 1;
 		UINT32 bDirectLightCastShadow = 1;
-		float _directLightPadding = 0.0f;
+		UINT32 PointLightSampleCount = 1;
 		glm::vec2 RandomOffset;
 		UINT32 FrameCounter;
 		UINT32 BlueNoiseOffsetStride = 1;
@@ -1019,17 +1023,55 @@ private:
 		float SpecularMotionVectorScale = 1.0f;
 		UINT32 bStabilizePrimaryRaySamples = 0;
 		UINT32 _rtaoPadding = 0;
-		PointLightParam PointLights[MaxPointLights];
+		UINT32 _pointLightPadding0 = 0;
 		UINT32 PointLightCount = 0;
 		glm::vec3 PointLightPadding = glm::vec3(0.0f);
 	};
 
+	struct RTMaterialRecord
+	{
+		UINT32 AlbedoTextureIndex = RHI_INVALID_BINDLESS_INDEX;
+		UINT32 NormalTextureIndex = RHI_INVALID_BINDLESS_INDEX;
+		UINT32 RoughnessTextureIndex = RHI_INVALID_BINDLESS_INDEX;
+		UINT32 MetallicTextureIndex = RHI_INVALID_BINDLESS_INDEX;
+	};
+
+	struct RTGeometryRecord
+	{
+		UINT32 VertexBufferIndex = RHI_INVALID_BINDLESS_INDEX;
+		UINT32 IndexBufferIndex = RHI_INVALID_BINDLESS_INDEX;
+		UINT32 Padding0 = 0;
+		UINT32 Padding1 = 0;
+	};
+
 	PathTracingViewParamCB PathTracingViewParam;
 	shared_ptr<RTPipelineStateObject> PSO_PATH_TRACING;
+	shared_ptr<RTPipelineStateObject> PSO_PATH_TRACING_COMPACTION_TRACE;
+	shared_ptr<ComputePipelineStateObject> PSO_PATH_TRACING_COMPACTION_SEED;
+	shared_ptr<ComputePipelineStateObject> PSO_PATH_TRACING_COMPACTION_INDIRECT_ARGS;
+	shared_ptr<ComputePipelineStateObject> PSO_PATH_TRACING_COMPACTION_RESOLVE;
 	shared_ptr<Texture> PathTracingAccumBuffer[2];
+	std::shared_ptr<Buffer> PathTracingCompactionState[2];
+	std::shared_ptr<Buffer> PathTracingCompactionActiveList[2];
+	std::shared_ptr<Buffer> PathTracingCompactionCounter;
+	std::shared_ptr<Buffer> PathTracingCompactionRadiance;
+	std::shared_ptr<Buffer> PathTracingCompactionIndirectArgs;
+	std::array<PointLightParam, MaxPathTracingPointLights> PathTracingPointLights = {};
+	UINT32 PathTracingPointLightCount = 0;
+	std::shared_ptr<Buffer> PathTracingPointLightBuffer;
+	UINT32 PathTracingPointLightBufferHash = 0xFFFFFFFFu;
+	std::shared_ptr<Buffer> RTMaterialRecordBuffer;
+	uint64_t RTMaterialRecordHash = 0;
+	std::shared_ptr<Buffer> RTGeometryRecordBuffer;
+	uint64_t RTGeometryRecordHash = 0;
 	UINT PathTracingWriteIndex = 0;
 	UINT32 PathTracingAccumulatedFrames = 0;
 	UINT32 PathTracingLastDispatchSamplesPerPixel = 1;
+	UINT32 PathTracingCompactionCapacity = 0;
+	bool bEnablePathTracingCompaction = false;
+	bool bPathTracingCompactionFallbackLogged = false;
+	bool bPathTracingCompactionResourcesNeedDescriptorRefresh = false;
+	bool bPathTracingCompactionDispatchLogged = false;
 	float PathTracingRRSpecularMotionVectorScale = 1.0f;
 	bool bEnablePathTracingRRSpecularMotionVectors = true;
 	bool bEnablePathTracingRRSpecularHitDistance = false;
@@ -1042,6 +1084,7 @@ private:
 	glm::vec3 PrevPathTracingLightDir;
 	float PrevPathTracingLightIntensity = 0.0f;
 	bool PrevPathTracingDirectionalLightCastShadow = true;
+	UINT32 PrevPathTracingPointLightStateHash = 0xFFFFFFFFu;
 	glm::vec3 PrevSkyColorTop = glm::vec3(0.0f);
 	glm::vec3 PrevSkyColorBottom = glm::vec3(0.0f);
 	float PrevSkyIntensity = 0.0f;
@@ -2016,9 +2059,51 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 		float SpatialHashLevelEnable = 0.0f;
 		float SpatialHashLevelBaseDistance = 600.0f;
 		UINT32 PathTracingDirectLightSampleCount = 1;
+		UINT32 PathTracingPointLightSampleCount = 1;
 		UINT32 PathTracingMaxBounces = 4;
 		UINT32 PathTracingSamplesPerPixel = 1;
 		UINT32 PathTracingDebugMode = 0;
+		bool bEnablePathTracingCompaction = false;
+	};
+
+	struct PathTracingCompactionParamCB
+	{
+		UINT32 RenderWidth = 0;
+		UINT32 RenderHeight = 0;
+		UINT32 Capacity = 0;
+		UINT32 BounceIndex = 0;
+	};
+
+	struct PathTracingCompactionIndirectParamCB
+	{
+		UINT32 RayGenStartLo = 0;
+		UINT32 RayGenStartHi = 0;
+		UINT32 RayGenSizeLo = 0;
+		UINT32 RayGenSizeHi = 0;
+		UINT32 MissStartLo = 0;
+		UINT32 MissStartHi = 0;
+		UINT32 MissSizeLo = 0;
+		UINT32 MissSizeHi = 0;
+		UINT32 MissStrideLo = 0;
+		UINT32 MissStrideHi = 0;
+		UINT32 HitStartLo = 0;
+		UINT32 HitStartHi = 0;
+		UINT32 HitSizeLo = 0;
+		UINT32 HitSizeHi = 0;
+		UINT32 HitStrideLo = 0;
+		UINT32 HitStrideHi = 0;
+		UINT32 CallableStartLo = 0;
+		UINT32 CallableStartHi = 0;
+		UINT32 CallableSizeLo = 0;
+		UINT32 CallableSizeHi = 0;
+		UINT32 CallableStrideLo = 0;
+		UINT32 CallableStrideHi = 0;
+		UINT32 MaxDispatchWidth = 0;
+		UINT32 CounterIndex = 0;
+		UINT32 DispatchHeight = 1;
+		UINT32 DispatchDepth = 1;
+		UINT32 _padding0 = 0;
+		UINT32 _padding1 = 0;
 	};
 
 	struct RenderFrameDelta
@@ -2239,6 +2324,7 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	void RebuildFrameTimingOverlayTextIfStale();
 	UINT64 GpuTimestampFrequency = 0;
 	std::array<std::array<uint8_t, GpuPassCount>, 3> GpuPassActiveMaskPerFrame = {};
+	std::array<uint8_t, GpuPassCount> GpuPassLastActiveMask = {};
 	std::array<float, GpuPassCount> GpuPassLastTimeMs = {};
 	std::array<float, GpuPassCount> GpuPassAverageTimeMs = {};
 	std::array<std::deque<float>, GpuPassCount> GpuPassHistoryMs = {};
@@ -2350,25 +2436,15 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	{
 		RTSceneHitProgramDesc()
 			: HitGroup("HitGroup")
-			, bBindSceneGeometry(true)
-			, bBindDiffuseTexture(true)
-			, bBindInstanceProperty(true)
-			, bBindInstancePropertyBeforeDiffuse(false)
 		{
 		}
 
 		const char* HitGroup;
-		bool bBindSceneGeometry;
-		bool bBindDiffuseTexture;
-		bool bBindInstanceProperty;
-		bool bBindInstancePropertyBeforeDiffuse;
 	};
 
 	class RTPassBuilder
 	{
 	public:
-		using HitProgramBinder = std::function<void(RTPipelineStateObject& pso, const RTSceneHitProgramDesc& desc, Mesh& mesh, uint32_t instanceIndex)>;
-
 		RTPassBuilder(Corona& owner, const shared_ptr<RTPipelineStateObject>& pso);
 
 		bool IsValid() const;
@@ -2377,24 +2453,24 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 		RTPassBuilder& SetBufferUAV(const char* shader, const char* bindingName, Buffer* buffer);
 		RTPassBuilder& SetTextureSRV(const char* shader, const char* bindingName, Texture* texture);
 		RTPassBuilder& SetBufferSRV(const char* shader, const char* bindingName, Buffer* buffer);
+		RTPassBuilder& SetBindlessTextureTable(const char* shader, const char* bindingName);
+		RTPassBuilder& SetBindlessBufferTable(const char* shader, const char* bindingName);
 		RTPassBuilder& SetAccelerationStructure(const char* shader, const char* bindingName, const shared_ptr<RTAS>& rtas);
 		RTPassBuilder& SetSampler(const char* shader, const char* bindingName, Sampler* sampler);
 		RTPassBuilder& SetCBVValue(const char* shader, const char* bindingName, void* data);
-		uint32_t BindSceneHitPrograms(const RTSceneHitProgramDesc& desc = RTSceneHitProgramDesc(), const HitProgramBinder& customBinder = HitProgramBinder());
+		uint32_t BindSceneHitPrograms(const RTSceneHitProgramDesc& desc = RTSceneHitProgramDesc());
+		bool FinalizeShaderTable();
+		bool GetDispatchRaysIndirectTemplate(uint32_t width, uint32_t height, RtDispatchRaysIndirectTemplate& outTemplate);
 		void Dispatch(uint32_t width, uint32_t height);
-
-		Texture* GetDiffuseTexture(const Mesh& mesh) const;
-		Texture* GetNormalTexture(const Mesh& mesh) const;
-		Texture* GetRoughnessTexture(const Mesh& mesh) const;
-		Texture* GetMetallicTexture(const Mesh& mesh) const;
+		bool DispatchIndirect(Buffer* indirectArgumentBuffer, uint64_t byteOffset = 0);
 
 	private:
-		Material* GetPrimaryMaterial(const Mesh& mesh) const;
 		uint64_t BuildHitProgramBindingSignature(const RTSceneHitProgramDesc& desc) const;
 
 		Corona& Owner;
 		shared_ptr<RTPipelineStateObject> PSO;
 		bool bBegan = false;
+		bool bShaderTableFinalized = false;
 	};
 	
 	// Raytracing helper functions
@@ -2793,6 +2869,7 @@ public:
 		int shutdownRef,
 		int imguiRef,
 		int uiRef,
+		int editorConfigRef,
 		const std::wstring& sourceName,
 		bool bPassEntityToCallbacks = true);
 	bool AttachEntityScriptFileForScript(
@@ -2875,6 +2952,7 @@ public:
 	void RenderQueuedLuauUi(bool bRenderToolUi = true, bool bRenderGameUi = true);
 	void DrawLuauImGui();
 	void DrawEntityScriptImGui();
+	bool DrawEditorConfigScriptImGui();
 	void ShutdownLuauScripting();
 	void StartLuauScriptProfileSampler(lua_State* L);
 	void StopLuauScriptProfileSampler();
@@ -3106,6 +3184,7 @@ public:
 	void DispatchSpineSkinningForMesh(Mesh* mesh);
 	void DispatchSpineSkinningForScene(const shared_ptr<Scene>& scene);
 	void DispatchSpineSkinningForRenderWorld();
+	void UploadLiveSpineTransientBonesForRender();
 
 	// 3D skeletal skinning entry points (implemented in Corona.Skeletal.cpp).
 	// Spawn helpers create procedural box characters for Sponza-mode testing.
@@ -3113,6 +3192,7 @@ public:
 	void DispatchSkeletalSkinningForRenderWorld();
 	void SpawnSkeletalTestCharacters();
 	void UpdateSkeletalTestCharacters(float timeSeconds);
+	void UploadSkeletalUnifiedTransientBuffersForRender();
 
 	// LLM-driven motion playback path (Corona.SmplCharacter.cpp +
 	// Corona.MotionPlayback.h). The console hands a loaded BVH clip to
@@ -3150,6 +3230,8 @@ public:
 	std::shared_ptr<Buffer> SkeletalUnifiedInputVertices;
 	std::shared_ptr<Buffer> SkeletalUnifiedBoneMatrices;
 	std::shared_ptr<Buffer> SkeletalUnifiedPrevBoneMatrices;
+	std::shared_ptr<Buffer> SkeletalUnifiedBoneMatricesFallback;
+	std::shared_ptr<Buffer> SkeletalUnifiedPrevBoneMatricesFallback;
 	std::shared_ptr<VertexBuffer> SkeletalUnifiedOutputVb;
 	std::shared_ptr<VertexBuffer> SkeletalUnifiedBindVb;
 	std::shared_ptr<IndexBuffer>  SkeletalUnifiedIb;
@@ -3160,6 +3242,7 @@ public:
 	// RenderWorld.SceneObjects. Mobile (GBufferMobile.hlsl) doesn't have
 	// the cluster shader entry so this SBV isn't bound there.
 	std::shared_ptr<Buffer> SkeletalUnifiedInstanceTransforms;
+	std::shared_ptr<Buffer> SkeletalUnifiedInstanceTransformsFallback;
 	std::shared_ptr<Material> SkeletalUnifiedMaterial;
 	uint32_t SkeletalUnifiedIndexCount = 0;
 	uint32_t SkeletalUnifiedCharCount = 0;
@@ -3215,9 +3298,6 @@ public:
 	void DumpSkeletalFrameStatsToTrace();
 	struct StaticGBufferInstanceXform { float r0[4]; float r1[4]; float r2[4]; };
 	std::vector<StaticGBufferInstanceXform> StaticGBufferInstanceTransformScratch;
-	std::vector<std::array<std::shared_ptr<Buffer>, 4>> StaticGBufferInstanceTransformBuffers;
-	uint32_t StaticGBufferInstanceTransformDrawIndex = 0;
-	Buffer* AcquireStaticGBufferInstanceTransformBuffer(uint32_t instanceCount);
 	bool IsSceneEligibleForStaticGBufferInstancing(const std::shared_ptr<Scene>& scene) const;
 	bool DrawStaticInstancedScene(
 		const std::shared_ptr<Scene>& scene,
@@ -3256,8 +3336,11 @@ public:
 	void BloomPass();
 
 	void InitPathTracingPass();
+	void InitPathTracingCompactionPass();
+	bool EnsurePathTracingCompactionResources(UINT32 width, UINT32 height);
 
 	void PathTracingPass();
+	bool PathTracingCompactionPass(Texture* outputColor, const PathTracingViewParamCB& dispatchViewParam, bool bWritePrimaryGBuffer);
 	void ApplyHybridDefaultCamera();
 	void ApplyDefaultFlyCamera();
 	void EnsureWindowFramebuffers();
@@ -3434,6 +3517,14 @@ private:
 	void FillPointLightParams(PointLightParam* outPointLights, UINT32& outPointLightCount, UINT32 maxCount) const;
 	void FillPointLightParamsFromList(PointLightParam* outPointLights, UINT32& outPointLightCount, const std::vector<const PointLightState*>& lights, UINT32 maxCount) const;
 	void ApplyRenderPointLightsToFrameParams();
+	UINT32 ComputePathTracingPointLightStateHash() const;
+	bool EnsurePathTracingPointLightBuffer(UINT32 pointLightStateHash);
+	bool UsesRTBindlessMaterials() const;
+	bool UsesRTBindlessGeometry() const;
+	void BindRTBindlessMaterialSchema(RTPipelineStateObject& pso, RHIShaderStageMask materialStages);
+	void BindRTBindlessGeometrySchema(RTPipelineStateObject& pso, RHIShaderStageMask geometryStages);
+	bool EnsureRTMaterialRecordBuffer();
+	bool EnsureRTGeometryRecordBuffer();
 
 	UINT m_width = 0;
 	UINT m_height = 0;

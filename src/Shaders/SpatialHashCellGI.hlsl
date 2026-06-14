@@ -1,4 +1,5 @@
 #include "Common.hlsl"
+#include "BindlessResources.hlsli"
 
 RWStructuredBuffer<float4> TraceSH0 : register(u0);
 RWStructuredBuffer<float4> TraceSH1 : register(u1);
@@ -10,10 +11,6 @@ StructuredBuffer<uint> CellKeys : register(t1);
 StructuredBuffer<float4> CellPosition : register(t2);
 StructuredBuffer<float4> CellNormal : register(t3);
 Texture3D RayNoiseBlueNoiseSource : register(t4);
-ByteAddressBuffer vertices : register(t5);
-ByteAddressBuffer indices : register(t6);
-Texture2D AlbedoTex : register(t7);
-ByteAddressBuffer InstanceProperty : register(t8);
 StructuredBuffer<uint> ActiveCellSlots : register(t9);
 StructuredBuffer<uint> ActiveCounter : register(t10);
 StructuredBuffer<uint> CellLightMask : register(t11);
@@ -890,7 +887,7 @@ void chs(inout RayPayload payload, in BuiltInTriangleIntersectionAttributes attr
     float3 barycentrics = float3(1.0f - attribs.barycentrics.x - attribs.barycentrics.y, attribs.barycentrics.x, attribs.barycentrics.y);
     uint triangleIndex = PrimitiveIndex();
     uint instanceID = InstanceID();
-    Vertex vertex = GetSurfaceVertexAttributes(instanceID, vertices, indices, InstanceProperty, triangleIndex, barycentrics);
+    Vertex vertex = CORONA_GET_SURFACE_VERTEX_ATTRIBUTES(instanceID, triangleIndex, barycentrics);
 
     payload.position = CommonSanitizeFloat3(vertex.position, WorldRayOrigin() + WorldRayDirection() * RayTCurrent());
     float3 hitNormal = SafeNormalize(vertex.normal, -WorldRayDirection());
@@ -898,15 +895,18 @@ void chs(inout RayPayload payload, in BuiltInTriangleIntersectionAttributes attr
         hitNormal = -hitNormal;
     payload.normal = hitNormal;
 
+    RTMaterialRecord material = RtMaterials[instanceID];
     uint w, h;
-    AlbedoTex.GetDimensions(w, h);
+    MaterialTextures[NonUniformResourceIndex(material.AlbedoTextureIndex)].GetDimensions(w, h);
+
     float halfLog2NumTexPixels = 0.5f * log2(w * h);
     vertex.textureLODConstant += halfLog2NumTexPixels;
     float hitT = RayTCurrent();
     float rayConeWidth = payload.spreadAngle * hitT + payload.coneWidth;
     float mipLevel = computeTextureLOD(1.0f, rayConeWidth, vertex.textureLODConstant);
 
-    payload.color = AlbedoTex.SampleLevel(sampleWrap, vertex.uv, mipLevel).xyz;
+    payload.color = MaterialTextures[NonUniformResourceIndex(material.AlbedoTextureIndex)].SampleLevel(sampleWrap, vertex.uv, mipLevel).xyz;
+
     payload.bHit = true;
 }
 

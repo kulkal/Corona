@@ -489,13 +489,17 @@ bool Component::Initialize(
 				}
 			}
 		}
-		HeightBuffer = backend->CreateUploadStructuredBuffer(
-			static_cast<uint32_t>(linear.size()), sizeof(float));
+		BufferCreateDesc heightDesc = {};
+		heightDesc.NumElements = static_cast<uint32_t>(linear.size());
+		heightDesc.ElementSize = sizeof(float);
+		heightDesc.InitialState = EInitialResourceState::ShaderRead;
+		heightDesc.InitialData = linear.data();
+		heightDesc.Shape = EBufferShape::Structured;
+		heightDesc.Access = EBufferAccess::GpuOnly;
+		heightDesc.AllocationPolicy = EBufferAllocationPolicy::Suballocated;
+		HeightBuffer = backend->CreateBuffer(heightDesc);
 		if (HeightBuffer)
 		{
-			backend->UpdateUploadStructuredBuffer(
-				HeightBuffer.get(), linear.data(),
-				static_cast<uint32_t>(linear.size() * sizeof(float)));
 			AppendCpuRuntimeTrace(
 				L"[Terrain] heightfield buffer " + std::to_wstring(W) + L"x" + std::to_wstring(D) +
 				L" (" + std::to_wstring(linear.size() * sizeof(float) / (1024 * 1024)) + L" MB)");

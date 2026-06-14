@@ -4,6 +4,8 @@
 #include <memory>
 #include <string>
 
+#include "RHIBinding.h"
+
 class Texture;
 class Buffer;
 class VertexBuffer;
@@ -14,6 +16,23 @@ class ComputePipelineStateObject
 {
 public:
 	virtual ~ComputePipelineStateObject() = default;
+
+	virtual void BindSRV(const RHIBindingDesc& binding)
+	{
+		BindSRV(binding.Name, binding.RegisterIndex, RHILegacyDescriptorCount(binding));
+	}
+	virtual void BindUAV(const RHIBindingDesc& binding)
+	{
+		BindUAV(binding.Name, binding.RegisterIndex);
+	}
+	virtual void BindCBV(const RHIBindingDesc& binding)
+	{
+		BindCBV(binding.Name, binding.RegisterIndex, binding.SizeInBytes);
+	}
+	virtual void BindSampler(const RHIBindingDesc& binding)
+	{
+		BindSampler(binding.Name, binding.RegisterIndex);
+	}
 
 	virtual void BindSRV(const std::string& name, uint32_t baseRegister, uint32_t numDescriptors) = 0;
 	virtual void BindUAV(const std::string& name, uint32_t baseRegister) = 0;
