@@ -414,6 +414,8 @@ private:
 
 	std::shared_ptr<GraphicsPipelineHandle> GBufferGraphicsPipeline;
 	std::shared_ptr<GraphicsPipelineHandle> GBufferBindlessGeometryGraphicsPipeline;
+	std::shared_ptr<GraphicsPipelineHandle> GBufferBindlessIndirectGraphicsPipeline;
+	std::shared_ptr<Buffer> GBufferDummyDrawRecordBuffer;
 	// Desktop static-mesh instancing path. Draws repeated map-spawned
 	// SceneObjects that share the same Scene/material override as
 	// DrawIndexedInstanced, with per-instance world matrices in t12.

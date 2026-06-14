@@ -6500,7 +6500,7 @@ bool VulkanBackend::AllocateTransientUploadStructuredRange(
 	VkBufferCreateInfo bufferInfo{};
 	bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
 	bufferInfo.size = blockSize;
-	bufferInfo.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+	bufferInfo.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT;
 	bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 	if (vkCreateBuffer(Device, &bufferInfo, nullptr, &block->Buffer) != VK_SUCCESS)
 		return false;
@@ -7869,6 +7869,9 @@ void VulkanBackend::CreateSwapChainForWindow(WindowHandle window, uint32_t width
 	VkPhysicalDeviceFeatures physicalDeviceFeatures{};
 	vkGetPhysicalDeviceFeatures(PhysicalDevice, &physicalDeviceFeatures);
 	bSamplerAnisotropySupported = physicalDeviceFeatures.samplerAnisotropy == VK_TRUE;
+	bDrawIndexedIndirectEnabled = true;
+	bMultiDrawIndirectEnabled = physicalDeviceFeatures.multiDrawIndirect == VK_TRUE;
+	bDrawIndirectFirstInstanceEnabled = physicalDeviceFeatures.drawIndirectFirstInstance == VK_TRUE;
 	bool bRayTracingIndirectFeatureSupport = false;
 	VkPhysicalDeviceDescriptorIndexingProperties descriptorIndexingProperties{};
 	descriptorIndexingProperties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_PROPERTIES;
@@ -7932,6 +7935,8 @@ void VulkanBackend::CreateSwapChainForWindow(WindowHandle window, uint32_t width
 		L"[VulkanBackend::CreateSwapChainForWindow] ray tracing support ext=" + std::to_wstring(bRayTracingExtensionSupport ? 1 : 0) +
 		L", feat=" + std::to_wstring(bRayTracingFeatureSupport ? 1 : 0) +
 		L", descriptorIndexing=" + std::to_wstring(bDescriptorIndexingEnabled ? 1 : 0) +
+		L", multiDrawIndirect=" + std::to_wstring(bMultiDrawIndirectEnabled ? 1 : 0) +
+		L", drawIndirectFirstInstance=" + std::to_wstring(bDrawIndirectFirstInstanceEnabled ? 1 : 0) +
 		L", maxBindlessTextures=" + std::to_wstring(MaxVulkanBindlessTextureSlots) +
 		L", maxBindlessBuffers=" + std::to_wstring(MaxVulkanBindlessBufferSlots));
 
@@ -9218,6 +9223,64 @@ void VulkanBackend::DrawIndexedInstanced(uint32_t indexCountPerInstance, uint32_
 			PendingViewportWidth > 0 ? PendingViewportWidth : SwapchainExtent.width,
 			PendingViewportHeight > 0 ? PendingViewportHeight : SwapchainExtent.height);
 	vkCmdDrawIndexed(ActiveCommandBuffer, indexCountPerInstance, instanceCount, startIndexLocation, baseVertexLocation, startInstanceLocation);
+#endif
+}
+bool VulkanBackend::DrawIndexedIndirect(Buffer* indirectArgumentBuffer, uint64_t byteOffset, uint32_t drawCount)
+{
+#if !CORONA_HAS_VULKAN
+	(void)indirectArgumentBuffer; (void)byteOffset; (void)drawCount; ThrowNotImplemented(__FUNCTION__);
+#else
+	static_assert(sizeof(DrawIndexedIndirectArguments) == sizeof(VkDrawIndexedIndirectCommand), "Draw indexed indirect argument layout must match Vulkan.");
+	if (drawCount == 0)
+		return true;
+	if (!bRenderPassActive || !indirectArgumentBuffer || !bDrawIndexedIndirectEnabled)
+		return false;
+	if (!bDrawIndirectFirstInstanceEnabled)
+		return false;
+
+	auto bufferIt = BufferAllocations.find(indirectArgumentBuffer);
+	if (bufferIt == BufferAllocations.end() || bufferIt->second.Buffer == VK_NULL_HANDLE)
+		return false;
+
+	auto* pipeline = dynamic_cast<VulkanGraphicsPipelineHandle*>(BoundGraphicsPipeline);
+	if (pipeline)
+		BindGraphicsPipelineForDraw(pipeline);
+	else
+		return false;
+	if (!bViewportBound)
+		SetViewportAndScissor(
+			PendingViewportWidth > 0 ? PendingViewportWidth : SwapchainExtent.width,
+			PendingViewportHeight > 0 ? PendingViewportHeight : SwapchainExtent.height);
+
+	const VkDeviceSize drawOffset = bufferIt->second.Offset + static_cast<VkDeviceSize>(byteOffset);
+	const VkDeviceSize argsBytes =
+		static_cast<VkDeviceSize>(drawCount) * static_cast<VkDeviceSize>(sizeof(DrawIndexedIndirectArguments));
+	if (drawOffset + argsBytes > bufferIt->second.Offset + bufferIt->second.SizeInBytes)
+		return false;
+
+	if (drawCount > 1 && !bMultiDrawIndirectEnabled)
+	{
+		const VkDeviceSize stride = sizeof(DrawIndexedIndirectArguments);
+		for (uint32_t i = 0; i < drawCount; ++i)
+		{
+			vkCmdDrawIndexedIndirect(
+				ActiveCommandBuffer,
+				bufferIt->second.Buffer,
+				drawOffset + static_cast<VkDeviceSize>(i) * stride,
+				1,
+				stride);
+		}
+	}
+	else
+	{
+		vkCmdDrawIndexedIndirect(
+			ActiveCommandBuffer,
+			bufferIt->second.Buffer,
+			drawOffset,
+			drawCount,
+			sizeof(DrawIndexedIndirectArguments));
+	}
+	return true;
 #endif
 }
 void VulkanBackend::Dispatch(uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ)

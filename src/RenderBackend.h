@@ -185,6 +185,15 @@ struct BufferCreateDesc
 	EBufferAllocationPolicy AllocationPolicy = EBufferAllocationPolicy::Dedicated;
 };
 
+struct DrawIndexedIndirectArguments
+{
+	uint32_t IndexCountPerInstance = 0;
+	uint32_t InstanceCount = 0;
+	uint32_t StartIndexLocation = 0;
+	int32_t BaseVertexLocation = 0;
+	uint32_t StartInstanceLocation = 0;
+};
+
 enum class ESamplerFilter
 {
 	Anisotropic,
@@ -384,6 +393,9 @@ struct RenderBackendCapabilities
 	bool SupportsRuntimeDescriptorArrays = false;
 	bool SupportsPartiallyBoundDescriptors = false;
 	bool SupportsUpdateAfterBind = false;
+	bool SupportsDrawIndexedIndirect = false;
+	bool SupportsMultiDrawIndirect = false;
+	bool SupportsDrawIndirectFirstInstance = false;
 	uint32_t MaxBindlessTextureCount = 0;
 	uint32_t MaxBindlessBufferCount = 0;
 };
@@ -608,6 +620,7 @@ public:
 	virtual void BindMeshBuffers(VertexBuffer* vertexBuffer, IndexBuffer* indexBuffer) = 0;
 	virtual void DrawIndexed(uint32_t indexCount, uint32_t startIndexLocation, int32_t baseVertexLocation) = 0;
 	virtual void DrawIndexedInstanced(uint32_t indexCountPerInstance, uint32_t instanceCount, uint32_t startIndexLocation, int32_t baseVertexLocation, uint32_t startInstanceLocation) = 0;
+	virtual bool DrawIndexedIndirect(Buffer* indirectArgumentBuffer, uint64_t byteOffset, uint32_t drawCount) = 0;
 	virtual void Dispatch(uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ) = 0;
 	virtual void ClearTextureUAVFloat(Texture* texture, const float clearColor[4]) = 0;
 	virtual void ExecuteCurrentCommandList() = 0;

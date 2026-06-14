@@ -690,6 +690,9 @@ public:
 		capabilities.SupportsBindlessBuffers = true;
 		capabilities.SupportsRuntimeDescriptorArrays = true;
 		capabilities.SupportsPartiallyBoundDescriptors = true;
+		capabilities.SupportsDrawIndexedIndirect = true;
+		capabilities.SupportsMultiDrawIndirect = true;
+		capabilities.SupportsDrawIndirectFirstInstance = true;
 		capabilities.MaxBindlessTextureCount = kMaxDX12BindlessTextureSlots;
 		capabilities.MaxBindlessBufferCount = kMaxDX12BindlessBufferSlots;
 		return capabilities;
@@ -790,6 +793,7 @@ public:
 	void BindMeshBuffers(VertexBuffer* vertexBuffer, IndexBuffer* indexBuffer) override;
 	void DrawIndexed(uint32_t indexCount, uint32_t startIndexLocation, int32_t baseVertexLocation) override;
 	void DrawIndexedInstanced(uint32_t indexCountPerInstance, uint32_t instanceCount, uint32_t startIndexLocation, int32_t baseVertexLocation, uint32_t startInstanceLocation) override;
+	bool DrawIndexedIndirect(Buffer* indirectArgumentBuffer, uint64_t byteOffset, uint32_t drawCount) override;
 	void Dispatch(uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ) override;
 	void ClearTextureUAVFloat(Texture* texture, const float clearColor[4]) override;
 	void ExecuteCurrentCommandList() override;
@@ -832,6 +836,7 @@ public:
 	std::vector<std::shared_ptr<Texture>> SwapChainRenderTargets;
 	std::vector<std::shared_ptr<Texture>> SwapChainWrappedTextures;
 	IDXGIFactory4* ExternalDXGIFactory = nullptr;
+	ComPtr<ID3D12CommandSignature> DrawIndexedIndirectCommandSignature;
 	std::wstring PendingWindowCapturePath;
 	std::wstring LastWindowCapturePath;
 	std::wstring LastWindowCaptureError;

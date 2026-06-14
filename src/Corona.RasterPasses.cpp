@@ -31,6 +31,7 @@ namespace
 {
 	constexpr uint32_t kGBufferBindlessTextureRegisterSpace = 10;
 	constexpr uint32_t kGBufferMaterialRecordRegister = 13;
+	constexpr uint32_t kGBufferDrawRecordRegister = 15;
 
 	struct GBufferMaterialRecord
 	{
@@ -70,6 +71,27 @@ namespace
 		UINT32 VertexStride = 0;
 		UINT32 IndexStride = 0;
 	};
+
+	struct GBufferDrawRecord
+	{
+		glm::vec4 WorldMatrixRow0 = glm::vec4(0.0f);
+		glm::vec4 WorldMatrixRow1 = glm::vec4(0.0f);
+		glm::vec4 WorldMatrixRow2 = glm::vec4(0.0f);
+		glm::vec4 WorldMatrixRow3 = glm::vec4(0.0f);
+		glm::vec4 BaseColorFactor = glm::vec4(1.0f);
+		glm::vec2 RougnessMetalic = glm::vec2(1.0f, 0.0f);
+		UINT32 bOverrideRougnessMetallic = 0;
+		UINT32 bTwoSidedLighting = 0;
+		UINT32 bUnlitMaterial = 0;
+		UINT32 bGrassMesh = 0;
+		UINT32 bTerrainMesh = 0;
+		UINT32 bExcludeFromDeformSphere = 0;
+		UINT32 GBufferMaterialIndex = 0;
+		UINT32 GBufferGeometryIndex = 0;
+		UINT32 GBufferIndexStart = 0;
+		INT32 GBufferVertexBase = 0;
+	};
+	static_assert(sizeof(GBufferDrawRecord) == 128, "GBufferDrawRecord must match GBufferCommon.hlsli.");
 
 	struct GBufferGeometryKey
 	{
@@ -217,44 +239,55 @@ namespace
 		Scene* scene,
 		Sampler* sampler,
 		Buffer* materialBuffer,
-		Buffer* geometryBuffer)
+		Buffer* geometryBuffer,
+		Buffer* drawRecordBuffer,
+		bool bAllowCache = true)
 	{
-		if (!backend || !pipeline || !scene || !sampler || !materialBuffer)
+		if (!backend || !pipeline || !scene || !sampler || !materialBuffer || !drawRecordBuffer)
 			return nullptr;
 
-		for (const Scene::GBufferResourceBindGroupCacheEntry& cached : scene->CachedGBufferResourceBindGroups)
+		if (bAllowCache)
 		{
-			if (cached.BindGroup &&
-				cached.Pipeline == pipeline &&
-				cached.Sampler == sampler &&
-				cached.MaterialBuffer == materialBuffer &&
-				cached.GeometryBuffer == geometryBuffer)
+			for (const Scene::GBufferResourceBindGroupCacheEntry& cached : scene->CachedGBufferResourceBindGroups)
 			{
-				backend->BindGraphicsBindGroup(
-					pipeline,
-					kGraphicsBindGroupSlot_Material,
-					cached.BindGroup);
-				return cached.BindGroup;
+				if (cached.BindGroup &&
+					cached.Pipeline == pipeline &&
+					cached.Sampler == sampler &&
+					cached.MaterialBuffer == materialBuffer &&
+					cached.GeometryBuffer == geometryBuffer &&
+					cached.DrawRecordBuffer == drawRecordBuffer)
+				{
+					backend->BindGraphicsBindGroup(
+						pipeline,
+						kGraphicsBindGroupSlot_Material,
+						cached.BindGroup);
+					return cached.BindGroup;
+				}
 			}
 		}
 
 		GraphicsBindGroupDesc desc{};
 		desc.Pipeline = pipeline;
 		desc.Slot = kGraphicsBindGroupSlot_Material;
-		desc.Entries.reserve(3);
+		desc.Entries.reserve(4);
 		desc.Entries.push_back(GraphicsBindGroupEntry::BufferSRV("GBufferMaterials", materialBuffer));
 		if (geometryBuffer)
 			desc.Entries.push_back(GraphicsBindGroupEntry::BufferSRV("GBufferGeometries", geometryBuffer));
+		desc.Entries.push_back(GraphicsBindGroupEntry::BufferSRV("GBufferDrawRecords", drawRecordBuffer));
 		desc.Entries.push_back(GraphicsBindGroupEntry::SamplerBinding("samplerWrap", sampler));
 
 		std::shared_ptr<GraphicsBindGroupHandle> bindGroup = backend->CreateGraphicsBindGroup(desc);
 		backend->BindGraphicsBindGroup(pipeline, kGraphicsBindGroupSlot_Material, bindGroup);
+
+		if (!bAllowCache)
+			return bindGroup;
 
 		Scene::GBufferResourceBindGroupCacheEntry cacheEntry;
 		cacheEntry.Pipeline = pipeline;
 		cacheEntry.Sampler = sampler;
 		cacheEntry.MaterialBuffer = materialBuffer;
 		cacheEntry.GeometryBuffer = geometryBuffer;
+		cacheEntry.DrawRecordBuffer = drawRecordBuffer;
 		cacheEntry.BindGroup = bindGroup;
 		scene->CachedGBufferResourceBindGroups.push_back(std::move(cacheEntry));
 		return bindGroup;
@@ -826,12 +859,27 @@ void Corona::InitGBufferPass()
 	const RHIShaderStageMask gbufferVertexStage = ToRHIShaderStageMask(RHIShaderStage::Vertex);
 	const RHIShaderStageMask gbufferPixelStage = ToRHIShaderStageMask(RHIShaderStage::Pixel);
 	const RHIShaderStageMask gbufferGraphicsStages = RHIShaderStage::Vertex | RHIShaderStage::Pixel;
+	{
+		GBufferDrawRecord dummyDrawRecord{};
+		BufferCreateDesc dummyDrawRecordDesc{};
+		dummyDrawRecordDesc.NumElements = 1;
+		dummyDrawRecordDesc.ElementSize = sizeof(GBufferDrawRecord);
+		dummyDrawRecordDesc.InitialState = EInitialResourceState::ShaderRead;
+		dummyDrawRecordDesc.InitialData = &dummyDrawRecord;
+		dummyDrawRecordDesc.Shape = EBufferShape::Structured;
+		dummyDrawRecordDesc.Access = EBufferAccess::GpuOnly;
+		dummyDrawRecordDesc.AllocationPolicy = EBufferAllocationPolicy::Suballocated;
+		GBufferDummyDrawRecordBuffer = renderBackend->CreateBuffer(dummyDrawRecordDesc);
+		if (!GBufferDummyDrawRecordBuffer)
+			AppendCpuRuntimeTrace(L"[InitGBufferPass] failed to create dummy GBufferDrawRecords buffer");
+	}
 	auto setBaseGBufferLayout = [&](GraphicsPipelineDesc& pipelineDesc)
 	{
 		pipelineDesc.PipelineLayout.Bindings = {
 			MakeRHICBV("__CB0", 0, sizeof(GBufferConstantBuffer), gbufferGraphicsStages),
 			MakeRHIBindlessTextureSRV("MaterialTextures", 0, kGBufferBindlessTextureRegisterSpace, gbufferPixelStage),
 			MakeRHIBufferSRV("GBufferMaterials", kGBufferMaterialRecordRegister, gbufferPixelStage),
+			MakeRHIBufferSRV("GBufferDrawRecords", kGBufferDrawRecordRegister, gbufferGraphicsStages),
 			MakeRHISampler("samplerWrap", 0, gbufferPixelStage),
 		};
 	};
@@ -872,6 +920,23 @@ void Corona::InitGBufferPass()
 		}
 		if (!GBufferBindlessGeometryGraphicsPipeline)
 			AppendCpuRuntimeTrace(L"[InitGBufferPass] failed to create Bindless Static GBuffer pipeline");
+	}
+	{
+		GraphicsPipelineDesc bindlessIndirectDesc = desc;
+		bindlessIndirectDesc.VertexEntryPoint = "VSMainBindlessIndirect";
+		bindlessIndirectDesc.VertexElements.clear();
+		bindlessIndirectDesc.VertexStride = 0;
+		appendGBufferBindlessGeometryLayout(bindlessIndirectDesc);
+		try
+		{
+			GBufferBindlessIndirectGraphicsPipeline = renderBackend->CreateGraphicsPipeline(bindlessIndirectDesc);
+		}
+		catch (const std::exception&)
+		{
+			AppendCpuRuntimeTrace(L"[InitGBufferPass] Bindless indirect GBuffer pipeline create exception");
+		}
+		if (!GBufferBindlessIndirectGraphicsPipeline)
+			AppendCpuRuntimeTrace(L"[InitGBufferPass] failed to create Bindless Indirect GBuffer pipeline");
 	}
 
 	if (!CORONA_PLATFORM_MOBILE)
@@ -2813,7 +2878,8 @@ bool Corona::DrawStaticInstancedScene(
 		scene.get(),
 		samplerWrap.get(),
 		materialTable.Buffer.get(),
-		bUseBindlessGeometry ? geometryTable.Buffer.get() : nullptr);
+		bUseBindlessGeometry ? geometryTable.Buffer.get() : nullptr,
+		GBufferDummyDrawRecordBuffer.get());
 
 	for (const std::shared_ptr<Mesh>& mesh : scene->meshes)
 	{
@@ -2910,6 +2976,174 @@ void Corona::DrawScene(shared_ptr<Scene> scene, const glm::mat4x4& instanceTrans
 			GBufferSequentialIbCapacity,
 			maxDrawIndexCount);
 
+	auto tryDrawSceneBindlessIndirect = [&]() -> bool
+	{
+		if (!GBufferBindlessIndirectGraphicsPipeline ||
+			!bUseSceneBindlessGeometry ||
+			!materialTable.Buffer ||
+			!geometryTable.Buffer ||
+			!samplerWrap ||
+			!GBufferSequentialIb)
+		{
+			return false;
+		}
+		const RenderBackendCapabilities backendCapabilities = renderBackend->GetCapabilities();
+		if (!backendCapabilities.SupportsDrawIndexedIndirect ||
+			!backendCapabilities.SupportsDrawIndirectFirstInstance)
+		{
+			return false;
+		}
+		if (renderBackend->GetAPI() == ERenderBackendAPI::Vulkan && bStartupLoadingScreenActive)
+			return false;
+
+		uint32_t drawCount = 0;
+		for (const std::shared_ptr<Mesh>& mesh : scene->meshes)
+		{
+			if (!mesh)
+				continue;
+			if (!mesh->Vb || !mesh->Ib)
+				return false;
+			if (mesh->bProceduralGrass ||
+				mesh->bGpuSpineSkinned ||
+				mesh->bSpineMesh ||
+				mesh->bSkeletalSkinned)
+			{
+				return false;
+			}
+			for (const Mesh::DrawCall& drawcall : mesh->Draws)
+			{
+				if (drawcall.IndexCount == 0)
+					continue;
+				if (drawCount == std::numeric_limits<uint32_t>::max())
+					return false;
+				++drawCount;
+			}
+		}
+
+		if (drawCount == 0)
+			return true;
+
+		std::vector<GBufferDrawRecord> drawRecords;
+		std::vector<DrawIndexedIndirectArguments> indirectArgs;
+		drawRecords.reserve(drawCount);
+		indirectArgs.reserve(drawCount);
+
+		for (const std::shared_ptr<Mesh>& mesh : scene->meshes)
+		{
+			if (!mesh)
+				continue;
+
+			const glm::mat4x4 worldMatrix = glm::transpose(instanceTransform * mesh->transform);
+			for (const Mesh::DrawCall& drawcall : mesh->Draws)
+			{
+				if (drawcall.IndexCount == 0)
+					continue;
+
+				GBufferDrawRecord drawRecord{};
+				drawRecord.WorldMatrixRow0 = worldMatrix[0];
+				drawRecord.WorldMatrixRow1 = worldMatrix[1];
+				drawRecord.WorldMatrixRow2 = worldMatrix[2];
+				drawRecord.WorldMatrixRow3 = worldMatrix[3];
+				drawRecord.BaseColorFactor = drawcall.mat ? drawcall.mat->BaseColorFactor : glm::vec4(1.0f);
+				drawRecord.RougnessMetalic = glm::vec2(Roughness, Metalic);
+				drawRecord.bOverrideRougnessMetallic = bOverrideRoughnessMetallic ? 1u : 0u;
+				drawRecord.bTwoSidedLighting = mesh->bGrassMesh ? 1u : 0u;
+				drawRecord.bUnlitMaterial = 0u;
+				drawRecord.bGrassMesh = mesh->bGrassMesh ? 1u : 0u;
+				drawRecord.bTerrainMesh = mesh->bTerrainMesh ? 1u : 0u;
+				drawRecord.bExcludeFromDeformSphere = mesh->bExcludeFromDeformSphere ? 1u : 0u;
+				drawRecord.GBufferMaterialIndex = drawcall.GBufferMaterialIndex;
+				drawRecord.GBufferGeometryIndex = mesh->GBufferGeometryIndex;
+				drawRecord.GBufferIndexStart = drawcall.IndexStart;
+				drawRecord.GBufferVertexBase = drawcall.VertexBase;
+
+				DrawIndexedIndirectArguments arg{};
+				arg.IndexCountPerInstance = drawcall.IndexCount;
+				arg.InstanceCount = 1;
+				arg.StartIndexLocation = 0;
+				arg.BaseVertexLocation = 0;
+				arg.StartInstanceLocation = static_cast<uint32_t>(drawRecords.size());
+
+				drawRecords.push_back(drawRecord);
+				indirectArgs.push_back(arg);
+			}
+		}
+
+		std::shared_ptr<Buffer> drawRecordBuffer = renderBackend->AllocateTransientUploadStructuredBuffer(
+			static_cast<uint32_t>(drawRecords.size()),
+			static_cast<uint32_t>(sizeof(GBufferDrawRecord)),
+			drawRecords.data());
+		std::shared_ptr<Buffer> indirectArgsBuffer = renderBackend->AllocateTransientUploadStructuredBuffer(
+			static_cast<uint32_t>(indirectArgs.size()),
+			static_cast<uint32_t>(sizeof(DrawIndexedIndirectArguments)),
+			indirectArgs.data());
+		if (!drawRecordBuffer || !indirectArgsBuffer)
+			return false;
+
+		GraphicsPipelineHandle* pso = GBufferBindlessIndirectGraphicsPipeline.get();
+		renderBackend->BindGraphicsPipeline(pso);
+		if (!BindGBufferSceneResourceBindGroup(
+			renderBackend.get(),
+			pso,
+			scene.get(),
+			samplerWrap.get(),
+			materialTable.Buffer.get(),
+			geometryTable.Buffer.get(),
+			drawRecordBuffer.get(),
+			false))
+		{
+			return false;
+		}
+
+		GBufferConstantBuffer objCB = {};
+		objCB.ViewProjectionMatrix = glm::transpose(ViewProjMat);
+		objCB.PrevViewProjectionMatrix = glm::transpose(PrevViewProjMat);
+		objCB.WorldMatrix = glm::mat4x4(1.0f);
+		objCB.UnjitteredViewProjMat = glm::transpose(UnjitteredViewProjMat);
+		objCB.PrevUnjitteredViewProjMat = glm::transpose(PrevUnjitteredViewProjMat);
+		objCB.ViewDir.x = RenderFrameCameraLookDirection.x;
+		objCB.ViewDir.y = RenderFrameCameraLookDirection.y;
+		objCB.ViewDir.z = RenderFrameCameraLookDirection.z;
+		objCB.ViewDir.w = 0.0f;
+		objCB.BaseColorFactor = glm::vec4(1.0f);
+		objCB.RTSize.x = GetRenderWidth();
+		objCB.RTSize.y = GetRenderHeight();
+		objCB.RougnessMetalic.x = Roughness;
+		objCB.RougnessMetalic.y = Metalic;
+		objCB.bOverrideRougnessMetallic = bOverrideRoughnessMetallic ? 1u : 0u;
+		objCB.MeshDeformParams = glm::vec4(RenderFrameWindTime, 0.0f, 0.0f, 0.0f);
+		objCB.GrassBendOrigin = RenderFrameGrassBendOrigin;
+		objCB.GrassBendParams = RenderFrameGrassBendParams;
+		objCB.WindParams = RenderFrameWindParams;
+		objCB.WindTuning = RenderFrameWindTuning;
+		objCB.TerrainDeformSphere = RenderFrameTerrainDeformSphere;
+
+		std::vector<GraphicsBindGroupEntry> drawBindEntries;
+		drawBindEntries.reserve(1);
+		drawBindEntries.push_back(GraphicsBindGroupEntry::Constant(0, &objCB, sizeof(objCB)));
+		if (!CreateAndBindGraphicsBindGroup(renderBackend.get(), pso, kGraphicsBindGroupSlot_Draw, drawBindEntries))
+			return false;
+
+		renderBackend->BindMeshBuffers(nullptr, GBufferSequentialIb.get());
+		const bool bDrawSubmitted = renderBackend->DrawIndexedIndirect(
+			indirectArgsBuffer.get(),
+			0,
+			static_cast<uint32_t>(indirectArgs.size()));
+		if (bDrawSubmitted)
+		{
+			static bool bLoggedBindlessIndirect = false;
+			if (!bLoggedBindlessIndirect)
+			{
+				AppendCpuRuntimeTrace(L"[GBufferIndirect] submitted bindless indirect drawCount=" + std::to_wstring(indirectArgs.size()));
+				bLoggedBindlessIndirect = true;
+			}
+		}
+		return bDrawSubmitted;
+	};
+
+	if (tryDrawSceneBindlessIndirect())
+		return;
+
 	for (auto& mesh : scene->meshes)
 	{
 		if (!mesh)
@@ -2991,7 +3225,8 @@ void Corona::DrawScene(shared_ptr<Scene> scene, const glm::mat4x4& instanceTrans
 				scene.get(),
 				samplerWrap.get(),
 				materialTable.Buffer.get(),
-				bUseStaticBindlessGeometry ? geometryTable.Buffer.get() : nullptr);
+				bUseStaticBindlessGeometry ? geometryTable.Buffer.get() : nullptr,
+				GBufferDummyDrawRecordBuffer.get());
 		}
 		std::vector<GraphicsBindGroupEntry> meshBindEntries;
 		meshBindEntries.reserve(8);

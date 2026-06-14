@@ -3869,6 +3869,9 @@ RenderBackendCapabilities NRIBackend::GetCapabilities() const
 	capabilities.SupportsBindlessBuffers = true;
 	capabilities.SupportsRuntimeDescriptorArrays = true;
 	capabilities.SupportsPartiallyBoundDescriptors = true;
+	capabilities.SupportsDrawIndexedIndirect = false;
+	capabilities.SupportsMultiDrawIndirect = false;
+	capabilities.SupportsDrawIndirectFirstInstance = false;
 	capabilities.MaxBindlessTextureCount = 4096;
 	capabilities.MaxBindlessBufferCount = 4096;
 	return capabilities;
@@ -5350,6 +5353,10 @@ void NRIBackend::DrawIndexedInstanced(uint32_t indexCountPerInstance, uint32_t i
 	nri::DrawIndexedDesc dd = {}; dd.indexNum = indexCountPerInstance; dd.instanceNum = instanceCount; dd.baseIndex = startIndexLocation; dd.baseVertex = baseVertexLocation; dd.baseInstance = startInstanceLocation;
 	m->Core.CmdDrawIndexed(*m->ActiveCmd, dd);
 	++m->DbgDraws;
+}
+bool NRIBackend::DrawIndexedIndirect(Buffer* /*indirectArgumentBuffer*/, uint64_t /*byteOffset*/, uint32_t /*drawCount*/)
+{
+	return false;
 }
 void NRIBackend::Dispatch(uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ)
 {

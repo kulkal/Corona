@@ -1398,6 +1398,46 @@ void DX12Backend::DrawIndexedInstanced(uint32_t indexCountPerInstance, uint32_t 
 	GlobalCmdList->CmdList->DrawIndexedInstanced(indexCountPerInstance, instanceCount, startIndexLocation, baseVertexLocation, startInstanceLocation);
 }
 
+bool DX12Backend::DrawIndexedIndirect(Buffer* indirectArgumentBuffer, uint64_t byteOffset, uint32_t drawCount)
+{
+	static_assert(sizeof(DrawIndexedIndirectArguments) == sizeof(D3D12_DRAW_INDEXED_ARGUMENTS), "Draw indexed indirect argument layout must match D3D12.");
+	if (drawCount == 0)
+		return true;
+	if (!GlobalCmdList || !GlobalCmdList->CmdList || !indirectArgumentBuffer || !indirectArgumentBuffer->resource)
+		return false;
+
+	if (!DrawIndexedIndirectCommandSignature)
+	{
+		D3D12_INDIRECT_ARGUMENT_DESC argumentDesc = {};
+		argumentDesc.Type = D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED;
+
+		D3D12_COMMAND_SIGNATURE_DESC signatureDesc = {};
+		signatureDesc.ByteStride = sizeof(DrawIndexedIndirectArguments);
+		signatureDesc.NumArgumentDescs = 1;
+		signatureDesc.pArgumentDescs = &argumentDesc;
+
+		HRESULT hr = Device->CreateCommandSignature(
+			&signatureDesc,
+			nullptr,
+			IID_PPV_ARGS(&DrawIndexedIndirectCommandSignature));
+		if (FAILED(hr))
+		{
+			AppendCpuRuntimeTrace(L"[DX12Backend] Create DRAW_INDEXED indirect command signature failed hr=" + FormatHexHRESULT(hr));
+			return false;
+		}
+		SetName(DrawIndexedIndirectCommandSignature.Get(), L"Corona DrawIndexedIndirect CommandSignature");
+	}
+
+	GlobalCmdList->CmdList->ExecuteIndirect(
+		DrawIndexedIndirectCommandSignature.Get(),
+		drawCount,
+		indirectArgumentBuffer->resource.Get(),
+		byteOffset,
+		nullptr,
+		0);
+	return true;
+}
+
 void DX12Backend::Dispatch(uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ)
 {
 	InvalidateGraphicsCommandStateCache();

@@ -72,8 +72,10 @@ PS_OUTPUT PSMain(PSInput input)
 
     velocity.xy /= RTSize.xy;
 
-    GBufferMaterialRecord material = GetGBufferMaterialRecord();
-    float4 Albedo    = SampleGBufferAlbedo(material, input.uv) * BaseColorFactor;
+    uint drawRecordIndex = input.drawRecordIndex;
+    float2 roughnessMetallicFactor = GetGBufferRoughnessMetallicFactor(drawRecordIndex);
+    GBufferMaterialRecord material = GetGBufferMaterialRecord(drawRecordIndex);
+    float4 Albedo    = SampleGBufferAlbedo(material, input.uv) * GetGBufferBaseColorFactor(drawRecordIndex);
     float  Roughness = SampleGBufferRoughness(material, input.uv);
     float  Metallic  = SampleGBufferMetallic(material, input.uv);
 
@@ -82,7 +84,7 @@ PS_OUTPUT PSMain(PSInput input)
 
     float3 WorldNormal = CalcPerPixelNormal(material, input.uv, input.normal, input.tangent);
     float3 GeomNormal  = CommonSafeNormalize(input.normal, float3(0.0f, 1.0f, 0.0f));
-    if (bTwoSidedLighting != 0)
+    if (GetGBufferTwoSidedLighting(drawRecordIndex) != 0)
     {
         float3 surfaceToViewForNormal = CommonSafeNormalize(-ViewDir.xyz, WorldNormal);
         if (dot(WorldNormal, surfaceToViewForNormal) < 0.0f)
@@ -99,21 +101,21 @@ PS_OUTPUT PSMain(PSInput input)
     output.Velocity.xy    = velocity;
     output.UnjitteredDepth = input.unjitteredPosition.z / input.unjitteredPosition.w;
 
-    if (bOverrideRougnessMetallic)
+    if (GetGBufferOverrideRoughnessMetallic(drawRecordIndex) != 0)
     {
-        output.Material.x = clamp(RougnessMetalic.x, 0.02f, 1.0f);
-        output.Material.y = saturate(RougnessMetalic.y);
+        output.Material.x = clamp(roughnessMetallicFactor.x, 0.02f, 1.0f);
+        output.Material.y = saturate(roughnessMetallicFactor.y);
     }
     else
     {
-        output.Material.x = clamp(Roughness * RougnessMetalic.x, 0.02f, 1.0f);
-        output.Material.y = saturate(Metallic  * RougnessMetalic.y);
+        output.Material.x = clamp(Roughness * roughnessMetallicFactor.x, 0.02f, 1.0f);
+        output.Material.y = saturate(Metallic  * roughnessMetallicFactor.y);
     }
-    output.Material.z = bUnlitMaterial != 0 ? 1.0f : 0.0f;
+    output.Material.z = GetGBufferUnlitMaterial(drawRecordIndex) != 0 ? 1.0f : 0.0f;
     // Material.w = surface-kind flag. 1.0 = grass blade (back-lit SSS in
     // LightingPS), 0.0 = standard opaque. Spine sprites use the unlit
     // path so they don't need a separate flag.
-    output.Material.w = bGrassMesh != 0 ? 1.0f : 0.0f;
+    output.Material.w = GetGBufferGrassMesh(drawRecordIndex) != 0 ? 1.0f : 0.0f;
 
     float3 surfaceToView = CommonSafeNormalize(-ViewDir.xyz, WorldNormal);
     output.SpecularAlbedo.xyz = ComputeDLSSRRSpecularAlbedo(Albedo.xyz, output.Material.y, output.Material.x, WorldNormal, surfaceToView);

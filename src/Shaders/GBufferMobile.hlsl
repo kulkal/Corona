@@ -40,14 +40,16 @@ PS_OUTPUT PSMain(PSInput input)
     positionSS *= RTSize.xy;
     float2 velocity = (positionSS - prevPositionSS) / RTSize.xy;
 
-    GBufferMaterialRecord material = GetGBufferMaterialRecord();
-    float4 Albedo = SampleGBufferAlbedo(material, input.uv) * BaseColorFactor;
+    uint drawRecordIndex = input.drawRecordIndex;
+    float2 roughnessMetallicFactor = GetGBufferRoughnessMetallicFactor(drawRecordIndex);
+    GBufferMaterialRecord material = GetGBufferMaterialRecord(drawRecordIndex);
+    float4 Albedo = SampleGBufferAlbedo(material, input.uv) * GetGBufferBaseColorFactor(drawRecordIndex);
 
     if (Albedo.w < 0.1f)
         discard;
 
     float3 WorldNormal = SafeNormalizeMobile(input.normal, float3(0.0f, 1.0f, 0.0f));
-    if (bTwoSidedLighting != 0)
+    if (GetGBufferTwoSidedLighting(drawRecordIndex) != 0)
     {
         float3 surfaceToView = SafeNormalizeMobile(-ViewDir.xyz, WorldNormal);
         if (dot(WorldNormal, surfaceToView) < 0.0f)
@@ -59,17 +61,17 @@ PS_OUTPUT PSMain(PSInput input)
     output.Normal   = float4(WorldNormal * 0.5f + 0.5f, 1.0f);
     output.Velocity = velocity;
 
-    if (bOverrideRougnessMetallic)
+    if (GetGBufferOverrideRoughnessMetallic(drawRecordIndex) != 0)
     {
-        output.Material.x = clamp(RougnessMetalic.x, 0.02f, 1.0f);
-        output.Material.y = saturate(RougnessMetalic.y);
+        output.Material.x = clamp(roughnessMetallicFactor.x, 0.02f, 1.0f);
+        output.Material.y = saturate(roughnessMetallicFactor.y);
     }
     else
     {
-        output.Material.x = clamp(RougnessMetalic.x, 0.02f, 1.0f);
+        output.Material.x = clamp(roughnessMetallicFactor.x, 0.02f, 1.0f);
         output.Material.y = 0.0f;
     }
-    output.Material.z = bUnlitMaterial != 0 ? 1.0f : 0.0f;
+    output.Material.z = GetGBufferUnlitMaterial(drawRecordIndex) != 0 ? 1.0f : 0.0f;
     output.Material.w = 0.0f;
 
     return output;

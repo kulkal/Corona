@@ -396,6 +396,7 @@ public:
 		Sampler* Sampler = nullptr;
 		Buffer* MaterialBuffer = nullptr;
 		Buffer* GeometryBuffer = nullptr;
+		Buffer* DrawRecordBuffer = nullptr;
 		std::shared_ptr<GraphicsBindGroupHandle> BindGroup;
 	};
 	std::vector<GBufferResourceBindGroupCacheEntry> CachedGBufferResourceBindGroups;

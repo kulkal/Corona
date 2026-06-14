@@ -46,10 +46,31 @@ struct GBufferGeometryRecord
     uint IndexStride;
 };
 
+struct GBufferDrawRecord
+{
+    float4 WorldMatrixRow0;
+    float4 WorldMatrixRow1;
+    float4 WorldMatrixRow2;
+    float4 WorldMatrixRow3;
+    float4 BaseColorFactor;
+    float2 RougnessMetalic;
+    uint bOverrideRougnessMetallic;
+    uint bTwoSidedLighting;
+    uint bUnlitMaterial;
+    uint bGrassMesh;
+    uint bTerrainMesh;
+    uint bExcludeFromDeformSphere;
+    uint GBufferMaterialIndex;
+    uint GBufferGeometryIndex;
+    uint GBufferIndexStart;
+    int  GBufferVertexBase;
+};
+
 Texture2D MaterialTextures[] : register(t0, space10);
 StructuredBuffer<GBufferMaterialRecord> GBufferMaterials : register(t13);
 ByteAddressBuffer GeometryBuffers[] : register(t0, space12);
 StructuredBuffer<GBufferGeometryRecord> GBufferGeometries : register(t14);
+StructuredBuffer<GBufferDrawRecord> GBufferDrawRecords : register(t15);
 
 SamplerState sampleWrap : register(s0);
 
@@ -132,9 +153,69 @@ cbuffer GBufferConstantBuffer : register(b0)
     float    PG_GrassPad2;
 };
 
-GBufferMaterialRecord GetGBufferMaterialRecord()
+static const uint GBUFFER_DRAW_RECORD_INVALID = 0xffffffffu;
+
+bool HasGBufferDrawRecord(uint drawRecordIndex)
 {
+    return drawRecordIndex != GBUFFER_DRAW_RECORD_INVALID;
+}
+
+float4x4 BuildGBufferDrawRecordWorldMatrix(GBufferDrawRecord drawRecord)
+{
+    return float4x4(
+        drawRecord.WorldMatrixRow0,
+        drawRecord.WorldMatrixRow1,
+        drawRecord.WorldMatrixRow2,
+        drawRecord.WorldMatrixRow3);
+}
+
+GBufferMaterialRecord GetGBufferMaterialRecord(uint drawRecordIndex)
+{
+    if (HasGBufferDrawRecord(drawRecordIndex))
+        return GBufferMaterials[GBufferDrawRecords[drawRecordIndex].GBufferMaterialIndex];
     return GBufferMaterials[GBufferMaterialIndex];
+}
+
+float4 GetGBufferBaseColorFactor(uint drawRecordIndex)
+{
+    if (HasGBufferDrawRecord(drawRecordIndex))
+        return GBufferDrawRecords[drawRecordIndex].BaseColorFactor;
+    return BaseColorFactor;
+}
+
+float2 GetGBufferRoughnessMetallicFactor(uint drawRecordIndex)
+{
+    if (HasGBufferDrawRecord(drawRecordIndex))
+        return GBufferDrawRecords[drawRecordIndex].RougnessMetalic;
+    return RougnessMetalic;
+}
+
+uint GetGBufferOverrideRoughnessMetallic(uint drawRecordIndex)
+{
+    if (HasGBufferDrawRecord(drawRecordIndex))
+        return GBufferDrawRecords[drawRecordIndex].bOverrideRougnessMetallic;
+    return bOverrideRougnessMetallic;
+}
+
+uint GetGBufferTwoSidedLighting(uint drawRecordIndex)
+{
+    if (HasGBufferDrawRecord(drawRecordIndex))
+        return GBufferDrawRecords[drawRecordIndex].bTwoSidedLighting;
+    return bTwoSidedLighting;
+}
+
+uint GetGBufferUnlitMaterial(uint drawRecordIndex)
+{
+    if (HasGBufferDrawRecord(drawRecordIndex))
+        return GBufferDrawRecords[drawRecordIndex].bUnlitMaterial;
+    return bUnlitMaterial;
+}
+
+uint GetGBufferGrassMesh(uint drawRecordIndex)
+{
+    if (HasGBufferDrawRecord(drawRecordIndex))
+        return GBufferDrawRecords[drawRecordIndex].bGrassMesh;
+    return bGrassMesh;
 }
 
 uint ResolveGBufferTextureIndex(uint textureIndex)
@@ -167,16 +248,21 @@ uint ResolveGBufferBufferIndex(uint bufferIndex)
     return bufferIndex == 0xffffffffu ? 0u : bufferIndex;
 }
 
-uint LoadGBufferBindlessIndex(GBufferGeometryRecord geometry, uint vertexId)
+uint LoadGBufferBindlessIndexFrom(GBufferGeometryRecord geometry, uint indexStart, uint vertexId)
 {
     ByteAddressBuffer indexBuffer = GeometryBuffers[NonUniformResourceIndex(ResolveGBufferBufferIndex(geometry.IndexBufferIndex))];
-    uint byteOffset = (GBufferIndexStart + vertexId) * geometry.IndexStride;
+    uint byteOffset = (indexStart + vertexId) * geometry.IndexStride;
     if (geometry.IndexStride == 2u)
     {
         uint packed = indexBuffer.Load(byteOffset & ~3u);
         return ((byteOffset & 2u) != 0u) ? ((packed >> 16u) & 0xffffu) : (packed & 0xffffu);
     }
     return indexBuffer.Load(byteOffset);
+}
+
+uint LoadGBufferBindlessIndex(GBufferGeometryRecord geometry, uint vertexId)
+{
+    return LoadGBufferBindlessIndexFrom(geometry, GBufferIndexStart, vertexId);
 }
 
 float3 LoadGBufferFloat3(ByteAddressBuffer buffer, uint byteOffset)
@@ -285,6 +371,7 @@ struct PSInput
     float4 prevPosition       : PREVPOSITION;
     float4 unjitteredPosition : UnjitteredPOSITION;
     float2 uv                 : TEXCOORD0;
+    nointerpolation uint drawRecordIndex : TEXCOORD1;
     float3 normal             : NORMAL;
     float3 tangent            : TANGENT;
 };
@@ -310,7 +397,19 @@ struct VertexObjSpace
     uint   instanceId;        // per-character / per-instance ID — used by
                               // Layer 2 effects for per-instance phase
                               // (wind sway randomization, etc.)
+    uint   drawRecordIndex;
+    uint   bGrassMesh;
+    uint   bTerrainMesh;
+    uint   bExcludeFromDeformSphere;
 };
+
+void SetDefaultGBufferDrawState(inout VertexObjSpace v)
+{
+    v.drawRecordIndex = GBUFFER_DRAW_RECORD_INVALID;
+    v.bGrassMesh = bGrassMesh;
+    v.bTerrainMesh = bTerrainMesh;
+    v.bExcludeFromDeformSphere = bExcludeFromDeformSphere;
+}
 
 // =====================================================================
 // Layer 1: Source loaders
@@ -327,6 +426,7 @@ VertexObjSpace LoadVertex_Static(VSInput input)
     v.worldMatrix    = WorldMatrix;
     v.prevWorldMatrix = WorldMatrix;
     v.instanceId     = 0;
+    SetDefaultGBufferDrawState(v);
     return v;
 }
 
@@ -347,6 +447,33 @@ VertexObjSpace LoadVertex_StaticBindless(uint vertexId)
     v.worldMatrix    = WorldMatrix;
     v.prevWorldMatrix = WorldMatrix;
     v.instanceId     = 0;
+    SetDefaultGBufferDrawState(v);
+    return v;
+}
+
+VertexObjSpace LoadVertex_StaticBindlessIndirect(uint vertexId, uint drawRecordIndex)
+{
+    GBufferDrawRecord drawRecord = GBufferDrawRecords[drawRecordIndex];
+    GBufferGeometryRecord geometry = GBufferGeometries[drawRecord.GBufferGeometryIndex];
+    uint indexValue = LoadGBufferBindlessIndexFrom(geometry, drawRecord.GBufferIndexStart, vertexId);
+    uint vertexIndex = uint(int(indexValue) + drawRecord.GBufferVertexBase);
+    ByteAddressBuffer vertexBuffer = GeometryBuffers[NonUniformResourceIndex(ResolveGBufferBufferIndex(geometry.VertexBufferIndex))];
+    uint vertexByteOffset = vertexIndex * geometry.VertexStride;
+    float4x4 worldMatrix = BuildGBufferDrawRecordWorldMatrix(drawRecord);
+
+    VertexObjSpace v;
+    v.currObjPos     = LoadGBufferFloat3(vertexBuffer, vertexByteOffset + 0u);
+    v.currObjNormal  = LoadGBufferFloat3(vertexBuffer, vertexByteOffset + 12u);
+    v.uv             = LoadGBufferFloat2(vertexBuffer, vertexByteOffset + 24u);
+    v.currObjTangent = LoadGBufferFloat3(vertexBuffer, vertexByteOffset + 32u);
+    v.prevObjPos     = v.currObjPos;
+    v.worldMatrix    = worldMatrix;
+    v.prevWorldMatrix = worldMatrix;
+    v.instanceId     = drawRecordIndex;
+    v.drawRecordIndex = drawRecordIndex;
+    v.bGrassMesh = drawRecord.bGrassMesh;
+    v.bTerrainMesh = drawRecord.bTerrainMesh;
+    v.bExcludeFromDeformSphere = drawRecord.bExcludeFromDeformSphere;
     return v;
 }
 
@@ -363,6 +490,7 @@ VertexObjSpace LoadVertex_SpineCached(uint vertexId)
     v.worldMatrix    = WorldMatrix;
     v.prevWorldMatrix = WorldMatrix;
     v.instanceId     = 0;
+    SetDefaultGBufferDrawState(v);
     return v;
 }
 
@@ -392,6 +520,7 @@ VertexObjSpace LoadVertex_SpineInline(uint vertexId)
     v.worldMatrix    = WorldMatrix;
     v.prevWorldMatrix = WorldMatrix;
     v.instanceId     = 0;
+    SetDefaultGBufferDrawState(v);
     return v;
 }
 
@@ -458,6 +587,7 @@ VertexObjSpace LoadVertex_SkeletalComp(VSInput input, uint vertexId)
     v.worldMatrix    = WorldMatrix;
     v.prevWorldMatrix = WorldMatrix;
     v.instanceId     = charIndex;
+    SetDefaultGBufferDrawState(v);
     return v;
 }
 
@@ -493,6 +623,7 @@ VertexObjSpace LoadVertex_SkeletalIL(VSInput input, uint vertexId)
     v.worldMatrix    = WorldMatrix;
     v.prevWorldMatrix = WorldMatrix;
     v.instanceId     = charIndex;
+    SetDefaultGBufferDrawState(v);
     return v;
 }
 
@@ -531,6 +662,7 @@ VertexObjSpace LoadVertex_SkeletalCl(VSInput input, uint vertexId, uint instance
     v.worldMatrix    = worldMatrix;
     v.prevWorldMatrix = worldMatrix; // prev-frame per-instance world TBD
     v.instanceId     = charIndex;
+    SetDefaultGBufferDrawState(v);
     return v;
 }
 
@@ -746,7 +878,7 @@ VertexObjSpace ApplyVertexDeformations(VertexObjSpace v)
     // grass meshes, never to ground / skeletal characters / Spine
     // sprites etc. The host code that submits the grass draw sets the
     // flag; everything else leaves it at 0.
-    if (bGrassMesh != 0u)
+    if (v.bGrassMesh != 0u)
     {
         const float time           = MeshDeformParams.x;
         const float maxBladeHeight = GrassBendParams.y;
@@ -807,20 +939,21 @@ PSInput BuildPSInput(VertexObjSpace v)
     // those that opt out (e.g. the player avatar that sits at the sphere
     // center). Operating in world space lets us skip the inverse world
     // matrix that an object-space variant would need.
-    if (bExcludeFromDeformSphere == 0u)
+    if (v.bExcludeFromDeformSphere == 0u)
         ApplyDeformSphereWorld(worldPos, worldNormal, worldTangent);
 
     result.position           = mul(float4(worldPos, 1.0f), ViewProjectionMatrix);
     result.unjitteredPosition = mul(float4(worldPos, 1.0f), UnjitteredViewProjMat);
 
     float3 prevWorldPos = mul(float4(v.prevObjPos, 1.0f), v.prevWorldMatrix).xyz;
-    if (bExcludeFromDeformSphere == 0u)
+    if (v.bExcludeFromDeformSphere == 0u)
         ApplyDeformSphereWorldPosOnly(prevWorldPos);
     result.prevPosition       = mul(float4(prevWorldPos, 1.0f), PrevUnjitteredViewProjMat);
 
     result.normal             = worldNormal;
     result.tangent            = worldTangent;
     result.uv                 = v.uv;
+    result.drawRecordIndex    = v.drawRecordIndex;
     return result;
 }
 
@@ -844,6 +977,13 @@ PSInput VSMain(VSInput input)
 PSInput VSMainBindless(uint vertexId : SV_VertexID)
 {
     VertexObjSpace v = LoadVertex_StaticBindless(vertexId);
+    v = ApplyVertexDeformations(v);
+    return BuildPSInput(v);
+}
+
+PSInput VSMainBindlessIndirect(uint vertexId : SV_VertexID, uint instanceId : SV_InstanceID)
+{
+    VertexObjSpace v = LoadVertex_StaticBindlessIndirect(vertexId, instanceId);
     v = ApplyVertexDeformations(v);
     return BuildPSInput(v);
 }
