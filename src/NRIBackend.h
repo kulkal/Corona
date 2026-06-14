@@ -61,6 +61,21 @@ public:
 	void UpdateUploadStructuredBuffer(Buffer* buffer, const void* srcData, uint32_t sizeInBytes) override;
 	std::shared_ptr<Buffer> AllocateTransientUploadStructuredBuffer(uint32_t numElements, uint32_t elementSize, const void* srcData) override;
 
+	// --- Bindless registry ---
+	RHITextureHandle RegisterBindlessTexture(Texture* texture) override;
+	bool UpdateBindlessTexture(Texture* texture) override;
+	void UnregisterBindlessTexture(Texture* texture) override;
+	RHITextureHandle GetBindlessTextureHandle(const Texture* texture) const override;
+	RHIBufferHandle RegisterBindlessBuffer(Buffer* buffer) override;
+	RHIBufferHandle RegisterBindlessVertexBuffer(VertexBuffer* buffer) override;
+	RHIBufferHandle RegisterBindlessIndexBuffer(IndexBuffer* buffer) override;
+	void UnregisterBindlessBuffer(Buffer* buffer) override;
+	void UnregisterBindlessVertexBuffer(VertexBuffer* buffer) override;
+	void UnregisterBindlessIndexBuffer(IndexBuffer* buffer) override;
+	RHIBufferHandle GetBindlessBufferHandle(const Buffer* buffer) const override;
+	RHIBufferHandle GetBindlessVertexBufferHandle(const VertexBuffer* buffer) const override;
+	RHIBufferHandle GetBindlessIndexBufferHandle(const IndexBuffer* buffer) const override;
+
 	// --- Ray tracing ---
 	std::shared_ptr<RTAS> CreateBLASForMesh(Mesh* mesh) override;
 	std::shared_ptr<RTAS> CreateBLASForSkeletalMesh(Mesh* mesh) override;

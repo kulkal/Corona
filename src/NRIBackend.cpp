@@ -513,6 +513,59 @@ struct NRIBackend::Impl
 	std::unordered_map<Texture*, TextureAlloc> Textures;
 	std::unordered_map<Sampler*, nri::Descriptor*> Samplers;
 
+	// --- Bindless registry (Phase C foundation) ---------------------------------
+	// Global index assignment + cached SRV descriptors for material textures
+	// (shader space10 MaterialTextures[]) and geometry byte-address buffers
+	// (space12 GeometryBuffers[]). RT pipelines write these into their bindless
+	// descriptor sets at Apply. Indices are stable for a resource's lifetime;
+	// generation distinguishes stale handles. Free-list reuse on unregister.
+	std::unordered_map<const void*, RHIBindlessHandle> BindlessTexHandles;
+	std::vector<nri::Descriptor*> BindlessTexDescs;   // index -> texture SRV (owned)
+	std::vector<uint32_t> BindlessTexGen;
+	std::vector<uint32_t> BindlessTexFreeList;
+	std::unordered_map<const void*, RHIBindlessHandle> BindlessBufHandles;
+	std::vector<nri::Descriptor*> BindlessBufDescs;   // index -> raw buffer SRV (owned)
+	std::vector<uint32_t> BindlessBufGen;
+	std::vector<uint32_t> BindlessBufFreeList;
+
+	RHIBindlessHandle RegisterBindlessTextureImpl(nri::Texture* nt, const void* key)
+	{
+		if (!nt || !key) return {};
+		auto existing = BindlessTexHandles.find(key);
+		if (existing != BindlessTexHandles.end() && existing->second.IsValid())
+			return existing->second;
+		const nri::TextureDesc& td = Core.GetTextureDesc(*nt);
+		nri::TextureViewDesc tvd = {}; tvd.texture = nt; tvd.type = nri::TextureView::TEXTURE;
+		tvd.format = td.format; tvd.mipNum = nri::REMAINING; tvd.layerNum = nri::REMAINING;
+		nri::Descriptor* d = nullptr;
+		if (Core.CreateTextureView(tvd, d) != nri::Result::SUCCESS || !d) return {};
+		uint32_t idx;
+		if (!BindlessTexFreeList.empty()) { idx = BindlessTexFreeList.back(); BindlessTexFreeList.pop_back(); BindlessTexDescs[idx] = d; }
+		else { idx = (uint32_t)BindlessTexDescs.size(); BindlessTexDescs.push_back(d); BindlessTexGen.push_back(0); }
+		if (BindlessTexGen[idx] == 0) BindlessTexGen[idx] = 1;
+		RHIBindlessHandle h; h.Index = idx; h.Generation = BindlessTexGen[idx];
+		BindlessTexHandles[key] = h;
+		return h;
+	}
+	RHIBindlessHandle RegisterBindlessBufferImpl(nri::Buffer* nb, uint64_t sizeBytes, const void* key)
+	{
+		if (!nb || !key || sizeBytes == 0) return {};
+		auto existing = BindlessBufHandles.find(key);
+		if (existing != BindlessBufHandles.end() && existing->second.IsValid())
+			return existing->second;
+		// ByteAddressBuffer SRV (raw).
+		nri::BufferViewDesc bvd = {}; bvd.buffer = nb; bvd.type = nri::BufferView::BYTE_ADDRESS_BUFFER; bvd.offset = 0; bvd.size = sizeBytes;
+		nri::Descriptor* d = nullptr;
+		if (Core.CreateBufferView(bvd, d) != nri::Result::SUCCESS || !d) return {};
+		uint32_t idx;
+		if (!BindlessBufFreeList.empty()) { idx = BindlessBufFreeList.back(); BindlessBufFreeList.pop_back(); BindlessBufDescs[idx] = d; }
+		else { idx = (uint32_t)BindlessBufDescs.size(); BindlessBufDescs.push_back(d); BindlessBufGen.push_back(0); }
+		if (BindlessBufGen[idx] == 0) BindlessBufGen[idx] = 1;
+		RHIBindlessHandle h; h.Index = idx; h.Generation = BindlessBufGen[idx];
+		BindlessBufHandles[key] = h;
+		return h;
+	}
+
 	std::string BackendName = "NRI (uninitialized)";
 	uint8_t RayTracingTier = 0;   // 0=none, 1=DXR1.0, 2=DXR1.1, 3=DXR1.2 (SER)
 	uint32_t FrameIndex = 0;
@@ -3976,6 +4029,79 @@ std::shared_ptr<Buffer> NRIBackend::AllocateTransientUploadStructuredBuffer(uint
 	}
 	m->TransientBuffers.push_back(buf);
 	return buf;
+}
+
+// === Bindless registry ====================================================
+RHITextureHandle NRIBackend::RegisterBindlessTexture(Texture* texture)
+{
+	if (!texture) return {};
+	auto it = m->Textures.find(texture);
+	if (it == m->Textures.end() || !it->second.texture) return {};
+	return m->RegisterBindlessTextureImpl(it->second.texture, texture);
+}
+bool NRIBackend::UpdateBindlessTexture(Texture* texture)
+{
+	// Texture content/view is stable for now; re-register if not present.
+	return texture && RegisterBindlessTexture(texture).IsValid();
+}
+void NRIBackend::UnregisterBindlessTexture(Texture* texture)
+{
+	auto it = m->BindlessTexHandles.find(texture);
+	if (it == m->BindlessTexHandles.end()) return;
+	const uint32_t idx = it->second.Index;
+	if (idx < m->BindlessTexDescs.size() && m->BindlessTexDescs[idx])
+	{
+		m->Core.DestroyDescriptor(m->BindlessTexDescs[idx]);
+		m->BindlessTexDescs[idx] = nullptr;
+		if (idx < m->BindlessTexGen.size()) ++m->BindlessTexGen[idx];
+		m->BindlessTexFreeList.push_back(idx);
+	}
+	m->BindlessTexHandles.erase(it);
+}
+RHITextureHandle NRIBackend::GetBindlessTextureHandle(const Texture* texture) const
+{
+	auto it = m->BindlessTexHandles.find(texture);
+	return it != m->BindlessTexHandles.end() ? it->second : RHITextureHandle{};
+}
+RHIBufferHandle NRIBackend::RegisterBindlessBuffer(Buffer* buffer)
+{
+	if (!buffer) return {};
+	auto it = m->Buffers.find(buffer);
+	if (it == m->Buffers.end() || !it->second.buffer) return {};
+	const uint64_t size = static_cast<uint64_t>(buffer->NumElements) * buffer->ElementSize;
+	return m->RegisterBindlessBufferImpl(it->second.buffer, size, buffer);
+}
+RHIBufferHandle NRIBackend::RegisterBindlessVertexBuffer(VertexBuffer* buffer)
+{
+	if (!buffer) return {};
+	auto it = m->VBs.find(buffer);
+	if (it == m->VBs.end() || !it->second.buffer) return {};
+	return m->RegisterBindlessBufferImpl(it->second.buffer, it->second.capacity, buffer);
+}
+RHIBufferHandle NRIBackend::RegisterBindlessIndexBuffer(IndexBuffer* buffer)
+{
+	if (!buffer) return {};
+	auto it = m->IBs.find(buffer);
+	if (it == m->IBs.end() || !it->second.buffer) return {};
+	return m->RegisterBindlessBufferImpl(it->second.buffer, it->second.capacity, buffer);
+}
+void NRIBackend::UnregisterBindlessBuffer(Buffer* buffer) { m->BindlessBufHandles.erase(buffer); }
+void NRIBackend::UnregisterBindlessVertexBuffer(VertexBuffer* buffer) { m->BindlessBufHandles.erase(buffer); }
+void NRIBackend::UnregisterBindlessIndexBuffer(IndexBuffer* buffer) { m->BindlessBufHandles.erase(buffer); }
+RHIBufferHandle NRIBackend::GetBindlessBufferHandle(const Buffer* buffer) const
+{
+	auto it = m->BindlessBufHandles.find(buffer);
+	return it != m->BindlessBufHandles.end() ? it->second : RHIBufferHandle{};
+}
+RHIBufferHandle NRIBackend::GetBindlessVertexBufferHandle(const VertexBuffer* buffer) const
+{
+	auto it = m->BindlessBufHandles.find(buffer);
+	return it != m->BindlessBufHandles.end() ? it->second : RHIBufferHandle{};
+}
+RHIBufferHandle NRIBackend::GetBindlessIndexBufferHandle(const IndexBuffer* buffer) const
+{
+	auto it = m->BindlessBufHandles.find(buffer);
+	return it != m->BindlessBufHandles.end() ? it->second : RHIBufferHandle{};
 }
 
 // === Ray tracing ==========================================================
