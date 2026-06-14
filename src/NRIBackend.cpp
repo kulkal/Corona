@@ -491,6 +491,19 @@ struct NRIBackend::Impl
 		void* mapped = nullptr; // non-null for persistently-mapped HOST_UPLOAD buffers
 	};
 	std::unordered_map<Buffer*, BufferAlloc> Buffers;
+	// Transient per-frame upload buffers (AllocateTransientUploadStructuredBuffer).
+	// Kept alive until the next BeginFrame; EndFrame waits synchronously so the
+	// previous frame's transients are safe to free then.
+	std::vector<std::shared_ptr<Buffer>> TransientBuffers;
+	void FreeTransientBuffers()
+	{
+		for (auto& w : TransientBuffers)
+		{
+			auto it = Buffers.find(w.get());
+			if (it != Buffers.end()) { FreeBuffer(it->second.buffer, it->second.memory); Buffers.erase(it); }
+		}
+		TransientBuffers.clear();
+	}
 
 	struct TextureAlloc
 	{
@@ -1872,7 +1885,7 @@ public:
 
 	void ResetHitProgram(uint32_t) override { HitBindSlot = 0; }
 	void StartHitProgram(const std::string&, uint32_t) override { HitBindSlot = 0; }
-	void AddTextureSRVToHitProgram(const std::string&, Texture* texture, uint32_t instanceIndex) override
+	void AddTextureSRVToHitProgram(const std::string&, Texture* texture, uint32_t instanceIndex)
 	{
 		if (Binding* b = FindHitBindingAtSlot(HitBindSlot))
 		{
@@ -1890,7 +1903,7 @@ public:
 		}
 		++HitBindSlot;
 	}
-	void AddBufferSRVToHitProgram(const std::string&, Buffer* buffer, uint32_t instanceIndex) override
+	void AddBufferSRVToHitProgram(const std::string&, Buffer* buffer, uint32_t instanceIndex)
 	{
 		if (Binding* b = FindHitBindingAtSlot(HitBindSlot))
 		{
@@ -1908,7 +1921,7 @@ public:
 		}
 		++HitBindSlot;
 	}
-	void AddSceneGeometrySRVsToHitProgram(const std::string&, VertexBuffer* sceneVertexBuffer, IndexBuffer* sceneIndexBuffer, uint32_t) override
+	void AddSceneGeometrySRVsToHitProgram(const std::string&, VertexBuffer* sceneVertexBuffer, IndexBuffer* sceneIndexBuffer, uint32_t)
 	{
 		if (Binding* b = FindHitBindingAtSlot(HitBindSlot))
 		{
@@ -1928,6 +1941,10 @@ public:
 		}
 		HitBindSlot += 2;
 	}
+
+	// Indirect DispatchRays: not yet implemented on NRI (RT bring-up is WIP).
+	bool ApplyIndirect(Buffer* /*indirectArgumentBuffer*/, uint64_t /*byteOffset*/) override { return false; }
+	bool GetDispatchRaysIndirectTemplate(uint32_t /*width*/, uint32_t /*height*/, RtDispatchRaysIndirectTemplate& /*outTemplate*/) const override { return false; }
 
 	bool InitRS(const std::string& shaderFile) override
 	{
@@ -3456,6 +3473,7 @@ void NRIBackend::BeginFrame()
 	m->HasPendingClear = false;
 	m->BBLayout = nri::Layout::UNDEFINED;
 	m->CurrentWindowRT = nullptr;
+	m->FreeTransientBuffers(); // previous frame's transients (GPU done after EndFrame's wait)
 
 	m->Core.ResetCommandAllocator(*m->CmdAllocator);
 	if (m->Core.BeginCommandBuffer(*m->CmdBuffer, nullptr) != nri::Result::SUCCESS)
@@ -3915,6 +3933,21 @@ void NRIBackend::UpdateUploadStructuredBuffer(Buffer* buffer, const void* srcDat
 	auto it = m->Buffers.find(buffer);
 	if (it != m->Buffers.end() && it->second.mapped && srcData)
 		memcpy(it->second.mapped, srcData, sizeInBytes);
+}
+std::shared_ptr<Buffer> NRIBackend::AllocateTransientUploadStructuredBuffer(uint32_t numElements, uint32_t elementSize, const void* srcData)
+{
+	// Per-frame transient upload buffer: HOST_UPLOAD + memcpy, freed at the next
+	// BeginFrame (EndFrame waits synchronously so it's safe to reuse the memory).
+	auto buf = CreateUploadStructuredBuffer(numElements, elementSize);
+	if (!buf) return nullptr;
+	if (srcData)
+	{
+		auto it = m->Buffers.find(buf.get());
+		if (it != m->Buffers.end() && it->second.mapped)
+			memcpy(it->second.mapped, srcData, static_cast<size_t>(numElements) * elementSize);
+	}
+	m->TransientBuffers.push_back(buf);
+	return buf;
 }
 
 // === Ray tracing ==========================================================
@@ -4615,6 +4648,19 @@ void NRIBackend::TransitionBuffer(Buffer* buffer, EResourceState stateBefore, ER
 	m->Core.CmdBarrier(*m->ActiveCmd, bd);
 }
 void NRIBackend::TransitionVertexBuffer(VertexBuffer*, EResourceState, EResourceState) { NRI_TODO(); }
+void NRIBackend::UAVBarrier(Buffer* buffer)
+{
+	if (!m->ActiveCmd || !buffer) return;
+	auto it = m->Buffers.find(buffer);
+	if (it == m->Buffers.end() || !it->second.buffer) return;
+	nri::BufferBarrierDesc bb = {};
+	bb.buffer = it->second.buffer;
+	bb.before = { nri::AccessBits::SHADER_RESOURCE_STORAGE, nri::StageBits::ALL };
+	bb.after  = { nri::AccessBits::SHADER_RESOURCE_STORAGE, nri::StageBits::ALL };
+	nri::BarrierDesc bd = {};
+	bd.buffers = &bb; bd.bufferNum = 1;
+	m->Core.CmdBarrier(*m->ActiveCmd, bd);
+}
 
 // === Graphics pipelines (by-name binding) =================================
 std::shared_ptr<GraphicsPipelineHandle> NRIBackend::CreateGraphicsPipeline(const GraphicsPipelineDesc& desc)
@@ -4633,10 +4679,62 @@ void NRIBackend::BindGraphicsPipeline(GraphicsPipelineHandle* pipeline)
 	m->HasBoundGfx = true;
 	++m->DbgGfxBindOk;
 }
-void NRIBackend::SetGraphicsPipelineConstantData(GraphicsPipelineHandle* pipeline, uint32_t, const void* data, uint32_t size) { if (auto* p = static_cast<NRIGraphicsPipeline*>(pipeline)) p->SetConstant(data, size); }
-void NRIBackend::BindGraphicsPipelineTexture(GraphicsPipelineHandle* pipeline, const std::string& bindingName, Texture* texture) { if (auto* p = static_cast<NRIGraphicsPipeline*>(pipeline)) p->SetTexture(bindingName, texture); }
-void NRIBackend::BindGraphicsPipelineBuffer(GraphicsPipelineHandle* pipeline, const std::string& bindingName, Buffer* buffer) { if (auto* p = static_cast<NRIGraphicsPipeline*>(pipeline)) p->SetBuffer(bindingName, buffer); }
-void NRIBackend::BindGraphicsPipelineVertexBufferSRV(GraphicsPipelineHandle*, const std::string&, VertexBuffer*) { /* skinning motion-vector SRV: later */ }
-void NRIBackend::BindGraphicsPipelineSampler(GraphicsPipelineHandle* pipeline, const std::string& bindingName, Sampler* sampler) { if (auto* p = static_cast<NRIGraphicsPipeline*>(pipeline)) p->SetSampler(bindingName, sampler); }
+// Bind-group binding (explicit-binding RHI). A bind group is a batched set of
+// by-name resource bindings for one draw; CreateGraphicsBindGroup copies the
+// entries (owning constant bytes) and BindGraphicsBindGroup replays them onto the
+// pipeline's existing by-name Set* state, which the next Draw* turns into a fresh
+// per-draw NRI descriptor set in NRIGraphicsPipeline::ApplyForDraw.
+struct NRIGraphicsBindGroup final : GraphicsBindGroupHandle
+{
+	struct Entry
+	{
+		EGraphicsBindGroupEntryType Type = EGraphicsBindGroupEntryType::TextureSRV;
+		std::string Name;
+		Texture* Tex = nullptr;
+		Buffer* Buf = nullptr;
+		Sampler* Samp = nullptr;
+		std::vector<uint8_t> Constant;
+	};
+	GraphicsPipelineHandle* Pipeline = nullptr;
+	std::vector<Entry> Entries;
+};
+
+std::shared_ptr<GraphicsBindGroupHandle> NRIBackend::CreateGraphicsBindGroup(const GraphicsBindGroupDesc& desc)
+{
+	auto handle = std::make_shared<NRIGraphicsBindGroup>();
+	handle->Pipeline = desc.Pipeline;
+	handle->Entries.reserve(desc.Entries.size());
+	for (const GraphicsBindGroupEntry& src : desc.Entries)
+	{
+		NRIGraphicsBindGroup::Entry e;
+		e.Type = src.Type; e.Name = src.BindingName;
+		e.Tex = src.TextureValue; e.Buf = src.BufferValue; e.Samp = src.SamplerValue;
+		if (src.Type == EGraphicsBindGroupEntryType::ConstantData && src.ConstantData && src.ConstantDataSize > 0)
+		{
+			const auto* bytes = static_cast<const uint8_t*>(src.ConstantData);
+			e.Constant.assign(bytes, bytes + src.ConstantDataSize);
+		}
+		handle->Entries.push_back(std::move(e));
+	}
+	return handle;
+}
+
+void NRIBackend::BindGraphicsBindGroup(GraphicsPipelineHandle* pipeline, uint32_t, const std::shared_ptr<GraphicsBindGroupHandle>& bindGroup)
+{
+	auto* p = static_cast<NRIGraphicsPipeline*>(pipeline);
+	auto* bg = static_cast<NRIGraphicsBindGroup*>(bindGroup.get());
+	if (!p || !bg) return;
+	for (const NRIGraphicsBindGroup::Entry& e : bg->Entries)
+	{
+		switch (e.Type)
+		{
+		case EGraphicsBindGroupEntryType::TextureSRV:       if (e.Tex)  p->SetTexture(e.Name, e.Tex); break;
+		case EGraphicsBindGroupEntryType::BufferSRV:        if (e.Buf)  p->SetBuffer(e.Name, e.Buf); break;
+		case EGraphicsBindGroupEntryType::VertexBufferSRV:  /* vertex-buffer SRV (skinning motion vectors): later */ break;
+		case EGraphicsBindGroupEntryType::Sampler:          if (e.Samp) p->SetSampler(e.Name, e.Samp); break;
+		case EGraphicsBindGroupEntryType::ConstantData:     if (!e.Constant.empty()) p->SetConstant(e.Constant.data(), (uint32_t)e.Constant.size()); break;
+		}
+	}
+}
 
 #endif // CORONA_HAS_NRI
