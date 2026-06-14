@@ -792,12 +792,19 @@ void Corona::RebuildAccelerationStructures()
 
 void Corona::InitRaytracingData()
 {
-	if (!renderBackend || !renderBackend->SupportsRayTracing())
+	if (!renderBackend)
 		return;
 
+	// Sync the render-world scene-object snapshot regardless of ray-tracing
+	// support: the raster GBuffer pass iterates RenderWorld.SceneObjects, so a
+	// backend with RT disabled (e.g. NRI today, GetMaxSupportedHybridStage()==0)
+	// still needs this snapshot or it renders an empty scene.
 	RenderWorld.SceneObjects = SceneObjects;
 	for (SceneObject& object : RenderWorld.SceneObjects)
 		object.RenderDirtyBits = 0;
+
+	if (!renderBackend->SupportsRayTracing())
+		return; // RenderWorld is synced for raster; skip building RT acceleration structures
 
 	size_t NumTotalMesh = 0;
 	for (const SceneObject& object : RenderWorld.SceneObjects)
