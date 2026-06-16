@@ -1050,6 +1050,9 @@ private:
 		UINT32 NormalTextureIndex = RHI_INVALID_BINDLESS_INDEX;
 		UINT32 RoughnessTextureIndex = RHI_INVALID_BINDLESS_INDEX;
 		UINT32 MetallicTextureIndex = RHI_INVALID_BINDLESS_INDEX;
+		// 0.5*log2(albedo w*h), precomputed so RT closest-hit shaders skip the
+		// per-hit GetDimensions() + log2() for ray-cone texture LOD.
+		float AlbedoLodConstant = 0.0f;
 	};
 
 	struct RTGeometryRecord

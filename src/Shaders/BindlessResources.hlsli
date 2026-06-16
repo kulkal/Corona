@@ -9,6 +9,7 @@ struct RTMaterialRecord
 	uint NormalTextureIndex;
 	uint RoughnessTextureIndex;
 	uint MetallicTextureIndex;
+	float AlbedoLodConstant; // 0.5*log2(albedo w*h), precomputed on CPU
 };
 
 Texture2D MaterialTextures[] : register(t0, space10);

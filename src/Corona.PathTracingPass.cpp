@@ -163,6 +163,10 @@ bool Corona::EnsureRTMaterialRecordBuffer()
 		record.NormalTextureIndex = getBindlessTextureIndex(normal);
 		record.RoughnessTextureIndex = getBindlessTextureIndex(roughness);
 		record.MetallicTextureIndex = getBindlessTextureIndex(metallic);
+		// Precompute the ray-cone texture-LOD constant so closest-hit shaders
+		// don't call GetDimensions()+log2() per hit.
+		const uint32_t albedoTexels = std::max<uint32_t>(1u, albedo->Width) * std::max<uint32_t>(1u, albedo->Height);
+		record.AlbedoLodConstant = 0.5f * std::log2(static_cast<float>(albedoTexels));
 		bAllTexturesRegistered = bAllTexturesRegistered &&
 			record.AlbedoTextureIndex != RHI_INVALID_BINDLESS_INDEX &&
 			record.NormalTextureIndex != RHI_INVALID_BINDLESS_INDEX &&

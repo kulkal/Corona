@@ -766,12 +766,7 @@ void chs(inout RayPayload payload, in BuiltInTriangleIntersectionAttributes attr
     payload.normal = SpecSafeNormalize(vertex.normal, -WorldRayDirection());
 
     RTMaterialRecord material = RtMaterials[instanceID];
-    uint w, h;
-    MaterialTextures[NonUniformResourceIndex(material.AlbedoTextureIndex)].GetDimensions(w, h);
-
-    float halfLog2NumTexPixels = 0.5 * log2(max(float(w) * float(h), 1.0f));
-
-    vertex.textureLODConstant += halfLog2NumTexPixels;
+    vertex.textureLODConstant += material.AlbedoLodConstant;
     float rayConeWidth = payload.spreadAngle * hitT;
 
     float NoV = 1;//dot(V, vertex.normal);
