@@ -583,6 +583,16 @@ public:
 	// until the frame's fence is retired, so callers can bind it immediately
 	// without maintaining their own per-draw cache.
 	virtual std::shared_ptr<Buffer> AllocateTransientUploadStructuredBuffer(uint32_t numElements, uint32_t elementSize, const void* srcData) = 0;
+	// Like AllocateTransientUploadStructuredBuffer, but the GPU reads the data
+	// from device-local (VRAM) memory instead of a host-visible/sysmem heap.
+	// Costs one staging copy + barrier per frame, but keeps heavy per-vertex/
+	// per-pixel SRV reads off the SysL2/sysmem aperture (which contends with the
+	// host/PCIe path when the CPU is memory-busy). Default forwards to the upload
+	// path; backends that can do better override it.
+	virtual std::shared_ptr<Buffer> AllocateTransientDefaultStructuredBuffer(uint32_t numElements, uint32_t elementSize, const void* srcData)
+	{
+		return AllocateTransientUploadStructuredBuffer(numElements, elementSize, srcData);
+	}
 	virtual std::shared_ptr<RTAS> CreateBLASForMesh(Mesh* mesh) = 0;
 	// Build a BLAS from the skeletal-skinning output VB (SkeletalOutputVb)
 	// with the ALLOW_UPDATE flag so RefitBLAS can refresh it cheaply each

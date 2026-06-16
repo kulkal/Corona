@@ -545,6 +545,17 @@ public:
 	void ResetTransientUploadStructuredFrame(uint32_t frameIndex);
 	TransientUploadStructuredAllocation AllocateTransientUploadStructuredBytes(UINT64 size, UINT64 alignment);
 
+	// Large DEFAULT-heap pool for mesh vertex/index buffers. Suballocating them
+	// (CreatePlacedResource) from a few big contiguous heaps lets the driver back
+	// them with large pages, so scattered RT/bindless geometry reads thrash the
+	// TPC uTLB far less than the prior per-mesh committed allocations did.
+	struct GeometryPlacement { ID3D12Heap* heap = nullptr; UINT64 offset = 0; };
+	std::vector<ComPtr<ID3D12Heap>> GeometryPlacedHeaps;
+	UINT64 GeometryPlacedHeapCursor = 0;
+	UINT64 GeometryPlacedHeapCapacity = 0;
+	static constexpr UINT64 GeometryPlacedHeapBlockSize = 256ull * 1024ull * 1024ull;
+	GeometryPlacement AllocateGeometryPlacement(UINT64 size, UINT64 alignment);
+
 	struct PersistentStructuredBufferBlock
 	{
 		ComPtr<ID3D12Resource> resource;
@@ -765,6 +776,7 @@ public:
 	std::shared_ptr<Buffer> CreateUploadStructuredBuffer(uint32_t numElements, uint32_t elementSize) override;
 	void UpdateUploadStructuredBuffer(Buffer* buffer, const void* srcData, uint32_t sizeInBytes) override;
 	std::shared_ptr<Buffer> AllocateTransientUploadStructuredBuffer(uint32_t numElements, uint32_t elementSize, const void* srcData) override;
+	std::shared_ptr<Buffer> AllocateTransientDefaultStructuredBuffer(uint32_t numElements, uint32_t elementSize, const void* srcData) override;
 	std::shared_ptr<RTAS> CreateBLASForMesh(Mesh* mesh) override;
 	std::shared_ptr<RTAS> CreateBLASForSkeletalMesh(Mesh* mesh) override;
 	void RefitBLAS(RTAS* rtas, Mesh* mesh) override;

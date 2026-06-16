@@ -2096,6 +2096,30 @@ bool DX12Backend::UploadToDefaultBuffer(Buffer* buffer, const void* srcData, UIN
 	return true;
 }
 
+DX12Backend::GeometryPlacement DX12Backend::AllocateGeometryPlacement(UINT64 size, UINT64 alignment)
+{
+	const UINT64 align = alignment ? alignment : static_cast<UINT64>(D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT);
+	UINT64 aligned = (GeometryPlacedHeapCursor + (align - 1)) & ~(align - 1);
+	if (GeometryPlacedHeaps.empty() || aligned + size > GeometryPlacedHeapCapacity)
+	{
+		const UINT64 blockSize = std::max<UINT64>(GeometryPlacedHeapBlockSize, size + align);
+		D3D12_HEAP_DESC heapDesc = {};
+		heapDesc.SizeInBytes = blockSize;
+		heapDesc.Properties = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT);
+		heapDesc.Alignment = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT;
+		heapDesc.Flags = D3D12_HEAP_FLAG_ALLOW_ONLY_BUFFERS;
+		ComPtr<ID3D12Heap> heap;
+		ThrowIfFailed(Device->CreateHeap(&heapDesc, IID_PPV_ARGS(&heap)));
+		GeometryPlacedHeaps.push_back(heap);
+		GeometryPlacedHeapCapacity = blockSize;
+		GeometryPlacedHeapCursor = 0;
+		aligned = 0;
+	}
+	GeometryPlacement placement{ GeometryPlacedHeaps.back().Get(), aligned };
+	GeometryPlacedHeapCursor = aligned + size;
+	return placement;
+}
+
 shared_ptr<IndexBuffer> DX12Backend::CreateIndexBuffer(EIndexFormat Format, UINT Size, void* SrcData)
 {
 	CommandList* cmd = CmdQ->AllocCmdList();
@@ -2108,13 +2132,16 @@ shared_ptr<IndexBuffer> DX12Backend::CreateIndexBuffer(EIndexFormat Format, UINT
 	ss << "CreateIndexBuffer : " << Size << "\n";
 	OutputDebugStringA(ss.str().c_str());*/
 
-	ThrowIfFailed(Device->CreateCommittedResource(
-		&CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT),
-		D3D12_HEAP_FLAG_NONE,
-		&CD3DX12_RESOURCE_DESC::Buffer(rawSrvSize),
-		D3D12_RESOURCE_STATE_COPY_DEST,
-		nullptr,
-		IID_PPV_ARGS(&ib->resource)));
+	{
+		const GeometryPlacement placement = AllocateGeometryPlacement(rawSrvSize, D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT);
+		ThrowIfFailed(Device->CreatePlacedResource(
+			placement.heap,
+			placement.offset,
+			&CD3DX12_RESOURCE_DESC::Buffer(rawSrvSize),
+			D3D12_RESOURCE_STATE_COPY_DEST,
+			nullptr,
+			IID_PPV_ARGS(&ib->resource)));
+	}
 
 	NAME_D3D12_OBJECT(ib->resource);
 
@@ -2179,13 +2206,16 @@ shared_ptr<VertexBuffer> DX12Backend::CreateVertexBuffer(UINT Size, UINT Stride,
 	ss << "CreateVertexBuffer : " << Size << "\n";
 	OutputDebugStringA(ss.str().c_str());*/
 	
-	ThrowIfFailed(Device->CreateCommittedResource(
-		&CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT),
-		D3D12_HEAP_FLAG_NONE,
-		&CD3DX12_RESOURCE_DESC::Buffer(Size),
-		D3D12_RESOURCE_STATE_COPY_DEST,
-		nullptr,
-		IID_PPV_ARGS(&vb->resource)));
+	{
+		const GeometryPlacement placement = AllocateGeometryPlacement(Size, D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT);
+		ThrowIfFailed(Device->CreatePlacedResource(
+			placement.heap,
+			placement.offset,
+			&CD3DX12_RESOURCE_DESC::Buffer(Size),
+			D3D12_RESOURCE_STATE_COPY_DEST,
+			nullptr,
+			IID_PPV_ARGS(&vb->resource)));
+	}
 
 	NAME_D3D12_OBJECT(vb->resource);
 
@@ -2310,6 +2340,72 @@ shared_ptr<Buffer> DX12Backend::AllocateTransientUploadStructuredBuffer(uint32_t
 	srvDesc.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_NONE;
 	srvDesc.Buffer.StructureByteStride = ElementSize;
 	srvDesc.Buffer.FirstElement = static_cast<UINT>(alloc.offset / ElementSize);
+	srvDesc.Buffer.NumElements = NumElements;
+	srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+	GlobalDHRing->AllocDescriptor(buffer->CpuHandleSRV, buffer->GpuHandleSRV);
+	Device->CreateShaderResourceView(buffer->resource.Get(), &srvDesc, buffer->CpuHandleSRV);
+	buffer->Type = Buffer::STRUCTURED;
+
+	if (TransientUploadStructuredKeepAlive.size() < NumFrame)
+		TransientUploadStructuredKeepAlive.resize(NumFrame);
+	const uint32_t frameIndex = CurrentFrameIndex < NumFrame ? CurrentFrameIndex : 0u;
+	TransientUploadStructuredKeepAlive[frameIndex].push_back(buffer);
+	return buffer;
+}
+
+shared_ptr<Buffer> DX12Backend::AllocateTransientDefaultStructuredBuffer(uint32_t NumElements, uint32_t ElementSize, const void* srcData)
+{
+	if (NumElements == 0 || ElementSize == 0 || !Device || !GlobalDHRing || !GlobalCmdList || !GlobalCmdList->CmdList)
+		return nullptr;
+
+	const UINT64 sizeInBytes64 = static_cast<UINT64>(NumElements) * static_cast<UINT64>(ElementSize);
+	if (sizeInBytes64 > static_cast<UINT64>(std::numeric_limits<uint32_t>::max()))
+		return nullptr;
+
+	// Device-local (VRAM) destination that the GBuffer shaders read from, so the
+	// per-vertex/per-pixel SRV loads hit VidL2/VRAM rather than the host-visible
+	// SysL2/sysmem aperture. Data is staged through the host-visible transient
+	// pool and copied once per frame.
+	auto buffer = std::shared_ptr<Buffer>(new Buffer);
+	buffer->Owner = this;
+	if (FAILED(Device->CreateCommittedResource(
+		&CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT),
+		D3D12_HEAP_FLAG_NONE,
+		&CD3DX12_RESOURCE_DESC::Buffer(sizeInBytes64),
+		D3D12_RESOURCE_STATE_COPY_DEST,
+		nullptr,
+		IID_PPV_ARGS(&buffer->resource))) || !buffer->resource)
+		return nullptr;
+
+	if (srcData)
+	{
+		TransientUploadStructuredAllocation staging = AllocateTransientUploadStructuredBytes(sizeInBytes64, ElementSize);
+		if (!staging.resource || !staging.cpu)
+			return nullptr;
+		memcpy(staging.cpu, srcData, static_cast<size_t>(sizeInBytes64));
+		GlobalCmdList->CmdList->CopyBufferRegion(
+			buffer->resource.Get(), 0,
+			staging.resource.Get(), staging.offset,
+			sizeInBytes64);
+	}
+	GlobalCmdList->CmdList->ResourceBarrier(1,
+		&CD3DX12_RESOURCE_BARRIER::Transition(
+			buffer->resource.Get(),
+			D3D12_RESOURCE_STATE_COPY_DEST,
+			D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
+
+	buffer->NumElements = NumElements;
+	buffer->ElementSize = ElementSize;
+	buffer->MappedPtr = nullptr;
+	buffer->MappedSizeInBytes = 0;
+	buffer->SuballocationOffsetBytes = 0;
+
+	D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+	srvDesc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+	srvDesc.Format = DXGI_FORMAT_UNKNOWN;
+	srvDesc.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_NONE;
+	srvDesc.Buffer.StructureByteStride = ElementSize;
+	srvDesc.Buffer.FirstElement = 0;
 	srvDesc.Buffer.NumElements = NumElements;
 	srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
 	GlobalDHRing->AllocDescriptor(buffer->CpuHandleSRV, buffer->GpuHandleSRV);
@@ -5200,7 +5296,9 @@ std::shared_ptr<RTAS> DX12Backend::CreateBLASForSkeletalMesh(Mesh* mesh)
 	}
 	{
 		D3D12_RESOURCE_DESC bufDesc = CD3DX12_RESOURCE_DESC::Buffer(info.ResultDataMaxSizeInBytes, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
-		owner->Device->CreateCommittedResource(&kDefaultHeapProps, D3D12_HEAP_FLAG_NONE, &bufDesc,
+		// Place the traversed BLAS in the big-page geometry pool (see CreateBLASForMesh).
+		const GeometryPlacement asPlacement = AllocateGeometryPlacement(info.ResultDataMaxSizeInBytes, D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT);
+		owner->Device->CreatePlacedResource(asPlacement.heap, asPlacement.offset, &bufDesc,
 			D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE, nullptr, IID_PPV_ARGS(&as->Result));
 		if (as->Result)
 			as->Result->SetName(L"Corona Skeletal BLAS Result");
@@ -5441,7 +5539,11 @@ std::shared_ptr<RTAS> DX12Backend::CreateBLASForMesh(Mesh* mesh)
 		OutputDebugStringA(ss.str().c_str());*/
 
 
-		owner->Device->CreateCommittedResource(&kDefaultHeapProps, D3D12_HEAP_FLAG_NONE, &bufDesc, D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE, nullptr, IID_PPV_ARGS(&as->Result));
+		// Place the traversed BLAS (BVH nodes) in the big-page geometry pool so
+		// ray traversal's scattered node reads thrash the TPC uTLB less. Scratch
+		// stays committed (build-time only, not traversed).
+		const GeometryPlacement asPlacement = AllocateGeometryPlacement(info.ResultDataMaxSizeInBytes, D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT);
+		owner->Device->CreatePlacedResource(asPlacement.heap, asPlacement.offset, &bufDesc, D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE, nullptr, IID_PPV_ARGS(&as->Result));
 		if (as->Result)
 			as->Result->SetName(L"Corona BLAS Result");
 	}

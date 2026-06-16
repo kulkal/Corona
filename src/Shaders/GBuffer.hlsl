@@ -56,7 +56,10 @@ struct PS_OUTPUT
     float  UnjitteredDepth : SV_Target6;
 };
 
-PS_OUTPUT PSMain(PSInput input)
+// Shared GBuffer shading: writes all 7 targets and returns the sampled albedo
+// alpha so the caller decides whether to alpha-test. Contains no `discard`, so
+// the opaque entry point below can be marked [earlydepthstencil].
+PS_OUTPUT GBufferShade(PSInput input, out float outAlbedoAlpha)
 {
     float2 prevPositionSS = (input.prevPosition.xy / input.prevPosition.w) * float2(0.5, -0.5) + 0.5;
     prevPositionSS *= RTSize.xy;
@@ -79,8 +82,7 @@ PS_OUTPUT PSMain(PSInput input)
     float  Roughness = SampleGBufferRoughness(material, input.uv);
     float  Metallic  = SampleGBufferMetallic(material, input.uv);
 
-    if (Albedo.w < 0.1)
-        discard;
+    outAlbedoAlpha = Albedo.w;
 
     float3 WorldNormal = CalcPerPixelNormal(material, input.uv, input.normal, input.tangent);
     float3 GeomNormal  = CommonSafeNormalize(input.normal, float3(0.0f, 1.0f, 0.0f));
@@ -122,4 +124,24 @@ PS_OUTPUT PSMain(PSInput input)
     output.SpecularAlbedo.w = 1.0f;
 
     return output;
+}
+
+// Alpha-tested geometry: late-Z so the discard can cut cutout texels.
+PS_OUTPUT PSMain(PSInput input)
+{
+    float albedoAlpha;
+    PS_OUTPUT output = GBufferShade(input, albedoAlpha);
+    if (albedoAlpha < 0.1)
+        discard;
+    return output;
+}
+
+// Fully-opaque geometry: force early depth test/write so occluded opaque pixels
+// are rejected before shading + pixel export, relieving the SM->PROP pixout
+// limiter. Only safe because this entry has no discard.
+[earlydepthstencil]
+PS_OUTPUT PSMainOpaque(PSInput input)
+{
+    float albedoAlpha;
+    return GBufferShade(input, albedoAlpha);
 }

@@ -979,6 +979,23 @@ void Corona::InitGBufferPass()
 			}
 			if (!GBufferBindlessIndirectGraphicsPipeline)
 				AppendCpuRuntimeTrace(L"[InitGBufferPass] failed to create Bindless Indirect GBuffer pipeline");
+
+			// Opaque variant: identical pipeline that runs PSMainOpaque
+			// (early-Z, no discard) so fully-opaque draws reject occluded
+			// pixels before shading. Optional — if it fails we fall back to
+			// the single alpha-test pipeline for all draws.
+			GraphicsPipelineDesc bindlessIndirectOpaqueDesc = bindlessIndirectDesc;
+			bindlessIndirectOpaqueDesc.PixelEntryPoint = "PSMainOpaque";
+			try
+			{
+				GBufferBindlessIndirectOpaqueGraphicsPipeline = renderBackend->CreateGraphicsPipeline(bindlessIndirectOpaqueDesc);
+			}
+			catch (const std::exception&)
+			{
+				AppendCpuRuntimeTrace(L"[InitGBufferPass] Bindless indirect opaque GBuffer pipeline create exception");
+			}
+			if (!GBufferBindlessIndirectOpaqueGraphicsPipeline)
+				AppendCpuRuntimeTrace(L"[InitGBufferPass] failed to create Bindless Indirect opaque GBuffer pipeline (opaque early-Z split disabled)");
 		}
 		else
 		{
@@ -3063,6 +3080,13 @@ bool Corona::DrawStaticObjectBindlessBatch(const std::vector<const SceneObject*>
 	geometryRecords.reserve(64);
 	drawRecords.reserve(objects.size());
 	indirectArgs.reserve(objects.size());
+	// Opaque/alpha-test split (early-Z): opaque draws batch here and run with
+	// PSMainOpaque ([earlydepthstencil]); alpha-tested draws stay on the
+	// discard PSO. Concatenated into indirectArgs as [opaque | alpha] below.
+	std::vector<DrawIndirectArguments> opaqueIndirectArgs;
+	std::vector<DrawIndirectArguments> alphaIndirectArgs;
+	opaqueIndirectArgs.reserve(objects.size());
+	alphaIndirectArgs.reserve(objects.size());
 
 	auto findOrAddMaterial = [&](const GBufferMaterialKey& key, uint32_t& outIndex) -> bool
 	{
@@ -3177,23 +3201,40 @@ bool Corona::DrawStaticObjectBindlessBatch(const std::vector<const SceneObject*>
 				}
 
 				drawRecords.push_back(drawRecord);
-				indirectArgs.push_back(arg);
+				// Route by opacity: opaque -> early-Z PSO batch, alpha-tested ->
+				// discard PSO batch. mesh->bTransparent matches the RT BVH opaque
+				// classification; conservative (any-alpha mesh -> discard path).
+				if (mesh->bTransparent)
+					alphaIndirectArgs.push_back(arg);
+				else
+					opaqueIndirectArgs.push_back(arg);
 			}
 		}
 	}
 
+	// Concatenate as [opaque | alpha]; opaque count is the DrawIndirect split.
+	const uint32_t gbufferOpaqueDrawCount = static_cast<uint32_t>(opaqueIndirectArgs.size());
+	indirectArgs.clear();
+	indirectArgs.reserve(opaqueIndirectArgs.size() + alphaIndirectArgs.size());
+	indirectArgs.insert(indirectArgs.end(), opaqueIndirectArgs.begin(), opaqueIndirectArgs.end());
+	indirectArgs.insert(indirectArgs.end(), alphaIndirectArgs.begin(), alphaIndirectArgs.end());
+
 	if (drawRecords.empty() || materialRecords.empty() || geometryRecords.empty() || indirectArgs.empty())
 		return true;
 
-	std::shared_ptr<Buffer> materialBuffer = renderBackend->AllocateTransientUploadStructuredBuffer(
+	// VRAM-resident (DEFAULT heap + staging copy) so the per-vertex/per-pixel
+	// bindless SRV reads hit VidL2/VRAM instead of the host-visible SysL2/sysmem
+	// aperture. indirectArgsBuffer stays host-visible (it is consumed as draw
+	// indirect args, not an SRV).
+	std::shared_ptr<Buffer> materialBuffer = renderBackend->AllocateTransientDefaultStructuredBuffer(
 		static_cast<uint32_t>(materialRecords.size()),
 		static_cast<uint32_t>(sizeof(GBufferMaterialRecord)),
 		materialRecords.data());
-	std::shared_ptr<Buffer> geometryBuffer = renderBackend->AllocateTransientUploadStructuredBuffer(
+	std::shared_ptr<Buffer> geometryBuffer = renderBackend->AllocateTransientDefaultStructuredBuffer(
 		static_cast<uint32_t>(geometryRecords.size()),
 		static_cast<uint32_t>(sizeof(GBufferGeometryRecord)),
 		geometryRecords.data());
-	std::shared_ptr<Buffer> drawRecordBuffer = renderBackend->AllocateTransientUploadStructuredBuffer(
+	std::shared_ptr<Buffer> drawRecordBuffer = renderBackend->AllocateTransientDefaultStructuredBuffer(
 		static_cast<uint32_t>(drawRecords.size()),
 		static_cast<uint32_t>(sizeof(GBufferDrawRecord)),
 		drawRecords.data());
@@ -3203,21 +3244,6 @@ bool Corona::DrawStaticObjectBindlessBatch(const std::vector<const SceneObject*>
 		indirectArgs.data());
 	if (!materialBuffer || !geometryBuffer || !drawRecordBuffer || !indirectArgsBuffer)
 		return failPrerequisite(L"transient upload allocation failed");
-
-	GraphicsPipelineHandle* pso = GBufferBindlessIndirectGraphicsPipeline.get();
-	renderBackend->BindGraphicsPipeline(pso);
-	if (!BindGBufferSceneResourceBindGroup(
-		renderBackend.get(),
-		pso,
-		objects.front()->ScenePtr.get(),
-		samplerWrap.get(),
-		materialBuffer.get(),
-		geometryBuffer.get(),
-		drawRecordBuffer.get(),
-		false))
-	{
-		return failPrerequisite(L"resource bind group creation failed");
-	}
 
 	GBufferConstantBuffer objCB = {};
 	objCB.ViewProjectionMatrix = glm::transpose(ViewProjMat);
@@ -3243,16 +3269,58 @@ bool Corona::DrawStaticObjectBindlessBatch(const std::vector<const SceneObject*>
 	objCB.bGBufferBindlessGeometry = 1u;
 
 	static bool bLoggedFirstStaticObjectBatch = false;
-	std::vector<GraphicsBindGroupEntry> drawBindEntries;
-	drawBindEntries.reserve(1);
-	drawBindEntries.push_back(GraphicsBindGroupEntry::Constant(0, &objCB, sizeof(objCB)));
-	if (!CreateAndBindGraphicsBindGroup(renderBackend.get(), pso, kGraphicsBindGroupSlot_Draw, drawBindEntries))
-		return failPrerequisite(L"draw bind group creation failed");
 
-	const bool bDrawSubmitted = renderBackend->DrawIndirect(
-		indirectArgsBuffer.get(),
-		0,
-		static_cast<uint32_t>(indirectArgs.size()));
+	// Bind a PSO with the shared scene resources + draw CB, then issue a
+	// DrawIndirect over a [byteOffset, +drawCount) slice of indirectArgs.
+	auto* gbufferScene = objects.front()->ScenePtr.get();
+	auto submitGBufferBatch = [&](GraphicsPipelineHandle* batchPso, uint64_t byteOffset, uint32_t drawCount) -> bool
+	{
+		if (!batchPso || drawCount == 0)
+			return true;
+		renderBackend->BindGraphicsPipeline(batchPso);
+		if (!BindGBufferSceneResourceBindGroup(
+			renderBackend.get(),
+			batchPso,
+			gbufferScene,
+			samplerWrap.get(),
+			materialBuffer.get(),
+			geometryBuffer.get(),
+			drawRecordBuffer.get(),
+			false))
+		{
+			return failPrerequisite(L"resource bind group creation failed");
+		}
+		std::vector<GraphicsBindGroupEntry> drawBindEntries;
+		drawBindEntries.reserve(1);
+		drawBindEntries.push_back(GraphicsBindGroupEntry::Constant(0, &objCB, sizeof(objCB)));
+		if (!CreateAndBindGraphicsBindGroup(renderBackend.get(), batchPso, kGraphicsBindGroupSlot_Draw, drawBindEntries))
+			return failPrerequisite(L"draw bind group creation failed");
+		return renderBackend->DrawIndirect(indirectArgsBuffer.get(), byteOffset, drawCount);
+	};
+
+	const uint32_t gbufferTotalDrawCount = static_cast<uint32_t>(indirectArgs.size());
+	const uint32_t gbufferAlphaDrawCount = gbufferTotalDrawCount - gbufferOpaqueDrawCount;
+	const uint64_t gbufferArgStride = static_cast<uint64_t>(sizeof(DrawIndirectArguments));
+
+	bool bDrawSubmitted = false;
+	GraphicsPipelineHandle* opaquePso = GBufferBindlessIndirectOpaqueGraphicsPipeline.get();
+	if (opaquePso)
+	{
+		// Opaque batch first (fills depth so early-Z rejects occluded opaque
+		// pixels), then the alpha-tested batch on the discard PSO.
+		const bool bOpaqueOk = submitGBufferBatch(opaquePso, 0, gbufferOpaqueDrawCount);
+		const bool bAlphaOk = submitGBufferBatch(
+			GBufferBindlessIndirectGraphicsPipeline.get(),
+			static_cast<uint64_t>(gbufferOpaqueDrawCount) * gbufferArgStride,
+			gbufferAlphaDrawCount);
+		bDrawSubmitted = bOpaqueOk && bAlphaOk;
+	}
+	else
+	{
+		// Opaque early-Z PSO unavailable: original single discard pass.
+		bDrawSubmitted = submitGBufferBatch(
+			GBufferBindlessIndirectGraphicsPipeline.get(), 0, gbufferTotalDrawCount);
+	}
 	if (!bDrawSubmitted)
 		return failPrerequisite(L"draw submission failed");
 

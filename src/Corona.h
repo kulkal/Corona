@@ -419,6 +419,11 @@ private:
 	std::shared_ptr<GraphicsPipelineHandle> GBufferGraphicsPipeline;
 	std::shared_ptr<GraphicsPipelineHandle> GBufferBindlessGeometryGraphicsPipeline;
 	std::shared_ptr<GraphicsPipelineHandle> GBufferBindlessIndirectGraphicsPipeline;
+	// Opaque sibling of the bindless-indirect GBuffer PSO: same layout but uses
+	// the PSMainOpaque pixel shader ([earlydepthstencil], no alpha-test discard)
+	// so occluded opaque pixels are rejected before shading/pixout. Alpha-tested
+	// draws stay on GBufferBindlessIndirectGraphicsPipeline (late-Z + discard).
+	std::shared_ptr<GraphicsPipelineHandle> GBufferBindlessIndirectOpaqueGraphicsPipeline;
 	std::shared_ptr<Buffer> GBufferDummyDrawRecordBuffer;
 	// Desktop static-mesh instancing path. Draws repeated map-spawned
 	// SceneObjects that share the same Scene/material override as
