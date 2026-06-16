@@ -83,9 +83,10 @@ struct RT_DIFFUSE_GI_RAY_PAYLOAD RayPayload
     float3 position RT_DIFFUSE_GI_PAYLOAD_RW;
     float3 color RT_DIFFUSE_GI_PAYLOAD_RW;
     float3 normal RT_DIFFUSE_GI_PAYLOAD_RW;
-    float spreadAngle RT_DIFFUSE_GI_PAYLOAD_RW;
-    float coneWidth RT_DIFFUSE_GI_PAYLOAD_RW;
     bool bHit RT_DIFFUSE_GI_PAYLOAD_RW;
+    // spreadAngle/coneWidth removed from payload: spreadAngle is uniform
+    // (ViewSpreadAngle) and coneWidth starts at 0, so chs derives the ray-cone
+    // width directly from ViewSpreadAngle. Keeps 2 dwords out of per-ray payload.
 };
 
 
@@ -309,8 +310,6 @@ void rayGen
     payload.position = 0.0f.xxx;
     payload.color = 0.0f.xxx;
     payload.normal = WorldNormal;
-    payload.coneWidth = 0;
-    payload.spreadAngle = ViewSpreadAngle; 
     payload.bHit = false;
     TraceDiffuseGIRay(ray, payload);
     if(payload.bHit == false)
@@ -422,7 +421,7 @@ void chs(inout RayPayload payload, in BuiltInTriangleIntersectionAttributes attr
 
     vertex.textureLODConstant += halfLog2NumTexPixels;
     float hitT = RayTCurrent();
-    float rayConeWidth = payload.spreadAngle * hitT + payload.coneWidth;
+    float rayConeWidth = ViewSpreadAngle * hitT;
 
     float NoV = 1;//dot(V, vertex.normal);
     float mipLevel = computeTextureLOD(NoV, rayConeWidth, vertex.textureLODConstant);

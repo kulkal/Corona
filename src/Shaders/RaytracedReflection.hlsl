@@ -93,7 +93,8 @@ struct RT_REFLECTION_RAY_PAYLOAD RayPayload
     float3 color RT_REFLECTION_PAYLOAD_RW;
     float3 normal RT_REFLECTION_PAYLOAD_RW;
     float spreadAngle RT_REFLECTION_PAYLOAD_RW;
-    float coneWidth RT_REFLECTION_PAYLOAD_RW;
+    // coneWidth removed: always 0 at init and never written during traversal,
+    // so chs derives rayConeWidth from spreadAngle*hitT alone.
     float hitDist RT_REFLECTION_PAYLOAD_RW;
     bool bHit RT_REFLECTION_PAYLOAD_RW;
 };
@@ -326,7 +327,6 @@ void WriteRRSpecularGuides(uint2 pixel, uint2 renderSize, bool primarySurfaceVal
         guidePayload.position = guideRay.Origin + guideRay.Direction * guideRay.TMax;
         guidePayload.color = 0.0f.xxx;
         guidePayload.normal = primaryGeomNormal;
-        guidePayload.coneWidth = 0.0f;
         guidePayload.spreadAngle = 0.0f;
         guidePayload.hitDist = ProjectionParams.w;
         guidePayload.bHit = false;
@@ -444,7 +444,6 @@ void rayGen
     payload.position = ray.Origin + ray.Direction * MAX_HIT_DIST;
     payload.color = 0.0f.xxx;
     payload.normal = WorldNormal;
-    payload.coneWidth = 0;
     payload.spreadAngle = max(SpecSanitizeFloat(ViewSpreadAngle, 0.0f), 0.0f);
     payload.hitDist = MAX_HIT_DIST;
     payload.bHit = false;
@@ -773,7 +772,7 @@ void chs(inout RayPayload payload, in BuiltInTriangleIntersectionAttributes attr
     float halfLog2NumTexPixels = 0.5 * log2(max(float(w) * float(h), 1.0f));
 
     vertex.textureLODConstant += halfLog2NumTexPixels;
-    float rayConeWidth = payload.spreadAngle * hitT + payload.coneWidth;
+    float rayConeWidth = payload.spreadAngle * hitT;
 
     float NoV = 1;//dot(V, vertex.normal);
     float mipLevel = computeTextureLOD(NoV, rayConeWidth, vertex.textureLODConstant);
