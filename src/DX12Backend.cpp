@@ -844,6 +844,7 @@ void DX12Backend::BeginFrame()
 	RetireCompletedPersistentStructuredBufferUploads();
 	RetireCompletedPersistentStructuredBufferFrees();
 	ResetTransientUploadStructuredFrame(CurrentFrameIndex);
+	RecycleTransientDefaultStructuredFrame(CurrentFrameIndex);
 
 	BeginNewGraphicsCommandList();
 	
@@ -2362,37 +2363,57 @@ shared_ptr<Buffer> DX12Backend::AllocateTransientDefaultStructuredBuffer(uint32_
 	if (sizeInBytes64 > static_cast<UINT64>(std::numeric_limits<uint32_t>::max()))
 		return nullptr;
 
-	// Device-local (VRAM) destination that the GBuffer shaders read from, so the
-	// per-vertex/per-pixel SRV loads hit VidL2/VRAM rather than the host-visible
-	// SysL2/sysmem aperture. Data is staged through the host-visible transient
-	// pool and copied once per frame.
-	auto buffer = std::shared_ptr<Buffer>(new Buffer);
-	buffer->Owner = this;
-	if (FAILED(Device->CreateCommittedResource(
-		&CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT),
-		D3D12_HEAP_FLAG_NONE,
-		&CD3DX12_RESOURCE_DESC::Buffer(sizeInBytes64),
-		D3D12_RESOURCE_STATE_COPY_DEST,
-		nullptr,
-		IID_PPV_ARGS(&buffer->resource))) || !buffer->resource)
-		return nullptr;
+	if (DefaultStructuredInUse.size() < NumFrame)
+		DefaultStructuredInUse.resize(NumFrame);
+	const uint32_t frameIndex = CurrentFrameIndex < NumFrame ? CurrentFrameIndex : 0u;
 
+	// Reuse a recyclable buffer (>= needed capacity) from the free pool;
+	// otherwise create one (rounded to a coarse bucket to maximise reuse).
+	DefaultStructuredPoolEntry entry;
+	bool found = false;
+	for (size_t i = 0; i < DefaultStructuredFreePool.size(); ++i)
+	{
+		if (DefaultStructuredFreePool[i].capacityBytes >= sizeInBytes64)
+		{
+			entry = std::move(DefaultStructuredFreePool[i]);
+			DefaultStructuredFreePool.erase(DefaultStructuredFreePool.begin() + i);
+			found = true;
+			break;
+		}
+	}
+	if (!found)
+	{
+		const UINT64 gran = 256ull * 1024ull;
+		const UINT64 capacity = ((sizeInBytes64 + gran - 1) / gran) * gran;
+		auto buf = std::shared_ptr<Buffer>(new Buffer);
+		buf->Owner = this;
+		if (FAILED(Device->CreateCommittedResource(
+			&CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT),
+			D3D12_HEAP_FLAG_NONE,
+			&CD3DX12_RESOURCE_DESC::Buffer(capacity),
+			D3D12_RESOURCE_STATE_COPY_DEST,
+			nullptr,
+			IID_PPV_ARGS(&buf->resource))) || !buf->resource)
+			return nullptr;
+		entry.buffer = buf;
+		entry.capacityBytes = capacity;
+		entry.state = D3D12_RESOURCE_STATE_COPY_DEST;
+	}
+
+	Buffer* buffer = entry.buffer.get();
+	const D3D12_RESOURCE_STATES srState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
 	if (srcData)
 	{
+		if (entry.state != D3D12_RESOURCE_STATE_COPY_DEST)
+			GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(buffer->resource.Get(), entry.state, D3D12_RESOURCE_STATE_COPY_DEST));
 		TransientUploadStructuredAllocation staging = AllocateTransientUploadStructuredBytes(sizeInBytes64, ElementSize);
 		if (!staging.resource || !staging.cpu)
 			return nullptr;
 		memcpy(staging.cpu, srcData, static_cast<size_t>(sizeInBytes64));
-		GlobalCmdList->CmdList->CopyBufferRegion(
-			buffer->resource.Get(), 0,
-			staging.resource.Get(), staging.offset,
-			sizeInBytes64);
+		GlobalCmdList->CmdList->CopyBufferRegion(buffer->resource.Get(), 0, staging.resource.Get(), staging.offset, sizeInBytes64);
+		GlobalCmdList->CmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(buffer->resource.Get(), D3D12_RESOURCE_STATE_COPY_DEST, srState));
+		entry.state = srState;
 	}
-	GlobalCmdList->CmdList->ResourceBarrier(1,
-		&CD3DX12_RESOURCE_BARRIER::Transition(
-			buffer->resource.Get(),
-			D3D12_RESOURCE_STATE_COPY_DEST,
-			D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
 
 	buffer->NumElements = NumElements;
 	buffer->ElementSize = ElementSize;
@@ -2412,11 +2433,18 @@ shared_ptr<Buffer> DX12Backend::AllocateTransientDefaultStructuredBuffer(uint32_
 	Device->CreateShaderResourceView(buffer->resource.Get(), &srvDesc, buffer->CpuHandleSRV);
 	buffer->Type = Buffer::STRUCTURED;
 
-	if (TransientUploadStructuredKeepAlive.size() < NumFrame)
-		TransientUploadStructuredKeepAlive.resize(NumFrame);
-	const uint32_t frameIndex = CurrentFrameIndex < NumFrame ? CurrentFrameIndex : 0u;
-	TransientUploadStructuredKeepAlive[frameIndex].push_back(buffer);
-	return buffer;
+	std::shared_ptr<Buffer> result = entry.buffer;
+	DefaultStructuredInUse[frameIndex].push_back(std::move(entry));
+	return result;
+}
+
+void DX12Backend::RecycleTransientDefaultStructuredFrame(uint32_t frameIndex)
+{
+	if (frameIndex >= DefaultStructuredInUse.size())
+		return;
+	for (DefaultStructuredPoolEntry& e : DefaultStructuredInUse[frameIndex])
+		DefaultStructuredFreePool.push_back(std::move(e));
+	DefaultStructuredInUse[frameIndex].clear();
 }
 
 shared_ptr<VertexBuffer> DX12Backend::CreateRWVertexBuffer(uint32_t Size, uint32_t Stride)

@@ -3222,10 +3222,10 @@ bool Corona::DrawStaticObjectBindlessBatch(const std::vector<const SceneObject*>
 	if (drawRecords.empty() || materialRecords.empty() || geometryRecords.empty() || indirectArgs.empty())
 		return true;
 
-	// VRAM-resident (DEFAULT heap + staging copy) so the per-vertex/per-pixel
-	// bindless SRV reads hit VidL2/VRAM instead of the host-visible SysL2/sysmem
-	// aperture. indirectArgsBuffer stays host-visible (it is consumed as draw
-	// indirect args, not an SRV).
+	// VRAM-resident records via the recycling DEFAULT pool: device-local reads
+	// (off the SysL2/sysmem aperture) without the per-frame CreateCommittedResource
+	// cost (buffers are recycled across frames). indirectArgsBuffer stays
+	// host-visible (consumed as draw indirect args, not an SRV).
 	std::shared_ptr<Buffer> materialBuffer = renderBackend->AllocateTransientDefaultStructuredBuffer(
 		static_cast<uint32_t>(materialRecords.size()),
 		static_cast<uint32_t>(sizeof(GBufferMaterialRecord)),

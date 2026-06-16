@@ -545,6 +545,21 @@ public:
 	void ResetTransientUploadStructuredFrame(uint32_t frameIndex);
 	TransientUploadStructuredAllocation AllocateTransientUploadStructuredBytes(UINT64 size, UINT64 alignment);
 
+	// Recycling pool of DEFAULT-heap (VRAM) structured buffers for per-frame
+	// record data. Avoids per-frame CreateCommittedResource (expensive CPU)
+	// while keeping reads off the SysL2/sysmem aperture. Each buffer is a
+	// distinct resource (clean per-resource barriers, no intra-frame
+	// serialization); returned to the free pool NumFrame frames after use.
+	struct DefaultStructuredPoolEntry
+	{
+		std::shared_ptr<Buffer> buffer;
+		UINT64 capacityBytes = 0;
+		D3D12_RESOURCE_STATES state = D3D12_RESOURCE_STATE_COPY_DEST;
+	};
+	std::vector<DefaultStructuredPoolEntry> DefaultStructuredFreePool;
+	std::vector<std::vector<DefaultStructuredPoolEntry>> DefaultStructuredInUse;
+	void RecycleTransientDefaultStructuredFrame(uint32_t frameIndex);
+
 	// Large DEFAULT-heap pool for mesh vertex/index buffers. Suballocating them
 	// (CreatePlacedResource) from a few big contiguous heaps lets the driver back
 	// them with large pages, so scattered RT/bindless geometry reads thrash the
