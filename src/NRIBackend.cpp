@@ -17,8 +17,11 @@
 #include <memory>
 #include <string>
 #include <fstream>
+#include <iomanip>
 #include <sstream>
+#include <set>
 #include <utility>
+#include <atomic>
 
 #include <wrl/client.h>
 #include <dxcapi.use.h>
@@ -40,6 +43,15 @@
 
 void AppendCpuRuntimeTrace(const std::wstring& line);
 
+static std::string NarrowAsciiForLog(const std::wstring& text)
+{
+	std::string out;
+	out.reserve(text.size());
+	for (wchar_t ch : text)
+		out.push_back((ch >= 0 && ch <= 0x7f) ? static_cast<char>(ch) : '?');
+	return out;
+}
+
 // ---------------------------------------------------------------------------
 // Shader compilation: HLSL -> DXIL via dxcompiler.dll. NRI consumes bytecode;
 // when NRI runs on D3D12 it wants DXIL (when on Vulkan it would want SPIR-V,
@@ -48,11 +60,223 @@ void AppendCpuRuntimeTrace(const std::wstring& line);
 // ---------------------------------------------------------------------------
 static dxc::DxcDllSupport gNriDxc;
 
+namespace NRIFileCache
+{
+	constexpr uint32_t kDxilCacheVersion = 1;
+	constexpr uint32_t kPipelineCacheVersion = 1;
+	constexpr uint64_t kFnvOffset = 1469598103934665603ull;
+	constexpr uint64_t kFnvPrime = 1099511628211ull;
+
+	uint64_t HashBytes(const void* data, size_t size, uint64_t seed)
+	{
+		const uint8_t* bytes = static_cast<const uint8_t*>(data);
+		uint64_t hash = seed;
+		for (size_t i = 0; i < size; ++i)
+		{
+			hash ^= bytes[i];
+			hash *= kFnvPrime;
+		}
+		return hash;
+	}
+
+	bool Enabled()
+	{
+		static const bool enabled = []
+		{
+			const wchar_t* disable = _wgetenv(L"CORONA_DISABLE_SHADER_CACHE");
+			return !(disable && disable[0] != L'\0' && disable[0] != L'0');
+		}();
+		return enabled;
+	}
+
+	std::filesystem::path CacheDir()
+	{
+		return RuntimePaths::RootDirectory() / L"bin" / L"shadercache";
+	}
+
+	std::filesystem::path CachePath(uint64_t key, const wchar_t* extension)
+	{
+		std::wstringstream name;
+		name << std::hex << std::setw(16) << std::setfill(L'0') << key << extension;
+		return CacheDir() / name.str();
+	}
+
+	bool ReadFile(const std::filesystem::path& path, std::vector<uint8_t>& out)
+	{
+		std::error_code ec;
+		const auto size = std::filesystem::file_size(path, ec);
+		if (ec || size == 0)
+			return false;
+		std::ifstream file(path, std::ios::binary);
+		if (!file.good())
+			return false;
+		out.resize(static_cast<size_t>(size));
+		file.read(reinterpret_cast<char*>(out.data()), static_cast<std::streamsize>(size));
+		return static_cast<size_t>(file.gcount()) == out.size();
+	}
+
+	void WriteFile(const std::filesystem::path& path, const void* data, size_t size)
+	{
+		if (!Enabled() || !data || size == 0)
+			return;
+		std::error_code ec;
+		std::filesystem::create_directories(CacheDir(), ec);
+		std::filesystem::path tmp = path;
+		tmp += L".tmp";
+		{
+			std::ofstream file(tmp, std::ios::binary | std::ios::trunc);
+			if (!file.good())
+				return;
+			file.write(static_cast<const char*>(data), static_cast<std::streamsize>(size));
+			if (!file.good())
+				return;
+		}
+		std::filesystem::rename(tmp, path, ec);
+		if (ec)
+			std::filesystem::remove(tmp, ec);
+	}
+
+	uint64_t CompilerStamp()
+	{
+		static const uint64_t stamp = []
+		{
+			std::error_code ec;
+			const std::filesystem::path compilerPath = RuntimePaths::RootDirectory() / L"bin" / L"dxcompiler.dll";
+			const auto size = std::filesystem::file_size(compilerPath, ec);
+			if (ec)
+				return 0ull;
+			const auto writeTime = std::filesystem::last_write_time(compilerPath, ec);
+			const uint64_t timeStamp = ec ? 0ull : static_cast<uint64_t>(writeTime.time_since_epoch().count());
+			return static_cast<uint64_t>(size) ^ (timeStamp * 0x9E3779B185EBCA87ull);
+		}();
+		return stamp;
+	}
+
+	uint64_t HashSourceTree(const std::filesystem::path& file, std::set<std::filesystem::path>& visited, uint64_t seed)
+	{
+		std::error_code ec;
+		const std::filesystem::path canonical = std::filesystem::weakly_canonical(file, ec);
+		const std::filesystem::path keyPath = ec ? file.lexically_normal() : canonical;
+		if (!visited.insert(keyPath).second)
+			return seed;
+
+		std::ifstream stream(file, std::ios::binary);
+		if (!stream.good())
+			return seed;
+
+		std::stringstream buffer;
+		buffer << stream.rdbuf();
+		const std::string content = buffer.str();
+		uint64_t hash = HashBytes(content.data(), content.size(), seed);
+
+		size_t pos = 0;
+		while ((pos = content.find("#include", pos)) != std::string::npos)
+		{
+			pos += 8;
+			const size_t newline = content.find('\n', pos);
+			const size_t open = content.find('"', pos);
+			if (open == std::string::npos)
+				break;
+			if (newline != std::string::npos && open > newline)
+			{
+				pos = newline + 1;
+				continue;
+			}
+			const size_t close = content.find('"', open + 1);
+			if (close == std::string::npos)
+				break;
+			const std::string relative = content.substr(open + 1, close - (open + 1));
+			pos = close + 1;
+			if (!relative.empty())
+				hash = HashSourceTree(file.parent_path() / std::filesystem::path(relative), visited, hash);
+		}
+		return hash;
+	}
+
+	uint64_t DxilKey(const void* source, size_t sourceSize, const wchar_t* sourceName, const wchar_t* entryPoint, const wchar_t* target)
+	{
+		uint64_t key = kFnvOffset;
+		key = HashBytes(&kDxilCacheVersion, sizeof(kDxilCacheVersion), key);
+		const uint64_t compilerStamp = CompilerStamp();
+		key = HashBytes(&compilerStamp, sizeof(compilerStamp), key);
+		if (source && sourceSize > 0)
+			key = HashBytes(source, sourceSize, key);
+		if (sourceName && sourceName[0] != L'\0')
+		{
+			const size_t sourceNameBytes = wcslen(sourceName) * sizeof(wchar_t);
+			key = HashBytes(sourceName, sourceNameBytes, key);
+			std::error_code ec;
+			const std::filesystem::path sourcePath(sourceName);
+			if (std::filesystem::exists(sourcePath, ec))
+			{
+				std::set<std::filesystem::path> visited;
+				key = HashSourceTree(sourcePath, visited, key);
+			}
+		}
+		const uint8_t hasEntryPoint = (entryPoint && entryPoint[0] != L'\0') ? 1u : 0u;
+		key = HashBytes(&hasEntryPoint, sizeof(hasEntryPoint), key);
+		if (hasEntryPoint)
+			key = HashBytes(entryPoint, wcslen(entryPoint) * sizeof(wchar_t), key);
+		if (target)
+			key = HashBytes(target, wcslen(target) * sizeof(wchar_t), key);
+#if defined(_DEBUG)
+		const char config = 'D';
+#else
+		const char config = 'R';
+#endif
+		key = HashBytes(&config, sizeof(config), key);
+		return key;
+	}
+
+	size_t BoundedCStringLength(const char* value, size_t maxLength);
+
+	uint64_t PipelineCacheKey(const nri::DeviceDesc& desc)
+	{
+		uint64_t key = kFnvOffset;
+		key = HashBytes(&kPipelineCacheVersion, sizeof(kPipelineCacheVersion), key);
+		key = HashBytes(desc.adapterDesc.name, BoundedCStringLength(desc.adapterDesc.name, sizeof(desc.adapterDesc.name)), key);
+		key = HashBytes(&desc.adapterDesc.uid, sizeof(desc.adapterDesc.uid), key);
+		key = HashBytes(&desc.adapterDesc.deviceId, sizeof(desc.adapterDesc.deviceId), key);
+		key = HashBytes(&desc.adapterDesc.driverVersion, sizeof(desc.adapterDesc.driverVersion), key);
+		key = HashBytes(&desc.graphicsAPI, sizeof(desc.graphicsAPI), key);
+		key = HashBytes(&desc.shaderModel, sizeof(desc.shaderModel), key);
+		return key;
+	}
+
+	std::vector<uint8_t> LoadDxil(uint64_t key)
+	{
+		std::vector<uint8_t> bytes;
+		if (Enabled())
+			ReadFile(CachePath(key, L".nri.dxil"), bytes);
+		return bytes;
+	}
+
+	void StoreDxil(uint64_t key, const std::vector<uint8_t>& bytes)
+	{
+		if (!bytes.empty())
+			WriteFile(CachePath(key, L".nri.dxil"), bytes.data(), bytes.size());
+	}
+
+	size_t BoundedCStringLength(const char* value, size_t maxLength)
+	{
+		size_t length = 0;
+		while (length < maxLength && value[length] != '\0')
+			++length;
+		return length;
+	}
+}
+
 static std::vector<uint8_t> CompileHLSLToDXIL(
 	const void* source, size_t sourceSize, const wchar_t* sourceName,
 	const wchar_t* entryPoint, const wchar_t* target, std::string& outError)
 {
 	using Microsoft::WRL::ComPtr;
+	outError.clear();
+	const uint64_t cacheKey = NRIFileCache::DxilKey(source, sourceSize, sourceName, entryPoint, target);
+	std::vector<uint8_t> cachedDxil = NRIFileCache::LoadDxil(cacheKey);
+	if (!cachedDxil.empty())
+		return cachedDxil;
+
 	if (FAILED(gNriDxc.Initialize()))
 	{
 		outError = "DXC: failed to load dxcompiler.dll";
@@ -117,7 +341,9 @@ static std::vector<uint8_t> CompileHLSLToDXIL(
 		return {};
 	}
 	const uint8_t* p = (const uint8_t*)blob->GetBufferPointer();
-	return std::vector<uint8_t>(p, p + blob->GetBufferSize());
+	std::vector<uint8_t> dxil(p, p + blob->GetBufferSize());
+	NRIFileCache::StoreDxil(cacheKey, dxil);
+	return dxil;
 }
 
 // ETextureFormat / ETextureUsageFlags -> NRI.
@@ -273,12 +499,25 @@ static nri::AccessStage ToAccessStage(EResourceState s)
 	case EResourceState::CopySource:      a.access = nri::AccessBits::COPY_SOURCE;             a.stages = nri::StageBits::COPY; break;
 	case EResourceState::CopyDest:        a.access = nri::AccessBits::COPY_DESTINATION;        a.stages = nri::StageBits::COPY; break;
 	case EResourceState::VertexBuffer:    a.access = nri::AccessBits::VERTEX_BUFFER;           a.stages = nri::StageBits::ALL;  break;
+	case EResourceState::IndirectArgument:a.access = nri::AccessBits::ARGUMENT_BUFFER;         a.stages = nri::StageBits::INDIRECT; break;
 	case EResourceState::RenderTarget:    a.access = nri::AccessBits::COLOR_ATTACHMENT;        a.stages = nri::StageBits::ALL;  break;
 	case EResourceState::DepthWrite:      a.access = nri::AccessBits::DEPTH_STENCIL_ATTACHMENT_WRITE; a.stages = nri::StageBits::ALL; break;
 	case EResourceState::Present:         a.access = nri::AccessBits::NONE;                    a.stages = nri::StageBits::ALL;  break;
 	default:                              a.access = nri::AccessBits::NONE;                    a.stages = nri::StageBits::ALL;  break;
 	}
 	return a;
+}
+
+static nri::StageBits ToNRIGraphicsStageBits(RHIShaderStageMask stages)
+{
+	nri::StageBits out = nri::StageBits::NONE;
+	if (stages & ToRHIShaderStageMask(RHIShaderStage::Vertex))
+		out = out | nri::StageBits::VERTEX_SHADER;
+	if (stages & ToRHIShaderStageMask(RHIShaderStage::Pixel))
+		out = out | nri::StageBits::FRAGMENT_SHADER;
+	if (out == nri::StageBits::NONE)
+		out = nri::StageBits::VERTEX_SHADER | nri::StageBits::FRAGMENT_SHADER;
+	return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -299,6 +538,70 @@ struct NRIBackend::Impl
 	nri::CommandBuffer* ActiveCmd = nullptr; // command buffer currently open for recording (set by the frame lifecycle / smokes)
 	nri::Fence* Fence = nullptr;
 	uint64_t FenceValue = 0;
+	nri::PipelineCache* PipelineCache = nullptr;
+	std::filesystem::path PipelineCachePath;
+
+	void InitializePipelineCache()
+	{
+		if (!Device || !Core.CreatePipelineCache || !Core.GetPipelineCacheData || !Core.DestroyPipelineCache || !NRIFileCache::Enabled())
+			return;
+
+		const nri::DeviceDesc& deviceDesc = Core.GetDeviceDesc(*Device);
+		if (!deviceDesc.features.pipelineCache)
+		{
+			AppendCpuRuntimeTrace(L"[NRICache] pipeline cache unsupported by device");
+			return;
+		}
+
+		PipelineCachePath = NRIFileCache::CachePath(NRIFileCache::PipelineCacheKey(deviceDesc), L".nri.pso");
+		std::vector<uint8_t> initialData;
+		NRIFileCache::ReadFile(PipelineCachePath, initialData);
+
+		nri::PipelineCacheDesc cacheDesc = {};
+		cacheDesc.data = initialData.empty() ? nullptr : initialData.data();
+		cacheDesc.size = initialData.size();
+		nri::Result result = Core.CreatePipelineCache(*Device, cacheDesc, PipelineCache);
+		if (result != nri::Result::SUCCESS && !initialData.empty())
+		{
+			AppendCpuRuntimeTrace(L"[NRICache] stale pipeline cache ignored result=" + std::to_wstring(static_cast<int>(result)));
+			initialData.clear();
+			cacheDesc.data = nullptr;
+			cacheDesc.size = 0;
+			result = Core.CreatePipelineCache(*Device, cacheDesc, PipelineCache);
+		}
+		if (result == nri::Result::SUCCESS && PipelineCache)
+		{
+			AppendCpuRuntimeTrace(L"[NRICache] pipeline cache ready initialBytes=" + std::to_wstring(initialData.size()));
+		}
+		else
+		{
+			PipelineCache = nullptr;
+			AppendCpuRuntimeTrace(L"[NRICache] CreatePipelineCache failed result=" + std::to_wstring(static_cast<int>(result)));
+		}
+	}
+
+	void SaveAndDestroyPipelineCache()
+	{
+		if (!PipelineCache || !Core.GetPipelineCacheData || !Core.DestroyPipelineCache)
+			return;
+		if (NRIFileCache::Enabled())
+		{
+			uint64_t size = 0;
+			nri::Result result = Core.GetPipelineCacheData(*PipelineCache, nullptr, size);
+			if (result == nri::Result::SUCCESS && size > 0)
+			{
+				std::vector<uint8_t> bytes(static_cast<size_t>(size));
+				result = Core.GetPipelineCacheData(*PipelineCache, bytes.data(), size);
+				if (result == nri::Result::SUCCESS && size > 0)
+				{
+					NRIFileCache::WriteFile(PipelineCachePath, bytes.data(), static_cast<size_t>(size));
+					AppendCpuRuntimeTrace(L"[NRICache] pipeline cache saved bytes=" + std::to_wstring(size));
+				}
+			}
+		}
+		Core.DestroyPipelineCache(PipelineCache);
+		PipelineCache = nullptr;
+	}
 
 	// Swap chain
 	nri::SwapChainInterface SwapChainI{};
@@ -314,7 +617,26 @@ struct NRIBackend::Impl
 	nri::Format SwapFormat = nri::Format::RGBA8_UNORM;
 	nri::Fence* CurAcquire = nullptr;
 	bool FrameHasBackbuffer = false;
+	bool DeviceLost = false;
 	nri::Layout BBLayout = nri::Layout::UNDEFINED; // current backbuffer layout this frame
+	static constexpr uint32_t kQueuedFrameNum = 2;
+	struct FrameContext
+	{
+		nri::CommandAllocator* allocator = nullptr;
+		nri::CommandBuffer* commandBuffer = nullptr;
+		uint64_t fenceValue = 0;
+		std::vector<std::shared_ptr<Buffer>> transientBuffers;
+	};
+	std::vector<FrameContext> FrameContexts;
+	uint32_t ActiveFrameContextIndex = 0;
+	struct ImmediateContext
+	{
+		nri::CommandAllocator* allocator = nullptr;
+		nri::CommandBuffer* commandBuffer = nullptr;
+		uint64_t fenceValue = 0;
+	};
+	std::vector<ImmediateContext> ImmediateContexts;
+	uint64_t ImmediateSubmitIndex = 0;
 
 	// ImGui (NRIImgui + Streamer)
 	nri::StreamerInterface StreamerI{};
@@ -523,6 +845,7 @@ struct NRIBackend::Impl
 		void* mapped = nullptr; // non-null for persistently-mapped HOST_UPLOAD buffers
 		BufKey key{};           // spec for the reuse pool
 	};
+	std::shared_ptr<std::atomic_bool> Alive = std::make_shared<std::atomic_bool>(true);
 	std::unordered_map<Buffer*, BufferAlloc> Buffers;
 
 	// Buffer reuse pool. NRI buffers were never freed when their wrapper died (no
@@ -565,18 +888,127 @@ struct NRIBackend::Impl
 	uint64_t StatUDR = 0;     // UpdateDescriptorRanges calls
 	uint64_t StatMap = 0;     // MapBuffer calls
 	uint32_t StatFrames = 0;
-	// Transient per-frame upload buffers (AllocateTransientUploadStructuredBuffer).
-	// Kept alive until the next BeginFrame; EndFrame waits synchronously so the
-	// previous frame's transients are safe to free then.
+	// Transient upload buffers are owned by the frame context that recorded them.
+	// They are released only after that context's fence has completed.
 	std::vector<std::shared_ptr<Buffer>> TransientBuffers;
-	void FreeTransientBuffers()
+	void FreeTransientBuffers(std::vector<std::shared_ptr<Buffer>>& transientBuffers)
 	{
-		for (auto& w : TransientBuffers)
+		for (auto& w : transientBuffers)
 		{
 			auto it = Buffers.find(w.get());
 			if (it != Buffers.end()) { FreeBuffer(it->second.buffer, it->second.memory); Buffers.erase(it); }
 		}
-		TransientBuffers.clear();
+		transientBuffers.clear();
+	}
+	void FreeTransientBuffers()
+	{
+		FreeTransientBuffers(TransientBuffers);
+	}
+	uint32_t FrameRingCount() const
+	{
+		return FrameContexts.empty() ? 1u : static_cast<uint32_t>(FrameContexts.size());
+	}
+	FrameContext* ActiveFrameContext()
+	{
+		return ActiveFrameContextIndex < FrameContexts.size() ? &FrameContexts[ActiveFrameContextIndex] : nullptr;
+	}
+	const FrameContext* ActiveFrameContext() const
+	{
+		return ActiveFrameContextIndex < FrameContexts.size() ? &FrameContexts[ActiveFrameContextIndex] : nullptr;
+	}
+	bool EnsureFrameContexts(uint32_t count)
+	{
+		if (!Device || !GraphicsQueue)
+			return false;
+		count = std::max(1u, count);
+		if (FrameContexts.size() >= count)
+			return true;
+		const size_t oldCount = FrameContexts.size();
+		FrameContexts.resize(count);
+		for (size_t i = oldCount; i < FrameContexts.size(); ++i)
+		{
+			FrameContext& frame = FrameContexts[i];
+			if (Core.CreateCommandAllocator(*GraphicsQueue, frame.allocator) != nri::Result::SUCCESS || !frame.allocator ||
+				Core.CreateCommandBuffer(*frame.allocator, frame.commandBuffer) != nri::Result::SUCCESS || !frame.commandBuffer)
+			{
+				return false;
+			}
+		}
+		return true;
+	}
+	void WaitForFrameContext(FrameContext& frame)
+	{
+		if (FrameFence && frame.fenceValue != 0)
+			Core.Wait(*FrameFence, frame.fenceValue);
+	}
+	void WaitForFrameContexts()
+	{
+		for (FrameContext& frame : FrameContexts)
+			WaitForFrameContext(frame);
+	}
+	bool EnsureImmediateContexts(uint32_t count)
+	{
+		if (!Device || !GraphicsQueue)
+			return false;
+		count = std::max(1u, count);
+		if (ImmediateContexts.size() >= count)
+			return true;
+		const size_t oldCount = ImmediateContexts.size();
+		ImmediateContexts.resize(count);
+		for (size_t i = oldCount; i < ImmediateContexts.size(); ++i)
+		{
+			ImmediateContext& ctx = ImmediateContexts[i];
+			if (Core.CreateCommandAllocator(*GraphicsQueue, ctx.allocator) != nri::Result::SUCCESS || !ctx.allocator ||
+				Core.CreateCommandBuffer(*ctx.allocator, ctx.commandBuffer) != nri::Result::SUCCESS || !ctx.commandBuffer)
+			{
+				return false;
+			}
+		}
+		return true;
+	}
+	void WaitForImmediateContext(ImmediateContext& ctx)
+	{
+		if (Fence && ctx.fenceValue != 0)
+			Core.Wait(*Fence, ctx.fenceValue);
+	}
+	void WaitForImmediateContexts()
+	{
+		for (ImmediateContext& ctx : ImmediateContexts)
+			WaitForImmediateContext(ctx);
+	}
+	ImmediateContext* AcquireImmediateContext()
+	{
+		if (!EnsureImmediateContexts(kQueuedFrameNum + 1u) || ImmediateContexts.empty())
+			return nullptr;
+		ImmediateContext& ctx = ImmediateContexts[ImmediateSubmitIndex % ImmediateContexts.size()];
+		++ImmediateSubmitIndex;
+		WaitForImmediateContext(ctx);
+		return &ctx;
+	}
+	void DestroyImmediateContexts()
+	{
+		WaitForImmediateContexts();
+		for (ImmediateContext& ctx : ImmediateContexts)
+		{
+			if (ctx.commandBuffer) { Core.DestroyCommandBuffer(ctx.commandBuffer); ctx.commandBuffer = nullptr; }
+			if (ctx.allocator) { Core.DestroyCommandAllocator(ctx.allocator); ctx.allocator = nullptr; }
+			ctx.fenceValue = 0;
+		}
+		ImmediateContexts.clear();
+		ImmediateSubmitIndex = 0;
+	}
+	void DestroyFrameContexts()
+	{
+		WaitForFrameContexts();
+		for (FrameContext& frame : FrameContexts)
+		{
+			FreeTransientBuffers(frame.transientBuffers);
+			if (frame.commandBuffer) { Core.DestroyCommandBuffer(frame.commandBuffer); frame.commandBuffer = nullptr; }
+			if (frame.allocator) { Core.DestroyCommandAllocator(frame.allocator); frame.allocator = nullptr; }
+			frame.fenceValue = 0;
+		}
+		FrameContexts.clear();
+		ActiveFrameContextIndex = 0;
 	}
 
 	struct TextureAlloc
@@ -780,6 +1212,7 @@ struct NRIBackend::Impl
 			cpd.shader.bytecode = dxil.data();
 			cpd.shader.size = dxil.size();
 			cpd.shader.entryPointName = "main";
+			cpd.cache = PipelineCache;
 			if (Core.CreateComputePipeline(*Device, cpd, pipeline) != Result::SUCCESS)
 				{ result = "FAIL(pipeline)"; break; }
 
@@ -932,22 +1365,31 @@ struct NRIBackend::Impl
 	}
 
 	template <typename RecordFn>
-	bool SubmitImmediate(const char* label, RecordFn record)
+	bool SubmitImmediate(const char* label, RecordFn record, bool waitForCompletion = true)
 	{
-		if (!Device || !GraphicsQueue || !CmdAllocator || !CmdBuffer || !Fence || ActiveCmd)
+		if (!Device || !GraphicsQueue || !Fence || ActiveCmd)
 		{
 			if (label)
 				OutputDebugStringA(label);
 			return false;
 		}
 
-		Core.ResetCommandAllocator(*CmdAllocator);
-		if (Core.BeginCommandBuffer(*CmdBuffer, nullptr) != nri::Result::SUCCESS)
+		ImmediateContext* immediateContext = AcquireImmediateContext();
+		nri::CommandAllocator* allocator = immediateContext ? immediateContext->allocator : CmdAllocator;
+		nri::CommandBuffer* commandBuffer = immediateContext ? immediateContext->commandBuffer : CmdBuffer;
+		if (!allocator || !commandBuffer)
 			return false;
 
-		record(*CmdBuffer);
+		if (!immediateContext && FenceValue != 0)
+			Core.Wait(*Fence, FenceValue);
 
-		if (Core.EndCommandBuffer(*CmdBuffer) != nri::Result::SUCCESS)
+		Core.ResetCommandAllocator(*allocator);
+		if (Core.BeginCommandBuffer(*commandBuffer, nullptr) != nri::Result::SUCCESS)
+			return false;
+
+		record(*commandBuffer);
+
+		if (Core.EndCommandBuffer(*commandBuffer) != nri::Result::SUCCESS)
 			return false;
 
 		nri::FenceSubmitDesc signalFence = {};
@@ -955,7 +1397,7 @@ struct NRIBackend::Impl
 		signalFence.value = ++FenceValue;
 		signalFence.stages = nri::StageBits::ALL;
 
-		nri::CommandBuffer* commandBuffers[1] = { CmdBuffer };
+		nri::CommandBuffer* commandBuffers[1] = { commandBuffer };
 		nri::QueueSubmitDesc submit = {};
 		submit.commandBuffers = commandBuffers;
 		submit.commandBufferNum = 1;
@@ -964,7 +1406,13 @@ struct NRIBackend::Impl
 
 		if (Core.QueueSubmit(*GraphicsQueue, submit) != nri::Result::SUCCESS)
 			return false;
+		if (immediateContext)
+			immediateContext->fenceValue = signalFence.value;
+		if (!waitForCompletion)
+			return true;
 		Core.Wait(*Fence, FenceValue);
+		if (immediateContext)
+			immediateContext->fenceValue = 0;
 		return Core.GetFenceValue(*Fence) >= FenceValue;
 	}
 
@@ -1313,6 +1761,7 @@ struct NRIBackend::Impl
 		rtd.recursionMaxDepth = 1;
 		rtd.rayPayloadMaxSize = 4;
 		rtd.rayHitAttributeMaxSize = 8;
+		rtd.cache = PipelineCache;
 		if (RT.CreateRayTracingPipeline(*Device, rtd, pipeline) != nri::Result::SUCCESS || !pipeline)
 		{
 			Cleanup();
@@ -1378,6 +1827,7 @@ struct NRIRTAS : RTAS
 {
 	NRIBackend::Impl* Owner = nullptr;
 	nri::AccelerationStructure* AccelerationStructure = nullptr;
+	uint64_t AccelerationStructureHandle = 0;
 	nri::Descriptor* Descriptor = nullptr;
 	nri::BottomLevelGeometryDesc BottomGeometry = {};
 	nri::Buffer* ScratchBuffer = nullptr;
@@ -1508,7 +1958,9 @@ static bool WriteNRITLASInstances(NRIRTAS* as, const std::vector<RTInstanceDesc>
 		// still carries the scene instance index used by InstanceProperty.
 		dst[i].shaderBindingTableLocalOffset = 0;
 		dst[i].flags = nri::TopLevelInstanceBits::NONE;
-		dst[i].accelerationStructureHandle = as->Owner->RT.GetAccelerationStructureHandle(*blas->AccelerationStructure);
+		if (blas->AccelerationStructureHandle == 0)
+			blas->AccelerationStructureHandle = as->Owner->RT.GetAccelerationStructureHandle(*blas->AccelerationStructure);
+		dst[i].accelerationStructureHandle = blas->AccelerationStructureHandle;
 		if (dst[i].accelerationStructureHandle == 0)
 			return false;
 	}
@@ -1555,6 +2007,12 @@ static std::shared_ptr<RTAS> CreateNRIBLASForMeshInternal(NRIBackend::Impl* m, M
 		!as->AccelerationStructure)
 	{
 		AppendCpuRuntimeTrace(L"[NRIRTAS] CreateCommittedAccelerationStructure BLAS failed");
+		return nullptr;
+	}
+	as->AccelerationStructureHandle = m->RT.GetAccelerationStructureHandle(*as->AccelerationStructure);
+	if (as->AccelerationStructureHandle == 0)
+	{
+		AppendCpuRuntimeTrace(L"[NRIRTAS] BLAS handle unavailable");
 		return nullptr;
 	}
 
@@ -1608,15 +2066,26 @@ static void CollectPendingNRIBLASBuilds(
 class NRIComputePSO : public ComputePipelineStateObject
 {
 public:
-	explicit NRIComputePSO(NRIBackend::Impl* impl) : m(impl) {}
+	explicit NRIComputePSO(NRIBackend::Impl* impl) : m(impl)
+	{
+		if (m)
+			Alive = m->Alive;
+	}
 	~NRIComputePSO() override
 	{
-		if (!m || !m->Device) return;
+		if (!BackendAlive()) return;
 		if (Pipeline) m->Core.DestroyPipeline(Pipeline);
 		if (Layout) m->Core.DestroyPipelineLayout(Layout);
 		if (Pool) m->Core.DestroyDescriptorPool(Pool);
 		for (auto& b : Bindings) if (b.ownsDesc && b.desc) m->Core.DestroyDescriptor(b.desc);
-		for (auto& kv : CbvBuffers) m->FreeBuffer(kv.second.buffer, kv.second.memory);
+		for (auto& kv : CbvBuffers)
+		{
+			for (CbvBuf& cb : kv.second)
+			{
+				if (cb.view) m->Core.DestroyDescriptor(cb.view);
+				m->FreeBuffer(cb.buffer, cb.memory);
+			}
+		}
 	}
 
 	enum class RegClass { SRV, UAV, CBV, Sampler };
@@ -1673,7 +2142,11 @@ public:
 		const uint32_t size = (sit != CbvSizeByName.end()) ? sit->second : 0u;
 		if (size == 0) return;
 		const uint32_t alignedSize = (size + 255u) & ~255u; // D3D12 CB alignment
-		CbvBuf& cb = CbvBuffers[name];
+		std::vector<CbvBuf>& cbRing = CbvBuffers[name];
+		if (cbRing.size() < NRIBackend::Impl::kQueuedFrameNum)
+			cbRing.resize(NRIBackend::Impl::kQueuedFrameNum);
+		const uint32_t frameSlot = m->ActiveFrameContextIndex % std::max(1u, m->FrameRingCount());
+		CbvBuf& cb = cbRing[frameSlot];
 		if (!cb.buffer)
 		{
 			if (!m->CreateBoundBuffer(alignedSize, 0, nri::BufferUsageBits::CONSTANT_BUFFER, nri::MemoryLocation::HOST_UPLOAD, cb.buffer, cb.memory))
@@ -1696,15 +2169,17 @@ public:
 
 		for (Binding& b : Bindings)
 			RefreshDescriptor(b);
+		const uint32_t frameSlot = m->ActiveFrameContextIndex % std::max(1u, m->FrameRingCount());
+		std::vector<nri::DescriptorSet*>* setsForFrame = frameSlot < Sets.size() ? &Sets[frameSlot] : nullptr;
 
 		// Write descriptors into the sets.
 		for (Binding& b : Bindings)
 		{
-			if (b.kind == ResKind::None || !b.desc || b.setIndex >= Sets.size() || !Sets[b.setIndex])
+			if (b.kind == ResKind::None || !b.desc || !setsForFrame || b.setIndex >= setsForFrame->size() || !(*setsForFrame)[b.setIndex])
 				continue;
 			nri::UpdateDescriptorRangeDesc upd = {};
 			b.descSingle[0] = b.desc;
-			upd.descriptorSet = Sets[b.setIndex];
+			upd.descriptorSet = (*setsForFrame)[b.setIndex];
 			upd.rangeIndex = b.rangeIndex;
 			upd.baseDescriptor = 0;
 			upd.descriptors = b.descSingle;
@@ -1714,12 +2189,13 @@ public:
 
 		if (Pool) m->Core.CmdSetDescriptorPool(*m->ActiveCmd, *Pool);
 		m->Core.CmdSetPipelineLayout(*m->ActiveCmd, nri::BindPoint::COMPUTE, *Layout);
-		for (uint32_t s = 0; s < Sets.size(); ++s)
+		const uint32_t setCount = setsForFrame ? static_cast<uint32_t>(setsForFrame->size()) : 0u;
+		for (uint32_t s = 0; s < setCount; ++s)
 		{
-			if (!Sets[s]) continue;
+			if (!(*setsForFrame)[s]) continue;
 			nri::SetDescriptorSetDesc sd = {};
 			sd.setIndex = s;
-			sd.descriptorSet = Sets[s];
+			sd.descriptorSet = (*setsForFrame)[s];
 			sd.bindPoint = nri::BindPoint::COMPUTE;
 			m->Core.CmdSetDescriptorSet(*m->ActiveCmd, sd);
 		}
@@ -1807,16 +2283,18 @@ private:
 
 		if (!sets.empty())
 		{
+			const uint32_t frameSlots = NRIBackend::Impl::kQueuedFrameNum;
 			nri::DescriptorPoolDesc pd = {};
-			pd.descriptorSetMaxNum = (uint32_t)sets.size();
-			pd.textureMaxNum = texN; pd.storageTextureMaxNum = storTexN;
-			pd.structuredBufferMaxNum = sbufN; pd.storageStructuredBufferMaxNum = storSbufN;
-			pd.constantBufferMaxNum = cbvN; pd.samplerMaxNum = sampN;
+			pd.descriptorSetMaxNum = static_cast<uint32_t>(sets.size()) * frameSlots;
+			pd.textureMaxNum = texN * frameSlots; pd.storageTextureMaxNum = storTexN * frameSlots;
+			pd.structuredBufferMaxNum = sbufN * frameSlots; pd.storageStructuredBufferMaxNum = storSbufN * frameSlots;
+			pd.constantBufferMaxNum = cbvN * frameSlots; pd.samplerMaxNum = sampN * frameSlots;
 			if (m->Core.CreateDescriptorPool(*m->Device, pd, Pool) != nri::Result::SUCCESS)
 				return false;
-			Sets.resize(sets.size(), nullptr);
-			for (uint32_t s = 0; s < sets.size(); ++s)
-				m->Core.AllocateDescriptorSets(*Pool, *Layout, s, &Sets[s], 1, 0);
+			Sets.assign(frameSlots, std::vector<nri::DescriptorSet*>(sets.size(), nullptr));
+			for (uint32_t frameSlot = 0; frameSlot < frameSlots; ++frameSlot)
+				for (uint32_t s = 0; s < sets.size(); ++s)
+					m->Core.AllocateDescriptorSets(*Pool, *Layout, s, &Sets[frameSlot][s], 1, 0);
 		}
 
 		nri::ComputePipelineDesc cpd = {};
@@ -1825,6 +2303,7 @@ private:
 		cpd.shader.bytecode = Dxil.data();
 		cpd.shader.size = Dxil.size();
 		cpd.shader.entryPointName = EntryPoint.c_str();
+		cpd.cache = m->PipelineCache;
 		return m->Core.CreateComputePipeline(*m->Device, cpd, Pipeline) == nri::Result::SUCCESS;
 	}
 
@@ -1873,16 +2352,23 @@ private:
 		}
 	}
 
+	bool BackendAlive() const
+	{
+		const std::shared_ptr<std::atomic_bool> alive = Alive.lock();
+		return m && alive && alive->load(std::memory_order_acquire) && m->Device;
+	}
+
 	NRIBackend::Impl* m = nullptr;
+	std::weak_ptr<std::atomic_bool> Alive;
 	std::vector<Binding> Bindings;
 	std::unordered_map<std::string, uint32_t> CbvSizeByName;
-	std::unordered_map<std::string, CbvBuf> CbvBuffers;
+	std::unordered_map<std::string, std::vector<CbvBuf>> CbvBuffers;
 	std::vector<uint8_t> Dxil;
 	std::string EntryPoint;
 	nri::PipelineLayout* Layout = nullptr;
 	nri::Pipeline* Pipeline = nullptr;
 	nri::DescriptorPool* Pool = nullptr;
-	std::vector<nri::DescriptorSet*> Sets;
+	std::vector<std::vector<nri::DescriptorSet*>> Sets;
 	bool InitAttempted = false;
 };
 
@@ -1896,10 +2382,14 @@ private:
 class NRIRTPipelineStateObject : public RTPipelineStateObject
 {
 public:
-	explicit NRIRTPipelineStateObject(NRIBackend::Impl* impl) : m(impl) {}
+	explicit NRIRTPipelineStateObject(NRIBackend::Impl* impl) : m(impl)
+	{
+		if (m)
+			Alive = m->Alive;
+	}
 	~NRIRTPipelineStateObject() override
 	{
-		if (!m || !m->Device) return;
+		if (!BackendAlive()) return;
 		if (Pipeline) m->Core.DestroyPipeline(Pipeline);
 		if (Layout) m->Core.DestroyPipelineLayout(Layout);
 		if (Pool) m->Core.DestroyDescriptorPool(Pool);
@@ -1915,9 +2405,12 @@ public:
 		}
 		for (auto& kv : CbvBuffers)
 		{
-			if (kv.second.view)
-				m->Core.DestroyDescriptor(kv.second.view);
-			m->FreeBuffer(kv.second.buffer, kv.second.memory);
+			for (CbvBuf& cb : kv.second)
+			{
+				if (cb.view)
+					m->Core.DestroyDescriptor(cb.view);
+				m->FreeBuffer(cb.buffer, cb.memory);
+			}
 		}
 		m->FreeBuffer(SbtBuffer, SbtMemory);
 	}
@@ -2066,7 +2559,11 @@ public:
 			return;
 
 		const uint32_t alignedSize = (b->cbSize + 255u) & ~255u;
-		CbvBuf& cb = CbvBuffers[bindingName];
+		std::vector<CbvBuf>& cbRing = CbvBuffers[bindingName];
+		if (cbRing.size() < NRIBackend::Impl::kQueuedFrameNum)
+			cbRing.resize(NRIBackend::Impl::kQueuedFrameNum);
+		const uint32_t frameSlot = m->ActiveFrameContextIndex % std::max(1u, m->FrameRingCount());
+		CbvBuf& cb = cbRing[frameSlot];
 		if (!cb.buffer)
 		{
 			if (!m->CreateBoundBuffer(alignedSize, 0, nri::BufferUsageBits::CONSTANT_BUFFER, nri::MemoryLocation::HOST_UPLOAD, cb.buffer, cb.memory))
@@ -2262,6 +2759,7 @@ public:
 		rtd.recursionMaxDepth = MaxRecursion;
 		rtd.rayPayloadMaxSize = MaxPayloadSize;
 		rtd.rayHitAttributeMaxSize = MaxAttributeSize;
+		rtd.cache = m->PipelineCache;
 		if (m->RT.CreateRayTracingPipeline(*m->Device, rtd, Pipeline) != nri::Result::SUCCESS || !Pipeline)
 		{
 			AppendCpuRuntimeTrace(L"[NRIRTPSO] CreateRayTracingPipeline failed shader=\"" + shaderPath.wstring() + L"\"");
@@ -2301,15 +2799,17 @@ public:
 			else
 				RefreshDescriptor(b);
 		}
+		const uint32_t frameSlot = m->ActiveFrameContextIndex % std::max(1u, m->FrameRingCount());
+		std::vector<nri::DescriptorSet*>* setsForFrame = frameSlot < Sets.size() ? &Sets[frameSlot] : nullptr;
 
-		if (!Sets.empty())
+		if (setsForFrame && !setsForFrame->empty())
 		{
 			// Bindless tables: write the backend's global registry descriptors
 			// (material textures / geometry buffers) into the bindless ranges.
 			// PARTIALLY_BOUND covers slots past the registered count.
 			for (Binding& b : Bindings)
 			{
-				if (!b.bindless || b.rangeIndex == UINT32_MAX || b.setIndex >= Sets.size() || !Sets[b.setIndex])
+				if (!b.bindless || b.rangeIndex == UINT32_MAX || b.setIndex >= setsForFrame->size() || !(*setsForFrame)[b.setIndex])
 					continue;
 				std::vector<nri::Descriptor*>& regDescs = (b.bindlessSrc == 2) ? m->BindlessBufDescs : m->BindlessTexDescs;
 				uint32_t count = std::min<uint32_t>((uint32_t)regDescs.size(), b.descriptorNum);
@@ -2317,7 +2817,7 @@ public:
 				if (count == 0)
 					continue;
 				nri::UpdateDescriptorRangeDesc upd = {};
-				upd.descriptorSet = Sets[b.setIndex];
+				upd.descriptorSet = (*setsForFrame)[b.setIndex];
 				upd.rangeIndex = b.rangeIndex;
 				upd.baseDescriptor = 0;
 				upd.descriptors = regDescs.data();
@@ -2328,10 +2828,10 @@ public:
 			{
 				if (b.bindless)
 					continue;
-				if (b.rangeIndex == UINT32_MAX || b.setIndex >= Sets.size() || !Sets[b.setIndex])
+				if (b.rangeIndex == UINT32_MAX || b.setIndex >= setsForFrame->size() || !(*setsForFrame)[b.setIndex])
 					continue;
 				nri::UpdateDescriptorRangeDesc upd = {};
-				upd.descriptorSet = Sets[b.setIndex];
+				upd.descriptorSet = (*setsForFrame)[b.setIndex];
 				upd.rangeIndex = b.rangeIndex;
 				upd.baseDescriptor = 0;
 				if (b.descriptorNum > 1)
@@ -2365,13 +2865,14 @@ public:
 			m->Core.CmdSetDescriptorPool(*m->ActiveCmd, *Pool);
 		}
 		m->Core.CmdSetPipelineLayout(*m->ActiveCmd, nri::BindPoint::RAY_TRACING, *Layout);
-		for (uint32_t setIndex = 0; setIndex < Sets.size(); ++setIndex)
+		const uint32_t setCount = setsForFrame ? static_cast<uint32_t>(setsForFrame->size()) : 0u;
+		for (uint32_t setIndex = 0; setIndex < setCount; ++setIndex)
 		{
-			if (!Sets[setIndex])
+			if (!(*setsForFrame)[setIndex])
 				continue;
 			nri::SetDescriptorSetDesc sd = {};
 			sd.setIndex = setIndex;
-			sd.descriptorSet = Sets[setIndex];
+			sd.descriptorSet = (*setsForFrame)[setIndex];
 			sd.bindPoint = nri::BindPoint::RAY_TRACING;
 			m->Core.CmdSetDescriptorSet(*m->ActiveCmd, sd);
 		}
@@ -2627,22 +3128,26 @@ private:
 
 		if (!sets.empty())
 		{
+			const uint32_t frameSlots = NRIBackend::Impl::kQueuedFrameNum;
 			nri::DescriptorPoolDesc pd = {};
-			pd.descriptorSetMaxNum = static_cast<uint32_t>(sets.size());
-			pd.textureMaxNum = textureNum;
-			pd.storageTextureMaxNum = storageTextureNum;
-			pd.structuredBufferMaxNum = structuredBufferNum;
-			pd.storageStructuredBufferMaxNum = storageStructuredBufferNum;
-			pd.constantBufferMaxNum = cbvNum;
-			pd.samplerMaxNum = samplerNum;
-			pd.accelerationStructureMaxNum = accelNum;
+			pd.descriptorSetMaxNum = static_cast<uint32_t>(sets.size()) * frameSlots;
+			pd.textureMaxNum = textureNum * frameSlots;
+			pd.storageTextureMaxNum = storageTextureNum * frameSlots;
+			pd.structuredBufferMaxNum = structuredBufferNum * frameSlots;
+			pd.storageStructuredBufferMaxNum = storageStructuredBufferNum * frameSlots;
+			pd.constantBufferMaxNum = cbvNum * frameSlots;
+			pd.samplerMaxNum = samplerNum * frameSlots;
+			pd.accelerationStructureMaxNum = accelNum * frameSlots;
 			if (m->Core.CreateDescriptorPool(*m->Device, pd, Pool) != nri::Result::SUCCESS || !Pool)
 				return false;
-			Sets.resize(sets.size(), nullptr);
-			for (uint32_t setIndex = 0; setIndex < Sets.size(); ++setIndex)
+			Sets.assign(frameSlots, std::vector<nri::DescriptorSet*>(sets.size(), nullptr));
+			for (uint32_t frameSlot = 0; frameSlot < frameSlots; ++frameSlot)
 			{
-				if (m->Core.AllocateDescriptorSets(*Pool, *Layout, setIndex, &Sets[setIndex], 1, 0) != nri::Result::SUCCESS || !Sets[setIndex])
-					return false;
+				for (uint32_t setIndex = 0; setIndex < sets.size(); ++setIndex)
+				{
+					if (m->Core.AllocateDescriptorSets(*Pool, *Layout, setIndex, &Sets[frameSlot][setIndex], 1, 0) != nri::Result::SUCCESS || !Sets[frameSlot][setIndex])
+						return false;
+				}
 			}
 		}
 		return true;
@@ -2992,12 +3497,19 @@ private:
 		}
 	}
 
+	bool BackendAlive() const
+	{
+		const std::shared_ptr<std::atomic_bool> alive = Alive.lock();
+		return m && alive && alive->load(std::memory_order_acquire) && m->Device;
+	}
+
 	NRIBackend::Impl* m = nullptr;
+	std::weak_ptr<std::atomic_bool> Alive;
 	std::vector<ShaderEntry> Shaders;
 	std::vector<HitGroupEntry> HitGroups;
 	std::vector<Binding> Bindings;
 	std::vector<std::pair<std::string, std::string>> ShaderDefines;
-	std::unordered_map<std::string, CbvBuf> CbvBuffers;
+	std::unordered_map<std::string, std::vector<CbvBuf>> CbvBuffers;
 	std::string ShaderLibraryTarget = "lib_6_3";
 	bool UseHitResourceArrays = false;
 	uint32_t NumInstances = 1;
@@ -3008,7 +3520,7 @@ private:
 	nri::PipelineLayout* Layout = nullptr;
 	nri::Pipeline* Pipeline = nullptr;
 	nri::DescriptorPool* Pool = nullptr;
-	std::vector<nri::DescriptorSet*> Sets;
+	std::vector<std::vector<nri::DescriptorSet*>> Sets;
 	nri::Buffer* SbtBuffer = nullptr;
 	std::vector<nri::Memory*> SbtMemory;
 	uint64_t SbtEntrySize = 0;
@@ -3033,11 +3545,13 @@ class NRIGraphicsPipeline : public GraphicsPipelineHandle
 public:
 	NRIGraphicsPipeline(NRIBackend::Impl* impl, const GraphicsPipelineDesc& desc) : m(impl)
 	{
+		if (m)
+			Alive = m->Alive;
 		Build(desc);
 	}
 	~NRIGraphicsPipeline() override
 	{
-		if (!m || !m->Device) return;
+		if (!BackendAlive()) return;
 		if (Pipeline) m->Core.DestroyPipeline(Pipeline);
 		if (Layout) m->Core.DestroyPipelineLayout(Layout);
 		if (Pool) m->Core.DestroyDescriptorPool(Pool);
@@ -3051,7 +3565,32 @@ public:
 	nri::PipelineLayout* GetLayout() const { return Layout; }
 
 	enum class Kind { TexSRV, BufSRV, Sampler, CBV };
-	struct Binding { std::string name; uint32_t reg; Kind kind; nri::Descriptor* desc = nullptr; nri::Descriptor* descSingle[1] = {}; bool ownsDesc = false; void* last = nullptr; Texture* tex = nullptr; Buffer* buf = nullptr; Sampler* samp = nullptr; uint32_t setIndex = 0; uint32_t rangeIndex = 0; };
+	struct Binding
+	{
+		std::string name;
+		uint32_t reg = 0;
+		uint32_t registerSpace = 0;
+		Kind kind = Kind::TexSRV;
+		nri::DescriptorType descriptorType = nri::DescriptorType::TEXTURE;
+		RHIBufferViewKind bufferView = RHIBufferViewKind::Structured;
+		nri::Descriptor* desc = nullptr;
+		nri::Descriptor* descSingle[1] = {};
+		bool ownsDesc = false;
+		bool bindless = false;
+		uint32_t bindlessSrc = 0; // 1 = texture registry, 2 = raw buffer registry
+		uint32_t descriptorNum = 1;
+		void* last = nullptr;
+		Texture* tex = nullptr;
+		Buffer* buf = nullptr;
+		Sampler* samp = nullptr;
+		uint32_t setIndex = UINT32_MAX;
+		uint32_t rangeIndex = UINT32_MAX;
+	};
+	struct SetState
+	{
+		uint32_t registerSpace = 0;
+		bool usesRing = false;
+	};
 	struct CbvState { nri::Buffer* buffer = nullptr; std::vector<nri::Memory*> memory; nri::Descriptor* view = nullptr; uint32_t size = 0; void* mapped = nullptr; };
 
 	void SetTexture(const std::string& name, Texture* t) { if (Binding* b = Find(name)) { b->tex = t; } }
@@ -3081,9 +3620,12 @@ public:
 	// Called by the backend immediately before each Cmd*Draw. Grabs a fresh
 	// per-draw descriptor set + constant-buffer slot from the per-frame ring,
 	// uploads the pending constants, writes all current descriptors, and binds.
-	void ApplyForDraw()
+	bool ApplyForDraw()
 	{
-		if (!Pipeline || !m->ActiveCmd || !HasResources || !Pool) return;
+		if (!Pipeline || !m->ActiveCmd)
+			return false;
+		if (!HasResources || !Pool)
+			return true;
 
 		// Reset the ring at the start of each frame (EndFrame waits on the GPU,
 		// so previous-frame ring entries are safe to overwrite).
@@ -3096,20 +3638,42 @@ public:
 		// read a wrong/out-of-range resource and HANG the GPU (DEVICE_HUNG), which is
 		// the wide-view (>1024 draws) camera-move freeze. Use a unique slot per draw;
 		// on genuine overflow skip the draw (visible gap) instead of aliasing.
-		const uint32_t slot = RingIdx++;
-		if (slot >= kRing)
+		const uint32_t ringSlotsPerFrame = std::max(1u, RingSlotsPerFrame);
+		const uint32_t drawSlot = RingIdx++;
+		if (drawSlot >= ringSlotsPerFrame)
 		{
 			static bool s_ringWarned = false;
 			if (!s_ringWarned) { s_ringWarned = true; AppendCpuRuntimeTrace(L"[NRI] per-draw descriptor ring overflow (>kRing draws/frame) — raise kRing"); }
-			return;
+			return false;
 		}
 
-		// Lazily allocate this ring slot's descriptor set + CB buffer/view.
-		if (SetRing.size() <= slot) { SetRing.resize(slot + 1, nullptr); CbRing.resize(slot + 1); }
-		if (!SetRing[slot])
-			m->Core.AllocateDescriptorSets(*Pool, *Layout, 0, &SetRing[slot], 1, 0);
-		nri::DescriptorSet* set = SetRing[slot];
-		if (!set) return;
+		const uint32_t frameSlot = m->ActiveFrameContextIndex % std::max(1u, m->FrameRingCount());
+		const uint32_t slot = frameSlot * ringSlotsPerFrame + drawSlot;
+
+		// Lazily allocate this ring slot's dynamic descriptor sets + CB buffer/view.
+		// Bindless-only spaces use a single static set; only spaces carrying per-draw
+		// CB/local SRVs need a ring to avoid D3D12 descriptor aliasing.
+		if (SetRing.size() <= slot) { SetRing.resize(slot + 1); CbRing.resize(slot + 1); }
+		if (SetRing[slot].size() < SetStates.size())
+			SetRing[slot].resize(SetStates.size(), nullptr);
+		for (uint32_t setIndex = 0; setIndex < SetStates.size(); ++setIndex)
+		{
+			if (!SetStates[setIndex].usesRing)
+				continue;
+			if (!SetRing[slot][setIndex])
+				m->Core.AllocateDescriptorSets(*Pool, *Layout, setIndex, &SetRing[slot][setIndex], 1, 0);
+			if (!SetRing[slot][setIndex])
+				return false;
+		}
+
+		auto descriptorSetFor = [&](const Binding& b) -> nri::DescriptorSet*
+		{
+			if (b.setIndex >= SetStates.size())
+				return nullptr;
+			if (SetStates[b.setIndex].usesRing)
+				return SetRing[slot][b.setIndex];
+			return (frameSlot < StaticSets.size() && b.setIndex < StaticSets[frameSlot].size()) ? StaticSets[frameSlot][b.setIndex] : nullptr;
+		};
 
 		// Per-draw constant buffer slot.
 		nri::Descriptor* cbView = nullptr;
@@ -3129,6 +3693,8 @@ public:
 					cb.mapped = m->Core.MapBuffer(*cb.buffer, 0, cb.size);
 				}
 			}
+			if (!cb.view || !cb.mapped)
+				return false;
 			if (cb.mapped && PendingCBSize > 0)
 				memcpy(cb.mapped, PendingCB.data(), PendingCBSize);
 			cbView = cb.view;
@@ -3145,13 +3711,35 @@ public:
 		updScratch.clear();
 		for (Binding& b : Bindings)
 		{
-			if (b.kind == Kind::CBV) { b.desc = cbView; b.ownsDesc = false; }
-			else RefreshDescriptor(b);
-			if (!b.desc) continue;
+			if (b.rangeIndex == UINT32_MAX)
+				continue;
+			nri::DescriptorSet* set = descriptorSetFor(b);
+			if (!set)
+				continue;
 			b.descSingle[0] = b.desc;
 			nri::UpdateDescriptorRangeDesc upd = {};
 			upd.descriptorSet = set; upd.rangeIndex = b.rangeIndex; upd.baseDescriptor = 0;
-			upd.descriptors = b.descSingle; upd.descriptorNum = 1;
+			if (b.bindless)
+			{
+				std::vector<nri::Descriptor*>& regDescs = (b.bindlessSrc == 2) ? m->BindlessBufDescs : m->BindlessTexDescs;
+				uint32_t count = std::min<uint32_t>(static_cast<uint32_t>(regDescs.size()), b.descriptorNum);
+				while (count > 0 && !regDescs[count - 1])
+					--count;
+				if (count == 0)
+					continue;
+				upd.descriptors = regDescs.data();
+				upd.descriptorNum = count;
+			}
+			else
+			{
+				if (b.kind == Kind::CBV) { b.desc = cbView; b.ownsDesc = false; }
+				else RefreshDescriptor(b);
+				if (!b.desc)
+					continue;
+				b.descSingle[0] = b.desc;
+				upd.descriptors = b.descSingle;
+				upd.descriptorNum = 1;
+			}
 			updScratch.push_back(upd);
 		}
 		if (!updScratch.empty())
@@ -3160,8 +3748,20 @@ public:
 			m->Core.UpdateDescriptorRanges(updScratch.data(), static_cast<uint32_t>(updScratch.size()));
 		}
 
-		nri::SetDescriptorSetDesc sd = {}; sd.setIndex = 0; sd.descriptorSet = set; sd.bindPoint = nri::BindPoint::GRAPHICS;
-		m->Core.CmdSetDescriptorSet(*m->ActiveCmd, sd);
+		for (uint32_t setIndex = 0; setIndex < SetStates.size(); ++setIndex)
+		{
+			nri::DescriptorSet* set = SetStates[setIndex].usesRing ?
+				SetRing[slot][setIndex] :
+				((frameSlot < StaticSets.size() && setIndex < StaticSets[frameSlot].size()) ? StaticSets[frameSlot][setIndex] : nullptr);
+			if (!set)
+				continue;
+			nri::SetDescriptorSetDesc sd = {};
+			sd.setIndex = setIndex;
+			sd.descriptorSet = set;
+			sd.bindPoint = nri::BindPoint::GRAPHICS;
+			m->Core.CmdSetDescriptorSet(*m->ActiveCmd, sd);
+		}
+		return true;
 	}
 
 	// Sanity-check the per-draw transform the GPU will consume. The GBuffer/shadow CB
@@ -3207,8 +3807,12 @@ private:
 		{
 			auto it = m->Buffers.find(b.buf);
 			if (it == m->Buffers.end() || !it->second.buffer) return;
-			nri::BufferViewDesc bvd = {}; bvd.buffer = it->second.buffer; bvd.type = nri::BufferView::STRUCTURED_BUFFER; bvd.offset = 0;
-			bvd.size = static_cast<uint64_t>(b.buf->NumElements) * b.buf->ElementSize; bvd.structureStride = b.buf->ElementSize ? b.buf->ElementSize : 4;
+			nri::BufferViewDesc bvd = {};
+			bvd.buffer = it->second.buffer;
+			bvd.type = (b.bufferView == RHIBufferViewKind::Raw) ? nri::BufferView::BYTE_ADDRESS_BUFFER : nri::BufferView::STRUCTURED_BUFFER;
+			bvd.offset = 0;
+			bvd.size = static_cast<uint64_t>(b.buf->NumElements) * b.buf->ElementSize;
+			bvd.structureStride = (b.bufferView == RHIBufferViewKind::Raw) ? 0 : (b.buf->ElementSize ? b.buf->ElementSize : 4);
 			nri::Descriptor* d = nullptr; if (m->Core.CreateBufferView(bvd, d) == nri::Result::SUCCESS) { b.desc = d; b.ownsDesc = true; }
 		}
 	}
@@ -3217,7 +3821,7 @@ private:
 	{
 		auto plog = [&](const char* what) {
 			std::ofstream l("nri_pso.log", std::ios::app);
-			if (l) { std::string sp(desc.ShaderPath.begin(), desc.ShaderPath.end());
+			if (l) { const std::string sp = NarrowAsciiForLog(desc.ShaderPath);
 				l << "GFXPSO FAIL [" << what << "] shader=" << sp << " vs=" << desc.VertexEntryPoint << " ps=" << desc.PixelEntryPoint << "\n"; }
 		};
 		if (!m->Device) { plog("no device"); return; }
@@ -3227,11 +3831,12 @@ private:
 		std::ifstream f(desc.ShaderPath, std::ios::binary);
 		if (!f.good()) { plog("shader file not found"); return; }
 		std::stringstream ss; ss << f.rdbuf(); const std::string src = ss.str();
-		VsDxil = CompileHLSLToDXIL(src.data(), src.size(), desc.ShaderPath.c_str(), vsW.c_str(), L"vs_6_5", verr);
+		const wchar_t* vsTarget = (desc.VertexEntryPoint == "VSMainBindlessIndirect") ? L"vs_6_8" : L"vs_6_5";
+		VsDxil = CompileHLSLToDXIL(src.data(), src.size(), desc.ShaderPath.c_str(), vsW.c_str(), vsTarget, verr);
 		PsDxil = CompileHLSLToDXIL(src.data(), src.size(), desc.ShaderPath.c_str(), psW.c_str(), L"ps_6_5", perr);
 		if (VsDxil.empty() || PsDxil.empty()) {
 			std::ofstream l("nri_pso.log", std::ios::app);
-			if (l) { std::string sp(desc.ShaderPath.begin(), desc.ShaderPath.end());
+			if (l) { const std::string sp = NarrowAsciiForLog(desc.ShaderPath);
 				l << "GFXPSO FAIL [shader compile] shader=" << sp << " vsEmpty=" << VsDxil.empty() << " psEmpty=" << PsDxil.empty()
 				  << " vsErr=" << verr << " psErr=" << perr << "\n"; }
 			return;
@@ -3239,39 +3844,77 @@ private:
 		VsEntry = desc.VertexEntryPoint; PsEntry = desc.PixelEntryPoint;
 
 		// Build descriptor ranges from the typed pipeline-layout schema (bindless
-		// RHI contract). Each RHIBindingDesc fully describes kind/register/space/
-		// count, so the root signature matches the shader with no late inference.
-		// NOTE: assumes register space 0 for all graphics bindings (true for the
-		// raster passes today); non-zero spaces (bindless material/geometry tables)
-		// will need one NRI descriptor set per space.
-		std::vector<nri::DescriptorRangeDesc> resR;
+		// RHI contract). NRI maps HLSL register spaces to descriptor sets, so
+		// GBuffer's space10 MaterialTextures[] and space12 GeometryBuffers[] must
+		// become separate sets from the per-draw space0 CB/SRV/sampler bindings.
+		struct SetBuild
+		{
+			uint32_t registerSpace = 0;
+			std::vector<nri::DescriptorRangeDesc> ranges;
+			bool hasDynamicBinding = false;
+		};
+		std::vector<SetBuild> setBuilds;
 		const nri::StageBits gfxStages = nri::StageBits::VERTEX_SHADER | nri::StageBits::FRAGMENT_SHADER;
-		uint32_t texN = 0, bufN = 0, cbvN = 0, sampN = 0, storTexN = 0, storBufN = 0;
+		auto findOrAddSet = [&](uint32_t registerSpace) -> uint32_t
+		{
+			for (uint32_t i = 0; i < setBuilds.size(); ++i)
+			{
+				if (setBuilds[i].registerSpace == registerSpace)
+					return i;
+			}
+			SetBuild setBuild;
+			setBuild.registerSpace = registerSpace;
+			setBuild.ranges.reserve(desc.PipelineLayout.Bindings.size());
+			setBuilds.push_back(std::move(setBuild));
+			return static_cast<uint32_t>(setBuilds.size() - 1);
+		};
+
 		for (const RHIBindingDesc& bd : desc.PipelineLayout.Bindings)
 		{
 			Kind k = Kind::TexSRV; nri::DescriptorType dt = nri::DescriptorType::TEXTURE;
 			switch (bd.DescriptorKind)
 			{
-			case RHIDescriptorKind::CBV:     k = Kind::CBV;     dt = nri::DescriptorType::CONSTANT_BUFFER; ++cbvN; break;
-			case RHIDescriptorKind::Sampler: k = Kind::Sampler; dt = nri::DescriptorType::SAMPLER; ++sampN; break;
+			case RHIDescriptorKind::CBV:     k = Kind::CBV;     dt = nri::DescriptorType::CONSTANT_BUFFER; break;
+			case RHIDescriptorKind::Sampler: k = Kind::Sampler; dt = nri::DescriptorType::SAMPLER; break;
 			case RHIDescriptorKind::UAV:
-				if (bd.ResourceKind == RHIResourceKind::Buffer) { k = Kind::BufSRV; dt = nri::DescriptorType::STORAGE_STRUCTURED_BUFFER; ++storBufN; }
-				else { k = Kind::TexSRV; dt = nri::DescriptorType::STORAGE_TEXTURE; ++storTexN; }
+				if (bd.ResourceKind == RHIResourceKind::Buffer) { k = Kind::BufSRV; dt = nri::DescriptorType::STORAGE_STRUCTURED_BUFFER; }
+				else { k = Kind::TexSRV; dt = nri::DescriptorType::STORAGE_TEXTURE; }
 				break;
 			case RHIDescriptorKind::SRV:
 			default:
-				if (bd.ResourceKind == RHIResourceKind::Buffer) { k = Kind::BufSRV; dt = nri::DescriptorType::STRUCTURED_BUFFER; ++bufN; }
-				else { k = Kind::TexSRV; dt = nri::DescriptorType::TEXTURE; ++texN; }
+				if (bd.ResourceKind == RHIResourceKind::Buffer) { k = Kind::BufSRV; dt = nri::DescriptorType::STRUCTURED_BUFFER; }
+				else { k = Kind::TexSRV; dt = nri::DescriptorType::TEXTURE; }
 				break;
 			}
-			Binding b; b.name = bd.Name; b.reg = bd.RegisterIndex; b.kind = k; b.setIndex = 0; b.rangeIndex = (uint32_t)resR.size(); Bindings.push_back(b);
+			const bool isBindless = bd.Bindless || bd.RuntimeArray || bd.DescriptorCount == RHI_BINDLESS_ARRAY;
+			const uint32_t descriptorCount = isBindless ? 4096u : (bd.DescriptorCount ? bd.DescriptorCount : 1u);
+			const uint32_t setIndex = findOrAddSet(bd.RegisterSpace);
+			setBuilds[setIndex].hasDynamicBinding |= !isBindless;
+
+			Binding b;
+			b.name = bd.Name;
+			b.reg = bd.RegisterIndex;
+			b.registerSpace = bd.RegisterSpace;
+			b.kind = k;
+			b.descriptorType = dt;
+			b.bufferView = bd.BufferView;
+			b.bindless = isBindless;
+			b.bindlessSrc = (bd.ResourceKind == RHIResourceKind::Buffer) ? 2u : 1u;
+			b.descriptorNum = descriptorCount;
+			b.setIndex = setIndex;
+			b.rangeIndex = static_cast<uint32_t>(setBuilds[setIndex].ranges.size());
+			Bindings.push_back(b);
+
 			nri::DescriptorRangeDesc r = {};
 			r.baseRegisterIndex = bd.RegisterIndex;
-			r.descriptorNum = (bd.RuntimeArray || bd.DescriptorCount == RHI_BINDLESS_ARRAY) ? 4096u : (bd.DescriptorCount ? bd.DescriptorCount : 1u);
+			r.descriptorNum = descriptorCount;
 			r.descriptorType = dt;
-			r.shaderStages = gfxStages;
-			r.flags = nri::DescriptorRangeBits::PARTIALLY_BOUND;
-			resR.push_back(r);
+			r.shaderStages = ToNRIGraphicsStageBits(bd.Stages);
+			if (bd.PartiallyBound || isBindless)
+				r.flags = r.flags | nri::DescriptorRangeBits::PARTIALLY_BOUND;
+			if (descriptorCount > 1)
+				r.flags = r.flags | nri::DescriptorRangeBits::ARRAY;
+			setBuilds[setIndex].ranges.push_back(r);
 			if (bd.DescriptorKind == RHIDescriptorKind::CBV && !Cbv.buffer)
 			{
 				const uint32_t aligned = ((bd.SizeInBytes ? bd.SizeInBytes : 256u) + 255u) & ~255u;
@@ -3285,26 +3928,86 @@ private:
 			}
 		}
 
-		// Single descriptor set (registerSpace 0) for all ranges (resources + samplers).
 		std::vector<nri::DescriptorSetDesc> sets;
-		if (!resR.empty()) { nri::DescriptorSetDesc d = {}; d.registerSpace = 0; d.ranges = resR.data(); d.rangeNum = (uint32_t)resR.size(); sets.push_back(d); }
+		sets.reserve(setBuilds.size());
+		SetStates.clear();
+		SetStates.reserve(setBuilds.size());
+		for (const SetBuild& setBuild : setBuilds)
+		{
+			nri::DescriptorSetDesc set = {};
+			set.registerSpace = setBuild.registerSpace;
+			set.ranges = setBuild.ranges.data();
+			set.rangeNum = static_cast<uint32_t>(setBuild.ranges.size());
+			sets.push_back(set);
+
+			SetState state;
+			state.registerSpace = setBuild.registerSpace;
+			state.usesRing = setBuild.hasDynamicBinding;
+			SetStates.push_back(state);
+		}
 
 		nri::PipelineLayoutDesc pld = {}; pld.rootRegisterSpace = 0; pld.descriptorSets = sets.empty() ? nullptr : sets.data(); pld.descriptorSetNum = (uint32_t)sets.size(); pld.shaderStages = gfxStages;
 		if (m->Core.CreatePipelineLayout(*m->Device, pld, Layout) != nri::Result::SUCCESS) { plog("CreatePipelineLayout"); return; }
 
 		if (!sets.empty())
 		{
-			// A single descriptor set reused across draws would alias in D3D12, so
-			// size the pool for a RING and hand out a fresh set per draw (ApplyForDraw).
+			const uint32_t frameSlots = NRIBackend::Impl::kQueuedFrameNum;
+			bool dynamicSamplerInRing = false;
+			for (const Binding& b : Bindings)
+			{
+				if (b.descriptorType == nri::DescriptorType::SAMPLER &&
+					b.setIndex < SetStates.size() &&
+					SetStates[b.setIndex].usesRing)
+				{
+					dynamicSamplerInRing = true;
+					break;
+				}
+			}
+			RingSlotsPerFrame = dynamicSamplerInRing ? std::max(1u, kRing / frameSlots) : kRing;
+			uint32_t descriptorSetMaxNum = 0;
+			uint32_t texN = 0, bufN = 0, cbvN = 0, sampN = 0, storTexN = 0, storBufN = 0;
+			for (uint32_t setIndex = 0; setIndex < SetStates.size(); ++setIndex)
+				descriptorSetMaxNum += (SetStates[setIndex].usesRing ? RingSlotsPerFrame : 1u) * frameSlots;
+			for (const Binding& b : Bindings)
+			{
+				const uint32_t multiplier = ((b.setIndex < SetStates.size() && SetStates[b.setIndex].usesRing) ? RingSlotsPerFrame : 1u) * frameSlots;
+				const uint32_t count = b.descriptorNum * multiplier;
+				switch (b.descriptorType)
+				{
+				case nri::DescriptorType::TEXTURE: ++texN; texN += count - 1; break;
+				case nri::DescriptorType::STORAGE_TEXTURE: ++storTexN; storTexN += count - 1; break;
+				case nri::DescriptorType::STRUCTURED_BUFFER: ++bufN; bufN += count - 1; break;
+				case nri::DescriptorType::STORAGE_STRUCTURED_BUFFER: ++storBufN; storBufN += count - 1; break;
+				case nri::DescriptorType::CONSTANT_BUFFER: ++cbvN; cbvN += count - 1; break;
+				case nri::DescriptorType::SAMPLER: ++sampN; sampN += count - 1; break;
+				default: break;
+				}
+			}
+
 			HasResources = true;
-			nri::DescriptorPoolDesc pd = {}; pd.descriptorSetMaxNum = kRing;
-			pd.textureMaxNum = texN * kRing;
-			pd.storageTextureMaxNum = storTexN * kRing;
-			pd.structuredBufferMaxNum = bufN * kRing;
-			pd.storageStructuredBufferMaxNum = storBufN * kRing;
-			pd.constantBufferMaxNum = cbvN * kRing;
-			pd.samplerMaxNum = std::min(sampN * kRing, 2048u); // D3D12 shader-visible sampler heap cap
+			nri::DescriptorPoolDesc pd = {}; pd.descriptorSetMaxNum = descriptorSetMaxNum;
+			pd.textureMaxNum = texN;
+			pd.storageTextureMaxNum = storTexN;
+			pd.structuredBufferMaxNum = bufN;
+			pd.storageStructuredBufferMaxNum = storBufN;
+			pd.constantBufferMaxNum = cbvN;
+			pd.samplerMaxNum = std::min(sampN, 2048u); // D3D12 shader-visible sampler heap cap
 			if (m->Core.CreateDescriptorPool(*m->Device, pd, Pool) != nri::Result::SUCCESS) { plog("CreateDescriptorPool"); return; }
+
+			StaticSets.assign(frameSlots, std::vector<nri::DescriptorSet*>(SetStates.size(), nullptr));
+			for (uint32_t frameSlot = 0; frameSlot < frameSlots; ++frameSlot)
+			{
+				for (uint32_t setIndex = 0; setIndex < SetStates.size(); ++setIndex)
+				{
+					if (SetStates[setIndex].usesRing)
+						continue;
+					if (m->Core.AllocateDescriptorSets(*Pool, *Layout, setIndex, &StaticSets[frameSlot][setIndex], 1, 0) != nri::Result::SUCCESS)
+					{
+						plog("AllocateStaticDescriptorSet");
+						return;
+					}
+				}
+			}
 		}
 
 		// Vertex input
@@ -3344,17 +4047,25 @@ private:
 		gpd.rasterization = rast;
 		gpd.outputMerger = om;
 		gpd.shaders = shaders; gpd.shaderNum = 2;
+		gpd.cache = m->PipelineCache;
 		nri::Result gr = m->Core.CreateGraphicsPipeline(*m->Device, gpd, Pipeline);
 		if (gr != nri::Result::SUCCESS || !Pipeline) {
 			std::ofstream l("nri_pso.log", std::ios::app);
-			if (l) { std::string sp(desc.ShaderPath.begin(), desc.ShaderPath.end());
+			if (l) { const std::string sp = NarrowAsciiForLog(desc.ShaderPath);
 				l << "GFXPSO FAIL [CreateGraphicsPipeline] result=" << (int)gr << " shader=" << sp
 				  << " colorNum=" << om.colorNum << " hasDepth=" << desc.DepthFormat.has_value()
 				  << " attrs=" << attrs.size() << "\n"; }
 		}
 	}
 
+	bool BackendAlive() const
+	{
+		const std::shared_ptr<std::atomic_bool> alive = Alive.lock();
+		return m && alive && alive->load(std::memory_order_acquire) && m->Device;
+	}
+
 	NRIBackend::Impl* m = nullptr;
+	std::weak_ptr<std::atomic_bool> Alive;
 	std::vector<Binding> Bindings;
 	CbvState Cbv;                       // size template for the per-draw CB ring
 	std::vector<uint8_t> VsDxil, PsDxil;
@@ -3362,7 +4073,8 @@ private:
 	nri::PipelineLayout* Layout = nullptr;
 	nri::Pipeline* Pipeline = nullptr;
 	nri::DescriptorPool* Pool = nullptr;
-	std::vector<nri::DescriptorSet*> Sets;
+	std::vector<SetState> SetStates;
+	std::vector<std::vector<nri::DescriptorSet*>> StaticSets;
 	bool HasResources = false;
 	// Per-draw ring: one descriptor set + one CB slot per draw, reused each frame.
 	// Must exceed the max draws in a single frame (wide views hit ~1.5k); overflow
@@ -3371,8 +4083,9 @@ private:
 	// heap maxes at 2048 (samplerMaxNum = sampN*kRing). Larger needs samplers split
 	// out of the ring into a static set.
 	static constexpr uint32_t kRing = 2048;
-	std::vector<nri::DescriptorSet*> SetRing;
+	std::vector<std::vector<nri::DescriptorSet*>> SetRing;
 	std::vector<CbvState> CbRing;
+	uint32_t RingSlotsPerFrame = kRing;
 	uint32_t RingIdx = 0;
 	uint64_t RingFrame = ~0ull;
 	std::vector<uint8_t> PendingCB;
@@ -3483,6 +4196,7 @@ NRIBackend::NRIBackend() : m(std::make_unique<Impl>())
 	const nri::DeviceDesc& dd = m->Core.GetDeviceDesc(*m->Device);
 	m->RayTracingTier = dd.tiers.rayTracing;
 	m->BackendName = std::string("NRI [D3D12] ") + dd.adapterDesc.name;
+	m->InitializePipelineCache();
 
 	// Bring-up smoke test: exercise the resource + memory path end-to-end
 	// (Core.CreateBuffer + Helper.AllocateAndBindMemory + Core.DestroyBuffer/
@@ -3780,6 +4494,8 @@ NRIBackend::~NRIBackend()
 {
 	if (!m)
 		return;
+	if (m->Alive)
+		m->Alive->store(false, std::memory_order_release);
 	if (m->Device)
 	{
 		for (std::weak_ptr<NRIRTAS>& weakAS : m->RayTracingAS)
@@ -3788,6 +4504,8 @@ NRIBackend::~NRIBackend()
 				as->Destroy();
 		}
 		m->RayTracingAS.clear();
+		m->DestroyFrameContexts();
+		m->DestroyImmediateContexts();
 
 		for (auto& kv : m->Buffers)
 		{
@@ -3830,6 +4548,7 @@ NRIBackend::~NRIBackend()
 		if (m->Fence) { m->Core.DestroyFence(m->Fence); m->Fence = nullptr; }
 		if (m->CmdBuffer) { m->Core.DestroyCommandBuffer(m->CmdBuffer); m->CmdBuffer = nullptr; }
 		if (m->CmdAllocator) { m->Core.DestroyCommandAllocator(m->CmdAllocator); m->CmdAllocator = nullptr; }
+		m->SaveAndDestroyPipelineCache();
 
 		nri::nriDestroyDevice(m->Device);
 		m->Device = nullptr;
@@ -3869,10 +4588,17 @@ RenderBackendCapabilities NRIBackend::GetCapabilities() const
 	capabilities.SupportsBindlessBuffers = true;
 	capabilities.SupportsRuntimeDescriptorArrays = true;
 	capabilities.SupportsPartiallyBoundDescriptors = true;
-	capabilities.SupportsDrawIndexedIndirect = false;
-	capabilities.SupportsDrawIndirect = false;
-	capabilities.SupportsMultiDrawIndirect = false;
-	capabilities.SupportsDrawIndirectFirstInstance = false;
+	if (m->Device && m->Core.CmdDrawIndirect && m->Core.CmdDrawIndexedIndirect)
+	{
+		const nri::DeviceDesc& dd = m->Core.GetDeviceDesc(*m->Device);
+		const bool supportsNativeDrawParameters =
+			dd.shaderFeatures.drawParameters &&
+			dd.shaderModel >= NriShaderModel(6, 8);
+		capabilities.SupportsDrawIndexedIndirect = true;
+		capabilities.SupportsDrawIndirect = true;
+		capabilities.SupportsMultiDrawIndirect = dd.other.drawIndirectMaxNum > 1;
+		capabilities.SupportsDrawIndirectFirstInstance = supportsNativeDrawParameters;
+	}
 	capabilities.MaxBindlessTextureCount = 4096;
 	capabilities.MaxBindlessBufferCount = 4096;
 	return capabilities;
@@ -3881,9 +4607,34 @@ RenderBackendCapabilities NRIBackend::GetCapabilities() const
 // === Frame lifecycle / diagnostics =======================================
 static void LogD3D12DeviceRemoved(ID3D12Device* dev, const wchar_t* where); // defined below
 
+void NRIBackend::MarkDeviceLost(const char* where, int result)
+{
+	if (!m || m->DeviceLost)
+		return;
+
+	m->DeviceLost = true;
+	const char* safeWhere = where ? where : "unknown";
+	std::ostringstream message;
+	message << "NRI device lost at " << safeWhere << " result=" << result;
+	ErrorString = message.str();
+	AppendCpuRuntimeTrace(L"[NRIDeviceLost] " + std::wstring(ErrorString.begin(), ErrorString.end()));
+
+	if (m->Device)
+	{
+		auto* nativeDevice = reinterpret_cast<ID3D12Device*>(m->Core.GetDeviceNativeObject(m->Device));
+		if (nativeDevice && nativeDevice->GetDeviceRemovedReason() != S_OK)
+		{
+			std::wstring wideWhere;
+			for (const char* p = safeWhere; *p; ++p)
+				wideWhere.push_back((*p >= 0 && *p <= 0x7f) ? static_cast<wchar_t>(*p) : L'?');
+			LogD3D12DeviceRemoved(nativeDevice, wideWhere.c_str());
+		}
+	}
+}
+
 void NRIBackend::BeginFrame()
 {
-	if (!m->Device || !m->CmdAllocator || !m->CmdBuffer || m->ActiveCmd)
+	if (!m->Device || m->ActiveCmd || m->DeviceLost)
 		return;
 	// Frame-start GPU-fault check: if the device was removed (the camera-move
 	// freeze), dump DRED once. More reliable than hooking a specific submit — once
@@ -3909,24 +4660,53 @@ void NRIBackend::BeginFrame()
 	m->FrameHasBackbuffer = false;
 	m->HasPendingClear = false;
 	m->BBLayout = nri::Layout::UNDEFINED;
+	m->CurAcquire = nullptr;
 	m->CurrentWindowRT = nullptr;
-	m->FreeTransientBuffers(); // previous frame's transients (GPU done after EndFrame's wait)
 
-	m->Core.ResetCommandAllocator(*m->CmdAllocator);
-	if (m->Core.BeginCommandBuffer(*m->CmdBuffer, nullptr) != nri::Result::SUCCESS)
+	nri::CommandAllocator* allocator = m->CmdAllocator;
+	nri::CommandBuffer* commandBuffer = m->CmdBuffer;
+	if (!m->FrameContexts.empty())
+	{
+		m->ActiveFrameContextIndex = static_cast<uint32_t>(m->SwapFrameIndex % m->FrameContexts.size());
+		NRIBackend::Impl::FrameContext& frame = m->FrameContexts[m->ActiveFrameContextIndex];
+		m->WaitForFrameContext(frame);
+		m->FreeTransientBuffers(frame.transientBuffers);
+		allocator = frame.allocator;
+		commandBuffer = frame.commandBuffer;
+	}
+	else
+	{
+		m->FreeTransientBuffers();
+	}
+
+	if (!allocator || !commandBuffer)
 		return;
-	m->ActiveCmd = m->CmdBuffer;
+	m->Core.ResetCommandAllocator(*allocator);
+	const nri::Result beginResult = m->Core.BeginCommandBuffer(*commandBuffer, nullptr);
+	if (beginResult != nri::Result::SUCCESS)
+	{
+		MarkDeviceLost("BeginCommandBuffer", static_cast<int>(beginResult));
+		return;
+	}
+	m->ActiveCmd = commandBuffer;
 
 	if (m->SwapChain && !m->BackBuffers.empty())
 	{
 		const uint32_t n = (uint32_t)m->BackBuffers.size();
 		nri::Fence* acq = m->AcquireSem[m->SwapFrameIndex % n];
 		uint32_t idx = 0;
-		if (m->SwapChainI.AcquireNextTexture(*m->SwapChain, *acq, idx) == nri::Result::SUCCESS && idx < n)
+		const nri::Result acquireResult = m->SwapChainI.AcquireNextTexture(*m->SwapChain, *acq, idx);
+		if (acquireResult == nri::Result::SUCCESS && idx < n)
 		{
 			m->CurrentBackBuffer = idx;
 			m->CurAcquire = acq;
 			m->FrameHasBackbuffer = true;
+		}
+		else
+		{
+			m->Core.EndCommandBuffer(*m->ActiveCmd);
+			m->ActiveCmd = nullptr;
+			MarkDeviceLost("AcquireNextTexture", static_cast<int>(acquireResult));
 		}
 	}
 }
@@ -4015,7 +4795,7 @@ static void LogD3D12DeviceRemoved(ID3D12Device* dev, const wchar_t* where)
 
 void NRIBackend::EndFrame()
 {
-	if (!m->ActiveCmd)
+	if (!m->ActiveCmd || m->DeviceLost)
 		return;
 	// TEMP perf instrumentation: per-120-frame hot-op counts (CORONA_NRI_STATS).
 	{
@@ -4036,6 +4816,8 @@ void NRIBackend::EndFrame()
 
 	if (m->FrameHasBackbuffer)
 	{
+		NRIBackend::Impl::FrameContext* frame = m->ActiveFrameContext();
+		const bool usesFrameContext = frame && frame->commandBuffer == m->ActiveCmd;
 		// Make sure the backbuffer ends in PRESENT layout even if nothing drew to it.
 		if (m->BBLayout != nri::Layout::PRESENT)
 			m->TransitionBackbuffer(nri::AccessBits::NONE, nri::Layout::PRESENT, nri::StageBits::NONE);
@@ -4045,18 +4827,32 @@ void NRIBackend::EndFrame()
 		nri::Fence* release = m->ReleaseSem[m->CurrentBackBuffer];
 		nri::FenceSubmitDesc waitAcq = {}; waitAcq.fence = m->CurAcquire; waitAcq.stages = nri::StageBits::ALL;
 		nri::FenceSubmitDesc sigRel = {}; sigRel.fence = release;
-		nri::FenceSubmitDesc sigFrame = {}; sigFrame.fence = m->FrameFence; sigFrame.value = 1 + m->SwapFrameIndex;
+		const uint64_t submittedFenceValue = 1 + m->SwapFrameIndex;
+		nri::FenceSubmitDesc sigFrame = {}; sigFrame.fence = m->FrameFence; sigFrame.value = submittedFenceValue;
 		nri::FenceSubmitDesc signals[2] = { sigRel, sigFrame };
 		nri::CommandBuffer* cbs[1] = { m->ActiveCmd };
 		nri::QueueSubmitDesc qs = {};
 		qs.waitFences = &waitAcq; qs.waitFenceNum = 1;
 		qs.commandBuffers = cbs; qs.commandBufferNum = 1;
 		qs.signalFences = signals; qs.signalFenceNum = 2;
-		if (m->Core.QueueSubmit(*m->GraphicsQueue, qs) != nri::Result::SUCCESS)
+		const nri::Result submitResult = m->Core.QueueSubmit(*m->GraphicsQueue, qs);
+		const bool submitted = submitResult == nri::Result::SUCCESS;
+		if (!submitted)
+		{
 			LogD3D12DeviceRemoved(reinterpret_cast<ID3D12Device*>(m->Core.GetDeviceNativeObject(m->Device)), L"EndFrame QueueSubmit");
-		m->SwapChainI.QueuePresent(*m->SwapChain, *release);
+			MarkDeviceLost("QueueSubmit", static_cast<int>(submitResult));
+		}
+		else if (usesFrameContext)
+			frame->fenceValue = submittedFenceValue;
+		if (submitted)
+		{
+			const nri::Result presentResult = m->SwapChainI.QueuePresent(*m->SwapChain, *release);
+			if (presentResult != nri::Result::SUCCESS)
+				MarkDeviceLost("QueuePresent", static_cast<int>(presentResult));
+		}
 		m->SwapFrameIndex++;
-		m->Core.Wait(*m->FrameFence, m->SwapFrameIndex); // synchronous pacing
+		if (submitted && !usesFrameContext)
+			m->Core.Wait(*m->FrameFence, submittedFenceValue);
 	}
 	else
 	{
@@ -4067,18 +4863,40 @@ void NRIBackend::EndFrame()
 		nri::QueueSubmitDesc qs = {};
 		qs.commandBuffers = cbs; qs.commandBufferNum = 1;
 		qs.signalFences = &sf; qs.signalFenceNum = 1;
-		m->Core.QueueSubmit(*m->GraphicsQueue, qs);
-		m->Core.Wait(*m->Fence, m->FenceValue);
+		const nri::Result submitResult = m->Core.QueueSubmit(*m->GraphicsQueue, qs);
+		if (submitResult == nri::Result::SUCCESS)
+			m->Core.Wait(*m->Fence, m->FenceValue);
+		else
+			MarkDeviceLost("QueueSubmit(no backbuffer)", static_cast<int>(submitResult));
 	}
 	m->ActiveCmd = nullptr;
 }
-void NRIBackend::WaitForGpu() { NRI_TODO(); }
+void NRIBackend::WaitForGpu()
+{
+	if (!m || !m->Device)
+		return;
+	if (m->DeviceLost)
+		return;
+	m->WaitForFrameContexts();
+	m->WaitForImmediateContexts();
+	if (m->Fence && m->FenceValue != 0)
+		m->Core.Wait(*m->Fence, m->FenceValue);
+}
 void NRIBackend::EmitGpuCrashMarker(const char*) { NRI_TODO(); }
+bool NRIBackend::IsDeviceLost() const { return m && m->DeviceLost; }
 const std::string& NRIBackend::GetErrorString() const { return ErrorString; }
 void NRIBackend::ClearErrorString() { ErrorString.clear(); }
 uint64_t NRIBackend::GetTimestampFrequency() const { return 0; }
-uint32_t NRIBackend::GetFrameCount() const { return 0; }
-uint32_t NRIBackend::GetCurrentFrameIndex() const { return m->CurrentBackBuffer; }
+uint32_t NRIBackend::GetFrameCount() const
+{
+	return m ? m->FrameRingCount() : 1u;
+}
+uint32_t NRIBackend::GetCurrentFrameIndex() const
+{
+	if (!m)
+		return 0;
+	return m->ActiveFrameContextIndex % std::max(1u, m->FrameRingCount());
+}
 DX12Backend* NRIBackend::AsDX12Backend() { return nullptr; }
 
 // === Resource creation ====================================================
@@ -4162,17 +4980,24 @@ std::shared_ptr<Buffer> NRIBackend::CreateBuffer(const BufferCreateDesc& desc)
 		m->Helper.UploadData(*m->GraphicsQueue, nullptr, 0, &up, 1);
 	}
 
-	// Custom deleter: when the last reference dies, recycle the NRI allocation
-	// into the reuse pool and drop the side-table entry. Without this, NRI buffers
-	// leaked their GPU memory every frame (no NRI free hook on ~Buffer).
+	// Custom deleter: when the last reference dies while the backend is alive,
+	// recycle the NRI allocation into the reuse pool and drop the side-table
+	// entry. If Corona destroys the backend before older persistent Buffer
+	// wrappers, the backend destructor has already released the NRI allocations;
+	// the deleter must then only delete the wrapper object.
 	Impl* impl = m.get();
-	std::shared_ptr<Buffer> wrapper(new Buffer(), [impl](Buffer* b)
+	std::weak_ptr<std::atomic_bool> alive = m->Alive;
+	std::shared_ptr<Buffer> wrapper(new Buffer(), [impl, alive](Buffer* b)
 	{
-		auto it = impl->Buffers.find(b);
-		if (it != impl->Buffers.end())
+		const std::shared_ptr<std::atomic_bool> aliveFlag = alive.lock();
+		if (aliveFlag && aliveFlag->load(std::memory_order_acquire) && impl)
 		{
-			impl->RecycleBuffer(std::move(it->second));
-			impl->Buffers.erase(it);
+			auto it = impl->Buffers.find(b);
+			if (it != impl->Buffers.end())
+			{
+				impl->RecycleBuffer(std::move(it->second));
+				impl->Buffers.erase(it);
+			}
 		}
 		delete b;
 	});
@@ -4472,7 +5297,13 @@ std::shared_ptr<Buffer> NRIBackend::CreateUploadStructuredBuffer(uint32_t numEle
 	if (!m->Device || numElements == 0 || elementSize == 0) return nullptr;
 	const uint64_t size = static_cast<uint64_t>(numElements) * elementSize;
 	nri::Buffer* nb = nullptr; std::vector<nri::Memory*> mem;
-	if (!m->CreateBoundBuffer(size, elementSize, nri::BufferUsageBits::SHADER_RESOURCE, nri::MemoryLocation::HOST_UPLOAD, nb, mem))
+	if (!m->CreateBoundBuffer(
+		size,
+		elementSize,
+		nri::BufferUsageBits::SHADER_RESOURCE | nri::BufferUsageBits::ARGUMENT_BUFFER,
+		nri::MemoryLocation::HOST_UPLOAD,
+		nb,
+		mem))
 	{
 		ErrorString = "CreateUploadStructuredBuffer: CreateBoundBuffer failed";
 		return nullptr;
@@ -4492,8 +5323,8 @@ void NRIBackend::UpdateUploadStructuredBuffer(Buffer* buffer, const void* srcDat
 }
 std::shared_ptr<Buffer> NRIBackend::AllocateTransientUploadStructuredBuffer(uint32_t numElements, uint32_t elementSize, const void* srcData)
 {
-	// Per-frame transient upload buffer: HOST_UPLOAD + memcpy, freed at the next
-	// BeginFrame (EndFrame waits synchronously so it's safe to reuse the memory).
+	// Per-frame transient upload buffer: HOST_UPLOAD + memcpy, released when the
+	// frame context that recorded it is known to have completed on the GPU.
 	auto buf = CreateUploadStructuredBuffer(numElements, elementSize);
 	if (!buf) return nullptr;
 	if (srcData)
@@ -4502,7 +5333,10 @@ std::shared_ptr<Buffer> NRIBackend::AllocateTransientUploadStructuredBuffer(uint
 		if (it != m->Buffers.end() && it->second.mapped)
 			memcpy(it->second.mapped, srcData, static_cast<size_t>(numElements) * elementSize);
 	}
-	m->TransientBuffers.push_back(buf);
+	if (NRIBackend::Impl::FrameContext* frame = m->ActiveFrameContext())
+		frame->transientBuffers.push_back(buf);
+	else
+		m->TransientBuffers.push_back(buf);
 	return buf;
 }
 
@@ -4608,11 +5442,20 @@ void NRIBackend::RefitBLAS(RTAS* rtas, Mesh* mesh)
 	build.geometryNum = 1;
 	build.scratchBuffer = as->ScratchBuffer;
 
-	m->SubmitImmediate("[NRIRTAS] RefitBLAS immediate submit failed\n", [&](nri::CommandBuffer& cmd)
+	auto recordRefit = [&](nri::CommandBuffer& cmd)
 	{
 		m->RT.CmdBuildBottomLevelAccelerationStructures(cmd, &build, 1);
 		m->BarrierAccelerationStructure(cmd, as->AccelerationStructure);
-	});
+	};
+	if (m->ActiveCmd)
+	{
+		m->EndRP();
+		recordRefit(*m->ActiveCmd);
+	}
+	else
+	{
+		m->SubmitImmediate("[NRIRTAS] RefitBLAS immediate submit failed\n", recordRefit, false);
+	}
 }
 
 std::shared_ptr<RTAS> NRIBackend::CreateTLAS(const std::vector<RTInstanceDesc>& instances)
@@ -4672,7 +5515,7 @@ std::shared_ptr<RTAS> NRIBackend::CreateTLAS(const std::vector<RTInstanceDesc>& 
 	std::vector<nri::BuildBottomLevelAccelerationStructureDesc> pendingBLASBuilds;
 	CollectPendingNRIBLASBuilds(instances, pendingBLAS, pendingBLASBuilds);
 
-	const bool submitted = m->SubmitImmediate("[NRIRTAS] BuildTLAS immediate submit failed\n", [&](nri::CommandBuffer& cmd)
+	auto recordBuild = [&](nri::CommandBuffer& cmd)
 	{
 		if (!pendingBLASBuilds.empty())
 		{
@@ -4684,7 +5527,18 @@ std::shared_ptr<RTAS> NRIBackend::CreateTLAS(const std::vector<RTInstanceDesc>& 
 		}
 		m->RT.CmdBuildTopLevelAccelerationStructures(cmd, &build, 1);
 		m->BarrierAccelerationStructure(cmd, as->AccelerationStructure);
-	});
+	};
+	bool submitted = false;
+	if (m->ActiveCmd)
+	{
+		m->EndRP();
+		recordBuild(*m->ActiveCmd);
+		submitted = true;
+	}
+	else
+	{
+		submitted = m->SubmitImmediate("[NRIRTAS] BuildTLAS immediate submit failed\n", recordBuild, false);
+	}
 	if (!submitted)
 	{
 		AppendCpuRuntimeTrace(L"[NRIRTAS] BuildTLAS submit failed");
@@ -4726,7 +5580,7 @@ bool NRIBackend::UpdateTLAS(const std::shared_ptr<RTAS>& topLevelAS, const std::
 	std::vector<nri::BuildBottomLevelAccelerationStructureDesc> pendingBLASBuilds;
 	CollectPendingNRIBLASBuilds(instances, pendingBLAS, pendingBLASBuilds);
 
-	const bool submitted = m->SubmitImmediate("[NRIRTAS] UpdateTLAS immediate submit failed\n", [&](nri::CommandBuffer& cmd)
+	auto recordUpdate = [&](nri::CommandBuffer& cmd)
 	{
 		if (!pendingBLASBuilds.empty())
 		{
@@ -4738,7 +5592,18 @@ bool NRIBackend::UpdateTLAS(const std::shared_ptr<RTAS>& topLevelAS, const std::
 		}
 		m->RT.CmdBuildTopLevelAccelerationStructures(cmd, &build, 1);
 		m->BarrierAccelerationStructure(cmd, as->AccelerationStructure);
-	});
+	};
+	bool submitted = false;
+	if (m->ActiveCmd)
+	{
+		m->EndRP();
+		recordUpdate(*m->ActiveCmd);
+		submitted = true;
+	}
+	else
+	{
+		submitted = m->SubmitImmediate("[NRIRTAS] UpdateTLAS immediate submit failed\n", recordUpdate, false);
+	}
 	if (submitted)
 	{
 		for (const std::shared_ptr<NRIRTAS>& blas : pendingBLAS)
@@ -4798,6 +5663,8 @@ void NRIBackend::CreateSwapChainForWindow(WindowHandle window, uint32_t width, u
 	scd.height = static_cast<nri::Dim_t>(height);
 	scd.textureNum = 3;
 	scd.format = nri::SwapChainFormat::BT709_G22_8BIT;
+	scd.flags = nri::SwapChainBits::ALLOW_TEARING;
+	scd.queuedFrameNum = static_cast<uint8_t>(NRIBackend::Impl::kQueuedFrameNum);
 	if (m->SwapChainI.CreateSwapChain(*m->Device, scd, m->SwapChain) != nri::Result::SUCCESS || !m->SwapChain)
 	{
 		ErrorString = "CreateSwapChain failed";
@@ -4836,6 +5703,11 @@ void NRIBackend::CreateSwapChainForWindow(WindowHandle window, uint32_t width, u
 	}
 	if (!m->FrameFence)
 		m->Core.CreateFence(*m->Device, 0, m->FrameFence);
+	if (!m->EnsureFrameContexts(NRIBackend::Impl::kQueuedFrameNum))
+	{
+		ErrorString = "CreateSwapChain: frame context allocation failed";
+		return;
+	}
 
 	char info[256];
 	_snprintf_s(info, _TRUNCATE, "swapchain ok: backbuffers=%u format=%d", num, (int)m->SwapFormat);
@@ -5003,12 +5875,15 @@ bool NRIBackend::CaptureTexture(Texture* source, CapturedImage& captured, EResou
 		}
 
 		m->ActiveCmd = nullptr;
-		if (m->CmdAllocator && m->CmdBuffer)
+		NRIBackend::Impl::FrameContext* frame = m->ActiveFrameContext();
+		nri::CommandAllocator* restartAllocator = frame ? frame->allocator : m->CmdAllocator;
+		nri::CommandBuffer* restartCommandBuffer = frame ? frame->commandBuffer : m->CmdBuffer;
+		if (restartAllocator && restartCommandBuffer)
 		{
-			m->Core.ResetCommandAllocator(*m->CmdAllocator);
-			if (m->Core.BeginCommandBuffer(*m->CmdBuffer, nullptr) == nri::Result::SUCCESS)
+			m->Core.ResetCommandAllocator(*restartAllocator);
+			if (m->Core.BeginCommandBuffer(*restartCommandBuffer, nullptr) == nri::Result::SUCCESS)
 			{
-				m->ActiveCmd = m->CmdBuffer;
+				m->ActiveCmd = restartCommandBuffer;
 				restartedActiveCmd = true;
 			}
 		}
@@ -5244,7 +6119,11 @@ void NRIBackend::DrawFullscreenQuad(VertexBuffer* vertexBuffer)
 {
 	if (!m->ActiveCmd || !m->RasterEnabled || !m->HasBoundGfx) { ++m->DbgDrawsSkipped; return; }
 	m->OpenRP();
-	if (m->CurrentGfx) static_cast<NRIGraphicsPipeline*>(m->CurrentGfx)->ApplyForDraw();
+	if (m->CurrentGfx && !static_cast<NRIGraphicsPipeline*>(m->CurrentGfx)->ApplyForDraw())
+	{
+		++m->DbgDrawsSkipped;
+		return;
+	}
 	auto it = m->VBs.find(vertexBuffer);
 	if (it != m->VBs.end() && it->second.buffer)
 	{
@@ -5309,7 +6188,11 @@ void NRIBackend::DrawIndexed(uint32_t indexCount, uint32_t startIndexLocation, i
 			if (m->DrawLog) { std::ofstream l("nri_drawlog.log", std::ios::app); if (l) l << "DRAWIDX vb=" << (void*)m->LastVB << " verts=" << m->LastVBVerts << " idxCount=" << indexCount << " worstXform=" << worst << "  <<<BAD-XFORM-SKIP" << std::endl; }
 			return;
 		}
-		gp->ApplyForDraw();
+		if (!gp->ApplyForDraw())
+		{
+			++m->DbgDrawsSkipped;
+			return;
+		}
 	}
 	nri::DrawIndexedDesc dd = {}; dd.indexNum = indexCount; dd.instanceNum = 1; dd.baseIndex = startIndexLocation; dd.baseVertex = baseVertexLocation;
 	m->Core.CmdDrawIndexed(*m->ActiveCmd, dd);
@@ -5330,7 +6213,11 @@ void NRIBackend::DrawInstanced(uint32_t vertexCountPerInstance, uint32_t instanc
 			if (m->DrawLog) { std::ofstream l("nri_drawlog.log", std::ios::app); if (l) l << "DRAW vb=" << (void*)m->LastVB << " vertexCount=" << vertexCountPerInstance << " worstXform=" << worst << "  <<<BAD-XFORM-SKIP" << std::endl; }
 			return;
 		}
-		gp->ApplyForDraw();
+		if (!gp->ApplyForDraw())
+		{
+			++m->DbgDrawsSkipped;
+			return;
+		}
 	}
 	nri::DrawDesc dd = {};
 	dd.vertexNum = vertexCountPerInstance;
@@ -5375,20 +6262,86 @@ void NRIBackend::DrawIndexedInstanced(uint32_t indexCountPerInstance, uint32_t i
 			if (m->DrawLog) { std::ofstream l("nri_drawlog.log", std::ios::app); if (l) l << "DRAWIDXINST vb=" << (void*)m->LastVB << " instCount=" << instanceCount << " worstXform=" << worst << "  <<<BAD-XFORM-SKIP" << std::endl; }
 			return;
 		}
-		gp->ApplyForDraw();
+		if (!gp->ApplyForDraw())
+		{
+			++m->DbgDrawsSkipped;
+			return;
+		}
 	}
 	nri::DrawIndexedDesc dd = {}; dd.indexNum = indexCountPerInstance; dd.instanceNum = instanceCount; dd.baseIndex = startIndexLocation; dd.baseVertex = baseVertexLocation; dd.baseInstance = startInstanceLocation;
 	m->Core.CmdDrawIndexed(*m->ActiveCmd, dd);
 	++m->DbgDraws;
 }
-bool NRIBackend::DrawIndexedIndirect(Buffer* /*indirectArgumentBuffer*/, uint64_t /*byteOffset*/, uint32_t /*drawCount*/)
+bool NRIBackend::DrawIndexedIndirect(Buffer* indirectArgumentBuffer, uint64_t byteOffset, uint32_t drawCount)
 {
-	return false;
+	static_assert(sizeof(DrawIndexedIndirectArguments) == sizeof(nri::DrawIndexedDesc), "Draw indexed indirect argument layout must match NRI.");
+	if (drawCount == 0)
+		return true;
+	if (!m->ActiveCmd || !m->RasterEnabled || !m->HasBoundGfx || !indirectArgumentBuffer)
+	{
+		++m->DbgDrawsSkipped;
+		return false;
+	}
+	auto it = m->Buffers.find(indirectArgumentBuffer);
+	if (it == m->Buffers.end() || !it->second.buffer)
+		return false;
+	const uint64_t argsBytes = static_cast<uint64_t>(drawCount) * sizeof(DrawIndexedIndirectArguments);
+	const uint64_t bufferBytes = static_cast<uint64_t>(indirectArgumentBuffer->NumElements) * indirectArgumentBuffer->ElementSize;
+	if (byteOffset > bufferBytes || argsBytes > bufferBytes - byteOffset)
+		return false;
+
+	m->OpenRP();
+	if (m->CurrentGfx && !static_cast<NRIGraphicsPipeline*>(m->CurrentGfx)->ApplyForDraw())
+	{
+		++m->DbgDrawsSkipped;
+		return false;
+	}
+	m->Core.CmdDrawIndexedIndirect(
+		*m->ActiveCmd,
+		*it->second.buffer,
+		byteOffset,
+		drawCount,
+		sizeof(DrawIndexedIndirectArguments),
+		nullptr,
+		0);
+	m->DbgDraws += drawCount;
+	return true;
 }
 
-bool NRIBackend::DrawIndirect(Buffer* /*indirectArgumentBuffer*/, uint64_t /*byteOffset*/, uint32_t /*drawCount*/)
+bool NRIBackend::DrawIndirect(Buffer* indirectArgumentBuffer, uint64_t byteOffset, uint32_t drawCount)
 {
-	return false;
+	static_assert(sizeof(DrawIndirectArguments) == sizeof(nri::DrawDesc), "Draw indirect argument layout must match NRI.");
+	if (drawCount == 0)
+		return true;
+	if (!m->ActiveCmd || !m->RasterEnabled || !m->HasBoundGfx || !indirectArgumentBuffer)
+	{
+		++m->DbgDrawsSkipped;
+		return false;
+	}
+	auto it = m->Buffers.find(indirectArgumentBuffer);
+	if (it == m->Buffers.end() || !it->second.buffer)
+		return false;
+	const uint64_t argsBytes = static_cast<uint64_t>(drawCount) * sizeof(DrawIndirectArguments);
+	const uint64_t bufferBytes = static_cast<uint64_t>(indirectArgumentBuffer->NumElements) * indirectArgumentBuffer->ElementSize;
+	if (byteOffset > bufferBytes || argsBytes > bufferBytes - byteOffset)
+		return false;
+
+	m->OpenRP();
+	if (m->CurrentGfx && !static_cast<NRIGraphicsPipeline*>(m->CurrentGfx)->ApplyForDraw())
+	{
+		++m->DbgDrawsSkipped;
+		return false;
+	}
+	m->Core.CmdDrawIndirect(
+		*m->ActiveCmd,
+		*it->second.buffer,
+		byteOffset,
+		drawCount,
+		sizeof(DrawIndirectArguments),
+		nullptr,
+		0);
+	m->DbgDraws += drawCount;
+	return true;
 }
 
 void NRIBackend::Dispatch(uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ)

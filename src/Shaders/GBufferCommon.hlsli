@@ -122,6 +122,10 @@ cbuffer GBufferConstantBuffer : register(b0)
     uint     GBufferIndexStart;
     int      GBufferVertexBase;
     uint     bGBufferBindlessGeometry;
+    uint     GBufferDrawRecordBase;
+    uint     GBufferDrawRecordPad0;
+    uint     GBufferDrawRecordPad1;
+    uint     GBufferDrawRecordPad2;
     // Wind sway. .xyz = wind direction normalized in XZ (Y typically 0),
     // .w = strength (0 disables). Composes additively with grass bend.
     float4   WindParams;
@@ -981,9 +985,16 @@ PSInput VSMainBindless(uint vertexId : SV_VertexID)
     return BuildPSInput(v);
 }
 
-PSInput VSMainBindlessIndirect(uint vertexId : SV_VertexID, uint instanceId : SV_InstanceID)
+#if defined(VULKAN_SPIRV)
+PSInput VSMainBindlessIndirect(
+    uint vertexId : SV_VertexID,
+    [[vk::builtin("BaseInstance")]] uint startInstanceLocation : _SV_Nothing2)
+#else
+PSInput VSMainBindlessIndirect(uint vertexId : SV_VertexID, uint startInstanceLocation : SV_StartInstanceLocation)
+#endif
 {
-    VertexObjSpace v = LoadVertex_StaticBindlessIndirect(vertexId, instanceId);
+    uint drawRecordIndex = GBufferDrawRecordBase + startInstanceLocation;
+    VertexObjSpace v = LoadVertex_StaticBindlessIndirect(vertexId, drawRecordIndex);
     v = ApplyVertexDeformations(v);
     return BuildPSInput(v);
 }

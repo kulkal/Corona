@@ -110,6 +110,24 @@ namespace
 		}
 	};
 
+	bool BuildGBufferIndirectDrawArguments(
+		uint32_t drawRecordIndex,
+		uint32_t indexCount,
+		DrawIndirectArguments& outArgs,
+		std::wstring* failureReason = nullptr)
+	{
+		outArgs = {};
+		if (indexCount == 0)
+			return true;
+		(void)failureReason;
+
+		outArgs.VertexCountPerInstance = indexCount;
+		outArgs.InstanceCount = 1;
+		outArgs.StartVertexLocation = 0;
+		outArgs.StartInstanceLocation = drawRecordIndex;
+		return true;
+	}
+
 	struct GBufferGeometryTable
 	{
 		std::vector<GBufferGeometryKey> Keys;
@@ -435,17 +453,6 @@ namespace
 			defaultRoughness,
 			defaultBlack);
 		const GBufferSceneTopologyCounts topologyCounts = CountGBufferSceneTopology(scene);
-		if (scene->bGBufferMaterialRecordCacheValid &&
-			scene->GBufferMaterialRecordBuffer &&
-			scene->GBufferMaterialRecordBackend == backend &&
-			scene->GBufferMaterialDefaultsHash == defaultsHash &&
-			scene->GBufferMaterialRecordTopologyHash == topologyCounts.Hash &&
-			scene->GBufferMaterialRecordMeshCount == topologyCounts.MeshCount &&
-			scene->GBufferMaterialRecordDrawCount == topologyCounts.DrawCount)
-		{
-			table.Buffer = scene->GBufferMaterialRecordBuffer;
-			return table;
-		}
 
 		auto findOrAddUniqueKey = [&](const GBufferMaterialKey& key) -> uint32_t
 		{
@@ -951,21 +958,32 @@ void Corona::InitGBufferPass()
 			AppendCpuRuntimeTrace(L"[InitGBufferPass] failed to create Bindless Static GBuffer pipeline");
 	}
 	{
-		GraphicsPipelineDesc bindlessIndirectDesc = desc;
-		bindlessIndirectDesc.VertexEntryPoint = "VSMainBindlessIndirect";
-		bindlessIndirectDesc.VertexElements.clear();
-		bindlessIndirectDesc.VertexStride = 0;
-		appendGBufferBindlessGeometryLayout(bindlessIndirectDesc);
-		try
+		const RenderBackendCapabilities backendCapabilities = renderBackend ?
+			renderBackend->GetCapabilities() :
+			RenderBackendCapabilities{};
+		if (backendCapabilities.SupportsDrawIndirect &&
+			backendCapabilities.SupportsDrawIndirectFirstInstance)
 		{
-			GBufferBindlessIndirectGraphicsPipeline = renderBackend->CreateGraphicsPipeline(bindlessIndirectDesc);
+			GraphicsPipelineDesc bindlessIndirectDesc = desc;
+			bindlessIndirectDesc.VertexEntryPoint = "VSMainBindlessIndirect";
+			bindlessIndirectDesc.VertexElements.clear();
+			bindlessIndirectDesc.VertexStride = 0;
+			appendGBufferBindlessGeometryLayout(bindlessIndirectDesc);
+			try
+			{
+				GBufferBindlessIndirectGraphicsPipeline = renderBackend->CreateGraphicsPipeline(bindlessIndirectDesc);
+			}
+			catch (const std::exception&)
+			{
+				AppendCpuRuntimeTrace(L"[InitGBufferPass] Bindless indirect GBuffer pipeline create exception");
+			}
+			if (!GBufferBindlessIndirectGraphicsPipeline)
+				AppendCpuRuntimeTrace(L"[InitGBufferPass] failed to create Bindless Indirect GBuffer pipeline");
 		}
-		catch (const std::exception&)
+		else
 		{
-			AppendCpuRuntimeTrace(L"[InitGBufferPass] Bindless indirect GBuffer pipeline create exception");
+			AppendCpuRuntimeTrace(L"[InitGBufferPass] skipping Bindless Indirect GBuffer pipeline: backend lacks draw-indirect first-instance support");
 		}
-		if (!GBufferBindlessIndirectGraphicsPipeline)
-			AppendCpuRuntimeTrace(L"[InitGBufferPass] failed to create Bindless Indirect GBuffer pipeline");
 	}
 
 	if (!CORONA_PLATFORM_MOBILE)
@@ -2982,6 +3000,279 @@ bool Corona::DrawStaticInstancedScene(
 	return true;
 }
 
+bool Corona::DrawStaticObjectBindlessBatch(const std::vector<const SceneObject*>& objects)
+{
+	auto failPrerequisite = [](const wchar_t* reason) -> bool
+	{
+		const std::wstring reasonText = reason ? reason : L"unknown";
+		static std::vector<std::wstring> loggedReasons;
+		bool bAlreadyLogged = false;
+		for (const std::wstring& loggedReason : loggedReasons)
+		{
+			if (loggedReason == reasonText)
+			{
+				bAlreadyLogged = true;
+				break;
+			}
+		}
+		if (!bAlreadyLogged)
+		{
+			AppendCpuRuntimeTrace(
+				std::wstring(L"[GBufferObjectBatch] prerequisite failed: ") +
+				reasonText);
+			loggedReasons.push_back(reasonText);
+		}
+		return false;
+	};
+
+	if (objects.empty())
+		return false;
+	if (!renderBackend)
+		return failPrerequisite(L"missing render backend");
+	if (!GBufferBindlessIndirectGraphicsPipeline)
+		return failPrerequisite(L"missing bindless indirect pipeline");
+	if (!samplerWrap)
+		return failPrerequisite(L"missing sampler");
+	if (!DefaultWhiteTex || !DefaultNormalTex || !DefaultRougnessTex || !DefaultBlackTex)
+		return failPrerequisite(L"missing default material texture");
+
+	if (!SupportsGBufferBindlessMaterials(renderBackend.get()) ||
+		!SupportsGBufferBindlessGeometry(renderBackend.get()))
+	{
+		return failPrerequisite(L"backend lacks bindless material or geometry support");
+	}
+	const RenderBackendCapabilities backendCapabilities = renderBackend->GetCapabilities();
+	if (!backendCapabilities.SupportsDrawIndirect ||
+		!backendCapabilities.SupportsDrawIndirectFirstInstance)
+	{
+		return failPrerequisite(L"backend lacks draw indirect first-instance support");
+	}
+	if (renderBackend->GetAPI() == ERenderBackendAPI::Vulkan && bStartupLoadingScreenActive)
+		return failPrerequisite(L"vulkan startup loading screen active");
+
+	std::vector<GBufferMaterialKey> materialKeys;
+	std::vector<GBufferMaterialRecord> materialRecords;
+	std::vector<GBufferGeometryKey> geometryKeys;
+	std::vector<GBufferGeometryRecord> geometryRecords;
+	std::vector<GBufferDrawRecord> drawRecords;
+	std::vector<DrawIndirectArguments> indirectArgs;
+
+	materialKeys.reserve(64);
+	materialRecords.reserve(64);
+	geometryKeys.reserve(64);
+	geometryRecords.reserve(64);
+	drawRecords.reserve(objects.size());
+	indirectArgs.reserve(objects.size());
+
+	auto findOrAddMaterial = [&](const GBufferMaterialKey& key, uint32_t& outIndex) -> bool
+	{
+		for (size_t i = 0; i < materialKeys.size(); ++i)
+		{
+			if (materialKeys[i] == key)
+			{
+				outIndex = static_cast<uint32_t>(i);
+				return true;
+			}
+		}
+		if (materialRecords.size() >= static_cast<size_t>(std::numeric_limits<uint32_t>::max()))
+			return false;
+		GBufferMaterialRecord record = MakeGBufferMaterialRecord(renderBackend.get(), key);
+		if (!IsValidGBufferMaterialRecord(record))
+			return false;
+		materialKeys.push_back(key);
+		materialRecords.push_back(record);
+		outIndex = static_cast<uint32_t>(materialRecords.size() - 1);
+		return true;
+	};
+
+	auto findOrAddGeometry = [&](const GBufferGeometryKey& key, uint32_t& outIndex) -> bool
+	{
+		for (size_t i = 0; i < geometryKeys.size(); ++i)
+		{
+			if (geometryKeys[i] == key)
+			{
+				outIndex = static_cast<uint32_t>(i);
+				return true;
+			}
+		}
+		if (geometryRecords.size() >= static_cast<size_t>(std::numeric_limits<uint32_t>::max()))
+			return false;
+		GBufferGeometryRecord record = MakeGBufferGeometryRecord(renderBackend.get(), key);
+		if (!IsValidGBufferGeometryRecord(record))
+			return false;
+		geometryKeys.push_back(key);
+		geometryRecords.push_back(record);
+		outIndex = static_cast<uint32_t>(geometryRecords.size() - 1);
+		return true;
+	};
+
+	for (const SceneObject* objectPtr : objects)
+	{
+		if (!objectPtr || !objectPtr->ScenePtr)
+			return failPrerequisite(L"missing object or scene");
+		const SceneObject& object = *objectPtr;
+		for (const std::shared_ptr<Mesh>& mesh : object.ScenePtr->meshes)
+		{
+			if (!mesh)
+				continue;
+			if (!IsGBufferStaticBindlessGeometryEligible(*mesh))
+				return failPrerequisite(L"mesh is not static bindless eligible");
+
+			uint32_t geometryIndex = 0;
+			const GBufferGeometryKey geometryKey{
+				mesh->Vb.get(),
+				mesh->Ib.get(),
+				mesh->VertexStride,
+				GetGBufferIndexStride(mesh->IndexFormat)
+			};
+			if (!findOrAddGeometry(geometryKey, geometryIndex))
+				return failPrerequisite(L"geometry registration failed");
+
+			const glm::mat4x4 worldMatrix = glm::transpose(object.Transform * mesh->transform);
+			for (const Mesh::DrawCall& drawcall : mesh->Draws)
+			{
+				if (drawcall.IndexCount == 0)
+					continue;
+				if (drawRecords.size() >= static_cast<size_t>(std::numeric_limits<uint32_t>::max()))
+					return failPrerequisite(L"draw record count overflow");
+
+				Material* material = drawcall.mat ? drawcall.mat.get() : mesh->Mat.get();
+				const GBufferMaterialKey materialKey = ResolveGBufferMaterialKey(
+					material,
+					DefaultWhiteTex.get(),
+					DefaultNormalTex.get(),
+					DefaultRougnessTex.get(),
+					DefaultBlackTex.get());
+				uint32_t materialIndex = 0;
+				if (!findOrAddMaterial(materialKey, materialIndex))
+					return failPrerequisite(L"material registration failed");
+
+				GBufferDrawRecord drawRecord{};
+				drawRecord.WorldMatrixRow0 = worldMatrix[0];
+				drawRecord.WorldMatrixRow1 = worldMatrix[1];
+				drawRecord.WorldMatrixRow2 = worldMatrix[2];
+				drawRecord.WorldMatrixRow3 = worldMatrix[3];
+				drawRecord.BaseColorFactor = drawcall.mat ? drawcall.mat->BaseColorFactor : glm::vec4(1.0f);
+				drawRecord.RougnessMetalic = glm::vec2(object.Roughness, object.Metallic);
+				drawRecord.bOverrideRougnessMetallic = object.bOverrideRoughnessMetallic ? 1u : 0u;
+				drawRecord.bTwoSidedLighting = mesh->bGrassMesh ? 1u : 0u;
+				drawRecord.bUnlitMaterial = 0u;
+				drawRecord.bGrassMesh = mesh->bGrassMesh ? 1u : 0u;
+				drawRecord.bTerrainMesh = mesh->bTerrainMesh ? 1u : 0u;
+				drawRecord.bExcludeFromDeformSphere = mesh->bExcludeFromDeformSphere ? 1u : 0u;
+				drawRecord.GBufferMaterialIndex = materialIndex;
+				drawRecord.GBufferGeometryIndex = geometryIndex;
+				drawRecord.GBufferIndexStart = drawcall.IndexStart;
+				drawRecord.GBufferVertexBase = drawcall.VertexBase;
+
+				DrawIndirectArguments arg{};
+				std::wstring failureReason;
+				if (!BuildGBufferIndirectDrawArguments(
+					static_cast<uint32_t>(drawRecords.size()),
+					drawcall.IndexCount,
+					arg,
+					&failureReason))
+				{
+					return failPrerequisite(failureReason.c_str());
+				}
+
+				drawRecords.push_back(drawRecord);
+				indirectArgs.push_back(arg);
+			}
+		}
+	}
+
+	if (drawRecords.empty() || materialRecords.empty() || geometryRecords.empty() || indirectArgs.empty())
+		return true;
+
+	std::shared_ptr<Buffer> materialBuffer = renderBackend->AllocateTransientUploadStructuredBuffer(
+		static_cast<uint32_t>(materialRecords.size()),
+		static_cast<uint32_t>(sizeof(GBufferMaterialRecord)),
+		materialRecords.data());
+	std::shared_ptr<Buffer> geometryBuffer = renderBackend->AllocateTransientUploadStructuredBuffer(
+		static_cast<uint32_t>(geometryRecords.size()),
+		static_cast<uint32_t>(sizeof(GBufferGeometryRecord)),
+		geometryRecords.data());
+	std::shared_ptr<Buffer> drawRecordBuffer = renderBackend->AllocateTransientUploadStructuredBuffer(
+		static_cast<uint32_t>(drawRecords.size()),
+		static_cast<uint32_t>(sizeof(GBufferDrawRecord)),
+		drawRecords.data());
+	std::shared_ptr<Buffer> indirectArgsBuffer = renderBackend->AllocateTransientUploadStructuredBuffer(
+		static_cast<uint32_t>(indirectArgs.size()),
+		static_cast<uint32_t>(sizeof(DrawIndirectArguments)),
+		indirectArgs.data());
+	if (!materialBuffer || !geometryBuffer || !drawRecordBuffer || !indirectArgsBuffer)
+		return failPrerequisite(L"transient upload allocation failed");
+
+	GraphicsPipelineHandle* pso = GBufferBindlessIndirectGraphicsPipeline.get();
+	renderBackend->BindGraphicsPipeline(pso);
+	if (!BindGBufferSceneResourceBindGroup(
+		renderBackend.get(),
+		pso,
+		objects.front()->ScenePtr.get(),
+		samplerWrap.get(),
+		materialBuffer.get(),
+		geometryBuffer.get(),
+		drawRecordBuffer.get(),
+		false))
+	{
+		return failPrerequisite(L"resource bind group creation failed");
+	}
+
+	GBufferConstantBuffer objCB = {};
+	objCB.ViewProjectionMatrix = glm::transpose(ViewProjMat);
+	objCB.PrevViewProjectionMatrix = glm::transpose(PrevViewProjMat);
+	objCB.WorldMatrix = glm::mat4x4(1.0f);
+	objCB.UnjitteredViewProjMat = glm::transpose(UnjitteredViewProjMat);
+	objCB.PrevUnjitteredViewProjMat = glm::transpose(PrevUnjitteredViewProjMat);
+	objCB.ViewDir.x = RenderFrameCameraLookDirection.x;
+	objCB.ViewDir.y = RenderFrameCameraLookDirection.y;
+	objCB.ViewDir.z = RenderFrameCameraLookDirection.z;
+	objCB.ViewDir.w = 0.0f;
+	objCB.BaseColorFactor = glm::vec4(1.0f);
+	objCB.RTSize.x = GetRenderWidth();
+	objCB.RTSize.y = GetRenderHeight();
+	objCB.RougnessMetalic = glm::vec2(1.0f, 0.0f);
+	objCB.bOverrideRougnessMetallic = 0u;
+	objCB.MeshDeformParams = glm::vec4(RenderFrameWindTime, 0.0f, 0.0f, 0.0f);
+	objCB.GrassBendOrigin = RenderFrameGrassBendOrigin;
+	objCB.GrassBendParams = RenderFrameGrassBendParams;
+	objCB.WindParams = RenderFrameWindParams;
+	objCB.WindTuning = RenderFrameWindTuning;
+	objCB.TerrainDeformSphere = RenderFrameTerrainDeformSphere;
+	objCB.bGBufferBindlessGeometry = 1u;
+
+	static bool bLoggedFirstStaticObjectBatch = false;
+	std::vector<GraphicsBindGroupEntry> drawBindEntries;
+	drawBindEntries.reserve(1);
+	drawBindEntries.push_back(GraphicsBindGroupEntry::Constant(0, &objCB, sizeof(objCB)));
+	if (!CreateAndBindGraphicsBindGroup(renderBackend.get(), pso, kGraphicsBindGroupSlot_Draw, drawBindEntries))
+		return failPrerequisite(L"draw bind group creation failed");
+
+	const bool bDrawSubmitted = renderBackend->DrawIndirect(
+		indirectArgsBuffer.get(),
+		0,
+		static_cast<uint32_t>(indirectArgs.size()));
+	if (!bDrawSubmitted)
+		return failPrerequisite(L"draw submission failed");
+
+	++GBufferLastBindlessObjectBatchCount;
+	GBufferLastBindlessObjectCount += static_cast<uint64_t>(objects.size());
+	GBufferLastBindlessObjectDrawCount += static_cast<uint64_t>(drawRecords.size());
+
+	if (!bLoggedFirstStaticObjectBatch || (FrameCounter % 120u) == 0u)
+	{
+		AppendCpuRuntimeTrace(
+			L"[GBufferObjectBatch] submitted objects=" + std::to_wstring(objects.size()) +
+			L", records=" + std::to_wstring(drawRecords.size()) +
+			L", indirectDraws=" + std::to_wstring(indirectArgs.size()) +
+			L", materials=" + std::to_wstring(materialRecords.size()) +
+			L", geometries=" + std::to_wstring(geometryRecords.size()));
+		bLoggedFirstStaticObjectBatch = true;
+	}
+	return true;
+}
+
 void Corona::DrawScene(shared_ptr<Scene> scene, const glm::mat4x4& instanceTransform, float Roughness, float Metalic, bool bOverrideRoughnessMetallic)
 {
 	if (!scene)
@@ -2998,38 +3289,58 @@ void Corona::DrawScene(shared_ptr<Scene> scene, const glm::mat4x4& instanceTrans
 	bool bUseSceneBindlessGeometry =
 		GBufferBindlessGeometryGraphicsPipeline &&
 		geometryTable.Buffer;
+	const RenderBackendCapabilities backendCapabilities =
+		renderBackend ? renderBackend->GetCapabilities() : RenderBackendCapabilities{};
+	const bool bBackendSupportsBindlessIndirect =
+		renderBackend &&
+		backendCapabilities.SupportsDrawIndirect &&
+		backendCapabilities.SupportsDrawIndirectFirstInstance;
+	const bool bSceneStaticBindlessIndirectCandidate =
+		IsGBufferSceneStaticBindlessGeometryEligible(scene.get());
+	const bool bSceneRequiresBindlessIndirect =
+		bSceneStaticBindlessIndirectCandidate;
 
 	auto tryDrawSceneBindlessIndirect = [&]() -> bool
 	{
-		static const bool bDisableGBufferBindlessIndirect =
-			std::getenv("CORONA_DISABLE_GBUFFER_BINDLESS_INDIRECT") != nullptr;
-		static bool bLoggedDisableGBufferBindlessIndirect = false;
-		if (bDisableGBufferBindlessIndirect)
+		auto failPrerequisite = [](const wchar_t* reason) -> bool
 		{
-			if (!bLoggedDisableGBufferBindlessIndirect)
+			const std::wstring reasonText = reason ? reason : L"unknown";
+			static std::vector<std::wstring> loggedReasons;
+			bool bAlreadyLogged = false;
+			for (const std::wstring& loggedReason : loggedReasons)
 			{
-				AppendCpuRuntimeTrace(L"[GBufferIndirect] disabled by CORONA_DISABLE_GBUFFER_BINDLESS_INDIRECT");
-				bLoggedDisableGBufferBindlessIndirect = true;
+				if (loggedReason == reasonText)
+				{
+					bAlreadyLogged = true;
+					break;
+				}
+			}
+			if (!bAlreadyLogged)
+			{
+				AppendCpuRuntimeTrace(
+					std::wstring(L"[GBufferIndirect] prerequisite failed: ") +
+					reasonText);
+				loggedReasons.push_back(reasonText);
 			}
 			return false;
-		}
+		};
 
-		if (!GBufferBindlessIndirectGraphicsPipeline ||
-			!bUseSceneBindlessGeometry ||
-			!materialTable.Buffer ||
-			!geometryTable.Buffer ||
-			!samplerWrap)
-		{
+		if (!bSceneStaticBindlessIndirectCandidate)
 			return false;
-		}
-		const RenderBackendCapabilities backendCapabilities = renderBackend->GetCapabilities();
-		if (!backendCapabilities.SupportsDrawIndirect ||
-			!backendCapabilities.SupportsDrawIndirectFirstInstance)
-		{
-			return false;
-		}
+		if (!bBackendSupportsBindlessIndirect)
+			return failPrerequisite(L"backend lacks draw indirect first-instance support");
+		if (!GBufferBindlessIndirectGraphicsPipeline)
+			return failPrerequisite(L"missing bindless indirect pipeline");
+		if (!materialTable.Buffer)
+			return failPrerequisite(L"missing material table");
+		if (!geometryTable.Buffer)
+			return failPrerequisite(L"missing geometry table");
+		if (!bUseSceneBindlessGeometry)
+			return failPrerequisite(L"missing bindless geometry pipeline");
+		if (!samplerWrap)
+			return failPrerequisite(L"missing sampler");
 		if (renderBackend->GetAPI() == ERenderBackendAPI::Vulkan && bStartupLoadingScreenActive)
-			return false;
+			return failPrerequisite(L"vulkan startup loading screen active");
 
 		uint32_t drawCount = 0;
 		for (const std::shared_ptr<Mesh>& mesh : scene->meshes)
@@ -3037,17 +3348,17 @@ void Corona::DrawScene(shared_ptr<Scene> scene, const glm::mat4x4& instanceTrans
 			if (!mesh)
 				continue;
 			if (!mesh->Vb || !mesh->Ib)
-				return false;
+				return failPrerequisite(L"mesh missing geometry buffers");
 			if (!IsGBufferStaticBindlessGeometryEligible(*mesh))
 			{
-				return false;
+				return failPrerequisite(L"mesh is not static bindless eligible");
 			}
 			for (const Mesh::DrawCall& drawcall : mesh->Draws)
 			{
 				if (drawcall.IndexCount == 0)
 					continue;
 				if (drawCount == std::numeric_limits<uint32_t>::max())
-					return false;
+					return failPrerequisite(L"draw count overflow");
 				++drawCount;
 			}
 		}
@@ -3090,10 +3401,15 @@ void Corona::DrawScene(shared_ptr<Scene> scene, const glm::mat4x4& instanceTrans
 				drawRecord.GBufferVertexBase = drawcall.VertexBase;
 
 				DrawIndirectArguments arg{};
-				arg.VertexCountPerInstance = drawcall.IndexCount;
-				arg.InstanceCount = 1;
-				arg.StartVertexLocation = 0;
-				arg.StartInstanceLocation = static_cast<uint32_t>(drawRecords.size());
+				std::wstring failureReason;
+				if (!BuildGBufferIndirectDrawArguments(
+					static_cast<uint32_t>(drawRecords.size()),
+					drawcall.IndexCount,
+					arg,
+					&failureReason))
+				{
+					return failPrerequisite(failureReason.c_str());
+				}
 
 				drawRecords.push_back(drawRecord);
 				indirectArgs.push_back(arg);
@@ -3109,7 +3425,7 @@ void Corona::DrawScene(shared_ptr<Scene> scene, const glm::mat4x4& instanceTrans
 			static_cast<uint32_t>(sizeof(DrawIndirectArguments)),
 			indirectArgs.data());
 		if (!drawRecordBuffer || !indirectArgsBuffer)
-			return false;
+			return failPrerequisite(L"transient upload allocation failed");
 
 		GraphicsPipelineHandle* pso = GBufferBindlessIndirectGraphicsPipeline.get();
 		renderBackend->BindGraphicsPipeline(pso);
@@ -3123,7 +3439,7 @@ void Corona::DrawScene(shared_ptr<Scene> scene, const glm::mat4x4& instanceTrans
 			drawRecordBuffer.get(),
 			false))
 		{
-			return false;
+			return failPrerequisite(L"resource bind group creation failed");
 		}
 
 		GBufferConstantBuffer objCB = {};
@@ -3148,12 +3464,13 @@ void Corona::DrawScene(shared_ptr<Scene> scene, const glm::mat4x4& instanceTrans
 		objCB.WindParams = RenderFrameWindParams;
 		objCB.WindTuning = RenderFrameWindTuning;
 		objCB.TerrainDeformSphere = RenderFrameTerrainDeformSphere;
+		objCB.bGBufferBindlessGeometry = 1u;
 
 		std::vector<GraphicsBindGroupEntry> drawBindEntries;
 		drawBindEntries.reserve(1);
 		drawBindEntries.push_back(GraphicsBindGroupEntry::Constant(0, &objCB, sizeof(objCB)));
 		if (!CreateAndBindGraphicsBindGroup(renderBackend.get(), pso, kGraphicsBindGroupSlot_Draw, drawBindEntries))
-			return false;
+			return failPrerequisite(L"draw bind group creation failed");
 
 		const bool bDrawSubmitted = renderBackend->DrawIndirect(
 			indirectArgsBuffer.get(),
@@ -3168,11 +3485,25 @@ void Corona::DrawScene(shared_ptr<Scene> scene, const glm::mat4x4& instanceTrans
 				bLoggedBindlessIndirect = true;
 			}
 		}
+		else
+		{
+			return failPrerequisite(L"draw submission failed");
+		}
 		return bDrawSubmitted;
 	};
 
 	if (tryDrawSceneBindlessIndirect())
 		return;
+	if (bSceneRequiresBindlessIndirect)
+	{
+		static bool bLoggedBindlessIndirectRequiredFailure = false;
+		if (!bLoggedBindlessIndirectRequiredFailure)
+		{
+			AppendCpuRuntimeTrace(L"[GBufferIndirect] required static bindless indirect draw failed; no fallback draw submitted");
+			bLoggedBindlessIndirectRequiredFailure = true;
+		}
+		return;
+	}
 
 	for (auto& mesh : scene->meshes)
 	{
@@ -4012,6 +4343,9 @@ void Corona::PrepareGBufferCulling(uint32_t sceneObjectCount)
 	GBufferLastStaticInstancedBatchCount = 0;
 	GBufferLastStaticInstancedObjectCount = 0;
 	GBufferLastStaticInstancedDrawCount = 0;
+	GBufferLastBindlessObjectBatchCount = 0;
+	GBufferLastBindlessObjectCount = 0;
+	GBufferLastBindlessObjectDrawCount = 0;
 	GBufferOcclusionQueryCount = 0;
 	bGBufferOcclusionQueriesActive = false;
 
@@ -4307,6 +4641,40 @@ void Corona::GBufferPass()
 			staticInstancingEligibilityCache[key] = eligible;
 			return eligible;
 		};
+		std::map<const Scene*, bool> staticObjectBatchEligibilityCache;
+		auto isStaticObjectBatchEligibleCached = [this, &staticObjectBatchEligibilityCache](const std::shared_ptr<Scene>& scene)
+		{
+			if (!scene)
+				return false;
+			const Scene* key = scene.get();
+			auto it = staticObjectBatchEligibilityCache.find(key);
+			if (it != staticObjectBatchEligibilityCache.end())
+				return it->second;
+
+			bool eligible = !scene->meshes.empty();
+			bool hasDrawableRange = false;
+			if (eligible)
+			{
+				for (const std::shared_ptr<Mesh>& mesh : scene->meshes)
+				{
+					if (!mesh || !mesh->Vb || !mesh->Ib || mesh->Draws.empty() ||
+						mesh->bTerrainMesh || mesh->bGrassMesh ||
+						!IsGBufferStaticBindlessGeometryEligible(*mesh))
+					{
+						eligible = false;
+						break;
+					}
+					for (const Mesh::DrawCall& drawcall : mesh->Draws)
+					{
+						if (drawcall.IndexCount != 0)
+							hasDrawableRange = true;
+					}
+				}
+			}
+			eligible = eligible && hasDrawableRange;
+			staticObjectBatchEligibilityCache[key] = eligible;
+			return eligible;
+		};
 		auto sceneHasProceduralGrass = [](const std::shared_ptr<Scene>& scene)
 		{
 			if (!scene)
@@ -4341,6 +4709,8 @@ void Corona::GBufferPass()
 		{
 			std::map<StaticBatchKey, StaticBatch> staticBatches;
 			std::vector<const SceneObject*> staticBatchObjectPtrs;
+			std::vector<StaticBatch::ObjectEntry> bindlessObjectBatch;
+			std::vector<const SceneObject*> bindlessObjectBatchPtrs;
 			for (const SceneObject& object : RenderWorld.SceneObjects)
 			{
 				if (!object.bVisible || !object.ScenePtr)
@@ -4354,29 +4724,6 @@ void Corona::GBufferPass()
 					continue;
 
 				++GBufferLastTotalObjectCount;
-
-				glm::vec3 boundsMin(0.0f);
-				glm::vec3 boundsMax(0.0f);
-				glm::vec3 boundsCenter(0.0f);
-				float boundsRadius = 0.0f;
-				const bool bHasBounds = GetSceneObjectWorldBounds(object, boundsMin, boundsMax, boundsCenter, boundsRadius);
-				if (bHasBounds)
-				{
-					if (!IsWorldAabbInViewFrustum(boundsMin, boundsMax))
-					{
-						++GBufferLastFrustumCulledObjectCount;
-						auto stateIt = SceneObjectCullingStates.find(object.Handle);
-						if (stateIt != SceneObjectCullingStates.end())
-						{
-							stateIt->second.LastVisible = true;
-							stateIt->second.HasPendingOcclusionQuery = false;
-						}
-						continue;
-					}
-
-					if (!ShouldDrawSceneObjectInGBuffer(object, boundsCenter, boundsRadius))
-						continue;
-				}
 
 				const bool bTerrainScene =
 					ActiveTerrain && object.ScenePtr == ActiveTerrain->GetScene();
@@ -4401,6 +4748,44 @@ void Corona::GBufferPass()
 					!bLegacyGrassScene &&
 					staticCandidateCount >= kMinStaticGBufferInstanceCount &&
 					isStaticInstancingEligibleCached(object.ScenePtr);
+				const bool bBindlessObjectBatchCandidate =
+					drawSpinePass == 0 &&
+					!bTerrainScene &&
+					!bProceduralGrassScene &&
+					!bLegacyGrassScene &&
+					isStaticObjectBatchEligibleCached(object.ScenePtr);
+				const bool bDrawsWithoutOcclusionQuery =
+					bStaticInstancingCandidate || bBindlessObjectBatchCandidate;
+
+				glm::vec3 boundsMin(0.0f);
+				glm::vec3 boundsMax(0.0f);
+				glm::vec3 boundsCenter(0.0f);
+				float boundsRadius = 0.0f;
+				const bool bHasBounds = GetSceneObjectWorldBounds(object, boundsMin, boundsMax, boundsCenter, boundsRadius);
+				if (bHasBounds)
+				{
+					if (!IsWorldAabbInViewFrustum(boundsMin, boundsMax))
+					{
+						++GBufferLastFrustumCulledObjectCount;
+						auto stateIt = SceneObjectCullingStates.find(object.Handle);
+						if (stateIt != SceneObjectCullingStates.end())
+						{
+							stateIt->second.LastVisible = true;
+							stateIt->second.HasPendingOcclusionQuery = false;
+						}
+						continue;
+					}
+
+					if (!bDrawsWithoutOcclusionQuery &&
+						!ShouldDrawSceneObjectInGBuffer(object, boundsCenter, boundsRadius))
+						continue;
+				}
+				if (bBindlessObjectBatchCandidate)
+				{
+					bindlessObjectBatch.push_back({ &object, bHasBounds, boundsCenter, boundsRadius });
+					continue;
+				}
+
 				if (bStaticInstancingCandidate)
 				{
 					StaticBatch& batch = staticBatches[staticBatchKey];
@@ -4436,6 +4821,42 @@ void Corona::GBufferPass()
 					EndGpuPassTiming(EGpuPass::Grass);
 				EndGBufferOcclusionQuery(object.Handle, occlusionQueryIndex);
 				++GBufferLastVisibleObjectCount;
+			}
+
+			if (!bindlessObjectBatch.empty())
+			{
+				bindlessObjectBatchPtrs.clear();
+				bindlessObjectBatchPtrs.reserve(bindlessObjectBatch.size());
+				for (const StaticBatch::ObjectEntry& entry : bindlessObjectBatch)
+				{
+					if (entry.Object)
+						bindlessObjectBatchPtrs.push_back(entry.Object);
+				}
+
+				if (!bindlessObjectBatchPtrs.empty() &&
+					DrawStaticObjectBindlessBatch(bindlessObjectBatchPtrs))
+				{
+					for (const StaticBatch::ObjectEntry& entry : bindlessObjectBatch)
+					{
+						if (!entry.Object)
+							continue;
+						markObjectDrawnWithoutOcclusionQuery(
+							*entry.Object,
+							entry.HasBounds,
+							entry.BoundsCenter,
+							entry.BoundsRadius);
+						++GBufferLastVisibleObjectCount;
+					}
+				}
+				else
+				{
+					static bool bLoggedBindlessObjectBatchFailure = false;
+					if (!bLoggedBindlessObjectBatchFailure)
+					{
+						AppendCpuRuntimeTrace(L"[GBufferObjectBatch] required bindless indirect batch failed; no fallback draw submitted");
+						bLoggedBindlessObjectBatchFailure = true;
+					}
+				}
 			}
 
 			for (auto& batchPair : staticBatches)
@@ -4545,6 +4966,9 @@ void Corona::GBufferPass()
 			L", staticBatches=" + std::to_wstring(GBufferLastStaticInstancedBatchCount) +
 			L", staticObjects=" + std::to_wstring(GBufferLastStaticInstancedObjectCount) +
 			L", staticDraws=" + std::to_wstring(GBufferLastStaticInstancedDrawCount) +
+			L", bindlessBatches=" + std::to_wstring(GBufferLastBindlessObjectBatchCount) +
+			L", bindlessObjects=" + std::to_wstring(GBufferLastBindlessObjectCount) +
+			L", bindlessDraws=" + std::to_wstring(GBufferLastBindlessObjectDrawCount) +
 			L", active=" + std::to_wstring(bGBufferOcclusionQueriesActive ? 1 : 0));
 	}
 	

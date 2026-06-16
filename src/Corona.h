@@ -377,6 +377,10 @@ private:
 		UINT32 GBufferIndexStart = 0;
 		INT32 GBufferVertexBase = 0;
 		UINT32 bGBufferBindlessGeometry = 0;
+		UINT32 GBufferDrawRecordBase = 0;
+		UINT32 GBufferDrawRecordPad0 = 0;
+		UINT32 GBufferDrawRecordPad1 = 0;
+		UINT32 GBufferDrawRecordPad2 = 0;
 		// WindParams: .xyz = wind direction normalized in XZ (Y typically 0),
 		// .w = strength (0 disables wind sway).
 		glm::vec4 WindParams = glm::vec4(0.0f);
@@ -2165,6 +2169,9 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	uint64_t GBufferLastStaticInstancedBatchCount = 0;
 	uint64_t GBufferLastStaticInstancedObjectCount = 0;
 	uint64_t GBufferLastStaticInstancedDrawCount = 0;
+	uint64_t GBufferLastBindlessObjectBatchCount = 0;
+	uint64_t GBufferLastBindlessObjectCount = 0;
+	uint64_t GBufferLastBindlessObjectDrawCount = 0;
 	uint64_t MobileShadowLastTotalObjectCount = 0;
 	uint64_t MobileShadowLastCandidateObjectCount = 0;
 	uint64_t MobileShadowLastReceiverObjectCount = 0;
@@ -3312,6 +3319,7 @@ public:
 		float roughness,
 		float metallic,
 		bool overrideRoughnessMetallic);
+	bool DrawStaticObjectBindlessBatch(const std::vector<const SceneObject*>& objects);
 	bool BuildMobileShadowViewProjection(glm::mat4x4& lightViewProj);
 	bool GetSceneObjectWorldBounds(const SceneObject& object, glm::vec3& boundsMin, glm::vec3& boundsMax, glm::vec3& center, float& radius) const;
 	bool IsWorldAabbInViewFrustum(const glm::vec3& boundsMin, const glm::vec3& boundsMax) const;

@@ -7695,12 +7695,15 @@ std::shared_ptr<GraphicsPipelineHandle> DX12Backend::CreateGraphicsPipeline(cons
 	auto handle = std::make_shared<DX12GraphicsPipelineHandle>();
 
 	const bool bRequiresVertexBindlessBufferSM66 = RequiresDX12VertexBindlessBufferShaderModel66(desc);
-	const std::string vertexShaderTarget = bRequiresVertexBindlessBufferSM66 ? "vs_6_6" : "vs_6_0";
+	const bool bRequiresDrawParametersSM68 = desc.VertexEntryPoint == "VSMainBindlessIndirect";
+	const std::string vertexShaderTarget =
+		bRequiresDrawParametersSM68 ? "vs_6_8" :
+		(bRequiresVertexBindlessBufferSM66 ? "vs_6_6" : "vs_6_0");
 	if (bRequiresVertexBindlessBufferSM66)
 	{
 		AppendCpuRuntimeTrace(
 			L"[DX12GraphicsPipeline] using " + ToWide(vertexShaderTarget) +
-			L" for vertex bindless buffer pipeline shader=\"" + desc.ShaderPath +
+			L" for vertex bindless pipeline shader=\"" + desc.ShaderPath +
 			L"\", entry=\"" + ToWide(desc.VertexEntryPoint) + L"\"");
 	}
 

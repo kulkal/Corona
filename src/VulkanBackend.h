@@ -471,6 +471,8 @@ private:
 		std::vector<VkBuffer>& fallbackBuffers,
 		std::vector<VkDeviceMemory>& fallbackMemories);
 	void LoadRayTracingFunctionPointers();
+	void InitializePipelineCache();
+	void SaveAndDestroyPipelineCache();
 	bool InitializeBindlessDescriptorTables();
 	void DestroyBindlessDescriptorTables();
 	void BindGraphicsPipelineForDraw(VulkanGraphicsPipelineHandle* pipeline);
@@ -602,6 +604,7 @@ private:
 	VkPhysicalDevice PhysicalDevice = VK_NULL_HANDLE;
 	VkDevice Device = VK_NULL_HANDLE;
 	VkSurfaceKHR Surface = VK_NULL_HANDLE;
+	VkPipelineCache PipelineCache = VK_NULL_HANDLE;
 	VkSwapchainKHR Swapchain = VK_NULL_HANDLE;
 	VkQueue GraphicsQueue = VK_NULL_HANDLE;
 	uint32_t GraphicsQueueFamilyIndex = UINT32_MAX;

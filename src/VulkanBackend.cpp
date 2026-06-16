@@ -17,6 +17,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <iterator>
 #include <map>
 #include <optional>
@@ -763,6 +764,70 @@ namespace
 		std::ofstream traceFile(tracePath, std::ios::app);
 		if (traceFile.is_open())
 			traceFile << PlatformWideToUtf8(line) << "\n";
+	}
+
+	bool IsShaderCacheEnabled()
+	{
+		static const bool enabled = []
+		{
+			const auto value = GetPlatformEnvironmentVariable(L"CORONA_DISABLE_SHADER_CACHE");
+			return !value || value->empty() || *value == L"0";
+		}();
+		return enabled;
+	}
+
+	std::filesystem::path VulkanPipelineCacheDir()
+	{
+		return RuntimePaths::RootDirectory() / L"bin" / L"shadercache";
+	}
+
+	bool ReadBinaryFile(const std::filesystem::path& path, std::vector<uint8_t>& out)
+	{
+		std::error_code ec;
+		const auto size = std::filesystem::file_size(path, ec);
+		if (ec || size == 0)
+			return false;
+		std::ifstream file(path, std::ios::binary);
+		if (!file.good())
+			return false;
+		out.resize(static_cast<size_t>(size));
+		file.read(reinterpret_cast<char*>(out.data()), static_cast<std::streamsize>(size));
+		return static_cast<size_t>(file.gcount()) == out.size();
+	}
+
+	void WriteBinaryFile(const std::filesystem::path& path, const void* data, size_t size)
+	{
+		if (!data || size == 0 || !IsShaderCacheEnabled())
+			return;
+		std::error_code ec;
+		std::filesystem::create_directories(path.parent_path(), ec);
+		std::filesystem::path tmp = path;
+		tmp += L".tmp";
+		{
+			std::ofstream file(tmp, std::ios::binary | std::ios::trunc);
+			if (!file.good())
+				return;
+			file.write(static_cast<const char*>(data), static_cast<std::streamsize>(size));
+			if (!file.good())
+				return;
+		}
+		std::filesystem::rename(tmp, path, ec);
+		if (ec)
+			std::filesystem::remove(tmp, ec);
+	}
+
+	std::filesystem::path GetVulkanPipelineCachePath(VkPhysicalDevice physicalDevice)
+	{
+		VkPhysicalDeviceProperties properties{};
+		if (physicalDevice != VK_NULL_HANDLE)
+			vkGetPhysicalDeviceProperties(physicalDevice, &properties);
+
+		std::wstringstream name;
+		name << L"vulkan_pipeline_";
+		for (uint8_t byte : properties.pipelineCacheUUID)
+			name << std::hex << std::setw(2) << std::setfill(L'0') << static_cast<uint32_t>(byte);
+		name << L".cache";
+		return VulkanPipelineCacheDir() / name.str();
 	}
 
 	bool IsVulkanValidationEnabled()
@@ -1988,7 +2053,7 @@ bool VulkanRTPipelineStateObject::InitRS(const std::string& shaderFile)
 		pipelineCreateInfo.pGroups = ShaderGroups.data();
 		pipelineCreateInfo.maxPipelineRayRecursionDepth = MaxRecursion;
 		pipelineCreateInfo.layout = PipelineLayout;
-		if (Owner->vkCreateRayTracingPipelinesKHRFn(Owner->Device, VK_NULL_HANDLE, VK_NULL_HANDLE, 1, &pipelineCreateInfo, nullptr, &Pipeline) != VK_SUCCESS)
+		if (Owner->vkCreateRayTracingPipelinesKHRFn(Owner->Device, VK_NULL_HANDLE, Owner->PipelineCache, 1, &pipelineCreateInfo, nullptr, &Pipeline) != VK_SUCCESS)
 		{
 			Owner->ErrorString += "Failed to create Vulkan RT pipeline.\n";
 			return false;
@@ -2837,7 +2902,7 @@ bool VulkanComputePipelineStateObject::InitCS(const std::wstring& shaderFile, co
 	pipelineInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
 	pipelineInfo.stage = shaderStageInfo;
 	pipelineInfo.layout = PipelineLayout;
-	if (vkCreateComputePipelines(Owner->Device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &Pipeline) != VK_SUCCESS)
+	if (vkCreateComputePipelines(Owner->Device, Owner->PipelineCache, 1, &pipelineInfo, nullptr, &Pipeline) != VK_SUCCESS)
 		throw std::runtime_error("Failed to create Vulkan compute pipeline.");
 
 	return Pipeline != VK_NULL_HANDLE;
@@ -4179,6 +4244,69 @@ void VulkanBackend::LoadRayTracingFunctionPointers()
 		vkGetBufferDeviceAddressKHRFn != nullptr;
 }
 #endif
+
+void VulkanBackend::InitializePipelineCache()
+{
+#if CORONA_HAS_VULKAN
+	if (Device == VK_NULL_HANDLE || PhysicalDevice == VK_NULL_HANDLE || PipelineCache != VK_NULL_HANDLE || !IsShaderCacheEnabled())
+		return;
+
+	const std::filesystem::path cachePath = GetVulkanPipelineCachePath(PhysicalDevice);
+	std::vector<uint8_t> initialData;
+	ReadBinaryFile(cachePath, initialData);
+
+	VkPipelineCacheCreateInfo cacheInfo{};
+	cacheInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO;
+	cacheInfo.initialDataSize = initialData.size();
+	cacheInfo.pInitialData = initialData.empty() ? nullptr : initialData.data();
+	VkResult result = vkCreatePipelineCache(Device, &cacheInfo, nullptr, &PipelineCache);
+	if (result != VK_SUCCESS && !initialData.empty())
+	{
+		AppendVulkanRuntimeTraceBackend(L"[VulkanCache] stale pipeline cache ignored result=" + std::to_wstring(static_cast<int>(result)));
+		initialData.clear();
+		cacheInfo.initialDataSize = 0;
+		cacheInfo.pInitialData = nullptr;
+		result = vkCreatePipelineCache(Device, &cacheInfo, nullptr, &PipelineCache);
+	}
+	if (result == VK_SUCCESS && PipelineCache != VK_NULL_HANDLE)
+	{
+		AppendVulkanRuntimeTraceBackend(L"[VulkanCache] pipeline cache ready initialBytes=" + std::to_wstring(initialData.size()));
+	}
+	else
+	{
+		PipelineCache = VK_NULL_HANDLE;
+		AppendVulkanRuntimeTraceBackend(L"[VulkanCache] vkCreatePipelineCache failed result=" + std::to_wstring(static_cast<int>(result)));
+	}
+#endif
+}
+
+void VulkanBackend::SaveAndDestroyPipelineCache()
+{
+#if CORONA_HAS_VULKAN
+	if (Device == VK_NULL_HANDLE || PipelineCache == VK_NULL_HANDLE)
+		return;
+
+	if (IsShaderCacheEnabled())
+	{
+		size_t size = 0;
+		VkResult result = vkGetPipelineCacheData(Device, PipelineCache, &size, nullptr);
+		if (result == VK_SUCCESS && size > 0)
+		{
+			std::vector<uint8_t> bytes(size);
+			result = vkGetPipelineCacheData(Device, PipelineCache, &size, bytes.data());
+			if (result == VK_SUCCESS && size > 0)
+			{
+				WriteBinaryFile(GetVulkanPipelineCachePath(PhysicalDevice), bytes.data(), size);
+				AppendVulkanRuntimeTraceBackend(L"[VulkanCache] pipeline cache saved bytes=" + std::to_wstring(size));
+			}
+		}
+	}
+
+	vkDestroyPipelineCache(Device, PipelineCache, nullptr);
+	PipelineCache = VK_NULL_HANDLE;
+#endif
+}
+
 void VulkanBackend::EndFrame()
 {
 #if !CORONA_HAS_VULKAN
@@ -8001,6 +8129,7 @@ void VulkanBackend::CreateSwapChainForWindow(WindowHandle window, uint32_t width
 	if (vkCreateDevice(PhysicalDevice, &deviceCreateInfo, nullptr, &Device) != VK_SUCCESS)
 		throw std::runtime_error("Failed to create Vulkan device for window rendering.");
 	AppendVulkanRuntimeTraceBackend(L"[VulkanBackend::CreateSwapChainForWindow] after vkCreateDevice");
+	InitializePipelineCache();
 	vkCmdInsertDebugUtilsLabelEXTFn = reinterpret_cast<PFN_vkCmdInsertDebugUtilsLabelEXT>(
 		vkGetDeviceProcAddr(Device, "vkCmdInsertDebugUtilsLabelEXT"));
 	vkCmdBeginDebugUtilsLabelEXTFn = reinterpret_cast<PFN_vkCmdBeginDebugUtilsLabelEXT>(
@@ -8259,7 +8388,7 @@ void VulkanBackend::InitializeImGuiBackend(WindowHandle window, ETextureFormat r
 	initInfo.Device = Device;
 	initInfo.QueueFamily = GraphicsQueueFamilyIndex;
 	initInfo.Queue = GraphicsQueue;
-	initInfo.PipelineCache = VK_NULL_HANDLE;
+	initInfo.PipelineCache = PipelineCache;
 	initInfo.DescriptorPool = ImGuiDescriptorPool;
 	initInfo.MinImageCount = 2;
 	initInfo.ImageCount = static_cast<uint32_t>(SwapchainImages.size());
@@ -8992,7 +9121,7 @@ VkPipeline VulkanBackend::CreateTestTrianglePipeline(VkRenderPass compatibleRend
 	pipelineInfo.subpass = 0;
 
 	VkPipeline pipeline = VK_NULL_HANDLE;
-	if (vkCreateGraphicsPipelines(Device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &pipeline) != VK_SUCCESS)
+	if (vkCreateGraphicsPipelines(Device, PipelineCache, 1, &pipelineInfo, nullptr, &pipeline) != VK_SUCCESS)
 		throw std::runtime_error("Failed to create Vulkan test triangle pipeline.");
 	return pipeline;
 }
@@ -9907,6 +10036,7 @@ void VulkanBackend::DestroyWindowContext()
 		vkDestroySwapchainKHR(Device, Swapchain, nullptr);
 	if (CommandPool != VK_NULL_HANDLE)
 		vkDestroyCommandPool(Device, CommandPool, nullptr);
+	SaveAndDestroyPipelineCache();
 	if (Device != VK_NULL_HANDLE)
 		vkDestroyDevice(Device, nullptr);
 	if (Surface != VK_NULL_HANDLE)
@@ -9922,6 +10052,7 @@ void VulkanBackend::DestroyWindowContext()
 	PhysicalDevice = VK_NULL_HANDLE;
 	Device = VK_NULL_HANDLE;
 	Surface = VK_NULL_HANDLE;
+	PipelineCache = VK_NULL_HANDLE;
 	Swapchain = VK_NULL_HANDLE;
 	GraphicsQueue = VK_NULL_HANDLE;
 	GraphicsQueueFamilyIndex = UINT32_MAX;
@@ -10087,7 +10218,7 @@ void VulkanBackend::CreateWindowTrianglePipeline(VkFormat swapchainFormat)
 	pipelineInfo.layout = PipelineLayout;
 	pipelineInfo.renderPass = RenderPass;
 	pipelineInfo.subpass = 0;
-	if (vkCreateGraphicsPipelines(Device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &GraphicsPipeline) != VK_SUCCESS)
+	if (vkCreateGraphicsPipelines(Device, PipelineCache, 1, &pipelineInfo, nullptr, &GraphicsPipeline) != VK_SUCCESS)
 		throw std::runtime_error("Failed to create Vulkan window test triangle pipeline.");
 #endif
 }
@@ -10840,7 +10971,7 @@ std::shared_ptr<GraphicsPipelineHandle> VulkanBackend::CreateGraphicsPipeline(co
 	}
 	pipelineInfo.renderPass = bUseSwapchainRenderPass ? RenderPass : handle->CompatibleRenderPass;
 	pipelineInfo.subpass = 0;
-	if (vkCreateGraphicsPipelines(Device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &handle->Pipeline) != VK_SUCCESS)
+	if (vkCreateGraphicsPipelines(Device, PipelineCache, 1, &pipelineInfo, nullptr, &handle->Pipeline) != VK_SUCCESS)
 		throw std::runtime_error("Failed to create Vulkan graphics pipeline.");
 
 	return handle;

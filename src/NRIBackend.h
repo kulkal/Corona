@@ -33,6 +33,7 @@ public:
 	void EndFrame() override;
 	void WaitForGpu() override;
 	void EmitGpuCrashMarker(const char* markerName) override;
+	bool IsDeviceLost() const override;
 	const std::string& GetErrorString() const override;
 	void ClearErrorString() override;
 	uint64_t GetTimestampFrequency() const override;
@@ -158,6 +159,8 @@ public:
 	struct Impl;
 
 private:
+	void MarkDeviceLost(const char* where, int result);
+
 	std::unique_ptr<Impl> m;
 	std::string ErrorString;
 };

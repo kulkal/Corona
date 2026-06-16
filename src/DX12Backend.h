@@ -693,7 +693,18 @@ public:
 		capabilities.SupportsDrawIndexedIndirect = true;
 		capabilities.SupportsDrawIndirect = true;
 		capabilities.SupportsMultiDrawIndirect = true;
-		capabilities.SupportsDrawIndirectFirstInstance = true;
+		if (Device)
+		{
+			D3D12_FEATURE_DATA_SHADER_MODEL shaderModel{};
+			shaderModel.HighestShaderModel = D3D_SHADER_MODEL_6_8;
+			const HRESULT shaderModelHr = Device->CheckFeatureSupport(
+				D3D12_FEATURE_SHADER_MODEL,
+				&shaderModel,
+				sizeof(shaderModel));
+			capabilities.SupportsDrawIndirectFirstInstance =
+				SUCCEEDED(shaderModelHr) &&
+				shaderModel.HighestShaderModel >= D3D_SHADER_MODEL_6_8;
+		}
 		capabilities.MaxBindlessTextureCount = kMaxDX12BindlessTextureSlots;
 		capabilities.MaxBindlessBufferCount = kMaxDX12BindlessBufferSlots;
 		return capabilities;

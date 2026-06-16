@@ -496,6 +496,7 @@ public:
 	virtual void EndFrame() = 0;
 	virtual void WaitForGpu() = 0;
 	virtual void EmitGpuCrashMarker(const char* markerName) = 0;
+	virtual bool IsDeviceLost() const { return false; }
 	virtual const std::string& GetErrorString() const = 0;
 	virtual void ClearErrorString() = 0;
 	virtual uint64_t GetTimestampFrequency() const = 0;

@@ -420,7 +420,9 @@ bool Corona::IsCurrentRayTracingFrameResourceReady() const
 		return false;
 	if (TLASFrameInstanceCounts[frameIndex] != static_cast<UINT32>(RayTracingInstances.size()))
 		return false;
-	if (renderBackend->GetAPI() == ERenderBackendAPI::D3D12 &&
+	const ERenderBackendAPI backendAPI = renderBackend->GetAPI();
+	if ((backendAPI == ERenderBackendAPI::D3D12 ||
+		 backendAPI == ERenderBackendAPI::NRI) &&
 		(frameIndex >= InstancePropertyFrameBuffers.size() || !InstancePropertyFrameBuffers[frameIndex]))
 	{
 		return false;
@@ -543,10 +545,9 @@ void Corona::UpdateInstancePropertyBuffer()
 	if (!renderBackend)
 		return;
 #if CORONA_HAS_D3D12
-	// The DX12 path lays InstanceProperty out in a ByteAddressBuffer that hit
-	// shaders look up via instance ID. The Vulkan path manages its own
-	// instance descriptor copy inside VulkanBackend, so this whole helper is
-	// DX12-only.
+	// Backend-specific instance property upload. DX12 uses a DEFAULT heap
+	// ByteAddressBuffer, NRI uses frame-local HOST_UPLOAD structured buffers,
+	// and Vulkan still manages its existing backend-side descriptor copy path.
 
 	constexpr UINT32 kMinInstancePropertyCapacity = 500u;
 	const UINT32 instanceCapacity = std::max(kMinInstancePropertyCapacity, static_cast<UINT32>(RayTracingInstances.size()));
@@ -562,7 +563,9 @@ void Corona::UpdateInstancePropertyBuffer()
 		instanceProperties[i].RoughnessMetallic = glm::vec2(RayTracingInstances[i].Roughness, RayTracingInstances[i].Metallic);
 	}
 
-	auto ClearFailedD3D12FrameResources = [&](const wchar_t* reason)
+	const UINT instancePropertyBytes = static_cast<UINT>(instanceProperties.size() * sizeof(InstanceProperty));
+
+	auto ClearFailedFrameResources = [&](const wchar_t* reason)
 	{
 		const UINT32 failedFrameIndex = GetRayTracingFrameResourceIndex();
 		AppendCpuRuntimeTrace(
@@ -580,9 +583,57 @@ void Corona::UpdateInstancePropertyBuffer()
 			InstancePropertyFrameBuffers[failedFrameIndex].reset();
 	};
 
-	if (renderBackend &&
-		(renderBackend->GetAPI() == ERenderBackendAPI::Vulkan ||
-		 renderBackend->GetAPI() == ERenderBackendAPI::NRI))
+	const ERenderBackendAPI backendAPI = renderBackend->GetAPI();
+	if (backendAPI == ERenderBackendAPI::NRI)
+	{
+		EnsureRayTracingFrameResourceSlots();
+		const UINT32 frameIndex = GetRayTracingFrameResourceIndex();
+		if (frameIndex >= InstancePropertyFrameBuffers.size())
+		{
+			ClearFailedFrameResources(L"NRI frame resource slot unavailable");
+			return;
+		}
+
+		std::shared_ptr<Buffer>& frameInstancePropertyBuffer = InstancePropertyFrameBuffers[frameIndex];
+		if (!frameInstancePropertyBuffer ||
+			frameInstancePropertyBuffer->NumElements < instanceCapacity ||
+			frameInstancePropertyBuffer->ElementSize != sizeof(InstanceProperty))
+		{
+			try
+			{
+				frameInstancePropertyBuffer = renderBackend->CreateUploadStructuredBuffer(instanceCapacity, sizeof(InstanceProperty));
+			}
+			catch (...)
+			{
+				ClearFailedFrameResources(L"NRI CreateUploadStructuredBuffer threw");
+				return;
+			}
+			if (!frameInstancePropertyBuffer)
+			{
+				ClearFailedFrameResources(L"NRI CreateUploadStructuredBuffer returned null");
+				return;
+			}
+			AppendCpuRuntimeTrace(
+				L"[RTAS] InstancePropertyBuffer NRI heap=HOST_UPLOAD"
+				L", capacity=" + std::to_wstring(instanceCapacity) +
+				L", bytes=" + std::to_wstring(instancePropertyBytes) +
+				L", frameIndex=" + std::to_wstring(frameIndex));
+		}
+
+		try
+		{
+			renderBackend->UpdateUploadStructuredBuffer(frameInstancePropertyBuffer.get(), instanceProperties.data(), instancePropertyBytes);
+		}
+		catch (...)
+		{
+			ClearFailedFrameResources(L"NRI UpdateUploadStructuredBuffer threw");
+			return;
+		}
+		InstancePropertyBuffer = frameInstancePropertyBuffer;
+		return;
+	}
+
+	if (backendAPI == ERenderBackendAPI::Vulkan)
 	{
 		try
 		{
@@ -623,7 +674,7 @@ void Corona::UpdateInstancePropertyBuffer()
 	DX12Backend* dx12Backend = renderBackend->AsDX12Backend();
 	if (!dx12Backend)
 	{
-		ClearFailedD3D12FrameResources(L"DX12 backend unavailable");
+		ClearFailedFrameResources(L"DX12 backend unavailable");
 		return;
 	}
 	const UINT32 frameIndex = GetRayTracingFrameResourceIndex();
@@ -636,12 +687,12 @@ void Corona::UpdateInstancePropertyBuffer()
 		}
 		catch (...)
 		{
-			ClearFailedD3D12FrameResources(L"DX12 CreateDefaultByteAddressBuffer threw");
+			ClearFailedFrameResources(L"DX12 CreateDefaultByteAddressBuffer threw");
 			return;
 		}
 		if (!frameInstancePropertyBuffer || !frameInstancePropertyBuffer->resource)
 		{
-			ClearFailedD3D12FrameResources(L"DX12 CreateDefaultByteAddressBuffer returned null");
+			ClearFailedFrameResources(L"DX12 CreateDefaultByteAddressBuffer returned null");
 			return;
 		}
 		NAME_D3D12_OBJECT(frameInstancePropertyBuffer->resource);
@@ -652,12 +703,11 @@ void Corona::UpdateInstancePropertyBuffer()
 	}
 	if (!frameInstancePropertyBuffer || !frameInstancePropertyBuffer->resource)
 	{
-		ClearFailedD3D12FrameResources(L"DX12 frame buffer missing resource");
+		ClearFailedFrameResources(L"DX12 frame buffer missing resource");
 		return;
 	}
 	InstancePropertyBuffer = frameInstancePropertyBuffer;
 
-	const UINT instancePropertyBytes = static_cast<UINT>(instanceProperties.size() * sizeof(InstanceProperty));
 	bool bUploaded = false;
 	try
 	{
@@ -670,12 +720,12 @@ void Corona::UpdateInstancePropertyBuffer()
 	}
 	catch (...)
 	{
-		ClearFailedD3D12FrameResources(L"DX12 UploadToDefaultBuffer threw");
+		ClearFailedFrameResources(L"DX12 UploadToDefaultBuffer threw");
 		return;
 	}
 	if (!bUploaded)
 	{
-		ClearFailedD3D12FrameResources(L"DX12 UploadToDefaultBuffer failed");
+		ClearFailedFrameResources(L"DX12 UploadToDefaultBuffer failed");
 		return;
 	}
 #endif // CORONA_HAS_D3D12 (UpdateInstancePropertyBuffer DX12 path)

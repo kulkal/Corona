@@ -75,3 +75,8 @@ src/MyToyDX12Renderer.pdb
 src/external/nri/
 # scratch build/configure logs created during NRI bring-up
 _*.log
+
+# temporary full-repo clone used for diff sanity checks (1.5GB, never commit)
+tempCorona_clone_check/
+# large NRI debug-layer message dump
+nri_messages.log

@@ -89,6 +89,8 @@ namespace
 {
 	constexpr double kCameraPathDumpFps = 30.0;
 	constexpr double kCameraPathRecordMinIntervalSeconds = 1.0 / 120.0;
+	constexpr float kDefaultEditorCameraFov = 0.8f;
+	constexpr float kMinPersistedEditorCameraFov = 0.45f;
 
 	std::string WideToUtf8(const std::wstring& value)
 	{
@@ -7224,7 +7226,8 @@ std::wstring Corona::GetCameraStatePath()
 
 bool Corona::LoadCameraState()
 {
-	std::ifstream file{ std::filesystem::path(GetCameraStatePath()) };
+	const std::filesystem::path cameraStatePath = std::filesystem::path(GetCameraStatePath());
+	std::ifstream file{ cameraStatePath };
 	if (!file.is_open())
 	{
 		const std::filesystem::path legacyPath = std::filesystem::path(GetAssetFullPath(L"camera_state.cfg"));
@@ -7238,16 +7241,24 @@ bool Corona::LoadCameraState()
 	std::string rotationTag;
 	std::string lightDirectionTag;
 	std::string lightIntensityTag;
+	std::string upDirectionTag;
+	std::string fovTag;
+	std::string nearPlaneTag;
+	std::string farPlaneTag;
 	int version = 0;
 	glm::vec3 position(0.0f);
 	float yaw = 0.0f;
 	float pitch = 0.0f;
+	glm::vec3 upDirection(0.0f, 1.0f, 0.0f);
+	float savedFov = kDefaultEditorCameraFov;
+	float savedNear = Near;
+	float savedFar = Far;
 	glm::vec3 savedLightDir(0.0f);
 	float savedLightIntensity = LightIntensity;
 
 	if (!(file >> versionTag >> version))
 		return false;
-	if (versionTag != "version" || (version != 1 && version != 2))
+	if (versionTag != "version" || (version < 1 || version > 3))
 		return false;
 	if (!(file >> positionTag >> position.x >> position.y >> position.z))
 		return false;
@@ -7269,13 +7280,52 @@ bool Corona::LoadCameraState()
 		if (lightIntensityTag != "light_intensity")
 			return false;
 	}
+	if (version >= 3)
+	{
+		if (!(file >> upDirectionTag >> upDirection.x >> upDirection.y >> upDirection.z))
+			return false;
+		if (upDirectionTag != "up_direction")
+			return false;
+		if (!(file >> fovTag >> savedFov))
+			return false;
+		if (fovTag != "fov")
+			return false;
+		if (!(file >> nearPlaneTag >> savedNear))
+			return false;
+		if (nearPlaneTag != "near_plane")
+			return false;
+		if (!(file >> farPlaneTag >> savedFar))
+			return false;
+		if (farPlaneTag != "far_plane")
+			return false;
+	}
 
 	m_camera.m_initialPosition = position;
 	m_camera.m_position = position;
 	m_camera.m_yaw = yaw;
 	m_camera.m_pitch = glm::clamp(pitch, -glm::quarter_pi<float>(), glm::quarter_pi<float>());
+	m_camera.m_upDirection = NormalizeFiniteVec3Or(upDirection, glm::vec3(0.0f, 1.0f, 0.0f));
 	m_camera.m_keysPressed = {};
 	m_camera.m_mouseButtonDown = false;
+	const float restoredFov = FiniteClampedOr(
+		savedFov,
+		kDefaultEditorCameraFov,
+		0.05f,
+		glm::pi<float>() - 0.05f);
+	if (restoredFov < kMinPersistedEditorCameraFov)
+	{
+		AppendCpuRuntimeTrace(
+			L"[CameraState] ignored narrow persisted editor fov=" +
+			std::to_wstring(restoredFov) +
+			L", using default=" + std::to_wstring(kDefaultEditorCameraFov));
+		Fov = kDefaultEditorCameraFov;
+	}
+	else
+	{
+		Fov = restoredFov;
+	}
+	Near = std::max(0.001f, FiniteFloatOr(savedNear, Near));
+	Far = std::max(Near + 1.0f, FiniteFloatOr(savedFar, Far));
 
 	const float r = cosf(m_camera.m_pitch);
 	m_camera.m_lookDirection.x = r * sinf(m_camera.m_yaw);
@@ -7290,7 +7340,38 @@ bool Corona::LoadCameraState()
 		LightIntensity = savedLightIntensity;
 		UpdateMainDirectionalLightEntityFromState();
 	}
+
+	const CoronaECS::Entity activeCameraEntity = EntityWorld.GetActiveCameraEntity();
+	const CoronaECS::Entity targetCameraEntity =
+		activeCameraEntity.IsValid() ? activeCameraEntity : MainCameraEntity;
+	if (EntityWorld.IsAlive(targetCameraEntity) && EntityWorld.HasCamera(targetCameraEntity))
+	{
+		CoronaECS::TransformComponent* transformComponent = EntityWorld.GetTransform(targetCameraEntity);
+		if (!transformComponent)
+			transformComponent = EntityWorld.AddTransform(targetCameraEntity);
+		if (transformComponent)
+			transformComponent->SetPosition(m_camera.m_position);
+
+		CoronaECS::CameraComponent* cameraComponent = EntityWorld.GetCamera(targetCameraEntity);
+		if (cameraComponent)
+		{
+			cameraComponent->LookDirection = NormalizeFiniteVec3Or(m_camera.m_lookDirection, glm::vec3(0.0f, 0.0f, 1.0f));
+			cameraComponent->UpDirection = m_camera.m_upDirection;
+			cameraComponent->Fov = Fov;
+			cameraComponent->NearPlane = Near;
+			cameraComponent->FarPlane = Far;
+			cameraComponent->bActive = true;
+			EntityWorld.SetActiveCamera(targetCameraEntity);
+		}
+	}
+
 	bCameraStateRestoredFromDisk = true;
+	AppendCpuRuntimeTrace(
+		L"[CameraState] loaded path=" + cameraStatePath.wstring() +
+		L", position=(" + std::to_wstring(m_camera.m_position.x) +
+		L"," + std::to_wstring(m_camera.m_position.y) +
+		L"," + std::to_wstring(m_camera.m_position.z) +
+		L"), targetEntity=" + std::to_wstring(targetCameraEntity.IsValid() ? targetCameraEntity.GetId() : 0));
 	return true;
 }
 
@@ -7302,12 +7383,40 @@ void Corona::SaveCameraState()
 	if (!file.is_open())
 		return;
 
+	const RenderFrameSourceState cameraState = CaptureRenderFrameSourceState();
+	const glm::vec3 savedPosition =
+		ReasonableWorldPositionOr(cameraState.CameraPosition, m_camera.m_position);
+	const glm::vec3 savedLookDirection =
+		NormalizeFiniteVec3Or(cameraState.CameraLookDirection, m_camera.m_lookDirection);
+	const glm::vec3 savedUpDirection =
+		NormalizeFiniteVec3Or(cameraState.CameraUpDirection, m_camera.m_upDirection);
+	const float savedYaw = static_cast<float>(std::atan2(savedLookDirection.x, savedLookDirection.z));
+	const float savedPitch = static_cast<float>(std::asin(std::clamp(savedLookDirection.y, -1.0f, 1.0f)));
+	float savedFov = FiniteClampedOr(
+		cameraState.Fov,
+		kDefaultEditorCameraFov,
+		0.05f,
+		glm::pi<float>() - 0.05f);
+	if (savedFov < kMinPersistedEditorCameraFov)
+		savedFov = kDefaultEditorCameraFov;
+	const float savedNear = std::max(0.001f, FiniteFloatOr(cameraState.NearPlane, Near));
+	const float savedFar = std::max(savedNear + 1.0f, FiniteFloatOr(cameraState.FarPlane, Far));
+
 	file << std::fixed << std::setprecision(9);
-	file << "version 2\n";
-	file << "position " << m_camera.m_position.x << ' ' << m_camera.m_position.y << ' ' << m_camera.m_position.z << '\n';
-	file << "rotation " << m_camera.m_yaw << ' ' << m_camera.m_pitch << '\n';
+	file << "version 3\n";
+	file << "position " << savedPosition.x << ' ' << savedPosition.y << ' ' << savedPosition.z << '\n';
+	file << "rotation " << savedYaw << ' ' << savedPitch << '\n';
 	file << "light_direction " << LightDir.x << ' ' << LightDir.y << ' ' << LightDir.z << '\n';
 	file << "light_intensity " << LightIntensity << '\n';
+	file << "up_direction " << savedUpDirection.x << ' ' << savedUpDirection.y << ' ' << savedUpDirection.z << '\n';
+	file << "fov " << savedFov << '\n';
+	file << "near_plane " << savedNear << '\n';
+	file << "far_plane " << savedFar << '\n';
+	AppendCpuRuntimeTrace(
+		L"[CameraState] saved path=" + cameraStatePath.wstring() +
+		L", position=(" + std::to_wstring(savedPosition.x) +
+		L"," + std::to_wstring(savedPosition.y) +
+		L"," + std::to_wstring(savedPosition.z) + L")");
 }
 
 std::wstring Corona::GetEditorRenderStatePath()
@@ -9245,6 +9354,14 @@ void Corona::LoadPipeline()
 		}
 #endif
 		return;
+	}
+#endif
+
+#if !CORONA_HAS_NRI
+	if (bCommandLineRenderBackendOverrideSet && CommandLineRenderBackendAPI == ERenderBackendAPI::NRI)
+	{
+		AppendCpuRuntimeTrace(L"[LoadPipeline] NRI requested but CORONA_HAS_NRI=0; rebuild with CORONA_WITH_NRI=ON");
+		throw std::runtime_error("NRI backend requested, but this build was configured without CORONA_WITH_NRI=ON.");
 	}
 #endif
 
@@ -14421,6 +14538,22 @@ void Corona::OnRender()
 	const auto beginFrameStart = CpuClock::now();
 	renderBackend->BeginFrame();
 	beginFrameMs = ElapsedMilliseconds(beginFrameStart, CpuClock::now());
+	if (renderBackend->IsDeviceLost())
+	{
+		const std::string& backendError = renderBackend->GetErrorString();
+		AppendCpuRuntimeTrace(
+			L"[OnRender] backend device lost, exiting render loop: " +
+			std::wstring(backendError.begin(), backendError.end()));
+		if (CommandLineExitAfterFrames > 0)
+		{
+			bCommandLineExitAfterFramesTriggered = true;
+			CommandLineExitAfterFrames = 0;
+		}
+		FinishFramePerfLogging(beginFrameMs, executeMs, endFrameMs, renderWaitMs);
+		RequestMainPlatformWindowClose();
+		QuitPlatformApplication(1);
+		return;
+	}
 
 	renderCommandPhaseStart = CpuClock::now();
 	UpdateGpuTimingReadback();

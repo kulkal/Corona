@@ -410,44 +410,6 @@ bool Corona::SaveMapToFile(const std::wstring& name, std::wstring* outError)
 		out << "    },\n";
 	}
 
-	// --- Camera (single active) ---
-	if (auto activeCam = ecs.GetActiveCameraEntity(); activeCam.IsValid())
-	{
-		const auto* cam = ecs.GetCamera(activeCam);
-		const auto* trans = ecs.GetTransform(activeCam);
-		std::string entityName = "camera";
-		if (const auto* n = ecs.GetName(activeCam))
-			entityName = *n;
-		if (cam)
-		{
-			out << "    {\n";
-			out << "      name = " << EscapeLuaString(entityName) << ",\n";
-			// Attached scripts for the camera entity (camera controllers).
-			if (const auto* script = ecs.GetScript(activeCam); script && !script->Instances.empty())
-			{
-				out << "      scripts = {\n";
-				for (const auto& inst : script->Instances)
-				{
-					if (!inst.SourceName.empty())
-						out << "        { file = " << EscapeLuaString(PlatformWideToUtf8(inst.SourceName)) << " },\n";
-					else if (!inst.NativeScriptName.empty())
-						out << "        { native = " << EscapeLuaString(inst.NativeScriptName) << " },\n";
-				}
-				out << "      },\n";
-			}
-			out << "      camera = {\n";
-			out << "        position       = " << Vec3Lua(trans ? trans->GetPosition() : glm::vec3(0.0f)) << ",\n";
-			out << "        look_direction = " << Vec3Lua(cam->LookDirection) << ",\n";
-			out << "        up             = " << Vec3Lua(cam->UpDirection) << ",\n";
-			out << "        fov            = " << cam->Fov << ",\n";
-			out << "        near_plane     = " << cam->NearPlane << ",\n";
-			out << "        far_plane      = " << cam->FarPlane << ",\n";
-			out << "        active         = " << (cam->bActive ? "true" : "false") << ",\n";
-			out << "      },\n";
-			out << "    },\n";
-		}
-	}
-
 	// --- Script-only entities (HUD, game controllers) ---
 	// Entities that have a ScriptComponent but NO mesh/light/camera —
 	// they exist purely as anchor points for behaviour scripts. Without
@@ -701,21 +663,6 @@ bool Corona::SaveEntityAsAsset(CoronaECS::Entity entity, const std::string& asse
 		bWroteAnyComponent = true;
 	}
 
-	// --- Camera component (transform pulled from the entity's TransformComponent) ---
-	if (const auto* cam = EntityWorld.GetCamera(entity))
-	{
-		const auto* trans = EntityWorld.GetTransform(entity);
-		out << "  camera = {\n";
-		out << "    position       = " << Vec3Lua(trans ? trans->GetPosition() : glm::vec3(0.0f)) << ",\n";
-		out << "    look_direction = " << Vec3Lua(cam->LookDirection) << ",\n";
-		out << "    up             = " << Vec3Lua(cam->UpDirection) << ",\n";
-		out << "    fov            = " << cam->Fov << ",\n";
-		out << "    near_plane     = " << cam->NearPlane << ",\n";
-		out << "    far_plane      = " << cam->FarPlane << ",\n";
-		out << "  },\n";
-		bWroteAnyComponent = true;
-	}
-
 	out << "}\n";
 
 	if (!bWroteAnyComponent)
@@ -789,6 +736,7 @@ bool Corona::LoadMapFromFile(const std::wstring& name, std::wstring* outError)
 	ClearScriptSpawnedScene();
 
 	const int rootIdx = lua_gettop(L);
+	bool bIgnoredCameraEntity = false;
 
 	// --- Entities ---
 	lua_getfield(L, rootIdx, "entities");
@@ -1074,36 +1022,16 @@ bool Corona::LoadMapFromFile(const std::wstring& name, std::wstring* outError)
 			}
 			lua_pop(L, 1); // light
 
-			// Camera entry?
+			// Camera entries in .map files are intentionally ignored. The
+			// editor/debug camera is persisted separately in camera_state.cfg
+			// so loading a map does not clobber the user's current vantage.
 			lua_getfield(L, eIdx, "camera");
 			if (lua_istable(L, -1))
 			{
-				const int cIdx = lua_gettop(L);
-				CoronaECS::Entity ce = CreateEntity(entityName);
-				createdEntity = ce;
-				CoronaECS::CameraComponent comp;
-				glm::vec3 position(0.0f);
-				LuaGetVec3(L, cIdx, "position", position);
-				LuaGetVec3(L, cIdx, "look_direction", comp.LookDirection);
-				LuaGetVec3(L, cIdx, "up", comp.UpDirection);
-				double fov = 0.8, np = 10.0, fp = 20000.0;
-				if (LuaGetNumber(L, cIdx, "fov", fov))         comp.Fov = static_cast<float>(fov);
-				if (LuaGetNumber(L, cIdx, "near_plane", np))   comp.NearPlane = static_cast<float>(np);
-				if (LuaGetNumber(L, cIdx, "far_plane", fp))    comp.FarPlane = static_cast<float>(fp);
-				LuaGetBool(L, cIdx, "active", comp.bActive);
-				EntityWorld.AddTransform(ce, CoronaECS::TransformComponent::FromTRS(position));
-				EntityWorld.AddCamera(ce, comp);
-				if (comp.bActive)
+				if (!bIgnoredCameraEntity)
 				{
-					EntityWorld.SetActiveCamera(ce);
-					// Bind to the engine-singleton slot so the next
-					// InitializeMainCameraEntity() call doesn't spawn a
-					// stale-handle duplicate.
-					if (!EntityWorld.IsAlive(MainCameraEntity) ||
-						!EntityWorld.HasCamera(MainCameraEntity))
-					{
-						MainCameraEntity = ce;
-					}
+					AppendCpuRuntimeTrace(L"[Map] ignored camera entity \"" + PlatformUtf8ToWide(entityName) + L"\"");
+					bIgnoredCameraEntity = true;
 				}
 			}
 			lua_pop(L, 1); // camera
@@ -1192,7 +1120,7 @@ bool Corona::LoadMapFromFile(const std::wstring& name, std::wstring* outError)
 	lua_pop(L, 1); // globals
 
 	lua_pop(L, 1); // root
-	UpdateSimpleCameraFromActiveCameraEntity();
+	UpdateMainCameraEntityFromSimpleCamera();
 	AppendCpuRuntimeTrace(L"[Map] loaded " + path.wstring());
 	CurrentMapName = name;
 	PersistLastEditorMapName(name);
