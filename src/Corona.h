@@ -1223,10 +1223,10 @@ private:
 		glm::uvec4 ShadowChannelMap[MaxPointLights / 4];
 		PointLightParam PointLights[MaxPointLights];
 		UINT32 PointLightCount = 0;
-		// Strength of the RTAO contact term multiplied into DIRECT diffuse light
+		// Strength of the RTAO contact term applied per lighting lobe
 		// (0 = no contact darkening, 1 = full AO). Adjustable in the Editor Config
 		// RTAO Details UI. Repurposes former padding (layout unchanged).
-		float RTAODirectContactStrength = 0.5f;
+		float RTAODirectContactStrength = 1.0f;
 		glm::vec2 PointLightPadding = glm::vec2(0.0f);
 	};
 	
@@ -1393,7 +1393,7 @@ private:
 	bool bEnableSpecularGI = true;
 	bool bEnableDirectDiffuse = true;
 	bool bEnableDirectSpecular = true;
-	bool bEnableRTAO = true;
+	bool bEnableRTAO = false;
 	bool bEnableAsyncShadowAOOverlap = true;
 	bool bAsyncShadowAOOverlapRTAO = true;
 	bool bAsyncShadowAOOverlapShadow = true;
@@ -1435,8 +1435,8 @@ private:
 	UINT32 DiffuseGIPointLightLimit = MaxDiffuseGIPointLights;
 	float RTAOIndirectStrength = 1.0f;
 	float RTAOIndirectFloor = 0.55f;
-	// RTAO contact term multiplied into DIRECT diffuse light (0..1).
-	float RTAODirectContactStrength = 0.5f;
+	// RTAO contact term applied per lighting lobe (0..1).
+	float RTAODirectContactStrength = 1.0f;
 	// Sky-ambient fill strength for uncached spatial-hash GI cells (0 = black, as
 	// before; 1 = full open-sky ambient). Avoids black cells in starved oct slots.
 	float SpatialHashSkyFallbackStrength = 0.5f;
@@ -2014,12 +2014,12 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 		bool bEnableSpecularGI = true;
 		bool bEnableDirectDiffuse = true;
 		bool bEnableDirectSpecular = true;
-		bool bEnableRTAO = true;
+		bool bEnableRTAO = false;
 		bool bEnableSkyLighting = false;
 		bool bEnableRayTracedSkyLighting = true;
 		float RTAOIndirectStrength = 1.0f;
 		float RTAOIndirectFloor = 0.55f;
-		float RTAODirectContactStrength = 0.5f;
+		float RTAODirectContactStrength = 1.0f;
 		float SurfaceBounceStrength = 1.0f;
 		float SurfaceBounceSaturation = 1.0f;
 		float SkyLightingStrength = 0.35f;

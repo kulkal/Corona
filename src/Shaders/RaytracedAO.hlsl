@@ -98,8 +98,8 @@ void rayGen()
     // their own surface after BVH leaf-level rounding.
     const float distanceToCamera = length(worldPos - cameraWorld);
     float configuredBias = clamp(NormalBias, 0.001f, 2.0f);
-    float normalBias = max(configuredBias,
-        distanceToCamera * 0.003f + distanceToCamera * distanceToCamera * 5e-8f);
+    float distanceBias = distanceToCamera * 0.00035f + distanceToCamera * distanceToCamera * 5e-9f;
+    float normalBias = clamp(max(configuredBias, distanceBias), 0.001f, min(2.0f, rayRadius * 0.10f));
     float3 traceNormal = CommonSafeNormalize(geoNormal + worldNormal * 0.25f, geoNormal);
     float3 rayOrigin = worldPos + traceNormal * normalBias;
     float3x3 tbn = BuildAOTBN(traceNormal);

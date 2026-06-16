@@ -11,6 +11,7 @@
 
 #include "stdafx.h"
 #include "Corona.h"
+#include "RenderGraph.h"
 
 #include <algorithm>
 #include <cmath>
@@ -56,10 +57,8 @@ void Corona::RaytraceSkyLightingPass()
 	if (!TLAS || !PSO_RT_SKY_LIGHTING || !SkyLightingBuffer || !UnjitteredDepthBuffers[ColorBufferWriteIndex] || !NormalBuffers[ColorBufferWriteIndex] || !GeomNormalBuffers[ColorBufferWriteIndex])
 		return;
 
-	renderBackend->EmitGpuCrashMarker("RaytraceSkyLightingPass");
-
 	if (!EnsureRTMaterialRecordBuffer())
-	return;
+		return;
 
 	RTSkyLightingViewParam.ViewMatrix = glm::transpose(ViewMat);
 	RTSkyLightingViewParam.InvViewMatrix = glm::transpose(InvViewMat);
@@ -81,26 +80,58 @@ void Corona::RaytraceSkyLightingPass()
 	RTSkyLightingViewParam.SkyMinWorldY = std::clamp(RTSkyLightingViewParam.SkyMinWorldY, -0.25f, 0.75f);
 	RTSkyLightingViewParam.SkyMaxSampleAttempts = std::clamp(RTSkyLightingViewParam.SkyMaxSampleAttempts, 1u, 8u);
 
-	renderBackend->TransitionTexture(SkyLightingBuffer.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
-	const FLOAT clearSkyLighting[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
-	renderBackend->ClearTextureUAVFloat(SkyLightingBuffer.get(), clearSkyLighting);
+	RenderGraph rg(renderBackend.get());
+	RGTextureRef skyLightingOutput = rg.ImportTexture("SkyLighting.Output", SkyLightingBuffer.get(), EResourceState::ShaderRead);
+	RGTextureRef depthInput = rg.ImportTexture("SkyLighting.Depth", UnjitteredDepthBuffers[ColorBufferWriteIndex].get(), EResourceState::ShaderRead);
+	RGTextureRef normalInput = rg.ImportTexture("SkyLighting.Normal", NormalBuffers[ColorBufferWriteIndex].get(), EResourceState::ShaderRead);
+	RGTextureRef blueNoiseInput = rg.ImportTexture("SkyLighting.BlueNoise", BlueNoiseTex.get(), EResourceState::ShaderRead);
+	RGTextureRef geomNormalInput = rg.ImportTexture("SkyLighting.GeomNormal", GeomNormalBuffers[ColorBufferWriteIndex].get(), EResourceState::ShaderRead);
+	RGBufferRef rtMaterials = rg.ImportBuffer("SkyLighting.RtMaterials", RTMaterialRecordBuffer.get(), EResourceState::ShaderRead);
 
-	RTPassBuilder pass(*this, PSO_RT_SKY_LIGHTING);
-	pass.BeginScene()
-		.SetTextureUAV("global", "SkyLightingResult", SkyLightingBuffer.get())
-		.SetAccelerationStructure("global", "gRtScene", TLAS)
-		.SetTextureSRV("global", "DepthTex", UnjitteredDepthBuffers[ColorBufferWriteIndex].get())
-		.SetTextureSRV("global", "WorldNormalTex", NormalBuffers[ColorBufferWriteIndex].get())
-		.SetTextureSRV("global", "RayNoiseBlueNoiseSource", BlueNoiseTex.get())
-		.SetTextureSRV("global", "GeoNormalTex", GeomNormalBuffers[ColorBufferWriteIndex].get())
-		.SetCBVValue("global", "ViewParameter", &RTSkyLightingViewParam)
-		.SetSampler("global", "sampleWrap", samplerWrap.get());
-	pass.SetBindlessTextureTable("global", "MaterialTextures")
-		.SetBufferSRV("global", "RtMaterials", RTMaterialRecordBuffer.get());
-	RTSceneHitProgramDesc hitProgramDesc;
-	pass.BindSceneHitPrograms(hitProgramDesc);
-	pass.Dispatch(GetRenderWidth(), GetRenderHeight());
+	rg.ExportTexture(skyLightingOutput, EResourceState::ShaderRead);
+	rg.AddPass(
+		"RaytraceSkyLightingPass",
+		ERGPassFlags::RayTracing,
+		[&](RGPassBuilder& builder)
+		{
+			builder.ReadWriteTexture(skyLightingOutput, EResourceState::UnorderedAccess)
+				.ReadTexture(depthInput, EResourceState::ShaderRead)
+				.ReadTexture(normalInput, EResourceState::ShaderRead)
+				.ReadTexture(blueNoiseInput, EResourceState::ShaderRead)
+				.ReadTexture(geomNormalInput, EResourceState::ShaderRead)
+				.ReadBuffer(rtMaterials, EResourceState::ShaderRead);
+		},
+		[&](RGContext& ctx)
+		{
+			Texture* skyLightingTexture = ctx.GetTexture(skyLightingOutput);
+			Texture* depthTexture = ctx.GetTexture(depthInput);
+			Texture* normalTexture = ctx.GetTexture(normalInput);
+			Texture* blueNoiseTexture = ctx.GetTexture(blueNoiseInput);
+			Texture* geomNormalTexture = ctx.GetTexture(geomNormalInput);
+			Buffer* materialBuffer = ctx.GetBuffer(rtMaterials);
 
-	renderBackend->TransitionTexture(SkyLightingBuffer.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
+			const FLOAT clearSkyLighting[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
+			renderBackend->ClearTextureUAVFloat(skyLightingTexture, clearSkyLighting);
+
+			RTPassBuilder pass(*this, PSO_RT_SKY_LIGHTING);
+			pass.BeginScene()
+				.SetTextureUAV("global", "SkyLightingResult", skyLightingTexture)
+				.SetAccelerationStructure("global", "gRtScene", TLAS)
+				.SetTextureSRV("global", "DepthTex", depthTexture)
+				.SetTextureSRV("global", "WorldNormalTex", normalTexture)
+				.SetTextureSRV("global", "RayNoiseBlueNoiseSource", blueNoiseTexture)
+				.SetTextureSRV("global", "GeoNormalTex", geomNormalTexture)
+				.SetCBVValue("global", "ViewParameter", &RTSkyLightingViewParam)
+				.SetSampler("global", "sampleWrap", samplerWrap.get());
+			pass.SetBindlessTextureTable("global", "MaterialTextures")
+				.SetBufferSRV("global", "RtMaterials", materialBuffer);
+			RTSceneHitProgramDesc hitProgramDesc;
+			pass.BindSceneHitPrograms(hitProgramDesc);
+			pass.Dispatch(GetRenderWidth(), GetRenderHeight());
+		});
+
+	if (!rg.Execute())
+		return;
+
 	bSkyLightingOutputValidThisFrame = true;
 }

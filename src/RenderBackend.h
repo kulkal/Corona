@@ -651,6 +651,7 @@ public:
 	virtual void TransitionTexture(Texture* texture, EResourceState stateBefore, EResourceState stateAfter) = 0;
 	virtual void TransitionBuffer(Buffer* buffer, EResourceState stateBefore, EResourceState stateAfter) = 0;
 	virtual void TransitionVertexBuffer(VertexBuffer* vertexBuffer, EResourceState stateBefore, EResourceState stateAfter) = 0;
+	virtual void UAVBarrier(Texture* texture) { (void)texture; }
 	virtual void UAVBarrier(Buffer* buffer) = 0;
 	virtual Texture* GetCurrentWindowRenderTarget() = 0;
 	virtual void PrepareWindowRenderTarget(Texture* renderTarget) = 0;

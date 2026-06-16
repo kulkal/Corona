@@ -11,6 +11,7 @@
 
 #include "stdafx.h"
 #include "Corona.h"
+#include "RenderGraph.h"
 // DX12 raw command list access for the ReSTIR Phase 2 CopyResource path.
 // Vulkan-side support pending; the copy is gated on dx12_rhi being valid.
 #include "DX12Backend.h"
@@ -107,10 +108,9 @@ void Corona::RaytraceShadowPass()
 {
 	if (!ShadowBuffer || !BlueNoiseTex || !TLAS || !PSO_RT_SHADOW || !UnjitteredDepthBuffers[ColorBufferWriteIndex] || !NormalBuffers[ColorBufferWriteIndex] || !GeomNormalBuffers[ColorBufferWriteIndex])
 		return;
-	renderBackend->EmitGpuCrashMarker("RaytraceShadowPass");
 
 	if (!EnsureRTMaterialRecordBuffer())
-	return;
+		return;
 
 	RTShadowViewParam.ViewMatrix = glm::transpose(ViewMat);
 	RTShadowViewParam.InvViewMatrix = glm::transpose(InvViewMat);
@@ -291,106 +291,211 @@ void Corona::RaytraceShadowPass()
 		bEnableReSTIRDirectShadow &&
 		PSO_SHADOW_SPATIAL_REUSE != nullptr &&
 		ShadowBufferPreSpatial != nullptr &&
-		ShadowReservoirMBufferPreSpatial != nullptr;
+		ShadowReservoirMBufferPreSpatial != nullptr &&
+		ShadowReservoirMBuffer != nullptr &&
+		dx12_rhi != nullptr;
 	Texture* const raygenShadowTarget = bUseSpatialReuseCompute ? ShadowBufferPreSpatial.get() : ShadowBuffer.get();
 	Texture* const raygenMTarget      = bUseSpatialReuseCompute ? ShadowReservoirMBufferPreSpatial.get() : ShadowReservoirMBuffer.get();
 
-	renderBackend->TransitionTexture(raygenShadowTarget, EResourceState::ShaderRead, EResourceState::UnorderedAccess);
+	Texture* const depthTexture = UnjitteredDepthBuffers[ColorBufferWriteIndex].get();
+	Texture* const normalTexture = NormalBuffers[ColorBufferWriteIndex].get();
+	Texture* const geomNormalTexture = GeomNormalBuffers[ColorBufferWriteIndex].get();
+	Texture* const prevDepthTexture = UnjitteredDepthBuffers[1 - ColorBufferWriteIndex]
+		? UnjitteredDepthBuffers[1 - ColorBufferWriteIndex].get()
+		: depthTexture;
+	Texture* const prevNormalTexture = NormalBuffers[1 - ColorBufferWriteIndex]
+		? NormalBuffers[1 - ColorBufferWriteIndex].get()
+		: normalTexture;
+	Buffer* const spatialLightCellKeys = SpatialHashGIResolvedKeys[0].get();
+	Buffer* const spatialLightCellMask = SpatialHashGICellLightMask.get();
 
-	if (raygenMTarget)
-		renderBackend->TransitionTexture(raygenMTarget, EResourceState::ShaderRead, EResourceState::UnorderedAccess);
+	RenderGraph rg(renderBackend.get());
+	RGTextureRef raygenShadowOutput = rg.ImportTexture("Shadow.RaygenReservoir", raygenShadowTarget, EResourceState::ShaderRead);
+	RGTextureRef raygenMOutput = raygenMTarget
+		? rg.ImportTexture("Shadow.RaygenReservoirM", raygenMTarget, EResourceState::ShaderRead)
+		: RGTextureRef{};
+	RGTextureRef finalShadowOutput = bUseSpatialReuseCompute
+		? rg.ImportTexture("Shadow.Reservoir", ShadowBuffer.get(), EResourceState::ShaderRead)
+		: raygenShadowOutput;
+	RGTextureRef finalMOutput = bUseSpatialReuseCompute
+		? rg.ImportTexture("Shadow.ReservoirM", ShadowReservoirMBuffer.get(), EResourceState::ShaderRead)
+		: raygenMOutput;
+	RGTextureRef depthInput = rg.ImportTexture("Shadow.Depth", depthTexture, EResourceState::ShaderRead);
+	RGTextureRef normalInput = rg.ImportTexture("Shadow.WorldNormal", normalTexture, EResourceState::ShaderRead);
+	RGTextureRef geomNormalInput = rg.ImportTexture("Shadow.GeoNormal", geomNormalTexture, EResourceState::ShaderRead);
+	RGTextureRef blueNoiseInput = rg.ImportTexture("Shadow.BlueNoise", BlueNoiseTex.get(), EResourceState::ShaderRead);
+	RGTextureRef prevDepthInput = prevDepthTexture == depthTexture
+		? depthInput
+		: rg.ImportTexture("Shadow.PrevDepth", prevDepthTexture, EResourceState::ShaderRead);
+	RGTextureRef prevNormalInput = prevNormalTexture == normalTexture
+		? normalInput
+		: rg.ImportTexture("Shadow.PrevWorldNormal", prevNormalTexture, EResourceState::ShaderRead);
+	RGTextureRef shadowPrevInput = ShadowReservoirPrevBuffer
+		? rg.ImportTexture("Shadow.PrevReservoir", ShadowReservoirPrevBuffer.get(), EResourceState::ShaderRead)
+		: RGTextureRef{};
+	RGTextureRef shadowMPrevInput = ShadowReservoirMPrevBuffer
+		? rg.ImportTexture("Shadow.PrevReservoirM", ShadowReservoirMPrevBuffer.get(), EResourceState::ShaderRead)
+		: RGTextureRef{};
+	RGTextureRef velocityInput = VelocityBuffer
+		? rg.ImportTexture("Shadow.Velocity", VelocityBuffer.get(), EResourceState::ShaderRead)
+		: RGTextureRef{};
+	RGBufferRef spatialLightCellKeysInput = spatialLightCellKeys
+		? rg.ImportBuffer("Shadow.SpatialLightCellKeys", spatialLightCellKeys, EResourceState::ShaderRead)
+		: RGBufferRef{};
+	RGBufferRef spatialLightCellMaskInput = spatialLightCellMask
+		? rg.ImportBuffer("Shadow.SpatialLightCellMask", spatialLightCellMask, EResourceState::ShaderRead)
+		: RGBufferRef{};
+	RGBufferRef rtMaterialsInput = rg.ImportBuffer("Shadow.RtMaterials", RTMaterialRecordBuffer.get(), EResourceState::ShaderRead);
 
-	RTPassBuilder pass(*this, PSO_RT_SHADOW);
-	pass.BeginScene()
-		.SetTextureUAV("global", "ShadowResult", raygenShadowTarget)
-		.SetTextureUAV("global", "ShadowReservoirM", raygenMTarget)
-		.SetAccelerationStructure("global", "gRtScene", TLAS)
-		.SetTextureSRV("global", "DepthTex", UnjitteredDepthBuffers[ColorBufferWriteIndex].get())
-		.SetTextureSRV("global", "WorldNormalTex", NormalBuffers[ColorBufferWriteIndex].get())
-		.SetTextureSRV("global", "GeoNormalTex", GeomNormalBuffers[ColorBufferWriteIndex].get())
-		.SetTextureSRV("global", "RayNoiseBlueNoiseSource", BlueNoiseTex.get())
-		.SetTextureSRV("global", "ShadowReservoirPrev",
-			ShadowReservoirPrevBuffer ? ShadowReservoirPrevBuffer.get() : ShadowBuffer.get())
-		.SetTextureSRV("global", "ShadowReservoirMPrev",
-			ShadowReservoirMPrevBuffer ? ShadowReservoirMPrevBuffer.get() : ShadowBuffer.get())
-		.SetTextureSRV("global", "DepthTexPrev",
-			UnjitteredDepthBuffers[1 - ColorBufferWriteIndex] ? UnjitteredDepthBuffers[1 - ColorBufferWriteIndex].get() : UnjitteredDepthBuffers[ColorBufferWriteIndex].get())
-		.SetTextureSRV("global", "WorldNormalTexPrev",
-			NormalBuffers[1 - ColorBufferWriteIndex] ? NormalBuffers[1 - ColorBufferWriteIndex].get() : NormalBuffers[ColorBufferWriteIndex].get())
-		.SetBufferSRV("global", "SpatialLightCellKeys", SpatialHashGIResolvedKeys[0].get())
-		.SetBufferSRV("global", "SpatialLightCellMask", SpatialHashGICellLightMask.get())
-		.SetTextureSRV("global", "VelocityTex", VelocityBuffer.get())
-		.SetCBVValue("global", "ViewParameter", &RTShadowViewParam)
-		.SetSampler("global", "sampleWrap", samplerWrap.get());
-	pass.SetBindlessTextureTable("global", "MaterialTextures")
-		.SetBufferSRV("global", "RtMaterials", RTMaterialRecordBuffer.get());
-	RTSceneHitProgramDesc hitProgramDesc;
-	pass.BindSceneHitPrograms(hitProgramDesc);
-	pass.Dispatch(GetRenderWidth(), GetRenderHeight());
+	rg.ExportTexture(finalShadowOutput, EResourceState::ShaderRead);
+	if (finalMOutput.IsValid())
+		rg.ExportTexture(finalMOutput, EResourceState::ShaderRead);
+	if (shadowPrevInput.IsValid())
+		rg.ExportTexture(shadowPrevInput, EResourceState::ShaderRead);
+	if (shadowMPrevInput.IsValid())
+		rg.ExportTexture(shadowMPrevInput, EResourceState::ShaderRead);
 
-	renderBackend->TransitionTexture(raygenShadowTarget, EResourceState::UnorderedAccess, EResourceState::ShaderRead);
-	if (raygenMTarget)
-		renderBackend->TransitionTexture(raygenMTarget, EResourceState::UnorderedAccess, EResourceState::ShaderRead);
+	rg.AddPass(
+		"RaytraceShadowPass",
+		ERGPassFlags::RayTracing,
+		[&](RGPassBuilder& builder)
+		{
+			builder.ReadWriteTexture(raygenShadowOutput, EResourceState::UnorderedAccess);
+			if (raygenMOutput.IsValid())
+				builder.ReadWriteTexture(raygenMOutput, EResourceState::UnorderedAccess);
+			builder.ReadTexture(depthInput, EResourceState::ShaderRead)
+				.ReadTexture(normalInput, EResourceState::ShaderRead)
+				.ReadTexture(geomNormalInput, EResourceState::ShaderRead)
+				.ReadTexture(blueNoiseInput, EResourceState::ShaderRead);
+			if (prevDepthInput.Index != depthInput.Index)
+				builder.ReadTexture(prevDepthInput, EResourceState::ShaderRead);
+			if (prevNormalInput.Index != normalInput.Index)
+				builder.ReadTexture(prevNormalInput, EResourceState::ShaderRead);
+			if (shadowPrevInput.IsValid())
+				builder.ReadTexture(shadowPrevInput, EResourceState::ShaderRead);
+			if (shadowMPrevInput.IsValid())
+				builder.ReadTexture(shadowMPrevInput, EResourceState::ShaderRead);
+			if (bUseSpatialReuseCompute && (!shadowPrevInput.IsValid() || !shadowMPrevInput.IsValid()))
+				builder.ReadTexture(finalShadowOutput, EResourceState::ShaderRead);
+			if (velocityInput.IsValid())
+				builder.ReadTexture(velocityInput, EResourceState::ShaderRead);
+			if (spatialLightCellKeysInput.IsValid())
+				builder.ReadBuffer(spatialLightCellKeysInput, EResourceState::ShaderRead);
+			if (spatialLightCellMaskInput.IsValid())
+				builder.ReadBuffer(spatialLightCellMaskInput, EResourceState::ShaderRead);
+			builder.ReadBuffer(rtMaterialsInput, EResourceState::ShaderRead);
+		},
+		[&](RGContext& ctx)
+		{
+			Texture* const shadowPrevTexture = shadowPrevInput.IsValid()
+				? ctx.GetTexture(shadowPrevInput)
+				: ShadowBuffer.get();
+			Texture* const shadowMPrevTexture = shadowMPrevInput.IsValid()
+				? ctx.GetTexture(shadowMPrevInput)
+				: ShadowBuffer.get();
+
+			RTPassBuilder pass(*this, PSO_RT_SHADOW);
+			pass.BeginScene()
+				.SetTextureUAV("global", "ShadowResult", ctx.GetTexture(raygenShadowOutput))
+				.SetTextureUAV("global", "ShadowReservoirM", raygenMOutput.IsValid() ? ctx.GetTexture(raygenMOutput) : nullptr)
+				.SetAccelerationStructure("global", "gRtScene", TLAS)
+				.SetTextureSRV("global", "DepthTex", ctx.GetTexture(depthInput))
+				.SetTextureSRV("global", "WorldNormalTex", ctx.GetTexture(normalInput))
+				.SetTextureSRV("global", "GeoNormalTex", ctx.GetTexture(geomNormalInput))
+				.SetTextureSRV("global", "RayNoiseBlueNoiseSource", ctx.GetTexture(blueNoiseInput))
+				.SetTextureSRV("global", "ShadowReservoirPrev", shadowPrevTexture)
+				.SetTextureSRV("global", "ShadowReservoirMPrev", shadowMPrevTexture)
+				.SetTextureSRV("global", "DepthTexPrev", prevDepthInput.Index == depthInput.Index ? ctx.GetTexture(depthInput) : ctx.GetTexture(prevDepthInput))
+				.SetTextureSRV("global", "WorldNormalTexPrev", prevNormalInput.Index == normalInput.Index ? ctx.GetTexture(normalInput) : ctx.GetTexture(prevNormalInput))
+				.SetBufferSRV("global", "SpatialLightCellKeys", spatialLightCellKeysInput.IsValid() ? ctx.GetBuffer(spatialLightCellKeysInput) : nullptr)
+				.SetBufferSRV("global", "SpatialLightCellMask", spatialLightCellMaskInput.IsValid() ? ctx.GetBuffer(spatialLightCellMaskInput) : nullptr)
+				.SetTextureSRV("global", "VelocityTex", velocityInput.IsValid() ? ctx.GetTexture(velocityInput) : nullptr)
+				.SetCBVValue("global", "ViewParameter", &RTShadowViewParam)
+				.SetSampler("global", "sampleWrap", samplerWrap.get());
+			pass.SetBindlessTextureTable("global", "MaterialTextures")
+				.SetBufferSRV("global", "RtMaterials", ctx.GetBuffer(rtMaterialsInput));
+			RTSceneHitProgramDesc hitProgramDesc;
+			pass.BindSceneHitPrograms(hitProgramDesc);
+			pass.Dispatch(GetRenderWidth(), GetRenderHeight());
+		});
 
 	// --- Phase 3 spatial reuse compute pass ---
 	if (bUseSpatialReuseCompute)
 	{
-		renderBackend->EmitGpuCrashMarker("ShadowSpatialReusePass");
-		renderBackend->TransitionTexture(ShadowBuffer.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
-		renderBackend->TransitionTexture(ShadowReservoirMBuffer.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
-
-		PSO_SHADOW_SPATIAL_REUSE->SetTextureSRV("PreSpatialReservoir", ShadowBufferPreSpatial.get());
-		PSO_SHADOW_SPATIAL_REUSE->SetTextureSRV("PreSpatialM",         ShadowReservoirMBufferPreSpatial.get());
-		PSO_SHADOW_SPATIAL_REUSE->SetTextureSRV("DepthTex",            UnjitteredDepthBuffers[ColorBufferWriteIndex].get());
-		PSO_SHADOW_SPATIAL_REUSE->SetTextureSRV("WorldNormalTex",      NormalBuffers[ColorBufferWriteIndex].get());
-		PSO_SHADOW_SPATIAL_REUSE->SetTextureSRV("GeoNormalTex",        GeomNormalBuffers[ColorBufferWriteIndex].get());
-		PSO_SHADOW_SPATIAL_REUSE->SetAccelerationStructure("gRtScene", TLAS);
-		PSO_SHADOW_SPATIAL_REUSE->SetTextureUAV("ShadowResult",        ShadowBuffer.get());
-		PSO_SHADOW_SPATIAL_REUSE->SetTextureUAV("ShadowReservoirM",    ShadowReservoirMBuffer.get());
-		PSO_SHADOW_SPATIAL_REUSE->SetCBVValue("ViewParameter",         &RTShadowViewParam);
-		PSO_SHADOW_SPATIAL_REUSE->SetSampler("sampleWrap",             samplerWrap.get());
-		PSO_SHADOW_SPATIAL_REUSE->Apply();
-		const UINT groupX = (GetRenderWidth() + 7) / 8;
-		const UINT groupY = (GetRenderHeight() + 7) / 8;
-		dx12_rhi->GetGraphicsCommandList()->Dispatch(groupX, groupY, 1);
-
-		renderBackend->TransitionTexture(ShadowBuffer.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
-		renderBackend->TransitionTexture(ShadowReservoirMBuffer.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
+		rg.AddPass(
+			"ShadowSpatialReusePass",
+			ERGPassFlags::Compute,
+			[&](RGPassBuilder& builder)
+			{
+				builder.ReadTexture(raygenShadowOutput, EResourceState::ShaderRead)
+					.ReadTexture(raygenMOutput, EResourceState::ShaderRead)
+					.ReadTexture(depthInput, EResourceState::ShaderRead)
+					.ReadTexture(normalInput, EResourceState::ShaderRead)
+					.ReadTexture(geomNormalInput, EResourceState::ShaderRead)
+					.ReadWriteTexture(finalShadowOutput, EResourceState::UnorderedAccess)
+					.ReadWriteTexture(finalMOutput, EResourceState::UnorderedAccess);
+			},
+			[&](RGContext& ctx)
+			{
+				PSO_SHADOW_SPATIAL_REUSE->SetTextureSRV("PreSpatialReservoir", ctx.GetTexture(raygenShadowOutput));
+				PSO_SHADOW_SPATIAL_REUSE->SetTextureSRV("PreSpatialM",         ctx.GetTexture(raygenMOutput));
+				PSO_SHADOW_SPATIAL_REUSE->SetTextureSRV("DepthTex",            ctx.GetTexture(depthInput));
+				PSO_SHADOW_SPATIAL_REUSE->SetTextureSRV("WorldNormalTex",      ctx.GetTexture(normalInput));
+				PSO_SHADOW_SPATIAL_REUSE->SetTextureSRV("GeoNormalTex",        ctx.GetTexture(geomNormalInput));
+				PSO_SHADOW_SPATIAL_REUSE->SetAccelerationStructure("gRtScene", TLAS);
+				PSO_SHADOW_SPATIAL_REUSE->SetTextureUAV("ShadowResult",        ctx.GetTexture(finalShadowOutput));
+				PSO_SHADOW_SPATIAL_REUSE->SetTextureUAV("ShadowReservoirM",    ctx.GetTexture(finalMOutput));
+				PSO_SHADOW_SPATIAL_REUSE->SetCBVValue("ViewParameter",         &RTShadowViewParam);
+				PSO_SHADOW_SPATIAL_REUSE->SetSampler("sampleWrap",             samplerWrap.get());
+				PSO_SHADOW_SPATIAL_REUSE->Apply();
+				const UINT groupX = (GetRenderWidth() + 7) / 8;
+				const UINT groupY = (GetRenderHeight() + 7) / 8;
+				dx12_rhi->GetGraphicsCommandList()->Dispatch(groupX, groupY, 1);
+			});
 	}
 
 	// ReSTIR Phase 2 temporal feedback: cache this frame's reservoirs for
 	// next-frame reproject via raw DX12 CopyResource. Only meaningful in
 	// ReSTIR mode; in Option A the copy is skipped. DX12-only for now —
 	// Vulkan path will follow with a backend-abstracted texture copy.
-	if (bEnableReSTIRDirectShadow && ShadowReservoirPrevBuffer && dx12_rhi)
+	if (bEnableReSTIRDirectShadow && shadowPrevInput.IsValid() && dx12_rhi)
 	{
-		renderBackend->TransitionTexture(ShadowReservoirPrevBuffer.get(),
-			EResourceState::ShaderRead, EResourceState::CopyDest);
-		renderBackend->TransitionTexture(ShadowBuffer.get(),
-			EResourceState::ShaderRead, EResourceState::CopySource);
-		dx12_rhi->GetGraphicsCommandList()->CopyResource(
-			ShadowReservoirPrevBuffer->resource.Get(),
-			ShadowBuffer->resource.Get());
-		renderBackend->TransitionTexture(ShadowReservoirPrevBuffer.get(),
-			EResourceState::CopyDest, EResourceState::ShaderRead);
-		renderBackend->TransitionTexture(ShadowBuffer.get(),
-			EResourceState::CopySource, EResourceState::ShaderRead);
+		rg.AddPass(
+			"Shadow.CopyReservoir",
+			ERGPassFlags::Copy,
+			[&](RGPassBuilder& builder)
+			{
+				builder.ReadTexture(finalShadowOutput, EResourceState::CopySource)
+					.WriteTexture(shadowPrevInput, EResourceState::CopyDest);
+			},
+			[&](RGContext& ctx)
+			{
+				dx12_rhi->GetGraphicsCommandList()->CopyResource(
+					ctx.GetTexture(shadowPrevInput)->resource.Get(),
+					ctx.GetTexture(finalShadowOutput)->resource.Get());
+			});
 
-		if (ShadowReservoirMBuffer && ShadowReservoirMPrevBuffer)
+		if (finalMOutput.IsValid() && shadowMPrevInput.IsValid())
 		{
-			renderBackend->TransitionTexture(ShadowReservoirMPrevBuffer.get(),
-				EResourceState::ShaderRead, EResourceState::CopyDest);
-			renderBackend->TransitionTexture(ShadowReservoirMBuffer.get(),
-				EResourceState::ShaderRead, EResourceState::CopySource);
-			dx12_rhi->GetGraphicsCommandList()->CopyResource(
-				ShadowReservoirMPrevBuffer->resource.Get(),
-				ShadowReservoirMBuffer->resource.Get());
-			renderBackend->TransitionTexture(ShadowReservoirMPrevBuffer.get(),
-				EResourceState::CopyDest, EResourceState::ShaderRead);
-			renderBackend->TransitionTexture(ShadowReservoirMBuffer.get(),
-				EResourceState::CopySource, EResourceState::ShaderRead);
+			rg.AddPass(
+				"Shadow.CopyReservoirM",
+				ERGPassFlags::Copy,
+				[&](RGPassBuilder& builder)
+				{
+					builder.ReadTexture(finalMOutput, EResourceState::CopySource)
+						.WriteTexture(shadowMPrevInput, EResourceState::CopyDest);
+				},
+				[&](RGContext& ctx)
+				{
+					dx12_rhi->GetGraphicsCommandList()->CopyResource(
+						ctx.GetTexture(shadowMPrevInput)->resource.Get(),
+						ctx.GetTexture(finalMOutput)->resource.Get());
+				});
 		}
 	}
+
+	if (!rg.Execute())
+		return;
 
 	bShadowOutputValidThisFrame = true;
 }

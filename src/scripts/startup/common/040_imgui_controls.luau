@@ -796,6 +796,9 @@ local function draw_lighting_controls(state)
             slider_float_state(state, "rtao_radius", "RTAO Radius", "script.lighting.rtao.radius", 2.0, 256.0)
             slider_float_state(state, "rtao_power", "RTAO Power", "script.lighting.rtao.power", 0.25, 4.0)
             slider_float_state(state, "rtao_normal_bias", "RTAO Normal Bias", "script.lighting.rtao.normal_bias", 0.01, 2.0)
+            slider_float_state(state, "rtao_direct_contact", "RTAO Contact Strength", "script.lighting.rtao.direct_contact", 0.0, 1.0)
+            slider_float_state(state, "rtao_indirect_strength", "RTAO AO Strength", "script.lighting.rtao.indirect_strength", 0.0, 1.0)
+            slider_float_state(state, "rtao_indirect_floor", "RTAO AO Floor", "script.lighting.rtao.indirect_floor", 0.0, 1.0)
         end
     end
 

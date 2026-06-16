@@ -11,6 +11,7 @@
 
 #include "stdafx.h"
 #include "Corona.h"
+#include "RenderGraph.h"
 
 #include <algorithm>
 #include <cmath>
@@ -200,35 +201,63 @@ void Corona::RaytraceGIPass()
 
 	if (!TLAS || !pso)
 		return;
-	renderBackend->EmitGpuCrashMarker("RaytraceGIPass");
 
 	if (!EnsureRTMaterialRecordBuffer())
-	return;
+		return;
 
-	renderBackend->TransitionTexture(DiffuseGIRawAux.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
-	renderBackend->TransitionTexture(DiffuseGIRaw.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
-	const FLOAT clearGI[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
-	renderBackend->ClearTextureUAVFloat(DiffuseGIRawAux.get(), clearGI);
-	renderBackend->ClearTextureUAVFloat(DiffuseGIRaw.get(), clearGI);
+	RenderGraph rg(renderBackend.get());
+	RGTextureRef giSHOutput = rg.ImportTexture("SimpleGI.RawSH", DiffuseGIRawAux.get(), EResourceState::ShaderRead);
+	RGTextureRef giColorOutput = rg.ImportTexture("SimpleGI.RawColor", DiffuseGIRaw.get(), EResourceState::ShaderRead);
+	RGTextureRef depthInput = rg.ImportTexture("SimpleGI.Depth", UnjitteredDepthBuffers[ColorBufferWriteIndex].get(), EResourceState::ShaderRead);
+	RGTextureRef normalInput = rg.ImportTexture("SimpleGI.Normal", NormalBuffers[ColorBufferWriteIndex].get(), EResourceState::ShaderRead);
+	RGTextureRef blueNoiseInput = rg.ImportTexture("SimpleGI.BlueNoise", BlueNoiseTex.get(), EResourceState::ShaderRead);
+	RGBufferRef rtMaterials = rg.ImportBuffer("SimpleGI.RtMaterials", RTMaterialRecordBuffer.get(), EResourceState::ShaderRead);
 
-	RTPassBuilder pass(*this, pso);
-	pass.BeginScene()
-		.SetTextureUAV("global", "GIResultSH", DiffuseGIRawAux.get())
-		.SetTextureUAV("global", "GIResultColor", DiffuseGIRaw.get())
-		.SetAccelerationStructure("global", "gRtScene", TLAS)
-		.SetTextureSRV("global", "DepthTex", UnjitteredDepthBuffers[ColorBufferWriteIndex].get())
-		.SetTextureSRV("global", "WorldNormalTex", NormalBuffers[ColorBufferWriteIndex].get())
-		.SetTextureSRV("global", "RayNoiseBlueNoiseSource", BlueNoiseTex.get())
-		.SetCBVValue("global", "ViewParameter", &RTGIViewParam)
-		.SetSampler("global", "sampleWrap", samplerWrap.get());
-	pass.SetBindlessTextureTable("global", "MaterialTextures")
-		.SetBufferSRV("global", "RtMaterials", RTMaterialRecordBuffer.get());
-	RTSceneHitProgramDesc hitProgramDesc;
-	pass.BindSceneHitPrograms(hitProgramDesc);
-	pass.Dispatch(GetRenderWidth(), GetRenderHeight());
+	rg.ExportTexture(giSHOutput, EResourceState::ShaderRead);
+	rg.ExportTexture(giColorOutput, EResourceState::ShaderRead);
+	rg.AddPass(
+		"RaytraceGIPass",
+		ERGPassFlags::RayTracing,
+		[&](RGPassBuilder& builder)
+		{
+			builder.ReadWriteTexture(giSHOutput, EResourceState::UnorderedAccess)
+				.ReadWriteTexture(giColorOutput, EResourceState::UnorderedAccess)
+				.ReadTexture(depthInput, EResourceState::ShaderRead)
+				.ReadTexture(normalInput, EResourceState::ShaderRead)
+				.ReadTexture(blueNoiseInput, EResourceState::ShaderRead)
+				.ReadBuffer(rtMaterials, EResourceState::ShaderRead);
+		},
+		[&, pso](RGContext& ctx)
+		{
+			Texture* giSHTexture = ctx.GetTexture(giSHOutput);
+			Texture* giColorTexture = ctx.GetTexture(giColorOutput);
+			Texture* depthTexture = ctx.GetTexture(depthInput);
+			Texture* normalTexture = ctx.GetTexture(normalInput);
+			Texture* blueNoiseTexture = ctx.GetTexture(blueNoiseInput);
+			Buffer* materialBuffer = ctx.GetBuffer(rtMaterials);
 
-	renderBackend->TransitionTexture(DiffuseGIRawAux.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
-	renderBackend->TransitionTexture(DiffuseGIRaw.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
+			const FLOAT clearGI[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+			renderBackend->ClearTextureUAVFloat(giSHTexture, clearGI);
+			renderBackend->ClearTextureUAVFloat(giColorTexture, clearGI);
+
+			RTPassBuilder pass(*this, pso);
+			pass.BeginScene()
+				.SetTextureUAV("global", "GIResultSH", giSHTexture)
+				.SetTextureUAV("global", "GIResultColor", giColorTexture)
+				.SetAccelerationStructure("global", "gRtScene", TLAS)
+				.SetTextureSRV("global", "DepthTex", depthTexture)
+				.SetTextureSRV("global", "WorldNormalTex", normalTexture)
+				.SetTextureSRV("global", "RayNoiseBlueNoiseSource", blueNoiseTexture)
+				.SetCBVValue("global", "ViewParameter", &RTGIViewParam)
+				.SetSampler("global", "sampleWrap", samplerWrap.get());
+			pass.SetBindlessTextureTable("global", "MaterialTextures")
+				.SetBufferSRV("global", "RtMaterials", materialBuffer);
+			RTSceneHitProgramDesc hitProgramDesc;
+			pass.BindSceneHitPrograms(hitProgramDesc);
+			pass.Dispatch(GetRenderWidth(), GetRenderHeight());
+		});
+
+	rg.Execute();
 }
 
 bool Corona::NRISimpleGIFallbackPass()

@@ -11,6 +11,7 @@
 
 #include "stdafx.h"
 #include "Corona.h"
+#include "RenderGraph.h"
 
 #include <algorithm>
 #include <limits>
@@ -282,46 +283,11 @@ bool Corona::PathTracingCompactionPass(Texture* outputColor, const PathTracingVi
 		bPathTracingCompactionDispatchLogged = true;
 	}
 
-	auto transitionCompactionBuffers = [this](EResourceState before, EResourceState after)
-	{
-		renderBackend->TransitionBuffer(PathTracingCompactionState[0].get(), before, after);
-		renderBackend->TransitionBuffer(PathTracingCompactionState[1].get(), before, after);
-		renderBackend->TransitionBuffer(PathTracingCompactionActiveList[0].get(), before, after);
-		renderBackend->TransitionBuffer(PathTracingCompactionActiveList[1].get(), before, after);
-		renderBackend->TransitionBuffer(PathTracingCompactionCounter.get(), before, after);
-		renderBackend->TransitionBuffer(PathTracingCompactionRadiance.get(), before, after);
-	};
-
-	auto barrierCompactionBuffers = [this]()
-	{
-		renderBackend->UAVBarrier(PathTracingCompactionState[0].get());
-		renderBackend->UAVBarrier(PathTracingCompactionState[1].get());
-		renderBackend->UAVBarrier(PathTracingCompactionActiveList[0].get());
-		renderBackend->UAVBarrier(PathTracingCompactionActiveList[1].get());
-		renderBackend->UAVBarrier(PathTracingCompactionCounter.get());
-		renderBackend->UAVBarrier(PathTracingCompactionRadiance.get());
-	};
-
-	transitionCompactionBuffers(EResourceState::ShaderRead, EResourceState::UnorderedAccess);
-	renderBackend->TransitionBuffer(PathTracingCompactionIndirectArgs.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
-
 	PathTracingCompactionParamCB compactionParam = {};
 	compactionParam.RenderWidth = m_width;
 	compactionParam.RenderHeight = m_height;
 	compactionParam.Capacity = PathTracingCompactionCapacity;
 	compactionParam.BounceIndex = 0;
-
-	renderBackend->BeginGpuMarker(0xff66ccffu, "PathTracingCompactionSeed");
-	PSO_PATH_TRACING_COMPACTION_SEED->SetBufferUAV("StateOut", PathTracingCompactionState[0].get());
-	PSO_PATH_TRACING_COMPACTION_SEED->SetBufferUAV("ActiveListOut", PathTracingCompactionActiveList[0].get());
-	PSO_PATH_TRACING_COMPACTION_SEED->SetBufferUAV("Counters", PathTracingCompactionCounter.get());
-	PSO_PATH_TRACING_COMPACTION_SEED->SetBufferUAV("PathRadiance", PathTracingCompactionRadiance.get());
-	PSO_PATH_TRACING_COMPACTION_SEED->SetCBVValue("ViewParameter", const_cast<PathTracingViewParamCB*>(&dispatchViewParam));
-	PSO_PATH_TRACING_COMPACTION_SEED->SetCBVValue("PathCompaction", &compactionParam);
-	PSO_PATH_TRACING_COMPACTION_SEED->Apply();
-	renderBackend->Dispatch((m_width + 7u) / 8u, (m_height + 7u) / 8u, 1u);
-	renderBackend->EndGpuMarker();
-	barrierCompactionBuffers();
 
 	auto makeIndirectParam = [this](const RtDispatchRaysIndirectTemplate& dispatchTemplate, UINT32 bounceIndex)
 	{
@@ -344,6 +310,105 @@ bool Corona::PathTracingCompactionPass(Texture* outputColor, const PathTracingVi
 		return param;
 	};
 
+	RenderGraph rg(renderBackend.get());
+	RGTextureRef outputColorTarget = rg.ImportTexture("PathTracingCompaction.OutputColor", outputColor, EResourceState::ShaderRead);
+	RGTextureRef outAlbedo = bWritePrimaryGBuffer && AlbedoBuffer
+		? rg.ImportTexture("PathTracingCompaction.OutAlbedo", AlbedoBuffer.get(), EResourceState::ShaderRead)
+		: RGTextureRef{};
+	RGTextureRef outSpecularAlbedo = bWritePrimaryGBuffer && SpecularAlbedoBuffer
+		? rg.ImportTexture("PathTracingCompaction.OutSpecularAlbedo", SpecularAlbedoBuffer.get(), EResourceState::ShaderRead)
+		: RGTextureRef{};
+	RGTextureRef outNormal = bWritePrimaryGBuffer && NormalBuffers[ColorBufferWriteIndex]
+		? rg.ImportTexture("PathTracingCompaction.OutNormal", NormalBuffers[ColorBufferWriteIndex].get(), EResourceState::ShaderRead)
+		: RGTextureRef{};
+	RGTextureRef outGeomNormal = bWritePrimaryGBuffer && GeomNormalBuffers[ColorBufferWriteIndex]
+		? rg.ImportTexture("PathTracingCompaction.OutGeomNormal", GeomNormalBuffers[ColorBufferWriteIndex].get(), EResourceState::ShaderRead)
+		: RGTextureRef{};
+	RGTextureRef outVelocity = bWritePrimaryGBuffer && VelocityBuffer
+		? rg.ImportTexture("PathTracingCompaction.OutVelocity", VelocityBuffer.get(), EResourceState::ShaderRead)
+		: RGTextureRef{};
+	RGTextureRef outRoughnessMetallic = bWritePrimaryGBuffer && RoughnessMetalicBuffer
+		? rg.ImportTexture("PathTracingCompaction.OutRoughnessMetallic", RoughnessMetalicBuffer.get(), EResourceState::ShaderRead)
+		: RGTextureRef{};
+	RGTextureRef outDepth = bWritePrimaryGBuffer && UnjitteredDepthBuffers[ColorBufferWriteIndex]
+		? rg.ImportTexture("PathTracingCompaction.OutDepth", UnjitteredDepthBuffers[ColorBufferWriteIndex].get(), EResourceState::ShaderRead)
+		: RGTextureRef{};
+	RGTextureRef outSpecularHitDistance = bWritePrimaryGBuffer && PathTracingSpecularHitDistanceBuffer
+		? rg.ImportTexture("PathTracingCompaction.OutSpecularHitDistance", PathTracingSpecularHitDistanceBuffer.get(), EResourceState::ShaderRead)
+		: RGTextureRef{};
+	RGTextureRef outSpecularMotionVector = bWritePrimaryGBuffer && PathTracingSpecularMotionVectorBuffer
+		? rg.ImportTexture("PathTracingCompaction.OutSpecularMotionVector", PathTracingSpecularMotionVectorBuffer.get(), EResourceState::ShaderRead)
+		: RGTextureRef{};
+	RGBufferRef state[2] =
+	{
+		rg.ImportBuffer("PathTracingCompaction.State0", PathTracingCompactionState[0].get(), EResourceState::ShaderRead),
+		rg.ImportBuffer("PathTracingCompaction.State1", PathTracingCompactionState[1].get(), EResourceState::ShaderRead),
+	};
+	RGBufferRef activeList[2] =
+	{
+		rg.ImportBuffer("PathTracingCompaction.ActiveList0", PathTracingCompactionActiveList[0].get(), EResourceState::ShaderRead),
+		rg.ImportBuffer("PathTracingCompaction.ActiveList1", PathTracingCompactionActiveList[1].get(), EResourceState::ShaderRead),
+	};
+	RGBufferRef counter = rg.ImportBuffer("PathTracingCompaction.Counter", PathTracingCompactionCounter.get(), EResourceState::ShaderRead);
+	RGBufferRef radiance = rg.ImportBuffer("PathTracingCompaction.Radiance", PathTracingCompactionRadiance.get(), EResourceState::ShaderRead);
+	RGBufferRef indirectArgs = rg.ImportBuffer("PathTracingCompaction.IndirectArgs", PathTracingCompactionIndirectArgs.get(), EResourceState::ShaderRead);
+	RGBufferRef pointLightBuffer = rg.ImportBuffer("PathTracingCompaction.PointLightBuffer", PathTracingPointLightBuffer.get(), EResourceState::ShaderRead);
+	RGBufferRef rtMaterials = rg.ImportBuffer("PathTracingCompaction.RtMaterials", RTMaterialRecordBuffer.get(), EResourceState::ShaderRead);
+
+	rg.ExportTexture(outputColorTarget, EResourceState::ShaderRead);
+	if (outAlbedo.IsValid())
+		rg.ExportTexture(outAlbedo, EResourceState::ShaderRead);
+	if (outSpecularAlbedo.IsValid())
+		rg.ExportTexture(outSpecularAlbedo, EResourceState::ShaderRead);
+	if (outNormal.IsValid())
+		rg.ExportTexture(outNormal, EResourceState::ShaderRead);
+	if (outGeomNormal.IsValid())
+		rg.ExportTexture(outGeomNormal, EResourceState::ShaderRead);
+	if (outVelocity.IsValid())
+		rg.ExportTexture(outVelocity, EResourceState::ShaderRead);
+	if (outRoughnessMetallic.IsValid())
+		rg.ExportTexture(outRoughnessMetallic, EResourceState::ShaderRead);
+	if (outDepth.IsValid())
+		rg.ExportTexture(outDepth, EResourceState::ShaderRead);
+	if (outSpecularHitDistance.IsValid())
+		rg.ExportTexture(outSpecularHitDistance, EResourceState::ShaderRead);
+	if (outSpecularMotionVector.IsValid())
+		rg.ExportTexture(outSpecularMotionVector, EResourceState::ShaderRead);
+	for (uint32_t index = 0; index < 2; ++index)
+	{
+		rg.ExportBuffer(state[index], EResourceState::ShaderRead);
+		rg.ExportBuffer(activeList[index], EResourceState::ShaderRead);
+	}
+	rg.ExportBuffer(counter, EResourceState::ShaderRead);
+	rg.ExportBuffer(radiance, EResourceState::ShaderRead);
+	rg.ExportBuffer(indirectArgs, EResourceState::ShaderRead);
+
+	const PathTracingViewParamCB viewParam = dispatchViewParam;
+	const PathTracingCompactionParamCB seedParam = compactionParam;
+	rg.AddPass(
+		"PathTracingCompactionSeed",
+		ERGPassFlags::Compute,
+		[&](RGPassBuilder& builder)
+		{
+			builder.WriteBuffer(state[0], EResourceState::UnorderedAccess)
+				.WriteBuffer(activeList[0], EResourceState::UnorderedAccess)
+				.ReadWriteBuffer(counter, EResourceState::UnorderedAccess)
+				.ReadWriteBuffer(radiance, EResourceState::UnorderedAccess);
+		},
+		[&, seedParam, viewParam](RGContext& ctx)
+		{
+			PathTracingCompactionParamCB passCompactionParam = seedParam;
+			PathTracingViewParamCB passViewParam = viewParam;
+			PSO_PATH_TRACING_COMPACTION_SEED->SetBufferUAV("StateOut", ctx.GetBuffer(state[0]));
+			PSO_PATH_TRACING_COMPACTION_SEED->SetBufferUAV("ActiveListOut", ctx.GetBuffer(activeList[0]));
+			PSO_PATH_TRACING_COMPACTION_SEED->SetBufferUAV("Counters", ctx.GetBuffer(counter));
+			PSO_PATH_TRACING_COMPACTION_SEED->SetBufferUAV("PathRadiance", ctx.GetBuffer(radiance));
+			PSO_PATH_TRACING_COMPACTION_SEED->SetCBVValue("ViewParameter", &passViewParam);
+			PSO_PATH_TRACING_COMPACTION_SEED->SetCBVValue("PathCompaction", &passCompactionParam);
+			PSO_PATH_TRACING_COMPACTION_SEED->Apply();
+			renderBackend->Dispatch((m_width + 7u) / 8u, (m_height + 7u) / 8u, 1u);
+		});
+
 	const UINT32 bounceCount = std::min(std::max(dispatchViewParam.MaxBounces, 1u), PathTracingCompactionCounterCount - 1u);
 	for (UINT32 bounceIndex = 0; bounceIndex < bounceCount; ++bounceIndex)
 	{
@@ -351,81 +416,123 @@ bool Corona::PathTracingCompactionPass(Texture* outputColor, const PathTracingVi
 		const UINT32 writeIndex = 1u - readIndex;
 		compactionParam.BounceIndex = bounceIndex;
 
-		RTPassBuilder pass(*this, PSO_PATH_TRACING_COMPACTION_TRACE);
-		pass.BeginScene()
-			.SetTextureUAV("global", "OutAlbedo", AlbedoBuffer.get())
-			.SetTextureUAV("global", "OutSpecularAlbedo", SpecularAlbedoBuffer.get())
-			.SetTextureUAV("global", "OutNormal", NormalBuffers[ColorBufferWriteIndex].get())
-			.SetTextureUAV("global", "OutGeomNormal", GeomNormalBuffers[ColorBufferWriteIndex].get())
-			.SetTextureUAV("global", "OutVelocity", VelocityBuffer.get())
-			.SetTextureUAV("global", "OutRoughnessMetallic", RoughnessMetalicBuffer.get())
-			.SetTextureUAV("global", "OutDepth", UnjitteredDepthBuffers[ColorBufferWriteIndex].get())
-			.SetTextureUAV("global", "OutSpecularHitDistance", PathTracingSpecularHitDistanceBuffer.get())
-			.SetTextureUAV("global", "OutSpecularMotionVector", PathTracingSpecularMotionVectorBuffer.get())
-			.SetBufferUAV("global", "PathCompactionStateIn", PathTracingCompactionState[readIndex].get())
-			.SetBufferUAV("global", "PathCompactionStateOut", PathTracingCompactionState[writeIndex].get())
-			.SetBufferUAV("global", "PathCompactionActiveListIn", PathTracingCompactionActiveList[readIndex].get())
-			.SetBufferUAV("global", "PathCompactionActiveListOut", PathTracingCompactionActiveList[writeIndex].get())
-			.SetBufferUAV("global", "PathCompactionCounters", PathTracingCompactionCounter.get())
-			.SetBufferUAV("global", "PathCompactionRadiance", PathTracingCompactionRadiance.get())
-			.SetAccelerationStructure("global", "gRtScene", TLAS)
-			.SetBufferSRV("global", "PointLightBuffer", PathTracingPointLightBuffer.get())
-			.SetCBVValue("global", "ViewParameter", const_cast<PathTracingViewParamCB*>(&dispatchViewParam))
-			.SetCBVValue("global", "PathCompaction", &compactionParam)
-			.SetSampler("global", "sampleWrap", samplerWrap.get());
-		pass.SetBindlessTextureTable("global", "MaterialTextures")
-			.SetBufferSRV("global", "RtMaterials", RTMaterialRecordBuffer.get());
+		const PathTracingCompactionParamCB traceParam = compactionParam;
+		rg.AddPass(
+			"PathTracingCompactionTrace",
+			ERGPassFlags::RayTracing,
+			[&, readIndex, writeIndex](RGPassBuilder& builder)
+			{
+				builder.ReadWriteBuffer(state[readIndex], EResourceState::UnorderedAccess)
+					.ReadWriteBuffer(state[writeIndex], EResourceState::UnorderedAccess)
+					.ReadWriteBuffer(activeList[readIndex], EResourceState::UnorderedAccess)
+					.ReadWriteBuffer(activeList[writeIndex], EResourceState::UnorderedAccess)
+					.ReadWriteBuffer(counter, EResourceState::UnorderedAccess)
+					.ReadWriteBuffer(radiance, EResourceState::UnorderedAccess)
+					.ReadWriteBuffer(indirectArgs, EResourceState::UnorderedAccess)
+					.ReadBuffer(pointLightBuffer, EResourceState::ShaderRead)
+					.ReadBuffer(rtMaterials, EResourceState::ShaderRead);
+				if (outAlbedo.IsValid())
+					builder.ReadWriteTexture(outAlbedo, EResourceState::UnorderedAccess);
+				if (outSpecularAlbedo.IsValid())
+					builder.ReadWriteTexture(outSpecularAlbedo, EResourceState::UnorderedAccess);
+				if (outNormal.IsValid())
+					builder.ReadWriteTexture(outNormal, EResourceState::UnorderedAccess);
+				if (outGeomNormal.IsValid())
+					builder.ReadWriteTexture(outGeomNormal, EResourceState::UnorderedAccess);
+				if (outVelocity.IsValid())
+					builder.ReadWriteTexture(outVelocity, EResourceState::UnorderedAccess);
+				if (outRoughnessMetallic.IsValid())
+					builder.ReadWriteTexture(outRoughnessMetallic, EResourceState::UnorderedAccess);
+				if (outDepth.IsValid())
+					builder.ReadWriteTexture(outDepth, EResourceState::UnorderedAccess);
+				if (outSpecularHitDistance.IsValid())
+					builder.ReadWriteTexture(outSpecularHitDistance, EResourceState::UnorderedAccess);
+				if (outSpecularMotionVector.IsValid())
+					builder.ReadWriteTexture(outSpecularMotionVector, EResourceState::UnorderedAccess);
+			},
+			[&, readIndex, writeIndex, bounceIndex, traceParam, viewParam](RGContext& ctx)
+			{
+				PathTracingCompactionParamCB passCompactionParam = traceParam;
+				PathTracingViewParamCB passViewParam = viewParam;
+				RTPassBuilder pass(*this, PSO_PATH_TRACING_COMPACTION_TRACE);
+				pass.BeginScene()
+					.SetTextureUAV("global", "OutAlbedo", outAlbedo.IsValid() ? ctx.GetTexture(outAlbedo) : nullptr)
+					.SetTextureUAV("global", "OutSpecularAlbedo", outSpecularAlbedo.IsValid() ? ctx.GetTexture(outSpecularAlbedo) : nullptr)
+					.SetTextureUAV("global", "OutNormal", outNormal.IsValid() ? ctx.GetTexture(outNormal) : nullptr)
+					.SetTextureUAV("global", "OutGeomNormal", outGeomNormal.IsValid() ? ctx.GetTexture(outGeomNormal) : nullptr)
+					.SetTextureUAV("global", "OutVelocity", outVelocity.IsValid() ? ctx.GetTexture(outVelocity) : nullptr)
+					.SetTextureUAV("global", "OutRoughnessMetallic", outRoughnessMetallic.IsValid() ? ctx.GetTexture(outRoughnessMetallic) : nullptr)
+					.SetTextureUAV("global", "OutDepth", outDepth.IsValid() ? ctx.GetTexture(outDepth) : nullptr)
+					.SetTextureUAV("global", "OutSpecularHitDistance", outSpecularHitDistance.IsValid() ? ctx.GetTexture(outSpecularHitDistance) : nullptr)
+					.SetTextureUAV("global", "OutSpecularMotionVector", outSpecularMotionVector.IsValid() ? ctx.GetTexture(outSpecularMotionVector) : nullptr)
+					.SetBufferUAV("global", "PathCompactionStateIn", ctx.GetBuffer(state[readIndex]))
+					.SetBufferUAV("global", "PathCompactionStateOut", ctx.GetBuffer(state[writeIndex]))
+					.SetBufferUAV("global", "PathCompactionActiveListIn", ctx.GetBuffer(activeList[readIndex]))
+					.SetBufferUAV("global", "PathCompactionActiveListOut", ctx.GetBuffer(activeList[writeIndex]))
+					.SetBufferUAV("global", "PathCompactionCounters", ctx.GetBuffer(counter))
+					.SetBufferUAV("global", "PathCompactionRadiance", ctx.GetBuffer(radiance))
+					.SetAccelerationStructure("global", "gRtScene", TLAS)
+					.SetBufferSRV("global", "PointLightBuffer", ctx.GetBuffer(pointLightBuffer))
+					.SetCBVValue("global", "ViewParameter", &passViewParam)
+					.SetCBVValue("global", "PathCompaction", &passCompactionParam)
+					.SetSampler("global", "sampleWrap", samplerWrap.get());
+				pass.SetBindlessTextureTable("global", "MaterialTextures")
+					.SetBufferSRV("global", "RtMaterials", ctx.GetBuffer(rtMaterials));
 
-		RTSceneHitProgramDesc hitProgramDesc;
-		pass.BindSceneHitPrograms(hitProgramDesc);
+				RTSceneHitProgramDesc hitProgramDesc;
+				pass.BindSceneHitPrograms(hitProgramDesc);
 
-		RtDispatchRaysIndirectTemplate dispatchTemplate = {};
-		const bool bCanDispatchIndirect =
-			pass.GetDispatchRaysIndirectTemplate(PathTracingCompactionCapacity, 1u, dispatchTemplate) &&
-			PathTracingCompactionIndirectArgs;
+				RtDispatchRaysIndirectTemplate dispatchTemplate = {};
+				const bool bCanDispatchIndirect =
+					pass.GetDispatchRaysIndirectTemplate(PathTracingCompactionCapacity, 1u, dispatchTemplate) &&
+					ctx.GetBuffer(indirectArgs);
 
-		bool bTraceDispatched = false;
-		if (bCanDispatchIndirect)
-		{
-			PathTracingCompactionIndirectParamCB indirectParam = makeIndirectParam(dispatchTemplate, bounceIndex);
-			renderBackend->BeginGpuMarker(0xff44aaffu, "PathTracingCompactionIndirectArgs");
-			PSO_PATH_TRACING_COMPACTION_INDIRECT_ARGS->SetBufferUAV("Counters", PathTracingCompactionCounter.get());
-			PSO_PATH_TRACING_COMPACTION_INDIRECT_ARGS->SetBufferUAV("IndirectArgs", PathTracingCompactionIndirectArgs.get());
-			PSO_PATH_TRACING_COMPACTION_INDIRECT_ARGS->SetCBVValue("PathCompactionIndirect", &indirectParam);
-			PSO_PATH_TRACING_COMPACTION_INDIRECT_ARGS->Apply();
-			renderBackend->Dispatch(1u, 1u, 1u);
-			renderBackend->EndGpuMarker();
-			renderBackend->UAVBarrier(PathTracingCompactionIndirectArgs.get());
+				bool bTraceDispatched = false;
+				if (bCanDispatchIndirect)
+				{
+					PathTracingCompactionIndirectParamCB indirectParam = makeIndirectParam(dispatchTemplate, bounceIndex);
+					PSO_PATH_TRACING_COMPACTION_INDIRECT_ARGS->SetBufferUAV("Counters", ctx.GetBuffer(counter));
+					PSO_PATH_TRACING_COMPACTION_INDIRECT_ARGS->SetBufferUAV("IndirectArgs", ctx.GetBuffer(indirectArgs));
+					PSO_PATH_TRACING_COMPACTION_INDIRECT_ARGS->SetCBVValue("PathCompactionIndirect", &indirectParam);
+					PSO_PATH_TRACING_COMPACTION_INDIRECT_ARGS->Apply();
+					renderBackend->Dispatch(1u, 1u, 1u);
+					renderBackend->UAVBarrier(ctx.GetBuffer(indirectArgs));
 
-			renderBackend->TransitionBuffer(PathTracingCompactionIndirectArgs.get(), EResourceState::UnorderedAccess, EResourceState::IndirectArgument);
-			renderBackend->BeginGpuMarker(0xff66cc99u, "PathTracingCompactionTrace");
-			bTraceDispatched = pass.DispatchIndirect(PathTracingCompactionIndirectArgs.get(), 0);
-			renderBackend->EndGpuMarker();
-			renderBackend->TransitionBuffer(PathTracingCompactionIndirectArgs.get(), EResourceState::IndirectArgument, EResourceState::UnorderedAccess);
-		}
+					renderBackend->TransitionBuffer(ctx.GetBuffer(indirectArgs), EResourceState::UnorderedAccess, EResourceState::IndirectArgument);
+					bTraceDispatched = pass.DispatchIndirect(ctx.GetBuffer(indirectArgs), 0);
+					renderBackend->TransitionBuffer(ctx.GetBuffer(indirectArgs), EResourceState::IndirectArgument, EResourceState::UnorderedAccess);
+				}
 
-		if (!bTraceDispatched)
-		{
-			renderBackend->BeginGpuMarker(0xff66cc99u, "PathTracingCompactionTrace");
-			pass.Dispatch(m_width, m_height);
-			renderBackend->EndGpuMarker();
-		}
-		barrierCompactionBuffers();
+				if (!bTraceDispatched)
+					pass.Dispatch(m_width, m_height);
+			});
 	}
 
 	compactionParam.BounceIndex = bounceCount;
-	renderBackend->BeginGpuMarker(0xffffcc66u, "PathTracingCompactionResolve");
-	PSO_PATH_TRACING_COMPACTION_RESOLVE->SetBufferUAV("PathRadiance", PathTracingCompactionRadiance.get());
-	PSO_PATH_TRACING_COMPACTION_RESOLVE->SetTextureUAV("OutputColor", outputColor);
-	PSO_PATH_TRACING_COMPACTION_RESOLVE->SetCBVValue("ViewParameter", const_cast<PathTracingViewParamCB*>(&dispatchViewParam));
-	PSO_PATH_TRACING_COMPACTION_RESOLVE->SetCBVValue("PathCompaction", &compactionParam);
-	PSO_PATH_TRACING_COMPACTION_RESOLVE->Apply();
-	renderBackend->Dispatch((m_width + 7u) / 8u, (m_height + 7u) / 8u, 1u);
-	renderBackend->EndGpuMarker();
-	renderBackend->UAVBarrier(PathTracingCompactionRadiance.get());
+	const PathTracingCompactionParamCB resolveParam = compactionParam;
+	rg.AddPass(
+		"PathTracingCompactionResolve",
+		ERGPassFlags::Compute,
+		[&](RGPassBuilder& builder)
+		{
+			builder.ReadWriteBuffer(radiance, EResourceState::UnorderedAccess)
+				.ReadWriteTexture(outputColorTarget, EResourceState::UnorderedAccess);
+		},
+		[&, resolveParam, viewParam](RGContext& ctx)
+		{
+			PathTracingCompactionParamCB passCompactionParam = resolveParam;
+			PathTracingViewParamCB passViewParam = viewParam;
+			PSO_PATH_TRACING_COMPACTION_RESOLVE->SetBufferUAV("PathRadiance", ctx.GetBuffer(radiance));
+			PSO_PATH_TRACING_COMPACTION_RESOLVE->SetTextureUAV("OutputColor", ctx.GetTexture(outputColorTarget));
+			PSO_PATH_TRACING_COMPACTION_RESOLVE->SetCBVValue("ViewParameter", &passViewParam);
+			PSO_PATH_TRACING_COMPACTION_RESOLVE->SetCBVValue("PathCompaction", &passCompactionParam);
+			PSO_PATH_TRACING_COMPACTION_RESOLVE->Apply();
+			renderBackend->Dispatch((m_width + 7u) / 8u, (m_height + 7u) / 8u, 1u);
+		});
 
-	renderBackend->TransitionBuffer(PathTracingCompactionIndirectArgs.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
-	transitionCompactionBuffers(EResourceState::UnorderedAccess, EResourceState::ShaderRead);
+	if (!rg.Execute())
+		return false;
+
 	(void)bWritePrimaryGBuffer;
 	return true;
 }

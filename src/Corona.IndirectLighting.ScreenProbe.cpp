@@ -11,6 +11,7 @@
 
 #include "stdafx.h"
 #include "Corona.h"
+#include "RenderGraph.h"
 
 #include <algorithm>
 #include <chrono>
@@ -24,6 +25,11 @@ void AppendCpuRuntimeTrace(const std::wstring& line);
 
 namespace
 {
+	RGTextureRef ImportTextureIfValid(RenderGraph& rg, const char* name, Texture* texture, EResourceState state = EResourceState::ShaderRead)
+	{
+		return texture ? rg.ImportTexture(name, texture, state) : RGTextureRef{};
+	}
+
 	std::wstring FormatScreenProbeInitMilliseconds(double milliseconds)
 	{
 		std::wostringstream stream;
@@ -217,10 +223,9 @@ void Corona::ScreenProbeRaytraceGIPass()
 
 	if (!TLAS || !pso || !ScreenProbeGIRadiance[0] || !ScreenProbeGIRadiance[1] || !hasScreenProbeSHSet(0) || !hasScreenProbeSHSet(1) || !ScreenProbeGIMetadata[0] || !ScreenProbeGIMetadata[1])
 		return;
-	renderBackend->EmitGpuCrashMarker("ScreenProbeRaytraceGIPass");
 
 	if (!EnsureRTMaterialRecordBuffer())
-	return;
+		return;
 
 	ScreenProbeGIAtlasWriteIndex = 1 - ScreenProbeGIAtlasWriteIndex;
 	const UINT writeIndex = ScreenProbeGIAtlasWriteIndex;
@@ -302,44 +307,100 @@ void Corona::ScreenProbeRaytraceGIPass()
 		}
 	}
 
-	renderBackend->TransitionTexture(ScreenProbeGIRadiance[writeIndex].get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
-	for (UINT coefficientIndex = 0; coefficientIndex < ScreenProbeSHCoefficientCount; ++coefficientIndex)
-		renderBackend->TransitionTexture(ScreenProbeGISH[writeIndex][coefficientIndex].get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
-	renderBackend->TransitionTexture(ScreenProbeGIMetadata[writeIndex].get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
+	Texture* const depthTexture = UnjitteredDepthBuffers[ColorBufferWriteIndex].get();
+	Texture* const normalTexture = NormalBuffers[ColorBufferWriteIndex].get();
+	Texture* const prevDepthTexture = UnjitteredDepthBuffers[1 - ColorBufferWriteIndex].get();
+	Texture* const prevNormalTexture = NormalBuffers[1 - ColorBufferWriteIndex].get();
 
-	RTPassBuilder pass(*this, pso);
-	pass.BeginScene();
-
-	pass.SetTextureUAV("global", "ProbeRadiance", ScreenProbeGIRadiance[writeIndex].get());
-	pass.SetTextureUAV("global", "ProbeMeta", ScreenProbeGIMetadata[writeIndex].get());
+	RenderGraph rg(renderBackend.get());
+	RGTextureRef outRadiance = rg.ImportTexture("ScreenProbe.AtlasRadiance", ScreenProbeGIRadiance[writeIndex].get(), EResourceState::ShaderRead);
+	RGTextureRef outMeta = rg.ImportTexture("ScreenProbe.AtlasMeta", ScreenProbeGIMetadata[writeIndex].get(), EResourceState::ShaderRead);
+	RGTextureRef outSH[ScreenProbeSHCoefficientCount] = {};
 	for (UINT coefficientIndex = 0; coefficientIndex < ScreenProbeSHCoefficientCount; ++coefficientIndex)
-		pass.SetTextureUAV("global", probeSHUAVNames[coefficientIndex], ScreenProbeGISH[writeIndex][coefficientIndex].get());
-	pass.SetAccelerationStructure("global", "gRtScene", TLAS);
-	pass.SetTextureSRV("global", "DepthTex", UnjitteredDepthBuffers[ColorBufferWriteIndex].get());
-	pass.SetTextureSRV("global", "WorldNormalTex", NormalBuffers[ColorBufferWriteIndex].get());
-	pass.SetTextureSRV("global", "RayNoiseBlueNoiseSource", BlueNoiseTex.get());
-	pass.SetTextureSRV("global", "PrevProbeRadianceTex", ScreenProbeGIRadiance[readIndex].get());
-	pass.SetTextureSRV("global", "PrevProbeMetaTex", ScreenProbeGIMetadata[readIndex].get());
+		outSH[coefficientIndex] = rg.ImportTexture("ScreenProbe.AtlasSH", ScreenProbeGISH[writeIndex][coefficientIndex].get(), EResourceState::ShaderRead);
+	RGTextureRef depth = ImportTextureIfValid(rg, "ScreenProbe.Depth", depthTexture);
+	RGTextureRef normal = ImportTextureIfValid(rg, "ScreenProbe.WorldNormal", normalTexture);
+	RGTextureRef blueNoise = ImportTextureIfValid(rg, "ScreenProbe.BlueNoise", BlueNoiseTex.get());
+	RGTextureRef prevRadiance = rg.ImportTexture("ScreenProbe.PrevAtlasRadiance", ScreenProbeGIRadiance[readIndex].get(), EResourceState::ShaderRead);
+	RGTextureRef prevMeta = rg.ImportTexture("ScreenProbe.PrevAtlasMeta", ScreenProbeGIMetadata[readIndex].get(), EResourceState::ShaderRead);
+	RGTextureRef prevSH[ScreenProbeSHCoefficientCount] = {};
 	for (UINT coefficientIndex = 0; coefficientIndex < ScreenProbeSHCoefficientCount; ++coefficientIndex)
-		pass.SetTextureSRV("global", prevProbeSHSRVNames[coefficientIndex], ScreenProbeGISH[readIndex][coefficientIndex].get());
-	pass.SetTextureSRV("global", "VelocityTex", VelocityBuffer.get());
-	pass.SetTextureSRV("global", "PrevDepthTex", UnjitteredDepthBuffers[1 - ColorBufferWriteIndex].get());
-	pass.SetTextureSRV("global", "PrevNormalTex", NormalBuffers[1 - ColorBufferWriteIndex].get());
-	pass.SetTextureSRV("global", "GeoNormalTex", GeomNormalBuffers[ColorBufferWriteIndex].get());
-	pass.SetCBVValue("global", "ViewParameter", &RTScreenProbeGIViewParam);
-	pass.SetSampler("global", "sampleWrap", samplerWrap.get());
-	pass.SetSampler("global", "historyClamp", samplerBilinearWrap.get());
-	pass.SetBindlessTextureTable("global", "MaterialTextures")
-		.SetBufferSRV("global", "RtMaterials", RTMaterialRecordBuffer.get());
+		prevSH[coefficientIndex] = rg.ImportTexture("ScreenProbe.PrevAtlasSH", ScreenProbeGISH[readIndex][coefficientIndex].get(), EResourceState::ShaderRead);
+	RGTextureRef velocity = ImportTextureIfValid(rg, "ScreenProbe.Velocity", VelocityBuffer.get());
+	RGTextureRef prevDepth = (prevDepthTexture && prevDepthTexture == depthTexture) ? depth : ImportTextureIfValid(rg, "ScreenProbe.PrevDepth", prevDepthTexture);
+	RGTextureRef prevNormal = (prevNormalTexture && prevNormalTexture == normalTexture) ? normal : ImportTextureIfValid(rg, "ScreenProbe.PrevNormal", prevNormalTexture);
+	RGTextureRef geomNormal = ImportTextureIfValid(rg, "ScreenProbe.GeoNormal", GeomNormalBuffers[ColorBufferWriteIndex].get());
+	RGBufferRef rtMaterials = rg.ImportBuffer("ScreenProbe.RtMaterials", RTMaterialRecordBuffer.get(), EResourceState::ShaderRead);
 
-	RTSceneHitProgramDesc hitProgramDesc;
-	pass.BindSceneHitPrograms(hitProgramDesc);
-	pass.Dispatch(probeGridWidth, probeGridHeight);
-
-	renderBackend->TransitionTexture(ScreenProbeGIRadiance[writeIndex].get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
+	rg.ExportTexture(outRadiance, EResourceState::ShaderRead);
+	rg.ExportTexture(outMeta, EResourceState::ShaderRead);
 	for (UINT coefficientIndex = 0; coefficientIndex < ScreenProbeSHCoefficientCount; ++coefficientIndex)
-		renderBackend->TransitionTexture(ScreenProbeGISH[writeIndex][coefficientIndex].get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
-	renderBackend->TransitionTexture(ScreenProbeGIMetadata[writeIndex].get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
+		rg.ExportTexture(outSH[coefficientIndex], EResourceState::ShaderRead);
+
+	rg.AddPass(
+		"ScreenProbeRaytraceGIPass",
+		ERGPassFlags::RayTracing,
+		[&](RGPassBuilder& builder)
+		{
+			builder.ReadWriteTexture(outRadiance, EResourceState::UnorderedAccess)
+				.ReadWriteTexture(outMeta, EResourceState::UnorderedAccess)
+				.ReadTexture(prevRadiance, EResourceState::ShaderRead)
+				.ReadTexture(prevMeta, EResourceState::ShaderRead)
+				.ReadBuffer(rtMaterials, EResourceState::ShaderRead);
+			for (UINT coefficientIndex = 0; coefficientIndex < ScreenProbeSHCoefficientCount; ++coefficientIndex)
+			{
+				builder.ReadWriteTexture(outSH[coefficientIndex], EResourceState::UnorderedAccess);
+				builder.ReadTexture(prevSH[coefficientIndex], EResourceState::ShaderRead);
+			}
+			if (depth.IsValid())
+				builder.ReadTexture(depth, EResourceState::ShaderRead);
+			if (normal.IsValid())
+				builder.ReadTexture(normal, EResourceState::ShaderRead);
+			if (blueNoise.IsValid())
+				builder.ReadTexture(blueNoise, EResourceState::ShaderRead);
+			if (velocity.IsValid())
+				builder.ReadTexture(velocity, EResourceState::ShaderRead);
+			if (prevDepth.IsValid() && prevDepth.Index != depth.Index)
+				builder.ReadTexture(prevDepth, EResourceState::ShaderRead);
+			if (prevNormal.IsValid() && prevNormal.Index != normal.Index)
+				builder.ReadTexture(prevNormal, EResourceState::ShaderRead);
+			if (geomNormal.IsValid())
+				builder.ReadTexture(geomNormal, EResourceState::ShaderRead);
+		},
+		[&, pso](RGContext& ctx)
+		{
+			RTPassBuilder pass(*this, pso);
+			pass.BeginScene();
+
+			pass.SetTextureUAV("global", "ProbeRadiance", ctx.GetTexture(outRadiance));
+			pass.SetTextureUAV("global", "ProbeMeta", ctx.GetTexture(outMeta));
+			for (UINT coefficientIndex = 0; coefficientIndex < ScreenProbeSHCoefficientCount; ++coefficientIndex)
+				pass.SetTextureUAV("global", probeSHUAVNames[coefficientIndex], ctx.GetTexture(outSH[coefficientIndex]));
+			pass.SetAccelerationStructure("global", "gRtScene", TLAS);
+			pass.SetTextureSRV("global", "DepthTex", depth.IsValid() ? ctx.GetTexture(depth) : nullptr);
+			pass.SetTextureSRV("global", "WorldNormalTex", normal.IsValid() ? ctx.GetTexture(normal) : nullptr);
+			pass.SetTextureSRV("global", "RayNoiseBlueNoiseSource", blueNoise.IsValid() ? ctx.GetTexture(blueNoise) : nullptr);
+			pass.SetTextureSRV("global", "PrevProbeRadianceTex", ctx.GetTexture(prevRadiance));
+			pass.SetTextureSRV("global", "PrevProbeMetaTex", ctx.GetTexture(prevMeta));
+			for (UINT coefficientIndex = 0; coefficientIndex < ScreenProbeSHCoefficientCount; ++coefficientIndex)
+				pass.SetTextureSRV("global", prevProbeSHSRVNames[coefficientIndex], ctx.GetTexture(prevSH[coefficientIndex]));
+			pass.SetTextureSRV("global", "VelocityTex", velocity.IsValid() ? ctx.GetTexture(velocity) : nullptr);
+			pass.SetTextureSRV("global", "PrevDepthTex", prevDepth.IsValid() ? ctx.GetTexture(prevDepth) : nullptr);
+			pass.SetTextureSRV("global", "PrevNormalTex", prevNormal.IsValid() ? ctx.GetTexture(prevNormal) : nullptr);
+			pass.SetTextureSRV("global", "GeoNormalTex", geomNormal.IsValid() ? ctx.GetTexture(geomNormal) : nullptr);
+			pass.SetCBVValue("global", "ViewParameter", &RTScreenProbeGIViewParam);
+			pass.SetSampler("global", "sampleWrap", samplerWrap.get());
+			pass.SetSampler("global", "historyClamp", samplerBilinearWrap.get());
+			pass.SetBindlessTextureTable("global", "MaterialTextures")
+				.SetBufferSRV("global", "RtMaterials", ctx.GetBuffer(rtMaterials));
+
+			RTSceneHitProgramDesc hitProgramDesc;
+			pass.BindSceneHitPrograms(hitProgramDesc);
+			pass.Dispatch(probeGridWidth, probeGridHeight);
+		});
+
+	if (!rg.Execute())
+		return;
 	bScreenProbeGIAtlasHistoryValid = true;
 }
 
@@ -358,7 +419,6 @@ void Corona::ScreenProbeGIPass()
 	if (!ScreenProbeGIPSO || !ScreenProbeGIResolved || !ScreenProbeGIProbeDebug || !ScreenProbeGIHistory[0] || !ScreenProbeGIHistory[1] ||
 		!ScreenProbeGIRadiance[ScreenProbeGIAtlasWriteIndex] || !hasScreenProbeSHSet(ScreenProbeGIAtlasWriteIndex) || !ScreenProbeGIMetadata[ScreenProbeGIAtlasWriteIndex])
 		return;
-	renderBackend->EmitGpuCrashMarker("ScreenProbeGIPass");
 
 	ScreenProbeGIHistoryWriteIndex = 1 - ScreenProbeGIHistoryWriteIndex;
 	const UINT historyWriteIndex = ScreenProbeGIHistoryWriteIndex;
@@ -376,48 +436,97 @@ void Corona::ScreenProbeGIPass()
 		"ScreenProbeSH8Tex"
 	};
 
-	renderBackend->TransitionTexture(ScreenProbeGIResolved.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
-	renderBackend->TransitionTexture(ScreenProbeGIProbeDebug.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
-	renderBackend->TransitionTexture(ScreenProbeGIHistory[historyWriteIndex].get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
+	Texture* const depthTexture = UnjitteredDepthBuffers[ColorBufferWriteIndex].get();
+	Texture* const normalTexture = NormalBuffers[ColorBufferWriteIndex].get();
+	Texture* const prevDepthTexture = UnjitteredDepthBuffers[1 - ColorBufferWriteIndex].get();
+	Texture* const prevNormalTexture = NormalBuffers[1 - ColorBufferWriteIndex].get();
 
-	ScreenProbeGIPSO->SetTextureSRV("DepthTex", UnjitteredDepthBuffers[ColorBufferWriteIndex].get());
-	ScreenProbeGIPSO->SetTextureSRV("WorldNormalTex", NormalBuffers[ColorBufferWriteIndex].get());
-	ScreenProbeGIPSO->SetTextureSRV("GeoNormalTex", GeomNormalBuffers[ColorBufferWriteIndex].get());
-	ScreenProbeGIPSO->SetTextureSRV("ScreenProbeRadianceTex", ScreenProbeGIRadiance[ScreenProbeGIAtlasWriteIndex].get());
-	ScreenProbeGIPSO->SetTextureSRV("ScreenProbeMetaTex", ScreenProbeGIMetadata[ScreenProbeGIAtlasWriteIndex].get());
-	ScreenProbeGIPSO->SetTextureSRV("PrevScreenProbeGITex", ScreenProbeGIHistory[historyReadIndex].get());
-	ScreenProbeGIPSO->SetTextureSRV("VelocityTex", VelocityBuffer.get());
-	ScreenProbeGIPSO->SetTextureSRV("PrevDepthTex", UnjitteredDepthBuffers[1 - ColorBufferWriteIndex].get());
-	ScreenProbeGIPSO->SetTextureSRV("PrevNormalTex", NormalBuffers[1 - ColorBufferWriteIndex].get());
+	RenderGraph rg(renderBackend.get());
+	RGTextureRef outResolved = rg.ImportTexture("ScreenProbe.Resolve.OutGI", ScreenProbeGIResolved.get(), EResourceState::ShaderRead);
+	RGTextureRef outDebug = rg.ImportTexture("ScreenProbe.Resolve.OutDebug", ScreenProbeGIProbeDebug.get(), EResourceState::ShaderRead);
+	RGTextureRef outHistory = rg.ImportTexture("ScreenProbe.Resolve.OutHistory", ScreenProbeGIHistory[historyWriteIndex].get(), EResourceState::ShaderRead);
+	RGTextureRef depth = ImportTextureIfValid(rg, "ScreenProbe.Resolve.Depth", depthTexture);
+	RGTextureRef normal = ImportTextureIfValid(rg, "ScreenProbe.Resolve.WorldNormal", normalTexture);
+	RGTextureRef geomNormal = ImportTextureIfValid(rg, "ScreenProbe.Resolve.GeoNormal", GeomNormalBuffers[ColorBufferWriteIndex].get());
+	RGTextureRef atlasRadiance = rg.ImportTexture("ScreenProbe.Resolve.AtlasRadiance", ScreenProbeGIRadiance[ScreenProbeGIAtlasWriteIndex].get(), EResourceState::ShaderRead);
+	RGTextureRef atlasMeta = rg.ImportTexture("ScreenProbe.Resolve.AtlasMeta", ScreenProbeGIMetadata[ScreenProbeGIAtlasWriteIndex].get(), EResourceState::ShaderRead);
+	RGTextureRef historyRead = rg.ImportTexture("ScreenProbe.Resolve.PrevHistory", ScreenProbeGIHistory[historyReadIndex].get(), EResourceState::ShaderRead);
+	RGTextureRef velocity = ImportTextureIfValid(rg, "ScreenProbe.Resolve.Velocity", VelocityBuffer.get());
+	RGTextureRef prevDepth = (prevDepthTexture && prevDepthTexture == depthTexture) ? depth : ImportTextureIfValid(rg, "ScreenProbe.Resolve.PrevDepth", prevDepthTexture);
+	RGTextureRef prevNormal = (prevNormalTexture && prevNormalTexture == normalTexture) ? normal : ImportTextureIfValid(rg, "ScreenProbe.Resolve.PrevNormal", prevNormalTexture);
+	RGTextureRef atlasSH[ScreenProbeSHCoefficientCount] = {};
 	for (UINT coefficientIndex = 0; coefficientIndex < ScreenProbeSHCoefficientCount; ++coefficientIndex)
-		ScreenProbeGIPSO->SetTextureSRV(screenProbeSHSRVNames[coefficientIndex], ScreenProbeGISH[ScreenProbeGIAtlasWriteIndex][coefficientIndex].get());
-	ScreenProbeGIPSO->SetTextureUAV("OutScreenProbeGI", ScreenProbeGIResolved.get());
-	ScreenProbeGIPSO->SetTextureUAV("OutScreenProbeDebug", ScreenProbeGIProbeDebug.get());
-	ScreenProbeGIPSO->SetTextureUAV("OutScreenProbeHistory", ScreenProbeGIHistory[historyWriteIndex].get());
-	ScreenProbeGIPSO->SetSampler("BilinearClamp", samplerBilinearWrap.get());
-	ScreenProbeGICB.ProbeSpacing = std::clamp(ScreenProbeGICB.ProbeSpacing, 4u, 64u);
-	ScreenProbeGICB.GatherRadius = std::clamp(ScreenProbeGICB.GatherRadius, 1u, 3u);
-	ScreenProbeGICB.RawBlend = std::clamp(ScreenProbeGICB.RawBlend, 0.0f, 1.0f);
-	ScreenProbeGICB.EdgeDepthWeight = std::clamp(ScreenProbeGICB.EdgeDepthWeight, 8.0f, 192.0f);
-	ScreenProbeGICB.EdgeNormalWeight = std::clamp(ScreenProbeGICB.EdgeNormalWeight, 1.0f, 96.0f);
-	ScreenProbeGICB.EdgeSampleCount = std::clamp(ScreenProbeGICB.EdgeSampleCount, 1u, 4u);
-	ScreenProbeGICB.SHCoefficientCount = ScreenProbeGICB.SHCoefficientCount <= 4u ? 4u : 9u;
-	ScreenProbeGICB.ProjectionParams = FrameProjectionParams;
-	ScreenProbeGICB.RTSize = glm::vec2(GetRenderWidth(), GetRenderHeight());
-	ScreenProbeGICB.ProbeGridSize = glm::vec2(
-		static_cast<float>((GetRenderWidth() + ScreenProbeGICB.ProbeSpacing - 1u) / ScreenProbeGICB.ProbeSpacing),
-		static_cast<float>((GetRenderHeight() + ScreenProbeGICB.ProbeSpacing - 1u) / ScreenProbeGICB.ProbeSpacing));
-	ScreenProbeGICB.FrameIndex = RenderFrameIndex;
-	ScreenProbeGICB.TemporalAlpha = std::clamp(ScreenProbeGICB.TemporalAlpha, 0.02f, 1.0f);
-	ScreenProbeGICB.HistoryValid = (bScreenProbeGIHistoryValid && !bScreenProbeLightingBootstrapPending) ? 1u : 0u;
-	ScreenProbeGIPSO->SetCBVValue("ScreenProbeGIConstant", &ScreenProbeGICB);
-	ScreenProbeGIPSO->Apply();
+		atlasSH[coefficientIndex] = rg.ImportTexture("ScreenProbe.Resolve.AtlasSH", ScreenProbeGISH[ScreenProbeGIAtlasWriteIndex][coefficientIndex].get(), EResourceState::ShaderRead);
 
-	renderBackend->Dispatch((GetRenderWidth() + 7) / 8, (GetRenderHeight() + 7) / 8, 1);
+	rg.ExportTexture(outResolved, EResourceState::ShaderRead);
+	rg.ExportTexture(outDebug, EResourceState::ShaderRead);
+	rg.ExportTexture(outHistory, EResourceState::ShaderRead);
+	rg.AddPass(
+		"ScreenProbeGIPass",
+		ERGPassFlags::Compute,
+		[&](RGPassBuilder& builder)
+		{
+			builder.ReadWriteTexture(outResolved, EResourceState::UnorderedAccess)
+				.ReadWriteTexture(outDebug, EResourceState::UnorderedAccess)
+				.ReadWriteTexture(outHistory, EResourceState::UnorderedAccess)
+				.ReadTexture(atlasRadiance, EResourceState::ShaderRead)
+				.ReadTexture(atlasMeta, EResourceState::ShaderRead)
+				.ReadTexture(historyRead, EResourceState::ShaderRead);
+			for (UINT coefficientIndex = 0; coefficientIndex < ScreenProbeSHCoefficientCount; ++coefficientIndex)
+				builder.ReadTexture(atlasSH[coefficientIndex], EResourceState::ShaderRead);
+			if (depth.IsValid())
+				builder.ReadTexture(depth, EResourceState::ShaderRead);
+			if (normal.IsValid())
+				builder.ReadTexture(normal, EResourceState::ShaderRead);
+			if (geomNormal.IsValid())
+				builder.ReadTexture(geomNormal, EResourceState::ShaderRead);
+			if (velocity.IsValid())
+				builder.ReadTexture(velocity, EResourceState::ShaderRead);
+			if (prevDepth.IsValid() && prevDepth.Index != depth.Index)
+				builder.ReadTexture(prevDepth, EResourceState::ShaderRead);
+			if (prevNormal.IsValid() && prevNormal.Index != normal.Index)
+				builder.ReadTexture(prevNormal, EResourceState::ShaderRead);
+		},
+		[&](RGContext& ctx)
+		{
+			ScreenProbeGIPSO->SetTextureSRV("DepthTex", depth.IsValid() ? ctx.GetTexture(depth) : nullptr);
+			ScreenProbeGIPSO->SetTextureSRV("WorldNormalTex", normal.IsValid() ? ctx.GetTexture(normal) : nullptr);
+			ScreenProbeGIPSO->SetTextureSRV("GeoNormalTex", geomNormal.IsValid() ? ctx.GetTexture(geomNormal) : nullptr);
+			ScreenProbeGIPSO->SetTextureSRV("ScreenProbeRadianceTex", ctx.GetTexture(atlasRadiance));
+			ScreenProbeGIPSO->SetTextureSRV("ScreenProbeMetaTex", ctx.GetTexture(atlasMeta));
+			ScreenProbeGIPSO->SetTextureSRV("PrevScreenProbeGITex", ctx.GetTexture(historyRead));
+			ScreenProbeGIPSO->SetTextureSRV("VelocityTex", velocity.IsValid() ? ctx.GetTexture(velocity) : nullptr);
+			ScreenProbeGIPSO->SetTextureSRV("PrevDepthTex", prevDepth.IsValid() ? ctx.GetTexture(prevDepth) : nullptr);
+			ScreenProbeGIPSO->SetTextureSRV("PrevNormalTex", prevNormal.IsValid() ? ctx.GetTexture(prevNormal) : nullptr);
+			for (UINT coefficientIndex = 0; coefficientIndex < ScreenProbeSHCoefficientCount; ++coefficientIndex)
+				ScreenProbeGIPSO->SetTextureSRV(screenProbeSHSRVNames[coefficientIndex], ctx.GetTexture(atlasSH[coefficientIndex]));
+			ScreenProbeGIPSO->SetTextureUAV("OutScreenProbeGI", ctx.GetTexture(outResolved));
+			ScreenProbeGIPSO->SetTextureUAV("OutScreenProbeDebug", ctx.GetTexture(outDebug));
+			ScreenProbeGIPSO->SetTextureUAV("OutScreenProbeHistory", ctx.GetTexture(outHistory));
+			ScreenProbeGIPSO->SetSampler("BilinearClamp", samplerBilinearWrap.get());
+			ScreenProbeGICB.ProbeSpacing = std::clamp(ScreenProbeGICB.ProbeSpacing, 4u, 64u);
+			ScreenProbeGICB.GatherRadius = std::clamp(ScreenProbeGICB.GatherRadius, 1u, 3u);
+			ScreenProbeGICB.RawBlend = std::clamp(ScreenProbeGICB.RawBlend, 0.0f, 1.0f);
+			ScreenProbeGICB.EdgeDepthWeight = std::clamp(ScreenProbeGICB.EdgeDepthWeight, 8.0f, 192.0f);
+			ScreenProbeGICB.EdgeNormalWeight = std::clamp(ScreenProbeGICB.EdgeNormalWeight, 1.0f, 96.0f);
+			ScreenProbeGICB.EdgeSampleCount = std::clamp(ScreenProbeGICB.EdgeSampleCount, 1u, 4u);
+			ScreenProbeGICB.SHCoefficientCount = ScreenProbeGICB.SHCoefficientCount <= 4u ? 4u : 9u;
+			ScreenProbeGICB.ProjectionParams = FrameProjectionParams;
+			ScreenProbeGICB.RTSize = glm::vec2(GetRenderWidth(), GetRenderHeight());
+			ScreenProbeGICB.ProbeGridSize = glm::vec2(
+				static_cast<float>((GetRenderWidth() + ScreenProbeGICB.ProbeSpacing - 1u) / ScreenProbeGICB.ProbeSpacing),
+				static_cast<float>((GetRenderHeight() + ScreenProbeGICB.ProbeSpacing - 1u) / ScreenProbeGICB.ProbeSpacing));
+			ScreenProbeGICB.FrameIndex = RenderFrameIndex;
+			ScreenProbeGICB.TemporalAlpha = std::clamp(ScreenProbeGICB.TemporalAlpha, 0.02f, 1.0f);
+			ScreenProbeGICB.HistoryValid = (bScreenProbeGIHistoryValid && !bScreenProbeLightingBootstrapPending) ? 1u : 0u;
+			ScreenProbeGIPSO->SetCBVValue("ScreenProbeGIConstant", &ScreenProbeGICB);
+			ScreenProbeGIPSO->Apply();
 
-	renderBackend->TransitionTexture(ScreenProbeGIResolved.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
-	renderBackend->TransitionTexture(ScreenProbeGIProbeDebug.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
-	renderBackend->TransitionTexture(ScreenProbeGIHistory[historyWriteIndex].get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
+			renderBackend->Dispatch((GetRenderWidth() + 7) / 8, (GetRenderHeight() + 7) / 8, 1);
+		});
+
+	if (!rg.Execute())
+		return;
 	bScreenProbeGIHistoryValid = true;
 	bScreenProbeLightingBootstrapPending = false;
 }

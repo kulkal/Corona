@@ -304,9 +304,9 @@ local function draw_hybrid_extras(state)
 		slider_float("RTAO Radius", "rtao_radius", state.rtao_radius, 2.0, 256.0, "%.1f")
 		slider_float("RTAO Power", "rtao_power", state.rtao_power, 0.25, 4.0, "%.2f")
 		slider_float("RTAO Normal Bias", "rtao_normal_bias", state.rtao_normal_bias, 0.01, 2.0, "%.2f")
-		slider_float("RTAO Direct Contact", "rtao_direct_contact", state.rtao_direct_contact, 0.0, 1.0, "%.2f")
-		slider_float("RTAO Indirect Strength", "rtao_indirect_strength", state.rtao_indirect_strength, 0.0, 1.0, "%.2f")
-		slider_float("RTAO Indirect Floor", "rtao_indirect_floor", state.rtao_indirect_floor, 0.0, 1.0, "%.2f")
+		slider_float("RTAO Contact Strength", "rtao_direct_contact", state.rtao_direct_contact, 0.0, 1.0, "%.2f")
+		slider_float("RTAO AO Strength", "rtao_indirect_strength", state.rtao_indirect_strength, 0.0, 1.0, "%.2f")
+		slider_float("RTAO AO Floor", "rtao_indirect_floor", state.rtao_indirect_floor, 0.0, 1.0, "%.2f")
 		imgui.tree_pop()
 	end
 end

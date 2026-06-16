@@ -2582,6 +2582,54 @@ void Corona::LightingPass()
 		SkyLightingBuffer.get() :
 		DefaultBlackTex.get();
 
+	{
+		static UINT32 sLastRTAOEnable = 0xFFFFFFFFu;
+		static UINT32 sLastRTAORequested = 0xFFFFFFFFu;
+		static UINT32 sLastRTAOValid = 0xFFFFFFFFu;
+		static float sLastRTAOContactStrength = -1.0f;
+		static float sLastRTAOAOStrength = -1.0f;
+		static float sLastRTAOAOFloor = -1.0f;
+		static float sLastRTAORadius = -1.0f;
+		static float sLastRTAOPower = -1.0f;
+		static float sLastRTAONormalBias = -1.0f;
+		static UINT32 sLastRTAOSamples = 0xFFFFFFFFu;
+		const UINT32 rtaoRequested = bEnableRTAO ? 1u : 0u;
+		const UINT32 rtaoValid = bRTAOOutputValidThisFrame ? 1u : 0u;
+		if (sLastRTAOEnable != Param.bEnableRTAO ||
+			sLastRTAORequested != rtaoRequested ||
+			sLastRTAOValid != rtaoValid ||
+			std::abs(sLastRTAOContactStrength - Param.RTAODirectContactStrength) > 0.0001f ||
+			std::abs(sLastRTAOAOStrength - Param.RTAOIndirectStrength) > 0.0001f ||
+			std::abs(sLastRTAOAOFloor - Param.RTAOIndirectFloor) > 0.0001f ||
+			std::abs(sLastRTAORadius - RTAOViewParam.Radius) > 0.0001f ||
+			std::abs(sLastRTAOPower - RTAOViewParam.Power) > 0.0001f ||
+			std::abs(sLastRTAONormalBias - RTAOViewParam.NormalBias) > 0.0001f ||
+			sLastRTAOSamples != RTAOViewParam.SampleCount)
+		{
+			sLastRTAOEnable = Param.bEnableRTAO;
+			sLastRTAORequested = rtaoRequested;
+			sLastRTAOValid = rtaoValid;
+			sLastRTAOContactStrength = Param.RTAODirectContactStrength;
+			sLastRTAOAOStrength = Param.RTAOIndirectStrength;
+			sLastRTAOAOFloor = Param.RTAOIndirectFloor;
+			sLastRTAORadius = RTAOViewParam.Radius;
+			sLastRTAOPower = RTAOViewParam.Power;
+			sLastRTAONormalBias = RTAOViewParam.NormalBias;
+			sLastRTAOSamples = RTAOViewParam.SampleCount;
+			AppendCpuRuntimeTrace(
+				L"[LightingPass][RTAO] enable=" + std::to_wstring(Param.bEnableRTAO) +
+				L", requested=" + std::to_wstring(rtaoRequested) +
+				L", valid=" + std::to_wstring(rtaoValid) +
+				L", contactStrength=" + std::to_wstring(Param.RTAODirectContactStrength) +
+				L", aoStrength=" + std::to_wstring(Param.RTAOIndirectStrength) +
+				L", aoFloor=" + std::to_wstring(Param.RTAOIndirectFloor) +
+				L", radius=" + std::to_wstring(RTAOViewParam.Radius) +
+				L", power=" + std::to_wstring(RTAOViewParam.Power) +
+				L", normalBias=" + std::to_wstring(RTAOViewParam.NormalBias) +
+				L", samples=" + std::to_wstring(RTAOViewParam.SampleCount));
+		}
+	}
+
 	if (!LightingGraphicsPipeline)
 		return;
 

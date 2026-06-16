@@ -11,11 +11,20 @@
 
 #include "stdafx.h"
 #include "Corona.h"
+#include "RenderGraph.h"
 
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
 #include <iterator>
+
+namespace
+{
+	RGTextureRef ImportTextureIfValid(RenderGraph& rg, const char* name, Texture* texture, EResourceState state = EResourceState::ShaderRead)
+	{
+		return texture ? rg.ImportTexture(name, texture, state) : RGTextureRef{};
+	}
+}
 
 void Corona::InitTemporalDenoisingPass()
 {
@@ -78,26 +87,48 @@ void Corona::DiffuseGISpatialFilterPass()
 		!DiffuseGIRaw || !DiffuseGIRawAux ||
 		!DiffuseGISpatialFiltered || !DiffuseGISpatialFilteredAux)
 		return;
-	renderBackend->EmitGpuCrashMarker("DiffuseGISpatialFilterPass");
 
-	renderBackend->TransitionTexture(DiffuseGISpatialFiltered.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
-	renderBackend->TransitionTexture(DiffuseGISpatialFilteredAux.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
+	RenderGraph rg(renderBackend.get());
+	RGTextureRef inColor = rg.ImportTexture("DiffuseGI.SpatialFilter.InColor", DiffuseGIRaw.get(), EResourceState::ShaderRead);
+	RGTextureRef inAux = rg.ImportTexture("DiffuseGI.SpatialFilter.InAux", DiffuseGIRawAux.get(), EResourceState::ShaderRead);
+	RGTextureRef depth = ImportTextureIfValid(rg, "DiffuseGI.SpatialFilter.Depth", UnjitteredDepthBuffers[ColorBufferWriteIndex].get());
+	RGTextureRef normal = ImportTextureIfValid(rg, "DiffuseGI.SpatialFilter.Normal", GeomNormalBuffers[ColorBufferWriteIndex].get());
+	RGTextureRef outColor = rg.ImportTexture("DiffuseGI.SpatialFilter.OutColor", DiffuseGISpatialFiltered.get(), EResourceState::ShaderRead);
+	RGTextureRef outAux = rg.ImportTexture("DiffuseGI.SpatialFilter.OutAux", DiffuseGISpatialFilteredAux.get(), EResourceState::ShaderRead);
 
-	DiffuseGISpatialFilterPSO->SetTextureSRV("InGIColor", DiffuseGIRaw.get());
-	DiffuseGISpatialFilterPSO->SetTextureSRV("InGIAux", DiffuseGIRawAux.get());
-	DiffuseGISpatialFilterPSO->SetTextureSRV("DepthTex", UnjitteredDepthBuffers[ColorBufferWriteIndex].get());
-	DiffuseGISpatialFilterPSO->SetTextureSRV("NormalTex", GeomNormalBuffers[ColorBufferWriteIndex].get());
-	DiffuseGISpatialFilterPSO->SetTextureUAV("OutGIColor", DiffuseGISpatialFiltered.get());
-	DiffuseGISpatialFilterPSO->SetTextureUAV("OutGIAux", DiffuseGISpatialFilteredAux.get());
+	rg.ExportTexture(outColor, EResourceState::ShaderRead);
+	rg.ExportTexture(outAux, EResourceState::ShaderRead);
+	rg.AddPass(
+		"DiffuseGISpatialFilterPass",
+		ERGPassFlags::Compute,
+		[&](RGPassBuilder& builder)
+		{
+			builder.ReadTexture(inColor, EResourceState::ShaderRead)
+				.ReadTexture(inAux, EResourceState::ShaderRead)
+				.ReadWriteTexture(outColor, EResourceState::UnorderedAccess)
+				.ReadWriteTexture(outAux, EResourceState::UnorderedAccess);
+			if (depth.IsValid())
+				builder.ReadTexture(depth, EResourceState::ShaderRead);
+			if (normal.IsValid())
+				builder.ReadTexture(normal, EResourceState::ShaderRead);
+		},
+		[&](RGContext& ctx)
+		{
+			DiffuseGISpatialFilterPSO->SetTextureSRV("InGIColor", ctx.GetTexture(inColor));
+			DiffuseGISpatialFilterPSO->SetTextureSRV("InGIAux", ctx.GetTexture(inAux));
+			DiffuseGISpatialFilterPSO->SetTextureSRV("DepthTex", depth.IsValid() ? ctx.GetTexture(depth) : nullptr);
+			DiffuseGISpatialFilterPSO->SetTextureSRV("NormalTex", normal.IsValid() ? ctx.GetTexture(normal) : nullptr);
+			DiffuseGISpatialFilterPSO->SetTextureUAV("OutGIColor", ctx.GetTexture(outColor));
+			DiffuseGISpatialFilterPSO->SetTextureUAV("OutGIAux", ctx.GetTexture(outAux));
 
-	DiffuseGISpatialFilterCB.RTSize = glm::vec2(GetRenderWidth(), GetRenderHeight());
-	DiffuseGISpatialFilterCB.ProjectionParams = glm::vec2(FrameProjectionParams.z, FrameProjectionParams.w);
-	DiffuseGISpatialFilterPSO->SetCBVValue("SpatialFilterConstant", &DiffuseGISpatialFilterCB);
-	DiffuseGISpatialFilterPSO->Apply();
-	renderBackend->Dispatch((GetRenderWidth() + 7) / 8, (GetRenderHeight() + 7) / 8, 1);
-
-	renderBackend->TransitionTexture(DiffuseGISpatialFiltered.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
-	renderBackend->TransitionTexture(DiffuseGISpatialFilteredAux.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
+			DiffuseGISpatialFilterCB.RTSize = glm::vec2(GetRenderWidth(), GetRenderHeight());
+			DiffuseGISpatialFilterCB.ProjectionParams = glm::vec2(FrameProjectionParams.z, FrameProjectionParams.w);
+			DiffuseGISpatialFilterPSO->SetCBVValue("SpatialFilterConstant", &DiffuseGISpatialFilterCB);
+			DiffuseGISpatialFilterPSO->Apply();
+			renderBackend->Dispatch((GetRenderWidth() + 7) / 8, (GetRenderHeight() + 7) / 8, 1);
+		});
+	if (!rg.Execute())
+		return;
 }
 
 // Post-temporal, variance-guided disocclusion filter. Runs AFTER TemporalDenoisingPass:
@@ -111,46 +142,64 @@ void Corona::DiffuseGIDisocclusionFilterPass()
 		!DiffuseGITemporal[GIBufferWriteIndex] || !DiffuseGITemporalAux[GIBufferWriteIndex] ||
 		!DiffuseGISpatialFiltered || !DiffuseGISpatialFilteredAux)
 		return;
-	renderBackend->EmitGpuCrashMarker("DiffuseGIDisocclusionFilterPass");
 
-	renderBackend->TransitionTexture(DiffuseGISpatialFiltered.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
-	renderBackend->TransitionTexture(DiffuseGISpatialFilteredAux.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
+	RenderGraph rg(renderBackend.get());
+	RGTextureRef inColor = rg.ImportTexture("DiffuseGI.DisocclusionFilter.InColor", DiffuseGITemporal[GIBufferWriteIndex].get(), EResourceState::ShaderRead);
+	RGTextureRef inAux = rg.ImportTexture("DiffuseGI.DisocclusionFilter.InAux", DiffuseGITemporalAux[GIBufferWriteIndex].get(), EResourceState::ShaderRead);
+	RGTextureRef depth = ImportTextureIfValid(rg, "DiffuseGI.DisocclusionFilter.Depth", UnjitteredDepthBuffers[ColorBufferWriteIndex].get());
+	RGTextureRef normal = ImportTextureIfValid(rg, "DiffuseGI.DisocclusionFilter.Normal", GeomNormalBuffers[ColorBufferWriteIndex].get());
+	RGTextureRef outColor = rg.ImportTexture("DiffuseGI.DisocclusionFilter.OutColor", DiffuseGISpatialFiltered.get(), EResourceState::ShaderRead);
+	RGTextureRef outAux = rg.ImportTexture("DiffuseGI.DisocclusionFilter.OutAux", DiffuseGISpatialFilteredAux.get(), EResourceState::ShaderRead);
 
-	DiffuseGISpatialFilterPSO->SetTextureSRV("InGIColor", DiffuseGITemporal[GIBufferWriteIndex].get());
-	DiffuseGISpatialFilterPSO->SetTextureSRV("InGIAux", DiffuseGITemporalAux[GIBufferWriteIndex].get());
-	DiffuseGISpatialFilterPSO->SetTextureSRV("DepthTex", UnjitteredDepthBuffers[ColorBufferWriteIndex].get());
-	DiffuseGISpatialFilterPSO->SetTextureSRV("NormalTex", GeomNormalBuffers[ColorBufferWriteIndex].get());
-	DiffuseGISpatialFilterPSO->SetTextureUAV("OutGIColor", DiffuseGISpatialFiltered.get());
-	DiffuseGISpatialFilterPSO->SetTextureUAV("OutGIAux", DiffuseGISpatialFilteredAux.get());
+	rg.ExportTexture(outColor, EResourceState::ShaderRead);
+	rg.ExportTexture(outAux, EResourceState::ShaderRead);
+	rg.AddPass(
+		"DiffuseGIDisocclusionFilterPass",
+		ERGPassFlags::Compute,
+		[&](RGPassBuilder& builder)
+		{
+			builder.ReadTexture(inColor, EResourceState::ShaderRead)
+				.ReadTexture(inAux, EResourceState::ShaderRead)
+				.ReadWriteTexture(outColor, EResourceState::UnorderedAccess)
+				.ReadWriteTexture(outAux, EResourceState::UnorderedAccess);
+			if (depth.IsValid())
+				builder.ReadTexture(depth, EResourceState::ShaderRead);
+			if (normal.IsValid())
+				builder.ReadTexture(normal, EResourceState::ShaderRead);
+		},
+		[&](RGContext& ctx)
+		{
+			DiffuseGISpatialFilterPSO->SetTextureSRV("InGIColor", ctx.GetTexture(inColor));
+			DiffuseGISpatialFilterPSO->SetTextureSRV("InGIAux", ctx.GetTexture(inAux));
+			DiffuseGISpatialFilterPSO->SetTextureSRV("DepthTex", depth.IsValid() ? ctx.GetTexture(depth) : nullptr);
+			DiffuseGISpatialFilterPSO->SetTextureSRV("NormalTex", normal.IsValid() ? ctx.GetTexture(normal) : nullptr);
+			DiffuseGISpatialFilterPSO->SetTextureUAV("OutGIColor", ctx.GetTexture(outColor));
+			DiffuseGISpatialFilterPSO->SetTextureUAV("OutGIAux", ctx.GetTexture(outAux));
 
-	DiffuseGISpatialFilterCB.RTSize = glm::vec2(GetRenderWidth(), GetRenderHeight());
-	DiffuseGISpatialFilterCB.ProjectionParams = glm::vec2(FrameProjectionParams.z, FrameProjectionParams.w);
-	DiffuseGISpatialFilterPSO->SetCBVValue("SpatialFilterConstant", &DiffuseGISpatialFilterCB);
-	DiffuseGISpatialFilterPSO->Apply();
-	renderBackend->Dispatch((GetRenderWidth() + 7) / 8, (GetRenderHeight() + 7) / 8, 1);
-
-	renderBackend->TransitionTexture(DiffuseGISpatialFiltered.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
-	renderBackend->TransitionTexture(DiffuseGISpatialFilteredAux.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
+			DiffuseGISpatialFilterCB.RTSize = glm::vec2(GetRenderWidth(), GetRenderHeight());
+			DiffuseGISpatialFilterCB.ProjectionParams = glm::vec2(FrameProjectionParams.z, FrameProjectionParams.w);
+			DiffuseGISpatialFilterPSO->SetCBVValue("SpatialFilterConstant", &DiffuseGISpatialFilterCB);
+			DiffuseGISpatialFilterPSO->Apply();
+			renderBackend->Dispatch((GetRenderWidth() + 7) / 8, (GetRenderHeight() + 7) / 8, 1);
+		});
+	if (!rg.Execute())
+		return;
 }
 
 void Corona::TemporalDenoisingPass()
 {
 	if (!TemporalDenoisingFilterPSO)
 		return;
-	renderBackend->EmitGpuCrashMarker("TemporalDenoisingPass");
+	if (!DiffuseGITemporalAux[0] || !DiffuseGITemporalAux[1] ||
+		!DiffuseGITemporal[0] || !DiffuseGITemporal[1] ||
+		!SpecularGITemporal[0] || !SpecularGITemporal[1] ||
+		!SpecularGIMoments[0] || !SpecularGIMoments[1])
+		return;
 
 	GIBufferWriteIndex = 1 - GIBufferWriteIndex;
 	UINT WriteIndex = GIBufferWriteIndex;
 	UINT ReadIndex = 1 - WriteIndex;
 
-	// first pass
-	renderBackend->TransitionTexture(DiffuseGITemporalAux[WriteIndex].get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
-	renderBackend->TransitionTexture(DiffuseGITemporal[WriteIndex].get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
-	renderBackend->TransitionTexture(SpecularGITemporal[WriteIndex].get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
-	renderBackend->TransitionTexture(SpecularGIMoments[WriteIndex].get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
-
-	TemporalDenoisingFilterPSO->SetTextureSRV("DepthTex", UnjitteredDepthBuffers[ColorBufferWriteIndex].get());
-	TemporalDenoisingFilterPSO->SetTextureSRV("NormalTex", GeomNormalBuffers[ColorBufferWriteIndex].get());
 	const bool bUseSpatialHashDiffuseInput =
 		DiffuseGIMode == EDiffuseGIMode::SPATIAL_HASH &&
 		bSpatialHashGIHistoryValid &&
@@ -164,45 +213,112 @@ void Corona::TemporalDenoisingPass()
 		bUseSpatialHashDiffuseInput ?
 		DiffuseGIHashCached.get() :
 		DiffuseGIRaw.get();
-	TemporalDenoisingFilterPSO->SetTextureSRV("InGIResultSHTex", temporalDiffuseInputAux);
-	TemporalDenoisingFilterPSO->SetTextureSRV("InGIResultColorTex", temporalDiffuseInput);
-	TemporalDenoisingFilterPSO->SetTextureSRV("InGIResultSHTexPrev", DiffuseGITemporalAux[ReadIndex].get());
-	TemporalDenoisingFilterPSO->SetTextureSRV("InGIResultColorTexPrev", DiffuseGITemporal[ReadIndex].get());
-	TemporalDenoisingFilterPSO->SetTextureSRV("VelocityTex", VelocityBuffer.get());
-	TemporalDenoisingFilterPSO->SetTextureSRV("InSpecularGITex", SpecularGIRaw.get());
-	TemporalDenoisingFilterPSO->SetTextureSRV("InSpecularGITexPrev", SpecularGITemporal[ReadIndex].get());
-	TemporalDenoisingFilterPSO->SetTextureSRV("RougnessMetalicTex", RoughnessMetalicBuffer.get());
-	TemporalDenoisingFilterPSO->SetTextureSRV("PrevDepthTex", UnjitteredDepthBuffers[1 - ColorBufferWriteIndex].get());
-	TemporalDenoisingFilterPSO->SetTextureSRV("PrevNormalTex", GeomNormalBuffers[1 - ColorBufferWriteIndex].get());
-	TemporalDenoisingFilterPSO->SetTextureSRV("PrevMomentsTex", SpecularGIMoments[ReadIndex].get());
 
+	Texture* const depthTexture = UnjitteredDepthBuffers[ColorBufferWriteIndex].get();
+	Texture* const normalTexture = GeomNormalBuffers[ColorBufferWriteIndex].get();
+	Texture* const prevDepthTexture = UnjitteredDepthBuffers[1 - ColorBufferWriteIndex].get();
+	Texture* const prevNormalTexture = GeomNormalBuffers[1 - ColorBufferWriteIndex].get();
 
-	TemporalDenoisingFilterPSO->SetTextureUAV("OutGIResultSH", DiffuseGITemporalAux[WriteIndex].get());
-	TemporalDenoisingFilterPSO->SetTextureUAV("OutGIResultColor", DiffuseGITemporal[WriteIndex].get());
-	TemporalDenoisingFilterPSO->SetTextureUAV("OutSpecularGI", SpecularGITemporal[WriteIndex].get());
-	TemporalDenoisingFilterPSO->SetTextureUAV("OutMoments", SpecularGIMoments[WriteIndex].get());
+	RenderGraph rg(renderBackend.get());
+	RGTextureRef outGIAux = rg.ImportTexture("TemporalDenoise.OutGIResultSH", DiffuseGITemporalAux[WriteIndex].get(), EResourceState::ShaderRead);
+	RGTextureRef outGIColor = rg.ImportTexture("TemporalDenoise.OutGIResultColor", DiffuseGITemporal[WriteIndex].get(), EResourceState::ShaderRead);
+	RGTextureRef outSpecularGI = rg.ImportTexture("TemporalDenoise.OutSpecularGI", SpecularGITemporal[WriteIndex].get(), EResourceState::ShaderRead);
+	RGTextureRef outMoments = rg.ImportTexture("TemporalDenoise.OutMoments", SpecularGIMoments[WriteIndex].get(), EResourceState::ShaderRead);
+	RGTextureRef depth = ImportTextureIfValid(rg, "TemporalDenoise.Depth", depthTexture);
+	RGTextureRef normal = ImportTextureIfValid(rg, "TemporalDenoise.Normal", normalTexture);
+	RGTextureRef inGIAux = ImportTextureIfValid(rg, "TemporalDenoise.InGIResultSH", temporalDiffuseInputAux);
+	RGTextureRef inGIColor = ImportTextureIfValid(rg, "TemporalDenoise.InGIResultColor", temporalDiffuseInput);
+	RGTextureRef prevGIAux = ImportTextureIfValid(rg, "TemporalDenoise.PrevGIResultSH", DiffuseGITemporalAux[ReadIndex].get());
+	RGTextureRef prevGIColor = ImportTextureIfValid(rg, "TemporalDenoise.PrevGIResultColor", DiffuseGITemporal[ReadIndex].get());
+	RGTextureRef velocity = ImportTextureIfValid(rg, "TemporalDenoise.Velocity", VelocityBuffer.get());
+	RGTextureRef specularGI = ImportTextureIfValid(rg, "TemporalDenoise.SpecularGI", SpecularGIRaw.get());
+	RGTextureRef prevSpecularGI = ImportTextureIfValid(rg, "TemporalDenoise.PrevSpecularGI", SpecularGITemporal[ReadIndex].get());
+	RGTextureRef roughness = ImportTextureIfValid(rg, "TemporalDenoise.RoughnessMetallic", RoughnessMetalicBuffer.get());
+	RGTextureRef prevDepth = (prevDepthTexture && prevDepthTexture == depthTexture) ? depth : ImportTextureIfValid(rg, "TemporalDenoise.PrevDepth", prevDepthTexture);
+	RGTextureRef prevNormal = (prevNormalTexture && prevNormalTexture == normalTexture) ? normal : ImportTextureIfValid(rg, "TemporalDenoise.PrevNormal", prevNormalTexture);
+	RGTextureRef prevMoments = ImportTextureIfValid(rg, "TemporalDenoise.PrevMoments", SpecularGIMoments[ReadIndex].get());
 
-	TemporalDenoisingFilterPSO->SetSampler("BilinearClamp", samplerBilinearWrap.get());
-	TemporalFilterCB.InvViewMatrix = glm::transpose(InvViewMat);
-	TemporalFilterCB.InvProjMatrix = glm::transpose(InvProjMat);
-	TemporalFilterCB.PrevUnjitteredViewProjMatrix = glm::transpose(PrevUnjitteredViewProjMat);
-	TemporalFilterCB.ProjectionParams = FrameProjectionParams;
-	TemporalFilterCB.RTSize = glm::vec2(GetRenderWidth(), GetRenderHeight());
-	TemporalFilterCB.FrameIndex = RenderFrameIndex;
-	TemporalFilterCB.AccumulationAlpha = bTemporalDenoiserHistoryValid ? (1.0f / float(std::min(IndirectAccumulatedFrames + 1u, 32u))) : 1.0f;
-	TemporalFilterCB.SpecularAccumulationAlpha = bTemporalDenoiserHistoryValid ? (1.0f / float(std::min(IndirectAccumulatedFrames + 1u, 64u))) : 1.0f;
-	TemporalFilterCB.JitterOffset = IsJitterEnabled() ? JitterOffset : glm::vec2(0.0f);
-	TemporalFilterCB.HistoryValid = bTemporalDenoiserHistoryValid ? 1u : 0u;
+	rg.ExportTexture(outGIAux, EResourceState::ShaderRead);
+	rg.ExportTexture(outGIColor, EResourceState::ShaderRead);
+	rg.ExportTexture(outSpecularGI, EResourceState::ShaderRead);
+	rg.ExportTexture(outMoments, EResourceState::ShaderRead);
+	rg.AddPass(
+		"TemporalDenoisingPass",
+		ERGPassFlags::Compute,
+		[&](RGPassBuilder& builder)
+		{
+			builder.ReadWriteTexture(outGIAux, EResourceState::UnorderedAccess)
+				.ReadWriteTexture(outGIColor, EResourceState::UnorderedAccess)
+				.ReadWriteTexture(outSpecularGI, EResourceState::UnorderedAccess)
+				.ReadWriteTexture(outMoments, EResourceState::UnorderedAccess);
+			if (depth.IsValid())
+				builder.ReadTexture(depth, EResourceState::ShaderRead);
+			if (normal.IsValid())
+				builder.ReadTexture(normal, EResourceState::ShaderRead);
+			if (inGIAux.IsValid())
+				builder.ReadTexture(inGIAux, EResourceState::ShaderRead);
+			if (inGIColor.IsValid())
+				builder.ReadTexture(inGIColor, EResourceState::ShaderRead);
+			if (prevGIAux.IsValid())
+				builder.ReadTexture(prevGIAux, EResourceState::ShaderRead);
+			if (prevGIColor.IsValid())
+				builder.ReadTexture(prevGIColor, EResourceState::ShaderRead);
+			if (velocity.IsValid())
+				builder.ReadTexture(velocity, EResourceState::ShaderRead);
+			if (specularGI.IsValid())
+				builder.ReadTexture(specularGI, EResourceState::ShaderRead);
+			if (prevSpecularGI.IsValid())
+				builder.ReadTexture(prevSpecularGI, EResourceState::ShaderRead);
+			if (roughness.IsValid())
+				builder.ReadTexture(roughness, EResourceState::ShaderRead);
+			if (prevDepth.IsValid() && prevDepth.Index != depth.Index)
+				builder.ReadTexture(prevDepth, EResourceState::ShaderRead);
+			if (prevNormal.IsValid() && prevNormal.Index != normal.Index)
+				builder.ReadTexture(prevNormal, EResourceState::ShaderRead);
+			if (prevMoments.IsValid())
+				builder.ReadTexture(prevMoments, EResourceState::ShaderRead);
+		},
+		[&](RGContext& ctx)
+		{
+			TemporalDenoisingFilterPSO->SetTextureSRV("DepthTex", depth.IsValid() ? ctx.GetTexture(depth) : nullptr);
+			TemporalDenoisingFilterPSO->SetTextureSRV("NormalTex", normal.IsValid() ? ctx.GetTexture(normal) : nullptr);
+			TemporalDenoisingFilterPSO->SetTextureSRV("InGIResultSHTex", inGIAux.IsValid() ? ctx.GetTexture(inGIAux) : nullptr);
+			TemporalDenoisingFilterPSO->SetTextureSRV("InGIResultColorTex", inGIColor.IsValid() ? ctx.GetTexture(inGIColor) : nullptr);
+			TemporalDenoisingFilterPSO->SetTextureSRV("InGIResultSHTexPrev", prevGIAux.IsValid() ? ctx.GetTexture(prevGIAux) : nullptr);
+			TemporalDenoisingFilterPSO->SetTextureSRV("InGIResultColorTexPrev", prevGIColor.IsValid() ? ctx.GetTexture(prevGIColor) : nullptr);
+			TemporalDenoisingFilterPSO->SetTextureSRV("VelocityTex", velocity.IsValid() ? ctx.GetTexture(velocity) : nullptr);
+			TemporalDenoisingFilterPSO->SetTextureSRV("InSpecularGITex", specularGI.IsValid() ? ctx.GetTexture(specularGI) : nullptr);
+			TemporalDenoisingFilterPSO->SetTextureSRV("InSpecularGITexPrev", prevSpecularGI.IsValid() ? ctx.GetTexture(prevSpecularGI) : nullptr);
+			TemporalDenoisingFilterPSO->SetTextureSRV("RougnessMetalicTex", roughness.IsValid() ? ctx.GetTexture(roughness) : nullptr);
+			TemporalDenoisingFilterPSO->SetTextureSRV("PrevDepthTex", prevDepth.IsValid() ? ctx.GetTexture(prevDepth) : nullptr);
+			TemporalDenoisingFilterPSO->SetTextureSRV("PrevNormalTex", prevNormal.IsValid() ? ctx.GetTexture(prevNormal) : nullptr);
+			TemporalDenoisingFilterPSO->SetTextureSRV("PrevMomentsTex", prevMoments.IsValid() ? ctx.GetTexture(prevMoments) : nullptr);
 
-	TemporalDenoisingFilterPSO->SetCBVValue("TemporalFilterConstant", &TemporalFilterCB);
-	TemporalDenoisingFilterPSO->Apply();
+			TemporalDenoisingFilterPSO->SetTextureUAV("OutGIResultSH", ctx.GetTexture(outGIAux));
+			TemporalDenoisingFilterPSO->SetTextureUAV("OutGIResultColor", ctx.GetTexture(outGIColor));
+			TemporalDenoisingFilterPSO->SetTextureUAV("OutSpecularGI", ctx.GetTexture(outSpecularGI));
+			TemporalDenoisingFilterPSO->SetTextureUAV("OutMoments", ctx.GetTexture(outMoments));
 
-	renderBackend->Dispatch((GetRenderWidth() + 14) / 15, (GetRenderHeight() + 14) / 15, 1);
+			TemporalDenoisingFilterPSO->SetSampler("BilinearClamp", samplerBilinearWrap.get());
+			TemporalFilterCB.InvViewMatrix = glm::transpose(InvViewMat);
+			TemporalFilterCB.InvProjMatrix = glm::transpose(InvProjMat);
+			TemporalFilterCB.PrevUnjitteredViewProjMatrix = glm::transpose(PrevUnjitteredViewProjMat);
+			TemporalFilterCB.ProjectionParams = FrameProjectionParams;
+			TemporalFilterCB.RTSize = glm::vec2(GetRenderWidth(), GetRenderHeight());
+			TemporalFilterCB.FrameIndex = RenderFrameIndex;
+			TemporalFilterCB.AccumulationAlpha = bTemporalDenoiserHistoryValid ? (1.0f / float(std::min(IndirectAccumulatedFrames + 1u, 32u))) : 1.0f;
+			TemporalFilterCB.SpecularAccumulationAlpha = bTemporalDenoiserHistoryValid ? (1.0f / float(std::min(IndirectAccumulatedFrames + 1u, 64u))) : 1.0f;
+			TemporalFilterCB.JitterOffset = IsJitterEnabled() ? JitterOffset : glm::vec2(0.0f);
+			TemporalFilterCB.HistoryValid = bTemporalDenoiserHistoryValid ? 1u : 0u;
 
-	renderBackend->TransitionTexture(DiffuseGITemporalAux[WriteIndex].get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
-	renderBackend->TransitionTexture(DiffuseGITemporal[WriteIndex].get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
-	renderBackend->TransitionTexture(SpecularGITemporal[WriteIndex].get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
-	renderBackend->TransitionTexture(SpecularGIMoments[WriteIndex].get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
+			TemporalDenoisingFilterPSO->SetCBVValue("TemporalFilterConstant", &TemporalFilterCB);
+			TemporalDenoisingFilterPSO->Apply();
+			renderBackend->Dispatch((GetRenderWidth() + 14) / 15, (GetRenderHeight() + 14) / 15, 1);
+		});
+
+	if (!rg.Execute())
+		return;
+
 	bTemporalDenoiserHistoryValid = true;
 	IndirectAccumulatedFrames = std::min(IndirectAccumulatedFrames + 1u, 1024u);
 }

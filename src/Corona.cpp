@@ -3201,6 +3201,13 @@ void Corona::ApplyRenderingAndAAMode(ERenderingMode requestedRenderingMode, EAnt
 
 	const ERenderingMode previousRenderingMode = RenderingMode;
 	const EAntiAliasingMode previousAAMode = AntiAliasingMode;
+	if (previousRenderingMode != requestedRenderingMode &&
+		requestedRenderingMode == ERenderingMode::PATHTRACING)
+	{
+		requestedAAMode = EAntiAliasingMode::OFF;
+		bDebugDraw = false;
+		FullscreenDebugBuffer = EDebugVisualization::NO_FULLSCREEN;
+	}
 	const EAntiAliasingMode normalizedAAMode = NormalizeAntiAliasingMode(requestedRenderingMode, requestedAAMode);
 
 	if (previousRenderingMode == requestedRenderingMode && previousAAMode == normalizedAAMode)
@@ -3239,7 +3246,8 @@ void Corona::ApplyRenderingAndAAMode(ERenderingMode requestedRenderingMode, EAnt
 		L"->" + std::to_wstring(static_cast<int>(RenderingMode)) +
 		L", aa " + std::wstring(GetAntiAliasingModeName(previousAAMode)) +
 		L"->" + std::wstring(GetAntiAliasingModeName(AntiAliasingMode)) +
-		L", forceReload=" + std::to_wstring(bForceResourceReload ? 1 : 0));
+		L", forceReload=" + std::to_wstring(bForceResourceReload ? 1 : 0) +
+		L", debugDraw=" + std::to_wstring(bDebugDraw ? 1 : 0));
 }
 
 void Corona::ApplyDiffuseGIMode(EDiffuseGIMode requestedMode)
@@ -11676,7 +11684,11 @@ void Corona::LoadAssets()
 		UpdateStartupLoadingProgress(0.89f, L"Compiling ray tracing pipelines");
 		InitRTPSO();
 		AppendCpuRuntimeTrace(L"[LoadAssets] after InitRTPSO");
-		if (!CORONA_PLATFORM_MOBILE && StartupRenderingMode == ERenderingMode::PATHTRACING)
+		const bool bInitPathTracingPipeline =
+			!CORONA_PLATFORM_MOBILE &&
+			(StartupRenderingMode == ERenderingMode::PATHTRACING ||
+			 (renderBackend && renderBackend->GetAPI() == ERenderBackendAPI::D3D12));
+		if (bInitPathTracingPipeline)
 		{
 			AppendCpuRuntimeTrace(L"[LoadAssets] before InitPathTracingPass");
 			UpdateStartupLoadingProgress(0.91f, L"Compiling path tracing pipeline");
@@ -14030,11 +14042,11 @@ void Corona::DrawEditorModeOverlay()
 							bLightingChanged = true;
 						if (ImGui::SliderFloat("RTAO Normal Bias", &RTAOViewParam.NormalBias, 0.01f, 2.0f, "%.2f"))
 							bLightingChanged = true;
-						if (ImGui::SliderFloat("RTAO Direct Contact", &RTAODirectContactStrength, 0.0f, 1.0f, "%.2f"))
+						if (ImGui::SliderFloat("RTAO Contact Strength", &RTAODirectContactStrength, 0.0f, 1.0f, "%.2f"))
 							bLightingChanged = true;
-						if (ImGui::SliderFloat("RTAO Indirect Strength", &RTAOIndirectStrength, 0.0f, 1.0f, "%.2f"))
+						if (ImGui::SliderFloat("RTAO AO Strength", &RTAOIndirectStrength, 0.0f, 1.0f, "%.2f"))
 							bLightingChanged = true;
-						if (ImGui::SliderFloat("RTAO Indirect Floor", &RTAOIndirectFloor, 0.0f, 1.0f, "%.2f"))
+						if (ImGui::SliderFloat("RTAO AO Floor", &RTAOIndirectFloor, 0.0f, 1.0f, "%.2f"))
 							bLightingChanged = true;
 						ImGui::TreePop();
 					}
@@ -14326,6 +14338,12 @@ void Corona::DrawEditorModeOverlay()
 							if (ImGui::SliderFloat("RTAO Power", &RTAOViewParam.Power, 0.25f, 4.0f, "%.2f"))
 								bAdvancedLightingChanged = true;
 							if (ImGui::SliderFloat("RTAO Normal Bias", &RTAOViewParam.NormalBias, 0.01f, 2.0f, "%.2f"))
+								bAdvancedLightingChanged = true;
+							if (ImGui::SliderFloat("RTAO Contact Strength", &RTAODirectContactStrength, 0.0f, 1.0f, "%.2f"))
+								bAdvancedLightingChanged = true;
+							if (ImGui::SliderFloat("RTAO AO Strength", &RTAOIndirectStrength, 0.0f, 1.0f, "%.2f"))
+								bAdvancedLightingChanged = true;
+							if (ImGui::SliderFloat("RTAO AO Floor", &RTAOIndirectFloor, 0.0f, 1.0f, "%.2f"))
 								bAdvancedLightingChanged = true;
 							ImGui::TreePop();
 						}
@@ -15026,7 +15044,7 @@ void Corona::OnRender()
 	AdvanceAutoAADump(backbuffer);
 
 #if CORONA_HAS_D3D12
-	if (bDebugDrawThisFrame)
+	if (bDebugDrawThisFrame && renderingModeThisFrame == ERenderingMode::HYBRID)
 	{
 		BeginGpuPassTiming(EGpuPass::Debug);
 		DebugPass();
@@ -15931,6 +15949,12 @@ void Corona::OnRender()
 					if (ImGui::SliderFloat("RTAO Power", &RTAOViewParam.Power, 0.25f, 4.0f, "%.2f"))
 						bLightingChanged = true;
 					if (ImGui::SliderFloat("RTAO Normal Bias", &RTAOViewParam.NormalBias, 0.01f, 2.0f, "%.2f"))
+						bLightingChanged = true;
+					if (ImGui::SliderFloat("RTAO Contact Strength", &RTAODirectContactStrength, 0.0f, 1.0f, "%.2f"))
+						bLightingChanged = true;
+					if (ImGui::SliderFloat("RTAO AO Strength", &RTAOIndirectStrength, 0.0f, 1.0f, "%.2f"))
+						bLightingChanged = true;
+					if (ImGui::SliderFloat("RTAO AO Floor", &RTAOIndirectFloor, 0.0f, 1.0f, "%.2f"))
 						bLightingChanged = true;
 					ImGui::TreePop();
 				}

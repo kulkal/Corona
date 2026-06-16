@@ -86,7 +86,7 @@ cbuffer LightingParam : register(b0)
     uint4 ShadowChannelMap[MAX_POINT_LIGHTS / 4];
     PointLightParam PointLights[MAX_POINT_LIGHTS];
     uint PointLightCount;
-    float RTAODirectContactStrength; // RTAO contact term strength on direct diffuse
+    float RTAODirectContactStrength; // RTAO contact term strength per lighting lobe
     float2 PointLightPadding;
 };
 
@@ -162,6 +162,19 @@ float3 ComputeSurfaceToViewDirection(float2 screenUV)
     float3 viewRay = normalize(float3(d.x, d.y, -1.0f));
     float3 worldRay = normalize(mul(float4(viewRay, 0.0f), InvViewMatrix).xyz);
     return -worldRay;
+}
+
+float ComputeSpecularOcclusion(float ao, float roughness, float ndotv)
+{
+    ao = saturate(ao);
+    roughness = clamp(roughness, 0.02f, 1.0f);
+    ndotv = saturate(ndotv);
+
+    // Lagarde-style specular occlusion. AO is diffuse/contact visibility, so
+    // apply it through a roughness/view dependent approximation instead of
+    // multiplying the specular lobe by the diffuse AO scalar directly.
+    float exponent = exp2(-16.0f * roughness - 1.0f);
+    return saturate(pow(max(ndotv + ao, 1.0e-4f), exponent) - 1.0f + ao);
 }
 
 float3 ReconstructWorldPosition(float2 screenUV, float deviceDepth)
@@ -350,19 +363,17 @@ float4 PSMain(PSInput input) : SV_TARGET
     float3 IndirectDiffuse = 0.0f.xxx;
     float3 IndirectSpecular = 0.0f.xxx;
 
-    // RTAO read once (1.0 = unoccluded when RTAO is off/invalid). Used for the
-    // indirect ContactAO below AND for direct-diffuse contact occlusion applied
-    // to the composite, so RTAO is visible even when diffuse GI is disabled.
+    // RTAO read once (1.0 = unoccluded when RTAO is off/invalid). Diffuse uses
+    // the contact AO directly; specular gets a lobe-aware approximation below.
     float AmbientOcclusion = bEnableRTAO != 0 ? saturate(SanitizeFloat3(AmbientOcclusionTex[PixelPos].xyz).x) : 1.0f;
 
     if (!bDirectOutput)
     {
-        float ContactAO = lerp(1.0f, max(AmbientOcclusion, saturate(RTAOIndirectFloor)), saturate(RTAOIndirectStrength));
         float3 SkyDiffuse = (bEnableSkyLighting != 0) ? SanitizeFloat3(SkyLightingTex[PixelPos].xyz) * Albedo * (1.0f - Metallic) * saturate(SkyLightingStrength) : float3(0, 0, 0);
         float3 SurfaceBounceGI = max(SanitizeFloat3(GIResultColorTex[PixelPos / GIBufferScale].xyz), 0.0f.xxx);
         float surfaceBounceLuma = dot(SurfaceBounceGI, float3(0.2126f, 0.7152f, 0.0722f));
         SurfaceBounceGI = lerp(surfaceBounceLuma.xxx, SurfaceBounceGI, saturate(SurfaceBounceSaturation));
-        float3 SurfaceBounceDiffuse = SurfaceBounceGI * Albedo * (1.0f - Metallic) * ContactAO * saturate(SurfaceBounceStrength);
+        float3 SurfaceBounceDiffuse = SurfaceBounceGI * Albedo * (1.0f - Metallic) * saturate(SurfaceBounceStrength);
         IndirectDiffuse = (bEnableDiffuseGI ? SurfaceBounceDiffuse : float3(0, 0, 0)) + SkyDiffuse;
         IndirectSpecular = bEnableSpecularGI ? SanitizeFloat3(SpecularGITex[PixelPos].xyz * SpecularColor) : float3(0, 0, 0);
     }
@@ -470,25 +481,29 @@ float4 PSMain(PSInput input) : SV_TARGET
 
     float3 SimpleSkyAmbient = (bMobileDirectOnly || bEnableSimpleSkyLighting != 0) ? EvaluateSimpleSkyAmbient(WorldNormal, Albedo, Metallic, DeviceDepth) : 0.0f.xxx;
     float3 DiffuseLighting = max(DirectionalDiffuse + PointDiffuse + SimpleSkyAmbient, 0);
-    // RTAO contact occlusion on direct diffuse: artist contact shadows in
-    // creases the direct shadow term misses, so enabling RTAO is visibly
-    // reflected even without diffuse GI. Non-physical, gentle, tunable
-    // (0 = physical/off, 1 = full AO). bEnableRTAO off => AmbientOcclusion = 1.
-    // Strength is the CB value (RTAODirectContactStrength), set from the Editor
-    // Config RTAO Details slider and persisted via FrameSourceState.
-    DiffuseLighting *= lerp(1.0f, AmbientOcclusion, saturate(RTAODirectContactStrength));
     float3 DirectSpecular = max(DirectionalSpecular + PointSpecular, 0);
 
-    float3 DirectLighting = max(DiffuseLighting + DirectSpecular, 0);
+    const float AOVisibility = lerp(1.0f, max(AmbientOcclusion, saturate(RTAOIndirectFloor)), saturate(RTAOIndirectStrength));
+    const float ContactStrength = saturate(RTAODirectContactStrength);
+    const float DiffuseContactAO = lerp(1.0f, AOVisibility, ContactStrength);
+    const float SpecularContactRaw = ComputeSpecularOcclusion(AOVisibility, Roughness, NdotV);
+    const float SpecularContactStrength = ContactStrength * saturate(0.20f + 0.80f * Roughness);
+    const float SpecularContactAO = lerp(1.0f, SpecularContactRaw, SpecularContactStrength);
+
+    float3 OccludedDiffuseLighting = DiffuseLighting * DiffuseContactAO;
+    float3 OccludedDirectSpecular = DirectSpecular * SpecularContactAO;
+    float3 DirectLighting = max(OccludedDiffuseLighting + OccludedDirectSpecular, 0);
     if (bDirectOutput)
         return float4(SanitizeFloat3(DirectLighting), 1);
 
-    float3 TotalSpecular = max(DirectSpecular + IndirectSpecular, 0);
+    float3 OccludedIndirectDiffuse = IndirectDiffuse * DiffuseContactAO;
+    float3 OccludedIndirectSpecular = IndirectSpecular * SpecularContactAO;
+    float3 TotalSpecular = max(OccludedDirectSpecular + OccludedIndirectSpecular, 0);
 
     // Indirect-only: just the GI (diffuse + specular indirect), no direct light.
     if (LightingOutputMode == 3u)
-        return float4(SanitizeFloat3(max(IndirectDiffuse + IndirectSpecular, 0)), 1);
+        return float4(SanitizeFloat3(max(OccludedIndirectDiffuse + OccludedIndirectSpecular, 0)), 1);
 
-    float3 FinalColor = DiffuseLighting + TotalSpecular + IndirectDiffuse;
+    float3 FinalColor = OccludedDiffuseLighting + TotalSpecular + OccludedIndirectDiffuse;
     return float4(SanitizeFloat3(FinalColor), 1);
 }

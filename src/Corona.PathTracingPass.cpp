@@ -11,6 +11,7 @@
 
 #include "stdafx.h"
 #include "Corona.h"
+#include "RenderGraph.h"
 
 #include <algorithm>
 #include <cmath>
@@ -410,8 +411,6 @@ void Corona::PathTracingPass()
 	if (!TLAS || !outputColor)
 		return;
 
-	renderBackend->EmitGpuCrashMarker("PathTracingPass");
-
 	if (!PSO_PATH_TRACING)
 	{
 		InitPathTracingPass();
@@ -426,38 +425,6 @@ void Corona::PathTracingPass()
 
 	if (!EnsureRTMaterialRecordBuffer())
 		return;
-
-	// Transition output buffer to UAV
-	renderBackend->TransitionTexture(outputColor, EResourceState::ShaderRead, EResourceState::UnorderedAccess);
-	if (bWritePrimaryGBuffer)
-	{
-		renderBackend->TransitionTexture(AlbedoBuffer.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
-		renderBackend->TransitionTexture(SpecularAlbedoBuffer.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
-		renderBackend->TransitionTexture(NormalBuffers[ColorBufferWriteIndex].get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
-		renderBackend->TransitionTexture(GeomNormalBuffers[ColorBufferWriteIndex].get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
-		renderBackend->TransitionTexture(VelocityBuffer.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
-		renderBackend->TransitionTexture(RoughnessMetalicBuffer.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
-		renderBackend->TransitionTexture(UnjitteredDepthBuffers[ColorBufferWriteIndex].get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
-		renderBackend->TransitionTexture(PathTracingSpecularHitDistanceBuffer.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
-		renderBackend->TransitionTexture(PathTracingSpecularMotionVectorBuffer.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
-	}
-
-	auto transitionPathTracingOutputsToShaderRead = [&]()
-	{
-		renderBackend->TransitionTexture(outputColor, EResourceState::UnorderedAccess, EResourceState::ShaderRead);
-		if (bWritePrimaryGBuffer)
-		{
-			renderBackend->TransitionTexture(AlbedoBuffer.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
-			renderBackend->TransitionTexture(SpecularAlbedoBuffer.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
-			renderBackend->TransitionTexture(NormalBuffers[ColorBufferWriteIndex].get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
-			renderBackend->TransitionTexture(GeomNormalBuffers[ColorBufferWriteIndex].get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
-			renderBackend->TransitionTexture(VelocityBuffer.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
-			renderBackend->TransitionTexture(RoughnessMetalicBuffer.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
-			renderBackend->TransitionTexture(UnjitteredDepthBuffers[ColorBufferWriteIndex].get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
-			renderBackend->TransitionTexture(PathTracingSpecularHitDistanceBuffer.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
-			renderBackend->TransitionTexture(PathTracingSpecularMotionVectorBuffer.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
-		}
-	};
 
 	// Check if camera or light changed and reset accumulation
 	bool cameraChanged = false;
@@ -578,7 +545,6 @@ void Corona::PathTracingPass()
 		{
 			if (PathTracingViewParam.DebugMode == 0)
 				PathTracingAccumulatedFrames++;
-			transitionPathTracingOutputsToShaderRead();
 			return;
 		}
 	}
@@ -587,34 +553,116 @@ void Corona::PathTracingPass()
 		bPathTracingCompactionFallbackLogged = false;
 	}
 
-	RTPassBuilder pass(*this, PSO_PATH_TRACING);
-	pass.BeginScene()
-		.SetTextureUAV("global", "OutputColor", outputColor)
-		.SetTextureUAV("global", "OutAlbedo", AlbedoBuffer.get())
-		.SetTextureUAV("global", "OutSpecularAlbedo", SpecularAlbedoBuffer.get())
-		.SetTextureUAV("global", "OutNormal", NormalBuffers[ColorBufferWriteIndex].get())
-		.SetTextureUAV("global", "OutGeomNormal", GeomNormalBuffers[ColorBufferWriteIndex].get())
-		.SetTextureUAV("global", "OutVelocity", VelocityBuffer.get())
-		.SetTextureUAV("global", "OutRoughnessMetallic", RoughnessMetalicBuffer.get())
-		.SetTextureUAV("global", "OutDepth", UnjitteredDepthBuffers[ColorBufferWriteIndex].get())
-		.SetTextureUAV("global", "OutSpecularHitDistance", PathTracingSpecularHitDistanceBuffer.get())
-		.SetTextureUAV("global", "OutSpecularMotionVector", PathTracingSpecularMotionVectorBuffer.get())
-		.SetAccelerationStructure("global", "gRtScene", TLAS)
-		.SetBufferSRV("global", "PointLightBuffer", PathTracingPointLightBuffer.get())
-		.SetCBVValue("global", "ViewParameter", &dispatchViewParam)
-		.SetSampler("global", "sampleWrap", samplerWrap.get());
-	pass.SetBindlessTextureTable("global", "MaterialTextures")
-		.SetBufferSRV("global", "RtMaterials", RTMaterialRecordBuffer.get());
+	RenderGraph rg(renderBackend.get());
+	RGTextureRef outputColorTarget = rg.ImportTexture("PathTracing.OutputColor", outputColor, EResourceState::ShaderRead);
+	RGTextureRef outAlbedo = bWritePrimaryGBuffer
+		? rg.ImportTexture("PathTracing.OutAlbedo", AlbedoBuffer.get(), EResourceState::ShaderRead)
+		: RGTextureRef{};
+	RGTextureRef outSpecularAlbedo = bWritePrimaryGBuffer
+		? rg.ImportTexture("PathTracing.OutSpecularAlbedo", SpecularAlbedoBuffer.get(), EResourceState::ShaderRead)
+		: RGTextureRef{};
+	RGTextureRef outNormal = bWritePrimaryGBuffer
+		? rg.ImportTexture("PathTracing.OutNormal", NormalBuffers[ColorBufferWriteIndex].get(), EResourceState::ShaderRead)
+		: RGTextureRef{};
+	RGTextureRef outGeomNormal = bWritePrimaryGBuffer
+		? rg.ImportTexture("PathTracing.OutGeomNormal", GeomNormalBuffers[ColorBufferWriteIndex].get(), EResourceState::ShaderRead)
+		: RGTextureRef{};
+	RGTextureRef outVelocity = bWritePrimaryGBuffer
+		? rg.ImportTexture("PathTracing.OutVelocity", VelocityBuffer.get(), EResourceState::ShaderRead)
+		: RGTextureRef{};
+	RGTextureRef outRoughnessMetallic = bWritePrimaryGBuffer
+		? rg.ImportTexture("PathTracing.OutRoughnessMetallic", RoughnessMetalicBuffer.get(), EResourceState::ShaderRead)
+		: RGTextureRef{};
+	RGTextureRef outDepth = bWritePrimaryGBuffer
+		? rg.ImportTexture("PathTracing.OutDepth", UnjitteredDepthBuffers[ColorBufferWriteIndex].get(), EResourceState::ShaderRead)
+		: RGTextureRef{};
+	RGTextureRef outSpecularHitDistance = bWritePrimaryGBuffer
+		? rg.ImportTexture("PathTracing.OutSpecularHitDistance", PathTracingSpecularHitDistanceBuffer.get(), EResourceState::ShaderRead)
+		: RGTextureRef{};
+	RGTextureRef outSpecularMotionVector = bWritePrimaryGBuffer
+		? rg.ImportTexture("PathTracing.OutSpecularMotionVector", PathTracingSpecularMotionVectorBuffer.get(), EResourceState::ShaderRead)
+		: RGTextureRef{};
+	RGBufferRef pointLightBuffer = rg.ImportBuffer("PathTracing.PointLightBuffer", PathTracingPointLightBuffer.get(), EResourceState::ShaderRead);
+	RGBufferRef rtMaterials = rg.ImportBuffer("PathTracing.RtMaterials", RTMaterialRecordBuffer.get(), EResourceState::ShaderRead);
 
-	RTSceneHitProgramDesc hitProgramDesc;
-	pass.BindSceneHitPrograms(hitProgramDesc);
-	pass.Dispatch(m_width, m_height);
+	rg.ExportTexture(outputColorTarget, EResourceState::ShaderRead);
+	if (outAlbedo.IsValid())
+		rg.ExportTexture(outAlbedo, EResourceState::ShaderRead);
+	if (outSpecularAlbedo.IsValid())
+		rg.ExportTexture(outSpecularAlbedo, EResourceState::ShaderRead);
+	if (outNormal.IsValid())
+		rg.ExportTexture(outNormal, EResourceState::ShaderRead);
+	if (outGeomNormal.IsValid())
+		rg.ExportTexture(outGeomNormal, EResourceState::ShaderRead);
+	if (outVelocity.IsValid())
+		rg.ExportTexture(outVelocity, EResourceState::ShaderRead);
+	if (outRoughnessMetallic.IsValid())
+		rg.ExportTexture(outRoughnessMetallic, EResourceState::ShaderRead);
+	if (outDepth.IsValid())
+		rg.ExportTexture(outDepth, EResourceState::ShaderRead);
+	if (outSpecularHitDistance.IsValid())
+		rg.ExportTexture(outSpecularHitDistance, EResourceState::ShaderRead);
+	if (outSpecularMotionVector.IsValid())
+		rg.ExportTexture(outSpecularMotionVector, EResourceState::ShaderRead);
+
+	rg.AddPass(
+		"PathTracingPass",
+		ERGPassFlags::RayTracing,
+		[&](RGPassBuilder& builder)
+		{
+			builder.ReadWriteTexture(outputColorTarget, EResourceState::UnorderedAccess)
+				.ReadBuffer(pointLightBuffer, EResourceState::ShaderRead)
+				.ReadBuffer(rtMaterials, EResourceState::ShaderRead);
+			if (outAlbedo.IsValid())
+				builder.ReadWriteTexture(outAlbedo, EResourceState::UnorderedAccess);
+			if (outSpecularAlbedo.IsValid())
+				builder.ReadWriteTexture(outSpecularAlbedo, EResourceState::UnorderedAccess);
+			if (outNormal.IsValid())
+				builder.ReadWriteTexture(outNormal, EResourceState::UnorderedAccess);
+			if (outGeomNormal.IsValid())
+				builder.ReadWriteTexture(outGeomNormal, EResourceState::UnorderedAccess);
+			if (outVelocity.IsValid())
+				builder.ReadWriteTexture(outVelocity, EResourceState::UnorderedAccess);
+			if (outRoughnessMetallic.IsValid())
+				builder.ReadWriteTexture(outRoughnessMetallic, EResourceState::UnorderedAccess);
+			if (outDepth.IsValid())
+				builder.ReadWriteTexture(outDepth, EResourceState::UnorderedAccess);
+			if (outSpecularHitDistance.IsValid())
+				builder.ReadWriteTexture(outSpecularHitDistance, EResourceState::UnorderedAccess);
+			if (outSpecularMotionVector.IsValid())
+				builder.ReadWriteTexture(outSpecularMotionVector, EResourceState::UnorderedAccess);
+		},
+		[&](RGContext& ctx)
+		{
+			RTPassBuilder pass(*this, PSO_PATH_TRACING);
+			pass.BeginScene()
+				.SetTextureUAV("global", "OutputColor", ctx.GetTexture(outputColorTarget))
+				.SetTextureUAV("global", "OutAlbedo", outAlbedo.IsValid() ? ctx.GetTexture(outAlbedo) : nullptr)
+				.SetTextureUAV("global", "OutSpecularAlbedo", outSpecularAlbedo.IsValid() ? ctx.GetTexture(outSpecularAlbedo) : nullptr)
+				.SetTextureUAV("global", "OutNormal", outNormal.IsValid() ? ctx.GetTexture(outNormal) : nullptr)
+				.SetTextureUAV("global", "OutGeomNormal", outGeomNormal.IsValid() ? ctx.GetTexture(outGeomNormal) : nullptr)
+				.SetTextureUAV("global", "OutVelocity", outVelocity.IsValid() ? ctx.GetTexture(outVelocity) : nullptr)
+				.SetTextureUAV("global", "OutRoughnessMetallic", outRoughnessMetallic.IsValid() ? ctx.GetTexture(outRoughnessMetallic) : nullptr)
+				.SetTextureUAV("global", "OutDepth", outDepth.IsValid() ? ctx.GetTexture(outDepth) : nullptr)
+				.SetTextureUAV("global", "OutSpecularHitDistance", outSpecularHitDistance.IsValid() ? ctx.GetTexture(outSpecularHitDistance) : nullptr)
+				.SetTextureUAV("global", "OutSpecularMotionVector", outSpecularMotionVector.IsValid() ? ctx.GetTexture(outSpecularMotionVector) : nullptr)
+				.SetAccelerationStructure("global", "gRtScene", TLAS)
+				.SetBufferSRV("global", "PointLightBuffer", ctx.GetBuffer(pointLightBuffer))
+				.SetCBVValue("global", "ViewParameter", &dispatchViewParam)
+				.SetSampler("global", "sampleWrap", samplerWrap.get());
+			pass.SetBindlessTextureTable("global", "MaterialTextures")
+				.SetBufferSRV("global", "RtMaterials", ctx.GetBuffer(rtMaterials));
+
+			RTSceneHitProgramDesc hitProgramDesc;
+			pass.BindSceneHitPrograms(hitProgramDesc);
+			pass.Dispatch(m_width, m_height);
+		});
+
+	if (!rg.Execute())
+		return;
 
 	if (PathTracingViewParam.DebugMode == 0)
 	{
 		PathTracingAccumulatedFrames++;
 	}
-
-	// Transition output buffer back to SRV
-	transitionPathTracingOutputsToShaderRead();
 }

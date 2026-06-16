@@ -1832,6 +1832,18 @@ void DX12Backend::UAVBarrier(Buffer* buffer)
 	GlobalCmdList->CmdList->ResourceBarrier(1, &barrierDesc);
 }
 
+void DX12Backend::UAVBarrier(Texture* texture)
+{
+	if (!GlobalCmdList)
+		return;
+
+	D3D12_RESOURCE_BARRIER barrierDesc = {};
+	barrierDesc.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+	barrierDesc.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+	barrierDesc.UAV.pResource = texture ? texture->resource.Get() : nullptr;
+	GlobalCmdList->CmdList->ResourceBarrier(1, &barrierDesc);
+}
+
 shared_ptr<Sampler> DX12Backend::CreateSampler(D3D12_SAMPLER_DESC& InSamplerDesc)
 {
 	Sampler* sampler = new Sampler;
@@ -4504,7 +4516,7 @@ IndexBuffer::~IndexBuffer()
 
 Texture::~Texture()
 {
-	if (Owner)
+	if (Owner && BindlessHandle.IsValid())
 		Owner->UnregisterBindlessTexture(this);
 }
 

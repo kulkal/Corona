@@ -11,6 +11,7 @@
 
 #include "stdafx.h"
 #include "Corona.h"
+#include "RenderGraph.h"
 // For dx12_rhi->GetGraphicsCommandList() used by the ReSTIR
 // reservoir-snapshot CopyResource at end-of-pass.
 #include "DX12Backend.h"
@@ -110,25 +111,19 @@ void Corona::RaytraceReflectionPass()
 {
 	if (!TLAS || !PSO_RT_REFLECTION || !SpecularGIRaw ||
 		!PathTracingSpecularHitDistanceBuffer ||
-		!PathTracingSpecularMotionVectorBuffer)
+		!PathTracingSpecularMotionVectorBuffer ||
+		!UnjitteredDepthBuffers[ColorBufferWriteIndex] ||
+		!GeomNormalBuffers[ColorBufferWriteIndex] ||
+		!RoughnessMetalicBuffer ||
+		!BlueNoiseTex ||
+		!NormalBuffers[ColorBufferWriteIndex])
 		return;
-	renderBackend->EmitGpuCrashMarker("RaytraceReflectionPass");
 	shared_ptr<RTPipelineStateObject> pso = PSO_RT_REFLECTION;
 	if (bEnableRTReflectionSER && renderBackend && renderBackend->SupportsShaderExecutionReordering() && InitRaytracingReflectionSERPass())
 		pso = PSO_RT_REFLECTION_SER;
 
 	if (!EnsureRTMaterialRecordBuffer())
-	return;
-
-	renderBackend->TransitionTexture(SpecularGIRaw.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
-	renderBackend->TransitionTexture(PathTracingSpecularHitDistanceBuffer.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
-	renderBackend->TransitionTexture(PathTracingSpecularMotionVectorBuffer.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
-	const FLOAT clearReflection[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
-	const FLOAT clearHitDistance[4] = { Far, 0.0f, 0.0f, 0.0f };
-	const FLOAT clearMotionVector[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
-	renderBackend->ClearTextureUAVFloat(SpecularGIRaw.get(), clearReflection);
-	renderBackend->ClearTextureUAVFloat(PathTracingSpecularHitDistanceBuffer.get(), clearHitDistance);
-	renderBackend->ClearTextureUAVFloat(PathTracingSpecularMotionVectorBuffer.get(), clearMotionVector);
+		return;
 
 	RTReflectionViewParam.ViewMatrix = glm::transpose(ViewMat);
 	RTReflectionViewParam.InvViewMatrix = glm::transpose(InvViewMat);
@@ -158,65 +153,149 @@ void Corona::RaytraceReflectionPass()
 	RTReflectionViewParam.bUseRRSpecularGuideRay =
 		(bEnableHybridRRSpecularGuideRay && (bWriteRRSpecularMotionVectors || bWriteRRSpecularHitDistance)) ? 1u : 0u;
 
-	// ReSTIR specular GI: transition reservoir UAVs.
-	if (ReflectionReservoirA)
-		renderBackend->TransitionTexture(ReflectionReservoirA.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
-	if (ReflectionReservoirB)
-		renderBackend->TransitionTexture(ReflectionReservoirB.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
+	RenderGraph rg(renderBackend.get());
+	RGTextureRef reflectionOutput = rg.ImportTexture("Reflection.SpecularGI", SpecularGIRaw.get(), EResourceState::ShaderRead);
+	RGTextureRef hitDistanceOutput = rg.ImportTexture("Reflection.HitDistance", PathTracingSpecularHitDistanceBuffer.get(), EResourceState::ShaderRead);
+	RGTextureRef motionVectorOutput = rg.ImportTexture("Reflection.MotionVector", PathTracingSpecularMotionVectorBuffer.get(), EResourceState::ShaderRead);
+	RGTextureRef reservoirAOutput = ReflectionReservoirA
+		? rg.ImportTexture("Reflection.ReservoirA", ReflectionReservoirA.get(), EResourceState::ShaderRead)
+		: RGTextureRef{};
+	RGTextureRef reservoirBOutput = ReflectionReservoirB
+		? rg.ImportTexture("Reflection.ReservoirB", ReflectionReservoirB.get(), EResourceState::ShaderRead)
+		: RGTextureRef{};
+	RGTextureRef depthInput = rg.ImportTexture("Reflection.Depth", UnjitteredDepthBuffers[ColorBufferWriteIndex].get(), EResourceState::ShaderRead);
+	RGTextureRef geomNormalInput = rg.ImportTexture("Reflection.GeomNormal", GeomNormalBuffers[ColorBufferWriteIndex].get(), EResourceState::ShaderRead);
+	RGTextureRef roughnessInput = rg.ImportTexture("Reflection.RoughnessMetallic", RoughnessMetalicBuffer.get(), EResourceState::ShaderRead);
+	RGTextureRef blueNoiseInput = rg.ImportTexture("Reflection.BlueNoise", BlueNoiseTex.get(), EResourceState::ShaderRead);
+	RGTextureRef normalInput = rg.ImportTexture("Reflection.Normal", NormalBuffers[ColorBufferWriteIndex].get(), EResourceState::ShaderRead);
+	RGTextureRef reservoirAPrevInput = ReflectionReservoirAPrev
+		? rg.ImportTexture("Reflection.ReservoirAPrev", ReflectionReservoirAPrev.get(), EResourceState::ShaderRead)
+		: RGTextureRef{};
+	RGTextureRef reservoirBPrevInput = ReflectionReservoirBPrev
+		? rg.ImportTexture("Reflection.ReservoirBPrev", ReflectionReservoirBPrev.get(), EResourceState::ShaderRead)
+		: RGTextureRef{};
+	RGTextureRef velocityInput = VelocityBuffer
+		? rg.ImportTexture("Reflection.Velocity", VelocityBuffer.get(), EResourceState::ShaderRead)
+		: RGTextureRef{};
+	RGBufferRef rtMaterials = rg.ImportBuffer("Reflection.RtMaterials", RTMaterialRecordBuffer.get(), EResourceState::ShaderRead);
 
-	RTPassBuilder pass(*this, pso);
-	pass.BeginScene()
-		.SetTextureUAV("global", "ReflectionResult", SpecularGIRaw.get())
-		.SetTextureUAV("global", "SpecularHitDistanceResult", PathTracingSpecularHitDistanceBuffer.get())
-		.SetTextureUAV("global", "SpecularMotionVectorResult", PathTracingSpecularMotionVectorBuffer.get())
-		.SetTextureUAV("global", "ReflReservoirA",
-			ReflectionReservoirA ? ReflectionReservoirA.get() : SpecularGIRaw.get())
-		.SetTextureUAV("global", "ReflReservoirB",
-			ReflectionReservoirB ? ReflectionReservoirB.get() : SpecularGIRaw.get())
-		.SetAccelerationStructure("global", "gRtScene", TLAS)
-		.SetTextureSRV("global", "DepthTex", UnjitteredDepthBuffers[ColorBufferWriteIndex].get())
-		.SetTextureSRV("global", "GeoNormalTex", GeomNormalBuffers[ColorBufferWriteIndex].get())
-		.SetTextureSRV("global", "RougnessMetallicTex", RoughnessMetalicBuffer.get())
-		.SetTextureSRV("global", "RayNoiseBlueNoiseSource", BlueNoiseTex.get())
-		.SetTextureSRV("global", "WorldNormalTex", NormalBuffers[ColorBufferWriteIndex].get())
-		.SetTextureSRV("global", "ReflReservoirAPrev",
-			ReflectionReservoirAPrev ? ReflectionReservoirAPrev.get() : NormalBuffers[ColorBufferWriteIndex].get())
-		.SetTextureSRV("global", "ReflReservoirBPrev",
-			ReflectionReservoirBPrev ? ReflectionReservoirBPrev.get() : NormalBuffers[ColorBufferWriteIndex].get())
-		.SetTextureSRV("global", "ReflVelocityTex",
-			VelocityBuffer ? VelocityBuffer.get() : NormalBuffers[ColorBufferWriteIndex].get())
-		.SetCBVValue("global", "ViewParameter", &RTReflectionViewParam)
-		.SetSampler("global", "sampleWrap", samplerWrap.get());
-	pass.SetBindlessTextureTable("global", "MaterialTextures")
-		.SetBufferSRV("global", "RtMaterials", RTMaterialRecordBuffer.get());
-	RTSceneHitProgramDesc hitProgramDesc;
-	pass.BindSceneHitPrograms(hitProgramDesc);
-	pass.Dispatch(GetRenderWidth(), GetRenderHeight());
+	rg.ExportTexture(reflectionOutput, EResourceState::ShaderRead);
+	rg.ExportTexture(hitDistanceOutput, EResourceState::ShaderRead);
+	rg.ExportTexture(motionVectorOutput, EResourceState::ShaderRead);
+	if (reservoirAOutput.IsValid())
+		rg.ExportTexture(reservoirAOutput, EResourceState::ShaderRead);
+	if (reservoirBOutput.IsValid())
+		rg.ExportTexture(reservoirBOutput, EResourceState::ShaderRead);
+	if (reservoirAPrevInput.IsValid())
+		rg.ExportTexture(reservoirAPrevInput, EResourceState::ShaderRead);
+	if (reservoirBPrevInput.IsValid())
+		rg.ExportTexture(reservoirBPrevInput, EResourceState::ShaderRead);
 
-	renderBackend->TransitionTexture(SpecularGIRaw.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
-	renderBackend->TransitionTexture(PathTracingSpecularHitDistanceBuffer.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
-	renderBackend->TransitionTexture(PathTracingSpecularMotionVectorBuffer.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
+	rg.AddPass(
+		"RaytraceReflectionPass",
+		ERGPassFlags::RayTracing,
+		[&](RGPassBuilder& builder)
+		{
+			builder.ReadWriteTexture(reflectionOutput, EResourceState::UnorderedAccess)
+				.ReadWriteTexture(hitDistanceOutput, EResourceState::UnorderedAccess)
+				.ReadWriteTexture(motionVectorOutput, EResourceState::UnorderedAccess);
+			if (reservoirAOutput.IsValid())
+				builder.ReadWriteTexture(reservoirAOutput, EResourceState::UnorderedAccess);
+			if (reservoirBOutput.IsValid())
+				builder.ReadWriteTexture(reservoirBOutput, EResourceState::UnorderedAccess);
+			builder.ReadTexture(depthInput, EResourceState::ShaderRead)
+				.ReadTexture(geomNormalInput, EResourceState::ShaderRead)
+				.ReadTexture(roughnessInput, EResourceState::ShaderRead)
+				.ReadTexture(blueNoiseInput, EResourceState::ShaderRead)
+				.ReadTexture(normalInput, EResourceState::ShaderRead);
+			if (reservoirAPrevInput.IsValid())
+				builder.ReadTexture(reservoirAPrevInput, EResourceState::ShaderRead);
+			if (reservoirBPrevInput.IsValid())
+				builder.ReadTexture(reservoirBPrevInput, EResourceState::ShaderRead);
+			if (velocityInput.IsValid())
+				builder.ReadTexture(velocityInput, EResourceState::ShaderRead);
+			builder.ReadBuffer(rtMaterials, EResourceState::ShaderRead);
+		},
+		[&, pso](RGContext& ctx)
+		{
+			Texture* reflectionTexture = ctx.GetTexture(reflectionOutput);
+			Texture* hitDistanceTexture = ctx.GetTexture(hitDistanceOutput);
+			Texture* motionVectorTexture = ctx.GetTexture(motionVectorOutput);
+			Texture* reservoirATexture = reservoirAOutput.IsValid() ? ctx.GetTexture(reservoirAOutput) : reflectionTexture;
+			Texture* reservoirBTexture = reservoirBOutput.IsValid() ? ctx.GetTexture(reservoirBOutput) : reflectionTexture;
+			Texture* normalTexture = ctx.GetTexture(normalInput);
+			Texture* reservoirAPrevTexture = reservoirAPrevInput.IsValid() ? ctx.GetTexture(reservoirAPrevInput) : normalTexture;
+			Texture* reservoirBPrevTexture = reservoirBPrevInput.IsValid() ? ctx.GetTexture(reservoirBPrevInput) : normalTexture;
+			Texture* velocityTexture = velocityInput.IsValid() ? ctx.GetTexture(velocityInput) : normalTexture;
+			Buffer* materialBuffer = ctx.GetBuffer(rtMaterials);
+
+			const FLOAT clearReflection[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+			const FLOAT clearHitDistance[4] = { Far, 0.0f, 0.0f, 0.0f };
+			const FLOAT clearMotionVector[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+			renderBackend->ClearTextureUAVFloat(reflectionTexture, clearReflection);
+			renderBackend->ClearTextureUAVFloat(hitDistanceTexture, clearHitDistance);
+			renderBackend->ClearTextureUAVFloat(motionVectorTexture, clearMotionVector);
+
+			RTPassBuilder pass(*this, pso);
+			pass.BeginScene()
+				.SetTextureUAV("global", "ReflectionResult", reflectionTexture)
+				.SetTextureUAV("global", "SpecularHitDistanceResult", hitDistanceTexture)
+				.SetTextureUAV("global", "SpecularMotionVectorResult", motionVectorTexture)
+				.SetTextureUAV("global", "ReflReservoirA", reservoirATexture)
+				.SetTextureUAV("global", "ReflReservoirB", reservoirBTexture)
+				.SetAccelerationStructure("global", "gRtScene", TLAS)
+				.SetTextureSRV("global", "DepthTex", ctx.GetTexture(depthInput))
+				.SetTextureSRV("global", "GeoNormalTex", ctx.GetTexture(geomNormalInput))
+				.SetTextureSRV("global", "RougnessMetallicTex", ctx.GetTexture(roughnessInput))
+				.SetTextureSRV("global", "RayNoiseBlueNoiseSource", ctx.GetTexture(blueNoiseInput))
+				.SetTextureSRV("global", "WorldNormalTex", normalTexture)
+				.SetTextureSRV("global", "ReflReservoirAPrev", reservoirAPrevTexture)
+				.SetTextureSRV("global", "ReflReservoirBPrev", reservoirBPrevTexture)
+				.SetTextureSRV("global", "ReflVelocityTex", velocityTexture)
+				.SetCBVValue("global", "ViewParameter", &RTReflectionViewParam)
+				.SetSampler("global", "sampleWrap", samplerWrap.get());
+			pass.SetBindlessTextureTable("global", "MaterialTextures")
+				.SetBufferSRV("global", "RtMaterials", materialBuffer);
+			RTSceneHitProgramDesc hitProgramDesc;
+			pass.BindSceneHitPrograms(hitProgramDesc);
+			pass.Dispatch(GetRenderWidth(), GetRenderHeight());
+		});
 
 	// ReSTIR specular GI: snapshot current reservoir → prev for next frame.
-	if (ReflectionReservoirA && ReflectionReservoirAPrev && dx12_rhi)
+	if (reservoirAOutput.IsValid() && reservoirAPrevInput.IsValid() && dx12_rhi)
 	{
-		renderBackend->TransitionTexture(ReflectionReservoirA.get(), EResourceState::UnorderedAccess, EResourceState::CopySource);
-		renderBackend->TransitionTexture(ReflectionReservoirAPrev.get(), EResourceState::ShaderRead, EResourceState::CopyDest);
-		dx12_rhi->GetGraphicsCommandList()->CopyResource(
-			ReflectionReservoirAPrev->resource.Get(),
-			ReflectionReservoirA->resource.Get());
-		renderBackend->TransitionTexture(ReflectionReservoirA.get(), EResourceState::CopySource, EResourceState::ShaderRead);
-		renderBackend->TransitionTexture(ReflectionReservoirAPrev.get(), EResourceState::CopyDest, EResourceState::ShaderRead);
+		rg.AddPass(
+			"Reflection.CopyReservoirA",
+			ERGPassFlags::Copy,
+			[&](RGPassBuilder& builder)
+			{
+				builder.ReadTexture(reservoirAOutput, EResourceState::CopySource)
+					.WriteTexture(reservoirAPrevInput, EResourceState::CopyDest);
+			},
+			[&](RGContext& ctx)
+			{
+				dx12_rhi->GetGraphicsCommandList()->CopyResource(
+					ctx.GetTexture(reservoirAPrevInput)->resource.Get(),
+					ctx.GetTexture(reservoirAOutput)->resource.Get());
+			});
 	}
-	if (ReflectionReservoirB && ReflectionReservoirBPrev && dx12_rhi)
+	if (reservoirBOutput.IsValid() && reservoirBPrevInput.IsValid() && dx12_rhi)
 	{
-		renderBackend->TransitionTexture(ReflectionReservoirB.get(), EResourceState::UnorderedAccess, EResourceState::CopySource);
-		renderBackend->TransitionTexture(ReflectionReservoirBPrev.get(), EResourceState::ShaderRead, EResourceState::CopyDest);
-		dx12_rhi->GetGraphicsCommandList()->CopyResource(
-			ReflectionReservoirBPrev->resource.Get(),
-			ReflectionReservoirB->resource.Get());
-		renderBackend->TransitionTexture(ReflectionReservoirB.get(), EResourceState::CopySource, EResourceState::ShaderRead);
-		renderBackend->TransitionTexture(ReflectionReservoirBPrev.get(), EResourceState::CopyDest, EResourceState::ShaderRead);
+		rg.AddPass(
+			"Reflection.CopyReservoirB",
+			ERGPassFlags::Copy,
+			[&](RGPassBuilder& builder)
+			{
+				builder.ReadTexture(reservoirBOutput, EResourceState::CopySource)
+					.WriteTexture(reservoirBPrevInput, EResourceState::CopyDest);
+			},
+			[&](RGContext& ctx)
+			{
+				dx12_rhi->GetGraphicsCommandList()->CopyResource(
+					ctx.GetTexture(reservoirBPrevInput)->resource.Get(),
+					ctx.GetTexture(reservoirBOutput)->resource.Get());
+			});
 	}
-	//PIXEndEvent();
+
+	rg.Execute();
 }

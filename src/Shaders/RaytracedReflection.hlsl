@@ -277,6 +277,44 @@ void TraceReflectionSurfaceRay(RayDesc ray, inout RayPayload payload)
 #endif
 }
 
+bool IsSpecularReservoirSampleVisible(float3 worldPos, float3 traceNormal, float3 samplePos)
+{
+    float3 toSample = samplePos - worldPos;
+    float sampleDistance = length(toSample);
+    if (sampleDistance <= 1.0e-3f)
+        return false;
+
+    traceNormal = SpecSafeNormalize(traceNormal, float3(0.0f, 1.0f, 0.0f));
+    float originBias = min(0.5f, sampleDistance * 0.10f);
+    float targetBias = min(0.5f, sampleDistance * 0.10f);
+    float tMax = sampleDistance - originBias - targetBias;
+    if (tMax <= 0.001f)
+        return true;
+
+    RayDesc visibilityRay;
+    visibilityRay.Origin = SpecSanitizeFloat3(worldPos + traceNormal * originBias, worldPos);
+    visibilityRay.Direction = toSample / sampleDistance;
+    visibilityRay.TMin = 0.001f;
+    visibilityRay.TMax = tMax;
+
+    ShadowRayPayload visibilityPayload;
+    visibilityPayload.bHit = true;
+    TraceRay(
+        gRtScene,
+        RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH |
+            RAY_FLAG_SKIP_CLOSEST_HIT_SHADER |
+            RAY_FLAG_FORCE_OPAQUE |
+            RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES,
+        0xFF,
+        0,
+        0,
+        1,
+        visibilityRay,
+        visibilityPayload);
+
+    return !visibilityPayload.bHit;
+}
+
 bool ProjectToScreenUVChecked(float3 worldPos, float4x4 viewProj, out float2 uv)
 {
     float4 clip = mul(float4(worldPos, 1.0f), viewProj);
@@ -639,7 +677,8 @@ void rayGen
             float prevW = prevB.w;
             float3 prevHit = prevA.xyz;
             float3 prevRad = max(prevB.xyz, 0.0f.xxx);
-            if (prevM > 0.0f && prevW > 0.0f && dot(prevRad, prevRad) > 0.0f)
+            if (prevM > 0.0f && prevW > 0.0f && dot(prevRad, prevRad) > 0.0f &&
+                IsSpecularReservoirSampleVisible(WorldPos, GeoNormal, prevHit))
             {
                 // Re-eval prev's target_pdf at CURRENT pixel — includes
                 // the GGX D factor against the current view direction,
