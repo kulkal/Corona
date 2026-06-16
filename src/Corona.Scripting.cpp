@@ -7937,6 +7937,12 @@ void Corona::PushLuauUiStateForScript(lua_State* L, const std::string& mode, boo
 	PushIntegerField(L, "dlss_jitter_phase_count_auto", static_cast<lua_Integer>(DLSSJitterPhaseCountAuto));
 	PushIntegerField(L, "dlss_jitter_phase_override", static_cast<lua_Integer>(DLSSJitterPhaseCountOverride));
 	PushNumberField(L, "dlss_jitter_phase_scale", DLSSJitterPhaseScale);
+	PushIntegerField(L, "dlss_rr_jitter_phase_override", static_cast<lua_Integer>(DLSSRRJitterPhaseCountOverride));
+	PushNumberField(L, "dlss_rr_jitter_phase_scale", DLSSRRJitterPhaseScale);
+	PushNumberField(L, "dlss_sr_sharpness", DLSSSRSharpness);
+	PushNumberField(L, "dlss_rr_sharpness", DLSSRRSharpness);
+	PushIntegerField(L, "dlss_sr_preset", static_cast<lua_Integer>(DLSSSRPresetOverride));
+	PushIntegerField(L, "dlss_rr_preset", static_cast<lua_Integer>(DLSSRRPresetOverride));
 	PushNumberField(L, "camera_turn_speed", m_turnSpeed);
 	PushBoolField(L, "show_imgui", bShowImgui);
 	PushBoolField(L, "show_frame_timing_overlay", bShowFrameTimingOverlay);
@@ -8275,6 +8281,7 @@ bool Corona::SetLuauUiValueForScript(const std::string& name, lua_State* L, int 
 		if (DLSSQualityMode == requestedMode)
 			return true;
 		DLSSQualityMode = requestedMode;
+		SyncCurrentDLSSSettingsToFrameSourceState();
 		ResetAllAccumulationState(true);
 		return true;
 	}
@@ -8284,6 +8291,7 @@ bool Corona::SetLuauUiValueForScript(const std::string& name, lua_State* L, int 
 		if (nearlyEqual(DLSSJitterPhaseScale, newValue))
 			return true;
 		DLSSJitterPhaseScale = newValue;
+		SyncCurrentDLSSSettingsToFrameSourceState();
 		ResetAllAccumulationState(false);
 		return true;
 	}
@@ -8293,6 +8301,73 @@ bool Corona::SetLuauUiValueForScript(const std::string& name, lua_State* L, int 
 		if (DLSSJitterPhaseCountOverride == newValue)
 			return true;
 		DLSSJitterPhaseCountOverride = newValue;
+		SyncCurrentDLSSSettingsToFrameSourceState();
+		ResetAllAccumulationState(false);
+		return true;
+	}
+	if (name == "dlss_rr_jitter_phase_scale")
+	{
+		const float newValue = std::max(0.25f, readFloat());
+		if (nearlyEqual(DLSSRRJitterPhaseScale, newValue))
+			return true;
+		DLSSRRJitterPhaseScale = newValue;
+		SyncCurrentDLSSSettingsToFrameSourceState();
+		ResetAllAccumulationState(false);
+		return true;
+	}
+	if (name == "dlss_rr_jitter_phase_override")
+	{
+		const UINT32 newValue = static_cast<UINT32>(std::clamp(readInt(), 0, 512));
+		if (DLSSRRJitterPhaseCountOverride == newValue)
+			return true;
+		DLSSRRJitterPhaseCountOverride = newValue;
+		SyncCurrentDLSSSettingsToFrameSourceState();
+		ResetAllAccumulationState(false);
+		return true;
+	}
+	if (name == "dlss_sr_sharpness")
+	{
+		const float newValue = std::clamp(readFloat(), 0.0f, 1.0f);
+		if (nearlyEqual(DLSSSRSharpness, newValue))
+			return true;
+		DLSSSRSharpness = newValue;
+		SyncCurrentDLSSSettingsToFrameSourceState();
+		ResetAllAccumulationState(false);
+		return true;
+	}
+	if (name == "dlss_rr_sharpness")
+	{
+		const float newValue = std::clamp(readFloat(), 0.0f, 1.0f);
+		if (nearlyEqual(DLSSRRSharpness, newValue))
+			return true;
+		DLSSRRSharpness = newValue;
+		SyncCurrentDLSSSettingsToFrameSourceState();
+		ResetAllAccumulationState(false);
+		return true;
+	}
+	if (name == "dlss_sr_preset")
+	{
+		const int requestedValue = readInt();
+		UINT32 newValue = 0u;
+		if (requestedValue == 10 || requestedValue == 11 || requestedValue == 12 || requestedValue == 13)
+			newValue = static_cast<UINT32>(requestedValue);
+		if (DLSSSRPresetOverride == newValue)
+			return true;
+		DLSSSRPresetOverride = newValue;
+		SyncCurrentDLSSSettingsToFrameSourceState();
+		ResetAllAccumulationState(false);
+		return true;
+	}
+	if (name == "dlss_rr_preset")
+	{
+		const int requestedValue = readInt();
+		UINT32 newValue = 0u;
+		if (requestedValue == 4 || requestedValue == 5)
+			newValue = static_cast<UINT32>(requestedValue);
+		if (DLSSRRPresetOverride == newValue)
+			return true;
+		DLSSRRPresetOverride = newValue;
+		SyncCurrentDLSSSettingsToFrameSourceState();
 		ResetAllAccumulationState(false);
 		return true;
 	}

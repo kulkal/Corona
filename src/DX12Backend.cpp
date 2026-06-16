@@ -270,6 +270,23 @@ namespace
 		return stream.str();
 	}
 
+	bool IsDX12DeviceLostHRESULT(HRESULT hr)
+	{
+		return hr == DXGI_ERROR_DEVICE_REMOVED ||
+			hr == DXGI_ERROR_DEVICE_HUNG ||
+			hr == DXGI_ERROR_DEVICE_RESET ||
+			hr == DXGI_ERROR_DRIVER_INTERNAL_ERROR;
+	}
+
+	std::string NarrowAscii(const std::wstring& value)
+	{
+		std::string result;
+		result.reserve(value.size());
+		for (wchar_t ch : value)
+			result.push_back((ch >= 0 && ch <= 0x7f) ? static_cast<char>(ch) : '?');
+		return result;
+	}
+
 	const wchar_t* CommandListTypeName(D3D12_COMMAND_LIST_TYPE type)
 	{
 		switch (type)
@@ -830,8 +847,47 @@ void DX12Backend::InvalidateGraphicsCommandStateCache()
 	BoundPrimitiveTopology = D3D_PRIMITIVE_TOPOLOGY_UNDEFINED;
 }
 
+void DX12Backend::MarkDeviceLost(const wchar_t* context, HRESULT hr)
+{
+	const HRESULT deviceRemovedReason = Device ? Device->GetDeviceRemovedReason() : S_OK;
+	if (deviceRemovedReason == S_OK && !IsDX12DeviceLostHRESULT(hr))
+		return;
+
+	const std::wstring safeContext = context ? std::wstring(context) : L"unknown";
+	const std::wstring message =
+		L"DX12 device lost at " + safeContext +
+		L" hr=" + FormatHexHRESULT(hr) +
+		L", reason=" + FormatHexHRESULT(deviceRemovedReason);
+
+	if (!bDeviceLost)
+	{
+		bDeviceLost = true;
+		errorString = NarrowAscii(message);
+		AppendCpuRuntimeTrace(L"[DX12DeviceLost] " + message);
+	}
+
+	if (!bDeviceLostDiagnosticsLogged)
+	{
+		bDeviceLostDiagnosticsLogged = true;
+		AppendD3D12InfoQueueMessages(Device.Get(), L"DX12Backend::DeviceLost " + safeContext);
+		AppendD3D12DeviceRemovedData(Device.Get(), L"DX12Backend::DeviceLost " + safeContext);
+	}
+}
+
 void DX12Backend::BeginFrame()
 {
+	if (bDeviceLost)
+		return;
+	if (Device)
+	{
+		const HRESULT deviceRemovedReason = Device->GetDeviceRemovedReason();
+		if (deviceRemovedReason != S_OK)
+		{
+			MarkDeviceLost(L"DX12Backend::BeginFrame", deviceRemovedReason);
+			return;
+		}
+	}
+
 	// Reclaim texture-upload staging heaps whose GPU copy has finished.
 	RetireCompletedTextureUploads();
 
@@ -913,6 +969,9 @@ void DX12Backend::BeginFrame()
 
 void DX12Backend::EndFrame()
 {
+	if (bDeviceLost)
+		return;
+
 	if (BvhViewerD3D12)
 		CoronaBvhViewerD3D12_OnNewFrame(BvhViewerD3D12);
 
@@ -928,8 +987,10 @@ void DX12Backend::EndFrame()
 		AppendCpuRuntimeTrace(
 			L"[DX12Backend][Present] failed hr=" + FormatHexHRESULT(presentHr) +
 			L", deviceRemovedReason=" + FormatHexHRESULT(deviceRemovedReason));
+		MarkDeviceLost(L"DX12Backend::EndFrame Present", presentHr);
+		if (bDeviceLost)
+			return;
 		AppendD3D12InfoQueueMessages(Device.Get(), L"DX12Backend::EndFrame Present");
-		AppendD3D12DeviceRemovedData(Device.Get(), L"DX12Backend::EndFrame Present");
 	}
 #if USE_AFTERMATH
 	ThrowIfFailed(presentHr, activeAftermathContext ? &activeAftermathContext : nullptr);
@@ -2031,7 +2092,7 @@ shared_ptr<Buffer> DX12Backend::CreateDefaultByteAddressBuffer(UINT InNumElement
 			L", elements=" + std::to_wstring(InNumElements) +
 			L", elementSize=" + std::to_wstring(InElementSize) +
 			L", bytes=" + std::to_wstring(Size));
-		AppendD3D12DeviceRemovedData(Device.Get(), L"DX12Backend::CreateDefaultByteAddressBuffer");
+		MarkDeviceLost(L"DX12Backend::CreateDefaultByteAddressBuffer", hr);
 		delete buffer;
 		return nullptr;
 	}
@@ -5673,7 +5734,23 @@ static bool WriteD3D12TLASInstanceDescs(D3D12RTAS* as, const std::vector<RTInsta
 
 std::shared_ptr<RTAS> DX12Backend::CreateTLAS(const std::vector<RTInstanceDesc>& instances)
 {
+	if (bDeviceLost || !Device || !CmdQ || instances.empty() || instances.size() > static_cast<size_t>(UINT_MAX))
+		return nullptr;
+
 	D3D12RTAS* as = new D3D12RTAS;
+	auto failCreateTLAS = [&](const wchar_t* context, HRESULT hr) -> std::shared_ptr<RTAS>
+	{
+		const HRESULT deviceRemovedReason = Device ? Device->GetDeviceRemovedReason() : S_OK;
+		AppendCpuRuntimeTrace(
+			L"[DX12RTAS] CreateTLAS failed context=\"" +
+			std::wstring(context ? context : L"unknown") +
+			L"\", hr=" + FormatHexHRESULT(hr) +
+			L", deviceRemovedReason=" + FormatHexHRESULT(deviceRemovedReason) +
+			L", instances=" + std::to_wstring(instances.size()));
+		MarkDeviceLost(context ? context : L"DX12Backend::CreateTLAS", hr);
+		delete as;
+		return nullptr;
+	};
 
 	// First, get the size of the TLAS buffers and create them
 	D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS inputs = {};
@@ -5686,6 +5763,8 @@ std::shared_ptr<RTAS> DX12Backend::CreateTLAS(const std::vector<RTInstanceDesc>&
 
 	D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO info;
 	Device->GetRaytracingAccelerationStructurePrebuildInfo(&inputs, &info);
+	if (info.ResultDataMaxSizeInBytes == 0 || info.ScratchDataSizeInBytes == 0)
+		return failCreateTLAS(L"DX12Backend::CreateTLAS PrebuildInfo", E_FAIL);
 	UINT64 scratchDataSize = info.ScratchDataSizeInBytes;
 	if (info.UpdateScratchDataSizeInBytes > scratchDataSize)
 		scratchDataSize = info.UpdateScratchDataSizeInBytes;
@@ -5704,7 +5783,9 @@ std::shared_ptr<RTAS> DX12Backend::CreateTLAS(const std::vector<RTInstanceDesc>&
 		bufDesc.SampleDesc.Quality = 0;
 		bufDesc.Width = scratchDataSize;
 
-		Device->CreateCommittedResource(&kDefaultHeapProps, D3D12_HEAP_FLAG_NONE, &bufDesc, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, IID_PPV_ARGS(&as->Scratch));
+		const HRESULT hr = Device->CreateCommittedResource(&kDefaultHeapProps, D3D12_HEAP_FLAG_NONE, &bufDesc, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, IID_PPV_ARGS(&as->Scratch));
+		if (FAILED(hr) || !as->Scratch)
+			return failCreateTLAS(L"DX12Backend::CreateTLAS Scratch", hr);
 		if (as->Scratch)
 			as->Scratch->SetName(L"Corona TLAS Scratch");
 	}
@@ -5723,7 +5804,9 @@ std::shared_ptr<RTAS> DX12Backend::CreateTLAS(const std::vector<RTInstanceDesc>&
 		bufDesc.SampleDesc.Quality = 0;
 		bufDesc.Width = info.ResultDataMaxSizeInBytes;
 
-		Device->CreateCommittedResource(&kDefaultHeapProps, D3D12_HEAP_FLAG_NONE, &bufDesc, D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE, nullptr, IID_PPV_ARGS(&as->Result));
+		const HRESULT hr = Device->CreateCommittedResource(&kDefaultHeapProps, D3D12_HEAP_FLAG_NONE, &bufDesc, D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE, nullptr, IID_PPV_ARGS(&as->Result));
+		if (FAILED(hr) || !as->Result)
+			return failCreateTLAS(L"DX12Backend::CreateTLAS Result", hr);
 		if (as->Result)
 			as->Result->SetName(L"Corona TLAS Result");
 	}
@@ -5742,13 +5825,17 @@ std::shared_ptr<RTAS> DX12Backend::CreateTLAS(const std::vector<RTInstanceDesc>&
 		bufDesc.SampleDesc.Quality = 0;
 		bufDesc.Width = sizeof(D3D12_RAYTRACING_INSTANCE_DESC) * instances.size();
 
-		Device->CreateCommittedResource(&kUploadHeapProps, D3D12_HEAP_FLAG_NONE, &bufDesc, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&as->Instance));
+		const HRESULT hr = Device->CreateCommittedResource(&kUploadHeapProps, D3D12_HEAP_FLAG_NONE, &bufDesc, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&as->Instance));
+		if (FAILED(hr) || !as->Instance)
+			return failCreateTLAS(L"DX12Backend::CreateTLAS InstanceDescs", hr);
 		if (as->Instance)
 			as->Instance->SetName(L"Corona TLAS Instance Descs");
 	}
 
 	if (!WriteD3D12TLASInstanceDescs(as, instances))
 	{
+		const HRESULT deviceRemovedReason = Device ? Device->GetDeviceRemovedReason() : S_OK;
+		MarkDeviceLost(L"DX12Backend::CreateTLAS WriteInstanceDescs", deviceRemovedReason);
 		delete as;
 		return nullptr;
 	}
@@ -5756,6 +5843,11 @@ std::shared_ptr<RTAS> DX12Backend::CreateTLAS(const std::vector<RTInstanceDesc>&
 	// Create the TLAS
 
 	CommandList* cmd = CmdQ->AllocCmdList();
+	if (!cmd || bDeviceLost)
+	{
+		delete as;
+		return nullptr;
+	}
 
 	D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC asDesc = {};
 	asDesc.Inputs = inputs;
@@ -5794,6 +5886,11 @@ std::shared_ptr<RTAS> DX12Backend::CreateTLAS(const std::vector<RTInstanceDesc>&
 	Device->CreateShaderResourceView(nullptr, &srvDesc, as->CPUHandle);
 
 	CmdQ->ExecuteCommandList(cmd);
+	if (bDeviceLost)
+	{
+		delete as;
+		return nullptr;
+	}
 	AppendCpuRuntimeTrace(
 		L"[DX12RTAS] BuildTLAS submitted result=" + FormatDx12Hex(asDesc.DestAccelerationStructureData));
 
@@ -5803,13 +5900,20 @@ std::shared_ptr<RTAS> DX12Backend::CreateTLAS(const std::vector<RTInstanceDesc>&
 
 bool DX12Backend::UpdateTLAS(const std::shared_ptr<RTAS>& topLevelAS, const std::vector<RTInstanceDesc>& instances)
 {
+	if (bDeviceLost || !Device || !CmdQ)
+		return false;
+
 	D3D12RTAS* as = dynamic_cast<D3D12RTAS*>(topLevelAS.get());
 	if (!as || !as->Scratch || !as->Result || !as->Instance)
 		return false;
 	if (instances.empty() || instances.size() != as->NumInstances || instances.size() > static_cast<size_t>(UINT_MAX))
 		return false;
 	if (!WriteD3D12TLASInstanceDescs(as, instances))
+	{
+		const HRESULT deviceRemovedReason = Device ? Device->GetDeviceRemovedReason() : S_OK;
+		MarkDeviceLost(L"DX12Backend::UpdateTLAS WriteInstanceDescs", deviceRemovedReason);
 		return false;
+	}
 
 	D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS inputs = {};
 	inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
@@ -5822,6 +5926,8 @@ bool DX12Backend::UpdateTLAS(const std::shared_ptr<RTAS>& topLevelAS, const std:
 	inputs.InstanceDescs = as->Instance->GetGPUVirtualAddress();
 
 	CommandList* cmd = CmdQ->AllocCmdList();
+	if (!cmd || bDeviceLost)
+		return false;
 
 	D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC asDesc = {};
 	asDesc.Inputs = inputs;
@@ -5851,6 +5957,8 @@ bool DX12Backend::UpdateTLAS(const std::shared_ptr<RTAS>& topLevelAS, const std:
 	cmd->CmdList->ResourceBarrier(1, &uavBarrier);
 
 	CmdQ->ExecuteCommandList(cmd);
+	if (bDeviceLost)
+		return false;
 	if (bTraceUpdateTlas)
 	{
 		AppendCpuRuntimeTrace(
@@ -7245,6 +7353,10 @@ bool D3D12RTPipelineStateObject::InitRS(const string& ShaderFile)
 			L"\", target=\"" + ToWide(ShaderLibraryTarget) +
 			L"\", hr=" + FormatHexHRESULT(hr));
 		AppendD3D12InfoQueueMessages(owner->Device.Get(), L"CreateStateObject " + shaderFileWide + L" " + ToWide(ShaderLibraryTarget));
+		{
+			const std::wstring context = L"DX12Backend::CreateStateObject " + shaderFileWide;
+			owner->MarkDeviceLost(context.c_str(), hr);
+		}
 		stringstream ss;
 		ss << "Failed to compile shader : " << ShaderFile << "\n";
 		owner->errorString += ss.str();
@@ -7553,10 +7665,14 @@ CommandQueue::~CommandQueue()
 CommandList * CommandQueue::AllocCmdList()
 {
 	std::lock_guard<std::mutex> lock(CmdAllocMtx);
+	if (Owner && Owner->IsDeviceLost())
+		return nullptr;
 
 	CommandList* cmdList = CommandListPool[CurrentIndex].get();
 	if(cmdList->Fence.has_value())
 		WaitFenceValue(cmdList->Fence.value());
+	if (Owner && Owner->IsDeviceLost())
+		return nullptr;
 
 	CurrentIndex++;
 
@@ -7583,7 +7699,18 @@ CommandList * CommandQueue::AllocCmdList()
 
 UINT64 CommandQueue::ExecuteCommandList(CommandList * cmd)
 {
-	cmd->CmdList->Close();
+	if (!cmd || !CmdQueue)
+		return CurrentFenceValue;
+	if (Owner && Owner->IsDeviceLost())
+		return CurrentFenceValue;
+
+	const HRESULT closeHr = cmd->CmdList->Close();
+	if (FAILED(closeHr))
+	{
+		if (Owner)
+			Owner->MarkDeviceLost(L"CommandQueue::ExecuteCommandList Close", closeHr);
+		return CurrentFenceValue;
+	}
 	ID3D12CommandList* ppCommandListsEnd[] = { cmd->CmdList.Get() };
 	CoronaBvhViewerD3D12EclDesc bvhEclDesc = {};
 	bvhEclDesc.inCommandQueue = CmdQueue.Get();
@@ -7603,7 +7730,13 @@ UINT64 CommandQueue::ExecuteCommandList(CommandList * cmd)
 		CmdQueue->Signal(bvhEclDesc.outFence, bvhEclDesc.outSignalValue);
 
 	const UINT64 submittedFenceValue = CurrentFenceValue;
-	CmdQueue->Signal(m_fence.Get(), submittedFenceValue);
+	const HRESULT signalHr = CmdQueue->Signal(m_fence.Get(), submittedFenceValue);
+	if (FAILED(signalHr))
+	{
+		if (Owner)
+			Owner->MarkDeviceLost(L"CommandQueue::ExecuteCommandList Signal", signalHr);
+		return submittedFenceValue;
+	}
 	cmd->Fence = submittedFenceValue;
 	CurrentFenceValue++;
 	return submittedFenceValue;
@@ -7611,8 +7744,23 @@ UINT64 CommandQueue::ExecuteCommandList(CommandList * cmd)
 
 void CommandQueue::WaitGPU()
 {
-	CmdQueue->Signal(m_fence.Get(), CurrentFenceValue);
-	m_fence->SetEventOnCompletion(CurrentFenceValue, m_fenceEvent);
+	if (!CmdQueue || !m_fence || (Owner && Owner->IsDeviceLost()))
+		return;
+
+	const HRESULT signalHr = CmdQueue->Signal(m_fence.Get(), CurrentFenceValue);
+	if (FAILED(signalHr))
+	{
+		if (Owner)
+			Owner->MarkDeviceLost(L"CommandQueue::WaitGPU Signal", signalHr);
+		return;
+	}
+	const HRESULT waitHr = m_fence->SetEventOnCompletion(CurrentFenceValue, m_fenceEvent);
+	if (FAILED(waitHr))
+	{
+		if (Owner)
+			Owner->MarkDeviceLost(L"CommandQueue::WaitGPU SetEventOnCompletion", waitHr);
+		return;
+	}
 	WaitForSingleObject(m_fenceEvent, INFINITE);
 	
 	CurrentFenceValue++;
@@ -7620,13 +7768,29 @@ void CommandQueue::WaitGPU()
 
 void CommandQueue::WaitFenceValue(UINT64 fenceValue)
 {
-	m_fence->SetEventOnCompletion(fenceValue, m_fenceEvent);
+	if (!m_fence || (Owner && Owner->IsDeviceLost()))
+		return;
+	const HRESULT waitHr = m_fence->SetEventOnCompletion(fenceValue, m_fenceEvent);
+	if (FAILED(waitHr))
+	{
+		if (Owner)
+			Owner->MarkDeviceLost(L"CommandQueue::WaitFenceValue SetEventOnCompletion", waitHr);
+		return;
+	}
 	WaitForSingleObject(m_fenceEvent, INFINITE);
 }
 
 void CommandQueue::SignalCurrentFence()
 {
-	CmdQueue->Signal(m_fence.Get(), CurrentFenceValue);
+	if (!CmdQueue || !m_fence || (Owner && Owner->IsDeviceLost()))
+		return;
+	const HRESULT signalHr = CmdQueue->Signal(m_fence.Get(), CurrentFenceValue);
+	if (FAILED(signalHr))
+	{
+		if (Owner)
+			Owner->MarkDeviceLost(L"CommandQueue::SignalCurrentFence", signalHr);
+		return;
+	}
 	CurrentFenceValue++;
 }
 

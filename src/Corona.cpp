@@ -794,6 +794,58 @@ namespace
 		}
 	}
 
+	sl::DLSSPreset ToSLDLSSPreset(UINT32 preset)
+	{
+		switch (preset)
+		{
+		case static_cast<UINT32>(sl::DLSSPreset::ePresetJ):
+			return sl::DLSSPreset::ePresetJ;
+		case static_cast<UINT32>(sl::DLSSPreset::ePresetK):
+			return sl::DLSSPreset::ePresetK;
+		case static_cast<UINT32>(sl::DLSSPreset::ePresetL):
+			return sl::DLSSPreset::ePresetL;
+		case static_cast<UINT32>(sl::DLSSPreset::ePresetM):
+			return sl::DLSSPreset::ePresetM;
+		default:
+			return sl::DLSSPreset::eDefault;
+		}
+	}
+
+	sl::DLSSDPreset ToSLDLSSDPreset(UINT32 preset)
+	{
+		switch (preset)
+		{
+		case static_cast<UINT32>(sl::DLSSDPreset::ePresetD):
+			return sl::DLSSDPreset::ePresetD;
+		case static_cast<UINT32>(sl::DLSSDPreset::ePresetE):
+			return sl::DLSSDPreset::ePresetE;
+		default:
+			return sl::DLSSDPreset::eDefault;
+		}
+	}
+
+	void ApplyDLSSSRPresetOverride(sl::DLSSOptions& opts, UINT32 presetOverride)
+	{
+		const sl::DLSSPreset preset = ToSLDLSSPreset(presetOverride);
+		opts.dlaaPreset = preset;
+		opts.qualityPreset = preset;
+		opts.balancedPreset = preset;
+		opts.performancePreset = preset;
+		opts.ultraPerformancePreset = preset;
+		opts.ultraQualityPreset = preset;
+	}
+
+	void ApplyDLSSRRPresetOverride(sl::DLSSDOptions& opts, UINT32 presetOverride)
+	{
+		const sl::DLSSDPreset preset = ToSLDLSSDPreset(presetOverride);
+		opts.dlaaPreset = preset;
+		opts.qualityPreset = preset;
+		opts.balancedPreset = preset;
+		opts.performancePreset = preset;
+		opts.ultraPerformancePreset = preset;
+		opts.ultraQualityPreset = preset;
+	}
+
 	sl::Constants BuildStreamlineConstants(
 		const glm::mat4x4& unjitteredProjMat,
 		const glm::mat4x4& prevViewMat,
@@ -2770,8 +2822,10 @@ bool Corona::DLSSPass()
 	opts.mode = ToSLDLSSMode(DLSSQualityMode);
 	opts.outputWidth = m_width;
 	opts.outputHeight = m_height;
+	opts.sharpness = std::clamp(DLSSSRSharpness, 0.0f, 1.0f);
 	opts.colorBuffersHDR = sl::Boolean::eTrue;
 	opts.useAutoExposure = sl::Boolean::eFalse;
+	ApplyDLSSSRPresetOverride(opts, DLSSSRPresetOverride);
 	const sl::Result setOptionsResult = slDLSSSetOptions(sl::ViewportHandle(0), opts);
 	if (setOptionsResult != sl::Result::eOk)
 	{
@@ -2850,7 +2904,6 @@ bool Corona::DLSSPass()
 
 	const sl::BaseStructure* inputs[] = {
 		static_cast<const sl::BaseStructure*>(&vp),
-		static_cast<const sl::BaseStructure*>(&depthTag),
 	};
 	const sl::Result evalResult = slEvaluateFeature(sl::kFeatureDLSS, *StreamlineFrameToken, inputs, _countof(inputs), streamlineCommandBuffer);
 	bDLSSResetNeeded = false;
@@ -2880,12 +2933,14 @@ bool Corona::DLSSRRPass()
 	opts.mode = ToSLDLSSMode(DLSSQualityMode);
 	opts.outputWidth = m_width;
 	opts.outputHeight = m_height;
+	opts.sharpness = std::clamp(DLSSRRSharpness, 0.0f, 1.0f);
 	opts.colorBuffersHDR = sl::Boolean::eTrue;
 	opts.preExposure = 1.0f;
 	opts.exposureScale = 1.0f;
 	opts.normalRoughnessMode = sl::DLSSDNormalRoughnessMode::eUnpacked;
 	opts.worldToCameraView = ToSLMatrix(ViewMat);
 	opts.cameraViewToWorld = ToSLMatrix(InvViewMat);
+	ApplyDLSSRRPresetOverride(opts, DLSSRRPresetOverride);
 	const sl::Result setOptionsResult = slDLSSDSetOptions(sl::ViewportHandle(0), opts);
 	if (setOptionsResult != sl::Result::eOk)
 	{
@@ -3113,6 +3168,8 @@ void Corona::ClearDisabledGIOutputBuffers(bool clearDiffuseGI, bool clearSpecula
 	{
 		ClearTextureUAV(DiffuseGIRawAux.get(), clear4);
 		ClearTextureUAV(DiffuseGIRaw.get(), clear4);
+		ClearTextureUAV(DiffuseGISpatialFiltered.get(), clear4);
+		ClearTextureUAV(DiffuseGISpatialFilteredAux.get(), clear4);
 		ClearTextureUAV(DiffuseGIHashCachedAux.get(), clear4);
 		ClearTextureUAV(DiffuseGIHashCached.get(), clear4);
 		ClearTextureUAV(DiffuseGIHashFiltered.get(), clear4);
@@ -3457,6 +3514,8 @@ void Corona::RecreateRenderResolutionResources()
 	releaseTexture(SpecularGIMoments[1]);
 	releaseTexture(DiffuseGIRawAux);
 	releaseTexture(DiffuseGIRaw);
+	releaseTexture(DiffuseGISpatialFiltered);
+	releaseTexture(DiffuseGISpatialFilteredAux);
 	releaseTexture(DiffuseGIHashCachedAux);
 	releaseTexture(DiffuseGIHashCached);
 	releaseTexture(ScreenProbeGIResolved);
@@ -3761,16 +3820,16 @@ void Corona::RefreshUpscaleSettings(bool reloadAssets)
 {
 	UINT desiredRenderWidth = m_width;
 	UINT desiredRenderHeight = m_height;
-	auto ApplyDLSSJitterPhaseSettings = [&](UINT32 basePhaseCount)
+	auto ApplyDLSSJitterPhaseSettings = [&](UINT32 basePhaseCount, float phaseScale, UINT32 phaseOverride)
 	{
 		DLSSJitterPhaseCountAuto = std::clamp(basePhaseCount, 1u, 512u);
-		if (DLSSJitterPhaseCountOverride > 0)
+		if (phaseOverride > 0)
 		{
-			DLSSJitterPhaseCount = std::clamp(DLSSJitterPhaseCountOverride, 1u, 512u);
+			DLSSJitterPhaseCount = std::clamp(phaseOverride, 1u, 512u);
 			return;
 		}
 
-		const float scaledPhaseCount = static_cast<float>(DLSSJitterPhaseCountAuto) * std::max(0.25f, DLSSJitterPhaseScale);
+		const float scaledPhaseCount = static_cast<float>(DLSSJitterPhaseCountAuto) * std::max(0.25f, phaseScale);
 		DLSSJitterPhaseCount = std::clamp(static_cast<UINT32>(std::max(1.0f, ceilf(scaledPhaseCount))), 1u, 512u);
 	};
 
@@ -3781,8 +3840,10 @@ void Corona::RefreshUpscaleSettings(bool reloadAssets)
 		opts.mode = ToSLDLSSMode(DLSSQualityMode);
 		opts.outputWidth = m_width;
 		opts.outputHeight = m_height;
+		opts.sharpness = std::clamp(DLSSSRSharpness, 0.0f, 1.0f);
 		opts.colorBuffersHDR = sl::Boolean::eTrue;
 		opts.useAutoExposure = sl::Boolean::eFalse;
+		ApplyDLSSSRPresetOverride(opts, DLSSSRPresetOverride);
 		slDLSSSetOptions(sl::ViewportHandle(0), opts);
 
 		sl::DLSSOptimalSettings settings{};
@@ -3792,7 +3853,10 @@ void Corona::RefreshUpscaleSettings(bool reloadAssets)
 			desiredRenderHeight = settings.optimalRenderHeight;
 		}
 
-		ApplyDLSSJitterPhaseSettings(static_cast<UINT32>(std::max(1.0f, ceilf(8.0f * static_cast<float>(m_width) / static_cast<float>(desiredRenderWidth)))));
+		ApplyDLSSJitterPhaseSettings(
+			static_cast<UINT32>(std::max(1.0f, ceilf(8.0f * static_cast<float>(m_width) / static_cast<float>(desiredRenderWidth)))),
+			DLSSJitterPhaseScale,
+			DLSSJitterPhaseCountOverride);
 		bDLSSResetNeeded = true;
 	}
 	else if (RenderingMode == ERenderingMode::HYBRID && bDLSSRRAvailable && AntiAliasingMode == EAntiAliasingMode::DLSS_RR)
@@ -3802,12 +3866,14 @@ void Corona::RefreshUpscaleSettings(bool reloadAssets)
 		opts.mode = ToSLDLSSMode(DLSSQualityMode);
 		opts.outputWidth = m_width;
 		opts.outputHeight = m_height;
+		opts.sharpness = std::clamp(DLSSRRSharpness, 0.0f, 1.0f);
 		opts.colorBuffersHDR = sl::Boolean::eTrue;
 		opts.preExposure = 1.0f;
 		opts.exposureScale = 1.0f;
 		opts.normalRoughnessMode = sl::DLSSDNormalRoughnessMode::eUnpacked;
 		opts.worldToCameraView = ToSLMatrix(identity);
 		opts.cameraViewToWorld = ToSLMatrix(identity);
+		ApplyDLSSRRPresetOverride(opts, DLSSRRPresetOverride);
 		slDLSSDSetOptions(sl::ViewportHandle(0), opts);
 
 		sl::DLSSDOptimalSettings settings{};
@@ -3817,14 +3883,17 @@ void Corona::RefreshUpscaleSettings(bool reloadAssets)
 			desiredRenderHeight = settings.optimalRenderHeight;
 		}
 
-		ApplyDLSSJitterPhaseSettings(static_cast<UINT32>(std::max(1.0f, ceilf(8.0f * static_cast<float>(m_width) / static_cast<float>(desiredRenderWidth)))));
+		ApplyDLSSJitterPhaseSettings(
+			static_cast<UINT32>(std::max(1.0f, ceilf(8.0f * static_cast<float>(m_width) / static_cast<float>(desiredRenderWidth)))),
+			DLSSRRJitterPhaseScale,
+			DLSSRRJitterPhaseCountOverride);
 		bDLSSResetNeeded = true;
 	}
 	else if (RenderingMode == ERenderingMode::PATHTRACING && IsPathTracingDLSSRREnabled())
 	{
 		desiredRenderWidth = m_width;
 		desiredRenderHeight = m_height;
-		ApplyDLSSJitterPhaseSettings(1u);
+		ApplyDLSSJitterPhaseSettings(1u, DLSSRRJitterPhaseScale, DLSSRRJitterPhaseCountOverride);
 		bDLSSResetNeeded = true;
 	}
 #endif
@@ -3838,7 +3907,7 @@ void Corona::RefreshUpscaleSettings(bool reloadAssets)
 	};
 	desiredRenderWidth = scaleMobileDimension(m_width);
 	desiredRenderHeight = scaleMobileDimension(m_height);
-	ApplyDLSSJitterPhaseSettings(8u);
+	ApplyDLSSJitterPhaseSettings(8u, DLSSJitterPhaseScale, DLSSJitterPhaseCountOverride);
 #endif
 
 	const bool bResolutionChanged = desiredRenderWidth != RenderWidth || desiredRenderHeight != RenderHeight;
@@ -3854,7 +3923,13 @@ void Corona::RefreshUpscaleSettings(bool reloadAssets)
 		L", dlssJitter=" + std::to_wstring(DLSSJitterPhaseCount) +
 		L", dlssJitterAuto=" + std::to_wstring(DLSSJitterPhaseCountAuto) +
 		L", dlssJitterScale=" + std::to_wstring(DLSSJitterPhaseScale) +
-		L", dlssJitterOverride=" + std::to_wstring(DLSSJitterPhaseCountOverride));
+		L", dlssJitterOverride=" + std::to_wstring(DLSSJitterPhaseCountOverride) +
+		L", dlssRRJitterScale=" + std::to_wstring(DLSSRRJitterPhaseScale) +
+		L", dlssRRJitterOverride=" + std::to_wstring(DLSSRRJitterPhaseCountOverride) +
+		L", dlssSRSharpness=" + std::to_wstring(DLSSSRSharpness) +
+		L", dlssRRSharpness=" + std::to_wstring(DLSSRRSharpness) +
+		L", dlssSRPreset=" + std::to_wstring(DLSSSRPresetOverride) +
+		L", dlssRRPreset=" + std::to_wstring(DLSSRRPresetOverride));
 	if (reloadAssets && (bResolutionChanged || bForceUpscaleReload))
 		ReloadRenderResolutionAssets();
 	bForceUpscaleReload = false;
@@ -3953,6 +4028,30 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 			value = value.substr(1, value.size() - 2);
 		}
 		return value;
+	};
+	auto ParseDLSSSRPresetOverride = [](const std::wstring& value) -> UINT32
+	{
+		if (value == L"default" || value == L"auto" || value == L"0")
+			return 0u;
+		if (value == L"j" || value == L"presetj" || value == L"preset-j" || value == L"10")
+			return 10u;
+		if (value == L"k" || value == L"presetk" || value == L"preset-k" || value == L"11")
+			return 11u;
+		if (value == L"l" || value == L"presetl" || value == L"preset-l" || value == L"12")
+			return 12u;
+		if (value == L"m" || value == L"presetm" || value == L"preset-m" || value == L"13")
+			return 13u;
+		return 0u;
+	};
+	auto ParseDLSSRRPresetOverride = [](const std::wstring& value) -> UINT32
+	{
+		if (value == L"default" || value == L"auto" || value == L"0")
+			return 0u;
+		if (value == L"d" || value == L"presetd" || value == L"preset-d" || value == L"4")
+			return 4u;
+		if (value == L"e" || value == L"presete" || value == L"preset-e" || value == L"5")
+			return 5u;
+		return 0u;
 	};
 	if (argc <= 1)
 	{
@@ -4658,6 +4757,89 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 			continue;
 		}
 
+		std::wstring rrJitterScaleValue = ParseValueArg(arg, L"--dlss-rr-jitter-scale", L"-dlss-rr-jitter-scale", i);
+		if (!rrJitterScaleValue.empty())
+		{
+			try
+			{
+				const float value = std::stof(rrJitterScaleValue);
+				DLSSRRJitterPhaseScale = std::clamp(value, 0.25f, 16.0f);
+			}
+			catch (...)
+			{
+			}
+			continue;
+		}
+
+		std::wstring rrJitterPhaseValue = ParseValueArg(arg, L"--dlss-rr-jitter-phases", L"-dlss-rr-jitter-phases", i);
+		if (!rrJitterPhaseValue.empty())
+		{
+			try
+			{
+				const unsigned long value = std::stoul(rrJitterPhaseValue);
+				DLSSRRJitterPhaseCountOverride = static_cast<UINT32>(std::clamp<unsigned long>(value, 0ul, 512ul));
+			}
+			catch (...)
+			{
+			}
+			continue;
+		}
+
+		std::wstring dlssSharpnessValue = ParseValueArg(arg, L"--dlss-sharpness", L"-dlss-sharpness", i);
+		if (!dlssSharpnessValue.empty())
+		{
+			try
+			{
+				const float value = std::clamp(std::stof(dlssSharpnessValue), 0.0f, 1.0f);
+				DLSSSRSharpness = value;
+				DLSSRRSharpness = value;
+			}
+			catch (...)
+			{
+			}
+			continue;
+		}
+
+		std::wstring dlssSRSharpnessValue = ParseValueArg(arg, L"--dlss-sr-sharpness", L"-dlss-sr-sharpness", i);
+		if (!dlssSRSharpnessValue.empty())
+		{
+			try
+			{
+				DLSSSRSharpness = std::clamp(std::stof(dlssSRSharpnessValue), 0.0f, 1.0f);
+			}
+			catch (...)
+			{
+			}
+			continue;
+		}
+
+		std::wstring dlssRRSharpnessValue = ParseValueArg(arg, L"--dlss-rr-sharpness", L"-dlss-rr-sharpness", i);
+		if (!dlssRRSharpnessValue.empty())
+		{
+			try
+			{
+				DLSSRRSharpness = std::clamp(std::stof(dlssRRSharpnessValue), 0.0f, 1.0f);
+			}
+			catch (...)
+			{
+			}
+			continue;
+		}
+
+		std::wstring dlssSRPresetValue = ParseValueArg(arg, L"--dlss-sr-preset", L"-dlss-sr-preset", i);
+		if (!dlssSRPresetValue.empty())
+		{
+			DLSSSRPresetOverride = ParseDLSSSRPresetOverride(dlssSRPresetValue);
+			continue;
+		}
+
+		std::wstring dlssRRPresetValue = ParseValueArg(arg, L"--dlss-rr-preset", L"-dlss-rr-preset", i);
+		if (!dlssRRPresetValue.empty())
+		{
+			DLSSRRPresetOverride = ParseDLSSRRPresetOverride(dlssRRPresetValue);
+			continue;
+		}
+
 		std::wstring screenProbeSpacingValue = ParseValueArg(arg, L"--screen-probe-spacing", L"-screen-probe-spacing", i);
 		if (!screenProbeSpacingValue.empty())
 		{
@@ -4810,6 +4992,12 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 		L", startupScripts=" + std::to_wstring(bEnableStartupLuauScript ? 1 : 0) +
 		L", dlssJitterScale=" + std::to_wstring(DLSSJitterPhaseScale) +
 		L", dlssJitterOverride=" + std::to_wstring(DLSSJitterPhaseCountOverride) +
+		L", dlssRRJitterScale=" + std::to_wstring(DLSSRRJitterPhaseScale) +
+		L", dlssRRJitterOverride=" + std::to_wstring(DLSSRRJitterPhaseCountOverride) +
+		L", dlssSRSharpness=" + std::to_wstring(DLSSSRSharpness) +
+		L", dlssRRSharpness=" + std::to_wstring(DLSSRRSharpness) +
+		L", dlssSRPreset=" + std::to_wstring(DLSSSRPresetOverride) +
+		L", dlssRRPreset=" + std::to_wstring(DLSSRRPresetOverride) +
 		L", autoDumpOverride=" + std::to_wstring(bCommandLineAutoDumpOverrideSet ? 1 : 0) +
 		L", autoDump=" + std::to_wstring(bCommandLineAutoDumpEnabled ? 1 : 0) +
 		L", noImgui=" + std::to_wstring(bCommandLineDisableImgui ? 1 : 0) +
@@ -7821,6 +8009,12 @@ Corona::RenderFrameSourceState Corona::CaptureRenderFrameSourceState() const
 	state.TAASampleCount = TAASampleCount;
 	state.DLSSJitterPhaseScale = DLSSJitterPhaseScale;
 	state.DLSSJitterPhaseCountOverride = DLSSJitterPhaseCountOverride;
+	state.DLSSRRJitterPhaseScale = DLSSRRJitterPhaseScale;
+	state.DLSSRRJitterPhaseCountOverride = DLSSRRJitterPhaseCountOverride;
+	state.DLSSSRSharpness = DLSSSRSharpness;
+	state.DLSSRRSharpness = DLSSRRSharpness;
+	state.DLSSSRPresetOverride = DLSSSRPresetOverride;
+	state.DLSSRRPresetOverride = DLSSRRPresetOverride;
 	const CoronaECS::LightComponent* directionalLight = EntityWorld.GetLight(MainDirectionalLightEntity);
 	if (directionalLight && directionalLight->Type == CoronaECS::LightType::Directional)
 	{
@@ -7925,8 +8119,14 @@ void Corona::ApplyRenderFrameSourceState(const RenderFrameSourceState& state)
 	SkyLightingStrength = state.SkyLightingStrength;
 	JitterScale = state.JitterScale;
 	TAASampleCount = state.TAASampleCount;
-	DLSSJitterPhaseScale = state.DLSSJitterPhaseScale;
-	DLSSJitterPhaseCountOverride = state.DLSSJitterPhaseCountOverride;
+	DLSSJitterPhaseScale = std::max(0.25f, state.DLSSJitterPhaseScale);
+	DLSSJitterPhaseCountOverride = std::clamp(state.DLSSJitterPhaseCountOverride, 0u, 512u);
+	DLSSRRJitterPhaseScale = std::max(0.25f, state.DLSSRRJitterPhaseScale);
+	DLSSRRJitterPhaseCountOverride = std::clamp(state.DLSSRRJitterPhaseCountOverride, 0u, 512u);
+	DLSSSRSharpness = std::clamp(state.DLSSSRSharpness, 0.0f, 1.0f);
+	DLSSRRSharpness = std::clamp(state.DLSSRRSharpness, 0.0f, 1.0f);
+	DLSSSRPresetOverride = state.DLSSSRPresetOverride;
+	DLSSRRPresetOverride = state.DLSSRRPresetOverride;
 	Fov = safeFov;
 	Near = safeNear;
 	Far = safeFar;
@@ -8087,6 +8287,34 @@ void Corona::SyncCurrentLightingSettingsToFrameSourceState()
 	}
 }
 
+void Corona::SyncCurrentDLSSSettingsToFrameSourceState()
+{
+	auto applyDLSSState = [&](RenderFrameSourceState& state)
+	{
+		state.DLSSQualityMode = DLSSQualityMode;
+		state.DLSSJitterPhaseScale = DLSSJitterPhaseScale;
+		state.DLSSJitterPhaseCountOverride = DLSSJitterPhaseCountOverride;
+		state.DLSSRRJitterPhaseScale = DLSSRRJitterPhaseScale;
+		state.DLSSRRJitterPhaseCountOverride = DLSSRRJitterPhaseCountOverride;
+		state.DLSSSRSharpness = DLSSSRSharpness;
+		state.DLSSRRSharpness = DLSSRRSharpness;
+		state.DLSSSRPresetOverride = DLSSSRPresetOverride;
+		state.DLSSRRPresetOverride = DLSSRRPresetOverride;
+	};
+
+	if (RenderWorld.bHasFrameSourceState)
+		applyDLSSState(RenderWorld.FrameSourceState);
+	{
+		std::lock_guard<std::mutex> pendingDeltaLock(RenderFrameDeltaMutex);
+		for (RenderFrameDelta& pendingDelta : PendingRenderFrameDeltas)
+		{
+			if (!pendingDelta.bHasFrameSourceState)
+				continue;
+			applyDLSSState(pendingDelta.FrameSourceState);
+		}
+	}
+}
+
 void Corona::CollectFrameSourceRenderSync(RenderFrameDelta& delta)
 {
 	if (!bSplitGameRenderThreads)
@@ -8101,19 +8329,47 @@ void Corona::ApplyFrameSourceRenderSync(const RenderFrameDelta& delta)
 	if (!delta.bHasFrameSourceState)
 		return;
 
-	const RenderFrameSourceState& newState = delta.FrameSourceState;
+	RenderFrameSourceState newState = delta.FrameSourceState;
 	const RenderFrameSourceState& oldState = RenderWorld.FrameSourceState;
+	const bool bHadFrameSourceState = RenderWorld.bHasFrameSourceState;
+	if (newState.RenderingMode != ERenderingMode::HYBRID &&
+		newState.RenderingMode != ERenderingMode::PATHTRACING)
+		newState.RenderingMode = ERenderingMode::HYBRID;
+#if CORONA_PLATFORM_MOBILE
+	newState.RenderingMode = ERenderingMode::HYBRID;
+	newState.AntiAliasingMode = EAntiAliasingMode::TAA;
+#else
+	const ERenderingMode previousRenderingModeForTransition =
+		bHadFrameSourceState ? oldState.RenderingMode : RenderingMode;
+	if (previousRenderingModeForTransition != newState.RenderingMode &&
+		newState.RenderingMode == ERenderingMode::PATHTRACING)
+	{
+		newState.AntiAliasingMode = EAntiAliasingMode::OFF;
+	}
+	newState.AntiAliasingMode = NormalizeAntiAliasingMode(
+		newState.RenderingMode,
+		newState.AntiAliasingMode);
+#endif
 	auto floatChanged = [](float a, float b, float epsilon = 0.0001f)
 	{
 		return std::abs(a - b) > epsilon;
 	};
 
-	const bool bHadFrameSourceState = RenderWorld.bHasFrameSourceState;
 	const bool bModeOrAAModeChanged =
 		bHadFrameSourceState &&
 		(oldState.RenderingMode != newState.RenderingMode ||
 		 oldState.AntiAliasingMode != newState.AntiAliasingMode ||
 		 oldState.DLSSQualityMode != newState.DLSSQualityMode);
+	const bool bDLSSOptionSettingsChanged =
+		bHadFrameSourceState &&
+		(floatChanged(oldState.DLSSJitterPhaseScale, newState.DLSSJitterPhaseScale) ||
+		 oldState.DLSSJitterPhaseCountOverride != newState.DLSSJitterPhaseCountOverride ||
+		 floatChanged(oldState.DLSSRRJitterPhaseScale, newState.DLSSRRJitterPhaseScale) ||
+		 oldState.DLSSRRJitterPhaseCountOverride != newState.DLSSRRJitterPhaseCountOverride ||
+		 floatChanged(oldState.DLSSSRSharpness, newState.DLSSSRSharpness) ||
+		 floatChanged(oldState.DLSSRRSharpness, newState.DLSSRRSharpness) ||
+		 oldState.DLSSSRPresetOverride != newState.DLSSSRPresetOverride ||
+		 oldState.DLSSRRPresetOverride != newState.DLSSRRPresetOverride);
 	const bool bIndirectSettingsChanged =
 		bHadFrameSourceState &&
 		(oldState.DiffuseGIMode != newState.DiffuseGIMode ||
@@ -8201,11 +8457,15 @@ void Corona::ApplyFrameSourceRenderSync(const RenderFrameDelta& delta)
 			std::to_wstring(static_cast<int>(oldState.RenderingMode)) +
 			L"->" + std::to_wstring(static_cast<int>(newState.RenderingMode)) +
 			L", aa " + std::wstring(GetAntiAliasingModeName(oldState.AntiAliasingMode)) +
-			L"->" + std::wstring(GetAntiAliasingModeName(newState.AntiAliasingMode)) +
+			 L"->" + std::wstring(GetAntiAliasingModeName(newState.AntiAliasingMode)) +
 			L", forceReload=" + std::to_wstring(bForceResourceReload ? 1 : 0));
 	}
+	else if (bDLSSOptionSettingsChanged && IsDLSSMode(newState.AntiAliasingMode))
+	{
+		ResetAllAccumulationState(false);
+	}
 
-	RenderWorld.FrameSourceState = delta.FrameSourceState;
+	RenderWorld.FrameSourceState = newState;
 	RenderWorld.bHasFrameSourceState = true;
 
 	if (bIndirectSettingsChanged)
@@ -11022,6 +11282,10 @@ void Corona::LoadAssets()
 		!bMobileHybridDirectOnlyStartup &&
 		(!bBackendHybridStageAware || maxSupportedHybridStage >= 6u);
 	const bool bSupportsTemporalDenoise =
+		bEnableTemporalDenoisingPass &&
+		!bMobileHybridDirectOnlyStartup &&
+		(!bBackendHybridStageAware || maxSupportedHybridStage >= 5u);
+	const bool bSupportsDiffuseGISpatialFilter =
 		!bMobileHybridDirectOnlyStartup &&
 		(!bBackendHybridStageAware || maxSupportedHybridStage >= 5u);
 	const bool bSupportsFullHybridPresentation =
@@ -11136,8 +11400,11 @@ void Corona::LoadAssets()
 		AppendCpuRuntimeTrace(L"[LoadAssets] before InitTemporalDenoisingPass");
 		UpdateStartupLoadingProgress(0.37f, L"Compiling temporal denoiser");
 		InitTemporalDenoisingPass();
-		InitDiffuseGISpatialFilterPass();
 		AppendCpuRuntimeTrace(L"[LoadAssets] after InitTemporalDenoisingPass");
+	}
+	if (bSupportsDiffuseGISpatialFilter)
+	{
+		InitDiffuseGISpatialFilterPass();
 	}
 	if (bSupportsScreenProbeGI)
 	{
@@ -13763,6 +14030,93 @@ void Corona::DrawEditorModeOverlay()
 			}
 			ImGui::EndCombo();
 		}
+		{
+			static const char* DLSSModes[] = { "Quality", "Balanced", "Performance", "Ultra Performance" };
+			int DLSSQualityIndex = static_cast<int>(DLSSQualityMode);
+			if (ImGui::Combo("DLSS Quality##editor_config", &DLSSQualityIndex, DLSSModes, IM_ARRAYSIZE(DLSSModes)))
+			{
+				DLSSQualityMode = static_cast<EDLSSQualityMode>(DLSSQualityIndex);
+				SyncCurrentDLSSSettingsToFrameSourceState();
+				ResetAllAccumulationState(true);
+			}
+			if (ImGui::SliderFloat("DLSS SR Jitter Phase Scale##editor_config", &DLSSJitterPhaseScale, 0.25f, 16.0f, "%.2f"))
+			{
+				SyncCurrentDLSSSettingsToFrameSourceState();
+				ResetAllAccumulationState(false);
+			}
+			int DLSSJitterPhaseOverrideUI = static_cast<int>(DLSSJitterPhaseCountOverride);
+			if (ImGui::SliderInt("DLSS SR Jitter Phase Override##editor_config", &DLSSJitterPhaseOverrideUI, 0, 512))
+			{
+				DLSSJitterPhaseCountOverride = static_cast<UINT32>(DLSSJitterPhaseOverrideUI);
+				SyncCurrentDLSSSettingsToFrameSourceState();
+				ResetAllAccumulationState(false);
+			}
+			if (ImGui::SliderFloat("DLSS RR Jitter Phase Scale##editor_config", &DLSSRRJitterPhaseScale, 0.25f, 16.0f, "%.2f"))
+			{
+				SyncCurrentDLSSSettingsToFrameSourceState();
+				ResetAllAccumulationState(false);
+			}
+			int DLSSRRJitterPhaseOverrideUI = static_cast<int>(DLSSRRJitterPhaseCountOverride);
+			if (ImGui::SliderInt("DLSS RR Jitter Phase Override##editor_config", &DLSSRRJitterPhaseOverrideUI, 0, 512))
+			{
+				DLSSRRJitterPhaseCountOverride = static_cast<UINT32>(DLSSRRJitterPhaseOverrideUI);
+				SyncCurrentDLSSSettingsToFrameSourceState();
+				ResetAllAccumulationState(false);
+			}
+			if (ImGui::SliderFloat("DLSS SR Sharpness##editor_config", &DLSSSRSharpness, 0.0f, 1.0f, "%.2f"))
+			{
+				DLSSSRSharpness = std::clamp(DLSSSRSharpness, 0.0f, 1.0f);
+				SyncCurrentDLSSSettingsToFrameSourceState();
+				ResetAllAccumulationState(false);
+			}
+			if (ImGui::SliderFloat("DLSS RR Sharpness##editor_config", &DLSSRRSharpness, 0.0f, 1.0f, "%.2f"))
+			{
+				DLSSRRSharpness = std::clamp(DLSSRRSharpness, 0.0f, 1.0f);
+				SyncCurrentDLSSSettingsToFrameSourceState();
+				ResetAllAccumulationState(false);
+			}
+			{
+				static const char* DLSSSRPresetItems[] = { "Default", "Preset J", "Preset K", "Preset L", "Preset M" };
+				static const UINT32 DLSSSRPresetValues[] = { 0u, 10u, 11u, 12u, 13u };
+				int presetIndex = 0;
+				for (int presetCandidateIndex = 0; presetCandidateIndex < IM_ARRAYSIZE(DLSSSRPresetValues); ++presetCandidateIndex)
+				{
+					if (DLSSSRPresetOverride == DLSSSRPresetValues[presetCandidateIndex])
+					{
+						presetIndex = presetCandidateIndex;
+						break;
+					}
+				}
+				if (ImGui::Combo("DLSS SR Preset Override##editor_config", &presetIndex, DLSSSRPresetItems, IM_ARRAYSIZE(DLSSSRPresetItems)))
+				{
+					DLSSSRPresetOverride = DLSSSRPresetValues[presetIndex];
+					SyncCurrentDLSSSettingsToFrameSourceState();
+					ResetAllAccumulationState(false);
+				}
+			}
+			{
+				static const char* DLSSRRPresetItems[] = { "Default", "Preset D", "Preset E" };
+				static const UINT32 DLSSRRPresetValues[] = { 0u, 4u, 5u };
+				int presetIndex = 0;
+				for (int presetCandidateIndex = 0; presetCandidateIndex < IM_ARRAYSIZE(DLSSRRPresetValues); ++presetCandidateIndex)
+				{
+					if (DLSSRRPresetOverride == DLSSRRPresetValues[presetCandidateIndex])
+					{
+						presetIndex = presetCandidateIndex;
+						break;
+					}
+				}
+				if (ImGui::Combo("DLSS RR Preset Override##editor_config", &presetIndex, DLSSRRPresetItems, IM_ARRAYSIZE(DLSSRRPresetItems)))
+				{
+					DLSSRRPresetOverride = DLSSRRPresetValues[presetIndex];
+					SyncCurrentDLSSSettingsToFrameSourceState();
+					ResetAllAccumulationState(false);
+				}
+			}
+			ImGui::Text("DLSS SR Available: %s", bDLSSAvailable ? "Yes" : "No");
+			ImGui::Text("DLSS RR Available: %s", bDLSSRRAvailable ? "Yes" : "No");
+			ImGui::Text("Render Resolution: %u x %u", RenderWidth, RenderHeight);
+		}
 		if (!bEditorDLSSSRAvailable && !bEditorDLSSRRAvailable)
 		{
 			if (bCommandLineDisableStreamline)
@@ -14514,9 +14868,42 @@ void Corona::OnRender()
 	double endFrameMs = 0.0;
 	double renderWaitMs = 0.0;
 
+	auto finishDeviceLostFrame = [&](const wchar_t* location) -> bool
+	{
+		if (!renderBackend || !renderBackend->IsDeviceLost())
+			return false;
+
+		const std::string& backendError = renderBackend->GetErrorString();
+		AppendCpuRuntimeTrace(
+			L"[OnRender] backend device lost at " +
+			std::wstring(location ? location : L"unknown") +
+			L"; stopping render work: " +
+			std::wstring(backendError.begin(), backendError.end()));
+		if (CommandLineExitAfterFrames > 0)
+		{
+			bCommandLineExitAfterFramesTriggered = true;
+			CommandLineExitAfterFrames = 0;
+		}
+		FinishFramePerfLogging(beginFrameMs, executeMs, endFrameMs, renderWaitMs);
+		RequestMainPlatformWindowClose();
+		QuitPlatformApplication(0);
+		return true;
+	};
+
+	if (finishDeviceLostFrame(L"frame start"))
+		return;
+
+	const auto beginFrameStart = CpuClock::now();
+	renderBackend->BeginFrame();
+	beginFrameMs = ElapsedMilliseconds(beginFrameStart, CpuClock::now());
+	if (finishDeviceLostFrame(L"BeginFrame"))
+		return;
+
 	auto renderCommandPhaseStart = CpuClock::now();
 	FlushSceneObjectChanges();
 	AddRenderCommandPhaseTiming(ERenderCommandPhase::SceneFlush, renderCommandPhaseStart, CpuClock::now());
+	if (finishDeviceLostFrame(L"scene flush"))
+		return;
 
 	bool bNotifyGameThreadFrameConsumed = false;
 	if (bSplitGameRenderThreads)
@@ -14552,26 +14939,6 @@ void Corona::OnRender()
 	const bool bDebugDrawThisFrame = bDebugDraw;
 	if (bAllowGameUpdateDuringRender)
 		stateLock.unlock();
-
-	const auto beginFrameStart = CpuClock::now();
-	renderBackend->BeginFrame();
-	beginFrameMs = ElapsedMilliseconds(beginFrameStart, CpuClock::now());
-	if (renderBackend->IsDeviceLost())
-	{
-		const std::string& backendError = renderBackend->GetErrorString();
-		AppendCpuRuntimeTrace(
-			L"[OnRender] backend device lost, exiting render loop: " +
-			std::wstring(backendError.begin(), backendError.end()));
-		if (CommandLineExitAfterFrames > 0)
-		{
-			bCommandLineExitAfterFramesTriggered = true;
-			CommandLineExitAfterFrames = 0;
-		}
-		FinishFramePerfLogging(beginFrameMs, executeMs, endFrameMs, renderWaitMs);
-		RequestMainPlatformWindowClose();
-		QuitPlatformApplication(1);
-		return;
-	}
 
 	renderCommandPhaseStart = CpuClock::now();
 	UpdateGpuTimingReadback();
@@ -14661,7 +15028,12 @@ void Corona::OnRender()
 			 // and the specular reflections before LightingPass. Under DLSS-RR it's
 			 // skipped — RR owns denoising from the raw cached query + raw specular.
 			 (bNriSimpleGIBringup && effectiveDiffuseGIMode == EDiffuseGIMode::SPATIAL_HASH && !IsDLSSRREnabled()));
-		const bool bRunTemporalDenoise = !bHybridDirectOnly && backendMaxSupportedHybridStage >= 5u && hybridStage >= 5 && (bDiffuseGINeedsTemporalDenoise || bStageDump);
+		const bool bRunTemporalDenoise =
+			bEnableTemporalDenoisingPass &&
+			!bHybridDirectOnly &&
+			backendMaxSupportedHybridStage >= 5u &&
+			hybridStage >= 5 &&
+			(bDiffuseGINeedsTemporalDenoise || bStageDump);
 		const bool bRunLighting = bPartialHybridLighting || hybridStage >= 7;
 		const bool bRunDesktopRTAO = !bHybridDirectOnly && backendMaxSupportedHybridStage >= 2u && bRunLighting && bEnableRTAO;
 		const bool bVulkanHybridBackend =
@@ -14878,17 +15250,14 @@ void Corona::OnRender()
 #if WITH_STREAMLINE
 		if (bRunLighting && IsDLSSRREnabled())
 		{
-			bool bNeedTemporalAA = false;
 			BeginGpuPassTiming(EGpuPass::DLSSRR);
 			const bool bRRPassed = DLSSRRPass();
 			EndGpuPassTiming(EGpuPass::DLSSRR);
-			bNeedTemporalAA = !bRRPassed;
-
-			if (bNeedTemporalAA)
+			if (!bRRPassed)
 			{
-				BeginGpuPassTiming(EGpuPass::TemporalAA);
-				TemporalAAPass();
-				EndGpuPassTiming(EGpuPass::TemporalAA);
+				bDLSSRROutputValidThisFrame = false;
+				bUseLightingBufferFallbackForToneMap = true;
+				bTemporalAAHistoryValid = false;
 			}
 		}
 		else if (bRunLighting && IsDLSSSREnabled())
@@ -14898,9 +15267,8 @@ void Corona::OnRender()
 			EndGpuPassTiming(EGpuPass::DLSSSR);
 			if (!bDLSSPassed)
 			{
-				BeginGpuPassTiming(EGpuPass::TemporalAA);
-				TemporalAAPass();
-				EndGpuPassTiming(EGpuPass::TemporalAA);
+				bUseLightingBufferFallbackForToneMap = true;
+				bTemporalAAHistoryValid = false;
 			}
 		}
 		else
@@ -15016,8 +15384,13 @@ void Corona::OnRender()
 					(DiffuseGIMode == EDiffuseGIMode::SPATIAL_HASH && DiffuseGIHashCached) ? DiffuseGIHashCached.get() :
 					((DiffuseGIMode == EDiffuseGIMode::SCREEN_PROBE && ScreenProbeGIResolved) ? ScreenProbeGIResolved.get() : DiffuseGIRaw.get());
 				break;
-			case 5: previewTexture = (DiffuseGIMode == EDiffuseGIMode::SCREEN_PROBE && ScreenProbeGIResolved) ? ScreenProbeGIResolved.get() : DiffuseGITemporal[GIBufferWriteIndex].get(); break;
-			case 6: previewTexture = (DiffuseGIMode == EDiffuseGIMode::SCREEN_PROBE && ScreenProbeGIResolved) ? ScreenProbeGIResolved.get() : DiffuseGITemporal[GIBufferWriteIndex].get(); break;
+			case 5:
+			case 6:
+				previewTexture =
+					(DiffuseGIMode == EDiffuseGIMode::SCREEN_PROBE && ScreenProbeGIResolved) ? ScreenProbeGIResolved.get() :
+					((bEnableTemporalDenoisingPass && DiffuseGITemporal[GIBufferWriteIndex]) ? DiffuseGITemporal[GIBufferWriteIndex].get() :
+					((DiffuseGIMode == EDiffuseGIMode::SPATIAL_HASH && DiffuseGIHashCached) ? DiffuseGIHashCached.get() : DiffuseGIRaw.get()));
+				break;
 			default: previewTexture = nullptr; break;
 			}
 			vkBackend->PreviewTextureOnWindow(previewTexture ? previewTexture : AlbedoBuffer.get());
@@ -15821,24 +16194,88 @@ void Corona::OnRender()
 				ApplyRenderingAndAAMode(RenderingMode, static_cast<EAntiAliasingMode>(AAModeIndex));
 			}
 #if WITH_STREAMLINE
-			if (bDLSSAvailable || bDLSSRRAvailable)
 			{
 				static const char* DLSSModes[] = { "Quality", "Balanced", "Performance", "Ultra Performance" };
 				int DLSSQualityIndex = static_cast<int>(DLSSQualityMode);
 				if (ImGui::Combo("DLSS Quality", &DLSSQualityIndex, DLSSModes, IM_ARRAYSIZE(DLSSModes)))
 				{
 					DLSSQualityMode = static_cast<EDLSSQualityMode>(DLSSQualityIndex);
+					SyncCurrentDLSSSettingsToFrameSourceState();
 					ResetAllAccumulationState(true);
 				}
-				if (ImGui::SliderFloat("DLSS Jitter Phase Scale", &DLSSJitterPhaseScale, 0.25f, 16.0f, "%.2f"))
+				if (ImGui::SliderFloat("DLSS SR Jitter Phase Scale", &DLSSJitterPhaseScale, 0.25f, 16.0f, "%.2f"))
 				{
+					SyncCurrentDLSSSettingsToFrameSourceState();
 					ResetAllAccumulationState(false);
 				}
 				int DLSSJitterPhaseOverrideUI = static_cast<int>(DLSSJitterPhaseCountOverride);
-				if (ImGui::SliderInt("DLSS Jitter Phase Override", &DLSSJitterPhaseOverrideUI, 0, 512))
+				if (ImGui::SliderInt("DLSS SR Jitter Phase Override", &DLSSJitterPhaseOverrideUI, 0, 512))
 				{
 					DLSSJitterPhaseCountOverride = static_cast<UINT32>(DLSSJitterPhaseOverrideUI);
+					SyncCurrentDLSSSettingsToFrameSourceState();
 					ResetAllAccumulationState(false);
+				}
+				if (ImGui::SliderFloat("DLSS RR Jitter Phase Scale", &DLSSRRJitterPhaseScale, 0.25f, 16.0f, "%.2f"))
+				{
+					SyncCurrentDLSSSettingsToFrameSourceState();
+					ResetAllAccumulationState(false);
+				}
+				int DLSSRRJitterPhaseOverrideUI = static_cast<int>(DLSSRRJitterPhaseCountOverride);
+				if (ImGui::SliderInt("DLSS RR Jitter Phase Override", &DLSSRRJitterPhaseOverrideUI, 0, 512))
+				{
+					DLSSRRJitterPhaseCountOverride = static_cast<UINT32>(DLSSRRJitterPhaseOverrideUI);
+					SyncCurrentDLSSSettingsToFrameSourceState();
+					ResetAllAccumulationState(false);
+				}
+				if (ImGui::SliderFloat("DLSS SR Sharpness", &DLSSSRSharpness, 0.0f, 1.0f, "%.2f"))
+				{
+					DLSSSRSharpness = std::clamp(DLSSSRSharpness, 0.0f, 1.0f);
+					SyncCurrentDLSSSettingsToFrameSourceState();
+					ResetAllAccumulationState(false);
+				}
+				if (ImGui::SliderFloat("DLSS RR Sharpness", &DLSSRRSharpness, 0.0f, 1.0f, "%.2f"))
+				{
+					DLSSRRSharpness = std::clamp(DLSSRRSharpness, 0.0f, 1.0f);
+					SyncCurrentDLSSSettingsToFrameSourceState();
+					ResetAllAccumulationState(false);
+				}
+				{
+					static const char* DLSSSRPresetItems[] = { "Default", "Preset J", "Preset K", "Preset L", "Preset M" };
+					static const UINT32 DLSSSRPresetValues[] = { 0u, 10u, 11u, 12u, 13u };
+					int presetIndex = 0;
+					for (int presetCandidateIndex = 0; presetCandidateIndex < IM_ARRAYSIZE(DLSSSRPresetValues); ++presetCandidateIndex)
+					{
+						if (DLSSSRPresetOverride == DLSSSRPresetValues[presetCandidateIndex])
+						{
+							presetIndex = presetCandidateIndex;
+							break;
+						}
+					}
+					if (ImGui::Combo("DLSS SR Preset Override", &presetIndex, DLSSSRPresetItems, IM_ARRAYSIZE(DLSSSRPresetItems)))
+					{
+						DLSSSRPresetOverride = DLSSSRPresetValues[presetIndex];
+						SyncCurrentDLSSSettingsToFrameSourceState();
+						ResetAllAccumulationState(false);
+					}
+				}
+				{
+					static const char* DLSSRRPresetItems[] = { "Default", "Preset D", "Preset E" };
+					static const UINT32 DLSSRRPresetValues[] = { 0u, 4u, 5u };
+					int presetIndex = 0;
+					for (int presetCandidateIndex = 0; presetCandidateIndex < IM_ARRAYSIZE(DLSSRRPresetValues); ++presetCandidateIndex)
+					{
+						if (DLSSRRPresetOverride == DLSSRRPresetValues[presetCandidateIndex])
+						{
+							presetIndex = presetCandidateIndex;
+							break;
+						}
+					}
+					if (ImGui::Combo("DLSS RR Preset Override", &presetIndex, DLSSRRPresetItems, IM_ARRAYSIZE(DLSSRRPresetItems)))
+					{
+						DLSSRRPresetOverride = DLSSRRPresetValues[presetIndex];
+						SyncCurrentDLSSSettingsToFrameSourceState();
+						ResetAllAccumulationState(false);
+					}
 				}
 				if (RenderingMode == ERenderingMode::HYBRID && AntiAliasingMode == EAntiAliasingMode::DLSS_RR)
 				{
@@ -15856,11 +16293,6 @@ void Corona::OnRender()
 				ImGui::Text("Render Resolution: %u x %u", RenderWidth, RenderHeight);
 				if (IsDLSSUpscaleEnabled())
 					ImGui::Text("DLSS Jitter Phases: %u (auto base %u)", DLSSJitterPhaseCount, DLSSJitterPhaseCountAuto);
-			}
-			else
-			{
-				ImGui::Text("DLSS SR Available: No");
-				ImGui::Text("DLSS RR Available: No");
 			}
 #endif
 		}
@@ -16427,6 +16859,106 @@ if (ImGui::Button("Reset Accumulation"))
 			if (AlbedoBuffer) AppendCpuRuntimeTrace(L"[NRIDump] albedo=" + std::to_wstring(DumpTexturePNG(AlbedoBuffer.get(), L"C:\\dev\\Corona_nri\\nri_dump_albedo.png", EResourceState::ShaderRead) ? 1 : 0));
 			Texture* finalColor = GetCurrentResolveSource();
 			if (finalColor) AppendCpuRuntimeTrace(L"[NRIDump] final=" + std::to_wstring(DumpTexturePNG(finalColor, L"C:\\dev\\Corona_nri\\nri_dump_final.png", EResourceState::ShaderRead) ? 1 : 0));
+		}
+	}
+	{
+		static bool s_ptRRDumpInitialized = false;
+		static bool s_ptRRDumpEnabled = false;
+		static bool s_ptRRDumpDone = false;
+		static UINT32 s_ptRRDumpFrame = 0;
+		static UINT32 s_ptRRDumpAccumulatedFrames = 0;
+		static bool s_ptRRDumpUseAccumulatedFrames = false;
+		static std::wstring s_ptRRDumpLabel = L"run";
+		if (!s_ptRRDumpInitialized)
+		{
+			s_ptRRDumpInitialized = true;
+			if (const auto accumulatedEnv = GetPlatformEnvironmentVariable(L"CORONA_PT_RR_DUMP_ACCUMULATED_FRAMES"); accumulatedEnv && !accumulatedEnv->empty())
+			{
+				try
+				{
+					s_ptRRDumpAccumulatedFrames = static_cast<UINT32>(std::clamp<unsigned long>(std::stoul(*accumulatedEnv), 1ul, 100000ul));
+					s_ptRRDumpUseAccumulatedFrames = true;
+					s_ptRRDumpEnabled = true;
+				}
+				catch (...)
+				{
+					s_ptRRDumpUseAccumulatedFrames = false;
+					s_ptRRDumpEnabled = false;
+				}
+			}
+			if (const auto frameEnv = GetPlatformEnvironmentVariable(L"CORONA_PT_RR_DUMP_FRAME"); frameEnv && !frameEnv->empty())
+			{
+				try
+				{
+					s_ptRRDumpFrame = static_cast<UINT32>(std::clamp<unsigned long>(std::stoul(*frameEnv), 1ul, 100000ul));
+					if (!s_ptRRDumpUseAccumulatedFrames)
+						s_ptRRDumpEnabled = true;
+				}
+				catch (...)
+				{
+					if (!s_ptRRDumpUseAccumulatedFrames)
+						s_ptRRDumpEnabled = false;
+				}
+			}
+			if (const auto labelEnv = GetPlatformEnvironmentVariable(L"CORONA_PT_RR_DUMP_LABEL"); labelEnv && !labelEnv->empty())
+			{
+				s_ptRRDumpLabel.clear();
+				for (wchar_t ch : *labelEnv)
+				{
+					const bool valid =
+						(ch >= L'a' && ch <= L'z') ||
+						(ch >= L'A' && ch <= L'Z') ||
+						(ch >= L'0' && ch <= L'9') ||
+						ch == L'_' || ch == L'-';
+					s_ptRRDumpLabel.push_back(valid ? ch : L'_');
+				}
+				if (s_ptRRDumpLabel.empty())
+					s_ptRRDumpLabel = L"run";
+			}
+		}
+		if (s_ptRRDumpEnabled &&
+			!s_ptRRDumpDone &&
+			RenderingMode == ERenderingMode::PATHTRACING &&
+			(s_ptRRDumpUseAccumulatedFrames ?
+				PathTracingAccumulatedFrames >= s_ptRRDumpAccumulatedFrames :
+				FrameCounter >= s_ptRRDumpFrame))
+		{
+			s_ptRRDumpDone = true;
+			const std::filesystem::path dumpDir =
+				RuntimePaths::DumpDirectory() / L"pt_rr_diagnostics" / s_ptRRDumpLabel;
+			std::error_code ec;
+			std::filesystem::create_directories(dumpDir, ec);
+			const std::wstring base = (dumpDir / (L"frame_" + std::to_wstring(FrameCounter))).wstring();
+			auto dumpTexture = [&](const wchar_t* suffix, Texture* texture, bool bDumpHdr, ERawFloatDumpFormat rawFormat = ERawFloatDumpFormat::Unknown, uint32_t rawChannelCount = 0)
+			{
+				if (!texture)
+					return;
+				const std::wstring pathBase = base + L"_" + suffix;
+				DumpTexturePNG(texture, pathBase + L"_preview.png", EResourceState::ShaderRead);
+				if (bDumpHdr)
+					DumpTextureHDR(texture, pathBase + L".hdr", EResourceState::ShaderRead);
+				if (rawFormat != ERawFloatDumpFormat::Unknown && rawChannelCount > 0)
+					DumpTextureRawFloat(texture, pathBase + L".rawf", EResourceState::ShaderRead, rawFormat, rawChannelCount);
+			};
+
+			dumpTexture(L"pt_input", PathTracingAccumBuffer[PathTracingWriteIndex].get(), true);
+			dumpTexture(L"rr_output", (bDLSSRROutputValidThisFrame && ColorBuffers[ResolvedColorBufferIndex]) ? ColorBuffers[ResolvedColorBufferIndex].get() : nullptr, true);
+			dumpTexture(L"depth", UnjitteredDepthBuffers[ColorBufferWriteIndex].get(), true, ERawFloatDumpFormat::R32Float, 1);
+			dumpTexture(L"motion", VelocityBuffer.get(), true, ERawFloatDumpFormat::R32G32Float, 2);
+			dumpTexture(L"normal", NormalBuffers[ColorBufferWriteIndex].get(), false);
+			dumpTexture(L"geom_normal", GeomNormalBuffers[ColorBufferWriteIndex].get(), false);
+			dumpTexture(L"albedo", AlbedoBuffer.get(), false);
+			dumpTexture(L"specular_albedo", SpecularAlbedoBuffer.get(), true);
+			dumpTexture(L"specular_hit_distance", PathTracingSpecularHitDistanceBuffer.get(), true, ERawFloatDumpFormat::R32Float, 1);
+			dumpTexture(L"specular_motion", PathTracingSpecularMotionVectorBuffer.get(), true, ERawFloatDumpFormat::R32G32Float, 2);
+			AppendCpuRuntimeTrace(
+				L"[PTRRDump] label=" + s_ptRRDumpLabel +
+				L", frame=" + std::to_wstring(FrameCounter) +
+				L", accumulated=" + std::to_wstring(PathTracingAccumulatedFrames) +
+				L", targetAccumulated=" + std::to_wstring(s_ptRRDumpUseAccumulatedFrames ? s_ptRRDumpAccumulatedFrames : 0u) +
+				L", dispatchSPP=" + std::to_wstring(PathTracingLastDispatchSamplesPerPixel) +
+				L", rrValid=" + std::to_wstring(bDLSSRROutputValidThisFrame ? 1 : 0) +
+				L", dir=" + dumpDir.wstring());
 		}
 	}
 

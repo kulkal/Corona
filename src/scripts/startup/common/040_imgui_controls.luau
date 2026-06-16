@@ -228,6 +228,25 @@ local function combo_state_zero_based(state, key, label, id, items)
     return set_value_if_changed(key, value, new_value)
 end
 
+local function combo_state_values(state, key, label, id, items, values)
+    local value = state[key]
+    if value == nil then
+        return nil
+    end
+
+    local index = 1
+    for i, item_value in ipairs(values) do
+        if item_value == value then
+            index = i
+            break
+        end
+    end
+
+    local new_index = ui.combo(label, id, index, items)
+    local new_value = values[new_index] or values[1]
+    return set_value_if_changed(key, value, new_value)
+end
+
 local function slider_vec3_state(state, key, label, id, min_value, max_value)
     local value = state[key]
     if value == nil then
@@ -720,22 +739,33 @@ local function draw_camera_aa_controls(state)
         "DLSS RR",
     })
 
-    if state.dlss_available or state.dlss_rr_available then
-        combo_state_zero_based(state, "dlss_quality", "DLSS Quality", "script.dlss.quality", {
-            "Quality",
-            "Balanced",
-            "Performance",
-            "Ultra Performance",
-        })
-        slider_float_state(state, "dlss_jitter_phase_scale", "DLSS Jitter Phase Scale", "script.dlss.jitter_scale", 0.25, 16.0)
-        slider_int_state(state, "dlss_jitter_phase_override", "DLSS Jitter Phase Override", "script.dlss.jitter_override", 0, 512)
-        ui.text(string.format("DLSS SR Available: %s", state.dlss_available and "Yes" or "No"))
-        ui.text(string.format("DLSS RR Available: %s", state.dlss_rr_available and "Yes" or "No"))
-        ui.text(string.format("Render Resolution: %d x %d", state.render_width or 0, state.render_height or 0))
-    else
-        ui.text("DLSS SR Available: No")
-        ui.text("DLSS RR Available: No")
-    end
+    combo_state_zero_based(state, "dlss_quality", "DLSS Quality", "script.dlss.quality", {
+        "Quality",
+        "Balanced",
+        "Performance",
+        "Ultra Performance",
+    })
+    slider_float_state(state, "dlss_jitter_phase_scale", "DLSS SR Jitter Phase Scale", "script.dlss.jitter_scale", 0.25, 16.0)
+    slider_int_state(state, "dlss_jitter_phase_override", "DLSS SR Jitter Phase Override", "script.dlss.jitter_override", 0, 512)
+    slider_float_state(state, "dlss_rr_jitter_phase_scale", "DLSS RR Jitter Phase Scale", "script.dlss.rr_jitter_scale", 0.25, 16.0)
+    slider_int_state(state, "dlss_rr_jitter_phase_override", "DLSS RR Jitter Phase Override", "script.dlss.rr_jitter_override", 0, 512)
+    slider_float_state(state, "dlss_sr_sharpness", "DLSS SR Sharpness", "script.dlss.sr_sharpness", 0.0, 1.0)
+    slider_float_state(state, "dlss_rr_sharpness", "DLSS RR Sharpness", "script.dlss.rr_sharpness", 0.0, 1.0)
+    combo_state_values(state, "dlss_sr_preset", "DLSS SR Preset Override", "script.dlss.sr_preset", {
+        "Default",
+        "Preset J",
+        "Preset K",
+        "Preset L",
+        "Preset M",
+    }, { 0, 10, 11, 12, 13 })
+    combo_state_values(state, "dlss_rr_preset", "DLSS RR Preset Override", "script.dlss.rr_preset", {
+        "Default",
+        "Preset D",
+        "Preset E",
+    }, { 0, 4, 5 })
+    ui.text(string.format("DLSS SR Available: %s", state.dlss_available and "Yes" or "No"))
+    ui.text(string.format("DLSS RR Available: %s", state.dlss_rr_available and "Yes" or "No"))
+    ui.text(string.format("Render Resolution: %d x %d", state.render_width or 0, state.render_height or 0))
 end
 
 local function draw_path_tracing_controls(state)

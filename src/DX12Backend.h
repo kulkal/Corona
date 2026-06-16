@@ -666,6 +666,8 @@ public:
 	uint32_t OcclusionQueryCount = 0;
 
 	string errorString;
+	bool bDeviceLost = false;
+	bool bDeviceLostDiagnosticsLogged = false;
 	CoronaBvhViewerD3D12Handle* BvhViewerD3D12 = nullptr;
 	bool bBvhViewerD3D12Allowed = true;
 
@@ -745,6 +747,7 @@ public:
 	void EndFrame() override;
 	void WaitForGpu() override { CmdQ->WaitGPU(); }
 	void EmitGpuCrashMarker(const char* markerName) override;
+	bool IsDeviceLost() const override { return bDeviceLost; }
 	const std::string& GetErrorString() const override { return errorString; }
 	void ClearErrorString() override { errorString.clear(); }
 	uint64_t GetTimestampFrequency() const override { UINT64 frequency = 0; CmdQ->CmdQueue->GetTimestampFrequency(&frequency); return frequency; }
@@ -854,6 +857,7 @@ public:
 	void TransitionVertexBuffer(VertexBuffer* vertexBuffer, EResourceState stateBefore, EResourceState stateAfter) override;
 	void UAVBarrier(Texture* texture) override;
 	void UAVBarrier(Buffer* buffer) override;
+	void MarkDeviceLost(const wchar_t* context, HRESULT hr);
 	Texture* GetCurrentWindowRenderTarget() override;
 	void PrepareWindowRenderTarget(Texture* renderTarget) override;
 	void FinalizeWindowRenderTarget(Texture* renderTarget) override;

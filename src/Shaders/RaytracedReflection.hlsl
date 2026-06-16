@@ -246,6 +246,79 @@ float3 SamplePrefilteredSkyEnvironment(float3 reflectionDir, float roughness)
     return radiance / (8.0f + 2.0f * verticalWeight);
 }
 
+float3 StabilizeReflectionNormal(float3 shadingNormal, float3 geomNormal, float3 incidentDir)
+{
+    geomNormal = SpecSafeNormalize(geomNormal, shadingNormal);
+    shadingNormal = SpecSafeNormalize(shadingNormal, geomNormal);
+    if (dot(shadingNormal, geomNormal) < 0.0f)
+        shadingNormal = -shadingNormal;
+
+    float viewNoG = saturate(dot(geomNormal, -incidentDir));
+    float normalBendLimit = lerp(0.50f, 0.82f, saturate((0.45f - viewNoG) / 0.45f));
+    float minShadingNoG = normalBendLimit;
+    float shadingNoG = dot(shadingNormal, geomNormal);
+    if (shadingNoG < minShadingNoG)
+    {
+        float3 tangent = shadingNormal - geomNormal * shadingNoG;
+        float tangentLenSq = dot(tangent, tangent);
+        if (tangentLenSq > 1.0e-6f)
+        {
+            tangent *= rsqrt(tangentLenSq);
+            float tangentScale = sqrt(max(0.0f, 1.0f - minShadingNoG * minShadingNoG));
+            shadingNormal = SpecSafeNormalize(geomNormal * minShadingNoG + tangent * tangentScale, geomNormal);
+        }
+        else
+        {
+            shadingNormal = geomNormal;
+        }
+    }
+
+    float3 reflectedDir = reflect(incidentDir, shadingNormal);
+    if (dot(reflectedDir, geomNormal) <= 1.0e-4f)
+    {
+        // Shading normals can legally differ from geometry normals, but a reflected
+        // ray below the geometric surface produces unstable far hits at grazing angles.
+        float blendToGeom = 0.0f;
+        [unroll]
+        for (uint i = 0; i < 4; ++i)
+        {
+            blendToGeom = min(1.0f, blendToGeom + 0.25f);
+            float3 candidateNormal = SpecSafeNormalize(lerp(shadingNormal, geomNormal, blendToGeom), geomNormal);
+            if (dot(reflect(incidentDir, candidateNormal), geomNormal) > 1.0e-4f)
+            {
+                shadingNormal = candidateNormal;
+                break;
+            }
+        }
+    }
+
+    return shadingNormal;
+}
+
+float ApplyNormalDeviationSpecularAA(float roughness, float3 shadingNormal, float3 geomNormal, float3 incidentDir, float linearDepth)
+{
+    geomNormal = SpecSafeNormalize(geomNormal, shadingNormal);
+    shadingNormal = SpecSafeNormalize(shadingNormal, geomNormal);
+    if (dot(shadingNormal, geomNormal) < 0.0f)
+        shadingNormal = -shadingNormal;
+
+    float shadingNoG = saturate(dot(shadingNormal, geomNormal));
+    float normalSlopeEnergy = saturate((1.0f - shadingNoG * shadingNoG) / max(shadingNoG * shadingNoG, 0.25f));
+    if (normalSlopeEnergy <= 1.0e-4f)
+        return roughness;
+
+    float viewNoG = saturate(dot(geomNormal, -incidentDir));
+    float grazingWeight = saturate((0.55f - viewNoG) / 0.50f);
+    float footprintWeight = saturate(ViewSpreadAngle * max(linearDepth, 0.0f) * 128.0f);
+    float aaWeight = grazingWeight * footprintWeight;
+    if (aaWeight <= 1.0e-4f)
+        return roughness;
+
+    float alpha = roughness * roughness;
+    float varianceBoost = normalSlopeEnergy * aaWeight * 0.16f;
+    return clamp(sqrt(saturate(alpha + varianceBoost)), 0.02f, 1.0f);
+}
+
 static const float MAX_HIT_DIST = 10000;
 
 #define RT_REFLECTION_SURFACE_RAY_FLAGS (RAY_FLAG_FORCE_OPAQUE | RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES)
@@ -347,14 +420,15 @@ void WriteRRSpecularGuides(uint2 pixel, uint2 renderSize, bool primarySurfaceVal
     }
 
     RayPayload guidePayload = reflectionPayload;
-    bool guideHit = reflectionPayload.bHit;
+    bool guideHit = false;
 
     float smoothGuide = saturate((0.38f - roughness) / 0.18f);
     float metalGuide = saturate(metallic) * saturate((0.55f - roughness) / 0.25f);
     float specularEnergy = lerp(0.04f, 1.0f, saturate(metallic));
     float specularGuideWeight = specularEnergy * max(smoothGuide, metalGuide);
+    float guideNoV = saturate(dot(mirrorDir, primaryGeomNormal));
 
-    if (bUseRRSpecularGuideRay != 0 && specularGuideWeight > 0.025f && dot(mirrorDir, primaryGeomNormal) > 1.0e-4f)
+    if (bUseRRSpecularGuideRay != 0 && specularGuideWeight > 0.025f && guideNoV > 0.12f)
     {
         RayDesc guideRay;
         guideRay.Origin = SpecSanitizeFloat3(primaryWorldPos + primaryGeomNormal * 0.5f, primaryWorldPos);
@@ -437,6 +511,8 @@ void rayGen
     float Metallic = saturate(material.y);
     float3 viewRay = SpecSafeNormalize(float3(dim.x * aspectRatio, -dim.y, -1), float3(0.0f, 0.0f, -1.0f));
     float3 V = SpecSafeNormalize(mul(float4(viewRay, 0.0f), InvViewMatrix).xyz, -WorldNormal);
+    Rougness = ApplyNormalDeviationSpecularAA(Rougness, WorldNormal, GeoNormal, V, LinearDepth);
+    WorldNormal = StabilizeReflectionNormal(WorldNormal, GeoNormal, V);
     float3 MirrorL = SpecSafeNormalize(reflect(V, WorldNormal), WorldNormal);
 
     const bool enablePrefilteredEnvSpecular = bEnablePrefilteredEnvSpecular != 0;
@@ -763,7 +839,6 @@ void rayGen
         ReflReservoirA[launchIndex.xy] = float4(chosenHit, M_writeback);
         ReflReservoirB[launchIndex.xy] = float4(chosenRadiance, W_writeback);
     }
-
     ReflectionResult[launchIndex.xy] = SpecSanitizeFloat4(float4(Reinhard(max(finalRadiance, 0.0f.xxx)), 1), float4(0.0f, 0.0f, 0.0f, 1.0f));
     WriteRRSpecularGuides(launchIndex.xy, launchDim.xy, primarySurfaceValid, WorldPos, GeoNormal, MirrorL, Rougness, Metallic, payload);
 
@@ -808,7 +883,7 @@ void chs(inout RayPayload payload, in BuiltInTriangleIntersectionAttributes attr
     vertex.textureLODConstant += material.AlbedoLodConstant;
     float rayConeWidth = payload.spreadAngle * hitT;
 
-    float NoV = 1;//dot(V, vertex.normal);
+    float NoV = max(abs(dot(payload.normal, -WorldRayDirection())), 1.0e-4f);
     float mipLevel = computeTextureLOD(NoV, rayConeWidth, vertex.textureLODConstant);
     payload.color = max(SpecSanitizeFloat3(MaterialTextures[NonUniformResourceIndex(material.AlbedoTextureIndex)].SampleLevel(sampleWrap, vertex.uv, mipLevel).xyz, 1.0f.xxx), 0.0f.xxx);
 

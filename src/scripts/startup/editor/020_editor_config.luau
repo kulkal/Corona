@@ -46,6 +46,41 @@ local DIRECT_SHADOW_MODES = {
 	"ReSTIR DI",
 }
 
+local DLSS_QUALITY_MODES = {
+	"Quality",
+	"Balanced",
+	"Performance",
+	"Ultra Performance",
+}
+
+local DLSS_SR_PRESETS = {
+	"Default",
+	"Preset J",
+	"Preset K",
+	"Preset L",
+	"Preset M",
+}
+
+local DLSS_SR_PRESET_VALUES = {
+	0,
+	10,
+	11,
+	12,
+	13,
+}
+
+local DLSS_RR_PRESETS = {
+	"Default",
+	"Preset D",
+	"Preset E",
+}
+
+local DLSS_RR_PRESET_VALUES = {
+	0,
+	4,
+	5,
+}
+
 local SPATIAL_HASH_GI_VARIANTS = {
 	"SH4 (spherical)",
 	"Octahedral DDGI",
@@ -82,6 +117,23 @@ local function combo_zero_based(label, name, value, items)
 		corona.set_ui_value(name, next_index - 1)
 	end
 	return next_index - 1, changed
+end
+
+local function combo_values(label, name, value, items, values)
+	local index = 1
+	for i, item_value in ipairs(values) do
+		if item_value == value then
+			index = i
+			break
+		end
+	end
+
+	local next_index, changed = imgui.combo(label, index, items)
+	local next_value = values[next_index] or values[1]
+	if changed then
+		corona.set_ui_value(name, next_value)
+	end
+	return next_value, changed
 end
 
 local function color_edit3(label, name, value)
@@ -141,6 +193,19 @@ local function draw_render_aa(state)
 	if aa_changed then
 		corona.set_ui_value("aa_mode", next_aa - 1)
 	end
+
+	combo_zero_based("DLSS Quality##editor_config_dlss_quality", "dlss_quality", state.dlss_quality, DLSS_QUALITY_MODES)
+	slider_float("DLSS SR Jitter Phase Scale##editor_config_dlss_jitter_scale", "dlss_jitter_phase_scale", state.dlss_jitter_phase_scale, 0.25, 16.0, "%.2f")
+	slider_int("DLSS SR Jitter Phase Override##editor_config_dlss_jitter_override", "dlss_jitter_phase_override", state.dlss_jitter_phase_override, 0, 512)
+	slider_float("DLSS RR Jitter Phase Scale##editor_config_dlss_rr_jitter_scale", "dlss_rr_jitter_phase_scale", state.dlss_rr_jitter_phase_scale, 0.25, 16.0, "%.2f")
+	slider_int("DLSS RR Jitter Phase Override##editor_config_dlss_rr_jitter_override", "dlss_rr_jitter_phase_override", state.dlss_rr_jitter_phase_override, 0, 512)
+	slider_float("DLSS SR Sharpness##editor_config_dlss_sr_sharpness", "dlss_sr_sharpness", state.dlss_sr_sharpness, 0.0, 1.0, "%.2f")
+	slider_float("DLSS RR Sharpness##editor_config_dlss_rr_sharpness", "dlss_rr_sharpness", state.dlss_rr_sharpness, 0.0, 1.0, "%.2f")
+	combo_values("DLSS SR Preset Override##editor_config_dlss_sr_preset", "dlss_sr_preset", state.dlss_sr_preset, DLSS_SR_PRESETS, DLSS_SR_PRESET_VALUES)
+	combo_values("DLSS RR Preset Override##editor_config_dlss_rr_preset", "dlss_rr_preset", state.dlss_rr_preset, DLSS_RR_PRESETS, DLSS_RR_PRESET_VALUES)
+	imgui.text(string.format("DLSS SR Available: %s", state.dlss_available and "Yes" or "No"))
+	imgui.text(string.format("DLSS RR Available: %s", state.dlss_rr_available and "Yes" or "No"))
+	imgui.text(string.format("Render Resolution: %d x %d", state.render_width or 0, state.render_height or 0))
 
 	if not state.dlss_available and not state.dlss_rr_available then
 		if state.streamline_disabled then

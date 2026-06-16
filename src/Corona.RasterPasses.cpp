@@ -2404,8 +2404,6 @@ void Corona::LightingPass()
 	const bool bSpecularGIEnabledThisFrame = Param.bEnableSpecularGI != 0;
 	const wchar_t* lightingDiffuseSource = L"black";
 	Texture* lightingDiffuseAuxTex = DefaultBlackTex.get();
-	if (!bMobileHybridDirectOnly && bDiffuseGIEnabledThisFrame && DiffuseGITemporalAux[GIBufferWriteIndex])
-		lightingDiffuseAuxTex = DiffuseGITemporalAux[GIBufferWriteIndex].get();
 	// Diffuse GI source for LightingPS — same logic as specular below:
 	// the second-stage screen-space TemporalDenoisingPass reprojects
 	// with the surface motion vector, which smears prev-frame indirect
@@ -2428,12 +2426,21 @@ void Corona::LightingPass()
 		// Under DLSS-RR this branch is skipped so the flow falls through to the
 		// SPATIAL_HASH branch below and RR owns denoising from the raw cached query
 		// (RR denoises best from un-temporally-filtered input).
-		if (backendMaxSupportedHybridStage >= 5u && DiffuseGITemporal[GIBufferWriteIndex])
+		if (bEnableTemporalDenoisingPass &&
+			backendMaxSupportedHybridStage >= 5u &&
+			DiffuseGITemporal[GIBufferWriteIndex])
 		{
 			lightingDiffuseTex = DiffuseGITemporal[GIBufferWriteIndex].get();
 			lightingDiffuseSource = L"temporal_nri_simple";
 			if (DiffuseGITemporalAux[GIBufferWriteIndex])
 				lightingDiffuseAuxTex = DiffuseGITemporalAux[GIBufferWriteIndex].get();
+		}
+		else if (DiffuseGIHashCached)
+		{
+			lightingDiffuseTex = DiffuseGIHashCached.get();
+			lightingDiffuseSource = L"spatial_hash_cached_nri_temporal_disabled";
+			if (DiffuseGIHashCachedAux)
+				lightingDiffuseAuxTex = DiffuseGIHashCachedAux.get();
 		}
 		else if (DiffuseGIRaw)
 		{
@@ -2450,8 +2457,10 @@ void Corona::LightingPass()
 	{
 		lightingDiffuseTex = DiffuseGIHashCached.get();
 		lightingDiffuseSource = L"spatial_hash_cached";
+		if (DiffuseGIHashCachedAux)
+			lightingDiffuseAuxTex = DiffuseGIHashCachedAux.get();
 	}
-	else if (!bMobileHybridDirectOnly && bDiffuseGIEnabledThisFrame && DiffuseGITemporal[GIBufferWriteIndex])
+	else if (!bMobileHybridDirectOnly && bDiffuseGIEnabledThisFrame)
 	{
 		// Under DLSS Ray Reconstruction, feed the RAW (un-reprojected) diffuse GI and
 		// let RR own the temporal/disocclusion pass — exactly like the specular path
@@ -2479,7 +2488,10 @@ void Corona::LightingPass()
 					lightingDiffuseAuxTex = DiffuseGIRawAux.get();
 			}
 		}
-		else if (IsDLSSRREnabled() && bEnableGIDisocclusionFilter && DiffuseGISpatialFiltered)
+		else if (IsDLSSRREnabled() &&
+			bEnableTemporalDenoisingPass &&
+			bEnableGIDisocclusionFilter &&
+			DiffuseGISpatialFiltered)
 		{
 			// Temporally accumulated, then variance-guided disocclusion-cleaned for RR.
 			lightingDiffuseTex = DiffuseGISpatialFiltered.get();
@@ -2487,10 +2499,19 @@ void Corona::LightingPass()
 			if (DiffuseGISpatialFilteredAux)
 				lightingDiffuseAuxTex = DiffuseGISpatialFilteredAux.get();
 		}
-		else
+		else if (bEnableTemporalDenoisingPass && DiffuseGITemporal[GIBufferWriteIndex])
 		{
 			lightingDiffuseTex = DiffuseGITemporal[GIBufferWriteIndex].get();
 			lightingDiffuseSource = L"temporal";
+			if (DiffuseGITemporalAux[GIBufferWriteIndex])
+				lightingDiffuseAuxTex = DiffuseGITemporalAux[GIBufferWriteIndex].get();
+		}
+		else if (DiffuseGIRaw)
+		{
+			lightingDiffuseTex = DiffuseGIRaw.get();
+			lightingDiffuseSource = L"raw_temporal_disabled";
+			if (DiffuseGIRawAux)
+				lightingDiffuseAuxTex = DiffuseGIRawAux.get();
 		}
 	}
 	if (!bMobileHybridDirectOnly &&
@@ -2501,9 +2522,8 @@ void Corona::LightingPass()
 		lightingDiffuseTex = ScreenProbeGIResolved.get();
 		lightingDiffuseSource = L"screen_probe";
 	}
-	// Keep specular GI raw for the final lighting input. DLSS RR benefits
-	// from seeing the native stochastic specular signal rather than a
-	// surface-motion-vector temporal filter.
+	// Keep specular GI raw for the final lighting input. DLSS-RR should see the
+	// native specular signal and own reconstruction.
 	const wchar_t* lightingSpecularSource = L"black";
 	Texture* lightingSpecularTex = DefaultBlackTex.get();
 	if (!bMobileHybridDirectOnly && bSpecularGIEnabledThisFrame &&

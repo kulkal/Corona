@@ -335,6 +335,8 @@ void Corona::FlushSceneObjectChanges()
 {
 	if (!renderBackend)
 		return;
+	if (renderBackend->IsDeviceLost())
+		return;
 
 	const bool bMobileHybridDirectOnly =
 		CORONA_PLATFORM_MOBILE &&
@@ -434,6 +436,8 @@ void Corona::UpdateRayTracingInstanceTransforms()
 {
 	if (!renderBackend || !renderBackend->SupportsRayTracing())
 		return;
+	if (renderBackend->IsDeviceLost())
+		return;
 
 	vector<RTInstanceDesc> updatedInstances;
 	auto phaseStart = CpuClock::now();
@@ -517,10 +521,14 @@ void Corona::UpdateRayTracingInstanceTransforms()
 	{
 		if (!renderBackend->UpdateTLAS(frameTLAS, RayTracingInstances))
 			frameTLAS.reset();
+		if (renderBackend->IsDeviceLost())
+			return;
 	}
 	if (!frameTLAS)
 	{
 		frameTLAS = renderBackend->CreateTLAS(RayTracingInstances);
+		if (renderBackend->IsDeviceLost())
+			return;
 	}
 	if (!frameTLAS)
 	{
@@ -537,12 +545,16 @@ void Corona::UpdateRayTracingInstanceTransforms()
 	phaseStart = CpuClock::now();
 	UpdateInstancePropertyBuffer();
 	AddSceneFlushPhaseTiming(ESceneFlushPhase::UpdateInstanceProperties, phaseStart, CpuClock::now());
+	if (renderBackend->IsDeviceLost())
+		return;
 	bRayTracingTransformDirty = false;
 }
 
 void Corona::UpdateInstancePropertyBuffer()
 {
 	if (!renderBackend)
+		return;
+	if (renderBackend->IsDeviceLost())
 		return;
 #if CORONA_HAS_D3D12
 	// Backend-specific instance property upload. DX12 uses a DEFAULT heap
@@ -735,6 +747,8 @@ void Corona::RebuildAccelerationStructures()
 {
 	if (!renderBackend || !renderBackend->SupportsRayTracing())
 		return;
+	if (renderBackend->IsDeviceLost())
+		return;
 
 	const size_t previousInstanceCount = RayTracingInstances.size();
 
@@ -742,6 +756,8 @@ void Corona::RebuildAccelerationStructures()
 	auto phaseStart = CpuClock::now();
 	renderBackend->WaitForGpu();
 	AddSceneFlushPhaseTiming(ESceneFlushPhase::RebuildGpuWait, phaseStart, CpuClock::now());
+	if (renderBackend->IsDeviceLost())
+		return;
 	EnsureRayTracingFrameResourceSlots();
 	std::fill(TLASFrameResources.begin(), TLASFrameResources.end(), std::shared_ptr<RTAS>());
 	std::fill(TLASFrameInstanceCounts.begin(), TLASFrameInstanceCounts.end(), 0u);
@@ -825,6 +841,11 @@ void Corona::RebuildAccelerationStructures()
 		const UINT32 frameIndex = GetRayTracingFrameResourceIndex();
 		std::shared_ptr<RTAS>& frameTLAS = TLASFrameResources[frameIndex];
 		frameTLAS = renderBackend->CreateTLAS(RayTracingInstances);
+		if (renderBackend->IsDeviceLost())
+		{
+			AddSceneFlushPhaseTiming(ESceneFlushPhase::RebuildTlas, phaseStart, CpuClock::now());
+			return;
+		}
 		TLASFrameInstanceCounts[frameIndex] = frameTLAS ? static_cast<UINT32>(RayTracingInstances.size()) : 0u;
 		TLAS = frameTLAS;
 	}
@@ -834,6 +855,17 @@ void Corona::RebuildAccelerationStructures()
 	phaseStart = CpuClock::now();
 	UpdateInstancePropertyBuffer();
 	AddSceneFlushPhaseTiming(ESceneFlushPhase::RebuildInstanceProperties, phaseStart, CpuClock::now());
+	if (renderBackend->IsDeviceLost())
+		return;
+	if (!IsCurrentRayTracingFrameResourceReady())
+	{
+		AppendCpuRuntimeTrace(
+			L"[RTAS] rebuild incomplete; skipping RT pipeline refresh"
+			L", instances=" + std::to_wstring(RayTracingInstances.size()) +
+			L", currentFrame=" + std::to_wstring(GetRayTracingFrameResourceIndex()));
+		bRayTracingSceneDirty = true;
+		return;
+	}
 
 	phaseStart = CpuClock::now();
 	if (bInstanceCountChanged && (PSO_RT_SHADOW || PSO_RT_AO || PSO_RT_SKY_LIGHTING || PSO_RT_REFLECTION || PSO_RT_GI || PSO_RT_SCREEN_PROBE_GI || PSO_RT_SPATIAL_HASH_GI))

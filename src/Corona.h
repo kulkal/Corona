@@ -1361,6 +1361,8 @@ private:
 	ERayNoiseMode RayNoiseMode = ERayNoiseMode::R2_LOW_DISCREPANCY;
 	EDiffuseGIMode DiffuseGIMode = EDiffuseGIMode::SPATIAL_HASH;
 	bool bEnableDiffuseGI = true;
+	// Disabled while validating the raw DX12 GI/specular path.
+	bool bEnableTemporalDenoisingPass = false;
 	// Spatial pre-filter for the SIMPLE_RAYTRACE diffuse GI DLSS-RR feed. DEFAULT OFF:
 	// pre-denoising fights RR (RR expects the raw noisy signal + guides and does its
 	// own reconstruction; a pre-blur degrades it, adding noise under camera rotation).
@@ -1452,6 +1454,12 @@ private:
 	UINT32 DLSSJitterPhaseCountAuto = 32;
 	UINT32 DLSSJitterPhaseCount = 32;
 	UINT32 DLSSJitterPhaseCountOverride = 0;
+	float DLSSRRJitterPhaseScale = 0.65f;
+	UINT32 DLSSRRJitterPhaseCountOverride = 4;
+	float DLSSSRSharpness = 0.0f;
+	float DLSSRRSharpness = 0.0f;
+	UINT32 DLSSSRPresetOverride = 0;
+	UINT32 DLSSRRPresetOverride = 0;
 	bool bEnablePathTracingDLSSRR = true;
 	UINT RenderWidth = 0;
 	UINT RenderHeight = 0;
@@ -2027,6 +2035,12 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 		UINT32 TAASampleCount = 32;
 		float DLSSJitterPhaseScale = 4.0f;
 		UINT32 DLSSJitterPhaseCountOverride = 0;
+		float DLSSRRJitterPhaseScale = 0.65f;
+		UINT32 DLSSRRJitterPhaseCountOverride = 4;
+		float DLSSSRSharpness = 0.0f;
+		float DLSSRRSharpness = 0.0f;
+		UINT32 DLSSSRPresetOverride = 0;
+		UINT32 DLSSRRPresetOverride = 0;
 		glm::vec3 LightDir = glm::vec3(0.0f, 1.0f, 0.0f);
 		float LightIntensity = 0.4f;
 		bool bDirectionalLightCastShadow = true;
@@ -3521,6 +3535,7 @@ private:
 	RenderFrameSourceState CaptureRenderFrameSourceState() const;
 	void ApplyRenderFrameSourceState(const RenderFrameSourceState& state);
 	void SyncCurrentLightingSettingsToFrameSourceState();
+	void SyncCurrentDLSSSettingsToFrameSourceState();
 	void CollectFrameSourceRenderSync(RenderFrameDelta& delta);
 	void ApplyFrameSourceRenderSync(const RenderFrameDelta& delta);
 	void CollectSceneObjectRenderSync(RenderFrameDelta& delta);
