@@ -57,7 +57,9 @@ shared_ptr<RTPipelineStateObject> Corona::CreateRaytracingSimpleGIPSO(bool bUseS
 
 
 		TEMP_PSO_RT_GI->AddShader("chs", RTPipelineStateObject::HIT);
-		TEMP_PSO_RT_GI->Configure(1, sizeof(float) * 12, sizeof(float) * 2);
+		// Payload is 10 dwords (position3+color3+normal3+bHit1) after the slim;
+		// shadow uses inline RayQuery so no shadow payload contributes.
+		TEMP_PSO_RT_GI->Configure(1, sizeof(float) * 10, sizeof(float) * 2);
 
 		const bool bSuccess = TEMP_PSO_RT_GI->InitRS("Shaders\\RaytracedGI.hlsl");
 
