@@ -5,7 +5,6 @@
 #include "Utils.h"
 #include "imgui_impl_dx12.h"
 #include "d3dx12.h"
-#include "wrapper/CoronaBvhViewerD3D12.h"
 #define USE_PIX
 #include "pix3.h"
 #define GLM_FORCE_CTOR_INIT
@@ -971,9 +970,6 @@ void DX12Backend::EndFrame()
 {
 	if (bDeviceLost)
 		return;
-
-	if (BvhViewerD3D12)
-		CoronaBvhViewerD3D12_OnNewFrame(BvhViewerD3D12);
 
 	const UINT presentFlags = bTearingSupported ? DXGI_PRESENT_ALLOW_TEARING : 0;
 #if USE_AFTERMATH
@@ -3217,7 +3213,6 @@ DX12Backend::DX12Backend(ComPtr<ID3D12Device5> InDevice)
 	GlobalCBRing = std::make_unique<ConstantBufferRingBuffer>(Device.Get(), 1024 * 1024 * 10, NumFrame);
 	
 	CmdQ->WaitGPU();
-	AppendCpuRuntimeTrace(L"[BvhViewerD3D12] auto-open skipped; use --bvh-viewer or the debug UI to open it explicitly");
 }
 
 bool DX12Backend::SupportsRayTracing() const
@@ -3239,67 +3234,6 @@ bool DX12Backend::SupportsShaderExecutionReordering() const
 	shaderModel.HighestShaderModel = D3D_SHADER_MODEL_6_9;
 	const HRESULT hr = Device->CheckFeatureSupport(D3D12_FEATURE_SHADER_MODEL, &shaderModel, sizeof(shaderModel));
 	return SUCCEEDED(hr) && shaderModel.HighestShaderModel >= D3D_SHADER_MODEL_6_9;
-}
-
-bool DX12Backend::IsBvhViewerD3D12Available() const
-{
-	return BvhViewerD3D12 && CoronaBvhViewerD3D12_IsReady(BvhViewerD3D12);
-}
-
-void DX12Backend::SetBvhViewerD3D12Allowed(bool allowed)
-{
-	bBvhViewerD3D12Allowed = allowed;
-	if (allowed || !BvhViewerD3D12)
-		return;
-
-	AppendCpuRuntimeTrace(L"[BvhViewerD3D12] shutting down because viewer hooks are disabled for this run");
-	CoronaBvhViewerD3D12_Shutdown(BvhViewerD3D12);
-	CoronaBvhViewerD3D12_Destroy(BvhViewerD3D12);
-	BvhViewerD3D12 = nullptr;
-}
-
-bool DX12Backend::IsBvhViewerD3D12WindowVisible() const
-{
-	return BvhViewerD3D12 && CoronaBvhViewerD3D12_IsWindowVisible(BvhViewerD3D12);
-}
-
-bool DX12Backend::ShowBvhViewerD3D12Window(uint32_t width, uint32_t height)
-{
-	if (!bBvhViewerD3D12Allowed)
-	{
-		AppendCpuRuntimeTrace(L"[BvhViewerD3D12] show skipped because viewer hooks are disabled for this run");
-		return false;
-	}
-
-	if (!BvhViewerD3D12)
-		BvhViewerD3D12 = CoronaBvhViewerD3D12_Create();
-
-	if (!BvhViewerD3D12)
-	{
-		AppendCpuRuntimeTrace(L"[BvhViewerD3D12] create failed");
-		return false;
-	}
-
-	if (!CoronaBvhViewerD3D12_IsReady(BvhViewerD3D12))
-	{
-		if (!CoronaBvhViewerD3D12_Initialize(BvhViewerD3D12, Device.Get(), width, height, NumFrame, true))
-		{
-			AppendCpuRuntimeTrace(L"[BvhViewerD3D12] initialization failed");
-			CoronaBvhViewerD3D12_Destroy(BvhViewerD3D12);
-			BvhViewerD3D12 = nullptr;
-			return false;
-		}
-		AppendCpuRuntimeTrace(L"[BvhViewerD3D12] initialized");
-	}
-
-	CoronaBvhViewerD3D12_SetWindowVisible(BvhViewerD3D12, true);
-	return true;
-}
-
-void DX12Backend::HideBvhViewerD3D12Window()
-{
-	if (BvhViewerD3D12 && CoronaBvhViewerD3D12_IsReady(BvhViewerD3D12))
-		CoronaBvhViewerD3D12_SetWindowVisible(BvhViewerD3D12, false);
 }
 
 RHITextureHandle DX12Backend::RegisterBindlessTexture(Texture* texture)
@@ -3793,12 +3727,6 @@ DX12Backend::~DX12Backend()
 			slot.Occupied = false;
 		}
 		BindlessBufferFreeList.clear();
-	}
-	if (BvhViewerD3D12)
-	{
-		CoronaBvhViewerD3D12_Shutdown(BvhViewerD3D12);
-		CoronaBvhViewerD3D12_Destroy(BvhViewerD3D12);
-		BvhViewerD3D12 = nullptr;
 	}
 	ShutdownOcclusionQueries();
 	ShutdownGpuTimestampQueries();
@@ -5435,8 +5363,6 @@ std::shared_ptr<RTAS> DX12Backend::CreateBLASForSkeletalMesh(Mesh* mesh)
 	asDesc.DestAccelerationStructureData = as->Result->GetGPUVirtualAddress();
 	asDesc.ScratchAccelerationStructureData = as->Scratch->GetGPUVirtualAddress();
 	cmd->CmdList->BuildRaytracingAccelerationStructure(&asDesc, 0, nullptr);
-	if (owner->BvhViewerD3D12 && CoronaBvhViewerD3D12_OnBuildRaytracingAccelerationStructure(owner->BvhViewerD3D12, cmd->CmdList.Get(), &asDesc))
-		RestoreCoronaDescriptorHeaps(owner, cmd->CmdList.Get());
 
 	D3D12_RESOURCE_BARRIER uavBarrier = {};
 	uavBarrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
@@ -5675,8 +5601,6 @@ std::shared_ptr<RTAS> DX12Backend::CreateBLASForMesh(Mesh* mesh)
 		L", resultBytes=" + std::to_wstring(info.ResultDataMaxSizeInBytes) +
 		L", scratchBytes=" + std::to_wstring(info.ScratchDataSizeInBytes));
 	cmd->CmdList->BuildRaytracingAccelerationStructure(&asDesc, 0, nullptr);
-	if (owner->BvhViewerD3D12 && CoronaBvhViewerD3D12_OnBuildRaytracingAccelerationStructure(owner->BvhViewerD3D12, cmd->CmdList.Get(), &asDesc))
-		RestoreCoronaDescriptorHeaps(owner, cmd->CmdList.Get());
 
 	D3D12_RESOURCE_BARRIER uavBarrier = {};
 	uavBarrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
@@ -5865,8 +5789,6 @@ std::shared_ptr<RTAS> DX12Backend::CreateTLAS(const std::vector<RTInstanceDesc>&
 		L", resultBytes=" + std::to_wstring(info.ResultDataMaxSizeInBytes) +
 		L", scratchBytes=" + std::to_wstring(scratchDataSize));
 	cmd->CmdList->BuildRaytracingAccelerationStructure(&asDesc, 0, nullptr);
-	if (BvhViewerD3D12 && CoronaBvhViewerD3D12_OnBuildRaytracingAccelerationStructure(BvhViewerD3D12, cmd->CmdList.Get(), &asDesc))
-		RestoreCoronaDescriptorHeaps(this, cmd->CmdList.Get());
 
 	// We need to insert a UAV barrier before using the acceleration structures in a raytracing operation
 	D3D12_RESOURCE_BARRIER uavBarrier = {};
@@ -5948,8 +5870,6 @@ bool DX12Backend::UpdateTLAS(const std::shared_ptr<RTAS>& topLevelAS, const std:
 			L", instanceDesc=" + FormatDx12Hex(asDesc.Inputs.InstanceDescs));
 	}
 	cmd->CmdList->BuildRaytracingAccelerationStructure(&asDesc, 0, nullptr);
-	if (BvhViewerD3D12 && CoronaBvhViewerD3D12_OnBuildRaytracingAccelerationStructure(BvhViewerD3D12, cmd->CmdList.Get(), &asDesc))
-		RestoreCoronaDescriptorHeaps(this, cmd->CmdList.Get());
 
 	D3D12_RESOURCE_BARRIER uavBarrier = {};
 	uavBarrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
@@ -7712,22 +7632,7 @@ UINT64 CommandQueue::ExecuteCommandList(CommandList * cmd)
 		return CurrentFenceValue;
 	}
 	ID3D12CommandList* ppCommandListsEnd[] = { cmd->CmdList.Get() };
-	CoronaBvhViewerD3D12EclDesc bvhEclDesc = {};
-	bvhEclDesc.inCommandQueue = CmdQueue.Get();
-	bvhEclDesc.inCommandLists = ppCommandListsEnd;
-	bvhEclDesc.inNumCommandLists = _countof(ppCommandListsEnd);
-	bvhEclDesc.outSignalValue = uint64_t(~0);
-	if (Type == D3D12_COMMAND_LIST_TYPE_DIRECT && Owner && Owner->BvhViewerD3D12)
-		CoronaBvhViewerD3D12_OnExecuteCommandLists(Owner->BvhViewerD3D12, &bvhEclDesc);
-
 	CmdQueue->ExecuteCommandLists(_countof(ppCommandListsEnd), ppCommandListsEnd);
-	if (bvhEclDesc.outCommandList)
-	{
-		ID3D12CommandList* bvhCommandLists[] = { bvhEclDesc.outCommandList };
-		CmdQueue->ExecuteCommandLists(_countof(bvhCommandLists), bvhCommandLists);
-	}
-	if (bvhEclDesc.outFence)
-		CmdQueue->Signal(bvhEclDesc.outFence, bvhEclDesc.outSignalValue);
 
 	const UINT64 submittedFenceValue = CurrentFenceValue;
 	const HRESULT signalHr = CmdQueue->Signal(m_fence.Get(), submittedFenceValue);

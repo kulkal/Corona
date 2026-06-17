@@ -230,6 +230,7 @@ namespace
 
 #if CORONA_HAS_VULKAN
 	std::filesystem::path ResolveVulkanSpirvPath(const std::wstring& fileName);
+	std::filesystem::path ResolveVulkanGraphicsFragmentSpirvPath(const std::wstring& shaderStem, const std::string& entryPoint);
 
 	std::string TrimAscii(std::string value)
 	{
@@ -8083,7 +8084,22 @@ void VulkanBackend::CreateSwapChainForWindow(WindowHandle window, uint32_t width
 	VkPhysicalDeviceRayTracingPipelineFeaturesKHR rayTracingPipelineFeatures{};
 	VkPhysicalDeviceRayQueryFeaturesKHR rayQueryFeatures{};
 	VkPhysicalDeviceDescriptorIndexingFeatures descriptorIndexingFeatures{};
+	VkPhysicalDeviceVulkan11Features vulkan11Features{};
 	void* deviceFeatureChain = nullptr;
+	{
+		VkPhysicalDeviceVulkan11Features supportedVulkan11Features{};
+		supportedVulkan11Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES;
+		VkPhysicalDeviceFeatures2 supportedFeatures2{};
+		supportedFeatures2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+		supportedFeatures2.pNext = &supportedVulkan11Features;
+		vkGetPhysicalDeviceFeatures2(PhysicalDevice, &supportedFeatures2);
+		if (supportedVulkan11Features.shaderDrawParameters == VK_TRUE)
+		{
+			vulkan11Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES;
+			vulkan11Features.shaderDrawParameters = VK_TRUE;
+			deviceFeatureChain = &vulkan11Features;
+		}
+	}
 	if (bCanEnableRayTracing)
 	{
 		deviceExtensions.push_back(VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME);
@@ -8115,6 +8131,8 @@ void VulkanBackend::CreateSwapChainForWindow(WindowHandle window, uint32_t width
 		accelerationStructureFeatures.pNext = &rayTracingPipelineFeatures;
 		rayTracingPipelineFeatures.pNext = &rayQueryFeatures;
 		rayQueryFeatures.pNext = &descriptorIndexingFeatures;
+		if (vulkan11Features.shaderDrawParameters == VK_TRUE)
+			descriptorIndexingFeatures.pNext = &vulkan11Features;
 		deviceFeatureChain = &bufferDeviceAddressFeatures;
 	}
 
@@ -10625,7 +10643,7 @@ std::shared_ptr<GraphicsPipelineHandle> VulkanBackend::CreateGraphicsPipeline(co
 
 	const std::wstring stem = NormalizeShaderPath(desc.ShaderPath).stem().wstring();
 	const std::vector<uint32_t> vertexSpirv = LoadSpirvFile(ResolveVulkanGraphicsVertexSpirvPath(stem, desc.VertexEntryPoint));
-	const std::vector<uint32_t> fragmentSpirv = LoadSpirvFile(ResolveVulkanSpirvPath(stem + L"Vulkan.frag.spv"));
+	const std::vector<uint32_t> fragmentSpirv = LoadSpirvFile(ResolveVulkanGraphicsFragmentSpirvPath(stem, desc.PixelEntryPoint));
 
 	VkShaderModuleCreateInfo shaderInfo{};
 	shaderInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;

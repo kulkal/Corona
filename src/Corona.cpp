@@ -97,18 +97,12 @@ namespace
 		return PlatformWideToUtf8(value);
 	}
 
-	void ConfigureVulkanImplicitLayerPolicy(bool bKeepImplicitLayers)
+	void ConfigureVulkanImplicitLayerPolicy()
 	{
 		const auto existingPolicy = GetPlatformEnvironmentVariable(L"VK_LOADER_LAYERS_DISABLE");
 		if (existingPolicy.has_value())
 		{
 			AppendCpuRuntimeTrace(L"[LoadPipeline] preserving VK_LOADER_LAYERS_DISABLE=" + *existingPolicy);
-			return;
-		}
-
-		if (bKeepImplicitLayers)
-		{
-			AppendCpuRuntimeTrace(L"[LoadPipeline] Vulkan implicit layers left enabled for live TLAS capture");
 			return;
 		}
 
@@ -2056,9 +2050,7 @@ Corona::~Corona()
 	if (renderBackend)
 		renderBackend->WaitForGpu();
 
-	// Pipeline objects own backend-native state but are declared before
-	// renderBackend in Corona.h, so member destruction would otherwise destroy
-	// the backend first and leave these wrappers with dangling backend pointers.
+	// Release backend-native pipeline wrappers while the backend is still alive.
 	GBufferGraphicsPipeline.reset();
 	StaticInstancedGBufferGraphicsPipeline.reset();
 	ProceduralGrassGraphicsPipeline.reset();
@@ -4106,23 +4098,6 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 			bCommandLineDisableStreamline = true;
 			continue;
 		}
-		if (arg == L"--bvh-viewer" || arg == L"--show-bvh-viewer" || arg == L"--enable-bvh-viewer")
-		{
-			bCommandLineBvhViewerOverrideSet = true;
-			bCommandLineBvhViewerEnabled = true;
-			continue;
-		}
-		if (arg == L"--no-bvh-viewer" || arg == L"--disable-bvh-viewer")
-		{
-			bCommandLineBvhViewerOverrideSet = true;
-			bCommandLineBvhViewerEnabled = false;
-			continue;
-		}
-		if (arg == L"--nvfraps-bvh-live-tlas" || arg == L"--force-tlas-update" || arg == L"--rtas-live-tlas")
-		{
-			bCommandLineNvFrapsBvhLiveTlas = true;
-			continue;
-		}
 		if (arg == L"--startup-scripts")
 		{
 			bStartupFreeFlyCamera = false;
@@ -5001,10 +4976,7 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 		L", autoDumpOverride=" + std::to_wstring(bCommandLineAutoDumpOverrideSet ? 1 : 0) +
 		L", autoDump=" + std::to_wstring(bCommandLineAutoDumpEnabled ? 1 : 0) +
 		L", noImgui=" + std::to_wstring(bCommandLineDisableImgui ? 1 : 0) +
-		L", noStreamline=" + std::to_wstring(bCommandLineDisableStreamline ? 1 : 0) +
-		L", bvhViewerOverride=" + std::to_wstring(bCommandLineBvhViewerOverrideSet ? 1 : 0) +
-		L", bvhViewer=" + std::to_wstring(bCommandLineBvhViewerEnabled ? 1 : 0) +
-		L", nvfrapsBvhLiveTlas=" + std::to_wstring(bCommandLineNvFrapsBvhLiveTlas ? 1 : 0));
+		L", noStreamline=" + std::to_wstring(bCommandLineDisableStreamline ? 1 : 0));
 }
 
 void Corona::PromptStartupModeSelection()
@@ -9519,7 +9491,7 @@ void Corona::LoadPipeline()
 	if (bCommandLineRenderBackendOverrideSet && CommandLineRenderBackendAPI == ERenderBackendAPI::Vulkan)
 	{
 		AppendCpuRuntimeTrace(L"[LoadPipeline] begin Vulkan path");
-		ConfigureVulkanImplicitLayerPolicy(bCommandLineNvFrapsBvhLiveTlas);
+		ConfigureVulkanImplicitLayerPolicy();
 		renderBackend = CreateRenderBackend(ERenderBackendAPI::Vulkan);
 		dx12_rhi = nullptr;
 		if (!renderBackend)
@@ -9628,8 +9600,8 @@ void Corona::LoadPipeline()
 #if !CORONA_HAS_NRI
 	if (bCommandLineRenderBackendOverrideSet && CommandLineRenderBackendAPI == ERenderBackendAPI::NRI)
 	{
-		AppendCpuRuntimeTrace(L"[LoadPipeline] NRI requested but CORONA_HAS_NRI=0; rebuild with CORONA_WITH_NRI=ON");
-		throw std::runtime_error("NRI backend requested, but this build was configured without CORONA_WITH_NRI=ON.");
+		AppendCpuRuntimeTrace(L"[LoadPipeline] NRI requested but CORONA_HAS_NRI=0; falling back to D3D12");
+		CommandLineRenderBackendAPI = ERenderBackendAPI::D3D12;
 	}
 #endif
 
@@ -9785,34 +9757,12 @@ void Corona::LoadPipeline()
 		throw std::runtime_error("Failed to create D3D12 render backend.");
 	}
 	dx12_rhi->SetExternalDXGIFactory(factory.Get());
-	const bool bBlockBvhViewerForStreamline =
-#if WITH_STREAMLINE
-		bStreamlineInitialized;
-#else
-		false;
-#endif
-	dx12_rhi->SetBvhViewerD3D12Allowed(!bBlockBvhViewerForStreamline);
-	if (bBlockBvhViewerForStreamline)
-	{
-		AppendCpuRuntimeTrace(L"[BvhViewerD3D12] disabled while Streamline is initialized to avoid D3D12 hook contention");
-	}
 
 	renderBackend->CreateSwapChainForWindow(
 		GetMainPlatformWindowHandle(),
 		m_width,
 		m_height,
 		ETextureFormat::RGBA8Unorm);
-	if (bCommandLineBvhViewerOverrideSet && bCommandLineBvhViewerEnabled)
-	{
-		if (bBlockBvhViewerForStreamline)
-		{
-			AppendCpuRuntimeTrace(L"[BvhViewerD3D12] command-line show skipped because Streamline is active; relaunch with --no-streamline --bvh-viewer");
-		}
-		else
-		{
-			dx12_rhi->ShowBvhViewerD3D12Window(1280, 720);
-		}
-	}
 #endif // CORONA_HAS_D3D12 (LoadPipeline DX12 bootstrap)
 }
 
@@ -15818,30 +15768,6 @@ void Corona::OnRender()
 				SetGpuTimingAverageFrameCount(static_cast<UINT32>(averageFrameCountUI));
 			if (ImGui::Button("Recompile all shaders"))
 				bRecompileShaders = true;
-
-#if CORONA_HAS_D3D12
-			DX12Backend* dx12BackendForBvh = renderBackend ? renderBackend->AsDX12Backend() : nullptr;
-			const bool bBvhViewerAllowed = dx12BackendForBvh && dx12BackendForBvh->IsBvhViewerD3D12Allowed();
-			bool bBvhViewerVisible = dx12BackendForBvh && dx12BackendForBvh->IsBvhViewerD3D12WindowVisible();
-			if (!bBvhViewerAllowed)
-				ImGui::BeginDisabled();
-			if (ImGui::Checkbox("BVH Viewer Window", &bBvhViewerVisible))
-			{
-				if (bBvhViewerVisible)
-					dx12BackendForBvh->ShowBvhViewerD3D12Window();
-				else
-					dx12BackendForBvh->HideBvhViewerD3D12Window();
-			}
-			ImGui::SameLine();
-			if (ImGui::Button("Focus BVH Viewer"))
-			{
-				dx12BackendForBvh->ShowBvhViewerD3D12Window();
-			}
-			if (!bBvhViewerAllowed)
-				ImGui::EndDisabled();
-			if (dx12BackendForBvh && !bBvhViewerAllowed)
-				ImGui::TextDisabled("BVH Viewer is disabled while Streamline is active.");
-#endif
 
 			if (bFinalScreenshotRequested || bFinalScreenshotCaptureInFlight)
 				ImGui::BeginDisabled();

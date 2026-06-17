@@ -39,7 +39,6 @@ using namespace std;
 class DX12Backend;
 class Texture;
 class Sampler;
-struct CoronaBvhViewerD3D12Handle;
 //class ThreadDescriptorHeapPool;
 
 class CommandList
@@ -668,8 +667,6 @@ public:
 	string errorString;
 	bool bDeviceLost = false;
 	bool bDeviceLostDiagnosticsLogged = false;
-	CoronaBvhViewerD3D12Handle* BvhViewerD3D12 = nullptr;
-	bool bBvhViewerD3D12Allowed = true;
 
 	static constexpr uint32_t kMaxDX12BindlessTextureSlots = 65536;
 	struct DX12BindlessTextureSlot
@@ -754,12 +751,6 @@ public:
 	uint32_t GetFrameCount() const override { return NumFrame; }
 	uint32_t GetCurrentFrameIndex() const override { return CurrentFrameIndex; }
 	DX12Backend* AsDX12Backend() override { return this; }
-	bool IsBvhViewerD3D12Available() const;
-	bool IsBvhViewerD3D12Allowed() const { return bBvhViewerD3D12Allowed; }
-	void SetBvhViewerD3D12Allowed(bool allowed);
-	bool IsBvhViewerD3D12WindowVisible() const;
-	bool ShowBvhViewerD3D12Window(uint32_t width = 1280, uint32_t height = 720);
-	void HideBvhViewerD3D12Window();
 	std::shared_ptr<Texture> CreateTexture2D(const TextureCreateDesc& desc) override;
 	std::shared_ptr<Buffer> CreateBuffer(const BufferCreateDesc& desc) override;
 	std::shared_ptr<Sampler> CreateSampler(const SamplerCreateDesc& desc) override;

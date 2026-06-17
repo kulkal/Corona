@@ -284,9 +284,6 @@ set(LUAU_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(LUAU_BUILD_WEB OFF CACHE BOOL "" FORCE)
 set(LUAU_EXTERN_C ON CACHE BOOL "" FORCE)
 add_subdirectory("${CORONA_SRC_DIR}/external/luau" "${CMAKE_CURRENT_BINARY_DIR}/luau" EXCLUDE_FROM_ALL)
-if(CORONA_PLATFORM_WINDOWS AND NOT CORONA_DISABLE_D3D12)
-    add_subdirectory("${CORONA_SRC_DIR}/external/nv_bvh_viewer" "${CMAKE_CURRENT_BINARY_DIR}/nv_bvh_viewer" EXCLUDE_FROM_ALL)
-endif()
 
 set(CORONA_REQUIRED_RUNTIME_PATHS)
 if(CORONA_PLATFORM_WINDOWS)
@@ -384,7 +381,6 @@ if(CORONA_PLATFORM_WINDOWS)
             "${CORONA_DXCOMPILER_LIB}"
             "${CORONA_AFTERMATH_LIB}"
             "${CORONA_WINPIX_LIB}"
-            CoronaBvhViewerD3D12
         )
         if(CORONA_STREAMLINE_LIB)
             target_link_libraries(Corona PRIVATE "${CORONA_STREAMLINE_LIB}")
@@ -484,6 +480,18 @@ if(Vulkan_FOUND AND (CORONA_PLATFORM_WINDOWS OR CORONA_PLATFORM_ANDROID))
             )
         endmacro()
 
+        macro(CORONA_ADD_VULKAN_GRAPHICS_FRAGMENT_ENTRY shader_path shader_stem entry_point)
+            set(fragment_output "${CORONA_VULKAN_SPIRV_DIR}/${shader_stem}_${entry_point}Vulkan.frag.spv")
+            list(APPEND CORONA_VULKAN_SHADER_OUTPUTS "${fragment_output}")
+            add_custom_command(
+                OUTPUT "${fragment_output}"
+                COMMAND "${CMAKE_COMMAND}" -E make_directory "${CORONA_VULKAN_SPIRV_DIR}"
+                COMMAND "${CORONA_VULKAN_DXC}" ${CORONA_VULKAN_DXC_COMMON_FLAGS} -fspv-target-env=vulkan1.1 -T ps_6_0 -E "${entry_point}" "${shader_path}" -Fo "${fragment_output}"
+                DEPENDS "${shader_path}" ${CORONA_SHADER_FILES}
+                VERBATIM
+            )
+        endmacro()
+
         macro(CORONA_ADD_VULKAN_COMPUTE_SHADER shader_path shader_stem entry_point)
             set(compute_output "${CORONA_VULKAN_SPIRV_DIR}/${shader_stem}_${entry_point}Vulkan.comp.spv")
             list(APPEND CORONA_VULKAN_SHADER_OUTPUTS "${compute_output}")
@@ -516,6 +524,7 @@ if(Vulkan_FOUND AND (CORONA_PLATFORM_WINDOWS OR CORONA_PLATFORM_ANDROID))
         foreach(CORONA_VULKAN_SHADER IN LISTS CORONA_VULKAN_HLSL_FILES)
             get_filename_component(CORONA_VULKAN_SHADER_STEM "${CORONA_VULKAN_SHADER}" NAME_WE)
             file(READ "${CORONA_VULKAN_SHADER}" CORONA_VULKAN_SHADER_CONTENT)
+            set(CORONA_VULKAN_SHADER_SOURCE_CONTENT "${CORONA_VULKAN_SHADER_CONTENT}")
 
             # Follow #include "X.hlsli" one level so entry points that
             # live in shared headers (e.g. GBufferCommon.hlsli) are still
@@ -542,7 +551,7 @@ if(Vulkan_FOUND AND (CORONA_PLATFORM_WINDOWS OR CORONA_PLATFORM_ANDROID))
             # they bring their own VSMain (e.g. GrassProcedural's vertex-
             # pulling path). Skip the dispatch rules for those alternates.
             set(CORONA_VULKAN_OMIT_LEGACY_ENTRIES OFF)
-            if(CORONA_VULKAN_SHADER_CONTENT MATCHES "#define[ \t]+GBUFFER_OMIT_ENTRIES")
+            if(CORONA_VULKAN_SHADER_SOURCE_CONTENT MATCHES "(^|\n)[ \t]*#[ \t]*define[ \t]+GBUFFER_OMIT_ENTRIES")
                 set(CORONA_VULKAN_OMIT_LEGACY_ENTRIES ON)
             endif()
             if(CORONA_VULKAN_SHADER_CONTENT MATCHES "VSMain[ \t\r\n]*\\(" AND CORONA_VULKAN_SHADER_CONTENT MATCHES "PSMain[ \t\r\n]*\\(")
@@ -551,6 +560,7 @@ if(Vulkan_FOUND AND (CORONA_PLATFORM_WINDOWS OR CORONA_PLATFORM_ANDROID))
             if(CORONA_VULKAN_SHADER_STEM STREQUAL "GBuffer")
                 CORONA_ADD_VULKAN_GRAPHICS_VERTEX_ENTRY("${CORONA_VULKAN_SHADER}" "${CORONA_VULKAN_SHADER_STEM}" "VSMainBindless")
                 CORONA_ADD_VULKAN_GRAPHICS_VERTEX_ENTRY("${CORONA_VULKAN_SHADER}" "${CORONA_VULKAN_SHADER_STEM}" "VSMainBindlessIndirect")
+                CORONA_ADD_VULKAN_GRAPHICS_FRAGMENT_ENTRY("${CORONA_VULKAN_SHADER}" "${CORONA_VULKAN_SHADER_STEM}" "PSMainOpaque")
             endif()
             if(NOT CORONA_VULKAN_OMIT_LEGACY_ENTRIES AND CORONA_VULKAN_SHADER_CONTENT MATCHES "SpineVSMain[ \t\r\n]*\\(")
                 CORONA_ADD_VULKAN_GRAPHICS_VERTEX_ENTRY("${CORONA_VULKAN_SHADER}" "${CORONA_VULKAN_SHADER_STEM}" "SpineVSMain")
@@ -569,7 +579,7 @@ if(Vulkan_FOUND AND (CORONA_PLATFORM_WINDOWS OR CORONA_PLATFORM_ANDROID))
             # regex scan via the .hlsli concat above, but it's only
             # compilable when the parent file defines GBUFFER_HAS_CLUSTER
             # before the include.
-            if(NOT CORONA_VULKAN_OMIT_LEGACY_ENTRIES AND CORONA_VULKAN_SHADER_CONTENT MATCHES "SkeletalVsInlineClusterVSMain[ \t\r\n]*\\(" AND CORONA_VULKAN_SHADER_CONTENT MATCHES "#define[ \t]+GBUFFER_HAS_CLUSTER")
+            if(NOT CORONA_VULKAN_OMIT_LEGACY_ENTRIES AND CORONA_VULKAN_SHADER_CONTENT MATCHES "SkeletalVsInlineClusterVSMain[ \t\r\n]*\\(" AND CORONA_VULKAN_SHADER_SOURCE_CONTENT MATCHES "(^|\n)[ \t]*#[ \t]*define[ \t]+GBUFFER_HAS_CLUSTER")
                 CORONA_ADD_VULKAN_GRAPHICS_VERTEX_ENTRY("${CORONA_VULKAN_SHADER}" "${CORONA_VULKAN_SHADER_STEM}" "SkeletalVsInlineClusterVSMain")
             endif()
             if(CORONA_VULKAN_SHADER_STEM STREQUAL "GBuffer")

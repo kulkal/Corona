@@ -224,6 +224,14 @@ private:
 	static constexpr float MobileShadowMinCasterHeight = 24.0f;
 	using CpuClock = std::chrono::steady_clock;
 
+	// Keep backend/device members before backend-owned resources so member
+	// destruction releases resources before tearing down the backend.
+#if CORONA_HAS_D3D12
+	ComPtr<ID3D12Device5> m_device;
+#endif
+	std::unique_ptr<IRenderBackend> renderBackend;
+	DX12Backend* dx12_rhi = nullptr;
+
 	shared_ptr<Texture> DepthBuffer;
 	shared_ptr<Texture> UnjitteredDepthBuffers[2];
 
@@ -1520,9 +1528,6 @@ private:
 	UINT32 SkeletalTestScreenshotFrame = 60;
 	std::wstring SkeletalTestScreenshotPath;
 	bool bSkeletalTestScreenshotDone = false;
-	bool bCommandLineBvhViewerOverrideSet = false;
-	bool bCommandLineBvhViewerEnabled = false;
-	bool bCommandLineNvFrapsBvhLiveTlas = false;
 	bool bStartupFreeFlyCamera = false;
 	bool bCommandLineDiffuseGIAutoDumpMode = false;
 	bool bCommandLineReadmeScreenshotDumpMode = false;
@@ -2306,13 +2311,6 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	UINT m_frameCounter = 0;
 
 	UINT FrameCounter = 0;
-
-	// Pipeline objects.
-#if CORONA_HAS_D3D12
-	ComPtr<ID3D12Device5> m_device;
-#endif
-	std::unique_ptr<IRenderBackend> renderBackend;
-	DX12Backend* dx12_rhi = nullptr;
 
 	enki::TaskScheduler g_TS;
 
