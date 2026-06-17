@@ -373,6 +373,15 @@ void Corona::FlushSceneObjectChanges()
 		// shadow drop when a skinned character was present. PERFORM_UPDATE
 		// on the active TLAS slot every frame fixes the flicker; the cost
 		// is microseconds for typical instance counts.
+		// Skip the forced update for static scenes after all frame slots are ready.
+		const bool bNeedsPerFrameTlasUpdate = SkeletalStats.BlasUpdates > 0;
+		if (!bRayTracingTransformDirty &&
+			!bNeedsPerFrameTlasUpdate &&
+			IsCurrentRayTracingFrameResourceReady())
+		{
+			ActivateCurrentRayTracingFrameResources();
+			return;
+		}
 		UpdateRayTracingInstanceTransforms();
 		return;
 	}
@@ -557,9 +566,9 @@ void Corona::UpdateInstancePropertyBuffer()
 	if (renderBackend->IsDeviceLost())
 		return;
 #if CORONA_HAS_D3D12
-	// Backend-specific instance property upload. DX12 uses a DEFAULT heap
-	// ByteAddressBuffer, NRI uses frame-local HOST_UPLOAD structured buffers,
-	// and Vulkan still manages its existing backend-side descriptor copy path.
+	// Backend-specific instance property upload. DX12 and NRI use GPU-local
+	// buffers with staged uploads; Vulkan still manages its existing
+	// backend-side descriptor copy path.
 
 	constexpr UINT32 kMinInstancePropertyCapacity = 500u;
 	const UINT32 instanceCapacity = std::max(kMinInstancePropertyCapacity, static_cast<UINT32>(RayTracingInstances.size()));
@@ -607,38 +616,49 @@ void Corona::UpdateInstancePropertyBuffer()
 		}
 
 		std::shared_ptr<Buffer>& frameInstancePropertyBuffer = InstancePropertyFrameBuffers[frameIndex];
-		if (!frameInstancePropertyBuffer ||
+		const bool needsCreate =
+			!frameInstancePropertyBuffer ||
 			frameInstancePropertyBuffer->NumElements < instanceCapacity ||
-			frameInstancePropertyBuffer->ElementSize != sizeof(InstanceProperty))
+			frameInstancePropertyBuffer->ElementSize != sizeof(InstanceProperty);
+		if (needsCreate)
 		{
 			try
 			{
-				frameInstancePropertyBuffer = renderBackend->CreateUploadStructuredBuffer(instanceCapacity, sizeof(InstanceProperty));
+				frameInstancePropertyBuffer = renderBackend->CreateBuffer({
+					instanceCapacity,
+					sizeof(InstanceProperty),
+					EInitialResourceState::ShaderRead,
+					false,
+					instanceProperties.data(),
+					EBufferShape::Structured
+				});
 			}
 			catch (...)
 			{
-				ClearFailedFrameResources(L"NRI CreateUploadStructuredBuffer threw");
+				ClearFailedFrameResources(L"NRI CreateBuffer threw");
 				return;
 			}
 			if (!frameInstancePropertyBuffer)
 			{
-				ClearFailedFrameResources(L"NRI CreateUploadStructuredBuffer returned null");
+				ClearFailedFrameResources(L"NRI CreateBuffer returned null");
 				return;
 			}
-			AppendCpuRuntimeTrace(
-				L"[RTAS] InstancePropertyBuffer NRI heap=HOST_UPLOAD"
-				L", capacity=" + std::to_wstring(instanceCapacity) +
-				L", bytes=" + std::to_wstring(instancePropertyBytes) +
-				L", frameIndex=" + std::to_wstring(frameIndex));
+			{
+				static bool bLoggedNriInstancePropertyHeap = false;
+				if (!bLoggedNriInstancePropertyHeap)
+				{
+					AppendCpuRuntimeTrace(
+						L"[RTAS] InstancePropertyBuffer NRI heap=DEVICE persistent"
+						L", capacity=" + std::to_wstring(instanceCapacity) +
+						L", bytes=" + std::to_wstring(instancePropertyBytes) +
+						L", frameIndex=" + std::to_wstring(frameIndex));
+					bLoggedNriInstancePropertyHeap = true;
+				}
+			}
 		}
-
-		try
+		else if (!renderBackend->UpdateDefaultStructuredBuffer(frameInstancePropertyBuffer.get(), instanceProperties.data(), instancePropertyBytes))
 		{
-			renderBackend->UpdateUploadStructuredBuffer(frameInstancePropertyBuffer.get(), instanceProperties.data(), instancePropertyBytes);
-		}
-		catch (...)
-		{
-			ClearFailedFrameResources(L"NRI UpdateUploadStructuredBuffer threw");
+			ClearFailedFrameResources(L"NRI UpdateDefaultStructuredBuffer failed");
 			return;
 		}
 		InstancePropertyBuffer = frameInstancePropertyBuffer;

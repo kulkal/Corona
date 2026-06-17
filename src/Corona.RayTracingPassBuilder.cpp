@@ -164,6 +164,19 @@ uint32_t Corona::RTPassBuilder::BindSceneHitPrograms(const RTSceneHitProgramDesc
 
 	PSO->MarkHitProgramBindingCacheDirty();
 	uint32_t boundCount = 0;
+	if (PSO->UsesSharedHitRecords())
+	{
+		if (instanceCount > 0)
+		{
+			PSO->ResetHitProgram(0);
+			PSO->StartHitProgram(desc.HitGroup, 0);
+			boundCount = instanceCount;
+		}
+		PSO->MarkHitProgramBindingCacheValid(instanceCount, bindingSignature);
+		Owner.AddRtRecordPhaseTiming(ERtRecordPhase::BindHitPrograms, phaseStart, Corona::CpuClock::now());
+		return boundCount;
+	}
+
 	uint32_t instanceIndex = 0;
 	for (const RTInstanceDesc& instance : Owner.RayTracingInstances)
 	{

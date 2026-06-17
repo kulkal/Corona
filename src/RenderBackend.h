@@ -480,6 +480,7 @@ public:
 		return false;
 	}
 	virtual void* GetStreamlineCommandBuffer() { return nullptr; }
+	virtual void NotifyExternalCommandListStateChanged() {}
 	// Native graphics device for Streamline (slSetD3DDevice / adapter LUID query).
 	// DX12 owns its device in Corona directly; the NRI backend creates its own, so
 	// it exposes the native ID3D12Device* here. Returns null when not applicable.
@@ -578,6 +579,13 @@ public:
 	// frames; call UpdateUploadStructuredBuffer to refresh contents.
 	virtual std::shared_ptr<Buffer> CreateUploadStructuredBuffer(uint32_t numElements, uint32_t elementSize) = 0;
 	virtual void UpdateUploadStructuredBuffer(Buffer* buffer, const void* srcData, uint32_t sizeInBytes) = 0;
+	virtual bool UpdateDefaultStructuredBuffer(Buffer* buffer, const void* srcData, uint32_t sizeInBytes)
+	{
+		(void)buffer;
+		(void)srcData;
+		(void)sizeInBytes;
+		return false;
+	}
 	// Frame-transient structured buffer backed by a backend-owned suballocated
 	// upload pool. The returned Buffer handle is kept alive by the backend
 	// until the frame's fence is retired, so callers can bind it immediately

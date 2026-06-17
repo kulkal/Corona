@@ -17,11 +17,14 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cmath>
 #include <cstdlib>
+#include <iomanip>
 #include <iterator>
 #include <limits>
+#include <sstream>
 
 #include "glm/gtc/matrix_transform.hpp"
 
@@ -29,6 +32,143 @@ void AppendCpuRuntimeTrace(const std::wstring& line);
 
 namespace
 {
+	using GBufferProfileClock = std::chrono::steady_clock;
+
+	bool IsGBufferObjectBatchProfileEnabled()
+	{
+		static const bool enabled = []
+		{
+			const char* nriValue = std::getenv("CORONA_NRI_RECORD_PROFILE");
+			const char* gbufferValue = std::getenv("CORONA_GBUFFER_BATCH_PROFILE");
+			const bool nriEnabled = nriValue && nriValue[0] != '\0' && nriValue[0] != '0';
+			const bool gbufferEnabled = gbufferValue && gbufferValue[0] != '\0' && gbufferValue[0] != '0';
+			return nriEnabled || gbufferEnabled;
+		}();
+		return enabled;
+	}
+
+	double GBufferProfileElapsedMs(GBufferProfileClock::time_point begin)
+	{
+		return std::chrono::duration<double, std::milli>(GBufferProfileClock::now() - begin).count();
+	}
+
+	void GBufferProfileAdd(bool enabled, double& totalMs, uint64_t& count, GBufferProfileClock::time_point begin)
+	{
+		if (!enabled)
+			return;
+		totalMs += GBufferProfileElapsedMs(begin);
+		++count;
+	}
+
+	struct GBufferProfileScope
+	{
+		bool Enabled = false;
+		GBufferProfileClock::time_point Begin{};
+		double& TotalMs;
+		uint64_t& Count;
+
+		GBufferProfileScope(bool enabled, double& totalMs, uint64_t& count)
+			: Enabled(enabled)
+			, Begin(enabled ? GBufferProfileClock::now() : GBufferProfileClock::time_point{})
+			, TotalMs(totalMs)
+			, Count(count)
+		{
+		}
+
+		~GBufferProfileScope()
+		{
+			if (Enabled)
+			{
+				TotalMs += GBufferProfileElapsedMs(Begin);
+				++Count;
+			}
+		}
+	};
+
+	struct GBufferObjectBatchProfile
+	{
+		uint64_t LastFrame = UINT64_MAX;
+		uint32_t Frames = 0;
+		uint64_t Calls = 0;
+		uint64_t Objects = 0;
+		uint64_t DrawRecords = 0;
+		uint64_t Materials = 0;
+		uint64_t Geometries = 0;
+		uint64_t IndirectArgs = 0;
+		double TotalMs = 0.0;
+		double BuildMs = 0.0;
+		double AllocMs = 0.0;
+		double MaterialAllocMs = 0.0;
+		double GeometryAllocMs = 0.0;
+		double DrawRecordAllocMs = 0.0;
+		double IndirectAllocMs = 0.0;
+		double BindMs = 0.0;
+		double DrawMs = 0.0;
+		uint64_t TotalCount = 0;
+		uint64_t BuildCount = 0;
+		uint64_t AllocCount = 0;
+		uint64_t MaterialAllocCount = 0;
+		uint64_t GeometryAllocCount = 0;
+		uint64_t DrawRecordAllocCount = 0;
+		uint64_t IndirectAllocCount = 0;
+		uint64_t BindCount = 0;
+		uint64_t DrawCount = 0;
+
+		void Reset()
+		{
+			*this = GBufferObjectBatchProfile{};
+		}
+
+		void FlushIfReady()
+		{
+			if (Frames < 120)
+				return;
+			const double frames = static_cast<double>(std::max(1u, Frames));
+			auto avgMs = [frames](double totalMs) { return totalMs / frames; };
+			auto perFrame = [frames](uint64_t count) { return static_cast<double>(count) / frames; };
+			auto metric = [&](std::wstringstream& ss, const wchar_t* name, double ms, uint64_t count)
+			{
+				ss << L", " << name << L"=" << std::fixed << std::setprecision(3) << avgMs(ms)
+					<< L"ms/" << std::setprecision(1) << perFrame(count) << L"c";
+			};
+
+			std::wstringstream ss;
+			ss << L"[GBufferObjectBatchProfile] frames=" << Frames
+				<< L", calls/frame=" << std::fixed << std::setprecision(1) << perFrame(Calls)
+				<< L", objects/frame=" << perFrame(Objects)
+				<< L", drawRecords/frame=" << perFrame(DrawRecords)
+				<< L", materials/frame=" << perFrame(Materials)
+				<< L", geometries/frame=" << perFrame(Geometries)
+				<< L", indirectArgs/frame=" << perFrame(IndirectArgs);
+			metric(ss, L"total", TotalMs, TotalCount);
+			metric(ss, L"build", BuildMs, BuildCount);
+			metric(ss, L"alloc", AllocMs, AllocCount);
+			metric(ss, L"matAlloc", MaterialAllocMs, MaterialAllocCount);
+			metric(ss, L"geoAlloc", GeometryAllocMs, GeometryAllocCount);
+			metric(ss, L"drawRecAlloc", DrawRecordAllocMs, DrawRecordAllocCount);
+			metric(ss, L"indirectAlloc", IndirectAllocMs, IndirectAllocCount);
+			metric(ss, L"bind", BindMs, BindCount);
+			metric(ss, L"draw", DrawMs, DrawCount);
+			AppendCpuRuntimeTrace(ss.str());
+			Reset();
+		}
+
+		void BeginFrame(uint64_t frame)
+		{
+			if (LastFrame == frame)
+				return;
+			FlushIfReady();
+			LastFrame = frame;
+			++Frames;
+		}
+	};
+
+	GBufferObjectBatchProfile& GetGBufferObjectBatchProfile()
+	{
+		static GBufferObjectBatchProfile profile;
+		return profile;
+	}
+
 	constexpr uint32_t kGBufferBindlessTextureRegisterSpace = 10;
 	constexpr uint32_t kGBufferMaterialRecordRegister = 13;
 	constexpr uint32_t kGBufferDrawRecordRegister = 15;
@@ -197,6 +337,21 @@ namespace
 		}
 		const RenderBackendCapabilities capabilities = backend->GetCapabilities();
 		return capabilities.SupportsBindlessBuffers && capabilities.SupportsRuntimeDescriptorArrays;
+	}
+
+	bool ShouldDisableNriGBufferObjectBatch(IRenderBackend* backend)
+	{
+		if (!backend || backend->GetAPI() != ERenderBackendAPI::NRI)
+			return false;
+		static const bool bDisableNriGBufferObjectBatch =
+			std::getenv("CORONA_NRI_DISABLE_GBUFFER_OBJECT_BATCH") != nullptr;
+		static bool bLoggedDisableNriGBufferObjectBatch = false;
+		if (bDisableNriGBufferObjectBatch && !bLoggedDisableNriGBufferObjectBatch)
+		{
+			AppendCpuRuntimeTrace(L"[GBufferObjectBatch] NRI object batch disabled by CORONA_NRI_DISABLE_GBUFFER_OBJECT_BATCH");
+			bLoggedDisableNriGBufferObjectBatch = true;
+		}
+		return bDisableNriGBufferObjectBatch;
 	}
 
 	bool IsGBufferStaticBindlessGeometryEligible(const Mesh& mesh, std::wstring* reason = nullptr)
@@ -3135,12 +3290,31 @@ bool Corona::DrawStaticObjectBindlessBatch(const std::vector<const SceneObject*>
 	if (renderBackend->GetAPI() == ERenderBackendAPI::Vulkan && bStartupLoadingScreenActive)
 		return failPrerequisite(L"vulkan startup loading screen active");
 
-	std::vector<GBufferMaterialKey> materialKeys;
-	std::vector<GBufferMaterialRecord> materialRecords;
-	std::vector<GBufferGeometryKey> geometryKeys;
-	std::vector<GBufferGeometryRecord> geometryRecords;
-	std::vector<GBufferDrawRecord> drawRecords;
-	std::vector<DrawIndirectArguments> indirectArgs;
+	const bool profile = IsGBufferObjectBatchProfileEnabled();
+	GBufferObjectBatchProfile& batchProfile = GetGBufferObjectBatchProfile();
+	if (profile)
+		batchProfile.BeginFrame(static_cast<uint64_t>(FrameCounter));
+	GBufferProfileScope totalScope(profile, batchProfile.TotalMs, batchProfile.TotalCount);
+	const auto buildStart = profile ? GBufferProfileClock::now() : GBufferProfileClock::time_point{};
+
+	static thread_local std::vector<GBufferMaterialKey> s_materialKeys;
+	static thread_local std::vector<GBufferMaterialRecord> s_materialRecords;
+	static thread_local std::vector<GBufferGeometryKey> s_geometryKeys;
+	static thread_local std::vector<GBufferGeometryRecord> s_geometryRecords;
+	static thread_local std::vector<GBufferDrawRecord> s_drawRecords;
+	static thread_local std::vector<DrawIndirectArguments> s_indirectArgs;
+	std::vector<GBufferMaterialKey>& materialKeys = s_materialKeys;
+	std::vector<GBufferMaterialRecord>& materialRecords = s_materialRecords;
+	std::vector<GBufferGeometryKey>& geometryKeys = s_geometryKeys;
+	std::vector<GBufferGeometryRecord>& geometryRecords = s_geometryRecords;
+	std::vector<GBufferDrawRecord>& drawRecords = s_drawRecords;
+	std::vector<DrawIndirectArguments>& indirectArgs = s_indirectArgs;
+	materialKeys.clear();
+	materialRecords.clear();
+	geometryKeys.clear();
+	geometryRecords.clear();
+	drawRecords.clear();
+	indirectArgs.clear();
 
 	materialKeys.reserve(64);
 	materialRecords.reserve(64);
@@ -3151,8 +3325,12 @@ bool Corona::DrawStaticObjectBindlessBatch(const std::vector<const SceneObject*>
 	// Opaque/alpha-test split (early-Z): opaque draws batch here and run with
 	// PSMainOpaque ([earlydepthstencil]); alpha-tested draws stay on the
 	// discard PSO. Concatenated into indirectArgs as [opaque | alpha] below.
-	std::vector<DrawIndirectArguments> opaqueIndirectArgs;
-	std::vector<DrawIndirectArguments> alphaIndirectArgs;
+	static thread_local std::vector<DrawIndirectArguments> s_opaqueIndirectArgs;
+	static thread_local std::vector<DrawIndirectArguments> s_alphaIndirectArgs;
+	std::vector<DrawIndirectArguments>& opaqueIndirectArgs = s_opaqueIndirectArgs;
+	std::vector<DrawIndirectArguments>& alphaIndirectArgs = s_alphaIndirectArgs;
+	opaqueIndirectArgs.clear();
+	alphaIndirectArgs.clear();
 	opaqueIndirectArgs.reserve(objects.size());
 	alphaIndirectArgs.reserve(objects.size());
 
@@ -3286,6 +3464,7 @@ bool Corona::DrawStaticObjectBindlessBatch(const std::vector<const SceneObject*>
 	indirectArgs.reserve(opaqueIndirectArgs.size() + alphaIndirectArgs.size());
 	indirectArgs.insert(indirectArgs.end(), opaqueIndirectArgs.begin(), opaqueIndirectArgs.end());
 	indirectArgs.insert(indirectArgs.end(), alphaIndirectArgs.begin(), alphaIndirectArgs.end());
+	GBufferProfileAdd(profile, batchProfile.BuildMs, batchProfile.BuildCount, buildStart);
 
 	if (drawRecords.empty() || materialRecords.empty() || geometryRecords.empty() || indirectArgs.empty())
 		return true;
@@ -3294,22 +3473,32 @@ bool Corona::DrawStaticObjectBindlessBatch(const std::vector<const SceneObject*>
 	// (off the SysL2/sysmem aperture) without the per-frame CreateCommittedResource
 	// cost (buffers are recycled across frames). indirectArgsBuffer stays
 	// host-visible (consumed as draw indirect args, not an SRV).
+	const auto allocStart = profile ? GBufferProfileClock::now() : GBufferProfileClock::time_point{};
+	const auto materialAllocStart = profile ? GBufferProfileClock::now() : GBufferProfileClock::time_point{};
 	std::shared_ptr<Buffer> materialBuffer = renderBackend->AllocateTransientDefaultStructuredBuffer(
 		static_cast<uint32_t>(materialRecords.size()),
 		static_cast<uint32_t>(sizeof(GBufferMaterialRecord)),
 		materialRecords.data());
+	GBufferProfileAdd(profile, batchProfile.MaterialAllocMs, batchProfile.MaterialAllocCount, materialAllocStart);
+	const auto geometryAllocStart = profile ? GBufferProfileClock::now() : GBufferProfileClock::time_point{};
 	std::shared_ptr<Buffer> geometryBuffer = renderBackend->AllocateTransientDefaultStructuredBuffer(
 		static_cast<uint32_t>(geometryRecords.size()),
 		static_cast<uint32_t>(sizeof(GBufferGeometryRecord)),
 		geometryRecords.data());
+	GBufferProfileAdd(profile, batchProfile.GeometryAllocMs, batchProfile.GeometryAllocCount, geometryAllocStart);
+	const auto drawRecordAllocStart = profile ? GBufferProfileClock::now() : GBufferProfileClock::time_point{};
 	std::shared_ptr<Buffer> drawRecordBuffer = renderBackend->AllocateTransientDefaultStructuredBuffer(
 		static_cast<uint32_t>(drawRecords.size()),
 		static_cast<uint32_t>(sizeof(GBufferDrawRecord)),
 		drawRecords.data());
+	GBufferProfileAdd(profile, batchProfile.DrawRecordAllocMs, batchProfile.DrawRecordAllocCount, drawRecordAllocStart);
+	const auto indirectAllocStart = profile ? GBufferProfileClock::now() : GBufferProfileClock::time_point{};
 	std::shared_ptr<Buffer> indirectArgsBuffer = renderBackend->AllocateTransientUploadStructuredBuffer(
 		static_cast<uint32_t>(indirectArgs.size()),
 		static_cast<uint32_t>(sizeof(DrawIndirectArguments)),
 		indirectArgs.data());
+	GBufferProfileAdd(profile, batchProfile.IndirectAllocMs, batchProfile.IndirectAllocCount, indirectAllocStart);
+	GBufferProfileAdd(profile, batchProfile.AllocMs, batchProfile.AllocCount, allocStart);
 	if (!materialBuffer || !geometryBuffer || !drawRecordBuffer || !indirectArgsBuffer)
 		return failPrerequisite(L"transient upload allocation failed");
 
@@ -3345,6 +3534,7 @@ bool Corona::DrawStaticObjectBindlessBatch(const std::vector<const SceneObject*>
 	{
 		if (!batchPso || drawCount == 0)
 			return true;
+		const auto bindStart = profile ? GBufferProfileClock::now() : GBufferProfileClock::time_point{};
 		renderBackend->BindGraphicsPipeline(batchPso);
 		if (!BindGBufferSceneResourceBindGroup(
 			renderBackend.get(),
@@ -3363,7 +3553,11 @@ bool Corona::DrawStaticObjectBindlessBatch(const std::vector<const SceneObject*>
 		drawBindEntries.push_back(GraphicsBindGroupEntry::Constant(0, &objCB, sizeof(objCB)));
 		if (!CreateAndBindGraphicsBindGroup(renderBackend.get(), batchPso, kGraphicsBindGroupSlot_Draw, drawBindEntries))
 			return failPrerequisite(L"draw bind group creation failed");
-		return renderBackend->DrawIndirect(indirectArgsBuffer.get(), byteOffset, drawCount);
+		GBufferProfileAdd(profile, batchProfile.BindMs, batchProfile.BindCount, bindStart);
+		const auto drawStart = profile ? GBufferProfileClock::now() : GBufferProfileClock::time_point{};
+		const bool drawOk = renderBackend->DrawIndirect(indirectArgsBuffer.get(), byteOffset, drawCount);
+		GBufferProfileAdd(profile, batchProfile.DrawMs, batchProfile.DrawCount, drawStart);
+		return drawOk;
 	};
 
 	const uint32_t gbufferTotalDrawCount = static_cast<uint32_t>(indirectArgs.size());
@@ -3395,6 +3589,15 @@ bool Corona::DrawStaticObjectBindlessBatch(const std::vector<const SceneObject*>
 	++GBufferLastBindlessObjectBatchCount;
 	GBufferLastBindlessObjectCount += static_cast<uint64_t>(objects.size());
 	GBufferLastBindlessObjectDrawCount += static_cast<uint64_t>(drawRecords.size());
+	if (profile)
+	{
+		++batchProfile.Calls;
+		batchProfile.Objects += static_cast<uint64_t>(objects.size());
+		batchProfile.DrawRecords += static_cast<uint64_t>(drawRecords.size());
+		batchProfile.Materials += static_cast<uint64_t>(materialRecords.size());
+		batchProfile.Geometries += static_cast<uint64_t>(geometryRecords.size());
+		batchProfile.IndirectArgs += static_cast<uint64_t>(indirectArgs.size());
+	}
 
 	if (!bLoggedFirstStaticObjectBatch || (FrameCounter % 120u) == 0u)
 	{
@@ -3432,6 +3635,7 @@ void Corona::DrawScene(shared_ptr<Scene> scene, const glm::mat4x4& instanceTrans
 		backendCapabilities.SupportsDrawIndirect &&
 		backendCapabilities.SupportsDrawIndirectFirstInstance;
 	const bool bSceneStaticBindlessIndirectCandidate =
+		bUseSceneBindlessGeometry &&
 		IsGBufferSceneStaticBindlessGeometryEligible(scene.get());
 	const bool bSceneRequiresBindlessIndirect =
 		bSceneStaticBindlessIndirectCandidate;
@@ -4780,6 +4984,15 @@ void Corona::GBufferPass()
 		std::map<const Scene*, bool> staticObjectBatchEligibilityCache;
 		auto isStaticObjectBatchEligibleCached = [this, &staticObjectBatchEligibilityCache](const std::shared_ptr<Scene>& scene)
 		{
+			if (ShouldDisableNriGBufferObjectBatch(renderBackend.get()))
+				return false;
+			if (!SupportsGBufferBindlessMaterials(renderBackend.get()) ||
+				!SupportsGBufferBindlessGeometry(renderBackend.get()))
+				return false;
+			const RenderBackendCapabilities capabilities =
+				renderBackend ? renderBackend->GetCapabilities() : RenderBackendCapabilities{};
+			if (!capabilities.SupportsDrawIndirect || !capabilities.SupportsDrawIndirectFirstInstance)
+				return false;
 			if (!scene)
 				return false;
 			const Scene* key = scene.get();

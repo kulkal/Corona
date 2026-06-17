@@ -61,7 +61,9 @@ public:
 	std::shared_ptr<VertexBuffer> CreateRWVertexBuffer(uint32_t size, uint32_t stride) override;
 	std::shared_ptr<Buffer> CreateUploadStructuredBuffer(uint32_t numElements, uint32_t elementSize) override;
 	void UpdateUploadStructuredBuffer(Buffer* buffer, const void* srcData, uint32_t sizeInBytes) override;
+	bool UpdateDefaultStructuredBuffer(Buffer* buffer, const void* srcData, uint32_t sizeInBytes) override;
 	std::shared_ptr<Buffer> AllocateTransientUploadStructuredBuffer(uint32_t numElements, uint32_t elementSize, const void* srcData) override;
+	std::shared_ptr<Buffer> AllocateTransientDefaultStructuredBuffer(uint32_t numElements, uint32_t elementSize, const void* srcData) override;
 
 	// --- Bindless registry ---
 	RHITextureHandle RegisterBindlessTexture(Texture* texture) override;

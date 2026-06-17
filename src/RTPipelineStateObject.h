@@ -72,6 +72,7 @@ public:
 	virtual bool IsHitProgramBindingCacheValid(uint32_t numInstances, uint64_t signature) const { return false; }
 	virtual void MarkHitProgramBindingCacheDirty() {}
 	virtual void MarkHitProgramBindingCacheValid(uint32_t numInstances, uint64_t signature) {}
+	virtual bool UsesSharedHitRecords() const { return false; }
 	virtual void BeginShaderTable() = 0;
 	virtual void EndShaderTable() = 0;
 	virtual void SetTextureUAV(const std::string& shader, const std::string& bindingName, Texture* texture, int instanceIndex = -1) = 0;

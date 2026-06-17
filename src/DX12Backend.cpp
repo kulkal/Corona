@@ -846,6 +846,64 @@ void DX12Backend::InvalidateGraphicsCommandStateCache()
 	BoundPrimitiveTopology = D3D_PRIMITIVE_TOPOLOGY_UNDEFINED;
 }
 
+void DX12Backend::InvalidateComputeCommandStateCache()
+{
+	BoundComputeRootSignature = nullptr;
+	BoundComputePipelineState = nullptr;
+	BoundComputeRootDescriptorTables.clear();
+}
+
+void DX12Backend::InvalidateRayTracingCommandStateCache()
+{
+	BoundRayTracingPipelineState = nullptr;
+}
+
+void DX12Backend::SetComputeRootSignatureIfNeeded(ID3D12GraphicsCommandList* commandList, ID3D12RootSignature* rootSignature)
+{
+	if (!commandList || !rootSignature)
+		return;
+	if (BoundComputeRootSignature == rootSignature)
+		return;
+	commandList->SetComputeRootSignature(rootSignature);
+	BoundComputeRootSignature = rootSignature;
+	BoundComputeRootDescriptorTables.clear();
+}
+
+void DX12Backend::SetComputePipelineStateIfNeeded(ID3D12GraphicsCommandList* commandList, ID3D12PipelineState* pipelineState)
+{
+	if (!commandList || !pipelineState)
+		return;
+	if (BoundComputePipelineState == pipelineState)
+		return;
+	commandList->SetPipelineState(pipelineState);
+	BoundComputePipelineState = pipelineState;
+	InvalidateRayTracingCommandStateCache();
+}
+
+void DX12Backend::SetComputeRootDescriptorTableIfNeeded(ID3D12GraphicsCommandList* commandList, UINT rootParamIndex, D3D12_GPU_DESCRIPTOR_HANDLE gpuHandle)
+{
+	if (!commandList)
+		return;
+	const UINT64 kUnboundDescriptorTable = std::numeric_limits<UINT64>::max();
+	if (BoundComputeRootDescriptorTables.size() <= rootParamIndex)
+		BoundComputeRootDescriptorTables.resize(static_cast<size_t>(rootParamIndex) + 1, kUnboundDescriptorTable);
+	if (BoundComputeRootDescriptorTables[rootParamIndex] == gpuHandle.ptr)
+		return;
+	commandList->SetComputeRootDescriptorTable(rootParamIndex, gpuHandle);
+	BoundComputeRootDescriptorTables[rootParamIndex] = gpuHandle.ptr;
+}
+
+void DX12Backend::SetRayTracingPipelineStateIfNeeded(ID3D12GraphicsCommandList4* commandList, ID3D12StateObject* pipelineState)
+{
+	if (!commandList || !pipelineState)
+		return;
+	if (BoundRayTracingPipelineState == pipelineState)
+		return;
+	commandList->SetPipelineState1(pipelineState);
+	BoundRayTracingPipelineState = pipelineState;
+	BoundComputePipelineState = nullptr;
+}
+
 void DX12Backend::MarkDeviceLost(const wchar_t* context, HRESULT hr)
 {
 	const HRESULT deviceRemovedReason = Device ? Device->GetDeviceRemovedReason() : S_OK;
@@ -1445,6 +1503,7 @@ void DX12Backend::BindDefaultDescriptorHeaps()
 {
 	ID3D12DescriptorHeap* ppHeaps[] = { SRVCBVDescriptorHeapShaderVisible->DH.Get(), SamplerDescriptorHeapShaderVisible->DH.Get() };
 	GlobalCmdList->CmdList->SetDescriptorHeaps(_countof(ppHeaps), ppHeaps);
+	BoundComputeRootDescriptorTables.clear();
 }
 
 void DX12Backend::SetViewportAndScissor(uint32_t width, uint32_t height)
@@ -1710,6 +1769,8 @@ void DX12Backend::BeginNewGraphicsCommandList()
 	GlobalCmdList = CmdQ->AllocCmdList();
 	GlobalCmdList->Fence = CmdQ->CurrentFenceValue;
 	InvalidateGraphicsCommandStateCache();
+	InvalidateComputeCommandStateCache();
+	InvalidateRayTracingCommandStateCache();
 	RestoreCoronaDescriptorHeaps(this, GlobalCmdList->CmdList.Get());
 }
 
@@ -1724,6 +1785,8 @@ UINT64 DX12Backend::SubmitCurrentCommandList()
 	const UINT64 submittedFenceValue = CmdQ->ExecuteCommandList(submittedCmdList);
 	GlobalCmdList = nullptr;
 	InvalidateGraphicsCommandStateCache();
+	InvalidateComputeCommandStateCache();
+	InvalidateRayTracingCommandStateCache();
 	return submittedFenceValue;
 }
 
@@ -1747,6 +1810,8 @@ bool DX12Backend::BeginAsyncRtRecordingAfterGraphicsSubmit()
 	ActiveAsyncRtCmdList->Fence = AsyncRtCmdQ->CurrentFenceValue;
 	GlobalCmdList = ActiveAsyncRtCmdList;
 	InvalidateGraphicsCommandStateCache();
+	InvalidateComputeCommandStateCache();
+	InvalidateRayTracingCommandStateCache();
 	RestoreCoronaDescriptorHeaps(this, ActiveAsyncRtCmdList->CmdList.Get());
 	static UINT sAsyncBeginTraceCount = 0;
 	if (sAsyncBeginTraceCount < 8)
@@ -3892,7 +3957,12 @@ void PipelineStateObject::SetSRV(string name, D3D12_GPU_DESCRIPTOR_HANDLE GpuHan
 		return;
 	UINT RPI = it->second.rootParamIndex;
 	if (IsCompute)
-		CommandList->SetComputeRootDescriptorTable(RPI, GpuHandleSRV);
+	{
+		if (Owner)
+			Owner->SetComputeRootDescriptorTableIfNeeded(CommandList, RPI, GpuHandleSRV);
+		else
+			CommandList->SetComputeRootDescriptorTable(RPI, GpuHandleSRV);
+	}
 	else
 		CommandList->SetGraphicsRootDescriptorTable(RPI, GpuHandleSRV);
 }
@@ -3907,7 +3977,12 @@ void PipelineStateObject::SetUAV(string name, D3D12_GPU_DESCRIPTOR_HANDLE GpuHan
 
 	UINT RPI = uavBinding[name].rootParamIndex;
 	if (IsCompute)
-		CommandList->SetComputeRootDescriptorTable(RPI, GpuHandleUAV);
+	{
+		if (Owner)
+			Owner->SetComputeRootDescriptorTableIfNeeded(CommandList, RPI, GpuHandleUAV);
+		else
+			CommandList->SetComputeRootDescriptorTable(RPI, GpuHandleUAV);
+	}
 	else
 		CommandList->SetGraphicsRootDescriptorTable(RPI, GpuHandleUAV);
 }
@@ -3923,7 +3998,12 @@ void PipelineStateObject::SetSampler(string name, Sampler* sampler, ID3D12Graphi
 		return;
 	it->second.sampler = sampler;
 	if (IsCompute)
-		CommandList->SetComputeRootDescriptorTable(it->second.rootParamIndex, sampler->GpuHandle);
+	{
+		if (Owner)
+			Owner->SetComputeRootDescriptorTableIfNeeded(CommandList, it->second.rootParamIndex, sampler->GpuHandle);
+		else
+			CommandList->SetComputeRootDescriptorTable(it->second.rootParamIndex, sampler->GpuHandle);
+	}
 	else
 		CommandList->SetGraphicsRootDescriptorTable(it->second.rootParamIndex, sampler->GpuHandle);
 }
@@ -4241,12 +4321,24 @@ void PipelineStateObject::Apply(ID3D12GraphicsCommandList* CommandList)
 	if (IsCompute)
 	{
 		if (Owner)
+		{
 			Owner->InvalidateGraphicsCommandStateCache();
-		CommandList->SetComputeRootSignature(RS.Get());
-		CommandList->SetPipelineState(PSO.Get());
+			Owner->SetComputeRootSignatureIfNeeded(CommandList, RS.Get());
+			Owner->SetComputePipelineStateIfNeeded(CommandList, PSO.Get());
+		}
+		else
+		{
+			CommandList->SetComputeRootSignature(RS.Get());
+			CommandList->SetPipelineState(PSO.Get());
+		}
 	}
 	else
 	{
+		if (Owner)
+		{
+			Owner->InvalidateComputeCommandStateCache();
+			Owner->InvalidateRayTracingCommandStateCache();
+		}
 		CommandList->SetGraphicsRootSignature(RS.Get());
 		CommandList->SetPipelineState(PSO.Get());
 	}
@@ -4279,7 +4371,12 @@ void PipelineStateObject::Apply(ID3D12GraphicsCommandList* CommandList)
 		}
 
 		if (IsCompute)
-			CommandList->SetComputeRootDescriptorTable(bindingData.rootParamIndex, tableHandle);
+		{
+			if (Owner)
+				Owner->SetComputeRootDescriptorTableIfNeeded(CommandList, bindingData.rootParamIndex, tableHandle);
+			else
+				CommandList->SetComputeRootDescriptorTable(bindingData.rootParamIndex, tableHandle);
+		}
 		else
 			CommandList->SetGraphicsRootDescriptorTable(bindingData.rootParamIndex, tableHandle);
 	}
@@ -4556,6 +4653,13 @@ bool DX12Backend::GetStreamlineTextureResource(Texture* texture, EResourceState 
 void* DX12Backend::GetStreamlineCommandBuffer()
 {
 	return GetGraphicsCommandList();
+}
+
+void DX12Backend::NotifyExternalCommandListStateChanged()
+{
+	InvalidateGraphicsCommandStateCache();
+	InvalidateComputeCommandStateCache();
+	InvalidateRayTracingCommandStateCache();
 }
 
 void Texture::MakeStaticSRV()
@@ -5343,6 +5447,8 @@ std::shared_ptr<RTAS> DX12Backend::CreateBLASForSkeletalMesh(Mesh* mesh)
 		delete as;
 		return nullptr;
 	}
+	as->ScratchGpuVA = as->Scratch->GetGPUVirtualAddress();
+	as->ResultGpuVA = as->Result->GetGPUVirtualAddress();
 
 	CommandList* cmd = owner->CmdQ->AllocCmdList();
 
@@ -5360,8 +5466,8 @@ std::shared_ptr<RTAS> DX12Backend::CreateBLASForSkeletalMesh(Mesh* mesh)
 
 	D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC asDesc = {};
 	asDesc.Inputs = inputs;
-	asDesc.DestAccelerationStructureData = as->Result->GetGPUVirtualAddress();
-	asDesc.ScratchAccelerationStructureData = as->Scratch->GetGPUVirtualAddress();
+	asDesc.DestAccelerationStructureData = as->ResultGpuVA;
+	asDesc.ScratchAccelerationStructureData = as->ScratchGpuVA;
 	cmd->CmdList->BuildRaytracingAccelerationStructure(&asDesc, 0, nullptr);
 
 	D3D12_RESOURCE_BARRIER uavBarrier = {};
@@ -5444,9 +5550,9 @@ void DX12Backend::RefitBLAS(RTAS* rtas, Mesh* mesh)
 
 	D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC asDesc = {};
 	asDesc.Inputs = inputs;
-	asDesc.DestAccelerationStructureData = as->Result->GetGPUVirtualAddress();
-	asDesc.SourceAccelerationStructureData = as->Result->GetGPUVirtualAddress();
-	asDesc.ScratchAccelerationStructureData = as->Scratch->GetGPUVirtualAddress();
+	asDesc.DestAccelerationStructureData = as->ResultGpuVA;
+	asDesc.SourceAccelerationStructureData = as->ResultGpuVA;
+	asDesc.ScratchAccelerationStructureData = as->ScratchGpuVA;
 
 	GlobalCmdList->CmdList->BuildRaytracingAccelerationStructure(&asDesc, 0, nullptr);
 
@@ -5585,13 +5691,15 @@ std::shared_ptr<RTAS> DX12Backend::CreateBLASForMesh(Mesh* mesh)
 		delete as;
 		return nullptr;
 	}
+	as->ScratchGpuVA = as->Scratch->GetGPUVirtualAddress();
+	as->ResultGpuVA = as->Result->GetGPUVirtualAddress();
 
 	CommandList* cmd = owner->CmdQ->AllocCmdList();
 
 	D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC asDesc = {};
 	asDesc.Inputs = inputs;
-	asDesc.DestAccelerationStructureData = as->Result->GetGPUVirtualAddress();
-	asDesc.ScratchAccelerationStructureData = as->Scratch->GetGPUVirtualAddress();
+	asDesc.DestAccelerationStructureData = as->ResultGpuVA;
+	asDesc.ScratchAccelerationStructureData = as->ScratchGpuVA;
 
 	AppendCpuRuntimeTrace(
 		L"[DX12RTAS] BuildBLAS begin vertices=" + std::to_wstring(mesh->Vb->numVertices) +
@@ -5620,39 +5728,57 @@ static bool WriteD3D12TLASInstanceDescs(D3D12RTAS* as, const std::vector<RTInsta
 	if (!as || !as->Instance || instances.size() > static_cast<size_t>(UINT_MAX))
 		return false;
 
-	D3D12_RAYTRACING_INSTANCE_DESC* pInstanceDesc = nullptr;
-	const HRESULT mapResult = as->Instance->Map(0, nullptr, reinterpret_cast<void**>(&pInstanceDesc));
-	if (FAILED(mapResult) || !pInstanceDesc)
-	{
-		AppendCpuRuntimeTrace(
-			L"[DX12RTAS] TLAS instance Map failed hr=" + FormatDx12Hex(static_cast<uint32_t>(mapResult)) +
-			L", instances=" + std::to_wstring(instances.size()));
-		return false;
-	}
-
 	const UINT instanceCount = static_cast<UINT>(instances.size());
-	ZeroMemory(pInstanceDesc, sizeof(D3D12_RAYTRACING_INSTANCE_DESC) * instanceCount);
+	if (as->InstanceCapacity != 0 && instanceCount > as->InstanceCapacity)
+		return false;
+
+	if (!as->InstanceMapped)
+	{
+		CD3DX12_RANGE readRange(0, 0);
+		const HRESULT mapResult = as->Instance->Map(0, &readRange, reinterpret_cast<void**>(&as->InstanceMapped));
+		if (FAILED(mapResult) || !as->InstanceMapped)
+		{
+			AppendCpuRuntimeTrace(
+				L"[DX12RTAS] TLAS instance Map failed hr=" + FormatDx12Hex(static_cast<uint32_t>(mapResult)) +
+				L", instances=" + std::to_wstring(instances.size()));
+			return false;
+		}
+	}
 
 	bool bValid = true;
 	for (UINT i = 0; i < instanceCount; ++i)
 	{
-		D3D12RTAS* blas = dynamic_cast<D3D12RTAS*>(instances[i].BottomLevelAS.get());
-		if (!blas || !blas->Result)
+		D3D12RTAS* blas = static_cast<D3D12RTAS*>(instances[i].BottomLevelAS.get());
+		if (!blas || !blas->Result || blas->ResultGpuVA == 0)
 		{
 			bValid = false;
 			break;
 		}
 
-		pInstanceDesc[i].InstanceID = i;
-		pInstanceDesc[i].InstanceContributionToHitGroupIndex = i;
-		pInstanceDesc[i].Flags = D3D12_RAYTRACING_INSTANCE_FLAG_NONE;
-		glm::mat4x4 mat = glm::transpose(instances[i].Transform);
-		memcpy(pInstanceDesc[i].Transform, &mat, sizeof(pInstanceDesc[i].Transform));
-		pInstanceDesc[i].AccelerationStructure = blas->Result->GetGPUVirtualAddress();
-		pInstanceDesc[i].InstanceMask = 0xFF;
+		D3D12_RAYTRACING_INSTANCE_DESC& instanceDesc = as->InstanceMapped[i];
+		instanceDesc.InstanceID = i;
+		// Per-instance material/geometry data comes from InstanceID() + bindless
+		// instance buffers. Keep all instances on the same hit record so the SBT
+		// does not scale with scene instance count.
+		instanceDesc.InstanceContributionToHitGroupIndex = 0;
+		instanceDesc.Flags = D3D12_RAYTRACING_INSTANCE_FLAG_NONE;
+		const glm::mat4x4& transform = instances[i].Transform;
+		instanceDesc.Transform[0][0] = transform[0][0];
+		instanceDesc.Transform[0][1] = transform[1][0];
+		instanceDesc.Transform[0][2] = transform[2][0];
+		instanceDesc.Transform[0][3] = transform[3][0];
+		instanceDesc.Transform[1][0] = transform[0][1];
+		instanceDesc.Transform[1][1] = transform[1][1];
+		instanceDesc.Transform[1][2] = transform[2][1];
+		instanceDesc.Transform[1][3] = transform[3][1];
+		instanceDesc.Transform[2][0] = transform[0][2];
+		instanceDesc.Transform[2][1] = transform[1][2];
+		instanceDesc.Transform[2][2] = transform[2][2];
+		instanceDesc.Transform[2][3] = transform[3][2];
+		instanceDesc.AccelerationStructure = blas->ResultGpuVA;
+		instanceDesc.InstanceMask = 0xFF;
 	}
 
-	as->Instance->Unmap(0, nullptr);
 	return bValid;
 }
 
@@ -5755,6 +5881,10 @@ std::shared_ptr<RTAS> DX12Backend::CreateTLAS(const std::vector<RTInstanceDesc>&
 		if (as->Instance)
 			as->Instance->SetName(L"Corona TLAS Instance Descs");
 	}
+	as->InstanceCapacity = static_cast<UINT>(instances.size());
+	as->ScratchGpuVA = as->Scratch->GetGPUVirtualAddress();
+	as->ResultGpuVA = as->Result->GetGPUVirtualAddress();
+	as->InstanceGpuVA = as->Instance->GetGPUVirtualAddress();
 
 	if (!WriteD3D12TLASInstanceDescs(as, instances))
 	{
@@ -5777,9 +5907,9 @@ std::shared_ptr<RTAS> DX12Backend::CreateTLAS(const std::vector<RTInstanceDesc>&
 	asDesc.Inputs = inputs;
 
 	if (!instances.empty())
-		asDesc.Inputs.InstanceDescs = as->Instance->GetGPUVirtualAddress();
-	asDesc.DestAccelerationStructureData = as->Result->GetGPUVirtualAddress();
-	asDesc.ScratchAccelerationStructureData = as->Scratch->GetGPUVirtualAddress();
+		asDesc.Inputs.InstanceDescs = as->InstanceGpuVA;
+	asDesc.DestAccelerationStructureData = as->ResultGpuVA;
+	asDesc.ScratchAccelerationStructureData = as->ScratchGpuVA;
 
 	AppendCpuRuntimeTrace(
 		L"[DX12RTAS] BuildTLAS begin instances=" + std::to_wstring(instances.size()) +
@@ -5800,7 +5930,7 @@ std::shared_ptr<RTAS> DX12Backend::CreateTLAS(const std::vector<RTInstanceDesc>&
 	D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
 	srvDesc.ViewDimension = D3D12_SRV_DIMENSION_RAYTRACING_ACCELERATION_STRUCTURE;
 	srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-	srvDesc.RaytracingAccelerationStructure.Location = as->Result->GetGPUVirtualAddress();
+	srvDesc.RaytracingAccelerationStructure.Location = as->ResultGpuVA;
 
 	// copydescriptor needed when being used.
 	GeomtryDHRing->AllocDescriptor(as->CPUHandle, as->GPUHandle);
@@ -5845,17 +5975,13 @@ bool DX12Backend::UpdateTLAS(const std::shared_ptr<RTAS>& topLevelAS, const std:
 		D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PERFORM_UPDATE;
 	inputs.NumDescs = static_cast<UINT>(instances.size());
 	inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL;
-	inputs.InstanceDescs = as->Instance->GetGPUVirtualAddress();
-
-	CommandList* cmd = CmdQ->AllocCmdList();
-	if (!cmd || bDeviceLost)
-		return false;
+	inputs.InstanceDescs = as->InstanceGpuVA;
 
 	D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC asDesc = {};
 	asDesc.Inputs = inputs;
-	asDesc.SourceAccelerationStructureData = as->Result->GetGPUVirtualAddress();
-	asDesc.DestAccelerationStructureData = as->Result->GetGPUVirtualAddress();
-	asDesc.ScratchAccelerationStructureData = as->Scratch->GetGPUVirtualAddress();
+	asDesc.SourceAccelerationStructureData = as->ResultGpuVA;
+	asDesc.DestAccelerationStructureData = as->ResultGpuVA;
+	asDesc.ScratchAccelerationStructureData = as->ScratchGpuVA;
 
 	static UINT64 sUpdateTlasTraceCount = 0;
 	const UINT64 updateTraceIndex = sUpdateTlasTraceCount++;
@@ -5869,6 +5995,17 @@ bool DX12Backend::UpdateTLAS(const std::shared_ptr<RTAS>& topLevelAS, const std:
 			L", scratch=" + FormatDx12Hex(asDesc.ScratchAccelerationStructureData) +
 			L", instanceDesc=" + FormatDx12Hex(asDesc.Inputs.InstanceDescs));
 	}
+
+	CommandList* cmd = GlobalCmdList;
+	bool bSubmitImmediately = false;
+	if (!cmd)
+	{
+		cmd = CmdQ->AllocCmdList();
+		if (!cmd || bDeviceLost)
+			return false;
+		bSubmitImmediately = true;
+	}
+
 	cmd->CmdList->BuildRaytracingAccelerationStructure(&asDesc, 0, nullptr);
 
 	D3D12_RESOURCE_BARRIER uavBarrier = {};
@@ -5876,13 +6013,18 @@ bool DX12Backend::UpdateTLAS(const std::shared_ptr<RTAS>& topLevelAS, const std:
 	uavBarrier.UAV.pResource = as->Result.Get();
 	cmd->CmdList->ResourceBarrier(1, &uavBarrier);
 
-	CmdQ->ExecuteCommandList(cmd);
-	if (bDeviceLost)
-		return false;
+	if (bSubmitImmediately)
+	{
+		CmdQ->ExecuteCommandList(cmd);
+		if (bDeviceLost)
+			return false;
+	}
 	if (bTraceUpdateTlas)
 	{
 		AppendCpuRuntimeTrace(
-			L"[DX12RTAS] UpdateTLAS submitted updateIndex=" + std::to_wstring(updateTraceIndex) +
+			L"[DX12RTAS] UpdateTLAS " +
+			std::wstring(bSubmitImmediately ? L"submitted" : L"recorded") +
+			L" updateIndex=" + std::to_wstring(updateTraceIndex) +
 			L", result=" + FormatDx12Hex(asDesc.DestAccelerationStructureData));
 	}
 	return true;
@@ -6583,7 +6725,7 @@ void D3D12RTPipelineStateObject::SetGlobalBinding(CommandList* CommandList)
 	UINT RPI = 0;
 	for (auto& bi : GlobalBinding)
 	{
-		CommandList->CmdList.Get()->SetComputeRootDescriptorTable(RPI++, bi.GPUHandle);
+		owner->SetComputeRootDescriptorTableIfNeeded(CommandList->CmdList.Get(), RPI++, bi.GPUHandle);
 	}
 }
 
@@ -6636,7 +6778,7 @@ void D3D12RTPipelineStateObject::EndShaderTable()
 				NumShaderTableEntry++;
 
 		}
-		NumShaderTableEntry += NumInstance * VecHitGroup.size();
+		NumShaderTableEntry += GetHitShaderRecordCount();
 
 		ShaderTableSize = ShaderTableEntrySize * NumShaderTableEntry;
 
@@ -6750,17 +6892,15 @@ void D3D12RTPipelineStateObject::EndShaderTable()
 		}
 	}
 
-	// hit program 
-	for(int InstanceIndex=0;InstanceIndex<NumInstance;InstanceIndex++)
+	// hit program
+	if (UsesSharedHitRecords())
 	{
-
-		//auto& HitProgramInfo = HitProgramBinding[InstanceIndex];
 		for (int iHitGroup = 0; iHitGroup < VecHitGroup.size(); iHitGroup++)
 		{
 			pDataThis = pData + LastIndex * ShaderTableEntrySize;
 
 			map<UINT, HitProgramData>& HitProgram = VecHitGroup[iHitGroup].HitProgramBinding;
-			auto& HitProgramInfo = HitProgram[InstanceIndex];
+			auto& HitProgramInfo = HitProgram[0];
 
 			memcpy(pDataThis, RtsoProps->GetShaderIdentifier(VecHitGroup[iHitGroup].name.c_str()), D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES);
 
@@ -6775,7 +6915,31 @@ void D3D12RTPipelineStateObject::EndShaderTable()
 			LastIndex++;
 
 		}
+	}
+	else
+	{
+		for (int InstanceIndex = 0; InstanceIndex < NumInstance; InstanceIndex++)
+		{
+			for (int iHitGroup = 0; iHitGroup < VecHitGroup.size(); iHitGroup++)
+			{
+				pDataThis = pData + LastIndex * ShaderTableEntrySize;
 
+				map<UINT, HitProgramData>& HitProgram = VecHitGroup[iHitGroup].HitProgramBinding;
+				auto& HitProgramInfo = HitProgram[InstanceIndex];
+
+				memcpy(pDataThis, RtsoProps->GetShaderIdentifier(VecHitGroup[iHitGroup].name.c_str()), D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES);
+
+				pDataThis += D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES;
+
+				for (auto& bd : HitProgramInfo.VecData)
+				{
+					*(UINT64*)(pDataThis) = bd.ptr;
+
+					pDataThis += sizeof(UINT64);
+				}
+				LastIndex++;
+			}
+		}
 	}
 
 
@@ -6825,7 +6989,7 @@ void D3D12RTPipelineStateObject::EndShaderTable()
 	HitProgramBindingPendingValid = false;
 }
 
-void D3D12RTPipelineStateObject::SetUAVHandle(const string& shader, const string& bindingName, D3D12_GPU_DESCRIPTOR_HANDLE uavHandle, INT instanceIndex /*= -1*/)
+void D3D12RTPipelineStateObject::SetUAVHandle(const string& shader, const string& bindingName, D3D12_CPU_DESCRIPTOR_HANDLE cpuHandle, D3D12_GPU_DESCRIPTOR_HANDLE uavHandle, INT instanceIndex /*= -1*/)
 {
 	// each bindings of raygen/miss shader is unique to shader name.
 	if (instanceIndex == -1) // raygen, miss
@@ -6836,6 +7000,7 @@ void D3D12RTPipelineStateObject::SetUAVHandle(const string& shader, const string
 			{
 				if (bd.name == bindingName)
 				{
+					bd.CPUHandle = cpuHandle;
 					bd.GPUHandle = uavHandle;
 				}
 			}
@@ -6847,6 +7012,7 @@ void D3D12RTPipelineStateObject::SetUAVHandle(const string& shader, const string
 			{
 				if (bd.name == bindingName)
 				{
+					bd.CPUHandle = cpuHandle;
 					bd.GPUHandle = uavHandle;
 
 				}
@@ -6861,7 +7027,7 @@ void D3D12RTPipelineStateObject::SetUAVHandle(const string& shader, const string
 	//}
 }
 
-void D3D12RTPipelineStateObject::SetSRVHandle(const string& shader, const string& bindingName, D3D12_GPU_DESCRIPTOR_HANDLE srvHandle, INT instanceIndex /*= -1*/)
+void D3D12RTPipelineStateObject::SetSRVHandle(const string& shader, const string& bindingName, D3D12_CPU_DESCRIPTOR_HANDLE cpuHandle, D3D12_GPU_DESCRIPTOR_HANDLE srvHandle, INT instanceIndex /*= -1*/)
 {
 	// each bindings of raygen/miss shader is unique to shader name.
 	if (instanceIndex == -1) // raygen, miss
@@ -6872,6 +7038,7 @@ void D3D12RTPipelineStateObject::SetSRVHandle(const string& shader, const string
 			{
 				if (bd.name == bindingName)
 				{
+					bd.CPUHandle = cpuHandle;
 					bd.GPUHandle = srvHandle;
 				}
 			}
@@ -6883,6 +7050,7 @@ void D3D12RTPipelineStateObject::SetSRVHandle(const string& shader, const string
 			{
 				if (bd.name == bindingName)
 				{
+					bd.CPUHandle = cpuHandle;
 					bd.GPUHandle = srvHandle;
 				}
 			}
@@ -6916,6 +7084,13 @@ void D3D12RTPipelineStateObject::StartHitProgram(const string& HitGroup, uint32_
 	(*HitProgram)[instanceIndex].VecData.clear();
 }
 
+UINT D3D12RTPipelineStateObject::GetHitShaderRecordCount() const
+{
+	if (VecHitGroup.empty())
+		return 0;
+	return static_cast<UINT>(VecHitGroup.size()) * (UsesSharedHitRecords() ? 1u : NumInstance);
+}
+
 void D3D12RTPipelineStateObject::SetSampler(const string& shader, const string& bindingName, Sampler* sampler, INT instanceIndex /*= -1*/)
 {
 	// each bindings of raygen/miss shader is unique to shader name.
@@ -6927,6 +7102,7 @@ void D3D12RTPipelineStateObject::SetSampler(const string& shader, const string& 
 			{
 				if (bd.name == bindingName)
 				{
+					bd.CPUHandle = sampler->CpuHandle;
 					bd.GPUHandle = sampler->GpuHandle;
 				}
 			}
@@ -6938,6 +7114,7 @@ void D3D12RTPipelineStateObject::SetSampler(const string& shader, const string& 
 			{
 				if (bd.name == bindingName)
 				{
+					bd.CPUHandle = sampler->CpuHandle;
 					bd.GPUHandle = sampler->GpuHandle;
 				}
 			}
@@ -6982,8 +7159,9 @@ void D3D12RTPipelineStateObject::SetCBVValue(const string& shader, const string&
 					cbvDesc.SizeInBytes = bd.cbSize;
 					owner->Device->CreateConstantBufferView(&cbvDesc, CpuHandle);
 
+					bd.CPUHandle = CpuHandle;
 					bd.GPUHandle = GpuHandle;
-
+				
 					bFound = true;
 				}
 			}
@@ -7015,6 +7193,7 @@ void D3D12RTPipelineStateObject::SetCBVValue(const string& shader, const string&
 					cbvDesc.SizeInBytes = bd.cbSize;
 					owner->Device->CreateConstantBufferView(&cbvDesc, CpuHandle);
 
+					bd.CPUHandle = CpuHandle;
 					bd.GPUHandle = GpuHandle;
 				
 					bFound = true;
@@ -7051,8 +7230,15 @@ bool D3D12RTPipelineStateObject::InitRS(const string& ShaderFile)
 		L", instances=" + std::to_wstring(NumInstance));
 	vector<D3D12_STATE_SUBOBJECT> subobjects;
 
-	// dxil + Hitgroup count + RS + Export + shaderconfig + export + pipelineconfig + global RS
-	int numSubobjects = 1 + VecHitGroup.size() + ShaderBinding.size() * 2 + 2 + 1 + 1;
+	uint32_t localRootBindingCount = 0;
+	for (const auto& sb : ShaderBinding)
+	{
+		if (!sb.second.Binding.empty())
+			++localRootBindingCount;
+	}
+
+	// dxil + Hitgroup count + non-empty local RS/export + shaderconfig + export + pipelineconfig + global RS
+	int numSubobjects = 1 + VecHitGroup.size() + localRootBindingCount * 2 + 2 + 1 + 1;
 	subobjects.resize(numSubobjects);
 	traceStep(L"Allocate subobjects");
 
@@ -7119,6 +7305,8 @@ bool D3D12RTPipelineStateObject::InitRS(const string& ShaderFile)
 	for (auto& sb : ShaderBinding)
 	{
 		BindingInfo& bindingInfo = sb.second;
+		if (bindingInfo.Binding.empty())
+			continue;
 		pBI = &bindingInfo;
 		
 		D3D12_ROOT_SIGNATURE_DESC Desc = {};
@@ -7328,7 +7516,7 @@ bool D3D12RTPipelineStateObject::BuildDispatchRaysDesc(uint32_t width, uint32_t 
 	size_t hitOffset = missOffset + NumMissShader * ShaderTableEntrySize;
 	outDesc.HitGroupTable.StartAddress = StartAddress + hitOffset;
 	outDesc.HitGroupTable.StrideInBytes = ShaderTableEntrySize;
-	outDesc.HitGroupTable.SizeInBytes = ShaderTableEntrySize * VecHitGroup.size() * NumInstance;
+	outDesc.HitGroupTable.SizeInBytes = ShaderTableEntrySize * GetHitShaderRecordCount();
 	return true;
 }
 
@@ -7345,15 +7533,11 @@ void D3D12RTPipelineStateObject::Apply(uint32_t width, uint32_t height)
 
 	// Bind the empty root signature
 	owner->InvalidateGraphicsCommandStateCache();
-	CommandList->CmdList->SetComputeRootSignature(GlobalRS.Get());
+	owner->SetComputeRootSignatureIfNeeded(CommandList->CmdList.Get(), GlobalRS.Get());
 
-	UINT RPI = 0;
-	for (auto& bi : GlobalBinding)
-	{
-		CommandList->CmdList.Get()->SetComputeRootDescriptorTable(RPI++, bi.GPUHandle);
-	}
+	SetGlobalBinding(CommandList);
 
-	CommandList->CmdList->SetPipelineState1(RTPipelineState.Get());
+	owner->SetRayTracingPipelineStateIfNeeded(CommandList->CmdList.Get(), RTPipelineState.Get());
 	
 	CommandList->CmdList->DispatchRays(&raytraceDesc);
 }
@@ -7425,15 +7609,11 @@ bool D3D12RTPipelineStateObject::ApplyIndirect(Buffer* indirectArgumentBuffer, u
 	assert(CommandList);
 
 	owner->InvalidateGraphicsCommandStateCache();
-	CommandList->CmdList->SetComputeRootSignature(GlobalRS.Get());
+	owner->SetComputeRootSignatureIfNeeded(CommandList->CmdList.Get(), GlobalRS.Get());
 
-	UINT RPI = 0;
-	for (auto& bi : GlobalBinding)
-	{
-		CommandList->CmdList.Get()->SetComputeRootDescriptorTable(RPI++, bi.GPUHandle);
-	}
+	SetGlobalBinding(CommandList);
 
-	CommandList->CmdList->SetPipelineState1(RTPipelineState.Get());
+	owner->SetRayTracingPipelineStateIfNeeded(CommandList->CmdList.Get(), RTPipelineState.Get());
 	CommandList->CmdList->ExecuteIndirect(
 		DispatchRaysCommandSignature.Get(),
 		1,
@@ -7447,25 +7627,25 @@ bool D3D12RTPipelineStateObject::ApplyIndirect(Buffer* indirectArgumentBuffer, u
 void D3D12RTPipelineStateObject::SetTextureUAV(const string& shader, const string& bindingName, Texture* texture, int instanceIndex)
 {
 	assert(texture);
-	SetUAVHandle(shader, bindingName, texture->GpuHandleUAV, instanceIndex);
+	SetUAVHandle(shader, bindingName, texture->CpuHandleUAV, texture->GpuHandleUAV, instanceIndex);
 }
 
 void D3D12RTPipelineStateObject::SetBufferUAV(const string& shader, const string& bindingName, Buffer* buffer, int instanceIndex)
 {
 	assert(buffer);
-	SetUAVHandle(shader, bindingName, buffer->GpuHandleUAV, instanceIndex);
+	SetUAVHandle(shader, bindingName, buffer->CpuHandleUAV, buffer->GpuHandleUAV, instanceIndex);
 }
 
 void D3D12RTPipelineStateObject::SetTextureSRV(const string& shader, const string& bindingName, Texture* texture, int instanceIndex)
 {
 	assert(texture);
-	SetSRVHandle(shader, bindingName, texture->GpuHandleSRV, instanceIndex);
+	SetSRVHandle(shader, bindingName, texture->CpuHandleSRV, texture->GpuHandleSRV, instanceIndex);
 }
 
 void D3D12RTPipelineStateObject::SetBufferSRV(const string& shader, const string& bindingName, Buffer* buffer, int instanceIndex)
 {
 	assert(buffer);
-	SetSRVHandle(shader, bindingName, buffer->GpuHandleSRV, instanceIndex);
+	SetSRVHandle(shader, bindingName, buffer->CpuHandleSRV, buffer->GpuHandleSRV, instanceIndex);
 }
 
 bool D3D12RTPipelineStateObject::SetBindlessTextureTable(const string& shader, const string& bindingName)
@@ -7473,7 +7653,7 @@ bool D3D12RTPipelineStateObject::SetBindlessTextureTable(const string& shader, c
 	if (!Owner || !Owner->IsBindlessTextureTableReady())
 		return false;
 
-	SetSRVHandle(shader, bindingName, Owner->GetBindlessTextureTableGpuHandle(), -1);
+	SetSRVHandle(shader, bindingName, Owner->GetBindlessTextureTableCpuHandle(), Owner->GetBindlessTextureTableGpuHandle(), -1);
 	return true;
 }
 
@@ -7482,7 +7662,7 @@ bool D3D12RTPipelineStateObject::SetBindlessBufferTable(const string& shader, co
 	if (!Owner || !Owner->IsBindlessBufferTableReady())
 		return false;
 
-	SetSRVHandle(shader, bindingName, Owner->GetBindlessBufferTableGpuHandle(), -1);
+	SetSRVHandle(shader, bindingName, Owner->GetBindlessBufferTableCpuHandle(), Owner->GetBindlessBufferTableGpuHandle(), -1);
 	return true;
 }
 
@@ -7490,7 +7670,7 @@ void D3D12RTPipelineStateObject::SetAccelerationStructure(const string& shader, 
 {
 	D3D12RTAS* dx12RTAS = dynamic_cast<D3D12RTAS*>(rtas.get());
 	assert(dx12RTAS);
-	SetSRVHandle(shader, bindingName, dx12RTAS->GPUHandle, instanceIndex);
+	SetSRVHandle(shader, bindingName, dx12RTAS->CPUHandle, dx12RTAS->GPUHandle, instanceIndex);
 }
 
 void DescriptorHeapRing::Init(DescriptorHeap* InDHHeap, UINT InNumDescriptors, UINT InNumFrame)

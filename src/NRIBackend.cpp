@@ -22,6 +22,7 @@
 #include <set>
 #include <utility>
 #include <atomic>
+#include <chrono>
 
 #include <wrl/client.h>
 #include <dxcapi.use.h>
@@ -52,6 +53,59 @@ static std::string NarrowAsciiForLog(const std::wstring& text)
 	return out;
 }
 
+namespace
+{
+	using NriCpuProfileClock = std::chrono::steady_clock;
+
+	bool IsNriRecordProfileEnabled()
+	{
+		static const bool enabled = []
+		{
+			const char* value = std::getenv("CORONA_NRI_RECORD_PROFILE");
+			return value && value[0] != '\0' && value[0] != '0';
+		}();
+		return enabled;
+	}
+
+	double NriCpuProfileElapsedMs(NriCpuProfileClock::time_point begin)
+	{
+		return std::chrono::duration<double, std::milli>(NriCpuProfileClock::now() - begin).count();
+	}
+
+	void NriCpuProfileAdd(bool enabled, double& totalMs, uint64_t& count, NriCpuProfileClock::time_point begin)
+	{
+		if (!enabled)
+			return;
+		totalMs += NriCpuProfileElapsedMs(begin);
+		++count;
+	}
+
+	struct NriCpuProfileScope
+	{
+		bool Enabled = false;
+		NriCpuProfileClock::time_point Begin{};
+		double& TotalMs;
+		uint64_t& Count;
+
+		NriCpuProfileScope(bool enabled, double& totalMs, uint64_t& count)
+			: Enabled(enabled)
+			, Begin(enabled ? NriCpuProfileClock::now() : NriCpuProfileClock::time_point{})
+			, TotalMs(totalMs)
+			, Count(count)
+		{
+		}
+
+		~NriCpuProfileScope()
+		{
+			if (Enabled)
+			{
+				TotalMs += NriCpuProfileElapsedMs(Begin);
+				++Count;
+			}
+		}
+	};
+}
+
 // ---------------------------------------------------------------------------
 // Shader compilation: HLSL -> DXIL via dxcompiler.dll. NRI consumes bytecode;
 // when NRI runs on D3D12 it wants DXIL (when on Vulkan it would want SPIR-V,
@@ -62,7 +116,7 @@ static dxc::DxcDllSupport gNriDxc;
 
 namespace NRIFileCache
 {
-	constexpr uint32_t kDxilCacheVersion = 1;
+	constexpr uint32_t kDxilCacheVersion = 2;
 	constexpr uint32_t kPipelineCacheVersion = 1;
 	constexpr uint64_t kFnvOffset = 1469598103934665603ull;
 	constexpr uint64_t kFnvPrime = 1099511628211ull;
@@ -309,6 +363,12 @@ static std::vector<uint8_t> CompileHLSLToDXIL(
 	}
 	std::vector<const wchar_t*> args;
 	std::wstring includeArg;
+#if defined(_DEBUG)
+	args.push_back(DXC_ARG_DEBUG);
+	args.push_back(DXC_ARG_SKIP_OPTIMIZATIONS);
+#else
+	args.push_back(DXC_ARG_OPTIMIZATION_LEVEL3);
+#endif
 	if (!shaderDir.empty())
 	{
 		includeArg = L"-I" + shaderDir;
@@ -540,6 +600,12 @@ struct NRIBackend::Impl
 	uint64_t FenceValue = 0;
 	nri::PipelineCache* PipelineCache = nullptr;
 	std::filesystem::path PipelineCachePath;
+	nri::QueryPool* TimestampQueryPool = nullptr;
+	nri::Buffer* TimestampReadbackBuffer = nullptr;
+	std::vector<nri::Memory*> TimestampReadbackMemory;
+	uint8_t* TimestampReadbackMapped = nullptr;
+	uint32_t TimestampQueryCount = 0;
+	uint32_t TimestampQueryStride = 0;
 
 	void InitializePipelineCache()
 	{
@@ -721,6 +787,8 @@ struct NRIBackend::Impl
 		uint32_t bi = 0;
 		if (IsBackbuffer(t, bi)) { TransitionBackbuffer(access, layout, stages); return; }
 		nri::Texture* nt = NriTex(t); if (!nt) return;
+		const bool profile = IsNriRecordProfileEnabled();
+		NriCpuProfileScope scope(profile, RecordProfile.TransitionTextureMs, RecordProfile.TransitionTextureCount);
 		nri::Layout before = TexLayout.count(t) ? TexLayout[t] : nri::Layout::UNDEFINED;
 		nri::TextureBarrierDesc tb = {};
 		tb.texture = nt;
@@ -734,6 +802,8 @@ struct NRIBackend::Impl
 	void OpenRP()
 	{
 		if (RPOpen || !ActiveCmd || (RTColors.empty() && !RTDepth)) return;
+		const bool profile = IsNriRecordProfileEnabled();
+		NriCpuProfileScope scope(profile, RecordProfile.OpenRenderPassMs, RecordProfile.OpenRenderPassCount);
 		std::vector<nri::AttachmentDesc> colors;
 		for (Texture* t : RTColors)
 		{
@@ -801,6 +871,8 @@ struct NRIBackend::Impl
 	{
 		if (!ActiveCmd || !FrameHasBackbuffer || CurrentBackBuffer >= BackBuffers.size())
 			return;
+		const bool profile = IsNriRecordProfileEnabled();
+		NriCpuProfileScope scope(profile, RecordProfile.TransitionTextureMs, RecordProfile.TransitionTextureCount);
 		nri::TextureBarrierDesc tb = {};
 		tb.texture = BackBuffers[CurrentBackBuffer];
 		tb.before.access = AccessForLayout(BBLayout);
@@ -844,6 +916,8 @@ struct NRIBackend::Impl
 		std::vector<nri::Memory*> memory;
 		void* mapped = nullptr; // non-null for persistently-mapped HOST_UPLOAD buffers
 		BufKey key{};           // spec for the reuse pool
+		nri::AccessStage access = {};
+		bool accessValid = false;
 	};
 	std::shared_ptr<std::atomic_bool> Alive = std::make_shared<std::atomic_bool>(true);
 	std::unordered_map<Buffer*, BufferAlloc> Buffers;
@@ -868,6 +942,11 @@ struct NRIBackend::Impl
 	}
 	void RecycleBuffer(BufferAlloc&& a)
 	{
+		if (a.key.size == 0 || !a.buffer)
+		{
+			FreeBuffer(a.buffer, a.memory);
+			return;
+		}
 		auto& v = BufferReusePool[a.key];
 		if (v.size() < kMaxPooledPerKey)
 			v.push_back(std::move(a));
@@ -882,6 +961,198 @@ struct NRIBackend::Impl
 		BufferReusePool.clear();
 	}
 
+	struct CpuRecordProfile
+	{
+		uint32_t Frames = 0;
+
+		double BeginFrameMs = 0.0;
+		double WaitFrameContextMs = 0.0;
+		double ResetBeginCommandBufferMs = 0.0;
+		double AcquireNextTextureMs = 0.0;
+		double EndFrameMs = 0.0;
+		double EndCommandBufferMs = 0.0;
+		double QueueSubmitMs = 0.0;
+		double QueuePresentMs = 0.0;
+		double FrameFenceWaitMs = 0.0;
+		double ImmediateFenceWaitMs = 0.0;
+		double HelperUploadDataMs = 0.0;
+		double CreateBoundBufferMs = 0.0;
+		double AllocateAndBindBufferMemoryMs = 0.0;
+		double CreateBoundTextureMs = 0.0;
+		double AllocateAndBindTextureMemoryMs = 0.0;
+		double TransientUploadAllocMs = 0.0;
+		double TransientUploadCreateMs = 0.0;
+		double TransientUploadMapMs = 0.0;
+		double TransientUploadMemcpyMs = 0.0;
+		double TransientDefaultAllocMs = 0.0;
+		double TransientDefaultCopyRecordMs = 0.0;
+		double TransientDefaultMemcpyMs = 0.0;
+		double FreeTransientBuffersMs = 0.0;
+		double BindGraphicsPipelineMs = 0.0;
+		double CreateGraphicsBindGroupMs = 0.0;
+		double BindGraphicsBindGroupMs = 0.0;
+		double ApplyForDrawMs = 0.0;
+		double RefreshDescriptorMs = 0.0;
+		double UpdateDescriptorRangesMs = 0.0;
+		double SetDescriptorSetMs = 0.0;
+		double OpenRenderPassMs = 0.0;
+		double TransitionTextureMs = 0.0;
+		double DrawMs = 0.0;
+		double DrawIndexedMs = 0.0;
+		double DrawIndirectMs = 0.0;
+		double DrawIndexedIndirectMs = 0.0;
+		double DispatchMs = 0.0;
+		double ComputeApplyMs = 0.0;
+		double ComputeCbvUpdateMs = 0.0;
+		double RtApplyMs = 0.0;
+		double RtCbvUpdateMs = 0.0;
+		double RtUpdateDescriptorRangesMs = 0.0;
+		double RtSetDescriptorSetMs = 0.0;
+		double RtDispatchRaysMs = 0.0;
+
+		uint64_t BeginFrameCount = 0;
+		uint64_t WaitFrameContextCount = 0;
+		uint64_t ResetBeginCommandBufferCount = 0;
+		uint64_t AcquireNextTextureCount = 0;
+		uint64_t EndFrameCount = 0;
+		uint64_t EndCommandBufferCount = 0;
+		uint64_t QueueSubmitCount = 0;
+		uint64_t QueuePresentCount = 0;
+		uint64_t FrameFenceWaitCount = 0;
+		uint64_t ImmediateFenceWaitCount = 0;
+		uint64_t HelperUploadDataCount = 0;
+		uint64_t CreateBoundBufferCount = 0;
+		uint64_t AllocateAndBindBufferMemoryCount = 0;
+		uint64_t CreateBoundTextureCount = 0;
+		uint64_t AllocateAndBindTextureMemoryCount = 0;
+		uint64_t TransientUploadAllocCount = 0;
+		uint64_t TransientUploadCreateCount = 0;
+		uint64_t TransientUploadMapCount = 0;
+		uint64_t TransientUploadMemcpyCount = 0;
+		uint64_t FreeTransientBuffersCount = 0;
+		uint64_t TransientUploadReuseHit = 0;
+		uint64_t TransientUploadReuseMiss = 0;
+		uint64_t TransientUploadBytes = 0;
+		uint64_t TransientDefaultAllocCount = 0;
+		uint64_t TransientDefaultCopyRecordCount = 0;
+		uint64_t TransientDefaultMemcpyCount = 0;
+		uint64_t TransientDefaultReuseHit = 0;
+		uint64_t TransientDefaultReuseMiss = 0;
+		uint64_t TransientDefaultBytes = 0;
+		uint64_t BindGraphicsPipelineCount = 0;
+		uint64_t CreateGraphicsBindGroupCount = 0;
+		uint64_t BindGraphicsBindGroupCount = 0;
+		uint64_t ApplyForDrawCount = 0;
+		uint64_t RefreshDescriptorCount = 0;
+		uint64_t UpdateDescriptorRangesCount = 0;
+		uint64_t SetDescriptorSetCount = 0;
+		uint64_t OpenRenderPassCount = 0;
+		uint64_t TransitionTextureCount = 0;
+		uint64_t DrawCount = 0;
+		uint64_t DrawIndexedCount = 0;
+		uint64_t DrawIndirectCallCount = 0;
+		uint64_t DrawIndirectDrawCount = 0;
+		uint64_t DrawIndexedIndirectCallCount = 0;
+		uint64_t DrawIndexedIndirectDrawCount = 0;
+		uint64_t DispatchCount = 0;
+		uint64_t ComputeApplyCount = 0;
+		uint64_t ComputeCbvUpdateCount = 0;
+		uint64_t RtApplyCount = 0;
+		uint64_t RtCbvUpdateCount = 0;
+		uint64_t RtUpdateDescriptorRangesCount = 0;
+		uint64_t RtSetDescriptorSetCount = 0;
+		uint64_t RtDispatchRaysCount = 0;
+
+		void Reset()
+		{
+			*this = CpuRecordProfile{};
+		}
+	};
+	CpuRecordProfile RecordProfile;
+
+	void FlushRecordProfileIfReady()
+	{
+		if (!IsNriRecordProfileEnabled() || RecordProfile.Frames < 120)
+			return;
+
+		const CpuRecordProfile& p = RecordProfile;
+		const double frames = static_cast<double>(std::max(1u, p.Frames));
+		auto avgMs = [frames](double totalMs) { return totalMs / frames; };
+		auto perFrame = [frames](uint64_t count) { return static_cast<double>(count) / frames; };
+		auto bytesPerFrameKB = [frames](uint64_t bytes) { return (static_cast<double>(bytes) / frames) / 1024.0; };
+		auto metric = [&](std::wstringstream& ss, const wchar_t* name, double ms, uint64_t count)
+		{
+			ss << L", " << name << L"=" << std::fixed << std::setprecision(3) << avgMs(ms)
+				<< L"ms/" << std::setprecision(1) << perFrame(count) << L"c";
+		};
+
+		std::wstringstream sync;
+		sync << L"[NRIRecordProfile][sync] frames=" << p.Frames;
+		metric(sync, L"beginFrame", p.BeginFrameMs, p.BeginFrameCount);
+		metric(sync, L"waitFrameCtx", p.WaitFrameContextMs, p.WaitFrameContextCount);
+		metric(sync, L"resetBeginCmd", p.ResetBeginCommandBufferMs, p.ResetBeginCommandBufferCount);
+		metric(sync, L"acquire", p.AcquireNextTextureMs, p.AcquireNextTextureCount);
+		metric(sync, L"endFrame", p.EndFrameMs, p.EndFrameCount);
+		metric(sync, L"endCmd", p.EndCommandBufferMs, p.EndCommandBufferCount);
+		metric(sync, L"submit", p.QueueSubmitMs, p.QueueSubmitCount);
+		metric(sync, L"present", p.QueuePresentMs, p.QueuePresentCount);
+		metric(sync, L"frameWait", p.FrameFenceWaitMs, p.FrameFenceWaitCount);
+		metric(sync, L"immWait", p.ImmediateFenceWaitMs, p.ImmediateFenceWaitCount);
+		metric(sync, L"uploadData", p.HelperUploadDataMs, p.HelperUploadDataCount);
+		AppendCpuRuntimeTrace(sync.str());
+
+		std::wstringstream alloc;
+		alloc << L"[NRIRecordProfile][alloc] frames=" << p.Frames;
+		metric(alloc, L"createBuf", p.CreateBoundBufferMs, p.CreateBoundBufferCount);
+		metric(alloc, L"allocBindBuf", p.AllocateAndBindBufferMemoryMs, p.AllocateAndBindBufferMemoryCount);
+		metric(alloc, L"createTex", p.CreateBoundTextureMs, p.CreateBoundTextureCount);
+		metric(alloc, L"allocBindTex", p.AllocateAndBindTextureMemoryMs, p.AllocateAndBindTextureMemoryCount);
+		metric(alloc, L"transient", p.TransientUploadAllocMs, p.TransientUploadAllocCount);
+		metric(alloc, L"transCreate", p.TransientUploadCreateMs, p.TransientUploadCreateCount);
+		metric(alloc, L"transMap", p.TransientUploadMapMs, p.TransientUploadMapCount);
+		metric(alloc, L"transMemcpy", p.TransientUploadMemcpyMs, p.TransientUploadMemcpyCount);
+		metric(alloc, L"defaultTransient", p.TransientDefaultAllocMs, p.TransientDefaultAllocCount);
+		metric(alloc, L"defaultCopyRecord", p.TransientDefaultCopyRecordMs, p.TransientDefaultCopyRecordCount);
+		metric(alloc, L"defaultMemcpy", p.TransientDefaultMemcpyMs, p.TransientDefaultMemcpyCount);
+		metric(alloc, L"freeTransient", p.FreeTransientBuffersMs, p.FreeTransientBuffersCount);
+		alloc << L", transKB/frame=" << std::fixed << std::setprecision(1) << bytesPerFrameKB(p.TransientUploadBytes)
+			<< L", reuseHit/frame=" << perFrame(p.TransientUploadReuseHit)
+			<< L", reuseMiss/frame=" << perFrame(p.TransientUploadReuseMiss)
+			<< L", defaultKB/frame=" << bytesPerFrameKB(p.TransientDefaultBytes)
+			<< L", defaultReuseHit/frame=" << perFrame(p.TransientDefaultReuseHit)
+			<< L", defaultReuseMiss/frame=" << perFrame(p.TransientDefaultReuseMiss);
+		AppendCpuRuntimeTrace(alloc.str());
+
+		std::wstringstream record;
+		record << L"[NRIRecordProfile][record] frames=" << p.Frames;
+		metric(record, L"openRP", p.OpenRenderPassMs, p.OpenRenderPassCount);
+		metric(record, L"transitionTex", p.TransitionTextureMs, p.TransitionTextureCount);
+		metric(record, L"bindPSO", p.BindGraphicsPipelineMs, p.BindGraphicsPipelineCount);
+		metric(record, L"createBG", p.CreateGraphicsBindGroupMs, p.CreateGraphicsBindGroupCount);
+		metric(record, L"bindBG", p.BindGraphicsBindGroupMs, p.BindGraphicsBindGroupCount);
+		metric(record, L"applyDraw", p.ApplyForDrawMs, p.ApplyForDrawCount);
+		metric(record, L"refreshDesc", p.RefreshDescriptorMs, p.RefreshDescriptorCount);
+		metric(record, L"updateDesc", p.UpdateDescriptorRangesMs, p.UpdateDescriptorRangesCount);
+		metric(record, L"setDescSet", p.SetDescriptorSetMs, p.SetDescriptorSetCount);
+		metric(record, L"draw", p.DrawMs, p.DrawCount);
+		metric(record, L"drawIdx", p.DrawIndexedMs, p.DrawIndexedCount);
+		metric(record, L"drawIndirect", p.DrawIndirectMs, p.DrawIndirectCallCount);
+		metric(record, L"drawIdxIndirect", p.DrawIndexedIndirectMs, p.DrawIndexedIndirectCallCount);
+		metric(record, L"dispatch", p.DispatchMs, p.DispatchCount);
+		metric(record, L"computeApply", p.ComputeApplyMs, p.ComputeApplyCount);
+		metric(record, L"computeCBV", p.ComputeCbvUpdateMs, p.ComputeCbvUpdateCount);
+		metric(record, L"rtApply", p.RtApplyMs, p.RtApplyCount);
+		metric(record, L"rtCBV", p.RtCbvUpdateMs, p.RtCbvUpdateCount);
+		metric(record, L"rtUpdateDesc", p.RtUpdateDescriptorRangesMs, p.RtUpdateDescriptorRangesCount);
+		metric(record, L"rtSetDesc", p.RtSetDescriptorSetMs, p.RtSetDescriptorSetCount);
+		metric(record, L"rtDispatchRays", p.RtDispatchRaysMs, p.RtDispatchRaysCount);
+		record << L", indirectDraws/frame=" << std::fixed << std::setprecision(1) << perFrame(p.DrawIndirectDrawCount)
+			<< L", indexedIndirectDraws/frame=" << perFrame(p.DrawIndexedIndirectDrawCount);
+		AppendCpuRuntimeTrace(record.str());
+
+		RecordProfile.Reset();
+	}
+
 	// TEMP perf instrumentation (CORONA_NRI_STATS): per-frame counts of the hot
 	// recording ops to find the remaining CPU bottleneck without guessing.
 	uint64_t StatAlloc = 0;   // CreateBoundBuffer (committed GPU heap allocations)
@@ -893,10 +1164,16 @@ struct NRIBackend::Impl
 	std::vector<std::shared_ptr<Buffer>> TransientBuffers;
 	void FreeTransientBuffers(std::vector<std::shared_ptr<Buffer>>& transientBuffers)
 	{
+		const bool profile = IsNriRecordProfileEnabled();
+		NriCpuProfileScope scope(profile, RecordProfile.FreeTransientBuffersMs, RecordProfile.FreeTransientBuffersCount);
 		for (auto& w : transientBuffers)
 		{
 			auto it = Buffers.find(w.get());
-			if (it != Buffers.end()) { FreeBuffer(it->second.buffer, it->second.memory); Buffers.erase(it); }
+			if (it != Buffers.end())
+			{
+				RecycleBuffer(std::move(it->second));
+				Buffers.erase(it);
+			}
 		}
 		transientBuffers.clear();
 	}
@@ -939,7 +1216,12 @@ struct NRIBackend::Impl
 	void WaitForFrameContext(FrameContext& frame)
 	{
 		if (FrameFence && frame.fenceValue != 0)
+		{
+			const bool profile = IsNriRecordProfileEnabled();
+			const auto start = profile ? NriCpuProfileClock::now() : NriCpuProfileClock::time_point{};
 			Core.Wait(*FrameFence, frame.fenceValue);
+			NriCpuProfileAdd(profile, RecordProfile.WaitFrameContextMs, RecordProfile.WaitFrameContextCount, start);
+		}
 	}
 	void WaitForFrameContexts()
 	{
@@ -969,7 +1251,12 @@ struct NRIBackend::Impl
 	void WaitForImmediateContext(ImmediateContext& ctx)
 	{
 		if (Fence && ctx.fenceValue != 0)
+		{
+			const bool profile = IsNriRecordProfileEnabled();
+			const auto start = profile ? NriCpuProfileClock::now() : NriCpuProfileClock::time_point{};
 			Core.Wait(*Fence, ctx.fenceValue);
+			NriCpuProfileAdd(profile, RecordProfile.ImmediateFenceWaitMs, RecordProfile.ImmediateFenceWaitCount, start);
+		}
 	}
 	void WaitForImmediateContexts()
 	{
@@ -1085,6 +1372,8 @@ struct NRIBackend::Impl
 		outMemory.clear();
 		if (!Device)
 			return false;
+		const bool profile = IsNriRecordProfileEnabled();
+		NriCpuProfileScope scope(profile, RecordProfile.CreateBoundBufferMs, RecordProfile.CreateBoundBufferCount);
 
 		nri::BufferDesc bd = {};
 		bd.size = size;
@@ -1101,13 +1390,16 @@ struct NRIBackend::Impl
 
 		const uint32_t allocNum = Helper.CalculateAllocationNumber(*Device, rg);
 		outMemory.resize(allocNum, nullptr);
+		const auto allocStart = profile ? NriCpuProfileClock::now() : NriCpuProfileClock::time_point{};
 		if (Helper.AllocateAndBindMemory(*Device, rg, outMemory.data()) != nri::Result::SUCCESS)
 		{
+			NriCpuProfileAdd(profile, RecordProfile.AllocateAndBindBufferMemoryMs, RecordProfile.AllocateAndBindBufferMemoryCount, allocStart);
 			Core.DestroyBuffer(outBuffer);
 			outBuffer = nullptr;
 			outMemory.clear();
 			return false;
 		}
+		NriCpuProfileAdd(profile, RecordProfile.AllocateAndBindBufferMemoryMs, RecordProfile.AllocateAndBindBufferMemoryCount, allocStart);
 		++StatAlloc;
 		return true;
 	}
@@ -1125,6 +1417,8 @@ struct NRIBackend::Impl
 		outMem.clear();
 		if (!Device)
 			return false;
+		const bool profile = IsNriRecordProfileEnabled();
+		NriCpuProfileScope scope(profile, RecordProfile.CreateBoundTextureMs, RecordProfile.CreateBoundTextureCount);
 		if (Core.CreateTexture(*Device, td, outTex) != nri::Result::SUCCESS || outTex == nullptr)
 			return false;
 
@@ -1136,13 +1430,16 @@ struct NRIBackend::Impl
 
 		const uint32_t allocNum = Helper.CalculateAllocationNumber(*Device, rg);
 		outMem.resize(allocNum, nullptr);
+		const auto allocStart = profile ? NriCpuProfileClock::now() : NriCpuProfileClock::time_point{};
 		if (Helper.AllocateAndBindMemory(*Device, rg, outMem.data()) != nri::Result::SUCCESS)
 		{
+			NriCpuProfileAdd(profile, RecordProfile.AllocateAndBindTextureMemoryMs, RecordProfile.AllocateAndBindTextureMemoryCount, allocStart);
 			Core.DestroyTexture(outTex);
 			outTex = nullptr;
 			outMem.clear();
 			return false;
 		}
+		NriCpuProfileAdd(profile, RecordProfile.AllocateAndBindTextureMemoryMs, RecordProfile.AllocateAndBindTextureMemoryCount, allocStart);
 		return true;
 	}
 
@@ -1381,7 +1678,12 @@ struct NRIBackend::Impl
 			return false;
 
 		if (!immediateContext && FenceValue != 0)
+		{
+			const bool profile = IsNriRecordProfileEnabled();
+			const auto waitStart = profile ? NriCpuProfileClock::now() : NriCpuProfileClock::time_point{};
 			Core.Wait(*Fence, FenceValue);
+			NriCpuProfileAdd(profile, RecordProfile.ImmediateFenceWaitMs, RecordProfile.ImmediateFenceWaitCount, waitStart);
+		}
 
 		Core.ResetCommandAllocator(*allocator);
 		if (Core.BeginCommandBuffer(*commandBuffer, nullptr) != nri::Result::SUCCESS)
@@ -1410,7 +1712,12 @@ struct NRIBackend::Impl
 			immediateContext->fenceValue = signalFence.value;
 		if (!waitForCompletion)
 			return true;
-		Core.Wait(*Fence, FenceValue);
+		{
+			const bool profile = IsNriRecordProfileEnabled();
+			const auto waitStart = profile ? NriCpuProfileClock::now() : NriCpuProfileClock::time_point{};
+			Core.Wait(*Fence, FenceValue);
+			NriCpuProfileAdd(profile, RecordProfile.ImmediateFenceWaitMs, RecordProfile.ImmediateFenceWaitCount, waitStart);
+		}
 		if (immediateContext)
 			immediateContext->fenceValue = 0;
 		return Core.GetFenceValue(*Fence) >= FenceValue;
@@ -2138,6 +2445,8 @@ public:
 	void SetCBVValue(const std::string& name, void* data) override
 	{
 		if (!m->Device || !data) return;
+		const bool profile = IsNriRecordProfileEnabled();
+		NriCpuProfileScope cbvScope(profile, m->RecordProfile.ComputeCbvUpdateMs, m->RecordProfile.ComputeCbvUpdateCount);
 		auto sit = CbvSizeByName.find(name);
 		const uint32_t size = (sit != CbvSizeByName.end()) ? sit->second : 0u;
 		if (size == 0) return;
@@ -2155,15 +2464,19 @@ public:
 			nri::BufferViewDesc bvd = {};
 			bvd.buffer = cb.buffer; bvd.type = nri::BufferView::CONSTANT_BUFFER; bvd.offset = 0; bvd.size = alignedSize;
 			m->Core.CreateBufferView(bvd, cb.view);
+			cb.mapped = m->Core.MapBuffer(*cb.buffer, 0, alignedSize);
+			++m->StatMap;
 		}
 		if (Binding* b = Find(name)) { b->kind = ResKind::CBV; b->desc = cb.view; b->ownsDesc = false; }
-		void* mapped = m->Core.MapBuffer(*cb.buffer, 0, size);
-		if (mapped) { memcpy(mapped, data, size); m->Core.UnmapBuffer(*cb.buffer); }
+		if (cb.mapped)
+			memcpy(cb.mapped, data, size);
 	}
 
 	void Apply() override
 	{
 		if (!m->ActiveCmd) return;
+		const bool profile = IsNriRecordProfileEnabled();
+		NriCpuProfileScope applyScope(profile, m->RecordProfile.ComputeApplyMs, m->RecordProfile.ComputeApplyCount);
 		m->EndRP();
 		if (!EnsureInit()) return;
 
@@ -2172,7 +2485,10 @@ public:
 		const uint32_t frameSlot = m->ActiveFrameContextIndex % std::max(1u, m->FrameRingCount());
 		std::vector<nri::DescriptorSet*>* setsForFrame = frameSlot < Sets.size() ? &Sets[frameSlot] : nullptr;
 
-		// Write descriptors into the sets.
+		// Write descriptors into the sets. Batch the range writes to avoid a driver
+		// call per binding on compute-heavy frames.
+		static std::vector<nri::UpdateDescriptorRangeDesc> updateScratch;
+		updateScratch.clear();
 		for (Binding& b : Bindings)
 		{
 			if (b.kind == ResKind::None || !b.desc || !setsForFrame || b.setIndex >= setsForFrame->size() || !(*setsForFrame)[b.setIndex])
@@ -2184,7 +2500,12 @@ public:
 			upd.baseDescriptor = 0;
 			upd.descriptors = b.descSingle;
 			upd.descriptorNum = 1;
-			++m->StatUDR; m->Core.UpdateDescriptorRanges(&upd, 1);
+			updateScratch.push_back(upd);
+		}
+		if (!updateScratch.empty())
+		{
+			++m->StatUDR;
+			m->Core.UpdateDescriptorRanges(updateScratch.data(), static_cast<uint32_t>(updateScratch.size()));
 		}
 
 		if (Pool) m->Core.CmdSetDescriptorPool(*m->ActiveCmd, *Pool);
@@ -2205,7 +2526,7 @@ public:
 	nri::Pipeline* GetPipeline() const { return Pipeline; }
 
 private:
-	struct CbvBuf { nri::Buffer* buffer = nullptr; std::vector<nri::Memory*> memory; uint32_t size = 0; nri::Descriptor* view = nullptr; };
+	struct CbvBuf { nri::Buffer* buffer = nullptr; std::vector<nri::Memory*> memory; uint32_t size = 0; nri::Descriptor* view = nullptr; void* mapped = nullptr; };
 
 	void AddBinding(const std::string& name, uint32_t reg, RegClass rc)
 	{
@@ -2412,10 +2733,12 @@ public:
 				m->FreeBuffer(cb.buffer, cb.memory);
 			}
 		}
+		m->FreeBuffer(SbtUploadBuffer, SbtUploadMemory);
 		m->FreeBuffer(SbtBuffer, SbtMemory);
 	}
 
 	void SetNumInstances(uint32_t numInstances) override { NumInstances = std::max(1u, numInstances); }
+	bool UsesSharedHitRecords() const override { return true; }
 	void Configure(uint32_t maxRecursion, uint32_t maxPayloadSizeInBytes, uint32_t maxAttributeSizeInBytes) override
 	{
 		MaxRecursion = maxRecursion;
@@ -2554,6 +2877,8 @@ public:
 	{
 		if (!m || !m->Device || !pData)
 			return;
+		const bool profile = IsNriRecordProfileEnabled();
+		NriCpuProfileScope cbvScope(profile, m->RecordProfile.RtCbvUpdateMs, m->RecordProfile.RtCbvUpdateCount);
 		Binding* b = Find(shader, bindingName);
 		if (!b || b->cbSize == 0)
 			return;
@@ -2575,13 +2900,11 @@ public:
 			bvd.size = alignedSize;
 			if (m->Core.CreateBufferView(bvd, cb.view) != nri::Result::SUCCESS)
 				return;
+			cb.mapped = m->Core.MapBuffer(*cb.buffer, 0, alignedSize);
+			++m->StatMap;
 		}
-		void* mapped = m->Core.MapBuffer(*cb.buffer, 0, b->cbSize);
-		if (mapped)
-		{
-			memcpy(mapped, pData, b->cbSize);
-			m->Core.UnmapBuffer(*cb.buffer);
-		}
+		if (cb.mapped)
+			memcpy(cb.mapped, pData, b->cbSize);
 		b->kind = ResKind::CBV;
 		b->desc = cb.view;
 		b->ownsDesc = false;
@@ -2778,13 +3101,26 @@ public:
 			L" missOff=" + std::to_wstring(MissOffset) +
 			L" hitOff=" + std::to_wstring(HitOffset) +
 			L" ok=" + std::to_wstring(sbtOk ? 1 : 0));
-		return sbtOk;
+		if (!sbtOk)
+		{
+			m->FreeBuffer(SbtUploadBuffer, SbtUploadMemory);
+			m->FreeBuffer(SbtBuffer, SbtMemory);
+			if (Pipeline)
+			{
+				m->Core.DestroyPipeline(Pipeline);
+				Pipeline = nullptr;
+			}
+			return false;
+		}
+		return true;
 	}
 
 	void Apply(uint32_t width, uint32_t height) override
 	{
 		if (!m || !m->ActiveCmd)
 			return;
+		const bool profile = IsNriRecordProfileEnabled();
+		NriCpuProfileScope applyScope(profile, m->RecordProfile.RtApplyMs, m->RecordProfile.RtApplyCount);
 		EnsureBuilt(); // lazily build the pipeline now that all bindings are declared
 		if (!Pipeline || !Layout || !SbtBuffer)
 			return;
@@ -2804,6 +3140,9 @@ public:
 
 		if (setsForFrame && !setsForFrame->empty())
 		{
+			static std::vector<nri::UpdateDescriptorRangeDesc> updateScratch;
+			updateScratch.clear();
+
 			// Bindless tables: write the backend's global registry descriptors
 			// (material textures / geometry buffers) into the bindless ranges.
 			// PARTIALLY_BOUND covers slots past the registered count.
@@ -2822,7 +3161,7 @@ public:
 				upd.baseDescriptor = 0;
 				upd.descriptors = regDescs.data();
 				upd.descriptorNum = count;
-				++m->StatUDR; m->Core.UpdateDescriptorRanges(&upd, 1);
+				updateScratch.push_back(upd);
 			}
 			for (Binding& b : Bindings)
 			{
@@ -2860,7 +3199,14 @@ public:
 					upd.descriptors = b.descSingle;
 					upd.descriptorNum = 1;
 				}
-				++m->StatUDR; m->Core.UpdateDescriptorRanges(&upd, 1);
+				updateScratch.push_back(upd);
+			}
+			if (!updateScratch.empty())
+			{
+				++m->StatUDR;
+				const auto updateStart = profile ? NriCpuProfileClock::now() : NriCpuProfileClock::time_point{};
+				m->Core.UpdateDescriptorRanges(updateScratch.data(), static_cast<uint32_t>(updateScratch.size()));
+				NriCpuProfileAdd(profile, m->RecordProfile.RtUpdateDescriptorRangesMs, m->RecordProfile.RtUpdateDescriptorRangesCount, updateStart);
 			}
 			m->Core.CmdSetDescriptorPool(*m->ActiveCmd, *Pool);
 		}
@@ -2874,7 +3220,9 @@ public:
 			sd.setIndex = setIndex;
 			sd.descriptorSet = (*setsForFrame)[setIndex];
 			sd.bindPoint = nri::BindPoint::RAY_TRACING;
+			const auto setStart = profile ? NriCpuProfileClock::now() : NriCpuProfileClock::time_point{};
 			m->Core.CmdSetDescriptorSet(*m->ActiveCmd, sd);
+			NriCpuProfileAdd(profile, m->RecordProfile.RtSetDescriptorSetMs, m->RecordProfile.RtSetDescriptorSetCount, setStart);
 		}
 		m->Core.CmdSetPipeline(*m->ActiveCmd, *Pipeline);
 
@@ -2897,7 +3245,9 @@ public:
 		dispatch.x = width;
 		dispatch.y = height;
 		dispatch.z = 1;
+		const auto dispatchStart = profile ? NriCpuProfileClock::now() : NriCpuProfileClock::time_point{};
 		m->RT.CmdDispatchRays(*m->ActiveCmd, dispatch);
+		NriCpuProfileAdd(profile, m->RecordProfile.RtDispatchRaysMs, m->RecordProfile.RtDispatchRaysCount, dispatchStart);
 	}
 
 private:
@@ -2905,7 +3255,7 @@ private:
 	enum class ResKind { None, TexSRV, TexUAV, BufSRV, BufUAV, CBV, Sampler, Accel, VertexSRV, IndexSRV };
 	struct ShaderEntry { std::string name; RTPipelineStateObject::ShaderType type = RTPipelineStateObject::GLOBAL; std::vector<uint8_t> dxil; };
 	struct HitGroupEntry { std::string name; std::string chs; std::string ahs; };
-	struct CbvBuf { nri::Buffer* buffer = nullptr; std::vector<nri::Memory*> memory; nri::Descriptor* view = nullptr; };
+	struct CbvBuf { nri::Buffer* buffer = nullptr; std::vector<nri::Memory*> memory; nri::Descriptor* view = nullptr; void* mapped = nullptr; };
 	struct Binding
 	{
 		std::string shader;
@@ -3252,12 +3602,38 @@ private:
 		MissOffset = AlignUpU64(RaygenOffset + SbtEntrySize * std::max(1u, RaygenGroupCount), alignment);
 		HitOffset = AlignUpU64(MissOffset + SbtEntrySize * std::max(1u, MissGroupCount), alignment);
 		const uint64_t sbtSize = HitOffset + SbtEntrySize * std::max(1u, HitGroupCount);
-		if (idSize == 0 || !m->CreateBoundBuffer(sbtSize, 0, nri::BufferUsageBits::SHADER_BINDING_TABLE, nri::MemoryLocation::HOST_UPLOAD, SbtBuffer, SbtMemory))
+		if (idSize == 0)
 			return false;
 
-		uint8_t* mapped = static_cast<uint8_t*>(m->Core.MapBuffer(*SbtBuffer, 0, sbtSize));
-		if (!mapped)
+		if (!m->CreateBoundBuffer(
+			sbtSize,
+			0,
+			nri::BufferUsageBits::SHADER_BINDING_TABLE,
+			nri::MemoryLocation::DEVICE,
+			SbtBuffer,
+			SbtMemory))
+		{
 			return false;
+		}
+		if (!m->CreateBoundBuffer(
+			sbtSize,
+			0,
+			nri::BufferUsageBits::NONE,
+			nri::MemoryLocation::HOST_UPLOAD,
+			SbtUploadBuffer,
+			SbtUploadMemory))
+		{
+			m->FreeBuffer(SbtBuffer, SbtMemory);
+			return false;
+		}
+
+		uint8_t* mapped = static_cast<uint8_t*>(m->Core.MapBuffer(*SbtUploadBuffer, 0, sbtSize));
+		if (!mapped)
+		{
+			m->FreeBuffer(SbtUploadBuffer, SbtUploadMemory);
+			m->FreeBuffer(SbtBuffer, SbtMemory);
+			return false;
+		}
 		memset(mapped, 0, static_cast<size_t>(sbtSize));
 		// WriteShaderGroupIdentifiers packs identifiers at shaderGroupIdentifierSize
 		// stride, but the shader binding table addresses records at SbtEntrySize
@@ -3282,8 +3658,59 @@ private:
 		ok = writeGroups(RaygenGroupCount, MissGroupCount, MissOffset) && ok;
 		if (HitGroupCount > 0)
 			ok = writeGroups(HitGroupStart, HitGroupCount, HitOffset) && ok;
-		m->Core.UnmapBuffer(*SbtBuffer);
-		return ok;
+		m->Core.UnmapBuffer(*SbtUploadBuffer);
+		if (!ok)
+		{
+			m->FreeBuffer(SbtUploadBuffer, SbtUploadMemory);
+			m->FreeBuffer(SbtBuffer, SbtMemory);
+			return false;
+		}
+
+		auto recordCopy = [&](nri::CommandBuffer& cmd)
+		{
+			const nri::AccessStage noneAccess{ nri::AccessBits::NONE, nri::StageBits::ALL };
+			const nri::AccessStage copySource{ nri::AccessBits::COPY_SOURCE, nri::StageBits::COPY };
+			const nri::AccessStage copyDest{ nri::AccessBits::COPY_DESTINATION, nri::StageBits::COPY };
+			const nri::AccessStage sbtRead{ nri::AccessBits::SHADER_BINDING_TABLE, nri::StageBits::RAY_TRACING_SHADERS };
+
+			nri::BufferBarrierDesc toCopy[2] = {};
+			toCopy[0].buffer = SbtUploadBuffer;
+			toCopy[0].before = noneAccess;
+			toCopy[0].after = copySource;
+			toCopy[1].buffer = SbtBuffer;
+			toCopy[1].before = noneAccess;
+			toCopy[1].after = copyDest;
+			nri::BarrierDesc copyBarrier = {};
+			copyBarrier.buffers = toCopy;
+			copyBarrier.bufferNum = 2;
+			m->Core.CmdBarrier(cmd, copyBarrier);
+
+			m->Core.CmdCopyBuffer(cmd, *SbtBuffer, 0, *SbtUploadBuffer, 0, sbtSize);
+
+			nri::BufferBarrierDesc toSbt = {};
+			toSbt.buffer = SbtBuffer;
+			toSbt.before = copyDest;
+			toSbt.after = sbtRead;
+			nri::BarrierDesc sbtBarrier = {};
+			sbtBarrier.buffers = &toSbt;
+			sbtBarrier.bufferNum = 1;
+			m->Core.CmdBarrier(cmd, sbtBarrier);
+		};
+
+		if (m->ActiveCmd)
+		{
+			m->EndRP();
+			recordCopy(*m->ActiveCmd);
+			return true;
+		}
+
+		if (!m->SubmitImmediate("[NRIRTPSO] SBT upload immediate submit failed\n", recordCopy, true))
+		{
+			m->FreeBuffer(SbtUploadBuffer, SbtUploadMemory);
+			m->FreeBuffer(SbtBuffer, SbtMemory);
+			return false;
+		}
+		return true;
 	}
 
 	void ResetOwnedDescriptor(Binding& b)
@@ -3523,6 +3950,8 @@ private:
 	std::vector<std::vector<nri::DescriptorSet*>> Sets;
 	nri::Buffer* SbtBuffer = nullptr;
 	std::vector<nri::Memory*> SbtMemory;
+	nri::Buffer* SbtUploadBuffer = nullptr;
+	std::vector<nri::Memory*> SbtUploadMemory;
 	uint64_t SbtEntrySize = 0;
 	uint64_t RaygenOffset = 0;
 	uint64_t MissOffset = 0;
@@ -3624,6 +4053,8 @@ public:
 	{
 		if (!Pipeline || !m->ActiveCmd)
 			return false;
+		const bool profile = IsNriRecordProfileEnabled();
+		NriCpuProfileScope applyScope(profile, m->RecordProfile.ApplyForDrawMs, m->RecordProfile.ApplyForDrawCount);
 		if (!HasResources || !Pool)
 			return true;
 
@@ -3733,7 +4164,12 @@ public:
 			else
 			{
 				if (b.kind == Kind::CBV) { b.desc = cbView; b.ownsDesc = false; }
-				else RefreshDescriptor(b);
+				else
+				{
+					const auto refreshStart = profile ? NriCpuProfileClock::now() : NriCpuProfileClock::time_point{};
+					RefreshDescriptor(b);
+					NriCpuProfileAdd(profile, m->RecordProfile.RefreshDescriptorMs, m->RecordProfile.RefreshDescriptorCount, refreshStart);
+				}
 				if (!b.desc)
 					continue;
 				b.descSingle[0] = b.desc;
@@ -3745,7 +4181,9 @@ public:
 		if (!updScratch.empty())
 		{
 			++m->StatUDR;
+			const auto updateStart = profile ? NriCpuProfileClock::now() : NriCpuProfileClock::time_point{};
 			m->Core.UpdateDescriptorRanges(updScratch.data(), static_cast<uint32_t>(updScratch.size()));
+			NriCpuProfileAdd(profile, m->RecordProfile.UpdateDescriptorRangesMs, m->RecordProfile.UpdateDescriptorRangesCount, updateStart);
 		}
 
 		for (uint32_t setIndex = 0; setIndex < SetStates.size(); ++setIndex)
@@ -3759,7 +4197,9 @@ public:
 			sd.setIndex = setIndex;
 			sd.descriptorSet = set;
 			sd.bindPoint = nri::BindPoint::GRAPHICS;
+			const auto setStart = profile ? NriCpuProfileClock::now() : NriCpuProfileClock::time_point{};
 			m->Core.CmdSetDescriptorSet(*m->ActiveCmd, sd);
+			NriCpuProfileAdd(profile, m->RecordProfile.SetDescriptorSetMs, m->RecordProfile.SetDescriptorSetCount, setStart);
 		}
 		return true;
 	}
@@ -3791,14 +4231,14 @@ private:
 	{
 		if (b.kind == Kind::CBV) { b.desc = Cbv.view; b.ownsDesc = false; return; }
 		if (b.kind == Kind::Sampler) { if (b.samp) { auto it = m->Samplers.find(b.samp); b.desc = it != m->Samplers.end() ? it->second : nullptr; } return; }
-		void* res = b.tex ? (void*)b.tex : (void*)b.buf;
-		if (res == b.last && b.desc) return;
-		if (b.ownsDesc && b.desc) { m->Core.DestroyDescriptor(b.desc); b.desc = nullptr; }
-		b.last = res;
 		if (b.kind == Kind::TexSRV && b.tex)
 		{
 			auto it = m->Textures.find(b.tex);
 			if (it == m->Textures.end() || !it->second.texture) return;
+			void* res = it->second.texture;
+			if (res == b.last && b.desc) return;
+			if (b.ownsDesc && b.desc) { m->Core.DestroyDescriptor(b.desc); b.desc = nullptr; }
+			b.last = res;
 			const nri::TextureDesc& td = m->Core.GetTextureDesc(*it->second.texture);
 			nri::TextureViewDesc tvd = {}; tvd.texture = it->second.texture; tvd.type = nri::TextureView::TEXTURE; tvd.format = td.format; tvd.mipNum = nri::REMAINING; tvd.layerNum = nri::REMAINING;
 			nri::Descriptor* d = nullptr; if (m->Core.CreateTextureView(tvd, d) == nri::Result::SUCCESS) { b.desc = d; b.ownsDesc = true; }
@@ -3807,6 +4247,10 @@ private:
 		{
 			auto it = m->Buffers.find(b.buf);
 			if (it == m->Buffers.end() || !it->second.buffer) return;
+			void* res = it->second.buffer;
+			if (res == b.last && b.desc) return;
+			if (b.ownsDesc && b.desc) { m->Core.DestroyDescriptor(b.desc); b.desc = nullptr; }
+			b.last = res;
 			nri::BufferViewDesc bvd = {};
 			bvd.buffer = it->second.buffer;
 			bvd.type = (b.bufferView == RHIBufferViewKind::Raw) ? nri::BufferView::BYTE_ADDRESS_BUFFER : nri::BufferView::STRUCTURED_BUFFER;
@@ -4506,6 +4950,7 @@ NRIBackend::~NRIBackend()
 		m->RayTracingAS.clear();
 		m->DestroyFrameContexts();
 		m->DestroyImmediateContexts();
+		ShutdownGpuTimestampQueries();
 
 		for (auto& kv : m->Buffers)
 		{
@@ -4636,6 +5081,8 @@ void NRIBackend::BeginFrame()
 {
 	if (!m->Device || m->ActiveCmd || m->DeviceLost)
 		return;
+	const bool profile = IsNriRecordProfileEnabled();
+	NriCpuProfileScope frameScope(profile, m->RecordProfile.BeginFrameMs, m->RecordProfile.BeginFrameCount);
 	// Frame-start GPU-fault check: if the device was removed (the camera-move
 	// freeze), dump DRED once. More reliable than hooking a specific submit — once
 	// removed, every later frame's GetDeviceRemovedReason reports it.
@@ -4681,8 +5128,10 @@ void NRIBackend::BeginFrame()
 
 	if (!allocator || !commandBuffer)
 		return;
+	const auto resetBeginStart = profile ? NriCpuProfileClock::now() : NriCpuProfileClock::time_point{};
 	m->Core.ResetCommandAllocator(*allocator);
 	const nri::Result beginResult = m->Core.BeginCommandBuffer(*commandBuffer, nullptr);
+	NriCpuProfileAdd(profile, m->RecordProfile.ResetBeginCommandBufferMs, m->RecordProfile.ResetBeginCommandBufferCount, resetBeginStart);
 	if (beginResult != nri::Result::SUCCESS)
 	{
 		MarkDeviceLost("BeginCommandBuffer", static_cast<int>(beginResult));
@@ -4695,7 +5144,9 @@ void NRIBackend::BeginFrame()
 		const uint32_t n = (uint32_t)m->BackBuffers.size();
 		nri::Fence* acq = m->AcquireSem[m->SwapFrameIndex % n];
 		uint32_t idx = 0;
+		const auto acquireStart = profile ? NriCpuProfileClock::now() : NriCpuProfileClock::time_point{};
 		const nri::Result acquireResult = m->SwapChainI.AcquireNextTexture(*m->SwapChain, *acq, idx);
+		NriCpuProfileAdd(profile, m->RecordProfile.AcquireNextTextureMs, m->RecordProfile.AcquireNextTextureCount, acquireStart);
 		if (acquireResult == nri::Result::SUCCESS && idx < n)
 		{
 			m->CurrentBackBuffer = idx;
@@ -4797,6 +5248,9 @@ void NRIBackend::EndFrame()
 {
 	if (!m->ActiveCmd || m->DeviceLost)
 		return;
+	m->FlushRecordProfileIfReady();
+	const bool profile = IsNriRecordProfileEnabled();
+	NriCpuProfileScope frameScope(profile, m->RecordProfile.EndFrameMs, m->RecordProfile.EndFrameCount);
 	// TEMP perf instrumentation: per-120-frame hot-op counts (CORONA_NRI_STATS).
 	{
 		static const bool s_stats = std::getenv("CORONA_NRI_STATS") != nullptr;
@@ -4822,7 +5276,9 @@ void NRIBackend::EndFrame()
 		if (m->BBLayout != nri::Layout::PRESENT)
 			m->TransitionBackbuffer(nri::AccessBits::NONE, nri::Layout::PRESENT, nri::StageBits::NONE);
 
+		const auto endCmdStart = profile ? NriCpuProfileClock::now() : NriCpuProfileClock::time_point{};
 		m->Core.EndCommandBuffer(*m->ActiveCmd);
+		NriCpuProfileAdd(profile, m->RecordProfile.EndCommandBufferMs, m->RecordProfile.EndCommandBufferCount, endCmdStart);
 
 		nri::Fence* release = m->ReleaseSem[m->CurrentBackBuffer];
 		nri::FenceSubmitDesc waitAcq = {}; waitAcq.fence = m->CurAcquire; waitAcq.stages = nri::StageBits::ALL;
@@ -4835,7 +5291,9 @@ void NRIBackend::EndFrame()
 		qs.waitFences = &waitAcq; qs.waitFenceNum = 1;
 		qs.commandBuffers = cbs; qs.commandBufferNum = 1;
 		qs.signalFences = signals; qs.signalFenceNum = 2;
+		const auto submitStart = profile ? NriCpuProfileClock::now() : NriCpuProfileClock::time_point{};
 		const nri::Result submitResult = m->Core.QueueSubmit(*m->GraphicsQueue, qs);
+		NriCpuProfileAdd(profile, m->RecordProfile.QueueSubmitMs, m->RecordProfile.QueueSubmitCount, submitStart);
 		const bool submitted = submitResult == nri::Result::SUCCESS;
 		if (!submitted)
 		{
@@ -4846,29 +5304,45 @@ void NRIBackend::EndFrame()
 			frame->fenceValue = submittedFenceValue;
 		if (submitted)
 		{
+			const auto presentStart = profile ? NriCpuProfileClock::now() : NriCpuProfileClock::time_point{};
 			const nri::Result presentResult = m->SwapChainI.QueuePresent(*m->SwapChain, *release);
+			NriCpuProfileAdd(profile, m->RecordProfile.QueuePresentMs, m->RecordProfile.QueuePresentCount, presentStart);
 			if (presentResult != nri::Result::SUCCESS)
 				MarkDeviceLost("QueuePresent", static_cast<int>(presentResult));
 		}
 		m->SwapFrameIndex++;
 		if (submitted && !usesFrameContext)
+		{
+			const auto waitStart = profile ? NriCpuProfileClock::now() : NriCpuProfileClock::time_point{};
 			m->Core.Wait(*m->FrameFence, submittedFenceValue);
+			NriCpuProfileAdd(profile, m->RecordProfile.FrameFenceWaitMs, m->RecordProfile.FrameFenceWaitCount, waitStart);
+		}
 	}
 	else
 	{
+		const auto endCmdStart = profile ? NriCpuProfileClock::now() : NriCpuProfileClock::time_point{};
 		m->Core.EndCommandBuffer(*m->ActiveCmd);
+		NriCpuProfileAdd(profile, m->RecordProfile.EndCommandBufferMs, m->RecordProfile.EndCommandBufferCount, endCmdStart);
 		nri::FenceSubmitDesc sf = {};
 		sf.fence = m->Fence; sf.value = ++m->FenceValue; sf.stages = nri::StageBits::ALL;
 		nri::CommandBuffer* cbs[1] = { m->ActiveCmd };
 		nri::QueueSubmitDesc qs = {};
 		qs.commandBuffers = cbs; qs.commandBufferNum = 1;
 		qs.signalFences = &sf; qs.signalFenceNum = 1;
+		const auto submitStart = profile ? NriCpuProfileClock::now() : NriCpuProfileClock::time_point{};
 		const nri::Result submitResult = m->Core.QueueSubmit(*m->GraphicsQueue, qs);
+		NriCpuProfileAdd(profile, m->RecordProfile.QueueSubmitMs, m->RecordProfile.QueueSubmitCount, submitStart);
 		if (submitResult == nri::Result::SUCCESS)
+		{
+			const auto waitStart = profile ? NriCpuProfileClock::now() : NriCpuProfileClock::time_point{};
 			m->Core.Wait(*m->Fence, m->FenceValue);
+			NriCpuProfileAdd(profile, m->RecordProfile.FrameFenceWaitMs, m->RecordProfile.FrameFenceWaitCount, waitStart);
+		}
 		else
 			MarkDeviceLost("QueueSubmit(no backbuffer)", static_cast<int>(submitResult));
 	}
+	if (profile)
+		++m->RecordProfile.Frames;
 	m->ActiveCmd = nullptr;
 }
 void NRIBackend::WaitForGpu()
@@ -4880,13 +5354,23 @@ void NRIBackend::WaitForGpu()
 	m->WaitForFrameContexts();
 	m->WaitForImmediateContexts();
 	if (m->Fence && m->FenceValue != 0)
+	{
+		const bool profile = IsNriRecordProfileEnabled();
+		const auto waitStart = profile ? NriCpuProfileClock::now() : NriCpuProfileClock::time_point{};
 		m->Core.Wait(*m->Fence, m->FenceValue);
+		NriCpuProfileAdd(profile, m->RecordProfile.ImmediateFenceWaitMs, m->RecordProfile.ImmediateFenceWaitCount, waitStart);
+	}
 }
 void NRIBackend::EmitGpuCrashMarker(const char*) { NRI_TODO(); }
 bool NRIBackend::IsDeviceLost() const { return m && m->DeviceLost; }
 const std::string& NRIBackend::GetErrorString() const { return ErrorString; }
 void NRIBackend::ClearErrorString() { ErrorString.clear(); }
-uint64_t NRIBackend::GetTimestampFrequency() const { return 0; }
+uint64_t NRIBackend::GetTimestampFrequency() const
+{
+	if (!m || !m->Device || !m->Core.GetDeviceDesc)
+		return 0;
+	return m->Core.GetDeviceDesc(*m->Device).other.timestampFrequencyHz;
+}
 uint32_t NRIBackend::GetFrameCount() const
 {
 	return m ? m->FrameRingCount() : 1u;
@@ -4970,6 +5454,7 @@ std::shared_ptr<Buffer> NRIBackend::CreateBuffer(const BufferCreateDesc& desc)
 	}
 	alloc.key = key;
 
+	bool uploadedInitialData = false;
 	if (desc.InitialData && m->GraphicsQueue)
 	{
 		nri::BufferUploadDesc up = {};
@@ -4977,7 +5462,21 @@ std::shared_ptr<Buffer> NRIBackend::CreateBuffer(const BufferCreateDesc& desc)
 		up.data = desc.InitialData;
 		up.after.access = nri::AccessBits::SHADER_RESOURCE;
 		up.after.stages = nri::StageBits::ALL;
+		const bool profile = IsNriRecordProfileEnabled();
+		const auto uploadStart = profile ? NriCpuProfileClock::now() : NriCpuProfileClock::time_point{};
 		m->Helper.UploadData(*m->GraphicsQueue, nullptr, 0, &up, 1);
+		NriCpuProfileAdd(profile, m->RecordProfile.HelperUploadDataMs, m->RecordProfile.HelperUploadDataCount, uploadStart);
+		uploadedInitialData = true;
+	}
+	if (!uploadedInitialData && desc.InitialState == EInitialResourceState::CopyDest)
+	{
+		alloc.access = { nri::AccessBits::COPY_DESTINATION, nri::StageBits::COPY };
+		alloc.accessValid = true;
+	}
+	else
+	{
+		alloc.access = { nri::AccessBits::SHADER_RESOURCE, nri::StageBits::ALL };
+		alloc.accessValid = true;
 	}
 
 	// Custom deleter: when the last reference dies while the backend is alive,
@@ -5102,7 +5601,13 @@ std::shared_ptr<Texture> NRIBackend::CreateTextureFromFile(const std::wstring& f
 				up.after.access = nri::AccessBits::SHADER_RESOURCE;
 				up.after.layout = nri::Layout::SHADER_RESOURCE;
 				up.after.stages = nri::StageBits::ALL;
-				if (subresourcesOk && m->Helper.UploadData(*m->GraphicsQueue, &up, 1, nullptr, 0) == nri::Result::SUCCESS)
+				const bool profile = IsNriRecordProfileEnabled();
+				const auto uploadStart = profile ? NriCpuProfileClock::now() : NriCpuProfileClock::time_point{};
+				bool uploadOk = false;
+				if (subresourcesOk)
+					uploadOk = m->Helper.UploadData(*m->GraphicsQueue, &up, 1, nullptr, 0) == nri::Result::SUCCESS;
+				NriCpuProfileAdd(profile, m->RecordProfile.HelperUploadDataMs, m->RecordProfile.HelperUploadDataCount, uploadStart);
+				if (uploadOk)
 				{
 					auto wrapper = std::make_shared<Texture>();
 					wrapper->Width = static_cast<uint32_t>(md.width);
@@ -5160,7 +5665,12 @@ std::shared_ptr<Texture> NRIBackend::CreateTextureFromFile(const std::wstring& f
 	nri::TextureUploadDesc up = {};
 	up.subresources = &sub; up.texture = tex; up.planes = nri::PlaneBits::ALL;
 	up.after.access = nri::AccessBits::SHADER_RESOURCE; up.after.layout = nri::Layout::SHADER_RESOURCE; up.after.stages = nri::StageBits::ALL;
-	m->Helper.UploadData(*m->GraphicsQueue, &up, 1, nullptr, 0);
+	{
+		const bool profile = IsNriRecordProfileEnabled();
+		const auto uploadStart = profile ? NriCpuProfileClock::now() : NriCpuProfileClock::time_point{};
+		m->Helper.UploadData(*m->GraphicsQueue, &up, 1, nullptr, 0);
+		NriCpuProfileAdd(profile, m->RecordProfile.HelperUploadDataMs, m->RecordProfile.HelperUploadDataCount, uploadStart);
+	}
 
 	auto wrapper = std::make_shared<Texture>();
 	wrapper->Width = static_cast<uint32_t>(img->width);
@@ -5213,16 +5723,35 @@ void NRIBackend::UploadTexture3D(Texture*, const void*, uint64_t, uint64_t) { NR
 std::shared_ptr<VertexBuffer> NRIBackend::CreateVertexBuffer(uint32_t size, uint32_t stride, void* srcData)
 {
 	if (!m->RasterEnabled || !m->Device || size == 0) return nullptr;
-	// HOST_UPLOAD + mapped memcpy — avoids a per-mesh Helper.UploadData queue submit
-	// (which serialized loading to a crawl with thousands of meshes).
+	// Static geometry lives in DEVICE memory; the one-time upload cost is paid at load time.
 	nri::Buffer* nb = nullptr; std::vector<nri::Memory*> mem;
 	if (!m->CreateBoundBuffer(size, 0,
 		nri::BufferUsageBits::VERTEX_BUFFER | nri::BufferUsageBits::SHADER_RESOURCE | nri::BufferUsageBits::ACCELERATION_STRUCTURE_BUILD_INPUT,
-		nri::MemoryLocation::HOST_UPLOAD, nb, mem)) return nullptr;
-	void* mapped = m->Core.MapBuffer(*nb, 0, size);
-	if (mapped && srcData) memcpy(mapped, srcData, size);
+		nri::MemoryLocation::DEVICE, nb, mem)) return nullptr;
+	if (srcData)
+	{
+		if (!m->GraphicsQueue)
+		{
+			m->FreeBuffer(nb, mem);
+			return nullptr;
+		}
+		nri::BufferUploadDesc up = {};
+		up.buffer = nb;
+		up.data = srcData;
+		up.after.access = nri::AccessBits::VERTEX_BUFFER | nri::AccessBits::SHADER_RESOURCE;
+		up.after.stages = nri::StageBits::ALL;
+		const bool profile = IsNriRecordProfileEnabled();
+		const auto uploadStart = profile ? NriCpuProfileClock::now() : NriCpuProfileClock::time_point{};
+		const bool uploadOk = m->Helper.UploadData(*m->GraphicsQueue, nullptr, 0, &up, 1) == nri::Result::SUCCESS;
+		NriCpuProfileAdd(profile, m->RecordProfile.HelperUploadDataMs, m->RecordProfile.HelperUploadDataCount, uploadStart);
+		if (!uploadOk)
+		{
+			m->FreeBuffer(nb, mem);
+			return nullptr;
+		}
+	}
 	auto w = std::make_shared<VertexBuffer>(); w->numVertices = stride ? (int)(size / stride) : 0;
-	Impl::GpuBuf gb; gb.buffer = nb; gb.memory = std::move(mem); gb.stride = stride; gb.mapped = mapped; gb.capacity = size;
+	Impl::GpuBuf gb; gb.buffer = nb; gb.memory = std::move(mem); gb.stride = stride; gb.mapped = nullptr; gb.capacity = size;
 	m->VBs[w.get()] = std::move(gb);
 	return w;
 }
@@ -5232,12 +5761,32 @@ std::shared_ptr<IndexBuffer> NRIBackend::CreateIndexBuffer(EIndexFormat format, 
 	nri::Buffer* nb = nullptr; std::vector<nri::Memory*> mem;
 	if (!m->CreateBoundBuffer(size, 0,
 		nri::BufferUsageBits::INDEX_BUFFER | nri::BufferUsageBits::SHADER_RESOURCE | nri::BufferUsageBits::ACCELERATION_STRUCTURE_BUILD_INPUT,
-		nri::MemoryLocation::HOST_UPLOAD, nb, mem)) return nullptr;
-	void* mapped = m->Core.MapBuffer(*nb, 0, size);
-	if (mapped && srcData) memcpy(mapped, srcData, size);
+		nri::MemoryLocation::DEVICE, nb, mem)) return nullptr;
+	if (srcData)
+	{
+		if (!m->GraphicsQueue)
+		{
+			m->FreeBuffer(nb, mem);
+			return nullptr;
+		}
+		nri::BufferUploadDesc up = {};
+		up.buffer = nb;
+		up.data = srcData;
+		up.after.access = nri::AccessBits::INDEX_BUFFER | nri::AccessBits::SHADER_RESOURCE;
+		up.after.stages = nri::StageBits::ALL;
+		const bool profile = IsNriRecordProfileEnabled();
+		const auto uploadStart = profile ? NriCpuProfileClock::now() : NriCpuProfileClock::time_point{};
+		const bool uploadOk = m->Helper.UploadData(*m->GraphicsQueue, nullptr, 0, &up, 1) == nri::Result::SUCCESS;
+		NriCpuProfileAdd(profile, m->RecordProfile.HelperUploadDataMs, m->RecordProfile.HelperUploadDataCount, uploadStart);
+		if (!uploadOk)
+		{
+			m->FreeBuffer(nb, mem);
+			return nullptr;
+		}
+	}
 	const uint32_t idxSize = (format == EIndexFormat::U16) ? 2u : 4u;
 	auto w = std::make_shared<IndexBuffer>(); w->numIndices = (int)(size / idxSize);
-	Impl::GpuBuf gb; gb.buffer = nb; gb.memory = std::move(mem); gb.indexType = (format == EIndexFormat::U16) ? nri::IndexType::UINT16 : nri::IndexType::UINT32; gb.mapped = mapped; gb.capacity = size;
+	Impl::GpuBuf gb; gb.buffer = nb; gb.memory = std::move(mem); gb.indexType = (format == EIndexFormat::U16) ? nri::IndexType::UINT16 : nri::IndexType::UINT32; gb.mapped = nullptr; gb.capacity = size;
 	m->IBs[w.get()] = std::move(gb);
 	return w;
 }
@@ -5312,6 +5861,12 @@ std::shared_ptr<Buffer> NRIBackend::CreateUploadStructuredBuffer(uint32_t numEle
 	auto w = std::make_shared<Buffer>();
 	w->Type = Buffer::STRUCTURED; w->NumElements = numElements; w->ElementSize = elementSize;
 	Impl::BufferAlloc alloc; alloc.buffer = nb; alloc.memory = std::move(mem); alloc.mapped = mapped;
+	alloc.key = Impl::BufKey{
+		size,
+		elementSize,
+		static_cast<uint32_t>(nri::BufferUsageBits::SHADER_RESOURCE | nri::BufferUsageBits::ARGUMENT_BUFFER),
+		static_cast<uint32_t>(nri::MemoryLocation::HOST_UPLOAD)
+	};
 	m->Buffers[w.get()] = std::move(alloc);
 	return w;
 }
@@ -5321,22 +5876,341 @@ void NRIBackend::UpdateUploadStructuredBuffer(Buffer* buffer, const void* srcDat
 	if (it != m->Buffers.end() && it->second.mapped && srcData)
 		memcpy(it->second.mapped, srcData, sizeInBytes);
 }
+bool NRIBackend::UpdateDefaultStructuredBuffer(Buffer* buffer, const void* srcData, uint32_t sizeInBytes)
+{
+	if (!m->Device || !buffer || !srcData)
+		return false;
+	const uint64_t capacity = static_cast<uint64_t>(buffer->NumElements) * buffer->ElementSize;
+	if (sizeInBytes == 0)
+		return true;
+	if (static_cast<uint64_t>(sizeInBytes) > capacity)
+		return false;
+
+	auto dstIt = m->Buffers.find(buffer);
+	if (dstIt == m->Buffers.end() || !dstIt->second.buffer)
+		return false;
+
+	const bool profile = IsNriRecordProfileEnabled();
+	if (profile)
+		m->RecordProfile.TransientDefaultBytes += sizeInBytes;
+
+	const nri::AccessStage copyDest{ nri::AccessBits::COPY_DESTINATION, nri::StageBits::COPY };
+	const nri::AccessStage shaderRead{ nri::AccessBits::SHADER_RESOURCE, nri::StageBits::ALL };
+
+	if (!m->ActiveCmd)
+	{
+		if (!m->GraphicsQueue)
+			return false;
+		nri::BufferUploadDesc up = {};
+		up.buffer = dstIt->second.buffer;
+		up.data = srcData;
+		up.after = shaderRead;
+		const auto uploadStart = profile ? NriCpuProfileClock::now() : NriCpuProfileClock::time_point{};
+		const bool uploadOk = m->Helper.UploadData(*m->GraphicsQueue, nullptr, 0, &up, 1) == nri::Result::SUCCESS;
+		NriCpuProfileAdd(profile, m->RecordProfile.HelperUploadDataMs, m->RecordProfile.HelperUploadDataCount, uploadStart);
+		if (!uploadOk)
+			return false;
+		dstIt->second.access = shaderRead;
+		dstIt->second.accessValid = true;
+		return true;
+	}
+
+	const Impl::BufKey stagingKey{
+		sizeInBytes,
+		0,
+		static_cast<uint32_t>(nri::BufferUsageBits::NONE),
+		static_cast<uint32_t>(nri::MemoryLocation::HOST_UPLOAD)
+	};
+
+	Impl::BufferAlloc stagingAlloc;
+	if (!m->TryReuseBuffer(stagingKey, stagingAlloc))
+	{
+		if (profile)
+			++m->RecordProfile.TransientDefaultReuseMiss;
+		nri::Buffer* sbuf = nullptr;
+		std::vector<nri::Memory*> smem;
+		if (!m->CreateBoundBuffer(sizeInBytes, 0, nri::BufferUsageBits::NONE, nri::MemoryLocation::HOST_UPLOAD, sbuf, smem))
+		{
+			ErrorString = "UpdateDefaultStructuredBuffer: CreateBoundBuffer staging failed";
+			return false;
+		}
+		stagingAlloc.buffer = sbuf;
+		stagingAlloc.memory = std::move(smem);
+		stagingAlloc.mapped = m->Core.MapBuffer(*sbuf, 0, sizeInBytes);
+		++m->StatMap;
+	}
+	else if (profile)
+	{
+		++m->RecordProfile.TransientDefaultReuseHit;
+	}
+	stagingAlloc.key = stagingKey;
+	if (!stagingAlloc.mapped)
+	{
+		m->RecycleBuffer(std::move(stagingAlloc));
+		return false;
+	}
+
+	{
+		const auto memcpyStart = profile ? NriCpuProfileClock::now() : NriCpuProfileClock::time_point{};
+		memcpy(stagingAlloc.mapped, srcData, sizeInBytes);
+		NriCpuProfileAdd(profile, m->RecordProfile.TransientDefaultMemcpyMs, m->RecordProfile.TransientDefaultMemcpyCount, memcpyStart);
+	}
+
+	nri::Buffer* dstBuffer = dstIt->second.buffer;
+	const nri::AccessStage dstBefore = dstIt->second.accessValid ? dstIt->second.access : shaderRead;
+	m->EndRP();
+	{
+		const auto copyStart = profile ? NriCpuProfileClock::now() : NriCpuProfileClock::time_point{};
+		const nri::AccessStage noneAccess{ nri::AccessBits::NONE, nri::StageBits::ALL };
+		const nri::AccessStage copySource{ nri::AccessBits::COPY_SOURCE, nri::StageBits::COPY };
+
+		nri::BufferBarrierDesc toCopy[2] = {};
+		toCopy[0].buffer = stagingAlloc.buffer;
+		toCopy[0].before = stagingAlloc.accessValid ? stagingAlloc.access : noneAccess;
+		toCopy[0].after = copySource;
+		toCopy[1].buffer = dstBuffer;
+		toCopy[1].before = dstBefore;
+		toCopy[1].after = copyDest;
+		nri::BarrierDesc copyBarrier = {};
+		copyBarrier.buffers = toCopy;
+		copyBarrier.bufferNum = 2;
+		m->Core.CmdBarrier(*m->ActiveCmd, copyBarrier);
+
+		m->Core.CmdCopyBuffer(*m->ActiveCmd, *dstBuffer, 0, *stagingAlloc.buffer, 0, sizeInBytes);
+
+		nri::BufferBarrierDesc toShader = {};
+		toShader.buffer = dstBuffer;
+		toShader.before = copyDest;
+		toShader.after = shaderRead;
+		nri::BarrierDesc shaderBarrier = {};
+		shaderBarrier.buffers = &toShader;
+		shaderBarrier.bufferNum = 1;
+		m->Core.CmdBarrier(*m->ActiveCmd, shaderBarrier);
+
+		stagingAlloc.access = copySource;
+		stagingAlloc.accessValid = true;
+		dstIt->second.access = shaderRead;
+		dstIt->second.accessValid = true;
+		NriCpuProfileAdd(profile, m->RecordProfile.TransientDefaultCopyRecordMs, m->RecordProfile.TransientDefaultCopyRecordCount, copyStart);
+	}
+
+	auto staging = std::make_shared<Buffer>();
+	staging->Type = Buffer::BYTE_ADDRESS;
+	staging->NumElements = sizeInBytes;
+	staging->ElementSize = 1;
+	m->Buffers[staging.get()] = std::move(stagingAlloc);
+	if (NRIBackend::Impl::FrameContext* frame = m->ActiveFrameContext())
+		frame->transientBuffers.push_back(staging);
+	else
+		m->TransientBuffers.push_back(staging);
+	return true;
+}
 std::shared_ptr<Buffer> NRIBackend::AllocateTransientUploadStructuredBuffer(uint32_t numElements, uint32_t elementSize, const void* srcData)
 {
-	// Per-frame transient upload buffer: HOST_UPLOAD + memcpy, released when the
-	// frame context that recorded it is known to have completed on the GPU.
-	auto buf = CreateUploadStructuredBuffer(numElements, elementSize);
-	if (!buf) return nullptr;
+	if (!m->Device || numElements == 0 || elementSize == 0)
+		return nullptr;
+	const bool profile = IsNriRecordProfileEnabled();
+	NriCpuProfileScope allocScope(profile, m->RecordProfile.TransientUploadAllocMs, m->RecordProfile.TransientUploadAllocCount);
+	const uint64_t size = static_cast<uint64_t>(numElements) * elementSize;
+	if (profile)
+		m->RecordProfile.TransientUploadBytes += size;
+	const nri::BufferUsageBits usage =
+		nri::BufferUsageBits::SHADER_RESOURCE |
+		nri::BufferUsageBits::ARGUMENT_BUFFER;
+	const Impl::BufKey key{
+		size,
+		elementSize,
+		static_cast<uint32_t>(usage),
+		static_cast<uint32_t>(nri::MemoryLocation::HOST_UPLOAD)
+	};
+
+	Impl::BufferAlloc alloc;
+	if (!m->TryReuseBuffer(key, alloc))
+	{
+		if (profile)
+			++m->RecordProfile.TransientUploadReuseMiss;
+		nri::Buffer* nb = nullptr;
+		std::vector<nri::Memory*> mem;
+		const auto createStart = profile ? NriCpuProfileClock::now() : NriCpuProfileClock::time_point{};
+		if (!m->CreateBoundBuffer(size, elementSize, usage, nri::MemoryLocation::HOST_UPLOAD, nb, mem))
+		{
+			NriCpuProfileAdd(profile, m->RecordProfile.TransientUploadCreateMs, m->RecordProfile.TransientUploadCreateCount, createStart);
+			ErrorString = "AllocateTransientUploadStructuredBuffer: CreateBoundBuffer failed";
+			return nullptr;
+		}
+		NriCpuProfileAdd(profile, m->RecordProfile.TransientUploadCreateMs, m->RecordProfile.TransientUploadCreateCount, createStart);
+		alloc.buffer = nb;
+		alloc.memory = std::move(mem);
+		const auto mapStart = profile ? NriCpuProfileClock::now() : NriCpuProfileClock::time_point{};
+		alloc.mapped = m->Core.MapBuffer(*nb, 0, size);
+		NriCpuProfileAdd(profile, m->RecordProfile.TransientUploadMapMs, m->RecordProfile.TransientUploadMapCount, mapStart);
+		++m->StatMap;
+	}
+	else if (profile)
+	{
+		++m->RecordProfile.TransientUploadReuseHit;
+	}
+	alloc.key = key;
+
+	auto buf = std::make_shared<Buffer>();
+	buf->Type = Buffer::STRUCTURED;
+	buf->NumElements = numElements;
+	buf->ElementSize = elementSize;
 	if (srcData)
 	{
-		auto it = m->Buffers.find(buf.get());
-		if (it != m->Buffers.end() && it->second.mapped)
-			memcpy(it->second.mapped, srcData, static_cast<size_t>(numElements) * elementSize);
+		if (alloc.mapped)
+		{
+			const auto memcpyStart = profile ? NriCpuProfileClock::now() : NriCpuProfileClock::time_point{};
+			memcpy(alloc.mapped, srcData, static_cast<size_t>(size));
+			NriCpuProfileAdd(profile, m->RecordProfile.TransientUploadMemcpyMs, m->RecordProfile.TransientUploadMemcpyCount, memcpyStart);
+		}
 	}
+	m->Buffers[buf.get()] = std::move(alloc);
 	if (NRIBackend::Impl::FrameContext* frame = m->ActiveFrameContext())
 		frame->transientBuffers.push_back(buf);
 	else
 		m->TransientBuffers.push_back(buf);
+	return buf;
+}
+
+std::shared_ptr<Buffer> NRIBackend::AllocateTransientDefaultStructuredBuffer(uint32_t numElements, uint32_t elementSize, const void* srcData)
+{
+	if (!m->Device || numElements == 0 || elementSize == 0)
+		return nullptr;
+	if (!m->ActiveCmd || !srcData)
+		return AllocateTransientUploadStructuredBuffer(numElements, elementSize, srcData);
+
+	const bool profile = IsNriRecordProfileEnabled();
+	NriCpuProfileScope allocScope(profile, m->RecordProfile.TransientDefaultAllocMs, m->RecordProfile.TransientDefaultAllocCount);
+	const uint64_t size = static_cast<uint64_t>(numElements) * elementSize;
+	if (profile)
+		m->RecordProfile.TransientDefaultBytes += size;
+
+	const nri::BufferUsageBits deviceUsage = nri::BufferUsageBits::SHADER_RESOURCE;
+	const Impl::BufKey deviceKey{
+		size,
+		elementSize,
+		static_cast<uint32_t>(deviceUsage),
+		static_cast<uint32_t>(nri::MemoryLocation::DEVICE)
+	};
+
+	Impl::BufferAlloc deviceAlloc;
+	if (!m->TryReuseBuffer(deviceKey, deviceAlloc))
+	{
+		if (profile)
+			++m->RecordProfile.TransientDefaultReuseMiss;
+		nri::Buffer* nbuf = nullptr;
+		std::vector<nri::Memory*> nmem;
+		if (!m->CreateBoundBuffer(size, elementSize, deviceUsage, nri::MemoryLocation::DEVICE, nbuf, nmem))
+		{
+			ErrorString = "AllocateTransientDefaultStructuredBuffer: CreateBoundBuffer failed";
+			return nullptr;
+		}
+		deviceAlloc.buffer = nbuf;
+		deviceAlloc.memory = std::move(nmem);
+		deviceAlloc.mapped = nullptr;
+	}
+	else if (profile)
+	{
+		++m->RecordProfile.TransientDefaultReuseHit;
+	}
+	deviceAlloc.key = deviceKey;
+
+	const Impl::BufKey stagingKey{
+		size,
+		0,
+		static_cast<uint32_t>(nri::BufferUsageBits::NONE),
+		static_cast<uint32_t>(nri::MemoryLocation::HOST_UPLOAD)
+	};
+	Impl::BufferAlloc stagingAlloc;
+	if (!m->TryReuseBuffer(stagingKey, stagingAlloc))
+	{
+		nri::Buffer* sbuf = nullptr;
+		std::vector<nri::Memory*> smem;
+		if (!m->CreateBoundBuffer(size, 0, nri::BufferUsageBits::NONE, nri::MemoryLocation::HOST_UPLOAD, sbuf, smem))
+		{
+			m->RecycleBuffer(std::move(deviceAlloc));
+			ErrorString = "AllocateTransientDefaultStructuredBuffer: CreateBoundBuffer staging failed";
+			return nullptr;
+		}
+		stagingAlloc.buffer = sbuf;
+		stagingAlloc.memory = std::move(smem);
+		stagingAlloc.mapped = m->Core.MapBuffer(*sbuf, 0, size);
+		++m->StatMap;
+	}
+	stagingAlloc.key = stagingKey;
+	if (!stagingAlloc.mapped)
+	{
+		m->RecycleBuffer(std::move(stagingAlloc));
+		m->RecycleBuffer(std::move(deviceAlloc));
+		return nullptr;
+	}
+
+	{
+		const auto memcpyStart = profile ? NriCpuProfileClock::now() : NriCpuProfileClock::time_point{};
+		memcpy(stagingAlloc.mapped, srcData, static_cast<size_t>(size));
+		NriCpuProfileAdd(profile, m->RecordProfile.TransientDefaultMemcpyMs, m->RecordProfile.TransientDefaultMemcpyCount, memcpyStart);
+	}
+
+	m->EndRP();
+	{
+		const auto copyStart = profile ? NriCpuProfileClock::now() : NriCpuProfileClock::time_point{};
+		const nri::AccessStage noneAccess{ nri::AccessBits::NONE, nri::StageBits::ALL };
+		const nri::AccessStage copySource{ nri::AccessBits::COPY_SOURCE, nri::StageBits::COPY };
+		const nri::AccessStage copyDest{ nri::AccessBits::COPY_DESTINATION, nri::StageBits::COPY };
+		const nri::AccessStage shaderRead{ nri::AccessBits::SHADER_RESOURCE, nri::StageBits::ALL };
+
+		nri::BufferBarrierDesc toCopy[2] = {};
+		toCopy[0].buffer = stagingAlloc.buffer;
+		toCopy[0].before = stagingAlloc.accessValid ? stagingAlloc.access : noneAccess;
+		toCopy[0].after = copySource;
+		toCopy[1].buffer = deviceAlloc.buffer;
+		toCopy[1].before = deviceAlloc.accessValid ? deviceAlloc.access : noneAccess;
+		toCopy[1].after = copyDest;
+		nri::BarrierDesc copyBarrier = {};
+		copyBarrier.buffers = toCopy;
+		copyBarrier.bufferNum = 2;
+		m->Core.CmdBarrier(*m->ActiveCmd, copyBarrier);
+
+		m->Core.CmdCopyBuffer(*m->ActiveCmd, *deviceAlloc.buffer, 0, *stagingAlloc.buffer, 0, size);
+
+		nri::BufferBarrierDesc toShader = {};
+		toShader.buffer = deviceAlloc.buffer;
+		toShader.before = copyDest;
+		toShader.after = shaderRead;
+		nri::BarrierDesc shaderBarrier = {};
+		shaderBarrier.buffers = &toShader;
+		shaderBarrier.bufferNum = 1;
+		m->Core.CmdBarrier(*m->ActiveCmd, shaderBarrier);
+
+		stagingAlloc.access = copySource;
+		stagingAlloc.accessValid = true;
+		deviceAlloc.access = shaderRead;
+		deviceAlloc.accessValid = true;
+		NriCpuProfileAdd(profile, m->RecordProfile.TransientDefaultCopyRecordMs, m->RecordProfile.TransientDefaultCopyRecordCount, copyStart);
+	}
+
+	auto pushTransient = [&](const std::shared_ptr<Buffer>& b)
+	{
+		if (NRIBackend::Impl::FrameContext* frame = m->ActiveFrameContext())
+			frame->transientBuffers.push_back(b);
+		else
+			m->TransientBuffers.push_back(b);
+	};
+
+	auto staging = std::make_shared<Buffer>();
+	staging->Type = Buffer::STRUCTURED;
+	staging->NumElements = numElements;
+	staging->ElementSize = elementSize;
+	m->Buffers[staging.get()] = std::move(stagingAlloc);
+	pushTransient(staging);
+
+	auto buf = std::make_shared<Buffer>();
+	buf->Type = Buffer::STRUCTURED;
+	buf->NumElements = numElements;
+	buf->ElementSize = elementSize;
+	m->Buffers[buf.get()] = std::move(deviceAlloc);
+	pushTransient(buf);
 	return buf;
 }
 
@@ -6002,7 +6876,7 @@ void NRIBackend::InitializeImGuiBackend(WindowHandle, ETextureFormat)
 	sd.constantBufferSize = 1u << 16;
 	sd.dynamicBufferMemoryLocation = nri::MemoryLocation::HOST_UPLOAD;
 	sd.dynamicBufferDesc.usage = nri::BufferUsageBits::VERTEX_BUFFER | nri::BufferUsageBits::INDEX_BUFFER;
-	sd.queuedFrameNum = 2;
+	sd.queuedFrameNum = m->FrameRingCount();
 	if (m->StreamerI.CreateStreamer(*m->Device, sd, m->Streamer) != nri::Result::SUCCESS)
 	{
 		ErrorString = "ImGui: CreateStreamer failed";
@@ -6065,11 +6939,110 @@ void NRIBackend::ShutdownImGuiBackend()
 }
 
 // === Queries ==============================================================
-void NRIBackend::InitializeGpuTimestampQueries(uint32_t) { NRI_TODO(); }
-void NRIBackend::ShutdownGpuTimestampQueries() { NRI_TODO(); }
-void NRIBackend::WriteGpuTimestamp(uint32_t) { NRI_TODO(); }
-void NRIBackend::ResolveGpuTimestampRange(uint32_t, uint32_t) { NRI_TODO(); }
-uint64_t NRIBackend::ReadGpuTimestampValue(uint32_t) const { return 0; }
+void NRIBackend::InitializeGpuTimestampQueries(uint32_t queryCount)
+{
+	if (!m || !m->Device || queryCount == 0)
+		return;
+	if (m->TimestampQueryPool && m->TimestampQueryCount == queryCount)
+		return;
+
+	ShutdownGpuTimestampQueries();
+
+	if (!m->Core.CreateQueryPool || !m->Core.DestroyQueryPool || !m->Core.GetQuerySize ||
+		!m->Core.CmdEndQuery || !m->Core.CmdCopyQueries)
+	{
+		AppendCpuRuntimeTrace(L"[NRI] GPU timestamp queries unsupported by interface");
+		return;
+	}
+
+	nri::QueryPoolDesc queryDesc = {};
+	queryDesc.queryType = nri::QueryType::TIMESTAMP;
+	queryDesc.capacity = queryCount;
+	if (m->Core.CreateQueryPool(*m->Device, queryDesc, m->TimestampQueryPool) != nri::Result::SUCCESS ||
+		!m->TimestampQueryPool)
+	{
+		m->TimestampQueryPool = nullptr;
+		AppendCpuRuntimeTrace(L"[NRI] CreateQueryPool(TIMESTAMP) failed");
+		return;
+	}
+
+	m->TimestampQueryStride = std::max<uint32_t>(sizeof(uint64_t), m->Core.GetQuerySize(*m->TimestampQueryPool));
+	const uint64_t readbackSize = static_cast<uint64_t>(m->TimestampQueryStride) * queryCount;
+	if (!m->CreateBoundBuffer(readbackSize, 0, nri::BufferUsageBits::NONE,
+		nri::MemoryLocation::HOST_READBACK, m->TimestampReadbackBuffer, m->TimestampReadbackMemory))
+	{
+		AppendCpuRuntimeTrace(L"[NRI] timestamp readback buffer allocation failed");
+		ShutdownGpuTimestampQueries();
+		return;
+	}
+
+	m->TimestampReadbackMapped = static_cast<uint8_t*>(m->Core.MapBuffer(*m->TimestampReadbackBuffer, 0, readbackSize));
+	if (!m->TimestampReadbackMapped)
+	{
+		AppendCpuRuntimeTrace(L"[NRI] timestamp readback map failed");
+		ShutdownGpuTimestampQueries();
+		return;
+	}
+
+	std::memset(m->TimestampReadbackMapped, 0, static_cast<size_t>(readbackSize));
+	m->TimestampQueryCount = queryCount;
+	AppendCpuRuntimeTrace(
+		L"[NRI] GPU timestamp queries initialized count=" + std::to_wstring(queryCount) +
+		L" stride=" + std::to_wstring(m->TimestampQueryStride) +
+		L" frequency=" + std::to_wstring(GetTimestampFrequency()));
+}
+void NRIBackend::ShutdownGpuTimestampQueries()
+{
+	if (!m)
+		return;
+	if (m->TimestampReadbackMapped && m->TimestampReadbackBuffer)
+	{
+		m->Core.UnmapBuffer(*m->TimestampReadbackBuffer);
+		m->TimestampReadbackMapped = nullptr;
+	}
+	if (m->TimestampReadbackBuffer)
+	{
+		m->FreeBuffer(m->TimestampReadbackBuffer, m->TimestampReadbackMemory);
+		m->TimestampReadbackBuffer = nullptr;
+	}
+	else
+	{
+		m->TimestampReadbackMemory.clear();
+	}
+	if (m->TimestampQueryPool && m->Core.DestroyQueryPool)
+	{
+		m->Core.DestroyQueryPool(m->TimestampQueryPool);
+		m->TimestampQueryPool = nullptr;
+	}
+	m->TimestampQueryCount = 0;
+	m->TimestampQueryStride = 0;
+}
+void NRIBackend::WriteGpuTimestamp(uint32_t queryIndex)
+{
+	if (!m || !m->ActiveCmd || !m->TimestampQueryPool || queryIndex >= m->TimestampQueryCount)
+		return;
+	m->Core.CmdEndQuery(*m->ActiveCmd, *m->TimestampQueryPool, queryIndex);
+}
+void NRIBackend::ResolveGpuTimestampRange(uint32_t startQueryIndex, uint32_t queryCount)
+{
+	if (!m || !m->ActiveCmd || !m->TimestampQueryPool || !m->TimestampReadbackBuffer || queryCount == 0)
+		return;
+	if (startQueryIndex >= m->TimestampQueryCount || queryCount > m->TimestampQueryCount - startQueryIndex)
+		return;
+
+	m->EndRP();
+	const uint64_t dstOffset = static_cast<uint64_t>(startQueryIndex) * m->TimestampQueryStride;
+	m->Core.CmdCopyQueries(*m->ActiveCmd, *m->TimestampQueryPool, startQueryIndex, queryCount,
+		*m->TimestampReadbackBuffer, dstOffset);
+}
+uint64_t NRIBackend::ReadGpuTimestampValue(uint32_t queryIndex) const
+{
+	if (!m || !m->TimestampReadbackMapped || queryIndex >= m->TimestampQueryCount || m->TimestampQueryStride < sizeof(uint64_t))
+		return 0;
+	uint64_t value = 0;
+	std::memcpy(&value, m->TimestampReadbackMapped + static_cast<size_t>(queryIndex) * m->TimestampQueryStride, sizeof(value));
+	return value;
+}
 void NRIBackend::InitializeOcclusionQueries(uint32_t) { NRI_TODO(); }
 void NRIBackend::ShutdownOcclusionQueries() { NRI_TODO(); }
 void NRIBackend::BeginOcclusionQuery(uint32_t) { NRI_TODO(); }
@@ -6118,6 +7091,8 @@ void NRIBackend::SetViewportAndScissor(uint32_t width, uint32_t height)
 void NRIBackend::DrawFullscreenQuad(VertexBuffer* vertexBuffer)
 {
 	if (!m->ActiveCmd || !m->RasterEnabled || !m->HasBoundGfx) { ++m->DbgDrawsSkipped; return; }
+	const bool profile = IsNriRecordProfileEnabled();
+	NriCpuProfileScope drawScope(profile, m->RecordProfile.DrawMs, m->RecordProfile.DrawCount);
 	m->OpenRP();
 	if (m->CurrentGfx && !static_cast<NRIGraphicsPipeline*>(m->CurrentGfx)->ApplyForDraw())
 	{
@@ -6159,6 +7134,8 @@ void NRIBackend::BindMeshBuffers(VertexBuffer* vertexBuffer, IndexBuffer* indexB
 void NRIBackend::DrawIndexed(uint32_t indexCount, uint32_t startIndexLocation, int32_t baseVertexLocation)
 {
 	if (!m->ActiveCmd || !m->RasterEnabled || !m->HasBoundGfx) { ++m->DbgDrawsSkipped; return; }
+	const bool profile = IsNriRecordProfileEnabled();
+	NriCpuProfileScope drawScope(profile, m->RecordProfile.DrawIndexedMs, m->RecordProfile.DrawIndexedCount);
 	m->OpenRP();
 	// Index-range OOB guard. A draw whose (baseIndex+indexCount) exceeds the bound
 	// IB's index capacity fetches out-of-bounds — a classic GPU DEVICE_HUNG cause that
@@ -6202,6 +7179,8 @@ void NRIBackend::DrawIndexed(uint32_t indexCount, uint32_t startIndexLocation, i
 void NRIBackend::DrawInstanced(uint32_t vertexCountPerInstance, uint32_t instanceCount, uint32_t startVertexLocation, uint32_t startInstanceLocation)
 {
 	if (!m->ActiveCmd || !m->RasterEnabled || !m->HasBoundGfx) { ++m->DbgDrawsSkipped; return; }
+	const bool profile = IsNriRecordProfileEnabled();
+	NriCpuProfileScope drawScope(profile, m->RecordProfile.DrawMs, m->RecordProfile.DrawCount);
 	m->OpenRP();
 	if (m->CurrentGfx)
 	{
@@ -6231,6 +7210,8 @@ void NRIBackend::DrawInstanced(uint32_t vertexCountPerInstance, uint32_t instanc
 void NRIBackend::DrawIndexedInstanced(uint32_t indexCountPerInstance, uint32_t instanceCount, uint32_t startIndexLocation, int32_t baseVertexLocation, uint32_t startInstanceLocation)
 {
 	if (!m->ActiveCmd || !m->RasterEnabled || !m->HasBoundGfx) { ++m->DbgDrawsSkipped; return; }
+	const bool profile = IsNriRecordProfileEnabled();
+	NriCpuProfileScope drawScope(profile, m->RecordProfile.DrawIndexedMs, m->RecordProfile.DrawIndexedCount);
 	m->OpenRP();
 	const uint32_t idxSize = m->LastIBType == nri::IndexType::UINT16 ? 2u : 4u;
 	const uint32_t ibCapIdx = m->LastIBCapacity / idxSize;
@@ -6282,6 +7263,10 @@ bool NRIBackend::DrawIndexedIndirect(Buffer* indirectArgumentBuffer, uint64_t by
 		++m->DbgDrawsSkipped;
 		return false;
 	}
+	const bool profile = IsNriRecordProfileEnabled();
+	NriCpuProfileScope drawScope(profile, m->RecordProfile.DrawIndexedIndirectMs, m->RecordProfile.DrawIndexedIndirectCallCount);
+	if (profile)
+		m->RecordProfile.DrawIndexedIndirectDrawCount += drawCount;
 	auto it = m->Buffers.find(indirectArgumentBuffer);
 	if (it == m->Buffers.end() || !it->second.buffer)
 		return false;
@@ -6318,6 +7303,10 @@ bool NRIBackend::DrawIndirect(Buffer* indirectArgumentBuffer, uint64_t byteOffse
 		++m->DbgDrawsSkipped;
 		return false;
 	}
+	const bool profile = IsNriRecordProfileEnabled();
+	NriCpuProfileScope drawScope(profile, m->RecordProfile.DrawIndirectMs, m->RecordProfile.DrawIndirectCallCount);
+	if (profile)
+		m->RecordProfile.DrawIndirectDrawCount += drawCount;
 	auto it = m->Buffers.find(indirectArgumentBuffer);
 	if (it == m->Buffers.end() || !it->second.buffer)
 		return false;
@@ -6348,6 +7337,8 @@ void NRIBackend::Dispatch(uint32_t groupCountX, uint32_t groupCountY, uint32_t g
 {
 	if (m->ActiveCmd)
 	{
+		const bool profile = IsNriRecordProfileEnabled();
+		NriCpuProfileScope dispatchScope(profile, m->RecordProfile.DispatchMs, m->RecordProfile.DispatchCount);
 		m->EndRP();
 		nri::DispatchDesc d = { groupCountX, groupCountY, groupCountZ };
 		m->Core.CmdDispatch(*m->ActiveCmd, d);
@@ -6355,8 +7346,19 @@ void NRIBackend::Dispatch(uint32_t groupCountX, uint32_t groupCountY, uint32_t g
 }
 void NRIBackend::ClearTextureUAVFloat(Texture*, const float[4]) { NRI_TODO(); }
 void NRIBackend::ExecuteCurrentCommandList() { NRI_TODO(); }
-void NRIBackend::BeginGpuMarker(uint64_t, const char*) { NRI_TODO(); }
-void NRIBackend::EndGpuMarker() { NRI_TODO(); }
+void NRIBackend::BeginGpuMarker(uint64_t color, const char* label)
+{
+	if (!m || !m->ActiveCmd || !label)
+		return;
+	m->Core.CmdBeginAnnotation(*m->ActiveCmd, label, static_cast<uint32_t>(color));
+}
+
+void NRIBackend::EndGpuMarker()
+{
+	if (!m || !m->ActiveCmd)
+		return;
+	m->Core.CmdEndAnnotation(*m->ActiveCmd);
+}
 void NRIBackend::TransitionTexture(Texture* texture, EResourceState, EResourceState stateAfter)
 {
 	if (!m->ActiveCmd || !texture) return;
@@ -6391,6 +7393,8 @@ void NRIBackend::TransitionBuffer(Buffer* buffer, EResourceState stateBefore, ER
 	nri::BarrierDesc bd = {};
 	bd.buffers = &bb; bd.bufferNum = 1;
 	m->Core.CmdBarrier(*m->ActiveCmd, bd);
+	it->second.access = bb.after;
+	it->second.accessValid = true;
 }
 void NRIBackend::TransitionVertexBuffer(VertexBuffer*, EResourceState, EResourceState) { NRI_TODO(); }
 void NRIBackend::UAVBarrier(Buffer* buffer)
@@ -6405,6 +7409,8 @@ void NRIBackend::UAVBarrier(Buffer* buffer)
 	nri::BarrierDesc bd = {};
 	bd.buffers = &bb; bd.bufferNum = 1;
 	m->Core.CmdBarrier(*m->ActiveCmd, bd);
+	it->second.access = bb.after;
+	it->second.accessValid = true;
 }
 
 // === Graphics pipelines (by-name binding) =================================
@@ -6417,6 +7423,8 @@ void NRIBackend::BindGraphicsPipeline(GraphicsPipelineHandle* pipeline)
 	m->CurrentGfx = pipeline;
 	m->HasBoundGfx = false;
 	if (!m->ActiveCmd || !pipeline || !m->RasterEnabled) return;
+	const bool profile = IsNriRecordProfileEnabled();
+	NriCpuProfileScope bindScope(profile, m->RecordProfile.BindGraphicsPipelineMs, m->RecordProfile.BindGraphicsPipelineCount);
 	auto* p = static_cast<NRIGraphicsPipeline*>(pipeline);
 	if (!p->GetPipeline()) { ++m->DbgGfxBindFail; return; }  // PSO failed to create — don't issue draws with no pipeline
 	m->OpenRP();
@@ -6446,6 +7454,8 @@ struct NRIGraphicsBindGroup final : GraphicsBindGroupHandle
 
 std::shared_ptr<GraphicsBindGroupHandle> NRIBackend::CreateGraphicsBindGroup(const GraphicsBindGroupDesc& desc)
 {
+	const bool profile = IsNriRecordProfileEnabled();
+	NriCpuProfileScope createScope(profile, m->RecordProfile.CreateGraphicsBindGroupMs, m->RecordProfile.CreateGraphicsBindGroupCount);
 	auto handle = std::make_shared<NRIGraphicsBindGroup>();
 	handle->Pipeline = desc.Pipeline;
 	handle->Entries.reserve(desc.Entries.size());
@@ -6466,6 +7476,8 @@ std::shared_ptr<GraphicsBindGroupHandle> NRIBackend::CreateGraphicsBindGroup(con
 
 void NRIBackend::BindGraphicsBindGroup(GraphicsPipelineHandle* pipeline, uint32_t, const std::shared_ptr<GraphicsBindGroupHandle>& bindGroup)
 {
+	const bool profile = IsNriRecordProfileEnabled();
+	NriCpuProfileScope bindScope(profile, m->RecordProfile.BindGraphicsBindGroupMs, m->RecordProfile.BindGraphicsBindGroupCount);
 	auto* p = static_cast<NRIGraphicsPipeline*>(pipeline);
 	auto* bg = static_cast<NRIGraphicsBindGroup*>(bindGroup.get());
 	if (!p || !bg) return;

@@ -321,6 +321,7 @@ public:
 	bool IsHitProgramBindingCacheValid(uint32_t numInstances, uint64_t signature) const override;
 	void MarkHitProgramBindingCacheDirty() override;
 	void MarkHitProgramBindingCacheValid(uint32_t numInstances, uint64_t signature) override;
+	bool UsesSharedHitRecords() const override { return true; }
 	void BeginShaderTable() override;
 	void EndShaderTable() override;
 	void SetTextureUAV(const std::string& shader, const std::string& bindingName, Texture* texture, int instanceIndex = -1) override;
@@ -340,8 +341,9 @@ public:
 	bool ApplyIndirect(Buffer* indirectArgumentBuffer, uint64_t byteOffset) override;
 
 	void SetGlobalBinding(CommandList* CommandList = nullptr);
-	void SetUAVHandle(const std::string& shader, const std::string& bindingName, D3D12_GPU_DESCRIPTOR_HANDLE uavHandle, INT instanceIndex = -1);
-	void SetSRVHandle(const std::string& shader, const std::string& bindingName, D3D12_GPU_DESCRIPTOR_HANDLE srvHandle, INT instanceIndex = -1);
+	void SetUAVHandle(const std::string& shader, const std::string& bindingName, D3D12_CPU_DESCRIPTOR_HANDLE cpuHandle, D3D12_GPU_DESCRIPTOR_HANDLE uavHandle, INT instanceIndex = -1);
+	void SetSRVHandle(const std::string& shader, const std::string& bindingName, D3D12_CPU_DESCRIPTOR_HANDLE cpuHandle, D3D12_GPU_DESCRIPTOR_HANDLE srvHandle, INT instanceIndex = -1);
+	UINT GetHitShaderRecordCount() const;
 	bool BuildDispatchRaysDesc(uint32_t width, uint32_t height, D3D12_DISPATCH_RAYS_DESC& outDesc) const;
 	bool EnsureDispatchRaysCommandSignature();
 };
@@ -450,12 +452,26 @@ public:
 class D3D12RTAS : public RTAS
 {
 public:
+	~D3D12RTAS() override
+	{
+		if (Instance && InstanceMapped)
+		{
+			Instance->Unmap(0, nullptr);
+			InstanceMapped = nullptr;
+		}
+	}
+
 	D3D12_GPU_DESCRIPTOR_HANDLE GPUHandle = {};
 	D3D12_CPU_DESCRIPTOR_HANDLE CPUHandle = {};
 
 	ComPtr<ID3D12Resource> Scratch;
 	ComPtr<ID3D12Resource> Result;
 	ComPtr<ID3D12Resource> Instance;
+	D3D12_GPU_VIRTUAL_ADDRESS ScratchGpuVA = 0;
+	D3D12_GPU_VIRTUAL_ADDRESS ResultGpuVA = 0;
+	D3D12_GPU_VIRTUAL_ADDRESS InstanceGpuVA = 0;
+	D3D12_RAYTRACING_INSTANCE_DESC* InstanceMapped = nullptr;
+	UINT InstanceCapacity = 0;
 	UINT NumInstances = 0;
 };
 
@@ -737,6 +753,7 @@ public:
 	RenderBackendAllocatorStats GetAllocatorStats() const override;
 	bool GetStreamlineTextureResource(Texture* texture, EResourceState state, StreamlineTextureResourceDesc& outDesc) const override;
 	void* GetStreamlineCommandBuffer() override;
+	void NotifyExternalCommandListStateChanged() override;
 	uint32_t GetMaxSupportedHybridStage() const override { return 7; }
 	bool SupportsRayTracing() const override;
 	bool SupportsShaderExecutionReordering() const override;
@@ -760,6 +777,7 @@ public:
 	void UnregisterBindlessTexture(Texture* texture) override;
 	RHITextureHandle GetBindlessTextureHandle(const Texture* texture) const override;
 	bool IsBindlessTextureTableReady() const { return bBindlessTextureTableAllocated; }
+	D3D12_CPU_DESCRIPTOR_HANDLE GetBindlessTextureTableCpuHandle() const { return BindlessTextureTableCpuBase; }
 	D3D12_GPU_DESCRIPTOR_HANDLE GetBindlessTextureTableGpuHandle() const { return BindlessTextureTableGpuBase; }
 	RHIBufferHandle RegisterBindlessBuffer(Buffer* buffer) override;
 	RHIBufferHandle RegisterBindlessVertexBuffer(VertexBuffer* buffer) override;
@@ -771,6 +789,7 @@ public:
 	RHIBufferHandle GetBindlessVertexBufferHandle(const VertexBuffer* buffer) const override;
 	RHIBufferHandle GetBindlessIndexBufferHandle(const IndexBuffer* buffer) const override;
 	bool IsBindlessBufferTableReady() const { return bBindlessBufferTableAllocated; }
+	D3D12_CPU_DESCRIPTOR_HANDLE GetBindlessBufferTableCpuHandle() const { return BindlessBufferTableCpuBase; }
 	D3D12_GPU_DESCRIPTOR_HANDLE GetBindlessBufferTableGpuHandle() const { return BindlessBufferTableGpuBase; }
 	std::shared_ptr<Texture> WrapNativeTexture(const Microsoft::WRL::ComPtr<ID3D12Resource>& resource);
 	std::shared_ptr<Texture> CreateTexture3D(ETextureFormat format, ETextureUsageFlags usage, EInitialResourceState initialState, int width, int height, int depth, int mipLevels) override;
@@ -890,8 +909,18 @@ public:
 	VertexBuffer* BoundVertexBuffer = nullptr;
 	IndexBuffer* BoundIndexBuffer = nullptr;
 	D3D12_PRIMITIVE_TOPOLOGY BoundPrimitiveTopology = D3D_PRIMITIVE_TOPOLOGY_UNDEFINED;
+	ID3D12RootSignature* BoundComputeRootSignature = nullptr;
+	ID3D12PipelineState* BoundComputePipelineState = nullptr;
+	ID3D12StateObject* BoundRayTracingPipelineState = nullptr;
+	std::vector<UINT64> BoundComputeRootDescriptorTables;
 
 	void InvalidateGraphicsCommandStateCache();
+	void InvalidateComputeCommandStateCache();
+	void InvalidateRayTracingCommandStateCache();
+	void SetComputeRootSignatureIfNeeded(ID3D12GraphicsCommandList* commandList, ID3D12RootSignature* rootSignature);
+	void SetComputePipelineStateIfNeeded(ID3D12GraphicsCommandList* commandList, ID3D12PipelineState* pipelineState);
+	void SetComputeRootDescriptorTableIfNeeded(ID3D12GraphicsCommandList* commandList, UINT rootParamIndex, D3D12_GPU_DESCRIPTOR_HANDLE gpuHandle);
+	void SetRayTracingPipelineStateIfNeeded(ID3D12GraphicsCommandList4* commandList, ID3D12StateObject* pipelineState);
 	void PresentBarrier(Texture* rt);
 	void ResourceBarrier(ID3D12Resource* Resource, D3D12_RESOURCE_STATES StateBefore, D3D12_RESOURCE_STATES StateAfter);
 

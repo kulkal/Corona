@@ -2898,6 +2898,7 @@ bool Corona::DLSSPass()
 		static_cast<const sl::BaseStructure*>(&vp),
 	};
 	const sl::Result evalResult = slEvaluateFeature(sl::kFeatureDLSS, *StreamlineFrameToken, inputs, _countof(inputs), streamlineCommandBuffer);
+	renderBackend->NotifyExternalCommandListStateChanged();
 	bDLSSResetNeeded = false;
 
 	renderBackend->TransitionTexture(outputTarget, EResourceState::UnorderedAccess, EResourceState::ShaderRead);
@@ -3063,6 +3064,7 @@ bool Corona::DLSSRRPass()
 	if (bUseRRSpecularHitDistance)
 		inputs.push_back(static_cast<const sl::BaseStructure*>(&*specularHitDistanceTag));
 	const sl::Result evalResult = slEvaluateFeature(sl::kFeatureDLSS_RR, *StreamlineFrameToken, inputs.data(), static_cast<uint32_t>(inputs.size()), streamlineCommandBuffer);
+	renderBackend->NotifyExternalCommandListStateChanged();
 	bDLSSResetNeeded = false;
 
 	renderBackend->TransitionTexture(outputTarget, EResourceState::UnorderedAccess, EResourceState::ShaderRead);
