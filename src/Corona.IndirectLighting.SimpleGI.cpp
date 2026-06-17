@@ -236,10 +236,6 @@ void Corona::RaytraceGIPass()
 			Texture* blueNoiseTexture = ctx.GetTexture(blueNoiseInput);
 			Buffer* materialBuffer = ctx.GetBuffer(rtMaterials);
 
-			const FLOAT clearGI[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
-			renderBackend->ClearTextureUAVFloat(giSHTexture, clearGI);
-			renderBackend->ClearTextureUAVFloat(giColorTexture, clearGI);
-
 			RTPassBuilder pass(*this, pso);
 			pass.BeginScene()
 				.SetTextureUAV("global", "GIResultSH", giSHTexture)

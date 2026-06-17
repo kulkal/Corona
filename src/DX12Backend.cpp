@@ -6309,6 +6309,7 @@ ComPtr<ID3DBlob> compileShaderLibrary(
 	PipelineCache::StoreDxil(cacheKey, pBlob);
 	return ComPtr<ID3DBlob>(pBlob);
 }
+
 struct DxilLibrary
 {
 	DxilLibrary(ComPtr<ID3DBlob> pBlob, const WCHAR* entryPoint[], uint32_t entryPointCount) : pShaderBlob(pBlob)
@@ -6356,11 +6357,100 @@ wstring StringToWString(const std::string &s)
 	return ws;
 }
 
+static D3D12_DESCRIPTOR_RANGE_FLAGS GetRtDescriptorRangeFlags(D3D12_DESCRIPTOR_RANGE_TYPE rangeType)
+{
+	D3D12_DESCRIPTOR_RANGE_FLAGS flags = D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE;
+	if (rangeType != D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER)
+		flags |= D3D12_DESCRIPTOR_RANGE_FLAG_DATA_STATIC_WHILE_SET_AT_EXECUTE;
+	return flags;
+}
+
 ComPtr<ID3D12RootSignature> CreateRootSignature(ComPtr<ID3D12Device5> pDevice, const D3D12_ROOT_SIGNATURE_DESC& desc)
 {
 	ComPtr<ID3DBlob> pSigBlob;
 	ComPtr<ID3DBlob> pErrorBlob;
-	HRESULT hr = D3D12SerializeRootSignature(&desc, D3D_ROOT_SIGNATURE_VERSION_1, &pSigBlob, &pErrorBlob);
+
+	D3D12_FEATURE_DATA_ROOT_SIGNATURE featureData = {};
+	featureData.HighestVersion = D3D_ROOT_SIGNATURE_VERSION_1_1;
+	if (FAILED(pDevice->CheckFeatureSupport(D3D12_FEATURE_ROOT_SIGNATURE, &featureData, sizeof(featureData))))
+		featureData.HighestVersion = D3D_ROOT_SIGNATURE_VERSION_1_0;
+
+	HRESULT hr = E_FAIL;
+	if (featureData.HighestVersion >= D3D_ROOT_SIGNATURE_VERSION_1_1)
+	{
+		UINT descriptorRangeCount = 0;
+		for (UINT paramIndex = 0; paramIndex < desc.NumParameters; ++paramIndex)
+		{
+			const D3D12_ROOT_PARAMETER& param = desc.pParameters[paramIndex];
+			if (param.ParameterType == D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE)
+				descriptorRangeCount += param.DescriptorTable.NumDescriptorRanges;
+		}
+
+		std::vector<D3D12_DESCRIPTOR_RANGE1> descriptorRanges;
+		descriptorRanges.reserve(descriptorRangeCount);
+		std::vector<D3D12_ROOT_PARAMETER1> rootParams(desc.NumParameters);
+		for (UINT paramIndex = 0; paramIndex < desc.NumParameters; ++paramIndex)
+		{
+			const D3D12_ROOT_PARAMETER& src = desc.pParameters[paramIndex];
+			D3D12_ROOT_PARAMETER1& dst = rootParams[paramIndex];
+			dst.ParameterType = src.ParameterType;
+			dst.ShaderVisibility = src.ShaderVisibility;
+			switch (src.ParameterType)
+			{
+			case D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE:
+			{
+				const UINT rangeOffset = static_cast<UINT>(descriptorRanges.size());
+				for (UINT rangeIndex = 0; rangeIndex < src.DescriptorTable.NumDescriptorRanges; ++rangeIndex)
+				{
+					const D3D12_DESCRIPTOR_RANGE& srcRange = src.DescriptorTable.pDescriptorRanges[rangeIndex];
+					D3D12_DESCRIPTOR_RANGE1 dstRange = {};
+					dstRange.RangeType = srcRange.RangeType;
+					dstRange.NumDescriptors = srcRange.NumDescriptors;
+					dstRange.BaseShaderRegister = srcRange.BaseShaderRegister;
+					dstRange.RegisterSpace = srcRange.RegisterSpace;
+					dstRange.Flags = GetRtDescriptorRangeFlags(srcRange.RangeType);
+					dstRange.OffsetInDescriptorsFromTableStart = srcRange.OffsetInDescriptorsFromTableStart;
+					descriptorRanges.push_back(dstRange);
+				}
+				dst.DescriptorTable.NumDescriptorRanges = src.DescriptorTable.NumDescriptorRanges;
+				dst.DescriptorTable.pDescriptorRanges = descriptorRanges.data() + rangeOffset;
+				break;
+			}
+			case D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS:
+				dst.Constants = src.Constants;
+				break;
+			case D3D12_ROOT_PARAMETER_TYPE_CBV:
+			case D3D12_ROOT_PARAMETER_TYPE_SRV:
+			case D3D12_ROOT_PARAMETER_TYPE_UAV:
+				dst.Descriptor.ShaderRegister = src.Descriptor.ShaderRegister;
+				dst.Descriptor.RegisterSpace = src.Descriptor.RegisterSpace;
+				dst.Descriptor.Flags = D3D12_ROOT_DESCRIPTOR_FLAG_NONE;
+				break;
+			default:
+				break;
+			}
+		}
+
+		D3D12_ROOT_SIGNATURE_FLAGS flags = desc.Flags;
+		if ((flags & D3D12_ROOT_SIGNATURE_FLAG_LOCAL_ROOT_SIGNATURE) == 0)
+		{
+			flags |=
+				D3D12_ROOT_SIGNATURE_FLAG_DENY_VERTEX_SHADER_ROOT_ACCESS |
+				D3D12_ROOT_SIGNATURE_FLAG_DENY_HULL_SHADER_ROOT_ACCESS |
+				D3D12_ROOT_SIGNATURE_FLAG_DENY_DOMAIN_SHADER_ROOT_ACCESS |
+				D3D12_ROOT_SIGNATURE_FLAG_DENY_GEOMETRY_SHADER_ROOT_ACCESS |
+				D3D12_ROOT_SIGNATURE_FLAG_DENY_PIXEL_SHADER_ROOT_ACCESS;
+		}
+
+		CD3DX12_VERSIONED_ROOT_SIGNATURE_DESC versionedDesc;
+		versionedDesc.Init_1_1(desc.NumParameters, rootParams.data(), desc.NumStaticSamplers, desc.pStaticSamplers, flags);
+		hr = D3DX12SerializeVersionedRootSignature(&versionedDesc, D3D_ROOT_SIGNATURE_VERSION_1_1, &pSigBlob, &pErrorBlob);
+	}
+	else
+	{
+		hr = D3D12SerializeRootSignature(&desc, D3D_ROOT_SIGNATURE_VERSION_1, &pSigBlob, &pErrorBlob);
+	}
+
 	if (FAILED(hr))
 	{
 		std::string msg = convertBlobToString(pErrorBlob.Get());
@@ -7264,7 +7354,6 @@ bool D3D12RTPipelineStateObject::InitRS(const string& ShaderFile)
 		entryPoints.push_back(sb.second.ShaderName.c_str());
 	}
 
-
 	DxilLibrary dxilLib = DxilLibrary(pDxilLib, entryPoints.data(), entryPoints.size());
 	subobjects[index++] = dxilLib.stateSubobject; // 0 Library
 	traceStep(L"Build DXIL library subobject");
@@ -7380,7 +7469,7 @@ bool D3D12RTPipelineStateObject::InitRS(const string& ShaderFile)
 
 	// shaderconfig export association
 	vector<const WCHAR*> vecShaderExports;
-	entryPoints.reserve(ShaderBinding.size());
+	vecShaderExports.reserve(ShaderBinding.size());
 	for (auto& sb : ShaderBinding)
 	{
 		vecShaderExports.push_back(sb.second.ShaderName.c_str());

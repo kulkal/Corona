@@ -229,13 +229,6 @@ void Corona::RaytraceReflectionPass()
 			Texture* velocityTexture = velocityInput.IsValid() ? ctx.GetTexture(velocityInput) : normalTexture;
 			Buffer* materialBuffer = ctx.GetBuffer(rtMaterials);
 
-			const FLOAT clearReflection[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
-			const FLOAT clearHitDistance[4] = { Far, 0.0f, 0.0f, 0.0f };
-			const FLOAT clearMotionVector[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
-			renderBackend->ClearTextureUAVFloat(reflectionTexture, clearReflection);
-			renderBackend->ClearTextureUAVFloat(hitDistanceTexture, clearHitDistance);
-			renderBackend->ClearTextureUAVFloat(motionVectorTexture, clearMotionVector);
-
 			RTPassBuilder pass(*this, pso);
 			pass.BeginScene()
 				.SetTextureUAV("global", "ReflectionResult", reflectionTexture)
