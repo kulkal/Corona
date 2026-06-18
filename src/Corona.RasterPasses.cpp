@@ -41,9 +41,13 @@ namespace
 	// Batched objects keep their last occlusion result for a while. Refreshing
 	// them requires pulling objects out of the bindless batch for real draws,
 	// so keep that trickle tiny and favor stable, approximate culling.
-	constexpr uint64_t kMaxGBufferOcclusionSkipFrames = 120u;
+	constexpr uint64_t kMaxGBufferOcclusionSkipFrames = 45u;
 	constexpr uint64_t kBatchedGBufferOcclusionRefreshFrames = 240u;
+	constexpr uint64_t kGBufferOcclusionConfirmMissFrames = 6u;
 	constexpr uint32_t kBatchedGBufferOcclusionRefreshQueryBudget = 16u;
+	constexpr uint8_t kMinConsecutiveGBufferOcclusionMisses = 2u;
+	constexpr float kGBufferOcclusionCameraMoveThreshold = 128.0f;
+	constexpr float kGBufferOcclusionCameraRotationDotThreshold = 0.9995f;
 
 	enum class EFrustumAabbRelation : uint8_t
 	{
@@ -5849,6 +5853,7 @@ void Corona::PrepareGBufferCulling(uint32_t sceneObjectCount)
 	GBufferLastBindlessObjectDrawCount = 0;
 	GBufferOcclusionQueryCount = 0;
 	bGBufferOcclusionQueriesActive = false;
+	bGBufferOcclusionCameraMovedThisFrame = false;
 
 	if (IsVulkanCaptureSafeActive())
 		return;
@@ -5875,6 +5880,27 @@ void Corona::PrepareGBufferCulling(uint32_t sceneObjectCount)
 
 	GBufferOcclusionFrameIndex = renderBackend->GetCurrentFrameIndex();
 	bGBufferOcclusionQueriesActive = GBufferOcclusionQueryCapacityPerFrame > 0;
+	const glm::vec3 cameraDelta = RenderFrameCameraPosition - GBufferOcclusionLastCameraPosition;
+	const float cameraMoveThresholdSq =
+		kGBufferOcclusionCameraMoveThreshold * kGBufferOcclusionCameraMoveThreshold;
+	const glm::vec3 currentLook =
+		glm::length(RenderFrameCameraLookDirection) > 0.0f ?
+		glm::normalize(RenderFrameCameraLookDirection) :
+		glm::vec3(0.0f, 0.0f, 1.0f);
+	const glm::vec3 previousLook =
+		glm::length(GBufferOcclusionLastCameraLookDirection) > 0.0f ?
+		glm::normalize(GBufferOcclusionLastCameraLookDirection) :
+		currentLook;
+	const bool bCameraHistoryValid = bGBufferOcclusionCameraHistoryValid;
+	if (!bCameraHistoryValid ||
+		glm::dot(cameraDelta, cameraDelta) > cameraMoveThresholdSq ||
+		glm::dot(currentLook, previousLook) < kGBufferOcclusionCameraRotationDotThreshold)
+	{
+		bGBufferOcclusionCameraMovedThisFrame = bCameraHistoryValid;
+		GBufferOcclusionLastCameraPosition = RenderFrameCameraPosition;
+		GBufferOcclusionLastCameraLookDirection = currentLook;
+		bGBufferOcclusionCameraHistoryValid = true;
+	}
 }
 
 bool Corona::ShouldDrawSceneObjectInGBuffer(const SceneObject& object, const glm::vec3& boundsCenter, float boundsRadius)
@@ -5895,7 +5921,9 @@ bool Corona::ShouldDrawSceneObjectInGBuffer(const SceneObject& object, const glm
 	{
 		state.LastVisible = true;
 		state.HasPendingOcclusionQuery = false;
+		state.ConsecutiveOccludedQueries = 0;
 		state.LastTestFrame = 0;
+		state.LastVisibleFrame = FrameCounter;
 		state.LastBoundsCenter = boundsCenter;
 		state.LastBoundsRadius = boundsRadius;
 		state.HasBounds = true;
@@ -5903,18 +5931,48 @@ bool Corona::ShouldDrawSceneObjectInGBuffer(const SceneObject& object, const glm
 
 	if (state.HasPendingOcclusionQuery && state.LastQueryFrameIndex == GBufferOcclusionFrameIndex)
 	{
-		state.LastVisible = renderBackend->ReadOcclusionQueryValue(state.LastQueryIndex) != 0;
+		const bool bQueryVisible = renderBackend->ReadOcclusionQueryValue(state.LastQueryIndex) != 0;
+		if (bQueryVisible)
+		{
+			state.LastVisible = true;
+			state.ConsecutiveOccludedQueries = 0;
+			state.LastVisibleFrame = FrameCounter;
+		}
+		else
+		{
+			state.ConsecutiveOccludedQueries =
+				static_cast<uint8_t>(std::min<uint32_t>(255u, static_cast<uint32_t>(state.ConsecutiveOccludedQueries) + 1u));
+			if (state.ConsecutiveOccludedQueries >= kMinConsecutiveGBufferOcclusionMisses)
+				state.LastVisible = false;
+		}
 		state.HasPendingOcclusionQuery = false;
+	}
+	if (bGBufferOcclusionCameraMovedThisFrame && state.ConsecutiveOccludedQueries != 0)
+	{
+		state.LastVisible = true;
+		state.ConsecutiveOccludedQueries = 0;
+		state.LastTestFrame = 0;
+		state.LastVisibleFrame = FrameCounter;
 	}
 
 	const uint64_t framesSinceTest =
 		FrameCounter >= state.LastTestFrame ?
 		static_cast<uint64_t>(FrameCounter) - state.LastTestFrame :
 		kMaxGBufferOcclusionSkipFrames + 1u;
-	if (!state.LastVisible && framesSinceTest <= kMaxGBufferOcclusionSkipFrames)
+	if (!state.LastVisible)
 	{
-		++GBufferLastOcclusionCulledObjectCount;
-		return false;
+		if (bGBufferOcclusionCameraMovedThisFrame || framesSinceTest > kMaxGBufferOcclusionSkipFrames)
+		{
+			state.LastVisible = true;
+			state.ConsecutiveOccludedQueries = 0;
+			state.LastTestFrame = 0;
+			state.LastVisibleFrame = FrameCounter;
+		}
+		else
+		{
+			++GBufferLastOcclusionCulledObjectCount;
+			return false;
+		}
 	}
 
 	return true;
@@ -6180,6 +6238,9 @@ void Corona::GBufferPass()
 			SceneObjectCullingState& state = SceneObjectCullingStates[object.Handle];
 			if (hasBounds)
 			{
+				state.LastVisible = true;
+				state.ConsecutiveOccludedQueries = 0;
+				state.LastVisibleFrame = FrameCounter;
 				state.LastBoundsCenter = boundsCenter;
 				state.LastBoundsRadius = boundsRadius;
 				state.HasBounds = true;
@@ -6208,6 +6269,8 @@ void Corona::GBufferPass()
 				FrameCounter >= state.LastTestFrame ?
 				static_cast<uint64_t>(FrameCounter) - state.LastTestFrame :
 				kBatchedGBufferOcclusionRefreshFrames + 1u;
+			if (state.ConsecutiveOccludedQueries != 0)
+				return framesSinceTest >= kGBufferOcclusionConfirmMissFrames;
 			if (!state.LastVisible)
 				return framesSinceTest > kMaxGBufferOcclusionSkipFrames;
 			return framesSinceTest >= kBatchedGBufferOcclusionRefreshFrames;
