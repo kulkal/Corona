@@ -128,6 +128,23 @@ namespace
 		return enabled;
 	}
 
+	bool IsGBufferPassProfileEnabled()
+	{
+		static const bool enabled = []
+		{
+			auto isEnabled = [](const char* value)
+			{
+				return value && value[0] != '\0' && value[0] != '0';
+			};
+			return
+				isEnabled(std::getenv("CORONA_NRI_RECORD_PROFILE")) ||
+				isEnabled(std::getenv("CORONA_GBUFFER_PASS_PROFILE")) ||
+				isEnabled(std::getenv("CORONA_GBUFFER_BATCH_PROFILE")) ||
+				isEnabled(std::getenv("CORONA_GBUFFER_CULL_PROFILE"));
+		}();
+		return enabled;
+	}
+
 	int GetGBufferCullingModeOverride()
 	{
 		const char* value = std::getenv("CORONA_GBUFFER_CULL_MODE");
@@ -329,6 +346,103 @@ namespace
 	GBufferCullingProfile& GetGBufferCullingProfile()
 	{
 		static GBufferCullingProfile profile;
+		return profile;
+	}
+
+	struct GBufferPassProfile
+	{
+		uint64_t LastFrame = UINT64_MAX;
+		uint32_t Frames = 0;
+		uint64_t TotalObjects = 0;
+		uint64_t VisibleObjects = 0;
+		uint64_t FrustumCulledObjects = 0;
+		uint64_t OcclusionCulledObjects = 0;
+		uint64_t SpatialCandidateObjects = 0;
+		uint64_t BindlessDraws = 0;
+		uint64_t StaticDraws = 0;
+		uint64_t Queries = 0;
+		double TotalMs = 0.0;
+		double PreTransitionMs = 0.0;
+		double ClearMs = 0.0;
+		double SkinningMs = 0.0;
+		double TargetSetupMs = 0.0;
+		double PrepareCullMs = 0.0;
+		double GatherVisibleMs = 0.0;
+		double ClusterDrawMs = 0.0;
+		double ClassifyMs = 0.0;
+		double DrawSubmitMs = 0.0;
+		double FinishCullMs = 0.0;
+		double PostTransitionMs = 0.0;
+		uint64_t TotalCount = 0;
+		uint64_t PreTransitionCount = 0;
+		uint64_t ClearCount = 0;
+		uint64_t SkinningCount = 0;
+		uint64_t TargetSetupCount = 0;
+		uint64_t PrepareCullCount = 0;
+		uint64_t GatherVisibleCount = 0;
+		uint64_t ClusterDrawCount = 0;
+		uint64_t ClassifyCount = 0;
+		uint64_t DrawSubmitCount = 0;
+		uint64_t FinishCullCount = 0;
+		uint64_t PostTransitionCount = 0;
+
+		void Reset()
+		{
+			*this = GBufferPassProfile{};
+		}
+
+		void FlushIfReady()
+		{
+			if (Frames < 120)
+				return;
+			const double frames = static_cast<double>(std::max(1u, Frames));
+			auto avgMs = [frames](double totalMs) { return totalMs / frames; };
+			auto perFrame = [frames](uint64_t count) { return static_cast<double>(count) / frames; };
+			auto metric = [&](std::wstringstream& ss, const wchar_t* name, double ms, uint64_t count)
+			{
+				ss << L", " << name << L"=" << std::fixed << std::setprecision(3) << avgMs(ms)
+					<< L"ms/" << std::setprecision(1) << perFrame(count) << L"c";
+			};
+
+			std::wstringstream ss;
+			ss << L"[GBufferPassProfile] frames=" << Frames
+				<< L", visible/frame=" << std::fixed << std::setprecision(1) << perFrame(VisibleObjects)
+				<< L"/" << perFrame(TotalObjects)
+				<< L", frustum/frame=" << perFrame(FrustumCulledObjects)
+				<< L", occlusion/frame=" << perFrame(OcclusionCulledObjects)
+				<< L", spatialCandidates/frame=" << perFrame(SpatialCandidateObjects)
+				<< L", bindlessDraws/frame=" << perFrame(BindlessDraws)
+				<< L", staticDraws/frame=" << perFrame(StaticDraws)
+				<< L", queries/frame=" << perFrame(Queries);
+			metric(ss, L"total", TotalMs, TotalCount);
+			metric(ss, L"preTransition", PreTransitionMs, PreTransitionCount);
+			metric(ss, L"clear", ClearMs, ClearCount);
+			metric(ss, L"skinning", SkinningMs, SkinningCount);
+			metric(ss, L"targetSetup", TargetSetupMs, TargetSetupCount);
+			metric(ss, L"prepareCull", PrepareCullMs, PrepareCullCount);
+			metric(ss, L"gatherVisible", GatherVisibleMs, GatherVisibleCount);
+			metric(ss, L"clusterDraw", ClusterDrawMs, ClusterDrawCount);
+			metric(ss, L"classify", ClassifyMs, ClassifyCount);
+			metric(ss, L"drawSubmit", DrawSubmitMs, DrawSubmitCount);
+			metric(ss, L"finishCull", FinishCullMs, FinishCullCount);
+			metric(ss, L"postTransition", PostTransitionMs, PostTransitionCount);
+			AppendCpuRuntimeTrace(ss.str());
+			Reset();
+		}
+
+		void BeginFrame(uint64_t frame)
+		{
+			if (LastFrame == frame)
+				return;
+			FlushIfReady();
+			LastFrame = frame;
+			++Frames;
+		}
+	};
+
+	GBufferPassProfile& GetGBufferPassProfile()
+	{
+		static GBufferPassProfile profile;
 		return profile;
 	}
 
@@ -3418,9 +3532,15 @@ void Corona::DispatchSpineSkinningForRenderWorld()
 	if (!SpineSkinningPSO && !bSpineUseVsInlineSkinning)
 		return;
 
+	static thread_local std::unordered_set<const Scene*> s_spineSkinningVisitedScenes;
+	s_spineSkinningVisitedScenes.clear();
+	s_spineSkinningVisitedScenes.reserve(256);
 	for (const SceneObject& object : RenderWorld.SceneObjects)
 	{
 		if (!object.bVisible || !object.ScenePtr)
+			continue;
+		const Scene* sceneKey = object.ScenePtr.get();
+		if (!s_spineSkinningVisitedScenes.insert(sceneKey).second)
 			continue;
 		DispatchSpineSkinningForScene(object.ScenePtr);
 	}
@@ -5686,8 +5806,14 @@ void Corona::PrepareGBufferCulling(uint32_t sceneObjectCount)
 	if (capacityPerFrame != GBufferOcclusionQueryCapacityPerFrame)
 	{
 		GBufferOcclusionQueryCapacityPerFrame = capacityPerFrame;
-		SceneObjectCullingStates.clear();
+		SceneObjectCullingStates.assign(
+			std::max<size_t>(1u, static_cast<size_t>(NextSceneObjectHandle)),
+			SceneObjectCullingState{});
 		renderBackend->InitializeOcclusionQueries(GBufferOcclusionQueryCapacityPerFrame * std::max<uint32_t>(1u, renderBackend->GetFrameCount()));
+	}
+	else if (SceneObjectCullingStates.size() <= static_cast<size_t>(NextSceneObjectHandle))
+	{
+		SceneObjectCullingStates.resize(static_cast<size_t>(NextSceneObjectHandle));
 	}
 
 	GBufferOcclusionFrameIndex = renderBackend->GetCurrentFrameIndex();
@@ -5699,11 +5825,14 @@ bool Corona::ShouldDrawSceneObjectInGBuffer(const SceneObject& object, const glm
 	if (!bGBufferOcclusionQueriesActive || object.Handle == InvalidSceneObjectHandle)
 		return true;
 
+	if (SceneObjectCullingStates.size() <= static_cast<size_t>(object.Handle))
+		SceneObjectCullingStates.resize(static_cast<size_t>(object.Handle) + 1u);
 	SceneObjectCullingState& state = SceneObjectCullingStates[object.Handle];
 	const float movementThreshold = std::max(4.0f, boundsRadius * 0.05f);
+	const glm::vec3 boundsDelta = boundsCenter - state.LastBoundsCenter;
 	const bool boundsChanged =
 		!state.HasBounds ||
-		glm::length(boundsCenter - state.LastBoundsCenter) > movementThreshold ||
+		glm::dot(boundsDelta, boundsDelta) > movementThreshold * movementThreshold ||
 		std::abs(boundsRadius - state.LastBoundsRadius) > movementThreshold;
 	if (boundsChanged)
 	{
@@ -5754,6 +5883,8 @@ void Corona::EndGBufferOcclusionQuery(SceneObjectHandle handle, uint32_t queryIn
 		return;
 
 	renderBackend->EndOcclusionQuery(queryIndex);
+	if (SceneObjectCullingStates.size() <= static_cast<size_t>(handle))
+		SceneObjectCullingStates.resize(static_cast<size_t>(handle) + 1u);
 	SceneObjectCullingState& state = SceneObjectCullingStates[handle];
 	state.HasPendingOcclusionQuery = true;
 	state.LastQueryIndex = queryIndex;
@@ -5775,6 +5906,17 @@ void Corona::FinishGBufferCulling()
 
 void Corona::GBufferPass()
 {
+	const bool bGBufferPassProfileEnabled = IsGBufferPassProfileEnabled();
+	GBufferPassProfile& gbufferPassProfile = GetGBufferPassProfile();
+	if (bGBufferPassProfileEnabled)
+		gbufferPassProfile.BeginFrame(static_cast<uint64_t>(FrameCounter));
+	GBufferProfileScope gbufferPassTotalScope(
+		bGBufferPassProfileEnabled,
+		gbufferPassProfile.TotalMs,
+		gbufferPassProfile.TotalCount);
+	const auto preTransitionProfileBegin =
+		bGBufferPassProfileEnabled ? GBufferProfileClock::now() : GBufferProfileClock::time_point{};
+
 	ColorBufferWriteIndex = 1 - ColorBufferWriteIndex;
 	//DepthBufferWriteIndex = 1 - DepthBufferWriteIndex;
 	renderBackend->EmitGpuCrashMarker("GBufferPass");
@@ -5794,7 +5936,14 @@ void Corona::GBufferPass()
 	renderBackend->TransitionTexture(DepthBuffer.get(), EResourceState::ShaderRead, EResourceState::DepthWrite);
 	if (!bMobileDirectGBuffer)
 		renderBackend->TransitionTexture(UnjitteredDepthBuffers[ColorBufferWriteIndex].get(), EResourceState::ShaderRead, EResourceState::RenderTarget);
+	GBufferProfileAdd(
+		bGBufferPassProfileEnabled,
+		gbufferPassProfile.PreTransitionMs,
+		gbufferPassProfile.PreTransitionCount,
+		preTransitionProfileBegin);
 
+	const auto clearProfileBegin =
+		bGBufferPassProfileEnabled ? GBufferProfileClock::now() : GBufferProfileClock::time_point{};
 	const float clearColor[] = { 0.0f, 0.2f, 0.4f, 1.0f };
 	renderBackend->ClearRenderTarget(AlbedoBuffer.get(), clearColor);
 	if (!bMobileDirectGBuffer)
@@ -5820,14 +5969,27 @@ void Corona::GBufferPass()
 		const float ujitteredDepthClearColor[] = { 1.0f, 1.0f, 1.0f, 1.0f};
 		renderBackend->ClearRenderTarget(UnjitteredDepthBuffers[ColorBufferWriteIndex].get(), ujitteredDepthClearColor);
 	}
+	GBufferProfileAdd(
+		bGBufferPassProfileEnabled,
+		gbufferPassProfile.ClearMs,
+		gbufferPassProfile.ClearCount,
+		clearProfileBegin);
 
-
+	const auto skinningProfileBegin =
+		bGBufferPassProfileEnabled ? GBufferProfileClock::now() : GBufferProfileClock::time_point{};
 	renderBackend->BindDefaultDescriptorHeaps();
 	DispatchSpineSkinningForRenderWorld();
 	BeginGpuPassTiming(EGpuPass::SkeletalSkinning);
 	DispatchSkeletalSkinningForRenderWorld();
 	EndGpuPassTiming(EGpuPass::SkeletalSkinning);
+	GBufferProfileAdd(
+		bGBufferPassProfileEnabled,
+		gbufferPassProfile.SkinningMs,
+		gbufferPassProfile.SkinningCount,
+		skinningProfileBegin);
 
+	const auto targetSetupProfileBegin =
+		bGBufferPassProfileEnabled ? GBufferProfileClock::now() : GBufferProfileClock::time_point{};
 	renderBackend->SetViewportAndScissor(GetRenderWidth(), GetRenderHeight());
 	if (bMobileDirectGBuffer)
 	{
@@ -5854,9 +6016,28 @@ void Corona::GBufferPass()
 	}
 
 	renderBackend->BindGraphicsPipeline(GBufferGraphicsPipeline.get());
+	GBufferProfileAdd(
+		bGBufferPassProfileEnabled,
+		gbufferPassProfile.TargetSetupMs,
+		gbufferPassProfile.TargetSetupCount,
+		targetSetupProfileBegin);
 
+	const auto prepareCullProfileBegin =
+		bGBufferPassProfileEnabled ? GBufferProfileClock::now() : GBufferProfileClock::time_point{};
 	PrepareGBufferCulling(static_cast<uint32_t>(RenderWorld.SceneObjects.size()));
+	GBufferProfileAdd(
+		bGBufferPassProfileEnabled,
+		gbufferPassProfile.PrepareCullMs,
+		gbufferPassProfile.PrepareCullCount,
+		prepareCullProfileBegin);
+	const auto gatherVisibleProfileBegin =
+		bGBufferPassProfileEnabled ? GBufferProfileClock::now() : GBufferProfileClock::time_point{};
 	const std::vector<uint32_t>& visibleObjectIndices = GatherGBufferVisibleObjectIndices();
+	GBufferProfileAdd(
+		bGBufferPassProfileEnabled,
+		gbufferPassProfile.GatherVisibleMs,
+		gbufferPassProfile.GatherVisibleCount,
+		gatherVisibleProfileBegin);
 
 	// Phase D (desktop only): if the cluster PSO is live AND we're in the
 	// VS-inline skinning mode, draw all skeletal characters with a single
@@ -5869,6 +6050,8 @@ void Corona::GBufferPass()
 		bSkeletalUseVsInlineSkinning &&
 		SkeletalVsInlineClusterGraphicsPipeline &&
 		SkeletalUnifiedCharCount > 0;
+	const auto clusterDrawProfileBegin =
+		bGBufferPassProfileEnabled ? GBufferProfileClock::now() : GBufferProfileClock::time_point{};
 	if (bClusterDrawActive)
 	{
 		UpdateSkeletalUnifiedInstanceTransforms();
@@ -5878,6 +6061,11 @@ void Corona::GBufferPass()
 		}
 		renderBackend->BindGraphicsPipeline(GBufferGraphicsPipeline.get());
 	}
+	GBufferProfileAdd(
+		bGBufferPassProfileEnabled,
+		gbufferPassProfile.ClusterDrawMs,
+		gbufferPassProfile.ClusterDrawCount,
+		clusterDrawProfileBegin);
 
 	static thread_local std::unordered_map<const Scene*, bool> s_skeletalUnifiedSceneCache;
 	std::unordered_map<const Scene*, bool>& skeletalUnifiedSceneCache = s_skeletalUnifiedSceneCache;
@@ -5906,6 +6094,8 @@ void Corona::GBufferPass()
 
 	if (!bMultiThreadRendering)
 	{
+		const auto classifyProfileBegin =
+			bGBufferPassProfileEnabled ? GBufferProfileClock::now() : GBufferProfileClock::time_point{};
 		static thread_local std::unordered_map<const Scene*, bool> s_spineMeshSceneCache;
 		std::unordered_map<const Scene*, bool>& spineMeshSceneCache = s_spineMeshSceneCache;
 		spineMeshSceneCache.clear();
@@ -5977,10 +6167,9 @@ void Corona::GBufferPass()
 		{
 			if (!bGBufferOcclusionQueriesActive || object.Handle == InvalidSceneObjectHandle)
 				return;
-			auto stateIt = SceneObjectCullingStates.find(object.Handle);
-			if (stateIt == SceneObjectCullingStates.end())
+			if (static_cast<size_t>(object.Handle) >= SceneObjectCullingStates.size())
 				return;
-			SceneObjectCullingState& state = stateIt->second;
+			SceneObjectCullingState& state = SceneObjectCullingStates[object.Handle];
 			if (hasBounds)
 			{
 				state.LastBoundsCenter = boundsCenter;
@@ -5998,11 +6187,10 @@ void Corona::GBufferPass()
 			if (GBufferOcclusionQueryCount >= batchedQueryBudget)
 				return false;
 
-			const auto stateIt = SceneObjectCullingStates.find(object.Handle);
-			if (stateIt == SceneObjectCullingStates.end())
+			if (static_cast<size_t>(object.Handle) >= SceneObjectCullingStates.size())
 				return true;
 
-			const SceneObjectCullingState& state = stateIt->second;
+			const SceneObjectCullingState& state = SceneObjectCullingStates[object.Handle];
 			if (state.HasPendingOcclusionQuery)
 				return false;
 			if (state.LastTestFrame == 0)
@@ -6115,6 +6303,13 @@ void Corona::GBufferPass()
 		std::vector<VisibleGBufferObjectEntry>& visibleGBufferEntries = s_visibleGBufferEntries;
 		visibleGBufferEntries.clear();
 		visibleGBufferEntries.reserve(visibleObjectIndices.size());
+		static thread_local std::vector<uint32_t> s_prebatchedBindlessObjectIndices;
+		std::vector<uint32_t>& prebatchedBindlessObjectIndices = s_prebatchedBindlessObjectIndices;
+		prebatchedBindlessObjectIndices.clear();
+		prebatchedBindlessObjectIndices.reserve(visibleObjectIndices.size());
+		const uint32_t prebatchedRefreshBudget =
+			std::min(GBufferOcclusionQueryCapacityPerFrame, kBatchedGBufferOcclusionRefreshQueryBudget);
+		uint32_t prebatchedRefreshCandidates = 0;
 		bool bHasSpineObjects = false;
 		for (uint32_t objectIndex : visibleObjectIndices)
 		{
@@ -6127,7 +6322,6 @@ void Corona::GBufferPass()
 			VisibleGBufferObjectEntry entry{};
 			entry.ObjectIndex = objectIndex;
 			entry.Object = &object;
-			entry.StaticBatchKey = makeStaticBatchKey(object);
 			entry.SpineObject = sceneUsesSpineMesh(object.ScenePtr);
 			entry.SkeletalUnifiedObject = isSkeletalUnifiedObject(object.ScenePtr);
 			entry.TerrainScene = activeTerrainScene && object.ScenePtr == activeTerrainScene;
@@ -6141,14 +6335,7 @@ void Corona::GBufferPass()
 				!entry.ProceduralGrassScene &&
 				!entry.LegacyGrassScene &&
 				isStaticObjectBatchEligibleCached(object.ScenePtr);
-			entry.StaticInstancingEligible =
-				!entry.SpineObject &&
-				!entry.SkeletalUnifiedObject &&
-				!entry.TerrainScene &&
-				!entry.ProceduralGrassScene &&
-				!entry.LegacyGrassScene &&
-				!entry.StaticObjectBatchEligible &&
-				isStaticInstancingEligibleCached(object.ScenePtr);
+			const bool bOriginallyStaticObjectBatchEligible = entry.StaticObjectBatchEligible;
 			if (objectIndex < RenderWorld.SceneObjectCullingData.size())
 			{
 				const RenderWorldMirror::SceneObjectCullingRecord& objectData =
@@ -6158,13 +6345,58 @@ void Corona::GBufferPass()
 				entry.BoundsRadius = objectData.BoundsRadius;
 			}
 
+			if (entry.StaticObjectBatchEligible)
+			{
+				if (entry.HasBounds)
+				{
+					if (!ShouldDrawSceneObjectInGBuffer(object, entry.BoundsCenter, entry.BoundsRadius))
+						continue;
+					const bool bRefreshBatchedObject =
+						prebatchedRefreshCandidates < prebatchedRefreshBudget &&
+						shouldRefreshBatchedOcclusionQuery(object);
+					if (bRefreshBatchedObject)
+					{
+						++prebatchedRefreshCandidates;
+						entry.StaticObjectBatchEligible = false;
+					}
+					else
+					{
+						prebatchedBindlessObjectIndices.push_back(objectIndex);
+						continue;
+					}
+				}
+				else
+				{
+					prebatchedBindlessObjectIndices.push_back(objectIndex);
+					continue;
+				}
+			}
+
+			entry.StaticInstancingEligible =
+				!entry.SpineObject &&
+				!entry.SkeletalUnifiedObject &&
+				!entry.TerrainScene &&
+				!entry.ProceduralGrassScene &&
+				!entry.LegacyGrassScene &&
+				!bOriginallyStaticObjectBatchEligible &&
+				isStaticInstancingEligibleCached(object.ScenePtr);
+			if (entry.StaticInstancingEligible)
+				entry.StaticBatchKey = makeStaticBatchKey(object);
+
 			if (entry.SpineObject)
 				bHasSpineObjects = true;
 			if (entry.StaticInstancingEligible)
 				++staticInstancingCandidateCounts[entry.StaticBatchKey];
 			visibleGBufferEntries.push_back(entry);
 		}
+		GBufferProfileAdd(
+			bGBufferPassProfileEnabled,
+			gbufferPassProfile.ClassifyMs,
+			gbufferPassProfile.ClassifyCount,
+			classifyProfileBegin);
 
+		const auto drawSubmitProfileBegin =
+			bGBufferPassProfileEnabled ? GBufferProfileClock::now() : GBufferProfileClock::time_point{};
 		const int drawSpinePassCount = bHasSpineObjects ? 2 : 1;
 		for (int drawSpinePass = 0; drawSpinePass < drawSpinePassCount; ++drawSpinePass)
 		{
@@ -6173,16 +6405,8 @@ void Corona::GBufferPass()
 			staticBatches.clear();
 			staticBatches.reserve(staticInstancingCandidateCounts.size());
 			static thread_local std::vector<const SceneObject*> s_staticBatchObjectPtrs;
-			static thread_local std::vector<StaticBatchObjectEntry> s_bindlessObjectBatch;
-			static thread_local std::vector<uint32_t> s_bindlessObjectBatchIndices;
 			std::vector<const SceneObject*>& staticBatchObjectPtrs = s_staticBatchObjectPtrs;
-			std::vector<StaticBatchObjectEntry>& bindlessObjectBatch = s_bindlessObjectBatch;
-			std::vector<uint32_t>& bindlessObjectBatchIndices = s_bindlessObjectBatchIndices;
 			staticBatchObjectPtrs.clear();
-			bindlessObjectBatch.clear();
-			bindlessObjectBatchIndices.clear();
-			bindlessObjectBatch.reserve(visibleGBufferEntries.size());
-			bindlessObjectBatchIndices.reserve(visibleGBufferEntries.size());
 			for (const VisibleGBufferObjectEntry& entry : visibleGBufferEntries)
 			{
 				if (!entry.Object)
@@ -6205,19 +6429,19 @@ void Corona::GBufferPass()
 				// can show their costs separately.
 				const bool bProceduralGrassScene = entry.ProceduralGrassScene;
 				const bool bLegacyGrassScene = entry.LegacyGrassScene;
-				const GBufferStaticBatchKey& staticBatchKey = entry.StaticBatchKey;
-				const auto staticCandidateCountIt = staticInstancingCandidateCounts.find(staticBatchKey);
-				const uint32_t staticCandidateCount =
-					staticCandidateCountIt != staticInstancingCandidateCounts.end() ? staticCandidateCountIt->second : 0u;
+				uint32_t staticCandidateCount = 0u;
+				if (entry.StaticInstancingEligible)
+				{
+					const auto staticCandidateCountIt = staticInstancingCandidateCounts.find(entry.StaticBatchKey);
+					staticCandidateCount =
+						staticCandidateCountIt != staticInstancingCandidateCounts.end() ? staticCandidateCountIt->second : 0u;
+				}
 				bool bStaticInstancingCandidate =
 					drawSpinePass == 0 &&
 					entry.StaticInstancingEligible &&
 					staticCandidateCount >= kMinStaticGBufferInstanceCount;
-				bool bBindlessObjectBatchCandidate =
-					drawSpinePass == 0 &&
-					entry.StaticObjectBatchEligible;
 				bool bDrawsWithoutOcclusionQuery =
-					bStaticInstancingCandidate || bBindlessObjectBatchCandidate;
+					bStaticInstancingCandidate;
 
 				const glm::vec3 boundsCenter = entry.BoundsCenter;
 				const float boundsRadius = entry.BoundsRadius;
@@ -6230,20 +6454,13 @@ void Corona::GBufferPass()
 						shouldRefreshBatchedOcclusionQuery(object))
 					{
 						bStaticInstancingCandidate = false;
-						bBindlessObjectBatchCandidate = false;
 						bDrawsWithoutOcclusionQuery = false;
 					}
-				}
-				if (bBindlessObjectBatchCandidate)
-				{
-					bindlessObjectBatch.push_back({ &object, bHasBounds, boundsCenter, boundsRadius });
-					bindlessObjectBatchIndices.push_back(objectIndex);
-					continue;
 				}
 
 				if (bStaticInstancingCandidate)
 				{
-					StaticBatch& batch = staticBatches[staticBatchKey];
+					StaticBatch& batch = staticBatches[entry.StaticBatchKey];
 					if (!batch.ScenePtr)
 					{
 						batch.ScenePtr = object.ScenePtr;
@@ -6278,22 +6495,11 @@ void Corona::GBufferPass()
 				++GBufferLastVisibleObjectCount;
 			}
 
-			if (!bindlessObjectBatch.empty())
+			if (drawSpinePass == 0 && !prebatchedBindlessObjectIndices.empty())
 			{
-				if (!bindlessObjectBatchIndices.empty() &&
-					DrawStaticObjectBindlessBatch(bindlessObjectBatchIndices))
+				if (DrawStaticObjectBindlessBatch(prebatchedBindlessObjectIndices))
 				{
-					for (const StaticBatchObjectEntry& entry : bindlessObjectBatch)
-					{
-						if (!entry.Object)
-							continue;
-						markObjectDrawnWithoutOcclusionQuery(
-							*entry.Object,
-							entry.HasBounds,
-							entry.BoundsCenter,
-							entry.BoundsRadius);
-						++GBufferLastVisibleObjectCount;
-					}
+					GBufferLastVisibleObjectCount += prebatchedBindlessObjectIndices.size();
 				}
 				else
 				{
@@ -6356,6 +6562,11 @@ void Corona::GBufferPass()
 				}
 			}
 		}
+		GBufferProfileAdd(
+			bGBufferPassProfileEnabled,
+			gbufferPassProfile.DrawSubmitMs,
+			gbufferPassProfile.DrawSubmitCount,
+			drawSubmitProfileBegin);
 	}
 	else
 	{
@@ -6396,7 +6607,26 @@ void Corona::GBufferPass()
 		//g_TS.WaitforAll();
 	}
 
+	const auto finishCullProfileBegin =
+		bGBufferPassProfileEnabled ? GBufferProfileClock::now() : GBufferProfileClock::time_point{};
 	FinishGBufferCulling();
+	GBufferProfileAdd(
+		bGBufferPassProfileEnabled,
+		gbufferPassProfile.FinishCullMs,
+		gbufferPassProfile.FinishCullCount,
+		finishCullProfileBegin);
+
+	if (bGBufferPassProfileEnabled)
+	{
+		gbufferPassProfile.TotalObjects += GBufferLastTotalObjectCount;
+		gbufferPassProfile.VisibleObjects += GBufferLastVisibleObjectCount;
+		gbufferPassProfile.FrustumCulledObjects += GBufferLastFrustumCulledObjectCount;
+		gbufferPassProfile.OcclusionCulledObjects += GBufferLastOcclusionCulledObjectCount;
+		gbufferPassProfile.SpatialCandidateObjects += GBufferLastSpatialCandidateObjectCount;
+		gbufferPassProfile.BindlessDraws += GBufferLastBindlessObjectDrawCount;
+		gbufferPassProfile.StaticDraws += GBufferLastStaticInstancedDrawCount;
+		gbufferPassProfile.Queries += GBufferOcclusionQueryCount;
+	}
 
 	if ((FrameCounter % 120u) == 0u &&
 		(GBufferLastTotalObjectCount != 0 ||
@@ -6423,7 +6653,9 @@ void Corona::GBufferPass()
 			L", spatialVisible=" + std::to_wstring(GBufferLastSpatialVisibleObjectCount) +
 			L", active=" + std::to_wstring(bGBufferOcclusionQueriesActive ? 1 : 0));
 	}
-	
+
+	const auto postTransitionProfileBegin =
+		bGBufferPassProfileEnabled ? GBufferProfileClock::now() : GBufferProfileClock::time_point{};
 	renderBackend->TransitionTexture(AlbedoBuffer.get(), EResourceState::RenderTarget, EResourceState::ShaderRead);
 	if (!bMobileDirectGBuffer)
 		renderBackend->TransitionTexture(SpecularAlbedoBuffer.get(), EResourceState::RenderTarget, EResourceState::ShaderRead);
@@ -6437,4 +6669,9 @@ void Corona::GBufferPass()
 	renderBackend->TransitionTexture(DepthBuffer.get(), EResourceState::DepthWrite, EResourceState::ShaderRead);
 	if (!bMobileDirectGBuffer)
 		renderBackend->TransitionTexture(UnjitteredDepthBuffers[ColorBufferWriteIndex].get(), EResourceState::RenderTarget, EResourceState::ShaderRead);
+	GBufferProfileAdd(
+		bGBufferPassProfileEnabled,
+		gbufferPassProfile.PostTransitionMs,
+		gbufferPassProfile.PostTransitionCount,
+		postTransitionProfileBegin);
 }

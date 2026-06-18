@@ -501,6 +501,9 @@ void Corona::DispatchSkeletalSkinningForRenderWorld()
 	// Gather visible skeletal meshes (single pass).
 	std::vector<Mesh*> skinnedMeshes;
 	skinnedMeshes.reserve(64);
+	static thread_local std::unordered_set<Mesh*> s_skinnedMeshSet;
+	s_skinnedMeshSet.clear();
+	s_skinnedMeshSet.reserve(64);
 	for (const SceneObject& object : SceneObjects)
 	{
 		if (!object.bVisible || !object.ScenePtr)
@@ -513,7 +516,9 @@ void Corona::DispatchSkeletalSkinningForRenderWorld()
 				mesh->SkeletalOutputVb &&
 				mesh->SkeletalVertexCount > 0)
 			{
-				skinnedMeshes.push_back(mesh.get());
+				Mesh* meshPtr = mesh.get();
+				if (s_skinnedMeshSet.insert(meshPtr).second)
+					skinnedMeshes.push_back(meshPtr);
 			}
 		}
 	}

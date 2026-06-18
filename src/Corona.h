@@ -2197,7 +2197,7 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 		float LastBoundsRadius = 0.0f;
 		bool HasBounds = false;
 	};
-	std::unordered_map<SceneObjectHandle, SceneObjectCullingState> SceneObjectCullingStates;
+	std::vector<SceneObjectCullingState> SceneObjectCullingStates;
 	uint32_t GBufferOcclusionQueryCapacityPerFrame = 0;
 	uint32_t GBufferOcclusionFrameIndex = 0;
 	uint32_t GBufferOcclusionQueryCount = 0;
