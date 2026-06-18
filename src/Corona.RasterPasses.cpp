@@ -38,9 +38,12 @@ namespace
 	constexpr uint32_t kParallelCullingIndexBuildThreshold = 1024u;
 	constexpr uint32_t kParallelCellFrustumCullThreshold = 512u;
 	constexpr uint32_t kParallelFrustumCullThreshold = 2048u;
-	constexpr uint64_t kMaxGBufferOcclusionSkipFrames = 8u;
-	constexpr uint64_t kBatchedGBufferOcclusionRefreshFrames = 45u;
-	constexpr uint32_t kBatchedGBufferOcclusionRefreshQueryBudget = 4096u;
+	// Batched objects keep their last occlusion result for a while. Refreshing
+	// them requires pulling objects out of the bindless batch for real draws,
+	// so keep that trickle tiny and favor stable, approximate culling.
+	constexpr uint64_t kMaxGBufferOcclusionSkipFrames = 120u;
+	constexpr uint64_t kBatchedGBufferOcclusionRefreshFrames = 240u;
+	constexpr uint32_t kBatchedGBufferOcclusionRefreshQueryBudget = 64u;
 
 	enum class EFrustumAabbRelation : uint8_t
 	{
@@ -5637,6 +5640,8 @@ void Corona::GBufferPass()
 			const SceneObjectCullingState& state = stateIt->second;
 			if (state.HasPendingOcclusionQuery)
 				return false;
+			if (state.LastTestFrame == 0)
+				return true;
 
 			const uint64_t framesSinceTest =
 				FrameCounter >= state.LastTestFrame ?
