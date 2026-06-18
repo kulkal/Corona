@@ -1,5 +1,7 @@
 #include "Common.hlsl"
+#ifndef RT_SHADOW_INLINE_RAYQUERY
 #include "BindlessResources.hlsli"
+#endif
 
 
 RWTexture2D<float4> ShadowResult : register(u0);
@@ -80,16 +82,37 @@ float3 linearToSrgb(float3 c)
     return srgb;
 }
 
+#ifndef RT_SHADOW_INLINE_RAYQUERY
 struct RayPayload
 {
     uint bHit;
     float3 _padding;
 };
+#endif
 
 static const uint RT_SHADOW_RAY_FLAGS =
     RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH |
     RAY_FLAG_SKIP_CLOSEST_HIT_SHADER |
     RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES;
+
+bool TraceShadowOccluded(RayDesc ray)
+{
+#ifdef RT_SHADOW_INLINE_RAYQUERY
+    RayQuery<RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH |
+             RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q;
+    q.TraceRayInline(gRtScene, RAY_FLAG_NONE, 0xFFu, ray);
+    q.Proceed();
+    return q.CommittedStatus() != COMMITTED_NOTHING;
+#else
+    RayPayload payload;
+    payload.bHit = 1u;
+    payload._padding = 0.0f.xxx;
+    TraceRay(gRtScene,
+        RT_SHADOW_RAY_FLAGS,
+        0xFF, 0, 0, 0, ray, payload);
+    return payload.bHit != 0u;
+#endif
+}
 
 uint CandidateMaskForCount(uint count)
 {
@@ -167,13 +190,8 @@ float3 offset_ray(float3 p, float3 n)
     return p + n * (1.0f / 256.0f);
 }
 
-[shader("raygeneration")]
-void rayGen()
+void ExecuteShadowPass(uint2 pixelPos, uint2 launchDim)
 {
-    uint3 launchIndex = DispatchRaysIndex();
-    uint3 launchDim = DispatchRaysDimensions();
-    uint2 pixelPos = launchIndex.xy;
-
     float2 launchSize = float2(max(launchDim.x, 1u), max(launchDim.y, 1u));
     float2 uv = (float2(pixelPos) + float2(0.5f, 0.5f)) / launchSize;
 	float deviceDepth = DepthTex.SampleLevel(sampleWrap, uv, 0).x;
@@ -235,14 +253,7 @@ void rayGen()
             ray.TMin = max(0.05f, normalBias * 0.25f);
             ray.TMax = 100000;
 
-            RayPayload payload;
-            payload.bHit = 1u;
-            payload._padding = 0.0f.xxx;
-            TraceRay(gRtScene,
-                RT_SHADOW_RAY_FLAGS,
-                0xFF, 0, 0, 0, ray, payload);
-
-            visibility += payload.bHit == 0u ? 1.0f : 0.0f;
+            visibility += TraceShadowOccluded(ray) ? 0.0f : 1.0f;
         }
 
         visibility /= sampleCount;
@@ -276,12 +287,7 @@ void rayGen()
                 _ray.Direction = _lightDir;                                \
                 _ray.TMin = max(0.05f, normalBias * 0.25f);                \
                 _ray.TMax = max(_distToLight - max(normalBias * 0.5f, 0.05f), _ray.TMin + 0.05f); \
-                RayPayload _p;                                             \
-                _p.bHit = 1u;                                              \
-                _p._padding = 0.0f.xxx;                                    \
-                TraceRay(gRtScene, RT_SHADOW_RAY_FLAGS,                    \
-                    0xFF, 0, 0, 0, _ray, _p);                              \
-                visOut = (_p.bHit == 0u) ? 1.0f : 0.0f;                    \
+                visOut = TraceShadowOccluded(_ray) ? 0.0f : 1.0f;          \
             }                                                              \
         }                                                                  \
     }
@@ -552,6 +558,26 @@ void rayGen()
 
 }
 
+#ifdef RT_SHADOW_INLINE_RAYQUERY
+RT_SHADOW_INLINE_ENTRY_DECL
+{
+    uint2 launchDim;
+    ShadowResult.GetDimensions(launchDim.x, launchDim.y);
+    if (pixelPos.x >= launchDim.x || pixelPos.y >= launchDim.y)
+        return;
+    ExecuteShadowPass(pixelPos, launchDim);
+}
+#else
+[shader("raygeneration")]
+void rayGen()
+{
+    uint3 launchIndex = DispatchRaysIndex();
+    uint3 launchDim = DispatchRaysDimensions();
+    ExecuteShadowPass(launchIndex.xy, launchDim.xy);
+}
+#endif
+
+#ifndef RT_SHADOW_INLINE_RAYQUERY
 [shader("miss")]
 void miss(inout RayPayload payload)
 {
@@ -589,3 +615,4 @@ void anyhit(inout RayPayload payload, in BuiltInTriangleIntersectionAttributes a
     
     IgnoreHit();
 }
+#endif

@@ -815,6 +815,8 @@ struct NRIBackend::Impl
 		const bool profile = IsNriRecordProfileEnabled();
 		NriCpuProfileScope scope(profile, RecordProfile.TransitionTextureMs, RecordProfile.TransitionTextureCount);
 		nri::Layout before = TexLayout.count(t) ? TexLayout[t] : nri::Layout::UNDEFINED;
+		if (before == layout)
+			return;
 		nri::TextureBarrierDesc tb = {};
 		tb.texture = nt;
 		tb.before.access = AccessForLayout(before); tb.before.layout = before; tb.before.stages = StagesForLayout(before);
@@ -3398,6 +3400,7 @@ private:
 		nri::Descriptor* descSingle[1] = {};
 		bool ownsDesc = false;
 		void* last = nullptr;
+		ResKind lastKind = ResKind::None;
 		std::vector<nri::Descriptor*> descArray;
 		std::vector<void*> lastArray;
 		Texture* tex = nullptr;
@@ -3844,6 +3847,8 @@ private:
 			m->Core.DestroyDescriptor(b.desc);
 		b.desc = nullptr;
 		b.ownsDesc = false;
+		b.last = nullptr;
+		b.lastKind = ResKind::None;
 	}
 
 	void ResetOwnedDescriptorArraySlot(Binding& b, uint32_t index)
@@ -3886,19 +3891,29 @@ private:
 		Buffer* fallbackBuffer = FirstBufferArrayValue(b);
 		for (uint32_t i = 0; i < b.descriptorNum; ++i)
 		{
-			void* current = nullptr;
 			Texture* texture = nullptr;
 			Buffer* buffer = nullptr;
+			nri::Texture* nativeTexture = nullptr;
+			nri::Buffer* nativeBuffer = nullptr;
+			void* current = nullptr;
 
 			if (b.kind == ResKind::TexSRV || b.kind == ResKind::TexUAV)
 			{
 				texture = (i < b.texArray.size() && b.texArray[i]) ? b.texArray[i] : fallbackTexture;
-				current = texture;
+				auto it = m->Textures.find(texture);
+				if (it == m->Textures.end() || !it->second.texture)
+					continue;
+				nativeTexture = it->second.texture;
+				current = nativeTexture;
 			}
 			else if (b.kind == ResKind::BufSRV || b.kind == ResKind::BufUAV)
 			{
 				buffer = (i < b.bufArray.size() && b.bufArray[i]) ? b.bufArray[i] : fallbackBuffer;
-				current = buffer;
+				auto it = m->Buffers.find(buffer);
+				if (it == m->Buffers.end() || !it->second.buffer)
+					continue;
+				nativeBuffer = it->second.buffer;
+				current = nativeBuffer;
 			}
 			if (!current || (b.lastArray[i] == current && b.descArray[i]))
 				continue;
@@ -3908,12 +3923,9 @@ private:
 
 			if (texture)
 			{
-				auto it = m->Textures.find(texture);
-				if (it == m->Textures.end() || !it->second.texture)
-					continue;
-				const nri::TextureDesc& td = m->Core.GetTextureDesc(*it->second.texture);
+				const nri::TextureDesc& td = m->Core.GetTextureDesc(*nativeTexture);
 				nri::TextureViewDesc tvd = {};
-				tvd.texture = it->second.texture;
+				tvd.texture = nativeTexture;
 				tvd.type = (b.kind == ResKind::TexUAV) ? nri::TextureView::STORAGE_TEXTURE : nri::TextureView::TEXTURE;
 				tvd.format = td.format;
 				tvd.mipNum = nri::REMAINING;
@@ -3926,11 +3938,8 @@ private:
 
 			if (buffer)
 			{
-				auto it = m->Buffers.find(buffer);
-				if (it == m->Buffers.end() || !it->second.buffer)
-					continue;
 				nri::BufferViewDesc bvd = {};
-				bvd.buffer = it->second.buffer;
+				bvd.buffer = nativeBuffer;
 				bvd.offset = 0;
 				bvd.size = static_cast<uint64_t>(buffer->NumElements) * buffer->ElementSize;
 				if (buffer->Type == Buffer::BYTE_ADDRESS)
@@ -3968,23 +3977,17 @@ private:
 			return;
 		}
 
-		void* current = nullptr;
-		if (b.tex) current = b.tex;
-		else if (b.buf) current = b.buf;
-		else if (b.vb) current = b.vb;
-		else if (b.ib) current = b.ib;
-		if (!current)
-			return;
-		if (b.last == current && b.desc)
-			return;
-		ResetOwnedDescriptor(b);
-		b.last = current;
-
 		if (b.kind == ResKind::TexSRV || b.kind == ResKind::TexUAV)
 		{
 			auto it = m->Textures.find(b.tex);
 			if (it == m->Textures.end() || !it->second.texture)
 				return;
+			void* current = it->second.texture;
+			if (b.last == current && b.lastKind == b.kind && b.desc)
+				return;
+			ResetOwnedDescriptor(b);
+			b.last = current;
+			b.lastKind = b.kind;
 			const nri::TextureDesc& td = m->Core.GetTextureDesc(*it->second.texture);
 			nri::TextureViewDesc tvd = {};
 			tvd.texture = it->second.texture;
@@ -4007,6 +4010,12 @@ private:
 			auto it = m->Buffers.find(b.buf);
 			if (it == m->Buffers.end() || !it->second.buffer || !b.buf)
 				return;
+			void* current = it->second.buffer;
+			if (b.last == current && b.lastKind == b.kind && b.desc)
+				return;
+			ResetOwnedDescriptor(b);
+			b.last = current;
+			b.lastKind = b.kind;
 			bvd.buffer = it->second.buffer;
 			bvd.offset = 0;
 			bvd.size = static_cast<uint64_t>(b.buf->NumElements) * b.buf->ElementSize;
@@ -4023,6 +4032,12 @@ private:
 			auto it = m->VBs.find(b.vb);
 			if (it == m->VBs.end() || !it->second.buffer)
 				return;
+			void* current = it->second.buffer;
+			if (b.last == current && b.lastKind == b.kind && b.desc)
+				return;
+			ResetOwnedDescriptor(b);
+			b.last = current;
+			b.lastKind = b.kind;
 			bvd.buffer = it->second.buffer;
 			bvd.type = nri::BufferView::BYTE_ADDRESS_BUFFER;
 			bvd.offset = 0;
@@ -4033,6 +4048,12 @@ private:
 			auto it = m->IBs.find(b.ib);
 			if (it == m->IBs.end() || !it->second.buffer)
 				return;
+			void* current = it->second.buffer;
+			if (b.last == current && b.lastKind == b.kind && b.desc)
+				return;
+			ResetOwnedDescriptor(b);
+			b.last = current;
+			b.lastKind = b.kind;
 			bvd.buffer = it->second.buffer;
 			bvd.type = nri::BufferView::BYTE_ADDRESS_BUFFER;
 			bvd.offset = 0;
@@ -8030,6 +8051,29 @@ void NRIBackend::TransitionVertexBuffer(VertexBuffer* vertexBuffer, EResourceSta
 	m->Core.CmdBarrier(*m->ActiveCmd, bd);
 	it->second.access = bb.after;
 	it->second.accessValid = true;
+}
+void NRIBackend::UAVBarrier(Texture* texture)
+{
+	if (!m->ActiveCmd || !texture)
+		return;
+	nri::Texture* nt = m->NriTex(texture);
+	if (!nt)
+		return;
+	const bool profile = IsNriRecordProfileEnabled();
+	NriCpuProfileScope scope(profile, m->RecordProfile.TransitionTextureMs, m->RecordProfile.TransitionTextureCount);
+	nri::TextureBarrierDesc tb = {};
+	tb.texture = nt;
+	tb.before.access = nri::AccessBits::SHADER_RESOURCE_STORAGE;
+	tb.before.layout = nri::Layout::SHADER_RESOURCE_STORAGE;
+	tb.before.stages = nri::StageBits::ALL;
+	tb.after = tb.before;
+	tb.mipNum = 1;
+	tb.layerNum = 1;
+	nri::BarrierDesc bd = {};
+	bd.textures = &tb;
+	bd.textureNum = 1;
+	m->Core.CmdBarrier(*m->ActiveCmd, bd);
+	m->TexLayout[texture] = nri::Layout::SHADER_RESOURCE_STORAGE;
 }
 void NRIBackend::UAVBarrier(Buffer* buffer)
 {

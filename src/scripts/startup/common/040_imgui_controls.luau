@@ -882,22 +882,6 @@ end
 
 local function draw_sky_controls(state)
     section("Sky / Environment")
-    local sky_enabled = checkbox_state(state, "enable_sky_lighting", "Enable Sky Lighting", "script.sky.enable")
-    if sky_enabled then
-        slider_float_state(state, "sky_lighting_strength", "Sky Lighting Strength", "script.sky.strength", 0.0, 1.0)
-        local rt_sky_enabled = checkbox_state(state, "enable_ray_traced_sky_lighting", "Ray Traced Sky Pass", "script.sky.rt_pass")
-        if rt_sky_enabled then
-            slider_int_state(state, "sky_lighting_samples", "Sky Lighting Samples", "script.sky.samples", 1, 32)
-            slider_float_state(state, "sky_lighting_ray_length", "Sky Lighting Ray Length", "script.sky.ray_length", 16.0, 10000.0)
-            slider_float_state(state, "sky_lighting_normal_bias", "Sky Lighting Normal Bias", "script.sky.normal_bias", 0.01, 4.0)
-            slider_float_state(state, "sky_lighting_up_bias", "Sky Lighting Up Bias", "script.sky.up_bias", 0.0, 1.0)
-            slider_float_state(state, "sky_lighting_direction_power", "Sky Lighting Direction Power", "script.sky.direction_power", 0.25, 8.0)
-            slider_float_state(state, "sky_lighting_min_world_y", "Sky Lighting Min World Y", "script.sky.min_world_y", -0.25, 0.75)
-        else
-            ui.text("Diffuse GI handles sky contribution")
-        end
-    end
-
     slider_float_state(state, "surface_bounce_strength", "Surface Bounce Strength", "script.sky.surface_bounce_strength", 0.0, 1.0)
     slider_float_state(state, "surface_bounce_saturation", "Surface Bounce Saturation", "script.sky.surface_bounce_saturation", 0.0, 1.0)
     slider_float_state(state, "sky_intensity", "Sky Intensity", "script.sky.intensity", 0.0, 10.0)

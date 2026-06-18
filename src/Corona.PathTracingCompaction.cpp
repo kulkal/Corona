@@ -454,7 +454,7 @@ bool Corona::PathTracingCompactionPass(Texture* outputColor, const PathTracingVi
 			{
 				PathTracingCompactionParamCB passCompactionParam = traceParam;
 				PathTracingViewParamCB passViewParam = viewParam;
-				RTPassBuilder pass(*this, PSO_PATH_TRACING_COMPACTION_TRACE);
+				RTPassBuilder pass(*this, PSO_PATH_TRACING_COMPACTION_TRACE, ERtProfilePass::PathTracingCompaction);
 				pass.BeginScene()
 					.SetTextureUAV("global", "OutAlbedo", outAlbedo.IsValid() ? ctx.GetTexture(outAlbedo) : nullptr)
 					.SetTextureUAV("global", "OutSpecularAlbedo", outSpecularAlbedo.IsValid() ? ctx.GetTexture(outSpecularAlbedo) : nullptr)

@@ -884,7 +884,7 @@ void CoronaSceneInspector::DrawSelectedEntityDetails()
 			ImGui::Text("Active: %s", c->bActive ? "yes" : "no");
 			ImGui::DragFloat("FoV##c", &c->Fov, 0.005f, 0.1f, 3.0f);
 			ImGui::DragFloat("Near##c", &c->NearPlane, 0.05f, 0.001f, 100.0f);
-			ImGui::DragFloat("Far##c",  &c->FarPlane, 10.0f, 10.0f, 100000.0f);
+			ImGui::DragFloat("Far##c",  &c->FarPlane, 10.0f, 10.0f, 500000.0f);
 			float look[3] = { c->LookDirection.x, c->LookDirection.y, c->LookDirection.z };
 			if (ImGui::DragFloat3("Look##c", look, 0.01f, -1.0f, 1.0f))
 				c->LookDirection = glm::vec3(look[0], look[1], look[2]);

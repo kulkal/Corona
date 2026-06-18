@@ -21,6 +21,11 @@
 
 void AppendCpuRuntimeTrace(const std::wstring& line);
 
+namespace
+{
+	constexpr bool kReflectionTemporalReservoirEnabled = false;
+}
+
 shared_ptr<RTPipelineStateObject> Corona::CreateRaytracingReflectionPSO(bool bUseSER)
 {
 	shared_ptr<RTPipelineStateObject> tempPSO = renderBackend->CreateRTPipelineStateObject();
@@ -34,6 +39,13 @@ shared_ptr<RTPipelineStateObject> Corona::CreateRaytracingReflectionPSO(bool bUs
 		tempPSO->SetShaderDefine("RT_REFLECTION_SER_MATERIAL_HINT_BITS", "8");
 		tempPSO->SetShaderLibraryTarget("lib_6_9");
 	}
+	else if (renderBackend && renderBackend->GetAPI() == ERenderBackendAPI::D3D12)
+	{
+		tempPSO->SetShaderDefine("RT_REFLECTION_USE_RAYQUERY_SHADOWS", "1");
+		tempPSO->SetShaderLibraryTarget("lib_6_5");
+	}
+	if constexpr (kReflectionTemporalReservoirEnabled)
+		tempPSO->SetShaderDefine("RT_REFLECTION_ENABLE_TEMPORAL_RESERVOIR", "1");
 
 	tempPSO->AddHitGroup("HitGroup", "chs", "");
 	//tempPSO->AddHitGroup("ShadowHitGroup", "chsShadow", "");
@@ -45,22 +57,23 @@ shared_ptr<RTPipelineStateObject> Corona::CreateRaytracingReflectionPSO(bool bUs
 	tempPSO->BindUAV("global", MakeRHITextureUAV("ReflectionResult", 0, rayGenStage));
 	tempPSO->BindUAV("global", MakeRHITextureUAV("SpecularHitDistanceResult", 1, rayGenStage));
 	tempPSO->BindUAV("global", MakeRHITextureUAV("SpecularMotionVectorResult", 2, rayGenStage));
-	// ReSTIR specular GI reservoir UAVs (current frame).
-	tempPSO->BindUAV("global", MakeRHITextureUAV("ReflReservoirA", 3, rayGenStage));
-	tempPSO->BindUAV("global", MakeRHITextureUAV("ReflReservoirB", 4, rayGenStage));
+	if constexpr (kReflectionTemporalReservoirEnabled)
+	{
+		tempPSO->BindUAV("global", MakeRHITextureUAV("ReflReservoirA", 3, rayGenStage));
+		tempPSO->BindUAV("global", MakeRHITextureUAV("ReflReservoirB", 4, rayGenStage));
+	}
 	tempPSO->BindSRV("global", MakeRHIAccelerationStructureSRV("gRtScene", 0, rayGenStage));
 	tempPSO->BindSRV("global", MakeRHITextureSRV("DepthTex", 1, rayGenStage));
 	tempPSO->BindSRV("global", MakeRHITextureSRV("GeoNormalTex", 2, rayGenStage));
 	tempPSO->BindSRV("global", MakeRHITextureSRV("RougnessMetallicTex", 6, rayGenStage));
 	tempPSO->BindSRV("global", MakeRHITextureSRV("RayNoiseBlueNoiseSource", 7, rayGenStage));
 	tempPSO->BindSRV("global", MakeRHITextureSRV("WorldNormalTex", 8, rayGenStage));
-	// ReSTIR specular GI reservoir SRVs (previous frame) + velocity
-	// for motion reprojection. Bound unconditionally to keep the
-	// root signature stable; the raygen only reads them after the
-	// first frame has produced data.
-	tempPSO->BindSRV("global", MakeRHITextureSRV("ReflReservoirAPrev", 10, rayGenStage));
-	tempPSO->BindSRV("global", MakeRHITextureSRV("ReflReservoirBPrev", 11, rayGenStage));
-	tempPSO->BindSRV("global", MakeRHITextureSRV("ReflVelocityTex",   12, rayGenStage));
+	if constexpr (kReflectionTemporalReservoirEnabled)
+	{
+		tempPSO->BindSRV("global", MakeRHITextureSRV("ReflReservoirAPrev", 10, rayGenStage));
+		tempPSO->BindSRV("global", MakeRHITextureSRV("ReflReservoirBPrev", 11, rayGenStage));
+		tempPSO->BindSRV("global", MakeRHITextureSRV("ReflVelocityTex",   12, rayGenStage));
+	}
 
 	tempPSO->BindCBV("global", MakeRHICBV("ViewParameter", 0, sizeof(RTReflectionViewParam), rayGenStage));
 	tempPSO->BindSampler("global", MakeRHISampler("sampleWrap", 0, rayGenStage | closestHitStage));
@@ -116,12 +129,16 @@ void Corona::RaytraceReflectionPass()
 		!BlueNoiseTex ||
 		!NormalBuffers[ColorBufferWriteIndex])
 		return;
+	const auto prepareStart = CpuClock::now();
 	shared_ptr<RTPipelineStateObject> pso = PSO_RT_REFLECTION;
 	if (bEnableRTReflectionSER && renderBackend && renderBackend->SupportsShaderExecutionReordering() && InitRaytracingReflectionSERPass())
 		pso = PSO_RT_REFLECTION_SER;
 
 	if (!EnsureRTMaterialRecordBuffer())
+	{
+		AddRtPassRecordPhaseTiming(ERtProfilePass::Reflection, ERtRecordPhase::Prepare, prepareStart, CpuClock::now());
 		return;
+	}
 
 	RTReflectionViewParam.ViewMatrix = glm::transpose(ViewMat);
 	RTReflectionViewParam.InvViewMatrix = glm::transpose(InvViewMat);
@@ -150,9 +167,7 @@ void Corona::RaytraceReflectionPass()
 	RTReflectionViewParam.bWriteRRSpecularHitDistance = bWriteRRSpecularHitDistance ? 1u : 0u;
 	RTReflectionViewParam.bUseRRSpecularGuideRay =
 		(bEnableHybridRRSpecularGuideRay && (bWriteRRSpecularMotionVectors || bWriteRRSpecularHitDistance)) ? 1u : 0u;
-	// Disabled: the specular temporal reservoir path adds backend-dependent noise
-	// without a visible quality gain on DX12/Vulkan/NRI.
-	const bool bUseSpecularTemporalReservoir = false;
+	constexpr bool bUseSpecularTemporalReservoir = kReflectionTemporalReservoirEnabled;
 	RTReflectionViewParam.bEnableSpecularTemporalReservoir = bUseSpecularTemporalReservoir ? 1u : 0u;
 	static const UINT32 s_reflectionDebugOutputMode = []() -> UINT32
 	{
@@ -172,15 +187,17 @@ void Corona::RaytraceReflectionPass()
 		return 0u;
 	}();
 	RTReflectionViewParam.ReflectionDebugOutputMode = s_reflectionDebugOutputMode;
+	AddRtPassRecordPhaseTiming(ERtProfilePass::Reflection, ERtRecordPhase::Prepare, prepareStart, CpuClock::now());
 
+	const auto buildGraphStart = CpuClock::now();
 	RenderGraph rg(renderBackend.get());
 	RGTextureRef reflectionOutput = rg.ImportTexture("Reflection.SpecularGI", SpecularGIRaw.get(), EResourceState::ShaderRead);
 	RGTextureRef hitDistanceOutput = rg.ImportTexture("Reflection.HitDistance", PathTracingSpecularHitDistanceBuffer.get(), EResourceState::ShaderRead);
 	RGTextureRef motionVectorOutput = rg.ImportTexture("Reflection.MotionVector", PathTracingSpecularMotionVectorBuffer.get(), EResourceState::ShaderRead);
-	RGTextureRef reservoirAOutput = ReflectionReservoirA
+	RGTextureRef reservoirAOutput = (bUseSpecularTemporalReservoir && ReflectionReservoirA)
 		? rg.ImportTexture("Reflection.ReservoirA", ReflectionReservoirA.get(), EResourceState::ShaderRead)
 		: RGTextureRef{};
-	RGTextureRef reservoirBOutput = ReflectionReservoirB
+	RGTextureRef reservoirBOutput = (bUseSpecularTemporalReservoir && ReflectionReservoirB)
 		? rg.ImportTexture("Reflection.ReservoirB", ReflectionReservoirB.get(), EResourceState::ShaderRead)
 		: RGTextureRef{};
 	RGTextureRef depthInput = rg.ImportTexture("Reflection.Depth", UnjitteredDepthBuffers[ColorBufferWriteIndex].get(), EResourceState::ShaderRead);
@@ -190,7 +207,7 @@ void Corona::RaytraceReflectionPass()
 	RGTextureRef normalInput = rg.ImportTexture("Reflection.Normal", NormalBuffers[ColorBufferWriteIndex].get(), EResourceState::ShaderRead);
 	RGTextureRef reservoirAPrevInput = {};
 	RGTextureRef reservoirBPrevInput = {};
-	RGTextureRef velocityInput = VelocityBuffer
+	RGTextureRef velocityInput = (bUseSpecularTemporalReservoir && VelocityBuffer)
 		? rg.ImportTexture("Reflection.Velocity", VelocityBuffer.get(), EResourceState::ShaderRead)
 		: RGTextureRef{};
 	RGBufferRef rtMaterials = rg.ImportBuffer("Reflection.RtMaterials", RTMaterialRecordBuffer.get(), EResourceState::ShaderRead);
@@ -247,24 +264,27 @@ void Corona::RaytraceReflectionPass()
 			Texture* velocityTexture = velocityInput.IsValid() ? ctx.GetTexture(velocityInput) : normalTexture;
 			Buffer* materialBuffer = ctx.GetBuffer(rtMaterials);
 
-			RTPassBuilder pass(*this, pso);
+			RTPassBuilder pass(*this, pso, ERtProfilePass::Reflection);
 			pass.BeginScene()
 				.SetTextureUAV("global", "ReflectionResult", reflectionTexture)
 				.SetTextureUAV("global", "SpecularHitDistanceResult", hitDistanceTexture)
 				.SetTextureUAV("global", "SpecularMotionVectorResult", motionVectorTexture)
-				.SetTextureUAV("global", "ReflReservoirA", reservoirATexture)
-				.SetTextureUAV("global", "ReflReservoirB", reservoirBTexture)
 				.SetAccelerationStructure("global", "gRtScene", TLAS)
 				.SetTextureSRV("global", "DepthTex", ctx.GetTexture(depthInput))
 				.SetTextureSRV("global", "GeoNormalTex", ctx.GetTexture(geomNormalInput))
 				.SetTextureSRV("global", "RougnessMetallicTex", ctx.GetTexture(roughnessInput))
 				.SetTextureSRV("global", "RayNoiseBlueNoiseSource", ctx.GetTexture(blueNoiseInput))
 				.SetTextureSRV("global", "WorldNormalTex", normalTexture)
-				.SetTextureSRV("global", "ReflReservoirAPrev", reservoirAPrevTexture)
-				.SetTextureSRV("global", "ReflReservoirBPrev", reservoirBPrevTexture)
-				.SetTextureSRV("global", "ReflVelocityTex", velocityTexture)
 				.SetCBVValue("global", "ViewParameter", &RTReflectionViewParam)
 				.SetSampler("global", "sampleWrap", samplerWrap.get());
+			if constexpr (kReflectionTemporalReservoirEnabled)
+			{
+				pass.SetTextureUAV("global", "ReflReservoirA", reservoirATexture)
+					.SetTextureUAV("global", "ReflReservoirB", reservoirBTexture)
+					.SetTextureSRV("global", "ReflReservoirAPrev", reservoirAPrevTexture)
+					.SetTextureSRV("global", "ReflReservoirBPrev", reservoirBPrevTexture)
+					.SetTextureSRV("global", "ReflVelocityTex", velocityTexture);
+			}
 			pass.SetBindlessTextureTable("global", "MaterialTextures")
 				.SetBufferSRV("global", "RtMaterials", materialBuffer);
 			RTSceneHitProgramDesc hitProgramDesc;
@@ -304,5 +324,10 @@ void Corona::RaytraceReflectionPass()
 			});
 	}
 
-	rg.Execute();
+	AddRtPassRecordPhaseTiming(ERtProfilePass::Reflection, ERtRecordPhase::BuildGraph, buildGraphStart, CpuClock::now());
+
+	const auto rgExecuteStart = CpuClock::now();
+	const bool bRgExecuted = rg.Execute();
+	AddRtPassRecordPhaseTiming(ERtProfilePass::Reflection, ERtRecordPhase::RenderGraph, rgExecuteStart, CpuClock::now());
+	(void)bRgExecuted;
 }

@@ -106,7 +106,7 @@ namespace CoronaECS
 		glm::vec3 UpDirection = glm::vec3(0.0f, 1.0f, 0.0f);
 		float Fov = 0.8f;
 		float NearPlane = 10.0f;
-		float FarPlane = 20000.0f;
+		float FarPlane = 500000.0f;
 		bool bActive = false;
 	};
 

@@ -7478,7 +7478,6 @@ void Corona::RebuildFrameTimingOverlayTextIfStale()
 			case EGpuPass::SpatialHashDeepSeed:
 			case EGpuPass::RaytraceShadow:
 			case EGpuPass::RaytraceAO:
-			case EGpuPass::RaytraceSkyLighting:
 			case EGpuPass::RaytraceReflection:
 			case EGpuPass::RaytraceGI:
 			case EGpuPass::ScreenProbeGI:
@@ -7566,6 +7565,50 @@ void Corona::RebuildFrameTimingOverlayTextIfStale()
 			"untracked record",
 			std::max(0.0f, FramePerfLastRecordMs - recordPhaseLastTotal),
 			std::max(0.0f, FramePerfAverageRecordMs - recordPhaseAvgTotal));
+		out += "  RT record detail              total l/a     prep l/a    build l/a      sbt l/a       bind l/a      hit l/a       dispatch l/a   graph l/a\n";
+		bool anyRtPassDetail = false;
+		const UINT rtPrepareIndex = static_cast<UINT>(ERtRecordPhase::Prepare);
+		const UINT rtBuildGraphIndex = static_cast<UINT>(ERtRecordPhase::BuildGraph);
+		const UINT rtBindIndex = static_cast<UINT>(ERtRecordPhase::BindResources);
+		const UINT rtHitIndex = static_cast<UINT>(ERtRecordPhase::BindHitPrograms);
+		const UINT rtSbtIndex = static_cast<UINT>(ERtRecordPhase::EndShaderTable);
+		const UINT rtDispatchIndex = static_cast<UINT>(ERtRecordPhase::ApplyDispatch);
+		const UINT rtGraphIndex = static_cast<UINT>(ERtRecordPhase::RenderGraph);
+		for (UINT passIndex = 0; passIndex < RtProfilePassCount; ++passIndex)
+		{
+			float passLastTotal = 0.0f;
+			float passAvgTotal = 0.0f;
+			for (UINT phaseIndex = 0; phaseIndex < RtRecordPhaseCount; ++phaseIndex)
+			{
+				passLastTotal += RtPassRecordPhaseCompletedLastTimeMs[passIndex][phaseIndex];
+				passAvgTotal += RtPassRecordPhaseAverageTimeMs[passIndex][phaseIndex];
+			}
+			if (!hasTiming(passLastTotal, passAvgTotal))
+				continue;
+
+			anyRtPassDetail = true;
+			const char* passName = GetRtProfilePassName(static_cast<ERtProfilePass>(passIndex));
+			appendLine("    %-24s %5.2f/%5.2f  %5.2f/%5.2f  %5.2f/%5.2f  %5.2f/%5.2f  %5.2f/%5.2f  %5.2f/%5.2f  %5.2f/%5.2f  %5.2f/%5.2f",
+				passName ? passName : "rt",
+				passLastTotal,
+				passAvgTotal,
+				RtPassRecordPhaseCompletedLastTimeMs[passIndex][rtPrepareIndex],
+				RtPassRecordPhaseAverageTimeMs[passIndex][rtPrepareIndex],
+				RtPassRecordPhaseCompletedLastTimeMs[passIndex][rtBuildGraphIndex],
+				RtPassRecordPhaseAverageTimeMs[passIndex][rtBuildGraphIndex],
+				RtPassRecordPhaseCompletedLastTimeMs[passIndex][rtSbtIndex],
+				RtPassRecordPhaseAverageTimeMs[passIndex][rtSbtIndex],
+				RtPassRecordPhaseCompletedLastTimeMs[passIndex][rtBindIndex],
+				RtPassRecordPhaseAverageTimeMs[passIndex][rtBindIndex],
+				RtPassRecordPhaseCompletedLastTimeMs[passIndex][rtHitIndex],
+				RtPassRecordPhaseAverageTimeMs[passIndex][rtHitIndex],
+				RtPassRecordPhaseCompletedLastTimeMs[passIndex][rtDispatchIndex],
+				RtPassRecordPhaseAverageTimeMs[passIndex][rtDispatchIndex],
+				RtPassRecordPhaseCompletedLastTimeMs[passIndex][rtGraphIndex],
+				RtPassRecordPhaseAverageTimeMs[passIndex][rtGraphIndex]);
+		}
+		if (!anyRtPassDetail)
+			appendLine("    (no rt pass samples yet)");
 		out += "  Phases\n";
 		for (UINT i = 0; i < RenderCommandPhaseCount; ++i)
 		{
@@ -7632,6 +7675,94 @@ void Corona::RebuildFrameTimingOverlayTextIfStale()
 		}
 		return;
 	}
+}
+
+void Corona::RebuildCullingOverlayTextIfStale()
+{
+	const double nowSec = m_timer.GetTotalSeconds();
+	if (CachedCullingOverlayTimestampSec >= 0.0 &&
+		(nowSec - CachedCullingOverlayTimestampSec) < 0.10)
+	{
+		return;
+	}
+	CachedCullingOverlayTimestampSec = nowSec;
+
+	auto pct = [](uint64_t value, uint64_t total) -> double
+	{
+		return total > 0 ? (static_cast<double>(value) * 100.0) / static_cast<double>(total) : 0.0;
+	};
+	auto appendPass = [&](std::string& out, const char* label, EGpuPass pass)
+	{
+		char line[256];
+		const UINT passIndex = static_cast<UINT>(pass);
+		std::snprintf(
+			line,
+			sizeof(line),
+			"  %-18s gpu %.3f / %.3f   cpu %.3f / %.3f\n",
+			label ? label : "pass",
+			GpuPassLastTimeMs[passIndex],
+			GpuPassAverageTimeMs[passIndex],
+			CpuPassLastTimeMs[passIndex],
+			CpuPassAverageTimeMs[passIndex]);
+		out += line;
+	};
+
+	std::string& out = CachedCullingOverlayText;
+	out.clear();
+	out.reserve(2048);
+	char line[256];
+
+	out += "Culling\n";
+	std::snprintf(
+		line,
+		sizeof(line),
+		"  visible %llu / %llu (%.1f%%)   frustum culled %llu (%.1f%%)\n",
+		static_cast<unsigned long long>(GBufferLastVisibleObjectCount),
+		static_cast<unsigned long long>(GBufferLastTotalObjectCount),
+		pct(GBufferLastVisibleObjectCount, GBufferLastTotalObjectCount),
+		static_cast<unsigned long long>(GBufferLastFrustumCulledObjectCount),
+		pct(GBufferLastFrustumCulledObjectCount, GBufferLastTotalObjectCount));
+	out += line;
+	std::snprintf(
+		line,
+		sizeof(line),
+		"  cells %llu / %llu   partial %llu   candidates %llu   spatial visible %llu\n",
+		static_cast<unsigned long long>(GBufferLastSpatialVisibleCellCount),
+		static_cast<unsigned long long>(GBufferLastSpatialCellCount),
+		static_cast<unsigned long long>(GBufferLastSpatialPartialCellCount),
+		static_cast<unsigned long long>(GBufferLastSpatialCandidateObjectCount),
+		static_cast<unsigned long long>(GBufferLastSpatialVisibleObjectCount));
+	out += line;
+	std::snprintf(
+		line,
+		sizeof(line),
+		"  occlusion culled %llu   queries %u   active %u\n",
+		static_cast<unsigned long long>(GBufferLastOcclusionCulledObjectCount),
+		GBufferOcclusionQueryCount,
+		bGBufferOcclusionQueriesActive ? 1u : 0u);
+	out += line;
+	std::snprintf(
+		line,
+		sizeof(line),
+		"  bindless batches %llu   objects %llu   draws %llu\n",
+		static_cast<unsigned long long>(GBufferLastBindlessObjectBatchCount),
+		static_cast<unsigned long long>(GBufferLastBindlessObjectCount),
+		static_cast<unsigned long long>(GBufferLastBindlessObjectDrawCount));
+	out += line;
+	std::snprintf(
+		line,
+		sizeof(line),
+		"  instanced batches %llu   objects %llu   draws %llu\n",
+		static_cast<unsigned long long>(GBufferLastStaticInstancedBatchCount),
+		static_cast<unsigned long long>(GBufferLastStaticInstancedObjectCount),
+		static_cast<unsigned long long>(GBufferLastStaticInstancedDrawCount));
+	out += line;
+
+	out += "Pass cost                   gpu last/avg      cpu record last/avg\n";
+	appendPass(out, "GBuffer", EGpuPass::GBuffer);
+	appendPass(out, "RT Shadow", EGpuPass::RaytraceShadow);
+	appendPass(out, "RT Reflection", EGpuPass::RaytraceReflection);
+	appendPass(out, "RT GI", EGpuPass::RaytraceGI);
 }
 
 #if 0
@@ -7864,6 +7995,13 @@ void Corona::PushLuauUiStateForScript(lua_State* L, const std::string& mode, boo
 	lua_pushlstring(L, CachedFrameTimingOverlayText.data(),
 		CachedFrameTimingOverlayText.size());
 	lua_setfield(L, -2, "frame_timing_overlay_text");
+	if (bShowCullingTextOverlay)
+		RebuildCullingOverlayTextIfStale();
+	else
+		CachedCullingOverlayText.clear();
+	lua_pushlstring(L, CachedCullingOverlayText.data(),
+		CachedCullingOverlayText.size());
+	lua_setfield(L, -2, "culling_overlay_text");
 	// Keep the scalar frame-timing numbers around — a handful of other
 	// panels (Capture / Profiling, script profile rows) read them.
 	PushNumberField(L, "frame_time_last_ms", FramePerfLastFrameMs);
@@ -7965,8 +8103,6 @@ void Corona::PushLuauUiStateForScript(lua_State* L, const std::string& mode, boo
 	PushBoolField(L, "rt_diffuse_gi_ser_available", renderBackend && renderBackend->SupportsShaderExecutionReordering());
 	PushBoolField(L, "enable_rtao", bEnableRTAO);
 	PushBoolField(L, "enable_restir_direct_shadow", bEnableReSTIRDirectShadow);
-	PushBoolField(L, "enable_sky_lighting", bEnableSkyLighting);
-	PushBoolField(L, "enable_ray_traced_sky_lighting", bEnableRayTracedSkyLighting);
 	PushBoolField(L, "async_shadow_ao_available", renderBackend && renderBackend->SupportsAsyncRtOverlap());
 	PushBoolField(L, "enable_async_shadow_ao_overlap", bEnableAsyncShadowAOOverlap);
 	PushBoolField(L, "async_shadow_ao_overlap_rtao", bAsyncShadowAOOverlapRTAO);
@@ -7980,13 +8116,6 @@ void Corona::PushLuauUiStateForScript(lua_State* L, const std::string& mode, boo
 	PushNumberField(L, "rtao_direct_contact", RTAODirectContactStrength);
 	PushNumberField(L, "rtao_indirect_strength", RTAOIndirectStrength);
 	PushNumberField(L, "rtao_indirect_floor", RTAOIndirectFloor);
-	PushIntegerField(L, "sky_lighting_samples", static_cast<lua_Integer>(RTSkyLightingViewParam.SampleCount));
-	PushNumberField(L, "sky_lighting_ray_length", RTSkyLightingViewParam.RayLength);
-	PushNumberField(L, "sky_lighting_strength", SkyLightingStrength);
-	PushNumberField(L, "sky_lighting_normal_bias", RTSkyLightingViewParam.NormalBias);
-	PushNumberField(L, "sky_lighting_up_bias", RTSkyLightingViewParam.SkyUpBias);
-	PushNumberField(L, "sky_lighting_direction_power", RTSkyLightingViewParam.SkyDirectionPower);
-	PushNumberField(L, "sky_lighting_min_world_y", RTSkyLightingViewParam.SkyMinWorldY);
 	PushNumberField(L, "surface_bounce_strength", SurfaceBounceStrength);
 	PushNumberField(L, "surface_bounce_saturation", SurfaceBounceSaturation);
 	PushIntegerField(L, "simple_gi_samples_per_pixel", static_cast<lua_Integer>(SimpleGISamplesPerPixel));
@@ -8583,8 +8712,6 @@ bool Corona::SetLuauUiValueForScript(const std::string& name, lua_State* L, int 
 	if (setBool("enable_async_shadow_ao_overlap", bEnableAsyncShadowAOOverlap)) return true;
 	if (setBool("async_shadow_ao_overlap_rtao", bAsyncShadowAOOverlapRTAO)) return true;
 	if (setBool("async_shadow_ao_overlap_shadow", bAsyncShadowAOOverlapShadow)) return true;
-	if (setBool("enable_sky_lighting", bEnableSkyLighting, true)) return true;
-	if (setBool("enable_ray_traced_sky_lighting", bEnableRayTracedSkyLighting, true)) return true;
 	if (setFloat("sun_angular_radius", RTShadowViewParam.ShadowLightRadius, true)) return true;
 	if (setUInt("hybrid_shadow_samples", RTShadowViewParam.ShadowSampleCount, 1, 16, true)) return true;
 	if (setUInt("rtao_samples", RTAOViewParam.SampleCount, 1, 16, true)) return true;
@@ -8594,13 +8721,6 @@ bool Corona::SetLuauUiValueForScript(const std::string& name, lua_State* L, int 
 	if (setFloat("rtao_direct_contact", RTAODirectContactStrength, true)) return true;
 	if (setFloat("rtao_indirect_strength", RTAOIndirectStrength, true)) return true;
 	if (setFloat("rtao_indirect_floor", RTAOIndirectFloor, true)) return true;
-	if (setUInt("sky_lighting_samples", RTSkyLightingViewParam.SampleCount, 1, 32, true)) return true;
-	if (setFloat("sky_lighting_ray_length", RTSkyLightingViewParam.RayLength, true)) return true;
-	if (setFloat("sky_lighting_strength", SkyLightingStrength, true)) return true;
-	if (setFloat("sky_lighting_normal_bias", RTSkyLightingViewParam.NormalBias, true)) return true;
-	if (setFloat("sky_lighting_up_bias", RTSkyLightingViewParam.SkyUpBias, true)) return true;
-	if (setFloat("sky_lighting_direction_power", RTSkyLightingViewParam.SkyDirectionPower, true)) return true;
-	if (setFloat("sky_lighting_min_world_y", RTSkyLightingViewParam.SkyMinWorldY, true)) return true;
 	if (setFloat("surface_bounce_strength", SurfaceBounceStrength, true)) return true;
 	if (setFloat("surface_bounce_saturation", SurfaceBounceSaturation, true)) return true;
 	if (setUInt("simple_gi_samples_per_pixel", SimpleGISamplesPerPixel, 1, 8, true)) return true;

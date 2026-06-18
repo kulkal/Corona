@@ -258,7 +258,7 @@ bool Corona::SpatialHashPrimaryDeepSeedPass()
 
 	renderBackend->EmitGpuCrashMarker("SpatialHashPrimaryDeepSeedPass");
 
-	RTPassBuilder pass(*this, PSO_RT_SPATIAL_HASH_PRIMARY_DEEP_SEED);
+	RTPassBuilder pass(*this, PSO_RT_SPATIAL_HASH_PRIMARY_DEEP_SEED, ERtProfilePass::SpatialHashSeed);
 	pass.BeginScene()
 		.SetAccelerationStructure("global", "gRtScene", TLAS)
 		.SetTextureSRV("global", "DepthTex", UnjitteredDepthBuffers[ColorBufferWriteIndex].get())
@@ -292,11 +292,6 @@ void Corona::PrepareSpatialHashGIFrameParams(UINT32 spatialHashTraceCellBudget)
 	SpatialHashGICB.HashEntryMask = SpatialHashGIEntryCount - 1u;
 	SpatialHashGICB.ActiveCellCapacity = SpatialHashGIActiveCellCapacity;
 	SpatialHashGICB.TraceCellBudget = traceCellBudgetForMode;
-	{
-		const float fallbackStrength = std::clamp(SpatialHashSkyFallbackStrength, 0.0f, 1.0f);
-		const glm::vec3 skyAvg = 0.5f * (SkyColorTop + SkyColorBottom) * RenderFrameDiffuseGISkyIntensity;
-		SpatialHashGICB.SpatialHashSkyAmbient = glm::vec4(skyAvg * fallbackStrength, fallbackStrength);
-	}
 	SpatialHashGICB.InvViewMatrix = glm::transpose(InvViewMat);
 	SpatialHashGICB.InvProjMatrix = glm::transpose(UnjitteredInvProjMat);
 	SpatialHashGICB.ProjectionParams = FrameProjectionParams;
@@ -360,12 +355,8 @@ void Corona::PrepareSpatialHashGIFrameParams(UINT32 spatialHashTraceCellBudget)
 	RTSpatialHashGIViewParam.CellSize = SpatialHashGICB.CellSize;
 	RTSpatialHashGIViewParam.RayBias = std::clamp(SpatialHashGICB.CellSize * 0.02f, 0.05f, 0.5f);
 	RTSpatialHashGIViewParam.ViewSpreadAngle = glm::tan(Fov * 0.5f) / (0.5f * GetRenderHeight());
-	RTSpatialHashGIViewParam.SkyColorTop = SkyColorTop;
-	RTSpatialHashGIViewParam.SkyIntensity = RenderFrameDiffuseGISkyIntensity;
-	RTSpatialHashGIViewParam.SkyColorBottom = SkyColorBottom;
 	RTSpatialHashGIViewParam.LightColor = RenderFrameLightColor;
 	RTSpatialHashGIViewParam.ActiveCellCapacity = SpatialHashGIActiveCellCapacity;
-	RTSpatialHashGIViewParam.bIncludeSkyLighting = RenderFrameDiffuseGISkyLightingEnabled;
 	RTSpatialHashGIViewParam.HashEntryMask = SpatialHashGIEntryCount - 1u;
 	RTSpatialHashGIViewParam.MaxProbeSteps = SpatialHashGICB.MaxProbeSteps;
 	RTSpatialHashGIViewParam.GIMode = SpatialHashGICB.GIMode;
@@ -391,10 +382,6 @@ void Corona::PrepareSpatialHashGIFrameParams(UINT32 spatialHashTraceCellBudget)
 			sizeof(PointLightParam) * RTSpatialHashGIViewParam.PointLightCount);
 		mix(&RTSpatialHashGIViewParam.LightDir, sizeof(glm::vec4));
 		mix(&RTSpatialHashGIViewParam.LightColor, sizeof(glm::vec3));
-		mix(&RTSpatialHashGIViewParam.SkyColorTop, sizeof(glm::vec3));
-		mix(&RTSpatialHashGIViewParam.SkyColorBottom, sizeof(glm::vec3));
-		mix(&RTSpatialHashGIViewParam.SkyIntensity, sizeof(float));
-		mix(&RTSpatialHashGIViewParam.bIncludeSkyLighting, sizeof(UINT32));
 		const bool lightingChanged = (h != LastSpatialHashLightingHash);
 		LastSpatialHashLightingHash = h;
 		SpatialHashGILightingChangedThisFrame = lightingChanged ? 1.0f : 0.0f;
@@ -417,8 +404,7 @@ void Corona::PrepareSpatialHashGIFrameParams(UINT32 spatialHashTraceCellBudget)
 				std::to_wstring(RenderFrameNormalizedLightDir.y) + L"," +
 				std::to_wstring(RenderFrameNormalizedLightDir.z) +
 				L", pointLights=" + std::to_wstring(RTSpatialHashGIViewParam.PointLightCount) +
-				L", pointLightLimit=" + std::to_wstring(DiffuseGIPointLightLimit) +
-				L", sky=" + std::to_wstring(RenderFrameDiffuseGISkyLightingEnabled));
+				L", pointLightLimit=" + std::to_wstring(DiffuseGIPointLightLimit));
 		}
 	}
 }
@@ -610,7 +596,7 @@ void Corona::SpatialHashGIPass()
 	if (SpatialHashGIOctRayData)
 		renderBackend->TransitionBuffer(SpatialHashGIOctRayData.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
 
-	RTPassBuilder pass(*this, rtPSO);
+	RTPassBuilder pass(*this, rtPSO, ERtProfilePass::SpatialHashTrace);
 	pass.BeginScene()
 		.SetBufferUAV("global", "TraceSH0", SpatialHashGITraceSH[0].get())
 		.SetBufferUAV("global", "TraceSH1", SpatialHashGITraceSH[1].get())

@@ -845,6 +845,25 @@ namespace
 		return normalized == L"1" || normalized == L"true" || normalized == L"on" || normalized == L"yes";
 	}
 
+	bool IsTruthyEnvironmentVariable(const wchar_t* name)
+	{
+		const auto value = GetPlatformEnvironmentVariable(name);
+		if (!value || value->empty())
+			return false;
+
+		std::wstring normalized = *value;
+		std::transform(normalized.begin(), normalized.end(), normalized.begin(), [](wchar_t ch)
+		{
+			return static_cast<wchar_t>(std::towlower(ch));
+		});
+		return normalized == L"1" || normalized == L"true" || normalized == L"on" || normalized == L"yes";
+	}
+
+	bool IsVulkanCaptureSafeModeEnabled()
+	{
+		return IsTruthyEnvironmentVariable(L"CORONA_VULKAN_CAPTURE_SAFE");
+	}
+
 	bool HasInstanceLayer(const char* layerName)
 	{
 		uint32_t layerCount = 0;
@@ -3116,6 +3135,18 @@ void VulkanComputePipelineStateObject::SetCBVValue(const std::string& name, void
 }
 #endif
 
+VulkanBackend::VulkanBackend()
+{
+#if CORONA_HAS_VULKAN
+	bCaptureSafeMode = IsVulkanCaptureSafeModeEnabled();
+	bCaptureSafeDisableRayTracing = IsTruthyEnvironmentVariable(L"CORONA_VULKAN_CAPTURE_DISABLE_RT");
+	if (bCaptureSafeMode)
+		AppendVulkanRuntimeTraceBackend(L"[VulkanBackend] capture-safe mode disables debug utils markers");
+	if (bCaptureSafeDisableRayTracing)
+		AppendVulkanRuntimeTraceBackend(L"[VulkanBackend] capture diagnostic disables Vulkan ray tracing extensions");
+#endif
+}
+
 VulkanBackend::~VulkanBackend()
 {
 	DestroyWindowContext();
@@ -4400,7 +4431,7 @@ void VulkanBackend::WaitForGpu()
 void VulkanBackend::EmitGpuCrashMarker(const char* markerName)
 {
 #if CORONA_HAS_VULKAN
-	if (!markerName || !vkCmdInsertDebugUtilsLabelEXTFn || ActiveCommandBuffer == VK_NULL_HANDLE)
+	if (bCaptureSafeMode || !markerName || !vkCmdInsertDebugUtilsLabelEXTFn || ActiveCommandBuffer == VK_NULL_HANDLE)
 		return;
 
 	VkDebugUtilsLabelEXT label{};
@@ -8045,6 +8076,11 @@ void VulkanBackend::CreateSwapChainForWindow(WindowHandle window, uint32_t width
 	const bool bHasRayTracingPipelineExtension = hasDeviceExtension(VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME);
 	const bool bHasRayQueryExtension = hasDeviceExtension(VK_KHR_RAY_QUERY_EXTENSION_NAME);
 	const bool bHasDescriptorIndexingExtension = hasDeviceExtension(VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME);
+#if defined(VK_EXT_debug_marker)
+	const bool bHasDebugMarkerExtension = hasDeviceExtension(VK_EXT_DEBUG_MARKER_EXTENSION_NAME);
+#else
+	const bool bHasDebugMarkerExtension = false;
+#endif
 	bRayTracingExtensionSupport =
 		bHasBufferDeviceAddressExtension &&
 		bHasDeferredHostOperationsExtension &&
@@ -8127,7 +8163,17 @@ void VulkanBackend::CreateSwapChainForWindow(WindowHandle window, uint32_t width
 		L", maxBindlessTextures=" + std::to_wstring(MaxVulkanBindlessTextureSlots) +
 		L", maxBindlessBuffers=" + std::to_wstring(MaxVulkanBindlessBufferSlots));
 
-	const bool bCanEnableRayTracing = bRayTracingExtensionSupport && bRayTracingFeatureSupport && bDescriptorIndexingEnabled;
+	const bool bCanEnableRayTracing =
+		!bCaptureSafeDisableRayTracing &&
+		bRayTracingExtensionSupport &&
+		bRayTracingFeatureSupport &&
+		bDescriptorIndexingEnabled;
+	if (bCaptureSafeDisableRayTracing)
+	{
+		bRayTracingEnabled = false;
+		bRayTracingIndirectEnabled = false;
+		AppendVulkanRuntimeTraceBackend(L"[VulkanBackend::CreateSwapChainForWindow] ray tracing disabled by capture diagnostic");
+	}
 
 	const float queuePriority = 1.0f;
 	VkDeviceQueueCreateInfo queueCreateInfo{};
@@ -8137,6 +8183,10 @@ void VulkanBackend::CreateSwapChainForWindow(WindowHandle window, uint32_t width
 	queueCreateInfo.pQueuePriorities = &queuePriority;
 
 	std::vector<const char*> deviceExtensions = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
+#if defined(VK_EXT_debug_marker)
+	if (bHasDebugMarkerExtension)
+		deviceExtensions.push_back(VK_EXT_DEBUG_MARKER_EXTENSION_NAME);
+#endif
 	VkPhysicalDeviceBufferDeviceAddressFeatures bufferDeviceAddressFeatures{};
 	VkPhysicalDeviceAccelerationStructureFeaturesKHR accelerationStructureFeatures{};
 	VkPhysicalDeviceRayTracingPipelineFeaturesKHR rayTracingPipelineFeatures{};
@@ -8212,6 +8262,17 @@ void VulkanBackend::CreateSwapChainForWindow(WindowHandle window, uint32_t width
 		vkGetDeviceProcAddr(Device, "vkCmdBeginDebugUtilsLabelEXT"));
 	vkCmdEndDebugUtilsLabelEXTFn = reinterpret_cast<PFN_vkCmdEndDebugUtilsLabelEXT>(
 		vkGetDeviceProcAddr(Device, "vkCmdEndDebugUtilsLabelEXT"));
+#if defined(VK_EXT_debug_marker)
+	vkCmdDebugMarkerBeginEXTFn = reinterpret_cast<PFN_vkCmdDebugMarkerBeginEXT>(
+		vkGetDeviceProcAddr(Device, "vkCmdDebugMarkerBeginEXT"));
+	vkCmdDebugMarkerEndEXTFn = reinterpret_cast<PFN_vkCmdDebugMarkerEndEXT>(
+		vkGetDeviceProcAddr(Device, "vkCmdDebugMarkerEndEXT"));
+#endif
+	AppendVulkanRuntimeTraceBackend(
+		L"[VulkanBackend::CreateSwapChainForWindow] markers debugUtils=" +
+		std::to_wstring(vkCmdBeginDebugUtilsLabelEXTFn && vkCmdEndDebugUtilsLabelEXTFn ? 1 : 0) +
+		L", debugMarker=" +
+		std::to_wstring(bHasDebugMarkerExtension ? 1 : 0));
 
 	if (bCanEnableRayTracing)
 		LoadRayTracingFunctionPointers();
@@ -9754,8 +9815,24 @@ void VulkanBackend::ExecuteCurrentCommandList()
 void VulkanBackend::BeginGpuMarker(uint64_t color, const char* label)
 {
 #if CORONA_HAS_VULKAN
+	if (bCaptureSafeMode)
+		return;
 	if (!label || ActiveCommandBuffer == VK_NULL_HANDLE)
 		return;
+#if defined(VK_EXT_debug_marker)
+	if (vkCmdDebugMarkerBeginEXTFn)
+	{
+		VkDebugMarkerMarkerInfoEXT markerInfo{};
+		markerInfo.sType = VK_STRUCTURE_TYPE_DEBUG_MARKER_MARKER_INFO_EXT;
+		markerInfo.pMarkerName = label;
+		markerInfo.color[0] = static_cast<float>((color >> 16) & 0xffu) / 255.0f;
+		markerInfo.color[1] = static_cast<float>((color >> 8) & 0xffu) / 255.0f;
+		markerInfo.color[2] = static_cast<float>(color & 0xffu) / 255.0f;
+		markerInfo.color[3] = static_cast<float>((color >> 24) & 0xffu) / 255.0f;
+		vkCmdDebugMarkerBeginEXTFn(ActiveCommandBuffer, &markerInfo);
+		return;
+	}
+#endif
 	if (!vkCmdBeginDebugUtilsLabelEXTFn)
 	{
 		if (vkCmdInsertDebugUtilsLabelEXTFn)
@@ -9788,6 +9865,15 @@ void VulkanBackend::BeginGpuMarker(uint64_t color, const char* label)
 void VulkanBackend::EndGpuMarker()
 {
 #if CORONA_HAS_VULKAN
+	if (bCaptureSafeMode)
+		return;
+#if defined(VK_EXT_debug_marker)
+	if (ActiveCommandBuffer != VK_NULL_HANDLE && vkCmdDebugMarkerEndEXTFn)
+	{
+		vkCmdDebugMarkerEndEXTFn(ActiveCommandBuffer);
+		return;
+	}
+#endif
 	if (ActiveCommandBuffer != VK_NULL_HANDLE && vkCmdEndDebugUtilsLabelEXTFn)
 		vkCmdEndDebugUtilsLabelEXTFn(ActiveCommandBuffer);
 #endif
@@ -10210,6 +10296,10 @@ void VulkanBackend::DestroyWindowContext()
 	vkCmdInsertDebugUtilsLabelEXTFn = nullptr;
 	vkCmdBeginDebugUtilsLabelEXTFn = nullptr;
 	vkCmdEndDebugUtilsLabelEXTFn = nullptr;
+#if defined(VK_EXT_debug_marker)
+	vkCmdDebugMarkerBeginEXTFn = nullptr;
+	vkCmdDebugMarkerEndEXTFn = nullptr;
+#endif
 	TimestampValidBits = 0;
 	TimestampPeriodNs = 0.0f;
 	OcclusionQueryCount = 0;

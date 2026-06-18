@@ -13,6 +13,7 @@
 #include "Corona.h"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
@@ -21,12 +22,127 @@
 #include <map>
 #include <set>
 #include <sstream>
+#include <unordered_set>
 
 void AppendCpuRuntimeTrace(const std::wstring& line);
 
 namespace
 {
 	constexpr uint32_t kRTInstanceFlagAlphaTested = 1u << 0;
+	constexpr float kDefaultRtExtendedFrustumMargin = 8192.0f;
+
+	using RtFrustumPlaneArray = std::array<glm::vec4, 6>;
+
+	struct RtExtendedFrustumCullStats
+	{
+		uint64_t TotalObjects = 0;
+		uint64_t IncludedObjects = 0;
+		uint64_t CulledObjects = 0;
+		uint64_t IncludedMeshes = 0;
+	};
+
+	enum class ERtFrustumAabbRelation : uint8_t
+	{
+		Outside,
+		Intersect,
+		Inside
+	};
+
+	bool IsRtExtendedFrustumCullingEnabled()
+	{
+		static const bool enabled = []
+		{
+			const char* value = std::getenv("CORONA_RT_EXTENDED_FRUSTUM_CULL");
+			if (!value || value[0] == '\0')
+				return false;
+			return value[0] != '\0' && value[0] != '0';
+		}();
+		return enabled;
+	}
+
+	float GetRtExtendedFrustumMargin()
+	{
+		static const float margin = []
+		{
+			const char* value = std::getenv("CORONA_RT_EXTENDED_FRUSTUM_MARGIN");
+			if (!value || value[0] == '\0')
+				return kDefaultRtExtendedFrustumMargin;
+			const float parsed = static_cast<float>(std::atof(value));
+			return std::isfinite(parsed) ? std::max(0.0f, parsed) : kDefaultRtExtendedFrustumMargin;
+		}();
+		return margin;
+	}
+
+	bool IsFiniteMatrix(const glm::mat4x4& matrix)
+	{
+		for (int col = 0; col < 4; ++col)
+		{
+			for (int row = 0; row < 4; ++row)
+			{
+				if (!std::isfinite(matrix[col][row]))
+					return false;
+			}
+		}
+		return true;
+	}
+
+	RtFrustumPlaneArray BuildRtFrustumPlanes(const glm::mat4x4& viewProj)
+	{
+		auto row = [](const glm::mat4x4& matrix, int index)
+		{
+			return glm::vec4(matrix[0][index], matrix[1][index], matrix[2][index], matrix[3][index]);
+		};
+		auto normalizePlane = [](const glm::vec4& plane)
+		{
+			const glm::vec3 normal(plane.x, plane.y, plane.z);
+			const float length = glm::length(normal);
+			return length > 0.0f && std::isfinite(length) ? plane / length : plane;
+		};
+		const glm::vec4 row0 = row(viewProj, 0);
+		const glm::vec4 row1 = row(viewProj, 1);
+		const glm::vec4 row2 = row(viewProj, 2);
+		const glm::vec4 row3 = row(viewProj, 3);
+		return
+		{
+			normalizePlane(row3 + row0),
+			normalizePlane(row3 - row0),
+			normalizePlane(row3 + row1),
+			normalizePlane(row3 - row1),
+			normalizePlane(row3 + row2),
+			normalizePlane(row3 - row2),
+		};
+	}
+
+	ERtFrustumAabbRelation ClassifyAabbAgainstExtendedFrustum(
+		const RtFrustumPlaneArray& planes,
+		const glm::vec3& boundsMin,
+		const glm::vec3& boundsMax,
+		float extensionMargin)
+	{
+		const glm::vec3 center = (boundsMin + boundsMax) * 0.5f;
+		const glm::vec3 extents = glm::max((boundsMax - boundsMin) * 0.5f, glm::vec3(0.0f));
+		bool bFullyInside = true;
+		for (const glm::vec4& plane : planes)
+		{
+			const glm::vec3 normal(plane.x, plane.y, plane.z);
+			const float distance = glm::dot(normal, center) + plane.w;
+			const float radius = glm::dot(glm::abs(normal), extents);
+			if (distance + radius < -extensionMargin)
+				return ERtFrustumAabbRelation::Outside;
+			if (distance - radius < -extensionMargin)
+				bFullyInside = false;
+		}
+		return bFullyInside ? ERtFrustumAabbRelation::Inside : ERtFrustumAabbRelation::Intersect;
+	}
+
+	bool IsAabbInsideExtendedFrustum(
+		const RtFrustumPlaneArray& planes,
+		const glm::vec3& boundsMin,
+		const glm::vec3& boundsMax,
+		float extensionMargin)
+	{
+		return ClassifyAabbAgainstExtendedFrustum(planes, boundsMin, boundsMax, extensionMargin) != ERtFrustumAabbRelation::Outside;
+	}
 
 	std::wstring FormatRTInitMilliseconds(double milliseconds)
 	{
@@ -70,20 +186,6 @@ namespace
 			mesh.Ib->numIndices >= 3;
 	}
 
-	size_t CountBuildableRayTracingMeshes(const shared_ptr<Scene>& scene)
-	{
-		if (!scene)
-			return 0;
-
-		size_t count = 0;
-		for (const shared_ptr<Mesh>& mesh : scene->meshes)
-		{
-			if (mesh && IsMeshRayTracingBuildable(*mesh))
-				++count;
-		}
-		return count;
-	}
-
 	void TraceSkippedRayTracingMesh(const Mesh& mesh)
 	{
 		static std::set<const Mesh*> loggedMeshes;
@@ -103,7 +205,7 @@ namespace
 			L", indices=" + std::to_wstring(mesh.Ib ? mesh.Ib->numIndices : 0));
 	}
 
-	void AddMeshesToRayTracingInstances(
+	size_t AddMeshesToRayTracingInstances(
 		vector<RTInstanceDesc>& instances,
 		map<Mesh*, shared_ptr<RTAS>>& blasCache,
 		const shared_ptr<Scene>& scene,
@@ -114,12 +216,13 @@ namespace
 		bool& bBuildSuspended)
 	{
 		if (!scene || bBuildSuspended)
-			return;
+			return 0;
 
+		size_t addedInstanceCount = 0;
 		for (auto& mesh : scene->meshes)
 		{
 			if (bBuildSuspended)
-				return;
+				return addedInstanceCount;
 			if (!mesh)
 				continue;
 			if (!IsMeshRayTracingBuildable(*mesh))
@@ -139,7 +242,7 @@ namespace
 					AppendCpuRuntimeTrace(
 						L"[RTAS] suspended BLAS build after cached failure for mesh=" +
 						FormatRTHex(reinterpret_cast<uint64_t>(mesh.get())));
-					return;
+					return addedInstanceCount;
 				}
 			}
 			else
@@ -155,7 +258,7 @@ namespace
 					AppendCpuRuntimeTrace(
 						L"[RTAS] cached failed BLAS build and suspended RTAS rebuild for mesh=" +
 						FormatRTHex(reinterpret_cast<uint64_t>(mesh.get())));
-					return;
+					return addedInstanceCount;
 				}
 			}
 
@@ -177,7 +280,9 @@ namespace
 				}
 			}
 			instances.push_back(instance);
+			++addedInstanceCount;
 		}
+		return addedInstanceCount;
 	}
 }
 
@@ -317,6 +422,156 @@ bool Corona::ShouldIncludeSceneObjectInRayTracingAS(const SceneObject& object) c
 	return object.bRayTracing || RenderingMode == ERenderingMode::PATHTRACING;
 }
 
+bool Corona::IsRayTracingExtendedFrustumCullingActive() const
+{
+	return RenderingMode != ERenderingMode::PATHTRACING &&
+		FrameCounter > 0 &&
+		IsRtExtendedFrustumCullingEnabled() &&
+		IsFiniteMatrix(UnjitteredViewProjMat);
+}
+
+bool Corona::ShouldIncludeSceneObjectInRayTracingExtendedFrustum(const SceneObject& object, bool& outFrustumCulled) const
+{
+	outFrustumCulled = false;
+	if (!ShouldIncludeSceneObjectInRayTracingAS(object))
+		return false;
+	if (!IsRayTracingExtendedFrustumCullingActive())
+		return true;
+
+	glm::vec3 boundsMin(0.0f);
+	glm::vec3 boundsMax(0.0f);
+	glm::vec3 boundsCenter(0.0f);
+	float boundsRadius = 0.0f;
+	if (!GetSceneObjectWorldBounds(object, boundsMin, boundsMax, boundsCenter, boundsRadius))
+		return true;
+
+	const RtFrustumPlaneArray planes = BuildRtFrustumPlanes(UnjitteredViewProjMat);
+	if (IsAabbInsideExtendedFrustum(planes, boundsMin, boundsMax, GetRtExtendedFrustumMargin()))
+		return true;
+
+	outFrustumCulled = true;
+	return false;
+}
+
+const std::vector<uint32_t>& Corona::GatherRayTracingVisibleObjectIndices(uint64_t& outTotalObjects, uint64_t& outCulledObjects)
+{
+	outTotalObjects = 0;
+	outCulledObjects = 0;
+	RayTracingVisibleObjectIndices.clear();
+	RayTracingSpatialFrustumCandidateIndices.clear();
+
+	const bool bExtendedFrustumCullActive = IsRayTracingExtendedFrustumCullingActive();
+	if (!bExtendedFrustumCullActive)
+	{
+		RayTracingVisibleObjectIndices.reserve(RenderWorld.SceneObjects.size());
+		for (uint32_t objectIndex = 0; objectIndex < static_cast<uint32_t>(RenderWorld.SceneObjects.size()); ++objectIndex)
+		{
+			const SceneObject& object = RenderWorld.SceneObjects[objectIndex];
+			if (!ShouldIncludeSceneObjectInRayTracingAS(object))
+				continue;
+			++outTotalObjects;
+			RayTracingVisibleObjectIndices.push_back(objectIndex);
+		}
+		return RayTracingVisibleObjectIndices;
+	}
+
+	if (RenderWorld.bSceneObjectCullingIndexDirty ||
+		RenderWorld.SceneObjectCullingData.size() != RenderWorld.SceneObjects.size())
+	{
+		RebuildRenderWorldCullingIndex();
+	}
+
+	const RtFrustumPlaneArray extendedFrustumPlanes = BuildRtFrustumPlanes(UnjitteredViewProjMat);
+	const float extendedFrustumMargin = GetRtExtendedFrustumMargin();
+	RayTracingVisibleObjectIndices.reserve(RenderWorld.SceneObjects.size() / 8u + RenderWorld.UnboundedSceneObjectIndices.size() + 64u);
+	for (uint32_t objectIndex : RenderWorld.UnboundedSceneObjectIndices)
+	{
+		if (objectIndex >= RenderWorld.SceneObjects.size())
+			continue;
+		const SceneObject& object = RenderWorld.SceneObjects[objectIndex];
+		if (!ShouldIncludeSceneObjectInRayTracingAS(object))
+			continue;
+		++outTotalObjects;
+		RayTracingVisibleObjectIndices.push_back(objectIndex);
+	}
+
+	auto includeObjectIndex = [&](uint32_t objectIndex)
+	{
+		if (objectIndex >= RenderWorld.SceneObjects.size())
+			return;
+		const SceneObject& object = RenderWorld.SceneObjects[objectIndex];
+		if (!ShouldIncludeSceneObjectInRayTracingAS(object))
+			return;
+		++outTotalObjects;
+		RayTracingVisibleObjectIndices.push_back(objectIndex);
+	};
+
+	auto testObjectIndex = [&](uint32_t objectIndex)
+	{
+		if (objectIndex >= RenderWorld.SceneObjects.size())
+			return;
+		const SceneObject& object = RenderWorld.SceneObjects[objectIndex];
+		if (!ShouldIncludeSceneObjectInRayTracingAS(object))
+			return;
+		++outTotalObjects;
+		if (objectIndex >= RenderWorld.SceneObjectCullingData.size())
+		{
+			RayTracingVisibleObjectIndices.push_back(objectIndex);
+			return;
+		}
+		const RenderWorldMirror::SceneObjectCullingRecord& objectData =
+			RenderWorld.SceneObjectCullingData[objectIndex];
+		if (!objectData.Visible)
+			return;
+		if (!objectData.HasBounds ||
+			IsAabbInsideExtendedFrustum(extendedFrustumPlanes, objectData.BoundsMin, objectData.BoundsMax, extendedFrustumMargin))
+		{
+			RayTracingVisibleObjectIndices.push_back(objectIndex);
+			return;
+		}
+		++outCulledObjects;
+	};
+
+	for (const RenderWorldMirror::SceneObjectCullingCell& cell : RenderWorld.SceneObjectCullingCells)
+	{
+		if (cell.ObjectIndices.empty())
+			continue;
+
+		const ERtFrustumAabbRelation cellRelation =
+			ClassifyAabbAgainstExtendedFrustum(extendedFrustumPlanes, cell.BoundsMin, cell.BoundsMax, extendedFrustumMargin);
+		if (cellRelation == ERtFrustumAabbRelation::Outside)
+		{
+			for (uint32_t objectIndex : cell.ObjectIndices)
+			{
+				if (objectIndex >= RenderWorld.SceneObjects.size())
+					continue;
+				if (!ShouldIncludeSceneObjectInRayTracingAS(RenderWorld.SceneObjects[objectIndex]))
+					continue;
+				++outTotalObjects;
+				++outCulledObjects;
+			}
+			continue;
+		}
+
+		if (cellRelation == ERtFrustumAabbRelation::Inside)
+		{
+			for (uint32_t objectIndex : cell.ObjectIndices)
+				includeObjectIndex(objectIndex);
+			continue;
+		}
+
+		RayTracingSpatialFrustumCandidateIndices.insert(
+			RayTracingSpatialFrustumCandidateIndices.end(),
+			cell.ObjectIndices.begin(),
+			cell.ObjectIndices.end());
+	}
+
+	for (uint32_t objectIndex : RayTracingSpatialFrustumCandidateIndices)
+		testObjectIndex(objectIndex);
+
+	return RayTracingVisibleObjectIndices;
+}
+
 void Corona::MarkRayTracingSceneDirty()
 {
 	bRayTracingSceneDirty = true;
@@ -329,6 +584,13 @@ void Corona::MarkRayTracingTransformsDirty()
 	if (!bRayTracingSceneDirty)
 		bRayTracingTransformDirty = true;
 	PrevPathTracingViewMat = glm::mat4x4(0.0f);
+}
+
+void Corona::MarkRayTracingInstanceListChanged()
+{
+	++RayTracingInstancesRevision;
+	if (RayTracingInstancesRevision == 0)
+		RayTracingInstancesRevision = 1;
 }
 
 void Corona::FlushSceneObjectChanges()
@@ -351,6 +613,7 @@ void Corona::FlushSceneObjectChanges()
 	if (bMobileHybridDirectOnly || bPlatformerHybridDirectOnly || !renderBackend->SupportsRayTracing())
 	{
 		RayTracingInstances.clear();
+		MarkRayTracingInstanceListChanged();
 		RTGeometryRecordHash = 0;
 		RTGeometryRecordBuffer.reset();
 		TLAS = nullptr;
@@ -365,6 +628,7 @@ void Corona::FlushSceneObjectChanges()
 
 	if (!bRayTracingSceneDirty)
 	{
+		const bool bCameraDependentRayTracingAS = IsRayTracingExtendedFrustumCullingActive();
 		// Even when no transforms changed, a per-frame BLAS refit (e.g.
 		// skeletal compute skinning) requires the TLAS to be re-issued each
 		// frame: TLAS slots cycle with triple buffering, and a slot that
@@ -377,6 +641,7 @@ void Corona::FlushSceneObjectChanges()
 		const bool bNeedsPerFrameTlasUpdate = SkeletalStats.BlasUpdates > 0;
 		if (!bRayTracingTransformDirty &&
 			!bNeedsPerFrameTlasUpdate &&
+			!bCameraDependentRayTracingAS &&
 			IsCurrentRayTracingFrameResourceReady())
 		{
 			ActivateCurrentRayTracingFrameResources();
@@ -450,25 +715,38 @@ void Corona::UpdateRayTracingInstanceTransforms()
 
 	vector<RTInstanceDesc> updatedInstances;
 	auto phaseStart = CpuClock::now();
-	size_t meshCount = 0;
-	for (const SceneObject& object : RenderWorld.SceneObjects)
+	RtExtendedFrustumCullStats cullStats;
+	const bool bExtendedFrustumCullActive = IsRayTracingExtendedFrustumCullingActive();
+	const float extendedFrustumMargin = bExtendedFrustumCullActive ? GetRtExtendedFrustumMargin() : 0.0f;
+	const std::vector<uint32_t>& rtVisibleObjectIndices =
+		GatherRayTracingVisibleObjectIndices(cullStats.TotalObjects, cullStats.CulledObjects);
+	cullStats.IncludedObjects = rtVisibleObjectIndices.size();
+	updatedInstances.reserve(std::max<size_t>(RayTracingInstances.size(), rtVisibleObjectIndices.size()));
+	for (uint32_t objectIndex : rtVisibleObjectIndices)
 	{
-		if (ShouldIncludeSceneObjectInRayTracingAS(object))
-			meshCount += CountBuildableRayTracingMeshes(object.ScenePtr);
+		if (objectIndex >= RenderWorld.SceneObjects.size())
+			continue;
+		const SceneObject& object = RenderWorld.SceneObjects[objectIndex];
+		cullStats.IncludedMeshes += AddMeshesToRayTracingInstances(
+			updatedInstances,
+			RayTracingBLASCache,
+			object.ScenePtr,
+			object.Transform,
+			object.Roughness,
+			object.Metallic,
+			object.bOverrideRoughnessMetallic,
+			bRayTracingBLASBuildSuspended);
 	}
-	updatedInstances.reserve(meshCount);
-	for (const SceneObject& object : RenderWorld.SceneObjects)
+	if (bExtendedFrustumCullActive && (FrameCounter % 120u) == 0u)
 	{
-		if (ShouldIncludeSceneObjectInRayTracingAS(object))
-			AddMeshesToRayTracingInstances(
-				updatedInstances,
-				RayTracingBLASCache,
-				object.ScenePtr,
-				object.Transform,
-				object.Roughness,
-				object.Metallic,
-				object.bOverrideRoughnessMetallic,
-				bRayTracingBLASBuildSuspended);
+		AppendCpuRuntimeTrace(
+			L"[RTASFrustumCulling] update objects=" +
+			std::to_wstring(cullStats.IncludedObjects) +
+			L"/" + std::to_wstring(cullStats.TotalObjects) +
+			L", culled=" + std::to_wstring(cullStats.CulledObjects) +
+			L", meshes=" + std::to_wstring(cullStats.IncludedMeshes) +
+			L", margin=" + std::to_wstring(extendedFrustumMargin) +
+			L", instances=" + std::to_wstring(updatedInstances.size()));
 	}
 	AddSceneFlushPhaseTiming(ESceneFlushPhase::UpdateGatherInstances, phaseStart, CpuClock::now());
 
@@ -480,11 +758,12 @@ void Corona::UpdateRayTracingInstanceTransforms()
 			bLoggedTransformSuspend = true;
 			AppendCpuRuntimeTrace(
 				L"[RTAS] transform update skipped after BLAS build suspension; falling back to raster for current scene"
-				L", requestedBuildableMeshes=" + std::to_wstring(meshCount) +
+				L", addedInstancesBeforeSuspend=" + std::to_wstring(cullStats.IncludedMeshes) +
 				L", builtInstancesBeforeSuspend=" + std::to_wstring(updatedInstances.size()) +
 				L" (further occurrences suppressed)");
 		}
 		RayTracingInstances.clear();
+		MarkRayTracingInstanceListChanged();
 		RTGeometryRecordHash = 0;
 		RTGeometryRecordBuffer.reset();
 		TLAS = nullptr;
@@ -496,6 +775,7 @@ void Corona::UpdateRayTracingInstanceTransforms()
 	if (updatedInstances.empty())
 	{
 		RayTracingInstances.clear();
+		MarkRayTracingInstanceListChanged();
 		RTGeometryRecordHash = 0;
 		RTGeometryRecordBuffer.reset();
 		TLAS = nullptr;
@@ -521,6 +801,7 @@ void Corona::UpdateRayTracingInstanceTransforms()
 
 	phaseStart = CpuClock::now();
 	RayTracingInstances = std::move(updatedInstances);
+	MarkRayTracingInstanceListChanged();
 	std::shared_ptr<RTAS>& frameTLAS = TLASFrameResources[frameIndex];
 	const bool bCanUpdateFrameTLAS =
 		frameTLAS &&
@@ -568,19 +849,20 @@ void Corona::UpdateInstancePropertyBuffer()
 
 	constexpr uint32_t kMinInstancePropertyCapacity = 500u;
 	const uint32_t instanceCapacity = std::max(kMinInstancePropertyCapacity, static_cast<uint32_t>(RayTracingInstances.size()));
-	std::vector<InstanceProperty> instanceProperties(instanceCapacity);
-	const size_t instanceCount = (std::min)(instanceProperties.size(), RayTracingInstances.size());
+	InstancePropertyUploadScratch.resize(instanceCapacity);
+	const size_t instanceCount = (std::min)(InstancePropertyUploadScratch.size(), RayTracingInstances.size());
 	for (size_t i = 0; i < instanceCount; ++i)
 	{
-		instanceProperties[i].WorldMatrix = glm::transpose(RayTracingInstances[i].Transform);
-		instanceProperties[i].VertexOffset = 0;
-		instanceProperties[i].IndexOffset = 0;
-		instanceProperties[i].Flags = RayTracingInstances[i].Flags;
-		instanceProperties[i].bOverrideRoughnessMetallic = RayTracingInstances[i].bOverrideRoughnessMetallic;
-		instanceProperties[i].RoughnessMetallic = glm::vec2(RayTracingInstances[i].Roughness, RayTracingInstances[i].Metallic);
+		InstanceProperty& property = InstancePropertyUploadScratch[i];
+		property.WorldMatrix = glm::transpose(RayTracingInstances[i].Transform);
+		property.VertexOffset = 0;
+		property.IndexOffset = 0;
+		property.Flags = RayTracingInstances[i].Flags;
+		property.bOverrideRoughnessMetallic = RayTracingInstances[i].bOverrideRoughnessMetallic;
+		property.RoughnessMetallic = glm::vec2(RayTracingInstances[i].Roughness, RayTracingInstances[i].Metallic);
 	}
 
-	const uint32_t instancePropertyBytes = static_cast<uint32_t>(instanceProperties.size() * sizeof(InstanceProperty));
+	const uint32_t instancePropertyBytes = static_cast<uint32_t>(InstancePropertyUploadScratch.size() * sizeof(InstanceProperty));
 
 	auto ClearFailedFrameResources = [&](const wchar_t* reason)
 	{
@@ -614,7 +896,7 @@ void Corona::UpdateInstancePropertyBuffer()
 		frameInstancePropertyBuffer,
 		instanceCapacity,
 		sizeof(InstanceProperty),
-		instanceProperties.data(),
+		InstancePropertyUploadScratch.data(),
 		instancePropertyBytes,
 		&failureReason))
 	{
@@ -663,10 +945,14 @@ void Corona::RebuildAccelerationStructures()
 
 	phaseStart = CpuClock::now();
 	RayTracingInstances.clear();
+	MarkRayTracingInstanceListChanged();
 	RTGeometryRecordHash = 0;
 	RTGeometryRecordBuffer.reset();
-	size_t meshCount = 0;
-	vector<Mesh*> retainedMeshes;
+	RtExtendedFrustumCullStats cullStats;
+	const bool bExtendedFrustumCullActive = IsRayTracingExtendedFrustumCullingActive();
+	const float extendedFrustumMargin = bExtendedFrustumCullActive ? GetRtExtendedFrustumMargin() : 0.0f;
+	std::unordered_set<Mesh*> retainedMeshes;
+	retainedMeshes.reserve(RenderWorld.SceneObjects.size() * 2u);
 	for (const SceneObject& object : RenderWorld.SceneObjects)
 	{
 		if (!object.ScenePtr)
@@ -674,42 +960,56 @@ void Corona::RebuildAccelerationStructures()
 
 		for (const shared_ptr<Mesh>& mesh : object.ScenePtr->meshes)
 		{
-			if (mesh && std::find(retainedMeshes.begin(), retainedMeshes.end(), mesh.get()) == retainedMeshes.end())
-				retainedMeshes.push_back(mesh.get());
+			if (mesh)
+				retainedMeshes.insert(mesh.get());
 		}
-
-		if (ShouldIncludeSceneObjectInRayTracingAS(object))
-			meshCount += CountBuildableRayTracingMeshes(object.ScenePtr);
 	}
-	RayTracingInstances.reserve(meshCount);
-	for (const SceneObject& object : RenderWorld.SceneObjects)
+	const std::vector<uint32_t>& rtVisibleObjectIndices =
+		GatherRayTracingVisibleObjectIndices(cullStats.TotalObjects, cullStats.CulledObjects);
+	cullStats.IncludedObjects = rtVisibleObjectIndices.size();
+	RayTracingInstances.reserve(std::max<size_t>(RayTracingInstances.capacity(), rtVisibleObjectIndices.size()));
+	for (uint32_t objectIndex : rtVisibleObjectIndices)
 	{
-		if (ShouldIncludeSceneObjectInRayTracingAS(object))
-			AddMeshesToRayTracingInstances(
-				RayTracingInstances,
-				RayTracingBLASCache,
-				object.ScenePtr,
-				object.Transform,
-				object.Roughness,
-				object.Metallic,
-				object.bOverrideRoughnessMetallic,
-				bRayTracingBLASBuildSuspended);
+		if (objectIndex >= RenderWorld.SceneObjects.size())
+			continue;
+		const SceneObject& object = RenderWorld.SceneObjects[objectIndex];
+		cullStats.IncludedMeshes += AddMeshesToRayTracingInstances(
+			RayTracingInstances,
+			RayTracingBLASCache,
+			object.ScenePtr,
+			object.Transform,
+			object.Roughness,
+			object.Metallic,
+			object.bOverrideRoughnessMetallic,
+			bRayTracingBLASBuildSuspended);
+	}
+	if (bExtendedFrustumCullActive)
+	{
+		AppendCpuRuntimeTrace(
+			L"[RTASFrustumCulling] rebuild objects=" +
+			std::to_wstring(cullStats.IncludedObjects) +
+			L"/" + std::to_wstring(cullStats.TotalObjects) +
+			L", culled=" + std::to_wstring(cullStats.CulledObjects) +
+			L", meshes=" + std::to_wstring(cullStats.IncludedMeshes) +
+			L", margin=" + std::to_wstring(extendedFrustumMargin) +
+			L", instances=" + std::to_wstring(RayTracingInstances.size()));
 	}
 
 	if (bRayTracingBLASBuildSuspended)
 	{
 		AppendCpuRuntimeTrace(
 			L"[RTAS] BLAS build suspended; falling back to raster for current scene"
-			L", requestedBuildableMeshes=" + std::to_wstring(meshCount) +
-			L", builtInstancesBeforeSuspend=" + std::to_wstring(RayTracingInstances.size()));
+			L", addedInstancesBeforeSuspend=" + std::to_wstring(cullStats.IncludedMeshes) +
+		L", builtInstancesBeforeSuspend=" + std::to_wstring(RayTracingInstances.size()));
 		RayTracingInstances.clear();
+		MarkRayTracingInstanceListChanged();
 		RTGeometryRecordHash = 0;
 		RTGeometryRecordBuffer.reset();
 	}
 
 	for (auto it = RayTracingBLASCache.begin(); it != RayTracingBLASCache.end();)
 	{
-		if (std::find(retainedMeshes.begin(), retainedMeshes.end(), it->first) == retainedMeshes.end())
+		if (retainedMeshes.find(it->first) == retainedMeshes.end())
 			it = RayTracingBLASCache.erase(it);
 		else
 			++it;
@@ -754,7 +1054,7 @@ void Corona::RebuildAccelerationStructures()
 	}
 
 	phaseStart = CpuClock::now();
-	if (bInstanceCountChanged && (PSO_RT_SHADOW || PSO_RT_AO || PSO_RT_SKY_LIGHTING || PSO_RT_REFLECTION || PSO_RT_GI || PSO_RT_SCREEN_PROBE_GI || PSO_RT_SPATIAL_HASH_GI))
+	if (bInstanceCountChanged && (PSO_RT_SHADOW || PSO_RT_AO || PSO_RT_REFLECTION || PSO_RT_GI || PSO_RT_SCREEN_PROBE_GI || PSO_RT_SPATIAL_HASH_GI))
 		InitRTPSO();
 	if (PSO_PATH_TRACING)
 		InitPathTracingPass();
@@ -774,18 +1074,14 @@ void Corona::InitRaytracingData()
 	// still needs this snapshot or it renders an empty scene.
 	RenderWorld.SceneObjects = SceneObjects;
 	for (SceneObject& object : RenderWorld.SceneObjects)
+	{
 		object.RenderDirtyBits = 0;
+		object.bWorldBoundsCacheValid = false;
+	}
+	MarkRenderWorldCullingIndexDirty();
 
 	if (!renderBackend->SupportsRayTracing())
 		return; // RenderWorld is synced for raster; skip building RT acceleration structures
-
-	size_t NumTotalMesh = 0;
-	for (const SceneObject& object : RenderWorld.SceneObjects)
-	{
-		if (ShouldIncludeSceneObjectInRayTracingAS(object))
-			NumTotalMesh += CountBuildableRayTracingMeshes(object.ScenePtr);
-	}
-	RayTracingInstances.reserve(NumTotalMesh);
 
 	bRayTracingSceneDirty = true;
 	RebuildAccelerationStructures();
@@ -836,7 +1132,11 @@ void Corona::InitRTPSO()
 	// reflection/AO are gated off). So set up the shadow pass and let the rest be
 	// declared but never built.
 
-	timePass(L"RaytracingShadow", [&]() { InitRaytracingShadowPass(); });
+	timePass(L"ShadowRayQuery", [&]() { InitShadowRayQueryPass(); });
+	if (!PSO_SHADOW_RAYQUERY)
+		timePass(L"RaytracingShadow", [&]() { InitRaytracingShadowPass(); });
+	else
+		AppendCpuRuntimeTrace(L"[StartupTiming][RTPSO] skip pass=\"RaytracingShadow\" (ShadowRayQuery active)");
 	if (maxSupportedHybridStage >= 2u)
 	{
 		timePass(L"ShadowSpatialReuse", [&]() { InitShadowSpatialReusePass(); });
@@ -847,10 +1147,6 @@ void Corona::InitRTPSO()
 		AppendCpuRuntimeTrace(L"[StartupTiming][RTPSO] skip pass=\"ShadowSpatialReuse\"");
 		AppendCpuRuntimeTrace(L"[StartupTiming][RTPSO] skip pass=\"RaytracingAO\"");
 	}
-	if (maxSupportedHybridStage >= 7u)
-		timePass(L"RaytracingSkyLighting", [&]() { InitRaytracingSkyLightingPass(); });
-	else
-		AppendCpuRuntimeTrace(L"[StartupTiming][RTPSO] skip pass=\"RaytracingSkyLighting\"");
 	if (bInitReflectionRT)
 		timePass(L"RaytracingReflection", [&]() { InitRaytracingReflectionPass(); });
 	else

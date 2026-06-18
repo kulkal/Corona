@@ -69,13 +69,8 @@ cbuffer ViewParameter : register(b0)
     float TemporalAlpha;
     float HistoryDepthWeight;
     float HistoryNormalWeight;
-    uint bIncludeSkyLighting;
-    float3 SkyColorTop;
-    float SkyIntensity;
-    float3 SkyColorBottom;
-    float _padding;
     float3 LightColor;
-    float _padding2;
+    float _padding;
     uint LightingBootstrap;
     uint BootstrapRays;
     uint SHCoefficientCount;
@@ -435,19 +430,6 @@ ProbeAnchor SelectStableProbeAnchor(uint2 centerPixelPos, uint2 probeCoord)
     return bestAnchor;
 }
 
-float3 EvaluateSkyColor(float3 direction)
-{
-    float t = 0.5f * (direction.y + 1.0f);
-    return lerp(SkyColorBottom, SkyColorTop, t) * SkyIntensity;
-}
-
-float3 EvaluateSkyDiffuseBounce(float3 normal)
-{
-    float3 averageSky = 0.5f * (SkyColorTop + SkyColorBottom);
-    float3 skyGradient = 0.5f * (SkyColorTop - SkyColorBottom);
-    return max((averageSky + (2.0f / 3.0f) * skyGradient * normal.y) * SkyIntensity, 0.0f.xxx);
-}
-
 float EvaluateSpotAttenuation(PointLightParam light, float3 surfaceToLightDir)
 {
     if (light.DirectionAndType.w < 0.5f)
@@ -567,7 +549,7 @@ float3 TraceDiffuseProbeRay(float3 worldPos, float3 worldNormal, uint2 probeCoor
     TraceDiffuseGIRay(ray, payload);
 
     if (!payload.bHit)
-        return (bIncludeSkyLighting != 0u) ? max(EvaluateSkyColor(sampleDirWorld), 0.0f.xxx) : 0.0f.xxx;
+        return 0.0f.xxx;
 
     float3 lightDir = normalize(LightDirAndIntensity.xyz);
     RayDesc shadowRay;

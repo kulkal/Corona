@@ -8,9 +8,12 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <iomanip>
+#include <limits>
 #include <sstream>
 #include <string>
 
@@ -82,6 +85,18 @@ namespace
 		std::ifstream f(path, std::ios::binary);
 		if (!f)
 			return std::string();
+
+		std::error_code ec;
+		const uint64_t size64 = std::filesystem::file_size(path, ec);
+		if (!ec && size64 <= static_cast<uint64_t>(std::numeric_limits<size_t>::max()))
+		{
+			std::string out;
+			out.resize(static_cast<size_t>(size64));
+			if (!out.empty())
+				f.read(out.data(), static_cast<std::streamsize>(out.size()));
+			return f ? out : std::string();
+		}
+
 		std::stringstream ss;
 		ss << f.rdbuf();
 		return ss.str();
@@ -147,6 +162,773 @@ namespace
 		lua_rawgeti(L, -1, 3); out.z = lua_isnumber(L, -1) ? static_cast<float>(lua_tonumber(L, -1)) : out.z; lua_pop(L, 1);
 		lua_rawgeti(L, -1, 4); out.w = lua_isnumber(L, -1) ? static_cast<float>(lua_tonumber(L, -1)) : out.w; lua_pop(L, 1);
 		lua_pop(L, 1);
+		return true;
+	}
+
+	enum class CachedMapMeshPrimitive : uint8_t
+	{
+		Unknown = 0,
+		Asset,
+		Terrain,
+		GrassOnTerrain,
+		Grass,
+		BlockCharacter,
+		Box,
+	};
+
+	struct CachedMapScript
+	{
+		bool bNative = false;
+		std::string Value;
+	};
+
+	struct CachedMapMesh
+	{
+		bool bPresent = false;
+		CachedMapMeshPrimitive Primitive = CachedMapMeshPrimitive::Unknown;
+		std::string AssetPath;
+		uint32_t Seed = 1;
+		uint32_t BladeCount = 100000;
+		float BladeHeight = 30.0f;
+		float AreaSize = 1000.0f;
+		uint32_t BladeSegments = 4;
+		bool bProcedural = false;
+		glm::vec3 Color = glm::vec3(0.72f, 0.72f, 0.72f);
+		bool bBrickTexture = false;
+		bool bFrontOnly = false;
+		float UvRepeat = 1.0f;
+		float UvRepeatY = -1.0f;
+		std::string TextureKind;
+		glm::vec3 Position = glm::vec3(0.0f);
+		glm::vec3 Rotation = glm::vec3(0.0f);
+		glm::vec3 Scale = glm::vec3(1.0f);
+		float TargetExtent = 1.0f;
+		bool bUseScale = false;
+		float Roughness = 1.0f;
+		float Metallic = 0.0f;
+		bool bOverrideMaterial = false;
+		bool bVisible = true;
+		bool bRayTracing = true;
+	};
+
+	struct CachedMapLight
+	{
+		bool bPresent = false;
+		CoronaECS::LightComponent Component;
+		bool bHasPosition = false;
+		glm::vec3 Position = glm::vec3(0.0f);
+	};
+
+	struct CachedMapEntity
+	{
+		std::string Name;
+		CachedMapMesh Mesh;
+		CachedMapLight Light;
+		bool bHasCamera = false;
+		std::vector<CachedMapScript> Scripts;
+	};
+
+	struct CachedMapGlobals
+	{
+		bool bHasWindParams = false;
+		bool bHasWindTuning = false;
+		bool bHasGrassBendOrigin = false;
+		bool bHasGrassBendParams = false;
+		bool bHasGrassRenderOrigin = false;
+		bool bHasGrassRenderDistance = false;
+		bool bHasTerrainDeformSphere = false;
+		glm::vec4 WindParams = glm::vec4(0.0f);
+		glm::vec4 WindTuning = glm::vec4(0.0f);
+		glm::vec4 GrassBendOrigin = glm::vec4(0.0f);
+		glm::vec4 GrassBendParams = glm::vec4(0.0f);
+		glm::vec3 GrassRenderOrigin = glm::vec3(0.0f);
+		float GrassRenderDistance = 0.0f;
+		glm::vec4 TerrainDeformSphere = glm::vec4(0.0f);
+	};
+
+	struct CachedMapScene
+	{
+		std::vector<CachedMapEntity> Entities;
+		CachedMapGlobals Globals;
+	};
+
+	struct CachedMapSourceMeta
+	{
+		uint64_t Size = 0;
+		int64_t WriteTime = 0;
+	};
+
+	struct CachedMapSceneHeader
+	{
+		char Magic[8] = {};
+		uint32_t Version = 0;
+		uint32_t HeaderSize = 0;
+		uint64_t SourceSize = 0;
+		int64_t SourceWriteTime = 0;
+		uint32_t EntityCount = 0;
+		uint32_t Reserved = 0;
+	};
+
+	constexpr char kCachedMapSceneMagic[8] = { 'C', 'R', 'N', 'M', 'A', 'P', 'S', '\0' };
+	constexpr uint32_t kCachedMapSceneVersion = 1;
+	constexpr uint32_t kCachedMapSceneMaxStringBytes = 1024u * 1024u;
+	constexpr uint32_t kCachedMapSceneMaxEntities = 2u * 1000u * 1000u;
+	constexpr uint32_t kCachedMapSceneMaxScriptsPerEntity = 1024u;
+
+	template<typename T>
+	bool WriteCachedValue(std::ofstream& file, const T& value)
+	{
+		file.write(reinterpret_cast<const char*>(&value), sizeof(T));
+		return static_cast<bool>(file);
+	}
+
+	bool WriteCachedBytes(std::ofstream& file, const void* data, size_t size)
+	{
+		if (size == 0)
+			return true;
+		file.write(reinterpret_cast<const char*>(data), static_cast<std::streamsize>(size));
+		return static_cast<bool>(file);
+	}
+
+	bool WriteCachedString(std::ofstream& file, const std::string& value)
+	{
+		if (value.size() > kCachedMapSceneMaxStringBytes)
+			return false;
+		const uint32_t size = static_cast<uint32_t>(value.size());
+		return WriteCachedValue(file, size) && WriteCachedBytes(file, value.data(), value.size());
+	}
+
+	bool WriteCachedBool(std::ofstream& file, bool value)
+	{
+		const uint8_t byte = value ? 1u : 0u;
+		return WriteCachedValue(file, byte);
+	}
+
+	bool WriteCachedVec3(std::ofstream& file, const glm::vec3& value)
+	{
+		return
+			WriteCachedValue(file, value.x) &&
+			WriteCachedValue(file, value.y) &&
+			WriteCachedValue(file, value.z);
+	}
+
+	bool WriteCachedVec4(std::ofstream& file, const glm::vec4& value)
+	{
+		return
+			WriteCachedValue(file, value.x) &&
+			WriteCachedValue(file, value.y) &&
+			WriteCachedValue(file, value.z) &&
+			WriteCachedValue(file, value.w);
+	}
+
+	template<typename T>
+	bool ReadCachedValue(std::ifstream& file, T& value)
+	{
+		file.read(reinterpret_cast<char*>(&value), sizeof(T));
+		return static_cast<bool>(file);
+	}
+
+	bool ReadCachedBytes(std::ifstream& file, void* data, size_t size)
+	{
+		if (size == 0)
+			return true;
+		file.read(reinterpret_cast<char*>(data), static_cast<std::streamsize>(size));
+		return static_cast<bool>(file);
+	}
+
+	bool ReadCachedString(std::ifstream& file, std::string& value)
+	{
+		uint32_t size = 0;
+		if (!ReadCachedValue(file, size) || size > kCachedMapSceneMaxStringBytes)
+			return false;
+		value.clear();
+		value.resize(size);
+		return ReadCachedBytes(file, value.data(), value.size());
+	}
+
+	bool ReadCachedBool(std::ifstream& file, bool& value)
+	{
+		uint8_t byte = 0;
+		if (!ReadCachedValue(file, byte) || byte > 1u)
+			return false;
+		value = byte != 0;
+		return true;
+	}
+
+	bool ReadCachedVec3(std::ifstream& file, glm::vec3& value)
+	{
+		return
+			ReadCachedValue(file, value.x) &&
+			ReadCachedValue(file, value.y) &&
+			ReadCachedValue(file, value.z);
+	}
+
+	bool ReadCachedVec4(std::ifstream& file, glm::vec4& value)
+	{
+		return
+			ReadCachedValue(file, value.x) &&
+			ReadCachedValue(file, value.y) &&
+			ReadCachedValue(file, value.z) &&
+			ReadCachedValue(file, value.w);
+	}
+
+	bool GetCachedMapSourceMeta(const std::filesystem::path& path, CachedMapSourceMeta& outMeta)
+	{
+		std::error_code ec;
+		outMeta.Size = static_cast<uint64_t>(std::filesystem::file_size(path, ec));
+		if (ec)
+			return false;
+		const auto writeTime = std::filesystem::last_write_time(path, ec);
+		if (ec)
+			return false;
+		outMeta.WriteTime = static_cast<int64_t>(writeTime.time_since_epoch().count());
+		return true;
+	}
+
+	std::filesystem::path GetCachedMapScenePath(const std::filesystem::path& sourcePath)
+	{
+		return std::filesystem::path(sourcePath.wstring() + L".cscene");
+	}
+
+	CachedMapMeshPrimitive ParseCachedMapMeshPrimitive(const std::string& primitive)
+	{
+		if (primitive == "asset")
+			return CachedMapMeshPrimitive::Asset;
+		if (primitive == "TERRAIN")
+			return CachedMapMeshPrimitive::Terrain;
+		if (primitive == "GRASS_ON_TERRAIN")
+			return CachedMapMeshPrimitive::GrassOnTerrain;
+		if (primitive == "GRASS")
+			return CachedMapMeshPrimitive::Grass;
+		if (primitive == "block_character")
+			return CachedMapMeshPrimitive::BlockCharacter;
+		if (primitive == "BOX" || primitive == "CUBE" || primitive == "PLANE" || primitive == "QUAD")
+			return CachedMapMeshPrimitive::Box;
+		return CachedMapMeshPrimitive::Unknown;
+	}
+
+	bool WriteCachedMapGlobals(std::ofstream& file, const CachedMapGlobals& globals)
+	{
+		return
+			WriteCachedBool(file, globals.bHasWindParams) &&
+			WriteCachedBool(file, globals.bHasWindTuning) &&
+			WriteCachedBool(file, globals.bHasGrassBendOrigin) &&
+			WriteCachedBool(file, globals.bHasGrassBendParams) &&
+			WriteCachedBool(file, globals.bHasGrassRenderOrigin) &&
+			WriteCachedBool(file, globals.bHasGrassRenderDistance) &&
+			WriteCachedBool(file, globals.bHasTerrainDeformSphere) &&
+			WriteCachedVec4(file, globals.WindParams) &&
+			WriteCachedVec4(file, globals.WindTuning) &&
+			WriteCachedVec4(file, globals.GrassBendOrigin) &&
+			WriteCachedVec4(file, globals.GrassBendParams) &&
+			WriteCachedVec3(file, globals.GrassRenderOrigin) &&
+			WriteCachedValue(file, globals.GrassRenderDistance) &&
+			WriteCachedVec4(file, globals.TerrainDeformSphere);
+	}
+
+	bool ReadCachedMapGlobals(std::ifstream& file, CachedMapGlobals& globals)
+	{
+		return
+			ReadCachedBool(file, globals.bHasWindParams) &&
+			ReadCachedBool(file, globals.bHasWindTuning) &&
+			ReadCachedBool(file, globals.bHasGrassBendOrigin) &&
+			ReadCachedBool(file, globals.bHasGrassBendParams) &&
+			ReadCachedBool(file, globals.bHasGrassRenderOrigin) &&
+			ReadCachedBool(file, globals.bHasGrassRenderDistance) &&
+			ReadCachedBool(file, globals.bHasTerrainDeformSphere) &&
+			ReadCachedVec4(file, globals.WindParams) &&
+			ReadCachedVec4(file, globals.WindTuning) &&
+			ReadCachedVec4(file, globals.GrassBendOrigin) &&
+			ReadCachedVec4(file, globals.GrassBendParams) &&
+			ReadCachedVec3(file, globals.GrassRenderOrigin) &&
+			ReadCachedValue(file, globals.GrassRenderDistance) &&
+			ReadCachedVec4(file, globals.TerrainDeformSphere);
+	}
+
+	bool WriteCachedMapMesh(std::ofstream& file, const CachedMapMesh& mesh)
+	{
+		const uint8_t primitive = static_cast<uint8_t>(mesh.Primitive);
+		return
+			WriteCachedBool(file, mesh.bPresent) &&
+			WriteCachedValue(file, primitive) &&
+			WriteCachedString(file, mesh.AssetPath) &&
+			WriteCachedValue(file, mesh.Seed) &&
+			WriteCachedValue(file, mesh.BladeCount) &&
+			WriteCachedValue(file, mesh.BladeHeight) &&
+			WriteCachedValue(file, mesh.AreaSize) &&
+			WriteCachedValue(file, mesh.BladeSegments) &&
+			WriteCachedBool(file, mesh.bProcedural) &&
+			WriteCachedVec3(file, mesh.Color) &&
+			WriteCachedBool(file, mesh.bBrickTexture) &&
+			WriteCachedBool(file, mesh.bFrontOnly) &&
+			WriteCachedValue(file, mesh.UvRepeat) &&
+			WriteCachedValue(file, mesh.UvRepeatY) &&
+			WriteCachedString(file, mesh.TextureKind) &&
+			WriteCachedVec3(file, mesh.Position) &&
+			WriteCachedVec3(file, mesh.Rotation) &&
+			WriteCachedVec3(file, mesh.Scale) &&
+			WriteCachedValue(file, mesh.TargetExtent) &&
+			WriteCachedBool(file, mesh.bUseScale) &&
+			WriteCachedValue(file, mesh.Roughness) &&
+			WriteCachedValue(file, mesh.Metallic) &&
+			WriteCachedBool(file, mesh.bOverrideMaterial) &&
+			WriteCachedBool(file, mesh.bVisible) &&
+			WriteCachedBool(file, mesh.bRayTracing);
+	}
+
+	bool ReadCachedMapMesh(std::ifstream& file, CachedMapMesh& mesh)
+	{
+		uint8_t primitive = 0;
+		if (!ReadCachedBool(file, mesh.bPresent) ||
+			!ReadCachedValue(file, primitive) ||
+			primitive > static_cast<uint8_t>(CachedMapMeshPrimitive::Box))
+		{
+			return false;
+		}
+		mesh.Primitive = static_cast<CachedMapMeshPrimitive>(primitive);
+		return
+			ReadCachedString(file, mesh.AssetPath) &&
+			ReadCachedValue(file, mesh.Seed) &&
+			ReadCachedValue(file, mesh.BladeCount) &&
+			ReadCachedValue(file, mesh.BladeHeight) &&
+			ReadCachedValue(file, mesh.AreaSize) &&
+			ReadCachedValue(file, mesh.BladeSegments) &&
+			ReadCachedBool(file, mesh.bProcedural) &&
+			ReadCachedVec3(file, mesh.Color) &&
+			ReadCachedBool(file, mesh.bBrickTexture) &&
+			ReadCachedBool(file, mesh.bFrontOnly) &&
+			ReadCachedValue(file, mesh.UvRepeat) &&
+			ReadCachedValue(file, mesh.UvRepeatY) &&
+			ReadCachedString(file, mesh.TextureKind) &&
+			ReadCachedVec3(file, mesh.Position) &&
+			ReadCachedVec3(file, mesh.Rotation) &&
+			ReadCachedVec3(file, mesh.Scale) &&
+			ReadCachedValue(file, mesh.TargetExtent) &&
+			ReadCachedBool(file, mesh.bUseScale) &&
+			ReadCachedValue(file, mesh.Roughness) &&
+			ReadCachedValue(file, mesh.Metallic) &&
+			ReadCachedBool(file, mesh.bOverrideMaterial) &&
+			ReadCachedBool(file, mesh.bVisible) &&
+			ReadCachedBool(file, mesh.bRayTracing);
+	}
+
+	bool WriteCachedMapLight(std::ofstream& file, const CachedMapLight& light)
+	{
+		const uint8_t type = static_cast<uint8_t>(light.Component.Type);
+		return
+			WriteCachedBool(file, light.bPresent) &&
+			WriteCachedValue(file, type) &&
+			WriteCachedBool(file, light.Component.bEnabled) &&
+			WriteCachedVec3(file, light.Component.Color) &&
+			WriteCachedValue(file, light.Component.Intensity) &&
+			WriteCachedVec3(file, light.Component.Direction) &&
+			WriteCachedValue(file, light.Component.Radius) &&
+			WriteCachedBool(file, light.Component.bCastShadow) &&
+			WriteCachedValue(file, light.Component.InnerConeAngle) &&
+			WriteCachedValue(file, light.Component.OuterConeAngle) &&
+			WriteCachedBool(file, light.bHasPosition) &&
+			WriteCachedVec3(file, light.Position);
+	}
+
+	bool ReadCachedMapLight(std::ifstream& file, CachedMapLight& light)
+	{
+		uint8_t type = 0;
+		if (!ReadCachedBool(file, light.bPresent) ||
+			!ReadCachedValue(file, type) ||
+			type > static_cast<uint8_t>(CoronaECS::LightType::Spot))
+		{
+			return false;
+		}
+		light.Component.Type = static_cast<CoronaECS::LightType>(type);
+		return
+			ReadCachedBool(file, light.Component.bEnabled) &&
+			ReadCachedVec3(file, light.Component.Color) &&
+			ReadCachedValue(file, light.Component.Intensity) &&
+			ReadCachedVec3(file, light.Component.Direction) &&
+			ReadCachedValue(file, light.Component.Radius) &&
+			ReadCachedBool(file, light.Component.bCastShadow) &&
+			ReadCachedValue(file, light.Component.InnerConeAngle) &&
+			ReadCachedValue(file, light.Component.OuterConeAngle) &&
+			ReadCachedBool(file, light.bHasPosition) &&
+			ReadCachedVec3(file, light.Position);
+	}
+
+	bool WriteCachedMapScene(
+		const std::filesystem::path& cachePath,
+		const CachedMapSourceMeta& sourceMeta,
+		const CachedMapScene& scene)
+	{
+		if (scene.Entities.size() > kCachedMapSceneMaxEntities)
+			return false;
+
+		std::error_code ec;
+		std::filesystem::create_directories(cachePath.parent_path(), ec);
+		std::ofstream file(cachePath, std::ios::binary | std::ios::trunc);
+		if (!file)
+			return false;
+
+		CachedMapSceneHeader header = {};
+		std::memcpy(header.Magic, kCachedMapSceneMagic, sizeof(header.Magic));
+		header.Version = kCachedMapSceneVersion;
+		header.HeaderSize = sizeof(CachedMapSceneHeader);
+		header.SourceSize = sourceMeta.Size;
+		header.SourceWriteTime = sourceMeta.WriteTime;
+		header.EntityCount = static_cast<uint32_t>(scene.Entities.size());
+		if (!WriteCachedValue(file, header) || !WriteCachedMapGlobals(file, scene.Globals))
+			return false;
+
+		for (const CachedMapEntity& entity : scene.Entities)
+		{
+			if (entity.Scripts.size() > kCachedMapSceneMaxScriptsPerEntity)
+				return false;
+			if (!WriteCachedString(file, entity.Name) ||
+				!WriteCachedMapMesh(file, entity.Mesh) ||
+				!WriteCachedMapLight(file, entity.Light) ||
+				!WriteCachedBool(file, entity.bHasCamera))
+			{
+				return false;
+			}
+			const uint32_t scriptCount = static_cast<uint32_t>(entity.Scripts.size());
+			if (!WriteCachedValue(file, scriptCount))
+				return false;
+			for (const CachedMapScript& script : entity.Scripts)
+			{
+				if (!WriteCachedBool(file, script.bNative) || !WriteCachedString(file, script.Value))
+					return false;
+			}
+		}
+		return static_cast<bool>(file);
+	}
+
+	bool ReadCachedMapScene(
+		const std::filesystem::path& cachePath,
+		const CachedMapSourceMeta& sourceMeta,
+		CachedMapScene& scene)
+	{
+		std::ifstream file(cachePath, std::ios::binary);
+		if (!file)
+			return false;
+
+		CachedMapSceneHeader header = {};
+		if (!ReadCachedValue(file, header) ||
+			std::memcmp(header.Magic, kCachedMapSceneMagic, sizeof(header.Magic)) != 0 ||
+			header.Version != kCachedMapSceneVersion ||
+			header.HeaderSize != sizeof(CachedMapSceneHeader) ||
+			header.SourceSize != sourceMeta.Size ||
+			header.SourceWriteTime != sourceMeta.WriteTime ||
+			header.EntityCount > kCachedMapSceneMaxEntities)
+		{
+			return false;
+		}
+
+		scene = {};
+		scene.Entities.reserve(header.EntityCount);
+		if (!ReadCachedMapGlobals(file, scene.Globals))
+			return false;
+
+		for (uint32_t i = 0; i < header.EntityCount; ++i)
+		{
+			CachedMapEntity entity;
+			if (!ReadCachedString(file, entity.Name) ||
+				!ReadCachedMapMesh(file, entity.Mesh) ||
+				!ReadCachedMapLight(file, entity.Light) ||
+				!ReadCachedBool(file, entity.bHasCamera))
+			{
+				return false;
+			}
+			uint32_t scriptCount = 0;
+			if (!ReadCachedValue(file, scriptCount) || scriptCount > kCachedMapSceneMaxScriptsPerEntity)
+				return false;
+			entity.Scripts.reserve(scriptCount);
+			for (uint32_t scriptIndex = 0; scriptIndex < scriptCount; ++scriptIndex)
+			{
+				CachedMapScript script;
+				if (!ReadCachedBool(file, script.bNative) || !ReadCachedString(file, script.Value))
+					return false;
+				entity.Scripts.push_back(std::move(script));
+			}
+			scene.Entities.push_back(std::move(entity));
+		}
+		return static_cast<bool>(file);
+	}
+
+	void ParseCachedMapScripts(lua_State* L, int entityIdx, CachedMapEntity& entity)
+	{
+		lua_getfield(L, entityIdx, "scripts");
+		if (lua_istable(L, -1))
+		{
+			const int scriptsIdx = lua_gettop(L);
+			const int scriptCount = static_cast<int>(lua_objlen(L, scriptsIdx));
+			entity.Scripts.reserve(std::max(scriptCount, 0));
+			for (int si = 1; si <= scriptCount; ++si)
+			{
+				lua_rawgeti(L, scriptsIdx, si);
+				if (lua_istable(L, -1))
+				{
+					const int sIdx = lua_gettop(L);
+					CachedMapScript script;
+					if (LuaGetString(L, sIdx, "file", script.Value) && !script.Value.empty())
+					{
+						script.bNative = false;
+						entity.Scripts.push_back(std::move(script));
+					}
+					else if (LuaGetString(L, sIdx, "native", script.Value) && !script.Value.empty())
+					{
+						script.bNative = true;
+						entity.Scripts.push_back(std::move(script));
+					}
+				}
+				lua_pop(L, 1);
+			}
+		}
+		lua_pop(L, 1);
+	}
+
+	void ParseCachedMapMesh(lua_State* L, int meshIdx, CachedMapMesh& mesh)
+	{
+		mesh = {};
+		mesh.bPresent = true;
+
+		std::string primitive;
+		LuaGetString(L, meshIdx, "primitive", primitive);
+		mesh.Primitive = ParseCachedMapMeshPrimitive(primitive);
+
+		lua_getfield(L, meshIdx, "params");
+		const int paramsIdx = lua_gettop(L);
+		if (lua_istable(L, paramsIdx))
+		{
+			double value = 0.0;
+			if (LuaGetNumber(L, paramsIdx, "seed", value))
+				mesh.Seed = static_cast<uint32_t>(value);
+			if (LuaGetNumber(L, paramsIdx, "blade_count", value))
+				mesh.BladeCount = static_cast<uint32_t>(value);
+			if (LuaGetNumber(L, paramsIdx, "blade_height", value))
+				mesh.BladeHeight = static_cast<float>(value);
+			if (LuaGetNumber(L, paramsIdx, "area_size", value))
+				mesh.AreaSize = static_cast<float>(value);
+			if (LuaGetNumber(L, paramsIdx, "blade_segments", value))
+				mesh.BladeSegments = static_cast<uint32_t>(value);
+			LuaGetBool(L, paramsIdx, "procedural", mesh.bProcedural);
+		}
+		lua_pop(L, 1);
+
+		if (mesh.Primitive == CachedMapMeshPrimitive::Asset)
+			LuaGetString(L, meshIdx, "path", mesh.AssetPath);
+
+		if (mesh.Primitive == CachedMapMeshPrimitive::Box)
+		{
+			mesh.bFrontOnly = (primitive == "PLANE" || primitive == "QUAD");
+			if (!LuaGetVec3(L, meshIdx, "color", mesh.Color))
+				LuaGetVec3(L, meshIdx, "base_color", mesh.Color);
+			LuaGetBool(L, meshIdx, "brick_texture", mesh.bBrickTexture);
+			LuaGetBool(L, meshIdx, "front_only", mesh.bFrontOnly);
+			double value = mesh.UvRepeat;
+			if (LuaGetNumber(L, meshIdx, "uv_repeat", value))
+				mesh.UvRepeat = static_cast<float>(value);
+			value = mesh.UvRepeatY;
+			if (LuaGetNumber(L, meshIdx, "uv_repeat_y", value))
+				mesh.UvRepeatY = static_cast<float>(value);
+			LuaGetString(L, meshIdx, "texture_kind", mesh.TextureKind);
+		}
+
+		lua_getfield(L, meshIdx, "transform");
+		if (lua_istable(L, -1))
+		{
+			const int transformIdx = lua_gettop(L);
+			LuaGetVec3(L, transformIdx, "position", mesh.Position);
+			LuaGetVec3(L, transformIdx, "rotation", mesh.Rotation);
+			double targetExtent = mesh.TargetExtent;
+			if (LuaGetNumber(L, transformIdx, "target_extent", targetExtent))
+				mesh.TargetExtent = static_cast<float>(targetExtent);
+			if (LuaGetVec3(L, transformIdx, "scale", mesh.Scale))
+				mesh.bUseScale = true;
+		}
+		lua_pop(L, 1);
+
+		lua_getfield(L, meshIdx, "material");
+		if (lua_istable(L, -1))
+		{
+			const int materialIdx = lua_gettop(L);
+			double value = mesh.Roughness;
+			if (LuaGetNumber(L, materialIdx, "roughness", value))
+				mesh.Roughness = static_cast<float>(value);
+			value = mesh.Metallic;
+			if (LuaGetNumber(L, materialIdx, "metallic", value))
+				mesh.Metallic = static_cast<float>(value);
+			LuaGetBool(L, materialIdx, "override", mesh.bOverrideMaterial);
+		}
+		lua_pop(L, 1);
+
+		LuaGetBool(L, meshIdx, "visible", mesh.bVisible);
+		LuaGetBool(L, meshIdx, "ray_tracing", mesh.bRayTracing);
+	}
+
+	void ParseCachedMapLight(lua_State* L, int lightIdx, CachedMapLight& light)
+	{
+		light = {};
+		light.bPresent = true;
+		CoronaECS::LightComponent& comp = light.Component;
+
+		std::string typeStr;
+		if (LuaGetString(L, lightIdx, "type", typeStr))
+		{
+			std::transform(typeStr.begin(), typeStr.end(), typeStr.begin(),
+				[](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+			comp.Type =
+				typeStr == "directional" || typeStr == "sun" ? CoronaECS::LightType::Directional :
+				typeStr == "spot" || typeStr == "spotlight" ? CoronaECS::LightType::Spot :
+				CoronaECS::LightType::Point;
+		}
+		LuaGetVec3(L, lightIdx, "direction", comp.Direction);
+		LuaGetVec3(L, lightIdx, "color", comp.Color);
+		double value = comp.Intensity;
+		if (LuaGetNumber(L, lightIdx, "intensity", value))
+			comp.Intensity = static_cast<float>(value);
+		value = comp.Radius;
+		if (LuaGetNumber(L, lightIdx, "radius", value))
+			comp.Radius = static_cast<float>(value);
+		value = comp.InnerConeAngle;
+		if (LuaGetNumber(L, lightIdx, "inner_cone_angle", value) ||
+			LuaGetNumber(L, lightIdx, "innerConeAngle", value))
+		{
+			comp.InnerConeAngle = std::clamp(static_cast<float>(value), 0.0f, glm::pi<float>() - 0.001f);
+		}
+		value = comp.OuterConeAngle;
+		if (LuaGetNumber(L, lightIdx, "outer_cone_angle", value) ||
+			LuaGetNumber(L, lightIdx, "outerConeAngle", value))
+		{
+			comp.OuterConeAngle = std::clamp(static_cast<float>(value), 0.001f, glm::pi<float>());
+		}
+		comp.InnerConeAngle = std::clamp(comp.InnerConeAngle, 0.0f, glm::pi<float>() - 0.001f);
+		comp.OuterConeAngle = std::clamp(comp.OuterConeAngle, comp.InnerConeAngle + 0.001f, glm::pi<float>());
+		if (!LuaGetBool(L, lightIdx, "cast_shadow", comp.bCastShadow))
+			LuaGetBool(L, lightIdx, "castShadow", comp.bCastShadow);
+		LuaGetBool(L, lightIdx, "enabled", comp.bEnabled);
+		light.bHasPosition =
+			(comp.Type != CoronaECS::LightType::Directional) &&
+			LuaGetVec3(L, lightIdx, "position", light.Position);
+	}
+
+	void ParseCachedMapGlobals(lua_State* L, int rootIdx, CachedMapGlobals& globals)
+	{
+		lua_getfield(L, rootIdx, "globals");
+		if (lua_istable(L, -1))
+		{
+			const int globalsIdx = lua_gettop(L);
+			lua_getfield(L, globalsIdx, "wind");
+			if (lua_istable(L, -1))
+			{
+				const int windIdx = lua_gettop(L);
+				globals.bHasWindParams = LuaGetVec4(L, windIdx, "params", globals.WindParams);
+				globals.bHasWindTuning = LuaGetVec4(L, windIdx, "tuning", globals.WindTuning);
+			}
+			lua_pop(L, 1);
+
+			lua_getfield(L, globalsIdx, "grass");
+			if (lua_istable(L, -1))
+			{
+				const int grassIdx = lua_gettop(L);
+				globals.bHasGrassBendOrigin = LuaGetVec4(L, grassIdx, "bend_origin", globals.GrassBendOrigin);
+				globals.bHasGrassBendParams = LuaGetVec4(L, grassIdx, "bend_params", globals.GrassBendParams);
+				globals.bHasGrassRenderOrigin = LuaGetVec3(L, grassIdx, "render_origin", globals.GrassRenderOrigin);
+				double renderDistance = globals.GrassRenderDistance;
+				if (LuaGetNumber(L, grassIdx, "render_distance", renderDistance))
+				{
+					globals.GrassRenderDistance = static_cast<float>(renderDistance);
+					globals.bHasGrassRenderDistance = true;
+				}
+			}
+			lua_pop(L, 1);
+
+			globals.bHasTerrainDeformSphere =
+				LuaGetVec4(L, globalsIdx, "terrain_deform_sphere", globals.TerrainDeformSphere);
+		}
+		lua_pop(L, 1);
+	}
+
+	bool ParseCachedMapSceneFromLua(
+		lua_State* L,
+		const std::filesystem::path& path,
+		const std::string& source,
+		CachedMapScene& outScene,
+		std::wstring* outError)
+	{
+		const int stackTop = lua_gettop(L);
+		size_t bytecodeSize = 0;
+		char* bytecode = luau_compile(source.data(), source.size(), nullptr, &bytecodeSize);
+		if (!bytecode)
+		{
+			if (outError) *outError = L"map compile failed: " + path.wstring();
+			lua_settop(L, stackTop);
+			return false;
+		}
+
+		const std::string chunkName = "=" + PlatformWideToUtf8(path.wstring());
+		const int loadResult = luau_load(L, chunkName.c_str(), bytecode, bytecodeSize, 0);
+		std::free(bytecode);
+		if (loadResult != 0)
+		{
+			if (outError)
+				*outError = L"map load failed: " + PlatformUtf8ToWide(lua_isstring(L, -1) ? lua_tostring(L, -1) : "");
+			lua_settop(L, stackTop);
+			return false;
+		}
+		if (lua_pcall(L, 0, 1, 0) != 0)
+		{
+			if (outError)
+				*outError = L"map exec error: " + PlatformUtf8ToWide(lua_isstring(L, -1) ? lua_tostring(L, -1) : "");
+			lua_settop(L, stackTop);
+			return false;
+		}
+		if (!lua_istable(L, -1))
+		{
+			if (outError) *outError = L"map didn't return a table";
+			lua_settop(L, stackTop);
+			return false;
+		}
+
+		CachedMapScene scene;
+		const int rootIdx = lua_gettop(L);
+		lua_getfield(L, rootIdx, "entities");
+		if (lua_istable(L, -1))
+		{
+			const int entitiesIdx = lua_gettop(L);
+			const int count = static_cast<int>(lua_objlen(L, entitiesIdx));
+			scene.Entities.reserve(std::max(count, 0));
+			for (int i = 1; i <= count; ++i)
+			{
+				lua_rawgeti(L, entitiesIdx, i);
+				if (lua_istable(L, -1))
+				{
+					const int entityIdx = lua_gettop(L);
+					CachedMapEntity entity;
+					LuaGetString(L, entityIdx, "name", entity.Name);
+
+					lua_getfield(L, entityIdx, "mesh");
+					if (lua_istable(L, -1))
+						ParseCachedMapMesh(L, lua_gettop(L), entity.Mesh);
+					lua_pop(L, 1);
+
+					lua_getfield(L, entityIdx, "light");
+					if (lua_istable(L, -1))
+						ParseCachedMapLight(L, lua_gettop(L), entity.Light);
+					lua_pop(L, 1);
+
+					lua_getfield(L, entityIdx, "camera");
+					entity.bHasCamera = lua_istable(L, -1) != 0;
+					lua_pop(L, 1);
+
+					ParseCachedMapScripts(L, entityIdx, entity);
+					scene.Entities.push_back(std::move(entity));
+				}
+				lua_pop(L, 1);
+			}
+		}
+		lua_pop(L, 1);
+
+		ParseCachedMapGlobals(L, rootIdx, scene.Globals);
+		lua_settop(L, stackTop);
+		outScene = std::move(scene);
 		return true;
 	}
 }
@@ -687,6 +1469,258 @@ bool Corona::SaveEntityAsAsset(CoronaECS::Entity entity, const std::string& asse
 
 bool Corona::LoadMapFromFile(const std::wstring& name, std::wstring* outError)
 {
+	{
+		const std::filesystem::path path = ResolveMapPath(name);
+		CachedMapSourceMeta sourceMeta = {};
+		if (!GetCachedMapSourceMeta(path, sourceMeta))
+		{
+			if (outError) *outError = L"map not found / unreadable: " + path.wstring();
+			return false;
+		}
+
+		if (!ScriptState || !ScriptState->L)
+		{
+			if (outError) *outError = L"Luau VM not initialized";
+			return false;
+		}
+
+		const std::filesystem::path cachePath = GetCachedMapScenePath(path);
+		auto mapScene = std::make_shared<CachedMapScene>();
+		bool bLoadedFromSceneCache = ReadCachedMapScene(cachePath, sourceMeta, *mapScene);
+		std::future<bool> cacheWriteFuture;
+		if (bLoadedFromSceneCache)
+		{
+			AppendCpuRuntimeTrace(
+				L"[MapCache] scene cache hit: " + cachePath.wstring() +
+				L", entities=" + std::to_wstring(mapScene->Entities.size()));
+		}
+		else
+		{
+			const std::string source = ReadFile(path);
+			if (source.empty())
+			{
+				if (outError) *outError = L"map not found / empty: " + path.wstring();
+				return false;
+			}
+
+			if (!ParseCachedMapSceneFromLua(ScriptState->L, path, source, *mapScene, outError))
+				return false;
+
+			AppendCpuRuntimeTrace(
+				L"[MapCache] parsed source map: " + path.wstring() +
+				L", bytes=" + std::to_wstring(source.size()) +
+				L", entities=" + std::to_wstring(mapScene->Entities.size()) +
+				L", cache=" + cachePath.wstring());
+			cacheWriteFuture = std::async(
+				std::launch::async,
+				[cachePath, sourceMeta, mapScene]()
+				{
+					return WriteCachedMapScene(cachePath, sourceMeta, *mapScene);
+				});
+		}
+
+		ClearScriptSpawnedScene();
+		SceneObjects.reserve(SceneObjects.size() + mapScene->Entities.size());
+		size_t expectedPointLights = 0;
+		for (const CachedMapEntity& entity : mapScene->Entities)
+		{
+			if (entity.Light.bPresent && entity.Light.Component.Type != CoronaECS::LightType::Directional)
+				++expectedPointLights;
+		}
+		PointLights.reserve(PointLights.size() + expectedPointLights);
+
+		bool bIgnoredCameraEntity = false;
+		const int entityCount = static_cast<int>(mapScene->Entities.size());
+		const int progressStep = std::max(1, entityCount / 200);
+		if (bStartupLoadingScreenActive)
+		{
+			EditorMapLoadEntityIndex = 0;
+			EditorMapLoadEntityCount = static_cast<uint32_t>(std::max(entityCount, 0));
+			UpdateStartupLoadingProgress(
+				0.05f,
+				(bLoadedFromSceneCache ? L"Replaying cached map entities: " : L"Replaying map entities: ") +
+				std::to_wstring(EditorMapLoadEntityCount));
+		}
+
+		for (int entityIndex = 0; entityIndex < entityCount; ++entityIndex)
+		{
+			const CachedMapEntity& cachedEntity = mapScene->Entities[static_cast<size_t>(entityIndex)];
+			const std::string& entityName = cachedEntity.Name;
+			if (bStartupLoadingScreenActive &&
+				(entityIndex == 0 || entityIndex + 1 == entityCount || (entityIndex % progressStep) == 0))
+			{
+				EditorMapLoadEntityIndex = static_cast<uint32_t>(entityIndex + 1);
+				const float entityProgress =
+					0.05f + 0.88f *
+					(static_cast<float>(entityIndex) / static_cast<float>(std::max(entityCount, 1)));
+				UpdateStartupLoadingProgress(
+					entityProgress,
+					L"Loading entity " + std::to_wstring(entityIndex + 1) +
+					L"/" + std::to_wstring(std::max(entityCount, 0)) +
+					(entityName.empty() ? std::wstring() : (L": " + PlatformUtf8ToWide(entityName))));
+			}
+
+			CoronaECS::Entity createdEntity;
+			if (cachedEntity.Mesh.bPresent)
+			{
+				const CachedMapMesh& mesh = cachedEntity.Mesh;
+				ScriptSceneHandle sceneHandle = InvalidScriptSceneHandle;
+				switch (mesh.Primitive)
+				{
+				case CachedMapMeshPrimitive::Terrain:
+					sceneHandle = CreateProceduralTerrainSceneForScript(mesh.Seed);
+					break;
+				case CachedMapMeshPrimitive::GrassOnTerrain:
+					sceneHandle = mesh.bProcedural
+						? CreateProceduralGrassOnTerrainSceneInstancedForScript(
+							mesh.BladeCount, mesh.BladeHeight, mesh.Seed, mesh.BladeSegments)
+						: CreateProceduralGrassOnTerrainSceneForScript(
+							mesh.BladeCount, mesh.BladeHeight, mesh.Seed, mesh.BladeSegments);
+					break;
+				case CachedMapMeshPrimitive::Grass:
+					sceneHandle = CreateProceduralGrassSceneForScript(
+						mesh.BladeCount, mesh.AreaSize, mesh.BladeHeight, mesh.Seed, mesh.BladeSegments);
+					break;
+				case CachedMapMeshPrimitive::BlockCharacter:
+					sceneHandle = CreateProceduralBlockCharacterSceneForScript(mesh.Seed);
+					break;
+				case CachedMapMeshPrimitive::Box:
+					sceneHandle = CreateProceduralBoxSceneForScript(
+						mesh.Color,
+						mesh.bBrickTexture,
+						mesh.UvRepeat,
+						PlatformUtf8ToWide(mesh.TextureKind),
+						mesh.UvRepeatY,
+						mesh.bFrontOnly);
+					break;
+				case CachedMapMeshPrimitive::Asset:
+					if (!mesh.AssetPath.empty())
+						sceneHandle = LoadSceneForScript(PlatformUtf8ToWide(mesh.AssetPath));
+					break;
+				case CachedMapMeshPrimitive::Unknown:
+				default:
+					break;
+				}
+
+				if (sceneHandle != InvalidScriptSceneHandle)
+				{
+					CoronaECS::Entity newEntity = CreateEntity(entityName);
+					AddMeshComponentForScript(
+						newEntity, sceneHandle,
+						mesh.Position, mesh.Rotation, mesh.TargetExtent, mesh.Scale, mesh.bUseScale,
+						mesh.Roughness, mesh.Metallic, mesh.bOverrideMaterial,
+						mesh.bVisible, mesh.bRayTracing, /*physicsQuery*/ true);
+					createdEntity = newEntity;
+				}
+			}
+
+			if (cachedEntity.Light.bPresent)
+			{
+				CoronaECS::LightComponent comp = cachedEntity.Light.Component;
+				const bool bDirectional = (comp.Type == CoronaECS::LightType::Directional);
+				if (bDirectional)
+				{
+					const float directionLength = glm::length(comp.Direction);
+					comp.Direction = directionLength > 0.0001f ?
+						(comp.Direction / directionLength) :
+						glm::vec3(0.0f, 1.0f, 0.0f);
+					if (comp.Direction.y < -0.0001f)
+					{
+						comp.Direction = -comp.Direction;
+						AppendCpuRuntimeTrace(
+							L"[MapLoad][Light] flipped downward directional vector to Corona surface-to-light convention: " +
+							PlatformUtf8ToWide(entityName));
+					}
+				}
+				const bool bAlreadyHaveDirectional =
+					bDirectional &&
+					EntityWorld.IsAlive(MainDirectionalLightEntity) &&
+					EntityWorld.HasLight(MainDirectionalLightEntity);
+				if (!bAlreadyHaveDirectional)
+				{
+					CoronaECS::Entity le = CreateEntity(entityName);
+					createdEntity = le;
+					comp.RuntimeLightId = 0;
+					if (bDirectional)
+					{
+						EntityWorld.AddLight(le, comp);
+						MainDirectionalLightEntity = le;
+						ApplyDirectionalLightEntityToState();
+					}
+					else
+					{
+						if (cachedEntity.Light.bHasPosition)
+						{
+							auto* trans = EntityWorld.GetTransform(le);
+							if (!trans)
+								trans = EntityWorld.AddTransform(le, CoronaECS::TransformComponent::FromTRS(cachedEntity.Light.Position));
+							else
+								trans->SetPosition(cachedEntity.Light.Position);
+						}
+						SetEntityLightForScript(le, comp, /*persist*/ false);
+					}
+				}
+			}
+
+			if (cachedEntity.bHasCamera && !bIgnoredCameraEntity)
+			{
+				AppendCpuRuntimeTrace(L"[Map] ignored camera entity \"" + PlatformUtf8ToWide(entityName) + L"\"");
+				bIgnoredCameraEntity = true;
+			}
+
+			if (!createdEntity.IsValid() && !cachedEntity.Scripts.empty())
+				createdEntity = CreateEntity(entityName);
+
+			if (createdEntity.IsValid())
+			{
+				for (const CachedMapScript& script : cachedEntity.Scripts)
+				{
+					if (script.bNative)
+						AttachNativeEntityScriptForScript(createdEntity, script.Value);
+					else
+						AttachEntityScriptFileForScript(createdEntity, PlatformUtf8ToWide(script.Value));
+				}
+			}
+		}
+
+		if (bStartupLoadingScreenActive)
+			UpdateStartupLoadingProgress(0.93f, L"Applying map globals");
+		const CachedMapGlobals& globals = mapScene->Globals;
+		if (globals.bHasWindParams) RenderFrameWindParams = globals.WindParams;
+		if (globals.bHasWindTuning) RenderFrameWindTuning = globals.WindTuning;
+		if (globals.bHasGrassBendOrigin) RenderFrameGrassBendOrigin = globals.GrassBendOrigin;
+		if (globals.bHasGrassBendParams) RenderFrameGrassBendParams = globals.GrassBendParams;
+		if (globals.bHasGrassRenderOrigin) GrassRenderOrigin = globals.GrassRenderOrigin;
+		if (globals.bHasGrassRenderDistance) GrassRenderDistance = globals.GrassRenderDistance;
+		if (globals.bHasTerrainDeformSphere) RenderFrameTerrainDeformSphere = globals.TerrainDeformSphere;
+
+		if (cacheWriteFuture.valid())
+		{
+			const bool bWroteCache = cacheWriteFuture.get();
+			AppendCpuRuntimeTrace(
+				std::wstring(L"[MapCache] scene cache write ") +
+				(bWroteCache ? L"ok: " : L"failed: ") +
+				cachePath.wstring());
+		}
+
+		UpdateMainCameraEntityFromSimpleCamera();
+		AppendCpuRuntimeTrace(
+			L"[Map] loaded " + path.wstring() +
+			L", sceneCache=" + std::wstring(bLoadedFromSceneCache ? L"hit" : L"miss") +
+			L", entities=" + std::to_wstring(mapScene->Entities.size()));
+		CurrentMapName = name;
+		PersistLastEditorMapName(name);
+		MarkAllSceneObjectsForRenderSync();
+		MarkAllPointLightsForRenderSync();
+		MarkCpuPhysicsSceneDirty();
+		MarkRayTracingSceneDirty();
+		bRayTracingBLASCacheResetPending = true;
+		ResetAllAccumulationState(false);
+		AppendCpuRuntimeTrace(L"[Map] requested full render sync after load " + path.wstring());
+		return true;
+	}
+
+#if 0
 	const std::filesystem::path path = ResolveMapPath(name);
 	const std::string source = ReadFile(path);
 	if (source.empty())
@@ -1132,4 +2166,5 @@ bool Corona::LoadMapFromFile(const std::wstring& name, std::wstring* outError)
 	ResetAllAccumulationState(false);
 	AppendCpuRuntimeTrace(L"[Map] requested full render sync after load " + path.wstring());
 	return true;
+#endif
 }

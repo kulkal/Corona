@@ -28,26 +28,16 @@ cbuffer ViewParameter : register(b0)
     uint BlueNoiseOffsetStride;
     float ViewSpreadAngle;
     uint NoiseMode;
-    uint bIncludeSkyLighting;
     uint GISamplesPerPixel;
-    float3 SkyColorTop;
-    float SkyIntensity;
-    float3 SkyColorBottom;
-    float _padding;
+    uint _paddingAfterGISamples;
     float3 LightColor;
-    float _padding2;
+    float _padding;
     PointLightParam PointLights[RT_DIFFUSE_GI_MAX_POINT_LIGHTS];
     uint PointLightCount;
     float3 PointLightPadding;
 };
 
 static const float INV_PI = 1.0f / PI;
-
-float3 EvaluateSkyColor(float3 direction)
-{
-    float t = 0.5f * (direction.y + 1.0f);
-    return max(lerp(SkyColorBottom, SkyColorTop, t) * SkyIntensity, 0.0f.xxx);
-}
 
 float3 EvaluatePointLightFill(float3 normal)
 {
@@ -96,9 +86,6 @@ void NRISimpleGIFallback(uint3 DTid : SV_DispatchThreadID)
         0.018f.xxx +
         directionalFill.xxx * 0.032f;
     irradiance += EvaluatePointLightFill(worldNormal);
-
-    if (bIncludeSkyLighting != 0u)
-        irradiance += max(dot(EvaluateSkyColor(worldNormal), float3(0.2126f, 0.7152f, 0.0722f)), 0.0f).xxx * 0.015f;
 
     irradiance = min(max(CommonSanitizeFloat3(irradiance, 0.0f.xxx), 0.0f.xxx), 0.12f.xxx);
 

@@ -74,6 +74,37 @@ void Corona::InitRaytracingShadowPass()
 		}
 }
 
+void Corona::InitShadowRayQueryPass()
+{
+	shared_ptr<ComputePipelineStateObject> tempPSO = renderBackend->CreateComputePipelineStateObject();
+	if (!tempPSO)
+		return;
+
+	const RHIShaderStageMask computeStage = ToRHIShaderStageMask(RHIShaderStage::Compute);
+	tempPSO->BindUAV(MakeRHITextureUAV("ShadowResult", 0, computeStage));
+	tempPSO->BindUAV(MakeRHITextureUAV("ShadowReservoirM", 1, computeStage));
+	tempPSO->BindSRV(MakeRHIAccelerationStructureSRV("gRtScene", 0, computeStage));
+	tempPSO->BindSRV(MakeRHITextureSRV("DepthTex", 1, computeStage));
+	tempPSO->BindSRV(MakeRHITextureSRV("WorldNormalTex", 2, computeStage));
+	tempPSO->BindSRV(MakeRHITextureSRV("GeoNormalTex", 7, computeStage));
+	tempPSO->BindSRV(MakeRHITextureSRV("RayNoiseBlueNoiseSource", 8, computeStage));
+	tempPSO->BindSRV(MakeRHITextureSRV("ShadowReservoirPrev", 9, computeStage));
+	tempPSO->BindSRV(MakeRHITextureSRV("VelocityTex", 10, computeStage));
+	tempPSO->BindSRV(MakeRHITextureSRV("ShadowReservoirMPrev", 11, computeStage));
+	tempPSO->BindSRV(MakeRHITextureSRV("DepthTexPrev", 12, computeStage));
+	tempPSO->BindSRV(MakeRHITextureSRV("WorldNormalTexPrev", 13, computeStage));
+	tempPSO->BindSRV(MakeRHIBufferSRV("SpatialLightCellKeys", 14, computeStage, RHIBufferViewKind::Raw));
+	tempPSO->BindSRV(MakeRHIBufferSRV("SpatialLightCellMask", 15, computeStage, RHIBufferViewKind::Raw));
+	tempPSO->BindCBV(MakeRHICBV("ViewParameter", 0, sizeof(RTShadowViewParamCB), computeStage));
+	tempPSO->BindSampler(MakeRHISampler("sampleWrap", 0, computeStage));
+
+	const bool ok = tempPSO->InitCSWithInlineRT(
+		GetAssetFullPath(L"Shaders\\RaytracedShadowRayQuery.hlsl"),
+		"main");
+	if (ok)
+		PSO_SHADOW_RAYQUERY = tempPSO;
+}
+
 void Corona::InitShadowSpatialReusePass()
 {
 	// ReSTIR DI Phase 3 — proper 2-pass spatial reuse. Compiles with
@@ -103,10 +134,11 @@ void Corona::InitShadowSpatialReusePass()
 
 void Corona::RaytraceShadowPass()
 {
-	if (!ShadowBuffer || !BlueNoiseTex || !TLAS || !PSO_RT_SHADOW || !UnjitteredDepthBuffers[ColorBufferWriteIndex] || !NormalBuffers[ColorBufferWriteIndex] || !GeomNormalBuffers[ColorBufferWriteIndex])
+	const bool bUseRayQueryShadow = PSO_SHADOW_RAYQUERY != nullptr;
+	if (!ShadowBuffer || !BlueNoiseTex || !TLAS || (!bUseRayQueryShadow && !PSO_RT_SHADOW) || !UnjitteredDepthBuffers[ColorBufferWriteIndex] || !NormalBuffers[ColorBufferWriteIndex] || !GeomNormalBuffers[ColorBufferWriteIndex])
 		return;
 
-	if (!EnsureRTMaterialRecordBuffer())
+	if (!bUseRayQueryShadow && !EnsureRTMaterialRecordBuffer())
 		return;
 
 	RTShadowViewParam.ViewMatrix = glm::transpose(ViewMat);
@@ -341,7 +373,9 @@ void Corona::RaytraceShadowPass()
 	RGBufferRef spatialLightCellMaskInput = spatialLightCellMask
 		? rg.ImportBuffer("Shadow.SpatialLightCellMask", spatialLightCellMask, EResourceState::ShaderRead)
 		: RGBufferRef{};
-	RGBufferRef rtMaterialsInput = rg.ImportBuffer("Shadow.RtMaterials", RTMaterialRecordBuffer.get(), EResourceState::ShaderRead);
+	RGBufferRef rtMaterialsInput = (!bUseRayQueryShadow && RTMaterialRecordBuffer)
+		? rg.ImportBuffer("Shadow.RtMaterials", RTMaterialRecordBuffer.get(), EResourceState::ShaderRead)
+		: RGBufferRef{};
 
 	rg.ExportTexture(finalShadowOutput, EResourceState::ShaderRead);
 	if (finalMOutput.IsValid())
@@ -352,8 +386,8 @@ void Corona::RaytraceShadowPass()
 		rg.ExportTexture(shadowMPrevInput, EResourceState::ShaderRead);
 
 	rg.AddPass(
-		"RaytraceShadowPass",
-		ERGPassFlags::RayTracing,
+		bUseRayQueryShadow ? "RayQueryShadowPass" : "RaytraceShadowPass",
+		bUseRayQueryShadow ? ERGPassFlags::Compute : ERGPassFlags::RayTracing,
 		[&](RGPassBuilder& builder)
 		{
 			builder.ReadWriteTexture(raygenShadowOutput, EResourceState::UnorderedAccess);
@@ -379,7 +413,8 @@ void Corona::RaytraceShadowPass()
 				builder.ReadBuffer(spatialLightCellKeysInput, EResourceState::ShaderRead);
 			if (spatialLightCellMaskInput.IsValid())
 				builder.ReadBuffer(spatialLightCellMaskInput, EResourceState::ShaderRead);
-			builder.ReadBuffer(rtMaterialsInput, EResourceState::ShaderRead);
+			if (rtMaterialsInput.IsValid())
+				builder.ReadBuffer(rtMaterialsInput, EResourceState::ShaderRead);
 		},
 		[&](RGContext& ctx)
 		{
@@ -390,7 +425,37 @@ void Corona::RaytraceShadowPass()
 				? ctx.GetTexture(shadowMPrevInput)
 				: ShadowBuffer.get();
 
-			RTPassBuilder pass(*this, PSO_RT_SHADOW);
+			if (bUseRayQueryShadow)
+			{
+				const auto bindStart = CpuClock::now();
+				PSO_SHADOW_RAYQUERY->SetTextureUAV("ShadowResult", ctx.GetTexture(raygenShadowOutput));
+				PSO_SHADOW_RAYQUERY->SetTextureUAV("ShadowReservoirM", raygenMOutput.IsValid() ? ctx.GetTexture(raygenMOutput) : nullptr);
+				PSO_SHADOW_RAYQUERY->SetAccelerationStructure("gRtScene", TLAS);
+				PSO_SHADOW_RAYQUERY->SetTextureSRV("DepthTex", ctx.GetTexture(depthInput));
+				PSO_SHADOW_RAYQUERY->SetTextureSRV("WorldNormalTex", ctx.GetTexture(normalInput));
+				PSO_SHADOW_RAYQUERY->SetTextureSRV("GeoNormalTex", ctx.GetTexture(geomNormalInput));
+				PSO_SHADOW_RAYQUERY->SetTextureSRV("RayNoiseBlueNoiseSource", ctx.GetTexture(blueNoiseInput));
+				PSO_SHADOW_RAYQUERY->SetTextureSRV("ShadowReservoirPrev", shadowPrevTexture);
+				PSO_SHADOW_RAYQUERY->SetTextureSRV("ShadowReservoirMPrev", shadowMPrevTexture);
+				PSO_SHADOW_RAYQUERY->SetTextureSRV("DepthTexPrev", prevDepthInput.Index == depthInput.Index ? ctx.GetTexture(depthInput) : ctx.GetTexture(prevDepthInput));
+				PSO_SHADOW_RAYQUERY->SetTextureSRV("WorldNormalTexPrev", prevNormalInput.Index == normalInput.Index ? ctx.GetTexture(normalInput) : ctx.GetTexture(prevNormalInput));
+				PSO_SHADOW_RAYQUERY->SetBufferSRV("SpatialLightCellKeys", spatialLightCellKeysInput.IsValid() ? ctx.GetBuffer(spatialLightCellKeysInput) : nullptr);
+				PSO_SHADOW_RAYQUERY->SetBufferSRV("SpatialLightCellMask", spatialLightCellMaskInput.IsValid() ? ctx.GetBuffer(spatialLightCellMaskInput) : nullptr);
+				PSO_SHADOW_RAYQUERY->SetTextureSRV("VelocityTex", velocityInput.IsValid() ? ctx.GetTexture(velocityInput) : nullptr);
+				PSO_SHADOW_RAYQUERY->SetCBVValue("ViewParameter", &RTShadowViewParam);
+				PSO_SHADOW_RAYQUERY->SetSampler("sampleWrap", samplerWrap.get());
+				AddRtPassRecordPhaseTiming(ERtProfilePass::Shadow, ERtRecordPhase::BindResources, bindStart, CpuClock::now());
+
+				const auto applyStart = CpuClock::now();
+				PSO_SHADOW_RAYQUERY->Apply();
+				const UINT groupX = (GetRenderWidth() + 7) / 8;
+				const UINT groupY = (GetRenderHeight() + 7) / 8;
+				ctx.GetBackend()->Dispatch(groupX, groupY, 1);
+				AddRtPassRecordPhaseTiming(ERtProfilePass::Shadow, ERtRecordPhase::ApplyDispatch, applyStart, CpuClock::now());
+				return;
+			}
+
+			RTPassBuilder pass(*this, PSO_RT_SHADOW, ERtProfilePass::Shadow);
 			pass.BeginScene()
 				.SetTextureUAV("global", "ShadowResult", ctx.GetTexture(raygenShadowOutput))
 				.SetTextureUAV("global", "ShadowReservoirM", raygenMOutput.IsValid() ? ctx.GetTexture(raygenMOutput) : nullptr)
@@ -485,7 +550,10 @@ void Corona::RaytraceShadowPass()
 		}
 	}
 
-	if (!rg.Execute())
+	const auto rgExecuteStart = CpuClock::now();
+	const bool bRgExecuted = rg.Execute();
+	AddRtPassRecordPhaseTiming(ERtProfilePass::Shadow, ERtRecordPhase::RenderGraph, rgExecuteStart, CpuClock::now());
+	if (!bRgExecuted)
 		return;
 
 	bShadowOutputValidThisFrame = true;

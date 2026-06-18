@@ -282,10 +282,6 @@ void Corona::ScreenProbeRaytraceGIPass()
 	RTScreenProbeGIViewParam.TemporalAlpha = std::clamp(ScreenProbeGICB.TemporalAlpha, 0.02f, 1.0f);
 	RTScreenProbeGIViewParam.HistoryDepthWeight = ScreenProbeGICB.HistoryDepthWeight;
 	RTScreenProbeGIViewParam.HistoryNormalWeight = ScreenProbeGICB.HistoryNormalWeight;
-	RTScreenProbeGIViewParam.bIncludeSkyLighting = RenderFrameDiffuseGISkyLightingEnabled;
-	RTScreenProbeGIViewParam.SkyColorTop = SkyColorTop;
-	RTScreenProbeGIViewParam.SkyIntensity = RenderFrameDiffuseGISkyIntensity;
-	RTScreenProbeGIViewParam.SkyColorBottom = SkyColorBottom;
 	RTScreenProbeGIViewParam.LightColor = RenderFrameLightColor;
 	FillPointLightParams(
 		RTScreenProbeGIViewParam.PointLights,
@@ -302,8 +298,7 @@ void Corona::ScreenProbeRaytraceGIPass()
 			AppendCpuRuntimeTrace(
 				L"[DiffuseGI][ScreenProbe] lightIntensity=" + std::to_wstring(LightIntensity) +
 				L", pointLights=" + std::to_wstring(RTScreenProbeGIViewParam.PointLightCount) +
-				L", pointLightLimit=" + std::to_wstring(DiffuseGIPointLightLimit) +
-				L", sky=" + std::to_wstring(RenderFrameDiffuseGISkyLightingEnabled));
+				L", pointLightLimit=" + std::to_wstring(DiffuseGIPointLightLimit));
 		}
 	}
 
@@ -369,7 +364,7 @@ void Corona::ScreenProbeRaytraceGIPass()
 		},
 		[&, pso](RGContext& ctx)
 		{
-			RTPassBuilder pass(*this, pso);
+			RTPassBuilder pass(*this, pso, ERtProfilePass::ScreenProbeGI);
 			pass.BeginScene();
 
 			pass.SetTextureUAV("global", "ProbeRadiance", ctx.GetTexture(outRadiance));

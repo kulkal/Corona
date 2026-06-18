@@ -156,6 +156,7 @@ public:
 	void TransitionTexture(Texture* texture, EResourceState stateBefore, EResourceState stateAfter) override;
 	void TransitionBuffer(Buffer* buffer, EResourceState stateBefore, EResourceState stateAfter) override;
 	void TransitionVertexBuffer(VertexBuffer* vertexBuffer, EResourceState stateBefore, EResourceState stateAfter) override;
+	void UAVBarrier(Texture* texture) override;
 	void UAVBarrier(Buffer* buffer) override;
 
 	// --- Graphics pipelines (bind-group binding) ---

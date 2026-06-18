@@ -97,9 +97,51 @@ namespace
 		return PlatformWideToUtf8(value);
 	}
 
-	void ConfigureVulkanImplicitLayerPolicy()
+	void ConfigureVulkanImplicitLayerPolicy(bool bCaptureSafeMode, bool bAllowImplicitLayers)
 	{
 		const auto existingPolicy = GetPlatformEnvironmentVariable(L"VK_LOADER_LAYERS_DISABLE");
+		if (bCaptureSafeMode)
+		{
+			SetPlatformEnvironmentVariable(L"CORONA_VULKAN_CAPTURE_SAFE", L"1");
+			if (existingPolicy.has_value())
+			{
+				if (SetPlatformEnvironmentVariable(L"VK_LOADER_LAYERS_DISABLE", nullptr))
+				{
+					AppendCpuRuntimeTrace(L"[LoadPipeline] Vulkan capture-safe mode cleared VK_LOADER_LAYERS_DISABLE=" + *existingPolicy);
+				}
+				else
+				{
+					AppendCpuRuntimeTrace(L"[LoadPipeline] Vulkan capture-safe mode failed to clear VK_LOADER_LAYERS_DISABLE=" + *existingPolicy);
+				}
+			}
+			else
+			{
+				AppendCpuRuntimeTrace(L"[LoadPipeline] Vulkan capture-safe mode preserving implicit layers");
+			}
+			return;
+		}
+
+		SetPlatformEnvironmentVariable(L"CORONA_VULKAN_CAPTURE_SAFE", nullptr);
+		if (bAllowImplicitLayers)
+		{
+			if (existingPolicy.has_value())
+			{
+				if (SetPlatformEnvironmentVariable(L"VK_LOADER_LAYERS_DISABLE", nullptr))
+				{
+					AppendCpuRuntimeTrace(L"[LoadPipeline] Vulkan capture mode cleared VK_LOADER_LAYERS_DISABLE=" + *existingPolicy);
+				}
+				else
+				{
+					AppendCpuRuntimeTrace(L"[LoadPipeline] Vulkan capture mode failed to clear VK_LOADER_LAYERS_DISABLE=" + *existingPolicy);
+				}
+			}
+			else
+			{
+				AppendCpuRuntimeTrace(L"[LoadPipeline] Vulkan capture mode allowing implicit layers");
+			}
+			return;
+		}
+
 		if (existingPolicy.has_value())
 		{
 			AppendCpuRuntimeTrace(L"[LoadPipeline] preserving VK_LOADER_LAYERS_DISABLE=" + *existingPolicy);
@@ -935,7 +977,7 @@ namespace
 		return mode == Corona::EAntiAliasingMode::DLSS_SR || mode == Corona::EAntiAliasingMode::DLSS_RR;
 	}
 
-	constexpr std::array<const char*, 24> kGpuPassNames = {
+	constexpr std::array<const char*, 23> kGpuPassNames = {
 		"Frame Total",
 		"Skeletal Skinning",
 		"GBuffer",
@@ -947,7 +989,6 @@ namespace
 		"SHC Primary Deep Seed",
 		"RT Shadow",
 		"RT AO",
-		"RT Sky",
 		"RT Reflection",
 		"RT Diffuse GI",
 		"Screen Probe GI",
@@ -1075,12 +1116,27 @@ namespace
 		"rebuild_pso_refresh",
 	};
 
-	constexpr std::array<const char*, 5> kRtRecordPhaseLogColumnNames = {
+	constexpr std::array<const char*, 8> kRtRecordPhaseLogColumnNames = {
+		"prepare",
+		"build_graph",
 		"begin_scene",
 		"bind_resources",
 		"bind_hit_programs",
 		"end_shader_table",
 		"apply_dispatch",
+		"render_graph",
+	};
+
+	constexpr std::array<const char*, 9> kRtProfilePassLogColumnNames = {
+		"shadow",
+		"ao",
+		"reflection",
+		"simple_gi",
+		"screen_probe_gi",
+		"spatial_hash_seed",
+		"spatial_hash_trace",
+		"path_tracing",
+		"path_tracing_compaction",
 	};
 
 	std::filesystem::path GetFramePerfLogPath()
@@ -2049,6 +2105,7 @@ Corona::~Corona()
 
 	if (renderBackend)
 		renderBackend->WaitForGpu();
+	ResetGBufferStaticDrawCache();
 
 	// Release backend-native pipeline wrappers while the backend is still alive.
 	GBufferGraphicsPipeline.reset();
@@ -2089,9 +2146,9 @@ Corona::~Corona()
 	DrawHistogramPSO.reset();
 	AdapteExposurePSO.reset();
 
+	PSO_SHADOW_RAYQUERY.reset();
 	PSO_RT_SHADOW.reset();
 	PSO_RT_AO.reset();
-	PSO_RT_SKY_LIGHTING.reset();
 	PSO_RT_REFLECTION.reset();
 	PSO_RT_REFLECTION_SER.reset();
 	PSO_RT_GI.reset();
@@ -2154,6 +2211,14 @@ void Corona::BeginFramePerfLogging()
 			{
 				logFile << ",avg_rt_record_" << kRtRecordPhaseLogColumnNames[phaseIndex] << "_ms";
 			}
+			for (UINT passIndex = 0; passIndex < RtProfilePassCount; ++passIndex)
+			{
+				for (UINT phaseIndex = 0; phaseIndex < RtRecordPhaseCount; ++phaseIndex)
+				{
+					logFile << ",avg_rt_" << kRtProfilePassLogColumnNames[passIndex]
+						<< "_" << kRtRecordPhaseLogColumnNames[phaseIndex] << "_ms";
+				}
+			}
 			for (UINT phaseIndex = 0; phaseIndex < CpuUpdatePhaseCount; ++phaseIndex)
 			{
 				logFile << ",avg_update_" << kCpuUpdatePhaseLogColumnNames[phaseIndex] << "_ms";
@@ -2176,6 +2241,10 @@ void Corona::BeginFramePerfLogging()
 	RenderCommandPhaseLastTimeMs.fill(0.0f);
 	SceneFlushPhaseLastTimeMs.fill(0.0f);
 	RtRecordPhaseLastTimeMs.fill(0.0f);
+	for (auto& passPhases : RtPassRecordPhaseLastTimeMs)
+	{
+		passPhases.fill(0.0f);
+	}
 }
 
 void Corona::FinishFramePerfLogging(double beginFrameMs, double executeMs, double endFrameMs, double renderWaitMs)
@@ -2243,6 +2312,25 @@ void Corona::FinishFramePerfLogging(double beginFrameMs, double executeMs, doubl
 		RtRecordPhaseAverageTimeMs[phaseIndex] =
 			history.empty() ? 0.0f : (sumMs / static_cast<float>(history.size()));
 	}
+	for (UINT passIndex = 0; passIndex < RtProfilePassCount; ++passIndex)
+	{
+		for (UINT phaseIndex = 0; phaseIndex < RtRecordPhaseCount; ++phaseIndex)
+		{
+			const float phaseMs = RtPassRecordPhaseLastTimeMs[passIndex][phaseIndex];
+			RtPassRecordPhaseCompletedLastTimeMs[passIndex][phaseIndex] = phaseMs;
+			FramePerfLogAccumRtPassRecordPhaseMs[passIndex][phaseIndex] += phaseMs;
+			auto& history = RtPassRecordPhaseHistoryMs[passIndex][phaseIndex];
+			history.push_back(phaseMs);
+			while (history.size() > GpuTimingAverageFrameCount)
+				history.pop_front();
+
+			float sumMs = 0.0f;
+			for (float sampleMs : history)
+				sumMs += sampleMs;
+			RtPassRecordPhaseAverageTimeMs[passIndex][phaseIndex] =
+				history.empty() ? 0.0f : (sumMs / static_cast<float>(history.size()));
+		}
+	}
 	FramePerfLogAccumBeginFrameMs += beginFrameMs;
 	FramePerfLogAccumRecordMs += recordMs;
 	FramePerfLogAccumExecuteMs += executeMs;
@@ -2309,6 +2397,13 @@ void Corona::FinishFramePerfLogging(double beginFrameMs, double executeMs, doubl
 		{
 			logFile << "," << (FramePerfLogAccumRtRecordPhaseMs[phaseIndex] / sampleFrameCount);
 		}
+		for (UINT passIndex = 0; passIndex < RtProfilePassCount; ++passIndex)
+		{
+			for (UINT phaseIndex = 0; phaseIndex < RtRecordPhaseCount; ++phaseIndex)
+			{
+				logFile << "," << (FramePerfLogAccumRtPassRecordPhaseMs[passIndex][phaseIndex] / sampleFrameCount);
+			}
+		}
 		for (UINT phaseIndex = 0; phaseIndex < CpuUpdatePhaseCount; ++phaseIndex)
 		{
 			logFile << "," << (FramePerfLogAccumCpuUpdatePhaseMs[phaseIndex] / sampleFrameCount);
@@ -2357,6 +2452,10 @@ void Corona::FinishFramePerfLogging(double beginFrameMs, double executeMs, doubl
 	FramePerfLogAccumRenderCommandPhaseMs.fill(0.0);
 	FramePerfLogAccumSceneFlushPhaseMs.fill(0.0);
 	FramePerfLogAccumRtRecordPhaseMs.fill(0.0);
+	for (auto& passPhases : FramePerfLogAccumRtPassRecordPhaseMs)
+	{
+		passPhases.fill(0.0);
+	}
 	FramePerfLogAccumBeginFrameMs = 0.0;
 	FramePerfLogAccumRecordMs = 0.0;
 	FramePerfLogAccumExecuteMs = 0.0;
@@ -2370,6 +2469,13 @@ void Corona::InitGpuTimingResources()
 	if (bGpuTimingResourcesInitialized)
 		return;
 
+	if (IsVulkanCaptureSafeActive())
+	{
+		GpuTimestampFrequency = 0;
+		AppendCpuRuntimeTrace(L"[GpuTiming] disabled for Vulkan capture-safe mode");
+		return;
+	}
+
 	renderBackend->InitializeGpuTimestampQueries(renderBackend->GetFrameCount() * GpuPassCount * GpuQueriesPerPass);
 	GpuTimestampFrequency = renderBackend->GetTimestampFrequency();
 	bGpuTimingResourcesInitialized = true;
@@ -2377,7 +2483,7 @@ void Corona::InitGpuTimingResources()
 
 void Corona::BeginGpuTimingFrame()
 {
-	if (!bGpuTimingResourcesInitialized)
+	if (IsVulkanCaptureSafeActive() || !bGpuTimingResourcesInitialized)
 		return;
 
 	GpuPassActiveMaskPerFrame[renderBackend->GetCurrentFrameIndex()].fill(0);
@@ -2385,7 +2491,7 @@ void Corona::BeginGpuTimingFrame()
 
 void Corona::ResolveGpuTimingFrame()
 {
-	if (!bGpuTimingResourcesInitialized)
+	if (IsVulkanCaptureSafeActive() || !bGpuTimingResourcesInitialized)
 		return;
 
 	const UINT frameIndex = renderBackend->GetCurrentFrameIndex();
@@ -2404,7 +2510,7 @@ void Corona::ResolveGpuTimingFrame()
 
 void Corona::UpdateGpuTimingReadback()
 {
-	if (!bGpuTimingResourcesInitialized || GpuTimestampFrequency == 0)
+	if (IsVulkanCaptureSafeActive() || !bGpuTimingResourcesInitialized || GpuTimestampFrequency == 0)
 		return;
 
 	const UINT frameIndex = renderBackend->GetCurrentFrameIndex();
@@ -2451,10 +2557,14 @@ void Corona::BeginGpuPassTiming(EGpuPass pass)
 	const UINT passIndex = static_cast<UINT>(pass);
 	CpuPassActiveMask[passIndex] = 1;
 	CpuPassStartTimes[passIndex] = CpuClock::now();
-	const char* markerName = (pass == EGpuPass::Frame) ? "Frame" : GetGpuPassName(pass);
-	BeginGpuPassMarker(renderBackend.get(), passIndex, markerName);
+	const bool bCaptureSafe = IsVulkanCaptureSafeActive();
+	if (!bCaptureSafe)
+	{
+		const char* markerName = (pass == EGpuPass::Frame) ? "Frame" : GetGpuPassName(pass);
+		BeginGpuPassMarker(renderBackend.get(), passIndex, markerName);
+	}
 
-	if (!bGpuTimingResourcesInitialized)
+	if (bCaptureSafe || !bGpuTimingResourcesInitialized)
 		return;
 
 	const UINT frameIndex = renderBackend->GetCurrentFrameIndex();
@@ -2486,14 +2596,21 @@ void Corona::EndGpuPassTiming(EGpuPass pass)
 		CpuPassAverageTimeMs[passIndex] =
 			cpuHistory.empty() ? 0.0f : (cpuSum / static_cast<float>(cpuHistory.size()));
 	}
-	EndGpuPassMarker(renderBackend.get());
+	const bool bCaptureSafe = IsVulkanCaptureSafeActive();
+	if (!bCaptureSafe)
+		EndGpuPassMarker(renderBackend.get());
 
-	if (!bGpuTimingResourcesInitialized)
+	if (bCaptureSafe || !bGpuTimingResourcesInitialized)
 		return;
 
 	const UINT frameIndex = renderBackend->GetCurrentFrameIndex();
 	const UINT queryIndex = frameIndex * GpuPassCount * GpuQueriesPerPass + passIndex * GpuQueriesPerPass + 1;
 	renderBackend->WriteGpuTimestamp(queryIndex);
+}
+
+bool Corona::IsVulkanCaptureSafeActive() const
+{
+	return bVulkanCaptureSafeMode && renderBackend && renderBackend->GetAPI() == ERenderBackendAPI::Vulkan;
 }
 
 const char* Corona::GetGpuPassName(EGpuPass pass) const
@@ -2516,6 +2633,11 @@ const char* Corona::GetRenderCommandPhaseName(ERenderCommandPhase phase) const
 const char* Corona::GetSceneFlushPhaseName(ESceneFlushPhase phase) const
 {
 	return kSceneFlushPhaseNames[static_cast<size_t>(phase)];
+}
+
+const char* Corona::GetRtProfilePassName(ERtProfilePass pass) const
+{
+	return kRtProfilePassLogColumnNames[static_cast<size_t>(pass)];
 }
 
 void Corona::AddRenderCommandPhaseTiming(
@@ -2543,6 +2665,23 @@ void Corona::AddRtRecordPhaseTiming(
 {
 	const UINT phaseIndex = static_cast<UINT>(phase);
 	RtRecordPhaseLastTimeMs[phaseIndex] += static_cast<float>(ElapsedMilliseconds(begin, end));
+}
+
+void Corona::AddRtPassRecordPhaseTiming(
+	ERtProfilePass pass,
+	ERtRecordPhase phase,
+	const CpuClock::time_point& begin,
+	const CpuClock::time_point& end)
+{
+	const UINT phaseIndex = static_cast<UINT>(phase);
+	const float elapsedMs = static_cast<float>(ElapsedMilliseconds(begin, end));
+	RtRecordPhaseLastTimeMs[phaseIndex] += elapsedMs;
+
+	const UINT passIndex = static_cast<UINT>(pass);
+	if (passIndex < RtProfilePassCount)
+	{
+		RtPassRecordPhaseLastTimeMs[passIndex][phaseIndex] += elapsedMs;
+	}
 }
 
 void Corona::AddCpuUpdatePhaseTiming(
@@ -3500,7 +3639,6 @@ void Corona::RecreateRenderResolutionResources()
 	releaseTexture(GeomNormalBuffers[1]);
 	releaseTexture(ShadowBuffer);
 	releaseTexture(AmbientOcclusionBuffer);
-	releaseTexture(SkyLightingBuffer);
 	releaseTexture(SpecularGIRaw);
 	releaseTexture(SpecularGITemporal[0]);
 	releaseTexture(SpecularGITemporal[1]);
@@ -3609,9 +3747,6 @@ void Corona::RecreateRenderResolutionResources()
 
 	AmbientOcclusionBuffer = createTexture2D(ETextureFormat::RGBA16Float, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1, glm::vec4(1.0f));
 	NAME_D3D12_OBJECT(AmbientOcclusionBuffer->resource);
-
-	SkyLightingBuffer = createTexture2D(ETextureFormat::RGBA16Float, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1, glm::vec4(0.0f, 0.0f, 0.0f, 1.0f));
-	NAME_D3D12_OBJECT(SkyLightingBuffer->resource);
 
 	SpecularGIRaw = createTexture2D(HybridFloat4UAVFormat, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
 	NAME_D3D12_OBJECT(SpecularGIRaw->resource);
@@ -3793,8 +3928,6 @@ void Corona::ReloadRenderResolutionAssets()
 	PrevIndirectSkyColorTop = SkyColorTop;
 	PrevIndirectSkyColorBottom = SkyColorBottom;
 	PrevIndirectSkyIntensity = SkyIntensity;
-	PrevIndirectSkyLightingStrength = SkyLightingStrength;
-	PrevIndirectDiffuseGISkyLightingEnabled = false;
 	PrevIndirectPrefilteredEnvRoughnessThreshold = PrefilteredEnvRoughnessThreshold;
 	PrevIndirectPrefilteredEnvRoughnessFade = PrefilteredEnvRoughnessFade;
 	PrevIndirectPrefilteredEnvSpecularEnabled = bEnablePrefilteredEnvSpecular;
@@ -3976,6 +4109,23 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 			ch = towlower(ch);
 		return value;
 	};
+	auto IsTruthyValue = [&](const std::wstring& value)
+	{
+		const std::wstring lowerValue = ToLower(value);
+		return lowerValue == L"1" || lowerValue == L"true" || lowerValue == L"yes" || lowerValue == L"on";
+	};
+	if (const auto captureSafeEnv = GetPlatformEnvironmentVariable(L"CORONA_VULKAN_CAPTURE_SAFE");
+		captureSafeEnv && IsTruthyValue(*captureSafeEnv))
+	{
+		bVulkanCaptureSafeMode = true;
+		AppendStartupTrace(L"[ParseCommandLineArgs] CORONA_VULKAN_CAPTURE_SAFE enabled");
+	}
+	if (const auto allowImplicitLayersEnv = GetPlatformEnvironmentVariable(L"CORONA_VULKAN_ALLOW_IMPLICIT_LAYERS");
+		allowImplicitLayersEnv && IsTruthyValue(*allowImplicitLayersEnv))
+	{
+		bVulkanAllowImplicitLayers = true;
+		AppendStartupTrace(L"[ParseCommandLineArgs] CORONA_VULKAN_ALLOW_IMPLICIT_LAYERS enabled");
+	}
 
 	auto ParseValueArg = [&](const std::wstring& current, const wchar_t* longName, const wchar_t* shortName, int& index) -> std::wstring
 	{
@@ -4098,6 +4248,26 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 		if (arg == L"--no-streamline" || arg == L"--disable-streamline")
 		{
 			bCommandLineDisableStreamline = true;
+			continue;
+		}
+		if (arg == L"--vulkan-capture-safe" || arg == L"--pylon-capture-safe")
+		{
+			bVulkanCaptureSafeMode = true;
+			continue;
+		}
+		if (arg == L"--no-vulkan-capture-safe" || arg == L"--disable-vulkan-capture-safe")
+		{
+			bVulkanCaptureSafeMode = false;
+			continue;
+		}
+		if (arg == L"--allow-vulkan-implicit-layers" || arg == L"--vulkan-allow-implicit-layers" || arg == L"--preserve-vulkan-implicit-layers")
+		{
+			bVulkanAllowImplicitLayers = true;
+			continue;
+		}
+		if (arg == L"--disable-vulkan-implicit-layers" || arg == L"--no-vulkan-implicit-layers")
+		{
+			bVulkanAllowImplicitLayers = false;
 			continue;
 		}
 		if (arg == L"--startup-scripts")
@@ -4432,16 +4602,6 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 			bEnableDirectSpecular = false;
 			continue;
 		}
-		if (arg == L"--sky-lighting" || arg == L"--enable-sky-lighting")
-		{
-			bEnableSkyLighting = true;
-			continue;
-		}
-		if (arg == L"--no-sky-lighting" || arg == L"--disable-sky-lighting")
-		{
-			bEnableSkyLighting = false;
-			continue;
-		}
 		std::wstring rtaoRadiusValue = ParseValueArg(arg, L"--rtao-radius", L"-rtao-radius", i);
 		if (!rtaoRadiusValue.empty())
 		{
@@ -4513,18 +4673,6 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 			try
 			{
 				SurfaceBounceSaturation = std::clamp(std::stof(surfaceBounceSaturationValue), 0.0f, 1.0f);
-			}
-			catch (...)
-			{
-			}
-			continue;
-		}
-		std::wstring skyLightingStrengthValue = ParseValueArg(arg, L"--sky-lighting-strength", L"-sky-lighting-strength", i);
-		if (!skyLightingStrengthValue.empty())
-		{
-			try
-			{
-				SkyLightingStrength = std::clamp(std::stof(skyLightingStrengthValue), 0.0f, 1.0f);
 			}
 			catch (...)
 			{
@@ -4926,7 +5074,6 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 	bEnableDiffuseGI = false;
 	bEnableSpecularGI = false;
 	bEnableRTAO = false;
-	bEnableRayTracedSkyLighting = false;
 	bEnablePrefilteredEnvSpecular = false;
 	const std::filesystem::path mobileDebugDumpFlag = RuntimePaths::RootDirectory() / L"mobile_debug_dump.flag";
 	if (std::filesystem::exists(mobileDebugDumpFlag))
@@ -4944,6 +5091,8 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 		L", renderMode=" + std::to_wstring(static_cast<int>(CommandLineRenderingMode)) +
 		L", aaOverride=" + std::to_wstring(bCommandLineAAOverrideSet ? 1 : 0) +
 		L", aa=" + std::wstring(GetAntiAliasingModeName(CommandLineSelectedAAMode)) +
+		L", vulkanCaptureSafe=" + std::to_wstring(bVulkanCaptureSafeMode ? 1 : 0) +
+		L", vulkanAllowImplicitLayers=" + std::to_wstring(bVulkanAllowImplicitLayers ? 1 : 0) +
 		L", rayNoise=" + std::wstring(GetRayNoiseModeNameW(RayNoiseMode)) +
 		L", diffuseGI=" + std::wstring(GetDiffuseGIModeNameW(DiffuseGIMode)) +
 		L", diffuseGIEnabled=" + std::to_wstring(bEnableDiffuseGI ? 1 : 0) +
@@ -4960,10 +5109,8 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 		L", directSpecular=" + std::to_wstring(bEnableDirectSpecular ? 1 : 0) +
 		L", restirDirectShadow=" + std::to_wstring(bEnableReSTIRDirectShadow ? 1 : 0) +
 		L", restirDirectShadowOverride=" + std::to_wstring(bCommandLineRestirDirectShadowOverrideSet ? 1 : 0) +
-		L", skyLighting=" + std::to_wstring(bEnableSkyLighting ? 1 : 0) +
 		L", surfaceBounceStrength=" + std::to_wstring(SurfaceBounceStrength) +
 		L", surfaceBounceSaturation=" + std::to_wstring(SurfaceBounceSaturation) +
-		L", skyLightingStrength=" + std::to_wstring(SkyLightingStrength) +
 		L", forceDiffuseGIColor=" + std::to_wstring(bDebugForceDiffuseGIColor ? 1 : 0) +
 		L", diffuseGIDump=" + std::to_wstring(bCommandLineDiffuseGIAutoDumpMode ? 1 : 0) +
 		L", readmeDump=" + std::to_wstring(bCommandLineReadmeScreenshotDumpMode ? 1 : 0) +
@@ -5357,7 +5504,6 @@ void Corona::InitializeAutoAADump()
 		RenderingMode = StartupRenderingMode;
 		AntiAliasingMode = StartupSelectedAAMode;
 		bEnableDiffuseGI = true;
-		bEnableSkyLighting = true;
 		ResetAllAccumulationState(IsDLSSMode(AntiAliasingMode));
 		const UINT32 frameCount = AutoAADumpFrameCountOverride > 0u ? AutoAADumpFrameCountOverride : 120u;
 		AppendAutoAADumpLog(L"[hybrid_full] begin frames=" + std::to_wstring(frameCount) + L", aa=" + std::wstring(GetAntiAliasingModeName(AntiAliasingMode)));
@@ -5876,7 +6022,6 @@ void Corona::AdvanceAutoAADump(Texture* backbuffer)
 			dumpResource(L"rr_specular_hit_distance", PathTracingSpecularHitDistanceBuffer.get(), EResourceState::ShaderRead);
 			dumpResource(L"rr_specular_motion", PathTracingSpecularMotionVectorBuffer.get(), EResourceState::ShaderRead);
 			dumpResource(L"rtao", AmbientOcclusionBuffer.get(), EResourceState::ShaderRead);
-			dumpResource(L"sky_lighting", SkyLightingBuffer.get(), EResourceState::ShaderRead);
 			if (DirectLightingBuffer)
 				dumpResource(L"direct_lighting", DirectLightingBuffer.get(), EResourceState::ShaderRead);
 			if (LightingBuffer)
@@ -6237,7 +6382,6 @@ void Corona::AdvanceAutoAADump(Texture* backbuffer)
 				if (bLightingStage)
 				{
 					dumpResource(L"rtao", AmbientOcclusionBuffer.get(), EResourceState::ShaderRead, false);
-					dumpResource(L"sky_lighting", SkyLightingBuffer.get(), EResourceState::ShaderRead, false);
 					dumpResource(L"direct_lighting", DirectLightingBuffer.get(), EResourceState::ShaderRead, true);
 					dumpResource(L"lighting", LightingBuffer.get(), EResourceState::ShaderRead, true);
 					Texture* resolveTarget = GetCurrentResolveSource();
@@ -6292,16 +6436,15 @@ void Corona::AdvanceAutoAADump(Texture* backbuffer)
 	const UINT32 kPathTracingDumpFrames =
 		AutoAADumpFrameCountOverride > 0u ? AutoAADumpFrameCountOverride :
 		(bReadmeScreenshotDumpMode ? 1000u : (bLightingCompareDumpMode ? 512u : 180u));
-	const UINT32 kNumDumpPhases = bLightingCompareDumpMode ? 5u : (bReadmeScreenshotDumpMode ? 2u : 3u);
+	const UINT32 kNumDumpPhases = bLightingCompareDumpMode ? 4u : (bReadmeScreenshotDumpMode ? 2u : 3u);
 
 	if (AutoAADumpPhase >= kNumDumpPhases)
 		return;
 
 	const bool bLightingHybridFullPhase = bLightingCompareDumpMode && AutoAADumpPhase == 0;
-	const bool bLightingHybridNoSkyPhase = bLightingCompareDumpMode && AutoAADumpPhase == 1;
-	const bool bLightingHybridNoDiffusePhase = bLightingCompareDumpMode && AutoAADumpPhase == 2;
-	const bool bLightingHybridDirectOnlyPhase = bLightingCompareDumpMode && AutoAADumpPhase == 3;
-	const bool bLightingPathTracingPhase = bLightingCompareDumpMode && AutoAADumpPhase == 4;
+	const bool bLightingHybridNoDiffusePhase = bLightingCompareDumpMode && AutoAADumpPhase == 1;
+	const bool bLightingHybridDirectOnlyPhase = bLightingCompareDumpMode && AutoAADumpPhase == 2;
+	const bool bLightingPathTracingPhase = bLightingCompareDumpMode && AutoAADumpPhase == 3;
 	const bool bHybridOnPhase = !bLightingCompareDumpMode && AutoAADumpPhase == 0;
 	const bool bHybridOffPhase = !bLightingCompareDumpMode && !bReadmeScreenshotDumpMode && AutoAADumpPhase == 1;
 	const bool bPathTracingPhase =
@@ -6312,25 +6455,21 @@ void Corona::AdvanceAutoAADump(Texture* backbuffer)
 	const ERenderingMode targetRenderingMode = bHybridPhase ? ERenderingMode::HYBRID : ERenderingMode::PATHTRACING;
 	const EAntiAliasingMode targetAAMode = bHybridPhase ? StartupSelectedAAMode : EAntiAliasingMode::OFF;
 	const bool targetEnableDiffuseGI = bLightingCompareDumpMode ? !(bLightingHybridNoDiffusePhase || bLightingHybridDirectOnlyPhase) : !bHybridOffPhase;
-	const bool targetEnableSkyLighting = bLightingCompareDumpMode ? !(bLightingHybridNoSkyPhase || bLightingHybridDirectOnlyPhase) : bEnableSkyLighting;
 	const wchar_t* currentPhaseName =
 		bLightingCompareDumpMode ?
 			(bLightingHybridFullPhase ? L"hybrid_full" :
-			(bLightingHybridNoSkyPhase ? L"hybrid_no_sky" :
 			(bLightingHybridNoDiffusePhase ? L"hybrid_no_diffuse" :
-			(bLightingHybridDirectOnlyPhase ? L"hybrid_direct_only" : L"path_tracing")))) :
+			(bLightingHybridDirectOnlyPhase ? L"hybrid_direct_only" : L"path_tracing"))) :
 		(bReadmeScreenshotDumpMode ?
 			(bPathTracingPhase ? L"readme_path_tracing" : L"readme_hybrid") :
 			(bHybridOnPhase ? L"hybrid_diffuse_on" :
 			(bHybridOffPhase ? L"hybrid_diffuse_off" : L"path_tracing")));
 
-	if (RenderingMode != targetRenderingMode || AntiAliasingMode != targetAAMode || bEnableDiffuseGI != targetEnableDiffuseGI || (bLightingCompareDumpMode && bEnableSkyLighting != targetEnableSkyLighting))
+	if (RenderingMode != targetRenderingMode || AntiAliasingMode != targetAAMode || bEnableDiffuseGI != targetEnableDiffuseGI)
 	{
 		RenderingMode = targetRenderingMode;
 		AntiAliasingMode = targetAAMode;
 		bEnableDiffuseGI = targetEnableDiffuseGI;
-		if (bLightingCompareDumpMode)
-			bEnableSkyLighting = targetEnableSkyLighting;
 		ResetAllAccumulationState(bHybridPhase);
 		PathTracingViewParam.SamplesPerPixel = 1;
 		PathTracingViewParam.MaxBounces = 4;
@@ -6364,7 +6503,6 @@ void Corona::AdvanceAutoAADump(Texture* backbuffer)
 			L", taaHistory=" + (bTemporalAAHistoryValid ? L"1" : L"0") +
 			L", fallback=" + (bUseLightingBufferFallbackForToneMap ? L"1" : L"0") +
 			L", diffuseGI=" + (bEnableDiffuseGI ? L"1" : L"0") +
-			L", skyLighting=" + (bEnableSkyLighting ? L"1" : L"0") +
 			L", specularGI=" + (bEnableSpecularGI ? L"1" : L"0") +
 			L", resolvedIndex=" + std::to_wstring(ResolvedColorBufferIndex) +
 			L", renderingMode=" + std::wstring(RenderingMode == ERenderingMode::PATHTRACING ? L"pt" : L"hybrid"));
@@ -6388,7 +6526,6 @@ void Corona::AdvanceAutoAADump(Texture* backbuffer)
 			dumpResource(L"gbuffer_velocity", VelocityBuffer.get(), EResourceState::ShaderRead, false);
 			dumpResource(L"gbuffer_depth", UnjitteredDepthBuffers[ColorBufferWriteIndex].get(), EResourceState::ShaderRead, false);
 			dumpResource(L"rtao", AmbientOcclusionBuffer.get(), EResourceState::ShaderRead, false);
-			dumpResource(L"sky_lighting", SkyLightingBuffer.get(), EResourceState::ShaderRead, false);
 			dumpResource(L"direct_lighting", DirectLightingBuffer.get(), EResourceState::ShaderRead, true);
 			dumpResource(L"gi_diffuse_raw", DiffuseGIRaw.get(), EResourceState::ShaderRead, true);
 			dumpResource(L"screen_probe_atlas", ScreenProbeGIRadiance[ScreenProbeGIAtlasWriteIndex].get(), EResourceState::ShaderRead, true);
@@ -6418,18 +6555,15 @@ void Corona::AdvanceAutoAADump(Texture* backbuffer)
 	{
 		WaitForAsyncImageDumps();
 		const bool bNextLightingHybridFullPhase = bLightingCompareDumpMode && AutoAADumpPhase == 0;
-		const bool bNextLightingHybridNoSkyPhase = bLightingCompareDumpMode && AutoAADumpPhase == 1;
-		const bool bNextLightingHybridNoDiffusePhase = bLightingCompareDumpMode && AutoAADumpPhase == 2;
-		const bool bNextLightingHybridDirectOnlyPhase = bLightingCompareDumpMode && AutoAADumpPhase == 3;
-		const bool bNextLightingPathTracingPhase = bLightingCompareDumpMode && AutoAADumpPhase == 4;
+		const bool bNextLightingHybridNoDiffusePhase = bLightingCompareDumpMode && AutoAADumpPhase == 1;
+		const bool bNextLightingHybridDirectOnlyPhase = bLightingCompareDumpMode && AutoAADumpPhase == 2;
+		const bool bNextLightingPathTracingPhase = bLightingCompareDumpMode && AutoAADumpPhase == 3;
 		const bool bNextHybridPhase =
 			CORONA_PLATFORM_MOBILE ||
 			(bLightingCompareDumpMode ? !bNextLightingPathTracingPhase : (bReadmeScreenshotDumpMode ? AutoAADumpPhase == 0 : AutoAADumpPhase < 2));
 		RenderingMode = bNextHybridPhase ? ERenderingMode::HYBRID : ERenderingMode::PATHTRACING;
 		AntiAliasingMode = (RenderingMode == ERenderingMode::HYBRID) ? StartupSelectedAAMode : EAntiAliasingMode::OFF;
 		bEnableDiffuseGI = bLightingCompareDumpMode ? !(bNextLightingHybridNoDiffusePhase || bNextLightingHybridDirectOnlyPhase) : (bReadmeScreenshotDumpMode ? true : (AutoAADumpPhase != 1));
-		if (bLightingCompareDumpMode)
-			bEnableSkyLighting = !(bNextLightingHybridNoSkyPhase || bNextLightingHybridDirectOnlyPhase);
 		ResetAllAccumulationState(RenderingMode == ERenderingMode::HYBRID);
 		const bool bNextHybridOnPhase = !bLightingCompareDumpMode && AutoAADumpPhase == 0;
 		const bool bNextHybridOffPhase = !bLightingCompareDumpMode && !bReadmeScreenshotDumpMode && AutoAADumpPhase == 1;
@@ -6440,9 +6574,8 @@ void Corona::AdvanceAutoAADump(Texture* backbuffer)
 		const wchar_t* nextPhaseName =
 			bLightingCompareDumpMode ?
 				(bNextLightingHybridFullPhase ? L"hybrid_full" :
-				(bNextLightingHybridNoSkyPhase ? L"hybrid_no_sky" :
 				(bNextLightingHybridNoDiffusePhase ? L"hybrid_no_diffuse" :
-				(bNextLightingHybridDirectOnlyPhase ? L"hybrid_direct_only" : L"path_tracing")))) :
+				(bNextLightingHybridDirectOnlyPhase ? L"hybrid_direct_only" : L"path_tracing"))) :
 			(bReadmeScreenshotDumpMode ?
 				(bNextPathTracingPhase ? L"readme_path_tracing" : L"readme_hybrid") :
 				(bNextHybridOnPhase ? L"hybrid_diffuse_on" :
@@ -7311,8 +7444,6 @@ void Corona::DumpCameraPathDiagnosticFrame()
 	dumpTexture(L"diffuse_temporal_prev", DiffuseGITemporal[1 - GIBufferWriteIndex].get(), true);
 	if (ScreenProbeGIResolved)
 		dumpTexture(L"screen_probe_gi", ScreenProbeGIResolved.get(), true);
-	if (SkyLightingBuffer)
-		dumpTexture(L"sky_lighting", SkyLightingBuffer.get(), true);
 	if (DirectLightingBuffer)
 		dumpTexture(L"direct_lighting", DirectLightingBuffer.get(), true);
 	if (LightingBuffer)
@@ -7522,7 +7653,9 @@ bool Corona::LoadCameraState()
 		Fov = restoredFov;
 	}
 	Near = std::max(0.001f, FiniteFloatOr(savedNear, Near));
-	Far = std::max(Near + 1.0f, FiniteFloatOr(savedFar, Far));
+	const float restoredFar = std::max(Near + 1.0f, FiniteFloatOr(savedFar, Far));
+	constexpr float kLegacyDefaultCameraFar = 20000.0f;
+	Far = restoredFar <= kLegacyDefaultCameraFar + 1.0f ? std::max(restoredFar, 500000.0f) : restoredFar;
 
 	const float r = cosf(m_camera.m_pitch);
 	m_camera.m_lookDirection.x = r * sinf(m_camera.m_yaw);
@@ -7982,7 +8115,7 @@ Corona::RenderFrameSourceState Corona::CaptureRenderFrameSourceState() const
 		state.CameraUpDirection = normalizeOrFallback(m_camera.m_upDirection, glm::vec3(0.0f, 1.0f, 0.0f));
 		state.Fov = FiniteClampedOr(Fov, 0.8f, 0.05f, glm::pi<float>() - 0.05f);
 		state.NearPlane = std::max(0.001f, FiniteFloatOr(Near, 10.0f));
-		state.FarPlane = std::max(state.NearPlane + 1.0f, FiniteFloatOr(Far, 20000.0f));
+		state.FarPlane = std::max(state.NearPlane + 1.0f, FiniteFloatOr(Far, 500000.0f));
 	}
 	state.AspectRatio = std::max(0.001f, FiniteFloatOr(m_aspectRatio, 16.0f / 9.0f));
 	state.TotalSeconds = static_cast<float>(m_timer.GetTotalSeconds());
@@ -7999,14 +8132,11 @@ Corona::RenderFrameSourceState Corona::CaptureRenderFrameSourceState() const
 	state.bEnableDirectDiffuse = bEnableDirectDiffuse;
 	state.bEnableDirectSpecular = bEnableDirectSpecular;
 	state.bEnableRTAO = bEnableRTAO;
-	state.bEnableSkyLighting = bEnableSkyLighting;
-	state.bEnableRayTracedSkyLighting = bEnableRayTracedSkyLighting;
 	state.RTAOIndirectStrength = RTAOIndirectStrength;
 	state.RTAOIndirectFloor = RTAOIndirectFloor;
 	state.RTAODirectContactStrength = RTAODirectContactStrength;
 	state.SurfaceBounceStrength = SurfaceBounceStrength;
 	state.SurfaceBounceSaturation = SurfaceBounceSaturation;
-	state.SkyLightingStrength = SkyLightingStrength;
 	state.JitterScale = JitterScale;
 	state.TAASampleCount = TAASampleCount;
 	state.DLSSJitterPhaseScale = DLSSJitterPhaseScale;
@@ -8042,13 +8172,6 @@ Corona::RenderFrameSourceState Corona::CaptureRenderFrameSourceState() const
 	state.RTAOPower = RTAOViewParam.Power;
 	state.RTAONormalBias = RTAOViewParam.NormalBias;
 	state.RTAOSampleCount = RTAOViewParam.SampleCount;
-	state.SkyLightingRayLength = RTSkyLightingViewParam.RayLength;
-	state.SkyLightingNormalBias = RTSkyLightingViewParam.NormalBias;
-	state.SkyLightingSampleCount = RTSkyLightingViewParam.SampleCount;
-	state.SkyLightingUpBias = RTSkyLightingViewParam.SkyUpBias;
-	state.SkyLightingDirectionPower = RTSkyLightingViewParam.SkyDirectionPower;
-	state.SkyLightingMinWorldY = RTSkyLightingViewParam.SkyMinWorldY;
-	state.SkyLightingMaxSampleAttempts = RTSkyLightingViewParam.SkyMaxSampleAttempts;
 	state.ScreenProbeSpacing = ScreenProbeGICB.ProbeSpacing;
 	state.ScreenProbeGatherRadius = ScreenProbeGICB.GatherRadius;
 	state.ScreenProbeRaysPerProbe = RTScreenProbeGIViewParam.RaysPerProbe;
@@ -8112,14 +8235,11 @@ void Corona::ApplyRenderFrameSourceState(const RenderFrameSourceState& state)
 	bEnableDirectDiffuse = state.bEnableDirectDiffuse;
 	bEnableDirectSpecular = state.bEnableDirectSpecular;
 	bEnableRTAO = state.bEnableRTAO;
-	bEnableSkyLighting = state.bEnableSkyLighting;
-	bEnableRayTracedSkyLighting = state.bEnableRayTracedSkyLighting;
 	RTAOIndirectStrength = state.RTAOIndirectStrength;
 	RTAOIndirectFloor = state.RTAOIndirectFloor;
 	RTAODirectContactStrength = state.RTAODirectContactStrength;
 	SurfaceBounceStrength = state.SurfaceBounceStrength;
 	SurfaceBounceSaturation = state.SurfaceBounceSaturation;
-	SkyLightingStrength = state.SkyLightingStrength;
 	JitterScale = state.JitterScale;
 	TAASampleCount = state.TAASampleCount;
 	DLSSJitterPhaseScale = std::max(0.25f, state.DLSSJitterPhaseScale);
@@ -8161,13 +8281,6 @@ void Corona::ApplyRenderFrameSourceState(const RenderFrameSourceState& state)
 	RTAOViewParam.Power = state.RTAOPower;
 	RTAOViewParam.NormalBias = state.RTAONormalBias;
 	RTAOViewParam.SampleCount = state.RTAOSampleCount;
-	RTSkyLightingViewParam.RayLength = state.SkyLightingRayLength;
-	RTSkyLightingViewParam.NormalBias = state.SkyLightingNormalBias;
-	RTSkyLightingViewParam.SampleCount = state.SkyLightingSampleCount;
-	RTSkyLightingViewParam.SkyUpBias = state.SkyLightingUpBias;
-	RTSkyLightingViewParam.SkyDirectionPower = state.SkyLightingDirectionPower;
-	RTSkyLightingViewParam.SkyMinWorldY = state.SkyLightingMinWorldY;
-	RTSkyLightingViewParam.SkyMaxSampleAttempts = state.SkyLightingMaxSampleAttempts;
 	ScreenProbeGICB.ProbeSpacing = state.ScreenProbeSpacing;
 	ScreenProbeGICB.GatherRadius = state.ScreenProbeGatherRadius;
 	RTScreenProbeGIViewParam.RaysPerProbe = state.ScreenProbeRaysPerProbe;
@@ -8220,14 +8333,11 @@ void Corona::SyncCurrentLightingSettingsToFrameSourceState()
 		state.bEnableDirectDiffuse = bEnableDirectDiffuse;
 		state.bEnableDirectSpecular = bEnableDirectSpecular;
 		state.bEnableRTAO = bEnableRTAO;
-		state.bEnableSkyLighting = bEnableSkyLighting;
-		state.bEnableRayTracedSkyLighting = bEnableRayTracedSkyLighting;
 		state.RTAOIndirectStrength = RTAOIndirectStrength;
 		state.RTAOIndirectFloor = RTAOIndirectFloor;
 		state.RTAODirectContactStrength = RTAODirectContactStrength;
 		state.SurfaceBounceStrength = SurfaceBounceStrength;
 		state.SurfaceBounceSaturation = SurfaceBounceSaturation;
-		state.SkyLightingStrength = SkyLightingStrength;
 		state.SkyColorTop = SkyColorTop;
 		state.SkyColorBottom = SkyColorBottom;
 		state.SkyIntensity = SkyIntensity;
@@ -8240,13 +8350,6 @@ void Corona::SyncCurrentLightingSettingsToFrameSourceState()
 		state.RTAOPower = RTAOViewParam.Power;
 		state.RTAONormalBias = RTAOViewParam.NormalBias;
 		state.RTAOSampleCount = RTAOViewParam.SampleCount;
-		state.SkyLightingRayLength = RTSkyLightingViewParam.RayLength;
-		state.SkyLightingNormalBias = RTSkyLightingViewParam.NormalBias;
-		state.SkyLightingSampleCount = RTSkyLightingViewParam.SampleCount;
-		state.SkyLightingUpBias = RTSkyLightingViewParam.SkyUpBias;
-		state.SkyLightingDirectionPower = RTSkyLightingViewParam.SkyDirectionPower;
-		state.SkyLightingMinWorldY = RTSkyLightingViewParam.SkyMinWorldY;
-		state.SkyLightingMaxSampleAttempts = RTSkyLightingViewParam.SkyMaxSampleAttempts;
 		state.ScreenProbeSpacing = ScreenProbeGICB.ProbeSpacing;
 		state.ScreenProbeGatherRadius = ScreenProbeGICB.GatherRadius;
 		state.ScreenProbeRaysPerProbe = RTScreenProbeGIViewParam.RaysPerProbe;
@@ -8383,12 +8486,9 @@ void Corona::ApplyFrameSourceRenderSync(const RenderFrameDelta& delta)
 		 oldState.bEnableRTReflectionSER != newState.bEnableRTReflectionSER ||
 		 oldState.bEnableSpecularGI != newState.bEnableSpecularGI ||
 		 oldState.bEnableRTAO != newState.bEnableRTAO ||
-		 oldState.bEnableSkyLighting != newState.bEnableSkyLighting ||
-		 oldState.bEnableRayTracedSkyLighting != newState.bEnableRayTracedSkyLighting ||
 		 oldState.bEnablePrefilteredEnvSpecular != newState.bEnablePrefilteredEnvSpecular ||
 		 oldState.ShadowSampleCount != newState.ShadowSampleCount ||
 		 oldState.RTAOSampleCount != newState.RTAOSampleCount ||
-		 oldState.SkyLightingSampleCount != newState.SkyLightingSampleCount ||
 		 oldState.ScreenProbeSpacing != newState.ScreenProbeSpacing ||
 		 oldState.ScreenProbeGatherRadius != newState.ScreenProbeGatherRadius ||
 		 oldState.ScreenProbeRaysPerProbe != newState.ScreenProbeRaysPerProbe ||
@@ -8401,7 +8501,6 @@ void Corona::ApplyFrameSourceRenderSync(const RenderFrameDelta& delta)
 		 floatChanged(oldState.RTAODirectContactStrength, newState.RTAODirectContactStrength) ||
 		 floatChanged(oldState.SurfaceBounceStrength, newState.SurfaceBounceStrength) ||
 		 floatChanged(oldState.SurfaceBounceSaturation, newState.SurfaceBounceSaturation) ||
-		 floatChanged(oldState.SkyLightingStrength, newState.SkyLightingStrength) ||
 		 floatChanged(oldState.SkyIntensity, newState.SkyIntensity) ||
 		 floatChanged(oldState.PrefilteredEnvRoughnessThreshold, newState.PrefilteredEnvRoughnessThreshold) ||
 		 floatChanged(oldState.PrefilteredEnvRoughnessFade, newState.PrefilteredEnvRoughnessFade) ||
@@ -8409,11 +8508,6 @@ void Corona::ApplyFrameSourceRenderSync(const RenderFrameDelta& delta)
 		 floatChanged(oldState.RTAORadius, newState.RTAORadius) ||
 		 floatChanged(oldState.RTAOPower, newState.RTAOPower) ||
 		 floatChanged(oldState.RTAONormalBias, newState.RTAONormalBias) ||
-		 floatChanged(oldState.SkyLightingRayLength, newState.SkyLightingRayLength) ||
-		 floatChanged(oldState.SkyLightingNormalBias, newState.SkyLightingNormalBias) ||
-		 floatChanged(oldState.SkyLightingUpBias, newState.SkyLightingUpBias) ||
-		 floatChanged(oldState.SkyLightingDirectionPower, newState.SkyLightingDirectionPower) ||
-		 floatChanged(oldState.SkyLightingMinWorldY, newState.SkyLightingMinWorldY) ||
 		 floatChanged(oldState.ScreenProbeRawBlend, newState.ScreenProbeRawBlend) ||
 		 floatChanged(oldState.ScreenProbeResolveDepthWeight, newState.ScreenProbeResolveDepthWeight) ||
 		 floatChanged(oldState.ScreenProbeResolveNormalWeight, newState.ScreenProbeResolveNormalWeight) ||
@@ -8514,6 +8608,7 @@ void Corona::CollectSceneObjectRenderSync(RenderFrameDelta& delta)
 			objectDelta.DirtyBits = kSceneObjectDirtyAll;
 			objectDelta.Object = object;
 			objectDelta.Object.RenderDirtyBits = 0;
+			objectDelta.Object.bWorldBoundsCacheValid = false;
 			objectDelta.Handle = object.Handle;
 			delta.SceneObjectDeltas.push_back(std::move(objectDelta));
 			object.RenderDirtyBits = 0;
@@ -8547,6 +8642,7 @@ void Corona::CollectSceneObjectRenderSync(RenderFrameDelta& delta)
 		objectDelta.DirtyBits = it->RenderDirtyBits;
 		objectDelta.Object = *it;
 		objectDelta.Object.RenderDirtyBits = 0;
+		objectDelta.Object.bWorldBoundsCacheValid = false;
 		objectDelta.Handle = it->Handle;
 		delta.SceneObjectDeltas.push_back(std::move(objectDelta));
 		it->RenderDirtyBits = 0;
@@ -8559,6 +8655,7 @@ void Corona::ApplySceneObjectRenderSync(const RenderFrameDelta& delta)
 	if (delta.bFullSceneObjectSync)
 	{
 		RenderWorld.SceneObjects.clear();
+		MarkRenderWorldCullingIndexDirty();
 		bRayTracingSceneDirty = true;
 		bRayTracingTransformDirty = false;
 		bRayTracingBLASCacheResetPending = true;
@@ -8581,6 +8678,7 @@ void Corona::ApplySceneObjectRenderSync(const RenderFrameDelta& delta)
 			if (it != RenderWorld.SceneObjects.end())
 			{
 				RenderWorld.SceneObjects.erase(it);
+				MarkRenderWorldCullingIndexDirty();
 				bRayTracingBLASCacheResetPending = true;
 				MarkRayTracingSceneDirty();
 			}
@@ -8589,6 +8687,7 @@ void Corona::ApplySceneObjectRenderSync(const RenderFrameDelta& delta)
 
 		SceneObject object = objectDelta.Object;
 		object.RenderDirtyBits = 0;
+		object.bWorldBoundsCacheValid = false;
 		auto it = std::find_if(RenderWorld.SceneObjects.begin(), RenderWorld.SceneObjects.end(), [handle](const SceneObject& candidate)
 		{
 			return candidate.Handle == handle;
@@ -8597,6 +8696,7 @@ void Corona::ApplySceneObjectRenderSync(const RenderFrameDelta& delta)
 		if (it == RenderWorld.SceneObjects.end())
 		{
 			RenderWorld.SceneObjects.push_back(std::move(object));
+			MarkRenderWorldCullingIndexDirty();
 			MarkRayTracingSceneDirty();
 			continue;
 		}
@@ -8607,6 +8707,7 @@ void Corona::ApplySceneObjectRenderSync(const RenderFrameDelta& delta)
 			(objectDelta.DirtyBits & (kSceneObjectDirtyTransform | kSceneObjectDirtyMaterial)) != 0;
 
 		*it = std::move(object);
+		MarkRenderWorldCullingIndexDirty();
 		if (bRayTracingSceneRelevant)
 		{
 			bRayTracingBLASCacheResetPending = true;
@@ -8763,18 +8864,60 @@ void Corona::ApplyPendingRenderFrameDeltas()
 	}
 }
 
-void Corona::BuildPointLightRenderCandidates(std::vector<const PointLightState*>& outCandidates) const
+void Corona::BuildPointLightRenderCandidates(std::vector<const PointLightState*>& outCandidates, UINT32 maxCount) const
 {
 	struct Candidate
 	{
-		const PointLightState* Light = nullptr;
+		uint32_t Index = 0;
 		float Score = 0.0f;
 	};
 
-	std::vector<Candidate> candidates;
-	candidates.reserve(RenderWorld.PointLights.size());
+	auto mixHash = [](uint64_t& hash, uint64_t value)
+	{
+		hash ^= value + 0x9e3779b97f4a7c15ull + (hash << 6) + (hash >> 2);
+	};
+	auto mixFloat = [&](uint64_t& hash, float value)
+	{
+		uint32_t bits = 0;
+		std::memcpy(&bits, &value, sizeof(bits));
+		mixHash(hash, bits);
+	};
+
+	uint64_t candidateHash = 1469598103934665603ull;
+	mixHash(candidateHash, static_cast<uint64_t>(RenderWorld.PointLights.size()));
 	for (const PointLightState& pointLight : RenderWorld.PointLights)
 	{
+		mixHash(candidateHash, pointLight.Id);
+		mixHash(candidateHash, pointLight.bEnabled ? 1u : 0u);
+		mixFloat(candidateHash, pointLight.Radius);
+		mixFloat(candidateHash, pointLight.Color.r);
+		mixFloat(candidateHash, pointLight.Color.g);
+		mixFloat(candidateHash, pointLight.Color.b);
+		mixFloat(candidateHash, pointLight.Intensity);
+	}
+
+	const uint32_t copyLimit = std::min<uint32_t>(
+		maxCount,
+		static_cast<uint32_t>(RenderWorld.PointLightCandidateCacheIndices.size()));
+	if (RenderWorld.bPointLightCandidateCacheValid &&
+		RenderWorld.PointLightCandidateCacheHash == candidateHash)
+	{
+		outCandidates.clear();
+		outCandidates.reserve(copyLimit);
+		for (uint32_t i = 0; i < copyLimit; ++i)
+		{
+			const uint32_t pointLightIndex = RenderWorld.PointLightCandidateCacheIndices[i];
+			if (pointLightIndex < RenderWorld.PointLights.size())
+				outCandidates.push_back(&RenderWorld.PointLights[pointLightIndex]);
+		}
+		return;
+	}
+
+	std::vector<Candidate> candidates;
+	candidates.reserve(RenderWorld.PointLights.size());
+	for (uint32_t pointLightIndex = 0; pointLightIndex < RenderWorld.PointLights.size(); ++pointLightIndex)
+	{
+		const PointLightState& pointLight = RenderWorld.PointLights[pointLightIndex];
 		if (!pointLight.bEnabled || pointLight.Intensity <= 0.0f)
 			continue;
 
@@ -8787,24 +8930,35 @@ void Corona::BuildPointLightRenderCandidates(std::vector<const PointLightState*>
 		float score = luma * radius * radius;
 		if (!std::isfinite(score) || score <= 0.0f)
 			score = luma;
-		candidates.push_back({ &pointLight, score });
+		candidates.push_back({ pointLightIndex, score });
 	}
 
-	std::stable_sort(candidates.begin(), candidates.end(), [](const Candidate& a, const Candidate& b)
+	std::stable_sort(candidates.begin(), candidates.end(), [&](const Candidate& a, const Candidate& b)
 	{
 		if (a.Score != b.Score)
 			return a.Score > b.Score;
-		const UINT32 aId = a.Light ? a.Light->Id : 0;
-		const UINT32 bId = b.Light ? b.Light->Id : 0;
+		const UINT32 aId = a.Index < RenderWorld.PointLights.size() ? RenderWorld.PointLights[a.Index].Id : 0;
+		const UINT32 bId = b.Index < RenderWorld.PointLights.size() ? RenderWorld.PointLights[b.Index].Id : 0;
 		return aId < bId;
 	});
 
-	outCandidates.clear();
-	outCandidates.reserve(candidates.size());
+	RenderWorld.PointLightCandidateCacheIndices.clear();
+	RenderWorld.PointLightCandidateCacheIndices.reserve(candidates.size());
 	for (const Candidate& candidate : candidates)
+		RenderWorld.PointLightCandidateCacheIndices.push_back(candidate.Index);
+	RenderWorld.PointLightCandidateCacheHash = candidateHash;
+	RenderWorld.bPointLightCandidateCacheValid = true;
+
+	const uint32_t rebuiltCopyLimit = std::min<uint32_t>(
+		maxCount,
+		static_cast<uint32_t>(RenderWorld.PointLightCandidateCacheIndices.size()));
+	outCandidates.clear();
+	outCandidates.reserve(rebuiltCopyLimit);
+	for (uint32_t i = 0; i < rebuiltCopyLimit; ++i)
 	{
-		if (candidate.Light)
-			outCandidates.push_back(candidate.Light);
+		const uint32_t pointLightIndex = RenderWorld.PointLightCandidateCacheIndices[i];
+		if (pointLightIndex < RenderWorld.PointLights.size())
+			outCandidates.push_back(&RenderWorld.PointLights[pointLightIndex]);
 	}
 }
 
@@ -8844,11 +8998,11 @@ void Corona::FillPointLightParams(PointLightParam* outPointLights, UINT32& outPo
 		return;
 
 	std::vector<const PointLightState*> pointLightCandidates;
-	BuildPointLightRenderCandidates(pointLightCandidates);
+	BuildPointLightRenderCandidates(pointLightCandidates, maxCount);
 	for (const PointLightState* pointLightPtr : pointLightCandidates)
 	{
 		if (!pointLightPtr || outPointLightCount >= maxCount)
-			continue;
+			break;
 
 		outPointLights[outPointLightCount++] = BuildPointLightParam(*pointLightPtr);
 	}
@@ -8864,35 +9018,8 @@ void Corona::BuildReSTIRSharedPointLights(std::vector<const PointLightState*>& o
 	// top-N here by camera-INDEPENDENT emitted power (luma * radius²) instead, then
 	// order the kept set by stable light Id so the bit/index meaning is fixed for the
 	// GI mask writer, the ReSTIR shadow candidates, and the ReSTIR lighting feed.
-	struct Ranked { const PointLightState* Light; float Power; };
-	std::vector<Ranked> ranked;
-	ranked.reserve(RenderWorld.PointLights.size());
-	for (const PointLightState& pl : RenderWorld.PointLights)
-	{
-		if (!pl.bEnabled || pl.Intensity <= 0.0f)
-			continue;
-		const float radius = std::max(pl.Radius, 0.01f);
-		const float colorLuma =
-			std::max(0.0f, 0.2126f * pl.Color.r + 0.7152f * pl.Color.g + 0.0722f * pl.Color.b);
-		const float power = colorLuma * std::max(0.0f, pl.Intensity) * radius * radius;
-		ranked.push_back({ &pl, power });
-	}
-	std::stable_sort(ranked.begin(), ranked.end(),
-		[](const Ranked& a, const Ranked& b)
-		{
-			if (a.Power != b.Power)
-				return a.Power > b.Power;
-			const UINT32 aId = a.Light ? a.Light->Id : 0u;
-			const UINT32 bId = b.Light ? b.Light->Id : 0u;
-			return aId < bId;
-		});
-	if (ranked.size() > MaxDiffuseGIPointLights)
-		ranked.resize(MaxDiffuseGIPointLights); // top-N by camera-independent power
-
 	outLights.clear();
-	outLights.reserve(ranked.size());
-	for (const Ranked& r : ranked)
-		outLights.push_back(r.Light);
+	BuildPointLightRenderCandidates(outLights, MaxDiffuseGIPointLights);
 	// Stable Id order for a fixed bit/index across frames and across the GI->shadow
 	// frame boundary.
 	std::stable_sort(outLights.begin(), outLights.end(),
@@ -8911,7 +9038,7 @@ void Corona::FillPointLightParamsFromList(PointLightParam* outPointLights, UINT3
 	for (const PointLightState* pointLightPtr : lights)
 	{
 		if (!pointLightPtr || outPointLightCount >= maxCount)
-			continue;
+			break;
 		outPointLights[outPointLightCount++] = BuildPointLightParam(*pointLightPtr);
 	}
 }
@@ -9522,7 +9649,7 @@ void Corona::LoadPipeline()
 	if (bCommandLineRenderBackendOverrideSet && CommandLineRenderBackendAPI == ERenderBackendAPI::Vulkan)
 	{
 		AppendCpuRuntimeTrace(L"[LoadPipeline] begin Vulkan path");
-		ConfigureVulkanImplicitLayerPolicy();
+		ConfigureVulkanImplicitLayerPolicy(bVulkanCaptureSafeMode, bVulkanAllowImplicitLayers);
 		renderBackend = CreateRenderBackend(ERenderBackendAPI::Vulkan);
 		dx12_rhi = nullptr;
 		if (!renderBackend)
@@ -11580,9 +11707,6 @@ void Corona::LoadAssets()
 
 		NAME_D3D12_OBJECT(AmbientOcclusionBuffer->resource);
 
-		SkyLightingBuffer = createTexture2D(ETextureFormat::RGBA16Float, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1, glm::vec4(0.0f, 0.0f, 0.0f, 1.0f));
-
-		NAME_D3D12_OBJECT(SkyLightingBuffer->resource);
 		AppendCpuRuntimeTrace(L"[LoadAssets] after shadow buffers");
 
 		// refleciton result
@@ -13087,26 +13211,51 @@ void Corona::DrawRuntimeFrameOverlay()
 	drawList->AddText(ImVec2(fpsTextPos.x + 1.0f, fpsTextPos.y + 1.0f), IM_COL32(0, 0, 0, 180), fpsText);
 	drawList->AddText(fpsTextPos, IM_COL32(255, 255, 255, 235), fpsText);
 
-	if (!bShowFrameTimingOverlay)
-		return;
+	auto drawTextPanel = [&](const std::string& text, const ImVec2& textPos, ImU32 textColor)
+	{
+		if (text.empty())
+			return ImVec2(0.0f, 0.0f);
+		const char* textBegin = text.c_str();
+		const char* textEnd = textBegin + text.size();
+		const ImVec2 textSize = ImGui::CalcTextSize(textBegin, textEnd, false);
+		const float padding = 8.0f;
+		const ImVec2 panelMin(textPos.x - padding, textPos.y - padding);
+		const ImVec2 panelMax(
+			std::min(displaySize.x - 8.0f, textPos.x + textSize.x + padding),
+			std::min(displaySize.y - 8.0f, textPos.y + textSize.y + padding));
+		drawList->AddRectFilled(panelMin, panelMax, IM_COL32(5, 7, 9, 178), 4.0f);
+		drawList->AddRect(panelMin, panelMax, IM_COL32(210, 235, 245, 70), 4.0f, 0, 1.0f);
+		drawList->AddText(ImVec2(textPos.x + 1.0f, textPos.y + 1.0f), IM_COL32(0, 0, 0, 180), textBegin, textEnd);
+		drawList->AddText(textPos, textColor, textBegin, textEnd);
+		return textSize;
+	};
 
-	RebuildFrameTimingOverlayTextIfStale();
-	if (CachedFrameTimingOverlayText.empty())
-		return;
+	ImVec2 timingTextSize(0.0f, 0.0f);
+	if (bShowFrameTimingOverlay)
+	{
+		RebuildFrameTimingOverlayTextIfStale();
+		timingTextSize = drawTextPanel(
+			CachedFrameTimingOverlayText,
+			ImVec2(10.0f, 30.0f),
+			IM_COL32(190, 235, 255, 235));
+	}
 
-	const ImVec2 timingTextPos(10.0f, 30.0f);
-	const char* timingText = CachedFrameTimingOverlayText.c_str();
-	const char* timingTextEnd = timingText + CachedFrameTimingOverlayText.size();
-	const ImVec2 textSize = ImGui::CalcTextSize(timingText, timingTextEnd, false);
-	const float padding = 8.0f;
-	const ImVec2 panelMin(timingTextPos.x - padding, timingTextPos.y - padding);
-	const ImVec2 panelMax(
-		std::min(displaySize.x - 8.0f, timingTextPos.x + textSize.x + padding),
-		std::min(displaySize.y - 8.0f, timingTextPos.y + textSize.y + padding));
-	drawList->AddRectFilled(panelMin, panelMax, IM_COL32(5, 7, 9, 178), 4.0f);
-	drawList->AddRect(panelMin, panelMax, IM_COL32(210, 235, 245, 70), 4.0f, 0, 1.0f);
-	drawList->AddText(ImVec2(timingTextPos.x + 1.0f, timingTextPos.y + 1.0f), IM_COL32(0, 0, 0, 180), timingText, timingTextEnd);
-	drawList->AddText(timingTextPos, IM_COL32(190, 235, 255, 235), timingText, timingTextEnd);
+	if (bShowCullingTextOverlay)
+	{
+		RebuildCullingOverlayTextIfStale();
+		const bool bPlaceBesideTiming =
+			bShowFrameTimingOverlay &&
+			timingTextSize.x > 0.0f &&
+			displaySize.x > timingTextSize.x + 620.0f;
+		const ImVec2 cullingTextPos =
+			bPlaceBesideTiming ?
+			ImVec2(10.0f + timingTextSize.x + 34.0f, 30.0f) :
+			ImVec2(10.0f, bShowFrameTimingOverlay ? 30.0f + timingTextSize.y + 26.0f : 30.0f);
+		drawTextPanel(
+			CachedCullingOverlayText,
+			cullingTextPos,
+			IM_COL32(225, 245, 205, 235));
+	}
 }
 
 void Corona::InitBlueNoiseTexture()
@@ -13425,7 +13574,7 @@ void Corona::BuildRenderFrameDerivedState(const RenderFrameSourceState* sourceSt
 		ApplyRenderFrameSourceState(*sourceState);
 
 	const float effectiveNear = std::max(0.001f, FiniteFloatOr(Near, 10.0f));
-	const float effectiveFar = std::max(effectiveNear + 1.0f, FiniteFloatOr(Far, 20000.0f));
+	const float effectiveFar = std::max(effectiveNear + 1.0f, FiniteFloatOr(Far, 500000.0f));
 	const float effectiveFov = FiniteClampedOr(Fov, 0.8f, 0.05f, glm::pi<float>() - 0.05f);
 	const float effectiveAspectRatio = std::max(0.001f, FiniteFloatOr(m_aspectRatio, 16.0f / 9.0f));
 	glm::vec3 debugCameraPosition(0.0f);
@@ -13589,13 +13738,6 @@ void Corona::BuildRenderFrameDerivedState(const RenderFrameSourceState* sourceSt
 	const float lightDirT = 0.5f * (RenderFrameNormalizedLightDir.y + 1.0f);
 	RenderFrameLightColor = glm::mix(SkyColorBottom, SkyColorTop, lightDirT);
 	RenderFrameRayNoiseMode = static_cast<UINT32>(RayNoiseMode);
-	// Keep the diffuse-GI buffer as surface-bounce lighting only. Sky/ambient
-	// lighting is composed separately in LightingPS; injecting sky on GI ray
-	// misses makes the diffuse GI input look like a nearly white constant and
-	// can double-count sky when simple sky ambient is enabled.
-	const bool bDiffuseGIIncludesSkyLighting = false;
-	RenderFrameDiffuseGISkyLightingEnabled = 0u;
-	RenderFrameDiffuseGISkyIntensity = 0.0f;
 	RenderFrameIndex = FrameCounter;
 
 	const bool indirectLightDirChanged = glm::length(RenderFrameNormalizedLightDir - PrevIndirectAccumLightDir) > 0.0001f;
@@ -13604,9 +13746,6 @@ void Corona::BuildRenderFrameDerivedState(const RenderFrameSourceState* sourceSt
 		glm::length(SkyColorTop - PrevIndirectSkyColorTop) > 0.0001f ||
 		glm::length(SkyColorBottom - PrevIndirectSkyColorBottom) > 0.0001f ||
 		abs(SkyIntensity - PrevIndirectSkyIntensity) > 0.0001f;
-	const bool indirectDiffuseGISkyLightingChanged =
-		bDiffuseGIIncludesSkyLighting != PrevIndirectDiffuseGISkyLightingEnabled;
-	const bool indirectSkyLightingStrengthChanged = false;
 	const bool indirectPrefilteredEnvChanged =
 		abs(PrefilteredEnvRoughnessThreshold - PrevIndirectPrefilteredEnvRoughnessThreshold) > 0.0001f ||
 		abs(PrefilteredEnvRoughnessFade - PrevIndirectPrefilteredEnvRoughnessFade) > 0.0001f ||
@@ -13615,8 +13754,6 @@ void Corona::BuildRenderFrameDerivedState(const RenderFrameSourceState* sourceSt
 		indirectLightDirChanged ||
 		indirectLightIntensityChanged ||
 		indirectSkyChanged ||
-		indirectDiffuseGISkyLightingChanged ||
-		indirectSkyLightingStrengthChanged ||
 		indirectPrefilteredEnvChanged;
 
 	if (indirectLightingChanged)
@@ -13635,8 +13772,6 @@ void Corona::BuildRenderFrameDerivedState(const RenderFrameSourceState* sourceSt
 		PrevIndirectSkyColorTop = SkyColorTop;
 		PrevIndirectSkyColorBottom = SkyColorBottom;
 		PrevIndirectSkyIntensity = SkyIntensity;
-		PrevIndirectSkyLightingStrength = SkyLightingStrength;
-		PrevIndirectDiffuseGISkyLightingEnabled = bDiffuseGIIncludesSkyLighting;
 		PrevIndirectPrefilteredEnvRoughnessThreshold = PrefilteredEnvRoughnessThreshold;
 		PrevIndirectPrefilteredEnvRoughnessFade = PrefilteredEnvRoughnessFade;
 		PrevIndirectPrefilteredEnvSpecularEnabled = bEnablePrefilteredEnvSpecular;
@@ -13658,7 +13793,7 @@ void Corona::DrawEditorMainWindowControls()
 	{
 		if (ImGui::Checkbox("Collision", &bEditorCameraCollisionEnabled))
 			AppendCpuRuntimeTrace(L"[editor-ui] camera collision=" + std::to_wstring(bEditorCameraCollisionEnabled ? 1 : 0));
-		if (ImGui::SliderFloat("Move speed", &EditorCameraMoveSpeed, 10.0f, 1500.0f, "%.0f"))
+		if (ImGui::SliderFloat("Move speed", &EditorCameraMoveSpeed, 10.0f, 4500.0f, "%.0f"))
 			m_camera.SetMoveSpeed(EditorCameraMoveSpeed);
 		ImGui::SliderFloat("Turn speed", &m_turnSpeed, 0.05f, glm::half_pi<float>() * 2.0f, "%.2f");
 		ImGui::Text("Position %.1f, %.1f, %.1f", m_camera.m_position.x, m_camera.m_position.y, m_camera.m_position.z);
@@ -13697,7 +13832,7 @@ void Corona::DrawEditorCameraOverlay()
 			AppendCpuRuntimeTrace(L"[editor-ui] camera collision=" + std::to_wstring(bEditorCameraCollisionEnabled ? 1 : 0));
 
 		ImGui::SetNextItemWidth(-1.0f);
-		if (ImGui::SliderFloat("Move Speed", &EditorCameraMoveSpeed, 10.0f, 1500.0f, "%.0f"))
+		if (ImGui::SliderFloat("Move Speed", &EditorCameraMoveSpeed, 10.0f, 4500.0f, "%.0f"))
 			m_camera.SetMoveSpeed(EditorCameraMoveSpeed);
 
 		ImGui::SetNextItemWidth(-1.0f);
@@ -14194,39 +14329,6 @@ void Corona::DrawEditorModeOverlay()
 					ImGui::TreePop();
 				}
 
-				if (RenderingMode == ERenderingMode::HYBRID && ImGui::TreeNodeEx("Sky Lighting", ImGuiTreeNodeFlags_DefaultOpen))
-				{
-					if (ImGui::Checkbox("Enable Sky Lighting", &bEnableSkyLighting))
-						bLightingChanged = true;
-					if (bEnableSkyLighting)
-					{
-						if (ImGui::SliderFloat("Sky Lighting Strength", &SkyLightingStrength, 0.0f, 1.0f, "%.2f"))
-							bLightingChanged = true;
-						if (ImGui::Checkbox("Ray Traced Sky Pass", &bEnableRayTracedSkyLighting))
-							bLightingChanged = true;
-						if (bEnableRayTracedSkyLighting)
-						{
-							int skySamples = static_cast<int>(RTSkyLightingViewParam.SampleCount);
-							if (ImGui::SliderInt("Sky Lighting Samples", &skySamples, 1, 32))
-							{
-								RTSkyLightingViewParam.SampleCount = static_cast<UINT32>(skySamples);
-								bLightingChanged = true;
-							}
-							if (ImGui::SliderFloat("Sky Lighting Ray Length", &RTSkyLightingViewParam.RayLength, 16.0f, 10000.0f, "%.1f"))
-								bLightingChanged = true;
-							if (ImGui::SliderFloat("Sky Lighting Normal Bias", &RTSkyLightingViewParam.NormalBias, 0.01f, 4.0f, "%.2f"))
-								bLightingChanged = true;
-							if (ImGui::SliderFloat("Sky Lighting Up Bias", &RTSkyLightingViewParam.SkyUpBias, 0.0f, 1.0f, "%.2f"))
-								bLightingChanged = true;
-							if (ImGui::SliderFloat("Sky Lighting Direction Power", &RTSkyLightingViewParam.SkyDirectionPower, 0.25f, 8.0f, "%.2f"))
-								bLightingChanged = true;
-							if (ImGui::SliderFloat("Sky Lighting Min World Y", &RTSkyLightingViewParam.SkyMinWorldY, -0.25f, 0.75f, "%.2f"))
-								bLightingChanged = true;
-						}
-					}
-					ImGui::TreePop();
-				}
-
 				if (ImGui::TreeNodeEx("Diffuse GI", ImGuiTreeNodeFlags_DefaultOpen))
 				{
 					if (ImGui::Checkbox("Enable Diffuse GI", &bEnableDiffuseGI)) bLightingChanged = true;
@@ -14503,18 +14605,6 @@ void Corona::DrawEditorModeOverlay()
 					if (ImGui::ColorEdit3("Sky Color Top", &SkyColorTop.x)) bLightingChanged = true;
 					if (ImGui::ColorEdit3("Sky Color Bottom", &SkyColorBottom.x)) bLightingChanged = true;
 					if (ImGui::SliderFloat("Sky Intensity", &SkyIntensity, 0.0f, 10.0f)) bLightingChanged = true;
-					if (RenderingMode == ERenderingMode::HYBRID)
-					{
-						if (ImGui::Checkbox("Sky Lighting", &bEnableSkyLighting))
-							bLightingChanged = true;
-						if (bEnableSkyLighting)
-						{
-							if (ImGui::SliderFloat("Sky Lighting Strength", &SkyLightingStrength, 0.0f, 1.0f, "%.2f"))
-								bLightingChanged = true;
-							if (ImGui::Checkbox("Ray Traced Sky Pass", &bEnableRayTracedSkyLighting))
-								bLightingChanged = true;
-						}
-					}
 				}
 
 				if (bLightingChanged)
@@ -14680,27 +14770,6 @@ void Corona::DrawEditorModeOverlay()
 							if (ImGui::SliderFloat("RTAO AO Strength", &RTAOIndirectStrength, 0.0f, 1.0f, "%.2f"))
 								bAdvancedLightingChanged = true;
 							if (ImGui::SliderFloat("RTAO AO Floor", &RTAOIndirectFloor, 0.0f, 1.0f, "%.2f"))
-								bAdvancedLightingChanged = true;
-							ImGui::TreePop();
-						}
-
-						if (bEnableSkyLighting && bEnableRayTracedSkyLighting && ImGui::TreeNodeEx("Ray Traced Sky Details"))
-						{
-							int skySamples = static_cast<int>(RTSkyLightingViewParam.SampleCount);
-							if (ImGui::SliderInt("Sky Lighting Samples", &skySamples, 1, 32))
-							{
-								RTSkyLightingViewParam.SampleCount = static_cast<UINT32>(skySamples);
-								bAdvancedLightingChanged = true;
-							}
-							if (ImGui::SliderFloat("Sky Lighting Ray Length", &RTSkyLightingViewParam.RayLength, 16.0f, 10000.0f, "%.1f"))
-								bAdvancedLightingChanged = true;
-							if (ImGui::SliderFloat("Sky Lighting Normal Bias", &RTSkyLightingViewParam.NormalBias, 0.01f, 4.0f, "%.2f"))
-								bAdvancedLightingChanged = true;
-							if (ImGui::SliderFloat("Sky Lighting Up Bias", &RTSkyLightingViewParam.SkyUpBias, 0.0f, 1.0f, "%.2f"))
-								bAdvancedLightingChanged = true;
-							if (ImGui::SliderFloat("Sky Lighting Direction Power", &RTSkyLightingViewParam.SkyDirectionPower, 0.25f, 8.0f, "%.2f"))
-								bAdvancedLightingChanged = true;
-							if (ImGui::SliderFloat("Sky Lighting Min World Y", &RTSkyLightingViewParam.SkyMinWorldY, -0.25f, 0.75f, "%.2f"))
 								bAdvancedLightingChanged = true;
 							ImGui::TreePop();
 						}
@@ -14936,7 +15005,6 @@ void Corona::OnRender()
 	bShadowOutputValidThisFrame = false;
 	bMobileShadowMapValidThisFrame = false;
 	bRTAOOutputValidThisFrame = false;
-	bSkyLightingOutputValidThisFrame = false;
 	if (bPendingTemporalHistoryClear)
 	{
 		ResetTemporalHistoryBuffers();
@@ -15095,17 +15163,6 @@ void Corona::OnRender()
 			EndGpuPassTiming(EGpuPass::RaytraceAO);
 		}
 
-		if (!bHybridDirectOnly &&
-			backendMaxSupportedHybridStage >= 7u &&
-			bRunLighting &&
-			bEnableSkyLighting &&
-			bEnableRayTracedSkyLighting)
-		{
-			BeginGpuPassTiming(EGpuPass::RaytraceSkyLighting);
-			RaytraceSkyLightingPass();
-			EndGpuPassTiming(EGpuPass::RaytraceSkyLighting);
-		}
-
 		if (!bHybridDirectOnly)
 		{
 			const bool bClearDisabledSpecularGI = hybridStage >= 3 && !bEnableSpecularGI;
@@ -15127,15 +15184,19 @@ void Corona::OnRender()
 				bAsyncShadowAOOverlapActive = true;
 				if (bAsyncRTAORequested)
 				{
-					BeginGpuPassMarker(renderBackend.get(), static_cast<UINT>(EGpuPass::RaytraceAO), "RaytraceAO async");
+					if (!IsVulkanCaptureSafeActive())
+						BeginGpuPassMarker(renderBackend.get(), static_cast<UINT>(EGpuPass::RaytraceAO), "RaytraceAO async");
 					RaytraceAOPass();
-					EndGpuPassMarker(renderBackend.get());
+					if (!IsVulkanCaptureSafeActive())
+						EndGpuPassMarker(renderBackend.get());
 				}
 				if (bAsyncShadowRequested)
 				{
-					BeginGpuPassMarker(renderBackend.get(), static_cast<UINT>(EGpuPass::RaytraceShadow), "RaytraceShadow async");
+					if (!IsVulkanCaptureSafeActive())
+						BeginGpuPassMarker(renderBackend.get(), static_cast<UINT>(EGpuPass::RaytraceShadow), "RaytraceShadow async");
 					RaytraceShadowPass();
-					EndGpuPassMarker(renderBackend.get());
+					if (!IsVulkanCaptureSafeActive())
+						EndGpuPassMarker(renderBackend.get());
 				}
 				renderBackend->EndAsyncRtRecordingAndResumeGraphics();
 			}
@@ -15573,12 +15634,6 @@ void Corona::OnRender()
 
 		} // end inner gate (bShowImgui || MOBILE)
 
-		// FPS is always drawn while imgui is active. Detailed frame timing
-		// stays opt-in and is rendered below the FPS line.
-#if !CORONA_PLATFORM_MOBILE
-		DrawRuntimeFrameOverlay();
-#endif
-
 		if (bEditorStartupMode)
 			DrawEditorCameraOverlay();
 
@@ -15590,76 +15645,6 @@ void Corona::OnRender()
 		bool show_demo_window = true;
 
 		//ImGui::ShowDemoWindow(&show_demo_window);
-
-		ImDrawList* foregroundDrawList = ImGui::GetForegroundDrawList();
-
-		if (bShowCullingTextOverlay)
-		{
-			char cullingText[320];
-			char terrainPart[80];
-			terrainPart[0] = '\0';
-			if (ActiveTerrain)
-			{
-				snprintf(terrainPart, sizeof(terrainPart),
-					"  |  Terrain %u / %u",
-					ActiveTerrain->GetLastVisibleChunkCount(),
-					ActiveTerrain->GetTotalChunkCount());
-			}
-			char grassPart[80];
-			grassPart[0] = '\0';
-			if (!ActiveGrassChunks.empty())
-			{
-				snprintf(grassPart, sizeof(grassPart),
-					"  |  Grass %u / %zu",
-					LastVisibleGrassChunkCount,
-					ActiveGrassChunks.size());
-			}
-			snprintf(
-				cullingText,
-				sizeof(cullingText),
-				"Rendered %llu / %llu objects  |  Frustum %llu  Occlusion %llu%s%s",
-				static_cast<unsigned long long>(GBufferLastVisibleObjectCount),
-				static_cast<unsigned long long>(GBufferLastTotalObjectCount),
-				static_cast<unsigned long long>(GBufferLastFrustumCulledObjectCount),
-				static_cast<unsigned long long>(GBufferLastOcclusionCulledObjectCount),
-				terrainPart,
-				grassPart);
-			const ImVec2 cullingTextPos(10.0f, 26.0f);
-			foregroundDrawList->AddText(ImVec2(cullingTextPos.x + 1.0f, cullingTextPos.y + 1.0f), IM_COL32(0, 0, 0, 180), cullingText);
-			foregroundDrawList->AddText(cullingTextPos, IM_COL32(190, 235, 255, 235), cullingText);
-
-			// Per-pass cost line (terrain/grass GPU + CPU recording ms).
-			// Avg uses the same rolling window as the Stats panel.
-			if (ActiveTerrain || !ActiveGrassChunks.empty())
-			{
-				char costText[256];
-				char terrainCost[120];
-				terrainCost[0] = '\0';
-				if (ActiveTerrain)
-				{
-					const UINT idx = static_cast<UINT>(EGpuPass::Terrain);
-					snprintf(terrainCost, sizeof(terrainCost),
-						"Terrain  gpu %.2f ms (avg %.2f)  cpu %.2f ms",
-						GpuPassLastTimeMs[idx], GpuPassAverageTimeMs[idx],
-						CpuPassLastTimeMs[idx]);
-				}
-				char grassCost[120];
-				grassCost[0] = '\0';
-				if (!ActiveGrassChunks.empty())
-				{
-					const UINT idx = static_cast<UINT>(EGpuPass::Grass);
-					snprintf(grassCost, sizeof(grassCost),
-						"%sGrass    gpu %.2f ms (avg %.2f)  cpu %.2f ms",
-						ActiveTerrain ? "  |  " : "",
-						GpuPassLastTimeMs[idx], GpuPassAverageTimeMs[idx],
-						CpuPassLastTimeMs[idx]);
-				}
-				snprintf(costText, sizeof(costText), "%s%s", terrainCost, grassCost);
-				const ImVec2 costTextPos(10.0f, 44.0f);
-				foregroundDrawList->AddText(ImVec2(costTextPos.x + 1.0f, costTextPos.y + 1.0f), IM_COL32(0, 0, 0, 180), costText);
-				foregroundDrawList->AddText(costTextPos, IM_COL32(190, 235, 255, 235), costText);
-			}
-		}
 
 		const auto luauStartTs = CpuClock::now();
 		if (bUseLuauImguiControls)
@@ -16349,43 +16334,6 @@ void Corona::OnRender()
 					ImGui::TreePop();
 				}
 
-				if (ImGui::TreeNodeEx("Sky Lighting", ImGuiTreeNodeFlags_DefaultOpen))
-				{
-					if (ImGui::Checkbox("Enable Sky Lighting", &bEnableSkyLighting))
-						bLightingChanged = true;
-					if (bEnableSkyLighting)
-					{
-						if (ImGui::SliderFloat("Sky Lighting Strength", &SkyLightingStrength, 0.0f, 1.0f, "%.2f"))
-							bLightingChanged = true;
-						if (ImGui::Checkbox("Ray Traced Sky Pass", &bEnableRayTracedSkyLighting))
-							bLightingChanged = true;
-						if (bEnableRayTracedSkyLighting)
-						{
-							int skySamples = static_cast<int>(RTSkyLightingViewParam.SampleCount);
-							if (ImGui::SliderInt("Sky Lighting Samples", &skySamples, 1, 32))
-							{
-								RTSkyLightingViewParam.SampleCount = static_cast<UINT32>(skySamples);
-								bLightingChanged = true;
-							}
-							if (ImGui::SliderFloat("Sky Lighting Ray Length", &RTSkyLightingViewParam.RayLength, 16.0f, 10000.0f, "%.1f"))
-								bLightingChanged = true;
-							if (ImGui::SliderFloat("Sky Lighting Normal Bias", &RTSkyLightingViewParam.NormalBias, 0.01f, 4.0f, "%.2f"))
-								bLightingChanged = true;
-							if (ImGui::SliderFloat("Sky Lighting Up Bias", &RTSkyLightingViewParam.SkyUpBias, 0.0f, 1.0f, "%.2f"))
-								bLightingChanged = true;
-							if (ImGui::SliderFloat("Sky Lighting Direction Power", &RTSkyLightingViewParam.SkyDirectionPower, 0.25f, 8.0f, "%.2f"))
-								bLightingChanged = true;
-							if (ImGui::SliderFloat("Sky Lighting Min World Y", &RTSkyLightingViewParam.SkyMinWorldY, -0.25f, 0.75f, "%.2f"))
-								bLightingChanged = true;
-						}
-						else
-						{
-							ImGui::TextDisabled("RT sky pass is skipped; simple sky ambient is composed separately.");
-						}
-					}
-					ImGui::TreePop();
-				}
-
 				if (ImGui::TreeNodeEx("Surface Bounce"))
 				{
 					if (ImGui::SliderFloat("Surface Bounce Strength", &SurfaceBounceStrength, 0.0f, 1.0f, "%.2f"))
@@ -16746,6 +16694,12 @@ if (ImGui::Button("Reset Accumulation"))
 			ImGui::End();
 		}
 		}
+
+#if !CORONA_PLATFORM_MOBILE
+		// Draw after every tool/editor window has emitted its ImGui commands so
+		// the performance overlays stay on top and use the latest toggled state.
+		DrawRuntimeFrameOverlay();
+#endif
 
 		const auto imguiStageBeforeRender = CpuClock::now();
 		tLegacyHud = ElapsedMilliseconds(imguiStageToolbox, imguiStageBeforeRender);
@@ -17186,6 +17140,7 @@ void Corona::OnDestroy()
 		return;
 	}
 	renderBackend->WaitForGpu();
+	ResetGBufferStaticDrawCache();
 	renderBackend->ShutdownGpuTimestampQueries();
 
 #if WITH_STREAMLINE

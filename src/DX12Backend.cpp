@@ -6639,15 +6639,53 @@ struct PipelineConfig
 	D3D12_STATE_SUBOBJECT subobject = {};
 };
 
+D3D12RTPipelineStateObject::~D3D12RTPipelineStateObject()
+{
+	ReleaseShaderTableResources();
+}
+
+void D3D12RTPipelineStateObject::ReleaseShaderTableResources()
+{
+	if (ShaderTableUpload && ShaderTableUploadMappedData)
+	{
+		ShaderTableUpload->Unmap(0, nullptr);
+	}
+	ShaderTableUploadMappedData = nullptr;
+	ShaderTable.Reset();
+	ShaderTableUpload.Reset();
+	ShaderTableEntrySize = 0;
+	ShaderTableSize = 0;
+	ShaderTableState = D3D12_RESOURCE_STATE_COPY_DEST;
+}
+
+const void* D3D12RTPipelineStateObject::GetShaderIdentifierCached(const std::wstring& shaderName)
+{
+	auto cached = ShaderIdentifierCache.find(shaderName);
+	if (cached != ShaderIdentifierCache.end())
+		return cached->second;
+
+	if (!RTPipelineProperties && RTPipelineState)
+	{
+		const HRESULT propsHr = RTPipelineState->QueryInterface(IID_PPV_ARGS(&RTPipelineProperties));
+		if (FAILED(propsHr) || !RTPipelineProperties)
+		{
+			AppendCpuRuntimeTrace(L"[DX12RT] QueryInterface(ID3D12StateObjectProperties) failed hr=" + FormatHexHRESULT(propsHr));
+			return nullptr;
+		}
+	}
+	if (!RTPipelineProperties)
+		return nullptr;
+
+	const void* identifier = RTPipelineProperties->GetShaderIdentifier(shaderName.c_str());
+	ShaderIdentifierCache.emplace(shaderName, identifier);
+	return identifier;
+}
+
 void D3D12RTPipelineStateObject::SetNumInstances(uint32_t numInstances)
 {
 	if (NumInstance != numInstances)
 	{
-		ShaderTable.Reset();
-		ShaderTableUpload.Reset();
-		ShaderTableEntrySize = 0;
-		ShaderTableSize = 0;
-		ShaderTableState = D3D12_RESOURCE_STATE_COPY_DEST;
+		ReleaseShaderTableResources();
 		MarkHitProgramBindingCacheDirty();
 	}
 	NumInstance = numInstances;
@@ -6687,6 +6725,7 @@ void D3D12RTPipelineStateObject::BindUAV(const string& shader, const string& nam
 		binding.BaseRegister = baseRegister;
 		binding.Schema = MakeLegacyRHIBindingDesc(name, RHIDescriptorKind::UAV, RHIResourceKind::Unknown, baseRegister, 1);
 
+		GlobalBindingIndexByName[name] = GlobalBinding.size();
 		GlobalBinding.push_back(binding);
 	}
 	else
@@ -6700,6 +6739,7 @@ void D3D12RTPipelineStateObject::BindUAV(const string& shader, const string& nam
 		binding.BaseRegister = baseRegister;
 		binding.Schema = MakeLegacyRHIBindingDesc(name, RHIDescriptorKind::UAV, RHIResourceKind::Unknown, baseRegister, 1);
 
+		bindingInfo.BindingIndexByName[name] = bindingInfo.Binding.size();
 		bindingInfo.Binding.push_back(binding);
 	}
 }
@@ -6724,6 +6764,7 @@ void D3D12RTPipelineStateObject::BindSRV(const string& shader, const string& nam
 		binding.BaseRegister = baseRegister;
 		binding.Schema = MakeLegacyRHIBindingDesc(name, RHIDescriptorKind::SRV, RHIResourceKind::Unknown, baseRegister, 1);
 
+		GlobalBindingIndexByName[name] = GlobalBinding.size();
 		GlobalBinding.push_back(binding);
 	}
 	else
@@ -6737,6 +6778,7 @@ void D3D12RTPipelineStateObject::BindSRV(const string& shader, const string& nam
 		binding.BaseRegister = baseRegister;
 		binding.Schema = MakeLegacyRHIBindingDesc(name, RHIDescriptorKind::SRV, RHIResourceKind::Unknown, baseRegister, 1);
 
+		bindingInfo.BindingIndexByName[name] = bindingInfo.Binding.size();
 		bindingInfo.Binding.push_back(binding);
 	}
 }
@@ -6763,6 +6805,7 @@ void D3D12RTPipelineStateObject::BindSampler(const string& shader, const string&
 		binding.BaseRegister = baseRegister;
 		binding.Schema = MakeLegacyRHIBindingDesc(name, RHIDescriptorKind::Sampler, RHIResourceKind::Sampler, baseRegister, 1);
 
+		GlobalBindingIndexByName[name] = GlobalBinding.size();
 		GlobalBinding.push_back(binding);
 	}
 	else
@@ -6776,6 +6819,7 @@ void D3D12RTPipelineStateObject::BindSampler(const string& shader, const string&
 		binding.BaseRegister = baseRegister;
 		binding.Schema = MakeLegacyRHIBindingDesc(name, RHIDescriptorKind::Sampler, RHIResourceKind::Sampler, baseRegister, 1);
 
+		bindingInfo.BindingIndexByName[name] = bindingInfo.Binding.size();
 		bindingInfo.Binding.push_back(binding);
 	}
 }
@@ -6802,6 +6846,7 @@ void D3D12RTPipelineStateObject::BindCBV(const string& shader, const string& nam
 		binding.cbSize = AlignConstantBufferSize(binding.sourceSize);
 		binding.Schema = MakeLegacyRHIBindingDesc(name, RHIDescriptorKind::CBV, RHIResourceKind::ConstantBuffer, baseRegister, 1, size);
 
+		GlobalBindingIndexByName[name] = GlobalBinding.size();
 		GlobalBinding.push_back(binding);
 	}
 	else
@@ -6817,6 +6862,7 @@ void D3D12RTPipelineStateObject::BindCBV(const string& shader, const string& nam
 		binding.cbSize = AlignConstantBufferSize(binding.sourceSize);
 		binding.Schema = MakeLegacyRHIBindingDesc(name, RHIDescriptorKind::CBV, RHIResourceKind::ConstantBuffer, baseRegister, 1, size);
 
+		bindingInfo.BindingIndexByName[name] = bindingInfo.Binding.size();
 		bindingInfo.Binding.push_back(binding);
 	}
 }
@@ -6987,8 +7033,15 @@ void D3D12RTPipelineStateObject::EndShaderTable()
 				AppendCpuRuntimeTrace(
 					L"[DX12RT] shader table allocation failed defaultHr=" + FormatHexHRESULT(defaultHr) +
 					L", uploadHr=" + FormatHexHRESULT(uploadHr));
-				ShaderTable.Reset();
-				ShaderTableUpload.Reset();
+				ReleaseShaderTableResources();
+				return;
+			}
+			D3D12_RANGE readRange = {};
+			const HRESULT mapHr = ShaderTableUpload->Map(0, &readRange, reinterpret_cast<void**>(&ShaderTableUploadMappedData));
+			if (FAILED(mapHr) || !ShaderTableUploadMappedData)
+			{
+				AppendCpuRuntimeTrace(L"[DX12RT] shader table upload persistent Map failed hr=" + FormatHexHRESULT(mapHr));
+				ReleaseShaderTableResources();
 				return;
 			}
 			ShaderTableState = D3D12_RESOURCE_STATE_COPY_DEST;
@@ -7005,18 +7058,14 @@ void D3D12RTPipelineStateObject::EndShaderTable()
 	// raygen : simple, it is just the begin of table
 	// miss : raygen + miss index * EntrySize
 	// hit : raygen + miss(N) + instanceIndex
-	uint8_t* pData = nullptr;
-	HRESULT hr = ShaderTableUpload->Map(0, nullptr, (void**)&pData);
-	if (FAILED(hr) || !pData)
+	uint8_t* pData = ShaderTableUploadMappedData;
+	if (!pData)
 	{
-		AppendCpuRuntimeTrace(L"[DX12RT] shader table upload Map failed hr=" + FormatHexHRESULT(hr));
+		AppendCpuRuntimeTrace(L"[DX12RT] shader table upload is not mapped");
 		return;
 	}
 
 	pData += ShaderTableSize * owner->CurrentFrameIndex;
-
-	ComPtr<ID3D12StateObjectProperties> RtsoProps;
-	RTPipelineState->QueryInterface(IID_PPV_ARGS(&RtsoProps));
 
 	uint8_t* pDataThis = pData;
 
@@ -7028,7 +7077,10 @@ void D3D12RTPipelineStateObject::EndShaderTable()
 		BindingInfo& bindingInfo = sb.second;
 		if (bindingInfo.Type == ShaderType::RAYGEN)
 		{
-			memcpy(pDataThis, RtsoProps->GetShaderIdentifier(bindingInfo.ShaderName.c_str()), D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES);
+			const void* shaderIdentifier = GetShaderIdentifierCached(bindingInfo.ShaderName);
+			if (!shaderIdentifier)
+				return;
+			memcpy(pDataThis, shaderIdentifier, D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES);
 			pDataThis += D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES;
 
 			for (auto& bd : bindingInfo.Binding)
@@ -7049,7 +7101,10 @@ void D3D12RTPipelineStateObject::EndShaderTable()
 		BindingInfo& bindingInfo = sb.second;
 		if (bindingInfo.Type == ShaderType::MISS)
 		{
-			memcpy(pDataThis, RtsoProps->GetShaderIdentifier(bindingInfo.ShaderName.c_str()), D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES);
+			const void* shaderIdentifier = GetShaderIdentifierCached(bindingInfo.ShaderName);
+			if (!shaderIdentifier)
+				return;
+			memcpy(pDataThis, shaderIdentifier, D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES);
 
 			LastIndex++;// multiple miss shader is available.
 
@@ -7066,7 +7121,10 @@ void D3D12RTPipelineStateObject::EndShaderTable()
 			map<UINT, HitProgramData>& HitProgram = VecHitGroup[iHitGroup].HitProgramBinding;
 			auto& HitProgramInfo = HitProgram[0];
 
-			memcpy(pDataThis, RtsoProps->GetShaderIdentifier(VecHitGroup[iHitGroup].name.c_str()), D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES);
+			const void* shaderIdentifier = GetShaderIdentifierCached(VecHitGroup[iHitGroup].name);
+			if (!shaderIdentifier)
+				return;
+			memcpy(pDataThis, shaderIdentifier, D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES);
 
 			pDataThis += D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES;
 
@@ -7091,7 +7149,10 @@ void D3D12RTPipelineStateObject::EndShaderTable()
 				map<UINT, HitProgramData>& HitProgram = VecHitGroup[iHitGroup].HitProgramBinding;
 				auto& HitProgramInfo = HitProgram[InstanceIndex];
 
-				memcpy(pDataThis, RtsoProps->GetShaderIdentifier(VecHitGroup[iHitGroup].name.c_str()), D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES);
+				const void* shaderIdentifier = GetShaderIdentifierCached(VecHitGroup[iHitGroup].name);
+				if (!shaderIdentifier)
+					return;
+				memcpy(pDataThis, shaderIdentifier, D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES);
 
 				pDataThis += D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES;
 
@@ -7105,9 +7166,6 @@ void D3D12RTPipelineStateObject::EndShaderTable()
 			}
 		}
 	}
-
-
-	ShaderTableUpload->Unmap(0, nullptr);
 	CommandList* commandList = ResolveCommandList(owner, nullptr);
 	if (commandList && ShaderTable && ShaderTableUpload)
 	{
@@ -7160,26 +7218,25 @@ void D3D12RTPipelineStateObject::SetUAVHandle(const string& shader, const string
 	{
 		if (shader == "global")
 		{
-			for (auto& bd : GlobalBinding)
+			const auto bindingIt = GlobalBindingIndexByName.find(bindingName);
+			if (bindingIt != GlobalBindingIndexByName.end() && bindingIt->second < GlobalBinding.size())
 			{
-				if (bd.name == bindingName)
-				{
-					bd.CPUHandle = cpuHandle;
-					bd.GPUHandle = uavHandle;
-				}
+				BindingData& bd = GlobalBinding[bindingIt->second];
+				bd.CPUHandle = cpuHandle;
+				bd.GPUHandle = uavHandle;
+				return;
 			}
 		}
 		else
 		{
 			BindingInfo& bi = ShaderBinding[shader];
-			for (auto& bd : bi.Binding)
+			const auto bindingIt = bi.BindingIndexByName.find(bindingName);
+			if (bindingIt != bi.BindingIndexByName.end() && bindingIt->second < bi.Binding.size())
 			{
-				if (bd.name == bindingName)
-				{
-					bd.CPUHandle = cpuHandle;
-					bd.GPUHandle = uavHandle;
-
-				}
+				BindingData& bd = bi.Binding[bindingIt->second];
+				bd.CPUHandle = cpuHandle;
+				bd.GPUHandle = uavHandle;
+				return;
 			}
 		}
 	}
@@ -7198,25 +7255,25 @@ void D3D12RTPipelineStateObject::SetSRVHandle(const string& shader, const string
 	{
 		if (shader == "global")
 		{
-			for (auto& bd : GlobalBinding)
+			const auto bindingIt = GlobalBindingIndexByName.find(bindingName);
+			if (bindingIt != GlobalBindingIndexByName.end() && bindingIt->second < GlobalBinding.size())
 			{
-				if (bd.name == bindingName)
-				{
-					bd.CPUHandle = cpuHandle;
-					bd.GPUHandle = srvHandle;
-				}
+				BindingData& bd = GlobalBinding[bindingIt->second];
+				bd.CPUHandle = cpuHandle;
+				bd.GPUHandle = srvHandle;
+				return;
 			}
 		}
 		else
 		{
 			BindingInfo& bi = ShaderBinding[shader];
-			for (auto& bd : bi.Binding)
+			const auto bindingIt = bi.BindingIndexByName.find(bindingName);
+			if (bindingIt != bi.BindingIndexByName.end() && bindingIt->second < bi.Binding.size())
 			{
-				if (bd.name == bindingName)
-				{
-					bd.CPUHandle = cpuHandle;
-					bd.GPUHandle = srvHandle;
-				}
+				BindingData& bd = bi.Binding[bindingIt->second];
+				bd.CPUHandle = cpuHandle;
+				bd.GPUHandle = srvHandle;
+				return;
 			}
 		}
 	}
@@ -7262,25 +7319,25 @@ void D3D12RTPipelineStateObject::SetSampler(const string& shader, const string& 
 	{
 		if (shader == "global")
 		{
-			for (auto& bd : GlobalBinding)
+			const auto bindingIt = GlobalBindingIndexByName.find(bindingName);
+			if (bindingIt != GlobalBindingIndexByName.end() && bindingIt->second < GlobalBinding.size())
 			{
-				if (bd.name == bindingName)
-				{
-					bd.CPUHandle = sampler->CpuHandle;
-					bd.GPUHandle = sampler->GpuHandle;
-				}
+				BindingData& bd = GlobalBinding[bindingIt->second];
+				bd.CPUHandle = sampler->CpuHandle;
+				bd.GPUHandle = sampler->GpuHandle;
+				return;
 			}
 		}
 		else
 		{
 			BindingInfo& bi = ShaderBinding[shader];
-			for (auto& bd : bi.Binding)
+			const auto bindingIt = bi.BindingIndexByName.find(bindingName);
+			if (bindingIt != bi.BindingIndexByName.end() && bindingIt->second < bi.Binding.size())
 			{
-				if (bd.name == bindingName)
-				{
-					bd.CPUHandle = sampler->CpuHandle;
-					bd.GPUHandle = sampler->GpuHandle;
-				}
+				BindingData& bd = bi.Binding[bindingIt->second];
+				bd.CPUHandle = sampler->CpuHandle;
+				bd.GPUHandle = sampler->GpuHandle;
+				return;
 			}
 		}
 	}
@@ -7302,32 +7359,30 @@ void D3D12RTPipelineStateObject::SetCBVValue(const string& shader, const string&
 		if (shader == "global")
 		{
 			bool bFound = false;
-			for (auto& bd : GlobalBinding)
+			const auto bindingIt = GlobalBindingIndexByName.find(bindingName);
+			if (bindingIt != GlobalBindingIndexByName.end() && bindingIt->second < GlobalBinding.size())
 			{
-				if (bd.name == bindingName)
-				{
-					auto Alloc = owner->GlobalCBRing->AllocGPUMemory(bd.cbSize);
-					UINT64 GPUAddr = std::get<0>(Alloc);
-					UINT8* pMapped = std::get<1>(Alloc);
+				BindingData& bd = GlobalBinding[bindingIt->second];
+				auto Alloc = owner->GlobalCBRing->AllocGPUMemory(bd.cbSize);
+				UINT64 GPUAddr = std::get<0>(Alloc);
+				UINT8* pMapped = std::get<1>(Alloc);
 
-					CopyConstantBufferData(pMapped, bd.cbSize, pData, bd.sourceSize);
+				CopyConstantBufferData(pMapped, bd.cbSize, pData, bd.sourceSize);
 
-					D3D12_CPU_DESCRIPTOR_HANDLE CpuHandle;
-					D3D12_GPU_DESCRIPTOR_HANDLE GpuHandle;
+				D3D12_CPU_DESCRIPTOR_HANDLE CpuHandle;
+				D3D12_GPU_DESCRIPTOR_HANDLE GpuHandle;
 
-					// ring is advanced at the begining of frame. so descriptors from multiple frame is not overlapped.
-					owner->GlobalDHRing->AllocDescriptor(CpuHandle, GpuHandle);
+				// ring is advanced at the begining of frame. so descriptors from multiple frame is not overlapped.
+				owner->GlobalDHRing->AllocDescriptor(CpuHandle, GpuHandle);
 
-					D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc = {};
-					cbvDesc.BufferLocation = GPUAddr;
-					cbvDesc.SizeInBytes = bd.cbSize;
-					owner->Device->CreateConstantBufferView(&cbvDesc, CpuHandle);
+				D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc = {};
+				cbvDesc.BufferLocation = GPUAddr;
+				cbvDesc.SizeInBytes = bd.cbSize;
+				owner->Device->CreateConstantBufferView(&cbvDesc, CpuHandle);
 
-					bd.CPUHandle = CpuHandle;
-					bd.GPUHandle = GpuHandle;
-				
-					bFound = true;
-				}
+				bd.CPUHandle = CpuHandle;
+				bd.GPUHandle = GpuHandle;
+				bFound = true;
 			}
 			assert(bFound == true);
 		}
@@ -7336,32 +7391,30 @@ void D3D12RTPipelineStateObject::SetCBVValue(const string& shader, const string&
 			bool bFound = false;
 
 			BindingInfo& bi = ShaderBinding[shader];
-			for (auto& bd : bi.Binding)
+			const auto bindingIt = bi.BindingIndexByName.find(bindingName);
+			if (bindingIt != bi.BindingIndexByName.end() && bindingIt->second < bi.Binding.size())
 			{
-				if (bd.name == bindingName)
-				{
-					auto Alloc = owner->GlobalCBRing->AllocGPUMemory(bd.cbSize);
-					UINT64 GPUAddr = std::get<0>(Alloc);
-					UINT8* pMapped = std::get<1>(Alloc);
+				BindingData& bd = bi.Binding[bindingIt->second];
+				auto Alloc = owner->GlobalCBRing->AllocGPUMemory(bd.cbSize);
+				UINT64 GPUAddr = std::get<0>(Alloc);
+				UINT8* pMapped = std::get<1>(Alloc);
 
-					CopyConstantBufferData(pMapped, bd.cbSize, pData, bd.sourceSize);
+				CopyConstantBufferData(pMapped, bd.cbSize, pData, bd.sourceSize);
 
-					D3D12_CPU_DESCRIPTOR_HANDLE CpuHandle;
-					D3D12_GPU_DESCRIPTOR_HANDLE GpuHandle;
+				D3D12_CPU_DESCRIPTOR_HANDLE CpuHandle;
+				D3D12_GPU_DESCRIPTOR_HANDLE GpuHandle;
 
-					// ring is advanced at the begining of frame. so descriptors from multiple frame is not overlapped.
-					owner->GlobalDHRing->AllocDescriptor(CpuHandle, GpuHandle);
+				// ring is advanced at the begining of frame. so descriptors from multiple frame is not overlapped.
+				owner->GlobalDHRing->AllocDescriptor(CpuHandle, GpuHandle);
 
-					D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc = {};
-					cbvDesc.BufferLocation = GPUAddr;
-					cbvDesc.SizeInBytes = bd.cbSize;
-					owner->Device->CreateConstantBufferView(&cbvDesc, CpuHandle);
+				D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc = {};
+				cbvDesc.BufferLocation = GPUAddr;
+				cbvDesc.SizeInBytes = bd.cbSize;
+				owner->Device->CreateConstantBufferView(&cbvDesc, CpuHandle);
 
-					bd.CPUHandle = CpuHandle;
-					bd.GPUHandle = GpuHandle;
-				
-					bFound = true;
-				}
+				bd.CPUHandle = CpuHandle;
+				bd.GPUHandle = GpuHandle;
+				bFound = true;
 			}
 			assert(bFound == true);
 		}

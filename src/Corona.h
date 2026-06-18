@@ -19,11 +19,13 @@
 #include <deque>
 #include <filesystem>
 #include <functional>
+#include <limits>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <thread>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "glm/glm.hpp"
@@ -144,7 +146,6 @@ private:
 		SpatialHashDeepSeed,
 		RaytraceShadow,
 		RaytraceAO,
-		RaytraceSkyLighting,
 		RaytraceReflection,
 		RaytraceGI,
 		ScreenProbeGI,
@@ -203,11 +204,28 @@ private:
 
 	enum class ERtRecordPhase : UINT32
 	{
-		BeginScene = 0,
+		Prepare = 0,
+		BuildGraph,
+		BeginScene,
 		BindResources,
 		BindHitPrograms,
 		EndShaderTable,
 		ApplyDispatch,
+		RenderGraph,
+		Count
+	};
+
+	enum class ERtProfilePass : UINT32
+	{
+		Shadow = 0,
+		AO,
+		Reflection,
+		SimpleGI,
+		ScreenProbeGI,
+		SpatialHashSeed,
+		SpatialHashTrace,
+		PathTracing,
+		PathTracingCompaction,
 		Count
 	};
 
@@ -216,6 +234,7 @@ private:
 	static constexpr UINT32 RenderCommandPhaseCount = static_cast<UINT32>(ERenderCommandPhase::Count);
 	static constexpr UINT32 SceneFlushPhaseCount = static_cast<UINT32>(ESceneFlushPhase::Count);
 	static constexpr UINT32 RtRecordPhaseCount = static_cast<UINT32>(ERtRecordPhase::Count);
+	static constexpr UINT32 RtProfilePassCount = static_cast<UINT32>(ERtProfilePass::Count);
 	static constexpr UINT32 GpuQueriesPerPass = 2;
 	static constexpr UINT32 MobileShadowMapResolution = 512;
 	static constexpr UINT32 MobileShadowNearbyCasterCount = 10;
@@ -294,7 +313,6 @@ private:
 	shared_ptr<Texture> ShadowBufferPreSpatial;
 	shared_ptr<Texture> ShadowReservoirMBufferPreSpatial;
 	shared_ptr<Texture> AmbientOcclusionBuffer;
-	shared_ptr<Texture> SkyLightingBuffer;
 	glm::mat4x4 MobileShadowViewProjMat = glm::mat4x4(1.0f);
 	bool bMobileShadowMapValidThisFrame = false;
 	std::vector<uint32_t> MobileShadowCasterObjectIndices;
@@ -671,10 +689,6 @@ private:
 		// (cells start growing beyond it), zw spare. Bounds the working set so far
 		// vistas don't exhaust the cache. Shared by SH and oct (hash-level feature).
 		glm::vec4 SpatialHashLevelParams = glm::vec4(0.0f, 600.0f, 0.0f, 0.0f);
-		// Sky-ambient fallback for cells with no cached GI (uncached / starved oct
-		// slots): rgb = pre-scaled ambient radiance (E/pi units), used instead of
-		// black. a unused. Computed from sky colour * intensity * strength.
-		glm::vec4 SpatialHashSkyAmbient = glm::vec4(0.0f);
 	};
 
 	SpatialHashGIConstant SpatialHashGICB;
@@ -777,6 +791,7 @@ private:
 	RTShadowViewParamCB RTShadowViewParam;
 	
 	shared_ptr<RTPipelineStateObject> PSO_RT_SHADOW;
+	shared_ptr<ComputePipelineStateObject> PSO_SHADOW_RAYQUERY;
 	// Phase 3 spatial-reuse compute PSO. Uses inline RT (RayQuery) so
 	// it can trace fresh visibility for the spatially-chosen light.
 	// Reads the PreSpatial reservoirs; writes the final ShadowBuffer.
@@ -806,34 +821,6 @@ private:
 	RTAOViewParamCB RTAOViewParam;
 	shared_ptr<RTPipelineStateObject> PSO_RT_AO;
 	bool bRTAOOutputValidThisFrame = false;
-
-	struct RTSkyLightingViewParamCB
-	{
-		glm::mat4x4 ViewMatrix;
-		glm::mat4x4 InvViewMatrix;
-		glm::mat4x4 ProjMatrix;
-		glm::mat4x4 InvProjMatrix;
-		glm::vec4 ProjectionParams;
-		glm::vec2 RTSize;
-		float RayLength = 10000.0f;
-		float NormalBias = 0.5f;
-		glm::vec3 SkyColorTop = glm::vec3(1.0f);
-		float SkyIntensity = 3.0f;
-		glm::vec3 SkyColorBottom = glm::vec3(0.8f);
-		UINT32 SampleCount = 32;
-		UINT32 FrameCounter = 0;
-		UINT32 NoiseMode = 1;
-		UINT32 BlueNoiseOffsetStride = 1;
-		float SkyUpBias = 0.65f;
-		float SkyDirectionPower = 2.25f;
-		float SkyMinWorldY = 0.02f;
-		UINT32 SkyMaxSampleAttempts = 4;
-		UINT32 _padding = 0;
-	};
-
-	RTSkyLightingViewParamCB RTSkyLightingViewParam;
-	shared_ptr<RTPipelineStateObject> PSO_RT_SKY_LIGHTING;
-	bool bSkyLightingOutputValidThisFrame = false;
 
 	// RT reflection
 	struct RTReflectionViewParamCB
@@ -889,18 +876,17 @@ private:
 		UINT32 BlueNoiseOffsetStride = 1;
 		float ViewSpreadAngle;
 		UINT32 NoiseMode = 1;
-		UINT32 bIncludeSkyLighting = 0;
 		UINT32 GISamplesPerPixel = 1; // local light samples at the first diffuse GI hit
-		glm::vec3 SkyColorTop;
-		float SkyIntensity;
-		glm::vec3 SkyColorBottom;
-		float _padding;
+		UINT32 _paddingAfterGISamples = 0;
 		glm::vec3 LightColor;
-		float _padding2;
+		float _padding;
 		PointLightParam PointLights[MaxDiffuseGIPointLights];
 		UINT32 PointLightCount = 0;
 		glm::vec3 PointLightPadding = glm::vec3(0.0f);
 	};
+
+	static_assert((offsetof(RTGIViewParamCB, LightColor) % 16) == 0, "RTGIViewParamCB LightColor must match HLSL cbuffer packing.");
+	static_assert((offsetof(RTGIViewParamCB, PointLights) % 16) == 0, "RTGIViewParamCB PointLights must match HLSL cbuffer packing.");
 
 	RTGIViewParamCB RTGIViewParam;
 	shared_ptr<RTPipelineStateObject> PSO_RT_GI;
@@ -929,13 +915,8 @@ private:
 		float TemporalAlpha = 0.06f;
 		float HistoryDepthWeight = 32.0f;
 		float HistoryNormalWeight = 32.0f;
-		UINT32 bIncludeSkyLighting = 0;
-		glm::vec3 SkyColorTop;
-		float SkyIntensity = 3.0f;
-		glm::vec3 SkyColorBottom;
-		float _padding = 0.0f;
 		glm::vec3 LightColor;
-		float _padding2 = 0.0f;
+		float _padding = 0.0f;
 		UINT32 LightingBootstrap = 0;
 		UINT32 BootstrapRays = 100;
 		UINT32 SHCoefficientCount = 4;
@@ -962,14 +943,9 @@ private:
 		float ViewSpreadAngle = 0.0f;
 		float RayBias = 0.5f;
 		float CellSize = 48.0f;
-		glm::vec3 SkyColorTop;
-		float SkyIntensity = 3.0f;
-		glm::vec3 SkyColorBottom;
-		float _padding = 0.0f;
 		glm::vec3 LightColor;
-		float _padding2 = 0.0f;
+		float _padding = 0.0f;
 		UINT32 ActiveCellCapacity = SpatialHashGIActiveCellCapacity;
-		UINT32 bIncludeSkyLighting = 0;
 		UINT32 HashEntryMask = SpatialHashGIEntryCount - 1u;
 		UINT32 MaxProbeSteps = 8;
 		// 0 = SH4 trace, 1 = octahedral per-ray trace, 2 = HL2 3-lobe trace.
@@ -1094,6 +1070,10 @@ private:
 	UINT32 PathTracingPointLightBufferHash = 0xFFFFFFFFu;
 	std::shared_ptr<Buffer> RTMaterialRecordBuffer;
 	uint64_t RTMaterialRecordHash = 0;
+	uint64_t RTMaterialRecordSourceHash = 0;
+	uint64_t RTMaterialRecordInstanceRevision = 0;
+	UINT32 RTMaterialRecordValidatedFrameCounter = 0;
+	const IRenderBackend* RTMaterialRecordBackend = nullptr;
 	std::shared_ptr<Buffer> RTGeometryRecordBuffer;
 	uint64_t RTGeometryRecordHash = 0;
 	UINT PathTracingWriteIndex = 0;
@@ -1127,8 +1107,6 @@ private:
 	glm::vec3 PrevIndirectSkyColorTop = glm::vec3(0.0f);
 	glm::vec3 PrevIndirectSkyColorBottom = glm::vec3(0.0f);
 	float PrevIndirectSkyIntensity = 0.0f;
-	float PrevIndirectSkyLightingStrength = 0.0f;
-	bool PrevIndirectDiffuseGISkyLightingEnabled = false;
 	float PrevIndirectPrefilteredEnvRoughnessThreshold = 0.0f;
 	float PrevIndirectPrefilteredEnvRoughnessFade = 0.0f;
 	bool PrevIndirectPrefilteredEnvSpecularEnabled = false;
@@ -1214,19 +1192,17 @@ private:
 		UINT32 bEnableDirectDiffuse;
 		UINT32 bEnableDirectSpecular;
 		UINT32 bEnableRTAO;
-		UINT32 bEnableSkyLighting;
 		float RTAOIndirectStrength;
 		float RTAOIndirectFloor;
 		float SurfaceBounceStrength;
 		float SurfaceBounceSaturation;
-		float SkyLightingStrength;
 		UINT32 LightingOutputMode = 0;
 		UINT32 bEnableDirectionalShadow = 1;
 		UINT32 bUseShadowMap = 0;
-		UINT32 bEnableSimpleSkyLighting = 0;
 		// Mirror RTShadowViewParamCB::ShadowMode (0 = Option A, 1 = ReSTIR
 		// Phase 1). LightingPS branches its point-light loop accordingly.
 		UINT32 ShadowMode = 0;
+		UINT32 _paddingAfterShadowMode[3] = {};
 		glm::vec4 AmbientSkyColorAndStrength = glm::vec4(0.0f);
 		glm::vec4 AmbientGroundColorAndStrength = glm::vec4(0.0f);
 		// Option A channel-pack map: global lightIndex -> channel index
@@ -1242,6 +1218,10 @@ private:
 		float RTAODirectContactStrength = 1.0f;
 		glm::vec2 PointLightPadding = glm::vec2(0.0f);
 	};
+
+	static_assert((offsetof(LightingParam, AmbientSkyColorAndStrength) % 16) == 0, "LightingParam ambient fields must match HLSL cbuffer packing.");
+	static_assert((offsetof(LightingParam, ShadowChannelMap) % 16) == 0, "LightingParam shadow channel map must match HLSL cbuffer packing.");
+	static_assert((offsetof(LightingParam, PointLights) % 16) == 0, "LightingParam point lights must match HLSL cbuffer packing.");
 	
 	std::shared_ptr<GraphicsPipelineHandle> LightingGraphicsPipeline;
 
@@ -1444,8 +1424,6 @@ private:
 	// heuristic MIS is implemented (or set the kSpatialSamples in the
 	// .hlsl back to 4 with a proper MIS pass).
 	bool bEnableShadowSpatialReuseCompute = false;
-	bool bEnableSkyLighting = false;
-	bool bEnableRayTracedSkyLighting = true;
 	bool bDebugForceDiffuseGIColor = false;
 	glm::vec3 DebugForceDiffuseGIColor = glm::vec3(1.0f, 0.0f, 1.0f);
 	UINT32 DiffuseGIPointLightLimit = MaxDiffuseGIPointLights;
@@ -1453,13 +1431,8 @@ private:
 	float RTAOIndirectFloor = 0.55f;
 	// RTAO contact term applied per lighting lobe (0..1).
 	float RTAODirectContactStrength = 1.0f;
-	// Sky-ambient fill strength for uncached spatial-hash GI cells (0 = black, as
-	// before; 1 = full open-sky ambient). Avoids black cells in starved oct slots.
-	float SpatialHashSkyFallbackStrength = 0.5f;
 	float SurfaceBounceStrength = 1.0f;
 	float SurfaceBounceSaturation = 1.0f;
-	float SkyLightingStrength = 0.35f;
-
 	UINT32 ClampMode = 2;
 
 	float JitterScale = 0.6;
@@ -1517,6 +1490,8 @@ private:
 	ERenderBackendAPI CommandLineRenderBackendAPI = ERenderBackendAPI::D3D12;
 	bool bCommandLineDisableImgui = false;
 	bool bCommandLineDisableStreamline = false;
+	bool bVulkanCaptureSafeMode = false;
+	bool bVulkanAllowImplicitLayers = false;
 	bool bEnableGpuSpineSkinning = true;
 	bool bCommandLineSpineSkinningOverrideSet = false;
 	bool bCommandLineSpineGpuSkinningEnabled = true;
@@ -1689,6 +1664,11 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 		EPhysicsCollisionShape PhysicsCollisionShape = EPhysicsCollisionShape::TriangleMesh;
 		glm::vec3 PhysicsBoxHalfExtent = glm::vec3(0.5f);
 		UINT32 RenderDirtyBits = 0;
+		mutable bool bWorldBoundsCacheValid = false;
+		mutable glm::vec3 CachedWorldBoundsMin = glm::vec3(0.0f);
+		mutable glm::vec3 CachedWorldBoundsMax = glm::vec3(0.0f);
+		mutable glm::vec3 CachedWorldBoundsCenter = glm::vec3(0.0f);
+		mutable float CachedWorldBoundsRadius = 0.0f;
 	};
 	vector<SceneObject> SceneObjects;
 	SceneObjectHandle NextSceneObjectHandle = 1;
@@ -2019,7 +1999,7 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 		glm::vec3 CameraUpDirection = glm::vec3(0.0f, 1.0f, 0.0f);
 		float Fov = 0.8f;
 		float NearPlane = 10.0f;
-		float FarPlane = 20000.0f;
+		float FarPlane = 500000.0f;
 		float AspectRatio = 1.0f;
 		float TotalSeconds = 0.0f;
 		ERenderingMode RenderingMode = ERenderingMode::HYBRID;
@@ -2035,14 +2015,11 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 		bool bEnableDirectDiffuse = true;
 		bool bEnableDirectSpecular = true;
 		bool bEnableRTAO = false;
-		bool bEnableSkyLighting = false;
-		bool bEnableRayTracedSkyLighting = true;
 		float RTAOIndirectStrength = 1.0f;
 		float RTAOIndirectFloor = 0.55f;
 		float RTAODirectContactStrength = 1.0f;
 		float SurfaceBounceStrength = 1.0f;
 		float SurfaceBounceSaturation = 1.0f;
-		float SkyLightingStrength = 0.35f;
 		float JitterScale = 0.6f;
 		UINT32 TAASampleCount = 32;
 		float DLSSJitterPhaseScale = 4.0f;
@@ -2068,13 +2045,6 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 		float RTAOPower = 1.10f;
 		float RTAONormalBias = 0.35f;
 		UINT32 RTAOSampleCount = 1;
-		float SkyLightingRayLength = 10000.0f;
-		float SkyLightingNormalBias = 0.5f;
-		UINT32 SkyLightingSampleCount = 32;
-		float SkyLightingUpBias = 0.65f;
-		float SkyLightingDirectionPower = 2.25f;
-		float SkyLightingMinWorldY = 0.02f;
-		UINT32 SkyLightingMaxSampleAttempts = 4;
 		UINT32 ScreenProbeSpacing = 8;
 		UINT32 ScreenProbeGatherRadius = 3;
 		UINT32 ScreenProbeRaysPerProbe = 4;
@@ -2164,8 +2134,35 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 
 	struct RenderWorldMirror
 	{
+		struct SceneObjectCullingRecord
+		{
+			glm::vec3 BoundsMin = glm::vec3(0.0f);
+			glm::vec3 BoundsMax = glm::vec3(0.0f);
+			glm::vec3 BoundsCenter = glm::vec3(0.0f);
+			float BoundsRadius = 0.0f;
+			bool HasBounds = false;
+			bool Visible = false;
+		};
+
+		struct SceneObjectCullingCell
+		{
+			glm::vec3 BoundsMin = glm::vec3(std::numeric_limits<float>::max());
+			glm::vec3 BoundsMax = glm::vec3(-std::numeric_limits<float>::max());
+			std::vector<uint32_t> ObjectIndices;
+		};
+
 		std::vector<SceneObject> SceneObjects;
 		std::vector<PointLightState> PointLights;
+		mutable bool bPointLightCandidateCacheValid = false;
+		mutable uint64_t PointLightCandidateCacheHash = 0;
+		mutable std::vector<uint32_t> PointLightCandidateCacheIndices;
+		std::vector<SceneObjectCullingRecord> SceneObjectCullingData;
+		std::vector<SceneObjectCullingCell> SceneObjectCullingCells;
+		std::vector<uint32_t> UnboundedSceneObjectIndices;
+		std::unordered_map<uint64_t, uint32_t> SceneObjectCullingCellLookup;
+		uint64_t SceneObjectCullingObjectCount = 0;
+		bool bSceneObjectCullingIndexDirty = true;
+		uint64_t SceneObjectCullingIndexGeneration = 0;
 		bool bHasFrameSourceState = false;
 		RenderFrameSourceState FrameSourceState;
 	};
@@ -2191,7 +2188,7 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 		float LastBoundsRadius = 0.0f;
 		bool HasBounds = false;
 	};
-	std::map<SceneObjectHandle, SceneObjectCullingState> SceneObjectCullingStates;
+	std::unordered_map<SceneObjectHandle, SceneObjectCullingState> SceneObjectCullingStates;
 	uint32_t GBufferOcclusionQueryCapacityPerFrame = 0;
 	uint32_t GBufferOcclusionFrameIndex = 0;
 	uint32_t GBufferOcclusionQueryCount = 0;
@@ -2206,6 +2203,17 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	uint64_t GBufferLastBindlessObjectBatchCount = 0;
 	uint64_t GBufferLastBindlessObjectCount = 0;
 	uint64_t GBufferLastBindlessObjectDrawCount = 0;
+	uint64_t GBufferLastSpatialCellCount = 0;
+	uint64_t GBufferLastSpatialVisibleCellCount = 0;
+	uint64_t GBufferLastSpatialPartialCellCount = 0;
+	uint64_t GBufferLastSpatialCandidateObjectCount = 0;
+	uint64_t GBufferLastSpatialVisibleObjectCount = 0;
+	std::vector<uint32_t> GBufferVisibleObjectIndices;
+	std::vector<uint32_t> GBufferSpatialFrustumCandidateIndices;
+	std::vector<std::vector<uint32_t>> GBufferSpatialThreadVisibleIndices;
+	std::vector<std::vector<uint32_t>> GBufferSpatialThreadCandidateIndices;
+	std::vector<uint32_t> RayTracingVisibleObjectIndices;
+	std::vector<uint32_t> RayTracingSpatialFrustumCandidateIndices;
 	uint64_t MobileShadowLastTotalObjectCount = 0;
 	uint64_t MobileShadowLastCandidateObjectCount = 0;
 	uint64_t MobileShadowLastReceiverObjectCount = 0;
@@ -2235,7 +2243,7 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	float PrefilteredEnvRoughnessFade = 0.10f;
 	
 	float Near = 10.0f;
-	float Far = 20000.0f;
+	float Far = 500000.0f;
 	float Fov = 0.8f;
 
 	glm::mat4x4 ViewMat;
@@ -2276,9 +2284,7 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	// m_camera.m_position directly (which is stale when a Luau script is
 	// driving the camera via CameraComponent.set).
 	glm::vec3 RenderFrameCameraPosition = glm::vec3(0.0f);
-	float RenderFrameDiffuseGISkyIntensity = 3.0f;
 	UINT32 RenderFrameRayNoiseMode = 0;
-	UINT32 RenderFrameDiffuseGISkyLightingEnabled = 0;
 	UINT32 RenderFrameIndex = 0;
 	glm::vec2 JitterOffset;
 	glm::vec2 PrevJitter;
@@ -2304,10 +2310,12 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	std::shared_ptr<Buffer> InstancePropertyBuffer;
 	shared_ptr<RTAS> TLAS;
 	std::vector<std::shared_ptr<Buffer>> InstancePropertyFrameBuffers;
+	std::vector<InstanceProperty> InstancePropertyUploadScratch;
 	std::vector<shared_ptr<RTAS>> TLASFrameResources;
 	std::vector<UINT32> TLASFrameInstanceCounts;
 	std::map<Mesh*, std::shared_ptr<RTAS>> RayTracingBLASCache;
 	std::vector<RTInstanceDesc> RayTracingInstances;
+	uint64_t RayTracingInstancesRevision = 1;
 	
 	// ...
 	bool bMultiThreadRendering = false;
@@ -2363,6 +2371,9 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	std::string CachedFrameTimingOverlayText;
 	double CachedFrameTimingOverlayTimestampSec = -1.0;
 	void RebuildFrameTimingOverlayTextIfStale();
+	std::string CachedCullingOverlayText;
+	double CachedCullingOverlayTimestampSec = -1.0;
+	void RebuildCullingOverlayTextIfStale();
 	UINT64 GpuTimestampFrequency = 0;
 	std::array<std::array<uint8_t, GpuPassCount>, 3> GpuPassActiveMaskPerFrame = {};
 	std::array<uint8_t, GpuPassCount> GpuPassLastActiveMask = {};
@@ -2387,6 +2398,12 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	std::array<float, RtRecordPhaseCount> RtRecordPhaseCompletedLastTimeMs = {};
 	std::array<float, RtRecordPhaseCount> RtRecordPhaseAverageTimeMs = {};
 	std::array<std::deque<float>, RtRecordPhaseCount> RtRecordPhaseHistoryMs = {};
+	using RtPassRecordPhaseArray = std::array<std::array<float, RtRecordPhaseCount>, RtProfilePassCount>;
+	using RtPassRecordPhaseHistoryArray = std::array<std::array<std::deque<float>, RtRecordPhaseCount>, RtProfilePassCount>;
+	RtPassRecordPhaseArray RtPassRecordPhaseLastTimeMs = {};
+	RtPassRecordPhaseArray RtPassRecordPhaseCompletedLastTimeMs = {};
+	RtPassRecordPhaseArray RtPassRecordPhaseAverageTimeMs = {};
+	RtPassRecordPhaseHistoryArray RtPassRecordPhaseHistoryMs = {};
 	bool bFramePerfLogInitialized = false;
 	UINT64 FramePerfLogTotalFrameCount = 0;
 	UINT32 FramePerfLogSampleFrameCount = 0;
@@ -2398,6 +2415,7 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	std::array<double, RenderCommandPhaseCount> FramePerfLogAccumRenderCommandPhaseMs = {};
 	std::array<double, SceneFlushPhaseCount> FramePerfLogAccumSceneFlushPhaseMs = {};
 	std::array<double, RtRecordPhaseCount> FramePerfLogAccumRtRecordPhaseMs = {};
+	std::array<std::array<double, RtRecordPhaseCount>, RtProfilePassCount> FramePerfLogAccumRtPassRecordPhaseMs = {};
 	double FramePerfLogAccumBeginFrameMs = 0.0;
 	double FramePerfLogAccumRecordMs = 0.0;
 	double FramePerfLogAccumExecuteMs = 0.0;
@@ -2432,13 +2450,16 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	void UpdateGpuTimingReadback();
 	void BeginGpuPassTiming(EGpuPass pass);
 	void EndGpuPassTiming(EGpuPass pass);
+	bool IsVulkanCaptureSafeActive() const;
 	const char* GetGpuPassName(EGpuPass pass) const;
 	const char* GetCpuUpdatePhaseName(ECpuUpdatePhase phase) const;
 	const char* GetRenderCommandPhaseName(ERenderCommandPhase phase) const;
 	const char* GetSceneFlushPhaseName(ESceneFlushPhase phase) const;
+	const char* GetRtProfilePassName(ERtProfilePass pass) const;
 	void AddRenderCommandPhaseTiming(ERenderCommandPhase phase, const CpuClock::time_point& begin, const CpuClock::time_point& end);
 	void AddSceneFlushPhaseTiming(ESceneFlushPhase phase, const CpuClock::time_point& begin, const CpuClock::time_point& end);
 	void AddRtRecordPhaseTiming(ERtRecordPhase phase, const CpuClock::time_point& begin, const CpuClock::time_point& end);
+	void AddRtPassRecordPhaseTiming(ERtProfilePass pass, ERtRecordPhase phase, const CpuClock::time_point& begin, const CpuClock::time_point& end);
 	void AddCpuUpdatePhaseTiming(ECpuUpdatePhase phase, const CpuClock::time_point& begin, const CpuClock::time_point& end);
 	void FinishCpuUpdateTiming(const CpuClock::time_point& begin, const CpuClock::time_point& end);
 	void TrimCpuUpdateTimingHistory();
@@ -2486,7 +2507,7 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	class RTPassBuilder
 	{
 	public:
-		RTPassBuilder(Corona& owner, const shared_ptr<RTPipelineStateObject>& pso);
+		RTPassBuilder(Corona& owner, const shared_ptr<RTPipelineStateObject>& pso, ERtProfilePass profilePass = ERtProfilePass::Count);
 
 		bool IsValid() const;
 		RTPassBuilder& BeginScene();
@@ -2510,6 +2531,7 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 
 		Corona& Owner;
 		shared_ptr<RTPipelineStateObject> PSO;
+		ERtProfilePass ProfilePass = ERtProfilePass::Count;
 		bool bBegan = false;
 		bool bShaderTableFinalized = false;
 	};
@@ -2555,8 +2577,12 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	void UpdateGrassCulling(const glm::mat4& viewProj);
 	shared_ptr<Scene> CreateProceduralTerrainScene(UINT32 seed);
 	bool ShouldIncludeSceneObjectInRayTracingAS(const SceneObject& object) const;
+	bool IsRayTracingExtendedFrustumCullingActive() const;
+	bool ShouldIncludeSceneObjectInRayTracingExtendedFrustum(const SceneObject& object, bool& outFrustumCulled) const;
+	const std::vector<uint32_t>& GatherRayTracingVisibleObjectIndices(uint64_t& outTotalObjects, uint64_t& outCulledObjects);
 	void MarkRayTracingSceneDirty();
 	void MarkRayTracingTransformsDirty();
+	void MarkRayTracingInstanceListChanged();
 	void FlushSceneObjectChanges();
 	UINT32 GetRayTracingFrameResourceIndex() const;
 	void EnsureRayTracingFrameResourceSlots();
@@ -2599,6 +2625,7 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	PointLightState* FindPointLightByEntity(CoronaECS::Entity entity);
 	const PointLightState* FindPointLightByEntity(CoronaECS::Entity entity) const;
 	void InitRaytracingShadowPass();
+	void InitShadowRayQueryPass();
 	void InitShadowSpatialReusePass();
 	void InitRaytracingReflectionPass();
 	shared_ptr<RTPipelineStateObject> CreateRaytracingReflectionPSO(bool bUseSER);
@@ -3346,10 +3373,14 @@ public:
 		float roughness,
 		float metallic,
 		bool overrideRoughnessMetallic);
-	bool DrawStaticObjectBindlessBatch(const std::vector<const SceneObject*>& objects);
+	bool DrawStaticObjectBindlessBatch(const std::vector<uint32_t>& objectIndices);
+	void ResetGBufferStaticDrawCache();
 	bool BuildMobileShadowViewProjection(glm::mat4x4& lightViewProj);
 	bool GetSceneObjectWorldBounds(const SceneObject& object, glm::vec3& boundsMin, glm::vec3& boundsMax, glm::vec3& center, float& radius) const;
 	bool IsWorldAabbInViewFrustum(const glm::vec3& boundsMin, const glm::vec3& boundsMax) const;
+	void MarkRenderWorldCullingIndexDirty();
+	void RebuildRenderWorldCullingIndex();
+	const std::vector<uint32_t>& GatherGBufferVisibleObjectIndices();
 	void PrepareGBufferCulling(uint32_t sceneObjectCount);
 	bool ShouldDrawSceneObjectInGBuffer(const SceneObject& object, const glm::vec3& boundsCenter, float boundsRadius);
 	uint32_t BeginGBufferOcclusionQuery(SceneObjectHandle handle);
@@ -3363,8 +3394,6 @@ public:
 
 	void InitRaytracingAOPass();
 	void RaytraceAOPass();
-	void InitRaytracingSkyLightingPass();
-	void RaytraceSkyLightingPass();
 
 	void RaytraceReflectionPass();
 
@@ -3548,7 +3577,7 @@ private:
 	void CollectPointLightRenderSync(RenderFrameDelta& delta);
 	void ApplyPointLightRenderSync(const RenderFrameDelta& delta);
 	void BuildRenderFrameDerivedState(const RenderFrameSourceState* sourceState);
-	void BuildPointLightRenderCandidates(std::vector<const PointLightState*>& outCandidates) const;
+	void BuildPointLightRenderCandidates(std::vector<const PointLightState*>& outCandidates, UINT32 maxCount = 0xFFFFFFFFu) const;
 	// Canonical ReSTIR point-light table shared by the spatial-hash GI light mask,
 	// the ReSTIR direct-shadow candidates, and the ReSTIR LightingPS feed. Selection
 	// is top-MaxDiffuseGIPointLights by score, but the FINAL order is by stable light

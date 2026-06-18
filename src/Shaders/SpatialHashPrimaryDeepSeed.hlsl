@@ -51,7 +51,6 @@ cbuffer SpatialHashGIConstant : register(b0)
     float LightingChangedFlag;
     float4 DebugDiffuseGIOverride;
     float4 SpatialHashLevelParams;
-    float4 SpatialHashSkyAmbient;
 };
 
 cbuffer PrimaryDeepSeedConstant : register(b1)

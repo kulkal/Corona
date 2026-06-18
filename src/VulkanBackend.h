@@ -309,7 +309,7 @@ class VulkanBackend : public IRenderBackend
 	friend struct VulkanComputePipelineStateObject;
 
 public:
-	VulkanBackend() = default;
+	VulkanBackend();
 	~VulkanBackend() override;
 
 	ERenderBackendAPI GetAPI() const override { return ERenderBackendAPI::Vulkan; }
@@ -780,6 +780,8 @@ private:
 	bool bDescriptorIndexingEnabled = false;
 	bool bBindlessTextureTableReady = false;
 	bool bBindlessBufferTableReady = false;
+	bool bCaptureSafeMode = false;
+	bool bCaptureSafeDisableRayTracing = false;
 	uint32_t MaxVulkanBindlessTextureSlots = 0;
 	uint32_t MaxVulkanBindlessBufferSlots = 0;
 	VkDescriptorSetLayout EmptyDescriptorSetLayout = VK_NULL_HANDLE;
@@ -823,5 +825,9 @@ private:
 	PFN_vkCmdInsertDebugUtilsLabelEXT vkCmdInsertDebugUtilsLabelEXTFn = nullptr;
 	PFN_vkCmdBeginDebugUtilsLabelEXT vkCmdBeginDebugUtilsLabelEXTFn = nullptr;
 	PFN_vkCmdEndDebugUtilsLabelEXT vkCmdEndDebugUtilsLabelEXTFn = nullptr;
+#if defined(VK_EXT_debug_marker)
+	PFN_vkCmdDebugMarkerBeginEXT vkCmdDebugMarkerBeginEXTFn = nullptr;
+	PFN_vkCmdDebugMarkerEndEXT vkCmdDebugMarkerEndEXTFn = nullptr;
+#endif
 #endif
 };

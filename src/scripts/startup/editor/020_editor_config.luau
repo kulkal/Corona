@@ -271,28 +271,6 @@ local function draw_specular_gi(state)
 	imgui.tree_pop()
 end
 
-local function draw_sky_lighting(state)
-	if state.rendering_mode ~= 0 or not imgui.tree_node("Sky Lighting", true) then
-		return
-	end
-
-	local sky_enabled = checkbox("Enable Sky Lighting", "enable_sky_lighting", state.enable_sky_lighting)
-	if sky_enabled then
-		slider_float("Sky Lighting Strength", "sky_lighting_strength", state.sky_lighting_strength, 0.0, 1.0, "%.2f")
-		local rt_sky = checkbox("Ray Traced Sky Pass", "enable_ray_traced_sky_lighting", state.enable_ray_traced_sky_lighting)
-		if rt_sky then
-			slider_int("Sky Lighting Samples", "sky_lighting_samples", state.sky_lighting_samples, 1, 32)
-			slider_float("Sky Lighting Ray Length", "sky_lighting_ray_length", state.sky_lighting_ray_length, 16.0, 10000.0, "%.1f")
-			slider_float("Sky Lighting Normal Bias", "sky_lighting_normal_bias", state.sky_lighting_normal_bias, 0.01, 4.0, "%.2f")
-			slider_float("Sky Lighting Up Bias", "sky_lighting_up_bias", state.sky_lighting_up_bias, 0.0, 1.0, "%.2f")
-			slider_float("Sky Lighting Direction Power", "sky_lighting_direction_power", state.sky_lighting_direction_power, 0.25, 8.0, "%.2f")
-			slider_float("Sky Lighting Min World Y", "sky_lighting_min_world_y", state.sky_lighting_min_world_y, -0.25, 0.75, "%.2f")
-		end
-	end
-
-	imgui.tree_pop()
-end
-
 local function draw_diffuse_gi(state)
 	if not imgui.tree_node("Diffuse GI", true) then
 		return
@@ -403,7 +381,6 @@ local function draw_lighting_gi(state)
 
 	draw_direct_lighting(state)
 	draw_specular_gi(state)
-	draw_sky_lighting(state)
 	draw_diffuse_gi(state)
 	draw_hybrid_extras(state)
 	draw_environment(state)

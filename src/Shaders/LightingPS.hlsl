@@ -22,7 +22,6 @@ Texture2D GIResultColorTex : register(t6);
 Texture2D SpecularGITex : register(t7);
 Texture2D RoughnessMetalicTex : register(t8);
 Texture2D AmbientOcclusionTex : register(t14);
-Texture2D SkyLightingTex : register(t15);
 
 
 
@@ -62,22 +61,20 @@ cbuffer LightingParam : register(b0)
     uint bEnableDirectDiffuse;
     uint bEnableDirectSpecular;
     uint bEnableRTAO;
-    uint bEnableSkyLighting;
     float RTAOIndirectStrength;
     float RTAOIndirectFloor;
     float SurfaceBounceStrength;
     float SurfaceBounceSaturation;
-    float SkyLightingStrength;
     uint LightingOutputMode;
     uint bEnableDirectionalShadow;
     uint bUseShadowMap;
-    uint bEnableSimpleSkyLighting;
     // 0 = Option A channel-pack (ShadowTex.gba = visibility for first 3
     //     enabled point lights),
     // 1 = ReSTIR Phase 1 reservoir (ShadowTex.g = chosen light index as
     //     float, .b = weight ratio, .a = visibility). LightingPS uses the
     //     same flag to branch its point-light loop.
     uint ShadowMode;
+    uint3 _paddingAfterShadowMode;
     float4 AmbientSkyColorAndStrength;
     float4 AmbientGroundColorAndStrength;
     // Option A channel-pack map: 4 light->channel entries per uint4.
@@ -230,11 +227,11 @@ float3 EvaluateDirectionalVisibility(float2 screenUV, float deviceDepth, float3 
 float3 EvaluateSimpleSkyAmbient(float3 worldNormal, float3 albedo, float metallic, float deviceDepth)
 {
     const bool bMobileDirectOnly = LightingOutputMode == 2;
-    if ((!bMobileDirectOnly && bEnableSimpleSkyLighting == 0) || deviceDepth >= 0.999999f)
+    if (!bMobileDirectOnly || deviceDepth >= 0.999999f)
         return 0.0f.xxx;
 
-    const float skyStrength = bMobileDirectOnly ? saturate(AmbientSkyColorAndStrength.w) : saturate(SkyLightingStrength);
-    const float groundStrength = bMobileDirectOnly ? saturate(AmbientGroundColorAndStrength.w) : saturate(SkyLightingStrength * 0.35f);
+    const float skyStrength = saturate(AmbientSkyColorAndStrength.w);
+    const float groundStrength = saturate(AmbientGroundColorAndStrength.w);
     if (skyStrength <= 0.0f && groundStrength <= 0.0f)
         return 0.0f.xxx;
 
@@ -369,12 +366,11 @@ float4 PSMain(PSInput input) : SV_TARGET
 
     if (!bDirectOutput)
     {
-        float3 SkyDiffuse = (bEnableSkyLighting != 0) ? SanitizeFloat3(SkyLightingTex[PixelPos].xyz) * Albedo * (1.0f - Metallic) * saturate(SkyLightingStrength) : float3(0, 0, 0);
         float3 SurfaceBounceGI = max(SanitizeFloat3(GIResultColorTex[PixelPos / GIBufferScale].xyz), 0.0f.xxx);
         float surfaceBounceLuma = dot(SurfaceBounceGI, float3(0.2126f, 0.7152f, 0.0722f));
         SurfaceBounceGI = lerp(surfaceBounceLuma.xxx, SurfaceBounceGI, saturate(SurfaceBounceSaturation));
         float3 SurfaceBounceDiffuse = SurfaceBounceGI * Albedo * (1.0f - Metallic) * saturate(SurfaceBounceStrength);
-        IndirectDiffuse = (bEnableDiffuseGI ? SurfaceBounceDiffuse : float3(0, 0, 0)) + SkyDiffuse;
+        IndirectDiffuse = bEnableDiffuseGI ? SurfaceBounceDiffuse : float3(0, 0, 0);
         IndirectSpecular = bEnableSpecularGI ? SanitizeFloat3(SpecularGITex[PixelPos].xyz * SpecularColor) : float3(0, 0, 0);
     }
 
@@ -479,7 +475,7 @@ float4 PSMain(PSInput input) : SV_TARGET
         }
     }
 
-    float3 SimpleSkyAmbient = (bMobileDirectOnly || bEnableSimpleSkyLighting != 0) ? EvaluateSimpleSkyAmbient(WorldNormal, Albedo, Metallic, DeviceDepth) : 0.0f.xxx;
+    float3 SimpleSkyAmbient = bMobileDirectOnly ? EvaluateSimpleSkyAmbient(WorldNormal, Albedo, Metallic, DeviceDepth) : 0.0f.xxx;
     float3 DiffuseLighting = max(DirectionalDiffuse + PointDiffuse + SimpleSkyAmbient, 0);
     float3 DirectSpecular = max(DirectionalSpecular + PointSpecular, 0);
 

@@ -91,6 +91,11 @@ RGPassBuilder& RGPassBuilder::ReadWriteBuffer(RGBufferRef buffer, EResourceState
 RenderGraph::RenderGraph(IRenderBackend* backend)
 	: Backend(backend)
 {
+	Textures.reserve(16);
+	Buffers.reserve(8);
+	Passes.reserve(4);
+	TransitionPlan.reserve(32);
+	Diagnostics.reserve(4);
 }
 
 void RenderGraph::Reset()
@@ -188,6 +193,7 @@ void RenderGraph::AddPass(const char* name, ERGPassFlags flags, const SetupFunc&
 	pass.Name = name ? name : "<unnamed pass>";
 	pass.Flags = flags;
 	pass.Execute = execute;
+	pass.Accesses.reserve(16);
 	Passes.push_back(std::move(pass));
 
 	const uint32_t passIndex = static_cast<uint32_t>(Passes.size() - 1);
@@ -406,7 +412,8 @@ bool RenderGraph::ValidateGraph()
 		if (!pass.Execute)
 			Diagnostics.push_back("Pass '" + pass.Name + "' has no execute function.");
 
-		std::unordered_set<uint64_t> resourcesInPass;
+		std::vector<uint64_t> resourcesInPass;
+		resourcesInPass.reserve(pass.Accesses.size());
 		for (const ResourceAccess& access : pass.Accesses)
 		{
 			if (access.Kind == ResourceKind::Texture)
@@ -447,8 +454,10 @@ bool RenderGraph::ValidateGraph()
 			}
 
 			const uint64_t key = MakeResourceKey(static_cast<uint8_t>(access.Kind), access.ResourceIndex);
-			if (!resourcesInPass.insert(key).second)
+			if (std::find(resourcesInPass.begin(), resourcesInPass.end(), key) != resourcesInPass.end())
 				Diagnostics.push_back("Pass '" + pass.Name + "' declares resource access more than once; split or use ReadWrite access.");
+			else
+				resourcesInPass.push_back(key);
 		}
 	}
 

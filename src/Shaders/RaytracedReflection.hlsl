@@ -2,6 +2,10 @@
 #include "GGX.hlsli"
 #include "BindlessResources.hlsli"
 
+#ifndef RT_REFLECTION_ENABLE_TEMPORAL_RESERVOIR
+#define RT_REFLECTION_ENABLE_TEMPORAL_RESERVOIR 0
+#endif
+
 RWTexture2D<float4> ReflectionResult : register(u0);
 RWTexture2D<float> SpecularHitDistanceResult : register(u1);
 RWTexture2D<float2> SpecularMotionVectorResult : register(u2);
@@ -105,6 +109,35 @@ struct RT_REFLECTION_SHADOW_RAY_PAYLOAD ShadowRayPayload
 {
     bool bHit RT_REFLECTION_SHADOW_PAYLOAD_RW;
 };
+
+bool TraceReflectionShadowOccluded(RayDesc shadowRay)
+{
+#if RT_REFLECTION_USE_RAYQUERY_SHADOWS
+    RayQuery<RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH |
+             RAY_FLAG_SKIP_CLOSEST_HIT_SHADER |
+             RAY_FLAG_FORCE_OPAQUE |
+             RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q;
+    q.TraceRayInline(gRtScene, RAY_FLAG_NONE, 0xFFu, shadowRay);
+    q.Proceed();
+    return q.CommittedStatus() != COMMITTED_NOTHING;
+#else
+    ShadowRayPayload shadowPayload;
+    shadowPayload.bHit = true;
+    TraceRay(
+        gRtScene,
+        RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH |
+            RAY_FLAG_SKIP_CLOSEST_HIT_SHADER |
+            RAY_FLAG_FORCE_OPAQUE |
+            RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES,
+        0xFF,
+        0,
+        0,
+        1,
+        shadowRay,
+        shadowPayload);
+    return shadowPayload.bHit;
+#endif
+}
 
 /*
     Params.x = Far / (Far - Near);
@@ -352,6 +385,7 @@ void TraceReflectionSurfaceRay(RayDesc ray, inout RayPayload payload)
 #endif
 }
 
+#if RT_REFLECTION_ENABLE_TEMPORAL_RESERVOIR
 bool IsSpecularReservoirSampleVisible(float3 worldPos, float3 traceNormal, float3 samplePos)
 {
     float3 toSample = samplePos - worldPos;
@@ -372,23 +406,9 @@ bool IsSpecularReservoirSampleVisible(float3 worldPos, float3 traceNormal, float
     visibilityRay.TMin = 0.001f;
     visibilityRay.TMax = tMax;
 
-    ShadowRayPayload visibilityPayload;
-    visibilityPayload.bHit = true;
-    TraceRay(
-        gRtScene,
-        RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH |
-            RAY_FLAG_SKIP_CLOSEST_HIT_SHADER |
-            RAY_FLAG_FORCE_OPAQUE |
-            RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES,
-        0xFF,
-        0,
-        0,
-        1,
-        visibilityRay,
-        visibilityPayload);
-
-    return !visibilityPayload.bHit;
+    return !TraceReflectionShadowOccluded(visibilityRay);
 }
+#endif
 
 bool ProjectToScreenUVChecked(float3 worldPos, float4x4 viewProj, out float2 uv)
 {
@@ -489,6 +509,13 @@ void rayGen
 	float2 UV = crd / dims;
 	float DeviceDepth = DepthTex.SampleLevel(sampleWrap, UV, 0).x;
     bool primarySurfaceValid = DeviceDepth < 0.999999f;
+    if (!primarySurfaceValid)
+    {
+        ReflectionResult[launchIndex.xy] = float4(0.0f, 0.0f, 0.0f, MAX_HIT_DIST);
+        SpecularHitDistanceResult[launchIndex.xy] = ProjectionParams.w;
+        SpecularMotionVectorResult[launchIndex.xy] = float2(0.0f, 0.0f);
+        return;
+    }
 
 	float3 WorldNormal = SpecSafeNormalize(WorldNormalTex.SampleLevel(sampleWrap, UV, 0).xyz, float3(0.0f, 1.0f, 0.0f));
   
@@ -525,7 +552,11 @@ void rayGen
         : saturate((Rougness - envBlendStart) / max(envThreshold - envBlendStart, 1e-4f))) : 0.0f;
     prefilteredEnvBlend = prefilteredEnvBlend * prefilteredEnvBlend * (3.0f - 2.0f * prefilteredEnvBlend);
     prefilteredEnvBlend = enablePrefilteredEnvSpecular && Rougness >= envThreshold ? 1.0f : prefilteredEnvBlend;
-    float3 prefilteredEnvRadiance = SamplePrefilteredSkyEnvironment(MirrorL, Rougness);
+    float3 prefilteredEnvRadiance = 0.0f.xxx;
+    if (prefilteredEnvBlend > 0.0f)
+    {
+        prefilteredEnvRadiance = SamplePrefilteredSkyEnvironment(MirrorL, Rougness);
+    }
     bool useDeterministicPrefilteredEnvRay = prefilteredEnvBlend >= 0.999f;
     float3 L = MirrorL;
     if (!useDeterministicPrefilteredEnvRay)
@@ -579,32 +610,20 @@ void rayGen
         payload.normal = SpecSafeNormalize(payload.normal, WorldNormal);
         debugHitNormal = payload.normal * 0.5f + 0.5f;
         debugNdotL = max(0.0f, dot(LightDir.xyz, payload.normal));
-        shadowRay.Origin = SpecSanitizeFloat3(payload.position + payload.normal * 0.5f, payload.position);
-        shadowRay.Direction = LightDir;
-
-        shadowRay.TMin = 0;
-        shadowRay.TMax = MAX_HIT_DIST;
-
-        ShadowRayPayload shadowPayload;
-        shadowPayload.bHit = true;
-        uint RayIndex = 0;
-        TraceRay(
-            gRtScene,
-            RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH |
-                RAY_FLAG_SKIP_CLOSEST_HIT_SHADER |
-                RAY_FLAG_FORCE_OPAQUE |
-                RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES,
-            0xFF,
-            RayIndex,
-            0,
-            1,
-            shadowRay,
-            shadowPayload);
+        bool shadowHit = true;
+        if (LightIntensity > 0.0f && debugNdotL > 0.0f)
+        {
+            shadowRay.Origin = SpecSanitizeFloat3(payload.position + payload.normal * 0.5f, payload.position);
+            shadowRay.Direction = LightDir;
+            shadowRay.TMin = 0;
+            shadowRay.TMax = MAX_HIT_DIST;
+            shadowHit = TraceReflectionShadowOccluded(shadowRay);
+        }
 
         float3 Irradiance = 0.0f.xxx;
         float3 Albedo = max(SpecSanitizeFloat3(payload.color, 1.0f.xxx), 0.0f.xxx);
-        debugVisibility = shadowPayload.bHit ? 0.0f : 1.0f;
-        if(shadowPayload.bHit == false)
+        debugVisibility = shadowHit ? 0.0f : 1.0f;
+        if(shadowHit == false)
         {
             // miss - apply light color
             Irradiance = debugNdotL * LightIntensity * max(SpecSanitizeFloat3(LightColor, 1.0f.xxx), 0.0f.xxx) * Albedo * INV_PI;
@@ -634,6 +653,8 @@ void rayGen
     // Output uses the chosen sample's radiance · W; reservoir state is
     // written to ReflReservoirA/B for next frame's combine via the
     // end-of-frame GPU snapshot.
+#if RT_REFLECTION_ENABLE_TEMPORAL_RESERVOIR
+    if (bEnableSpecularTemporalReservoir != 0u)
     {
         float3 chosenHit;
         float3 chosenRadiance;
@@ -852,6 +873,7 @@ void rayGen
             ReflReservoirB[launchIndex.xy] = float4(chosenRadiance, W_writeback);
         }
     }
+#endif
     if (ReflectionDebugOutputMode == 1u)
     {
         finalRadiance = payload.bHit ? max(SpecSanitizeFloat3(payload.color, 0.0f.xxx), 0.0f.xxx) : 0.0f.xxx;

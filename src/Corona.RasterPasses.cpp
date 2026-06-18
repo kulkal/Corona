@@ -25,6 +25,7 @@
 #include <iterator>
 #include <limits>
 #include <sstream>
+#include <unordered_map>
 
 #include "glm/gtc/matrix_transform.hpp"
 
@@ -33,6 +34,67 @@ void AppendCpuRuntimeTrace(const std::wstring& line);
 namespace
 {
 	using GBufferProfileClock = std::chrono::steady_clock;
+	constexpr float kRenderWorldCullingCellSize = 4096.0f;
+	constexpr uint32_t kParallelCullingIndexBuildThreshold = 1024u;
+	constexpr uint32_t kParallelCellFrustumCullThreshold = 512u;
+	constexpr uint32_t kParallelFrustumCullThreshold = 2048u;
+
+	enum class EFrustumAabbRelation : uint8_t
+	{
+		Outside,
+		Intersect,
+		Inside,
+	};
+
+	using FrustumPlaneArray = std::array<glm::vec4, 6>;
+
+	FrustumPlaneArray BuildFrustumPlanes(const glm::mat4x4& viewProj)
+	{
+		auto row = [](const glm::mat4x4& matrix, int index)
+		{
+			return glm::vec4(matrix[0][index], matrix[1][index], matrix[2][index], matrix[3][index]);
+		};
+		const glm::vec4 row0 = row(viewProj, 0);
+		const glm::vec4 row1 = row(viewProj, 1);
+		const glm::vec4 row2 = row(viewProj, 2);
+		const glm::vec4 row3 = row(viewProj, 3);
+		return
+		{
+			row3 + row0,
+			row3 - row0,
+			row3 + row1,
+			row3 - row1,
+			row3 + row2,
+			row3 - row2,
+		};
+	}
+
+	EFrustumAabbRelation ClassifyAabbAgainstFrustumPlanes(
+		const FrustumPlaneArray& planes,
+		const glm::vec3& boundsMin,
+		const glm::vec3& boundsMax)
+	{
+		const glm::vec3 center = (boundsMin + boundsMax) * 0.5f;
+		const glm::vec3 extents = glm::max((boundsMax - boundsMin) * 0.5f, glm::vec3(0.0f));
+		bool bFullyInside = true;
+		for (const glm::vec4& plane : planes)
+		{
+			const glm::vec3 normal(plane.x, plane.y, plane.z);
+			const float distance = glm::dot(normal, center) + plane.w;
+			const float radius = glm::dot(glm::abs(normal), extents);
+			if (distance + radius < 0.0f)
+				return EFrustumAabbRelation::Outside;
+			if (distance - radius < 0.0f)
+				bFullyInside = false;
+		}
+		return bFullyInside ? EFrustumAabbRelation::Inside : EFrustumAabbRelation::Intersect;
+	}
+
+	uint64_t PackCullingCellCoord(int32_t cellX, int32_t cellZ)
+	{
+		return (static_cast<uint64_t>(static_cast<uint32_t>(cellX)) << 32u) |
+			static_cast<uint32_t>(cellZ);
+	}
 
 	bool IsGBufferObjectBatchProfileEnabled()
 	{
@@ -43,6 +105,19 @@ namespace
 			const bool nriEnabled = nriValue && nriValue[0] != '\0' && nriValue[0] != '0';
 			const bool gbufferEnabled = gbufferValue && gbufferValue[0] != '\0' && gbufferValue[0] != '0';
 			return nriEnabled || gbufferEnabled;
+		}();
+		return enabled;
+	}
+
+	bool IsGBufferCullingProfileEnabled()
+	{
+		static const bool enabled = []
+		{
+			const char* nriValue = std::getenv("CORONA_NRI_RECORD_PROFILE");
+			const char* cullValue = std::getenv("CORONA_GBUFFER_CULL_PROFILE");
+			const bool nriEnabled = nriValue && nriValue[0] != '\0' && nriValue[0] != '0';
+			const bool cullEnabled = cullValue && cullValue[0] != '\0' && cullValue[0] != '0';
+			return nriEnabled || cullEnabled;
 		}();
 		return enabled;
 	}
@@ -169,6 +244,76 @@ namespace
 		return profile;
 	}
 
+	struct GBufferCullingProfile
+	{
+		uint64_t LastFrame = UINT64_MAX;
+		uint32_t Frames = 0;
+		uint64_t Objects = 0;
+		uint64_t BoundsTests = 0;
+		uint64_t FrustumTests = 0;
+		uint64_t CandidateScans = 0;
+		uint64_t ObjectScans = 0;
+		double TotalMs = 0.0;
+		double CandidateScanMs = 0.0;
+		double ObjectScanMs = 0.0;
+		double BoundsMs = 0.0;
+		double FrustumMs = 0.0;
+		uint64_t TotalCount = 0;
+		uint64_t CandidateScanCount = 0;
+		uint64_t ObjectScanCount = 0;
+		uint64_t BoundsCount = 0;
+		uint64_t FrustumCount = 0;
+
+		void Reset()
+		{
+			*this = GBufferCullingProfile{};
+		}
+
+		void FlushIfReady()
+		{
+			if (Frames < 120)
+				return;
+			const double frames = static_cast<double>(std::max(1u, Frames));
+			auto avgMs = [frames](double totalMs) { return totalMs / frames; };
+			auto perFrame = [frames](uint64_t count) { return static_cast<double>(count) / frames; };
+			auto metric = [&](std::wstringstream& ss, const wchar_t* name, double ms, uint64_t count)
+			{
+				ss << L", " << name << L"=" << std::fixed << std::setprecision(3) << avgMs(ms)
+					<< L"ms/" << std::setprecision(1) << perFrame(count) << L"c";
+			};
+
+			std::wstringstream ss;
+			ss << L"[GBufferCullingProfile] frames=" << Frames
+				<< L", objects/frame=" << std::fixed << std::setprecision(1) << perFrame(Objects)
+				<< L", bounds/frame=" << perFrame(BoundsTests)
+				<< L", frustum/frame=" << perFrame(FrustumTests)
+				<< L", candidateScans/frame=" << perFrame(CandidateScans)
+				<< L", objectScans/frame=" << perFrame(ObjectScans);
+			metric(ss, L"total", TotalMs, TotalCount);
+			metric(ss, L"candidateScan", CandidateScanMs, CandidateScanCount);
+			metric(ss, L"objectScan", ObjectScanMs, ObjectScanCount);
+			metric(ss, L"bounds", BoundsMs, BoundsCount);
+			metric(ss, L"frustum", FrustumMs, FrustumCount);
+			AppendCpuRuntimeTrace(ss.str());
+			Reset();
+		}
+
+		void BeginFrame(uint64_t frame)
+		{
+			if (LastFrame == frame)
+				return;
+			FlushIfReady();
+			LastFrame = frame;
+			++Frames;
+		}
+	};
+
+	GBufferCullingProfile& GetGBufferCullingProfile()
+	{
+		static GBufferCullingProfile profile;
+		return profile;
+	}
+
 	constexpr uint32_t kGBufferBindlessTextureRegisterSpace = 10;
 	constexpr uint32_t kGBufferMaterialRecordRegister = 13;
 	constexpr uint32_t kGBufferDrawRecordRegister = 15;
@@ -249,6 +394,94 @@ namespace
 				IndexStride == other.IndexStride;
 		}
 	};
+
+	struct GBufferStaticBatchKey
+	{
+		const Scene* ScenePtr = nullptr;
+		float Roughness = 1.0f;
+		float Metallic = 0.0f;
+		bool OverrideRoughnessMetallic = false;
+
+		bool operator==(const GBufferStaticBatchKey& rhs) const
+		{
+			return ScenePtr == rhs.ScenePtr &&
+				Roughness == rhs.Roughness &&
+				Metallic == rhs.Metallic &&
+				OverrideRoughnessMetallic == rhs.OverrideRoughnessMetallic;
+		}
+	};
+
+	struct GBufferStaticBatchKeyHash
+	{
+		size_t operator()(const GBufferStaticBatchKey& key) const
+		{
+			size_t seed = std::hash<const Scene*>{}(key.ScenePtr);
+			auto combine = [&seed](size_t value)
+			{
+				seed ^= value + 0x9e3779b9u + (seed << 6u) + (seed >> 2u);
+			};
+			combine(std::hash<float>{}(key.Roughness));
+			combine(std::hash<float>{}(key.Metallic));
+			combine(std::hash<bool>{}(key.OverrideRoughnessMetallic));
+			return seed;
+		}
+	};
+
+	struct CachedGBufferStaticObjectDrawRange
+	{
+		uint32_t FirstDraw = 0;
+		uint32_t DrawCount = 0;
+	};
+
+	struct CachedGBufferStaticDrawInfo
+	{
+		uint32_t DrawRecordIndex = 0;
+		uint32_t IndexCount = 0;
+		bool bTransparent = false;
+	};
+
+	struct CachedGBufferStaticDrawTable
+	{
+		IRenderBackend* Backend = nullptr;
+		uint64_t Generation = UINT64_MAX;
+		uint64_t DefaultsHash = 0;
+		uint32_t ObjectCount = 0;
+		uint32_t MaterialCount = 0;
+		uint32_t GeometryCount = 0;
+		uint32_t DrawRecordCount = 0;
+		std::shared_ptr<Buffer> MaterialBuffer;
+		std::shared_ptr<Buffer> GeometryBuffer;
+		std::shared_ptr<Buffer> DrawRecordBuffer;
+		std::vector<CachedGBufferStaticObjectDrawRange> ObjectRanges;
+		std::vector<CachedGBufferStaticDrawInfo> Draws;
+
+		void Reset()
+		{
+			Backend = nullptr;
+			Generation = UINT64_MAX;
+			DefaultsHash = 0;
+			ObjectCount = 0;
+			MaterialCount = 0;
+			GeometryCount = 0;
+			DrawRecordCount = 0;
+			MaterialBuffer.reset();
+			GeometryBuffer.reset();
+			DrawRecordBuffer.reset();
+			ObjectRanges.clear();
+			Draws.clear();
+		}
+	};
+
+	CachedGBufferStaticDrawTable& GetCachedGBufferStaticDrawTable(const Corona* owner)
+	{
+		static std::unordered_map<const Corona*, CachedGBufferStaticDrawTable> caches;
+		return caches[owner];
+	}
+
+	void ResetCachedGBufferStaticDrawTable(const Corona* owner)
+	{
+		GetCachedGBufferStaticDrawTable(owner).Reset();
+	}
 
 	bool BuildGBufferIndirectDrawArguments(
 		uint32_t drawRecordIndex,
@@ -1703,7 +1936,6 @@ void Corona::InitLightingPass()
 		MakeRHITextureSRV("SpecularGITex", 7, lightingPixelStage),
 		MakeRHITextureSRV("RoughnessMetalicTex", 8, lightingPixelStage),
 		MakeRHITextureSRV("AmbientOcclusionTex", 14, lightingPixelStage),
-		MakeRHITextureSRV("SkyLightingTex", 15, lightingPixelStage),
 		MakeRHISampler("sampleWrap", 0, lightingPixelStage),
 	};
 
@@ -2405,7 +2637,6 @@ void Corona::LightingPass()
 	const bool bBackendSupportsSpecularGI = backendMaxSupportedHybridStage >= 3u;
 	const bool bBackendSupportsDiffuseGI = backendMaxSupportedHybridStage >= 4u;
 	const bool bBackendSupportsRTAO = backendMaxSupportedHybridStage >= 2u;
-	const bool bBackendSupportsRayTracedSkyLighting = backendMaxSupportedHybridStage >= 7u;
 	Param.GIBufferScale = GIBufferScale;
 	Param.LightColor = lightColor;
 	Param.bEnableDiffuseGI = (!bMobileHybridDirectOnly && bBackendSupportsDiffuseGI && bEnableDiffuseGI) ? 1 : 0;
@@ -2413,14 +2644,11 @@ void Corona::LightingPass()
 	Param.bEnableDirectDiffuse = bEnableDirectDiffuse ? 1 : 0;
 	Param.bEnableDirectSpecular = bEnableDirectSpecular ? 1 : 0;
 	Param.bEnableRTAO = (!bMobileHybridDirectOnly && bBackendSupportsRTAO && bEnableRTAO && bRTAOOutputValidThisFrame && AmbientOcclusionBuffer) ? 1 : 0;
-	Param.bEnableSkyLighting = (!bMobileHybridDirectOnly && bBackendSupportsRayTracedSkyLighting && bEnableSkyLighting && bEnableRayTracedSkyLighting && bSkyLightingOutputValidThisFrame && SkyLightingBuffer) ? 1 : 0;
-	Param.bEnableSimpleSkyLighting = bEnableSkyLighting ? 1u : 0u;
 	Param.RTAOIndirectStrength = RTAOIndirectStrength;
 	Param.RTAOIndirectFloor = RTAOIndirectFloor;
 	Param.RTAODirectContactStrength = std::clamp(RTAODirectContactStrength, 0.0f, 1.0f);
 	Param.SurfaceBounceStrength = std::clamp(SurfaceBounceStrength, 0.0f, 1.0f);
 	Param.SurfaceBounceSaturation = std::clamp(SurfaceBounceSaturation, 0.0f, 1.0f);
-	Param.SkyLightingStrength = std::clamp(SkyLightingStrength, 0.0f, 1.0f);
 	Param.LightingOutputMode = bMobileHybridDirectOnly ? 2u : EditorLightingViewMode;
 	const bool bUseMobileShadowMap =
 		bMobileHybridDirectOnly &&
@@ -2750,10 +2978,6 @@ void Corona::LightingPass()
 		(!bMobileHybridDirectOnly && AmbientOcclusionBuffer) ?
 		AmbientOcclusionBuffer.get() :
 		DefaultWhiteTex.get();
-	Texture* skyLightingTex =
-		(!bMobileHybridDirectOnly && SkyLightingBuffer) ?
-		SkyLightingBuffer.get() :
-		DefaultBlackTex.get();
 
 	{
 		static UINT32 sLastRTAOEnable = 0xFFFFFFFFu;
@@ -2826,7 +3050,6 @@ void Corona::LightingPass()
 				GraphicsBindGroupEntry::TextureSRV("SpecularGITex", lightingSpecularTex),
 				GraphicsBindGroupEntry::TextureSRV("RoughnessMetalicTex", RoughnessMetalicBuffer.get()),
 				GraphicsBindGroupEntry::TextureSRV("AmbientOcclusionTex", ambientOcclusionTex),
-				GraphicsBindGroupEntry::TextureSRV("SkyLightingTex", skyLightingTex),
 				GraphicsBindGroupEntry::SamplerBinding("sampleWrap", samplerWrap.get()),
 				GraphicsBindGroupEntry::Constant(0, &Param, sizeof(Param)),
 			});
@@ -3238,7 +3461,7 @@ bool Corona::DrawStaticInstancedScene(
 	return true;
 }
 
-bool Corona::DrawStaticObjectBindlessBatch(const std::vector<const SceneObject*>& objects)
+bool Corona::DrawStaticObjectBindlessBatch(const std::vector<uint32_t>& objectIndices)
 {
 	auto failPrerequisite = [](const wchar_t* reason) -> bool
 	{
@@ -3263,7 +3486,7 @@ bool Corona::DrawStaticObjectBindlessBatch(const std::vector<const SceneObject*>
 		return false;
 	};
 
-	if (objects.empty())
+	if (objectIndices.empty())
 		return false;
 	if (!renderBackend)
 		return failPrerequisite(L"missing render backend");
@@ -3295,31 +3518,220 @@ bool Corona::DrawStaticObjectBindlessBatch(const std::vector<const SceneObject*>
 	GBufferProfileScope totalScope(profile, batchProfile.TotalMs, batchProfile.TotalCount);
 	const auto buildStart = profile ? GBufferProfileClock::now() : GBufferProfileClock::time_point{};
 
-	static thread_local std::vector<GBufferMaterialKey> s_materialKeys;
-	static thread_local std::vector<GBufferMaterialRecord> s_materialRecords;
-	static thread_local std::vector<GBufferGeometryKey> s_geometryKeys;
-	static thread_local std::vector<GBufferGeometryRecord> s_geometryRecords;
-	static thread_local std::vector<GBufferDrawRecord> s_drawRecords;
-	static thread_local std::vector<DrawIndirectArguments> s_indirectArgs;
-	std::vector<GBufferMaterialKey>& materialKeys = s_materialKeys;
-	std::vector<GBufferMaterialRecord>& materialRecords = s_materialRecords;
-	std::vector<GBufferGeometryKey>& geometryKeys = s_geometryKeys;
-	std::vector<GBufferGeometryRecord>& geometryRecords = s_geometryRecords;
-	std::vector<GBufferDrawRecord>& drawRecords = s_drawRecords;
-	std::vector<DrawIndirectArguments>& indirectArgs = s_indirectArgs;
-	materialKeys.clear();
-	materialRecords.clear();
-	geometryKeys.clear();
-	geometryRecords.clear();
-	drawRecords.clear();
-	indirectArgs.clear();
+	const uint64_t defaultsHash = ComputeGBufferMaterialDefaultsHash(
+		DefaultWhiteTex.get(),
+		DefaultNormalTex.get(),
+		DefaultRougnessTex.get(),
+		DefaultBlackTex.get());
+	CachedGBufferStaticDrawTable& staticDrawTable = GetCachedGBufferStaticDrawTable(this);
 
-	materialKeys.reserve(64);
-	materialRecords.reserve(64);
-	geometryKeys.reserve(64);
-	geometryRecords.reserve(64);
-	drawRecords.reserve(objects.size());
-	indirectArgs.reserve(objects.size());
+	auto buildStaticDrawTable = [&]() -> bool
+	{
+		const auto cacheBuildStart = GBufferProfileClock::now();
+		AppendCpuRuntimeTrace(
+			L"[GBufferObjectBatchCache] build begin objects=" +
+			std::to_wstring(RenderWorld.SceneObjects.size()) +
+			L", generation=" + std::to_wstring(RenderWorld.SceneObjectCullingIndexGeneration));
+		staticDrawTable.Reset();
+		staticDrawTable.Backend = renderBackend.get();
+		staticDrawTable.Generation = RenderWorld.SceneObjectCullingIndexGeneration;
+		staticDrawTable.DefaultsHash = defaultsHash;
+		staticDrawTable.ObjectCount = static_cast<uint32_t>(RenderWorld.SceneObjects.size());
+		staticDrawTable.ObjectRanges.assign(RenderWorld.SceneObjects.size(), {});
+
+		std::vector<GBufferMaterialKey> materialKeys;
+		std::vector<GBufferMaterialRecord> materialRecords;
+		std::vector<GBufferGeometryKey> geometryKeys;
+		std::vector<GBufferGeometryRecord> geometryRecords;
+		std::vector<GBufferDrawRecord> drawRecords;
+		materialKeys.reserve(128);
+		materialRecords.reserve(128);
+		geometryKeys.reserve(256);
+		geometryRecords.reserve(256);
+		drawRecords.reserve(RenderWorld.SceneObjects.size());
+		staticDrawTable.Draws.reserve(RenderWorld.SceneObjects.size());
+
+		auto findOrAddMaterial = [&](const GBufferMaterialKey& key, uint32_t& outIndex) -> bool
+		{
+			for (size_t i = 0; i < materialKeys.size(); ++i)
+			{
+				if (materialKeys[i] == key)
+				{
+					outIndex = static_cast<uint32_t>(i);
+					return true;
+				}
+			}
+			if (materialRecords.size() >= static_cast<size_t>(std::numeric_limits<uint32_t>::max()))
+				return false;
+			GBufferMaterialRecord record = MakeGBufferMaterialRecord(renderBackend.get(), key);
+			if (!IsValidGBufferMaterialRecord(record))
+				return false;
+			materialKeys.push_back(key);
+			materialRecords.push_back(record);
+			outIndex = static_cast<uint32_t>(materialRecords.size() - 1);
+			return true;
+		};
+
+		auto findOrAddGeometry = [&](const GBufferGeometryKey& key, uint32_t& outIndex) -> bool
+		{
+			for (size_t i = 0; i < geometryKeys.size(); ++i)
+			{
+				if (geometryKeys[i] == key)
+				{
+					outIndex = static_cast<uint32_t>(i);
+					return true;
+				}
+			}
+			if (geometryRecords.size() >= static_cast<size_t>(std::numeric_limits<uint32_t>::max()))
+				return false;
+			GBufferGeometryRecord record = MakeGBufferGeometryRecord(renderBackend.get(), key);
+			if (!IsValidGBufferGeometryRecord(record))
+				return false;
+			geometryKeys.push_back(key);
+			geometryRecords.push_back(record);
+			outIndex = static_cast<uint32_t>(geometryRecords.size() - 1);
+			return true;
+		};
+
+		for (uint32_t objectIndex = 0; objectIndex < static_cast<uint32_t>(RenderWorld.SceneObjects.size()); ++objectIndex)
+		{
+			const SceneObject& object = RenderWorld.SceneObjects[objectIndex];
+			CachedGBufferStaticObjectDrawRange& range = staticDrawTable.ObjectRanges[objectIndex];
+			range.FirstDraw = static_cast<uint32_t>(staticDrawTable.Draws.size());
+			if (!object.ScenePtr)
+				continue;
+
+			for (const std::shared_ptr<Mesh>& mesh : object.ScenePtr->meshes)
+			{
+				if (!mesh || !mesh->Vb || !mesh->Ib || !IsGBufferStaticBindlessGeometryEligible(*mesh))
+					continue;
+
+				uint32_t geometryIndex = 0;
+				const GBufferGeometryKey geometryKey{
+					mesh->Vb.get(),
+					mesh->Ib.get(),
+					mesh->VertexStride,
+					GetGBufferIndexStride(mesh->IndexFormat)
+				};
+				if (!findOrAddGeometry(geometryKey, geometryIndex))
+					return false;
+
+				const glm::mat4x4 worldMatrix = glm::transpose(object.Transform * mesh->transform);
+				for (const Mesh::DrawCall& drawcall : mesh->Draws)
+				{
+					if (drawcall.IndexCount == 0)
+						continue;
+					if (drawRecords.size() >= static_cast<size_t>(std::numeric_limits<uint32_t>::max()))
+						return false;
+
+					Material* material = drawcall.mat ? drawcall.mat.get() : mesh->Mat.get();
+					const GBufferMaterialKey materialKey = ResolveGBufferMaterialKey(
+						material,
+						DefaultWhiteTex.get(),
+						DefaultNormalTex.get(),
+						DefaultRougnessTex.get(),
+						DefaultBlackTex.get());
+					uint32_t materialIndex = 0;
+					if (!findOrAddMaterial(materialKey, materialIndex))
+						return false;
+
+					GBufferDrawRecord drawRecord{};
+					drawRecord.WorldMatrixRow0 = worldMatrix[0];
+					drawRecord.WorldMatrixRow1 = worldMatrix[1];
+					drawRecord.WorldMatrixRow2 = worldMatrix[2];
+					drawRecord.WorldMatrixRow3 = worldMatrix[3];
+					drawRecord.BaseColorFactor = drawcall.mat ? drawcall.mat->BaseColorFactor : glm::vec4(1.0f);
+					drawRecord.RougnessMetalic = glm::vec2(object.Roughness, object.Metallic);
+					drawRecord.bOverrideRougnessMetallic = object.bOverrideRoughnessMetallic ? 1u : 0u;
+					drawRecord.bTwoSidedLighting = mesh->bGrassMesh ? 1u : 0u;
+					drawRecord.bUnlitMaterial = 0u;
+					drawRecord.bGrassMesh = mesh->bGrassMesh ? 1u : 0u;
+					drawRecord.bTerrainMesh = mesh->bTerrainMesh ? 1u : 0u;
+					drawRecord.bExcludeFromDeformSphere = mesh->bExcludeFromDeformSphere ? 1u : 0u;
+					drawRecord.GBufferMaterialIndex = materialIndex;
+					drawRecord.GBufferGeometryIndex = geometryIndex;
+					drawRecord.GBufferIndexStart = drawcall.IndexStart;
+					drawRecord.GBufferVertexBase = drawcall.VertexBase;
+
+					staticDrawTable.Draws.push_back({
+						static_cast<uint32_t>(drawRecords.size()),
+						drawcall.IndexCount,
+						mesh->bTransparent
+					});
+					drawRecords.push_back(drawRecord);
+				}
+			}
+			range.DrawCount = static_cast<uint32_t>(staticDrawTable.Draws.size()) - range.FirstDraw;
+		}
+
+		if (drawRecords.empty() || materialRecords.empty() || geometryRecords.empty())
+		{
+			staticDrawTable.Reset();
+			return true;
+		}
+
+		auto createStaticStructuredBuffer = [&](uint32_t numElements, uint32_t elementSize, const void* initialData)
+			-> std::shared_ptr<Buffer>
+		{
+			BufferCreateDesc desc = {};
+			desc.NumElements = numElements;
+			desc.ElementSize = elementSize;
+			desc.InitialState = EInitialResourceState::ShaderRead;
+			desc.InitialData = const_cast<void*>(initialData);
+			desc.Shape = EBufferShape::Structured;
+			desc.Access = EBufferAccess::GpuOnly;
+			desc.AllocationPolicy = EBufferAllocationPolicy::Suballocated;
+			return renderBackend->CreateBuffer(desc);
+		};
+
+		staticDrawTable.MaterialBuffer = createStaticStructuredBuffer(
+			static_cast<uint32_t>(materialRecords.size()),
+			static_cast<uint32_t>(sizeof(GBufferMaterialRecord)),
+			materialRecords.data());
+		staticDrawTable.GeometryBuffer = createStaticStructuredBuffer(
+			static_cast<uint32_t>(geometryRecords.size()),
+			static_cast<uint32_t>(sizeof(GBufferGeometryRecord)),
+			geometryRecords.data());
+		staticDrawTable.DrawRecordBuffer = createStaticStructuredBuffer(
+			static_cast<uint32_t>(drawRecords.size()),
+			static_cast<uint32_t>(sizeof(GBufferDrawRecord)),
+			drawRecords.data());
+		if (!staticDrawTable.MaterialBuffer || !staticDrawTable.GeometryBuffer || !staticDrawTable.DrawRecordBuffer)
+		{
+			staticDrawTable.Reset();
+			return false;
+		}
+
+		staticDrawTable.MaterialCount = static_cast<uint32_t>(materialRecords.size());
+		staticDrawTable.GeometryCount = static_cast<uint32_t>(geometryRecords.size());
+		staticDrawTable.DrawRecordCount = static_cast<uint32_t>(drawRecords.size());
+		AppendCpuRuntimeTrace(
+			L"[GBufferObjectBatchCache] build complete ms=" +
+			std::to_wstring(GBufferProfileElapsedMs(cacheBuildStart)) +
+			L", materials=" + std::to_wstring(staticDrawTable.MaterialCount) +
+			L", geometries=" + std::to_wstring(staticDrawTable.GeometryCount) +
+			L", records=" + std::to_wstring(staticDrawTable.DrawRecordCount) +
+			L", drawInfos=" + std::to_wstring(staticDrawTable.Draws.size()));
+		return true;
+	};
+
+	const bool bStaticDrawTableValid =
+		staticDrawTable.Backend == renderBackend.get() &&
+		staticDrawTable.Generation == RenderWorld.SceneObjectCullingIndexGeneration &&
+		staticDrawTable.DefaultsHash == defaultsHash &&
+		staticDrawTable.ObjectCount == static_cast<uint32_t>(RenderWorld.SceneObjects.size()) &&
+		staticDrawTable.MaterialBuffer &&
+		staticDrawTable.GeometryBuffer &&
+		staticDrawTable.DrawRecordBuffer;
+	if (!bStaticDrawTableValid && !buildStaticDrawTable())
+		return failPrerequisite(L"static draw table build failed");
+
+	if (!staticDrawTable.MaterialBuffer || !staticDrawTable.GeometryBuffer || !staticDrawTable.DrawRecordBuffer)
+		return true;
+
+	static thread_local std::vector<DrawIndirectArguments> s_indirectArgs;
+	std::vector<DrawIndirectArguments>& indirectArgs = s_indirectArgs;
+	indirectArgs.clear();
 	// Opaque/alpha-test split (early-Z): opaque draws batch here and run with
 	// PSMainOpaque ([earlydepthstencil]); alpha-tested draws stay on the
 	// discard PSO. Concatenated into indirectArgs as [opaque | alpha] below.
@@ -3329,130 +3741,43 @@ bool Corona::DrawStaticObjectBindlessBatch(const std::vector<const SceneObject*>
 	std::vector<DrawIndirectArguments>& alphaIndirectArgs = s_alphaIndirectArgs;
 	opaqueIndirectArgs.clear();
 	alphaIndirectArgs.clear();
-	opaqueIndirectArgs.reserve(objects.size());
-	alphaIndirectArgs.reserve(objects.size());
+	indirectArgs.reserve(objectIndices.size() * 2u);
+	opaqueIndirectArgs.reserve(objectIndices.size() * 2u);
+	alphaIndirectArgs.reserve(objectIndices.size() * 2u);
 
-	auto findOrAddMaterial = [&](const GBufferMaterialKey& key, uint32_t& outIndex) -> bool
+	for (uint32_t objectIndex : objectIndices)
 	{
-		for (size_t i = 0; i < materialKeys.size(); ++i)
+		if (objectIndex >= RenderWorld.SceneObjects.size())
+			return failPrerequisite(L"object index out of range");
+		const SceneObject& object = RenderWorld.SceneObjects[objectIndex];
+		if (!object.ScenePtr)
+			return failPrerequisite(L"missing object scene");
+		if (objectIndex >= staticDrawTable.ObjectRanges.size())
+			return failPrerequisite(L"object draw range missing");
+		const CachedGBufferStaticObjectDrawRange& range = staticDrawTable.ObjectRanges[objectIndex];
+		for (uint32_t drawOffset = 0; drawOffset < range.DrawCount; ++drawOffset)
 		{
-			if (materialKeys[i] == key)
+			const uint32_t cachedDrawIndex = range.FirstDraw + drawOffset;
+			if (cachedDrawIndex >= staticDrawTable.Draws.size())
+				return failPrerequisite(L"cached draw index overflow");
+			const CachedGBufferStaticDrawInfo& drawInfo = staticDrawTable.Draws[cachedDrawIndex];
+			DrawIndirectArguments arg{};
+			std::wstring failureReason;
+			if (!BuildGBufferIndirectDrawArguments(
+				drawInfo.DrawRecordIndex,
+				drawInfo.IndexCount,
+				arg,
+				&failureReason))
 			{
-				outIndex = static_cast<uint32_t>(i);
-				return true;
+				return failPrerequisite(failureReason.c_str());
 			}
-		}
-		if (materialRecords.size() >= static_cast<size_t>(std::numeric_limits<uint32_t>::max()))
-			return false;
-		GBufferMaterialRecord record = MakeGBufferMaterialRecord(renderBackend.get(), key);
-		if (!IsValidGBufferMaterialRecord(record))
-			return false;
-		materialKeys.push_back(key);
-		materialRecords.push_back(record);
-		outIndex = static_cast<uint32_t>(materialRecords.size() - 1);
-		return true;
-	};
-
-	auto findOrAddGeometry = [&](const GBufferGeometryKey& key, uint32_t& outIndex) -> bool
-	{
-		for (size_t i = 0; i < geometryKeys.size(); ++i)
-		{
-			if (geometryKeys[i] == key)
-			{
-				outIndex = static_cast<uint32_t>(i);
-				return true;
-			}
-		}
-		if (geometryRecords.size() >= static_cast<size_t>(std::numeric_limits<uint32_t>::max()))
-			return false;
-		GBufferGeometryRecord record = MakeGBufferGeometryRecord(renderBackend.get(), key);
-		if (!IsValidGBufferGeometryRecord(record))
-			return false;
-		geometryKeys.push_back(key);
-		geometryRecords.push_back(record);
-		outIndex = static_cast<uint32_t>(geometryRecords.size() - 1);
-		return true;
-	};
-
-	for (const SceneObject* objectPtr : objects)
-	{
-		if (!objectPtr || !objectPtr->ScenePtr)
-			return failPrerequisite(L"missing object or scene");
-		const SceneObject& object = *objectPtr;
-		for (const std::shared_ptr<Mesh>& mesh : object.ScenePtr->meshes)
-		{
-			if (!mesh)
-				continue;
-			if (!IsGBufferStaticBindlessGeometryEligible(*mesh))
-				return failPrerequisite(L"mesh is not static bindless eligible");
-
-			uint32_t geometryIndex = 0;
-			const GBufferGeometryKey geometryKey{
-				mesh->Vb.get(),
-				mesh->Ib.get(),
-				mesh->VertexStride,
-				GetGBufferIndexStride(mesh->IndexFormat)
-			};
-			if (!findOrAddGeometry(geometryKey, geometryIndex))
-				return failPrerequisite(L"geometry registration failed");
-
-			const glm::mat4x4 worldMatrix = glm::transpose(object.Transform * mesh->transform);
-			for (const Mesh::DrawCall& drawcall : mesh->Draws)
-			{
-				if (drawcall.IndexCount == 0)
-					continue;
-				if (drawRecords.size() >= static_cast<size_t>(std::numeric_limits<uint32_t>::max()))
-					return failPrerequisite(L"draw record count overflow");
-
-				Material* material = drawcall.mat ? drawcall.mat.get() : mesh->Mat.get();
-				const GBufferMaterialKey materialKey = ResolveGBufferMaterialKey(
-					material,
-					DefaultWhiteTex.get(),
-					DefaultNormalTex.get(),
-					DefaultRougnessTex.get(),
-					DefaultBlackTex.get());
-				uint32_t materialIndex = 0;
-				if (!findOrAddMaterial(materialKey, materialIndex))
-					return failPrerequisite(L"material registration failed");
-
-				GBufferDrawRecord drawRecord{};
-				drawRecord.WorldMatrixRow0 = worldMatrix[0];
-				drawRecord.WorldMatrixRow1 = worldMatrix[1];
-				drawRecord.WorldMatrixRow2 = worldMatrix[2];
-				drawRecord.WorldMatrixRow3 = worldMatrix[3];
-				drawRecord.BaseColorFactor = drawcall.mat ? drawcall.mat->BaseColorFactor : glm::vec4(1.0f);
-				drawRecord.RougnessMetalic = glm::vec2(object.Roughness, object.Metallic);
-				drawRecord.bOverrideRougnessMetallic = object.bOverrideRoughnessMetallic ? 1u : 0u;
-				drawRecord.bTwoSidedLighting = mesh->bGrassMesh ? 1u : 0u;
-				drawRecord.bUnlitMaterial = 0u;
-				drawRecord.bGrassMesh = mesh->bGrassMesh ? 1u : 0u;
-				drawRecord.bTerrainMesh = mesh->bTerrainMesh ? 1u : 0u;
-				drawRecord.bExcludeFromDeformSphere = mesh->bExcludeFromDeformSphere ? 1u : 0u;
-				drawRecord.GBufferMaterialIndex = materialIndex;
-				drawRecord.GBufferGeometryIndex = geometryIndex;
-				drawRecord.GBufferIndexStart = drawcall.IndexStart;
-				drawRecord.GBufferVertexBase = drawcall.VertexBase;
-
-				DrawIndirectArguments arg{};
-				std::wstring failureReason;
-				if (!BuildGBufferIndirectDrawArguments(
-					static_cast<uint32_t>(drawRecords.size()),
-					drawcall.IndexCount,
-					arg,
-					&failureReason))
-				{
-					return failPrerequisite(failureReason.c_str());
-				}
-
-				drawRecords.push_back(drawRecord);
-				// Route by opacity: opaque -> early-Z PSO batch, alpha-tested ->
-				// discard PSO batch. mesh->bTransparent matches the RT BVH opaque
-				// classification; conservative (any-alpha mesh -> discard path).
-				if (mesh->bTransparent)
-					alphaIndirectArgs.push_back(arg);
-				else
-					opaqueIndirectArgs.push_back(arg);
-			}
+			// Route by opacity: opaque -> early-Z PSO batch, alpha-tested ->
+			// discard PSO batch. mesh->bTransparent matches the RT BVH opaque
+			// classification; conservative (any-alpha mesh -> discard path).
+			if (drawInfo.bTransparent)
+				alphaIndirectArgs.push_back(arg);
+			else
+				opaqueIndirectArgs.push_back(arg);
 		}
 	}
 
@@ -3464,32 +3789,12 @@ bool Corona::DrawStaticObjectBindlessBatch(const std::vector<const SceneObject*>
 	indirectArgs.insert(indirectArgs.end(), alphaIndirectArgs.begin(), alphaIndirectArgs.end());
 	GBufferProfileAdd(profile, batchProfile.BuildMs, batchProfile.BuildCount, buildStart);
 
-	if (drawRecords.empty() || materialRecords.empty() || geometryRecords.empty() || indirectArgs.empty())
+	if (indirectArgs.empty())
 		return true;
 
-	// VRAM-resident records via the recycling DEFAULT pool: device-local reads
-	// (off the SysL2/sysmem aperture) without the per-frame CreateCommittedResource
-	// cost (buffers are recycled across frames). indirectArgsBuffer stays
-	// host-visible (consumed as draw indirect args, not an SRV).
+	// Static records are persistent device-local buffers. Per frame we only
+	// stream the visible indirect argument list.
 	const auto allocStart = profile ? GBufferProfileClock::now() : GBufferProfileClock::time_point{};
-	const auto materialAllocStart = profile ? GBufferProfileClock::now() : GBufferProfileClock::time_point{};
-	std::shared_ptr<Buffer> materialBuffer = renderBackend->AllocateTransientDefaultStructuredBuffer(
-		static_cast<uint32_t>(materialRecords.size()),
-		static_cast<uint32_t>(sizeof(GBufferMaterialRecord)),
-		materialRecords.data());
-	GBufferProfileAdd(profile, batchProfile.MaterialAllocMs, batchProfile.MaterialAllocCount, materialAllocStart);
-	const auto geometryAllocStart = profile ? GBufferProfileClock::now() : GBufferProfileClock::time_point{};
-	std::shared_ptr<Buffer> geometryBuffer = renderBackend->AllocateTransientDefaultStructuredBuffer(
-		static_cast<uint32_t>(geometryRecords.size()),
-		static_cast<uint32_t>(sizeof(GBufferGeometryRecord)),
-		geometryRecords.data());
-	GBufferProfileAdd(profile, batchProfile.GeometryAllocMs, batchProfile.GeometryAllocCount, geometryAllocStart);
-	const auto drawRecordAllocStart = profile ? GBufferProfileClock::now() : GBufferProfileClock::time_point{};
-	std::shared_ptr<Buffer> drawRecordBuffer = renderBackend->AllocateTransientDefaultStructuredBuffer(
-		static_cast<uint32_t>(drawRecords.size()),
-		static_cast<uint32_t>(sizeof(GBufferDrawRecord)),
-		drawRecords.data());
-	GBufferProfileAdd(profile, batchProfile.DrawRecordAllocMs, batchProfile.DrawRecordAllocCount, drawRecordAllocStart);
 	const auto indirectAllocStart = profile ? GBufferProfileClock::now() : GBufferProfileClock::time_point{};
 	std::shared_ptr<Buffer> indirectArgsBuffer = renderBackend->AllocateTransientUploadStructuredBuffer(
 		static_cast<uint32_t>(indirectArgs.size()),
@@ -3497,7 +3802,7 @@ bool Corona::DrawStaticObjectBindlessBatch(const std::vector<const SceneObject*>
 		indirectArgs.data());
 	GBufferProfileAdd(profile, batchProfile.IndirectAllocMs, batchProfile.IndirectAllocCount, indirectAllocStart);
 	GBufferProfileAdd(profile, batchProfile.AllocMs, batchProfile.AllocCount, allocStart);
-	if (!materialBuffer || !geometryBuffer || !drawRecordBuffer || !indirectArgsBuffer)
+	if (!indirectArgsBuffer)
 		return failPrerequisite(L"transient upload allocation failed");
 
 	GBufferConstantBuffer objCB = {};
@@ -3527,7 +3832,12 @@ bool Corona::DrawStaticObjectBindlessBatch(const std::vector<const SceneObject*>
 
 	// Bind a PSO with the shared scene resources + draw CB, then issue a
 	// DrawIndirect over a [byteOffset, +drawCount) slice of indirectArgs.
-	auto* gbufferScene = objects.front()->ScenePtr.get();
+	if (objectIndices.front() >= RenderWorld.SceneObjects.size() ||
+		!RenderWorld.SceneObjects[objectIndices.front()].ScenePtr)
+	{
+		return failPrerequisite(L"missing first object scene");
+	}
+	auto* gbufferScene = RenderWorld.SceneObjects[objectIndices.front()].ScenePtr.get();
 	auto submitGBufferBatch = [&](GraphicsPipelineHandle* batchPso, uint64_t byteOffset, uint32_t drawCount) -> bool
 	{
 		if (!batchPso || drawCount == 0)
@@ -3539,10 +3849,10 @@ bool Corona::DrawStaticObjectBindlessBatch(const std::vector<const SceneObject*>
 			batchPso,
 			gbufferScene,
 			samplerWrap.get(),
-			materialBuffer.get(),
-			geometryBuffer.get(),
-			drawRecordBuffer.get(),
-			false))
+			staticDrawTable.MaterialBuffer.get(),
+			staticDrawTable.GeometryBuffer.get(),
+			staticDrawTable.DrawRecordBuffer.get(),
+			true))
 		{
 			return failPrerequisite(L"resource bind group creation failed");
 		}
@@ -3585,29 +3895,35 @@ bool Corona::DrawStaticObjectBindlessBatch(const std::vector<const SceneObject*>
 		return failPrerequisite(L"draw submission failed");
 
 	++GBufferLastBindlessObjectBatchCount;
-	GBufferLastBindlessObjectCount += static_cast<uint64_t>(objects.size());
-	GBufferLastBindlessObjectDrawCount += static_cast<uint64_t>(drawRecords.size());
+	GBufferLastBindlessObjectCount += static_cast<uint64_t>(objectIndices.size());
+	GBufferLastBindlessObjectDrawCount += static_cast<uint64_t>(indirectArgs.size());
 	if (profile)
 	{
 		++batchProfile.Calls;
-		batchProfile.Objects += static_cast<uint64_t>(objects.size());
-		batchProfile.DrawRecords += static_cast<uint64_t>(drawRecords.size());
-		batchProfile.Materials += static_cast<uint64_t>(materialRecords.size());
-		batchProfile.Geometries += static_cast<uint64_t>(geometryRecords.size());
+		batchProfile.Objects += static_cast<uint64_t>(objectIndices.size());
+		batchProfile.DrawRecords += static_cast<uint64_t>(indirectArgs.size());
+		batchProfile.Materials += static_cast<uint64_t>(staticDrawTable.MaterialCount);
+		batchProfile.Geometries += static_cast<uint64_t>(staticDrawTable.GeometryCount);
 		batchProfile.IndirectArgs += static_cast<uint64_t>(indirectArgs.size());
 	}
 
 	if (!bLoggedFirstStaticObjectBatch || (FrameCounter % 120u) == 0u)
 	{
 		AppendCpuRuntimeTrace(
-			L"[GBufferObjectBatch] submitted objects=" + std::to_wstring(objects.size()) +
-			L", records=" + std::to_wstring(drawRecords.size()) +
+			L"[GBufferObjectBatch] submitted objects=" + std::to_wstring(objectIndices.size()) +
+			L", visibleRecords=" + std::to_wstring(indirectArgs.size()) +
+			L", cachedRecords=" + std::to_wstring(staticDrawTable.DrawRecordCount) +
 			L", indirectDraws=" + std::to_wstring(indirectArgs.size()) +
-			L", materials=" + std::to_wstring(materialRecords.size()) +
-			L", geometries=" + std::to_wstring(geometryRecords.size()));
+			L", materials=" + std::to_wstring(staticDrawTable.MaterialCount) +
+			L", geometries=" + std::to_wstring(staticDrawTable.GeometryCount));
 		bLoggedFirstStaticObjectBatch = true;
 	}
 	return true;
+}
+
+void Corona::ResetGBufferStaticDrawCache()
+{
+	ResetCachedGBufferStaticDrawTable(this);
 }
 
 void Corona::DrawScene(shared_ptr<Scene> scene, const glm::mat4x4& instanceTransform, float Roughness, float Metalic, bool bOverrideRoughnessMetallic)
@@ -4610,66 +4926,365 @@ bool Corona::GetSceneObjectWorldBounds(
 	if (!object.ScenePtr || !object.ScenePtr->bHasBounds)
 		return false;
 
-	const glm::vec3 localMin = object.ScenePtr->BoundsMin;
-	const glm::vec3 localMax = object.ScenePtr->BoundsMax;
-	const std::array<glm::vec3, 8> corners =
+	if (object.bWorldBoundsCacheValid)
 	{
-		glm::vec3(localMin.x, localMin.y, localMin.z),
-		glm::vec3(localMax.x, localMin.y, localMin.z),
-		glm::vec3(localMin.x, localMax.y, localMin.z),
-		glm::vec3(localMax.x, localMax.y, localMin.z),
-		glm::vec3(localMin.x, localMin.y, localMax.z),
-		glm::vec3(localMax.x, localMin.y, localMax.z),
-		glm::vec3(localMin.x, localMax.y, localMax.z),
-		glm::vec3(localMax.x, localMax.y, localMax.z),
-	};
-
-	boundsMin = glm::vec3(std::numeric_limits<float>::max());
-	boundsMax = glm::vec3(-std::numeric_limits<float>::max());
-	for (const glm::vec3& corner : corners)
-	{
-		const glm::vec3 worldCorner = glm::vec3(object.Transform * glm::vec4(corner, 1.0f));
-		boundsMin = glm::min(boundsMin, worldCorner);
-		boundsMax = glm::max(boundsMax, worldCorner);
+		boundsMin = object.CachedWorldBoundsMin;
+		boundsMax = object.CachedWorldBoundsMax;
+		center = object.CachedWorldBoundsCenter;
+		radius = object.CachedWorldBoundsRadius;
+		return radius > 0.001f;
 	}
 
-	center = (boundsMin + boundsMax) * 0.5f;
-	radius = glm::length(boundsMax - boundsMin) * 0.5f;
+	const glm::vec3 localMin = object.ScenePtr->BoundsMin;
+	const glm::vec3 localMax = object.ScenePtr->BoundsMax;
+	const glm::vec3 localCenter = (localMin + localMax) * 0.5f;
+	const glm::vec3 localExtents = glm::max((localMax - localMin) * 0.5f, glm::vec3(0.0f));
+	center = glm::vec3(object.Transform * glm::vec4(localCenter, 1.0f));
+	const glm::vec3 extents(
+		std::abs(object.Transform[0][0]) * localExtents.x + std::abs(object.Transform[1][0]) * localExtents.y + std::abs(object.Transform[2][0]) * localExtents.z,
+		std::abs(object.Transform[0][1]) * localExtents.x + std::abs(object.Transform[1][1]) * localExtents.y + std::abs(object.Transform[2][1]) * localExtents.z,
+		std::abs(object.Transform[0][2]) * localExtents.x + std::abs(object.Transform[1][2]) * localExtents.y + std::abs(object.Transform[2][2]) * localExtents.z);
+	boundsMin = center - extents;
+	boundsMax = center + extents;
+	radius = glm::length(extents);
+	object.CachedWorldBoundsMin = boundsMin;
+	object.CachedWorldBoundsMax = boundsMax;
+	object.CachedWorldBoundsCenter = center;
+	object.CachedWorldBoundsRadius = radius;
+	object.bWorldBoundsCacheValid = radius > 0.001f;
 	return radius > 0.001f;
 }
 
 bool Corona::IsWorldAabbInViewFrustum(const glm::vec3& boundsMin, const glm::vec3& boundsMax) const
 {
-	const std::array<glm::vec3, 8> corners =
+	const FrustumPlaneArray planes = BuildFrustumPlanes(UnjitteredViewProjMat);
+	return ClassifyAabbAgainstFrustumPlanes(planes, boundsMin, boundsMax) != EFrustumAabbRelation::Outside;
+}
+
+void Corona::MarkRenderWorldCullingIndexDirty()
+{
+	RenderWorld.bSceneObjectCullingIndexDirty = true;
+}
+
+void Corona::RebuildRenderWorldCullingIndex()
+{
+	const bool bGBufferCullProfileEnabled = IsGBufferCullingProfileEnabled();
+	GBufferCullingProfile& gbufferCullProfile = GetGBufferCullingProfile();
+	const auto boundsProfileBegin =
+		bGBufferCullProfileEnabled ? GBufferProfileClock::now() : GBufferProfileClock::time_point{};
+
+	RenderWorld.SceneObjectCullingData.clear();
+	RenderWorld.SceneObjectCullingData.resize(RenderWorld.SceneObjects.size());
+	RenderWorld.SceneObjectCullingCells.clear();
+	RenderWorld.UnboundedSceneObjectIndices.clear();
+	RenderWorld.SceneObjectCullingCellLookup.clear();
+	RenderWorld.SceneObjectCullingObjectCount = 0;
+	RenderWorld.SceneObjectCullingCells.reserve(std::max<size_t>(16, RenderWorld.SceneObjects.size() / 64));
+	RenderWorld.UnboundedSceneObjectIndices.reserve(64);
+	RenderWorld.SceneObjectCullingCellLookup.reserve(std::max<size_t>(16, RenderWorld.SceneObjects.size() / 64));
+
+	auto isFinite3 = [](const glm::vec3& value)
 	{
-		glm::vec3(boundsMin.x, boundsMin.y, boundsMin.z),
-		glm::vec3(boundsMax.x, boundsMin.y, boundsMin.z),
-		glm::vec3(boundsMin.x, boundsMax.y, boundsMin.z),
-		glm::vec3(boundsMax.x, boundsMax.y, boundsMin.z),
-		glm::vec3(boundsMin.x, boundsMin.y, boundsMax.z),
-		glm::vec3(boundsMax.x, boundsMin.y, boundsMax.z),
-		glm::vec3(boundsMin.x, boundsMax.y, boundsMax.z),
-		glm::vec3(boundsMax.x, boundsMax.y, boundsMax.z),
+		return std::isfinite(value.x) && std::isfinite(value.y) && std::isfinite(value.z);
 	};
 
-	std::array<uint32_t, 6> outsideCounts = {};
-	for (const glm::vec3& corner : corners)
+	const uint32_t objectCount = static_cast<uint32_t>(RenderWorld.SceneObjects.size());
+	auto buildObjectCullingRecord = [&](uint32_t objectIndex)
 	{
-		const glm::vec4 clip = UnjitteredViewProjMat * glm::vec4(corner, 1.0f);
-		if (clip.x < -clip.w) ++outsideCounts[0];
-		if (clip.x >  clip.w) ++outsideCounts[1];
-		if (clip.y < -clip.w) ++outsideCounts[2];
-		if (clip.y >  clip.w) ++outsideCounts[3];
-		if (clip.z < -clip.w) ++outsideCounts[4];
-		if (clip.z >  clip.w) ++outsideCounts[5];
+		const SceneObject& object = RenderWorld.SceneObjects[objectIndex];
+		RenderWorldMirror::SceneObjectCullingRecord& objectData = RenderWorld.SceneObjectCullingData[objectIndex];
+		objectData.Visible = object.bVisible && object.ScenePtr != nullptr;
+		if (!objectData.Visible)
+			return;
+
+		glm::vec3 boundsMin(0.0f);
+		glm::vec3 boundsMax(0.0f);
+		glm::vec3 boundsCenter(0.0f);
+		float boundsRadius = 0.0f;
+		objectData.HasBounds = GetSceneObjectWorldBounds(object, boundsMin, boundsMax, boundsCenter, boundsRadius) &&
+			isFinite3(boundsMin) &&
+			isFinite3(boundsMax) &&
+			isFinite3(boundsCenter) &&
+			std::isfinite(boundsRadius);
+		if (!objectData.HasBounds)
+			return;
+
+		objectData.BoundsMin = boundsMin;
+		objectData.BoundsMax = boundsMax;
+		objectData.BoundsCenter = boundsCenter;
+		objectData.BoundsRadius = boundsRadius;
+	};
+
+	const uint32_t taskThreadCount = std::max<uint32_t>(1u, g_TS.GetNumTaskThreads());
+	if (objectCount >= kParallelCullingIndexBuildThreshold && taskThreadCount > 1u)
+	{
+		enki::TaskSet buildRecordsTask(objectCount, [&](enki::TaskSetPartition range, uint32_t)
+		{
+			for (uint32_t objectIndex = range.start; objectIndex < range.end; ++objectIndex)
+				buildObjectCullingRecord(objectIndex);
+		});
+		buildRecordsTask.m_MinRange = 256u;
+		g_TS.AddTaskSetToPipe(&buildRecordsTask);
+		g_TS.WaitforTask(&buildRecordsTask);
+	}
+	else
+	{
+		for (uint32_t objectIndex = 0; objectIndex < objectCount; ++objectIndex)
+			buildObjectCullingRecord(objectIndex);
 	}
 
-	for (uint32_t outsideCount : outsideCounts)
+	for (uint32_t objectIndex = 0; objectIndex < objectCount; ++objectIndex)
 	{
-		if (outsideCount == corners.size())
-			return false;
+		const RenderWorldMirror::SceneObjectCullingRecord& objectData = RenderWorld.SceneObjectCullingData[objectIndex];
+		if (!objectData.Visible)
+			continue;
+		++RenderWorld.SceneObjectCullingObjectCount;
+		if (!objectData.HasBounds)
+		{
+			RenderWorld.UnboundedSceneObjectIndices.push_back(objectIndex);
+			continue;
+		}
+
+		const int32_t cellX = static_cast<int32_t>(std::floor(objectData.BoundsCenter.x / kRenderWorldCullingCellSize));
+		const int32_t cellZ = static_cast<int32_t>(std::floor(objectData.BoundsCenter.z / kRenderWorldCullingCellSize));
+		const uint64_t cellKey = PackCullingCellCoord(cellX, cellZ);
+		auto cellIt = RenderWorld.SceneObjectCullingCellLookup.find(cellKey);
+		if (cellIt == RenderWorld.SceneObjectCullingCellLookup.end())
+		{
+			const uint32_t newCellIndex = static_cast<uint32_t>(RenderWorld.SceneObjectCullingCells.size());
+			cellIt = RenderWorld.SceneObjectCullingCellLookup.emplace(cellKey, newCellIndex).first;
+			RenderWorld.SceneObjectCullingCells.push_back({});
+		}
+
+		RenderWorldMirror::SceneObjectCullingCell& cell = RenderWorld.SceneObjectCullingCells[cellIt->second];
+		cell.BoundsMin = glm::min(cell.BoundsMin, objectData.BoundsMin);
+		cell.BoundsMax = glm::max(cell.BoundsMax, objectData.BoundsMax);
+		cell.ObjectIndices.push_back(objectIndex);
 	}
-	return true;
+
+	RenderWorld.bSceneObjectCullingIndexDirty = false;
+	++RenderWorld.SceneObjectCullingIndexGeneration;
+	if (bGBufferCullProfileEnabled)
+	{
+		gbufferCullProfile.BoundsTests += static_cast<uint64_t>(RenderWorld.SceneObjects.size());
+		GBufferProfileAdd(true, gbufferCullProfile.BoundsMs, gbufferCullProfile.BoundsCount, boundsProfileBegin);
+	}
+}
+
+const std::vector<uint32_t>& Corona::GatherGBufferVisibleObjectIndices()
+{
+	const bool bGBufferCullProfileEnabled = IsGBufferCullingProfileEnabled();
+	GBufferCullingProfile& gbufferCullProfile = GetGBufferCullingProfile();
+	if (bGBufferCullProfileEnabled)
+		gbufferCullProfile.BeginFrame(static_cast<uint64_t>(FrameCounter));
+	const auto totalProfileBegin =
+		bGBufferCullProfileEnabled ? GBufferProfileClock::now() : GBufferProfileClock::time_point{};
+
+	if (RenderWorld.bSceneObjectCullingIndexDirty ||
+		RenderWorld.SceneObjectCullingData.size() != RenderWorld.SceneObjects.size())
+	{
+		RebuildRenderWorldCullingIndex();
+	}
+
+	GBufferVisibleObjectIndices.clear();
+	GBufferSpatialFrustumCandidateIndices.clear();
+	GBufferLastSpatialCellCount = RenderWorld.SceneObjectCullingCells.size();
+	GBufferLastSpatialVisibleCellCount = 0;
+	GBufferLastSpatialPartialCellCount = 0;
+	GBufferLastSpatialCandidateObjectCount = 0;
+	GBufferLastSpatialVisibleObjectCount = 0;
+
+	const uint64_t totalCullableObjectCount = RenderWorld.SceneObjectCullingObjectCount;
+	GBufferLastTotalObjectCount = totalCullableObjectCount;
+
+	GBufferVisibleObjectIndices.reserve(static_cast<size_t>(std::min<uint64_t>(totalCullableObjectCount, RenderWorld.SceneObjects.size())));
+	for (uint32_t objectIndex : RenderWorld.UnboundedSceneObjectIndices)
+		GBufferVisibleObjectIndices.push_back(objectIndex);
+
+	const FrustumPlaneArray planes = BuildFrustumPlanes(UnjitteredViewProjMat);
+	const uint32_t taskThreadCount = std::max<uint32_t>(1u, g_TS.GetNumTaskThreads());
+	const auto candidateScanProfileBegin =
+		bGBufferCullProfileEnabled ? GBufferProfileClock::now() : GBufferProfileClock::time_point{};
+	const uint32_t cellCount = static_cast<uint32_t>(RenderWorld.SceneObjectCullingCells.size());
+	if (cellCount >= kParallelCellFrustumCullThreshold && taskThreadCount > 1u)
+	{
+		GBufferSpatialThreadVisibleIndices.resize(taskThreadCount);
+		GBufferSpatialThreadCandidateIndices.resize(taskThreadCount);
+		const size_t perThreadObjectReserve =
+			static_cast<size_t>(std::max<uint64_t>(64u, totalCullableObjectCount / taskThreadCount));
+		for (uint32_t threadIndex = 0; threadIndex < taskThreadCount; ++threadIndex)
+		{
+			GBufferSpatialThreadVisibleIndices[threadIndex].clear();
+			GBufferSpatialThreadVisibleIndices[threadIndex].reserve(perThreadObjectReserve);
+			GBufferSpatialThreadCandidateIndices[threadIndex].clear();
+			GBufferSpatialThreadCandidateIndices[threadIndex].reserve(perThreadObjectReserve / 2u + 64u);
+		}
+		std::vector<uint32_t> visibleCellCounts(taskThreadCount, 0u);
+		std::vector<uint32_t> partialCellCounts(taskThreadCount, 0u);
+
+		enki::TaskSet cellCullTask(cellCount, [&](enki::TaskSetPartition range, uint32_t threadnum)
+		{
+			const uint32_t threadIndex = std::min<uint32_t>(threadnum, taskThreadCount - 1u);
+			std::vector<uint32_t>& threadVisible = GBufferSpatialThreadVisibleIndices[threadIndex];
+			std::vector<uint32_t>& threadCandidates = GBufferSpatialThreadCandidateIndices[threadIndex];
+			uint32_t localVisibleCells = 0;
+			uint32_t localPartialCells = 0;
+			for (uint32_t cellIndex = range.start; cellIndex < range.end; ++cellIndex)
+			{
+				const RenderWorldMirror::SceneObjectCullingCell& cell = RenderWorld.SceneObjectCullingCells[cellIndex];
+				if (cell.ObjectIndices.empty())
+					continue;
+
+				const EFrustumAabbRelation relation =
+					ClassifyAabbAgainstFrustumPlanes(planes, cell.BoundsMin, cell.BoundsMax);
+				if (relation == EFrustumAabbRelation::Outside)
+					continue;
+
+				++localVisibleCells;
+				if (relation == EFrustumAabbRelation::Inside)
+				{
+					threadVisible.insert(
+						threadVisible.end(),
+						cell.ObjectIndices.begin(),
+						cell.ObjectIndices.end());
+					continue;
+				}
+
+				++localPartialCells;
+				threadCandidates.insert(
+					threadCandidates.end(),
+					cell.ObjectIndices.begin(),
+					cell.ObjectIndices.end());
+			}
+			visibleCellCounts[threadIndex] += localVisibleCells;
+			partialCellCounts[threadIndex] += localPartialCells;
+		});
+		cellCullTask.m_MinRange = 64u;
+		g_TS.AddTaskSetToPipe(&cellCullTask);
+		g_TS.WaitforTask(&cellCullTask);
+
+		for (uint32_t threadIndex = 0; threadIndex < taskThreadCount; ++threadIndex)
+		{
+			GBufferLastSpatialVisibleCellCount += visibleCellCounts[threadIndex];
+			GBufferLastSpatialPartialCellCount += partialCellCounts[threadIndex];
+			GBufferVisibleObjectIndices.insert(
+				GBufferVisibleObjectIndices.end(),
+				GBufferSpatialThreadVisibleIndices[threadIndex].begin(),
+				GBufferSpatialThreadVisibleIndices[threadIndex].end());
+			GBufferSpatialFrustumCandidateIndices.insert(
+				GBufferSpatialFrustumCandidateIndices.end(),
+				GBufferSpatialThreadCandidateIndices[threadIndex].begin(),
+				GBufferSpatialThreadCandidateIndices[threadIndex].end());
+		}
+	}
+	else
+	{
+		for (const RenderWorldMirror::SceneObjectCullingCell& cell : RenderWorld.SceneObjectCullingCells)
+		{
+			if (cell.ObjectIndices.empty())
+				continue;
+
+			const EFrustumAabbRelation relation =
+				ClassifyAabbAgainstFrustumPlanes(planes, cell.BoundsMin, cell.BoundsMax);
+			if (relation == EFrustumAabbRelation::Outside)
+				continue;
+
+			++GBufferLastSpatialVisibleCellCount;
+			if (relation == EFrustumAabbRelation::Inside)
+			{
+				GBufferVisibleObjectIndices.insert(
+					GBufferVisibleObjectIndices.end(),
+					cell.ObjectIndices.begin(),
+					cell.ObjectIndices.end());
+				continue;
+			}
+
+			++GBufferLastSpatialPartialCellCount;
+			GBufferSpatialFrustumCandidateIndices.insert(
+				GBufferSpatialFrustumCandidateIndices.end(),
+				cell.ObjectIndices.begin(),
+				cell.ObjectIndices.end());
+		}
+	}
+	if (bGBufferCullProfileEnabled)
+	{
+		gbufferCullProfile.CandidateScans += static_cast<uint64_t>(RenderWorld.SceneObjectCullingCells.size());
+		GBufferProfileAdd(true, gbufferCullProfile.CandidateScanMs, gbufferCullProfile.CandidateScanCount, candidateScanProfileBegin);
+	}
+
+	const auto objectScanProfileBegin =
+		bGBufferCullProfileEnabled ? GBufferProfileClock::now() : GBufferProfileClock::time_point{};
+	GBufferLastSpatialCandidateObjectCount = GBufferSpatialFrustumCandidateIndices.size();
+	const uint32_t candidateCount = static_cast<uint32_t>(GBufferSpatialFrustumCandidateIndices.size());
+	if (candidateCount >= kParallelFrustumCullThreshold && taskThreadCount > 1u)
+	{
+		GBufferSpatialThreadVisibleIndices.resize(taskThreadCount);
+		for (std::vector<uint32_t>& threadIndices : GBufferSpatialThreadVisibleIndices)
+		{
+			threadIndices.clear();
+			threadIndices.reserve((candidateCount / taskThreadCount) + 64u);
+		}
+
+		enki::TaskSet frustumCullTask(candidateCount, [&](enki::TaskSetPartition range, uint32_t threadnum)
+		{
+			std::vector<uint32_t>& threadVisible =
+				GBufferSpatialThreadVisibleIndices[std::min<uint32_t>(threadnum, taskThreadCount - 1u)];
+			for (uint32_t candidateIndex = range.start; candidateIndex < range.end; ++candidateIndex)
+			{
+				const uint32_t objectIndex = GBufferSpatialFrustumCandidateIndices[candidateIndex];
+				if (objectIndex >= RenderWorld.SceneObjectCullingData.size())
+					continue;
+				const RenderWorldMirror::SceneObjectCullingRecord& objectData =
+					RenderWorld.SceneObjectCullingData[objectIndex];
+				if (!objectData.Visible || !objectData.HasBounds)
+					continue;
+				if (ClassifyAabbAgainstFrustumPlanes(planes, objectData.BoundsMin, objectData.BoundsMax) != EFrustumAabbRelation::Outside)
+					threadVisible.push_back(objectIndex);
+			}
+		});
+		frustumCullTask.m_MinRange = 256u;
+		g_TS.AddTaskSetToPipe(&frustumCullTask);
+		g_TS.WaitforTask(&frustumCullTask);
+
+		for (const std::vector<uint32_t>& threadVisible : GBufferSpatialThreadVisibleIndices)
+		{
+			GBufferVisibleObjectIndices.insert(
+				GBufferVisibleObjectIndices.end(),
+				threadVisible.begin(),
+				threadVisible.end());
+		}
+	}
+	else
+	{
+		for (uint32_t objectIndex : GBufferSpatialFrustumCandidateIndices)
+		{
+			if (objectIndex >= RenderWorld.SceneObjectCullingData.size())
+				continue;
+			const RenderWorldMirror::SceneObjectCullingRecord& objectData =
+				RenderWorld.SceneObjectCullingData[objectIndex];
+			if (!objectData.Visible || !objectData.HasBounds)
+				continue;
+			if (ClassifyAabbAgainstFrustumPlanes(planes, objectData.BoundsMin, objectData.BoundsMax) != EFrustumAabbRelation::Outside)
+				GBufferVisibleObjectIndices.push_back(objectIndex);
+		}
+	}
+	GBufferLastSpatialVisibleObjectCount = GBufferVisibleObjectIndices.size();
+	GBufferLastFrustumCulledObjectCount =
+		totalCullableObjectCount > GBufferVisibleObjectIndices.size() ?
+		totalCullableObjectCount - GBufferVisibleObjectIndices.size() :
+		0;
+
+	if (bGBufferCullProfileEnabled)
+	{
+		gbufferCullProfile.Objects += totalCullableObjectCount;
+		gbufferCullProfile.ObjectScans += GBufferSpatialFrustumCandidateIndices.size();
+		gbufferCullProfile.FrustumTests +=
+			static_cast<uint64_t>(RenderWorld.SceneObjectCullingCells.size()) +
+			static_cast<uint64_t>(GBufferSpatialFrustumCandidateIndices.size());
+		GBufferProfileAdd(true, gbufferCullProfile.ObjectScanMs, gbufferCullProfile.ObjectScanCount, objectScanProfileBegin);
+		GBufferProfileAdd(true, gbufferCullProfile.TotalMs, gbufferCullProfile.TotalCount, totalProfileBegin);
+	}
+	return GBufferVisibleObjectIndices;
 }
 
 void Corona::PrepareGBufferCulling(uint32_t sceneObjectCount)
@@ -4686,6 +5301,9 @@ void Corona::PrepareGBufferCulling(uint32_t sceneObjectCount)
 	GBufferLastBindlessObjectDrawCount = 0;
 	GBufferOcclusionQueryCount = 0;
 	bGBufferOcclusionQueriesActive = false;
+
+	if (IsVulkanCaptureSafeActive())
+		return;
 
 	if (!renderBackend || !renderBackend->GetCapabilities().SupportsGBufferOcclusionQueries || sceneObjectCount == 0)
 		return;
@@ -4748,6 +5366,9 @@ bool Corona::ShouldDrawSceneObjectInGBuffer(const SceneObject& object, const glm
 
 uint32_t Corona::BeginGBufferOcclusionQuery(SceneObjectHandle handle)
 {
+	if (IsVulkanCaptureSafeActive())
+		return std::numeric_limits<uint32_t>::max();
+
 	if (!bGBufferOcclusionQueriesActive || handle == InvalidSceneObjectHandle || GBufferOcclusionQueryCount >= GBufferOcclusionQueryCapacityPerFrame)
 		return std::numeric_limits<uint32_t>::max();
 
@@ -4772,6 +5393,9 @@ void Corona::EndGBufferOcclusionQuery(SceneObjectHandle handle, uint32_t queryIn
 
 void Corona::FinishGBufferCulling()
 {
+	if (IsVulkanCaptureSafeActive())
+		return;
+
 	if (!bGBufferOcclusionQueriesActive || GBufferOcclusionQueryCount == 0)
 		return;
 
@@ -4862,6 +5486,7 @@ void Corona::GBufferPass()
 	renderBackend->BindGraphicsPipeline(GBufferGraphicsPipeline.get());
 
 	PrepareGBufferCulling(static_cast<uint32_t>(RenderWorld.SceneObjects.size()));
+	const std::vector<uint32_t>& visibleObjectIndices = GatherGBufferVisibleObjectIndices();
 
 	// Phase D (desktop only): if the cluster PSO is live AND we're in the
 	// VS-inline skinning mode, draw all skeletal characters with a single
@@ -4884,46 +5509,64 @@ void Corona::GBufferPass()
 		renderBackend->BindGraphicsPipeline(GBufferGraphicsPipeline.get());
 	}
 
-	auto isSkeletalUnifiedObject = [bClusterDrawActive](const std::shared_ptr<Scene>& scene)
+	static thread_local std::unordered_map<const Scene*, bool> s_skeletalUnifiedSceneCache;
+	std::unordered_map<const Scene*, bool>& skeletalUnifiedSceneCache = s_skeletalUnifiedSceneCache;
+	skeletalUnifiedSceneCache.clear();
+	skeletalUnifiedSceneCache.reserve(64);
+	auto isSkeletalUnifiedObject = [bClusterDrawActive, &skeletalUnifiedSceneCache](const std::shared_ptr<Scene>& scene)
 	{
 		if (!bClusterDrawActive || !scene)
 			return false;
+		const Scene* key = scene.get();
+		auto it = skeletalUnifiedSceneCache.find(key);
+		if (it != skeletalUnifiedSceneCache.end())
+			return it->second;
+		bool eligible = false;
 		for (const auto& mesh : scene->meshes)
 		{
 			if (mesh && mesh->bSkeletalSkinned)
-				return true;
+			{
+				eligible = true;
+				break;
+			}
 		}
-		return false;
+		skeletalUnifiedSceneCache[key] = eligible;
+		return eligible;
 	};
 
 	if (!bMultiThreadRendering)
 	{
-		auto sceneUsesSpineMesh = [](const std::shared_ptr<Scene>& scene)
+		static thread_local std::unordered_map<const Scene*, bool> s_spineMeshSceneCache;
+		std::unordered_map<const Scene*, bool>& spineMeshSceneCache = s_spineMeshSceneCache;
+		spineMeshSceneCache.clear();
+		spineMeshSceneCache.reserve(128);
+		auto sceneUsesSpineMesh = [&spineMeshSceneCache](const std::shared_ptr<Scene>& scene)
 		{
 			if (!scene)
 				return false;
+			const Scene* key = scene.get();
+			auto it = spineMeshSceneCache.find(key);
+			if (it != spineMeshSceneCache.end())
+				return it->second;
+			bool usesSpine = false;
 			for (const auto& mesh : scene->meshes)
 			{
 				if (mesh && mesh->bSpineMesh)
-					return true;
+				{
+					usesSpine = true;
+					break;
+				}
 			}
-			return false;
+			spineMeshSceneCache[key] = usesSpine;
+			return usesSpine;
 		};
 
-		struct StaticBatchKey
+		struct StaticBatchObjectEntry
 		{
-			const Scene* ScenePtr = nullptr;
-			float Roughness = 1.0f;
-			float Metallic = 0.0f;
-			bool OverrideRoughnessMetallic = false;
-
-			bool operator<(const StaticBatchKey& rhs) const
-			{
-				if (ScenePtr != rhs.ScenePtr) return ScenePtr < rhs.ScenePtr;
-				if (OverrideRoughnessMetallic != rhs.OverrideRoughnessMetallic) return OverrideRoughnessMetallic < rhs.OverrideRoughnessMetallic;
-				if (Roughness != rhs.Roughness) return Roughness < rhs.Roughness;
-				return Metallic < rhs.Metallic;
-			}
+			const SceneObject* Object = nullptr;
+			bool HasBounds = false;
+			glm::vec3 BoundsCenter = glm::vec3(0.0f);
+			float BoundsRadius = 0.0f;
 		};
 		struct StaticBatch
 		{
@@ -4931,19 +5574,28 @@ void Corona::GBufferPass()
 			float Roughness = 1.0f;
 			float Metallic = 0.0f;
 			bool OverrideRoughnessMetallic = false;
-			struct ObjectEntry
-			{
-				const SceneObject* Object = nullptr;
-				bool HasBounds = false;
-				glm::vec3 BoundsCenter = glm::vec3(0.0f);
-				float BoundsRadius = 0.0f;
-			};
-			std::vector<ObjectEntry> Objects;
+			std::vector<StaticBatchObjectEntry> Objects;
+		};
+		struct VisibleGBufferObjectEntry
+		{
+			uint32_t ObjectIndex = std::numeric_limits<uint32_t>::max();
+			const SceneObject* Object = nullptr;
+			GBufferStaticBatchKey StaticBatchKey;
+			bool SpineObject = false;
+			bool SkeletalUnifiedObject = false;
+			bool TerrainScene = false;
+			bool ProceduralGrassScene = false;
+			bool LegacyGrassScene = false;
+			bool StaticInstancingEligible = false;
+			bool StaticObjectBatchEligible = false;
+			bool HasBounds = false;
+			glm::vec3 BoundsCenter = glm::vec3(0.0f);
+			float BoundsRadius = 0.0f;
 		};
 		constexpr size_t kMinStaticGBufferInstanceCount = 32;
 		auto makeStaticBatchKey = [](const SceneObject& object)
 		{
-			StaticBatchKey key;
+			GBufferStaticBatchKey key;
 			key.ScenePtr = object.ScenePtr.get();
 			key.Roughness = object.Roughness;
 			key.Metallic = object.Metallic;
@@ -4955,7 +5607,10 @@ void Corona::GBufferPass()
 		{
 			if (!bGBufferOcclusionQueriesActive || object.Handle == InvalidSceneObjectHandle)
 				return;
-			SceneObjectCullingState& state = SceneObjectCullingStates[object.Handle];
+			auto stateIt = SceneObjectCullingStates.find(object.Handle);
+			if (stateIt == SceneObjectCullingStates.end())
+				return;
+			SceneObjectCullingState& state = stateIt->second;
 			state.LastVisible = true;
 			state.HasPendingOcclusionQuery = false;
 			state.LastTestFrame = FrameCounter;
@@ -4966,7 +5621,10 @@ void Corona::GBufferPass()
 				state.HasBounds = true;
 			}
 		};
-		std::map<const Scene*, bool> staticInstancingEligibilityCache;
+		static thread_local std::unordered_map<const Scene*, bool> s_staticInstancingEligibilityCache;
+		std::unordered_map<const Scene*, bool>& staticInstancingEligibilityCache = s_staticInstancingEligibilityCache;
+		staticInstancingEligibilityCache.clear();
+		staticInstancingEligibilityCache.reserve(128);
 		auto isStaticInstancingEligibleCached = [this, &staticInstancingEligibilityCache](const std::shared_ptr<Scene>& scene)
 		{
 			if (!scene)
@@ -4979,17 +5637,21 @@ void Corona::GBufferPass()
 			staticInstancingEligibilityCache[key] = eligible;
 			return eligible;
 		};
-		std::map<const Scene*, bool> staticObjectBatchEligibilityCache;
-		auto isStaticObjectBatchEligibleCached = [this, &staticObjectBatchEligibilityCache](const std::shared_ptr<Scene>& scene)
+		const RenderBackendCapabilities gbufferCapabilities =
+			renderBackend ? renderBackend->GetCapabilities() : RenderBackendCapabilities{};
+		const bool bStaticObjectBatchSupported =
+			!ShouldDisableNriGBufferObjectBatch(renderBackend.get()) &&
+			SupportsGBufferBindlessMaterials(renderBackend.get()) &&
+			SupportsGBufferBindlessGeometry(renderBackend.get()) &&
+			gbufferCapabilities.SupportsDrawIndirect &&
+			gbufferCapabilities.SupportsDrawIndirectFirstInstance;
+		static thread_local std::unordered_map<const Scene*, bool> s_staticObjectBatchEligibilityCache;
+		std::unordered_map<const Scene*, bool>& staticObjectBatchEligibilityCache = s_staticObjectBatchEligibilityCache;
+		staticObjectBatchEligibilityCache.clear();
+		staticObjectBatchEligibilityCache.reserve(128);
+		auto isStaticObjectBatchEligibleCached = [bStaticObjectBatchSupported, &staticObjectBatchEligibilityCache](const std::shared_ptr<Scene>& scene)
 		{
-			if (ShouldDisableNriGBufferObjectBatch(renderBackend.get()))
-				return false;
-			if (!SupportsGBufferBindlessMaterials(renderBackend.get()) ||
-				!SupportsGBufferBindlessGeometry(renderBackend.get()))
-				return false;
-			const RenderBackendCapabilities capabilities =
-				renderBackend ? renderBackend->GetCapabilities() : RenderBackendCapabilities{};
-			if (!capabilities.SupportsDrawIndirect || !capabilities.SupportsDrawIndirectFirstInstance)
+			if (!bStaticObjectBatchSupported)
 				return false;
 			if (!scene)
 				return false;
@@ -5022,58 +5684,123 @@ void Corona::GBufferPass()
 			staticObjectBatchEligibilityCache[key] = eligible;
 			return eligible;
 		};
-		auto sceneHasProceduralGrass = [](const std::shared_ptr<Scene>& scene)
+		static thread_local std::unordered_map<const Scene*, bool> s_proceduralGrassSceneCache;
+		std::unordered_map<const Scene*, bool>& proceduralGrassSceneCache = s_proceduralGrassSceneCache;
+		proceduralGrassSceneCache.clear();
+		proceduralGrassSceneCache.reserve(128);
+		auto sceneHasProceduralGrass = [&proceduralGrassSceneCache](const std::shared_ptr<Scene>& scene)
 		{
 			if (!scene)
 				return false;
+			const Scene* key = scene.get();
+			auto it = proceduralGrassSceneCache.find(key);
+			if (it != proceduralGrassSceneCache.end())
+				return it->second;
+			bool hasProceduralGrass = false;
 			for (const std::shared_ptr<Mesh>& sceneMesh : scene->meshes)
 			{
 				if (sceneMesh && sceneMesh->bProceduralGrass)
-					return true;
+				{
+					hasProceduralGrass = true;
+					break;
+				}
 			}
-			return false;
+			proceduralGrassSceneCache[key] = hasProceduralGrass;
+			return hasProceduralGrass;
 		};
+		const std::shared_ptr<Scene> activeTerrainScene =
+			ActiveTerrain ? ActiveTerrain->GetScene() : std::shared_ptr<Scene>{};
 		const std::shared_ptr<Scene> activeGrassScene = ActiveGrassScene.lock();
-		std::map<StaticBatchKey, uint32_t> staticInstancingCandidateCounts;
-		for (const SceneObject& object : RenderWorld.SceneObjects)
+		static thread_local std::unordered_map<GBufferStaticBatchKey, uint32_t, GBufferStaticBatchKeyHash> s_staticInstancingCandidateCounts;
+		std::unordered_map<GBufferStaticBatchKey, uint32_t, GBufferStaticBatchKeyHash>& staticInstancingCandidateCounts =
+			s_staticInstancingCandidateCounts;
+		staticInstancingCandidateCounts.clear();
+		staticInstancingCandidateCounts.reserve(std::min<size_t>(visibleObjectIndices.size(), 1024u));
+		static thread_local std::vector<VisibleGBufferObjectEntry> s_visibleGBufferEntries;
+		std::vector<VisibleGBufferObjectEntry>& visibleGBufferEntries = s_visibleGBufferEntries;
+		visibleGBufferEntries.clear();
+		visibleGBufferEntries.reserve(visibleObjectIndices.size());
+		bool bHasSpineObjects = false;
+		for (uint32_t objectIndex : visibleObjectIndices)
 		{
+			if (objectIndex >= RenderWorld.SceneObjects.size())
+				continue;
+			const SceneObject& object = RenderWorld.SceneObjects[objectIndex];
 			if (!object.bVisible || !object.ScenePtr)
 				continue;
-			if (sceneUsesSpineMesh(object.ScenePtr) || isSkeletalUnifiedObject(object.ScenePtr))
-				continue;
-			const bool bTerrainScene = ActiveTerrain && object.ScenePtr == ActiveTerrain->GetScene();
-			const bool bProceduralGrassScene = sceneHasProceduralGrass(object.ScenePtr);
-			const bool bLegacyGrassScene =
-				!bProceduralGrassScene && activeGrassScene && object.ScenePtr == activeGrassScene;
-			if (bTerrainScene || bProceduralGrassScene || bLegacyGrassScene)
-				continue;
-			if (!isStaticInstancingEligibleCached(object.ScenePtr))
-				continue;
-			++staticInstancingCandidateCounts[makeStaticBatchKey(object)];
+
+			VisibleGBufferObjectEntry entry{};
+			entry.ObjectIndex = objectIndex;
+			entry.Object = &object;
+			entry.StaticBatchKey = makeStaticBatchKey(object);
+			entry.SpineObject = sceneUsesSpineMesh(object.ScenePtr);
+			entry.SkeletalUnifiedObject = isSkeletalUnifiedObject(object.ScenePtr);
+			entry.TerrainScene = activeTerrainScene && object.ScenePtr == activeTerrainScene;
+			entry.ProceduralGrassScene = sceneHasProceduralGrass(object.ScenePtr);
+			entry.LegacyGrassScene =
+				!entry.ProceduralGrassScene && activeGrassScene && object.ScenePtr == activeGrassScene;
+			entry.StaticObjectBatchEligible =
+				!entry.SpineObject &&
+				!entry.SkeletalUnifiedObject &&
+				!entry.TerrainScene &&
+				!entry.ProceduralGrassScene &&
+				!entry.LegacyGrassScene &&
+				isStaticObjectBatchEligibleCached(object.ScenePtr);
+			entry.StaticInstancingEligible =
+				!entry.SpineObject &&
+				!entry.SkeletalUnifiedObject &&
+				!entry.TerrainScene &&
+				!entry.ProceduralGrassScene &&
+				!entry.LegacyGrassScene &&
+				!entry.StaticObjectBatchEligible &&
+				isStaticInstancingEligibleCached(object.ScenePtr);
+			if (objectIndex < RenderWorld.SceneObjectCullingData.size())
+			{
+				const RenderWorldMirror::SceneObjectCullingRecord& objectData =
+					RenderWorld.SceneObjectCullingData[objectIndex];
+				entry.HasBounds = objectData.HasBounds;
+				entry.BoundsCenter = objectData.BoundsCenter;
+				entry.BoundsRadius = objectData.BoundsRadius;
+			}
+
+			if (entry.SpineObject)
+				bHasSpineObjects = true;
+			if (entry.StaticInstancingEligible)
+				++staticInstancingCandidateCounts[entry.StaticBatchKey];
+			visibleGBufferEntries.push_back(entry);
 		}
 
-		for (int drawSpinePass = 0; drawSpinePass < 2; ++drawSpinePass)
+		const int drawSpinePassCount = bHasSpineObjects ? 2 : 1;
+		for (int drawSpinePass = 0; drawSpinePass < drawSpinePassCount; ++drawSpinePass)
 		{
-			std::map<StaticBatchKey, StaticBatch> staticBatches;
-			std::vector<const SceneObject*> staticBatchObjectPtrs;
-			std::vector<StaticBatch::ObjectEntry> bindlessObjectBatch;
-			std::vector<const SceneObject*> bindlessObjectBatchPtrs;
-			for (const SceneObject& object : RenderWorld.SceneObjects)
+			static thread_local std::unordered_map<GBufferStaticBatchKey, StaticBatch, GBufferStaticBatchKeyHash> s_staticBatches;
+			std::unordered_map<GBufferStaticBatchKey, StaticBatch, GBufferStaticBatchKeyHash>& staticBatches = s_staticBatches;
+			staticBatches.clear();
+			staticBatches.reserve(staticInstancingCandidateCounts.size());
+			static thread_local std::vector<const SceneObject*> s_staticBatchObjectPtrs;
+			static thread_local std::vector<StaticBatchObjectEntry> s_bindlessObjectBatch;
+			static thread_local std::vector<uint32_t> s_bindlessObjectBatchIndices;
+			std::vector<const SceneObject*>& staticBatchObjectPtrs = s_staticBatchObjectPtrs;
+			std::vector<StaticBatchObjectEntry>& bindlessObjectBatch = s_bindlessObjectBatch;
+			std::vector<uint32_t>& bindlessObjectBatchIndices = s_bindlessObjectBatchIndices;
+			staticBatchObjectPtrs.clear();
+			bindlessObjectBatch.clear();
+			bindlessObjectBatchIndices.clear();
+			bindlessObjectBatch.reserve(visibleGBufferEntries.size());
+			bindlessObjectBatchIndices.reserve(visibleGBufferEntries.size());
+			for (const VisibleGBufferObjectEntry& entry : visibleGBufferEntries)
 			{
-				if (!object.bVisible || !object.ScenePtr)
+				if (!entry.Object)
+					continue;
+				const SceneObject& object = *entry.Object;
+				const uint32_t objectIndex = entry.ObjectIndex;
+				if ((drawSpinePass == 0 && entry.SpineObject) || (drawSpinePass == 1 && !entry.SpineObject))
 					continue;
 
-				const bool bSpineObject = sceneUsesSpineMesh(object.ScenePtr);
-				if ((drawSpinePass == 0 && bSpineObject) || (drawSpinePass == 1 && !bSpineObject))
+				if (entry.SkeletalUnifiedObject)
 					continue;
 
-				if (isSkeletalUnifiedObject(object.ScenePtr))
-					continue;
-
-				++GBufferLastTotalObjectCount;
-
-				const bool bTerrainScene =
-					ActiveTerrain && object.ScenePtr == ActiveTerrain->GetScene();
+				const bool bTerrainScene = entry.TerrainScene;
 				// Procedural-grass scenes route through the vertex-pulling PSO
 				// regardless of whether they're the active terrain-anchored
 				// grass (script-spawned) or a toolbox-spawned grass entity, so
@@ -5081,48 +5808,27 @@ void Corona::GBufferPass()
 				// pointer. Legacy VB-backed grass keeps the original Grass
 				// bucket; procedural lands in its own bucket so the overlay
 				// can show their costs separately.
-				const bool bProceduralGrassScene = sceneHasProceduralGrass(object.ScenePtr);
-				const bool bLegacyGrassScene =
-					!bProceduralGrassScene && activeGrassScene && object.ScenePtr == activeGrassScene;
-				const StaticBatchKey staticBatchKey = makeStaticBatchKey(object);
+				const bool bProceduralGrassScene = entry.ProceduralGrassScene;
+				const bool bLegacyGrassScene = entry.LegacyGrassScene;
+				const GBufferStaticBatchKey& staticBatchKey = entry.StaticBatchKey;
 				const auto staticCandidateCountIt = staticInstancingCandidateCounts.find(staticBatchKey);
 				const uint32_t staticCandidateCount =
 					staticCandidateCountIt != staticInstancingCandidateCounts.end() ? staticCandidateCountIt->second : 0u;
 				const bool bStaticInstancingCandidate =
 					drawSpinePass == 0 &&
-					!bTerrainScene &&
-					!bProceduralGrassScene &&
-					!bLegacyGrassScene &&
-					staticCandidateCount >= kMinStaticGBufferInstanceCount &&
-					isStaticInstancingEligibleCached(object.ScenePtr);
+					entry.StaticInstancingEligible &&
+					staticCandidateCount >= kMinStaticGBufferInstanceCount;
 				const bool bBindlessObjectBatchCandidate =
 					drawSpinePass == 0 &&
-					!bTerrainScene &&
-					!bProceduralGrassScene &&
-					!bLegacyGrassScene &&
-					isStaticObjectBatchEligibleCached(object.ScenePtr);
+					entry.StaticObjectBatchEligible;
 				const bool bDrawsWithoutOcclusionQuery =
 					bStaticInstancingCandidate || bBindlessObjectBatchCandidate;
 
-				glm::vec3 boundsMin(0.0f);
-				glm::vec3 boundsMax(0.0f);
-				glm::vec3 boundsCenter(0.0f);
-				float boundsRadius = 0.0f;
-				const bool bHasBounds = GetSceneObjectWorldBounds(object, boundsMin, boundsMax, boundsCenter, boundsRadius);
+				const glm::vec3 boundsCenter = entry.BoundsCenter;
+				const float boundsRadius = entry.BoundsRadius;
+				const bool bHasBounds = entry.HasBounds;
 				if (bHasBounds)
 				{
-					if (!IsWorldAabbInViewFrustum(boundsMin, boundsMax))
-					{
-						++GBufferLastFrustumCulledObjectCount;
-						auto stateIt = SceneObjectCullingStates.find(object.Handle);
-						if (stateIt != SceneObjectCullingStates.end())
-						{
-							stateIt->second.LastVisible = true;
-							stateIt->second.HasPendingOcclusionQuery = false;
-						}
-						continue;
-					}
-
 					if (!bDrawsWithoutOcclusionQuery &&
 						!ShouldDrawSceneObjectInGBuffer(object, boundsCenter, boundsRadius))
 						continue;
@@ -5130,6 +5836,7 @@ void Corona::GBufferPass()
 				if (bBindlessObjectBatchCandidate)
 				{
 					bindlessObjectBatch.push_back({ &object, bHasBounds, boundsCenter, boundsRadius });
+					bindlessObjectBatchIndices.push_back(objectIndex);
 					continue;
 				}
 
@@ -5172,18 +5879,10 @@ void Corona::GBufferPass()
 
 			if (!bindlessObjectBatch.empty())
 			{
-				bindlessObjectBatchPtrs.clear();
-				bindlessObjectBatchPtrs.reserve(bindlessObjectBatch.size());
-				for (const StaticBatch::ObjectEntry& entry : bindlessObjectBatch)
+				if (!bindlessObjectBatchIndices.empty() &&
+					DrawStaticObjectBindlessBatch(bindlessObjectBatchIndices))
 				{
-					if (entry.Object)
-						bindlessObjectBatchPtrs.push_back(entry.Object);
-				}
-
-				if (!bindlessObjectBatchPtrs.empty() &&
-					DrawStaticObjectBindlessBatch(bindlessObjectBatchPtrs))
-				{
-					for (const StaticBatch::ObjectEntry& entry : bindlessObjectBatch)
+					for (const StaticBatchObjectEntry& entry : bindlessObjectBatch)
 					{
 						if (!entry.Object)
 							continue;
@@ -5213,7 +5912,7 @@ void Corona::GBufferPass()
 					continue;
 				staticBatchObjectPtrs.clear();
 				staticBatchObjectPtrs.reserve(batch.Objects.size());
-				for (const StaticBatch::ObjectEntry& entry : batch.Objects)
+				for (const StaticBatchObjectEntry& entry : batch.Objects)
 				{
 					if (entry.Object)
 						staticBatchObjectPtrs.push_back(entry.Object);
@@ -5226,7 +5925,7 @@ void Corona::GBufferPass()
 						batch.Metallic,
 						batch.OverrideRoughnessMetallic))
 				{
-					for (const StaticBatch::ObjectEntry& entry : batch.Objects)
+					for (const StaticBatchObjectEntry& entry : batch.Objects)
 					{
 						if (!entry.Object)
 							continue;
@@ -5239,7 +5938,7 @@ void Corona::GBufferPass()
 					}
 					continue;
 				}
-				for (const StaticBatch::ObjectEntry& entry : batch.Objects)
+				for (const StaticBatchObjectEntry& entry : batch.Objects)
 				{
 					const SceneObject* object = entry.Object;
 					if (!object)
@@ -5316,6 +6015,11 @@ void Corona::GBufferPass()
 			L", bindlessBatches=" + std::to_wstring(GBufferLastBindlessObjectBatchCount) +
 			L", bindlessObjects=" + std::to_wstring(GBufferLastBindlessObjectCount) +
 			L", bindlessDraws=" + std::to_wstring(GBufferLastBindlessObjectDrawCount) +
+			L", cells=" + std::to_wstring(GBufferLastSpatialVisibleCellCount) +
+			L"/" + std::to_wstring(GBufferLastSpatialCellCount) +
+			L", partialCells=" + std::to_wstring(GBufferLastSpatialPartialCellCount) +
+			L", spatialCandidates=" + std::to_wstring(GBufferLastSpatialCandidateObjectCount) +
+			L", spatialVisible=" + std::to_wstring(GBufferLastSpatialVisibleObjectCount) +
 			L", active=" + std::to_wstring(bGBufferOcclusionQueriesActive ? 1 : 0));
 	}
 	

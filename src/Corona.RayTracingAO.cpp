@@ -109,7 +109,7 @@ void Corona::RaytraceAOPass()
 			RTAOViewParam.BlueNoiseOffsetStride = RTGIViewParam.BlueNoiseOffsetStride;
 			RTAOViewParam.NormalBias = std::clamp(RTAOViewParam.NormalBias, 0.01f, 2.0f);
 
-			RTPassBuilder pass(*this, PSO_RT_AO);
+			RTPassBuilder pass(*this, PSO_RT_AO, ERtProfilePass::AO);
 			pass.BeginScene()
 				.SetTextureUAV("global", "AmbientOcclusionResult", aoTexture)
 				.SetAccelerationStructure("global", "gRtScene", TLAS)

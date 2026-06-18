@@ -35,14 +35,10 @@ cbuffer ViewParameter : register(b0)
     uint BlueNoiseOffsetStride;
     float ViewSpreadAngle;
     uint NoiseMode;
-    uint bIncludeSkyLighting;
     uint GISamplesPerPixel;
-    float3 SkyColorTop;
-    float SkyIntensity;
-    float3 SkyColorBottom;
-    float _padding;
+    uint _paddingAfterGISamples;
     float3 LightColor;
-    float _padding2;
+    float _padding;
     PointLightParam PointLights[RT_DIFFUSE_GI_MAX_POINT_LIGHTS];
     uint PointLightCount;
     float3 PointLightPadding;
@@ -54,19 +50,6 @@ static const float INV_PI = 1.0 / PI;
 static const float MAX_HIT_DIST = 10000;
 
 #define RT_GI_SURFACE_RAY_FLAGS (RAY_FLAG_FORCE_OPAQUE | RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES)
-
-float3 EvaluateSkyColor(float3 direction)
-{
-    float t = 0.5 * (direction.y + 1.0);
-    return max(lerp(SkyColorBottom, SkyColorTop, t) * SkyIntensity, 0.0f.xxx);
-}
-
-float3 EvaluateSkyDiffuseBounce(float3 normal)
-{
-    float3 averageSky = 0.5f * (SkyColorTop + SkyColorBottom);
-    float3 skyGradient = 0.5f * (SkyColorTop - SkyColorBottom);
-    return (averageSky + (2.0f / 3.0f) * skyGradient * normal.y) * SkyIntensity;
-}
 
 float3 linearToSrgb(float3 c)
 {
@@ -95,6 +78,35 @@ struct RT_DIFFUSE_GI_RAY_PAYLOAD ShadowRayPayload
     bool bHit RT_DIFFUSE_GI_SHADOW_PAYLOAD_RW;
 };
 
+bool TraceDiffuseGIShadowOccluded(RayDesc shadowRay)
+{
+#if RT_DIFFUSE_GI_USE_RAYQUERY_SHADOWS
+    RayQuery<RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH |
+             RAY_FLAG_SKIP_CLOSEST_HIT_SHADER |
+             RAY_FLAG_FORCE_OPAQUE |
+             RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q;
+    q.TraceRayInline(gRtScene, RAY_FLAG_NONE, 0xFFu, shadowRay);
+    q.Proceed();
+    return q.CommittedStatus() != COMMITTED_NOTHING;
+#else
+    ShadowRayPayload shadowPayload;
+    shadowPayload.bHit = true;
+    TraceRay(
+        gRtScene,
+        RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH |
+            RAY_FLAG_SKIP_CLOSEST_HIT_SHADER |
+            RAY_FLAG_FORCE_OPAQUE |
+            RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES,
+        0xFF,
+        0,
+        0,
+        1,
+        shadowRay,
+        shadowPayload);
+    return shadowPayload.bHit;
+#endif
+}
+
 float EvaluateSpotAttenuation(PointLightParam light, float3 surfaceToLightDir)
 {
     if (light.DirectionAndType.w < 0.5f)
@@ -117,22 +129,7 @@ bool IsPointLightVisible(float3 worldPos, float3 normal, float3 lightDir, float 
     shadowRay.TMin = 0.001f;
     shadowRay.TMax = max(lightDistance - 0.05f, 0.001f);
 
-    ShadowRayPayload shadowPayload;
-    shadowPayload.bHit = true;
-    TraceRay(
-        gRtScene,
-        RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH |
-            RAY_FLAG_SKIP_CLOSEST_HIT_SHADER |
-            RAY_FLAG_FORCE_OPAQUE |
-            RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES,
-        0xFF,
-        0,
-        0,
-        1,
-        shadowRay,
-        shadowPayload);
-
-    return !shadowPayload.bHit;
+    return !TraceDiffuseGIShadowOccluded(shadowRay);
 }
 
 uint HashPointLightSample(uint2 pixel, uint frameIndex, uint sampleIndex)
@@ -287,6 +284,12 @@ void rayGen
 
 	float2 UV = crd / dims;
 	float DeviceDepth = DepthTex.SampleLevel(sampleWrap, UV, 0).x;
+    if (DeviceDepth >= 0.999999f)
+    {
+        GIResultSH[launchIndex.xy] = float4(0.0f, 0.0f, 0.0f, 0.0f);
+        GIResultColor[launchIndex.xy] = float4(0.0f, 0.0f, 0.0f, 0.0f);
+        return;
+    }
 
 	float3 WorldNormal = CommonSafeNormalize(WorldNormalTex.SampleLevel(sampleWrap, UV, 0).xyz, float3(0.0f, 1.0f, 0.0f));
   
@@ -305,9 +308,6 @@ void rayGen
 	float3 WorldPos = mul(float4(ViewPosition, 1), InvViewMatrix).xyz;
 
   
-    float rand_u = random(crd + RandomOffset);
-    float rand_v = random(crd + RandomOffset + float2(100, 100));
-
     float2 RandomUV = GenerateRaySample2D(RayNoiseBlueNoiseSource, launchIndex.xy, FrameCounter, BlueNoiseOffsetStride, NoiseMode);
 
     float LightIntensity = max(CommonSanitizeFloat(LightDirAndIntensity.w, 0.0f), 0.0f);
@@ -320,10 +320,6 @@ void rayGen
     float3 sampleDirLocal = SampleHemisphereCosine(RandomUV.x, RandomUV.y);
     float3x3 tbn = buildTBN(WorldNormal);
     float3 sampleDirWorld = CommonSafeNormalize(mul(sampleDirLocal, tbn), WorldNormal);
-
-    // https://computergraphics.stackexchange.com/questions/4664/does-cosine-weighted-hemisphere-sampling-still-require-ndotl-when-calculating-co
-    // https://computergraphics.stackexchange.com/questions/8578/how-to-set-equivalent-pdfs-for-cosine-weighted-and-uniform-sampled-hemispheres
-    float cosTerm = 1;//dot(float3(0, 0, 1), sampleDirLocal)*2;
 
 	RayDesc ray;
 	// Self-intersection guard. A fixed 0.5u push-off does not clear the surface on deep /
@@ -347,7 +343,7 @@ void rayGen
     TraceDiffuseGIRay(ray, payload);
     if(payload.bHit == false)
     {
-        float3 Irradiance = (bIncludeSkyLighting != 0u) ? max(EvaluateSkyColor(sampleDirWorld), 0.0f.xxx) : 0.0f.xxx;
+        float3 Irradiance = 0.0f.xxx;
 
         // Sanitize before it reaches DLSS-RR: NaN/Inf or extreme fireflies in the raw GI
         // feed pollute the RR input color and make RR collapse the whole frame to black.
@@ -369,35 +365,23 @@ void rayGen
     {
         float3 LightDir = CommonSafeNormalize(LightDirAndIntensity.xyz, float3(0.0f, 1.0f, 0.0f));
         payload.normal = CommonSafeNormalize(payload.normal, WorldNormal);
-        RayDesc shadowRay;
-        shadowRay.Origin = payload.position + payload.normal * 0.5f;
-        shadowRay.Direction = LightDir;
-
-        shadowRay.TMin = 0.001f;
-        shadowRay.TMax = MAX_HIT_DIST;
-
-        ShadowRayPayload shadowPayload;
-        shadowPayload.bHit = true;
-        TraceRay(
-            gRtScene,
-            RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH |
-                RAY_FLAG_SKIP_CLOSEST_HIT_SHADER |
-                RAY_FLAG_FORCE_OPAQUE |
-                RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES,
-            0xFF,
-            0,
-            0,
-            1,
-            shadowRay,
-            shadowPayload);
-
         float3 Albedo = max(CommonSanitizeFloat3(payload.color, 1.0f.xxx), 0.0f.xxx);
         SH sh_indirect = init_SH();
         float3 Irradiance = 0.0f.xxx;
-        if(shadowPayload.bHit == false)
+        float NdotL = saturate(dot(LightDir, payload.normal));
+        bool shadowHit = true;
+        if (LightIntensity > 0.0f && NdotL > 0.0f)
+        {
+            RayDesc shadowRay;
+            shadowRay.Origin = payload.position + payload.normal * 0.5f;
+            shadowRay.Direction = LightDir;
+            shadowRay.TMin = 0.001f;
+            shadowRay.TMax = MAX_HIT_DIST;
+            shadowHit = TraceDiffuseGIShadowOccluded(shadowRay);
+        }
+        if(shadowHit == false)
         {
             // miss - apply light color
-            float NdotL = saturate(dot(LightDir, payload.normal));
             Irradiance += NdotL * LightIntensity * max(CommonSanitizeFloat3(LightColor, 1.0f.xxx), 0.0f.xxx) * Albedo * INV_PI;
         }
         Irradiance += EvaluatePointLightBounce(payload.position, payload.normal, Albedo, launchIndex.xy);

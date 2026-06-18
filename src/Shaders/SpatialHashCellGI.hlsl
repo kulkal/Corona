@@ -41,14 +41,9 @@ cbuffer ViewParameter : register(b0)
     float ViewSpreadAngle;
     float RayBias;
     float CellSize;
-    float3 SkyColorTop;
-    float SkyIntensity;
-    float3 SkyColorBottom;
-    float _padding;
     float3 LightColor;
-    float _padding2;
+    float _padding;
     uint ActiveCellCapacity;
-    uint bIncludeSkyLighting;
     uint HashEntryMask;
     uint MaxProbeSteps;
     uint GIMode;            // 0 = SH4 trace, 1 = octahedral per-ray trace, 2 = HL2 basis
@@ -424,19 +419,6 @@ uint LoadSurfaceLightMask(float3 worldPos, float3 normal)
     return ComputeLocalLightMask(worldPos, normal);
 }
 
-float3 EvaluateSkyColor(float3 direction)
-{
-    float t = 0.5f * (direction.y + 1.0f);
-    return max(lerp(SkyColorBottom, SkyColorTop, t) * SkyIntensity, 0.0f.xxx);
-}
-
-float3 EvaluateSkyDiffuseBounce(float3 normal)
-{
-    float3 averageSky = 0.5f * (SkyColorTop + SkyColorBottom);
-    float3 skyGradient = 0.5f * (SkyColorTop - SkyColorBottom);
-    return max((averageSky + (2.0f / 3.0f) * skyGradient * normal.y) * SkyIntensity, 0.0f.xxx);
-}
-
 float EvaluateSpotAttenuation(PointLightParam light, float3 surfaceToLightDir)
 {
     if (light.DirectionAndType.w < 0.5f)
@@ -587,8 +569,6 @@ float3 TraceDiffusePath(float3 origin, float3 direction, uint2 noiseCoord, uint 
 
         if (!payload.bHit)
         {
-            if (bIncludeSkyLighting != 0u)
-                radiance += throughput * EvaluateSkyColor(rayDirection);
             break;
         }
 

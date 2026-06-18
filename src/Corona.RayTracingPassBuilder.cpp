@@ -21,9 +21,13 @@ namespace
 
 }
 
-Corona::RTPassBuilder::RTPassBuilder(Corona& owner, const shared_ptr<RTPipelineStateObject>& pso)
+Corona::RTPassBuilder::RTPassBuilder(
+	Corona& owner,
+	const shared_ptr<RTPipelineStateObject>& pso,
+	ERtProfilePass profilePass)
 	: Owner(owner)
 	, PSO(pso)
+	, ProfilePass(profilePass)
 {
 }
 
@@ -55,12 +59,12 @@ Corona::RTPassBuilder& Corona::RTPassBuilder::BeginScene()
 	else
 	{
 		PSO.reset();
-		Owner.AddRtRecordPhaseTiming(ERtRecordPhase::BeginScene, phaseStart, Corona::CpuClock::now());
+		Owner.AddRtPassRecordPhaseTiming(ProfilePass, ERtRecordPhase::BeginScene, phaseStart, Corona::CpuClock::now());
 		return *this;
 	}
 	bBegan = true;
 	bShaderTableFinalized = false;
-	Owner.AddRtRecordPhaseTiming(ERtRecordPhase::BeginScene, phaseStart, Corona::CpuClock::now());
+	Owner.AddRtPassRecordPhaseTiming(ProfilePass, ERtRecordPhase::BeginScene, phaseStart, Corona::CpuClock::now());
 	return *this;
 }
 
@@ -69,7 +73,7 @@ Corona::RTPassBuilder& Corona::RTPassBuilder::SetTextureUAV(const char* shader, 
 	const auto phaseStart = Corona::CpuClock::now();
 	if (PSO && texture)
 		PSO->SetTextureUAV(shader, bindingName, texture);
-	Owner.AddRtRecordPhaseTiming(ERtRecordPhase::BindResources, phaseStart, Corona::CpuClock::now());
+	Owner.AddRtPassRecordPhaseTiming(ProfilePass, ERtRecordPhase::BindResources, phaseStart, Corona::CpuClock::now());
 	return *this;
 }
 
@@ -78,7 +82,7 @@ Corona::RTPassBuilder& Corona::RTPassBuilder::SetBufferUAV(const char* shader, c
 	const auto phaseStart = Corona::CpuClock::now();
 	if (PSO && buffer)
 		PSO->SetBufferUAV(shader, bindingName, buffer);
-	Owner.AddRtRecordPhaseTiming(ERtRecordPhase::BindResources, phaseStart, Corona::CpuClock::now());
+	Owner.AddRtPassRecordPhaseTiming(ProfilePass, ERtRecordPhase::BindResources, phaseStart, Corona::CpuClock::now());
 	return *this;
 }
 
@@ -87,7 +91,7 @@ Corona::RTPassBuilder& Corona::RTPassBuilder::SetTextureSRV(const char* shader, 
 	const auto phaseStart = Corona::CpuClock::now();
 	if (PSO && texture)
 		PSO->SetTextureSRV(shader, bindingName, texture);
-	Owner.AddRtRecordPhaseTiming(ERtRecordPhase::BindResources, phaseStart, Corona::CpuClock::now());
+	Owner.AddRtPassRecordPhaseTiming(ProfilePass, ERtRecordPhase::BindResources, phaseStart, Corona::CpuClock::now());
 	return *this;
 }
 
@@ -96,7 +100,7 @@ Corona::RTPassBuilder& Corona::RTPassBuilder::SetBufferSRV(const char* shader, c
 	const auto phaseStart = Corona::CpuClock::now();
 	if (PSO && buffer)
 		PSO->SetBufferSRV(shader, bindingName, buffer);
-	Owner.AddRtRecordPhaseTiming(ERtRecordPhase::BindResources, phaseStart, Corona::CpuClock::now());
+	Owner.AddRtPassRecordPhaseTiming(ProfilePass, ERtRecordPhase::BindResources, phaseStart, Corona::CpuClock::now());
 	return *this;
 }
 
@@ -105,7 +109,7 @@ Corona::RTPassBuilder& Corona::RTPassBuilder::SetBindlessTextureTable(const char
 	const auto phaseStart = Corona::CpuClock::now();
 	if (PSO)
 		PSO->SetBindlessTextureTable(shader, bindingName);
-	Owner.AddRtRecordPhaseTiming(ERtRecordPhase::BindResources, phaseStart, Corona::CpuClock::now());
+	Owner.AddRtPassRecordPhaseTiming(ProfilePass, ERtRecordPhase::BindResources, phaseStart, Corona::CpuClock::now());
 	return *this;
 }
 
@@ -114,7 +118,7 @@ Corona::RTPassBuilder& Corona::RTPassBuilder::SetBindlessBufferTable(const char*
 	const auto phaseStart = Corona::CpuClock::now();
 	if (PSO)
 		PSO->SetBindlessBufferTable(shader, bindingName);
-	Owner.AddRtRecordPhaseTiming(ERtRecordPhase::BindResources, phaseStart, Corona::CpuClock::now());
+	Owner.AddRtPassRecordPhaseTiming(ProfilePass, ERtRecordPhase::BindResources, phaseStart, Corona::CpuClock::now());
 	return *this;
 }
 
@@ -123,7 +127,7 @@ Corona::RTPassBuilder& Corona::RTPassBuilder::SetAccelerationStructure(const cha
 	const auto phaseStart = Corona::CpuClock::now();
 	if (PSO && rtas)
 		PSO->SetAccelerationStructure(shader, bindingName, rtas);
-	Owner.AddRtRecordPhaseTiming(ERtRecordPhase::BindResources, phaseStart, Corona::CpuClock::now());
+	Owner.AddRtPassRecordPhaseTiming(ProfilePass, ERtRecordPhase::BindResources, phaseStart, Corona::CpuClock::now());
 	return *this;
 }
 
@@ -132,7 +136,7 @@ Corona::RTPassBuilder& Corona::RTPassBuilder::SetSampler(const char* shader, con
 	const auto phaseStart = Corona::CpuClock::now();
 	if (PSO && sampler)
 		PSO->SetSampler(shader, bindingName, sampler);
-	Owner.AddRtRecordPhaseTiming(ERtRecordPhase::BindResources, phaseStart, Corona::CpuClock::now());
+	Owner.AddRtPassRecordPhaseTiming(ProfilePass, ERtRecordPhase::BindResources, phaseStart, Corona::CpuClock::now());
 	return *this;
 }
 
@@ -141,7 +145,7 @@ Corona::RTPassBuilder& Corona::RTPassBuilder::SetCBVValue(const char* shader, co
 	const auto phaseStart = Corona::CpuClock::now();
 	if (PSO && data)
 		PSO->SetCBVValue(shader, bindingName, data);
-	Owner.AddRtRecordPhaseTiming(ERtRecordPhase::BindResources, phaseStart, Corona::CpuClock::now());
+	Owner.AddRtPassRecordPhaseTiming(ProfilePass, ERtRecordPhase::BindResources, phaseStart, Corona::CpuClock::now());
 	return *this;
 }
 
@@ -158,7 +162,7 @@ uint32_t Corona::RTPassBuilder::BindSceneHitPrograms(const RTSceneHitProgramDesc
 	const uint64_t bindingSignature = BuildHitProgramBindingSignature(desc);
 	if (PSO->IsHitProgramBindingCacheValid(instanceCount, bindingSignature))
 	{
-		Owner.AddRtRecordPhaseTiming(ERtRecordPhase::BindHitPrograms, phaseStart, Corona::CpuClock::now());
+		Owner.AddRtPassRecordPhaseTiming(ProfilePass, ERtRecordPhase::BindHitPrograms, phaseStart, Corona::CpuClock::now());
 		return instanceCount;
 	}
 
@@ -173,7 +177,7 @@ uint32_t Corona::RTPassBuilder::BindSceneHitPrograms(const RTSceneHitProgramDesc
 			boundCount = instanceCount;
 		}
 		PSO->MarkHitProgramBindingCacheValid(instanceCount, bindingSignature);
-		Owner.AddRtRecordPhaseTiming(ERtRecordPhase::BindHitPrograms, phaseStart, Corona::CpuClock::now());
+		Owner.AddRtPassRecordPhaseTiming(ProfilePass, ERtRecordPhase::BindHitPrograms, phaseStart, Corona::CpuClock::now());
 		return boundCount;
 	}
 
@@ -196,7 +200,7 @@ uint32_t Corona::RTPassBuilder::BindSceneHitPrograms(const RTSceneHitProgramDesc
 	}
 
 	PSO->MarkHitProgramBindingCacheValid(instanceCount, bindingSignature);
-	Owner.AddRtRecordPhaseTiming(ERtRecordPhase::BindHitPrograms, phaseStart, Corona::CpuClock::now());
+	Owner.AddRtPassRecordPhaseTiming(ProfilePass, ERtRecordPhase::BindHitPrograms, phaseStart, Corona::CpuClock::now());
 	return boundCount;
 }
 
@@ -213,7 +217,7 @@ bool Corona::RTPassBuilder::FinalizeShaderTable()
 
 	const auto endShaderTableStart = Corona::CpuClock::now();
 	PSO->EndShaderTable();
-	Owner.AddRtRecordPhaseTiming(ERtRecordPhase::EndShaderTable, endShaderTableStart, Corona::CpuClock::now());
+	Owner.AddRtPassRecordPhaseTiming(ProfilePass, ERtRecordPhase::EndShaderTable, endShaderTableStart, Corona::CpuClock::now());
 	bShaderTableFinalized = true;
 	return true;
 }
@@ -239,7 +243,7 @@ void Corona::RTPassBuilder::Dispatch(uint32_t width, uint32_t height)
 
 	const auto applyStart = Corona::CpuClock::now();
 	PSO->Apply(width, height);
-	Owner.AddRtRecordPhaseTiming(ERtRecordPhase::ApplyDispatch, applyStart, Corona::CpuClock::now());
+	Owner.AddRtPassRecordPhaseTiming(ProfilePass, ERtRecordPhase::ApplyDispatch, applyStart, Corona::CpuClock::now());
 	bBegan = false;
 	bShaderTableFinalized = false;
 }
@@ -254,7 +258,7 @@ bool Corona::RTPassBuilder::DispatchIndirect(Buffer* indirectArgumentBuffer, uin
 
 	const auto applyStart = Corona::CpuClock::now();
 	const bool bDispatched = PSO->ApplyIndirect(indirectArgumentBuffer, byteOffset);
-	Owner.AddRtRecordPhaseTiming(ERtRecordPhase::ApplyDispatch, applyStart, Corona::CpuClock::now());
+	Owner.AddRtPassRecordPhaseTiming(ProfilePass, ERtRecordPhase::ApplyDispatch, applyStart, Corona::CpuClock::now());
 	if (bDispatched)
 	{
 		bBegan = false;

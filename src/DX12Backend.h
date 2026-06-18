@@ -210,6 +210,7 @@ class D3D12RTPipelineStateObject : public RTPipelineStateObject
 {
 public:
 	DX12Backend* Owner = nullptr;
+	~D3D12RTPipelineStateObject() override;
 private:
 	struct BindingData
 	{
@@ -248,6 +249,7 @@ public:
 		ShaderType Type = GLOBAL;
 		wstring ShaderName;
 		vector<BindingData> Binding;
+		std::map<std::string, size_t> BindingIndexByName;
 
 		ComPtr<ID3D12RootSignature> RS;
 
@@ -258,6 +260,7 @@ public:
 	map<string, BindingInfo> ShaderBinding;
 
 	vector<BindingData> GlobalBinding;
+	std::map<std::string, size_t> GlobalBindingIndexByName;
 
 	
 
@@ -293,8 +296,11 @@ public:
 	UINT ShaderTableSize = 0;
 	ComPtr<ID3D12Resource> ShaderTable;
 	ComPtr<ID3D12Resource> ShaderTableUpload;
+	uint8_t* ShaderTableUploadMappedData = nullptr;
 	D3D12_RESOURCE_STATES ShaderTableState = D3D12_RESOURCE_STATE_COPY_DEST;
 	ComPtr<ID3D12CommandSignature> DispatchRaysCommandSignature;
+	ComPtr<ID3D12StateObjectProperties> RTPipelineProperties;
+	std::map<std::wstring, const void*> ShaderIdentifierCache;
 	std::vector<uint8_t> ShaderTableFrameValid;
 	std::vector<uint32_t> ShaderTableFrameInstanceCount;
 	std::vector<uint64_t> ShaderTableFrameSignature;
@@ -304,6 +310,8 @@ public:
 
 	UINT NumInstance = 0;
 
+	void ReleaseShaderTableResources();
+	const void* GetShaderIdentifierCached(const std::wstring& shaderName);
 	void SetNumInstances(uint32_t numInstances) override;
 	void Configure(uint32_t maxRecursion, uint32_t maxPayloadSizeInBytes, uint32_t maxAttributeSizeInBytes) override;
 	void AddHitGroup(const std::string& name, const std::string& chs, const std::string& ahs) override;

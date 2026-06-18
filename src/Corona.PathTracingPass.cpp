@@ -114,8 +114,15 @@ bool Corona::EnsureRTMaterialRecordBuffer()
 	if (!UsesRTBindlessMaterials())
 		return false;
 
-	const size_t recordCount = std::max<size_t>(RayTracingInstances.size(), 1);
-	std::vector<RTMaterialRecord> records(recordCount);
+	constexpr UINT32 kMaterialRecordValidationFrameInterval = 120u;
+	if (RTMaterialRecordBuffer &&
+		RTMaterialRecordHash != 0 &&
+		RTMaterialRecordBackend == renderBackend.get() &&
+		RTMaterialRecordInstanceRevision == RayTracingInstancesRevision &&
+		static_cast<UINT32>(FrameCounter - RTMaterialRecordValidatedFrameCounter) < kMaterialRecordValidationFrameInterval)
+	{
+		return true;
+	}
 
 	auto getPrimaryMaterial = [](Mesh& mesh) -> Material*
 	{
@@ -123,6 +130,43 @@ bool Corona::EnsureRTMaterialRecordBuffer()
 			return mesh.Draws[0].mat.get();
 		return mesh.Mat.get();
 	};
+
+	uint64_t sourceHash = 1469598103934665603ull;
+	HashCombinePathTracingMaterial(sourceHash, static_cast<uint64_t>(RayTracingInstances.size()));
+	for (const RTInstanceDesc& instance : RayTracingInstances)
+	{
+		Mesh* mesh = instance.BottomLevelAS ? instance.BottomLevelAS->MeshPtr : nullptr;
+		HashCombinePathTracingMaterial(sourceHash, reinterpret_cast<uintptr_t>(mesh));
+		if (!mesh)
+			continue;
+
+		Material* material = getPrimaryMaterial(*mesh);
+		HashCombinePathTracingMaterial(sourceHash, reinterpret_cast<uintptr_t>(material));
+		if (!material)
+			continue;
+
+		HashCombinePathTracingMaterial(sourceHash, reinterpret_cast<uintptr_t>(material->Diffuse.get()));
+		HashCombinePathTracingMaterial(sourceHash, reinterpret_cast<uintptr_t>(material->Normal.get()));
+		HashCombinePathTracingMaterial(sourceHash, reinterpret_cast<uintptr_t>(material->Roughness.get()));
+		HashCombinePathTracingMaterial(sourceHash, reinterpret_cast<uintptr_t>(material->Metallic.get()));
+		uint32_t baseColorBits[4] = {};
+		std::memcpy(baseColorBits, &material->BaseColorFactor, sizeof(baseColorBits));
+		for (uint32_t bits : baseColorBits)
+			HashCombinePathTracingMaterial(sourceHash, bits);
+	}
+
+	if (RTMaterialRecordBuffer &&
+		RTMaterialRecordHash != 0 &&
+		RTMaterialRecordSourceHash == sourceHash &&
+		RTMaterialRecordBackend == renderBackend.get())
+	{
+		RTMaterialRecordInstanceRevision = RayTracingInstancesRevision;
+		RTMaterialRecordValidatedFrameCounter = FrameCounter;
+		return true;
+	}
+
+	const size_t recordCount = std::max<size_t>(RayTracingInstances.size(), 1);
+	std::vector<RTMaterialRecord> records(recordCount);
 
 	auto getBindlessTextureIndex = [&](Texture* texture) -> UINT32
 	{
@@ -197,11 +241,19 @@ bool Corona::EnsureRTMaterialRecordBuffer()
 	}
 
 	if (RTMaterialRecordBuffer && RTMaterialRecordHash == materialHash)
+	{
+		RTMaterialRecordSourceHash = sourceHash;
+		RTMaterialRecordInstanceRevision = RayTracingInstancesRevision;
+		RTMaterialRecordValidatedFrameCounter = FrameCounter;
+		RTMaterialRecordBackend = renderBackend.get();
 		return true;
+	}
 
 	if (!bAllTexturesRegistered)
 	{
 		RTMaterialRecordHash = 0;
+		RTMaterialRecordSourceHash = 0;
+		RTMaterialRecordBackend = nullptr;
 		AppendCpuRuntimeTrace(L"[RTMaterial] bindless material texture registration failed");
 		return false;
 	}
@@ -219,11 +271,17 @@ bool Corona::EnsureRTMaterialRecordBuffer()
 	if (!RTMaterialRecordBuffer)
 	{
 		RTMaterialRecordHash = 0;
+		RTMaterialRecordSourceHash = 0;
+		RTMaterialRecordBackend = nullptr;
 		AppendCpuRuntimeTrace(L"[RTMaterial] failed to create bindless material record buffer");
 		return false;
 	}
 
 	RTMaterialRecordHash = materialHash;
+	RTMaterialRecordSourceHash = sourceHash;
+	RTMaterialRecordInstanceRevision = RayTracingInstancesRevision;
+	RTMaterialRecordValidatedFrameCounter = FrameCounter;
+	RTMaterialRecordBackend = renderBackend.get();
 	AppendCpuRuntimeTrace(
 		L"[RTMaterial] bindless material records uploaded, count=" +
 		std::to_wstring(records.size()));
@@ -645,7 +703,7 @@ void Corona::PathTracingPass()
 		},
 		[&](RGContext& ctx)
 		{
-			RTPassBuilder pass(*this, PSO_PATH_TRACING);
+			RTPassBuilder pass(*this, PSO_PATH_TRACING, ERtProfilePass::PathTracing);
 			pass.BeginScene()
 				.SetTextureUAV("global", "OutputColor", ctx.GetTexture(outputColorTarget))
 				.SetTextureUAV("global", "OutAlbedo", outAlbedo.IsValid() ? ctx.GetTexture(outAlbedo) : nullptr)

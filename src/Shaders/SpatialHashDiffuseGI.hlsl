@@ -162,7 +162,6 @@ cbuffer SpatialHashGIConstant : register(b0)
     float LightingChangedFlag;    // P3b: >0.5 = lighting changed -> re-trace/converge
     float4 DebugDiffuseGIOverride;
     float4 SpatialHashLevelParams; // x=enable, y=base distance (SHaRC cell levels)
-    float4 SpatialHashSkyAmbient;  // rgb = sky-ambient fill for uncached cells (E/pi)
 };
 
 struct SH4RGB
@@ -399,12 +398,9 @@ float3 EvaluateSHDiffuse(SH4RGB sh, float3 normal)
     return max(SanitizeFloat3(irradiance), 0.0f.xxx);
 }
 
-// Fallback ambient for uncached cells. The previous camera-anchored SH fallback
-// is disabled here so missing oct cells are exposed to the view-ray lookup first
-// and only fall back to the fixed sky ambient.
 float3 EvaluateUncachedAmbient(float3 normal)
 {
-    return max(SpatialHashSkyAmbient.rgb, 0.0f.xxx);
+    return 0.0f.xxx;
 }
 
 SH4RGB LoadTraceSH(uint entryIndex)

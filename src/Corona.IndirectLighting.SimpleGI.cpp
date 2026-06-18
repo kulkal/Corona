@@ -31,6 +31,11 @@ shared_ptr<RTPipelineStateObject> Corona::CreateRaytracingSimpleGIPSO(bool bUseS
 			TEMP_PSO_RT_GI->SetShaderDefine("RT_DIFFUSE_GI_SER_MATERIAL_HINT_BITS", "8");
 			TEMP_PSO_RT_GI->SetShaderLibraryTarget("lib_6_9");
 		}
+		else if (renderBackend && renderBackend->GetAPI() == ERenderBackendAPI::D3D12)
+		{
+			TEMP_PSO_RT_GI->SetShaderDefine("RT_DIFFUSE_GI_USE_RAYQUERY_SHADOWS", "1");
+			TEMP_PSO_RT_GI->SetShaderLibraryTarget("lib_6_5");
+		}
 		TEMP_PSO_RT_GI->SetNumInstances(static_cast<uint32_t>(RayTracingInstances.size()));
 
 		TEMP_PSO_RT_GI->AddHitGroup("HitGroup", "chs", "");
@@ -138,6 +143,7 @@ bool Corona::InitRaytracingSimpleGISERPass()
 
 void Corona::RaytraceGIPass()
 {
+	const auto prepareStart = CpuClock::now();
 	shared_ptr<RTPipelineStateObject> pso = PSO_RT_GI;
 	if (bEnableRTDiffuseGISER && renderBackend && renderBackend->SupportsShaderExecutionReordering() && InitRaytracingSimpleGISERPass())
 		pso = PSO_RT_GI_SER;
@@ -154,11 +160,7 @@ void Corona::RaytraceGIPass()
 		RTGIViewParam.FrameCounter = RenderFrameIndex;
 		RTGIViewParam.ViewSpreadAngle = glm::tan(Fov * 0.5f) / (0.5f * GetRenderHeight());
 		RTGIViewParam.NoiseMode = RenderFrameRayNoiseMode;
-		RTGIViewParam.bIncludeSkyLighting = RenderFrameDiffuseGISkyLightingEnabled;
 		RTGIViewParam.GISamplesPerPixel = std::clamp(SimpleGISamplesPerPixel, 1u, MaxDiffuseGIPointLights);
-		RTGIViewParam.SkyColorTop = SkyColorTop;
-		RTGIViewParam.SkyIntensity = RenderFrameDiffuseGISkyIntensity;
-		RTGIViewParam.SkyColorBottom = SkyColorBottom;
 		RTGIViewParam.LightColor = RenderFrameLightColor;
 		FillPointLightParams(
 			RTGIViewParam.PointLights,
@@ -179,8 +181,7 @@ void Corona::RaytraceGIPass()
 					std::to_wstring(RenderFrameNormalizedLightDir.z) +
 					L", pointLights=" + std::to_wstring(RTGIViewParam.PointLightCount) +
 					L", pointLightLimit=" + std::to_wstring(DiffuseGIPointLightLimit) +
-					L", pointLightSamples=" + std::to_wstring(RTGIViewParam.GISamplesPerPixel) +
-					L", sky=" + std::to_wstring(RenderFrameDiffuseGISkyLightingEnabled));
+					L", pointLightSamples=" + std::to_wstring(RTGIViewParam.GISamplesPerPixel));
 			}
 		}
 	};
@@ -193,17 +194,26 @@ void Corona::RaytraceGIPass()
 	{
 		if (!pso || !TLAS)
 		{
+			AddRtPassRecordPhaseTiming(ERtProfilePass::SimpleGI, ERtRecordPhase::Prepare, prepareStart, CpuClock::now());
 			SimpleGIFallbackPass();
 			return;
 		}
 	}
 
 	if (!TLAS || !pso)
+	{
+		AddRtPassRecordPhaseTiming(ERtProfilePass::SimpleGI, ERtRecordPhase::Prepare, prepareStart, CpuClock::now());
 		return;
+	}
 
 	if (!EnsureRTMaterialRecordBuffer())
+	{
+		AddRtPassRecordPhaseTiming(ERtProfilePass::SimpleGI, ERtRecordPhase::Prepare, prepareStart, CpuClock::now());
 		return;
+	}
+	AddRtPassRecordPhaseTiming(ERtProfilePass::SimpleGI, ERtRecordPhase::Prepare, prepareStart, CpuClock::now());
 
+	const auto buildGraphStart = CpuClock::now();
 	RenderGraph rg(renderBackend.get());
 	RGTextureRef giSHOutput = rg.ImportTexture("SimpleGI.RawSH", DiffuseGIRawAux.get(), EResourceState::ShaderRead);
 	RGTextureRef giColorOutput = rg.ImportTexture("SimpleGI.RawColor", DiffuseGIRaw.get(), EResourceState::ShaderRead);
@@ -235,7 +245,7 @@ void Corona::RaytraceGIPass()
 			Texture* blueNoiseTexture = ctx.GetTexture(blueNoiseInput);
 			Buffer* materialBuffer = ctx.GetBuffer(rtMaterials);
 
-			RTPassBuilder pass(*this, pso);
+			RTPassBuilder pass(*this, pso, ERtProfilePass::SimpleGI);
 			pass.BeginScene()
 				.SetTextureUAV("global", "GIResultSH", giSHTexture)
 				.SetTextureUAV("global", "GIResultColor", giColorTexture)
@@ -252,7 +262,12 @@ void Corona::RaytraceGIPass()
 			pass.Dispatch(GetRenderWidth(), GetRenderHeight());
 		});
 
-	rg.Execute();
+	AddRtPassRecordPhaseTiming(ERtProfilePass::SimpleGI, ERtRecordPhase::BuildGraph, buildGraphStart, CpuClock::now());
+
+	const auto rgExecuteStart = CpuClock::now();
+	const bool bRgExecuted = rg.Execute();
+	AddRtPassRecordPhaseTiming(ERtProfilePass::SimpleGI, ERtRecordPhase::RenderGraph, rgExecuteStart, CpuClock::now());
+	(void)bRgExecuted;
 }
 
 bool Corona::SimpleGIFallbackPass()
