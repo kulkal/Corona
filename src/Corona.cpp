@@ -8394,6 +8394,52 @@ void Corona::SyncCurrentLightingSettingsToFrameSourceState()
 	}
 }
 
+void Corona::SyncCurrentCameraClipSettingsToFrameSourceState()
+{
+	const float safeFov = FiniteClampedOr(Fov, 0.8f, 0.05f, glm::pi<float>() - 0.05f);
+	const float safeNear = std::max(0.001f, FiniteFloatOr(Near, 10.0f));
+	const float safeFar = std::max(safeNear + 1.0f, FiniteFloatOr(Far, 500000.0f));
+	Fov = safeFov;
+	Near = safeNear;
+	Far = safeFar;
+
+	auto applyCameraClipState = [&](RenderFrameSourceState& state)
+	{
+		state.Fov = safeFov;
+		state.NearPlane = safeNear;
+		state.FarPlane = safeFar;
+	};
+
+	if (RenderWorld.bHasFrameSourceState)
+		applyCameraClipState(RenderWorld.FrameSourceState);
+	{
+		std::lock_guard<std::mutex> pendingDeltaLock(RenderFrameDeltaMutex);
+		for (RenderFrameDelta& pendingDelta : PendingRenderFrameDeltas)
+		{
+			if (!pendingDelta.bHasFrameSourceState)
+				continue;
+			applyCameraClipState(pendingDelta.FrameSourceState);
+		}
+	}
+
+	CoronaECS::Entity cameraEntity = EntityWorld.GetActiveCameraEntity();
+	if (!cameraEntity.IsValid())
+	{
+		InitializeMainCameraEntity();
+		cameraEntity = MainCameraEntity;
+	}
+
+	CoronaECS::CameraComponent* cameraComponent = EntityWorld.GetCamera(cameraEntity);
+	if (!cameraComponent && cameraEntity == MainCameraEntity)
+		cameraComponent = EntityWorld.AddCamera(MainCameraEntity);
+	if (cameraComponent)
+	{
+		cameraComponent->Fov = safeFov;
+		cameraComponent->NearPlane = safeNear;
+		cameraComponent->FarPlane = safeFar;
+	}
+}
+
 void Corona::SyncCurrentDLSSSettingsToFrameSourceState()
 {
 	auto applyDLSSState = [&](RenderFrameSourceState& state)
@@ -13819,8 +13865,10 @@ void Corona::DrawEditorMainWindowControls()
 			AppendCpuRuntimeTrace(L"[editor-ui] camera collision=" + std::to_wstring(bEditorCameraCollisionEnabled ? 1 : 0));
 		if (ImGui::SliderFloat("Move speed", &EditorCameraMoveSpeed, 10.0f, 4500.0f, "%.0f"))
 			m_camera.SetMoveSpeed(EditorCameraMoveSpeed);
-		if (ImGui::InputFloat("Far clip", &Far, 1000.0f, 10000.0f, "%.0f"))
-			Far = std::max(Near + 1.0f, Far);
+		const bool bMainFarClipCommitted =
+			ImGui::InputFloat("Far clip", &Far, 1000.0f, 10000.0f, "%.0f", ImGuiInputTextFlags_EnterReturnsTrue);
+		if (bMainFarClipCommitted || ImGui::IsItemDeactivatedAfterEdit())
+			SyncCurrentCameraClipSettingsToFrameSourceState();
 		ImGui::SliderFloat("Turn speed", &m_turnSpeed, 0.05f, glm::half_pi<float>() * 2.0f, "%.2f");
 		ImGui::Text("Position %.1f, %.1f, %.1f", m_camera.m_position.x, m_camera.m_position.y, m_camera.m_position.z);
 	}
@@ -13862,8 +13910,10 @@ void Corona::DrawEditorCameraOverlay()
 			m_camera.SetMoveSpeed(EditorCameraMoveSpeed);
 
 		ImGui::SetNextItemWidth(-1.0f);
-		if (ImGui::InputFloat("Far Clip", &Far, 1000.0f, 10000.0f, "%.0f"))
-			Far = std::max(Near + 1.0f, Far);
+		const bool bOverlayFarClipCommitted =
+			ImGui::InputFloat("Far Clip", &Far, 1000.0f, 10000.0f, "%.0f", ImGuiInputTextFlags_EnterReturnsTrue);
+		if (bOverlayFarClipCommitted || ImGui::IsItemDeactivatedAfterEdit())
+			SyncCurrentCameraClipSettingsToFrameSourceState();
 
 		ImGui::SetNextItemWidth(-1.0f);
 		ImGui::SliderFloat("Turn Speed", &m_turnSpeed, 0.05f, glm::half_pi<float>() * 2.0f, "%.2f");

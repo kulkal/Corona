@@ -3569,6 +3569,7 @@ private:
 	void ApplyPendingRenderFrameDeltas();
 	RenderFrameSourceState CaptureRenderFrameSourceState() const;
 	void ApplyRenderFrameSourceState(const RenderFrameSourceState& state);
+	void SyncCurrentCameraClipSettingsToFrameSourceState();
 	void SyncCurrentLightingSettingsToFrameSourceState();
 	void SyncCurrentDLSSSettingsToFrameSourceState();
 	void CollectFrameSourceRenderSync(RenderFrameDelta& delta);
