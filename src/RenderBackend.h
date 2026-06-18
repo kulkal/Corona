@@ -403,6 +403,7 @@ struct RenderBackendCapabilities
 	bool SupportsUpdateAfterBind = false;
 	bool SupportsDrawIndexedIndirect = false;
 	bool SupportsDrawIndirect = false;
+	bool SupportsDrawIndirectCount = false;
 	bool SupportsMultiDrawIndirect = false;
 	bool SupportsDrawIndirectFirstInstance = false;
 	bool SupportsGBufferOcclusionQueries = false;
@@ -668,6 +669,15 @@ public:
 	virtual void DrawIndexed(uint32_t indexCount, uint32_t startIndexLocation, int32_t baseVertexLocation) = 0;
 	virtual void DrawIndexedInstanced(uint32_t indexCountPerInstance, uint32_t instanceCount, uint32_t startIndexLocation, int32_t baseVertexLocation, uint32_t startInstanceLocation) = 0;
 	virtual bool DrawIndirect(Buffer* indirectArgumentBuffer, uint64_t byteOffset, uint32_t drawCount) = 0;
+	virtual bool DrawIndirectCount(Buffer* indirectArgumentBuffer, uint64_t byteOffset, Buffer* countBuffer, uint64_t countByteOffset, uint32_t maxDrawCount)
+	{
+		(void)indirectArgumentBuffer;
+		(void)byteOffset;
+		(void)countBuffer;
+		(void)countByteOffset;
+		(void)maxDrawCount;
+		return false;
+	}
 	virtual bool DrawIndexedIndirect(Buffer* indirectArgumentBuffer, uint64_t byteOffset, uint32_t drawCount) = 0;
 	virtual void Dispatch(uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ) = 0;
 	virtual void ClearTextureUAVFloat(Texture* texture, const float clearColor[4]) = 0;

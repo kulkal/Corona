@@ -1691,6 +1691,79 @@ bool DX12Backend::DrawIndirect(Buffer* indirectArgumentBuffer, uint64_t byteOffs
 	return true;
 }
 
+bool DX12Backend::DrawIndirectCount(Buffer* indirectArgumentBuffer, uint64_t byteOffset, Buffer* countBuffer, uint64_t countByteOffset, uint32_t maxDrawCount)
+{
+	static_assert(sizeof(DrawIndirectArguments) == sizeof(D3D12_DRAW_ARGUMENTS), "Draw indirect argument layout must match D3D12.");
+	if (maxDrawCount == 0)
+		return true;
+	if (!GlobalCmdList || !GlobalCmdList->CmdList || !indirectArgumentBuffer || !indirectArgumentBuffer->resource || !countBuffer || !countBuffer->resource)
+		return false;
+
+	const uint64_t argsBytes = static_cast<uint64_t>(maxDrawCount) * static_cast<uint64_t>(sizeof(DrawIndirectArguments));
+	if (byteOffset > std::numeric_limits<uint64_t>::max() - indirectArgumentBuffer->SuballocationOffsetBytes ||
+		countByteOffset > std::numeric_limits<uint64_t>::max() - countBuffer->SuballocationOffsetBytes)
+	{
+		return false;
+	}
+	if (indirectArgumentBuffer->MappedSizeInBytes > 0 &&
+		(byteOffset > indirectArgumentBuffer->MappedSizeInBytes ||
+		 argsBytes > static_cast<uint64_t>(indirectArgumentBuffer->MappedSizeInBytes) - byteOffset))
+	{
+		return false;
+	}
+	if (countBuffer->MappedSizeInBytes > 0 &&
+		(countByteOffset > countBuffer->MappedSizeInBytes ||
+		 sizeof(uint32_t) > static_cast<uint64_t>(countBuffer->MappedSizeInBytes) - countByteOffset))
+	{
+		return false;
+	}
+
+	const uint64_t resourceByteOffset = indirectArgumentBuffer->SuballocationOffsetBytes + byteOffset;
+	const uint64_t countResourceByteOffset = countBuffer->SuballocationOffsetBytes + countByteOffset;
+
+	if (BoundPrimitiveTopology != D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST)
+	{
+		GlobalCmdList->CmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+		BoundPrimitiveTopology = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
+	}
+	if (BoundIndexBuffer)
+	{
+		GlobalCmdList->CmdList->IASetIndexBuffer(nullptr);
+		BoundIndexBuffer = nullptr;
+	}
+
+	if (!DrawIndirectCommandSignature)
+	{
+		D3D12_INDIRECT_ARGUMENT_DESC argumentDesc = {};
+		argumentDesc.Type = D3D12_INDIRECT_ARGUMENT_TYPE_DRAW;
+
+		D3D12_COMMAND_SIGNATURE_DESC signatureDesc = {};
+		signatureDesc.ByteStride = sizeof(DrawIndirectArguments);
+		signatureDesc.NumArgumentDescs = 1;
+		signatureDesc.pArgumentDescs = &argumentDesc;
+
+		HRESULT hr = Device->CreateCommandSignature(
+			&signatureDesc,
+			nullptr,
+			IID_PPV_ARGS(&DrawIndirectCommandSignature));
+		if (FAILED(hr))
+		{
+			AppendCpuRuntimeTrace(L"[DX12Backend] Create DRAW indirect command signature failed hr=" + FormatHexHRESULT(hr));
+			return false;
+		}
+		SetName(DrawIndirectCommandSignature.Get(), L"Corona DrawIndirect CommandSignature");
+	}
+
+	GlobalCmdList->CmdList->ExecuteIndirect(
+		DrawIndirectCommandSignature.Get(),
+		maxDrawCount,
+		indirectArgumentBuffer->resource.Get(),
+		resourceByteOffset,
+		countBuffer->resource.Get(),
+		countResourceByteOffset);
+	return true;
+}
+
 bool DX12Backend::DrawIndexedIndirect(Buffer* indirectArgumentBuffer, uint64_t byteOffset, uint32_t drawCount)
 {
 	static_assert(sizeof(DrawIndexedIndirectArguments) == sizeof(D3D12_DRAW_INDEXED_ARGUMENTS), "Draw indexed indirect argument layout must match D3D12.");

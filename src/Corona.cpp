@@ -2128,6 +2128,8 @@ Corona::~Corona()
 
 	SpineSkinningPSO.reset();
 	SkeletalSkinningPSO.reset();
+	GBufferGpuCullClearPSO.reset();
+	GBufferGpuCullBuildPSO.reset();
 	TemporalDenoisingFilterPSO.reset();
 	DiffuseGISpatialFilterPSO.reset();
 	ScreenProbeGIPSO.reset();
@@ -13869,6 +13871,22 @@ void Corona::DrawEditorMainWindowControls()
 			ImGui::InputFloat("Far clip", &Far, 1000.0f, 10000.0f, "%.0f", ImGuiInputTextFlags_EnterReturnsTrue);
 		if (bMainFarClipCommitted || ImGui::IsItemDeactivatedAfterEdit())
 			SyncCurrentCameraClipSettingsToFrameSourceState();
+		{
+			static const char* kGBufferCullingModes[] = { "CPU indirect build", "GPU indirect build" };
+			int modeIndex = static_cast<int>(GBufferObjectCullingMode);
+			if (ImGui::Combo("GBuffer culling", &modeIndex, kGBufferCullingModes, IM_ARRAYSIZE(kGBufferCullingModes)))
+			{
+				GBufferObjectCullingMode = static_cast<EGBufferObjectCullingMode>(modeIndex);
+				AppendCpuRuntimeTrace(L"[editor-ui] gbuffer culling mode=" + std::to_wstring(modeIndex));
+			}
+			const bool bGpuModeSupported =
+				renderBackend &&
+				renderBackend->GetCapabilities().SupportsDrawIndirectCount &&
+				GBufferGpuCullClearPSO &&
+				GBufferGpuCullBuildPSO;
+			if (GBufferObjectCullingMode == EGBufferObjectCullingMode::GpuIndirect && !bGpuModeSupported)
+				ImGui::TextDisabled("GPU mode unavailable on this backend; CPU fallback will be used.");
+		}
 		ImGui::SliderFloat("Turn speed", &m_turnSpeed, 0.05f, glm::half_pi<float>() * 2.0f, "%.2f");
 		ImGui::Text("Position %.1f, %.1f, %.1f", m_camera.m_position.x, m_camera.m_position.y, m_camera.m_position.z);
 	}
@@ -13914,6 +13932,24 @@ void Corona::DrawEditorCameraOverlay()
 			ImGui::InputFloat("Far Clip", &Far, 1000.0f, 10000.0f, "%.0f", ImGuiInputTextFlags_EnterReturnsTrue);
 		if (bOverlayFarClipCommitted || ImGui::IsItemDeactivatedAfterEdit())
 			SyncCurrentCameraClipSettingsToFrameSourceState();
+
+		{
+			static const char* kGBufferCullingModes[] = { "CPU indirect build", "GPU indirect build" };
+			int modeIndex = static_cast<int>(GBufferObjectCullingMode);
+			ImGui::SetNextItemWidth(-1.0f);
+			if (ImGui::Combo("GBuffer Culling", &modeIndex, kGBufferCullingModes, IM_ARRAYSIZE(kGBufferCullingModes)))
+			{
+				GBufferObjectCullingMode = static_cast<EGBufferObjectCullingMode>(modeIndex);
+				AppendCpuRuntimeTrace(L"[editor-ui] gbuffer culling mode=" + std::to_wstring(modeIndex));
+			}
+			const bool bGpuModeSupported =
+				renderBackend &&
+				renderBackend->GetCapabilities().SupportsDrawIndirectCount &&
+				GBufferGpuCullClearPSO &&
+				GBufferGpuCullBuildPSO;
+			if (GBufferObjectCullingMode == EGBufferObjectCullingMode::GpuIndirect && !bGpuModeSupported)
+				ImGui::TextDisabled("GPU mode unavailable; CPU fallback will be used.");
+		}
 
 		ImGui::SetNextItemWidth(-1.0f);
 		ImGui::SliderFloat("Turn Speed", &m_turnSpeed, 0.05f, glm::half_pi<float>() * 2.0f, "%.2f");

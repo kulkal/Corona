@@ -741,6 +741,7 @@ public:
 		capabilities.SupportsPartiallyBoundDescriptors = true;
 		capabilities.SupportsDrawIndexedIndirect = true;
 		capabilities.SupportsDrawIndirect = true;
+		capabilities.SupportsDrawIndirectCount = true;
 		capabilities.SupportsMultiDrawIndirect = true;
 		capabilities.SupportsGBufferOcclusionQueries = true;
 		capabilities.UsesWindowFramebufferCache = true;
@@ -857,6 +858,7 @@ public:
 	void DrawIndexed(uint32_t indexCount, uint32_t startIndexLocation, int32_t baseVertexLocation) override;
 	void DrawIndexedInstanced(uint32_t indexCountPerInstance, uint32_t instanceCount, uint32_t startIndexLocation, int32_t baseVertexLocation, uint32_t startInstanceLocation) override;
 	bool DrawIndirect(Buffer* indirectArgumentBuffer, uint64_t byteOffset, uint32_t drawCount) override;
+	bool DrawIndirectCount(Buffer* indirectArgumentBuffer, uint64_t byteOffset, Buffer* countBuffer, uint64_t countByteOffset, uint32_t maxDrawCount) override;
 	bool DrawIndexedIndirect(Buffer* indirectArgumentBuffer, uint64_t byteOffset, uint32_t drawCount) override;
 	void Dispatch(uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ) override;
 	void ClearTextureUAVFloat(Texture* texture, const float clearColor[4]) override;

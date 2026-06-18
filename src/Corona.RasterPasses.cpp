@@ -446,6 +446,24 @@ namespace
 		bool bTransparent = false;
 	};
 
+	struct GBufferGpuCachedDrawInfo
+	{
+		uint32_t DrawRecordIndex = 0;
+		uint32_t IndexCount = 0;
+		uint32_t Flags = 0;
+		uint32_t Pad = 0;
+	};
+	static_assert(sizeof(GBufferGpuCachedDrawInfo) == 16, "GBufferGpuCachedDrawInfo must match GBufferCullCS.hlsl.");
+
+	struct GBufferGpuCullConstant
+	{
+		uint32_t CandidateCount = 0;
+		uint32_t ObjectRangeCount = 0;
+		uint32_t DrawInfoCount = 0;
+		uint32_t MaxOutputDraws = 0;
+	};
+	static_assert(sizeof(GBufferGpuCullConstant) == 16, "GBufferGpuCullConstant must match GBufferCullCS.hlsl.");
+
 	struct CachedGBufferStaticDrawTable
 	{
 		IRenderBackend* Backend = nullptr;
@@ -458,6 +476,15 @@ namespace
 		std::shared_ptr<Buffer> MaterialBuffer;
 		std::shared_ptr<Buffer> GeometryBuffer;
 		std::shared_ptr<Buffer> DrawRecordBuffer;
+		std::shared_ptr<Buffer> GpuObjectRangeBuffer;
+		std::shared_ptr<Buffer> GpuDrawInfoBuffer;
+		std::shared_ptr<Buffer> GpuOpaqueIndirectArgsBuffer;
+		std::shared_ptr<Buffer> GpuAlphaIndirectArgsBuffer;
+		std::shared_ptr<Buffer> GpuIndirectCountBuffer;
+		EResourceState GpuOpaqueIndirectArgsState = EResourceState::ShaderRead;
+		EResourceState GpuAlphaIndirectArgsState = EResourceState::ShaderRead;
+		EResourceState GpuIndirectCountState = EResourceState::ShaderRead;
+		uint64_t GpuCullBufferCreateFrame = UINT64_MAX;
 		std::vector<CachedGBufferStaticObjectDrawRange> ObjectRanges;
 		std::vector<CachedGBufferStaticDrawInfo> Draws;
 
@@ -473,6 +500,15 @@ namespace
 			MaterialBuffer.reset();
 			GeometryBuffer.reset();
 			DrawRecordBuffer.reset();
+			GpuObjectRangeBuffer.reset();
+			GpuDrawInfoBuffer.reset();
+			GpuOpaqueIndirectArgsBuffer.reset();
+			GpuAlphaIndirectArgsBuffer.reset();
+			GpuIndirectCountBuffer.reset();
+			GpuOpaqueIndirectArgsState = EResourceState::ShaderRead;
+			GpuAlphaIndirectArgsState = EResourceState::ShaderRead;
+			GpuIndirectCountState = EResourceState::ShaderRead;
+			GpuCullBufferCreateFrame = UINT64_MAX;
 			ObjectRanges.clear();
 			Draws.clear();
 		}
@@ -1394,6 +1430,62 @@ void Corona::InitGBufferPass()
 		else
 		{
 			AppendCpuRuntimeTrace(L"[InitGBufferPass] skipping Bindless Indirect GBuffer pipeline: backend lacks draw-indirect first-instance support");
+		}
+	}
+	{
+		const RenderBackendCapabilities backendCapabilities = renderBackend ?
+			renderBackend->GetCapabilities() :
+			RenderBackendCapabilities{};
+		if (backendCapabilities.SupportsDrawIndirectCount)
+		{
+			const RHIShaderStageMask computeStage = ToRHIShaderStageMask(RHIShaderStage::Compute);
+			auto createGBufferCullPSO = [&](const std::string& entryPoint, std::initializer_list<RHIBindingDesc> bindings)
+				-> std::shared_ptr<ComputePipelineStateObject>
+			{
+				auto pso = renderBackend->CreateComputePipelineStateObject();
+				if (!pso)
+					return nullptr;
+				for (const RHIBindingDesc& binding : bindings)
+				{
+					switch (binding.DescriptorKind)
+					{
+					case RHIDescriptorKind::SRV:
+						pso->BindSRV(binding);
+						break;
+					case RHIDescriptorKind::UAV:
+						pso->BindUAV(binding);
+						break;
+					case RHIDescriptorKind::CBV:
+						pso->BindCBV(binding);
+						break;
+					case RHIDescriptorKind::Sampler:
+					case RHIDescriptorKind::AccelerationStructure:
+						break;
+					}
+				}
+				if (!pso->InitCS(GetAssetFullPath(L"Shaders\\GBufferCullCS.hlsl"), entryPoint))
+					return nullptr;
+				return pso;
+			};
+
+			GBufferGpuCullClearPSO = createGBufferCullPSO(
+				"ClearGBufferIndirectCountersCS",
+				{
+					MakeRHIBufferUAV("GBufferCullCounters", 2, computeStage),
+				});
+			GBufferGpuCullBuildPSO = createGBufferCullPSO(
+				"BuildGBufferIndirectArgsCS",
+				{
+					MakeRHIBufferSRV("GBufferObjectRanges", 0, computeStage),
+					MakeRHIBufferSRV("GBufferCachedDraws", 1, computeStage),
+					MakeRHIBufferSRV("GBufferCandidateObjectIndices", 2, computeStage),
+					MakeRHIBufferUAV("GBufferOpaqueArgs", 0, computeStage),
+					MakeRHIBufferUAV("GBufferAlphaArgs", 1, computeStage),
+					MakeRHIBufferUAV("GBufferCullCounters", 2, computeStage),
+					MakeRHICBV("GBufferCullCB", 0, sizeof(GBufferGpuCullConstant), computeStage),
+				});
+			if (!GBufferGpuCullClearPSO || !GBufferGpuCullBuildPSO)
+				AppendCpuRuntimeTrace(L"[InitGBufferPass] failed to create GPU GBuffer culling compute PSOs");
 		}
 	}
 
@@ -3676,6 +3768,17 @@ bool Corona::DrawStaticObjectBindlessBatch(const std::vector<uint32_t>& objectIn
 			return true;
 		}
 
+		std::vector<GBufferGpuCachedDrawInfo> gpuDrawInfos;
+		gpuDrawInfos.reserve(staticDrawTable.Draws.size());
+		for (const CachedGBufferStaticDrawInfo& drawInfo : staticDrawTable.Draws)
+		{
+			GBufferGpuCachedDrawInfo gpuDrawInfo{};
+			gpuDrawInfo.DrawRecordIndex = drawInfo.DrawRecordIndex;
+			gpuDrawInfo.IndexCount = drawInfo.IndexCount;
+			gpuDrawInfo.Flags = drawInfo.bTransparent ? 1u : 0u;
+			gpuDrawInfos.push_back(gpuDrawInfo);
+		}
+
 		auto createStaticStructuredBuffer = [&](uint32_t numElements, uint32_t elementSize, const void* initialData)
 			-> std::shared_ptr<Buffer>
 		{
@@ -3687,6 +3790,19 @@ bool Corona::DrawStaticObjectBindlessBatch(const std::vector<uint32_t>& objectIn
 			desc.Shape = EBufferShape::Structured;
 			desc.Access = EBufferAccess::GpuOnly;
 			desc.AllocationPolicy = EBufferAllocationPolicy::Suballocated;
+			return renderBackend->CreateBuffer(desc);
+		};
+		auto createGpuWriteStructuredBuffer = [&](uint32_t numElements, uint32_t elementSize)
+			-> std::shared_ptr<Buffer>
+		{
+			BufferCreateDesc desc = {};
+			desc.NumElements = std::max(1u, numElements);
+			desc.ElementSize = elementSize;
+			desc.InitialState = EInitialResourceState::ShaderRead;
+			desc.bAllowUnorderedAccess = true;
+			desc.Shape = EBufferShape::Structured;
+			desc.Access = EBufferAccess::GpuOnly;
+			desc.AllocationPolicy = EBufferAllocationPolicy::Dedicated;
 			return renderBackend->CreateBuffer(desc);
 		};
 
@@ -3702,10 +3818,44 @@ bool Corona::DrawStaticObjectBindlessBatch(const std::vector<uint32_t>& objectIn
 			static_cast<uint32_t>(drawRecords.size()),
 			static_cast<uint32_t>(sizeof(GBufferDrawRecord)),
 			drawRecords.data());
+		staticDrawTable.GpuObjectRangeBuffer = createStaticStructuredBuffer(
+			static_cast<uint32_t>(staticDrawTable.ObjectRanges.size()),
+			static_cast<uint32_t>(sizeof(CachedGBufferStaticObjectDrawRange)),
+			staticDrawTable.ObjectRanges.data());
+		staticDrawTable.GpuDrawInfoBuffer = createStaticStructuredBuffer(
+			static_cast<uint32_t>(gpuDrawInfos.size()),
+			static_cast<uint32_t>(sizeof(GBufferGpuCachedDrawInfo)),
+			gpuDrawInfos.data());
+		staticDrawTable.GpuOpaqueIndirectArgsBuffer = createGpuWriteStructuredBuffer(
+			static_cast<uint32_t>(drawRecords.size()),
+			static_cast<uint32_t>(sizeof(DrawIndirectArguments)));
+		staticDrawTable.GpuAlphaIndirectArgsBuffer = createGpuWriteStructuredBuffer(
+			static_cast<uint32_t>(drawRecords.size()),
+			static_cast<uint32_t>(sizeof(DrawIndirectArguments)));
+		staticDrawTable.GpuIndirectCountBuffer = createGpuWriteStructuredBuffer(
+			2u,
+			static_cast<uint32_t>(sizeof(uint32_t)));
+		staticDrawTable.GpuOpaqueIndirectArgsState = EResourceState::ShaderRead;
+		staticDrawTable.GpuAlphaIndirectArgsState = EResourceState::ShaderRead;
+		staticDrawTable.GpuIndirectCountState = EResourceState::ShaderRead;
+		staticDrawTable.GpuCullBufferCreateFrame = FrameCounter;
 		if (!staticDrawTable.MaterialBuffer || !staticDrawTable.GeometryBuffer || !staticDrawTable.DrawRecordBuffer)
 		{
 			staticDrawTable.Reset();
 			return false;
+		}
+		if (!staticDrawTable.GpuObjectRangeBuffer ||
+			!staticDrawTable.GpuDrawInfoBuffer ||
+			!staticDrawTable.GpuOpaqueIndirectArgsBuffer ||
+			!staticDrawTable.GpuAlphaIndirectArgsBuffer ||
+			!staticDrawTable.GpuIndirectCountBuffer)
+		{
+			AppendCpuRuntimeTrace(L"[GBufferObjectBatchCache] GPU cull buffers unavailable; CPU indirect mode remains available");
+			staticDrawTable.GpuObjectRangeBuffer.reset();
+			staticDrawTable.GpuDrawInfoBuffer.reset();
+			staticDrawTable.GpuOpaqueIndirectArgsBuffer.reset();
+			staticDrawTable.GpuAlphaIndirectArgsBuffer.reset();
+			staticDrawTable.GpuIndirectCountBuffer.reset();
 		}
 
 		staticDrawTable.MaterialCount = static_cast<uint32_t>(materialRecords.size());
@@ -3734,6 +3884,229 @@ bool Corona::DrawStaticObjectBindlessBatch(const std::vector<uint32_t>& objectIn
 
 	if (!staticDrawTable.MaterialBuffer || !staticDrawTable.GeometryBuffer || !staticDrawTable.DrawRecordBuffer)
 		return true;
+
+	GBufferConstantBuffer objCB = {};
+	objCB.ViewProjectionMatrix = glm::transpose(ViewProjMat);
+	objCB.PrevViewProjectionMatrix = glm::transpose(PrevViewProjMat);
+	objCB.WorldMatrix = glm::mat4x4(1.0f);
+	objCB.UnjitteredViewProjMat = glm::transpose(UnjitteredViewProjMat);
+	objCB.PrevUnjitteredViewProjMat = glm::transpose(PrevUnjitteredViewProjMat);
+	objCB.ViewDir.x = RenderFrameCameraLookDirection.x;
+	objCB.ViewDir.y = RenderFrameCameraLookDirection.y;
+	objCB.ViewDir.z = RenderFrameCameraLookDirection.z;
+	objCB.ViewDir.w = 0.0f;
+	objCB.BaseColorFactor = glm::vec4(1.0f);
+	objCB.RTSize.x = GetRenderWidth();
+	objCB.RTSize.y = GetRenderHeight();
+	objCB.RougnessMetalic = glm::vec2(1.0f, 0.0f);
+	objCB.bOverrideRougnessMetallic = 0u;
+	objCB.MeshDeformParams = glm::vec4(RenderFrameWindTime, 0.0f, 0.0f, 0.0f);
+	objCB.GrassBendOrigin = RenderFrameGrassBendOrigin;
+	objCB.GrassBendParams = RenderFrameGrassBendParams;
+	objCB.WindParams = RenderFrameWindParams;
+	objCB.WindTuning = RenderFrameWindTuning;
+	objCB.TerrainDeformSphere = RenderFrameTerrainDeformSphere;
+	objCB.bGBufferBindlessGeometry = 1u;
+
+	static bool bLoggedFirstStaticObjectCpuBatch = false;
+	static bool bLoggedFirstStaticObjectGpuBatch = false;
+
+	if (objectIndices.front() >= RenderWorld.SceneObjects.size() ||
+		!RenderWorld.SceneObjects[objectIndices.front()].ScenePtr)
+	{
+		return failPrerequisite(L"missing first object scene");
+	}
+	auto* gbufferScene = RenderWorld.SceneObjects[objectIndices.front()].ScenePtr.get();
+
+	auto bindGBufferBatchResources = [&](GraphicsPipelineHandle* batchPso) -> bool
+	{
+		if (!batchPso)
+			return true;
+		const auto bindStart = profile ? GBufferProfileClock::now() : GBufferProfileClock::time_point{};
+		renderBackend->BindGraphicsPipeline(batchPso);
+		if (!BindGBufferSceneResourceBindGroup(
+			renderBackend.get(),
+			batchPso,
+			gbufferScene,
+			samplerWrap.get(),
+			staticDrawTable.MaterialBuffer.get(),
+			staticDrawTable.GeometryBuffer.get(),
+			staticDrawTable.DrawRecordBuffer.get(),
+			true))
+		{
+			return failPrerequisite(L"resource bind group creation failed");
+		}
+		std::vector<GraphicsBindGroupEntry> drawBindEntries;
+		drawBindEntries.reserve(1);
+		drawBindEntries.push_back(GraphicsBindGroupEntry::Constant(0, &objCB, sizeof(objCB)));
+		if (!CreateAndBindGraphicsBindGroup(renderBackend.get(), batchPso, kGraphicsBindGroupSlot_Draw, drawBindEntries))
+			return failPrerequisite(L"draw bind group creation failed");
+		GBufferProfileAdd(profile, batchProfile.BindMs, batchProfile.BindCount, bindStart);
+		return true;
+	};
+
+	auto submitGBufferBatch = [&](GraphicsPipelineHandle* batchPso, Buffer* indirectArgsBuffer, uint64_t byteOffset, uint32_t drawCount) -> bool
+	{
+		if (!batchPso || drawCount == 0)
+			return true;
+		if (!bindGBufferBatchResources(batchPso))
+			return false;
+		const auto drawStart = profile ? GBufferProfileClock::now() : GBufferProfileClock::time_point{};
+		const bool drawOk = renderBackend->DrawIndirect(indirectArgsBuffer, byteOffset, drawCount);
+		GBufferProfileAdd(profile, batchProfile.DrawMs, batchProfile.DrawCount, drawStart);
+		return drawOk;
+	};
+
+	auto submitGBufferBatchCount = [&](GraphicsPipelineHandle* batchPso, Buffer* indirectArgsBuffer, Buffer* countBuffer, uint64_t countByteOffset, uint32_t maxDrawCount) -> bool
+	{
+		if (!batchPso || maxDrawCount == 0)
+			return true;
+		if (!bindGBufferBatchResources(batchPso))
+			return false;
+		const auto drawStart = profile ? GBufferProfileClock::now() : GBufferProfileClock::time_point{};
+		const bool drawOk = renderBackend->DrawIndirectCount(indirectArgsBuffer, 0, countBuffer, countByteOffset, maxDrawCount);
+		GBufferProfileAdd(profile, batchProfile.DrawMs, batchProfile.DrawCount, drawStart);
+		return drawOk;
+	};
+
+	auto transitionTrackedBuffer = [&](Buffer* buffer, EResourceState& currentState, EResourceState nextState)
+	{
+		if (!buffer || currentState == nextState)
+			return;
+		renderBackend->TransitionBuffer(buffer, currentState, nextState);
+		currentState = nextState;
+	};
+
+	auto trySubmitGpuGeneratedIndirect = [&](bool& outGpuWorkStarted) -> bool
+	{
+		outGpuWorkStarted = false;
+		if (GBufferObjectCullingMode != EGBufferObjectCullingMode::GpuIndirect)
+			return false;
+		const RenderBackendCapabilities gpuCapabilities = renderBackend->GetCapabilities();
+		if (!gpuCapabilities.SupportsDrawIndirectCount ||
+			!GBufferGpuCullClearPSO ||
+			!GBufferGpuCullBuildPSO ||
+			!staticDrawTable.GpuObjectRangeBuffer ||
+			!staticDrawTable.GpuDrawInfoBuffer ||
+			!staticDrawTable.GpuOpaqueIndirectArgsBuffer ||
+			!staticDrawTable.GpuAlphaIndirectArgsBuffer ||
+			!staticDrawTable.GpuIndirectCountBuffer)
+		{
+			return false;
+		}
+		if (staticDrawTable.GpuCullBufferCreateFrame == FrameCounter)
+			return false;
+
+		const auto allocStart = profile ? GBufferProfileClock::now() : GBufferProfileClock::time_point{};
+		std::shared_ptr<Buffer> candidateObjectBuffer = renderBackend->AllocateTransientUploadStructuredBuffer(
+			static_cast<uint32_t>(objectIndices.size()),
+			static_cast<uint32_t>(sizeof(uint32_t)),
+			objectIndices.data());
+		GBufferProfileAdd(profile, batchProfile.IndirectAllocMs, batchProfile.IndirectAllocCount, allocStart);
+		GBufferProfileAdd(profile, batchProfile.AllocMs, batchProfile.AllocCount, allocStart);
+		if (!candidateObjectBuffer)
+			return false;
+
+		transitionTrackedBuffer(
+			staticDrawTable.GpuOpaqueIndirectArgsBuffer.get(),
+			staticDrawTable.GpuOpaqueIndirectArgsState,
+			EResourceState::UnorderedAccess);
+		transitionTrackedBuffer(
+			staticDrawTable.GpuAlphaIndirectArgsBuffer.get(),
+			staticDrawTable.GpuAlphaIndirectArgsState,
+			EResourceState::UnorderedAccess);
+		transitionTrackedBuffer(
+			staticDrawTable.GpuIndirectCountBuffer.get(),
+			staticDrawTable.GpuIndirectCountState,
+			EResourceState::UnorderedAccess);
+
+		outGpuWorkStarted = true;
+		GBufferGpuCullClearPSO->SetBufferUAV("GBufferCullCounters", staticDrawTable.GpuIndirectCountBuffer.get());
+		GBufferGpuCullClearPSO->Apply();
+		renderBackend->Dispatch(1, 1, 1);
+		renderBackend->UAVBarrier(staticDrawTable.GpuIndirectCountBuffer.get());
+
+		GBufferGpuCullConstant cullCB{};
+		cullCB.CandidateCount = static_cast<uint32_t>(objectIndices.size());
+		cullCB.ObjectRangeCount = static_cast<uint32_t>(staticDrawTable.ObjectRanges.size());
+		cullCB.DrawInfoCount = static_cast<uint32_t>(staticDrawTable.Draws.size());
+		cullCB.MaxOutputDraws = staticDrawTable.DrawRecordCount;
+		GBufferGpuCullBuildPSO->SetBufferSRV("GBufferObjectRanges", staticDrawTable.GpuObjectRangeBuffer.get());
+		GBufferGpuCullBuildPSO->SetBufferSRV("GBufferCachedDraws", staticDrawTable.GpuDrawInfoBuffer.get());
+		GBufferGpuCullBuildPSO->SetBufferSRV("GBufferCandidateObjectIndices", candidateObjectBuffer.get());
+		GBufferGpuCullBuildPSO->SetBufferUAV("GBufferOpaqueArgs", staticDrawTable.GpuOpaqueIndirectArgsBuffer.get());
+		GBufferGpuCullBuildPSO->SetBufferUAV("GBufferAlphaArgs", staticDrawTable.GpuAlphaIndirectArgsBuffer.get());
+		GBufferGpuCullBuildPSO->SetBufferUAV("GBufferCullCounters", staticDrawTable.GpuIndirectCountBuffer.get());
+		GBufferGpuCullBuildPSO->SetCBVValue("GBufferCullCB", &cullCB);
+		GBufferGpuCullBuildPSO->Apply();
+		const uint32_t dispatchGroups = (cullCB.CandidateCount + 63u) / 64u;
+		renderBackend->Dispatch(std::max(1u, dispatchGroups), 1, 1);
+		renderBackend->UAVBarrier(staticDrawTable.GpuOpaqueIndirectArgsBuffer.get());
+		renderBackend->UAVBarrier(staticDrawTable.GpuAlphaIndirectArgsBuffer.get());
+		renderBackend->UAVBarrier(staticDrawTable.GpuIndirectCountBuffer.get());
+
+		transitionTrackedBuffer(
+			staticDrawTable.GpuOpaqueIndirectArgsBuffer.get(),
+			staticDrawTable.GpuOpaqueIndirectArgsState,
+			EResourceState::IndirectArgument);
+		transitionTrackedBuffer(
+			staticDrawTable.GpuAlphaIndirectArgsBuffer.get(),
+			staticDrawTable.GpuAlphaIndirectArgsState,
+			EResourceState::IndirectArgument);
+		transitionTrackedBuffer(
+			staticDrawTable.GpuIndirectCountBuffer.get(),
+			staticDrawTable.GpuIndirectCountState,
+			EResourceState::IndirectArgument);
+		GBufferProfileAdd(profile, batchProfile.BuildMs, batchProfile.BuildCount, buildStart);
+
+		const uint32_t maxDrawCount = staticDrawTable.DrawRecordCount;
+		GraphicsPipelineHandle* opaquePso = GBufferBindlessIndirectOpaqueGraphicsPipeline.get();
+		GraphicsPipelineHandle* opaqueDrawPso = opaquePso ? opaquePso : GBufferBindlessIndirectGraphicsPipeline.get();
+		const bool bOpaqueOk = submitGBufferBatchCount(
+			opaqueDrawPso,
+			staticDrawTable.GpuOpaqueIndirectArgsBuffer.get(),
+			staticDrawTable.GpuIndirectCountBuffer.get(),
+			0,
+			maxDrawCount);
+		const bool bAlphaOk = submitGBufferBatchCount(
+			GBufferBindlessIndirectGraphicsPipeline.get(),
+			staticDrawTable.GpuAlphaIndirectArgsBuffer.get(),
+			staticDrawTable.GpuIndirectCountBuffer.get(),
+			sizeof(uint32_t),
+			maxDrawCount);
+		if (!bOpaqueOk || !bAlphaOk)
+			return false;
+
+		++GBufferLastBindlessObjectBatchCount;
+		GBufferLastBindlessObjectCount += static_cast<uint64_t>(objectIndices.size());
+		GBufferLastBindlessObjectDrawCount += static_cast<uint64_t>(objectIndices.size());
+		if (profile)
+		{
+			++batchProfile.Calls;
+			batchProfile.Objects += static_cast<uint64_t>(objectIndices.size());
+			batchProfile.DrawRecords += static_cast<uint64_t>(objectIndices.size());
+			batchProfile.Materials += static_cast<uint64_t>(staticDrawTable.MaterialCount);
+			batchProfile.Geometries += static_cast<uint64_t>(staticDrawTable.GeometryCount);
+			batchProfile.IndirectArgs += static_cast<uint64_t>(objectIndices.size());
+		}
+		if (!bLoggedFirstStaticObjectGpuBatch || (FrameCounter % 120u) == 0u)
+		{
+			AppendCpuRuntimeTrace(
+				L"[GBufferObjectBatch] submitted mode=gpu objects=" + std::to_wstring(objectIndices.size()) +
+				L", cachedRecords=" + std::to_wstring(staticDrawTable.DrawRecordCount) +
+				L", maxIndirectDraws=" + std::to_wstring(maxDrawCount) +
+				L", materials=" + std::to_wstring(staticDrawTable.MaterialCount) +
+				L", geometries=" + std::to_wstring(staticDrawTable.GeometryCount));
+			bLoggedFirstStaticObjectGpuBatch = true;
+		}
+		return true;
+	};
+
+	bool bGpuWorkStarted = false;
+	if (trySubmitGpuGeneratedIndirect(bGpuWorkStarted))
+		return true;
+	if (bGpuWorkStarted)
+		return failPrerequisite(L"GPU generated indirect draw submission failed");
 
 	static thread_local std::vector<DrawIndirectArguments> s_indirectArgs;
 	std::vector<DrawIndirectArguments>& indirectArgs = s_indirectArgs;
@@ -3811,69 +4184,6 @@ bool Corona::DrawStaticObjectBindlessBatch(const std::vector<uint32_t>& objectIn
 	if (!indirectArgsBuffer)
 		return failPrerequisite(L"transient upload allocation failed");
 
-	GBufferConstantBuffer objCB = {};
-	objCB.ViewProjectionMatrix = glm::transpose(ViewProjMat);
-	objCB.PrevViewProjectionMatrix = glm::transpose(PrevViewProjMat);
-	objCB.WorldMatrix = glm::mat4x4(1.0f);
-	objCB.UnjitteredViewProjMat = glm::transpose(UnjitteredViewProjMat);
-	objCB.PrevUnjitteredViewProjMat = glm::transpose(PrevUnjitteredViewProjMat);
-	objCB.ViewDir.x = RenderFrameCameraLookDirection.x;
-	objCB.ViewDir.y = RenderFrameCameraLookDirection.y;
-	objCB.ViewDir.z = RenderFrameCameraLookDirection.z;
-	objCB.ViewDir.w = 0.0f;
-	objCB.BaseColorFactor = glm::vec4(1.0f);
-	objCB.RTSize.x = GetRenderWidth();
-	objCB.RTSize.y = GetRenderHeight();
-	objCB.RougnessMetalic = glm::vec2(1.0f, 0.0f);
-	objCB.bOverrideRougnessMetallic = 0u;
-	objCB.MeshDeformParams = glm::vec4(RenderFrameWindTime, 0.0f, 0.0f, 0.0f);
-	objCB.GrassBendOrigin = RenderFrameGrassBendOrigin;
-	objCB.GrassBendParams = RenderFrameGrassBendParams;
-	objCB.WindParams = RenderFrameWindParams;
-	objCB.WindTuning = RenderFrameWindTuning;
-	objCB.TerrainDeformSphere = RenderFrameTerrainDeformSphere;
-	objCB.bGBufferBindlessGeometry = 1u;
-
-	static bool bLoggedFirstStaticObjectBatch = false;
-
-	// Bind a PSO with the shared scene resources + draw CB, then issue a
-	// DrawIndirect over a [byteOffset, +drawCount) slice of indirectArgs.
-	if (objectIndices.front() >= RenderWorld.SceneObjects.size() ||
-		!RenderWorld.SceneObjects[objectIndices.front()].ScenePtr)
-	{
-		return failPrerequisite(L"missing first object scene");
-	}
-	auto* gbufferScene = RenderWorld.SceneObjects[objectIndices.front()].ScenePtr.get();
-	auto submitGBufferBatch = [&](GraphicsPipelineHandle* batchPso, uint64_t byteOffset, uint32_t drawCount) -> bool
-	{
-		if (!batchPso || drawCount == 0)
-			return true;
-		const auto bindStart = profile ? GBufferProfileClock::now() : GBufferProfileClock::time_point{};
-		renderBackend->BindGraphicsPipeline(batchPso);
-		if (!BindGBufferSceneResourceBindGroup(
-			renderBackend.get(),
-			batchPso,
-			gbufferScene,
-			samplerWrap.get(),
-			staticDrawTable.MaterialBuffer.get(),
-			staticDrawTable.GeometryBuffer.get(),
-			staticDrawTable.DrawRecordBuffer.get(),
-			true))
-		{
-			return failPrerequisite(L"resource bind group creation failed");
-		}
-		std::vector<GraphicsBindGroupEntry> drawBindEntries;
-		drawBindEntries.reserve(1);
-		drawBindEntries.push_back(GraphicsBindGroupEntry::Constant(0, &objCB, sizeof(objCB)));
-		if (!CreateAndBindGraphicsBindGroup(renderBackend.get(), batchPso, kGraphicsBindGroupSlot_Draw, drawBindEntries))
-			return failPrerequisite(L"draw bind group creation failed");
-		GBufferProfileAdd(profile, batchProfile.BindMs, batchProfile.BindCount, bindStart);
-		const auto drawStart = profile ? GBufferProfileClock::now() : GBufferProfileClock::time_point{};
-		const bool drawOk = renderBackend->DrawIndirect(indirectArgsBuffer.get(), byteOffset, drawCount);
-		GBufferProfileAdd(profile, batchProfile.DrawMs, batchProfile.DrawCount, drawStart);
-		return drawOk;
-	};
-
 	const uint32_t gbufferTotalDrawCount = static_cast<uint32_t>(indirectArgs.size());
 	const uint32_t gbufferAlphaDrawCount = gbufferTotalDrawCount - gbufferOpaqueDrawCount;
 	const uint64_t gbufferArgStride = static_cast<uint64_t>(sizeof(DrawIndirectArguments));
@@ -3884,9 +4194,10 @@ bool Corona::DrawStaticObjectBindlessBatch(const std::vector<uint32_t>& objectIn
 	{
 		// Opaque batch first (fills depth so early-Z rejects occluded opaque
 		// pixels), then the alpha-tested batch on the discard PSO.
-		const bool bOpaqueOk = submitGBufferBatch(opaquePso, 0, gbufferOpaqueDrawCount);
+		const bool bOpaqueOk = submitGBufferBatch(opaquePso, indirectArgsBuffer.get(), 0, gbufferOpaqueDrawCount);
 		const bool bAlphaOk = submitGBufferBatch(
 			GBufferBindlessIndirectGraphicsPipeline.get(),
+			indirectArgsBuffer.get(),
 			static_cast<uint64_t>(gbufferOpaqueDrawCount) * gbufferArgStride,
 			gbufferAlphaDrawCount);
 		bDrawSubmitted = bOpaqueOk && bAlphaOk;
@@ -3895,7 +4206,7 @@ bool Corona::DrawStaticObjectBindlessBatch(const std::vector<uint32_t>& objectIn
 	{
 		// Opaque early-Z PSO unavailable: original single discard pass.
 		bDrawSubmitted = submitGBufferBatch(
-			GBufferBindlessIndirectGraphicsPipeline.get(), 0, gbufferTotalDrawCount);
+			GBufferBindlessIndirectGraphicsPipeline.get(), indirectArgsBuffer.get(), 0, gbufferTotalDrawCount);
 	}
 	if (!bDrawSubmitted)
 		return failPrerequisite(L"draw submission failed");
@@ -3913,16 +4224,16 @@ bool Corona::DrawStaticObjectBindlessBatch(const std::vector<uint32_t>& objectIn
 		batchProfile.IndirectArgs += static_cast<uint64_t>(indirectArgs.size());
 	}
 
-	if (!bLoggedFirstStaticObjectBatch || (FrameCounter % 120u) == 0u)
+	if (!bLoggedFirstStaticObjectCpuBatch || (FrameCounter % 120u) == 0u)
 	{
 		AppendCpuRuntimeTrace(
-			L"[GBufferObjectBatch] submitted objects=" + std::to_wstring(objectIndices.size()) +
+			L"[GBufferObjectBatch] submitted mode=cpu objects=" + std::to_wstring(objectIndices.size()) +
 			L", visibleRecords=" + std::to_wstring(indirectArgs.size()) +
 			L", cachedRecords=" + std::to_wstring(staticDrawTable.DrawRecordCount) +
 			L", indirectDraws=" + std::to_wstring(indirectArgs.size()) +
 			L", materials=" + std::to_wstring(staticDrawTable.MaterialCount) +
 			L", geometries=" + std::to_wstring(staticDrawTable.GeometryCount));
-		bLoggedFirstStaticObjectBatch = true;
+		bLoggedFirstStaticObjectCpuBatch = true;
 	}
 	return true;
 }

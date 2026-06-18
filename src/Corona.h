@@ -133,6 +133,12 @@ public:
 	ERenderingMode RenderingMode = ERenderingMode::HYBRID;
 	EDebugVisualization FullscreenDebugBuffer = EDebugVisualization::NO_FULLSCREEN;
 private:
+	enum class EGBufferObjectCullingMode : UINT32
+	{
+		CpuIndirect = 0,
+		GpuIndirect = 1,
+	};
+
 	enum class EGpuPass : UINT32
 	{
 		Frame = 0,
@@ -450,6 +456,9 @@ private:
 	// so occluded opaque pixels are rejected before shading/pixout. Alpha-tested
 	// draws stay on GBufferBindlessIndirectGraphicsPipeline (late-Z + discard).
 	std::shared_ptr<GraphicsPipelineHandle> GBufferBindlessIndirectOpaqueGraphicsPipeline;
+	shared_ptr<ComputePipelineStateObject> GBufferGpuCullClearPSO;
+	shared_ptr<ComputePipelineStateObject> GBufferGpuCullBuildPSO;
+	EGBufferObjectCullingMode GBufferObjectCullingMode = EGBufferObjectCullingMode::GpuIndirect;
 	std::shared_ptr<Buffer> GBufferDummyDrawRecordBuffer;
 	// Desktop static-mesh instancing path. Draws repeated map-spawned
 	// SceneObjects that share the same Scene/material override as
