@@ -36,7 +36,7 @@ cbuffer ViewParameter : register(b0)
     float ViewSpreadAngle;
     uint NoiseMode;
     uint bIncludeSkyLighting;
-    float NoisePadding;
+    uint GISamplesPerPixel;
     float3 SkyColorTop;
     float SkyIntensity;
     float3 SkyColorBottom;
@@ -135,33 +135,66 @@ bool IsPointLightVisible(float3 worldPos, float3 normal, float3 lightDir, float 
     return !shadowPayload.bHit;
 }
 
-float3 EvaluatePointLightBounce(float3 worldPos, float3 normal, float3 albedo)
+uint HashPointLightSample(uint2 pixel, uint frameIndex, uint sampleIndex)
+{
+    uint h = pixel.x * 1973u;
+    h ^= pixel.y * 9277u;
+    h ^= frameIndex * 26699u;
+    h ^= sampleIndex * 911u;
+    h ^= h >> 16;
+    h *= 2246822519u;
+    h ^= h >> 13;
+    h *= 3266489917u;
+    h ^= h >> 16;
+    return h;
+}
+
+float3 EvaluateSinglePointLightBounce(float3 worldPos, float3 normal, float3 albedo, uint lightIndex)
+{
+    PointLightParam light = PointLights[lightIndex];
+    float3 toLight = light.PositionAndRadius.xyz - worldPos;
+    float distanceSq = max(dot(toLight, toLight), 1.0e-4f);
+    float lightDistance = sqrt(distanceSq);
+    float3 lightDir = toLight / lightDistance;
+    float range = max(light.PositionAndRadius.w, 0.01f);
+    float rangeAttenuation = saturate(1.0f - lightDistance / range);
+    rangeAttenuation *= rangeAttenuation;
+    float inverseSquareAttenuation = 1.0f / max(1.0f, distanceSq * 0.0001f);
+    float attenuation = rangeAttenuation * inverseSquareAttenuation * EvaluateSpotAttenuation(light, lightDir);
+    float nDotL = saturate(dot(normal, lightDir));
+    if (attenuation <= 0.0f || nDotL <= 0.0f || !IsPointLightVisible(worldPos, normal, lightDir, lightDistance, light))
+        return 0.0f.xxx;
+
+    float3 lightColor = max(CommonSanitizeFloat3(light.ColorAndIntensity.xyz, 0.0f.xxx), 0.0f.xxx);
+    float lightIntensity = max(CommonSanitizeFloat(light.ColorAndIntensity.w, 0.0f), 0.0f);
+    return nDotL * lightColor * lightIntensity * attenuation * max(albedo, 0.0f.xxx) * INV_PI;
+}
+
+float3 EvaluatePointLightBounce(float3 worldPos, float3 normal, float3 albedo, uint2 pixel)
 {
     float3 radiance = 0.0f.xxx;
     uint activeCount = min(PointLightCount, (uint)RT_DIFFUSE_GI_MAX_POINT_LIGHTS);
-    [loop]
-    for (uint lightIndex = 0u; lightIndex < RT_DIFFUSE_GI_MAX_POINT_LIGHTS; ++lightIndex)
+    uint sampleCount = clamp(GISamplesPerPixel, 1u, (uint)RT_DIFFUSE_GI_MAX_POINT_LIGHTS);
+    if (sampleCount >= activeCount)
     {
-        if (lightIndex >= activeCount)
+        [loop]
+        for (uint lightIndex = 0u; lightIndex < RT_DIFFUSE_GI_MAX_POINT_LIGHTS; ++lightIndex)
+        {
+            if (lightIndex >= activeCount)
+                break;
+            radiance += EvaluateSinglePointLightBounce(worldPos, normal, albedo, lightIndex);
+        }
+        return radiance;
+    }
+
+    float sampleWeight = (float)activeCount / max((float)sampleCount, 1.0f);
+    [loop]
+    for (uint sampleIndex = 0u; sampleIndex < RT_DIFFUSE_GI_MAX_POINT_LIGHTS; ++sampleIndex)
+    {
+        if (sampleIndex >= sampleCount)
             break;
-
-        PointLightParam light = PointLights[lightIndex];
-        float3 toLight = light.PositionAndRadius.xyz - worldPos;
-        float distanceSq = max(dot(toLight, toLight), 1.0e-4f);
-        float lightDistance = sqrt(distanceSq);
-        float3 lightDir = toLight / lightDistance;
-        float range = max(light.PositionAndRadius.w, 0.01f);
-        float rangeAttenuation = saturate(1.0f - lightDistance / range);
-        rangeAttenuation *= rangeAttenuation;
-        float inverseSquareAttenuation = 1.0f / max(1.0f, distanceSq * 0.0001f);
-        float attenuation = rangeAttenuation * inverseSquareAttenuation * EvaluateSpotAttenuation(light, lightDir);
-        float nDotL = saturate(dot(normal, lightDir));
-        if (attenuation <= 0.0f || nDotL <= 0.0f || !IsPointLightVisible(worldPos, normal, lightDir, lightDistance, light))
-            continue;
-
-        float3 lightColor = max(CommonSanitizeFloat3(light.ColorAndIntensity.xyz, 0.0f.xxx), 0.0f.xxx);
-        float lightIntensity = max(CommonSanitizeFloat(light.ColorAndIntensity.w, 0.0f), 0.0f);
-        radiance += nDotL * lightColor * lightIntensity * attenuation * max(albedo, 0.0f.xxx) * INV_PI;
+        uint lightIndex = HashPointLightSample(pixel, FrameCounter, sampleIndex) % activeCount;
+        radiance += EvaluateSinglePointLightBounce(worldPos, normal, albedo, lightIndex) * sampleWeight;
     }
     return radiance;
 }
@@ -367,7 +400,7 @@ void rayGen
             float NdotL = saturate(dot(LightDir, payload.normal));
             Irradiance += NdotL * LightIntensity * max(CommonSanitizeFloat3(LightColor, 1.0f.xxx), 0.0f.xxx) * Albedo * INV_PI;
         }
-        Irradiance += EvaluatePointLightBounce(payload.position, payload.normal, Albedo);
+        Irradiance += EvaluatePointLightBounce(payload.position, payload.normal, Albedo, launchIndex.xy);
 
         // Sanitize before it reaches DLSS-RR: a point light close to a GI hit makes the
         // 1/d^2 term blow up (Inf / huge firefly), which pollutes the RR input color and
@@ -421,7 +454,8 @@ void chs(inout RayPayload payload, in BuiltInTriangleIntersectionAttributes attr
     float NoV = 1;//dot(V, vertex.normal);
     float mipLevel = computeTextureLOD(NoV, rayConeWidth, vertex.textureLODConstant);
 
-    payload.color = max(CommonSanitizeFloat3(MaterialTextures[NonUniformResourceIndex(material.AlbedoTextureIndex)].SampleLevel(sampleWrap, vertex.uv, mipLevel).xyz, 1.0f.xxx), 0.0f.xxx);
+    float3 baseColor = MaterialTextures[NonUniformResourceIndex(material.AlbedoTextureIndex)].SampleLevel(sampleWrap, vertex.uv, mipLevel).xyz * material.BaseColorFactor.xyz;
+    payload.color = max(CommonSanitizeFloat3(baseColor, 1.0f.xxx), 0.0f.xxx);
 
 
     payload.bHit = true;

@@ -52,9 +52,14 @@ cbuffer ViewParameter : register(b0)
     uint bWriteRRSpecularMotionVectors;
     uint bWriteRRSpecularHitDistance;
     uint bUseRRSpecularGuideRay;
+    uint bEnableSpecularTemporalReservoir;
+    uint ReflectionDebugOutputMode;
+    uint2 SpecularTemporalReservoirPadding;
 };
 
 SamplerState sampleWrap : register(s0);
+
+static const float INV_PI = 1.0f / PI;
 
 float SpecSanitizeFloat(float value, float fallback)
 {
@@ -92,9 +97,6 @@ struct RT_REFLECTION_RAY_PAYLOAD RayPayload
     float3 position RT_REFLECTION_PAYLOAD_RW;
     float3 color RT_REFLECTION_PAYLOAD_RW;
     float3 normal RT_REFLECTION_PAYLOAD_RW;
-    float spreadAngle RT_REFLECTION_PAYLOAD_RW;
-    // coneWidth removed: always 0 at init and never written during traversal,
-    // so chs derives rayConeWidth from spreadAngle*hitT alone.
     float hitDist RT_REFLECTION_PAYLOAD_RW;
     bool bHit RT_REFLECTION_PAYLOAD_RW;
 };
@@ -439,7 +441,6 @@ void WriteRRSpecularGuides(uint2 pixel, uint2 renderSize, bool primarySurfaceVal
         guidePayload.position = guideRay.Origin + guideRay.Direction * guideRay.TMax;
         guidePayload.color = 0.0f.xxx;
         guidePayload.normal = primaryGeomNormal;
-        guidePayload.spreadAngle = 0.0f;
         guidePayload.hitDist = ProjectionParams.w;
         guidePayload.bHit = false;
         TraceReflectionSurfaceRay(guideRay, guidePayload);
@@ -554,16 +555,18 @@ void rayGen
 	ray.TMin = 0;
 	ray.TMax = MAX_HIT_DIST;
 
-	RayPayload payload;
+    RayPayload payload;
     payload.position = ray.Origin + ray.Direction * MAX_HIT_DIST;
     payload.color = 0.0f.xxx;
     payload.normal = WorldNormal;
-    payload.spreadAngle = max(SpecSanitizeFloat(ViewSpreadAngle, 0.0f), 0.0f);
     payload.hitDist = MAX_HIT_DIST;
     payload.bHit = false;
     TraceReflectionSurfaceRay(ray, payload);
 
     float3 tracedRadiance = 0.0f.xxx;
+    float debugVisibility = 0.0f;
+    float debugNdotL = 0.0f;
+    float3 debugHitNormal = 0.0f.xxx;
     if(payload.bHit == false)
     {
         // hit sky - payload.color already includes SkyIntensity from miss shader
@@ -574,6 +577,8 @@ void rayGen
         float3 LightDir = SpecSafeNormalize(LightDirAndIntensity.xyz, float3(0.0f, 1.0f, 0.0f));
         RayDesc shadowRay;
         payload.normal = SpecSafeNormalize(payload.normal, WorldNormal);
+        debugHitNormal = payload.normal * 0.5f + 0.5f;
+        debugNdotL = max(0.0f, dot(LightDir.xyz, payload.normal));
         shadowRay.Origin = SpecSanitizeFloat3(payload.position + payload.normal * 0.5f, payload.position);
         shadowRay.Direction = LightDir;
 
@@ -598,10 +603,11 @@ void rayGen
 
         float3 Irradiance = 0.0f.xxx;
         float3 Albedo = max(SpecSanitizeFloat3(payload.color, 1.0f.xxx), 0.0f.xxx);
+        debugVisibility = shadowPayload.bHit ? 0.0f : 1.0f;
         if(shadowPayload.bHit == false)
         {
             // miss - apply light color
-            Irradiance = max(0.0f, dot(LightDir.xyz, payload.normal)) * LightIntensity * max(SpecSanitizeFloat3(LightColor, 1.0f.xxx), 0.0f.xxx) * Albedo;
+            Irradiance = debugNdotL * LightIntensity * max(SpecSanitizeFloat3(LightColor, 1.0f.xxx), 0.0f.xxx) * Albedo * INV_PI;
         }
         else
         {
@@ -627,7 +633,7 @@ void rayGen
     // frame's reservoir at the motion-reprojected pixel.
     // Output uses the chosen sample's radiance · W; reservoir state is
     // written to ReflReservoirA/B for next frame's combine via the
-    // end-of-frame CopyResource snapshot.
+    // end-of-frame GPU snapshot.
     {
         float3 chosenHit;
         float3 chosenRadiance;
@@ -723,6 +729,8 @@ void rayGen
         // the prev pixel whose reservoir saw (close to) the same
         // reflected world point. Fallback to surface velocity if we
         // didn't get a valid hit this frame (sky reflections etc.).
+        if (bEnableSpecularTemporalReservoir != 0u)
+        {
         float2 reflLaunchSize = float2(max(launchDim.x, 1u), max(launchDim.y, 1u));
         float2 reflUV = (float2(launchIndex.xy) + 0.5f) / reflLaunchSize;
         float2 reflPrevUV = float2(-1.0f, -1.0f);
@@ -812,6 +820,8 @@ void rayGen
 
         // Output: chosen sample's radiance × W (RIS estimator).
         // W = weightSum / (M_uncapped · target_pdf_chosen).
+        }
+
         float3 ristedRadiance = finalRadiance;
         if (weightSum > 0.0f && chosenTpdf > 0.0f)
         {
@@ -830,15 +840,35 @@ void rayGen
         }
         finalRadiance = ristedRadiance;
 
-        // Persist current reservoir state for next-frame combine. Cap
-        // M at 16 so prev contribution stays bounded long-term.
-        const float kReflMaxM = 16.0f;
-        float M_writeback = min(M_eff, kReflMaxM);
-        float W_writeback = (chosenTpdf > 0.0f && M_eff > 0.0f)
-            ? weightSum / (M_eff * chosenTpdf) : 0.0f;
-        ReflReservoirA[launchIndex.xy] = float4(chosenHit, M_writeback);
-        ReflReservoirB[launchIndex.xy] = float4(chosenRadiance, W_writeback);
+        if (bEnableSpecularTemporalReservoir != 0u)
+        {
+            // Persist current reservoir state for next-frame combine. Cap
+            // M at 16 so prev contribution stays bounded long-term.
+            const float kReflMaxM = 16.0f;
+            float M_writeback = min(M_eff, kReflMaxM);
+            float W_writeback = (chosenTpdf > 0.0f && M_eff > 0.0f)
+                ? weightSum / (M_eff * chosenTpdf) : 0.0f;
+            ReflReservoirA[launchIndex.xy] = float4(chosenHit, M_writeback);
+            ReflReservoirB[launchIndex.xy] = float4(chosenRadiance, W_writeback);
+        }
     }
+    if (ReflectionDebugOutputMode == 1u)
+    {
+        finalRadiance = payload.bHit ? max(SpecSanitizeFloat3(payload.color, 0.0f.xxx), 0.0f.xxx) : 0.0f.xxx;
+    }
+    else if (ReflectionDebugOutputMode == 2u)
+    {
+        finalRadiance = debugVisibility.xxx;
+    }
+    else if (ReflectionDebugOutputMode == 3u)
+    {
+        finalRadiance = debugNdotL.xxx;
+    }
+    else if (ReflectionDebugOutputMode == 4u)
+    {
+        finalRadiance = payload.bHit ? debugHitNormal : 0.0f.xxx;
+    }
+
     ReflectionResult[launchIndex.xy] = SpecSanitizeFloat4(float4(Reinhard(max(finalRadiance, 0.0f.xxx)), 1), float4(0.0f, 0.0f, 0.0f, 1.0f));
     WriteRRSpecularGuides(launchIndex.xy, launchDim.xy, primarySurfaceValid, WorldPos, GeoNormal, MirrorL, Rougness, Metallic, payload);
 
@@ -881,11 +911,12 @@ void chs(inout RayPayload payload, in BuiltInTriangleIntersectionAttributes attr
 
     RTMaterialRecord material = RtMaterials[instanceID];
     vertex.textureLODConstant += material.AlbedoLodConstant;
-    float rayConeWidth = payload.spreadAngle * hitT;
+    float rayConeWidth = max(SpecSanitizeFloat(ViewSpreadAngle, 0.0f), 0.0f) * hitT;
 
     float NoV = max(abs(dot(payload.normal, -WorldRayDirection())), 1.0e-4f);
     float mipLevel = computeTextureLOD(NoV, rayConeWidth, vertex.textureLODConstant);
-    payload.color = max(SpecSanitizeFloat3(MaterialTextures[NonUniformResourceIndex(material.AlbedoTextureIndex)].SampleLevel(sampleWrap, vertex.uv, mipLevel).xyz, 1.0f.xxx), 0.0f.xxx);
+    float3 baseColor = MaterialTextures[NonUniformResourceIndex(material.AlbedoTextureIndex)].SampleLevel(sampleWrap, vertex.uv, mipLevel).xyz * material.BaseColorFactor.xyz;
+    payload.color = max(SpecSanitizeFloat3(baseColor, 1.0f.xxx), 0.0f.xxx);
 
     payload.bHit = true;
     payload.hitDist = hitT;

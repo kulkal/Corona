@@ -220,7 +220,7 @@ void anyhit(inout SkyPayload payload, in BuiltInTriangleIntersectionAttributes a
     Vertex vertex = CORONA_GET_VERTEX_ATTRIBUTES(instanceID, triangleIndex, barycentrics);
     float opacity = 1.0f;
     RTMaterialRecord material = RtMaterials[instanceID];
-    opacity = MaterialTextures[NonUniformResourceIndex(material.AlbedoTextureIndex)].SampleLevel(sampleWrap, vertex.uv, 5).w;
+    opacity = MaterialTextures[NonUniformResourceIndex(material.AlbedoTextureIndex)].SampleLevel(sampleWrap, vertex.uv, 5).w * material.BaseColorFactor.w;
 
     if (opacity > 0.10f)
         return;

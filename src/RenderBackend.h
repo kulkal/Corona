@@ -405,6 +405,10 @@ struct RenderBackendCapabilities
 	bool SupportsDrawIndirect = false;
 	bool SupportsMultiDrawIndirect = false;
 	bool SupportsDrawIndirectFirstInstance = false;
+	bool SupportsGBufferOcclusionQueries = false;
+	bool RequiresStartupLoadingScreenGBufferFallback = false;
+	bool RequiresFullPrecisionHybridUAVTargets = false;
+	bool UsesWindowFramebufferCache = false;
 	uint32_t MaxBindlessTextureCount = 0;
 	uint32_t MaxBindlessBufferCount = 0;
 };
@@ -493,9 +497,15 @@ public:
 	virtual uint32_t GetMaxSupportedHybridStage() const = 0;
 	virtual bool SupportsRayTracing() const = 0;
 	virtual bool SupportsShaderExecutionReordering() const = 0;
+	virtual bool UsesSimpleGIFallbackPath() const { return false; }
 	virtual void BeginFrame() = 0;
 	virtual void EndFrame() = 0;
 	virtual void WaitForGpu() = 0;
+	virtual bool SupportsAsyncRtOverlap() const { return false; }
+	virtual bool BeginAsyncRtRecordingAfterGraphicsSubmit() { return false; }
+	virtual uint64_t EndAsyncRtRecordingAndResumeGraphics() { return 0; }
+	virtual bool HasPendingAsyncRtWork() const { return false; }
+	virtual void SubmitGraphicsWorkAndWaitForAsyncRt() {}
 	virtual void EmitGpuCrashMarker(const char* markerName) = 0;
 	virtual bool IsDeviceLost() const { return false; }
 	virtual const std::string& GetErrorString() const = 0;
@@ -586,6 +596,13 @@ public:
 		(void)sizeInBytes;
 		return false;
 	}
+	virtual bool CreateOrUpdateRayTracingInstancePropertyBuffer(
+		std::shared_ptr<Buffer>& buffer,
+		uint32_t numElements,
+		uint32_t elementSize,
+		const void* srcData,
+		uint32_t sizeInBytes,
+		std::wstring* outFailureReason) = 0;
 	// Frame-transient structured buffer backed by a backend-owned suballocated
 	// upload pool. The returned Buffer handle is kept alive by the backend
 	// until the frame's fence is retired, so callers can bind it immediately
@@ -616,6 +633,7 @@ public:
 	virtual std::shared_ptr<ComputePipelineStateObject> CreateComputePipelineStateObject() = 0;
 	virtual ShaderBytecode CreateShader(const std::wstring& fileName, const std::string& entryPoint, const std::string& target) = 0;
 	virtual void ResetDynamicResources() = 0;
+	virtual void ForgetDynamicTexture(Texture* texture) { (void)texture; }
 	virtual void CreateSwapChainForWindow(
 		WindowHandle window,
 		uint32_t width,
@@ -653,6 +671,7 @@ public:
 	virtual bool DrawIndexedIndirect(Buffer* indirectArgumentBuffer, uint64_t byteOffset, uint32_t drawCount) = 0;
 	virtual void Dispatch(uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ) = 0;
 	virtual void ClearTextureUAVFloat(Texture* texture, const float clearColor[4]) = 0;
+	virtual void CopyTexture(Texture* dstTexture, Texture* srcTexture) = 0;
 	virtual void ExecuteCurrentCommandList() = 0;
 	virtual void BeginGpuMarker(uint64_t color, const char* label) = 0;
 	virtual void EndGpuMarker() = 0;

@@ -7967,7 +7967,7 @@ void Corona::PushLuauUiStateForScript(lua_State* L, const std::string& mode, boo
 	PushBoolField(L, "enable_restir_direct_shadow", bEnableReSTIRDirectShadow);
 	PushBoolField(L, "enable_sky_lighting", bEnableSkyLighting);
 	PushBoolField(L, "enable_ray_traced_sky_lighting", bEnableRayTracedSkyLighting);
-	PushBoolField(L, "async_shadow_ao_available", renderBackend && renderBackend->GetAPI() == ERenderBackendAPI::D3D12);
+	PushBoolField(L, "async_shadow_ao_available", renderBackend && renderBackend->SupportsAsyncRtOverlap());
 	PushBoolField(L, "enable_async_shadow_ao_overlap", bEnableAsyncShadowAOOverlap);
 	PushBoolField(L, "async_shadow_ao_overlap_rtao", bAsyncShadowAOOverlapRTAO);
 	PushBoolField(L, "async_shadow_ao_overlap_shadow", bAsyncShadowAOOverlapShadow);

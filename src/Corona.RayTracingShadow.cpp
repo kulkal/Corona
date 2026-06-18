@@ -12,9 +12,6 @@
 #include "stdafx.h"
 #include "Corona.h"
 #include "RenderGraph.h"
-// DX12 raw command list access for the ReSTIR Phase 2 CopyResource path.
-// Vulkan-side support pending; the copy is gated on dx12_rhi being valid.
-#include "DX12Backend.h"
 
 #include <algorithm>
 #include <cmath>
@@ -292,8 +289,7 @@ void Corona::RaytraceShadowPass()
 		PSO_SHADOW_SPATIAL_REUSE != nullptr &&
 		ShadowBufferPreSpatial != nullptr &&
 		ShadowReservoirMBufferPreSpatial != nullptr &&
-		ShadowReservoirMBuffer != nullptr &&
-		dx12_rhi != nullptr;
+		ShadowReservoirMBuffer != nullptr;
 	Texture* const raygenShadowTarget = bUseSpatialReuseCompute ? ShadowBufferPreSpatial.get() : ShadowBuffer.get();
 	Texture* const raygenMTarget      = bUseSpatialReuseCompute ? ShadowReservoirMBufferPreSpatial.get() : ShadowReservoirMBuffer.get();
 
@@ -450,15 +446,14 @@ void Corona::RaytraceShadowPass()
 				PSO_SHADOW_SPATIAL_REUSE->Apply();
 				const UINT groupX = (GetRenderWidth() + 7) / 8;
 				const UINT groupY = (GetRenderHeight() + 7) / 8;
-				dx12_rhi->GetGraphicsCommandList()->Dispatch(groupX, groupY, 1);
+				ctx.GetBackend()->Dispatch(groupX, groupY, 1);
 			});
 	}
 
 	// ReSTIR Phase 2 temporal feedback: cache this frame's reservoirs for
-	// next-frame reproject via raw DX12 CopyResource. Only meaningful in
+	// next-frame reproject. Only meaningful in
 	// ReSTIR mode; in Option A the copy is skipped. DX12-only for now —
-	// Vulkan path will follow with a backend-abstracted texture copy.
-	if (bEnableReSTIRDirectShadow && shadowPrevInput.IsValid() && dx12_rhi)
+	if (bEnableReSTIRDirectShadow && shadowPrevInput.IsValid())
 	{
 		rg.AddPass(
 			"Shadow.CopyReservoir",
@@ -470,9 +465,7 @@ void Corona::RaytraceShadowPass()
 			},
 			[&](RGContext& ctx)
 			{
-				dx12_rhi->GetGraphicsCommandList()->CopyResource(
-					ctx.GetTexture(shadowPrevInput)->resource.Get(),
-					ctx.GetTexture(finalShadowOutput)->resource.Get());
+				ctx.GetBackend()->CopyTexture(ctx.GetTexture(shadowPrevInput), ctx.GetTexture(finalShadowOutput));
 			});
 
 		if (finalMOutput.IsValid() && shadowMPrevInput.IsValid())
@@ -487,9 +480,7 @@ void Corona::RaytraceShadowPass()
 				},
 				[&](RGContext& ctx)
 				{
-					dx12_rhi->GetGraphicsCommandList()->CopyResource(
-						ctx.GetTexture(shadowMPrevInput)->resource.Get(),
-						ctx.GetTexture(finalMOutput)->resource.Get());
+					ctx.GetBackend()->CopyTexture(ctx.GetTexture(shadowMPrevInput), ctx.GetTexture(finalMOutput));
 				});
 		}
 	}

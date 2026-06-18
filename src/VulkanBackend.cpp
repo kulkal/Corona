@@ -4723,7 +4723,7 @@ std::shared_ptr<Buffer> VulkanBackend::CreateBuffer(const BufferCreateDesc& desc
 	auto buffer = CreateTrackedBufferHandle();
 	buffer->NumElements = desc.NumElements;
 	buffer->ElementSize = desc.ElementSize;
-	buffer->Type = Buffer::UNKNOWN;
+	buffer->Type = (desc.Shape == EBufferShape::Structured) ? Buffer::STRUCTURED : Buffer::BYTE_ADDRESS;
 
 	VulkanBufferAllocation allocation{};
 	allocation.Stride = desc.ElementSize;
@@ -4789,6 +4789,64 @@ std::shared_ptr<Buffer> VulkanBackend::CreateBuffer(const BufferCreateDesc& desc
 	return buffer;
 #endif
 }
+
+bool VulkanBackend::CreateOrUpdateRayTracingInstancePropertyBuffer(
+	std::shared_ptr<Buffer>& buffer,
+	uint32_t numElements,
+	uint32_t elementSize,
+	const void* srcData,
+	uint32_t sizeInBytes,
+	std::wstring* outFailureReason)
+{
+#if !CORONA_HAS_VULKAN
+	(void)buffer;
+	(void)numElements;
+	(void)elementSize;
+	(void)srcData;
+	(void)sizeInBytes;
+	if (outFailureReason)
+		*outFailureReason = L"Vulkan unavailable";
+	return false;
+#else
+	auto fail = [&](const wchar_t* reason)
+	{
+		if (outFailureReason)
+			*outFailureReason = reason ? reason : L"unknown";
+		return false;
+	};
+
+	if (numElements == 0 || elementSize == 0)
+		return fail(L"invalid buffer dimensions");
+	if (!srcData || sizeInBytes == 0)
+		return fail(L"missing source data");
+	if (static_cast<uint64_t>(sizeInBytes) > static_cast<uint64_t>(numElements) * static_cast<uint64_t>(elementSize))
+		return fail(L"source data exceeds buffer capacity");
+
+	try
+	{
+		buffer = CreateBuffer({
+			numElements,
+			elementSize,
+			EInitialResourceState::ShaderRead,
+			false,
+			const_cast<void*>(srcData),
+			EBufferShape::ByteAddress
+		});
+	}
+	catch (...)
+	{
+		buffer = nullptr;
+		return fail(L"CreateBuffer threw");
+	}
+	if (!buffer)
+		return fail(L"CreateBuffer returned null");
+
+	if (outFailureReason)
+		outFailureReason->clear();
+	return true;
+#endif
+}
+
 std::shared_ptr<Sampler> VulkanBackend::CreateSampler(const SamplerCreateDesc& desc)
 {
 #if !CORONA_HAS_VULKAN
@@ -9597,6 +9655,53 @@ void VulkanBackend::ClearTextureUAVFloat(Texture* texture, const float clearColo
 		1, &barrier);
 #endif
 }
+
+void VulkanBackend::CopyTexture(Texture* dstTexture, Texture* srcTexture)
+{
+#if !CORONA_HAS_VULKAN
+	(void)dstTexture; (void)srcTexture; ThrowNotImplemented(__FUNCTION__);
+#else
+	if (!bFrameActive || ActiveCommandBuffer == VK_NULL_HANDLE || !dstTexture || !srcTexture || dstTexture == srcTexture)
+		return;
+
+	auto srcIt = TextureAllocations.find(srcTexture);
+	auto dstIt = TextureAllocations.find(dstTexture);
+	if (srcIt == TextureAllocations.end() || dstIt == TextureAllocations.end())
+		return;
+
+	if (bRenderPassActive)
+	{
+		vkCmdEndRenderPass(ActiveCommandBuffer);
+		bRenderPassActive = false;
+	}
+
+	const VulkanTextureAllocation& srcAllocation = srcIt->second;
+	const VulkanTextureAllocation& dstAllocation = dstIt->second;
+
+	VkImageCopy copyRegion{};
+	copyRegion.srcSubresource.aspectMask = GetImageAspectFlags(srcTexture->Format);
+	copyRegion.srcSubresource.mipLevel = 0;
+	copyRegion.srcSubresource.baseArrayLayer = 0;
+	copyRegion.srcSubresource.layerCount = 1;
+	copyRegion.dstSubresource.aspectMask = GetImageAspectFlags(dstTexture->Format);
+	copyRegion.dstSubresource.mipLevel = 0;
+	copyRegion.dstSubresource.baseArrayLayer = 0;
+	copyRegion.dstSubresource.layerCount = 1;
+	copyRegion.extent.width = std::min(srcAllocation.Width, dstAllocation.Width);
+	copyRegion.extent.height = std::min(srcAllocation.Height, dstAllocation.Height);
+	copyRegion.extent.depth = std::min(srcAllocation.Depth, dstAllocation.Depth);
+
+	vkCmdCopyImage(
+		ActiveCommandBuffer,
+		srcAllocation.Image,
+		VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+		dstAllocation.Image,
+		VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+		1,
+		&copyRegion);
+#endif
+}
+
 void VulkanBackend::ExecuteCurrentCommandList()
 {
 #if !CORONA_HAS_VULKAN

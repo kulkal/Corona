@@ -27,6 +27,7 @@ public:
 	RenderBackendCapabilities GetCapabilities() const override;
 	bool SupportsRayTracing() const override;
 	bool SupportsShaderExecutionReordering() const override;
+	bool UsesSimpleGIFallbackPath() const override { return true; }
 
 	// --- Frame lifecycle / diagnostics ---
 	void BeginFrame() override;
@@ -62,6 +63,13 @@ public:
 	std::shared_ptr<Buffer> CreateUploadStructuredBuffer(uint32_t numElements, uint32_t elementSize) override;
 	void UpdateUploadStructuredBuffer(Buffer* buffer, const void* srcData, uint32_t sizeInBytes) override;
 	bool UpdateDefaultStructuredBuffer(Buffer* buffer, const void* srcData, uint32_t sizeInBytes) override;
+	bool CreateOrUpdateRayTracingInstancePropertyBuffer(
+		std::shared_ptr<Buffer>& buffer,
+		uint32_t numElements,
+		uint32_t elementSize,
+		const void* srcData,
+		uint32_t sizeInBytes,
+		std::wstring* outFailureReason) override;
 	std::shared_ptr<Buffer> AllocateTransientUploadStructuredBuffer(uint32_t numElements, uint32_t elementSize, const void* srcData) override;
 	std::shared_ptr<Buffer> AllocateTransientDefaultStructuredBuffer(uint32_t numElements, uint32_t elementSize, const void* srcData) override;
 
@@ -141,6 +149,7 @@ public:
 	bool DrawIndexedIndirect(Buffer* indirectArgumentBuffer, uint64_t byteOffset, uint32_t drawCount) override;
 	void Dispatch(uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ) override;
 	void ClearTextureUAVFloat(Texture* texture, const float clearColor[4]) override;
+	void CopyTexture(Texture* dstTexture, Texture* srcTexture) override;
 	void ExecuteCurrentCommandList() override;
 	void BeginGpuMarker(uint64_t color, const char* label) override;
 	void EndGpuMarker() override;

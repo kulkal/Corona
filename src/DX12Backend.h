@@ -734,6 +734,8 @@ public:
 		capabilities.SupportsDrawIndexedIndirect = true;
 		capabilities.SupportsDrawIndirect = true;
 		capabilities.SupportsMultiDrawIndirect = true;
+		capabilities.SupportsGBufferOcclusionQueries = true;
+		capabilities.UsesWindowFramebufferCache = true;
 		if (Device)
 		{
 			D3D12_FEATURE_DATA_SHADER_MODEL shaderModel{};
@@ -814,7 +816,7 @@ public:
 	std::shared_ptr<ComputePipelineStateObject> CreateComputePipelineStateObject() override;
 	ShaderBytecode CreateShader(const std::wstring& fileName, const std::string& entryPoint, const std::string& target) override;
 	void ResetDynamicResources() override { DynamicTextures.clear(); DynamicBuffers.clear(); }
-	void ForgetDynamicTexture(Texture* texture) { if (texture) DynamicTextures.remove_if([texture](const std::shared_ptr<Texture>& entry) { return entry.get() == texture; }); }
+	void ForgetDynamicTexture(Texture* texture) override { if (texture) DynamicTextures.remove_if([texture](const std::shared_ptr<Texture>& entry) { return entry.get() == texture; }); }
 	void ForgetDynamicBuffer(Buffer* buffer) { if (buffer) DynamicBuffers.remove_if([buffer](const std::shared_ptr<Buffer>& entry) { return entry.get() == buffer; }); }
 	void CreateSwapChainForWindow(WindowHandle window, uint32_t width, uint32_t height, ETextureFormat format) override;
 	std::shared_ptr<Texture> GetSwapChainTexture(uint32_t bufferIndex) override;
@@ -850,14 +852,16 @@ public:
 	bool DrawIndexedIndirect(Buffer* indirectArgumentBuffer, uint64_t byteOffset, uint32_t drawCount) override;
 	void Dispatch(uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ) override;
 	void ClearTextureUAVFloat(Texture* texture, const float clearColor[4]) override;
+	void CopyTexture(Texture* dstTexture, Texture* srcTexture) override;
 	void ExecuteCurrentCommandList() override;
 	void BeginNewGraphicsCommandList();
 	UINT64 SubmitCurrentCommandList();
 	UINT64 SubmitCurrentCommandListAndRestart();
-	bool BeginAsyncRtRecordingAfterGraphicsSubmit();
-	UINT64 EndAsyncRtRecordingAndResumeGraphics();
-	bool HasPendingAsyncRtWork() const { return PendingAsyncRtFenceValue != 0; }
-	void SubmitGraphicsWorkAndWaitForAsyncRt();
+	bool SupportsAsyncRtOverlap() const override { return AsyncRtCmdQ != nullptr; }
+	bool BeginAsyncRtRecordingAfterGraphicsSubmit() override;
+	uint64_t EndAsyncRtRecordingAndResumeGraphics() override;
+	bool HasPendingAsyncRtWork() const override { return PendingAsyncRtFenceValue != 0; }
+	void SubmitGraphicsWorkAndWaitForAsyncRt() override;
 	void WaitForAsyncRtOnGraphicsQueue();
 	void BeginGpuMarker(uint64_t color, const char* label) override;
 	void EndGpuMarker() override;
@@ -888,6 +892,13 @@ public:
 	shared_ptr<Buffer> CreateBuffer(UINT InNumElements, UINT InElementSize, D3D12_RESOURCE_STATES initResState, bool isUAV, void* SrcData = nullptr, EBufferAccess access = EBufferAccess::GpuOnly);
 	shared_ptr<Buffer> CreateDefaultByteAddressBuffer(UINT InNumElements, UINT InElementSize, EInitialResourceState initialState = EInitialResourceState::ShaderRead);
 	bool UploadToDefaultBuffer(Buffer* buffer, const void* srcData, UINT sizeInBytes, EResourceState stateBefore, EResourceState stateAfter);
+	bool CreateOrUpdateRayTracingInstancePropertyBuffer(
+		std::shared_ptr<Buffer>& buffer,
+		uint32_t numElements,
+		uint32_t elementSize,
+		const void* srcData,
+		uint32_t sizeInBytes,
+		std::wstring* outFailureReason) override;
 
 	std::vector<std::shared_ptr<Texture>> SwapChainRenderTargets;
 	std::vector<std::shared_ptr<Texture>> SwapChainWrappedTextures;

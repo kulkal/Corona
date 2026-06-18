@@ -91,7 +91,7 @@ static const float PATH_TRACING_RAY_BIAS = 0.5f;
 
 float4 SamplePathTracingAlbedo(RTMaterialRecord material, float2 uv, float mipLevel)
 {
-    return MaterialTextures[NonUniformResourceIndex(material.AlbedoTextureIndex)].SampleLevel(sampleWrap, uv, mipLevel);
+    return MaterialTextures[NonUniformResourceIndex(material.AlbedoTextureIndex)].SampleLevel(sampleWrap, uv, mipLevel) * material.BaseColorFactor;
 }
 
 float3 SamplePathTracingNormal(RTMaterialRecord material, float2 uv, float mipLevel)

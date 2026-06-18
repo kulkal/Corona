@@ -2096,7 +2096,7 @@ Corona::~Corona()
 	PSO_RT_REFLECTION_SER.reset();
 	PSO_RT_GI.reset();
 	PSO_RT_GI_SER.reset();
-	PSO_NRI_SIMPLE_GI_FALLBACK.reset();
+	PSO_SIMPLE_GI_FALLBACK.reset();
 	PSO_RT_SCREEN_PROBE_GI.reset();
 	PSO_RT_SCREEN_PROBE_GI_SER.reset();
 	PSO_RT_SPATIAL_HASH_GI.reset();
@@ -3445,7 +3445,7 @@ void Corona::RecreateRenderResolutionResources()
 	const UINT ColorBufferWidth = CORONA_PLATFORM_MOBILE ? RenderWidthLocal : DisplayWidth;
 	const UINT ColorBufferHeight = CORONA_PLATFORM_MOBILE ? RenderHeightLocal : DisplayHeight;
 	const ETextureFormat HybridFloat4UAVFormat =
-		(renderBackend && renderBackend->GetAPI() == ERenderBackendAPI::Vulkan)
+		(renderBackend && renderBackend->GetCapabilities().RequiresFullPrecisionHybridUAVTargets)
 		? ETextureFormat::RGBA32Float
 		: ETextureFormat::RGBA16Float;
 	const bool bNeedExtendedHybridResources =
@@ -3453,8 +3453,8 @@ void Corona::RecreateRenderResolutionResources()
 
 	auto releaseTexture = [&](std::shared_ptr<Texture>& texture)
 	{
-		if (dx12_rhi && texture)
-			dx12_rhi->ForgetDynamicTexture(texture.get());
+		if (renderBackend && texture)
+			renderBackend->ForgetDynamicTexture(texture.get());
 		texture.reset();
 	};
 
@@ -4337,6 +4337,21 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 			}
 			continue;
 		}
+		std::wstring simpleGILocalLightSamplesValue = ParseValueArg(arg, L"--simple-gi-local-light-samples", L"-simple-gi-local-light-samples", i);
+		if (simpleGILocalLightSamplesValue.empty())
+			simpleGILocalLightSamplesValue = ParseValueArg(arg, L"--simple-gi-point-light-samples", L"-simple-gi-point-light-samples", i);
+		if (!simpleGILocalLightSamplesValue.empty())
+		{
+			try
+			{
+				const unsigned long value = std::stoul(simpleGILocalLightSamplesValue);
+				SimpleGISamplesPerPixel = static_cast<UINT32>(std::clamp<unsigned long>(value, 1ul, static_cast<unsigned long>(MaxDiffuseGIPointLights)));
+			}
+			catch (...)
+			{
+			}
+			continue;
+		}
 		if (arg == L"--rt-diffuse-gi-ser" || arg == L"--enable-rt-diffuse-gi-ser" || arg == L"--diffuse-gi-ser")
 		{
 			bEnableRTDiffuseGISER = true;
@@ -4377,6 +4392,16 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 		if (arg == L"--no-specular-gi" || arg == L"--disable-specular-gi" || arg == L"--no-indirect-specular" || arg == L"--disable-indirect-specular")
 		{
 			bEnableSpecularGI = false;
+			continue;
+		}
+		if (arg == L"--specular-gi-temporal-reservoir" || arg == L"--enable-specular-gi-temporal-reservoir")
+		{
+			bEnableSpecularGITemporalReservoir = false;
+			continue;
+		}
+		if (arg == L"--no-specular-gi-temporal-reservoir" || arg == L"--disable-specular-gi-temporal-reservoir")
+		{
+			bEnableSpecularGITemporalReservoir = false;
 			continue;
 		}
 		if (arg == L"--direct-diffuse" || arg == L"--enable-direct-diffuse")
@@ -4928,7 +4953,9 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 		L", shcPrimaryDeepSeed=" + std::to_wstring(bEnableSpatialHashPrimaryDeepSeed ? 1 : 0) +
 		L", shcPrimaryDeepStride=" + std::to_wstring(SpatialHashPrimaryDeepSeedPixelStride) +
 		L", diffuseGIPointLights=" + std::to_wstring(DiffuseGIPointLightLimit) +
+		L", simpleGILocalLightSamples=" + std::to_wstring(SimpleGISamplesPerPixel) +
 		L", specularGIEnabled=" + std::to_wstring(bEnableSpecularGI ? 1 : 0) +
+		L", specularGITemporalReservoir=0" +
 		L", directDiffuse=" + std::to_wstring(bEnableDirectDiffuse ? 1 : 0) +
 		L", directSpecular=" + std::to_wstring(bEnableDirectSpecular ? 1 : 0) +
 		L", restirDirectShadow=" + std::to_wstring(bEnableReSTIRDirectShadow ? 1 : 0) +
@@ -7968,6 +7995,7 @@ Corona::RenderFrameSourceState Corona::CaptureRenderFrameSourceState() const
 	state.bEnableRTDiffuseGISER = bEnableRTDiffuseGISER;
 	state.bEnableRTReflectionSER = bEnableRTReflectionSER;
 	state.bEnableSpecularGI = bEnableSpecularGI;
+	state.bEnableSpecularGITemporalReservoir = false;
 	state.bEnableDirectDiffuse = bEnableDirectDiffuse;
 	state.bEnableDirectSpecular = bEnableDirectSpecular;
 	state.bEnableRTAO = bEnableRTAO;
@@ -8080,6 +8108,7 @@ void Corona::ApplyRenderFrameSourceState(const RenderFrameSourceState& state)
 	bEnableRTDiffuseGISER = state.bEnableRTDiffuseGISER;
 	bEnableRTReflectionSER = state.bEnableRTReflectionSER;
 	bEnableSpecularGI = state.bEnableSpecularGI;
+	bEnableSpecularGITemporalReservoir = false;
 	bEnableDirectDiffuse = state.bEnableDirectDiffuse;
 	bEnableDirectSpecular = state.bEnableDirectSpecular;
 	bEnableRTAO = state.bEnableRTAO;
@@ -8187,6 +8216,7 @@ void Corona::SyncCurrentLightingSettingsToFrameSourceState()
 		state.bEnableRTDiffuseGISER = bEnableRTDiffuseGISER;
 		state.bEnableRTReflectionSER = bEnableRTReflectionSER;
 		state.bEnableSpecularGI = bEnableSpecularGI;
+		state.bEnableSpecularGITemporalReservoir = false;
 		state.bEnableDirectDiffuse = bEnableDirectDiffuse;
 		state.bEnableDirectSpecular = bEnableDirectSpecular;
 		state.bEnableRTAO = bEnableRTAO;
@@ -9003,15 +9033,14 @@ void Corona::DrawStartupLoadingScreen()
 		renderBackend->BeginFrame();
 
 		Texture* backbuffer = renderBackend->GetCurrentWindowRenderTarget();
-		if (renderBackend->GetAPI() == ERenderBackendAPI::D3D12 && !backbuffer)
+		if (!backbuffer)
 		{
 			renderBackend->EndFrame();
 			return;
 		}
 
 		const float clearColor[4] = { 0.025f, 0.032f, 0.045f, 1.0f };
-		if (renderBackend->GetAPI() == ERenderBackendAPI::D3D12)
-			renderBackend->PrepareWindowRenderTarget(backbuffer);
+		renderBackend->PrepareWindowRenderTarget(backbuffer);
 		renderBackend->ClearRenderTarget(backbuffer, clearColor);
 		renderBackend->SetRenderTarget(backbuffer);
 		const UINT windowWidth = (backbuffer && backbuffer->Width > 0) ? backbuffer->Width : m_width;
@@ -11384,7 +11413,7 @@ void Corona::LoadAssets()
 	const UINT ColorBufferWidth = CORONA_PLATFORM_MOBILE ? RenderWidthLocal : DisplayWidth;
 	const UINT ColorBufferHeight = CORONA_PLATFORM_MOBILE ? RenderHeightLocal : DisplayHeight;
 	const ETextureFormat HybridFloat4UAVFormat =
-		(renderBackend && renderBackend->GetAPI() == ERenderBackendAPI::Vulkan)
+		(renderBackend && renderBackend->GetCapabilities().RequiresFullPrecisionHybridUAVTargets)
 		? ETextureFormat::RGBA32Float
 		: ETextureFormat::RGBA16Float;
 	const bool bNeedExtendedHybridResources = !bMobileHybridDirectOnlyStartup;
@@ -11392,7 +11421,7 @@ void Corona::LoadAssets()
 
 	if (bSupportsFullHybridPresentation &&
 		renderBackend &&
-		renderBackend->GetAPI() == ERenderBackendAPI::D3D12 &&
+		renderBackend->GetCapabilities().UsesWindowFramebufferCache &&
 		framebuffers.empty())
 	{
 		for (UINT i = 0; i < renderBackend->GetFrameCount(); i++)
@@ -13144,7 +13173,7 @@ void Corona::InitBlueNoiseTexture()
 
 void Corona::EnsureWindowFramebuffers()
 {
-	if (!renderBackend || renderBackend->GetAPI() != ERenderBackendAPI::D3D12 || !framebuffers.empty())
+	if (!renderBackend || !renderBackend->GetCapabilities().UsesWindowFramebufferCache || !framebuffers.empty())
 		return;
 
 	for (UINT i = 0; i < renderBackend->GetFrameCount(); i++)
@@ -14203,9 +14232,9 @@ void Corona::DrawEditorModeOverlay()
 					if (ImGui::Checkbox("Enable Diffuse GI", &bEnableDiffuseGI)) bLightingChanged = true;
 					{
 						int giSpp = (int)SimpleGISamplesPerPixel;
-						if (ImGui::SliderInt("Simple GI Samples/Pixel", &giSpp, 1, 8))
+						if (ImGui::SliderInt("Simple GI Local Light Samples", &giSpp, 1, 16))
 						{
-							SimpleGISamplesPerPixel = (UINT32)giSpp;
+							SimpleGISamplesPerPixel = static_cast<UINT32>(std::clamp(giSpp, 1, 16));
 							bLightingChanged = true;
 						}
 					}
@@ -14383,7 +14412,8 @@ void Corona::DrawEditorModeOverlay()
 					SyncCurrentLightingSettingsToFrameSourceState();
 					AppendCpuRuntimeTrace(
 						L"[LightingControls] changed (no temporal reset), diffuseGI=" + std::to_wstring(bEnableDiffuseGI ? 1 : 0) +
-						L", specularGI=" + std::to_wstring(bEnableSpecularGI ? 1 : 0));
+						L", specularGI=" + std::to_wstring(bEnableSpecularGI ? 1 : 0) +
+						L", specularGITemporalReservoir=0");
 				}
 			}
 		}
@@ -14940,17 +14970,16 @@ void Corona::OnRender()
 			!bHybridDirectOnly &&
 			backendMaxSupportedHybridStage > 0u &&
 			backendMaxSupportedHybridStage < 7u;
-		const bool bNriSimpleGIBringup =
-			renderBackend &&
-			renderBackend->GetAPI() == ERenderBackendAPI::NRI &&
+		const bool bPartialHybridDiffuseGIBringup =
+			!bHybridDirectOnly &&
 			backendMaxSupportedHybridStage >= 4u &&
 			backendMaxSupportedHybridStage < 7u;
-		// NRI bring-up now runs the spatial-hash diffuse GI (the engine default) — the
+		// Partial hybrid backends run spatial-hash diffuse GI (the engine default).
 		// screen-space TemporalDenoisingPass already accepts spatial-hash input
 		// (bUseSpatialHashDiffuseInput) and writes the denoised DiffuseGITemporal that
-		// LightingPass consumes. Screen-probe GI is still not brought up on NRI.
+		// LightingPass consumes. Screen-probe GI is disabled until the backend supports it.
 		const EDiffuseGIMode effectiveDiffuseGIMode =
-			bNriSimpleGIBringup
+			bPartialHybridDiffuseGIBringup
 				? (DiffuseGIMode == EDiffuseGIMode::SCREEN_PROBE ? EDiffuseGIMode::SPATIAL_HASH : DiffuseGIMode)
 				: DiffuseGIMode;
 		const bool bStageDump = !bHybridDirectOnly && IsHybridStageAutoDumpPhase();
@@ -14975,11 +15004,11 @@ void Corona::OnRender()
 		const bool bDiffuseGINeedsTemporalDenoise =
 			bRunGI &&
 			(effectiveDiffuseGIMode == EDiffuseGIMode::SIMPLE_RAYTRACE ||
-			 // NRI bring-up without DLSS-RR: the screen-space TemporalDenoisingPass is
+			 // Partial hybrid without DLSS-RR: the screen-space TemporalDenoisingPass is
 			 // what denoises both the spatial-hash diffuse (via bUseSpatialHashDiffuseInput)
 			 // and the specular reflections before LightingPass. Under DLSS-RR it's
-			 // skipped — RR owns denoising from the raw cached query + raw specular.
-			 (bNriSimpleGIBringup && effectiveDiffuseGIMode == EDiffuseGIMode::SPATIAL_HASH && !IsDLSSRREnabled()));
+			 // skipped; RR owns denoising from the raw cached query + raw specular.
+			 (bPartialHybridDiffuseGIBringup && effectiveDiffuseGIMode == EDiffuseGIMode::SPATIAL_HASH && !IsDLSSRREnabled()));
 		const bool bRunTemporalDenoise =
 			bEnableTemporalDenoisingPass &&
 			!bHybridDirectOnly &&
@@ -15017,7 +15046,8 @@ void Corona::OnRender()
 
 		const bool bAsyncShadowAOOverlapAvailable =
 			bEnableAsyncShadowAOOverlap &&
-			dx12_rhi &&
+			renderBackend &&
+			renderBackend->SupportsAsyncRtOverlap() &&
 			bRunGI &&
 			effectiveDiffuseGIMode == EDiffuseGIMode::SPATIAL_HASH;
 		const bool bAsyncRTAORequested =
@@ -15092,7 +15122,7 @@ void Corona::OnRender()
 
 		if (bTryAsyncShadowAOOverlap)
 		{
-			if (dx12_rhi->BeginAsyncRtRecordingAfterGraphicsSubmit())
+			if (renderBackend->BeginAsyncRtRecordingAfterGraphicsSubmit())
 			{
 				bAsyncShadowAOOverlapActive = true;
 				if (bAsyncRTAORequested)
@@ -15107,7 +15137,7 @@ void Corona::OnRender()
 					RaytraceShadowPass();
 					EndGpuPassMarker(renderBackend.get());
 				}
-				dx12_rhi->EndAsyncRtRecordingAndResumeGraphics();
+				renderBackend->EndAsyncRtRecordingAndResumeGraphics();
 			}
 			else
 			{
@@ -15184,8 +15214,8 @@ void Corona::OnRender()
 
 		if (bRunLighting)
 		{
-			if (bAsyncShadowAOOverlapActive && dx12_rhi && dx12_rhi->HasPendingAsyncRtWork())
-				dx12_rhi->SubmitGraphicsWorkAndWaitForAsyncRt();
+			if (bAsyncShadowAOOverlapActive && renderBackend && renderBackend->HasPendingAsyncRtWork())
+				renderBackend->SubmitGraphicsWorkAndWaitForAsyncRt();
 			BeginGpuPassTiming(EGpuPass::Lighting);
 			LightingPass();
 			EndGpuPassTiming(EGpuPass::Lighting);
@@ -16768,25 +16798,38 @@ if (ImGui::Button("Reset Accumulation"))
 	renderBackend->EndFrame();
 	endFrameMs = ElapsedMilliseconds(endFrameStart, CpuClock::now());
 
-	// One-shot buffer dump for headless verification (set env CORONA_NRI_DUMP).
+	// One-shot buffer dump for headless verification (set env CORONA_GI_DUMP or legacy CORONA_NRI_DUMP).
 	// Runs after EndFrame (ActiveCmd null) so CaptureTexture records its own cmd.
 	{
-		static const bool s_nriDumpEnabled = std::getenv("CORONA_NRI_DUMP") != nullptr;
-		static int s_nriDumpFrame = -1;
-		if (s_nriDumpEnabled && s_nriDumpFrame < 0 && renderBackend && renderBackend->GetAPI() == ERenderBackendAPI::NRI)
-			s_nriDumpFrame = (int)FrameCounter + 150;
-		if (s_nriDumpFrame >= 0 && (int)FrameCounter == s_nriDumpFrame)
+		static const bool s_giDumpEnabled =
+			std::getenv("CORONA_GI_DUMP") != nullptr ||
+			std::getenv("CORONA_NRI_DUMP") != nullptr;
+		static int s_giDumpFrame = -1;
+		if (s_giDumpEnabled && s_giDumpFrame < 0 && renderBackend)
+			s_giDumpFrame = (int)FrameCounter + 150;
+		if (s_giDumpFrame >= 0 && (int)FrameCounter == s_giDumpFrame)
 		{
-			AppendCpuRuntimeTrace(L"[NRIDump] dumping buffers at frame " + std::to_wstring(FrameCounter));
-			if (DiffuseGIRaw) AppendCpuRuntimeTrace(L"[NRIDump] gi=" + std::to_wstring(DumpTexturePNG(DiffuseGIRaw.get(), L"C:\\dev\\Corona_nri\\nri_dump_gi.png", EResourceState::ShaderRead) ? 1 : 0));
-			if (DiffuseGITemporal[GIBufferWriteIndex]) AppendCpuRuntimeTrace(L"[NRIDump] gidenoised=" + std::to_wstring(DumpTexturePNG(DiffuseGITemporal[GIBufferWriteIndex].get(), L"C:\\dev\\Corona_nri\\nri_dump_gidenoised.png", EResourceState::ShaderRead) ? 1 : 0));
-			if (DiffuseGIHashCached) AppendCpuRuntimeTrace(L"[NRIDump] gihash=" + std::to_wstring(DumpTexturePNG(DiffuseGIHashCached.get(), L"C:\\dev\\Corona_nri\\nri_dump_gihash.png", EResourceState::ShaderRead) ? 1 : 0));
-			if (SpecularGIRaw) AppendCpuRuntimeTrace(L"[NRIDump] specgi=" + std::to_wstring(DumpTexturePNG(SpecularGIRaw.get(), L"C:\\dev\\Corona_nri\\nri_dump_specgi.png", EResourceState::ShaderRead) ? 1 : 0));
-			if (AmbientOcclusionBuffer) AppendCpuRuntimeTrace(L"[NRIDump] rtao=" + std::to_wstring(DumpTexturePNG(AmbientOcclusionBuffer.get(), L"C:\\dev\\Corona_nri\\nri_dump_rtao.png", EResourceState::ShaderRead) ? 1 : 0));
-			if (ShadowBuffer) AppendCpuRuntimeTrace(L"[NRIDump] shadow=" + std::to_wstring(DumpTexturePNG(ShadowBuffer.get(), L"C:\\dev\\Corona_nri\\nri_dump_shadow.png", EResourceState::ShaderRead) ? 1 : 0));
-			if (AlbedoBuffer) AppendCpuRuntimeTrace(L"[NRIDump] albedo=" + std::to_wstring(DumpTexturePNG(AlbedoBuffer.get(), L"C:\\dev\\Corona_nri\\nri_dump_albedo.png", EResourceState::ShaderRead) ? 1 : 0));
+			const wchar_t* backendPrefix = L"unknown";
+			switch (renderBackend->GetAPI())
+			{
+			case ERenderBackendAPI::D3D12: backendPrefix = L"dx12"; break;
+			case ERenderBackendAPI::Vulkan: backendPrefix = L"vulkan"; break;
+			case ERenderBackendAPI::NRI: backendPrefix = L"nri"; break;
+			}
+			const std::wstring dumpDir = L"C:\\dev\\Corona_gi_dump\\";
+			std::error_code ec;
+			std::filesystem::create_directories(dumpDir, ec);
+			const std::wstring base = dumpDir + backendPrefix + L"_dump_";
+			AppendCpuRuntimeTrace(L"[GIDump] dumping buffers for " + std::wstring(backendPrefix) + L" at frame " + std::to_wstring(FrameCounter));
+			if (DiffuseGIRaw) AppendCpuRuntimeTrace(L"[GIDump] gi=" + std::to_wstring(DumpTexturePNG(DiffuseGIRaw.get(), base + L"gi.png", EResourceState::ShaderRead) ? 1 : 0));
+			if (DiffuseGITemporal[GIBufferWriteIndex]) AppendCpuRuntimeTrace(L"[GIDump] gidenoised=" + std::to_wstring(DumpTexturePNG(DiffuseGITemporal[GIBufferWriteIndex].get(), base + L"gidenoised.png", EResourceState::ShaderRead) ? 1 : 0));
+			if (DiffuseGIHashCached) AppendCpuRuntimeTrace(L"[GIDump] gihash=" + std::to_wstring(DumpTexturePNG(DiffuseGIHashCached.get(), base + L"gihash.png", EResourceState::ShaderRead) ? 1 : 0));
+			if (SpecularGIRaw) AppendCpuRuntimeTrace(L"[GIDump] specgi=" + std::to_wstring(DumpTexturePNG(SpecularGIRaw.get(), base + L"specgi.png", EResourceState::ShaderRead) ? 1 : 0));
+			if (AmbientOcclusionBuffer) AppendCpuRuntimeTrace(L"[GIDump] rtao=" + std::to_wstring(DumpTexturePNG(AmbientOcclusionBuffer.get(), base + L"rtao.png", EResourceState::ShaderRead) ? 1 : 0));
+			if (ShadowBuffer) AppendCpuRuntimeTrace(L"[GIDump] shadow=" + std::to_wstring(DumpTexturePNG(ShadowBuffer.get(), base + L"shadow.png", EResourceState::ShaderRead) ? 1 : 0));
+			if (AlbedoBuffer) AppendCpuRuntimeTrace(L"[GIDump] albedo=" + std::to_wstring(DumpTexturePNG(AlbedoBuffer.get(), base + L"albedo.png", EResourceState::ShaderRead) ? 1 : 0));
 			Texture* finalColor = GetCurrentResolveSource();
-			if (finalColor) AppendCpuRuntimeTrace(L"[NRIDump] final=" + std::to_wstring(DumpTexturePNG(finalColor, L"C:\\dev\\Corona_nri\\nri_dump_final.png", EResourceState::ShaderRead) ? 1 : 0));
+			if (finalColor) AppendCpuRuntimeTrace(L"[GIDump] final=" + std::to_wstring(DumpTexturePNG(finalColor, base + L"final.png", EResourceState::ShaderRead) ? 1 : 0));
 		}
 	}
 	{

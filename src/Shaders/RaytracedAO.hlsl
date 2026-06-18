@@ -179,7 +179,7 @@ void anyhit(inout AOPayload payload, in BuiltInTriangleIntersectionAttributes at
 
     float opacity = 1.0f;
     RTMaterialRecord material = RtMaterials[instanceID];
-    opacity = MaterialTextures[NonUniformResourceIndex(material.AlbedoTextureIndex)].SampleLevel(sampleWrap, vertex.uv, 5).w;
+    opacity = MaterialTextures[NonUniformResourceIndex(material.AlbedoTextureIndex)].SampleLevel(sampleWrap, vertex.uv, 5).w * material.BaseColorFactor.w;
 
     if (opacity > 0.10f)
     {

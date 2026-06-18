@@ -1761,6 +1761,16 @@ void DX12Backend::ClearTextureUAVFloat(Texture* texture, const float clearColor[
 		nullptr);
 }
 
+void DX12Backend::CopyTexture(Texture* dstTexture, Texture* srcTexture)
+{
+	if (!GlobalCmdList || !dstTexture || !srcTexture || dstTexture == srcTexture)
+		return;
+	if (!dstTexture->resource || !srcTexture->resource)
+		return;
+
+	GlobalCmdList->CmdList->CopyResource(dstTexture->resource.Get(), srcTexture->resource.Get());
+}
+
 void DX12Backend::BeginNewGraphicsCommandList()
 {
 	if (!CmdQ)
@@ -2228,6 +2238,70 @@ bool DX12Backend::UploadToDefaultBuffer(Buffer* buffer, const void* srcData, UIN
 
 	CmdQ->ExecuteCommandList(cmd);
 
+	return true;
+}
+
+bool DX12Backend::CreateOrUpdateRayTracingInstancePropertyBuffer(
+	std::shared_ptr<Buffer>& buffer,
+	uint32_t numElements,
+	uint32_t elementSize,
+	const void* srcData,
+	uint32_t sizeInBytes,
+	std::wstring* outFailureReason)
+{
+	auto fail = [&](const wchar_t* reason)
+	{
+		if (outFailureReason)
+			*outFailureReason = reason ? reason : L"unknown";
+		return false;
+	};
+
+	if (numElements == 0 || elementSize == 0)
+		return fail(L"invalid buffer dimensions");
+	if (!srcData || sizeInBytes == 0)
+		return fail(L"missing source data");
+
+	if (!buffer || buffer->NumElements < numElements || buffer->ElementSize != elementSize)
+	{
+		try
+		{
+			buffer = CreateDefaultByteAddressBuffer(numElements, elementSize, EInitialResourceState::ShaderRead);
+		}
+		catch (...)
+		{
+			return fail(L"CreateDefaultByteAddressBuffer threw");
+		}
+		if (!buffer || !buffer->resource)
+			return fail(L"CreateDefaultByteAddressBuffer returned null");
+
+		AppendCpuRuntimeTrace(
+			L"[RTAS] InstancePropertyBuffer DX12 heap=DEFAULT"
+			L", capacity=" + std::to_wstring(numElements) +
+			L", bytes=" + std::to_wstring(static_cast<uint64_t>(numElements) * static_cast<uint64_t>(elementSize)));
+	}
+
+	if (!buffer || !buffer->resource)
+		return fail(L"frame buffer missing resource");
+
+	bool uploaded = false;
+	try
+	{
+		uploaded = UploadToDefaultBuffer(
+			buffer.get(),
+			srcData,
+			sizeInBytes,
+			EResourceState::ShaderRead,
+			EResourceState::ShaderRead);
+	}
+	catch (...)
+	{
+		return fail(L"UploadToDefaultBuffer threw");
+	}
+	if (!uploaded)
+		return fail(L"UploadToDefaultBuffer failed");
+
+	if (outFailureReason)
+		outFailureReason->clear();
 	return true;
 }
 

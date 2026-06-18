@@ -565,13 +565,9 @@ void Corona::UpdateInstancePropertyBuffer()
 		return;
 	if (renderBackend->IsDeviceLost())
 		return;
-#if CORONA_HAS_D3D12
-	// Backend-specific instance property upload. DX12 and NRI use GPU-local
-	// buffers with staged uploads; Vulkan still manages its existing
-	// backend-side descriptor copy path.
 
-	constexpr UINT32 kMinInstancePropertyCapacity = 500u;
-	const UINT32 instanceCapacity = std::max(kMinInstancePropertyCapacity, static_cast<UINT32>(RayTracingInstances.size()));
+	constexpr uint32_t kMinInstancePropertyCapacity = 500u;
+	const uint32_t instanceCapacity = std::max(kMinInstancePropertyCapacity, static_cast<uint32_t>(RayTracingInstances.size()));
 	std::vector<InstanceProperty> instanceProperties(instanceCapacity);
 	const size_t instanceCount = (std::min)(instanceProperties.size(), RayTracingInstances.size());
 	for (size_t i = 0; i < instanceCount; ++i)
@@ -584,11 +580,11 @@ void Corona::UpdateInstancePropertyBuffer()
 		instanceProperties[i].RoughnessMetallic = glm::vec2(RayTracingInstances[i].Roughness, RayTracingInstances[i].Metallic);
 	}
 
-	const UINT instancePropertyBytes = static_cast<UINT>(instanceProperties.size() * sizeof(InstanceProperty));
+	const uint32_t instancePropertyBytes = static_cast<uint32_t>(instanceProperties.size() * sizeof(InstanceProperty));
 
 	auto ClearFailedFrameResources = [&](const wchar_t* reason)
 	{
-		const UINT32 failedFrameIndex = GetRayTracingFrameResourceIndex();
+		const uint32_t failedFrameIndex = GetRayTracingFrameResourceIndex();
 		AppendCpuRuntimeTrace(
 			L"[RTAS] InstancePropertyBuffer unavailable: " + std::wstring(reason ? reason : L"unknown") +
 			L", capacity=" + std::to_wstring(instanceCapacity) +
@@ -604,163 +600,33 @@ void Corona::UpdateInstancePropertyBuffer()
 			InstancePropertyFrameBuffers[failedFrameIndex].reset();
 	};
 
-	const ERenderBackendAPI backendAPI = renderBackend->GetAPI();
-	if (backendAPI == ERenderBackendAPI::NRI)
-	{
-		EnsureRayTracingFrameResourceSlots();
-		const UINT32 frameIndex = GetRayTracingFrameResourceIndex();
-		if (frameIndex >= InstancePropertyFrameBuffers.size())
-		{
-			ClearFailedFrameResources(L"NRI frame resource slot unavailable");
-			return;
-		}
-
-		std::shared_ptr<Buffer>& frameInstancePropertyBuffer = InstancePropertyFrameBuffers[frameIndex];
-		const bool needsCreate =
-			!frameInstancePropertyBuffer ||
-			frameInstancePropertyBuffer->NumElements < instanceCapacity ||
-			frameInstancePropertyBuffer->ElementSize != sizeof(InstanceProperty);
-		if (needsCreate)
-		{
-			try
-			{
-				frameInstancePropertyBuffer = renderBackend->CreateBuffer({
-					instanceCapacity,
-					sizeof(InstanceProperty),
-					EInitialResourceState::ShaderRead,
-					false,
-					instanceProperties.data(),
-					EBufferShape::Structured
-				});
-			}
-			catch (...)
-			{
-				ClearFailedFrameResources(L"NRI CreateBuffer threw");
-				return;
-			}
-			if (!frameInstancePropertyBuffer)
-			{
-				ClearFailedFrameResources(L"NRI CreateBuffer returned null");
-				return;
-			}
-			{
-				static bool bLoggedNriInstancePropertyHeap = false;
-				if (!bLoggedNriInstancePropertyHeap)
-				{
-					AppendCpuRuntimeTrace(
-						L"[RTAS] InstancePropertyBuffer NRI heap=DEVICE persistent"
-						L", capacity=" + std::to_wstring(instanceCapacity) +
-						L", bytes=" + std::to_wstring(instancePropertyBytes) +
-						L", frameIndex=" + std::to_wstring(frameIndex));
-					bLoggedNriInstancePropertyHeap = true;
-				}
-			}
-		}
-		else if (!renderBackend->UpdateDefaultStructuredBuffer(frameInstancePropertyBuffer.get(), instanceProperties.data(), instancePropertyBytes))
-		{
-			ClearFailedFrameResources(L"NRI UpdateDefaultStructuredBuffer failed");
-			return;
-		}
-		InstancePropertyBuffer = frameInstancePropertyBuffer;
-		return;
-	}
-
-	if (backendAPI == ERenderBackendAPI::Vulkan)
-	{
-		try
-		{
-			InstancePropertyBuffer = renderBackend->CreateBuffer({
-				instanceCapacity,
-				sizeof(InstanceProperty),
-				EInitialResourceState::ShaderRead,
-				false,
-				instanceProperties.data()
-			});
-		}
-		catch (...)
-		{
-			AppendCpuRuntimeTrace(
-				L"[RTAS] Vulkan InstancePropertyBuffer CreateBuffer threw"
-				L", capacity=" + std::to_wstring(instanceCapacity) +
-				L", instances=" + std::to_wstring(RayTracingInstances.size()));
-			InstancePropertyBuffer = nullptr;
-			return;
-		}
-		if (!InstancePropertyBuffer)
-		{
-			AppendCpuRuntimeTrace(
-				L"[RTAS] Vulkan InstancePropertyBuffer CreateBuffer returned null"
-				L", capacity=" + std::to_wstring(instanceCapacity) +
-				L", instances=" + std::to_wstring(RayTracingInstances.size()));
-			return;
-		}
-		if (renderBackend->GetAPI() == ERenderBackendAPI::Vulkan)
-		{
-			InstancePropertyBuffer->MakeByteAddressBufferSRV();
-			NAME_D3D12_OBJECT(InstancePropertyBuffer->resource);
-		}
-		return;
-	}
-
 	EnsureRayTracingFrameResourceSlots();
-	DX12Backend* dx12Backend = renderBackend->AsDX12Backend();
-	if (!dx12Backend)
+	const uint32_t frameIndex = GetRayTracingFrameResourceIndex();
+	if (frameIndex >= InstancePropertyFrameBuffers.size())
 	{
-		ClearFailedFrameResources(L"DX12 backend unavailable");
+		ClearFailedFrameResources(L"frame resource slot unavailable");
 		return;
 	}
-	const UINT32 frameIndex = GetRayTracingFrameResourceIndex();
+
 	std::shared_ptr<Buffer>& frameInstancePropertyBuffer = InstancePropertyFrameBuffers[frameIndex];
-	if (!frameInstancePropertyBuffer || frameInstancePropertyBuffer->NumElements < instanceCapacity)
+	std::wstring failureReason;
+	if (!renderBackend->CreateOrUpdateRayTracingInstancePropertyBuffer(
+		frameInstancePropertyBuffer,
+		instanceCapacity,
+		sizeof(InstanceProperty),
+		instanceProperties.data(),
+		instancePropertyBytes,
+		&failureReason))
 	{
-		try
-		{
-			frameInstancePropertyBuffer = dx12Backend->CreateDefaultByteAddressBuffer(instanceCapacity, sizeof(InstanceProperty), EInitialResourceState::ShaderRead);
-		}
-		catch (...)
-		{
-			ClearFailedFrameResources(L"DX12 CreateDefaultByteAddressBuffer threw");
-			return;
-		}
-		if (!frameInstancePropertyBuffer || !frameInstancePropertyBuffer->resource)
-		{
-			ClearFailedFrameResources(L"DX12 CreateDefaultByteAddressBuffer returned null");
-			return;
-		}
-		NAME_D3D12_OBJECT(frameInstancePropertyBuffer->resource);
-		AppendCpuRuntimeTrace(
-			L"[RTAS] InstancePropertyBuffer DX12 heap=DEFAULT"
-			L", capacity=" + std::to_wstring(instanceCapacity) +
-			L", bytes=" + std::to_wstring(instanceCapacity * sizeof(InstanceProperty)));
+		ClearFailedFrameResources(failureReason.empty() ? L"backend update failed" : failureReason.c_str());
+		return;
 	}
-	if (!frameInstancePropertyBuffer || !frameInstancePropertyBuffer->resource)
+	if (!frameInstancePropertyBuffer)
 	{
-		ClearFailedFrameResources(L"DX12 frame buffer missing resource");
+		ClearFailedFrameResources(L"backend returned null buffer");
 		return;
 	}
 	InstancePropertyBuffer = frameInstancePropertyBuffer;
-
-	bool bUploaded = false;
-	try
-	{
-		bUploaded = dx12Backend->UploadToDefaultBuffer(
-			InstancePropertyBuffer.get(),
-			instanceProperties.data(),
-			instancePropertyBytes,
-			EResourceState::ShaderRead,
-			EResourceState::ShaderRead);
-	}
-	catch (...)
-	{
-		ClearFailedFrameResources(L"DX12 UploadToDefaultBuffer threw");
-		return;
-	}
-	if (!bUploaded)
-	{
-		ClearFailedFrameResources(L"DX12 UploadToDefaultBuffer failed");
-		return;
-	}
-#endif // CORONA_HAS_D3D12 (UpdateInstancePropertyBuffer DX12 path)
 }
 
 void Corona::RebuildAccelerationStructures()
@@ -933,9 +799,7 @@ void Corona::InitRTPSO()
 	// shadows, so keep later reflection/GI pipelines disabled until the backend
 	// explicitly advertises the resources those passes require.
 	const bool bBackendSupportsRT = maxSupportedHybridStage >= 1u;
-	const bool bNriSimpleGIBringup =
-		renderBackend &&
-		renderBackend->GetAPI() == ERenderBackendAPI::NRI &&
+	const bool bPartialHybridDiffuseGIBringup =
 		maxSupportedHybridStage >= 4u &&
 		maxSupportedHybridStage < 7u;
 	// AO/reflections are decoupled from the NRI "simple GI" flag now that the RT
@@ -967,7 +831,7 @@ void Corona::InitRTPSO()
 		AppendCpuRuntimeTrace(L"[StartupTiming][RTPSO] complete totalMs=0");
 		return;
 	}
-	// NRI SimpleGI bringup: RT pipelines are deferred-built at first Apply, and
+	// Partial hybrid bringup: RT pipelines are deferred-built at first Apply, and
 	// only the RT shadow pass is dispatched (GI uses the compute fallback,
 	// reflection/AO are gated off). So set up the shadow pass and let the rest be
 	// declared but never built.
@@ -994,10 +858,10 @@ void Corona::InitRTPSO()
 	if (bInitGIRT)
 	{
 		timePass(L"RaytracingSimpleGI", [&]() { InitRaytracingSimpleGIPass(); });
-		// Spatial-hash GI is now brought up on NRI too (its RT cell-trace PSO uses
+		// Spatial-hash GI is brought up on partial hybrid backends (its RT cell-trace PSO uses
 		// the same bindless RT path as simple GI; the rest are compute passes).
-		// Screen-probe GI stays off during the NRI bring-up.
-		if (bNriSimpleGIBringup)
+		// Screen-probe GI stays off during partial hybrid bring-up.
+		if (bPartialHybridDiffuseGIBringup)
 		{
 			AppendCpuRuntimeTrace(L"[StartupTiming][RTPSO] skip pass=\"RaytracingScreenProbeGI\"");
 			timePass(L"RaytracingSpatialHashGI", [&]() { InitRaytracingSpatialHashPass(); });

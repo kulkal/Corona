@@ -31,6 +31,7 @@
 #include "DirectXTex.h"
 
 #include "imgui.h"
+#include "CoronaImageIO.h"
 #include "Utils.h"
 
 #include "NRI.h"
@@ -606,6 +607,12 @@ struct NRIBackend::Impl
 	uint8_t* TimestampReadbackMapped = nullptr;
 	uint32_t TimestampQueryCount = 0;
 	uint32_t TimestampQueryStride = 0;
+	nri::QueryPool* OcclusionQueryPool = nullptr;
+	nri::Buffer* OcclusionReadbackBuffer = nullptr;
+	std::vector<nri::Memory*> OcclusionReadbackMemory;
+	uint8_t* OcclusionReadbackMapped = nullptr;
+	uint32_t OcclusionQueryCount = 0;
+	uint32_t OcclusionQueryStride = 0;
 
 	void InitializePipelineCache()
 	{
@@ -685,6 +692,11 @@ struct NRIBackend::Impl
 	bool FrameHasBackbuffer = false;
 	bool DeviceLost = false;
 	nri::Layout BBLayout = nri::Layout::UNDEFINED; // current backbuffer layout this frame
+	std::wstring PendingWindowCapturePath;
+	std::wstring LastWindowCapturePath;
+	std::wstring LastWindowCaptureError;
+	bool LastWindowCaptureResultValid = false;
+	bool LastWindowCaptureSucceeded = false;
 	static constexpr uint32_t kQueuedFrameNum = 2;
 	struct FrameContext
 	{
@@ -715,7 +727,17 @@ struct NRIBackend::Impl
 	GraphicsPipelineHandle* CurrentGfx = nullptr;
 
 	// Graphics command recording (Stage 2)
-	struct GpuBuf { nri::Buffer* buffer = nullptr; std::vector<nri::Memory*> memory; uint32_t stride = 0; nri::IndexType indexType = nri::IndexType::UINT32; void* mapped = nullptr; uint32_t capacity = 0; };
+	struct GpuBuf
+	{
+		nri::Buffer* buffer = nullptr;
+		std::vector<nri::Memory*> memory;
+		uint32_t stride = 0;
+		nri::IndexType indexType = nri::IndexType::UINT32;
+		void* mapped = nullptr;
+		uint32_t capacity = 0;
+		nri::AccessStage access = {};
+		bool accessValid = false;
+	};
 	std::unordered_map<VertexBuffer*, GpuBuf> VBs;
 	std::unordered_map<IndexBuffer*, GpuBuf> IBs;
 	// Last-bound mesh buffers (for per-draw OOB diagnosis; see DrawIndexed).
@@ -749,6 +771,9 @@ struct NRIBackend::Impl
 	uint32_t DbgRPOpens = 0, DbgGfxBindOk = 0, DbgGfxBindFail = 0;
 	uint32_t DbgDraws = 0, DbgDrawsSkipped = 0, DbgImguiDraws = 0, DbgClears = 0;
 	std::vector<std::weak_ptr<NRIRTAS>> RayTracingAS;
+	std::shared_ptr<ComputePipelineStateObject> ClearTextureUavFloat1Pso;
+	std::shared_ptr<ComputePipelineStateObject> ClearTextureUavFloat2Pso;
+	std::shared_ptr<ComputePipelineStateObject> ClearTextureUavFloat4Pso;
 
 	nri::Texture* NriTex(Texture* t)
 	{
@@ -1723,6 +1748,22 @@ struct NRIBackend::Impl
 		return Core.GetFenceValue(*Fence) >= FenceValue;
 	}
 
+	bool ResetQueries(nri::QueryPool* queryPool, uint32_t offset, uint32_t count, const char* label)
+	{
+		if (!queryPool || count == 0 || !Core.CmdResetQueries)
+			return false;
+		if (ActiveCmd)
+		{
+			EndRP();
+			Core.CmdResetQueries(*ActiveCmd, *queryPool, offset, count);
+			return true;
+		}
+		return SubmitImmediate(label, [&](nri::CommandBuffer& cmd)
+		{
+			Core.CmdResetQueries(cmd, *queryPool, offset, count);
+		});
+	}
+
 	std::string RunRayTracingASSmoke()
 	{
 		if (!HasRayTracing || RayTracingTier < 1)
@@ -2396,7 +2437,7 @@ public:
 	}
 
 	enum class RegClass { SRV, UAV, CBV, Sampler };
-	enum class ResKind { None, TexSRV, TexUAV, BufSRV, BufUAV, CBV, Sampler };
+	enum class ResKind { None, TexSRV, TexUAV, BufSRV, BufUAV, VertexUAV, CBV, Sampler };
 	struct Binding
 	{
 		std::string name;
@@ -2405,6 +2446,7 @@ public:
 		ResKind kind = ResKind::None;
 		Texture* tex = nullptr;
 		Buffer* buf = nullptr;
+		VertexBuffer* vb = nullptr;
 		Sampler* samp = nullptr;
 		nri::Descriptor* desc = nullptr;
 		nri::Descriptor* descSingle[1] = {};
@@ -2440,7 +2482,22 @@ public:
 	void SetTextureUAV(const std::string& name, Texture* t) override { SetRes(name, ResKind::TexUAV, t, nullptr, nullptr); }
 	void SetBufferSRV(const std::string& name, Buffer* b) override { SetRes(name, ResKind::BufSRV, nullptr, b, nullptr); }
 	void SetBufferUAV(const std::string& name, Buffer* b) override { SetRes(name, ResKind::BufUAV, nullptr, b, nullptr); }
-	void SetVertexBufferUAV(const std::string&, VertexBuffer*) override {} // skinning output: later
+	void SetVertexBufferUAV(const std::string& name, VertexBuffer* vertexBuffer) override
+	{
+		Binding* b = Find(name);
+		if (!b)
+		{
+			AddBinding(name, 0, RegClass::UAV);
+			b = Find(name);
+		}
+		if (!b)
+			return;
+		b->kind = ResKind::VertexUAV;
+		b->tex = nullptr;
+		b->buf = nullptr;
+		b->vb = vertexBuffer;
+		b->samp = nullptr;
+	}
 	void SetSampler(const std::string& name, Sampler* s) override { SetRes(name, ResKind::Sampler, nullptr, nullptr, s); }
 	void SetCBVValue(const std::string& name, void* data) override
 	{
@@ -2544,7 +2601,7 @@ private:
 		Binding* b = Find(name);
 		if (!b) { AddBinding(name, 0, k == ResKind::Sampler ? RegClass::Sampler : (k == ResKind::TexUAV || k == ResKind::BufUAV) ? RegClass::UAV : RegClass::SRV); b = Find(name); }
 		if (!b) return;
-		b->kind = k; b->tex = t; b->buf = bufp; b->samp = s;
+		b->kind = k; b->tex = t; b->buf = bufp; b->vb = nullptr; b->samp = s;
 	}
 	static nri::DescriptorType ToDescriptorType(ResKind k)
 	{
@@ -2554,6 +2611,7 @@ private:
 		case ResKind::TexUAV: return nri::DescriptorType::STORAGE_TEXTURE;
 		case ResKind::BufSRV: return nri::DescriptorType::STRUCTURED_BUFFER;
 		case ResKind::BufUAV: return nri::DescriptorType::STORAGE_STRUCTURED_BUFFER;
+		case ResKind::VertexUAV: return nri::DescriptorType::STORAGE_STRUCTURED_BUFFER;
 		case ResKind::CBV:    return nri::DescriptorType::CONSTANT_BUFFER;
 		case ResKind::Sampler:return nri::DescriptorType::SAMPLER;
 		default:              return nri::DescriptorType::TEXTURE;
@@ -2585,6 +2643,7 @@ private:
 			case ResKind::TexUAV: ++storTexN; break;
 			case ResKind::BufSRV: ++sbufN; break;
 			case ResKind::BufUAV: ++storSbufN; break;
+			case ResKind::VertexUAV: ++storSbufN; break;
 			case ResKind::CBV:    ++cbvN; break;
 			case ResKind::Sampler:++sampN; break;
 			default: break;
@@ -2637,7 +2696,7 @@ private:
 			if (b.samp) { auto it = m->Samplers.find(b.samp); b.desc = (it != m->Samplers.end()) ? it->second : nullptr; b.ownsDesc = false; }
 			return;
 		}
-		void* res = b.tex ? (void*)b.tex : (void*)b.buf;
+		void* res = b.tex ? (void*)b.tex : (b.buf ? (void*)b.buf : (void*)b.vb);
 		if (res == b.lastResource && b.desc) return; // unchanged
 		if (b.ownsDesc && b.desc) { m->Core.DestroyDescriptor(b.desc); b.desc = nullptr; }
 		b.lastResource = res;
@@ -2657,6 +2716,19 @@ private:
 			nri::Descriptor* d = nullptr;
 			if (m->Core.CreateTextureView(tvd, d) == nri::Result::SUCCESS) { b.desc = d; b.ownsDesc = true; }
 		}
+		else if (b.kind == ResKind::VertexUAV)
+		{
+			if (!b.vb) return;
+			auto it = m->VBs.find(b.vb);
+			if (it == m->VBs.end() || !it->second.buffer || it->second.capacity == 0) return;
+			nri::BufferViewDesc bvd = {};
+			bvd.buffer = it->second.buffer;
+			bvd.type = nri::BufferView::STORAGE_BYTE_ADDRESS_BUFFER;
+			bvd.offset = 0;
+			bvd.size = it->second.capacity;
+			nri::Descriptor* d = nullptr;
+			if (m->Core.CreateBufferView(bvd, d) == nri::Result::SUCCESS) { b.desc = d; b.ownsDesc = true; }
+		}
 		else // BufSRV / BufUAV
 		{
 			if (!b.buf) return;
@@ -2664,10 +2736,17 @@ private:
 			if (it == m->Buffers.end() || !it->second.buffer) return;
 			nri::BufferViewDesc bvd = {};
 			bvd.buffer = it->second.buffer;
-			bvd.type = (b.kind == ResKind::BufUAV) ? nri::BufferView::STORAGE_STRUCTURED_BUFFER : nri::BufferView::STRUCTURED_BUFFER;
 			bvd.offset = 0;
 			bvd.size = static_cast<uint64_t>(b.buf->NumElements) * b.buf->ElementSize;
-			bvd.structureStride = b.buf->ElementSize ? b.buf->ElementSize : 4;
+			if (b.buf->Type == Buffer::BYTE_ADDRESS)
+			{
+				bvd.type = (b.kind == ResKind::BufUAV) ? nri::BufferView::STORAGE_BYTE_ADDRESS_BUFFER : nri::BufferView::BYTE_ADDRESS_BUFFER;
+			}
+			else
+			{
+				bvd.type = (b.kind == ResKind::BufUAV) ? nri::BufferView::STORAGE_STRUCTURED_BUFFER : nri::BufferView::STRUCTURED_BUFFER;
+				bvd.structureStride = b.buf->ElementSize ? b.buf->ElementSize : 4;
+			}
 			nri::Descriptor* d = nullptr;
 			if (m->Core.CreateBufferView(bvd, d) == nri::Result::SUCCESS) { b.desc = d; b.ownsDesc = true; }
 		}
@@ -2969,9 +3048,53 @@ public:
 		HitBindSlot += 2;
 	}
 
-	// Indirect DispatchRays: not yet implemented on NRI (RT bring-up is WIP).
-	bool ApplyIndirect(Buffer* /*indirectArgumentBuffer*/, uint64_t /*byteOffset*/) override { return false; }
-	bool GetDispatchRaysIndirectTemplate(uint32_t /*width*/, uint32_t /*height*/, RtDispatchRaysIndirectTemplate& /*outTemplate*/) const override { return false; }
+	bool ApplyIndirect(Buffer* indirectArgumentBuffer, uint64_t byteOffset) override
+	{
+		if (!m || !m->ActiveCmd || !m->RT.CmdDispatchRaysIndirect || !indirectArgumentBuffer)
+			return false;
+		if (!EnsureBuilt())
+			return false;
+		auto it = m->Buffers.find(indirectArgumentBuffer);
+		if (it == m->Buffers.end() || !it->second.buffer)
+			return false;
+
+		Apply(0, 0);
+		const bool profile = IsNriRecordProfileEnabled();
+		const auto dispatchStart = profile ? NriCpuProfileClock::now() : NriCpuProfileClock::time_point{};
+		m->RT.CmdDispatchRaysIndirect(*m->ActiveCmd, *it->second.buffer, byteOffset);
+		NriCpuProfileAdd(profile, m->RecordProfile.RtDispatchRaysMs, m->RecordProfile.RtDispatchRaysCount, dispatchStart);
+		return true;
+	}
+	bool GetDispatchRaysIndirectTemplate(uint32_t width, uint32_t height, RtDispatchRaysIndirectTemplate& outTemplate) const override
+	{
+		static_assert(sizeof(RtDispatchRaysIndirectTemplate) == sizeof(nri::DispatchRaysIndirectDesc), "NRI DispatchRays indirect args must match Corona template.");
+		outTemplate = {};
+		if (!m || !m->Core.GetBufferDeviceAddress || !m->RT.CmdDispatchRaysIndirect)
+			return false;
+		if (!Pipeline && !const_cast<NRIRTPipelineStateObject*>(this)->EnsureBuilt())
+			return false;
+		if (!Pipeline || !SbtBuffer)
+			return false;
+		const uint64_t sbtAddress = m->Core.GetBufferDeviceAddress(*SbtBuffer);
+		if (sbtAddress == 0 || SbtEntrySize == 0)
+			return false;
+
+		outTemplate.RayGenerationStartAddress = sbtAddress + RaygenOffset;
+		outTemplate.RayGenerationSizeInBytes = SbtEntrySize;
+		outTemplate.MissStartAddress = sbtAddress + MissOffset;
+		outTemplate.MissSizeInBytes = SbtEntrySize * std::max(1u, MissGroupCount);
+		outTemplate.MissStrideInBytes = SbtEntrySize;
+		if (HitGroupCount > 0)
+		{
+			outTemplate.HitGroupStartAddress = sbtAddress + HitOffset;
+			outTemplate.HitGroupSizeInBytes = SbtEntrySize * HitGroupCount;
+			outTemplate.HitGroupStrideInBytes = SbtEntrySize;
+		}
+		outTemplate.Width = width;
+		outTemplate.Height = height;
+		outTemplate.Depth = 1;
+		return true;
+	}
 
 	// Defer the actual pipeline build to the first Apply: the renderer declares
 	// the bindless tables (SetBindlessTextureTable / record buffers) at dispatch
@@ -3225,6 +3348,8 @@ public:
 			NriCpuProfileAdd(profile, m->RecordProfile.RtSetDescriptorSetMs, m->RecordProfile.RtSetDescriptorSetCount, setStart);
 		}
 		m->Core.CmdSetPipeline(*m->ActiveCmd, *Pipeline);
+		if (width == 0 || height == 0)
+			return;
 
 		nri::DispatchRaysDesc dispatch = {};
 		dispatch.raygenShader.buffer = SbtBuffer;
@@ -3993,7 +4118,7 @@ public:
 	nri::Pipeline* GetPipeline() const { return Pipeline; }
 	nri::PipelineLayout* GetLayout() const { return Layout; }
 
-	enum class Kind { TexSRV, BufSRV, Sampler, CBV };
+	enum class Kind { TexSRV, BufSRV, VertexSRV, Sampler, CBV };
 	struct Binding
 	{
 		std::string name;
@@ -4011,6 +4136,7 @@ public:
 		void* last = nullptr;
 		Texture* tex = nullptr;
 		Buffer* buf = nullptr;
+		VertexBuffer* vb = nullptr;
 		Sampler* samp = nullptr;
 		uint32_t setIndex = UINT32_MAX;
 		uint32_t rangeIndex = UINT32_MAX;
@@ -4024,6 +4150,7 @@ public:
 
 	void SetTexture(const std::string& name, Texture* t) { if (Binding* b = Find(name)) { b->tex = t; } }
 	void SetBuffer(const std::string& name, Buffer* bb) { if (Binding* b = Find(name)) { b->buf = bb; } }
+	void SetVertexBuffer(const std::string& name, VertexBuffer* vb) { if (Binding* b = Find(name)) { b->kind = Kind::VertexSRV; b->vb = vb; b->buf = nullptr; } }
 	void SetSampler(const std::string& name, Sampler* s) { if (Binding* b = Find(name)) { b->samp = s; } }
 	void SetConstant(const void* data, uint32_t size)
 	{
@@ -4257,6 +4384,21 @@ private:
 			bvd.offset = 0;
 			bvd.size = static_cast<uint64_t>(b.buf->NumElements) * b.buf->ElementSize;
 			bvd.structureStride = (b.bufferView == RHIBufferViewKind::Raw) ? 0 : (b.buf->ElementSize ? b.buf->ElementSize : 4);
+			nri::Descriptor* d = nullptr; if (m->Core.CreateBufferView(bvd, d) == nri::Result::SUCCESS) { b.desc = d; b.ownsDesc = true; }
+		}
+		else if (b.kind == Kind::VertexSRV && b.vb)
+		{
+			auto it = m->VBs.find(b.vb);
+			if (it == m->VBs.end() || !it->second.buffer || it->second.capacity == 0) return;
+			void* res = it->second.buffer;
+			if (res == b.last && b.desc) return;
+			if (b.ownsDesc && b.desc) { m->Core.DestroyDescriptor(b.desc); b.desc = nullptr; }
+			b.last = res;
+			nri::BufferViewDesc bvd = {};
+			bvd.buffer = it->second.buffer;
+			bvd.type = nri::BufferView::BYTE_ADDRESS_BUFFER;
+			bvd.offset = 0;
+			bvd.size = it->second.capacity;
 			nri::Descriptor* d = nullptr; if (m->Core.CreateBufferView(bvd, d) == nri::Result::SUCCESS) { b.desc = d; b.ownsDesc = true; }
 		}
 	}
@@ -4938,6 +5080,9 @@ NRIBackend::~NRIBackend()
 {
 	if (!m)
 		return;
+	m->ClearTextureUavFloat1Pso.reset();
+	m->ClearTextureUavFloat2Pso.reset();
+	m->ClearTextureUavFloat4Pso.reset();
 	if (m->Alive)
 		m->Alive->store(false, std::memory_order_release);
 	if (m->Device)
@@ -4951,6 +5096,7 @@ NRIBackend::~NRIBackend()
 		m->DestroyFrameContexts();
 		m->DestroyImmediateContexts();
 		ShutdownGpuTimestampQueries();
+		ShutdownOcclusionQueries();
 
 		for (auto& kv : m->Buffers)
 		{
@@ -5001,10 +5147,6 @@ NRIBackend::~NRIBackend()
 	}
 }
 
-// Marks a method that is declared/wired but whose NRI implementation is still
-// pending. Keeps the backend compiling/linking while it is built out incrementally.
-#define NRI_TODO() do { } while (0)
-
 // === Capabilities / identity =============================================
 ERenderBackendAPI NRIBackend::GetAPI() const { return ERenderBackendAPI::NRI; }
 const char* NRIBackend::GetBackendName() const { return m->BackendName.c_str(); }
@@ -5033,6 +5175,14 @@ RenderBackendCapabilities NRIBackend::GetCapabilities() const
 	capabilities.SupportsBindlessBuffers = true;
 	capabilities.SupportsRuntimeDescriptorArrays = true;
 	capabilities.SupportsPartiallyBoundDescriptors = true;
+	capabilities.SupportsGBufferOcclusionQueries =
+		m->Core.CreateQueryPool &&
+		m->Core.DestroyQueryPool &&
+		m->Core.GetQuerySize &&
+		m->Core.CmdResetQueries &&
+		m->Core.CmdBeginQuery &&
+		m->Core.CmdEndQuery &&
+		m->Core.CmdCopyQueries;
 	if (m->Device && m->Core.CmdDrawIndirect && m->Core.CmdDrawIndexedIndirect)
 	{
 		const nri::DeviceDesc& dd = m->Core.GetDeviceDesc(*m->Device);
@@ -5295,6 +5445,7 @@ void NRIBackend::EndFrame()
 		const nri::Result submitResult = m->Core.QueueSubmit(*m->GraphicsQueue, qs);
 		NriCpuProfileAdd(profile, m->RecordProfile.QueueSubmitMs, m->RecordProfile.QueueSubmitCount, submitStart);
 		const bool submitted = submitResult == nri::Result::SUCCESS;
+		bool waitedSubmittedFence = false;
 		if (!submitted)
 		{
 			LogD3D12DeviceRemoved(reinterpret_cast<ID3D12Device*>(m->Core.GetDeviceNativeObject(m->Device)), L"EndFrame QueueSubmit");
@@ -5304,6 +5455,60 @@ void NRIBackend::EndFrame()
 			frame->fenceValue = submittedFenceValue;
 		if (submitted)
 		{
+			if (!m->PendingWindowCapturePath.empty())
+			{
+				const auto waitStart = profile ? NriCpuProfileClock::now() : NriCpuProfileClock::time_point{};
+				m->Core.Wait(*m->FrameFence, submittedFenceValue);
+				NriCpuProfileAdd(profile, m->RecordProfile.FrameFenceWaitMs, m->RecordProfile.FrameFenceWaitCount, waitStart);
+				waitedSubmittedFence = true;
+
+				m->LastWindowCapturePath = m->PendingWindowCapturePath;
+				m->PendingWindowCapturePath.clear();
+				m->LastWindowCaptureError.clear();
+				m->LastWindowCaptureSucceeded = false;
+				m->LastWindowCaptureResultValid = true;
+
+				Texture* renderTarget =
+					(m->CurrentBackBuffer < m->BackBufferWrappers.size()) ?
+					m->BackBufferWrappers[m->CurrentBackBuffer].get() :
+					nullptr;
+				if (renderTarget)
+				{
+					CapturedImage captured;
+					nri::CommandBuffer* submittedCommandBuffer = m->ActiveCmd;
+					m->ActiveCmd = nullptr;
+					const bool captureOk = CaptureTexture(renderTarget, captured, EResourceState::Present);
+					m->ActiveCmd = submittedCommandBuffer;
+					if (captureOk)
+					{
+						if ((captured.Format == ETextureFormat::RGBA8Unorm || captured.Format == ETextureFormat::BGRA8Unorm) &&
+							captured.RowPitch >= captured.Width * 4u)
+						{
+							for (uint32_t y = 0; y < captured.Height; ++y)
+							{
+								uint8_t* row = captured.Pixels.data() + static_cast<size_t>(y) * captured.RowPitch;
+								for (uint32_t x = 0; x < captured.Width; ++x)
+									row[x * 4u + 3u] = 0xff;
+							}
+						}
+						m->LastWindowCaptureSucceeded = CoronaImageIO::SavePNG(
+							captured,
+							m->LastWindowCapturePath,
+							&m->LastWindowCaptureError);
+					}
+					else
+					{
+						m->LastWindowCaptureError = ErrorString.empty() ?
+							L"NRI window capture failed." :
+							AnsiToWString(ErrorString.c_str());
+					}
+				}
+				else
+				{
+					m->LastWindowCaptureError = L"NRI window capture render target unavailable.";
+				}
+			}
+
 			const auto presentStart = profile ? NriCpuProfileClock::now() : NriCpuProfileClock::time_point{};
 			const nri::Result presentResult = m->SwapChainI.QueuePresent(*m->SwapChain, *release);
 			NriCpuProfileAdd(profile, m->RecordProfile.QueuePresentMs, m->RecordProfile.QueuePresentCount, presentStart);
@@ -5311,7 +5516,7 @@ void NRIBackend::EndFrame()
 				MarkDeviceLost("QueuePresent", static_cast<int>(presentResult));
 		}
 		m->SwapFrameIndex++;
-		if (submitted && !usesFrameContext)
+		if (submitted && !usesFrameContext && !waitedSubmittedFence)
 		{
 			const auto waitStart = profile ? NriCpuProfileClock::now() : NriCpuProfileClock::time_point{};
 			m->Core.Wait(*m->FrameFence, submittedFenceValue);
@@ -5361,7 +5566,13 @@ void NRIBackend::WaitForGpu()
 		NriCpuProfileAdd(profile, m->RecordProfile.ImmediateFenceWaitMs, m->RecordProfile.ImmediateFenceWaitCount, waitStart);
 	}
 }
-void NRIBackend::EmitGpuCrashMarker(const char*) { NRI_TODO(); }
+void NRIBackend::EmitGpuCrashMarker(const char* markerName)
+{
+	if (!m || !m->ActiveCmd || !markerName || !m->Core.CmdBeginAnnotation || !m->Core.CmdEndAnnotation)
+		return;
+	m->Core.CmdBeginAnnotation(*m->ActiveCmd, markerName, 0xff3399ffu);
+	m->Core.CmdEndAnnotation(*m->ActiveCmd);
+}
 bool NRIBackend::IsDeviceLost() const { return m && m->DeviceLost; }
 const std::string& NRIBackend::GetErrorString() const { return ErrorString; }
 void NRIBackend::ClearErrorString() { ErrorString.clear(); }
@@ -5431,6 +5642,8 @@ std::shared_ptr<Buffer> NRIBackend::CreateBuffer(const BufferCreateDesc& desc)
 	nri::BufferUsageBits usage = nri::BufferUsageBits::SHADER_RESOURCE;
 	if (desc.bAllowUnorderedAccess)
 		usage = usage | nri::BufferUsageBits::SHADER_RESOURCE_STORAGE;
+	if (desc.Shape == EBufferShape::ByteAddress)
+		usage = usage | nri::BufferUsageBits::ARGUMENT_BUFFER;
 	const uint32_t stride = (desc.Shape == EBufferShape::Structured) ? desc.ElementSize : 0;
 
 	const Impl::BufKey key{ size, stride, static_cast<uint32_t>(usage), static_cast<uint32_t>(nri::MemoryLocation::DEVICE) };
@@ -5719,7 +5932,50 @@ std::shared_ptr<Texture> NRIBackend::CreateTexture3D(
 	m->Textures[wrapper.get()] = std::move(alloc);
 	return wrapper;
 }
-void NRIBackend::UploadTexture3D(Texture*, const void*, uint64_t, uint64_t) { NRI_TODO(); }
+void NRIBackend::UploadTexture3D(Texture* texture, const void* data, uint64_t rowPitch, uint64_t slicePitch)
+{
+	if (!m || !m->Device || !m->GraphicsQueue || !texture || !data || rowPitch == 0 || slicePitch == 0)
+		return;
+	auto it = m->Textures.find(texture);
+	if (it == m->Textures.end() || !it->second.texture)
+		return;
+
+	const nri::TextureDesc& td = m->Core.GetTextureDesc(*it->second.texture);
+	if (td.type != nri::TextureType::TEXTURE_3D || td.mipNum == 0 || td.depth == 0)
+		return;
+	if (rowPitch > UINT32_MAX || slicePitch > UINT32_MAX)
+	{
+		ErrorString = "UploadTexture3D: pitch is too large";
+		return;
+	}
+
+	nri::TextureSubresourceUploadDesc sub = {};
+	sub.slices = data;
+	sub.sliceNum = td.depth;
+	sub.rowPitch = static_cast<uint32_t>(rowPitch);
+	sub.slicePitch = static_cast<uint32_t>(slicePitch);
+
+	nri::TextureUploadDesc up = {};
+	up.subresources = &sub;
+	up.texture = it->second.texture;
+	up.planes = nri::PlaneBits::ALL;
+	up.after.access = nri::AccessBits::SHADER_RESOURCE;
+	up.after.layout = nri::Layout::SHADER_RESOURCE;
+	up.after.stages = nri::StageBits::ALL;
+
+	const bool profile = IsNriRecordProfileEnabled();
+	const auto uploadStart = profile ? NriCpuProfileClock::now() : NriCpuProfileClock::time_point{};
+	const nri::Result result = m->Helper.UploadData(*m->GraphicsQueue, &up, 1, nullptr, 0);
+	NriCpuProfileAdd(profile, m->RecordProfile.HelperUploadDataMs, m->RecordProfile.HelperUploadDataCount, uploadStart);
+	if (result == nri::Result::SUCCESS)
+	{
+		m->TexLayout[texture] = nri::Layout::SHADER_RESOURCE;
+	}
+	else
+	{
+		ErrorString = "UploadTexture3D: UploadData failed";
+	}
+}
 std::shared_ptr<VertexBuffer> NRIBackend::CreateVertexBuffer(uint32_t size, uint32_t stride, void* srcData)
 {
 	if (!m->RasterEnabled || !m->Device || size == 0) return nullptr;
@@ -5752,6 +6008,8 @@ std::shared_ptr<VertexBuffer> NRIBackend::CreateVertexBuffer(uint32_t size, uint
 	}
 	auto w = std::make_shared<VertexBuffer>(); w->numVertices = stride ? (int)(size / stride) : 0;
 	Impl::GpuBuf gb; gb.buffer = nb; gb.memory = std::move(mem); gb.stride = stride; gb.mapped = nullptr; gb.capacity = size;
+	gb.access = { nri::AccessBits::VERTEX_BUFFER | nri::AccessBits::SHADER_RESOURCE, nri::StageBits::ALL };
+	gb.accessValid = true;
 	m->VBs[w.get()] = std::move(gb);
 	return w;
 }
@@ -5787,6 +6045,8 @@ std::shared_ptr<IndexBuffer> NRIBackend::CreateIndexBuffer(EIndexFormat format, 
 	const uint32_t idxSize = (format == EIndexFormat::U16) ? 2u : 4u;
 	auto w = std::make_shared<IndexBuffer>(); w->numIndices = (int)(size / idxSize);
 	Impl::GpuBuf gb; gb.buffer = nb; gb.memory = std::move(mem); gb.indexType = (format == EIndexFormat::U16) ? nri::IndexType::UINT16 : nri::IndexType::UINT32; gb.mapped = nullptr; gb.capacity = size;
+	gb.access = { nri::AccessBits::INDEX_BUFFER | nri::AccessBits::SHADER_RESOURCE, nri::StageBits::ALL };
+	gb.accessValid = true;
 	m->IBs[w.get()] = std::move(gb);
 	return w;
 }
@@ -5801,6 +6061,8 @@ std::shared_ptr<VertexBuffer> NRIBackend::CreateUploadVertexBuffer(uint32_t size
 	if (mapped && srcData) memcpy(mapped, srcData, size);
 	auto w = std::make_shared<VertexBuffer>(); w->numVertices = stride ? (int)(size / stride) : 0; w->MappedCpu = mapped; w->MappedCapacityBytes = size;
 	Impl::GpuBuf gb; gb.buffer = nb; gb.memory = std::move(mem); gb.stride = stride; gb.mapped = mapped; gb.capacity = size;
+	gb.access = { nri::AccessBits::VERTEX_BUFFER | nri::AccessBits::SHADER_RESOURCE, nri::StageBits::ALL };
+	gb.accessValid = true;
 	m->VBs[w.get()] = std::move(gb);
 	return w;
 }
@@ -5816,6 +6078,8 @@ std::shared_ptr<IndexBuffer> NRIBackend::CreateUploadIndexBuffer(EIndexFormat fo
 	const uint32_t idxSize = (format == EIndexFormat::U16) ? 2u : 4u;
 	auto w = std::make_shared<IndexBuffer>(); w->numIndices = (int)(size / idxSize); w->MappedCpu = mapped; w->MappedCapacityBytes = size;
 	Impl::GpuBuf gb; gb.buffer = nb; gb.memory = std::move(mem); gb.indexType = (format == EIndexFormat::U16) ? nri::IndexType::UINT16 : nri::IndexType::UINT32; gb.mapped = mapped; gb.capacity = size;
+	gb.access = { nri::AccessBits::INDEX_BUFFER | nri::AccessBits::SHADER_RESOURCE, nri::StageBits::ALL };
+	gb.accessValid = true;
 	m->IBs[w.get()] = std::move(gb);
 	return w;
 }
@@ -5838,6 +6102,8 @@ std::shared_ptr<VertexBuffer> NRIBackend::CreateRWVertexBuffer(uint32_t size, ui
 		nri::MemoryLocation::DEVICE, nb, mem)) return nullptr;
 	auto w = std::make_shared<VertexBuffer>(); w->numVertices = stride ? (int)(size / stride) : 0;
 	Impl::GpuBuf gb; gb.buffer = nb; gb.memory = std::move(mem); gb.stride = stride; gb.capacity = size;
+	gb.access = { nri::AccessBits::VERTEX_BUFFER | nri::AccessBits::SHADER_RESOURCE, nri::StageBits::ALL };
+	gb.accessValid = true;
 	m->VBs[w.get()] = std::move(gb);
 	return w;
 }
@@ -6005,6 +6271,67 @@ bool NRIBackend::UpdateDefaultStructuredBuffer(Buffer* buffer, const void* srcDa
 		m->TransientBuffers.push_back(staging);
 	return true;
 }
+
+bool NRIBackend::CreateOrUpdateRayTracingInstancePropertyBuffer(
+	std::shared_ptr<Buffer>& buffer,
+	uint32_t numElements,
+	uint32_t elementSize,
+	const void* srcData,
+	uint32_t sizeInBytes,
+	std::wstring* outFailureReason)
+{
+	auto fail = [&](const wchar_t* reason)
+	{
+		if (outFailureReason)
+			*outFailureReason = reason ? reason : L"unknown";
+		return false;
+	};
+
+	if (!m->Device)
+		return fail(L"device unavailable");
+	if (numElements == 0 || elementSize == 0)
+		return fail(L"invalid buffer dimensions");
+	if (!srcData || sizeInBytes == 0)
+		return fail(L"missing source data");
+	if (static_cast<uint64_t>(sizeInBytes) > static_cast<uint64_t>(numElements) * static_cast<uint64_t>(elementSize))
+		return fail(L"source data exceeds buffer capacity");
+
+	const bool needsCreate =
+		!buffer ||
+		buffer->NumElements < numElements ||
+		buffer->ElementSize != elementSize ||
+		buffer->Type != Buffer::BYTE_ADDRESS;
+	if (needsCreate)
+	{
+		try
+		{
+			buffer = CreateBuffer({
+				numElements,
+				elementSize,
+				EInitialResourceState::ShaderRead,
+				false,
+				const_cast<void*>(srcData),
+				EBufferShape::ByteAddress
+			});
+		}
+		catch (...)
+		{
+			buffer = nullptr;
+			return fail(L"CreateBuffer threw");
+		}
+		if (!buffer)
+			return fail(L"CreateBuffer returned null");
+	}
+	else if (!UpdateDefaultStructuredBuffer(buffer.get(), srcData, sizeInBytes))
+	{
+		return fail(L"UpdateDefaultStructuredBuffer failed");
+	}
+
+	if (outFailureReason)
+		outFailureReason->clear();
+	return true;
+}
+
 std::shared_ptr<Buffer> NRIBackend::AllocateTransientUploadStructuredBuffer(uint32_t numElements, uint32_t elementSize, const void* srcData)
 {
 	if (!m->Device || numElements == 0 || elementSize == 0)
@@ -6519,7 +6846,20 @@ ShaderBytecode NRIBackend::CreateShader(const std::wstring& fileName, const std:
 		ErrorString = "CreateShader: " + err;
 	return out;
 }
-void NRIBackend::ResetDynamicResources() { NRI_TODO(); }
+void NRIBackend::ResetDynamicResources()
+{
+	if (!m)
+		return;
+	if (m->ActiveCmd)
+		m->EndRP();
+	WaitForGpu();
+	for (NRIBackend::Impl::FrameContext& frame : m->FrameContexts)
+		m->FreeTransientBuffers(frame.transientBuffers);
+	m->FreeTransientBuffers();
+	m->FlushBufferReusePool();
+	m->PendingColorClears.clear();
+	m->PendingDepthClears.clear();
+}
 
 // === Swapchain / present ==================================================
 void NRIBackend::CreateSwapChainForWindow(WindowHandle window, uint32_t width, uint32_t height, ETextureFormat /*format*/)
@@ -6764,9 +7104,14 @@ bool NRIBackend::CaptureTexture(Texture* source, CapturedImage& captured, EResou
 	}
 	else
 	{
+		uint32_t immediateBackBufferIndex = 0;
+		const bool immediateBackBuffer = m->IsBackbuffer(source, immediateBackBufferIndex);
+		const nri::Layout immediateBeforeLayout = immediateBackBuffer ?
+			m->BBLayout :
+			(m->TexLayout.count(source) ? m->TexLayout[source] : nri::Layout::UNDEFINED);
 		submitted = m->SubmitImmediate("[NRI] CaptureTexture immediate submit failed\n", [&](nri::CommandBuffer& cmd)
 		{
-			const nri::Layout beforeLayout = m->TexLayout.count(source) ? m->TexLayout[source] : nri::Layout::UNDEFINED;
+			const nri::Layout beforeLayout = immediateBeforeLayout;
 			nri::TextureBarrierDesc toCopy = {};
 			toCopy.texture = texture;
 			toCopy.before.access = AccessForLayout(beforeLayout);
@@ -6808,6 +7153,11 @@ bool NRIBackend::CaptureTexture(Texture* source, CapturedImage& captured, EResou
 			toReadBarrier.textureNum = 1;
 			m->Core.CmdBarrier(cmd, toReadBarrier);
 		});
+		if (submitted)
+		{
+			if (immediateBackBuffer)
+				m->BBLayout = immediateBeforeLayout;
+		}
 	}
 
 	if (!submitted)
@@ -6856,8 +7206,34 @@ void NRIBackend::FinalizeWindowRenderTarget(Texture*)
 	if (m->FrameHasBackbuffer && m->BBLayout != nri::Layout::PRESENT)
 		m->TransitionBackbuffer(nri::AccessBits::NONE, nri::Layout::PRESENT, nri::StageBits::NONE);
 }
-void NRIBackend::RequestWindowCapture(const std::wstring&) { NRI_TODO(); }
-bool NRIBackend::ConsumeWindowCaptureResult(std::wstring*, bool*, std::wstring*) { NRI_TODO(); return false; }
+void NRIBackend::RequestWindowCapture(const std::wstring& outputPath)
+{
+	if (!m)
+		return;
+	m->PendingWindowCapturePath = outputPath;
+	m->LastWindowCaptureResultValid = false;
+	m->LastWindowCapturePath.clear();
+	m->LastWindowCaptureError.clear();
+	m->LastWindowCaptureSucceeded = false;
+}
+bool NRIBackend::ConsumeWindowCaptureResult(std::wstring* outputPath, bool* success, std::wstring* errorMessage)
+{
+	if (!m || !m->LastWindowCaptureResultValid)
+		return false;
+
+	if (outputPath)
+		*outputPath = m->LastWindowCapturePath;
+	if (success)
+		*success = m->LastWindowCaptureSucceeded;
+	if (errorMessage)
+		*errorMessage = m->LastWindowCaptureError;
+
+	m->LastWindowCaptureResultValid = false;
+	m->LastWindowCapturePath.clear();
+	m->LastWindowCaptureError.clear();
+	m->LastWindowCaptureSucceeded = false;
+	return true;
+}
 
 // === ImGui ================================================================
 void NRIBackend::InitializeImGuiBackend(WindowHandle, ETextureFormat)
@@ -6949,6 +7325,7 @@ void NRIBackend::InitializeGpuTimestampQueries(uint32_t queryCount)
 	ShutdownGpuTimestampQueries();
 
 	if (!m->Core.CreateQueryPool || !m->Core.DestroyQueryPool || !m->Core.GetQuerySize ||
+		!m->Core.CmdResetQueries ||
 		!m->Core.CmdEndQuery || !m->Core.CmdCopyQueries)
 	{
 		AppendCpuRuntimeTrace(L"[NRI] GPU timestamp queries unsupported by interface");
@@ -6985,6 +7362,12 @@ void NRIBackend::InitializeGpuTimestampQueries(uint32_t queryCount)
 	}
 
 	std::memset(m->TimestampReadbackMapped, 0, static_cast<size_t>(readbackSize));
+	if (!m->ResetQueries(m->TimestampQueryPool, 0, queryCount, "[NRI] timestamp query reset failed\n"))
+	{
+		AppendCpuRuntimeTrace(L"[NRI] timestamp query reset failed");
+		ShutdownGpuTimestampQueries();
+		return;
+	}
 	m->TimestampQueryCount = queryCount;
 	AppendCpuRuntimeTrace(
 		L"[NRI] GPU timestamp queries initialized count=" + std::to_wstring(queryCount) +
@@ -7034,6 +7417,7 @@ void NRIBackend::ResolveGpuTimestampRange(uint32_t startQueryIndex, uint32_t que
 	const uint64_t dstOffset = static_cast<uint64_t>(startQueryIndex) * m->TimestampQueryStride;
 	m->Core.CmdCopyQueries(*m->ActiveCmd, *m->TimestampQueryPool, startQueryIndex, queryCount,
 		*m->TimestampReadbackBuffer, dstOffset);
+	m->Core.CmdResetQueries(*m->ActiveCmd, *m->TimestampQueryPool, startQueryIndex, queryCount);
 }
 uint64_t NRIBackend::ReadGpuTimestampValue(uint32_t queryIndex) const
 {
@@ -7043,12 +7427,130 @@ uint64_t NRIBackend::ReadGpuTimestampValue(uint32_t queryIndex) const
 	std::memcpy(&value, m->TimestampReadbackMapped + static_cast<size_t>(queryIndex) * m->TimestampQueryStride, sizeof(value));
 	return value;
 }
-void NRIBackend::InitializeOcclusionQueries(uint32_t) { NRI_TODO(); }
-void NRIBackend::ShutdownOcclusionQueries() { NRI_TODO(); }
-void NRIBackend::BeginOcclusionQuery(uint32_t) { NRI_TODO(); }
-void NRIBackend::EndOcclusionQuery(uint32_t) { NRI_TODO(); }
-void NRIBackend::ResolveOcclusionQueryRange(uint32_t, uint32_t) { NRI_TODO(); }
-uint64_t NRIBackend::ReadOcclusionQueryValue(uint32_t) const { return 0; }
+void NRIBackend::InitializeOcclusionQueries(uint32_t queryCount)
+{
+	if (!m || !m->Device)
+		return;
+	if (m->OcclusionQueryPool && m->OcclusionQueryCount == queryCount)
+		return;
+
+	ShutdownOcclusionQueries();
+	if (queryCount == 0)
+		return;
+
+	if (!m->Core.CreateQueryPool || !m->Core.DestroyQueryPool || !m->Core.GetQuerySize ||
+		!m->Core.CmdResetQueries ||
+		!m->Core.CmdBeginQuery || !m->Core.CmdEndQuery || !m->Core.CmdCopyQueries)
+	{
+		AppendCpuRuntimeTrace(L"[NRI] occlusion queries unsupported by interface");
+		return;
+	}
+
+	nri::QueryPoolDesc queryDesc = {};
+	queryDesc.queryType = nri::QueryType::OCCLUSION;
+	queryDesc.capacity = queryCount;
+	if (m->Core.CreateQueryPool(*m->Device, queryDesc, m->OcclusionQueryPool) != nri::Result::SUCCESS ||
+		!m->OcclusionQueryPool)
+	{
+		m->OcclusionQueryPool = nullptr;
+		AppendCpuRuntimeTrace(L"[NRI] CreateQueryPool(OCCLUSION) failed");
+		return;
+	}
+
+	m->OcclusionQueryStride = std::max<uint32_t>(sizeof(uint64_t), m->Core.GetQuerySize(*m->OcclusionQueryPool));
+	const uint64_t readbackSize = static_cast<uint64_t>(m->OcclusionQueryStride) * queryCount;
+	if (!m->CreateBoundBuffer(readbackSize, 0, nri::BufferUsageBits::NONE,
+		nri::MemoryLocation::HOST_READBACK, m->OcclusionReadbackBuffer, m->OcclusionReadbackMemory))
+	{
+		AppendCpuRuntimeTrace(L"[NRI] occlusion readback buffer allocation failed");
+		ShutdownOcclusionQueries();
+		return;
+	}
+
+	m->OcclusionReadbackMapped = static_cast<uint8_t*>(m->Core.MapBuffer(*m->OcclusionReadbackBuffer, 0, readbackSize));
+	if (!m->OcclusionReadbackMapped)
+	{
+		AppendCpuRuntimeTrace(L"[NRI] occlusion readback map failed");
+		ShutdownOcclusionQueries();
+		return;
+	}
+
+	for (uint32_t i = 0; i < queryCount; ++i)
+	{
+		const uint64_t visible = 1;
+		std::memcpy(m->OcclusionReadbackMapped + static_cast<size_t>(i) * m->OcclusionQueryStride, &visible, sizeof(visible));
+	}
+	if (!m->ResetQueries(m->OcclusionQueryPool, 0, queryCount, "[NRI] occlusion query reset failed\n"))
+	{
+		AppendCpuRuntimeTrace(L"[NRI] occlusion query reset failed");
+		ShutdownOcclusionQueries();
+		return;
+	}
+	m->OcclusionQueryCount = queryCount;
+	AppendCpuRuntimeTrace(
+		L"[NRI] occlusion queries initialized count=" + std::to_wstring(queryCount) +
+		L" stride=" + std::to_wstring(m->OcclusionQueryStride));
+}
+void NRIBackend::ShutdownOcclusionQueries()
+{
+	if (!m)
+		return;
+	if (m->OcclusionReadbackMapped && m->OcclusionReadbackBuffer)
+	{
+		m->Core.UnmapBuffer(*m->OcclusionReadbackBuffer);
+		m->OcclusionReadbackMapped = nullptr;
+	}
+	if (m->OcclusionReadbackBuffer)
+	{
+		m->FreeBuffer(m->OcclusionReadbackBuffer, m->OcclusionReadbackMemory);
+		m->OcclusionReadbackBuffer = nullptr;
+	}
+	else
+	{
+		m->OcclusionReadbackMemory.clear();
+	}
+	if (m->OcclusionQueryPool && m->Core.DestroyQueryPool)
+	{
+		m->Core.DestroyQueryPool(m->OcclusionQueryPool);
+		m->OcclusionQueryPool = nullptr;
+	}
+	m->OcclusionQueryCount = 0;
+	m->OcclusionQueryStride = 0;
+}
+void NRIBackend::BeginOcclusionQuery(uint32_t queryIndex)
+{
+	if (!m || !m->ActiveCmd || !m->OcclusionQueryPool || queryIndex >= m->OcclusionQueryCount)
+		return;
+	m->Core.CmdBeginQuery(*m->ActiveCmd, *m->OcclusionQueryPool, queryIndex);
+}
+void NRIBackend::EndOcclusionQuery(uint32_t queryIndex)
+{
+	if (!m || !m->ActiveCmd || !m->OcclusionQueryPool || queryIndex >= m->OcclusionQueryCount)
+		return;
+	m->Core.CmdEndQuery(*m->ActiveCmd, *m->OcclusionQueryPool, queryIndex);
+}
+void NRIBackend::ResolveOcclusionQueryRange(uint32_t startQueryIndex, uint32_t queryCount)
+{
+	if (!m || !m->ActiveCmd || !m->OcclusionQueryPool || !m->OcclusionReadbackBuffer || queryCount == 0)
+		return;
+	if (startQueryIndex >= m->OcclusionQueryCount)
+		return;
+
+	queryCount = std::min(queryCount, m->OcclusionQueryCount - startQueryIndex);
+	m->EndRP();
+	const uint64_t dstOffset = static_cast<uint64_t>(startQueryIndex) * m->OcclusionQueryStride;
+	m->Core.CmdCopyQueries(*m->ActiveCmd, *m->OcclusionQueryPool, startQueryIndex, queryCount,
+		*m->OcclusionReadbackBuffer, dstOffset);
+	m->Core.CmdResetQueries(*m->ActiveCmd, *m->OcclusionQueryPool, startQueryIndex, queryCount);
+}
+uint64_t NRIBackend::ReadOcclusionQueryValue(uint32_t queryIndex) const
+{
+	if (!m || !m->OcclusionReadbackMapped || queryIndex >= m->OcclusionQueryCount || m->OcclusionQueryStride < sizeof(uint64_t))
+		return 1;
+	uint64_t value = 1;
+	std::memcpy(&value, m->OcclusionReadbackMapped + static_cast<size_t>(queryIndex) * m->OcclusionQueryStride, sizeof(value));
+	return value;
+}
 
 // === Command recording ====================================================
 void NRIBackend::SetRenderTarget(Texture* colorTarget, Texture* depthTarget)
@@ -7076,7 +7578,7 @@ void NRIBackend::ClearRenderTarget(Texture* target, const float clearColor[4])
 	++m->DbgClears;
 }
 void NRIBackend::ClearDepth(Texture* target, float depthValue) { if (target) m->PendingDepthClears[target] = depthValue; }
-void NRIBackend::BindDefaultDescriptorHeaps() { NRI_TODO(); }
+void NRIBackend::BindDefaultDescriptorHeaps() {}
 void NRIBackend::SetViewportAndScissor(uint32_t width, uint32_t height)
 {
 	m->VpW = width; m->VpH = height;
@@ -7344,8 +7846,122 @@ void NRIBackend::Dispatch(uint32_t groupCountX, uint32_t groupCountY, uint32_t g
 		m->Core.CmdDispatch(*m->ActiveCmd, d);
 	}
 }
-void NRIBackend::ClearTextureUAVFloat(Texture*, const float[4]) { NRI_TODO(); }
-void NRIBackend::ExecuteCurrentCommandList() { NRI_TODO(); }
+void NRIBackend::ClearTextureUAVFloat(Texture* texture, const float clearColor[4])
+{
+	if (!m || !m->ActiveCmd || !texture || !clearColor)
+		return;
+	auto it = m->Textures.find(texture);
+	if (it == m->Textures.end() || !it->second.texture)
+		return;
+
+	const char* uavName = "OutTex4";
+	const char* entryPoint = "ClearTextureFloat4";
+	const wchar_t* shaderFile = L"Shaders\\NRITextureClear.hlsl";
+	std::shared_ptr<ComputePipelineStateObject>* psoSlot = &m->ClearTextureUavFloat4Pso;
+	switch (texture->Format)
+	{
+	case ETextureFormat::R32Float:
+		uavName = "OutTex1";
+		entryPoint = "ClearTextureFloat1";
+		shaderFile = L"Shaders\\NRITextureClearFloat1.hlsl";
+		psoSlot = &m->ClearTextureUavFloat1Pso;
+		break;
+	case ETextureFormat::RG16Float:
+		uavName = "OutTex2";
+		entryPoint = "ClearTextureFloat2";
+		shaderFile = L"Shaders\\NRITextureClearFloat2.hlsl";
+		psoSlot = &m->ClearTextureUavFloat2Pso;
+		break;
+	case ETextureFormat::RGBA16Float:
+	case ETextureFormat::RGBA32Float:
+	case ETextureFormat::RGBA8Unorm:
+	case ETextureFormat::BGRA8Unorm:
+		break;
+	default:
+	{
+		static bool s_warnedUnsupportedClear = false;
+		if (!s_warnedUnsupportedClear)
+		{
+			s_warnedUnsupportedClear = true;
+			AppendCpuRuntimeTrace(L"[NRI] ClearTextureUAVFloat skipped unsupported texture format");
+		}
+		return;
+	}
+	}
+
+	if (!*psoSlot)
+	{
+		std::shared_ptr<ComputePipelineStateObject> pso = CreateComputePipelineStateObject();
+		if (!pso)
+			return;
+		pso->BindUAV(uavName, 0);
+		pso->BindCBV("ClearParams", 0, 32);
+		const std::wstring shaderPath = RuntimePaths::SourceFile(shaderFile).wstring();
+		if (!pso->InitCS(shaderPath, entryPoint))
+		{
+			AppendCpuRuntimeTrace(L"[NRI] ClearTextureUAVFloat clear shader init failed");
+			return;
+		}
+		*psoSlot = pso;
+	}
+
+	struct ClearParams
+	{
+		float ClearValue[4];
+		uint32_t Extent[2];
+		uint32_t Pad[2];
+	};
+	ClearParams params = {};
+	params.ClearValue[0] = clearColor[0];
+	params.ClearValue[1] = clearColor[1];
+	params.ClearValue[2] = clearColor[2];
+	params.ClearValue[3] = clearColor[3];
+	params.Extent[0] = texture->Width;
+	params.Extent[1] = texture->Height;
+
+	(*psoSlot)->SetTextureUAV(uavName, texture);
+	(*psoSlot)->SetCBVValue("ClearParams", &params);
+	(*psoSlot)->Apply();
+	Dispatch((texture->Width + 7u) / 8u, (texture->Height + 7u) / 8u, 1u);
+	m->TransitionTex(texture, nri::AccessBits::SHADER_RESOURCE_STORAGE, nri::Layout::SHADER_RESOURCE_STORAGE, nri::StageBits::ALL);
+}
+void NRIBackend::CopyTexture(Texture* dstTexture, Texture* srcTexture)
+{
+	if (!m || !m->ActiveCmd || !dstTexture || !srcTexture || dstTexture == srcTexture)
+		return;
+
+	auto srcIt = m->Textures.find(srcTexture);
+	auto dstIt = m->Textures.find(dstTexture);
+	if (srcIt == m->Textures.end() || dstIt == m->Textures.end() || !srcIt->second.texture || !dstIt->second.texture)
+		return;
+
+	m->EndRP();
+	const nri::TextureDesc& srcDesc = m->Core.GetTextureDesc(*srcIt->second.texture);
+	const nri::TextureDesc& dstDesc = m->Core.GetTextureDesc(*dstIt->second.texture);
+	if (srcDesc.type != dstDesc.type || srcDesc.format != dstDesc.format ||
+		srcDesc.width != dstDesc.width || srcDesc.height != dstDesc.height || srcDesc.depth != dstDesc.depth ||
+		srcDesc.mipNum != dstDesc.mipNum || srcDesc.layerNum != dstDesc.layerNum)
+	{
+		static bool s_warnedCopyMismatch = false;
+		if (!s_warnedCopyMismatch)
+		{
+			s_warnedCopyMismatch = true;
+			AppendCpuRuntimeTrace(L"[NRI] CopyTexture skipped incompatible source/destination");
+		}
+		return;
+	}
+	if (!m->TexLayout.count(srcTexture) || m->TexLayout[srcTexture] != nri::Layout::COPY_SOURCE)
+		m->TransitionTex(srcTexture, nri::AccessBits::COPY_SOURCE, nri::Layout::COPY_SOURCE, nri::StageBits::COPY);
+	if (!m->TexLayout.count(dstTexture) || m->TexLayout[dstTexture] != nri::Layout::COPY_DESTINATION)
+		m->TransitionTex(dstTexture, nri::AccessBits::COPY_DESTINATION, nri::Layout::COPY_DESTINATION, nri::StageBits::COPY);
+	m->Core.CmdCopyTexture(*m->ActiveCmd, *dstIt->second.texture, nullptr, *srcIt->second.texture, nullptr);
+}
+void NRIBackend::ExecuteCurrentCommandList()
+{
+	if (!m || !m->ActiveCmd)
+		return;
+	m->EndRP();
+}
 void NRIBackend::BeginGpuMarker(uint64_t color, const char* label)
 {
 	if (!m || !m->ActiveCmd || !label)
@@ -7396,7 +8012,25 @@ void NRIBackend::TransitionBuffer(Buffer* buffer, EResourceState stateBefore, ER
 	it->second.access = bb.after;
 	it->second.accessValid = true;
 }
-void NRIBackend::TransitionVertexBuffer(VertexBuffer*, EResourceState, EResourceState) { NRI_TODO(); }
+void NRIBackend::TransitionVertexBuffer(VertexBuffer* vertexBuffer, EResourceState stateBefore, EResourceState stateAfter)
+{
+	if (!m || !m->ActiveCmd || !vertexBuffer)
+		return;
+	auto it = m->VBs.find(vertexBuffer);
+	if (it == m->VBs.end() || !it->second.buffer)
+		return;
+	m->EndRP();
+	nri::BufferBarrierDesc bb = {};
+	bb.buffer = it->second.buffer;
+	bb.before = ToAccessStage(stateBefore);
+	bb.after = ToAccessStage(stateAfter);
+	nri::BarrierDesc bd = {};
+	bd.buffers = &bb;
+	bd.bufferNum = 1;
+	m->Core.CmdBarrier(*m->ActiveCmd, bd);
+	it->second.access = bb.after;
+	it->second.accessValid = true;
+}
 void NRIBackend::UAVBarrier(Buffer* buffer)
 {
 	if (!m->ActiveCmd || !buffer) return;
@@ -7445,6 +8079,7 @@ struct NRIGraphicsBindGroup final : GraphicsBindGroupHandle
 		std::string Name;
 		Texture* Tex = nullptr;
 		Buffer* Buf = nullptr;
+		VertexBuffer* Vb = nullptr;
 		Sampler* Samp = nullptr;
 		std::vector<uint8_t> Constant;
 	};
@@ -7464,6 +8099,7 @@ std::shared_ptr<GraphicsBindGroupHandle> NRIBackend::CreateGraphicsBindGroup(con
 		NRIGraphicsBindGroup::Entry e;
 		e.Type = src.Type; e.Name = src.BindingName;
 		e.Tex = src.TextureValue; e.Buf = src.BufferValue; e.Samp = src.SamplerValue;
+		e.Vb = src.VertexBufferValue;
 		if (src.Type == EGraphicsBindGroupEntryType::ConstantData && src.ConstantData && src.ConstantDataSize > 0)
 		{
 			const auto* bytes = static_cast<const uint8_t*>(src.ConstantData);
@@ -7487,7 +8123,7 @@ void NRIBackend::BindGraphicsBindGroup(GraphicsPipelineHandle* pipeline, uint32_
 		{
 		case EGraphicsBindGroupEntryType::TextureSRV:       if (e.Tex)  p->SetTexture(e.Name, e.Tex); break;
 		case EGraphicsBindGroupEntryType::BufferSRV:        if (e.Buf)  p->SetBuffer(e.Name, e.Buf); break;
-		case EGraphicsBindGroupEntryType::VertexBufferSRV:  /* vertex-buffer SRV (skinning motion vectors): later */ break;
+		case EGraphicsBindGroupEntryType::VertexBufferSRV:  if (e.Vb)   p->SetVertexBuffer(e.Name, e.Vb); break;
 		case EGraphicsBindGroupEntryType::Sampler:          if (e.Samp) p->SetSampler(e.Name, e.Samp); break;
 		case EGraphicsBindGroupEntryType::ConstantData:     if (!e.Constant.empty()) p->SetConstant(e.Constant.data(), (uint32_t)e.Constant.size()); break;
 		}

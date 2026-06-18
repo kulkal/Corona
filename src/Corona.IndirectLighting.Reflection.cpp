@@ -12,13 +12,11 @@
 #include "stdafx.h"
 #include "Corona.h"
 #include "RenderGraph.h"
-// For dx12_rhi->GetGraphicsCommandList() used by the ReSTIR
-// reservoir-snapshot CopyResource at end-of-pass.
-#include "DX12Backend.h"
 
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
+#include <cstring>
 #include <iterator>
 
 void AppendCpuRuntimeTrace(const std::wstring& line);
@@ -152,6 +150,28 @@ void Corona::RaytraceReflectionPass()
 	RTReflectionViewParam.bWriteRRSpecularHitDistance = bWriteRRSpecularHitDistance ? 1u : 0u;
 	RTReflectionViewParam.bUseRRSpecularGuideRay =
 		(bEnableHybridRRSpecularGuideRay && (bWriteRRSpecularMotionVectors || bWriteRRSpecularHitDistance)) ? 1u : 0u;
+	// Disabled: the specular temporal reservoir path adds backend-dependent noise
+	// without a visible quality gain on DX12/Vulkan/NRI.
+	const bool bUseSpecularTemporalReservoir = false;
+	RTReflectionViewParam.bEnableSpecularTemporalReservoir = bUseSpecularTemporalReservoir ? 1u : 0u;
+	static const UINT32 s_reflectionDebugOutputMode = []() -> UINT32
+	{
+		if (std::getenv("CORONA_NRI_DUMP_REFLECTION_ALBEDO") != nullptr)
+			return 1u;
+		const char* mode = std::getenv("CORONA_REFLECTION_DEBUG_OUTPUT");
+		if (!mode)
+			return 0u;
+		if (std::strcmp(mode, "albedo") == 0)
+			return 1u;
+		if (std::strcmp(mode, "visibility") == 0)
+			return 2u;
+		if (std::strcmp(mode, "ndotl") == 0)
+			return 3u;
+		if (std::strcmp(mode, "normal") == 0)
+			return 4u;
+		return 0u;
+	}();
+	RTReflectionViewParam.ReflectionDebugOutputMode = s_reflectionDebugOutputMode;
 
 	RenderGraph rg(renderBackend.get());
 	RGTextureRef reflectionOutput = rg.ImportTexture("Reflection.SpecularGI", SpecularGIRaw.get(), EResourceState::ShaderRead);
@@ -168,12 +188,8 @@ void Corona::RaytraceReflectionPass()
 	RGTextureRef roughnessInput = rg.ImportTexture("Reflection.RoughnessMetallic", RoughnessMetalicBuffer.get(), EResourceState::ShaderRead);
 	RGTextureRef blueNoiseInput = rg.ImportTexture("Reflection.BlueNoise", BlueNoiseTex.get(), EResourceState::ShaderRead);
 	RGTextureRef normalInput = rg.ImportTexture("Reflection.Normal", NormalBuffers[ColorBufferWriteIndex].get(), EResourceState::ShaderRead);
-	RGTextureRef reservoirAPrevInput = ReflectionReservoirAPrev
-		? rg.ImportTexture("Reflection.ReservoirAPrev", ReflectionReservoirAPrev.get(), EResourceState::ShaderRead)
-		: RGTextureRef{};
-	RGTextureRef reservoirBPrevInput = ReflectionReservoirBPrev
-		? rg.ImportTexture("Reflection.ReservoirBPrev", ReflectionReservoirBPrev.get(), EResourceState::ShaderRead)
-		: RGTextureRef{};
+	RGTextureRef reservoirAPrevInput = {};
+	RGTextureRef reservoirBPrevInput = {};
 	RGTextureRef velocityInput = VelocityBuffer
 		? rg.ImportTexture("Reflection.Velocity", VelocityBuffer.get(), EResourceState::ShaderRead)
 		: RGTextureRef{};
@@ -208,9 +224,9 @@ void Corona::RaytraceReflectionPass()
 				.ReadTexture(roughnessInput, EResourceState::ShaderRead)
 				.ReadTexture(blueNoiseInput, EResourceState::ShaderRead)
 				.ReadTexture(normalInput, EResourceState::ShaderRead);
-			if (reservoirAPrevInput.IsValid())
+			if (bUseSpecularTemporalReservoir && reservoirAPrevInput.IsValid())
 				builder.ReadTexture(reservoirAPrevInput, EResourceState::ShaderRead);
-			if (reservoirBPrevInput.IsValid())
+			if (bUseSpecularTemporalReservoir && reservoirBPrevInput.IsValid())
 				builder.ReadTexture(reservoirBPrevInput, EResourceState::ShaderRead);
 			if (velocityInput.IsValid())
 				builder.ReadTexture(velocityInput, EResourceState::ShaderRead);
@@ -224,8 +240,10 @@ void Corona::RaytraceReflectionPass()
 			Texture* reservoirATexture = reservoirAOutput.IsValid() ? ctx.GetTexture(reservoirAOutput) : reflectionTexture;
 			Texture* reservoirBTexture = reservoirBOutput.IsValid() ? ctx.GetTexture(reservoirBOutput) : reflectionTexture;
 			Texture* normalTexture = ctx.GetTexture(normalInput);
-			Texture* reservoirAPrevTexture = reservoirAPrevInput.IsValid() ? ctx.GetTexture(reservoirAPrevInput) : normalTexture;
-			Texture* reservoirBPrevTexture = reservoirBPrevInput.IsValid() ? ctx.GetTexture(reservoirBPrevInput) : normalTexture;
+			Texture* reservoirAPrevTexture =
+				(bUseSpecularTemporalReservoir && reservoirAPrevInput.IsValid()) ? ctx.GetTexture(reservoirAPrevInput) : normalTexture;
+			Texture* reservoirBPrevTexture =
+				(bUseSpecularTemporalReservoir && reservoirBPrevInput.IsValid()) ? ctx.GetTexture(reservoirBPrevInput) : normalTexture;
 			Texture* velocityTexture = velocityInput.IsValid() ? ctx.GetTexture(velocityInput) : normalTexture;
 			Buffer* materialBuffer = ctx.GetBuffer(rtMaterials);
 
@@ -254,8 +272,8 @@ void Corona::RaytraceReflectionPass()
 			pass.Dispatch(GetRenderWidth(), GetRenderHeight());
 		});
 
-	// ReSTIR specular GI: snapshot current reservoir → prev for next frame.
-	if (reservoirAOutput.IsValid() && reservoirAPrevInput.IsValid() && dx12_rhi)
+	// ReSTIR specular GI: snapshot current reservoir -> prev for next frame.
+	if (bUseSpecularTemporalReservoir && reservoirAOutput.IsValid() && reservoirAPrevInput.IsValid())
 	{
 		rg.AddPass(
 			"Reflection.CopyReservoirA",
@@ -267,12 +285,10 @@ void Corona::RaytraceReflectionPass()
 			},
 			[&](RGContext& ctx)
 			{
-				dx12_rhi->GetGraphicsCommandList()->CopyResource(
-					ctx.GetTexture(reservoirAPrevInput)->resource.Get(),
-					ctx.GetTexture(reservoirAOutput)->resource.Get());
+				ctx.GetBackend()->CopyTexture(ctx.GetTexture(reservoirAPrevInput), ctx.GetTexture(reservoirAOutput));
 			});
 	}
-	if (reservoirBOutput.IsValid() && reservoirBPrevInput.IsValid() && dx12_rhi)
+	if (bUseSpecularTemporalReservoir && reservoirBOutput.IsValid() && reservoirBPrevInput.IsValid())
 	{
 		rg.AddPass(
 			"Reflection.CopyReservoirB",
@@ -284,9 +300,7 @@ void Corona::RaytraceReflectionPass()
 			},
 			[&](RGContext& ctx)
 			{
-				dx12_rhi->GetGraphicsCommandList()->CopyResource(
-					ctx.GetTexture(reservoirBPrevInput)->resource.Get(),
-					ctx.GetTexture(reservoirBOutput)->resource.Get());
+				ctx.GetBackend()->CopyTexture(ctx.GetTexture(reservoirBPrevInput), ctx.GetTexture(reservoirBOutput));
 			});
 	}
 

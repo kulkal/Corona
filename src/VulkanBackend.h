@@ -328,6 +328,8 @@ public:
 		capabilities.SupportsDrawIndirect = bDrawIndexedIndirectEnabled;
 		capabilities.SupportsMultiDrawIndirect = bMultiDrawIndirectEnabled;
 		capabilities.SupportsDrawIndirectFirstInstance = bDrawIndirectFirstInstanceEnabled;
+		capabilities.RequiresStartupLoadingScreenGBufferFallback = true;
+		capabilities.RequiresFullPrecisionHybridUAVTargets = true;
 		capabilities.MaxBindlessTextureCount = MaxVulkanBindlessTextureSlots;
 		capabilities.MaxBindlessBufferCount = MaxVulkanBindlessBufferSlots;
 #endif
@@ -379,6 +381,13 @@ public:
 	std::shared_ptr<VertexBuffer> CreateRWVertexBuffer(uint32_t size, uint32_t stride) override;
 	std::shared_ptr<Buffer> CreateUploadStructuredBuffer(uint32_t numElements, uint32_t elementSize) override;
 	void UpdateUploadStructuredBuffer(Buffer* buffer, const void* srcData, uint32_t sizeInBytes) override;
+	bool CreateOrUpdateRayTracingInstancePropertyBuffer(
+		std::shared_ptr<Buffer>& buffer,
+		uint32_t numElements,
+		uint32_t elementSize,
+		const void* srcData,
+		uint32_t sizeInBytes,
+		std::wstring* outFailureReason) override;
 	std::shared_ptr<Buffer> AllocateTransientUploadStructuredBuffer(uint32_t numElements, uint32_t elementSize, const void* srcData) override;
 	std::shared_ptr<RTAS> CreateBLASForMesh(Mesh* mesh) override;
 	std::shared_ptr<RTAS> CreateBLASForSkeletalMesh(Mesh* mesh) override;
@@ -422,6 +431,7 @@ public:
 	bool DrawIndexedIndirect(Buffer* indirectArgumentBuffer, uint64_t byteOffset, uint32_t drawCount) override;
 	void Dispatch(uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ) override;
 	void ClearTextureUAVFloat(Texture* texture, const float clearColor[4]) override;
+	void CopyTexture(Texture* dstTexture, Texture* srcTexture) override;
 	void ExecuteCurrentCommandList() override;
 	void BeginGpuMarker(uint64_t color, const char* label) override;
 	void EndGpuMarker() override;

@@ -2399,9 +2399,7 @@ void Corona::LightingPass()
 	const uint32_t backendMaxSupportedHybridStage =
 		(renderBackend && RenderingMode == ERenderingMode::HYBRID) ?
 		renderBackend->GetMaxSupportedHybridStage() : 7u;
-	const bool bNriSimpleGIBringup =
-		renderBackend &&
-		renderBackend->GetAPI() == ERenderBackendAPI::NRI &&
+	const bool bPartialHybridDiffuseGIBringup =
 		backendMaxSupportedHybridStage >= 4u &&
 		backendMaxSupportedHybridStage < 7u;
 	const bool bBackendSupportsSpecularGI = backendMaxSupportedHybridStage >= 3u;
@@ -2572,10 +2570,10 @@ void Corona::LightingPass()
 	Texture* lightingDiffuseTex = DefaultBlackTex.get();
 	if (!bMobileHybridDirectOnly &&
 		bDiffuseGIEnabledThisFrame &&
-		bNriSimpleGIBringup &&
+		bPartialHybridDiffuseGIBringup &&
 		!IsDLSSRREnabled())
 	{
-		// NRI bring-up, NON-RR path: feed the screen-space TemporalDenoisingPass
+		// Partial hybrid NON-RR path: feed the screen-space TemporalDenoisingPass
 		// output (DiffuseGITemporal — fed by the spatial-hash query, see
 		// bUseSpatialHashDiffuseInput) so the composite is denoised without DLSS-RR.
 		// Under DLSS-RR this branch is skipped so the flow falls through to the
@@ -2586,21 +2584,21 @@ void Corona::LightingPass()
 			DiffuseGITemporal[GIBufferWriteIndex])
 		{
 			lightingDiffuseTex = DiffuseGITemporal[GIBufferWriteIndex].get();
-			lightingDiffuseSource = L"temporal_nri_simple";
+			lightingDiffuseSource = L"temporal_partial_hybrid";
 			if (DiffuseGITemporalAux[GIBufferWriteIndex])
 				lightingDiffuseAuxTex = DiffuseGITemporalAux[GIBufferWriteIndex].get();
 		}
 		else if (DiffuseGIHashCached)
 		{
 			lightingDiffuseTex = DiffuseGIHashCached.get();
-			lightingDiffuseSource = L"spatial_hash_cached_nri_temporal_disabled";
+			lightingDiffuseSource = L"spatial_hash_cached_partial_hybrid_temporal_disabled";
 			if (DiffuseGIHashCachedAux)
 				lightingDiffuseAuxTex = DiffuseGIHashCachedAux.get();
 		}
 		else if (DiffuseGIRaw)
 		{
 			lightingDiffuseTex = DiffuseGIRaw.get();
-			lightingDiffuseSource = L"raw_nri_simple";
+			lightingDiffuseSource = L"raw_partial_hybrid";
 			if (DiffuseGIRawAux)
 				lightingDiffuseAuxTex = DiffuseGIRawAux.get();
 		}
@@ -2682,15 +2680,15 @@ void Corona::LightingPass()
 	const wchar_t* lightingSpecularSource = L"black";
 	Texture* lightingSpecularTex = DefaultBlackTex.get();
 	if (!bMobileHybridDirectOnly && bSpecularGIEnabledThisFrame &&
-		bNriSimpleGIBringup && backendMaxSupportedHybridStage >= 5u &&
+		bPartialHybridDiffuseGIBringup && backendMaxSupportedHybridStage >= 5u &&
 		!IsDLSSRREnabled() &&
 		SpecularGITemporal[GIBufferWriteIndex])
 	{
-		// NRI bring-up NON-RR: consume the screen-space TemporalDenoising denoised
+		// Partial hybrid NON-RR: consume the screen-space TemporalDenoising denoised
 		// specular instead of the raw 1-spp reflections. Under DLSS-RR fall through
 		// to raw so RR owns specular denoising.
 		lightingSpecularTex = SpecularGITemporal[GIBufferWriteIndex].get();
-		lightingSpecularSource = L"temporal_nri";
+		lightingSpecularSource = L"temporal_partial_hybrid";
 	}
 	else if (!bMobileHybridDirectOnly && bSpecularGIEnabledThisFrame && SpecularGIRaw)
 	{
@@ -3287,8 +3285,8 @@ bool Corona::DrawStaticObjectBindlessBatch(const std::vector<const SceneObject*>
 	{
 		return failPrerequisite(L"backend lacks draw indirect first-instance support");
 	}
-	if (renderBackend->GetAPI() == ERenderBackendAPI::Vulkan && bStartupLoadingScreenActive)
-		return failPrerequisite(L"vulkan startup loading screen active");
+	if (backendCapabilities.RequiresStartupLoadingScreenGBufferFallback && bStartupLoadingScreenActive)
+		return failPrerequisite(L"startup loading screen active");
 
 	const bool profile = IsGBufferObjectBatchProfileEnabled();
 	GBufferObjectBatchProfile& batchProfile = GetGBufferObjectBatchProfile();
@@ -3679,8 +3677,8 @@ void Corona::DrawScene(shared_ptr<Scene> scene, const glm::mat4x4& instanceTrans
 			return failPrerequisite(L"missing bindless geometry pipeline");
 		if (!samplerWrap)
 			return failPrerequisite(L"missing sampler");
-		if (renderBackend->GetAPI() == ERenderBackendAPI::Vulkan && bStartupLoadingScreenActive)
-			return failPrerequisite(L"vulkan startup loading screen active");
+		if (backendCapabilities.RequiresStartupLoadingScreenGBufferFallback && bStartupLoadingScreenActive)
+			return failPrerequisite(L"startup loading screen active");
 
 		uint32_t drawCount = 0;
 		for (const std::shared_ptr<Mesh>& mesh : scene->meshes)
@@ -4689,7 +4687,7 @@ void Corona::PrepareGBufferCulling(uint32_t sceneObjectCount)
 	GBufferOcclusionQueryCount = 0;
 	bGBufferOcclusionQueriesActive = false;
 
-	if (!renderBackend || renderBackend->GetAPI() != ERenderBackendAPI::D3D12 || sceneObjectCount == 0)
+	if (!renderBackend || !renderBackend->GetCapabilities().SupportsGBufferOcclusionQueries || sceneObjectCount == 0)
 		return;
 
 	uint32_t capacityPerFrame = 256u;

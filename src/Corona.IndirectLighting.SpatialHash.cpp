@@ -11,9 +11,6 @@
 
 #include "stdafx.h"
 #include "Corona.h"
-// For dx12_rhi->GetGraphicsCommandList() used by the screen-resolve
-// snapshot CopyResource at end of pass.
-#include "DX12Backend.h"
 
 #include <algorithm>
 #include <cmath>
@@ -798,16 +795,11 @@ void Corona::SpatialHashGIPass()
 		renderBackend->TransitionTexture(DiffuseGIHashFiltered.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
 
 		// End-of-frame snapshot for next frame's temporal blend.
-		if (dx12_rhi)
-		{
-			renderBackend->TransitionTexture(DiffuseGIHashFiltered.get(), EResourceState::ShaderRead, EResourceState::CopySource);
-			renderBackend->TransitionTexture(DiffuseGIHashFilteredPrev.get(), EResourceState::ShaderRead, EResourceState::CopyDest);
-			dx12_rhi->GetGraphicsCommandList()->CopyResource(
-				DiffuseGIHashFilteredPrev->resource.Get(),
-				DiffuseGIHashFiltered->resource.Get());
-			renderBackend->TransitionTexture(DiffuseGIHashFiltered.get(), EResourceState::CopySource, EResourceState::ShaderRead);
-			renderBackend->TransitionTexture(DiffuseGIHashFilteredPrev.get(), EResourceState::CopyDest, EResourceState::ShaderRead);
-		}
+		renderBackend->TransitionTexture(DiffuseGIHashFiltered.get(), EResourceState::ShaderRead, EResourceState::CopySource);
+		renderBackend->TransitionTexture(DiffuseGIHashFilteredPrev.get(), EResourceState::ShaderRead, EResourceState::CopyDest);
+		renderBackend->CopyTexture(DiffuseGIHashFilteredPrev.get(), DiffuseGIHashFiltered.get());
+		renderBackend->TransitionTexture(DiffuseGIHashFiltered.get(), EResourceState::CopySource, EResourceState::ShaderRead);
+		renderBackend->TransitionTexture(DiffuseGIHashFilteredPrev.get(), EResourceState::CopyDest, EResourceState::ShaderRead);
 	}
 
 	bSpatialHashGIHistoryValid = true;

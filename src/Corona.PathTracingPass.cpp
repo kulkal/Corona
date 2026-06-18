@@ -15,6 +15,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <cstdlib>
 #include <iterator>
 
@@ -144,10 +145,12 @@ bool Corona::EnsureRTMaterialRecordBuffer()
 		Texture* normal = DefaultNormalTex.get();
 		Texture* roughness = DefaultRougnessTex.get();
 		Texture* metallic = DefaultBlackTex.get();
+		glm::vec4 baseColorFactor(1.0f);
 		if (mesh)
 		{
 			if (Material* material = getPrimaryMaterial(*mesh))
 			{
+				baseColorFactor = material->BaseColorFactor;
 				if (material->Diffuse)
 					albedo = material->Diffuse.get();
 				if (material->Normal)
@@ -168,6 +171,10 @@ bool Corona::EnsureRTMaterialRecordBuffer()
 		// don't call GetDimensions()+log2() per hit.
 		const uint32_t albedoTexels = std::max<uint32_t>(1u, albedo->Width) * std::max<uint32_t>(1u, albedo->Height);
 		record.AlbedoLodConstant = 0.5f * std::log2(static_cast<float>(albedoTexels));
+		record.BaseColorFactor[0] = baseColorFactor.r;
+		record.BaseColorFactor[1] = baseColorFactor.g;
+		record.BaseColorFactor[2] = baseColorFactor.b;
+		record.BaseColorFactor[3] = baseColorFactor.a;
 		bAllTexturesRegistered = bAllTexturesRegistered &&
 			record.AlbedoTextureIndex != RHI_INVALID_BINDLESS_INDEX &&
 			record.NormalTextureIndex != RHI_INVALID_BINDLESS_INDEX &&
@@ -183,6 +190,10 @@ bool Corona::EnsureRTMaterialRecordBuffer()
 		HashCombinePathTracingMaterial(materialHash, record.NormalTextureIndex);
 		HashCombinePathTracingMaterial(materialHash, record.RoughnessTextureIndex);
 		HashCombinePathTracingMaterial(materialHash, record.MetallicTextureIndex);
+		uint32_t baseColorBits[4] = {};
+		std::memcpy(baseColorBits, record.BaseColorFactor, sizeof(baseColorBits));
+		for (uint32_t bits : baseColorBits)
+			HashCombinePathTracingMaterial(materialHash, bits);
 	}
 
 	if (RTMaterialRecordBuffer && RTMaterialRecordHash == materialHash)

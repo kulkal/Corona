@@ -253,7 +253,7 @@ private:
 	// `*A`: .xyz = chosen sample's hit world position, .w = M
 	// (effective sample count). `*B`: .xyz = radiance leaving the
 	// hit toward the pixel (LINEAR, pre-Reinhard), .w = W (RIS
-	// weight). Prev buffers receive end-of-frame CopyResource so
+	// weight). Prev buffers receive an end-of-frame GPU copy so
 	// the next frame can RIS-combine via motion reprojection.
 	// Sized to match the raytraced reflection output (full render
 	// resolution). RGBA32Float used throughout for unbiased combine
@@ -280,7 +280,7 @@ private:
 	// single-channel texture because ShadowBuffer's 4 RGBA32F slots are
 	// fully spoken for (sun / idx / W / vis). R16Float gives ample range
 	// for the M cap (~20). Curr is written by the RT shadow shader; Prev
-	// is the CopyResource'd snapshot used by the next frame's combine.
+	// is the snapshot used by the next frame's combine.
 	shared_ptr<Texture> ShadowReservoirMBuffer;
 	shared_ptr<Texture> ShadowReservoirMPrevBuffer;
 	// Phase 3 proper 2-pass scratch buffers. The RT raygen writes here
@@ -864,6 +864,9 @@ private:
 		UINT32 bWriteRRSpecularMotionVectors = 0;
 		UINT32 bWriteRRSpecularHitDistance = 0;
 		UINT32 bUseRRSpecularGuideRay = 1;
+		UINT32 bEnableSpecularTemporalReservoir = 0;
+		UINT32 ReflectionDebugOutputMode = 0;
+		glm::uvec2 _specularTemporalReservoirPadding = glm::uvec2(0);
 	};
 
 	RTReflectionViewParamCB RTReflectionViewParam;
@@ -887,7 +890,7 @@ private:
 		float ViewSpreadAngle;
 		UINT32 NoiseMode = 1;
 		UINT32 bIncludeSkyLighting = 0;
-		UINT32 GISamplesPerPixel = 1; // diffuse GI rays per pixel per frame (was _noisePadding)
+		UINT32 GISamplesPerPixel = 1; // local light samples at the first diffuse GI hit
 		glm::vec3 SkyColorTop;
 		float SkyIntensity;
 		glm::vec3 SkyColorBottom;
@@ -902,7 +905,7 @@ private:
 	RTGIViewParamCB RTGIViewParam;
 	shared_ptr<RTPipelineStateObject> PSO_RT_GI;
 	shared_ptr<RTPipelineStateObject> PSO_RT_GI_SER;
-	shared_ptr<ComputePipelineStateObject> PSO_NRI_SIMPLE_GI_FALLBACK;
+	shared_ptr<ComputePipelineStateObject> PSO_SIMPLE_GI_FALLBACK;
 	bool bRTDiffuseGISimpleSERInitFailed = false;
 
 	struct RTScreenProbeGIViewParamCB
@@ -1058,10 +1061,12 @@ private:
 		UINT32 NormalTextureIndex = RHI_INVALID_BINDLESS_INDEX;
 		UINT32 RoughnessTextureIndex = RHI_INVALID_BINDLESS_INDEX;
 		UINT32 MetallicTextureIndex = RHI_INVALID_BINDLESS_INDEX;
+		float BaseColorFactor[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
 		// 0.5*log2(albedo w*h), precomputed so RT closest-hit shaders skip the
 		// per-hit GetDimensions() + log2() for ray-cone texture LOD.
 		float AlbedoLodConstant = 0.0f;
 	};
+	static_assert(sizeof(RTMaterialRecord) == 36, "RTMaterialRecord layout must match BindlessResources.hlsli");
 
 	struct RTGeometryRecord
 	{
@@ -1393,14 +1398,15 @@ private:
 	// no-history) pixels that RR's combined-mode spatial denoise leaves noisy on camera
 	// rotation, while leaving well-accumulated pixels untouched (detail preserved).
 	bool bEnableGIDisocclusionFilter = false;
-	// Diffuse GI rays per pixel per frame for SIMPLE_RAYTRACE. >1 cuts the 1spp
-	// variance at the source (RR-compatible: each sample is still raw) so DLSS-RR
-	// stays stable on dolly motion. Cost scales ~linearly with the count.
+	// Local point lights sampled at the first diffuse GI hit. 16 restores the old
+	// all-light evaluation; lower values keep the estimate unbiased while reducing
+	// per-hit shadow visibility rays.
 	UINT32 SimpleGISamplesPerPixel = 4;
 	bool bEnableRTDiffuseGISER = false;
 	bool bEnableRTReflectionSER = false;
 	bool bD3D12ShaderModel69Supported = false;
 	bool bEnableSpecularGI = true;
+	bool bEnableSpecularGITemporalReservoir = false;
 	bool bEnableDirectDiffuse = true;
 	bool bEnableDirectSpecular = true;
 	bool bEnableRTAO = false;
@@ -2025,6 +2031,7 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 		bool bEnableRTDiffuseGISER = false;
 		bool bEnableRTReflectionSER = false;
 		bool bEnableSpecularGI = true;
+		bool bEnableSpecularGITemporalReservoir = false;
 		bool bEnableDirectDiffuse = true;
 		bool bEnableDirectSpecular = true;
 		bool bEnableRTAO = false;
@@ -2599,8 +2606,8 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	void InitRaytracingSimpleGIPass();
 	shared_ptr<RTPipelineStateObject> CreateRaytracingSimpleGIPSO(bool bUseSER);
 	bool InitRaytracingSimpleGISERPass();
-	void InitNRISimpleGIFallbackPass();
-	bool NRISimpleGIFallbackPass();
+	void InitSimpleGIFallbackPass();
+	bool SimpleGIFallbackPass();
 	void InitRaytracingScreenProbePass();
 	shared_ptr<RTPipelineStateObject> CreateRaytracingScreenProbeGIPSO(bool bUseSER);
 	bool InitRaytracingScreenProbeGISERPass();
