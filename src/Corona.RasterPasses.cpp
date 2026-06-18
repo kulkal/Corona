@@ -43,7 +43,7 @@ namespace
 	// so keep that trickle tiny and favor stable, approximate culling.
 	constexpr uint64_t kMaxGBufferOcclusionSkipFrames = 120u;
 	constexpr uint64_t kBatchedGBufferOcclusionRefreshFrames = 240u;
-	constexpr uint32_t kBatchedGBufferOcclusionRefreshQueryBudget = 64u;
+	constexpr uint32_t kBatchedGBufferOcclusionRefreshQueryBudget = 16u;
 
 	enum class EFrustumAabbRelation : uint8_t
 	{
@@ -3700,7 +3700,11 @@ bool Corona::DrawStaticInstancedScene(
 	return true;
 }
 
-bool Corona::DrawStaticObjectBindlessBatch(const std::vector<uint32_t>& objectIndices)
+bool Corona::DrawStaticObjectBindlessBatch(
+	const std::vector<uint32_t>& objectIndices,
+	bool hasPrecomputedCandidateDrawCounts,
+	uint32_t precomputedOpaqueDrawCount,
+	uint32_t precomputedAlphaDrawCount)
 {
 	auto failPrerequisite = [](const wchar_t* reason) -> bool
 	{
@@ -4143,20 +4147,25 @@ bool Corona::DrawStaticObjectBindlessBatch(const std::vector<uint32_t>& objectIn
 		if (staticDrawTable.GpuCullBufferCreateFrame == FrameCounter)
 			return false;
 
-		uint32_t candidateOpaqueMaxDraws = 0;
-		uint32_t candidateAlphaMaxDraws = 0;
-		for (uint32_t objectIndex : objectIndices)
+		uint32_t candidateOpaqueMaxDraws = precomputedOpaqueDrawCount;
+		uint32_t candidateAlphaMaxDraws = precomputedAlphaDrawCount;
+		if (!hasPrecomputedCandidateDrawCounts)
 		{
-			if (objectIndex >= staticDrawTable.ObjectRanges.size())
-				return false;
-			const CachedGBufferStaticObjectDrawRange& range = staticDrawTable.ObjectRanges[objectIndex];
-			if (range.OpaqueDrawCount > std::numeric_limits<uint32_t>::max() - candidateOpaqueMaxDraws ||
-				range.AlphaDrawCount > std::numeric_limits<uint32_t>::max() - candidateAlphaMaxDraws)
+			candidateOpaqueMaxDraws = 0;
+			candidateAlphaMaxDraws = 0;
+			for (uint32_t objectIndex : objectIndices)
 			{
-				return false;
+				if (objectIndex >= staticDrawTable.ObjectRanges.size())
+					return false;
+				const CachedGBufferStaticObjectDrawRange& range = staticDrawTable.ObjectRanges[objectIndex];
+				if (range.OpaqueDrawCount > std::numeric_limits<uint32_t>::max() - candidateOpaqueMaxDraws ||
+					range.AlphaDrawCount > std::numeric_limits<uint32_t>::max() - candidateAlphaMaxDraws)
+				{
+					return false;
+				}
+				candidateOpaqueMaxDraws += range.OpaqueDrawCount;
+				candidateAlphaMaxDraws += range.AlphaDrawCount;
 			}
-			candidateOpaqueMaxDraws += range.OpaqueDrawCount;
-			candidateAlphaMaxDraws += range.AlphaDrawCount;
 		}
 		if (candidateAlphaMaxDraws > std::numeric_limits<uint32_t>::max() - candidateOpaqueMaxDraws)
 			return false;
@@ -6115,59 +6124,10 @@ void Corona::GBufferPass()
 		gbufferPassProfile.ClusterDrawCount,
 		clusterDrawProfileBegin);
 
-	static thread_local std::unordered_map<const Scene*, bool> s_skeletalUnifiedSceneCache;
-	std::unordered_map<const Scene*, bool>& skeletalUnifiedSceneCache = s_skeletalUnifiedSceneCache;
-	skeletalUnifiedSceneCache.clear();
-	skeletalUnifiedSceneCache.reserve(64);
-	auto isSkeletalUnifiedObject = [bClusterDrawActive, &skeletalUnifiedSceneCache](const std::shared_ptr<Scene>& scene)
-	{
-		if (!bClusterDrawActive || !scene)
-			return false;
-		const Scene* key = scene.get();
-		auto it = skeletalUnifiedSceneCache.find(key);
-		if (it != skeletalUnifiedSceneCache.end())
-			return it->second;
-		bool eligible = false;
-		for (const auto& mesh : scene->meshes)
-		{
-			if (mesh && mesh->bSkeletalSkinned)
-			{
-				eligible = true;
-				break;
-			}
-		}
-		skeletalUnifiedSceneCache[key] = eligible;
-		return eligible;
-	};
-
 	if (!bMultiThreadRendering)
 	{
 		const auto classifyProfileBegin =
 			bGBufferPassProfileEnabled ? GBufferProfileClock::now() : GBufferProfileClock::time_point{};
-		static thread_local std::unordered_map<const Scene*, bool> s_spineMeshSceneCache;
-		std::unordered_map<const Scene*, bool>& spineMeshSceneCache = s_spineMeshSceneCache;
-		spineMeshSceneCache.clear();
-		spineMeshSceneCache.reserve(128);
-		auto sceneUsesSpineMesh = [&spineMeshSceneCache](const std::shared_ptr<Scene>& scene)
-		{
-			if (!scene)
-				return false;
-			const Scene* key = scene.get();
-			auto it = spineMeshSceneCache.find(key);
-			if (it != spineMeshSceneCache.end())
-				return it->second;
-			bool usesSpine = false;
-			for (const auto& mesh : scene->meshes)
-			{
-				if (mesh && mesh->bSpineMesh)
-				{
-					usesSpine = true;
-					break;
-				}
-			}
-			spineMeshSceneCache[key] = usesSpine;
-			return usesSpine;
-		};
 
 		struct StaticBatchObjectEntry
 		{
@@ -6252,22 +6212,6 @@ void Corona::GBufferPass()
 				return framesSinceTest > kMaxGBufferOcclusionSkipFrames;
 			return framesSinceTest >= kBatchedGBufferOcclusionRefreshFrames;
 		};
-		static thread_local std::unordered_map<const Scene*, bool> s_staticInstancingEligibilityCache;
-		std::unordered_map<const Scene*, bool>& staticInstancingEligibilityCache = s_staticInstancingEligibilityCache;
-		staticInstancingEligibilityCache.clear();
-		staticInstancingEligibilityCache.reserve(128);
-		auto isStaticInstancingEligibleCached = [this, &staticInstancingEligibilityCache](const std::shared_ptr<Scene>& scene)
-		{
-			if (!scene)
-				return false;
-			const Scene* key = scene.get();
-			auto it = staticInstancingEligibilityCache.find(key);
-			if (it != staticInstancingEligibilityCache.end())
-				return it->second;
-			const bool eligible = IsSceneEligibleForStaticGBufferInstancing(scene);
-			staticInstancingEligibilityCache[key] = eligible;
-			return eligible;
-		};
 		const RenderBackendCapabilities gbufferCapabilities =
 			renderBackend ? renderBackend->GetCapabilities() : RenderBackendCapabilities{};
 		const bool bStaticObjectBatchSupported =
@@ -6276,69 +6220,114 @@ void Corona::GBufferPass()
 			SupportsGBufferBindlessGeometry(renderBackend.get()) &&
 			gbufferCapabilities.SupportsDrawIndirect &&
 			gbufferCapabilities.SupportsDrawIndirectFirstInstance;
-		static thread_local std::unordered_map<const Scene*, bool> s_staticObjectBatchEligibilityCache;
-		std::unordered_map<const Scene*, bool>& staticObjectBatchEligibilityCache = s_staticObjectBatchEligibilityCache;
-		staticObjectBatchEligibilityCache.clear();
-		staticObjectBatchEligibilityCache.reserve(128);
-		auto isStaticObjectBatchEligibleCached = [bStaticObjectBatchSupported, &staticObjectBatchEligibilityCache](const std::shared_ptr<Scene>& scene)
-		{
-			if (!bStaticObjectBatchSupported)
-				return false;
-			if (!scene)
-				return false;
-			const Scene* key = scene.get();
-			auto it = staticObjectBatchEligibilityCache.find(key);
-			if (it != staticObjectBatchEligibilityCache.end())
-				return it->second;
 
-			bool eligible = !scene->meshes.empty();
-			bool hasDrawableRange = false;
-			if (eligible)
-			{
-				for (const std::shared_ptr<Mesh>& mesh : scene->meshes)
-				{
-					if (!mesh || !mesh->Vb || !mesh->Ib || mesh->Draws.empty() ||
-						mesh->bTerrainMesh || mesh->bGrassMesh ||
-						!IsGBufferStaticBindlessGeometryEligible(*mesh))
-					{
-						eligible = false;
-						break;
-					}
-					for (const Mesh::DrawCall& drawcall : mesh->Draws)
-					{
-						if (drawcall.IndexCount != 0)
-							hasDrawableRange = true;
-					}
-				}
-			}
-			eligible = eligible && hasDrawableRange;
-			staticObjectBatchEligibilityCache[key] = eligible;
-			return eligible;
-		};
-		static thread_local std::unordered_map<const Scene*, bool> s_proceduralGrassSceneCache;
-		std::unordered_map<const Scene*, bool>& proceduralGrassSceneCache = s_proceduralGrassSceneCache;
-		proceduralGrassSceneCache.clear();
-		proceduralGrassSceneCache.reserve(128);
-		auto sceneHasProceduralGrass = [&proceduralGrassSceneCache](const std::shared_ptr<Scene>& scene)
+		struct GBufferSceneFeatureFlags
 		{
+			bool SpineObject = false;
+			bool SkeletalUnifiedObject = false;
+			bool ProceduralGrassScene = false;
+			bool StaticInstancingEligible = false;
+			bool StaticObjectBatchEligible = false;
+			uint32_t StaticObjectBatchOpaqueDrawCount = 0;
+			uint32_t StaticObjectBatchAlphaDrawCount = 0;
+		};
+		static thread_local std::unordered_map<const Scene*, GBufferSceneFeatureFlags> s_sceneFeatureCache;
+		std::unordered_map<const Scene*, GBufferSceneFeatureFlags>& sceneFeatureCache = s_sceneFeatureCache;
+		static thread_local std::vector<GBufferSceneFeatureFlags> s_sceneFeatureByObject;
+		static thread_local uint64_t s_sceneFeatureGeneration = UINT64_MAX;
+		static thread_local size_t s_sceneFeatureObjectCount = std::numeric_limits<size_t>::max();
+		static thread_local bool s_sceneFeatureClusterDrawActive = false;
+		static thread_local bool s_sceneFeatureStaticObjectBatchSupported = false;
+		auto computeSceneFeatureFlags =
+			[this, bClusterDrawActive, bStaticObjectBatchSupported](const std::shared_ptr<Scene>& scene) -> GBufferSceneFeatureFlags
+		{
+			GBufferSceneFeatureFlags flags{};
 			if (!scene)
-				return false;
-			const Scene* key = scene.get();
-			auto it = proceduralGrassSceneCache.find(key);
-			if (it != proceduralGrassSceneCache.end())
-				return it->second;
-			bool hasProceduralGrass = false;
+				return flags;
+
+			bool staticObjectBatchEligible = bStaticObjectBatchSupported && !scene->meshes.empty();
+			bool hasDrawableRange = false;
+			uint32_t staticObjectBatchOpaqueDrawCount = 0;
+			uint32_t staticObjectBatchAlphaDrawCount = 0;
 			for (const std::shared_ptr<Mesh>& sceneMesh : scene->meshes)
 			{
-				if (sceneMesh && sceneMesh->bProceduralGrass)
+				if (!sceneMesh)
 				{
-					hasProceduralGrass = true;
-					break;
+					staticObjectBatchEligible = false;
+					continue;
+				}
+
+				flags.SpineObject = flags.SpineObject || sceneMesh->bSpineMesh;
+				flags.SkeletalUnifiedObject =
+					flags.SkeletalUnifiedObject ||
+					(bClusterDrawActive && sceneMesh->bSkeletalSkinned);
+				flags.ProceduralGrassScene = flags.ProceduralGrassScene || sceneMesh->bProceduralGrass;
+
+				if (staticObjectBatchEligible)
+				{
+					if (!sceneMesh->Vb || !sceneMesh->Ib || sceneMesh->Draws.empty() ||
+						sceneMesh->bTerrainMesh || sceneMesh->bGrassMesh ||
+						!IsGBufferStaticBindlessGeometryEligible(*sceneMesh))
+					{
+						staticObjectBatchEligible = false;
+					}
+					else
+					{
+						for (const Mesh::DrawCall& drawcall : sceneMesh->Draws)
+						{
+							if (drawcall.IndexCount != 0)
+							{
+								hasDrawableRange = true;
+								if (sceneMesh->bTransparent)
+									++staticObjectBatchAlphaDrawCount;
+								else
+									++staticObjectBatchOpaqueDrawCount;
+							}
+						}
+					}
 				}
 			}
-			proceduralGrassSceneCache[key] = hasProceduralGrass;
-			return hasProceduralGrass;
+			flags.StaticObjectBatchEligible = staticObjectBatchEligible && hasDrawableRange;
+			if (flags.StaticObjectBatchEligible)
+			{
+				flags.StaticObjectBatchOpaqueDrawCount = staticObjectBatchOpaqueDrawCount;
+				flags.StaticObjectBatchAlphaDrawCount = staticObjectBatchAlphaDrawCount;
+			}
+			flags.StaticInstancingEligible = IsSceneEligibleForStaticGBufferInstancing(scene);
+			return flags;
 		};
+		const size_t sceneFeatureObjectCount = RenderWorld.SceneObjects.size();
+		const bool bSceneFeatureCacheValid =
+			s_sceneFeatureGeneration == RenderWorld.SceneObjectCullingIndexGeneration &&
+			s_sceneFeatureObjectCount == sceneFeatureObjectCount &&
+			s_sceneFeatureClusterDrawActive == bClusterDrawActive &&
+			s_sceneFeatureStaticObjectBatchSupported == bStaticObjectBatchSupported &&
+			s_sceneFeatureByObject.size() == sceneFeatureObjectCount;
+		if (!bSceneFeatureCacheValid)
+		{
+			sceneFeatureCache.clear();
+			sceneFeatureCache.reserve(256);
+			s_sceneFeatureByObject.assign(sceneFeatureObjectCount, GBufferSceneFeatureFlags{});
+			for (size_t objectFeatureIndex = 0; objectFeatureIndex < sceneFeatureObjectCount; ++objectFeatureIndex)
+			{
+				const std::shared_ptr<Scene>& scene = RenderWorld.SceneObjects[objectFeatureIndex].ScenePtr;
+				if (!scene)
+					continue;
+
+				const Scene* key = scene.get();
+				auto it = sceneFeatureCache.find(key);
+				if (it == sceneFeatureCache.end())
+				{
+					const GBufferSceneFeatureFlags flags = computeSceneFeatureFlags(scene);
+					it = sceneFeatureCache.emplace(key, flags).first;
+				}
+				s_sceneFeatureByObject[objectFeatureIndex] = it->second;
+			}
+			s_sceneFeatureGeneration = RenderWorld.SceneObjectCullingIndexGeneration;
+			s_sceneFeatureObjectCount = sceneFeatureObjectCount;
+			s_sceneFeatureClusterDrawActive = bClusterDrawActive;
+			s_sceneFeatureStaticObjectBatchSupported = bStaticObjectBatchSupported;
+		}
 		const std::shared_ptr<Scene> activeTerrainScene =
 			ActiveTerrain ? ActiveTerrain->GetScene() : std::shared_ptr<Scene>{};
 		const std::shared_ptr<Scene> activeGrassScene = ActiveGrassScene.lock();
@@ -6355,6 +6344,24 @@ void Corona::GBufferPass()
 		std::vector<uint32_t>& prebatchedBindlessObjectIndices = s_prebatchedBindlessObjectIndices;
 		prebatchedBindlessObjectIndices.clear();
 		prebatchedBindlessObjectIndices.reserve(visibleObjectIndices.size());
+		bool bPrebatchedDrawCountsValid = true;
+		uint32_t prebatchedOpaqueDrawCount = 0;
+		uint32_t prebatchedAlphaDrawCount = 0;
+		auto accumulatePrebatchedDrawCounts =
+			[&bPrebatchedDrawCountsValid, &prebatchedOpaqueDrawCount, &prebatchedAlphaDrawCount]
+			(const GBufferSceneFeatureFlags& sceneFeatures)
+		{
+			if (!bPrebatchedDrawCountsValid)
+				return;
+			if (sceneFeatures.StaticObjectBatchOpaqueDrawCount > std::numeric_limits<uint32_t>::max() - prebatchedOpaqueDrawCount ||
+				sceneFeatures.StaticObjectBatchAlphaDrawCount > std::numeric_limits<uint32_t>::max() - prebatchedAlphaDrawCount)
+			{
+				bPrebatchedDrawCountsValid = false;
+				return;
+			}
+			prebatchedOpaqueDrawCount += sceneFeatures.StaticObjectBatchOpaqueDrawCount;
+			prebatchedAlphaDrawCount += sceneFeatures.StaticObjectBatchAlphaDrawCount;
+		};
 		const uint32_t prebatchedRefreshBudget =
 			std::min(GBufferOcclusionQueryCapacityPerFrame, kBatchedGBufferOcclusionRefreshQueryBudget);
 		uint32_t prebatchedRefreshCandidates = 0;
@@ -6367,13 +6374,18 @@ void Corona::GBufferPass()
 			if (!object.bVisible || !object.ScenePtr)
 				continue;
 
+			const GBufferSceneFeatureFlags sceneFeatures =
+				objectIndex < s_sceneFeatureByObject.size() ?
+				s_sceneFeatureByObject[objectIndex] :
+				GBufferSceneFeatureFlags{};
+
 			VisibleGBufferObjectEntry entry{};
 			entry.ObjectIndex = objectIndex;
 			entry.Object = &object;
-			entry.SpineObject = sceneUsesSpineMesh(object.ScenePtr);
-			entry.SkeletalUnifiedObject = isSkeletalUnifiedObject(object.ScenePtr);
+			entry.SpineObject = sceneFeatures.SpineObject;
+			entry.SkeletalUnifiedObject = sceneFeatures.SkeletalUnifiedObject;
 			entry.TerrainScene = activeTerrainScene && object.ScenePtr == activeTerrainScene;
-			entry.ProceduralGrassScene = sceneHasProceduralGrass(object.ScenePtr);
+			entry.ProceduralGrassScene = sceneFeatures.ProceduralGrassScene;
 			entry.LegacyGrassScene =
 				!entry.ProceduralGrassScene && activeGrassScene && object.ScenePtr == activeGrassScene;
 			entry.StaticObjectBatchEligible =
@@ -6382,7 +6394,7 @@ void Corona::GBufferPass()
 				!entry.TerrainScene &&
 				!entry.ProceduralGrassScene &&
 				!entry.LegacyGrassScene &&
-				isStaticObjectBatchEligibleCached(object.ScenePtr);
+				sceneFeatures.StaticObjectBatchEligible;
 			const bool bOriginallyStaticObjectBatchEligible = entry.StaticObjectBatchEligible;
 			if (objectIndex < RenderWorld.SceneObjectCullingData.size())
 			{
@@ -6409,12 +6421,14 @@ void Corona::GBufferPass()
 					}
 					else
 					{
+						accumulatePrebatchedDrawCounts(sceneFeatures);
 						prebatchedBindlessObjectIndices.push_back(objectIndex);
 						continue;
 					}
 				}
 				else
 				{
+					accumulatePrebatchedDrawCounts(sceneFeatures);
 					prebatchedBindlessObjectIndices.push_back(objectIndex);
 					continue;
 				}
@@ -6427,7 +6441,7 @@ void Corona::GBufferPass()
 				!entry.ProceduralGrassScene &&
 				!entry.LegacyGrassScene &&
 				!bOriginallyStaticObjectBatchEligible &&
-				isStaticInstancingEligibleCached(object.ScenePtr);
+				sceneFeatures.StaticInstancingEligible;
 			if (entry.StaticInstancingEligible)
 				entry.StaticBatchKey = makeStaticBatchKey(object);
 
@@ -6545,7 +6559,11 @@ void Corona::GBufferPass()
 
 			if (drawSpinePass == 0 && !prebatchedBindlessObjectIndices.empty())
 			{
-				if (DrawStaticObjectBindlessBatch(prebatchedBindlessObjectIndices))
+				if (DrawStaticObjectBindlessBatch(
+					prebatchedBindlessObjectIndices,
+					bPrebatchedDrawCountsValid,
+					prebatchedOpaqueDrawCount,
+					prebatchedAlphaDrawCount))
 				{
 					GBufferLastVisibleObjectCount += prebatchedBindlessObjectIndices.size();
 				}
