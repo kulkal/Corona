@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -16,6 +17,8 @@
 #include <limits>
 #include <sstream>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
 
 #include "EntityComponentSystem.h"
 #include "PlatformSystem.h"
@@ -33,6 +36,20 @@ void AppendCpuRuntimeTrace(const std::wstring& line);
 
 namespace
 {
+	double MapFormatElapsedMilliseconds(
+		std::chrono::steady_clock::time_point start,
+		std::chrono::steady_clock::time_point end)
+	{
+		return std::chrono::duration<double, std::milli>(end - start).count();
+	}
+
+	std::wstring MapFormatFormatMilliseconds(double milliseconds)
+	{
+		wchar_t buffer[64] = {};
+		swprintf_s(buffer, L"%.3f", milliseconds);
+		return buffer;
+	}
+
 	std::string EscapeLuaString(const std::string& s)
 	{
 		std::string out;
@@ -226,6 +243,20 @@ namespace
 		CachedMapLight Light;
 		bool bHasCamera = false;
 		std::vector<CachedMapScript> Scripts;
+		uint32_t OriginalOrder = 0;
+		uint32_t ChunkId = std::numeric_limits<uint32_t>::max();
+	};
+
+	struct CachedMapChunk
+	{
+		uint32_t Id = 0;
+		uint32_t EntityCount = 0;
+		uint32_t MeshCount = 0;
+		uint32_t LightCount = 0;
+		glm::vec3 BoundsMin = glm::vec3(0.0f);
+		glm::vec3 BoundsMax = glm::vec3(0.0f);
+		glm::vec3 Center = glm::vec3(0.0f);
+		float Radius = 0.0f;
 	};
 
 	struct CachedMapGlobals
@@ -249,6 +280,7 @@ namespace
 	struct CachedMapScene
 	{
 		std::vector<CachedMapEntity> Entities;
+		std::vector<CachedMapChunk> Chunks;
 		CachedMapGlobals Globals;
 	};
 
@@ -266,14 +298,17 @@ namespace
 		uint64_t SourceSize = 0;
 		int64_t SourceWriteTime = 0;
 		uint32_t EntityCount = 0;
-		uint32_t Reserved = 0;
+		uint32_t ChunkCount = 0;
 	};
 
 	constexpr char kCachedMapSceneMagic[8] = { 'C', 'R', 'N', 'M', 'A', 'P', 'S', '\0' };
-	constexpr uint32_t kCachedMapSceneVersion = 1;
+	constexpr uint32_t kCachedMapSceneVersion = 2;
 	constexpr uint32_t kCachedMapSceneMaxStringBytes = 1024u * 1024u;
 	constexpr uint32_t kCachedMapSceneMaxEntities = 2u * 1000u * 1000u;
+	constexpr uint32_t kCachedMapSceneMaxChunks = 256u * 1024u;
 	constexpr uint32_t kCachedMapSceneMaxScriptsPerEntity = 1024u;
+	constexpr uint32_t kInvalidCachedMapChunkId = std::numeric_limits<uint32_t>::max();
+	constexpr float kCachedMapChunkCellSize = 2048.0f;
 
 	template<typename T>
 	bool WriteCachedValue(std::ofstream& file, const T& value)
@@ -553,12 +588,215 @@ namespace
 			ReadCachedVec3(file, light.Position);
 	}
 
+	bool WriteCachedMapChunk(std::ofstream& file, const CachedMapChunk& chunk)
+	{
+		return
+			WriteCachedValue(file, chunk.Id) &&
+			WriteCachedValue(file, chunk.EntityCount) &&
+			WriteCachedValue(file, chunk.MeshCount) &&
+			WriteCachedValue(file, chunk.LightCount) &&
+			WriteCachedVec3(file, chunk.BoundsMin) &&
+			WriteCachedVec3(file, chunk.BoundsMax) &&
+			WriteCachedVec3(file, chunk.Center) &&
+			WriteCachedValue(file, chunk.Radius);
+	}
+
+	bool ReadCachedMapChunk(std::ifstream& file, CachedMapChunk& chunk)
+	{
+		return
+			ReadCachedValue(file, chunk.Id) &&
+			ReadCachedValue(file, chunk.EntityCount) &&
+			ReadCachedValue(file, chunk.MeshCount) &&
+			ReadCachedValue(file, chunk.LightCount) &&
+			ReadCachedVec3(file, chunk.BoundsMin) &&
+			ReadCachedVec3(file, chunk.BoundsMax) &&
+			ReadCachedVec3(file, chunk.Center) &&
+			ReadCachedValue(file, chunk.Radius);
+	}
+
+	bool GetCachedMapEntitySpatialPosition(const CachedMapEntity& entity, glm::vec3& outPosition)
+	{
+		if (entity.Mesh.bPresent)
+		{
+			outPosition = entity.Mesh.Position;
+			return true;
+		}
+		if (entity.Light.bPresent &&
+			entity.Light.Component.Type != CoronaECS::LightType::Directional &&
+			entity.Light.bHasPosition)
+		{
+			outPosition = entity.Light.Position;
+			return true;
+		}
+		return false;
+	}
+
+	int32_t CachedMapChunkCoord(float value)
+	{
+		return static_cast<int32_t>(std::floor(static_cast<double>(value / kCachedMapChunkCellSize)));
+	}
+
+	uint64_t MakeCachedMapChunkKey(int32_t x, int32_t z)
+	{
+		return
+			(static_cast<uint64_t>(static_cast<uint32_t>(x)) << 32) |
+			static_cast<uint64_t>(static_cast<uint32_t>(z));
+	}
+
+	void ExpandCachedMapChunkBounds(CachedMapChunk& chunk, const glm::vec3& position)
+	{
+		if (chunk.EntityCount == 0)
+		{
+			chunk.BoundsMin = position;
+			chunk.BoundsMax = position;
+		}
+		else
+		{
+			chunk.BoundsMin = glm::min(chunk.BoundsMin, position);
+			chunk.BoundsMax = glm::max(chunk.BoundsMax, position);
+		}
+		++chunk.EntityCount;
+	}
+
+	void FinalizeCachedMapChunk(CachedMapChunk& chunk)
+	{
+		chunk.Center = (chunk.BoundsMin + chunk.BoundsMax) * 0.5f;
+		const glm::vec3 extent = (chunk.BoundsMax - chunk.BoundsMin) * 0.5f;
+		chunk.Radius = std::sqrt(extent.x * extent.x + extent.y * extent.y + extent.z * extent.z);
+	}
+
+	void BuildCachedMapChunks(CachedMapScene& scene)
+	{
+		scene.Chunks.clear();
+		std::unordered_map<uint64_t, uint32_t> chunkByKey;
+		chunkByKey.reserve(std::max<size_t>(scene.Entities.size() / 64u, 16u));
+
+		for (uint32_t entityIndex = 0; entityIndex < static_cast<uint32_t>(scene.Entities.size()); ++entityIndex)
+		{
+			CachedMapEntity& entity = scene.Entities[entityIndex];
+			entity.OriginalOrder = entityIndex;
+			entity.ChunkId = kInvalidCachedMapChunkId;
+
+			// Scripts and cameras stay in the non-spatial prefix during replay
+			// until script dependency tracking becomes chunk-aware.
+			if (!entity.Scripts.empty() || entity.bHasCamera)
+				continue;
+
+			glm::vec3 position(0.0f);
+			if (!GetCachedMapEntitySpatialPosition(entity, position))
+				continue;
+
+			const int32_t chunkX = CachedMapChunkCoord(position.x);
+			const int32_t chunkZ = CachedMapChunkCoord(position.z);
+			const uint64_t key = MakeCachedMapChunkKey(chunkX, chunkZ);
+			uint32_t chunkId = kInvalidCachedMapChunkId;
+			const auto found = chunkByKey.find(key);
+			if (found != chunkByKey.end())
+			{
+				chunkId = found->second;
+			}
+			else
+			{
+				chunkId = static_cast<uint32_t>(scene.Chunks.size());
+				chunkByKey[key] = chunkId;
+				CachedMapChunk chunk;
+				chunk.Id = chunkId;
+				scene.Chunks.push_back(chunk);
+			}
+
+			entity.ChunkId = chunkId;
+			CachedMapChunk& chunk = scene.Chunks[chunkId];
+			ExpandCachedMapChunkBounds(chunk, position);
+			if (entity.Mesh.bPresent)
+				++chunk.MeshCount;
+			if (entity.Light.bPresent)
+				++chunk.LightCount;
+		}
+
+		for (CachedMapChunk& chunk : scene.Chunks)
+			FinalizeCachedMapChunk(chunk);
+	}
+
+	float CachedMapChunkDistanceSq(const CachedMapChunk& chunk, const glm::vec3& cameraPosition)
+	{
+		const glm::vec3 d = chunk.Center - cameraPosition;
+		return d.x * d.x + d.y * d.y + d.z * d.z;
+	}
+
+	std::vector<uint32_t> BuildCachedMapReplayOrder(
+		const CachedMapScene& scene,
+		const glm::vec3& cameraPosition)
+	{
+		std::vector<uint32_t> order;
+		order.reserve(scene.Entities.size());
+
+		std::vector<uint32_t> chunkEntityCounts(scene.Chunks.size(), 0u);
+		uint32_t spatialEntityCount = 0;
+		for (uint32_t entityIndex = 0; entityIndex < static_cast<uint32_t>(scene.Entities.size()); ++entityIndex)
+		{
+			const CachedMapEntity& entity = scene.Entities[entityIndex];
+			if (entity.ChunkId == kInvalidCachedMapChunkId || entity.ChunkId >= scene.Chunks.size())
+			{
+				order.push_back(entityIndex);
+			}
+			else
+			{
+				++chunkEntityCounts[entity.ChunkId];
+				++spatialEntityCount;
+			}
+		}
+
+		std::vector<uint32_t> sortedChunks;
+		sortedChunks.reserve(scene.Chunks.size());
+		std::vector<uint32_t> chunkOffsets(scene.Chunks.size(), 0u);
+		uint32_t offset = 0;
+		for (uint32_t chunkId = 0; chunkId < static_cast<uint32_t>(scene.Chunks.size()); ++chunkId)
+		{
+			chunkOffsets[chunkId] = offset;
+			const uint32_t count = chunkEntityCounts[chunkId];
+			offset += count;
+			if (count != 0)
+				sortedChunks.push_back(chunkId);
+		}
+
+		std::vector<uint32_t> spatialByChunk(spatialEntityCount);
+		std::vector<uint32_t> chunkWriteOffsets = chunkOffsets;
+		for (uint32_t entityIndex = 0; entityIndex < static_cast<uint32_t>(scene.Entities.size()); ++entityIndex)
+		{
+			const CachedMapEntity& entity = scene.Entities[entityIndex];
+			if (entity.ChunkId == kInvalidCachedMapChunkId || entity.ChunkId >= scene.Chunks.size())
+				continue;
+			spatialByChunk[chunkWriteOffsets[entity.ChunkId]++] = entityIndex;
+		}
+
+		std::stable_sort(sortedChunks.begin(), sortedChunks.end(),
+			[&](uint32_t aIndex, uint32_t bIndex)
+			{
+				const CachedMapChunk& aChunk = scene.Chunks[aIndex];
+				const CachedMapChunk& bChunk = scene.Chunks[bIndex];
+				const float aDist = CachedMapChunkDistanceSq(aChunk, cameraPosition);
+				const float bDist = CachedMapChunkDistanceSq(bChunk, cameraPosition);
+				if (aDist != bDist)
+					return aDist < bDist;
+				return aIndex < bIndex;
+			});
+
+		for (const uint32_t chunkId : sortedChunks)
+		{
+			const uint32_t begin = chunkOffsets[chunkId];
+			const uint32_t end = begin + chunkEntityCounts[chunkId];
+			order.insert(order.end(), spatialByChunk.begin() + begin, spatialByChunk.begin() + end);
+		}
+		return order;
+	}
+
 	bool WriteCachedMapScene(
 		const std::filesystem::path& cachePath,
 		const CachedMapSourceMeta& sourceMeta,
 		const CachedMapScene& scene)
 	{
-		if (scene.Entities.size() > kCachedMapSceneMaxEntities)
+		if (scene.Entities.size() > kCachedMapSceneMaxEntities ||
+			scene.Chunks.size() > kCachedMapSceneMaxChunks)
 			return false;
 
 		std::error_code ec;
@@ -574,14 +812,23 @@ namespace
 		header.SourceSize = sourceMeta.Size;
 		header.SourceWriteTime = sourceMeta.WriteTime;
 		header.EntityCount = static_cast<uint32_t>(scene.Entities.size());
+		header.ChunkCount = static_cast<uint32_t>(scene.Chunks.size());
 		if (!WriteCachedValue(file, header) || !WriteCachedMapGlobals(file, scene.Globals))
 			return false;
+
+		for (const CachedMapChunk& chunk : scene.Chunks)
+		{
+			if (!WriteCachedMapChunk(file, chunk))
+				return false;
+		}
 
 		for (const CachedMapEntity& entity : scene.Entities)
 		{
 			if (entity.Scripts.size() > kCachedMapSceneMaxScriptsPerEntity)
 				return false;
 			if (!WriteCachedString(file, entity.Name) ||
+				!WriteCachedValue(file, entity.OriginalOrder) ||
+				!WriteCachedValue(file, entity.ChunkId) ||
 				!WriteCachedMapMesh(file, entity.Mesh) ||
 				!WriteCachedMapLight(file, entity.Light) ||
 				!WriteCachedBool(file, entity.bHasCamera))
@@ -616,26 +863,40 @@ namespace
 			header.HeaderSize != sizeof(CachedMapSceneHeader) ||
 			header.SourceSize != sourceMeta.Size ||
 			header.SourceWriteTime != sourceMeta.WriteTime ||
-			header.EntityCount > kCachedMapSceneMaxEntities)
+			header.EntityCount > kCachedMapSceneMaxEntities ||
+			header.ChunkCount > kCachedMapSceneMaxChunks)
 		{
 			return false;
 		}
 
 		scene = {};
+		scene.Chunks.reserve(header.ChunkCount);
 		scene.Entities.reserve(header.EntityCount);
 		if (!ReadCachedMapGlobals(file, scene.Globals))
 			return false;
+
+		for (uint32_t i = 0; i < header.ChunkCount; ++i)
+		{
+			CachedMapChunk chunk;
+			if (!ReadCachedMapChunk(file, chunk) || chunk.Id != i)
+				return false;
+			scene.Chunks.push_back(chunk);
+		}
 
 		for (uint32_t i = 0; i < header.EntityCount; ++i)
 		{
 			CachedMapEntity entity;
 			if (!ReadCachedString(file, entity.Name) ||
+				!ReadCachedValue(file, entity.OriginalOrder) ||
+				!ReadCachedValue(file, entity.ChunkId) ||
 				!ReadCachedMapMesh(file, entity.Mesh) ||
 				!ReadCachedMapLight(file, entity.Light) ||
 				!ReadCachedBool(file, entity.bHasCamera))
 			{
 				return false;
 			}
+			if (entity.ChunkId != kInvalidCachedMapChunkId && entity.ChunkId >= header.ChunkCount)
+				return false;
 			uint32_t scriptCount = 0;
 			if (!ReadCachedValue(file, scriptCount) || scriptCount > kCachedMapSceneMaxScriptsPerEntity)
 				return false;
@@ -928,6 +1189,7 @@ namespace
 
 		ParseCachedMapGlobals(L, rootIdx, scene.Globals);
 		lua_settop(L, stackTop);
+		BuildCachedMapChunks(scene);
 		outScene = std::move(scene);
 		return true;
 	}
@@ -973,14 +1235,49 @@ std::wstring Corona::ReadPersistedLastEditorMapName() const
 
 void Corona::ClearScriptSpawnedScene()
 {
-	// Remove every SceneObject that the script layer created. Each removal
-	// also cleans up the matching ECS Entity if the script owned it.
-	std::vector<SceneObjectHandle> handles;
-	handles.reserve(ScriptObjects.size());
-	for (const auto& [h, _] : ScriptObjects)
-		handles.push_back(h);
-	for (SceneObjectHandle h : handles)
-		RemoveSceneObject(h);
+	// Bulk remove script-owned SceneObjects. Calling RemoveSceneObject for
+	// every handle erases from the middle of SceneObjects and becomes
+	// quadratic on large streamed maps.
+	if (!ScriptObjects.empty())
+	{
+		std::unordered_set<SceneObjectHandle> scriptHandles;
+		scriptHandles.reserve(ScriptObjects.size());
+		for (const auto& [h, _] : ScriptObjects)
+			scriptHandles.insert(h);
+
+		std::vector<SceneObject> keptObjects;
+		keptObjects.reserve(SceneObjects.size() > scriptHandles.size() ? SceneObjects.size() - scriptHandles.size() : 0u);
+		size_t removedObjectCount = 0;
+		for (const SceneObject& object : SceneObjects)
+		{
+			if (scriptHandles.find(object.Handle) == scriptHandles.end())
+			{
+				keptObjects.push_back(object);
+				continue;
+			}
+
+			const CoronaECS::Entity entity = object.EntityHandle;
+			DestroyEntityScriptComponent(entity);
+			if (!bMapReplayInProgress)
+				MarkSceneObjectRenderRemoved(object.Handle);
+			EntityWorld.DestroyEntity(entity);
+			if (SponzaObject == object.Handle)
+				SponzaObject = InvalidSceneObjectHandle;
+			if (BuddhaObject == object.Handle)
+				BuddhaObject = InvalidSceneObjectHandle;
+			if (ShaderBallObject == object.Handle)
+				ShaderBallObject = InvalidSceneObjectHandle;
+			if (PistolObject == object.Handle)
+				PistolObject = InvalidSceneObjectHandle;
+			if (MirrorCubeObject == object.Handle)
+				MirrorCubeObject = InvalidSceneObjectHandle;
+			++removedObjectCount;
+		}
+
+		SceneObjects = std::move(keptObjects);
+		if (removedObjectCount != 0)
+			MarkCpuPhysicsSceneDirty();
+	}
 
 	ScriptObjects.clear();
 	ScriptScenes.clear();
@@ -1492,7 +1789,8 @@ bool Corona::LoadMapFromFile(const std::wstring& name, std::wstring* outError)
 		{
 			AppendCpuRuntimeTrace(
 				L"[MapCache] scene cache hit: " + cachePath.wstring() +
-				L", entities=" + std::to_wstring(mapScene->Entities.size()));
+				L", entities=" + std::to_wstring(mapScene->Entities.size()) +
+				L", chunks=" + std::to_wstring(mapScene->Chunks.size()));
 		}
 		else
 		{
@@ -1510,6 +1808,7 @@ bool Corona::LoadMapFromFile(const std::wstring& name, std::wstring* outError)
 				L"[MapCache] parsed source map: " + path.wstring() +
 				L", bytes=" + std::to_wstring(source.size()) +
 				L", entities=" + std::to_wstring(mapScene->Entities.size()) +
+				L", chunks=" + std::to_wstring(mapScene->Chunks.size()) +
 				L", cache=" + cachePath.wstring());
 			cacheWriteFuture = std::async(
 				std::launch::async,
@@ -1519,8 +1818,11 @@ bool Corona::LoadMapFromFile(const std::wstring& name, std::wstring* outError)
 				});
 		}
 
+		const bool bPreviousMapReplayInProgress = bMapReplayInProgress;
+		bMapReplayInProgress = true;
 		ClearScriptSpawnedScene();
 		SceneObjects.reserve(SceneObjects.size() + mapScene->Entities.size());
+		ScriptObjects.reserve(ScriptObjects.size() + mapScene->Entities.size());
 		size_t expectedPointLights = 0;
 		for (const CachedMapEntity& entity : mapScene->Entities)
 		{
@@ -1530,7 +1832,12 @@ bool Corona::LoadMapFromFile(const std::wstring& name, std::wstring* outError)
 		PointLights.reserve(PointLights.size() + expectedPointLights);
 
 		bool bIgnoredCameraEntity = false;
-		const int entityCount = static_cast<int>(mapScene->Entities.size());
+		double replayOrderMs = 0.0;
+		const auto replayOrderStart = CpuClock::now();
+		const std::vector<uint32_t> replayOrder =
+			BuildCachedMapReplayOrder(*mapScene, m_camera.m_position);
+		replayOrderMs = MapFormatElapsedMilliseconds(replayOrderStart, CpuClock::now());
+		const int entityCount = static_cast<int>(replayOrder.size());
 		const int progressStep = std::max(1, entityCount / 200);
 		if (bStartupLoadingScreenActive)
 		{
@@ -1542,9 +1849,22 @@ bool Corona::LoadMapFromFile(const std::wstring& name, std::wstring* outError)
 				std::to_wstring(EditorMapLoadEntityCount));
 		}
 
+		const auto replayStart = CpuClock::now();
+		double meshSceneResolveMs = 0.0;
+		double meshEntityApplyMs = 0.0;
+		double lightApplyMs = 0.0;
+		double scriptApplyMs = 0.0;
+		uint32_t meshEntityCount = 0;
+		uint32_t lightEntityCount = 0;
+		uint32_t scriptEntityCount = 0;
+		std::unordered_map<std::string, ScriptSceneHandle> assetSceneHandleCache;
+		assetSceneHandleCache.reserve(1024);
 		for (int entityIndex = 0; entityIndex < entityCount; ++entityIndex)
 		{
-			const CachedMapEntity& cachedEntity = mapScene->Entities[static_cast<size_t>(entityIndex)];
+			const uint32_t orderedEntityIndex = replayOrder[static_cast<size_t>(entityIndex)];
+			if (orderedEntityIndex >= mapScene->Entities.size())
+				continue;
+			const CachedMapEntity& cachedEntity = mapScene->Entities[orderedEntityIndex];
 			const std::string& entityName = cachedEntity.Name;
 			if (bStartupLoadingScreenActive &&
 				(entityIndex == 0 || entityIndex + 1 == entityCount || (entityIndex % progressStep) == 0))
@@ -1565,6 +1885,7 @@ bool Corona::LoadMapFromFile(const std::wstring& name, std::wstring* outError)
 			{
 				const CachedMapMesh& mesh = cachedEntity.Mesh;
 				ScriptSceneHandle sceneHandle = InvalidScriptSceneHandle;
+				const auto sceneResolveStart = CpuClock::now();
 				switch (mesh.Primitive)
 				{
 				case CachedMapMeshPrimitive::Terrain:
@@ -1595,15 +1916,29 @@ bool Corona::LoadMapFromFile(const std::wstring& name, std::wstring* outError)
 					break;
 				case CachedMapMeshPrimitive::Asset:
 					if (!mesh.AssetPath.empty())
-						sceneHandle = LoadSceneForScript(PlatformUtf8ToWide(mesh.AssetPath));
+					{
+						const auto cachedSceneHandle = assetSceneHandleCache.find(mesh.AssetPath);
+						if (cachedSceneHandle != assetSceneHandleCache.end())
+						{
+							sceneHandle = cachedSceneHandle->second;
+						}
+						else
+						{
+							sceneHandle = LoadSceneForScript(PlatformUtf8ToWide(mesh.AssetPath));
+							if (sceneHandle != InvalidScriptSceneHandle)
+								assetSceneHandleCache[mesh.AssetPath] = sceneHandle;
+						}
+					}
 					break;
 				case CachedMapMeshPrimitive::Unknown:
 				default:
 					break;
 				}
+				meshSceneResolveMs += MapFormatElapsedMilliseconds(sceneResolveStart, CpuClock::now());
 
 				if (sceneHandle != InvalidScriptSceneHandle)
 				{
+					const auto meshApplyStart = CpuClock::now();
 					CoronaECS::Entity newEntity = CreateEntity(entityName);
 					AddMeshComponentForScript(
 						newEntity, sceneHandle,
@@ -1611,11 +1946,14 @@ bool Corona::LoadMapFromFile(const std::wstring& name, std::wstring* outError)
 						mesh.Roughness, mesh.Metallic, mesh.bOverrideMaterial,
 						mesh.bVisible, mesh.bRayTracing, /*physicsQuery*/ true);
 					createdEntity = newEntity;
+					meshEntityApplyMs += MapFormatElapsedMilliseconds(meshApplyStart, CpuClock::now());
+					++meshEntityCount;
 				}
 			}
 
 			if (cachedEntity.Light.bPresent)
 			{
+				const auto lightApplyStart = CpuClock::now();
 				CoronaECS::LightComponent comp = cachedEntity.Light.Component;
 				const bool bDirectional = (comp.Type == CoronaECS::LightType::Directional);
 				if (bDirectional)
@@ -1660,6 +1998,8 @@ bool Corona::LoadMapFromFile(const std::wstring& name, std::wstring* outError)
 						SetEntityLightForScript(le, comp, /*persist*/ false);
 					}
 				}
+				lightApplyMs += MapFormatElapsedMilliseconds(lightApplyStart, CpuClock::now());
+				++lightEntityCount;
 			}
 
 			if (cachedEntity.bHasCamera && !bIgnoredCameraEntity)
@@ -1673,6 +2013,7 @@ bool Corona::LoadMapFromFile(const std::wstring& name, std::wstring* outError)
 
 			if (createdEntity.IsValid())
 			{
+				const auto scriptApplyStart = CpuClock::now();
 				for (const CachedMapScript& script : cachedEntity.Scripts)
 				{
 					if (script.bNative)
@@ -1680,8 +2021,26 @@ bool Corona::LoadMapFromFile(const std::wstring& name, std::wstring* outError)
 					else
 						AttachEntityScriptFileForScript(createdEntity, PlatformUtf8ToWide(script.Value));
 				}
+				if (!cachedEntity.Scripts.empty())
+				{
+					scriptApplyMs += MapFormatElapsedMilliseconds(scriptApplyStart, CpuClock::now());
+					++scriptEntityCount;
+				}
 			}
 		}
+		bMapReplayInProgress = bPreviousMapReplayInProgress;
+		const double replayMs = MapFormatElapsedMilliseconds(replayStart, CpuClock::now());
+		AppendCpuRuntimeTrace(
+			L"[MapLoadProfile] replayMs=" + MapFormatFormatMilliseconds(replayMs) +
+			L", replayOrderMs=" + MapFormatFormatMilliseconds(replayOrderMs) +
+			L", meshSceneResolveMs=" + MapFormatFormatMilliseconds(meshSceneResolveMs) +
+			L", meshEntityApplyMs=" + MapFormatFormatMilliseconds(meshEntityApplyMs) +
+			L", lightApplyMs=" + MapFormatFormatMilliseconds(lightApplyMs) +
+			L", scriptApplyMs=" + MapFormatFormatMilliseconds(scriptApplyMs) +
+			L", meshEntities=" + std::to_wstring(meshEntityCount) +
+			L", lightEntities=" + std::to_wstring(lightEntityCount) +
+			L", scriptEntities=" + std::to_wstring(scriptEntityCount) +
+			L", assetSceneCacheEntries=" + std::to_wstring(assetSceneHandleCache.size()));
 
 		if (bStartupLoadingScreenActive)
 			UpdateStartupLoadingProgress(0.93f, L"Applying map globals");
@@ -1707,7 +2066,8 @@ bool Corona::LoadMapFromFile(const std::wstring& name, std::wstring* outError)
 		AppendCpuRuntimeTrace(
 			L"[Map] loaded " + path.wstring() +
 			L", sceneCache=" + std::wstring(bLoadedFromSceneCache ? L"hit" : L"miss") +
-			L", entities=" + std::to_wstring(mapScene->Entities.size()));
+			L", entities=" + std::to_wstring(mapScene->Entities.size()) +
+			L", chunks=" + std::to_wstring(mapScene->Chunks.size()));
 		CurrentMapName = name;
 		PersistLastEditorMapName(name);
 		MarkAllSceneObjectsForRenderSync();

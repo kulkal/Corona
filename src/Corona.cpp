@@ -9073,6 +9073,7 @@ void Corona::ProcessPendingEditorMapLoad()
 	StartupLoadingStatus.clear();
 	StartupLoadingTitle = L"Loading map: " + mapName;
 	StartupLoadingTimingLastStatus.clear();
+	StartupLoadingTimingLastLoggedProgress = 0.0f;
 	bStartupLoadingTimingStarted = false;
 	bStartupLoadingCompactWindow = true;
 	StartupLoadingLastDrawTime = {};
@@ -9291,33 +9292,48 @@ void Corona::UpdateStartupLoadingProgress(float progress, const std::wstring& st
 {
 	const auto now = CpuClock::now();
 	const float previousProgress = StartupLoadingProgress;
+	const float clampedProgress = std::clamp(progress, StartupLoadingProgress, 1.0f);
 	if (!bStartupLoadingTimingStarted)
 	{
 		bStartupLoadingTimingStarted = true;
 		StartupLoadingTimingStart = now;
 		StartupLoadingTimingLast = now;
 		StartupLoadingTimingLastStatus = status;
+		StartupLoadingTimingLastLoggedProgress = clampedProgress;
 		AppendCpuRuntimeTrace(
-			L"[StartupTiming] begin progress=" + std::to_wstring(static_cast<int>(std::round(progress * 100.0f))) +
+			L"[StartupTiming] begin progress=" + std::to_wstring(static_cast<int>(std::round(clampedProgress * 100.0f))) +
 			L"% status=\"" + status + L"\"");
 	}
 	else
 	{
-		const double stepMs = ElapsedMilliseconds(StartupLoadingTimingLast, now);
-		const double totalMs = ElapsedMilliseconds(StartupLoadingTimingStart, now);
-		AppendCpuRuntimeTrace(
-			L"[StartupTiming] step=\"" + StartupLoadingTimingLastStatus +
-			L"\", stepMs=" + FormatMilliseconds(stepMs) +
-			L", totalMs=" + FormatMilliseconds(totalMs) +
-			L", progress=" + std::to_wstring(static_cast<int>(std::round(previousProgress * 100.0f))) +
-			L"->" + std::to_wstring(static_cast<int>(std::round(progress * 100.0f))) +
-			L"% next=\"" + status + L"\"");
-		StartupLoadingTimingLast = now;
+		const bool bStatusChanged = status != StartupLoadingTimingLastStatus;
+		const bool bHighFrequencyLoadingStatus =
+			status.rfind(L"Loading entity ", 0) == 0 ||
+			status.rfind(L"Loading model: ", 0) == 0 ||
+			status.rfind(L"Loading mesh cache: ", 0) == 0;
+		const bool bStageStatusChanged = bStatusChanged && !bHighFrequencyLoadingStatus;
+		const bool bProgressJumpedForLog = (clampedProgress - StartupLoadingTimingLastLoggedProgress) >= 0.025f;
+		const bool bLogIntervalElapsed = ElapsedMilliseconds(StartupLoadingTimingLast, now) >= 500.0;
+		const bool bForceLog = status == L"Ready" || status == L"Load map failed";
+		if (bStageStatusChanged || bProgressJumpedForLog || bLogIntervalElapsed || bForceLog)
+		{
+			const double stepMs = ElapsedMilliseconds(StartupLoadingTimingLast, now);
+			const double totalMs = ElapsedMilliseconds(StartupLoadingTimingStart, now);
+			AppendCpuRuntimeTrace(
+				L"[StartupTiming] step=\"" + StartupLoadingTimingLastStatus +
+				L"\", stepMs=" + FormatMilliseconds(stepMs) +
+				L", totalMs=" + FormatMilliseconds(totalMs) +
+				L", progress=" + std::to_wstring(static_cast<int>(std::round(StartupLoadingTimingLastLoggedProgress * 100.0f))) +
+				L"->" + std::to_wstring(static_cast<int>(std::round(clampedProgress * 100.0f))) +
+				L"% next=\"" + status + L"\"");
+			StartupLoadingTimingLast = now;
+			StartupLoadingTimingLastLoggedProgress = clampedProgress;
+		}
 		StartupLoadingTimingLastStatus = status;
 	}
 
 	bStartupLoadingScreenActive = true;
-	StartupLoadingProgress = std::clamp(progress, StartupLoadingProgress, 1.0f);
+	StartupLoadingProgress = clampedProgress;
 	StartupLoadingStatus = status;
 	if (bStartupLoadingCompactWindow)
 	{
@@ -12381,31 +12397,39 @@ shared_ptr<Scene> Corona::LoadBinaryMeshModel(const std::wstring& binaryFileName
 		gMeshLoadProfileTotals.MaxTexturePath = maxTexturePath;
 	}
 
-	AppendCpuRuntimeTrace(
-		L"[LoadBinaryMeshModel] loaded: " + binaryFileName +
-		L", meshes=" + std::to_wstring(header.MeshCount) +
-		L", vertices=" + std::to_wstring(totalVertices) +
-		L", triangles=" + std::to_wstring(totalIndices / 3) +
-		L", textureRequests=" + std::to_wstring(textureRequests) +
-		L", textureLoads=" + std::to_wstring(textureLoads) +
-		L", textureCacheHits=" + std::to_wstring(textureCacheHits) +
-		L", textureLocalCacheHits=" + std::to_wstring(textureLocalCacheHits) +
-		L", textureGlobalCacheHits=" + std::to_wstring(textureGlobalCacheHits) +
-		L", textureDdsSubstitutions=" + std::to_wstring(textureDdsSubstitutions) +
-		L", textureDdsConversions=" + std::to_wstring(textureDdsConversions) +
-		L", textureSourceDeletes=" + std::to_wstring(textureSourceDeletes) +
-		L", textureFallbacks=" + std::to_wstring(textureFallbacks) +
-		L", textureBytes=" + std::to_wstring(textureBytes) +
-		L", elapsedMs=" + FormatMilliseconds(totalMs) +
-		L", openHeaderMs=" + FormatMilliseconds(openHeaderMs) +
-		L", materialReadMs=" + FormatMilliseconds(materialReadMs) +
-		L", textureLoadMs=" + FormatMilliseconds(textureLoadMs) +
-		L", meshHeaderReadMs=" + FormatMilliseconds(meshHeaderReadMs) +
-		L", meshDataReadMs=" + FormatMilliseconds(meshDataReadMs) +
-		L", gpuBufferCreateMs=" + FormatMilliseconds(gpuBufferCreateMs) +
-		L", cpuCopyMs=" + FormatMilliseconds(cpuCopyMs) +
-		L", maxTextureMs=" + FormatMilliseconds(maxTextureLoadMs) +
-		L", maxTexture=\"" + maxTexturePath + L"\"");
+	const bool bLogModelDetail =
+		totalMs >= 100.0 ||
+		textureLoads > 0 ||
+		textureFallbacks > 0 ||
+		(!bEditorMapLoadInProgress && gMeshLoadProfileTotals.ModelCount <= 8);
+	if (bLogModelDetail)
+	{
+		AppendCpuRuntimeTrace(
+			L"[LoadBinaryMeshModel] loaded: " + binaryFileName +
+			L", meshes=" + std::to_wstring(header.MeshCount) +
+			L", vertices=" + std::to_wstring(totalVertices) +
+			L", triangles=" + std::to_wstring(totalIndices / 3) +
+			L", textureRequests=" + std::to_wstring(textureRequests) +
+			L", textureLoads=" + std::to_wstring(textureLoads) +
+			L", textureCacheHits=" + std::to_wstring(textureCacheHits) +
+			L", textureLocalCacheHits=" + std::to_wstring(textureLocalCacheHits) +
+			L", textureGlobalCacheHits=" + std::to_wstring(textureGlobalCacheHits) +
+			L", textureDdsSubstitutions=" + std::to_wstring(textureDdsSubstitutions) +
+			L", textureDdsConversions=" + std::to_wstring(textureDdsConversions) +
+			L", textureSourceDeletes=" + std::to_wstring(textureSourceDeletes) +
+			L", textureFallbacks=" + std::to_wstring(textureFallbacks) +
+			L", textureBytes=" + std::to_wstring(textureBytes) +
+			L", elapsedMs=" + FormatMilliseconds(totalMs) +
+			L", openHeaderMs=" + FormatMilliseconds(openHeaderMs) +
+			L", materialReadMs=" + FormatMilliseconds(materialReadMs) +
+			L", textureLoadMs=" + FormatMilliseconds(textureLoadMs) +
+			L", meshHeaderReadMs=" + FormatMilliseconds(meshHeaderReadMs) +
+			L", meshDataReadMs=" + FormatMilliseconds(meshDataReadMs) +
+			L", gpuBufferCreateMs=" + FormatMilliseconds(gpuBufferCreateMs) +
+			L", cpuCopyMs=" + FormatMilliseconds(cpuCopyMs) +
+			L", maxTextureMs=" + FormatMilliseconds(maxTextureLoadMs) +
+			L", maxTexture=\"" + maxTexturePath + L"\"");
+	}
 
 	if ((gMeshLoadProfileTotals.ModelCount % 25) == 0)
 		AppendMeshLoadProfileSummary(L"periodic");

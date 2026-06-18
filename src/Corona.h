@@ -1798,7 +1798,7 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	bool bPersistentSceneStateDirty = false;
 	std::map<ScriptSceneHandle, ScriptSceneEntry> ScriptScenes;
 	std::map<std::wstring, ScriptSceneHandle> ScriptSceneByPath;
-	std::map<SceneObjectHandle, ScriptObjectState> ScriptObjects;
+	std::unordered_map<SceneObjectHandle, ScriptObjectState> ScriptObjects;
 	ScriptSceneHandle NextScriptSceneHandle = 1;
 	std::map<std::string, NativeEntityScriptCallbacks> NativeEntityScripts;
 	std::mutex ScriptProfileMutex;
@@ -2344,6 +2344,7 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	UINT32 EditorLightingViewMode = 0;
 	bool bEditorMapLoadQueued = false;
 	bool bEditorMapLoadInProgress = false;
+	bool bMapReplayInProgress = false;
 	uint32_t EditorMapLoadEntityIndex = 0;
 	uint32_t EditorMapLoadEntityCount = 0;
 	std::wstring PendingEditorMapLoadName;
@@ -3613,6 +3614,7 @@ private:
 	CpuClock::time_point StartupLoadingTimingLast = {};
 	CpuClock::time_point StartupLoadingLastDrawTime = {};
 	std::wstring StartupLoadingTimingLastStatus;
+	float StartupLoadingTimingLastLoggedProgress = 0.0f;
 	bool bStartupLoadingTimingStarted = false;
 	bool bStartupLoadingScreenActive = false;
 	bool bStartupLoadingCompactWindow = false;

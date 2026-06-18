@@ -5052,7 +5052,8 @@ Corona::SceneObjectHandle Corona::SpawnSceneObjectForScript(
 		ShaderBallCenterRotationDegrees = rotationDegrees;
 	}
 
-	AppendCpuRuntimeTrace(L"[Luau][MeshComponent] scene_object=" + std::to_wstring(handle) + L" scene=" + std::to_wstring(sceneHandle));
+	if (!bEditorMapLoadInProgress)
+		AppendCpuRuntimeTrace(L"[Luau][MeshComponent] scene_object=" + std::to_wstring(handle) + L" scene=" + std::to_wstring(sceneHandle));
 	return handle;
 }
 
@@ -5319,7 +5320,7 @@ bool Corona::AddMeshComponentForScript(
 		BuildScaledSceneTransform(sceneIt->second.ScenePtr, safeScale, position, rotationDegrees) :
 		BuildCenteredSceneTransform(sceneIt->second.ScenePtr, safeTargetExtent, position, rotationDegrees);
 
-	const SceneObjectHandle objectHandle = GetEntitySceneObject(entity);
+	const SceneObjectHandle objectHandle = bMapReplayInProgress ? InvalidSceneObjectHandle : GetEntitySceneObject(entity);
 	if (objectHandle != InvalidSceneObjectHandle)
 	{
 		const auto objectIt = std::find_if(SceneObjects.begin(), SceneObjects.end(), [objectHandle](const SceneObject& object)
@@ -5725,7 +5726,7 @@ bool Corona::SetEntityLightForScript(
 			std::abs(a.OuterConeAngle - b.OuterConeAngle) <= 0.0001f;
 	};
 	CoronaECS::LightComponent previousComponent;
-	const bool bHadPreviousLight = GetEntityLightForScript(entity, previousComponent);
+	const bool bHadPreviousLight = bMapReplayInProgress ? false : GetEntityLightForScript(entity, previousComponent);
 	const bool bLightChanged = !bHadPreviousLight || !lightNearlyEqual(previousComponent, lightComponent);
 
 	if (entity == MainDirectionalLightEntity || lightComponent.Type == CoronaECS::LightType::Directional)
@@ -5762,7 +5763,7 @@ bool Corona::SetEntityLightForScript(
 		return true;
 	}
 
-	PointLightState* pointLight = FindPointLightByEntity(entity);
+	PointLightState* pointLight = bMapReplayInProgress ? nullptr : FindPointLightByEntity(entity);
 	if (!pointLight)
 	{
 		PointLightState newPointLight;
@@ -5791,10 +5792,13 @@ bool Corona::SetEntityLightForScript(
 	lightComponent.Type = pointLight->Type;
 	lightComponent.RuntimeLightId = pointLight->Id;
 	EntityWorld.AddLight(entity, lightComponent);
-	UpdatePointLightEntity(*pointLight);
-	if (bLightChanged)
+	if (!bMapReplayInProgress)
 	{
-		MarkPointLightRenderDirty(pointLight->Id, kPointLightDirtyAll);
+		UpdatePointLightEntity(*pointLight);
+		if (bLightChanged)
+		{
+			MarkPointLightRenderDirty(pointLight->Id, kPointLightDirtyAll);
+		}
 	}
 	if (bPersistSceneState && bLightChanged)
 	{

@@ -310,9 +310,17 @@ Corona::SceneObjectHandle Corona::AddSceneObject(const SceneObjectDesc& desc)
 		UpdateSceneObjectEntity(object);
 	else
 		object.EntityHandle = CreateSceneObjectEntity(object);
+	if (bMapReplayInProgress)
+	{
+		object.RenderDirtyBits = 0;
+	}
+	else
+	{
+		object.RenderDirtyBits = kSceneObjectDirtyAll;
+		DirtySceneObjectHandles.push_back(object.Handle);
+	}
 	SceneObjects.push_back(object);
 
-	MarkSceneObjectRenderDirty(object.Handle, kSceneObjectDirtyAll);
 	MarkCpuPhysicsSceneDirty();
 	return object.Handle;
 }
