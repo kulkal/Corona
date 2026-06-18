@@ -13819,7 +13819,7 @@ void Corona::DrawEditorMainWindowControls()
 			AppendCpuRuntimeTrace(L"[editor-ui] camera collision=" + std::to_wstring(bEditorCameraCollisionEnabled ? 1 : 0));
 		if (ImGui::SliderFloat("Move speed", &EditorCameraMoveSpeed, 10.0f, 4500.0f, "%.0f"))
 			m_camera.SetMoveSpeed(EditorCameraMoveSpeed);
-		if (ImGui::DragFloat("Far clip", &Far, 1000.0f, Near + 1.0f, 2000000.0f, "%.0f"))
+		if (ImGui::InputFloat("Far clip", &Far, 1000.0f, 10000.0f, "%.0f"))
 			Far = std::max(Near + 1.0f, Far);
 		ImGui::SliderFloat("Turn speed", &m_turnSpeed, 0.05f, glm::half_pi<float>() * 2.0f, "%.2f");
 		ImGui::Text("Position %.1f, %.1f, %.1f", m_camera.m_position.x, m_camera.m_position.y, m_camera.m_position.z);
@@ -13862,7 +13862,7 @@ void Corona::DrawEditorCameraOverlay()
 			m_camera.SetMoveSpeed(EditorCameraMoveSpeed);
 
 		ImGui::SetNextItemWidth(-1.0f);
-		if (ImGui::DragFloat("Far Clip", &Far, 1000.0f, Near + 1.0f, 2000000.0f, "%.0f"))
+		if (ImGui::InputFloat("Far Clip", &Far, 1000.0f, 10000.0f, "%.0f"))
 			Far = std::max(Near + 1.0f, Far);
 
 		ImGui::SetNextItemWidth(-1.0f);
