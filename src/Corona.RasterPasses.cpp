@@ -128,6 +128,18 @@ namespace
 		return enabled;
 	}
 
+	int GetGBufferCullingModeOverride()
+	{
+		const char* value = std::getenv("CORONA_GBUFFER_CULL_MODE");
+		if (!value || value[0] == '\0')
+			return -1;
+		if (value[0] == '0' || value[0] == 'c' || value[0] == 'C')
+			return 0;
+		if (value[0] == '1' || value[0] == 'g' || value[0] == 'G')
+			return 1;
+		return -1;
+	}
+
 	double GBufferProfileElapsedMs(GBufferProfileClock::time_point begin)
 	{
 		return std::chrono::duration<double, std::milli>(GBufferProfileClock::now() - begin).count();
@@ -437,7 +449,10 @@ namespace
 	{
 		uint32_t FirstDraw = 0;
 		uint32_t DrawCount = 0;
+		uint32_t OpaqueDrawCount = 0;
+		uint32_t AlphaDrawCount = 0;
 	};
+	static_assert(sizeof(CachedGBufferStaticObjectDrawRange) == 16, "CachedGBufferStaticObjectDrawRange must match GBufferCullCS.hlsl.");
 
 	struct CachedGBufferStaticDrawInfo
 	{
@@ -1278,6 +1293,18 @@ void Corona::InitBloomPass()
 
 void Corona::InitGBufferPass()
 {
+	static bool bAppliedGBufferCullModeEnv = false;
+	if (!bAppliedGBufferCullModeEnv)
+	{
+		bAppliedGBufferCullModeEnv = true;
+		const int modeOverride = GetGBufferCullingModeOverride();
+		if (modeOverride == 0 || modeOverride == 1)
+		{
+			GBufferObjectCullingMode = static_cast<EGBufferObjectCullingMode>(modeOverride);
+			AppendCpuRuntimeTrace(L"[InitGBufferPass] CORONA_GBUFFER_CULL_MODE=" + std::to_wstring(modeOverride));
+		}
+	}
+
 	GraphicsPipelineDesc desc{};
 	desc.ShaderPath = GetAssetFullPath(CORONA_PLATFORM_MOBILE ? L"Shaders\\GBufferMobile.hlsl" : L"Shaders\\GBuffer.hlsl");
 	desc.VertexEntryPoint = "VSMain";
@@ -3751,11 +3778,16 @@ bool Corona::DrawStaticObjectBindlessBatch(const std::vector<uint32_t>& objectIn
 					drawRecord.GBufferIndexStart = drawcall.IndexStart;
 					drawRecord.GBufferVertexBase = drawcall.VertexBase;
 
+					const bool bTransparentDraw = mesh->bTransparent;
 					staticDrawTable.Draws.push_back({
 						static_cast<uint32_t>(drawRecords.size()),
 						drawcall.IndexCount,
-						mesh->bTransparent
+						bTransparentDraw
 					});
+					if (bTransparentDraw)
+						++range.AlphaDrawCount;
+					else
+						++range.OpaqueDrawCount;
 					drawRecords.push_back(drawRecord);
 				}
 			}
@@ -3997,6 +4029,27 @@ bool Corona::DrawStaticObjectBindlessBatch(const std::vector<uint32_t>& objectIn
 		if (staticDrawTable.GpuCullBufferCreateFrame == FrameCounter)
 			return false;
 
+		uint32_t candidateOpaqueMaxDraws = 0;
+		uint32_t candidateAlphaMaxDraws = 0;
+		for (uint32_t objectIndex : objectIndices)
+		{
+			if (objectIndex >= staticDrawTable.ObjectRanges.size())
+				return false;
+			const CachedGBufferStaticObjectDrawRange& range = staticDrawTable.ObjectRanges[objectIndex];
+			if (range.OpaqueDrawCount > std::numeric_limits<uint32_t>::max() - candidateOpaqueMaxDraws ||
+				range.AlphaDrawCount > std::numeric_limits<uint32_t>::max() - candidateAlphaMaxDraws)
+			{
+				return false;
+			}
+			candidateOpaqueMaxDraws += range.OpaqueDrawCount;
+			candidateAlphaMaxDraws += range.AlphaDrawCount;
+		}
+		if (candidateAlphaMaxDraws > std::numeric_limits<uint32_t>::max() - candidateOpaqueMaxDraws)
+			return false;
+		const uint32_t candidateMaxDraws = candidateOpaqueMaxDraws + candidateAlphaMaxDraws;
+		if (candidateMaxDraws == 0)
+			return true;
+
 		const auto allocStart = profile ? GBufferProfileClock::now() : GBufferProfileClock::time_point{};
 		std::shared_ptr<Buffer> candidateObjectBuffer = renderBackend->AllocateTransientUploadStructuredBuffer(
 			static_cast<uint32_t>(objectIndices.size()),
@@ -4030,7 +4083,7 @@ bool Corona::DrawStaticObjectBindlessBatch(const std::vector<uint32_t>& objectIn
 		cullCB.CandidateCount = static_cast<uint32_t>(objectIndices.size());
 		cullCB.ObjectRangeCount = static_cast<uint32_t>(staticDrawTable.ObjectRanges.size());
 		cullCB.DrawInfoCount = static_cast<uint32_t>(staticDrawTable.Draws.size());
-		cullCB.MaxOutputDraws = staticDrawTable.DrawRecordCount;
+		cullCB.MaxOutputDraws = std::max(candidateOpaqueMaxDraws, candidateAlphaMaxDraws);
 		GBufferGpuCullBuildPSO->SetBufferSRV("GBufferObjectRanges", staticDrawTable.GpuObjectRangeBuffer.get());
 		GBufferGpuCullBuildPSO->SetBufferSRV("GBufferCachedDraws", staticDrawTable.GpuDrawInfoBuffer.get());
 		GBufferGpuCullBuildPSO->SetBufferSRV("GBufferCandidateObjectIndices", candidateObjectBuffer.get());
@@ -4059,7 +4112,6 @@ bool Corona::DrawStaticObjectBindlessBatch(const std::vector<uint32_t>& objectIn
 			EResourceState::IndirectArgument);
 		GBufferProfileAdd(profile, batchProfile.BuildMs, batchProfile.BuildCount, buildStart);
 
-		const uint32_t maxDrawCount = staticDrawTable.DrawRecordCount;
 		GraphicsPipelineHandle* opaquePso = GBufferBindlessIndirectOpaqueGraphicsPipeline.get();
 		GraphicsPipelineHandle* opaqueDrawPso = opaquePso ? opaquePso : GBufferBindlessIndirectGraphicsPipeline.get();
 		const bool bOpaqueOk = submitGBufferBatchCount(
@@ -4067,34 +4119,36 @@ bool Corona::DrawStaticObjectBindlessBatch(const std::vector<uint32_t>& objectIn
 			staticDrawTable.GpuOpaqueIndirectArgsBuffer.get(),
 			staticDrawTable.GpuIndirectCountBuffer.get(),
 			0,
-			maxDrawCount);
+			candidateOpaqueMaxDraws);
 		const bool bAlphaOk = submitGBufferBatchCount(
 			GBufferBindlessIndirectGraphicsPipeline.get(),
 			staticDrawTable.GpuAlphaIndirectArgsBuffer.get(),
 			staticDrawTable.GpuIndirectCountBuffer.get(),
 			sizeof(uint32_t),
-			maxDrawCount);
+			candidateAlphaMaxDraws);
 		if (!bOpaqueOk || !bAlphaOk)
 			return false;
 
 		++GBufferLastBindlessObjectBatchCount;
 		GBufferLastBindlessObjectCount += static_cast<uint64_t>(objectIndices.size());
-		GBufferLastBindlessObjectDrawCount += static_cast<uint64_t>(objectIndices.size());
+		GBufferLastBindlessObjectDrawCount += static_cast<uint64_t>(candidateMaxDraws);
 		if (profile)
 		{
 			++batchProfile.Calls;
 			batchProfile.Objects += static_cast<uint64_t>(objectIndices.size());
-			batchProfile.DrawRecords += static_cast<uint64_t>(objectIndices.size());
+			batchProfile.DrawRecords += static_cast<uint64_t>(candidateMaxDraws);
 			batchProfile.Materials += static_cast<uint64_t>(staticDrawTable.MaterialCount);
 			batchProfile.Geometries += static_cast<uint64_t>(staticDrawTable.GeometryCount);
-			batchProfile.IndirectArgs += static_cast<uint64_t>(objectIndices.size());
+			batchProfile.IndirectArgs += static_cast<uint64_t>(candidateMaxDraws);
 		}
 		if (!bLoggedFirstStaticObjectGpuBatch || (FrameCounter % 120u) == 0u)
 		{
 			AppendCpuRuntimeTrace(
 				L"[GBufferObjectBatch] submitted mode=gpu objects=" + std::to_wstring(objectIndices.size()) +
 				L", cachedRecords=" + std::to_wstring(staticDrawTable.DrawRecordCount) +
-				L", maxIndirectDraws=" + std::to_wstring(maxDrawCount) +
+				L", candidateDraws=" + std::to_wstring(candidateMaxDraws) +
+				L", opaqueMax=" + std::to_wstring(candidateOpaqueMaxDraws) +
+				L", alphaMax=" + std::to_wstring(candidateAlphaMaxDraws) +
 				L", materials=" + std::to_wstring(staticDrawTable.MaterialCount) +
 				L", geometries=" + std::to_wstring(staticDrawTable.GeometryCount));
 			bLoggedFirstStaticObjectGpuBatch = true;

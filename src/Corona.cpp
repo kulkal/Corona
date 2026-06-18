@@ -13872,9 +13872,9 @@ void Corona::DrawEditorMainWindowControls()
 		if (bMainFarClipCommitted || ImGui::IsItemDeactivatedAfterEdit())
 			SyncCurrentCameraClipSettingsToFrameSourceState();
 		{
-			static const char* kGBufferCullingModes[] = { "CPU indirect build", "GPU indirect build" };
+			static const char* kGBufferCullingModes[] = { "CPU draw-args build", "GPU draw-args build" };
 			int modeIndex = static_cast<int>(GBufferObjectCullingMode);
-			if (ImGui::Combo("GBuffer culling", &modeIndex, kGBufferCullingModes, IM_ARRAYSIZE(kGBufferCullingModes)))
+			if (ImGui::Combo("GBuffer draw args", &modeIndex, kGBufferCullingModes, IM_ARRAYSIZE(kGBufferCullingModes)))
 			{
 				GBufferObjectCullingMode = static_cast<EGBufferObjectCullingMode>(modeIndex);
 				AppendCpuRuntimeTrace(L"[editor-ui] gbuffer culling mode=" + std::to_wstring(modeIndex));
@@ -13934,10 +13934,10 @@ void Corona::DrawEditorCameraOverlay()
 			SyncCurrentCameraClipSettingsToFrameSourceState();
 
 		{
-			static const char* kGBufferCullingModes[] = { "CPU indirect build", "GPU indirect build" };
+			static const char* kGBufferCullingModes[] = { "CPU draw-args build", "GPU draw-args build" };
 			int modeIndex = static_cast<int>(GBufferObjectCullingMode);
 			ImGui::SetNextItemWidth(-1.0f);
-			if (ImGui::Combo("GBuffer Culling", &modeIndex, kGBufferCullingModes, IM_ARRAYSIZE(kGBufferCullingModes)))
+			if (ImGui::Combo("GBuffer Draw Args", &modeIndex, kGBufferCullingModes, IM_ARRAYSIZE(kGBufferCullingModes)))
 			{
 				GBufferObjectCullingMode = static_cast<EGBufferObjectCullingMode>(modeIndex);
 				AppendCpuRuntimeTrace(L"[editor-ui] gbuffer culling mode=" + std::to_wstring(modeIndex));

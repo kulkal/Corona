@@ -2,6 +2,8 @@ struct GBufferObjectDrawRange
 {
     uint FirstDraw;
     uint DrawCount;
+    uint OpaqueDrawCount;
+    uint AlphaDrawCount;
 };
 
 struct GBufferCachedDrawInfo
