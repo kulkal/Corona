@@ -3397,7 +3397,8 @@ public:
 		const std::vector<uint32_t>& objectIndices,
 		bool hasPrecomputedCandidateDrawCounts = false,
 		uint32_t precomputedOpaqueDrawCount = 0,
-		uint32_t precomputedAlphaDrawCount = 0);
+		uint32_t precomputedAlphaDrawCount = 0,
+		bool useAllStaticObjects = false);
 	void ResetGBufferStaticDrawCache();
 	bool BuildMobileShadowViewProjection(glm::mat4x4& lightViewProj);
 	bool GetSceneObjectWorldBounds(const SceneObject& object, glm::vec3& boundsMin, glm::vec3& boundsMax, glm::vec3& center, float& radius) const;

@@ -14,6 +14,12 @@ struct GBufferCachedDrawInfo
     uint Pad;
 };
 
+struct GBufferObjectBounds
+{
+    float4 BoundsMin;
+    float4 BoundsMax;
+};
+
 struct DrawIndirectArguments
 {
     uint VertexCountPerInstance;
@@ -28,11 +34,15 @@ cbuffer GBufferCullCB : register(b0)
     uint ObjectRangeCount;
     uint DrawInfoCount;
     uint MaxOutputDraws;
+    float4 FrustumPlanes[6];
+    uint EnableFrustumCull;
+    uint3 Pad;
 };
 
 StructuredBuffer<GBufferObjectDrawRange> GBufferObjectRanges : register(t0);
 StructuredBuffer<GBufferCachedDrawInfo> GBufferCachedDraws : register(t1);
 StructuredBuffer<uint> GBufferCandidateObjectIndices : register(t2);
+StructuredBuffer<GBufferObjectBounds> GBufferObjectBoundsBuffer : register(t3);
 
 RWStructuredBuffer<DrawIndirectArguments> GBufferOpaqueArgs : register(u0);
 RWStructuredBuffer<DrawIndirectArguments> GBufferAlphaArgs : register(u1);
@@ -48,6 +58,23 @@ void ClearGBufferIndirectCountersCS(uint3 dispatchThreadId : SV_DispatchThreadID
     }
 }
 
+bool IsAabbInFrustum(float3 boundsMin, float3 boundsMax)
+{
+    const float3 center = (boundsMin + boundsMax) * 0.5f;
+    const float3 extents = max((boundsMax - boundsMin) * 0.5f, 0.0f.xxx);
+    [unroll]
+    for (uint planeIndex = 0; planeIndex < 6; ++planeIndex)
+    {
+        const float4 plane = FrustumPlanes[planeIndex];
+        const float3 normal = plane.xyz;
+        const float distance = dot(normal, center) + plane.w;
+        const float radius = dot(abs(normal), extents);
+        if (distance + radius < 0.0f)
+            return false;
+    }
+    return true;
+}
+
 [numthreads(64, 1, 1)]
 void BuildGBufferIndirectArgsCS(uint3 dispatchThreadId : SV_DispatchThreadID)
 {
@@ -58,6 +85,16 @@ void BuildGBufferIndirectArgsCS(uint3 dispatchThreadId : SV_DispatchThreadID)
     const uint objectIndex = GBufferCandidateObjectIndices[candidateIndex];
     if (objectIndex >= ObjectRangeCount)
         return;
+
+    if (EnableFrustumCull != 0)
+    {
+        const GBufferObjectBounds objectBounds = GBufferObjectBoundsBuffer[objectIndex];
+        if (objectBounds.BoundsMin.w != 0.0f &&
+            !IsAabbInFrustum(objectBounds.BoundsMin.xyz, objectBounds.BoundsMax.xyz))
+        {
+            return;
+        }
+    }
 
     const GBufferObjectDrawRange range = GBufferObjectRanges[objectIndex];
     for (uint drawOffset = 0; drawOffset < range.DrawCount; ++drawOffset)
