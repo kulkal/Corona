@@ -309,6 +309,7 @@ namespace
 	constexpr uint32_t kCachedMapSceneMaxScriptsPerEntity = 1024u;
 	constexpr uint32_t kInvalidCachedMapChunkId = std::numeric_limits<uint32_t>::max();
 	constexpr float kCachedMapChunkCellSize = 2048.0f;
+	constexpr bool kMapLoadDetailedReplayProfile = false;
 
 	template<typename T>
 	bool WriteCachedValue(std::ofstream& file, const T& value)
@@ -1823,13 +1824,30 @@ bool Corona::LoadMapFromFile(const std::wstring& name, std::wstring* outError)
 		ClearScriptSpawnedScene();
 		SceneObjects.reserve(SceneObjects.size() + mapScene->Entities.size());
 		ScriptObjects.reserve(ScriptObjects.size() + mapScene->Entities.size());
+		size_t expectedMeshEntities = 0;
 		size_t expectedPointLights = 0;
+		size_t expectedLightEntities = 0;
+		size_t expectedScriptEntities = 0;
 		for (const CachedMapEntity& entity : mapScene->Entities)
 		{
+			if (entity.Mesh.bPresent)
+				++expectedMeshEntities;
 			if (entity.Light.bPresent && entity.Light.Component.Type != CoronaECS::LightType::Directional)
 				++expectedPointLights;
+			if (entity.Light.bPresent)
+				++expectedLightEntities;
+			if (!entity.Scripts.empty())
+				++expectedScriptEntities;
 		}
 		PointLights.reserve(PointLights.size() + expectedPointLights);
+		EntityWorld.ReserveAdditional(
+			mapScene->Entities.size(),
+			expectedMeshEntities + expectedPointLights + 2u,
+			expectedMeshEntities,
+			expectedMeshEntities,
+			expectedLightEntities,
+			1u,
+			expectedScriptEntities);
 
 		bool bIgnoredCameraEntity = false;
 		double replayOrderMs = 0.0;
@@ -1885,7 +1903,7 @@ bool Corona::LoadMapFromFile(const std::wstring& name, std::wstring* outError)
 			{
 				const CachedMapMesh& mesh = cachedEntity.Mesh;
 				ScriptSceneHandle sceneHandle = InvalidScriptSceneHandle;
-				const auto sceneResolveStart = CpuClock::now();
+				const auto sceneResolveStart = kMapLoadDetailedReplayProfile ? CpuClock::now() : CpuClock::time_point();
 				switch (mesh.Primitive)
 				{
 				case CachedMapMeshPrimitive::Terrain:
@@ -1934,11 +1952,12 @@ bool Corona::LoadMapFromFile(const std::wstring& name, std::wstring* outError)
 				default:
 					break;
 				}
-				meshSceneResolveMs += MapFormatElapsedMilliseconds(sceneResolveStart, CpuClock::now());
+				if (kMapLoadDetailedReplayProfile)
+					meshSceneResolveMs += MapFormatElapsedMilliseconds(sceneResolveStart, CpuClock::now());
 
 				if (sceneHandle != InvalidScriptSceneHandle)
 				{
-					const auto meshApplyStart = CpuClock::now();
+					const auto meshApplyStart = kMapLoadDetailedReplayProfile ? CpuClock::now() : CpuClock::time_point();
 					CoronaECS::Entity newEntity = CreateEntity(entityName);
 					AddMeshComponentForScript(
 						newEntity, sceneHandle,
@@ -1946,14 +1965,15 @@ bool Corona::LoadMapFromFile(const std::wstring& name, std::wstring* outError)
 						mesh.Roughness, mesh.Metallic, mesh.bOverrideMaterial,
 						mesh.bVisible, mesh.bRayTracing, /*physicsQuery*/ true);
 					createdEntity = newEntity;
-					meshEntityApplyMs += MapFormatElapsedMilliseconds(meshApplyStart, CpuClock::now());
+					if (kMapLoadDetailedReplayProfile)
+						meshEntityApplyMs += MapFormatElapsedMilliseconds(meshApplyStart, CpuClock::now());
 					++meshEntityCount;
 				}
 			}
 
 			if (cachedEntity.Light.bPresent)
 			{
-				const auto lightApplyStart = CpuClock::now();
+				const auto lightApplyStart = kMapLoadDetailedReplayProfile ? CpuClock::now() : CpuClock::time_point();
 				CoronaECS::LightComponent comp = cachedEntity.Light.Component;
 				const bool bDirectional = (comp.Type == CoronaECS::LightType::Directional);
 				if (bDirectional)
@@ -1998,7 +2018,8 @@ bool Corona::LoadMapFromFile(const std::wstring& name, std::wstring* outError)
 						SetEntityLightForScript(le, comp, /*persist*/ false);
 					}
 				}
-				lightApplyMs += MapFormatElapsedMilliseconds(lightApplyStart, CpuClock::now());
+				if (kMapLoadDetailedReplayProfile)
+					lightApplyMs += MapFormatElapsedMilliseconds(lightApplyStart, CpuClock::now());
 				++lightEntityCount;
 			}
 
@@ -2013,7 +2034,7 @@ bool Corona::LoadMapFromFile(const std::wstring& name, std::wstring* outError)
 
 			if (createdEntity.IsValid())
 			{
-				const auto scriptApplyStart = CpuClock::now();
+				const auto scriptApplyStart = kMapLoadDetailedReplayProfile ? CpuClock::now() : CpuClock::time_point();
 				for (const CachedMapScript& script : cachedEntity.Scripts)
 				{
 					if (script.bNative)
@@ -2023,7 +2044,8 @@ bool Corona::LoadMapFromFile(const std::wstring& name, std::wstring* outError)
 				}
 				if (!cachedEntity.Scripts.empty())
 				{
-					scriptApplyMs += MapFormatElapsedMilliseconds(scriptApplyStart, CpuClock::now());
+					if (kMapLoadDetailedReplayProfile)
+						scriptApplyMs += MapFormatElapsedMilliseconds(scriptApplyStart, CpuClock::now());
 					++scriptEntityCount;
 				}
 			}
@@ -2040,7 +2062,8 @@ bool Corona::LoadMapFromFile(const std::wstring& name, std::wstring* outError)
 			L", meshEntities=" + std::to_wstring(meshEntityCount) +
 			L", lightEntities=" + std::to_wstring(lightEntityCount) +
 			L", scriptEntities=" + std::to_wstring(scriptEntityCount) +
-			L", assetSceneCacheEntries=" + std::to_wstring(assetSceneHandleCache.size()));
+			L", assetSceneCacheEntries=" + std::to_wstring(assetSceneHandleCache.size()) +
+			L", detailed=" + std::to_wstring(kMapLoadDetailedReplayProfile ? 1 : 0));
 
 		if (bStartupLoadingScreenActive)
 			UpdateStartupLoadingProgress(0.93f, L"Applying map globals");

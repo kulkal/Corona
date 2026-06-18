@@ -143,6 +143,14 @@ namespace CoronaECS
 		bool IsAlive(Entity entity) const;
 		Entity GetEntityById(uint32_t id) const;
 		void Clear();
+		void ReserveAdditional(
+			size_t entityCount,
+			size_t transformCount,
+			size_t meshCount,
+			size_t physicsCount,
+			size_t lightCount,
+			size_t cameraCount,
+			size_t scriptCount);
 
 		void SetName(Entity entity, const std::string& name);
 		const std::string* GetName(Entity entity) const;

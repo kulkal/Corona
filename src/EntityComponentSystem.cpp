@@ -136,6 +136,26 @@ namespace CoronaECS
 		ActiveCameraEntity = Entity();
 	}
 
+	void EntityComponentSystem::ReserveAdditional(
+		size_t entityCount,
+		size_t transformCount,
+		size_t meshCount,
+		size_t physicsCount,
+		size_t lightCount,
+		size_t cameraCount,
+		size_t scriptCount)
+	{
+		EntityGenerations.reserve(EntityGenerations.size() + entityCount);
+		AliveEntityIds.reserve(AliveEntityIds.size() + entityCount);
+		EntityNames.reserve(EntityNames.size() + entityCount);
+		TransformComponents.reserve(TransformComponents.size() + transformCount);
+		MeshComponents.reserve(MeshComponents.size() + meshCount);
+		PhysicsComponents.reserve(PhysicsComponents.size() + physicsCount);
+		LightComponents.reserve(LightComponents.size() + lightCount);
+		CameraComponents.reserve(CameraComponents.size() + cameraCount);
+		ScriptComponents.reserve(ScriptComponents.size() + scriptCount);
+	}
+
 	void EntityComponentSystem::SetName(Entity entity, const std::string& name)
 	{
 		if (!IsAlive(entity))
