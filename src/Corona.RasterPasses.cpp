@@ -38,6 +38,9 @@ namespace
 	constexpr uint32_t kParallelCullingIndexBuildThreshold = 1024u;
 	constexpr uint32_t kParallelCellFrustumCullThreshold = 512u;
 	constexpr uint32_t kParallelFrustumCullThreshold = 2048u;
+	constexpr uint64_t kMaxGBufferOcclusionSkipFrames = 8u;
+	constexpr uint64_t kBatchedGBufferOcclusionRefreshFrames = 45u;
+	constexpr uint32_t kBatchedGBufferOcclusionRefreshQueryBudget = 4096u;
 
 	enum class EFrustumAabbRelation : uint8_t
 	{
@@ -5350,12 +5353,11 @@ bool Corona::ShouldDrawSceneObjectInGBuffer(const SceneObject& object, const glm
 		state.HasPendingOcclusionQuery = false;
 	}
 
-	constexpr uint64_t kMaxOcclusionSkipFrames = 8;
 	const uint64_t framesSinceTest =
 		FrameCounter >= state.LastTestFrame ?
 		static_cast<uint64_t>(FrameCounter) - state.LastTestFrame :
-		kMaxOcclusionSkipFrames + 1u;
-	if (!state.LastVisible && framesSinceTest <= kMaxOcclusionSkipFrames)
+		kMaxGBufferOcclusionSkipFrames + 1u;
+	if (!state.LastVisible && framesSinceTest <= kMaxGBufferOcclusionSkipFrames)
 	{
 		++GBufferLastOcclusionCulledObjectCount;
 		return false;
@@ -5611,15 +5613,38 @@ void Corona::GBufferPass()
 			if (stateIt == SceneObjectCullingStates.end())
 				return;
 			SceneObjectCullingState& state = stateIt->second;
-			state.LastVisible = true;
-			state.HasPendingOcclusionQuery = false;
-			state.LastTestFrame = FrameCounter;
 			if (hasBounds)
 			{
 				state.LastBoundsCenter = boundsCenter;
 				state.LastBoundsRadius = boundsRadius;
 				state.HasBounds = true;
 			}
+		};
+		auto shouldRefreshBatchedOcclusionQuery =
+			[this](const SceneObject& object)
+		{
+			if (!bGBufferOcclusionQueriesActive || object.Handle == InvalidSceneObjectHandle)
+				return false;
+			const uint32_t batchedQueryBudget =
+				std::min(GBufferOcclusionQueryCapacityPerFrame, kBatchedGBufferOcclusionRefreshQueryBudget);
+			if (GBufferOcclusionQueryCount >= batchedQueryBudget)
+				return false;
+
+			const auto stateIt = SceneObjectCullingStates.find(object.Handle);
+			if (stateIt == SceneObjectCullingStates.end())
+				return true;
+
+			const SceneObjectCullingState& state = stateIt->second;
+			if (state.HasPendingOcclusionQuery)
+				return false;
+
+			const uint64_t framesSinceTest =
+				FrameCounter >= state.LastTestFrame ?
+				static_cast<uint64_t>(FrameCounter) - state.LastTestFrame :
+				kBatchedGBufferOcclusionRefreshFrames + 1u;
+			if (!state.LastVisible)
+				return framesSinceTest > kMaxGBufferOcclusionSkipFrames;
+			return framesSinceTest >= kBatchedGBufferOcclusionRefreshFrames;
 		};
 		static thread_local std::unordered_map<const Scene*, bool> s_staticInstancingEligibilityCache;
 		std::unordered_map<const Scene*, bool>& staticInstancingEligibilityCache = s_staticInstancingEligibilityCache;
@@ -5814,14 +5839,14 @@ void Corona::GBufferPass()
 				const auto staticCandidateCountIt = staticInstancingCandidateCounts.find(staticBatchKey);
 				const uint32_t staticCandidateCount =
 					staticCandidateCountIt != staticInstancingCandidateCounts.end() ? staticCandidateCountIt->second : 0u;
-				const bool bStaticInstancingCandidate =
+				bool bStaticInstancingCandidate =
 					drawSpinePass == 0 &&
 					entry.StaticInstancingEligible &&
 					staticCandidateCount >= kMinStaticGBufferInstanceCount;
-				const bool bBindlessObjectBatchCandidate =
+				bool bBindlessObjectBatchCandidate =
 					drawSpinePass == 0 &&
 					entry.StaticObjectBatchEligible;
-				const bool bDrawsWithoutOcclusionQuery =
+				bool bDrawsWithoutOcclusionQuery =
 					bStaticInstancingCandidate || bBindlessObjectBatchCandidate;
 
 				const glm::vec3 boundsCenter = entry.BoundsCenter;
@@ -5829,9 +5854,15 @@ void Corona::GBufferPass()
 				const bool bHasBounds = entry.HasBounds;
 				if (bHasBounds)
 				{
-					if (!bDrawsWithoutOcclusionQuery &&
-						!ShouldDrawSceneObjectInGBuffer(object, boundsCenter, boundsRadius))
+					if (!ShouldDrawSceneObjectInGBuffer(object, boundsCenter, boundsRadius))
 						continue;
+					if (bDrawsWithoutOcclusionQuery &&
+						shouldRefreshBatchedOcclusionQuery(object))
+					{
+						bStaticInstancingCandidate = false;
+						bBindlessObjectBatchCandidate = false;
+						bDrawsWithoutOcclusionQuery = false;
+					}
 				}
 				if (bBindlessObjectBatchCandidate)
 				{
