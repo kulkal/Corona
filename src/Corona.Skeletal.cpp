@@ -444,6 +444,10 @@ void Corona::DispatchSkeletalSkinningForRenderWorld()
 	if (!renderBackend || !SkeletalSkinningPSO)
 		return;
 
+	RefreshRenderWorldSkinningCache();
+	if (RenderWorldSkeletalSkinningMeshes.empty())
+		return;
+
 	// LLM-driven SMPL character: refresh its bone palette from the current
 	// MotionPlayback pose before the generic skeletal compute dispatch
 	// runs. The SMPL mesh has bSkeletalSkinned=true, so it gets picked up
@@ -463,12 +467,8 @@ void Corona::DispatchSkeletalSkinningForRenderWorld()
 		SkeletalStats.BlasUpdates = 0;
 		// Mark meshes dispatched so the GBuffer path treats them as
 		// "ready" (some code branches still gate on this flag).
-		for (SceneObject& object : SceneObjects)
-		{
-			if (!object.ScenePtr) continue;
-			for (const std::shared_ptr<Mesh>& mesh : object.ScenePtr->meshes)
-				if (mesh && mesh->bSkeletalSkinned) mesh->bSkeletalSkinningDispatched = true;
-		}
+		for (Mesh* mesh : RenderWorldSkeletalSkinningMeshes)
+			if (mesh) mesh->bSkeletalSkinningDispatched = true;
 		return;
 	}
 
@@ -489,37 +489,25 @@ void Corona::DispatchSkeletalSkinningForRenderWorld()
 		// Mark every skeletal mesh as "skinning ready" so the GBuffer
 		// path picks the skeletal PSO + the CPU-skinned VB instead of
 		// falling back to the static bind VB.
-		for (SceneObject& object : SceneObjects)
-		{
-			if (!object.ScenePtr) continue;
-			for (const std::shared_ptr<Mesh>& mesh : object.ScenePtr->meshes)
-				if (mesh && mesh->bSkeletalSkinned) mesh->bSkeletalSkinningDispatched = true;
-		}
+		for (Mesh* mesh : RenderWorldSkeletalSkinningMeshes)
+			if (mesh) mesh->bSkeletalSkinningDispatched = true;
 		return;
 	}
 
 	// Gather visible skeletal meshes (single pass).
 	std::vector<Mesh*> skinnedMeshes;
-	skinnedMeshes.reserve(64);
-	static thread_local std::unordered_set<Mesh*> s_skinnedMeshSet;
-	s_skinnedMeshSet.clear();
-	s_skinnedMeshSet.reserve(64);
-	for (const SceneObject& object : SceneObjects)
+	skinnedMeshes.reserve(RenderWorldSkeletalSkinningMeshes.size());
+	for (Mesh* mesh : RenderWorldSkeletalSkinningMeshes)
 	{
-		if (!object.bVisible || !object.ScenePtr)
+		if (!mesh)
 			continue;
-		for (const std::shared_ptr<Mesh>& mesh : object.ScenePtr->meshes)
+		if (mesh->bSkeletalSkinned &&
+			mesh->SkeletalInputVertices &&
+			mesh->SkeletalBoneMatrices &&
+			mesh->SkeletalOutputVb &&
+			mesh->SkeletalVertexCount > 0)
 		{
-			if (mesh && mesh->bSkeletalSkinned &&
-				mesh->SkeletalInputVertices &&
-				mesh->SkeletalBoneMatrices &&
-				mesh->SkeletalOutputVb &&
-				mesh->SkeletalVertexCount > 0)
-			{
-				Mesh* meshPtr = mesh.get();
-				if (s_skinnedMeshSet.insert(meshPtr).second)
-					skinnedMeshes.push_back(meshPtr);
-			}
+			skinnedMeshes.push_back(mesh);
 		}
 	}
 	if (skinnedMeshes.empty())

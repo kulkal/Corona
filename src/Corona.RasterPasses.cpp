@@ -3528,22 +3528,16 @@ void Corona::DispatchSpineSkinningForRenderWorld()
 	if (!renderBackend || !bEnableGpuSpineSkinning)
 		return;
 
+	RefreshRenderWorldSkinningCache();
+	if (RenderWorldSpineSkinningScenes.empty())
+		return;
+
 	UploadLiveSpineTransientBonesForRender();
 	if (!SpineSkinningPSO && !bSpineUseVsInlineSkinning)
 		return;
 
-	static thread_local std::unordered_set<const Scene*> s_spineSkinningVisitedScenes;
-	s_spineSkinningVisitedScenes.clear();
-	s_spineSkinningVisitedScenes.reserve(256);
-	for (const SceneObject& object : RenderWorld.SceneObjects)
-	{
-		if (!object.bVisible || !object.ScenePtr)
-			continue;
-		const Scene* sceneKey = object.ScenePtr.get();
-		if (!s_spineSkinningVisitedScenes.insert(sceneKey).second)
-			continue;
-		DispatchSpineSkinningForScene(object.ScenePtr);
-	}
+	for (const std::shared_ptr<Scene>& scene : RenderWorldSpineSkinningScenes)
+		DispatchSpineSkinningForScene(scene);
 }
 
 bool Corona::IsSceneEligibleForStaticGBufferInstancing(const std::shared_ptr<Scene>& scene) const
@@ -5455,6 +5449,60 @@ bool Corona::IsWorldAabbInViewFrustum(const glm::vec3& boundsMin, const glm::vec
 void Corona::MarkRenderWorldCullingIndexDirty()
 {
 	RenderWorld.bSceneObjectCullingIndexDirty = true;
+	RenderWorldSkinningCacheGeneration = UINT64_MAX;
+	RenderWorldSkinningCacheObjectCount = std::numeric_limits<size_t>::max();
+}
+
+void Corona::RefreshRenderWorldSkinningCache()
+{
+	if (!RenderWorld.bSceneObjectCullingIndexDirty &&
+		RenderWorldSkinningCacheGeneration == RenderWorld.SceneObjectCullingIndexGeneration &&
+		RenderWorldSkinningCacheObjectCount == RenderWorld.SceneObjects.size())
+	{
+		return;
+	}
+
+	RenderWorldSpineSkinningScenes.clear();
+	RenderWorldSkeletalSkinningMeshes.clear();
+
+	static thread_local std::unordered_set<const Scene*> s_visitedScenes;
+	static thread_local std::unordered_set<Mesh*> s_visitedSkeletalMeshes;
+	s_visitedScenes.clear();
+	s_visitedSkeletalMeshes.clear();
+	s_visitedScenes.reserve(256);
+	s_visitedSkeletalMeshes.reserve(64);
+
+	for (const SceneObject& object : RenderWorld.SceneObjects)
+	{
+		if (!object.bVisible || !object.ScenePtr)
+			continue;
+		const Scene* sceneKey = object.ScenePtr.get();
+		if (!s_visitedScenes.insert(sceneKey).second)
+			continue;
+
+		bool bSceneNeedsSpineSkinning = false;
+		for (const std::shared_ptr<Mesh>& mesh : object.ScenePtr->meshes)
+		{
+			if (!mesh)
+				continue;
+			if (mesh->bGpuSpineSkinned)
+				bSceneNeedsSpineSkinning = true;
+			if (mesh->bSkeletalSkinned &&
+				mesh->SkeletalInputVertices &&
+				mesh->SkeletalBoneMatrices &&
+				mesh->SkeletalOutputVb &&
+				mesh->SkeletalVertexCount > 0 &&
+				s_visitedSkeletalMeshes.insert(mesh.get()).second)
+			{
+				RenderWorldSkeletalSkinningMeshes.push_back(mesh.get());
+			}
+		}
+		if (bSceneNeedsSpineSkinning)
+			RenderWorldSpineSkinningScenes.push_back(object.ScenePtr);
+	}
+
+	RenderWorldSkinningCacheGeneration = RenderWorld.SceneObjectCullingIndexGeneration;
+	RenderWorldSkinningCacheObjectCount = RenderWorld.SceneObjects.size();
 }
 
 void Corona::RebuildRenderWorldCullingIndex()

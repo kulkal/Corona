@@ -2221,6 +2221,10 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	std::vector<uint32_t> GBufferSpatialFrustumCandidateIndices;
 	std::vector<std::vector<uint32_t>> GBufferSpatialThreadVisibleIndices;
 	std::vector<std::vector<uint32_t>> GBufferSpatialThreadCandidateIndices;
+	uint64_t RenderWorldSkinningCacheGeneration = UINT64_MAX;
+	size_t RenderWorldSkinningCacheObjectCount = std::numeric_limits<size_t>::max();
+	std::vector<std::shared_ptr<Scene>> RenderWorldSpineSkinningScenes;
+	std::vector<Mesh*> RenderWorldSkeletalSkinningMeshes;
 	std::vector<uint32_t> RayTracingVisibleObjectIndices;
 	std::vector<uint32_t> RayTracingSpatialFrustumCandidateIndices;
 	uint64_t MobileShadowLastTotalObjectCount = 0;
@@ -3392,6 +3396,7 @@ public:
 	void RebuildRenderWorldCullingIndex();
 	const std::vector<uint32_t>& GatherGBufferVisibleObjectIndices();
 	void PrepareGBufferCulling(uint32_t sceneObjectCount);
+	void RefreshRenderWorldSkinningCache();
 	bool ShouldDrawSceneObjectInGBuffer(const SceneObject& object, const glm::vec3& boundsCenter, float boundsRadius);
 	uint32_t BeginGBufferOcclusionQuery(SceneObjectHandle handle);
 	void EndGBufferOcclusionQuery(SceneObjectHandle handle, uint32_t queryIndex);
