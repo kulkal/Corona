@@ -310,6 +310,7 @@ namespace
 	constexpr uint32_t kInvalidCachedMapChunkId = std::numeric_limits<uint32_t>::max();
 	constexpr float kCachedMapChunkCellSize = 2048.0f;
 	constexpr bool kMapLoadDetailedReplayProfile = false;
+	constexpr size_t kCachedMapSceneIoBufferBytes = 4u * 1024u * 1024u;
 
 	template<typename T>
 	bool WriteCachedValue(std::ofstream& file, const T& value)
@@ -802,7 +803,10 @@ namespace
 
 		std::error_code ec;
 		std::filesystem::create_directories(cachePath.parent_path(), ec);
-		std::ofstream file(cachePath, std::ios::binary | std::ios::trunc);
+		std::vector<char> ioBuffer(kCachedMapSceneIoBufferBytes);
+		std::ofstream file;
+		file.rdbuf()->pubsetbuf(ioBuffer.data(), static_cast<std::streamsize>(ioBuffer.size()));
+		file.open(cachePath, std::ios::binary | std::ios::trunc);
 		if (!file)
 			return false;
 
@@ -853,7 +857,10 @@ namespace
 		const CachedMapSourceMeta& sourceMeta,
 		CachedMapScene& scene)
 	{
-		std::ifstream file(cachePath, std::ios::binary);
+		std::vector<char> ioBuffer(kCachedMapSceneIoBufferBytes);
+		std::ifstream file;
+		file.rdbuf()->pubsetbuf(ioBuffer.data(), static_cast<std::streamsize>(ioBuffer.size()));
+		file.open(cachePath, std::ios::binary);
 		if (!file)
 			return false;
 
