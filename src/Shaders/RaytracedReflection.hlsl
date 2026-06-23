@@ -477,8 +477,8 @@ void WriteRRSpecularGuides(uint2 pixel, uint2 renderSize, bool primarySurfaceVal
             if (ProjectToScreenUVChecked(guidePayload.position, UnjitteredViewProjMatrix, specCurrentUV) &&
                 ProjectToScreenUVChecked(guidePayload.position, PrevUnjitteredViewProjMatrix, specPrevUV))
             {
-                // Streamline mvecScale is configured for normalized UV deltas, matching the GBuffer velocity target.
-                float2 candidateMotionVector = (specPrevUV - specCurrentUV) * SpecularMotionVectorScale;
+                // Match the GBuffer velocity convention: normalized current UV minus previous UV.
+                float2 candidateMotionVector = (specCurrentUV - specPrevUV) * SpecularMotionVectorScale;
                 float maxNormalizedMotion = max(1.0f, abs(SpecularMotionVectorScale));
                 if (all(abs(candidateMotionVector) <= float2(maxNormalizedMotion, maxNormalizedMotion)))
                     specularMotionVector = candidateMotionVector;

@@ -45,9 +45,74 @@ namespace
 	constexpr uint64_t kBatchedGBufferOcclusionRefreshFrames = 240u;
 	constexpr uint64_t kGBufferOcclusionConfirmMissFrames = 6u;
 	constexpr uint32_t kBatchedGBufferOcclusionRefreshQueryBudget = 16u;
-	constexpr uint8_t kMinConsecutiveGBufferOcclusionMisses = 2u;
+	constexpr uint64_t kAdaptiveGBufferOcclusionWarmupFrames = 4u;
+	constexpr uint32_t kAdaptiveGBufferOcclusionRefreshQueryBudget = 256u;
+	constexpr uint8_t kMinConsecutiveGBufferOcclusionMisses = 3u;
 	constexpr float kGBufferOcclusionCameraMoveThreshold = 128.0f;
 	constexpr float kGBufferOcclusionCameraRotationDotThreshold = 0.9995f;
+
+	uint32_t HashGBufferOcclusionProbe(uint32_t handle, uint64_t frame, uint32_t salt)
+	{
+		uint32_t x = handle * 747796405u + static_cast<uint32_t>(frame) * 2891336453u + salt * 277803737u;
+		x ^= x >> 16;
+		x *= 2246822519u;
+		x ^= x >> 13;
+		x *= 3266489917u;
+		x ^= x >> 16;
+		return x;
+	}
+
+	float GBufferOcclusionRandom01(uint32_t handle, uint64_t frame, uint32_t salt)
+	{
+		return static_cast<float>(HashGBufferOcclusionProbe(handle, frame, salt) & 0x00ffffffu) * (1.0f / 16777216.0f);
+	}
+
+	float ComputeGBufferOcclusionImportance(const glm::vec3& cameraPosition, const glm::vec3& boundsCenter, float boundsRadius)
+	{
+		const float distance = std::max(1.0f, glm::length(boundsCenter - cameraPosition));
+		return std::clamp((std::max(1.0f, boundsRadius) / distance) * 10.0f, 0.0f, 1.0f);
+	}
+
+	uint64_t ComputeAdaptiveOcclusionProbeInterval(float importance, bool lastVisible, bool cameraMoved)
+	{
+		const float farInterval = lastVisible ? 180.0f : 90.0f;
+		const float nearInterval = lastVisible ? 36.0f : 8.0f;
+		float interval = farInterval + (nearInterval - farInterval) * std::clamp(importance, 0.0f, 1.0f);
+		if (cameraMoved)
+			interval *= lastVisible ? 0.5f : 0.25f;
+		return static_cast<uint64_t>(std::max(2.0f, std::round(interval)));
+	}
+
+	float ComputeAdaptiveOcclusionProbeProbability(float importance, uint64_t framesSinceTest, bool lastVisible, bool cameraMoved)
+	{
+		const float age = std::clamp(static_cast<float>(framesSinceTest) / (lastVisible ? 180.0f : 90.0f), 0.0f, 1.0f);
+		float probability =
+			lastVisible ?
+			(0.006f + 0.050f * age + 0.050f * importance) :
+			(0.020f + 0.200f * age + 0.420f * importance);
+		if (cameraMoved)
+			probability += lastVisible ? 0.025f : 0.220f;
+		return std::clamp(probability, 0.0f, 0.95f);
+	}
+
+	bool ShouldAdaptiveOcclusionProbe(
+		uint32_t handle,
+		uint64_t frame,
+		uint64_t framesSinceTest,
+		bool lastVisible,
+		bool cameraMoved,
+		float importance)
+	{
+		if (framesSinceTest == 0)
+			return false;
+		const uint64_t probeInterval =
+			ComputeAdaptiveOcclusionProbeInterval(importance, lastVisible, cameraMoved);
+		if (framesSinceTest >= probeInterval)
+			return true;
+		const float probability =
+			ComputeAdaptiveOcclusionProbeProbability(importance, framesSinceTest, lastVisible, cameraMoved);
+		return GBufferOcclusionRandom01(handle, frame, lastVisible ? 17u : 29u) < probability;
+	}
 
 	enum class EFrustumAabbRelation : uint8_t
 	{
@@ -602,10 +667,46 @@ namespace
 		uint32_t DrawInfoCount = 0;
 		uint32_t MaxOutputDraws = 0;
 		glm::vec4 FrustumPlanes[6] = {};
+		glm::mat4 ViewProjectionMatrix = glm::mat4(1.0f);
 		uint32_t EnableFrustumCull = 0;
-		uint32_t Pad[3] = {};
+		uint32_t EnableHiZOcclusion = 0;
+		uint32_t DepthPyramidWidth = 0;
+		uint32_t DepthPyramidHeight = 0;
+		uint32_t DepthPyramidMipCount = 0;
+		uint32_t DepthPyramidMaxMip = 0;
+		float HiZDepthBias = 0.002f;
+		uint32_t Pad0 = 0;
+		glm::uvec4 DepthPyramidMipOffsets[4] = {};
 	};
-	static_assert(sizeof(GBufferGpuCullConstant) == 128, "GBufferGpuCullConstant must match GBufferCullCS.hlsl.");
+	static_assert(sizeof(GBufferGpuCullConstant) == 272, "GBufferGpuCullConstant must match GBufferCullCS.hlsl.");
+
+	struct GBufferOccluderDepthPyramidConstant
+	{
+		uint32_t Mode = 0;
+		uint32_t SrcOffset = 0;
+		uint32_t DstOffset = 0;
+		uint32_t SrcWidth = 0;
+		uint32_t SrcHeight = 0;
+		uint32_t DstWidth = 0;
+		uint32_t DstHeight = 0;
+		uint32_t Pad0 = 0;
+	};
+	static_assert(sizeof(GBufferOccluderDepthPyramidConstant) == 32, "GBufferOccluderDepthPyramidConstant must match OccluderDepthPyramidCS.hlsl.");
+
+	struct GBufferSparseRayOccluderConstant
+	{
+		glm::mat4 InvViewProjectionMatrix = glm::mat4(1.0f);
+		glm::vec4 CameraPositionAndTMin = glm::vec4(0.0f);
+		uint32_t RayGridWidth = 0;
+		uint32_t RayGridHeight = 0;
+		uint32_t MaxOccluderObjects = 0;
+		uint32_t ObjectCount = 0;
+		uint32_t RTInstanceCount = 0;
+		uint32_t FrameIndex = 0;
+		uint32_t Pad0 = 0;
+		uint32_t Pad1 = 0;
+	};
+	static_assert(sizeof(GBufferSparseRayOccluderConstant) == 112, "GBufferSparseRayOccluderConstant must match GBufferSparseRayOccluderCS.hlsli.");
 
 	struct CachedGBufferStaticDrawTable
 	{
@@ -1482,6 +1583,7 @@ void Corona::InitGBufferPass()
 	}
 	desc.DepthFormat = ETextureFormat::D32Float;
 	desc.bDepthEnable = true;
+	desc.DepthCompareOp = EDepthCompareOp::LessEqual;
 	desc.bCullBackFaces = false;
 	desc.ConstantBufferSize = sizeof(GBufferConstantBuffer);
 	desc.ConstantBufferBinding = 0;
@@ -1589,6 +1691,73 @@ void Corona::InitGBufferPass()
 			}
 			if (!GBufferBindlessIndirectOpaqueGraphicsPipeline)
 				AppendCpuRuntimeTrace(L"[InitGBufferPass] failed to create Bindless Indirect opaque GBuffer pipeline (opaque early-Z split disabled)");
+
+			GraphicsPipelineDesc bindlessIndirectDepthPrepassDesc = bindlessIndirectDesc;
+			bindlessIndirectDepthPrepassDesc.PixelEntryPoint = "PSMainDepthOnly";
+			bindlessIndirectDepthPrepassDesc.ColorFormats.clear();
+			bindlessIndirectDepthPrepassDesc.bDepthWriteEnable = true;
+			bindlessIndirectDepthPrepassDesc.DepthCompareOp = EDepthCompareOp::LessEqual;
+			try
+			{
+				GBufferBindlessIndirectDepthPrepassGraphicsPipeline = renderBackend->CreateGraphicsPipeline(bindlessIndirectDepthPrepassDesc);
+			}
+			catch (const std::exception&)
+			{
+				AppendCpuRuntimeTrace(L"[InitGBufferPass] Bindless indirect depth-prepass pipeline create exception");
+			}
+			if (!GBufferBindlessIndirectDepthPrepassGraphicsPipeline)
+				AppendCpuRuntimeTrace(L"[InitGBufferPass] failed to create Bindless Indirect depth-prepass GBuffer pipeline");
+
+			GraphicsPipelineDesc bindlessIndirectDepthVisualizeDesc = bindlessIndirectDepthPrepassDesc;
+			bindlessIndirectDepthVisualizeDesc.PixelEntryPoint = "PSMainDepthVisualize";
+			bindlessIndirectDepthVisualizeDesc.ColorFormats = { ETextureFormat::R32Float };
+			try
+			{
+				GBufferBindlessIndirectDepthVisualizeGraphicsPipeline = renderBackend->CreateGraphicsPipeline(bindlessIndirectDepthVisualizeDesc);
+			}
+			catch (const std::exception&)
+			{
+				AppendCpuRuntimeTrace(L"[InitGBufferPass] Bindless indirect depth visualize GBuffer pipeline create exception");
+			}
+			if (!GBufferBindlessIndirectDepthVisualizeGraphicsPipeline)
+				AppendCpuRuntimeTrace(L"[InitGBufferPass] failed to create Bindless Indirect depth visualize GBuffer pipeline");
+
+			GraphicsPipelineDesc occlusionBoundsDesc = desc;
+			occlusionBoundsDesc.VertexEntryPoint = "VSMainOcclusionBounds";
+			occlusionBoundsDesc.PixelEntryPoint = "PSMainDepthOnly";
+			occlusionBoundsDesc.VertexElements.clear();
+			occlusionBoundsDesc.VertexStride = 0;
+			occlusionBoundsDesc.ColorFormats.clear();
+			occlusionBoundsDesc.bDepthWriteEnable = false;
+			occlusionBoundsDesc.DepthCompareOp = EDepthCompareOp::LessEqual;
+			occlusionBoundsDesc.PipelineLayout.Bindings = {
+				MakeRHICBV("__CB0", 0, sizeof(GBufferConstantBuffer), gbufferVertexStage),
+				MakeRHIBufferSRV("GBufferOcclusionBoundsBuffer", 16, gbufferVertexStage),
+			};
+			try
+			{
+				GBufferOcclusionBoundsGraphicsPipeline = renderBackend->CreateGraphicsPipeline(occlusionBoundsDesc);
+			}
+			catch (const std::exception&)
+			{
+				AppendCpuRuntimeTrace(L"[InitGBufferPass] occlusion bounds proxy pipeline create exception");
+			}
+			if (!GBufferOcclusionBoundsGraphicsPipeline)
+				AppendCpuRuntimeTrace(L"[InitGBufferPass] failed to create occlusion bounds proxy GBuffer pipeline");
+
+			GraphicsPipelineDesc bindlessIndirectOpaqueDepthTestDesc = bindlessIndirectOpaqueDesc;
+			bindlessIndirectOpaqueDepthTestDesc.bDepthWriteEnable = true;
+			bindlessIndirectOpaqueDepthTestDesc.DepthCompareOp = EDepthCompareOp::LessEqual;
+			try
+			{
+				GBufferBindlessIndirectOpaqueDepthTestGraphicsPipeline = renderBackend->CreateGraphicsPipeline(bindlessIndirectOpaqueDepthTestDesc);
+			}
+			catch (const std::exception&)
+			{
+				AppendCpuRuntimeTrace(L"[InitGBufferPass] Bindless indirect opaque depth-test GBuffer pipeline create exception");
+			}
+			if (!GBufferBindlessIndirectOpaqueDepthTestGraphicsPipeline)
+				AppendCpuRuntimeTrace(L"[InitGBufferPass] failed to create Bindless Indirect opaque depth-test GBuffer pipeline");
 		}
 		else
 		{
@@ -1643,13 +1812,66 @@ void Corona::InitGBufferPass()
 					MakeRHIBufferSRV("GBufferCachedDraws", 1, computeStage),
 					MakeRHIBufferSRV("GBufferCandidateObjectIndices", 2, computeStage),
 					MakeRHIBufferSRV("GBufferObjectBoundsBuffer", 3, computeStage),
+					MakeRHIBufferSRV("GBufferDepthPyramid", 4, computeStage),
 					MakeRHIBufferUAV("GBufferOpaqueArgs", 0, computeStage),
 					MakeRHIBufferUAV("GBufferAlphaArgs", 1, computeStage),
 					MakeRHIBufferUAV("GBufferCullCounters", 2, computeStage),
 					MakeRHICBV("GBufferCullCB", 0, sizeof(GBufferGpuCullConstant), computeStage),
 				});
-			if (!GBufferGpuCullClearPSO || !GBufferGpuCullBuildPSO)
+			auto createOccluderDepthPyramidPSO = [&]() -> std::shared_ptr<ComputePipelineStateObject>
+			{
+				auto pso = renderBackend->CreateComputePipelineStateObject();
+				if (!pso)
+					return nullptr;
+				pso->BindSRV(MakeRHITextureSRV("SourceDepth", 0, computeStage));
+				pso->BindUAV(MakeRHIBufferUAV("DepthPyramid", 0, computeStage));
+				pso->BindCBV(MakeRHICBV("OccluderDepthPyramidCB", 0, sizeof(GBufferOccluderDepthPyramidConstant), computeStage));
+				if (!pso->InitCS(GetAssetFullPath(L"Shaders\\OccluderDepthPyramidCS.hlsl"), "BuildOccluderDepthPyramidCS"))
+					return nullptr;
+				return pso;
+			};
+			GBufferOccluderDepthPyramidBuildPSO = createOccluderDepthPyramidPSO();
+			if (!GBufferGpuCullClearPSO || !GBufferGpuCullBuildPSO || !GBufferOccluderDepthPyramidBuildPSO)
 				AppendCpuRuntimeTrace(L"[InitGBufferPass] failed to create GPU GBuffer culling compute PSOs");
+			if (renderBackend->GetAPI() == ERenderBackendAPI::D3D12 &&
+				renderBackend->SupportsRayTracing())
+			{
+				auto createSparseRayOccluderPSO = [&](const std::string& entryPoint)
+					-> std::shared_ptr<ComputePipelineStateObject>
+				{
+					auto pso = renderBackend->CreateComputePipelineStateObject();
+					if (!pso)
+						return nullptr;
+					pso->BindSRV(MakeRHIAccelerationStructureSRV("GBufferRtScene", 0, computeStage));
+					pso->BindSRV(MakeRHIBufferSRV("RTInstanceSceneObjectIndices", 1, computeStage));
+					pso->BindSRV(MakeRHIBufferSRV("GBufferObjectRanges", 2, computeStage));
+					pso->BindUAV(MakeRHIBufferUAV("SparseRayCandidateObjectIndices", 0, computeStage));
+					pso->BindUAV(MakeRHIBufferUAV("SparseRayObjectHitFlags", 1, computeStage));
+					pso->BindUAV(MakeRHIBufferUAV("SparseRayCounters", 2, computeStage));
+					pso->BindCBV(MakeRHICBV("GBufferSparseRayOccluderCB", 0, sizeof(GBufferSparseRayOccluderConstant), computeStage));
+					if (!pso->InitCSWithInlineRT(GetAssetFullPath(L"Shaders\\GBufferSparseRayOccluderCS.hlsli"), entryPoint))
+						return nullptr;
+					return pso;
+				};
+				GBufferSparseRayOccluderClearPSO = createSparseRayOccluderPSO("ClearSparseRayOccluderSelectionCS");
+				GBufferSparseRayOccluderSelectPSO = createSparseRayOccluderPSO("SelectSparseRayOccludersCS");
+				if (!GBufferSparseRayOccluderClearPSO || !GBufferSparseRayOccluderSelectPSO)
+					AppendCpuRuntimeTrace(L"[InitGBufferPass] failed to create sparse-ray GBuffer occluder PSOs");
+			}
+			if (!GBufferDummyDepthPyramidBuffer)
+			{
+				float dummyDepth = 1.0f;
+				BufferCreateDesc desc = {};
+				desc.NumElements = 1u;
+				desc.ElementSize = static_cast<uint32_t>(sizeof(float));
+				desc.InitialState = EInitialResourceState::ShaderRead;
+				desc.bAllowUnorderedAccess = false;
+				desc.InitialData = &dummyDepth;
+				desc.Shape = EBufferShape::Structured;
+				desc.Access = EBufferAccess::GpuOnly;
+				desc.AllocationPolicy = EBufferAllocationPolicy::Dedicated;
+				GBufferDummyDepthPyramidBuffer = renderBackend->CreateBuffer(desc);
+			}
 		}
 	}
 
@@ -2145,6 +2367,7 @@ void Corona::InitDebugPass()
 		MakeRHITextureSRV("SrcTex", 0, debugPixelStage),
 		MakeRHITextureSRV("SrcTexSH", 1, debugPixelStage),
 		MakeRHITextureSRV("SrcTexNormal", 2, debugPixelStage),
+		MakeRHITextureSRV("DepthMaskTex", 3, debugPixelStage),
 		MakeRHISampler("samplerWrap", 0, debugPixelStage),
 	};
 
@@ -2359,6 +2582,9 @@ void Corona::DebugPass()
 	// DX12 SetGraphicsRootSignature (inside BindGraphicsPipeline) invalidates root
 	// descriptor tables. Each visualize call must bind the pipeline BEFORE writing
 	// textures + CB; the same goes for the once-only sampler bind below.
+	Texture* debugDepthMask =
+		UnjitteredDepthBuffers[ColorBufferWriteIndex] ? UnjitteredDepthBuffers[ColorBufferWriteIndex].get() :
+		(DepthBuffer ? DepthBuffer.get() : DefaultBlackTex.get());
 	auto visualize = [&](const DebugPassCB& cb, Texture* tex) {
 		if (!tex) return;
 		renderBackend->BindGraphicsPipeline(BufferVisualizeGraphicsPipeline.get());
@@ -2366,6 +2592,7 @@ void Corona::DebugPass()
 			{
 				GraphicsBindGroupEntry::SamplerBinding("samplerWrap", samplerWrap.get()),
 				GraphicsBindGroupEntry::TextureSRV("SrcTex", tex),
+				GraphicsBindGroupEntry::TextureSRV("DepthMaskTex", debugDepthMask),
 				GraphicsBindGroupEntry::Constant(0, &cb, sizeof(cb)),
 			});
 		renderBackend->DrawFullscreenQuad(FullScreenVB.get());
@@ -2379,6 +2606,7 @@ void Corona::DebugPass()
 				GraphicsBindGroupEntry::TextureSRV("SrcTex", tex),
 				GraphicsBindGroupEntry::TextureSRV("SrcTexSH", texSH),
 				GraphicsBindGroupEntry::TextureSRV("SrcTexNormal", texNormal),
+				GraphicsBindGroupEntry::TextureSRV("DepthMaskTex", debugDepthMask),
 				GraphicsBindGroupEntry::Constant(0, &cb, sizeof(cb)),
 			});
 		renderBackend->DrawFullscreenQuad(FullScreenVB.get());
@@ -2523,7 +2751,11 @@ void Corona::DebugPass()
 		// depth
 		DebugPassCB cb;
 
-		if (eFS == EDebugVisualization::DEPTH)
+		Texture* depthVisualizationTexture = UnjitteredDepthBuffers[ColorBufferWriteIndex].get();
+		if (eFS == EDebugVisualization::OCCLUDER_DEPTH)
+			depthVisualizationTexture = GBufferOccluderDepthDebugBuffer.get();
+
+		if (eFS == EDebugVisualization::DEPTH || eFS == EDebugVisualization::OCCLUDER_DEPTH)
 		{
 			cb.Offset = glm::vec4(0, 0, 0, 0);
 			cb.Scale = glm::vec4(1, 1, 0, 0);
@@ -2540,8 +2772,11 @@ void Corona::DebugPass()
 
 		cb.ProjectionParams.z = Near;
 		cb.ProjectionParams.w = Far;
-		cb.DebugMode = DEPTH;
-		visualize(cb, UnjitteredDepthBuffers[ColorBufferWriteIndex].get());
+		cb.DebugMode =
+			eFS == EDebugVisualization::OCCLUDER_DEPTH ?
+			DEPTH_QUANTIZED :
+			DEPTH;
+		visualize(cb, depthVisualizationTexture);
 	});
 	functions.push_back([&](EDebugVisualization eFS) {
 		// raw diffuse gi
@@ -2712,7 +2947,7 @@ void Corona::DebugPass()
 			return;
 		}
 
-		cb.DebugMode = RAW_COPY;
+		cb.DebugMode = RAW_COPY_DEPTH_MASKED;
 		visualizeMulti(cb, getLightingDiffuseSource(), getLightingDiffuseAuxSource(), NormalBuffers[ColorBufferWriteIndex].get());
 	});
 	functions.push_back([&](EDebugVisualization eFS) {
@@ -3240,6 +3475,10 @@ void Corona::LightingPass()
 		(!bMobileHybridDirectOnly && AmbientOcclusionBuffer) ?
 		AmbientOcclusionBuffer.get() :
 		DefaultWhiteTex.get();
+	Texture* gbufferDepthTex =
+		(GBufferGenerationMode == EGBufferGenerationMode::RtPrimary && UnjitteredDepthBuffers[ColorBufferWriteIndex]) ?
+		UnjitteredDepthBuffers[ColorBufferWriteIndex].get() :
+		DepthBuffer.get();
 
 	{
 		static UINT32 sLastRTAOEnable = 0xFFFFFFFFu;
@@ -3306,7 +3545,7 @@ void Corona::LightingPass()
 				GraphicsBindGroupEntry::TextureSRV("NormalTex", NormalBuffers[ColorBufferWriteIndex].get()),
 				GraphicsBindGroupEntry::TextureSRV("ShadowTex", shadowTex),
 				GraphicsBindGroupEntry::TextureSRV("VelocityTex", VelocityBuffer.get()),
-				GraphicsBindGroupEntry::TextureSRV("DepthTex", DepthBuffer.get()),
+				GraphicsBindGroupEntry::TextureSRV("DepthTex", gbufferDepthTex),
 				GraphicsBindGroupEntry::TextureSRV("GIResultSHTex", lightingDiffuseAuxTex),
 				GraphicsBindGroupEntry::TextureSRV("GIResultColorTex", lightingDiffuseTex),
 				GraphicsBindGroupEntry::TextureSRV("SpecularGITex", lightingSpecularTex),
@@ -3379,7 +3618,11 @@ void Corona::TemporalAAPass()
 			GraphicsBindGroupEntry::TextureSRV("CurrentColorTex", LightingBuffer.get()),
 			GraphicsBindGroupEntry::TextureSRV("PrevColorTex", PrevColorBuffer),
 			GraphicsBindGroupEntry::TextureSRV("VelocityTex", VelocityBuffer.get()),
-			GraphicsBindGroupEntry::TextureSRV("DepthTex", DepthBuffer.get()),
+			GraphicsBindGroupEntry::TextureSRV(
+				"DepthTex",
+				(GBufferGenerationMode == EGBufferGenerationMode::RtPrimary && UnjitteredDepthBuffers[ColorBufferWriteIndex]) ?
+				UnjitteredDepthBuffers[ColorBufferWriteIndex].get() :
+				DepthBuffer.get()),
 			GraphicsBindGroupEntry::TextureSRV("BloomTex", BloomTexture),
 			GraphicsBindGroupEntry::BufferSRV("Exposure", ExposureData.get()),
 			GraphicsBindGroupEntry::SamplerBinding("sampleWrap", samplerBilinearWrap ? samplerBilinearWrap.get() : samplerWrap.get()),
@@ -3728,7 +3971,10 @@ bool Corona::DrawStaticObjectBindlessBatch(
 	bool hasPrecomputedCandidateDrawCounts,
 	uint32_t precomputedOpaqueDrawCount,
 	uint32_t precomputedAlphaDrawCount,
-	bool useAllStaticObjects)
+	bool useAllStaticObjects,
+	bool depthPrepassOnly,
+	GraphicsPipelineHandle* depthPrepassPipelineOverride,
+	bool sparseRayDepthPrepassOnly)
 {
 	auto failPrerequisite = [](const wchar_t* reason) -> bool
 	{
@@ -3753,12 +3999,16 @@ bool Corona::DrawStaticObjectBindlessBatch(
 		return false;
 	};
 
-	if (objectIndices.empty() && !useAllStaticObjects)
+	if (objectIndices.empty() && !useAllStaticObjects && !sparseRayDepthPrepassOnly)
 		return false;
 	if (!renderBackend)
 		return failPrerequisite(L"missing render backend");
 	if (!GBufferBindlessIndirectGraphicsPipeline)
 		return failPrerequisite(L"missing bindless indirect pipeline");
+	GraphicsPipelineHandle* depthPrepassPso =
+		depthPrepassPipelineOverride ? depthPrepassPipelineOverride : GBufferBindlessIndirectDepthPrepassGraphicsPipeline.get();
+	if (depthPrepassOnly && !depthPrepassPso)
+		return failPrerequisite(L"missing depth-prepass pipeline");
 	if (!samplerWrap)
 		return failPrerequisite(L"missing sampler");
 	if (!DefaultWhiteTex || !DefaultNormalTex || !DefaultRougnessTex || !DefaultBlackTex)
@@ -4122,7 +4372,7 @@ bool Corona::DrawStaticObjectBindlessBatch(
 	static bool bLoggedFirstStaticObjectGpuBatch = false;
 
 	uint32_t firstObjectIndex = std::numeric_limits<uint32_t>::max();
-	if (useAllStaticObjects)
+	if (useAllStaticObjects || sparseRayDepthPrepassOnly)
 	{
 		for (uint32_t objectIndex = 0; objectIndex < static_cast<uint32_t>(RenderWorld.SceneObjects.size()); ++objectIndex)
 		{
@@ -4205,15 +4455,180 @@ bool Corona::DrawStaticObjectBindlessBatch(
 		currentState = nextState;
 	};
 
+	auto buildSparseRayOccluderCandidates = [&](const CachedGBufferStaticDrawTable& table, uint32_t candidateCapacity)
+		-> Buffer*
+	{
+		if (!depthPrepassOnly || !sparseRayDepthPrepassOnly)
+			return nullptr;
+		if (!GBufferSparseRayOccluderClearPSO ||
+			!GBufferSparseRayOccluderSelectPSO ||
+			!TLAS ||
+			!RTInstanceSceneObjectIndexBuffer ||
+			RayTracingInstances.empty() ||
+			table.ObjectCount == 0u ||
+			candidateCapacity == 0u)
+		{
+			return nullptr;
+		}
+
+		auto createGpuWriteStructuredBuffer = [&](uint32_t numElements, uint32_t elementSize)
+			-> std::shared_ptr<Buffer>
+		{
+			BufferCreateDesc desc = {};
+			desc.NumElements = std::max(1u, numElements);
+			desc.ElementSize = elementSize;
+			desc.InitialState = EInitialResourceState::ShaderRead;
+			desc.bAllowUnorderedAccess = true;
+			desc.Shape = EBufferShape::Structured;
+			desc.Access = EBufferAccess::GpuOnly;
+			desc.AllocationPolicy = EBufferAllocationPolicy::Dedicated;
+			return renderBackend->CreateBuffer(desc);
+		};
+
+		const bool bNeedCandidateBuffer =
+			!GBufferSparseRayOccluderCandidateObjectBuffer ||
+			GBufferSparseRayOccluderCandidateCapacity != candidateCapacity;
+		const bool bNeedObjectHitBuffer =
+			!GBufferSparseRayOccluderObjectHitFlagsBuffer ||
+			GBufferSparseRayOccluderObjectCapacity != table.ObjectCount;
+		if (bNeedCandidateBuffer)
+		{
+			GBufferSparseRayOccluderCandidateObjectBuffer = createGpuWriteStructuredBuffer(
+				candidateCapacity,
+				static_cast<uint32_t>(sizeof(uint32_t)));
+			GBufferSparseRayOccluderCandidateObjectState = EResourceState::ShaderRead;
+			GBufferSparseRayOccluderCandidateCapacity =
+				GBufferSparseRayOccluderCandidateObjectBuffer ? candidateCapacity : 0u;
+			GBufferSparseRayOccluderBuiltFrame = UINT32_MAX;
+		}
+		if (bNeedObjectHitBuffer)
+		{
+			GBufferSparseRayOccluderObjectHitFlagsBuffer = createGpuWriteStructuredBuffer(
+				table.ObjectCount,
+				static_cast<uint32_t>(sizeof(uint32_t)));
+			GBufferSparseRayOccluderObjectHitFlagsState = EResourceState::ShaderRead;
+			GBufferSparseRayOccluderObjectCapacity =
+				GBufferSparseRayOccluderObjectHitFlagsBuffer ? table.ObjectCount : 0u;
+			GBufferSparseRayOccluderBuiltFrame = UINT32_MAX;
+		}
+		if (!GBufferSparseRayOccluderCounterBuffer)
+		{
+			GBufferSparseRayOccluderCounterBuffer = createGpuWriteStructuredBuffer(
+				2u,
+				static_cast<uint32_t>(sizeof(uint32_t)));
+			GBufferSparseRayOccluderCounterState = EResourceState::ShaderRead;
+			GBufferSparseRayOccluderBuiltFrame = UINT32_MAX;
+		}
+		if (!GBufferSparseRayOccluderCandidateObjectBuffer ||
+			!GBufferSparseRayOccluderObjectHitFlagsBuffer ||
+			!GBufferSparseRayOccluderCounterBuffer)
+		{
+			return nullptr;
+		}
+
+		const uint32_t updateInterval = std::max(1u, GBufferSparseRayOccluderUpdateInterval);
+		const bool bCanReuse =
+			GBufferSparseRayOccluderBuiltFrame != UINT32_MAX &&
+			GBufferSparseRayOccluderSceneGeneration == table.Generation &&
+			FrameCounter >= GBufferSparseRayOccluderBuiltFrame &&
+			FrameCounter - GBufferSparseRayOccluderBuiltFrame < updateInterval &&
+			GBufferSparseRayOccluderCandidateObjectState == EResourceState::ShaderRead;
+		if (bCanReuse)
+		{
+			GBufferLastSparseRayOccluderRayCount =
+				static_cast<uint64_t>(std::max(1u, GBufferSparseRayOccluderGridWidth)) *
+				static_cast<uint64_t>(std::max(1u, GBufferSparseRayOccluderGridHeight));
+			GBufferLastSparseRayOccluderCandidateCapacity = candidateCapacity;
+			GBufferLastDepthPrepassCandidateObjectCount = GBufferLastSparseRayOccluderRayCount;
+			GBufferLastDepthPrepassSelectedObjectCount = candidateCapacity;
+			GBufferLastDepthPrepassOpaqueDrawCount = table.TotalOpaqueDrawCount;
+			return GBufferSparseRayOccluderCandidateObjectBuffer.get();
+		}
+
+		transitionTrackedBuffer(
+			GBufferSparseRayOccluderCandidateObjectBuffer.get(),
+			GBufferSparseRayOccluderCandidateObjectState,
+			EResourceState::UnorderedAccess);
+		transitionTrackedBuffer(
+			GBufferSparseRayOccluderObjectHitFlagsBuffer.get(),
+			GBufferSparseRayOccluderObjectHitFlagsState,
+			EResourceState::UnorderedAccess);
+		transitionTrackedBuffer(
+			GBufferSparseRayOccluderCounterBuffer.get(),
+			GBufferSparseRayOccluderCounterState,
+			EResourceState::UnorderedAccess);
+
+		GBufferSparseRayOccluderConstant sparseCB{};
+		sparseCB.InvViewProjectionMatrix = glm::transpose(glm::inverse(UnjitteredViewProjMat));
+		sparseCB.CameraPositionAndTMin =
+			glm::vec4(RenderFrameCameraPosition, std::max(0.001f, Near * 0.5f));
+		sparseCB.RayGridWidth = std::max(1u, GBufferSparseRayOccluderGridWidth);
+		sparseCB.RayGridHeight = std::max(1u, GBufferSparseRayOccluderGridHeight);
+		sparseCB.MaxOccluderObjects = candidateCapacity;
+		sparseCB.ObjectCount = table.ObjectCount;
+		sparseCB.RTInstanceCount = static_cast<uint32_t>(std::min<size_t>(
+			RayTracingInstances.size(),
+			static_cast<size_t>(std::numeric_limits<uint32_t>::max())));
+		sparseCB.FrameIndex = static_cast<uint32_t>(FrameCounter);
+
+		GBufferSparseRayOccluderClearPSO->SetAccelerationStructure("GBufferRtScene", TLAS);
+		GBufferSparseRayOccluderClearPSO->SetBufferSRV("RTInstanceSceneObjectIndices", RTInstanceSceneObjectIndexBuffer.get());
+		GBufferSparseRayOccluderClearPSO->SetBufferSRV("GBufferObjectRanges", table.GpuObjectRangeBuffer.get());
+		GBufferSparseRayOccluderClearPSO->SetBufferUAV("SparseRayCandidateObjectIndices", GBufferSparseRayOccluderCandidateObjectBuffer.get());
+		GBufferSparseRayOccluderClearPSO->SetBufferUAV("SparseRayObjectHitFlags", GBufferSparseRayOccluderObjectHitFlagsBuffer.get());
+		GBufferSparseRayOccluderClearPSO->SetBufferUAV("SparseRayCounters", GBufferSparseRayOccluderCounterBuffer.get());
+		GBufferSparseRayOccluderClearPSO->SetCBVValue("GBufferSparseRayOccluderCB", &sparseCB);
+		GBufferSparseRayOccluderClearPSO->Apply();
+		const uint32_t clearElements = std::max(candidateCapacity, table.ObjectCount);
+		renderBackend->Dispatch(std::max(1u, (clearElements + 63u) / 64u), 1, 1);
+		renderBackend->UAVBarrier(GBufferSparseRayOccluderCandidateObjectBuffer.get());
+		renderBackend->UAVBarrier(GBufferSparseRayOccluderObjectHitFlagsBuffer.get());
+		renderBackend->UAVBarrier(GBufferSparseRayOccluderCounterBuffer.get());
+
+		GBufferSparseRayOccluderSelectPSO->SetAccelerationStructure("GBufferRtScene", TLAS);
+		GBufferSparseRayOccluderSelectPSO->SetBufferSRV("RTInstanceSceneObjectIndices", RTInstanceSceneObjectIndexBuffer.get());
+		GBufferSparseRayOccluderSelectPSO->SetBufferSRV("GBufferObjectRanges", table.GpuObjectRangeBuffer.get());
+		GBufferSparseRayOccluderSelectPSO->SetBufferUAV("SparseRayCandidateObjectIndices", GBufferSparseRayOccluderCandidateObjectBuffer.get());
+		GBufferSparseRayOccluderSelectPSO->SetBufferUAV("SparseRayObjectHitFlags", GBufferSparseRayOccluderObjectHitFlagsBuffer.get());
+		GBufferSparseRayOccluderSelectPSO->SetBufferUAV("SparseRayCounters", GBufferSparseRayOccluderCounterBuffer.get());
+		GBufferSparseRayOccluderSelectPSO->SetCBVValue("GBufferSparseRayOccluderCB", &sparseCB);
+		GBufferSparseRayOccluderSelectPSO->Apply();
+		renderBackend->Dispatch(
+			std::max(1u, (sparseCB.RayGridWidth + 7u) / 8u),
+			std::max(1u, (sparseCB.RayGridHeight + 7u) / 8u),
+			1);
+		renderBackend->UAVBarrier(GBufferSparseRayOccluderCandidateObjectBuffer.get());
+		renderBackend->UAVBarrier(GBufferSparseRayOccluderObjectHitFlagsBuffer.get());
+		renderBackend->UAVBarrier(GBufferSparseRayOccluderCounterBuffer.get());
+
+		transitionTrackedBuffer(
+			GBufferSparseRayOccluderCandidateObjectBuffer.get(),
+			GBufferSparseRayOccluderCandidateObjectState,
+			EResourceState::ShaderRead);
+
+		GBufferSparseRayOccluderBuiltFrame = static_cast<uint32_t>(FrameCounter);
+		GBufferSparseRayOccluderSceneGeneration = table.Generation;
+		GBufferLastSparseRayOccluderRayCount =
+			static_cast<uint64_t>(sparseCB.RayGridWidth) * static_cast<uint64_t>(sparseCB.RayGridHeight);
+		GBufferLastSparseRayOccluderCandidateCapacity = candidateCapacity;
+		GBufferLastDepthPrepassCandidateObjectCount = GBufferLastSparseRayOccluderRayCount;
+		GBufferLastDepthPrepassSelectedObjectCount = candidateCapacity;
+		GBufferLastDepthPrepassOpaqueDrawCount = table.TotalOpaqueDrawCount;
+		return GBufferSparseRayOccluderCandidateObjectBuffer.get();
+	};
+
 	auto trySubmitGpuGeneratedIndirect = [&](bool& outGpuWorkStarted) -> bool
 	{
 		outGpuWorkStarted = false;
 		if (GBufferObjectCullingMode != EGBufferObjectCullingMode::GpuIndirect)
 			return false;
+		if (sparseRayDepthPrepassOnly && !depthPrepassOnly)
+			return false;
 		const RenderBackendCapabilities gpuCapabilities = renderBackend->GetCapabilities();
 		if (!gpuCapabilities.SupportsDrawIndirectCount ||
 			!GBufferGpuCullClearPSO ||
 			!GBufferGpuCullBuildPSO ||
+			!GBufferDummyDepthPyramidBuffer ||
 			!staticDrawTable.GpuObjectRangeBuffer ||
 			!staticDrawTable.GpuDrawInfoBuffer ||
 			!staticDrawTable.GpuObjectBoundsBuffer ||
@@ -4228,10 +4643,12 @@ bool Corona::DrawStaticObjectBindlessBatch(
 			return false;
 
 		uint32_t candidateOpaqueMaxDraws =
-			useAllStaticObjects ? staticDrawTable.TotalOpaqueDrawCount : precomputedOpaqueDrawCount;
+			(useAllStaticObjects || sparseRayDepthPrepassOnly) ? staticDrawTable.TotalOpaqueDrawCount : precomputedOpaqueDrawCount;
 		uint32_t candidateAlphaMaxDraws =
 			useAllStaticObjects ? staticDrawTable.TotalAlphaDrawCount : precomputedAlphaDrawCount;
-		if (!useAllStaticObjects && !hasPrecomputedCandidateDrawCounts)
+		if (sparseRayDepthPrepassOnly)
+			candidateAlphaMaxDraws = 0u;
+		if (!useAllStaticObjects && !sparseRayDepthPrepassOnly && !hasPrecomputedCandidateDrawCounts)
 		{
 			candidateOpaqueMaxDraws = 0;
 			candidateAlphaMaxDraws = 0;
@@ -4258,10 +4675,16 @@ bool Corona::DrawStaticObjectBindlessBatch(
 		std::shared_ptr<Buffer> candidateObjectBuffer;
 		Buffer* candidateObjectBufferRaw = nullptr;
 		const uint32_t candidateObjectCount =
-			useAllStaticObjects ? staticDrawTable.ObjectCount : static_cast<uint32_t>(objectIndices.size());
+			sparseRayDepthPrepassOnly ?
+			std::max(1u, GBufferDepthPrepassMaxOccluderObjects) :
+			(useAllStaticObjects ? staticDrawTable.ObjectCount : static_cast<uint32_t>(objectIndices.size()));
 		if (useAllStaticObjects)
 		{
 			candidateObjectBufferRaw = staticDrawTable.GpuAllObjectIndexBuffer.get();
+		}
+		else if (sparseRayDepthPrepassOnly)
+		{
+			candidateObjectBufferRaw = buildSparseRayOccluderCandidates(staticDrawTable, candidateObjectCount);
 		}
 		else
 		{
@@ -4306,11 +4729,41 @@ bool Corona::DrawStaticObjectBindlessBatch(
 		const FrustumPlaneArray frustumPlanes = BuildFrustumPlanes(UnjitteredViewProjMat);
 		for (size_t planeIndex = 0; planeIndex < frustumPlanes.size(); ++planeIndex)
 			cullCB.FrustumPlanes[planeIndex] = frustumPlanes[planeIndex];
+		cullCB.ViewProjectionMatrix = glm::transpose(UnjitteredViewProjMat);
 		cullCB.EnableFrustumCull = 1u;
+		const bool bUseHiZOcclusion =
+			!depthPrepassOnly &&
+			bEnableGBufferHiZOcclusion &&
+			GBufferOccluderDepthPyramidBuildPSO &&
+			GBufferOccluderDepthPyramidBuffer &&
+			GBufferOccluderDepthPyramidBuiltFrame == FrameCounter &&
+			GBufferOccluderDepthPyramidState == EResourceState::ShaderRead &&
+			GBufferOccluderDepthPyramidWidth != 0u &&
+			GBufferOccluderDepthPyramidHeight != 0u &&
+			GBufferOccluderDepthPyramidMipCount != 0u;
+		cullCB.EnableHiZOcclusion = bUseHiZOcclusion ? 1u : 0u;
+		cullCB.DepthPyramidWidth = GBufferOccluderDepthPyramidWidth;
+		cullCB.DepthPyramidHeight = GBufferOccluderDepthPyramidHeight;
+		cullCB.DepthPyramidMipCount = GBufferOccluderDepthPyramidMipCount;
+		cullCB.DepthPyramidMaxMip = GBufferOccluderDepthPyramidMipCount != 0u ? GBufferOccluderDepthPyramidMipCount - 1u : 0u;
+		cullCB.HiZDepthBias = 0.002f;
+		for (uint32_t packedOffsetIndex = 0; packedOffsetIndex < 4u; ++packedOffsetIndex)
+		{
+			cullCB.DepthPyramidMipOffsets[packedOffsetIndex] = glm::uvec4(0u);
+			for (uint32_t lane = 0; lane < 4u; ++lane)
+			{
+				const uint32_t mip = packedOffsetIndex * 4u + lane;
+				if (mip < GBufferOccluderDepthPyramidMipCount)
+					cullCB.DepthPyramidMipOffsets[packedOffsetIndex][lane] = GBufferOccluderDepthPyramidMipOffsets[mip];
+			}
+		}
 		GBufferGpuCullBuildPSO->SetBufferSRV("GBufferObjectRanges", staticDrawTable.GpuObjectRangeBuffer.get());
 		GBufferGpuCullBuildPSO->SetBufferSRV("GBufferCachedDraws", staticDrawTable.GpuDrawInfoBuffer.get());
 		GBufferGpuCullBuildPSO->SetBufferSRV("GBufferCandidateObjectIndices", candidateObjectBufferRaw);
 		GBufferGpuCullBuildPSO->SetBufferSRV("GBufferObjectBoundsBuffer", staticDrawTable.GpuObjectBoundsBuffer.get());
+		GBufferGpuCullBuildPSO->SetBufferSRV(
+			"GBufferDepthPyramid",
+			bUseHiZOcclusion ? GBufferOccluderDepthPyramidBuffer.get() : GBufferDummyDepthPyramidBuffer.get());
 		GBufferGpuCullBuildPSO->SetBufferUAV("GBufferOpaqueArgs", staticDrawTable.GpuOpaqueIndirectArgsBuffer.get());
 		GBufferGpuCullBuildPSO->SetBufferUAV("GBufferAlphaArgs", staticDrawTable.GpuAlphaIndirectArgsBuffer.get());
 		GBufferGpuCullBuildPSO->SetBufferUAV("GBufferCullCounters", staticDrawTable.GpuIndirectCountBuffer.get());
@@ -4336,14 +4789,37 @@ bool Corona::DrawStaticObjectBindlessBatch(
 			EResourceState::IndirectArgument);
 		GBufferProfileAdd(profile, batchProfile.BuildMs, batchProfile.BuildCount, buildStart);
 
-		GraphicsPipelineHandle* opaquePso = GBufferBindlessIndirectOpaqueGraphicsPipeline.get();
-		GraphicsPipelineHandle* opaqueDrawPso = opaquePso ? opaquePso : GBufferBindlessIndirectGraphicsPipeline.get();
+		GraphicsPipelineHandle* opaquePso =
+			depthPrepassOnly ?
+			depthPrepassPso :
+			(bGBufferDepthPrepassMainPassActive && GBufferBindlessIndirectOpaqueDepthTestGraphicsPipeline ?
+				GBufferBindlessIndirectOpaqueDepthTestGraphicsPipeline.get() :
+				GBufferBindlessIndirectOpaqueGraphicsPipeline.get());
+		GraphicsPipelineHandle* opaqueDrawPso =
+			opaquePso ? opaquePso : GBufferBindlessIndirectGraphicsPipeline.get();
 		const bool bOpaqueOk = submitGBufferBatchCount(
 			opaqueDrawPso,
 			staticDrawTable.GpuOpaqueIndirectArgsBuffer.get(),
 			staticDrawTable.GpuIndirectCountBuffer.get(),
 			0,
 			candidateOpaqueMaxDraws);
+		if (depthPrepassOnly)
+		{
+			if (!bOpaqueOk)
+				return false;
+			static bool bLoggedFirstDepthPrepassGpuBatch = false;
+			if (!bLoggedFirstDepthPrepassGpuBatch || (FrameCounter % 120u) == 0u)
+			{
+				AppendCpuRuntimeTrace(
+					std::wstring(L"[GBufferDepthPrepass] submitted mode=") +
+					(sparseRayDepthPrepassOnly ? L"sparse-ray-gpu" : L"gpu") +
+					L" candidateObjects=" +
+					std::to_wstring(candidateObjectCount) +
+					L", opaqueMax=" + std::to_wstring(candidateOpaqueMaxDraws));
+				bLoggedFirstDepthPrepassGpuBatch = true;
+			}
+			return true;
+		}
 		const bool bAlphaOk = submitGBufferBatchCount(
 			GBufferBindlessIndirectGraphicsPipeline.get(),
 			staticDrawTable.GpuAlphaIndirectArgsBuffer.get(),
@@ -4387,6 +4863,8 @@ bool Corona::DrawStaticObjectBindlessBatch(
 		return true;
 	if (bGpuWorkStarted)
 		return failPrerequisite(L"GPU generated indirect draw submission failed");
+	if (sparseRayDepthPrepassOnly)
+		return failPrerequisite(L"sparse-ray depth prepass GPU path unavailable");
 	if (useAllStaticObjects)
 		return failPrerequisite(L"GPU world static batch unavailable");
 
@@ -4471,12 +4949,32 @@ bool Corona::DrawStaticObjectBindlessBatch(
 	const uint64_t gbufferArgStride = static_cast<uint64_t>(sizeof(DrawIndirectArguments));
 
 	bool bDrawSubmitted = false;
-	GraphicsPipelineHandle* opaquePso = GBufferBindlessIndirectOpaqueGraphicsPipeline.get();
+	GraphicsPipelineHandle* opaquePso =
+		depthPrepassOnly ?
+		depthPrepassPso :
+		(bGBufferDepthPrepassMainPassActive && GBufferBindlessIndirectOpaqueDepthTestGraphicsPipeline ?
+			GBufferBindlessIndirectOpaqueDepthTestGraphicsPipeline.get() :
+			GBufferBindlessIndirectOpaqueGraphicsPipeline.get());
 	if (opaquePso)
 	{
+		const bool bOpaqueOk = submitGBufferBatch(opaquePso, indirectArgsBuffer.get(), 0, gbufferOpaqueDrawCount);
+		if (depthPrepassOnly)
+		{
+			if (!bOpaqueOk)
+				return failPrerequisite(L"depth-prepass draw submission failed");
+			static bool bLoggedFirstDepthPrepassCpuBatch = false;
+			if (!bLoggedFirstDepthPrepassCpuBatch || (FrameCounter % 120u) == 0u)
+			{
+				AppendCpuRuntimeTrace(
+					L"[GBufferDepthPrepass] submitted mode=cpu objects=" +
+					std::to_wstring(objectIndices.size()) +
+					L", opaqueDraws=" + std::to_wstring(gbufferOpaqueDrawCount));
+				bLoggedFirstDepthPrepassCpuBatch = true;
+			}
+			return true;
+		}
 		// Opaque batch first (fills depth so early-Z rejects occluded opaque
 		// pixels), then the alpha-tested batch on the discard PSO.
-		const bool bOpaqueOk = submitGBufferBatch(opaquePso, indirectArgsBuffer.get(), 0, gbufferOpaqueDrawCount);
 		const bool bAlphaOk = submitGBufferBatch(
 			GBufferBindlessIndirectGraphicsPipeline.get(),
 			indirectArgsBuffer.get(),
@@ -4523,6 +5021,37 @@ bool Corona::DrawStaticObjectBindlessBatch(
 void Corona::ResetGBufferStaticDrawCache()
 {
 	ResetCachedGBufferStaticDrawTable(this);
+	GBufferSparseRayOccluderBuiltFrame = UINT32_MAX;
+	GBufferSparseRayOccluderSceneGeneration = UINT64_MAX;
+}
+
+void Corona::ResetGBufferOcclusionRuntimeState()
+{
+	if (renderBackend)
+		renderBackend->WaitForGpu();
+	SceneObjectCullingStates.clear();
+	GBufferOcclusionQueryCount = 0;
+	GBufferOcclusionWarmupStartFrame = FrameCounter;
+	bGBufferOcclusionQueriesActive = false;
+	bGBufferOcclusionQueryDrawActive = false;
+	bGBufferOcclusionWarmupStartFrameValid = true;
+	bGBufferAdaptiveOcclusionWarmupThisFrame = false;
+	bGBufferOcclusionCameraHistoryValid = false;
+	bGBufferOcclusionCameraMovedThisFrame = false;
+	ResetGBufferStaticDrawCache();
+}
+
+void Corona::SetGBufferOcclusionMode(EGBufferOcclusionMode mode, const wchar_t* reason)
+{
+	if (GBufferOcclusionMode == mode)
+		return;
+	GBufferOcclusionMode = mode;
+	ResetGBufferOcclusionRuntimeState();
+	AppendCpuRuntimeTrace(
+		std::wstring(L"[GBufferOcclusion] mode=") +
+		std::to_wstring(static_cast<int>(mode)) +
+		L", reset=1, reason=" +
+		(reason ? reason : L"unknown"));
 }
 
 void Corona::DrawScene(shared_ptr<Scene> scene, const glm::mat4x4& instanceTransform, float Roughness, float Metalic, bool bOverrideRoughnessMetallic)
@@ -4538,9 +5067,12 @@ void Corona::DrawScene(shared_ptr<Scene> scene, const glm::mat4x4& instanceTrans
 		DefaultRougnessTex.get(),
 		DefaultBlackTex.get());
 	GBufferGeometryTable geometryTable = BuildGBufferGeometryTable(renderBackend.get(), scene.get());
+	const bool bForceDirectDrawForOcclusionQuery =
+		bGBufferOcclusionQueryDrawActive;
 	bool bUseSceneBindlessGeometry =
 		GBufferBindlessGeometryGraphicsPipeline &&
-		geometryTable.Buffer;
+		geometryTable.Buffer &&
+		!bForceDirectDrawForOcclusionQuery;
 	const RenderBackendCapabilities backendCapabilities =
 		renderBackend ? renderBackend->GetCapabilities() : RenderBackendCapabilities{};
 	const bool bBackendSupportsBindlessIndirect =
@@ -4551,7 +5083,8 @@ void Corona::DrawScene(shared_ptr<Scene> scene, const glm::mat4x4& instanceTrans
 		bUseSceneBindlessGeometry &&
 		IsGBufferSceneStaticBindlessGeometryEligible(scene.get());
 	const bool bSceneRequiresBindlessIndirect =
-		bSceneStaticBindlessIndirectCandidate;
+		bSceneStaticBindlessIndirectCandidate &&
+		!bForceDirectDrawForOcclusionQuery;
 
 	auto tryDrawSceneBindlessIndirect = [&]() -> bool
 	{
@@ -4578,6 +5111,8 @@ void Corona::DrawScene(shared_ptr<Scene> scene, const glm::mat4x4& instanceTrans
 			return false;
 		};
 
+		if (bForceDirectDrawForOcclusionQuery)
+			return false;
 		if (!bSceneStaticBindlessIndirectCandidate)
 			return false;
 		if (!bBackendSupportsBindlessIndirect)
@@ -5952,8 +6487,15 @@ void Corona::PrepareGBufferCulling(uint32_t sceneObjectCount)
 	GBufferLastBindlessObjectBatchCount = 0;
 	GBufferLastBindlessObjectCount = 0;
 	GBufferLastBindlessObjectDrawCount = 0;
+	GBufferLastDepthPrepassCandidateObjectCount = 0;
+	GBufferLastDepthPrepassSelectedObjectCount = 0;
+	GBufferLastDepthPrepassOpaqueDrawCount = 0;
+	GBufferLastSparseRayOccluderRayCount = 0;
+	GBufferLastSparseRayOccluderCandidateCapacity = 0;
 	GBufferOcclusionQueryCount = 0;
 	bGBufferOcclusionQueriesActive = false;
+	bGBufferOcclusionQueryDrawActive = false;
+	bGBufferAdaptiveOcclusionWarmupThisFrame = false;
 	bGBufferOcclusionCameraMovedThisFrame = false;
 
 	if (IsVulkanCaptureSafeActive())
@@ -5969,6 +6511,8 @@ void Corona::PrepareGBufferCulling(uint32_t sceneObjectCount)
 	if (capacityPerFrame != GBufferOcclusionQueryCapacityPerFrame)
 	{
 		GBufferOcclusionQueryCapacityPerFrame = capacityPerFrame;
+		GBufferOcclusionWarmupStartFrame = FrameCounter;
+		bGBufferOcclusionWarmupStartFrameValid = true;
 		SceneObjectCullingStates.assign(
 			std::max<size_t>(1u, static_cast<size_t>(NextSceneObjectHandle)),
 			SceneObjectCullingState{});
@@ -5981,6 +6525,20 @@ void Corona::PrepareGBufferCulling(uint32_t sceneObjectCount)
 
 	GBufferOcclusionFrameIndex = renderBackend->GetCurrentFrameIndex();
 	bGBufferOcclusionQueriesActive = GBufferOcclusionQueryCapacityPerFrame > 0;
+	const bool bAggressiveOcclusion =
+		GBufferOcclusionMode == EGBufferOcclusionMode::Aggressive;
+	const bool bAdaptiveOcclusion =
+		GBufferOcclusionMode == EGBufferOcclusionMode::Adaptive;
+	if (!bGBufferOcclusionWarmupStartFrameValid)
+	{
+		GBufferOcclusionWarmupStartFrame = FrameCounter;
+		bGBufferOcclusionWarmupStartFrameValid = true;
+	}
+	bGBufferAdaptiveOcclusionWarmupThisFrame =
+		bAdaptiveOcclusion &&
+		static_cast<uint64_t>(FrameCounter) <= GBufferOcclusionWarmupStartFrame + kAdaptiveGBufferOcclusionWarmupFrames;
+	if (bGBufferAdaptiveOcclusionWarmupThisFrame)
+		bGBufferOcclusionQueriesActive = false;
 	const glm::vec3 cameraDelta = RenderFrameCameraPosition - GBufferOcclusionLastCameraPosition;
 	const float cameraMoveThresholdSq =
 		kGBufferOcclusionCameraMoveThreshold * kGBufferOcclusionCameraMoveThreshold;
@@ -5997,7 +6555,7 @@ void Corona::PrepareGBufferCulling(uint32_t sceneObjectCount)
 		glm::dot(cameraDelta, cameraDelta) > cameraMoveThresholdSq ||
 		glm::dot(currentLook, previousLook) < kGBufferOcclusionCameraRotationDotThreshold)
 	{
-		bGBufferOcclusionCameraMovedThisFrame = bCameraHistoryValid;
+		bGBufferOcclusionCameraMovedThisFrame = bCameraHistoryValid && !bAggressiveOcclusion;
 		GBufferOcclusionLastCameraPosition = RenderFrameCameraPosition;
 		GBufferOcclusionLastCameraLookDirection = currentLook;
 		bGBufferOcclusionCameraHistoryValid = true;
@@ -6009,9 +6567,16 @@ bool Corona::ShouldDrawSceneObjectInGBuffer(const SceneObject& object, const glm
 	if (!bGBufferOcclusionQueriesActive || object.Handle == InvalidSceneObjectHandle)
 		return true;
 
+	const bool bAggressiveOcclusion =
+		GBufferOcclusionMode == EGBufferOcclusionMode::Aggressive;
+	const bool bAdaptiveOcclusion =
+		GBufferOcclusionMode == EGBufferOcclusionMode::Adaptive;
+	const bool bConservativeOcclusion =
+		GBufferOcclusionMode == EGBufferOcclusionMode::Conservative;
 	if (SceneObjectCullingStates.size() <= static_cast<size_t>(object.Handle))
 		SceneObjectCullingStates.resize(static_cast<size_t>(object.Handle) + 1u);
 	SceneObjectCullingState& state = SceneObjectCullingStates[object.Handle];
+	state.ForceOcclusionQueryThisFrame = false;
 	const float movementThreshold = std::max(4.0f, boundsRadius * 0.05f);
 	const glm::vec3 boundsDelta = boundsCenter - state.LastBoundsCenter;
 	const bool boundsChanged =
@@ -6022,6 +6587,7 @@ bool Corona::ShouldDrawSceneObjectInGBuffer(const SceneObject& object, const glm
 	{
 		state.LastVisible = true;
 		state.HasPendingOcclusionQuery = false;
+		state.ForceOcclusionQueryThisFrame = false;
 		state.ConsecutiveOccludedQueries = 0;
 		state.LastTestFrame = 0;
 		state.LastVisibleFrame = FrameCounter;
@@ -6043,12 +6609,18 @@ bool Corona::ShouldDrawSceneObjectInGBuffer(const SceneObject& object, const glm
 		{
 			state.ConsecutiveOccludedQueries =
 				static_cast<uint8_t>(std::min<uint32_t>(255u, static_cast<uint32_t>(state.ConsecutiveOccludedQueries) + 1u));
-			if (state.ConsecutiveOccludedQueries >= kMinConsecutiveGBufferOcclusionMisses)
+			const uint8_t minOcclusionMisses =
+				bAggressiveOcclusion ?
+				1u :
+				(bAdaptiveOcclusion ?
+					(ComputeGBufferOcclusionImportance(RenderFrameCameraPosition, state.LastBoundsCenter, state.LastBoundsRadius) >= 0.25f ? 4u : 3u) :
+					kMinConsecutiveGBufferOcclusionMisses);
+			if (state.ConsecutiveOccludedQueries >= minOcclusionMisses)
 				state.LastVisible = false;
 		}
 		state.HasPendingOcclusionQuery = false;
 	}
-	if (bGBufferOcclusionCameraMovedThisFrame && state.ConsecutiveOccludedQueries != 0)
+	if (bConservativeOcclusion && bGBufferOcclusionCameraMovedThisFrame && state.ConsecutiveOccludedQueries != 0)
 	{
 		state.LastVisible = true;
 		state.ConsecutiveOccludedQueries = 0;
@@ -6062,7 +6634,26 @@ bool Corona::ShouldDrawSceneObjectInGBuffer(const SceneObject& object, const glm
 		kMaxGBufferOcclusionSkipFrames + 1u;
 	if (!state.LastVisible)
 	{
-		if (bGBufferOcclusionCameraMovedThisFrame || framesSinceTest > kMaxGBufferOcclusionSkipFrames)
+		if (bAdaptiveOcclusion)
+		{
+			const float importance =
+				ComputeGBufferOcclusionImportance(RenderFrameCameraPosition, boundsCenter, boundsRadius);
+			if (ShouldAdaptiveOcclusionProbe(
+					object.Handle,
+					static_cast<uint64_t>(FrameCounter),
+					framesSinceTest,
+					false,
+					bGBufferOcclusionCameraMovedThisFrame,
+					importance))
+			{
+				state.ForceOcclusionQueryThisFrame = true;
+				return true;
+			}
+			++GBufferLastOcclusionCulledObjectCount;
+			return false;
+		}
+		if (bConservativeOcclusion &&
+			(bGBufferOcclusionCameraMovedThisFrame || framesSinceTest > kMaxGBufferOcclusionSkipFrames))
 		{
 			state.LastVisible = true;
 			state.ConsecutiveOccludedQueries = 0;
@@ -6103,6 +6694,7 @@ void Corona::EndGBufferOcclusionQuery(SceneObjectHandle handle, uint32_t queryIn
 		SceneObjectCullingStates.resize(static_cast<size_t>(handle) + 1u);
 	SceneObjectCullingState& state = SceneObjectCullingStates[handle];
 	state.HasPendingOcclusionQuery = true;
+	state.ForceOcclusionQueryThisFrame = false;
 	state.LastQueryIndex = queryIndex;
 	state.LastQueryFrameIndex = GBufferOcclusionFrameIndex;
 	state.LastTestFrame = FrameCounter;
@@ -6122,6 +6714,7 @@ void Corona::FinishGBufferCulling()
 
 void Corona::GBufferPass()
 {
+	bGBufferDepthPrepassMainPassActive = false;
 	const bool bGBufferPassProfileEnabled = IsGBufferPassProfileEnabled();
 	GBufferPassProfile& gbufferPassProfile = GetGBufferPassProfile();
 	if (bGBufferPassProfileEnabled)
@@ -6160,10 +6753,10 @@ void Corona::GBufferPass()
 
 	const auto clearProfileBegin =
 		bGBufferPassProfileEnabled ? GBufferProfileClock::now() : GBufferProfileClock::time_point{};
-	const float clearColor[] = { 0.0f, 0.2f, 0.4f, 1.0f };
-	renderBackend->ClearRenderTarget(AlbedoBuffer.get(), clearColor);
+	const float gbufferGuideClearColor[] = { 0.0f, 0.0f, 0.0f, 1.0f };
+	renderBackend->ClearRenderTarget(AlbedoBuffer.get(), gbufferGuideClearColor);
 	if (!bMobileDirectGBuffer)
-		renderBackend->ClearRenderTarget(SpecularAlbedoBuffer.get(), clearColor);
+		renderBackend->ClearRenderTarget(SpecularAlbedoBuffer.get(), gbufferGuideClearColor);
 	const float normalClearColor[] =
 	{
 		bMobileDirectGBuffer ? 0.5f : 0.0f,
@@ -6230,6 +6823,33 @@ void Corona::GBufferPass()
 		};
 		renderBackend->SetRenderTargets(renderTargets, static_cast<uint32_t>(std::size(renderTargets)), DepthBuffer.get());
 	}
+	auto restoreGBufferRenderTargets = [&]()
+	{
+		renderBackend->SetViewportAndScissor(GetRenderWidth(), GetRenderHeight());
+		if (bMobileDirectGBuffer)
+		{
+			Texture* renderTargets[] = {
+				AlbedoBuffer.get(),
+				NormalBuffers[ColorBufferWriteIndex].get(),
+				VelocityBuffer.get(),
+				RoughnessMetalicBuffer.get()
+			};
+			renderBackend->SetRenderTargets(renderTargets, static_cast<uint32_t>(std::size(renderTargets)), DepthBuffer.get());
+		}
+		else
+		{
+			Texture* renderTargets[] = {
+				AlbedoBuffer.get(),
+				SpecularAlbedoBuffer.get(),
+				NormalBuffers[ColorBufferWriteIndex].get(),
+				GeomNormalBuffers[ColorBufferWriteIndex].get(),
+				VelocityBuffer.get(),
+				RoughnessMetalicBuffer.get(),
+				UnjitteredDepthBuffers[ColorBufferWriteIndex].get()
+			};
+			renderBackend->SetRenderTargets(renderTargets, static_cast<uint32_t>(std::size(renderTargets)), DepthBuffer.get());
+		}
+	};
 
 	renderBackend->BindGraphicsPipeline(GBufferGraphicsPipeline.get());
 	GBufferProfileAdd(
@@ -6316,6 +6936,8 @@ void Corona::GBufferPass()
 			bool StaticInstancingEligible = false;
 			bool StaticObjectBatchEligible = false;
 			bool HasBounds = false;
+			glm::vec3 BoundsMin = glm::vec3(0.0f);
+			glm::vec3 BoundsMax = glm::vec3(0.0f);
 			glm::vec3 BoundsCenter = glm::vec3(0.0f);
 			float BoundsRadius = 0.0f;
 		};
@@ -6340,6 +6962,7 @@ void Corona::GBufferPass()
 			if (hasBounds)
 			{
 				state.LastVisible = true;
+				state.ForceOcclusionQueryThisFrame = false;
 				state.ConsecutiveOccludedQueries = 0;
 				state.LastVisibleFrame = FrameCounter;
 				state.LastBoundsCenter = boundsCenter;
@@ -6352,8 +6975,17 @@ void Corona::GBufferPass()
 		{
 			if (!bGBufferOcclusionQueriesActive || object.Handle == InvalidSceneObjectHandle)
 				return false;
+			const bool bAggressiveOcclusion =
+				GBufferOcclusionMode == EGBufferOcclusionMode::Aggressive;
+			const bool bAdaptiveOcclusion =
+				GBufferOcclusionMode == EGBufferOcclusionMode::Adaptive &&
+				!bGBufferAdaptiveOcclusionWarmupThisFrame;
 			const uint32_t batchedQueryBudget =
-				std::min(GBufferOcclusionQueryCapacityPerFrame, kBatchedGBufferOcclusionRefreshQueryBudget);
+				bAggressiveOcclusion ?
+				GBufferOcclusionQueryCapacityPerFrame :
+				(bAdaptiveOcclusion ?
+					std::min(GBufferOcclusionQueryCapacityPerFrame, kAdaptiveGBufferOcclusionRefreshQueryBudget) :
+					std::min(GBufferOcclusionQueryCapacityPerFrame, kBatchedGBufferOcclusionRefreshQueryBudget));
 			if (GBufferOcclusionQueryCount >= batchedQueryBudget)
 				return false;
 
@@ -6363,6 +6995,10 @@ void Corona::GBufferPass()
 			const SceneObjectCullingState& state = SceneObjectCullingStates[object.Handle];
 			if (state.HasPendingOcclusionQuery)
 				return false;
+			if (state.ForceOcclusionQueryThisFrame)
+				return true;
+			if (bAggressiveOcclusion)
+				return true;
 			if (state.LastTestFrame == 0)
 				return true;
 
@@ -6370,6 +7006,20 @@ void Corona::GBufferPass()
 				FrameCounter >= state.LastTestFrame ?
 				static_cast<uint64_t>(FrameCounter) - state.LastTestFrame :
 				kBatchedGBufferOcclusionRefreshFrames + 1u;
+			if (bAdaptiveOcclusion && state.ConsecutiveOccludedQueries != 0)
+				return framesSinceTest >= kGBufferOcclusionConfirmMissFrames;
+			if (bAdaptiveOcclusion)
+			{
+				const float importance =
+					ComputeGBufferOcclusionImportance(RenderFrameCameraPosition, state.LastBoundsCenter, state.LastBoundsRadius);
+				return ShouldAdaptiveOcclusionProbe(
+					object.Handle,
+					static_cast<uint64_t>(FrameCounter),
+					framesSinceTest,
+					state.LastVisible,
+					bGBufferOcclusionCameraMovedThisFrame,
+					importance);
+			}
 			if (state.ConsecutiveOccludedQueries != 0)
 				return framesSinceTest >= kGBufferOcclusionConfirmMissFrames;
 			if (!state.LastVisible)
@@ -6384,8 +7034,20 @@ void Corona::GBufferPass()
 			SupportsGBufferBindlessGeometry(renderBackend.get()) &&
 			gbufferCapabilities.SupportsDrawIndirect &&
 			gbufferCapabilities.SupportsDrawIndirectFirstInstance;
+		const bool bCanUseGpuHiZStaticBatch =
+			bEnableGBufferHiZOcclusion &&
+			bEnableGBufferDepthPrepass &&
+			GBufferObjectCullingMode == EGBufferObjectCullingMode::GpuIndirect &&
+			gbufferCapabilities.SupportsDrawIndirectCount &&
+			GBufferGpuCullClearPSO &&
+			GBufferGpuCullBuildPSO &&
+			GBufferOccluderDepthPyramidBuildPSO;
 		const bool bUseGpuWorldStaticBatch =
 			bStaticObjectBatchSupported &&
+			(bCanUseGpuHiZStaticBatch ||
+				((GBufferOcclusionMode != EGBufferOcclusionMode::Adaptive ||
+				  bGBufferAdaptiveOcclusionWarmupThisFrame) &&
+				 GBufferOcclusionMode != EGBufferOcclusionMode::Aggressive)) &&
 			GBufferObjectCullingMode == EGBufferObjectCullingMode::GpuIndirect &&
 			gbufferCapabilities.SupportsDrawIndirectCount &&
 			GBufferGpuCullClearPSO &&
@@ -6514,6 +7176,10 @@ void Corona::GBufferPass()
 		std::vector<uint32_t>& prebatchedBindlessObjectIndices = s_prebatchedBindlessObjectIndices;
 		prebatchedBindlessObjectIndices.clear();
 		prebatchedBindlessObjectIndices.reserve(visibleObjectIndices.size());
+		static thread_local std::vector<uint32_t> s_prebatchedOcclusionProxyObjectIndices;
+		std::vector<uint32_t>& prebatchedOcclusionProxyObjectIndices = s_prebatchedOcclusionProxyObjectIndices;
+		prebatchedOcclusionProxyObjectIndices.clear();
+		prebatchedOcclusionProxyObjectIndices.reserve(std::min<size_t>(visibleObjectIndices.size(), 256u));
 		bool bPrebatchedDrawCountsValid = true;
 		uint32_t prebatchedOpaqueDrawCount = 0;
 		uint32_t prebatchedAlphaDrawCount = 0;
@@ -6534,7 +7200,16 @@ void Corona::GBufferPass()
 			prebatchedAlphaDrawCount += sceneFeatures.StaticObjectBatchAlphaDrawCount;
 		};
 		const uint32_t prebatchedRefreshBudget =
-			std::min(GBufferOcclusionQueryCapacityPerFrame, kBatchedGBufferOcclusionRefreshQueryBudget);
+			GBufferOcclusionMode == EGBufferOcclusionMode::Aggressive ?
+			GBufferOcclusionQueryCapacityPerFrame :
+			(GBufferOcclusionMode == EGBufferOcclusionMode::Adaptive &&
+			 !bGBufferAdaptiveOcclusionWarmupThisFrame ?
+				std::min(GBufferOcclusionQueryCapacityPerFrame, kAdaptiveGBufferOcclusionRefreshQueryBudget) :
+				std::min(GBufferOcclusionQueryCapacityPerFrame, kBatchedGBufferOcclusionRefreshQueryBudget));
+		const bool bRequirePerObjectOcclusionQueries =
+			GBufferOcclusionMode == EGBufferOcclusionMode::Aggressive;
+		const bool bCanUsePrebatchedOcclusionProxyQueries =
+			GBufferOcclusionBoundsGraphicsPipeline != nullptr;
 		uint32_t prebatchedRefreshCandidates = 0;
 		bool bHasSpineObjects = false;
 		for (uint32_t objectIndex : visibleObjectIndices)
@@ -6572,6 +7247,8 @@ void Corona::GBufferPass()
 				const RenderWorldMirror::SceneObjectCullingRecord& objectData =
 					RenderWorld.SceneObjectCullingData[objectIndex];
 				entry.HasBounds = objectData.HasBounds;
+				entry.BoundsMin = objectData.BoundsMin;
+				entry.BoundsMax = objectData.BoundsMax;
 				entry.BoundsCenter = objectData.BoundsCenter;
 				entry.BoundsRadius = objectData.BoundsRadius;
 			}
@@ -6589,12 +7266,46 @@ void Corona::GBufferPass()
 				{
 					if (!ShouldDrawSceneObjectInGBuffer(object, entry.BoundsCenter, entry.BoundsRadius))
 						continue;
-					const bool bRefreshBatchedObject =
-						prebatchedRefreshCandidates < prebatchedRefreshBudget &&
-						shouldRefreshBatchedOcclusionQuery(object);
-					if (bRefreshBatchedObject)
+					if (bRequirePerObjectOcclusionQueries)
 					{
-						++prebatchedRefreshCandidates;
+						if (bCanUsePrebatchedOcclusionProxyQueries)
+						{
+							prebatchedOcclusionProxyObjectIndices.push_back(objectIndex);
+							accumulatePrebatchedDrawCounts(sceneFeatures);
+							prebatchedBindlessObjectIndices.push_back(objectIndex);
+							continue;
+						}
+						entry.StaticObjectBatchEligible = false;
+					}
+					else
+					{
+						const bool bRefreshBatchedObject =
+							prebatchedRefreshCandidates < prebatchedRefreshBudget &&
+							shouldRefreshBatchedOcclusionQuery(object);
+						if (bRefreshBatchedObject)
+						{
+							++prebatchedRefreshCandidates;
+							if (bCanUsePrebatchedOcclusionProxyQueries)
+							{
+								prebatchedOcclusionProxyObjectIndices.push_back(objectIndex);
+								accumulatePrebatchedDrawCounts(sceneFeatures);
+								prebatchedBindlessObjectIndices.push_back(objectIndex);
+								continue;
+							}
+							entry.StaticObjectBatchEligible = false;
+						}
+						else
+						{
+							accumulatePrebatchedDrawCounts(sceneFeatures);
+							prebatchedBindlessObjectIndices.push_back(objectIndex);
+							continue;
+						}
+					}
+				}
+				else
+				{
+					if (bRequirePerObjectOcclusionQueries)
+					{
 						entry.StaticObjectBatchEligible = false;
 					}
 					else
@@ -6603,12 +7314,6 @@ void Corona::GBufferPass()
 						prebatchedBindlessObjectIndices.push_back(objectIndex);
 						continue;
 					}
-				}
-				else
-				{
-					accumulatePrebatchedDrawCounts(sceneFeatures);
-					prebatchedBindlessObjectIndices.push_back(objectIndex);
-					continue;
 				}
 			}
 
@@ -6634,6 +7339,530 @@ void Corona::GBufferPass()
 			gbufferPassProfile.ClassifyMs,
 			gbufferPassProfile.ClassifyCount,
 			classifyProfileBegin);
+
+		struct GBufferDepthPrepassOccluderCandidate
+		{
+			uint32_t ObjectIndex = 0;
+			float ScreenCoverage = 0.0f;
+			float SortScore = 0.0f;
+			uint32_t OpaqueDrawCount = 0;
+			uint32_t AlphaDrawCount = 0;
+		};
+		auto computeAabbScreenCoverage =
+			[this](const glm::vec3& boundsMin, const glm::vec3& boundsMax, const glm::vec3& boundsCenter, float boundsRadius) -> float
+		{
+			(void)boundsMin;
+			(void)boundsMax;
+			if (boundsRadius <= 0.001f)
+				return 0.0f;
+
+			const float cameraDistance = glm::length(boundsCenter - RenderFrameCameraPosition);
+			if (cameraDistance <= boundsRadius * 1.25f)
+				return 1.0f;
+
+			const glm::vec4 clipCenter = UnjitteredViewProjMat * glm::vec4(boundsCenter, 1.0f);
+			if (!std::isfinite(clipCenter.x) ||
+				!std::isfinite(clipCenter.y) ||
+				!std::isfinite(clipCenter.w) ||
+				clipCenter.w <= 1.0e-4f)
+			{
+				return 0.0f;
+			}
+
+			const float ndcX = clipCenter.x / clipCenter.w;
+			const float ndcY = clipCenter.y / clipCenter.w;
+			if (!std::isfinite(ndcX) || !std::isfinite(ndcY))
+				return 0.0f;
+
+			const float projectionScale =
+				std::max(std::abs(ProjMat[0][0]), std::abs(ProjMat[1][1]));
+			const float radiusNdc =
+				std::clamp((boundsRadius * projectionScale) / std::max(clipCenter.w, 1.0e-4f), 0.0f, 2.0f);
+			const float clippedMinX = std::clamp(ndcX - radiusNdc, -1.0f, 1.0f);
+			const float clippedMaxX = std::clamp(ndcX + radiusNdc, -1.0f, 1.0f);
+			const float clippedMinY = std::clamp(ndcY - radiusNdc, -1.0f, 1.0f);
+			const float clippedMaxY = std::clamp(ndcY + radiusNdc, -1.0f, 1.0f);
+			const float widthNdc = std::max(0.0f, clippedMaxX - clippedMinX);
+			const float heightNdc = std::max(0.0f, clippedMaxY - clippedMinY);
+			return std::clamp(widthNdc * heightNdc * 0.25f, 0.0f, 1.0f);
+		};
+
+		static thread_local std::vector<GBufferDepthPrepassOccluderCandidate> s_depthPrepassOccluderCandidates;
+		static thread_local std::vector<uint32_t> s_depthPrepassObjectIndices;
+		static thread_local std::vector<uint32_t> s_cachedDepthPrepassObjectIndices;
+		static thread_local uint64_t s_cachedDepthPrepassFrame = UINT64_MAX;
+		static thread_local uint64_t s_cachedDepthPrepassGeneration = UINT64_MAX;
+		static thread_local float s_cachedDepthPrepassMinScreenCoverage = -1.0f;
+		static thread_local uint32_t s_cachedDepthPrepassMaxOccluderObjects = 0u;
+		static thread_local uint64_t s_cachedDepthPrepassCandidateObjectCount = 0;
+		static thread_local uint32_t s_cachedDepthPrepassOpaqueDrawCount = 0;
+		static thread_local uint32_t s_cachedDepthPrepassAlphaDrawCount = 0;
+		static thread_local bool s_cachedDepthPrepassDrawCountsValid = true;
+		std::vector<GBufferDepthPrepassOccluderCandidate>& depthPrepassOccluderCandidates =
+			s_depthPrepassOccluderCandidates;
+		std::vector<uint32_t>& depthPrepassObjectIndices = s_depthPrepassObjectIndices;
+		depthPrepassOccluderCandidates.clear();
+		depthPrepassObjectIndices.clear();
+		uint32_t depthPrepassOpaqueDrawCount = 0;
+		uint32_t depthPrepassAlphaDrawCount = 0;
+		bool bDepthPrepassDrawCountsValid = true;
+		const bool bOccluderDepthVisualizationRequested =
+			bDebugDraw &&
+			FullscreenDebugBuffer == EDebugVisualization::OCCLUDER_DEPTH;
+		const bool bUseSparseRayDepthPrepass =
+			GBufferDepthPrepassOccluderMode == EGBufferDepthPrepassOccluderMode::SparseRayGpu;
+		const bool bWantsDepthPrepassOccluderCandidates =
+			!bUseSparseRayDepthPrepass &&
+			(bEnableGBufferDepthPrepass || bOccluderDepthVisualizationRequested) &&
+			GBufferDepthPrepassMaxOccluderObjects != 0u;
+		if (bWantsDepthPrepassOccluderCandidates)
+		{
+			const uint32_t depthPrepassUpdateInterval =
+				std::max(1u, GBufferDepthPrepassOccluderUpdateInterval);
+			const bool bRefreshDepthPrepassOccluders =
+				s_cachedDepthPrepassFrame == UINT64_MAX ||
+				s_cachedDepthPrepassGeneration != RenderWorld.SceneObjectCullingIndexGeneration ||
+				s_cachedDepthPrepassMinScreenCoverage != GBufferDepthPrepassMinScreenCoverage ||
+				s_cachedDepthPrepassMaxOccluderObjects != GBufferDepthPrepassMaxOccluderObjects ||
+				FrameCounter < s_cachedDepthPrepassFrame ||
+				FrameCounter - s_cachedDepthPrepassFrame >= depthPrepassUpdateInterval;
+			if (bRefreshDepthPrepassOccluders)
+			{
+				depthPrepassOccluderCandidates.reserve(std::min<size_t>(prebatchedBindlessObjectIndices.size(), 1024u));
+				for (uint32_t objectIndex : prebatchedBindlessObjectIndices)
+				{
+					if (objectIndex >= RenderWorld.SceneObjects.size() ||
+						objectIndex >= RenderWorld.SceneObjectCullingData.size() ||
+						objectIndex >= s_sceneFeatureByObject.size())
+					{
+						continue;
+					}
+					const GBufferSceneFeatureFlags& sceneFeatures = s_sceneFeatureByObject[objectIndex];
+					if (sceneFeatures.StaticObjectBatchOpaqueDrawCount == 0u)
+						continue;
+
+					++GBufferLastDepthPrepassCandidateObjectCount;
+					const RenderWorldMirror::SceneObjectCullingRecord& objectData =
+						RenderWorld.SceneObjectCullingData[objectIndex];
+					if (!objectData.HasBounds)
+						continue;
+
+					const float screenCoverage = computeAabbScreenCoverage(
+						objectData.BoundsMin,
+						objectData.BoundsMax,
+						objectData.BoundsCenter,
+						objectData.BoundsRadius);
+					const bool bWasSelectedOccluder =
+						std::find(
+							s_cachedDepthPrepassObjectIndices.begin(),
+							s_cachedDepthPrepassObjectIndices.end(),
+							objectIndex) != s_cachedDepthPrepassObjectIndices.end();
+					const float keepCoverage =
+						bWasSelectedOccluder ? GBufferDepthPrepassMinScreenCoverage * 0.5f : GBufferDepthPrepassMinScreenCoverage;
+					if (screenCoverage < keepCoverage)
+						continue;
+
+					depthPrepassOccluderCandidates.push_back({
+						objectIndex,
+						screenCoverage,
+						screenCoverage + (bWasSelectedOccluder ? GBufferDepthPrepassMinScreenCoverage : 0.0f),
+						sceneFeatures.StaticObjectBatchOpaqueDrawCount,
+						sceneFeatures.StaticObjectBatchAlphaDrawCount });
+				}
+				if (!depthPrepassOccluderCandidates.empty())
+				{
+					const size_t maxOccluderObjects = static_cast<size_t>(GBufferDepthPrepassMaxOccluderObjects);
+					const size_t selectedCount = std::min(depthPrepassOccluderCandidates.size(), maxOccluderObjects);
+					std::partial_sort(
+						depthPrepassOccluderCandidates.begin(),
+						depthPrepassOccluderCandidates.begin() + static_cast<std::ptrdiff_t>(selectedCount),
+						depthPrepassOccluderCandidates.end(),
+						[](const GBufferDepthPrepassOccluderCandidate& lhs, const GBufferDepthPrepassOccluderCandidate& rhs)
+						{
+							return lhs.SortScore > rhs.SortScore;
+						});
+					depthPrepassObjectIndices.reserve(selectedCount);
+					for (size_t selectedIndex = 0; selectedIndex < selectedCount; ++selectedIndex)
+					{
+						const GBufferDepthPrepassOccluderCandidate& candidate = depthPrepassOccluderCandidates[selectedIndex];
+						depthPrepassObjectIndices.push_back(candidate.ObjectIndex);
+						if (bDepthPrepassDrawCountsValid)
+						{
+							if (candidate.OpaqueDrawCount > std::numeric_limits<uint32_t>::max() - depthPrepassOpaqueDrawCount ||
+								candidate.AlphaDrawCount > std::numeric_limits<uint32_t>::max() - depthPrepassAlphaDrawCount)
+							{
+								bDepthPrepassDrawCountsValid = false;
+							}
+							else
+							{
+								depthPrepassOpaqueDrawCount += candidate.OpaqueDrawCount;
+								depthPrepassAlphaDrawCount += candidate.AlphaDrawCount;
+							}
+						}
+					}
+				}
+				s_cachedDepthPrepassObjectIndices = depthPrepassObjectIndices;
+				s_cachedDepthPrepassFrame = FrameCounter;
+				s_cachedDepthPrepassGeneration = RenderWorld.SceneObjectCullingIndexGeneration;
+				s_cachedDepthPrepassMinScreenCoverage = GBufferDepthPrepassMinScreenCoverage;
+				s_cachedDepthPrepassMaxOccluderObjects = GBufferDepthPrepassMaxOccluderObjects;
+				s_cachedDepthPrepassCandidateObjectCount = GBufferLastDepthPrepassCandidateObjectCount;
+				s_cachedDepthPrepassOpaqueDrawCount = depthPrepassOpaqueDrawCount;
+				s_cachedDepthPrepassAlphaDrawCount = depthPrepassAlphaDrawCount;
+				s_cachedDepthPrepassDrawCountsValid = bDepthPrepassDrawCountsValid;
+			}
+			else
+			{
+				depthPrepassObjectIndices = s_cachedDepthPrepassObjectIndices;
+				GBufferLastDepthPrepassCandidateObjectCount = s_cachedDepthPrepassCandidateObjectCount;
+				depthPrepassOpaqueDrawCount = s_cachedDepthPrepassOpaqueDrawCount;
+				depthPrepassAlphaDrawCount = s_cachedDepthPrepassAlphaDrawCount;
+				bDepthPrepassDrawCountsValid = s_cachedDepthPrepassDrawCountsValid;
+			}
+		}
+		GBufferLastDepthPrepassSelectedObjectCount = depthPrepassObjectIndices.size();
+		GBufferLastDepthPrepassOpaqueDrawCount = depthPrepassOpaqueDrawCount;
+		if (bUseSparseRayDepthPrepass)
+		{
+			GBufferLastSparseRayOccluderRayCount =
+				static_cast<uint64_t>(std::max(1u, GBufferSparseRayOccluderGridWidth)) *
+				static_cast<uint64_t>(std::max(1u, GBufferSparseRayOccluderGridHeight));
+			GBufferLastSparseRayOccluderCandidateCapacity = GBufferDepthPrepassMaxOccluderObjects;
+			GBufferLastDepthPrepassCandidateObjectCount = GBufferLastSparseRayOccluderRayCount;
+			GBufferLastDepthPrepassSelectedObjectCount = GBufferDepthPrepassMaxOccluderObjects;
+			GBufferLastDepthPrepassOpaqueDrawCount = 0u;
+		}
+
+		bool bGBufferDepthPrepassSubmitted = false;
+		const bool bVisualizeGBufferOccluderDepth =
+			bOccluderDepthVisualizationRequested &&
+			!bMobileDirectGBuffer &&
+			GBufferOccluderDepthDebugBuffer != nullptr &&
+			GBufferOccluderDepthDebugDepthBuffer != nullptr &&
+			GBufferBindlessIndirectDepthVisualizeGraphicsPipeline != nullptr;
+		bool bGBufferRenderTargetsNeedRestore = false;
+		bool bGBufferOccluderDepthColorNeedsShaderReadTransition = false;
+		bool bGBufferOccluderDepthDepthNeedsShaderReadTransition = false;
+		if (bVisualizeGBufferOccluderDepth)
+		{
+			renderBackend->TransitionTexture(
+				GBufferOccluderDepthDebugBuffer.get(),
+				EResourceState::ShaderRead,
+				EResourceState::RenderTarget);
+			renderBackend->TransitionTexture(
+				GBufferOccluderDepthDebugDepthBuffer.get(),
+				EResourceState::ShaderRead,
+				EResourceState::DepthWrite);
+			const float occluderDepthClearColor[] = { 1.0f, 1.0f, 1.0f, 1.0f };
+			renderBackend->ClearRenderTarget(GBufferOccluderDepthDebugBuffer.get(), occluderDepthClearColor);
+			renderBackend->ClearDepth(GBufferOccluderDepthDebugDepthBuffer.get(), 1.0f);
+			bGBufferOccluderDepthColorNeedsShaderReadTransition = true;
+			bGBufferOccluderDepthDepthNeedsShaderReadTransition = true;
+		}
+		const bool bCanSubmitGBufferDepthPrepass =
+			!bMobileDirectGBuffer &&
+			GBufferBindlessIndirectDepthPrepassGraphicsPipeline &&
+			(!depthPrepassObjectIndices.empty() ||
+			 (bUseSparseRayDepthPrepass && GBufferDepthPrepassMaxOccluderObjects != 0u));
+		if (bEnableGBufferDepthPrepass && bCanSubmitGBufferDepthPrepass)
+		{
+			Texture* noColorTargets[1] = { nullptr };
+			renderBackend->SetRenderTargets(noColorTargets, 0, DepthBuffer.get());
+			renderBackend->SetViewportAndScissor(GetRenderWidth(), GetRenderHeight());
+			bGBufferRenderTargetsNeedRestore = true;
+			BeginGpuPassTiming(EGpuPass::DepthPrepass);
+			bGBufferDepthPrepassSubmitted = DrawStaticObjectBindlessBatch(
+				depthPrepassObjectIndices,
+				bDepthPrepassDrawCountsValid,
+				depthPrepassOpaqueDrawCount,
+				depthPrepassAlphaDrawCount,
+				false,
+				true,
+				nullptr,
+				bUseSparseRayDepthPrepass);
+			EndGpuPassTiming(EGpuPass::DepthPrepass);
+
+			if (!bGBufferDepthPrepassSubmitted)
+			{
+				static bool bLoggedDepthPrepassFailed = false;
+				if (!bLoggedDepthPrepassFailed)
+				{
+					AppendCpuRuntimeTrace(L"[GBufferDepthPrepass] skipped: bindless depth prepass submission failed");
+					bLoggedDepthPrepassFailed = true;
+				}
+			}
+			else if ((FrameCounter % 120u) == 0u)
+			{
+				AppendCpuRuntimeTrace(
+					L"[GBufferDepthPrepass] occluder filter selected=" +
+					std::to_wstring(GBufferLastDepthPrepassSelectedObjectCount) +
+					L"/" + std::to_wstring(GBufferLastDepthPrepassCandidateObjectCount) +
+					L", opaqueDraws=" + std::to_wstring(GBufferLastDepthPrepassOpaqueDrawCount) +
+					L", mode=" + std::wstring(bUseSparseRayDepthPrepass ? L"sparse-ray" : L"cpu-coverage") +
+					L", minCoverage=" + std::to_wstring(GBufferDepthPrepassMinScreenCoverage) +
+					L", maxObjects=" + std::to_wstring(GBufferDepthPrepassMaxOccluderObjects) +
+					L", updateFrames=" + std::to_wstring(
+						bUseSparseRayDepthPrepass ?
+						GBufferSparseRayOccluderUpdateInterval :
+						GBufferDepthPrepassOccluderUpdateInterval));
+			}
+		}
+		auto ensureGBufferOccluderDepthPyramidBuffer = [&]() -> bool
+		{
+			const uint32_t baseWidth = std::max(1u, (static_cast<uint32_t>(GetRenderWidth()) + 1u) / 2u);
+			const uint32_t baseHeight = std::max(1u, (static_cast<uint32_t>(GetRenderHeight()) + 1u) / 2u);
+			std::array<uint32_t, GBufferOccluderDepthPyramidMaxMipCount> mipOffsets = {};
+			uint32_t mipCount = 0;
+			uint32_t totalElements = 0;
+			uint32_t mipWidth = baseWidth;
+			uint32_t mipHeight = baseHeight;
+			while (mipCount < GBufferOccluderDepthPyramidMaxMipCount)
+			{
+				mipOffsets[mipCount] = totalElements;
+				if (mipWidth > std::numeric_limits<uint32_t>::max() / std::max(1u, mipHeight))
+					return false;
+				const uint32_t mipElements = std::max(1u, mipWidth * mipHeight);
+				if (totalElements > std::numeric_limits<uint32_t>::max() - mipElements)
+					return false;
+				totalElements += mipElements;
+				++mipCount;
+				if (mipWidth == 1u && mipHeight == 1u)
+					break;
+				mipWidth = std::max(1u, (mipWidth + 1u) / 2u);
+				mipHeight = std::max(1u, (mipHeight + 1u) / 2u);
+			}
+
+			const bool bMatches =
+				GBufferOccluderDepthPyramidBuffer &&
+				GBufferOccluderDepthPyramidWidth == baseWidth &&
+				GBufferOccluderDepthPyramidHeight == baseHeight &&
+				GBufferOccluderDepthPyramidMipCount == mipCount &&
+				GBufferOccluderDepthPyramidElementCount == totalElements;
+			if (bMatches)
+				return true;
+
+			BufferCreateDesc desc = {};
+			desc.NumElements = std::max(1u, totalElements);
+			desc.ElementSize = static_cast<uint32_t>(sizeof(float));
+			desc.InitialState = EInitialResourceState::ShaderRead;
+			desc.bAllowUnorderedAccess = true;
+			desc.Shape = EBufferShape::Structured;
+			desc.Access = EBufferAccess::GpuOnly;
+			desc.AllocationPolicy = EBufferAllocationPolicy::Dedicated;
+			GBufferOccluderDepthPyramidBuffer = renderBackend->CreateBuffer(desc);
+			GBufferOccluderDepthPyramidState = EResourceState::ShaderRead;
+			GBufferOccluderDepthPyramidWidth = baseWidth;
+			GBufferOccluderDepthPyramidHeight = baseHeight;
+			GBufferOccluderDepthPyramidMipCount = mipCount;
+			GBufferOccluderDepthPyramidElementCount = totalElements;
+			GBufferOccluderDepthPyramidMipOffsets = mipOffsets;
+			GBufferOccluderDepthPyramidBuiltFrame = UINT32_MAX;
+			return GBufferOccluderDepthPyramidBuffer != nullptr;
+		};
+		auto buildGBufferOccluderDepthPyramid = [&]() -> bool
+		{
+			if (!bEnableGBufferHiZOcclusion ||
+				!bGBufferDepthPrepassSubmitted ||
+				!DepthBuffer ||
+				!GBufferOccluderDepthPyramidBuildPSO)
+			{
+				return false;
+			}
+			if (!ensureGBufferOccluderDepthPyramidBuffer() || !GBufferOccluderDepthPyramidBuffer)
+				return false;
+
+			renderBackend->TransitionTexture(DepthBuffer.get(), EResourceState::DepthWrite, EResourceState::ShaderRead);
+			if (GBufferOccluderDepthPyramidState != EResourceState::UnorderedAccess)
+			{
+				renderBackend->TransitionBuffer(
+					GBufferOccluderDepthPyramidBuffer.get(),
+					GBufferOccluderDepthPyramidState,
+					EResourceState::UnorderedAccess);
+				GBufferOccluderDepthPyramidState = EResourceState::UnorderedAccess;
+			}
+
+			BeginGpuPassTiming(EGpuPass::OccluderDepth);
+			auto mipDimension = [](uint32_t base, uint32_t mip) -> uint32_t
+			{
+				uint32_t value = std::max(1u, base);
+				for (uint32_t i = 0; i < mip; ++i)
+					value = std::max(1u, (value + 1u) / 2u);
+				return value;
+			};
+			for (uint32_t mip = 0; mip < GBufferOccluderDepthPyramidMipCount; ++mip)
+			{
+				const uint32_t dstWidth = mipDimension(GBufferOccluderDepthPyramidWidth, mip);
+				const uint32_t dstHeight = mipDimension(GBufferOccluderDepthPyramidHeight, mip);
+				GBufferOccluderDepthPyramidConstant cb{};
+				cb.Mode = mip == 0u ? 0u : 1u;
+				cb.SrcOffset = mip == 0u ? 0u : GBufferOccluderDepthPyramidMipOffsets[mip - 1u];
+				cb.DstOffset = GBufferOccluderDepthPyramidMipOffsets[mip];
+				cb.SrcWidth = mip == 0u ? static_cast<uint32_t>(GetRenderWidth()) : mipDimension(GBufferOccluderDepthPyramidWidth, mip - 1u);
+				cb.SrcHeight = mip == 0u ? static_cast<uint32_t>(GetRenderHeight()) : mipDimension(GBufferOccluderDepthPyramidHeight, mip - 1u);
+				cb.DstWidth = dstWidth;
+				cb.DstHeight = dstHeight;
+				GBufferOccluderDepthPyramidBuildPSO->SetTextureSRV("SourceDepth", DepthBuffer.get());
+				GBufferOccluderDepthPyramidBuildPSO->SetBufferUAV("DepthPyramid", GBufferOccluderDepthPyramidBuffer.get());
+				GBufferOccluderDepthPyramidBuildPSO->SetCBVValue("OccluderDepthPyramidCB", &cb);
+				GBufferOccluderDepthPyramidBuildPSO->Apply();
+				renderBackend->Dispatch((dstWidth + 7u) / 8u, (dstHeight + 7u) / 8u, 1u);
+				renderBackend->UAVBarrier(GBufferOccluderDepthPyramidBuffer.get());
+			}
+			EndGpuPassTiming(EGpuPass::OccluderDepth);
+
+			renderBackend->TransitionBuffer(
+				GBufferOccluderDepthPyramidBuffer.get(),
+				EResourceState::UnorderedAccess,
+				EResourceState::ShaderRead);
+			GBufferOccluderDepthPyramidState = EResourceState::ShaderRead;
+			renderBackend->TransitionTexture(DepthBuffer.get(), EResourceState::ShaderRead, EResourceState::DepthWrite);
+			GBufferOccluderDepthPyramidBuiltFrame = FrameCounter;
+			return true;
+		};
+		if (bGBufferDepthPrepassSubmitted)
+			(void)buildGBufferOccluderDepthPyramid();
+		if (bVisualizeGBufferOccluderDepth &&
+			(!depthPrepassObjectIndices.empty() ||
+			 (bUseSparseRayDepthPrepass && GBufferDepthPrepassMaxOccluderObjects != 0u)))
+		{
+			Texture* debugColorTargets[] = { GBufferOccluderDepthDebugBuffer.get() };
+			renderBackend->SetRenderTargets(debugColorTargets, static_cast<uint32_t>(std::size(debugColorTargets)), GBufferOccluderDepthDebugDepthBuffer.get());
+			renderBackend->SetViewportAndScissor(GetRenderWidth(), GetRenderHeight());
+			bGBufferRenderTargetsNeedRestore = true;
+			BeginGpuPassTiming(EGpuPass::OccluderDepth);
+			(void)DrawStaticObjectBindlessBatch(
+				depthPrepassObjectIndices,
+				bDepthPrepassDrawCountsValid,
+				depthPrepassOpaqueDrawCount,
+				depthPrepassAlphaDrawCount,
+				false,
+				true,
+				GBufferBindlessIndirectDepthVisualizeGraphicsPipeline.get(),
+				bUseSparseRayDepthPrepass);
+			EndGpuPassTiming(EGpuPass::OccluderDepth);
+		}
+		if (bGBufferRenderTargetsNeedRestore)
+			restoreGBufferRenderTargets();
+		if (bGBufferOccluderDepthColorNeedsShaderReadTransition)
+		{
+			renderBackend->TransitionTexture(
+				GBufferOccluderDepthDebugBuffer.get(),
+				EResourceState::RenderTarget,
+				EResourceState::ShaderRead);
+		}
+		if (bGBufferOccluderDepthDepthNeedsShaderReadTransition)
+		{
+			renderBackend->TransitionTexture(
+				GBufferOccluderDepthDebugDepthBuffer.get(),
+				EResourceState::DepthWrite,
+				EResourceState::ShaderRead);
+		}
+		bGBufferDepthPrepassMainPassActive =
+			bGBufferDepthPrepassSubmitted &&
+			GBufferBindlessIndirectOpaqueDepthTestGraphicsPipeline != nullptr;
+
+		auto submitPrebatchedOcclusionProxyQueries = [&]() -> bool
+		{
+			if (prebatchedOcclusionProxyObjectIndices.empty())
+				return true;
+			if (!renderBackend || !DepthBuffer || !GBufferOcclusionBoundsGraphicsPipeline)
+				return false;
+
+			CachedGBufferStaticDrawTable& staticDrawTable = GetCachedGBufferStaticDrawTable(this);
+			if (!staticDrawTable.GpuObjectBoundsBuffer)
+				return false;
+
+			GBufferConstantBuffer objCB = {};
+			objCB.ViewProjectionMatrix = glm::transpose(ViewProjMat);
+			objCB.PrevViewProjectionMatrix = glm::transpose(PrevViewProjMat);
+			objCB.WorldMatrix = glm::mat4x4(1.0f);
+			objCB.UnjitteredViewProjMat = glm::transpose(UnjitteredViewProjMat);
+			objCB.PrevUnjitteredViewProjMat = glm::transpose(PrevUnjitteredViewProjMat);
+			objCB.ViewDir.x = RenderFrameCameraLookDirection.x;
+			objCB.ViewDir.y = RenderFrameCameraLookDirection.y;
+			objCB.ViewDir.z = RenderFrameCameraLookDirection.z;
+			objCB.ViewDir.w = 0.0f;
+			objCB.BaseColorFactor = glm::vec4(1.0f);
+			objCB.RTSize.x = GetRenderWidth();
+			objCB.RTSize.y = GetRenderHeight();
+			objCB.RougnessMetalic = glm::vec2(1.0f, 0.0f);
+			objCB.bOverrideRougnessMetallic = 0u;
+			objCB.MeshDeformParams = glm::vec4(RenderFrameWindTime, 0.0f, 0.0f, 0.0f);
+			objCB.GrassBendOrigin = RenderFrameGrassBendOrigin;
+			objCB.GrassBendParams = RenderFrameGrassBendParams;
+			objCB.WindParams = RenderFrameWindParams;
+			objCB.WindTuning = RenderFrameWindTuning;
+			objCB.TerrainDeformSphere = RenderFrameTerrainDeformSphere;
+
+			Texture* noColorTargets[1] = { nullptr };
+			renderBackend->SetRenderTargets(noColorTargets, 0, DepthBuffer.get());
+			renderBackend->SetViewportAndScissor(GetRenderWidth(), GetRenderHeight());
+			renderBackend->BindGraphicsPipeline(GBufferOcclusionBoundsGraphicsPipeline.get());
+			auto materialBindGroup = CreateAndBindGraphicsBindGroup(
+				renderBackend.get(),
+				GBufferOcclusionBoundsGraphicsPipeline.get(),
+				kGraphicsBindGroupSlot_Material,
+				{
+					GraphicsBindGroupEntry::BufferSRV("GBufferOcclusionBoundsBuffer", staticDrawTable.GpuObjectBoundsBuffer.get()),
+				});
+			auto drawBindGroup = CreateAndBindGraphicsBindGroup(
+				renderBackend.get(),
+				GBufferOcclusionBoundsGraphicsPipeline.get(),
+				kGraphicsBindGroupSlot_Draw,
+				{
+					GraphicsBindGroupEntry::Constant(0, &objCB, sizeof(objCB)),
+				});
+			if (!materialBindGroup || !drawBindGroup)
+				return false;
+
+			uint32_t submittedQueries = 0;
+			for (uint32_t objectIndex : prebatchedOcclusionProxyObjectIndices)
+			{
+				if (objectIndex >= RenderWorld.SceneObjects.size() ||
+					objectIndex >= staticDrawTable.ObjectRanges.size())
+				{
+					continue;
+				}
+				const SceneObject& object = RenderWorld.SceneObjects[objectIndex];
+				if (object.Handle == InvalidSceneObjectHandle ||
+					staticDrawTable.ObjectRanges[objectIndex].DrawCount == 0)
+				{
+					continue;
+				}
+				const uint32_t occlusionQueryIndex = BeginGBufferOcclusionQuery(object.Handle);
+				if (occlusionQueryIndex == std::numeric_limits<uint32_t>::max())
+					continue;
+				renderBackend->DrawInstanced(36, 1, 0, objectIndex);
+				EndGBufferOcclusionQuery(object.Handle, occlusionQueryIndex);
+				++submittedQueries;
+			}
+
+			if (submittedQueries != 0 && (FrameCounter % 120u) == 0u)
+			{
+				AppendCpuRuntimeTrace(
+					L"[GBufferOcclusionProxy] submitted boundsQueries=" +
+					std::to_wstring(submittedQueries) +
+					L"/" + std::to_wstring(prebatchedOcclusionProxyObjectIndices.size()));
+			}
+			return true;
+		};
+
+		bool bGBufferOcclusionProxyRenderTargetsNeedRestore = false;
+		if (!prebatchedOcclusionProxyObjectIndices.empty())
+		{
+			bGBufferOcclusionProxyRenderTargetsNeedRestore = true;
+			if (!submitPrebatchedOcclusionProxyQueries())
+			{
+				static bool bLoggedOcclusionProxyFailure = false;
+				if (!bLoggedOcclusionProxyFailure)
+				{
+					AppendCpuRuntimeTrace(L"[GBufferOcclusionProxy] skipped: bounds proxy query submission failed");
+					bLoggedOcclusionProxyFailure = true;
+				}
+			}
+		}
+		if (bGBufferOcclusionProxyRenderTargetsNeedRestore)
+			restoreGBufferRenderTargets();
 
 		const auto drawSubmitProfileBegin =
 			bGBufferPassProfileEnabled ? GBufferProfileClock::now() : GBufferProfileClock::time_point{};
@@ -6693,6 +7922,7 @@ void Corona::GBufferPass()
 				}
 				bool bStaticInstancingCandidate =
 					drawSpinePass == 0 &&
+					GBufferOcclusionMode != EGBufferOcclusionMode::Aggressive &&
 					entry.StaticInstancingEligible &&
 					staticCandidateCount >= kMinStaticGBufferInstanceCount;
 				bool bDrawsWithoutOcclusionQuery =
@@ -6734,12 +7964,20 @@ void Corona::GBufferPass()
 					BeginGpuPassTiming(EGpuPass::ProceduralGrass);
 				else if (bLegacyGrassScene)
 					BeginGpuPassTiming(EGpuPass::Grass);
+				const bool bHasValidOcclusionQuery =
+					occlusionQueryIndex != std::numeric_limits<uint32_t>::max();
+				const bool bPreviousOcclusionQueryDrawActive =
+					bGBufferOcclusionQueryDrawActive;
+				bGBufferOcclusionQueryDrawActive =
+					bPreviousOcclusionQueryDrawActive || bHasValidOcclusionQuery;
 				DrawScene(
 					object.ScenePtr,
 					object.Transform,
 					object.Roughness,
 					object.Metallic,
 					object.bOverrideRoughnessMetallic);
+				bGBufferOcclusionQueryDrawActive =
+					bPreviousOcclusionQueryDrawActive;
 				if (bTerrainScene)
 					EndGpuPassTiming(EGpuPass::Terrain);
 				else if (bProceduralGrassScene)
@@ -6770,6 +8008,8 @@ void Corona::GBufferPass()
 					}
 				}
 			}
+			if (drawSpinePass == 0)
+				bGBufferDepthPrepassMainPassActive = false;
 
 			for (auto& batchPair : staticBatches)
 			{
@@ -6810,12 +8050,20 @@ void Corona::GBufferPass()
 					if (!object)
 						continue;
 					const uint32_t occlusionQueryIndex = BeginGBufferOcclusionQuery(object->Handle);
+					const bool bHasValidOcclusionQuery =
+						occlusionQueryIndex != std::numeric_limits<uint32_t>::max();
+					const bool bPreviousOcclusionQueryDrawActive =
+						bGBufferOcclusionQueryDrawActive;
+					bGBufferOcclusionQueryDrawActive =
+						bPreviousOcclusionQueryDrawActive || bHasValidOcclusionQuery;
 					DrawScene(
 						object->ScenePtr,
 						object->Transform,
 						object->Roughness,
 						object->Metallic,
 						object->bOverrideRoughnessMetallic);
+					bGBufferOcclusionQueryDrawActive =
+						bPreviousOcclusionQueryDrawActive;
 					EndGBufferOcclusionQuery(object->Handle, occlusionQueryIndex);
 					++GBufferLastVisibleObjectCount;
 				}
@@ -6868,6 +8116,7 @@ void Corona::GBufferPass()
 
 	const auto finishCullProfileBegin =
 		bGBufferPassProfileEnabled ? GBufferProfileClock::now() : GBufferProfileClock::time_point{};
+	bGBufferDepthPrepassMainPassActive = false;
 	FinishGBufferCulling();
 	GBufferProfileAdd(
 		bGBufferPassProfileEnabled,

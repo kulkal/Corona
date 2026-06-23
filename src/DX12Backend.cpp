@@ -8375,7 +8375,9 @@ std::shared_ptr<GraphicsPipelineHandle> DX12Backend::CreateGraphicsPipeline(cons
 	auto handle = std::make_shared<DX12GraphicsPipelineHandle>();
 
 	const bool bRequiresVertexBindlessBufferSM66 = RequiresDX12VertexBindlessBufferShaderModel66(desc);
-	const bool bRequiresDrawParametersSM68 = desc.VertexEntryPoint == "VSMainBindlessIndirect";
+	const bool bRequiresDrawParametersSM68 =
+		desc.VertexEntryPoint == "VSMainBindlessIndirect" ||
+		desc.VertexEntryPoint == "VSMainOcclusionBounds";
 	const std::string vertexShaderTarget =
 		bRequiresDrawParametersSM68 ? "vs_6_8" :
 		(bRequiresVertexBindlessBufferSM66 ? "vs_6_6" : "vs_6_0");
@@ -8453,6 +8455,25 @@ std::shared_ptr<GraphicsPipelineHandle> DX12Backend::CreateGraphicsPipeline(cons
 	psoDesc.DepthStencilState.DepthEnable = desc.bDepthEnable ? TRUE : FALSE;
 	psoDesc.DepthStencilState.DepthWriteMask =
 		(desc.bDepthEnable && desc.bDepthWriteEnable) ? D3D12_DEPTH_WRITE_MASK_ALL : D3D12_DEPTH_WRITE_MASK_ZERO;
+	auto mapDepthCompareOp = [](EDepthCompareOp op) -> D3D12_COMPARISON_FUNC
+	{
+		switch (op)
+		{
+		case EDepthCompareOp::Less:
+			return D3D12_COMPARISON_FUNC_LESS;
+		case EDepthCompareOp::LessEqual:
+			return D3D12_COMPARISON_FUNC_LESS_EQUAL;
+		case EDepthCompareOp::Equal:
+			return D3D12_COMPARISON_FUNC_EQUAL;
+		case EDepthCompareOp::Always:
+			return D3D12_COMPARISON_FUNC_ALWAYS;
+		case EDepthCompareOp::BackendDefault:
+		default:
+			return D3D12_COMPARISON_FUNC_LESS;
+		}
+	};
+	psoDesc.DepthStencilState.DepthFunc =
+		desc.bDepthEnable ? mapDepthCompareOp(desc.DepthCompareOp) : D3D12_COMPARISON_FUNC_ALWAYS;
 	psoDesc.DepthStencilState.StencilEnable = FALSE;
 	psoDesc.SampleMask = UINT_MAX;
 	psoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;

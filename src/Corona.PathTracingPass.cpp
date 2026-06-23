@@ -28,6 +28,7 @@ namespace
 	constexpr uint32_t kRTBindlessGeometryBufferRegisterSpace = 12;
 	constexpr uint32_t kRTGeometryRecordBufferRegisterSpace = 13;
 	constexpr uint32_t kRTInstancePropertyBufferRegisterSpace = 14;
+	constexpr uint32_t kRTMaterialDrawRangeBufferRegisterSpace = 15;
 
 	void HashCombinePathTracingMaterial(uint64_t& seed, uint64_t value)
 	{
@@ -116,6 +117,7 @@ bool Corona::EnsureRTMaterialRecordBuffer()
 
 	constexpr UINT32 kMaterialRecordValidationFrameInterval = 120u;
 	if (RTMaterialRecordBuffer &&
+		RTMaterialDrawRangeRecordBuffer &&
 		RTMaterialRecordHash != 0 &&
 		RTMaterialRecordBackend == renderBackend.get() &&
 		RTMaterialRecordInstanceRevision == RayTracingInstancesRevision &&
@@ -142,20 +144,32 @@ bool Corona::EnsureRTMaterialRecordBuffer()
 
 		Material* material = getPrimaryMaterial(*mesh);
 		HashCombinePathTracingMaterial(sourceHash, reinterpret_cast<uintptr_t>(material));
-		if (!material)
-			continue;
-
-		HashCombinePathTracingMaterial(sourceHash, reinterpret_cast<uintptr_t>(material->Diffuse.get()));
-		HashCombinePathTracingMaterial(sourceHash, reinterpret_cast<uintptr_t>(material->Normal.get()));
-		HashCombinePathTracingMaterial(sourceHash, reinterpret_cast<uintptr_t>(material->Roughness.get()));
-		HashCombinePathTracingMaterial(sourceHash, reinterpret_cast<uintptr_t>(material->Metallic.get()));
-		uint32_t baseColorBits[4] = {};
-		std::memcpy(baseColorBits, &material->BaseColorFactor, sizeof(baseColorBits));
-		for (uint32_t bits : baseColorBits)
-			HashCombinePathTracingMaterial(sourceHash, bits);
+		auto hashMaterial = [&](Material* hashMaterialPtr)
+		{
+			HashCombinePathTracingMaterial(sourceHash, reinterpret_cast<uintptr_t>(hashMaterialPtr));
+			if (!hashMaterialPtr)
+				return;
+			HashCombinePathTracingMaterial(sourceHash, reinterpret_cast<uintptr_t>(hashMaterialPtr->Diffuse.get()));
+			HashCombinePathTracingMaterial(sourceHash, reinterpret_cast<uintptr_t>(hashMaterialPtr->Normal.get()));
+			HashCombinePathTracingMaterial(sourceHash, reinterpret_cast<uintptr_t>(hashMaterialPtr->Roughness.get()));
+			HashCombinePathTracingMaterial(sourceHash, reinterpret_cast<uintptr_t>(hashMaterialPtr->Metallic.get()));
+			uint32_t baseColorBits[4] = {};
+			std::memcpy(baseColorBits, &hashMaterialPtr->BaseColorFactor, sizeof(baseColorBits));
+			for (uint32_t bits : baseColorBits)
+				HashCombinePathTracingMaterial(sourceHash, bits);
+		};
+		hashMaterial(material);
+		HashCombinePathTracingMaterial(sourceHash, static_cast<uint64_t>(mesh->Draws.size()));
+		for (const Mesh::DrawCall& draw : mesh->Draws)
+		{
+			HashCombinePathTracingMaterial(sourceHash, draw.IndexStart);
+			HashCombinePathTracingMaterial(sourceHash, draw.IndexCount);
+			hashMaterial(draw.mat ? draw.mat.get() : material);
+		}
 	}
 
 	if (RTMaterialRecordBuffer &&
+		RTMaterialDrawRangeRecordBuffer &&
 		RTMaterialRecordHash != 0 &&
 		RTMaterialRecordSourceHash == sourceHash &&
 		RTMaterialRecordBackend == renderBackend.get())
@@ -164,9 +178,6 @@ bool Corona::EnsureRTMaterialRecordBuffer()
 		RTMaterialRecordValidatedFrameCounter = FrameCounter;
 		return true;
 	}
-
-	const size_t recordCount = std::max<size_t>(RayTracingInstances.size(), 1);
-	std::vector<RTMaterialRecord> records(recordCount);
 
 	auto getBindlessTextureIndex = [&](Texture* texture) -> UINT32
 	{
@@ -179,40 +190,31 @@ bool Corona::EnsureRTMaterialRecordBuffer()
 		return handle.IsValid() ? handle.Index : RHI_INVALID_BINDLESS_INDEX;
 	};
 
-	bool bAllTexturesRegistered = true;
-	for (size_t instanceIndex = 0; instanceIndex < RayTracingInstances.size(); ++instanceIndex)
+	auto buildRecordForMaterial = [&](Material* material, bool& bAllTexturesRegistered) -> RTMaterialRecord
 	{
-		const RTInstanceDesc& instance = RayTracingInstances[instanceIndex];
-		Mesh* mesh = instance.BottomLevelAS ? instance.BottomLevelAS->MeshPtr : nullptr;
-
 		Texture* albedo = DefaultWhiteTex.get();
 		Texture* normal = DefaultNormalTex.get();
 		Texture* roughness = DefaultRougnessTex.get();
 		Texture* metallic = DefaultBlackTex.get();
 		glm::vec4 baseColorFactor(1.0f);
-		if (mesh)
+		if (material)
 		{
-			if (Material* material = getPrimaryMaterial(*mesh))
-			{
-				baseColorFactor = material->BaseColorFactor;
-				if (material->Diffuse)
-					albedo = material->Diffuse.get();
-				if (material->Normal)
-					normal = material->Normal.get();
-				if (material->Roughness)
-					roughness = material->Roughness.get();
-				if (material->Metallic)
-					metallic = material->Metallic.get();
-			}
+			baseColorFactor = material->BaseColorFactor;
+			if (material->Diffuse)
+				albedo = material->Diffuse.get();
+			if (material->Normal)
+				normal = material->Normal.get();
+			if (material->Roughness)
+				roughness = material->Roughness.get();
+			if (material->Metallic)
+				metallic = material->Metallic.get();
 		}
 
-		RTMaterialRecord& record = records[instanceIndex];
+		RTMaterialRecord record;
 		record.AlbedoTextureIndex = getBindlessTextureIndex(albedo);
 		record.NormalTextureIndex = getBindlessTextureIndex(normal);
 		record.RoughnessTextureIndex = getBindlessTextureIndex(roughness);
 		record.MetallicTextureIndex = getBindlessTextureIndex(metallic);
-		// Precompute the ray-cone texture-LOD constant so closest-hit shaders
-		// don't call GetDimensions()+log2() per hit.
 		const uint32_t albedoTexels = std::max<uint32_t>(1u, albedo->Width) * std::max<uint32_t>(1u, albedo->Height);
 		record.AlbedoLodConstant = 0.5f * std::log2(static_cast<float>(albedoTexels));
 		record.BaseColorFactor[0] = baseColorFactor.r;
@@ -224,10 +226,56 @@ bool Corona::EnsureRTMaterialRecordBuffer()
 			record.NormalTextureIndex != RHI_INVALID_BINDLESS_INDEX &&
 			record.RoughnessTextureIndex != RHI_INVALID_BINDLESS_INDEX &&
 			record.MetallicTextureIndex != RHI_INVALID_BINDLESS_INDEX;
+		return record;
+	};
+
+	const size_t instanceRecordCount = std::max<size_t>(RayTracingInstances.size(), 1);
+	std::vector<RTMaterialRecord> records(instanceRecordCount);
+	std::vector<RTMaterialDrawRangeRecord> drawRanges;
+
+	bool bAllTexturesRegistered = true;
+	for (size_t instanceIndex = 0; instanceIndex < RayTracingInstances.size(); ++instanceIndex)
+	{
+		const RTInstanceDesc& instance = RayTracingInstances[instanceIndex];
+		Mesh* mesh = instance.BottomLevelAS ? instance.BottomLevelAS->MeshPtr : nullptr;
+
+		Material* primaryMaterial = nullptr;
+		if (mesh)
+			primaryMaterial = getPrimaryMaterial(*mesh);
+
+		records[instanceIndex] = buildRecordForMaterial(primaryMaterial, bAllTexturesRegistered);
+
+		if (!mesh)
+			continue;
+
+		for (const Mesh::DrawCall& draw : mesh->Draws)
+		{
+			if (draw.IndexCount == 0)
+				continue;
+			Material* drawMaterial = draw.mat ? draw.mat.get() : primaryMaterial;
+			UINT32 materialRecordIndex = static_cast<UINT32>(instanceIndex);
+			if (drawMaterial != primaryMaterial)
+			{
+				materialRecordIndex = static_cast<UINT32>(records.size());
+				records.push_back(buildRecordForMaterial(drawMaterial, bAllTexturesRegistered));
+			}
+
+			RTMaterialDrawRangeRecord range;
+			const UINT32 primitiveStart = draw.IndexStart / 3u;
+			const UINT32 primitiveEnd = (draw.IndexStart + draw.IndexCount + 2u) / 3u;
+			range.PrimitiveStart = primitiveStart;
+			range.PrimitiveCount = primitiveEnd > primitiveStart ? primitiveEnd - primitiveStart : 0u;
+			range.MaterialRecordIndex = materialRecordIndex;
+			range.VertexBase = static_cast<INT32>(draw.VertexBase);
+			if (range.PrimitiveCount != 0)
+				drawRanges.push_back(range);
+		}
 	}
+	if (drawRanges.empty())
+		drawRanges.push_back({});
 
 	uint64_t materialHash = 1469598103934665603ull;
-	HashCombinePathTracingMaterial(materialHash, static_cast<uint64_t>(RayTracingInstances.size()));
+	HashCombinePathTracingMaterial(materialHash, static_cast<uint64_t>(records.size()));
 	for (const RTMaterialRecord& record : records)
 	{
 		HashCombinePathTracingMaterial(materialHash, record.AlbedoTextureIndex);
@@ -238,9 +286,20 @@ bool Corona::EnsureRTMaterialRecordBuffer()
 		std::memcpy(baseColorBits, record.BaseColorFactor, sizeof(baseColorBits));
 		for (uint32_t bits : baseColorBits)
 			HashCombinePathTracingMaterial(materialHash, bits);
+		uint32_t lodBits = 0;
+		std::memcpy(&lodBits, &record.AlbedoLodConstant, sizeof(lodBits));
+		HashCombinePathTracingMaterial(materialHash, lodBits);
+	}
+	HashCombinePathTracingMaterial(materialHash, static_cast<uint64_t>(drawRanges.size()));
+	for (const RTMaterialDrawRangeRecord& range : drawRanges)
+	{
+		HashCombinePathTracingMaterial(materialHash, range.PrimitiveStart);
+		HashCombinePathTracingMaterial(materialHash, range.PrimitiveCount);
+		HashCombinePathTracingMaterial(materialHash, range.MaterialRecordIndex);
+		HashCombinePathTracingMaterial(materialHash, static_cast<uint32_t>(range.VertexBase));
 	}
 
-	if (RTMaterialRecordBuffer && RTMaterialRecordHash == materialHash)
+	if (RTMaterialRecordBuffer && RTMaterialDrawRangeRecordBuffer && RTMaterialRecordHash == materialHash)
 	{
 		RTMaterialRecordSourceHash = sourceHash;
 		RTMaterialRecordInstanceRevision = RayTracingInstancesRevision;
@@ -254,6 +313,7 @@ bool Corona::EnsureRTMaterialRecordBuffer()
 		RTMaterialRecordHash = 0;
 		RTMaterialRecordSourceHash = 0;
 		RTMaterialRecordBackend = nullptr;
+		RTMaterialDrawRangeRecordBuffer.reset();
 		AppendCpuRuntimeTrace(L"[RTMaterial] bindless material texture registration failed");
 		return false;
 	}
@@ -273,7 +333,28 @@ bool Corona::EnsureRTMaterialRecordBuffer()
 		RTMaterialRecordHash = 0;
 		RTMaterialRecordSourceHash = 0;
 		RTMaterialRecordBackend = nullptr;
+		RTMaterialDrawRangeRecordBuffer.reset();
 		AppendCpuRuntimeTrace(L"[RTMaterial] failed to create bindless material record buffer");
+		return false;
+	}
+
+	BufferCreateDesc drawRangeDesc = {};
+	drawRangeDesc.NumElements = static_cast<uint32_t>(drawRanges.size());
+	drawRangeDesc.ElementSize = sizeof(RTMaterialDrawRangeRecord);
+	drawRangeDesc.InitialState = EInitialResourceState::ShaderRead;
+	drawRangeDesc.InitialData = drawRanges.data();
+	drawRangeDesc.Shape = EBufferShape::Structured;
+	drawRangeDesc.Access = EBufferAccess::GpuOnly;
+	drawRangeDesc.AllocationPolicy = EBufferAllocationPolicy::Suballocated;
+
+	RTMaterialDrawRangeRecordBuffer = renderBackend->CreateBuffer(drawRangeDesc);
+	if (!RTMaterialDrawRangeRecordBuffer)
+	{
+		RTMaterialRecordHash = 0;
+		RTMaterialRecordSourceHash = 0;
+		RTMaterialRecordBackend = nullptr;
+		RTMaterialRecordBuffer.reset();
+		AppendCpuRuntimeTrace(L"[RTMaterial] failed to create material draw range buffer");
 		return false;
 	}
 
@@ -284,7 +365,9 @@ bool Corona::EnsureRTMaterialRecordBuffer()
 	RTMaterialRecordBackend = renderBackend.get();
 	AppendCpuRuntimeTrace(
 		L"[RTMaterial] bindless material records uploaded, count=" +
-		std::to_wstring(records.size()));
+		std::to_wstring(records.size()) +
+		L", drawRanges=" +
+		std::to_wstring(drawRanges.size()));
 	return true;
 }
 
@@ -326,6 +409,7 @@ bool Corona::EnsureRTGeometryRecordBuffer()
 		return handle.IsValid() ? handle.Index : RHI_INVALID_BINDLESS_INDEX;
 	};
 
+	UINT32 drawRangeOffset = 0;
 	for (size_t instanceIndex = 0; instanceIndex < RayTracingInstances.size(); ++instanceIndex)
 	{
 		const RTInstanceDesc& instance = RayTracingInstances[instanceIndex];
@@ -336,6 +420,13 @@ bool Corona::EnsureRTGeometryRecordBuffer()
 		RTGeometryRecord& record = records[instanceIndex];
 		record.VertexBufferIndex = getBindlessVertexBufferIndex(mesh->Vb.get());
 		record.IndexBufferIndex = getBindlessIndexBufferIndex(mesh->Ib.get());
+		record.DrawRangeOffset = drawRangeOffset;
+		for (const Mesh::DrawCall& draw : mesh->Draws)
+		{
+			if (draw.IndexCount != 0)
+				++record.DrawRangeCount;
+		}
+		drawRangeOffset += record.DrawRangeCount;
 		bAllBuffersRegistered = bAllBuffersRegistered &&
 			record.VertexBufferIndex != RHI_INVALID_BINDLESS_INDEX &&
 			record.IndexBufferIndex != RHI_INVALID_BINDLESS_INDEX;
@@ -347,6 +438,8 @@ bool Corona::EnsureRTGeometryRecordBuffer()
 	{
 		HashCombinePathTracingMaterial(geometryHash, record.VertexBufferIndex);
 		HashCombinePathTracingMaterial(geometryHash, record.IndexBufferIndex);
+		HashCombinePathTracingMaterial(geometryHash, record.DrawRangeOffset);
+		HashCombinePathTracingMaterial(geometryHash, record.DrawRangeCount);
 	}
 
 	if (RTGeometryRecordBuffer && RTGeometryRecordHash == geometryHash)
@@ -443,6 +536,15 @@ void Corona::InitPathTracingPass()
 	TEMP_PSO_PATH_TRACING->BindUAV("global", MakeRHITextureUAV("OutSpecularMotionVector", 9, rayGenStage));
 	TEMP_PSO_PATH_TRACING->BindSRV("global", MakeRHIAccelerationStructureSRV("gRtScene", 0, rayGenStage));
 	TEMP_PSO_PATH_TRACING->BindSRV("global", MakeRHIBufferSRV("PointLightBuffer", 4, rayGenStage));
+	TEMP_PSO_PATH_TRACING->BindSRV(
+		"global",
+		MakeRHIBufferSRV(
+			"RtMaterialDrawRanges",
+			0,
+			materialStage,
+			RHIBufferViewKind::Structured,
+			1,
+			kRTMaterialDrawRangeBufferRegisterSpace));
 	TEMP_PSO_PATH_TRACING->BindCBV("global", MakeRHICBV("ViewParameter", 0, sizeof(PathTracingViewParam), rayGenStage));
 	TEMP_PSO_PATH_TRACING->BindSampler("global", MakeRHISampler("sampleWrap", 0, rayGenStage | closestHitStage | anyHitStage));
 
@@ -460,6 +562,202 @@ void Corona::InitPathTracingPass()
 	{
 		PSO_PATH_TRACING = TEMP_PSO_PATH_TRACING;
 	}
+}
+
+bool Corona::RaytracePrimaryGBufferPass()
+{
+	if (!renderBackend || RenderingMode != ERenderingMode::HYBRID)
+		return false;
+	if (!renderBackend->SupportsRayTracing() || !TLAS)
+		return false;
+	const UINT nextColorBufferWriteIndex = 1 - ColorBufferWriteIndex;
+	if (!AlbedoBuffer ||
+		!SpecularAlbedoBuffer ||
+		!NormalBuffers[nextColorBufferWriteIndex] ||
+		!GeomNormalBuffers[nextColorBufferWriteIndex] ||
+		!VelocityBuffer ||
+		!RoughnessMetalicBuffer ||
+		!UnjitteredDepthBuffers[nextColorBufferWriteIndex] ||
+		!PathTracingSpecularHitDistanceBuffer ||
+		!PathTracingSpecularMotionVectorBuffer ||
+		!PathTracingAccumBuffer[PathTracingWriteIndex])
+	{
+		return false;
+	}
+	if (!UsesRTBindlessMaterials() || !UsesRTBindlessGeometry())
+		return false;
+
+	if (!PSO_PATH_TRACING)
+	{
+		InitPathTracingPass();
+		if (!PSO_PATH_TRACING)
+			return false;
+	}
+
+	renderBackend->EmitGpuCrashMarker("RTPrimaryGBufferPass");
+	renderBackend->BindDefaultDescriptorHeaps();
+	if (RenderWorld.bSceneObjectCullingIndexDirty ||
+		RenderWorld.SceneObjectCullingData.size() != RenderWorld.SceneObjects.size())
+	{
+		RebuildRenderWorldCullingIndex();
+	}
+	DispatchSpineSkinningForRenderWorld();
+	BeginGpuPassTiming(EGpuPass::SkeletalSkinning);
+	DispatchSkeletalSkinningForRenderWorld();
+	EndGpuPassTiming(EGpuPass::SkeletalSkinning);
+
+	ApplyRenderPointLightsToFrameParams();
+	const UINT32 pointLightStateHash = ComputePathTracingPointLightStateHash();
+	if (!EnsurePathTracingPointLightBuffer(pointLightStateHash))
+		return false;
+	if (!EnsureRTMaterialRecordBuffer())
+		return false;
+
+	bGBufferDepthPrepassMainPassActive = false;
+	GBufferLastTotalObjectCount = static_cast<uint64_t>(RenderWorld.SceneObjects.size());
+	GBufferLastVisibleObjectCount = static_cast<uint64_t>(RayTracingInstances.size());
+	GBufferLastFrustumCulledObjectCount = 0;
+	GBufferLastOcclusionCulledObjectCount = 0;
+	GBufferLastStaticInstancedBatchCount = 0;
+	GBufferLastStaticInstancedObjectCount = 0;
+	GBufferLastStaticInstancedDrawCount = 0;
+	GBufferLastBindlessObjectBatchCount = 0;
+	GBufferLastBindlessObjectCount = 0;
+	GBufferLastBindlessObjectDrawCount = 0;
+	GBufferLastDepthPrepassCandidateObjectCount = 0;
+	GBufferLastDepthPrepassSelectedObjectCount = 0;
+	GBufferLastDepthPrepassOpaqueDrawCount = 0;
+	GBufferLastSpatialCellCount = 0;
+	GBufferLastSpatialVisibleCellCount = 0;
+	GBufferLastSpatialPartialCellCount = 0;
+	GBufferLastSpatialCandidateObjectCount = 0;
+	GBufferLastSpatialVisibleObjectCount = 0;
+
+	ColorBufferWriteIndex = nextColorBufferWriteIndex;
+	if (DepthBuffer)
+	{
+		renderBackend->TransitionTexture(DepthBuffer.get(), EResourceState::ShaderRead, EResourceState::DepthWrite);
+		renderBackend->ClearDepth(DepthBuffer.get(), 1.0f);
+		renderBackend->TransitionTexture(DepthBuffer.get(), EResourceState::DepthWrite, EResourceState::ShaderRead);
+	}
+
+	PathTracingViewParamCB dispatchViewParam = PathTracingViewParam;
+	dispatchViewParam.ViewMatrix = glm::transpose(ViewMat);
+	dispatchViewParam.InvViewMatrix = glm::transpose(InvViewMat);
+	// RT primary builds raw RR input with a single explicitly jittered ray per
+	// pixel. Keep the projection unjittered here and pass the same pixel jitter
+	// that Streamline receives so the raygen sample position owns the jitter.
+	dispatchViewParam.ProjMatrix = glm::transpose(UnjitteredProjMat);
+	dispatchViewParam.InvProjMatrix = glm::transpose(UnjitteredInvProjMat);
+	dispatchViewParam.UnjitteredViewProjMatrix = glm::transpose(UnjitteredViewProjMat);
+	dispatchViewParam.PrevUnjitteredViewProjMatrix = glm::transpose(PrevUnjitteredViewProjMat);
+	dispatchViewParam.ProjectionParams = FrameProjectionParams;
+	dispatchViewParam.LightDirAndIntensity = glm::vec4(RenderFrameNormalizedLightDir, LightIntensity);
+	dispatchViewParam.DirectLightAngularRadius = RTShadowViewParam.ShadowLightRadius;
+	dispatchViewParam.DirectLightSampleCount = 1u;
+	dispatchViewParam.PointLightSampleCount = 0u;
+	dispatchViewParam.bDirectLightCastShadow = 0u;
+	dispatchViewParam.RandomOffset = CurrentJitter * 0.5f;
+	dispatchViewParam.FrameCounter = 0u;
+	dispatchViewParam.BlueNoiseOffsetStride = RenderFrameIndex;
+	dispatchViewParam.MaxBounces = 1u;
+	dispatchViewParam.SamplesPerPixel = 1u;
+	dispatchViewParam.ViewSpreadAngle = glm::tan(Fov * 0.5f) / (0.5f * GetRenderHeight());
+	dispatchViewParam.DebugMode = 0u;
+	dispatchViewParam.SkyColorTop = SkyColorTop;
+	dispatchViewParam.SkyIntensity = SkyIntensity;
+	dispatchViewParam.SkyColorBottom = SkyColorBottom;
+	dispatchViewParam.LightColor = RenderFrameLightColor;
+	dispatchViewParam.bEnableDiffuseGI = 0u;
+	dispatchViewParam.bEnableSpecularGI = 0u;
+	dispatchViewParam.bEnableDirectDiffuse = 0u;
+	dispatchViewParam.bEnableDirectSpecular = 0u;
+	dispatchViewParam.bEnableRTAO = 0u;
+	dispatchViewParam.bWritePrimaryGBuffer = 1u;
+	dispatchViewParam.SpecularMotionVectorScale = PathTracingRRSpecularMotionVectorScale;
+	dispatchViewParam.bStabilizePrimaryRaySamples = 1u;
+	dispatchViewParam.bPrimaryGBufferOnly = 1u;
+	dispatchViewParam.PointLightCount = 0u;
+
+	RenderGraph rg(renderBackend.get());
+	RGTextureRef outputColorTarget = rg.ImportTexture(
+		"RTPrimaryGBuffer.OutputColor",
+		PathTracingAccumBuffer[PathTracingWriteIndex].get(),
+		EResourceState::ShaderRead);
+	RGTextureRef outAlbedo = rg.ImportTexture("RTPrimaryGBuffer.OutAlbedo", AlbedoBuffer.get(), EResourceState::ShaderRead);
+	RGTextureRef outSpecularAlbedo = rg.ImportTexture("RTPrimaryGBuffer.OutSpecularAlbedo", SpecularAlbedoBuffer.get(), EResourceState::ShaderRead);
+	RGTextureRef outNormal = rg.ImportTexture("RTPrimaryGBuffer.OutNormal", NormalBuffers[ColorBufferWriteIndex].get(), EResourceState::ShaderRead);
+	RGTextureRef outGeomNormal = rg.ImportTexture("RTPrimaryGBuffer.OutGeomNormal", GeomNormalBuffers[ColorBufferWriteIndex].get(), EResourceState::ShaderRead);
+	RGTextureRef outVelocity = rg.ImportTexture("RTPrimaryGBuffer.OutVelocity", VelocityBuffer.get(), EResourceState::ShaderRead);
+	RGTextureRef outRoughnessMetallic = rg.ImportTexture("RTPrimaryGBuffer.OutRoughnessMetallic", RoughnessMetalicBuffer.get(), EResourceState::ShaderRead);
+	RGTextureRef outDepth = rg.ImportTexture("RTPrimaryGBuffer.OutDepth", UnjitteredDepthBuffers[ColorBufferWriteIndex].get(), EResourceState::ShaderRead);
+	RGTextureRef outSpecularHitDistance = rg.ImportTexture("RTPrimaryGBuffer.OutSpecularHitDistance", PathTracingSpecularHitDistanceBuffer.get(), EResourceState::ShaderRead);
+	RGTextureRef outSpecularMotionVector = rg.ImportTexture("RTPrimaryGBuffer.OutSpecularMotionVector", PathTracingSpecularMotionVectorBuffer.get(), EResourceState::ShaderRead);
+	RGBufferRef pointLightBuffer = rg.ImportBuffer("RTPrimaryGBuffer.PointLightBuffer", PathTracingPointLightBuffer.get(), EResourceState::ShaderRead);
+	RGBufferRef rtMaterials = rg.ImportBuffer("RTPrimaryGBuffer.RtMaterials", RTMaterialRecordBuffer.get(), EResourceState::ShaderRead);
+	RGBufferRef rtMaterialDrawRanges = rg.ImportBuffer("RTPrimaryGBuffer.RtMaterialDrawRanges", RTMaterialDrawRangeRecordBuffer.get(), EResourceState::ShaderRead);
+
+	rg.ExportTexture(outputColorTarget, EResourceState::ShaderRead);
+	rg.ExportTexture(outAlbedo, EResourceState::ShaderRead);
+	rg.ExportTexture(outSpecularAlbedo, EResourceState::ShaderRead);
+	rg.ExportTexture(outNormal, EResourceState::ShaderRead);
+	rg.ExportTexture(outGeomNormal, EResourceState::ShaderRead);
+	rg.ExportTexture(outVelocity, EResourceState::ShaderRead);
+	rg.ExportTexture(outRoughnessMetallic, EResourceState::ShaderRead);
+	rg.ExportTexture(outDepth, EResourceState::ShaderRead);
+	rg.ExportTexture(outSpecularHitDistance, EResourceState::ShaderRead);
+	rg.ExportTexture(outSpecularMotionVector, EResourceState::ShaderRead);
+
+	rg.AddPass(
+		"RTPrimaryGBufferPass",
+		ERGPassFlags::RayTracing,
+		[&](RGPassBuilder& builder)
+		{
+			builder.ReadWriteTexture(outputColorTarget, EResourceState::UnorderedAccess)
+				.ReadWriteTexture(outAlbedo, EResourceState::UnorderedAccess)
+				.ReadWriteTexture(outSpecularAlbedo, EResourceState::UnorderedAccess)
+				.ReadWriteTexture(outNormal, EResourceState::UnorderedAccess)
+				.ReadWriteTexture(outGeomNormal, EResourceState::UnorderedAccess)
+				.ReadWriteTexture(outVelocity, EResourceState::UnorderedAccess)
+				.ReadWriteTexture(outRoughnessMetallic, EResourceState::UnorderedAccess)
+				.ReadWriteTexture(outDepth, EResourceState::UnorderedAccess)
+				.ReadWriteTexture(outSpecularHitDistance, EResourceState::UnorderedAccess)
+				.ReadWriteTexture(outSpecularMotionVector, EResourceState::UnorderedAccess)
+				.ReadBuffer(pointLightBuffer, EResourceState::ShaderRead)
+				.ReadBuffer(rtMaterials, EResourceState::ShaderRead)
+				.ReadBuffer(rtMaterialDrawRanges, EResourceState::ShaderRead);
+		},
+		[&](RGContext& ctx)
+		{
+			RTPassBuilder pass(*this, PSO_PATH_TRACING, ERtProfilePass::PathTracing);
+			pass.BeginScene()
+				.SetTextureUAV("global", "OutputColor", ctx.GetTexture(outputColorTarget))
+				.SetTextureUAV("global", "OutAlbedo", ctx.GetTexture(outAlbedo))
+				.SetTextureUAV("global", "OutSpecularAlbedo", ctx.GetTexture(outSpecularAlbedo))
+				.SetTextureUAV("global", "OutNormal", ctx.GetTexture(outNormal))
+				.SetTextureUAV("global", "OutGeomNormal", ctx.GetTexture(outGeomNormal))
+				.SetTextureUAV("global", "OutVelocity", ctx.GetTexture(outVelocity))
+				.SetTextureUAV("global", "OutRoughnessMetallic", ctx.GetTexture(outRoughnessMetallic))
+				.SetTextureUAV("global", "OutDepth", ctx.GetTexture(outDepth))
+				.SetTextureUAV("global", "OutSpecularHitDistance", ctx.GetTexture(outSpecularHitDistance))
+				.SetTextureUAV("global", "OutSpecularMotionVector", ctx.GetTexture(outSpecularMotionVector))
+				.SetAccelerationStructure("global", "gRtScene", TLAS)
+				.SetBufferSRV("global", "PointLightBuffer", ctx.GetBuffer(pointLightBuffer))
+				.SetCBVValue("global", "ViewParameter", &dispatchViewParam)
+				.SetSampler("global", "sampleWrap", samplerWrap.get());
+			pass.SetBindlessTextureTable("global", "MaterialTextures")
+				.SetBufferSRV("global", "RtMaterials", ctx.GetBuffer(rtMaterials))
+				.SetBufferSRV("global", "RtMaterialDrawRanges", ctx.GetBuffer(rtMaterialDrawRanges));
+
+			RTSceneHitProgramDesc hitProgramDesc;
+			pass.BindSceneHitPrograms(hitProgramDesc);
+			pass.Dispatch(GetRenderWidth(), GetRenderHeight());
+		});
+
+	if (!rg.Execute())
+		return false;
+
+	return true;
 }
 
 void Corona::PathTracingPass()
@@ -653,6 +951,7 @@ void Corona::PathTracingPass()
 		: RGTextureRef{};
 	RGBufferRef pointLightBuffer = rg.ImportBuffer("PathTracing.PointLightBuffer", PathTracingPointLightBuffer.get(), EResourceState::ShaderRead);
 	RGBufferRef rtMaterials = rg.ImportBuffer("PathTracing.RtMaterials", RTMaterialRecordBuffer.get(), EResourceState::ShaderRead);
+	RGBufferRef rtMaterialDrawRanges = rg.ImportBuffer("PathTracing.RtMaterialDrawRanges", RTMaterialDrawRangeRecordBuffer.get(), EResourceState::ShaderRead);
 
 	rg.ExportTexture(outputColorTarget, EResourceState::ShaderRead);
 	if (outAlbedo.IsValid())
@@ -681,7 +980,8 @@ void Corona::PathTracingPass()
 		{
 			builder.ReadWriteTexture(outputColorTarget, EResourceState::UnorderedAccess)
 				.ReadBuffer(pointLightBuffer, EResourceState::ShaderRead)
-				.ReadBuffer(rtMaterials, EResourceState::ShaderRead);
+				.ReadBuffer(rtMaterials, EResourceState::ShaderRead)
+				.ReadBuffer(rtMaterialDrawRanges, EResourceState::ShaderRead);
 			if (outAlbedo.IsValid())
 				builder.ReadWriteTexture(outAlbedo, EResourceState::UnorderedAccess);
 			if (outSpecularAlbedo.IsValid())
@@ -720,7 +1020,8 @@ void Corona::PathTracingPass()
 				.SetCBVValue("global", "ViewParameter", &dispatchViewParam)
 				.SetSampler("global", "sampleWrap", samplerWrap.get());
 			pass.SetBindlessTextureTable("global", "MaterialTextures")
-				.SetBufferSRV("global", "RtMaterials", ctx.GetBuffer(rtMaterials));
+				.SetBufferSRV("global", "RtMaterials", ctx.GetBuffer(rtMaterials))
+				.SetBufferSRV("global", "RtMaterialDrawRanges", ctx.GetBuffer(rtMaterialDrawRanges));
 
 			RTSceneHitProgramDesc hitProgramDesc;
 			pass.BindSceneHitPrograms(hitProgramDesc);

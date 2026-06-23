@@ -4438,7 +4438,9 @@ private:
 		std::ifstream f(desc.ShaderPath, std::ios::binary);
 		if (!f.good()) { plog("shader file not found"); return; }
 		std::stringstream ss; ss << f.rdbuf(); const std::string src = ss.str();
-		const wchar_t* vsTarget = (desc.VertexEntryPoint == "VSMainBindlessIndirect") ? L"vs_6_8" : L"vs_6_5";
+		const wchar_t* vsTarget =
+			(desc.VertexEntryPoint == "VSMainBindlessIndirect" ||
+			 desc.VertexEntryPoint == "VSMainOcclusionBounds") ? L"vs_6_8" : L"vs_6_5";
 		VsDxil = CompileHLSLToDXIL(src.data(), src.size(), desc.ShaderPath.c_str(), vsW.c_str(), vsTarget, verr);
 		PsDxil = CompileHLSLToDXIL(src.data(), src.size(), desc.ShaderPath.c_str(), psW.c_str(), L"ps_6_5", perr);
 		if (VsDxil.empty() || PsDxil.empty()) {
@@ -4638,7 +4640,24 @@ private:
 			colors.push_back(c);
 		}
 		nri::OutputMergerDesc om = {}; om.colors = colors.empty() ? nullptr : colors.data(); om.colorNum = (uint32_t)colors.size();
-		if (desc.DepthFormat.has_value()) { om.depthStencilFormat = ToNRIFormat(*desc.DepthFormat); om.depth.compareOp = desc.bDepthEnable ? nri::CompareOp::LESS_EQUAL : nri::CompareOp::NONE; om.depth.write = desc.bDepthWriteEnable; }
+		auto mapDepthCompareOp = [](EDepthCompareOp op) -> nri::CompareOp
+		{
+			switch (op)
+			{
+			case EDepthCompareOp::Less:
+				return nri::CompareOp::LESS;
+			case EDepthCompareOp::LessEqual:
+				return nri::CompareOp::LESS_EQUAL;
+			case EDepthCompareOp::Equal:
+				return nri::CompareOp::EQUAL;
+			case EDepthCompareOp::Always:
+				return nri::CompareOp::ALWAYS;
+			case EDepthCompareOp::BackendDefault:
+			default:
+				return nri::CompareOp::LESS_EQUAL;
+			}
+		};
+		if (desc.DepthFormat.has_value()) { om.depthStencilFormat = ToNRIFormat(*desc.DepthFormat); om.depth.compareOp = desc.bDepthEnable ? mapDepthCompareOp(desc.DepthCompareOp) : nri::CompareOp::NONE; om.depth.write = desc.bDepthWriteEnable; }
 
 		nri::RasterizationDesc rast = {}; rast.fillMode = nri::FillMode::SOLID; rast.cullMode = desc.bCullBackFaces ? nri::CullMode::BACK : nri::CullMode::NONE; rast.frontCounterClockwise = false;
 		nri::InputAssemblyDesc ia = {}; ia.topology = desc.bTriangleStrip ? nri::Topology::TRIANGLE_STRIP : nri::Topology::TRIANGLE_LIST;

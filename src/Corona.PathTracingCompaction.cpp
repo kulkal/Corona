@@ -23,6 +23,7 @@ namespace
 	static constexpr UINT32 PathTracingCompactionStateStrideBytes = 64u;
 	static constexpr UINT32 PathTracingCompactionCounterCount = 16u;
 	static constexpr UINT32 PathTracingCompactionIndirectArgsBytes = 128u;
+	static constexpr uint32_t kRTMaterialDrawRangeBufferRegisterSpace = 15u;
 
 	void SplitUint64(UINT64 value, UINT32& lo, UINT32& hi)
 	{
@@ -82,6 +83,15 @@ void Corona::InitPathTracingCompactionPass()
 	tracePso->BindUAV("global", MakeRHIBufferUAV("PathCompactionRadiance", 15, rayGenStage));
 	tracePso->BindSRV("global", MakeRHIAccelerationStructureSRV("gRtScene", 0, rayGenStage));
 	tracePso->BindSRV("global", MakeRHIBufferSRV("PointLightBuffer", 4, rayGenStage));
+	tracePso->BindSRV(
+		"global",
+		MakeRHIBufferSRV(
+			"RtMaterialDrawRanges",
+			0,
+			closestHitStage | anyHitStage,
+			RHIBufferViewKind::Structured,
+			1,
+			kRTMaterialDrawRangeBufferRegisterSpace));
 	tracePso->BindCBV("global", MakeRHICBV("ViewParameter", 0, sizeof(PathTracingViewParam), rayGenStage));
 	tracePso->BindCBV("global", MakeRHICBV("PathCompaction", 1, sizeof(PathTracingCompactionParamCB), rayGenStage));
 	tracePso->BindSampler("global", MakeRHISampler("sampleWrap", 0, rayGenStage | closestHitStage | anyHitStage));
@@ -354,6 +364,7 @@ bool Corona::PathTracingCompactionPass(Texture* outputColor, const PathTracingVi
 	RGBufferRef indirectArgs = rg.ImportBuffer("PathTracingCompaction.IndirectArgs", PathTracingCompactionIndirectArgs.get(), EResourceState::ShaderRead);
 	RGBufferRef pointLightBuffer = rg.ImportBuffer("PathTracingCompaction.PointLightBuffer", PathTracingPointLightBuffer.get(), EResourceState::ShaderRead);
 	RGBufferRef rtMaterials = rg.ImportBuffer("PathTracingCompaction.RtMaterials", RTMaterialRecordBuffer.get(), EResourceState::ShaderRead);
+	RGBufferRef rtMaterialDrawRanges = rg.ImportBuffer("PathTracingCompaction.RtMaterialDrawRanges", RTMaterialDrawRangeRecordBuffer.get(), EResourceState::ShaderRead);
 
 	rg.ExportTexture(outputColorTarget, EResourceState::ShaderRead);
 	if (outAlbedo.IsValid())
@@ -430,7 +441,8 @@ bool Corona::PathTracingCompactionPass(Texture* outputColor, const PathTracingVi
 					.ReadWriteBuffer(radiance, EResourceState::UnorderedAccess)
 					.ReadWriteBuffer(indirectArgs, EResourceState::UnorderedAccess)
 					.ReadBuffer(pointLightBuffer, EResourceState::ShaderRead)
-					.ReadBuffer(rtMaterials, EResourceState::ShaderRead);
+					.ReadBuffer(rtMaterials, EResourceState::ShaderRead)
+					.ReadBuffer(rtMaterialDrawRanges, EResourceState::ShaderRead);
 				if (outAlbedo.IsValid())
 					builder.ReadWriteTexture(outAlbedo, EResourceState::UnorderedAccess);
 				if (outSpecularAlbedo.IsValid())
@@ -477,7 +489,8 @@ bool Corona::PathTracingCompactionPass(Texture* outputColor, const PathTracingVi
 					.SetCBVValue("global", "PathCompaction", &passCompactionParam)
 					.SetSampler("global", "sampleWrap", samplerWrap.get());
 				pass.SetBindlessTextureTable("global", "MaterialTextures")
-					.SetBufferSRV("global", "RtMaterials", ctx.GetBuffer(rtMaterials));
+					.SetBufferSRV("global", "RtMaterials", ctx.GetBuffer(rtMaterials))
+					.SetBufferSRV("global", "RtMaterialDrawRanges", ctx.GetBuffer(rtMaterialDrawRanges));
 
 				RTSceneHitProgramDesc hitProgramDesc;
 				pass.BindSceneHitPrograms(hitProgramDesc);

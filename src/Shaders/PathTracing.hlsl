@@ -35,6 +35,16 @@ struct PointLightParam
 
 StructuredBuffer<PointLightParam> PointLightBuffer : register(t4);
 
+struct RTMaterialDrawRangeRecord
+{
+    uint PrimitiveStart;
+    uint PrimitiveCount;
+    uint MaterialRecordIndex;
+    int VertexBase;
+};
+
+StructuredBuffer<RTMaterialDrawRangeRecord> RtMaterialDrawRanges : register(t0, space15);
+
 cbuffer ViewParameter : register(b0)
 {
     float4x4 ViewMatrix;
@@ -70,7 +80,7 @@ cbuffer ViewParameter : register(b0)
     uint bWritePrimaryGBuffer;
     float SpecularMotionVectorScale;
     uint bStabilizePrimaryRaySamples;
-    uint _rtaoPadding;
+    uint bPrimaryGBufferOnly;
     uint _pointLightPadding0;
     uint PointLightCount;
     float3 PointLightPadding;
@@ -107,6 +117,31 @@ float SamplePathTracingRoughness(RTMaterialRecord material, float2 uv, float mip
 float SamplePathTracingMetallic(RTMaterialRecord material, float2 uv, float mipLevel)
 {
     return MaterialTextures[NonUniformResourceIndex(material.MetallicTextureIndex)].SampleLevel(sampleWrap, uv, mipLevel).x;
+}
+
+RTMaterialDrawRangeRecord ResolvePathTracingDrawRange(uint instanceID, uint triangleIndex)
+{
+    RTGeometryRecord geometry = RtGeometries[instanceID];
+    [loop]
+    for (uint i = 0; i < geometry.DrawRangeCount; ++i)
+    {
+        RTMaterialDrawRangeRecord range = RtMaterialDrawRanges[geometry.DrawRangeOffset + i];
+        if (triangleIndex >= range.PrimitiveStart && triangleIndex < range.PrimitiveStart + range.PrimitiveCount)
+            return range;
+    }
+
+    RTMaterialDrawRangeRecord fallback;
+    fallback.PrimitiveStart = 0;
+    fallback.PrimitiveCount = 0;
+    fallback.MaterialRecordIndex = instanceID;
+    fallback.VertexBase = 0;
+    return fallback;
+}
+
+RTMaterialRecord ResolvePathTracingMaterial(uint instanceID, uint triangleIndex)
+{
+    RTMaterialDrawRangeRecord range = ResolvePathTracingDrawRange(instanceID, triangleIndex);
+    return RtMaterials[range.MaterialRecordIndex];
 }
 
 float EvaluateSpotAttenuation(PointLightParam light, float3 surfaceToLightDir)
@@ -265,13 +300,11 @@ float3 sample_ggx(float3 N, float roughness, inout uint seed)
     return GGXSafeNormalize(mul(H, TBN), N);
 }
 
-float ComputePathTracingTextureMipLevel(uint instanceID, Vertex vertex, float3 viewDir, float hitDistance)
+float ComputePathTracingTextureMipLevel(RTMaterialRecord material, Vertex vertex, float3 viewDir, float hitDistance)
 {
     uint textureWidth = 1;
     uint textureHeight = 1;
-    RTMaterialRecord material = RtMaterials[instanceID];
     MaterialTextures[NonUniformResourceIndex(material.AlbedoTextureIndex)].GetDimensions(textureWidth, textureHeight);
-
 
     float halfLog2NumTexPixels = 0.5f * log2(max(float(textureWidth) * float(textureHeight), 1.0f));
     float triangleLodConstant = vertex.textureLODConstant + halfLog2NumTexPixels;
@@ -282,30 +315,28 @@ float ComputePathTracingTextureMipLevel(uint instanceID, Vertex vertex, float3 v
     return computeTextureLOD(NoV, rayConeWidth, triangleLodConstant);
 }
 
-float3 ApplyPathTracingNormalMap(float3 vertexNormal, float3 vertexTangent, float2 uv, uint instanceID, float mipLevel)
+float3 ApplyPathTracingNormalMap(float3 vertexNormal, float3 vertexTangent, float2 uv, RTMaterialRecord material, float mipLevel)
 {
     float3 N = GGXSafeNormalize(vertexNormal, float3(0.0f, 1.0f, 0.0f));
     float tangentLenSq = dot(vertexTangent, vertexTangent);
     if (any(isnan(vertexTangent)) || any(isinf(vertexTangent)) || tangentLenSq < 1e-8f)
         return N;
 
-    float3 T = GGXSafeNormalize(vertexTangent, N);
-    T = T - dot(T, N) * N;
-    T = GGXSafeNormalize(T, float3(0.0f, 0.0f, 0.0f));
+    float3 T = GGXSafeNormalize(vertexTangent, float3(0.0f, 0.0f, 0.0f));
     if (dot(T, T) < 1e-8f)
         return N;
 
-    float3 B = cross(N, T);
+    float3 B = cross(T, N);
     B = GGXSafeNormalize(B, float3(0.0f, 0.0f, 0.0f));
     if (dot(B, B) < 1e-8f)
         return N;
 
-    RTMaterialRecord material = RtMaterials[instanceID];
     float3 normalMap = SamplePathTracingNormal(material, uv, mipLevel);
 
     if (any(isnan(normalMap)) || any(isinf(normalMap)))
         return N;
-    normalMap = normalMap * 2.0f - 1.0f;
+    float2 normalXY = normalMap.xy * 2.0f - 1.0f;
+    normalMap = float3(normalXY, sqrt(saturate(1.0f - dot(normalXY, normalXY))));
 
     return GGXSafeNormalize(mul(normalMap, float3x3(T, B, N)), N);
 }
@@ -400,6 +431,35 @@ void WritePrimaryHitGBuffer(uint2 pixel, PathTracingPayload payload, bool bHit, 
     OutSpecularMotionVector[pixel] = specularMotionVector;
 }
 
+PathTracingPayload TracePrimaryGBufferSample(float2 pixelCenter, float2 launchDim, float2 sampleOffset, uint seed)
+{
+    float2 inUV = (pixelCenter + sampleOffset) / launchDim;
+    float2 clipXY = inUV * 2.0f - 1.0f;
+    clipXY.y = -clipXY.y;
+
+    float4 viewFarH = mul(float4(clipXY, 1.0f, 1.0f), InvProjMatrix);
+    float invViewFarW = abs(viewFarH.w) > 1.0e-6f ? rcp(viewFarH.w) : 1.0f;
+    float3 viewRayDir = viewFarH.xyz * invViewFarW;
+    if (any(isnan(viewRayDir)) || any(isinf(viewRayDir)) || dot(viewRayDir, viewRayDir) < 1.0e-8f)
+        viewRayDir = float3(0.0f, 0.0f, -1.0f);
+    else
+        viewRayDir = normalize(viewRayDir);
+
+    float primaryRayTScale = rcp(max(-viewRayDir.z, 1.0e-4f));
+    float3 rayDir = normalize(mul(float4(viewRayDir, 0), InvViewMatrix).xyz);
+    float3 rayOrigin = mul(float4(0, 0, 0, 1), InvViewMatrix).xyz;
+
+    RayDesc ray;
+    ray.Origin = rayOrigin;
+    ray.Direction = rayDir;
+    ray.TMin = max(0.0001f, ProjectionParams.z * primaryRayTScale);
+    ray.TMax = max(ray.TMin + 0.0001f, ProjectionParams.w * primaryRayTScale);
+
+    PathTracingPayload payload = MakePathTracingPayload(rayOrigin, rayDir, 0u, seed, float3(1, 1, 1), 0u);
+    TraceRay(gRtScene, RAY_FLAG_NONE, 0xFF, 0, 0, 0, ray, payload);
+    return payload;
+}
+
 [shader("raygeneration")]
 void PathTracingRayGen()
 {
@@ -411,6 +471,21 @@ void PathTracingRayGen()
     
     uint frameCounter = (DebugMode > 0) ? 0 : BlueNoiseOffsetStride;
     uint sampleCount = (DebugMode > 0) ? 1u : clamp(SamplesPerPixel, 1u, 16u);
+    if (bPrimaryGBufferOnly != 0)
+    {
+        PathTracingPayload payload = TracePrimaryGBufferSample(
+            pixelCenter,
+            float2(launchDim.xy),
+            -RandomOffset,
+            init_path_seed(launchIndex.xy, frameCounter, 0u));
+        WritePrimaryHitGBuffer(
+            launchIndex.xy,
+            payload,
+            payload.hit != 0u,
+            ProjectionParams.w,
+            float2(0.0f, 0.0f));
+        return;
+    }
     float3 radianceSum = float3(0, 0, 0);
 
     for (uint sampleIndex = 0; sampleIndex < sampleCount; ++sampleIndex)
@@ -466,7 +541,7 @@ void PathTracingRayGen()
                 float specularHitDistance = ProjectionParams.w;
                 float2 specularMotionVector = float2(0.0f, 0.0f);
                 bool primaryHit = payload.hit != 0u;
-                if (primaryHit)
+                if (primaryHit && bPrimaryGBufferOnly == 0)
                 {
                     float roughness = clamp(payload.debugRoughness, 0.02f, 1.0f);
                     float3 specularAlbedo = lerp(0.04f.xxx, saturate(payload.debugAlbedo), saturate(payload.debugMetallic));
@@ -512,6 +587,8 @@ void PathTracingRayGen()
                     }
                 }
                 WritePrimaryHitGBuffer(launchIndex.xy, payload, primaryHit, specularHitDistance, specularMotionVector);
+                if (bPrimaryGBufferOnly != 0)
+                    return;
             }
             
             if (DebugMode > 0 && bounce == 0)
@@ -813,14 +890,17 @@ void PathTracingClosestHit(inout PathTracingPayload payload, in BuiltInTriangleI
     
     uint triangleIndex = PrimitiveIndex();
     uint instanceID = InstanceID();
+    RTMaterialDrawRangeRecord drawRange = ResolvePathTracingDrawRange(instanceID, triangleIndex);
     Vertex vertex = CORONA_GET_VERTEX_ATTRIBUTES(instanceID, triangleIndex, barycentrics);
+    RTMaterialRecord material = RtMaterials[drawRange.MaterialRecordIndex];
     float hitDistance = RayTCurrent();
-    float textureMipLevel = ComputePathTracingTextureMipLevel(instanceID, vertex, payload.direction, hitDistance);
+    float textureMipLevel = (bPrimaryGBufferOnly != 0)
+        ? 0.0f
+        : ComputePathTracingTextureMipLevel(material, vertex, payload.direction, hitDistance);
     payload.hit = 1u;
     payload.hitDistance = hitDistance;
     
     // Get material properties
-    RTMaterialRecord material = RtMaterials[instanceID];
     float3 albedo = SamplePathTracingAlbedo(material, vertex.uv, textureMipLevel).xyz;
     float roughness = clamp(SamplePathTracingRoughness(material, vertex.uv, textureMipLevel), 0.02f, 1.0f);
     float metallic = saturate(SamplePathTracingMetallic(material, vertex.uv, textureMipLevel));
@@ -843,21 +923,34 @@ void PathTracingClosestHit(inout PathTracingPayload payload, in BuiltInTriangleI
     
     // Sample normal map when a valid tangent basis exists. Models without UVs
     // such as buddha.obj have no tangents, so fall back to the geometric normal.
-    float3 N = ApplyPathTracingNormalMap(vertex.normal, vertex.tangent, vertex.uv, instanceID, textureMipLevel);
+    float3 N = ApplyPathTracingNormalMap(vertex.normal, vertex.tangent, vertex.uv, material, textureMipLevel);
     float3 V = GGXSafeNormalize(-payload.direction, N);
     float3 geomNormal = GGXSafeNormalize(vertex.normal, N);
     // Path tracing hits both sides of imported meshes. Keep the shading normal
     // on the visible side so inverted/two-sided OBJ normals do not trap paths.
-    if (dot(N, V) < 0.0f)
-        N = -N;
-    if (dot(geomNormal, V) < 0.0f)
-        geomNormal = -geomNormal;
+    // RT primary GBuffer must match raster GBuffer, which does not generally
+    // face-forward opaque mesh normals. Keep the path-tracing robustness flip
+    // out of the raw RR input path.
+    if (bPrimaryGBufferOnly == 0)
+    {
+        if (dot(N, V) < 0.0f)
+            N = -N;
+        if (dot(geomNormal, V) < 0.0f)
+            geomNormal = -geomNormal;
+    }
     
     // Store final normal for debug visualization
     if (payload.depth == 0)
     {
         payload.debugNormal = N;
         payload.debugGeomNormal = geomNormal;
+    }
+
+    if (bPrimaryGBufferOnly != 0 && payload.depth == 0)
+    {
+        payload.radiance = float3(0, 0, 0);
+        payload.done = true;
+        return;
     }
     
     // Offset ray origin to avoid self-intersection
@@ -1088,11 +1181,14 @@ void PathTracingAnyHit(inout PathTracingPayload payload, in BuiltInTriangleInter
     if (!IsAlphaTestedInstance(instanceID, CORONA_INSTANCE_PROPERTY))
         return;
 
+    RTMaterialDrawRangeRecord drawRange = ResolvePathTracingDrawRange(instanceID, triangleIndex);
     Vertex vertex = CORONA_GET_VERTEX_ATTRIBUTES(instanceID, triangleIndex, barycentrics);
-    float textureMipLevel = ComputePathTracingTextureMipLevel(instanceID, vertex, payload.direction, RayTCurrent());
+    RTMaterialRecord material = RtMaterials[drawRange.MaterialRecordIndex];
+    float textureMipLevel = (bPrimaryGBufferOnly != 0)
+        ? 0.0f
+        : ComputePathTracingTextureMipLevel(material, vertex, payload.direction, RayTCurrent());
     
     // Sample albedo alpha channel
-    RTMaterialRecord material = RtMaterials[instanceID];
     float alpha = SamplePathTracingAlbedo(material, vertex.uv, textureMipLevel).w;
 
     

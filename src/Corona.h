@@ -110,6 +110,7 @@ public:
 		WORLD_NORMAL,
 		GEO_NORMAL,
 		DEPTH,
+		OCCLUDER_DEPTH,
 		RAW_DIFFUSE_GI,
 		RAW_DIFFUSE_GI_AUX,
 		SCREEN_PROBE_DIFFUSE_GI,
@@ -139,10 +140,31 @@ private:
 		GpuIndirect = 1,
 	};
 
+	enum class EGBufferOcclusionMode : UINT32
+	{
+		Conservative = 0,
+		Adaptive = 1,
+		Aggressive = 2,
+	};
+
+	enum class EGBufferDepthPrepassOccluderMode : UINT32
+	{
+		CpuCoverage = 0,
+		SparseRayGpu = 1,
+	};
+
+	enum class EGBufferGenerationMode : UINT32
+	{
+		Raster = 0,
+		RtPrimary = 1,
+	};
+
 	enum class EGpuPass : UINT32
 	{
 		Frame = 0,
 		SkeletalSkinning,
+		DepthPrepass,
+		OccluderDepth,
 		GBuffer,
 		Terrain,
 		Grass,
@@ -258,6 +280,8 @@ private:
 	DX12Backend* dx12_rhi = nullptr;
 
 	shared_ptr<Texture> DepthBuffer;
+	shared_ptr<Texture> GBufferOccluderDepthDebugBuffer;
+	shared_ptr<Texture> GBufferOccluderDepthDebugDepthBuffer;
 	shared_ptr<Texture> UnjitteredDepthBuffers[2];
 
 	UINT ColorBufferWriteIndex = 0;
@@ -456,9 +480,50 @@ private:
 	// so occluded opaque pixels are rejected before shading/pixout. Alpha-tested
 	// draws stay on GBufferBindlessIndirectGraphicsPipeline (late-Z + discard).
 	std::shared_ptr<GraphicsPipelineHandle> GBufferBindlessIndirectOpaqueGraphicsPipeline;
+	std::shared_ptr<GraphicsPipelineHandle> GBufferBindlessIndirectDepthPrepassGraphicsPipeline;
+	std::shared_ptr<GraphicsPipelineHandle> GBufferBindlessIndirectDepthVisualizeGraphicsPipeline;
+	std::shared_ptr<GraphicsPipelineHandle> GBufferOcclusionBoundsGraphicsPipeline;
+	std::shared_ptr<GraphicsPipelineHandle> GBufferBindlessIndirectOpaqueDepthTestGraphicsPipeline;
 	shared_ptr<ComputePipelineStateObject> GBufferGpuCullClearPSO;
 	shared_ptr<ComputePipelineStateObject> GBufferGpuCullBuildPSO;
+	shared_ptr<ComputePipelineStateObject> GBufferOccluderDepthPyramidBuildPSO;
+	shared_ptr<ComputePipelineStateObject> GBufferSparseRayOccluderClearPSO;
+	shared_ptr<ComputePipelineStateObject> GBufferSparseRayOccluderSelectPSO;
 	EGBufferObjectCullingMode GBufferObjectCullingMode = EGBufferObjectCullingMode::GpuIndirect;
+	EGBufferOcclusionMode GBufferOcclusionMode = EGBufferOcclusionMode::Adaptive;
+	EGBufferDepthPrepassOccluderMode GBufferDepthPrepassOccluderMode = EGBufferDepthPrepassOccluderMode::CpuCoverage;
+	EGBufferGenerationMode GBufferGenerationMode = EGBufferGenerationMode::Raster;
+	bool bEnableGBufferDepthPrepass = true;
+	bool bEnableGBufferHiZOcclusion = true;
+	bool bGBufferDepthPrepassMainPassActive = false;
+	float GBufferDepthPrepassMinScreenCoverage = 0.02f;
+	uint32_t GBufferDepthPrepassMaxOccluderObjects = 128u;
+	uint32_t GBufferDepthPrepassOccluderUpdateInterval = 4u;
+	uint32_t GBufferSparseRayOccluderGridWidth = 96u;
+	uint32_t GBufferSparseRayOccluderGridHeight = 54u;
+	uint32_t GBufferSparseRayOccluderUpdateInterval = 1u;
+	std::shared_ptr<Buffer> GBufferSparseRayOccluderCandidateObjectBuffer;
+	std::shared_ptr<Buffer> GBufferSparseRayOccluderObjectHitFlagsBuffer;
+	std::shared_ptr<Buffer> GBufferSparseRayOccluderCounterBuffer;
+	EResourceState GBufferSparseRayOccluderCandidateObjectState = EResourceState::ShaderRead;
+	EResourceState GBufferSparseRayOccluderObjectHitFlagsState = EResourceState::ShaderRead;
+	EResourceState GBufferSparseRayOccluderCounterState = EResourceState::ShaderRead;
+	uint32_t GBufferSparseRayOccluderCandidateCapacity = 0u;
+	uint32_t GBufferSparseRayOccluderObjectCapacity = 0u;
+	uint32_t GBufferSparseRayOccluderBuiltFrame = UINT32_MAX;
+	uint64_t GBufferSparseRayOccluderSceneGeneration = UINT64_MAX;
+	uint64_t GBufferLastSparseRayOccluderRayCount = 0;
+	uint64_t GBufferLastSparseRayOccluderCandidateCapacity = 0;
+	static constexpr uint32_t GBufferOccluderDepthPyramidMaxMipCount = 16u;
+	std::shared_ptr<Buffer> GBufferOccluderDepthPyramidBuffer;
+	std::shared_ptr<Buffer> GBufferDummyDepthPyramidBuffer;
+	EResourceState GBufferOccluderDepthPyramidState = EResourceState::ShaderRead;
+	uint32_t GBufferOccluderDepthPyramidWidth = 0;
+	uint32_t GBufferOccluderDepthPyramidHeight = 0;
+	uint32_t GBufferOccluderDepthPyramidMipCount = 0;
+	uint32_t GBufferOccluderDepthPyramidElementCount = 0;
+	std::array<uint32_t, GBufferOccluderDepthPyramidMaxMipCount> GBufferOccluderDepthPyramidMipOffsets = {};
+	uint32_t GBufferOccluderDepthPyramidBuiltFrame = UINT32_MAX;
 	std::shared_ptr<Buffer> GBufferDummyDrawRecordBuffer;
 	// Desktop static-mesh instancing path. Draws repeated map-spawned
 	// SceneObjects that share the same Scene/material override as
@@ -1034,7 +1099,7 @@ private:
 		UINT32 bWritePrimaryGBuffer = 0;
 		float SpecularMotionVectorScale = 1.0f;
 		UINT32 bStabilizePrimaryRaySamples = 0;
-		UINT32 _rtaoPadding = 0;
+		UINT32 bPrimaryGBufferOnly = 0;
 		UINT32 _pointLightPadding0 = 0;
 		UINT32 PointLightCount = 0;
 		glm::vec3 PointLightPadding = glm::vec3(0.0f);
@@ -1053,12 +1118,21 @@ private:
 	};
 	static_assert(sizeof(RTMaterialRecord) == 36, "RTMaterialRecord layout must match BindlessResources.hlsli");
 
+	struct RTMaterialDrawRangeRecord
+	{
+		UINT32 PrimitiveStart = 0;
+		UINT32 PrimitiveCount = 0;
+		UINT32 MaterialRecordIndex = 0;
+		INT32 VertexBase = 0;
+	};
+	static_assert(sizeof(RTMaterialDrawRangeRecord) == 16, "RTMaterialDrawRangeRecord layout must match PathTracing.hlsl");
+
 	struct RTGeometryRecord
 	{
 		UINT32 VertexBufferIndex = RHI_INVALID_BINDLESS_INDEX;
 		UINT32 IndexBufferIndex = RHI_INVALID_BINDLESS_INDEX;
-		UINT32 Padding0 = 0;
-		UINT32 Padding1 = 0;
+		UINT32 DrawRangeOffset = 0;
+		UINT32 DrawRangeCount = 0;
 	};
 
 	PathTracingViewParamCB PathTracingViewParam;
@@ -1083,6 +1157,7 @@ private:
 	uint64_t RTMaterialRecordInstanceRevision = 0;
 	UINT32 RTMaterialRecordValidatedFrameCounter = 0;
 	const IRenderBackend* RTMaterialRecordBackend = nullptr;
+	std::shared_ptr<Buffer> RTMaterialDrawRangeRecordBuffer;
 	std::shared_ptr<Buffer> RTGeometryRecordBuffer;
 	uint64_t RTGeometryRecordHash = 0;
 	UINT PathTracingWriteIndex = 0;
@@ -1098,9 +1173,9 @@ private:
 	bool bEnablePathTracingRRSpecularHitDistance = false;
 	bool bEnablePathTracingRRPrimaryRayStabilization = true;
 	float HybridRRSpecularMotionVectorScale = 1.0f;
-	bool bEnableHybridRRSpecularMotionVectors = true;
-	bool bEnableHybridRRSpecularHitDistance = true;
-	bool bEnableHybridRRSpecularGuideRay = true;
+	bool bEnableHybridRRSpecularMotionVectors = false;
+	bool bEnableHybridRRSpecularHitDistance = false;
+	bool bEnableHybridRRSpecularGuideRay = false;
 	glm::mat4x4 PrevPathTracingViewMat = glm::mat4x4(0.0f);
 	glm::vec3 PrevPathTracingLightDir;
 	float PrevPathTracingLightIntensity = 0.0f;
@@ -1168,7 +1243,9 @@ private:
 		SH_LIGHTING = 5,
 		DEPTH = 6,
 		HISTORY_LENGTH = 7,
-		COUNT = 8,
+		RAW_COPY_DEPTH_MASKED = 8,
+		DEPTH_QUANTIZED = 9,
+		COUNT = 10,
 	};
 	struct DebugPassCB
 	{
@@ -1446,12 +1523,12 @@ private:
 
 	float JitterScale = 0.6;
 	UINT32 TAASampleCount = 32;
-	float DLSSJitterPhaseScale = 4.0f;
+	float DLSSJitterPhaseScale = 1.0f;
 	UINT32 DLSSJitterPhaseCountAuto = 32;
 	UINT32 DLSSJitterPhaseCount = 32;
 	UINT32 DLSSJitterPhaseCountOverride = 0;
 	float DLSSRRJitterPhaseScale = 0.65f;
-	UINT32 DLSSRRJitterPhaseCountOverride = 4;
+	UINT32 DLSSRRJitterPhaseCountOverride = 0;
 	float DLSSSRSharpness = 0.0f;
 	float DLSSRRSharpness = 0.0f;
 	UINT32 DLSSSRPresetOverride = 0;
@@ -2031,10 +2108,10 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 		float SurfaceBounceSaturation = 1.0f;
 		float JitterScale = 0.6f;
 		UINT32 TAASampleCount = 32;
-		float DLSSJitterPhaseScale = 4.0f;
+		float DLSSJitterPhaseScale = 1.0f;
 		UINT32 DLSSJitterPhaseCountOverride = 0;
 		float DLSSRRJitterPhaseScale = 0.65f;
-		UINT32 DLSSRRJitterPhaseCountOverride = 4;
+		UINT32 DLSSRRJitterPhaseCountOverride = 0;
 		float DLSSSRSharpness = 0.0f;
 		float DLSSRRSharpness = 0.0f;
 		UINT32 DLSSSRPresetOverride = 0;
@@ -2190,6 +2267,7 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	{
 		bool LastVisible = true;
 		bool HasPendingOcclusionQuery = false;
+		bool ForceOcclusionQueryThisFrame = false;
 		uint8_t ConsecutiveOccludedQueries = 0;
 		uint32_t LastQueryIndex = 0;
 		uint32_t LastQueryFrameIndex = 0;
@@ -2203,7 +2281,11 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	uint32_t GBufferOcclusionQueryCapacityPerFrame = 0;
 	uint32_t GBufferOcclusionFrameIndex = 0;
 	uint32_t GBufferOcclusionQueryCount = 0;
+	uint64_t GBufferOcclusionWarmupStartFrame = 0;
 	bool bGBufferOcclusionQueriesActive = false;
+	bool bGBufferOcclusionQueryDrawActive = false;
+	bool bGBufferOcclusionWarmupStartFrameValid = false;
+	bool bGBufferAdaptiveOcclusionWarmupThisFrame = false;
 	bool bGBufferOcclusionCameraHistoryValid = false;
 	bool bGBufferOcclusionCameraMovedThisFrame = false;
 	glm::vec3 GBufferOcclusionLastCameraPosition = glm::vec3(0.0f);
@@ -2218,6 +2300,9 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	uint64_t GBufferLastBindlessObjectBatchCount = 0;
 	uint64_t GBufferLastBindlessObjectCount = 0;
 	uint64_t GBufferLastBindlessObjectDrawCount = 0;
+	uint64_t GBufferLastDepthPrepassCandidateObjectCount = 0;
+	uint64_t GBufferLastDepthPrepassSelectedObjectCount = 0;
+	uint64_t GBufferLastDepthPrepassOpaqueDrawCount = 0;
 	uint64_t GBufferLastSpatialCellCount = 0;
 	uint64_t GBufferLastSpatialVisibleCellCount = 0;
 	uint64_t GBufferLastSpatialPartialCellCount = 0;
@@ -2327,9 +2412,12 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	};
 
 	std::shared_ptr<Buffer> InstancePropertyBuffer;
+	std::shared_ptr<Buffer> RTInstanceSceneObjectIndexBuffer;
 	shared_ptr<RTAS> TLAS;
 	std::vector<std::shared_ptr<Buffer>> InstancePropertyFrameBuffers;
+	std::vector<std::shared_ptr<Buffer>> RTInstanceSceneObjectIndexFrameBuffers;
 	std::vector<InstanceProperty> InstancePropertyUploadScratch;
+	std::vector<uint32_t> RTInstanceSceneObjectIndexUploadScratch;
 	std::vector<shared_ptr<RTAS>> TLASFrameResources;
 	std::vector<UINT32> TLASFrameInstanceCounts;
 	std::map<Mesh*, std::shared_ptr<RTAS>> RayTracingBLASCache;
@@ -3398,8 +3486,13 @@ public:
 		bool hasPrecomputedCandidateDrawCounts = false,
 		uint32_t precomputedOpaqueDrawCount = 0,
 		uint32_t precomputedAlphaDrawCount = 0,
-		bool useAllStaticObjects = false);
+		bool useAllStaticObjects = false,
+		bool depthPrepassOnly = false,
+		GraphicsPipelineHandle* depthPrepassPipelineOverride = nullptr,
+		bool sparseRayDepthPrepassOnly = false);
 	void ResetGBufferStaticDrawCache();
+	void ResetGBufferOcclusionRuntimeState();
+	void SetGBufferOcclusionMode(EGBufferOcclusionMode mode, const wchar_t* reason);
 	bool BuildMobileShadowViewProjection(glm::mat4x4& lightViewProj);
 	bool GetSceneObjectWorldBounds(const SceneObject& object, glm::vec3& boundsMin, glm::vec3& boundsMax, glm::vec3& center, float& radius) const;
 	bool IsWorldAabbInViewFrustum(const glm::vec3& boundsMin, const glm::vec3& boundsMax) const;
@@ -3414,6 +3507,7 @@ public:
 	void FinishGBufferCulling();
 
 	void GBufferPass();
+	bool RaytracePrimaryGBufferPass();
 	void MobileShadowMapPass();
 
 	void RaytraceShadowPass();

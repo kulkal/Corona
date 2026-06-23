@@ -264,6 +264,15 @@ enum class EBlendMode : uint8_t
 	AlphaBlend,
 };
 
+enum class EDepthCompareOp : uint8_t
+{
+	BackendDefault,
+	Less,
+	LessEqual,
+	Equal,
+	Always,
+};
+
 struct GraphicsPipelineDesc
 {
 	std::wstring ShaderPath;
@@ -279,6 +288,7 @@ struct GraphicsPipelineDesc
 	std::optional<ETextureFormat> DepthFormat;
 	bool bDepthEnable = false;
 	bool bDepthWriteEnable = true;
+	EDepthCompareOp DepthCompareOp = EDepthCompareOp::BackendDefault;
 	bool bCullBackFaces = true;
 	bool bTriangleStrip = false;
 	bool bDepthBiasEnable = false;
@@ -391,6 +401,7 @@ struct RTInstanceDesc
 	float Metallic = 0.0f;
 	uint32_t bOverrideRoughnessMetallic = 0;
 	uint32_t Flags = 0;
+	uint32_t SceneObjectIndex = UINT32_MAX;
 };
 
 struct RenderBackendCapabilities

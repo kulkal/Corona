@@ -8860,6 +8860,13 @@ void VulkanBackend::SetRenderTargets(Texture* const* colorTargets, uint32_t colo
 #if !CORONA_HAS_VULKAN
 	(void)colorTargets; (void)colorTargetCount; (void)depthTarget; ThrowNotImplemented(__FUNCTION__);
 #else
+	if (bRenderPassActive && ActiveCommandBuffer != VK_NULL_HANDLE)
+	{
+		vkCmdEndRenderPass(ActiveCommandBuffer);
+		bRenderPassActive = false;
+		ActiveGraphicsRenderPass = VK_NULL_HANDLE;
+		ActiveColorAttachmentCount = 0;
+	}
 	PendingOffscreenColorTargets.clear();
 	for (uint32_t i = 0; i < colorTargetCount; ++i)
 	{
@@ -11044,7 +11051,25 @@ std::shared_ptr<GraphicsPipelineHandle> VulkanBackend::CreateGraphicsPipeline(co
 	depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
 	depthStencil.depthTestEnable = desc.bDepthEnable ? VK_TRUE : VK_FALSE;
 	depthStencil.depthWriteEnable = (desc.bDepthEnable && desc.bDepthWriteEnable) ? VK_TRUE : VK_FALSE;
-	depthStencil.depthCompareOp = desc.bDepthEnable ? VK_COMPARE_OP_LESS_OR_EQUAL : VK_COMPARE_OP_ALWAYS;
+	auto mapDepthCompareOp = [](EDepthCompareOp op) -> VkCompareOp
+	{
+		switch (op)
+		{
+		case EDepthCompareOp::Less:
+			return VK_COMPARE_OP_LESS;
+		case EDepthCompareOp::LessEqual:
+			return VK_COMPARE_OP_LESS_OR_EQUAL;
+		case EDepthCompareOp::Equal:
+			return VK_COMPARE_OP_EQUAL;
+		case EDepthCompareOp::Always:
+			return VK_COMPARE_OP_ALWAYS;
+		case EDepthCompareOp::BackendDefault:
+		default:
+			return VK_COMPARE_OP_LESS_OR_EQUAL;
+		}
+	};
+	depthStencil.depthCompareOp =
+		desc.bDepthEnable ? mapDepthCompareOp(desc.DepthCompareOp) : VK_COMPARE_OP_ALWAYS;
 
 	std::vector<VkPipelineColorBlendAttachmentState> colorBlendAttachments;
 	const uint32_t colorAttachmentCount = static_cast<uint32_t>(desc.ColorFormats.size());

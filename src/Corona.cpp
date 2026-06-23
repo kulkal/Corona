@@ -977,9 +977,11 @@ namespace
 		return mode == Corona::EAntiAliasingMode::DLSS_SR || mode == Corona::EAntiAliasingMode::DLSS_RR;
 	}
 
-	constexpr std::array<const char*, 23> kGpuPassNames = {
+	constexpr std::array<const char*, 25> kGpuPassNames = {
 		"Frame Total",
 		"Skeletal Skinning",
+		"Depth Prepass",
+		"Occluder Depth",
 		"GBuffer",
 		"Terrain",
 		"Grass",
@@ -1011,10 +1013,11 @@ namespace
 		return 0xFF000000ull | (static_cast<uint64_t>(b) << 16) | (static_cast<uint64_t>(g) << 8) | static_cast<uint64_t>(r);
 	}
 
-	const std::array<UINT64, 18> kGpuPassPixColors = {
+	const std::array<UINT64, 19> kGpuPassPixColors = {
 		MakeGpuMarkerColor(210, 210, 210),
 		MakeGpuMarkerColor(86, 156, 214),
 		MakeGpuMarkerColor(214, 86, 86),
+		MakeGpuMarkerColor(214, 214, 86),
 		MakeGpuMarkerColor(214, 145, 86),
 		MakeGpuMarkerColor(156, 214, 86),
 		MakeGpuMarkerColor(214, 86, 189),
@@ -2109,6 +2112,13 @@ Corona::~Corona()
 
 	// Release backend-native pipeline wrappers while the backend is still alive.
 	GBufferGraphicsPipeline.reset();
+	GBufferBindlessGeometryGraphicsPipeline.reset();
+	GBufferBindlessIndirectGraphicsPipeline.reset();
+	GBufferBindlessIndirectOpaqueGraphicsPipeline.reset();
+	GBufferBindlessIndirectDepthPrepassGraphicsPipeline.reset();
+	GBufferBindlessIndirectDepthVisualizeGraphicsPipeline.reset();
+	GBufferOcclusionBoundsGraphicsPipeline.reset();
+	GBufferBindlessIndirectOpaqueDepthTestGraphicsPipeline.reset();
 	StaticInstancedGBufferGraphicsPipeline.reset();
 	ProceduralGrassGraphicsPipeline.reset();
 	CpuSpineGBufferGraphicsPipeline.reset();
@@ -2130,6 +2140,9 @@ Corona::~Corona()
 	SkeletalSkinningPSO.reset();
 	GBufferGpuCullClearPSO.reset();
 	GBufferGpuCullBuildPSO.reset();
+	GBufferOccluderDepthPyramidBuildPSO.reset();
+	GBufferSparseRayOccluderClearPSO.reset();
+	GBufferSparseRayOccluderSelectPSO.reset();
 	TemporalDenoisingFilterPSO.reset();
 	DiffuseGISpatialFilterPSO.reset();
 	ScreenProbeGIPSO.reset();
@@ -2200,7 +2213,10 @@ void Corona::BeginFramePerfLogging()
 		{
 			logFile << "# Corona frame performance log. One row is an approximately one-second sample.\n";
 			logFile << "sample,total_frames,backend,mode,timer_fps,avg_fps,avg_frame_ms,min_frame_ms,max_frame_ms,"
-				"avg_update_ms,avg_begin_frame_ms,avg_record_ms,avg_execute_ms,avg_end_frame_ms,avg_render_wait_ms";
+				"avg_update_ms,avg_begin_frame_ms,avg_record_ms,avg_execute_ms,avg_end_frame_ms,avg_render_wait_ms,"
+				"gbuffer_generation_mode,gbuffer_depth_prepass_occluder_mode,gbuffer_sparse_ray_grid_w,gbuffer_sparse_ray_grid_h,"
+				"gbuffer_sparse_ray_count,gbuffer_depth_prepass_candidates,gbuffer_depth_prepass_selected,"
+				"gbuffer_depth_prepass_opaque_draws";
 			for (UINT phaseIndex = 0; phaseIndex < RenderCommandPhaseCount; ++phaseIndex)
 			{
 				logFile << ",avg_record_" << kRenderCommandPhaseLogColumnNames[phaseIndex] << "_ms";
@@ -2386,7 +2402,15 @@ void Corona::FinishFramePerfLogging(double beginFrameMs, double executeMs, doubl
 			<< "," << (FramePerfLogAccumRecordMs / sampleFrameCount)
 			<< "," << (FramePerfLogAccumExecuteMs / sampleFrameCount)
 			<< "," << (FramePerfLogAccumEndFrameMs / sampleFrameCount)
-			<< "," << (FramePerfLogAccumRenderWaitMs / sampleFrameCount);
+			<< "," << (FramePerfLogAccumRenderWaitMs / sampleFrameCount)
+			<< "," << static_cast<int>(GBufferGenerationMode)
+			<< "," << static_cast<int>(GBufferDepthPrepassOccluderMode)
+			<< "," << GBufferSparseRayOccluderGridWidth
+			<< "," << GBufferSparseRayOccluderGridHeight
+			<< "," << GBufferLastSparseRayOccluderRayCount
+			<< "," << GBufferLastDepthPrepassCandidateObjectCount
+			<< "," << GBufferLastDepthPrepassSelectedObjectCount
+			<< "," << GBufferLastDepthPrepassOpaqueDrawCount;
 		for (UINT phaseIndex = 0; phaseIndex < RenderCommandPhaseCount; ++phaseIndex)
 		{
 			logFile << "," << (FramePerfLogAccumRenderCommandPhaseMs[phaseIndex] / sampleFrameCount);
@@ -3514,6 +3538,8 @@ bool Corona::RenderResolutionResourcesMatchCurrentState() const
 		!textureMatches(VelocityBuffer, renderWidth, renderHeight) ||
 		!textureMatches(RoughnessMetalicBuffer, renderWidth, renderHeight) ||
 		!textureMatches(DepthBuffer, renderWidth, renderHeight) ||
+		!textureMatches(GBufferOccluderDepthDebugBuffer, renderWidth, renderHeight) ||
+		!textureMatches(GBufferOccluderDepthDebugDepthBuffer, renderWidth, renderHeight) ||
 		!textureMatches(UnjitteredDepthBuffers[0], renderWidth, renderHeight) ||
 		!textureMatches(UnjitteredDepthBuffers[1], renderWidth, renderHeight))
 		return false;
@@ -3676,6 +3702,8 @@ void Corona::RecreateRenderResolutionResources()
 	releaseTexture(PathTracingSpecularHitDistanceBuffer);
 	releaseTexture(PathTracingSpecularMotionVectorBuffer);
 	releaseTexture(DepthBuffer);
+	releaseTexture(GBufferOccluderDepthDebugBuffer);
+	releaseTexture(GBufferOccluderDepthDebugDepthBuffer);
 	releaseTexture(UnjitteredDepthBuffers[0]);
 	releaseTexture(UnjitteredDepthBuffers[1]);
 
@@ -3868,6 +3896,12 @@ void Corona::RecreateRenderResolutionResources()
 
 	DepthBuffer = createTexture2D(ETextureFormat::D32Float, TextureUsage_DepthStencil, RenderWidthLocal, RenderHeightLocal, 1);
 	NAME_D3D12_OBJECT(DepthBuffer->resource);
+
+	GBufferOccluderDepthDebugBuffer = createTexture2D(ETextureFormat::R32Float, TextureUsage_RenderTarget | TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1, glm::vec4(1.0f));
+	NAME_D3D12_OBJECT(GBufferOccluderDepthDebugBuffer->resource);
+
+	GBufferOccluderDepthDebugDepthBuffer = createTexture2D(ETextureFormat::D32Float, TextureUsage_DepthStencil, RenderWidthLocal, RenderHeightLocal, 1);
+	NAME_D3D12_OBJECT(GBufferOccluderDepthDebugDepthBuffer->resource);
 
 	UnjitteredDepthBuffers[0] = createTexture2D(ETextureFormat::R32Float, TextureUsage_RenderTarget | TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
 	NAME_D3D12_OBJECT(UnjitteredDepthBuffers[0]->resource);
@@ -4775,6 +4809,210 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 			continue;
 		}
 
+		std::wstring gbufferOcclusionValue = ParseValueArg(arg, L"--gbuffer-occlusion", L"-gbuffer-occlusion", i);
+		if (!gbufferOcclusionValue.empty())
+		{
+			if (gbufferOcclusionValue == L"adaptive" || gbufferOcclusionValue == L"stochastic" || gbufferOcclusionValue == L"1")
+				GBufferOcclusionMode = EGBufferOcclusionMode::Adaptive;
+			else if (gbufferOcclusionValue == L"aggressive" || gbufferOcclusionValue == L"agressive" || gbufferOcclusionValue == L"2")
+				GBufferOcclusionMode = EGBufferOcclusionMode::Aggressive;
+			else
+				GBufferOcclusionMode = EGBufferOcclusionMode::Conservative;
+			continue;
+		}
+		std::wstring gbufferGenerationValue = ParseValueArg(arg, L"--gbuffer-generation", L"-gbuffer-generation", i);
+		if (!gbufferGenerationValue.empty())
+		{
+			if (gbufferGenerationValue == L"rt-primary" ||
+				gbufferGenerationValue == L"rt_primary" ||
+				gbufferGenerationValue == L"rtprimary" ||
+				gbufferGenerationValue == L"primary-ray" ||
+				gbufferGenerationValue == L"primary_hit" ||
+				gbufferGenerationValue == L"primary-hit" ||
+				gbufferGenerationValue == L"ray" ||
+				gbufferGenerationValue == L"rt" ||
+				gbufferGenerationValue == L"1")
+			{
+				GBufferGenerationMode = EGBufferGenerationMode::RtPrimary;
+			}
+			else
+			{
+				GBufferGenerationMode = EGBufferGenerationMode::Raster;
+			}
+			continue;
+		}
+		if (arg == L"--rt-primary-gbuffer" || arg == L"-rt-primary-gbuffer")
+		{
+			GBufferGenerationMode = EGBufferGenerationMode::RtPrimary;
+			continue;
+		}
+		if (arg == L"--gbuffer-depth-prepass" || arg == L"-gbuffer-depth-prepass")
+		{
+			bEnableGBufferDepthPrepass = true;
+			continue;
+		}
+		if (arg == L"--no-gbuffer-depth-prepass" || arg == L"-no-gbuffer-depth-prepass")
+		{
+			bEnableGBufferDepthPrepass = false;
+			continue;
+		}
+		std::wstring gbufferDepthPrepassValue = ParseValueArg(arg, L"--gbuffer-depth-prepass", L"-gbuffer-depth-prepass", i);
+		if (!gbufferDepthPrepassValue.empty())
+		{
+			bEnableGBufferDepthPrepass = IsTruthyValue(gbufferDepthPrepassValue);
+			continue;
+		}
+		if (arg == L"--gbuffer-hiz-occlusion" || arg == L"-gbuffer-hiz-occlusion")
+		{
+			bEnableGBufferHiZOcclusion = true;
+			continue;
+		}
+		if (arg == L"--no-gbuffer-hiz-occlusion" || arg == L"-no-gbuffer-hiz-occlusion")
+		{
+			bEnableGBufferHiZOcclusion = false;
+			continue;
+		}
+		std::wstring gbufferHiZOcclusionValue =
+			ParseValueArg(arg, L"--gbuffer-hiz-occlusion", L"-gbuffer-hiz-occlusion", i);
+		if (!gbufferHiZOcclusionValue.empty())
+		{
+			bEnableGBufferHiZOcclusion = IsTruthyValue(gbufferHiZOcclusionValue);
+			continue;
+		}
+		std::wstring gbufferDepthPrepassCoverageValue =
+			ParseValueArg(arg, L"--gbuffer-depth-prepass-min-coverage", L"-gbuffer-depth-prepass-min-coverage", i);
+		if (!gbufferDepthPrepassCoverageValue.empty())
+		{
+			try
+			{
+				GBufferDepthPrepassMinScreenCoverage = std::clamp(std::stof(gbufferDepthPrepassCoverageValue), 0.0f, 1.0f);
+			}
+			catch (const std::exception&)
+			{
+			}
+			continue;
+		}
+		std::wstring gbufferDepthPrepassMaxObjectsValue =
+			ParseValueArg(arg, L"--gbuffer-depth-prepass-max-objects", L"-gbuffer-depth-prepass-max-objects", i);
+		if (!gbufferDepthPrepassMaxObjectsValue.empty())
+		{
+			try
+			{
+				const unsigned long value = std::stoul(gbufferDepthPrepassMaxObjectsValue);
+				GBufferDepthPrepassMaxOccluderObjects =
+					static_cast<uint32_t>(std::clamp<unsigned long>(value, 0ul, 1000000ul));
+			}
+			catch (const std::exception&)
+			{
+			}
+			continue;
+		}
+		std::wstring gbufferDepthPrepassUpdateIntervalValue =
+			ParseValueArg(arg, L"--gbuffer-depth-prepass-update-interval", L"-gbuffer-depth-prepass-update-interval", i);
+		if (!gbufferDepthPrepassUpdateIntervalValue.empty())
+		{
+			try
+			{
+				const unsigned long value = std::stoul(gbufferDepthPrepassUpdateIntervalValue);
+				GBufferDepthPrepassOccluderUpdateInterval =
+					static_cast<uint32_t>(std::clamp<unsigned long>(value, 1ul, 240ul));
+			}
+			catch (const std::exception&)
+			{
+			}
+			continue;
+		}
+		std::wstring gbufferDepthPrepassOccluderModeValue =
+			ParseValueArg(arg, L"--gbuffer-depth-prepass-occluders", L"-gbuffer-depth-prepass-occluders", i);
+		if (!gbufferDepthPrepassOccluderModeValue.empty())
+		{
+			if (gbufferDepthPrepassOccluderModeValue == L"sparse-ray" ||
+				gbufferDepthPrepassOccluderModeValue == L"sparseray" ||
+				gbufferDepthPrepassOccluderModeValue == L"ray" ||
+				gbufferDepthPrepassOccluderModeValue == L"gpu" ||
+				gbufferDepthPrepassOccluderModeValue == L"1")
+			{
+				GBufferDepthPrepassOccluderMode = EGBufferDepthPrepassOccluderMode::SparseRayGpu;
+			}
+			else
+			{
+				GBufferDepthPrepassOccluderMode = EGBufferDepthPrepassOccluderMode::CpuCoverage;
+			}
+			continue;
+		}
+		if (arg == L"--gbuffer-sparse-ray-occluders" || arg == L"-gbuffer-sparse-ray-occluders")
+		{
+			GBufferDepthPrepassOccluderMode = EGBufferDepthPrepassOccluderMode::SparseRayGpu;
+			continue;
+		}
+		std::wstring gbufferSparseRayGridValue =
+			ParseValueArg(arg, L"--gbuffer-sparse-ray-grid", L"-gbuffer-sparse-ray-grid", i);
+		if (!gbufferSparseRayGridValue.empty())
+		{
+			const size_t separator = gbufferSparseRayGridValue.find_first_of(L"xX,");
+			try
+			{
+				if (separator != std::wstring::npos)
+				{
+					const unsigned long gridWidth = std::stoul(gbufferSparseRayGridValue.substr(0, separator));
+					const unsigned long gridHeight = std::stoul(gbufferSparseRayGridValue.substr(separator + 1));
+					GBufferSparseRayOccluderGridWidth =
+						static_cast<uint32_t>(std::clamp<unsigned long>(gridWidth, 1ul, 4096ul));
+					GBufferSparseRayOccluderGridHeight =
+						static_cast<uint32_t>(std::clamp<unsigned long>(gridHeight, 1ul, 4096ul));
+				}
+			}
+			catch (const std::exception&)
+			{
+			}
+			continue;
+		}
+		std::wstring gbufferSparseRayGridWidthValue =
+			ParseValueArg(arg, L"--gbuffer-sparse-ray-grid-width", L"-gbuffer-sparse-ray-grid-width", i);
+		if (!gbufferSparseRayGridWidthValue.empty())
+		{
+			try
+			{
+				const unsigned long value = std::stoul(gbufferSparseRayGridWidthValue);
+				GBufferSparseRayOccluderGridWidth =
+					static_cast<uint32_t>(std::clamp<unsigned long>(value, 1ul, 4096ul));
+			}
+			catch (const std::exception&)
+			{
+			}
+			continue;
+		}
+		std::wstring gbufferSparseRayGridHeightValue =
+			ParseValueArg(arg, L"--gbuffer-sparse-ray-grid-height", L"-gbuffer-sparse-ray-grid-height", i);
+		if (!gbufferSparseRayGridHeightValue.empty())
+		{
+			try
+			{
+				const unsigned long value = std::stoul(gbufferSparseRayGridHeightValue);
+				GBufferSparseRayOccluderGridHeight =
+					static_cast<uint32_t>(std::clamp<unsigned long>(value, 1ul, 4096ul));
+			}
+			catch (const std::exception&)
+			{
+			}
+			continue;
+		}
+		std::wstring gbufferSparseRayUpdateIntervalValue =
+			ParseValueArg(arg, L"--gbuffer-sparse-ray-update-interval", L"-gbuffer-sparse-ray-update-interval", i);
+		if (!gbufferSparseRayUpdateIntervalValue.empty())
+		{
+			try
+			{
+				const unsigned long value = std::stoul(gbufferSparseRayUpdateIntervalValue);
+				GBufferSparseRayOccluderUpdateInterval =
+					static_cast<uint32_t>(std::clamp<unsigned long>(value, 1ul, 240ul));
+			}
+			catch (const std::exception&)
+			{
+			}
+			continue;
+		}
+
 		// Force the spatial-hash storage sub-mode (SH4 spherical / oct) deterministically
 		// for headless A/B measurement. Sets the live CB GIMode (captured into the
 		// frame source state each frame, so it sticks) and selects the spatial-hash
@@ -5097,6 +5335,17 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 		L", vulkanAllowImplicitLayers=" + std::to_wstring(bVulkanAllowImplicitLayers ? 1 : 0) +
 		L", rayNoise=" + std::wstring(GetRayNoiseModeNameW(RayNoiseMode)) +
 		L", diffuseGI=" + std::wstring(GetDiffuseGIModeNameW(DiffuseGIMode)) +
+		L", gbufferOcclusion=" + std::to_wstring(static_cast<int>(GBufferOcclusionMode)) +
+		L", gbufferGeneration=" + std::to_wstring(static_cast<int>(GBufferGenerationMode)) +
+		L", gbufferDepthPrepass=" + std::to_wstring(bEnableGBufferDepthPrepass ? 1 : 0) +
+		L", gbufferHiZOcclusion=" + std::to_wstring(bEnableGBufferHiZOcclusion ? 1 : 0) +
+		L", gbufferDepthPrepassOccluders=" + std::to_wstring(static_cast<int>(GBufferDepthPrepassOccluderMode)) +
+		L", gbufferDepthPrepassMinCoverage=" + std::to_wstring(GBufferDepthPrepassMinScreenCoverage) +
+		L", gbufferDepthPrepassMaxObjects=" + std::to_wstring(GBufferDepthPrepassMaxOccluderObjects) +
+		L", gbufferDepthPrepassUpdateInterval=" + std::to_wstring(GBufferDepthPrepassOccluderUpdateInterval) +
+		L", gbufferSparseRayGrid=" + std::to_wstring(GBufferSparseRayOccluderGridWidth) +
+		L"x" + std::to_wstring(GBufferSparseRayOccluderGridHeight) +
+		L", gbufferSparseRayUpdateInterval=" + std::to_wstring(GBufferSparseRayOccluderUpdateInterval) +
 		L", diffuseGIEnabled=" + std::to_wstring(bEnableDiffuseGI ? 1 : 0) +
 		L", asyncShadowAO=" + std::to_wstring(bEnableAsyncShadowAOOverlap ? 1 : 0) +
 		L", asyncRTAO=" + std::to_wstring(bAsyncShadowAOOverlapRTAO ? 1 : 0) +
@@ -8248,6 +8497,19 @@ void Corona::ApplyRenderFrameSourceState(const RenderFrameSourceState& state)
 	DLSSJitterPhaseCountOverride = std::clamp(state.DLSSJitterPhaseCountOverride, 0u, 512u);
 	DLSSRRJitterPhaseScale = std::max(0.25f, state.DLSSRRJitterPhaseScale);
 	DLSSRRJitterPhaseCountOverride = std::clamp(state.DLSSRRJitterPhaseCountOverride, 0u, 512u);
+	if (std::abs(DLSSJitterPhaseScale - 4.0f) <= 0.0001f && DLSSJitterPhaseCountOverride == 0u)
+	{
+		DLSSJitterPhaseScale = 1.0f;
+	}
+	if (std::abs(DLSSRRJitterPhaseScale - 0.65f) <= 0.0001f && DLSSRRJitterPhaseCountOverride == 4u)
+	{
+		DLSSRRJitterPhaseScale = 0.65f;
+		DLSSRRJitterPhaseCountOverride = 0u;
+	}
+	else if (std::abs(DLSSRRJitterPhaseScale - 1.0f) <= 0.0001f && DLSSRRJitterPhaseCountOverride == 0u)
+	{
+		DLSSRRJitterPhaseScale = 0.65f;
+	}
 	DLSSSRSharpness = std::clamp(state.DLSSSRSharpness, 0.0f, 1.0f);
 	DLSSRRSharpness = std::clamp(state.DLSSRRSharpness, 0.0f, 1.0f);
 	DLSSSRPresetOverride = state.DLSSSRPresetOverride;
@@ -11981,6 +12243,12 @@ void Corona::LoadAssets()
 	DepthBuffer = createTexture2D(ETextureFormat::D32Float, TextureUsage_DepthStencil, RenderWidthLocal, RenderHeightLocal, 1);
 	NAME_D3D12_OBJECT(DepthBuffer->resource);
 
+	GBufferOccluderDepthDebugBuffer = createTexture2D(ETextureFormat::R32Float, TextureUsage_RenderTarget | TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1, glm::vec4(1.0f));
+	NAME_D3D12_OBJECT(GBufferOccluderDepthDebugBuffer->resource);
+
+	GBufferOccluderDepthDebugDepthBuffer = createTexture2D(ETextureFormat::D32Float, TextureUsage_DepthStencil, RenderWidthLocal, RenderHeightLocal, 1);
+	NAME_D3D12_OBJECT(GBufferOccluderDepthDebugDepthBuffer->resource);
+
 	UnjitteredDepthBuffers[0] = createTexture2D(ETextureFormat::R32Float, TextureUsage_RenderTarget | TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
 	NAME_D3D12_OBJECT(UnjitteredDepthBuffers[0]->resource);
 
@@ -13147,7 +13415,7 @@ void Corona::DrawMobilePerformanceOverlay()
 	std::vector<std::string> lines;
 	lines.reserve(8);
 
-	char buffer[256];
+	char buffer[512];
 	std::snprintf(
 		buffer,
 		sizeof(buffer),
@@ -13182,9 +13450,11 @@ void Corona::DrawMobilePerformanceOverlay()
 	std::snprintf(
 		buffer,
 		sizeof(buffer),
-		"GPU frame %.2f  skel %.2f  gbuf %.2f  shadow %.2f  ao %.2f  refl %.2f  gi %.2f  light %.2f  taa %.2f  tone %.2f  ui %.2f",
+		"GPU frame %.2f  skel %.2f  depth %.2f  occl %.2f  gbuf %.2f  shadow %.2f  ao %.2f  refl %.2f  gi %.2f  light %.2f  taa %.2f  tone %.2f  ui %.2f",
 		passAvg(EGpuPass::Frame),
 		passAvg(EGpuPass::SkeletalSkinning),
+		passAvg(EGpuPass::DepthPrepass),
+		passAvg(EGpuPass::OccluderDepth),
 		passAvg(EGpuPass::GBuffer),
 		passAvg(EGpuPass::RaytraceShadow),
 		passAvg(EGpuPass::RaytraceAO),
@@ -13199,8 +13469,10 @@ void Corona::DrawMobilePerformanceOverlay()
 	std::snprintf(
 		buffer,
 		sizeof(buffer),
-		"CPU pass skel %.2f  gbuf %.2f  shadow %.2f  ao %.2f  refl %.2f  gi %.2f  light %.2f  taa %.2f  tone %.2f  ui %.2f",
+		"CPU pass skel %.2f  depth %.2f  occl %.2f  gbuf %.2f  shadow %.2f  ao %.2f  refl %.2f  gi %.2f  light %.2f  taa %.2f  tone %.2f  ui %.2f",
 		passCpu(EGpuPass::SkeletalSkinning),
+		passCpu(EGpuPass::DepthPrepass),
+		passCpu(EGpuPass::OccluderDepth),
 		passCpu(EGpuPass::GBuffer),
 		passCpu(EGpuPass::RaytraceShadow),
 		passCpu(EGpuPass::RaytraceAO),
@@ -13225,10 +13497,22 @@ void Corona::DrawMobilePerformanceOverlay()
 	std::snprintf(
 		buffer,
 		sizeof(buffer),
-		"GBuffer visible %llu/%llu  culled %llu",
+		"GBuffer %s  visible %llu/%llu  culled %llu",
+		GBufferGenerationMode == EGBufferGenerationMode::RtPrimary ? "rt-primary" : "raster",
 		static_cast<unsigned long long>(GBufferLastVisibleObjectCount),
 		static_cast<unsigned long long>(GBufferLastTotalObjectCount),
 		static_cast<unsigned long long>(GBufferLastFrustumCulledObjectCount));
+	lines.emplace_back(buffer);
+
+	std::snprintf(
+		buffer,
+		sizeof(buffer),
+		"Depth prepass %s %llu/%llu  opaque draws %llu  rays %llu",
+		GBufferDepthPrepassOccluderMode == EGBufferDepthPrepassOccluderMode::SparseRayGpu ? "sparse-ray" : "cpu-coverage",
+		static_cast<unsigned long long>(GBufferLastDepthPrepassSelectedObjectCount),
+		static_cast<unsigned long long>(GBufferLastDepthPrepassCandidateObjectCount),
+		static_cast<unsigned long long>(GBufferLastDepthPrepassOpaqueDrawCount),
+		static_cast<unsigned long long>(GBufferLastSparseRayOccluderRayCount));
 	lines.emplace_back(buffer);
 
 	std::snprintf(
@@ -13872,6 +14156,24 @@ void Corona::DrawEditorMainWindowControls()
 		if (bMainFarClipCommitted || ImGui::IsItemDeactivatedAfterEdit())
 			SyncCurrentCameraClipSettingsToFrameSourceState();
 		{
+			static const char* kGBufferGenerationModes[] = { "Raster", "RT primary hit" };
+			int generationModeIndex = static_cast<int>(GBufferGenerationMode);
+			ImGui::SetNextItemWidth(180.0f);
+			if (ImGui::Combo("GBuffer generation", &generationModeIndex, kGBufferGenerationModes, IM_ARRAYSIZE(kGBufferGenerationModes)))
+			{
+				GBufferGenerationMode = static_cast<EGBufferGenerationMode>(generationModeIndex);
+				ResetGBufferOcclusionRuntimeState();
+				AppendCpuRuntimeTrace(L"[editor-ui] gbuffer generation=" + std::to_wstring(generationModeIndex));
+			}
+			const bool bRtPrimaryGBufferSupported =
+				renderBackend &&
+				renderBackend->SupportsRayTracing() &&
+				UsesRTBindlessMaterials() &&
+				UsesRTBindlessGeometry();
+			if (GBufferGenerationMode == EGBufferGenerationMode::RtPrimary && !bRtPrimaryGBufferSupported)
+				ImGui::TextDisabled("RT primary GBuffer requires ray tracing and bindless RT resources.");
+		}
+		{
 			static const char* kGBufferCullingModes[] = { "CPU draw-args build", "GPU draw-args build" };
 			int modeIndex = static_cast<int>(GBufferObjectCullingMode);
 			if (ImGui::Combo("GBuffer draw args", &modeIndex, kGBufferCullingModes, IM_ARRAYSIZE(kGBufferCullingModes)))
@@ -13886,6 +14188,87 @@ void Corona::DrawEditorMainWindowControls()
 				GBufferGpuCullBuildPSO;
 			if (GBufferObjectCullingMode == EGBufferObjectCullingMode::GpuIndirect && !bGpuModeSupported)
 				ImGui::TextDisabled("GPU mode unavailable on this backend; CPU fallback will be used.");
+		}
+		if (ImGui::Checkbox("GBuffer depth prepass", &bEnableGBufferDepthPrepass))
+		{
+			ResetGBufferOcclusionRuntimeState();
+			AppendCpuRuntimeTrace(L"[editor-ui] gbuffer depth prepass=" + std::to_wstring(bEnableGBufferDepthPrepass ? 1 : 0));
+		}
+		if (ImGui::Checkbox("GBuffer Hi-Z occlusion", &bEnableGBufferHiZOcclusion))
+		{
+			ResetGBufferOcclusionRuntimeState();
+			AppendCpuRuntimeTrace(L"[editor-ui] gbuffer hiz occlusion=" + std::to_wstring(bEnableGBufferHiZOcclusion ? 1 : 0));
+		}
+		{
+			static const char* kDepthPrepassOccluderModes[] = { "CPU coverage", "Sparse ray GPU" };
+			int occluderModeIndex = static_cast<int>(GBufferDepthPrepassOccluderMode);
+			ImGui::SetNextItemWidth(180.0f);
+			if (ImGui::Combo("Depth prepass occluders", &occluderModeIndex, kDepthPrepassOccluderModes, IM_ARRAYSIZE(kDepthPrepassOccluderModes)))
+			{
+				GBufferDepthPrepassOccluderMode = static_cast<EGBufferDepthPrepassOccluderMode>(occluderModeIndex);
+				ResetGBufferOcclusionRuntimeState();
+				AppendCpuRuntimeTrace(L"[editor-ui] gbuffer depth prepass occluders=" + std::to_wstring(occluderModeIndex));
+			}
+			const bool bSparseRaySupported =
+				renderBackend &&
+				renderBackend->GetAPI() == ERenderBackendAPI::D3D12 &&
+				renderBackend->SupportsRayTracing() &&
+				GBufferSparseRayOccluderClearPSO &&
+				GBufferSparseRayOccluderSelectPSO;
+			if (GBufferDepthPrepassOccluderMode == EGBufferDepthPrepassOccluderMode::SparseRayGpu && !bSparseRaySupported)
+				ImGui::TextDisabled("Sparse-ray occluders require DX12 ray tracing.");
+		}
+		int sparseRayGridWidth = static_cast<int>(std::min<uint32_t>(GBufferSparseRayOccluderGridWidth, 4096u));
+		ImGui::SetNextItemWidth(180.0f);
+		if (ImGui::InputInt("Sparse ray grid width", &sparseRayGridWidth, 8, 32))
+		{
+			GBufferSparseRayOccluderGridWidth = static_cast<uint32_t>(std::clamp(sparseRayGridWidth, 1, 4096));
+			GBufferSparseRayOccluderBuiltFrame = UINT32_MAX;
+		}
+		int sparseRayGridHeight = static_cast<int>(std::min<uint32_t>(GBufferSparseRayOccluderGridHeight, 4096u));
+		ImGui::SetNextItemWidth(180.0f);
+		if (ImGui::InputInt("Sparse ray grid height", &sparseRayGridHeight, 8, 32))
+		{
+			GBufferSparseRayOccluderGridHeight = static_cast<uint32_t>(std::clamp(sparseRayGridHeight, 1, 4096));
+			GBufferSparseRayOccluderBuiltFrame = UINT32_MAX;
+		}
+		ImGui::SetNextItemWidth(180.0f);
+		if (ImGui::SliderFloat("Depth prepass min coverage", &GBufferDepthPrepassMinScreenCoverage, 0.0f, 0.10f, "%.3f"))
+			GBufferDepthPrepassMinScreenCoverage = std::clamp(GBufferDepthPrepassMinScreenCoverage, 0.0f, 1.0f);
+		int depthPrepassMaxObjects = static_cast<int>(std::min<uint32_t>(GBufferDepthPrepassMaxOccluderObjects, 1000000u));
+		ImGui::SetNextItemWidth(180.0f);
+		if (ImGui::InputInt("Depth prepass max objects", &depthPrepassMaxObjects, 16, 128))
+		{
+			GBufferDepthPrepassMaxOccluderObjects =
+				static_cast<uint32_t>(std::clamp(depthPrepassMaxObjects, 0, 1000000));
+		}
+		int depthPrepassUpdateInterval = static_cast<int>(std::min<uint32_t>(GBufferDepthPrepassOccluderUpdateInterval, 240u));
+		ImGui::SetNextItemWidth(180.0f);
+		if (ImGui::InputInt("Depth prepass update frames", &depthPrepassUpdateInterval, 1, 4))
+		{
+			GBufferDepthPrepassOccluderUpdateInterval =
+				static_cast<uint32_t>(std::clamp(depthPrepassUpdateInterval, 1, 240));
+		}
+		int sparseRayUpdateInterval = static_cast<int>(std::min<uint32_t>(GBufferSparseRayOccluderUpdateInterval, 240u));
+		ImGui::SetNextItemWidth(180.0f);
+		if (ImGui::InputInt("Sparse ray update frames", &sparseRayUpdateInterval, 1, 4))
+		{
+			GBufferSparseRayOccluderUpdateInterval =
+				static_cast<uint32_t>(std::clamp(sparseRayUpdateInterval, 1, 240));
+			GBufferSparseRayOccluderBuiltFrame = UINT32_MAX;
+		}
+		{
+			static const char* kGBufferOcclusionModes[] = { "Conservative", "Adaptive", "Aggressive" };
+			int modeIndex = static_cast<int>(GBufferOcclusionMode);
+			if (ImGui::Combo("GBuffer occlusion", &modeIndex, kGBufferOcclusionModes, IM_ARRAYSIZE(kGBufferOcclusionModes)))
+			{
+				SetGBufferOcclusionMode(static_cast<EGBufferOcclusionMode>(modeIndex), L"editor-main-window");
+				AppendCpuRuntimeTrace(L"[editor-ui] gbuffer occlusion mode=" + std::to_wstring(modeIndex));
+			}
+			if (GBufferOcclusionMode == EGBufferOcclusionMode::Adaptive)
+				ImGui::TextDisabled("Adaptive: stochastic re-query balances culling and popping.");
+			else if (GBufferOcclusionMode == EGBufferOcclusionMode::Aggressive)
+				ImGui::TextDisabled("Aggressive: disables safety and may pop when the camera moves.");
 		}
 		ImGui::SliderFloat("Turn speed", &m_turnSpeed, 0.05f, glm::half_pi<float>() * 2.0f, "%.2f");
 		ImGui::Text("Position %.1f, %.1f, %.1f", m_camera.m_position.x, m_camera.m_position.y, m_camera.m_position.z);
@@ -13933,6 +14316,37 @@ void Corona::DrawEditorCameraOverlay()
 		if (bOverlayFarClipCommitted || ImGui::IsItemDeactivatedAfterEdit())
 			SyncCurrentCameraClipSettingsToFrameSourceState();
 
+		ImGui::Separator();
+		ImGui::Checkbox("Frame Timing Overlay", &bShowFrameTimingOverlay);
+		if (bShowFrameTimingOverlay)
+		{
+			int averageFrameCountUI = static_cast<int>(GpuTimingAverageFrameCount);
+			ImGui::SetNextItemWidth(-1.0f);
+			if (ImGui::SliderInt("Timing Avg Frames", &averageFrameCountUI, 1, 240))
+				SetGpuTimingAverageFrameCount(static_cast<UINT32>(averageFrameCountUI));
+		}
+		ImGui::Checkbox("Culling Overlay", &bShowCullingTextOverlay);
+		ImGui::Separator();
+
+		{
+			static const char* kGBufferGenerationModes[] = { "Raster", "RT primary hit" };
+			int generationModeIndex = static_cast<int>(GBufferGenerationMode);
+			ImGui::SetNextItemWidth(-1.0f);
+			if (ImGui::Combo("GBuffer Generation", &generationModeIndex, kGBufferGenerationModes, IM_ARRAYSIZE(kGBufferGenerationModes)))
+			{
+				GBufferGenerationMode = static_cast<EGBufferGenerationMode>(generationModeIndex);
+				ResetGBufferOcclusionRuntimeState();
+				AppendCpuRuntimeTrace(L"[editor-ui] gbuffer generation=" + std::to_wstring(generationModeIndex));
+			}
+			const bool bRtPrimaryGBufferSupported =
+				renderBackend &&
+				renderBackend->SupportsRayTracing() &&
+				UsesRTBindlessMaterials() &&
+				UsesRTBindlessGeometry();
+			if (GBufferGenerationMode == EGBufferGenerationMode::RtPrimary && !bRtPrimaryGBufferSupported)
+				ImGui::TextDisabled("RT primary GBuffer requires ray tracing and bindless RT resources.");
+		}
+
 		{
 			static const char* kGBufferCullingModes[] = { "CPU draw-args build", "GPU draw-args build" };
 			int modeIndex = static_cast<int>(GBufferObjectCullingMode);
@@ -13949,6 +14363,89 @@ void Corona::DrawEditorCameraOverlay()
 				GBufferGpuCullBuildPSO;
 			if (GBufferObjectCullingMode == EGBufferObjectCullingMode::GpuIndirect && !bGpuModeSupported)
 				ImGui::TextDisabled("GPU mode unavailable; CPU fallback will be used.");
+		}
+		if (ImGui::Checkbox("GBuffer Depth Prepass", &bEnableGBufferDepthPrepass))
+		{
+			ResetGBufferOcclusionRuntimeState();
+			AppendCpuRuntimeTrace(L"[editor-ui] gbuffer depth prepass=" + std::to_wstring(bEnableGBufferDepthPrepass ? 1 : 0));
+		}
+		if (ImGui::Checkbox("GBuffer Hi-Z Occlusion", &bEnableGBufferHiZOcclusion))
+		{
+			ResetGBufferOcclusionRuntimeState();
+			AppendCpuRuntimeTrace(L"[editor-ui] gbuffer hiz occlusion=" + std::to_wstring(bEnableGBufferHiZOcclusion ? 1 : 0));
+		}
+		{
+			static const char* kDepthPrepassOccluderModes[] = { "CPU coverage", "Sparse ray GPU" };
+			int occluderModeIndex = static_cast<int>(GBufferDepthPrepassOccluderMode);
+			ImGui::SetNextItemWidth(-1.0f);
+			if (ImGui::Combo("Depth Prepass Occluders", &occluderModeIndex, kDepthPrepassOccluderModes, IM_ARRAYSIZE(kDepthPrepassOccluderModes)))
+			{
+				GBufferDepthPrepassOccluderMode = static_cast<EGBufferDepthPrepassOccluderMode>(occluderModeIndex);
+				ResetGBufferOcclusionRuntimeState();
+				AppendCpuRuntimeTrace(L"[editor-ui] gbuffer depth prepass occluders=" + std::to_wstring(occluderModeIndex));
+			}
+			const bool bSparseRaySupported =
+				renderBackend &&
+				renderBackend->GetAPI() == ERenderBackendAPI::D3D12 &&
+				renderBackend->SupportsRayTracing() &&
+				GBufferSparseRayOccluderClearPSO &&
+				GBufferSparseRayOccluderSelectPSO;
+			if (GBufferDepthPrepassOccluderMode == EGBufferDepthPrepassOccluderMode::SparseRayGpu && !bSparseRaySupported)
+				ImGui::TextDisabled("Sparse-ray occluders require DX12 ray tracing.");
+		}
+		int sparseRayGridWidth = static_cast<int>(std::min<uint32_t>(GBufferSparseRayOccluderGridWidth, 4096u));
+		ImGui::SetNextItemWidth(-1.0f);
+		if (ImGui::InputInt("Sparse Ray Grid Width", &sparseRayGridWidth, 8, 32))
+		{
+			GBufferSparseRayOccluderGridWidth = static_cast<uint32_t>(std::clamp(sparseRayGridWidth, 1, 4096));
+			GBufferSparseRayOccluderBuiltFrame = UINT32_MAX;
+		}
+		int sparseRayGridHeight = static_cast<int>(std::min<uint32_t>(GBufferSparseRayOccluderGridHeight, 4096u));
+		ImGui::SetNextItemWidth(-1.0f);
+		if (ImGui::InputInt("Sparse Ray Grid Height", &sparseRayGridHeight, 8, 32))
+		{
+			GBufferSparseRayOccluderGridHeight = static_cast<uint32_t>(std::clamp(sparseRayGridHeight, 1, 4096));
+			GBufferSparseRayOccluderBuiltFrame = UINT32_MAX;
+		}
+		ImGui::SetNextItemWidth(-1.0f);
+		if (ImGui::SliderFloat("Depth Prepass Min Coverage", &GBufferDepthPrepassMinScreenCoverage, 0.0f, 0.10f, "%.3f"))
+			GBufferDepthPrepassMinScreenCoverage = std::clamp(GBufferDepthPrepassMinScreenCoverage, 0.0f, 1.0f);
+		int depthPrepassMaxObjects = static_cast<int>(std::min<uint32_t>(GBufferDepthPrepassMaxOccluderObjects, 1000000u));
+		ImGui::SetNextItemWidth(-1.0f);
+		if (ImGui::InputInt("Depth Prepass Max Objects", &depthPrepassMaxObjects, 16, 128))
+		{
+			GBufferDepthPrepassMaxOccluderObjects =
+				static_cast<uint32_t>(std::clamp(depthPrepassMaxObjects, 0, 1000000));
+		}
+		int depthPrepassUpdateInterval = static_cast<int>(std::min<uint32_t>(GBufferDepthPrepassOccluderUpdateInterval, 240u));
+		ImGui::SetNextItemWidth(-1.0f);
+		if (ImGui::InputInt("Depth Prepass Update Frames", &depthPrepassUpdateInterval, 1, 4))
+		{
+			GBufferDepthPrepassOccluderUpdateInterval =
+				static_cast<uint32_t>(std::clamp(depthPrepassUpdateInterval, 1, 240));
+		}
+		int sparseRayUpdateInterval = static_cast<int>(std::min<uint32_t>(GBufferSparseRayOccluderUpdateInterval, 240u));
+		ImGui::SetNextItemWidth(-1.0f);
+		if (ImGui::InputInt("Sparse Ray Update Frames", &sparseRayUpdateInterval, 1, 4))
+		{
+			GBufferSparseRayOccluderUpdateInterval =
+				static_cast<uint32_t>(std::clamp(sparseRayUpdateInterval, 1, 240));
+			GBufferSparseRayOccluderBuiltFrame = UINT32_MAX;
+		}
+
+		{
+			static const char* kGBufferOcclusionModes[] = { "Conservative", "Adaptive", "Aggressive" };
+			int modeIndex = static_cast<int>(GBufferOcclusionMode);
+			ImGui::SetNextItemWidth(-1.0f);
+			if (ImGui::Combo("GBuffer Occlusion", &modeIndex, kGBufferOcclusionModes, IM_ARRAYSIZE(kGBufferOcclusionModes)))
+			{
+				SetGBufferOcclusionMode(static_cast<EGBufferOcclusionMode>(modeIndex), L"editor-camera-overlay");
+				AppendCpuRuntimeTrace(L"[editor-ui] gbuffer occlusion mode=" + std::to_wstring(modeIndex));
+			}
+			if (GBufferOcclusionMode == EGBufferOcclusionMode::Adaptive)
+				ImGui::TextDisabled("Adaptive: stochastic re-query balances culling and popping.");
+			else if (GBufferOcclusionMode == EGBufferOcclusionMode::Aggressive)
+				ImGui::TextDisabled("Aggressive: may pop when the camera moves.");
 		}
 
 		ImGui::SetNextItemWidth(-1.0f);
@@ -13977,6 +14474,7 @@ void Corona::DrawEditorCameraOverlay()
 			{ "World Normal (GBuffer)",ViewModeKind::Buffer,    0u, EDebugVisualization::WORLD_NORMAL },
 			{ "Roughness/Metallic",    ViewModeKind::Buffer,    0u, EDebugVisualization::ROUGNESS_METALLIC },
 			{ "Depth (GBuffer)",       ViewModeKind::Buffer,    0u, EDebugVisualization::DEPTH },
+			{ "Occluder Depth",        ViewModeKind::Buffer,    0u, EDebugVisualization::OCCLUDER_DEPTH },
 			{ "Diffuse GI buffer",     ViewModeKind::Buffer,    0u, EDebugVisualization::FINAL_DIFFUSE_GI },
 			{ "Specular buffer",       ViewModeKind::Buffer,    0u, EDebugVisualization::TEMPORAL_FILTERED_SPECULAR },
 			{ "Shadow (direct vis)",   ViewModeKind::Buffer,    0u, EDebugVisualization::SHADOW },
@@ -14135,12 +14633,7 @@ void Corona::DrawEditorModeOverlay()
 
 		if (ImGui::CollapsingHeader("Top", ImGuiTreeNodeFlags_DefaultOpen))
 		{
-			ImGui::Checkbox("Frame Timing Overlay (CPU / GPU / Recording)", &bShowFrameTimingOverlay);
-			int averageFrameCountUI = static_cast<int>(GpuTimingAverageFrameCount);
-			if (ImGui::SliderInt("Timing Average Frames", &averageFrameCountUI, 1, 240))
-				SetGpuTimingAverageFrameCount(static_cast<UINT32>(averageFrameCountUI));
 			ImGui::Checkbox("Full Render Controls Window", &bShowImgui);
-			ImGui::Checkbox("Culling Overlay", &bShowCullingTextOverlay);
 			ImGui::Separator();
 			ImGui::TextUnformatted("Visualization");
 			const bool bDebugVisualizationAvailable = renderBackend && BufferVisualizeGraphicsPipeline;
@@ -14152,6 +14645,7 @@ void Corona::DrawEditorModeOverlay()
 				"WORLD_NORMAL",
 				"GEO_NORMAL",
 				"DEPTH",
+				"OCCLUDER_DEPTH",
 				"RAW_DIFFUSE_GI",
 				"RAW_DIFFUSE_GI_AUX",
 				"SCREEN_PROBE_DIFFUSE_GI",
@@ -14762,6 +15256,7 @@ void Corona::DrawEditorModeOverlay()
 					"WORLD_NORMAL",
 					"GEO_NORMAL",
 					"DEPTH",
+					"OCCLUDER_DEPTH",
 					"RAW_DIFFUSE_GI",
 					"RAW_DIFFUSE_GI_AUX",
 					"SCREEN_PROBE_DIFFUSE_GI",
@@ -14795,11 +15290,6 @@ void Corona::DrawEditorModeOverlay()
 				}
 
 				ImGui::Separator();
-				ImGui::Checkbox("Culling overlay", &bShowCullingTextOverlay);
-				ImGui::Checkbox("Frame timing overlay (CPU / GPU / Recording)", &bShowFrameTimingOverlay);
-				int averageFrameCountUI = static_cast<int>(GpuTimingAverageFrameCount);
-				if (ImGui::SliderInt("Timing Average Frames", &averageFrameCountUI, 1, 240))
-					SetGpuTimingAverageFrameCount(static_cast<UINT32>(averageFrameCountUI));
 				if (ImGui::Button("Recompile all shaders", ImVec2(-1.0f, 0.0f)))
 					bRecompileShaders = true;
 
@@ -15205,9 +15695,25 @@ void Corona::OnRender()
 			renderBackend &&
 			renderBackend->GetAPI() == ERenderBackendAPI::Vulkan;
 
-		// Hybrid rendering: Rasterization GBuffer + Raytracing
+		// Hybrid rendering: GBuffer + raytracing.
 		BeginGpuPassTiming(EGpuPass::GBuffer);
-		GBufferPass();
+		if (GBufferGenerationMode == EGBufferGenerationMode::RtPrimary && !bHybridDirectOnly)
+		{
+			if (!RaytracePrimaryGBufferPass())
+			{
+				static bool sLoggedRtPrimaryGBufferFallback = false;
+				if (!sLoggedRtPrimaryGBufferFallback)
+				{
+					sLoggedRtPrimaryGBufferFallback = true;
+					AppendCpuRuntimeTrace(L"[RTPrimaryGBuffer] unavailable; falling back to raster GBuffer");
+				}
+				GBufferPass();
+			}
+		}
+		else
+		{
+			GBufferPass();
+		}
 		EndGpuPassTiming(EGpuPass::GBuffer);
 
 		const bool bNeedSpatialLightMaskForDirectShadow =
@@ -15843,6 +16349,7 @@ void Corona::OnRender()
 				"WORLD_NORMAL",
 				"GEO_NORMAL",
 				"DEPTH",
+				"OCCLUDER_DEPTH",
 				"RAW_DIFFUSE_GI",
 				"RAW_DIFFUSE_GI_AUX",
 				"SCREEN_PROBE_DIFFUSE_GI",
@@ -16898,6 +17405,10 @@ if (ImGui::Button("Reset Accumulation"))
 			if (AmbientOcclusionBuffer) AppendCpuRuntimeTrace(L"[GIDump] rtao=" + std::to_wstring(DumpTexturePNG(AmbientOcclusionBuffer.get(), base + L"rtao.png", EResourceState::ShaderRead) ? 1 : 0));
 			if (ShadowBuffer) AppendCpuRuntimeTrace(L"[GIDump] shadow=" + std::to_wstring(DumpTexturePNG(ShadowBuffer.get(), base + L"shadow.png", EResourceState::ShaderRead) ? 1 : 0));
 			if (AlbedoBuffer) AppendCpuRuntimeTrace(L"[GIDump] albedo=" + std::to_wstring(DumpTexturePNG(AlbedoBuffer.get(), base + L"albedo.png", EResourceState::ShaderRead) ? 1 : 0));
+			if (NormalBuffers[ColorBufferWriteIndex]) AppendCpuRuntimeTrace(L"[GIDump] normal=" + std::to_wstring(DumpTexturePNG(NormalBuffers[ColorBufferWriteIndex].get(), base + L"normal.png", EResourceState::ShaderRead) ? 1 : 0));
+			if (GeomNormalBuffers[ColorBufferWriteIndex]) AppendCpuRuntimeTrace(L"[GIDump] geom_normal=" + std::to_wstring(DumpTexturePNG(GeomNormalBuffers[ColorBufferWriteIndex].get(), base + L"geom_normal.png", EResourceState::ShaderRead) ? 1 : 0));
+			if (VelocityBuffer) AppendCpuRuntimeTrace(L"[GIDump] velocity=" + std::to_wstring(DumpTexturePNG(VelocityBuffer.get(), base + L"velocity.png", EResourceState::ShaderRead) ? 1 : 0));
+			if (UnjitteredDepthBuffers[ColorBufferWriteIndex]) AppendCpuRuntimeTrace(L"[GIDump] depth=" + std::to_wstring(DumpTexturePNG(UnjitteredDepthBuffers[ColorBufferWriteIndex].get(), base + L"depth.png", EResourceState::ShaderRead) ? 1 : 0));
 			Texture* finalColor = GetCurrentResolveSource();
 			if (finalColor) AppendCpuRuntimeTrace(L"[GIDump] final=" + std::to_wstring(DumpTexturePNG(finalColor, base + L"final.png", EResourceState::ShaderRead) ? 1 : 0));
 		}

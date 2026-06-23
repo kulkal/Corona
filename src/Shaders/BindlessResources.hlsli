@@ -20,8 +20,8 @@ struct RTGeometryRecord
 {
 	uint VertexBufferIndex;
 	uint IndexBufferIndex;
-	uint Padding0;
-	uint Padding1;
+	uint DrawRangeOffset;
+	uint DrawRangeCount;
 };
 
 ByteAddressBuffer GeometryBuffers[] : register(t0, space12);

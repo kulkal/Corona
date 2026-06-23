@@ -10,6 +10,54 @@
 #define GBUFFER_HAS_CLUSTER
 #include "GBufferCommon.hlsli"
 
+struct GBufferOcclusionBounds
+{
+    float4 BoundsMin;
+    float4 BoundsMax;
+};
+
+StructuredBuffer<GBufferOcclusionBounds> GBufferOcclusionBoundsBuffer : register(t16);
+
+#if defined(VULKAN_SPIRV)
+PSInput VSMainOcclusionBounds(
+    uint vertexId : SV_VertexID,
+    [[vk::builtin("BaseInstance")]] uint startInstanceLocation : _SV_Nothing2)
+#else
+PSInput VSMainOcclusionBounds(uint vertexId : SV_VertexID, uint startInstanceLocation : SV_StartInstanceLocation)
+#endif
+{
+    static const uint kBoxCornerIndices[36] =
+    {
+        0, 2, 1, 1, 2, 3,
+        4, 5, 6, 5, 7, 6,
+        0, 4, 2, 2, 4, 6,
+        1, 3, 5, 5, 3, 7,
+        0, 1, 4, 1, 5, 4,
+        2, 6, 3, 3, 6, 7
+    };
+
+    GBufferOcclusionBounds objectBounds = GBufferOcclusionBoundsBuffer[startInstanceLocation];
+    const uint cornerIndex = kBoxCornerIndices[min(vertexId, 35u)];
+    const float3 boundsMin = objectBounds.BoundsMin.xyz;
+    const float3 boundsMax = objectBounds.BoundsMax.xyz;
+    const float3 worldPos = float3(
+        ((cornerIndex & 1u) != 0u) ? boundsMax.x : boundsMin.x,
+        ((cornerIndex & 2u) != 0u) ? boundsMax.y : boundsMin.y,
+        ((cornerIndex & 4u) != 0u) ? boundsMax.z : boundsMin.z);
+
+    PSInput result;
+    result.position = objectBounds.BoundsMin.w != 0.0f ?
+        mul(float4(worldPos, 1.0f), ViewProjectionMatrix) :
+        float4(2.0f, 2.0f, 1.0f, 1.0f);
+    result.unjitteredPosition = result.position;
+    result.prevPosition = result.position;
+    result.normal = float3(0.0f, 1.0f, 0.0f);
+    result.tangent = float3(1.0f, 0.0f, 0.0f);
+    result.uv = float2(0.0f, 0.0f);
+    result.drawRecordIndex = GBUFFER_DRAW_RECORD_INVALID;
+    return result;
+}
+
 float3 CalcPerPixelNormal(GBufferMaterialRecord material, float2 vTexcoord, float3 vVertNormal, float3 vVertTangent)
 {
     float normalLengthSq = dot(vVertNormal, vVertNormal);
@@ -144,4 +192,16 @@ PS_OUTPUT PSMainOpaque(PSInput input)
 {
     float albedoAlpha;
     return GBufferShade(input, albedoAlpha);
+}
+
+[earlydepthstencil]
+void PSMainDepthOnly(PSInput input)
+{
+}
+
+[earlydepthstencil]
+float PSMainDepthVisualize(PSInput input) : SV_Target0
+{
+    const float deviceDepth = input.unjitteredPosition.z / input.unjitteredPosition.w;
+    return saturate(deviceDepth);
 }

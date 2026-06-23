@@ -213,6 +213,7 @@ namespace
 		float roughness,
 		float metallic,
 		bool bOverrideRoughnessMetallic,
+		uint32_t sceneObjectIndex,
 		bool& bBuildSuspended)
 	{
 		if (!scene || bBuildSuspended)
@@ -271,6 +272,7 @@ namespace
 			instance.Roughness = roughness;
 			instance.Metallic = metallic;
 			instance.bOverrideRoughnessMetallic = bOverrideRoughnessMetallic ? 1u : 0u;
+			instance.SceneObjectIndex = sceneObjectIndex;
 			for (const Mesh::DrawCall& draw : mesh->Draws)
 			{
 				if (draw.mat && draw.mat->bHasAlpha)
@@ -626,9 +628,11 @@ void Corona::FlushSceneObjectChanges()
 		RTGeometryRecordBuffer.reset();
 		TLAS = nullptr;
 		InstancePropertyBuffer = nullptr;
+		RTInstanceSceneObjectIndexBuffer = nullptr;
 		TLASFrameResources.clear();
 		TLASFrameInstanceCounts.clear();
 		InstancePropertyFrameBuffers.clear();
+		RTInstanceSceneObjectIndexFrameBuffers.clear();
 		bRayTracingSceneDirty = false;
 		bRayTracingTransformDirty = false;
 		return;
@@ -680,6 +684,8 @@ void Corona::EnsureRayTracingFrameResourceSlots()
 		TLASFrameInstanceCounts.resize(frameCount, 0u);
 	if (InstancePropertyFrameBuffers.size() != frameCount)
 		InstancePropertyFrameBuffers.resize(frameCount);
+	if (RTInstanceSceneObjectIndexFrameBuffers.size() != frameCount)
+		RTInstanceSceneObjectIndexFrameBuffers.resize(frameCount);
 }
 
 void Corona::ActivateCurrentRayTracingFrameResources()
@@ -690,6 +696,8 @@ void Corona::ActivateCurrentRayTracingFrameResources()
 		TLAS = TLASFrameResources[frameIndex];
 	if (frameIndex < InstancePropertyFrameBuffers.size() && InstancePropertyFrameBuffers[frameIndex])
 		InstancePropertyBuffer = InstancePropertyFrameBuffers[frameIndex];
+	if (frameIndex < RTInstanceSceneObjectIndexFrameBuffers.size() && RTInstanceSceneObjectIndexFrameBuffers[frameIndex])
+		RTInstanceSceneObjectIndexBuffer = RTInstanceSceneObjectIndexFrameBuffers[frameIndex];
 }
 
 bool Corona::IsCurrentRayTracingFrameResourceReady() const
@@ -743,6 +751,7 @@ void Corona::UpdateRayTracingInstanceTransforms()
 			object.Roughness,
 			object.Metallic,
 			object.bOverrideRoughnessMetallic,
+			objectIndex,
 			bRayTracingBLASBuildSuspended);
 	}
 	if (bExtendedFrustumCullActive && (FrameCounter % 120u) == 0u)
@@ -808,8 +817,19 @@ void Corona::UpdateRayTracingInstanceTransforms()
 	AddSceneFlushPhaseTiming(ESceneFlushPhase::UpdateGpuWait, phaseStart, CpuClock::now());
 
 	phaseStart = CpuClock::now();
+	const bool bInstanceBindingsChanged =
+		RayTracingInstances.size() != updatedInstances.size() ||
+		!std::equal(
+			RayTracingInstances.begin(),
+			RayTracingInstances.end(),
+			updatedInstances.begin(),
+			[](const RTInstanceDesc& a, const RTInstanceDesc& b)
+			{
+				return a.BottomLevelAS.get() == b.BottomLevelAS.get();
+			});
 	RayTracingInstances = std::move(updatedInstances);
-	MarkRayTracingInstanceListChanged();
+	if (bInstanceBindingsChanged)
+		MarkRayTracingInstanceListChanged();
 	std::shared_ptr<RTAS>& frameTLAS = TLASFrameResources[frameIndex];
 	const bool bCanUpdateFrameTLAS =
 		frameTLAS &&
@@ -858,6 +878,7 @@ void Corona::UpdateInstancePropertyBuffer()
 	constexpr uint32_t kMinInstancePropertyCapacity = 500u;
 	const uint32_t instanceCapacity = std::max(kMinInstancePropertyCapacity, static_cast<uint32_t>(RayTracingInstances.size()));
 	InstancePropertyUploadScratch.resize(instanceCapacity);
+	RTInstanceSceneObjectIndexUploadScratch.assign(instanceCapacity, UINT32_MAX);
 	const size_t instanceCount = (std::min)(InstancePropertyUploadScratch.size(), RayTracingInstances.size());
 	for (size_t i = 0; i < instanceCount; ++i)
 	{
@@ -868,9 +889,12 @@ void Corona::UpdateInstancePropertyBuffer()
 		property.Flags = RayTracingInstances[i].Flags;
 		property.bOverrideRoughnessMetallic = RayTracingInstances[i].bOverrideRoughnessMetallic;
 		property.RoughnessMetallic = glm::vec2(RayTracingInstances[i].Roughness, RayTracingInstances[i].Metallic);
+		RTInstanceSceneObjectIndexUploadScratch[i] = RayTracingInstances[i].SceneObjectIndex;
 	}
 
 	const uint32_t instancePropertyBytes = static_cast<uint32_t>(InstancePropertyUploadScratch.size() * sizeof(InstanceProperty));
+	const uint32_t instanceSceneObjectIndexBytes =
+		static_cast<uint32_t>(RTInstanceSceneObjectIndexUploadScratch.size() * sizeof(uint32_t));
 
 	auto ClearFailedFrameResources = [&](const wchar_t* reason)
 	{
@@ -881,6 +905,7 @@ void Corona::UpdateInstancePropertyBuffer()
 			L", instances=" + std::to_wstring(RayTracingInstances.size()) +
 			L", frameIndex=" + std::to_wstring(failedFrameIndex));
 		InstancePropertyBuffer = nullptr;
+		RTInstanceSceneObjectIndexBuffer = nullptr;
 		TLAS = nullptr;
 		if (failedFrameIndex < TLASFrameResources.size())
 			TLASFrameResources[failedFrameIndex].reset();
@@ -888,6 +913,8 @@ void Corona::UpdateInstancePropertyBuffer()
 			TLASFrameInstanceCounts[failedFrameIndex] = 0u;
 		if (failedFrameIndex < InstancePropertyFrameBuffers.size())
 			InstancePropertyFrameBuffers[failedFrameIndex].reset();
+		if (failedFrameIndex < RTInstanceSceneObjectIndexFrameBuffers.size())
+			RTInstanceSceneObjectIndexFrameBuffers[failedFrameIndex].reset();
 	};
 
 	EnsureRayTracingFrameResourceSlots();
@@ -899,6 +926,7 @@ void Corona::UpdateInstancePropertyBuffer()
 	}
 
 	std::shared_ptr<Buffer>& frameInstancePropertyBuffer = InstancePropertyFrameBuffers[frameIndex];
+	std::shared_ptr<Buffer>& frameInstanceSceneObjectIndexBuffer = RTInstanceSceneObjectIndexFrameBuffers[frameIndex];
 	std::wstring failureReason;
 	if (!renderBackend->CreateOrUpdateRayTracingInstancePropertyBuffer(
 		frameInstancePropertyBuffer,
@@ -911,12 +939,31 @@ void Corona::UpdateInstancePropertyBuffer()
 		ClearFailedFrameResources(failureReason.empty() ? L"backend update failed" : failureReason.c_str());
 		return;
 	}
+	failureReason.clear();
+	if (!renderBackend->CreateOrUpdateRayTracingInstancePropertyBuffer(
+		frameInstanceSceneObjectIndexBuffer,
+		instanceCapacity,
+		sizeof(uint32_t),
+		RTInstanceSceneObjectIndexUploadScratch.data(),
+		instanceSceneObjectIndexBytes,
+		&failureReason))
+	{
+		ClearFailedFrameResources(
+			failureReason.empty() ? L"rt instance scene-object index update failed" : failureReason.c_str());
+		return;
+	}
 	if (!frameInstancePropertyBuffer)
 	{
 		ClearFailedFrameResources(L"backend returned null buffer");
 		return;
 	}
+	if (!frameInstanceSceneObjectIndexBuffer)
+	{
+		ClearFailedFrameResources(L"backend returned null scene-object index buffer");
+		return;
+	}
 	InstancePropertyBuffer = frameInstancePropertyBuffer;
+	RTInstanceSceneObjectIndexBuffer = frameInstanceSceneObjectIndexBuffer;
 }
 
 void Corona::RebuildAccelerationStructures()
@@ -938,6 +985,7 @@ void Corona::RebuildAccelerationStructures()
 	std::fill(TLASFrameResources.begin(), TLASFrameResources.end(), std::shared_ptr<RTAS>());
 	std::fill(TLASFrameInstanceCounts.begin(), TLASFrameInstanceCounts.end(), 0u);
 	std::fill(InstancePropertyFrameBuffers.begin(), InstancePropertyFrameBuffers.end(), std::shared_ptr<Buffer>());
+	std::fill(RTInstanceSceneObjectIndexFrameBuffers.begin(), RTInstanceSceneObjectIndexFrameBuffers.end(), std::shared_ptr<Buffer>());
 	if (bRayTracingBLASCacheResetPending)
 	{
 		if (!RayTracingBLASCache.empty())
@@ -989,6 +1037,7 @@ void Corona::RebuildAccelerationStructures()
 			object.Roughness,
 			object.Metallic,
 			object.bOverrideRoughnessMetallic,
+			objectIndex,
 			bRayTracingBLASBuildSuspended);
 	}
 	if (bExtendedFrustumCullActive)

@@ -55,6 +55,7 @@ PSInput VSMain(
 static const float Pi = 3.14159265359;
 static const float CubicB = 0.33f;
 static const float CubicC = 0.33f;
+static const float SkyDepthThreshold = 0.999999f;
 // All filtering functions assume that 'x' is normalized to [0, 1], where 1 == FilteRadius
 float FilterBox(in float x)
 {
@@ -207,6 +208,8 @@ float4 PSMain(PSInput input) : SV_TARGET
     uint2 PixelPos = uint2(input.position.xy);
     float2 PixelCenter = float2(PixelPos) + 0.5f;
     float2 CurrentSampleCenter = PixelCenter + CurrentJitter;
+    float CenterDepth = DepthTex[PixelPos].x;
+    bool bCenterSky = CenterDepth >= SkyDepthThreshold;
 
 
     const int SampleRadius_ = 1;
@@ -224,6 +227,10 @@ float4 PSMain(PSInput input) : SV_TARGET
             float2 samplePos = CurrentSampleCenter + sampleOffset;
             samplePos = clamp(samplePos, 0.5f.xx, RTSize - 0.5f.xx);
             float2 sampleUV = samplePos / RTSize;
+            uint2 samplePixel = uint2(samplePos);
+            bool bSampleSky = DepthTex[samplePixel].x >= SkyDepthThreshold;
+            if (bSampleSky != bCenterSky)
+                continue;
 
             float2 sampleDist = abs(sampleOffset) / (ResolveFilterDiameter / 2.0f);
 
@@ -241,10 +248,25 @@ float4 PSMain(PSInput input) : SV_TARGET
         }
     }
 
+    if (currentFilterWeight <= 1.0e-5f || mWeight <= 0.0f)
+    {
+        float3 centerSample = CurrentColorTex[PixelPos].xyz * Exposure[0];
+        clrMin = centerSample;
+        clrMax = centerSample;
+        m1 = centerSample;
+        m2 = centerSample * centerSample;
+        mWeight = 1.0f;
+        currentFilteredColor = centerSample;
+        currentFilterWeight = 1.0f;
+    }
+
     float2 Velocity = VelocityTex[PixelPos];
     float3 Bloom = BloomTex.SampleLevel(sampleWrap, input.uv, 0);
     float3 CurrentColor = currentFilteredColor / max(currentFilterWeight, 1e-5f);
     CurrentColor += Bloom * BloomStrength;
+
+    if (bCenterSky)
+        return float4(CurrentColor, 1);
 
     float2 PrevPixelPos = PixelCenter - Velocity * RTSize;
     float2 PrevUV = (PrevPixelPos + 0.0f) / RTSize;

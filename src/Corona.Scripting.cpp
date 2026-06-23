@@ -7473,6 +7473,8 @@ void Corona::RebuildFrameTimingOverlayTextIfStale()
 			switch (pass)
 			{
 			case EGpuPass::SkeletalSkinning:
+			case EGpuPass::DepthPrepass:
+			case EGpuPass::OccluderDepth:
 			case EGpuPass::GBuffer:
 			case EGpuPass::Terrain:
 			case EGpuPass::Grass:
@@ -7752,6 +7754,17 @@ void Corona::RebuildCullingOverlayTextIfStale()
 		static_cast<unsigned long long>(GBufferLastBindlessObjectBatchCount),
 		static_cast<unsigned long long>(GBufferLastBindlessObjectCount),
 		static_cast<unsigned long long>(GBufferLastBindlessObjectDrawCount));
+	out += line;
+	std::snprintf(
+		line,
+		sizeof(line),
+		"  generation %s   depth prepass %s   candidates %llu   selected %llu   opaque draws %llu   sparse rays %llu\n",
+		GBufferGenerationMode == EGBufferGenerationMode::RtPrimary ? "rt-primary" : "raster",
+		GBufferDepthPrepassOccluderMode == EGBufferDepthPrepassOccluderMode::SparseRayGpu ? "sparse-ray" : "cpu-coverage",
+		static_cast<unsigned long long>(GBufferLastDepthPrepassCandidateObjectCount),
+		static_cast<unsigned long long>(GBufferLastDepthPrepassSelectedObjectCount),
+		static_cast<unsigned long long>(GBufferLastDepthPrepassOpaqueDrawCount),
+		static_cast<unsigned long long>(GBufferLastSparseRayOccluderRayCount));
 	out += line;
 	std::snprintf(
 		line,
