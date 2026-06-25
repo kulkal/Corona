@@ -11,6 +11,9 @@
 
 #include "Common.hlsl"
 #include "GGX.hlsli"
+#define POINT_LIGHT_GRID_COUNTS_REGISTER t15
+#define POINT_LIGHT_GRID_INDICES_REGISTER t16
+#include "PointLightGrid.hlsli"
 
 Texture2D AlbedoTex : register(t0);
 Texture2D NormalTex : register(t1);
@@ -70,9 +73,9 @@ cbuffer LightingParam : register(b0)
     uint bUseShadowMap;
     // 0 = Option A channel-pack (ShadowTex.gba = visibility for first 3
     //     enabled point lights),
-    // 1 = ReSTIR Phase 1 reservoir (ShadowTex.g = chosen light index as
-    //     float, .b = weight ratio, .a = visibility). LightingPS uses the
-    //     same flag to branch its point-light loop.
+    // 1 = deterministic per-pixel finite-light shadows. ShadowTex.gba pack
+    //     up to three signed light indices: abs(value)-1 is the light index,
+    //     sign is hard visibility.
     uint ShadowMode;
     uint3 _paddingAfterShadowMode;
     float4 AmbientSkyColorAndStrength;
@@ -137,6 +140,17 @@ float EvaluateSpotAttenuation(PointLightParam light, float3 surfaceToLightDir)
     float cosTheta = dot(spotDir, -surfaceToLightDir);
     float cone = saturate((cosTheta - light.SpotConeAndFlags.y) * light.SpotConeAndFlags.z);
     return cone * cone;
+}
+
+float EvaluatePointLightDistanceAttenuation(float distanceSq, float radius)
+{
+    radius = max(radius, 0.01f);
+    const float invRadiusSq = rcp(radius * radius);
+    const float normalizedDistSq = saturate(distanceSq * invRadiusSq);
+    float rangeAttenuation = saturate(1.0f - normalizedDistSq * normalizedDistSq);
+    rangeAttenuation *= rangeAttenuation;
+    const float inverseSquareAttenuation = rcp(max(1.0f, distanceSq * 0.0001f));
+    return rangeAttenuation * inverseSquareAttenuation;
 }
 
 float4 SanitizeFloat4(float4 value)
@@ -390,26 +404,30 @@ float4 PSMain(PSInput input) : SV_TARGET
 
         if (ShadowMode == 1u)
         {
-            // ReSTIR DI for shadow-casting lights: shadow buffer stores a
-            // single chosen light index, candidate weight ratio, and
-            // visibility for THIS pixel. Evaluate that one chosen light
-            // at full BRDF weighted by the RIS ratio; temporal
-            // accumulation across frames and neighboring pixels covers
-            // the full shadow-casting light set.
-            // Shadow-casting lights that were not selected are skipped so
-            // large occluders do not leak unshadowed point-light energy.
-            // Non-shadow-casting lights remain deterministic because they
-            // are not ReSTIR candidates.
+            // Deterministic finite-light shadows. The shadow pass chooses the
+            // strongest local shadow-casting lights for this pixel and packs
+            // their visibility into gba. This keeps direct lighting free of
+            // stochastic low-frequency noise; unselected local lights remain
+            // unshadowed, matching a bounded direct-shadow budget.
             uint2 shadowPixel = uint2(screenUV * RTSize);
-            float rawIdx = ShadowTex[shadowPixel].g;
-            uint chosenIdx = (uint)(rawIdx + 0.5f);
-            float ratio = max(ShadowTex[shadowPixel].b, 0.0f);
-            float vis = saturate(ShadowTex[shadowPixel].a);
+            float3 packedShadow = ShadowTex[shadowPixel].gba;
+            const bool usePointLightGrid = PointLightGridIsEnabled();
+            uint gridCellIndex = 0u;
+            uint gridCandidateCount = usePointLightGrid ?
+                PointLightGridSelectCandidateCount(WorldPosition, gridCellIndex) :
+                activePointLightCount;
+            uint pointLightLoopCount = usePointLightGrid ?
+                min(gridCandidateCount, PointLightGridGetMaxCount()) :
+                activePointLightCount;
             [loop]
-            for (uint lightIndex = 0; lightIndex < activePointLightCount; ++lightIndex)
+            for (uint candidateIndex = 0u; candidateIndex < MAX_POINT_LIGHTS; ++candidateIndex)
             {
-                const bool castsShadow = PointLights[lightIndex].SpotConeAndFlags.w > 0.5f;
-                if (castsShadow && (lightIndex != chosenIdx || ratio <= 0.0f))
+                if (candidateIndex >= pointLightLoopCount)
+                    break;
+                const uint lightIndex = usePointLightGrid ?
+                    PointLightGridLoadLightIndex(gridCellIndex, candidateIndex) :
+                    candidateIndex;
+                if (lightIndex >= activePointLightCount)
                     continue;
 
                 float3 pointPosition = PointLights[lightIndex].PositionAndRadius.xyz;
@@ -421,20 +439,38 @@ float4 PSMain(PSInput input) : SV_TARGET
                 float distanceSq = max(dot(toLight, toLight), 1.0e-4f);
                 float distanceToLight = sqrt(distanceSq);
                 float3 pointLightDir = toLight / distanceToLight;
-                float rangeAttenuation = saturate(1.0f - distanceToLight / pointRadius);
-                rangeAttenuation *= rangeAttenuation;
-                float inverseSquareAttenuation = 1.0f / max(1.0f, distanceSq * 0.0001f);
-                float attenuation = rangeAttenuation * inverseSquareAttenuation *
+                float attenuation = EvaluatePointLightDistanceAttenuation(distanceSq, pointRadius) *
                     EvaluateSpotAttenuation(PointLights[lightIndex], pointLightDir);
                 float pointNdotL = saturate(dot(pointLightDir, WorldNormal));
                 float3 pointRadiance = pointColor * pointIntensity * attenuation;
-                float restirWeight = castsShadow ? ratio : 1.0f;
-                float visibilityEstimate = castsShadow ? vis : 1.0f;
+                const bool castsShadow = PointLights[lightIndex].SpotConeAndFlags.w > 0.5f;
+                // Shadow-casting lights must be explicitly covered by the
+                // bounded per-pixel shadow set. Treating unselected shadow
+                // lights as unshadowed leaks light through walls when the
+                // grid candidate list is large. Non-shadow-casting lights
+                // still contribute normally.
+                float visibilityEstimate = castsShadow ? 0.0f : 1.0f;
+                if (castsShadow)
+                {
+                    [unroll]
+                    for (uint shadowChannel = 0u; shadowChannel < 3u; ++shadowChannel)
+                    {
+                        const float packed = packedShadow[shadowChannel];
+                        if (abs(packed) < 0.5f)
+                            continue;
+                        const uint packedIndex = (uint)(abs(packed) - 1.0f + 0.5f);
+                        if (packedIndex == lightIndex)
+                        {
+                            visibilityEstimate = packed > 0.0f ? 1.0f : 0.0f;
+                            break;
+                        }
+                    }
+                }
 
                 if (bEnableDirectDiffuse)
-                    PointDiffuse += pointNdotL * pointRadiance * visibilityEstimate * restirWeight * Albedo * (1.0f - Metallic);
+                    PointDiffuse += pointNdotL * pointRadiance * visibilityEstimate * Albedo * (1.0f - Metallic);
                 if (bEnableDirectSpecular)
-                    PointSpecular += EvaluateGGXSpecularBRDF(WorldNormal, V, pointLightDir, Roughness, F0) * pointNdotL * pointRadiance * visibilityEstimate * restirWeight;
+                    PointSpecular += EvaluateGGXSpecularBRDF(WorldNormal, V, pointLightDir, Roughness, F0) * pointNdotL * pointRadiance * visibilityEstimate;
             }
         }
         else
@@ -445,9 +481,26 @@ float4 PSMain(PSInput input) : SV_TARGET
             // channel got its visibility). Lights that weren't selected
             // stay unshadowed.
             float3 PointVis = float3(shadowSample.g, shadowSample.b, shadowSample.a);
+            const bool usePointLightGrid = PointLightGridIsEnabled();
+            uint gridCellIndex = 0u;
+            uint gridCandidateCount = usePointLightGrid ?
+                PointLightGridSelectCandidateCount(WorldPosition, gridCellIndex) :
+                activePointLightCount;
+            uint pointLightLoopCount = usePointLightGrid ?
+                min(gridCandidateCount, PointLightGridGetMaxCount()) :
+                activePointLightCount;
+
             [loop]
-            for (uint lightIndex = 0; lightIndex < activePointLightCount; ++lightIndex)
+            for (uint candidateIndex = 0u; candidateIndex < MAX_POINT_LIGHTS; ++candidateIndex)
             {
+                if (candidateIndex >= pointLightLoopCount)
+                    break;
+                const uint lightIndex = usePointLightGrid ?
+                    PointLightGridLoadLightIndex(gridCellIndex, candidateIndex) :
+                    candidateIndex;
+                if (lightIndex >= activePointLightCount)
+                    continue;
+
                 float3 pointPosition = PointLights[lightIndex].PositionAndRadius.xyz;
                 float pointRadius = max(PointLights[lightIndex].PositionAndRadius.w, 0.01f);
                 float3 pointColor = max(PointLights[lightIndex].ColorAndIntensity.xyz, 0.0f.xxx);
@@ -457,10 +510,7 @@ float4 PSMain(PSInput input) : SV_TARGET
                 float distanceSq = max(dot(toLight, toLight), 1.0e-4f);
                 float distanceToLight = sqrt(distanceSq);
                 float3 pointLightDir = toLight / distanceToLight;
-                float rangeAttenuation = saturate(1.0f - distanceToLight / pointRadius);
-                rangeAttenuation *= rangeAttenuation;
-                float inverseSquareAttenuation = 1.0f / max(1.0f, distanceSq * 0.0001f);
-                float attenuation = rangeAttenuation * inverseSquareAttenuation *
+                float attenuation = EvaluatePointLightDistanceAttenuation(distanceSq, pointRadius) *
                     EvaluateSpotAttenuation(PointLights[lightIndex], pointLightDir);
                 float pointNdotL = saturate(dot(pointLightDir, WorldNormal));
                 uint shadowChan = ShadowChannelMap[lightIndex >> 2u][lightIndex & 3u];

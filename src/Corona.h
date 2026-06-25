@@ -696,6 +696,11 @@ private:
 	static constexpr UINT32 MaxPointLights = 128;
 	static constexpr UINT32 MaxDiffuseGIPointLights = 16;
 	static constexpr UINT32 MaxPathTracingPointLights = MaxDiffuseGIPointLights;
+	static constexpr UINT32 PointLightGridResolution = 64;
+	static constexpr UINT32 PointLightGridMaxLightsPerCell = MaxPointLights;
+	static constexpr UINT32 PointLightGridAxisCount = 3;
+	static constexpr UINT32 PointLightGridCellCount =
+		PointLightGridResolution * PointLightGridResolution * PointLightGridAxisCount;
 	static_assert(MaxDiffuseGIPointLights <= 32,
 		"Spatial light masks pack one bit per direct ReSTIR point-light candidate");
 	static_assert(MaxPathTracingPointLights <= MaxPointLights,
@@ -707,6 +712,13 @@ private:
 		glm::vec4 ColorAndIntensity = glm::vec4(1.0f);
 		glm::vec4 DirectionAndType = glm::vec4(0.0f, 1.0f, 0.0f, 0.0f);
 		glm::vec4 SpotConeAndFlags = glm::vec4(1.0f, 0.70710677f, 3.4142137f, 1.0f);
+	};
+
+	struct PointLightGridParamCB
+	{
+		glm::vec4 MinAndEnabled = glm::vec4(0.0f);
+		glm::vec4 InvExtentAndResolution = glm::vec4(0.0f);
+		glm::uvec4 Counts = glm::uvec4(0u);
 	};
 	// SHaRC-style spatial hash diffuse GI cache
 	static constexpr UINT32 SpatialHashGIEntryCount = 1u << 21;
@@ -1151,6 +1163,14 @@ private:
 	UINT32 PathTracingPointLightCount = 0;
 	std::shared_ptr<Buffer> PathTracingPointLightBuffer;
 	UINT32 PathTracingPointLightBufferHash = 0xFFFFFFFFu;
+	std::array<PointLightParam, MaxPointLights> PointLightGridPointLights = {};
+	UINT32 PointLightGridPointLightCount = 0;
+	PointLightGridParamCB PointLightGridParam;
+	std::shared_ptr<Buffer> PointLightGridPointLightBuffer;
+	std::shared_ptr<Buffer> PointLightGridCountBuffer;
+	std::shared_ptr<Buffer> PointLightGridIndexBuffer;
+	UINT32 PointLightGridBufferHash = 0xFFFFFFFFu;
+	uint64_t PointLightGridSourceHash = 0;
 	std::shared_ptr<Buffer> RTMaterialRecordBuffer;
 	uint64_t RTMaterialRecordHash = 0;
 	uint64_t RTMaterialRecordSourceHash = 0;
@@ -1413,6 +1433,7 @@ public:
 	struct SceneObjectDesc
 	{
 		CoronaECS::Entity EntityHandle;
+		std::string DebugName;
 		shared_ptr<Scene> ScenePtr;
 		glm::mat4x4 Transform = glm::mat4x4(1.0f);
 		float Roughness = 1.0f;
@@ -1487,6 +1508,9 @@ private:
 	// ReSTIR is now the default — it handles arbitrary light counts; the
 	// 4-channel path stays as a fallback for A/B comparison.
 	bool bEnableReSTIRDirectShadow = true;
+	bool bDebugDisableDirectionalShadow = false;
+	bool bDebugDisablePointLightShadow = false;
+	bool bForceRaytracedShadowPipeline = false;
 	// Cross-frame cache of the exact ordered point-light table the spatial-hash GI
 	// light mask was last built from. The GI pass runs AFTER the shadow pass, so the
 	// shadow pass reads the PREVIOUS frame's mask. To keep the mask's bit index in
@@ -1739,6 +1763,7 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	{
 		SceneObjectHandle Handle = InvalidSceneObjectHandle;
 		CoronaECS::Entity EntityHandle;
+		std::string DebugName;
 		shared_ptr<Scene> ScenePtr;
 		glm::mat4x4 Transform = glm::mat4x4(1.0f);
 		float Roughness = 1.0f;
@@ -2687,6 +2712,7 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	bool ShouldIncludeSceneObjectInRayTracingAS(const SceneObject& object) const;
 	bool IsRayTracingExtendedFrustumCullingActive() const;
 	bool ShouldIncludeSceneObjectInRayTracingExtendedFrustum(const SceneObject& object, bool& outFrustumCulled) const;
+	uint32_t GetRayTracingInstanceMaskForSceneObject(const SceneObject& object) const;
 	const std::vector<uint32_t>& GatherRayTracingVisibleObjectIndices(uint64_t& outTotalObjects, uint64_t& outCulledObjects);
 	void MarkRayTracingSceneDirty();
 	void MarkRayTracingTransformsDirty();
@@ -3712,6 +3738,8 @@ private:
 	void ApplyRenderPointLightsToFrameParams();
 	UINT32 ComputePathTracingPointLightStateHash() const;
 	bool EnsurePathTracingPointLightBuffer(UINT32 pointLightStateHash);
+	UINT32 ComputePointLightGridStateHash() const;
+	bool EnsurePointLightGridBuffers();
 	bool UsesRTBindlessMaterials() const;
 	bool UsesRTBindlessGeometry() const;
 	void BindRTBindlessMaterialSchema(RTPipelineStateObject& pso, RHIShaderStageMask materialStages);

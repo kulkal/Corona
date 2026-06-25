@@ -22,6 +22,9 @@ struct PointLightParam
     float4 SpotConeAndFlags;
 };
 
+StructuredBuffer<PointLightParam> PointLightBuffer : register(t4);
+#include "PointLightGrid.hlsli"
+
 cbuffer ViewParameter : register(b0)
 {
     float4x4 ViewMatrix;
@@ -78,6 +81,8 @@ struct RT_DIFFUSE_GI_RAY_PAYLOAD ShadowRayPayload
     bool bHit RT_DIFFUSE_GI_SHADOW_PAYLOAD_RW;
 };
 
+static const uint RT_SHADOW_RAY_MASK = 0x02u;
+
 bool TraceDiffuseGIShadowOccluded(RayDesc shadowRay)
 {
 #if RT_DIFFUSE_GI_USE_RAYQUERY_SHADOWS
@@ -85,7 +90,7 @@ bool TraceDiffuseGIShadowOccluded(RayDesc shadowRay)
              RAY_FLAG_SKIP_CLOSEST_HIT_SHADER |
              RAY_FLAG_FORCE_OPAQUE |
              RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q;
-    q.TraceRayInline(gRtScene, RAY_FLAG_NONE, 0xFFu, shadowRay);
+    q.TraceRayInline(gRtScene, RAY_FLAG_NONE, RT_SHADOW_RAY_MASK, shadowRay);
     q.Proceed();
     return q.CommittedStatus() != COMMITTED_NOTHING;
 #else
@@ -97,7 +102,7 @@ bool TraceDiffuseGIShadowOccluded(RayDesc shadowRay)
             RAY_FLAG_SKIP_CLOSEST_HIT_SHADER |
             RAY_FLAG_FORCE_OPAQUE |
             RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES,
-        0xFF,
+        RT_SHADOW_RAY_MASK,
         0,
         0,
         1,
@@ -118,6 +123,46 @@ float EvaluateSpotAttenuation(PointLightParam light, float3 surfaceToLightDir)
     return cone * cone;
 }
 
+float EvaluatePointLightDistanceAttenuation(float distanceSq, float radius)
+{
+    radius = max(radius, 0.01f);
+    const float invRadiusSq = rcp(radius * radius);
+    const float normalizedDistSq = saturate(distanceSq * invRadiusSq);
+    float rangeAttenuation = saturate(1.0f - normalizedDistSq * normalizedDistSq);
+    rangeAttenuation *= rangeAttenuation;
+    const float inverseSquareAttenuation = rcp(max(1.0f, distanceSq * 0.0001f));
+    return rangeAttenuation * inverseSquareAttenuation;
+}
+
+float ComputePointLightEndpointBias(float lightRadius)
+{
+    return clamp(max(lightRadius, 0.01f) * 0.02f, 0.25f, 80.0f);
+}
+
+bool LoadPointLightForGI(uint lightIndex, bool usePointLightGrid, out PointLightParam light)
+{
+    light.PositionAndRadius = 0.0f.xxxx;
+    light.ColorAndIntensity = 0.0f.xxxx;
+    light.DirectionAndType = 0.0f.xxxx;
+    light.SpotConeAndFlags = 0.0f.xxxx;
+
+    if (usePointLightGrid)
+    {
+        if (lightIndex >= PointLightGridGetPointLightCount() || lightIndex >= (uint)MAX_POINT_LIGHTS)
+            return false;
+        light = PointLightBuffer[lightIndex];
+    }
+    else
+    {
+        if (lightIndex >= PointLightCount || lightIndex >= (uint)RT_DIFFUSE_GI_MAX_POINT_LIGHTS)
+            return false;
+        light = PointLights[lightIndex];
+    }
+
+    return max(light.ColorAndIntensity.w, 0.0f) > 0.0f &&
+        max(light.PositionAndRadius.w, 0.0f) > 0.0f;
+}
+
 bool IsPointLightVisible(float3 worldPos, float3 normal, float3 lightDir, float lightDistance, PointLightParam light)
 {
     if (light.SpotConeAndFlags.w <= 0.5f)
@@ -127,7 +172,10 @@ bool IsPointLightVisible(float3 worldPos, float3 normal, float3 lightDir, float 
     shadowRay.Origin = worldPos + normal * 0.5f;
     shadowRay.Direction = lightDir;
     shadowRay.TMin = 0.001f;
-    shadowRay.TMax = max(lightDistance - 0.05f, 0.001f);
+    const float endpointBias = ComputePointLightEndpointBias(light.PositionAndRadius.w);
+    if (lightDistance <= endpointBias + shadowRay.TMin)
+        return true;
+    shadowRay.TMax = max(lightDistance - endpointBias, shadowRay.TMin + 0.05f);
 
     return !TraceDiffuseGIShadowOccluded(shadowRay);
 }
@@ -146,18 +194,31 @@ uint HashPointLightSample(uint2 pixel, uint frameIndex, uint sampleIndex)
     return h;
 }
 
-float3 EvaluateSinglePointLightBounce(float3 worldPos, float3 normal, float3 albedo, uint lightIndex)
+float EvaluatePointLightSelectionScore(float3 worldPos, float3 normal, PointLightParam light)
 {
-    PointLightParam light = PointLights[lightIndex];
     float3 toLight = light.PositionAndRadius.xyz - worldPos;
     float distanceSq = max(dot(toLight, toLight), 1.0e-4f);
     float lightDistance = sqrt(distanceSq);
     float3 lightDir = toLight / lightDistance;
     float range = max(light.PositionAndRadius.w, 0.01f);
-    float rangeAttenuation = saturate(1.0f - lightDistance / range);
-    rangeAttenuation *= rangeAttenuation;
-    float inverseSquareAttenuation = 1.0f / max(1.0f, distanceSq * 0.0001f);
-    float attenuation = rangeAttenuation * inverseSquareAttenuation * EvaluateSpotAttenuation(light, lightDir);
+    float attenuation = EvaluatePointLightDistanceAttenuation(distanceSq, range) * EvaluateSpotAttenuation(light, lightDir);
+    float nDotL = saturate(dot(normal, lightDir));
+    float luma = dot(max(light.ColorAndIntensity.xyz, 0.0f.xxx), float3(0.2126f, 0.7152f, 0.0722f));
+    return max(0.0f, luma * max(light.ColorAndIntensity.w, 0.0f) * attenuation * nDotL);
+}
+
+float3 EvaluateSinglePointLightBounce(float3 worldPos, float3 normal, float3 albedo, uint lightIndex, bool usePointLightGrid)
+{
+    PointLightParam light;
+    if (!LoadPointLightForGI(lightIndex, usePointLightGrid, light))
+        return 0.0f.xxx;
+
+    float3 toLight = light.PositionAndRadius.xyz - worldPos;
+    float distanceSq = max(dot(toLight, toLight), 1.0e-4f);
+    float lightDistance = sqrt(distanceSq);
+    float3 lightDir = toLight / lightDistance;
+    float range = max(light.PositionAndRadius.w, 0.01f);
+    float attenuation = EvaluatePointLightDistanceAttenuation(distanceSq, range) * EvaluateSpotAttenuation(light, lightDir);
     float nDotL = saturate(dot(normal, lightDir));
     if (attenuation <= 0.0f || nDotL <= 0.0f || !IsPointLightVisible(worldPos, normal, lightDir, lightDistance, light))
         return 0.0f.xxx;
@@ -170,28 +231,97 @@ float3 EvaluateSinglePointLightBounce(float3 worldPos, float3 normal, float3 alb
 float3 EvaluatePointLightBounce(float3 worldPos, float3 normal, float3 albedo, uint2 pixel)
 {
     float3 radiance = 0.0f.xxx;
-    uint activeCount = min(PointLightCount, (uint)RT_DIFFUSE_GI_MAX_POINT_LIGHTS);
+    const bool usePointLightGrid = PointLightGridIsEnabled();
+    const uint activeCount = usePointLightGrid ?
+        min(PointLightGridGetPointLightCount(), (uint)MAX_POINT_LIGHTS) :
+        min(PointLightCount, (uint)RT_DIFFUSE_GI_MAX_POINT_LIGHTS);
+    if (activeCount == 0u)
+        return radiance;
+
+    uint gridCellIndex = 0u;
+    const uint candidateCount = usePointLightGrid ?
+        min(PointLightGridSelectCandidateCount(worldPos, gridCellIndex), PointLightGridGetMaxCount()) :
+        activeCount;
+    if (candidateCount == 0u)
+        return radiance;
+
     uint sampleCount = clamp(GISamplesPerPixel, 1u, (uint)RT_DIFFUSE_GI_MAX_POINT_LIGHTS);
-    if (sampleCount >= activeCount)
+    if (sampleCount >= candidateCount)
     {
         [loop]
-        for (uint lightIndex = 0u; lightIndex < RT_DIFFUSE_GI_MAX_POINT_LIGHTS; ++lightIndex)
+        for (uint candidateIndex = 0u; candidateIndex < MAX_POINT_LIGHTS; ++candidateIndex)
         {
-            if (lightIndex >= activeCount)
+            if (candidateIndex >= candidateCount)
                 break;
-            radiance += EvaluateSinglePointLightBounce(worldPos, normal, albedo, lightIndex);
+            const uint lightIndex = usePointLightGrid ?
+                PointLightGridLoadLightIndex(gridCellIndex, candidateIndex) :
+                candidateIndex;
+            if (lightIndex >= activeCount)
+                continue;
+            radiance += EvaluateSinglePointLightBounce(worldPos, normal, albedo, lightIndex, usePointLightGrid);
         }
         return radiance;
     }
 
-    float sampleWeight = (float)activeCount / max((float)sampleCount, 1.0f);
-    [loop]
-    for (uint sampleIndex = 0u; sampleIndex < RT_DIFFUSE_GI_MAX_POINT_LIGHTS; ++sampleIndex)
+    float topScore[RT_DIFFUSE_GI_MAX_POINT_LIGHTS];
+    uint topIndex[RT_DIFFUSE_GI_MAX_POINT_LIGHTS];
+    [unroll]
+    for (uint slot = 0u; slot < (uint)RT_DIFFUSE_GI_MAX_POINT_LIGHTS; ++slot)
     {
-        if (sampleIndex >= sampleCount)
+        topScore[slot] = 0.0f;
+        topIndex[slot] = 0xFFFFFFFFu;
+    }
+
+    [loop]
+    for (uint candidateIndex = 0u; candidateIndex < MAX_POINT_LIGHTS; ++candidateIndex)
+    {
+        if (candidateIndex >= candidateCount)
             break;
-        uint lightIndex = HashPointLightSample(pixel, FrameCounter, sampleIndex) % activeCount;
-        radiance += EvaluateSinglePointLightBounce(worldPos, normal, albedo, lightIndex) * sampleWeight;
+        const uint lightIndex = usePointLightGrid ?
+            PointLightGridLoadLightIndex(gridCellIndex, candidateIndex) :
+            candidateIndex;
+        if (lightIndex >= activeCount)
+            continue;
+
+        PointLightParam light;
+        if (!LoadPointLightForGI(lightIndex, usePointLightGrid, light))
+            continue;
+
+        const float score = EvaluatePointLightSelectionScore(worldPos, normal, light);
+        if (score <= 0.0f)
+            continue;
+
+        [unroll]
+        for (uint slot = 0u; slot < (uint)RT_DIFFUSE_GI_MAX_POINT_LIGHTS; ++slot)
+        {
+            if (slot >= sampleCount)
+                break;
+            if (score <= topScore[slot])
+                continue;
+
+            [unroll]
+            for (uint shift = (uint)RT_DIFFUSE_GI_MAX_POINT_LIGHTS - 1u; shift > 0u; --shift)
+            {
+                if (shift >= sampleCount || shift <= slot)
+                    continue;
+                topScore[shift] = topScore[shift - 1u];
+                topIndex[shift] = topIndex[shift - 1u];
+            }
+
+            topScore[slot] = score;
+            topIndex[slot] = lightIndex;
+            break;
+        }
+    }
+
+    [unroll]
+    for (uint slot = 0u; slot < (uint)RT_DIFFUSE_GI_MAX_POINT_LIGHTS; ++slot)
+    {
+        if (slot >= sampleCount)
+            break;
+        if (topIndex[slot] == 0xFFFFFFFFu)
+            continue;
+        radiance += EvaluateSinglePointLightBounce(worldPos, normal, albedo, topIndex[slot], usePointLightGrid);
     }
     return radiance;
 }

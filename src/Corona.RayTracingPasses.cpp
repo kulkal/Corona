@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cctype>
 #include <cmath>
 #include <cstdlib>
 #include <iomanip>
@@ -40,6 +41,21 @@ namespace
 		uint64_t CulledObjects = 0;
 		uint64_t IncludedMeshes = 0;
 	};
+
+	std::string ToLowerAscii(std::string value)
+	{
+		for (char& c : value)
+			c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+		return value;
+	}
+
+	bool IsLightProxyShadowCasterName(const std::string& debugName)
+	{
+		const std::string name = ToLowerAscii(debugName);
+		return name.rfind("sm_light", 0) == 0 ||
+			name.rfind("sm_neon", 0) == 0 ||
+			name.find("_neon") != std::string::npos;
+	}
 
 	enum class ERtFrustumAabbRelation : uint8_t
 	{
@@ -214,6 +230,7 @@ namespace
 		float metallic,
 		bool bOverrideRoughnessMetallic,
 		uint32_t sceneObjectIndex,
+		uint32_t instanceMask,
 		bool& bBuildSuspended)
 	{
 		if (!scene || bBuildSuspended)
@@ -273,6 +290,7 @@ namespace
 			instance.Metallic = metallic;
 			instance.bOverrideRoughnessMetallic = bOverrideRoughnessMetallic ? 1u : 0u;
 			instance.SceneObjectIndex = sceneObjectIndex;
+			instance.InstanceMask = instanceMask;
 			for (const Mesh::DrawCall& draw : mesh->Draws)
 			{
 				if (draw.mat && draw.mat->bHasAlpha)
@@ -308,6 +326,12 @@ Corona::SceneObjectHandle Corona::AddSceneObject(const SceneObjectDesc& desc)
 	object.PhysicsBoxHalfExtent = desc.PhysicsBoxHalfExtent;
 	object.Transform = desc.Transform;
 	object.EntityHandle = desc.EntityHandle;
+	object.DebugName = desc.DebugName;
+	if (object.DebugName.empty() && EntityWorld.IsAlive(object.EntityHandle))
+	{
+		if (const std::string* entityName = EntityWorld.GetName(object.EntityHandle))
+			object.DebugName = *entityName;
+	}
 	if (EntityWorld.IsAlive(object.EntityHandle))
 		UpdateSceneObjectEntity(object);
 	else
@@ -430,6 +454,25 @@ bool Corona::ShouldIncludeSceneObjectInRayTracingAS(const SceneObject& object) c
 	// In hybrid mode this flag lets script objects opt out of RT effects.
 	// Path tracing has no raster fallback, so every visible object must be in the AS.
 	return object.bRayTracing || RenderingMode == ERenderingMode::PATHTRACING;
+}
+
+uint32_t Corona::GetRayTracingInstanceMaskForSceneObject(const SceneObject& object) const
+{
+	uint32_t mask = kRTRayMaskAll;
+	if (IsLightProxyShadowCasterName(object.DebugName))
+	{
+		mask &= ~kRTRayMaskShadow;
+		static std::set<std::string> loggedNames;
+		if (loggedNames.size() < 32 && loggedNames.insert(object.DebugName).second)
+		{
+			std::wstring wideName;
+			wideName.reserve(object.DebugName.size());
+			for (char c : object.DebugName)
+				wideName.push_back(static_cast<wchar_t>(static_cast<unsigned char>(c)));
+			AppendCpuRuntimeTrace(L"[RTASShadowMask] disabled shadow casting for light proxy \"" + wideName + L"\"");
+		}
+	}
+	return mask != 0u ? mask : 0x01u;
 }
 
 bool Corona::IsRayTracingExtendedFrustumCullingActive() const
@@ -743,6 +786,7 @@ void Corona::UpdateRayTracingInstanceTransforms()
 		if (objectIndex >= RenderWorld.SceneObjects.size())
 			continue;
 		const SceneObject& object = RenderWorld.SceneObjects[objectIndex];
+		const uint32_t instanceMask = GetRayTracingInstanceMaskForSceneObject(object);
 		cullStats.IncludedMeshes += AddMeshesToRayTracingInstances(
 			updatedInstances,
 			RayTracingBLASCache,
@@ -752,6 +796,7 @@ void Corona::UpdateRayTracingInstanceTransforms()
 			object.Metallic,
 			object.bOverrideRoughnessMetallic,
 			objectIndex,
+			instanceMask,
 			bRayTracingBLASBuildSuspended);
 	}
 	if (bExtendedFrustumCullActive && (FrameCounter % 120u) == 0u)
@@ -1029,6 +1074,7 @@ void Corona::RebuildAccelerationStructures()
 		if (objectIndex >= RenderWorld.SceneObjects.size())
 			continue;
 		const SceneObject& object = RenderWorld.SceneObjects[objectIndex];
+		const uint32_t instanceMask = GetRayTracingInstanceMaskForSceneObject(object);
 		cullStats.IncludedMeshes += AddMeshesToRayTracingInstances(
 			RayTracingInstances,
 			RayTracingBLASCache,
@@ -1038,6 +1084,7 @@ void Corona::RebuildAccelerationStructures()
 			object.Metallic,
 			object.bOverrideRoughnessMetallic,
 			objectIndex,
+			instanceMask,
 			bRayTracingBLASBuildSuspended);
 	}
 	if (bExtendedFrustumCullActive)
@@ -1190,7 +1237,7 @@ void Corona::InitRTPSO()
 	// declared but never built.
 
 	timePass(L"ShadowRayQuery", [&]() { InitShadowRayQueryPass(); });
-	if (!PSO_SHADOW_RAYQUERY)
+	if (!PSO_SHADOW_RAYQUERY || bForceRaytracedShadowPipeline)
 		timePass(L"RaytracingShadow", [&]() { InitRaytracingShadowPass(); });
 	else
 		AppendCpuRuntimeTrace(L"[StartupTiming][RTPSO] skip pass=\"RaytracingShadow\" (ShadowRayQuery active)");

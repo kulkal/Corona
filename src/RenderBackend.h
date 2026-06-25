@@ -393,6 +393,9 @@ public:
 	virtual ~GraphicsBindGroupHandle() = default;
 };
 
+inline constexpr uint32_t kRTRayMaskAll = 0xFFu;
+inline constexpr uint32_t kRTRayMaskShadow = 0x02u;
+
 struct RTInstanceDesc
 {
 	std::shared_ptr<RTAS> BottomLevelAS;
@@ -402,6 +405,7 @@ struct RTInstanceDesc
 	uint32_t bOverrideRoughnessMetallic = 0;
 	uint32_t Flags = 0;
 	uint32_t SceneObjectIndex = UINT32_MAX;
+	uint32_t InstanceMask = kRTRayMaskAll;
 };
 
 struct RenderBackendCapabilities

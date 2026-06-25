@@ -110,6 +110,8 @@ struct RT_REFLECTION_SHADOW_RAY_PAYLOAD ShadowRayPayload
     bool bHit RT_REFLECTION_SHADOW_PAYLOAD_RW;
 };
 
+static const uint RT_SHADOW_RAY_MASK = 0x02u;
+
 bool TraceReflectionShadowOccluded(RayDesc shadowRay)
 {
 #if RT_REFLECTION_USE_RAYQUERY_SHADOWS
@@ -117,7 +119,7 @@ bool TraceReflectionShadowOccluded(RayDesc shadowRay)
              RAY_FLAG_SKIP_CLOSEST_HIT_SHADER |
              RAY_FLAG_FORCE_OPAQUE |
              RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q;
-    q.TraceRayInline(gRtScene, RAY_FLAG_NONE, 0xFFu, shadowRay);
+    q.TraceRayInline(gRtScene, RAY_FLAG_NONE, RT_SHADOW_RAY_MASK, shadowRay);
     q.Proceed();
     return q.CommittedStatus() != COMMITTED_NOTHING;
 #else
@@ -129,7 +131,7 @@ bool TraceReflectionShadowOccluded(RayDesc shadowRay)
             RAY_FLAG_SKIP_CLOSEST_HIT_SHADER |
             RAY_FLAG_FORCE_OPAQUE |
             RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES,
-        0xFF,
+        RT_SHADOW_RAY_MASK,
         0,
         0,
         1,

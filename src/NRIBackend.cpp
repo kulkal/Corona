@@ -2303,7 +2303,9 @@ static bool WriteNRITLASInstances(NRIRTAS* as, const std::vector<RTInstanceDesc>
 		const glm::mat4x4 mat = glm::transpose(instances[i].Transform);
 		memcpy(dst[i].transform, &mat, sizeof(dst[i].transform));
 		dst[i].instanceId = i;
-		dst[i].mask = 0xFF;
+		dst[i].mask = static_cast<uint8_t>(instances[i].InstanceMask & 0xFFu);
+		if (dst[i].mask == 0)
+			dst[i].mask = 0x01;
 		// The NRI RT PSO currently emits one shared hit-group record. InstanceID()
 		// still carries the scene instance index used by InstanceProperty.
 		dst[i].shaderBindingTableLocalOffset = 0;

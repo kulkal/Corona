@@ -53,6 +53,7 @@ SamplerState sampleWrap : register(s0);
 static const uint kSpatialFlags =
     RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH |
     RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES;
+static const uint RT_SHADOW_RAY_MASK = 0x02u;
 
 // World-space reconstruction from depth + inverse-projection. Matches
 // the existing GetViewPosition helper convention (row-vector form):
@@ -80,9 +81,18 @@ float TargetPdfAtPixel(uint lightIdx, float3 worldPos, float3 worldNormal)
     float3 toCand = candPos - worldPos;
     float  distSq = max(dot(toCand, toCand), 1.0e-4f);
     float  dist   = sqrt(distSq);
-    float  rangeAtten = saturate(1.0f - dist / candRadius);
+    const float invRadiusSq = rcp(candRadius * candRadius);
+    const float normalizedDistSq = saturate(distSq * invRadiusSq);
+    float  rangeAtten = saturate(1.0f - normalizedDistSq * normalizedDistSq);
+    rangeAtten *= rangeAtten;
+    const float inverseSquareAtten = rcp(max(1.0f, distSq * 0.0001f));
     float  NdotL = saturate(dot(worldNormal, toCand) / max(dist, 1.0e-3f));
-    return candLuma * rangeAtten * rangeAtten * NdotL / max(distSq * 0.0001f, 1.0f);
+    return candLuma * max(0.0f, rangeAtten * inverseSquareAtten * NdotL);
+}
+
+float ComputePointLightEndpointBias(float lightRadius, float normalBias)
+{
+    return max(normalBias * 0.5f, clamp(max(lightRadius, 0.01f) * 0.02f, 0.25f, 80.0f));
 }
 
 // Trace a single visibility ray for a point light using inline RT.
@@ -111,11 +121,14 @@ float TraceVisibilityInline(float3 worldPos, float3 worldNormal, float3 traceNor
     ray.Origin = worldPos + bias * normalBias;
     ray.Direction = lightDir;
     ray.TMin = max(0.05f, normalBias * 0.25f);
-    ray.TMax = max(distToLight - max(normalBias * 0.5f, 0.05f), ray.TMin + 0.05f);
+    const float endpointBias = ComputePointLightEndpointBias(lightRadius, normalBias);
+    if (distToLight <= endpointBias + ray.TMin)
+        return 1.0f;
+    ray.TMax = max(distToLight - endpointBias, ray.TMin + 0.05f);
 
     RayQuery<RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH |
              RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q;
-    q.TraceRayInline(gRtScene, RAY_FLAG_NONE, 0xFFu, ray);
+    q.TraceRayInline(gRtScene, RAY_FLAG_NONE, RT_SHADOW_RAY_MASK, ray);
     q.Proceed();
     return (q.CommittedStatus() == COMMITTED_NOTHING) ? 1.0f : 0.0f;
 }

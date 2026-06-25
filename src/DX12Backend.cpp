@@ -5923,7 +5923,9 @@ static bool WriteD3D12TLASInstanceDescs(D3D12RTAS* as, const std::vector<RTInsta
 		instanceDesc.Transform[2][2] = transform[2][2];
 		instanceDesc.Transform[2][3] = transform[3][2];
 		instanceDesc.AccelerationStructure = blas->ResultGpuVA;
-		instanceDesc.InstanceMask = 0xFF;
+		instanceDesc.InstanceMask = static_cast<UINT8>(instances[i].InstanceMask & 0xFFu);
+		if (instanceDesc.InstanceMask == 0)
+			instanceDesc.InstanceMask = 0x01;
 	}
 
 	return bValid;

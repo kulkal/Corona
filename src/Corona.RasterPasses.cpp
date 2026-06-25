@@ -2411,6 +2411,7 @@ void Corona::InitLightingPass()
 	const RHIShaderStageMask lightingGraphicsStages = RHIShaderStage::Vertex | RHIShaderStage::Pixel;
 	desc.PipelineLayout.Bindings = {
 		MakeRHICBV("__CB0", 0, sizeof(LightingParam), lightingGraphicsStages),
+		MakeRHICBV("__CB1", 1, sizeof(PointLightGridParamCB), lightingGraphicsStages),
 		MakeRHITextureSRV("AlbedoTex", 0, lightingPixelStage),
 		MakeRHITextureSRV("NormalTex", 1, lightingPixelStage),
 		MakeRHITextureSRV("ShadowTex", 2, lightingPixelStage),
@@ -2421,6 +2422,8 @@ void Corona::InitLightingPass()
 		MakeRHITextureSRV("SpecularGITex", 7, lightingPixelStage),
 		MakeRHITextureSRV("RoughnessMetalicTex", 8, lightingPixelStage),
 		MakeRHITextureSRV("AmbientOcclusionTex", 14, lightingPixelStage),
+		MakeRHIBufferSRV("PointLightGridCounts", 15, lightingPixelStage),
+		MakeRHIBufferSRV("PointLightGridIndices", 16, lightingPixelStage),
 		MakeRHISampler("sampleWrap", 0, lightingPixelStage),
 	};
 
@@ -3177,17 +3180,26 @@ void Corona::LightingPass()
 		Param.AmbientGroundColorAndStrength = glm::vec4(glm::max(SkyColorBottom, glm::vec3(0.0f)), 0.0f);
 	}
 	Param.PointLightCount = 0;
+	const bool bPointLightGridReady = EnsurePointLightGridBuffers();
 	std::vector<const PointLightState*> pointLightCandidates;
 	// ReSTIR: use the shared stable-Id-ordered table so the chosen light index the
 	// shadow pass writes indexes the SAME light here (and matches the GI light mask).
 	// Option A keeps the full score-sorted candidate set (its channel map below sorts
 	// by distance and relies on that order).
-	if (bEnableReSTIRDirectShadow)
+	if (bEnableReSTIRDirectShadow && bPointLightGridReady)
+		BuildPointLightRenderCandidates(pointLightCandidates, MaxPointLights);
+	else if (bEnableReSTIRDirectShadow)
 		BuildReSTIRSharedPointLights(pointLightCandidates);
 	else
 		BuildPointLightRenderCandidates(pointLightCandidates);
-	const UINT32 maxLightingPointLights = bEnableReSTIRDirectShadow ? MaxDiffuseGIPointLights : MaxPointLights;
-	if (bEnableReSTIRDirectShadow && bReSTIRMaskLightCacheValid && !ReSTIRMaskLightCache.empty())
+	const UINT32 maxLightingPointLights = (bEnableReSTIRDirectShadow && bPointLightGridReady) ? MaxPointLights :
+		(bEnableReSTIRDirectShadow ? MaxDiffuseGIPointLights : MaxPointLights);
+	if (bEnableReSTIRDirectShadow && bPointLightGridReady)
+	{
+		for (UINT32 pointLightIndex = 0; pointLightIndex < PointLightGridPointLightCount && Param.PointLightCount < maxLightingPointLights; ++pointLightIndex)
+			Param.PointLights[Param.PointLightCount++] = PointLightGridPointLights[pointLightIndex];
+	}
+	else if (bEnableReSTIRDirectShadow && bReSTIRMaskLightCacheValid && !ReSTIRMaskLightCache.empty())
 	{
 		// Shade from the exact cached table the GI mask + ReSTIR shadow pass share, so
 		// the light index the shadow ray chose addresses the same light here (parity
@@ -3551,8 +3563,11 @@ void Corona::LightingPass()
 				GraphicsBindGroupEntry::TextureSRV("SpecularGITex", lightingSpecularTex),
 				GraphicsBindGroupEntry::TextureSRV("RoughnessMetalicTex", RoughnessMetalicBuffer.get()),
 				GraphicsBindGroupEntry::TextureSRV("AmbientOcclusionTex", ambientOcclusionTex),
+				GraphicsBindGroupEntry::BufferSRV("PointLightGridCounts", PointLightGridCountBuffer.get()),
+				GraphicsBindGroupEntry::BufferSRV("PointLightGridIndices", PointLightGridIndexBuffer.get()),
 				GraphicsBindGroupEntry::SamplerBinding("sampleWrap", samplerWrap.get()),
 				GraphicsBindGroupEntry::Constant(0, &Param, sizeof(Param)),
+				GraphicsBindGroupEntry::Constant(1, &PointLightGridParam, sizeof(PointLightGridParam)),
 			});
 	};
 	bindLightingGroup();

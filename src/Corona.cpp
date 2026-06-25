@@ -4590,6 +4590,27 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 			bEnableReSTIRDirectShadow = false;
 			continue;
 		}
+		if (arg == L"--no-directional-shadow" || arg == L"--disable-directional-shadow" || arg == L"--no-sun-shadow")
+		{
+			bDebugDisableDirectionalShadow = true;
+			continue;
+		}
+		if (arg == L"--no-point-light-shadow" || arg == L"--disable-point-light-shadow" || arg == L"--no-local-light-shadow")
+		{
+			bDebugDisablePointLightShadow = true;
+			continue;
+		}
+		if (arg == L"--no-direct-shadows" || arg == L"--disable-direct-shadows")
+		{
+			bDebugDisableDirectionalShadow = true;
+			bDebugDisablePointLightShadow = true;
+			continue;
+		}
+		if (arg == L"--no-shadow-rayquery" || arg == L"--rt-shadow-pipeline" || arg == L"--raytraced-shadow-pipeline")
+		{
+			bForceRaytracedShadowPipeline = true;
+			continue;
+		}
 		if (arg == L"--specular-gi" || arg == L"--enable-specular-gi" || arg == L"--indirect-specular" || arg == L"--enable-indirect-specular")
 		{
 			bEnableSpecularGI = true;
@@ -9297,7 +9318,8 @@ Corona::PointLightParam Corona::BuildPointLightParam(const PointLightState& poin
 
 	param.DirectionAndType = glm::vec4(direction, bSpot ? 1.0f : 0.0f);
 	param.SpotConeAndFlags =
-		glm::vec4(innerCos, outerCos, invConeDelta, pointLight.bCastShadow ? 1.0f : 0.0f);
+		glm::vec4(innerCos, outerCos, invConeDelta,
+			(pointLight.bCastShadow && !bDebugDisablePointLightShadow) ? 1.0f : 0.0f);
 	return param;
 }
 
@@ -9453,6 +9475,266 @@ UINT32 Corona::ComputePathTracingPointLightStateHash() const
 	for (UINT32 i = 0; i < activeCount; ++i)
 		mixBytes(&PathTracingPointLights[i], sizeof(PointLightParam));
 	return hash;
+}
+
+UINT32 Corona::ComputePointLightGridStateHash() const
+{
+	UINT32 hash = 2166136261u;
+	auto mixBytes = [&hash](const void* data, size_t size)
+	{
+		const auto* bytes = static_cast<const uint8_t*>(data);
+		for (size_t i = 0; i < size; ++i)
+		{
+			hash ^= static_cast<UINT32>(bytes[i]);
+			hash *= 16777619u;
+		}
+	};
+
+	const UINT32 resolution = PointLightGridResolution;
+	const UINT32 maxPerCell = PointLightGridMaxLightsPerCell;
+	const UINT32 activeCount = std::min(PointLightGridPointLightCount, MaxPointLights);
+	mixBytes(&resolution, sizeof(resolution));
+	mixBytes(&maxPerCell, sizeof(maxPerCell));
+	mixBytes(&PointLightGridParam, sizeof(PointLightGridParam));
+	mixBytes(&activeCount, sizeof(activeCount));
+	for (UINT32 i = 0; i < activeCount; ++i)
+		mixBytes(&PointLightGridPointLights[i], sizeof(PointLightParam));
+	return hash;
+}
+
+bool Corona::EnsurePointLightGridBuffers()
+{
+	if (!renderBackend)
+		return false;
+
+	auto mixHash = [](uint64_t& hash, uint64_t value)
+	{
+		hash ^= value + 0x9e3779b97f4a7c15ull + (hash << 6) + (hash >> 2);
+	};
+	auto mixFloat = [&](uint64_t& hash, float value)
+	{
+		uint32_t bits = 0;
+		std::memcpy(&bits, &value, sizeof(bits));
+		mixHash(hash, bits);
+	};
+	uint64_t sourceHash = 1469598103934665603ull;
+	mixHash(sourceHash, RenderWorld.PointLights.size());
+	mixHash(sourceHash, PointLightGridResolution);
+	mixHash(sourceHash, PointLightGridMaxLightsPerCell);
+	for (const PointLightState& pointLight : RenderWorld.PointLights)
+	{
+		mixHash(sourceHash, pointLight.Id);
+		mixHash(sourceHash, pointLight.bEnabled ? 1u : 0u);
+		mixFloat(sourceHash, pointLight.Position.x);
+		mixFloat(sourceHash, pointLight.Position.y);
+		mixFloat(sourceHash, pointLight.Position.z);
+		mixFloat(sourceHash, pointLight.Radius);
+		mixFloat(sourceHash, pointLight.Color.r);
+		mixFloat(sourceHash, pointLight.Color.g);
+		mixFloat(sourceHash, pointLight.Color.b);
+		mixFloat(sourceHash, pointLight.Intensity);
+		mixFloat(sourceHash, pointLight.Direction.x);
+		mixFloat(sourceHash, pointLight.Direction.y);
+		mixFloat(sourceHash, pointLight.Direction.z);
+		mixHash(sourceHash, static_cast<uint64_t>(pointLight.Type));
+		mixFloat(sourceHash, pointLight.InnerConeAngle);
+		mixFloat(sourceHash, pointLight.OuterConeAngle);
+		mixHash(sourceHash, pointLight.bCastShadow ? 1u : 0u);
+	}
+	if (PointLightGridPointLightBuffer &&
+		PointLightGridCountBuffer &&
+		PointLightGridIndexBuffer &&
+		PointLightGridSourceHash == sourceHash)
+	{
+		return true;
+	}
+
+	PointLightGridPointLights.fill(PointLightParam{});
+	PointLightGridPointLightCount = 0;
+	PointLightGridParam = PointLightGridParamCB{};
+
+	std::vector<const PointLightState*> pointLightCandidates;
+	BuildPointLightRenderCandidates(pointLightCandidates, MaxPointLights);
+	const UINT32 activeCount = std::min<UINT32>(
+		static_cast<UINT32>(pointLightCandidates.size()),
+		MaxPointLights);
+
+	glm::vec3 boundsMin(std::numeric_limits<float>::max());
+	glm::vec3 boundsMax(-std::numeric_limits<float>::max());
+	for (UINT32 i = 0; i < activeCount; ++i)
+	{
+		const PointLightState* light = pointLightCandidates[i];
+		if (!light)
+			continue;
+
+		PointLightParam param = BuildPointLightParam(*light);
+		PointLightGridPointLights[PointLightGridPointLightCount++] = param;
+
+		const glm::vec3 position(param.PositionAndRadius);
+		const float radius = std::max(param.PositionAndRadius.w, 0.01f);
+		if (!IsFiniteVec3(position) || !std::isfinite(radius))
+			continue;
+
+		const glm::vec3 radiusVec(radius);
+		boundsMin = glm::min(boundsMin, position - radiusVec);
+		boundsMax = glm::max(boundsMax, position + radiusVec);
+	}
+
+	const bool bHasLights = PointLightGridPointLightCount > 0 &&
+		IsFiniteVec3(boundsMin) &&
+		IsFiniteVec3(boundsMax);
+	glm::vec3 invExtent(0.0f);
+	if (bHasLights)
+	{
+		glm::vec3 extent = boundsMax - boundsMin;
+		for (int axis = 0; axis < 3; ++axis)
+		{
+			if (!std::isfinite(extent[axis]) || extent[axis] < 0.01f)
+			{
+				const float center = 0.5f * (boundsMin[axis] + boundsMax[axis]);
+				boundsMin[axis] = center - 0.5f;
+				boundsMax[axis] = center + 0.5f;
+				extent[axis] = 1.0f;
+			}
+			invExtent[axis] = 1.0f / extent[axis];
+		}
+
+		PointLightGridParam.MinAndEnabled = glm::vec4(boundsMin, 1.0f);
+		PointLightGridParam.InvExtentAndResolution =
+			glm::vec4(invExtent, static_cast<float>(PointLightGridResolution));
+		PointLightGridParam.Counts = glm::uvec4(
+			PointLightGridPointLightCount,
+			PointLightGridResolution,
+			PointLightGridMaxLightsPerCell,
+			0u);
+	}
+	else
+	{
+		PointLightGridParam.MinAndEnabled = glm::vec4(0.0f);
+		PointLightGridParam.InvExtentAndResolution =
+			glm::vec4(0.0f, 0.0f, 0.0f, static_cast<float>(PointLightGridResolution));
+		PointLightGridParam.Counts = glm::uvec4(0u, PointLightGridResolution, PointLightGridMaxLightsPerCell, 0u);
+	}
+
+	std::vector<uint32_t> gridCounts;
+	std::vector<uint32_t> gridIndices;
+	if (bHasLights)
+	{
+		gridCounts.assign(PointLightGridCellCount, 0u);
+		gridIndices.assign(
+			static_cast<size_t>(PointLightGridCellCount) * PointLightGridMaxLightsPerCell,
+			0u);
+
+		auto toCell = [](float u) -> UINT32
+		{
+			u = std::clamp(u, 0.0f, 0.999999f);
+			return static_cast<UINT32>(u * PointLightGridResolution);
+		};
+		auto component = [](const glm::vec3& value, int axis) -> float
+		{
+			return axis == 0 ? value.x : (axis == 1 ? value.y : value.z);
+		};
+		const int projectedAxes[PointLightGridAxisCount][2] =
+		{
+			{ 1, 2 }, // YZ
+			{ 0, 2 }, // XZ
+			{ 0, 1 }, // XY
+		};
+
+		for (UINT32 lightIndex = 0; lightIndex < PointLightGridPointLightCount; ++lightIndex)
+		{
+			const PointLightParam& light = PointLightGridPointLights[lightIndex];
+			const glm::vec3 center(light.PositionAndRadius);
+			const float radius = std::max(light.PositionAndRadius.w, 0.01f);
+			const glm::vec3 lightMin = center - glm::vec3(radius);
+			const glm::vec3 lightMax = center + glm::vec3(radius);
+
+			for (UINT32 axis = 0; axis < PointLightGridAxisCount; ++axis)
+			{
+				const int axisU = projectedAxes[axis][0];
+				const int axisV = projectedAxes[axis][1];
+				const UINT32 minU = toCell((component(lightMin, axisU) - component(boundsMin, axisU)) * component(invExtent, axisU));
+				const UINT32 maxU = toCell((component(lightMax, axisU) - component(boundsMin, axisU)) * component(invExtent, axisU));
+				const UINT32 minV = toCell((component(lightMin, axisV) - component(boundsMin, axisV)) * component(invExtent, axisV));
+				const UINT32 maxV = toCell((component(lightMax, axisV) - component(boundsMin, axisV)) * component(invExtent, axisV));
+
+				for (UINT32 y = minV; y <= maxV; ++y)
+				{
+					for (UINT32 x = minU; x <= maxU; ++x)
+					{
+						const UINT32 cellIndex =
+							axis * PointLightGridResolution * PointLightGridResolution +
+							y * PointLightGridResolution +
+							x;
+						uint32_t& count = gridCounts[cellIndex];
+						if (count >= PointLightGridMaxLightsPerCell)
+							continue;
+						gridIndices[static_cast<size_t>(cellIndex) * PointLightGridMaxLightsPerCell + count] = lightIndex;
+						++count;
+					}
+				}
+			}
+		}
+	}
+	else
+	{
+		gridCounts.assign(1u, 0u);
+		gridIndices.assign(1u, 0u);
+	}
+
+	const UINT32 stateHash = ComputePointLightGridStateHash();
+	if (PointLightGridPointLightBuffer &&
+		PointLightGridCountBuffer &&
+		PointLightGridIndexBuffer &&
+		PointLightGridBufferHash == stateHash)
+	{
+		PointLightGridSourceHash = sourceHash;
+		return true;
+	}
+
+	auto createStructuredBuffer = [&](uint32_t numElements, uint32_t elementSize, const void* initialData)
+	{
+		BufferCreateDesc desc = {};
+		desc.NumElements = numElements;
+		desc.ElementSize = elementSize;
+		desc.InitialState = EInitialResourceState::ShaderRead;
+		desc.InitialData = const_cast<void*>(initialData);
+		desc.Shape = EBufferShape::Structured;
+		desc.Access = EBufferAccess::GpuOnly;
+		desc.AllocationPolicy = EBufferAllocationPolicy::Suballocated;
+		return renderBackend->CreateBuffer(desc);
+	};
+
+	PointLightGridPointLightBuffer = createStructuredBuffer(
+		MaxPointLights,
+		sizeof(PointLightParam),
+		PointLightGridPointLights.data());
+	PointLightGridCountBuffer = createStructuredBuffer(
+		static_cast<uint32_t>(gridCounts.size()),
+		sizeof(uint32_t),
+		gridCounts.data());
+	PointLightGridIndexBuffer = createStructuredBuffer(
+		static_cast<uint32_t>(gridIndices.size()),
+		sizeof(uint32_t),
+		gridIndices.data());
+
+	if (!PointLightGridPointLightBuffer || !PointLightGridCountBuffer || !PointLightGridIndexBuffer)
+	{
+		PointLightGridBufferHash = 0xFFFFFFFFu;
+		PointLightGridSourceHash = 0;
+		PointLightGridParam.MinAndEnabled.w = 0.0f;
+		AppendCpuRuntimeTrace(L"[PointLightGrid] failed to upload buffers");
+		return false;
+	}
+
+	PointLightGridBufferHash = stateHash;
+	PointLightGridSourceHash = sourceHash;
+	AppendCpuRuntimeTrace(
+		L"[PointLightGrid] uploaded, lights=" + std::to_wstring(PointLightGridPointLightCount) +
+		L", resolution=" + std::to_wstring(PointLightGridResolution) +
+		L", maxPerCell=" + std::to_wstring(PointLightGridMaxLightsPerCell) +
+		L", cells=" + std::to_wstring(bHasLights ? PointLightGridCellCount : 1u));
+	return true;
 }
 
 

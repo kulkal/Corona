@@ -50,7 +50,11 @@ shared_ptr<RTPipelineStateObject> Corona::CreateRaytracingSimpleGIPSO(bool bUseS
 		TEMP_PSO_RT_GI->BindSRV("global", MakeRHIAccelerationStructureSRV("gRtScene", 0, rayGenStage));
 		TEMP_PSO_RT_GI->BindSRV("global", MakeRHITextureSRV("DepthTex", 1, rayGenStage));
 		TEMP_PSO_RT_GI->BindSRV("global", MakeRHITextureSRV("WorldNormalTex", 2, rayGenStage));
+		TEMP_PSO_RT_GI->BindSRV("global", MakeRHIBufferSRV("PointLightBuffer", 4, rayGenStage));
+		TEMP_PSO_RT_GI->BindSRV("global", MakeRHIBufferSRV("PointLightGridCounts", 5, rayGenStage));
+		TEMP_PSO_RT_GI->BindSRV("global", MakeRHIBufferSRV("PointLightGridIndices", 6, rayGenStage));
 		TEMP_PSO_RT_GI->BindCBV("global", MakeRHICBV("ViewParameter", 0, sizeof(RTGIViewParam), rayGenStage));
+		TEMP_PSO_RT_GI->BindCBV("global", MakeRHICBV("PointLightGridCB", 1, sizeof(PointLightGridParamCB), rayGenStage));
 		TEMP_PSO_RT_GI->BindSampler("global", MakeRHISampler("sampleWrap", 0, rayGenStage | closestHitStage));
 		TEMP_PSO_RT_GI->BindSRV("global", MakeRHITextureSRV("RayNoiseBlueNoiseSource", 7, rayGenStage));
 		BindRTBindlessMaterialSchema(*TEMP_PSO_RT_GI, closestHitStage);
@@ -211,6 +215,11 @@ void Corona::RaytraceGIPass()
 		AddRtPassRecordPhaseTiming(ERtProfilePass::SimpleGI, ERtRecordPhase::Prepare, prepareStart, CpuClock::now());
 		return;
 	}
+	if (!EnsurePointLightGridBuffers())
+	{
+		AddRtPassRecordPhaseTiming(ERtProfilePass::SimpleGI, ERtRecordPhase::Prepare, prepareStart, CpuClock::now());
+		return;
+	}
 	AddRtPassRecordPhaseTiming(ERtProfilePass::SimpleGI, ERtRecordPhase::Prepare, prepareStart, CpuClock::now());
 
 	const auto buildGraphStart = CpuClock::now();
@@ -221,6 +230,9 @@ void Corona::RaytraceGIPass()
 	RGTextureRef normalInput = rg.ImportTexture("SimpleGI.Normal", NormalBuffers[ColorBufferWriteIndex].get(), EResourceState::ShaderRead);
 	RGTextureRef blueNoiseInput = rg.ImportTexture("SimpleGI.BlueNoise", BlueNoiseTex.get(), EResourceState::ShaderRead);
 	RGBufferRef rtMaterials = rg.ImportBuffer("SimpleGI.RtMaterials", RTMaterialRecordBuffer.get(), EResourceState::ShaderRead);
+	RGBufferRef pointLights = rg.ImportBuffer("SimpleGI.PointLights", PointLightGridPointLightBuffer.get(), EResourceState::ShaderRead);
+	RGBufferRef pointLightGridCounts = rg.ImportBuffer("SimpleGI.PointLightGridCounts", PointLightGridCountBuffer.get(), EResourceState::ShaderRead);
+	RGBufferRef pointLightGridIndices = rg.ImportBuffer("SimpleGI.PointLightGridIndices", PointLightGridIndexBuffer.get(), EResourceState::ShaderRead);
 
 	rg.ExportTexture(giSHOutput, EResourceState::ShaderRead);
 	rg.ExportTexture(giColorOutput, EResourceState::ShaderRead);
@@ -234,7 +246,10 @@ void Corona::RaytraceGIPass()
 				.ReadTexture(depthInput, EResourceState::ShaderRead)
 				.ReadTexture(normalInput, EResourceState::ShaderRead)
 				.ReadTexture(blueNoiseInput, EResourceState::ShaderRead)
-				.ReadBuffer(rtMaterials, EResourceState::ShaderRead);
+				.ReadBuffer(rtMaterials, EResourceState::ShaderRead)
+				.ReadBuffer(pointLights, EResourceState::ShaderRead)
+				.ReadBuffer(pointLightGridCounts, EResourceState::ShaderRead)
+				.ReadBuffer(pointLightGridIndices, EResourceState::ShaderRead);
 		},
 		[&, pso](RGContext& ctx)
 		{
@@ -244,6 +259,9 @@ void Corona::RaytraceGIPass()
 			Texture* normalTexture = ctx.GetTexture(normalInput);
 			Texture* blueNoiseTexture = ctx.GetTexture(blueNoiseInput);
 			Buffer* materialBuffer = ctx.GetBuffer(rtMaterials);
+			Buffer* pointLightBuffer = ctx.GetBuffer(pointLights);
+			Buffer* pointLightGridCountBuffer = ctx.GetBuffer(pointLightGridCounts);
+			Buffer* pointLightGridIndexBuffer = ctx.GetBuffer(pointLightGridIndices);
 
 			RTPassBuilder pass(*this, pso, ERtProfilePass::SimpleGI);
 			pass.BeginScene()
@@ -254,6 +272,10 @@ void Corona::RaytraceGIPass()
 				.SetTextureSRV("global", "WorldNormalTex", normalTexture)
 				.SetTextureSRV("global", "RayNoiseBlueNoiseSource", blueNoiseTexture)
 				.SetCBVValue("global", "ViewParameter", &RTGIViewParam)
+				.SetCBVValue("global", "PointLightGridCB", &PointLightGridParam)
+				.SetBufferSRV("global", "PointLightBuffer", pointLightBuffer)
+				.SetBufferSRV("global", "PointLightGridCounts", pointLightGridCountBuffer)
+				.SetBufferSRV("global", "PointLightGridIndices", pointLightGridIndexBuffer)
 				.SetSampler("global", "sampleWrap", samplerWrap.get());
 			pass.SetBindlessTextureTable("global", "MaterialTextures")
 				.SetBufferSRV("global", "RtMaterials", materialBuffer);

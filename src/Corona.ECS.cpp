@@ -81,7 +81,8 @@ CoronaECS::Entity Corona::CreateSceneObjectEntity(const SceneObject& object)
 	if (!object.ScenePtr || object.Handle == InvalidSceneObjectHandle)
 		return CoronaECS::Entity();
 
-	CoronaECS::Entity entity = EntityWorld.CreateEntity("SceneObject_" + std::to_string(object.Handle));
+	CoronaECS::Entity entity = EntityWorld.CreateEntity(
+		object.DebugName.empty() ? ("SceneObject_" + std::to_string(object.Handle)) : object.DebugName);
 
 	EntityWorld.AddTransform(entity, CoronaECS::TransformComponent::FromMatrix(object.Transform));
 

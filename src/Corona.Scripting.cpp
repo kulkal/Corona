@@ -5259,6 +5259,11 @@ bool Corona::SetSpinePoseForScript(
 		objectIt->bVisible = true;
 		objectIt->bRayTracing = bRayTracing;
 		objectIt->bPhysicsQuery = false;
+		if (objectIt->DebugName.empty())
+		{
+			if (const std::string* entityName = EntityWorld.GetName(entity))
+				objectIt->DebugName = *entityName;
+		}
 		UpdateSceneObjectEntity(*objectIt);
 		MarkSceneObjectRenderDirty(objectHandle, dirtyBits);
 		if (bPhysicsQueryChanged)
@@ -5340,6 +5345,11 @@ bool Corona::AddMeshComponentForScript(
 		objectIt->bPhysicsQuery = bPhysicsQuery;
 		objectIt->PhysicsCollisionShape = sceneIt->second.PhysicsCollisionShape;
 		objectIt->PhysicsBoxHalfExtent = sceneIt->second.PhysicsBoxHalfExtent;
+		if (objectIt->DebugName.empty())
+		{
+			if (const std::string* entityName = EntityWorld.GetName(entity))
+				objectIt->DebugName = *entityName;
+		}
 		UpdateSceneObjectEntity(*objectIt);
 		MarkSceneObjectRenderDirty(objectHandle, kSceneObjectDirtyAll);
 		MarkCpuPhysicsSceneDirty();

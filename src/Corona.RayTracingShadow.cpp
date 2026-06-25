@@ -54,8 +54,12 @@ void Corona::InitRaytracingShadowPass()
 		TEMP_PSO_RT_SHADOW->BindSRV("global", MakeRHITextureSRV("WorldNormalTexPrev", 13, rayGenStage));
 		TEMP_PSO_RT_SHADOW->BindSRV("global", MakeRHIBufferSRV("SpatialLightCellKeys", 14, rayGenStage, RHIBufferViewKind::Raw));
 		TEMP_PSO_RT_SHADOW->BindSRV("global", MakeRHIBufferSRV("SpatialLightCellMask", 15, rayGenStage, RHIBufferViewKind::Raw));
+		TEMP_PSO_RT_SHADOW->BindSRV("global", MakeRHIBufferSRV("PointLightBuffer", 16, rayGenStage));
+		TEMP_PSO_RT_SHADOW->BindSRV("global", MakeRHIBufferSRV("PointLightGridCounts", 17, rayGenStage));
+		TEMP_PSO_RT_SHADOW->BindSRV("global", MakeRHIBufferSRV("PointLightGridIndices", 18, rayGenStage));
 
 		TEMP_PSO_RT_SHADOW->BindCBV("global", MakeRHICBV("ViewParameter", 0, sizeof(RTShadowViewParamCB), rayGenStage));
+		TEMP_PSO_RT_SHADOW->BindCBV("global", MakeRHICBV("PointLightGridCB", 1, sizeof(PointLightGridParamCB), rayGenStage));
 		TEMP_PSO_RT_SHADOW->BindSampler("global", MakeRHISampler("sampleWrap", 0, rayGenStage | anyHitStage));
 		BindRTBindlessMaterialSchema(*TEMP_PSO_RT_SHADOW, anyHitStage);
 		BindRTBindlessGeometrySchema(*TEMP_PSO_RT_SHADOW, anyHitStage);
@@ -95,7 +99,11 @@ void Corona::InitShadowRayQueryPass()
 	tempPSO->BindSRV(MakeRHITextureSRV("WorldNormalTexPrev", 13, computeStage));
 	tempPSO->BindSRV(MakeRHIBufferSRV("SpatialLightCellKeys", 14, computeStage, RHIBufferViewKind::Raw));
 	tempPSO->BindSRV(MakeRHIBufferSRV("SpatialLightCellMask", 15, computeStage, RHIBufferViewKind::Raw));
+	tempPSO->BindSRV(MakeRHIBufferSRV("PointLightBuffer", 16, computeStage));
+	tempPSO->BindSRV(MakeRHIBufferSRV("PointLightGridCounts", 17, computeStage));
+	tempPSO->BindSRV(MakeRHIBufferSRV("PointLightGridIndices", 18, computeStage));
 	tempPSO->BindCBV(MakeRHICBV("ViewParameter", 0, sizeof(RTShadowViewParamCB), computeStage));
+	tempPSO->BindCBV(MakeRHICBV("PointLightGridCB", 1, sizeof(PointLightGridParamCB), computeStage));
 	tempPSO->BindSampler(MakeRHISampler("sampleWrap", 0, computeStage));
 
 	const bool ok = tempPSO->InitCSWithInlineRT(
@@ -134,11 +142,13 @@ void Corona::InitShadowSpatialReusePass()
 
 void Corona::RaytraceShadowPass()
 {
-	const bool bUseRayQueryShadow = PSO_SHADOW_RAYQUERY != nullptr;
+	const bool bUseRayQueryShadow = PSO_SHADOW_RAYQUERY != nullptr && !bForceRaytracedShadowPipeline;
 	if (!ShadowBuffer || !BlueNoiseTex || !TLAS || (!bUseRayQueryShadow && !PSO_RT_SHADOW) || !UnjitteredDepthBuffers[ColorBufferWriteIndex] || !NormalBuffers[ColorBufferWriteIndex] || !GeomNormalBuffers[ColorBufferWriteIndex])
 		return;
 
 	if (!bUseRayQueryShadow && !EnsureRTMaterialRecordBuffer())
+		return;
+	if (!EnsurePointLightGridBuffers())
 		return;
 
 	RTShadowViewParam.ViewMatrix = glm::transpose(ViewMat);
@@ -146,7 +156,9 @@ void Corona::RaytraceShadowPass()
 	RTShadowViewParam.ProjMatrix = glm::transpose(UnjitteredProjMat);
 	RTShadowViewParam.InvProjMatrix = glm::transpose(UnjitteredInvProjMat);
 	RTShadowViewParam.ProjectionParams = FrameProjectionParams;
-	RTShadowViewParam.LightDir = glm::vec4(RenderFrameNormalizedLightDir, RenderFrameDirectionalLightCastShadow ? 1.0f : 0.0f);
+	RTShadowViewParam.LightDir = glm::vec4(
+		RenderFrameNormalizedLightDir,
+		(RenderFrameDirectionalLightCastShadow && !bDebugDisableDirectionalShadow) ? 1.0f : 0.0f);
 	RTShadowViewParam.ShadowLightRadius = std::clamp(RTShadowViewParam.ShadowLightRadius, 0.0f, 0.03f);
 	RTShadowViewParam.ShadowSampleCount = std::clamp(RTShadowViewParam.ShadowSampleCount, 1u, 16u);
 	RTShadowViewParam.FrameCounter = RenderFrameIndex;
@@ -229,7 +241,7 @@ void Corona::RaytraceShadowPass()
 				if (shadowedCount >= MaxDiffuseGIPointLights)
 					break;
 				const float radius = std::max(p.PositionAndRadius.w, 0.01f);
-				const bool castsShadow = p.SpotConeAndFlags.w > 0.5f;
+				const bool castsShadow = !bDebugDisablePointLightShadow && p.SpotConeAndFlags.w > 0.5f;
 				const float luma =
 					std::max(0.0f, 0.2126f * p.ColorAndIntensity.x + 0.7152f * p.ColorAndIntensity.y + 0.0722f * p.ColorAndIntensity.z) *
 					std::max(0.0f, p.ColorAndIntensity.w);
@@ -253,7 +265,7 @@ void Corona::RaytraceShadowPass()
 				RTShadowViewParam.ShadowedPointLights[shadowedCount] =
 					glm::vec4(pl.Position, radius);
 				RTShadowViewParam.ShadowedPointLightWeights[shadowedCount] =
-					glm::vec4(pl.bCastShadow ? computeLuma(pl) : 0.0f, 0.0f, 0.0f, 0.0f);
+					glm::vec4((pl.bCastShadow && !bDebugDisablePointLightShadow) ? computeLuma(pl) : 0.0f, 0.0f, 0.0f, 0.0f);
 				++shadowedCount;
 			}
 		}
@@ -275,7 +287,7 @@ void Corona::RaytraceShadowPass()
 			if (!plPtr)
 				continue;
 			const PointLightState& pl = *plPtr;
-			if (!pl.bCastShadow)
+			if (!pl.bCastShadow || bDebugDisablePointLightShadow)
 				continue;
 			const glm::vec3 toLight = pl.Position - camPos;
 			candidates.push_back({ i, glm::dot(toLight, toLight) });
@@ -373,6 +385,15 @@ void Corona::RaytraceShadowPass()
 	RGBufferRef spatialLightCellMaskInput = spatialLightCellMask
 		? rg.ImportBuffer("Shadow.SpatialLightCellMask", spatialLightCellMask, EResourceState::ShaderRead)
 		: RGBufferRef{};
+	RGBufferRef pointLightsInput = PointLightGridPointLightBuffer
+		? rg.ImportBuffer("Shadow.PointLights", PointLightGridPointLightBuffer.get(), EResourceState::ShaderRead)
+		: RGBufferRef{};
+	RGBufferRef pointLightGridCountsInput = PointLightGridCountBuffer
+		? rg.ImportBuffer("Shadow.PointLightGridCounts", PointLightGridCountBuffer.get(), EResourceState::ShaderRead)
+		: RGBufferRef{};
+	RGBufferRef pointLightGridIndicesInput = PointLightGridIndexBuffer
+		? rg.ImportBuffer("Shadow.PointLightGridIndices", PointLightGridIndexBuffer.get(), EResourceState::ShaderRead)
+		: RGBufferRef{};
 	RGBufferRef rtMaterialsInput = (!bUseRayQueryShadow && RTMaterialRecordBuffer)
 		? rg.ImportBuffer("Shadow.RtMaterials", RTMaterialRecordBuffer.get(), EResourceState::ShaderRead)
 		: RGBufferRef{};
@@ -413,6 +434,12 @@ void Corona::RaytraceShadowPass()
 				builder.ReadBuffer(spatialLightCellKeysInput, EResourceState::ShaderRead);
 			if (spatialLightCellMaskInput.IsValid())
 				builder.ReadBuffer(spatialLightCellMaskInput, EResourceState::ShaderRead);
+			if (pointLightsInput.IsValid())
+				builder.ReadBuffer(pointLightsInput, EResourceState::ShaderRead);
+			if (pointLightGridCountsInput.IsValid())
+				builder.ReadBuffer(pointLightGridCountsInput, EResourceState::ShaderRead);
+			if (pointLightGridIndicesInput.IsValid())
+				builder.ReadBuffer(pointLightGridIndicesInput, EResourceState::ShaderRead);
 			if (rtMaterialsInput.IsValid())
 				builder.ReadBuffer(rtMaterialsInput, EResourceState::ShaderRead);
 		},
@@ -441,8 +468,12 @@ void Corona::RaytraceShadowPass()
 				PSO_SHADOW_RAYQUERY->SetTextureSRV("WorldNormalTexPrev", prevNormalInput.Index == normalInput.Index ? ctx.GetTexture(normalInput) : ctx.GetTexture(prevNormalInput));
 				PSO_SHADOW_RAYQUERY->SetBufferSRV("SpatialLightCellKeys", spatialLightCellKeysInput.IsValid() ? ctx.GetBuffer(spatialLightCellKeysInput) : nullptr);
 				PSO_SHADOW_RAYQUERY->SetBufferSRV("SpatialLightCellMask", spatialLightCellMaskInput.IsValid() ? ctx.GetBuffer(spatialLightCellMaskInput) : nullptr);
+				PSO_SHADOW_RAYQUERY->SetBufferSRV("PointLightBuffer", pointLightsInput.IsValid() ? ctx.GetBuffer(pointLightsInput) : nullptr);
+				PSO_SHADOW_RAYQUERY->SetBufferSRV("PointLightGridCounts", pointLightGridCountsInput.IsValid() ? ctx.GetBuffer(pointLightGridCountsInput) : nullptr);
+				PSO_SHADOW_RAYQUERY->SetBufferSRV("PointLightGridIndices", pointLightGridIndicesInput.IsValid() ? ctx.GetBuffer(pointLightGridIndicesInput) : nullptr);
 				PSO_SHADOW_RAYQUERY->SetTextureSRV("VelocityTex", velocityInput.IsValid() ? ctx.GetTexture(velocityInput) : nullptr);
 				PSO_SHADOW_RAYQUERY->SetCBVValue("ViewParameter", &RTShadowViewParam);
+				PSO_SHADOW_RAYQUERY->SetCBVValue("PointLightGridCB", &PointLightGridParam);
 				PSO_SHADOW_RAYQUERY->SetSampler("sampleWrap", samplerWrap.get());
 				AddRtPassRecordPhaseTiming(ERtProfilePass::Shadow, ERtRecordPhase::BindResources, bindStart, CpuClock::now());
 
@@ -470,8 +501,12 @@ void Corona::RaytraceShadowPass()
 				.SetTextureSRV("global", "WorldNormalTexPrev", prevNormalInput.Index == normalInput.Index ? ctx.GetTexture(normalInput) : ctx.GetTexture(prevNormalInput))
 				.SetBufferSRV("global", "SpatialLightCellKeys", spatialLightCellKeysInput.IsValid() ? ctx.GetBuffer(spatialLightCellKeysInput) : nullptr)
 				.SetBufferSRV("global", "SpatialLightCellMask", spatialLightCellMaskInput.IsValid() ? ctx.GetBuffer(spatialLightCellMaskInput) : nullptr)
+				.SetBufferSRV("global", "PointLightBuffer", pointLightsInput.IsValid() ? ctx.GetBuffer(pointLightsInput) : nullptr)
+				.SetBufferSRV("global", "PointLightGridCounts", pointLightGridCountsInput.IsValid() ? ctx.GetBuffer(pointLightGridCountsInput) : nullptr)
+				.SetBufferSRV("global", "PointLightGridIndices", pointLightGridIndicesInput.IsValid() ? ctx.GetBuffer(pointLightGridIndicesInput) : nullptr)
 				.SetTextureSRV("global", "VelocityTex", velocityInput.IsValid() ? ctx.GetTexture(velocityInput) : nullptr)
 				.SetCBVValue("global", "ViewParameter", &RTShadowViewParam)
+				.SetCBVValue("global", "PointLightGridCB", &PointLightGridParam)
 				.SetSampler("global", "sampleWrap", samplerWrap.get());
 			pass.SetBindlessTextureTable("global", "MaterialTextures")
 				.SetBufferSRV("global", "RtMaterials", ctx.GetBuffer(rtMaterialsInput));

@@ -32,6 +32,19 @@ Texture2D WorldNormalTexPrev : register(t13);
 StructuredBuffer<uint> SpatialLightCellKeys : register(t14);
 StructuredBuffer<uint> SpatialLightCellMask : register(t15);
 
+struct PointLightParam
+{
+    float4 PositionAndRadius;
+    float4 ColorAndIntensity;
+    float4 DirectionAndType;
+    float4 SpotConeAndFlags;
+};
+
+StructuredBuffer<PointLightParam> PointLightBuffer : register(t16);
+#define POINT_LIGHT_GRID_COUNTS_REGISTER t17
+#define POINT_LIGHT_GRID_INDICES_REGISTER t18
+#include "PointLightGrid.hlsli"
+
 
 cbuffer ViewParameter : register(b0)
 {
@@ -94,13 +107,14 @@ static const uint RT_SHADOW_RAY_FLAGS =
     RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH |
     RAY_FLAG_SKIP_CLOSEST_HIT_SHADER |
     RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES;
+static const uint RT_SHADOW_RAY_MASK = 0x02u;
 
 bool TraceShadowOccluded(RayDesc ray)
 {
 #ifdef RT_SHADOW_INLINE_RAYQUERY
     RayQuery<RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH |
              RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q;
-    q.TraceRayInline(gRtScene, RAY_FLAG_NONE, 0xFFu, ray);
+    q.TraceRayInline(gRtScene, RAY_FLAG_NONE, RT_SHADOW_RAY_MASK, ray);
     q.Proceed();
     return q.CommittedStatus() != COMMITTED_NOTHING;
 #else
@@ -109,7 +123,7 @@ bool TraceShadowOccluded(RayDesc ray)
     payload._padding = 0.0f.xxx;
     TraceRay(gRtScene,
         RT_SHADOW_RAY_FLAGS,
-        0xFF, 0, 0, 0, ray, payload);
+        RT_SHADOW_RAY_MASK, 0, 0, 0, ray, payload);
     return payload.bHit != 0u;
 #endif
 }
@@ -185,6 +199,126 @@ uint LoadSpatialLightMask(float3 worldPos)
     return SpatialLightCellMask[slot] & allMask;
 }
 
+bool LoadReSTIRPointLight(uint lightIndex, bool usePointLightGrid, out float3 position, out float radius, out float luma)
+{
+    position = 0.0f.xxx;
+    radius = 0.0f;
+    luma = 0.0f;
+
+    if (usePointLightGrid)
+    {
+        if (lightIndex >= PointLightGridGetPointLightCount())
+            return false;
+        PointLightParam light = PointLightBuffer[lightIndex];
+        if (light.SpotConeAndFlags.w <= 0.5f)
+            return false;
+        position = light.PositionAndRadius.xyz;
+        radius = max(light.PositionAndRadius.w, 0.01f);
+        luma =
+            max(0.0f, 0.2126f * light.ColorAndIntensity.x + 0.7152f * light.ColorAndIntensity.y + 0.0722f * light.ColorAndIntensity.z) *
+            max(0.0f, light.ColorAndIntensity.w);
+        return luma > 0.0f;
+    }
+
+    if (lightIndex >= ShadowedPointLightCount || lightIndex >= (uint)MAX_SHADOWED_PT_LIGHTS)
+        return false;
+    position = ShadowedPointLights[lightIndex].xyz;
+    radius = max(ShadowedPointLights[lightIndex].w, 0.01f);
+    luma = ShadowedPointLightWeights[lightIndex].x;
+    return luma > 0.0f;
+}
+
+bool LoadDirectPointLightCandidate(
+    uint lightIndex,
+    bool usePointLightGrid,
+    out float3 position,
+    out float radius,
+    out float luma,
+    out bool castsShadow)
+{
+    position = 0.0f.xxx;
+    radius = 0.0f;
+    luma = 0.0f;
+    castsShadow = true;
+
+    if (usePointLightGrid)
+    {
+        if (lightIndex >= PointLightGridGetPointLightCount())
+            return false;
+        PointLightParam light = PointLightBuffer[lightIndex];
+        position = light.PositionAndRadius.xyz;
+        radius = max(light.PositionAndRadius.w, 0.01f);
+        luma =
+            max(0.0f, 0.2126f * light.ColorAndIntensity.x + 0.7152f * light.ColorAndIntensity.y + 0.0722f * light.ColorAndIntensity.z) *
+            max(0.0f, light.ColorAndIntensity.w);
+        castsShadow = light.SpotConeAndFlags.w > 0.5f;
+        return luma > 0.0f;
+    }
+
+    if (!LoadReSTIRPointLight(lightIndex, false, position, radius, luma))
+        return false;
+    castsShadow = true;
+    return true;
+}
+
+bool ReSTIRLightAllowed(
+    uint lightIndex,
+    bool usePointLightGrid,
+    uint gridCellIndex,
+    uint gridCandidateCount,
+    uint spatialLightMask)
+{
+    if (usePointLightGrid)
+        return PointLightGridCellContainsLightIndex(gridCellIndex, gridCandidateCount, lightIndex);
+    return lightIndex < 32u && (spatialLightMask & (1u << lightIndex)) != 0u;
+}
+
+float EvaluatePointLightDistanceAttenuation(float distanceSq, float radius)
+{
+    radius = max(radius, 0.01f);
+    const float invRadiusSq = rcp(radius * radius);
+    const float normalizedDistSq = saturate(distanceSq * invRadiusSq);
+    float rangeAttenuation = saturate(1.0f - normalizedDistSq * normalizedDistSq);
+    rangeAttenuation *= rangeAttenuation;
+    const float inverseSquareAttenuation = rcp(max(1.0f, distanceSq * 0.0001f));
+    return rangeAttenuation * inverseSquareAttenuation;
+}
+
+float EvaluateReSTIRPointLightTargetPdf(float luma, float distanceSq, float radius, float nDotL)
+{
+    const float spatialTerm = max(0.0f, EvaluatePointLightDistanceAttenuation(distanceSq, radius) * saturate(nDotL));
+    return max(0.0f, luma) * spatialTerm;
+}
+
+float ComputePointLightEndpointBias(float lightRadius, float normalBias)
+{
+    // Light proxy meshes are filtered from the shadow mask on the host side,
+    // so this endpoint guard can stay narrow. A wide guard hides legitimate
+    // blockers near the light and shows up as direct-light leaks.
+    return max(normalBias * 0.5f, clamp(lightRadius * 0.005f, 0.10f, 20.0f));
+}
+
+float ReconstructLinearViewDepth(float2 sampleUv, float deviceDepth)
+{
+    float2 screenPosition = sampleUv * 2.0f - 1.0f;
+    screenPosition.y = -screenPosition.y;
+    return abs(GetViewPosition(deviceDepth, screenPosition, InvProjMatrix).z);
+}
+
+bool ReSTIRSurfaceCompatible(float2 sampleUv, float sampleDepth, float3 sampleNormal, float currentLinearDepth, float3 currentNormal)
+{
+    if (sampleDepth >= 0.999999f)
+        return false;
+
+    const float sampleLinearDepth = ReconstructLinearViewDepth(sampleUv, sampleDepth);
+    const float depthTolerance = max(2.0f, currentLinearDepth * 0.01f);
+    if (abs(sampleLinearDepth - currentLinearDepth) > depthTolerance)
+        return false;
+
+    const float3 n = CommonSafeNormalize(sampleNormal, currentNormal);
+    return dot(n, currentNormal) > 0.85f;
+}
+
 float3 offset_ray(float3 p, float3 n)
 {
     return p + n * (1.0f / 256.0f);
@@ -203,8 +337,9 @@ void ExecuteShadowPass(uint2 pixelPos, uint2 launchDim)
 
 	float2 screenPosition = uv * 2.0f - 1.0f;
 	screenPosition.y = -screenPosition.y;
-    float3 viewPosition = GetViewPosition(deviceDepth, screenPosition, InvProjMatrix);
+	float3 viewPosition = GetViewPosition(deviceDepth, screenPosition, InvProjMatrix);
 	float3 worldPos = mul(float4(viewPosition, 1.0f), InvViewMatrix).xyz;
+    const float currentLinearDepth = abs(viewPosition.z);
 
 	float3 geoNormal = CommonSafeNormalize(GeoNormalTex.SampleLevel(sampleWrap, uv, 0).xyz, float3(0.0f, 1.0f, 0.0f));
 	float3 worldNormal = CommonSafeNormalize(WorldNormalTex.SampleLevel(sampleWrap, uv, 0).xyz, geoNormal);
@@ -286,8 +421,16 @@ void ExecuteShadowPass(uint2 pixelPos, uint2 launchDim)
                 _ray.Origin = worldPos + _bias * normalBias;               \
                 _ray.Direction = _lightDir;                                \
                 _ray.TMin = max(0.05f, normalBias * 0.25f);                \
-                _ray.TMax = max(_distToLight - max(normalBias * 0.5f, 0.05f), _ray.TMin + 0.05f); \
-                visOut = TraceShadowOccluded(_ray) ? 0.0f : 1.0f;          \
+                float _endpointBias = ComputePointLightEndpointBias((lightRadius), normalBias); \
+                if (_distToLight <= _endpointBias + _ray.TMin)             \
+                {                                                          \
+                    visOut = 1.0f;                                         \
+                }                                                          \
+                else                                                       \
+                {                                                          \
+                    _ray.TMax = max(_distToLight - _endpointBias, _ray.TMin + 0.05f); \
+                    visOut = TraceShadowOccluded(_ray) ? 0.0f : 1.0f;      \
+                }                                                          \
             }                                                              \
         }                                                                  \
     }
@@ -316,6 +459,231 @@ void ExecuteShadowPass(uint2 pixelPos, uint2 launchDim)
     }
     else
     {
+    {
+        // Deterministic finite-light shadows for direct lighting.
+        //
+        // Direct lighting is too visible to feed as a stochastic 1-light
+        // reservoir when DLSS RR is the only denoiser. Match the practical
+        // engine-style path instead: pick the strongest local shadow-casting
+        // candidates for this pixel and trace those deterministically. The
+        // lighting pass still accumulates the local grid list, but only these
+        // packed entries modulate finite-light visibility.
+        const uint spatialLightMask = LoadSpatialLightMask(worldPos);
+        const bool usePointLightGrid = PointLightGridIsEnabled();
+        uint gridCellIndex = 0u;
+        uint gridCandidateCount = usePointLightGrid ?
+            PointLightGridSelectCandidateCount(worldPos, gridCellIndex) :
+            0u;
+        const uint candCount = usePointLightGrid ?
+            min(gridCandidateCount, PointLightGridGetMaxCount()) :
+            min(ShadowedPointLightCount, (uint)MAX_SHADOWED_PT_LIGHTS);
+
+        float topScore0 = 0.0f;
+        float topScore1 = 0.0f;
+        float topScore2 = 0.0f;
+        uint topIdx0 = 0xFFFFFFFFu;
+        uint topIdx1 = 0xFFFFFFFFu;
+        uint topIdx2 = 0xFFFFFFFFu;
+
+        [loop]
+        for (uint candidateIndex = 0u; candidateIndex < 128u; ++candidateIndex)
+        {
+            if (candidateIndex >= candCount)
+                break;
+
+            const uint candIdx = usePointLightGrid ?
+                PointLightGridLoadLightIndex(gridCellIndex, candidateIndex) :
+                candidateIndex;
+            if (!usePointLightGrid &&
+                !ReSTIRLightAllowed(candIdx, usePointLightGrid, gridCellIndex, gridCandidateCount, spatialLightMask))
+                continue;
+
+            float3 candPos = 0.0f.xxx;
+            float candRadius = 0.0f;
+            float candLuma = 0.0f;
+            bool candCastsShadow = false;
+            if (!LoadDirectPointLightCandidate(candIdx, usePointLightGrid, candPos, candRadius, candLuma, candCastsShadow) ||
+                !candCastsShadow)
+                continue;
+
+            float3 toCand = candPos - worldPos;
+            float distSq = max(dot(toCand, toCand), 1.0e-4f);
+            float dist = sqrt(distSq);
+            float nDotL = saturate(dot(worldNormal, toCand) / max(dist, 1.0e-3f));
+            float score = EvaluateReSTIRPointLightTargetPdf(candLuma, distSq, candRadius, nDotL);
+            if (score <= 0.0f)
+                continue;
+
+            if (score > topScore0)
+            {
+                topScore2 = topScore1; topIdx2 = topIdx1;
+                topScore1 = topScore0; topIdx1 = topIdx0;
+                topScore0 = score; topIdx0 = candIdx;
+            }
+            else if (score > topScore1)
+            {
+                topScore2 = topScore1; topIdx2 = topIdx1;
+                topScore1 = score; topIdx1 = candIdx;
+            }
+            else if (score > topScore2)
+            {
+                topScore2 = score; topIdx2 = candIdx;
+            }
+        }
+
+        float packed0 = 0.0f;
+        float packed1 = 0.0f;
+        float packed2 = 0.0f;
+        if (topIdx0 != 0xFFFFFFFFu)
+        {
+            float3 pos = 0.0f.xxx;
+            float radius = 0.0f;
+            float luma = 0.0f;
+            bool castsShadow = false;
+            if (LoadDirectPointLightCandidate(topIdx0, usePointLightGrid, pos, radius, luma, castsShadow) && castsShadow)
+            {
+                float vis = 1.0f;
+                COMPUTE_POINT_LIGHT_VIS(vis, pos, radius);
+                packed0 = (vis >= 0.5f ? 1.0f : -1.0f) * ((float)topIdx0 + 1.0f);
+            }
+        }
+        if (topIdx1 != 0xFFFFFFFFu)
+        {
+            float3 pos = 0.0f.xxx;
+            float radius = 0.0f;
+            float luma = 0.0f;
+            bool castsShadow = false;
+            if (LoadDirectPointLightCandidate(topIdx1, usePointLightGrid, pos, radius, luma, castsShadow) && castsShadow)
+            {
+                float vis = 1.0f;
+                COMPUTE_POINT_LIGHT_VIS(vis, pos, radius);
+                packed1 = (vis >= 0.5f ? 1.0f : -1.0f) * ((float)topIdx1 + 1.0f);
+            }
+        }
+        if (topIdx2 != 0xFFFFFFFFu)
+        {
+            float3 pos = 0.0f.xxx;
+            float radius = 0.0f;
+            float luma = 0.0f;
+            bool castsShadow = false;
+            if (LoadDirectPointLightCandidate(topIdx2, usePointLightGrid, pos, radius, luma, castsShadow) && castsShadow)
+            {
+                float vis = 1.0f;
+                COMPUTE_POINT_LIGHT_VIS(vis, pos, radius);
+                packed2 = (vis >= 0.5f ? 1.0f : -1.0f) * ((float)topIdx2 + 1.0f);
+            }
+        }
+
+        outShadow.g = packed0;
+        outShadow.b = packed1;
+        outShadow.a = packed2;
+        ShadowReservoirM[pixelPos] = 0.0f;
+        ShadowResult[pixelPos] = outShadow;
+        return;
+    }
+
+#if 0
+        // -------------- Stochastic direct-light sample -----------------
+        // No temporal/spatial ReSTIR reservoir. Pick one locally relevant
+        // finite light uniformly per pixel/frame and let DLSS RR denoise the
+        // raw noisy direct-light signal. This avoids stable structured
+        // reservoir patterns showing up in direct diffuse when GI is off.
+        uint stochasticChosenIdx = 0xFFFFFFFFu;
+        bool stochasticChosenCastsShadow = false;
+        uint stochasticValidCount = 0u;
+        const uint stochasticSpatialLightMask = LoadSpatialLightMask(worldPos);
+        const bool stochasticUsePointLightGrid = PointLightGridIsEnabled();
+        uint stochasticGridCellIndex = 0u;
+        uint stochasticGridCandidateCount = stochasticUsePointLightGrid ?
+            PointLightGridSelectCandidateCount(worldPos, stochasticGridCellIndex) :
+            0u;
+
+        const uint stochasticCandCount = stochasticUsePointLightGrid ?
+            min(stochasticGridCandidateCount, PointLightGridGetMaxCount()) :
+            min(ShadowedPointLightCount, (uint)MAX_SHADOWED_PT_LIGHTS);
+
+        [loop]
+        for (uint stochasticCandidateIndex = 0u; stochasticCandidateIndex < 128u; ++stochasticCandidateIndex)
+        {
+            if (stochasticCandidateIndex >= stochasticCandCount)
+                break;
+            const uint stochasticCandIdx = stochasticUsePointLightGrid ?
+                PointLightGridLoadLightIndex(stochasticGridCellIndex, stochasticCandidateIndex) :
+                stochasticCandidateIndex;
+            if (!stochasticUsePointLightGrid &&
+                !ReSTIRLightAllowed(stochasticCandIdx, stochasticUsePointLightGrid, stochasticGridCellIndex, stochasticGridCandidateCount, stochasticSpatialLightMask))
+                continue;
+
+            float3 stochasticCandPos = 0.0f.xxx;
+            float stochasticCandRadius = 0.0f;
+            float stochasticCandLuma = 0.0f;
+            bool stochasticCandCastsShadow = true;
+            if (!LoadDirectPointLightCandidate(
+                stochasticCandIdx,
+                stochasticUsePointLightGrid,
+                stochasticCandPos,
+                stochasticCandRadius,
+                stochasticCandLuma,
+                stochasticCandCastsShadow))
+                continue;
+
+            const float3 stochasticToCand = stochasticCandPos - worldPos;
+            const float stochasticDistSq = max(dot(stochasticToCand, stochasticToCand), 1.0e-4f);
+            const float stochasticDist = sqrt(stochasticDistSq);
+            const float stochasticNdotL = saturate(dot(worldNormal, stochasticToCand) / max(stochasticDist, 1.0e-3f));
+            const float stochasticContribution =
+                EvaluateReSTIRPointLightTargetPdf(stochasticCandLuma, stochasticDistSq, stochasticCandRadius, stochasticNdotL);
+            if (stochasticContribution <= 0.0f)
+                continue;
+
+            ++stochasticValidCount;
+            uint stochasticSeed =
+                (pixelPos.x * 1973u + pixelPos.y * 9277u + FrameCounter * 26699u + stochasticCandIdx * 49u) * 6151u;
+            stochasticSeed ^= stochasticSeed >> 13u;
+            stochasticSeed *= 0x5bd1e995u;
+            stochasticSeed ^= stochasticSeed >> 15u;
+            const float stochasticU = (stochasticSeed & 0x00FFFFFFu) / 16777216.0f;
+            if (stochasticU < rcp((float)stochasticValidCount))
+            {
+                stochasticChosenIdx = stochasticCandIdx;
+                stochasticChosenCastsShadow = stochasticCandCastsShadow;
+            }
+        }
+
+        if (stochasticChosenIdx != 0xFFFFFFFFu && stochasticValidCount > 0u)
+        {
+            float3 stochasticChosenPos = 0.0f.xxx;
+            float stochasticChosenRadius = 0.0f;
+            float stochasticChosenLuma = 0.0f;
+            bool stochasticCastsShadow = false;
+            const bool stochasticChosenValid = LoadDirectPointLightCandidate(
+                stochasticChosenIdx,
+                stochasticUsePointLightGrid,
+                stochasticChosenPos,
+                stochasticChosenRadius,
+                stochasticChosenLuma,
+                stochasticCastsShadow);
+            float stochasticPointVis = 1.0f;
+            if (stochasticChosenValid && stochasticChosenCastsShadow && stochasticCastsShadow)
+            {
+                COMPUTE_POINT_LIGHT_VIS(stochasticPointVis, stochasticChosenPos, stochasticChosenRadius);
+            }
+            outShadow.g = stochasticChosenValid ? (float)stochasticChosenIdx : 255.0f;
+            outShadow.b = stochasticChosenValid ? (float)stochasticValidCount : 0.0f;
+            outShadow.a = stochasticChosenValid ? stochasticPointVis : 1.0f;
+        }
+        else
+        {
+            outShadow.g = 255.0f;
+            outShadow.b = 0.0f;
+            outShadow.a = 1.0f;
+        }
+
+        ShadowReservoirM[pixelPos] = 0.0f;
+        ShadowResult[pixelPos] = outShadow;
+        return;
+#endif
+
         // -------------- ReSTIR Phase 1: per-pixel RIS over all lights --
         // Pick one light per pixel proportional to luma*intensity (target
         // PDF). NO temporal / spatial reuse yet — that's Phase 2/3.
@@ -327,19 +695,30 @@ void ExecuteShadowPass(uint2 pixelPos, uint2 launchDim)
         float chosenWeight = 0.0f;
         float weightSum = 0.0f;
         const uint spatialLightMask = LoadSpatialLightMask(worldPos);
+        const bool usePointLightGrid = PointLightGridIsEnabled();
+        uint gridCellIndex = 0u;
+        uint gridCandidateCount = usePointLightGrid ?
+            PointLightGridSelectCandidateCount(worldPos, gridCellIndex) :
+            0u;
 
-        const uint candCount = min(ShadowedPointLightCount, (uint)MAX_SHADOWED_PT_LIGHTS);
+        const uint candCount = usePointLightGrid ?
+            min(gridCandidateCount, PointLightGridGetMaxCount()) :
+            min(ShadowedPointLightCount, (uint)MAX_SHADOWED_PT_LIGHTS);
         [loop]
-        for (uint candIdx = 0; candIdx < (uint)MAX_SHADOWED_PT_LIGHTS; ++candIdx)
+        for (uint candidateIndex = 0; candidateIndex < 128u; ++candidateIndex)
         {
-            if (candIdx >= candCount)
+            if (candidateIndex >= candCount)
                 break;
-            if ((spatialLightMask & (1u << candIdx)) == 0u)
+            const uint candIdx = usePointLightGrid ?
+                PointLightGridLoadLightIndex(gridCellIndex, candidateIndex) :
+                candidateIndex;
+            if (!usePointLightGrid &&
+                !ReSTIRLightAllowed(candIdx, usePointLightGrid, gridCellIndex, gridCandidateCount, spatialLightMask))
                 continue;
-            float3 candPos = ShadowedPointLights[candIdx].xyz;
-            float candRadius = max(ShadowedPointLights[candIdx].w, 0.01f);
-            float candLuma = ShadowedPointLightWeights[candIdx].x;
-            if (candLuma <= 0.0f)
+            float3 candPos = 0.0f.xxx;
+            float candRadius = 0.0f;
+            float candLuma = 0.0f;
+            if (!LoadReSTIRPointLight(candIdx, usePointLightGrid, candPos, candRadius, candLuma))
                 continue;
 
             // Per-candidate unshadowed contribution estimate: luma /
@@ -347,9 +726,8 @@ void ExecuteShadowPass(uint2 pixelPos, uint2 launchDim)
             float3 toCand = candPos - worldPos;
             float distSq = max(dot(toCand, toCand), 1.0e-4f);
             float dist = sqrt(distSq);
-            float rangeAtten = saturate(1.0f - dist / candRadius);
             float NdotL = saturate(dot(worldNormal, toCand) / max(dist, 1.0e-3f));
-            float targetPdf = candLuma * rangeAtten * rangeAtten * NdotL / max(distSq * 0.0001f, 1.0f);
+            float targetPdf = EvaluateReSTIRPointLightTargetPdf(candLuma, distSq, candRadius, NdotL);
             if (targetPdf <= 0.0f)
                 continue;
 
@@ -392,7 +770,7 @@ void ExecuteShadowPass(uint2 pixelPos, uint2 launchDim)
         // while preventing the ghost streaks under camera motion that
         // pure 1-frame-stale reuse caused.
         const int   kSpatialSamples   = 3;
-        const float kSpatialRadius    = 8.0f;  // pixels
+        const float kSpatialRadius    = 4.0f;  // pixels
         // (No disocclusion / velocity-decay gates here — they were
         // tried 2026-05-30 to remove motion ghosting, but the
         // residual motion noise was traced to TAA/DLSS-RR's
@@ -403,7 +781,7 @@ void ExecuteShadowPass(uint2 pixelPos, uint2 launchDim)
         [unroll]
         for (int sIdx = 0; sIdx < kSpatialSamples; ++sIdx)
         {
-            uint sSeed = (pixelPos.x * 5237u + pixelPos.y * 6311u + FrameCounter * 17u + (uint)sIdx * 991u) * 1597u;
+            uint sSeed = (pixelPos.x * 5237u + pixelPos.y * 6311u + (uint)sIdx * 991u) * 1597u;
             sSeed ^= sSeed >> 13u; sSeed *= 0x5bd1e995u; sSeed ^= sSeed >> 15u;
             float rA = (sSeed & 0xFFFFu) / 65535.0f;
             sSeed = sSeed * 1664525u + 1013904223u;
@@ -415,6 +793,11 @@ void ExecuteShadowPass(uint2 pixelPos, uint2 launchDim)
             if (spatialPx.x < 0 || spatialPx.x >= (int)launchSize.x ||
                 spatialPx.y < 0 || spatialPx.y >= (int)launchSize.y)
                 continue;
+            const float2 spatialUv = (float2(spatialPx) + 0.5f) / launchSize;
+            const float spatialDepth = DepthTexPrev.Load(int3(spatialPx, 0)).x;
+            const float3 spatialNormal = WorldNormalTexPrev.Load(int3(spatialPx, 0)).xyz;
+            if (!ReSTIRSurfaceCompatible(spatialUv, spatialDepth, spatialNormal, currentLinearDepth, worldNormal))
+                continue;
             // Integer-coord point sampling. SampleLevel bilinear on a
             // RGBA32F reservoir whose .g channel encodes lightIdx as a
             // float corrupts the index (4-pixel blend → non-integer →
@@ -424,19 +807,19 @@ void ExecuteShadowPass(uint2 pixelPos, uint2 launchDim)
             const uint  spIdx   = (uint)(sp.g + 0.5f);
             const float spRatio = sp.b;
             const float spM     = ShadowReservoirMPrev.Load(int3(spatialPx, 0)).x;
-            if (spIdx >= ShadowedPointLightCount || spRatio <= 0.0f || spM <= 0.0f)
+            if (spRatio <= 0.0f || spM <= 0.0f ||
+                !ReSTIRLightAllowed(spIdx, usePointLightGrid, gridCellIndex, gridCandidateCount, spatialLightMask))
                 continue;
-            if ((spatialLightMask & (1u << spIdx)) == 0u)
+            float3 cPos = 0.0f.xxx;
+            float cRad = 0.0f;
+            float cLum = 0.0f;
+            if (!LoadReSTIRPointLight(spIdx, usePointLightGrid, cPos, cRad, cLum))
                 continue;
-            const float3 cPos = ShadowedPointLights[spIdx].xyz;
-            const float  cRad = max(ShadowedPointLights[spIdx].w, 0.01f);
-            const float  cLum = ShadowedPointLightWeights[spIdx].x;
             const float3 toC = cPos - worldPos;
             const float  dSq = max(dot(toC, toC), 1.0e-4f);
             const float  d   = sqrt(dSq);
-            const float  raC = saturate(1.0f - d / cRad);
             const float  NLc = saturate(dot(worldNormal, toC) / max(d, 1.0e-3f));
-            const float  tpdfC = cLum * raC * raC * NLc / max(dSq * 0.0001f, 1.0f);
+            const float  tpdfC = EvaluateReSTIRPointLightTargetPdf(cLum, dSq, cRad, NLc);
             const float  spW   = spRatio * tpdfC * spM;
             if (spW <= 0.0f) continue;
             weightSum += spW;
@@ -464,7 +847,7 @@ void ExecuteShadowPass(uint2 pixelPos, uint2 launchDim)
         // combine into the current pixel's reservoir.
         const float2 velocity = VelocityTex.SampleLevel(sampleWrap, uv, 0).xy;
         const float2 prevUV = uv - velocity;
-        if (prevUV.x >= 0.0f && prevUV.x <= 1.0f && prevUV.y >= 0.0f && prevUV.y <= 1.0f)
+        if (prevUV.x >= 0.0f && prevUV.x < 1.0f && prevUV.y >= 0.0f && prevUV.y < 1.0f)
         {
             // Integer-coord point sampling — bilinear on the
             // RGBA32F reservoir corrupts lightIdx (.g) on any
@@ -473,22 +856,29 @@ void ExecuteShadowPass(uint2 pixelPos, uint2 launchDim)
             // strong noise under camera motion. See spatial-reuse
             // block above for the same fix.
             const int2 prevPx = int2(prevUV * launchSize);
-            const float4 prev = ShadowReservoirPrev.Load(int3(prevPx, 0));
-            const uint prevIdx = (uint)(prev.g + 0.5f);
-            const float prevRatio = prev.b;
-            const float prevM = ShadowReservoirMPrev.Load(int3(prevPx, 0)).x;
-            if (prevIdx < (uint)MAX_SHADOWED_PT_LIGHTS && prevIdx < ShadowedPointLightCount && prevRatio > 0.0f && prevM > 0.0f &&
-                (spatialLightMask & (1u << prevIdx)) != 0u)
+            const float prevDepth = DepthTexPrev.Load(int3(prevPx, 0)).x;
+            const float3 prevNormal = WorldNormalTexPrev.Load(int3(prevPx, 0)).xyz;
+            if (ReSTIRSurfaceCompatible((float2(prevPx) + 0.5f) / launchSize, prevDepth, prevNormal, currentLinearDepth, worldNormal))
             {
-                const float3 candPos = ShadowedPointLights[prevIdx].xyz;
-                const float candRadius = max(ShadowedPointLights[prevIdx].w, 0.01f);
-                const float candLuma = ShadowedPointLightWeights[prevIdx].x;
+                const float4 prev = ShadowReservoirPrev.Load(int3(prevPx, 0));
+                const uint prevIdx = (uint)(prev.g + 0.5f);
+                const float prevRatio = prev.b;
+                const float prevM = ShadowReservoirMPrev.Load(int3(prevPx, 0)).x;
+                if (prevRatio > 0.0f && prevM > 0.0f &&
+                    ReSTIRLightAllowed(prevIdx, usePointLightGrid, gridCellIndex, gridCandidateCount, spatialLightMask))
+                {
+                    float3 candPos = 0.0f.xxx;
+                    float candRadius = 0.0f;
+                    float candLuma = 0.0f;
+                    if (!LoadReSTIRPointLight(prevIdx, usePointLightGrid, candPos, candRadius, candLuma))
+                    {
+                        candLuma = 0.0f;
+                    }
                 const float3 toCand = candPos - worldPos;
                 const float distSq = max(dot(toCand, toCand), 1.0e-4f);
                 const float dist = sqrt(distSq);
-                const float rangeAtten = saturate(1.0f - dist / candRadius);
                 const float NdotL = saturate(dot(worldNormal, toCand) / max(dist, 1.0e-3f));
-                const float targetPdfPrev = candLuma * rangeAtten * rangeAtten * NdotL / max(distSq * 0.0001f, 1.0f);
+                const float targetPdfPrev = EvaluateReSTIRPointLightTargetPdf(candLuma, distSq, candRadius, NdotL);
                 // RIS combine: prev sample's W-contribution at this pixel
                 // is prev.W_at_curr * prev.M = (prevRatio * targetPdfPrev)
                 // weighted by the prev sample count.
@@ -517,14 +907,20 @@ void ExecuteShadowPass(uint2 pixelPos, uint2 launchDim)
                     M_eff += prevM;
                 }
             }
+            }
         }
 
         if (chosenIdx != 0xFFFFFFFFu && M_eff > 0.0f)
         {
+            float3 chosenPos = 0.0f.xxx;
+            float chosenRadius = 0.0f;
+            float chosenLuma = 0.0f;
+            const bool chosenValid = LoadReSTIRPointLight(chosenIdx, usePointLightGrid, chosenPos, chosenRadius, chosenLuma);
             float pointVis = 1.0f;
-            COMPUTE_POINT_LIGHT_VIS(pointVis,
-                ShadowedPointLights[chosenIdx].xyz,
-                max(ShadowedPointLights[chosenIdx].w, 0.01f));
+            if (chosenValid)
+            {
+                COMPUTE_POINT_LIGHT_VIS(pointVis, chosenPos, chosenRadius);
+            }
             // Unbiased estimator weight: W = W_sum / (p_chosen * M).
             // Firefly clamp keeps a single low-pdf sample from spiking
             // many frames of accumulated weight into one pixel — that's
@@ -536,9 +932,9 @@ void ExecuteShadowPass(uint2 pixelPos, uint2 launchDim)
             const float kFireflyCap = 30.0f;
             float ratio = weightSum / (max(chosenWeight, 1.0e-6f) * M_eff);
             ratio = clamp(ratio, 0.0f, kFireflyCap);
-            outShadow.g = (float)chosenIdx;
-            outShadow.b = ratio;
-            outShadow.a = pointVis;
+            outShadow.g = chosenValid ? (float)chosenIdx : 255.0f;
+            outShadow.b = chosenValid ? ratio : 0.0f;
+            outShadow.a = chosenValid ? pointVis : 1.0f;
             // Cap M ON WRITEBACK so next frame's Phase 2/3 lite read
             // back a bounded prev_M. Running cap during the combine
             // (removed above) created the W-inflation bug.
