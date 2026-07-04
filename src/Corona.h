@@ -172,6 +172,7 @@ private:
 		Particles,
 		SpatialLightMask,
 		SpatialHashDeepSeed,
+		GBufferDecals,
 		RaytraceShadow,
 		RaytraceAO,
 		RaytraceReflection,
@@ -179,6 +180,8 @@ private:
 		ScreenProbeGI,
 		TemporalDenoise,
 		Lighting,
+		DepthHeightFog,
+		VolumetricFog,
 		DLSSRR,
 		DLSSSR,
 		TemporalAA,
@@ -489,6 +492,9 @@ private:
 	shared_ptr<ComputePipelineStateObject> GBufferOccluderDepthPyramidBuildPSO;
 	shared_ptr<ComputePipelineStateObject> GBufferSparseRayOccluderClearPSO;
 	shared_ptr<ComputePipelineStateObject> GBufferSparseRayOccluderSelectPSO;
+	shared_ptr<ComputePipelineStateObject> RoadDecalClearTilesPSO;
+	shared_ptr<ComputePipelineStateObject> RoadDecalBuildTilesPSO;
+	shared_ptr<ComputePipelineStateObject> RoadDecalApplyPSO;
 	EGBufferObjectCullingMode GBufferObjectCullingMode = EGBufferObjectCullingMode::GpuIndirect;
 	EGBufferOcclusionMode GBufferOcclusionMode = EGBufferOcclusionMode::Adaptive;
 	EGBufferDepthPrepassOccluderMode GBufferDepthPrepassOccluderMode = EGBufferDepthPrepassOccluderMode::CpuCoverage;
@@ -524,6 +530,23 @@ private:
 	uint32_t GBufferOccluderDepthPyramidElementCount = 0;
 	std::array<uint32_t, GBufferOccluderDepthPyramidMaxMipCount> GBufferOccluderDepthPyramidMipOffsets = {};
 	uint32_t GBufferOccluderDepthPyramidBuiltFrame = UINT32_MAX;
+	std::shared_ptr<Buffer> RoadDecalTileCountsBuffer;
+	std::shared_ptr<Buffer> RoadDecalTileIndicesBuffer;
+	std::shared_ptr<Buffer> RoadDecalDepthPyramidBuffer;
+	std::shared_ptr<Buffer> RoadDecalDummyBuffer;
+	EResourceState RoadDecalTileCountsState = EResourceState::ShaderRead;
+	EResourceState RoadDecalTileIndicesState = EResourceState::ShaderRead;
+	EResourceState RoadDecalDepthPyramidState = EResourceState::ShaderRead;
+	uint32_t RoadDecalTileCountX = 0;
+	uint32_t RoadDecalTileCountY = 0;
+	uint32_t RoadDecalTileCount = 0;
+	uint32_t RoadDecalMaxDecalsPerTile = 16;
+	uint32_t RoadDecalTileIndexCapacity = 0;
+	uint32_t RoadDecalDepthPyramidWidth = 0;
+	uint32_t RoadDecalDepthPyramidHeight = 0;
+	uint32_t RoadDecalDepthPyramidMipCount = 0;
+	uint32_t RoadDecalDepthPyramidElementCount = 0;
+	std::array<uint32_t, GBufferOccluderDepthPyramidMaxMipCount> RoadDecalDepthPyramidMipOffsets = {};
 	std::shared_ptr<Buffer> GBufferDummyDrawRecordBuffer;
 	// Desktop static-mesh instancing path. Draws repeated map-spawned
 	// SceneObjects that share the same Scene/material override as
@@ -843,6 +866,8 @@ private:
 		UINT32 FrameCounter = 0;
 		UINT32 BlueNoiseOffsetStride = 1;
 		UINT32 NoiseMode = 1;
+		UINT32 bDirectionalShadowTemporalStochastic = 0;
+		UINT32 bFiniteShadowTemporalStochastic = 0;
 		// Mode: 0 = Option A channel-pack (sun in R, top-3 point lights in GBA),
 		//       1 = ReSTIR Phase 1 single-light reservoir (sun in R; G=light
 		//           index, B=light weight, A=visibility for the RIS-chosen
@@ -863,6 +888,8 @@ private:
 		UINT32 SpatialLightHashEntryMask = SpatialHashGIEntryCount - 1u;
 		UINT32 SpatialLightMaxProbeSteps = 8u;
 		UINT32 bUseSpatialLightMask = 0u;
+		UINT32 bHasDynamicRtScene = 0u;
+		UINT32 DynamicRtScenePadding = 0u;
 		glm::vec4 SpatialHashLevelParams = glm::vec4(0.0f, 600.0f, 0.0f, 0.0f);
 		// Up to MaxDiffuseGIPointLights candidates. Option A reads only
 		// the first 3 (channel-pack hard cap); ReSTIR uses the shared
@@ -940,6 +967,10 @@ private:
 		UINT32 bEnableSpecularTemporalReservoir = 0;
 		UINT32 ReflectionDebugOutputMode = 0;
 		glm::uvec2 _specularTemporalReservoirPadding = glm::uvec2(0);
+		UINT32 CheckerboardMode = 0;
+		UINT32 CheckerboardPhase = 0;
+		UINT32 CheckerboardLobeParity = 0;
+		float CheckerboardOutputScale = 1.0f;
 	};
 
 	RTReflectionViewParamCB RTReflectionViewParam;
@@ -969,6 +1000,10 @@ private:
 		PointLightParam PointLights[MaxDiffuseGIPointLights];
 		UINT32 PointLightCount = 0;
 		glm::vec3 PointLightPadding = glm::vec3(0.0f);
+		UINT32 CheckerboardMode = 0;
+		UINT32 CheckerboardPhase = 0;
+		UINT32 CheckerboardLobeParity = 0;
+		float CheckerboardOutputScale = 1.0f;
 	};
 
 	static_assert((offsetof(RTGIViewParamCB, LightColor) % 16) == 0, "RTGIViewParamCB LightColor must match HLSL cbuffer packing.");
@@ -1322,7 +1357,8 @@ private:
 		// (0 = no contact darkening, 1 = full AO). Adjustable in the Editor Config
 		// RTAO Details UI. Repurposes former padding (layout unchanged).
 		float RTAODirectContactStrength = 1.0f;
-		glm::vec2 PointLightPadding = glm::vec2(0.0f);
+		float UnselectedShadowCasterVisibility = 0.0f;
+		float PointLightPadding = 0.0f;
 	};
 
 	static_assert((offsetof(LightingParam, AmbientSkyColorAndStrength) % 16) == 0, "LightingParam ambient fields must match HLSL cbuffer packing.");
@@ -1441,6 +1477,8 @@ public:
 		bool bOverrideRoughnessMetallic = false;
 		bool bVisible = true;
 		bool bRayTracing = true;
+		bool bDynamicRayTracing = false;
+		bool bDynamicRaster = false;
 		bool bPhysicsQuery = true;
 		EPhysicsCollisionShape PhysicsCollisionShape = EPhysicsCollisionShape::TriangleMesh;
 		glm::vec3 PhysicsBoxHalfExtent = glm::vec3(0.5f);
@@ -1454,6 +1492,29 @@ public:
 		float Distance = 0.0f;
 	};
 
+	struct RoadDecalState
+	{
+		static constexpr uint32_t MaxPolygonVertices = 16;
+
+		glm::vec3 Center = glm::vec3(0.0f);
+		float HalfLength = 0.0f;
+		glm::vec3 AxisX = glm::vec3(1.0f, 0.0f, 0.0f);
+		float HalfWidth = 0.0f;
+		glm::vec3 AxisZ = glm::vec3(0.0f, 0.0f, 1.0f);
+		float Height = 0.0f;
+		glm::vec4 BaseColor = glm::vec4(0.18f, 0.18f, 0.17f, 1.0f);
+		float Roughness = 0.88f;
+		float UvRepeatX = 6.0f;
+		float UvRepeatY = 1.0f;
+		float HeightTolerance = 18.0f;
+		float NormalThreshold = 0.65f;
+		bool bDrawCenterStripe = true;
+		bool bFillOnlyMissingRoad = false;
+		bool bEnabled = true;
+		uint32_t PolygonVertexCount = 0;
+		std::array<glm::vec2, MaxPolygonVertices> PolygonXZ = {};
+	};
+
 private:
 
 	EAntiAliasingMode AntiAliasingMode = EAntiAliasingMode::TAA;
@@ -1463,12 +1524,6 @@ private:
 	bool bEnableDiffuseGI = true;
 	// Disabled while validating the raw DX12 GI/specular path.
 	bool bEnableTemporalDenoisingPass = false;
-	// Spatial pre-filter for the SIMPLE_RAYTRACE diffuse GI DLSS-RR feed. DEFAULT OFF:
-	// pre-denoising fights RR (RR expects the raw noisy signal + guides and does its
-	// own reconstruction; a pre-blur degrades it, adding noise under camera rotation).
-	// Kept as a toggle for A/B only; raw is the correct RR feed. Reduce 1spp dolly
-	// variance at the SOURCE (sample count) instead.
-	bool bEnableSimpleGISpatialFilter = false;
 	// Feed the RAW (un-reprojected) simple-trace diffuse GI to DLSS-RR. DEFAULT OFF:
 	// the raw 1spp signal in dark scenes has such high per-frame variance that RR goes
 	// unstable and collapses the whole frame to black intermittently (NaN/firefly
@@ -1489,6 +1544,8 @@ private:
 	// all-light evaluation; lower values keep the estimate unbiased while reducing
 	// per-hit shadow visibility rays.
 	UINT32 SimpleGISamplesPerPixel = 4;
+	UINT32 RTIndirectFrameInterleaveMode = 0;
+	UINT32 DirectLightingPointLightGridMaxPerCell = 32;
 	bool bEnableRTDiffuseGISER = false;
 	bool bEnableRTReflectionSER = false;
 	bool bD3D12ShaderModel69Supported = false;
@@ -1543,6 +1600,26 @@ private:
 	float RTAODirectContactStrength = 1.0f;
 	float SurfaceBounceStrength = 1.0f;
 	float SurfaceBounceSaturation = 1.0f;
+	bool bEnableDepthHeightFog = false;
+	glm::vec3 DepthHeightFogColor = glm::vec3(0.60f, 0.68f, 0.75f);
+	float DepthHeightFogDensity = 0.00002f;
+	float DepthHeightFogStartDistance = 0.0f;
+	float DepthHeightFogHeight = 0.0f;
+	float DepthHeightFogHeightFalloff = 0.0008f;
+	float DepthHeightFogMaxOpacity = 0.85f;
+	bool bEnableVolumetricFog = false;
+	glm::vec3 VolumetricFogColor = glm::vec3(0.60f, 0.68f, 0.75f);
+	float VolumetricFogDensity = 0.000015f;
+	float VolumetricFogStartDistance = 0.0f;
+	float VolumetricFogMaxDistance = 200000.0f;
+	float VolumetricFogHeight = 0.0f;
+	float VolumetricFogHeightFalloff = 0.0008f;
+	float VolumetricFogMaxOpacity = 0.75f;
+	float VolumetricFogAmbientStrength = 0.18f;
+	float VolumetricFogDirectionalStrength = 1.0f;
+	float VolumetricFogAnisotropy = 0.15f;
+	UINT32 VolumetricFogGridPixelSize = 16;
+	UINT32 VolumetricFogGridSizeZ = 64;
 	UINT32 ClampMode = 2;
 
 	float JitterScale = 0.6;
@@ -1600,6 +1677,7 @@ private:
 	ERenderBackendAPI CommandLineRenderBackendAPI = ERenderBackendAPI::D3D12;
 	bool bCommandLineDisableImgui = false;
 	bool bCommandLineDisableStreamline = false;
+	bool bCommandLineDisableRoadDecals = false;
 	bool bVulkanCaptureSafeMode = false;
 	bool bVulkanAllowImplicitLayers = false;
 	bool bEnableGpuSpineSkinning = true;
@@ -1619,6 +1697,7 @@ private:
 	UINT32 SkeletalTestScreenshotFrame = 60;
 	std::wstring SkeletalTestScreenshotPath;
 	bool bSkeletalTestScreenshotDone = false;
+	bool bVehicleDrivingMode = false;
 	bool bStartupFreeFlyCamera = false;
 	bool bCommandLineDiffuseGIAutoDumpMode = false;
 	bool bCommandLineReadmeScreenshotDumpMode = false;
@@ -1637,6 +1716,9 @@ private:
 	std::wstring CommandLineLoadMapFile;
 	UINT32 CommandLineScreenshotFrame = 0;
 	bool bCommandLineScreenshotTriggered = false;
+	bool bCommandLineLightingDebugDump = false;
+	UINT32 LightingDebugDumpFrame = 120;
+	bool bLightingDebugDumpDone = false;
 
 	std::shared_ptr<GraphicsPipelineHandle> TemporalAAGraphicsPipeline;
 	bool bTemporalAAHistoryValid = false;
@@ -1683,6 +1765,40 @@ private:
 	float BloomSigma = 0.037;
 	float Exposure = 1;
 	float BloomStrength = 1.0;
+
+	struct DepthHeightFogCB
+	{
+		glm::mat4x4 InvViewMatrix;
+		glm::mat4x4 InvProjMatrix;
+		glm::vec4 FogColorAndDensity;
+		glm::vec4 HeightParams;
+		glm::vec2 RTSize;
+		glm::vec2 Padding = glm::vec2(0.0f);
+	};
+
+	DepthHeightFogCB DepthHeightFogCB;
+	shared_ptr<ComputePipelineStateObject> DepthHeightFogPSO;
+
+	struct VolumetricFogCB
+	{
+		glm::mat4x4 InvViewMatrix;
+		glm::mat4x4 InvProjMatrix;
+		glm::vec4 FogColorAndDensity;
+		glm::vec4 HeightParams;
+		glm::vec4 LightingParams;
+		glm::vec4 GridParams;
+		glm::vec4 LightDirAndIntensity;
+		glm::vec4 FrameParams;
+		glm::vec2 RTSize;
+		glm::vec2 Padding = glm::vec2(0.0f);
+	};
+
+	VolumetricFogCB VolumetricFogCB;
+	shared_ptr<Texture> VolumetricFogAtlas;
+	shared_ptr<ComputePipelineStateObject> VolumetricFogBuildPSO;
+	shared_ptr<ComputePipelineStateObject> VolumetricFogCompositePSO;
+	UINT32 VolumetricFogAtlasWidth = 0;
+	UINT32 VolumetricFogAtlasHeight = 0;
 
 	UINT BloomBufferWidth = 640;
 	UINT  BloomBufferHeight = 384;
@@ -1771,6 +1887,8 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 		bool bOverrideRoughnessMetallic = false;
 		bool bVisible = true;
 		bool bRayTracing = true;
+		bool bDynamicRayTracing = false;
+		bool bDynamicRaster = false;
 		bool bPhysicsQuery = true;
 		EPhysicsCollisionShape PhysicsCollisionShape = EPhysicsCollisionShape::TriangleMesh;
 		glm::vec3 PhysicsBoxHalfExtent = glm::vec3(0.5f);
@@ -1782,6 +1900,7 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 		mutable float CachedWorldBoundsRadius = 0.0f;
 	};
 	vector<SceneObject> SceneObjects;
+	std::unordered_map<SceneObjectHandle, size_t> SceneObjectHandleToIndex;
 	SceneObjectHandle NextSceneObjectHandle = 1;
 	CoronaECS::EntityComponentSystem EntityWorld;
 	CoronaECS::Entity WorldEntity;
@@ -1789,6 +1908,8 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	CoronaECS::Entity MainCameraEntity;
 	bool bRayTracingSceneDirty = false;
 	bool bRayTracingTransformDirty = false;
+	bool bDynamicRayTracingSceneDirty = false;
+	bool bDynamicRayTracingTransformDirty = false;
 	bool bRayTracingBLASCacheResetPending = false;
 	bool bRayTracingBLASBuildSuspended = false;
 
@@ -1970,6 +2091,77 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	float m_turnSpeed = glm::half_pi<float>();
 
 	SimpleCamera m_camera;
+
+	struct VehicleWheelState
+	{
+		float Load = 0.0f;
+		float Compression = 0.0f;
+		float CompressionVelocity = 0.0f;
+		float SlipRatio = 0.0f;
+		float SlipAngle = 0.0f;
+		float AngularVelocity = 0.0f;
+		float SpinAngle = 0.0f;
+		float DriveTorqueShare = 0.0f;
+		bool bGrounded = false;
+		glm::vec3 ContactPoint = glm::vec3(0.0f);
+		glm::vec3 ContactNormal = glm::vec3(0.0f, 1.0f, 0.0f);
+	};
+
+	struct VehicleDrivingState
+	{
+		bool bSpawned = false;
+		bool bResetPending = true;
+		glm::vec3 Position = glm::vec3(0.0f, 120.0f, 0.0f);
+		glm::vec3 Velocity = glm::vec3(0.0f);
+		float Yaw = 0.0f;
+		float YawRate = 0.0f;
+		float VerticalVelocity = 0.0f;
+		float Steering = 0.0f;
+		float Throttle = 0.0f;
+		float Brake = 0.0f;
+		float LiftOffOversteer = 0.0f;
+		float OversteerSustain = 0.0f;
+		int Gear = 1;
+		float EngineRpm = 900.0f;
+		float LongitudinalAccel = 0.0f;
+		float LateralAccel = 0.0f;
+		float VisualPitch = 0.0f;
+		float VisualRoll = 0.0f;
+		float WheelSpin = 0.0f;
+		float GroundedFraction = 0.0f;
+		std::array<VehicleWheelState, 4> Wheels = {};
+		SceneObjectHandle BodyHandle = InvalidSceneObjectHandle;
+		SceneObjectHandle CabinHandle = InvalidSceneObjectHandle;
+		std::array<SceneObjectHandle, 4> WheelHandles = {};
+		std::array<SceneObjectHandle, 4> LoadBarHandles = {};
+		std::array<SceneObjectHandle, 4> SlipPlaneHandles = {};
+	};
+
+	struct VehicleAlignmentSettings
+	{
+		float FrontStaticToeDeg = 0.10f;
+		float RearStaticToeDeg = 0.18f;
+		float FrontStaticNegativeCamberDeg = 1.25f;
+		float RearStaticNegativeCamberDeg = 0.85f;
+		float FrontRollDynamicCamberDeg = 2.60f;
+		float RearRollDynamicCamberDeg = 1.80f;
+		float FrontRollToeGain = -0.055f;
+		float RearRollToeGain = 0.038f;
+		float FrontBrakeToeStabilize = 0.34f;
+		float RearBrakeToeStabilize = 0.010f;
+		float VisualAlignmentScale = 1.0f;
+	};
+
+	VehicleDrivingState VehicleDriving;
+	VehicleAlignmentSettings VehicleAlignment;
+	bool bVehicleSettingsViewerOpen = true;
+	std::wstring VehicleAlignmentStatus;
+	shared_ptr<Scene> VehicleBodyScene;
+	shared_ptr<Scene> VehicleCabinScene;
+	shared_ptr<Scene> VehicleWheelScene;
+	shared_ptr<Scene> VehicleLoadBarScene;
+	shared_ptr<Scene> VehicleSlipPlaneScene;
+
 	bool bMobileVirtualMoveForward = false;
 	bool bMobileVirtualMoveBackward = false;
 	bool bMobileVirtualMoveLeft = false;
@@ -2055,7 +2247,9 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 		float OuterConeAngle = 0.785398163f;
 		UINT32 RenderDirtyBits = 0;
 	};
+
 	std::vector<PointLightState> PointLights;
+	std::vector<RoadDecalState> RoadDecals;
 	UINT32 NextPointLightId = 1;
 	CoronaECS::Entity MainDirectionalLightEntity;
 
@@ -2131,6 +2325,26 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 		float RTAODirectContactStrength = 1.0f;
 		float SurfaceBounceStrength = 1.0f;
 		float SurfaceBounceSaturation = 1.0f;
+		bool bEnableDepthHeightFog = false;
+		glm::vec3 DepthHeightFogColor = glm::vec3(0.60f, 0.68f, 0.75f);
+		float DepthHeightFogDensity = 0.00002f;
+		float DepthHeightFogStartDistance = 0.0f;
+		float DepthHeightFogHeight = 0.0f;
+		float DepthHeightFogHeightFalloff = 0.0008f;
+		float DepthHeightFogMaxOpacity = 0.85f;
+		bool bEnableVolumetricFog = false;
+		glm::vec3 VolumetricFogColor = glm::vec3(0.60f, 0.68f, 0.75f);
+		float VolumetricFogDensity = 0.000015f;
+		float VolumetricFogStartDistance = 0.0f;
+		float VolumetricFogMaxDistance = 200000.0f;
+		float VolumetricFogHeight = 0.0f;
+		float VolumetricFogHeightFalloff = 0.0008f;
+		float VolumetricFogMaxOpacity = 0.75f;
+		float VolumetricFogAmbientStrength = 0.18f;
+		float VolumetricFogDirectionalStrength = 1.0f;
+		float VolumetricFogAnisotropy = 0.15f;
+		UINT32 VolumetricFogGridPixelSize = 16;
+		UINT32 VolumetricFogGridSizeZ = 64;
 		float JitterScale = 0.6f;
 		UINT32 TAASampleCount = 32;
 		float DLSSJitterPhaseScale = 1.0f;
@@ -2239,8 +2453,10 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 		RenderFrameSourceState FrameSourceState;
 		bool bFullSceneObjectSync = false;
 		bool bFullPointLightSync = false;
+		bool bFullRoadDecalSync = false;
 		std::vector<RenderSceneObjectDelta> SceneObjectDeltas;
 		std::vector<RenderPointLightDelta> PointLightDeltas;
+		std::vector<RoadDecalState> RoadDecals;
 	};
 
 	struct RenderWorldMirror
@@ -2264,6 +2480,7 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 
 		std::vector<SceneObject> SceneObjects;
 		std::vector<PointLightState> PointLights;
+		std::vector<RoadDecalState> RoadDecals;
 		mutable bool bPointLightCandidateCacheValid = false;
 		mutable uint64_t PointLightCandidateCacheHash = 0;
 		mutable std::vector<uint32_t> PointLightCandidateCacheIndices;
@@ -2355,6 +2572,7 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	bool bRenderSyncChannelsInitialized = false;
 	bool bSceneObjectFullSyncPending = false;
 	bool bPointLightFullSyncPending = false;
+	bool bRoadDecalFullSyncPending = false;
 	std::vector<SceneObjectHandle> DirtySceneObjectHandles;
 	std::vector<SceneObjectHandle> RemovedSceneObjectHandles;
 	std::vector<UINT32> DirtyPointLightIds;
@@ -2439,15 +2657,21 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	std::shared_ptr<Buffer> InstancePropertyBuffer;
 	std::shared_ptr<Buffer> RTInstanceSceneObjectIndexBuffer;
 	shared_ptr<RTAS> TLAS;
+	shared_ptr<RTAS> DynamicTLAS;
 	std::vector<std::shared_ptr<Buffer>> InstancePropertyFrameBuffers;
 	std::vector<std::shared_ptr<Buffer>> RTInstanceSceneObjectIndexFrameBuffers;
 	std::vector<InstanceProperty> InstancePropertyUploadScratch;
 	std::vector<uint32_t> RTInstanceSceneObjectIndexUploadScratch;
 	std::vector<shared_ptr<RTAS>> TLASFrameResources;
 	std::vector<UINT32> TLASFrameInstanceCounts;
+	std::vector<shared_ptr<RTAS>> DynamicTLASFrameResources;
+	std::vector<UINT32> DynamicTLASFrameInstanceCounts;
 	std::map<Mesh*, std::shared_ptr<RTAS>> RayTracingBLASCache;
 	std::vector<RTInstanceDesc> RayTracingInstances;
+	std::vector<RTInstanceDesc> DynamicRayTracingInstances;
+	std::vector<uint32_t> DynamicRayTracingObjectIndices;
 	uint64_t RayTracingInstancesRevision = 1;
+	bool bDynamicRayTracingObjectIndexDirty = true;
 	
 	// ...
 	bool bMultiThreadRendering = false;
@@ -2692,6 +2916,7 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	shared_ptr<Texture> GetProceduralDungeonBrickDiffuseTexture();
 	shared_ptr<Texture> GetProceduralBoxDiffuseTexture(const std::wstring& textureKind);
 	shared_ptr<Scene> CreateProceduralBoxScene(const glm::vec3& baseColor, bool bUseBrickTexture = false, float uvRepeat = 1.0f, const std::wstring& textureKind = std::wstring(), float uvRepeatY = -1.0f, bool bFrontOnly = false);
+	shared_ptr<Scene> CreateProceduralCylinderScene(float radius, float halfLength, uint32_t segments, const glm::vec3& baseColor);
 	shared_ptr<Scene> CreateProceduralGrassScene(UINT32 numBlades, float areaSize, float bladeHeight, UINT32 seed, UINT32 bladeSegments = 4u);
 	// Procedural UV sphere generator. `rings` = latitude steps, `segments` =
 	// longitude steps. Standard 44 B Vertex layout so it shares the default
@@ -2710,21 +2935,31 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	void UpdateGrassCulling(const glm::mat4& viewProj);
 	shared_ptr<Scene> CreateProceduralTerrainScene(UINT32 seed);
 	bool ShouldIncludeSceneObjectInRayTracingAS(const SceneObject& object) const;
+	bool ShouldIncludeSceneObjectInDynamicRayTracingAS(const SceneObject& object) const;
 	bool IsRayTracingExtendedFrustumCullingActive() const;
 	bool ShouldIncludeSceneObjectInRayTracingExtendedFrustum(const SceneObject& object, bool& outFrustumCulled) const;
 	uint32_t GetRayTracingInstanceMaskForSceneObject(const SceneObject& object) const;
 	const std::vector<uint32_t>& GatherRayTracingVisibleObjectIndices(uint64_t& outTotalObjects, uint64_t& outCulledObjects);
 	void MarkRayTracingSceneDirty();
 	void MarkRayTracingTransformsDirty();
+	void MarkDynamicRayTracingSceneDirty();
+	void MarkDynamicRayTracingTransformsDirty();
 	void MarkRayTracingInstanceListChanged();
 	void FlushSceneObjectChanges();
 	UINT32 GetRayTracingFrameResourceIndex() const;
 	void EnsureRayTracingFrameResourceSlots();
+	void EnsureDynamicRayTracingFrameResourceSlots();
 	void ActivateCurrentRayTracingFrameResources();
+	void ActivateCurrentDynamicRayTracingFrameResources();
 	bool IsCurrentRayTracingFrameResourceReady() const;
+	bool IsCurrentDynamicRayTracingFrameResourceReady() const;
+	void RefreshDynamicRayTracingObjectIndices();
 	void UpdateRayTracingInstanceTransforms();
+	void UpdateDynamicRayTracingInstanceTransforms();
 	void UpdateInstancePropertyBuffer();
 	void RebuildAccelerationStructures();
+	void RebuildDynamicRayTracingAccelerationStructures();
+	void FlushDynamicRayTracingScene();
 	void InitCpuPhysics();
 	void ShutdownCpuPhysics();
 	void MarkCpuPhysicsSceneDirty();
@@ -2833,6 +3068,9 @@ public:
 	SceneObjectHandle AddSceneObject(const SceneObjectDesc& desc);
 	SceneObjectHandle AddSceneInstance(const shared_ptr<Scene>& scene, const glm::mat4x4& transform);
 	bool RemoveSceneObject(SceneObjectHandle handle);
+	void RebuildSceneObjectHandleIndex();
+	SceneObject* FindSceneObject(SceneObjectHandle handle);
+	const SceneObject* FindSceneObject(SceneObjectHandle handle) const;
 	bool SetSceneObjectTransform(SceneObjectHandle handle, const glm::mat4x4& transform);
 	bool SetSceneObjectVisibility(SceneObjectHandle handle, bool visible);
 	bool SetSceneObjectRayTracingEnabled(SceneObjectHandle handle, bool enabled);
@@ -3336,18 +3574,20 @@ public:
 
 	void InitTemporalDenoisingPass();
 	void InitDiffuseGISpatialFilterPass();
-	void DiffuseGISpatialFilterPass();
 	void DiffuseGIDisocclusionFilterPass();
 	void InitScreenProbeGIPass();
 	void InitSpatialHashGIPass();
 
 	void InitGBufferPass();
+	void InitRoadDecalPass();
 
 	void InitToneMapPass();
 
 	void InitDebugPass();
 
 	void InitLightingPass();
+	void InitDepthHeightFogPass();
+	void InitVolumetricFogPass();
 	void InitParticlePass();
 	void InitMobileShadowMapPass();
 
@@ -3534,6 +3774,7 @@ public:
 
 	void GBufferPass();
 	bool RaytracePrimaryGBufferPass();
+	void RoadDecalPass();
 	void MobileShadowMapPass();
 
 	void RaytraceShadowPass();
@@ -3567,6 +3808,9 @@ public:
 	void DebugPass();
 
 	void LightingPass();
+	void DepthHeightFogPass();
+	bool EnsureVolumetricFogResources();
+	void VolumetricFogPass();
 
 	// Forward-translucent particle draw against the post-light HDR buffer.
 	// Walks ActiveParticleSystems and uploads + draws each system's quads.
@@ -3656,6 +3900,17 @@ public:
 
 	void OnUpdate();
 	void UpdateMobileTouchCameraInput(float elapsedSeconds);
+	bool IsVehicleDrivingMode() const { return bVehicleDrivingMode; }
+	void InitializeVehicleDrivingMode();
+	void ResetVehicleDrivingMode();
+	void UpdateVehicleDrivingMode(float elapsedSeconds);
+	void UpdateVehicleVisuals();
+	void DrawVehicleDrivingOverlay();
+	void DrawVehicleSettingsViewer();
+	std::wstring GetVehicleAlignmentSettingsPath() const;
+	void ClampVehicleAlignmentSettings();
+	bool LoadVehicleAlignmentSettings();
+	bool SaveVehicleAlignmentSettings();
 
 	void OnRender();
 	bool IsEditorStartupMode() const { return bEnableStartupLuauScript && StartupLuauMode == L"editor"; }
@@ -3709,6 +3964,8 @@ private:
 	void MarkPointLightRenderDirty(UINT32 id, UINT32 dirtyBits);
 	void MarkPointLightRenderRemoved(UINT32 id);
 	void MarkAllPointLightsForRenderSync();
+	void MarkAllRoadDecalsForRenderSync();
+	void AddRoadDecalForMap(const RoadDecalState& decal);
 	void CollectRenderFrameDeltas();
 	void PublishRenderFrameDelta(RenderFrameDelta&& delta);
 	void ApplyPendingRenderFrameDeltas();
@@ -3723,6 +3980,8 @@ private:
 	void ApplySceneObjectRenderSync(const RenderFrameDelta& delta);
 	void CollectPointLightRenderSync(RenderFrameDelta& delta);
 	void ApplyPointLightRenderSync(const RenderFrameDelta& delta);
+	void CollectRoadDecalRenderSync(RenderFrameDelta& delta);
+	void ApplyRoadDecalRenderSync(const RenderFrameDelta& delta);
 	void BuildRenderFrameDerivedState(const RenderFrameSourceState* sourceState);
 	void BuildPointLightRenderCandidates(std::vector<const PointLightState*>& outCandidates, UINT32 maxCount = 0xFFFFFFFFu) const;
 	// Canonical ReSTIR point-light table shared by the spatial-hash GI light mask,

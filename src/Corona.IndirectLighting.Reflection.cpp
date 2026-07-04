@@ -169,6 +169,10 @@ void Corona::RaytraceReflectionPass()
 		(bEnableHybridRRSpecularGuideRay && (bWriteRRSpecularMotionVectors || bWriteRRSpecularHitDistance)) ? 1u : 0u;
 	constexpr bool bUseSpecularTemporalReservoir = kReflectionTemporalReservoirEnabled;
 	RTReflectionViewParam.bEnableSpecularTemporalReservoir = bUseSpecularTemporalReservoir ? 1u : 0u;
+	RTReflectionViewParam.CheckerboardMode = RTIndirectFrameInterleaveMode == 3u ? 3u : 0u;
+	RTReflectionViewParam.CheckerboardPhase = RenderFrameIndex;
+	RTReflectionViewParam.CheckerboardLobeParity = 1u;
+	RTReflectionViewParam.CheckerboardOutputScale = RTReflectionViewParam.CheckerboardMode == 3u ? 4.0f : 1.0f;
 	static const UINT32 s_reflectionDebugOutputMode = []() -> UINT32
 	{
 		if (std::getenv("CORONA_NRI_DUMP_REFLECTION_ALBEDO") != nullptr)

@@ -57,6 +57,7 @@ void Corona::InitRaytracingShadowPass()
 		TEMP_PSO_RT_SHADOW->BindSRV("global", MakeRHIBufferSRV("PointLightBuffer", 16, rayGenStage));
 		TEMP_PSO_RT_SHADOW->BindSRV("global", MakeRHIBufferSRV("PointLightGridCounts", 17, rayGenStage));
 		TEMP_PSO_RT_SHADOW->BindSRV("global", MakeRHIBufferSRV("PointLightGridIndices", 18, rayGenStage));
+		TEMP_PSO_RT_SHADOW->BindSRV("global", MakeRHIAccelerationStructureSRV("gRtDynamicScene", 19, rayGenStage));
 
 		TEMP_PSO_RT_SHADOW->BindCBV("global", MakeRHICBV("ViewParameter", 0, sizeof(RTShadowViewParamCB), rayGenStage));
 		TEMP_PSO_RT_SHADOW->BindCBV("global", MakeRHICBV("PointLightGridCB", 1, sizeof(PointLightGridParamCB), rayGenStage));
@@ -102,6 +103,7 @@ void Corona::InitShadowRayQueryPass()
 	tempPSO->BindSRV(MakeRHIBufferSRV("PointLightBuffer", 16, computeStage));
 	tempPSO->BindSRV(MakeRHIBufferSRV("PointLightGridCounts", 17, computeStage));
 	tempPSO->BindSRV(MakeRHIBufferSRV("PointLightGridIndices", 18, computeStage));
+	tempPSO->BindSRV(MakeRHIAccelerationStructureSRV("gRtDynamicScene", 19, computeStage));
 	tempPSO->BindCBV(MakeRHICBV("ViewParameter", 0, sizeof(RTShadowViewParamCB), computeStage));
 	tempPSO->BindCBV(MakeRHICBV("PointLightGridCB", 1, sizeof(PointLightGridParamCB), computeStage));
 	tempPSO->BindSampler(MakeRHISampler("sampleWrap", 0, computeStage));
@@ -129,6 +131,7 @@ void Corona::InitShadowSpatialReusePass()
 	tempPSO->BindSRV(MakeRHITextureSRV("WorldNormalTex",      3, computeStage));
 	tempPSO->BindSRV(MakeRHITextureSRV("GeoNormalTex",        4, computeStage));
 	tempPSO->BindSRV(MakeRHIAccelerationStructureSRV("gRtScene", 5, computeStage));
+	tempPSO->BindSRV(MakeRHIAccelerationStructureSRV("gRtDynamicScene", 6, computeStage));
 	tempPSO->BindUAV(MakeRHITextureUAV("ShadowResult",        0, computeStage));
 	tempPSO->BindUAV(MakeRHITextureUAV("ShadowReservoirM",    1, computeStage));
 	tempPSO->BindCBV(MakeRHICBV("ViewParameter",       0, sizeof(RTShadowViewParamCB), computeStage));
@@ -164,6 +167,8 @@ void Corona::RaytraceShadowPass()
 	RTShadowViewParam.FrameCounter = RenderFrameIndex;
 	RTShadowViewParam.BlueNoiseOffsetStride = RTGIViewParam.BlueNoiseOffsetStride;
 	RTShadowViewParam.NoiseMode = RenderFrameRayNoiseMode;
+	RTShadowViewParam.bDirectionalShadowTemporalStochastic = IsDLSSRREnabled() ? 1u : 0u;
+	RTShadowViewParam.bFiniteShadowTemporalStochastic = IsDLSSRREnabled() ? 1u : 0u;
 	// Push the runtime-tunable temporal M cap. Clamp to a sensible
 	// range so a slider drag past the rails doesn't produce a
 	// degenerate reservoir (M < 1 effectively disables temporal reuse;
@@ -179,6 +184,7 @@ void Corona::RaytraceShadowPass()
 	RTShadowViewParam.SpatialLightHashEntryMask = SpatialHashGIEntryCount - 1u;
 	RTShadowViewParam.SpatialLightMaxProbeSteps = SpatialHashGICB.MaxProbeSteps;
 	RTShadowViewParam.bUseSpatialLightMask = bSpatialLightMaskReady ? 1u : 0u;
+	RTShadowViewParam.bHasDynamicRtScene = DynamicTLAS ? 1u : 0u;
 	RTShadowViewParam.SpatialHashLevelParams = SpatialHashGICB.SpatialHashLevelParams;
 
 	// Shadow mode handling:
@@ -458,6 +464,7 @@ void Corona::RaytraceShadowPass()
 				PSO_SHADOW_RAYQUERY->SetTextureUAV("ShadowResult", ctx.GetTexture(raygenShadowOutput));
 				PSO_SHADOW_RAYQUERY->SetTextureUAV("ShadowReservoirM", raygenMOutput.IsValid() ? ctx.GetTexture(raygenMOutput) : nullptr);
 				PSO_SHADOW_RAYQUERY->SetAccelerationStructure("gRtScene", TLAS);
+				PSO_SHADOW_RAYQUERY->SetAccelerationStructure("gRtDynamicScene", DynamicTLAS ? DynamicTLAS : TLAS);
 				PSO_SHADOW_RAYQUERY->SetTextureSRV("DepthTex", ctx.GetTexture(depthInput));
 				PSO_SHADOW_RAYQUERY->SetTextureSRV("WorldNormalTex", ctx.GetTexture(normalInput));
 				PSO_SHADOW_RAYQUERY->SetTextureSRV("GeoNormalTex", ctx.GetTexture(geomNormalInput));
@@ -491,6 +498,7 @@ void Corona::RaytraceShadowPass()
 				.SetTextureUAV("global", "ShadowResult", ctx.GetTexture(raygenShadowOutput))
 				.SetTextureUAV("global", "ShadowReservoirM", raygenMOutput.IsValid() ? ctx.GetTexture(raygenMOutput) : nullptr)
 				.SetAccelerationStructure("global", "gRtScene", TLAS)
+				.SetAccelerationStructure("global", "gRtDynamicScene", DynamicTLAS ? DynamicTLAS : TLAS)
 				.SetTextureSRV("global", "DepthTex", ctx.GetTexture(depthInput))
 				.SetTextureSRV("global", "WorldNormalTex", ctx.GetTexture(normalInput))
 				.SetTextureSRV("global", "GeoNormalTex", ctx.GetTexture(geomNormalInput))
@@ -539,6 +547,7 @@ void Corona::RaytraceShadowPass()
 				PSO_SHADOW_SPATIAL_REUSE->SetTextureSRV("WorldNormalTex",      ctx.GetTexture(normalInput));
 				PSO_SHADOW_SPATIAL_REUSE->SetTextureSRV("GeoNormalTex",        ctx.GetTexture(geomNormalInput));
 				PSO_SHADOW_SPATIAL_REUSE->SetAccelerationStructure("gRtScene", TLAS);
+				PSO_SHADOW_SPATIAL_REUSE->SetAccelerationStructure("gRtDynamicScene", DynamicTLAS ? DynamicTLAS : TLAS);
 				PSO_SHADOW_SPATIAL_REUSE->SetTextureUAV("ShadowResult",        ctx.GetTexture(finalShadowOutput));
 				PSO_SHADOW_SPATIAL_REUSE->SetTextureUAV("ShadowReservoirM",    ctx.GetTexture(finalMOutput));
 				PSO_SHADOW_SPATIAL_REUSE->SetCBVValue("ViewParameter",         &RTShadowViewParam);

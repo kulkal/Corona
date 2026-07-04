@@ -321,6 +321,8 @@ Corona::SceneObjectHandle Corona::AddSceneObject(const SceneObjectDesc& desc)
 	object.bOverrideRoughnessMetallic = desc.bOverrideRoughnessMetallic;
 	object.bVisible = desc.bVisible;
 	object.bRayTracing = desc.bRayTracing;
+	object.bDynamicRayTracing = desc.bDynamicRayTracing;
+	object.bDynamicRaster = desc.bDynamicRaster;
 	object.bPhysicsQuery = desc.bPhysicsQuery;
 	object.PhysicsCollisionShape = desc.PhysicsCollisionShape;
 	object.PhysicsBoxHalfExtent = desc.PhysicsBoxHalfExtent;
@@ -345,7 +347,9 @@ Corona::SceneObjectHandle Corona::AddSceneObject(const SceneObjectDesc& desc)
 		object.RenderDirtyBits = kSceneObjectDirtyAll;
 		DirtySceneObjectHandles.push_back(object.Handle);
 	}
+	const size_t objectIndex = SceneObjects.size();
 	SceneObjects.push_back(object);
+	SceneObjectHandleToIndex[object.Handle] = objectIndex;
 
 	MarkCpuPhysicsSceneDirty();
 	return object.Handle;
@@ -364,17 +368,19 @@ bool Corona::RemoveSceneObject(SceneObjectHandle handle)
 	if (handle == InvalidSceneObjectHandle)
 		return false;
 
-	const auto it = std::find_if(SceneObjects.begin(), SceneObjects.end(), [handle](const SceneObject& object)
-	{
-		return object.Handle == handle;
-	});
-	if (it == SceneObjects.end())
+	auto indexIt = SceneObjectHandleToIndex.find(handle);
+	if (indexIt == SceneObjectHandleToIndex.end() || indexIt->second >= SceneObjects.size())
 		return false;
+	const size_t removedIndex = indexIt->second;
+	auto it = SceneObjects.begin() + static_cast<std::ptrdiff_t>(removedIndex);
 
 	const CoronaECS::Entity entity = it->EntityHandle;
 	DestroyEntityScriptComponent(entity);
 	MarkSceneObjectRenderRemoved(handle);
 	SceneObjects.erase(it);
+	SceneObjectHandleToIndex.erase(indexIt);
+	for (size_t objectIndex = removedIndex; objectIndex < SceneObjects.size(); ++objectIndex)
+		SceneObjectHandleToIndex[SceneObjects[objectIndex].Handle] = objectIndex;
 	EntityWorld.DestroyEntity(entity);
 	ScriptObjects.erase(handle);
 	if (SponzaObject == handle)
@@ -391,38 +397,62 @@ bool Corona::RemoveSceneObject(SceneObjectHandle handle)
 	return true;
 }
 
+void Corona::RebuildSceneObjectHandleIndex()
+{
+	SceneObjectHandleToIndex.clear();
+	SceneObjectHandleToIndex.reserve(SceneObjects.size());
+	for (size_t objectIndex = 0; objectIndex < SceneObjects.size(); ++objectIndex)
+	{
+		const SceneObjectHandle handle = SceneObjects[objectIndex].Handle;
+		if (handle != InvalidSceneObjectHandle)
+			SceneObjectHandleToIndex[handle] = objectIndex;
+	}
+}
+
+Corona::SceneObject* Corona::FindSceneObject(SceneObjectHandle handle)
+{
+	const auto indexIt = SceneObjectHandleToIndex.find(handle);
+	if (indexIt == SceneObjectHandleToIndex.end() || indexIt->second >= SceneObjects.size())
+		return nullptr;
+	SceneObject& object = SceneObjects[indexIt->second];
+	return object.Handle == handle ? &object : nullptr;
+}
+
+const Corona::SceneObject* Corona::FindSceneObject(SceneObjectHandle handle) const
+{
+	const auto indexIt = SceneObjectHandleToIndex.find(handle);
+	if (indexIt == SceneObjectHandleToIndex.end() || indexIt->second >= SceneObjects.size())
+		return nullptr;
+	const SceneObject& object = SceneObjects[indexIt->second];
+	return object.Handle == handle ? &object : nullptr;
+}
+
 bool Corona::SetSceneObjectTransform(SceneObjectHandle handle, const glm::mat4x4& transform)
 {
-	const auto it = std::find_if(SceneObjects.begin(), SceneObjects.end(), [handle](const SceneObject& object)
-	{
-		return object.Handle == handle;
-	});
-	if (it == SceneObjects.end())
+	SceneObject* object = FindSceneObject(handle);
+	if (!object)
 		return false;
 
-	it->Transform = transform;
-	UpdateSceneObjectEntity(*it);
+	object->Transform = transform;
+	UpdateSceneObjectEntity(*object);
 	MarkSceneObjectRenderDirty(handle, kSceneObjectDirtyTransform);
-	if (it->bVisible && it->bPhysicsQuery)
+	if (object->bVisible && object->bPhysicsQuery)
 		MarkCpuPhysicsSceneDirty();
 	return true;
 }
 
 bool Corona::SetSceneObjectVisibility(SceneObjectHandle handle, bool visible)
 {
-	const auto it = std::find_if(SceneObjects.begin(), SceneObjects.end(), [handle](const SceneObject& object)
-	{
-		return object.Handle == handle;
-	});
-	if (it == SceneObjects.end())
+	SceneObject* object = FindSceneObject(handle);
+	if (!object)
 		return false;
 
-	if (it->bVisible != visible)
+	if (object->bVisible != visible)
 	{
-		it->bVisible = visible;
-		UpdateSceneObjectEntity(*it);
+		object->bVisible = visible;
+		UpdateSceneObjectEntity(*object);
 		MarkSceneObjectRenderDirty(handle, kSceneObjectDirtyVisibility);
-		if (it->bPhysicsQuery)
+		if (object->bPhysicsQuery)
 			MarkCpuPhysicsSceneDirty();
 	}
 	return true;
@@ -430,17 +460,14 @@ bool Corona::SetSceneObjectVisibility(SceneObjectHandle handle, bool visible)
 
 bool Corona::SetSceneObjectRayTracingEnabled(SceneObjectHandle handle, bool enabled)
 {
-	const auto it = std::find_if(SceneObjects.begin(), SceneObjects.end(), [handle](const SceneObject& object)
-	{
-		return object.Handle == handle;
-	});
-	if (it == SceneObjects.end())
+	SceneObject* object = FindSceneObject(handle);
+	if (!object)
 		return false;
 
-	if (it->bRayTracing != enabled)
+	if (object->bRayTracing != enabled)
 	{
-		it->bRayTracing = enabled;
-		UpdateSceneObjectEntity(*it);
+		object->bRayTracing = enabled;
+		UpdateSceneObjectEntity(*object);
 		MarkSceneObjectRenderDirty(handle, kSceneObjectDirtyRayTracing);
 	}
 	return true;
@@ -454,6 +481,15 @@ bool Corona::ShouldIncludeSceneObjectInRayTracingAS(const SceneObject& object) c
 	// In hybrid mode this flag lets script objects opt out of RT effects.
 	// Path tracing has no raster fallback, so every visible object must be in the AS.
 	return object.bRayTracing || RenderingMode == ERenderingMode::PATHTRACING;
+}
+
+bool Corona::ShouldIncludeSceneObjectInDynamicRayTracingAS(const SceneObject& object) const
+{
+	if (!object.bVisible || !object.ScenePtr)
+		return false;
+	if (RenderingMode == ERenderingMode::PATHTRACING)
+		return false;
+	return object.bDynamicRayTracing;
 }
 
 uint32_t Corona::GetRayTracingInstanceMaskForSceneObject(const SceneObject& object) const
@@ -639,6 +675,19 @@ void Corona::MarkRayTracingTransformsDirty()
 	PrevPathTracingViewMat = glm::mat4x4(0.0f);
 }
 
+void Corona::MarkDynamicRayTracingSceneDirty()
+{
+	bDynamicRayTracingSceneDirty = true;
+	bDynamicRayTracingTransformDirty = false;
+	bDynamicRayTracingObjectIndexDirty = true;
+}
+
+void Corona::MarkDynamicRayTracingTransformsDirty()
+{
+	if (!bDynamicRayTracingSceneDirty)
+		bDynamicRayTracingTransformDirty = true;
+}
+
 void Corona::MarkRayTracingInstanceListChanged()
 {
 	++RayTracingInstancesRevision;
@@ -670,14 +719,22 @@ void Corona::FlushSceneObjectChanges()
 		RTGeometryRecordHash = 0;
 		RTGeometryRecordBuffer.reset();
 		TLAS = nullptr;
+		DynamicRayTracingInstances.clear();
+		DynamicRayTracingObjectIndices.clear();
+		DynamicTLAS = nullptr;
 		InstancePropertyBuffer = nullptr;
 		RTInstanceSceneObjectIndexBuffer = nullptr;
 		TLASFrameResources.clear();
 		TLASFrameInstanceCounts.clear();
+		DynamicTLASFrameResources.clear();
+		DynamicTLASFrameInstanceCounts.clear();
 		InstancePropertyFrameBuffers.clear();
 		RTInstanceSceneObjectIndexFrameBuffers.clear();
 		bRayTracingSceneDirty = false;
 		bRayTracingTransformDirty = false;
+		bDynamicRayTracingSceneDirty = false;
+		bDynamicRayTracingTransformDirty = false;
+		bDynamicRayTracingObjectIndexDirty = true;
 		return;
 	}
 
@@ -700,13 +757,16 @@ void Corona::FlushSceneObjectChanges()
 			IsCurrentRayTracingFrameResourceReady())
 		{
 			ActivateCurrentRayTracingFrameResources();
+			FlushDynamicRayTracingScene();
 			return;
 		}
 		UpdateRayTracingInstanceTransforms();
+		FlushDynamicRayTracingScene();
 		return;
 	}
 
 	RebuildAccelerationStructures();
+	FlushDynamicRayTracingScene();
 }
 
 UINT32 Corona::GetRayTracingFrameResourceIndex() const
@@ -731,6 +791,15 @@ void Corona::EnsureRayTracingFrameResourceSlots()
 		RTInstanceSceneObjectIndexFrameBuffers.resize(frameCount);
 }
 
+void Corona::EnsureDynamicRayTracingFrameResourceSlots()
+{
+	const UINT32 frameCount = renderBackend ? std::max<UINT32>(1u, renderBackend->GetFrameCount()) : 1u;
+	if (DynamicTLASFrameResources.size() != frameCount)
+		DynamicTLASFrameResources.resize(frameCount);
+	if (DynamicTLASFrameInstanceCounts.size() != frameCount)
+		DynamicTLASFrameInstanceCounts.resize(frameCount, 0u);
+}
+
 void Corona::ActivateCurrentRayTracingFrameResources()
 {
 	EnsureRayTracingFrameResourceSlots();
@@ -741,6 +810,14 @@ void Corona::ActivateCurrentRayTracingFrameResources()
 		InstancePropertyBuffer = InstancePropertyFrameBuffers[frameIndex];
 	if (frameIndex < RTInstanceSceneObjectIndexFrameBuffers.size() && RTInstanceSceneObjectIndexFrameBuffers[frameIndex])
 		RTInstanceSceneObjectIndexBuffer = RTInstanceSceneObjectIndexFrameBuffers[frameIndex];
+}
+
+void Corona::ActivateCurrentDynamicRayTracingFrameResources()
+{
+	EnsureDynamicRayTracingFrameResourceSlots();
+	const UINT32 frameIndex = GetRayTracingFrameResourceIndex();
+	if (frameIndex < DynamicTLASFrameResources.size() && DynamicTLASFrameResources[frameIndex])
+		DynamicTLAS = DynamicTLASFrameResources[frameIndex];
 }
 
 bool Corona::IsCurrentRayTracingFrameResourceReady() const
@@ -763,6 +840,34 @@ bool Corona::IsCurrentRayTracingFrameResourceReady() const
 		return false;
 	}
 	return true;
+}
+
+bool Corona::IsCurrentDynamicRayTracingFrameResourceReady() const
+{
+	if (!renderBackend || DynamicRayTracingInstances.empty())
+		return true;
+
+	const UINT32 frameIndex = GetRayTracingFrameResourceIndex();
+	if (frameIndex >= DynamicTLASFrameResources.size() || frameIndex >= DynamicTLASFrameInstanceCounts.size())
+		return false;
+	if (!DynamicTLASFrameResources[frameIndex])
+		return false;
+	return DynamicTLASFrameInstanceCounts[frameIndex] == static_cast<UINT32>(DynamicRayTracingInstances.size());
+}
+
+void Corona::RefreshDynamicRayTracingObjectIndices()
+{
+	if (!bDynamicRayTracingObjectIndexDirty)
+		return;
+
+	DynamicRayTracingObjectIndices.clear();
+	DynamicRayTracingObjectIndices.reserve(std::max<size_t>(DynamicRayTracingInstances.size(), 8u));
+	for (uint32_t objectIndex = 0; objectIndex < static_cast<uint32_t>(RenderWorld.SceneObjects.size()); ++objectIndex)
+	{
+		if (ShouldIncludeSceneObjectInDynamicRayTracingAS(RenderWorld.SceneObjects[objectIndex]))
+			DynamicRayTracingObjectIndices.push_back(objectIndex);
+	}
+	bDynamicRayTracingObjectIndexDirty = false;
 }
 
 void Corona::UpdateRayTracingInstanceTransforms()
@@ -913,6 +1018,123 @@ void Corona::UpdateRayTracingInstanceTransforms()
 	bRayTracingTransformDirty = false;
 }
 
+void Corona::UpdateDynamicRayTracingInstanceTransforms()
+{
+	if (!renderBackend || !renderBackend->SupportsRayTracing())
+		return;
+	if (renderBackend->IsDeviceLost())
+		return;
+
+	vector<RTInstanceDesc> updatedInstances;
+	bool bDynamicBuildSuspended = false;
+	auto phaseStart = CpuClock::now();
+	RefreshDynamicRayTracingObjectIndices();
+	updatedInstances.reserve(std::max<size_t>(DynamicRayTracingInstances.size(), 8u));
+	uint64_t includedObjects = 0;
+	uint64_t includedMeshes = 0;
+	for (uint32_t objectIndex : DynamicRayTracingObjectIndices)
+	{
+		if (objectIndex >= RenderWorld.SceneObjects.size())
+			continue;
+		const SceneObject& object = RenderWorld.SceneObjects[objectIndex];
+		if (!ShouldIncludeSceneObjectInDynamicRayTracingAS(object))
+			continue;
+		++includedObjects;
+		const uint32_t instanceMask = GetRayTracingInstanceMaskForSceneObject(object);
+		includedMeshes += AddMeshesToRayTracingInstances(
+			updatedInstances,
+			RayTracingBLASCache,
+			object.ScenePtr,
+			object.Transform,
+			object.Roughness,
+			object.Metallic,
+			object.bOverrideRoughnessMetallic,
+			objectIndex,
+			instanceMask,
+			bDynamicBuildSuspended);
+	}
+	AddSceneFlushPhaseTiming(ESceneFlushPhase::UpdateGatherInstances, phaseStart, CpuClock::now());
+
+	if (bDynamicBuildSuspended || updatedInstances.empty())
+	{
+		if (bDynamicBuildSuspended)
+		{
+			AppendCpuRuntimeTrace(
+				L"[DynamicRTAS] skipped after BLAS build failure"
+				L", objects=" + std::to_wstring(includedObjects) +
+				L", meshes=" + std::to_wstring(includedMeshes));
+		}
+		DynamicRayTracingInstances.clear();
+		DynamicTLAS = nullptr;
+		std::fill(DynamicTLASFrameResources.begin(), DynamicTLASFrameResources.end(), std::shared_ptr<RTAS>());
+		std::fill(DynamicTLASFrameInstanceCounts.begin(), DynamicTLASFrameInstanceCounts.end(), 0u);
+		bDynamicRayTracingSceneDirty = false;
+		bDynamicRayTracingTransformDirty = false;
+		return;
+	}
+
+	const bool bInstanceBindingsChanged =
+		DynamicRayTracingInstances.size() != updatedInstances.size() ||
+		!std::equal(
+			DynamicRayTracingInstances.begin(),
+			DynamicRayTracingInstances.end(),
+			updatedInstances.begin(),
+			[](const RTInstanceDesc& a, const RTInstanceDesc& b)
+			{
+				return a.BottomLevelAS.get() == b.BottomLevelAS.get();
+			});
+	DynamicRayTracingInstances = std::move(updatedInstances);
+	if (bInstanceBindingsChanged)
+	{
+		std::fill(DynamicTLASFrameResources.begin(), DynamicTLASFrameResources.end(), std::shared_ptr<RTAS>());
+		std::fill(DynamicTLASFrameInstanceCounts.begin(), DynamicTLASFrameInstanceCounts.end(), 0u);
+	}
+
+	EnsureDynamicRayTracingFrameResourceSlots();
+	const UINT32 frameIndex = GetRayTracingFrameResourceIndex();
+	phaseStart = CpuClock::now();
+	std::shared_ptr<RTAS>& frameTLAS = DynamicTLASFrameResources[frameIndex];
+	const bool bCanUpdateFrameTLAS =
+		frameTLAS &&
+		frameIndex < DynamicTLASFrameInstanceCounts.size() &&
+		DynamicTLASFrameInstanceCounts[frameIndex] == static_cast<UINT32>(DynamicRayTracingInstances.size());
+	if (bCanUpdateFrameTLAS)
+	{
+		if (!renderBackend->UpdateTLAS(frameTLAS, DynamicRayTracingInstances))
+			frameTLAS.reset();
+		if (renderBackend->IsDeviceLost())
+			return;
+	}
+	if (!frameTLAS)
+	{
+		frameTLAS = renderBackend->CreateTLAS(DynamicRayTracingInstances);
+		if (renderBackend->IsDeviceLost())
+			return;
+	}
+	if (!frameTLAS)
+	{
+		AddSceneFlushPhaseTiming(ESceneFlushPhase::UpdateTlas, phaseStart, CpuClock::now());
+		bDynamicRayTracingSceneDirty = true;
+		bDynamicRayTracingTransformDirty = false;
+		return;
+	}
+
+	DynamicTLASFrameInstanceCounts[frameIndex] = static_cast<UINT32>(DynamicRayTracingInstances.size());
+	DynamicTLAS = frameTLAS;
+	AddSceneFlushPhaseTiming(ESceneFlushPhase::UpdateTlas, phaseStart, CpuClock::now());
+
+	if ((FrameCounter % 120u) == 0u)
+	{
+		AppendCpuRuntimeTrace(
+			L"[DynamicRTAS] update objects=" + std::to_wstring(includedObjects) +
+			L", meshes=" + std::to_wstring(includedMeshes) +
+			L", instances=" + std::to_wstring(DynamicRayTracingInstances.size()));
+	}
+
+	bDynamicRayTracingSceneDirty = false;
+	bDynamicRayTracingTransformDirty = false;
+}
+
 void Corona::UpdateInstancePropertyBuffer()
 {
 	if (!renderBackend)
@@ -1009,6 +1231,51 @@ void Corona::UpdateInstancePropertyBuffer()
 	}
 	InstancePropertyBuffer = frameInstancePropertyBuffer;
 	RTInstanceSceneObjectIndexBuffer = frameInstanceSceneObjectIndexBuffer;
+}
+
+void Corona::RebuildDynamicRayTracingAccelerationStructures()
+{
+	if (!renderBackend || !renderBackend->SupportsRayTracing())
+		return;
+	if (renderBackend->IsDeviceLost())
+		return;
+
+	auto phaseStart = CpuClock::now();
+	renderBackend->WaitForGpu();
+	AddSceneFlushPhaseTiming(ESceneFlushPhase::RebuildGpuWait, phaseStart, CpuClock::now());
+	if (renderBackend->IsDeviceLost())
+		return;
+
+	EnsureDynamicRayTracingFrameResourceSlots();
+	std::fill(DynamicTLASFrameResources.begin(), DynamicTLASFrameResources.end(), std::shared_ptr<RTAS>());
+	std::fill(DynamicTLASFrameInstanceCounts.begin(), DynamicTLASFrameInstanceCounts.end(), 0u);
+	DynamicTLAS = nullptr;
+	DynamicRayTracingInstances.clear();
+	bDynamicRayTracingSceneDirty = false;
+	bDynamicRayTracingTransformDirty = true;
+	UpdateDynamicRayTracingInstanceTransforms();
+}
+
+void Corona::FlushDynamicRayTracingScene()
+{
+	if (!renderBackend || !renderBackend->SupportsRayTracing())
+		return;
+	if (renderBackend->IsDeviceLost())
+		return;
+
+	if (bDynamicRayTracingSceneDirty)
+	{
+		RebuildDynamicRayTracingAccelerationStructures();
+		return;
+	}
+
+	if (bDynamicRayTracingTransformDirty || !IsCurrentDynamicRayTracingFrameResourceReady())
+	{
+		UpdateDynamicRayTracingInstanceTransforms();
+		return;
+	}
+
+	ActivateCurrentDynamicRayTracingFrameResources();
 }
 
 void Corona::RebuildAccelerationStructures()
@@ -1188,7 +1455,9 @@ void Corona::InitRaytracingData()
 		return; // RenderWorld is synced for raster; skip building RT acceleration structures
 
 	bRayTracingSceneDirty = true;
+	bDynamicRayTracingSceneDirty = true;
 	RebuildAccelerationStructures();
+	FlushDynamicRayTracingScene();
 }
 
 void Corona::InitRTPSO()

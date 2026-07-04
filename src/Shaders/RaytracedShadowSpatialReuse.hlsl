@@ -18,6 +18,7 @@ Texture2D DepthTex            : register(t2);
 Texture2D WorldNormalTex      : register(t3);
 Texture2D GeoNormalTex        : register(t4);
 RaytracingAccelerationStructure gRtScene : register(t5);
+RaytracingAccelerationStructure gRtDynamicScene : register(t6);
 
 RWTexture2D<float4> ShadowResult    : register(u0);
 RWTexture2D<float>  ShadowReservoirM : register(u1);
@@ -35,6 +36,8 @@ cbuffer ViewParameter : register(b0)
     uint FrameCounter;
     uint BlueNoiseOffsetStride;
     uint NoiseMode;
+    uint bDirectionalShadowTemporalStochastic;
+    uint bFiniteShadowTemporalStochastic;
     uint ShadowMode;
     uint ShadowedPointLightCount;
     float ShadowMaxM;
@@ -42,6 +45,8 @@ cbuffer ViewParameter : register(b0)
     uint SpatialLightHashEntryMask;
     uint SpatialLightMaxProbeSteps;
     uint bUseSpatialLightMask;
+    uint bHasDynamicRtScene;
+    uint _DynamicRtScenePadding;
     float4 SpatialHashLevelParams;
     #define MAX_SHADOWED_PT_LIGHTS 16
     float4 ShadowedPointLights[MAX_SHADOWED_PT_LIGHTS];
@@ -130,7 +135,18 @@ float TraceVisibilityInline(float3 worldPos, float3 worldNormal, float3 traceNor
              RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q;
     q.TraceRayInline(gRtScene, RAY_FLAG_NONE, RT_SHADOW_RAY_MASK, ray);
     q.Proceed();
-    return (q.CommittedStatus() == COMMITTED_NOTHING) ? 1.0f : 0.0f;
+    if (q.CommittedStatus() != COMMITTED_NOTHING)
+        return 0.0f;
+    if (bHasDynamicRtScene != 0u)
+    {
+        RayQuery<RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH |
+                 RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> qDynamic;
+        qDynamic.TraceRayInline(gRtDynamicScene, RAY_FLAG_NONE, RT_SHADOW_RAY_MASK, ray);
+        qDynamic.Proceed();
+        if (qDynamic.CommittedStatus() != COMMITTED_NOTHING)
+            return 0.0f;
+    }
+    return 1.0f;
 }
 
 [numthreads(8, 8, 1)]

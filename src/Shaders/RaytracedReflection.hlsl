@@ -59,11 +59,79 @@ cbuffer ViewParameter : register(b0)
     uint bEnableSpecularTemporalReservoir;
     uint ReflectionDebugOutputMode;
     uint2 SpecularTemporalReservoirPadding;
+    uint CheckerboardMode;
+    uint CheckerboardPhase;
+    uint CheckerboardLobeParity;
+    float CheckerboardOutputScale;
 };
 
 SamplerState sampleWrap : register(s0);
 
 static const float INV_PI = 1.0f / PI;
+static const float MAX_HIT_DIST = 10000;
+
+uint RTReflectionHashCheckerboardTile(uint2 tile)
+{
+    uint h = tile.x * 0x8da6b343u;
+    h ^= tile.y * 0xd8163841u;
+    h ^= h >> 16;
+    h *= 0x7feb352du;
+    h ^= h >> 15;
+    return h;
+}
+
+uint2 RTReflectionGetCheckerboardTargetOffset(uint2 pixel, uint2 renderSize)
+{
+    (void)renderSize;
+    uint2 basePixel = pixel - (pixel & uint2(1u, 1u));
+    uint2 tile = basePixel / 2u;
+    uint temporalSeed = CheckerboardPhase / 4u;
+    uint tileHash = RTReflectionHashCheckerboardTile(tile ^ uint2(temporalSeed * 0x9e3779b9u, temporalSeed * 0x7f4a7c15u));
+    uint lobePhaseBase = (CheckerboardPhase & 3u) + (tileHash & 3u);
+    uint lobePhase = (lobePhaseBase + (CheckerboardLobeParity & 1u) * 2u) & 3u;
+    uint2 offset = uint2(lobePhase & 1u, (lobePhase >> 1u) & 1u);
+    return offset;
+}
+
+uint2 RTReflectionGetCheckerboardSourcePixel(uint2 pixel, uint2 renderSize)
+{
+    uint2 basePixel = pixel - (pixel & uint2(1u, 1u));
+    return basePixel + RTReflectionGetCheckerboardTargetOffset(pixel, renderSize);
+}
+
+bool RTReflectionIsCheckerboardRepresentative(uint2 pixel, uint2 renderSize)
+{
+    uint2 basePixel = pixel - (pixel & uint2(1u, 1u));
+    return all((pixel - basePixel) == RTReflectionGetCheckerboardTargetOffset(pixel, renderSize));
+}
+
+bool RTReflectionShouldTracePixel(uint2 pixel, uint2 renderSize)
+{
+    if (CheckerboardMode != 3u)
+        return true;
+    return RTReflectionIsCheckerboardRepresentative(pixel, renderSize);
+}
+
+void RTReflectionStoreCheckerboard(uint2 pixel, uint2 renderSize, float4 radianceAndDistance)
+{
+    (void)renderSize;
+    float scale = CheckerboardMode == 3u ? CheckerboardOutputScale : 1.0f;
+    ReflectionResult[pixel] = float4(radianceAndDistance.rgb * scale, radianceAndDistance.a);
+}
+
+void RTReflectionStoreGuidesCheckerboard(uint2 pixel, uint2 renderSize, float hitDistance, float2 motionVector)
+{
+    (void)renderSize;
+    SpecularHitDistanceResult[pixel] = hitDistance;
+    SpecularMotionVectorResult[pixel] = motionVector;
+}
+
+void RTReflectionClearCheckerboardPixel(uint2 pixel)
+{
+    ReflectionResult[pixel] = float4(0.0f, 0.0f, 0.0f, MAX_HIT_DIST);
+    SpecularHitDistanceResult[pixel] = ProjectionParams.w;
+    SpecularMotionVectorResult[pixel] = float2(0.0f, 0.0f);
+}
 
 float SpecSanitizeFloat(float value, float fallback)
 {
@@ -356,8 +424,6 @@ float ApplyNormalDeviationSpecularAA(float roughness, float3 shadingNormal, floa
     return clamp(sqrt(saturate(alpha + varianceBoost)), 0.02f, 1.0f);
 }
 
-static const float MAX_HIT_DIST = 10000;
-
 #define RT_REFLECTION_SURFACE_RAY_FLAGS (RAY_FLAG_FORCE_OPAQUE | RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES)
 
 void TraceReflectionSurfaceRay(RayDesc ray, inout RayPayload payload)
@@ -438,8 +504,7 @@ void WriteRRSpecularGuides(uint2 pixel, uint2 renderSize, bool primarySurfaceVal
 
     if (!primarySurfaceValid || (bWriteRRSpecularHitDistance == 0 && bWriteRRSpecularMotionVectors == 0))
     {
-        SpecularHitDistanceResult[pixel] = specularHitDistance;
-        SpecularMotionVectorResult[pixel] = specularMotionVector;
+        RTReflectionStoreGuidesCheckerboard(pixel, renderSize, specularHitDistance, specularMotionVector);
         return;
     }
 
@@ -488,8 +553,11 @@ void WriteRRSpecularGuides(uint2 pixel, uint2 renderSize, bool primarySurfaceVal
         }
     }
 
-    SpecularHitDistanceResult[pixel] = (bWriteRRSpecularHitDistance != 0) ? specularHitDistance : ProjectionParams.w;
-    SpecularMotionVectorResult[pixel] = (bWriteRRSpecularMotionVectors != 0) ? specularMotionVector : float2(0.0f, 0.0f);
+    RTReflectionStoreGuidesCheckerboard(
+        pixel,
+        renderSize,
+        (bWriteRRSpecularHitDistance != 0) ? specularHitDistance : ProjectionParams.w,
+        (bWriteRRSpecularMotionVectors != 0) ? specularMotionVector : float2(0.0f, 0.0f));
 }
 
 [shader("raygeneration")]
@@ -498,6 +566,12 @@ void rayGen
 {
     uint3 launchIndex = DispatchRaysIndex();
     uint3 launchDim = DispatchRaysDimensions();
+
+    if (!RTReflectionShouldTracePixel(launchIndex.xy, launchDim.xy))
+    {
+        RTReflectionClearCheckerboardPixel(launchIndex.xy);
+        return;
+    }
 
     float2 crd = float2(launchIndex.xy);
 	//crd.y *= -1;
@@ -513,9 +587,8 @@ void rayGen
     bool primarySurfaceValid = DeviceDepth < 0.999999f;
     if (!primarySurfaceValid)
     {
-        ReflectionResult[launchIndex.xy] = float4(0.0f, 0.0f, 0.0f, MAX_HIT_DIST);
-        SpecularHitDistanceResult[launchIndex.xy] = ProjectionParams.w;
-        SpecularMotionVectorResult[launchIndex.xy] = float2(0.0f, 0.0f);
+        RTReflectionStoreCheckerboard(launchIndex.xy, launchDim.xy, float4(0.0f, 0.0f, 0.0f, MAX_HIT_DIST));
+        RTReflectionStoreGuidesCheckerboard(launchIndex.xy, launchDim.xy, ProjectionParams.w, float2(0.0f, 0.0f));
         return;
     }
 
@@ -893,7 +966,6 @@ void rayGen
         finalRadiance = payload.bHit ? debugHitNormal : 0.0f.xxx;
     }
 
-    ReflectionResult[launchIndex.xy] = SpecSanitizeFloat4(float4(Reinhard(max(finalRadiance, 0.0f.xxx)), 1), float4(0.0f, 0.0f, 0.0f, 1.0f));
     WriteRRSpecularGuides(launchIndex.xy, launchDim.xy, primarySurfaceValid, WorldPos, GeoNormal, MirrorL, Rougness, Metallic, payload);
 
     float reflectionDistance = MAX_HIT_DIST;
@@ -903,7 +975,12 @@ void rayGen
         float distP2Plane = PointPlaneDist(float4(WorldNormal, d), payload.position);
         reflectionDistance = abs(distP2Plane);
     }
-    ReflectionResult[launchIndex.xy].w = SpecSanitizeFloat(reflectionDistance, MAX_HIT_DIST);
+    RTReflectionStoreCheckerboard(
+        launchIndex.xy,
+        launchDim.xy,
+        SpecSanitizeFloat4(
+            float4(Reinhard(max(finalRadiance, 0.0f.xxx)), SpecSanitizeFloat(reflectionDistance, MAX_HIT_DIST)),
+            float4(0.0f, 0.0f, 0.0f, MAX_HIT_DIST)));
 }
 
 

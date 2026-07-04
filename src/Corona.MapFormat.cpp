@@ -7,6 +7,7 @@
 #include "Corona.h"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cmath>
 #include <cstring>
@@ -90,6 +91,14 @@ namespace
 		return o.str();
 	}
 
+	std::string Vec2Lua(const glm::vec2& v)
+	{
+		std::ostringstream o;
+		o.setf(std::ios::fmtflags(0), std::ios::floatfield);
+		o << "{" << v.x << "," << v.y << "}";
+		return o.str();
+	}
+
 	std::string Vec4Lua(const glm::vec4& v)
 	{
 		std::ostringstream o;
@@ -149,6 +158,20 @@ namespace
 			out = lua_tostring(L, -1);
 		lua_pop(L, 1);
 		return ok;
+	}
+
+	bool LuaGetVec2(lua_State* L, int tableIdx, const char* key, glm::vec2& out)
+	{
+		lua_getfield(L, tableIdx, key);
+		if (!lua_istable(L, -1))
+		{
+			lua_pop(L, 1);
+			return false;
+		}
+		lua_rawgeti(L, -1, 1); out.x = lua_isnumber(L, -1) ? static_cast<float>(lua_tonumber(L, -1)) : out.x; lua_pop(L, 1);
+		lua_rawgeti(L, -1, 2); out.y = lua_isnumber(L, -1) ? static_cast<float>(lua_tonumber(L, -1)) : out.y; lua_pop(L, 1);
+		lua_pop(L, 1);
+		return true;
 	}
 
 	bool LuaGetVec3(lua_State* L, int tableIdx, const char* key, glm::vec3& out)
@@ -236,11 +259,31 @@ namespace
 		glm::vec3 Position = glm::vec3(0.0f);
 	};
 
+	struct CachedMapDecal
+	{
+		bool bPresent = false;
+		std::string Type = "road";
+		glm::vec3 Position = glm::vec3(0.0f);
+		glm::vec3 Rotation = glm::vec3(0.0f);
+		glm::vec2 Size = glm::vec2(1.0f);
+		glm::vec4 Color = glm::vec4(0.18f, 0.18f, 0.17f, 1.0f);
+		float Roughness = 0.88f;
+		float UvRepeat = 6.0f;
+		float UvRepeatY = 1.0f;
+		float HeightTolerance = 18.0f;
+		float NormalThreshold = 0.65f;
+		bool bCenterStripe = true;
+		bool bEnabled = true;
+		uint32_t PolygonVertexCount = 0;
+		std::array<glm::vec2, Corona::RoadDecalState::MaxPolygonVertices> PolygonXZ = {};
+	};
+
 	struct CachedMapEntity
 	{
 		std::string Name;
 		CachedMapMesh Mesh;
 		CachedMapLight Light;
+		CachedMapDecal Decal;
 		bool bHasCamera = false;
 		std::vector<CachedMapScript> Scripts;
 		uint32_t OriginalOrder = 0;
@@ -302,7 +345,7 @@ namespace
 	};
 
 	constexpr char kCachedMapSceneMagic[8] = { 'C', 'R', 'N', 'M', 'A', 'P', 'S', '\0' };
-	constexpr uint32_t kCachedMapSceneVersion = 2;
+	constexpr uint32_t kCachedMapSceneVersion = 6;
 	constexpr uint32_t kCachedMapSceneMaxStringBytes = 1024u * 1024u;
 	constexpr uint32_t kCachedMapSceneMaxEntities = 2u * 1000u * 1000u;
 	constexpr uint32_t kCachedMapSceneMaxChunks = 256u * 1024u;
@@ -310,6 +353,7 @@ namespace
 	constexpr uint32_t kInvalidCachedMapChunkId = std::numeric_limits<uint32_t>::max();
 	constexpr float kCachedMapChunkCellSize = 2048.0f;
 	constexpr bool kMapLoadDetailedReplayProfile = false;
+	constexpr bool kEnableRoadJunctionFillPatches = false;
 	constexpr size_t kCachedMapSceneIoBufferBytes = 4u * 1024u * 1024u;
 
 	template<typename T>
@@ -590,6 +634,74 @@ namespace
 			ReadCachedVec3(file, light.Position);
 	}
 
+	bool WriteCachedMapDecal(std::ofstream& file, const CachedMapDecal& decal)
+	{
+		return
+			WriteCachedBool(file, decal.bPresent) &&
+			WriteCachedString(file, decal.Type) &&
+			WriteCachedVec3(file, decal.Position) &&
+			WriteCachedVec3(file, decal.Rotation) &&
+			WriteCachedValue(file, decal.Size.x) &&
+			WriteCachedValue(file, decal.Size.y) &&
+			WriteCachedValue(file, decal.Color.x) &&
+			WriteCachedValue(file, decal.Color.y) &&
+			WriteCachedValue(file, decal.Color.z) &&
+			WriteCachedValue(file, decal.Color.w) &&
+			WriteCachedValue(file, decal.Roughness) &&
+			WriteCachedValue(file, decal.UvRepeat) &&
+			WriteCachedValue(file, decal.UvRepeatY) &&
+			WriteCachedValue(file, decal.HeightTolerance) &&
+			WriteCachedValue(file, decal.NormalThreshold) &&
+			WriteCachedBool(file, decal.bCenterStripe) &&
+			WriteCachedBool(file, decal.bEnabled) &&
+			WriteCachedValue(file, decal.PolygonVertexCount) &&
+			[&]() -> bool
+			{
+				for (const glm::vec2& point : decal.PolygonXZ)
+				{
+					if (!WriteCachedValue(file, point.x) || !WriteCachedValue(file, point.y))
+						return false;
+				}
+				return true;
+			}();
+	}
+
+	bool ReadCachedMapDecal(std::ifstream& file, CachedMapDecal& decal)
+	{
+		if (!(
+			ReadCachedBool(file, decal.bPresent) &&
+			ReadCachedString(file, decal.Type) &&
+			ReadCachedVec3(file, decal.Position) &&
+			ReadCachedVec3(file, decal.Rotation) &&
+			ReadCachedValue(file, decal.Size.x) &&
+			ReadCachedValue(file, decal.Size.y) &&
+			ReadCachedValue(file, decal.Color.x) &&
+			ReadCachedValue(file, decal.Color.y) &&
+			ReadCachedValue(file, decal.Color.z) &&
+			ReadCachedValue(file, decal.Color.w) &&
+			ReadCachedValue(file, decal.Roughness) &&
+			ReadCachedValue(file, decal.UvRepeat) &&
+			ReadCachedValue(file, decal.UvRepeatY) &&
+			ReadCachedValue(file, decal.HeightTolerance) &&
+			ReadCachedValue(file, decal.NormalThreshold) &&
+			ReadCachedBool(file, decal.bCenterStripe) &&
+			ReadCachedBool(file, decal.bEnabled) &&
+			ReadCachedValue(file, decal.PolygonVertexCount)))
+		{
+			return false;
+		}
+
+		decal.PolygonVertexCount = std::min<uint32_t>(
+			decal.PolygonVertexCount,
+			static_cast<uint32_t>(Corona::RoadDecalState::MaxPolygonVertices));
+		for (glm::vec2& point : decal.PolygonXZ)
+		{
+			if (!ReadCachedValue(file, point.x) || !ReadCachedValue(file, point.y))
+				return false;
+		}
+		return true;
+	}
+
 	bool WriteCachedMapChunk(std::ofstream& file, const CachedMapChunk& chunk)
 	{
 		return
@@ -628,6 +740,11 @@ namespace
 			entity.Light.bHasPosition)
 		{
 			outPosition = entity.Light.Position;
+			return true;
+		}
+		if (entity.Decal.bPresent)
+		{
+			outPosition = entity.Decal.Position;
 			return true;
 		}
 		return false;
@@ -836,6 +953,7 @@ namespace
 				!WriteCachedValue(file, entity.ChunkId) ||
 				!WriteCachedMapMesh(file, entity.Mesh) ||
 				!WriteCachedMapLight(file, entity.Light) ||
+				!WriteCachedMapDecal(file, entity.Decal) ||
 				!WriteCachedBool(file, entity.bHasCamera))
 			{
 				return false;
@@ -899,6 +1017,7 @@ namespace
 				!ReadCachedValue(file, entity.ChunkId) ||
 				!ReadCachedMapMesh(file, entity.Mesh) ||
 				!ReadCachedMapLight(file, entity.Light) ||
+				!ReadCachedMapDecal(file, entity.Decal) ||
 				!ReadCachedBool(file, entity.bHasCamera))
 			{
 				return false;
@@ -1078,6 +1197,72 @@ namespace
 			LuaGetVec3(L, lightIdx, "position", light.Position);
 	}
 
+	void ParseCachedMapDecal(lua_State* L, int decalIdx, CachedMapDecal& decal)
+	{
+		decal = {};
+		decal.bPresent = true;
+		LuaGetString(L, decalIdx, "type", decal.Type);
+		std::transform(decal.Type.begin(), decal.Type.end(), decal.Type.begin(),
+			[](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+		LuaGetVec3(L, decalIdx, "position", decal.Position);
+		LuaGetVec3(L, decalIdx, "rotation", decal.Rotation);
+		LuaGetVec2(L, decalIdx, "size", decal.Size);
+		if (!LuaGetVec4(L, decalIdx, "color", decal.Color))
+		{
+			glm::vec3 color3(decal.Color.x, decal.Color.y, decal.Color.z);
+			if (LuaGetVec3(L, decalIdx, "base_color", color3))
+				decal.Color = glm::vec4(color3, decal.Color.w);
+		}
+		double value = decal.Roughness;
+		if (LuaGetNumber(L, decalIdx, "roughness", value))
+			decal.Roughness = static_cast<float>(value);
+		value = decal.UvRepeat;
+		if (LuaGetNumber(L, decalIdx, "uv_repeat", value))
+			decal.UvRepeat = static_cast<float>(value);
+		value = decal.UvRepeatY;
+		if (LuaGetNumber(L, decalIdx, "uv_repeat_y", value))
+			decal.UvRepeatY = static_cast<float>(value);
+		value = decal.HeightTolerance;
+		if (LuaGetNumber(L, decalIdx, "height_tolerance", value))
+			decal.HeightTolerance = static_cast<float>(value);
+		value = decal.NormalThreshold;
+		if (LuaGetNumber(L, decalIdx, "normal_threshold", value))
+			decal.NormalThreshold = static_cast<float>(value);
+		LuaGetBool(L, decalIdx, "center_stripe", decal.bCenterStripe);
+		LuaGetBool(L, decalIdx, "enabled", decal.bEnabled);
+
+		lua_getfield(L, decalIdx, "polygon");
+		if (lua_istable(L, -1))
+		{
+			const int polygonIdx = lua_gettop(L);
+			uint32_t count = 0;
+			for (uint32_t i = 0u; i < Corona::RoadDecalState::MaxPolygonVertices; ++i)
+			{
+				lua_rawgeti(L, polygonIdx, static_cast<int>(i + 1u));
+				if (!lua_istable(L, -1))
+				{
+					lua_pop(L, 1);
+					break;
+				}
+
+				glm::vec2 point(0.0f);
+				lua_rawgeti(L, -1, 1);
+				point.x = lua_isnumber(L, -1) ? static_cast<float>(lua_tonumber(L, -1)) : point.x;
+				lua_pop(L, 1);
+				lua_rawgeti(L, -1, 2);
+				point.y = lua_isnumber(L, -1) ? static_cast<float>(lua_tonumber(L, -1)) : point.y;
+				lua_pop(L, 1);
+				lua_pop(L, 1);
+
+				if (!std::isfinite(point.x) || !std::isfinite(point.y))
+					break;
+				decal.PolygonXZ[count++] = point;
+			}
+			decal.PolygonVertexCount = count;
+		}
+		lua_pop(L, 1);
+	}
+
 	void ParseCachedMapGlobals(lua_State* L, int rootIdx, CachedMapGlobals& globals)
 	{
 		lua_getfield(L, rootIdx, "globals");
@@ -1113,6 +1298,539 @@ namespace
 				LuaGetVec4(L, globalsIdx, "terrain_deform_sphere", globals.TerrainDeformSphere);
 		}
 		lua_pop(L, 1);
+	}
+
+	bool IsCachedRoadMeshDecalCandidate(const CachedMapEntity& entity)
+	{
+		if (!entity.Mesh.bPresent || entity.Mesh.Primitive != CachedMapMeshPrimitive::Box)
+			return false;
+		std::string textureKind = entity.Mesh.TextureKind;
+		std::transform(textureKind.begin(), textureKind.end(), textureKind.begin(),
+			[](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+		if (textureKind != "road" && textureKind != "asphalt" && textureKind != "street" && textureKind != "pavement")
+			return false;
+		return entity.Name.rfind("Road_", 0) == 0 || textureKind == "road";
+	}
+
+	Corona::RoadDecalState BuildRoadDecalFromTransform(
+		const glm::vec3& position,
+		const glm::vec3& rotationDegrees,
+		const glm::vec2& size,
+		const glm::vec4& color,
+		float roughness,
+		float uvRepeat,
+		float uvRepeatY,
+		float heightTolerance,
+		float normalThreshold,
+		bool centerStripe,
+		bool enabled)
+	{
+		Corona::RoadDecalState decal;
+		decal.Center = position;
+		decal.HalfLength = std::max(std::abs(size.x) * 0.5f, 0.5f);
+		decal.HalfWidth = std::max(std::abs(size.y) * 0.5f, 0.5f);
+		const float yawRadians = glm::radians(-rotationDegrees.y);
+		decal.AxisX = glm::normalize(glm::vec3(std::cos(yawRadians), 0.0f, std::sin(yawRadians)));
+		decal.AxisZ = glm::normalize(glm::vec3(-decal.AxisX.z, 0.0f, decal.AxisX.x));
+		decal.Height = position.y;
+		decal.BaseColor = color;
+		decal.Roughness = std::clamp(roughness, 0.02f, 1.0f);
+		decal.UvRepeatX = std::max(uvRepeat, 0.01f);
+		decal.UvRepeatY = std::max(uvRepeatY, 0.01f);
+		decal.HeightTolerance = std::max(heightTolerance, 0.01f);
+		decal.NormalThreshold = std::clamp(normalThreshold, -1.0f, 1.0f);
+		decal.bDrawCenterStripe = centerStripe;
+		decal.bEnabled = enabled;
+		return decal;
+	}
+
+	Corona::RoadDecalState BuildRoadDecalFromCachedDecal(const CachedMapDecal& cached)
+	{
+		Corona::RoadDecalState decal = BuildRoadDecalFromTransform(
+			cached.Position,
+			cached.Rotation,
+			cached.Size,
+			cached.Color,
+			cached.Roughness,
+			cached.UvRepeat,
+			cached.UvRepeatY,
+			cached.HeightTolerance,
+			cached.NormalThreshold,
+			cached.bCenterStripe,
+			cached.bEnabled);
+		decal.PolygonVertexCount = std::min<uint32_t>(
+			cached.PolygonVertexCount,
+			static_cast<uint32_t>(Corona::RoadDecalState::MaxPolygonVertices));
+		for (uint32_t i = 0u; i < Corona::RoadDecalState::MaxPolygonVertices; ++i)
+		{
+			const uint32_t srcIndex = i < decal.PolygonVertexCount ? i : (decal.PolygonVertexCount > 0u ? decal.PolygonVertexCount - 1u : 0u);
+			decal.PolygonXZ[i] = cached.PolygonXZ[srcIndex];
+		}
+		return decal;
+	}
+
+	Corona::RoadDecalState BuildRoadDecalFromCachedRoadMesh(const CachedMapMesh& mesh)
+	{
+		const float length = std::max(std::abs(mesh.Scale.x), 1.0f);
+		const float width = mesh.bFrontOnly ?
+			std::max(std::abs(mesh.Scale.y), 1.0f) :
+			std::max(std::abs(mesh.Scale.z), 1.0f);
+		const glm::vec4 color(mesh.Color, 1.0f);
+		return BuildRoadDecalFromTransform(
+			mesh.Position,
+			mesh.Rotation,
+			glm::vec2(length, width),
+			color,
+			mesh.Roughness,
+			mesh.UvRepeat,
+			mesh.UvRepeatY > 0.0f ? mesh.UvRepeatY : 1.0f,
+			24.0f,
+			0.65f,
+			true,
+			mesh.bVisible);
+	}
+
+	float Cross2D(const glm::vec2& a, const glm::vec2& b)
+	{
+		return a.x * b.y - a.y * b.x;
+	}
+
+	std::vector<glm::vec2> BuildConvexHull2D(std::vector<glm::vec2> points)
+	{
+		points.erase(
+			std::remove_if(
+				points.begin(),
+				points.end(),
+				[](const glm::vec2& p)
+				{
+					return !std::isfinite(p.x) || !std::isfinite(p.y);
+				}),
+			points.end());
+		if (points.size() < 3)
+			return points;
+
+		std::sort(
+			points.begin(),
+			points.end(),
+			[](const glm::vec2& a, const glm::vec2& b)
+			{
+				if (a.x == b.x)
+					return a.y < b.y;
+				return a.x < b.x;
+			});
+
+		std::vector<glm::vec2> uniquePoints;
+		uniquePoints.reserve(points.size());
+		for (const glm::vec2& p : points)
+		{
+			if (uniquePoints.empty() || glm::length(p - uniquePoints.back()) > 0.25f)
+				uniquePoints.push_back(p);
+		}
+		if (uniquePoints.size() < 3)
+			return uniquePoints;
+
+		std::vector<glm::vec2> hull;
+		hull.reserve(uniquePoints.size() * 2);
+		for (const glm::vec2& p : uniquePoints)
+		{
+			while (hull.size() >= 2 &&
+				Cross2D(hull.back() - hull[hull.size() - 2], p - hull.back()) <= 0.01f)
+			{
+				hull.pop_back();
+			}
+			hull.push_back(p);
+		}
+
+		const size_t lowerCount = hull.size();
+		for (size_t i = uniquePoints.size() - 1; i-- > 0;)
+		{
+			const glm::vec2& p = uniquePoints[i];
+			while (hull.size() > lowerCount &&
+				Cross2D(hull.back() - hull[hull.size() - 2], p - hull.back()) <= 0.01f)
+			{
+				hull.pop_back();
+			}
+			hull.push_back(p);
+		}
+		if (!hull.empty())
+			hull.pop_back();
+		return hull;
+	}
+
+	std::vector<Corona::RoadDecalState> BuildRoadJunctionDecals(const std::vector<Corona::RoadDecalState>& sourceDecals)
+	{
+		struct Segment
+		{
+			glm::vec2 A = glm::vec2(0.0f);
+			glm::vec2 B = glm::vec2(0.0f);
+			glm::vec2 Axis = glm::vec2(1.0f, 0.0f);
+			float Width = 0.0f;
+			const Corona::RoadDecalState* Source = nullptr;
+		};
+
+		struct JunctionSeed
+		{
+			glm::vec2 Center = glm::vec2(0.0f);
+			std::vector<size_t> SegmentIndices;
+			const Corona::RoadDecalState* Source = nullptr;
+			float Width = 0.0f;
+		};
+
+		struct JunctionArm
+		{
+			glm::vec2 CapCenter = glm::vec2(0.0f);
+			glm::vec2 Direction = glm::vec2(1.0f, 0.0f);
+			float HalfWidth = 1.0f;
+			float Length = 1.0f;
+			float CapDistance = 0.0f;
+		};
+
+		std::vector<Segment> segments;
+		segments.reserve(sourceDecals.size());
+		std::vector<JunctionSeed> seeds;
+		seeds.reserve(sourceDecals.size() / 2);
+		std::vector<Corona::RoadDecalState> junctions;
+		junctions.reserve(sourceDecals.size() / 2);
+
+		auto addUniqueSegmentIndex = [](std::vector<size_t>& indices, size_t index)
+		{
+			if (std::find(indices.begin(), indices.end(), index) == indices.end())
+				indices.push_back(index);
+		};
+
+		auto addUniqueJunctionArm = [](std::vector<JunctionArm>& arms, const JunctionArm& arm)
+		{
+			if (!std::isfinite(arm.Direction.x) || !std::isfinite(arm.Direction.y) || arm.Length < 1.0f)
+				return;
+
+			constexpr float kSameArmDot = 0.985f;
+			for (JunctionArm& existing : arms)
+			{
+				if (glm::dot(existing.Direction, arm.Direction) > kSameArmDot)
+				{
+					existing.HalfWidth = std::max(existing.HalfWidth, arm.HalfWidth);
+					existing.Length = std::max(existing.Length, arm.Length);
+					if (arm.CapDistance < existing.CapDistance)
+					{
+						existing.CapCenter = arm.CapCenter;
+						existing.CapDistance = arm.CapDistance;
+					}
+					return;
+				}
+			}
+			arms.push_back(arm);
+		};
+
+		auto intersectLines2D = [](const glm::vec2& originA, const glm::vec2& directionA, const glm::vec2& originB, const glm::vec2& directionB, glm::vec2& outPoint)
+		{
+			const float denom = Cross2D(directionA, directionB);
+			if (std::abs(denom) < 1.0e-4f)
+				return false;
+
+			const float t = Cross2D(originB - originA, directionB) / denom;
+			outPoint = originA + directionA * t;
+			return std::isfinite(outPoint.x) && std::isfinite(outPoint.y);
+		};
+
+		auto addJunctionSeed = [&](const glm::vec2& p, size_t segmentA, size_t segmentB)
+		{
+			const Segment& a = segments[segmentA];
+			const Segment& b = segments[segmentB];
+			const Segment& widest = a.Width >= b.Width ? a : b;
+			if (!widest.Source)
+				return;
+
+			const float width = std::max(a.Width, b.Width);
+			const float mergeRadius = std::max(width * 0.65f, 48.0f);
+			for (JunctionSeed& seed : seeds)
+			{
+				const glm::vec2 delta = seed.Center - p;
+				if (glm::dot(delta, delta) <= mergeRadius * mergeRadius)
+				{
+					addUniqueSegmentIndex(seed.SegmentIndices, segmentA);
+					addUniqueSegmentIndex(seed.SegmentIndices, segmentB);
+					if (width > seed.Width)
+					{
+						seed.Width = width;
+						seed.Source = widest.Source;
+					}
+					return;
+				}
+			}
+
+			JunctionSeed seed;
+			seed.Center = p;
+			seed.Source = widest.Source;
+			seed.Width = width;
+			addUniqueSegmentIndex(seed.SegmentIndices, segmentA);
+			addUniqueSegmentIndex(seed.SegmentIndices, segmentB);
+			seeds.push_back(std::move(seed));
+		};
+
+		auto addEndpointProximitySeed = [&](size_t endpointSegmentIndex, size_t targetSegmentIndex, const glm::vec2& endpoint)
+		{
+			const Segment& endpointSegment = segments[endpointSegmentIndex];
+			const Segment& targetSegment = segments[targetSegmentIndex];
+			const glm::vec2 targetDelta = targetSegment.B - targetSegment.A;
+			const float targetLenSq = glm::dot(targetDelta, targetDelta);
+			if (targetLenSq < 1.0f)
+				return;
+
+			const float t = glm::dot(endpoint - targetSegment.A, targetDelta) / targetLenSq;
+			if (t < -0.05f || t > 1.05f)
+				return;
+
+			const glm::vec2 closest = targetSegment.A + targetDelta * std::clamp(t, 0.0f, 1.0f);
+			const float distance = glm::length(endpoint - closest);
+			const float maxWidth = std::max(endpointSegment.Width, targetSegment.Width);
+			const float joinDistance = std::max(maxWidth * 0.68f, 42.0f);
+			if (distance > joinDistance)
+				return;
+
+			const float axisDot = std::abs(glm::dot(endpointSegment.Axis, targetSegment.Axis));
+			if (axisDot > 0.96f && distance > std::max(maxWidth * 0.22f, 14.0f))
+				return;
+
+			addJunctionSeed(endpoint, endpointSegmentIndex, targetSegmentIndex);
+		};
+
+		for (const Corona::RoadDecalState& decal : sourceDecals)
+		{
+			if (!decal.bEnabled || !decal.bDrawCenterStripe || decal.HalfLength < 1.0f || decal.HalfWidth < 1.0f)
+				continue;
+			const glm::vec2 center(decal.Center.x, decal.Center.z);
+			const glm::vec2 axis = glm::normalize(glm::vec2(decal.AxisX.x, decal.AxisX.z));
+			if (!std::isfinite(axis.x) || !std::isfinite(axis.y))
+				continue;
+			Segment segment;
+			segment.A = center - axis * decal.HalfLength;
+			segment.B = center + axis * decal.HalfLength;
+			segment.Axis = axis;
+			segment.Width = decal.HalfWidth * 2.0f;
+			segment.Source = &decal;
+			segments.push_back(segment);
+		}
+
+		for (size_t i = 0; i < segments.size(); ++i)
+		{
+			const glm::vec2 r = segments[i].B - segments[i].A;
+			const float rLen = glm::length(r);
+			if (rLen < 1.0f)
+				continue;
+			for (size_t j = i + 1; j < segments.size(); ++j)
+			{
+				const glm::vec2 s = segments[j].B - segments[j].A;
+				const float sLen = glm::length(s);
+				if (sLen < 1.0f)
+					continue;
+				const float denom = Cross2D(r, s);
+				if (std::abs(denom) < 1.0e-3f)
+				{
+					addEndpointProximitySeed(i, j, segments[i].A);
+					addEndpointProximitySeed(i, j, segments[i].B);
+					addEndpointProximitySeed(j, i, segments[j].A);
+					addEndpointProximitySeed(j, i, segments[j].B);
+					continue;
+				}
+				const glm::vec2 qp = segments[j].A - segments[i].A;
+				const float t = Cross2D(qp, s) / denom;
+				const float u = Cross2D(qp, r) / denom;
+				const float endpointSlack = std::max(segments[i].Width, segments[j].Width) * 0.25f;
+				const float tSlack = endpointSlack / rLen;
+				const float uSlack = endpointSlack / sLen;
+				if (t < -tSlack || t > 1.0f + tSlack || u < -uSlack || u > 1.0f + uSlack)
+				{
+					addEndpointProximitySeed(i, j, segments[i].A);
+					addEndpointProximitySeed(i, j, segments[i].B);
+					addEndpointProximitySeed(j, i, segments[j].A);
+					addEndpointProximitySeed(j, i, segments[j].B);
+					continue;
+				}
+				else
+				{
+					const glm::vec2 p = segments[i].A + r * std::clamp(t, 0.0f, 1.0f);
+					addJunctionSeed(p, i, j);
+				}
+			}
+		}
+
+		for (const JunctionSeed& seed : seeds)
+		{
+			if (!seed.Source || seed.SegmentIndices.size() < 2)
+				continue;
+
+			std::vector<JunctionArm> arms;
+			arms.reserve(seed.SegmentIndices.size() * 2);
+			for (size_t segmentIndex : seed.SegmentIndices)
+			{
+				if (segmentIndex >= segments.size())
+					continue;
+
+				const Segment& segment = segments[segmentIndex];
+				const float halfWidth = std::max(segment.Width * 0.5f, 1.0f);
+				const glm::vec2 segmentDelta = segment.B - segment.A;
+				const float segmentLength = glm::length(segmentDelta);
+				if (segmentLength < 1.0f)
+					continue;
+
+				const glm::vec2 axis = segmentDelta / segmentLength;
+				const float endpointJoinDistance = std::max(segment.Width * 0.85f, 72.0f);
+				const bool bNearA = glm::length(segment.A - seed.Center) <= endpointJoinDistance;
+				const bool bNearB = glm::length(segment.B - seed.Center) <= endpointJoinDistance;
+				auto addArm = [&](const glm::vec2& capCenter, const glm::vec2& direction, float length)
+				{
+					if (glm::dot(direction, direction) <= 1.0e-6f || length < halfWidth * 0.25f)
+						return;
+
+					JunctionArm arm;
+					arm.CapCenter = capCenter;
+					arm.Direction = glm::normalize(direction);
+					arm.HalfWidth = halfWidth;
+					arm.Length = length;
+					arm.CapDistance = glm::length(capCenter - seed.Center);
+					addUniqueJunctionArm(arms, arm);
+				};
+
+				if (bNearA)
+					addArm(segment.A, axis, segmentLength);
+				if (bNearB)
+					addArm(segment.B, -axis, segmentLength);
+
+				if (!bNearA && !bNearB)
+				{
+					const float t = glm::dot(seed.Center - segment.A, segmentDelta) / (segmentLength * segmentLength);
+					if (t >= -0.02f && t <= 1.02f)
+					{
+						const glm::vec2 center = segment.A + segmentDelta * std::clamp(t, 0.0f, 1.0f);
+						const float centerlineDistance = glm::length(center - seed.Center);
+						if (centerlineDistance <= std::max(segment.Width * 0.35f, 24.0f))
+						{
+							addArm(center, axis, segmentLength * (1.0f - std::clamp(t, 0.0f, 1.0f)));
+							addArm(center, -axis, segmentLength * std::clamp(t, 0.0f, 1.0f));
+						}
+					}
+				}
+			}
+
+			if (arms.size() < 3)
+				continue;
+
+			std::sort(
+				arms.begin(),
+				arms.end(),
+				[](const JunctionArm& a, const JunctionArm& b)
+				{
+					return std::atan2(a.Direction.y, a.Direction.x) < std::atan2(b.Direction.y, b.Direction.x);
+				});
+
+			std::vector<glm::vec2> polygon;
+			polygon.reserve(arms.size() * 2);
+			struct JunctionCorner
+			{
+				glm::vec2 Point = glm::vec2(0.0f);
+				float Angle = 0.0f;
+				float Distance = 0.0f;
+			};
+			std::vector<JunctionCorner> corners;
+			corners.reserve(arms.size() * 2);
+			auto addCorner = [&](const glm::vec2& point)
+			{
+				if (!std::isfinite(point.x) || !std::isfinite(point.y))
+					return;
+				const glm::vec2 delta = point - seed.Center;
+				const float distance = glm::length(delta);
+				if (distance < 1.0f)
+					return;
+				JunctionCorner corner;
+				corner.Point = point;
+				corner.Angle = std::atan2(delta.y, delta.x);
+				corner.Distance = distance;
+				corners.push_back(corner);
+			};
+
+			for (const JunctionArm& arm : arms)
+			{
+				const glm::vec2 left(-arm.Direction.y, arm.Direction.x);
+				addCorner(arm.CapCenter + left * arm.HalfWidth);
+				addCorner(arm.CapCenter - left * arm.HalfWidth);
+			}
+
+			if (corners.size() < 3)
+				continue;
+			std::sort(
+				corners.begin(),
+				corners.end(),
+				[](const JunctionCorner& a, const JunctionCorner& b)
+				{
+					return a.Angle < b.Angle;
+				});
+			for (const JunctionCorner& corner : corners)
+			{
+				if (!polygon.empty() && glm::length(corner.Point - polygon.back()) < 1.0f)
+					continue;
+				polygon.push_back(corner.Point);
+			}
+			if (polygon.size() > 1 && glm::length(polygon.front() - polygon.back()) < 1.0f)
+				polygon.pop_back();
+			if (polygon.size() < 3)
+				continue;
+			if (polygon.size() > Corona::RoadDecalState::MaxPolygonVertices)
+			{
+				std::vector<glm::vec2> reducedPolygon;
+				reducedPolygon.reserve(Corona::RoadDecalState::MaxPolygonVertices);
+				for (uint32_t i = 0u; i < Corona::RoadDecalState::MaxPolygonVertices; ++i)
+				{
+					reducedPolygon.push_back(polygon[(static_cast<size_t>(i) * polygon.size()) / Corona::RoadDecalState::MaxPolygonVertices]);
+				}
+				polygon = std::move(reducedPolygon);
+			}
+
+			glm::vec2 boundsMin(std::numeric_limits<float>::max());
+			glm::vec2 boundsMax(-std::numeric_limits<float>::max());
+			for (const glm::vec2& p : polygon)
+			{
+				boundsMin = glm::min(boundsMin, p);
+				boundsMax = glm::max(boundsMax, p);
+			}
+			const glm::vec2 boundsSize = glm::max(boundsMax - boundsMin, glm::vec2(1.0f));
+			const glm::vec2 boundsCenter = (boundsMin + boundsMax) * 0.5f;
+			const float maxDimension = std::max(boundsSize.x, boundsSize.y);
+
+			glm::vec3 axisX = seed.Source->AxisX;
+			if (glm::dot(axisX, axisX) <= 1.0e-6f)
+				axisX = glm::vec3(1.0f, 0.0f, 0.0f);
+			axisX = glm::normalize(axisX);
+			glm::vec3 axisZ(-axisX.z, 0.0f, axisX.x);
+			if (glm::dot(axisZ, axisZ) <= 1.0e-6f)
+				axisZ = glm::vec3(0.0f, 0.0f, 1.0f);
+
+			Corona::RoadDecalState junction;
+			junction.Center = glm::vec3(boundsCenter.x, seed.Source->Height, boundsCenter.y);
+			junction.HalfLength = std::max(boundsSize.x * 0.5f, 0.5f);
+			junction.AxisX = axisX;
+			junction.HalfWidth = std::max(boundsSize.y * 0.5f, 0.5f);
+			junction.AxisZ = glm::normalize(axisZ);
+			junction.Height = seed.Source->Height;
+			junction.BaseColor = seed.Source->BaseColor;
+			junction.BaseColor.a = 1.0f;
+			junction.Roughness = seed.Source->Roughness;
+			junction.UvRepeatX = std::max(maxDimension / 180.0f, 1.0f);
+			junction.UvRepeatY = junction.UvRepeatX;
+			junction.HeightTolerance = std::max(seed.Source->HeightTolerance, 24.0f);
+			junction.NormalThreshold = seed.Source->NormalThreshold;
+			junction.bDrawCenterStripe = false;
+			junction.bFillOnlyMissingRoad = false;
+			junction.bEnabled = true;
+			junction.PolygonVertexCount = static_cast<uint32_t>(std::min<size_t>(polygon.size(), Corona::RoadDecalState::MaxPolygonVertices));
+			for (uint32_t i = 0u; i < Corona::RoadDecalState::MaxPolygonVertices; ++i)
+			{
+				const uint32_t srcIndex = i < junction.PolygonVertexCount ? i : (junction.PolygonVertexCount - 1u);
+				junction.PolygonXZ[i] = polygon[srcIndex];
+			}
+			junctions.push_back(junction);
+		}
+
+		return junctions;
 	}
 
 	bool ParseCachedMapSceneFromLua(
@@ -1181,6 +1899,11 @@ namespace
 					lua_getfield(L, entityIdx, "light");
 					if (lua_istable(L, -1))
 						ParseCachedMapLight(L, lua_gettop(L), entity.Light);
+					lua_pop(L, 1);
+
+					lua_getfield(L, entityIdx, "decal");
+					if (lua_istable(L, -1))
+						ParseCachedMapDecal(L, lua_gettop(L), entity.Decal);
 					lua_pop(L, 1);
 
 					lua_getfield(L, entityIdx, "camera");
@@ -1283,6 +2006,7 @@ void Corona::ClearScriptSpawnedScene()
 		}
 
 		SceneObjects = std::move(keptObjects);
+		RebuildSceneObjectHandleIndex();
 		if (removedObjectCount != 0)
 			MarkCpuPhysicsSceneDirty();
 	}
@@ -1315,6 +2039,8 @@ void Corona::ClearScriptSpawnedScene()
 	for (PointLightState& pl : PointLights)
 		MarkPointLightRenderRemoved(pl.Id);
 	PointLights.clear();
+	RoadDecals.clear();
+	MarkAllRoadDecalsForRenderSync();
 	// Cameras: handled by iterating active camera entity if present.
 	const auto activeCam = EntityWorld.GetActiveCameraEntity();
 	if (activeCam.IsValid())
@@ -1439,6 +2165,52 @@ bool Corona::SaveMapToFile(const std::wstring& name, std::wstring* outError)
 		out << "        },\n";
 		out << "        ray_tracing = " << (mesh->bRayTracing ? "true" : "false") << ",\n";
 		out << "        visible     = " << (mesh->bVisible ? "true" : "false") << ",\n";
+		out << "      },\n";
+		out << "    },\n";
+	}
+
+	// --- Road decal entities ---
+	// Road decals are render-side state, not ECS mesh entities. Persist them
+	// explicitly so editor autosave / save_map does not strip compiled road
+	// networks and produce a cache with roadDecals=0 on the next launch.
+	uint32_t roadDecalIndex = 1;
+	for (const RoadDecalState& decal : RoadDecals)
+	{
+		const glm::vec3 axisX =
+			glm::dot(decal.AxisX, decal.AxisX) > 1.0e-6f ?
+			glm::normalize(decal.AxisX) :
+			glm::vec3(1.0f, 0.0f, 0.0f);
+		const float yawDegrees = -glm::degrees(std::atan2(axisX.z, axisX.x));
+		const glm::vec3 position(decal.Center.x, decal.Height, decal.Center.z);
+		const glm::vec2 size(
+			std::max(decal.HalfLength * 2.0f, 1.0f),
+			std::max(decal.HalfWidth * 2.0f, 1.0f));
+
+		out << "    {\n";
+		out << "      name = " << EscapeLuaString("RoadDecal_" + std::to_string(roadDecalIndex++)) << ",\n";
+		out << "      decal = {\n";
+		out << "        type = \"road\",\n";
+		out << "        position = " << Vec3Lua(position) << ",\n";
+		out << "        rotation = {0," << yawDegrees << ",0},\n";
+		out << "        size = " << Vec2Lua(size) << ",\n";
+		if (decal.PolygonVertexCount >= 3u)
+		{
+			out << "        polygon = {\n";
+			const uint32_t polygonVertexCount = std::min<uint32_t>(
+				decal.PolygonVertexCount,
+				static_cast<uint32_t>(RoadDecalState::MaxPolygonVertices));
+			for (uint32_t i = 0u; i < polygonVertexCount; ++i)
+				out << "          " << Vec2Lua(decal.PolygonXZ[i]) << ",\n";
+			out << "        },\n";
+		}
+		out << "        color = " << Vec4Lua(decal.BaseColor) << ",\n";
+		out << "        roughness = " << decal.Roughness << ",\n";
+		out << "        uv_repeat = " << decal.UvRepeatX << ",\n";
+		out << "        uv_repeat_y = " << decal.UvRepeatY << ",\n";
+		out << "        height_tolerance = " << decal.HeightTolerance << ",\n";
+		out << "        normal_threshold = " << decal.NormalThreshold << ",\n";
+		out << "        center_stripe = " << (decal.bDrawCenterStripe ? "true" : "false") << ",\n";
+		out << "        enabled = " << (decal.bEnabled ? "true" : "false") << ",\n";
 		out << "      },\n";
 		out << "    },\n";
 	}
@@ -1837,7 +2609,7 @@ bool Corona::LoadMapFromFile(const std::wstring& name, std::wstring* outError)
 		size_t expectedScriptEntities = 0;
 		for (const CachedMapEntity& entity : mapScene->Entities)
 		{
-			if (entity.Mesh.bPresent)
+			if (entity.Mesh.bPresent && !IsCachedRoadMeshDecalCandidate(entity))
 				++expectedMeshEntities;
 			if (entity.Light.bPresent && entity.Light.Component.Type != CoronaECS::LightType::Directional)
 				++expectedPointLights;
@@ -1882,8 +2654,11 @@ bool Corona::LoadMapFromFile(const std::wstring& name, std::wstring* outError)
 		uint32_t meshEntityCount = 0;
 		uint32_t lightEntityCount = 0;
 		uint32_t scriptEntityCount = 0;
+		uint32_t roadJunctionDecalCount = 0;
 		std::unordered_map<std::string, ScriptSceneHandle> assetSceneHandleCache;
 		assetSceneHandleCache.reserve(1024);
+		std::vector<RoadDecalState> loadedRoadDecalSegments;
+		loadedRoadDecalSegments.reserve(1024);
 		for (int entityIndex = 0; entityIndex < entityCount; ++entityIndex)
 		{
 			const uint32_t orderedEntityIndex = replayOrder[static_cast<size_t>(entityIndex)];
@@ -1906,7 +2681,21 @@ bool Corona::LoadMapFromFile(const std::wstring& name, std::wstring* outError)
 			}
 
 			CoronaECS::Entity createdEntity;
-			if (cachedEntity.Mesh.bPresent)
+			const bool bRoadMeshConvertedToDecal = IsCachedRoadMeshDecalCandidate(cachedEntity);
+			if (cachedEntity.Decal.bPresent)
+			{
+				RoadDecalState decal = BuildRoadDecalFromCachedDecal(cachedEntity.Decal);
+				AddRoadDecalForMap(decal);
+				loadedRoadDecalSegments.push_back(decal);
+			}
+			if (bRoadMeshConvertedToDecal)
+			{
+				RoadDecalState decal = BuildRoadDecalFromCachedRoadMesh(cachedEntity.Mesh);
+				AddRoadDecalForMap(decal);
+				loadedRoadDecalSegments.push_back(decal);
+			}
+
+			if (cachedEntity.Mesh.bPresent && !bRoadMeshConvertedToDecal)
 			{
 				const CachedMapMesh& mesh = cachedEntity.Mesh;
 				ScriptSceneHandle sceneHandle = InvalidScriptSceneHandle;
@@ -1966,9 +2755,34 @@ bool Corona::LoadMapFromFile(const std::wstring& name, std::wstring* outError)
 				{
 					const auto meshApplyStart = kMapLoadDetailedReplayProfile ? CpuClock::now() : CpuClock::time_point();
 					CoronaECS::Entity newEntity = CreateEntity(entityName);
+					glm::vec3 meshPosition = mesh.Position;
+					glm::vec3 meshScale = mesh.Scale;
+					std::string textureKindLower = mesh.TextureKind;
+					std::transform(textureKindLower.begin(), textureKindLower.end(), textureKindLower.begin(),
+						[](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+					const bool bLooksLikeCompiledCityBuilding =
+						entityName.rfind("Building_", 0) == 0 ||
+						(mesh.Primitive == CachedMapMeshPrimitive::Box &&
+						 mesh.bUseScale &&
+						 mesh.Scale.y > 80.0f &&
+						 textureKindLower != "road" &&
+						 textureKindLower != "asphalt" &&
+						 textureKindLower != "street" &&
+						 textureKindLower != "pavement" &&
+						 entityName != "City_Ground");
+					if (bLooksLikeCompiledCityBuilding &&
+						mesh.Primitive == CachedMapMeshPrimitive::Box &&
+						mesh.bUseScale)
+					{
+						const float buildingBaseSink = std::clamp(std::abs(mesh.Scale.y) * 0.08f, 40.0f, 256.0f);
+						meshPosition.y = std::min(meshPosition.y, -buildingBaseSink);
+						meshScale.y = mesh.Scale.y >= 0.0f ?
+							(mesh.Scale.y + buildingBaseSink) :
+							(mesh.Scale.y - buildingBaseSink);
+					}
 					AddMeshComponentForScript(
 						newEntity, sceneHandle,
-						mesh.Position, mesh.Rotation, mesh.TargetExtent, mesh.Scale, mesh.bUseScale,
+						meshPosition, mesh.Rotation, mesh.TargetExtent, meshScale, mesh.bUseScale,
 						mesh.Roughness, mesh.Metallic, mesh.bOverrideMaterial,
 						mesh.bVisible, mesh.bRayTracing, /*physicsQuery*/ true);
 					createdEntity = newEntity;
@@ -2057,6 +2871,14 @@ bool Corona::LoadMapFromFile(const std::wstring& name, std::wstring* outError)
 				}
 			}
 		}
+		if constexpr (kEnableRoadJunctionFillPatches)
+		{
+			for (const RoadDecalState& junction : BuildRoadJunctionDecals(loadedRoadDecalSegments))
+			{
+				AddRoadDecalForMap(junction);
+				++roadJunctionDecalCount;
+			}
+		}
 		bMapReplayInProgress = bPreviousMapReplayInProgress;
 		const double replayMs = MapFormatElapsedMilliseconds(replayStart, CpuClock::now());
 		AppendCpuRuntimeTrace(
@@ -2067,6 +2889,8 @@ bool Corona::LoadMapFromFile(const std::wstring& name, std::wstring* outError)
 			L", lightApplyMs=" + MapFormatFormatMilliseconds(lightApplyMs) +
 			L", scriptApplyMs=" + MapFormatFormatMilliseconds(scriptApplyMs) +
 			L", meshEntities=" + std::to_wstring(meshEntityCount) +
+			L", roadDecals=" + std::to_wstring(RoadDecals.size()) +
+			L", roadJunctionDecals=" + std::to_wstring(roadJunctionDecalCount) +
 			L", lightEntities=" + std::to_wstring(lightEntityCount) +
 			L", scriptEntities=" + std::to_wstring(scriptEntityCount) +
 			L", assetSceneCacheEntries=" + std::to_wstring(assetSceneHandleCache.size()) +
@@ -2102,6 +2926,7 @@ bool Corona::LoadMapFromFile(const std::wstring& name, std::wstring* outError)
 		PersistLastEditorMapName(name);
 		MarkAllSceneObjectsForRenderSync();
 		MarkAllPointLightsForRenderSync();
+		MarkAllRoadDecalsForRenderSync();
 		MarkCpuPhysicsSceneDirty();
 		MarkRayTracingSceneDirty();
 		bRayTracingBLASCacheResetPending = true;

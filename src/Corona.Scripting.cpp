@@ -235,6 +235,8 @@ namespace
 			return "leaf";
 		if (key == "ROCK" || key == "STONE" || key == "BOULDER")
 			return "rock";
+		if (key == "ROAD" || key == "ASPHALT" || key == "STREET" || key == "PAVEMENT")
+			return "road";
 		if (key == "FLOWER" || key == "FLOWERS" || key == "PETAL" || key == "PETALS")
 			return "flower";
 		if (key == "CLOUD" || key == "MIST")
@@ -4503,8 +4505,9 @@ Corona::ScriptSceneHandle Corona::CreateProceduralBoxSceneForScript(const glm::v
 		return cachedIt->second;
 
 	const std::filesystem::path absPath = GetAssetFullPath(generatedRel);
+	const bool bRoadTexture = textureKey == L"road";
 	std::error_code existsEc;
-	if (!std::filesystem::exists(absPath, existsEc))
+	if (bRoadTexture || !std::filesystem::exists(absPath, existsEc))
 	{
 		std::error_code dirEc;
 		std::filesystem::create_directories(absPath.parent_path(), dirEc);
@@ -4535,12 +4538,27 @@ Corona::ScriptSceneHandle Corona::CreateProceduralBoxSceneForScript(const glm::v
 		const glm::vec2 uvs[4] = {
 			{ 0.0f, uY }, { uX, uY }, { uX, 0.0f }, { 0.0f, 0.0f }
 		};
+		const glm::vec2 roadHorizontalFaceUvs[4] = {
+			{ uY, 0.0f }, { uY, uX }, { 0.0f, uX }, { 0.0f, 0.0f }
+		};
 
 		const std::filesystem::path mtlPath = absPath.parent_path() / (absPath.stem().wstring() + L".mtl");
 		std::ofstream mtl(mtlPath);
-		const glm::vec3 colorLinear = glm::vec3(quantizedColor) / 255.0f;
+		if (bRoadTexture)
+		{
+			GetProceduralBoxDiffuseTexture(L"road");
+			std::error_code textureCopyEc;
+			std::filesystem::copy_file(
+				GetAssetFullPath(L"assets\\procedural\\platformer_road.bmp"),
+				absPath.parent_path() / L"platformer_road.bmp",
+				std::filesystem::copy_options::overwrite_existing,
+				textureCopyEc);
+		}
+		const glm::vec3 colorLinear = bRoadTexture ? glm::vec3(1.0f) : glm::vec3(quantizedColor) / 255.0f;
 		mtl << "newmtl boxmat\n";
 		mtl << "Kd " << colorLinear.x << " " << colorLinear.y << " " << colorLinear.z << "\n";
+		if (bRoadTexture)
+			mtl << "map_Kd platformer_road.bmp\n";
 		mtl.close();
 
 		std::ofstream out(absPath);
@@ -4551,12 +4569,13 @@ Corona::ScriptSceneHandle Corona::CreateProceduralBoxSceneForScript(const glm::v
 
 		auto emitFace = [&](const ObjFace& f, int& vBase)
 		{
+			const glm::vec2* faceUvs = (bRoadTexture && std::abs(f.N.y) > 0.5f) ? roadHorizontalFaceUvs : uvs;
 			for (int i = 0; i < 4; ++i)
 				out << "v " << f.P[i].x << " " << f.P[i].y << " " << f.P[i].z << "\n";
 			for (int i = 0; i < 4; ++i)
 				out << "vn " << f.N.x << " " << f.N.y << " " << f.N.z << "\n";
 			for (int i = 0; i < 4; ++i)
-				out << "vt " << uvs[i].x << " " << uvs[i].y << "\n";
+				out << "vt " << faceUvs[i].x << " " << faceUvs[i].y << "\n";
 			const int b = vBase;
 			out << "usemtl boxmat\n";
 			out << "f " << (b+0) << "/" << (b+0) << "/" << (b+0)
@@ -4573,6 +4592,13 @@ Corona::ScriptSceneHandle Corona::CreateProceduralBoxSceneForScript(const glm::v
 		else
 			for (const ObjFace& f : faces) emitFace(f, vBase);
 		out.close();
+		if (bRoadTexture)
+		{
+			std::error_code cacheEc;
+			std::filesystem::path cmeshPath = absPath;
+			cmeshPath.replace_extension(L".cmesh");
+			std::filesystem::remove(cmeshPath, cacheEc);
+		}
 		AppendCpuRuntimeTrace(L"[Luau][MeshComponent] baked procedural box to " + absPath.wstring());
 	}
 
@@ -7499,6 +7525,8 @@ void Corona::RebuildFrameTimingOverlayTextIfStale()
 			case EGpuPass::ScreenProbeGI:
 			case EGpuPass::TemporalDenoise:
 			case EGpuPass::Lighting:
+			case EGpuPass::DepthHeightFog:
+			case EGpuPass::VolumetricFog:
 			case EGpuPass::DLSSRR:
 			case EGpuPass::DLSSSR:
 			case EGpuPass::TemporalAA:
@@ -8145,11 +8173,30 @@ void Corona::PushLuauUiStateForScript(lua_State* L, const std::string& mode, boo
 	PushNumberField(L, "rtao_indirect_floor", RTAOIndirectFloor);
 	PushNumberField(L, "surface_bounce_strength", SurfaceBounceStrength);
 	PushNumberField(L, "surface_bounce_saturation", SurfaceBounceSaturation);
+	PushBoolField(L, "enable_depth_height_fog", bEnableDepthHeightFog);
+	PushVec3Field(L, "depth_height_fog_color", DepthHeightFogColor);
+	PushNumberField(L, "depth_height_fog_density", DepthHeightFogDensity);
+	PushNumberField(L, "depth_height_fog_start_distance", DepthHeightFogStartDistance);
+	PushNumberField(L, "depth_height_fog_height", DepthHeightFogHeight);
+	PushNumberField(L, "depth_height_fog_height_falloff", DepthHeightFogHeightFalloff);
+	PushNumberField(L, "depth_height_fog_max_opacity", DepthHeightFogMaxOpacity);
+	PushBoolField(L, "enable_volumetric_fog", bEnableVolumetricFog);
+	PushVec3Field(L, "volumetric_fog_color", VolumetricFogColor);
+	PushNumberField(L, "volumetric_fog_density", VolumetricFogDensity);
+	PushNumberField(L, "volumetric_fog_start_distance", VolumetricFogStartDistance);
+	PushNumberField(L, "volumetric_fog_max_distance", VolumetricFogMaxDistance);
+	PushNumberField(L, "volumetric_fog_height", VolumetricFogHeight);
+	PushNumberField(L, "volumetric_fog_height_falloff", VolumetricFogHeightFalloff);
+	PushNumberField(L, "volumetric_fog_max_opacity", VolumetricFogMaxOpacity);
+	PushNumberField(L, "volumetric_fog_ambient_strength", VolumetricFogAmbientStrength);
+	PushNumberField(L, "volumetric_fog_directional_strength", VolumetricFogDirectionalStrength);
+	PushNumberField(L, "volumetric_fog_anisotropy", VolumetricFogAnisotropy);
+	PushIntegerField(L, "volumetric_fog_grid_pixel_size", static_cast<lua_Integer>(VolumetricFogGridPixelSize));
+	PushIntegerField(L, "volumetric_fog_grid_z", static_cast<lua_Integer>(VolumetricFogGridSizeZ));
 	PushIntegerField(L, "simple_gi_samples_per_pixel", static_cast<lua_Integer>(SimpleGISamplesPerPixel));
 	PushBoolField(L, "enable_gi_disocclusion_filter", bEnableGIDisocclusionFilter);
 	PushIntegerField(L, "diffuse_gi_spatial_filter_radius", static_cast<lua_Integer>(DiffuseGISpatialFilterCB.Radius));
 	PushBoolField(L, "feed_raw_gi_to_rr", bFeedRawGIToRR);
-	PushBoolField(L, "enable_simple_gi_spatial_filter", bEnableSimpleGISpatialFilter);
 	PushIntegerField(L, "diffuse_gi_mode", static_cast<lua_Integer>(DiffuseGIMode));
 	PushIntegerField(L, "screen_probe_spacing", static_cast<lua_Integer>(ScreenProbeGICB.ProbeSpacing));
 	PushIntegerField(L, "screen_probe_gather_radius", static_cast<lua_Integer>(ScreenProbeGICB.GatherRadius));
@@ -8750,6 +8797,93 @@ bool Corona::SetLuauUiValueForScript(const std::string& name, lua_State* L, int 
 	if (setFloat("rtao_indirect_floor", RTAOIndirectFloor, true)) return true;
 	if (setFloat("surface_bounce_strength", SurfaceBounceStrength, true)) return true;
 	if (setFloat("surface_bounce_saturation", SurfaceBounceSaturation, true)) return true;
+	if (setBool("enable_depth_height_fog", bEnableDepthHeightFog, true)) return true;
+	if (name == "depth_height_fog_color")
+	{
+		glm::vec3 value;
+		if (!ReadVec3(L, valueIndex, value))
+			return false;
+		value = glm::max(value, glm::vec3(0.0f));
+		if (!vecNearlyEqual(DepthHeightFogColor, value))
+			DepthHeightFogColor = value;
+		return true;
+	}
+	if (name == "depth_height_fog_density")
+	{
+		DepthHeightFogDensity = std::max(0.0f, readFloat());
+		return true;
+	}
+	if (name == "depth_height_fog_start_distance")
+	{
+		DepthHeightFogStartDistance = std::max(0.0f, readFloat());
+		return true;
+	}
+	if (setFloat("depth_height_fog_height", DepthHeightFogHeight, true)) return true;
+	if (name == "depth_height_fog_height_falloff")
+	{
+		DepthHeightFogHeightFalloff = std::max(0.0f, readFloat());
+		return true;
+	}
+	if (name == "depth_height_fog_max_opacity")
+	{
+		DepthHeightFogMaxOpacity = std::clamp(readFloat(), 0.0f, 1.0f);
+		return true;
+	}
+	if (setBool("enable_volumetric_fog", bEnableVolumetricFog, true)) return true;
+	if (name == "volumetric_fog_color")
+	{
+		glm::vec3 value;
+		if (!ReadVec3(L, valueIndex, value))
+			return false;
+		value = glm::max(value, glm::vec3(0.0f));
+		if (!vecNearlyEqual(VolumetricFogColor, value))
+			VolumetricFogColor = value;
+		return true;
+	}
+	if (name == "volumetric_fog_density")
+	{
+		VolumetricFogDensity = std::max(0.0f, readFloat());
+		return true;
+	}
+	if (name == "volumetric_fog_start_distance")
+	{
+		VolumetricFogStartDistance = std::max(0.0f, readFloat());
+		VolumetricFogMaxDistance = std::max(VolumetricFogMaxDistance, VolumetricFogStartDistance + 1.0f);
+		return true;
+	}
+	if (name == "volumetric_fog_max_distance")
+	{
+		VolumetricFogMaxDistance = std::max(VolumetricFogStartDistance + 1.0f, readFloat());
+		return true;
+	}
+	if (setFloat("volumetric_fog_height", VolumetricFogHeight, true)) return true;
+	if (name == "volumetric_fog_height_falloff")
+	{
+		VolumetricFogHeightFalloff = std::max(0.0f, readFloat());
+		return true;
+	}
+	if (name == "volumetric_fog_max_opacity")
+	{
+		VolumetricFogMaxOpacity = std::clamp(readFloat(), 0.0f, 1.0f);
+		return true;
+	}
+	if (name == "volumetric_fog_ambient_strength")
+	{
+		VolumetricFogAmbientStrength = std::max(0.0f, readFloat());
+		return true;
+	}
+	if (name == "volumetric_fog_directional_strength")
+	{
+		VolumetricFogDirectionalStrength = std::max(0.0f, readFloat());
+		return true;
+	}
+	if (name == "volumetric_fog_anisotropy")
+	{
+		VolumetricFogAnisotropy = std::clamp(readFloat(), -0.9f, 0.9f);
+		return true;
+	}
+	if (setUInt("volumetric_fog_grid_pixel_size", VolumetricFogGridPixelSize, 4, 64, true)) return true;
+	if (setUInt("volumetric_fog_grid_z", VolumetricFogGridSizeZ, 8, 128, true)) return true;
 	if (setUInt("simple_gi_samples_per_pixel", SimpleGISamplesPerPixel, 1, 8, true)) return true;
 	if (setBool("enable_gi_disocclusion_filter", bEnableGIDisocclusionFilter, true)) return true;
 	if (name == "diffuse_gi_spatial_filter_radius")
@@ -8761,7 +8895,6 @@ bool Corona::SetLuauUiValueForScript(const std::string& name, lua_State* L, int 
 		return true;
 	}
 	if (setBool("feed_raw_gi_to_rr", bFeedRawGIToRR, true)) return true;
-	if (setBool("enable_simple_gi_spatial_filter", bEnableSimpleGISpatialFilter, true)) return true;
 	if (setUInt("screen_probe_spacing", ScreenProbeGICB.ProbeSpacing, 4, 64, true)) return true;
 	if (setUInt("screen_probe_gather_radius", ScreenProbeGICB.GatherRadius, 1, 3, true)) return true;
 	if (setUInt("screen_probe_rays_per_probe", RTScreenProbeGIViewParam.RaysPerProbe, 1, 4, true)) return true;

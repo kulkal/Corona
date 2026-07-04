@@ -166,6 +166,10 @@ void Corona::RaytraceGIPass()
 		RTGIViewParam.NoiseMode = RenderFrameRayNoiseMode;
 		RTGIViewParam.GISamplesPerPixel = std::clamp(SimpleGISamplesPerPixel, 1u, MaxDiffuseGIPointLights);
 		RTGIViewParam.LightColor = RenderFrameLightColor;
+		RTGIViewParam.CheckerboardMode = RTIndirectFrameInterleaveMode == 3u ? 3u : 0u;
+		RTGIViewParam.CheckerboardPhase = RenderFrameIndex;
+		RTGIViewParam.CheckerboardLobeParity = 0u;
+		RTGIViewParam.CheckerboardOutputScale = RTGIViewParam.CheckerboardMode == 3u ? 4.0f : 1.0f;
 		FillPointLightParams(
 			RTGIViewParam.PointLights,
 			RTGIViewParam.PointLightCount,

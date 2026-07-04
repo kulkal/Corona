@@ -87,7 +87,8 @@ cbuffer LightingParam : register(b0)
     PointLightParam PointLights[MAX_POINT_LIGHTS];
     uint PointLightCount;
     float RTAODirectContactStrength; // RTAO contact term strength per lighting lobe
-    float2 PointLightPadding;
+    float UnselectedShadowCasterVisibility;
+    float PointLightPadding;
 };
 
 struct VSInput
@@ -434,22 +435,26 @@ float4 PSMain(PSInput input) : SV_TARGET
                 float pointRadius = max(PointLights[lightIndex].PositionAndRadius.w, 0.01f);
                 float3 pointColor = max(PointLights[lightIndex].ColorAndIntensity.xyz, 0.0f.xxx);
                 float pointIntensity = max(PointLights[lightIndex].ColorAndIntensity.w, 0.0f);
+                if (pointIntensity <= 0.0f || max(pointColor.x, max(pointColor.y, pointColor.z)) <= 0.0f)
+                    continue;
 
                 float3 toLight = pointPosition - WorldPosition;
                 float distanceSq = max(dot(toLight, toLight), 1.0e-4f);
-                float distanceToLight = sqrt(distanceSq);
-                float3 pointLightDir = toLight / distanceToLight;
+                float invDistanceToLight = rsqrt(distanceSq);
+                float3 pointLightDir = toLight * invDistanceToLight;
                 float attenuation = EvaluatePointLightDistanceAttenuation(distanceSq, pointRadius) *
                     EvaluateSpotAttenuation(PointLights[lightIndex], pointLightDir);
                 float pointNdotL = saturate(dot(pointLightDir, WorldNormal));
+                if (attenuation <= 0.0f || pointNdotL <= 0.0f)
+                    continue;
                 float3 pointRadiance = pointColor * pointIntensity * attenuation;
                 const bool castsShadow = PointLights[lightIndex].SpotConeAndFlags.w > 0.5f;
-                // Shadow-casting lights must be explicitly covered by the
-                // bounded per-pixel shadow set. Treating unselected shadow
-                // lights as unshadowed leaks light through walls when the
-                // grid candidate list is large. Non-shadow-casting lights
-                // still contribute normally.
-                float visibilityEstimate = castsShadow ? 0.0f : 1.0f;
+                // Shadow-casting lights outside the bounded per-pixel shadow
+                // set have no visibility ray. Non-RR keeps the conservative
+                // dark fallback; RR uses the unshadowed fallback so unknown
+                // local lights do not enter the reconstruction as false
+                // shadow regions.
+                float visibilityEstimate = castsShadow ? saturate(UnselectedShadowCasterVisibility) : 1.0f;
                 if (castsShadow)
                 {
                     [unroll]
@@ -505,14 +510,18 @@ float4 PSMain(PSInput input) : SV_TARGET
                 float pointRadius = max(PointLights[lightIndex].PositionAndRadius.w, 0.01f);
                 float3 pointColor = max(PointLights[lightIndex].ColorAndIntensity.xyz, 0.0f.xxx);
                 float pointIntensity = max(PointLights[lightIndex].ColorAndIntensity.w, 0.0f);
+                if (pointIntensity <= 0.0f || max(pointColor.x, max(pointColor.y, pointColor.z)) <= 0.0f)
+                    continue;
 
                 float3 toLight = pointPosition - WorldPosition;
                 float distanceSq = max(dot(toLight, toLight), 1.0e-4f);
-                float distanceToLight = sqrt(distanceSq);
-                float3 pointLightDir = toLight / distanceToLight;
+                float invDistanceToLight = rsqrt(distanceSq);
+                float3 pointLightDir = toLight * invDistanceToLight;
                 float attenuation = EvaluatePointLightDistanceAttenuation(distanceSq, pointRadius) *
                     EvaluateSpotAttenuation(PointLights[lightIndex], pointLightDir);
                 float pointNdotL = saturate(dot(pointLightDir, WorldNormal));
+                if (attenuation <= 0.0f || pointNdotL <= 0.0f)
+                    continue;
                 uint shadowChan = ShadowChannelMap[lightIndex >> 2u][lightIndex & 3u];
                 float pointVisibility = shadowChan < 3u ? PointVis[shadowChan] : 1.0f;
                 float3 pointRadiance = pointColor * pointIntensity * attenuation * pointVisibility;

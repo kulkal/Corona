@@ -330,6 +330,7 @@ target_include_directories(Corona PRIVATE
     "${CORONA_SPINE_C_ROOT}/include"
     "${CORONA_SRC_DIR}/external/imgui"
     "${CORONA_SRC_DIR}/external/imgui/backends"
+    "${CORONA_SRC_DIR}/external/streamline-sdk/external/json/include"
     "${CORONA_SRC_DIR}"
 )
 if(CORONA_PLATFORM_WINDOWS)

@@ -45,6 +45,10 @@ cbuffer ViewParameter : register(b0)
     PointLightParam PointLights[RT_DIFFUSE_GI_MAX_POINT_LIGHTS];
     uint PointLightCount;
     float3 PointLightPadding;
+    uint CheckerboardMode;
+    uint CheckerboardPhase;
+    uint CheckerboardLobeParity;
+    float CheckerboardOutputScale;
 };
 
 SamplerState sampleWrap : register(s0);
@@ -53,6 +57,62 @@ static const float INV_PI = 1.0 / PI;
 static const float MAX_HIT_DIST = 10000;
 
 #define RT_GI_SURFACE_RAY_FLAGS (RAY_FLAG_FORCE_OPAQUE | RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES)
+
+uint RTGIHashCheckerboardTile(uint2 tile)
+{
+    uint h = tile.x * 0x8da6b343u;
+    h ^= tile.y * 0xd8163841u;
+    h ^= h >> 16;
+    h *= 0x7feb352du;
+    h ^= h >> 15;
+    return h;
+}
+
+uint2 RTGIGetCheckerboardTargetOffset(uint2 pixel, uint2 renderSize)
+{
+    (void)renderSize;
+    uint2 basePixel = pixel - (pixel & uint2(1u, 1u));
+    uint2 tile = basePixel / 2u;
+    uint temporalSeed = CheckerboardPhase / 4u;
+    uint tileHash = RTGIHashCheckerboardTile(tile ^ uint2(temporalSeed * 0x9e3779b9u, temporalSeed * 0x7f4a7c15u));
+    uint lobePhaseBase = (CheckerboardPhase & 3u) + (tileHash & 3u);
+    uint lobePhase = (lobePhaseBase + (CheckerboardLobeParity & 1u) * 2u) & 3u;
+    uint2 offset = uint2(lobePhase & 1u, (lobePhase >> 1u) & 1u);
+    return offset;
+}
+
+uint2 RTGIGetCheckerboardSourcePixel(uint2 pixel, uint2 renderSize)
+{
+    uint2 basePixel = pixel - (pixel & uint2(1u, 1u));
+    return basePixel + RTGIGetCheckerboardTargetOffset(pixel, renderSize);
+}
+
+bool RTGIIsCheckerboardRepresentative(uint2 pixel, uint2 renderSize)
+{
+    uint2 basePixel = pixel - (pixel & uint2(1u, 1u));
+    return all((pixel - basePixel) == RTGIGetCheckerboardTargetOffset(pixel, renderSize));
+}
+
+bool RTGIShouldTracePixel(uint2 pixel, uint2 renderSize)
+{
+    if (CheckerboardMode != 3u)
+        return true;
+    return RTGIIsCheckerboardRepresentative(pixel, renderSize);
+}
+
+void RTGIStoreCheckerboard(uint2 pixel, uint2 renderSize, float4 shValue, float4 colorValue)
+{
+    (void)renderSize;
+    float scale = CheckerboardMode == 3u ? CheckerboardOutputScale : 1.0f;
+    GIResultSH[pixel] = shValue * scale;
+    GIResultColor[pixel] = float4(colorValue.rgb * scale, colorValue.a);
+}
+
+void RTGIClearCheckerboardPixel(uint2 pixel)
+{
+    GIResultSH[pixel] = float4(0.0f, 0.0f, 0.0f, 0.0f);
+    GIResultColor[pixel] = float4(0.0f, 0.0f, 0.0f, 0.0f);
+}
 
 float3 linearToSrgb(float3 c)
 {
@@ -139,6 +199,8 @@ float ComputePointLightEndpointBias(float lightRadius)
     return clamp(max(lightRadius, 0.01f) * 0.02f, 0.25f, 80.0f);
 }
 
+float3 offset_ray(float3 p, float3 n);
+
 bool LoadPointLightForGI(uint lightIndex, bool usePointLightGrid, out PointLightParam light)
 {
     light.PositionAndRadius = 0.0f.xxxx;
@@ -168,10 +230,11 @@ bool IsPointLightVisible(float3 worldPos, float3 normal, float3 lightDir, float 
     if (light.SpotConeAndFlags.w <= 0.5f)
         return true;
 
+    float3 biasNormal = dot(normal, lightDir) < 0.0f ? -normal : normal;
     RayDesc shadowRay;
-    shadowRay.Origin = worldPos + normal * 0.5f;
+    shadowRay.Origin = offset_ray(worldPos + biasNormal * 0.5f, biasNormal);
     shadowRay.Direction = lightDir;
-    shadowRay.TMin = 0.001f;
+    shadowRay.TMin = 0.5f;
     const float endpointBias = ComputePointLightEndpointBias(light.PositionAndRadius.w);
     if (lightDistance <= endpointBias + shadowRay.TMin)
         return true;
@@ -355,7 +418,21 @@ void TraceDiffuseGIRay(RayDesc ray, inout RayPayload payload)
 
 float3 offset_ray(float3 p, float3 n)
 {
-    return p + n * (1.0f / 256.0f);
+    const float origin = 1.0f / 32.0f;
+    const float floatScale = 1.0f / 65536.0f;
+    const float intScale = 256.0f;
+
+    int3 ofi = int3(n * intScale);
+    int3 piInt = asint(p);
+    piInt.x += p.x < 0.0f ? -ofi.x : ofi.x;
+    piInt.y += p.y < 0.0f ? -ofi.y : ofi.y;
+    piInt.z += p.z < 0.0f ? -ofi.z : ofi.z;
+
+    float3 pi = asfloat(piInt);
+    return float3(
+        abs(p.x) < origin ? p.x + floatScale * n.x : pi.x,
+        abs(p.y) < origin ? p.y + floatScale * n.y : pi.y,
+        abs(p.z) < origin ? p.z + floatScale * n.z : pi.z);
 }
 
 float random(float2 co){
@@ -401,6 +478,11 @@ void rayGen
     uint3 launchIndex = DispatchRaysIndex();
     uint3 launchDim = DispatchRaysDimensions();
 
+    if (!RTGIShouldTracePixel(launchIndex.xy, launchDim.xy))
+    {
+        RTGIClearCheckerboardPixel(launchIndex.xy);
+        return;
+    }
 
 
     float2 crd = float2(launchIndex.xy);
@@ -416,8 +498,7 @@ void rayGen
 	float DeviceDepth = DepthTex.SampleLevel(sampleWrap, UV, 0).x;
     if (DeviceDepth >= 0.999999f)
     {
-        GIResultSH[launchIndex.xy] = float4(0.0f, 0.0f, 0.0f, 0.0f);
-        GIResultColor[launchIndex.xy] = float4(0.0f, 0.0f, 0.0f, 0.0f);
+        RTGIStoreCheckerboard(launchIndex.xy, launchDim.xy, float4(0.0f, 0.0f, 0.0f, 0.0f), float4(0.0f, 0.0f, 0.0f, 0.0f));
         return;
     }
 
@@ -459,7 +540,7 @@ void rayGen
 	// raw diffuse feed that read as large flickering regions. Scaling the push-off and TMin
 	// with view depth keeps the origin clear of the surface at any distance.
 	float surfEps = max(0.5f, abs(LinearDepth) * 0.02f);
-	ray.Origin = WorldPos + WorldNormal * surfEps;
+	ray.Origin = offset_ray(WorldPos + WorldNormal * surfEps, WorldNormal);
 	ray.Direction = sampleDirWorld;//reflect(ViewDir, WorldNormal);
 
 	ray.TMin = max(0.01f, surfEps * 0.5f);
@@ -488,8 +569,7 @@ void rayGen
         SH sh_indirect = init_SH();
         sh_indirect = irradiance_to_SH(Irradiance, sampleDirWorld);
 
-        GIResultSH[launchIndex.xy] = sh_indirect.shY;
-        GIResultColor[launchIndex.xy] = float4(Irradiance, 1.0f);
+        RTGIStoreCheckerboard(launchIndex.xy, launchDim.xy, sh_indirect.shY, float4(Irradiance, 1.0f));
     }
     else
     {
@@ -502,10 +582,11 @@ void rayGen
         bool shadowHit = true;
         if (LightIntensity > 0.0f && NdotL > 0.0f)
         {
+            float3 shadowBiasNormal = dot(payload.normal, LightDir) < 0.0f ? -payload.normal : payload.normal;
             RayDesc shadowRay;
-            shadowRay.Origin = payload.position + payload.normal * 0.5f;
+            shadowRay.Origin = offset_ray(payload.position + shadowBiasNormal * 0.5f, shadowBiasNormal);
             shadowRay.Direction = LightDir;
-            shadowRay.TMin = 0.001f;
+            shadowRay.TMin = 0.5f;
             shadowRay.TMax = MAX_HIT_DIST;
             shadowHit = TraceDiffuseGIShadowOccluded(shadowRay);
         }
@@ -530,8 +611,7 @@ void rayGen
 
         sh_indirect = irradiance_to_SH(Irradiance, sampleDirWorld);
 
-        GIResultSH[launchIndex.xy] = sh_indirect.shY;
-        GIResultColor[launchIndex.xy] = float4(Irradiance, 1.0f);
+        RTGIStoreCheckerboard(launchIndex.xy, launchDim.xy, sh_indirect.shY, float4(Irradiance, 1.0f));
     }
 
 

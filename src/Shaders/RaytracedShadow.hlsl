@@ -44,6 +44,7 @@ StructuredBuffer<PointLightParam> PointLightBuffer : register(t16);
 #define POINT_LIGHT_GRID_COUNTS_REGISTER t17
 #define POINT_LIGHT_GRID_INDICES_REGISTER t18
 #include "PointLightGrid.hlsli"
+RaytracingAccelerationStructure gRtDynamicScene : register(t19);
 
 
 cbuffer ViewParameter : register(b0)
@@ -59,6 +60,8 @@ cbuffer ViewParameter : register(b0)
     uint FrameCounter;
     uint BlueNoiseOffsetStride;
     uint NoiseMode;
+    uint bDirectionalShadowTemporalStochastic;
+    uint bFiniteShadowTemporalStochastic;
     // 0 = Option A channel-pack (sun in R, top-3 lights in GBA),
     // 1 = ReSTIR Phase 1 single-light reservoir (sun in R, G=lightIdx,
     //     B=lightWeight, A=visibility). The two modes write different
@@ -73,6 +76,8 @@ cbuffer ViewParameter : register(b0)
     uint SpatialLightHashEntryMask;
     uint SpatialLightMaxProbeSteps;
     uint bUseSpatialLightMask;
+    uint bHasDynamicRtScene;
+    uint _DynamicRtScenePadding;
     float4 SpatialHashLevelParams;
     // Must match Corona::MaxPointLights in Corona.h. Option A reads only
     // the first 3 entries; ReSTIR iterates all valid entries.
@@ -83,7 +88,6 @@ cbuffer ViewParameter : register(b0)
     float4 ShadowedPointLightWeights[MAX_SHADOWED_PT_LIGHTS];
 };
 SamplerState sampleWrap : register(s0);
-
 
 float3 linearToSrgb(float3 c)
 {
@@ -116,7 +120,17 @@ bool TraceShadowOccluded(RayDesc ray)
              RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q;
     q.TraceRayInline(gRtScene, RAY_FLAG_NONE, RT_SHADOW_RAY_MASK, ray);
     q.Proceed();
-    return q.CommittedStatus() != COMMITTED_NOTHING;
+    if (q.CommittedStatus() != COMMITTED_NOTHING)
+        return true;
+    if (bHasDynamicRtScene != 0u)
+    {
+        RayQuery<RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH |
+                 RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> qDynamic;
+        qDynamic.TraceRayInline(gRtDynamicScene, RAY_FLAG_NONE, RT_SHADOW_RAY_MASK, ray);
+        qDynamic.Proceed();
+        return qDynamic.CommittedStatus() != COMMITTED_NOTHING;
+    }
+    return false;
 #else
     RayPayload payload;
     payload.bHit = 1u;
@@ -124,7 +138,58 @@ bool TraceShadowOccluded(RayDesc ray)
     TraceRay(gRtScene,
         RT_SHADOW_RAY_FLAGS,
         RT_SHADOW_RAY_MASK, 0, 0, 0, ray, payload);
-    return payload.bHit != 0u;
+    if (payload.bHit != 0u)
+        return true;
+    if (bHasDynamicRtScene != 0u)
+    {
+        payload.bHit = 1u;
+        TraceRay(gRtDynamicScene,
+            RT_SHADOW_RAY_FLAGS,
+            RT_SHADOW_RAY_MASK, 0, 0, 0, ray, payload);
+        return payload.bHit != 0u;
+    }
+    return false;
+#endif
+}
+
+bool TraceDirectionalShadowOccluded(RayDesc ray)
+{
+#ifdef RT_SHADOW_INLINE_RAYQUERY
+    RayQuery<RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH |
+             RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES |
+             RAY_FLAG_CULL_BACK_FACING_TRIANGLES> q;
+    q.TraceRayInline(gRtScene, RAY_FLAG_NONE, RT_SHADOW_RAY_MASK, ray);
+    q.Proceed();
+    if (q.CommittedStatus() != COMMITTED_NOTHING)
+        return true;
+    if (bHasDynamicRtScene != 0u)
+    {
+        RayQuery<RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH |
+                 RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES |
+                 RAY_FLAG_CULL_BACK_FACING_TRIANGLES> qDynamic;
+        qDynamic.TraceRayInline(gRtDynamicScene, RAY_FLAG_NONE, RT_SHADOW_RAY_MASK, ray);
+        qDynamic.Proceed();
+        return qDynamic.CommittedStatus() != COMMITTED_NOTHING;
+    }
+    return false;
+#else
+    RayPayload payload;
+    payload.bHit = 1u;
+    payload._padding = 0.0f.xxx;
+    TraceRay(gRtScene,
+        RT_SHADOW_RAY_FLAGS | RAY_FLAG_CULL_BACK_FACING_TRIANGLES,
+        RT_SHADOW_RAY_MASK, 0, 0, 0, ray, payload);
+    if (payload.bHit != 0u)
+        return true;
+    if (bHasDynamicRtScene != 0u)
+    {
+        payload.bHit = 1u;
+        TraceRay(gRtDynamicScene,
+            RT_SHADOW_RAY_FLAGS | RAY_FLAG_CULL_BACK_FACING_TRIANGLES,
+            RT_SHADOW_RAY_MASK, 0, 0, 0, ray, payload);
+        return payload.bHit != 0u;
+    }
+    return false;
 #endif
 }
 
@@ -298,11 +363,113 @@ float ComputePointLightEndpointBias(float lightRadius, float normalBias)
     return max(normalBias * 0.5f, clamp(lightRadius * 0.005f, 0.10f, 20.0f));
 }
 
+float3 SampleUnitSphere(float2 u)
+{
+    float z = 1.0f - 2.0f * saturate(u.x);
+    float r = sqrt(saturate(1.0f - z * z));
+    float phi = 2.0f * PI * u.y;
+    return float3(cos(phi) * r, sin(phi) * r, z);
+}
+
+float ComputeFiniteLightShadowSourceRadius(float lightRadius)
+{
+    // Small source sphere for point/spot shadow visibility only. The light
+    // shading still evaluates the original point/spot center, so keep this
+    // conservative to avoid changing apparent light size too much.
+    return clamp(lightRadius * 0.003f, 0.10f, 5.0f);
+}
+
+float3 SampleFiniteLightShadowTarget(float3 lightPos, float lightRadius, uint2 pixelPos)
+{
+    if (bFiniteShadowTemporalStochastic == 0u)
+        return lightPos;
+
+    uint lightSeed =
+        HashUInt(asuint(lightPos.x) ^ HashUInt(asuint(lightPos.y)) ^ HashUInt(asuint(lightPos.z)));
+    uint2 noisePixel = pixelPos + uint2(lightSeed & 255u, (lightSeed >> 8u) & 255u);
+    float2 randUV = GenerateRaySample2D(
+        RayNoiseBlueNoiseSource,
+        noisePixel,
+        FrameCounter + (lightSeed & 1023u),
+        BlueNoiseOffsetStride,
+        NoiseMode);
+    uint seed = pixelPos.x * 1973u +
+        pixelPos.y * 9277u +
+        FrameCounter * 26699u +
+        lightSeed * 17u;
+    randUV = frac(randUV + float2(HashToUnitFloat(seed), HashToUnitFloat(seed ^ 0x9E3779B9u)));
+    return lightPos + SampleUnitSphere(randUV) * ComputeFiniteLightShadowSourceRadius(lightRadius);
+}
+
 float ReconstructLinearViewDepth(float2 sampleUv, float deviceDepth)
 {
     float2 screenPosition = sampleUv * 2.0f - 1.0f;
     screenPosition.y = -screenPosition.y;
     return abs(GetViewPosition(deviceDepth, screenPosition, InvProjMatrix).z);
+}
+
+float3 FilterShadowVisibilityNormal(
+    uint2 pixelPos,
+    uint2 launchDim,
+    float currentLinearDepth,
+    float3 worldNormal,
+    float3 geoNormal)
+{
+    // Use only for shadow visibility decisions. This damps normal-map and
+    // tiny geometric-normal instability near grazing light angles without
+    // changing the GBuffer normal used by the final lighting pass.
+    const int2 maxPixel = int2(max(launchDim, uint2(1u, 1u)) - uint2(1u, 1u));
+    const float2 launchSize = float2(max(launchDim.x, 1u), max(launchDim.y, 1u));
+    const float depthTolerance = max(0.75f, currentLinearDepth * 0.0025f);
+
+    float3 normalSum = worldNormal;
+    float weightSum = 1.0f;
+
+    [unroll]
+    for (int oy = -1; oy <= 1; ++oy)
+    {
+        [unroll]
+        for (int ox = -1; ox <= 1; ++ox)
+        {
+            if (ox == 0 && oy == 0)
+                continue;
+
+            const int2 samplePixel = min(max(int2(pixelPos) + int2(ox, oy), int2(0, 0)), maxPixel);
+            const float sampleDepth = DepthTex.Load(int3(samplePixel, 0)).x;
+            if (sampleDepth >= 0.999999f)
+                continue;
+
+            const float2 sampleUv = (float2(samplePixel) + float2(0.5f, 0.5f)) / launchSize;
+            const float sampleLinearDepth = ReconstructLinearViewDepth(sampleUv, sampleDepth);
+            const float depthDelta = abs(sampleLinearDepth - currentLinearDepth);
+            if (depthDelta > depthTolerance)
+                continue;
+
+            float3 sampleGeoNormal = CommonSafeNormalize(GeoNormalTex.Load(int3(samplePixel, 0)).xyz, geoNormal);
+            if (dot(sampleGeoNormal, geoNormal) < 0.0f)
+                sampleGeoNormal = -sampleGeoNormal;
+            const float geoSimilarity = saturate((dot(sampleGeoNormal, geoNormal) - 0.55f) / 0.45f);
+            if (geoSimilarity <= 0.0f)
+                continue;
+
+            float3 sampleWorldNormal = CommonSafeNormalize(WorldNormalTex.Load(int3(samplePixel, 0)).xyz, sampleGeoNormal);
+            if (dot(sampleWorldNormal, sampleGeoNormal) < 0.0f)
+                sampleWorldNormal = -sampleWorldNormal;
+            if (dot(sampleWorldNormal, worldNormal) < 0.15f)
+                continue;
+
+            const float depthWeight = saturate(1.0f - depthDelta / depthTolerance);
+            const float weight = depthWeight * geoSimilarity;
+            normalSum += sampleWorldNormal * weight;
+            weightSum += weight;
+        }
+    }
+
+    float3 filteredNormal = CommonSafeNormalize(normalSum / max(weightSum, 1.0e-4f), worldNormal);
+    if (dot(filteredNormal, geoNormal) < 0.0f)
+        filteredNormal = -filteredNormal;
+    filteredNormal = CommonSafeNormalize(filteredNormal + geoNormal * 0.20f, worldNormal);
+    return CommonSafeNormalize(lerp(worldNormal, filteredNormal, 0.35f), worldNormal);
 }
 
 bool ReSTIRSurfaceCompatible(float2 sampleUv, float sampleDepth, float3 sampleNormal, float currentLinearDepth, float3 currentNormal)
@@ -319,9 +486,107 @@ bool ReSTIRSurfaceCompatible(float2 sampleUv, float sampleDepth, float3 sampleNo
     return dot(n, currentNormal) > 0.85f;
 }
 
+float ComputePointLightVisibility(
+    float3 worldPos,
+    float3 worldNormal,
+    float3 traceNormal,
+    float normalBias,
+    uint2 pixelPos,
+    float3 lightPos,
+    float lightRadius)
+{
+    float3 toCenter = lightPos - worldPos;
+    float distCenter = length(toCenter);
+    if (distCenter > lightRadius || distCenter < 1.0e-3f)
+        return 1.0f;
+
+    const float rayTMin = max(0.05f, normalBias * 0.25f);
+    const float endpointBias = ComputePointLightEndpointBias(lightRadius, normalBias);
+    float3 centerDir = toCenter / distCenter;
+    if (dot(worldNormal, centerDir) <= 0.0f)
+        return 0.0f;
+
+    // Conservative soft-source gate: if the original point/spot center is
+    // occluded, do not let a stochastic source sample leak light around thin
+    // blockers. The area sample can only turn an unoccluded center into a
+    // partially shadowed sample, never the opposite.
+    if (bFiniteShadowTemporalStochastic != 0u)
+    {
+        if (distCenter <= endpointBias + rayTMin)
+            return 1.0f;
+
+        float3 centerBias = dot(traceNormal, centerDir) < 0.0f ? -traceNormal : traceNormal;
+        RayDesc centerRay;
+        centerRay.Origin = worldPos + centerBias * normalBias;
+        centerRay.Direction = centerDir;
+        centerRay.TMin = rayTMin;
+        centerRay.TMax = max(distCenter - endpointBias, rayTMin + 0.05f);
+        if (TraceShadowOccluded(centerRay))
+            return 0.0f;
+    }
+
+    float3 shadowTarget = SampleFiniteLightShadowTarget(lightPos, lightRadius, pixelPos);
+    float3 toLight = shadowTarget - worldPos;
+    float distToLight = length(toLight);
+    if (distToLight < 1.0e-3f)
+        return 1.0f;
+
+    float3 lightDir = toLight / distToLight;
+    if (dot(worldNormal, lightDir) <= 0.0f)
+        return 0.0f;
+
+    if (distToLight <= endpointBias + rayTMin)
+        return 1.0f;
+
+    float3 bias = dot(traceNormal, lightDir) < 0.0f ? -traceNormal : traceNormal;
+    RayDesc ray;
+    ray.Origin = worldPos + bias * normalBias;
+    ray.Direction = lightDir;
+    ray.TMin = rayTMin;
+    ray.TMax = max(distToLight - endpointBias, rayTMin + 0.05f);
+    return TraceShadowOccluded(ray) ? 0.0f : 1.0f;
+}
+
 float3 offset_ray(float3 p, float3 n)
 {
-    return p + n * (1.0f / 256.0f);
+    // Ray Tracing Gems style floating-point safe origin offset. This moves
+    // the position by a few representable floats in the normal direction,
+    // which is more robust than adding a tiny fixed epsilon at large world
+    // coordinates.
+    const float origin = 1.0f / 32.0f;
+    const float floatScale = 1.0f / 65536.0f;
+    const float intScale = 256.0f;
+
+    int3 ofi = int3(n * intScale);
+    int3 piInt = asint(p);
+    piInt.x += p.x < 0.0f ? -ofi.x : ofi.x;
+    piInt.y += p.y < 0.0f ? -ofi.y : ofi.y;
+    piInt.z += p.z < 0.0f ? -ofi.z : ofi.z;
+
+    float3 pi = asfloat(piInt);
+    return float3(
+        abs(p.x) < origin ? p.x + floatScale * n.x : pi.x,
+        abs(p.y) < origin ? p.y + floatScale * n.y : pi.y,
+        abs(p.z) < origin ? p.z + floatScale * n.z : pi.z);
+}
+
+float3 SelectDirectionalShadowBiasNormal(float3 geoNormal, float3 baseLightDir)
+{
+    // Keep the origin on the light-facing side of the geometric surface.
+    // This avoids self-shadowing when the camera-visible side is not the
+    // side the sun ray leaves from. The sign is based only on the unjittered
+    // sun direction, not per-sample soft-shadow rays, so it stays temporally
+    // stable.
+    return dot(geoNormal, baseLightDir) < 0.0f ? -geoNormal : geoNormal;
+}
+
+float ComputeDirectionalShadowNormalBias(float3 geoNormal, float3 baseLightDir)
+{
+    // Directional shadows must not use the camera-distance scaled local-light
+    // bias. Keep the old minimum scale, which was large enough to avoid
+    // whole-screen self-hit flicker, but make it camera-invariant so shadow
+    // length does not change as the camera moves.
+    return 0.5f;
 }
 
 void ExecuteShadowPass(uint2 pixelPos, uint2 launchDim)
@@ -349,9 +614,13 @@ void ExecuteShadowPass(uint2 pixelPos, uint2 launchDim)
         geoNormal = -geoNormal;
     if (dot(worldNormal, geoNormal) < 0.0f)
         worldNormal = -worldNormal;
+    worldNormal = FilterShadowVisibilityNormal(pixelPos, launchDim, currentLinearDepth, worldNormal, geoNormal);
 
     float3 traceNormal = CommonSafeNormalize(geoNormal + worldNormal * 0.25f, geoNormal);
     float3 baseLightDir = CommonSafeNormalize(LightDir.xyz, float3(0.0f, 1.0f, 0.0f));
+    float3 directionalBiasNormal = SelectDirectionalShadowBiasNormal(geoNormal, baseLightDir);
+    const float directionalNormalBias = ComputeDirectionalShadowNormalBias(geoNormal, baseLightDir);
+    const float directionalTMin = 0.5f;
     float visibility = 1.0f;
     const uint kMaxShadowSamples = 16;
     uint sampleCount = min(max(ShadowSampleCount, 1), kMaxShadowSamples);
@@ -370,25 +639,47 @@ void ExecuteShadowPass(uint2 pixelPos, uint2 launchDim)
     if (directionalCastsShadow)
     {
         visibility = 0.0f;
+        const float directionalSampleRadius = (bDirectionalShadowTemporalStochastic != 0u)
+            ? (ShadowLightRadius * 5.0f)
+            : ShadowLightRadius;
+        const bool useDirectionalSoftSamples =
+            directionalSampleRadius > 1.0e-6f &&
+            (sampleCount > 1u || bDirectionalShadowTemporalStochastic != 0u);
         [loop]
         for (uint sampleIndex = 0; sampleIndex < kMaxShadowSamples; ++sampleIndex)
         {
             if (sampleIndex >= sampleCount)
                 break;
 
-            uint2 noisePixel = pixelPos + uint2(sampleIndex * 17u, sampleIndex * 31u);
-            uint noiseFrame = FrameCounter + sampleIndex * 13u;
-            float2 randUV = GenerateRaySample2D(RayNoiseBlueNoiseSource, noisePixel, noiseFrame, BlueNoiseOffsetStride, NoiseMode);
-            float3 rayDir = SampleDirectionalLightSphereCap(baseLightDir, ShadowLightRadius, randUV);
-            float3 rayBiasNormal = dot(traceNormal, rayDir) < 0.0f ? -traceNormal : traceNormal;
+            float3 rayDir = baseLightDir;
+            if (useDirectionalSoftSamples)
+            {
+                uint2 noisePixel = pixelPos + uint2(sampleIndex * 17u, sampleIndex * 31u);
+                // Non-RR keeps the old frame-stable pattern. DLSS-RR benefits
+                // from a true 1-spp temporal signal for soft-sun shadows, so
+                // move the cap sample every frame only when the host requests it.
+                uint noiseFrame = (bDirectionalShadowTemporalStochastic != 0u)
+                    ? (FrameCounter + sampleIndex * 13u)
+                    : (sampleIndex * 13u);
+                float2 randUV = GenerateRaySample2D(RayNoiseBlueNoiseSource, noisePixel, noiseFrame, BlueNoiseOffsetStride, NoiseMode);
+                if (bDirectionalShadowTemporalStochastic != 0u)
+                {
+                    uint seed = pixelPos.x * 1973u +
+                        pixelPos.y * 9277u +
+                        FrameCounter * 26699u +
+                        sampleIndex * 104729u;
+                    randUV = frac(randUV + float2(HashToUnitFloat(seed), HashToUnitFloat(seed ^ 0x9E3779B9u)));
+                }
+                rayDir = SampleDirectionalLightSphereCap(baseLightDir, directionalSampleRadius, randUV);
+            }
 
             RayDesc ray;
-            ray.Origin = worldPos + rayBiasNormal * normalBias;
+            ray.Origin = offset_ray(worldPos + directionalBiasNormal * directionalNormalBias, directionalBiasNormal);
             ray.Direction = rayDir;
-            ray.TMin = max(0.05f, normalBias * 0.25f);
+            ray.TMin = directionalTMin;
             ray.TMax = 100000;
 
-            visibility += TraceShadowOccluded(ray) ? 0.0f : 1.0f;
+            visibility += TraceDirectionalShadowOccluded(ray) ? 0.0f : 1.0f;
         }
 
         visibility /= sampleCount;
@@ -400,14 +691,38 @@ void ExecuteShadowPass(uint2 pixelPos, uint2 launchDim)
     // Option A's fixed channel pack and ReSTIR's single-light reservoir.
     #define COMPUTE_POINT_LIGHT_VIS(visOut, lightPos, lightRadius)         \
     {                                                                      \
-        float3 _toLight = (lightPos) - worldPos;                           \
-        float _distToLight = length(_toLight);                             \
-        if (_distToLight > (lightRadius) || _distToLight < 1.0e-3f)        \
+        float3 _toLightCenter = (lightPos) - worldPos;                     \
+        float _distToLightCenter = length(_toLightCenter);                 \
+        if (_distToLightCenter > (lightRadius) || _distToLightCenter < 1.0e-3f) \
         {                                                                  \
             visOut = 1.0f; /* out of range — direct attenuation handles */ \
         }                                                                  \
         else                                                               \
         {                                                                  \
+            bool _centerAllowsAreaSample = true;                           \
+            if (bFiniteShadowTemporalStochastic != 0u)                     \
+            {                                                              \
+                float _centerRayTMin = max(0.05f, normalBias * 0.25f);     \
+                float _centerEndpointBias = ComputePointLightEndpointBias((lightRadius), normalBias); \
+                float3 _centerLightDir = _toLightCenter / _distToLightCenter; \
+                if (dot(worldNormal, _centerLightDir) <= 0.0f)             \
+                {                                                          \
+                    _centerAllowsAreaSample = false;                       \
+                }                                                          \
+                else if (_distToLightCenter > _centerEndpointBias + _centerRayTMin) \
+                {                                                          \
+                    float3 _centerBias = dot(traceNormal, _centerLightDir) < 0.0f ? -traceNormal : traceNormal; \
+                    RayDesc _centerRay;                                    \
+                    _centerRay.Origin = worldPos + _centerBias * normalBias; \
+                    _centerRay.Direction = _centerLightDir;                \
+                    _centerRay.TMin = _centerRayTMin;                      \
+                    _centerRay.TMax = max(_distToLightCenter - _centerEndpointBias, _centerRayTMin + 0.05f); \
+                    _centerAllowsAreaSample = !TraceShadowOccluded(_centerRay); \
+                }                                                          \
+            }                                                              \
+            float3 _shadowTarget = _centerAllowsAreaSample ? SampleFiniteLightShadowTarget((lightPos), (lightRadius), pixelPos) : (lightPos); \
+            float3 _toLight = _shadowTarget - worldPos;                    \
+            float _distToLight = length(_toLight);                         \
             float3 _lightDir = _toLight / _distToLight;                    \
             if (dot(worldNormal, _lightDir) <= 0.0f)                       \
             {                                                              \

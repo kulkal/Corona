@@ -282,13 +282,7 @@ local function draw_diffuse_gi(state)
 	if disocclusion and not state.feed_raw_gi_to_rr then
 		slider_int("  Disoccl Filter Radius", "diffuse_gi_spatial_filter_radius", state.diffuse_gi_spatial_filter_radius, 1, 8)
 	end
-	local feed_raw = checkbox("Feed RAW GI to DLSS-RR (unstable in dark scenes)", "feed_raw_gi_to_rr", state.feed_raw_gi_to_rr)
-	if feed_raw then
-		local simple_filter = checkbox("  Simple GI Spatial Filter (DLSS-RR)", "enable_simple_gi_spatial_filter", state.enable_simple_gi_spatial_filter)
-		if simple_filter then
-			slider_int("    GI Spatial Filter Radius", "diffuse_gi_spatial_filter_radius", state.diffuse_gi_spatial_filter_radius, 1, 8)
-		end
-	end
+	checkbox("Feed RAW GI to DLSS-RR (unstable in dark scenes)", "feed_raw_gi_to_rr", state.feed_raw_gi_to_rr)
 
 	begin_disabled(not state.rt_diffuse_gi_ser_available)
 	checkbox("RT Diffuse GI SER", "rt_diffuse_gi_ser", state.rt_diffuse_gi_ser)
@@ -365,6 +359,34 @@ local function draw_environment(state)
 	checkbox("Prefiltered Env Specular", "enable_prefiltered_env_specular", state.enable_prefiltered_env_specular)
 	slider_float("Prefiltered Env Roughness Threshold", "prefiltered_env_roughness_threshold", state.prefiltered_env_roughness_threshold, 0.02, 1.0, "%.2f")
 	slider_float("Prefiltered Env Roughness Fade", "prefiltered_env_roughness_fade", state.prefiltered_env_roughness_fade, 0.0, 0.5, "%.2f")
+
+	local fog_enabled = checkbox("Enable Depth / Height Fog", "enable_depth_height_fog", state.enable_depth_height_fog)
+	if fog_enabled and imgui.tree_node("Depth / Height Fog", true) then
+		color_edit3("Fog Color", "depth_height_fog_color", state.depth_height_fog_color)
+		slider_float("Density", "depth_height_fog_density", state.depth_height_fog_density, 0.0, 0.001, "%.6f")
+		slider_float("Start Distance", "depth_height_fog_start_distance", state.depth_height_fog_start_distance, 0.0, 200000.0, "%.0f")
+		slider_float("Height", "depth_height_fog_height", state.depth_height_fog_height, -10000.0, 10000.0, "%.1f")
+		slider_float("Height Falloff", "depth_height_fog_height_falloff", state.depth_height_fog_height_falloff, 0.0, 0.01, "%.6f")
+		slider_float("Max Opacity", "depth_height_fog_max_opacity", state.depth_height_fog_max_opacity, 0.0, 1.0, "%.2f")
+		imgui.tree_pop()
+	end
+
+	local volumetric_fog_enabled = checkbox("Enable Froxel Volumetric Fog", "enable_volumetric_fog", state.enable_volumetric_fog)
+	if volumetric_fog_enabled and imgui.tree_node("Froxel Volumetric Fog", true) then
+		color_edit3("Fog Color##volumetric", "volumetric_fog_color", state.volumetric_fog_color)
+		slider_float("Density##volumetric", "volumetric_fog_density", state.volumetric_fog_density, 0.0, 0.001, "%.6f")
+		slider_float("Start Distance##volumetric", "volumetric_fog_start_distance", state.volumetric_fog_start_distance, 0.0, 200000.0, "%.0f")
+		slider_float("Max Distance##volumetric", "volumetric_fog_max_distance", state.volumetric_fog_max_distance, 1000.0, 500000.0, "%.0f")
+		slider_float("Height##volumetric", "volumetric_fog_height", state.volumetric_fog_height, -10000.0, 10000.0, "%.1f")
+		slider_float("Height Falloff##volumetric", "volumetric_fog_height_falloff", state.volumetric_fog_height_falloff, 0.0, 0.01, "%.6f")
+		slider_float("Max Opacity##volumetric", "volumetric_fog_max_opacity", state.volumetric_fog_max_opacity, 0.0, 1.0, "%.2f")
+		slider_float("Ambient Strength##volumetric", "volumetric_fog_ambient_strength", state.volumetric_fog_ambient_strength, 0.0, 4.0, "%.2f")
+		slider_float("Directional Strength##volumetric", "volumetric_fog_directional_strength", state.volumetric_fog_directional_strength, 0.0, 8.0, "%.2f")
+		slider_float("Anisotropy##volumetric", "volumetric_fog_anisotropy", state.volumetric_fog_anisotropy, -0.9, 0.9, "%.2f")
+		slider_int("Grid Pixel Size##volumetric", "volumetric_fog_grid_pixel_size", state.volumetric_fog_grid_pixel_size, 4, 64)
+		slider_int("Grid Z Slices##volumetric", "volumetric_fog_grid_z", state.volumetric_fog_grid_z, 8, 128)
+		imgui.tree_pop()
+	end
 
 	imgui.tree_pop()
 end

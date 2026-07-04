@@ -81,56 +81,6 @@ void Corona::InitDiffuseGISpatialFilterPass()
 		DiffuseGISpatialFilterPSO = tempPSO;
 }
 
-void Corona::DiffuseGISpatialFilterPass()
-{
-	if (!DiffuseGISpatialFilterPSO ||
-		!DiffuseGIRaw || !DiffuseGIRawAux ||
-		!DiffuseGISpatialFiltered || !DiffuseGISpatialFilteredAux)
-		return;
-
-	RenderGraph rg(renderBackend.get());
-	RGTextureRef inColor = rg.ImportTexture("DiffuseGI.SpatialFilter.InColor", DiffuseGIRaw.get(), EResourceState::ShaderRead);
-	RGTextureRef inAux = rg.ImportTexture("DiffuseGI.SpatialFilter.InAux", DiffuseGIRawAux.get(), EResourceState::ShaderRead);
-	RGTextureRef depth = ImportTextureIfValid(rg, "DiffuseGI.SpatialFilter.Depth", UnjitteredDepthBuffers[ColorBufferWriteIndex].get());
-	RGTextureRef normal = ImportTextureIfValid(rg, "DiffuseGI.SpatialFilter.Normal", GeomNormalBuffers[ColorBufferWriteIndex].get());
-	RGTextureRef outColor = rg.ImportTexture("DiffuseGI.SpatialFilter.OutColor", DiffuseGISpatialFiltered.get(), EResourceState::ShaderRead);
-	RGTextureRef outAux = rg.ImportTexture("DiffuseGI.SpatialFilter.OutAux", DiffuseGISpatialFilteredAux.get(), EResourceState::ShaderRead);
-
-	rg.ExportTexture(outColor, EResourceState::ShaderRead);
-	rg.ExportTexture(outAux, EResourceState::ShaderRead);
-	rg.AddPass(
-		"DiffuseGISpatialFilterPass",
-		ERGPassFlags::Compute,
-		[&](RGPassBuilder& builder)
-		{
-			builder.ReadTexture(inColor, EResourceState::ShaderRead)
-				.ReadTexture(inAux, EResourceState::ShaderRead)
-				.ReadWriteTexture(outColor, EResourceState::UnorderedAccess)
-				.ReadWriteTexture(outAux, EResourceState::UnorderedAccess);
-			if (depth.IsValid())
-				builder.ReadTexture(depth, EResourceState::ShaderRead);
-			if (normal.IsValid())
-				builder.ReadTexture(normal, EResourceState::ShaderRead);
-		},
-		[&](RGContext& ctx)
-		{
-			DiffuseGISpatialFilterPSO->SetTextureSRV("InGIColor", ctx.GetTexture(inColor));
-			DiffuseGISpatialFilterPSO->SetTextureSRV("InGIAux", ctx.GetTexture(inAux));
-			DiffuseGISpatialFilterPSO->SetTextureSRV("DepthTex", depth.IsValid() ? ctx.GetTexture(depth) : nullptr);
-			DiffuseGISpatialFilterPSO->SetTextureSRV("NormalTex", normal.IsValid() ? ctx.GetTexture(normal) : nullptr);
-			DiffuseGISpatialFilterPSO->SetTextureUAV("OutGIColor", ctx.GetTexture(outColor));
-			DiffuseGISpatialFilterPSO->SetTextureUAV("OutGIAux", ctx.GetTexture(outAux));
-
-			DiffuseGISpatialFilterCB.RTSize = glm::vec2(GetRenderWidth(), GetRenderHeight());
-			DiffuseGISpatialFilterCB.ProjectionParams = glm::vec2(FrameProjectionParams.z, FrameProjectionParams.w);
-			DiffuseGISpatialFilterPSO->SetCBVValue("SpatialFilterConstant", &DiffuseGISpatialFilterCB);
-			DiffuseGISpatialFilterPSO->Apply();
-			renderBackend->Dispatch((GetRenderWidth() + 7) / 8, (GetRenderHeight() + 7) / 8, 1);
-		});
-	if (!rg.Execute())
-		return;
-}
-
 // Post-temporal, variance-guided disocclusion filter. Runs AFTER TemporalDenoisingPass:
 // reads the temporally-accumulated diffuse GI and cleans only the high-variance
 // (freshly-disoccluded, no-history) pixels before they reach the DLSS-RR combined feed.

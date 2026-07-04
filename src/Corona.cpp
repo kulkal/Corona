@@ -25,6 +25,7 @@
 #include "PlatformWindow.h"
 #include "VulkanBackend.h"
 #include "CoronaImageIO.h"
+#include "external/streamline-sdk/external/json/include/nlohmann/json.hpp"
 #if CORONA_HAS_DXC_RUNTIME
 #include <dxcapi.use.h>
 //#include <dxcapi.h>
@@ -457,6 +458,8 @@ namespace
 			return L"leaf";
 		if (key == L"rock" || key == L"stone" || key == L"boulder")
 			return L"rock";
+		if (key == L"road" || key == L"asphalt" || key == L"street" || key == L"pavement")
+			return L"road";
 		if (key == L"flower" || key == L"flowers" || key == L"petal" || key == L"petals")
 			return L"flower";
 		if (key == L"cloud" || key == L"mist")
@@ -609,6 +612,18 @@ namespace
 					r = clampByte(210 + noise + cell + crackShade);
 					g = clampByte(214 + noise + cell + crackShade);
 					b = clampByte(206 + noise + cell + crackShade);
+				}
+				else if (kind == L"road")
+				{
+					const int coarse = static_cast<int>((ProceduralTextureHash(x / 4u, static_cast<uint32_t>(y) / 4u, salt + 17u) >> 5) & 15u) - 7;
+					const int pebble = ((x * 7u + static_cast<uint32_t>(y) * 11u + (hash >> 4)) % 43u) < 3u ? 18 : 0;
+					const int crack = ((x + static_cast<uint32_t>(y) * 5u + (hash >> 9)) % 67u) < 2u ? -20 : 0;
+					const bool centerStripe = std::abs(static_cast<int>(x) - 64) <= 2;
+					const bool brokenStripe = ((y / 22) % 2) == 0;
+					const int lane = centerStripe && brokenStripe ? 112 : 0;
+					r = clampByte(50 + noise / 2 + coarse + pebble + crack + lane);
+					g = clampByte(51 + noise / 2 + coarse + pebble + crack + lane);
+					b = clampByte(49 + noise / 3 + coarse + pebble + crack + lane / 2);
 				}
 				else if (kind == L"flower")
 				{
@@ -977,7 +992,7 @@ namespace
 		return mode == Corona::EAntiAliasingMode::DLSS_SR || mode == Corona::EAntiAliasingMode::DLSS_RR;
 	}
 
-	constexpr std::array<const char*, 25> kGpuPassNames = {
+	constexpr std::array<const char*, 28> kGpuPassNames = {
 		"Frame Total",
 		"Skeletal Skinning",
 		"Depth Prepass",
@@ -989,6 +1004,7 @@ namespace
 		"Particles",
 		"Spatial Light Mask",
 		"SHC Primary Deep Seed",
+		"GBuffer Decals",
 		"RT Shadow",
 		"RT AO",
 		"RT Reflection",
@@ -996,6 +1012,8 @@ namespace
 		"Screen Probe GI",
 		"Temporal Denoise",
 		"Lighting",
+		"Depth/Height Fog",
+		"Volumetric Fog",
 		"DLSS RR",
 		"DLSS SR",
 		"Temporal AA",
@@ -2160,6 +2178,10 @@ Corona::~Corona()
 	ClearHistogramPSO.reset();
 	DrawHistogramPSO.reset();
 	AdapteExposurePSO.reset();
+	DepthHeightFogPSO.reset();
+	VolumetricFogBuildPSO.reset();
+	VolumetricFogCompositePSO.reset();
+	VolumetricFogAtlas.reset();
 
 	PSO_SHADOW_RAYQUERY.reset();
 	PSO_RT_SHADOW.reset();
@@ -4286,6 +4308,11 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 			bCommandLineDisableStreamline = true;
 			continue;
 		}
+		if (arg == L"--no-road-decals" || arg == L"--disable-road-decals")
+		{
+			bCommandLineDisableRoadDecals = true;
+			continue;
+		}
 		if (arg == L"--vulkan-capture-safe" || arg == L"--pylon-capture-safe")
 		{
 			bVulkanCaptureSafeMode = true;
@@ -4318,6 +4345,18 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 			bEnableStartupLuauScript = true;
 			StartupLuauMode = L"platformer";
 			bCommandLineDungeonCharacterMode = false;
+			continue;
+		}
+		if (arg == L"--vehicle" || arg == L"--vehicle-mode" || arg == L"--drive-city" || arg == L"--car")
+		{
+			bVehicleDrivingMode = true;
+			bStartupFreeFlyCamera = false;
+			bEnableStartupLuauScript = false;
+			bCommandLineDungeonCharacterMode = false;
+			StartupLuauMode = L"vehicle";
+			bShowImgui = false;
+			if (CommandLineLoadMapFile.empty())
+				CommandLineLoadMapFile = L"procedural_city_compiled";
 			continue;
 		}
 		if (arg == L"--grass-demo")
@@ -4558,6 +4597,49 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 			}
 			continue;
 		}
+		std::wstring rtIndirectFrameInterleaveValue = ParseValueArg(arg, L"--rt-indirect-frame-interleave", L"-rt-indirect-frame-interleave", i);
+		if (rtIndirectFrameInterleaveValue.empty())
+			rtIndirectFrameInterleaveValue = ParseValueArg(arg, L"--rt-indirect-frameinterleave", L"-rt-indirect-frameinterleave", i);
+		if (!rtIndirectFrameInterleaveValue.empty())
+		{
+			try
+			{
+				const unsigned long value = std::stoul(rtIndirectFrameInterleaveValue);
+				RTIndirectFrameInterleaveMode = static_cast<UINT32>(std::clamp<unsigned long>(value, 0ul, 4ul));
+			}
+			catch (...)
+			{
+			}
+			continue;
+		}
+		if (arg == L"--rt-checkerboard-2x2" || arg == L"--checkerboard-2x2" ||
+			arg == L"--rt-indirect-checkerboard-2x2")
+		{
+			RTIndirectFrameInterleaveMode = 3u;
+			continue;
+		}
+		std::wstring directLightGridMaxPerCellValue = ParseValueArg(arg, L"--direct-light-grid-max-per-cell", L"-direct-light-grid-max-per-cell", i);
+		if (directLightGridMaxPerCellValue.empty())
+			directLightGridMaxPerCellValue = ParseValueArg(arg, L"--lighting-light-grid-max-per-cell", L"-lighting-light-grid-max-per-cell", i);
+		if (!directLightGridMaxPerCellValue.empty())
+		{
+			try
+			{
+				const unsigned long value = std::stoul(directLightGridMaxPerCellValue);
+				DirectLightingPointLightGridMaxPerCell =
+					static_cast<UINT32>(std::clamp<unsigned long>(value, 1ul, static_cast<unsigned long>(PointLightGridMaxLightsPerCell)));
+			}
+			catch (...)
+			{
+			}
+			continue;
+		}
+		if (arg == L"--no-rt-checkerboard" || arg == L"--disable-rt-checkerboard" ||
+			arg == L"--no-rt-indirect-checkerboard")
+		{
+			RTIndirectFrameInterleaveMode = 0u;
+			continue;
+		}
 		if (arg == L"--rt-diffuse-gi-ser" || arg == L"--enable-rt-diffuse-gi-ser" || arg == L"--diffuse-gi-ser")
 		{
 			bEnableRTDiffuseGISER = true;
@@ -4768,8 +4850,9 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 		if (!loadMapValue.empty())
 		{
 			CommandLineLoadMapFile = StripOuterQuotes(loadMapValue);
-			bEnableStartupLuauScript = true;
-			StartupLuauMode = L"editor";
+			bEnableStartupLuauScript = !bVehicleDrivingMode;
+			if (!bVehicleDrivingMode)
+				StartupLuauMode = L"editor";
 			bStartupFreeFlyCamera = false;
 			bShowImgui = false;
 			if (!bCommandLineAAOverrideSet)
@@ -4788,6 +4871,27 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 			{
 				const unsigned long value = std::stoul(screenshotFrameValue);
 				CommandLineScreenshotFrame = static_cast<UINT32>(std::clamp<unsigned long>(value, 1ul, 100000ul));
+			}
+			catch (...)
+			{
+			}
+			continue;
+		}
+		if (arg == L"--lighting-debug-dump" || arg == L"--shadow-debug-dump" || arg == L"--dump-lighting-debug")
+		{
+			bCommandLineLightingDebugDump = true;
+			continue;
+		}
+		std::wstring lightingDebugFrameValue = ParseValueArg(arg, L"--lighting-debug-frame", L"-lighting-debug-frame", i);
+		if (lightingDebugFrameValue.empty())
+			lightingDebugFrameValue = ParseValueArg(arg, L"--shadow-debug-frame", L"-shadow-debug-frame", i);
+		if (!lightingDebugFrameValue.empty())
+		{
+			try
+			{
+				const unsigned long value = std::stoul(lightingDebugFrameValue);
+				LightingDebugDumpFrame = static_cast<UINT32>(std::clamp<unsigned long>(value, 1ul, 100000ul));
+				bCommandLineLightingDebugDump = true;
 			}
 			catch (...)
 			{
@@ -5345,6 +5449,13 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 	AppendStartupTrace(L"[ParseCommandLineArgs] mobile override: vulkan hybrid taa startup scripts");
 #endif
 
+	if (bVehicleDrivingMode && GBufferGenerationMode == EGBufferGenerationMode::RtPrimary)
+	{
+		GBufferGenerationMode = EGBufferGenerationMode::Raster;
+		AppendStartupTrace(
+			L"[ParseCommandLineArgs] vehicle mode forces raster GBuffer; moving vehicle parts are not inserted into the main TLAS");
+	}
+
 	AppendStartupTrace(
 		L"[ParseCommandLineArgs] end backendOverride=" + std::to_wstring(bCommandLineRenderBackendOverrideSet ? 1 : 0) +
 		L", backend=" + std::to_wstring(static_cast<int>(CommandLineRenderBackendAPI)) +
@@ -5375,6 +5486,8 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 		L", shcPrimaryDeepStride=" + std::to_wstring(SpatialHashPrimaryDeepSeedPixelStride) +
 		L", diffuseGIPointLights=" + std::to_wstring(DiffuseGIPointLightLimit) +
 		L", simpleGILocalLightSamples=" + std::to_wstring(SimpleGISamplesPerPixel) +
+		L", rtIndirectFrameInterleave=" + std::to_wstring(RTIndirectFrameInterleaveMode) +
+		L", directLightGridMaxPerCell=" + std::to_wstring(DirectLightingPointLightGridMaxPerCell) +
 		L", specularGIEnabled=" + std::to_wstring(bEnableSpecularGI ? 1 : 0) +
 		L", specularGITemporalReservoir=0" +
 		L", directDiffuse=" + std::to_wstring(bEnableDirectDiffuse ? 1 : 0) +
@@ -5424,7 +5537,8 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 		L", autoDumpOverride=" + std::to_wstring(bCommandLineAutoDumpOverrideSet ? 1 : 0) +
 		L", autoDump=" + std::to_wstring(bCommandLineAutoDumpEnabled ? 1 : 0) +
 		L", noImgui=" + std::to_wstring(bCommandLineDisableImgui ? 1 : 0) +
-		L", noStreamline=" + std::to_wstring(bCommandLineDisableStreamline ? 1 : 0));
+		L", noStreamline=" + std::to_wstring(bCommandLineDisableStreamline ? 1 : 0) +
+		L", noRoadDecals=" + std::to_wstring(bCommandLineDisableRoadDecals ? 1 : 0));
 }
 
 void Corona::PromptStartupModeSelection()
@@ -8265,6 +8379,7 @@ void Corona::InitRenderSyncChannels()
 	RenderSyncChannels.push_back({ "frame_source", &Corona::CollectFrameSourceRenderSync, &Corona::ApplyFrameSourceRenderSync });
 	RenderSyncChannels.push_back({ "scene_objects", &Corona::CollectSceneObjectRenderSync, &Corona::ApplySceneObjectRenderSync });
 	RenderSyncChannels.push_back({ "point_lights", &Corona::CollectPointLightRenderSync, &Corona::ApplyPointLightRenderSync });
+	RenderSyncChannels.push_back({ "road_decals", &Corona::CollectRoadDecalRenderSync, &Corona::ApplyRoadDecalRenderSync });
 	bRenderSyncChannelsInitialized = true;
 }
 
@@ -8273,15 +8388,12 @@ void Corona::MarkSceneObjectRenderDirty(SceneObjectHandle handle, UINT32 dirtyBi
 	if (handle == InvalidSceneObjectHandle || dirtyBits == 0)
 		return;
 
-	const auto it = std::find_if(SceneObjects.begin(), SceneObjects.end(), [handle](const SceneObject& object)
-	{
-		return object.Handle == handle;
-	});
-	if (it == SceneObjects.end())
+	SceneObject* object = FindSceneObject(handle);
+	if (!object)
 		return;
 
-	const bool bWasClean = it->RenderDirtyBits == 0;
-	it->RenderDirtyBits |= dirtyBits;
+	const bool bWasClean = object->RenderDirtyBits == 0;
+	object->RenderDirtyBits |= dirtyBits;
 	if (bWasClean)
 		DirtySceneObjectHandles.push_back(handle);
 }
@@ -8338,6 +8450,20 @@ void Corona::MarkAllPointLightsForRenderSync()
 		pointLight.RenderDirtyBits = 0;
 	DirtyPointLightIds.clear();
 	RemovedPointLightIds.clear();
+}
+
+void Corona::MarkAllRoadDecalsForRenderSync()
+{
+	bRoadDecalFullSyncPending = true;
+}
+
+void Corona::AddRoadDecalForMap(const RoadDecalState& decal)
+{
+	if (!decal.bEnabled || decal.HalfLength <= 0.0f || decal.HalfWidth <= 0.0f)
+		return;
+
+	RoadDecals.push_back(decal);
+	MarkAllRoadDecalsForRenderSync();
 }
 
 Corona::RenderFrameSourceState Corona::CaptureRenderFrameSourceState() const
@@ -8409,6 +8535,26 @@ Corona::RenderFrameSourceState Corona::CaptureRenderFrameSourceState() const
 	state.RTAODirectContactStrength = RTAODirectContactStrength;
 	state.SurfaceBounceStrength = SurfaceBounceStrength;
 	state.SurfaceBounceSaturation = SurfaceBounceSaturation;
+	state.bEnableDepthHeightFog = bEnableDepthHeightFog;
+	state.DepthHeightFogColor = DepthHeightFogColor;
+	state.DepthHeightFogDensity = DepthHeightFogDensity;
+	state.DepthHeightFogStartDistance = DepthHeightFogStartDistance;
+	state.DepthHeightFogHeight = DepthHeightFogHeight;
+	state.DepthHeightFogHeightFalloff = DepthHeightFogHeightFalloff;
+	state.DepthHeightFogMaxOpacity = DepthHeightFogMaxOpacity;
+	state.bEnableVolumetricFog = bEnableVolumetricFog;
+	state.VolumetricFogColor = VolumetricFogColor;
+	state.VolumetricFogDensity = VolumetricFogDensity;
+	state.VolumetricFogStartDistance = VolumetricFogStartDistance;
+	state.VolumetricFogMaxDistance = VolumetricFogMaxDistance;
+	state.VolumetricFogHeight = VolumetricFogHeight;
+	state.VolumetricFogHeightFalloff = VolumetricFogHeightFalloff;
+	state.VolumetricFogMaxOpacity = VolumetricFogMaxOpacity;
+	state.VolumetricFogAmbientStrength = VolumetricFogAmbientStrength;
+	state.VolumetricFogDirectionalStrength = VolumetricFogDirectionalStrength;
+	state.VolumetricFogAnisotropy = VolumetricFogAnisotropy;
+	state.VolumetricFogGridPixelSize = VolumetricFogGridPixelSize;
+	state.VolumetricFogGridSizeZ = VolumetricFogGridSizeZ;
 	state.JitterScale = JitterScale;
 	state.TAASampleCount = TAASampleCount;
 	state.DLSSJitterPhaseScale = DLSSJitterPhaseScale;
@@ -8512,6 +8658,26 @@ void Corona::ApplyRenderFrameSourceState(const RenderFrameSourceState& state)
 	RTAODirectContactStrength = state.RTAODirectContactStrength;
 	SurfaceBounceStrength = state.SurfaceBounceStrength;
 	SurfaceBounceSaturation = state.SurfaceBounceSaturation;
+	bEnableDepthHeightFog = state.bEnableDepthHeightFog;
+	DepthHeightFogColor = glm::max(state.DepthHeightFogColor, glm::vec3(0.0f));
+	DepthHeightFogDensity = std::max(0.0f, state.DepthHeightFogDensity);
+	DepthHeightFogStartDistance = std::max(0.0f, state.DepthHeightFogStartDistance);
+	DepthHeightFogHeight = FiniteFloatOr(state.DepthHeightFogHeight, DepthHeightFogHeight);
+	DepthHeightFogHeightFalloff = std::max(0.0f, state.DepthHeightFogHeightFalloff);
+	DepthHeightFogMaxOpacity = std::clamp(state.DepthHeightFogMaxOpacity, 0.0f, 1.0f);
+	bEnableVolumetricFog = state.bEnableVolumetricFog;
+	VolumetricFogColor = glm::max(state.VolumetricFogColor, glm::vec3(0.0f));
+	VolumetricFogDensity = std::max(0.0f, state.VolumetricFogDensity);
+	VolumetricFogStartDistance = std::max(0.0f, state.VolumetricFogStartDistance);
+	VolumetricFogMaxDistance = std::max(VolumetricFogStartDistance + 1.0f, state.VolumetricFogMaxDistance);
+	VolumetricFogHeight = FiniteFloatOr(state.VolumetricFogHeight, VolumetricFogHeight);
+	VolumetricFogHeightFalloff = std::max(0.0f, state.VolumetricFogHeightFalloff);
+	VolumetricFogMaxOpacity = std::clamp(state.VolumetricFogMaxOpacity, 0.0f, 1.0f);
+	VolumetricFogAmbientStrength = std::max(0.0f, state.VolumetricFogAmbientStrength);
+	VolumetricFogDirectionalStrength = std::max(0.0f, state.VolumetricFogDirectionalStrength);
+	VolumetricFogAnisotropy = std::clamp(state.VolumetricFogAnisotropy, -0.9f, 0.9f);
+	VolumetricFogGridPixelSize = std::clamp(state.VolumetricFogGridPixelSize, 4u, 64u);
+	VolumetricFogGridSizeZ = std::clamp(state.VolumetricFogGridSizeZ, 8u, 128u);
 	JitterScale = state.JitterScale;
 	TAASampleCount = state.TAASampleCount;
 	DLSSJitterPhaseScale = std::max(0.25f, state.DLSSJitterPhaseScale);
@@ -8623,6 +8789,26 @@ void Corona::SyncCurrentLightingSettingsToFrameSourceState()
 		state.RTAODirectContactStrength = RTAODirectContactStrength;
 		state.SurfaceBounceStrength = SurfaceBounceStrength;
 		state.SurfaceBounceSaturation = SurfaceBounceSaturation;
+		state.bEnableDepthHeightFog = bEnableDepthHeightFog;
+		state.DepthHeightFogColor = DepthHeightFogColor;
+		state.DepthHeightFogDensity = DepthHeightFogDensity;
+		state.DepthHeightFogStartDistance = DepthHeightFogStartDistance;
+		state.DepthHeightFogHeight = DepthHeightFogHeight;
+		state.DepthHeightFogHeightFalloff = DepthHeightFogHeightFalloff;
+		state.DepthHeightFogMaxOpacity = DepthHeightFogMaxOpacity;
+		state.bEnableVolumetricFog = bEnableVolumetricFog;
+		state.VolumetricFogColor = VolumetricFogColor;
+		state.VolumetricFogDensity = VolumetricFogDensity;
+		state.VolumetricFogStartDistance = VolumetricFogStartDistance;
+		state.VolumetricFogMaxDistance = VolumetricFogMaxDistance;
+		state.VolumetricFogHeight = VolumetricFogHeight;
+		state.VolumetricFogHeightFalloff = VolumetricFogHeightFalloff;
+		state.VolumetricFogMaxOpacity = VolumetricFogMaxOpacity;
+		state.VolumetricFogAmbientStrength = VolumetricFogAmbientStrength;
+		state.VolumetricFogDirectionalStrength = VolumetricFogDirectionalStrength;
+		state.VolumetricFogAnisotropy = VolumetricFogAnisotropy;
+		state.VolumetricFogGridPixelSize = VolumetricFogGridPixelSize;
+		state.VolumetricFogGridSizeZ = VolumetricFogGridSizeZ;
 		state.SkyColorTop = SkyColorTop;
 		state.SkyColorBottom = SkyColorBottom;
 		state.SkyIntensity = SkyIntensity;
@@ -8832,6 +9018,30 @@ void Corona::ApplyFrameSourceRenderSync(const RenderFrameDelta& delta)
 		 floatChanged(oldState.RTAODirectContactStrength, newState.RTAODirectContactStrength) ||
 		 floatChanged(oldState.SurfaceBounceStrength, newState.SurfaceBounceStrength) ||
 		 floatChanged(oldState.SurfaceBounceSaturation, newState.SurfaceBounceSaturation) ||
+		 oldState.bEnableDepthHeightFog != newState.bEnableDepthHeightFog ||
+		 floatChanged(oldState.DepthHeightFogColor.x, newState.DepthHeightFogColor.x) ||
+		 floatChanged(oldState.DepthHeightFogColor.y, newState.DepthHeightFogColor.y) ||
+		 floatChanged(oldState.DepthHeightFogColor.z, newState.DepthHeightFogColor.z) ||
+		 floatChanged(oldState.DepthHeightFogDensity, newState.DepthHeightFogDensity) ||
+		 floatChanged(oldState.DepthHeightFogStartDistance, newState.DepthHeightFogStartDistance) ||
+		 floatChanged(oldState.DepthHeightFogHeight, newState.DepthHeightFogHeight) ||
+		 floatChanged(oldState.DepthHeightFogHeightFalloff, newState.DepthHeightFogHeightFalloff) ||
+		 floatChanged(oldState.DepthHeightFogMaxOpacity, newState.DepthHeightFogMaxOpacity) ||
+		 oldState.bEnableVolumetricFog != newState.bEnableVolumetricFog ||
+		 floatChanged(oldState.VolumetricFogColor.x, newState.VolumetricFogColor.x) ||
+		 floatChanged(oldState.VolumetricFogColor.y, newState.VolumetricFogColor.y) ||
+		 floatChanged(oldState.VolumetricFogColor.z, newState.VolumetricFogColor.z) ||
+		 floatChanged(oldState.VolumetricFogDensity, newState.VolumetricFogDensity) ||
+		 floatChanged(oldState.VolumetricFogStartDistance, newState.VolumetricFogStartDistance) ||
+		 floatChanged(oldState.VolumetricFogMaxDistance, newState.VolumetricFogMaxDistance) ||
+		 floatChanged(oldState.VolumetricFogHeight, newState.VolumetricFogHeight) ||
+		 floatChanged(oldState.VolumetricFogHeightFalloff, newState.VolumetricFogHeightFalloff) ||
+		 floatChanged(oldState.VolumetricFogMaxOpacity, newState.VolumetricFogMaxOpacity) ||
+		 floatChanged(oldState.VolumetricFogAmbientStrength, newState.VolumetricFogAmbientStrength) ||
+		 floatChanged(oldState.VolumetricFogDirectionalStrength, newState.VolumetricFogDirectionalStrength) ||
+		 floatChanged(oldState.VolumetricFogAnisotropy, newState.VolumetricFogAnisotropy) ||
+		 oldState.VolumetricFogGridPixelSize != newState.VolumetricFogGridPixelSize ||
+		 oldState.VolumetricFogGridSizeZ != newState.VolumetricFogGridSizeZ ||
 		 floatChanged(oldState.SkyIntensity, newState.SkyIntensity) ||
 		 floatChanged(oldState.PrefilteredEnvRoughnessThreshold, newState.PrefilteredEnvRoughnessThreshold) ||
 		 floatChanged(oldState.PrefilteredEnvRoughnessFade, newState.PrefilteredEnvRoughnessFade) ||
@@ -8961,22 +9171,19 @@ void Corona::CollectSceneObjectRenderSync(RenderFrameDelta& delta)
 
 	for (SceneObjectHandle handle : DirtySceneObjectHandles)
 	{
-		const auto it = std::find_if(SceneObjects.begin(), SceneObjects.end(), [handle](const SceneObject& object)
-		{
-			return object.Handle == handle;
-		});
-		if (it == SceneObjects.end() || it->RenderDirtyBits == 0)
+		SceneObject* object = FindSceneObject(handle);
+		if (!object || object->RenderDirtyBits == 0)
 			continue;
 
 		RenderSceneObjectDelta objectDelta;
 		objectDelta.Op = ERenderDeltaOp::Upsert;
-		objectDelta.DirtyBits = it->RenderDirtyBits;
-		objectDelta.Object = *it;
+		objectDelta.DirtyBits = object->RenderDirtyBits;
+		objectDelta.Object = *object;
 		objectDelta.Object.RenderDirtyBits = 0;
 		objectDelta.Object.bWorldBoundsCacheValid = false;
-		objectDelta.Handle = it->Handle;
+		objectDelta.Handle = object->Handle;
 		delta.SceneObjectDeltas.push_back(std::move(objectDelta));
-		it->RenderDirtyBits = 0;
+		object->RenderDirtyBits = 0;
 	}
 	DirtySceneObjectHandles.clear();
 }
@@ -8989,6 +9196,8 @@ void Corona::ApplySceneObjectRenderSync(const RenderFrameDelta& delta)
 		MarkRenderWorldCullingIndexDirty();
 		bRayTracingSceneDirty = true;
 		bRayTracingTransformDirty = false;
+		bDynamicRayTracingSceneDirty = true;
+		bDynamicRayTracingTransformDirty = false;
 		bRayTracingBLASCacheResetPending = true;
 		PrevPathTracingViewMat = glm::mat4x4(0.0f);
 	}
@@ -9008,10 +9217,16 @@ void Corona::ApplySceneObjectRenderSync(const RenderFrameDelta& delta)
 			});
 			if (it != RenderWorld.SceneObjects.end())
 			{
+				const bool bWasRayTracing = ShouldIncludeSceneObjectInRayTracingAS(*it);
+				const bool bWasDynamicRayTracing = ShouldIncludeSceneObjectInDynamicRayTracingAS(*it);
 				RenderWorld.SceneObjects.erase(it);
 				MarkRenderWorldCullingIndexDirty();
-				bRayTracingBLASCacheResetPending = true;
-				MarkRayTracingSceneDirty();
+				MarkDynamicRayTracingSceneDirty();
+				if (bWasRayTracing)
+				{
+					bRayTracingBLASCacheResetPending = true;
+					MarkRayTracingSceneDirty();
+				}
 			}
 			continue;
 		}
@@ -9026,26 +9241,54 @@ void Corona::ApplySceneObjectRenderSync(const RenderFrameDelta& delta)
 
 		if (it == RenderWorld.SceneObjects.end())
 		{
+			const bool bRayTracing = ShouldIncludeSceneObjectInRayTracingAS(object);
+			const bool bDynamicRayTracing = ShouldIncludeSceneObjectInDynamicRayTracingAS(object);
 			RenderWorld.SceneObjects.push_back(std::move(object));
 			MarkRenderWorldCullingIndexDirty();
-			MarkRayTracingSceneDirty();
+			if (bRayTracing)
+				MarkRayTracingSceneDirty();
+			if (bDynamicRayTracing)
+				MarkDynamicRayTracingSceneDirty();
 			continue;
 		}
 
+		const bool bWasRayTracing = ShouldIncludeSceneObjectInRayTracingAS(*it);
+		const bool bWasDynamicRayTracing = ShouldIncludeSceneObjectInDynamicRayTracingAS(*it);
+		const bool bWasDynamicRaster = it->bDynamicRaster;
 		const bool bRayTracingSceneRelevant =
 			(objectDelta.DirtyBits & (kSceneObjectDirtyScene | kSceneObjectDirtyVisibility | kSceneObjectDirtyRayTracing)) != 0;
 		const bool bRayTracingInstanceRelevant =
 			(objectDelta.DirtyBits & (kSceneObjectDirtyTransform | kSceneObjectDirtyMaterial)) != 0;
 
 		*it = std::move(object);
-		MarkRenderWorldCullingIndexDirty();
+		const bool bIsRayTracing = ShouldIncludeSceneObjectInRayTracingAS(*it);
+		const bool bIsDynamicRayTracing = ShouldIncludeSceneObjectInDynamicRayTracingAS(*it);
+		const bool bIsDynamicRaster = it->bDynamicRaster;
+		const bool bRenderWorldTopologyRelevant =
+			(objectDelta.DirtyBits & (kSceneObjectDirtyScene | kSceneObjectDirtyVisibility)) != 0;
+		const bool bStaticGBufferCacheRelevant =
+			!bWasDynamicRaster || !bIsDynamicRaster;
+		const bool bStaticGBufferRecordRelevant =
+			(objectDelta.DirtyBits & (kSceneObjectDirtyTransform | kSceneObjectDirtyMaterial)) != 0;
+		if (bRenderWorldTopologyRelevant || (bStaticGBufferCacheRelevant && bStaticGBufferRecordRelevant))
+			MarkRenderWorldCullingIndexDirty();
 		if (bRayTracingSceneRelevant)
 		{
-			bRayTracingBLASCacheResetPending = true;
-			MarkRayTracingSceneDirty();
+			if (bWasRayTracing || bIsRayTracing)
+			{
+				bRayTracingBLASCacheResetPending = true;
+				MarkRayTracingSceneDirty();
+			}
+			if (bWasDynamicRayTracing || bIsDynamicRayTracing)
+				MarkDynamicRayTracingSceneDirty();
 		}
-		else if (bRayTracingInstanceRelevant && ShouldIncludeSceneObjectInRayTracingAS(*it))
-			MarkRayTracingTransformsDirty();
+		else if (bRayTracingInstanceRelevant)
+		{
+			if (bIsRayTracing)
+				MarkRayTracingTransformsDirty();
+			if (bIsDynamicRayTracing && ((objectDelta.DirtyBits & kSceneObjectDirtyTransform) != 0))
+				MarkDynamicRayTracingTransformsDirty();
+		}
 	}
 }
 
@@ -9145,6 +9388,24 @@ void Corona::ApplyPointLightRenderSync(const RenderFrameDelta& delta)
 	(void)bChanged;
 }
 
+void Corona::CollectRoadDecalRenderSync(RenderFrameDelta& delta)
+{
+	if (!bRoadDecalFullSyncPending)
+		return;
+
+	delta.bFullRoadDecalSync = true;
+	delta.RoadDecals = RoadDecals;
+	bRoadDecalFullSyncPending = false;
+}
+
+void Corona::ApplyRoadDecalRenderSync(const RenderFrameDelta& delta)
+{
+	if (!delta.bFullRoadDecalSync)
+		return;
+
+	RenderWorld.RoadDecals = delta.RoadDecals;
+}
+
 void Corona::CollectRenderFrameDeltas()
 {
 	InitRenderSyncChannels();
@@ -9159,9 +9420,11 @@ void Corona::CollectRenderFrameDeltas()
 
 	if (delta.SceneObjectDeltas.empty() &&
 		delta.PointLightDeltas.empty() &&
+		delta.RoadDecals.empty() &&
 		!delta.bHasFrameSourceState &&
 		!delta.bFullSceneObjectSync &&
-		!delta.bFullPointLightSync)
+		!delta.bFullPointLightSync &&
+		!delta.bFullRoadDecalSync)
 	{
 		return;
 	}
@@ -9491,7 +9754,10 @@ UINT32 Corona::ComputePointLightGridStateHash() const
 	};
 
 	const UINT32 resolution = PointLightGridResolution;
-	const UINT32 maxPerCell = PointLightGridMaxLightsPerCell;
+	const UINT32 maxPerCell = std::clamp<UINT32>(
+		DirectLightingPointLightGridMaxPerCell,
+		1u,
+		PointLightGridMaxLightsPerCell);
 	const UINT32 activeCount = std::min(PointLightGridPointLightCount, MaxPointLights);
 	mixBytes(&resolution, sizeof(resolution));
 	mixBytes(&maxPerCell, sizeof(maxPerCell));
@@ -9518,9 +9784,13 @@ bool Corona::EnsurePointLightGridBuffers()
 		mixHash(hash, bits);
 	};
 	uint64_t sourceHash = 1469598103934665603ull;
+	const UINT32 effectiveMaxPerCell = std::clamp<UINT32>(
+		DirectLightingPointLightGridMaxPerCell,
+		1u,
+		PointLightGridMaxLightsPerCell);
 	mixHash(sourceHash, RenderWorld.PointLights.size());
 	mixHash(sourceHash, PointLightGridResolution);
-	mixHash(sourceHash, PointLightGridMaxLightsPerCell);
+	mixHash(sourceHash, effectiveMaxPerCell);
 	for (const PointLightState& pointLight : RenderWorld.PointLights)
 	{
 		mixHash(sourceHash, pointLight.Id);
@@ -9605,7 +9875,7 @@ bool Corona::EnsurePointLightGridBuffers()
 		PointLightGridParam.Counts = glm::uvec4(
 			PointLightGridPointLightCount,
 			PointLightGridResolution,
-			PointLightGridMaxLightsPerCell,
+			effectiveMaxPerCell,
 			0u);
 	}
 	else
@@ -9613,7 +9883,7 @@ bool Corona::EnsurePointLightGridBuffers()
 		PointLightGridParam.MinAndEnabled = glm::vec4(0.0f);
 		PointLightGridParam.InvExtentAndResolution =
 			glm::vec4(0.0f, 0.0f, 0.0f, static_cast<float>(PointLightGridResolution));
-		PointLightGridParam.Counts = glm::uvec4(0u, PointLightGridResolution, PointLightGridMaxLightsPerCell, 0u);
+		PointLightGridParam.Counts = glm::uvec4(0u, PointLightGridResolution, effectiveMaxPerCell, 0u);
 	}
 
 	std::vector<uint32_t> gridCounts;
@@ -9622,8 +9892,11 @@ bool Corona::EnsurePointLightGridBuffers()
 	{
 		gridCounts.assign(PointLightGridCellCount, 0u);
 		gridIndices.assign(
-			static_cast<size_t>(PointLightGridCellCount) * PointLightGridMaxLightsPerCell,
+			static_cast<size_t>(PointLightGridCellCount) * effectiveMaxPerCell,
 			0u);
+		std::vector<float> gridWeights(
+			static_cast<size_t>(PointLightGridCellCount) * effectiveMaxPerCell,
+			-1.0f);
 
 		auto toCell = [](float u) -> UINT32
 		{
@@ -9646,6 +9919,10 @@ bool Corona::EnsurePointLightGridBuffers()
 			const PointLightParam& light = PointLightGridPointLights[lightIndex];
 			const glm::vec3 center(light.PositionAndRadius);
 			const float radius = std::max(light.PositionAndRadius.w, 0.01f);
+			const glm::vec3 color = glm::max(glm::vec3(light.ColorAndIntensity), glm::vec3(0.0f));
+			const float intensity = std::max(light.ColorAndIntensity.w, 0.0f);
+			const float luma = 0.2126f * color.r + 0.7152f * color.g + 0.0722f * color.b;
+			const float lightWeight = std::max(0.0f, luma * intensity * radius * radius);
 			const glm::vec3 lightMin = center - glm::vec3(radius);
 			const glm::vec3 lightMax = center + glm::vec3(radius);
 
@@ -9667,10 +9944,33 @@ bool Corona::EnsurePointLightGridBuffers()
 							y * PointLightGridResolution +
 							x;
 						uint32_t& count = gridCounts[cellIndex];
-						if (count >= PointLightGridMaxLightsPerCell)
+						const size_t cellBase = static_cast<size_t>(cellIndex) * effectiveMaxPerCell;
+						if (count < effectiveMaxPerCell)
+						{
+							const size_t slot = cellBase + count;
+							gridIndices[slot] = lightIndex;
+							gridWeights[slot] = lightWeight;
+							++count;
 							continue;
-						gridIndices[static_cast<size_t>(cellIndex) * PointLightGridMaxLightsPerCell + count] = lightIndex;
-						++count;
+						}
+
+						UINT32 weakestSlot = 0u;
+						float weakestWeight = gridWeights[cellBase];
+						for (UINT32 slotIndex = 1u; slotIndex < effectiveMaxPerCell; ++slotIndex)
+						{
+							const float candidateWeight = gridWeights[cellBase + slotIndex];
+							if (candidateWeight < weakestWeight)
+							{
+								weakestWeight = candidateWeight;
+								weakestSlot = slotIndex;
+							}
+						}
+						if (lightWeight > weakestWeight)
+						{
+							const size_t slot = cellBase + weakestSlot;
+							gridIndices[slot] = lightIndex;
+							gridWeights[slot] = lightWeight;
+						}
 					}
 				}
 			}
@@ -9732,7 +10032,7 @@ bool Corona::EnsurePointLightGridBuffers()
 	AppendCpuRuntimeTrace(
 		L"[PointLightGrid] uploaded, lights=" + std::to_wstring(PointLightGridPointLightCount) +
 		L", resolution=" + std::to_wstring(PointLightGridResolution) +
-		L", maxPerCell=" + std::to_wstring(PointLightGridMaxLightsPerCell) +
+		L", maxPerCell=" + std::to_wstring(effectiveMaxPerCell) +
 		L", cells=" + std::to_wstring(bHasLights ? PointLightGridCellCount : 1u));
 	return true;
 }
@@ -10946,6 +11246,146 @@ shared_ptr<Scene> Corona::CreateProceduralBoxScene(const glm::vec3& baseColor, b
 	return scene;
 }
 
+shared_ptr<Scene> Corona::CreateProceduralCylinderScene(float radius, float halfLength, uint32_t segments, const glm::vec3& baseColor)
+{
+	if (!renderBackend || radius <= 0.0f || halfLength <= 0.0f)
+		return nullptr;
+
+	const uint32_t S = std::clamp<uint32_t>(segments, 8u, 128u);
+	struct CylinderVertex
+	{
+		glm::vec3 Position;
+		glm::vec3 Normal;
+		glm::vec2 UV;
+		glm::vec3 Tangent;
+	};
+	static_assert(sizeof(CylinderVertex) == 44, "CylinderVertex must match base GBuffer PSO stride");
+
+	std::vector<CylinderVertex> vertices;
+	std::vector<uint32_t> indices;
+	vertices.reserve(static_cast<size_t>(S + 1u) * 2u + static_cast<size_t>(S) * 2u + 2u);
+	indices.reserve(static_cast<size_t>(S) * 12u);
+
+	for (uint32_t i = 0; i <= S; ++i)
+	{
+		const float u = static_cast<float>(i) / static_cast<float>(S);
+		const float a = u * glm::two_pi<float>();
+		const float c = std::cos(a);
+		const float s = std::sin(a);
+		const glm::vec3 normal(0.0f, c, s);
+		const glm::vec2 uv(u, 0.0f);
+		CylinderVertex left{};
+		left.Position = glm::vec3(-halfLength, radius * c, radius * s);
+		left.Normal = normal;
+		left.UV = uv;
+		left.Tangent = glm::vec3(1.0f, 0.0f, 0.0f);
+		vertices.push_back(left);
+
+		CylinderVertex right = left;
+		right.Position.x = halfLength;
+		right.UV.y = 1.0f;
+		vertices.push_back(right);
+	}
+
+	for (uint32_t i = 0; i < S; ++i)
+	{
+		const uint32_t i0 = i * 2u;
+		const uint32_t i1 = i0 + 1u;
+		const uint32_t i2 = (i + 1u) * 2u;
+		const uint32_t i3 = i2 + 1u;
+		indices.push_back(i0); indices.push_back(i2); indices.push_back(i1);
+		indices.push_back(i1); indices.push_back(i2); indices.push_back(i3);
+	}
+
+	const uint32_t leftCenter = static_cast<uint32_t>(vertices.size());
+	CylinderVertex leftCenterVertex{};
+	leftCenterVertex.Position = glm::vec3(-halfLength, 0.0f, 0.0f);
+	leftCenterVertex.Normal = glm::vec3(-1.0f, 0.0f, 0.0f);
+	leftCenterVertex.UV = glm::vec2(0.5f);
+	leftCenterVertex.Tangent = glm::vec3(0.0f, 1.0f, 0.0f);
+	vertices.push_back(leftCenterVertex);
+
+	const uint32_t leftRim = static_cast<uint32_t>(vertices.size());
+	for (uint32_t i = 0; i < S; ++i)
+	{
+		const float u = static_cast<float>(i) / static_cast<float>(S);
+		const float a = u * glm::two_pi<float>();
+		const float c = std::cos(a);
+		const float s = std::sin(a);
+		CylinderVertex v{};
+		v.Position = glm::vec3(-halfLength, radius * c, radius * s);
+		v.Normal = glm::vec3(-1.0f, 0.0f, 0.0f);
+		v.UV = glm::vec2(0.5f + c * 0.5f, 0.5f + s * 0.5f);
+		v.Tangent = glm::vec3(0.0f, 1.0f, 0.0f);
+		vertices.push_back(v);
+	}
+
+	const uint32_t rightCenter = static_cast<uint32_t>(vertices.size());
+	CylinderVertex rightCenterVertex = leftCenterVertex;
+	rightCenterVertex.Position.x = halfLength;
+	rightCenterVertex.Normal = glm::vec3(1.0f, 0.0f, 0.0f);
+	vertices.push_back(rightCenterVertex);
+
+	const uint32_t rightRim = static_cast<uint32_t>(vertices.size());
+	for (uint32_t i = 0; i < S; ++i)
+	{
+		const float u = static_cast<float>(i) / static_cast<float>(S);
+		const float a = u * glm::two_pi<float>();
+		const float c = std::cos(a);
+		const float s = std::sin(a);
+		CylinderVertex v{};
+		v.Position = glm::vec3(halfLength, radius * c, radius * s);
+		v.Normal = glm::vec3(1.0f, 0.0f, 0.0f);
+		v.UV = glm::vec2(0.5f + c * 0.5f, 0.5f + s * 0.5f);
+		v.Tangent = glm::vec3(0.0f, 1.0f, 0.0f);
+		vertices.push_back(v);
+	}
+
+	for (uint32_t i = 0; i < S; ++i)
+	{
+		const uint32_t next = (i + 1u) % S;
+		indices.push_back(leftCenter); indices.push_back(leftRim + next); indices.push_back(leftRim + i);
+		indices.push_back(rightCenter); indices.push_back(rightRim + i); indices.push_back(rightRim + next);
+	}
+
+	auto material = std::make_shared<Material>();
+	material->BaseColorFactor = glm::vec4(glm::clamp(baseColor, glm::vec3(0.0f), glm::vec3(1.0f)), 1.0f);
+	material->Diffuse = DefaultWhiteTex;
+	material->Normal = DefaultNormalTex;
+	material->Roughness = DefaultRougnessTex;
+	material->Metallic = DefaultBlackTex;
+
+	auto mesh = std::make_shared<Mesh>(renderBackend.get());
+	mesh->transform = glm::mat4x4(1.0f);
+	mesh->NumVertices = static_cast<UINT>(vertices.size());
+	mesh->NumIndices = static_cast<UINT>(indices.size());
+	mesh->VertexStride = sizeof(CylinderVertex);
+	mesh->IndexFormat = EIndexFormat::U32;
+	mesh->Mat = material;
+	mesh->Vb = renderBackend->CreateVertexBuffer(sizeof(CylinderVertex) * vertices.size(), sizeof(CylinderVertex), vertices.data());
+	mesh->Ib = renderBackend->CreateIndexBuffer(mesh->IndexFormat, sizeof(uint32_t) * indices.size(), indices.data());
+	mesh->CpuPositions.reserve(vertices.size());
+	for (const CylinderVertex& vertex : vertices)
+		mesh->CpuPositions.push_back(vertex.Position);
+	mesh->CpuIndices = indices;
+
+	Mesh::DrawCall drawCall = {};
+	drawCall.IndexStart = 0;
+	drawCall.IndexCount = mesh->NumIndices;
+	drawCall.VertexBase = 0;
+	drawCall.VertexCount = mesh->NumVertices;
+	drawCall.mat = material;
+	mesh->Draws.push_back(drawCall);
+
+	auto scene = std::make_shared<Scene>();
+	scene->Materials.push_back(material);
+	scene->meshes.push_back(mesh);
+	scene->bHasBounds = true;
+	scene->BoundsMin = glm::vec3(-halfLength, -radius, -radius);
+	scene->BoundsMax = glm::vec3(halfLength, radius, radius);
+	return scene;
+}
+
 namespace
 {
 	// Shared blade-grid generator. baseYSampler returns each blade root's
@@ -12054,6 +12494,7 @@ void Corona::LoadAssets()
 	AppendCpuRuntimeTrace(L"[LoadAssets] before InitGBufferPass");
 	UpdateStartupLoadingProgress(0.26f, L"Compiling G-buffer pass");
 	InitGBufferPass();
+	InitRoadDecalPass();
 	AppendCpuRuntimeTrace(L"[LoadAssets] after InitGBufferPass");
 	if (bMobileHybridDirectOnlyStartup)
 	{
@@ -12067,6 +12508,8 @@ void Corona::LoadAssets()
 		AppendCpuRuntimeTrace(L"[LoadAssets] before full hybrid presentation pass init");
 		UpdateStartupLoadingProgress(0.30f, L"Compiling presentation passes");
 		InitLightingPass();
+		InitDepthHeightFogPass();
+		InitVolumetricFogPass();
 		InitToneMapPass();
 		InitParticlePass();
 		if (!bVulkanPathTracingStartup)
@@ -14063,6 +14506,7 @@ void Corona::ApplyDefaultFlyCamera()
 	UpdateMainCameraEntityFromSimpleCamera();
 }
 
+
 static const float OneMinusEpsilon = 0.9999999403953552f;
 
 inline float RadicalInverseBase2(uint32 bits)
@@ -14117,7 +14561,11 @@ void Corona::OnUpdate()
 	phaseStart = CpuClock::now();
 	const glm::vec3 cameraPositionBeforeNativeUpdate = m_camera.m_position;
 	const bool bCameraPathDrivesCamera = bCameraPathPlaying || bCameraPathDumping;
-	if (!bScriptCameraControlEnabled && !bCameraPathDrivesCamera)
+	if (bVehicleDrivingMode)
+	{
+		UpdateVehicleDrivingMode(elapsedSeconds);
+	}
+	else if (!bScriptCameraControlEnabled && !bCameraPathDrivesCamera)
 	{
 		if (IsEditorStartupMode())
 			m_camera.SetMoveSpeed(EditorCameraMoveSpeed);
@@ -15225,6 +15673,14 @@ void Corona::DrawEditorModeOverlay()
 				{
 					if (ImGui::Checkbox("Enable Diffuse GI", &bEnableDiffuseGI)) bLightingChanged = true;
 					{
+						int frameInterleaveMode = static_cast<int>(RTIndirectFrameInterleaveMode);
+						if (ImGui::SliderInt("RT Indirect FrameInterleave", &frameInterleaveMode, 0, 4))
+						{
+							RTIndirectFrameInterleaveMode = static_cast<UINT32>(std::clamp(frameInterleaveMode, 0, 4));
+							bLightingChanged = true;
+						}
+					}
+					{
 						int giSpp = (int)SimpleGISamplesPerPixel;
 						if (ImGui::SliderInt("Simple GI Local Light Samples", &giSpp, 1, 16))
 						{
@@ -15236,12 +15692,6 @@ void Corona::DrawEditorModeOverlay()
 					if (bEnableGIDisocclusionFilter && !bFeedRawGIToRR)
 						ImGui::SliderInt("  Disoccl Filter Radius", &DiffuseGISpatialFilterCB.Radius, 1, 8);
 					if (ImGui::Checkbox("Feed RAW GI to DLSS-RR (unstable in dark scenes)", &bFeedRawGIToRR)) bLightingChanged = true;
-					if (bFeedRawGIToRR)
-					{
-						if (ImGui::Checkbox("  Simple GI Spatial Filter (DLSS-RR)", &bEnableSimpleGISpatialFilter)) bLightingChanged = true;
-						if (bEnableSimpleGISpatialFilter)
-							ImGui::SliderInt("    GI Spatial Filter Radius", &DiffuseGISpatialFilterCB.Radius, 1, 8);
-					}
 					const bool bRTDiffuseGISERAvailable =
 						renderBackend &&
 						renderBackend->SupportsShaderExecutionReordering();
@@ -15392,6 +15842,52 @@ void Corona::DrawEditorModeOverlay()
 						bLightingChanged = true;
 					if (ImGui::SliderFloat("Prefiltered Env Roughness Fade", &PrefilteredEnvRoughnessFade, 0.0f, 0.5f))
 						bLightingChanged = true;
+					if (ImGui::Checkbox("Enable Depth / Height Fog", &bEnableDepthHeightFog))
+						bLightingChanged = true;
+					if (bEnableDepthHeightFog && ImGui::TreeNodeEx("Depth / Height Fog", ImGuiTreeNodeFlags_DefaultOpen))
+					{
+						if (ImGui::ColorEdit3("Fog Color", &DepthHeightFogColor.x))
+							bLightingChanged = true;
+						if (ImGui::SliderFloat("Density", &DepthHeightFogDensity, 0.0f, 0.001f, "%.6f"))
+							bLightingChanged = true;
+						if (ImGui::SliderFloat("Start Distance", &DepthHeightFogStartDistance, 0.0f, 200000.0f, "%.0f"))
+							bLightingChanged = true;
+						if (ImGui::SliderFloat("Height", &DepthHeightFogHeight, -10000.0f, 10000.0f, "%.1f"))
+							bLightingChanged = true;
+						if (ImGui::SliderFloat("Height Falloff", &DepthHeightFogHeightFalloff, 0.0f, 0.01f, "%.6f"))
+							bLightingChanged = true;
+						if (ImGui::SliderFloat("Max Opacity", &DepthHeightFogMaxOpacity, 0.0f, 1.0f, "%.2f"))
+							bLightingChanged = true;
+						ImGui::TreePop();
+					}
+					if (ImGui::Checkbox("Enable Froxel Volumetric Fog", &bEnableVolumetricFog))
+						bLightingChanged = true;
+					if (bEnableVolumetricFog && ImGui::TreeNodeEx("Froxel Volumetric Fog", ImGuiTreeNodeFlags_DefaultOpen))
+					{
+						if (ImGui::ColorEdit3("Fog Color##volumetric", &VolumetricFogColor.x)) bLightingChanged = true;
+						if (ImGui::SliderFloat("Density##volumetric", &VolumetricFogDensity, 0.0f, 0.001f, "%.6f")) bLightingChanged = true;
+						if (ImGui::SliderFloat("Start Distance##volumetric", &VolumetricFogStartDistance, 0.0f, 200000.0f, "%.0f")) bLightingChanged = true;
+						if (ImGui::SliderFloat("Max Distance##volumetric", &VolumetricFogMaxDistance, 1000.0f, 500000.0f, "%.0f")) bLightingChanged = true;
+						if (ImGui::SliderFloat("Height##volumetric", &VolumetricFogHeight, -10000.0f, 10000.0f, "%.1f")) bLightingChanged = true;
+						if (ImGui::SliderFloat("Height Falloff##volumetric", &VolumetricFogHeightFalloff, 0.0f, 0.01f, "%.6f")) bLightingChanged = true;
+						if (ImGui::SliderFloat("Max Opacity##volumetric", &VolumetricFogMaxOpacity, 0.0f, 1.0f, "%.2f")) bLightingChanged = true;
+						if (ImGui::SliderFloat("Ambient Strength##volumetric", &VolumetricFogAmbientStrength, 0.0f, 4.0f, "%.2f")) bLightingChanged = true;
+						if (ImGui::SliderFloat("Directional Strength##volumetric", &VolumetricFogDirectionalStrength, 0.0f, 8.0f, "%.2f")) bLightingChanged = true;
+						if (ImGui::SliderFloat("Anisotropy##volumetric", &VolumetricFogAnisotropy, -0.9f, 0.9f, "%.2f")) bLightingChanged = true;
+						int gridPixelSize = static_cast<int>(VolumetricFogGridPixelSize);
+						if (ImGui::SliderInt("Grid Pixel Size##volumetric", &gridPixelSize, 4, 64))
+						{
+							VolumetricFogGridPixelSize = static_cast<UINT32>(std::clamp(gridPixelSize, 4, 64));
+							bLightingChanged = true;
+						}
+						int gridSizeZ = static_cast<int>(VolumetricFogGridSizeZ);
+						if (ImGui::SliderInt("Grid Z Slices##volumetric", &gridSizeZ, 8, 128))
+						{
+							VolumetricFogGridSizeZ = static_cast<UINT32>(std::clamp(gridSizeZ, 8, 128));
+							bLightingChanged = true;
+						}
+						ImGui::TreePop();
+					}
 					ImGui::TreePop();
 				}
 
@@ -15497,6 +15993,42 @@ void Corona::DrawEditorModeOverlay()
 					if (ImGui::ColorEdit3("Sky Color Top", &SkyColorTop.x)) bLightingChanged = true;
 					if (ImGui::ColorEdit3("Sky Color Bottom", &SkyColorBottom.x)) bLightingChanged = true;
 					if (ImGui::SliderFloat("Sky Intensity", &SkyIntensity, 0.0f, 10.0f)) bLightingChanged = true;
+					if (ImGui::Checkbox("Enable Depth / Height Fog", &bEnableDepthHeightFog)) bLightingChanged = true;
+					if (bEnableDepthHeightFog)
+					{
+						if (ImGui::ColorEdit3("Fog Color", &DepthHeightFogColor.x)) bLightingChanged = true;
+						if (ImGui::SliderFloat("Fog Density", &DepthHeightFogDensity, 0.0f, 0.001f, "%.6f")) bLightingChanged = true;
+						if (ImGui::SliderFloat("Fog Start Distance", &DepthHeightFogStartDistance, 0.0f, 200000.0f, "%.0f")) bLightingChanged = true;
+						if (ImGui::SliderFloat("Fog Height", &DepthHeightFogHeight, -10000.0f, 10000.0f, "%.1f")) bLightingChanged = true;
+						if (ImGui::SliderFloat("Fog Height Falloff", &DepthHeightFogHeightFalloff, 0.0f, 0.01f, "%.6f")) bLightingChanged = true;
+						if (ImGui::SliderFloat("Fog Max Opacity", &DepthHeightFogMaxOpacity, 0.0f, 1.0f, "%.2f")) bLightingChanged = true;
+					}
+					if (ImGui::Checkbox("Enable Froxel Volumetric Fog", &bEnableVolumetricFog)) bLightingChanged = true;
+					if (bEnableVolumetricFog)
+					{
+						if (ImGui::ColorEdit3("Volumetric Fog Color", &VolumetricFogColor.x)) bLightingChanged = true;
+						if (ImGui::SliderFloat("Volumetric Fog Density", &VolumetricFogDensity, 0.0f, 0.001f, "%.6f")) bLightingChanged = true;
+						if (ImGui::SliderFloat("Volumetric Fog Start Distance", &VolumetricFogStartDistance, 0.0f, 200000.0f, "%.0f")) bLightingChanged = true;
+						if (ImGui::SliderFloat("Volumetric Fog Max Distance", &VolumetricFogMaxDistance, 1000.0f, 500000.0f, "%.0f")) bLightingChanged = true;
+						if (ImGui::SliderFloat("Volumetric Fog Height", &VolumetricFogHeight, -10000.0f, 10000.0f, "%.1f")) bLightingChanged = true;
+						if (ImGui::SliderFloat("Volumetric Fog Height Falloff", &VolumetricFogHeightFalloff, 0.0f, 0.01f, "%.6f")) bLightingChanged = true;
+						if (ImGui::SliderFloat("Volumetric Fog Max Opacity", &VolumetricFogMaxOpacity, 0.0f, 1.0f, "%.2f")) bLightingChanged = true;
+						if (ImGui::SliderFloat("Volumetric Fog Ambient", &VolumetricFogAmbientStrength, 0.0f, 4.0f, "%.2f")) bLightingChanged = true;
+						if (ImGui::SliderFloat("Volumetric Fog Directional", &VolumetricFogDirectionalStrength, 0.0f, 8.0f, "%.2f")) bLightingChanged = true;
+						if (ImGui::SliderFloat("Volumetric Fog Anisotropy", &VolumetricFogAnisotropy, -0.9f, 0.9f, "%.2f")) bLightingChanged = true;
+						int gridPixelSize = static_cast<int>(VolumetricFogGridPixelSize);
+						if (ImGui::SliderInt("Volumetric Fog Grid Pixel", &gridPixelSize, 4, 64))
+						{
+							VolumetricFogGridPixelSize = static_cast<UINT32>(std::clamp(gridPixelSize, 4, 64));
+							bLightingChanged = true;
+						}
+						int gridSizeZ = static_cast<int>(VolumetricFogGridSizeZ);
+						if (ImGui::SliderInt("Volumetric Fog Grid Z", &gridSizeZ, 8, 128))
+						{
+							VolumetricFogGridSizeZ = static_cast<UINT32>(std::clamp(gridSizeZ, 8, 128));
+							bLightingChanged = true;
+						}
+					}
 				}
 
 				if (bLightingChanged)
@@ -15998,6 +16530,13 @@ void Corona::OnRender()
 		}
 		EndGpuPassTiming(EGpuPass::GBuffer);
 
+		if (!bCommandLineDisableRoadDecals && !RenderWorld.RoadDecals.empty())
+		{
+			BeginGpuPassTiming(EGpuPass::GBufferDecals);
+			RoadDecalPass();
+			EndGpuPassTiming(EGpuPass::GBufferDecals);
+		}
+
 		const bool bNeedSpatialLightMaskForDirectShadow =
 			bRunRayTracedShadow &&
 			bEnableReSTIRDirectShadow &&
@@ -16139,17 +16678,6 @@ void Corona::OnRender()
 			EndGpuPassTiming(EGpuPass::RaytraceGI);
 		}
 
-		// Spatial-only pre-filter for the DLSS-RR feed of the simple-trace diffuse GI
-		// (no temporal reprojection -> no ghosting; reduces 1spp variance so RR stays
-		// stable on dolly). Only meaningful when SIMPLE_RAYTRACE feeds RR raw.
-		if (bEnableDiffuseGI &&
-			effectiveDiffuseGIMode == EDiffuseGIMode::SIMPLE_RAYTRACE &&
-			IsDLSSRREnabled() &&
-			bEnableSimpleGISpatialFilter)
-		{
-			DiffuseGISpatialFilterPass();
-		}
-
 		// Simple GI denoising: edge-aware temporal accumulation.
 		if (bRunTemporalDenoise)
 		{
@@ -16190,6 +16718,18 @@ void Corona::OnRender()
 			BeginGpuPassTiming(EGpuPass::Particles);
 			ParticlePass();
 			EndGpuPassTiming(EGpuPass::Particles);
+			if (bEnableVolumetricFog)
+			{
+				BeginGpuPassTiming(EGpuPass::VolumetricFog);
+				VolumetricFogPass();
+				EndGpuPassTiming(EGpuPass::VolumetricFog);
+			}
+			if (bEnableDepthHeightFog)
+			{
+				BeginGpuPassTiming(EGpuPass::DepthHeightFog);
+				DepthHeightFogPass();
+				EndGpuPassTiming(EGpuPass::DepthHeightFog);
+			}
 		}
 
 		// BloomPass(); // Disabled for hybrid mode
@@ -16543,6 +17083,12 @@ void Corona::OnRender()
 
 		if (bEditorStartupMode)
 			DrawEditorModeOverlay();
+
+		if (bVehicleDrivingMode)
+		{
+			DrawVehicleDrivingOverlay();
+			DrawVehicleSettingsViewer();
+		}
 
 		if (bShowImgui)
 		{
@@ -17252,6 +17798,14 @@ void Corona::OnRender()
 			if (ImGui::TreeNodeEx("Diffuse GI", ImGuiTreeNodeFlags_DefaultOpen))
 			{
 				if (ImGui::Checkbox("Enable Diffuse GI", &bEnableDiffuseGI)) bLightingChanged = true;
+				{
+					int frameInterleaveMode = static_cast<int>(RTIndirectFrameInterleaveMode);
+					if (ImGui::SliderInt("RT Indirect FrameInterleave", &frameInterleaveMode, 0, 4))
+					{
+						RTIndirectFrameInterleaveMode = static_cast<UINT32>(std::clamp(frameInterleaveMode, 0, 4));
+						bLightingChanged = true;
+					}
+				}
 				const bool bRTDiffuseGISERAvailable =
 					renderBackend &&
 					renderBackend->SupportsShaderExecutionReordering();
@@ -17543,6 +18097,36 @@ if (ImGui::Button("Reset Accumulation"))
 			ResetAllAccumulationState(false);
 		if (ImGui::SliderFloat("Prefiltered Env Roughness Fade", &PrefilteredEnvRoughnessFade, 0.0f, 0.5f))
 			ResetAllAccumulationState(false);
+		ImGui::Checkbox("Enable Depth / Height Fog", &bEnableDepthHeightFog);
+		if (bEnableDepthHeightFog)
+		{
+			ImGui::ColorEdit3("Fog Color", &DepthHeightFogColor.x);
+			ImGui::SliderFloat("Fog Density", &DepthHeightFogDensity, 0.0f, 0.001f, "%.6f");
+			ImGui::SliderFloat("Fog Start Distance", &DepthHeightFogStartDistance, 0.0f, 200000.0f, "%.0f");
+			ImGui::SliderFloat("Fog Height", &DepthHeightFogHeight, -10000.0f, 10000.0f, "%.1f");
+			ImGui::SliderFloat("Fog Height Falloff", &DepthHeightFogHeightFalloff, 0.0f, 0.01f, "%.6f");
+			ImGui::SliderFloat("Fog Max Opacity", &DepthHeightFogMaxOpacity, 0.0f, 1.0f, "%.2f");
+		}
+		ImGui::Checkbox("Enable Froxel Volumetric Fog", &bEnableVolumetricFog);
+		if (bEnableVolumetricFog)
+		{
+			ImGui::ColorEdit3("Volumetric Fog Color", &VolumetricFogColor.x);
+			ImGui::SliderFloat("Volumetric Fog Density", &VolumetricFogDensity, 0.0f, 0.001f, "%.6f");
+			ImGui::SliderFloat("Volumetric Fog Start Distance", &VolumetricFogStartDistance, 0.0f, 200000.0f, "%.0f");
+			ImGui::SliderFloat("Volumetric Fog Max Distance", &VolumetricFogMaxDistance, 1000.0f, 500000.0f, "%.0f");
+			ImGui::SliderFloat("Volumetric Fog Height", &VolumetricFogHeight, -10000.0f, 10000.0f, "%.1f");
+			ImGui::SliderFloat("Volumetric Fog Height Falloff", &VolumetricFogHeightFalloff, 0.0f, 0.01f, "%.6f");
+			ImGui::SliderFloat("Volumetric Fog Max Opacity", &VolumetricFogMaxOpacity, 0.0f, 1.0f, "%.2f");
+			ImGui::SliderFloat("Volumetric Fog Ambient", &VolumetricFogAmbientStrength, 0.0f, 4.0f, "%.2f");
+			ImGui::SliderFloat("Volumetric Fog Directional", &VolumetricFogDirectionalStrength, 0.0f, 8.0f, "%.2f");
+			ImGui::SliderFloat("Volumetric Fog Anisotropy", &VolumetricFogAnisotropy, -0.9f, 0.9f, "%.2f");
+			int gridPixelSize = static_cast<int>(VolumetricFogGridPixelSize);
+			if (ImGui::SliderInt("Volumetric Fog Grid Pixel", &gridPixelSize, 4, 64))
+				VolumetricFogGridPixelSize = static_cast<UINT32>(std::clamp(gridPixelSize, 4, 64));
+			int gridSizeZ = static_cast<int>(VolumetricFogGridSizeZ);
+			if (ImGui::SliderInt("Volumetric Fog Grid Z", &gridSizeZ, 8, 128))
+				VolumetricFogGridSizeZ = static_cast<UINT32>(std::clamp(gridSizeZ, 8, 128));
+		}
 
 		if (!renderBackend->GetErrorString().empty())
 		{
@@ -17808,6 +18392,53 @@ if (ImGui::Button("Reset Accumulation"))
 	ConsumeCameraPathDumpCaptureResult();
 	ConsumeFinalBackbufferScreenshotResult();
 
+	if (bCommandLineLightingDebugDump && !bLightingDebugDumpDone &&
+		FrameCounter >= LightingDebugDumpFrame &&
+		FrameCounter <= LightingDebugDumpFrame + 3)
+	{
+		if (FrameCounter == LightingDebugDumpFrame + 3)
+			bLightingDebugDumpDone = true;
+
+		std::filesystem::path dumpDir = RuntimePaths::DumpDirectory() / L"lighting_debug";
+		std::error_code ec;
+		std::filesystem::create_directories(dumpDir, ec);
+		const std::wstring base = (dumpDir / (L"frame_" + std::to_wstring(FrameCounter))).wstring();
+
+		auto dumpPng = [&](const wchar_t* suffix, Texture* texture, EResourceState state)
+		{
+			if (!texture)
+				return;
+			const bool ok = DumpTexturePNG(texture, base + L"_" + suffix + L".png", state);
+			AppendCpuRuntimeTrace(
+				std::wstring(L"[LightingDebugDump] ") + suffix +
+				L" png=" + std::to_wstring(ok ? 1 : 0) +
+				L", frame=" + std::to_wstring(FrameCounter));
+		};
+
+		auto dumpHdrAndPng = [&](const wchar_t* suffix, Texture* texture, EResourceState state)
+		{
+			if (!texture)
+				return;
+			const bool hdrOk = DumpTextureHDR(texture, base + L"_" + suffix + L".hdr", state);
+			const bool pngOk = DumpTexturePNG(texture, base + L"_" + suffix + L".png", state);
+			AppendCpuRuntimeTrace(
+				std::wstring(L"[LightingDebugDump] ") + suffix +
+				L" hdr=" + std::to_wstring(hdrOk ? 1 : 0) +
+				L", png=" + std::to_wstring(pngOk ? 1 : 0) +
+				L", frame=" + std::to_wstring(FrameCounter));
+		};
+
+		dumpPng(L"shadow", ShadowBuffer.get(), EResourceState::ShaderRead);
+		dumpHdrAndPng(L"direct_lighting", DirectLightingBuffer.get(), EResourceState::ShaderRead);
+		dumpHdrAndPng(L"diffuse_gi_raw", DiffuseGIRaw.get(), EResourceState::ShaderRead);
+		dumpHdrAndPng(L"specular_gi_raw", SpecularGIRaw.get(), EResourceState::ShaderRead);
+		dumpHdrAndPng(L"lighting", LightingBuffer.get(), EResourceState::ShaderRead);
+		dumpPng(L"albedo", AlbedoBuffer.get(), EResourceState::ShaderRead);
+		dumpPng(L"world_normal", NormalBuffers[ColorBufferWriteIndex].get(), EResourceState::ShaderRead);
+		dumpPng(L"geo_normal", GeomNormalBuffers[ColorBufferWriteIndex].get(), EResourceState::ShaderRead);
+		dumpPng(L"depth", UnjitteredDepthBuffers[ColorBufferWriteIndex].get(), EResourceState::ShaderRead);
+	}
+
 	if ((bVulkanStagePreview || bVulkanHybridAutoDump || bAASwitchDumpMode) && bAutoAADumpEnabled && bAutoAADumpInitialized && !AutoAADumpDir.empty())
 	{
 		std::wstring outputPath;
@@ -18053,7 +18684,21 @@ void Corona::OnDestroy()
 	renderBackend->ShutdownGpuTimestampQueries();
 
 #if WITH_STREAMLINE
-	ShutdownStreamline();
+	if (bCommandLineExitAfterFramesTriggered)
+	{
+		// Automated profiling runs can otherwise hang in slShutdown after the
+		// requested frame count has completed. The process is exiting, so prefer
+		// deterministic benchmark turnaround over plugin cleanup latency.
+		AppendCpuRuntimeTrace(L"[Streamline] shutdown skipped after command-line exit-after-frames");
+		bStreamlineInitialized = false;
+		StreamlineFrameToken = nullptr;
+		StreamlineFrameIndex = 0;
+		bStreamlineConstantsSetThisFrame = false;
+	}
+	else
+	{
+		ShutdownStreamline();
+	}
 #endif
 	if (bImguiInitialized)
 	{
@@ -18203,8 +18848,11 @@ void Corona::RecompileShaders()
 
 #if CORONA_PLATFORM_MOBILE
 	InitGBufferPass();
+	InitRoadDecalPass();
 	InitToneMapPass();
 	InitLightingPass();
+	InitDepthHeightFogPass();
+	InitVolumetricFogPass();
 	InitParticlePass();
 	InitTemporalAAPass();
 	return;
@@ -18222,8 +18870,11 @@ void Corona::RecompileShaders()
 	if (maxSupportedHybridStage >= 6u)
 		InitSpatialHashGIPass();
 	InitGBufferPass();
+	InitRoadDecalPass();
 	InitToneMapPass();
 	InitLightingPass();
+	InitDepthHeightFogPass();
+	InitVolumetricFogPass();
 	InitParticlePass();
 	InitTemporalAAPass();
 #if CORONA_HAS_D3D12

@@ -693,6 +693,58 @@ namespace
 	};
 	static_assert(sizeof(GBufferOccluderDepthPyramidConstant) == 32, "GBufferOccluderDepthPyramidConstant must match OccluderDepthPyramidCS.hlsl.");
 
+	struct RoadDecalGpuRecord
+	{
+		glm::vec4 CenterHalfLength = glm::vec4(0.0f);
+		glm::vec4 AxisXHalfWidth = glm::vec4(1.0f, 0.0f, 0.0f, 0.0f);
+		glm::vec4 AxisZHeight = glm::vec4(0.0f, 0.0f, 1.0f, 0.0f);
+		glm::vec4 BaseColorRoughness = glm::vec4(0.18f, 0.18f, 0.17f, 0.88f);
+		glm::vec4 Params = glm::vec4(6.0f, 1.0f, 18.0f, 0.65f);
+		glm::vec4 BoundsMin = glm::vec4(0.0f);
+		glm::vec4 BoundsMax = glm::vec4(0.0f);
+		glm::vec4 Polygon01 = glm::vec4(0.0f);
+		glm::vec4 Polygon23 = glm::vec4(0.0f);
+		glm::vec4 Polygon45 = glm::vec4(0.0f);
+		glm::vec4 Polygon67 = glm::vec4(0.0f);
+		glm::vec4 Polygon89 = glm::vec4(0.0f);
+		glm::vec4 PolygonAB = glm::vec4(0.0f);
+		glm::vec4 PolygonCD = glm::vec4(0.0f);
+		glm::vec4 PolygonEF = glm::vec4(0.0f);
+	};
+	static_assert(sizeof(RoadDecalGpuRecord) == 240, "RoadDecalGpuRecord must match RoadDecalCS.hlsl.");
+
+	struct RoadDecalCullConstant
+	{
+		uint32_t DecalCount = 0;
+		uint32_t TileCountX = 0;
+		uint32_t TileCountY = 0;
+		uint32_t MaxDecalsPerTile = 0;
+		glm::vec2 RTSize = glm::vec2(0.0f);
+		glm::vec2 Padding = glm::vec2(0.0f);
+		glm::vec4 FrustumPlanes[6] = {};
+		glm::mat4 ViewProjectionMatrix = glm::mat4(1.0f);
+		uint32_t EnableFrustumCull = 1;
+		uint32_t EnableHiZOcclusion = 1;
+		uint32_t DepthPyramidWidth = 0;
+		uint32_t DepthPyramidHeight = 0;
+		uint32_t DepthPyramidMipCount = 0;
+		uint32_t DepthPyramidMaxMip = 0;
+		float HiZDepthBias = 0.002f;
+		uint32_t Pad0 = 0;
+		glm::uvec4 DepthPyramidMipOffsets[4] = {};
+	};
+	static_assert(sizeof(RoadDecalCullConstant) == 288, "RoadDecalCullConstant must match RoadDecalCS.hlsl.");
+
+	struct RoadDecalApplyConstant
+	{
+		glm::mat4 InvViewMatrix = glm::mat4(1.0f);
+		glm::mat4 InvProjMatrix = glm::mat4(1.0f);
+		glm::vec2 RTSize = glm::vec2(0.0f);
+		uint32_t TileCountX = 0;
+		uint32_t MaxDecalsPerTile = 0;
+	};
+	static_assert(sizeof(RoadDecalApplyConstant) == 144, "RoadDecalApplyConstant must match RoadDecalCS.hlsl.");
+
 	struct GBufferSparseRayOccluderConstant
 	{
 		glm::mat4 InvViewProjectionMatrix = glm::mat4(1.0f);
@@ -2430,6 +2482,147 @@ void Corona::InitLightingPass()
 	LightingGraphicsPipeline = renderBackend->CreateGraphicsPipeline(desc);
 }
 
+void Corona::InitDepthHeightFogPass()
+{
+	DepthHeightFogPSO.reset();
+	if (!renderBackend)
+		return;
+
+	const RHIShaderStageMask computeStage = ToRHIShaderStageMask(RHIShaderStage::Compute);
+	auto pso = renderBackend->CreateComputePipelineStateObject();
+	if (!pso)
+		return;
+
+	pso->BindUAV(MakeRHITextureUAV("ColorTex", 0, computeStage));
+	pso->BindSRV(MakeRHITextureSRV("DepthTex", 0, computeStage));
+	pso->BindCBV(MakeRHICBV("FogCB", 0, sizeof(DepthHeightFogCB), computeStage));
+
+	if (!pso->InitCS(GetAssetFullPath(L"Shaders\\DepthHeightFog.hlsl"), "DepthHeightFogCS"))
+	{
+		return;
+	}
+
+	DepthHeightFogPSO = pso;
+}
+
+void Corona::InitRoadDecalPass()
+{
+	RoadDecalClearTilesPSO.reset();
+	RoadDecalBuildTilesPSO.reset();
+	RoadDecalApplyPSO.reset();
+	if (!renderBackend)
+		return;
+
+	const RHIShaderStageMask computeStage = ToRHIShaderStageMask(RHIShaderStage::Compute);
+	auto createPSO = [&](const char* entryPoint, std::initializer_list<RHIBindingDesc> bindings)
+		-> std::shared_ptr<ComputePipelineStateObject>
+	{
+		auto pso = renderBackend->CreateComputePipelineStateObject();
+		if (!pso)
+			return nullptr;
+		for (const RHIBindingDesc& binding : bindings)
+		{
+			switch (binding.DescriptorKind)
+			{
+			case RHIDescriptorKind::SRV:
+				pso->BindSRV(binding);
+				break;
+			case RHIDescriptorKind::UAV:
+				pso->BindUAV(binding);
+				break;
+			case RHIDescriptorKind::CBV:
+				pso->BindCBV(binding);
+				break;
+			case RHIDescriptorKind::Sampler:
+			case RHIDescriptorKind::AccelerationStructure:
+				break;
+			}
+		}
+		if (!pso->InitCS(GetAssetFullPath(L"Shaders\\RoadDecalCS.hlsl"), entryPoint))
+			return nullptr;
+		return pso;
+	};
+
+	RoadDecalClearTilesPSO = createPSO(
+		"ClearRoadDecalTilesCS",
+		{
+			MakeRHIBufferUAV("RoadDecalTileCounts", 0, computeStage),
+			MakeRHICBV("RoadDecalCullCB", 0, sizeof(RoadDecalCullConstant), computeStage),
+		});
+	RoadDecalBuildTilesPSO = createPSO(
+		"BuildRoadDecalTilesCS",
+		{
+			MakeRHIBufferSRV("RoadDecals", 0, computeStage),
+			MakeRHIBufferSRV("RoadDecalDepthPyramid", 1, computeStage),
+			MakeRHIBufferUAV("RoadDecalTileCounts", 0, computeStage),
+			MakeRHIBufferUAV("RoadDecalTileIndices", 1, computeStage),
+			MakeRHICBV("RoadDecalCullCB", 0, sizeof(RoadDecalCullConstant), computeStage),
+		});
+	RoadDecalApplyPSO = createPSO(
+		"ApplyRoadDecalsCS",
+		{
+			MakeRHITextureSRV("DepthTex", 5, computeStage),
+			MakeRHITextureSRV("NormalTex", 6, computeStage),
+			MakeRHIBufferSRV("ApplyRoadDecals", 7, computeStage),
+			MakeRHIBufferSRV("ApplyTileCounts", 8, computeStage),
+			MakeRHIBufferSRV("ApplyTileIndices", 9, computeStage),
+			MakeRHITextureUAV("AlbedoTex", 2, computeStage),
+			MakeRHITextureUAV("RoughnessMetallicTex", 3, computeStage),
+			MakeRHICBV("RoadDecalApplyCB", 1, sizeof(RoadDecalApplyConstant), computeStage),
+		});
+
+	if (!RoadDecalClearTilesPSO || !RoadDecalBuildTilesPSO || !RoadDecalApplyPSO)
+		AppendCpuRuntimeTrace(L"[InitRoadDecalPass] failed to create road decal compute PSOs");
+
+	if (!RoadDecalDummyBuffer)
+	{
+		float dummyDepth = 1.0f;
+		BufferCreateDesc desc = {};
+		desc.NumElements = 1u;
+		desc.ElementSize = static_cast<uint32_t>(sizeof(float));
+		desc.InitialState = EInitialResourceState::ShaderRead;
+		desc.bAllowUnorderedAccess = false;
+		desc.InitialData = &dummyDepth;
+		desc.Shape = EBufferShape::Structured;
+		desc.Access = EBufferAccess::GpuOnly;
+		desc.AllocationPolicy = EBufferAllocationPolicy::Dedicated;
+		RoadDecalDummyBuffer = renderBackend->CreateBuffer(desc);
+	}
+}
+
+void Corona::InitVolumetricFogPass()
+{
+	VolumetricFogBuildPSO.reset();
+	VolumetricFogCompositePSO.reset();
+	if (!renderBackend)
+		return;
+
+	const RHIShaderStageMask computeStage = ToRHIShaderStageMask(RHIShaderStage::Compute);
+	auto buildPso = renderBackend->CreateComputePipelineStateObject();
+	if (buildPso)
+	{
+		buildPso->BindUAV(MakeRHITextureUAV("FroxelAtlas", 0, computeStage));
+		buildPso->BindCBV(MakeRHICBV("FogCB", 0, sizeof(VolumetricFogCB), computeStage));
+		if (buildPso->InitCS(GetAssetFullPath(L"Shaders\\VolumetricFog.hlsl"), "VolumetricFogBuildCS"))
+		{
+			VolumetricFogBuildPSO = buildPso;
+		}
+	}
+
+	auto compositePso = renderBackend->CreateComputePipelineStateObject();
+	if (compositePso)
+	{
+		compositePso->BindUAV(MakeRHITextureUAV("FroxelAtlas", 0, computeStage));
+		compositePso->BindSRV(MakeRHITextureSRV("DepthTex", 0, computeStage));
+		compositePso->BindSRV(MakeRHITextureSRV("FroxelAtlasRead", 1, computeStage));
+		compositePso->BindCBV(MakeRHICBV("FogCB", 0, sizeof(VolumetricFogCB), computeStage));
+		if (compositePso->InitCS(GetAssetFullPath(L"Shaders\\VolumetricFog.hlsl"), "VolumetricFogCompositeCS"))
+		{
+			VolumetricFogCompositePSO = compositePso;
+		}
+	}
+}
+
 void Corona::InitMobileShadowMapPass()
 {
 	if (!renderBackend)
@@ -3147,6 +3340,7 @@ void Corona::LightingPass()
 	Param.RTAOIndirectStrength = RTAOIndirectStrength;
 	Param.RTAOIndirectFloor = RTAOIndirectFloor;
 	Param.RTAODirectContactStrength = std::clamp(RTAODirectContactStrength, 0.0f, 1.0f);
+	Param.UnselectedShadowCasterVisibility = 0.0f;
 	Param.SurfaceBounceStrength = std::clamp(SurfaceBounceStrength, 0.0f, 1.0f);
 	Param.SurfaceBounceSaturation = std::clamp(SurfaceBounceSaturation, 0.0f, 1.0f);
 	Param.LightingOutputMode = bMobileHybridDirectOnly ? 2u : EditorLightingViewMode;
@@ -3361,22 +3555,10 @@ void Corona::LightingPass()
 		// adds ghosting here. Non-RR paths (TAA/off) keep the temporal stage they rely on.
 		if (IsDLSSRREnabled() && bFeedRawGIToRR && DiffuseGIRaw)
 		{
-			if (bEnableSimpleGISpatialFilter && DiffuseGISpatialFiltered)
-			{
-				// Spatially pre-filtered (no temporal reproject) — RR-idiomatic: calms
-				// the 1spp variance (less dolly flicker) without any ghosting.
-				lightingDiffuseTex = DiffuseGISpatialFiltered.get();
-				lightingDiffuseSource = L"spatial_filtered_for_rr";
-				if (DiffuseGISpatialFilteredAux)
-					lightingDiffuseAuxTex = DiffuseGISpatialFilteredAux.get();
-			}
-			else
-			{
-				lightingDiffuseTex = DiffuseGIRaw.get();
-				lightingDiffuseSource = L"raw_for_rr";
-				if (DiffuseGIRawAux)
-					lightingDiffuseAuxTex = DiffuseGIRawAux.get();
-			}
+			lightingDiffuseTex = DiffuseGIRaw.get();
+			lightingDiffuseSource = L"raw_for_rr";
+			if (DiffuseGIRawAux)
+				lightingDiffuseAuxTex = DiffuseGIRawAux.get();
 		}
 		else if (IsDLSSRREnabled() &&
 			bEnableTemporalDenoisingPass &&
@@ -3497,6 +3679,7 @@ void Corona::LightingPass()
 		static UINT32 sLastRTAORequested = 0xFFFFFFFFu;
 		static UINT32 sLastRTAOValid = 0xFFFFFFFFu;
 		static float sLastRTAOContactStrength = -1.0f;
+		static float sLastUnselectedShadowCasterVisibility = -1.0f;
 		static float sLastRTAOAOStrength = -1.0f;
 		static float sLastRTAOAOFloor = -1.0f;
 		static float sLastRTAORadius = -1.0f;
@@ -3509,6 +3692,7 @@ void Corona::LightingPass()
 			sLastRTAORequested != rtaoRequested ||
 			sLastRTAOValid != rtaoValid ||
 			std::abs(sLastRTAOContactStrength - Param.RTAODirectContactStrength) > 0.0001f ||
+			std::abs(sLastUnselectedShadowCasterVisibility - Param.UnselectedShadowCasterVisibility) > 0.0001f ||
 			std::abs(sLastRTAOAOStrength - Param.RTAOIndirectStrength) > 0.0001f ||
 			std::abs(sLastRTAOAOFloor - Param.RTAOIndirectFloor) > 0.0001f ||
 			std::abs(sLastRTAORadius - RTAOViewParam.Radius) > 0.0001f ||
@@ -3520,6 +3704,7 @@ void Corona::LightingPass()
 			sLastRTAORequested = rtaoRequested;
 			sLastRTAOValid = rtaoValid;
 			sLastRTAOContactStrength = Param.RTAODirectContactStrength;
+			sLastUnselectedShadowCasterVisibility = Param.UnselectedShadowCasterVisibility;
 			sLastRTAOAOStrength = Param.RTAOIndirectStrength;
 			sLastRTAOAOFloor = Param.RTAOIndirectFloor;
 			sLastRTAORadius = RTAOViewParam.Radius;
@@ -3531,6 +3716,7 @@ void Corona::LightingPass()
 				L", requested=" + std::to_wstring(rtaoRequested) +
 				L", valid=" + std::to_wstring(rtaoValid) +
 				L", contactStrength=" + std::to_wstring(Param.RTAODirectContactStrength) +
+				L", unselectedShadowCasterVisibility=" + std::to_wstring(Param.UnselectedShadowCasterVisibility) +
 				L", aoStrength=" + std::to_wstring(Param.RTAOIndirectStrength) +
 				L", aoFloor=" + std::to_wstring(Param.RTAOIndirectFloor) +
 				L", radius=" + std::to_wstring(RTAOViewParam.Radius) +
@@ -3589,6 +3775,530 @@ void Corona::LightingPass()
 		renderBackend->TransitionTexture(DirectLightingBuffer.get(), EResourceState::RenderTarget, EResourceState::ShaderRead);
 	}
 	renderBackend->BindGraphicsBindGroup(LightingGraphicsPipeline.get(), kGraphicsBindGroupSlot_All, nullptr);
+}
+
+void Corona::RoadDecalPass()
+{
+	if (!renderBackend ||
+		!RoadDecalClearTilesPSO ||
+		!RoadDecalBuildTilesPSO ||
+		!RoadDecalApplyPSO ||
+		RenderWorld.RoadDecals.empty() ||
+		!AlbedoBuffer ||
+		!RoughnessMetalicBuffer ||
+		!NormalBuffers[ColorBufferWriteIndex])
+	{
+		return;
+	}
+
+	Texture* depthTex =
+		(GBufferGenerationMode == EGBufferGenerationMode::RtPrimary && UnjitteredDepthBuffers[ColorBufferWriteIndex]) ?
+		UnjitteredDepthBuffers[ColorBufferWriteIndex].get() :
+		DepthBuffer.get();
+	if (!depthTex)
+		return;
+
+	const uint32_t renderWidth = static_cast<uint32_t>(GetRenderWidth());
+	const uint32_t renderHeight = static_cast<uint32_t>(GetRenderHeight());
+	if (renderWidth == 0u || renderHeight == 0u)
+		return;
+
+	renderBackend->EmitGpuCrashMarker("RoadDecalPass");
+
+	static thread_local std::vector<RoadDecalGpuRecord> s_roadDecalRecords;
+	s_roadDecalRecords.clear();
+	s_roadDecalRecords.reserve(RenderWorld.RoadDecals.size());
+	for (const RoadDecalState& decal : RenderWorld.RoadDecals)
+	{
+		if (!decal.bEnabled ||
+			decal.HalfLength <= 0.0f ||
+			decal.HalfWidth <= 0.0f ||
+			!std::isfinite(decal.Center.x) ||
+			!std::isfinite(decal.Center.y) ||
+			!std::isfinite(decal.Center.z))
+		{
+			continue;
+		}
+
+		const glm::vec3 axisX = glm::dot(decal.AxisX, decal.AxisX) > 1.0e-6f ?
+			glm::normalize(decal.AxisX) :
+			glm::vec3(1.0f, 0.0f, 0.0f);
+		glm::vec3 fallbackAxisZ(-axisX.z, 0.0f, axisX.x);
+		if (glm::dot(fallbackAxisZ, fallbackAxisZ) <= 1.0e-6f)
+			fallbackAxisZ = glm::vec3(0.0f, 0.0f, 1.0f);
+		const glm::vec3 axisZ = glm::dot(decal.AxisZ, decal.AxisZ) > 1.0e-6f ?
+			glm::normalize(decal.AxisZ) :
+			glm::normalize(fallbackAxisZ);
+		const float halfLength = std::max(decal.HalfLength, 0.5f);
+		const float halfWidth = std::max(decal.HalfWidth, 0.5f);
+		const float heightTolerance = std::max(decal.HeightTolerance, 0.01f);
+		const glm::vec3 center(decal.Center.x, decal.Height, decal.Center.z);
+		glm::vec3 extent =
+			glm::abs(axisX) * halfLength +
+			glm::abs(axisZ) * halfWidth +
+			glm::vec3(4.0f, heightTolerance, 4.0f);
+		glm::vec3 boundsMin = center - extent;
+		glm::vec3 boundsMax = center + extent;
+
+		const uint32_t polygonVertexCount = std::min<uint32_t>(
+			decal.PolygonVertexCount,
+			static_cast<uint32_t>(RoadDecalState::MaxPolygonVertices));
+		const bool bUsePolygonFootprint = polygonVertexCount >= 3u;
+		std::array<glm::vec2, RoadDecalState::MaxPolygonVertices> polygonXZ = {};
+		if (bUsePolygonFootprint)
+		{
+			glm::vec2 polygonMin(std::numeric_limits<float>::max());
+			glm::vec2 polygonMax(-std::numeric_limits<float>::max());
+			for (uint32_t i = 0u; i < RoadDecalState::MaxPolygonVertices; ++i)
+			{
+				const uint32_t srcIndex = i < polygonVertexCount ? i : (polygonVertexCount - 1u);
+				polygonXZ[i] = decal.PolygonXZ[srcIndex];
+				if (!std::isfinite(polygonXZ[i].x) || !std::isfinite(polygonXZ[i].y))
+				{
+					polygonXZ[i] = glm::vec2(center.x, center.z);
+				}
+				polygonMin = glm::min(polygonMin, polygonXZ[i]);
+				polygonMax = glm::max(polygonMax, polygonXZ[i]);
+			}
+
+			boundsMin = glm::vec3(polygonMin.x - 4.0f, center.y - heightTolerance, polygonMin.y - 4.0f);
+			boundsMax = glm::vec3(polygonMax.x + 4.0f, center.y + heightTolerance, polygonMax.y + 4.0f);
+		}
+
+		RoadDecalGpuRecord record{};
+		record.CenterHalfLength = glm::vec4(center, halfLength);
+		record.AxisXHalfWidth = glm::vec4(axisX, halfWidth);
+		record.AxisZHeight = glm::vec4(axisZ, decal.Height);
+		record.BaseColorRoughness = glm::vec4(
+			glm::clamp(glm::vec3(decal.BaseColor), glm::vec3(0.0f), glm::vec3(1.0f)),
+			std::clamp(decal.Roughness, 0.02f, 1.0f));
+		record.BaseColorRoughness.a = std::clamp(decal.BaseColor.a, 0.0f, 1.0f);
+		record.Params = glm::vec4(
+			std::max(decal.UvRepeatX, 0.01f),
+			std::max(decal.UvRepeatY, 0.01f),
+			heightTolerance,
+			std::clamp(decal.NormalThreshold, -1.0f, 1.0f));
+		float decalMode = decal.bDrawCenterStripe ? 1.0f : (decal.bFillOnlyMissingRoad ? -1.0f : 0.0f);
+		if (bUsePolygonFootprint)
+		{
+			decalMode = decal.bDrawCenterStripe ? 3.0f : (decal.bFillOnlyMissingRoad ? -2.0f : 2.0f);
+		}
+		record.BoundsMin = glm::vec4(boundsMin, decalMode);
+		record.BoundsMax = glm::vec4(boundsMax, std::clamp(decal.Roughness, 0.02f, 1.0f));
+		record.Polygon01 = glm::vec4(polygonXZ[0].x, polygonXZ[0].y, polygonXZ[1].x, polygonXZ[1].y);
+		record.Polygon23 = glm::vec4(polygonXZ[2].x, polygonXZ[2].y, polygonXZ[3].x, polygonXZ[3].y);
+		record.Polygon45 = glm::vec4(polygonXZ[4].x, polygonXZ[4].y, polygonXZ[5].x, polygonXZ[5].y);
+		record.Polygon67 = glm::vec4(polygonXZ[6].x, polygonXZ[6].y, polygonXZ[7].x, polygonXZ[7].y);
+		record.Polygon89 = glm::vec4(polygonXZ[8].x, polygonXZ[8].y, polygonXZ[9].x, polygonXZ[9].y);
+		record.PolygonAB = glm::vec4(polygonXZ[10].x, polygonXZ[10].y, polygonXZ[11].x, polygonXZ[11].y);
+		record.PolygonCD = glm::vec4(polygonXZ[12].x, polygonXZ[12].y, polygonXZ[13].x, polygonXZ[13].y);
+		record.PolygonEF = glm::vec4(polygonXZ[14].x, polygonXZ[14].y, polygonXZ[15].x, polygonXZ[15].y);
+		s_roadDecalRecords.push_back(record);
+	}
+	if (s_roadDecalRecords.empty())
+		return;
+	std::stable_partition(
+		s_roadDecalRecords.begin(),
+		s_roadDecalRecords.end(),
+		[](const RoadDecalGpuRecord& record)
+		{
+			return std::abs(record.BoundsMin.w) <= 1.5f;
+		});
+
+	std::shared_ptr<Buffer> roadDecalBuffer = renderBackend->AllocateTransientUploadStructuredBuffer(
+		static_cast<uint32_t>(s_roadDecalRecords.size()),
+		static_cast<uint32_t>(sizeof(RoadDecalGpuRecord)),
+		s_roadDecalRecords.data());
+	if (!roadDecalBuffer)
+		return;
+
+	auto transitionTrackedBuffer = [&](Buffer* buffer, EResourceState& currentState, EResourceState nextState)
+	{
+		if (!buffer || currentState == nextState)
+			return;
+		renderBackend->TransitionBuffer(buffer, currentState, nextState);
+		currentState = nextState;
+	};
+
+	const uint32_t tileCountX = (renderWidth + 15u) / 16u;
+	const uint32_t tileCountY = (renderHeight + 15u) / 16u;
+	const uint64_t tileCount64 = static_cast<uint64_t>(tileCountX) * static_cast<uint64_t>(tileCountY);
+	if (tileCount64 == 0u || tileCount64 > std::numeric_limits<uint32_t>::max())
+		return;
+	const uint32_t tileCount = static_cast<uint32_t>(tileCount64);
+	const uint64_t tileIndexCapacity64 =
+		tileCount64 * static_cast<uint64_t>(std::max(1u, RoadDecalMaxDecalsPerTile));
+	if (tileIndexCapacity64 > std::numeric_limits<uint32_t>::max())
+		return;
+	const uint32_t tileIndexCapacity = static_cast<uint32_t>(tileIndexCapacity64);
+
+	auto createGpuWriteStructuredBuffer = [&](uint32_t numElements, uint32_t elementSize)
+		-> std::shared_ptr<Buffer>
+	{
+		BufferCreateDesc desc = {};
+		desc.NumElements = std::max(1u, numElements);
+		desc.ElementSize = elementSize;
+		desc.InitialState = EInitialResourceState::ShaderRead;
+		desc.bAllowUnorderedAccess = true;
+		desc.Shape = EBufferShape::Structured;
+		desc.Access = EBufferAccess::GpuOnly;
+		desc.AllocationPolicy = EBufferAllocationPolicy::Dedicated;
+		return renderBackend->CreateBuffer(desc);
+	};
+
+	const bool bNeedTileBuffers =
+		!RoadDecalTileCountsBuffer ||
+		!RoadDecalTileIndicesBuffer ||
+		RoadDecalTileCountX != tileCountX ||
+		RoadDecalTileCountY != tileCountY ||
+		RoadDecalTileCount != tileCount ||
+		RoadDecalTileIndexCapacity != tileIndexCapacity;
+	if (bNeedTileBuffers)
+	{
+		RoadDecalTileCountsBuffer = createGpuWriteStructuredBuffer(tileCount, static_cast<uint32_t>(sizeof(uint32_t)));
+		RoadDecalTileIndicesBuffer = createGpuWriteStructuredBuffer(tileIndexCapacity, static_cast<uint32_t>(sizeof(uint32_t)));
+		RoadDecalTileCountsState = EResourceState::ShaderRead;
+		RoadDecalTileIndicesState = EResourceState::ShaderRead;
+		RoadDecalTileCountX = RoadDecalTileCountsBuffer ? tileCountX : 0u;
+		RoadDecalTileCountY = RoadDecalTileCountsBuffer ? tileCountY : 0u;
+		RoadDecalTileCount = RoadDecalTileCountsBuffer ? tileCount : 0u;
+		RoadDecalTileIndexCapacity = (RoadDecalTileCountsBuffer && RoadDecalTileIndicesBuffer) ? tileIndexCapacity : 0u;
+	}
+	if (!RoadDecalTileCountsBuffer || !RoadDecalTileIndicesBuffer)
+		return;
+
+	auto mipDimension = [](uint32_t base, uint32_t mip) -> uint32_t
+	{
+		uint32_t value = std::max(1u, base);
+		for (uint32_t i = 0u; i < mip; ++i)
+			value = std::max(1u, (value + 1u) / 2u);
+		return value;
+	};
+
+	auto ensureRoadDecalDepthPyramidBuffer = [&]() -> bool
+	{
+		const uint32_t baseWidth = std::max(1u, (renderWidth + 1u) / 2u);
+		const uint32_t baseHeight = std::max(1u, (renderHeight + 1u) / 2u);
+		std::array<uint32_t, GBufferOccluderDepthPyramidMaxMipCount> mipOffsets = {};
+		uint32_t mipCount = 0u;
+		uint32_t totalElements = 0u;
+		uint32_t mipWidth = baseWidth;
+		uint32_t mipHeight = baseHeight;
+		while (mipCount < GBufferOccluderDepthPyramidMaxMipCount)
+		{
+			mipOffsets[mipCount] = totalElements;
+			if (mipWidth > std::numeric_limits<uint32_t>::max() / std::max(1u, mipHeight))
+				return false;
+			const uint32_t mipElements = std::max(1u, mipWidth * mipHeight);
+			if (totalElements > std::numeric_limits<uint32_t>::max() - mipElements)
+				return false;
+			totalElements += mipElements;
+			++mipCount;
+			if (mipWidth == 1u && mipHeight == 1u)
+				break;
+			mipWidth = std::max(1u, (mipWidth + 1u) / 2u);
+			mipHeight = std::max(1u, (mipHeight + 1u) / 2u);
+		}
+
+		const bool bMatches =
+			RoadDecalDepthPyramidBuffer &&
+			RoadDecalDepthPyramidWidth == baseWidth &&
+			RoadDecalDepthPyramidHeight == baseHeight &&
+			RoadDecalDepthPyramidMipCount == mipCount &&
+			RoadDecalDepthPyramidElementCount == totalElements;
+		if (bMatches)
+			return true;
+
+		RoadDecalDepthPyramidBuffer.reset();
+		BufferCreateDesc desc = {};
+		desc.NumElements = std::max(1u, totalElements);
+		desc.ElementSize = static_cast<uint32_t>(sizeof(float));
+		desc.InitialState = EInitialResourceState::ShaderRead;
+		desc.bAllowUnorderedAccess = true;
+		desc.Shape = EBufferShape::Structured;
+		desc.Access = EBufferAccess::GpuOnly;
+		desc.AllocationPolicy = EBufferAllocationPolicy::Dedicated;
+		RoadDecalDepthPyramidBuffer = renderBackend->CreateBuffer(desc);
+		RoadDecalDepthPyramidState = EResourceState::ShaderRead;
+		RoadDecalDepthPyramidWidth = RoadDecalDepthPyramidBuffer ? baseWidth : 0u;
+		RoadDecalDepthPyramidHeight = RoadDecalDepthPyramidBuffer ? baseHeight : 0u;
+		RoadDecalDepthPyramidMipCount = RoadDecalDepthPyramidBuffer ? mipCount : 0u;
+		RoadDecalDepthPyramidElementCount = RoadDecalDepthPyramidBuffer ? totalElements : 0u;
+		RoadDecalDepthPyramidMipOffsets = RoadDecalDepthPyramidBuffer ? mipOffsets : std::array<uint32_t, GBufferOccluderDepthPyramidMaxMipCount>{};
+		return RoadDecalDepthPyramidBuffer != nullptr;
+	};
+
+	bool bHiZReady = false;
+	if (GBufferOccluderDepthPyramidBuildPSO && ensureRoadDecalDepthPyramidBuffer() && RoadDecalDepthPyramidBuffer)
+	{
+		transitionTrackedBuffer(
+			RoadDecalDepthPyramidBuffer.get(),
+			RoadDecalDepthPyramidState,
+			EResourceState::UnorderedAccess);
+		for (uint32_t mip = 0u; mip < RoadDecalDepthPyramidMipCount; ++mip)
+		{
+			const uint32_t dstWidth = mipDimension(RoadDecalDepthPyramidWidth, mip);
+			const uint32_t dstHeight = mipDimension(RoadDecalDepthPyramidHeight, mip);
+			GBufferOccluderDepthPyramidConstant cb{};
+			cb.Mode = mip == 0u ? 0u : 1u;
+			cb.SrcOffset = mip == 0u ? 0u : RoadDecalDepthPyramidMipOffsets[mip - 1u];
+			cb.DstOffset = RoadDecalDepthPyramidMipOffsets[mip];
+			cb.SrcWidth = mip == 0u ? renderWidth : mipDimension(RoadDecalDepthPyramidWidth, mip - 1u);
+			cb.SrcHeight = mip == 0u ? renderHeight : mipDimension(RoadDecalDepthPyramidHeight, mip - 1u);
+			cb.DstWidth = dstWidth;
+			cb.DstHeight = dstHeight;
+			GBufferOccluderDepthPyramidBuildPSO->SetTextureSRV("SourceDepth", depthTex);
+			GBufferOccluderDepthPyramidBuildPSO->SetBufferUAV("DepthPyramid", RoadDecalDepthPyramidBuffer.get());
+			GBufferOccluderDepthPyramidBuildPSO->SetCBVValue("OccluderDepthPyramidCB", &cb);
+			GBufferOccluderDepthPyramidBuildPSO->Apply();
+			renderBackend->Dispatch((dstWidth + 7u) / 8u, (dstHeight + 7u) / 8u, 1u);
+			renderBackend->UAVBarrier(RoadDecalDepthPyramidBuffer.get());
+		}
+		transitionTrackedBuffer(
+			RoadDecalDepthPyramidBuffer.get(),
+			RoadDecalDepthPyramidState,
+			EResourceState::ShaderRead);
+		bHiZReady = RoadDecalDepthPyramidMipCount != 0u;
+	}
+
+	RoadDecalCullConstant cullCB{};
+	cullCB.DecalCount = static_cast<uint32_t>(s_roadDecalRecords.size());
+	cullCB.TileCountX = tileCountX;
+	cullCB.TileCountY = tileCountY;
+	cullCB.MaxDecalsPerTile = std::max(1u, RoadDecalMaxDecalsPerTile);
+	cullCB.RTSize = glm::vec2(static_cast<float>(renderWidth), static_cast<float>(renderHeight));
+	const FrustumPlaneArray frustumPlanes = BuildFrustumPlanes(UnjitteredViewProjMat);
+	for (size_t planeIndex = 0; planeIndex < frustumPlanes.size(); ++planeIndex)
+		cullCB.FrustumPlanes[planeIndex] = frustumPlanes[planeIndex];
+	cullCB.ViewProjectionMatrix = glm::transpose(UnjitteredViewProjMat);
+	cullCB.EnableFrustumCull = 1u;
+	cullCB.EnableHiZOcclusion = bHiZReady ? 1u : 0u;
+	cullCB.DepthPyramidWidth = RoadDecalDepthPyramidWidth;
+	cullCB.DepthPyramidHeight = RoadDecalDepthPyramidHeight;
+	cullCB.DepthPyramidMipCount = RoadDecalDepthPyramidMipCount;
+	cullCB.DepthPyramidMaxMip = RoadDecalDepthPyramidMipCount != 0u ? RoadDecalDepthPyramidMipCount - 1u : 0u;
+	cullCB.HiZDepthBias = 0.002f;
+	for (uint32_t packedOffsetIndex = 0u; packedOffsetIndex < 4u; ++packedOffsetIndex)
+	{
+		cullCB.DepthPyramidMipOffsets[packedOffsetIndex] = glm::uvec4(0u);
+		for (uint32_t lane = 0u; lane < 4u; ++lane)
+		{
+			const uint32_t mip = packedOffsetIndex * 4u + lane;
+			if (mip < RoadDecalDepthPyramidMipCount)
+				cullCB.DepthPyramidMipOffsets[packedOffsetIndex][lane] = RoadDecalDepthPyramidMipOffsets[mip];
+		}
+	}
+
+	transitionTrackedBuffer(RoadDecalTileCountsBuffer.get(), RoadDecalTileCountsState, EResourceState::UnorderedAccess);
+	transitionTrackedBuffer(RoadDecalTileIndicesBuffer.get(), RoadDecalTileIndicesState, EResourceState::UnorderedAccess);
+
+	RoadDecalClearTilesPSO->SetBufferUAV("RoadDecalTileCounts", RoadDecalTileCountsBuffer.get());
+	RoadDecalClearTilesPSO->SetCBVValue("RoadDecalCullCB", &cullCB);
+	RoadDecalClearTilesPSO->Apply();
+	renderBackend->Dispatch((tileCount + 63u) / 64u, 1u, 1u);
+	renderBackend->UAVBarrier(RoadDecalTileCountsBuffer.get());
+
+	RoadDecalBuildTilesPSO->SetBufferSRV("RoadDecals", roadDecalBuffer.get());
+	RoadDecalBuildTilesPSO->SetBufferSRV(
+		"RoadDecalDepthPyramid",
+		bHiZReady ? RoadDecalDepthPyramidBuffer.get() : RoadDecalDummyBuffer.get());
+	RoadDecalBuildTilesPSO->SetBufferUAV("RoadDecalTileCounts", RoadDecalTileCountsBuffer.get());
+	RoadDecalBuildTilesPSO->SetBufferUAV("RoadDecalTileIndices", RoadDecalTileIndicesBuffer.get());
+	RoadDecalBuildTilesPSO->SetCBVValue("RoadDecalCullCB", &cullCB);
+	RoadDecalBuildTilesPSO->Apply();
+	renderBackend->Dispatch((cullCB.DecalCount + 63u) / 64u, 1u, 1u);
+	renderBackend->UAVBarrier(RoadDecalTileCountsBuffer.get());
+	renderBackend->UAVBarrier(RoadDecalTileIndicesBuffer.get());
+
+	transitionTrackedBuffer(RoadDecalTileCountsBuffer.get(), RoadDecalTileCountsState, EResourceState::ShaderRead);
+	transitionTrackedBuffer(RoadDecalTileIndicesBuffer.get(), RoadDecalTileIndicesState, EResourceState::ShaderRead);
+
+	RoadDecalApplyConstant applyCB{};
+	applyCB.InvViewMatrix = glm::transpose(glm::inverse(ViewMat));
+	applyCB.InvProjMatrix = glm::transpose(InvProjMat);
+	applyCB.RTSize = glm::vec2(static_cast<float>(renderWidth), static_cast<float>(renderHeight));
+	applyCB.TileCountX = tileCountX;
+	applyCB.MaxDecalsPerTile = std::max(1u, RoadDecalMaxDecalsPerTile);
+
+	renderBackend->TransitionTexture(AlbedoBuffer.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
+	renderBackend->TransitionTexture(RoughnessMetalicBuffer.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
+
+	RoadDecalApplyPSO->SetTextureSRV("DepthTex", depthTex);
+	RoadDecalApplyPSO->SetTextureSRV("NormalTex", NormalBuffers[ColorBufferWriteIndex].get());
+	RoadDecalApplyPSO->SetBufferSRV("ApplyRoadDecals", roadDecalBuffer.get());
+	RoadDecalApplyPSO->SetBufferSRV("ApplyTileCounts", RoadDecalTileCountsBuffer.get());
+	RoadDecalApplyPSO->SetBufferSRV("ApplyTileIndices", RoadDecalTileIndicesBuffer.get());
+	RoadDecalApplyPSO->SetTextureUAV("AlbedoTex", AlbedoBuffer.get());
+	RoadDecalApplyPSO->SetTextureUAV("RoughnessMetallicTex", RoughnessMetalicBuffer.get());
+	RoadDecalApplyPSO->SetCBVValue("RoadDecalApplyCB", &applyCB);
+	RoadDecalApplyPSO->Apply();
+	renderBackend->Dispatch((renderWidth + 7u) / 8u, (renderHeight + 7u) / 8u, 1u);
+	renderBackend->UAVBarrier(AlbedoBuffer.get());
+	renderBackend->UAVBarrier(RoughnessMetalicBuffer.get());
+
+	renderBackend->TransitionTexture(AlbedoBuffer.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
+	renderBackend->TransitionTexture(RoughnessMetalicBuffer.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
+}
+
+void Corona::DepthHeightFogPass()
+{
+	renderBackend->EmitGpuCrashMarker("DepthHeightFogPass");
+
+	if (!bEnableDepthHeightFog || !DepthHeightFogPSO || !LightingBuffer || !DepthBuffer)
+		return;
+
+	Texture* depthTex =
+		(GBufferGenerationMode == EGBufferGenerationMode::RtPrimary && UnjitteredDepthBuffers[ColorBufferWriteIndex]) ?
+		UnjitteredDepthBuffers[ColorBufferWriteIndex].get() :
+		DepthBuffer.get();
+	if (!depthTex)
+		return;
+
+	glm::mat4x4 invViewMat = glm::inverse(ViewMat);
+	DepthHeightFogCB.InvViewMatrix = glm::transpose(invViewMat);
+	DepthHeightFogCB.InvProjMatrix = glm::transpose(InvProjMat);
+	DepthHeightFogCB.FogColorAndDensity = glm::vec4(
+		glm::max(DepthHeightFogColor, glm::vec3(0.0f)),
+		std::max(DepthHeightFogDensity, 0.0f));
+	DepthHeightFogCB.HeightParams = glm::vec4(
+		DepthHeightFogHeight,
+		std::max(DepthHeightFogHeightFalloff, 0.0f),
+		std::max(DepthHeightFogStartDistance, 0.0f),
+		std::clamp(DepthHeightFogMaxOpacity, 0.0f, 1.0f));
+	DepthHeightFogCB.RTSize = glm::vec2(
+		static_cast<float>(GetRenderWidth()),
+		static_cast<float>(GetRenderHeight()));
+	DepthHeightFogCB.Padding = glm::vec2(0.0f);
+
+	renderBackend->TransitionTexture(LightingBuffer.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
+
+	DepthHeightFogPSO->SetTextureUAV("ColorTex", LightingBuffer.get());
+	DepthHeightFogPSO->SetTextureSRV("DepthTex", depthTex);
+	DepthHeightFogPSO->SetCBVValue("FogCB", &DepthHeightFogCB);
+	DepthHeightFogPSO->Apply();
+
+	const UINT32 dispatchX = (GetRenderWidth() + 7u) / 8u;
+	const UINT32 dispatchY = (GetRenderHeight() + 7u) / 8u;
+	renderBackend->Dispatch(dispatchX, dispatchY, 1);
+
+	renderBackend->TransitionTexture(LightingBuffer.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
+}
+
+bool Corona::EnsureVolumetricFogResources()
+{
+	if (!renderBackend)
+		return false;
+
+	const UINT32 renderWidth = std::max(1u, static_cast<UINT32>(GetRenderWidth()));
+	const UINT32 renderHeight = std::max(1u, static_cast<UINT32>(GetRenderHeight()));
+	const UINT32 gridPixelSize = std::clamp(VolumetricFogGridPixelSize, 4u, 64u);
+	const UINT32 gridSizeX = std::max(1u, (renderWidth + gridPixelSize - 1u) / gridPixelSize);
+	const UINT32 gridSizeY = std::max(1u, (renderHeight + gridPixelSize - 1u) / gridPixelSize);
+	constexpr UINT32 maxAtlasHeight = 16384u;
+	const UINT32 maxGridSizeZForAtlas = std::max(1u, maxAtlasHeight / gridSizeY);
+	const UINT32 gridSizeZ = std::min(std::clamp(VolumetricFogGridSizeZ, 8u, 128u), maxGridSizeZForAtlas);
+	const UINT32 atlasWidth = gridSizeX;
+	const UINT32 atlasHeight = std::max(1u, gridSizeY * gridSizeZ);
+
+	if (VolumetricFogAtlas &&
+		VolumetricFogAtlasWidth == atlasWidth &&
+		VolumetricFogAtlasHeight == atlasHeight &&
+		VolumetricFogAtlas->Width == atlasWidth &&
+		VolumetricFogAtlas->Height == atlasHeight)
+	{
+		return true;
+	}
+
+	if (VolumetricFogAtlas)
+	{
+		renderBackend->ForgetDynamicTexture(VolumetricFogAtlas.get());
+		VolumetricFogAtlas.reset();
+	}
+
+	TextureCreateDesc desc = {};
+	desc.Format = ETextureFormat::RGBA16Float;
+	desc.Usage = TextureUsage_UnorderedAccess;
+	desc.InitialState = EInitialResourceState::ShaderRead;
+	desc.Width = static_cast<int>(atlasWidth);
+	desc.Height = static_cast<int>(atlasHeight);
+	desc.MipLevels = 1;
+	desc.ClearColor = glm::vec4(0.0f);
+	VolumetricFogAtlas = renderBackend->CreateTexture2D(desc);
+	VolumetricFogAtlasWidth = atlasWidth;
+	VolumetricFogAtlasHeight = atlasHeight;
+
+	return VolumetricFogAtlas != nullptr;
+}
+
+void Corona::VolumetricFogPass()
+{
+	renderBackend->EmitGpuCrashMarker("VolumetricFogPass");
+
+	if (!bEnableVolumetricFog || !VolumetricFogBuildPSO || !VolumetricFogCompositePSO || !LightingBuffer || !DepthBuffer)
+		return;
+	if (!EnsureVolumetricFogResources() || !VolumetricFogAtlas)
+		return;
+
+	Texture* depthTex =
+		(GBufferGenerationMode == EGBufferGenerationMode::RtPrimary && UnjitteredDepthBuffers[ColorBufferWriteIndex]) ?
+		UnjitteredDepthBuffers[ColorBufferWriteIndex].get() :
+		DepthBuffer.get();
+	if (!depthTex)
+		return;
+
+	const UINT32 renderWidth = std::max(1u, static_cast<UINT32>(GetRenderWidth()));
+	const UINT32 renderHeight = std::max(1u, static_cast<UINT32>(GetRenderHeight()));
+	const UINT32 gridPixelSize = std::clamp(VolumetricFogGridPixelSize, 4u, 64u);
+	const UINT32 gridSizeX = std::max(1u, (renderWidth + gridPixelSize - 1u) / gridPixelSize);
+	const UINT32 gridSizeY = std::max(1u, (renderHeight + gridPixelSize - 1u) / gridPixelSize);
+	constexpr UINT32 maxAtlasHeight = 16384u;
+	const UINT32 maxGridSizeZForAtlas = std::max(1u, maxAtlasHeight / gridSizeY);
+	const UINT32 gridSizeZ = std::min(std::clamp(VolumetricFogGridSizeZ, 8u, 128u), maxGridSizeZForAtlas);
+	const float startDistance = std::max(0.0f, VolumetricFogStartDistance);
+	const float maxDistance = std::max(startDistance + 1.0f, VolumetricFogMaxDistance);
+	glm::vec3 lightDir = glm::length(LightDir) > 0.0001f ? glm::normalize(LightDir) : glm::vec3(0.0f, 1.0f, 0.0f);
+
+	glm::mat4x4 invViewMat = glm::inverse(ViewMat);
+	VolumetricFogCB.InvViewMatrix = glm::transpose(invViewMat);
+	VolumetricFogCB.InvProjMatrix = glm::transpose(InvProjMat);
+	VolumetricFogCB.FogColorAndDensity = glm::vec4(
+		glm::max(VolumetricFogColor, glm::vec3(0.0f)),
+		std::max(VolumetricFogDensity, 0.0f));
+	VolumetricFogCB.HeightParams = glm::vec4(
+		VolumetricFogHeight,
+		std::max(VolumetricFogHeightFalloff, 0.0f),
+		startDistance,
+		maxDistance);
+	VolumetricFogCB.LightingParams = glm::vec4(
+		std::clamp(VolumetricFogAnisotropy, -0.9f, 0.9f),
+		std::max(0.0f, VolumetricFogAmbientStrength),
+		std::max(0.0f, VolumetricFogDirectionalStrength),
+		std::clamp(VolumetricFogMaxOpacity, 0.0f, 1.0f));
+	VolumetricFogCB.GridParams = glm::vec4(
+		static_cast<float>(gridSizeX),
+		static_cast<float>(gridSizeY),
+		static_cast<float>(gridSizeZ),
+		static_cast<float>(gridPixelSize));
+	VolumetricFogCB.LightDirAndIntensity = glm::vec4(lightDir, std::max(0.0f, LightIntensity));
+	VolumetricFogCB.FrameParams = glm::vec4(static_cast<float>(FrameCounter), 0.0f, 0.0f, 0.0f);
+	VolumetricFogCB.RTSize = glm::vec2(static_cast<float>(renderWidth), static_cast<float>(renderHeight));
+	VolumetricFogCB.Padding = glm::vec2(0.0f);
+
+	renderBackend->TransitionTexture(VolumetricFogAtlas.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
+	VolumetricFogBuildPSO->SetTextureUAV("FroxelAtlas", VolumetricFogAtlas.get());
+	VolumetricFogBuildPSO->SetCBVValue("FogCB", &VolumetricFogCB);
+	VolumetricFogBuildPSO->Apply();
+	renderBackend->Dispatch((gridSizeX + 7u) / 8u, (gridSizeY + 7u) / 8u, gridSizeZ);
+	renderBackend->TransitionTexture(VolumetricFogAtlas.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
+
+	renderBackend->TransitionTexture(LightingBuffer.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
+	VolumetricFogCompositePSO->SetTextureUAV("FroxelAtlas", LightingBuffer.get());
+	VolumetricFogCompositePSO->SetTextureSRV("DepthTex", depthTex);
+	VolumetricFogCompositePSO->SetTextureSRV("FroxelAtlasRead", VolumetricFogAtlas.get());
+	VolumetricFogCompositePSO->SetCBVValue("FogCB", &VolumetricFogCB);
+	VolumetricFogCompositePSO->Apply();
+	renderBackend->Dispatch((renderWidth + 7u) / 8u, (renderHeight + 7u) / 8u, 1);
+	renderBackend->TransitionTexture(LightingBuffer.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
 }
 
 void Corona::TemporalAAPass()
@@ -4148,7 +4858,7 @@ bool Corona::DrawStaticObjectBindlessBatch(
 						glm::vec4(objectData.BoundsMax, 0.0f);
 				}
 			}
-			if (!object.ScenePtr)
+			if (!object.ScenePtr || object.bDynamicRaster)
 				continue;
 
 			for (const std::shared_ptr<Mesh>& mesh : object.ScenePtr->meshes)
@@ -6199,6 +6909,11 @@ void Corona::RebuildRenderWorldCullingIndex()
 		objectData.Visible = object.bVisible && object.ScenePtr != nullptr;
 		if (!objectData.Visible)
 			return;
+		if (object.bDynamicRaster)
+		{
+			objectData.HasBounds = false;
+			return;
+		}
 
 		glm::vec3 boundsMin(0.0f);
 		glm::vec3 boundsMax(0.0f);
@@ -7252,6 +7967,7 @@ void Corona::GBufferPass()
 			entry.StaticObjectBatchEligible =
 				!entry.SpineObject &&
 				!entry.SkeletalUnifiedObject &&
+				!object.bDynamicRaster &&
 				!entry.TerrainScene &&
 				!entry.ProceduralGrassScene &&
 				!entry.LegacyGrassScene &&
@@ -7335,6 +8051,7 @@ void Corona::GBufferPass()
 			entry.StaticInstancingEligible =
 				!entry.SpineObject &&
 				!entry.SkeletalUnifiedObject &&
+				!object.bDynamicRaster &&
 				!entry.TerrainScene &&
 				!entry.ProceduralGrassScene &&
 				!entry.LegacyGrassScene &&
