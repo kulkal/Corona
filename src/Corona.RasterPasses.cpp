@@ -51,6 +51,24 @@ namespace
 	constexpr float kGBufferOcclusionCameraMoveThreshold = 128.0f;
 	constexpr float kGBufferOcclusionCameraRotationDotThreshold = 0.9995f;
 
+	bool GetEnvBool(const wchar_t* name, bool fallback)
+	{
+		const wchar_t* rawValue = _wgetenv(name);
+		if (!rawValue || !*rawValue)
+			return fallback;
+
+		std::wstring value(rawValue);
+		std::transform(value.begin(), value.end(), value.begin(), [](wchar_t ch)
+		{
+			return static_cast<wchar_t>(towlower(ch));
+		});
+		if (value == L"0" || value == L"false" || value == L"off" || value == L"no")
+			return false;
+		if (value == L"1" || value == L"true" || value == L"on" || value == L"yes")
+			return true;
+		return fallback;
+	}
+
 	uint32_t HashGBufferOcclusionProbe(uint32_t handle, uint64_t frame, uint32_t salt)
 	{
 		uint32_t x = handle * 747796405u + static_cast<uint32_t>(frame) * 2891336453u + salt * 277803737u;
@@ -659,6 +677,18 @@ namespace
 		glm::vec4 BoundsMax = glm::vec4(0.0f);
 	};
 	static_assert(sizeof(GBufferGpuObjectBounds) == 32, "GBufferGpuObjectBounds must match GBufferCullCS.hlsl.");
+
+	bool SceneHasAlphaBlendMesh(const std::shared_ptr<Scene>& scene)
+	{
+		if (!scene)
+			return false;
+		for (const std::shared_ptr<Mesh>& mesh : scene->meshes)
+		{
+			if (mesh && mesh->bAlphaBlend)
+				return true;
+		}
+		return false;
+	}
 
 	struct GBufferGpuCullConstant
 	{
@@ -2211,6 +2241,119 @@ void Corona::InitToneMapPass()
 	ToneMapGraphicsPipeline = renderBackend->CreateGraphicsPipeline(desc);
 }
 
+void Corona::InitTranslucentMeshPass()
+{
+	TranslucentMeshGraphicsPipeline.reset();
+	TranslucentPreLightingGuideGraphicsPipeline.reset();
+	TranslucentSurfaceLightingGraphicsPipeline.reset();
+	TranslucentGuideWarpPSO.reset();
+	if (!renderBackend)
+		return;
+
+	GraphicsPipelineDesc desc{};
+	const bool bUseRtReflectionShader =
+		renderBackend->GetAPI() == ERenderBackendAPI::D3D12 &&
+		renderBackend->SupportsRayTracing();
+	desc.ShaderPath = GetAssetFullPath(bUseRtReflectionShader ?
+		L"Shaders\\TranslucentMeshRT.hlsl" :
+		L"Shaders\\TranslucentMesh.hlsl");
+	desc.VertexEntryPoint = "VSMain";
+	desc.PixelEntryPoint = "PSMain";
+	desc.VertexStride = 44;
+	desc.VertexElements = {
+		{ "POSITION", 0, EVertexAttributeFormat::Float3, 0 },
+		{ "NORMAL",   0, EVertexAttributeFormat::Float3, 12 },
+		{ "TEXCOORD", 0, EVertexAttributeFormat::Float2, 24 },
+		{ "TANGENT",  0, EVertexAttributeFormat::Float3, 32 },
+	};
+	desc.ColorFormats = { ETextureFormat::RGBA16Float, ETextureFormat::RGBA16Float, ETextureFormat::RGBA16Float };
+	desc.DepthFormat = ETextureFormat::D32Float;
+	desc.bDepthEnable = true;
+	desc.bDepthWriteEnable = false;
+	desc.DepthCompareOp = EDepthCompareOp::LessEqual;
+	desc.bCullBackFaces = false;
+	desc.BlendMode = EBlendMode::Opaque;
+	desc.ConstantBufferSize = sizeof(TranslucentMeshCB);
+	desc.ConstantBufferBinding = 0;
+
+	const RHIShaderStageMask pixelStage = ToRHIShaderStageMask(RHIShaderStage::Pixel);
+	const RHIShaderStageMask graphicsStages = RHIShaderStage::Vertex | RHIShaderStage::Pixel;
+	desc.PipelineLayout.Bindings = {
+		MakeRHICBV("__CB0", 0, sizeof(TranslucentMeshCB), graphicsStages),
+		MakeRHITextureSRV("SceneColorTex", 0, pixelStage),
+		MakeRHITextureSRV("PrevCompositeGuideTex", 2, pixelStage),
+		MakeRHISampler("samplerClamp", 0, pixelStage),
+	};
+	if (bUseRtReflectionShader)
+		desc.PipelineLayout.Bindings.push_back(MakeRHIAccelerationStructureSRV("gRtScene", 1, pixelStage));
+
+	TranslucentMeshGraphicsPipeline = renderBackend->CreateGraphicsPipeline(desc);
+	if (!TranslucentMeshGraphicsPipeline)
+		AppendCpuRuntimeTrace(L"[InitTranslucentMeshPass] pipeline create failed");
+
+	GraphicsPipelineDesc guideDesc{};
+	guideDesc.ShaderPath = GetAssetFullPath(L"Shaders\\TranslucentPreLightingGuide.hlsl");
+	guideDesc.VertexEntryPoint = "VSMain";
+	guideDesc.PixelEntryPoint = "PSMain";
+	guideDesc.VertexStride = 44;
+	guideDesc.VertexElements = {
+		{ "POSITION", 0, EVertexAttributeFormat::Float3, 0 },
+		{ "NORMAL",   0, EVertexAttributeFormat::Float3, 12 },
+		{ "TEXCOORD", 0, EVertexAttributeFormat::Float2, 24 },
+		{ "TANGENT",  0, EVertexAttributeFormat::Float3, 32 },
+	};
+	guideDesc.ColorFormats = { ETextureFormat::RGBA16Float };
+	guideDesc.DepthFormat = ETextureFormat::D32Float;
+	guideDesc.bDepthEnable = true;
+	guideDesc.bDepthWriteEnable = false;
+	guideDesc.DepthCompareOp = EDepthCompareOp::LessEqual;
+	guideDesc.bCullBackFaces = false;
+	guideDesc.bTriangleStrip = false;
+	guideDesc.BlendMode = EBlendMode::AdditiveAlpha;
+	guideDesc.ConstantBufferSize = sizeof(TranslucentPreLightingMeshGuideCB);
+	guideDesc.ConstantBufferBinding = 0;
+	guideDesc.PipelineLayout.Bindings = {
+		MakeRHICBV("__CB0", 0, sizeof(TranslucentPreLightingMeshGuideCB), graphicsStages),
+	};
+	TranslucentPreLightingGuideGraphicsPipeline = renderBackend->CreateGraphicsPipeline(guideDesc);
+	if (!TranslucentPreLightingGuideGraphicsPipeline)
+		AppendCpuRuntimeTrace(L"[InitTranslucentMeshPass] pre-light guide pipeline create failed");
+
+	GraphicsPipelineDesc surfaceDesc{};
+	surfaceDesc.ShaderPath = GetAssetFullPath(bUseRtReflectionShader ?
+		L"Shaders\\TranslucentSurfaceLightingRT.hlsl" :
+		L"Shaders\\TranslucentSurfaceLighting.hlsl");
+	surfaceDesc.VertexEntryPoint = "VSMain";
+	surfaceDesc.PixelEntryPoint = "PSMain";
+	surfaceDesc.VertexStride = 44;
+	surfaceDesc.VertexElements = {
+		{ "POSITION", 0, EVertexAttributeFormat::Float3, 0 },
+		{ "NORMAL",   0, EVertexAttributeFormat::Float3, 12 },
+		{ "TEXCOORD", 0, EVertexAttributeFormat::Float2, 24 },
+		{ "TANGENT",  0, EVertexAttributeFormat::Float3, 32 },
+	};
+	surfaceDesc.ColorFormats = { ETextureFormat::RGBA16Float, ETextureFormat::RGBA16Float };
+	surfaceDesc.DepthFormat = ETextureFormat::D32Float;
+	surfaceDesc.bDepthEnable = true;
+	surfaceDesc.bDepthWriteEnable = false;
+	surfaceDesc.DepthCompareOp = EDepthCompareOp::LessEqual;
+	surfaceDesc.bCullBackFaces = false;
+	surfaceDesc.BlendMode = EBlendMode::AlphaBlendAll;
+	surfaceDesc.ConstantBufferSize = sizeof(TranslucentMeshCB);
+	surfaceDesc.ConstantBufferBinding = 0;
+	surfaceDesc.PipelineLayout.Bindings = {
+		MakeRHICBV("__CB0", 0, sizeof(TranslucentMeshCB), graphicsStages),
+		MakeRHITextureSRV("SceneColorTex", 0, pixelStage),
+		MakeRHISampler("samplerClamp", 0, pixelStage),
+	};
+	if (bUseRtReflectionShader)
+		surfaceDesc.PipelineLayout.Bindings.push_back(MakeRHIAccelerationStructureSRV("gRtScene", 1, pixelStage));
+
+	TranslucentSurfaceLightingGraphicsPipeline = renderBackend->CreateGraphicsPipeline(surfaceDesc);
+	if (!TranslucentSurfaceLightingGraphicsPipeline)
+		AppendCpuRuntimeTrace(L"[InitTranslucentMeshPass] surface lighting pipeline create failed");
+}
+
 void Corona::InitParticlePass()
 {
 	if (!renderBackend)
@@ -2276,6 +2419,1013 @@ uint32_t Corona::ParticleBurstForScript(float x, float y, float z, uint32_t coun
 	if (!sys)
 		return 0;
 	return sys->SpawnBurst(glm::vec3(x, y, z), count);
+}
+
+bool Corona::IsTranslucentPreLightingRefractedGBufferEnabled() const
+{
+	if (_wgetenv(L"CORONA_TRANSLUCENT_PRELIGHT_GBUFFER"))
+		return GetEnvBool(L"CORONA_TRANSLUCENT_PRELIGHT_GBUFFER", true);
+
+	const auto result = PersistentScriptControls.find("transparency_layers.pre_lighting_refracted_gbuffer");
+	if (result != PersistentScriptControls.end() && result->second.Type == PersistentScriptControlType::Bool)
+		return result->second.Bool;
+	return true;
+}
+
+bool Corona::TranslucentPreLightingGuidePass()
+{
+#if 1
+	bTranslucentDistortionGuideValidThisFrame = false;
+	bTranslucentDistortionGuideIsOffsetThisFrame = false;
+	if (!renderBackend ||
+		!TranslucentPreLightingGuideGraphicsPipeline ||
+		!TranslucentDistortionBuffer ||
+		!TranslucentGuideRasterDepthBuffer ||
+		!DepthBuffer)
+	{
+		return false;
+	}
+
+	struct TranslucentGuideDraw
+	{
+		const SceneObject* Object = nullptr;
+		const Mesh* MeshPtr = nullptr;
+		const Mesh::DrawCall* Draw = nullptr;
+		float SortKey = 0.0f;
+	};
+
+	static thread_local std::vector<TranslucentGuideDraw> s_guideDraws;
+	std::vector<TranslucentGuideDraw>& guideDraws = s_guideDraws;
+	guideDraws.clear();
+
+	glm::vec3 cameraForward = glm::length(RenderFrameCameraLookDirection) > 1.0e-4f ?
+		glm::normalize(RenderFrameCameraLookDirection) :
+		glm::vec3(0.0f, 0.0f, 1.0f);
+
+	for (const SceneObject& object : RenderWorld.SceneObjects)
+	{
+		if (!object.bVisible || !object.ScenePtr || !SceneHasAlphaBlendMesh(object.ScenePtr))
+			continue;
+
+		glm::vec3 boundsMin(0.0f);
+		glm::vec3 boundsMax(0.0f);
+		glm::vec3 boundsCenter(object.Transform[3]);
+		float boundsRadius = 0.0f;
+		GetSceneObjectWorldBounds(object, boundsMin, boundsMax, boundsCenter, boundsRadius);
+		const float sortKey = glm::dot(boundsCenter - RenderFrameCameraPosition, cameraForward);
+
+		for (const std::shared_ptr<Mesh>& mesh : object.ScenePtr->meshes)
+		{
+			if (!mesh || !mesh->bAlphaBlend || !mesh->Vb || !mesh->Ib)
+				continue;
+			for (const Mesh::DrawCall& draw : mesh->Draws)
+			{
+				if (draw.IndexCount == 0)
+					continue;
+				const Material* material = draw.mat ? draw.mat.get() : mesh->Mat.get();
+				if (!material || material->BaseColorFactor.a <= 0.001f)
+					continue;
+				guideDraws.push_back({ &object, mesh.get(), &draw, sortKey });
+			}
+		}
+	}
+
+	if (guideDraws.empty())
+		return false;
+
+	std::sort(guideDraws.begin(), guideDraws.end(), [](const TranslucentGuideDraw& a, const TranslucentGuideDraw& b)
+	{
+		return a.SortKey < b.SortKey;
+	});
+
+	auto getPersistentNumber = [this](const char* name, float fallback)
+	{
+		const auto result = PersistentScriptControls.find(name);
+		if (result != PersistentScriptControls.end() && result->second.Type == PersistentScriptControlType::Number)
+			return result->second.Number;
+		return fallback;
+	};
+	auto getPersistentBool = [this](const char* name, bool fallback)
+	{
+		const auto result = PersistentScriptControls.find(name);
+		if (result != PersistentScriptControls.end() && result->second.Type == PersistentScriptControlType::Bool)
+			return result->second.Bool;
+		return fallback;
+	};
+
+	auto matrixIsFinite = [](const glm::mat4x4& m)
+	{
+		for (int c = 0; c < 4; ++c)
+		{
+			for (int r = 0; r < 4; ++r)
+			{
+				if (!std::isfinite(m[c][r]))
+					return false;
+			}
+		}
+		return true;
+	};
+
+	const float distortionScale = std::clamp(getPersistentNumber("transparency_layers.distortion_scale", 1.0f), 0.0f, 12.0f);
+	const float refractionPixels = 6.0f * distortionScale;
+	const float invWidth = 1.0f / static_cast<float>(std::max<UINT>(GetRenderWidth(), 1u));
+	const float invHeight = 1.0f / static_cast<float>(std::max<UINT>(GetRenderHeight(), 1u));
+
+	auto buildGuideCB = [&](const TranslucentGuideDraw& item, uint32_t drawOrdinal)
+	{
+		const Material* material = item.Draw->mat ? item.Draw->mat.get() : item.MeshPtr->Mat.get();
+		TranslucentPreLightingMeshGuideCB cb{};
+		const glm::mat4x4 world = item.Object->Transform * item.MeshPtr->transform;
+		const glm::mat4x4 worldView = ViewMat * world;
+		const glm::mat4x4 normalWorldView = glm::inverse(worldView);
+		cb.WorldViewMatrix = glm::transpose(worldView);
+		cb.WorldViewProjectionMatrix = glm::transpose(ViewProjMat * world);
+		cb.NormalWorldViewMatrix = matrixIsFinite(normalWorldView) ? normalWorldView : glm::mat4x4(1.0f);
+		cb.BaseColorFactor = material ? material->BaseColorFactor : glm::vec4(1.0f);
+		cb.BaseColorFactor.a = std::clamp(cb.BaseColorFactor.a, 0.0f, 1.0f);
+		cb.RenderTargetParams = glm::vec4(invWidth, invHeight, 0.0f, 0.0f);
+		cb.EffectParams = glm::vec4(refractionPixels, 0.0f, 0.0f, 0.0f);
+		cb.StochasticParams = glm::uvec4(
+			0u,
+			static_cast<uint32_t>(FrameCounter),
+			static_cast<uint32_t>((drawOrdinal + 1u) * 9781u),
+			0u);
+		return cb;
+	};
+
+	renderBackend->EmitGpuCrashMarker("TranslucentPreLightingGuidePass");
+	renderBackend->TransitionTexture(TranslucentDistortionBuffer.get(), EResourceState::ShaderRead, EResourceState::RenderTarget);
+	const float refractionGuideClearColor[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+	renderBackend->ClearRenderTarget(TranslucentDistortionBuffer.get(), refractionGuideClearColor);
+
+	const bool bUseOpaqueDepthForGuide =
+		GetEnvBool(L"CORONA_TRANSLUCENT_PRELIGHT_OPAQUE_DEPTH", false) ||
+		getPersistentBool("transparency_layers.pre_lighting_opaque_depth", false);
+	if (bUseOpaqueDepthForGuide)
+	{
+		renderBackend->TransitionTexture(DepthBuffer.get(), EResourceState::ShaderRead, EResourceState::CopySource);
+		renderBackend->TransitionTexture(TranslucentGuideRasterDepthBuffer.get(), EResourceState::ShaderRead, EResourceState::CopyDest);
+		renderBackend->CopyTexture(TranslucentGuideRasterDepthBuffer.get(), DepthBuffer.get());
+		renderBackend->TransitionTexture(DepthBuffer.get(), EResourceState::CopySource, EResourceState::ShaderRead);
+		renderBackend->TransitionTexture(TranslucentGuideRasterDepthBuffer.get(), EResourceState::CopyDest, EResourceState::DepthWrite);
+	}
+	else
+	{
+		renderBackend->TransitionTexture(TranslucentGuideRasterDepthBuffer.get(), EResourceState::ShaderRead, EResourceState::DepthWrite);
+		renderBackend->ClearDepth(TranslucentGuideRasterDepthBuffer.get(), 1.0f);
+	}
+
+	Texture* colorTargets[] = { TranslucentDistortionBuffer.get() };
+	renderBackend->SetRenderTargets(colorTargets, static_cast<uint32_t>(std::size(colorTargets)), TranslucentGuideRasterDepthBuffer.get());
+	renderBackend->SetViewportAndScissor(GetRenderWidth(), GetRenderHeight());
+	renderBackend->BindGraphicsPipeline(TranslucentPreLightingGuideGraphicsPipeline.get());
+
+	uint32_t submittedDraws = 0;
+	for (const TranslucentGuideDraw& item : guideDraws)
+	{
+		TranslucentPreLightingMeshGuideCB cb = buildGuideCB(item, submittedDraws);
+		CreateAndBindGraphicsBindGroup(renderBackend.get(), TranslucentPreLightingGuideGraphicsPipeline.get(),
+			{
+				GraphicsBindGroupEntry::Constant(0, &cb, sizeof(cb)),
+			});
+		renderBackend->BindMeshBuffers(item.MeshPtr->Vb.get(), item.MeshPtr->Ib.get());
+		renderBackend->DrawIndexed(item.Draw->IndexCount, item.Draw->IndexStart, item.Draw->VertexBase);
+		++submittedDraws;
+	}
+
+	renderBackend->TransitionTexture(TranslucentGuideRasterDepthBuffer.get(), EResourceState::DepthWrite, EResourceState::ShaderRead);
+	renderBackend->TransitionTexture(TranslucentDistortionBuffer.get(), EResourceState::RenderTarget, EResourceState::ShaderRead);
+	if (GetEnvBool(L"CORONA_TRANSLUCENT_PRELIGHT_WAIT", false))
+	{
+		renderBackend->ExecuteCurrentCommandList();
+		renderBackend->WaitForGpu();
+		AppendCpuRuntimeTrace(L"[TranslucentPreLightingGuidePass] waited for GPU after pass");
+	}
+	bTranslucentDistortionGuideValidThisFrame = submittedDraws > 0;
+	bTranslucentDistortionGuideIsOffsetThisFrame = bTranslucentDistortionGuideValidThisFrame;
+
+	static uint32_t s_logCounter = 0;
+	if ((++s_logCounter % 120u) == 0u)
+	{
+		AppendCpuRuntimeTrace(
+			L"[TranslucentPreLightingGuidePass] meshGuide=1, draws=" + std::to_wstring(submittedDraws) +
+			L", refractionPixels=" + std::to_wstring(refractionPixels) +
+			L", opaqueDepth=" + std::to_wstring(bUseOpaqueDepthForGuide ? 1 : 0) +
+			L", accumulatedOffset=1" +
+			L", guideDistortion=" + std::to_wstring(bTranslucentDistortionGuideValidThisFrame ? 1 : 0));
+	}
+	return bTranslucentDistortionGuideValidThisFrame;
+#else
+	bTranslucentDistortionGuideValidThisFrame = false;
+	if (!renderBackend ||
+		!TranslucentPreLightingGuideGraphicsPipeline ||
+		!TranslucentDistortionBuffer ||
+		!FullScreenVB)
+	{
+		return false;
+	}
+
+	struct ProjectedTranslucentGuidePrimitive
+	{
+		glm::vec2 Center = glm::vec2(0.0f);
+		glm::vec2 Radius = glm::vec2(0.0f);
+		float Alpha = 0.0f;
+		float ShapeKind = 0.0f;
+		float Depth = 0.0f;
+		uint32_t Seed = 0u;
+	};
+
+	static thread_local std::vector<ProjectedTranslucentGuidePrimitive> s_projectedPrimitives;
+	std::vector<ProjectedTranslucentGuidePrimitive>& projectedPrimitives = s_projectedPrimitives;
+	projectedPrimitives.clear();
+
+	const float invWidth = 1.0f / static_cast<float>(std::max<UINT>(GetRenderWidth(), 1u));
+	const float invHeight = 1.0f / static_cast<float>(std::max<UINT>(GetRenderHeight(), 1u));
+	const glm::vec2 minGuideRadius(2.0f * invWidth, 2.0f * invHeight);
+	const glm::vec2 guidePadding(1.5f * invWidth, 1.5f * invHeight);
+
+	auto projectWorldPoint = [this](const glm::vec3& worldPosition, glm::vec2& outUv, float& outDepth) -> bool
+	{
+		const glm::vec4 clip = ViewProjMat * glm::vec4(worldPosition, 1.0f);
+		if (!std::isfinite(clip.x) || !std::isfinite(clip.y) || !std::isfinite(clip.z) || !std::isfinite(clip.w) ||
+			clip.w <= 1.0e-4f)
+		{
+			return false;
+		}
+
+		const glm::vec3 ndc = glm::vec3(clip) / clip.w;
+		outUv = glm::vec2(ndc.x * 0.5f + 0.5f, 0.5f - ndc.y * 0.5f);
+		outDepth = ndc.z;
+		return std::isfinite(outUv.x) && std::isfinite(outUv.y) && std::isfinite(outDepth);
+	};
+
+	auto classifyGuideShape = [](const SceneObject& object, const glm::mat4x4& world, const std::vector<glm::vec3>& positions) -> float
+	{
+		if (object.DebugName.find("SPHERE") != std::string::npos ||
+			object.DebugName.find("Sphere") != std::string::npos ||
+			object.DebugName.find("sphere") != std::string::npos)
+		{
+			return 0.0f;
+		}
+		if (object.DebugName.find("LAYER") != std::string::npos ||
+			object.DebugName.find("Layer") != std::string::npos ||
+			object.DebugName.find("layer") != std::string::npos)
+		{
+			return 1.0f;
+		}
+		if (!positions.empty())
+		{
+			glm::vec3 minPos(std::numeric_limits<float>::max());
+			glm::vec3 maxPos(-std::numeric_limits<float>::max());
+			for (const glm::vec3& position : positions)
+			{
+				minPos = glm::min(minPos, position);
+				maxPos = glm::max(maxPos, position);
+			}
+			const glm::vec3 localSize = glm::max(maxPos - minPos, glm::vec3(0.0f));
+			const glm::vec3 worldAxisScale(
+				glm::length(glm::vec3(world[0])),
+				glm::length(glm::vec3(world[1])),
+				glm::length(glm::vec3(world[2])));
+			const glm::vec3 worldSize = localSize * worldAxisScale;
+			const float maxSize = std::max(worldSize.x, std::max(worldSize.y, worldSize.z));
+			const float minSize = std::min(worldSize.x, std::min(worldSize.y, worldSize.z));
+			if (maxSize > 1.0e-3f && minSize < maxSize * 0.08f)
+				return 1.0f;
+		}
+		return 2.0f;
+	};
+
+	auto appendProjectedPrimitive = [&](const SceneObject& object, const Mesh& mesh, float alpha, uint32_t seed)
+	{
+		if (alpha <= 0.001f)
+			return;
+
+		const glm::mat4x4 world = object.Transform * mesh.transform;
+		glm::vec2 minUv(std::numeric_limits<float>::max());
+		glm::vec2 maxUv(-std::numeric_limits<float>::max());
+		float depthSum = 0.0f;
+		uint32_t projectedPointCount = 0u;
+
+		auto appendProjectedPoint = [&](const glm::vec3& localPosition)
+		{
+			glm::vec2 uv(0.0f);
+			float depth = 0.0f;
+			if (!projectWorldPoint(glm::vec3(world * glm::vec4(localPosition, 1.0f)), uv, depth))
+				return;
+			minUv = glm::min(minUv, uv);
+			maxUv = glm::max(maxUv, uv);
+			depthSum += depth;
+			++projectedPointCount;
+		};
+
+		if (!mesh.CpuPositions.empty())
+		{
+			for (const glm::vec3& position : mesh.CpuPositions)
+				appendProjectedPoint(position);
+		}
+		else if (object.ScenePtr && object.ScenePtr->bHasBounds)
+		{
+			const glm::vec3 localMin = object.ScenePtr->BoundsMin;
+			const glm::vec3 localMax = object.ScenePtr->BoundsMax;
+			const glm::vec3 corners[8] =
+			{
+				{ localMin.x, localMin.y, localMin.z },
+				{ localMax.x, localMin.y, localMin.z },
+				{ localMin.x, localMax.y, localMin.z },
+				{ localMax.x, localMax.y, localMin.z },
+				{ localMin.x, localMin.y, localMax.z },
+				{ localMax.x, localMin.y, localMax.z },
+				{ localMin.x, localMax.y, localMax.z },
+				{ localMax.x, localMax.y, localMax.z },
+			};
+			for (const glm::vec3& corner : corners)
+				appendProjectedPoint(corner);
+		}
+
+		if (projectedPointCount == 0u)
+			return;
+		if (maxUv.x < 0.0f || maxUv.y < 0.0f || minUv.x > 1.0f || minUv.y > 1.0f)
+			return;
+
+		minUv = glm::clamp(minUv - guidePadding, glm::vec2(0.0f), glm::vec2(1.0f));
+		maxUv = glm::clamp(maxUv + guidePadding, glm::vec2(0.0f), glm::vec2(1.0f));
+		glm::vec2 radius = glm::max((maxUv - minUv) * 0.5f, minGuideRadius);
+		if (radius.x <= minGuideRadius.x * 0.5f || radius.y <= minGuideRadius.y * 0.5f)
+			return;
+
+		ProjectedTranslucentGuidePrimitive primitive{};
+		primitive.Center = (minUv + maxUv) * 0.5f;
+		primitive.Radius = radius;
+		primitive.Alpha = alpha;
+		primitive.ShapeKind = classifyGuideShape(object, world, mesh.CpuPositions);
+		primitive.Depth = depthSum / static_cast<float>(projectedPointCount);
+		primitive.Seed = seed;
+		projectedPrimitives.push_back(primitive);
+	};
+
+	uint32_t alphaDrawCount = 0;
+	float maxSceneAlpha = 0.0f;
+	for (const SceneObject& object : RenderWorld.SceneObjects)
+	{
+		if (!object.bVisible || !object.ScenePtr || !SceneHasAlphaBlendMesh(object.ScenePtr))
+			continue;
+
+		for (const std::shared_ptr<Mesh>& mesh : object.ScenePtr->meshes)
+		{
+			if (!mesh || !mesh->bAlphaBlend)
+				continue;
+			float meshMaxAlpha = 0.0f;
+			for (const Mesh::DrawCall& draw : mesh->Draws)
+			{
+				if (draw.IndexCount == 0)
+					continue;
+				const Material* material = draw.mat ? draw.mat.get() : mesh->Mat.get();
+				if (!material || material->BaseColorFactor.a <= 0.001f)
+					continue;
+				meshMaxAlpha = std::max(meshMaxAlpha, material->BaseColorFactor.a);
+				++alphaDrawCount;
+			}
+			maxSceneAlpha = std::max(maxSceneAlpha, meshMaxAlpha);
+			if (projectedPrimitives.size() < kMaxTranslucentPreLightingGuidePrimitives)
+				appendProjectedPrimitive(object, *mesh, meshMaxAlpha, alphaDrawCount);
+		}
+	}
+
+	if (alphaDrawCount == 0 || projectedPrimitives.empty())
+		return false;
+
+	std::sort(projectedPrimitives.begin(), projectedPrimitives.end(),
+		[](const ProjectedTranslucentGuidePrimitive& a, const ProjectedTranslucentGuidePrimitive& b)
+	{
+		return a.Depth < b.Depth;
+	});
+	if (projectedPrimitives.size() > kMaxTranslucentPreLightingGuidePrimitives)
+		projectedPrimitives.resize(kMaxTranslucentPreLightingGuidePrimitives);
+
+	auto getPersistentNumber = [this](const char* name, float fallback)
+	{
+		const auto result = PersistentScriptControls.find(name);
+		if (result != PersistentScriptControls.end() && result->second.Type == PersistentScriptControlType::Number)
+			return result->second.Number;
+		return fallback;
+	};
+
+	const float distortionScale = std::clamp(getPersistentNumber("transparency_layers.distortion_scale", 1.0f), 0.0f, 12.0f);
+	const float layerAlpha = std::clamp(getPersistentNumber("transparency_layers.alpha", 0.24f), 0.0f, 1.0f);
+	const float shapeAlpha = std::clamp(getPersistentNumber("transparency_layers.shape_alpha", 0.34f), 0.0f, 1.0f);
+	const float guideAlpha = std::clamp(std::max(maxSceneAlpha, std::max(layerAlpha, shapeAlpha)), 0.0f, 1.0f);
+	const float refractionPixels = 6.0f * distortionScale;
+
+	TranslucentPreLightingGuideCB cb{};
+	cb.RenderTargetParams = glm::vec4(
+		invWidth,
+		invHeight,
+		0.0f,
+		0.0f);
+	cb.EffectParams = glm::vec4(refractionPixels, guideAlpha, static_cast<float>(alphaDrawCount), 0.0f);
+	cb.PrimitiveParams = glm::uvec4(
+		static_cast<uint32_t>(projectedPrimitives.size()),
+		static_cast<uint32_t>(FrameCounter),
+		alphaDrawCount,
+		0u);
+	for (size_t primitiveIndex = 0; primitiveIndex < projectedPrimitives.size(); ++primitiveIndex)
+	{
+		const ProjectedTranslucentGuidePrimitive& primitive = projectedPrimitives[primitiveIndex];
+		cb.PrimitiveCenterRadius[primitiveIndex] = glm::vec4(primitive.Center, primitive.Radius);
+		cb.PrimitiveData[primitiveIndex] = glm::vec4(
+			std::clamp(primitive.Alpha, 0.0f, 1.0f),
+			primitive.ShapeKind,
+			static_cast<float>(primitive.Seed),
+			primitive.Depth);
+	}
+
+	renderBackend->EmitGpuCrashMarker("TranslucentPreLightingGuidePass");
+	renderBackend->TransitionTexture(TranslucentDistortionBuffer.get(), EResourceState::ShaderRead, EResourceState::RenderTarget);
+	const float refractionGuideClearColor[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+	renderBackend->ClearRenderTarget(TranslucentDistortionBuffer.get(), refractionGuideClearColor);
+
+	Texture* colorTargets[] = { TranslucentDistortionBuffer.get() };
+	renderBackend->SetRenderTargets(colorTargets, static_cast<uint32_t>(std::size(colorTargets)), nullptr);
+	renderBackend->SetViewportAndScissor(GetRenderWidth(), GetRenderHeight());
+	renderBackend->BindGraphicsPipeline(TranslucentPreLightingGuideGraphicsPipeline.get());
+	CreateAndBindGraphicsBindGroup(renderBackend.get(), TranslucentPreLightingGuideGraphicsPipeline.get(),
+		{
+			GraphicsBindGroupEntry::Constant(0, &cb, sizeof(cb)),
+		});
+	renderBackend->DrawFullscreenQuad(FullScreenVB.get());
+
+	renderBackend->TransitionTexture(TranslucentDistortionBuffer.get(), EResourceState::RenderTarget, EResourceState::ShaderRead);
+	if (GetEnvBool(L"CORONA_TRANSLUCENT_PRELIGHT_WAIT", false))
+	{
+		renderBackend->ExecuteCurrentCommandList();
+		renderBackend->WaitForGpu();
+		AppendCpuRuntimeTrace(L"[TranslucentPreLightingGuidePass] waited for GPU after pass");
+	}
+	bTranslucentDistortionGuideValidThisFrame = true;
+
+	static uint32_t s_logCounter = 0;
+	if ((++s_logCounter % 120u) == 0u)
+	{
+		AppendCpuRuntimeTrace(
+			L"[TranslucentPreLightingGuidePass] meshProjectedGuide=1, alphaDraws=" + std::to_wstring(alphaDrawCount) +
+			L", primitives=" + std::to_wstring(projectedPrimitives.size()) +
+			L", alpha=" + std::to_wstring(guideAlpha) +
+			L", guideDistortion=" + std::to_wstring(bTranslucentDistortionGuideValidThisFrame ? 1 : 0));
+	}
+	return bTranslucentDistortionGuideValidThisFrame;
+#endif
+}
+
+void Corona::TranslucentMeshPass()
+{
+	bTranslucentDistortionGuideValidThisFrame = false;
+	if (!renderBackend ||
+		!TranslucentMeshGraphicsPipeline ||
+		!LightingBuffer ||
+		!TranslucentBackgroundBuffer ||
+		!TranslucentDistortionBuffer ||
+		!TranslucentCompositeGuideHistoryBuffer ||
+		!TranslucentSurfaceBuffer ||
+		!DepthBuffer)
+	{
+		return;
+	}
+
+	struct TranslucentDraw
+	{
+		const SceneObject* Object = nullptr;
+		const Mesh* MeshPtr = nullptr;
+		const Mesh::DrawCall* Draw = nullptr;
+		float SortKey = 0.0f;
+		float NearDepth = 0.0f;
+		float InvDepthRange = 1.0f;
+	};
+
+	static thread_local std::vector<TranslucentDraw> s_draws;
+	std::vector<TranslucentDraw>& draws = s_draws;
+	draws.clear();
+
+	glm::vec3 cameraForward = glm::length(RenderFrameCameraLookDirection) > 1.0e-4f ?
+		glm::normalize(RenderFrameCameraLookDirection) :
+		glm::vec3(0.0f, 0.0f, 1.0f);
+
+	for (const SceneObject& object : RenderWorld.SceneObjects)
+	{
+		if (!object.bVisible || !object.ScenePtr || !SceneHasAlphaBlendMesh(object.ScenePtr))
+			continue;
+
+		glm::vec3 boundsMin(0.0f);
+		glm::vec3 boundsMax(0.0f);
+		glm::vec3 boundsCenter(object.Transform[3]);
+		float boundsRadius = 0.0f;
+		GetSceneObjectWorldBounds(object, boundsMin, boundsMax, boundsCenter, boundsRadius);
+		const float sortKey = glm::dot(boundsCenter - RenderFrameCameraPosition, cameraForward);
+		const float nearDepth = std::max(0.0f, sortKey - boundsRadius);
+		const float farDepth = std::max(nearDepth + 0.001f, sortKey + boundsRadius);
+		const float invDepthRange = 1.0f / std::max(0.001f, farDepth - nearDepth);
+
+		for (const std::shared_ptr<Mesh>& mesh : object.ScenePtr->meshes)
+		{
+			if (!mesh || !mesh->bAlphaBlend || !mesh->Vb || !mesh->Ib)
+				continue;
+			for (const Mesh::DrawCall& draw : mesh->Draws)
+			{
+				if (draw.IndexCount == 0)
+					continue;
+				const Material* material = draw.mat ? draw.mat.get() : mesh->Mat.get();
+				if (!material || material->BaseColorFactor.a <= 0.001f)
+					continue;
+				draws.push_back({ &object, mesh.get(), &draw, sortKey, nearDepth, invDepthRange });
+			}
+		}
+	}
+
+	if (draws.empty())
+		return;
+
+	std::sort(draws.begin(), draws.end(), [](const TranslucentDraw& a, const TranslucentDraw& b)
+	{
+		return a.SortKey > b.SortKey;
+	});
+
+	renderBackend->EmitGpuCrashMarker("TranslucentMeshPass");
+	renderBackend->TransitionTexture(LightingBuffer.get(), EResourceState::ShaderRead, EResourceState::CopySource);
+	renderBackend->TransitionTexture(TranslucentBackgroundBuffer.get(), EResourceState::ShaderRead, EResourceState::CopyDest);
+	renderBackend->CopyTexture(TranslucentBackgroundBuffer.get(), LightingBuffer.get());
+	renderBackend->TransitionTexture(LightingBuffer.get(), EResourceState::CopySource, EResourceState::RenderTarget);
+	renderBackend->TransitionTexture(TranslucentBackgroundBuffer.get(), EResourceState::CopyDest, EResourceState::ShaderRead);
+	renderBackend->TransitionTexture(TranslucentDistortionBuffer.get(), EResourceState::ShaderRead, EResourceState::RenderTarget);
+	const float refractionGuideClearColor[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+	renderBackend->ClearRenderTarget(TranslucentDistortionBuffer.get(), refractionGuideClearColor);
+	renderBackend->TransitionTexture(TranslucentSurfaceBuffer.get(), EResourceState::ShaderRead, EResourceState::RenderTarget);
+	const float translucentSurfaceClearColor[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+	renderBackend->ClearRenderTarget(TranslucentSurfaceBuffer.get(), translucentSurfaceClearColor);
+
+	auto getPersistentNumber = [this](const char* name, float fallback)
+	{
+		const auto result = PersistentScriptControls.find(name);
+		if (result != PersistentScriptControls.end() && result->second.Type == PersistentScriptControlType::Number)
+			return result->second.Number;
+		return fallback;
+	};
+	auto getPersistentBool = [this](const char* name, bool fallback)
+	{
+		const auto result = PersistentScriptControls.find(name);
+		if (result != PersistentScriptControls.end() && result->second.Type == PersistentScriptControlType::Bool)
+			return result->second.Bool;
+		return fallback;
+	};
+	auto matrixIsFinite = [](const glm::mat4x4& m)
+	{
+		for (int c = 0; c < 4; ++c)
+		{
+			for (int r = 0; r < 4; ++r)
+			{
+				if (!std::isfinite(m[c][r]))
+					return false;
+			}
+		}
+		return true;
+	};
+	const float distortionScale = std::clamp(getPersistentNumber("transparency_layers.distortion_scale", 1.0f), 0.0f, 12.0f);
+	const bool bBindRtReflection =
+		renderBackend->GetAPI() == ERenderBackendAPI::D3D12 &&
+		renderBackend->SupportsRayTracing() &&
+		TLAS != nullptr;
+	const bool reflectionEnabled =
+		getPersistentBool("transparency_layers.reflection_enabled", true) &&
+		(renderBackend->GetAPI() != ERenderBackendAPI::D3D12 || !renderBackend->SupportsRayTracing() || bBindRtReflection);
+	const float reflectionScale = reflectionEnabled ? std::clamp(getPersistentNumber("transparency_layers.reflection_scale", 1.0f), 0.0f, 3.0f) : 0.0f;
+	const float reflectionStrength = reflectionEnabled ? std::clamp(getPersistentNumber("transparency_layers.reflection_strength", 0.92f), 0.0f, 1.0f) : 0.0f;
+	const float surfaceStrength = std::clamp(getPersistentNumber("transparency_layers.surface_strength", 0.55f), 0.0f, 1.0f);
+	const float tintStrength = std::clamp(getPersistentNumber("transparency_layers.tint_strength", 0.22f), 0.0f, 1.0f);
+	const float fresnelPower = std::clamp(getPersistentNumber("transparency_layers.fresnel_power", 2.35f), 0.25f, 8.0f);
+	const bool bRefractionOnly = getPersistentBool("transparency_layers.refraction_only", false);
+	const float refractionPixels = 6.0f * distortionScale;
+	const float reflectionPixels = 28.0f * reflectionScale;
+
+	auto buildTranslucentCB = [&](const TranslucentDraw& item, uint32_t drawOrdinal)
+	{
+		const Material* material = item.Draw->mat ? item.Draw->mat.get() : item.MeshPtr->Mat.get();
+		TranslucentMeshCB cb{};
+		const glm::mat4x4 world = item.Object->Transform * item.MeshPtr->transform;
+		const glm::mat4x4 worldView = ViewMat * world;
+		const glm::mat4x4 normalWorldView = glm::inverse(worldView);
+		const glm::mat4x4 normalWorld = glm::inverse(world);
+		cb.WorldViewMatrix = glm::transpose(worldView);
+		cb.WorldViewProjectionMatrix = glm::transpose(ViewProjMat * world);
+		cb.WorldMatrix = glm::transpose(world);
+		cb.ViewProjectionMatrix = glm::transpose(ViewProjMat);
+		cb.NormalWorldViewMatrix = matrixIsFinite(normalWorldView) ? normalWorldView : glm::mat4x4(1.0f);
+		cb.NormalWorldMatrix = matrixIsFinite(normalWorld) ? normalWorld : glm::mat4x4(1.0f);
+		cb.BaseColorFactor = material ? material->BaseColorFactor : glm::vec4(1.0f);
+		cb.BaseColorFactor.a = std::clamp(cb.BaseColorFactor.a, 0.0f, 1.0f);
+		cb.EffectParams = glm::vec4(refractionPixels, reflectionPixels, reflectionStrength, fresnelPower);
+		cb.RenderTargetParams = glm::vec4(
+			1.0f / static_cast<float>(std::max<UINT>(GetRenderWidth(), 1u)),
+			1.0f / static_cast<float>(std::max<UINT>(GetRenderHeight(), 1u)),
+			tintStrength,
+			surfaceStrength);
+		cb.CameraPositionAndRayParams = glm::vec4(RenderFrameCameraPosition, 0.15f);
+		cb.StochasticParams = glm::uvec4(
+			0u,
+			static_cast<uint32_t>(FrameCounter),
+			static_cast<uint32_t>((drawOrdinal + 1u) * 9781u),
+			bRefractionOnly ? 1u : 0u);
+		return cb;
+	};
+
+	Texture* colorTargets[] = { LightingBuffer.get(), TranslucentDistortionBuffer.get(), TranslucentSurfaceBuffer.get() };
+
+	uint32_t submittedDraws = 0;
+	for (size_t drawIndex = 0; drawIndex < draws.size(); ++drawIndex)
+	{
+		const TranslucentDraw& item = draws[drawIndex];
+		TranslucentMeshCB cb = buildTranslucentCB(item, submittedDraws);
+
+		// Snapshot the guide accumulated by farther translucent layers. The
+		// current layer samples this at the same UV used for SceneColorTex, so
+		// the final guide follows the same refraction chain as the color input
+		// sent to DLSS-RR.
+		renderBackend->TransitionTexture(TranslucentDistortionBuffer.get(), EResourceState::RenderTarget, EResourceState::CopySource);
+		renderBackend->TransitionTexture(TranslucentCompositeGuideHistoryBuffer.get(), EResourceState::ShaderRead, EResourceState::CopyDest);
+		renderBackend->CopyTexture(TranslucentCompositeGuideHistoryBuffer.get(), TranslucentDistortionBuffer.get());
+		renderBackend->TransitionTexture(TranslucentDistortionBuffer.get(), EResourceState::CopySource, EResourceState::RenderTarget);
+		renderBackend->TransitionTexture(TranslucentCompositeGuideHistoryBuffer.get(), EResourceState::CopyDest, EResourceState::ShaderRead);
+
+		renderBackend->SetRenderTargets(colorTargets, static_cast<uint32_t>(std::size(colorTargets)), DepthBuffer.get());
+		renderBackend->SetViewportAndScissor(GetRenderWidth(), GetRenderHeight());
+		renderBackend->BindGraphicsPipeline(TranslucentMeshGraphicsPipeline.get());
+
+		std::vector<GraphicsBindGroupEntry> bindEntries = {
+			GraphicsBindGroupEntry::SamplerBinding("samplerClamp", samplerBilinearWrap ? samplerBilinearWrap.get() : samplerWrap.get()),
+			GraphicsBindGroupEntry::TextureSRV("SceneColorTex", TranslucentBackgroundBuffer.get()),
+			GraphicsBindGroupEntry::TextureSRV("PrevCompositeGuideTex", TranslucentCompositeGuideHistoryBuffer.get()),
+			GraphicsBindGroupEntry::Constant(0, &cb, sizeof(cb)),
+		};
+		if (bBindRtReflection)
+			bindEntries.push_back(GraphicsBindGroupEntry::AccelerationStructureSRV("gRtScene", TLAS));
+		CreateAndBindGraphicsBindGroup(renderBackend.get(), TranslucentMeshGraphicsPipeline.get(), bindEntries);
+		renderBackend->BindMeshBuffers(item.MeshPtr->Vb.get(), item.MeshPtr->Ib.get());
+		renderBackend->DrawIndexed(item.Draw->IndexCount, item.Draw->IndexStart, item.Draw->VertexBase);
+		++submittedDraws;
+
+		if (drawIndex + 1u < draws.size())
+		{
+			// Refractive layers need to sample the full scene behind them,
+			// including translucent layers already composited back-to-front.
+			renderBackend->TransitionTexture(LightingBuffer.get(), EResourceState::RenderTarget, EResourceState::CopySource);
+			renderBackend->TransitionTexture(TranslucentBackgroundBuffer.get(), EResourceState::ShaderRead, EResourceState::CopyDest);
+			renderBackend->CopyTexture(TranslucentBackgroundBuffer.get(), LightingBuffer.get());
+			renderBackend->TransitionTexture(LightingBuffer.get(), EResourceState::CopySource, EResourceState::RenderTarget);
+			renderBackend->TransitionTexture(TranslucentBackgroundBuffer.get(), EResourceState::CopyDest, EResourceState::ShaderRead);
+		}
+	}
+
+	renderBackend->TransitionTexture(LightingBuffer.get(), EResourceState::RenderTarget, EResourceState::ShaderRead);
+	renderBackend->TransitionTexture(TranslucentDistortionBuffer.get(), EResourceState::RenderTarget, EResourceState::ShaderRead);
+	renderBackend->TransitionTexture(TranslucentSurfaceBuffer.get(), EResourceState::RenderTarget, EResourceState::ShaderRead);
+	bTranslucentDistortionGuideValidThisFrame = submittedDraws > 0;
+	bTranslucentDistortionGuideIsOffsetThisFrame = false;
+
+	static uint32_t s_logCounter = 0;
+	if ((++s_logCounter % 120u) == 0u)
+		AppendCpuRuntimeTrace(
+			L"[TranslucentMeshPass] draws=" + std::to_wstring(submittedDraws) +
+			L", refractionOnly=" + std::to_wstring(bRefractionOnly ? 1 : 0) +
+			L", guideDistortion=" + std::to_wstring(bTranslucentDistortionGuideValidThisFrame ? 1 : 0) +
+			L", compositeGuide=1" +
+			L", rtReflection=" + std::to_wstring(bBindRtReflection ? 1 : 0));
+}
+
+void Corona::TranslucentSurfaceLightingPass()
+{
+	if (!renderBackend ||
+		!TranslucentSurfaceLightingGraphicsPipeline ||
+		!LightingBuffer ||
+		!TranslucentBackgroundBuffer ||
+		!TranslucentSurfaceBuffer ||
+		!TranslucentGuideRasterDepthBuffer)
+	{
+		return;
+	}
+
+	struct TranslucentDraw
+	{
+		const SceneObject* Object = nullptr;
+		const Mesh* MeshPtr = nullptr;
+		const Mesh::DrawCall* Draw = nullptr;
+		float SortKey = 0.0f;
+		float NearDepth = 0.0f;
+		float InvDepthRange = 1.0f;
+	};
+
+	static thread_local std::vector<TranslucentDraw> s_draws;
+	std::vector<TranslucentDraw>& draws = s_draws;
+	draws.clear();
+
+	glm::vec3 cameraForward = glm::length(RenderFrameCameraLookDirection) > 1.0e-4f ?
+		glm::normalize(RenderFrameCameraLookDirection) :
+		glm::vec3(0.0f, 0.0f, 1.0f);
+
+	for (const SceneObject& object : RenderWorld.SceneObjects)
+	{
+		if (!object.bVisible || !object.ScenePtr || !SceneHasAlphaBlendMesh(object.ScenePtr))
+			continue;
+
+		glm::vec3 boundsMin(0.0f);
+		glm::vec3 boundsMax(0.0f);
+		glm::vec3 boundsCenter(object.Transform[3]);
+		float boundsRadius = 0.0f;
+		GetSceneObjectWorldBounds(object, boundsMin, boundsMax, boundsCenter, boundsRadius);
+		const float sortKey = glm::dot(boundsCenter - RenderFrameCameraPosition, cameraForward);
+		const float nearDepth = std::max(0.0f, sortKey - boundsRadius);
+		const float farDepth = std::max(nearDepth + 0.001f, sortKey + boundsRadius);
+		const float invDepthRange = 1.0f / std::max(0.001f, farDepth - nearDepth);
+
+		for (const std::shared_ptr<Mesh>& mesh : object.ScenePtr->meshes)
+		{
+			if (!mesh || !mesh->bAlphaBlend || !mesh->Vb || !mesh->Ib)
+				continue;
+			for (const Mesh::DrawCall& draw : mesh->Draws)
+			{
+				if (draw.IndexCount == 0)
+					continue;
+				const Material* material = draw.mat ? draw.mat.get() : mesh->Mat.get();
+				if (!material || material->BaseColorFactor.a <= 0.001f)
+					continue;
+				draws.push_back({ &object, mesh.get(), &draw, sortKey, nearDepth, invDepthRange });
+			}
+		}
+	}
+
+	if (draws.empty())
+		return;
+
+	std::sort(draws.begin(), draws.end(), [](const TranslucentDraw& a, const TranslucentDraw& b)
+	{
+		return a.SortKey > b.SortKey;
+	});
+
+	auto getPersistentNumber = [this](const char* name, float fallback)
+	{
+		const auto result = PersistentScriptControls.find(name);
+		if (result != PersistentScriptControls.end() && result->second.Type == PersistentScriptControlType::Number)
+			return result->second.Number;
+		return fallback;
+	};
+	auto getPersistentBool = [this](const char* name, bool fallback)
+	{
+		const auto result = PersistentScriptControls.find(name);
+		if (result != PersistentScriptControls.end() && result->second.Type == PersistentScriptControlType::Bool)
+			return result->second.Bool;
+		return fallback;
+	};
+	auto matrixIsFinite = [](const glm::mat4x4& m)
+	{
+		for (int c = 0; c < 4; ++c)
+		{
+			for (int r = 0; r < 4; ++r)
+			{
+				if (!std::isfinite(m[c][r]))
+					return false;
+			}
+		}
+		return true;
+	};
+
+	const float distortionScale = std::clamp(getPersistentNumber("transparency_layers.distortion_scale", 1.0f), 0.0f, 12.0f);
+	const bool bBindRtReflection =
+		renderBackend->GetAPI() == ERenderBackendAPI::D3D12 &&
+		renderBackend->SupportsRayTracing() &&
+		TLAS != nullptr;
+	const bool reflectionEnabled =
+		getPersistentBool("transparency_layers.reflection_enabled", true) &&
+		(renderBackend->GetAPI() != ERenderBackendAPI::D3D12 || !renderBackend->SupportsRayTracing() || bBindRtReflection);
+	const float reflectionScale = reflectionEnabled ? std::clamp(getPersistentNumber("transparency_layers.reflection_scale", 1.0f), 0.0f, 3.0f) : 0.0f;
+	const float reflectionStrength = reflectionEnabled ? std::clamp(getPersistentNumber("transparency_layers.reflection_strength", 0.92f), 0.0f, 1.0f) : 0.0f;
+	const float surfaceStrength = std::clamp(getPersistentNumber("transparency_layers.surface_strength", 0.55f), 0.0f, 1.0f);
+	const float tintStrength = std::clamp(getPersistentNumber("transparency_layers.tint_strength", 0.22f), 0.0f, 1.0f);
+	const float fresnelPower = std::clamp(getPersistentNumber("transparency_layers.fresnel_power", 2.35f), 0.25f, 8.0f);
+	const bool bRefractionOnly = getPersistentBool("transparency_layers.refraction_only", false);
+	const float refractionPixels = 6.0f * distortionScale;
+	const float reflectionPixels = 28.0f * reflectionScale;
+
+	auto buildTranslucentCB = [&](const TranslucentDraw& item, uint32_t drawOrdinal)
+	{
+		const Material* material = item.Draw->mat ? item.Draw->mat.get() : item.MeshPtr->Mat.get();
+		TranslucentMeshCB cb{};
+		const glm::mat4x4 world = item.Object->Transform * item.MeshPtr->transform;
+		const glm::mat4x4 worldView = ViewMat * world;
+		const glm::mat4x4 normalWorldView = glm::inverse(worldView);
+		const glm::mat4x4 normalWorld = glm::inverse(world);
+		cb.WorldViewMatrix = glm::transpose(worldView);
+		cb.WorldViewProjectionMatrix = glm::transpose(ViewProjMat * world);
+		cb.WorldMatrix = glm::transpose(world);
+		cb.ViewProjectionMatrix = glm::transpose(ViewProjMat);
+		cb.NormalWorldViewMatrix = matrixIsFinite(normalWorldView) ? normalWorldView : glm::mat4x4(1.0f);
+		cb.NormalWorldMatrix = matrixIsFinite(normalWorld) ? normalWorld : glm::mat4x4(1.0f);
+		cb.BaseColorFactor = material ? material->BaseColorFactor : glm::vec4(1.0f);
+		cb.BaseColorFactor.a = std::clamp(cb.BaseColorFactor.a, 0.0f, 1.0f);
+		cb.EffectParams = glm::vec4(refractionPixels, reflectionPixels, reflectionStrength, fresnelPower);
+		cb.RenderTargetParams = glm::vec4(
+			1.0f / static_cast<float>(std::max<UINT>(GetRenderWidth(), 1u)),
+			1.0f / static_cast<float>(std::max<UINT>(GetRenderHeight(), 1u)),
+			tintStrength,
+			surfaceStrength);
+		cb.CameraPositionAndRayParams = glm::vec4(RenderFrameCameraPosition, 0.15f);
+		cb.SurfaceDepthParams = glm::vec4(item.NearDepth, item.InvDepthRange, 2.6f, 0.08f);
+		cb.StochasticParams = glm::uvec4(
+			1u,
+			static_cast<uint32_t>(FrameCounter),
+			static_cast<uint32_t>((drawOrdinal + 1u) * 9781u),
+			bRefractionOnly ? 1u : 0u);
+		return cb;
+	};
+
+	renderBackend->EmitGpuCrashMarker("TranslucentSurfaceLightingPass");
+	renderBackend->TransitionTexture(TranslucentSurfaceBuffer.get(), EResourceState::ShaderRead, EResourceState::RenderTarget);
+	const float translucentSurfaceClearColor[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+	renderBackend->ClearRenderTarget(TranslucentSurfaceBuffer.get(), translucentSurfaceClearColor);
+	renderBackend->TransitionTexture(TranslucentGuideRasterDepthBuffer.get(), EResourceState::ShaderRead, EResourceState::DepthWrite);
+	renderBackend->ClearDepth(TranslucentGuideRasterDepthBuffer.get(), 1.0f);
+
+	renderBackend->SetViewportAndScissor(GetRenderWidth(), GetRenderHeight());
+	renderBackend->BindGraphicsPipeline(TranslucentSurfaceLightingGraphicsPipeline.get());
+
+	uint32_t submittedDraws = 0;
+	for (size_t drawIndex = 0; drawIndex < draws.size(); ++drawIndex)
+	{
+		const TranslucentDraw& item = draws[drawIndex];
+		renderBackend->TransitionTexture(
+			LightingBuffer.get(),
+			drawIndex == 0 ? EResourceState::ShaderRead : EResourceState::RenderTarget,
+			EResourceState::CopySource);
+		renderBackend->TransitionTexture(TranslucentBackgroundBuffer.get(), EResourceState::ShaderRead, EResourceState::CopyDest);
+		renderBackend->CopyTexture(TranslucentBackgroundBuffer.get(), LightingBuffer.get());
+		renderBackend->TransitionTexture(LightingBuffer.get(), EResourceState::CopySource, EResourceState::RenderTarget);
+		renderBackend->TransitionTexture(TranslucentBackgroundBuffer.get(), EResourceState::CopyDest, EResourceState::ShaderRead);
+
+		Texture* colorTargets[] = { LightingBuffer.get(), TranslucentSurfaceBuffer.get() };
+		renderBackend->SetRenderTargets(colorTargets, static_cast<uint32_t>(std::size(colorTargets)), TranslucentGuideRasterDepthBuffer.get());
+
+		TranslucentMeshCB cb = buildTranslucentCB(item, submittedDraws);
+		std::vector<GraphicsBindGroupEntry> bindEntries = {
+			GraphicsBindGroupEntry::SamplerBinding("samplerClamp", samplerBilinearWrap ? samplerBilinearWrap.get() : samplerWrap.get()),
+			GraphicsBindGroupEntry::TextureSRV("SceneColorTex", TranslucentBackgroundBuffer.get()),
+			GraphicsBindGroupEntry::Constant(0, &cb, sizeof(cb)),
+		};
+		if (bBindRtReflection)
+			bindEntries.push_back(GraphicsBindGroupEntry::AccelerationStructureSRV("gRtScene", TLAS));
+		CreateAndBindGraphicsBindGroup(renderBackend.get(), TranslucentSurfaceLightingGraphicsPipeline.get(), bindEntries);
+		renderBackend->BindMeshBuffers(item.MeshPtr->Vb.get(), item.MeshPtr->Ib.get());
+		renderBackend->DrawIndexed(item.Draw->IndexCount, item.Draw->IndexStart, item.Draw->VertexBase);
+		++submittedDraws;
+	}
+
+	renderBackend->TransitionTexture(TranslucentGuideRasterDepthBuffer.get(), EResourceState::DepthWrite, EResourceState::ShaderRead);
+	renderBackend->TransitionTexture(LightingBuffer.get(), EResourceState::RenderTarget, EResourceState::ShaderRead);
+	renderBackend->TransitionTexture(TranslucentSurfaceBuffer.get(), EResourceState::RenderTarget, EResourceState::ShaderRead);
+
+	static uint32_t s_logCounter = 0;
+	if ((++s_logCounter % 120u) == 0u)
+		AppendCpuRuntimeTrace(
+			L"[TranslucentSurfaceLightingPass] draws=" + std::to_wstring(submittedDraws) +
+			L", layeredGlass=1" +
+			L", refractionOnly=" + std::to_wstring(bRefractionOnly ? 1 : 0) +
+			L", surfaceStrength=" + std::to_wstring(surfaceStrength) +
+			L", reflectionStrength=" + std::to_wstring(reflectionStrength) +
+			L", rtReflection=" + std::to_wstring(bBindRtReflection ? 1 : 0));
+}
+
+bool Corona::PrepareTranslucentDLSSRRGuideBuffers(
+	Texture*& depthGuide,
+	Texture*& velocityGuide,
+	Texture*& normalGuide,
+	Texture*& roughnessGuide,
+	Texture*& albedoGuide,
+	Texture*& specularAlbedoGuide,
+	bool bForce)
+{
+	if (!renderBackend ||
+		!bTranslucentDistortionGuideValidThisFrame ||
+		!TranslucentDistortionBuffer ||
+		!TranslucentGuideDepthBuffer ||
+		!TranslucentGuideVelocityBuffer ||
+		!TranslucentGuideNormalBuffer ||
+		!TranslucentGuideRoughnessBuffer ||
+		!TranslucentGuideAlbedoBuffer ||
+		!TranslucentGuideSpecularAlbedoBuffer ||
+		!depthGuide ||
+		!velocityGuide ||
+		!normalGuide ||
+		!roughnessGuide ||
+		!albedoGuide ||
+		!specularAlbedoGuide)
+	{
+		return false;
+	}
+
+	const auto getPersistentBool = [this](const char* name, bool fallback)
+	{
+		const auto result = PersistentScriptControls.find(name);
+		if (result != PersistentScriptControls.end() && result->second.Type == PersistentScriptControlType::Bool)
+			return result->second.Bool;
+		return fallback;
+	};
+	if (!bForce && !getPersistentBool("transparency_layers.dlssrr_guide_warp", true))
+		return false;
+
+	if (!TranslucentGuideWarpPSO)
+	{
+		const RHIShaderStageMask computeStage = ToRHIShaderStageMask(RHIShaderStage::Compute);
+		auto pso = renderBackend->CreateComputePipelineStateObject();
+		if (!pso)
+			return false;
+
+		pso->BindSRV(MakeRHITextureSRV("SrcDepth", 0, computeStage));
+		pso->BindSRV(MakeRHITextureSRV("SrcVelocity", 1, computeStage));
+		pso->BindSRV(MakeRHITextureSRV("SrcNormal", 2, computeStage));
+		pso->BindSRV(MakeRHITextureSRV("SrcRoughness", 3, computeStage));
+		pso->BindSRV(MakeRHITextureSRV("SrcAlbedo", 4, computeStage));
+		pso->BindSRV(MakeRHITextureSRV("SrcSpecularAlbedo", 5, computeStage));
+		pso->BindSRV(MakeRHITextureSRV("TranslucentDistortionTex", 6, computeStage));
+		pso->BindUAV(MakeRHITextureUAV("OutDepth", 0, computeStage));
+		pso->BindUAV(MakeRHITextureUAV("OutVelocity", 1, computeStage));
+		pso->BindUAV(MakeRHITextureUAV("OutNormal", 2, computeStage));
+		pso->BindUAV(MakeRHITextureUAV("OutRoughness", 3, computeStage));
+		pso->BindUAV(MakeRHITextureUAV("OutAlbedo", 4, computeStage));
+		pso->BindUAV(MakeRHITextureUAV("OutSpecularAlbedo", 5, computeStage));
+		pso->BindCBV(MakeRHICBV("TranslucentGuideWarpCB", 0, sizeof(TranslucentGuideWarpCB), computeStage));
+
+		if (!pso->InitCS(GetAssetFullPath(L"Shaders\\TranslucentGuideWarpCS.hlsl"), "CSMain"))
+		{
+			AppendCpuRuntimeTrace(L"[PrepareTranslucentDLSSRRGuideBuffers] guide warp PSO create failed");
+			return false;
+		}
+
+		TranslucentGuideWarpPSO = pso;
+	}
+
+	renderBackend->EmitGpuCrashMarker("TranslucentGuideWarp");
+	renderBackend->TransitionTexture(TranslucentGuideDepthBuffer.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
+	renderBackend->TransitionTexture(TranslucentGuideVelocityBuffer.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
+	renderBackend->TransitionTexture(TranslucentGuideNormalBuffer.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
+	renderBackend->TransitionTexture(TranslucentGuideRoughnessBuffer.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
+	renderBackend->TransitionTexture(TranslucentGuideAlbedoBuffer.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
+	renderBackend->TransitionTexture(TranslucentGuideSpecularAlbedoBuffer.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
+
+	TranslucentGuideWarpPSO->SetTextureSRV("SrcDepth", depthGuide);
+	TranslucentGuideWarpPSO->SetTextureSRV("SrcVelocity", velocityGuide);
+	TranslucentGuideWarpPSO->SetTextureSRV("SrcNormal", normalGuide);
+	TranslucentGuideWarpPSO->SetTextureSRV("SrcRoughness", roughnessGuide);
+	TranslucentGuideWarpPSO->SetTextureSRV("SrcAlbedo", albedoGuide);
+	TranslucentGuideWarpPSO->SetTextureSRV("SrcSpecularAlbedo", specularAlbedoGuide);
+	TranslucentGuideWarpPSO->SetTextureSRV("TranslucentDistortionTex", TranslucentDistortionBuffer.get());
+	TranslucentGuideWarpPSO->SetTextureUAV("OutDepth", TranslucentGuideDepthBuffer.get());
+	TranslucentGuideWarpPSO->SetTextureUAV("OutVelocity", TranslucentGuideVelocityBuffer.get());
+	TranslucentGuideWarpPSO->SetTextureUAV("OutNormal", TranslucentGuideNormalBuffer.get());
+	TranslucentGuideWarpPSO->SetTextureUAV("OutRoughness", TranslucentGuideRoughnessBuffer.get());
+	TranslucentGuideWarpPSO->SetTextureUAV("OutAlbedo", TranslucentGuideAlbedoBuffer.get());
+	TranslucentGuideWarpPSO->SetTextureUAV("OutSpecularAlbedo", TranslucentGuideSpecularAlbedoBuffer.get());
+
+	TranslucentGuideWarpCB cb{};
+	cb.Params = glm::vec4(
+		1.0f / static_cast<float>(std::max<UINT>(GetRenderWidth(), 1u)),
+		1.0f / static_cast<float>(std::max<UINT>(GetRenderHeight(), 1u)),
+		0.0001f,
+		0.0f);
+	cb.Flags = glm::uvec4(
+		1u,
+		CORONA_PLATFORM_MOBILE ? 1u : 0u,
+		bTranslucentDistortionGuideIsOffsetThisFrame ? 1u : 0u,
+		0u);
+	TranslucentGuideWarpPSO->SetCBVValue("TranslucentGuideWarpCB", &cb);
+	TranslucentGuideWarpPSO->Apply();
+	renderBackend->Dispatch((GetRenderWidth() + 7u) / 8u, (GetRenderHeight() + 7u) / 8u, 1u);
+
+	renderBackend->UAVBarrier(TranslucentGuideDepthBuffer.get());
+	renderBackend->UAVBarrier(TranslucentGuideVelocityBuffer.get());
+	renderBackend->UAVBarrier(TranslucentGuideNormalBuffer.get());
+	renderBackend->UAVBarrier(TranslucentGuideRoughnessBuffer.get());
+	renderBackend->UAVBarrier(TranslucentGuideAlbedoBuffer.get());
+	renderBackend->UAVBarrier(TranslucentGuideSpecularAlbedoBuffer.get());
+
+	renderBackend->TransitionTexture(TranslucentGuideDepthBuffer.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
+	renderBackend->TransitionTexture(TranslucentGuideVelocityBuffer.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
+	renderBackend->TransitionTexture(TranslucentGuideNormalBuffer.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
+	renderBackend->TransitionTexture(TranslucentGuideRoughnessBuffer.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
+	renderBackend->TransitionTexture(TranslucentGuideAlbedoBuffer.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
+	renderBackend->TransitionTexture(TranslucentGuideSpecularAlbedoBuffer.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
+
+	depthGuide = TranslucentGuideDepthBuffer.get();
+	velocityGuide = TranslucentGuideVelocityBuffer.get();
+	normalGuide = TranslucentGuideNormalBuffer.get();
+	roughnessGuide = TranslucentGuideRoughnessBuffer.get();
+	albedoGuide = TranslucentGuideAlbedoBuffer.get();
+	specularAlbedoGuide = TranslucentGuideSpecularAlbedoBuffer.get();
+	return true;
 }
 
 void Corona::UseNativeCameraForScript(bool enabled)
@@ -2831,6 +3981,38 @@ void Corona::DebugPass()
 
 
 
+	auto isTranslucentGuideDebugVisualization = [](EDebugVisualization eFS) -> bool
+	{
+		switch (eFS)
+		{
+		case EDebugVisualization::TRANSLUCENT_GUIDE_DEPTH:
+		case EDebugVisualization::TRANSLUCENT_GUIDE_VELOCITY:
+		case EDebugVisualization::TRANSLUCENT_GUIDE_NORMAL:
+		case EDebugVisualization::TRANSLUCENT_GUIDE_ROUGHNESS:
+		case EDebugVisualization::TRANSLUCENT_GUIDE_ALBEDO:
+		case EDebugVisualization::TRANSLUCENT_GUIDE_SPECULAR_ALBEDO:
+			return true;
+		default:
+			return false;
+		}
+	};
+	if (isTranslucentGuideDebugVisualization(FullscreenDebugBuffer))
+	{
+		Texture* rrDepthGuide = UnjitteredDepthBuffers[ColorBufferWriteIndex].get();
+		Texture* rrMotionGuide = VelocityBuffer.get();
+		Texture* rrNormalGuide = NormalBuffers[ColorBufferWriteIndex].get();
+		Texture* rrRoughnessGuide = RoughnessMetalicBuffer.get();
+		Texture* rrAlbedoGuide = AlbedoBuffer.get();
+		Texture* rrSpecularAlbedoGuide = SpecularAlbedoBuffer.get();
+		PrepareTranslucentDLSSRRGuideBuffers(
+			rrDepthGuide,
+			rrMotionGuide,
+			rrNormalGuide,
+			rrRoughnessGuide,
+			rrAlbedoGuide,
+			rrSpecularAlbedoGuide);
+	}
+
 	std::vector<std::function<void(EDebugVisualization eFS)>> functions;
 	functions.push_back([&](EDebugVisualization eFS){
 		//raytraced shadow
@@ -2876,6 +4058,62 @@ void Corona::DebugPass()
 			return;
 		cb.DebugMode = CHANNEL_X;
 		visualize(cb, AmbientOcclusionBuffer.get());
+	});
+
+	functions.push_back([&](EDebugVisualization eFS) {
+		// Translucent refraction UV written by the translucent color pass.
+		DebugPassCB cb;
+		if (eFS != EDebugVisualization::TRANSLUCENT_REFRACTION_UV)
+			return;
+		cb.Offset = glm::vec4(0, 0, 0, 0);
+		cb.Scale = glm::vec4(1, 1, 0, 0);
+		cb.DebugMode = RAW_COPY;
+		visualize(cb, TranslucentDistortionBuffer.get());
+	});
+
+	functions.push_back([&](EDebugVisualization eFS) {
+		DebugPassCB cb;
+		Texture* tex = nullptr;
+		if (eFS == EDebugVisualization::TRANSLUCENT_GUIDE_DEPTH)
+		{
+			tex = TranslucentGuideDepthBuffer.get();
+			cb.ProjectionParams.z = Near;
+			cb.ProjectionParams.w = Far;
+			cb.DebugMode = DEPTH;
+		}
+		else if (eFS == EDebugVisualization::TRANSLUCENT_GUIDE_VELOCITY)
+		{
+			tex = TranslucentGuideVelocityBuffer.get();
+			cb.DebugMode = RAW_COPY;
+		}
+		else if (eFS == EDebugVisualization::TRANSLUCENT_GUIDE_NORMAL)
+		{
+			tex = TranslucentGuideNormalBuffer.get();
+			cb.DebugMode = RAW_COPY;
+		}
+		else if (eFS == EDebugVisualization::TRANSLUCENT_GUIDE_ROUGHNESS)
+		{
+			tex = TranslucentGuideRoughnessBuffer.get();
+			cb.DebugMode = RAW_COPY;
+		}
+		else if (eFS == EDebugVisualization::TRANSLUCENT_GUIDE_ALBEDO)
+		{
+			tex = TranslucentGuideAlbedoBuffer.get();
+			cb.DebugMode = RAW_COPY;
+		}
+		else if (eFS == EDebugVisualization::TRANSLUCENT_GUIDE_SPECULAR_ALBEDO)
+		{
+			tex = TranslucentGuideSpecularAlbedoBuffer.get();
+			cb.DebugMode = RAW_COPY;
+		}
+		else
+		{
+			return;
+		}
+
+		cb.Offset = glm::vec4(0, 0, 0, 0);
+		cb.Scale = glm::vec4(1, 1, 0, 0);
+		visualize(cb, tex);
 	});
 
 	functions.push_back([&](EDebugVisualization eFS) {
@@ -3673,6 +4911,27 @@ void Corona::LightingPass()
 		(GBufferGenerationMode == EGBufferGenerationMode::RtPrimary && UnjitteredDepthBuffers[ColorBufferWriteIndex]) ?
 		UnjitteredDepthBuffers[ColorBufferWriteIndex].get() :
 		DepthBuffer.get();
+	const bool bUseTranslucentRefractedGBuffer =
+		bTranslucentRefractedGBufferActiveThisFrame &&
+		GetEnvBool(L"CORONA_TRANSLUCENT_PRELIGHT_LIGHTING_GUIDE", true) &&
+		TranslucentGuideDepthBuffer &&
+		TranslucentGuideVelocityBuffer &&
+		TranslucentGuideNormalBuffer &&
+		TranslucentGuideRoughnessBuffer &&
+		TranslucentGuideAlbedoBuffer;
+	Texture* lightingAlbedoTex = bUseTranslucentRefractedGBuffer ? TranslucentGuideAlbedoBuffer.get() : AlbedoBuffer.get();
+	Texture* lightingNormalTex = bUseTranslucentRefractedGBuffer ? TranslucentGuideNormalBuffer.get() : NormalBuffers[ColorBufferWriteIndex].get();
+	Texture* lightingVelocityTex = bUseTranslucentRefractedGBuffer ? TranslucentGuideVelocityBuffer.get() : VelocityBuffer.get();
+	Texture* lightingDepthTex = bUseTranslucentRefractedGBuffer ? TranslucentGuideDepthBuffer.get() : gbufferDepthTex;
+	Texture* lightingRoughnessTex = bUseTranslucentRefractedGBuffer ? TranslucentGuideRoughnessBuffer.get() : RoughnessMetalicBuffer.get();
+
+	static uint32_t sLastRefractedGBufferLighting = 0xFFFFFFFFu;
+	const uint32_t refractedGBufferLighting = bUseTranslucentRefractedGBuffer ? 1u : 0u;
+	if (sLastRefractedGBufferLighting != refractedGBufferLighting)
+	{
+		sLastRefractedGBufferLighting = refractedGBufferLighting;
+		AppendCpuRuntimeTrace(L"[LightingPass] refractedGBuffer=" + std::to_wstring(refractedGBufferLighting));
+	}
 
 	{
 		static UINT32 sLastRTAOEnable = 0xFFFFFFFFu;
@@ -3739,15 +4998,15 @@ void Corona::LightingPass()
 	{
 		CreateAndBindGraphicsBindGroup(renderBackend.get(), LightingGraphicsPipeline.get(),
 			{
-				GraphicsBindGroupEntry::TextureSRV("AlbedoTex", AlbedoBuffer.get()),
-				GraphicsBindGroupEntry::TextureSRV("NormalTex", NormalBuffers[ColorBufferWriteIndex].get()),
+				GraphicsBindGroupEntry::TextureSRV("AlbedoTex", lightingAlbedoTex),
+				GraphicsBindGroupEntry::TextureSRV("NormalTex", lightingNormalTex),
 				GraphicsBindGroupEntry::TextureSRV("ShadowTex", shadowTex),
-				GraphicsBindGroupEntry::TextureSRV("VelocityTex", VelocityBuffer.get()),
-				GraphicsBindGroupEntry::TextureSRV("DepthTex", gbufferDepthTex),
+				GraphicsBindGroupEntry::TextureSRV("VelocityTex", lightingVelocityTex),
+				GraphicsBindGroupEntry::TextureSRV("DepthTex", lightingDepthTex),
 				GraphicsBindGroupEntry::TextureSRV("GIResultSHTex", lightingDiffuseAuxTex),
 				GraphicsBindGroupEntry::TextureSRV("GIResultColorTex", lightingDiffuseTex),
 				GraphicsBindGroupEntry::TextureSRV("SpecularGITex", lightingSpecularTex),
-				GraphicsBindGroupEntry::TextureSRV("RoughnessMetalicTex", RoughnessMetalicBuffer.get()),
+				GraphicsBindGroupEntry::TextureSRV("RoughnessMetalicTex", lightingRoughnessTex),
 				GraphicsBindGroupEntry::TextureSRV("AmbientOcclusionTex", ambientOcclusionTex),
 				GraphicsBindGroupEntry::BufferSRV("PointLightGridCounts", PointLightGridCountBuffer.get()),
 				GraphicsBindGroupEntry::BufferSRV("PointLightGridIndices", PointLightGridIndexBuffer.get()),
@@ -4540,6 +5799,8 @@ bool Corona::IsSceneEligibleForStaticGBufferInstancing(const std::shared_ptr<Sce
 	{
 		if (!mesh || !mesh->Vb || !mesh->Ib || mesh->Draws.empty())
 			return false;
+		if (mesh->bAlphaBlend)
+			return false;
 		if (mesh->bProceduralGrass || mesh->bGpuSpineSkinned || mesh->bSpineMesh || mesh->bSkeletalSkinned)
 			return false;
 		if (mesh->bTerrainMesh || mesh->bGrassMesh)
@@ -4865,6 +6126,7 @@ bool Corona::DrawStaticObjectBindlessBatch(
 			{
 				if (!mesh || !mesh->Vb || !mesh->Ib ||
 					mesh->bTerrainMesh || mesh->bGrassMesh ||
+					mesh->bAlphaBlend ||
 					!IsGBufferStaticBindlessGeometryEligible(*mesh))
 				{
 					continue;
@@ -6021,6 +7283,8 @@ void Corona::DrawScene(shared_ptr<Scene> scene, const glm::mat4x4& instanceTrans
 	for (auto& mesh : scene->meshes)
 	{
 		if (!mesh)
+			continue;
+		if (mesh->bAlphaBlend)
 			continue;
 
 		// Spine VS-inline path: skinning math runs in the VS, reading
@@ -7788,6 +9052,7 @@ void Corona::GBufferPass()
 			bool SpineObject = false;
 			bool SkeletalUnifiedObject = false;
 			bool ProceduralGrassScene = false;
+			bool AlphaBlendScene = false;
 			bool StaticInstancingEligible = false;
 			bool StaticObjectBatchEligible = false;
 			uint32_t StaticObjectBatchOpaqueDrawCount = 0;
@@ -7824,11 +9089,13 @@ void Corona::GBufferPass()
 					flags.SkeletalUnifiedObject ||
 					(bClusterDrawActive && sceneMesh->bSkeletalSkinned);
 				flags.ProceduralGrassScene = flags.ProceduralGrassScene || sceneMesh->bProceduralGrass;
+				flags.AlphaBlendScene = flags.AlphaBlendScene || sceneMesh->bAlphaBlend;
 
 				if (staticObjectBatchEligible)
 				{
 					if (!sceneMesh->Vb || !sceneMesh->Ib || sceneMesh->Draws.empty() ||
 						sceneMesh->bTerrainMesh || sceneMesh->bGrassMesh ||
+						sceneMesh->bAlphaBlend ||
 						!IsGBufferStaticBindlessGeometryEligible(*sceneMesh))
 					{
 						staticObjectBatchEligible = false;

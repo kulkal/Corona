@@ -6,12 +6,17 @@
 #include "TerrainComponent.h"
 #include "imgui.h"
 
+#include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <string>
 
 namespace
 {
 	constexpr float kToggleBtnH = 28.0f;
+	constexpr float kToolboxPrimitiveScale = 20.0f;
+	constexpr float kToolboxOpaqueSpawnDistance = 30.0f;
+	constexpr float kToolboxGlassSpawnDistance = 45.0f;
 
 	std::string NextName(const char* prefix, int& counter)
 	{
@@ -32,6 +37,24 @@ namespace
 		}
 		return pos;
 	}
+
+	glm::vec3 SpawnLargeGroundedPosInFront(Corona* host, float dist, float targetExtent)
+	{
+		glm::vec3 pos = SpawnPosInFront(host, dist, /*snapToTerrain*/ true);
+		pos.y += targetExtent * 0.5f;
+		return pos;
+	}
+
+	glm::vec3 CameraFacingRotationDegrees(Corona* host)
+	{
+		glm::vec3 look = host->GetCameraLookDirForConsole();
+		if (!std::isfinite(look.x) || !std::isfinite(look.y) || !std::isfinite(look.z) || glm::length(look) < 0.0001f)
+			look = glm::vec3(0.0f, 0.0f, 1.0f);
+		look = glm::normalize(look);
+		const float yaw = glm::degrees(std::atan2(look.x, look.z));
+		const float pitch = glm::degrees(std::asin(std::clamp(look.y, -1.0f, 1.0f)));
+		return glm::vec3(-pitch, yaw, 0.0f);
+	}
 }
 
 CoronaToolbox::CoronaToolbox(Corona* host) : Host(host) {}
@@ -44,7 +67,7 @@ void CoronaToolbox::RenderImGui()
 		return;
 
 	const ImGuiViewport* vp = ImGui::GetMainViewport();
-	const ImVec2 size(260.0f, 220.0f);
+	const ImVec2 size(280.0f, 350.0f);
 	const float topOffset = Host && Host->IsEditorStartupMode() ? 180.0f : 40.0f;
 	ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x + vp->WorkSize.x - size.x - 8.0f, vp->WorkPos.y + topOffset),
 		ImGuiCond_FirstUseEver);
@@ -61,6 +84,12 @@ void CoronaToolbox::RenderImGui()
 		if (ImGui::Button("Box",               ImVec2(-1, 0))) SpawnBox();
 		if (ImGui::Button("Sphere",            ImVec2(-1, 0))) SpawnSphere();
 		if (ImGui::Button("Grass (procedural)",ImVec2(-1, 0))) SpawnGrass();
+		ImGui::Separator();
+		ImGui::TextDisabled("glass test meshes");
+		if (ImGui::Button("Glass Cube",        ImVec2(-1, 0))) SpawnGlassCube();
+		if (ImGui::Button("Glass Sphere",      ImVec2(-1, 0))) SpawnGlassSphere();
+		if (ImGui::Button("Glass Plane",       ImVec2(-1, 0))) SpawnGlassPlane();
+		if (ImGui::Button("Glass Diamond",     ImVec2(-1, 0))) SpawnGlassDiamond();
 	}
 	ImGui::End();
 }
@@ -126,10 +155,10 @@ void CoronaToolbox::SpawnBox()
 	if (sh == Corona::InvalidScriptSceneHandle)
 		return;
 	const CoronaECS::Entity e = Host->CreateEntity(name);
-	const glm::vec3 pos = SpawnPosInFront(Host, 3.5f, /*snap*/ true);
+	const glm::vec3 pos = SpawnLargeGroundedPosInFront(Host, kToolboxOpaqueSpawnDistance, kToolboxPrimitiveScale);
 	Host->AddMeshComponentForScript(
 		e, sh, pos, glm::vec3(0.0f),
-		/*targetExtent*/ 1.0f, glm::vec3(1.0f), /*useScale*/ false,
+		/*targetExtent*/ kToolboxPrimitiveScale, glm::vec3(1.0f), /*useScale*/ false,
 		/*roughness*/ 0.6f, /*metallic*/ 0.0f, /*overrideRM*/ true,
 		/*visible*/ true, /*rayTracing*/ true, /*physicsQuery*/ true);
 }
@@ -144,10 +173,10 @@ void CoronaToolbox::SpawnSphere()
 	if (sh == Corona::InvalidScriptSceneHandle)
 		return;
 	const CoronaECS::Entity e = Host->CreateEntity(name);
-	const glm::vec3 pos = SpawnPosInFront(Host, 3.5f, /*snap*/ true);
+	const glm::vec3 pos = SpawnLargeGroundedPosInFront(Host, kToolboxOpaqueSpawnDistance, kToolboxPrimitiveScale);
 	Host->AddMeshComponentForScript(
 		e, sh, pos, glm::vec3(0.0f),
-		/*targetExtent*/ 1.0f, glm::vec3(1.0f), /*useScale*/ false,
+		/*targetExtent*/ kToolboxPrimitiveScale, glm::vec3(1.0f), /*useScale*/ false,
 		/*roughness*/ 0.4f, /*metallic*/ 0.0f, /*overrideRM*/ true,
 		/*visible*/ true, /*rayTracing*/ true, /*physicsQuery*/ true);
 }
@@ -177,6 +206,114 @@ void CoronaToolbox::SpawnGrass()
 		/*targetExtent*/ 1.0f, glm::vec3(1.0f, 1.0f, 1.0f), /*useScale*/ true,
 		/*roughness*/ 0.85f, /*metallic*/ 0.0f, /*overrideRM*/ true,
 		/*visible*/ true, /*rayTracing*/ false, /*physicsQuery*/ false);
+}
+
+void CoronaToolbox::SpawnGlassMesh(
+	const char* namePrefix,
+	uint32_t sceneHandle,
+	const glm::vec3& position,
+	const glm::vec3& rotationDegrees,
+	float targetExtent,
+	const glm::vec3& scale,
+	bool bUseScale,
+	float roughness)
+{
+	if (sceneHandle == Corona::InvalidScriptSceneHandle)
+		return;
+
+	const std::string name = NextName(namePrefix, NextSpawnId);
+	const CoronaECS::Entity e = Host->CreateEntity(name);
+	Host->AddMeshComponentForScript(
+		e,
+		sceneHandle,
+		position,
+		rotationDegrees,
+		targetExtent,
+		scale,
+		bUseScale,
+		roughness,
+		/*metallic*/ 0.0f,
+		/*overrideRM*/ true,
+		/*visible*/ true,
+		/*rayTracing*/ true,
+		/*physicsQuery*/ true);
+}
+
+void CoronaToolbox::SpawnGlassCube()
+{
+	const Corona::ScriptSceneHandle sh = Host->CreateProceduralBoxSceneForScript(
+		glm::vec3(0.38f, 0.92f, 1.0f),
+		/*bUseBrickTexture*/ false,
+		/*uvRepeat*/ 1.0f,
+		/*textureKind*/ L"flat",
+		/*uvRepeatY*/ 0.0f,
+		/*bFrontOnly*/ false,
+		/*alpha*/ 0.34f);
+	SpawnGlassMesh(
+		"Glass_Cube",
+		sh,
+		SpawnPosInFront(Host, kToolboxGlassSpawnDistance, /*snap*/ false),
+		glm::vec3(0.0f, 25.0f, 0.0f),
+		/*targetExtent*/ 1.45f * kToolboxPrimitiveScale,
+		glm::vec3(1.0f),
+		/*useScale*/ false,
+		/*roughness*/ 0.08f);
+}
+
+void CoronaToolbox::SpawnGlassSphere()
+{
+	const Corona::ScriptSceneHandle sh = Host->CreateProceduralSphereSceneForScript(
+		/*radius*/ 1.0f,
+		/*rings*/ 32,
+		/*segments*/ 48,
+		glm::vec3(0.78f, 0.62f, 1.0f),
+		/*alpha*/ 0.36f);
+	SpawnGlassMesh(
+		"Glass_Sphere",
+		sh,
+		SpawnPosInFront(Host, kToolboxGlassSpawnDistance, /*snap*/ false),
+		glm::vec3(0.0f),
+		/*targetExtent*/ 1.55f * kToolboxPrimitiveScale,
+		glm::vec3(1.0f),
+		/*useScale*/ false,
+		/*roughness*/ 0.06f);
+}
+
+void CoronaToolbox::SpawnGlassPlane()
+{
+	const Corona::ScriptSceneHandle sh = Host->CreateProceduralBoxSceneForScript(
+		glm::vec3(0.68f, 1.0f, 0.76f),
+		/*bUseBrickTexture*/ false,
+		/*uvRepeat*/ 1.0f,
+		/*textureKind*/ L"flat",
+		/*uvRepeatY*/ 0.0f,
+		/*bFrontOnly*/ true,
+		/*alpha*/ 0.28f);
+	SpawnGlassMesh(
+		"Glass_Plane",
+		sh,
+		SpawnPosInFront(Host, kToolboxGlassSpawnDistance, /*snap*/ false),
+		CameraFacingRotationDegrees(Host),
+		/*targetExtent*/ 1.0f,
+		glm::vec3(2.8f, 1.6f, 1.0f) * kToolboxPrimitiveScale,
+		/*useScale*/ true,
+		/*roughness*/ 0.12f);
+}
+
+void CoronaToolbox::SpawnGlassDiamond()
+{
+	const Corona::ScriptSceneHandle sh = Host->CreateProceduralDiamondSceneForScript(
+		glm::vec3(0.74f, 0.94f, 1.0f),
+		/*alpha*/ 0.42f);
+	SpawnGlassMesh(
+		"Glass_Diamond",
+		sh,
+		SpawnPosInFront(Host, kToolboxGlassSpawnDistance, /*snap*/ false),
+		glm::vec3(0.0f, 45.0f, 0.0f),
+		/*targetExtent*/ 1.65f * kToolboxPrimitiveScale,
+		glm::vec3(1.0f),
+		/*useScale*/ false,
+		/*roughness*/ 0.04f);
 }
 
 void CoronaToolbox::DrawBottomToggleButton()

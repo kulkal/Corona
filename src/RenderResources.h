@@ -175,6 +175,7 @@ class Material
 {
 public:
 	bool bHasAlpha = false;
+	bool bAlphaBlend = false;
 	glm::vec4 BaseColorFactor = glm::vec4(1.0f);
 
 	std::shared_ptr<Texture> Diffuse;
@@ -265,6 +266,7 @@ public:
 	};
 
 	bool bTransparent = false;
+	bool bAlphaBlend = false;
 	glm::mat4x4 transform = glm::mat4x4(1.0f);
 	uint32_t NumIndices = 0;
 	uint32_t NumVertices = 0;

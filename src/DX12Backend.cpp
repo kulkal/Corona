@@ -603,6 +603,7 @@ namespace
 		Texture* TextureValue = nullptr;
 		Buffer* BufferValue = nullptr;
 		VertexBuffer* VertexBufferValue = nullptr;
+		std::shared_ptr<RTAS> AccelerationStructureValue;
 		Sampler* SamplerValue = nullptr;
 		std::vector<uint8_t> ConstantData;
 	};
@@ -3983,6 +3984,19 @@ static bool RequiresDX12VertexBindlessBufferShaderModel66(const GraphicsPipeline
 			continue;
 		}
 		if (binding.RuntimeArray || binding.DescriptorCount == RHI_BINDLESS_ARRAY)
+			return true;
+	}
+	return false;
+}
+
+static bool RequiresDX12PixelInlineRayQueryShaderModel65(const GraphicsPipelineDesc& desc)
+{
+	const RHIShaderStageMask pixelStage = ToRHIShaderStageMask(RHIShaderStage::Pixel);
+	for (const RHIBindingDesc& binding : desc.PipelineLayout.Bindings)
+	{
+		if ((binding.Stages & pixelStage) == 0)
+			continue;
+		if (binding.DescriptorKind == RHIDescriptorKind::AccelerationStructure)
 			return true;
 	}
 	return false;
@@ -8383,6 +8397,8 @@ std::shared_ptr<GraphicsPipelineHandle> DX12Backend::CreateGraphicsPipeline(cons
 	const std::string vertexShaderTarget =
 		bRequiresDrawParametersSM68 ? "vs_6_8" :
 		(bRequiresVertexBindlessBufferSM66 ? "vs_6_6" : "vs_6_0");
+	const bool bRequiresPixelInlineRayQuerySM65 = RequiresDX12PixelInlineRayQueryShaderModel65(desc);
+	const std::string pixelShaderTarget = bRequiresPixelInlineRayQuerySM65 ? "ps_6_5" : "ps_6_0";
 	if (bRequiresVertexBindlessBufferSM66)
 	{
 		AppendCpuRuntimeTrace(
@@ -8390,9 +8406,16 @@ std::shared_ptr<GraphicsPipelineHandle> DX12Backend::CreateGraphicsPipeline(cons
 			L" for vertex bindless pipeline shader=\"" + desc.ShaderPath +
 			L"\", entry=\"" + ToWide(desc.VertexEntryPoint) + L"\"");
 	}
+	if (bRequiresPixelInlineRayQuerySM65)
+	{
+		AppendCpuRuntimeTrace(
+			L"[DX12GraphicsPipeline] using ps_6_5 for inline ray query shader=\"" +
+			desc.ShaderPath +
+			L"\", entry=\"" + ToWide(desc.PixelEntryPoint) + L"\"");
+	}
 
 	ShaderBytecode vs = CreateShader(desc.ShaderPath, desc.VertexEntryPoint, vertexShaderTarget);
-	ShaderBytecode ps = CreateShader(desc.ShaderPath, desc.PixelEntryPoint, "ps_6_0");
+	ShaderBytecode ps = CreateShader(desc.ShaderPath, desc.PixelEntryPoint, pixelShaderTarget);
 	if (!vs.IsValid() || !ps.IsValid())
 		return nullptr;
 
@@ -8432,26 +8455,47 @@ std::shared_ptr<GraphicsPipelineHandle> DX12Backend::CreateGraphicsPipeline(cons
 		// Only RT 0 blends; remaining RTs keep write-mask = 0 so additive/
 		// alpha particle PSOs that share the multi-RT GBuffer pass don't
 		// touch Normal/Velocity/Roughness.
-		auto& rt0 = psoDesc.BlendState.RenderTarget[0];
-		rt0.BlendEnable = TRUE;
-		rt0.LogicOpEnable = FALSE;
-		rt0.SrcBlendAlpha = D3D12_BLEND_ONE;
-		rt0.DestBlendAlpha = D3D12_BLEND_ZERO;
-		rt0.BlendOpAlpha = D3D12_BLEND_OP_ADD;
-		rt0.BlendOp = D3D12_BLEND_OP_ADD;
-		rt0.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
-		if (desc.BlendMode == EBlendMode::Additive)
+		auto configureBlendTarget = [&](D3D12_RENDER_TARGET_BLEND_DESC& rt)
 		{
-			rt0.SrcBlend = D3D12_BLEND_SRC_ALPHA;
-			rt0.DestBlend = D3D12_BLEND_ONE;
-		}
-		else // AlphaBlend
-		{
-			rt0.SrcBlend = D3D12_BLEND_SRC_ALPHA;
-			rt0.DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
-		}
+			rt.BlendEnable = TRUE;
+			rt.LogicOpEnable = FALSE;
+			rt.BlendOp = D3D12_BLEND_OP_ADD;
+			rt.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+			if (desc.BlendMode == EBlendMode::Additive)
+			{
+				rt.SrcBlend = D3D12_BLEND_SRC_ALPHA;
+				rt.DestBlend = D3D12_BLEND_ONE;
+				rt.SrcBlendAlpha = D3D12_BLEND_ONE;
+				rt.DestBlendAlpha = D3D12_BLEND_ZERO;
+				rt.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+			}
+			else if (desc.BlendMode == EBlendMode::AdditiveAlpha)
+			{
+				rt.SrcBlend = D3D12_BLEND_SRC_ALPHA;
+				rt.DestBlend = D3D12_BLEND_ONE;
+				rt.SrcBlendAlpha = D3D12_BLEND_ONE;
+				rt.DestBlendAlpha = D3D12_BLEND_ONE;
+				rt.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+			}
+			else // AlphaBlend / AlphaBlendAll
+			{
+				rt.SrcBlend = D3D12_BLEND_SRC_ALPHA;
+				rt.DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
+				rt.SrcBlendAlpha = D3D12_BLEND_ONE;
+				rt.DestBlendAlpha = D3D12_BLEND_ZERO;
+				rt.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+			}
+		};
+
+		configureBlendTarget(psoDesc.BlendState.RenderTarget[0]);
+		const bool bBlendAllTargets = desc.BlendMode == EBlendMode::AlphaBlendAll;
 		for (UINT i = 1; i < D3D12_SIMULTANEOUS_RENDER_TARGET_COUNT; ++i)
-			psoDesc.BlendState.RenderTarget[i].RenderTargetWriteMask = 0;
+		{
+			if (bBlendAllTargets && i < desc.ColorFormats.size())
+				configureBlendTarget(psoDesc.BlendState.RenderTarget[i]);
+			else
+				psoDesc.BlendState.RenderTarget[i].RenderTargetWriteMask = 0;
+		}
 	}
 	psoDesc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
 	psoDesc.DepthStencilState.DepthEnable = desc.bDepthEnable ? TRUE : FALSE;
@@ -8568,6 +8612,7 @@ std::shared_ptr<GraphicsBindGroupHandle> DX12Backend::CreateGraphicsBindGroup(co
 		dst.TextureValue = src.TextureValue;
 		dst.BufferValue = src.BufferValue;
 		dst.VertexBufferValue = src.VertexBufferValue;
+		dst.AccelerationStructureValue = src.AccelerationStructureValue;
 		dst.SamplerValue = src.SamplerValue;
 		if (src.Type == EGraphicsBindGroupEntryType::ConstantData && src.ConstantData && src.ConstantDataSize > 0)
 		{
@@ -8623,6 +8668,13 @@ void DX12Backend::BindGraphicsBindGroup(GraphicsPipelineHandle* pipeline, uint32
 			if (entry.VertexBufferValue)
 				dxPipeline->PSO->SetSRV(entry.BindingName, entry.VertexBufferValue->GpuHandleSRV);
 			break;
+		case EGraphicsBindGroupEntryType::AccelerationStructureSRV:
+		{
+			D3D12RTAS* dx12RTAS = dynamic_cast<D3D12RTAS*>(entry.AccelerationStructureValue.get());
+			if (dx12RTAS)
+				dxPipeline->PSO->SetSRV(entry.BindingName, dx12RTAS->GPUHandle);
+			break;
+		}
 		case EGraphicsBindGroupEntryType::Sampler:
 			if (entry.SamplerValue)
 				dxPipeline->PSO->SetSampler(entry.BindingName, entry.SamplerValue);

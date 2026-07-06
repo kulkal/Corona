@@ -48,6 +48,18 @@ namespace
 	void PushVec3Field(lua_State* L, const char* name, const glm::vec3& value);
 	void LuauScriptProfileInterrupt(lua_State* L, int gcState);
 
+	bool SceneHasScriptAlphaBlendMesh(const std::shared_ptr<Scene>& scene)
+	{
+		if (!scene)
+			return false;
+		for (const std::shared_ptr<Mesh>& mesh : scene->meshes)
+		{
+			if (mesh && mesh->bAlphaBlend)
+				return true;
+		}
+		return false;
+	}
+
 	std::wstring Utf8ToWideLocal(const std::string& value)
 	{
 		if (value.empty())
@@ -530,6 +542,14 @@ private:
 	{
 		lua_getfield(L, tableIndex, name);
 		const bool ok = ReadVec3At(L, -1, value);
+		lua_pop(L, 1);
+		return ok;
+	}
+
+	bool ReadColorField(lua_State* L, int tableIndex, const char* name, glm::vec4& value)
+	{
+		lua_getfield(L, tableIndex, name);
+		const bool ok = ReadVec4At(L, -1, value);
 		lua_pop(L, 1);
 		return ok;
 	}
@@ -1083,7 +1103,7 @@ private:
 			return 0;
 		}
 
-		glm::vec3 color(0.72f, 0.72f, 0.72f);
+		glm::vec4 color(0.72f, 0.72f, 0.72f, 1.0f);
 		bool brickTexture = false;
 		float uvRepeat = 1.0f;
 		float uvRepeatY = -1.0f;
@@ -1092,11 +1112,19 @@ private:
 		if (lua_istable(L, 1))
 		{
 			const int tableIndex = lua_absindex(L, 1);
-			if (!ReadVec3Field(L, tableIndex, "color", color))
+			if (!ReadColorField(L, tableIndex, "color", color))
 			{
-				if (!ReadVec3Field(L, tableIndex, "base_color", color))
-					ReadVec3Field(L, tableIndex, "baseColor", color);
+				if (!ReadColorField(L, tableIndex, "base_color", color))
+					ReadColorField(L, tableIndex, "baseColor", color);
 			}
+			if (!ReadNumberField(L, tableIndex, "alpha", color.w))
+			{
+				if (!ReadNumberField(L, tableIndex, "opacity", color.w))
+					ReadNumberField(L, tableIndex, "transparency_alpha", color.w);
+			}
+			if (color.w > 1.0f)
+				color.w *= 1.0f / 255.0f;
+			color.w = std::clamp(color.w, 0.0f, 1.0f);
 			if (!ReadBoolField(L, tableIndex, "brick_texture", brickTexture))
 				ReadBoolField(L, tableIndex, "brickTexture", brickTexture);
 			if (!ReadNumberField(L, tableIndex, "uv_repeat", uvRepeat))
@@ -1134,7 +1162,14 @@ private:
 				{ "texture_kind", "textureKind", "texture", "terrain_texture", "terrainTexture", "material_kind", "materialKind" }));
 		}
 
-		const Corona::ScriptSceneHandle handle = host->CreateProceduralBoxSceneForScript(color, brickTexture, uvRepeat, Utf8ToWideLocal(textureKind), uvRepeatY, frontOnly);
+		const Corona::ScriptSceneHandle handle = host->CreateProceduralBoxSceneForScript(
+			glm::vec3(color.x, color.y, color.z),
+			brickTexture,
+			uvRepeat,
+			Utf8ToWideLocal(textureKind),
+			uvRepeatY,
+			frontOnly,
+			color.w);
 		if (handle == Corona::InvalidScriptSceneHandle)
 		{
 			luaL_error(L, "failed to create procedural box scene");
@@ -1741,17 +1776,25 @@ private:
 			const std::string primitive = NormalizeKeyName(ReadFirstStringField(L, tableIndex, { "primitive", "type" }).c_str());
 			if (primitive == "BOX" || primitive == "CUBE" || primitive == "PLANE" || primitive == "QUAD")
 			{
-				glm::vec3 color(0.72f, 0.72f, 0.72f);
+				glm::vec4 color(0.72f, 0.72f, 0.72f, 1.0f);
 				bool brickTexture = false;
 				float uvRepeat = 1.0f;
 				float uvRepeatY = -1.0f;
 				bool frontOnly = primitive == "PLANE" || primitive == "QUAD";
 				std::string textureKind;
-				if (!ReadVec3Field(L, tableIndex, "color", color))
+				if (!ReadColorField(L, tableIndex, "color", color))
 				{
-					if (!ReadVec3Field(L, tableIndex, "base_color", color))
-						ReadVec3Field(L, tableIndex, "baseColor", color);
+					if (!ReadColorField(L, tableIndex, "base_color", color))
+						ReadColorField(L, tableIndex, "baseColor", color);
 				}
+				if (!ReadNumberField(L, tableIndex, "alpha", color.w))
+				{
+					if (!ReadNumberField(L, tableIndex, "opacity", color.w))
+						ReadNumberField(L, tableIndex, "transparency_alpha", color.w);
+				}
+				if (color.w > 1.0f)
+					color.w *= 1.0f / 255.0f;
+				color.w = std::clamp(color.w, 0.0f, 1.0f);
 				if (!ReadBoolField(L, tableIndex, "brick_texture", brickTexture))
 					ReadBoolField(L, tableIndex, "brickTexture", brickTexture);
 				if (!ReadNumberField(L, tableIndex, "uv_repeat", uvRepeat))
@@ -1787,7 +1830,68 @@ private:
 					L,
 					tableIndex,
 					{ "texture_kind", "textureKind", "texture", "terrain_texture", "terrainTexture", "material_kind", "materialKind" }));
-				sceneHandle = host->CreateProceduralBoxSceneForScript(color, brickTexture, uvRepeat, Utf8ToWideLocal(textureKind), uvRepeatY, frontOnly);
+				sceneHandle = host->CreateProceduralBoxSceneForScript(
+					glm::vec3(color.x, color.y, color.z),
+					brickTexture,
+					uvRepeat,
+					Utf8ToWideLocal(textureKind),
+					uvRepeatY,
+					frontOnly,
+					color.w);
+			}
+			else if (primitive == "DIAMOND" || primitive == "OCTAHEDRON")
+			{
+				glm::vec4 color(0.8f, 0.95f, 1.0f, 1.0f);
+				if (!ReadColorField(L, tableIndex, "color", color))
+				{
+					if (!ReadColorField(L, tableIndex, "base_color", color))
+						ReadColorField(L, tableIndex, "baseColor", color);
+				}
+				if (!ReadNumberField(L, tableIndex, "alpha", color.w))
+				{
+					if (!ReadNumberField(L, tableIndex, "opacity", color.w))
+						ReadNumberField(L, tableIndex, "transparency_alpha", color.w);
+				}
+				if (color.w > 1.0f)
+					color.w *= 1.0f / 255.0f;
+				color.w = std::clamp(color.w, 0.0f, 1.0f);
+				sceneHandle = host->CreateProceduralDiamondSceneForScript(
+					glm::vec3(color.x, color.y, color.z),
+					color.w);
+			}
+			else if (primitive == "SPHERE" || primitive == "UVSPHERE")
+			{
+				glm::vec4 color(0.7f, 0.7f, 0.75f, 1.0f);
+				float radius = 0.5f;
+				float ringsF = 20.0f;
+				float segmentsF = 32.0f;
+				if (!ReadColorField(L, tableIndex, "color", color))
+				{
+					if (!ReadColorField(L, tableIndex, "base_color", color))
+						ReadColorField(L, tableIndex, "baseColor", color);
+				}
+				if (!ReadNumberField(L, tableIndex, "alpha", color.w))
+				{
+					if (!ReadNumberField(L, tableIndex, "opacity", color.w))
+						ReadNumberField(L, tableIndex, "transparency_alpha", color.w);
+				}
+				if (color.w > 1.0f)
+					color.w *= 1.0f / 255.0f;
+				color.w = std::clamp(color.w, 0.0f, 1.0f);
+				ReadNumberField(L, tableIndex, "radius", radius);
+				if (!ReadNumberField(L, tableIndex, "rings", ringsF))
+					ReadNumberField(L, tableIndex, "latitude_segments", ringsF);
+				if (!ReadNumberField(L, tableIndex, "segments", segmentsF))
+				{
+					if (!ReadNumberField(L, tableIndex, "longitude_segments", segmentsF))
+						ReadNumberField(L, tableIndex, "slices", segmentsF);
+				}
+				sceneHandle = host->CreateProceduralSphereSceneForScript(
+					radius,
+					static_cast<uint32_t>(std::max(4.0f, std::round(ringsF))),
+					static_cast<uint32_t>(std::max(6.0f, std::round(segmentsF))),
+					glm::vec3(color.x, color.y, color.z),
+					color.w);
 			}
 			else if (primitive == "BLOCKCHARACTER" || primitive == "CHARACTER")
 			{
@@ -4459,11 +4563,12 @@ Corona::ScriptSceneHandle Corona::CreateProceduralBlockCharacterSceneForScript(U
 	return handle;
 }
 
-Corona::ScriptSceneHandle Corona::CreateProceduralBoxSceneForScript(const glm::vec3& baseColor, bool bUseBrickTexture, float uvRepeat, const std::wstring& textureKind, float uvRepeatY, bool bFrontOnly)
+Corona::ScriptSceneHandle Corona::CreateProceduralBoxSceneForScript(const glm::vec3& baseColor, bool bUseBrickTexture, float uvRepeat, const std::wstring& textureKind, float uvRepeatY, bool bFrontOnly, float alpha)
 {
 	if (!renderBackend)
 		return InvalidScriptSceneHandle;
 
+	const float safeAlpha = std::clamp(std::isfinite(alpha) ? alpha : 1.0f, 0.0f, 1.0f);
 	const std::string normalizedTextureKindUtf8 = NormalizeProceduralBoxTextureKindForScript(WideToUtf8Local(textureKind));
 	const std::wstring normalizedTextureKind = Utf8ToWideLocal(normalizedTextureKindUtf8);
 	const std::wstring textureKey = normalizedTextureKind.empty()
@@ -4475,6 +4580,7 @@ Corona::ScriptSceneHandle Corona::CreateProceduralBoxSceneForScript(const glm::v
 		glm::ivec3(255));
 	const int quantizedUvRepeatX = std::clamp(static_cast<int>(std::round(std::clamp(uvRepeat, 1.0f, 64.0f) * 100.0f)), 100, 6400);
 	const int quantizedUvRepeatY = std::clamp(static_cast<int>(std::round(std::clamp(uvRepeatY > 0.0f ? uvRepeatY : uvRepeat, 1.0f, 64.0f) * 100.0f)), 100, 6400);
+	const int quantizedAlpha = std::clamp(static_cast<int>(std::round(safeAlpha * 255.0f)), 0, 255);
 	const std::wstring key =
 		L"procedural://box/" +
 		std::to_wstring(quantizedColor.x) + L"/" +
@@ -4484,6 +4590,39 @@ Corona::ScriptSceneHandle Corona::CreateProceduralBoxSceneForScript(const glm::v
 		textureKey + L"/" +
 		std::to_wstring(quantizedUvRepeatX) + L"/" +
 		std::to_wstring(quantizedUvRepeatY);
+	if (quantizedAlpha < 255)
+	{
+		const std::wstring alphaKey = key + L"/alpha/" + std::to_wstring(quantizedAlpha);
+		const auto cachedAlphaIt = ScriptSceneByPath.find(alphaKey);
+		if (cachedAlphaIt != ScriptSceneByPath.end())
+			return cachedAlphaIt->second;
+
+		const glm::vec3 runtimeColor(
+			static_cast<float>(quantizedColor.x) / 255.0f,
+			static_cast<float>(quantizedColor.y) / 255.0f,
+			static_cast<float>(quantizedColor.z) / 255.0f);
+		shared_ptr<Scene> scene = CreateProceduralBoxScene(
+			runtimeColor,
+			bUseBrickTexture,
+			uvRepeat,
+			textureKey,
+			uvRepeatY,
+			bFrontOnly,
+			safeAlpha);
+		if (!scene)
+			return InvalidScriptSceneHandle;
+
+		ScriptSceneHandle handle = NextScriptSceneHandle++;
+		if (handle == InvalidScriptSceneHandle)
+			handle = NextScriptSceneHandle++;
+
+		ScriptScenes[handle] = { scene, alphaKey, EPhysicsCollisionShape::Box, glm::vec3(0.5f) };
+		ScriptSceneByPath[alphaKey] = handle;
+		AppendCpuRuntimeTrace(
+			L"[Luau][MeshComponent] procedural_alpha_box handle=" + std::to_wstring(handle) +
+			L" alpha=" + std::to_wstring(safeAlpha));
+		return handle;
+	}
 	// Bake the box to assets/generated/ on first creation so map save can
 	// store a real Asset path. Filename encodes the params; texture-key
 	// flavours and front-only variants get distinct files. MTL alongside
@@ -4605,6 +4744,47 @@ Corona::ScriptSceneHandle Corona::CreateProceduralBoxSceneForScript(const glm::v
 	return LoadSceneForScript(generatedRel);
 }
 
+Corona::ScriptSceneHandle Corona::CreateProceduralDiamondSceneForScript(const glm::vec3& baseColor, float alpha)
+{
+	if (!renderBackend)
+		return InvalidScriptSceneHandle;
+
+	const float safeAlpha = std::clamp(std::isfinite(alpha) ? alpha : 1.0f, 0.0f, 1.0f);
+	const glm::ivec3 quantizedColor = glm::clamp(
+		glm::ivec3(glm::round(glm::clamp(baseColor, glm::vec3(0.0f), glm::vec3(1.0f)) * 255.0f)),
+		glm::ivec3(0),
+		glm::ivec3(255));
+	const int quantizedAlpha = std::clamp(static_cast<int>(std::round(safeAlpha * 255.0f)), 0, 255);
+	const std::wstring key =
+		L"procedural://diamond/" +
+		std::to_wstring(quantizedColor.x) + L"/" +
+		std::to_wstring(quantizedColor.y) + L"/" +
+		std::to_wstring(quantizedColor.z) + L"/alpha/" +
+		std::to_wstring(quantizedAlpha);
+	const auto cachedIt = ScriptSceneByPath.find(key);
+	if (cachedIt != ScriptSceneByPath.end())
+		return cachedIt->second;
+
+	const glm::vec3 runtimeColor(
+		static_cast<float>(quantizedColor.x) / 255.0f,
+		static_cast<float>(quantizedColor.y) / 255.0f,
+		static_cast<float>(quantizedColor.z) / 255.0f);
+	shared_ptr<Scene> scene = CreateProceduralDiamondScene(runtimeColor, safeAlpha);
+	if (!scene)
+		return InvalidScriptSceneHandle;
+
+	ScriptSceneHandle handle = NextScriptSceneHandle++;
+	if (handle == InvalidScriptSceneHandle)
+		handle = NextScriptSceneHandle++;
+
+	ScriptScenes[handle] = { scene, key, EPhysicsCollisionShape::Box, glm::vec3(0.58f, 0.78f, 0.58f) };
+	ScriptSceneByPath[key] = handle;
+	AppendCpuRuntimeTrace(
+		L"[Luau][MeshComponent] procedural_alpha_diamond handle=" + std::to_wstring(handle) +
+		L" alpha=" + std::to_wstring(safeAlpha));
+	return handle;
+}
+
 Corona::ScriptSceneHandle Corona::CreateProceduralGrassSceneForScript(UINT32 numBlades, float areaSize, float bladeHeight, UINT32 seed, UINT32 bladeSegments)
 {
 	if (!renderBackend)
@@ -4704,12 +4884,58 @@ Corona::ScriptSceneHandle Corona::CreateProceduralGrassOnTerrainSceneForScript(U
 	return handle;
 }
 
-Corona::ScriptSceneHandle Corona::CreateProceduralSphereSceneForScript(float radius, uint32_t rings, uint32_t segments)
+Corona::ScriptSceneHandle Corona::CreateProceduralSphereSceneForScript(float radius, uint32_t rings, uint32_t segments, const glm::vec3& baseColor, float alpha)
 {
 	if (!renderBackend) return InvalidScriptSceneHandle;
 	const float r = std::clamp(radius, 0.05f, 100.0f);
 	const uint32_t R = std::clamp<uint32_t>(rings,    4u, 128u);
 	const uint32_t S = std::clamp<uint32_t>(segments, 6u, 256u);
+	const float safeAlpha = std::clamp(std::isfinite(alpha) ? alpha : 1.0f, 0.0f, 1.0f);
+	const glm::ivec3 quantizedColor = glm::clamp(
+		glm::ivec3(glm::round(glm::clamp(baseColor, glm::vec3(0.0f), glm::vec3(1.0f)) * 255.0f)),
+		glm::ivec3(0),
+		glm::ivec3(255));
+	const glm::ivec3 defaultColor(179, 179, 191);
+	const int quantizedAlpha = std::clamp(static_cast<int>(std::round(safeAlpha * 255.0f)), 0, 255);
+	const bool bRuntimeMaterial =
+		quantizedAlpha < 255 ||
+		quantizedColor.x != defaultColor.x ||
+		quantizedColor.y != defaultColor.y ||
+		quantizedColor.z != defaultColor.z;
+	if (bRuntimeMaterial)
+	{
+		const std::wstring key =
+			L"procedural://sphere/" +
+			std::to_wstring(static_cast<int>(std::round(r * 100.0f))) + L"/" +
+			std::to_wstring(R) + L"/" +
+			std::to_wstring(S) + L"/" +
+			std::to_wstring(quantizedColor.x) + L"/" +
+			std::to_wstring(quantizedColor.y) + L"/" +
+			std::to_wstring(quantizedColor.z) + L"/alpha/" +
+			std::to_wstring(quantizedAlpha);
+		const auto cachedIt = ScriptSceneByPath.find(key);
+		if (cachedIt != ScriptSceneByPath.end())
+			return cachedIt->second;
+
+		const glm::vec3 runtimeColor(
+			static_cast<float>(quantizedColor.x) / 255.0f,
+			static_cast<float>(quantizedColor.y) / 255.0f,
+			static_cast<float>(quantizedColor.z) / 255.0f);
+		shared_ptr<Scene> scene = CreateProceduralSphereScene(r, R, S, runtimeColor, safeAlpha);
+		if (!scene)
+			return InvalidScriptSceneHandle;
+
+		ScriptSceneHandle handle = NextScriptSceneHandle++;
+		if (handle == InvalidScriptSceneHandle)
+			handle = NextScriptSceneHandle++;
+
+		ScriptScenes[handle] = { scene, key, EPhysicsCollisionShape::Box, glm::vec3(r) };
+		ScriptSceneByPath[key] = handle;
+		AppendCpuRuntimeTrace(
+			L"[Luau][MeshComponent] procedural_alpha_sphere handle=" + std::to_wstring(handle) +
+			L" alpha=" + std::to_wstring(safeAlpha));
+		return handle;
+	}
 	// Bake to assets/generated/ on first creation so map save can store a
 	// real path (primitive="asset") and the loader can reconstruct the
 	// scene without any procedural-recipe special case. Subsequent calls
@@ -5050,6 +5276,9 @@ Corona::SceneObjectHandle Corona::SpawnSceneObjectForScript(
 	desc.bOverrideRoughnessMetallic = bOverrideRoughnessMetallic;
 	desc.bVisible = bVisible;
 	desc.bRayTracing = bRayTracing;
+	const bool bAlphaBlendScene = SceneHasScriptAlphaBlendMesh(desc.ScenePtr);
+	desc.bDynamicRaster = bAlphaBlendScene;
+	desc.bDynamicRayTracing = bAlphaBlendScene && bRayTracing;
 	desc.bPhysicsQuery = bPhysicsQuery;
 	desc.PhysicsCollisionShape = sceneIt->second.PhysicsCollisionShape;
 	desc.PhysicsBoxHalfExtent = sceneIt->second.PhysicsBoxHalfExtent;
@@ -5368,6 +5597,9 @@ bool Corona::AddMeshComponentForScript(
 		objectIt->bOverrideRoughnessMetallic = bOverrideRoughnessMetallic;
 		objectIt->bVisible = bVisible;
 		objectIt->bRayTracing = bRayTracing;
+		const bool bAlphaBlendScene = SceneHasScriptAlphaBlendMesh(objectIt->ScenePtr);
+		objectIt->bDynamicRaster = bAlphaBlendScene;
+		objectIt->bDynamicRayTracing = bAlphaBlendScene && bRayTracing;
 		objectIt->bPhysicsQuery = bPhysicsQuery;
 		objectIt->PhysicsCollisionShape = sceneIt->second.PhysicsCollisionShape;
 		objectIt->PhysicsBoxHalfExtent = sceneIt->second.PhysicsBoxHalfExtent;
@@ -5392,6 +5624,9 @@ bool Corona::AddMeshComponentForScript(
 	desc.bOverrideRoughnessMetallic = bOverrideRoughnessMetallic;
 	desc.bVisible = bVisible;
 	desc.bRayTracing = bRayTracing;
+	const bool bAlphaBlendScene = SceneHasScriptAlphaBlendMesh(desc.ScenePtr);
+	desc.bDynamicRaster = bAlphaBlendScene;
+	desc.bDynamicRayTracing = bAlphaBlendScene && bRayTracing;
 	desc.bPhysicsQuery = bPhysicsQuery;
 	desc.PhysicsCollisionShape = sceneIt->second.PhysicsCollisionShape;
 	desc.PhysicsBoxHalfExtent = sceneIt->second.PhysicsBoxHalfExtent;
@@ -5491,6 +5726,9 @@ bool Corona::SetEntityMeshComponentForScript(
 	if (objectIt == SceneObjects.end() || !objectIt->ScenePtr)
 		return false;
 
+	const bool bAlphaBlendScene = SceneHasScriptAlphaBlendMesh(objectIt->ScenePtr);
+	const bool bNextDynamicRaster = bAlphaBlendScene;
+	const bool bNextDynamicRayTracing = bAlphaBlendScene && bRayTracing;
 	const float safeTargetExtent = std::max(targetExtent, 0.001f);
 	const glm::vec3 safeScale = SanitizeScriptScale(scale);
 	const glm::mat4x4 nextTransform = bUseScale ?
@@ -5506,7 +5744,7 @@ bool Corona::SetEntityMeshComponentForScript(
 	}
 	if (objectIt->bVisible != bVisible)
 		dirtyBits |= kSceneObjectDirtyVisibility;
-	if (objectIt->bRayTracing != bRayTracing)
+	if (objectIt->bRayTracing != bRayTracing || objectIt->bDynamicRayTracing != bNextDynamicRayTracing)
 		dirtyBits |= kSceneObjectDirtyRayTracing;
 
 	objectIt->Transform = nextTransform;
@@ -5515,6 +5753,8 @@ bool Corona::SetEntityMeshComponentForScript(
 	objectIt->bOverrideRoughnessMetallic = bOverrideRoughnessMetallic;
 	objectIt->bVisible = bVisible;
 	objectIt->bRayTracing = bRayTracing;
+	objectIt->bDynamicRaster = bNextDynamicRaster;
+	objectIt->bDynamicRayTracing = bNextDynamicRayTracing;
 	objectIt->bPhysicsQuery = bPhysicsQuery;
 
 	if (const CoronaECS::PhysicsComponent* physicsComponent = EntityWorld.GetPhysics(entity))

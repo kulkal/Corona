@@ -4641,6 +4641,46 @@ private:
 			c.blendEnabled = false;
 			colors.push_back(c);
 		}
+		if (desc.BlendMode != EBlendMode::Opaque && !colors.empty())
+		{
+			auto configureBlendTarget = [&](nri::ColorAttachmentDesc& c)
+			{
+				c.blendEnabled = true;
+				c.colorBlend.op = nri::BlendOp::ADD;
+				c.alphaBlend.op = nri::BlendOp::ADD;
+				if (desc.BlendMode == EBlendMode::Additive)
+				{
+					c.colorBlend.srcFactor = nri::BlendFactor::SRC_ALPHA;
+					c.colorBlend.dstFactor = nri::BlendFactor::ONE;
+					c.alphaBlend.srcFactor = nri::BlendFactor::ONE;
+					c.alphaBlend.dstFactor = nri::BlendFactor::ZERO;
+				}
+				else if (desc.BlendMode == EBlendMode::AdditiveAlpha)
+				{
+					c.colorBlend.srcFactor = nri::BlendFactor::SRC_ALPHA;
+					c.colorBlend.dstFactor = nri::BlendFactor::ONE;
+					c.alphaBlend.srcFactor = nri::BlendFactor::ONE;
+					c.alphaBlend.dstFactor = nri::BlendFactor::ONE;
+				}
+				else // AlphaBlend / AlphaBlendAll
+				{
+					c.colorBlend.srcFactor = nri::BlendFactor::SRC_ALPHA;
+					c.colorBlend.dstFactor = nri::BlendFactor::ONE_MINUS_SRC_ALPHA;
+					c.alphaBlend.srcFactor = nri::BlendFactor::ONE;
+					c.alphaBlend.dstFactor = nri::BlendFactor::ZERO;
+				}
+			};
+
+			configureBlendTarget(colors[0]);
+			const bool bBlendAllTargets = desc.BlendMode == EBlendMode::AlphaBlendAll;
+			for (size_t i = 1; i < colors.size(); ++i)
+			{
+				if (bBlendAllTargets)
+					configureBlendTarget(colors[i]);
+				else
+					colors[i].colorWriteMask = nri::ColorWriteBits::NONE;
+			}
+		}
 		nri::OutputMergerDesc om = {}; om.colors = colors.empty() ? nullptr : colors.data(); om.colorNum = (uint32_t)colors.size();
 		auto mapDepthCompareOp = [](EDepthCompareOp op) -> nri::CompareOp
 		{

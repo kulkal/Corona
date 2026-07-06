@@ -128,6 +128,13 @@ public:
 		BLOOM,
 		SPEC_HISTORY_LENGTH,
 		RTAO,
+		TRANSLUCENT_REFRACTION_UV,
+		TRANSLUCENT_GUIDE_DEPTH,
+		TRANSLUCENT_GUIDE_VELOCITY,
+		TRANSLUCENT_GUIDE_NORMAL,
+		TRANSLUCENT_GUIDE_ROUGHNESS,
+		TRANSLUCENT_GUIDE_ALBEDO,
+		TRANSLUCENT_GUIDE_SPECULAR_ALBEDO,
 		NO_FULLSCREEN,
 	};
 
@@ -291,6 +298,11 @@ private:
 	UINT ResolvedColorBufferIndex = 0;
 	shared_ptr<Texture> ColorBuffers[2];
 	shared_ptr<Texture> LightingBuffer;
+	shared_ptr<Texture> TranslucentBackgroundBuffer;
+	shared_ptr<Texture> TranslucentDistortionBuffer;
+	shared_ptr<Texture> TranslucentGuideRasterDepthBuffer;
+	shared_ptr<Texture> TranslucentCompositeGuideHistoryBuffer;
+	shared_ptr<Texture> TranslucentSurfaceBuffer;
 	shared_ptr<Texture> DirectLightingBuffer;
 	shared_ptr<Texture> DLSSRRBuffer;
 	shared_ptr<Texture> AlbedoBuffer;
@@ -299,6 +311,12 @@ private:
 	shared_ptr<Texture> GeomNormalBuffers[2];
 	shared_ptr<Texture> VelocityBuffer;
 	shared_ptr<Texture> RoughnessMetalicBuffer;
+	shared_ptr<Texture> TranslucentGuideDepthBuffer;
+	shared_ptr<Texture> TranslucentGuideVelocityBuffer;
+	shared_ptr<Texture> TranslucentGuideNormalBuffer;
+	shared_ptr<Texture> TranslucentGuideRoughnessBuffer;
+	shared_ptr<Texture> TranslucentGuideAlbedoBuffer;
+	shared_ptr<Texture> TranslucentGuideSpecularAlbedoBuffer;
 	shared_ptr<Texture> PathTracingSpecularHitDistanceBuffer;
 	shared_ptr<Texture> PathTracingSpecularMotionVectorBuffer;
 	// ReSTIR GI on specular RT path — per-pixel reservoir storage.
@@ -1280,6 +1298,43 @@ private:
 	// PSO targets the post-light LightingBuffer with EBlendMode::Additive +
 	// depth-test (no depth write). ActiveParticleSystems is populated by the
 	// startup-mode demo bootstrap and walked once per frame by ParticlePass.
+	std::shared_ptr<GraphicsPipelineHandle> TranslucentMeshGraphicsPipeline;
+	std::shared_ptr<GraphicsPipelineHandle> TranslucentPreLightingGuideGraphicsPipeline;
+	std::shared_ptr<GraphicsPipelineHandle> TranslucentSurfaceLightingGraphicsPipeline;
+	shared_ptr<ComputePipelineStateObject> TranslucentGuideWarpPSO;
+	bool bTranslucentDistortionGuideValidThisFrame = false;
+	bool bTranslucentDistortionGuideIsOffsetThisFrame = false;
+	bool bTranslucentRefractedGBufferActiveThisFrame = false;
+	struct TranslucentMeshCB
+	{
+		glm::mat4x4 WorldViewMatrix;
+		glm::mat4x4 WorldViewProjectionMatrix;
+		glm::mat4x4 WorldMatrix;
+		glm::mat4x4 ViewProjectionMatrix;
+		glm::mat4x4 NormalWorldViewMatrix;
+		glm::mat4x4 NormalWorldMatrix;
+		glm::vec4 BaseColorFactor = glm::vec4(1.0f);
+		glm::vec4 EffectParams = glm::vec4(6.0f, 28.0f, 0.92f, 2.35f);
+		glm::vec4 RenderTargetParams = glm::vec4(1.0f);
+		glm::vec4 CameraPositionAndRayParams = glm::vec4(0.0f, 0.0f, 0.0f, 0.25f);
+		glm::vec4 SurfaceDepthParams = glm::vec4(0.0f);
+		glm::uvec4 StochasticParams = glm::uvec4(0u);
+	};
+	struct TranslucentPreLightingMeshGuideCB
+	{
+		glm::mat4x4 WorldViewMatrix;
+		glm::mat4x4 WorldViewProjectionMatrix;
+		glm::mat4x4 NormalWorldViewMatrix;
+		glm::vec4 BaseColorFactor = glm::vec4(1.0f);
+		glm::vec4 RenderTargetParams = glm::vec4(1.0f);
+		glm::vec4 EffectParams = glm::vec4(0.0f);
+		glm::uvec4 StochasticParams = glm::uvec4(0u);
+	};
+	struct TranslucentGuideWarpCB
+	{
+		glm::vec4 Params = glm::vec4(0.0f);
+		glm::uvec4 Flags = glm::uvec4(0u);
+	};
 	std::shared_ptr<GraphicsPipelineHandle> ParticleGraphicsPipeline;
 	std::vector<std::shared_ptr<Particles::System>> ActiveParticleSystems;
 	struct ParticleCB
@@ -1654,6 +1709,7 @@ private:
 	bool bMobileGBufferDumpMode = false;
 	bool bAASwitchDumpMode = false;
 	bool bSpecularSequenceDumpMode = false;
+	bool bTranslucentRRDumpMode = false;
 	bool bLoggedHybridStageLimit = false;
 	bool bMobileGBufferDumpCompleted = false;
 	bool bStartupModeConfigured = false;
@@ -1706,6 +1762,7 @@ private:
 	bool bCommandLineMobileGBufferDumpMode = false;
 	bool bCommandLineAASwitchDumpMode = false;
 	bool bCommandLineSpecularSequenceDumpMode = false;
+	bool bCommandLineTranslucentRRDumpMode = false;
 	bool bCommandLineCameraPathDump = false;
 	bool bCommandLineCameraPathDiagnostics = false;
 	bool bCommandLineLoadLatestCameraPath = false;
@@ -2051,6 +2108,8 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	int ScriptProfileSampleHz = 1000;
 	bool bEnableStartupLuauScript = true;
 	bool bCommandLineDungeonCharacterMode = false;
+	bool bCommandLineTransparencyLayers = false;
+	bool bTranslucentStochasticSampling = false;
 	std::wstring StartupLuauMode = L"platformer";
 	bool bScriptCameraControlEnabled = false;
 	bool bLuauImGuiFrameActive = false;
@@ -2915,14 +2974,14 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	shared_ptr<Scene> CreateMirrorCubeScene();
 	shared_ptr<Texture> GetProceduralDungeonBrickDiffuseTexture();
 	shared_ptr<Texture> GetProceduralBoxDiffuseTexture(const std::wstring& textureKind);
-	shared_ptr<Scene> CreateProceduralBoxScene(const glm::vec3& baseColor, bool bUseBrickTexture = false, float uvRepeat = 1.0f, const std::wstring& textureKind = std::wstring(), float uvRepeatY = -1.0f, bool bFrontOnly = false);
+	shared_ptr<Scene> CreateProceduralBoxScene(const glm::vec3& baseColor, bool bUseBrickTexture = false, float uvRepeat = 1.0f, const std::wstring& textureKind = std::wstring(), float uvRepeatY = -1.0f, bool bFrontOnly = false, float alpha = 1.0f);
+	shared_ptr<Scene> CreateProceduralDiamondScene(const glm::vec3& baseColor, float alpha = 1.0f);
 	shared_ptr<Scene> CreateProceduralCylinderScene(float radius, float halfLength, uint32_t segments, const glm::vec3& baseColor);
 	shared_ptr<Scene> CreateProceduralGrassScene(UINT32 numBlades, float areaSize, float bladeHeight, UINT32 seed, UINT32 bladeSegments = 4u);
 	// Procedural UV sphere generator. `rings` = latitude steps, `segments` =
 	// longitude steps. Standard 44 B Vertex layout so it shares the default
 	// GBuffer PSO.
-	shared_ptr<Scene> CreateProceduralSphereScene(float radius, uint32_t rings = 24, uint32_t segments = 32);
-	ScriptSceneHandle CreateProceduralSphereSceneForScript(float radius, uint32_t rings = 24, uint32_t segments = 32);
+	shared_ptr<Scene> CreateProceduralSphereScene(float radius, uint32_t rings = 24, uint32_t segments = 32, const glm::vec3& baseColor = glm::vec3(0.7f, 0.7f, 0.75f), float alpha = 1.0f);
 	// Same as CreateProceduralGrassScene but each blade's base Y is sampled
 	// from the currently-active TerrainComponent so the blades sit on the
 	// terrain surface. Falls back to flat (y=0) when no terrain is active.
@@ -3080,7 +3139,9 @@ public:
 		float maxDistance,
 		CpuPhysicsRaycastHit& hit);
 	ScriptSceneHandle CreateProceduralBlockCharacterSceneForScript(UINT32 seed);
-	ScriptSceneHandle CreateProceduralBoxSceneForScript(const glm::vec3& baseColor, bool bUseBrickTexture = false, float uvRepeat = 1.0f, const std::wstring& textureKind = std::wstring(), float uvRepeatY = -1.0f, bool bFrontOnly = false);
+	ScriptSceneHandle CreateProceduralBoxSceneForScript(const glm::vec3& baseColor, bool bUseBrickTexture = false, float uvRepeat = 1.0f, const std::wstring& textureKind = std::wstring(), float uvRepeatY = -1.0f, bool bFrontOnly = false, float alpha = 1.0f);
+	ScriptSceneHandle CreateProceduralDiamondSceneForScript(const glm::vec3& baseColor = glm::vec3(0.8f, 0.95f, 1.0f), float alpha = 1.0f);
+	ScriptSceneHandle CreateProceduralSphereSceneForScript(float radius, uint32_t rings = 24, uint32_t segments = 32, const glm::vec3& baseColor = glm::vec3(0.7f, 0.7f, 0.75f), float alpha = 1.0f);
 	// Procedural grass: a single Mesh containing N upright blades laid out
 	// over a square area. Each blade is a 2-segment quad rooted at Y=0
 	// with the tip at Y=bladeHeight. Marked `bGrassMesh = true` so the
@@ -3811,6 +3872,20 @@ public:
 	void DepthHeightFogPass();
 	bool EnsureVolumetricFogResources();
 	void VolumetricFogPass();
+
+	void InitTranslucentMeshPass();
+	bool IsTranslucentPreLightingRefractedGBufferEnabled() const;
+	bool TranslucentPreLightingGuidePass();
+	void TranslucentMeshPass();
+	void TranslucentSurfaceLightingPass();
+	bool PrepareTranslucentDLSSRRGuideBuffers(
+		Texture*& depthGuide,
+		Texture*& velocityGuide,
+		Texture*& normalGuide,
+		Texture*& roughnessGuide,
+		Texture*& albedoGuide,
+		Texture*& specularAlbedoGuide,
+		bool bForce = false);
 
 	// Forward-translucent particle draw against the post-light HDR buffer.
 	// Walks ActiveParticleSystems and uploads + draws each system's quads.

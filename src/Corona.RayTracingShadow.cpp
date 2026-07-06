@@ -18,6 +18,29 @@
 #include <cstdlib>
 #include <iterator>
 
+void AppendCpuRuntimeTrace(const std::wstring& line);
+
+namespace
+{
+	bool GetEnvBool(const wchar_t* name, bool fallback)
+	{
+		const wchar_t* rawValue = _wgetenv(name);
+		if (!rawValue || !*rawValue)
+			return fallback;
+
+		std::wstring value(rawValue);
+		std::transform(value.begin(), value.end(), value.begin(), [](wchar_t ch)
+		{
+			return static_cast<wchar_t>(towlower(ch));
+		});
+		if (value == L"0" || value == L"false" || value == L"off" || value == L"no")
+			return false;
+		if (value == L"1" || value == L"true" || value == L"on" || value == L"yes")
+			return true;
+		return fallback;
+	}
+}
+
 void Corona::InitRaytracingShadowPass()
 {
 		shared_ptr<RTPipelineStateObject> TEMP_PSO_RT_SHADOW = renderBackend->CreateRTPipelineStateObject();
@@ -343,15 +366,41 @@ void Corona::RaytraceShadowPass()
 	Texture* const raygenShadowTarget = bUseSpatialReuseCompute ? ShadowBufferPreSpatial.get() : ShadowBuffer.get();
 	Texture* const raygenMTarget      = bUseSpatialReuseCompute ? ShadowReservoirMBufferPreSpatial.get() : ShadowReservoirMBuffer.get();
 
-	Texture* const depthTexture = UnjitteredDepthBuffers[ColorBufferWriteIndex].get();
-	Texture* const normalTexture = NormalBuffers[ColorBufferWriteIndex].get();
-	Texture* const geomNormalTexture = GeomNormalBuffers[ColorBufferWriteIndex].get();
-	Texture* const prevDepthTexture = UnjitteredDepthBuffers[1 - ColorBufferWriteIndex]
-		? UnjitteredDepthBuffers[1 - ColorBufferWriteIndex].get()
-		: depthTexture;
-	Texture* const prevNormalTexture = NormalBuffers[1 - ColorBufferWriteIndex]
-		? NormalBuffers[1 - ColorBufferWriteIndex].get()
-		: normalTexture;
+	const bool bUseTranslucentRefractedGBuffer =
+		bTranslucentRefractedGBufferActiveThisFrame &&
+		GetEnvBool(L"CORONA_TRANSLUCENT_PRELIGHT_SHADOW_GUIDE", true) &&
+		TranslucentGuideDepthBuffer &&
+		TranslucentGuideVelocityBuffer &&
+		TranslucentGuideNormalBuffer;
+	Texture* const depthTexture = bUseTranslucentRefractedGBuffer ?
+		TranslucentGuideDepthBuffer.get() :
+		UnjitteredDepthBuffers[ColorBufferWriteIndex].get();
+	Texture* const normalTexture = bUseTranslucentRefractedGBuffer ?
+		TranslucentGuideNormalBuffer.get() :
+		NormalBuffers[ColorBufferWriteIndex].get();
+	Texture* const geomNormalTexture = bUseTranslucentRefractedGBuffer ?
+		TranslucentGuideNormalBuffer.get() :
+		GeomNormalBuffers[ColorBufferWriteIndex].get();
+	Texture* const velocityTexture = bUseTranslucentRefractedGBuffer ?
+		TranslucentGuideVelocityBuffer.get() :
+		VelocityBuffer.get();
+	Texture* const prevDepthTexture = bUseTranslucentRefractedGBuffer ?
+		depthTexture :
+		(UnjitteredDepthBuffers[1 - ColorBufferWriteIndex]
+			? UnjitteredDepthBuffers[1 - ColorBufferWriteIndex].get()
+			: depthTexture);
+	Texture* const prevNormalTexture = bUseTranslucentRefractedGBuffer ?
+		normalTexture :
+		(NormalBuffers[1 - ColorBufferWriteIndex]
+			? NormalBuffers[1 - ColorBufferWriteIndex].get()
+			: normalTexture);
+	static uint32_t sLastShadowRefractedGBuffer = 0xFFFFFFFFu;
+	const uint32_t shadowRefractedGBuffer = bUseTranslucentRefractedGBuffer ? 1u : 0u;
+	if (sLastShadowRefractedGBuffer != shadowRefractedGBuffer)
+	{
+		sLastShadowRefractedGBuffer = shadowRefractedGBuffer;
+		AppendCpuRuntimeTrace(L"[RaytraceShadowPass] refractedGBuffer=" + std::to_wstring(shadowRefractedGBuffer));
+	}
 	Buffer* const spatialLightCellKeys = SpatialHashGIResolvedKeys[0].get();
 	Buffer* const spatialLightCellMask = SpatialHashGICellLightMask.get();
 
@@ -368,7 +417,9 @@ void Corona::RaytraceShadowPass()
 		: raygenMOutput;
 	RGTextureRef depthInput = rg.ImportTexture("Shadow.Depth", depthTexture, EResourceState::ShaderRead);
 	RGTextureRef normalInput = rg.ImportTexture("Shadow.WorldNormal", normalTexture, EResourceState::ShaderRead);
-	RGTextureRef geomNormalInput = rg.ImportTexture("Shadow.GeoNormal", geomNormalTexture, EResourceState::ShaderRead);
+	RGTextureRef geomNormalInput = geomNormalTexture == normalTexture
+		? normalInput
+		: rg.ImportTexture("Shadow.GeoNormal", geomNormalTexture, EResourceState::ShaderRead);
 	RGTextureRef blueNoiseInput = rg.ImportTexture("Shadow.BlueNoise", BlueNoiseTex.get(), EResourceState::ShaderRead);
 	RGTextureRef prevDepthInput = prevDepthTexture == depthTexture
 		? depthInput
@@ -382,8 +433,8 @@ void Corona::RaytraceShadowPass()
 	RGTextureRef shadowMPrevInput = ShadowReservoirMPrevBuffer
 		? rg.ImportTexture("Shadow.PrevReservoirM", ShadowReservoirMPrevBuffer.get(), EResourceState::ShaderRead)
 		: RGTextureRef{};
-	RGTextureRef velocityInput = VelocityBuffer
-		? rg.ImportTexture("Shadow.Velocity", VelocityBuffer.get(), EResourceState::ShaderRead)
+	RGTextureRef velocityInput = velocityTexture
+		? rg.ImportTexture("Shadow.Velocity", velocityTexture, EResourceState::ShaderRead)
 		: RGTextureRef{};
 	RGBufferRef spatialLightCellKeysInput = spatialLightCellKeys
 		? rg.ImportBuffer("Shadow.SpatialLightCellKeys", spatialLightCellKeys, EResourceState::ShaderRead)
@@ -422,8 +473,9 @@ void Corona::RaytraceShadowPass()
 				builder.ReadWriteTexture(raygenMOutput, EResourceState::UnorderedAccess);
 			builder.ReadTexture(depthInput, EResourceState::ShaderRead)
 				.ReadTexture(normalInput, EResourceState::ShaderRead)
-				.ReadTexture(geomNormalInput, EResourceState::ShaderRead)
 				.ReadTexture(blueNoiseInput, EResourceState::ShaderRead);
+			if (geomNormalInput.Index != normalInput.Index)
+				builder.ReadTexture(geomNormalInput, EResourceState::ShaderRead);
 			if (prevDepthInput.Index != depthInput.Index)
 				builder.ReadTexture(prevDepthInput, EResourceState::ShaderRead);
 			if (prevNormalInput.Index != normalInput.Index)
@@ -535,9 +587,10 @@ void Corona::RaytraceShadowPass()
 					.ReadTexture(raygenMOutput, EResourceState::ShaderRead)
 					.ReadTexture(depthInput, EResourceState::ShaderRead)
 					.ReadTexture(normalInput, EResourceState::ShaderRead)
-					.ReadTexture(geomNormalInput, EResourceState::ShaderRead)
 					.ReadWriteTexture(finalShadowOutput, EResourceState::UnorderedAccess)
 					.ReadWriteTexture(finalMOutput, EResourceState::UnorderedAccess);
+				if (geomNormalInput.Index != normalInput.Index)
+					builder.ReadTexture(geomNormalInput, EResourceState::ShaderRead);
 			},
 			[&](RGContext& ctx)
 			{

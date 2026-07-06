@@ -11098,24 +11098,45 @@ std::shared_ptr<GraphicsPipelineHandle> VulkanBackend::CreateGraphicsPipeline(co
 		// Mirror DX12: only RT 0 blends; remaining RTs masked off so a
 		// translucent PSO can coexist with the opaque GBuffer pass and not
 		// scribble into Normal/Velocity/Roughness attachments.
-		auto& rt0 = colorBlendAttachments[0];
-		rt0.blendEnable = VK_TRUE;
-		rt0.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
-		rt0.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
-		rt0.alphaBlendOp = VK_BLEND_OP_ADD;
-		rt0.colorBlendOp = VK_BLEND_OP_ADD;
-		if (desc.BlendMode == EBlendMode::Additive)
+		auto configureBlendTarget = [&](VkPipelineColorBlendAttachmentState& rt)
 		{
-			rt0.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
-			rt0.dstColorBlendFactor = VK_BLEND_FACTOR_ONE;
-		}
-		else // AlphaBlend
-		{
-			rt0.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
-			rt0.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
-		}
+			rt.blendEnable = VK_TRUE;
+			rt.colorBlendOp = VK_BLEND_OP_ADD;
+			if (desc.BlendMode == EBlendMode::Additive)
+			{
+				rt.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+				rt.dstColorBlendFactor = VK_BLEND_FACTOR_ONE;
+				rt.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+				rt.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+				rt.alphaBlendOp = VK_BLEND_OP_ADD;
+			}
+			else if (desc.BlendMode == EBlendMode::AdditiveAlpha)
+			{
+				rt.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+				rt.dstColorBlendFactor = VK_BLEND_FACTOR_ONE;
+				rt.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+				rt.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+				rt.alphaBlendOp = VK_BLEND_OP_ADD;
+			}
+			else // AlphaBlend / AlphaBlendAll
+			{
+				rt.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+				rt.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+				rt.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+				rt.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+				rt.alphaBlendOp = VK_BLEND_OP_ADD;
+			}
+		};
+
+		configureBlendTarget(colorBlendAttachments[0]);
+		const bool bBlendAllTargets = desc.BlendMode == EBlendMode::AlphaBlendAll;
 		for (uint32_t i = 1; i < colorAttachmentCount; ++i)
-			colorBlendAttachments[i].colorWriteMask = 0;
+		{
+			if (bBlendAllTargets)
+				configureBlendTarget(colorBlendAttachments[i]);
+			else
+				colorBlendAttachments[i].colorWriteMask = 0;
+		}
 	}
 
 	VkPipelineColorBlendStateCreateInfo colorBlending{};
@@ -11264,6 +11285,8 @@ std::shared_ptr<GraphicsBindGroupHandle> VulkanBackend::CreateGraphicsBindGroup(
 				handle->Buffers.push_back({ bindingIt->second, nullptr, entry.VertexBufferValue });
 			break;
 		}
+		case EGraphicsBindGroupEntryType::AccelerationStructureSRV:
+			break;
 		case EGraphicsBindGroupEntryType::Sampler:
 		{
 			if (!entry.SamplerValue)

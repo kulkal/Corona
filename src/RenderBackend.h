@@ -254,14 +254,17 @@ struct GraphicsSamplerBindingDesc
 
 // Blend mode for a graphics PSO. Default Opaque preserves prior behavior:
 // every existing pipeline was opaque-only and didn't carry a blend field.
-// Additive / AlphaBlend write the blended result to RT 0 only (RT >= 1 stays
-// fully masked off) so PSOs that target multi-RT GBuffer can sit beside the
-// opaque mesh path without scribbling into Normal/Velocity/Roughness.
+// Additive variants / AlphaBlend write the blended result to RT 0 only
+// (RT >= 1 stays fully masked off) so PSOs that target multi-RT GBuffer can
+// sit beside the opaque mesh path without scribbling into secondary targets.
+// AlphaBlendAll applies standard source-alpha blending to every bound RT.
 enum class EBlendMode : uint8_t
 {
 	Opaque,
 	Additive,
+	AdditiveAlpha,
 	AlphaBlend,
+	AlphaBlendAll,
 };
 
 enum class EDepthCompareOp : uint8_t
@@ -311,6 +314,7 @@ enum class EGraphicsBindGroupEntryType : uint8_t
 	TextureSRV,
 	BufferSRV,
 	VertexBufferSRV,
+	AccelerationStructureSRV,
 	Sampler,
 	ConstantData,
 };
@@ -323,6 +327,7 @@ struct GraphicsBindGroupEntry
 	Texture* TextureValue = nullptr;
 	Buffer* BufferValue = nullptr;
 	VertexBuffer* VertexBufferValue = nullptr;
+	std::shared_ptr<RTAS> AccelerationStructureValue;
 	Sampler* SamplerValue = nullptr;
 	const void* ConstantData = nullptr;
 	uint32_t ConstantDataSize = 0;
@@ -351,6 +356,15 @@ struct GraphicsBindGroupEntry
 		entry.Type = EGraphicsBindGroupEntryType::VertexBufferSRV;
 		entry.BindingName = std::move(bindingName);
 		entry.VertexBufferValue = vertexBuffer;
+		return entry;
+	}
+
+	static GraphicsBindGroupEntry AccelerationStructureSRV(std::string bindingName, std::shared_ptr<RTAS> rtas)
+	{
+		GraphicsBindGroupEntry entry{};
+		entry.Type = EGraphicsBindGroupEntryType::AccelerationStructureSRV;
+		entry.BindingName = std::move(bindingName);
+		entry.AccelerationStructureValue = std::move(rtas);
 		return entry;
 	}
 

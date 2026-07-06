@@ -98,6 +98,24 @@ namespace
 		return PlatformWideToUtf8(value);
 	}
 
+	bool GetEnvBool(const wchar_t* name, bool fallback)
+	{
+		const auto valueOpt = GetPlatformEnvironmentVariable(name);
+		if (!valueOpt || valueOpt->empty())
+			return fallback;
+
+		std::wstring value = *valueOpt;
+		std::transform(value.begin(), value.end(), value.begin(), [](wchar_t ch)
+		{
+			return static_cast<wchar_t>(towlower(ch));
+		});
+		if (value == L"0" || value == L"false" || value == L"off" || value == L"no")
+			return false;
+		if (value == L"1" || value == L"true" || value == L"on" || value == L"yes")
+			return true;
+		return fallback;
+	}
+
 	void ConfigureVulkanImplicitLayerPolicy(bool bCaptureSafeMode, bool bAllowImplicitLayers)
 	{
 		const auto existingPolicy = GetPlatformEnvironmentVariable(L"VK_LOADER_LAYERS_DISABLE");
@@ -734,9 +752,15 @@ namespace
 			return false;
 		}
 
-		const size_t bytesPerPixel = sizeof(float) * static_cast<size_t>(channelCount);
-		const size_t rowBytes = static_cast<size_t>(captured.Width) * bytesPerPixel;
-		if (captured.RowPitch < rowBytes)
+		const bool bConvertRG16ToRG32 =
+			targetFormat == ERawFloatDumpFormat::R32G32Float &&
+			captured.Format == ETextureFormat::RG16Float &&
+			channelCount == 2;
+		const size_t outputBytesPerPixel = sizeof(float) * static_cast<size_t>(channelCount);
+		const size_t outputRowBytes = static_cast<size_t>(captured.Width) * outputBytesPerPixel;
+		const size_t sourceBytesPerPixel = bConvertRG16ToRG32 ? sizeof(uint16_t) * 2u : outputBytesPerPixel;
+		const size_t sourceRowBytes = static_cast<size_t>(captured.Width) * sourceBytesPerPixel;
+		if (captured.RowPitch < sourceRowBytes)
 		{
 			if (errorMessage)
 				*errorMessage = L"raw row pitch is smaller than expected";
@@ -759,10 +783,65 @@ namespace
 		file << "endianness little\n";
 		file << "data\n";
 
+		auto halfToFloat = [](uint16_t h) -> float
+		{
+			const uint32_t sign = (static_cast<uint32_t>(h & 0x8000u)) << 16u;
+			const uint32_t exp = (h >> 10u) & 0x1fu;
+			const uint32_t mant = h & 0x03ffu;
+			uint32_t bits = 0;
+			if (exp == 0)
+			{
+				if (mant == 0)
+				{
+					bits = sign;
+				}
+				else
+				{
+					uint32_t normalizedMant = mant;
+					uint32_t normalizedExp = 127u - 15u + 1u;
+					while ((normalizedMant & 0x0400u) == 0u)
+					{
+						normalizedMant <<= 1u;
+						--normalizedExp;
+					}
+					normalizedMant &= 0x03ffu;
+					bits = sign | (normalizedExp << 23u) | (normalizedMant << 13u);
+				}
+			}
+			else if (exp == 0x1fu)
+			{
+				bits = sign | 0x7f800000u | (mant << 13u);
+			}
+			else
+			{
+				bits = sign | ((exp + (127u - 15u)) << 23u) | (mant << 13u);
+			}
+
+			float value = 0.0f;
+			std::memcpy(&value, &bits, sizeof(value));
+			return value;
+		};
+
 		for (size_t y = 0; y < captured.Height; ++y)
 		{
 			const uint8_t* row = captured.Pixels.data() + y * captured.RowPitch;
-			file.write(reinterpret_cast<const char*>(row), static_cast<std::streamsize>(rowBytes));
+			if (bConvertRG16ToRG32)
+			{
+				const uint16_t* src = reinterpret_cast<const uint16_t*>(row);
+				for (size_t x = 0; x < captured.Width; ++x)
+				{
+					const float converted[2] =
+					{
+						halfToFloat(src[x * 2u + 0u]),
+						halfToFloat(src[x * 2u + 1u]),
+					};
+					file.write(reinterpret_cast<const char*>(converted), sizeof(converted));
+				}
+			}
+			else
+			{
+				file.write(reinterpret_cast<const char*>(row), static_cast<std::streamsize>(outputRowBytes));
+			}
 			if (!file.good())
 			{
 				if (errorMessage)
@@ -2144,6 +2223,7 @@ Corona::~Corona()
 	SpineVsInlineGBufferGraphicsPipeline.reset();
 	SkeletalGBufferGraphicsPipeline.reset();
 	ToneMapGraphicsPipeline.reset();
+	TranslucentMeshGraphicsPipeline.reset();
 	ParticleGraphicsPipeline.reset();
 	BufferVisualizeGraphicsPipeline.reset();
 	LightingGraphicsPipeline.reset();
@@ -3160,6 +3240,24 @@ bool Corona::DLSSRRPass()
 		(bUseRRSpecularHitDistance && !PathTracingSpecularHitDistanceBuffer) ||
 		(bUseRRSpecularMotionVectors && !PathTracingSpecularMotionVectorBuffer))
 		return false;
+
+	Texture* rrDepthGuide = UnjitteredDepthBuffers[ColorBufferWriteIndex].get();
+	Texture* rrMotionGuide = VelocityBuffer.get();
+	Texture* rrNormalGuide = NormalBuffers[ColorBufferWriteIndex].get();
+	Texture* rrRoughnessGuide = RoughnessMetalicBuffer.get();
+	Texture* rrAlbedoGuide = AlbedoBuffer.get();
+	Texture* rrSpecularAlbedoGuide = SpecularAlbedoBuffer.get();
+	if (!IsPathTracingDLSSRREnabled())
+	{
+		PrepareTranslucentDLSSRRGuideBuffers(
+			rrDepthGuide,
+			rrMotionGuide,
+			rrNormalGuide,
+			rrRoughnessGuide,
+			rrAlbedoGuide,
+			rrSpecularAlbedoGuide);
+	}
+
 	renderBackend->TransitionTexture(outputTarget, EResourceState::ShaderRead, EResourceState::UnorderedAccess);
 
 	sl::ViewportHandle vp(0);
@@ -3167,12 +3265,12 @@ bool Corona::DLSSRRPass()
 	sl::Extent outputExtent{ 0, 0, m_width, m_height };
 	sl::CommandBuffer* streamlineCommandBuffer = reinterpret_cast<sl::CommandBuffer*>(renderBackend->GetStreamlineCommandBuffer());
 	auto colorRes = MakeStreamlineTextureResource(renderBackend.get(), inputColor, EResourceState::ShaderRead);
-	auto depthRes = MakeStreamlineTextureResource(renderBackend.get(), UnjitteredDepthBuffers[ColorBufferWriteIndex].get(), EResourceState::ShaderRead);
-	auto motionRes = MakeStreamlineTextureResource(renderBackend.get(), VelocityBuffer.get(), EResourceState::ShaderRead);
-	auto normalRes = MakeStreamlineTextureResource(renderBackend.get(), NormalBuffers[ColorBufferWriteIndex].get(), EResourceState::ShaderRead);
-	auto roughnessRes = MakeStreamlineTextureResource(renderBackend.get(), RoughnessMetalicBuffer.get(), EResourceState::ShaderRead);
-	auto albedoRes = MakeStreamlineTextureResource(renderBackend.get(), AlbedoBuffer.get(), EResourceState::ShaderRead);
-	auto specularAlbedoRes = MakeStreamlineTextureResource(renderBackend.get(), SpecularAlbedoBuffer.get(), EResourceState::ShaderRead);
+	auto depthRes = MakeStreamlineTextureResource(renderBackend.get(), rrDepthGuide, EResourceState::ShaderRead);
+	auto motionRes = MakeStreamlineTextureResource(renderBackend.get(), rrMotionGuide, EResourceState::ShaderRead);
+	auto normalRes = MakeStreamlineTextureResource(renderBackend.get(), rrNormalGuide, EResourceState::ShaderRead);
+	auto roughnessRes = MakeStreamlineTextureResource(renderBackend.get(), rrRoughnessGuide, EResourceState::ShaderRead);
+	auto albedoRes = MakeStreamlineTextureResource(renderBackend.get(), rrAlbedoGuide, EResourceState::ShaderRead);
+	auto specularAlbedoRes = MakeStreamlineTextureResource(renderBackend.get(), rrSpecularAlbedoGuide, EResourceState::ShaderRead);
 	auto outputRes = MakeStreamlineTextureResource(renderBackend.get(), outputTarget, EResourceState::UnorderedAccess);
 	std::optional<sl::Resource> specularHitDistanceRes;
 	std::optional<sl::Resource> specularMotionVectorRes;
@@ -3551,6 +3649,11 @@ bool Corona::RenderResolutionResourcesMatchCurrentState() const
 		return false;
 
 	if (!textureMatches(LightingBuffer, renderWidth, renderHeight) ||
+		!textureMatches(TranslucentBackgroundBuffer, renderWidth, renderHeight) ||
+		!textureMatches(TranslucentDistortionBuffer, renderWidth, renderHeight) ||
+		!textureMatches(TranslucentGuideRasterDepthBuffer, renderWidth, renderHeight) ||
+		!textureMatches(TranslucentCompositeGuideHistoryBuffer, renderWidth, renderHeight) ||
+		!textureMatches(TranslucentSurfaceBuffer, renderWidth, renderHeight) ||
 		!textureMatches(AlbedoBuffer, renderWidth, renderHeight) ||
 		!textureMatches(SpecularAlbedoBuffer, renderWidth, renderHeight) ||
 		!textureMatches(NormalBuffers[0], renderWidth, renderHeight) ||
@@ -3559,6 +3662,12 @@ bool Corona::RenderResolutionResourcesMatchCurrentState() const
 		!textureMatches(GeomNormalBuffers[1], renderWidth, renderHeight) ||
 		!textureMatches(VelocityBuffer, renderWidth, renderHeight) ||
 		!textureMatches(RoughnessMetalicBuffer, renderWidth, renderHeight) ||
+		!textureMatches(TranslucentGuideDepthBuffer, renderWidth, renderHeight) ||
+		!textureMatches(TranslucentGuideVelocityBuffer, renderWidth, renderHeight) ||
+		!textureMatches(TranslucentGuideNormalBuffer, renderWidth, renderHeight) ||
+		!textureMatches(TranslucentGuideRoughnessBuffer, renderWidth, renderHeight) ||
+		!textureMatches(TranslucentGuideAlbedoBuffer, renderWidth, renderHeight) ||
+		!textureMatches(TranslucentGuideSpecularAlbedoBuffer, renderWidth, renderHeight) ||
 		!textureMatches(DepthBuffer, renderWidth, renderHeight) ||
 		!textureMatches(GBufferOccluderDepthDebugBuffer, renderWidth, renderHeight) ||
 		!textureMatches(GBufferOccluderDepthDebugDepthBuffer, renderWidth, renderHeight) ||
@@ -3601,6 +3710,7 @@ void Corona::ResetAllAccumulationState(bool forceUpscaleReload)
 	bResetTemporalStateNextUpdate = true;
 	bUseLightingBufferFallbackForToneMap = true;
 	bDLSSRROutputValidThisFrame = false;
+	bTranslucentRefractedGBufferActiveThisFrame = false;
 	bShadowOutputValidThisFrame = false;
 	bMobileShadowMapValidThisFrame = false;
 	PrevPathTracingViewMat = glm::mat4x4(0.0f);
@@ -3681,6 +3791,11 @@ void Corona::RecreateRenderResolutionResources()
 	}
 
 	releaseTexture(LightingBuffer);
+	releaseTexture(TranslucentBackgroundBuffer);
+	releaseTexture(TranslucentDistortionBuffer);
+	releaseTexture(TranslucentGuideRasterDepthBuffer);
+	releaseTexture(TranslucentCompositeGuideHistoryBuffer);
+	releaseTexture(TranslucentSurfaceBuffer);
 	releaseTexture(DirectLightingBuffer);
 	releaseTexture(DLSSRRBuffer);
 	releaseTexture(NormalBuffers[0]);
@@ -3721,6 +3836,12 @@ void Corona::RecreateRenderResolutionResources()
 	releaseTexture(SpecularAlbedoBuffer);
 	releaseTexture(VelocityBuffer);
 	releaseTexture(RoughnessMetalicBuffer);
+	releaseTexture(TranslucentGuideDepthBuffer);
+	releaseTexture(TranslucentGuideVelocityBuffer);
+	releaseTexture(TranslucentGuideNormalBuffer);
+	releaseTexture(TranslucentGuideRoughnessBuffer);
+	releaseTexture(TranslucentGuideAlbedoBuffer);
+	releaseTexture(TranslucentGuideSpecularAlbedoBuffer);
 	releaseTexture(PathTracingSpecularHitDistanceBuffer);
 	releaseTexture(PathTracingSpecularMotionVectorBuffer);
 	releaseTexture(DepthBuffer);
@@ -3749,6 +3870,21 @@ void Corona::RecreateRenderResolutionResources()
 
 	LightingBuffer = createTexture2D(ETextureFormat::RGBA16Float, TextureUsage_RenderTarget | TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
 	NAME_D3D12_OBJECT(LightingBuffer->resource);
+
+	TranslucentBackgroundBuffer = createTexture2D(ETextureFormat::RGBA16Float, TextureUsage_RenderTarget | TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
+	NAME_D3D12_OBJECT(TranslucentBackgroundBuffer->resource);
+
+	TranslucentDistortionBuffer = createTexture2D(ETextureFormat::RGBA16Float, TextureUsage_RenderTarget | TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1, glm::vec4(0.0f));
+	NAME_D3D12_OBJECT(TranslucentDistortionBuffer->resource);
+
+	TranslucentGuideRasterDepthBuffer = createTexture2D(ETextureFormat::D32Float, TextureUsage_DepthStencil, RenderWidthLocal, RenderHeightLocal, 1);
+	NAME_D3D12_OBJECT(TranslucentGuideRasterDepthBuffer->resource);
+
+	TranslucentCompositeGuideHistoryBuffer = createTexture2D(ETextureFormat::RGBA16Float, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1, glm::vec4(0.0f));
+	NAME_D3D12_OBJECT(TranslucentCompositeGuideHistoryBuffer->resource);
+
+	TranslucentSurfaceBuffer = createTexture2D(ETextureFormat::RGBA16Float, TextureUsage_RenderTarget | TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1, glm::vec4(0.0f));
+	NAME_D3D12_OBJECT(TranslucentSurfaceBuffer->resource);
 
 	DirectLightingBuffer = createTexture2D(ETextureFormat::RGBA16Float, TextureUsage_RenderTarget | TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
 	NAME_D3D12_OBJECT(DirectLightingBuffer->resource);
@@ -3906,6 +4042,24 @@ void Corona::RecreateRenderResolutionResources()
 
 	RoughnessMetalicBuffer = createTexture2D(ETextureFormat::RGBA8Unorm, TextureUsage_RenderTarget | TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1, glm::vec4(0.001f, 0.0f, 0.0f, 0.0f));
 	NAME_D3D12_OBJECT(RoughnessMetalicBuffer->resource);
+
+	TranslucentGuideDepthBuffer = createTexture2D(ETextureFormat::R32Float, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
+	NAME_D3D12_OBJECT(TranslucentGuideDepthBuffer->resource);
+
+	TranslucentGuideVelocityBuffer = createTexture2D(ETextureFormat::RG16Float, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1, glm::vec4(0.0f));
+	NAME_D3D12_OBJECT(TranslucentGuideVelocityBuffer->resource);
+
+	TranslucentGuideNormalBuffer = createTexture2D(normalBufferFormat, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1, normalClearValue);
+	NAME_D3D12_OBJECT(TranslucentGuideNormalBuffer->resource);
+
+	TranslucentGuideRoughnessBuffer = createTexture2D(ETextureFormat::RGBA8Unorm, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1, glm::vec4(0.001f, 0.0f, 0.0f, 0.0f));
+	NAME_D3D12_OBJECT(TranslucentGuideRoughnessBuffer->resource);
+
+	TranslucentGuideAlbedoBuffer = createTexture2D(ETextureFormat::RGBA8Unorm, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
+	NAME_D3D12_OBJECT(TranslucentGuideAlbedoBuffer->resource);
+
+	TranslucentGuideSpecularAlbedoBuffer = createTexture2D(ETextureFormat::RGBA8Unorm, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
+	NAME_D3D12_OBJECT(TranslucentGuideSpecularAlbedoBuffer->resource);
 
 	if (bNeedExtendedHybridResources)
 	{
@@ -4337,6 +4491,32 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 		{
 			bStartupFreeFlyCamera = false;
 			bEnableStartupLuauScript = true;
+			continue;
+		}
+		if (arg == L"--transparency-layers" || arg == L"--translucent-layers" || arg == L"--translucency-layers")
+		{
+			bCommandLineTransparencyLayers = true;
+			bTranslucentStochasticSampling = true;
+			bEnableStartupLuauScript = true;
+			continue;
+		}
+		if (arg == L"--no-transparency-layers" || arg == L"--disable-transparency-layers" ||
+			arg == L"--no-translucent-layers" || arg == L"--disable-translucent-layers")
+		{
+			bCommandLineTransparencyLayers = false;
+			continue;
+		}
+		if (arg == L"--transparency-stochastic" || arg == L"--stochastic-transparency" ||
+			arg == L"--translucent-stochastic" || arg == L"--stochastic-translucency")
+		{
+			bTranslucentStochasticSampling = true;
+			continue;
+		}
+		if (arg == L"--no-transparency-stochastic" || arg == L"--disable-transparency-stochastic" ||
+			arg == L"--no-stochastic-transparency" || arg == L"--disable-stochastic-transparency" ||
+			arg == L"--transparency-alpha-blend")
+		{
+			bTranslucentStochasticSampling = false;
 			continue;
 		}
 		if (arg == L"--platformer" || arg == L"--platformer-mode" || arg == L"--platformer-character")
@@ -4882,6 +5062,16 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 			bCommandLineLightingDebugDump = true;
 			continue;
 		}
+		if (arg == L"--translucent-rr-dump" || arg == L"--transparency-rr-dump" ||
+			arg == L"--dump-translucent-rr" || arg == L"--dump-transparency-rr")
+		{
+			bCommandLineAutoDumpOverrideSet = true;
+			bCommandLineAutoDumpEnabled = true;
+			bCommandLineTranslucentRRDumpMode = true;
+			bCommandLineAAOverrideSet = true;
+			CommandLineSelectedAAMode = EAntiAliasingMode::DLSS_RR;
+			continue;
+		}
 		std::wstring lightingDebugFrameValue = ParseValueArg(arg, L"--lighting-debug-frame", L"-lighting-debug-frame", i);
 		if (lightingDebugFrameValue.empty())
 			lightingDebugFrameValue = ParseValueArg(arg, L"--shadow-debug-frame", L"-shadow-debug-frame", i);
@@ -4918,6 +5108,16 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 				bCommandLineAutoDumpOverrideSet = true;
 				bCommandLineAutoDumpEnabled = true;
 				bCommandLinePathTracingScreenshotDumpMode = true;
+			}
+			else if (dumpModeValue == L"translucent-rr" || dumpModeValue == L"translucent_rr" ||
+				dumpModeValue == L"transparency-rr" || dumpModeValue == L"transparency_rr" ||
+				dumpModeValue == L"dlssrr-translucent" || dumpModeValue == L"dlssrr_translucent")
+			{
+				bCommandLineAutoDumpOverrideSet = true;
+				bCommandLineAutoDumpEnabled = true;
+				bCommandLineTranslucentRRDumpMode = true;
+				bCommandLineAAOverrideSet = true;
+				CommandLineSelectedAAMode = EAntiAliasingMode::DLSS_RR;
 			}
 			continue;
 		}
@@ -5503,6 +5703,7 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 		L", lightingCompareDump=" + std::to_wstring(bCommandLineLightingCompareDumpMode ? 1 : 0) +
 		L", mobileGBufferDump=" + std::to_wstring(bCommandLineMobileGBufferDumpMode ? 1 : 0) +
 		L", specularSequenceDump=" + std::to_wstring(bCommandLineSpecularSequenceDumpMode ? 1 : 0) +
+		L", translucentRRDump=" + std::to_wstring(bCommandLineTranslucentRRDumpMode ? 1 : 0) +
 		L", autoDumpFrames=" + std::to_wstring(AutoAADumpFrameCountOverride) +
 		L", exitAfterFrames=" + std::to_wstring(CommandLineExitAfterFrames) +
 		L", spineGpuSkinning=" + std::to_wstring(bEnableGpuSpineSkinning ? 1 : 0) +
@@ -5526,6 +5727,8 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 		L", hybridRRSpecularGuideRay=" + std::to_wstring(bEnableHybridRRSpecularGuideRay ? 1 : 0) +
 		L", freeFlyCamera=" + std::to_wstring(bStartupFreeFlyCamera ? 1 : 0) +
 		L", startupScripts=" + std::to_wstring(bEnableStartupLuauScript ? 1 : 0) +
+		L", transparencyLayers=" + std::to_wstring(bCommandLineTransparencyLayers ? 1 : 0) +
+		L", translucentStochastic=" + std::to_wstring(bTranslucentStochasticSampling ? 1 : 0) +
 		L", dlssJitterScale=" + std::to_wstring(DLSSJitterPhaseScale) +
 		L", dlssJitterOverride=" + std::to_wstring(DLSSJitterPhaseCountOverride) +
 		L", dlssRRJitterScale=" + std::to_wstring(DLSSRRJitterPhaseScale) +
@@ -5596,6 +5799,9 @@ void Corona::PromptStartupModeSelection()
 		bAutoAADumpEnabled = true;
 	bSpecularSequenceDumpMode = bCommandLineSpecularSequenceDumpMode;
 	if (bSpecularSequenceDumpMode)
+		bAutoAADumpEnabled = true;
+	bTranslucentRRDumpMode = bCommandLineTranslucentRRDumpMode;
+	if (bTranslucentRRDumpMode)
 		bAutoAADumpEnabled = true;
 
 	if (!bCommandLineAutoDumpOverrideSet)
@@ -5953,6 +6159,55 @@ void Corona::InitializeAutoAADump()
 			L"[specular_sequence] warmup=64, captureFrames=" + std::to_wstring(captureFrameCount) +
 			L", aa=" + std::wstring(GetAntiAliasingModeName(AntiAliasingMode)) +
 			L", gi=" + std::wstring(GetDiffuseGIModeNameW(DiffuseGIMode)));
+		return;
+	}
+
+	if (bTranslucentRRDumpMode)
+	{
+		std::filesystem::path dumpDir = RuntimePaths::DumpDirectory() / L"translucent_rr";
+		std::filesystem::create_directories(dumpDir);
+		this->AutoAADumpDir = dumpDir.wstring();
+		this->bAutoAADumpInitialized = true;
+		this->bAutoAADumpCompleted = false;
+		this->bHybridStageAutoDumpMode = false;
+		this->AutoAADumpPhase = 0;
+		this->AutoAADumpFramesInPhase = 0;
+
+		std::filesystem::path logPath = std::filesystem::path(AutoAADumpDir) / L"dump_log.txt";
+		std::error_code ec;
+		std::filesystem::remove(logPath, ec);
+		{
+			std::wofstream clearLog(logPath, std::ios::trunc);
+		}
+
+		StartupRenderingMode = ERenderingMode::HYBRID;
+		RenderingMode = StartupRenderingMode;
+		StartupSelectedAAMode = EAntiAliasingMode::DLSS_RR;
+		AntiAliasingMode = StartupSelectedAAMode;
+		auto setScriptBoolOverride = [this](const std::string& name, bool value)
+		{
+			PersistentScriptControlValue controlValue;
+			controlValue.Type = PersistentScriptControlType::Bool;
+			controlValue.Bool = value;
+			PersistentScriptControls[name] = controlValue;
+		};
+		auto setScriptNumberOverride = [this](const std::string& name, float value)
+		{
+			PersistentScriptControlValue controlValue;
+			controlValue.Type = PersistentScriptControlType::Number;
+			controlValue.Number = value;
+			PersistentScriptControls[name] = controlValue;
+		};
+		setScriptBoolOverride("transparency_layers.refraction_only", false);
+		setScriptBoolOverride("transparency_layers.reflection_enabled", true);
+		setScriptNumberOverride("transparency_layers.reflection_scale", 1.0f);
+		setScriptNumberOverride("transparency_layers.reflection_strength", 0.92f);
+		setScriptNumberOverride("transparency_layers.surface_strength", 0.55f);
+		ResetAllAccumulationState(true);
+		const UINT32 frameCount = AutoAADumpFrameCountOverride > 0u ? AutoAADumpFrameCountOverride : 120u;
+		AppendAutoAADumpLog(
+			L"[translucent_rr] begin frames=" + std::to_wstring(frameCount) +
+			L", aa=dlss-rr, gi=" + std::wstring(GetDiffuseGIModeNameW(DiffuseGIMode)));
 		return;
 	}
 
@@ -6351,6 +6606,126 @@ void Corona::AdvanceAutoAADump(Texture* backbuffer)
 {
 	if (!bAutoAADumpEnabled || !bAutoAADumpInitialized || bAutoAADumpCompleted)
 		return;
+
+	if (bTranslucentRRDumpMode)
+	{
+		const UINT32 targetFrameCount = AutoAADumpFrameCountOverride > 0u ? AutoAADumpFrameCountOverride : 120u;
+		if (RenderingMode != ERenderingMode::HYBRID || AntiAliasingMode != EAntiAliasingMode::DLSS_RR)
+		{
+			RenderingMode = ERenderingMode::HYBRID;
+			StartupRenderingMode = ERenderingMode::HYBRID;
+			StartupSelectedAAMode = EAntiAliasingMode::DLSS_RR;
+			AntiAliasingMode = EAntiAliasingMode::DLSS_RR;
+			ResetAllAccumulationState(true);
+			AppendAutoAADumpLog(L"[translucent_rr] reset for hybrid dlss-rr capture");
+			return;
+		}
+
+		if (AutoAADumpFramesInPhase == targetFrameCount - 1)
+		{
+			const std::wstring base = AutoAADumpDir + L"\\translucent_rr";
+			Texture* resolveTarget = GetCurrentResolveSource();
+			Texture* rrOutput = (bDLSSRROutputValidThisFrame && ColorBuffers[ResolvedColorBufferIndex]) ?
+				ColorBuffers[ResolvedColorBufferIndex].get() :
+				nullptr;
+
+			Texture* rrDepthGuide = UnjitteredDepthBuffers[ColorBufferWriteIndex].get();
+			Texture* rrMotionGuide = VelocityBuffer.get();
+			Texture* rrNormalGuide = NormalBuffers[ColorBufferWriteIndex].get();
+			Texture* rrRoughnessGuide = RoughnessMetalicBuffer.get();
+			Texture* rrAlbedoGuide = AlbedoBuffer.get();
+			Texture* rrSpecularAlbedoGuide = SpecularAlbedoBuffer.get();
+			bool bGuideWarped = PrepareTranslucentDLSSRRGuideBuffers(
+				rrDepthGuide,
+				rrMotionGuide,
+				rrNormalGuide,
+				rrRoughnessGuide,
+				rrAlbedoGuide,
+				rrSpecularAlbedoGuide);
+
+			auto dumpTexture = [&](const wchar_t* suffix, Texture* texture, bool bDumpHdr, ERawFloatDumpFormat rawFormat = ERawFloatDumpFormat::Unknown, uint32_t rawChannelCount = 0)
+			{
+				const std::wstring fileBase = base + L"_" + suffix;
+				if (!texture)
+				{
+					std::error_code removeError;
+					std::filesystem::remove(fileBase + L".hdr", removeError);
+					removeError.clear();
+					std::filesystem::remove(fileBase + L"_preview.png", removeError);
+					removeError.clear();
+					std::filesystem::remove(fileBase + L".rawf", removeError);
+					AppendAutoAADumpLog(std::wstring(L"[translucent_rr] ") + suffix + L" skipped=null");
+					return;
+				}
+
+				bool hdrOk = true;
+				if (bDumpHdr)
+					hdrOk = DumpTextureHDR(texture, fileBase + L".hdr", EResourceState::ShaderRead);
+				const bool pngOk = DumpTexturePNG(texture, fileBase + L"_preview.png", EResourceState::ShaderRead);
+				bool rawOk = true;
+				if (rawFormat != ERawFloatDumpFormat::Unknown && rawChannelCount > 0)
+					rawOk = DumpTextureRawFloat(texture, fileBase + L".rawf", EResourceState::ShaderRead, rawFormat, rawChannelCount);
+				AppendAutoAADumpLog(std::wstring(L"[translucent_rr] ") + suffix +
+					L" hdr=" + (bDumpHdr ? (hdrOk ? L"ok" : L"fail") : L"skip") +
+					L", png=" + (pngOk ? L"ok" : L"fail") +
+					L", raw=" + ((rawFormat != ERawFloatDumpFormat::Unknown && rawChannelCount > 0) ? (rawOk ? L"ok" : L"fail") : L"skip"));
+			};
+
+			AppendAutoAADumpLog(
+				L"[translucent_rr] frameCounter=" + std::to_wstring(FrameCounter) +
+				L", targetFrames=" + std::to_wstring(targetFrameCount) +
+				L", rrOutputValid=" + std::to_wstring(bDLSSRROutputValidThisFrame ? 1 : 0) +
+				L", guideWarped=" + std::to_wstring(bGuideWarped ? 1 : 0) +
+				L", distortionValid=" + std::to_wstring(bTranslucentDistortionGuideValidThisFrame ? 1 : 0) +
+				L", preLightRefractedGBuffer=" + std::to_wstring(bTranslucentRefractedGBufferActiveThisFrame ? 1 : 0) +
+				L", writeIndex=" + std::to_wstring(ColorBufferWriteIndex) +
+				L", resolvedIndex=" + std::to_wstring(ResolvedColorBufferIndex));
+
+			dumpTexture(L"final_resolve", resolveTarget, true);
+			dumpTexture(L"rr_input_lighting", LightingBuffer.get(), true);
+			dumpTexture(L"rr_output", rrOutput, true);
+			dumpTexture(L"translucent_refraction_uv", TranslucentDistortionBuffer.get(), true);
+			dumpTexture(L"translucent_composite_guide_uv", TranslucentDistortionBuffer.get(), true);
+			dumpTexture(L"translucent_surface", TranslucentSurfaceBuffer.get(), true);
+
+			dumpTexture(L"rr_actual_depth", rrDepthGuide, true, ERawFloatDumpFormat::R32Float, 1);
+			dumpTexture(L"rr_actual_motion", rrMotionGuide, true, ERawFloatDumpFormat::R32G32Float, 2);
+			dumpTexture(L"rr_actual_normal", rrNormalGuide, false);
+			dumpTexture(L"rr_actual_roughness", rrRoughnessGuide, true);
+			dumpTexture(L"rr_actual_albedo", rrAlbedoGuide, false);
+			dumpTexture(L"rr_actual_specular_albedo", rrSpecularAlbedoGuide, false);
+
+			dumpTexture(L"gbuffer_depth", UnjitteredDepthBuffers[ColorBufferWriteIndex].get(), true, ERawFloatDumpFormat::R32Float, 1);
+			dumpTexture(L"gbuffer_motion", VelocityBuffer.get(), true, ERawFloatDumpFormat::R32G32Float, 2);
+			dumpTexture(L"gbuffer_normal", NormalBuffers[ColorBufferWriteIndex].get(), false);
+			dumpTexture(L"gbuffer_roughness", RoughnessMetalicBuffer.get(), true);
+			dumpTexture(L"gbuffer_albedo", AlbedoBuffer.get(), false);
+			dumpTexture(L"gbuffer_specular_albedo", SpecularAlbedoBuffer.get(), false);
+
+			dumpTexture(L"translucent_guide_depth", bGuideWarped ? TranslucentGuideDepthBuffer.get() : nullptr, true, ERawFloatDumpFormat::R32Float, 1);
+			dumpTexture(L"translucent_guide_motion", bGuideWarped ? TranslucentGuideVelocityBuffer.get() : nullptr, true, ERawFloatDumpFormat::R32G32Float, 2);
+			dumpTexture(L"translucent_guide_normal", bGuideWarped ? TranslucentGuideNormalBuffer.get() : nullptr, false);
+			dumpTexture(L"translucent_guide_roughness", bGuideWarped ? TranslucentGuideRoughnessBuffer.get() : nullptr, true);
+			dumpTexture(L"translucent_guide_albedo", bGuideWarped ? TranslucentGuideAlbedoBuffer.get() : nullptr, false);
+			dumpTexture(L"translucent_guide_specular_albedo", bGuideWarped ? TranslucentGuideSpecularAlbedoBuffer.get() : nullptr, false);
+
+			if (backbuffer)
+			{
+				const bool screenPngOk = DumpTexturePNG(backbuffer, base + L"_screen_preview.png", EResourceState::RenderTarget);
+				AppendAutoAADumpLog(std::wstring(L"[translucent_rr] screen png=") + (screenPngOk ? L"ok" : L"fail"));
+			}
+		}
+
+		++AutoAADumpFramesInPhase;
+		if (AutoAADumpFramesInPhase < targetFrameCount)
+			return;
+
+		WaitForAsyncImageDumps();
+		bAutoAADumpCompleted = true;
+		RequestMainPlatformWindowClose();
+		QuitPlatformApplication(0);
+		return;
+	}
 
 	if (bSpecularSequenceDumpMode)
 	{
@@ -8322,17 +8697,27 @@ void Corona::SaveSceneState()
 		}
 		return true;
 	};
-	auto isTransientBenchmarkControl = [](const std::string& name)
+	auto shouldSkipPersistentControl = [this](const std::string& name)
 	{
-		return
-			name == "platformer.spineSkinningBenchmark" ||
+		const bool bTransientBenchmarkControl =
+			bCommandLinePlatformerSpineBenchmark &&
+			(name == "platformer.spineSkinningBenchmark" ||
 			name == "platformer.spineSkinningBenchmarkCharacterCount" ||
 			name == "platformer.spineSkinningBenchmarkSampleFps" ||
 			name == "platformer.startInMenu" ||
 			name == "platformer.showHud" ||
 			name == "platformer.enemyStreaming" ||
 			name == "platformer.maxSceneSamplesPerFrame" ||
-			name == "platformer.deferSpineSamplingWhileStreamingSeconds";
+			name == "platformer.deferSpineSamplingWhileStreamingSeconds");
+		const bool bCommandLineTransparencyControl =
+			bCommandLineTransparencyLayers &&
+			(name == "transparency_layers.enabled" ||
+			name == "transparency_layers.refraction_only" ||
+			name == "transparency_layers.reflection_enabled" ||
+			name == "transparency_layers.reflection_scale" ||
+			name == "transparency_layers.reflection_strength" ||
+			name == "transparency_layers.surface_strength");
+		return bTransientBenchmarkControl || bCommandLineTransparencyControl;
 	};
 
 	file << std::fixed << std::setprecision(9);
@@ -8341,7 +8726,7 @@ void Corona::SaveSceneState()
 	{
 		if (!isSafeControlName(name))
 			continue;
-		if (bCommandLinePlatformerSpineBenchmark && isTransientBenchmarkControl(name))
+		if (shouldSkipPersistentControl(name))
 			continue;
 
 		switch (value.Type)
@@ -10319,6 +10704,15 @@ void Corona::OnInit()
 		setScriptBoolOverride("platformer.enabled", bPlatformerStartupMode);
 		setScriptBoolOverride("dungeon.enabled", bDungeonStartupMode);
 		setScriptBoolOverride("spine_benchmark.enabled", bSpineBenchmarkStartupMode);
+		if (bCommandLineTransparencyLayers)
+		{
+			setScriptBoolOverride("transparency_layers.enabled", true);
+			setScriptBoolOverride("transparency_layers.refraction_only", false);
+			setScriptBoolOverride("transparency_layers.reflection_enabled", true);
+			setScriptNumberOverride("transparency_layers.reflection_scale", 1.0f);
+			setScriptNumberOverride("transparency_layers.reflection_strength", 0.92f);
+			setScriptNumberOverride("transparency_layers.surface_strength", 0.55f);
+		}
 		if (bCommandLinePlatformerSpineBenchmark)
 		{
 			setScriptNumberOverride("spine_benchmark.characterCount", static_cast<float>(CommandLinePlatformerSpineBenchmarkCount));
@@ -10469,6 +10863,15 @@ void Corona::OnInit()
 		bRayTracingBLASCacheResetPending = false;
 		AppendCpuRuntimeTrace(L"[OnInit] consumed startup scene-object sync during InitRaytracingData");
 	};
+	auto ReloadTransparencyLayersAfterMapLoad = [&]()
+	{
+		if (!bCommandLineTransparencyLayers)
+			return;
+
+		const std::filesystem::path scriptPath = GetAssetFullPath(L"scripts\\startup\\common\\030_transparency_layers.luau");
+		AppendCpuRuntimeTrace(L"[transparency_layers] reload after map load: " + scriptPath.wstring());
+		LoadLuauScriptFile(scriptPath);
+	};
 	if (CommandLineLoadMapFile.empty() &&
 		bEnableStartupLuauScript &&
 		StartupLuauMode == L"editor")
@@ -10486,6 +10889,7 @@ void Corona::OnInit()
 			ResetAllAccumulationState(false);
 			InitRaytracingData();
 			ClearStartupSceneObjectSync();
+			ReloadTransparencyLayersAfterMapLoad();
 		}
 	}
 	if (!CommandLineLoadMapFile.empty())
@@ -10502,6 +10906,7 @@ void Corona::OnInit()
 			ResetAllAccumulationState(false);
 			InitRaytracingData();
 			ClearStartupSceneObjectSync();
+			ReloadTransparencyLayersAfterMapLoad();
 		}
 	}
 	bPendingTemporalHistoryClear = true;
@@ -10511,7 +10916,7 @@ void Corona::OnInit()
 		L"[OnInit] after InitializeAutoAADump initialized=" + std::to_wstring(bAutoAADumpInitialized ? 1 : 0) +
 		L", completed=" + std::to_wstring(bAutoAADumpCompleted ? 1 : 0) +
 		L", dir=" + AutoAADumpDir);
-	if (!bAutoAADumpEnabled && (bCommandLineLoadLatestCameraPath || !CommandLineCameraPathFile.empty() || bCommandLineCameraPathDump))
+	if (bCommandLineLoadLatestCameraPath || !CommandLineCameraPathFile.empty() || bCommandLineCameraPathDump)
 	{
 		bool bLoadedCameraPath = false;
 		if (!CommandLineCameraPathFile.empty())
@@ -10523,6 +10928,12 @@ void Corona::OnInit()
 			L"[OnInit] command line camera path loaded=" + std::to_wstring(bLoadedCameraPath ? 1 : 0) +
 			L", dump=" + std::to_wstring(bCommandLineCameraPathDump ? 1 : 0) +
 			L", status=" + LastCameraPathStatus);
+
+		if (bLoadedCameraPath && !bCommandLineCameraPathDump)
+		{
+			bPendingTemporalHistoryClear = true;
+			ResetAllAccumulationState(IsDLSSMode(AntiAliasingMode));
+		}
 
 		if (bLoadedCameraPath && bCommandLineCameraPathDump)
 		{
@@ -11110,7 +11521,7 @@ shared_ptr<Texture> Corona::GetProceduralBoxDiffuseTexture(const std::wstring& t
 	return texture;
 }
 
-shared_ptr<Scene> Corona::CreateProceduralBoxScene(const glm::vec3& baseColor, bool bUseBrickTexture, float uvRepeat, const std::wstring& textureKind, float uvRepeatY, bool bFrontOnly)
+shared_ptr<Scene> Corona::CreateProceduralBoxScene(const glm::vec3& baseColor, bool bUseBrickTexture, float uvRepeat, const std::wstring& textureKind, float uvRepeatY, bool bFrontOnly, float alpha)
 {
 	if (!renderBackend)
 		return nullptr;
@@ -11197,8 +11608,11 @@ shared_ptr<Scene> Corona::CreateProceduralBoxScene(const glm::vec3& baseColor, b
 			appendFace(face);
 	}
 
+	const float safeAlpha = std::clamp(std::isfinite(alpha) ? alpha : 1.0f, 0.0f, 1.0f);
+	const bool bAlphaBlend = safeAlpha < 0.999f;
+
 	shared_ptr<Material> material = std::make_shared<Material>();
-	material->BaseColorFactor = glm::vec4(glm::clamp(baseColor, glm::vec3(0.0f), glm::vec3(1.0f)), 1.0f);
+	material->BaseColorFactor = glm::vec4(glm::clamp(baseColor, glm::vec3(0.0f), glm::vec3(1.0f)), safeAlpha);
 	const std::wstring assetTexturePath = ResolveProceduralBoxTextureAssetPath(textureKind);
 	const std::wstring resolvedTextureKind = !assetTexturePath.empty() || !NormalizeProceduralBoxTextureKind(textureKind).empty()
 		? textureKind
@@ -11211,7 +11625,8 @@ shared_ptr<Scene> Corona::CreateProceduralBoxScene(const glm::vec3& baseColor, b
 	// alpha-tested so the GBuffer discard and RT any-hit shaders honor the
 	// transparent pixels.
 	const bool bAlphaTested = !assetTexturePath.empty() && assetTexturePath.find(L"/raw/") != std::wstring::npos;
-	material->bHasAlpha = bAlphaTested;
+	material->bHasAlpha = bAlphaTested || bAlphaBlend;
+	material->bAlphaBlend = bAlphaBlend;
 
 	Mesh* mesh = new Mesh(renderBackend.get());
 	mesh->transform = glm::mat4x4(1.0f);
@@ -11219,7 +11634,8 @@ shared_ptr<Scene> Corona::CreateProceduralBoxScene(const glm::vec3& baseColor, b
 	mesh->NumIndices = static_cast<UINT>(indices.size());
 	mesh->VertexStride = sizeof(Vertex);
 	mesh->IndexFormat = EIndexFormat::U32;
-	mesh->bTransparent = bAlphaTested;
+	mesh->bTransparent = material->bHasAlpha;
+	mesh->bAlphaBlend = bAlphaBlend;
 	mesh->Mat = material;
 	mesh->Vb = renderBackend->CreateVertexBuffer(sizeof(Vertex) * vertices.size(), sizeof(Vertex), vertices.data());
 	mesh->Ib = renderBackend->CreateIndexBuffer(mesh->IndexFormat, sizeof(UINT32) * indices.size(), indices.data());
@@ -11243,6 +11659,165 @@ shared_ptr<Scene> Corona::CreateProceduralBoxScene(const glm::vec3& baseColor, b
 	scene->BoundsMin = glm::vec3(-kHalfExtent, -kHalfExtent, -kHalfExtent);
 	scene->BoundsMax = glm::vec3( kHalfExtent,  kHalfExtent,  kHalfExtent);
 
+	return scene;
+}
+
+shared_ptr<Scene> Corona::CreateProceduralDiamondScene(const glm::vec3& baseColor, float alpha)
+{
+	if (!renderBackend)
+		return nullptr;
+
+	struct Vertex
+	{
+		glm::vec3 Position;
+		glm::vec3 Normal;
+		glm::vec2 UV;
+		glm::vec3 Tangent;
+	};
+	static_assert(sizeof(Vertex) == 44, "Diamond vertex must match base GBuffer PSO stride");
+
+	std::vector<Vertex> vertices;
+	std::vector<UINT32> indices;
+	constexpr uint32_t kSegments = 16u;
+	constexpr float kPi = 3.14159265358979323846f;
+	vertices.reserve(kSegments * 10u * 3u);
+	indices.reserve(kSegments * 10u * 3u);
+
+	auto appendTriangle = [&](glm::vec3 p0, glm::vec3 p1, glm::vec3 p2)
+	{
+		glm::vec3 normal = glm::cross(p1 - p0, p2 - p0);
+		if (glm::length(normal) < 1.0e-6f)
+			return;
+		normal = glm::normalize(normal);
+		const glm::vec3 centroid = (p0 + p1 + p2) * (1.0f / 3.0f);
+		if (glm::dot(normal, centroid) < 0.0f)
+		{
+			std::swap(p1, p2);
+			normal = -normal;
+		}
+
+		const UINT32 baseVertex = static_cast<UINT32>(vertices.size());
+		glm::vec3 tangent = glm::cross(glm::vec3(0.0f, 1.0f, 0.0f), normal);
+		if (glm::length(tangent) < 1.0e-4f)
+			tangent = glm::cross(glm::vec3(1.0f, 0.0f, 0.0f), normal);
+		tangent = glm::normalize(tangent);
+
+		const glm::vec3 positions[3] = { p0, p1, p2 };
+		for (UINT32 vertexIndex = 0; vertexIndex < 3; ++vertexIndex)
+		{
+			const glm::vec3 position = positions[vertexIndex];
+			Vertex vertex{};
+			vertex.Position = position;
+			vertex.Normal = normal;
+			vertex.UV = glm::vec2(position.x * 0.5f + 0.5f, position.z * 0.5f + 0.5f);
+			vertex.Tangent = tangent;
+			vertices.push_back(vertex);
+		}
+
+		indices.push_back(baseVertex + 0u);
+		indices.push_back(baseVertex + 1u);
+		indices.push_back(baseVertex + 2u);
+	};
+
+	auto appendQuad = [&](const glm::vec3& p0, const glm::vec3& p1, const glm::vec3& p2, const glm::vec3& p3, bool bFlipDiagonal)
+	{
+		if (bFlipDiagonal)
+		{
+			appendTriangle(p0, p1, p3);
+			appendTriangle(p1, p2, p3);
+		}
+		else
+		{
+			appendTriangle(p0, p1, p2);
+			appendTriangle(p0, p2, p3);
+		}
+	};
+
+	auto ringPoint = [](float radius, float y, float angle)
+	{
+		return glm::vec3(std::cos(angle) * radius, y, std::sin(angle) * radius);
+	};
+
+	std::vector<glm::vec3> table;
+	std::vector<glm::vec3> crown;
+	std::vector<glm::vec3> girdleTop;
+	std::vector<glm::vec3> girdleBottom;
+	std::vector<glm::vec3> pavilion;
+	table.reserve(kSegments);
+	crown.reserve(kSegments);
+	girdleTop.reserve(kSegments);
+	girdleBottom.reserve(kSegments);
+	pavilion.reserve(kSegments);
+
+	const float step = 2.0f * kPi / static_cast<float>(kSegments);
+	for (uint32_t i = 0; i < kSegments; ++i)
+	{
+		const float angle = static_cast<float>(i) * step;
+		const float halfAngle = angle + step * 0.5f;
+		table.push_back(ringPoint(0.28f, 0.62f, angle));
+		crown.push_back(ringPoint(0.44f, 0.36f, halfAngle));
+		girdleTop.push_back(ringPoint(0.62f, 0.055f, angle));
+		girdleBottom.push_back(ringPoint(0.62f, -0.055f, angle));
+		pavilion.push_back(ringPoint(0.34f, -0.46f, halfAngle));
+	}
+
+	const glm::vec3 tableCenter(0.0f, 0.62f, 0.0f);
+	const glm::vec3 culet(0.0f, -0.82f, 0.0f);
+	for (uint32_t i = 0; i < kSegments; ++i)
+	{
+		const uint32_t next = (i + 1u) % kSegments;
+		const bool bFlipDiagonal = (i & 1u) != 0u;
+
+		appendTriangle(tableCenter, table[i], table[next]);
+		appendQuad(table[i], table[next], crown[next], crown[i], bFlipDiagonal);
+		appendQuad(crown[i], crown[next], girdleTop[next], girdleTop[i], !bFlipDiagonal);
+		appendQuad(girdleTop[i], girdleTop[next], girdleBottom[next], girdleBottom[i], bFlipDiagonal);
+		appendQuad(girdleBottom[i], girdleBottom[next], pavilion[next], pavilion[i], !bFlipDiagonal);
+		appendTriangle(pavilion[i], pavilion[next], culet);
+	}
+
+	const float safeAlpha = std::clamp(std::isfinite(alpha) ? alpha : 1.0f, 0.0f, 1.0f);
+	const bool bAlphaBlend = safeAlpha < 0.999f;
+
+	shared_ptr<Material> material = std::make_shared<Material>();
+	material->BaseColorFactor = glm::vec4(glm::clamp(baseColor, glm::vec3(0.0f), glm::vec3(1.0f)), safeAlpha);
+	material->Diffuse = DefaultWhiteTex;
+	material->Normal = DefaultNormalTex;
+	material->Roughness = DefaultRougnessTex;
+	material->Metallic = DefaultBlackTex;
+	material->bHasAlpha = bAlphaBlend;
+	material->bAlphaBlend = bAlphaBlend;
+
+	auto mesh = std::make_shared<Mesh>(renderBackend.get());
+	mesh->transform = glm::mat4x4(1.0f);
+	mesh->NumVertices = static_cast<UINT>(vertices.size());
+	mesh->NumIndices = static_cast<UINT>(indices.size());
+	mesh->VertexStride = sizeof(Vertex);
+	mesh->IndexFormat = EIndexFormat::U32;
+	mesh->bTransparent = bAlphaBlend;
+	mesh->bAlphaBlend = bAlphaBlend;
+	mesh->Mat = material;
+	mesh->Vb = renderBackend->CreateVertexBuffer(sizeof(Vertex) * vertices.size(), sizeof(Vertex), vertices.data());
+	mesh->Ib = renderBackend->CreateIndexBuffer(mesh->IndexFormat, sizeof(UINT32) * indices.size(), indices.data());
+	mesh->CpuPositions.reserve(vertices.size());
+	for (const Vertex& vertex : vertices)
+		mesh->CpuPositions.push_back(vertex.Position);
+	mesh->CpuIndices = indices;
+
+	Mesh::DrawCall drawCall{};
+	drawCall.IndexStart = 0;
+	drawCall.IndexCount = mesh->NumIndices;
+	drawCall.VertexBase = 0;
+	drawCall.VertexCount = mesh->NumVertices;
+	drawCall.mat = material;
+	mesh->Draws.push_back(drawCall);
+
+	shared_ptr<Scene> scene = std::make_shared<Scene>();
+	scene->Materials.push_back(material);
+	scene->meshes.push_back(mesh);
+	scene->bHasBounds = true;
+	scene->BoundsMin = glm::vec3(-0.62f, -0.82f, -0.62f);
+	scene->BoundsMax = glm::vec3(0.62f, 0.62f, 0.62f);
 	return scene;
 }
 
@@ -11593,12 +12168,14 @@ namespace
 	}
 }
 
-shared_ptr<Scene> Corona::CreateProceduralSphereScene(float radius, uint32_t rings, uint32_t segments)
+shared_ptr<Scene> Corona::CreateProceduralSphereScene(float radius, uint32_t rings, uint32_t segments, const glm::vec3& baseColor, float alpha)
 {
 	if (!renderBackend || radius <= 0.0f)
 		return nullptr;
 	const uint32_t R = std::clamp<uint32_t>(rings, 4u, 128u);
 	const uint32_t S = std::clamp<uint32_t>(segments, 6u, 256u);
+	const float safeAlpha = std::clamp(std::isfinite(alpha) ? alpha : 1.0f, 0.0f, 1.0f);
+	const bool bAlphaBlend = safeAlpha < 0.999f;
 
 	struct SphereVertex
 	{
@@ -11648,11 +12225,13 @@ shared_ptr<Scene> Corona::CreateProceduralSphereScene(float radius, uint32_t rin
 	}
 
 	auto material = std::make_shared<Material>();
-	material->BaseColorFactor = glm::vec4(0.7f, 0.7f, 0.75f, 1.0f);
+	material->BaseColorFactor = glm::vec4(glm::clamp(baseColor, glm::vec3(0.0f), glm::vec3(1.0f)), safeAlpha);
 	material->Diffuse   = DefaultWhiteTex;
 	material->Normal    = DefaultNormalTex;
 	material->Roughness = DefaultRougnessTex;
 	material->Metallic  = DefaultBlackTex;
+	material->bHasAlpha = bAlphaBlend;
+	material->bAlphaBlend = bAlphaBlend;
 
 	auto mesh = std::make_shared<Mesh>(renderBackend.get());
 	mesh->transform = glm::mat4x4(1.0f);
@@ -11660,6 +12239,8 @@ shared_ptr<Scene> Corona::CreateProceduralSphereScene(float radius, uint32_t rin
 	mesh->NumIndices  = static_cast<uint32_t>(indices.size());
 	mesh->VertexStride = sizeof(SphereVertex);
 	mesh->IndexFormat = EIndexFormat::U32;
+	mesh->bTransparent = bAlphaBlend;
+	mesh->bAlphaBlend = bAlphaBlend;
 	mesh->Mat = material;
 	const uint32_t vbBytes = static_cast<uint32_t>(verts.size() * sizeof(SphereVertex));
 	const uint32_t ibBytes = static_cast<uint32_t>(indices.size() * sizeof(uint32_t));
@@ -12511,6 +13092,7 @@ void Corona::LoadAssets()
 		InitDepthHeightFogPass();
 		InitVolumetricFogPass();
 		InitToneMapPass();
+		InitTranslucentMeshPass();
 		InitParticlePass();
 		if (!bVulkanPathTracingStartup)
 			InitTemporalAAPass();
@@ -12697,6 +13279,26 @@ void Corona::LoadAssets()
 	LightingBuffer = createTexture2D(ETextureFormat::RGBA16Float, TextureUsage_RenderTarget | TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
 
 	NAME_D3D12_OBJECT(LightingBuffer->resource);
+
+	TranslucentBackgroundBuffer = createTexture2D(ETextureFormat::RGBA16Float, TextureUsage_RenderTarget | TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
+
+	NAME_D3D12_OBJECT(TranslucentBackgroundBuffer->resource);
+
+	TranslucentDistortionBuffer = createTexture2D(ETextureFormat::RGBA16Float, TextureUsage_RenderTarget | TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1, glm::vec4(0.0f));
+
+	NAME_D3D12_OBJECT(TranslucentDistortionBuffer->resource);
+
+	TranslucentGuideRasterDepthBuffer = createTexture2D(ETextureFormat::D32Float, TextureUsage_DepthStencil, RenderWidthLocal, RenderHeightLocal, 1);
+
+	NAME_D3D12_OBJECT(TranslucentGuideRasterDepthBuffer->resource);
+
+	TranslucentCompositeGuideHistoryBuffer = createTexture2D(ETextureFormat::RGBA16Float, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1, glm::vec4(0.0f));
+
+	NAME_D3D12_OBJECT(TranslucentCompositeGuideHistoryBuffer->resource);
+
+	TranslucentSurfaceBuffer = createTexture2D(ETextureFormat::RGBA16Float, TextureUsage_RenderTarget | TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1, glm::vec4(0.0f));
+
+	NAME_D3D12_OBJECT(TranslucentSurfaceBuffer->resource);
 
 	if (bNeedExtendedHybridResources)
 	{
@@ -12954,6 +13556,24 @@ void Corona::LoadAssets()
 	RoughnessMetalicBuffer = createTexture2D(ETextureFormat::RGBA8Unorm, TextureUsage_RenderTarget | TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1, glm::vec4(0.001f, 0.0f, 0.0f, 0.0f));
 
 	NAME_D3D12_OBJECT(RoughnessMetalicBuffer->resource);
+
+	TranslucentGuideDepthBuffer = createTexture2D(ETextureFormat::R32Float, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
+	NAME_D3D12_OBJECT(TranslucentGuideDepthBuffer->resource);
+
+	TranslucentGuideVelocityBuffer = createTexture2D(ETextureFormat::RG16Float, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1, glm::vec4(0.0f));
+	NAME_D3D12_OBJECT(TranslucentGuideVelocityBuffer->resource);
+
+	TranslucentGuideNormalBuffer = createTexture2D(normalBufferFormat, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1, normalClearValue);
+	NAME_D3D12_OBJECT(TranslucentGuideNormalBuffer->resource);
+
+	TranslucentGuideRoughnessBuffer = createTexture2D(ETextureFormat::RGBA8Unorm, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1, glm::vec4(0.001f, 0.0f, 0.0f, 0.0f));
+	NAME_D3D12_OBJECT(TranslucentGuideRoughnessBuffer->resource);
+
+	TranslucentGuideAlbedoBuffer = createTexture2D(ETextureFormat::RGBA8Unorm, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
+	NAME_D3D12_OBJECT(TranslucentGuideAlbedoBuffer->resource);
+
+	TranslucentGuideSpecularAlbedoBuffer = createTexture2D(ETextureFormat::RGBA8Unorm, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1);
+	NAME_D3D12_OBJECT(TranslucentGuideSpecularAlbedoBuffer->resource);
 
 	if (bNeedExtendedHybridResources)
 	{
@@ -15393,6 +16013,13 @@ void Corona::DrawEditorModeOverlay()
 				"BLOOM",
 				"SPEC_HISTORY_LENGTH",
 				"RTAO",
+				"TRANSLUCENT_REFRACTION_UV",
+				"TRANSLUCENT_GUIDE_DEPTH",
+				"TRANSLUCENT_GUIDE_VELOCITY",
+				"TRANSLUCENT_GUIDE_NORMAL",
+				"TRANSLUCENT_GUIDE_ROUGHNESS",
+				"TRANSLUCENT_GUIDE_ALBEDO",
+				"TRANSLUCENT_GUIDE_SPECULAR_ALBEDO",
 				"NO_FULLSCREEN",
 			};
 			int debugVisualizationIndex = std::clamp(
@@ -16088,6 +16715,13 @@ void Corona::DrawEditorModeOverlay()
 					"BLOOM",
 					"SPEC_HISTORY_LENGTH",
 					"RTAO",
+					"TRANSLUCENT_REFRACTION_UV",
+					"TRANSLUCENT_GUIDE_DEPTH",
+					"TRANSLUCENT_GUIDE_VELOCITY",
+					"TRANSLUCENT_GUIDE_NORMAL",
+					"TRANSLUCENT_GUIDE_ROUGHNESS",
+					"TRANSLUCENT_GUIDE_ALBEDO",
+					"TRANSLUCENT_GUIDE_SPECULAR_ALBEDO",
 					"NO_FULLSCREEN",
 				};
 				int debugVisualizationIndex = std::clamp(
@@ -16425,6 +17059,9 @@ void Corona::OnRender()
 	bShadowOutputValidThisFrame = false;
 	bMobileShadowMapValidThisFrame = false;
 	bRTAOOutputValidThisFrame = false;
+	bTranslucentDistortionGuideValidThisFrame = false;
+	bTranslucentDistortionGuideIsOffsetThisFrame = false;
+	bTranslucentRefractedGBufferActiveThisFrame = false;
 	if (bPendingTemporalHistoryClear)
 	{
 		ResetTemporalHistoryBuffers();
@@ -16709,9 +17346,34 @@ void Corona::OnRender()
 		{
 			if (bAsyncShadowAOOverlapActive && renderBackend && renderBackend->HasPendingAsyncRtWork())
 				renderBackend->SubmitGraphicsWorkAndWaitForAsyncRt();
+			if (IsTranslucentPreLightingRefractedGBufferEnabled())
+			{
+				const bool bGuideWritten = TranslucentPreLightingGuidePass();
+				if (bGuideWritten && GetEnvBool(L"CORONA_TRANSLUCENT_PRELIGHT_WARP", true))
+				{
+					Texture* refractedDepthGuide = UnjitteredDepthBuffers[ColorBufferWriteIndex].get();
+					Texture* refractedMotionGuide = VelocityBuffer.get();
+					Texture* refractedNormalGuide = NormalBuffers[ColorBufferWriteIndex].get();
+					Texture* refractedRoughnessGuide = RoughnessMetalicBuffer.get();
+					Texture* refractedAlbedoGuide = AlbedoBuffer.get();
+					Texture* refractedSpecularAlbedoGuide = SpecularAlbedoBuffer.get();
+					bTranslucentRefractedGBufferActiveThisFrame = PrepareTranslucentDLSSRRGuideBuffers(
+						refractedDepthGuide,
+						refractedMotionGuide,
+						refractedNormalGuide,
+						refractedRoughnessGuide,
+						refractedAlbedoGuide,
+						refractedSpecularAlbedoGuide,
+						true);
+				}
+			}
 			BeginGpuPassTiming(EGpuPass::Lighting);
 			LightingPass();
 			EndGpuPassTiming(EGpuPass::Lighting);
+			if (bTranslucentRefractedGBufferActiveThisFrame)
+				TranslucentSurfaceLightingPass();
+			else
+				TranslucentMeshPass();
 			// Forward-translucent particle draw against the post-light HDR.
 			// Sits between LightingPass and TemporalAA so the additive
 			// sparks ride through the TAA/DLSS accumulation pipeline.
@@ -17084,6 +17746,9 @@ void Corona::OnRender()
 		if (bEditorStartupMode)
 			DrawEditorModeOverlay();
 
+		if (bEditorStartupMode && bCommandLineTransparencyLayers && !bShowImgui)
+			DrawLuauImGui();
+
 		if (bVehicleDrivingMode)
 		{
 			DrawVehicleDrivingOverlay();
@@ -17195,6 +17860,13 @@ void Corona::OnRender()
 				"BLOOM",
 				"SPEC_HISTORY_LENGTH",
 				"RTAO",
+				"TRANSLUCENT_REFRACTION_UV",
+				"TRANSLUCENT_GUIDE_DEPTH",
+				"TRANSLUCENT_GUIDE_VELOCITY",
+				"TRANSLUCENT_GUIDE_NORMAL",
+				"TRANSLUCENT_GUIDE_ROUGHNESS",
+				"TRANSLUCENT_GUIDE_ALBEDO",
+				"TRANSLUCENT_GUIDE_SPECULAR_ALBEDO",
 				"NO_FULLSCREEN",
 			};
 			int debugVisualizationIndex = std::clamp(
@@ -18853,6 +19525,7 @@ void Corona::RecompileShaders()
 	InitLightingPass();
 	InitDepthHeightFogPass();
 	InitVolumetricFogPass();
+	InitTranslucentMeshPass();
 	InitParticlePass();
 	InitTemporalAAPass();
 	return;
@@ -18875,6 +19548,7 @@ void Corona::RecompileShaders()
 	InitLightingPass();
 	InitDepthHeightFogPass();
 	InitVolumetricFogPass();
+	InitTranslucentMeshPass();
 	InitParticlePass();
 	InitTemporalAAPass();
 #if CORONA_HAS_D3D12
