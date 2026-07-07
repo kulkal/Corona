@@ -29,6 +29,7 @@ namespace
 	constexpr uint32_t kRTGeometryRecordBufferRegisterSpace = 13;
 	constexpr uint32_t kRTInstancePropertyBufferRegisterSpace = 14;
 	constexpr uint32_t kRTMaterialDrawRangeBufferRegisterSpace = 15;
+	constexpr UINT32 kRTMaterialFlagAlphaBlend = 1u << 0;
 
 	void HashCombinePathTracingMaterial(uint64_t& seed, uint64_t value)
 	{
@@ -157,6 +158,7 @@ bool Corona::EnsureRTMaterialRecordBuffer()
 			std::memcpy(baseColorBits, &hashMaterialPtr->BaseColorFactor, sizeof(baseColorBits));
 			for (uint32_t bits : baseColorBits)
 				HashCombinePathTracingMaterial(sourceHash, bits);
+			HashCombinePathTracingMaterial(sourceHash, hashMaterialPtr->bAlphaBlend ? 1u : 0u);
 		};
 		hashMaterial(material);
 		HashCombinePathTracingMaterial(sourceHash, static_cast<uint64_t>(mesh->Draws.size()));
@@ -221,6 +223,7 @@ bool Corona::EnsureRTMaterialRecordBuffer()
 		record.BaseColorFactor[1] = baseColorFactor.g;
 		record.BaseColorFactor[2] = baseColorFactor.b;
 		record.BaseColorFactor[3] = baseColorFactor.a;
+		record.Flags = (material && material->bAlphaBlend) || baseColorFactor.a < 0.999f ? kRTMaterialFlagAlphaBlend : 0u;
 		bAllTexturesRegistered = bAllTexturesRegistered &&
 			record.AlbedoTextureIndex != RHI_INVALID_BINDLESS_INDEX &&
 			record.NormalTextureIndex != RHI_INVALID_BINDLESS_INDEX &&
@@ -289,6 +292,7 @@ bool Corona::EnsureRTMaterialRecordBuffer()
 		uint32_t lodBits = 0;
 		std::memcpy(&lodBits, &record.AlbedoLodConstant, sizeof(lodBits));
 		HashCombinePathTracingMaterial(materialHash, lodBits);
+		HashCombinePathTracingMaterial(materialHash, record.Flags);
 	}
 	HashCombinePathTracingMaterial(materialHash, static_cast<uint64_t>(drawRanges.size()));
 	for (const RTMaterialDrawRangeRecord& range : drawRanges)
@@ -757,6 +761,273 @@ bool Corona::RaytracePrimaryGBufferPass()
 	if (!rg.Execute())
 		return false;
 
+	return true;
+}
+
+bool Corona::RaytraceTranslucentRefractedGuideGBufferPass()
+{
+	auto logSkip = [this](const std::wstring& reason)
+	{
+		if ((FrameCounter % 120u) == 0u)
+			AppendCpuRuntimeTrace(std::wstring(L"[RTRefractedGuide] skipped: ") + reason);
+	};
+
+	if (!renderBackend ||
+		RenderingMode != ERenderingMode::HYBRID ||
+		GBufferGenerationMode != EGBufferGenerationMode::RtPrimary)
+	{
+		logSkip(L"not hybrid rt-primary");
+		return false;
+	}
+	if (!renderBackend->SupportsRayTracing() || !TLAS)
+	{
+		logSkip(L"ray tracing unsupported or TLAS missing");
+		return false;
+	}
+	if (!TranslucentGuideDepthBuffer ||
+		!TranslucentGuideVelocityBuffer ||
+		!TranslucentGuideNormalBuffer ||
+		!TranslucentGuideRoughnessBuffer ||
+		!TranslucentGuideAlbedoBuffer ||
+		!TranslucentGuideSpecularAlbedoBuffer ||
+		!TranslucentDistortionBuffer ||
+		!RTRefractedGuideDummyGeomNormalBuffer ||
+		!RTRefractedGuideDummySpecularHitDistanceBuffer ||
+		!RTRefractedGuideDummySpecularMotionVectorBuffer)
+	{
+		logSkip(L"translucent guide buffers missing");
+		return false;
+	}
+	if (!UsesRTBindlessMaterials() || !UsesRTBindlessGeometry())
+	{
+		logSkip(L"bindless material/geometry support unavailable");
+		return false;
+	}
+
+	uint32_t visibleTranslucentMeshCount = 0;
+	for (const SceneObject& object : RenderWorld.SceneObjects)
+	{
+		if (!object.bVisible || !object.ScenePtr)
+			continue;
+		for (const std::shared_ptr<Mesh>& mesh : object.ScenePtr->meshes)
+		{
+			if (mesh && mesh->bAlphaBlend)
+				++visibleTranslucentMeshCount;
+		}
+	}
+
+	uint32_t translucentInstanceCount = 0;
+	for (const RTInstanceDesc& instance : RayTracingInstances)
+	{
+		Mesh* mesh = instance.BottomLevelAS ? instance.BottomLevelAS->MeshPtr : nullptr;
+		if (mesh && mesh->bAlphaBlend)
+			++translucentInstanceCount;
+	}
+	if (translucentInstanceCount == 0)
+	{
+		logSkip(
+			std::wstring(L"no alpha-blend instances in TLAS, visibleAlphaMeshes=") +
+			std::to_wstring(visibleTranslucentMeshCount) +
+			L", rtInstances=" +
+			std::to_wstring(RayTracingInstances.size()));
+		return false;
+	}
+
+	if (!PSO_PATH_TRACING)
+	{
+		InitPathTracingPass();
+		if (!PSO_PATH_TRACING)
+		{
+			logSkip(L"path tracing PSO unavailable");
+			return false;
+		}
+	}
+
+	ApplyRenderPointLightsToFrameParams();
+	const UINT32 pointLightStateHash = ComputePathTracingPointLightStateHash();
+	if (!EnsurePathTracingPointLightBuffer(pointLightStateHash))
+	{
+		logSkip(L"point light buffer unavailable");
+		return false;
+	}
+	if (!EnsureRTMaterialRecordBuffer())
+	{
+		logSkip(L"RT material records unavailable");
+		return false;
+	}
+
+	auto getPersistentNumber = [this](const char* name, float fallback)
+	{
+		const auto result = PersistentScriptControls.find(name);
+		if (result != PersistentScriptControls.end() && result->second.Type == PersistentScriptControlType::Number)
+			return result->second.Number;
+		return fallback;
+	};
+	auto getPersistentBool = [this](const char* name, bool fallback)
+	{
+		const auto result = PersistentScriptControls.find(name);
+		if (result != PersistentScriptControls.end() && result->second.Type == PersistentScriptControlType::Bool)
+			return result->second.Bool;
+		return fallback;
+	};
+
+	PathTracingViewParamCB dispatchViewParam = PathTracingViewParam;
+	dispatchViewParam.ViewMatrix = glm::transpose(ViewMat);
+	dispatchViewParam.InvViewMatrix = glm::transpose(InvViewMat);
+	dispatchViewParam.ProjMatrix = glm::transpose(UnjitteredProjMat);
+	dispatchViewParam.InvProjMatrix = glm::transpose(UnjitteredInvProjMat);
+	dispatchViewParam.UnjitteredViewProjMatrix = glm::transpose(UnjitteredViewProjMat);
+	dispatchViewParam.PrevUnjitteredViewProjMatrix = glm::transpose(PrevUnjitteredViewProjMat);
+	dispatchViewParam.ProjectionParams = FrameProjectionParams;
+	dispatchViewParam.LightDirAndIntensity = glm::vec4(RenderFrameNormalizedLightDir, LightIntensity);
+	dispatchViewParam.DirectLightAngularRadius = RTShadowViewParam.ShadowLightRadius;
+	dispatchViewParam.DirectLightSampleCount = 1u;
+	dispatchViewParam.PointLightSampleCount = 0u;
+	dispatchViewParam.bDirectLightCastShadow = 0u;
+	dispatchViewParam.RandomOffset = CurrentJitter * 0.5f;
+	dispatchViewParam.FrameCounter = 0u;
+	dispatchViewParam.BlueNoiseOffsetStride = RenderFrameIndex;
+	dispatchViewParam.MaxBounces = 1u;
+	dispatchViewParam.SamplesPerPixel = 1u;
+	dispatchViewParam.ViewSpreadAngle = glm::tan(Fov * 0.5f) / (0.5f * GetRenderHeight());
+	dispatchViewParam.DebugMode = 0u;
+	dispatchViewParam.SkyColorTop = SkyColorTop;
+	dispatchViewParam.SkyIntensity = SkyIntensity;
+	dispatchViewParam.SkyColorBottom = SkyColorBottom;
+	dispatchViewParam.LightColor = RenderFrameLightColor;
+	dispatchViewParam.bEnableDiffuseGI = 0u;
+	dispatchViewParam.bEnableSpecularGI = 0u;
+	dispatchViewParam.bEnableDirectDiffuse = 0u;
+	dispatchViewParam.bEnableDirectSpecular = 0u;
+	dispatchViewParam.bEnableRTAO = 0u;
+	dispatchViewParam.bWritePrimaryGBuffer = 1u;
+	dispatchViewParam.SpecularMotionVectorScale = PathTracingRRSpecularMotionVectorScale;
+	dispatchViewParam.bStabilizePrimaryRaySamples = 1u;
+	dispatchViewParam.bPrimaryGBufferOnly = 1u;
+	dispatchViewParam.PointLightCount = 0u;
+	dispatchViewParam.bRefractedGuideGBufferOnly = 1u;
+	dispatchViewParam.RefractedGuideMaxLayers = static_cast<UINT32>(std::clamp(
+		static_cast<int>(std::lround(getPersistentNumber("transparency_layers.rt_refraction_layers", 4.0f))),
+		1,
+		8));
+	dispatchViewParam.RefractedGuideIOR = std::clamp(
+		getPersistentNumber("transparency_layers.rt_refraction_ior", 1.45f),
+		1.0001f,
+		2.5f);
+	dispatchViewParam.RefractedGuideRayBias = std::clamp(
+		getPersistentNumber("transparency_layers.rt_refraction_ray_bias", 0.05f),
+		0.0001f,
+		2.0f);
+	dispatchViewParam.bRefractedGuideDebug = getPersistentBool("transparency_layers.rt_refraction_debug", false) ? 1u : 0u;
+
+	if ((FrameCounter % 120u) == 0u)
+	{
+		AppendCpuRuntimeTrace(
+			L"[RTRefractedGuide] active=1, visibleAlphaMeshes=" + std::to_wstring(visibleTranslucentMeshCount) +
+			L", alphaInstances=" + std::to_wstring(translucentInstanceCount) +
+			L", rtInstances=" + std::to_wstring(RayTracingInstances.size()) +
+			L", layers=" + std::to_wstring(dispatchViewParam.RefractedGuideMaxLayers) +
+			L", ior=" + std::to_wstring(dispatchViewParam.RefractedGuideIOR) +
+			L", rayBias=" + std::to_wstring(dispatchViewParam.RefractedGuideRayBias) +
+			L", debug=" + std::to_wstring(dispatchViewParam.bRefractedGuideDebug));
+	}
+
+	RenderGraph rg(renderBackend.get());
+	RGTextureRef outputColorTarget = rg.ImportTexture("RTRefractedGuide.SourceUV", TranslucentDistortionBuffer.get(), EResourceState::ShaderRead);
+	RGTextureRef outAlbedo = rg.ImportTexture("RTRefractedGuide.OutAlbedo", TranslucentGuideAlbedoBuffer.get(), EResourceState::ShaderRead);
+	RGTextureRef outSpecularAlbedo = rg.ImportTexture("RTRefractedGuide.OutSpecularAlbedo", TranslucentGuideSpecularAlbedoBuffer.get(), EResourceState::ShaderRead);
+	RGTextureRef outNormal = rg.ImportTexture("RTRefractedGuide.OutNormal", TranslucentGuideNormalBuffer.get(), EResourceState::ShaderRead);
+	RGTextureRef outGeomNormal = rg.ImportTexture("RTRefractedGuide.DummyGeomNormal", RTRefractedGuideDummyGeomNormalBuffer.get(), EResourceState::ShaderRead);
+	RGTextureRef outVelocity = rg.ImportTexture("RTRefractedGuide.OutVelocity", TranslucentGuideVelocityBuffer.get(), EResourceState::ShaderRead);
+	RGTextureRef outRoughnessMetallic = rg.ImportTexture("RTRefractedGuide.OutRoughnessMetallic", TranslucentGuideRoughnessBuffer.get(), EResourceState::ShaderRead);
+	RGTextureRef outDepth = rg.ImportTexture("RTRefractedGuide.OutDepth", TranslucentGuideDepthBuffer.get(), EResourceState::ShaderRead);
+	RGTextureRef outSpecularHitDistance = rg.ImportTexture("RTRefractedGuide.DummySpecularHitDistance", RTRefractedGuideDummySpecularHitDistanceBuffer.get(), EResourceState::ShaderRead);
+	RGTextureRef outSpecularMotionVector = rg.ImportTexture("RTRefractedGuide.DummySpecularMotionVector", RTRefractedGuideDummySpecularMotionVectorBuffer.get(), EResourceState::ShaderRead);
+	RGBufferRef pointLightBuffer = rg.ImportBuffer("RTRefractedGuide.PointLightBuffer", PathTracingPointLightBuffer.get(), EResourceState::ShaderRead);
+	RGBufferRef rtMaterials = rg.ImportBuffer("RTRefractedGuide.RtMaterials", RTMaterialRecordBuffer.get(), EResourceState::ShaderRead);
+	RGBufferRef rtMaterialDrawRanges = rg.ImportBuffer("RTRefractedGuide.RtMaterialDrawRanges", RTMaterialDrawRangeRecordBuffer.get(), EResourceState::ShaderRead);
+
+	renderBackend->EmitGpuCrashMarker("RTRefractedGuideGBufferPass");
+
+	rg.ExportTexture(outputColorTarget, EResourceState::ShaderRead);
+	rg.ExportTexture(outAlbedo, EResourceState::ShaderRead);
+	rg.ExportTexture(outSpecularAlbedo, EResourceState::ShaderRead);
+	rg.ExportTexture(outNormal, EResourceState::ShaderRead);
+	rg.ExportTexture(outVelocity, EResourceState::ShaderRead);
+	rg.ExportTexture(outRoughnessMetallic, EResourceState::ShaderRead);
+	rg.ExportTexture(outDepth, EResourceState::ShaderRead);
+	rg.ExportTexture(outGeomNormal, EResourceState::ShaderRead);
+	rg.ExportTexture(outSpecularHitDistance, EResourceState::ShaderRead);
+	rg.ExportTexture(outSpecularMotionVector, EResourceState::ShaderRead);
+
+	rg.AddPass(
+		"RTRefractedGuideGBufferPass",
+		ERGPassFlags::RayTracing,
+		[&](RGPassBuilder& builder)
+		{
+			builder.ReadWriteTexture(outputColorTarget, EResourceState::UnorderedAccess)
+				.ReadWriteTexture(outAlbedo, EResourceState::UnorderedAccess)
+				.ReadWriteTexture(outSpecularAlbedo, EResourceState::UnorderedAccess)
+				.ReadWriteTexture(outNormal, EResourceState::UnorderedAccess)
+				.ReadWriteTexture(outVelocity, EResourceState::UnorderedAccess)
+				.ReadWriteTexture(outRoughnessMetallic, EResourceState::UnorderedAccess)
+				.ReadWriteTexture(outDepth, EResourceState::UnorderedAccess)
+				.ReadBuffer(pointLightBuffer, EResourceState::ShaderRead)
+				.ReadBuffer(rtMaterials, EResourceState::ShaderRead)
+				.ReadBuffer(rtMaterialDrawRanges, EResourceState::ShaderRead);
+			builder.WriteTexture(outGeomNormal, EResourceState::UnorderedAccess)
+				.WriteTexture(outSpecularHitDistance, EResourceState::UnorderedAccess)
+				.WriteTexture(outSpecularMotionVector, EResourceState::UnorderedAccess);
+		},
+		[&](RGContext& ctx)
+		{
+			RTPassBuilder pass(*this, PSO_PATH_TRACING, ERtProfilePass::PathTracing);
+			pass.BeginScene()
+				.SetTextureUAV("global", "OutputColor", ctx.GetTexture(outputColorTarget))
+				.SetTextureUAV("global", "OutAlbedo", ctx.GetTexture(outAlbedo))
+				.SetTextureUAV("global", "OutSpecularAlbedo", ctx.GetTexture(outSpecularAlbedo))
+				.SetTextureUAV("global", "OutNormal", ctx.GetTexture(outNormal))
+				.SetTextureUAV("global", "OutGeomNormal", ctx.GetTexture(outGeomNormal))
+				.SetTextureUAV("global", "OutVelocity", ctx.GetTexture(outVelocity))
+				.SetTextureUAV("global", "OutRoughnessMetallic", ctx.GetTexture(outRoughnessMetallic))
+				.SetTextureUAV("global", "OutDepth", ctx.GetTexture(outDepth))
+				.SetTextureUAV("global", "OutSpecularHitDistance", ctx.GetTexture(outSpecularHitDistance))
+				.SetTextureUAV("global", "OutSpecularMotionVector", ctx.GetTexture(outSpecularMotionVector))
+				.SetAccelerationStructure("global", "gRtScene", TLAS)
+				.SetBufferSRV("global", "PointLightBuffer", ctx.GetBuffer(pointLightBuffer))
+				.SetCBVValue("global", "ViewParameter", &dispatchViewParam)
+				.SetSampler("global", "sampleWrap", samplerWrap.get());
+			pass.SetBindlessTextureTable("global", "MaterialTextures")
+				.SetBufferSRV("global", "RtMaterials", ctx.GetBuffer(rtMaterials))
+				.SetBufferSRV("global", "RtMaterialDrawRanges", ctx.GetBuffer(rtMaterialDrawRanges));
+
+			RTSceneHitProgramDesc hitProgramDesc;
+			pass.BindSceneHitPrograms(hitProgramDesc);
+			pass.Dispatch(GetRenderWidth(), GetRenderHeight());
+		});
+
+	if (!rg.Execute())
+	{
+		std::wstring reason = L"render graph execution failed";
+		if (!rg.GetDiagnostics().empty())
+		{
+			reason += L": ";
+			for (size_t diagnosticIndex = 0; diagnosticIndex < rg.GetDiagnostics().size(); ++diagnosticIndex)
+			{
+				if (diagnosticIndex != 0)
+					reason += L"; ";
+				const std::string& diagnostic = rg.GetDiagnostics()[diagnosticIndex];
+				reason.reserve(reason.size() + diagnostic.size());
+				for (char c : diagnostic)
+					reason.push_back(static_cast<wchar_t>(static_cast<unsigned char>(c)));
+			}
+		}
+		logSkip(reason);
+		return false;
+	}
+
+	bTranslucentDistortionGuideValidThisFrame = true;
+	bTranslucentDistortionGuideIsOffsetThisFrame = false;
 	return true;
 }
 

@@ -83,7 +83,13 @@ cbuffer ViewParameter : register(b0)
     uint bPrimaryGBufferOnly;
     uint _pointLightPadding0;
     uint PointLightCount;
+    uint _pointLightPadding1;
     float3 PointLightPadding;
+    uint bRefractedGuideGBufferOnly;
+    uint RefractedGuideMaxLayers;
+    float RefractedGuideIOR;
+    float RefractedGuideRayBias;
+    uint bRefractedGuideDebug;
 };
 
 cbuffer PathCompaction : register(b1)
@@ -98,6 +104,10 @@ SamplerState sampleWrap : register(s0);
 
 static const float INV_PI = 1.0 / PI;
 static const float PATH_TRACING_RAY_BIAS = 0.5f;
+static const uint RT_RAY_MASK_OPAQUE = 0x01u;
+static const uint RT_RAY_MASK_ALL = 0xFFu;
+static const uint RT_MATERIAL_FLAG_ALPHA_BLEND = 1u << 0;
+static const uint MAX_REFRACTED_GUIDE_LAYERS = 8u;
 
 float4 SamplePathTracingAlbedo(RTMaterialRecord material, float2 uv, float mipLevel)
 {
@@ -179,6 +189,8 @@ struct PathTracingPayload
     float2 debugUV;
     uint debugInstanceID;
     uint debugTriangleIndex;
+    uint debugMaterialFlags;
+    float debugAlpha;
 };
 
 struct ShadowRayPayload
@@ -244,6 +256,8 @@ PathTracingPayload MakePathTracingPayload(float3 rayOrigin, float3 rayDirection,
     payload.debugUV = float2(0, 0);
     payload.debugInstanceID = 0;
     payload.debugTriangleIndex = 0;
+    payload.debugMaterialFlags = 0u;
+    payload.debugAlpha = 1.0f;
     return payload;
 }
 
@@ -456,8 +470,209 @@ PathTracingPayload TracePrimaryGBufferSample(float2 pixelCenter, float2 launchDi
     ray.TMax = max(ray.TMin + 0.0001f, ProjectionParams.w * primaryRayTScale);
 
     PathTracingPayload payload = MakePathTracingPayload(rayOrigin, rayDir, 0u, seed, float3(1, 1, 1), 0u);
-    TraceRay(gRtScene, RAY_FLAG_NONE, 0xFF, 0, 0, 0, ray, payload);
+    // RT primary GBuffer is the opaque base pass. Alpha-blend meshes are
+    // handled by the refracted guide path and must not write opaque depth.
+    TraceRay(gRtScene, RAY_FLAG_NONE, RT_RAY_MASK_OPAQUE, 0, 0, 0, ray, payload);
     return payload;
+}
+
+bool IsTranslucentMaterialPayload(PathTracingPayload payload)
+{
+    return payload.hit != 0u &&
+           (payload.debugMaterialFlags & RT_MATERIAL_FLAG_ALPHA_BLEND) != 0u &&
+           payload.debugAlpha > 0.001f;
+}
+
+float3 ComputeGuideRefractionDirection(float3 incidentDir, float3 surfaceNormal, float ior)
+{
+    float3 I = GGXSafeNormalize(incidentDir, float3(0.0f, 0.0f, 1.0f));
+    float3 N = GGXSafeNormalize(surfaceNormal, -I);
+    float safeIor = max(ior, 1.0001f);
+    if (dot(I, N) > 0.0f)
+        N = -N;
+
+    // This guide is not a full IOR stack. Treat every consumed translucent
+    // surface as a local bending interface so the guide hit visibly follows
+    // the selected IOR instead of cancelling out on thin/parallel surfaces.
+    float3 refractedDir = refract(I, N, rcp(safeIor));
+    if (dot(refractedDir, refractedDir) < 1.0e-8f ||
+        any(isnan(refractedDir)) ||
+        any(isinf(refractedDir)))
+    {
+        refractedDir = reflect(I, N);
+    }
+
+    // A physically paired enter/exit stack tends to cancel on thin glass and
+    // makes this guide GBuffer insensitive to the artist-facing IOR control.
+    // Extrapolate the Snell delta so IOR changes move the selected opaque hit
+    // in the same direction, while IOR close to 1 still converges to no bend.
+    float guideBendScale = 1.0f + saturate((safeIor - 1.0f) / 1.5f) * 4.0f;
+    return GGXSafeNormalize(I + (refractedDir - I) * guideBendScale, refractedDir);
+}
+
+float3 ComputeWorldRayDirectionFromScreenUv(float2 screenUv, out float primaryRayTScale)
+{
+    float2 clipXY = saturate(screenUv) * 2.0f - 1.0f;
+    clipXY.y = -clipXY.y;
+
+    float4 viewFarH = mul(float4(clipXY, 1.0f, 1.0f), InvProjMatrix);
+    float invViewFarW = abs(viewFarH.w) > 1.0e-6f ? rcp(viewFarH.w) : 1.0f;
+    float3 viewRayDir = viewFarH.xyz * invViewFarW;
+    if (any(isnan(viewRayDir)) || any(isinf(viewRayDir)) || dot(viewRayDir, viewRayDir) < 1.0e-8f)
+        viewRayDir = float3(0.0f, 0.0f, -1.0f);
+    else
+        viewRayDir = normalize(viewRayDir);
+
+    primaryRayTScale = rcp(max(-viewRayDir.z, 1.0e-4f));
+    return normalize(mul(float4(viewRayDir, 0), InvViewMatrix).xyz);
+}
+
+float2 ComputeThinLensGuideOffset(PathTracingPayload payload, float2 launchDim)
+{
+    float safeIor = max(RefractedGuideIOR, 1.0001f);
+    float iorStrength = saturate((safeIor - 1.0f) / 1.5f);
+    float alpha = saturate(payload.debugAlpha);
+
+    float3 viewNormal = normalize(mul(float4(payload.debugNormal, 0.0f), ViewMatrix).xyz);
+    float2 normalPixels = viewNormal.xy * (8.0f + 56.0f * iorStrength);
+
+    // A camera-facing flat pane has no angular Snell shift at normal incidence.
+    // Add a thin-lens UV term so flat test planes still produce a visible,
+    // RT-traced source hit instead of appearing as only surface tint.
+    float2 uvLens = payload.debugUV * 2.0f - 1.0f;
+    uvLens.y = -uvLens.y;
+    float2 lensPixels = uvLens * (4.0f + 28.0f * iorStrength);
+
+    return (normalPixels * 0.75f + lensPixels * 0.45f) * alpha / max(launchDim, float2(1.0f, 1.0f));
+}
+
+PathTracingPayload TraceOpaqueFromScreenUv(float2 screenUv, float2 launchDim, uint seed, out bool bHit)
+{
+    float primaryRayTScale;
+    float3 rayDir = ComputeWorldRayDirectionFromScreenUv(screenUv, primaryRayTScale);
+    float3 rayOrigin = mul(float4(0, 0, 0, 1), InvViewMatrix).xyz;
+
+    RayDesc ray;
+    ray.Origin = rayOrigin;
+    ray.Direction = rayDir;
+    ray.TMin = max(0.0001f, ProjectionParams.z * primaryRayTScale);
+    ray.TMax = max(ray.TMin + 0.0001f, ProjectionParams.w * primaryRayTScale);
+
+    PathTracingPayload payload = MakePathTracingPayload(rayOrigin, rayDir, 0u, seed, float3(1, 1, 1), 0u);
+    TraceRay(gRtScene, RAY_FLAG_NONE, RT_RAY_MASK_OPAQUE, 0, 0, 0, ray, payload);
+    bHit = payload.hit != 0u;
+    return payload;
+}
+
+void WriteRefractedGuideDebug(uint2 pixel, uint firstTranslucentHit, uint consumedLayers, uint finalOpaqueHit)
+{
+    if (bRefractedGuideDebug == 0u || firstTranslucentHit == 0u)
+        return;
+
+    float layerNorm = saturate(float(consumedLayers) / float(MAX_REFRACTED_GUIDE_LAYERS));
+    float iorNorm = saturate((max(RefractedGuideIOR, 1.0001f) - 1.0f) / 1.5f);
+    OutSpecularAlbedo[pixel] = float4(max(layerNorm, 0.15f), iorNorm, finalOpaqueHit != 0u ? 1.0f : 0.0f, 1.0f);
+}
+
+void TraceRefractedGuideGBufferSample(uint2 pixel, float2 pixelCenter, float2 launchDim, float2 sampleOffset, uint seed)
+{
+    float2 inUV = (pixelCenter + sampleOffset) / launchDim;
+    OutputColor[pixel] = float4(saturate(inUV), 0.0f, 0.0f);
+    float2 clipXY = inUV * 2.0f - 1.0f;
+    clipXY.y = -clipXY.y;
+
+    float4 viewFarH = mul(float4(clipXY, 1.0f, 1.0f), InvProjMatrix);
+    float invViewFarW = abs(viewFarH.w) > 1.0e-6f ? rcp(viewFarH.w) : 1.0f;
+    float3 viewRayDir = viewFarH.xyz * invViewFarW;
+    if (any(isnan(viewRayDir)) || any(isinf(viewRayDir)) || dot(viewRayDir, viewRayDir) < 1.0e-8f)
+        viewRayDir = float3(0.0f, 0.0f, -1.0f);
+    else
+        viewRayDir = normalize(viewRayDir);
+
+    float primaryRayTScale = rcp(max(-viewRayDir.z, 1.0e-4f));
+    float3 rayDir = normalize(mul(float4(viewRayDir, 0), InvViewMatrix).xyz);
+    float3 rayOrigin = mul(float4(0, 0, 0, 1), InvViewMatrix).xyz;
+    float rayBias = max(RefractedGuideRayBias, 0.0001f);
+
+    RayDesc ray;
+    ray.Origin = rayOrigin;
+    ray.Direction = rayDir;
+    ray.TMin = max(0.0001f, ProjectionParams.z * primaryRayTScale);
+    ray.TMax = max(ray.TMin + 0.0001f, ProjectionParams.w * primaryRayTScale);
+
+    PathTracingPayload payload = MakePathTracingPayload(rayOrigin, rayDir, 0u, seed, float3(1, 1, 1), 0u);
+    TraceRay(gRtScene, RAY_FLAG_NONE, RT_RAY_MASK_ALL, 0, 0, 0, ray, payload);
+
+    uint consumedLayers = 0u;
+    uint firstTranslucentHit = IsTranslucentMaterialPayload(payload) ? 1u : 0u;
+    float2 thinLensGuideOffset = float2(0.0f, 0.0f);
+    uint maxLayers = min(max(RefractedGuideMaxLayers, 1u), MAX_REFRACTED_GUIDE_LAYERS);
+    [loop]
+    for (uint layerIndex = 0u; layerIndex < MAX_REFRACTED_GUIDE_LAYERS; ++layerIndex)
+    {
+        if (layerIndex >= maxLayers || !IsTranslucentMaterialPayload(payload))
+            break;
+
+        ++consumedLayers;
+        thinLensGuideOffset += ComputeThinLensGuideOffset(payload, launchDim);
+        rayDir = ComputeGuideRefractionDirection(payload.direction, payload.debugNormal, RefractedGuideIOR);
+        rayOrigin = payload.debugWorldPos + rayDir * rayBias;
+
+        RayDesc layerRay;
+        layerRay.Origin = rayOrigin;
+        layerRay.Direction = rayDir;
+        layerRay.TMin = rayBias;
+        layerRay.TMax = ProjectionParams.w;
+
+        payload = MakePathTracingPayload(rayOrigin, rayDir, 0u, seed, float3(1, 1, 1), 0u);
+        TraceRay(gRtScene, RAY_FLAG_NONE, RT_RAY_MASK_ALL, 0, 0, 0, layerRay, payload);
+    }
+
+    PathTracingPayload finalPayload = payload;
+    uint finalOpaqueHit = (payload.hit != 0u && !IsTranslucentMaterialPayload(payload)) ? 1u : 0u;
+    if (finalOpaqueHit == 0u)
+    {
+        RayDesc opaqueRay;
+        opaqueRay.Origin = rayOrigin;
+        opaqueRay.Direction = rayDir;
+        opaqueRay.TMin = rayBias;
+        opaqueRay.TMax = ProjectionParams.w;
+
+        finalPayload = MakePathTracingPayload(rayOrigin, rayDir, 0u, seed, float3(1, 1, 1), 0u);
+        TraceRay(gRtScene, RAY_FLAG_NONE, RT_RAY_MASK_OPAQUE, 0, 0, 0, opaqueRay, finalPayload);
+        finalOpaqueHit = finalPayload.hit != 0u ? 1u : 0u;
+    }
+
+    float2 finalGuideUv = inUV;
+    float physicalShiftPixels = 0.0f;
+    if (finalOpaqueHit != 0u)
+    {
+        float2 projectedUv;
+        if (ProjectToScreenUVFinite(finalPayload.debugWorldPos, UnjitteredViewProjMatrix, projectedUv))
+        {
+            finalGuideUv = saturate(projectedUv);
+            physicalShiftPixels = length((projectedUv - inUV) * launchDim);
+        }
+    }
+
+    float lensShiftPixels = length(thinLensGuideOffset * launchDim);
+    if (firstTranslucentHit != 0u && lensShiftPixels > 0.25f && physicalShiftPixels < 1.5f)
+    {
+        float2 lensUv = saturate(inUV + thinLensGuideOffset);
+        bool lensHit = false;
+        PathTracingPayload lensPayload = TraceOpaqueFromScreenUv(lensUv, launchDim, seed, lensHit);
+        if (lensHit)
+        {
+            finalPayload = lensPayload;
+            finalOpaqueHit = 1u;
+            finalGuideUv = lensUv;
+        }
+    }
+
+    WritePrimaryHitGBuffer(pixel, finalPayload, finalOpaqueHit != 0u, ProjectionParams.w, float2(0.0f, 0.0f));
+    if (firstTranslucentHit != 0u && finalOpaqueHit != 0u)
+        OutputColor[pixel] = float4(finalGuideUv, saturate(float(consumedLayers) / float(MAX_REFRACTED_GUIDE_LAYERS)), 1.0f);
+    WriteRefractedGuideDebug(pixel, firstTranslucentHit, consumedLayers, finalOpaqueHit);
 }
 
 [shader("raygeneration")]
@@ -471,6 +686,16 @@ void PathTracingRayGen()
     
     uint frameCounter = (DebugMode > 0) ? 0 : BlueNoiseOffsetStride;
     uint sampleCount = (DebugMode > 0) ? 1u : clamp(SamplesPerPixel, 1u, 16u);
+    if (bRefractedGuideGBufferOnly != 0)
+    {
+        TraceRefractedGuideGBufferSample(
+            launchIndex.xy,
+            pixelCenter,
+            float2(launchDim.xy),
+            -RandomOffset,
+            init_path_seed(launchIndex.xy, frameCounter, 0u));
+        return;
+    }
     if (bPrimaryGBufferOnly != 0)
     {
         PathTracingPayload payload = TracePrimaryGBufferSample(
@@ -901,7 +1126,8 @@ void PathTracingClosestHit(inout PathTracingPayload payload, in BuiltInTriangleI
     payload.hitDistance = hitDistance;
     
     // Get material properties
-    float3 albedo = SamplePathTracingAlbedo(material, vertex.uv, textureMipLevel).xyz;
+    float4 albedoSample = SamplePathTracingAlbedo(material, vertex.uv, textureMipLevel);
+    float3 albedo = albedoSample.xyz;
     float roughness = clamp(SamplePathTracingRoughness(material, vertex.uv, textureMipLevel), 0.02f, 1.0f);
     float metallic = saturate(SamplePathTracingMetallic(material, vertex.uv, textureMipLevel));
 
@@ -919,6 +1145,8 @@ void PathTracingClosestHit(inout PathTracingPayload payload, in BuiltInTriangleI
         payload.debugUV = vertex.uv;
         payload.debugInstanceID = instanceID;
         payload.debugTriangleIndex = triangleIndex;
+        payload.debugMaterialFlags = material.Flags;
+        payload.debugAlpha = saturate(albedoSample.w);
     }
     
     // Sample normal map when a valid tangent basis exists. Models without UVs

@@ -46,6 +46,7 @@ cbuffer ViewParameter : register(b0)
     uint _rtaoPadding;
     uint _pointLightPadding0;
     uint PointLightCount;
+    uint _pointLightPadding1;
     float3 PointLightPadding;
 };
 

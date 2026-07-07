@@ -407,8 +407,10 @@ public:
 	virtual ~GraphicsBindGroupHandle() = default;
 };
 
-inline constexpr uint32_t kRTRayMaskAll = 0xFFu;
+inline constexpr uint32_t kRTRayMaskOpaque = 0x01u;
 inline constexpr uint32_t kRTRayMaskShadow = 0x02u;
+inline constexpr uint32_t kRTRayMaskTranslucent = 0x04u;
+inline constexpr uint32_t kRTRayMaskAll = 0xFFu;
 
 struct RTInstanceDesc
 {

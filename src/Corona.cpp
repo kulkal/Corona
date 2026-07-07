@@ -3680,7 +3680,10 @@ bool Corona::RenderResolutionResourcesMatchCurrentState() const
 		 !textureMatches(ShadowBuffer, renderWidth, renderHeight) ||
 		 !textureMatches(DLSSRRBuffer, renderWidth, renderHeight) ||
 		 !textureMatches(PathTracingSpecularHitDistanceBuffer, renderWidth, renderHeight) ||
-		 !textureMatches(PathTracingSpecularMotionVectorBuffer, renderWidth, renderHeight)))
+		 !textureMatches(PathTracingSpecularMotionVectorBuffer, renderWidth, renderHeight) ||
+		 !textureMatches(RTRefractedGuideDummyGeomNormalBuffer, renderWidth, renderHeight) ||
+		 !textureMatches(RTRefractedGuideDummySpecularHitDistanceBuffer, renderWidth, renderHeight) ||
+		 !textureMatches(RTRefractedGuideDummySpecularMotionVectorBuffer, renderWidth, renderHeight)))
 		return false;
 
 	return true;
@@ -3844,6 +3847,9 @@ void Corona::RecreateRenderResolutionResources()
 	releaseTexture(TranslucentGuideSpecularAlbedoBuffer);
 	releaseTexture(PathTracingSpecularHitDistanceBuffer);
 	releaseTexture(PathTracingSpecularMotionVectorBuffer);
+	releaseTexture(RTRefractedGuideDummyGeomNormalBuffer);
+	releaseTexture(RTRefractedGuideDummySpecularHitDistanceBuffer);
+	releaseTexture(RTRefractedGuideDummySpecularMotionVectorBuffer);
 	releaseTexture(DepthBuffer);
 	releaseTexture(GBufferOccluderDepthDebugBuffer);
 	releaseTexture(GBufferOccluderDepthDebugDepthBuffer);
@@ -4068,6 +4074,15 @@ void Corona::RecreateRenderResolutionResources()
 
 		PathTracingSpecularMotionVectorBuffer = createTexture2D(ETextureFormat::RG16Float, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1, glm::vec4(0.0f));
 		NAME_D3D12_OBJECT(PathTracingSpecularMotionVectorBuffer->resource);
+
+		RTRefractedGuideDummyGeomNormalBuffer = createTexture2D(normalBufferFormat, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1, normalClearValue);
+		NAME_D3D12_OBJECT(RTRefractedGuideDummyGeomNormalBuffer->resource);
+
+		RTRefractedGuideDummySpecularHitDistanceBuffer = createTexture2D(ETextureFormat::R32Float, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1, glm::vec4(Far));
+		NAME_D3D12_OBJECT(RTRefractedGuideDummySpecularHitDistanceBuffer->resource);
+
+		RTRefractedGuideDummySpecularMotionVectorBuffer = createTexture2D(ETextureFormat::RG16Float, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1, glm::vec4(0.0f));
+		NAME_D3D12_OBJECT(RTRefractedGuideDummySpecularMotionVectorBuffer->resource);
 	}
 
 	DepthBuffer = createTexture2D(ETextureFormat::D32Float, TextureUsage_DepthStencil, RenderWidthLocal, RenderHeightLocal, 1);
@@ -13582,6 +13597,15 @@ void Corona::LoadAssets()
 
 		PathTracingSpecularMotionVectorBuffer = createTexture2D(ETextureFormat::RG16Float, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1, glm::vec4(0.0f));
 		NAME_D3D12_OBJECT(PathTracingSpecularMotionVectorBuffer->resource);
+
+		RTRefractedGuideDummyGeomNormalBuffer = createTexture2D(normalBufferFormat, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1, normalClearValue);
+		NAME_D3D12_OBJECT(RTRefractedGuideDummyGeomNormalBuffer->resource);
+
+		RTRefractedGuideDummySpecularHitDistanceBuffer = createTexture2D(ETextureFormat::R32Float, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1, glm::vec4(Far));
+		NAME_D3D12_OBJECT(RTRefractedGuideDummySpecularHitDistanceBuffer->resource);
+
+		RTRefractedGuideDummySpecularMotionVectorBuffer = createTexture2D(ETextureFormat::RG16Float, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1, glm::vec4(0.0f));
+		NAME_D3D12_OBJECT(RTRefractedGuideDummySpecularMotionVectorBuffer->resource);
 	}
 
 	// depth
@@ -17147,10 +17171,12 @@ void Corona::OnRender()
 			renderBackend->GetAPI() == ERenderBackendAPI::Vulkan;
 
 		// Hybrid rendering: GBuffer + raytracing.
+		bool bRtPrimaryGBufferWritten = false;
 		BeginGpuPassTiming(EGpuPass::GBuffer);
 		if (GBufferGenerationMode == EGBufferGenerationMode::RtPrimary && !bHybridDirectOnly)
 		{
-			if (!RaytracePrimaryGBufferPass())
+			bRtPrimaryGBufferWritten = RaytracePrimaryGBufferPass();
+			if (!bRtPrimaryGBufferWritten)
 			{
 				static bool sLoggedRtPrimaryGBufferFallback = false;
 				if (!sLoggedRtPrimaryGBufferFallback)
@@ -17190,6 +17216,46 @@ void Corona::OnRender()
 			BeginGpuPassTiming(EGpuPass::SpatialLightMask);
 			SpatialHashLightMaskPass();
 			EndGpuPassTiming(EGpuPass::SpatialLightMask);
+		}
+
+		bool bRtPrimaryTranslucentGuideAttempted = false;
+		if (bRunLighting && IsTranslucentPreLightingRefractedGBufferEnabled())
+		{
+			auto runRasterTranslucentGuide = [&]()
+			{
+				const bool bGuideWritten = TranslucentPreLightingGuidePass();
+				if (bGuideWritten && GetEnvBool(L"CORONA_TRANSLUCENT_PRELIGHT_WARP", true))
+				{
+					Texture* refractedDepthGuide = UnjitteredDepthBuffers[ColorBufferWriteIndex].get();
+					Texture* refractedMotionGuide = VelocityBuffer.get();
+					Texture* refractedNormalGuide = NormalBuffers[ColorBufferWriteIndex].get();
+					Texture* refractedRoughnessGuide = RoughnessMetalicBuffer.get();
+					Texture* refractedAlbedoGuide = AlbedoBuffer.get();
+					Texture* refractedSpecularAlbedoGuide = SpecularAlbedoBuffer.get();
+					bTranslucentRefractedGBufferActiveThisFrame = PrepareTranslucentDLSSRRGuideBuffers(
+						refractedDepthGuide,
+						refractedMotionGuide,
+						refractedNormalGuide,
+						refractedRoughnessGuide,
+						refractedAlbedoGuide,
+						refractedSpecularAlbedoGuide,
+						true);
+				}
+			};
+			if (bRtPrimaryGBufferWritten)
+			{
+				bRtPrimaryTranslucentGuideAttempted = true;
+				bTranslucentRefractedGBufferActiveThisFrame = RaytraceTranslucentRefractedGuideGBufferPass();
+				if (!bTranslucentRefractedGBufferActiveThisFrame)
+				{
+					if ((FrameCounter % 120u) == 0u)
+						AppendCpuRuntimeTrace(L"[TranslucentRefractedGuide] RT guide unavailable; drawing surface-only translucent pass in RT-primary mode");
+				}
+			}
+			else
+			{
+				runRasterTranslucentGuide();
+			}
 		}
 
 		const bool bAsyncShadowAOOverlapAvailable =
@@ -17346,31 +17412,10 @@ void Corona::OnRender()
 		{
 			if (bAsyncShadowAOOverlapActive && renderBackend && renderBackend->HasPendingAsyncRtWork())
 				renderBackend->SubmitGraphicsWorkAndWaitForAsyncRt();
-			if (IsTranslucentPreLightingRefractedGBufferEnabled())
-			{
-				const bool bGuideWritten = TranslucentPreLightingGuidePass();
-				if (bGuideWritten && GetEnvBool(L"CORONA_TRANSLUCENT_PRELIGHT_WARP", true))
-				{
-					Texture* refractedDepthGuide = UnjitteredDepthBuffers[ColorBufferWriteIndex].get();
-					Texture* refractedMotionGuide = VelocityBuffer.get();
-					Texture* refractedNormalGuide = NormalBuffers[ColorBufferWriteIndex].get();
-					Texture* refractedRoughnessGuide = RoughnessMetalicBuffer.get();
-					Texture* refractedAlbedoGuide = AlbedoBuffer.get();
-					Texture* refractedSpecularAlbedoGuide = SpecularAlbedoBuffer.get();
-					bTranslucentRefractedGBufferActiveThisFrame = PrepareTranslucentDLSSRRGuideBuffers(
-						refractedDepthGuide,
-						refractedMotionGuide,
-						refractedNormalGuide,
-						refractedRoughnessGuide,
-						refractedAlbedoGuide,
-						refractedSpecularAlbedoGuide,
-						true);
-				}
-			}
 			BeginGpuPassTiming(EGpuPass::Lighting);
 			LightingPass();
 			EndGpuPassTiming(EGpuPass::Lighting);
-			if (bTranslucentRefractedGBufferActiveThisFrame)
+			if (bTranslucentRefractedGBufferActiveThisFrame || bRtPrimaryTranslucentGuideAttempted)
 				TranslucentSurfaceLightingPass();
 			else
 				TranslucentMeshPass();

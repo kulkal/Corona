@@ -11,6 +11,7 @@ struct RTMaterialRecord
 	uint MetallicTextureIndex;
 	float4 BaseColorFactor;
 	float AlbedoLodConstant; // 0.5*log2(albedo w*h), precomputed on CPU
+	uint Flags;
 };
 
 Texture2D MaterialTextures[] : register(t0, space10);

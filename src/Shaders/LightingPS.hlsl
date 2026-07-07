@@ -25,6 +25,7 @@ Texture2D GIResultColorTex : register(t6);
 Texture2D SpecularGITex : register(t7);
 Texture2D RoughnessMetalicTex : register(t8);
 Texture2D AmbientOcclusionTex : register(t14);
+Texture2D TranslucentGuideUVTex : register(t17);
 
 
 
@@ -77,7 +78,8 @@ cbuffer LightingParam : register(b0)
     //     up to three signed light indices: abs(value)-1 is the light index,
     //     sign is hard visibility.
     uint ShadowMode;
-    uint3 _paddingAfterShadowMode;
+    uint TranslucentGuideFlags;
+    uint2 _paddingAfterShadowMode;
     float4 AmbientSkyColorAndStrength;
     float4 AmbientGroundColorAndStrength;
     // Option A channel-pack map: 4 light->channel entries per uint4.
@@ -90,6 +92,22 @@ cbuffer LightingParam : register(b0)
     float UnselectedShadowCasterVisibility;
     float PointLightPadding;
 };
+
+static const uint TRANSLUCENT_GUIDE_FLAG_USE = 1u;
+static const uint TRANSLUCENT_GUIDE_FLAG_OFFSET = 2u;
+
+float2 ResolveLightingReceiverProjectionUv(uint2 pixelPos, float2 dstUv)
+{
+    if ((TranslucentGuideFlags & TRANSLUCENT_GUIDE_FLAG_USE) == 0u)
+        return dstUv;
+
+    float4 guide = TranslucentGuideUVTex.Load(int3(pixelPos, 0));
+    if (guide.w <= 0.0001f)
+        return dstUv;
+
+    const bool guideStoresOffset = (TranslucentGuideFlags & TRANSLUCENT_GUIDE_FLAG_OFFSET) != 0u;
+    return saturate(guideStoresOffset ? (dstUv + guide.xy) : guide.xy);
+}
 
 struct VSInput
 {
@@ -210,7 +228,7 @@ float SampleShadowMapVisibility(float2 shadowUV, float receiverDepth, float3 wor
     return (receiverDepth - depthBias <= blockerDepth) ? 1.0f : 0.0f;
 }
 
-float3 EvaluateDirectionalVisibility(float2 screenUV, float deviceDepth, float3 worldNormal)
+float3 EvaluateDirectionalVisibility(float2 screenUV, float2 receiverProjectionUV, float deviceDepth, float3 worldNormal)
 {
     if (bEnableDirectionalShadow == 0 || deviceDepth >= 0.999999f)
         return 1.0f.xxx;
@@ -225,7 +243,7 @@ float3 EvaluateDirectionalVisibility(float2 screenUV, float deviceDepth, float3 
         return sunVis.xxx;
     }
 
-    float3 worldPosition = ReconstructWorldPosition(screenUV, deviceDepth);
+    float3 worldPosition = ReconstructWorldPosition(receiverProjectionUV, deviceDepth);
     worldPosition += SafeNormalize(worldNormal, float3(0.0f, 1.0f, 0.0f)) * 1.75f;
     float4 shadowClip = mul(float4(worldPosition, 1.0f), ShadowViewProjectionMatrix);
     if (abs(shadowClip.w) <= 1.0e-5f)
@@ -288,6 +306,8 @@ float4 PSMain(PSInput input) : SV_TARGET
     input.uv.y = 1 - input.uv.y;
     float2 screenUV = input.uv;
     float2 PixelPos = input.uv * RTSize;
+    uint2 pixelPos = min(uint2(PixelPos), uint2(max(RTSize.x, 1.0f) - 1.0f, max(RTSize.y, 1.0f) - 1.0f));
+    float2 receiverProjectionUV = ResolveLightingReceiverProjectionUv(pixelPos, screenUV);
 
 
     // LightingOutputMode: 0 = full composite, 1 = direct only, 2 = mobile direct
@@ -311,9 +331,9 @@ float4 PSMain(PSInput input) : SV_TARGET
     // ddx/ddy are well-defined. Garbage at depth silhouettes is acceptable here.
     if (LightingOutputMode == 5u && DeviceDepth < 0.999999f)
     {
-        float3 wp = ReconstructWorldPosition(screenUV, DeviceDepth);
+        float3 wp = ReconstructWorldPosition(receiverProjectionUV, DeviceDepth);
         float3 geoNormal = normalize(cross(ddx(wp), ddy(wp)));
-        float3 viewDir = ComputeSurfaceToViewDirection(screenUV);
+        float3 viewDir = ComputeSurfaceToViewDirection(receiverProjectionUV);
         if (dot(geoNormal, viewDir) < 0.0f)
             geoNormal = -geoNormal;
         WorldNormal = SafeNormalize(geoNormal, WorldNormal);
@@ -328,7 +348,7 @@ float4 PSMain(PSInput input) : SV_TARGET
     if (DeviceDepth >= 0.999999f)
         return float4(EvaluateSkyBackground(screenUV), 1.0f);
 
-    float3 DirectVisibility = EvaluateDirectionalVisibility(screenUV, DeviceDepth, WorldNormal);
+    float3 DirectVisibility = EvaluateDirectionalVisibility(screenUV, receiverProjectionUV, DeviceDepth, WorldNormal);
 
     float2 Velocity = VelocityTex[PixelPos];
 
@@ -368,7 +388,7 @@ float4 PSMain(PSInput input) : SV_TARGET
         (WrappedNdotL * LightIntensity * LightColor * Albedo * (1.0f - Metallic) * DirectVisibility + GrassSSS) :
         float3(0, 0, 0);
 
-    float3 V = ComputeSurfaceToViewDirection(screenUV);
+    float3 V = ComputeSurfaceToViewDirection(receiverProjectionUV);
     float NdotV = saturate(dot(WorldNormal, V));
 
     float3 SpecularColor = FresnelSchlick(NdotV, F0);
@@ -400,7 +420,7 @@ float4 PSMain(PSInput input) : SV_TARGET
             saturate(SanitizeFloat4(ShadowTex[uint2(screenUV * RTSize)])) :
             float4(1.0f, 1.0f, 1.0f, 1.0f);
 
-        float3 WorldPosition = ReconstructWorldPosition(screenUV, DeviceDepth);
+        float3 WorldPosition = ReconstructWorldPosition(receiverProjectionUV, DeviceDepth);
         uint activePointLightCount = min(PointLightCount, MAX_POINT_LIGHTS);
 
         if (ShadowMode == 1u)

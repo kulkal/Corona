@@ -45,6 +45,7 @@ StructuredBuffer<PointLightParam> PointLightBuffer : register(t16);
 #define POINT_LIGHT_GRID_INDICES_REGISTER t18
 #include "PointLightGrid.hlsli"
 RaytracingAccelerationStructure gRtDynamicScene : register(t19);
+Texture2D TranslucentGuideUVTex : register(t20);
 
 
 cbuffer ViewParameter : register(b0)
@@ -77,7 +78,7 @@ cbuffer ViewParameter : register(b0)
     uint SpatialLightMaxProbeSteps;
     uint bUseSpatialLightMask;
     uint bHasDynamicRtScene;
-    uint _DynamicRtScenePadding;
+    uint TranslucentGuideFlags;
     float4 SpatialHashLevelParams;
     // Must match Corona::MaxPointLights in Corona.h. Option A reads only
     // the first 3 entries; ReSTIR iterates all valid entries.
@@ -88,6 +89,22 @@ cbuffer ViewParameter : register(b0)
     float4 ShadowedPointLightWeights[MAX_SHADOWED_PT_LIGHTS];
 };
 SamplerState sampleWrap : register(s0);
+
+static const uint TRANSLUCENT_GUIDE_FLAG_USE = 1u;
+static const uint TRANSLUCENT_GUIDE_FLAG_OFFSET = 2u;
+
+float2 ResolveShadowReceiverProjectionUv(uint2 pixelPos, float2 dstUv)
+{
+    if ((TranslucentGuideFlags & TRANSLUCENT_GUIDE_FLAG_USE) == 0u)
+        return dstUv;
+
+    float4 guide = TranslucentGuideUVTex.Load(int3(pixelPos, 0));
+    if (guide.w <= 0.0001f)
+        return dstUv;
+
+    const bool guideStoresOffset = (TranslucentGuideFlags & TRANSLUCENT_GUIDE_FLAG_OFFSET) != 0u;
+    return saturate(guideStoresOffset ? (dstUv + guide.xy) : guide.xy);
+}
 
 float3 linearToSrgb(float3 c)
 {
@@ -440,7 +457,8 @@ float3 FilterShadowVisibilityNormal(
                 continue;
 
             const float2 sampleUv = (float2(samplePixel) + float2(0.5f, 0.5f)) / launchSize;
-            const float sampleLinearDepth = ReconstructLinearViewDepth(sampleUv, sampleDepth);
+            const float2 sampleProjectionUv = ResolveShadowReceiverProjectionUv(uint2(samplePixel), sampleUv);
+            const float sampleLinearDepth = ReconstructLinearViewDepth(sampleProjectionUv, sampleDepth);
             const float depthDelta = abs(sampleLinearDepth - currentLinearDepth);
             if (depthDelta > depthTolerance)
                 continue;
@@ -593,6 +611,7 @@ void ExecuteShadowPass(uint2 pixelPos, uint2 launchDim)
 {
     float2 launchSize = float2(max(launchDim.x, 1u), max(launchDim.y, 1u));
     float2 uv = (float2(pixelPos) + float2(0.5f, 0.5f)) / launchSize;
+    float2 receiverProjectionUv = ResolveShadowReceiverProjectionUv(pixelPos, uv);
 	float deviceDepth = DepthTex.SampleLevel(sampleWrap, uv, 0).x;
     if (deviceDepth >= 0.999999f)
     {
@@ -600,7 +619,7 @@ void ExecuteShadowPass(uint2 pixelPos, uint2 launchDim)
         return;
     }
 
-	float2 screenPosition = uv * 2.0f - 1.0f;
+	float2 screenPosition = receiverProjectionUv * 2.0f - 1.0f;
 	screenPosition.y = -screenPosition.y;
 	float3 viewPosition = GetViewPosition(deviceDepth, screenPosition, InvProjMatrix);
 	float3 worldPos = mul(float4(viewPosition, 1.0f), InvViewMatrix).xyz;
@@ -1111,7 +1130,8 @@ void ExecuteShadowPass(uint2 pixelPos, uint2 launchDim)
             const float2 spatialUv = (float2(spatialPx) + 0.5f) / launchSize;
             const float spatialDepth = DepthTexPrev.Load(int3(spatialPx, 0)).x;
             const float3 spatialNormal = WorldNormalTexPrev.Load(int3(spatialPx, 0)).xyz;
-            if (!ReSTIRSurfaceCompatible(spatialUv, spatialDepth, spatialNormal, currentLinearDepth, worldNormal))
+            const float2 spatialProjectionUv = ResolveShadowReceiverProjectionUv(uint2(spatialPx), spatialUv);
+            if (!ReSTIRSurfaceCompatible(spatialProjectionUv, spatialDepth, spatialNormal, currentLinearDepth, worldNormal))
                 continue;
             // Integer-coord point sampling. SampleLevel bilinear on a
             // RGBA32F reservoir whose .g channel encodes lightIdx as a
@@ -1173,7 +1193,9 @@ void ExecuteShadowPass(uint2 pixelPos, uint2 launchDim)
             const int2 prevPx = int2(prevUV * launchSize);
             const float prevDepth = DepthTexPrev.Load(int3(prevPx, 0)).x;
             const float3 prevNormal = WorldNormalTexPrev.Load(int3(prevPx, 0)).xyz;
-            if (ReSTIRSurfaceCompatible((float2(prevPx) + 0.5f) / launchSize, prevDepth, prevNormal, currentLinearDepth, worldNormal))
+            const float2 prevPixelUv = (float2(prevPx) + 0.5f) / launchSize;
+            const float2 prevProjectionUv = ResolveShadowReceiverProjectionUv(uint2(prevPx), prevPixelUv);
+            if (ReSTIRSurfaceCompatible(prevProjectionUv, prevDepth, prevNormal, currentLinearDepth, worldNormal))
             {
                 const float4 prev = ShadowReservoirPrev.Load(int3(prevPx, 0));
                 const uint prevIdx = (uint)(prev.g + 0.5f);

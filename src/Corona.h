@@ -319,6 +319,9 @@ private:
 	shared_ptr<Texture> TranslucentGuideSpecularAlbedoBuffer;
 	shared_ptr<Texture> PathTracingSpecularHitDistanceBuffer;
 	shared_ptr<Texture> PathTracingSpecularMotionVectorBuffer;
+	shared_ptr<Texture> RTRefractedGuideDummyGeomNormalBuffer;
+	shared_ptr<Texture> RTRefractedGuideDummySpecularHitDistanceBuffer;
+	shared_ptr<Texture> RTRefractedGuideDummySpecularMotionVectorBuffer;
 	// ReSTIR GI on specular RT path — per-pixel reservoir storage.
 	// `*A`: .xyz = chosen sample's hit world position, .w = M
 	// (effective sample count). `*B`: .xyz = radiance leaving the
@@ -907,7 +910,9 @@ private:
 		UINT32 SpatialLightMaxProbeSteps = 8u;
 		UINT32 bUseSpatialLightMask = 0u;
 		UINT32 bHasDynamicRtScene = 0u;
-		UINT32 DynamicRtScenePadding = 0u;
+		// Bit 0: use TranslucentDistortionBuffer as receiver projection UV.
+		// Bit 1: guide stores an offset from current UV instead of absolute UV.
+		UINT32 TranslucentGuideFlags = 0u;
 		glm::vec4 SpatialHashLevelParams = glm::vec4(0.0f, 600.0f, 0.0f, 0.0f);
 		// Up to MaxDiffuseGIPointLights candidates. Option A reads only
 		// the first 3 (channel-pack hard cap); ReSTIR uses the shared
@@ -1167,8 +1172,17 @@ private:
 		UINT32 bPrimaryGBufferOnly = 0;
 		UINT32 _pointLightPadding0 = 0;
 		UINT32 PointLightCount = 0;
+		UINT32 _pointLightPadding1 = 0;
 		glm::vec3 PointLightPadding = glm::vec3(0.0f);
+		UINT32 bRefractedGuideGBufferOnly = 0;
+		UINT32 RefractedGuideMaxLayers = 4;
+		float RefractedGuideIOR = 1.45f;
+		float RefractedGuideRayBias = 0.05f;
+		UINT32 bRefractedGuideDebug = 0;
 	};
+	static_assert(offsetof(PathTracingViewParamCB, PointLightPadding) % 16u == 0u, "PathTracingViewParamCB PointLightPadding must match HLSL packing.");
+	static_assert(offsetof(PathTracingViewParamCB, RefractedGuideMaxLayers) % 16u == 0u, "PathTracingViewParamCB refracted guide controls must match HLSL packing.");
+	static_assert(sizeof(PathTracingViewParamCB) % 16u == 0u, "PathTracingViewParamCB must keep 16-byte cbuffer alignment.");
 
 	struct RTMaterialRecord
 	{
@@ -1180,8 +1194,9 @@ private:
 		// 0.5*log2(albedo w*h), precomputed so RT closest-hit shaders skip the
 		// per-hit GetDimensions() + log2() for ray-cone texture LOD.
 		float AlbedoLodConstant = 0.0f;
+		UINT32 Flags = 0;
 	};
-	static_assert(sizeof(RTMaterialRecord) == 36, "RTMaterialRecord layout must match BindlessResources.hlsli");
+	static_assert(sizeof(RTMaterialRecord) == 40, "RTMaterialRecord layout must match BindlessResources.hlsli");
 
 	struct RTMaterialDrawRangeRecord
 	{
@@ -1398,7 +1413,9 @@ private:
 		// Mirror RTShadowViewParamCB::ShadowMode (0 = Option A, 1 = ReSTIR
 		// Phase 1). LightingPS branches its point-light loop accordingly.
 		UINT32 ShadowMode = 0;
-		UINT32 _paddingAfterShadowMode[3] = {};
+		// Same bit layout as RTShadowViewParamCB::TranslucentGuideFlags.
+		UINT32 TranslucentGuideFlags = 0;
+		UINT32 _paddingAfterShadowMode[2] = {};
 		glm::vec4 AmbientSkyColorAndStrength = glm::vec4(0.0f);
 		glm::vec4 AmbientGroundColorAndStrength = glm::vec4(0.0f);
 		// Option A channel-pack map: global lightIndex -> channel index
@@ -3835,6 +3852,7 @@ public:
 
 	void GBufferPass();
 	bool RaytracePrimaryGBufferPass();
+	bool RaytraceTranslucentRefractedGuideGBufferPass();
 	void RoadDecalPass();
 	void MobileShadowMapPass();
 

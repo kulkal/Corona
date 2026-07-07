@@ -46,7 +46,7 @@ cbuffer ViewParameter : register(b0)
     uint SpatialLightMaxProbeSteps;
     uint bUseSpatialLightMask;
     uint bHasDynamicRtScene;
-    uint _DynamicRtScenePadding;
+    uint TranslucentGuideFlags;
     float4 SpatialHashLevelParams;
     #define MAX_SHADOWED_PT_LIGHTS 16
     float4 ShadowedPointLights[MAX_SHADOWED_PT_LIGHTS];

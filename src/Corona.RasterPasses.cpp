@@ -35,6 +35,7 @@ namespace
 {
 	using GBufferProfileClock = std::chrono::steady_clock;
 	constexpr float kRenderWorldCullingCellSize = 4096.0f;
+	constexpr float kRasterTranslucentRefractionPixelsPerScale = 24.0f;
 	constexpr uint32_t kParallelCullingIndexBuildThreshold = 1024u;
 	constexpr uint32_t kParallelCellFrustumCullThreshold = 512u;
 	constexpr uint32_t kParallelFrustumCullThreshold = 2048u;
@@ -2527,7 +2528,7 @@ bool Corona::TranslucentPreLightingGuidePass()
 	};
 
 	const float distortionScale = std::clamp(getPersistentNumber("transparency_layers.distortion_scale", 1.0f), 0.0f, 12.0f);
-	const float refractionPixels = 6.0f * distortionScale;
+	const float refractionPixels = kRasterTranslucentRefractionPixelsPerScale * distortionScale;
 	const float invWidth = 1.0f / static_cast<float>(std::max<UINT>(GetRenderWidth(), 1u));
 	const float invHeight = 1.0f / static_cast<float>(std::max<UINT>(GetRenderHeight(), 1u));
 
@@ -2815,7 +2816,7 @@ bool Corona::TranslucentPreLightingGuidePass()
 	const float layerAlpha = std::clamp(getPersistentNumber("transparency_layers.alpha", 0.24f), 0.0f, 1.0f);
 	const float shapeAlpha = std::clamp(getPersistentNumber("transparency_layers.shape_alpha", 0.34f), 0.0f, 1.0f);
 	const float guideAlpha = std::clamp(std::max(maxSceneAlpha, std::max(layerAlpha, shapeAlpha)), 0.0f, 1.0f);
-	const float refractionPixels = 6.0f * distortionScale;
+	const float refractionPixels = kRasterTranslucentRefractionPixelsPerScale * distortionScale;
 
 	TranslucentPreLightingGuideCB cb{};
 	cb.RenderTargetParams = glm::vec4(
@@ -3002,7 +3003,7 @@ void Corona::TranslucentMeshPass()
 	const float tintStrength = std::clamp(getPersistentNumber("transparency_layers.tint_strength", 0.22f), 0.0f, 1.0f);
 	const float fresnelPower = std::clamp(getPersistentNumber("transparency_layers.fresnel_power", 2.35f), 0.25f, 8.0f);
 	const bool bRefractionOnly = getPersistentBool("transparency_layers.refraction_only", false);
-	const float refractionPixels = 6.0f * distortionScale;
+	const float refractionPixels = kRasterTranslucentRefractionPixelsPerScale * distortionScale;
 	const float reflectionPixels = 28.0f * reflectionScale;
 
 	auto buildTranslucentCB = [&](const TranslucentDraw& item, uint32_t drawOrdinal)
@@ -3105,9 +3106,33 @@ void Corona::TranslucentSurfaceLightingPass()
 		!TranslucentSurfaceLightingGraphicsPipeline ||
 		!LightingBuffer ||
 		!TranslucentBackgroundBuffer ||
+		!TranslucentDistortionBuffer ||
 		!TranslucentSurfaceBuffer ||
 		!TranslucentGuideRasterDepthBuffer)
 	{
+		return;
+	}
+
+	auto getPersistentBool = [this](const char* name, bool fallback)
+	{
+		const auto result = PersistentScriptControls.find(name);
+		if (result != PersistentScriptControls.end() && result->second.Type == PersistentScriptControlType::Bool)
+			return result->second.Bool;
+		return fallback;
+	};
+	const bool bRefractionOnly = getPersistentBool("transparency_layers.refraction_only", false);
+	const bool bUsePrelitRefractedGBuffer =
+		bTranslucentRefractedGBufferActiveThisFrame &&
+		TranslucentDistortionBuffer != nullptr;
+	if (bRefractionOnly && !bUsePrelitRefractedGBuffer)
+	{
+		renderBackend->TransitionTexture(TranslucentSurfaceBuffer.get(), EResourceState::ShaderRead, EResourceState::RenderTarget);
+		const float translucentSurfaceClearColor[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+		renderBackend->ClearRenderTarget(TranslucentSurfaceBuffer.get(), translucentSurfaceClearColor);
+		renderBackend->TransitionTexture(TranslucentSurfaceBuffer.get(), EResourceState::RenderTarget, EResourceState::ShaderRead);
+		static uint32_t s_logCounter = 0;
+		if ((++s_logCounter % 120u) == 0u)
+			AppendCpuRuntimeTrace(L"[TranslucentSurfaceLightingPass] skipped: refractionOnly=1");
 		return;
 	}
 
@@ -3175,13 +3200,6 @@ void Corona::TranslucentSurfaceLightingPass()
 			return result->second.Number;
 		return fallback;
 	};
-	auto getPersistentBool = [this](const char* name, bool fallback)
-	{
-		const auto result = PersistentScriptControls.find(name);
-		if (result != PersistentScriptControls.end() && result->second.Type == PersistentScriptControlType::Bool)
-			return result->second.Bool;
-		return fallback;
-	};
 	auto matrixIsFinite = [](const glm::mat4x4& m)
 	{
 		for (int c = 0; c < 4; ++c)
@@ -3208,8 +3226,7 @@ void Corona::TranslucentSurfaceLightingPass()
 	const float surfaceStrength = std::clamp(getPersistentNumber("transparency_layers.surface_strength", 0.55f), 0.0f, 1.0f);
 	const float tintStrength = std::clamp(getPersistentNumber("transparency_layers.tint_strength", 0.22f), 0.0f, 1.0f);
 	const float fresnelPower = std::clamp(getPersistentNumber("transparency_layers.fresnel_power", 2.35f), 0.25f, 8.0f);
-	const bool bRefractionOnly = getPersistentBool("transparency_layers.refraction_only", false);
-	const float refractionPixels = 6.0f * distortionScale;
+	const float refractionPixels = kRasterTranslucentRefractionPixelsPerScale * distortionScale;
 	const float reflectionPixels = 28.0f * reflectionScale;
 
 	auto buildTranslucentCB = [&](const TranslucentDraw& item, uint32_t drawOrdinal)
@@ -3336,6 +3353,17 @@ bool Corona::PrepareTranslucentDLSSRRGuideBuffers(
 	};
 	if (!bForce && !getPersistentBool("transparency_layers.dlssrr_guide_warp", true))
 		return false;
+
+	if (bTranslucentRefractedGBufferActiveThisFrame)
+	{
+		depthGuide = TranslucentGuideDepthBuffer.get();
+		velocityGuide = TranslucentGuideVelocityBuffer.get();
+		normalGuide = TranslucentGuideNormalBuffer.get();
+		roughnessGuide = TranslucentGuideRoughnessBuffer.get();
+		albedoGuide = TranslucentGuideAlbedoBuffer.get();
+		specularAlbedoGuide = TranslucentGuideSpecularAlbedoBuffer.get();
+		return true;
+	}
 
 	if (!TranslucentGuideWarpPSO)
 	{
@@ -3626,6 +3654,7 @@ void Corona::InitLightingPass()
 		MakeRHITextureSRV("AmbientOcclusionTex", 14, lightingPixelStage),
 		MakeRHIBufferSRV("PointLightGridCounts", 15, lightingPixelStage),
 		MakeRHIBufferSRV("PointLightGridIndices", 16, lightingPixelStage),
+		MakeRHITextureSRV("TranslucentGuideUVTex", 17, lightingPixelStage),
 		MakeRHISampler("sampleWrap", 0, lightingPixelStage),
 	};
 
@@ -4924,6 +4953,12 @@ void Corona::LightingPass()
 	Texture* lightingVelocityTex = bUseTranslucentRefractedGBuffer ? TranslucentGuideVelocityBuffer.get() : VelocityBuffer.get();
 	Texture* lightingDepthTex = bUseTranslucentRefractedGBuffer ? TranslucentGuideDepthBuffer.get() : gbufferDepthTex;
 	Texture* lightingRoughnessTex = bUseTranslucentRefractedGBuffer ? TranslucentGuideRoughnessBuffer.get() : RoughnessMetalicBuffer.get();
+	Param.TranslucentGuideFlags = bUseTranslucentRefractedGBuffer ? 1u : 0u;
+	if (bUseTranslucentRefractedGBuffer && bTranslucentDistortionGuideIsOffsetThisFrame)
+		Param.TranslucentGuideFlags |= 2u;
+	Texture* lightingGuideUvTex = (Param.TranslucentGuideFlags != 0u && TranslucentDistortionBuffer) ?
+		TranslucentDistortionBuffer.get() :
+		DefaultBlackTex.get();
 
 	static uint32_t sLastRefractedGBufferLighting = 0xFFFFFFFFu;
 	const uint32_t refractedGBufferLighting = bUseTranslucentRefractedGBuffer ? 1u : 0u;
@@ -5008,6 +5043,7 @@ void Corona::LightingPass()
 				GraphicsBindGroupEntry::TextureSRV("SpecularGITex", lightingSpecularTex),
 				GraphicsBindGroupEntry::TextureSRV("RoughnessMetalicTex", lightingRoughnessTex),
 				GraphicsBindGroupEntry::TextureSRV("AmbientOcclusionTex", ambientOcclusionTex),
+				GraphicsBindGroupEntry::TextureSRV("TranslucentGuideUVTex", lightingGuideUvTex),
 				GraphicsBindGroupEntry::BufferSRV("PointLightGridCounts", PointLightGridCountBuffer.get()),
 				GraphicsBindGroupEntry::BufferSRV("PointLightGridIndices", PointLightGridIndexBuffer.get()),
 				GraphicsBindGroupEntry::SamplerBinding("sampleWrap", samplerWrap.get()),

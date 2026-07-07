@@ -290,7 +290,8 @@ namespace
 			instance.Metallic = metallic;
 			instance.bOverrideRoughnessMetallic = bOverrideRoughnessMetallic ? 1u : 0u;
 			instance.SceneObjectIndex = sceneObjectIndex;
-			instance.InstanceMask = instanceMask;
+			instance.InstanceMask = (instanceMask & ~(kRTRayMaskOpaque | kRTRayMaskTranslucent)) |
+				(mesh->bAlphaBlend ? kRTRayMaskTranslucent : kRTRayMaskOpaque);
 			for (const Mesh::DrawCall& draw : mesh->Draws)
 			{
 				if (draw.mat && draw.mat->bHasAlpha)

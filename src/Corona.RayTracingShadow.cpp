@@ -81,6 +81,7 @@ void Corona::InitRaytracingShadowPass()
 		TEMP_PSO_RT_SHADOW->BindSRV("global", MakeRHIBufferSRV("PointLightGridCounts", 17, rayGenStage));
 		TEMP_PSO_RT_SHADOW->BindSRV("global", MakeRHIBufferSRV("PointLightGridIndices", 18, rayGenStage));
 		TEMP_PSO_RT_SHADOW->BindSRV("global", MakeRHIAccelerationStructureSRV("gRtDynamicScene", 19, rayGenStage));
+		TEMP_PSO_RT_SHADOW->BindSRV("global", MakeRHITextureSRV("TranslucentGuideUVTex", 20, rayGenStage));
 
 		TEMP_PSO_RT_SHADOW->BindCBV("global", MakeRHICBV("ViewParameter", 0, sizeof(RTShadowViewParamCB), rayGenStage));
 		TEMP_PSO_RT_SHADOW->BindCBV("global", MakeRHICBV("PointLightGridCB", 1, sizeof(PointLightGridParamCB), rayGenStage));
@@ -127,6 +128,7 @@ void Corona::InitShadowRayQueryPass()
 	tempPSO->BindSRV(MakeRHIBufferSRV("PointLightGridCounts", 17, computeStage));
 	tempPSO->BindSRV(MakeRHIBufferSRV("PointLightGridIndices", 18, computeStage));
 	tempPSO->BindSRV(MakeRHIAccelerationStructureSRV("gRtDynamicScene", 19, computeStage));
+	tempPSO->BindSRV(MakeRHITextureSRV("TranslucentGuideUVTex", 20, computeStage));
 	tempPSO->BindCBV(MakeRHICBV("ViewParameter", 0, sizeof(RTShadowViewParamCB), computeStage));
 	tempPSO->BindCBV(MakeRHICBV("PointLightGridCB", 1, sizeof(PointLightGridParamCB), computeStage));
 	tempPSO->BindSampler(MakeRHISampler("sampleWrap", 0, computeStage));
@@ -342,6 +344,18 @@ void Corona::RaytraceShadowPass()
 	}
 	RTShadowViewParam.ShadowedPointLightCount = shadowedCount;
 
+	const bool bUseTranslucentRefractedGBuffer =
+		bTranslucentRefractedGBufferActiveThisFrame &&
+		GetEnvBool(L"CORONA_TRANSLUCENT_PRELIGHT_SHADOW_GUIDE", true) &&
+		TranslucentDistortionBuffer &&
+		TranslucentGuideDepthBuffer &&
+		TranslucentGuideVelocityBuffer &&
+		TranslucentGuideNormalBuffer;
+	uint32_t translucentGuideFlags = bUseTranslucentRefractedGBuffer ? 1u : 0u;
+	if (bUseTranslucentRefractedGBuffer && bTranslucentDistortionGuideIsOffsetThisFrame)
+		translucentGuideFlags |= 2u;
+	RTShadowViewParam.TranslucentGuideFlags = translucentGuideFlags;
+
 	// Phase 3 proper 2-pass:
 	//   raygen  writes  ShadowBufferPreSpatial + ShadowReservoirMBufferPreSpatial
 	//   compute reads   those, writes the final ShadowBuffer + ShadowReservoirMBuffer
@@ -355,8 +369,11 @@ void Corona::RaytraceShadowPass()
 	// proper balance-heuristic MIS is the follow-up. The
 	// infrastructure (PreSpatial buffers, compute PSO with inline RT,
 	// cs_6_5 compile path) stays in place so re-enabling once MIS is
-	// implemented is a one-flag flip.
+	// implemented is a one-flag flip. The translucent refracted GBuffer path
+	// uses source-UV receiver reprojection, which this neighbour pass does not
+	// understand yet, so keep it on the single-pass path for now.
 	const bool bUseSpatialReuseCompute =
+		!bUseTranslucentRefractedGBuffer &&
 		bEnableShadowSpatialReuseCompute &&
 		bEnableReSTIRDirectShadow &&
 		PSO_SHADOW_SPATIAL_REUSE != nullptr &&
@@ -366,12 +383,6 @@ void Corona::RaytraceShadowPass()
 	Texture* const raygenShadowTarget = bUseSpatialReuseCompute ? ShadowBufferPreSpatial.get() : ShadowBuffer.get();
 	Texture* const raygenMTarget      = bUseSpatialReuseCompute ? ShadowReservoirMBufferPreSpatial.get() : ShadowReservoirMBuffer.get();
 
-	const bool bUseTranslucentRefractedGBuffer =
-		bTranslucentRefractedGBufferActiveThisFrame &&
-		GetEnvBool(L"CORONA_TRANSLUCENT_PRELIGHT_SHADOW_GUIDE", true) &&
-		TranslucentGuideDepthBuffer &&
-		TranslucentGuideVelocityBuffer &&
-		TranslucentGuideNormalBuffer;
 	Texture* const depthTexture = bUseTranslucentRefractedGBuffer ?
 		TranslucentGuideDepthBuffer.get() :
 		UnjitteredDepthBuffers[ColorBufferWriteIndex].get();
@@ -394,12 +405,17 @@ void Corona::RaytraceShadowPass()
 		(NormalBuffers[1 - ColorBufferWriteIndex]
 			? NormalBuffers[1 - ColorBufferWriteIndex].get()
 			: normalTexture);
+	Texture* const guideUvTexture = (translucentGuideFlags != 0u && TranslucentDistortionBuffer) ?
+		TranslucentDistortionBuffer.get() :
+		(DefaultBlackTex ? DefaultBlackTex.get() : nullptr);
 	static uint32_t sLastShadowRefractedGBuffer = 0xFFFFFFFFu;
 	const uint32_t shadowRefractedGBuffer = bUseTranslucentRefractedGBuffer ? 1u : 0u;
 	if (sLastShadowRefractedGBuffer != shadowRefractedGBuffer)
 	{
 		sLastShadowRefractedGBuffer = shadowRefractedGBuffer;
-		AppendCpuRuntimeTrace(L"[RaytraceShadowPass] refractedGBuffer=" + std::to_wstring(shadowRefractedGBuffer));
+		AppendCpuRuntimeTrace(
+			L"[RaytraceShadowPass] refractedGBuffer=" + std::to_wstring(shadowRefractedGBuffer) +
+			L", guideFlags=" + std::to_wstring(translucentGuideFlags));
 	}
 	Buffer* const spatialLightCellKeys = SpatialHashGIResolvedKeys[0].get();
 	Buffer* const spatialLightCellMask = SpatialHashGICellLightMask.get();
@@ -435,6 +451,9 @@ void Corona::RaytraceShadowPass()
 		: RGTextureRef{};
 	RGTextureRef velocityInput = velocityTexture
 		? rg.ImportTexture("Shadow.Velocity", velocityTexture, EResourceState::ShaderRead)
+		: RGTextureRef{};
+	RGTextureRef guideUvInput = guideUvTexture
+		? rg.ImportTexture("Shadow.TranslucentGuideUV", guideUvTexture, EResourceState::ShaderRead)
 		: RGTextureRef{};
 	RGBufferRef spatialLightCellKeysInput = spatialLightCellKeys
 		? rg.ImportBuffer("Shadow.SpatialLightCellKeys", spatialLightCellKeys, EResourceState::ShaderRead)
@@ -488,6 +507,8 @@ void Corona::RaytraceShadowPass()
 				builder.ReadTexture(finalShadowOutput, EResourceState::ShaderRead);
 			if (velocityInput.IsValid())
 				builder.ReadTexture(velocityInput, EResourceState::ShaderRead);
+			if (guideUvInput.IsValid())
+				builder.ReadTexture(guideUvInput, EResourceState::ShaderRead);
 			if (spatialLightCellKeysInput.IsValid())
 				builder.ReadBuffer(spatialLightCellKeysInput, EResourceState::ShaderRead);
 			if (spatialLightCellMaskInput.IsValid())
@@ -531,6 +552,7 @@ void Corona::RaytraceShadowPass()
 				PSO_SHADOW_RAYQUERY->SetBufferSRV("PointLightGridCounts", pointLightGridCountsInput.IsValid() ? ctx.GetBuffer(pointLightGridCountsInput) : nullptr);
 				PSO_SHADOW_RAYQUERY->SetBufferSRV("PointLightGridIndices", pointLightGridIndicesInput.IsValid() ? ctx.GetBuffer(pointLightGridIndicesInput) : nullptr);
 				PSO_SHADOW_RAYQUERY->SetTextureSRV("VelocityTex", velocityInput.IsValid() ? ctx.GetTexture(velocityInput) : nullptr);
+				PSO_SHADOW_RAYQUERY->SetTextureSRV("TranslucentGuideUVTex", guideUvInput.IsValid() ? ctx.GetTexture(guideUvInput) : nullptr);
 				PSO_SHADOW_RAYQUERY->SetCBVValue("ViewParameter", &RTShadowViewParam);
 				PSO_SHADOW_RAYQUERY->SetCBVValue("PointLightGridCB", &PointLightGridParam);
 				PSO_SHADOW_RAYQUERY->SetSampler("sampleWrap", samplerWrap.get());
@@ -565,6 +587,7 @@ void Corona::RaytraceShadowPass()
 				.SetBufferSRV("global", "PointLightGridCounts", pointLightGridCountsInput.IsValid() ? ctx.GetBuffer(pointLightGridCountsInput) : nullptr)
 				.SetBufferSRV("global", "PointLightGridIndices", pointLightGridIndicesInput.IsValid() ? ctx.GetBuffer(pointLightGridIndicesInput) : nullptr)
 				.SetTextureSRV("global", "VelocityTex", velocityInput.IsValid() ? ctx.GetTexture(velocityInput) : nullptr)
+				.SetTextureSRV("global", "TranslucentGuideUVTex", guideUvInput.IsValid() ? ctx.GetTexture(guideUvInput) : nullptr)
 				.SetCBVValue("global", "ViewParameter", &RTShadowViewParam)
 				.SetCBVValue("global", "PointLightGridCB", &PointLightGridParam)
 				.SetSampler("global", "sampleWrap", samplerWrap.get());

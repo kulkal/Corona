@@ -7479,7 +7479,9 @@ bool VulkanBackend::WriteVulkanTLASInstanceDescs(VulkanRTAS* rtas, const std::ve
 		const glm::mat4x4 mat = glm::transpose(instancesDesc[i].Transform);
 		VkAccelerationStructureInstanceKHR instance{};
 		instance.instanceCustomIndex = i;
-		instance.mask = 0xFF;
+		instance.mask = static_cast<uint8_t>(instancesDesc[i].InstanceMask & 0xFFu);
+		if (instance.mask == 0)
+			instance.mask = 0x01;
 		instance.instanceShaderBindingTableRecordOffset = 0;
 		instance.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
 		instance.accelerationStructureReference = blas->DeviceAddress;
@@ -7529,7 +7531,9 @@ std::shared_ptr<RTAS> VulkanBackend::CreateTLAS(const std::vector<RTInstanceDesc
 		const glm::mat4x4 mat = glm::transpose(instancesDesc[i].Transform);
 		VkAccelerationStructureInstanceKHR instance{};
 		instance.instanceCustomIndex = static_cast<uint32_t>(i);
-		instance.mask = 0xFF;
+		instance.mask = static_cast<uint8_t>(instancesDesc[i].InstanceMask & 0xFFu);
+		if (instance.mask == 0)
+			instance.mask = 0x01;
 		// Vulkan currently stores per-instance hit resources in descriptor arrays indexed by
 		// InstanceCustomIndexKHR. The hit SBT itself only has one record per hit group, so
 		// per-instance SBT offsets would point past the hit table and produce undefined hits.

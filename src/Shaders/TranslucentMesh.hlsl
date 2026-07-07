@@ -254,7 +254,9 @@ PSOutput PSMain(PSInput input)
     if (StochasticParams.w != 0u)
     {
 #if TRANSLUCENT_SURFACE_ONLY
-        output.Color = float4(refracted, 0.0f);
+        // Pre-light refraction is already in LightingBuffer. In refraction-only
+        // mode the surface pass should not resample or overwrite that result.
+        output.Color = float4(0.0f, 0.0f, 0.0f, 0.0f);
         output.Surface = float4(0.0f, 0.0f, 0.0f, 0.0f);
 #else
         output.Color = float4(refracted, 1.0f);
@@ -323,9 +325,16 @@ PSOutput PSMain(PSInput input)
     float frontT = saturate((viewDepth - SurfaceDepthParams.x) * max(SurfaceDepthParams.y, 0.0f));
     float frontDepthWeight = pow(saturate(1.0f - frontT), max(SurfaceDepthParams.z, 0.001f));
     float depthWeight = lerp(saturate(SurfaceDepthParams.w), 1.0f, frontDepthWeight);
-    float blendAlpha = saturate(depthWeight);
+    float blendAlpha = saturate(alpha * depthWeight);
 
-    output.Color = float4(color, blendAlpha);
+    // This pass runs after LightingPass and samples a copy of the current
+    // LightingBuffer in SceneColorTex. If we output `color` directly with
+    // standard alpha blending, many glass layers converge toward opaque
+    // pastel source colors. Solve the blend equation instead so the target
+    // receives the intended transmitted/tinted color for this layer.
+    float safeBlendAlpha = max(blendAlpha, 1.0e-4f);
+    float3 blendSource = (color - refracted * (1.0f - safeBlendAlpha)) * rcp(safeBlendAlpha);
+    output.Color = float4(max(blendSource, 0.0f.xxx), blendAlpha);
     output.Surface = float4(surfaceLighting, blendAlpha);
 #else
     // Refractive translucency has already sampled the background it should
