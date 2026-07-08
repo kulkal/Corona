@@ -2999,6 +2999,7 @@ void Corona::TranslucentMeshPass()
 		(renderBackend->GetAPI() != ERenderBackendAPI::D3D12 || !renderBackend->SupportsRayTracing() || bBindRtReflection);
 	const float reflectionScale = reflectionEnabled ? std::clamp(getPersistentNumber("transparency_layers.reflection_scale", 1.0f), 0.0f, 3.0f) : 0.0f;
 	const float reflectionStrength = reflectionEnabled ? std::clamp(getPersistentNumber("transparency_layers.reflection_strength", 0.92f), 0.0f, 1.0f) : 0.0f;
+	const float reflectionRoughness = reflectionEnabled ? std::clamp(getPersistentNumber("transparency_layers.reflection_roughness", 0.0f), 0.0f, 1.0f) : 0.0f;
 	const float surfaceStrength = std::clamp(getPersistentNumber("transparency_layers.surface_strength", 0.55f), 0.0f, 1.0f);
 	const float tintStrength = std::clamp(getPersistentNumber("transparency_layers.tint_strength", 0.22f), 0.0f, 1.0f);
 	const float fresnelPower = std::clamp(getPersistentNumber("transparency_layers.fresnel_power", 2.35f), 0.25f, 8.0f);
@@ -3029,6 +3030,7 @@ void Corona::TranslucentMeshPass()
 			tintStrength,
 			surfaceStrength);
 		cb.CameraPositionAndRayParams = glm::vec4(RenderFrameCameraPosition, 0.15f);
+		cb.ReflectionParams = glm::vec4(reflectionRoughness, 0.0f, 0.0f, 0.0f);
 		cb.StochasticParams = glm::uvec4(
 			0u,
 			static_cast<uint32_t>(FrameCounter),
@@ -3223,6 +3225,7 @@ void Corona::TranslucentSurfaceLightingPass()
 		(renderBackend->GetAPI() != ERenderBackendAPI::D3D12 || !renderBackend->SupportsRayTracing() || bBindRtReflection);
 	const float reflectionScale = reflectionEnabled ? std::clamp(getPersistentNumber("transparency_layers.reflection_scale", 1.0f), 0.0f, 3.0f) : 0.0f;
 	const float reflectionStrength = reflectionEnabled ? std::clamp(getPersistentNumber("transparency_layers.reflection_strength", 0.92f), 0.0f, 1.0f) : 0.0f;
+	const float reflectionRoughness = reflectionEnabled ? std::clamp(getPersistentNumber("transparency_layers.reflection_roughness", 0.0f), 0.0f, 1.0f) : 0.0f;
 	const float surfaceStrength = std::clamp(getPersistentNumber("transparency_layers.surface_strength", 0.55f), 0.0f, 1.0f);
 	const float tintStrength = std::clamp(getPersistentNumber("transparency_layers.tint_strength", 0.22f), 0.0f, 1.0f);
 	const float fresnelPower = std::clamp(getPersistentNumber("transparency_layers.fresnel_power", 2.35f), 0.25f, 8.0f);
@@ -3253,6 +3256,7 @@ void Corona::TranslucentSurfaceLightingPass()
 			surfaceStrength);
 		cb.CameraPositionAndRayParams = glm::vec4(RenderFrameCameraPosition, 0.15f);
 		cb.SurfaceDepthParams = glm::vec4(item.NearDepth, item.InvDepthRange, 2.6f, 0.08f);
+		cb.ReflectionParams = glm::vec4(reflectionRoughness, 0.0f, 0.0f, 0.0f);
 		cb.StochasticParams = glm::uvec4(
 			1u,
 			static_cast<uint32_t>(FrameCounter),
@@ -3313,6 +3317,7 @@ void Corona::TranslucentSurfaceLightingPass()
 			L", refractionOnly=" + std::to_wstring(bRefractionOnly ? 1 : 0) +
 			L", surfaceStrength=" + std::to_wstring(surfaceStrength) +
 			L", reflectionStrength=" + std::to_wstring(reflectionStrength) +
+			L", reflectionRoughness=" + std::to_wstring(reflectionRoughness) +
 			L", rtReflection=" + std::to_wstring(bBindRtReflection ? 1 : 0));
 }
 

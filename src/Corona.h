@@ -1333,6 +1333,8 @@ private:
 		glm::vec4 RenderTargetParams = glm::vec4(1.0f);
 		glm::vec4 CameraPositionAndRayParams = glm::vec4(0.0f, 0.0f, 0.0f, 0.25f);
 		glm::vec4 SurfaceDepthParams = glm::vec4(0.0f);
+		// x: glass reflection perceptual roughness [0, 1].
+		glm::vec4 ReflectionParams = glm::vec4(0.0f);
 		glm::uvec4 StochasticParams = glm::uvec4(0u);
 	};
 	struct TranslucentPreLightingMeshGuideCB

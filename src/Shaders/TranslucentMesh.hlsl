@@ -24,6 +24,7 @@ cbuffer TranslucentMeshCB : register(b0)
     float4 RenderTargetParams;
     float4 CameraPositionAndRayParams;
     float4 SurfaceDepthParams;
+    float4 ReflectionParams;
     uint4 StochasticParams;
 };
 
@@ -70,6 +71,44 @@ float Random01(uint2 pixel, uint frameIndex, uint drawSeed)
     h ^= frameIndex * 0xcb1ab31fu;
     h ^= drawSeed * 0x165667b1u;
     return (HashUint(h) & 0x00ffffffu) * (1.0f / 16777216.0f);
+}
+
+float3 SampleRoughReflectionDirection(
+    float3 incident,
+    float3 normal,
+    float roughness,
+    uint2 pixel,
+    uint frameIndex,
+    uint drawSeed)
+{
+    float3 perfectReflection = normalize(reflect(incident, normal));
+    roughness = saturate(roughness);
+    if (roughness <= 1.0e-4f)
+        return perfectReflection;
+
+    float2 randomSample = float2(
+        Random01(pixel, frameIndex, drawSeed),
+        Random01(pixel, frameIndex, drawSeed ^ 0x9e3779b9u));
+    float alpha = max(roughness * roughness, 1.0e-3f);
+    float alphaSquared = alpha * alpha;
+    float phi = 6.28318530718f * randomSample.x;
+    float cosTheta = sqrt(saturate(
+        (1.0f - randomSample.y) /
+        max(1.0f + (alphaSquared - 1.0f) * randomSample.y, 1.0e-5f)));
+    float sinTheta = sqrt(saturate(1.0f - cosTheta * cosTheta));
+
+    float3 tangent = abs(normal.z) < 0.999f
+        ? normalize(cross(float3(0.0f, 0.0f, 1.0f), normal))
+        : normalize(cross(float3(0.0f, 1.0f, 0.0f), normal));
+    float3 bitangent = cross(normal, tangent);
+    float3 microfacetNormal = normalize(
+        tangent * (cos(phi) * sinTheta) +
+        bitangent * (sin(phi) * sinTheta) +
+        normal * cosTheta);
+    float3 sampledReflection = normalize(reflect(incident, microfacetNormal));
+    return dot(sampledReflection, normal) > 1.0e-4f
+        ? sampledReflection
+        : perfectReflection;
 }
 
 uint2 ClampGuidePixel(int2 pixel, uint2 dims)
@@ -142,7 +181,7 @@ bool ProjectWorldToScreenUv(float3 worldPos, out float2 uv)
     return all(uv >= float2(0.0f, 0.0f)) && all(uv <= float2(1.0f, 1.0f));
 }
 
-float3 ReflectionEnvironment(float3 reflectedDir, float reflectionScale, float grazing)
+float3 ReflectionEnvironment(float3 reflectedDir, float reflectionScale, float grazing, float roughness)
 {
     float sky = saturate(reflectedDir.y * 0.5f + 0.5f);
     float horizon = pow(saturate(1.0f - abs(reflectedDir.y)), 3.0f);
@@ -153,22 +192,37 @@ float3 ReflectionEnvironment(float3 reflectedDir, float reflectionScale, float g
     reflectedEnv += float3(0.18f, 0.26f, 0.38f) * horizon * (0.35f + 0.25f * reflectionScale);
 
     float3 glintDir = normalize(float3(-0.35f, 0.55f, 0.76f));
-    float glintPower = lerp(96.0f, 24.0f, saturate(reflectionScale * 0.333f));
+    float glintPower = lerp(
+        lerp(96.0f, 24.0f, saturate(reflectionScale * 0.333f)),
+        4.0f,
+        saturate(roughness));
     float glint = pow(saturate(dot(reflectedDir, glintDir)), glintPower);
     float3 reflected = reflectedEnv * (0.38f + 0.20f * reflectionScale + 0.42f * grazing);
-    reflected += float3(1.0f, 0.96f, 0.88f) * glint * (0.25f + 0.35f * reflectionScale);
+    reflected += float3(1.0f, 0.96f, 0.88f) * glint *
+        (0.25f + 0.35f * reflectionScale) * lerp(1.0f, 0.35f, saturate(roughness));
     return reflected;
 }
 
 #if TRANSLUCENT_ENABLE_RT_REFLECTION
-float3 TraceRayReflectionColor(float3 worldPos, float3 worldNormal, out bool rayHit)
+float3 TraceRayReflectionColor(
+    float3 worldPos,
+    float3 worldNormal,
+    float roughness,
+    uint2 pixel,
+    out bool rayHit)
 {
     rayHit = false;
 
     float3 cameraPos = CameraPositionAndRayParams.xyz;
     float3 incident = normalize(worldPos - cameraPos);
     float3 normal = normalize(worldNormal);
-    float3 reflectedDir = normalize(reflect(incident, normal));
+    float3 reflectedDir = SampleRoughReflectionDirection(
+        incident,
+        normal,
+        roughness,
+        pixel,
+        StochasticParams.y,
+        StochasticParams.z);
 
     float bias = max(CameraPositionAndRayParams.w, 0.01f);
     RayDesc ray;
@@ -235,6 +289,8 @@ PSOutput PSMain(PSInput input)
     float reflectionScale = max(EffectParams.y * (1.0f / 28.0f), 0.0f);
     float reflectionStrength = saturate(EffectParams.z);
     float fresnelPower = max(EffectParams.w, 0.001f);
+    float reflectionRoughness = saturate(ReflectionParams.x);
+    uint2 reflectionPixel = uint2(max(input.position.xy, 0.0f.xx));
 
     float3 refracted = SceneColorTex.SampleLevel(samplerClamp, screenUv, 0.0f).rgb;
     float2 compositeGuideUv = screenUv;
@@ -270,8 +326,18 @@ PSOutput PSMain(PSInput input)
     if (reflectionStrength > 0.0001f)
     {
         float3 incident = normalize(input.viewPos);
-        float3 reflectedViewDir = reflect(incident, viewNormal);
-        reflected = ReflectionEnvironment(reflectedViewDir, reflectionScale, grazing);
+        float3 reflectedViewDir = SampleRoughReflectionDirection(
+            incident,
+            viewNormal,
+            reflectionRoughness,
+            reflectionPixel,
+            StochasticParams.y,
+            StochasticParams.z);
+        reflected = ReflectionEnvironment(
+            reflectedViewDir,
+            reflectionScale,
+            grazing,
+            reflectionRoughness);
 
 #if TRANSLUCENT_ENABLE_RT_REFLECTION
         float3 worldNormal = normalize(input.worldNormal);
@@ -280,7 +346,12 @@ PSOutput PSMain(PSInput input)
             worldNormal = -worldNormal;
 
         bool rtHit = false;
-        float3 rtReflected = TraceRayReflectionColor(input.worldPos, worldNormal, rtHit);
+        float3 rtReflected = TraceRayReflectionColor(
+            input.worldPos,
+            worldNormal,
+            reflectionRoughness,
+            reflectionPixel,
+            rtHit);
         if (rtHit)
         {
             float hitBlend = saturate(0.72f + 0.10f * reflectionScale);

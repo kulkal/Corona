@@ -50,6 +50,7 @@ set_default("refraction_only", false)
 set_default("reflection_enabled", true)
 set_default("reflection_scale", 1.0)
 set_default("reflection_strength", 0.92)
+set_default("reflection_roughness", 0.0)
 set_default("surface_strength", 0.55)
 set_default("tint_strength", 0.22)
 set_default("fresnel_power", 2.35)
@@ -610,6 +611,7 @@ function script.imgui()
     end
     slider_float("Reflection Scale", "reflection_scale", 0.0, 3.0, "%.2f", false)
     slider_float("Reflection Strength", "reflection_strength", 0.0, 1.0, "%.2f", false)
+    slider_float("Reflection Roughness", "reflection_roughness", 0.0, 1.0, "%.2f", false)
     if not reflection_enabled then
         imgui.end_disabled()
     end

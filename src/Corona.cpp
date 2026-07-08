@@ -6217,6 +6217,7 @@ void Corona::InitializeAutoAADump()
 		setScriptBoolOverride("transparency_layers.reflection_enabled", true);
 		setScriptNumberOverride("transparency_layers.reflection_scale", 1.0f);
 		setScriptNumberOverride("transparency_layers.reflection_strength", 0.92f);
+		setScriptNumberOverride("transparency_layers.reflection_roughness", 0.0f);
 		setScriptNumberOverride("transparency_layers.surface_strength", 0.55f);
 		ResetAllAccumulationState(true);
 		const UINT32 frameCount = AutoAADumpFrameCountOverride > 0u ? AutoAADumpFrameCountOverride : 120u;
@@ -8731,6 +8732,7 @@ void Corona::SaveSceneState()
 			name == "transparency_layers.reflection_enabled" ||
 			name == "transparency_layers.reflection_scale" ||
 			name == "transparency_layers.reflection_strength" ||
+			name == "transparency_layers.reflection_roughness" ||
 			name == "transparency_layers.surface_strength");
 		return bTransientBenchmarkControl || bCommandLineTransparencyControl;
 	};
@@ -10726,6 +10728,7 @@ void Corona::OnInit()
 			setScriptBoolOverride("transparency_layers.reflection_enabled", true);
 			setScriptNumberOverride("transparency_layers.reflection_scale", 1.0f);
 			setScriptNumberOverride("transparency_layers.reflection_strength", 0.92f);
+			setScriptNumberOverride("transparency_layers.reflection_roughness", 0.0f);
 			setScriptNumberOverride("transparency_layers.surface_strength", 0.55f);
 		}
 		if (bCommandLinePlatformerSpineBenchmark)
