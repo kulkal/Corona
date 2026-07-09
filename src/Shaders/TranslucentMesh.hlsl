@@ -11,6 +11,11 @@
 #define TRANSLUCENT_SURFACE_ONLY 0
 #endif
 
+#if TRANSLUCENT_ENABLE_RT_REFLECTION
+#include "Common.hlsl"
+#include "BindlessResources.hlsli"
+#endif
+
 cbuffer TranslucentMeshCB : register(b0)
 {
     float4x4 WorldViewMatrix;
@@ -24,11 +29,14 @@ cbuffer TranslucentMeshCB : register(b0)
     float4 RenderTargetParams;
     float4 CameraPositionAndRayParams;
     float4 SurfaceDepthParams;
-    float4 ReflectionParams;
+    float4 ReflectionHitLightDirAndIntensity;
+    float4 ReflectionHitLightColorAndViewSpread;
+    float4 GlassParams;
     uint4 StochasticParams;
 };
 
 Texture2D SceneColorTex : register(t0);
+Texture2D RefractedColorTex : register(t3);
 #if TRANSLUCENT_ENABLE_RT_REFLECTION
 RaytracingAccelerationStructure gRtScene : register(t1);
 #endif
@@ -36,6 +44,16 @@ RaytracingAccelerationStructure gRtScene : register(t1);
 Texture2D PrevCompositeGuideTex : register(t2);
 #endif
 SamplerState samplerClamp : register(s0);
+
+static const uint TRANSLUCENT_FLAG_SURFACE_PASS = 1u << 0;
+static const uint TRANSLUCENT_FLAG_REFLECTION_HIT_LIGHTING_FALLBACK = 1u << 1;
+static const uint TRANSLUCENT_FLAG_RT_REFRACTION_COLOR = 1u << 2;
+static const uint TRANSLUCENT_RT_MASK_OPAQUE = 0x01u;
+
+bool TranslucentFlagEnabled(uint flag)
+{
+    return (StochasticParams.x & flag) != 0u;
+}
 
 struct VSInput
 {
@@ -71,6 +89,27 @@ float Random01(uint2 pixel, uint frameIndex, uint drawSeed)
     h ^= frameIndex * 0xcb1ab31fu;
     h ^= drawSeed * 0x165667b1u;
     return (HashUint(h) & 0x00ffffffu) * (1.0f / 16777216.0f);
+}
+
+float2 SampleConcentricDisk(float2 randomSample)
+{
+    float2 offset = randomSample * 2.0f - 1.0f;
+    if (abs(offset.x) < 1.0e-6f && abs(offset.y) < 1.0e-6f)
+        return float2(0.0f, 0.0f);
+
+    float radius;
+    float theta;
+    if (abs(offset.x) > abs(offset.y))
+    {
+        radius = offset.x;
+        theta = 0.78539816339f * (offset.y / offset.x);
+    }
+    else
+    {
+        radius = offset.y;
+        theta = 1.57079632679f - 0.78539816339f * (offset.x / offset.y);
+    }
+    return radius * float2(cos(theta), sin(theta));
 }
 
 float3 SampleRoughReflectionDirection(
@@ -204,14 +243,88 @@ float3 ReflectionEnvironment(float3 reflectedDir, float reflectionScale, float g
 }
 
 #if TRANSLUCENT_ENABLE_RT_REFLECTION
+float3 TranslucentSafeNormalize(float3 value, float3 fallback)
+{
+    float lenSq = dot(value, value);
+    return lenSq > 1.0e-8f ? value * rsqrt(lenSq) : fallback;
+}
+
+bool TraceTranslucentReflectionShadowVisible(float3 hitWorld, float3 hitNormal, float3 lightDir)
+{
+    RayDesc shadowRay;
+    shadowRay.Origin = hitWorld + hitNormal * 0.5f;
+    shadowRay.Direction = lightDir;
+    shadowRay.TMin = 0.0f;
+    shadowRay.TMax = 100000.0f;
+
+    RayQuery<
+        RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH |
+        RAY_FLAG_SKIP_CLOSEST_HIT_SHADER |
+        RAY_FLAG_FORCE_OPAQUE |
+        RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> shadowQuery;
+    shadowQuery.TraceRayInline(gRtScene, RAY_FLAG_NONE, TRANSLUCENT_RT_MASK_OPAQUE, shadowRay);
+    while (shadowQuery.Proceed())
+    {
+    }
+
+    return shadowQuery.CommittedStatus() == COMMITTED_NOTHING;
+}
+
+float3 ShadeTranslucentReflectionHit(
+    RayDesc ray,
+    float hitT,
+    float2 hitBary,
+    uint triangleIndex,
+    uint instanceID)
+{
+    hitT = max(hitT, 0.0f);
+    float3 fallbackHitWorld = ray.Origin + ray.Direction * hitT;
+    float3 barycentrics = float3(1.0f - hitBary.x - hitBary.y, hitBary.x, hitBary.y);
+
+    Vertex vertex = CORONA_GET_SURFACE_VERTEX_ATTRIBUTES(instanceID, triangleIndex, barycentrics);
+    float3 hitWorld = CommonSanitizeFloat3(vertex.position, fallbackHitWorld);
+    float3 hitNormal = CommonSafeNormalize(vertex.normal, -ray.Direction);
+    if (dot(hitNormal, -ray.Direction) < 0.0f)
+        hitNormal = -hitNormal;
+
+    RTMaterialRecord material = RtMaterials[instanceID];
+    vertex.textureLODConstant += material.AlbedoLodConstant;
+    float noV = max(abs(dot(hitNormal, -ray.Direction)), 1.0e-4f);
+    float rayConeWidth = max(ReflectionHitLightColorAndViewSpread.w, 0.0f) * hitT;
+    float mipLevel = computeTextureLOD(noV, rayConeWidth, vertex.textureLODConstant);
+
+    float3 baseColor = max(CommonSanitizeFloat3(material.BaseColorFactor.rgb, 1.0f.xxx), 0.0f.xxx);
+    if (IsValidBindlessTextureIndex(material.AlbedoTextureIndex))
+    {
+        float3 sampledAlbedo = MaterialTextures[NonUniformResourceIndex(material.AlbedoTextureIndex)]
+            .SampleLevel(samplerClamp, vertex.uv, mipLevel).rgb;
+        baseColor *= max(CommonSanitizeFloat3(sampledAlbedo, 1.0f.xxx), 0.0f.xxx);
+    }
+
+    float3 lightDir = CommonSafeNormalize(ReflectionHitLightDirAndIntensity.xyz, float3(0.0f, 1.0f, 0.0f));
+    float lightIntensity = max(ReflectionHitLightDirAndIntensity.w, 0.0f);
+    float ndotl = saturate(dot(hitNormal, lightDir));
+    float visibility = 1.0f;
+    if (lightIntensity > 0.0f && ndotl > 0.0f)
+        visibility = TraceTranslucentReflectionShadowVisible(hitWorld, hitNormal, lightDir) ? 1.0f : 0.35f;
+
+    float3 lightColor = max(ReflectionHitLightColorAndViewSpread.rgb, 0.0f.xxx);
+    float3 direct = baseColor * lightColor * (ndotl * lightIntensity * visibility * (1.0f / PI));
+    float hemi = saturate(hitNormal.y * 0.5f + 0.5f);
+    float3 ambientColor = lerp(0.035f.xxx, max(lightColor, 0.08f.xxx) * 0.10f, hemi);
+    return max(direct + baseColor * ambientColor, 0.0f.xxx);
+}
+
 float3 TraceRayReflectionColor(
     float3 worldPos,
     float3 worldNormal,
     float roughness,
     uint2 pixel,
-    out bool rayHit)
+    out bool rayHit,
+    out bool usedHitLightingFallback)
 {
     rayHit = false;
+    usedHitLightingFallback = false;
 
     float3 cameraPos = CameraPositionAndRayParams.xyz;
     float3 incident = normalize(worldPos - cameraPos);
@@ -236,7 +349,7 @@ float3 TraceRayReflectionColor(
         RAY_FLAG_SKIP_CLOSEST_HIT_SHADER |
         RAY_FLAG_FORCE_OPAQUE |
         RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> query;
-    query.TraceRayInline(gRtScene, RAY_FLAG_NONE, 0xffu, ray);
+    query.TraceRayInline(gRtScene, RAY_FLAG_NONE, TRANSLUCENT_RT_MASK_OPAQUE, ray);
     while (query.Proceed())
     {
     }
@@ -249,6 +362,18 @@ float3 TraceRayReflectionColor(
         {
             rayHit = true;
             return SceneColorTex.SampleLevel(samplerClamp, saturate(hitUv), 0.0f).rgb;
+        }
+
+        if (TranslucentFlagEnabled(TRANSLUCENT_FLAG_REFLECTION_HIT_LIGHTING_FALLBACK))
+        {
+            rayHit = true;
+            usedHitLightingFallback = true;
+            return ShadeTranslucentReflectionHit(
+                ray,
+                query.CommittedRayT(),
+                query.CommittedTriangleBarycentrics(),
+                query.CommittedPrimitiveIndex(),
+                query.CommittedInstanceID());
         }
     }
 
@@ -289,10 +414,31 @@ PSOutput PSMain(PSInput input)
     float reflectionScale = max(EffectParams.y * (1.0f / 28.0f), 0.0f);
     float reflectionStrength = saturate(EffectParams.z);
     float fresnelPower = max(EffectParams.w, 0.001f);
-    float reflectionRoughness = saturate(ReflectionParams.x);
-    uint2 reflectionPixel = uint2(max(input.position.xy, 0.0f.xx));
+    float glassRoughness = saturate(GlassParams.x);
+    uint2 stochasticPixel = uint2(max(input.position.xy, 0.0f.xx));
 
-    float3 refracted = SceneColorTex.SampleLevel(samplerClamp, screenUv, 0.0f).rgb;
+    float4 rtRefraction = RefractedColorTex.Load(int3(stochasticPixel, 0));
+    bool useRtRefraction =
+        TranslucentFlagEnabled(TRANSLUCENT_FLAG_RT_REFRACTION_COLOR) &&
+        rtRefraction.a > 0.5f;
+    float2 roughRefractionOffsetUv = float2(0.0f, 0.0f);
+#if !TRANSLUCENT_SURFACE_ONLY
+    if (!useRtRefraction && glassRoughness > 1.0e-4f)
+    {
+        float2 refractionRandom = float2(
+            Random01(stochasticPixel, StochasticParams.y, StochasticParams.z ^ 0x68bc21ebu),
+            Random01(stochasticPixel, StochasticParams.y, StochasticParams.z ^ 0x02e5be93u));
+        float2 roughnessDisk = SampleConcentricDisk(refractionRandom);
+        float roughnessRadiusPixels =
+            glassRoughness * glassRoughness *
+            lerp(12.0f, 48.0f, grazing);
+        roughRefractionOffsetUv = roughnessDisk * roughnessRadiusPixels * invTargetSize;
+    }
+#endif
+    float3 destinationColor = SceneColorTex.SampleLevel(samplerClamp, screenUv, 0.0f).rgb;
+    float3 refracted = useRtRefraction ?
+        max(rtRefraction.rgb, 0.0f.xxx) :
+        SceneColorTex.SampleLevel(samplerClamp, saturate(screenUv + roughRefractionOffsetUv), 0.0f).rgb;
     float2 compositeGuideUv = screenUv;
 
 #if !TRANSLUCENT_SURFACE_ONLY
@@ -301,18 +447,22 @@ PSOutput PSMain(PSInput input)
     float2 rippleOffset = float2(rippleA, rippleB) * (1.0f - saturate(length(normalOffset)));
     float2 refractionDir = normalOffset * 0.85f + rippleOffset * 0.055f;
     float2 refractionUv = screenUv + refractionDir * refractionPixels * invTargetSize * alpha * (0.35f + 0.65f * grazing);
+    refractionUv += roughRefractionOffsetUv;
     float2 refractionSampleUv = saturate(refractionUv);
     float4 prevCompositeGuide = SamplePrevCompositeGuide(refractionSampleUv);
     compositeGuideUv = prevCompositeGuide.w > 0.0001f ? prevCompositeGuide.xy : refractionSampleUv;
-    refracted = SceneColorTex.SampleLevel(samplerClamp, refractionSampleUv, 0.0f).rgb;
+    refracted = useRtRefraction ?
+        max(rtRefraction.rgb, 0.0f.xxx) :
+        SceneColorTex.SampleLevel(samplerClamp, refractionSampleUv, 0.0f).rgb;
 #endif
 
     if (StochasticParams.w != 0u)
     {
 #if TRANSLUCENT_SURFACE_ONLY
-        // Pre-light refraction is already in LightingBuffer. In refraction-only
-        // mode the surface pass should not resample or overwrite that result.
-        output.Color = float4(0.0f, 0.0f, 0.0f, 0.0f);
+        // LightingBuffer contains the sharp pre-light result. Replace it with
+        // this layer's stochastic transmission sample; a zero-output early
+        // return would discard raster roughness entirely in refraction-only mode.
+        output.Color = float4(refracted, 1.0f);
         output.Surface = float4(0.0f, 0.0f, 0.0f, 0.0f);
 #else
         output.Color = float4(refracted, 1.0f);
@@ -329,15 +479,15 @@ PSOutput PSMain(PSInput input)
         float3 reflectedViewDir = SampleRoughReflectionDirection(
             incident,
             viewNormal,
-            reflectionRoughness,
-            reflectionPixel,
+            glassRoughness,
+            stochasticPixel,
             StochasticParams.y,
             StochasticParams.z);
         reflected = ReflectionEnvironment(
             reflectedViewDir,
             reflectionScale,
             grazing,
-            reflectionRoughness);
+            glassRoughness);
 
 #if TRANSLUCENT_ENABLE_RT_REFLECTION
         float3 worldNormal = normalize(input.worldNormal);
@@ -346,15 +496,22 @@ PSOutput PSMain(PSInput input)
             worldNormal = -worldNormal;
 
         bool rtHit = false;
+        bool usedHitLightingFallback = false;
         float3 rtReflected = TraceRayReflectionColor(
             input.worldPos,
             worldNormal,
-            reflectionRoughness,
-            reflectionPixel,
-            rtHit);
+            glassRoughness,
+            stochasticPixel,
+            rtHit,
+            usedHitLightingFallback);
         if (rtHit)
         {
-            float hitBlend = saturate(0.72f + 0.10f * reflectionScale);
+            // Screen-projected hits have a full scene-color sample. Offscreen
+            // hit lighting is a one-light estimate without reflection guides,
+            // so retain most of the stable environment estimate underneath it.
+            float hitBlend = usedHitLightingFallback ?
+                0.28f :
+                saturate(0.72f + 0.10f * reflectionScale);
             reflected = lerp(reflected, rtReflected, hitBlend);
         }
 #endif
@@ -367,11 +524,12 @@ PSOutput PSMain(PSInput input)
         float3(1.0f, 1.0f, 1.0f),
         surfaceAlbedo,
         tintStrength * (0.25f + 0.75f * alpha));
-    float3 refractedColor = refracted * transmissionTint;
     reflected = lerp(reflected, reflected * max(baseColor.rgb, float3(0.08f, 0.08f, 0.08f)), tintStrength * 0.35f);
 
     float fresnel = pow(grazing, fresnelPower);
     float reflectionWeight = saturate(reflectionStrength * (0.10f + 0.90f * fresnel));
+    float refractionEnergy = 1.0f - saturate(reflectionWeight * alpha * 0.35f);
+    float3 refractedColor = refracted * transmissionTint * refractionEnergy;
 
     float3 keyLightDir = normalize(float3(-0.45f, 0.62f, 0.64f));
     float3 fillLightDir = normalize(float3(0.55f, 0.15f, 0.82f));
@@ -402,10 +560,13 @@ PSOutput PSMain(PSInput input)
     // LightingBuffer in SceneColorTex. If we output `color` directly with
     // standard alpha blending, many glass layers converge toward opaque
     // pastel source colors. Solve the blend equation instead so the target
-    // receives the intended transmitted/tinted color for this layer.
+    // receives the intended transmitted/tinted color for this layer. Subtract
+    // the actual destination pixel, not the displaced refraction sample;
+    // subtracting `refracted` would reintroduce the sharp destination through
+    // the hardware (1-alpha) term and cancel most of the roughness.
     float safeBlendAlpha = max(blendAlpha, 1.0e-4f);
-    float3 blendSource = (color - refracted * (1.0f - safeBlendAlpha)) * rcp(safeBlendAlpha);
-    output.Color = float4(max(blendSource, 0.0f.xxx), blendAlpha);
+    float3 blendSource = (color - destinationColor * (1.0f - safeBlendAlpha)) * rcp(safeBlendAlpha);
+    output.Color = float4(blendSource, blendAlpha);
     output.Surface = float4(surfaceLighting, blendAlpha);
 #else
     // Refractive translucency has already sampled the background it should

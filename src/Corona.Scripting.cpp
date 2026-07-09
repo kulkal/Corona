@@ -4777,7 +4777,7 @@ Corona::ScriptSceneHandle Corona::CreateProceduralDiamondSceneForScript(const gl
 	if (handle == InvalidScriptSceneHandle)
 		handle = NextScriptSceneHandle++;
 
-	ScriptScenes[handle] = { scene, key, EPhysicsCollisionShape::Box, glm::vec3(0.58f, 0.78f, 0.58f) };
+	ScriptScenes[handle] = { scene, key, EPhysicsCollisionShape::Box, glm::vec3(0.62f, 0.59f, 0.62f) };
 	ScriptSceneByPath[key] = handle;
 	AppendCpuRuntimeTrace(
 		L"[Luau][MeshComponent] procedural_alpha_diamond handle=" + std::to_wstring(handle) +
@@ -10614,65 +10614,78 @@ void Corona::DrawLuauImGui()
 	bLuauImGuiFrameActive = previousFrameActive;
 }
 
-bool Corona::DrawEditorConfigScriptImGui()
+bool Corona::DrawEditorConfigScriptImGui(bool bProbeOnly)
 {
 	if (!ScriptState || !ScriptState->L ||
 		EntityWorld.GetScriptComponentCount() == 0)
 		return false;
 
 	lua_State* L = ScriptState->L;
-	bool bDrewAnyEditorConfig = false;
+	bool bReplaceNativeEditorConfig = false;
 	const bool previousFrameActive = bLuauImGuiFrameActive;
 	bLuauImGuiFrameActive = true;
 
 	const std::vector<CoronaECS::Entity> scriptEntities = EntityWorld.GetEntitiesWithScript();
-	for (CoronaECS::Entity entity : scriptEntities)
+	const int callbackPassCount = bProbeOnly ? 1 : 2;
+	for (int callbackPass = 0; callbackPass < callbackPassCount; ++callbackPass)
 	{
-		CoronaECS::ScriptComponent* scriptComponent = EntityWorld.GetScript(entity);
-		if (!scriptComponent || !scriptComponent->bEnabled)
-			continue;
-
-		std::vector<uint32_t> instanceIds;
-		instanceIds.reserve(scriptComponent->Instances.size());
-		for (const CoronaECS::ScriptInstance& script : scriptComponent->Instances)
-			instanceIds.push_back(script.InstanceId);
-
-		for (uint32_t instanceId : instanceIds)
+		for (CoronaECS::Entity entity : scriptEntities)
 		{
-			scriptComponent = EntityWorld.GetScript(entity);
-			CoronaECS::ScriptInstance* script = FindScriptInstance(scriptComponent, instanceId);
-			if (!script || !script->bEnabled || script->EditorConfigRef == LUA_REFNIL)
+			CoronaECS::ScriptComponent* scriptComponent = EntityWorld.GetScript(entity);
+			if (!scriptComponent || !scriptComponent->bEnabled)
 				continue;
 
-			const int editorConfigRef = script->EditorConfigRef;
-			const std::wstring sourceName = script->SourceName;
-			lua_getref(L, editorConfigRef);
-			const auto callStart = CpuClock::now();
-			int result = LUA_OK;
+			std::vector<uint32_t> instanceIds;
+			instanceIds.reserve(scriptComponent->Instances.size());
+			for (const CoronaECS::ScriptInstance& script : scriptComponent->Instances)
+				instanceIds.push_back(script.InstanceId);
+
+			for (uint32_t instanceId : instanceIds)
 			{
-				ScopedLuauScriptProfileExecution profileExecution(this);
-				result = lua_pcall(L, 0, 0, 0);
-			}
-			RecordScriptFunctionProfile(sourceName, "editor_config", ElapsedMilliseconds(callStart, CpuClock::now()), false);
-			if (result != 0)
-			{
-				AppendCpuRuntimeTrace(L"[Luau] editor_config error in " + sourceName + L": " + Utf8ToWideLocal(LuaToString(L, -1)));
-				lua_pop(L, 1);
 				scriptComponent = EntityWorld.GetScript(entity);
-				if (CoronaECS::ScriptInstance* currentScript = FindScriptInstance(scriptComponent, instanceId))
-				{
-					if (currentScript->EditorConfigRef == editorConfigRef)
-						UnrefLuaRef(L, currentScript->EditorConfigRef);
-				}
-				continue;
-			}
+				CoronaECS::ScriptInstance* script = FindScriptInstance(scriptComponent, instanceId);
+				if (!script || !script->bEnabled || script->EditorConfigRef == LUA_REFNIL)
+					continue;
 
-			bDrewAnyEditorConfig = true;
+				const int editorConfigRef = script->EditorConfigRef;
+				const std::wstring sourceName = script->SourceName;
+				const bool bTransparencySection = sourceName.find(L"transparency_layers") != std::wstring::npos;
+				if (!bProbeOnly && bTransparencySection != (callbackPass == 1))
+					continue;
+
+				lua_getref(L, editorConfigRef);
+				lua_pushboolean(L, bProbeOnly ? 1 : 0);
+				const auto callStart = CpuClock::now();
+				int result = LUA_OK;
+				{
+					ScopedLuauScriptProfileExecution profileExecution(this);
+					result = lua_pcall(L, 1, 1, 0);
+				}
+				RecordScriptFunctionProfile(sourceName, "editor_config", ElapsedMilliseconds(callStart, CpuClock::now()), false);
+				if (result != 0)
+				{
+					AppendCpuRuntimeTrace(L"[Luau] editor_config error in " + sourceName + L": " + Utf8ToWideLocal(LuaToString(L, -1)));
+					lua_pop(L, 1);
+					scriptComponent = EntityWorld.GetScript(entity);
+					if (CoronaECS::ScriptInstance* currentScript = FindScriptInstance(scriptComponent, instanceId))
+					{
+						if (currentScript->EditorConfigRef == editorConfigRef)
+							UnrefLuaRef(L, currentScript->EditorConfigRef);
+					}
+					continue;
+				}
+
+				// Probe calls only query replacement intent. Render calls happen after
+				// either the native panel or a replacement script has established the
+				// main sections; transparency callbacks run in the final pass.
+				bReplaceNativeEditorConfig = bReplaceNativeEditorConfig || lua_toboolean(L, -1) != 0;
+				lua_pop(L, 1);
+			}
 		}
 	}
 
 	bLuauImGuiFrameActive = previousFrameActive;
-	return bDrewAnyEditorConfig;
+	return bReplaceNativeEditorConfig;
 }
 
 void Corona::DrawEntityScriptImGui()

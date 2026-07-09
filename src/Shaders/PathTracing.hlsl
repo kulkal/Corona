@@ -90,6 +90,11 @@ cbuffer ViewParameter : register(b0)
     float RefractedGuideIOR;
     float RefractedGuideRayBias;
     uint bRefractedGuideDebug;
+    float RefractedGuideRoughness;
+    float3 RefractedGuidePadding;
+    float4 RefractedVolumeParams;
+    uint bRefractedVolumeOnly;
+    uint3 RefractedVolumePadding;
 };
 
 cbuffer PathCompaction : register(b1)
@@ -483,7 +488,12 @@ bool IsTranslucentMaterialPayload(PathTracingPayload payload)
            payload.debugAlpha > 0.001f;
 }
 
-float3 ComputeGuideRefractionDirection(float3 incidentDir, float3 surfaceNormal, float ior)
+float3 ComputeGuideRefractionDirection(
+    float3 incidentDir,
+    float3 surfaceNormal,
+    float ior,
+    float roughness,
+    inout uint seed)
 {
     float3 I = GGXSafeNormalize(incidentDir, float3(0.0f, 0.0f, 1.0f));
     float3 N = GGXSafeNormalize(surfaceNormal, -I);
@@ -494,12 +504,12 @@ float3 ComputeGuideRefractionDirection(float3 incidentDir, float3 surfaceNormal,
     // This guide is not a full IOR stack. Treat every consumed translucent
     // surface as a local bending interface so the guide hit visibly follows
     // the selected IOR instead of cancelling out on thin/parallel surfaces.
-    float3 refractedDir = refract(I, N, rcp(safeIor));
-    if (dot(refractedDir, refractedDir) < 1.0e-8f ||
-        any(isnan(refractedDir)) ||
-        any(isinf(refractedDir)))
+    float3 smoothRefractedDir = refract(I, N, rcp(safeIor));
+    if (dot(smoothRefractedDir, smoothRefractedDir) < 1.0e-8f ||
+        any(isnan(smoothRefractedDir)) ||
+        any(isinf(smoothRefractedDir)))
     {
-        refractedDir = reflect(I, N);
+        smoothRefractedDir = reflect(I, N);
     }
 
     // A physically paired enter/exit stack tends to cancel on thin glass and
@@ -507,7 +517,34 @@ float3 ComputeGuideRefractionDirection(float3 incidentDir, float3 surfaceNormal,
     // Extrapolate the Snell delta so IOR changes move the selected opaque hit
     // in the same direction, while IOR close to 1 still converges to no bend.
     float guideBendScale = 1.0f + saturate((safeIor - 1.0f) / 1.5f) * 4.0f;
-    return GGXSafeNormalize(I + (refractedDir - I) * guideBendScale, refractedDir);
+    float3 smoothGuideDir = GGXSafeNormalize(
+        I + (smoothRefractedDir - I) * guideBendScale,
+        smoothRefractedDir);
+
+    roughness = saturate(roughness);
+    if (roughness <= 1.0e-4f)
+        return smoothGuideDir;
+
+    float3 microfacetNormal = sample_ggx(N, roughness, seed);
+    if (dot(I, microfacetNormal) >= -1.0e-4f)
+        microfacetNormal = N;
+
+    float3 roughRefractedDir = refract(I, microfacetNormal, rcp(safeIor));
+    if (dot(roughRefractedDir, roughRefractedDir) < 1.0e-8f ||
+        any(isnan(roughRefractedDir)) ||
+        any(isinf(roughRefractedDir)))
+    {
+        // A sampled microsurface can enter total internal reflection even
+        // when the smooth interface transmits. Preserve that physical branch.
+        return GGXSafeNormalize(reflect(I, microfacetNormal), smoothGuideDir);
+    }
+
+    // Preserve the existing artist-facing IOR bend while adding only the
+    // stochastic microsurface delta; otherwise guideBendScale would amplify
+    // roughness several times on every glass layer.
+    return GGXSafeNormalize(
+        smoothGuideDir + (roughRefractedDir - smoothRefractedDir),
+        smoothGuideDir);
 }
 
 float3 ComputeWorldRayDirectionFromScreenUv(float2 screenUv, out float primaryRayTScale)
@@ -574,10 +611,147 @@ void WriteRefractedGuideDebug(uint2 pixel, uint firstTranslucentHit, uint consum
     OutSpecularAlbedo[pixel] = float4(max(layerNorm, 0.15f), iorNorm, finalOpaqueHit != 0u ? 1.0f : 0.0f, 1.0f);
 }
 
+float3 ResolveRefractedTransmissionRadiance(PathTracingPayload payload, bool opaqueHit)
+{
+    if (!opaqueHit)
+        return max(payload.radiance, 0.0f.xxx);
+
+    // Keep bPrimaryGBufferOnly enabled so closest-hit preserves the incoming
+    // refracted direction. Evaluate a compact one-hit lighting estimate here
+    // instead of enabling the normal path-tracing BRDF continuation, which
+    // overwrites payload.direction with a bounce direction.
+    float3 N = GGXSafeNormalize(payload.debugNormal, -payload.direction);
+    float3 V = GGXSafeNormalize(-payload.direction, N);
+    if (dot(N, V) < 0.0f)
+        N = -N;
+    float3 albedo = max(payload.debugAlbedo, 0.0f.xxx);
+    float roughness = clamp(payload.debugRoughness, 0.02f, 1.0f);
+    float metallic = saturate(payload.debugMetallic);
+    float3 lightDir = GGXSafeNormalize(LightDirAndIntensity.xyz, float3(0.0f, 1.0f, 0.0f));
+    float ndotl = saturate(dot(N, lightDir));
+    float3 f0 = lerp(0.04f.xxx, albedo, metallic);
+    float3 diffuse = albedo * (1.0f - metallic);
+    float3 specular = EvaluateGGXSpecularBRDF(N, V, lightDir, roughness, f0);
+    float3 direct = (diffuse + specular) * ndotl * max(LightDirAndIntensity.w, 0.0f) * max(LightColor, 0.0f.xxx);
+
+    float skyT = saturate(N.y * 0.5f + 0.5f);
+    float3 skyIrradiance = lerp(SkyColorBottom, SkyColorTop, skyT) * SkyIntensity;
+    float3 ambient = albedo * max(skyIrradiance, 0.0f.xxx) * 0.18f;
+    return max(direct + ambient, 0.0f.xxx);
+}
+
+void TraceRefractedVolumeSample(uint2 pixel, float2 pixelCenter, float2 launchDim, uint seed)
+{
+    // RGB stores in-scattered radiance; A stores scalar transmittance.  The
+    // dispatch dimensions are deliberately smaller than the backing texture.
+    OutGeomNormal[pixel] = float4(0.0f, 0.0f, 0.0f, 1.0f);
+
+    float2 inUV = pixelCenter / launchDim;
+    float2 clipXY = inUV * 2.0f - 1.0f;
+    clipXY.y = -clipXY.y;
+    float4 viewFarH = mul(float4(clipXY, 1.0f, 1.0f), InvProjMatrix);
+    float3 viewRayDir = viewFarH.xyz / max(abs(viewFarH.w), 1.0e-6f);
+    viewRayDir = GGXSafeNormalize(viewRayDir, float3(0.0f, 0.0f, -1.0f));
+
+    float primaryRayTScale = rcp(max(-viewRayDir.z, 1.0e-4f));
+    float3 rayDir = GGXSafeNormalize(mul(float4(viewRayDir, 0.0f), InvViewMatrix).xyz, float3(0.0f, 0.0f, -1.0f));
+    float3 rayOrigin = mul(float4(0.0f, 0.0f, 0.0f, 1.0f), InvViewMatrix).xyz;
+    float rayBias = max(RefractedGuideRayBias, 0.0001f);
+
+    RayDesc ray;
+    ray.Origin = rayOrigin;
+    ray.Direction = rayDir;
+    ray.TMin = max(0.0001f, ProjectionParams.z * primaryRayTScale);
+    ray.TMax = max(ray.TMin + 0.0001f, ProjectionParams.w * primaryRayTScale);
+
+    PathTracingPayload payload = MakePathTracingPayload(rayOrigin, rayDir, 0u, seed, 1.0f.xxx, 0u);
+    TraceRay(gRtScene, RAY_FLAG_NONE, RT_RAY_MASK_ALL, 0, 0, 0, ray, payload);
+    if (!IsTranslucentMaterialPayload(payload))
+        return;
+
+    float density = max(RefractedVolumeParams.x, 0.0f);
+    float scatteringStrength = max(RefractedVolumeParams.y, 0.0f);
+    float anisotropy = clamp(RefractedVolumeParams.z, -0.9f, 0.9f);
+    float transmittance = 1.0f;
+    float3 scattering = 0.0f.xxx;
+    float3 entryPosition = 0.0f.xxx;
+    float3 entryColor = 1.0f.xxx;
+    bool insideVolume = false;
+    uint consumedLayers = 0u;
+    uint maxLayers = min(max(RefractedGuideMaxLayers, 2u), MAX_REFRACTED_GUIDE_LAYERS);
+
+    [loop]
+    for (uint layerIndex = 0u; layerIndex < MAX_REFRACTED_GUIDE_LAYERS; ++layerIndex)
+    {
+        if (layerIndex >= maxLayers || !IsTranslucentMaterialPayload(payload))
+            break;
+
+        ++consumedLayers;
+        if (!insideVolume)
+        {
+            entryPosition = payload.debugWorldPos;
+            entryColor = max(payload.debugAlbedo, 0.0f.xxx);
+            insideVolume = true;
+        }
+        else
+        {
+            float segmentLength = length(payload.debugWorldPos - entryPosition);
+            float segmentT = exp(-density * segmentLength);
+            float3 samplePosition = (entryPosition + payload.debugWorldPos) * 0.5f;
+            float3 lightDir = GGXSafeNormalize(LightDirAndIntensity.xyz, float3(0.0f, 1.0f, 0.0f));
+
+            ShadowRayPayload shadowPayload;
+            shadowPayload.bHit = true;
+            RayDesc shadowRay;
+            shadowRay.Origin = samplePosition + lightDir * rayBias;
+            shadowRay.Direction = lightDir;
+            shadowRay.TMin = rayBias;
+            shadowRay.TMax = ProjectionParams.w;
+            TraceRay(gRtScene,
+                     RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH |
+                     RAY_FLAG_SKIP_CLOSEST_HIT_SHADER |
+                     RAY_FLAG_FORCE_OPAQUE |
+                     RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES,
+                     RT_RAY_MASK_OPAQUE, 0, 0, 1, shadowRay, shadowPayload);
+
+            float cosTheta = dot(-rayDir, lightDir);
+            float phaseDenom = max(1.0f + anisotropy * anisotropy - 2.0f * anisotropy * cosTheta, 1.0e-3f);
+            // Normalized Henyey-Greenstein phase.  Omitting 1/(4*pi) makes
+            // directly-lit glass look roughly 12.6x denser than shadowed
+            // glass even though their Beer-Lambert transmittance is equal.
+            float phase = (1.0f - anisotropy * anisotropy) /
+                (4.0f * PI * pow(phaseDenom, 1.5f));
+            float visibility = shadowPayload.bHit ? 0.0f : 1.0f;
+            float3 direct = max(LightColor, 0.0f.xxx) * max(LightDirAndIntensity.w, 0.0f) * visibility * phase;
+            // For a uniform environment, integrating a normalized phase
+            // function over the sphere returns the environment radiance.
+            // This is also the first-order fill term in directional shadows.
+            float3 ambient = max(lerp(SkyColorBottom, SkyColorTop, 0.5f), 0.0f.xxx) * max(SkyIntensity, 0.0f);
+            scattering += transmittance * entryColor * scatteringStrength * (1.0f - segmentT) * (direct + ambient);
+            transmittance *= segmentT;
+            insideVolume = false;
+        }
+
+        float interfaceRoughness = consumedLayers == 1u ? RefractedGuideRoughness : 0.0f;
+        rayDir = ComputeGuideRefractionDirection(payload.direction, payload.debugNormal, RefractedGuideIOR, interfaceRoughness, seed);
+        rayOrigin = payload.debugWorldPos + rayDir * rayBias;
+        RayDesc layerRay;
+        layerRay.Origin = rayOrigin;
+        layerRay.Direction = rayDir;
+        layerRay.TMin = rayBias;
+        layerRay.TMax = ProjectionParams.w;
+        payload = MakePathTracingPayload(rayOrigin, rayDir, 0u, seed, 1.0f.xxx, 0u);
+        TraceRay(gRtScene, RAY_FLAG_NONE, RT_RAY_MASK_ALL, 0, 0, 0, layerRay, payload);
+    }
+
+    OutGeomNormal[pixel] = float4(max(scattering, 0.0f.xxx), saturate(transmittance));
+}
+
 void TraceRefractedGuideGBufferSample(uint2 pixel, float2 pixelCenter, float2 launchDim, float2 sampleOffset, uint seed)
 {
     float2 inUV = (pixelCenter + sampleOffset) / launchDim;
     OutputColor[pixel] = float4(saturate(inUV), 0.0f, 0.0f);
+    OutGeomNormal[pixel] = float4(0.0f, 0.0f, 0.0f, 0.0f);
     float2 clipXY = inUV * 2.0f - 1.0f;
     clipXY.y = -clipXY.y;
 
@@ -615,7 +789,17 @@ void TraceRefractedGuideGBufferSample(uint2 pixel, float2 pixelCenter, float2 la
 
         ++consumedLayers;
         thinLensGuideOffset += ComputeThinLensGuideOffset(payload, launchDim);
-        rayDir = ComputeGuideRefractionDirection(payload.direction, payload.debugNormal, RefractedGuideIOR);
+        // This guide uses a local bending approximation rather than a tracked
+        // enter/exit IOR stack. Sample roughness once at the first interface;
+        // applying the same local eta at every layer compounds into unstable
+        // directions on closed glass meshes.
+        const float interfaceRoughness = consumedLayers == 1u ? RefractedGuideRoughness : 0.0f;
+        rayDir = ComputeGuideRefractionDirection(
+            payload.direction,
+            payload.debugNormal,
+            RefractedGuideIOR,
+            interfaceRoughness,
+            seed);
         rayOrigin = payload.debugWorldPos + rayDir * rayBias;
 
         RayDesc layerRay;
@@ -672,6 +856,12 @@ void TraceRefractedGuideGBufferSample(uint2 pixel, float2 pixelCenter, float2 la
     WritePrimaryHitGBuffer(pixel, finalPayload, finalOpaqueHit != 0u, ProjectionParams.w, float2(0.0f, 0.0f));
     if (firstTranslucentHit != 0u && finalOpaqueHit != 0u)
         OutputColor[pixel] = float4(finalGuideUv, saturate(float(consumedLayers) / float(MAX_REFRACTED_GUIDE_LAYERS)), 1.0f);
+    if (firstTranslucentHit != 0u)
+    {
+        OutGeomNormal[pixel] = float4(
+            ResolveRefractedTransmissionRadiance(finalPayload, finalOpaqueHit != 0u),
+            1.0f);
+    }
     WriteRefractedGuideDebug(pixel, firstTranslucentHit, consumedLayers, finalOpaqueHit);
 }
 
@@ -686,6 +876,15 @@ void PathTracingRayGen()
     
     uint frameCounter = (DebugMode > 0) ? 0 : BlueNoiseOffsetStride;
     uint sampleCount = (DebugMode > 0) ? 1u : clamp(SamplesPerPixel, 1u, 16u);
+    if (bRefractedVolumeOnly != 0)
+    {
+        TraceRefractedVolumeSample(
+            launchIndex.xy,
+            pixelCenter,
+            float2(launchDim.xy),
+            init_path_seed(launchIndex.xy, frameCounter, 0u));
+        return;
+    }
     if (bRefractedGuideGBufferOnly != 0)
     {
         TraceRefractedGuideGBufferSample(

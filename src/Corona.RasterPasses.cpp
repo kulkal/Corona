@@ -538,6 +538,14 @@ namespace
 	constexpr uint32_t kGBufferMaterialRecordRegister = 13;
 	constexpr uint32_t kGBufferDrawRecordRegister = 15;
 	constexpr uint32_t kGBufferLegacyStaticVertexStride = 44;
+	constexpr uint32_t kRTBindlessTextureRegisterSpace = 10;
+	constexpr uint32_t kRTMaterialBufferRegisterSpace = 11;
+	constexpr uint32_t kRTBindlessGeometryBufferRegisterSpace = 12;
+	constexpr uint32_t kRTGeometryRecordBufferRegisterSpace = 13;
+	constexpr uint32_t kRTInstancePropertyBufferRegisterSpace = 14;
+	constexpr uint32_t kTranslucentSurfacePassFlag = 1u << 0;
+	constexpr uint32_t kTranslucentReflectionHitLightingFallbackFlag = 1u << 1;
+	constexpr uint32_t kTranslucentRTRefractionColorFlag = 1u << 2;
 
 	struct GBufferMaterialRecord
 	{
@@ -2247,7 +2255,10 @@ void Corona::InitTranslucentMeshPass()
 	TranslucentMeshGraphicsPipeline.reset();
 	TranslucentPreLightingGuideGraphicsPipeline.reset();
 	TranslucentSurfaceLightingGraphicsPipeline.reset();
+	RasterTranslucentVolumeBackGraphicsPipeline.reset();
+	RasterTranslucentVolumeFrontGraphicsPipeline.reset();
 	TranslucentGuideWarpPSO.reset();
+	RTTranslucentVolumeCompositePSO.reset();
 	if (!renderBackend)
 		return;
 
@@ -2283,10 +2294,45 @@ void Corona::InitTranslucentMeshPass()
 		MakeRHICBV("__CB0", 0, sizeof(TranslucentMeshCB), graphicsStages),
 		MakeRHITextureSRV("SceneColorTex", 0, pixelStage),
 		MakeRHITextureSRV("PrevCompositeGuideTex", 2, pixelStage),
+		MakeRHITextureSRV("RefractedColorTex", 3, pixelStage),
 		MakeRHISampler("samplerClamp", 0, pixelStage),
 	};
 	if (bUseRtReflectionShader)
+	{
 		desc.PipelineLayout.Bindings.push_back(MakeRHIAccelerationStructureSRV("gRtScene", 1, pixelStage));
+		desc.PipelineLayout.Bindings.push_back(MakeRHIBindlessTextureSRV(
+			"MaterialTextures",
+			0,
+			kRTBindlessTextureRegisterSpace,
+			pixelStage));
+		desc.PipelineLayout.Bindings.push_back(MakeRHIBufferSRV(
+			"RtMaterials",
+			0,
+			pixelStage,
+			RHIBufferViewKind::Structured,
+			1,
+			kRTMaterialBufferRegisterSpace));
+		desc.PipelineLayout.Bindings.push_back(MakeRHIBindlessBufferSRV(
+			"GeometryBuffers",
+			0,
+			kRTBindlessGeometryBufferRegisterSpace,
+			pixelStage,
+			RHIBufferViewKind::Raw));
+		desc.PipelineLayout.Bindings.push_back(MakeRHIBufferSRV(
+			"RtGeometries",
+			0,
+			pixelStage,
+			RHIBufferViewKind::Structured,
+			1,
+			kRTGeometryRecordBufferRegisterSpace));
+		desc.PipelineLayout.Bindings.push_back(MakeRHIBufferSRV(
+			"RtInstanceProperties",
+			0,
+			pixelStage,
+			RHIBufferViewKind::Raw,
+			1,
+			kRTInstancePropertyBufferRegisterSpace));
+	}
 
 	TranslucentMeshGraphicsPipeline = renderBackend->CreateGraphicsPipeline(desc);
 	if (!TranslucentMeshGraphicsPipeline)
@@ -2345,14 +2391,80 @@ void Corona::InitTranslucentMeshPass()
 	surfaceDesc.PipelineLayout.Bindings = {
 		MakeRHICBV("__CB0", 0, sizeof(TranslucentMeshCB), graphicsStages),
 		MakeRHITextureSRV("SceneColorTex", 0, pixelStage),
+		MakeRHITextureSRV("RefractedColorTex", 3, pixelStage),
 		MakeRHISampler("samplerClamp", 0, pixelStage),
 	};
 	if (bUseRtReflectionShader)
+	{
 		surfaceDesc.PipelineLayout.Bindings.push_back(MakeRHIAccelerationStructureSRV("gRtScene", 1, pixelStage));
+		surfaceDesc.PipelineLayout.Bindings.push_back(MakeRHIBindlessTextureSRV(
+			"MaterialTextures",
+			0,
+			kRTBindlessTextureRegisterSpace,
+			pixelStage));
+		surfaceDesc.PipelineLayout.Bindings.push_back(MakeRHIBufferSRV(
+			"RtMaterials",
+			0,
+			pixelStage,
+			RHIBufferViewKind::Structured,
+			1,
+			kRTMaterialBufferRegisterSpace));
+		surfaceDesc.PipelineLayout.Bindings.push_back(MakeRHIBindlessBufferSRV(
+			"GeometryBuffers",
+			0,
+			kRTBindlessGeometryBufferRegisterSpace,
+			pixelStage,
+			RHIBufferViewKind::Raw));
+		surfaceDesc.PipelineLayout.Bindings.push_back(MakeRHIBufferSRV(
+			"RtGeometries",
+			0,
+			pixelStage,
+			RHIBufferViewKind::Structured,
+			1,
+			kRTGeometryRecordBufferRegisterSpace));
+		surfaceDesc.PipelineLayout.Bindings.push_back(MakeRHIBufferSRV(
+			"RtInstanceProperties",
+			0,
+			pixelStage,
+			RHIBufferViewKind::Raw,
+			1,
+			kRTInstancePropertyBufferRegisterSpace));
+	}
 
 	TranslucentSurfaceLightingGraphicsPipeline = renderBackend->CreateGraphicsPipeline(surfaceDesc);
 	if (!TranslucentSurfaceLightingGraphicsPipeline)
 		AppendCpuRuntimeTrace(L"[InitTranslucentMeshPass] surface lighting pipeline create failed");
+
+	GraphicsPipelineDesc volumeDesc{};
+	volumeDesc.ShaderPath = GetAssetFullPath(L"Shaders\\RasterTranslucentVolume.hlsl");
+	volumeDesc.VertexEntryPoint = "VSMain";
+	volumeDesc.PixelEntryPoint = "PSBack";
+	volumeDesc.VertexStride = 44;
+	volumeDesc.VertexElements = {
+		{ "POSITION", 0, EVertexAttributeFormat::Float3, 0 },
+		{ "NORMAL",   0, EVertexAttributeFormat::Float3, 12 },
+		{ "TEXCOORD", 0, EVertexAttributeFormat::Float2, 24 },
+		{ "TANGENT",  0, EVertexAttributeFormat::Float3, 32 },
+	};
+	volumeDesc.ColorFormats = { ETextureFormat::RGBA16Float };
+	volumeDesc.DepthFormat = ETextureFormat::D32Float;
+	volumeDesc.bDepthEnable = true;
+	volumeDesc.bDepthWriteEnable = true;
+	volumeDesc.DepthCompareOp = EDepthCompareOp::LessEqual;
+	volumeDesc.bCullBackFaces = false;
+	volumeDesc.BlendMode = EBlendMode::Opaque;
+	volumeDesc.ConstantBufferSize = sizeof(RasterTranslucentVolumeCB);
+	volumeDesc.ConstantBufferBinding = 0;
+	volumeDesc.PipelineLayout.Bindings = {
+		MakeRHICBV("__CB0", 0, sizeof(RasterTranslucentVolumeCB), graphicsStages),
+		MakeRHITextureSRV("BackDepthTex", 0, pixelStage),
+		MakeRHITextureSRV("ShadowTex", 1, pixelStage),
+	};
+	RasterTranslucentVolumeBackGraphicsPipeline = renderBackend->CreateGraphicsPipeline(volumeDesc);
+	volumeDesc.PixelEntryPoint = "PSFront";
+	RasterTranslucentVolumeFrontGraphicsPipeline = renderBackend->CreateGraphicsPipeline(volumeDesc);
+	if (!RasterTranslucentVolumeBackGraphicsPipeline || !RasterTranslucentVolumeFrontGraphicsPipeline)
+		AppendCpuRuntimeTrace(L"[InitTranslucentMeshPass] raster volume pipeline create failed");
 }
 
 void Corona::InitParticlePass()
@@ -2422,8 +2534,21 @@ uint32_t Corona::ParticleBurstForScript(float x, float y, float z, uint32_t coun
 	return sys->SpawnBurst(glm::vec3(x, y, z), count);
 }
 
+bool Corona::IsTranslucentColorOnlyRefractionEnabled() const
+{
+	if (_wgetenv(L"CORONA_TRANSLUCENT_COLOR_ONLY_REFRACTION"))
+		return GetEnvBool(L"CORONA_TRANSLUCENT_COLOR_ONLY_REFRACTION", false);
+
+	const auto result = PersistentScriptControls.find("transparency_layers.color_only_refraction");
+	if (result != PersistentScriptControls.end() && result->second.Type == PersistentScriptControlType::Bool)
+		return result->second.Bool;
+	return false;
+}
+
 bool Corona::IsTranslucentPreLightingRefractedGBufferEnabled() const
 {
+	if (IsTranslucentColorOnlyRefractionEnabled())
+		return false;
 	if (_wgetenv(L"CORONA_TRANSLUCENT_PRELIGHT_GBUFFER"))
 		return GetEnvBool(L"CORONA_TRANSLUCENT_PRELIGHT_GBUFFER", true);
 
@@ -2528,6 +2653,7 @@ bool Corona::TranslucentPreLightingGuidePass()
 	};
 
 	const float distortionScale = std::clamp(getPersistentNumber("transparency_layers.distortion_scale", 1.0f), 0.0f, 12.0f);
+	const float glassRoughness = std::clamp(getPersistentNumber("transparency_layers.roughness", 0.0f), 0.0f, 1.0f);
 	const float refractionPixels = kRasterTranslucentRefractionPixelsPerScale * distortionScale;
 	const float invWidth = 1.0f / static_cast<float>(std::max<UINT>(GetRenderWidth(), 1u));
 	const float invHeight = 1.0f / static_cast<float>(std::max<UINT>(GetRenderHeight(), 1u));
@@ -2545,7 +2671,7 @@ bool Corona::TranslucentPreLightingGuidePass()
 		cb.BaseColorFactor = material ? material->BaseColorFactor : glm::vec4(1.0f);
 		cb.BaseColorFactor.a = std::clamp(cb.BaseColorFactor.a, 0.0f, 1.0f);
 		cb.RenderTargetParams = glm::vec4(invWidth, invHeight, 0.0f, 0.0f);
-		cb.EffectParams = glm::vec4(refractionPixels, 0.0f, 0.0f, 0.0f);
+		cb.EffectParams = glm::vec4(refractionPixels, glassRoughness, 0.0f, 0.0f);
 		cb.StochasticParams = glm::uvec4(
 			0u,
 			static_cast<uint32_t>(FrameCounter),
@@ -2611,6 +2737,7 @@ bool Corona::TranslucentPreLightingGuidePass()
 		AppendCpuRuntimeTrace(
 			L"[TranslucentPreLightingGuidePass] meshGuide=1, draws=" + std::to_wstring(submittedDraws) +
 			L", refractionPixels=" + std::to_wstring(refractionPixels) +
+			L", roughness=" + std::to_wstring(glassRoughness) +
 			L", opaqueDepth=" + std::to_wstring(bUseOpaqueDepthForGuide ? 1 : 0) +
 			L", accumulatedOffset=1" +
 			L", guideDistortion=" + std::to_wstring(bTranslucentDistortionGuideValidThisFrame ? 1 : 0));
@@ -2881,6 +3008,8 @@ bool Corona::TranslucentPreLightingGuidePass()
 void Corona::TranslucentMeshPass()
 {
 	bTranslucentDistortionGuideValidThisFrame = false;
+	bTranslucentDistortionGuideIsOffsetThisFrame = false;
+	const bool bColorOnlyRefraction = IsTranslucentColorOnlyRefractionEnabled();
 	if (!renderBackend ||
 		!TranslucentMeshGraphicsPipeline ||
 		!LightingBuffer ||
@@ -2990,22 +3119,45 @@ void Corona::TranslucentMeshPass()
 		return true;
 	};
 	const float distortionScale = std::clamp(getPersistentNumber("transparency_layers.distortion_scale", 1.0f), 0.0f, 12.0f);
-	const bool bBindRtReflection =
+	const float glassRoughness = std::clamp(getPersistentNumber("transparency_layers.roughness", 0.0f), 0.0f, 1.0f);
+	const bool bUseRtReflectionShader =
 		renderBackend->GetAPI() == ERenderBackendAPI::D3D12 &&
-		renderBackend->SupportsRayTracing() &&
+		renderBackend->SupportsRayTracing();
+	const bool bBindRtReflection =
+		bUseRtReflectionShader &&
 		TLAS != nullptr;
+	// RT-primary already shades the stochastic refracted GBuffer in LightingPass.
+	// Do not replace that full lighting result with the reduced one-hit color UAV.
+	const bool bUseRtRefractionColor = false;
 	const bool reflectionEnabled =
+		!bColorOnlyRefraction &&
 		getPersistentBool("transparency_layers.reflection_enabled", true) &&
-		(renderBackend->GetAPI() != ERenderBackendAPI::D3D12 || !renderBackend->SupportsRayTracing() || bBindRtReflection);
+		(!bUseRtReflectionShader || bBindRtReflection);
 	const float reflectionScale = reflectionEnabled ? std::clamp(getPersistentNumber("transparency_layers.reflection_scale", 1.0f), 0.0f, 3.0f) : 0.0f;
 	const float reflectionStrength = reflectionEnabled ? std::clamp(getPersistentNumber("transparency_layers.reflection_strength", 0.92f), 0.0f, 1.0f) : 0.0f;
-	const float reflectionRoughness = reflectionEnabled ? std::clamp(getPersistentNumber("transparency_layers.reflection_roughness", 0.0f), 0.0f, 1.0f) : 0.0f;
-	const float surfaceStrength = std::clamp(getPersistentNumber("transparency_layers.surface_strength", 0.55f), 0.0f, 1.0f);
-	const float tintStrength = std::clamp(getPersistentNumber("transparency_layers.tint_strength", 0.22f), 0.0f, 1.0f);
+	const bool bEnableReflectionHitLightingFallback =
+		bBindRtReflection &&
+		reflectionEnabled &&
+		getPersistentBool("transparency_layers.reflection_hit_lighting_fallback", true);
+	const bool bBindReflectionHitLighting =
+		bEnableReflectionHitLightingFallback &&
+		EnsureRTMaterialRecordBuffer() &&
+		EnsureRTGeometryRecordBuffer() &&
+		RTMaterialRecordBuffer &&
+		RTGeometryRecordBuffer &&
+		InstancePropertyBuffer;
+	const float surfaceStrength = bColorOnlyRefraction ?
+		0.0f :
+		std::clamp(getPersistentNumber("transparency_layers.surface_strength", 0.55f), 0.0f, 1.0f);
+	const float tintStrength = bColorOnlyRefraction ?
+		0.0f :
+		std::clamp(getPersistentNumber("transparency_layers.tint_strength", 0.22f), 0.0f, 1.0f);
 	const float fresnelPower = std::clamp(getPersistentNumber("transparency_layers.fresnel_power", 2.35f), 0.25f, 8.0f);
-	const bool bRefractionOnly = getPersistentBool("transparency_layers.refraction_only", false);
+	const bool bRefractionOnly = bColorOnlyRefraction || getPersistentBool("transparency_layers.refraction_only", false);
 	const float refractionPixels = kRasterTranslucentRefractionPixelsPerScale * distortionScale;
 	const float reflectionPixels = 28.0f * reflectionScale;
+	const float reflectionViewSpreadAngle =
+		std::tan(Fov * 0.5f) / (0.5f * static_cast<float>(std::max<UINT>(GetRenderHeight(), 1u)));
 
 	auto buildTranslucentCB = [&](const TranslucentDraw& item, uint32_t drawOrdinal)
 	{
@@ -3030,9 +3182,12 @@ void Corona::TranslucentMeshPass()
 			tintStrength,
 			surfaceStrength);
 		cb.CameraPositionAndRayParams = glm::vec4(RenderFrameCameraPosition, 0.15f);
-		cb.ReflectionParams = glm::vec4(reflectionRoughness, 0.0f, 0.0f, 0.0f);
+		cb.ReflectionHitLightDirAndIntensity = glm::vec4(RenderFrameNormalizedLightDir, std::max(0.0f, LightIntensity));
+		cb.ReflectionHitLightColorAndViewSpread = glm::vec4(RenderFrameLightColor, reflectionViewSpreadAngle);
+		cb.GlassParams = glm::vec4(glassRoughness, 0.0f, 0.0f, 0.0f);
 		cb.StochasticParams = glm::uvec4(
-			0u,
+			(bBindReflectionHitLighting ? kTranslucentReflectionHitLightingFallbackFlag : 0u) |
+				(bUseRtRefractionColor ? kTranslucentRTRefractionColorFlag : 0u),
 			static_cast<uint32_t>(FrameCounter),
 			static_cast<uint32_t>((drawOrdinal + 1u) * 9781u),
 			bRefractionOnly ? 1u : 0u);
@@ -3047,28 +3202,41 @@ void Corona::TranslucentMeshPass()
 		const TranslucentDraw& item = draws[drawIndex];
 		TranslucentMeshCB cb = buildTranslucentCB(item, submittedDraws);
 
-		// Snapshot the guide accumulated by farther translucent layers. The
-		// current layer samples this at the same UV used for SceneColorTex, so
-		// the final guide follows the same refraction chain as the color input
-		// sent to DLSS-RR.
-		renderBackend->TransitionTexture(TranslucentDistortionBuffer.get(), EResourceState::RenderTarget, EResourceState::CopySource);
-		renderBackend->TransitionTexture(TranslucentCompositeGuideHistoryBuffer.get(), EResourceState::ShaderRead, EResourceState::CopyDest);
-		renderBackend->CopyTexture(TranslucentCompositeGuideHistoryBuffer.get(), TranslucentDistortionBuffer.get());
-		renderBackend->TransitionTexture(TranslucentDistortionBuffer.get(), EResourceState::CopySource, EResourceState::RenderTarget);
-		renderBackend->TransitionTexture(TranslucentCompositeGuideHistoryBuffer.get(), EResourceState::CopyDest, EResourceState::ShaderRead);
+		if (!bColorOnlyRefraction)
+		{
+			// Snapshot the guide accumulated by farther translucent layers. The
+			// current layer samples this at the same UV used for SceneColorTex, so
+			// the final guide follows the same refraction chain as the color input
+			// sent to DLSS-RR.
+			renderBackend->TransitionTexture(TranslucentDistortionBuffer.get(), EResourceState::RenderTarget, EResourceState::CopySource);
+			renderBackend->TransitionTexture(TranslucentCompositeGuideHistoryBuffer.get(), EResourceState::ShaderRead, EResourceState::CopyDest);
+			renderBackend->CopyTexture(TranslucentCompositeGuideHistoryBuffer.get(), TranslucentDistortionBuffer.get());
+			renderBackend->TransitionTexture(TranslucentDistortionBuffer.get(), EResourceState::CopySource, EResourceState::RenderTarget);
+			renderBackend->TransitionTexture(TranslucentCompositeGuideHistoryBuffer.get(), EResourceState::CopyDest, EResourceState::ShaderRead);
+		}
 
 		renderBackend->SetRenderTargets(colorTargets, static_cast<uint32_t>(std::size(colorTargets)), DepthBuffer.get());
 		renderBackend->SetViewportAndScissor(GetRenderWidth(), GetRenderHeight());
 		renderBackend->BindGraphicsPipeline(TranslucentMeshGraphicsPipeline.get());
 
+		Texture* prevCompositeGuideTex = (bColorOnlyRefraction && DefaultBlackTex) ?
+			DefaultBlackTex.get() :
+			TranslucentCompositeGuideHistoryBuffer.get();
 		std::vector<GraphicsBindGroupEntry> bindEntries = {
 			GraphicsBindGroupEntry::SamplerBinding("samplerClamp", samplerBilinearWrap ? samplerBilinearWrap.get() : samplerWrap.get()),
 			GraphicsBindGroupEntry::TextureSRV("SceneColorTex", TranslucentBackgroundBuffer.get()),
-			GraphicsBindGroupEntry::TextureSRV("PrevCompositeGuideTex", TranslucentCompositeGuideHistoryBuffer.get()),
+			GraphicsBindGroupEntry::TextureSRV("PrevCompositeGuideTex", prevCompositeGuideTex),
+			GraphicsBindGroupEntry::TextureSRV("RefractedColorTex", bUseRtRefractionColor ? RTRefractedColorBuffer.get() : DefaultBlackTex.get()),
 			GraphicsBindGroupEntry::Constant(0, &cb, sizeof(cb)),
 		};
 		if (bBindRtReflection)
 			bindEntries.push_back(GraphicsBindGroupEntry::AccelerationStructureSRV("gRtScene", TLAS));
+		if (bBindReflectionHitLighting)
+		{
+			bindEntries.push_back(GraphicsBindGroupEntry::BufferSRV("RtMaterials", RTMaterialRecordBuffer.get()));
+			bindEntries.push_back(GraphicsBindGroupEntry::BufferSRV("RtGeometries", RTGeometryRecordBuffer.get()));
+			bindEntries.push_back(GraphicsBindGroupEntry::BufferSRV("RtInstanceProperties", InstancePropertyBuffer.get()));
+		}
 		CreateAndBindGraphicsBindGroup(renderBackend.get(), TranslucentMeshGraphicsPipeline.get(), bindEntries);
 		renderBackend->BindMeshBuffers(item.MeshPtr->Vb.get(), item.MeshPtr->Ib.get());
 		renderBackend->DrawIndexed(item.Draw->IndexCount, item.Draw->IndexStart, item.Draw->VertexBase);
@@ -3089,17 +3257,19 @@ void Corona::TranslucentMeshPass()
 	renderBackend->TransitionTexture(LightingBuffer.get(), EResourceState::RenderTarget, EResourceState::ShaderRead);
 	renderBackend->TransitionTexture(TranslucentDistortionBuffer.get(), EResourceState::RenderTarget, EResourceState::ShaderRead);
 	renderBackend->TransitionTexture(TranslucentSurfaceBuffer.get(), EResourceState::RenderTarget, EResourceState::ShaderRead);
-	bTranslucentDistortionGuideValidThisFrame = submittedDraws > 0;
+	bTranslucentDistortionGuideValidThisFrame = !bColorOnlyRefraction && submittedDraws > 0;
 	bTranslucentDistortionGuideIsOffsetThisFrame = false;
 
 	static uint32_t s_logCounter = 0;
 	if ((++s_logCounter % 120u) == 0u)
 		AppendCpuRuntimeTrace(
 			L"[TranslucentMeshPass] draws=" + std::to_wstring(submittedDraws) +
+			L", colorOnly=" + std::to_wstring(bColorOnlyRefraction ? 1 : 0) +
 			L", refractionOnly=" + std::to_wstring(bRefractionOnly ? 1 : 0) +
 			L", guideDistortion=" + std::to_wstring(bTranslucentDistortionGuideValidThisFrame ? 1 : 0) +
 			L", compositeGuide=1" +
-			L", rtReflection=" + std::to_wstring(bBindRtReflection ? 1 : 0));
+			L", rtReflection=" + std::to_wstring(bBindRtReflection ? 1 : 0) +
+			L", rtReflectionHitLighting=" + std::to_wstring(bBindReflectionHitLighting ? 1 : 0));
 }
 
 void Corona::TranslucentSurfaceLightingPass()
@@ -3216,21 +3386,36 @@ void Corona::TranslucentSurfaceLightingPass()
 	};
 
 	const float distortionScale = std::clamp(getPersistentNumber("transparency_layers.distortion_scale", 1.0f), 0.0f, 12.0f);
+	const float glassRoughness = std::clamp(getPersistentNumber("transparency_layers.roughness", 0.0f), 0.0f, 1.0f);
 	const bool bBindRtReflection =
 		renderBackend->GetAPI() == ERenderBackendAPI::D3D12 &&
 		renderBackend->SupportsRayTracing() &&
 		TLAS != nullptr;
+	// Preserve the fully lit stochastic GBuffer result already in LightingBuffer.
+	const bool bUseRtRefractionColor = false;
 	const bool reflectionEnabled =
 		getPersistentBool("transparency_layers.reflection_enabled", true) &&
 		(renderBackend->GetAPI() != ERenderBackendAPI::D3D12 || !renderBackend->SupportsRayTracing() || bBindRtReflection);
 	const float reflectionScale = reflectionEnabled ? std::clamp(getPersistentNumber("transparency_layers.reflection_scale", 1.0f), 0.0f, 3.0f) : 0.0f;
 	const float reflectionStrength = reflectionEnabled ? std::clamp(getPersistentNumber("transparency_layers.reflection_strength", 0.92f), 0.0f, 1.0f) : 0.0f;
-	const float reflectionRoughness = reflectionEnabled ? std::clamp(getPersistentNumber("transparency_layers.reflection_roughness", 0.0f), 0.0f, 1.0f) : 0.0f;
+	const bool bEnableReflectionHitLightingFallback =
+		bBindRtReflection &&
+		reflectionEnabled &&
+		getPersistentBool("transparency_layers.reflection_hit_lighting_fallback", true);
+	const bool bBindReflectionHitLighting =
+		bEnableReflectionHitLightingFallback &&
+		EnsureRTMaterialRecordBuffer() &&
+		EnsureRTGeometryRecordBuffer() &&
+		RTMaterialRecordBuffer &&
+		RTGeometryRecordBuffer &&
+		InstancePropertyBuffer;
 	const float surfaceStrength = std::clamp(getPersistentNumber("transparency_layers.surface_strength", 0.55f), 0.0f, 1.0f);
 	const float tintStrength = std::clamp(getPersistentNumber("transparency_layers.tint_strength", 0.22f), 0.0f, 1.0f);
 	const float fresnelPower = std::clamp(getPersistentNumber("transparency_layers.fresnel_power", 2.35f), 0.25f, 8.0f);
 	const float refractionPixels = kRasterTranslucentRefractionPixelsPerScale * distortionScale;
 	const float reflectionPixels = 28.0f * reflectionScale;
+	const float reflectionViewSpreadAngle =
+		std::tan(Fov * 0.5f) / (0.5f * static_cast<float>(std::max<UINT>(GetRenderHeight(), 1u)));
 
 	auto buildTranslucentCB = [&](const TranslucentDraw& item, uint32_t drawOrdinal)
 	{
@@ -3256,9 +3441,13 @@ void Corona::TranslucentSurfaceLightingPass()
 			surfaceStrength);
 		cb.CameraPositionAndRayParams = glm::vec4(RenderFrameCameraPosition, 0.15f);
 		cb.SurfaceDepthParams = glm::vec4(item.NearDepth, item.InvDepthRange, 2.6f, 0.08f);
-		cb.ReflectionParams = glm::vec4(reflectionRoughness, 0.0f, 0.0f, 0.0f);
+		cb.ReflectionHitLightDirAndIntensity = glm::vec4(RenderFrameNormalizedLightDir, std::max(0.0f, LightIntensity));
+		cb.ReflectionHitLightColorAndViewSpread = glm::vec4(RenderFrameLightColor, reflectionViewSpreadAngle);
+		cb.GlassParams = glm::vec4(glassRoughness, 0.0f, 0.0f, 0.0f);
 		cb.StochasticParams = glm::uvec4(
-			1u,
+			kTranslucentSurfacePassFlag |
+				(bBindReflectionHitLighting ? kTranslucentReflectionHitLightingFallbackFlag : 0u) |
+				(bUseRtRefractionColor ? kTranslucentRTRefractionColorFlag : 0u),
 			static_cast<uint32_t>(FrameCounter),
 			static_cast<uint32_t>((drawOrdinal + 1u) * 9781u),
 			bRefractionOnly ? 1u : 0u);
@@ -3295,10 +3484,17 @@ void Corona::TranslucentSurfaceLightingPass()
 		std::vector<GraphicsBindGroupEntry> bindEntries = {
 			GraphicsBindGroupEntry::SamplerBinding("samplerClamp", samplerBilinearWrap ? samplerBilinearWrap.get() : samplerWrap.get()),
 			GraphicsBindGroupEntry::TextureSRV("SceneColorTex", TranslucentBackgroundBuffer.get()),
+			GraphicsBindGroupEntry::TextureSRV("RefractedColorTex", bUseRtRefractionColor ? RTRefractedColorBuffer.get() : DefaultBlackTex.get()),
 			GraphicsBindGroupEntry::Constant(0, &cb, sizeof(cb)),
 		};
 		if (bBindRtReflection)
 			bindEntries.push_back(GraphicsBindGroupEntry::AccelerationStructureSRV("gRtScene", TLAS));
+		if (bBindReflectionHitLighting)
+		{
+			bindEntries.push_back(GraphicsBindGroupEntry::BufferSRV("RtMaterials", RTMaterialRecordBuffer.get()));
+			bindEntries.push_back(GraphicsBindGroupEntry::BufferSRV("RtGeometries", RTGeometryRecordBuffer.get()));
+			bindEntries.push_back(GraphicsBindGroupEntry::BufferSRV("RtInstanceProperties", InstancePropertyBuffer.get()));
+		}
 		CreateAndBindGraphicsBindGroup(renderBackend.get(), TranslucentSurfaceLightingGraphicsPipeline.get(), bindEntries);
 		renderBackend->BindMeshBuffers(item.MeshPtr->Vb.get(), item.MeshPtr->Ib.get());
 		renderBackend->DrawIndexed(item.Draw->IndexCount, item.Draw->IndexStart, item.Draw->VertexBase);
@@ -3315,10 +3511,221 @@ void Corona::TranslucentSurfaceLightingPass()
 			L"[TranslucentSurfaceLightingPass] draws=" + std::to_wstring(submittedDraws) +
 			L", layeredGlass=1" +
 			L", refractionOnly=" + std::to_wstring(bRefractionOnly ? 1 : 0) +
+			L", roughness=" + std::to_wstring(glassRoughness) +
 			L", surfaceStrength=" + std::to_wstring(surfaceStrength) +
 			L", reflectionStrength=" + std::to_wstring(reflectionStrength) +
-			L", reflectionRoughness=" + std::to_wstring(reflectionRoughness) +
-			L", rtReflection=" + std::to_wstring(bBindRtReflection ? 1 : 0));
+			L", rtRefractionColor=" + std::to_wstring(bUseRtRefractionColor ? 1 : 0) +
+			L", rtReflection=" + std::to_wstring(bBindRtReflection ? 1 : 0) +
+			L", rtReflectionHitLighting=" + std::to_wstring(bBindReflectionHitLighting ? 1 : 0));
+}
+
+void Corona::CompositeRTTranslucentVolumePass()
+{
+	if (!bRTTranslucentVolumeValidThisFrame ||
+		RTTranslucentVolumeWidth == 0u ||
+		RTTranslucentVolumeHeight == 0u ||
+		!renderBackend ||
+		!LightingBuffer ||
+		!RTRefractedColorBuffer ||
+		!TranslucentDistortionBuffer)
+	{
+		return;
+	}
+
+	if (!RTTranslucentVolumeCompositePSO)
+	{
+		const RHIShaderStageMask computeStage = ToRHIShaderStageMask(RHIShaderStage::Compute);
+		auto pso = renderBackend->CreateComputePipelineStateObject();
+		if (!pso)
+			return;
+
+		pso->BindSRV(MakeRHITextureSRV("VolumeTex", 0, computeStage));
+		pso->BindSRV(MakeRHITextureSRV("CoverageTex", 1, computeStage));
+		pso->BindUAV(MakeRHITextureUAV("LightingTex", 0, computeStage));
+		pso->BindCBV(MakeRHICBV("RTTranslucentVolumeCompositeCB", 0, sizeof(RTTranslucentVolumeCompositeCB), computeStage));
+		if (!pso->InitCS(GetAssetFullPath(L"Shaders\\RTTranslucentVolumeCompositeCS.hlsl"), "CSMain"))
+		{
+			AppendCpuRuntimeTrace(L"[RTTranslucentVolume] composite PSO create failed");
+			return;
+		}
+		RTTranslucentVolumeCompositePSO = pso;
+	}
+
+	RTTranslucentVolumeCompositeCB cb{};
+	const UINT32 renderWidth = std::max<UINT32>(GetRenderWidth(), 1u);
+	const UINT32 renderHeight = std::max<UINT32>(GetRenderHeight(), 1u);
+	cb.FullSizeAndInvSize = glm::vec4(
+		static_cast<float>(renderWidth),
+		static_cast<float>(renderHeight),
+		1.0f / static_cast<float>(renderWidth),
+		1.0f / static_cast<float>(renderHeight));
+	cb.LowResolutionSize = glm::uvec4(RTTranslucentVolumeWidth, RTTranslucentVolumeHeight, 0u, 0u);
+
+	renderBackend->EmitGpuCrashMarker("RTTranslucentVolumeComposite");
+	renderBackend->TransitionTexture(LightingBuffer.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
+	RTTranslucentVolumeCompositePSO->SetTextureSRV("VolumeTex", RTRefractedColorBuffer.get());
+	RTTranslucentVolumeCompositePSO->SetTextureSRV("CoverageTex", TranslucentDistortionBuffer.get());
+	RTTranslucentVolumeCompositePSO->SetTextureUAV("LightingTex", LightingBuffer.get());
+	RTTranslucentVolumeCompositePSO->SetCBVValue("RTTranslucentVolumeCompositeCB", &cb);
+	RTTranslucentVolumeCompositePSO->Apply();
+	renderBackend->Dispatch((renderWidth + 7u) / 8u, (renderHeight + 7u) / 8u, 1u);
+	renderBackend->UAVBarrier(LightingBuffer.get());
+	renderBackend->TransitionTexture(LightingBuffer.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
+}
+
+bool Corona::RasterizeTranslucentVolumePass()
+{
+	if (!renderBackend ||
+		GBufferGenerationMode == EGBufferGenerationMode::RtPrimary ||
+		!RasterTranslucentVolumeBackGraphicsPipeline ||
+		!RasterTranslucentVolumeFrontGraphicsPipeline ||
+		!RTRefractedColorBuffer ||
+		!TranslucentSurfaceBuffer ||
+		!TranslucentGuideRasterDepthBuffer ||
+		!DepthBuffer ||
+		!TranslucentDistortionBuffer)
+	{
+		return false;
+	}
+
+	auto getPersistentNumber = [this](const char* name, float fallback)
+	{
+		const auto result = PersistentScriptControls.find(name);
+		if (result != PersistentScriptControls.end() && result->second.Type == PersistentScriptControlType::Number)
+			return result->second.Number;
+		return fallback;
+	};
+	auto getPersistentBool = [this](const char* name, bool fallback)
+	{
+		const auto result = PersistentScriptControls.find(name);
+		if (result != PersistentScriptControls.end() && result->second.Type == PersistentScriptControlType::Bool)
+			return result->second.Bool;
+		return fallback;
+	};
+	if (!getPersistentBool("transparency_layers.rt_volume_scattering", false))
+		return false;
+
+	struct VolumeDraw
+	{
+		const SceneObject* Object = nullptr;
+		const Mesh* MeshPtr = nullptr;
+		const Mesh::DrawCall* Draw = nullptr;
+	};
+	static thread_local std::vector<VolumeDraw> s_volumeDraws;
+	s_volumeDraws.clear();
+	for (const SceneObject& object : RenderWorld.SceneObjects)
+	{
+		if (!object.bVisible || !object.ScenePtr || !SceneHasAlphaBlendMesh(object.ScenePtr))
+			continue;
+		for (const std::shared_ptr<Mesh>& mesh : object.ScenePtr->meshes)
+		{
+			if (!mesh || !mesh->bAlphaBlend || !mesh->Vb || !mesh->Ib)
+				continue;
+			for (const Mesh::DrawCall& draw : mesh->Draws)
+			{
+				const Material* material = draw.mat ? draw.mat.get() : mesh->Mat.get();
+				if (draw.IndexCount > 0u && material && material->BaseColorFactor.a > 0.001f)
+					s_volumeDraws.push_back({ &object, mesh.get(), &draw });
+			}
+		}
+	}
+	if (s_volumeDraws.empty())
+		return false;
+
+	const UINT32 divisor = static_cast<UINT32>(std::clamp(
+		static_cast<int>(std::lround(getPersistentNumber("transparency_layers.rt_volume_resolution_divisor", 2.0f))),
+		1,
+		4));
+	const UINT32 lowWidth = (GetRenderWidth() + divisor - 1u) / divisor;
+	const UINT32 lowHeight = (GetRenderHeight() + divisor - 1u) / divisor;
+	const float density = std::clamp(getPersistentNumber("transparency_layers.rt_volume_density", 0.001f), 0.0f, 0.005f);
+	const float strength = std::clamp(getPersistentNumber("transparency_layers.rt_volume_scattering_strength", 0.65f), 0.0f, 8.0f);
+	const float anisotropy = std::clamp(getPersistentNumber("transparency_layers.rt_volume_anisotropy", 0.0f), -0.9f, 0.9f);
+	glm::vec3 viewLightDir = glm::mat3(ViewMat) * RenderFrameNormalizedLightDir;
+	if (glm::length(viewLightDir) < 1.0e-5f)
+		viewLightDir = glm::vec3(0.0f, 1.0f, 0.0f);
+	else
+		viewLightDir = glm::normalize(viewLightDir);
+
+	auto buildCB = [&](const VolumeDraw& item)
+	{
+		RasterTranslucentVolumeCB cb{};
+		const glm::mat4x4 world = item.Object->Transform * item.MeshPtr->transform;
+		cb.WorldViewMatrix = glm::transpose(ViewMat * world);
+		cb.WorldViewProjectionMatrix = glm::transpose(ViewProjMat * world);
+		const Material* material = item.Draw->mat ? item.Draw->mat.get() : item.MeshPtr->Mat.get();
+		cb.BaseColorFactor = material ? material->BaseColorFactor : glm::vec4(1.0f);
+		cb.VolumeParams = glm::vec4(density, strength, anisotropy, 0.0f);
+		cb.TargetParams = glm::vec4(
+			1.0f / static_cast<float>(std::max(lowWidth, 1u)),
+			1.0f / static_cast<float>(std::max(lowHeight, 1u)),
+			static_cast<float>(lowWidth),
+			static_cast<float>(lowHeight));
+		cb.ViewLightDirAndIntensity = glm::vec4(viewLightDir, std::max(LightIntensity, 0.0f));
+		cb.LightColorAndSkyIntensity = glm::vec4(glm::max(RenderFrameLightColor, glm::vec3(0.0f)), std::max(SkyIntensity, 0.0f));
+		cb.SkyColorTop = glm::vec4(glm::max(SkyColorTop, glm::vec3(0.0f)), 0.0f);
+		cb.SkyColorBottom = glm::vec4(glm::max(SkyColorBottom, glm::vec3(0.0f)), 0.0f);
+		return cb;
+	};
+
+	auto restoreOpaqueDepth = [&](EResourceState translucentDepthState)
+	{
+		renderBackend->TransitionTexture(DepthBuffer.get(), EResourceState::ShaderRead, EResourceState::CopySource);
+		renderBackend->TransitionTexture(TranslucentGuideRasterDepthBuffer.get(), translucentDepthState, EResourceState::CopyDest);
+		renderBackend->CopyTexture(TranslucentGuideRasterDepthBuffer.get(), DepthBuffer.get());
+		renderBackend->TransitionTexture(DepthBuffer.get(), EResourceState::CopySource, EResourceState::ShaderRead);
+		renderBackend->TransitionTexture(TranslucentGuideRasterDepthBuffer.get(), EResourceState::CopyDest, EResourceState::DepthWrite);
+	};
+
+	renderBackend->EmitGpuCrashMarker("RasterTranslucentVolumeBack");
+	restoreOpaqueDepth(EResourceState::ShaderRead);
+	renderBackend->TransitionTexture(TranslucentSurfaceBuffer.get(), EResourceState::ShaderRead, EResourceState::RenderTarget);
+	const float backClear[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+	renderBackend->ClearRenderTarget(TranslucentSurfaceBuffer.get(), backClear);
+	Texture* backTargets[] = { TranslucentSurfaceBuffer.get() };
+	renderBackend->SetRenderTargets(backTargets, 1u, TranslucentGuideRasterDepthBuffer.get());
+	renderBackend->SetViewportAndScissor(lowWidth, lowHeight);
+	renderBackend->BindGraphicsPipeline(RasterTranslucentVolumeBackGraphicsPipeline.get());
+	for (const VolumeDraw& item : s_volumeDraws)
+	{
+		RasterTranslucentVolumeCB cb = buildCB(item);
+		CreateAndBindGraphicsBindGroup(renderBackend.get(), RasterTranslucentVolumeBackGraphicsPipeline.get(), {
+			GraphicsBindGroupEntry::TextureSRV("BackDepthTex", DefaultBlackTex.get()),
+			GraphicsBindGroupEntry::TextureSRV("ShadowTex", ShadowBuffer ? ShadowBuffer.get() : DefaultWhiteTex.get()),
+			GraphicsBindGroupEntry::Constant(0, &cb, sizeof(cb)),
+		});
+		renderBackend->BindMeshBuffers(item.MeshPtr->Vb.get(), item.MeshPtr->Ib.get());
+		renderBackend->DrawIndexed(item.Draw->IndexCount, item.Draw->IndexStart, item.Draw->VertexBase);
+	}
+	renderBackend->TransitionTexture(TranslucentSurfaceBuffer.get(), EResourceState::RenderTarget, EResourceState::ShaderRead);
+
+	renderBackend->EmitGpuCrashMarker("RasterTranslucentVolumeFront");
+	restoreOpaqueDepth(EResourceState::DepthWrite);
+	renderBackend->TransitionTexture(RTRefractedColorBuffer.get(), EResourceState::ShaderRead, EResourceState::RenderTarget);
+	const float volumeClear[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
+	renderBackend->ClearRenderTarget(RTRefractedColorBuffer.get(), volumeClear);
+	Texture* frontTargets[] = { RTRefractedColorBuffer.get() };
+	renderBackend->SetRenderTargets(frontTargets, 1u, TranslucentGuideRasterDepthBuffer.get());
+	renderBackend->SetViewportAndScissor(lowWidth, lowHeight);
+	renderBackend->BindGraphicsPipeline(RasterTranslucentVolumeFrontGraphicsPipeline.get());
+	for (const VolumeDraw& item : s_volumeDraws)
+	{
+		RasterTranslucentVolumeCB cb = buildCB(item);
+		CreateAndBindGraphicsBindGroup(renderBackend.get(), RasterTranslucentVolumeFrontGraphicsPipeline.get(), {
+			GraphicsBindGroupEntry::TextureSRV("BackDepthTex", TranslucentSurfaceBuffer.get()),
+			GraphicsBindGroupEntry::TextureSRV("ShadowTex", ShadowBuffer ? ShadowBuffer.get() : DefaultWhiteTex.get()),
+			GraphicsBindGroupEntry::Constant(0, &cb, sizeof(cb)),
+		});
+		renderBackend->BindMeshBuffers(item.MeshPtr->Vb.get(), item.MeshPtr->Ib.get());
+		renderBackend->DrawIndexed(item.Draw->IndexCount, item.Draw->IndexStart, item.Draw->VertexBase);
+	}
+	renderBackend->TransitionTexture(RTRefractedColorBuffer.get(), EResourceState::RenderTarget, EResourceState::ShaderRead);
+	renderBackend->TransitionTexture(TranslucentGuideRasterDepthBuffer.get(), EResourceState::DepthWrite, EResourceState::ShaderRead);
+
+	bRTTranslucentVolumeValidThisFrame = true;
+	RTTranslucentVolumeWidth = lowWidth;
+	RTTranslucentVolumeHeight = lowHeight;
+	return true;
 }
 
 bool Corona::PrepareTranslucentDLSSRRGuideBuffers(
@@ -3330,6 +3737,9 @@ bool Corona::PrepareTranslucentDLSSRRGuideBuffers(
 	Texture*& specularAlbedoGuide,
 	bool bForce)
 {
+	if (IsTranslucentColorOnlyRefractionEnabled())
+		return false;
+
 	if (!renderBackend ||
 		!bTranslucentDistortionGuideValidThisFrame ||
 		!TranslucentDistortionBuffer ||

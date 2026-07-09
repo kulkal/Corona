@@ -319,7 +319,10 @@ private:
 	shared_ptr<Texture> TranslucentGuideSpecularAlbedoBuffer;
 	shared_ptr<Texture> PathTracingSpecularHitDistanceBuffer;
 	shared_ptr<Texture> PathTracingSpecularMotionVectorBuffer;
-	shared_ptr<Texture> RTRefractedGuideDummyGeomNormalBuffer;
+	// RT translucent scratch target. The full-resolution guide may write a
+	// transmission preview, then the optional volume pass stores low-resolution
+	// scattering RGB and scalar transmittance A in its top-left region.
+	shared_ptr<Texture> RTRefractedColorBuffer;
 	shared_ptr<Texture> RTRefractedGuideDummySpecularHitDistanceBuffer;
 	shared_ptr<Texture> RTRefractedGuideDummySpecularMotionVectorBuffer;
 	// ReSTIR GI on specular RT path — per-pixel reservoir storage.
@@ -1017,7 +1020,9 @@ private:
 		float ViewSpreadAngle;
 		UINT32 NoiseMode = 1;
 		UINT32 GISamplesPerPixel = 1; // local light samples at the first diffuse GI hit
-		UINT32 _paddingAfterGISamples = 0;
+		// Bit 0: use TranslucentDistortionBuffer as receiver projection UV.
+		// Bit 1: guide stores an offset from current UV instead of absolute UV.
+		UINT32 TranslucentGuideFlags = 0;
 		glm::vec3 LightColor;
 		float _padding;
 		PointLightParam PointLights[MaxDiffuseGIPointLights];
@@ -1179,6 +1184,11 @@ private:
 		float RefractedGuideIOR = 1.45f;
 		float RefractedGuideRayBias = 0.05f;
 		UINT32 bRefractedGuideDebug = 0;
+		float RefractedGuideRoughness = 0.0f;
+		glm::vec3 RefractedGuidePadding = glm::vec3(0.0f);
+		glm::vec4 RefractedVolumeParams = glm::vec4(0.001f, 0.65f, 0.0f, 2.0f);
+		UINT32 bRefractedVolumeOnly = 0;
+		glm::uvec3 RefractedVolumePadding = glm::uvec3(0u);
 	};
 	static_assert(offsetof(PathTracingViewParamCB, PointLightPadding) % 16u == 0u, "PathTracingViewParamCB PointLightPadding must match HLSL packing.");
 	static_assert(offsetof(PathTracingViewParamCB, RefractedGuideMaxLayers) % 16u == 0u, "PathTracingViewParamCB refracted guide controls must match HLSL packing.");
@@ -1316,10 +1326,16 @@ private:
 	std::shared_ptr<GraphicsPipelineHandle> TranslucentMeshGraphicsPipeline;
 	std::shared_ptr<GraphicsPipelineHandle> TranslucentPreLightingGuideGraphicsPipeline;
 	std::shared_ptr<GraphicsPipelineHandle> TranslucentSurfaceLightingGraphicsPipeline;
+	std::shared_ptr<GraphicsPipelineHandle> RasterTranslucentVolumeBackGraphicsPipeline;
+	std::shared_ptr<GraphicsPipelineHandle> RasterTranslucentVolumeFrontGraphicsPipeline;
 	shared_ptr<ComputePipelineStateObject> TranslucentGuideWarpPSO;
+	shared_ptr<ComputePipelineStateObject> RTTranslucentVolumeCompositePSO;
 	bool bTranslucentDistortionGuideValidThisFrame = false;
 	bool bTranslucentDistortionGuideIsOffsetThisFrame = false;
 	bool bTranslucentRefractedGBufferActiveThisFrame = false;
+	bool bRTTranslucentVolumeValidThisFrame = false;
+	UINT32 RTTranslucentVolumeWidth = 0;
+	UINT32 RTTranslucentVolumeHeight = 0;
 	struct TranslucentMeshCB
 	{
 		glm::mat4x4 WorldViewMatrix;
@@ -1333,8 +1349,10 @@ private:
 		glm::vec4 RenderTargetParams = glm::vec4(1.0f);
 		glm::vec4 CameraPositionAndRayParams = glm::vec4(0.0f, 0.0f, 0.0f, 0.25f);
 		glm::vec4 SurfaceDepthParams = glm::vec4(0.0f);
-		// x: glass reflection perceptual roughness [0, 1].
-		glm::vec4 ReflectionParams = glm::vec4(0.0f);
+		glm::vec4 ReflectionHitLightDirAndIntensity = glm::vec4(0.0f, 1.0f, 0.0f, 0.0f);
+		glm::vec4 ReflectionHitLightColorAndViewSpread = glm::vec4(1.0f, 1.0f, 1.0f, 0.0f);
+		// x: shared glass reflection/refraction roughness [0, 1].
+		glm::vec4 GlassParams = glm::vec4(0.0f);
 		glm::uvec4 StochasticParams = glm::uvec4(0u);
 	};
 	struct TranslucentPreLightingMeshGuideCB
@@ -1351,6 +1369,23 @@ private:
 	{
 		glm::vec4 Params = glm::vec4(0.0f);
 		glm::uvec4 Flags = glm::uvec4(0u);
+	};
+	struct RTTranslucentVolumeCompositeCB
+	{
+		glm::vec4 FullSizeAndInvSize = glm::vec4(0.0f);
+		glm::uvec4 LowResolutionSize = glm::uvec4(0u);
+	};
+	struct RasterTranslucentVolumeCB
+	{
+		glm::mat4x4 WorldViewMatrix;
+		glm::mat4x4 WorldViewProjectionMatrix;
+		glm::vec4 BaseColorFactor = glm::vec4(1.0f);
+		glm::vec4 VolumeParams = glm::vec4(0.001f, 0.65f, 0.0f, 0.0f);
+		glm::vec4 TargetParams = glm::vec4(1.0f);
+		glm::vec4 ViewLightDirAndIntensity = glm::vec4(0.0f, 1.0f, 0.0f, 0.0f);
+		glm::vec4 LightColorAndSkyIntensity = glm::vec4(1.0f);
+		glm::vec4 SkyColorTop = glm::vec4(0.0f);
+		glm::vec4 SkyColorBottom = glm::vec4(0.0f);
 	};
 	std::shared_ptr<GraphicsPipelineHandle> ParticleGraphicsPipeline;
 	std::vector<std::shared_ptr<Particles::System>> ActiveParticleSystems;
@@ -3472,7 +3507,7 @@ public:
 	void RenderQueuedLuauUi(bool bRenderToolUi = true, bool bRenderGameUi = true);
 	void DrawLuauImGui();
 	void DrawEntityScriptImGui();
-	bool DrawEditorConfigScriptImGui();
+	bool DrawEditorConfigScriptImGui(bool bProbeOnly = false);
 	void ShutdownLuauScripting();
 	void StartLuauScriptProfileSampler(lua_State* L);
 	void StopLuauScriptProfileSampler();
@@ -3894,10 +3929,13 @@ public:
 	void VolumetricFogPass();
 
 	void InitTranslucentMeshPass();
+	bool IsTranslucentColorOnlyRefractionEnabled() const;
 	bool IsTranslucentPreLightingRefractedGBufferEnabled() const;
 	bool TranslucentPreLightingGuidePass();
 	void TranslucentMeshPass();
 	void TranslucentSurfaceLightingPass();
+	bool RasterizeTranslucentVolumePass();
+	void CompositeRTTranslucentVolumePass();
 	bool PrepareTranslucentDLSSRRGuideBuffers(
 		Texture*& depthGuide,
 		Texture*& velocityGuide,

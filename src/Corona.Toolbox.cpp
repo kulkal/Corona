@@ -9,12 +9,14 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <random>
 #include <string>
 
 namespace
 {
 	constexpr float kToggleBtnH = 28.0f;
 	constexpr float kToolboxPrimitiveScale = 20.0f;
+	constexpr float kToolboxGlassSizeMultiplier = 2.0f;
 	constexpr float kToolboxOpaqueSpawnDistance = 30.0f;
 	constexpr float kToolboxGlassSpawnDistance = 45.0f;
 
@@ -54,6 +56,42 @@ namespace
 		const float yaw = glm::degrees(std::atan2(look.x, look.z));
 		const float pitch = glm::degrees(std::asin(std::clamp(look.y, -1.0f, 1.0f)));
 		return glm::vec3(-pitch, yaw, 0.0f);
+	}
+
+	float RandomRange(float minValue, float maxValue)
+	{
+		static std::mt19937 rng(std::random_device{}());
+		std::uniform_real_distribution<float> dist(minValue, maxValue);
+		return dist(rng);
+	}
+
+	glm::vec3 HsvToRgb(float h, float s, float v)
+	{
+		h = h - std::floor(h);
+		const float scaledHue = h * 6.0f;
+		const int sector = static_cast<int>(std::floor(scaledHue));
+		const float f = scaledHue - static_cast<float>(sector);
+		const float p = v * (1.0f - s);
+		const float q = v * (1.0f - s * f);
+		const float t = v * (1.0f - s * (1.0f - f));
+
+		switch (sector % 6)
+		{
+		case 0: return glm::vec3(v, t, p);
+		case 1: return glm::vec3(q, v, p);
+		case 2: return glm::vec3(p, v, t);
+		case 3: return glm::vec3(p, q, v);
+		case 4: return glm::vec3(t, p, v);
+		default: return glm::vec3(v, p, q);
+		}
+	}
+
+	glm::vec3 RandomGlassAlbedo()
+	{
+		return HsvToRgb(
+			RandomRange(0.0f, 1.0f),
+			RandomRange(0.28f, 0.62f),
+			RandomRange(0.86f, 1.0f));
 	}
 }
 
@@ -242,7 +280,7 @@ void CoronaToolbox::SpawnGlassMesh(
 void CoronaToolbox::SpawnGlassCube()
 {
 	const Corona::ScriptSceneHandle sh = Host->CreateProceduralBoxSceneForScript(
-		glm::vec3(0.38f, 0.92f, 1.0f),
+		RandomGlassAlbedo(),
 		/*bUseBrickTexture*/ false,
 		/*uvRepeat*/ 1.0f,
 		/*textureKind*/ L"flat",
@@ -254,7 +292,7 @@ void CoronaToolbox::SpawnGlassCube()
 		sh,
 		SpawnPosInFront(Host, kToolboxGlassSpawnDistance, /*snap*/ false),
 		glm::vec3(0.0f, 25.0f, 0.0f),
-		/*targetExtent*/ 1.45f * kToolboxPrimitiveScale,
+		/*targetExtent*/ 1.45f * kToolboxPrimitiveScale * kToolboxGlassSizeMultiplier,
 		glm::vec3(1.0f),
 		/*useScale*/ false,
 		/*roughness*/ 0.08f);
@@ -266,14 +304,14 @@ void CoronaToolbox::SpawnGlassSphere()
 		/*radius*/ 1.0f,
 		/*rings*/ 32,
 		/*segments*/ 48,
-		glm::vec3(0.78f, 0.62f, 1.0f),
+		RandomGlassAlbedo(),
 		/*alpha*/ 0.36f);
 	SpawnGlassMesh(
 		"Glass_Sphere",
 		sh,
 		SpawnPosInFront(Host, kToolboxGlassSpawnDistance, /*snap*/ false),
 		glm::vec3(0.0f),
-		/*targetExtent*/ 1.55f * kToolboxPrimitiveScale,
+		/*targetExtent*/ 1.55f * kToolboxPrimitiveScale * kToolboxGlassSizeMultiplier,
 		glm::vec3(1.0f),
 		/*useScale*/ false,
 		/*roughness*/ 0.06f);
@@ -282,7 +320,7 @@ void CoronaToolbox::SpawnGlassSphere()
 void CoronaToolbox::SpawnGlassPlane()
 {
 	const Corona::ScriptSceneHandle sh = Host->CreateProceduralBoxSceneForScript(
-		glm::vec3(0.68f, 1.0f, 0.76f),
+		RandomGlassAlbedo(),
 		/*bUseBrickTexture*/ false,
 		/*uvRepeat*/ 1.0f,
 		/*textureKind*/ L"flat",
@@ -295,7 +333,7 @@ void CoronaToolbox::SpawnGlassPlane()
 		SpawnPosInFront(Host, kToolboxGlassSpawnDistance, /*snap*/ false),
 		CameraFacingRotationDegrees(Host),
 		/*targetExtent*/ 1.0f,
-		glm::vec3(2.8f, 1.6f, 1.0f) * kToolboxPrimitiveScale,
+		glm::vec3(2.8f, 1.6f, 1.0f) * (kToolboxPrimitiveScale * kToolboxGlassSizeMultiplier),
 		/*useScale*/ true,
 		/*roughness*/ 0.12f);
 }
@@ -303,14 +341,14 @@ void CoronaToolbox::SpawnGlassPlane()
 void CoronaToolbox::SpawnGlassDiamond()
 {
 	const Corona::ScriptSceneHandle sh = Host->CreateProceduralDiamondSceneForScript(
-		glm::vec3(0.74f, 0.94f, 1.0f),
+		RandomGlassAlbedo(),
 		/*alpha*/ 0.42f);
 	SpawnGlassMesh(
 		"Glass_Diamond",
 		sh,
 		SpawnPosInFront(Host, kToolboxGlassSpawnDistance, /*snap*/ false),
 		glm::vec3(0.0f, 45.0f, 0.0f),
-		/*targetExtent*/ 1.65f * kToolboxPrimitiveScale,
+		/*targetExtent*/ 1.65f * kToolboxPrimitiveScale * kToolboxGlassSizeMultiplier,
 		glm::vec3(1.0f),
 		/*useScale*/ false,
 		/*roughness*/ 0.04f);

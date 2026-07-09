@@ -1,7 +1,6 @@
 local script = {}
 
-local startup_mode = corona_script_startup_mode or ""
-local default_enabled = startup_mode == "sandbox"
+local default_enabled = false
 
 corona_script_controls = corona_script_controls or {}
 corona_script_controls.transparency_layers = corona_script_controls.transparency_layers or {}
@@ -39,18 +38,24 @@ set_default("diamond_size", 13.0)
 set_default("diamond_alpha", 0.42)
 set_default("rotate_objects", false)
 set_default("follow_camera", true)
-set_default("fixed_current_position", false)
 set_default("distortion_scale", 1.0)
+set_default("roughness", 0.0)
+set_default("color_only_refraction", false)
 set_default("pre_lighting_refracted_gbuffer", true)
 set_default("rt_refraction_layers", 4)
 set_default("rt_refraction_ior", 1.45)
 set_default("rt_refraction_ray_bias", 0.05)
 set_default("rt_refraction_debug", false)
+set_default("rt_volume_scattering", false)
+set_default("rt_volume_resolution_divisor", 2)
+set_default("rt_volume_density", 0.001)
+set_default("rt_volume_scattering_strength", 0.65)
+set_default("rt_volume_anisotropy", 0.0)
 set_default("refraction_only", false)
 set_default("reflection_enabled", true)
+set_default("reflection_hit_lighting_fallback", true)
 set_default("reflection_scale", 1.0)
 set_default("reflection_strength", 0.92)
-set_default("reflection_roughness", 0.0)
 set_default("surface_strength", 0.55)
 set_default("tint_strength", 0.22)
 set_default("fresnel_power", 2.35)
@@ -85,21 +90,8 @@ local layer_slots = 0
 local shape_slots = 0
 local spawned_logged = false
 local pending_rebuild = false
-local pending_capture_current = false
 local elapsed_seconds = 0.0
-local locked_layer_poses = {}
-local locked_shape_poses = {}
-local locked_diamond_pose = nil
-local last_layer_poses = {}
-local last_shape_poses = {}
-local last_diamond_pose = nil
-
-if controls.follow_camera ~= true then
-    controls.fixed_current_position = true
-end
-if controls.fixed_current_position == true then
-    controls.follow_camera = false
-end
+local placement_camera = nil
 
 local function clamp(value, minValue, maxValue)
     if value < minValue then
@@ -141,48 +133,6 @@ end
 
 local function mul(a, s)
     return { a[1] * s, a[2] * s, a[3] * s }
-end
-
-local function clone_vec3(v)
-    return { v[1], v[2], v[3] }
-end
-
-local function clone_pose(pose)
-    return {
-        position = clone_vec3(pose.position),
-        rotation = clone_vec3(pose.rotation),
-        scale = clone_vec3(pose.scale),
-    }
-end
-
-local function clear_locked_poses()
-    locked_layer_poses = {}
-    locked_shape_poses = {}
-    locked_diamond_pose = nil
-    pending_capture_current = false
-end
-
-local function capture_current_poses()
-    locked_layer_poses = {}
-    locked_shape_poses = {}
-    local captured = false
-    for i = 1, layer_slots do
-        if last_layer_poses[i] ~= nil then
-            locked_layer_poses[i] = clone_pose(last_layer_poses[i])
-            captured = true
-        end
-    end
-    for i = 1, shape_slots do
-        if last_shape_poses[i] ~= nil then
-            locked_shape_poses[i] = clone_pose(last_shape_poses[i])
-            captured = true
-        end
-    end
-    if last_diamond_pose ~= nil then
-        locked_diamond_pose = clone_pose(last_diamond_pose)
-        captured = true
-    end
-    pending_capture_current = not captured
 end
 
 local function entity_alive(entity)
@@ -309,8 +259,6 @@ local function ensure_diamond()
             corona.Entity.destroy(diamond)
             diamond = nil
         end
-        last_diamond_pose = nil
-        locked_diamond_pose = nil
         return
     end
     if not entity_alive(diamond) then
@@ -340,10 +288,6 @@ local function destroy_layers()
     layer_slots = 0
     shape_slots = 0
     spawned_logged = false
-    last_layer_poses = {}
-    last_shape_poses = {}
-    last_diamond_pose = nil
-    locked_diamond_pose = nil
 end
 
 local function make_layer_pose(index, camera)
@@ -427,28 +371,24 @@ local function update_layers(dt)
         spawned_logged = true
     end
 
-    local camera = corona.get_camera()
-    local use_fixed_position = controls.fixed_current_position == true or controls.follow_camera ~= true
-    if pending_capture_current then
-        capture_current_poses()
+    if placement_camera == nil or controls.follow_camera == true then
+        local camera = corona.get_camera()
+        placement_camera = {
+            position = { camera.position[1], camera.position[2], camera.position[3] },
+            forward = { camera.forward[1], camera.forward[2], camera.forward[3] },
+            right = { camera.right[1], camera.right[2], camera.right[3] },
+            up = { camera.up[1], camera.up[2], camera.up[3] },
+            pitch = camera.pitch,
+            yaw = camera.yaw,
+        }
     end
-
+    local camera = placement_camera
     local count = layer_slots
     for i = 1, count do
         local entity = layers[i]
         if entity ~= nil then
             local color, alpha = layer_color(i)
             local pose = make_layer_pose(i, camera)
-            if use_fixed_position then
-                local locked_pose = locked_layer_poses[i]
-                if locked_pose == nil then
-                    locked_layer_poses[i] = clone_pose(pose)
-                else
-                    pose.position = clone_vec3(locked_pose.position)
-                    pose.rotation = clone_vec3(locked_pose.rotation)
-                end
-            end
-            last_layer_poses[i] = clone_pose(pose)
 
             corona.MeshComponent.set(entity, {
                 color = { color[1], color[2], color[3], alpha },
@@ -471,15 +411,6 @@ local function update_layers(dt)
         if entity ~= nil then
             local color, alpha = shape_color(i)
             local pose = make_shape_pose(i, camera, animation_time)
-            if use_fixed_position then
-                local locked_pose = locked_shape_poses[i]
-                if locked_pose == nil then
-                    locked_shape_poses[i] = clone_pose(pose)
-                else
-                    pose.position = clone_vec3(locked_pose.position)
-                end
-            end
-            last_shape_poses[i] = clone_pose(pose)
 
             corona.MeshComponent.set(entity, {
                 color = { color[1], color[2], color[3], alpha },
@@ -499,15 +430,6 @@ local function update_layers(dt)
     if diamond ~= nil then
         local alpha = clamp(controls.diamond_alpha or controls.shape_alpha or 0.42, 0.08, 0.75)
         local pose = make_diamond_pose(camera)
-        if use_fixed_position then
-            if locked_diamond_pose == nil then
-                locked_diamond_pose = clone_pose(pose)
-            else
-                pose.position = clone_vec3(locked_diamond_pose.position)
-                pose.rotation = clone_vec3(locked_diamond_pose.rotation)
-            end
-        end
-        last_diamond_pose = clone_pose(pose)
         corona.MeshComponent.set(diamond, {
             color = { 0.74, 0.94, 1.0, alpha },
             alpha = alpha,
@@ -554,36 +476,16 @@ local function checkbox(label, name, rebuild)
     return next_value, changed
 end
 
-function script.imgui()
-    if not imgui.begin("Transparency Layers") then
-        imgui.end_window()
+local function draw_transparency_editor_config()
+    if not imgui.collapsing_header("Top / Transparency Layers", true) then
         return
     end
 
     checkbox("Enabled", "enabled", true)
+    checkbox("Follow Camera", "follow_camera", false)
     local _, rotate_changed = checkbox("Rotate Objects", "rotate_objects", false)
     if rotate_changed and controls.rotate_objects == false then
         elapsed_seconds = 0.0
-    end
-    local follow_camera, follow_changed = checkbox("Follow Camera", "follow_camera", false)
-    if follow_changed then
-        if follow_camera then
-            persist_control("fixed_current_position", false)
-            clear_locked_poses()
-        else
-            persist_control("fixed_current_position", true)
-            capture_current_poses()
-        end
-    end
-    local fixed_current_position, fixed_changed = checkbox("Lock Current Position", "fixed_current_position", false)
-    if fixed_changed then
-        if fixed_current_position then
-            persist_control("follow_camera", false)
-            capture_current_poses()
-        else
-            persist_control("follow_camera", true)
-            clear_locked_poses()
-        end
     end
     imgui.separator()
     slider_float("Object Alpha", "shape_alpha", 0.02, 0.70, "%.2f", true)
@@ -596,13 +498,32 @@ function script.imgui()
     slider_float("Diamond Alpha", "diamond_alpha", 0.08, 0.75, "%.2f", true)
     imgui.separator()
     slider_float("Distortion Scale", "distortion_scale", 0.0, 12.0, "%.2f", false)
+    slider_float("Roughness", "roughness", 0.0, 1.0, "%.2f", false)
+    local color_only_refraction, _ = checkbox("Color-only Refraction", "color_only_refraction", false)
+    if color_only_refraction then
+        imgui.begin_disabled()
+    end
     checkbox("Pre-light Refracted GBuffer", "pre_lighting_refracted_gbuffer", false)
     slider_int("RT Refract Layers", "rt_refraction_layers", 1, 8, false)
     slider_float("RT Refract IOR", "rt_refraction_ior", 1.01, 2.50, "%.2f", false)
     slider_float("RT Ray Bias", "rt_refraction_ray_bias", 0.001, 0.50, "%.3f", false)
     checkbox("RT Refract Debug", "rt_refraction_debug", false)
+    local rt_volume_scattering, _ = checkbox("Volume Scattering", "rt_volume_scattering", false)
+    if not rt_volume_scattering then
+        imgui.begin_disabled()
+    end
+    slider_int("Volume Resolution Divisor", "rt_volume_resolution_divisor", 1, 4, false)
+    slider_float("Volume Density", "rt_volume_density", 0.0, 0.005, "%.5f", false)
+    slider_float("Volume Strength", "rt_volume_scattering_strength", 0.0, 4.0, "%.2f", false)
+    slider_float("Volume Anisotropy", "rt_volume_anisotropy", -0.90, 0.90, "%.2f", false)
+    if not rt_volume_scattering then
+        imgui.end_disabled()
+    end
+    if color_only_refraction then
+        imgui.end_disabled()
+    end
     local refraction_only, _ = checkbox("Refraction Only", "refraction_only", false)
-    if refraction_only then
+    if refraction_only or color_only_refraction then
         imgui.begin_disabled()
     end
     local reflection_enabled, _ = checkbox("Reflection", "reflection_enabled", false)
@@ -611,18 +532,21 @@ function script.imgui()
     end
     slider_float("Reflection Scale", "reflection_scale", 0.0, 3.0, "%.2f", false)
     slider_float("Reflection Strength", "reflection_strength", 0.0, 1.0, "%.2f", false)
-    slider_float("Reflection Roughness", "reflection_roughness", 0.0, 1.0, "%.2f", false)
+    checkbox("Hit Lighting Fallback", "reflection_hit_lighting_fallback", true)
     if not reflection_enabled then
         imgui.end_disabled()
     end
-    slider_float("Surface Light", "surface_strength", 0.0, 1.0, "%.2f", false)
-    slider_float("Tint", "tint_strength", 0.0, 1.0, "%.2f", false)
-    slider_float("Fresnel Power", "fresnel_power", 0.25, 8.0, "%.2f", false)
-    if refraction_only then
+    if refraction_only or color_only_refraction then
         imgui.end_disabled()
     end
+end
 
-    imgui.end_window()
+function script.editor_config(probe_only)
+    if probe_only then
+        return false
+    end
+    draw_transparency_editor_config()
+    return false
 end
 
 corona.log("[transparency_layers] loaded enabled=" .. tostring(controls.enabled))

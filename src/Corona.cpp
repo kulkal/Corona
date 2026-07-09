@@ -3681,7 +3681,7 @@ bool Corona::RenderResolutionResourcesMatchCurrentState() const
 		 !textureMatches(DLSSRRBuffer, renderWidth, renderHeight) ||
 		 !textureMatches(PathTracingSpecularHitDistanceBuffer, renderWidth, renderHeight) ||
 		 !textureMatches(PathTracingSpecularMotionVectorBuffer, renderWidth, renderHeight) ||
-		 !textureMatches(RTRefractedGuideDummyGeomNormalBuffer, renderWidth, renderHeight) ||
+		 !textureMatches(RTRefractedColorBuffer, renderWidth, renderHeight) ||
 		 !textureMatches(RTRefractedGuideDummySpecularHitDistanceBuffer, renderWidth, renderHeight) ||
 		 !textureMatches(RTRefractedGuideDummySpecularMotionVectorBuffer, renderWidth, renderHeight)))
 		return false;
@@ -3714,6 +3714,9 @@ void Corona::ResetAllAccumulationState(bool forceUpscaleReload)
 	bUseLightingBufferFallbackForToneMap = true;
 	bDLSSRROutputValidThisFrame = false;
 	bTranslucentRefractedGBufferActiveThisFrame = false;
+	bRTTranslucentVolumeValidThisFrame = false;
+	RTTranslucentVolumeWidth = 0u;
+	RTTranslucentVolumeHeight = 0u;
 	bShadowOutputValidThisFrame = false;
 	bMobileShadowMapValidThisFrame = false;
 	PrevPathTracingViewMat = glm::mat4x4(0.0f);
@@ -3847,7 +3850,7 @@ void Corona::RecreateRenderResolutionResources()
 	releaseTexture(TranslucentGuideSpecularAlbedoBuffer);
 	releaseTexture(PathTracingSpecularHitDistanceBuffer);
 	releaseTexture(PathTracingSpecularMotionVectorBuffer);
-	releaseTexture(RTRefractedGuideDummyGeomNormalBuffer);
+	releaseTexture(RTRefractedColorBuffer);
 	releaseTexture(RTRefractedGuideDummySpecularHitDistanceBuffer);
 	releaseTexture(RTRefractedGuideDummySpecularMotionVectorBuffer);
 	releaseTexture(DepthBuffer);
@@ -4075,8 +4078,8 @@ void Corona::RecreateRenderResolutionResources()
 		PathTracingSpecularMotionVectorBuffer = createTexture2D(ETextureFormat::RG16Float, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1, glm::vec4(0.0f));
 		NAME_D3D12_OBJECT(PathTracingSpecularMotionVectorBuffer->resource);
 
-		RTRefractedGuideDummyGeomNormalBuffer = createTexture2D(normalBufferFormat, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1, normalClearValue);
-		NAME_D3D12_OBJECT(RTRefractedGuideDummyGeomNormalBuffer->resource);
+		RTRefractedColorBuffer = createTexture2D(ETextureFormat::RGBA16Float, TextureUsage_RenderTarget | TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1, glm::vec4(0.0f));
+		NAME_D3D12_OBJECT(RTRefractedColorBuffer->resource);
 
 		RTRefractedGuideDummySpecularHitDistanceBuffer = createTexture2D(ETextureFormat::R32Float, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1, glm::vec4(Far));
 		NAME_D3D12_OBJECT(RTRefractedGuideDummySpecularHitDistanceBuffer->resource);
@@ -6213,11 +6216,12 @@ void Corona::InitializeAutoAADump()
 			controlValue.Number = value;
 			PersistentScriptControls[name] = controlValue;
 		};
+		setScriptBoolOverride("transparency_layers.color_only_refraction", false);
+		setScriptNumberOverride("transparency_layers.roughness", 0.0f);
 		setScriptBoolOverride("transparency_layers.refraction_only", false);
 		setScriptBoolOverride("transparency_layers.reflection_enabled", true);
 		setScriptNumberOverride("transparency_layers.reflection_scale", 1.0f);
 		setScriptNumberOverride("transparency_layers.reflection_strength", 0.92f);
-		setScriptNumberOverride("transparency_layers.reflection_roughness", 0.0f);
 		setScriptNumberOverride("transparency_layers.surface_strength", 0.55f);
 		ResetAllAccumulationState(true);
 		const UINT32 frameCount = AutoAADumpFrameCountOverride > 0u ? AutoAADumpFrameCountOverride : 120u;
@@ -8728,11 +8732,14 @@ void Corona::SaveSceneState()
 		const bool bCommandLineTransparencyControl =
 			bCommandLineTransparencyLayers &&
 			(name == "transparency_layers.enabled" ||
+			name == "transparency_layers.color_only_refraction" ||
+			name == "transparency_layers.roughness" ||
 			name == "transparency_layers.refraction_only" ||
 			name == "transparency_layers.reflection_enabled" ||
+			name == "transparency_layers.reflection_hit_lighting_fallback" ||
 			name == "transparency_layers.reflection_scale" ||
 			name == "transparency_layers.reflection_strength" ||
-			name == "transparency_layers.reflection_roughness" ||
+			name == "transparency_layers.fresnel_power" ||
 			name == "transparency_layers.surface_strength");
 		return bTransientBenchmarkControl || bCommandLineTransparencyControl;
 	};
@@ -10724,11 +10731,12 @@ void Corona::OnInit()
 		if (bCommandLineTransparencyLayers)
 		{
 			setScriptBoolOverride("transparency_layers.enabled", true);
+			setScriptBoolOverride("transparency_layers.color_only_refraction", false);
+			setScriptNumberOverride("transparency_layers.roughness", 0.0f);
 			setScriptBoolOverride("transparency_layers.refraction_only", false);
 			setScriptBoolOverride("transparency_layers.reflection_enabled", true);
 			setScriptNumberOverride("transparency_layers.reflection_scale", 1.0f);
 			setScriptNumberOverride("transparency_layers.reflection_strength", 0.92f);
-			setScriptNumberOverride("transparency_layers.reflection_roughness", 0.0f);
 			setScriptNumberOverride("transparency_layers.surface_strength", 0.55f);
 		}
 		if (bCommandLinePlatformerSpineBenchmark)
@@ -11698,6 +11706,16 @@ shared_ptr<Scene> Corona::CreateProceduralDiamondScene(const glm::vec3& baseColo
 	std::vector<UINT32> indices;
 	constexpr uint32_t kSegments = 16u;
 	constexpr float kPi = 3.14159265358979323846f;
+	constexpr float kTableRadius = 0.36f;
+	constexpr float kTableY = 0.36f;
+	constexpr float kCrownRadius = 0.50f;
+	constexpr float kCrownY = 0.18f;
+	constexpr float kGirdleRadius = 0.62f;
+	constexpr float kGirdleTopY = 0.055f;
+	constexpr float kGirdleBottomY = -0.055f;
+	constexpr float kPavilionRadius = 0.34f;
+	constexpr float kPavilionY = -0.46f;
+	constexpr float kCuletY = -0.82f;
 	vertices.reserve(kSegments * 10u * 3u);
 	indices.reserve(kSegments * 10u * 3u);
 
@@ -11772,15 +11790,15 @@ shared_ptr<Scene> Corona::CreateProceduralDiamondScene(const glm::vec3& baseColo
 	{
 		const float angle = static_cast<float>(i) * step;
 		const float halfAngle = angle + step * 0.5f;
-		table.push_back(ringPoint(0.28f, 0.62f, angle));
-		crown.push_back(ringPoint(0.44f, 0.36f, halfAngle));
-		girdleTop.push_back(ringPoint(0.62f, 0.055f, angle));
-		girdleBottom.push_back(ringPoint(0.62f, -0.055f, angle));
-		pavilion.push_back(ringPoint(0.34f, -0.46f, halfAngle));
+		table.push_back(ringPoint(kTableRadius, kTableY, angle));
+		crown.push_back(ringPoint(kCrownRadius, kCrownY, halfAngle));
+		girdleTop.push_back(ringPoint(kGirdleRadius, kGirdleTopY, angle));
+		girdleBottom.push_back(ringPoint(kGirdleRadius, kGirdleBottomY, angle));
+		pavilion.push_back(ringPoint(kPavilionRadius, kPavilionY, halfAngle));
 	}
 
-	const glm::vec3 tableCenter(0.0f, 0.62f, 0.0f);
-	const glm::vec3 culet(0.0f, -0.82f, 0.0f);
+	const glm::vec3 tableCenter(0.0f, kTableY, 0.0f);
+	const glm::vec3 culet(0.0f, kCuletY, 0.0f);
 	for (uint32_t i = 0; i < kSegments; ++i)
 	{
 		const uint32_t next = (i + 1u) % kSegments;
@@ -11834,8 +11852,8 @@ shared_ptr<Scene> Corona::CreateProceduralDiamondScene(const glm::vec3& baseColo
 	scene->Materials.push_back(material);
 	scene->meshes.push_back(mesh);
 	scene->bHasBounds = true;
-	scene->BoundsMin = glm::vec3(-0.62f, -0.82f, -0.62f);
-	scene->BoundsMax = glm::vec3(0.62f, 0.62f, 0.62f);
+	scene->BoundsMin = glm::vec3(-kGirdleRadius, kCuletY, -kGirdleRadius);
+	scene->BoundsMax = glm::vec3(kGirdleRadius, kTableY, kGirdleRadius);
 	return scene;
 }
 
@@ -13601,8 +13619,8 @@ void Corona::LoadAssets()
 		PathTracingSpecularMotionVectorBuffer = createTexture2D(ETextureFormat::RG16Float, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1, glm::vec4(0.0f));
 		NAME_D3D12_OBJECT(PathTracingSpecularMotionVectorBuffer->resource);
 
-		RTRefractedGuideDummyGeomNormalBuffer = createTexture2D(normalBufferFormat, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1, normalClearValue);
-		NAME_D3D12_OBJECT(RTRefractedGuideDummyGeomNormalBuffer->resource);
+		RTRefractedColorBuffer = createTexture2D(ETextureFormat::RGBA16Float, TextureUsage_RenderTarget | TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1, glm::vec4(0.0f));
+		NAME_D3D12_OBJECT(RTRefractedColorBuffer->resource);
 
 		RTRefractedGuideDummySpecularHitDistanceBuffer = createTexture2D(ETextureFormat::R32Float, TextureUsage_UnorderedAccess, RenderWidthLocal, RenderHeightLocal, 1, glm::vec4(Far));
 		NAME_D3D12_OBJECT(RTRefractedGuideDummySpecularHitDistanceBuffer->resource);
@@ -15969,7 +15987,7 @@ void Corona::DrawEditorModeOverlay()
 			ImGuiWindowFlags_NoSavedSettings;
 		if (ImGui::Begin("Editor Config", &bEditorConfigWindowOpen, configFlags))
 		{
-			const bool bEditorConfigScriptHandled = DrawEditorConfigScriptImGui();
+			const bool bEditorConfigScriptHandled = DrawEditorConfigScriptImGui(true);
 			if (!bEditorConfigScriptHandled)
 			{
 			if (renderBackend)
@@ -16563,6 +16581,7 @@ void Corona::DrawEditorModeOverlay()
 		}
 
 			}
+			DrawEditorConfigScriptImGui(false);
 	}
 	ImGui::End();
 	}
@@ -17089,6 +17108,9 @@ void Corona::OnRender()
 	bTranslucentDistortionGuideValidThisFrame = false;
 	bTranslucentDistortionGuideIsOffsetThisFrame = false;
 	bTranslucentRefractedGBufferActiveThisFrame = false;
+	bRTTranslucentVolumeValidThisFrame = false;
+	RTTranslucentVolumeWidth = 0u;
+	RTTranslucentVolumeHeight = 0u;
 	if (bPendingTemporalHistoryClear)
 	{
 		ResetTemporalHistoryBuffers();
@@ -17222,7 +17244,12 @@ void Corona::OnRender()
 		}
 
 		bool bRtPrimaryTranslucentGuideAttempted = false;
-		if (bRunLighting && IsTranslucentPreLightingRefractedGBufferEnabled())
+		const auto volumeScatteringControl = PersistentScriptControls.find("transparency_layers.rt_volume_scattering");
+		const bool bTranslucentVolumeRequested =
+			volumeScatteringControl != PersistentScriptControls.end() &&
+			volumeScatteringControl->second.Type == PersistentScriptControlType::Bool &&
+			volumeScatteringControl->second.Bool;
+		if (bRunLighting && (IsTranslucentPreLightingRefractedGBufferEnabled() || bTranslucentVolumeRequested))
 		{
 			auto runRasterTranslucentGuide = [&]()
 			{
@@ -17258,6 +17285,7 @@ void Corona::OnRender()
 			else
 			{
 				runRasterTranslucentGuide();
+				RasterizeTranslucentVolumePass();
 			}
 		}
 
@@ -17418,6 +17446,7 @@ void Corona::OnRender()
 			BeginGpuPassTiming(EGpuPass::Lighting);
 			LightingPass();
 			EndGpuPassTiming(EGpuPass::Lighting);
+			CompositeRTTranslucentVolumePass();
 			if (bTranslucentRefractedGBufferActiveThisFrame || bRtPrimaryTranslucentGuideAttempted)
 				TranslucentSurfaceLightingPass();
 			else

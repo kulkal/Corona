@@ -766,6 +766,10 @@ bool Corona::RaytracePrimaryGBufferPass()
 
 bool Corona::RaytraceTranslucentRefractedGuideGBufferPass()
 {
+	bRTTranslucentVolumeValidThisFrame = false;
+	RTTranslucentVolumeWidth = 0u;
+	RTTranslucentVolumeHeight = 0u;
+
 	auto logSkip = [this](const std::wstring& reason)
 	{
 		if ((FrameCounter % 120u) == 0u)
@@ -791,7 +795,7 @@ bool Corona::RaytraceTranslucentRefractedGuideGBufferPass()
 		!TranslucentGuideAlbedoBuffer ||
 		!TranslucentGuideSpecularAlbedoBuffer ||
 		!TranslucentDistortionBuffer ||
-		!RTRefractedGuideDummyGeomNormalBuffer ||
+		!RTRefractedColorBuffer ||
 		!RTRefractedGuideDummySpecularHitDistanceBuffer ||
 		!RTRefractedGuideDummySpecularMotionVectorBuffer)
 	{
@@ -906,6 +910,7 @@ bool Corona::RaytraceTranslucentRefractedGuideGBufferPass()
 	dispatchViewParam.bPrimaryGBufferOnly = 1u;
 	dispatchViewParam.PointLightCount = 0u;
 	dispatchViewParam.bRefractedGuideGBufferOnly = 1u;
+	dispatchViewParam.bRefractedVolumeOnly = 0u;
 	dispatchViewParam.RefractedGuideMaxLayers = static_cast<UINT32>(std::clamp(
 		static_cast<int>(std::lround(getPersistentNumber("transparency_layers.rt_refraction_layers", 4.0f))),
 		1,
@@ -919,6 +924,26 @@ bool Corona::RaytraceTranslucentRefractedGuideGBufferPass()
 		0.0001f,
 		2.0f);
 	dispatchViewParam.bRefractedGuideDebug = getPersistentBool("transparency_layers.rt_refraction_debug", false) ? 1u : 0u;
+	dispatchViewParam.RefractedGuideRoughness = std::clamp(
+		getPersistentNumber("transparency_layers.roughness", 0.0f),
+		0.0f,
+		1.0f);
+
+	const bool bVolumeScatteringEnabled = getPersistentBool("transparency_layers.rt_volume_scattering", false);
+	const UINT32 volumeResolutionDivisor = static_cast<UINT32>(std::clamp(
+		static_cast<int>(std::lround(getPersistentNumber("transparency_layers.rt_volume_resolution_divisor", 2.0f))),
+		1,
+		4));
+	const UINT32 volumeWidth = (GetRenderWidth() + volumeResolutionDivisor - 1u) / volumeResolutionDivisor;
+	const UINT32 volumeHeight = (GetRenderHeight() + volumeResolutionDivisor - 1u) / volumeResolutionDivisor;
+	PathTracingViewParamCB volumeViewParam = dispatchViewParam;
+	volumeViewParam.bRefractedGuideGBufferOnly = 0u;
+	volumeViewParam.bRefractedVolumeOnly = 1u;
+	volumeViewParam.RefractedVolumeParams = glm::vec4(
+		std::clamp(getPersistentNumber("transparency_layers.rt_volume_density", 0.001f), 0.0f, 0.005f),
+		std::clamp(getPersistentNumber("transparency_layers.rt_volume_scattering_strength", 0.65f), 0.0f, 8.0f),
+		std::clamp(getPersistentNumber("transparency_layers.rt_volume_anisotropy", 0.0f), -0.9f, 0.9f),
+		static_cast<float>(volumeResolutionDivisor));
 
 	if ((FrameCounter % 120u) == 0u)
 	{
@@ -928,8 +953,11 @@ bool Corona::RaytraceTranslucentRefractedGuideGBufferPass()
 			L", rtInstances=" + std::to_wstring(RayTracingInstances.size()) +
 			L", layers=" + std::to_wstring(dispatchViewParam.RefractedGuideMaxLayers) +
 			L", ior=" + std::to_wstring(dispatchViewParam.RefractedGuideIOR) +
+			L", roughness=" + std::to_wstring(dispatchViewParam.RefractedGuideRoughness) +
 			L", rayBias=" + std::to_wstring(dispatchViewParam.RefractedGuideRayBias) +
-			L", debug=" + std::to_wstring(dispatchViewParam.bRefractedGuideDebug));
+			L", debug=" + std::to_wstring(dispatchViewParam.bRefractedGuideDebug) +
+			L", volume=" + std::to_wstring(bVolumeScatteringEnabled ? 1u : 0u) +
+			L", volumeDivisor=" + std::to_wstring(volumeResolutionDivisor));
 	}
 
 	RenderGraph rg(renderBackend.get());
@@ -937,7 +965,7 @@ bool Corona::RaytraceTranslucentRefractedGuideGBufferPass()
 	RGTextureRef outAlbedo = rg.ImportTexture("RTRefractedGuide.OutAlbedo", TranslucentGuideAlbedoBuffer.get(), EResourceState::ShaderRead);
 	RGTextureRef outSpecularAlbedo = rg.ImportTexture("RTRefractedGuide.OutSpecularAlbedo", TranslucentGuideSpecularAlbedoBuffer.get(), EResourceState::ShaderRead);
 	RGTextureRef outNormal = rg.ImportTexture("RTRefractedGuide.OutNormal", TranslucentGuideNormalBuffer.get(), EResourceState::ShaderRead);
-	RGTextureRef outGeomNormal = rg.ImportTexture("RTRefractedGuide.DummyGeomNormal", RTRefractedGuideDummyGeomNormalBuffer.get(), EResourceState::ShaderRead);
+	RGTextureRef outGeomNormal = rg.ImportTexture("RTRefractedGuide.OutTransmissionColor", RTRefractedColorBuffer.get(), EResourceState::ShaderRead);
 	RGTextureRef outVelocity = rg.ImportTexture("RTRefractedGuide.OutVelocity", TranslucentGuideVelocityBuffer.get(), EResourceState::ShaderRead);
 	RGTextureRef outRoughnessMetallic = rg.ImportTexture("RTRefractedGuide.OutRoughnessMetallic", TranslucentGuideRoughnessBuffer.get(), EResourceState::ShaderRead);
 	RGTextureRef outDepth = rg.ImportTexture("RTRefractedGuide.OutDepth", TranslucentGuideDepthBuffer.get(), EResourceState::ShaderRead);
@@ -1006,6 +1034,55 @@ bool Corona::RaytraceTranslucentRefractedGuideGBufferPass()
 			pass.Dispatch(GetRenderWidth(), GetRenderHeight());
 		});
 
+	if (bVolumeScatteringEnabled)
+	{
+		rg.AddPass(
+			"RTTranslucentVolumePass",
+			ERGPassFlags::RayTracing,
+			[&](RGPassBuilder& builder)
+			{
+				builder.ReadWriteTexture(outputColorTarget, EResourceState::UnorderedAccess)
+					.ReadWriteTexture(outAlbedo, EResourceState::UnorderedAccess)
+					.ReadWriteTexture(outSpecularAlbedo, EResourceState::UnorderedAccess)
+					.ReadWriteTexture(outNormal, EResourceState::UnorderedAccess)
+					.ReadWriteTexture(outVelocity, EResourceState::UnorderedAccess)
+					.ReadWriteTexture(outRoughnessMetallic, EResourceState::UnorderedAccess)
+					.ReadWriteTexture(outDepth, EResourceState::UnorderedAccess)
+					.ReadWriteTexture(outGeomNormal, EResourceState::UnorderedAccess)
+					.ReadWriteTexture(outSpecularHitDistance, EResourceState::UnorderedAccess)
+					.ReadWriteTexture(outSpecularMotionVector, EResourceState::UnorderedAccess)
+					.ReadBuffer(pointLightBuffer, EResourceState::ShaderRead)
+					.ReadBuffer(rtMaterials, EResourceState::ShaderRead)
+					.ReadBuffer(rtMaterialDrawRanges, EResourceState::ShaderRead);
+			},
+			[&](RGContext& ctx)
+			{
+				RTPassBuilder pass(*this, PSO_PATH_TRACING, ERtProfilePass::PathTracing);
+				pass.BeginScene()
+					.SetTextureUAV("global", "OutputColor", ctx.GetTexture(outputColorTarget))
+					.SetTextureUAV("global", "OutAlbedo", ctx.GetTexture(outAlbedo))
+					.SetTextureUAV("global", "OutSpecularAlbedo", ctx.GetTexture(outSpecularAlbedo))
+					.SetTextureUAV("global", "OutNormal", ctx.GetTexture(outNormal))
+					.SetTextureUAV("global", "OutGeomNormal", ctx.GetTexture(outGeomNormal))
+					.SetTextureUAV("global", "OutVelocity", ctx.GetTexture(outVelocity))
+					.SetTextureUAV("global", "OutRoughnessMetallic", ctx.GetTexture(outRoughnessMetallic))
+					.SetTextureUAV("global", "OutDepth", ctx.GetTexture(outDepth))
+					.SetTextureUAV("global", "OutSpecularHitDistance", ctx.GetTexture(outSpecularHitDistance))
+					.SetTextureUAV("global", "OutSpecularMotionVector", ctx.GetTexture(outSpecularMotionVector))
+					.SetAccelerationStructure("global", "gRtScene", TLAS)
+					.SetBufferSRV("global", "PointLightBuffer", ctx.GetBuffer(pointLightBuffer))
+					.SetCBVValue("global", "ViewParameter", &volumeViewParam)
+					.SetSampler("global", "sampleWrap", samplerWrap.get());
+				pass.SetBindlessTextureTable("global", "MaterialTextures")
+					.SetBufferSRV("global", "RtMaterials", ctx.GetBuffer(rtMaterials))
+					.SetBufferSRV("global", "RtMaterialDrawRanges", ctx.GetBuffer(rtMaterialDrawRanges));
+
+				RTSceneHitProgramDesc hitProgramDesc;
+				pass.BindSceneHitPrograms(hitProgramDesc);
+				pass.Dispatch(volumeWidth, volumeHeight);
+			});
+	}
+
 	if (!rg.Execute())
 	{
 		std::wstring reason = L"render graph execution failed";
@@ -1028,6 +1105,9 @@ bool Corona::RaytraceTranslucentRefractedGuideGBufferPass()
 
 	bTranslucentDistortionGuideValidThisFrame = true;
 	bTranslucentDistortionGuideIsOffsetThisFrame = false;
+	bRTTranslucentVolumeValidThisFrame = bVolumeScatteringEnabled;
+	RTTranslucentVolumeWidth = bVolumeScatteringEnabled ? volumeWidth : 0u;
+	RTTranslucentVolumeHeight = bVolumeScatteringEnabled ? volumeHeight : 0u;
 	return true;
 }
 

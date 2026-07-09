@@ -416,7 +416,10 @@ local function draw_lighting_gi(state)
 	draw_environment(state)
 end
 
-local function editor_config()
+local function editor_config(probe_only)
+	if probe_only then
+		return true
+	end
 	local state = corona.get_ui_state("editor_config", false)
 	if state.backend_name and state.backend_name ~= "" then
 		imgui.text("Backend: " .. state.backend_name)
@@ -425,6 +428,7 @@ local function editor_config()
 	draw_top(state)
 	draw_render_aa(state)
 	draw_lighting_gi(state)
+	return true
 end
 
 return {
