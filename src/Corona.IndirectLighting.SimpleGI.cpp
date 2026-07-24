@@ -20,6 +20,27 @@
 
 void AppendCpuRuntimeTrace(const std::wstring& line);
 
+namespace
+{
+	bool GetEnvBool(const wchar_t* name, bool fallback)
+	{
+		const wchar_t* rawValue = _wgetenv(name);
+		if (!rawValue || !*rawValue)
+			return fallback;
+
+		std::wstring value(rawValue);
+		std::transform(value.begin(), value.end(), value.begin(), [](wchar_t ch)
+		{
+			return static_cast<wchar_t>(towlower(ch));
+		});
+		if (value == L"0" || value == L"false" || value == L"off" || value == L"no")
+			return false;
+		if (value == L"1" || value == L"true" || value == L"on" || value == L"yes")
+			return true;
+		return fallback;
+	}
+}
+
 shared_ptr<RTPipelineStateObject> Corona::CreateRaytracingSimpleGIPSO(bool bUseSER)
 {
 		shared_ptr<RTPipelineStateObject> TEMP_PSO_RT_GI = renderBackend->CreateRTPipelineStateObject();
@@ -53,6 +74,7 @@ shared_ptr<RTPipelineStateObject> Corona::CreateRaytracingSimpleGIPSO(bool bUseS
 		TEMP_PSO_RT_GI->BindSRV("global", MakeRHIBufferSRV("PointLightBuffer", 4, rayGenStage));
 		TEMP_PSO_RT_GI->BindSRV("global", MakeRHIBufferSRV("PointLightGridCounts", 5, rayGenStage));
 		TEMP_PSO_RT_GI->BindSRV("global", MakeRHIBufferSRV("PointLightGridIndices", 6, rayGenStage));
+		TEMP_PSO_RT_GI->BindSRV("global", MakeRHITextureSRV("TranslucentGuideUVTex", 8, rayGenStage));
 		TEMP_PSO_RT_GI->BindCBV("global", MakeRHICBV("ViewParameter", 0, sizeof(RTGIViewParam), rayGenStage));
 		TEMP_PSO_RT_GI->BindCBV("global", MakeRHICBV("PointLightGridCB", 1, sizeof(PointLightGridParamCB), rayGenStage));
 		TEMP_PSO_RT_GI->BindSampler("global", MakeRHISampler("sampleWrap", 0, rayGenStage | closestHitStage));
@@ -152,6 +174,16 @@ void Corona::RaytraceGIPass()
 	if (bEnableRTDiffuseGISER && renderBackend && renderBackend->SupportsShaderExecutionReordering() && InitRaytracingSimpleGISERPass())
 		pso = PSO_RT_GI_SER;
 
+	const bool bUseTranslucentRefractedGBuffer =
+		bTranslucentRefractedGBufferActiveThisFrame &&
+		GetEnvBool(L"CORONA_TRANSLUCENT_PRELIGHT_SIMPLE_GI_GUIDE", true) &&
+		TranslucentDistortionBuffer &&
+		TranslucentGuideDepthBuffer &&
+		TranslucentGuideNormalBuffer;
+	uint32_t translucentGuideFlags = bUseTranslucentRefractedGBuffer ? 1u : 0u;
+	if (bUseTranslucentRefractedGBuffer && bTranslucentDistortionGuideIsOffsetThisFrame)
+		translucentGuideFlags |= 2u;
+
 	auto fillViewParam = [&]()
 	{
 		RTGIViewParam.ViewMatrix = glm::transpose(ViewMat);
@@ -165,6 +197,7 @@ void Corona::RaytraceGIPass()
 		RTGIViewParam.ViewSpreadAngle = glm::tan(Fov * 0.5f) / (0.5f * GetRenderHeight());
 		RTGIViewParam.NoiseMode = RenderFrameRayNoiseMode;
 		RTGIViewParam.GISamplesPerPixel = std::clamp(SimpleGISamplesPerPixel, 1u, MaxDiffuseGIPointLights);
+		RTGIViewParam.TranslucentGuideFlags = translucentGuideFlags;
 		RTGIViewParam.LightColor = RenderFrameLightColor;
 		RTGIViewParam.CheckerboardMode = RTIndirectFrameInterleaveMode == 3u ? 3u : 0u;
 		RTGIViewParam.CheckerboardPhase = RenderFrameIndex;
@@ -227,12 +260,35 @@ void Corona::RaytraceGIPass()
 	AddRtPassRecordPhaseTiming(ERtProfilePass::SimpleGI, ERtRecordPhase::Prepare, prepareStart, CpuClock::now());
 
 	const auto buildGraphStart = CpuClock::now();
+	Texture* const depthTexture = bUseTranslucentRefractedGBuffer ?
+		TranslucentGuideDepthBuffer.get() :
+		UnjitteredDepthBuffers[ColorBufferWriteIndex].get();
+	Texture* const normalTexture = bUseTranslucentRefractedGBuffer ?
+		TranslucentGuideNormalBuffer.get() :
+		NormalBuffers[ColorBufferWriteIndex].get();
+	Texture* const guideUvTexture = (translucentGuideFlags != 0u && TranslucentDistortionBuffer) ?
+		TranslucentDistortionBuffer.get() :
+		(DefaultBlackTex ? DefaultBlackTex.get() : nullptr);
+
+	static uint32_t sLastSimpleGIRefractedGBuffer = 0xFFFFFFFFu;
+	const uint32_t simpleGIRefractedGBuffer = bUseTranslucentRefractedGBuffer ? 1u : 0u;
+	if (sLastSimpleGIRefractedGBuffer != simpleGIRefractedGBuffer)
+	{
+		sLastSimpleGIRefractedGBuffer = simpleGIRefractedGBuffer;
+		AppendCpuRuntimeTrace(
+			L"[DiffuseGI][Simple] refractedGBuffer=" + std::to_wstring(simpleGIRefractedGBuffer) +
+			L", guideFlags=" + std::to_wstring(translucentGuideFlags));
+	}
+
 	RenderGraph rg(renderBackend.get());
 	RGTextureRef giSHOutput = rg.ImportTexture("SimpleGI.RawSH", DiffuseGIRawAux.get(), EResourceState::ShaderRead);
 	RGTextureRef giColorOutput = rg.ImportTexture("SimpleGI.RawColor", DiffuseGIRaw.get(), EResourceState::ShaderRead);
-	RGTextureRef depthInput = rg.ImportTexture("SimpleGI.Depth", UnjitteredDepthBuffers[ColorBufferWriteIndex].get(), EResourceState::ShaderRead);
-	RGTextureRef normalInput = rg.ImportTexture("SimpleGI.Normal", NormalBuffers[ColorBufferWriteIndex].get(), EResourceState::ShaderRead);
+	RGTextureRef depthInput = rg.ImportTexture("SimpleGI.Depth", depthTexture, EResourceState::ShaderRead);
+	RGTextureRef normalInput = rg.ImportTexture("SimpleGI.Normal", normalTexture, EResourceState::ShaderRead);
 	RGTextureRef blueNoiseInput = rg.ImportTexture("SimpleGI.BlueNoise", BlueNoiseTex.get(), EResourceState::ShaderRead);
+	RGTextureRef guideUvInput = guideUvTexture
+		? rg.ImportTexture("SimpleGI.TranslucentGuideUV", guideUvTexture, EResourceState::ShaderRead)
+		: RGTextureRef{};
 	RGBufferRef rtMaterials = rg.ImportBuffer("SimpleGI.RtMaterials", RTMaterialRecordBuffer.get(), EResourceState::ShaderRead);
 	RGBufferRef pointLights = rg.ImportBuffer("SimpleGI.PointLights", PointLightGridPointLightBuffer.get(), EResourceState::ShaderRead);
 	RGBufferRef pointLightGridCounts = rg.ImportBuffer("SimpleGI.PointLightGridCounts", PointLightGridCountBuffer.get(), EResourceState::ShaderRead);
@@ -254,6 +310,8 @@ void Corona::RaytraceGIPass()
 				.ReadBuffer(pointLights, EResourceState::ShaderRead)
 				.ReadBuffer(pointLightGridCounts, EResourceState::ShaderRead)
 				.ReadBuffer(pointLightGridIndices, EResourceState::ShaderRead);
+			if (guideUvInput.IsValid())
+				builder.ReadTexture(guideUvInput, EResourceState::ShaderRead);
 		},
 		[&, pso](RGContext& ctx)
 		{
@@ -275,6 +333,7 @@ void Corona::RaytraceGIPass()
 				.SetTextureSRV("global", "DepthTex", depthTexture)
 				.SetTextureSRV("global", "WorldNormalTex", normalTexture)
 				.SetTextureSRV("global", "RayNoiseBlueNoiseSource", blueNoiseTexture)
+				.SetTextureSRV("global", "TranslucentGuideUVTex", guideUvInput.IsValid() ? ctx.GetTexture(guideUvInput) : nullptr)
 				.SetCBVValue("global", "ViewParameter", &RTGIViewParam)
 				.SetCBVValue("global", "PointLightGridCB", &PointLightGridParam)
 				.SetBufferSRV("global", "PointLightBuffer", pointLightBuffer)
@@ -309,8 +368,20 @@ bool Corona::SimpleGIFallbackPass()
 
 	renderBackend->TransitionTexture(DiffuseGIRaw.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
 
-	PSO_SIMPLE_GI_FALLBACK->SetTextureSRV("DepthTex", UnjitteredDepthBuffers[ColorBufferWriteIndex].get());
-	PSO_SIMPLE_GI_FALLBACK->SetTextureSRV("WorldNormalTex", NormalBuffers[ColorBufferWriteIndex].get());
+	const bool bUseTranslucentRefractedGBuffer =
+		bTranslucentRefractedGBufferActiveThisFrame &&
+		GetEnvBool(L"CORONA_TRANSLUCENT_PRELIGHT_SIMPLE_GI_GUIDE", true) &&
+		TranslucentGuideDepthBuffer &&
+		TranslucentGuideNormalBuffer;
+	Texture* const depthTexture = bUseTranslucentRefractedGBuffer ?
+		TranslucentGuideDepthBuffer.get() :
+		UnjitteredDepthBuffers[ColorBufferWriteIndex].get();
+	Texture* const normalTexture = bUseTranslucentRefractedGBuffer ?
+		TranslucentGuideNormalBuffer.get() :
+		NormalBuffers[ColorBufferWriteIndex].get();
+
+	PSO_SIMPLE_GI_FALLBACK->SetTextureSRV("DepthTex", depthTexture);
+	PSO_SIMPLE_GI_FALLBACK->SetTextureSRV("WorldNormalTex", normalTexture);
 	PSO_SIMPLE_GI_FALLBACK->SetTextureUAV("GIResultColor", DiffuseGIRaw.get());
 	PSO_SIMPLE_GI_FALLBACK->SetCBVValue("ViewParameter", &RTGIViewParam);
 	PSO_SIMPLE_GI_FALLBACK->Apply();

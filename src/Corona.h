@@ -1345,14 +1345,16 @@ private:
 		glm::mat4x4 NormalWorldViewMatrix;
 		glm::mat4x4 NormalWorldMatrix;
 		glm::vec4 BaseColorFactor = glm::vec4(1.0f);
-		glm::vec4 EffectParams = glm::vec4(6.0f, 28.0f, 0.92f, 2.35f);
-		glm::vec4 RenderTargetParams = glm::vec4(1.0f);
+		// x: refraction offset in pixels, z: reflection Fresnel multiplier.
+		glm::vec4 EffectParams = glm::vec4(6.0f, 0.0f, 1.0f, 0.0f);
+		// xy: inverse render-target dimensions.
+		glm::vec4 RenderTargetParams = glm::vec4(1.0f, 1.0f, 0.0f, 0.0f);
 		glm::vec4 CameraPositionAndRayParams = glm::vec4(0.0f, 0.0f, 0.0f, 0.25f);
 		glm::vec4 SurfaceDepthParams = glm::vec4(0.0f);
 		glm::vec4 ReflectionHitLightDirAndIntensity = glm::vec4(0.0f, 1.0f, 0.0f, 0.0f);
 		glm::vec4 ReflectionHitLightColorAndViewSpread = glm::vec4(1.0f, 1.0f, 1.0f, 0.0f);
-		// x: shared glass reflection/refraction roughness [0, 1].
-		glm::vec4 GlassParams = glm::vec4(0.0f);
+		// x: shared glass roughness [0, 1], y: dielectric IOR.
+		glm::vec4 GlassParams = glm::vec4(0.0f, 1.45f, 0.0f, 0.0f);
 		glm::uvec4 StochasticParams = glm::uvec4(0u);
 	};
 	struct TranslucentPreLightingMeshGuideCB
@@ -1374,6 +1376,12 @@ private:
 	{
 		glm::vec4 FullSizeAndInvSize = glm::vec4(0.0f);
 		glm::uvec4 LowResolutionSize = glm::uvec4(0u);
+		glm::vec4 VolumeParams = glm::vec4(0.001f, 0.65f, 0.0f, 0.0f);
+		glm::vec4 ViewLightDirAndIntensity = glm::vec4(0.0f, 1.0f, 0.0f, 0.0f);
+		glm::vec4 LightColorAndSkyIntensity = glm::vec4(1.0f);
+		glm::vec4 SkyColorTop = glm::vec4(0.0f);
+		glm::vec4 SkyColorBottom = glm::vec4(0.0f);
+		glm::vec4 RasterParams = glm::vec4(0.0f);
 	};
 	struct RasterTranslucentVolumeCB
 	{
@@ -2162,8 +2170,6 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	int ScriptProfileSampleHz = 1000;
 	bool bEnableStartupLuauScript = true;
 	bool bCommandLineDungeonCharacterMode = false;
-	bool bCommandLineTransparencyLayers = false;
-	bool bTranslucentStochasticSampling = false;
 	std::wstring StartupLuauMode = L"platformer";
 	bool bScriptCameraControlEnabled = false;
 	bool bLuauImGuiFrameActive = false;
@@ -3942,8 +3948,7 @@ public:
 		Texture*& normalGuide,
 		Texture*& roughnessGuide,
 		Texture*& albedoGuide,
-		Texture*& specularAlbedoGuide,
-		bool bForce = false);
+		Texture*& specularAlbedoGuide);
 
 	// Forward-translucent particle draw against the post-light HDR buffer.
 	// Walks ActiveParticleSystems and uploads + draws each system's quads.

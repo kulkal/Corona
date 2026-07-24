@@ -41,7 +41,6 @@ set_default("follow_camera", true)
 set_default("distortion_scale", 1.0)
 set_default("roughness", 0.0)
 set_default("color_only_refraction", false)
-set_default("pre_lighting_refracted_gbuffer", true)
 set_default("rt_refraction_layers", 4)
 set_default("rt_refraction_ior", 1.45)
 set_default("rt_refraction_ray_bias", 0.05)
@@ -54,11 +53,7 @@ set_default("rt_volume_anisotropy", 0.0)
 set_default("refraction_only", false)
 set_default("reflection_enabled", true)
 set_default("reflection_hit_lighting_fallback", true)
-set_default("reflection_scale", 1.0)
-set_default("reflection_strength", 0.92)
-set_default("surface_strength", 0.55)
-set_default("tint_strength", 0.22)
-set_default("fresnel_power", 2.35)
+set_default("reflection_strength", 1.0)
 
 local palette = {
     { 0.95, 0.18, 0.14 },
@@ -481,64 +476,64 @@ local function draw_transparency_editor_config()
         return
     end
 
-    checkbox("Enabled", "enabled", true)
+    checkbox("Demo Geometry", "enabled", true)
     checkbox("Follow Camera", "follow_camera", false)
     local _, rotate_changed = checkbox("Rotate Objects", "rotate_objects", false)
     if rotate_changed and controls.rotate_objects == false then
         elapsed_seconds = 0.0
     end
     imgui.separator()
-    slider_float("Object Alpha", "shape_alpha", 0.02, 0.70, "%.2f", true)
-    slider_float("Layer Alpha", "alpha", 0.02, 0.65, "%.2f", true)
+    imgui.text("Geometry / Coverage")
+    slider_float("Object Coverage", "shape_alpha", 0.02, 0.70, "%.2f", true)
+    slider_float("Layer Coverage", "alpha", 0.02, 0.65, "%.2f", true)
     slider_int("Layers", "layer_count", 5, 12, false)
     slider_int("Objects", "shape_count", 0, 18, false)
     slider_float("Object Size", "shape_size", 2.0, 24.0, "%.1f", false)
     checkbox("Center Diamond", "diamond_enabled", true)
     slider_float("Diamond Size", "diamond_size", 4.0, 28.0, "%.1f", false)
-    slider_float("Diamond Alpha", "diamond_alpha", 0.08, 0.75, "%.2f", true)
+    slider_float("Diamond Coverage", "diamond_alpha", 0.08, 0.75, "%.2f", true)
     imgui.separator()
+    imgui.text("Refraction")
     slider_float("Distortion Scale", "distortion_scale", 0.0, 12.0, "%.2f", false)
     slider_float("Roughness", "roughness", 0.0, 1.0, "%.2f", false)
-    local color_only_refraction, _ = checkbox("Color-only Refraction", "color_only_refraction", false)
-    if color_only_refraction then
-        imgui.begin_disabled()
-    end
-    checkbox("Pre-light Refracted GBuffer", "pre_lighting_refracted_gbuffer", false)
-    slider_int("RT Refract Layers", "rt_refraction_layers", 1, 8, false)
-    slider_float("RT Refract IOR", "rt_refraction_ior", 1.01, 2.50, "%.2f", false)
-    slider_float("RT Ray Bias", "rt_refraction_ray_bias", 0.001, 0.50, "%.3f", false)
-    checkbox("RT Refract Debug", "rt_refraction_debug", false)
-    local rt_volume_scattering, _ = checkbox("Volume Scattering", "rt_volume_scattering", false)
-    if not rt_volume_scattering then
-        imgui.begin_disabled()
-    end
-    slider_int("Volume Resolution Divisor", "rt_volume_resolution_divisor", 1, 4, false)
-    slider_float("Volume Density", "rt_volume_density", 0.0, 0.005, "%.5f", false)
-    slider_float("Volume Strength", "rt_volume_scattering_strength", 0.0, 4.0, "%.2f", false)
-    slider_float("Volume Anisotropy", "rt_volume_anisotropy", -0.90, 0.90, "%.2f", false)
-    if not rt_volume_scattering then
-        imgui.end_disabled()
-    end
-    if color_only_refraction then
-        imgui.end_disabled()
-    end
+    slider_float("IOR", "rt_refraction_ior", 1.01, 2.50, "%.2f", false)
     local refraction_only, _ = checkbox("Refraction Only", "refraction_only", false)
-    if refraction_only or color_only_refraction then
+    imgui.separator()
+    imgui.text("Reflection")
+    if refraction_only then
         imgui.begin_disabled()
     end
-    local reflection_enabled, _ = checkbox("Reflection", "reflection_enabled", false)
+    local reflection_enabled, _ = checkbox("Enabled", "reflection_enabled", true)
     if not reflection_enabled then
         imgui.begin_disabled()
     end
-    slider_float("Reflection Scale", "reflection_scale", 0.0, 3.0, "%.2f", false)
-    slider_float("Reflection Strength", "reflection_strength", 0.0, 1.0, "%.2f", false)
-    checkbox("Hit Lighting Fallback", "reflection_hit_lighting_fallback", true)
+    slider_float("Strength", "reflection_strength", 0.0, 1.0, "%.2f", false)
     if not reflection_enabled then
         imgui.end_disabled()
     end
-    if refraction_only or color_only_refraction then
+    if refraction_only then
         imgui.end_disabled()
     end
+    imgui.separator()
+    imgui.text("Volume Attenuation / Scattering")
+    local rt_volume_scattering, _ = checkbox("Enabled", "rt_volume_scattering", false)
+    if not rt_volume_scattering then
+        imgui.begin_disabled()
+    end
+    slider_float("Density", "rt_volume_density", 0.0, 0.005, "%.5f", false)
+    slider_float("Scattering Strength", "rt_volume_scattering_strength", 0.0, 4.0, "%.2f", false)
+    slider_float("Anisotropy", "rt_volume_anisotropy", -0.90, 0.90, "%.2f", false)
+    slider_int("Resolution Divisor", "rt_volume_resolution_divisor", 1, 4, false)
+    if not rt_volume_scattering then
+        imgui.end_disabled()
+    end
+    imgui.separator()
+    imgui.text("Advanced")
+    checkbox("Color-only Refraction", "color_only_refraction", false)
+    slider_int("RT Refraction Layers", "rt_refraction_layers", 1, 8, false)
+    slider_float("RT Ray Bias", "rt_refraction_ray_bias", 0.001, 0.50, "%.3f", false)
+    checkbox("RT Refraction Debug", "rt_refraction_debug", false)
+    checkbox("Reflection Hit-light Fallback", "reflection_hit_lighting_fallback", true)
 end
 
 function script.editor_config(probe_only)
@@ -549,7 +544,7 @@ function script.editor_config(probe_only)
     return false
 end
 
-corona.log("[transparency_layers] loaded enabled=" .. tostring(controls.enabled))
+corona.log("[transparency_layers] loaded demoEnabled=" .. tostring(controls.enabled))
 
 function script.update(dt)
     update_layers(dt)

@@ -36,6 +36,7 @@ namespace
 	using GBufferProfileClock = std::chrono::steady_clock;
 	constexpr float kRenderWorldCullingCellSize = 4096.0f;
 	constexpr float kRasterTranslucentRefractionPixelsPerScale = 24.0f;
+	constexpr float kTranslucentVolumeDensityWorldScale = 32.0f;
 	constexpr uint32_t kParallelCullingIndexBuildThreshold = 1024u;
 	constexpr uint32_t kParallelCellFrustumCullThreshold = 512u;
 	constexpr uint32_t kParallelFrustumCullThreshold = 2048u;
@@ -2457,8 +2458,6 @@ void Corona::InitTranslucentMeshPass()
 	volumeDesc.ConstantBufferBinding = 0;
 	volumeDesc.PipelineLayout.Bindings = {
 		MakeRHICBV("__CB0", 0, sizeof(RasterTranslucentVolumeCB), graphicsStages),
-		MakeRHITextureSRV("BackDepthTex", 0, pixelStage),
-		MakeRHITextureSRV("ShadowTex", 1, pixelStage),
 	};
 	RasterTranslucentVolumeBackGraphicsPipeline = renderBackend->CreateGraphicsPipeline(volumeDesc);
 	volumeDesc.PixelEntryPoint = "PSFront";
@@ -2549,13 +2548,7 @@ bool Corona::IsTranslucentPreLightingRefractedGBufferEnabled() const
 {
 	if (IsTranslucentColorOnlyRefractionEnabled())
 		return false;
-	if (_wgetenv(L"CORONA_TRANSLUCENT_PRELIGHT_GBUFFER"))
-		return GetEnvBool(L"CORONA_TRANSLUCENT_PRELIGHT_GBUFFER", true);
-
-	const auto result = PersistentScriptControls.find("transparency_layers.pre_lighting_refracted_gbuffer");
-	if (result != PersistentScriptControls.end() && result->second.Type == PersistentScriptControlType::Bool)
-		return result->second.Bool;
-	return true;
+	return GetEnvBool(L"CORONA_TRANSLUCENT_PRELIGHT_GBUFFER", true);
 }
 
 bool Corona::TranslucentPreLightingGuidePass()
@@ -2631,14 +2624,6 @@ bool Corona::TranslucentPreLightingGuidePass()
 			return result->second.Number;
 		return fallback;
 	};
-	auto getPersistentBool = [this](const char* name, bool fallback)
-	{
-		const auto result = PersistentScriptControls.find(name);
-		if (result != PersistentScriptControls.end() && result->second.Type == PersistentScriptControlType::Bool)
-			return result->second.Bool;
-		return fallback;
-	};
-
 	auto matrixIsFinite = [](const glm::mat4x4& m)
 	{
 		for (int c = 0; c < 4; ++c)
@@ -2686,8 +2671,7 @@ bool Corona::TranslucentPreLightingGuidePass()
 	renderBackend->ClearRenderTarget(TranslucentDistortionBuffer.get(), refractionGuideClearColor);
 
 	const bool bUseOpaqueDepthForGuide =
-		GetEnvBool(L"CORONA_TRANSLUCENT_PRELIGHT_OPAQUE_DEPTH", false) ||
-		getPersistentBool("transparency_layers.pre_lighting_opaque_depth", false);
+		GetEnvBool(L"CORONA_TRANSLUCENT_PRELIGHT_OPAQUE_DEPTH", false);
 	if (bUseOpaqueDepthForGuide)
 	{
 		renderBackend->TransitionTexture(DepthBuffer.get(), EResourceState::ShaderRead, EResourceState::CopySource);
@@ -3133,8 +3117,8 @@ void Corona::TranslucentMeshPass()
 		!bColorOnlyRefraction &&
 		getPersistentBool("transparency_layers.reflection_enabled", true) &&
 		(!bUseRtReflectionShader || bBindRtReflection);
-	const float reflectionScale = reflectionEnabled ? std::clamp(getPersistentNumber("transparency_layers.reflection_scale", 1.0f), 0.0f, 3.0f) : 0.0f;
-	const float reflectionStrength = reflectionEnabled ? std::clamp(getPersistentNumber("transparency_layers.reflection_strength", 0.92f), 0.0f, 1.0f) : 0.0f;
+	const float reflectionStrength = reflectionEnabled ? std::clamp(getPersistentNumber("transparency_layers.reflection_strength", 1.0f), 0.0f, 1.0f) : 0.0f;
+	const float glassIor = std::clamp(getPersistentNumber("transparency_layers.rt_refraction_ior", 1.45f), 1.0001f, 2.5f);
 	const bool bEnableReflectionHitLightingFallback =
 		bBindRtReflection &&
 		reflectionEnabled &&
@@ -3146,16 +3130,8 @@ void Corona::TranslucentMeshPass()
 		RTMaterialRecordBuffer &&
 		RTGeometryRecordBuffer &&
 		InstancePropertyBuffer;
-	const float surfaceStrength = bColorOnlyRefraction ?
-		0.0f :
-		std::clamp(getPersistentNumber("transparency_layers.surface_strength", 0.55f), 0.0f, 1.0f);
-	const float tintStrength = bColorOnlyRefraction ?
-		0.0f :
-		std::clamp(getPersistentNumber("transparency_layers.tint_strength", 0.22f), 0.0f, 1.0f);
-	const float fresnelPower = std::clamp(getPersistentNumber("transparency_layers.fresnel_power", 2.35f), 0.25f, 8.0f);
 	const bool bRefractionOnly = bColorOnlyRefraction || getPersistentBool("transparency_layers.refraction_only", false);
 	const float refractionPixels = kRasterTranslucentRefractionPixelsPerScale * distortionScale;
-	const float reflectionPixels = 28.0f * reflectionScale;
 	const float reflectionViewSpreadAngle =
 		std::tan(Fov * 0.5f) / (0.5f * static_cast<float>(std::max<UINT>(GetRenderHeight(), 1u)));
 
@@ -3175,16 +3151,16 @@ void Corona::TranslucentMeshPass()
 		cb.NormalWorldMatrix = matrixIsFinite(normalWorld) ? normalWorld : glm::mat4x4(1.0f);
 		cb.BaseColorFactor = material ? material->BaseColorFactor : glm::vec4(1.0f);
 		cb.BaseColorFactor.a = std::clamp(cb.BaseColorFactor.a, 0.0f, 1.0f);
-		cb.EffectParams = glm::vec4(refractionPixels, reflectionPixels, reflectionStrength, fresnelPower);
+		cb.EffectParams = glm::vec4(refractionPixels, 0.0f, reflectionStrength, 0.0f);
 		cb.RenderTargetParams = glm::vec4(
 			1.0f / static_cast<float>(std::max<UINT>(GetRenderWidth(), 1u)),
 			1.0f / static_cast<float>(std::max<UINT>(GetRenderHeight(), 1u)),
-			tintStrength,
-			surfaceStrength);
+			0.0f,
+			0.0f);
 		cb.CameraPositionAndRayParams = glm::vec4(RenderFrameCameraPosition, 0.15f);
 		cb.ReflectionHitLightDirAndIntensity = glm::vec4(RenderFrameNormalizedLightDir, std::max(0.0f, LightIntensity));
 		cb.ReflectionHitLightColorAndViewSpread = glm::vec4(RenderFrameLightColor, reflectionViewSpreadAngle);
-		cb.GlassParams = glm::vec4(glassRoughness, 0.0f, 0.0f, 0.0f);
+		cb.GlassParams = glm::vec4(glassRoughness, glassIor, 0.0f, 0.0f);
 		cb.StochasticParams = glm::uvec4(
 			(bBindReflectionHitLighting ? kTranslucentReflectionHitLightingFallbackFlag : 0u) |
 				(bUseRtRefractionColor ? kTranslucentRTRefractionColorFlag : 0u),
@@ -3292,7 +3268,10 @@ void Corona::TranslucentSurfaceLightingPass()
 			return result->second.Bool;
 		return fallback;
 	};
-	const bool bRefractionOnly = getPersistentBool("transparency_layers.refraction_only", false);
+	const bool bColorOnlyRefraction = getPersistentBool("transparency_layers.color_only_refraction", false);
+	const bool bRefractionOnly =
+		bColorOnlyRefraction ||
+		getPersistentBool("transparency_layers.refraction_only", false);
 	const bool bUsePrelitRefractedGBuffer =
 		bTranslucentRefractedGBufferActiveThisFrame &&
 		TranslucentDistortionBuffer != nullptr;
@@ -3396,8 +3375,8 @@ void Corona::TranslucentSurfaceLightingPass()
 	const bool reflectionEnabled =
 		getPersistentBool("transparency_layers.reflection_enabled", true) &&
 		(renderBackend->GetAPI() != ERenderBackendAPI::D3D12 || !renderBackend->SupportsRayTracing() || bBindRtReflection);
-	const float reflectionScale = reflectionEnabled ? std::clamp(getPersistentNumber("transparency_layers.reflection_scale", 1.0f), 0.0f, 3.0f) : 0.0f;
-	const float reflectionStrength = reflectionEnabled ? std::clamp(getPersistentNumber("transparency_layers.reflection_strength", 0.92f), 0.0f, 1.0f) : 0.0f;
+	const float reflectionStrength = reflectionEnabled ? std::clamp(getPersistentNumber("transparency_layers.reflection_strength", 1.0f), 0.0f, 1.0f) : 0.0f;
+	const float glassIor = std::clamp(getPersistentNumber("transparency_layers.rt_refraction_ior", 1.45f), 1.0001f, 2.5f);
 	const bool bEnableReflectionHitLightingFallback =
 		bBindRtReflection &&
 		reflectionEnabled &&
@@ -3409,11 +3388,7 @@ void Corona::TranslucentSurfaceLightingPass()
 		RTMaterialRecordBuffer &&
 		RTGeometryRecordBuffer &&
 		InstancePropertyBuffer;
-	const float surfaceStrength = std::clamp(getPersistentNumber("transparency_layers.surface_strength", 0.55f), 0.0f, 1.0f);
-	const float tintStrength = std::clamp(getPersistentNumber("transparency_layers.tint_strength", 0.22f), 0.0f, 1.0f);
-	const float fresnelPower = std::clamp(getPersistentNumber("transparency_layers.fresnel_power", 2.35f), 0.25f, 8.0f);
 	const float refractionPixels = kRasterTranslucentRefractionPixelsPerScale * distortionScale;
-	const float reflectionPixels = 28.0f * reflectionScale;
 	const float reflectionViewSpreadAngle =
 		std::tan(Fov * 0.5f) / (0.5f * static_cast<float>(std::max<UINT>(GetRenderHeight(), 1u)));
 
@@ -3433,17 +3408,17 @@ void Corona::TranslucentSurfaceLightingPass()
 		cb.NormalWorldMatrix = matrixIsFinite(normalWorld) ? normalWorld : glm::mat4x4(1.0f);
 		cb.BaseColorFactor = material ? material->BaseColorFactor : glm::vec4(1.0f);
 		cb.BaseColorFactor.a = std::clamp(cb.BaseColorFactor.a, 0.0f, 1.0f);
-		cb.EffectParams = glm::vec4(refractionPixels, reflectionPixels, reflectionStrength, fresnelPower);
+		cb.EffectParams = glm::vec4(refractionPixels, 0.0f, reflectionStrength, 0.0f);
 		cb.RenderTargetParams = glm::vec4(
 			1.0f / static_cast<float>(std::max<UINT>(GetRenderWidth(), 1u)),
 			1.0f / static_cast<float>(std::max<UINT>(GetRenderHeight(), 1u)),
-			tintStrength,
-			surfaceStrength);
+			0.0f,
+			0.0f);
 		cb.CameraPositionAndRayParams = glm::vec4(RenderFrameCameraPosition, 0.15f);
 		cb.SurfaceDepthParams = glm::vec4(item.NearDepth, item.InvDepthRange, 2.6f, 0.08f);
 		cb.ReflectionHitLightDirAndIntensity = glm::vec4(RenderFrameNormalizedLightDir, std::max(0.0f, LightIntensity));
 		cb.ReflectionHitLightColorAndViewSpread = glm::vec4(RenderFrameLightColor, reflectionViewSpreadAngle);
-		cb.GlassParams = glm::vec4(glassRoughness, 0.0f, 0.0f, 0.0f);
+		cb.GlassParams = glm::vec4(glassRoughness, glassIor, 0.0f, 0.0f);
 		cb.StochasticParams = glm::uvec4(
 			kTranslucentSurfacePassFlag |
 				(bBindReflectionHitLighting ? kTranslucentReflectionHitLightingFallbackFlag : 0u) |
@@ -3512,7 +3487,7 @@ void Corona::TranslucentSurfaceLightingPass()
 			L", layeredGlass=1" +
 			L", refractionOnly=" + std::to_wstring(bRefractionOnly ? 1 : 0) +
 			L", roughness=" + std::to_wstring(glassRoughness) +
-			L", surfaceStrength=" + std::to_wstring(surfaceStrength) +
+			L", ior=" + std::to_wstring(glassIor) +
 			L", reflectionStrength=" + std::to_wstring(reflectionStrength) +
 			L", rtRefractionColor=" + std::to_wstring(bUseRtRefractionColor ? 1 : 0) +
 			L", rtReflection=" + std::to_wstring(bBindRtReflection ? 1 : 0) +
@@ -3526,6 +3501,7 @@ void Corona::CompositeRTTranslucentVolumePass()
 		RTTranslucentVolumeHeight == 0u ||
 		!renderBackend ||
 		!LightingBuffer ||
+		!TranslucentSurfaceBuffer ||
 		!RTRefractedColorBuffer ||
 		!TranslucentDistortionBuffer)
 	{
@@ -3539,8 +3515,10 @@ void Corona::CompositeRTTranslucentVolumePass()
 		if (!pso)
 			return;
 
-		pso->BindSRV(MakeRHITextureSRV("VolumeTex", 0, computeStage));
-		pso->BindSRV(MakeRHITextureSRV("CoverageTex", 1, computeStage));
+		pso->BindSRV(MakeRHITextureSRV("BackDepthTex", 0, computeStage));
+		pso->BindSRV(MakeRHITextureSRV("FrontDataTex", 1, computeStage));
+		pso->BindSRV(MakeRHITextureSRV("CoverageTex", 2, computeStage));
+		pso->BindSRV(MakeRHITextureSRV("ShadowTex", 3, computeStage));
 		pso->BindUAV(MakeRHITextureUAV("LightingTex", 0, computeStage));
 		pso->BindCBV(MakeRHICBV("RTTranslucentVolumeCompositeCB", 0, sizeof(RTTranslucentVolumeCompositeCB), computeStage));
 		if (!pso->InitCS(GetAssetFullPath(L"Shaders\\RTTranslucentVolumeCompositeCS.hlsl"), "CSMain"))
@@ -3559,12 +3537,56 @@ void Corona::CompositeRTTranslucentVolumePass()
 		static_cast<float>(renderHeight),
 		1.0f / static_cast<float>(renderWidth),
 		1.0f / static_cast<float>(renderHeight));
-	cb.LowResolutionSize = glm::uvec4(RTTranslucentVolumeWidth, RTTranslucentVolumeHeight, 0u, 0u);
+	const bool bPrecomputedRTVolume = GBufferGenerationMode == EGBufferGenerationMode::RtPrimary;
+	cb.LowResolutionSize = glm::uvec4(
+		RTTranslucentVolumeWidth,
+		RTTranslucentVolumeHeight,
+		bPrecomputedRTVolume ? 1u : 0u,
+		0u);
+	auto getPersistentNumber = [this](const char* name, float fallback)
+	{
+		const auto result = PersistentScriptControls.find(name);
+		if (result != PersistentScriptControls.end() && result->second.Type == PersistentScriptControlType::Number)
+			return result->second.Number;
+		return fallback;
+	};
+	const float density = std::clamp(getPersistentNumber("transparency_layers.rt_volume_density", 0.001f), 0.0f, 0.005f);
+	const float strength = std::clamp(getPersistentNumber("transparency_layers.rt_volume_scattering_strength", 0.65f), 0.0f, 8.0f);
+	const float anisotropy = std::clamp(getPersistentNumber("transparency_layers.rt_volume_anisotropy", 0.0f), -0.9f, 0.9f);
+	glm::vec3 viewLightDir = glm::mat3(ViewMat) * RenderFrameNormalizedLightDir;
+	if (glm::length(viewLightDir) < 1.0e-5f)
+		viewLightDir = glm::vec3(0.0f, 1.0f, 0.0f);
+	else
+		viewLightDir = glm::normalize(viewLightDir);
+	cb.VolumeParams = glm::vec4(
+		density * kTranslucentVolumeDensityWorldScale,
+		strength,
+		anisotropy,
+		std::tan(Fov * 0.5f));
+	cb.ViewLightDirAndIntensity = glm::vec4(viewLightDir, std::max(LightIntensity, 0.0f));
+	cb.LightColorAndSkyIntensity = glm::vec4(glm::max(RenderFrameLightColor, glm::vec3(0.0f)), std::max(SkyIntensity, 0.0f));
+	cb.SkyColorTop = glm::vec4(glm::max(SkyColorTop, glm::vec3(0.0f)), 0.0f);
+	cb.SkyColorBottom = glm::vec4(glm::max(SkyColorBottom, glm::vec3(0.0f)), 0.0f);
+	cb.RasterParams = glm::vec4(
+		std::max(getPersistentNumber("transparency_layers.spacing", 8.0f), 0.1f),
+		0.0f,
+		0.0f,
+		0.0f);
+	if ((FrameCounter % 120u) == 0u)
+	{
+		AppendCpuRuntimeTrace(
+			L"[RTTranslucentVolume] compositeMode=" + std::wstring(bPrecomputedRTVolume ? L"rt-precomputed" : L"raster-depth") +
+			L", density=" + std::to_wstring(density) +
+			L", effectiveDensity=" + std::to_wstring(density * kTranslucentVolumeDensityWorldScale) +
+			L", fallbackThickness=" + std::to_wstring(cb.RasterParams.x));
+	}
 
 	renderBackend->EmitGpuCrashMarker("RTTranslucentVolumeComposite");
 	renderBackend->TransitionTexture(LightingBuffer.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
-	RTTranslucentVolumeCompositePSO->SetTextureSRV("VolumeTex", RTRefractedColorBuffer.get());
+	RTTranslucentVolumeCompositePSO->SetTextureSRV("BackDepthTex", TranslucentSurfaceBuffer.get());
+	RTTranslucentVolumeCompositePSO->SetTextureSRV("FrontDataTex", RTRefractedColorBuffer.get());
 	RTTranslucentVolumeCompositePSO->SetTextureSRV("CoverageTex", TranslucentDistortionBuffer.get());
+	RTTranslucentVolumeCompositePSO->SetTextureSRV("ShadowTex", ShadowBuffer ? ShadowBuffer.get() : DefaultWhiteTex.get());
 	RTTranslucentVolumeCompositePSO->SetTextureUAV("LightingTex", LightingBuffer.get());
 	RTTranslucentVolumeCompositePSO->SetCBVValue("RTTranslucentVolumeCompositeCB", &cb);
 	RTTranslucentVolumeCompositePSO->Apply();
@@ -3690,8 +3712,6 @@ bool Corona::RasterizeTranslucentVolumePass()
 	{
 		RasterTranslucentVolumeCB cb = buildCB(item);
 		CreateAndBindGraphicsBindGroup(renderBackend.get(), RasterTranslucentVolumeBackGraphicsPipeline.get(), {
-			GraphicsBindGroupEntry::TextureSRV("BackDepthTex", DefaultBlackTex.get()),
-			GraphicsBindGroupEntry::TextureSRV("ShadowTex", ShadowBuffer ? ShadowBuffer.get() : DefaultWhiteTex.get()),
 			GraphicsBindGroupEntry::Constant(0, &cb, sizeof(cb)),
 		});
 		renderBackend->BindMeshBuffers(item.MeshPtr->Vb.get(), item.MeshPtr->Ib.get());
@@ -3702,7 +3722,7 @@ bool Corona::RasterizeTranslucentVolumePass()
 	renderBackend->EmitGpuCrashMarker("RasterTranslucentVolumeFront");
 	restoreOpaqueDepth(EResourceState::DepthWrite);
 	renderBackend->TransitionTexture(RTRefractedColorBuffer.get(), EResourceState::ShaderRead, EResourceState::RenderTarget);
-	const float volumeClear[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
+	const float volumeClear[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
 	renderBackend->ClearRenderTarget(RTRefractedColorBuffer.get(), volumeClear);
 	Texture* frontTargets[] = { RTRefractedColorBuffer.get() };
 	renderBackend->SetRenderTargets(frontTargets, 1u, TranslucentGuideRasterDepthBuffer.get());
@@ -3712,8 +3732,6 @@ bool Corona::RasterizeTranslucentVolumePass()
 	{
 		RasterTranslucentVolumeCB cb = buildCB(item);
 		CreateAndBindGraphicsBindGroup(renderBackend.get(), RasterTranslucentVolumeFrontGraphicsPipeline.get(), {
-			GraphicsBindGroupEntry::TextureSRV("BackDepthTex", TranslucentSurfaceBuffer.get()),
-			GraphicsBindGroupEntry::TextureSRV("ShadowTex", ShadowBuffer ? ShadowBuffer.get() : DefaultWhiteTex.get()),
 			GraphicsBindGroupEntry::Constant(0, &cb, sizeof(cb)),
 		});
 		renderBackend->BindMeshBuffers(item.MeshPtr->Vb.get(), item.MeshPtr->Ib.get());
@@ -3734,8 +3752,7 @@ bool Corona::PrepareTranslucentDLSSRRGuideBuffers(
 	Texture*& normalGuide,
 	Texture*& roughnessGuide,
 	Texture*& albedoGuide,
-	Texture*& specularAlbedoGuide,
-	bool bForce)
+	Texture*& specularAlbedoGuide)
 {
 	if (IsTranslucentColorOnlyRefractionEnabled())
 		return false;
@@ -3758,16 +3775,6 @@ bool Corona::PrepareTranslucentDLSSRRGuideBuffers(
 	{
 		return false;
 	}
-
-	const auto getPersistentBool = [this](const char* name, bool fallback)
-	{
-		const auto result = PersistentScriptControls.find(name);
-		if (result != PersistentScriptControls.end() && result->second.Type == PersistentScriptControlType::Bool)
-			return result->second.Bool;
-		return fallback;
-	};
-	if (!bForce && !getPersistentBool("transparency_layers.dlssrr_guide_warp", true))
-		return false;
 
 	if (bTranslucentRefractedGBufferActiveThisFrame)
 	{

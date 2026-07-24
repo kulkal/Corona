@@ -29,7 +29,7 @@ cbuffer ViewParameter : register(b0)
     float ViewSpreadAngle;
     uint NoiseMode;
     uint GISamplesPerPixel;
-    uint _paddingAfterGISamples;
+    uint TranslucentGuideFlags;
     float3 LightColor;
     float _padding;
     PointLightParam PointLights[RT_DIFFUSE_GI_MAX_POINT_LIGHTS];

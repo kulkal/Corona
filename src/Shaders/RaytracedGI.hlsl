@@ -9,6 +9,7 @@ RaytracingAccelerationStructure gRtScene : register(t0);
 Texture2D DepthTex : register(t1);
 Texture2D WorldNormalTex : register(t2);
 Texture3D RayNoiseBlueNoiseSource : register(t7);
+Texture2D TranslucentGuideUVTex : register(t8);
 
 // Must match Corona::MaxPointLights in Corona.h.
 #define MAX_POINT_LIGHTS 128
@@ -39,7 +40,7 @@ cbuffer ViewParameter : register(b0)
     float ViewSpreadAngle;
     uint NoiseMode;
     uint GISamplesPerPixel;
-    uint _paddingAfterGISamples;
+    uint TranslucentGuideFlags;
     float3 LightColor;
     float _padding;
     PointLightParam PointLights[RT_DIFFUSE_GI_MAX_POINT_LIGHTS];
@@ -52,6 +53,22 @@ cbuffer ViewParameter : register(b0)
 };
 
 SamplerState sampleWrap : register(s0);
+
+static const uint TRANSLUCENT_GUIDE_FLAG_USE = 1u;
+static const uint TRANSLUCENT_GUIDE_FLAG_OFFSET = 2u;
+
+float2 ResolveGIReceiverProjectionUv(uint2 pixelPos, float2 dstUv)
+{
+    if ((TranslucentGuideFlags & TRANSLUCENT_GUIDE_FLAG_USE) == 0u)
+        return dstUv;
+
+    float4 guide = TranslucentGuideUVTex.Load(int3(pixelPos, 0));
+    if (guide.w <= 0.0001f)
+        return dstUv;
+
+    const bool guideStoresOffset = (TranslucentGuideFlags & TRANSLUCENT_GUIDE_FLAG_OFFSET) != 0u;
+    return saturate(guideStoresOffset ? (dstUv + guide.xy) : guide.xy);
+}
 
 static const float INV_PI = 1.0 / PI;
 static const float MAX_HIT_DIST = 10000;
@@ -489,12 +506,13 @@ void rayGen
 	//crd.y *= -1;
     float2 dims = float2(launchDim.xy);
 
-    float2 d = ((crd / dims) * 2.f - 1.f);
+	float2 UV = crd / dims;
+    float2 receiverProjectionUv = ResolveGIReceiverProjectionUv(launchIndex.xy, UV);
+    float2 d = (receiverProjectionUv * 2.f - 1.f);
     d *= tan(0.8 / 2);
     float aspectRatio = dims.x / dims.y;
 
 
-	float2 UV = crd / dims;
 	float DeviceDepth = DepthTex.SampleLevel(sampleWrap, UV, 0).x;
     if (DeviceDepth >= 0.999999f)
     {
@@ -507,10 +525,7 @@ void rayGen
 
     float LinearDepth = GetLinearDepthOpenGL(DeviceDepth, ProjectionParams.z, ProjectionParams.w) ;
 	
-    float2 ScreenPosition = crd.xy;
-	ScreenPosition.x /= dims.x;
-	ScreenPosition.y /= dims.y;
-	ScreenPosition.xy = ScreenPosition.xy * 2 - 1;
+    float2 ScreenPosition = receiverProjectionUv * 2.0f - 1.0f;
 	ScreenPosition.y = -ScreenPosition.y;
 
 	// float3 ViewPosition = GetViewPosition(LinearDepth, ScreenPosition, ProjMatrix._11, ProjMatrix._22);

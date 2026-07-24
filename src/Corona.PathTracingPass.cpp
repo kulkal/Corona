@@ -30,6 +30,7 @@ namespace
 	constexpr uint32_t kRTInstancePropertyBufferRegisterSpace = 14;
 	constexpr uint32_t kRTMaterialDrawRangeBufferRegisterSpace = 15;
 	constexpr UINT32 kRTMaterialFlagAlphaBlend = 1u << 0;
+	constexpr float kTranslucentVolumeDensityWorldScale = 32.0f;
 
 	void HashCombinePathTracingMaterial(uint64_t& seed, uint64_t value)
 	{
@@ -940,7 +941,8 @@ bool Corona::RaytraceTranslucentRefractedGuideGBufferPass()
 	volumeViewParam.bRefractedGuideGBufferOnly = 0u;
 	volumeViewParam.bRefractedVolumeOnly = 1u;
 	volumeViewParam.RefractedVolumeParams = glm::vec4(
-		std::clamp(getPersistentNumber("transparency_layers.rt_volume_density", 0.001f), 0.0f, 0.005f),
+		std::clamp(getPersistentNumber("transparency_layers.rt_volume_density", 0.001f), 0.0f, 0.005f) *
+			kTranslucentVolumeDensityWorldScale,
 		std::clamp(getPersistentNumber("transparency_layers.rt_volume_scattering_strength", 0.65f), 0.0f, 8.0f),
 		std::clamp(getPersistentNumber("transparency_layers.rt_volume_anisotropy", 0.0f), -0.9f, 0.9f),
 		static_cast<float>(volumeResolutionDivisor));

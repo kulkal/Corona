@@ -1,7 +1,7 @@
 @echo off
-REM Launch Corona like editor.bat, but enable only the transparency layer overlay.
-REM The CyberpunkAlleyInterp map is loaded and common\030_transparency_layers.luau
-REM is enabled via --transparency-layers.
+REM Launch the transparency test map. Translucency is an engine feature and
+REM common\030_transparency_layers.luau is loaded by the normal editor startup.
+REM Demo geometry remains controlled by Top / Transparency Layers / Enabled.
 REM Extra args are forwarded after the defaults, e.g.:
 REM   run_transparency_layers.bat --aa taa
 
@@ -17,4 +17,4 @@ if not exist "%EXE%" (
 )
 
 cd /d "%ROOT%bin"
-start "Corona Transparency Layers" "%EXE%" --editor --backend d3d12 --render-mode hybrid --aa dlss-rr --gi-mode simple --load-map CyberpunkAlleyInterp --no-pt-compaction --transparency-layers %*
+start "Corona Transparency Layers" "%EXE%" --editor --backend d3d12 --render-mode hybrid --aa dlss-rr --gi-mode simple --load-map CyberpunkAlleyInterp --no-pt-compaction %*

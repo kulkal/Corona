@@ -4511,32 +4511,6 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 			bEnableStartupLuauScript = true;
 			continue;
 		}
-		if (arg == L"--transparency-layers" || arg == L"--translucent-layers" || arg == L"--translucency-layers")
-		{
-			bCommandLineTransparencyLayers = true;
-			bTranslucentStochasticSampling = true;
-			bEnableStartupLuauScript = true;
-			continue;
-		}
-		if (arg == L"--no-transparency-layers" || arg == L"--disable-transparency-layers" ||
-			arg == L"--no-translucent-layers" || arg == L"--disable-translucent-layers")
-		{
-			bCommandLineTransparencyLayers = false;
-			continue;
-		}
-		if (arg == L"--transparency-stochastic" || arg == L"--stochastic-transparency" ||
-			arg == L"--translucent-stochastic" || arg == L"--stochastic-translucency")
-		{
-			bTranslucentStochasticSampling = true;
-			continue;
-		}
-		if (arg == L"--no-transparency-stochastic" || arg == L"--disable-transparency-stochastic" ||
-			arg == L"--no-stochastic-transparency" || arg == L"--disable-stochastic-transparency" ||
-			arg == L"--transparency-alpha-blend")
-		{
-			bTranslucentStochasticSampling = false;
-			continue;
-		}
 		if (arg == L"--platformer" || arg == L"--platformer-mode" || arg == L"--platformer-character")
 		{
 			bStartupFreeFlyCamera = false;
@@ -5745,8 +5719,6 @@ void Corona::ParseCommandLineArgs(WCHAR* argv[], int argc)
 		L", hybridRRSpecularGuideRay=" + std::to_wstring(bEnableHybridRRSpecularGuideRay ? 1 : 0) +
 		L", freeFlyCamera=" + std::to_wstring(bStartupFreeFlyCamera ? 1 : 0) +
 		L", startupScripts=" + std::to_wstring(bEnableStartupLuauScript ? 1 : 0) +
-		L", transparencyLayers=" + std::to_wstring(bCommandLineTransparencyLayers ? 1 : 0) +
-		L", translucentStochastic=" + std::to_wstring(bTranslucentStochasticSampling ? 1 : 0) +
 		L", dlssJitterScale=" + std::to_wstring(DLSSJitterPhaseScale) +
 		L", dlssJitterOverride=" + std::to_wstring(DLSSJitterPhaseCountOverride) +
 		L", dlssRRJitterScale=" + std::to_wstring(DLSSRRJitterPhaseScale) +
@@ -6220,9 +6192,7 @@ void Corona::InitializeAutoAADump()
 		setScriptNumberOverride("transparency_layers.roughness", 0.0f);
 		setScriptBoolOverride("transparency_layers.refraction_only", false);
 		setScriptBoolOverride("transparency_layers.reflection_enabled", true);
-		setScriptNumberOverride("transparency_layers.reflection_scale", 1.0f);
-		setScriptNumberOverride("transparency_layers.reflection_strength", 0.92f);
-		setScriptNumberOverride("transparency_layers.surface_strength", 0.55f);
+		setScriptNumberOverride("transparency_layers.reflection_strength", 1.0f);
 		ResetAllAccumulationState(true);
 		const UINT32 frameCount = AutoAADumpFrameCountOverride > 0u ? AutoAADumpFrameCountOverride : 120u;
 		AppendAutoAADumpLog(
@@ -8729,19 +8699,27 @@ void Corona::SaveSceneState()
 			name == "platformer.enemyStreaming" ||
 			name == "platformer.maxSceneSamplesPerFrame" ||
 			name == "platformer.deferSpineSamplingWhileStreamingSeconds");
-		const bool bCommandLineTransparencyControl =
-			bCommandLineTransparencyLayers &&
-			(name == "transparency_layers.enabled" ||
-			name == "transparency_layers.color_only_refraction" ||
+		const bool bTransientTransparencyDumpControl =
+			bTranslucentRRDumpMode &&
+			(name == "transparency_layers.color_only_refraction" ||
 			name == "transparency_layers.roughness" ||
 			name == "transparency_layers.refraction_only" ||
 			name == "transparency_layers.reflection_enabled" ||
 			name == "transparency_layers.reflection_hit_lighting_fallback" ||
+			name == "transparency_layers.reflection_strength");
+		const bool bObsoleteTransparencyControl =
+			name == "transparency_layers.background_prefilter" ||
+			name == "transparency_layers.background_prefilter_radius" ||
+			name == "transparency_layers.fixed_current_position" ||
+			name == "transparency_layers.pre_lighting_refracted_gbuffer" ||
+			name == "transparency_layers.pre_lighting_opaque_depth" ||
+			name == "transparency_layers.dlssrr_guide_warp" ||
 			name == "transparency_layers.reflection_scale" ||
-			name == "transparency_layers.reflection_strength" ||
 			name == "transparency_layers.fresnel_power" ||
-			name == "transparency_layers.surface_strength");
-		return bTransientBenchmarkControl || bCommandLineTransparencyControl;
+			name == "transparency_layers.surface_strength" ||
+			name == "transparency_layers.tint_strength";
+		return bTransientBenchmarkControl || bTransientTransparencyDumpControl ||
+			bObsoleteTransparencyControl;
 	};
 
 	file << std::fixed << std::setprecision(9);
@@ -10728,17 +10706,6 @@ void Corona::OnInit()
 		setScriptBoolOverride("platformer.enabled", bPlatformerStartupMode);
 		setScriptBoolOverride("dungeon.enabled", bDungeonStartupMode);
 		setScriptBoolOverride("spine_benchmark.enabled", bSpineBenchmarkStartupMode);
-		if (bCommandLineTransparencyLayers)
-		{
-			setScriptBoolOverride("transparency_layers.enabled", true);
-			setScriptBoolOverride("transparency_layers.color_only_refraction", false);
-			setScriptNumberOverride("transparency_layers.roughness", 0.0f);
-			setScriptBoolOverride("transparency_layers.refraction_only", false);
-			setScriptBoolOverride("transparency_layers.reflection_enabled", true);
-			setScriptNumberOverride("transparency_layers.reflection_scale", 1.0f);
-			setScriptNumberOverride("transparency_layers.reflection_strength", 0.92f);
-			setScriptNumberOverride("transparency_layers.surface_strength", 0.55f);
-		}
 		if (bCommandLinePlatformerSpineBenchmark)
 		{
 			setScriptNumberOverride("spine_benchmark.characterCount", static_cast<float>(CommandLinePlatformerSpineBenchmarkCount));
@@ -10891,7 +10858,7 @@ void Corona::OnInit()
 	};
 	auto ReloadTransparencyLayersAfterMapLoad = [&]()
 	{
-		if (!bCommandLineTransparencyLayers)
+		if (!bEnableStartupLuauScript)
 			return;
 
 		const std::filesystem::path scriptPath = GetAssetFullPath(L"scripts\\startup\\common\\030_transparency_layers.luau");
@@ -17268,8 +17235,7 @@ void Corona::OnRender()
 						refractedNormalGuide,
 						refractedRoughnessGuide,
 						refractedAlbedoGuide,
-						refractedSpecularAlbedoGuide,
-						true);
+						refractedSpecularAlbedoGuide);
 				}
 			};
 			if (bRtPrimaryGBufferWritten)
@@ -17822,9 +17788,6 @@ void Corona::OnRender()
 
 		if (bEditorStartupMode)
 			DrawEditorModeOverlay();
-
-		if (bEditorStartupMode && bCommandLineTransparencyLayers && !bShowImgui)
-			DrawLuauImGui();
 
 		if (bVehicleDrivingMode)
 		{

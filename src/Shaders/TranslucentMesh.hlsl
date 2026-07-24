@@ -220,26 +220,20 @@ bool ProjectWorldToScreenUv(float3 worldPos, out float2 uv)
     return all(uv >= float2(0.0f, 0.0f)) && all(uv <= float2(1.0f, 1.0f));
 }
 
-float3 ReflectionEnvironment(float3 reflectedDir, float reflectionScale, float grazing, float roughness)
+float3 ReflectionEnvironment(float3 reflectedDir, float roughness)
 {
     float sky = saturate(reflectedDir.y * 0.5f + 0.5f);
     float horizon = pow(saturate(1.0f - abs(reflectedDir.y)), 3.0f);
     float3 reflectedEnv = lerp(
-        float3(0.018f, 0.022f, 0.030f),
-        float3(0.65f, 0.78f, 0.96f),
+        float3(0.012f, 0.015f, 0.020f),
+        float3(0.12f, 0.16f, 0.22f),
         sky);
-    reflectedEnv += float3(0.18f, 0.26f, 0.38f) * horizon * (0.35f + 0.25f * reflectionScale);
+    reflectedEnv += float3(0.025f, 0.032f, 0.045f) * horizon;
 
-    float3 glintDir = normalize(float3(-0.35f, 0.55f, 0.76f));
-    float glintPower = lerp(
-        lerp(96.0f, 24.0f, saturate(reflectionScale * 0.333f)),
-        4.0f,
-        saturate(roughness));
-    float glint = pow(saturate(dot(reflectedDir, glintDir)), glintPower);
-    float3 reflected = reflectedEnv * (0.38f + 0.20f * reflectionScale + 0.42f * grazing);
-    reflected += float3(1.0f, 0.96f, 0.88f) * glint *
-        (0.25f + 0.35f * reflectionScale) * lerp(1.0f, 0.35f, saturate(roughness));
-    return reflected;
+    // This is only a stable miss fallback. Fresnel controls reflection energy;
+    // do not add a fake key light, glint, or grazing boost here.
+    float luminance = dot(reflectedEnv, float3(0.2126f, 0.7152f, 0.0722f));
+    return lerp(reflectedEnv, luminance.xxx, saturate(roughness) * 0.25f);
 }
 
 #if TRANSLUCENT_ENABLE_RT_REFLECTION
@@ -411,10 +405,9 @@ PSOutput PSMain(PSInput input)
 
     float grazing = 1.0f - noV;
     float refractionPixels = EffectParams.x;
-    float reflectionScale = max(EffectParams.y * (1.0f / 28.0f), 0.0f);
     float reflectionStrength = saturate(EffectParams.z);
-    float fresnelPower = max(EffectParams.w, 0.001f);
     float glassRoughness = saturate(GlassParams.x);
+    float glassIor = clamp(GlassParams.y, 1.0001f, 2.5f);
     uint2 stochasticPixel = uint2(max(input.position.xy, 0.0f.xx));
 
     float4 rtRefraction = RefractedColorTex.Load(int3(stochasticPixel, 0));
@@ -446,7 +439,7 @@ PSOutput PSMain(PSInput input)
     float rippleB = cos(dot(screenUv, float2(19.7f, 53.9f)) * 6.2831853f);
     float2 rippleOffset = float2(rippleA, rippleB) * (1.0f - saturate(length(normalOffset)));
     float2 refractionDir = normalOffset * 0.85f + rippleOffset * 0.055f;
-    float2 refractionUv = screenUv + refractionDir * refractionPixels * invTargetSize * alpha * (0.35f + 0.65f * grazing);
+    float2 refractionUv = screenUv + refractionDir * refractionPixels * invTargetSize * (0.35f + 0.65f * grazing);
     refractionUv += roughRefractionOffsetUv;
     float2 refractionSampleUv = saturate(refractionUv);
     float4 prevCompositeGuide = SamplePrevCompositeGuide(refractionSampleUv);
@@ -458,14 +451,15 @@ PSOutput PSMain(PSInput input)
 
     if (StochasticParams.w != 0u)
     {
+        float3 refractionOnlyColor = lerp(destinationColor, refracted, alpha);
 #if TRANSLUCENT_SURFACE_ONLY
         // LightingBuffer contains the sharp pre-light result. Replace it with
         // this layer's stochastic transmission sample; a zero-output early
         // return would discard raster roughness entirely in refraction-only mode.
-        output.Color = float4(refracted, 1.0f);
+        output.Color = float4(refractionOnlyColor, 1.0f);
         output.Surface = float4(0.0f, 0.0f, 0.0f, 0.0f);
 #else
-        output.Color = float4(refracted, 1.0f);
+        output.Color = float4(refractionOnlyColor, 1.0f);
         output.RefractionGuide = float4(compositeGuideUv, alpha, 1.0f);
         output.Surface = float4(0.0f, 0.0f, 0.0f, 0.0f);
 #endif
@@ -485,8 +479,6 @@ PSOutput PSMain(PSInput input)
             StochasticParams.z);
         reflected = ReflectionEnvironment(
             reflectedViewDir,
-            reflectionScale,
-            grazing,
             glassRoughness);
 
 #if TRANSLUCENT_ENABLE_RT_REFLECTION
@@ -506,48 +498,26 @@ PSOutput PSMain(PSInput input)
             usedHitLightingFallback);
         if (rtHit)
         {
-            // Screen-projected hits have a full scene-color sample. Offscreen
-            // hit lighting is a one-light estimate without reflection guides,
-            // so retain most of the stable environment estimate underneath it.
-            float hitBlend = usedHitLightingFallback ?
-                0.28f :
-                saturate(0.72f + 0.10f * reflectionScale);
+            // Screen-projected hits are the reflection result. Offscreen hit
+            // lighting is an approximation, so blend it with the miss fallback.
+            float hitBlend = usedHitLightingFallback ? 0.35f : 1.0f;
             reflected = lerp(reflected, rtReflected, hitBlend);
         }
 #endif
     }
 
-    float tintStrength = saturate(RenderTargetParams.z);
-    float surfaceStrength = saturate(RenderTargetParams.w);
-    float3 surfaceAlbedo = max(baseColor.rgb, float3(0.02f, 0.02f, 0.02f));
-    float3 transmissionTint = lerp(
-        float3(1.0f, 1.0f, 1.0f),
-        surfaceAlbedo,
-        tintStrength * (0.25f + 0.75f * alpha));
-    reflected = lerp(reflected, reflected * max(baseColor.rgb, float3(0.08f, 0.08f, 0.08f)), tintStrength * 0.35f);
-
-    float fresnel = pow(grazing, fresnelPower);
-    float reflectionWeight = saturate(reflectionStrength * (0.10f + 0.90f * fresnel));
-    float refractionEnergy = 1.0f - saturate(reflectionWeight * alpha * 0.35f);
-    float3 refractedColor = refracted * transmissionTint * refractionEnergy;
-
-    float3 keyLightDir = normalize(float3(-0.45f, 0.62f, 0.64f));
-    float3 fillLightDir = normalize(float3(0.55f, 0.15f, 0.82f));
-    float diffuse = 0.18f +
-        saturate(dot(viewNormal, keyLightDir)) * 0.62f +
-        saturate(dot(viewNormal, fillLightDir)) * 0.24f;
-    float3 halfVector = normalize(keyLightDir + viewDir);
-    float specular = pow(saturate(dot(viewNormal, halfVector)), 64.0f) * (0.55f + 0.45f * fresnel);
-    float rim = pow(grazing, 2.0f) * 0.42f;
-    float surfaceVisibility = surfaceStrength * alpha;
-    float3 diffuseLighting = surfaceAlbedo * diffuse * surfaceVisibility * 0.55f;
-    float3 rimLighting = lerp(surfaceAlbedo, float3(1.0f, 1.0f, 1.0f), 0.65f) * rim * surfaceVisibility;
-    float3 specularLighting = float3(1.0f, 0.96f, 0.88f) * specular * surfaceVisibility;
-    float reflectionVisibility = saturate(surfaceVisibility * (0.65f + 0.35f * fresnel) + alpha * surfaceStrength * 0.15f);
-    float3 reflectionLighting = reflected * reflectionWeight * reflectionVisibility;
-
-    float3 surfaceLighting = diffuseLighting + rimLighting + specularLighting + reflectionLighting;
-    float3 color = refractedColor + surfaceLighting;
+    // Ideal dielectric interface: IOR determines Fresnel reflectance and the
+    // remaining energy is transmitted. Material color belongs to the volume
+    // attenuation/scattering model, not to an extra surface-lighting term.
+    float f0Root = (glassIor - 1.0f) / (glassIor + 1.0f);
+    float f0 = f0Root * f0Root;
+    float fresnel = f0 + (1.0f - f0) * pow(grazing, 5.0f);
+    float reflectionWeight = saturate(reflectionStrength * fresnel);
+    float transmissionWeight = 1.0f - reflectionWeight;
+    float3 reflectionLighting = reflected * reflectionWeight;
+    float3 dielectricColor = refracted * transmissionWeight + reflectionLighting;
+    float3 color = lerp(destinationColor, dielectricColor, alpha);
+    float3 surfaceLighting = reflectionLighting * alpha;
 
 #if TRANSLUCENT_SURFACE_ONLY
     float viewDepth = max(-input.viewPos.z, 0.0f);
