@@ -90,13 +90,7 @@ using LPCWSTR = const wchar_t*;
 #  define CORONA_HAS_DIRECTXTEX CORONA_HAS_D3D12
 #endif
 
-// Assimp and PhysX are currently wired to checked-in Windows binaries. They
-// are feature dependencies, not rendering-API dependencies; mobile ports can
-// re-enable them once platform-native packages are provided.
-#ifndef CORONA_HAS_ASSIMP
-#  define CORONA_HAS_ASSIMP CORONA_PLATFORM_IS_WINDOWS
-#endif
-
+// PhysX is currently wired to checked-in Windows binaries.
 #ifndef CORONA_HAS_PHYSX
 #  define CORONA_HAS_PHYSX CORONA_PLATFORM_IS_WINDOWS
 #endif

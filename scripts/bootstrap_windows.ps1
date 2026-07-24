@@ -213,7 +213,8 @@ function Copy-OptionalRuntimeFromVulkanSdk {
 function Assert-BuildOutputs {
     $requiredOutputs = @(
         "bin\Corona.exe",
-        "bin\assimp.dll",
+        "bin\CoronaMeshImport.exe",
+        "bin\CoronaTextureImport.exe",
         "bin\WinPixEventRuntime.dll",
         "bin\D3D12\D3D12Core.dll",
         "bin\D3D12\d3d12SDKLayers.dll",

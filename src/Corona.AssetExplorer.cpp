@@ -47,10 +47,7 @@ namespace
 	bool IsModelFile(const std::filesystem::path& p)
 	{
 		const std::string ext = p.extension().string();
-		return EndsWithCi(ext, ".obj") || EndsWithCi(ext, ".fbx") ||
-		       EndsWithCi(ext, ".gltf") || EndsWithCi(ext, ".glb") ||
-		       EndsWithCi(ext, ".dae") || EndsWithCi(ext, ".ply") ||
-		       EndsWithCi(ext, ".stl") || EndsWithCi(ext, ".3ds");
+		return EndsWithCi(ext, ".obj") || EndsWithCi(ext, ".fbx") || EndsWithCi(ext, ".cmesh");
 	}
 
 	bool IsMapFile(const std::filesystem::path& p)

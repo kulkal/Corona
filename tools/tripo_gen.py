@@ -95,7 +95,7 @@ def main() -> int:
 
     # Compute smooth vertex normals so trimesh's OBJ exporter writes `vn`
     # lines and faces use the `v/vt/vn` triple form. Without this the
-    # exported mesh ships only positions + vertex colors and Assimp+Corona
+    # exported mesh ships only positions + vertex colors and importers can
     # fall back to flat per-face shading.
     import trimesh as _trimesh
     if not isinstance(mesh, _trimesh.Trimesh):

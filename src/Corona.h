@@ -2031,7 +2031,7 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 	{
 		enum class Kind : uint8_t
 		{
-			Asset,           // loaded from disk (OBJ/FBX/glTF) — AssetPath
+			Asset,           // FBX/OBJ source or prebuilt cmesh — AssetPath
 			Terrain,         // procedural terrain — Seed
 			GrassOnTerrain,  // procedural grass on terrain — BladeCount, BladeHeight, Seed
 			Grass,           // flat procedural grass field — BladeCount, AreaSize, BladeHeight, Seed
@@ -3680,7 +3680,7 @@ public:
 
 	// Deletes the cmesh cache file paired with `sourceFilePath` (.cmesh
 	// sibling). Next LoadMeshModel of the same source goes through the
-	// FBX importer again — useful when the importer config changes or
+	// external ufbx importer again — useful when the importer config changes or
 	// the asset was edited externally. Returns true on success or if
 	// no cache exists (which is also "ready for re-import").
 	bool InvalidateMeshCacheForSource(const std::wstring& sourceFilePath, std::wstring* outErr = nullptr);

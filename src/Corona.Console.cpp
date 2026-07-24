@@ -387,8 +387,8 @@ void CoronaConsole::Submit(const std::string& cmd)
 		}
 	}
 
-	// loadmodel <path> — direct asset import (any format Assimp accepts:
-	// OBJ/FBX/glTF/glb/DAE/PLY/STL/3DS/X). Skips the TripoSR step and
+	// loadmodel <path> — direct FBX/OBJ import or prebuilt cmesh load.
+	// Skips the TripoSR step and
 	// places the result in front of the camera the same way `generate` does.
 	{
 		std::string arg = consumePrefix(std::string("loadmodel"));
