@@ -33,6 +33,7 @@ scripts/capture_nsight_raytracing_inspector.ps1
 scripts/launch_nvfraps_bvh_viewer.ps1
 tools/*
 !tools/TextureImportTool.cpp
+!tools/MeshImportTool.cpp
 !tools/motion_gen.py
 !tools/tripo_gen.py
 !tools/motion_server/

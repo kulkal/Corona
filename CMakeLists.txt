@@ -168,8 +168,6 @@ if(CORONA_PLATFORM_WINDOWS AND NOT CORONA_DISABLE_D3D12)
 endif()
 
 set(CORONA_DIRECTXTEX_LIB_DIR "${CORONA_SRC_DIR}/external/DirectXTex July 2017/Lib 2017")
-set(CORONA_ASSIMP_LIB "${CORONA_SRC_DIR}/external/assimp/lib/assimp.lib")
-set(CORONA_ASSIMP_DLL "${CORONA_SRC_DIR}/external/assimp/lib/assimp.dll")
 set(CORONA_DXCOMPILER_LIB "${CORONA_SRC_DIR}/external/dxc/lib/x64/dxcompiler.lib")
 set(CORONA_AFTERMATH_LIB "${CORONA_SRC_DIR}/external/GFSDK_Aftermath/lib/x64/GFSDK_Aftermath_Lib.x64.lib")
 set(CORONA_AFTERMATH_DLL "${CORONA_SRC_DIR}/external/GFSDK_Aftermath/lib/x64/GFSDK_Aftermath_Lib.x64.dll")
@@ -288,8 +286,6 @@ add_subdirectory("${CORONA_SRC_DIR}/external/luau" "${CMAKE_CURRENT_BINARY_DIR}/
 set(CORONA_REQUIRED_RUNTIME_PATHS)
 if(CORONA_PLATFORM_WINDOWS)
     list(APPEND CORONA_REQUIRED_RUNTIME_PATHS
-        "${CORONA_ASSIMP_LIB}"
-        "${CORONA_ASSIMP_DLL}"
         ${CORONA_PHYSX_LIBS}
         ${CORONA_PHYSX_DLLS}
     )
@@ -336,7 +332,6 @@ target_include_directories(Corona PRIVATE
 if(CORONA_PLATFORM_WINDOWS)
     target_include_directories(Corona PRIVATE
         "${CORONA_SRC_DIR}/external/DirectXTex July 2017/Include"
-        "${CORONA_SRC_DIR}/external/assimp/include"
         "${CORONA_SRC_DIR}/external/dxc/inc"
         "${CORONA_PHYSX_ROOT}/include"
     )
@@ -369,7 +364,6 @@ if(CORONA_PLATFORM_WINDOWS)
         "${CORONA_DIRECTXTEX_LIB_DIR}"
     )
     target_link_libraries(Corona PRIVATE
-        "${CORONA_ASSIMP_LIB}"
         ${CORONA_PHYSX_LIBS}
         Dbghelp
     )
@@ -418,6 +412,25 @@ if(CORONA_PLATFORM_WINDOWS)
         RUNTIME_OUTPUT_DIRECTORY_RELWITHDEBINFO "${CORONA_OUT_DIR}"
         RUNTIME_OUTPUT_DIRECTORY_MINSIZEREL "${CORONA_OUT_DIR}"
     )
+
+    add_executable(CoronaMeshImport
+        "${CMAKE_CURRENT_SOURCE_DIR}/tools/MeshImportTool.cpp"
+        "${CORONA_SRC_DIR}/external/ufbx/ufbx.c"
+    )
+    target_include_directories(CoronaMeshImport PRIVATE
+        "${CORONA_SRC_DIR}"
+        "${CORONA_SRC_DIR}/external/ufbx"
+        "${CORONA_SRC_DIR}/external/streamline-sdk/external/json/include"
+    )
+    target_compile_definitions(CoronaMeshImport PRIVATE _CRT_SECURE_NO_WARNINGS)
+    set_target_properties(CoronaMeshImport PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CORONA_OUT_DIR}"
+        RUNTIME_OUTPUT_DIRECTORY_DEBUG "${CORONA_OUT_DIR}"
+        RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CORONA_OUT_DIR}"
+        RUNTIME_OUTPUT_DIRECTORY_RELWITHDEBINFO "${CORONA_OUT_DIR}"
+        RUNTIME_OUTPUT_DIRECTORY_MINSIZEREL "${CORONA_OUT_DIR}"
+    )
+    add_dependencies(Corona CoronaTextureImport CoronaMeshImport)
 endif()
 
 if(Vulkan_FOUND AND (CORONA_PLATFORM_WINDOWS OR CORONA_PLATFORM_ANDROID))
@@ -612,7 +625,6 @@ endif()
 target_compile_definitions(Corona PRIVATE
     IMGUI_DEFINE_MATH_OPERATORS
     CORONA_TARGET_PLATFORM=${CORONA_TARGET_PLATFORM_VALUE}
-    CORONA_HAS_ASSIMP=$<BOOL:${CORONA_PLATFORM_WINDOWS}>
     CORONA_HAS_PHYSX=$<BOOL:${CORONA_PLATFORM_WINDOWS}>
     $<$<BOOL:${Vulkan_FOUND}>:CORONA_HAS_VULKAN=1>
     $<$<NOT:$<BOOL:${Vulkan_FOUND}>>:CORONA_HAS_VULKAN=0>
@@ -674,9 +686,7 @@ set_target_properties(Corona PROPERTIES
 
 if(CORONA_PLATFORM_WINDOWS)
     add_custom_command(TARGET Corona POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${CORONA_ASSIMP_DLL}"
-            "${CORONA_OUT_DIR}/assimp.dll"
+        COMMAND ${CMAKE_COMMAND} -E rm -f "${CORONA_OUT_DIR}/assimp.dll"
     )
     if(NOT CORONA_DISABLE_D3D12)
         add_custom_command(TARGET Corona POST_BUILD
