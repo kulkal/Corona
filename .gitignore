@@ -22,6 +22,20 @@ obj/
 
 # runtime-local state and generated diagnostics
 .claude/settings.local.json
+# local-only working material: internal notes, perf captures, offline tooling.
+# Only files the engine needs to build and run stay tracked.
+docs/
+gpu_perf_images/
+_motions/
+/*.md
+/editor_*.bat
+scripts/capture_nsight_raytracing_inspector.ps1
+scripts/launch_nvfraps_bvh_viewer.ps1
+tools/*
+!tools/TextureImportTool.cpp
+!tools/motion_gen.py
+!tools/tripo_gen.py
+!tools/motion_server/
 # assets: only engine defaults and Sponza are tracked; everything else
 # (UE-exported maps, spine, generated meshes, ...) stays local-only
 assets/*
