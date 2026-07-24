@@ -22,7 +22,20 @@ obj/
 
 # runtime-local state and generated diagnostics
 .claude/settings.local.json
-assets/
+# assets: only engine defaults and Sponza are tracked; everything else
+# (UE-exported maps, spine, generated meshes, ...) stays local-only
+assets/*
+!assets/engine/
+!assets/oldmesh/
+assets/oldmesh/*
+!assets/oldmesh/Sponza/
+!assets/maps/
+assets/maps/*
+!assets/maps/sponza.map
+!assets/maps/sponza_demo.map
+!assets/ue_export/
+assets/ue_export/*
+!assets/ue_export/export_ignore
 config/
 logs/
 dumps/
