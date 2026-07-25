@@ -7,7 +7,7 @@ return {
       name = "SponzaModel",
       mesh = {
         primitive = "asset",
-        path = "C:\\dev\\Corona\\assets\\Sponza\\Sponza.fbx",
+        path = "assets/oldmesh/Sponza/Sponza.fbx",
         transform = {
           position = {0,0,0},
           rotation = {0,0,0},
