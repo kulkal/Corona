@@ -520,17 +520,22 @@ namespace
                     : 0;
                 const std::uint32_t materialIndex = ResolveMaterialIndex(node, mesh, localMaterial, materialCount);
 
+                // The engine's left-handed convention matches the retired assimp
+                // pipeline (MakeLeftHanded + FlipWindingOrder): negate Z on the
+                // right-handed Y-up scene and emit triangles in reversed order.
+                static constexpr std::uint32_t kWindingRemap[3] = { 0, 2, 1 };
                 for (std::uint32_t triangleIndex = 0; triangleIndex < triangleCount; ++triangleIndex)
                 {
                     Triangle triangle{};
                     triangle.MaterialIndex = materialIndex;
                     for (std::uint32_t vertex = 0; vertex < 3; ++vertex)
                     {
-                        const std::uint32_t meshIndex = triangulated[triangleIndex * 3 + vertex];
+                        const std::uint32_t meshIndex = triangulated[triangleIndex * 3 + kWindingRemap[vertex]];
                         const ufbx_vec3 localPosition = ufbx_get_vertex_vec3(&mesh->vertex_position, meshIndex);
                         const ufbx_vec3 worldPosition = ufbx_transform_position(&node->geometry_to_world, localPosition);
                         Corner corner{};
                         corner.Position = ToVec3(worldPosition);
+                        corner.Position.Z = -corner.Position.Z;
                         if (mesh->vertex_uv.exists)
                         {
                             const ufbx_vec2 uv = ufbx_get_vertex_vec2(&mesh->vertex_uv, meshIndex);
@@ -746,7 +751,7 @@ namespace
         options.normalize_normals = true;
         options.normalize_tangents = true;
         options.use_blender_pbr_material = true;
-        options.target_axes = ufbx_axes_left_handed_y_up;
+        options.target_axes = ufbx_axes_right_handed_y_up;
         options.space_conversion = UFBX_SPACE_CONVERSION_MODIFY_GEOMETRY;
         options.geometry_transform_handling = UFBX_GEOMETRY_TRANSFORM_HANDLING_MODIFY_GEOMETRY;
 
