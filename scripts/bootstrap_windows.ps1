@@ -160,7 +160,9 @@ function Set-VulkanEnvironment {
 
 function Restore-NuGetPackages {
     if (-not (Test-Path $NuGetExe)) {
-        throw "Bundled NuGet CLI is missing: $NuGetExe"
+        Write-Step "Downloading NuGet CLI"
+        New-Item -ItemType Directory -Force (Split-Path $NuGetExe) | Out-Null
+        Invoke-WebRequest -Uri "https://dist.nuget.org/win-x86-commandline/latest/nuget.exe" -OutFile $NuGetExe
     }
 
     Invoke-External $NuGetExe @(

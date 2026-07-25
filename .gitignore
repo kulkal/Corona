@@ -28,6 +28,7 @@ docs/
 gpu_perf_images/
 _motions/
 /*.md
+!/README.md
 /editor_*.bat
 scripts/capture_nsight_raytracing_inspector.ps1
 scripts/launch_nvfraps_bvh_viewer.ps1
