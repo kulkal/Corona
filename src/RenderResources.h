@@ -142,6 +142,7 @@ public:
 	// API-neutral
 	uint32_t Width = 0;
 	uint32_t Height = 0;
+	uint32_t Depth = 1; // > 1 for Texture3D
 	uint32_t MipLevels = 1;
 	ETextureFormat Format = ETextureFormat::RGBA8Unorm;
 	ETextureUsageFlags Usage = TextureUsage_None;

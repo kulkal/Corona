@@ -1106,27 +1106,41 @@ namespace
 		return 0xFF000000ull | (static_cast<uint64_t>(b) << 16) | (static_cast<uint64_t>(g) << 8) | static_cast<uint64_t>(r);
 	}
 
-	const std::array<UINT64, 19> kGpuPassPixColors = {
-		MakeGpuMarkerColor(210, 210, 210),
-		MakeGpuMarkerColor(86, 156, 214),
-		MakeGpuMarkerColor(214, 86, 86),
-		MakeGpuMarkerColor(214, 214, 86),
-		MakeGpuMarkerColor(214, 145, 86),
-		MakeGpuMarkerColor(156, 214, 86),
-		MakeGpuMarkerColor(214, 86, 189),
-		MakeGpuMarkerColor(86, 214, 169),
-		MakeGpuMarkerColor(160, 220, 120),
-		MakeGpuMarkerColor(86, 214, 214),
-		MakeGpuMarkerColor(181, 140, 255),
-		MakeGpuMarkerColor(245, 214, 86),
-		MakeGpuMarkerColor(86, 145, 245),
-		MakeGpuMarkerColor(86, 189, 245),
-		MakeGpuMarkerColor(245, 145, 86),
-		MakeGpuMarkerColor(189, 86, 245),
-		MakeGpuMarkerColor(245, 245, 245),
-		MakeGpuMarkerColor(145, 145, 145),
-		MakeGpuMarkerColor(86, 245, 145),
+	// One entry per EGpuPass (28) — BeginGpuPassMarker drops the PIX marker
+	// for any pass index beyond this table, which silently hid the tail
+	// passes (fog, DLSS, TAA, tone map, ...) from Nsight captures.
+	const std::array<UINT64, 28> kGpuPassPixColors = {
+		MakeGpuMarkerColor(210, 210, 210), // Frame
+		MakeGpuMarkerColor(86, 156, 214),  // SkeletalSkinning
+		MakeGpuMarkerColor(214, 86, 86),   // DepthPrepass
+		MakeGpuMarkerColor(214, 214, 86),  // OccluderDepth
+		MakeGpuMarkerColor(214, 145, 86),  // GBuffer
+		MakeGpuMarkerColor(156, 214, 86),  // Terrain
+		MakeGpuMarkerColor(214, 86, 189),  // Grass
+		MakeGpuMarkerColor(86, 214, 169),  // ProceduralGrass
+		MakeGpuMarkerColor(160, 220, 120), // Particles
+		MakeGpuMarkerColor(86, 214, 214),  // SpatialLightMask
+		MakeGpuMarkerColor(181, 140, 255), // SpatialHashDeepSeed
+		MakeGpuMarkerColor(245, 214, 86),  // GBufferDecals
+		MakeGpuMarkerColor(86, 145, 245),  // RaytraceShadow
+		MakeGpuMarkerColor(86, 189, 245),  // RaytraceAO
+		MakeGpuMarkerColor(245, 145, 86),  // RaytraceReflection
+		MakeGpuMarkerColor(189, 86, 245),  // RaytraceGI
+		MakeGpuMarkerColor(245, 245, 245), // ScreenProbeGI
+		MakeGpuMarkerColor(145, 145, 145), // TemporalDenoise
+		MakeGpuMarkerColor(86, 245, 145),  // Lighting
+		MakeGpuMarkerColor(120, 170, 200), // DepthHeightFog
+		MakeGpuMarkerColor(150, 200, 230), // VolumetricFog
+		MakeGpuMarkerColor(230, 120, 120), // DLSSRR
+		MakeGpuMarkerColor(230, 150, 120), // DLSSSR
+		MakeGpuMarkerColor(230, 180, 120), // TemporalAA
+		MakeGpuMarkerColor(120, 230, 180), // PathTracing
+		MakeGpuMarkerColor(200, 200, 120), // ToneMap
+		MakeGpuMarkerColor(170, 170, 170), // Debug
+		MakeGpuMarkerColor(120, 120, 230), // ImGui
 	};
+	static_assert(std::tuple_size<decltype(kGpuPassPixColors)>::value == std::tuple_size<decltype(kGpuPassNames)>::value,
+		"kGpuPassPixColors must cover every EGpuPass (keep in sync with kGpuPassNames)");
 
 	void BeginGpuPassMarker(IRenderBackend* backend, UINT passIndex, const char* markerName)
 	{
@@ -2228,9 +2242,14 @@ Corona::~Corona()
 	DrawHistogramPSO.reset();
 	AdapteExposurePSO.reset();
 	DepthHeightFogPSO.reset();
-	VolumetricFogBuildPSO.reset();
+	VolumetricFogInjectPSO.reset();
+	VolumetricFogInjectShadowPSO.reset();
+	VolumetricFogIntegratePSO.reset();
 	VolumetricFogCompositePSO.reset();
-	VolumetricFogAtlas.reset();
+	VolumetricFogScatterVolumes[0].reset();
+	VolumetricFogScatterVolumes[1].reset();
+	VolumetricFogIntegratedVolume.reset();
+	bVolumetricFogHistoryValid = false;
 
 	PSO_SHADOW_RAYQUERY.reset();
 	PSO_RT_SHADOW.reset();
@@ -3675,6 +3694,7 @@ void Corona::ResetAllAccumulationState(bool forceUpscaleReload)
 	bScreenProbeGIHistoryValid = false;
 	bScreenProbeLightingBootstrapPending = false;
 	bSpatialHashGIHistoryValid = false;
+	bVolumetricFogHistoryValid = false;
 	ScreenProbeGIAtlasWriteIndex = 0;
 	ScreenProbeGIHistoryWriteIndex = 0;
 	SpatialHashGIWriteIndex = 0;
@@ -4113,6 +4133,7 @@ void Corona::ReloadRenderResolutionAssets()
 	bScreenProbeGIHistoryValid = false;
 	bScreenProbeLightingBootstrapPending = false;
 	bSpatialHashGIHistoryValid = false;
+	bVolumetricFogHistoryValid = false;
 	ScreenProbeGIAtlasWriteIndex = 0;
 	ScreenProbeGIHistoryWriteIndex = 0;
 	SpatialHashGIWriteIndex = 0;
@@ -8911,6 +8932,11 @@ Corona::RenderFrameSourceState Corona::CaptureRenderFrameSourceState() const
 	state.VolumetricFogAnisotropy = VolumetricFogAnisotropy;
 	state.VolumetricFogGridPixelSize = VolumetricFogGridPixelSize;
 	state.VolumetricFogGridSizeZ = VolumetricFogGridSizeZ;
+	state.bVolumetricFogSunShadow = bVolumetricFogSunShadow;
+	state.bVolumetricFogPointLights = bVolumetricFogPointLights;
+	state.VolumetricFogPointLightStrength = VolumetricFogPointLightStrength;
+	state.bVolumetricFogTemporalReprojection = bVolumetricFogTemporalReprojection;
+	state.VolumetricFogTemporalBlend = VolumetricFogTemporalBlend;
 	state.JitterScale = JitterScale;
 	state.TAASampleCount = TAASampleCount;
 	state.DLSSJitterPhaseScale = DLSSJitterPhaseScale;
@@ -9034,6 +9060,11 @@ void Corona::ApplyRenderFrameSourceState(const RenderFrameSourceState& state)
 	VolumetricFogAnisotropy = std::clamp(state.VolumetricFogAnisotropy, -0.9f, 0.9f);
 	VolumetricFogGridPixelSize = std::clamp(state.VolumetricFogGridPixelSize, 4u, 64u);
 	VolumetricFogGridSizeZ = std::clamp(state.VolumetricFogGridSizeZ, 8u, 128u);
+	bVolumetricFogSunShadow = state.bVolumetricFogSunShadow;
+	bVolumetricFogPointLights = state.bVolumetricFogPointLights;
+	VolumetricFogPointLightStrength = std::clamp(state.VolumetricFogPointLightStrength, 0.0f, 16.0f);
+	bVolumetricFogTemporalReprojection = state.bVolumetricFogTemporalReprojection;
+	VolumetricFogTemporalBlend = std::clamp(state.VolumetricFogTemporalBlend, 0.0f, 0.98f);
 	JitterScale = state.JitterScale;
 	TAASampleCount = state.TAASampleCount;
 	DLSSJitterPhaseScale = std::max(0.25f, state.DLSSJitterPhaseScale);
@@ -9165,6 +9196,11 @@ void Corona::SyncCurrentLightingSettingsToFrameSourceState()
 		state.VolumetricFogAnisotropy = VolumetricFogAnisotropy;
 		state.VolumetricFogGridPixelSize = VolumetricFogGridPixelSize;
 		state.VolumetricFogGridSizeZ = VolumetricFogGridSizeZ;
+		state.bVolumetricFogSunShadow = bVolumetricFogSunShadow;
+		state.bVolumetricFogPointLights = bVolumetricFogPointLights;
+		state.VolumetricFogPointLightStrength = VolumetricFogPointLightStrength;
+		state.bVolumetricFogTemporalReprojection = bVolumetricFogTemporalReprojection;
+		state.VolumetricFogTemporalBlend = VolumetricFogTemporalBlend;
 		state.SkyColorTop = SkyColorTop;
 		state.SkyColorBottom = SkyColorBottom;
 		state.SkyIntensity = SkyIntensity;
@@ -9398,6 +9434,11 @@ void Corona::ApplyFrameSourceRenderSync(const RenderFrameDelta& delta)
 		 floatChanged(oldState.VolumetricFogAnisotropy, newState.VolumetricFogAnisotropy) ||
 		 oldState.VolumetricFogGridPixelSize != newState.VolumetricFogGridPixelSize ||
 		 oldState.VolumetricFogGridSizeZ != newState.VolumetricFogGridSizeZ ||
+		 oldState.bVolumetricFogSunShadow != newState.bVolumetricFogSunShadow ||
+		 oldState.bVolumetricFogPointLights != newState.bVolumetricFogPointLights ||
+		 floatChanged(oldState.VolumetricFogPointLightStrength, newState.VolumetricFogPointLightStrength) ||
+		 oldState.bVolumetricFogTemporalReprojection != newState.bVolumetricFogTemporalReprojection ||
+		 floatChanged(oldState.VolumetricFogTemporalBlend, newState.VolumetricFogTemporalBlend) ||
 		 floatChanged(oldState.SkyIntensity, newState.SkyIntensity) ||
 		 floatChanged(oldState.PrefilteredEnvRoughnessThreshold, newState.PrefilteredEnvRoughnessThreshold) ||
 		 floatChanged(oldState.PrefilteredEnvRoughnessFade, newState.PrefilteredEnvRoughnessFade) ||
@@ -15052,6 +15093,7 @@ void Corona::BuildRenderFrameDerivedState(const RenderFrameSourceState* sourceSt
 		bScreenProbeGIAtlasHistoryValid = false;
 		bScreenProbeGIHistoryValid = false;
 		bSpatialHashGIHistoryValid = false;
+		bVolumetricFogHistoryValid = false;
 		bResetTemporalStateNextUpdate = false;
 	}
 
@@ -15619,6 +15661,60 @@ void Corona::DrawEditorModeOverlay()
 		{
 			ImGui::Checkbox("Full Render Controls Window", &bShowImgui);
 			ImGui::Separator();
+			ImGui::TextUnformatted("Fog");
+			bool bFogSettingsChanged = false;
+			if (ImGui::Checkbox("Froxel Volumetric Fog##editor_config_native", &bEnableVolumetricFog))
+				bFogSettingsChanged = true;
+			if (bEnableVolumetricFog && ImGui::TreeNodeEx("Froxel Fog Settings##editor_config_native", ImGuiTreeNodeFlags_DefaultOpen))
+			{
+				if (ImGui::ColorEdit3("Color##fog_native", &VolumetricFogColor.x)) bFogSettingsChanged = true;
+				if (ImGui::SliderFloat("Density##fog_native", &VolumetricFogDensity, 0.0f, 0.001f, "%.6f")) bFogSettingsChanged = true;
+				if (ImGui::SliderFloat("Start Distance##fog_native", &VolumetricFogStartDistance, 0.0f, 200000.0f, "%.0f")) bFogSettingsChanged = true;
+				if (ImGui::SliderFloat("Max Distance##fog_native", &VolumetricFogMaxDistance, 1000.0f, 500000.0f, "%.0f")) bFogSettingsChanged = true;
+				if (ImGui::SliderFloat("Height##fog_native", &VolumetricFogHeight, -10000.0f, 10000.0f, "%.1f")) bFogSettingsChanged = true;
+				if (ImGui::SliderFloat("Height Falloff##fog_native", &VolumetricFogHeightFalloff, 0.0f, 0.01f, "%.6f")) bFogSettingsChanged = true;
+				if (ImGui::SliderFloat("Max Opacity##fog_native", &VolumetricFogMaxOpacity, 0.0f, 1.0f, "%.2f")) bFogSettingsChanged = true;
+				if (ImGui::SliderFloat("Ambient Strength##fog_native", &VolumetricFogAmbientStrength, 0.0f, 4.0f, "%.2f")) bFogSettingsChanged = true;
+				if (ImGui::SliderFloat("Directional Strength##fog_native", &VolumetricFogDirectionalStrength, 0.0f, 8.0f, "%.2f")) bFogSettingsChanged = true;
+				if (ImGui::SliderFloat("Anisotropy##fog_native", &VolumetricFogAnisotropy, -0.9f, 0.9f, "%.2f")) bFogSettingsChanged = true;
+				if (ImGui::Checkbox("Sun Shadow Rays##fog_native", &bVolumetricFogSunShadow)) bFogSettingsChanged = true;
+				if (ImGui::Checkbox("Point Light Scattering##fog_native", &bVolumetricFogPointLights)) bFogSettingsChanged = true;
+				if (bVolumetricFogPointLights &&
+					ImGui::SliderFloat("Point Light Strength##fog_native", &VolumetricFogPointLightStrength, 0.0f, 16.0f, "%.2f"))
+					bFogSettingsChanged = true;
+				if (ImGui::Checkbox("Temporal Reprojection##fog_native", &bVolumetricFogTemporalReprojection)) bFogSettingsChanged = true;
+				if (bVolumetricFogTemporalReprojection &&
+					ImGui::SliderFloat("Temporal Blend##fog_native", &VolumetricFogTemporalBlend, 0.0f, 0.98f, "%.2f"))
+					bFogSettingsChanged = true;
+				int fogGridPixelSize = static_cast<int>(VolumetricFogGridPixelSize);
+				if (ImGui::SliderInt("Grid Pixel Size##fog_native", &fogGridPixelSize, 4, 64))
+				{
+					VolumetricFogGridPixelSize = static_cast<UINT32>(std::clamp(fogGridPixelSize, 4, 64));
+					bFogSettingsChanged = true;
+				}
+				int fogGridSizeZ = static_cast<int>(VolumetricFogGridSizeZ);
+				if (ImGui::SliderInt("Grid Z Slices##fog_native", &fogGridSizeZ, 8, 128))
+				{
+					VolumetricFogGridSizeZ = static_cast<UINT32>(std::clamp(fogGridSizeZ, 8, 128));
+					bFogSettingsChanged = true;
+				}
+				ImGui::TreePop();
+			}
+			if (ImGui::Checkbox("Depth / Height Fog##editor_config_native", &bEnableDepthHeightFog))
+				bFogSettingsChanged = true;
+			if (bEnableDepthHeightFog && ImGui::TreeNodeEx("Height Fog Settings##editor_config_native", ImGuiTreeNodeFlags_DefaultOpen))
+			{
+				if (ImGui::ColorEdit3("Color##heightfog_native", &DepthHeightFogColor.x)) bFogSettingsChanged = true;
+				if (ImGui::SliderFloat("Density##heightfog_native", &DepthHeightFogDensity, 0.0f, 0.001f, "%.6f")) bFogSettingsChanged = true;
+				if (ImGui::SliderFloat("Start Distance##heightfog_native", &DepthHeightFogStartDistance, 0.0f, 200000.0f, "%.0f")) bFogSettingsChanged = true;
+				if (ImGui::SliderFloat("Height##heightfog_native", &DepthHeightFogHeight, -10000.0f, 10000.0f, "%.1f")) bFogSettingsChanged = true;
+				if (ImGui::SliderFloat("Height Falloff##heightfog_native", &DepthHeightFogHeightFalloff, 0.0f, 0.01f, "%.6f")) bFogSettingsChanged = true;
+				if (ImGui::SliderFloat("Max Opacity##heightfog_native", &DepthHeightFogMaxOpacity, 0.0f, 1.0f, "%.2f")) bFogSettingsChanged = true;
+				ImGui::TreePop();
+			}
+			if (bFogSettingsChanged)
+				SyncCurrentLightingSettingsToFrameSourceState();
+			ImGui::Separator();
 			ImGui::TextUnformatted("Visualization");
 			const bool bDebugVisualizationAvailable = renderBackend && BufferVisualizeGraphicsPipeline;
 			if (!bDebugVisualizationAvailable)
@@ -16135,6 +16231,15 @@ void Corona::DrawEditorModeOverlay()
 						if (ImGui::SliderFloat("Ambient Strength##volumetric", &VolumetricFogAmbientStrength, 0.0f, 4.0f, "%.2f")) bLightingChanged = true;
 						if (ImGui::SliderFloat("Directional Strength##volumetric", &VolumetricFogDirectionalStrength, 0.0f, 8.0f, "%.2f")) bLightingChanged = true;
 						if (ImGui::SliderFloat("Anisotropy##volumetric", &VolumetricFogAnisotropy, -0.9f, 0.9f, "%.2f")) bLightingChanged = true;
+						if (ImGui::Checkbox("Sun Shadow Rays##volumetric", &bVolumetricFogSunShadow)) bLightingChanged = true;
+						if (ImGui::Checkbox("Point Light Scattering##volumetric", &bVolumetricFogPointLights)) bLightingChanged = true;
+						if (bVolumetricFogPointLights &&
+							ImGui::SliderFloat("Point Light Strength##volumetric", &VolumetricFogPointLightStrength, 0.0f, 16.0f, "%.2f"))
+							bLightingChanged = true;
+						if (ImGui::Checkbox("Temporal Reprojection##volumetric", &bVolumetricFogTemporalReprojection)) bLightingChanged = true;
+						if (bVolumetricFogTemporalReprojection &&
+							ImGui::SliderFloat("Temporal Blend##volumetric", &VolumetricFogTemporalBlend, 0.0f, 0.98f, "%.2f"))
+							bLightingChanged = true;
 						int gridPixelSize = static_cast<int>(VolumetricFogGridPixelSize);
 						if (ImGui::SliderInt("Grid Pixel Size##volumetric", &gridPixelSize, 4, 64))
 						{
@@ -16278,6 +16383,15 @@ void Corona::DrawEditorModeOverlay()
 						if (ImGui::SliderFloat("Volumetric Fog Ambient", &VolumetricFogAmbientStrength, 0.0f, 4.0f, "%.2f")) bLightingChanged = true;
 						if (ImGui::SliderFloat("Volumetric Fog Directional", &VolumetricFogDirectionalStrength, 0.0f, 8.0f, "%.2f")) bLightingChanged = true;
 						if (ImGui::SliderFloat("Volumetric Fog Anisotropy", &VolumetricFogAnisotropy, -0.9f, 0.9f, "%.2f")) bLightingChanged = true;
+						if (ImGui::Checkbox("Volumetric Fog Sun Shadow", &bVolumetricFogSunShadow)) bLightingChanged = true;
+						if (ImGui::Checkbox("Volumetric Fog Point Lights", &bVolumetricFogPointLights)) bLightingChanged = true;
+						if (bVolumetricFogPointLights &&
+							ImGui::SliderFloat("Volumetric Fog Point Light Strength", &VolumetricFogPointLightStrength, 0.0f, 16.0f, "%.2f"))
+							bLightingChanged = true;
+						if (ImGui::Checkbox("Volumetric Fog Temporal", &bVolumetricFogTemporalReprojection)) bLightingChanged = true;
+						if (bVolumetricFogTemporalReprojection &&
+							ImGui::SliderFloat("Volumetric Fog Temporal Blend", &VolumetricFogTemporalBlend, 0.0f, 0.98f, "%.2f"))
+							bLightingChanged = true;
 						int gridPixelSize = static_cast<int>(VolumetricFogGridPixelSize);
 						if (ImGui::SliderInt("Volumetric Fog Grid Pixel", &gridPixelSize, 4, 64))
 						{

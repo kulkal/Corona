@@ -4193,30 +4193,77 @@ void Corona::InitRoadDecalPass()
 
 void Corona::InitVolumetricFogPass()
 {
-	VolumetricFogBuildPSO.reset();
+	VolumetricFogInjectPSO.reset();
+	VolumetricFogInjectShadowPSO.reset();
+	VolumetricFogIntegratePSO.reset();
 	VolumetricFogCompositePSO.reset();
 	if (!renderBackend)
 		return;
 
 	const RHIShaderStageMask computeStage = ToRHIShaderStageMask(RHIShaderStage::Compute);
-	auto buildPso = renderBackend->CreateComputePipelineStateObject();
-	if (buildPso)
+
+	auto bindInjectCommon = [&](ComputePipelineStateObject& pso)
 	{
-		buildPso->BindUAV(MakeRHITextureUAV("FroxelAtlas", 0, computeStage));
-		buildPso->BindCBV(MakeRHICBV("FogCB", 0, sizeof(VolumetricFogCB), computeStage));
-		if (buildPso->InitCS(GetAssetFullPath(L"Shaders\\VolumetricFog.hlsl"), "VolumetricFogBuildCS"))
+		pso.BindUAV(MakeRHITextureUAV("ScatterVolume", 0, computeStage, 1, 0, RHITextureDimension::Tex3D));
+		pso.BindSRV(MakeRHITextureSRV("HistoryVolume", 2, computeStage, 1, 0, RHITextureDimension::Tex3D));
+		pso.BindSRV(MakeRHIBufferSRV("PointLightBuffer", 3, computeStage));
+		pso.BindSRV(MakeRHIBufferSRV("PointLightGridCounts", 4, computeStage));
+		pso.BindSRV(MakeRHIBufferSRV("PointLightGridIndices", 5, computeStage));
+		pso.BindCBV(MakeRHICBV("FogCB", 0, sizeof(VolumetricFogCB), computeStage));
+		pso.BindCBV(MakeRHICBV("PointLightGridCB", 1, sizeof(PointLightGridParamCB), computeStage));
+		pso.BindSampler(MakeRHISampler("VolumeSampler", 0, computeStage));
+	};
+
+	auto injectPso = renderBackend->CreateComputePipelineStateObject();
+	if (injectPso)
+	{
+		bindInjectCommon(*injectPso);
+		if (injectPso->InitCS(GetAssetFullPath(L"Shaders\\VolumetricFog.hlsl"), "VolumetricFogInjectCS"))
 		{
-			VolumetricFogBuildPSO = buildPso;
+			VolumetricFogInjectPSO = injectPso;
+		}
+	}
+
+	// Sun-shadowed variant (inline RayQuery, cs_6_5), DX12 only: the base
+	// InitCSWithInlineRT falls back to InitCS on other backends, which can
+	// "succeed" without implementing SetAccelerationStructure and would
+	// dispatch with unbound TLAS registers. Non-DX12 uses the unshadowed
+	// inject.
+	auto injectShadowPso =
+		renderBackend->GetAPI() == ERenderBackendAPI::D3D12 ?
+		renderBackend->CreateComputePipelineStateObject() :
+		nullptr;
+	if (injectShadowPso)
+	{
+		bindInjectCommon(*injectShadowPso);
+		injectShadowPso->BindSRV(MakeRHIAccelerationStructureSRV("gRtScene", 0, computeStage));
+		injectShadowPso->BindSRV(MakeRHIAccelerationStructureSRV("gRtDynamicScene", 1, computeStage));
+		if (injectShadowPso->InitCSWithInlineRT(GetAssetFullPath(L"Shaders\\VolumetricFogRayQuery.hlsl"), "VolumetricFogInjectCS"))
+		{
+			VolumetricFogInjectShadowPSO = injectShadowPso;
+		}
+	}
+
+	auto integratePso = renderBackend->CreateComputePipelineStateObject();
+	if (integratePso)
+	{
+		integratePso->BindUAV(MakeRHITextureUAV("IntegratedVolume", 1, computeStage, 1, 0, RHITextureDimension::Tex3D));
+		integratePso->BindSRV(MakeRHITextureSRV("ScatterVolumeRead", 6, computeStage, 1, 0, RHITextureDimension::Tex3D));
+		integratePso->BindCBV(MakeRHICBV("FogCB", 0, sizeof(VolumetricFogCB), computeStage));
+		if (integratePso->InitCS(GetAssetFullPath(L"Shaders\\VolumetricFog.hlsl"), "VolumetricFogIntegrateCS"))
+		{
+			VolumetricFogIntegratePSO = integratePso;
 		}
 	}
 
 	auto compositePso = renderBackend->CreateComputePipelineStateObject();
 	if (compositePso)
 	{
-		compositePso->BindUAV(MakeRHITextureUAV("FroxelAtlas", 0, computeStage));
-		compositePso->BindSRV(MakeRHITextureSRV("DepthTex", 0, computeStage));
-		compositePso->BindSRV(MakeRHITextureSRV("FroxelAtlasRead", 1, computeStage));
+		compositePso->BindUAV(MakeRHITextureUAV("SceneColorTex", 2, computeStage));
+		compositePso->BindSRV(MakeRHITextureSRV("DepthTex", 7, computeStage));
+		compositePso->BindSRV(MakeRHITextureSRV("IntegratedVolumeRead", 8, computeStage, 1, 0, RHITextureDimension::Tex3D));
 		compositePso->BindCBV(MakeRHICBV("FogCB", 0, sizeof(VolumetricFogCB), computeStage));
+		compositePso->BindSampler(MakeRHISampler("VolumeSampler", 0, computeStage));
 		if (compositePso->InitCS(GetAssetFullPath(L"Shaders\\VolumetricFog.hlsl"), "VolumetricFogCompositeCS"))
 		{
 			VolumetricFogCompositePSO = compositePso;
@@ -5908,76 +5955,149 @@ bool Corona::EnsureVolumetricFogResources()
 
 	const UINT32 renderWidth = std::max(1u, static_cast<UINT32>(GetRenderWidth()));
 	const UINT32 renderHeight = std::max(1u, static_cast<UINT32>(GetRenderHeight()));
-	const UINT32 gridPixelSize = std::clamp(VolumetricFogGridPixelSize, 4u, 64u);
-	const UINT32 gridSizeX = std::max(1u, (renderWidth + gridPixelSize - 1u) / gridPixelSize);
-	const UINT32 gridSizeY = std::max(1u, (renderHeight + gridPixelSize - 1u) / gridPixelSize);
-	constexpr UINT32 maxAtlasHeight = 16384u;
-	const UINT32 maxGridSizeZForAtlas = std::max(1u, maxAtlasHeight / gridSizeY);
-	const UINT32 gridSizeZ = std::min(std::clamp(VolumetricFogGridSizeZ, 8u, 128u), maxGridSizeZForAtlas);
-	const UINT32 atlasWidth = gridSizeX;
-	const UINT32 atlasHeight = std::max(1u, gridSizeY * gridSizeZ);
+	const UINT32 gridSizeZ = std::clamp(VolumetricFogGridSizeZ, 8u, 128u);
 
-	if (VolumetricFogAtlas &&
-		VolumetricFogAtlasWidth == atlasWidth &&
-		VolumetricFogAtlasHeight == atlasHeight &&
-		VolumetricFogAtlas->Width == atlasWidth &&
-		VolumetricFogAtlas->Height == atlasHeight)
+	// Budget the froxel count so the three RGBA16F volumes stay bounded
+	// regardless of resolution and settings (8M froxels ≈ 192 MiB total).
+	// Grow the effective pixel size beyond the user's setting when needed.
+	constexpr UINT64 kMaxVolumeFroxels = 8ull << 20;
+	UINT32 gridPixelSize = std::clamp(VolumetricFogGridPixelSize, 4u, 64u);
+	UINT32 gridSizeX = 0;
+	UINT32 gridSizeY = 0;
+	for (;; ++gridPixelSize)
+	{
+		gridSizeX = std::max(1u, (renderWidth + gridPixelSize - 1u) / gridPixelSize);
+		gridSizeY = std::max(1u, (renderHeight + gridPixelSize - 1u) / gridPixelSize);
+		const UINT64 froxelCount = static_cast<UINT64>(gridSizeX) * gridSizeY * gridSizeZ;
+		if (froxelCount <= kMaxVolumeFroxels || gridPixelSize >= 64u)
+			break;
+	}
+
+	if (VolumetricFogScatterVolumes[0] &&
+		VolumetricFogScatterVolumes[1] &&
+		VolumetricFogIntegratedVolume &&
+		VolumetricFogVolumeSizeX == gridSizeX &&
+		VolumetricFogVolumeSizeY == gridSizeY &&
+		VolumetricFogVolumeSizeZ == gridSizeZ)
 	{
 		return true;
 	}
 
-	if (VolumetricFogAtlas)
+	auto releaseVolume = [&](shared_ptr<Texture>& volume)
 	{
-		renderBackend->ForgetDynamicTexture(VolumetricFogAtlas.get());
-		VolumetricFogAtlas.reset();
+		if (volume)
+		{
+			renderBackend->ForgetDynamicTexture(volume.get());
+			volume.reset();
+		}
+	};
+	releaseVolume(VolumetricFogScatterVolumes[0]);
+	releaseVolume(VolumetricFogScatterVolumes[1]);
+	releaseVolume(VolumetricFogIntegratedVolume);
+
+	auto createVolume = [&]()
+	{
+		return renderBackend->CreateTexture3D(
+			ETextureFormat::RGBA16Float,
+			TextureUsage_UnorderedAccess,
+			EInitialResourceState::ShaderRead,
+			static_cast<int>(gridSizeX),
+			static_cast<int>(gridSizeY),
+			static_cast<int>(gridSizeZ),
+			1);
+	};
+	VolumetricFogScatterVolumes[0] = createVolume();
+	VolumetricFogScatterVolumes[1] = createVolume();
+	VolumetricFogIntegratedVolume = createVolume();
+
+	VolumetricFogVolumeSizeX = gridSizeX;
+	VolumetricFogVolumeSizeY = gridSizeY;
+	VolumetricFogVolumeSizeZ = gridSizeZ;
+	VolumetricFogVolumePixelSize = gridPixelSize;
+	VolumetricFogVolumeWriteIndex = 0;
+	bVolumetricFogHistoryValid = false;
+
+	if (!VolumetricFogScatterVolumes[0] || !VolumetricFogScatterVolumes[1] || !VolumetricFogIntegratedVolume)
+	{
+		releaseVolume(VolumetricFogScatterVolumes[0]);
+		releaseVolume(VolumetricFogScatterVolumes[1]);
+		releaseVolume(VolumetricFogIntegratedVolume);
+		return false;
 	}
 
-	TextureCreateDesc desc = {};
-	desc.Format = ETextureFormat::RGBA16Float;
-	desc.Usage = TextureUsage_UnorderedAccess;
-	desc.InitialState = EInitialResourceState::ShaderRead;
-	desc.Width = static_cast<int>(atlasWidth);
-	desc.Height = static_cast<int>(atlasHeight);
-	desc.MipLevels = 1;
-	desc.ClearColor = glm::vec4(0.0f);
-	VolumetricFogAtlas = renderBackend->CreateTexture2D(desc);
-	VolumetricFogAtlasWidth = atlasWidth;
-	VolumetricFogAtlasHeight = atlasHeight;
-
-	return VolumetricFogAtlas != nullptr;
+	// DX12 allocates the dynamic SRV/UAV descriptors for these volumes in
+	// the next BeginFrame() DynamicTextures pass; binding them in the same
+	// frame they were created would use null descriptors. Skip fog for the
+	// creation frame.
+	return false;
 }
 
 void Corona::VolumetricFogPass()
 {
 	renderBackend->EmitGpuCrashMarker("VolumetricFogPass");
 
-	if (!bEnableVolumetricFog || !VolumetricFogBuildPSO || !VolumetricFogCompositePSO || !LightingBuffer || !DepthBuffer)
+	// Any frame that does not write the scatter volume invalidates the
+	// temporal history: the reprojection blend must not pick up a volume
+	// from an arbitrarily old camera the next time the pass runs.
+	if (!bEnableVolumetricFog || !VolumetricFogInjectPSO || !VolumetricFogIntegratePSO || !VolumetricFogCompositePSO || !LightingBuffer || !DepthBuffer)
+	{
+		bVolumetricFogHistoryValid = false;
 		return;
-	if (!EnsureVolumetricFogResources() || !VolumetricFogAtlas)
+	}
+	if (!EnsureVolumetricFogResources())
 		return;
+	// The grid buffers double as dummy bindings when point-light scattering
+	// is disabled, so require them unconditionally.
+	if (!EnsurePointLightGridBuffers() ||
+		!PointLightGridPointLightBuffer || !PointLightGridCountBuffer || !PointLightGridIndexBuffer)
+	{
+		bVolumetricFogHistoryValid = false;
+		return;
+	}
 
 	Texture* depthTex =
 		(GBufferGenerationMode == EGBufferGenerationMode::RtPrimary && UnjitteredDepthBuffers[ColorBufferWriteIndex]) ?
 		UnjitteredDepthBuffers[ColorBufferWriteIndex].get() :
 		DepthBuffer.get();
 	if (!depthTex)
+	{
+		bVolumetricFogHistoryValid = false;
 		return;
+	}
 
 	const UINT32 renderWidth = std::max(1u, static_cast<UINT32>(GetRenderWidth()));
 	const UINT32 renderHeight = std::max(1u, static_cast<UINT32>(GetRenderHeight()));
-	const UINT32 gridPixelSize = std::clamp(VolumetricFogGridPixelSize, 4u, 64u);
-	const UINT32 gridSizeX = std::max(1u, (renderWidth + gridPixelSize - 1u) / gridPixelSize);
-	const UINT32 gridSizeY = std::max(1u, (renderHeight + gridPixelSize - 1u) / gridPixelSize);
-	constexpr UINT32 maxAtlasHeight = 16384u;
-	const UINT32 maxGridSizeZForAtlas = std::max(1u, maxAtlasHeight / gridSizeY);
-	const UINT32 gridSizeZ = std::min(std::clamp(VolumetricFogGridSizeZ, 8u, 128u), maxGridSizeZForAtlas);
+	const UINT32 gridPixelSize = std::clamp(VolumetricFogVolumePixelSize, 4u, 64u);
+	const UINT32 gridSizeX = VolumetricFogVolumeSizeX;
+	const UINT32 gridSizeY = VolumetricFogVolumeSizeY;
+	const UINT32 gridSizeZ = VolumetricFogVolumeSizeZ;
 	const float startDistance = std::max(0.0f, VolumetricFogStartDistance);
 	const float maxDistance = std::max(startDistance + 1.0f, VolumetricFogMaxDistance);
 	glm::vec3 lightDir = glm::length(LightDir) > 0.0001f ? glm::normalize(LightDir) : glm::vec3(0.0f, 1.0f, 0.0f);
 
+	// Sun color from the sky gradient, matching LightingPass.
+	const float lightDirT = 0.5f * (lightDir.y + 1.0f);
+	const glm::vec3 sunColor = glm::mix(SkyColorBottom, SkyColorTop, lightDirT);
+
+	const bool bUseShadowInject =
+		bVolumetricFogSunShadow &&
+		VolumetricFogInjectShadowPSO &&
+		TLAS &&
+		RenderFrameDirectionalLightCastShadow;
+	ComputePipelineStateObject* injectPso =
+		bUseShadowInject ? VolumetricFogInjectShadowPSO.get() : VolumetricFogInjectPSO.get();
+
+	const bool bTemporal = bVolumetricFogTemporalReprojection;
+	const float temporalBlend = bTemporal ? std::clamp(VolumetricFogTemporalBlend, 0.0f, 0.98f) : 0.0f;
+	// Cap the per-froxel light loop well below MaxPointLights; froxels are
+	// coarse and the loop cost scales with the whole volume.
+	constexpr float kMaxPointLightsPerFroxel = 32.0f;
+
 	glm::mat4x4 invViewMat = glm::inverse(ViewMat);
 	VolumetricFogCB.InvViewMatrix = glm::transpose(invViewMat);
 	VolumetricFogCB.InvProjMatrix = glm::transpose(InvProjMat);
+	VolumetricFogCB.PrevViewProjMatrix = glm::transpose(PrevUnjitteredViewProjMat);
+	VolumetricFogCB.PrevCameraPosition = glm::vec4(glm::vec3(glm::inverse(PrevViewMat)[3]), 0.0f);
 	VolumetricFogCB.FogColorAndDensity = glm::vec4(
 		glm::max(VolumetricFogColor, glm::vec3(0.0f)),
 		std::max(VolumetricFogDensity, 0.0f));
@@ -5997,25 +6117,65 @@ void Corona::VolumetricFogPass()
 		static_cast<float>(gridSizeZ),
 		static_cast<float>(gridPixelSize));
 	VolumetricFogCB.LightDirAndIntensity = glm::vec4(lightDir, std::max(0.0f, LightIntensity));
-	VolumetricFogCB.FrameParams = glm::vec4(static_cast<float>(FrameCounter), 0.0f, 0.0f, 0.0f);
+	VolumetricFogCB.SunColorAndShadow = glm::vec4(sunColor, bUseShadowInject ? 1.0f : 0.0f);
+	VolumetricFogCB.TemporalParams = glm::vec4(
+		static_cast<float>(FrameCounter % 4096u),
+		temporalBlend,
+		bVolumetricFogHistoryValid ? 1.0f : 0.0f,
+		0.0f);
+	VolumetricFogCB.PointLightScatterParams = glm::vec4(
+		bVolumetricFogPointLights ? 1.0f : 0.0f,
+		std::clamp(VolumetricFogPointLightStrength, 0.0f, 16.0f),
+		kMaxPointLightsPerFroxel,
+		(bUseShadowInject && DynamicTLAS) ? 1.0f : 0.0f);
 	VolumetricFogCB.RTSize = glm::vec2(static_cast<float>(renderWidth), static_cast<float>(renderHeight));
 	VolumetricFogCB.Padding = glm::vec2(0.0f);
 
-	renderBackend->TransitionTexture(VolumetricFogAtlas.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
-	VolumetricFogBuildPSO->SetTextureUAV("FroxelAtlas", VolumetricFogAtlas.get());
-	VolumetricFogBuildPSO->SetCBVValue("FogCB", &VolumetricFogCB);
-	VolumetricFogBuildPSO->Apply();
-	renderBackend->Dispatch((gridSizeX + 7u) / 8u, (gridSizeY + 7u) / 8u, gridSizeZ);
-	renderBackend->TransitionTexture(VolumetricFogAtlas.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
+	Texture* scatterVolume = VolumetricFogScatterVolumes[VolumetricFogVolumeWriteIndex].get();
+	Texture* historyVolume = VolumetricFogScatterVolumes[1u - VolumetricFogVolumeWriteIndex].get();
+	Sampler* volumeSampler = samplerBilinearWrap ? samplerBilinearWrap.get() : samplerWrap.get();
 
+	// 1) Inject: per-froxel lighting into the scatter volume (+ temporal blend).
+	renderBackend->TransitionTexture(scatterVolume, EResourceState::ShaderRead, EResourceState::UnorderedAccess);
+	injectPso->SetTextureUAV("ScatterVolume", scatterVolume);
+	injectPso->SetTextureSRV("HistoryVolume", historyVolume);
+	injectPso->SetBufferSRV("PointLightBuffer", PointLightGridPointLightBuffer.get());
+	injectPso->SetBufferSRV("PointLightGridCounts", PointLightGridCountBuffer.get());
+	injectPso->SetBufferSRV("PointLightGridIndices", PointLightGridIndexBuffer.get());
+	injectPso->SetCBVValue("FogCB", &VolumetricFogCB);
+	injectPso->SetCBVValue("PointLightGridCB", &PointLightGridParam);
+	injectPso->SetSampler("VolumeSampler", volumeSampler);
+	if (bUseShadowInject)
+	{
+		injectPso->SetAccelerationStructure("gRtScene", TLAS);
+		injectPso->SetAccelerationStructure("gRtDynamicScene", DynamicTLAS ? DynamicTLAS : TLAS);
+	}
+	injectPso->Apply();
+	renderBackend->Dispatch((gridSizeX + 3u) / 4u, (gridSizeY + 3u) / 4u, (gridSizeZ + 3u) / 4u);
+	renderBackend->TransitionTexture(scatterVolume, EResourceState::UnorderedAccess, EResourceState::ShaderRead);
+
+	// 2) Integrate: front-to-back scattering/transmittance along Z.
+	renderBackend->TransitionTexture(VolumetricFogIntegratedVolume.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
+	VolumetricFogIntegratePSO->SetTextureUAV("IntegratedVolume", VolumetricFogIntegratedVolume.get());
+	VolumetricFogIntegratePSO->SetTextureSRV("ScatterVolumeRead", scatterVolume);
+	VolumetricFogIntegratePSO->SetCBVValue("FogCB", &VolumetricFogCB);
+	VolumetricFogIntegratePSO->Apply();
+	renderBackend->Dispatch((gridSizeX + 7u) / 8u, (gridSizeY + 7u) / 8u, 1);
+	renderBackend->TransitionTexture(VolumetricFogIntegratedVolume.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
+
+	// 3) Composite: single trilinear fetch per pixel into the scene color.
 	renderBackend->TransitionTexture(LightingBuffer.get(), EResourceState::ShaderRead, EResourceState::UnorderedAccess);
-	VolumetricFogCompositePSO->SetTextureUAV("FroxelAtlas", LightingBuffer.get());
+	VolumetricFogCompositePSO->SetTextureUAV("SceneColorTex", LightingBuffer.get());
 	VolumetricFogCompositePSO->SetTextureSRV("DepthTex", depthTex);
-	VolumetricFogCompositePSO->SetTextureSRV("FroxelAtlasRead", VolumetricFogAtlas.get());
+	VolumetricFogCompositePSO->SetTextureSRV("IntegratedVolumeRead", VolumetricFogIntegratedVolume.get());
 	VolumetricFogCompositePSO->SetCBVValue("FogCB", &VolumetricFogCB);
+	VolumetricFogCompositePSO->SetSampler("VolumeSampler", volumeSampler);
 	VolumetricFogCompositePSO->Apply();
 	renderBackend->Dispatch((renderWidth + 7u) / 8u, (renderHeight + 7u) / 8u, 1);
 	renderBackend->TransitionTexture(LightingBuffer.get(), EResourceState::UnorderedAccess, EResourceState::ShaderRead);
+
+	VolumetricFogVolumeWriteIndex = 1u - VolumetricFogVolumeWriteIndex;
+	bVolumetricFogHistoryValid = true;
 }
 
 void Corona::TemporalAAPass()

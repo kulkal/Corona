@@ -173,6 +173,11 @@ local function draw_top(state)
 	checkbox("Culling Overlay", "show_culling_overlay", state.show_culling_overlay)
 
 	imgui.separator()
+	imgui.text("Fog")
+	checkbox("Froxel Volumetric Fog##editor_config_top", "enable_volumetric_fog", state.enable_volumetric_fog)
+	checkbox("Depth / Height Fog##editor_config_top", "enable_depth_height_fog", state.enable_depth_height_fog)
+
+	imgui.separator()
 	imgui.text("Visualization")
 	local debug_available = state.debug_visualization_available == true
 	begin_disabled(not debug_available)
@@ -391,6 +396,15 @@ local function draw_environment(state)
 		slider_float("Ambient Strength##volumetric", "volumetric_fog_ambient_strength", state.volumetric_fog_ambient_strength, 0.0, 4.0, "%.2f")
 		slider_float("Directional Strength##volumetric", "volumetric_fog_directional_strength", state.volumetric_fog_directional_strength, 0.0, 8.0, "%.2f")
 		slider_float("Anisotropy##volumetric", "volumetric_fog_anisotropy", state.volumetric_fog_anisotropy, -0.9, 0.9, "%.2f")
+		checkbox("Sun Shadow Rays##volumetric", "volumetric_fog_sun_shadow", state.volumetric_fog_sun_shadow)
+		local point_lights_enabled = checkbox("Point Light Scattering##volumetric", "volumetric_fog_point_lights", state.volumetric_fog_point_lights)
+		if point_lights_enabled then
+			slider_float("Point Light Strength##volumetric", "volumetric_fog_point_light_strength", state.volumetric_fog_point_light_strength, 0.0, 16.0, "%.2f")
+		end
+		local temporal_enabled = checkbox("Temporal Reprojection##volumetric", "volumetric_fog_temporal", state.volumetric_fog_temporal)
+		if temporal_enabled then
+			slider_float("Temporal Blend##volumetric", "volumetric_fog_temporal_blend", state.volumetric_fog_temporal_blend, 0.0, 0.98, "%.2f")
+		end
 		slider_int("Grid Pixel Size##volumetric", "volumetric_fog_grid_pixel_size", state.volumetric_fog_grid_pixel_size, 4, 64)
 		slider_int("Grid Z Slices##volumetric", "volumetric_fog_grid_z", state.volumetric_fog_grid_z, 8, 128)
 		imgui.tree_pop()

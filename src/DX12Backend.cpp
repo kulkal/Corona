@@ -969,14 +969,26 @@ void DX12Backend::BeginFrame()
 
 	for (auto& tex : DynamicTextures)
 	{
+		const bool bIsTexture3D = tex->textureDesc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D;
+
 		if (tex->textureDesc.Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS)
 		{
 			GlobalDHRing->AllocDescriptor(tex->CpuHandleUAV, tex->GpuHandleUAV);
 
 
 			D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc = {};
-			uavDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
 			uavDesc.Format = tex->textureDesc.Format;
+			if (bIsTexture3D)
+			{
+				uavDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE3D;
+				uavDesc.Texture3D.MipSlice = 0;
+				uavDesc.Texture3D.FirstWSlice = 0;
+				uavDesc.Texture3D.WSize = tex->textureDesc.DepthOrArraySize;
+			}
+			else
+			{
+				uavDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+			}
 
 			Device->CreateUnorderedAccessView(tex->resource.Get(), nullptr, &uavDesc, tex->CpuHandleUAV);
 		}
@@ -991,8 +1003,16 @@ void DX12Backend::BeginFrame()
 		else
 			SrvDesc.Format = tex->textureDesc.Format;
 
-		SrvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-		SrvDesc.Texture2D.MipLevels = tex->textureDesc.MipLevels;
+		if (bIsTexture3D)
+		{
+			SrvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE3D;
+			SrvDesc.Texture3D.MipLevels = tex->textureDesc.MipLevels;
+		}
+		else
+		{
+			SrvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+			SrvDesc.Texture2D.MipLevels = tex->textureDesc.MipLevels;
+		}
 		Device->CreateShaderResourceView(tex->resource.Get(), &SrvDesc, tex->CpuHandleSRV);
 	}
 
@@ -4906,7 +4926,7 @@ std::shared_ptr<Texture> DX12Backend::CreateTexture2D(const TextureCreateDesc& d
 
 std::shared_ptr<Texture> DX12Backend::CreateTexture3D(ETextureFormat format, ETextureUsageFlags usage, EInitialResourceState initialState, int width, int height, int depth, int mipLevels)
 {
-	return CreateTexture3D(
+	std::shared_ptr<Texture> texture = CreateTexture3D(
 		ToDXGIFormat(format),
 		ToD3D12ResourceFlags(usage),
 		ToD3D12ResourceState(initialState),
@@ -4914,6 +4934,16 @@ std::shared_ptr<Texture> DX12Backend::CreateTexture3D(ETextureFormat format, ETe
 		height,
 		depth,
 		mipLevels);
+	if (texture)
+	{
+		texture->Width = static_cast<uint32_t>(width);
+		texture->Height = static_cast<uint32_t>(height);
+		texture->Depth = static_cast<uint32_t>(depth);
+		texture->MipLevels = static_cast<uint32_t>(mipLevels);
+		texture->Format = format;
+		texture->Usage = usage;
+	}
+	return texture;
 }
 
 void DX12Backend::UploadTexture3D(Texture* texture, const void* data, uint64_t rowPitch, uint64_t slicePitch)

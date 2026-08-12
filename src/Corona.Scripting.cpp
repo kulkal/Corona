@@ -8433,6 +8433,11 @@ void Corona::PushLuauUiStateForScript(lua_State* L, const std::string& mode, boo
 	PushNumberField(L, "volumetric_fog_anisotropy", VolumetricFogAnisotropy);
 	PushIntegerField(L, "volumetric_fog_grid_pixel_size", static_cast<lua_Integer>(VolumetricFogGridPixelSize));
 	PushIntegerField(L, "volumetric_fog_grid_z", static_cast<lua_Integer>(VolumetricFogGridSizeZ));
+	PushBoolField(L, "volumetric_fog_sun_shadow", bVolumetricFogSunShadow);
+	PushBoolField(L, "volumetric_fog_point_lights", bVolumetricFogPointLights);
+	PushNumberField(L, "volumetric_fog_point_light_strength", VolumetricFogPointLightStrength);
+	PushBoolField(L, "volumetric_fog_temporal", bVolumetricFogTemporalReprojection);
+	PushNumberField(L, "volumetric_fog_temporal_blend", VolumetricFogTemporalBlend);
 	PushIntegerField(L, "simple_gi_samples_per_pixel", static_cast<lua_Integer>(SimpleGISamplesPerPixel));
 	PushBoolField(L, "enable_gi_disocclusion_filter", bEnableGIDisocclusionFilter);
 	PushIntegerField(L, "diffuse_gi_spatial_filter_radius", static_cast<lua_Integer>(DiffuseGISpatialFilterCB.Radius));
@@ -9124,6 +9129,19 @@ bool Corona::SetLuauUiValueForScript(const std::string& name, lua_State* L, int 
 	}
 	if (setUInt("volumetric_fog_grid_pixel_size", VolumetricFogGridPixelSize, 4, 64, true)) return true;
 	if (setUInt("volumetric_fog_grid_z", VolumetricFogGridSizeZ, 8, 128, true)) return true;
+	if (setBool("volumetric_fog_sun_shadow", bVolumetricFogSunShadow, true)) return true;
+	if (setBool("volumetric_fog_point_lights", bVolumetricFogPointLights, true)) return true;
+	if (name == "volumetric_fog_point_light_strength")
+	{
+		VolumetricFogPointLightStrength = std::clamp(readFloat(), 0.0f, 16.0f);
+		return true;
+	}
+	if (setBool("volumetric_fog_temporal", bVolumetricFogTemporalReprojection, true)) return true;
+	if (name == "volumetric_fog_temporal_blend")
+	{
+		VolumetricFogTemporalBlend = std::clamp(readFloat(), 0.0f, 0.98f);
+		return true;
+	}
 	if (setUInt("simple_gi_samples_per_pixel", SimpleGISamplesPerPixel, 1, 8, true)) return true;
 	if (setBool("enable_gi_disocclusion_filter", bEnableGIDisocclusionFilter, true)) return true;
 	if (name == "diffuse_gi_spatial_filter_radius")

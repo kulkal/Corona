@@ -1719,24 +1719,32 @@ private:
 	float SurfaceBounceSaturation = 1.0f;
 	bool bEnableDepthHeightFog = false;
 	glm::vec3 DepthHeightFogColor = glm::vec3(0.60f, 0.68f, 0.75f);
-	float DepthHeightFogDensity = 0.00002f;
+	// Densities are per world unit (cm scale, far plane 500k). Tuned so the
+	// effect is clearly visible at Sponza-interior view distances (~3k units)
+	// the moment the checkbox is enabled.
+	float DepthHeightFogDensity = 0.0001f;
 	float DepthHeightFogStartDistance = 0.0f;
 	float DepthHeightFogHeight = 0.0f;
 	float DepthHeightFogHeightFalloff = 0.0008f;
 	float DepthHeightFogMaxOpacity = 0.85f;
 	bool bEnableVolumetricFog = false;
 	glm::vec3 VolumetricFogColor = glm::vec3(0.60f, 0.68f, 0.75f);
-	float VolumetricFogDensity = 0.000015f;
+	float VolumetricFogDensity = 0.0002f;
 	float VolumetricFogStartDistance = 0.0f;
 	float VolumetricFogMaxDistance = 200000.0f;
 	float VolumetricFogHeight = 0.0f;
 	float VolumetricFogHeightFalloff = 0.0008f;
 	float VolumetricFogMaxOpacity = 0.75f;
-	float VolumetricFogAmbientStrength = 0.18f;
-	float VolumetricFogDirectionalStrength = 1.0f;
+	float VolumetricFogAmbientStrength = 0.4f;
+	float VolumetricFogDirectionalStrength = 2.0f;
 	float VolumetricFogAnisotropy = 0.15f;
 	UINT32 VolumetricFogGridPixelSize = 16;
 	UINT32 VolumetricFogGridSizeZ = 64;
+	bool bVolumetricFogSunShadow = true;
+	bool bVolumetricFogPointLights = true;
+	float VolumetricFogPointLightStrength = 1.0f;
+	bool bVolumetricFogTemporalReprojection = true;
+	float VolumetricFogTemporalBlend = 0.9f;
 	UINT32 ClampMode = 2;
 
 	float JitterScale = 0.6;
@@ -1902,22 +1910,37 @@ private:
 	{
 		glm::mat4x4 InvViewMatrix;
 		glm::mat4x4 InvProjMatrix;
+		glm::mat4x4 PrevViewProjMatrix;
+		glm::vec4 PrevCameraPosition;
 		glm::vec4 FogColorAndDensity;
 		glm::vec4 HeightParams;
 		glm::vec4 LightingParams;
 		glm::vec4 GridParams;
 		glm::vec4 LightDirAndIntensity;
-		glm::vec4 FrameParams;
+		glm::vec4 SunColorAndShadow;
+		glm::vec4 TemporalParams;
+		glm::vec4 PointLightScatterParams;
 		glm::vec2 RTSize;
 		glm::vec2 Padding = glm::vec2(0.0f);
 	};
 
 	VolumetricFogCB VolumetricFogCB;
-	shared_ptr<Texture> VolumetricFogAtlas;
-	shared_ptr<ComputePipelineStateObject> VolumetricFogBuildPSO;
+	// Froxel volumes: ping-pong scatter volumes (current write / temporal
+	// history read) plus the Z-integrated result the composite samples.
+	shared_ptr<Texture> VolumetricFogScatterVolumes[2];
+	shared_ptr<Texture> VolumetricFogIntegratedVolume;
+	shared_ptr<ComputePipelineStateObject> VolumetricFogInjectPSO;
+	shared_ptr<ComputePipelineStateObject> VolumetricFogInjectShadowPSO;
+	shared_ptr<ComputePipelineStateObject> VolumetricFogIntegratePSO;
 	shared_ptr<ComputePipelineStateObject> VolumetricFogCompositePSO;
-	UINT32 VolumetricFogAtlasWidth = 0;
-	UINT32 VolumetricFogAtlasHeight = 0;
+	UINT32 VolumetricFogVolumeSizeX = 0;
+	UINT32 VolumetricFogVolumeSizeY = 0;
+	UINT32 VolumetricFogVolumeSizeZ = 0;
+	// Effective grid pixel size after the froxel-count budget clamp; can be
+	// larger than the user's VolumetricFogGridPixelSize at high resolutions.
+	UINT32 VolumetricFogVolumePixelSize = 0;
+	UINT32 VolumetricFogVolumeWriteIndex = 0;
+	bool bVolumetricFogHistoryValid = false;
 
 	UINT BloomBufferWidth = 640;
 	UINT  BloomBufferHeight = 384;
@@ -2446,24 +2469,29 @@ AdaptExposureCB.MaxExposure = 64.0f;*/
 		float SurfaceBounceSaturation = 1.0f;
 		bool bEnableDepthHeightFog = false;
 		glm::vec3 DepthHeightFogColor = glm::vec3(0.60f, 0.68f, 0.75f);
-		float DepthHeightFogDensity = 0.00002f;
+		float DepthHeightFogDensity = 0.0001f;
 		float DepthHeightFogStartDistance = 0.0f;
 		float DepthHeightFogHeight = 0.0f;
 		float DepthHeightFogHeightFalloff = 0.0008f;
 		float DepthHeightFogMaxOpacity = 0.85f;
 		bool bEnableVolumetricFog = false;
 		glm::vec3 VolumetricFogColor = glm::vec3(0.60f, 0.68f, 0.75f);
-		float VolumetricFogDensity = 0.000015f;
+		float VolumetricFogDensity = 0.0002f;
 		float VolumetricFogStartDistance = 0.0f;
 		float VolumetricFogMaxDistance = 200000.0f;
 		float VolumetricFogHeight = 0.0f;
 		float VolumetricFogHeightFalloff = 0.0008f;
 		float VolumetricFogMaxOpacity = 0.75f;
-		float VolumetricFogAmbientStrength = 0.18f;
-		float VolumetricFogDirectionalStrength = 1.0f;
+		float VolumetricFogAmbientStrength = 0.4f;
+		float VolumetricFogDirectionalStrength = 2.0f;
 		float VolumetricFogAnisotropy = 0.15f;
 		UINT32 VolumetricFogGridPixelSize = 16;
 		UINT32 VolumetricFogGridSizeZ = 64;
+		bool bVolumetricFogSunShadow = true;
+		bool bVolumetricFogPointLights = true;
+		float VolumetricFogPointLightStrength = 1.0f;
+		bool bVolumetricFogTemporalReprojection = true;
+		float VolumetricFogTemporalBlend = 0.9f;
 		float JitterScale = 0.6f;
 		UINT32 TAASampleCount = 32;
 		float DLSSJitterPhaseScale = 1.0f;
