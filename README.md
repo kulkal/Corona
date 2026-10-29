@@ -107,8 +107,6 @@ integration; Vulkan has native raster, compute and ray-tracing infrastructure;
 the optional NRI build is an experimental backend capable of targeting D3D12
 or Vulkan without changing the high-level renderer.
 
-![Corona running through the native Vulkan backend](docs/images/readme_backends_vulkan.png)
-
 ## Quick start
 
 Requires Windows 10/11, an NVIDIA RTX GPU, Visual Studio 2022 (Desktop C++),

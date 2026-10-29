@@ -35,7 +35,6 @@ docs/images/*
 !docs/images/readme_path_tracing.png
 !docs/images/readme_pathtracing_noisy_1spp.gif
 !docs/images/readme_pathtracing_demo.gif
-!docs/images/readme_backends_vulkan.png
 !docs/images/readme_hybrid_dlssrr_640x360_v2.gif
 !docs/images/translucent_rr_experiment_sphere_refraction.png
 gpu_perf_images/
