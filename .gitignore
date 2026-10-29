@@ -25,6 +25,19 @@ obj/
 # local-only working material: internal notes, perf captures, offline tooling.
 # Only files the engine needs to build and run stay tracked.
 docs/
+!docs/
+docs/*
+!docs/images/
+docs/images/*
+!docs/images/readme_hybrid_final.png
+!docs/images/readme_hybrid_noisy_1spp.gif
+!docs/images/readme_deferred_signals_rgb_v2.png
+!docs/images/readme_path_tracing.png
+!docs/images/readme_pathtracing_noisy_1spp.gif
+!docs/images/readme_pathtracing_demo.gif
+!docs/images/readme_backends_vulkan.png
+!docs/images/readme_hybrid_dlssrr_640x360_v2.gif
+!docs/images/translucent_rr_experiment_sphere_refraction.png
 gpu_perf_images/
 _motions/
 /*.md
